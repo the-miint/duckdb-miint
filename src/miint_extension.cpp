@@ -1,0 +1,44 @@
+#define DUCKDB_EXTENSION_MAIN
+
+#include "miint_extension.hpp"
+#include <kseq++/seqio.hpp>
+#include <read_fastx.hpp>
+#include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
+
+namespace fs = std::filesystem;
+
+namespace duckdb {
+
+static void LoadInternal(ExtensionLoader &loader) {
+	// TODO: use [[nodiscard]] throughout in headers
+	// TODO: //! comment on headers
+	ReadFastxTableFunction read_fastx;
+	loader.RegisterFunction(read_fastx.GetFunction());
+
+	// QualFilterScalarFunction find_low_quality_window;
+	// loader.RegisterFunction(find_low_quality_window.GetFunction());
+}
+
+void MiintExtension::Load(ExtensionLoader &loader) {
+	LoadInternal(loader);
+}
+std::string MiintExtension::Name() {
+	return "miint";
+}
+
+std::string MiintExtension::Version() const {
+#ifdef EXT_VERSION_MIINT
+	return EXT_VERSION_MIINT;
+#else
+	return "unversioned";
+#endif
+}
+
+} // namespace duckdb
+
+extern "C" {
+
+DUCKDB_CPP_EXTENSION_ENTRY(miint, loader) {
+	duckdb::LoadInternal(loader);
+}
+}

@@ -1,0 +1,58 @@
+# name: test/sql/read_fastx.test
+# description: test read_fastx table function
+# group: [miint]
+
+statement ok
+PRAGMA enable_verification;
+
+# Before we load the extension, this will fail
+statement error
+SELECT * FROM read_fastx('foo', 'bar');
+----
+Catalog Error: Table Function with name read_fastx does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require miint
+
+# Confirm the extension fails when files are not found
+statement error
+SELECT * FROM read_fastx('missing_file1', reverse='missing_file2');
+----
+IO Error: File not found: missing_file1
+
+query IIIIII
+SELECT * FROM read_fastx('data/fastq/foo.r1.fastq.gz', reverse='data/fastq/foo.r2.fastq.gz')
+----
+foo1	comment-1	ATGC	TGCAT	[40, 39, 38, 37]	[36, 35, 34, 33, 32]
+foo2	comment-2	ATGCT	TGCATC	[40, 39, 38, 37, 36]	[36, 35, 34, 33, 32, 31]
+
+query IIIIII
+SELECT * FROM read_fastx('data/fastq/bar.r1.fastq.gz', reverse='data/fastq/bar.r2.fastq.gz')
+----
+bar1	NULL	AA	CCC	[40, 40]	[39, 39, 39]
+bar2	NULL	GG	GGG	[40, 40]	[39, 39, 39]
+bar3	NULL	TT	TTT	[40, 40]	[39, 39, 39]
+
+# mismatched read IDs
+statement error
+SELECT * FROM read_fastx('data/fastq/foo.r1.fastq.gz', reverse='data/fastq/foo.r2.fastq.mismatched-ids.fastq.gz')
+----
+Invalid Error: Mismatched read IDs: foo1/1 vs foo2/2
+
+# different number of reads
+statement error
+SELECT * FROM read_fastx('data/fastq/foo.r1.fastq.gz', reverse='data/fastq/foo.r2.fastq.missing-read.fastq.gz')
+----
+Invalid Error: Mismatched number of records: missing mate for foo2/1
+
+# single end
+query IIIIII
+SELECT * FROM read_fastx('data/fastq/foo.r1.fastq.gz')
+----
+foo1	comment-1	ATGC	NULL	[40, 39, 38, 37]	NULL
+foo2	comment-2	ATGCT	NULL	[40, 39, 38, 37, 36]	NULL
+
+# interleaved
+# alternative phred offset
+#statement error
+#select * from read_fastx('fail-missing-tests');
