@@ -1,0 +1,57 @@
+# name: test/sql/read_sam.test
+# description: test read_sam table function
+# group: [miint]
+
+statement ok
+PRAGMA enable_verification;
+
+# Before we load the extension, this will fail
+statement error
+SELECT * FROM read_sam('foo');
+----
+Catalog Error: Table Function with name read_sam does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require miint
+
+# Confirm the extension fails when files are not found
+statement error
+SELECT * FROM read_sam('missing_file1');
+----
+IO Error: File not found: missing_file1
+
+# read_id flags ref pos	mapq cigar rnext pnext tlen fields
+query IIIIIIIIII
+SELECT * FROM read_sam('data/sam/foo_has_header.sam');
+----
+foo-1	0	G1234	2	60	10M	*	0	0	{de: 0.0, rl: 0}
+foo-2	0	G1234	2	60	10M	*	0	0	NULL
+foo-3	99	G000144735	76020	1	150M	=	76146	276	NULL
+foo-3	147	G000144735	76146	1	150M	=	76020	-276	NULL
+
+# Confirm error as we lack reference information
+statement error
+SELECT * FROM read_sam('data/sam/foo_no_header.sam');
+----
+IO Error: File lacks a header, and no reference information provided
+
+# Confirm error with incomplete reference information
+statement error
+SELECT * FROM read_sam('data/sam/foo_no_header.sam', reference_lengths={'G1234': 20});
+----
+IO Error: File lacks a header, and no reference information provided
+
+# Confirm error passing reference information and SAM with header
+statement error
+SELECT * FROM read_sam('data/sam/foo_jas_header.sam', reference_lengths={'G1234': 20});
+----
+IO Error: Conflict, SAM has header but reference information provided
+
+# Confirm parse with reference information works
+query IIIIIIIIII
+SELECT * FROM read_sam('data/sam/foo_no_header.sam', reference_lengths={'G1234': 20, 'G000144735': 90});
+----
+foo-1	0	G1234	2	60	10M	*	0	0	{de: 0.0, rl: 0}
+foo-2	0	G1234	2	60	10M	*	0	0	NULL
+foo-3	99	G000144735	76020	1	150M	=	76146	276	NULL
+foo-3	147	G000144735	76146	1	150M	=	76020	-276	NULL
