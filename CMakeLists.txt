@@ -22,6 +22,34 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
 project(${TARGET_NAME})
 
+include(ExternalProject)
+
+# Build htslib from release tarball
+ExternalProject_Add(
+    htslib_build
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1
+    CONFIGURE_COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1/configure
+        --prefix=${CMAKE_CURRENT_BINARY_DIR}/htslib
+        --disable-libcurl
+        --disable-bz2
+        --disable-lzma
+    BUILD_COMMAND make
+    INSTALL_COMMAND make install
+    BUILD_IN_SOURCE 0
+    BUILD_BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib/libhts.a
+)
+
+# Create imported library
+add_library(hts STATIC IMPORTED GLOBAL)
+set_target_properties(hts PROPERTIES
+    IMPORTED_LOCATION ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib/libhts.a
+)
+set_property(TARGET hts PROPERTY
+    IMPORTED_LOCATION ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib/libhts.a
+)
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/htslib/include)
+add_dependencies(hts htslib_build)
+
 # adapted kseq++ include use from strobealign
 include_directories(src/include ext)
 set(EXTENSION_SOURCES
@@ -37,10 +65,12 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
 target_link_libraries(${EXTENSION_NAME}
                       Threads::Threads
-                      ZLIB::ZLIB)
+                      ZLIB::ZLIB
+                      hts)
 target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       Threads::Threads
-                      ZLIB::ZLIB)
+                      ZLIB::ZLIB
+                      hts)
 
 install(
   TARGETS ${EXTENSION_NAME}
@@ -68,4 +98,4 @@ target_link_libraries(tests
   Threads::Threads
   ZLIB::ZLIB
 )
-target_include_directories(tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_BINARY_DIR}/htslib/include)
