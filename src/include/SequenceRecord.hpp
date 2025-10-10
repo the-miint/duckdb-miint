@@ -4,7 +4,6 @@
 #include "QualScore.hpp"
 #include "kseq++/kseq++.hpp"
 #include <stdexcept>
-#include <string>
 #include <kseq++/seqio.hpp>
 
 namespace miint {
