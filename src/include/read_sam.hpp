@@ -1,3 +1,4 @@
+#include "SAMReader.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/types.hpp"
@@ -75,7 +76,7 @@ struct GlobalState : public GlobalTableFunctionState {
 		return 4;
 	};
 
-	GlobalState(const std::string &sam_path) : reader(miint::SAMReader(sam_path)) {};
+	explicit GlobalState(const std::string &sam_path) : reader(miint::SAMReader(sam_path)) {};
 };
 
 static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
@@ -85,6 +86,8 @@ static unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, T
 
 static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 
+// TODO: can these be pushed to a templated baseclass?
+// class MiintTableFunction<Tfield, Trecord> ?
 static void SetResultVector(Vector &result_vector, const miint::SAMRecordField &field,
                             const std::vector<miint::SAMRecord> &records);
 static void SetResultVectorNull(Vector &result_vector);
@@ -92,10 +95,12 @@ static void SetResultVectorString(Vector &result_vector, const miint::SAMRecordF
                                   const std::vector<miint::SAMRecord> &records);
 static void SetResultVectorStringNullable(Vector &result_vector, const miint::SAMRecordField &field,
                                           const std::vector<miint::SAMRecord> &records);
-static void SetResultVectorListUInt8(Vector &result_vector, const miint::SAMRecordField &field,
-                                     const std::vector<miint::SAMRecord> &records);
+static void SetResultVectorUInt8(Vector &result_vector, const miint::SAMRecordField &field,
+                                 const std::vector<miint::SAMRecord> &records);
+static void SetResultVectorUInt16(Vector &result_vector, const miint::SAMRecordField &field,
+                                  const std::vector<miint::SAMRecord> &records);
+static void SetResultVectorInt64(Vector &result_vector, const miint::SAMRecordField &field,
+                                 const std::vector<miint::SAMRecord> &records);
 
 static TableFunction GetFunction();
-};
-}
-; // namespace duckdb
+}; // namespace duckdb

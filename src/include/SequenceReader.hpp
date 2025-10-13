@@ -4,7 +4,6 @@
 #include <string>
 #include <memory>
 #include <kseq++/seqio.hpp>
-#include <thread>
 #include "SequenceRecord.hpp"
 
 namespace miint {

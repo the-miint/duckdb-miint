@@ -57,7 +57,9 @@ set(EXTENSION_SOURCES
     src/QualScore.cpp
     src/read_fastx.cpp
     src/miint_extension.cpp
-    src/QualScore.cpp)
+    src/QualScore.cpp
+    src/read_sam.cpp
+    src/SAMReader.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
@@ -89,6 +91,8 @@ set(TEST_SOURCES
     test/cpp/test_SequenceReader.cpp
     src/QualScore.cpp
     test/cpp/test_QualScore.cpp
+    src/SAMReader.cpp
+    test/cpp/test_SAMReader.cpp
 )
 
 add_executable(tests ${TEST_SOURCES})
@@ -97,5 +101,6 @@ target_link_libraries(tests
   Catch2::Catch2WithMain
   Threads::Threads
   ZLIB::ZLIB
+  hts
 )
 target_include_directories(tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_BINARY_DIR}/htslib/include)

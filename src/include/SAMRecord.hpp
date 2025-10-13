@@ -88,7 +88,7 @@ enum class SAMRecordField {
 
 class SAMRecord {
 private:
-	int64_t get_int_tag(const bam1_t *aln, const char *tag, int64_t default_val = -1) {
+	const int64_t get_int_tag(const bam1_t *aln, const char *tag, int64_t default_val = -1) {
 		uint8_t *aux = bam_aux_get(aln, tag);
 		if (!aux) {
 			return default_val;
@@ -98,7 +98,7 @@ private:
 
 	// Helper to get string tag value, returns empty string if not found
 	std::string get_string_tag(const bam1_t *aln, const char *tag) {
-		uint8_t *aux = bam_aux_get(aln, tag);
+		const uint8_t *aux = bam_aux_get(aln, tag);
 		if (!aux) {
 			return "";
 		}
@@ -108,7 +108,7 @@ private:
 	// Helper to convert CIGAR to string
 	std::string cigar_to_string(const bam1_t *aln) {
 		std::ostringstream oss;
-		uint32_t *cigar = reinterpret_cast<uint32_t *>(aln->data + aln->core.l_qname);
+		const uint32_t *cigar = reinterpret_cast<uint32_t *>(aln->data + aln->core.l_qname);
 		for (uint32_t i = 0; i < aln->core.n_cigar; i++) {
 			uint32_t op_len = bam_cigar_oplen(cigar[i]);
 			char op_chr = bam_cigar_opchr(cigar[i]);
@@ -142,7 +142,7 @@ public:
 	explicit SAMRecord(const bam1_t *aln, const sam_hdr_t *hdr) noexcept {
 		// bam_get_qname performs a c-style cast
 		// recommended approach from claude for a reinterpret cast
-		read_id = std::string(reinterpret_cast<char *>(aln->data), aln->core.l_qname - 1);
+		read_id = std::string(reinterpret_cast<char *>(aln->data));
 		flags = aln->core.flag;
 
 		if (aln->core.tid >= 0) {
