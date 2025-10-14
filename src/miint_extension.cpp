@@ -3,6 +3,7 @@
 #include "miint_extension.hpp"
 #include <kseq++/seqio.hpp>
 #include <read_fastx.hpp>
+#include <read_sam.hpp>
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 
 namespace fs = std::filesystem;
@@ -14,6 +15,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// TODO: //! comment on headers
 	ReadFastxTableFunction read_fastx;
 	loader.RegisterFunction(read_fastx.GetFunction());
+
+	ReadSAMTableFunction read_sam;
+	loader.RegisterFunction(read_sam.GetFunction());
 
 	// QualFilterScalarFunction find_low_quality_window;
 	// loader.RegisterFunction(find_low_quality_window.GetFunction());
