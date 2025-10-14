@@ -139,6 +139,7 @@ void ReadSAMTableFunction::SetResultVector(Vector &result_vector, const miint::S
 		SetResultVectorUInt16(result_vector, field, records);
 		break;
 	case miint::SAMRecordField::POSITION:
+	case miint::SAMRecordField::STOP_POSITION:
 	case miint::SAMRecordField::MATE_POSITION:
 	case miint::SAMRecordField::TEMPLATE_LENGTH:
 		SetResultVectorInt64(result_vector, field, records);

@@ -60,7 +60,8 @@ set(EXTENSION_SOURCES
     src/QualScore.cpp
     src/read_sam.cpp
     src/SAMReader.cpp
-    src/alignment_flag_functions.cpp)
+    src/alignment_flag_functions.cpp
+    src/alignment_functions.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
@@ -94,6 +95,7 @@ set(TEST_SOURCES
     test/cpp/test_QualScore.cpp
     src/SAMReader.cpp
     test/cpp/test_SAMReader.cpp
+    test/cpp/test_AlignmentFunctions.cpp
 )
 
 add_executable(tests ${TEST_SOURCES})

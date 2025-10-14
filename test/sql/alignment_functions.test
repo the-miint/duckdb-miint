@@ -1,0 +1,275 @@
+# name: test/sql/alignment_functions.test
+# description: test alignment_seq_identity scalar function
+# group: [miint]
+
+require miint
+
+###############################################################################
+# STOP_POSITION TESTS (from read_sam schema)
+###############################################################################
+
+# Verify stop_position is computed correctly
+query III
+SELECT position, stop_position, cigar FROM read_sam('data/sam/foo_has_header.sam') WHERE read_id = 'foo-1';
+----
+2	12	10M
+
+# Verify stop_position for larger alignments
+query III
+SELECT position, stop_position, cigar FROM read_sam('data/sam/foo_has_header.sam') WHERE read_id = 'foo-3' LIMIT 1;
+----
+76020	76170	150M
+
+###############################################################################
+# ALIGNMENT_SEQ_IDENTITY - BASIC FUNCTIONALITY
+###############################################################################
+
+# Test gap_compressed mode (default) with simple CIGAR
+query R
+SELECT alignment_seq_identity('10M', 0, '', 'gap_compressed')::FLOAT;
+----
+1.0
+
+# Test gap_compressed with some mismatches (NM=2)
+query R
+SELECT alignment_seq_identity('10M', 2, '', 'gap_compressed')::FLOAT;
+----
+0.8
+
+# Test gap_compressed with insertions
+# CIGAR: 10M5I10M, NM=5 (5 insertions)
+# m=20, n=5, g=5, o=1
+# (m - n + g) / (m + o) = (20 - 5 + 5) / (20 + 1) = 20/21 ≈ 0.952
+query R
+SELECT alignment_seq_identity('10M5I10M', 5, '', 'gap_compressed')::FLOAT;
+----
+0.952
+
+# Test gap_compressed with deletions
+# CIGAR: 10M3D10M, NM=3 (3 deletions)
+# m=20, n=3, g=3, o=1
+# (m - n + g) / (m + o) = (20 - 3 + 3) / (20 + 1) = 20/21 ≈ 0.952
+query R
+SELECT alignment_seq_identity('10M3D10M', 3, '', 'gap_compressed')::FLOAT;
+----
+0.952
+
+# Test blast mode
+# CIGAR: 10M, NM=2
+# alignment_columns=10, matches=10-2=8
+# 8/10 = 0.8
+query R
+SELECT alignment_seq_identity('10M', 2, '', 'blast')::FLOAT;
+----
+0.8
+
+# Test blast mode with indels
+# CIGAR: 10M5I5D, NM=12 (2 mismatches + 5 ins + 5 del)
+# alignment_columns=20, matches=20-12=8
+# 8/20 = 0.4
+query R
+SELECT alignment_seq_identity('10M5I5D', 12, '', 'blast')::FLOAT;
+----
+0.4
+
+# Test gap_excluded mode
+# MD: 10 (10 matches, 0 mismatches)
+query R
+SELECT alignment_seq_identity('10M', -1, '10', 'gap_excluded')::FLOAT;
+----
+1.0
+
+# Test gap_excluded with mismatches
+# MD: 5A4 (5 matches, 1 mismatch 'A', 4 matches)
+query R
+SELECT alignment_seq_identity('10M', -1, '5A4', 'gap_excluded')::FLOAT;
+----
+0.9
+
+# Test gap_excluded with multiple mismatches
+# MD: 3A2T3 (3 matches, mismatch 'A', 2 matches, mismatch 'T', 3 matches)
+query R
+SELECT alignment_seq_identity('10M', -1, '3A2T3', 'gap_excluded')::FLOAT;
+----
+0.8
+
+# Test gap_excluded with deletions in MD
+# MD: 5^AC4 (5 matches, deletion of 'AC', 4 matches)
+query R
+SELECT alignment_seq_identity('5M2D4M', -1, '5^AC4', 'gap_excluded')::FLOAT;
+----
+1.0
+
+# Test correctness against Heng Li's blog post 
+# https://lh3.github.io/2018/11/25/on-the-definition-of-sequence-identity
+query R
+SELECT alignment_seq_identity('18M3D2M2D2M1I22M', NULL, '14A3^CAG2^TG24', 'gap_excluded')::FLOAT;
+----
+0.977
+
+query R
+SELECT alignment_seq_identity('18M3D2M2D2M1I22M', 7, NULL, 'blast')::FLOAT;
+----
+0.86
+
+query R
+SELECT alignment_seq_identity('18M3D2M2D2M1I22M', 7, NULL, 'gap_compressed')::FLOAT;
+----
+0.915
+
+###############################################################################
+# NULL HANDLING
+###############################################################################
+
+# NULL CIGAR should return NULL
+query I
+SELECT alignment_seq_identity(NULL, 0, '', 'gap_compressed') IS NULL;
+----
+true
+
+# Unmapped read (CIGAR='*') should return NULL
+query I
+SELECT alignment_seq_identity('*', 0, '', 'gap_compressed') IS NULL;
+----
+true
+
+# Missing NM tag (nm=-1) for blast mode should return NULL
+query I
+SELECT alignment_seq_identity('10M', -1, '', 'blast') IS NULL;
+----
+true
+
+# Missing NM tag (nm=-1) for gap_compressed mode should return NULL
+query I
+SELECT alignment_seq_identity('10M', -1, '', 'gap_compressed') IS NULL;
+----
+true
+
+# Missing MD tag for gap_excluded mode should return NULL
+query I
+SELECT alignment_seq_identity('10M', 0, '', 'gap_excluded') IS NULL;
+----
+true
+
+# NULL MD tag for gap_excluded mode should return NULL
+query I
+SELECT alignment_seq_identity('10M', 0, NULL, 'gap_excluded') IS NULL;
+----
+true
+
+# NULL NM tag for gap_excluded mode should work (NM not needed)
+query R
+SELECT alignment_seq_identity('10M', NULL, '5A4', 'gap_excluded')::FLOAT;
+----
+0.9
+
+# NULL MD tag for blast mode should work (MD not needed)
+query R
+SELECT alignment_seq_identity('10M', 2, NULL, 'blast')::FLOAT;
+----
+0.8
+
+# NULL NM tag for blast mode should return NULL
+query I
+SELECT alignment_seq_identity('10M', NULL, '', 'blast') IS NULL;
+----
+true
+
+# NULL NM tag for gap_compressed mode should return NULL
+query I
+SELECT alignment_seq_identity('10M', NULL, '', 'gap_compressed') IS NULL;
+----
+true
+
+# NULL type parameter should return NULL
+query I
+SELECT alignment_seq_identity('10M', 0, '', NULL) IS NULL;
+----
+true
+
+# All parameters NULL except CIGAR
+query I
+SELECT alignment_seq_identity('10M', NULL, NULL, NULL) IS NULL;
+----
+true
+
+# All parameters NULL
+query I
+SELECT alignment_seq_identity(NULL, NULL, NULL, NULL) IS NULL;
+----
+true
+
+###############################################################################
+# ERROR HANDLING
+###############################################################################
+
+# Invalid type parameter
+statement error
+SELECT alignment_seq_identity('10M', 0, '', 'invalid_type');
+----
+Invalid Input Error: Invalid type parameter for alignment_seq_identity
+
+###############################################################################
+# COMPLEX CIGAR PATTERNS
+###############################################################################
+
+# CIGAR with soft clipping (should be ignored)
+# 5S10M5S, NM=1
+query R
+SELECT alignment_seq_identity('5S10M5S', 1, '', 'gap_compressed')::FLOAT;
+----
+0.9
+
+# CIGAR with hard clipping (should be ignored)
+# 5H10M5H, NM=0
+query R
+SELECT alignment_seq_identity('5H10M5H', 0, '', 'gap_compressed')::FLOAT;
+----
+1.0
+
+# CIGAR with ref skip (N operation, e.g., spliced alignment)
+# 10M100N10M, NM=2
+query R
+SELECT alignment_seq_identity('10M100N10M', 2, '', 'gap_compressed')::FLOAT;
+----
+0.9
+
+# Multiple gap opens
+# CIGAR: 10M2I5M3D5M, NM=7 (2 ins + 3 del + 2 mismatches)
+# m=20, n=7, g=5, o=2
+# (m - n + g) / (m + o) = (20 - 7 + 5) / (20 + 2) = 18/22 ≈ 0.818
+query R
+SELECT alignment_seq_identity('10M2I5M3D5M', 7, '', 'gap_compressed')::FLOAT;
+----
+0.818
+
+# Test = and X CIGAR operations (explicit match/mismatch)
+# CIGAR: 5=2X3=, NM=2
+query R
+SELECT alignment_seq_identity('5=2X3=', 2, '', 'gap_compressed')::FLOAT;
+----
+0.8
+
+###############################################################################
+# INTEGRATION WITH read_sam
+###############################################################################
+
+# Test with actual SAM data - verify we can call function on read_sam output
+query I
+SELECT COUNT(*) FROM read_sam('data/sam/foo_has_header.sam') 
+WHERE alignment_seq_identity(cigar, tag_nm, tag_md, 'gap_compressed') IS NOT NULL;
+----
+0
+
+# Verify function works with all three modes on SAM data
+query I
+SELECT COUNT(*) FROM read_sam('data/sam/foo_has_header.sam') 
+WHERE alignment_seq_identity(cigar, tag_nm, tag_md, 'blast') IS NULL;
+----
+4
+
+query I
+SELECT COUNT(*) FROM read_sam('data/sam/foo_has_header.sam') 
+WHERE alignment_seq_identity(cigar, tag_nm, tag_md, 'gap_excluded') IS NULL;
+----
+4

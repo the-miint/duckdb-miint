@@ -68,6 +68,7 @@ enum class SAMRecordField {
 	FLAGS,
 	REFERENCE,
 	POSITION,
+	STOP_POSITION,
 	MAPQ,
 	CIGAR,
 	MATE_REFERENCE,
@@ -122,6 +123,7 @@ public:
 	uint16_t flags;
 	std::string reference;
 	int64_t position;
+	int64_t stop_position;
 	uint8_t mapq;
 	std::string cigar;
 	std::string mate_reference;
@@ -152,6 +154,16 @@ public:
 		}
 		// Position (POS) - convert from 0-based to 1-based
 		position = aln->core.pos >= 0 ? aln->core.pos + 1 : 0;
+
+		// Stop position (computed from CIGAR using bam_endpos)
+		// bam_endpos returns 0-based coordinate of first base after alignment
+		// Convert to 1-based by adding 1
+		if (aln->core.flag & 0x4) { // BAM_FUNMAP
+			stop_position = 0;
+		} else {
+			hts_pos_t end_pos = bam_endpos(aln);
+			stop_position = end_pos >= 0 ? end_pos + 1 : 0;
+		}
 
 		// Mapping quality (MAPQ)
 		mapq = aln->core.qual;
@@ -215,6 +227,8 @@ public:
 		switch (field) {
 		case SAMRecordField::POSITION:
 			return position;
+		case SAMRecordField::STOP_POSITION:
+			return stop_position;
 		case SAMRecordField::MATE_POSITION:
 			return mate_position;
 		case SAMRecordField::TEMPLATE_LENGTH:

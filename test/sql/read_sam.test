@@ -68,16 +68,16 @@ IO Error: Inconsistent headers across files: 'data/sam/foo_no_header.sam' lacks 
 # BASIC FUNCTIONALITY TESTS
 ###############################################################################
 
-# Single file with header - verify all 20 columns
-# Schema: read_id, flags, reference, position, mapq, cigar, mate_reference, mate_position, template_length,
+# Single file with header - verify all 21 columns
+# Schema: read_id, flags, reference, position, stop_position, mapq, cigar, mate_reference, mate_position, template_length,
 #         tag_as, tag_xs, tag_ys, tag_xn, tag_xm, tag_xo, tag_xg, tag_nm, tag_yt, tag_md, tag_sa
-query ITIITITTIIIIIIIIITTT
+query IIIIIIITTIIIIIIIIITTT
 SELECT * FROM read_sam('data/sam/foo_has_header.sam');
 ----
-foo-1	0	G1234	2	60	10M	*	0	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
-foo-2	0	G1234	2	60	10M	*	0	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
-foo-3	99	G000144735	76020	1	150M	=	76146	276	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
-foo-3	147	G000144735	76146	1	150M	=	76020	-276	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+foo-1	0	G1234	2	12	60	10M	*	0	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+foo-2	0	G1234	2	12	60	10M	*	0	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+foo-3	99	G000144735	76020	76170	1	150M	=	76146	276	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+foo-3	147	G000144735	76146	76296	1	150M	=	76020	-276	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
 
 # Single file with header (VARCHAR input)
 query I
@@ -86,13 +86,13 @@ SELECT COUNT(*) FROM read_sam('data/sam/foo_has_header.sam');
 4
 
 # Single file headerless with reference_lengths
-query ITIITITTIIIIIIIIITTT
+query IIIIIIITTIIIIIIIIITTT
 SELECT * FROM read_sam('data/sam/foo_no_header.sam', reference_lengths=MAP(['G1234', 'G000144735'], [20, 90]));
 ----
-foo-1	0	G1234	2	60	10M	*	0	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
-foo-2	0	G1234	2	60	10M	*	0	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
-foo-3	99	G000144735	76020	1	150M	=	76146	276	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
-foo-3	147	G000144735	76146	1	150M	=	76020	-276	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+foo-1	0	G1234	2	12	60	10M	*	0	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+foo-2	0	G1234	2	12	60	10M	*	0	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+foo-3	99	G000144735	76020	76170	1	150M	=	76146	276	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+foo-3	147	G000144735	76146	76296	1	150M	=	76020	-276	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
 
 # Single file headerless with extra references in reference_lengths (should be OK)
 query I
@@ -129,19 +129,19 @@ SELECT COUNT(*) FROM read_sam(['data/sam/foo_no_header.sam', 'data/sam/foo_no_he
 # INCLUDE_FILEPATH TESTS
 ###############################################################################
 
-# Single file without include_filepath (default) - should have 20 columns
+# Single file without include_filepath (default) - should have 21 columns
 query I
-SELECT COUNT(*) FROM (SELECT * FROM read_sam('data/sam/foo_has_header.sam')) AS t(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, c18, c19, c20);
+SELECT COUNT(*) FROM (SELECT * FROM read_sam('data/sam/foo_has_header.sam')) AS t(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, c18, c19, c20, c21);
 ----
 4
 
-# Single file with include_filepath=false - should have 20 columns
+# Single file with include_filepath=false - should have 21 columns
 query I
-SELECT COUNT(*) FROM (SELECT * FROM read_sam('data/sam/foo_has_header.sam', include_filepath=false)) AS t(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, c18, c19, c20);
+SELECT COUNT(*) FROM (SELECT * FROM read_sam('data/sam/foo_has_header.sam', include_filepath=false)) AS t(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, c18, c19, c20, c21);
 ----
 4
 
-# Single file with include_filepath=true - should have 21 columns with filepath at end
+# Single file with include_filepath=true - should have 22 columns with filepath at end
 query IT
 SELECT read_id, filepath FROM read_sam('data/sam/foo_has_header.sam', include_filepath=true);
 ----
@@ -175,17 +175,17 @@ SELECT COUNT(*) FROM read_sam('data/sam/foo_empty_has_header.sam');
 
 # File with records containing optional tags (verify non-null tags)
 # This uses a file with actual bowtie2/minimap2 tags
-query ITIITITTIIIIIIIIITTT
+query IIIIIIITTIIIIIIIIITTT
 SELECT * FROM read_sam('data/sam/foo_with_tags.sam');
 ----
-tagged-1	0	G1234	10	60	50M	*	0	0	100	90	NULL	5	3	1	2	4	CP	10A5T20	NULL
-tagged-2	99	G000144735	1000	30	100M	=	1200	300	200	180	150	NULL	NULL	NULL	NULL	10	UU	NULL	chr1,1234,+,50M,60,5;
+tagged-1	0	G1234	10	60	60	50M	*	0	0	100	90	NULL	5	3	1	2	4	CP	10A5T20	NULL
+tagged-2	99	G000144735	1000	1100	30	100M	=	1200	300	200	180	150	NULL	NULL	NULL	NULL	10	UU	NULL	chr1,1234,+,50M,60,5;
 
 # File with records missing all optional tags (verify all NULL)
-query ITIITITTIIIIIIIIITTT
+query IIIIIIITTIIIIIIIIITTT
 SELECT * FROM read_sam('data/sam/foo_no_tags.sam');
 ----
-notag-1	0	G1234	5	60	25M	*	0	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+notag-1	0	G1234	5	30	60	25M	*	0	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
 
 ###############################################################################
 # ORDERING TESTS
@@ -222,11 +222,11 @@ foo-3	G000144735	data/sam/foo_has_header.sam
 ###############################################################################
 
 # Verify BIGINT for positions (can handle large genomic coordinates)
-query ITIITITII
-SELECT read_id, flags, reference, position, mapq, cigar, mate_reference, mate_position, template_length 
+query IIIIIIIIII
+SELECT read_id, flags, reference, position, stop_position, mapq, cigar, mate_reference, mate_position, template_length 
 FROM read_sam('data/sam/foo_large_positions.sam');
 ----
-large-pos	0	chrLarge	2147483648	60	100M	=	2147483748	200
+large-pos	0	chrLarge	2147483648	2147483748	60	100M	=	2147483748	200
 
 # Verify nullable integer tags return NULL properly
 query IIIIIIII

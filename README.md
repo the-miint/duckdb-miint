@@ -40,6 +40,12 @@ To run the extension code, simply start the shell with `./build/release/duckdb`.
 ### `read_sam(filename)`
 Read SAM/BAM alignment files.
 
+**Output schema includes:**
+- `position` (BIGINT): 1-based start position
+- `stop_position` (BIGINT): 1-based stop position (computed from CIGAR using `bam_endpos`)
+- `cigar` (VARCHAR): CIGAR string
+- Plus other standard SAM fields and optional tags
+
 ### `read_fastx(filename)`
 Read FASTA/FASTQ sequence files.
 
@@ -66,11 +72,68 @@ Test individual SAM flag bits. Each function takes a `USMALLINT` (the flags colu
 
 **Example:**
 ```sql
-SELECT read_id, flags 
-FROM read_sam('alignments.sam') 
-WHERE alignment_is_paired(flags) 
+SELECT read_id, flags
+FROM read_sam('alignments.sam')
+WHERE alignment_is_paired(flags)
   AND NOT alignment_is_unmapped(flags);
 ```
+
+### `alignment_seq_identity(cigar, nm, md, type)`
+
+Calculate sequence identity between read and reference using three different methods. They are derived from Heng Li's [blog post](https://lh3.github.io/2018/11/25/on-the-definition-of-sequence-identity).
+
+*IMPORTANT*: these calculations assume use of '='/'X' (e.g., `--xeq` with bowtie2, `-eqx` with minimap2, etc).
+
+**Parameters:**
+- `cigar` (VARCHAR): CIGAR string from alignment.
+- `nm` (BIGINT): NM tag value (edit distance)
+- `md` (VARCHAR): MD tag value (mismatch positions)
+- `type` (VARCHAR, default='gap_compressed'): Identity calculation method
+
+**Identity types:**
+
+1. **`'gap_excluded'`**: Ignore gaps, only consider match/mismatch positions
+   - Formula: `#matches / (#matches + #mismatches)`
+   - Requires: CIGAR + MD tag
+   - Use case: Genetic divergence between species
+
+2. **`'blast'`**: Traditional BLAST-style identity
+   - Formula: `#matches / alignment_columns`
+   - Requires: CIGAR + NM tag
+   - Use case: General similarity measurement
+   - Note: Large indels significantly lower identity
+
+3. **`'gap_compressed'`** (default): Count consecutive gaps as single events
+   - Formula: `(m - n + g) / (m + o)` where m=M_columns, n=NM, g=gap_bases, o=gap_opens
+   - Equivalent to: `1 - (n - g + o) / (m + o)` from the blog post
+   - Requires: CIGAR + NM tag
+   - Use case: Filtering alignments (recommended)
+   - Note: More robust to structural variations
+
+**Returns:** DOUBLE between 0.0 and 1.0, or NULL for unmapped reads or missing required tags
+
+**Example:**
+```sql
+-- Calculate gap-compressed identity (default)
+SELECT read_id, alignment_seq_identity(cigar, tag_nm, tag_md, 'gap_compressed') AS identity
+FROM read_sam('alignments.sam')
+WHERE tag_nm IS NOT NULL;
+
+-- Filter high-quality alignments
+SELECT COUNT(*)
+FROM read_sam('alignments.sam')
+WHERE alignment_seq_identity(cigar, tag_nm, tag_md) > 0.95;
+
+-- Compare different identity methods
+SELECT read_id,
+  alignment_seq_identity(cigar, tag_nm, tag_md, 'gap_excluded') AS gap_excl,
+  alignment_seq_identity(cigar, tag_nm, tag_md, 'blast') AS blast,
+  alignment_seq_identity(cigar, tag_nm, tag_md, 'gap_compressed') AS gap_comp
+FROM read_sam('alignments.sam')
+WHERE tag_nm IS NOT NULL AND tag_md IS NOT NULL;
+```
+
+**Reference:** [On the definition of sequence identity](https://lh3.github.io/2018/11/25/on-the-definition-of-sequence-identity) by Heng Li
 
 ## Running the tests
 Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:

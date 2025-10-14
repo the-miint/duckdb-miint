@@ -25,13 +25,15 @@ public:
 		explicit Data(const std::vector<std::string> &paths,
 		              const std::optional<std::unordered_map<std::string, uint64_t>> &ref_lengths, bool include_fp)
 		    : sam_paths(paths), reference_lengths(ref_lengths), include_filepath(include_fp),
-		      names({"read_id",       "flags",           "reference", "position", "mapq",   "cigar",  "mate_reference",
-		             "mate_position", "template_length", "tag_as",    "tag_xs",   "tag_ys", "tag_xn", "tag_xm",
-		             "tag_xo",        "tag_xg",          "tag_nm",    "tag_yt",   "tag_md", "tag_sa"}),
+		      names({"read_id",       "flags",      "reference", "position", "stop_position", "mapq",   "cigar",
+		             "mate_reference", "mate_position", "template_length", "tag_as",    "tag_xs",   "tag_ys",
+		             "tag_xn",         "tag_xm",     "tag_xo",    "tag_xg",   "tag_nm",    "tag_yt",   "tag_md",
+		             "tag_sa"}),
 		      types({LogicalType::VARCHAR,   // read_id
 		             LogicalType::USMALLINT, // flags
 		             LogicalType::VARCHAR,   // reference
 		             LogicalType::BIGINT,    // position
+		             LogicalType::BIGINT,    // stop_position
 		             LogicalType::UTINYINT,  // mapq
 		             LogicalType::VARCHAR,   // cigar
 		             LogicalType::VARCHAR,   // mate_reference
@@ -52,6 +54,7 @@ public:
 		              miint::SAMRecordField::FLAGS,
 		              miint::SAMRecordField::REFERENCE,
 		              miint::SAMRecordField::POSITION,
+		              miint::SAMRecordField::STOP_POSITION,
 		              miint::SAMRecordField::MAPQ,
 		              miint::SAMRecordField::CIGAR,
 		              miint::SAMRecordField::MATE_REFERENCE,
