@@ -36,6 +36,11 @@ unique_ptr<FunctionData> ReadSAMTableFunction::Bind(ClientContext &context, Tabl
 	auto ref_param = input.named_parameters.find("reference_lengths");
 	if (ref_param != input.named_parameters.end() && !ref_param->second.IsNull()) {
 		const auto &map_value = ref_param->second;
+		
+		if (map_value.type().id() != LogicalTypeId::MAP) {
+			throw InvalidInputException("reference_lengths must be a MAP type (e.g., MAP{'ref1': 100, 'ref2': 200})");
+		}
+		
 		reference_lengths = std::unordered_map<std::string, uint64_t>();
 
 		// MAP is a LIST of STRUCT<key, value> entries
