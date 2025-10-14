@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include "SAMRecord.hpp"
 #include <htslib-1.22.1/htslib/sam.h>
+#include <htslib-1.22.1/htslib/hts_log.h>
 
 namespace miint {
 struct SAMFileDeleter {

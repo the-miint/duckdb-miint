@@ -13,7 +13,7 @@ public:
 	}
 };
 
-enum class SequenceRecordField { READ_ID = 0, COMMENT, READ1, READ2, QUAL1, QUAL2 };
+enum class SequenceRecordField { READ_ID = 0, COMMENT, SEQUENCE1, SEQUENCE2, QUAL1, QUAL2 };
 
 class SequenceRecord {
 public:
@@ -60,9 +60,9 @@ public:
 			return read_id;
 		case SequenceRecordField::COMMENT:
 			return comment;
-		case SequenceRecordField::READ1:
+		case SequenceRecordField::SEQUENCE1:
 			return read1;
-		case SequenceRecordField::READ2:
+		case SequenceRecordField::SEQUENCE2:
 			if (is_paired) {
 				return read2.value();
 			}
@@ -85,8 +85,8 @@ public:
 			throw UnpairedError("Attempted to access paired read with an unpaired record");
 		case SequenceRecordField::READ_ID:
 		case SequenceRecordField::COMMENT:
-		case SequenceRecordField::READ1:
-		case SequenceRecordField::READ2:
+		case SequenceRecordField::SEQUENCE1:
+		case SequenceRecordField::SEQUENCE2:
 		default:
 			throw std::invalid_argument("Invalid field");
 		}
@@ -94,10 +94,10 @@ public:
 
 	const size_t GetLength(const SequenceRecordField field) const {
 		switch (field) {
-		case SequenceRecordField::READ1:
+		case SequenceRecordField::SEQUENCE1:
 		case SequenceRecordField::QUAL1:
 			return length_read1();
-		case SequenceRecordField::READ2:
+		case SequenceRecordField::SEQUENCE2:
 		case SequenceRecordField::QUAL2:
 			return length_read2();
 		default:

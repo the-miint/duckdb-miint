@@ -15,8 +15,8 @@ public:
 private:
 	using SeqStreamIn = klibpp::SeqStreamIn;
 
-	std::unique_ptr<SeqStreamIn> reader1_;
-	std::optional<std::unique_ptr<SeqStreamIn>> reader2_;
+	std::unique_ptr<SeqStreamIn> sequence1_reader_;
+	std::optional<std::unique_ptr<SeqStreamIn>> sequence2_reader_;
 
 	bool paired_;
 

@@ -1,3 +1,4 @@
+#include "htslib-1.22.1/htslib/hts_log.h"
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -129,8 +130,8 @@ TEST_CASE("Headerless constructor with multiple references", "[SAMReader][header
 TEST_CASE("Headerless constructor reads records correctly", "[SAMReader][headerless]") {
 	TempFileFixture fixture;
 	auto path = "test_headerless_integrity.sam";
-	fixture.write_temp_sam(path, {unpaired_record("read1", "genome1", "0", "4M"),
-	                              unpaired_record("read2", "genome1", "256", "4M")});
+	fixture.write_temp_sam(
+	    path, {unpaired_record("read1", "genome1", "0", "4M"), unpaired_record("read2", "genome1", "256", "4M")});
 
 	std::unordered_map<std::string, uint64_t> refs = {{"genome1", 5000}};
 	miint::SAMReader reader(path, refs);
@@ -202,6 +203,7 @@ TEST_CASE("Headerless constructor throws on zero length reference", "[SAMReader]
 
 TEST_CASE("Headerless constructor throws on nonexistent file", "[SAMReader][headerless]") {
 	std::unordered_map<std::string, uint64_t> refs = {{"ref1", 1000}};
+	hts_set_log_level(HTS_LOG_OFF);
 	REQUIRE_THROWS_AS(miint::SAMReader("nonexistent_file.sam", refs), std::runtime_error);
 }
 
@@ -214,12 +216,14 @@ TEST_CASE("Header constructor throws on headerless file", "[SAMReader][header]")
 }
 
 TEST_CASE("Header constructor throws on nonexistent file", "[SAMReader][header]") {
+	hts_set_log_level(HTS_LOG_OFF);
 	REQUIRE_THROWS_AS(miint::SAMReader("nonexistent_file.sam"), std::runtime_error);
 }
 
 TEST_CASE("Headerless constructor with unknown reference in data", "[SAMReader][headerless]") {
 	TempFileFixture fixture;
 	auto path = "test_unknown_ref.sam";
+	hts_set_log_level(HTS_LOG_OFF);
 	fixture.write_temp_sam(path, {unpaired_record("r1", "unknown_ref", "0", "4M")});
 
 	std::unordered_map<std::string, uint64_t> refs = {{"ref1", 1000}};
@@ -278,9 +282,8 @@ TEST_CASE("Headerless constructor multiple sequential reads", "[SAMReader][heade
 TEST_CASE("Header constructor multiple sequential reads", "[SAMReader][header]") {
 	TempFileFixture fixture;
 	auto path = "test_header_sequential.sam";
-	fixture.write_temp_sam(path,
-	                       {header_reference_line("ref1", "1000"), unpaired_record("r1", "ref1", "0", "4M"),
-	                        unpaired_record("r2", "ref1", "0", "4M"), unpaired_record("r3", "ref1", "0", "4M")});
+	fixture.write_temp_sam(path, {header_reference_line("ref1", "1000"), unpaired_record("r1", "ref1", "0", "4M"),
+	                              unpaired_record("r2", "ref1", "0", "4M"), unpaired_record("r3", "ref1", "0", "4M")});
 
 	miint::SAMReader reader(path);
 

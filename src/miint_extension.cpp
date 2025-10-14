@@ -24,6 +24,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 }
 
 void MiintExtension::Load(ExtensionLoader &loader) {
+	hts_set_log_level(HTS_LOG_ERROR);
+
 	LoadInternal(loader);
 }
 std::string MiintExtension::Name() {
