@@ -35,15 +35,41 @@ The main binaries that will be built are:
 ## Running the extension
 To run the extension code, simply start the shell with `./build/release/duckdb`.
 
-Now we can use the features from the extension directly in DuckDB. The template contains a single scalar function `miint()` that takes a string arguments and returns a string:
-```
-D select miint('Jane') as result;
-┌───────────────┐
-│    result     │
-│    varchar    │
-├───────────────┤
-│ Miint Jane 🐥 │
-└───────────────┘
+## Functions
+
+### `read_sam(filename)`
+Read SAM/BAM alignment files.
+
+### `read_fastx(filename)`
+Read FASTA/FASTQ sequence files.
+
+### SAM Flag Functions
+
+Test individual SAM flag bits. Each function takes a `USMALLINT` (the flags column from `read_sam`) and returns a `BOOLEAN`.
+
+**Primary names:**
+- `alignment_is_paired(flags)` - Read is paired (0x1)
+- `alignment_is_proper_pair(flags)` - Read is properly paired (0x2)
+- `alignment_is_unmapped(flags)` - Read is unmapped (0x4)
+- `alignment_is_mate_unmapped(flags)` - Mate is unmapped (0x8)
+- `alignment_is_reverse(flags)` - Read is reverse strand (0x10)
+- `alignment_is_mate_reverse(flags)` - Mate is reverse strand (0x20)
+- `alignment_is_read1(flags)` - Read is first in pair (0x40)
+- `alignment_is_read2(flags)` - Read is second in pair (0x80)
+- `alignment_is_secondary(flags)` - Secondary alignment (0x100)
+- `alignment_is_qc_failed(flags)` - QC failure (0x200)
+- `alignment_is_duplicate(flags)` - PCR/optical duplicate (0x400)
+- `alignment_is_supplementary(flags)` - Supplementary alignment (0x800)
+
+**HTSlib-compatible aliases:**
+`is_paired`, `is_proper_pair`, `is_unmapped`, `is_munmap`, `is_reverse`, `is_mreverse`, `is_read1`, `is_read2`, `is_secondary`, `is_qcfail`, `is_dup`, `is_supplementary`
+
+**Example:**
+```sql
+SELECT read_id, flags 
+FROM read_sam('alignments.sam') 
+WHERE alignment_is_paired(flags) 
+  AND NOT alignment_is_unmapped(flags);
 ```
 
 ## Running the tests

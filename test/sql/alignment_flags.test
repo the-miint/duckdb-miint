@@ -1,0 +1,222 @@
+# name: test/sql/alignment_flags.test
+# description: Test alignment flag bit testing functions
+# group: [miint]
+
+require miint
+
+# Test individual flag bits with known values
+query I
+SELECT alignment_is_paired(1::USMALLINT);
+----
+true
+
+query I
+SELECT alignment_is_paired(0::USMALLINT);
+----
+false
+
+query I
+SELECT alignment_is_proper_pair(2::USMALLINT);
+----
+true
+
+query I
+SELECT alignment_is_proper_pair(0::USMALLINT);
+----
+false
+
+query I
+SELECT alignment_is_unmapped(4::USMALLINT);
+----
+true
+
+query I
+SELECT alignment_is_unmapped(0::USMALLINT);
+----
+false
+
+query I
+SELECT alignment_is_mate_unmapped(8::USMALLINT);
+----
+true
+
+query I
+SELECT alignment_is_mate_unmapped(0::USMALLINT);
+----
+false
+
+query I
+SELECT alignment_is_reverse(16::USMALLINT);
+----
+true
+
+query I
+SELECT alignment_is_reverse(0::USMALLINT);
+----
+false
+
+query I
+SELECT alignment_is_mate_reverse(32::USMALLINT);
+----
+true
+
+query I
+SELECT alignment_is_mate_reverse(0::USMALLINT);
+----
+false
+
+query I
+SELECT alignment_is_read1(64::USMALLINT);
+----
+true
+
+query I
+SELECT alignment_is_read1(0::USMALLINT);
+----
+false
+
+query I
+SELECT alignment_is_read2(128::USMALLINT);
+----
+true
+
+query I
+SELECT alignment_is_read2(0::USMALLINT);
+----
+false
+
+query I
+SELECT alignment_is_secondary(256::USMALLINT);
+----
+true
+
+query I
+SELECT alignment_is_secondary(0::USMALLINT);
+----
+false
+
+query I
+SELECT alignment_is_qc_failed(512::USMALLINT);
+----
+true
+
+query I
+SELECT alignment_is_qc_failed(0::USMALLINT);
+----
+false
+
+query I
+SELECT alignment_is_duplicate(1024::USMALLINT);
+----
+true
+
+query I
+SELECT alignment_is_duplicate(0::USMALLINT);
+----
+false
+
+query I
+SELECT alignment_is_supplementary(2048::USMALLINT);
+----
+true
+
+query I
+SELECT alignment_is_supplementary(0::USMALLINT);
+----
+false
+
+# Test with combined flags
+query IIII
+SELECT 
+    alignment_is_paired(99::USMALLINT),
+    alignment_is_proper_pair(99::USMALLINT),
+    alignment_is_reverse(99::USMALLINT),
+    alignment_is_read1(99::USMALLINT);
+----
+true	true	false	true
+
+# Test HTSlib-compatible aliases
+query I
+SELECT is_paired(1::USMALLINT);
+----
+true
+
+query I
+SELECT is_proper_pair(2::USMALLINT);
+----
+true
+
+query I
+SELECT is_unmapped(4::USMALLINT);
+----
+true
+
+query I
+SELECT is_munmap(8::USMALLINT);
+----
+true
+
+query I
+SELECT is_reverse(16::USMALLINT);
+----
+true
+
+query I
+SELECT is_mreverse(32::USMALLINT);
+----
+true
+
+query I
+SELECT is_read1(64::USMALLINT);
+----
+true
+
+query I
+SELECT is_read2(128::USMALLINT);
+----
+true
+
+query I
+SELECT is_secondary(256::USMALLINT);
+----
+true
+
+query I
+SELECT is_qcfail(512::USMALLINT);
+----
+true
+
+query I
+SELECT is_dup(1024::USMALLINT);
+----
+true
+
+query I
+SELECT is_supplementary(2048::USMALLINT);
+----
+true
+
+# Test with actual SAM file
+statement ok
+CREATE TABLE alignments AS SELECT * FROM read_sam('data/sam/foo_has_header.sam');
+
+query I
+SELECT COUNT(*) FROM alignments WHERE alignment_is_paired(flags);
+----
+2
+
+query I
+SELECT COUNT(*) FROM alignments WHERE alignment_is_unmapped(flags);
+----
+0
+
+query I
+SELECT COUNT(*) FROM alignments WHERE alignment_is_reverse(flags);
+----
+1
+
+# Verify aliases work with SAM data
+query I
+SELECT COUNT(*) FROM alignments WHERE is_reverse(flags);
+----
+1

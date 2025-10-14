@@ -1,6 +1,7 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "miint_extension.hpp"
+#include <alignment_flag_functions.hpp>
 #include <kseq++/seqio.hpp>
 #include <read_fastx.hpp>
 #include <read_sam.hpp>
@@ -18,6 +19,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	ReadSAMTableFunction read_sam;
 	loader.RegisterFunction(read_sam.GetFunction());
+
+	AlignmentFlagFunctions::Register(loader);
 
 	// QualFilterScalarFunction find_low_quality_window;
 	// loader.RegisterFunction(find_low_quality_window.GetFunction());
