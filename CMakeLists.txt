@@ -28,7 +28,7 @@ include(ExternalProject)
 ExternalProject_Add(
     htslib_build
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1
-    CONFIGURE_COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1/configure
+    CONFIGURE_COMMAND env CFLAGS=-fPIC ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1/configure
         --prefix=${CMAKE_CURRENT_BINARY_DIR}/htslib
         --disable-libcurl
         --disable-bz2
