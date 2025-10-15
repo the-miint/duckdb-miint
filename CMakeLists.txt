@@ -61,7 +61,11 @@ set(EXTENSION_SOURCES
     src/read_sam.cpp
     src/SAMReader.cpp
     src/alignment_flag_functions.cpp
-    src/alignment_functions.cpp)
+    src/alignment_functions.cpp
+    src/copy_format_common.cpp
+    src/copy_fastq.cpp
+    src/copy_fasta.cpp
+    src/copy_sam.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

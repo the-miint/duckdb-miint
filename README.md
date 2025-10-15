@@ -135,6 +135,151 @@ WHERE tag_nm IS NOT NULL AND tag_md IS NOT NULL;
 
 **Reference:** [On the definition of sequence identity](https://lh3.github.io/2018/11/25/on-the-definition-of-sequence-identity) by Heng Li
 
+## COPY Formats
+
+DuckDB miint provides custom COPY formats for writing bioinformatics file formats.
+
+### `COPY ... TO '...' (FORMAT FASTQ)`
+
+Write query results to FASTQ format files. Requires `read_id`, `sequence1`, and `qual1` columns from `read_fastx` output.
+
+**Required columns:**
+- `read_id` (VARCHAR): Sequence identifier
+- `sequence1` (VARCHAR): DNA/RNA sequence
+- `qual1` (BLOB): Quality scores as raw bytes
+
+**Optional columns:**
+- `comment` (VARCHAR): Comment line (only included if `INCLUDE_COMMENT=true`)
+- `sequence_index` (BIGINT): Used as identifier if `ID_AS_SEQUENCE_INDEX=true`
+- `sequence2` (VARCHAR): Second read for paired-end data
+- `qual2` (BLOB): Quality scores for second read
+
+**Parameters:**
+- `QUAL_OFFSET` (default: 33): Quality score encoding offset (33 or 64)
+- `INCLUDE_COMMENT` (default: false): Include comment field in output
+- `ID_AS_SEQUENCE_INDEX` (default: false): Use `sequence_index` as identifier instead of `read_id`
+- `INTERLEAVE` (default: false): Write paired reads interleaved in single file
+- `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension)
+
+**Examples:**
+```sql
+-- Basic single-end FASTQ output
+COPY (SELECT * FROM read_fastx('input.fastq'))
+TO 'output.fastq' (FORMAT FASTQ);
+
+-- Paired-end interleaved output
+COPY (SELECT * FROM read_fastx('R1.fastq', 'R2.fastq'))
+TO 'output.fastq' (FORMAT FASTQ, INTERLEAVE true);
+
+-- Paired-end split files (use {ORIENTATION} placeholder)
+COPY (SELECT * FROM read_fastx('R1.fastq', 'R2.fastq'))
+TO 'output_{ORIENTATION}.fastq' (FORMAT FASTQ);
+
+-- Compressed output with custom quality offset
+COPY (SELECT * FROM read_fastx('input.fastq'))
+TO 'output.fastq.gz' (FORMAT FASTQ, QUAL_OFFSET 33, COMPRESSION gzip);
+
+-- Use sequence index as identifier
+COPY (SELECT * FROM read_fastx('input.fastq'))
+TO 'output.fastq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true);
+```
+
+### `COPY ... TO '...' (FORMAT FASTA)`
+
+Write query results to FASTA format files. Requires `read_id` and `sequence1` columns from `read_fastx` output.
+
+**Required columns:**
+- `read_id` (VARCHAR): Sequence identifier
+- `sequence1` (VARCHAR): DNA/RNA/protein sequence
+
+**Optional columns:**
+- `comment` (VARCHAR): Comment line (only included if `INCLUDE_COMMENT=true`)
+- `sequence_index` (BIGINT): Used as identifier if `ID_AS_SEQUENCE_INDEX=true`
+- `sequence2` (VARCHAR): Second read for paired-end data
+
+**Parameters:**
+- `INCLUDE_COMMENT` (default: false): Include comment field in output
+- `ID_AS_SEQUENCE_INDEX` (default: false): Use `sequence_index` as identifier instead of `read_id`
+- `INTERLEAVE` (default: false): Write paired reads interleaved in single file
+- `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension)
+
+**Examples:**
+```sql
+-- Basic FASTA output
+COPY (SELECT * FROM read_fastx('input.fasta'))
+TO 'output.fasta' (FORMAT FASTA);
+
+-- Paired-end split files
+COPY (SELECT * FROM read_fastx('R1.fasta', 'R2.fasta'))
+TO 'output_{ORIENTATION}.fasta' (FORMAT FASTA);
+
+-- Compressed with comments
+COPY (SELECT * FROM read_fastx('input.fasta'))
+TO 'output.fasta.gz' (FORMAT FASTA, INCLUDE_COMMENT true);
+```
+
+### `COPY ... TO '...' (FORMAT SAM)`
+
+Write query results to SAM format files. Requires all mandatory SAM columns from `read_sam` output.
+
+**Required columns:**
+- `read_id` (VARCHAR): Query template name
+- `flags` (USMALLINT): Bitwise flags
+- `reference` (VARCHAR): Reference sequence name
+- `position` (BIGINT): 1-based leftmost mapping position
+- `mapq` (UTINYINT): Mapping quality
+- `cigar` (VARCHAR): CIGAR string
+- `mate_reference` (VARCHAR): Reference name of mate/next read
+- `mate_position` (BIGINT): Position of mate/next read
+- `template_length` (BIGINT): Observed template length
+
+**Optional columns:**
+- `tag_as`, `tag_xs`, `tag_ys`, `tag_xn`, `tag_xm`, `tag_xo`, `tag_xg`, `tag_nm` (BIGINT): Optional integer tags
+- `tag_yt`, `tag_md`, `tag_sa` (VARCHAR): Optional string tags
+
+**Parameters:**
+- `INCLUDE_HEADER` (default: true): Include @SQ header lines with reference sequences
+- `REFERENCE_LENGTHS` (required if INCLUDE_HEADER=true): MAP of reference names to their lengths (e.g., `MAP{'chr1': 248956422, 'chr2': 242193529}`)
+- `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension)
+
+**Examples:**
+```sql
+-- Basic SAM output with header (requires reference lengths)
+COPY (SELECT * FROM read_sam('input.sam'))
+TO 'output.sam' (FORMAT SAM, REFERENCE_LENGTHS MAP{'chr1': 248956422, 'chr2': 242193529});
+
+-- Using a variable for reference lengths (recommended for reuse)
+SET VARIABLE my_refs = MAP{'chr1': 248956422, 'chr2': 242193529};
+COPY (SELECT * FROM read_sam('input.sam'))
+TO 'output.sam' (FORMAT SAM, REFERENCE_LENGTHS getvariable('my_refs'));
+
+-- Constructing reference lengths from a query/table
+CREATE TABLE refs AS SELECT 'chr1' as name, 248956422 as length 
+                     UNION ALL SELECT 'chr2', 242193529;
+SET VARIABLE ref_map = (SELECT MAP(LIST(name), LIST(length)) FROM refs);
+COPY (SELECT * FROM read_sam('input.sam'))
+TO 'output.sam' (FORMAT SAM, REFERENCE_LENGTHS getvariable('ref_map'));
+
+-- Headerless SAM output (no reference lengths needed)
+COPY (SELECT * FROM read_sam('input.sam'))
+TO 'output.sam' (FORMAT SAM, INCLUDE_HEADER false);
+
+-- Compressed SAM output with header
+COPY (SELECT * FROM read_sam('input.sam'))
+TO 'output.sam.gz' (FORMAT SAM, COMPRESSION gzip, REFERENCE_LENGTHS MAP{'chr1': 248956422});
+
+-- Filter and write high-quality alignments (headerless)
+COPY (
+  SELECT * FROM read_sam('input.sam')
+  WHERE mapq >= 30 AND NOT alignment_is_unmapped(flags)
+) TO 'filtered.sam' (FORMAT SAM, INCLUDE_HEADER false);
+```
+
+**Notes:**
+- SEQ and QUAL fields are always written as `*` in current implementation
+- Reference lengths must be provided explicitly when writing headers - they cannot be inferred from the data
+- All optional tags present in the input are preserved in the output
+
 ## Running the tests
 Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:
 ```sh

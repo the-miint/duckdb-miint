@@ -1,0 +1,153 @@
+# name: test/sql/copy_fasta.test
+# description: Test COPY FORMAT FASTA
+# group: [miint]
+
+require miint
+
+# Test 1: Basic single-end FASTA output (without comments)
+statement ok
+CREATE TABLE test_fasta_single AS SELECT sequence_index, read_id, comment, sequence1 FROM read_fastx('data/fastq/test.fa');
+
+statement ok
+COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) TO '__TEST_DIR__/output1.fa' (FORMAT FASTA);
+
+query IIII
+SELECT sequence_index, read_id, sequence1, comment FROM read_fastx('__TEST_DIR__/output1.fa') ORDER BY sequence_index;
+----
+1	seq1	ATGCATGCATGC	NULL
+2	seq2	GGCCGGCCGGCC	NULL
+
+# Test 2: Single-end with ID_AS_SEQUENCE_INDEX
+statement ok
+COPY (SELECT sequence_index, read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) TO '__TEST_DIR__/output2.fa' (FORMAT FASTA, ID_AS_SEQUENCE_INDEX true);
+
+query IIII
+SELECT sequence_index, read_id, sequence1, comment FROM read_fastx('__TEST_DIR__/output2.fa') ORDER BY sequence_index;
+----
+1	1	ATGCATGCATGC	NULL
+2	2	GGCCGGCCGGCC	NULL
+
+# Test 3: Single-end with compression
+statement ok
+COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) TO '__TEST_DIR__/output3.fa.gz' (FORMAT FASTA);
+
+query IIII
+SELECT sequence_index, read_id, sequence1, comment FROM read_fastx('__TEST_DIR__/output3.fa.gz') ORDER BY sequence_index;
+----
+1	seq1	ATGCATGCATGC	NULL
+2	seq2	GGCCGGCCGGCC	NULL
+
+# Test 4: Single-end with INCLUDE_COMMENT
+statement ok
+CREATE TABLE test_fasta_comment AS SELECT sequence_index, read_id, 'my comment' as comment, sequence1 FROM test_fasta_single WHERE sequence_index = 1;
+
+statement ok
+COPY (SELECT read_id, comment, sequence1 FROM test_fasta_comment) TO '__TEST_DIR__/output4.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
+
+query IIII
+SELECT sequence_index, read_id, sequence1, comment FROM read_fastx('__TEST_DIR__/output4.fa') ORDER BY sequence_index;
+----
+1	seq1	ATGCATGCATGC	my comment
+
+# Test 5: Paired-end interleaved (R1 and R2 in same file)
+# Create a paired-end table from FASTQ data (has quality scores but we won't use them)
+statement ok
+CREATE TABLE test_fasta_paired AS SELECT sequence_index, read_id, comment, sequence1, sequence2 FROM read_fastx('data/fastq/small_a_r1.fq', sequence2='data/fastq/small_a_r2.fq');
+
+statement ok
+COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired ORDER BY sequence_index) TO '__TEST_DIR__/output5.fa' (FORMAT FASTA, INTERLEAVE true);
+
+query III
+SELECT read_id, sequence1, comment FROM read_fastx('__TEST_DIR__/output5.fa') ORDER BY sequence_index;
+----
+pair_a1	AAAA	NULL
+pair_a1	TTTT	NULL
+
+# Test 6: Paired-end split (R1/R2)
+statement ok
+COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired ORDER BY sequence_index) TO '__TEST_DIR__/output6.{ORIENTATION}.fa' (FORMAT FASTA, INTERLEAVE false);
+
+query IIIII
+SELECT sequence_index, read_id, sequence1, sequence2, comment FROM read_fastx('__TEST_DIR__/output6.R1.fa', sequence2='__TEST_DIR__/output6.R2.fa') ORDER BY sequence_index;
+----
+1	pair_a1	AAAA	TTTT	NULL
+
+# Test 7: Paired-end split with compression
+statement ok
+COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired ORDER BY sequence_index) TO '__TEST_DIR__/output7.{ORIENTATION}.fa.gz' (FORMAT FASTA, INTERLEAVE false, COMPRESSION gzip);
+
+query IIIII
+SELECT sequence_index, read_id, sequence1, sequence2, comment FROM read_fastx('__TEST_DIR__/output7.R1.fa.gz', sequence2='__TEST_DIR__/output7.R2.fa.gz') ORDER BY sequence_index;
+----
+1	pair_a1	AAAA	TTTT	NULL
+
+# Test 8: Error - missing required column (read_id)
+statement error
+COPY (SELECT sequence1 FROM test_fasta_single) TO '__TEST_DIR__/error1.fa' (FORMAT FASTA);
+----
+COPY FORMAT FASTA requires 'read_id' column
+
+# Test 9: Error - missing required column (sequence1)
+statement error
+COPY (SELECT read_id FROM test_fasta_single) TO '__TEST_DIR__/error2.fa' (FORMAT FASTA);
+----
+COPY FORMAT FASTA requires 'sequence1' column
+
+# Test 10: Error - paired data without INTERLEAVE parameter
+statement error
+COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired) TO '__TEST_DIR__/error3.fa' (FORMAT FASTA);
+----
+INTERLEAVE parameter required for paired-end data
+
+# Test 11: Error - paired data with INTERLEAVE=false but no {ORIENTATION}
+statement error
+COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired) TO '__TEST_DIR__/error4.fa' (FORMAT FASTA, INTERLEAVE false);
+----
+{ORIENTATION} in file path
+
+# Test 12: Error - single-end data with {ORIENTATION}
+statement error
+COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single) TO '__TEST_DIR__/error5.{ORIENTATION}.fa' (FORMAT FASTA);
+----
+Single-end data cannot use {ORIENTATION}
+
+# Test 13: Error - ID_AS_SEQUENCE_INDEX without sequence_index column
+statement error
+COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single) TO '__TEST_DIR__/error6.fa' (FORMAT FASTA, ID_AS_SEQUENCE_INDEX true);
+----
+ID_AS_SEQUENCE_INDEX=true requires 'sequence_index' column
+
+# Test 14: Test with original comments preserved (INCLUDE_COMMENT=true)
+statement ok
+COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) TO '__TEST_DIR__/output_with_comments.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
+
+query IIII
+SELECT sequence_index, read_id, sequence1, comment FROM read_fastx('__TEST_DIR__/output_with_comments.fa') ORDER BY sequence_index;
+----
+1	seq1	ATGCATGCATGC	test sequence 1
+2	seq2	GGCCGGCCGGCC	NULL
+
+# Test 15: Round-trip with NULL comments
+statement ok
+COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) TO '__TEST_DIR__/output_nulls.fa' (FORMAT FASTA);
+
+query I
+SELECT COUNT(*) FROM read_fastx('__TEST_DIR__/output_nulls.fa');
+----
+2
+
+query III
+SELECT read_id, sequence1, comment FROM read_fastx('__TEST_DIR__/output_nulls.fa') ORDER BY sequence_index;
+----
+seq1	ATGCATGCATGC	NULL
+seq2	GGCCGGCCGGCC	NULL
+
+# Cleanup
+statement ok
+DROP TABLE test_fasta_single;
+
+statement ok
+DROP TABLE test_fasta_comment;
+
+statement ok
+DROP TABLE test_fasta_paired;

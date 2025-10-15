@@ -20,18 +20,18 @@ SELECT * FROM read_fastx('missing_file1', sequence2='missing_file2');
 ----
 IO Error: File not found: missing_file1
 
-query IIIIII
+query IIIIIII
 SELECT * FROM read_fastx('data/fastq/foo.r1.fastq.gz', sequence2='data/fastq/foo.r2.fastq.gz')
 ----
-foo1	comment-1	ATGC	TGCAT	[40, 39, 38, 37]	[36, 35, 34, 33, 32]
-foo2	comment-2	ATGCT	TGCATC	[40, 39, 38, 37, 36]	[36, 35, 34, 33, 32, 31]
+1	foo1	comment-1	ATGC	TGCAT	[40, 39, 38, 37]	[36, 35, 34, 33, 32]
+2	foo2	comment-2	ATGCT	TGCATC	[40, 39, 38, 37, 36]	[36, 35, 34, 33, 32, 31]
 
-query IIIIII
+query IIIIIII
 SELECT * FROM read_fastx('data/fastq/bar.r1.fastq.gz', sequence2='data/fastq/bar.r2.fastq.gz')
 ----
-bar1	NULL	AA	CCC	[40, 40]	[39, 39, 39]
-bar2	NULL	GG	GGG	[40, 40]	[39, 39, 39]
-bar3	NULL	TT	TTT	[40, 40]	[39, 39, 39]
+1	bar1	NULL	AA	CCC	[40, 40]	[39, 39, 39]
+2	bar2	NULL	GG	GGG	[40, 40]	[39, 39, 39]
+3	bar3	NULL	TT	TTT	[40, 40]	[39, 39, 39]
 
 # mismatched read IDs
 statement error
@@ -46,11 +46,11 @@ SELECT * FROM read_fastx('data/fastq/foo.r1.fastq.gz', sequence2='data/fastq/foo
 Invalid Error: Mismatched number of records: missing mate for foo2/1
 
 # single end
-query IIIIII
+query IIIIIII
 SELECT * FROM read_fastx('data/fastq/foo.r1.fastq.gz')
 ----
-foo1	comment-1	ATGC	NULL	[40, 39, 38, 37]	NULL
-foo2	comment-2	ATGCT	NULL	[40, 39, 38, 37, 36]	NULL
+1	foo1	comment-1	ATGC	NULL	[40, 39, 38, 37]	NULL
+2	foo2	comment-2	ATGCT	NULL	[40, 39, 38, 37, 36]	NULL
 
 # interleaved
 # alternative phred offset
@@ -60,45 +60,45 @@ foo2	comment-2	ATGCT	NULL	[40, 39, 38, 37, 36]	NULL
 # ===== NEW TESTS FOR EXPANDED FUNCTIONALITY =====
 
 # Test FASTA format (no quality scores - should be NULL)
-query IIIIII
+query IIIIIII
 SELECT * FROM read_fastx('data/fastq/test.fa')
 ----
-seq1	test sequence 1	ATGCATGCATGC	NULL	NULL	NULL
-seq2	NULL	GGCCGGCCGGCC	NULL	NULL	NULL
+1	seq1	test sequence 1	ATGCATGCATGC	NULL	NULL	NULL
+2	seq2	NULL	GGCCGGCCGGCC	NULL	NULL	NULL
 
 # Test VARCHAR[] single-end (multiple files concatenated)
-query IIIIII
+query IIIIIII
 SELECT * FROM read_fastx(['data/fastq/small_a.fq', 'data/fastq/small_b.fq'])
 ----
-read_a1	NULL	AAAA	NULL	[40, 40, 40, 40]	NULL
-read_a2	NULL	TTTT	NULL	[39, 39, 39, 39]	NULL
-read_b1	NULL	GGGG	NULL	[38, 38, 38, 38]	NULL
-read_b2	NULL	CCCC	NULL	[37, 37, 37, 37]	NULL
+1	read_a1	NULL	AAAA	NULL	[40, 40, 40, 40]	NULL
+2	read_a2	NULL	TTTT	NULL	[39, 39, 39, 39]	NULL
+3	read_b1	NULL	GGGG	NULL	[38, 38, 38, 38]	NULL
+4	read_b2	NULL	CCCC	NULL	[37, 37, 37, 37]	NULL
 
 # Test VARCHAR[] paired-end
-query IIIIII
+query IIIIIII
 SELECT * FROM read_fastx(['data/fastq/small_a_r1.fq', 'data/fastq/small_b_r1.fq'], 
                           sequence2=['data/fastq/small_a_r2.fq', 'data/fastq/small_b_r2.fq'])
 ----
-pair_a1	NULL	AAAA	TTTT	[40, 40, 40, 40]	[39, 39, 39, 39]
-pair_b1	NULL	GGGG	CCCC	[38, 38, 38, 38]	[37, 37, 37, 37]
+1	pair_a1	NULL	AAAA	TTTT	[40, 40, 40, 40]	[39, 39, 39, 39]
+2	pair_b1	NULL	GGGG	CCCC	[38, 38, 38, 38]	[37, 37, 37, 37]
 
 # Test include_filepath parameter
-query IIIIIII
+query IIIIIIII
 SELECT * FROM read_fastx(['data/fastq/small_a.fq', 'data/fastq/small_b.fq'], include_filepath=true)
 ----
-read_a1	NULL	AAAA	NULL	[40, 40, 40, 40]	NULL	data/fastq/small_a.fq
-read_a2	NULL	TTTT	NULL	[39, 39, 39, 39]	NULL	data/fastq/small_a.fq
-read_b1	NULL	GGGG	NULL	[38, 38, 38, 38]	NULL	data/fastq/small_b.fq
-read_b2	NULL	CCCC	NULL	[37, 37, 37, 37]	NULL	data/fastq/small_b.fq
+1	read_a1	NULL	AAAA	NULL	[40, 40, 40, 40]	NULL	data/fastq/small_a.fq
+2	read_a2	NULL	TTTT	NULL	[39, 39, 39, 39]	NULL	data/fastq/small_a.fq
+3	read_b1	NULL	GGGG	NULL	[38, 38, 38, 38]	NULL	data/fastq/small_b.fq
+4	read_b2	NULL	CCCC	NULL	[37, 37, 37, 37]	NULL	data/fastq/small_b.fq
 
 # Test include_filepath with paired-end
-query IIIIIII
+query IIIIIIII
 SELECT * FROM read_fastx('data/fastq/small_a_r1.fq', 
                           sequence2='data/fastq/small_a_r2.fq',
                           include_filepath=true)
 ----
-pair_a1	NULL	AAAA	TTTT	[40, 40, 40, 40]	[39, 39, 39, 39]	data/fastq/small_a_r1.fq
+1	pair_a1	NULL	AAAA	TTTT	[40, 40, 40, 40]	[39, 39, 39, 39]	data/fastq/small_a_r1.fq
 
 # Test COUNT with VARCHAR[] to verify all records read
 query I

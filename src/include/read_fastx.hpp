@@ -16,18 +16,20 @@ public:
 		std::optional<std::vector<std::string>> sequence2_paths;
 		bool include_filepath;
 		bool uses_stdin;
+		uint8_t qual_offset;
 
 		std::vector<std::string> names;                 // field names
 		std::vector<LogicalType> types;                 // field types
 		std::vector<miint::SequenceRecordField> fields; // enum for convenience
 
 		Data(const std::vector<std::string> &r1_paths, const std::optional<std::vector<std::string>> &r2_paths,
-		     bool include_fp, bool stdin_used)
+		     bool include_fp, bool stdin_used, uint8_t offset)
 		    : sequence1_paths(r1_paths), sequence2_paths(r2_paths), include_filepath(include_fp),
-		      uses_stdin(stdin_used),
-		      names({"read_id", "comment", "sequence1", "sequence2", "qual1", "qual2"}),
-		      types({LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-		             LogicalType::LIST(LogicalType::UTINYINT), LogicalType::LIST(LogicalType::UTINYINT)}),
+		      uses_stdin(stdin_used), qual_offset(offset),
+		      names({"sequence_index", "read_id", "comment", "sequence1", "sequence2", "qual1", "qual2"}),
+		      types({LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+		             LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT),
+		             LogicalType::LIST(LogicalType::UTINYINT)}),
 		      fields({miint::SequenceRecordField::READ_ID, miint::SequenceRecordField::COMMENT,
 		              miint::SequenceRecordField::SEQUENCE1, miint::SequenceRecordField::SEQUENCE2,
 		              miint::SequenceRecordField::QUAL1, miint::SequenceRecordField::QUAL2}) {
@@ -47,6 +49,7 @@ public:
 		bool finished;
 		std::string current_filepath;
 		bool uses_stdin;
+		uint64_t sequence_index_counter;
 
 		// stdin cannot be read in parallel (no seeking/rewinding).
 		// This forces sequential execution, which may be slower than
@@ -59,7 +62,7 @@ public:
 
 		GlobalState(const std::vector<std::string> &sequence1_paths,
 		            const std::optional<std::vector<std::string>> &sequence2_paths, bool stdin_used)
-		    : current_file_idx(0), finished(false), uses_stdin(stdin_used) {
+		    : current_file_idx(0), finished(false), uses_stdin(stdin_used), sequence_index_counter(1) {
 			sequence1_filepaths = sequence1_paths;
 			if (sequence2_paths.has_value()) {
 				sequence2_filepaths = sequence2_paths.value();
@@ -88,14 +91,14 @@ public:
 	static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 
 	static void SetResultVector(Vector &result_vector, const miint::SequenceRecordField &field,
-	                            const std::vector<miint::SequenceRecord> &records);
+	                            const std::vector<miint::SequenceRecord> &records, uint8_t qual_offset);
 	static void SetResultVectorNull(Vector &result_vector);
 	static void SetResultVectorString(Vector &result_vector, const miint::SequenceRecordField &field,
 	                                  const std::vector<miint::SequenceRecord> &records);
 	static void SetResultVectorStringNullable(Vector &result_vector, const miint::SequenceRecordField &field,
 	                                          const std::vector<miint::SequenceRecord> &records);
 	static void SetResultVectorListUInt8(Vector &result_vector, const miint::SequenceRecordField &field,
-	                                     const std::vector<miint::SequenceRecord> &records);
+	                                     const std::vector<miint::SequenceRecord> &records, uint8_t qual_offset);
 	static void SetResultVectorFilepath(Vector &result_vector, const std::string &filepath, size_t num_records);
 
 	static TableFunction GetFunction();

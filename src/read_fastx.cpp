@@ -98,7 +98,17 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 		include_filepath = fp_param->second.GetValue<bool>();
 	}
 
-	auto data = duckdb::make_uniq<Data>(sequence1_paths, sequence2_paths, include_filepath, uses_stdin);
+	uint8_t qual_offset = 33;
+	auto offset_param = input.named_parameters.find("qual_offset");
+	if (offset_param != input.named_parameters.end() && !offset_param->second.IsNull()) {
+		int64_t offset_value = offset_param->second.GetValue<int64_t>();
+		if (offset_value != 33 && offset_value != 64) {
+			throw InvalidInputException("qual_offset must be 33 or 64");
+		}
+		qual_offset = static_cast<uint8_t>(offset_value);
+	}
+
+	auto data = duckdb::make_uniq<Data>(sequence1_paths, sequence2_paths, include_filepath, uses_stdin, qual_offset);
 	for (auto &name : data->names) {
 		names.emplace_back(name);
 	}
@@ -117,7 +127,7 @@ unique_ptr<GlobalTableFunctionState> ReadFastxTableFunction::InitGlobal(ClientCo
 }
 
 void ReadFastxTableFunction::SetResultVector(Vector &result_vector, const miint::SequenceRecordField &field,
-                                             const std::vector<miint::SequenceRecord> &records) {
+                                             const std::vector<miint::SequenceRecord> &records, uint8_t qual_offset) {
 	auto is_paired = records[0].is_paired;
 	if (!is_paired && (field == miint::SequenceRecordField::SEQUENCE2 || field == miint::SequenceRecordField::QUAL2)) {
 		SetResultVectorNull(result_vector);
@@ -127,7 +137,7 @@ void ReadFastxTableFunction::SetResultVector(Vector &result_vector, const miint:
 	} else if (field == miint::SequenceRecordField::COMMENT) {
 		SetResultVectorStringNullable(result_vector, field, records);
 	} else if (field == miint::SequenceRecordField::QUAL1 || field == miint::SequenceRecordField::QUAL2) {
-		SetResultVectorListUInt8(result_vector, field, records);
+		SetResultVectorListUInt8(result_vector, field, records, qual_offset);
 	} else {
 		throw NotImplementedException("field not supported");
 	}
@@ -164,7 +174,7 @@ void ReadFastxTableFunction::SetResultVectorStringNullable(Vector &result_vector
 }
 
 void ReadFastxTableFunction::SetResultVectorListUInt8(Vector &result_vector, const miint::SequenceRecordField &field,
-                                                      const std::vector<miint::SequenceRecord> &records) {
+                                                      const std::vector<miint::SequenceRecord> &records, uint8_t qual_offset) {
 	// Check if this is FASTA (quality scores are empty)
 	bool is_fasta = records[0].qual1.as_string().empty();
 	bool is_qual2 = (field == miint::SequenceRecordField::QUAL2);
@@ -191,7 +201,7 @@ void ReadFastxTableFunction::SetResultVectorListUInt8(Vector &result_vector, con
 	idx_t value_offset = 0;
 	idx_t row_offset = 0;
 	for (idx_t row_offset = 0; row_offset < output_count; row_offset++) {
-		const auto qual_data = records[row_offset].GetQual(field).as_vec();
+		const auto qual_data = records[row_offset].GetQual(field).as_vec(qual_offset);
 		list_entries[row_offset].offset = value_offset;
 		list_entries[row_offset].length = qual_data.size();
 
@@ -221,6 +231,7 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 
 	std::vector<miint::SequenceRecord> records;
 	std::string current_filepath;
+	uint64_t start_sequence_index;
 
 	{
 		lock_guard<mutex> read_lock(global_state.lock);
@@ -236,6 +247,9 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 
 			if (records.size() > 0) {
 				current_filepath = global_state.sequence1_filepaths[global_state.current_file_idx];
+				// Capture starting sequence_index for this chunk and increment counter
+				start_sequence_index = global_state.sequence_index_counter;
+				global_state.sequence_index_counter += records.size();
 				break;
 			}
 
@@ -254,15 +268,22 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 		}
 	}
 
-	// Set result vectors (outside lock)
+	// Set sequence_index column (first column, index 0)
+	auto &sequence_index_vector = output.data[0];
+	auto sequence_index_data = FlatVector::GetData<int64_t>(sequence_index_vector);
+	for (idx_t j = 0; j < records.size(); j++) {
+		sequence_index_data[j] = static_cast<int64_t>(start_sequence_index + j);
+	}
+
+	// Set result vectors for sequence fields (now starting at index 1)
 	for (idx_t i = 0; i < bind_data.fields.size(); i++) {
-		auto &result_vector = output.data[i];
+		auto &result_vector = output.data[i + 1];
 		auto &field = bind_data.fields[i];
-		SetResultVector(result_vector, field, records);
+		SetResultVector(result_vector, field, records, bind_data.qual_offset);
 	}
 
 	if (bind_data.include_filepath) {
-		auto &result_vector = output.data[bind_data.fields.size()];
+		auto &result_vector = output.data[1 + bind_data.fields.size()];
 		SetResultVectorFilepath(result_vector, current_filepath, records.size());
 	}
 
@@ -275,6 +296,7 @@ TableFunction ReadFastxTableFunction::GetFunction() {
 	auto tf = TableFunction("read_fastx", {LogicalType::ANY}, Execute, Bind, InitGlobal);
 	tf.named_parameters["sequence2"] = LogicalType::ANY;
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
+	tf.named_parameters["qual_offset"] = LogicalType::BIGINT;
 	return tf;
 }
 }; // namespace duckdb

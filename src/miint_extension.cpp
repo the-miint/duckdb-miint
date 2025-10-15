@@ -3,6 +3,9 @@
 #include "miint_extension.hpp"
 #include <alignment_flag_functions.hpp>
 #include <alignment_functions.hpp>
+#include <copy_fasta.hpp>
+#include <copy_fastq.hpp>
+#include <copy_sam.hpp>
 #include <kseq++/seqio.hpp>
 #include <read_fastx.hpp>
 #include <read_sam.hpp>
@@ -23,6 +26,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	AlignmentFlagFunctions::Register(loader);
 	AlignmentSeqIdentityFunction::Register(loader);
+	
+	// Register COPY functions
+	loader.RegisterFunction(CopyFastqFunction::GetFunction());
+	loader.RegisterFunction(CopyFastaFunction::GetFunction());
+	loader.RegisterFunction(CopySAMFunction::GetFunction());
 
 	// QualFilterScalarFunction find_low_quality_window;
 	// loader.RegisterFunction(find_low_quality_window.GetFunction());

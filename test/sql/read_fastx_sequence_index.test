@@ -1,0 +1,40 @@
+# name: test/sql/read_fastx_sequence_index.test
+# description: Test sequence_index column in read_fastx
+# group: [miint]
+
+require miint
+
+# Test sequence_index starts at 1
+query III
+SELECT sequence_index, read_id, sequence1 FROM read_fastx('data/fastq/small_a.fq') ORDER BY sequence_index;
+----
+1	read_a1	AAAA
+2	read_a2	TTTT
+
+# Test sequence_index is unique per record
+query I
+SELECT COUNT(DISTINCT sequence_index) FROM read_fastx('data/fastq/small_a.fq');
+----
+2
+
+# Test sequence_index works with paired-end data
+query III
+SELECT sequence_index, read_id, sequence2 FROM read_fastx('data/fastq/small_a_r1.fq', sequence2='data/fastq/small_a_r2.fq');
+----
+1	pair_a1	TTTT
+
+# Test sequence_index continues across multiple files
+query II
+SELECT sequence_index, read_id FROM read_fastx(['data/fastq/small_a.fq', 'data/fastq/small_b.fq']) ORDER BY sequence_index;
+----
+1	read_a1
+2	read_a2
+3	read_b1
+4	read_b2
+
+# Test sequence_index with include_filepath
+query III
+SELECT sequence_index, read_id, filepath FROM read_fastx('data/fastq/small_a.fq', include_filepath=true) ORDER BY sequence_index;
+----
+1	read_a1	data/fastq/small_a.fq
+2	read_a2	data/fastq/small_a.fq

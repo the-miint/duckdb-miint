@@ -1,0 +1,51 @@
+# name: test/sql/read_fastx_qual_offset.test
+# description: Test qual_offset parameter in read_fastx
+# group: [miint]
+
+require miint
+
+# Test default qual_offset (33) - Phred+33 encoding
+query II
+SELECT read_id, qual1 FROM read_fastx('data/fastq/small_a.fq') ORDER BY read_id;
+----
+read_a1	[40, 40, 40, 40]
+read_a2	[39, 39, 39, 39]
+
+# Test explicit qual_offset=33
+query II
+SELECT read_id, qual1 FROM read_fastx('data/fastq/small_a.fq', qual_offset=33) ORDER BY read_id;
+----
+read_a1	[40, 40, 40, 40]
+read_a2	[39, 39, 39, 39]
+
+# Test qual_offset=64 - Phred+64 encoding (older Illumina)
+query II
+SELECT read_id, qual1 FROM read_fastx('data/fastq/small_a.fq', qual_offset=64) ORDER BY read_id;
+----
+read_a1	[9, 9, 9, 9]
+read_a2	[8, 8, 8, 8]
+
+# Test qual_offset with paired-end data
+query III
+SELECT read_id, qual1, qual2 FROM read_fastx('data/fastq/small_a_r1.fq', sequence2='data/fastq/small_a_r2.fq', qual_offset=33);
+----
+pair_a1	[40, 40, 40, 40]	[39, 39, 39, 39]
+
+# Test invalid qual_offset (not 33 or 64)
+statement error
+SELECT * FROM read_fastx('data/fastq/small_a.fq', qual_offset=100);
+----
+qual_offset must be 33 or 64
+
+# Test invalid qual_offset (0)
+statement error
+SELECT * FROM read_fastx('data/fastq/small_a.fq', qual_offset=0);
+----
+qual_offset must be 33 or 64
+
+# Test qual_offset does not affect FASTA files (no quality scores)
+query II
+SELECT read_id, qual1 FROM read_fastx('data/fastq/test.fa', qual_offset=64) ORDER BY read_id LIMIT 2;
+----
+seq1	NULL
+seq2	NULL
