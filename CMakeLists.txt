@@ -63,8 +63,33 @@ else()
 endif()
 
 # Set CFLAGS and LDFLAGS to find ZLIB from vcpkg
+if(ZLIB_LIBRARY_RELEASE)
+    get_filename_component(ZLIB_LIBRARY_DIR "${ZLIB_LIBRARY_RELEASE}" DIRECTORY)
+    message(STATUS "Using ZLIB from ZLIB_LIBRARY_RELEASE: ${ZLIB_LIBRARY_DIR}")
+elseif(ZLIB_LIBRARY)
+    get_filename_component(ZLIB_LIBRARY_DIR "${ZLIB_LIBRARY}" DIRECTORY)
+    message(STATUS "Using ZLIB from ZLIB_LIBRARY: ${ZLIB_LIBRARY_DIR}")
+else()
+    # Extract first real library path (skip keywords like "optimized"/"debug")
+    set(ZLIB_LIBRARY_DIR "")
+    foreach(lib ${ZLIB_LIBRARIES})
+        if(EXISTS "${lib}" AND NOT ZLIB_LIBRARY_DIR)
+            get_filename_component(ZLIB_LIBRARY_DIR "${lib}" DIRECTORY)
+            message(STATUS "Using ZLIB from ZLIB_LIBRARIES: ${ZLIB_LIBRARY_DIR}")
+        endif()
+    endforeach()
+endif()
+
+if(NOT ZLIB_LIBRARY_DIR)
+    message(WARNING "Could not determine ZLIB library directory. ZLIB_LIBRARY_RELEASE=${ZLIB_LIBRARY_RELEASE}, ZLIB_LIBRARY=${ZLIB_LIBRARY}, ZLIB_LIBRARIES=${ZLIB_LIBRARIES}")
+endif()
+
 set(HTSLIB_CFLAGS "CFLAGS=-fPIC -I${ZLIB_INCLUDE_DIRS}")
-set(HTSLIB_LDFLAGS "LDFLAGS=-L${ZLIB_LIBRARY_RELEASE_DIRS}")
+if(ZLIB_LIBRARY_DIR)
+    set(HTSLIB_LDFLAGS "LDFLAGS=-L${ZLIB_LIBRARY_DIR}")
+else()
+    set(HTSLIB_LDFLAGS "")
+endif()
 
 ExternalProject_Add(
     htslib_build
