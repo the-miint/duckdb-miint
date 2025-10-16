@@ -13,7 +13,7 @@ std::unordered_map<std::string, uint64_t> ReadReferenceTable(ClientContext &cont
 
 	// Get the table catalog entry
 	auto catalog_entry = Catalog::GetEntry<TableCatalogEntry>(context, INVALID_CATALOG, INVALID_SCHEMA, table_name,
-	                                                           OnEntryNotFound::RETURN_NULL);
+	                                                          OnEntryNotFound::RETURN_NULL);
 	if (!catalog_entry) {
 		throw InvalidInputException("Table '%s' does not exist", table_name);
 	}

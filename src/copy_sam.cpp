@@ -206,9 +206,9 @@ static unique_ptr<FunctionData> SAMCopyBind(ClientContext &context, CopyFunction
 			result->reference_lengths_table = table_value.ToString();
 
 			// Validate table exists
-			auto catalog_entry = Catalog::GetEntry<TableCatalogEntry>(
-			    context, INVALID_CATALOG, INVALID_SCHEMA, result->reference_lengths_table.value(),
-			    OnEntryNotFound::RETURN_NULL);
+			auto catalog_entry = Catalog::GetEntry<TableCatalogEntry>(context, INVALID_CATALOG, INVALID_SCHEMA,
+			                                                          result->reference_lengths_table.value(),
+			                                                          OnEntryNotFound::RETURN_NULL);
 			if (!catalog_entry) {
 				throw BinderException("Table '%s' does not exist", result->reference_lengths_table.value());
 			}

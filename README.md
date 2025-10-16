@@ -57,7 +57,7 @@ Read SAM/BAM alignment files.
 SELECT * FROM read_sam('alignments.sam');
 
 -- Read headerless SAM file (requires reference table)
-CREATE TABLE my_refs AS 
+CREATE TABLE my_refs AS
   SELECT 'chr1' AS name, 248956422 AS length
   UNION ALL SELECT 'chr2', 242193529;
 SELECT * FROM read_sam('headerless.sam', reference_lengths='my_refs');
@@ -83,6 +83,7 @@ Test individual SAM flag bits. Each function takes a `USMALLINT` (the flags colu
 - `alignment_is_read1(flags)` - Read is first in pair (0x40)
 - `alignment_is_read2(flags)` - Read is second in pair (0x80)
 - `alignment_is_secondary(flags)` - Secondary alignment (0x100)
+- `alignment_is_primary(flags)` - NOT alignment_is_secondary
 - `alignment_is_qc_failed(flags)` - QC failure (0x200)
 - `alignment_is_duplicate(flags)` - PCR/optical duplicate (0x400)
 - `alignment_is_supplementary(flags)` - Supplementary alignment (0x800)
@@ -174,7 +175,7 @@ Aggregate function that merges overlapping genomic intervals into a minimal set 
 **Examples:**
 ```sql
 -- Calculate coverage regions per reference from SAM alignments
-SELECT reference, 
+SELECT reference,
        compress_intervals(position, stop_position) AS coverage
 FROM read_sam('alignments.sam')
 GROUP BY reference;
@@ -335,7 +336,7 @@ Write query results to SAM format files. Requires all mandatory SAM columns from
 **Examples:**
 ```sql
 -- Create reference table (recommended for reuse, especially with large reference sets)
-CREATE TABLE ref_table AS 
+CREATE TABLE ref_table AS
   SELECT 'genome1' AS name, 248956422 AS length
   UNION ALL SELECT 'genome2', 242193529;
 

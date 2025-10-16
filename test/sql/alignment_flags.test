@@ -96,6 +96,16 @@ SELECT alignment_is_secondary(0::USMALLINT);
 false
 
 query I
+SELECT alignment_is_primary(256::USMALLINT);
+----
+false
+
+query I
+SELECT alignment_is_primary(0::USMALLINT);
+----
+true
+
+query I
 SELECT alignment_is_qc_failed(512::USMALLINT);
 ----
 true

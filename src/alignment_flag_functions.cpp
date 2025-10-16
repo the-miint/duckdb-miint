@@ -58,6 +58,12 @@ static void AlignmentIsSecondaryFunction(DataChunk &args, ExpressionState &state
 	                                       [&](uint16_t flags) { return (flags & 0x100) != 0; });
 }
 
+static void AlignmentIsPrimaryFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &flags_vector = args.data[0];
+	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(),
+	                                       [&](uint16_t flags) { return (flags & 0x100) == 0; });
+}
+
 static void AlignmentIsQcFailedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &flags_vector = args.data[0];
 	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(),
@@ -132,6 +138,11 @@ void AlignmentFlagFunctions::Register(ExtensionLoader &loader) {
 	ScalarFunction alignment_is_secondary("alignment_is_secondary", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
 	                                      AlignmentIsSecondaryFunction);
 	loader.RegisterFunction(alignment_is_secondary);
+
+	ScalarFunction alignment_is_primary("alignment_is_primary", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
+	                                    AlignmentIsPrimaryFunction);
+	loader.RegisterFunction(alignment_is_primary);
+
 	ScalarFunction is_secondary("is_secondary", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
 	                            AlignmentIsSecondaryFunction);
 	loader.RegisterFunction(is_secondary);
