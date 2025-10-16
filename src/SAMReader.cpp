@@ -74,18 +74,16 @@ SAMReader::SAMReader(const std::string &filename, const std::unordered_map<std::
 	}
 
 	// Create synthetic header
-	hdr.reset(sam_hdr_init());
-	if (!hdr) {
-		throw std::runtime_error("Failed to initialize SAM header");
+	// Build header text as string for efficiency with large reference sets
+	std::string header_text;
+	for (const auto &[name, length] : references) {
+		header_text += "@SQ\tSN:" + name + "\tLN:" + std::to_string(length) + "\n";
 	}
 
-	// Add reference sequences
-	for (const auto &[name, length] : references) {
-		std::string length_str = std::to_string(length);
-		int ret = sam_hdr_add_line(hdr.get(), "SQ", "SN", name.c_str(), "LN", length_str.c_str(), NULL);
-		if (ret != 0) {
-			throw std::runtime_error("Failed to add reference to header: " + name);
-		}
+	// Parse header text once (much faster than repeated sam_hdr_add_line calls)
+	hdr.reset(sam_hdr_parse(header_text.length(), header_text.c_str()));
+	if (!hdr) {
+		throw std::runtime_error("Failed to parse SAM header");
 	}
 
 	// Initialize alignment record
