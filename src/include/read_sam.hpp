@@ -15,16 +15,16 @@ class ReadSAMTableFunction {
 public:
 	struct Data : public TableFunctionData {
 		std::vector<std::string> sam_paths;
-		std::optional<std::unordered_map<std::string, uint64_t>> reference_lengths;
+		std::optional<std::string> reference_lengths_table;
 		bool include_filepath;
 
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 		std::vector<miint::SAMRecordField> fields;
 
-		explicit Data(const std::vector<std::string> &paths,
-		              const std::optional<std::unordered_map<std::string, uint64_t>> &ref_lengths, bool include_fp)
-		    : sam_paths(paths), reference_lengths(ref_lengths), include_filepath(include_fp),
+		explicit Data(const std::vector<std::string> &paths, const std::optional<std::string> &ref_table,
+		              bool include_fp)
+		    : sam_paths(paths), reference_lengths_table(ref_table), include_filepath(include_fp),
 		      names({"read_id", "flags",          "reference",     "position",        "stop_position", "mapq",
 		             "cigar",   "mate_reference", "mate_position", "template_length", "tag_as",        "tag_xs",
 		             "tag_ys",  "tag_xn",         "tag_xm",        "tag_xo",          "tag_xg",        "tag_nm",
@@ -80,7 +80,7 @@ public:
 		}
 
 		GlobalState(const std::vector<std::string> &paths,
-		            const std::optional<std::unordered_map<std::string, uint64_t>> &ref_lengths)
+		            std::optional<std::unordered_map<std::string, uint64_t>> ref_lengths)
 		    : current_file_idx(0), finished(false) {
 			filepaths = paths;
 			for (const auto &path : paths) {

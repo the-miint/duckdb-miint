@@ -103,8 +103,11 @@ SELECT * FROM read_sam('data/sam/foo_has_header.sam')
 CROSS JOIN generate_series(1, 250) t(i);
 
 statement ok
+CREATE TABLE ref_table AS SELECT 'G1234' AS name, 20 AS length UNION ALL SELECT 'G000144735', 90;
+
+statement ok
 COPY large_sam_test TO '__TEST_DIR__/large_sam.sam.gz' 
-(FORMAT SAM, REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
+(FORMAT SAM, REFERENCE_LENGTHS 'ref_table');
 
 query I
 SELECT COUNT(*) FROM read_sam('__TEST_DIR__/large_sam.sam.gz');

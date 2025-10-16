@@ -1,5 +1,8 @@
 #include "copy_sam.hpp"
 #include "copy_format_common.hpp"
+#include "reference_table_reader.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
@@ -19,7 +22,7 @@ struct SAMCopyBindData : public FunctionData {
 	idx_t flush_size = 1024 * 1024;
 	string file_path;
 	vector<string> names;
-	std::unordered_map<string, int64_t> reference_lengths;
+	std::optional<string> reference_lengths_table;
 
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<SAMCopyBindData>();
@@ -28,14 +31,14 @@ struct SAMCopyBindData : public FunctionData {
 		result->flush_size = flush_size;
 		result->file_path = file_path;
 		result->names = names;
-		result->reference_lengths = reference_lengths;
+		result->reference_lengths_table = reference_lengths_table;
 		return std::move(result);
 	}
 
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<SAMCopyBindData>();
 		return include_header == other.include_header && compression == other.compression &&
-		       file_path == other.file_path && reference_lengths == other.reference_lengths;
+		       file_path == other.file_path && reference_lengths_table == other.reference_lengths_table;
 	}
 };
 
@@ -195,19 +198,19 @@ static unique_ptr<FunctionData> SAMCopyBind(ClientContext &context, CopyFunction
 		} else if (StringUtil::CIEquals(option.first, "compression")) {
 			result->compression = DetectCompressionType(result->file_path, option.second[0]);
 		} else if (StringUtil::CIEquals(option.first, "reference_lengths")) {
-			const auto &map_value = option.second[0];
-			if (map_value.type().id() != LogicalTypeId::MAP) {
-				throw BinderException("reference_lengths must be a MAP type (e.g., MAP{'ref1': 100, 'ref2': 200})");
+			const auto &table_value = option.second[0];
+			if (table_value.type().id() != LogicalTypeId::VARCHAR) {
+				throw BinderException("reference_lengths must be a VARCHAR (table name)");
 			}
-			const auto &entries = MapValue::GetChildren(map_value);
-			for (const auto &entry : entries) {
-				const auto &kv = StructValue::GetChildren(entry);
-				const auto key = StringValue::Get(kv[0]);
-				const auto value = kv[1].GetValue<int64_t>();
-				if (value < 0) {
-					throw BinderException("reference_lengths values must be non-negative");
-				}
-				result->reference_lengths.emplace(key, value);
+
+			result->reference_lengths_table = table_value.ToString();
+
+			// Validate table exists
+			auto catalog_entry = Catalog::GetEntry<TableCatalogEntry>(
+			    context, INVALID_CATALOG, INVALID_SCHEMA, result->reference_lengths_table.value(),
+			    OnEntryNotFound::RETURN_NULL);
+			if (!catalog_entry) {
+				throw BinderException("Table '%s' does not exist", result->reference_lengths_table.value());
 			}
 		} else {
 			throw BinderException("Unknown option for COPY FORMAT SAM: %s", option.first);
@@ -215,9 +218,9 @@ static unique_ptr<FunctionData> SAMCopyBind(ClientContext &context, CopyFunction
 	}
 
 	// Validate reference_lengths requirement
-	if (result->include_header && result->reference_lengths.empty()) {
+	if (result->include_header && !result->reference_lengths_table.has_value()) {
 		throw BinderException("COPY FORMAT SAM with INCLUDE_HEADER=true requires REFERENCE_LENGTHS parameter "
-		                      "(e.g., REFERENCE_LENGTHS=MAP{'chr1': 248956422, 'chr2': 242193529})");
+		                      "(e.g., REFERENCE_LENGTHS='ref_table')");
 	}
 
 	// Auto-detect compression from file extension if not specified
@@ -244,6 +247,7 @@ struct SAMCopyGlobalState : public GlobalFunctionData {
 	mutex lock;
 	unique_ptr<CopyFileHandle> file;
 	bool header_written = false;
+	std::unordered_map<string, uint64_t> reference_lengths_map;
 };
 
 static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &context, FunctionData &bind_data,
@@ -253,6 +257,11 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 
 	auto gstate = make_uniq<SAMCopyGlobalState>();
 	gstate->file = make_uniq<CopyFileHandle>(fs, file_path, fdata.compression);
+
+	// Read reference table if provided
+	if (fdata.reference_lengths_table.has_value()) {
+		gstate->reference_lengths_map = ReadReferenceTable(context, fdata.reference_lengths_table.value());
+	}
 
 	return std::move(gstate);
 }
@@ -509,7 +518,7 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 		// Write header if needed (only first flush)
 		if (!gstate.header_written && fdata.include_header) {
 			stringstream header;
-			for (const auto &ref : fdata.reference_lengths) {
+			for (const auto &ref : gstate.reference_lengths_map) {
 				header << "@SQ\tSN:" << ref.first << "\tLN:" << ref.second << "\n";
 			}
 			gstate.file->WriteString(header.str());
@@ -541,7 +550,7 @@ static void SAMCopyCombine(ExecutionContext &context, FunctionData &bind_data, G
 	// Write header if needed (only first combine)
 	if (!gstate.header_written && fdata.include_header) {
 		stringstream header;
-		for (const auto &ref : fdata.reference_lengths) {
+		for (const auto &ref : gstate.reference_lengths_map) {
 			header << "@SQ\tSN:" << ref.first << "\tLN:" << ref.second << "\n";
 		}
 		gstate.file->WriteString(header.str());
@@ -567,7 +576,7 @@ static void SAMCopyFinalize(ClientContext &context, FunctionData &bind_data, Glo
 	// Write header if we haven't written anything yet (empty file with header)
 	if (!gstate.header_written && fdata.include_header) {
 		stringstream header;
-		for (const auto &ref : fdata.reference_lengths) {
+		for (const auto &ref : gstate.reference_lengths_map) {
 			header << "@SQ\tSN:" << ref.first << "\tLN:" << ref.second << "\n";
 		}
 		gstate.file->WriteString(header.str());

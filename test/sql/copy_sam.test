@@ -9,7 +9,10 @@ statement ok
 CREATE TABLE sam_test AS SELECT * FROM read_sam('data/sam/foo_has_header.sam');
 
 statement ok
-COPY sam_test TO '__TEST_DIR__/basic.sam' (FORMAT SAM, REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
+CREATE TABLE ref_table AS SELECT 'G1234' AS name, 20 AS length UNION ALL SELECT 'G000144735', 90;
+
+statement ok
+COPY sam_test TO '__TEST_DIR__/basic.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_table');
 
 query I
 SELECT COUNT(*) FROM read_sam('__TEST_DIR__/basic.sam');
@@ -28,15 +31,15 @@ foo-3	147	G000144735	76146	1
 statement ok
 COPY sam_test TO '__TEST_DIR__/no_header.sam' (FORMAT SAM, INCLUDE_HEADER false);
 
-# When reading back headerless files, we need to provide reference_lengths
+# When reading back headerless files, we need to provide reference_lengths (using table)
 query I
-SELECT COUNT(*) FROM read_sam('__TEST_DIR__/no_header.sam', reference_lengths = MAP{'G1234': 20, 'G000144735': 90});
+SELECT COUNT(*) FROM read_sam('__TEST_DIR__/no_header.sam', reference_lengths='ref_table');
 ----
 4
 
 # Test 3: SAM output with header (INCLUDE_HEADER=true, explicit)
 statement ok
-COPY sam_test TO '__TEST_DIR__/with_header.sam' (FORMAT SAM, INCLUDE_HEADER true, REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
+COPY sam_test TO '__TEST_DIR__/with_header.sam' (FORMAT SAM, INCLUDE_HEADER true, REFERENCE_LENGTHS 'ref_table');
 
 query IIIII
 SELECT read_id, flags, reference, position, mapq FROM read_sam('__TEST_DIR__/with_header.sam') ORDER BY read_id, position;
@@ -51,7 +54,10 @@ statement ok
 CREATE TABLE sam_tags_test AS SELECT * FROM read_sam('data/sam/foo_with_tags.sam');
 
 statement ok
-COPY sam_tags_test TO '__TEST_DIR__/with_tags.sam' (FORMAT SAM, REFERENCE_LENGTHS MAP{'G1234': 1000, 'G000144735': 100000});
+CREATE TABLE ref_table_tags AS SELECT 'G1234' AS name, 1000 AS length UNION ALL SELECT 'G000144735', 100000;
+
+statement ok
+COPY sam_tags_test TO '__TEST_DIR__/with_tags.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_table_tags');
 
 query IIIIII
 SELECT read_id, flags, reference, position, mapq, tag_as FROM read_sam('__TEST_DIR__/with_tags.sam') ORDER BY read_id;
@@ -64,7 +70,10 @@ statement ok
 CREATE TABLE empty_sam AS SELECT * FROM sam_test WHERE 1=0;
 
 statement ok
-COPY empty_sam TO '__TEST_DIR__/empty.sam' (FORMAT SAM, INCLUDE_HEADER true, REFERENCE_LENGTHS MAP{'G1234': 20});
+CREATE TABLE ref_table_single AS SELECT 'G1234' AS name, 20 AS length;
+
+statement ok
+COPY empty_sam TO '__TEST_DIR__/empty.sam' (FORMAT SAM, INCLUDE_HEADER true, REFERENCE_LENGTHS 'ref_table_single');
 
 # Test 6: SAM without header for empty table
 statement ok
@@ -75,7 +84,10 @@ statement ok
 CREATE TABLE large_pos_test AS SELECT * FROM read_sam('data/sam/foo_large_positions.sam');
 
 statement ok
-COPY large_pos_test TO '__TEST_DIR__/large_pos.sam' (FORMAT SAM, REFERENCE_LENGTHS MAP{'chrLarge': 3000000000});
+CREATE TABLE ref_table_large AS SELECT 'chrLarge' AS name, 3000000000 AS length;
+
+statement ok
+COPY large_pos_test TO '__TEST_DIR__/large_pos.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_table_large');
 
 query III
 SELECT read_id, position, stop_position FROM read_sam('__TEST_DIR__/large_pos.sam') ORDER BY read_id;
@@ -100,7 +112,7 @@ foo-3	=	76020	-276
 
 # Test 10: Test GZIP compression
 statement ok
-COPY sam_test TO '__TEST_DIR__/compressed.sam.gz' (FORMAT SAM, COMPRESSION gzip, REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
+COPY sam_test TO '__TEST_DIR__/compressed.sam.gz' (FORMAT SAM, COMPRESSION gzip, REFERENCE_LENGTHS 'ref_table');
 
 query I
 SELECT COUNT(*) FROM read_sam('__TEST_DIR__/compressed.sam.gz');
@@ -120,7 +132,7 @@ statement ok
 COPY sam_test TO '__TEST_DIR__/compressed_no_header.sam.gz' (FORMAT SAM, COMPRESSION gzip, INCLUDE_HEADER false);
 
 query I
-SELECT COUNT(*) FROM read_sam('__TEST_DIR__/compressed_no_header.sam.gz', reference_lengths = MAP{'G1234': 20, 'G000144735': 90});
+SELECT COUNT(*) FROM read_sam('__TEST_DIR__/compressed_no_header.sam.gz', reference_lengths='ref_table');
 ----
 4
 
@@ -138,7 +150,7 @@ statement ok
 CREATE TABLE no_tags_test AS SELECT * FROM read_sam('data/sam/foo_no_tags.sam');
 
 statement ok
-COPY no_tags_test TO '__TEST_DIR__/no_tags.sam' (FORMAT SAM, REFERENCE_LENGTHS MAP{'G1234': 1000});
+COPY no_tags_test TO '__TEST_DIR__/no_tags.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_table_single');
 
 query I
 SELECT COUNT(*) FROM read_sam('__TEST_DIR__/no_tags.sam');
@@ -156,10 +168,13 @@ statement ok
 CREATE TABLE unmapped AS SELECT 'unmapped-1' as read_id, 4::UINT16 as flags, '*' as reference, 0::INT64 as position, 0::INT64 as stop_position, 0::UINT8 as mapq, '*' as cigar, '*' as mate_reference, 0::INT64 as mate_position, 0::INT64 as template_length, NULL::INT64 as tag_as, NULL::INT64 as tag_xs, NULL::INT64 as tag_ys, NULL::INT64 as tag_xn, NULL::INT64 as tag_xm, NULL::INT64 as tag_xo, NULL::INT64 as tag_xg, NULL::INT64 as tag_nm, NULL::VARCHAR as tag_yt, NULL::VARCHAR as tag_md, NULL::VARCHAR as tag_sa;
 
 statement ok
+CREATE TABLE ref_table_dummy AS SELECT 'dummy' AS name, 1000 AS length;
+
+statement ok
 COPY unmapped TO '__TEST_DIR__/unmapped.sam' (FORMAT SAM, INCLUDE_HEADER false);
 
 query IIII
-SELECT read_id, flags, reference, position FROM read_sam('__TEST_DIR__/unmapped.sam', reference_lengths = MAP{'dummy': 1000});
+SELECT read_id, flags, reference, position FROM read_sam('__TEST_DIR__/unmapped.sam', reference_lengths='ref_table_dummy');
 ----
 unmapped-1	4	*	0
 
@@ -180,13 +195,13 @@ SELECT COUNT(DISTINCT reference) FROM read_sam('__TEST_DIR__/basic.sam');
 
 # Test 18: Test error on missing required columns
 statement error
-COPY (SELECT read_id FROM sam_test) TO '__TEST_DIR__/error.sam' (FORMAT SAM, REFERENCE_LENGTHS MAP{'G1234': 20});
+COPY (SELECT read_id FROM sam_test) TO '__TEST_DIR__/error.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_table_single');
 ----
 COPY FORMAT SAM requires 'flags' column
 
 # Test 19: Test error on wrong column types
 statement error
-COPY (SELECT read_id, 'wrong'::VARCHAR as flags, reference, position, mapq, cigar, mate_reference, mate_position, template_length FROM sam_test) TO '__TEST_DIR__/error.sam' (FORMAT SAM, REFERENCE_LENGTHS MAP{'G1234': 20});
+COPY (SELECT read_id, 'wrong'::VARCHAR as flags, reference, position, mapq, cigar, mate_reference, mate_position, template_length FROM sam_test) TO '__TEST_DIR__/error.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_table_single');
 ----
 Column 'flags' must be USMALLINT
 
@@ -202,9 +217,12 @@ statement ok
 CREATE TABLE with_seq AS SELECT 'read-seq' as read_id, 0::UINT16 as flags, 'ref1' as reference, 1::INT64 as position, 4::INT64 as stop_position, 30::UINT8 as mapq, '4M' as cigar, '*' as mate_reference, 0::INT64 as mate_position, 0::INT64 as template_length, NULL::INT64 as tag_as, NULL::INT64 as tag_xs, NULL::INT64 as tag_ys, NULL::INT64 as tag_xn, NULL::INT64 as tag_xm, NULL::INT64 as tag_xo, NULL::INT64 as tag_xg, NULL::INT64 as tag_nm, NULL::VARCHAR as tag_yt, NULL::VARCHAR as tag_md, NULL::VARCHAR as tag_sa;
 
 statement ok
+CREATE TABLE ref_table_seq AS SELECT 'ref1' AS name, 100 AS length;
+
+statement ok
 COPY with_seq TO '__TEST_DIR__/with_seq.sam' (FORMAT SAM, INCLUDE_HEADER false);
 
 query IIIII
-SELECT read_id, flags, reference, position, mapq FROM read_sam('__TEST_DIR__/with_seq.sam', reference_lengths = MAP{'ref1': 100});
+SELECT read_id, flags, reference, position, mapq FROM read_sam('__TEST_DIR__/with_seq.sam', reference_lengths='ref_table_seq');
 ----
 read-seq	0	ref1	1	30

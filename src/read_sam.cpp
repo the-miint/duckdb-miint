@@ -1,6 +1,9 @@
 #include "read_sam.hpp"
+#include "reference_table_reader.hpp"
 #include "SAMReader.hpp"
 #include "SAMRecord.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
 
@@ -31,28 +34,23 @@ unique_ptr<FunctionData> ReadSAMTableFunction::Bind(ClientContext &context, Tabl
 		}
 	}
 
-	// Parse reference_lengths parameter (optional MAP)
-	std::optional<std::unordered_map<std::string, uint64_t>> reference_lengths;
+	// Parse reference_lengths parameter (optional VARCHAR - table name)
+	std::optional<std::string> reference_lengths_table;
 	auto ref_param = input.named_parameters.find("reference_lengths");
 	if (ref_param != input.named_parameters.end() && !ref_param->second.IsNull()) {
-		const auto &map_value = ref_param->second;
+		const auto &table_value = ref_param->second;
 
-		if (map_value.type().id() != LogicalTypeId::MAP) {
-			throw InvalidInputException("reference_lengths must be a MAP type (e.g., MAP{'ref1': 100, 'ref2': 200})");
+		if (table_value.type().id() != LogicalTypeId::VARCHAR) {
+			throw InvalidInputException("reference_lengths must be a VARCHAR (table name)");
 		}
 
-		reference_lengths = std::unordered_map<std::string, uint64_t>();
+		reference_lengths_table = table_value.ToString();
 
-		// MAP is a LIST of STRUCT<key, value> entries
-		const auto &entries = MapValue::GetChildren(map_value);
-		for (const auto &entry : entries) {
-			const auto &kv = StructValue::GetChildren(entry);
-			const auto key = StringValue::Get(kv[0]);
-			const auto value = kv[1].GetValue<int64_t>();
-			if (value < 0) {
-				throw InvalidInputException("reference_lengths values must be non-negative");
-			}
-			reference_lengths->emplace(key, static_cast<uint64_t>(value));
+		// Validate table exists
+		auto catalog_entry = Catalog::GetEntry<TableCatalogEntry>(
+		    context, INVALID_CATALOG, INVALID_SCHEMA, reference_lengths_table.value(), OnEntryNotFound::RETURN_NULL);
+		if (!catalog_entry) {
+			throw InvalidInputException("Table '%s' does not exist", reference_lengths_table.value());
 		}
 	}
 
@@ -80,12 +78,12 @@ unique_ptr<FunctionData> ReadSAMTableFunction::Bind(ClientContext &context, Tabl
 			first_file_has_header = has_header;
 
 			// Validate first file: if no header, require reference_lengths
-			if (!has_header && !reference_lengths.has_value()) {
+			if (!has_header && !reference_lengths_table.has_value()) {
 				throw IOException("File lacks a header, and no reference information provided");
 			}
 
 			// Validate first file: if has header, reject reference_lengths
-			if (has_header && reference_lengths.has_value()) {
+			if (has_header && reference_lengths_table.has_value()) {
 				throw IOException("SAM file has header, but reference_lengths parameter was provided");
 			}
 		} else {
@@ -105,7 +103,7 @@ unique_ptr<FunctionData> ReadSAMTableFunction::Bind(ClientContext &context, Tabl
 	// If headerless, validate that all references in SAM are provided
 	// This is deferred to InitGlobal since we need to read records to see which references are used
 
-	auto data = duckdb::make_uniq<Data>(sam_paths, reference_lengths, include_filepath);
+	auto data = duckdb::make_uniq<Data>(sam_paths, reference_lengths_table, include_filepath);
 	for (auto &name : data->names) {
 		names.emplace_back(name);
 	}
@@ -118,7 +116,14 @@ unique_ptr<FunctionData> ReadSAMTableFunction::Bind(ClientContext &context, Tabl
 unique_ptr<GlobalTableFunctionState> ReadSAMTableFunction::InitGlobal(ClientContext &context,
                                                                       TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
-	auto gstate = duckdb::make_uniq<GlobalState>(data.sam_paths, data.reference_lengths);
+
+	// Read reference table if provided
+	std::optional<std::unordered_map<std::string, uint64_t>> reference_lengths;
+	if (data.reference_lengths_table.has_value()) {
+		reference_lengths = ReadReferenceTable(context, data.reference_lengths_table.value());
+	}
+
+	auto gstate = duckdb::make_uniq<GlobalState>(data.sam_paths, reference_lengths);
 
 	return std::move(gstate);
 }

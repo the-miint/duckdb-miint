@@ -37,14 +37,34 @@ To run the extension code, simply start the shell with `./build/release/duckdb`.
 
 ## Functions
 
-### `read_sam(filename)`
+### `read_sam(filename, [reference_lengths='table_name'], [include_filepath=false])`
 Read SAM/BAM alignment files.
+
+**Parameters:**
+- `filename` (VARCHAR or VARCHAR[]): Path to SAM/BAM file(s)
+- `reference_lengths` (VARCHAR, optional): Table name containing reference sequences for headerless SAM files. Table must have at least 2 columns: first column = reference name (VARCHAR), second column = reference length (INTEGER/BIGINT). Column names don't matter.
+- `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
 
 **Output schema includes:**
 - `position` (BIGINT): 1-based start position
 - `stop_position` (BIGINT): 1-based stop position (computed from CIGAR using `bam_endpos`)
 - `cigar` (VARCHAR): CIGAR string
 - Plus other standard SAM fields and optional tags
+
+**Examples:**
+```sql
+-- Read SAM file with header
+SELECT * FROM read_sam('alignments.sam');
+
+-- Read headerless SAM file (requires reference table)
+CREATE TABLE my_refs AS 
+  SELECT 'chr1' AS name, 248956422 AS length
+  UNION ALL SELECT 'chr2', 242193529;
+SELECT * FROM read_sam('headerless.sam', reference_lengths='my_refs');
+
+-- Read multiple files with filepath tracking
+SELECT * FROM read_sam(['file1.sam', 'file2.sam'], include_filepath=true);
+```
 
 ### `read_fastx(filename)`
 Read FASTA/FASTQ sequence files.
@@ -309,26 +329,19 @@ Write query results to SAM format files. Requires all mandatory SAM columns from
 
 **Parameters:**
 - `INCLUDE_HEADER` (default: true): Include @SQ header lines with reference sequences
-- `REFERENCE_LENGTHS` (required if INCLUDE_HEADER=true): MAP of reference names to their lengths (e.g., `MAP{'genome1': 248956422, 'genome2': 242193529}`)
+- `REFERENCE_LENGTHS` (VARCHAR, required if INCLUDE_HEADER=true): Table name containing reference sequences. Table must have at least 2 columns: first column = reference name (VARCHAR), second column = reference length (INTEGER/BIGINT). Column names don't matter.
 - `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension)
 
 **Examples:**
 ```sql
--- Basic SAM output with header (requires reference lengths)
-COPY (SELECT * FROM read_sam('input.sam'))
-TO 'output.sam' (FORMAT SAM, REFERENCE_LENGTHS MAP{'genome1': 248956422, 'genome2': 242193529});
+-- Create reference table (recommended for reuse, especially with large reference sets)
+CREATE TABLE ref_table AS 
+  SELECT 'genome1' AS name, 248956422 AS length
+  UNION ALL SELECT 'genome2', 242193529;
 
--- Using a variable for reference lengths (recommended for reuse)
-SET VARIABLE my_refs = MAP{'genome1': 248956422, 'genome2': 242193529};
+-- Basic SAM output with header
 COPY (SELECT * FROM read_sam('input.sam'))
-TO 'output.sam' (FORMAT SAM, REFERENCE_LENGTHS getvariable('my_refs'));
-
--- Constructing reference lengths from a query/table
-CREATE TABLE refs AS SELECT 'genome1' as name, 248956422 as length 
-                     UNION ALL SELECT 'genome2', 242193529;
-SET VARIABLE ref_map = (SELECT MAP(LIST(name), LIST(length)) FROM refs);
-COPY (SELECT * FROM read_sam('input.sam'))
-TO 'output.sam' (FORMAT SAM, REFERENCE_LENGTHS getvariable('ref_map'));
+TO 'output.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_table');
 
 -- Headerless SAM output (no reference lengths needed)
 COPY (SELECT * FROM read_sam('input.sam'))
@@ -336,7 +349,7 @@ TO 'output.sam' (FORMAT SAM, INCLUDE_HEADER false);
 
 -- Compressed SAM output with header
 COPY (SELECT * FROM read_sam('input.sam'))
-TO 'output.sam.gz' (FORMAT SAM, COMPRESSION gzip, REFERENCE_LENGTHS MAP{'genome1': 248956422});
+TO 'output.sam.gz' (FORMAT SAM, COMPRESSION gzip, REFERENCE_LENGTHS 'ref_table');
 
 -- Filter and write high-quality alignments (headerless)
 COPY (

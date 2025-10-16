@@ -104,7 +104,8 @@ set(EXTENSION_SOURCES
     src/copy_format_common.cpp
     src/copy_fastq.cpp
     src/copy_fasta.cpp
-    src/copy_sam.cpp)
+    src/copy_sam.cpp
+    src/reference_table_reader.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

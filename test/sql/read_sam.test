@@ -36,10 +36,20 @@ SELECT * FROM read_sam('data/sam/foo_no_header.sam');
 ----
 IO Error: File lacks a header, and no reference information provided
 
+# Create reference tables for headerless tests
+statement ok
+CREATE TABLE ref_incomplete AS SELECT 'G1234' AS name, 20 AS length;
+
+statement ok
+CREATE TABLE ref_complete AS SELECT 'G1234' AS name, 20 AS length UNION ALL SELECT 'G000144735', 90;
+
+statement ok
+CREATE TABLE ref_extra AS SELECT 'G1234' AS name, 20 AS length UNION ALL SELECT 'G000144735', 90 UNION ALL SELECT 'G999999', 100;
+
 # Confirm that incomplete reference information results in unmapped records
 # (records with missing references appear as unmapped with reference "*")
 query ITI
-SELECT read_id, reference, flags FROM read_sam('data/sam/foo_no_header.sam', reference_lengths=MAP(['G1234'], [20]));
+SELECT read_id, reference, flags FROM read_sam('data/sam/foo_no_header.sam', reference_lengths='ref_incomplete');
 ----
 foo-1	G1234	0
 foo-2	G1234	0
@@ -48,7 +58,7 @@ foo-3	*	151
 
 # Confirm error passing reference information and SAM with header (conflict)
 statement error
-SELECT * FROM read_sam('data/sam/foo_has_header.sam', reference_lengths=MAP(['G1234'], [20]));
+SELECT * FROM read_sam('data/sam/foo_has_header.sam', reference_lengths='ref_incomplete');
 ----
 IO Error: SAM file has header, but reference_lengths parameter was provided
 
@@ -60,7 +70,7 @@ IO Error: Inconsistent headers across files: 'data/sam/foo_has_header.sam' has h
 
 # Confirm error with mixed headers in multi-file (first doesn't, second does)
 statement error
-SELECT * FROM read_sam(['data/sam/foo_no_header.sam', 'data/sam/foo_has_header.sam'], reference_lengths=MAP(['G1234', 'G000144735'], [20, 90]));
+SELECT * FROM read_sam(['data/sam/foo_no_header.sam', 'data/sam/foo_has_header.sam'], reference_lengths='ref_complete');
 ----
 IO Error: Inconsistent headers across files: 'data/sam/foo_no_header.sam' lacks header, 'data/sam/foo_has_header.sam' has header
 
@@ -87,7 +97,7 @@ SELECT COUNT(*) FROM read_sam('data/sam/foo_has_header.sam');
 
 # Single file headerless with reference_lengths
 query IIIIIIITTIIIIIIIIITTT
-SELECT * FROM read_sam('data/sam/foo_no_header.sam', reference_lengths=MAP(['G1234', 'G000144735'], [20, 90]));
+SELECT * FROM read_sam('data/sam/foo_no_header.sam', reference_lengths='ref_complete');
 ----
 foo-1	0	G1234	2	12	60	10M	*	0	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
 foo-2	0	G1234	2	12	60	10M	*	0	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
@@ -96,7 +106,7 @@ foo-3	147	G000144735	76146	76296	1	150M	=	76020	-276	NULL	NULL	NULL	NULL	NULL	NU
 
 # Single file headerless with extra references in reference_lengths (should be OK)
 query I
-SELECT COUNT(*) FROM read_sam('data/sam/foo_no_header.sam', reference_lengths=MAP(['G1234', 'G000144735', 'G999999'], [20, 90, 100]));
+SELECT COUNT(*) FROM read_sam('data/sam/foo_no_header.sam', reference_lengths='ref_extra');
 ----
 4
 
@@ -121,7 +131,7 @@ bar-3	G1234
 
 # Multi-file headerless with reference_lengths
 query I
-SELECT COUNT(*) FROM read_sam(['data/sam/foo_no_header.sam', 'data/sam/foo_no_header_2.sam'], reference_lengths=MAP(['G1234', 'G000144735'], [20, 90]));
+SELECT COUNT(*) FROM read_sam(['data/sam/foo_no_header.sam', 'data/sam/foo_no_header_2.sam'], reference_lengths='ref_complete');
 ----
 8
 
