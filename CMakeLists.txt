@@ -62,10 +62,14 @@ else()
     set(HTSLIB_PKG_CONFIG_PATH "")
 endif()
 
+# Set CFLAGS and LDFLAGS to find ZLIB from vcpkg
+set(HTSLIB_CFLAGS "CFLAGS=-fPIC -I${ZLIB_INCLUDE_DIRS}")
+set(HTSLIB_LDFLAGS "LDFLAGS=-L${ZLIB_LIBRARY_RELEASE_DIRS}")
+
 ExternalProject_Add(
     htslib_build
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1
-    CONFIGURE_COMMAND env CFLAGS=-fPIC ${HTSLIB_PKG_CONFIG_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1/configure
+    CONFIGURE_COMMAND env ${HTSLIB_CFLAGS} ${HTSLIB_LDFLAGS} ${HTSLIB_PKG_CONFIG_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1/configure
         --prefix=${CMAKE_CURRENT_BINARY_DIR}/htslib
         --disable-libcurl
         --disable-bz2
