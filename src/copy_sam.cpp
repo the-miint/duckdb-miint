@@ -53,7 +53,7 @@ struct SAMColumnIndices {
 	idx_t mate_reference_idx = DConstants::INVALID_INDEX;
 	idx_t mate_position_idx = DConstants::INVALID_INDEX;
 	idx_t template_length_idx = DConstants::INVALID_INDEX;
-	
+
 	// Tag columns
 	idx_t tag_as_idx = DConstants::INVALID_INDEX;
 	idx_t tag_xs_idx = DConstants::INVALID_INDEX;
@@ -213,7 +213,7 @@ static unique_ptr<FunctionData> SAMCopyBind(ClientContext &context, CopyFunction
 			throw BinderException("Unknown option for COPY FORMAT SAM: %s", option.first);
 		}
 	}
-	
+
 	// Validate reference_lengths requirement
 	if (result->include_header && result->reference_lengths.empty()) {
 		throw BinderException("COPY FORMAT SAM with INCLUDE_HEADER=true requires REFERENCE_LENGTHS parameter "
@@ -247,7 +247,7 @@ struct SAMCopyGlobalState : public GlobalFunctionData {
 };
 
 static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &context, FunctionData &bind_data,
-                                                               const string &file_path) {
+                                                              const string &file_path) {
 	auto &fdata = bind_data.Cast<SAMCopyBindData>();
 	auto &fs = FileSystem::GetFileSystem(context);
 
@@ -267,9 +267,9 @@ struct SAMCopyLocalState : public LocalFunctionData {
 static unique_ptr<LocalFunctionData> SAMCopyInitializeLocal(ExecutionContext &context, FunctionData &bind_data) {
 	auto &fdata = bind_data.Cast<SAMCopyBindData>();
 	auto lstate = make_uniq<SAMCopyLocalState>();
-	
+
 	lstate->writer_state = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
-	
+
 	return std::move(lstate);
 }
 
@@ -369,47 +369,35 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 	auto mate_position_ptr = UnifiedVectorFormat::GetData<int64_t>(mate_position_data);
 	auto template_length_ptr = UnifiedVectorFormat::GetData<int64_t>(template_length_data);
 
-	auto stop_position_ptr =
-	    indices.stop_position_idx != DConstants::INVALID_INDEX
-	        ? UnifiedVectorFormat::GetData<int64_t>(stop_position_data)
-	        : nullptr;
-	auto tag_as_ptr = indices.tag_as_idx != DConstants::INVALID_INDEX
-	                      ? UnifiedVectorFormat::GetData<int64_t>(tag_as_data)
-	                      : nullptr;
-	auto tag_xs_ptr = indices.tag_xs_idx != DConstants::INVALID_INDEX
-	                      ? UnifiedVectorFormat::GetData<int64_t>(tag_xs_data)
-	                      : nullptr;
-	auto tag_ys_ptr = indices.tag_ys_idx != DConstants::INVALID_INDEX
-	                      ? UnifiedVectorFormat::GetData<int64_t>(tag_ys_data)
-	                      : nullptr;
-	auto tag_xn_ptr = indices.tag_xn_idx != DConstants::INVALID_INDEX
-	                      ? UnifiedVectorFormat::GetData<int64_t>(tag_xn_data)
-	                      : nullptr;
-	auto tag_xm_ptr = indices.tag_xm_idx != DConstants::INVALID_INDEX
-	                      ? UnifiedVectorFormat::GetData<int64_t>(tag_xm_data)
-	                      : nullptr;
-	auto tag_xo_ptr = indices.tag_xo_idx != DConstants::INVALID_INDEX
-	                      ? UnifiedVectorFormat::GetData<int64_t>(tag_xo_data)
-	                      : nullptr;
-	auto tag_xg_ptr = indices.tag_xg_idx != DConstants::INVALID_INDEX
-	                      ? UnifiedVectorFormat::GetData<int64_t>(tag_xg_data)
-	                      : nullptr;
-	auto tag_nm_ptr = indices.tag_nm_idx != DConstants::INVALID_INDEX
-	                      ? UnifiedVectorFormat::GetData<int64_t>(tag_nm_data)
-	                      : nullptr;
-	auto tag_yt_ptr = indices.tag_yt_idx != DConstants::INVALID_INDEX
-	                      ? UnifiedVectorFormat::GetData<string_t>(tag_yt_data)
-	                      : nullptr;
-	auto tag_md_ptr = indices.tag_md_idx != DConstants::INVALID_INDEX
-	                      ? UnifiedVectorFormat::GetData<string_t>(tag_md_data)
-	                      : nullptr;
-	auto tag_sa_ptr = indices.tag_sa_idx != DConstants::INVALID_INDEX
-	                      ? UnifiedVectorFormat::GetData<string_t>(tag_sa_data)
-	                      : nullptr;
+	auto stop_position_ptr = indices.stop_position_idx != DConstants::INVALID_INDEX
+	                             ? UnifiedVectorFormat::GetData<int64_t>(stop_position_data)
+	                             : nullptr;
+	auto tag_as_ptr =
+	    indices.tag_as_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<int64_t>(tag_as_data) : nullptr;
+	auto tag_xs_ptr =
+	    indices.tag_xs_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<int64_t>(tag_xs_data) : nullptr;
+	auto tag_ys_ptr =
+	    indices.tag_ys_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<int64_t>(tag_ys_data) : nullptr;
+	auto tag_xn_ptr =
+	    indices.tag_xn_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<int64_t>(tag_xn_data) : nullptr;
+	auto tag_xm_ptr =
+	    indices.tag_xm_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<int64_t>(tag_xm_data) : nullptr;
+	auto tag_xo_ptr =
+	    indices.tag_xo_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<int64_t>(tag_xo_data) : nullptr;
+	auto tag_xg_ptr =
+	    indices.tag_xg_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<int64_t>(tag_xg_data) : nullptr;
+	auto tag_nm_ptr =
+	    indices.tag_nm_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<int64_t>(tag_nm_data) : nullptr;
+	auto tag_yt_ptr =
+	    indices.tag_yt_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<string_t>(tag_yt_data) : nullptr;
+	auto tag_md_ptr =
+	    indices.tag_md_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<string_t>(tag_md_data) : nullptr;
+	auto tag_sa_ptr =
+	    indices.tag_sa_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<string_t>(tag_sa_data) : nullptr;
 
 	// Get reference to local buffer
 	auto &stream = *lstate.writer_state->stream;
-	
+
 	// Build records in local buffer - NO LOCK
 	for (idx_t i = 0; i < input.size(); i++) {
 		auto read_id_idx = read_id_data.sel->get_index(i);
@@ -434,9 +422,9 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 
 		// Build SAM record: QNAME FLAG RNAME POS MAPQ CIGAR RNEXT PNEXT TLEN SEQ QUAL [TAGS]
 		stringstream record;
-		record << read_id << "\t" << flags << "\t" << reference << "\t" << position << "\t"
-		       << static_cast<int>(mapq) << "\t" << cigar << "\t" << mate_reference << "\t" << mate_position
-		       << "\t" << template_length << "\t*\t*";
+		record << read_id << "\t" << flags << "\t" << reference << "\t" << position << "\t" << static_cast<int>(mapq)
+		       << "\t" << cigar << "\t" << mate_reference << "\t" << mate_position << "\t" << template_length
+		       << "\t*\t*";
 		// Add optional tags
 		if (tag_as_ptr && indices.tag_as_idx != DConstants::INVALID_INDEX) {
 			auto tag_idx = tag_as_data.sel->get_index(i);
@@ -506,7 +494,7 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 		}
 
 		record << "\n";
-		
+
 		// Write record to local buffer
 		string record_str = record.str();
 		stream.WriteData(const_data_ptr_cast(record_str.c_str()), record_str.size());
@@ -517,7 +505,7 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 	if (lstate.writer_state->stream->GetPosition() >= lstate.writer_state->flush_size) {
 		// Acquire lock only for writing
 		lock_guard<mutex> glock(gstate.lock);
-		
+
 		// Write header if needed (only first flush)
 		if (!gstate.header_written && fdata.include_header) {
 			stringstream header;
@@ -529,7 +517,7 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 		} else if (!gstate.header_written && !fdata.include_header) {
 			gstate.header_written = true;
 		}
-		
+
 		// Flush buffer (already holding lock, so write directly)
 		if (lstate.writer_state->written_anything) {
 			gstate.file->Write(lstate.writer_state->stream->GetData(), lstate.writer_state->stream->GetPosition());
@@ -546,10 +534,10 @@ static void SAMCopyCombine(ExecutionContext &context, FunctionData &bind_data, G
 	auto &fdata = bind_data.Cast<SAMCopyBindData>();
 	auto &gstate = gstate_p.Cast<SAMCopyGlobalState>();
 	auto &lstate = lstate_p.Cast<SAMCopyLocalState>();
-	
+
 	// Acquire lock for header check and flush
 	lock_guard<mutex> glock(gstate.lock);
-	
+
 	// Write header if needed (only first combine)
 	if (!gstate.header_written && fdata.include_header) {
 		stringstream header;
@@ -561,7 +549,7 @@ static void SAMCopyCombine(ExecutionContext &context, FunctionData &bind_data, G
 	} else if (!gstate.header_written && !fdata.include_header) {
 		gstate.header_written = true;
 	}
-	
+
 	// Flush any remaining data in local buffer (already holding lock)
 	if (lstate.writer_state->written_anything) {
 		gstate.file->Write(lstate.writer_state->stream->GetData(), lstate.writer_state->stream->GetPosition());

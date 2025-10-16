@@ -28,7 +28,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	AlignmentFlagFunctions::Register(loader);
 	AlignmentSeqIdentityFunction::Register(loader);
 	CompressIntervalsFunction::Register(loader);
-	
+
 	// Register COPY functions
 	loader.RegisterFunction(CopyFastqFunction::GetFunction());
 	loader.RegisterFunction(CopyFastaFunction::GetFunction());

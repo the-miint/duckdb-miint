@@ -1,6 +1,6 @@
 # name: test/sql/read_fastx.test
 # description: test read_fastx table function
-# group: [miint]
+# group: [sql]
 
 statement ok
 PRAGMA enable_verification;

@@ -28,7 +28,9 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 
 	// Detect stdin usage
 	bool uses_stdin = false;
-	auto is_stdin = [](const std::string &path) { return path == "-" || path == "/dev/stdin"; };
+	auto is_stdin = [](const std::string &path) {
+		return path == "-" || path == "/dev/stdin";
+	};
 
 	if (sequence1_paths.size() == 1 && is_stdin(sequence1_paths[0])) {
 		uses_stdin = true;
@@ -40,7 +42,8 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 		// Check if stdin is in an array (not allowed)
 		for (const auto &path : sequence1_paths) {
 			if (is_stdin(path)) {
-				throw InvalidInputException("stdin ('-' or '/dev/stdin') must be a single file path, not part of an array");
+				throw InvalidInputException(
+				    "stdin ('-' or '/dev/stdin') must be a single file path, not part of an array");
 			}
 		}
 	}
@@ -174,7 +177,8 @@ void ReadFastxTableFunction::SetResultVectorStringNullable(Vector &result_vector
 }
 
 void ReadFastxTableFunction::SetResultVectorListUInt8(Vector &result_vector, const miint::SequenceRecordField &field,
-                                                      const std::vector<miint::SequenceRecord> &records, uint8_t qual_offset) {
+                                                      const std::vector<miint::SequenceRecord> &records,
+                                                      uint8_t qual_offset) {
 	// Check if this is FASTA (quality scores are empty)
 	bool is_fasta = records[0].qual1.as_string().empty();
 	bool is_qual2 = (field == miint::SequenceRecordField::QUAL2);

@@ -6,97 +6,85 @@ namespace duckdb {
 
 static void AlignmentIsPairedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &flags_vector = args.data[0];
-	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(), [&](uint16_t flags) {
-		return (flags & 0x1) != 0;
-	});
+	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(),
+	                                       [&](uint16_t flags) { return (flags & 0x1) != 0; });
 }
 
 static void AlignmentIsProperPairFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &flags_vector = args.data[0];
-	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(), [&](uint16_t flags) {
-		return (flags & 0x2) != 0;
-	});
+	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(),
+	                                       [&](uint16_t flags) { return (flags & 0x2) != 0; });
 }
 
 static void AlignmentIsUnmappedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &flags_vector = args.data[0];
-	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(), [&](uint16_t flags) {
-		return (flags & 0x4) != 0;
-	});
+	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(),
+	                                       [&](uint16_t flags) { return (flags & 0x4) != 0; });
 }
 
 static void AlignmentIsMateUnmappedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &flags_vector = args.data[0];
-	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(), [&](uint16_t flags) {
-		return (flags & 0x8) != 0;
-	});
+	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(),
+	                                       [&](uint16_t flags) { return (flags & 0x8) != 0; });
 }
 
 static void AlignmentIsReverseFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &flags_vector = args.data[0];
-	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(), [&](uint16_t flags) {
-		return (flags & 0x10) != 0;
-	});
+	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(),
+	                                       [&](uint16_t flags) { return (flags & 0x10) != 0; });
 }
 
 static void AlignmentIsMateReverseFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &flags_vector = args.data[0];
-	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(), [&](uint16_t flags) {
-		return (flags & 0x20) != 0;
-	});
+	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(),
+	                                       [&](uint16_t flags) { return (flags & 0x20) != 0; });
 }
 
 static void AlignmentIsRead1Function(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &flags_vector = args.data[0];
-	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(), [&](uint16_t flags) {
-		return (flags & 0x40) != 0;
-	});
+	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(),
+	                                       [&](uint16_t flags) { return (flags & 0x40) != 0; });
 }
 
 static void AlignmentIsRead2Function(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &flags_vector = args.data[0];
-	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(), [&](uint16_t flags) {
-		return (flags & 0x80) != 0;
-	});
+	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(),
+	                                       [&](uint16_t flags) { return (flags & 0x80) != 0; });
 }
 
 static void AlignmentIsSecondaryFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &flags_vector = args.data[0];
-	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(), [&](uint16_t flags) {
-		return (flags & 0x100) != 0;
-	});
+	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(),
+	                                       [&](uint16_t flags) { return (flags & 0x100) != 0; });
 }
 
 static void AlignmentIsQcFailedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &flags_vector = args.data[0];
-	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(), [&](uint16_t flags) {
-		return (flags & 0x200) != 0;
-	});
+	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(),
+	                                       [&](uint16_t flags) { return (flags & 0x200) != 0; });
 }
 
 static void AlignmentIsDuplicateFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &flags_vector = args.data[0];
-	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(), [&](uint16_t flags) {
-		return (flags & 0x400) != 0;
-	});
+	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(),
+	                                       [&](uint16_t flags) { return (flags & 0x400) != 0; });
 }
 
 static void AlignmentIsSupplementaryFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &flags_vector = args.data[0];
-	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(), [&](uint16_t flags) {
-		return (flags & 0x800) != 0;
-	});
+	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(),
+	                                       [&](uint16_t flags) { return (flags & 0x800) != 0; });
 }
 
 void AlignmentFlagFunctions::Register(ExtensionLoader &loader) {
 	ScalarFunction alignment_is_paired("alignment_is_paired", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                                    AlignmentIsPairedFunction);
+	                                   AlignmentIsPairedFunction);
 	loader.RegisterFunction(alignment_is_paired);
 	ScalarFunction is_paired("is_paired", {LogicalType::USMALLINT}, LogicalType::BOOLEAN, AlignmentIsPairedFunction);
 	loader.RegisterFunction(is_paired);
 
-	ScalarFunction alignment_is_proper_pair("alignment_is_proper_pair", {LogicalType::USMALLINT},
-	                                        LogicalType::BOOLEAN, AlignmentIsProperPairFunction);
+	ScalarFunction alignment_is_proper_pair("alignment_is_proper_pair", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
+	                                        AlignmentIsProperPairFunction);
 	loader.RegisterFunction(alignment_is_proper_pair);
 	ScalarFunction is_proper_pair("is_proper_pair", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
 	                              AlignmentIsProperPairFunction);
@@ -119,8 +107,7 @@ void AlignmentFlagFunctions::Register(ExtensionLoader &loader) {
 	ScalarFunction alignment_is_reverse("alignment_is_reverse", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
 	                                    AlignmentIsReverseFunction);
 	loader.RegisterFunction(alignment_is_reverse);
-	ScalarFunction is_reverse("is_reverse", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                          AlignmentIsReverseFunction);
+	ScalarFunction is_reverse("is_reverse", {LogicalType::USMALLINT}, LogicalType::BOOLEAN, AlignmentIsReverseFunction);
 	loader.RegisterFunction(is_reverse);
 
 	ScalarFunction alignment_is_mate_reverse("alignment_is_mate_reverse", {LogicalType::USMALLINT},
@@ -152,8 +139,7 @@ void AlignmentFlagFunctions::Register(ExtensionLoader &loader) {
 	ScalarFunction alignment_is_qc_failed("alignment_is_qc_failed", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
 	                                      AlignmentIsQcFailedFunction);
 	loader.RegisterFunction(alignment_is_qc_failed);
-	ScalarFunction is_qcfail("is_qcfail", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                         AlignmentIsQcFailedFunction);
+	ScalarFunction is_qcfail("is_qcfail", {LogicalType::USMALLINT}, LogicalType::BOOLEAN, AlignmentIsQcFailedFunction);
 	loader.RegisterFunction(is_qcfail);
 
 	ScalarFunction alignment_is_duplicate("alignment_is_duplicate", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,

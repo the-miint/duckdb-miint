@@ -1,6 +1,6 @@
 # name: test/sql/read_fastx_sequence_index.test
 # description: Test sequence_index column in read_fastx
-# group: [miint]
+# group: [sql]
 
 require miint
 

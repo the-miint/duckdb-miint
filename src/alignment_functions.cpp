@@ -9,12 +9,12 @@ namespace miint {
 
 // CIGAR parsing result structure
 struct CigarStats {
-	int64_t matches = 0;          // M, =, X operations
-	int64_t match_ops = 0;        // = operations only
-	int64_t mismatch_ops = 0;     // X operations only
-	int64_t insertions = 0;       // I operations
-	int64_t deletions = 0;        // D operations
-	int64_t gap_opens = 0;        // Number of gap opening events
+	int64_t matches = 0;           // M, =, X operations
+	int64_t match_ops = 0;         // = operations only
+	int64_t mismatch_ops = 0;      // X operations only
+	int64_t insertions = 0;        // I operations
+	int64_t deletions = 0;         // D operations
+	int64_t gap_opens = 0;         // Number of gap opening events
 	int64_t alignment_columns = 0; // M + I + D operations
 };
 
@@ -184,7 +184,7 @@ static void AlignmentSeqIdentityScalarFunction(DataChunk &args, ExpressionState 
 
 		string_t cigar = cigar_ptr[cigar_idx];
 		string_t type = type_ptr[type_idx];
-		
+
 		// Handle optional parameters - treat NULL as missing (-1 for nm, empty for md)
 		int64_t nm = nm_data.validity.RowIsValid(nm_idx) ? nm_ptr[nm_idx] : -1;
 		string_t md = md_data.validity.RowIsValid(md_idx) ? md_ptr[md_idx] : string_t("", 0);

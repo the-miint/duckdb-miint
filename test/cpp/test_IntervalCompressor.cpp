@@ -253,15 +253,15 @@ TEST_CASE("IntervalCompressor - many non-overlapping intervals", "[interval_comp
 
 TEST_CASE("IntervalCompressor - automatic compression at threshold", "[interval_compressor]") {
 	IntervalCompressor compressor;
-	
+
 	for (int i = 0; i < 999999; i++) {
 		compressor.Add(i, i + 10);
 	}
-	
+
 	REQUIRE(compressor.Size() == 999999);
-	
+
 	compressor.Add(999999, 1000009);
-	
+
 	REQUIRE(compressor.Size() == 1);
 	REQUIRE(compressor.starts[0] == 0);
 	REQUIRE(compressor.stops[0] == 1000009);

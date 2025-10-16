@@ -15,11 +15,11 @@ class CopyFileHandle {
 public:
 	CopyFileHandle(FileSystem &fs, const string &path, FileCompressionType compression);
 	~CopyFileHandle();
-	
+
 	void Write(const_data_ptr_t data, idx_t size);
 	void WriteString(const string &data);
 	void Close();
-	
+
 private:
 	unique_ptr<BufferedFileWriter> file_writer;
 	FileCompressionType compression;
@@ -31,9 +31,9 @@ private:
 struct FormatWriterState {
 	FormatWriterState(ClientContext &context, idx_t flush_size);
 	~FormatWriterState();
-	
+
 	void Reset();
-	
+
 	idx_t flush_size;
 	unique_ptr<MemoryStream> stream;
 	bool written_anything = false;
@@ -62,7 +62,7 @@ struct ColumnIndices {
 	idx_t sequence2_idx = DConstants::INVALID_INDEX;
 	idx_t qual1_idx = DConstants::INVALID_INDEX;
 	idx_t qual2_idx = DConstants::INVALID_INDEX;
-	
+
 	void FindIndices(const vector<string> &names);
 };
 
@@ -74,18 +74,16 @@ struct CommonCopyParameters {
 	bool id_as_sequence_index = false;
 	bool include_comment = false;
 	FileCompressionType compression = FileCompressionType::UNCOMPRESSED;
-	idx_t flush_size = 1024 * 1024;  // 1MB default buffer size
-	
-	void ParseFromOptions(const case_insensitive_map_t<vector<Value>> &options,
-	                      const string &file_path);
+	idx_t flush_size = 1024 * 1024; // 1MB default buffer size
+
+	void ParseFromOptions(const case_insensitive_map_t<vector<Value>> &options, const string &file_path);
 };
 
 //===--------------------------------------------------------------------===//
 // Common Validation Functions
 //===--------------------------------------------------------------------===//
 void ValidateRequiredColumns(bool has_read_id, bool has_sequence1, const string &format_name);
-void ValidatePairedEndParameters(bool is_paired, bool has_interleave_param, bool interleave,
-                                 const string &file_path);
+void ValidatePairedEndParameters(bool is_paired, bool has_interleave_param, bool interleave, const string &file_path);
 void ValidateSequenceIndexParameter(bool id_as_sequence_index, bool has_sequence_index);
 
 } // namespace duckdb

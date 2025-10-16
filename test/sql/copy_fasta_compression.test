@@ -1,6 +1,6 @@
 # name: test/sql/copy_fasta_compression.test
 # description: Test COPY FORMAT FASTA with various compression options
-# group: [miint]
+# group: [sql]
 
 require miint
 

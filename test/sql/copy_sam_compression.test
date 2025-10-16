@@ -1,6 +1,6 @@
 # name: test/sql/copy_sam_compression.test
 # description: Test COPY FORMAT SAM with various compression options
-# group: [miint]
+# group: [sql]
 
 require miint
 

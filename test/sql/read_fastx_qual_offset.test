@@ -1,6 +1,6 @@
 # name: test/sql/read_fastx_qual_offset.test
 # description: Test qual_offset parameter in read_fastx
-# group: [miint]
+# group: [sql]
 
 require miint
 

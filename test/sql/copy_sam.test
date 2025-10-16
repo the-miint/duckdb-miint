@@ -1,6 +1,6 @@
 # name: test/sql/copy_sam.test
 # description: Test COPY FORMAT SAM for writing SAM format files
-# group: [miint]
+# group: [sql]
 
 require miint
 

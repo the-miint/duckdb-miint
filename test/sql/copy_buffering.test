@@ -1,6 +1,6 @@
 # name: test/sql/copy_buffering.test
 # description: Test COPY FORMAT with large datasets to verify buffering correctness
-# group: [miint]
+# group: [sql]
 
 require miint
 

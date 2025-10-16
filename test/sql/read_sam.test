@@ -1,6 +1,6 @@
 # name: test/sql/read_sam.test
 # description: test read_sam table function
-# group: [miint]
+# group: [sql]
 
 statement ok
 PRAGMA enable_verification;

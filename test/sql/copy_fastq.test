@@ -1,6 +1,6 @@
 # name: test/sql/copy_fastq.test
 # description: Test COPY FORMAT FASTQ
-# group: [miint]
+# group: [sql]
 
 require miint
 

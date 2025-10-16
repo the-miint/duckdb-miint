@@ -1,6 +1,6 @@
 # name: test/sql/alignment_flags.test
 # description: Test alignment flag bit testing functions
-# group: [miint]
+# group: [sql]
 
 require miint
 

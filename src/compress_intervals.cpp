@@ -62,7 +62,8 @@ struct CompressIntervalsOperation {
 		state.~STATE();
 	}
 
-	static void Operation(Vector inputs[], AggregateInputData &aggr_input_data, idx_t input_count, Vector &states, idx_t count) {
+	static void Operation(Vector inputs[], AggregateInputData &aggr_input_data, idx_t input_count, Vector &states,
+	                      idx_t count) {
 		auto &start_vector = inputs[0];
 		auto &stop_vector = inputs[1];
 
@@ -99,7 +100,8 @@ struct CompressIntervalsOperation {
 		}
 	}
 
-	static void Finalize(Vector &state_vector, AggregateInputData &aggr_input_data, Vector &result, idx_t count, idx_t offset) {
+	static void Finalize(Vector &state_vector, AggregateInputData &aggr_input_data, Vector &result, idx_t count,
+	                     idx_t offset) {
 		UnifiedVectorFormat state_data;
 		state_vector.ToUnifiedFormat(count, state_data);
 		auto states = UnifiedVectorFormat::GetData<IntervalState *>(state_data);
@@ -110,7 +112,7 @@ struct CompressIntervalsOperation {
 		for (idx_t i = 0; i < count; i++) {
 			auto state_idx = state_data.sel->get_index(i);
 			auto &state = *states[state_idx];
-			
+
 			state.Compress();
 
 			if (state.Empty()) {
@@ -150,10 +152,12 @@ void CompressIntervalsFunction::Register(ExtensionLoader &loader) {
 	auto fun = AggregateFunction(
 	    "compress_intervals", {LogicalType::BIGINT, LogicalType::BIGINT},
 	    LogicalType::LIST(LogicalType::STRUCT({{"start", LogicalType::BIGINT}, {"stop", LogicalType::BIGINT}})),
-	    AggregateFunction::StateSize<IntervalState>, AggregateFunction::StateInitialize<IntervalState, CompressIntervalsOperation>,
-	    CompressIntervalsOperation::Operation, AggregateFunction::StateCombine<IntervalState, CompressIntervalsOperation>,
-	    CompressIntervalsOperation::Finalize,
-	    nullptr, nullptr, AggregateFunction::StateDestroy<IntervalState, CompressIntervalsOperation>);
+	    AggregateFunction::StateSize<IntervalState>,
+	    AggregateFunction::StateInitialize<IntervalState, CompressIntervalsOperation>,
+	    CompressIntervalsOperation::Operation,
+	    AggregateFunction::StateCombine<IntervalState, CompressIntervalsOperation>,
+	    CompressIntervalsOperation::Finalize, nullptr, nullptr,
+	    AggregateFunction::StateDestroy<IntervalState, CompressIntervalsOperation>);
 
 	loader.RegisterFunction(fun);
 }

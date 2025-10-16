@@ -28,12 +28,12 @@ void FlushFormatBuffer(FormatWriterState &local_state, CopyFileHandle &file, mut
 	if (!local_state.written_anything) {
 		return;
 	}
-	
+
 	lock_guard<mutex> glock(lock);
-	
+
 	// Write accumulated buffer to file
 	file.Write(local_state.stream->GetData(), local_state.stream->GetPosition());
-	
+
 	// Reset local buffer
 	local_state.Reset();
 }
@@ -43,9 +43,9 @@ void FlushFormatBuffer(FormatWriterState &local_state, CopyFileHandle &file, mut
 //===--------------------------------------------------------------------===//
 CopyFileHandle::CopyFileHandle(FileSystem &fs, const string &path, FileCompressionType compression_p)
     : compression(compression_p) {
-	auto flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW | 
-	             FileLockType::WRITE_LOCK | compression;
-	
+	auto flags =
+	    FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW | FileLockType::WRITE_LOCK | compression;
+
 	// BufferedFileWriter handles both file opening and buffering
 	file_writer = make_uniq<BufferedFileWriter>(fs, path, flags);
 }
@@ -91,18 +91,19 @@ FileCompressionType DetectCompressionType(const string &file_path, const Value &
 			throw InvalidInputException("compression must be 'gzip', 'gz', 'zstd', 'zst', or 'none'");
 		}
 	}
-	
+
 	// Auto-detect from extension
 	if (file_path.size() >= 3 && file_path.substr(file_path.size() - 3) == ".gz") {
 		return FileCompressionType::GZIP;
 	}
 	if (file_path.size() >= 4 && file_path.substr(file_path.size() - 4) == ".zst") {
 		// TODO: zstd support temporarily disabled due to unicode encoding issues during read-back
-		throw NotImplementedException("zstd compression (.zst extension) is temporarily disabled for FASTX/SAM formats. "
-		                              "Please use .gz extension or COMPRESSION='gzip' instead. "
-		                              "zstd support will be re-enabled in a future release.");
+		throw NotImplementedException(
+		    "zstd compression (.zst extension) is temporarily disabled for FASTX/SAM formats. "
+		    "Please use .gz extension or COMPRESSION='gzip' instead. "
+		    "zstd support will be re-enabled in a future release.");
 	}
-	
+
 	return FileCompressionType::UNCOMPRESSED;
 }
 
@@ -126,13 +127,20 @@ bool HasOrientationPlaceholder(const string &path) {
 void ColumnIndices::FindIndices(const vector<string> &names) {
 	for (idx_t i = 0; i < names.size(); i++) {
 		auto &name = names[i];
-		if (name == "read_id") read_id_idx = i;
-		else if (name == "sequence_index") sequence_index_idx = i;
-		else if (name == "comment") comment_idx = i;
-		else if (name == "sequence1") sequence1_idx = i;
-		else if (name == "sequence2") sequence2_idx = i;
-		else if (name == "qual1") qual1_idx = i;
-		else if (name == "qual2") qual2_idx = i;
+		if (name == "read_id")
+			read_id_idx = i;
+		else if (name == "sequence_index")
+			sequence_index_idx = i;
+		else if (name == "comment")
+			comment_idx = i;
+		else if (name == "sequence1")
+			sequence1_idx = i;
+		else if (name == "sequence2")
+			sequence2_idx = i;
+		else if (name == "qual1")
+			qual1_idx = i;
+		else if (name == "qual2")
+			qual2_idx = i;
 	}
 }
 
@@ -145,7 +153,7 @@ void CommonCopyParameters::ParseFromOptions(const case_insensitive_map_t<vector<
 	Value id_as_sequence_index_param;
 	Value include_comment_param;
 	Value compression_param;
-	
+
 	for (auto &option : options) {
 		if (StringUtil::CIEquals(option.first, "interleave")) {
 			interleave_param = option.second[0];
@@ -157,19 +165,19 @@ void CommonCopyParameters::ParseFromOptions(const case_insensitive_map_t<vector<
 			compression_param = option.second[0];
 		}
 	}
-	
+
 	if (!interleave_param.IsNull()) {
 		interleave = interleave_param.GetValue<bool>();
 	}
-	
+
 	if (!id_as_sequence_index_param.IsNull()) {
 		id_as_sequence_index = id_as_sequence_index_param.GetValue<bool>();
 	}
-	
+
 	if (!include_comment_param.IsNull()) {
 		include_comment = include_comment_param.GetValue<bool>();
 	}
-	
+
 	compression = DetectCompressionType(file_path, compression_param);
 }
 
@@ -185,13 +193,12 @@ void ValidateRequiredColumns(bool has_read_id, bool has_sequence1, const string 
 	}
 }
 
-void ValidatePairedEndParameters(bool is_paired, bool has_interleave_param, bool interleave,
-                                 const string &file_path) {
+void ValidatePairedEndParameters(bool is_paired, bool has_interleave_param, bool interleave, const string &file_path) {
 	// INTERLEAVE parameter required for paired-end data
 	if (is_paired && !has_interleave_param) {
 		throw BinderException("INTERLEAVE parameter required for paired-end data");
 	}
-	
+
 	// Validate {ORIENTATION} usage
 	bool has_orientation = HasOrientationPlaceholder(file_path);
 	if (is_paired && !interleave && !has_orientation) {

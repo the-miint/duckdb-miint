@@ -69,7 +69,7 @@ static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFuncti
 	// Detect columns
 	ColumnIndices indices;
 	indices.FindIndices(names);
-	
+
 	bool has_sequence1 = indices.sequence1_idx != DConstants::INVALID_INDEX;
 	bool has_sequence2 = indices.sequence2_idx != DConstants::INVALID_INDEX;
 	bool has_read_id = indices.read_id_idx != DConstants::INVALID_INDEX;
@@ -87,10 +87,10 @@ static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFuncti
 
 	// Parse common parameters
 	CommonCopyParameters common_params;
-	
+
 	Value qual_offset_param;
 	bool has_interleave_param = false;
-	
+
 	for (auto &option : input.info.options) {
 		if (StringUtil::CIEquals(option.first, "interleave")) {
 			has_interleave_param = true;
@@ -102,9 +102,9 @@ static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFuncti
 			throw BinderException("Unknown option for COPY FORMAT FASTQ: %s", option.first);
 		}
 	}
-	
+
 	common_params.ParseFromOptions(input.info.options, result->file_path);
-	
+
 	result->interleave = common_params.interleave;
 	result->id_as_sequence_index = common_params.id_as_sequence_index;
 	result->include_comment = common_params.include_comment;
@@ -113,7 +113,7 @@ static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFuncti
 
 	// Validate paired-end parameters
 	ValidatePairedEndParameters(result->is_paired, has_interleave_param, result->interleave, result->file_path);
-	
+
 	// Validate sequence_index parameter
 	ValidateSequenceIndexParameter(result->id_as_sequence_index, has_sequence_index);
 
@@ -153,7 +153,7 @@ static unique_ptr<GlobalFunctionData> FastqCopyInitializeGlobal(ClientContext &c
 		// Split mode: open two files
 		string path_r1 = SubstituteOrientation(file_path, "R1");
 		string path_r2 = SubstituteOrientation(file_path, "R2");
-		
+
 		gstate->file_r1 = make_uniq<CopyFileHandle>(fs, path_r1, fdata.compression);
 		gstate->file_r2 = make_uniq<CopyFileHandle>(fs, path_r2, fdata.compression);
 	} else {
@@ -169,19 +169,19 @@ static unique_ptr<GlobalFunctionData> FastqCopyInitializeGlobal(ClientContext &c
 //===--------------------------------------------------------------------===//
 struct FastqCopyLocalState : public LocalFunctionData {
 	unique_ptr<FormatWriterState> writer_state_r1;
-	unique_ptr<FormatWriterState> writer_state_r2;  // For split paired-end
+	unique_ptr<FormatWriterState> writer_state_r2; // For split paired-end
 };
 
 static unique_ptr<LocalFunctionData> FastqCopyInitializeLocal(ExecutionContext &context, FunctionData &bind_data) {
 	auto &fdata = bind_data.Cast<FastqCopyBindData>();
 	auto lstate = make_uniq<FastqCopyLocalState>();
-	
+
 	lstate->writer_state_r1 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
-	
+
 	if (fdata.is_paired && !fdata.interleave) {
 		lstate->writer_state_r2 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
 	}
-	
+
 	return std::move(lstate);
 }
 
@@ -196,7 +196,7 @@ static void WriteFastqRecordToBuffer(MemoryStream &stream, const string &id, con
 		record += " " + comment;
 	}
 	record += "\n" + seq + "\n+\n" + EncodeQuality(qual, qual_offset) + "\n";
-	
+
 	// Write to stream
 	stream.WriteData(const_data_ptr_cast(record.c_str()), record.size());
 }
@@ -329,10 +329,10 @@ static void FastqCopyCombine(ExecutionContext &context, FunctionData &bind_data,
 	auto &fdata = bind_data.Cast<FastqCopyBindData>();
 	auto &gstate = gstate_p.Cast<FastqCopyGlobalState>();
 	auto &lstate = lstate_p.Cast<FastqCopyLocalState>();
-	
+
 	// Flush any remaining data in local buffers
 	FlushFormatBuffer(*lstate.writer_state_r1, *gstate.file_r1, gstate.lock);
-	
+
 	if (fdata.is_paired && !fdata.interleave) {
 		FlushFormatBuffer(*lstate.writer_state_r2, *gstate.file_r2, gstate.lock);
 	}

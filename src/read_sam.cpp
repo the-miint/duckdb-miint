@@ -36,11 +36,11 @@ unique_ptr<FunctionData> ReadSAMTableFunction::Bind(ClientContext &context, Tabl
 	auto ref_param = input.named_parameters.find("reference_lengths");
 	if (ref_param != input.named_parameters.end() && !ref_param->second.IsNull()) {
 		const auto &map_value = ref_param->second;
-		
+
 		if (map_value.type().id() != LogicalTypeId::MAP) {
 			throw InvalidInputException("reference_lengths must be a MAP type (e.g., MAP{'ref1': 100, 'ref2': 200})");
 		}
-		
+
 		reference_lengths = std::unordered_map<std::string, uint64_t>();
 
 		// MAP is a LIST of STRUCT<key, value> entries
@@ -92,8 +92,8 @@ unique_ptr<FunctionData> ReadSAMTableFunction::Bind(ClientContext &context, Tabl
 			// Validate subsequent files have same header status
 			if (has_header != first_file_has_header) {
 				if (first_file_has_header) {
-					throw IOException("Inconsistent headers across files: '" + sam_paths[0] + "' has header, '" +
-					                  path + "' does not");
+					throw IOException("Inconsistent headers across files: '" + sam_paths[0] + "' has header, '" + path +
+					                  "' does not");
 				} else {
 					throw IOException("Inconsistent headers across files: '" + sam_paths[0] + "' lacks header, '" +
 					                  path + "' has header");
@@ -116,7 +116,7 @@ unique_ptr<FunctionData> ReadSAMTableFunction::Bind(ClientContext &context, Tabl
 }
 
 unique_ptr<GlobalTableFunctionState> ReadSAMTableFunction::InitGlobal(ClientContext &context,
-                                                                       TableFunctionInitInput &input) {
+                                                                      TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = duckdb::make_uniq<GlobalState>(data.sam_paths, data.reference_lengths);
 

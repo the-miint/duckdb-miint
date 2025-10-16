@@ -45,7 +45,8 @@ private:
 TEST_CASE("SequenceReader single-end", "[SequenceReader]") {
 	TempFileFixture fixture;
 	auto path = "test_R1.fastq";
-	fixture.write_temp_fastq(path, {fixture.simple_read("r1", "ACGT", "IIII"), fixture.simple_read("r2", "TGCA", "HHHH")});
+	fixture.write_temp_fastq(path,
+	                         {fixture.simple_read("r1", "ACGT", "IIII"), fixture.simple_read("r2", "TGCA", "HHHH")});
 
 	miint::SequenceReader reader(path);
 	auto batch = reader.read(5);
@@ -60,8 +61,10 @@ TEST_CASE("SequenceReader paired-end valid", "[SequenceReader]") {
 	auto r1 = "test_p1.fastq";
 	auto r2 = "test_p2.fastq";
 
-	fixture.write_temp_fastq(r1, {fixture.simple_read("x/1", "ACGT", "IIII"), fixture.simple_read("y", "TGCA", "HHHH")});
-	fixture.write_temp_fastq(r2, {fixture.simple_read("x/2", "AAAA", "DDDD"), fixture.simple_read("y", "CCCC", "EEEE")});
+	fixture.write_temp_fastq(r1,
+	                         {fixture.simple_read("x/1", "ACGT", "IIII"), fixture.simple_read("y", "TGCA", "HHHH")});
+	fixture.write_temp_fastq(r2,
+	                         {fixture.simple_read("x/2", "AAAA", "DDDD"), fixture.simple_read("y", "CCCC", "EEEE")});
 
 	miint::SequenceReader reader(r1, r2);
 	auto batch = reader.read(2);
@@ -126,8 +129,8 @@ TEST_CASE("SequenceRecord paired-end", "[SequenceRecord]") {
 TEST_CASE("SequenceReader FASTA format single-end", "[SequenceReader][FASTA]") {
 	TempFileFixture fixture;
 	auto path = "test_fasta.fa";
-	fixture.write_temp_fastq(path, {fixture.simple_fasta("seq1", "ATGC", "comment1"),
-	                                fixture.simple_fasta("seq2", "GGCC")});
+	fixture.write_temp_fastq(path,
+	                         {fixture.simple_fasta("seq1", "ATGC", "comment1"), fixture.simple_fasta("seq2", "GGCC")});
 
 	miint::SequenceReader reader(path);
 	auto batch = reader.read(5);
@@ -167,10 +170,11 @@ TEST_CASE("SequenceReader mixed FASTA/FASTQ paired-end throws", "[SequenceReader
 	auto r2 = "test_mixed_r2.fq";
 
 	fixture.write_temp_fastq(r1, {fixture.simple_fasta("read1/1", "ATGC"), fixture.simple_fasta("read2", "GGCC")});
-	fixture.write_temp_fastq(r2, {fixture.simple_read("read1/2", "TGCA", "IIII"),
-	                              fixture.simple_read("read2", "CCGG", "HHHH")});
+	fixture.write_temp_fastq(
+	    r2, {fixture.simple_read("read1/2", "TGCA", "IIII"), fixture.simple_read("read2", "CCGG", "HHHH")});
 
-	REQUIRE_THROWS_WITH(miint::SequenceReader(r1, r2), Catch::Matchers::ContainsSubstring("Cannot mix FASTA and FASTQ"));
+	REQUIRE_THROWS_WITH(miint::SequenceReader(r1, r2),
+	                    Catch::Matchers::ContainsSubstring("Cannot mix FASTA and FASTQ"));
 }
 
 TEST_CASE("SequenceReader empty file throws", "[SequenceReader][error]") {
@@ -193,10 +197,9 @@ TEST_CASE("SequenceReader gzipped file", "[SequenceReader][compression]") {
 TEST_CASE("SequenceReader multiple sequential exhaustive reads", "[SequenceReader]") {
 	TempFileFixture fixture;
 	auto path = "multi_batch.fq";
-	fixture.write_temp_fastq(path, {fixture.simple_read("r1", "AAAA", "IIII"),
-	                                fixture.simple_read("r2", "TTTT", "HHHH"),
-	                                fixture.simple_read("r3", "GGGG", "GGGG"),
-	                                fixture.simple_read("r4", "CCCC", "FFFF")});
+	fixture.write_temp_fastq(path,
+	                         {fixture.simple_read("r1", "AAAA", "IIII"), fixture.simple_read("r2", "TTTT", "HHHH"),
+	                          fixture.simple_read("r3", "GGGG", "GGGG"), fixture.simple_read("r4", "CCCC", "FFFF")});
 
 	miint::SequenceReader reader(path);
 
@@ -234,9 +237,9 @@ TEST_CASE("SequenceReader large batch size", "[SequenceReader]") {
 TEST_CASE("SequenceReader partial read at EOF", "[SequenceReader]") {
 	TempFileFixture fixture;
 	auto path = "partial_eof.fq";
-	fixture.write_temp_fastq(path, {fixture.simple_read("r1", "ACGT", "IIII"),
-	                                fixture.simple_read("r2", "TGCA", "HHHH"),
-	                                fixture.simple_read("r3", "GGCC", "GGGG")});
+	fixture.write_temp_fastq(path,
+	                         {fixture.simple_read("r1", "ACGT", "IIII"), fixture.simple_read("r2", "TGCA", "HHHH"),
+	                          fixture.simple_read("r3", "GGCC", "GGGG")});
 
 	miint::SequenceReader reader(path);
 	auto batch = reader.read(10);
@@ -265,7 +268,8 @@ TEST_CASE("SequenceReader paired-end mismatched count with context", "[SequenceR
 	auto r1 = "mismatch_r1.fq";
 	auto r2 = "mismatch_r2.fq";
 
-	fixture.write_temp_fastq(r1, {fixture.simple_read("r1", "ACGT", "IIII"), fixture.simple_read("r2", "TGCA", "HHHH")});
+	fixture.write_temp_fastq(r1,
+	                         {fixture.simple_read("r1", "ACGT", "IIII"), fixture.simple_read("r2", "TGCA", "HHHH")});
 	fixture.write_temp_fastq(r2, {fixture.simple_read("r1", "AAAA", "DDDD")});
 
 	miint::SequenceReader reader(r1, r2);

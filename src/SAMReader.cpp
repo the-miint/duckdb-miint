@@ -68,7 +68,8 @@ SAMReader::SAMReader(const std::string &filename, const std::unordered_map<std::
 		// Regex pattern: :[0-9]+(-[0-9]+)?$
 		std::regex position_pattern(":[0-9]+(-[0-9]+)?$");
 		if (std::regex_search(name, position_pattern)) {
-			throw std::runtime_error("Reference name ends with position-like pattern (:<digits> or :<digits>-<digits>)");
+			throw std::runtime_error(
+			    "Reference name ends with position-like pattern (:<digits> or :<digits>-<digits>)");
 		}
 	}
 
