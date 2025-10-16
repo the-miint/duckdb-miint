@@ -2,36 +2,38 @@
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
+#include <memory>
 
 namespace duckdb {
 
 struct IntervalState {
-	miint::IntervalCompressor compressor;
+	std::unique_ptr<miint::IntervalCompressor> compressor;
 
-	IntervalState() = default;
+	IntervalState() : compressor(nullptr) {
+	}
 
 	void Compress() {
-		compressor.Compress();
+		compressor->Compress();
 	}
 
 	void Add(int64_t start, int64_t stop) {
-		compressor.Add(start, stop);
+		compressor->Add(start, stop);
 	}
 
 	bool Empty() const {
-		return compressor.Empty();
+		return compressor->Empty();
 	}
 
 	size_t Size() const {
-		return compressor.Size();
+		return compressor->Size();
 	}
 
 	const std::vector<int64_t> &Starts() const {
-		return compressor.starts;
+		return compressor->starts;
 	}
 
 	const std::vector<int64_t> &Stops() const {
-		return compressor.stops;
+		return compressor->stops;
 	}
 };
 
@@ -52,6 +54,7 @@ struct CompressIntervalsOperation {
 	template <class STATE>
 	static void Initialize(STATE &state) {
 		new (&state) STATE();
+		state.compressor = std::make_unique<miint::IntervalCompressor>();
 	}
 
 	template <class STATE>
