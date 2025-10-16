@@ -13,41 +13,41 @@ CREATE TABLE test_single AS SELECT * FROM read_fastx('data/fastq/small_a.fq');
 statement ok
 CREATE TABLE test_paired AS SELECT * FROM read_fastx('data/fastq/small_a_r1.fq', sequence2='data/fastq/small_a_r2.fq');
 
-# Test 1: zstd compression with .zst extension (auto-detect)
-statement ok
-COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single ORDER BY sequence_index) 
-TO '__TEST_DIR__/output_zstd.fq.zst' (FORMAT FASTQ);
-
-query IIIII
-SELECT sequence_index, read_id, sequence1, qual1, comment 
-FROM read_fastx('__TEST_DIR__/output_zstd.fq.zst') ORDER BY sequence_index;
-----
-1	read_a1	AAAA	[40, 40, 40, 40]	NULL
-2	read_a2	TTTT	[39, 39, 39, 39]	NULL
-
-# Test 2: Explicit COMPRESSION='zstd'
-statement ok
-COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single ORDER BY sequence_index) 
-TO '__TEST_DIR__/output_explicit_zstd.fq' (FORMAT FASTQ, COMPRESSION 'zstd');
-
-query IIIII
-SELECT sequence_index, read_id, sequence1, qual1, comment 
-FROM read_fastx('__TEST_DIR__/output_explicit_zstd.fq') ORDER BY sequence_index;
-----
-1	read_a1	AAAA	[40, 40, 40, 40]	NULL
-2	read_a2	TTTT	[39, 39, 39, 39]	NULL
-
-# Test 3: Explicit COMPRESSION='zst' (alternative name)
-statement ok
-COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single ORDER BY sequence_index) 
-TO '__TEST_DIR__/output_zst.fq' (FORMAT FASTQ, COMPRESSION 'zst');
-
-query III
-SELECT read_id, sequence1, qual1 
-FROM read_fastx('__TEST_DIR__/output_zst.fq') ORDER BY sequence_index;
-----
-read_a1	AAAA	[40, 40, 40, 40]
-read_a2	TTTT	[39, 39, 39, 39]
+## Test 1: zstd compression with .zst extension (auto-detect)
+#statement ok
+#COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single ORDER BY sequence_index) 
+#TO '__TEST_DIR__/output_zstd.fq.zst' (FORMAT FASTQ);
+#
+#query IIIII
+#SELECT sequence_index, read_id, sequence1, qual1, comment 
+#FROM read_fastx('__TEST_DIR__/output_zstd.fq.zst') ORDER BY sequence_index;
+#----
+#1	read_a1	AAAA	[40, 40, 40, 40]	NULL
+#2	read_a2	TTTT	[39, 39, 39, 39]	NULL
+#
+## Test 2: Explicit COMPRESSION='zstd'
+#statement ok
+#COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single ORDER BY sequence_index) 
+#TO '__TEST_DIR__/output_explicit_zstd.fq' (FORMAT FASTQ, COMPRESSION 'zstd');
+#
+#query IIIII
+#SELECT sequence_index, read_id, sequence1, qual1, comment 
+#FROM read_fastx('__TEST_DIR__/output_explicit_zstd.fq') ORDER BY sequence_index;
+#----
+#1	read_a1	AAAA	[40, 40, 40, 40]	NULL
+#2	read_a2	TTTT	[39, 39, 39, 39]	NULL
+#
+## Test 3: Explicit COMPRESSION='zst' (alternative name)
+#statement ok
+#COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single ORDER BY sequence_index) 
+#TO '__TEST_DIR__/output_zst.fq' (FORMAT FASTQ, COMPRESSION 'zst');
+#
+#query III
+#SELECT read_id, sequence1, qual1 
+#FROM read_fastx('__TEST_DIR__/output_zst.fq') ORDER BY sequence_index;
+#----
+#read_a1	AAAA	[40, 40, 40, 40]
+#read_a2	TTTT	[39, 39, 39, 39]
 
 # Test 4: Explicit COMPRESSION='gzip'
 statement ok
@@ -85,41 +85,41 @@ FROM read_fastx('__TEST_DIR__/output_uncompressed.fq.gz') ORDER BY sequence_inde
 1	read_a1	AAAA	[40, 40, 40, 40]	NULL
 2	read_a2	TTTT	[39, 39, 39, 39]	NULL
 
-# Test 7: Paired-end interleaved with zstd
-statement ok
-COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired ORDER BY sequence_index) 
-TO '__TEST_DIR__/paired_interleaved.fq.zst' (FORMAT FASTQ, INTERLEAVE true);
-
-query III
-SELECT read_id, sequence1, qual1 
-FROM read_fastx('__TEST_DIR__/paired_interleaved.fq.zst') ORDER BY sequence_index;
-----
-pair_a1	AAAA	[40, 40, 40, 40]
-pair_a1	TTTT	[39, 39, 39, 39]
-
-# Test 8: Paired-end split with zstd
-statement ok
-COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired ORDER BY sequence_index) 
-TO '__TEST_DIR__/paired_split.{ORIENTATION}.fq.zst' (FORMAT FASTQ, INTERLEAVE false);
-
-query IIIIIII
-SELECT sequence_index, read_id, sequence1, sequence2, qual1, qual2, comment 
-FROM read_fastx('__TEST_DIR__/paired_split.R1.fq.zst', sequence2='__TEST_DIR__/paired_split.R2.fq.zst') 
-ORDER BY sequence_index;
-----
-1	pair_a1	AAAA	TTTT	[40, 40, 40, 40]	[39, 39, 39, 39]	NULL
-
-# Test 9: Paired-end split with explicit COMPRESSION='zstd'
-statement ok
-COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired ORDER BY sequence_index) 
-TO '__TEST_DIR__/paired_explicit.{ORIENTATION}.fq' (FORMAT FASTQ, INTERLEAVE false, COMPRESSION 'zstd');
-
-query IIIIIII
-SELECT sequence_index, read_id, sequence1, sequence2, qual1, qual2, comment 
-FROM read_fastx('__TEST_DIR__/paired_explicit.R1.fq', sequence2='__TEST_DIR__/paired_explicit.R2.fq') 
-ORDER BY sequence_index;
-----
-1	pair_a1	AAAA	TTTT	[40, 40, 40, 40]	[39, 39, 39, 39]	NULL
+## Test 7: Paired-end interleaved with zstd
+#statement ok
+#COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired ORDER BY sequence_index) 
+#TO '__TEST_DIR__/paired_interleaved.fq.zst' (FORMAT FASTQ, INTERLEAVE true);
+#
+#query III
+#SELECT read_id, sequence1, qual1 
+#FROM read_fastx('__TEST_DIR__/paired_interleaved.fq.zst') ORDER BY sequence_index;
+#----
+#pair_a1	AAAA	[40, 40, 40, 40]
+#pair_a1	TTTT	[39, 39, 39, 39]
+#
+## Test 8: Paired-end split with zstd
+#statement ok
+#COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired ORDER BY sequence_index) 
+#TO '__TEST_DIR__/paired_split.{ORIENTATION}.fq.zst' (FORMAT FASTQ, INTERLEAVE false);
+#
+#query IIIIIII
+#SELECT sequence_index, read_id, sequence1, sequence2, qual1, qual2, comment 
+#FROM read_fastx('__TEST_DIR__/paired_split.R1.fq.zst', sequence2='__TEST_DIR__/paired_split.R2.fq.zst') 
+#ORDER BY sequence_index;
+#----
+#1	pair_a1	AAAA	TTTT	[40, 40, 40, 40]	[39, 39, 39, 39]	NULL
+#
+## Test 9: Paired-end split with explicit COMPRESSION='zstd'
+#statement ok
+#COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired ORDER BY sequence_index) 
+#TO '__TEST_DIR__/paired_explicit.{ORIENTATION}.fq' (FORMAT FASTQ, INTERLEAVE false, COMPRESSION 'zstd');
+#
+#query IIIIIII
+#SELECT sequence_index, read_id, sequence1, sequence2, qual1, qual2, comment 
+#FROM read_fastx('__TEST_DIR__/paired_explicit.R1.fq', sequence2='__TEST_DIR__/paired_explicit.R2.fq') 
+#ORDER BY sequence_index;
+#----
+#1	pair_a1	AAAA	TTTT	[40, 40, 40, 40]	[39, 39, 39, 39]	NULL
 
 # Test 10: Case-insensitive compression option (GZIP)
 statement ok

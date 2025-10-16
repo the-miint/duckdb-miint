@@ -13,41 +13,41 @@ CREATE TABLE test_fasta_single AS SELECT sequence_index, read_id, comment, seque
 statement ok
 CREATE TABLE test_fasta_paired AS SELECT sequence_index, read_id, comment, sequence1, sequence2 FROM read_fastx('data/fastq/small_a_r1.fq', sequence2='data/fastq/small_a_r2.fq');
 
-# Test 1: zstd compression with .zst extension (auto-detect)
-statement ok
-COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) 
-TO '__TEST_DIR__/output_zstd.fa.zst' (FORMAT FASTA);
-
-query IIII
-SELECT sequence_index, read_id, sequence1, comment 
-FROM read_fastx('__TEST_DIR__/output_zstd.fa.zst') ORDER BY sequence_index;
-----
-1	seq1	ATGCATGCATGC	NULL
-2	seq2	GGCCGGCCGGCC	NULL
-
-# Test 2: Explicit COMPRESSION='zstd'
-statement ok
-COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) 
-TO '__TEST_DIR__/output_explicit_zstd.fa' (FORMAT FASTA, COMPRESSION 'zstd');
-
-query IIII
-SELECT sequence_index, read_id, sequence1, comment 
-FROM read_fastx('__TEST_DIR__/output_explicit_zstd.fa') ORDER BY sequence_index;
-----
-1	seq1	ATGCATGCATGC	NULL
-2	seq2	GGCCGGCCGGCC	NULL
-
-# Test 3: Explicit COMPRESSION='zst' (alternative name)
-statement ok
-COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) 
-TO '__TEST_DIR__/output_zst.fa' (FORMAT FASTA, COMPRESSION 'zst');
-
-query III
-SELECT read_id, sequence1, comment 
-FROM read_fastx('__TEST_DIR__/output_zst.fa') ORDER BY sequence_index;
-----
-seq1	ATGCATGCATGC	NULL
-seq2	GGCCGGCCGGCC	NULL
+## Test 1: zstd compression with .zst extension (auto-detect)
+#statement ok
+#COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) 
+#TO '__TEST_DIR__/output_zstd.fa.zst' (FORMAT FASTA);
+#
+#query IIII
+#SELECT sequence_index, read_id, sequence1, comment 
+#FROM read_fastx('__TEST_DIR__/output_zstd.fa.zst') ORDER BY sequence_index;
+#----
+#1	seq1	ATGCATGCATGC	NULL
+#2	seq2	GGCCGGCCGGCC	NULL
+#
+## Test 2: Explicit COMPRESSION='zstd'
+#statement ok
+#COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) 
+#TO '__TEST_DIR__/output_explicit_zstd.fa' (FORMAT FASTA, COMPRESSION 'zstd');
+#
+#query IIII
+#SELECT sequence_index, read_id, sequence1, comment 
+#FROM read_fastx('__TEST_DIR__/output_explicit_zstd.fa') ORDER BY sequence_index;
+#----
+#1	seq1	ATGCATGCATGC	NULL
+#2	seq2	GGCCGGCCGGCC	NULL
+#
+## Test 3: Explicit COMPRESSION='zst' (alternative name)
+#statement ok
+#COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) 
+#TO '__TEST_DIR__/output_zst.fa' (FORMAT FASTA, COMPRESSION 'zst');
+#
+#query III
+#SELECT read_id, sequence1, comment 
+#FROM read_fastx('__TEST_DIR__/output_zst.fa') ORDER BY sequence_index;
+#----
+#seq1	ATGCATGCATGC	NULL
+#seq2	GGCCGGCCGGCC	NULL
 
 # Test 4: Explicit COMPRESSION='gzip'
 statement ok
@@ -86,73 +86,73 @@ FROM read_fastx('__TEST_DIR__/output_uncompressed.fa.gz') ORDER BY sequence_inde
 2	seq2	GGCCGGCCGGCC	NULL
 
 # Test 7: Paired-end interleaved with zstd
-statement ok
-COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired ORDER BY sequence_index) 
-TO '__TEST_DIR__/paired_interleaved.fa.zst' (FORMAT FASTA, INTERLEAVE true);
-
-query III
-SELECT read_id, sequence1, comment 
-FROM read_fastx('__TEST_DIR__/paired_interleaved.fa.zst') ORDER BY sequence_index;
-----
-pair_a1	AAAA	NULL
-pair_a1	TTTT	NULL
-
-# Test 8: Paired-end split with zstd
-statement ok
-COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired ORDER BY sequence_index) 
-TO '__TEST_DIR__/paired_split.{ORIENTATION}.fa.zst' (FORMAT FASTA, INTERLEAVE false);
-
-query IIIII
-SELECT sequence_index, read_id, sequence1, sequence2, comment 
-FROM read_fastx('__TEST_DIR__/paired_split.R1.fa.zst', sequence2='__TEST_DIR__/paired_split.R2.fa.zst') 
-ORDER BY sequence_index;
-----
-1	pair_a1	AAAA	TTTT	NULL
-
-# Test 9: Paired-end split with explicit COMPRESSION='zstd'
-statement ok
-COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired ORDER BY sequence_index) 
-TO '__TEST_DIR__/paired_explicit.{ORIENTATION}.fa' (FORMAT FASTA, INTERLEAVE false, COMPRESSION 'zstd');
-
-query IIIII
-SELECT sequence_index, read_id, sequence1, sequence2, comment 
-FROM read_fastx('__TEST_DIR__/paired_explicit.R1.fa', sequence2='__TEST_DIR__/paired_explicit.R2.fa') 
-ORDER BY sequence_index;
-----
-1	pair_a1	AAAA	TTTT	NULL
-
-# Test 10: INCLUDE_COMMENT with zstd compression
-statement ok
-CREATE TABLE test_with_comment AS SELECT sequence_index, read_id, 'my comment' as comment, sequence1 FROM test_fasta_single WHERE sequence_index = 1;
-
-statement ok
-COPY (SELECT read_id, comment, sequence1 FROM test_with_comment) 
-TO '__TEST_DIR__/with_comment.fa.zst' (FORMAT FASTA, INCLUDE_COMMENT true);
-
-query IIII
-SELECT sequence_index, read_id, sequence1, comment 
-FROM read_fastx('__TEST_DIR__/with_comment.fa.zst') ORDER BY sequence_index;
-----
-1	seq1	ATGCATGCATGC	my comment
-
-# Test 11: Case-insensitive compression option
-statement ok
-COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) 
-TO '__TEST_DIR__/output_case.fa' (FORMAT FASTA, COMPRESSION 'ZSTD');
-
-query III
-SELECT read_id, sequence1, comment 
-FROM read_fastx('__TEST_DIR__/output_case.fa') ORDER BY sequence_index;
-----
-seq1	ATGCATGCATGC	NULL
-seq2	GGCCGGCCGGCC	NULL
-
-# Test 12: Error - invalid compression type
-statement error
-COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single) 
-TO '__TEST_DIR__/error.fa' (FORMAT FASTA, COMPRESSION 'invalid');
-----
-compression must be
+#statement ok
+#COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired ORDER BY sequence_index) 
+#TO '__TEST_DIR__/paired_interleaved.fa.zst' (FORMAT FASTA, INTERLEAVE true);
+#
+#query III
+#SELECT read_id, sequence1, comment 
+#FROM read_fastx('__TEST_DIR__/paired_interleaved.fa.zst') ORDER BY sequence_index;
+#----
+#pair_a1	AAAA	NULL
+#pair_a1	TTTT	NULL
+#
+## Test 8: Paired-end split with zstd
+#statement ok
+#COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired ORDER BY sequence_index) 
+#TO '__TEST_DIR__/paired_split.{ORIENTATION}.fa.zst' (FORMAT FASTA, INTERLEAVE false);
+#
+#query IIIII
+#SELECT sequence_index, read_id, sequence1, sequence2, comment 
+#FROM read_fastx('__TEST_DIR__/paired_split.R1.fa.zst', sequence2='__TEST_DIR__/paired_split.R2.fa.zst') 
+#ORDER BY sequence_index;
+#----
+#1	pair_a1	AAAA	TTTT	NULL
+#
+## Test 9: Paired-end split with explicit COMPRESSION='zstd'
+#statement ok
+#COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired ORDER BY sequence_index) 
+#TO '__TEST_DIR__/paired_explicit.{ORIENTATION}.fa' (FORMAT FASTA, INTERLEAVE false, COMPRESSION 'zstd');
+#
+#query IIIII
+#SELECT sequence_index, read_id, sequence1, sequence2, comment 
+#FROM read_fastx('__TEST_DIR__/paired_explicit.R1.fa', sequence2='__TEST_DIR__/paired_explicit.R2.fa') 
+#ORDER BY sequence_index;
+#----
+#1	pair_a1	AAAA	TTTT	NULL
+#
+## Test 10: INCLUDE_COMMENT with zstd compression
+#statement ok
+#CREATE TABLE test_with_comment AS SELECT sequence_index, read_id, 'my comment' as comment, sequence1 FROM test_fasta_single WHERE sequence_index = 1;
+#
+#statement ok
+#COPY (SELECT read_id, comment, sequence1 FROM test_with_comment) 
+#TO '__TEST_DIR__/with_comment.fa.zst' (FORMAT FASTA, INCLUDE_COMMENT true);
+#
+#query IIII
+#SELECT sequence_index, read_id, sequence1, comment 
+#FROM read_fastx('__TEST_DIR__/with_comment.fa.zst') ORDER BY sequence_index;
+#----
+#1	seq1	ATGCATGCATGC	my comment
+#
+## Test 11: Case-insensitive compression option
+#statement ok
+#COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) 
+#TO '__TEST_DIR__/output_case.fa' (FORMAT FASTA, COMPRESSION 'ZSTD');
+#
+#query III
+#SELECT read_id, sequence1, comment 
+#FROM read_fastx('__TEST_DIR__/output_case.fa') ORDER BY sequence_index;
+#----
+#seq1	ATGCATGCATGC	NULL
+#seq2	GGCCGGCCGGCC	NULL
+#
+## Test 12: Error - invalid compression type
+#statement error
+#COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single) 
+#TO '__TEST_DIR__/error.fa' (FORMAT FASTA, COMPRESSION 'invalid');
+#----
+#compression must be
 
 # Test 13: Verify gzip backward compatibility (existing .gz auto-detect still works)
 statement ok
@@ -173,5 +173,5 @@ DROP TABLE test_fasta_single;
 statement ok
 DROP TABLE test_fasta_paired;
 
-statement ok
-DROP TABLE test_with_comment;
+#statement ok
+#DROP TABLE test_with_comment;

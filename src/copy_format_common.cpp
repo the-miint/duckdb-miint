@@ -81,7 +81,10 @@ FileCompressionType DetectCompressionType(const string &file_path, const Value &
 		if (comp_str == "gzip" || comp_str == "gz") {
 			return FileCompressionType::GZIP;
 		} else if (comp_str == "zstd" || comp_str == "zst") {
-			return FileCompressionType::ZSTD;
+			// TODO: zstd support temporarily disabled due to unicode encoding issues during read-back
+			throw NotImplementedException("zstd compression is temporarily disabled for FASTX/SAM formats. "
+			                              "Please use gzip compression instead. "
+			                              "zstd support will be re-enabled in a future release.");
 		} else if (comp_str == "none") {
 			return FileCompressionType::UNCOMPRESSED;
 		} else {
@@ -94,7 +97,10 @@ FileCompressionType DetectCompressionType(const string &file_path, const Value &
 		return FileCompressionType::GZIP;
 	}
 	if (file_path.size() >= 4 && file_path.substr(file_path.size() - 4) == ".zst") {
-		return FileCompressionType::ZSTD;
+		// TODO: zstd support temporarily disabled due to unicode encoding issues during read-back
+		throw NotImplementedException("zstd compression (.zst extension) is temporarily disabled for FASTX/SAM formats. "
+		                              "Please use .gz extension or COMPRESSION='gzip' instead. "
+		                              "zstd support will be re-enabled in a future release.");
 	}
 	
 	return FileCompressionType::UNCOMPRESSED;
