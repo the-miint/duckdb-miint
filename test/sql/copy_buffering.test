@@ -1,0 +1,213 @@
+# name: test/sql/copy_buffering.test
+# description: Test COPY FORMAT with large datasets to verify buffering correctness
+# group: [miint]
+
+require miint
+
+# Test 1: FASTQ - Large dataset with gzip compression
+statement ok
+CREATE TABLE large_fastq_test AS 
+SELECT * FROM read_fastx(['data/fastq/small_a.fq', 'data/fastq/small_b.fq']) 
+CROSS JOIN generate_series(1, 500) t(i);
+
+statement ok
+COPY (SELECT read_id, comment, sequence1, qual1 FROM large_fastq_test ORDER BY sequence_index) 
+TO '__TEST_DIR__/large_fastq.fq.gz' (FORMAT FASTQ);
+
+query I
+SELECT COUNT(*) FROM read_fastx('__TEST_DIR__/large_fastq.fq.gz');
+----
+2000
+
+# Verify content integrity (first few records - CROSS JOIN creates duplicates in sequence)
+query III
+SELECT read_id, sequence1, qual1 
+FROM read_fastx('__TEST_DIR__/large_fastq.fq.gz') 
+ORDER BY sequence_index LIMIT 5;
+----
+read_a1	AAAA	[40, 40, 40, 40]
+read_a1	AAAA	[40, 40, 40, 40]
+read_a1	AAAA	[40, 40, 40, 40]
+read_a1	AAAA	[40, 40, 40, 40]
+read_a1	AAAA	[40, 40, 40, 40]
+
+# Verify last few records to ensure complete write
+query III
+SELECT read_id, sequence1, qual1 
+FROM read_fastx('__TEST_DIR__/large_fastq.fq.gz') 
+ORDER BY sequence_index DESC LIMIT 3;
+----
+read_b2	CCCC	[37, 37, 37, 37]
+read_b2	CCCC	[37, 37, 37, 37]
+read_b2	CCCC	[37, 37, 37, 37]
+
+# Test 2: FASTQ - Large dataset with zstd compression (SKIP: requires zstd in DuckDB build)
+# statement ok
+# COPY (SELECT read_id, comment, sequence1, qual1 FROM large_fastq_test ORDER BY sequence_index) 
+# TO '__TEST_DIR__/large_fastq.fq.zst' (FORMAT FASTQ);
+
+# query I
+# SELECT COUNT(*) FROM read_fastx('__TEST_DIR__/large_fastq.fq.zst');
+# ----
+# 2000
+
+# Test 3: FASTQ - Large dataset uncompressed
+statement ok
+COPY (SELECT read_id, comment, sequence1, qual1 FROM large_fastq_test ORDER BY sequence_index) 
+TO '__TEST_DIR__/large_fastq.fq' (FORMAT FASTQ);
+
+query I
+SELECT COUNT(*) FROM read_fastx('__TEST_DIR__/large_fastq.fq');
+----
+2000
+
+# Test 4: FASTA - Large dataset with gzip compression
+statement ok
+CREATE TABLE large_fasta_test AS 
+SELECT * FROM read_fastx('data/fastq/test.fa') 
+CROSS JOIN generate_series(1, 500) t(i);
+
+statement ok
+COPY (SELECT read_id, comment, sequence1 FROM large_fasta_test ORDER BY sequence_index) 
+TO '__TEST_DIR__/large_fasta.fa.gz' (FORMAT FASTA);
+
+query I
+SELECT COUNT(*) FROM read_fastx('__TEST_DIR__/large_fasta.fa.gz');
+----
+1000
+
+# Verify content integrity (CROSS JOIN creates duplicates)
+query II
+SELECT read_id, sequence1 
+FROM read_fastx('__TEST_DIR__/large_fasta.fa.gz') 
+ORDER BY sequence_index LIMIT 3;
+----
+seq1	ATGCATGCATGC
+seq1	ATGCATGCATGC
+seq1	ATGCATGCATGC
+
+# Test 5: FASTA - Large dataset with zstd compression (SKIP: requires zstd in DuckDB build)
+# statement ok
+# COPY (SELECT read_id, comment, sequence1 FROM large_fasta_test ORDER BY sequence_index) 
+# TO '__TEST_DIR__/large_fasta.fa.zst' (FORMAT FASTA);
+
+# query I
+# SELECT COUNT(*) FROM read_fastx('__TEST_DIR__/large_fasta.fa.zst');
+# ----
+# 1000
+
+# Test 6: SAM - Large dataset with gzip compression
+statement ok
+CREATE TABLE large_sam_test AS 
+SELECT * FROM read_sam('data/sam/foo_has_header.sam') 
+CROSS JOIN generate_series(1, 250) t(i);
+
+statement ok
+COPY large_sam_test TO '__TEST_DIR__/large_sam.sam.gz' 
+(FORMAT SAM, REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
+
+query I
+SELECT COUNT(*) FROM read_sam('__TEST_DIR__/large_sam.sam.gz');
+----
+1000
+
+# Verify content integrity
+query III
+SELECT read_id, reference, position 
+FROM read_sam('__TEST_DIR__/large_sam.sam.gz') 
+ORDER BY read_id, position LIMIT 5;
+----
+foo-1	G1234	2
+foo-1	G1234	2
+foo-1	G1234	2
+foo-1	G1234	2
+foo-1	G1234	2
+
+# Test 7: SAM - Large dataset with zstd compression (SKIP: requires zstd in DuckDB build)
+# statement ok
+# COPY large_sam_test TO '__TEST_DIR__/large_sam.sam.zst' 
+# (FORMAT SAM, REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
+
+# query I
+# SELECT COUNT(*) FROM read_sam('__TEST_DIR__/large_sam.sam.zst');
+# ----
+# 1000
+
+# Test 8: FASTQ Paired-end - Large interleaved dataset
+statement ok
+CREATE TABLE large_paired_test AS 
+SELECT * FROM read_fastx('data/fastq/small_a_r1.fq', sequence2='data/fastq/small_a_r2.fq') 
+CROSS JOIN generate_series(1, 500) t(i);
+
+statement ok
+COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM large_paired_test ORDER BY sequence_index) 
+TO '__TEST_DIR__/large_paired.fq.gz' (FORMAT FASTQ, INTERLEAVE true);
+
+# Should have 1000 records (500 * 1 pair * 2 reads)
+query I
+SELECT COUNT(*) FROM read_fastx('__TEST_DIR__/large_paired.fq.gz');
+----
+1000
+
+# Test 9: FASTQ Paired-end - Large split dataset
+statement ok
+COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM large_paired_test ORDER BY sequence_index) 
+TO '__TEST_DIR__/large_split.{ORIENTATION}.fq.gz' (FORMAT FASTQ, INTERLEAVE false);
+
+query I
+SELECT COUNT(*) FROM read_fastx('__TEST_DIR__/large_split.R1.fq.gz', sequence2='__TEST_DIR__/large_split.R2.fq.gz');
+----
+500
+
+# Verify R1 and R2 files each have 500 records
+query I
+SELECT COUNT(*) FROM read_fastx('__TEST_DIR__/large_split.R1.fq.gz');
+----
+500
+
+query I
+SELECT COUNT(*) FROM read_fastx('__TEST_DIR__/large_split.R2.fq.gz');
+----
+500
+
+# Test 10: Verify data integrity across compression types (gzip vs uncompressed)
+# Note: zstd skipped - requires DuckDB build with zstd support
+statement ok
+CREATE TABLE verify_test AS SELECT * FROM read_fastx('data/fastq/small_a.fq');
+
+statement ok
+COPY (SELECT read_id, comment, sequence1, qual1 FROM verify_test ORDER BY sequence_index) 
+TO '__TEST_DIR__/verify_gz.fq.gz' (FORMAT FASTQ);
+
+statement ok
+COPY (SELECT read_id, comment, sequence1, qual1 FROM verify_test ORDER BY sequence_index) 
+TO '__TEST_DIR__/verify_none.fq' (FORMAT FASTQ);
+
+# Both should produce identical content
+query III
+SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/verify_gz.fq.gz') ORDER BY sequence_index;
+----
+read_a1	AAAA	[40, 40, 40, 40]
+read_a2	TTTT	[39, 39, 39, 39]
+
+query III
+SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/verify_none.fq') ORDER BY sequence_index;
+----
+read_a1	AAAA	[40, 40, 40, 40]
+read_a2	TTTT	[39, 39, 39, 39]
+
+# Cleanup
+statement ok
+DROP TABLE large_fastq_test;
+
+statement ok
+DROP TABLE large_fasta_test;
+
+statement ok
+DROP TABLE large_sam_test;
+
+statement ok
+DROP TABLE large_paired_test;
+
+statement ok
+DROP TABLE verify_test;

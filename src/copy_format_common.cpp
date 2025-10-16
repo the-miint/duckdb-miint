@@ -1,72 +1,103 @@
 #include "copy_format_common.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
 
 //===--------------------------------------------------------------------===//
+// FormatWriterState Implementation
+//===--------------------------------------------------------------------===//
+FormatWriterState::FormatWriterState(ClientContext &context, idx_t flush_size_p)
+    : flush_size(flush_size_p), written_anything(false) {
+	stream = make_uniq<MemoryStream>();
+}
+
+FormatWriterState::~FormatWriterState() {
+	// MemoryStream auto-cleans
+}
+
+void FormatWriterState::Reset() {
+	stream->Rewind();
+	written_anything = false;
+}
+
+//===--------------------------------------------------------------------===//
+// Format Writer Helper Functions
+//===--------------------------------------------------------------------===//
+void FlushFormatBuffer(FormatWriterState &local_state, CopyFileHandle &file, mutex &lock) {
+	if (!local_state.written_anything) {
+		return;
+	}
+	
+	lock_guard<mutex> glock(lock);
+	
+	// Write accumulated buffer to file
+	file.Write(local_state.stream->GetData(), local_state.stream->GetPosition());
+	
+	// Reset local buffer
+	local_state.Reset();
+}
+
+//===--------------------------------------------------------------------===//
 // CopyFileHandle Implementation
 //===--------------------------------------------------------------------===//
-CopyFileHandle::CopyFileHandle(FileSystem &fs, const string &path, bool use_compression_p)
-    : use_compression(use_compression_p) {
-	if (use_compression) {
-		gz_file = gzopen(path.c_str(), "wb");
-		if (!gz_file) {
-			throw IOException("Failed to open file for writing: %s", path);
-		}
-	} else {
-		auto flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW;
-		file_handle = fs.OpenFile(path, flags);
-	}
+CopyFileHandle::CopyFileHandle(FileSystem &fs, const string &path, FileCompressionType compression_p)
+    : compression(compression_p) {
+	auto flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW | 
+	             FileLockType::WRITE_LOCK | compression;
+	
+	// BufferedFileWriter handles both file opening and buffering
+	file_writer = make_uniq<BufferedFileWriter>(fs, path, flags);
 }
 
 CopyFileHandle::~CopyFileHandle() {
 	Close();
 }
 
-void CopyFileHandle::Write(const string &data) {
-	if (use_compression) {
-		if (gz_file) {
-			gzwrite(gz_file, data.c_str(), data.size());
-		}
-	} else {
-		if (file_handle) {
-			file_handle->Write((void *)data.c_str(), data.size());
-		}
+void CopyFileHandle::Write(const_data_ptr_t data, idx_t size) {
+	if (file_writer) {
+		file_writer->WriteData(data, size);
 	}
 }
 
+void CopyFileHandle::WriteString(const string &data) {
+	Write(const_data_ptr_cast(data.c_str()), data.size());
+}
+
 void CopyFileHandle::Close() {
-	if (use_compression) {
-		if (gz_file) {
-			gzclose(gz_file);
-			gz_file = nullptr;
-		}
-	} else {
-		if (file_handle) {
-			file_handle->Close();
-			file_handle.reset();
-		}
+	if (file_writer) {
+		file_writer->Close();
+		file_writer.reset();
 	}
 }
 
 //===--------------------------------------------------------------------===//
 // Common Helper Functions
 //===--------------------------------------------------------------------===//
-bool DetectCompression(const string &file_path, const Value &compression_param) {
+FileCompressionType DetectCompressionType(const string &file_path, const Value &compression_param) {
 	// Explicit parameter takes precedence
 	if (!compression_param.IsNull()) {
-		string comp_str = compression_param.ToString();
+		string comp_str = StringUtil::Lower(compression_param.ToString());
 		if (comp_str == "gzip" || comp_str == "gz") {
-			return true;
+			return FileCompressionType::GZIP;
+		} else if (comp_str == "zstd" || comp_str == "zst") {
+			return FileCompressionType::ZSTD;
 		} else if (comp_str == "none") {
-			return false;
+			return FileCompressionType::UNCOMPRESSED;
 		} else {
-			throw InvalidInputException("compression must be 'gzip', 'gz', or 'none'");
+			throw InvalidInputException("compression must be 'gzip', 'gz', 'zstd', 'zst', or 'none'");
 		}
 	}
 	
 	// Auto-detect from extension
-	return file_path.size() >= 3 && file_path.substr(file_path.size() - 3) == ".gz";
+	if (file_path.size() >= 3 && file_path.substr(file_path.size() - 3) == ".gz") {
+		return FileCompressionType::GZIP;
+	}
+	if (file_path.size() >= 4 && file_path.substr(file_path.size() - 4) == ".zst") {
+		return FileCompressionType::ZSTD;
+	}
+	
+	return FileCompressionType::UNCOMPRESSED;
 }
 
 string SubstituteOrientation(const string &path, const string &orientation) {
@@ -133,7 +164,7 @@ void CommonCopyParameters::ParseFromOptions(const case_insensitive_map_t<vector<
 		include_comment = include_comment_param.GetValue<bool>();
 	}
 	
-	use_compression = DetectCompression(file_path, compression_param);
+	compression = DetectCompressionType(file_path, compression_param);
 }
 
 //===--------------------------------------------------------------------===//

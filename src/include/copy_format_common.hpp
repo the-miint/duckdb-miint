@@ -2,7 +2,9 @@
 
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/common/file_system.hpp"
-#include <zlib.h>
+#include "duckdb/common/serializer/buffered_file_writer.hpp"
+#include "duckdb/common/serializer/memory_stream.hpp"
+#include "duckdb/common/enums/file_compression_type.hpp"
 
 namespace duckdb {
 
@@ -11,22 +13,41 @@ namespace duckdb {
 //===--------------------------------------------------------------------===//
 class CopyFileHandle {
 public:
-	CopyFileHandle(FileSystem &fs, const string &path, bool use_compression);
+	CopyFileHandle(FileSystem &fs, const string &path, FileCompressionType compression);
 	~CopyFileHandle();
 	
-	void Write(const string &data);
+	void Write(const_data_ptr_t data, idx_t size);
+	void WriteString(const string &data);
 	void Close();
 	
 private:
-	unique_ptr<FileHandle> file_handle;
-	gzFile gz_file = nullptr;
-	bool use_compression;
+	unique_ptr<BufferedFileWriter> file_writer;
+	FileCompressionType compression;
 };
+
+//===--------------------------------------------------------------------===//
+// Format Writer State (Per-Thread Buffer)
+//===--------------------------------------------------------------------===//
+struct FormatWriterState {
+	FormatWriterState(ClientContext &context, idx_t flush_size);
+	~FormatWriterState();
+	
+	void Reset();
+	
+	idx_t flush_size;
+	unique_ptr<MemoryStream> stream;
+	bool written_anything = false;
+};
+
+//===--------------------------------------------------------------------===//
+// Format Writer Helper Functions
+//===--------------------------------------------------------------------===//
+void FlushFormatBuffer(FormatWriterState &local_state, CopyFileHandle &file, mutex &lock);
 
 //===--------------------------------------------------------------------===//
 // Common Helper Functions
 //===--------------------------------------------------------------------===//
-bool DetectCompression(const string &file_path, const Value &compression_param);
+FileCompressionType DetectCompressionType(const string &file_path, const Value &compression_param);
 string SubstituteOrientation(const string &path, const string &orientation);
 bool HasOrientationPlaceholder(const string &path);
 
@@ -52,7 +73,8 @@ struct CommonCopyParameters {
 	bool interleave = false;
 	bool id_as_sequence_index = false;
 	bool include_comment = false;
-	bool use_compression = false;
+	FileCompressionType compression = FileCompressionType::UNCOMPRESSED;
+	idx_t flush_size = 1024 * 1024;  // 1MB default buffer size
 	
 	void ParseFromOptions(const case_insensitive_map_t<vector<Value>> &options,
 	                      const string &file_path);

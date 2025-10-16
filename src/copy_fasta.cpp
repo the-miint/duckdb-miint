@@ -15,7 +15,8 @@ struct FastaCopyBindData : public FunctionData {
 	bool interleave = false;
 	bool id_as_sequence_index = false;
 	bool include_comment = false;
-	bool use_compression = false;
+	FileCompressionType compression = FileCompressionType::UNCOMPRESSED;
+	idx_t flush_size = 1024 * 1024;
 	string file_path;
 	bool is_paired = false;
 	vector<string> names;
@@ -25,7 +26,8 @@ struct FastaCopyBindData : public FunctionData {
 		result->interleave = interleave;
 		result->id_as_sequence_index = id_as_sequence_index;
 		result->include_comment = include_comment;
-		result->use_compression = use_compression;
+		result->compression = compression;
+		result->flush_size = flush_size;
 		result->file_path = file_path;
 		result->is_paired = is_paired;
 		result->names = names;
@@ -37,7 +39,7 @@ struct FastaCopyBindData : public FunctionData {
 		return interleave == other.interleave &&
 		       id_as_sequence_index == other.id_as_sequence_index &&
 		       include_comment == other.include_comment &&
-		       use_compression == other.use_compression &&
+		       compression == other.compression &&
 		       file_path == other.file_path &&
 		       is_paired == other.is_paired;
 	}
@@ -85,7 +87,8 @@ static unique_ptr<FunctionData> FastaCopyBind(ClientContext &context, CopyFuncti
 	result->interleave = common_params.interleave;
 	result->id_as_sequence_index = common_params.id_as_sequence_index;
 	result->include_comment = common_params.include_comment;
-	result->use_compression = common_params.use_compression;
+	result->compression = common_params.compression;
+	result->flush_size = common_params.flush_size;
 	
 	// Validate paired-end parameters
 	ValidatePairedEndParameters(result->is_paired, has_interleave_param, result->interleave, result->file_path);
@@ -121,11 +124,11 @@ static unique_ptr<GlobalFunctionData> FastaCopyInitializeGlobal(ClientContext &c
 		string path_r1 = SubstituteOrientation(file_path, "R1");
 		string path_r2 = SubstituteOrientation(file_path, "R2");
 		
-		gstate->file_r1 = make_uniq<CopyFileHandle>(fs, path_r1, fdata.use_compression);
-		gstate->file_r2 = make_uniq<CopyFileHandle>(fs, path_r2, fdata.use_compression);
+		gstate->file_r1 = make_uniq<CopyFileHandle>(fs, path_r1, fdata.compression);
+		gstate->file_r2 = make_uniq<CopyFileHandle>(fs, path_r2, fdata.compression);
 	} else {
 		// Interleaved or single-end: open one file
-		gstate->file_r1 = make_uniq<CopyFileHandle>(fs, file_path, fdata.use_compression);
+		gstate->file_r1 = make_uniq<CopyFileHandle>(fs, file_path, fdata.compression);
 	}
 	
 	return std::move(gstate);
@@ -134,34 +137,46 @@ static unique_ptr<GlobalFunctionData> FastaCopyInitializeGlobal(ClientContext &c
 //===--------------------------------------------------------------------===//
 // Local State
 //===--------------------------------------------------------------------===//
-struct FastaCopyLocalState : public LocalFunctionData {};
+struct FastaCopyLocalState : public LocalFunctionData {
+	unique_ptr<FormatWriterState> writer_state_r1;
+	unique_ptr<FormatWriterState> writer_state_r2;  // For split paired-end
+};
 
 static unique_ptr<LocalFunctionData> FastaCopyInitializeLocal(ExecutionContext &context, FunctionData &bind_data) {
-	return make_uniq<FastaCopyLocalState>();
+	auto &fdata = bind_data.Cast<FastaCopyBindData>();
+	auto lstate = make_uniq<FastaCopyLocalState>();
+	
+	lstate->writer_state_r1 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
+	
+	if (fdata.is_paired && !fdata.interleave) {
+		lstate->writer_state_r2 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
+	}
+	
+	return std::move(lstate);
 }
 
 //===--------------------------------------------------------------------===//
 // Sink
 //===--------------------------------------------------------------------===//
-static void WriteFastaRecord(CopyFileHandle &file, const string &id, const string &seq, const string &comment) {
-	stringstream record;
-	record << ">" << id;
+static void WriteFastaRecordToBuffer(MemoryStream &stream, const string &id, const string &seq, const string &comment) {
+	// Build record string
+	string record = ">" + id;
 	if (!comment.empty()) {
-		record << " " << comment;
+		record += " " + comment;
 	}
-	record << "\n" << seq << "\n";
+	record += "\n" + seq + "\n";
 	
-	file.Write(record.str());
+	// Write to stream
+	stream.WriteData(const_data_ptr_cast(record.c_str()), record.size());
 }
 
 static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p,
-                          LocalFunctionData &lstate, DataChunk &input) {
+                          LocalFunctionData &lstate_p, DataChunk &input) {
 	auto &fdata = bind_data.Cast<FastaCopyBindData>();
 	auto &gstate = gstate_p.Cast<FastaCopyGlobalState>();
+	auto &lstate = lstate_p.Cast<FastaCopyLocalState>();
 	
-	lock_guard<mutex> glock(gstate.lock);
-	
-	// Get column indices
+	// Get column indices (no lock needed yet!)
 	ColumnIndices indices;
 	indices.FindIndices(fdata.names);
 	
@@ -188,6 +203,14 @@ static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 		input.data[indices.sequence2_idx].ToUnifiedFormat(input.size(), seq2_data);
 	}
 	
+	// Get references to local buffers
+	auto &stream_r1 = *lstate.writer_state_r1->stream;
+	MemoryStream *stream_r2 = nullptr;
+	if (is_paired && !fdata.interleave) {
+		stream_r2 = lstate.writer_state_r2->stream.get();
+	}
+	
+	// Build all records into local buffer(s) - NO LOCK
 	for (idx_t row = 0; row < input.size(); row++) {
 		auto row_idx = read_id_data.sel->get_index(row);
 		
@@ -215,8 +238,9 @@ static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 		auto seq1_row = seq1_data.sel->get_index(row);
 		string seq1 = seq1_strings[seq1_row].GetString();
 		
-		// Write R1 record
-		WriteFastaRecord(*gstate.file_r1, id, seq1, comment);
+		// Write R1 record to local buffer
+		WriteFastaRecordToBuffer(stream_r1, id, seq1, comment);
+		lstate.writer_state_r1->written_anything = true;
 		
 		// Handle R2 for paired-end
 		if (is_paired) {
@@ -225,22 +249,41 @@ static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 			string seq2 = seq2_strings[seq2_row].GetString();
 			
 			if (fdata.interleave) {
-				// Write R2 to same file
-				WriteFastaRecord(*gstate.file_r1, id, seq2, comment);
+				// Write R2 to same buffer
+				WriteFastaRecordToBuffer(stream_r1, id, seq2, comment);
 			} else {
-				// Write R2 to separate file
-				WriteFastaRecord(*gstate.file_r2, id, seq2, comment);
+				// Write R2 to separate buffer
+				WriteFastaRecordToBuffer(*stream_r2, id, seq2, comment);
+				lstate.writer_state_r2->written_anything = true;
 			}
 		}
+	}
+	
+	// Check if we need to flush (buffer exceeded threshold)
+	if (lstate.writer_state_r1->stream->GetPosition() >= lstate.writer_state_r1->flush_size) {
+		FlushFormatBuffer(*lstate.writer_state_r1, *gstate.file_r1, gstate.lock);
+	}
+	
+	if (stream_r2 && lstate.writer_state_r2->stream->GetPosition() >= lstate.writer_state_r2->flush_size) {
+		FlushFormatBuffer(*lstate.writer_state_r2, *gstate.file_r2, gstate.lock);
 	}
 }
 
 //===--------------------------------------------------------------------===//
 // Combine
 //===--------------------------------------------------------------------===//
-static void FastaCopyCombine(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate,
-                             LocalFunctionData &lstate) {
-	// No-op for FASTA
+static void FastaCopyCombine(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p,
+                             LocalFunctionData &lstate_p) {
+	auto &fdata = bind_data.Cast<FastaCopyBindData>();
+	auto &gstate = gstate_p.Cast<FastaCopyGlobalState>();
+	auto &lstate = lstate_p.Cast<FastaCopyLocalState>();
+	
+	// Flush any remaining data in local buffers
+	FlushFormatBuffer(*lstate.writer_state_r1, *gstate.file_r1, gstate.lock);
+	
+	if (fdata.is_paired && !fdata.interleave) {
+		FlushFormatBuffer(*lstate.writer_state_r2, *gstate.file_r2, gstate.lock);
+	}
 }
 
 //===--------------------------------------------------------------------===//

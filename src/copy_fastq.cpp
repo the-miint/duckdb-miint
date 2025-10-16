@@ -17,7 +17,8 @@ struct FastqCopyBindData : public FunctionData {
 	bool id_as_sequence_index = false;
 	bool include_comment = false;
 	uint8_t qual_offset = 33;
-	bool use_compression = false;
+	FileCompressionType compression = FileCompressionType::UNCOMPRESSED;
+	idx_t flush_size = 1024 * 1024;
 	string file_path;
 	bool is_paired = false;
 	vector<string> names;
@@ -28,7 +29,8 @@ struct FastqCopyBindData : public FunctionData {
 		result->id_as_sequence_index = id_as_sequence_index;
 		result->include_comment = include_comment;
 		result->qual_offset = qual_offset;
-		result->use_compression = use_compression;
+		result->compression = compression;
+		result->flush_size = flush_size;
 		result->file_path = file_path;
 		result->is_paired = is_paired;
 		result->names = names;
@@ -39,7 +41,7 @@ struct FastqCopyBindData : public FunctionData {
 		auto &other = other_p.Cast<FastqCopyBindData>();
 		return interleave == other.interleave && id_as_sequence_index == other.id_as_sequence_index &&
 		       include_comment == other.include_comment && qual_offset == other.qual_offset &&
-		       use_compression == other.use_compression && file_path == other.file_path && is_paired == other.is_paired;
+		       compression == other.compression && file_path == other.file_path && is_paired == other.is_paired;
 	}
 };
 
@@ -106,7 +108,8 @@ static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFuncti
 	result->interleave = common_params.interleave;
 	result->id_as_sequence_index = common_params.id_as_sequence_index;
 	result->include_comment = common_params.include_comment;
-	result->use_compression = common_params.use_compression;
+	result->compression = common_params.compression;
+	result->flush_size = common_params.flush_size;
 
 	// Validate paired-end parameters
 	ValidatePairedEndParameters(result->is_paired, has_interleave_param, result->interleave, result->file_path);
@@ -151,11 +154,11 @@ static unique_ptr<GlobalFunctionData> FastqCopyInitializeGlobal(ClientContext &c
 		string path_r1 = SubstituteOrientation(file_path, "R1");
 		string path_r2 = SubstituteOrientation(file_path, "R2");
 		
-		gstate->file_r1 = make_uniq<CopyFileHandle>(fs, path_r1, fdata.use_compression);
-		gstate->file_r2 = make_uniq<CopyFileHandle>(fs, path_r2, fdata.use_compression);
+		gstate->file_r1 = make_uniq<CopyFileHandle>(fs, path_r1, fdata.compression);
+		gstate->file_r2 = make_uniq<CopyFileHandle>(fs, path_r2, fdata.compression);
 	} else {
 		// Interleaved or single-end: open one file
-		gstate->file_r1 = make_uniq<CopyFileHandle>(fs, file_path, fdata.use_compression);
+		gstate->file_r1 = make_uniq<CopyFileHandle>(fs, file_path, fdata.compression);
 	}
 
 	return std::move(gstate);
@@ -164,35 +167,47 @@ static unique_ptr<GlobalFunctionData> FastqCopyInitializeGlobal(ClientContext &c
 //===--------------------------------------------------------------------===//
 // Local State
 //===--------------------------------------------------------------------===//
-struct FastqCopyLocalState : public LocalFunctionData {};
+struct FastqCopyLocalState : public LocalFunctionData {
+	unique_ptr<FormatWriterState> writer_state_r1;
+	unique_ptr<FormatWriterState> writer_state_r2;  // For split paired-end
+};
 
 static unique_ptr<LocalFunctionData> FastqCopyInitializeLocal(ExecutionContext &context, FunctionData &bind_data) {
-	return make_uniq<FastqCopyLocalState>();
+	auto &fdata = bind_data.Cast<FastqCopyBindData>();
+	auto lstate = make_uniq<FastqCopyLocalState>();
+	
+	lstate->writer_state_r1 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
+	
+	if (fdata.is_paired && !fdata.interleave) {
+		lstate->writer_state_r2 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
+	}
+	
+	return std::move(lstate);
 }
 
 //===--------------------------------------------------------------------===//
 // Sink
 //===--------------------------------------------------------------------===//
-static void WriteFastqRecord(CopyFileHandle &file, const string &id, const string &seq,
-                             const vector<uint8_t> &qual, uint8_t qual_offset, const string &comment) {
-	stringstream record;
-	record << "@" << id;
+static void WriteFastqRecordToBuffer(MemoryStream &stream, const string &id, const string &seq,
+                                     const vector<uint8_t> &qual, uint8_t qual_offset, const string &comment) {
+	// Build record string
+	string record = "@" + id;
 	if (!comment.empty()) {
-		record << " " << comment;
+		record += " " + comment;
 	}
-	record << "\n" << seq << "\n+\n" << EncodeQuality(qual, qual_offset) << "\n";
+	record += "\n" + seq + "\n+\n" + EncodeQuality(qual, qual_offset) + "\n";
 	
-	file.Write(record.str());
+	// Write to stream
+	stream.WriteData(const_data_ptr_cast(record.c_str()), record.size());
 }
 
 static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p,
-                          LocalFunctionData &lstate, DataChunk &input) {
+                          LocalFunctionData &lstate_p, DataChunk &input) {
 	auto &fdata = bind_data.Cast<FastqCopyBindData>();
 	auto &gstate = gstate_p.Cast<FastqCopyGlobalState>();
+	auto &lstate = lstate_p.Cast<FastqCopyLocalState>();
 
-	lock_guard<mutex> glock(gstate.lock);
-
-	// Get column indices
+	// Get column indices (no lock needed yet!)
 	ColumnIndices indices;
 	indices.FindIndices(fdata.names);
 
@@ -222,6 +237,14 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 		input.data[indices.qual2_idx].ToUnifiedFormat(input.size(), qual2_data);
 	}
 
+	// Get references to local buffers
+	auto &stream_r1 = *lstate.writer_state_r1->stream;
+	MemoryStream *stream_r2 = nullptr;
+	if (is_paired && !fdata.interleave) {
+		stream_r2 = lstate.writer_state_r2->stream.get();
+	}
+
+	// Build all records into local buffer(s) - NO LOCK
 	for (idx_t row = 0; row < input.size(); row++) {
 		auto row_idx = read_id_data.sel->get_index(row);
 
@@ -258,8 +281,9 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 			qual1_vec.push_back(qual1_list_data[qual1_entries[qual1_row].offset + i]);
 		}
 
-		// Write R1 record
-		WriteFastqRecord(*gstate.file_r1, id, seq1, qual1_vec, fdata.qual_offset, comment);
+		// Write R1 record to local buffer
+		WriteFastqRecordToBuffer(stream_r1, id, seq1, qual1_vec, fdata.qual_offset, comment);
+		lstate.writer_state_r1->written_anything = true;
 
 		// Handle R2 for paired-end
 		if (is_paired) {
@@ -277,22 +301,41 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 			}
 
 			if (fdata.interleave) {
-				// Write R2 to same file
-				WriteFastqRecord(*gstate.file_r1, id, seq2, qual2_vec, fdata.qual_offset, comment);
+				// Write R2 to same buffer
+				WriteFastqRecordToBuffer(stream_r1, id, seq2, qual2_vec, fdata.qual_offset, comment);
 			} else {
-				// Write R2 to separate file
-				WriteFastqRecord(*gstate.file_r2, id, seq2, qual2_vec, fdata.qual_offset, comment);
+				// Write R2 to separate buffer
+				WriteFastqRecordToBuffer(*stream_r2, id, seq2, qual2_vec, fdata.qual_offset, comment);
+				lstate.writer_state_r2->written_anything = true;
 			}
 		}
+	}
+
+	// Check if we need to flush (buffer exceeded threshold)
+	if (lstate.writer_state_r1->stream->GetPosition() >= lstate.writer_state_r1->flush_size) {
+		FlushFormatBuffer(*lstate.writer_state_r1, *gstate.file_r1, gstate.lock);
+	}
+
+	if (stream_r2 && lstate.writer_state_r2->stream->GetPosition() >= lstate.writer_state_r2->flush_size) {
+		FlushFormatBuffer(*lstate.writer_state_r2, *gstate.file_r2, gstate.lock);
 	}
 }
 
 //===--------------------------------------------------------------------===//
 // Combine
 //===--------------------------------------------------------------------===//
-static void FastqCopyCombine(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate,
-                             LocalFunctionData &lstate) {
-	// No-op for FASTQ
+static void FastqCopyCombine(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p,
+                             LocalFunctionData &lstate_p) {
+	auto &fdata = bind_data.Cast<FastqCopyBindData>();
+	auto &gstate = gstate_p.Cast<FastqCopyGlobalState>();
+	auto &lstate = lstate_p.Cast<FastqCopyLocalState>();
+	
+	// Flush any remaining data in local buffers
+	FlushFormatBuffer(*lstate.writer_state_r1, *gstate.file_r1, gstate.lock);
+	
+	if (fdata.is_paired && !fdata.interleave) {
+		FlushFormatBuffer(*lstate.writer_state_r2, *gstate.file_r2, gstate.lock);
+	}
 }
 
 //===--------------------------------------------------------------------===//

@@ -15,7 +15,8 @@ namespace duckdb {
 //===--------------------------------------------------------------------===//
 struct SAMCopyBindData : public FunctionData {
 	bool include_header = true;
-	bool use_compression = false;
+	FileCompressionType compression = FileCompressionType::UNCOMPRESSED;
+	idx_t flush_size = 1024 * 1024;
 	string file_path;
 	vector<string> names;
 	std::unordered_map<string, int64_t> reference_lengths;
@@ -23,7 +24,8 @@ struct SAMCopyBindData : public FunctionData {
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<SAMCopyBindData>();
 		result->include_header = include_header;
-		result->use_compression = use_compression;
+		result->compression = compression;
+		result->flush_size = flush_size;
 		result->file_path = file_path;
 		result->names = names;
 		result->reference_lengths = reference_lengths;
@@ -32,7 +34,7 @@ struct SAMCopyBindData : public FunctionData {
 
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<SAMCopyBindData>();
-		return include_header == other.include_header && use_compression == other.use_compression &&
+		return include_header == other.include_header && compression == other.compression &&
 		       file_path == other.file_path && reference_lengths == other.reference_lengths;
 	}
 };
@@ -191,7 +193,7 @@ static unique_ptr<FunctionData> SAMCopyBind(ClientContext &context, CopyFunction
 		if (StringUtil::CIEquals(option.first, "include_header")) {
 			result->include_header = option.second[0].GetValue<bool>();
 		} else if (StringUtil::CIEquals(option.first, "compression")) {
-			result->use_compression = DetectCompression(result->file_path, option.second[0]);
+			result->compression = DetectCompressionType(result->file_path, option.second[0]);
 		} else if (StringUtil::CIEquals(option.first, "reference_lengths")) {
 			const auto &map_value = option.second[0];
 			if (map_value.type().id() != LogicalTypeId::MAP) {
@@ -219,15 +221,16 @@ static unique_ptr<FunctionData> SAMCopyBind(ClientContext &context, CopyFunction
 	}
 
 	// Auto-detect compression from file extension if not specified
-	if (!result->use_compression) {
+	if (result->compression == FileCompressionType::UNCOMPRESSED) {
+		bool compression_specified = false;
 		for (auto &option : input.info.options) {
 			if (StringUtil::CIEquals(option.first, "compression")) {
-				result->use_compression = DetectCompression(result->file_path, option.second[0]);
+				compression_specified = true;
 				break;
 			}
 		}
-		if (!result->use_compression) {
-			result->use_compression = DetectCompression(result->file_path, Value());
+		if (!compression_specified) {
+			result->compression = DetectCompressionType(result->file_path, Value());
 		}
 	}
 
@@ -249,7 +252,7 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 	auto &fs = FileSystem::GetFileSystem(context);
 
 	auto gstate = make_uniq<SAMCopyGlobalState>();
-	gstate->file = make_uniq<CopyFileHandle>(fs, file_path, fdata.use_compression);
+	gstate->file = make_uniq<CopyFileHandle>(fs, file_path, fdata.compression);
 
 	return std::move(gstate);
 }
@@ -257,10 +260,17 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 //===--------------------------------------------------------------------===//
 // Local State
 //===--------------------------------------------------------------------===//
-struct SAMCopyLocalState : public LocalFunctionData {};
+struct SAMCopyLocalState : public LocalFunctionData {
+	unique_ptr<FormatWriterState> writer_state;
+};
 
 static unique_ptr<LocalFunctionData> SAMCopyInitializeLocal(ExecutionContext &context, FunctionData &bind_data) {
-	return make_uniq<SAMCopyLocalState>();
+	auto &fdata = bind_data.Cast<SAMCopyBindData>();
+	auto lstate = make_uniq<SAMCopyLocalState>();
+	
+	lstate->writer_state = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
+	
+	return std::move(lstate);
 }
 
 //===--------------------------------------------------------------------===//
@@ -397,9 +407,10 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 	                      ? UnifiedVectorFormat::GetData<string_t>(tag_sa_data)
 	                      : nullptr;
 
-	// Build records in local state
-	stringstream batch_output;
+	// Get reference to local buffer
+	auto &stream = *lstate.writer_state->stream;
 	
+	// Build records in local buffer - NO LOCK
 	for (idx_t i = 0; i < input.size(); i++) {
 		auto read_id_idx = read_id_data.sel->get_index(i);
 		auto flags_idx = flags_data.sel->get_index(i);
@@ -422,99 +433,140 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 		int64_t template_length = template_length_ptr[template_length_idx];
 
 		// Build SAM record: QNAME FLAG RNAME POS MAPQ CIGAR RNEXT PNEXT TLEN SEQ QUAL [TAGS]
-		batch_output << read_id << "\t" << flags << "\t" << reference << "\t" << position << "\t"
-		             << static_cast<int>(mapq) << "\t" << cigar << "\t" << mate_reference << "\t" << mate_position
-		             << "\t" << template_length << "\t*\t*";
+		stringstream record;
+		record << read_id << "\t" << flags << "\t" << reference << "\t" << position << "\t"
+		       << static_cast<int>(mapq) << "\t" << cigar << "\t" << mate_reference << "\t" << mate_position
+		       << "\t" << template_length << "\t*\t*";
 		// Add optional tags
 		if (tag_as_ptr && indices.tag_as_idx != DConstants::INVALID_INDEX) {
 			auto tag_idx = tag_as_data.sel->get_index(i);
 			if (tag_as_data.validity.RowIsValid(tag_idx)) {
-				batch_output << "\tAS:i:" << tag_as_ptr[tag_idx];
+				record << "\tAS:i:" << tag_as_ptr[tag_idx];
 			}
 		}
 		if (tag_xs_ptr && indices.tag_xs_idx != DConstants::INVALID_INDEX) {
 			auto tag_idx = tag_xs_data.sel->get_index(i);
 			if (tag_xs_data.validity.RowIsValid(tag_idx)) {
-				batch_output << "\tXS:i:" << tag_xs_ptr[tag_idx];
+				record << "\tXS:i:" << tag_xs_ptr[tag_idx];
 			}
 		}
 		if (tag_ys_ptr && indices.tag_ys_idx != DConstants::INVALID_INDEX) {
 			auto tag_idx = tag_ys_data.sel->get_index(i);
 			if (tag_ys_data.validity.RowIsValid(tag_idx)) {
-				batch_output << "\tYS:i:" << tag_ys_ptr[tag_idx];
+				record << "\tYS:i:" << tag_ys_ptr[tag_idx];
 			}
 		}
 		if (tag_xn_ptr && indices.tag_xn_idx != DConstants::INVALID_INDEX) {
 			auto tag_idx = tag_xn_data.sel->get_index(i);
 			if (tag_xn_data.validity.RowIsValid(tag_idx)) {
-				batch_output << "\tXN:i:" << tag_xn_ptr[tag_idx];
+				record << "\tXN:i:" << tag_xn_ptr[tag_idx];
 			}
 		}
 		if (tag_xm_ptr && indices.tag_xm_idx != DConstants::INVALID_INDEX) {
 			auto tag_idx = tag_xm_data.sel->get_index(i);
 			if (tag_xm_data.validity.RowIsValid(tag_idx)) {
-				batch_output << "\tXM:i:" << tag_xm_ptr[tag_idx];
+				record << "\tXM:i:" << tag_xm_ptr[tag_idx];
 			}
 		}
 		if (tag_xo_ptr && indices.tag_xo_idx != DConstants::INVALID_INDEX) {
 			auto tag_idx = tag_xo_data.sel->get_index(i);
 			if (tag_xo_data.validity.RowIsValid(tag_idx)) {
-				batch_output << "\tXO:i:" << tag_xo_ptr[tag_idx];
+				record << "\tXO:i:" << tag_xo_ptr[tag_idx];
 			}
 		}
 		if (tag_xg_ptr && indices.tag_xg_idx != DConstants::INVALID_INDEX) {
 			auto tag_idx = tag_xg_data.sel->get_index(i);
 			if (tag_xg_data.validity.RowIsValid(tag_idx)) {
-				batch_output << "\tXG:i:" << tag_xg_ptr[tag_idx];
+				record << "\tXG:i:" << tag_xg_ptr[tag_idx];
 			}
 		}
 		if (tag_nm_ptr && indices.tag_nm_idx != DConstants::INVALID_INDEX) {
 			auto tag_idx = tag_nm_data.sel->get_index(i);
 			if (tag_nm_data.validity.RowIsValid(tag_idx)) {
-				batch_output << "\tNM:i:" << tag_nm_ptr[tag_idx];
+				record << "\tNM:i:" << tag_nm_ptr[tag_idx];
 			}
 		}
 		if (tag_yt_ptr && indices.tag_yt_idx != DConstants::INVALID_INDEX) {
 			auto tag_idx = tag_yt_data.sel->get_index(i);
 			if (tag_yt_data.validity.RowIsValid(tag_idx)) {
-				batch_output << "\tYT:Z:" << tag_yt_ptr[tag_idx].GetString();
+				record << "\tYT:Z:" << tag_yt_ptr[tag_idx].GetString();
 			}
 		}
 		if (tag_md_ptr && indices.tag_md_idx != DConstants::INVALID_INDEX) {
 			auto tag_idx = tag_md_data.sel->get_index(i);
 			if (tag_md_data.validity.RowIsValid(tag_idx)) {
-				batch_output << "\tMD:Z:" << tag_md_ptr[tag_idx].GetString();
+				record << "\tMD:Z:" << tag_md_ptr[tag_idx].GetString();
 			}
 		}
 		if (tag_sa_ptr && indices.tag_sa_idx != DConstants::INVALID_INDEX) {
 			auto tag_idx = tag_sa_data.sel->get_index(i);
 			if (tag_sa_data.validity.RowIsValid(tag_idx)) {
-				batch_output << "\tSA:Z:" << tag_sa_ptr[tag_idx].GetString();
+				record << "\tSA:Z:" << tag_sa_ptr[tag_idx].GetString();
 			}
 		}
 
-		batch_output << "\n";
+		record << "\n";
+		
+		// Write record to local buffer
+		string record_str = record.str();
+		stream.WriteData(const_data_ptr_cast(record_str.c_str()), record_str.size());
+		lstate.writer_state->written_anything = true;
 	}
 
-	// Write to file with lock
-	lock_guard<mutex> glock(gstate.lock);
+	// Check if we need to flush (buffer exceeded threshold)
+	if (lstate.writer_state->stream->GetPosition() >= lstate.writer_state->flush_size) {
+		// Acquire lock only for writing
+		lock_guard<mutex> glock(gstate.lock);
+		
+		// Write header if needed (only first flush)
+		if (!gstate.header_written && fdata.include_header) {
+			stringstream header;
+			for (const auto &ref : fdata.reference_lengths) {
+				header << "@SQ\tSN:" << ref.first << "\tLN:" << ref.second << "\n";
+			}
+			gstate.file->WriteString(header.str());
+			gstate.header_written = true;
+		} else if (!gstate.header_written && !fdata.include_header) {
+			gstate.header_written = true;
+		}
+		
+		// Flush buffer (already holding lock, so write directly)
+		if (lstate.writer_state->written_anything) {
+			gstate.file->Write(lstate.writer_state->stream->GetData(), lstate.writer_state->stream->GetPosition());
+			lstate.writer_state->Reset();
+		}
+	}
+}
 
-	// Write header if needed
+//===--------------------------------------------------------------------===//
+// Combine
+//===--------------------------------------------------------------------===//
+static void SAMCopyCombine(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p,
+                           LocalFunctionData &lstate_p) {
+	auto &fdata = bind_data.Cast<SAMCopyBindData>();
+	auto &gstate = gstate_p.Cast<SAMCopyGlobalState>();
+	auto &lstate = lstate_p.Cast<SAMCopyLocalState>();
+	
+	// Acquire lock for header check and flush
+	lock_guard<mutex> glock(gstate.lock);
+	
+	// Write header if needed (only first combine)
 	if (!gstate.header_written && fdata.include_header) {
-		// Write @SQ headers for all references
 		stringstream header;
 		for (const auto &ref : fdata.reference_lengths) {
 			header << "@SQ\tSN:" << ref.first << "\tLN:" << ref.second << "\n";
 		}
-		gstate.file->Write(header.str());
+		gstate.file->WriteString(header.str());
 		gstate.header_written = true;
 	} else if (!gstate.header_written && !fdata.include_header) {
-		// Mark header as written even if not including it
 		gstate.header_written = true;
 	}
-
-	// Write batch
-	gstate.file->Write(batch_output.str());
+	
+	// Flush any remaining data in local buffer (already holding lock)
+	if (lstate.writer_state->written_anything) {
+		gstate.file->Write(lstate.writer_state->stream->GetData(), lstate.writer_state->stream->GetPosition());
+		lstate.writer_state->Reset();
+	}
 }
 
 //===--------------------------------------------------------------------===//
@@ -524,13 +576,13 @@ static void SAMCopyFinalize(ClientContext &context, FunctionData &bind_data, Glo
 	auto &fdata = bind_data.Cast<SAMCopyBindData>();
 	auto &gstate = gstate_p.Cast<SAMCopyGlobalState>();
 
-	// Write header if we haven't written anything yet and include_header is true
+	// Write header if we haven't written anything yet (empty file with header)
 	if (!gstate.header_written && fdata.include_header) {
 		stringstream header;
 		for (const auto &ref : fdata.reference_lengths) {
 			header << "@SQ\tSN:" << ref.first << "\tLN:" << ref.second << "\n";
 		}
-		gstate.file->Write(header.str());
+		gstate.file->WriteString(header.str());
 	}
 
 	gstate.file->Close();
@@ -545,6 +597,7 @@ CopyFunction CopySAMFunction::GetFunction() {
 	function.copy_to_initialize_global = SAMCopyInitializeGlobal;
 	function.copy_to_initialize_local = SAMCopyInitializeLocal;
 	function.copy_to_sink = SAMCopySink;
+	function.copy_to_combine = SAMCopyCombine;
 	function.copy_to_finalize = SAMCopyFinalize;
 	function.extension = "sam";
 

@@ -1,0 +1,198 @@
+# name: test/sql/copy_sam_compression.test
+# description: Test COPY FORMAT SAM with various compression options
+# group: [miint]
+
+require miint
+
+# Setup test data
+statement ok
+CREATE TABLE sam_test AS SELECT * FROM read_sam('data/sam/foo_has_header.sam');
+
+statement ok
+CREATE TABLE sam_tags_test AS SELECT * FROM read_sam('data/sam/foo_with_tags.sam');
+
+# Test 1: zstd compression with .zst extension (auto-detect)
+statement ok
+COPY sam_test TO '__TEST_DIR__/output_zstd.sam.zst' 
+(FORMAT SAM, REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
+
+query I
+SELECT COUNT(*) FROM read_sam('__TEST_DIR__/output_zstd.sam.zst');
+----
+4
+
+query IIIII
+SELECT read_id, flags, reference, position, mapq 
+FROM read_sam('__TEST_DIR__/output_zstd.sam.zst') ORDER BY read_id, position;
+----
+foo-1	0	G1234	2	60
+foo-2	0	G1234	2	60
+foo-3	99	G000144735	76020	1
+foo-3	147	G000144735	76146	1
+
+# Test 2: Explicit COMPRESSION='zstd'
+statement ok
+COPY sam_test TO '__TEST_DIR__/output_explicit_zstd.sam' 
+(FORMAT SAM, COMPRESSION 'zstd', REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
+
+query I
+SELECT COUNT(*) FROM read_sam('__TEST_DIR__/output_explicit_zstd.sam');
+----
+4
+
+query IIIII
+SELECT read_id, flags, reference, position, mapq 
+FROM read_sam('__TEST_DIR__/output_explicit_zstd.sam') ORDER BY read_id, position;
+----
+foo-1	0	G1234	2	60
+foo-2	0	G1234	2	60
+foo-3	99	G000144735	76020	1
+foo-3	147	G000144735	76146	1
+
+# Test 3: Explicit COMPRESSION='zst' (alternative name)
+statement ok
+COPY sam_test TO '__TEST_DIR__/output_zst.sam' 
+(FORMAT SAM, COMPRESSION 'zst', REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
+
+query IIIII
+SELECT read_id, flags, reference, position, mapq 
+FROM read_sam('__TEST_DIR__/output_zst.sam') ORDER BY read_id, position;
+----
+foo-1	0	G1234	2	60
+foo-2	0	G1234	2	60
+foo-3	99	G000144735	76020	1
+foo-3	147	G000144735	76146	1
+
+# Test 4: Explicit COMPRESSION='gzip'
+statement ok
+COPY sam_test TO '__TEST_DIR__/output_explicit_gzip.sam' 
+(FORMAT SAM, COMPRESSION 'gzip', REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
+
+query I
+SELECT COUNT(*) FROM read_sam('__TEST_DIR__/output_explicit_gzip.sam');
+----
+4
+
+query IIIII
+SELECT read_id, flags, reference, position, mapq 
+FROM read_sam('__TEST_DIR__/output_explicit_gzip.sam') ORDER BY read_id, position;
+----
+foo-1	0	G1234	2	60
+foo-2	0	G1234	2	60
+foo-3	99	G000144735	76020	1
+foo-3	147	G000144735	76146	1
+
+# Test 5: Explicit COMPRESSION='gz' (alternative name)
+statement ok
+COPY sam_test TO '__TEST_DIR__/output_gz.sam' 
+(FORMAT SAM, COMPRESSION 'gz', REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
+
+query IIIII
+SELECT read_id, flags, reference, position, mapq 
+FROM read_sam('__TEST_DIR__/output_gz.sam') ORDER BY read_id, position;
+----
+foo-1	0	G1234	2	60
+foo-2	0	G1234	2	60
+foo-3	99	G000144735	76020	1
+foo-3	147	G000144735	76146	1
+
+# Test 6: Explicit COMPRESSION='none' (overrides .gz extension)
+statement ok
+COPY sam_test TO '__TEST_DIR__/output_uncompressed.sam.gz' 
+(FORMAT SAM, COMPRESSION 'none', REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
+
+query I
+SELECT COUNT(*) FROM read_sam('__TEST_DIR__/output_uncompressed.sam.gz', reference_lengths = MAP{'G1234': 20, 'G000144735': 90});
+----
+4
+
+# Test 7: zstd with INCLUDE_HEADER=false
+statement ok
+COPY sam_test TO '__TEST_DIR__/no_header_zstd.sam.zst' 
+(FORMAT SAM, INCLUDE_HEADER false);
+
+query I
+SELECT COUNT(*) FROM read_sam('__TEST_DIR__/no_header_zstd.sam.zst', reference_lengths = MAP{'G1234': 20, 'G000144735': 90});
+----
+4
+
+# Test 8: zstd with tags preserved
+statement ok
+COPY sam_tags_test TO '__TEST_DIR__/with_tags_zstd.sam.zst' 
+(FORMAT SAM, REFERENCE_LENGTHS MAP{'G1234': 1000, 'G000144735': 100000});
+
+query IIIIII
+SELECT read_id, flags, reference, position, mapq, tag_as 
+FROM read_sam('__TEST_DIR__/with_tags_zstd.sam.zst') ORDER BY read_id;
+----
+tagged-1	0	G1234	10	60	100
+tagged-2	99	G000144735	1000	30	200
+
+# Test 9: Case-insensitive compression option
+statement ok
+COPY sam_test TO '__TEST_DIR__/output_case.sam' 
+(FORMAT SAM, COMPRESSION 'ZSTD', REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
+
+query IIIII
+SELECT read_id, flags, reference, position, mapq 
+FROM read_sam('__TEST_DIR__/output_case.sam') ORDER BY read_id, position;
+----
+foo-1	0	G1234	2	60
+foo-2	0	G1234	2	60
+foo-3	99	G000144735	76020	1
+foo-3	147	G000144735	76146	1
+
+# Test 10: Verify header preservation with compression
+statement ok
+COPY sam_test TO '__TEST_DIR__/header_check.sam.zst' 
+(FORMAT SAM, INCLUDE_HEADER true, REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
+
+query II
+SELECT read_id, cigar 
+FROM read_sam('__TEST_DIR__/header_check.sam.zst') ORDER BY read_id, position;
+----
+foo-1	10M
+foo-2	10M
+foo-3	150M
+foo-3	150M
+
+# Test 11: Verify mate information preservation with compression
+query IIII
+SELECT read_id, mate_reference, mate_position, template_length 
+FROM read_sam('__TEST_DIR__/header_check.sam.zst') WHERE read_id = 'foo-3' ORDER BY position;
+----
+foo-3	=	76146	276
+foo-3	=	76020	-276
+
+# Test 12: Error - invalid compression type
+statement error
+COPY sam_test TO '__TEST_DIR__/error.sam' 
+(FORMAT SAM, COMPRESSION 'invalid', REFERENCE_LENGTHS MAP{'G1234': 20});
+----
+compression must be
+
+# Test 13: Verify gzip backward compatibility (existing .gz auto-detect still works)
+statement ok
+COPY sam_test TO '__TEST_DIR__/backward_compat.sam.gz' 
+(FORMAT SAM, REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
+
+query I
+SELECT COUNT(*) FROM read_sam('__TEST_DIR__/backward_compat.sam.gz');
+----
+4
+
+query IIIII
+SELECT read_id, flags, reference, position, mapq 
+FROM read_sam('__TEST_DIR__/backward_compat.sam.gz') ORDER BY read_id, position;
+----
+foo-1	0	G1234	2	60
+foo-2	0	G1234	2	60
+foo-3	99	G000144735	76020	1
+foo-3	147	G000144735	76146	1
+
+# Cleanup
+statement ok
+DROP TABLE sam_test;
+
+statement ok
+DROP TABLE sam_tags_test;
