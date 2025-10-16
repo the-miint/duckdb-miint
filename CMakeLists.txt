@@ -20,8 +20,27 @@ find_package(Threads REQUIRED)
 # Find zstd for compression support (optional - build will succeed without it but zstd won't work)
 find_package(zstd QUIET)
 if(zstd_FOUND)
-    message(STATUS "Found zstd: enabling zstd compression support")
-    set(HAVE_LIBZSTD ON)
+    # Determine which target is available
+    if(TARGET zstd::libzstd_static)
+        set(ZSTD_TARGET zstd::libzstd_static)
+        set(HAVE_LIBZSTD ON)
+        message(STATUS "Found zstd: enabling zstd compression support (target: zstd::libzstd_static)")
+    elseif(TARGET zstd::libzstd_shared)
+        set(ZSTD_TARGET zstd::libzstd_shared)
+        set(HAVE_LIBZSTD ON)
+        message(STATUS "Found zstd: enabling zstd compression support (target: zstd::libzstd_shared)")
+    elseif(TARGET zstd::libzstd)
+        set(ZSTD_TARGET zstd::libzstd)
+        set(HAVE_LIBZSTD ON)
+        message(STATUS "Found zstd: enabling zstd compression support (target: zstd::libzstd)")
+    elseif(TARGET zstd)
+        set(ZSTD_TARGET zstd)
+        set(HAVE_LIBZSTD ON)
+        message(STATUS "Found zstd: enabling zstd compression support (target: zstd)")
+    else()
+        message(WARNING "zstd found but no known target available - disabling zstd support")
+        set(HAVE_LIBZSTD OFF)
+    endif()
 else()
     message(WARNING "zstd not found - building without zstd compression support")
     set(HAVE_LIBZSTD OFF)
@@ -96,7 +115,7 @@ target_link_libraries(${EXTENSION_NAME}
                       ZLIB::ZLIB
                       hts)
 if(HAVE_LIBZSTD)
-    target_link_libraries(${EXTENSION_NAME} zstd::libzstd_static)
+    target_link_libraries(${EXTENSION_NAME} ${ZSTD_TARGET})
 endif()
 
 target_link_libraries(${LOADABLE_EXTENSION_NAME}
@@ -104,7 +123,7 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       ZLIB::ZLIB
                       hts)
 if(HAVE_LIBZSTD)
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} zstd::libzstd_static)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} ${ZSTD_TARGET})
 endif()
 
 install(
@@ -140,6 +159,6 @@ target_link_libraries(tests
   hts
 )
 if(HAVE_LIBZSTD)
-    target_link_libraries(tests zstd::libzstd_static)
+    target_link_libraries(tests ${ZSTD_TARGET})
 endif()
 target_include_directories(tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_BINARY_DIR}/htslib/include)

@@ -4,6 +4,8 @@
 
 require miint
 
+require parquet
+
 # Setup test data
 statement ok
 CREATE TABLE test_single AS SELECT * FROM read_fastx('data/fastq/small_a.fq');

@@ -4,6 +4,8 @@
 
 require miint
 
+require parquet
+
 # Setup test data
 statement ok
 CREATE TABLE sam_test AS SELECT * FROM read_sam('data/sam/foo_has_header.sam');

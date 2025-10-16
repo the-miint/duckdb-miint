@@ -4,6 +4,8 @@
 
 require miint
 
+require parquet
+
 # Setup test data
 statement ok
 CREATE TABLE test_fasta_single AS SELECT sequence_index, read_id, comment, sequence1 FROM read_fastx('data/fastq/test.fa');
