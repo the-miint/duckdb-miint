@@ -135,6 +135,76 @@ WHERE tag_nm IS NOT NULL AND tag_md IS NOT NULL;
 
 **Reference:** [On the definition of sequence identity](https://lh3.github.io/2018/11/25/on-the-definition-of-sequence-identity) by Heng Li
 
+### `compress_intervals(start, stop)`
+
+Aggregate function that merges overlapping genomic intervals into a minimal set of non-overlapping intervals. Useful for computing coverage regions, reducing redundant intervals, and analyzing read depth.
+
+**Parameters:**
+- `start` (BIGINT): Start position of interval
+- `stop` (BIGINT): Stop position of interval
+
+**Returns:** `LIST<STRUCT(start BIGINT, stop BIGINT)>` - Array of merged intervals, sorted by start position
+
+**Behavior:**
+- Intervals that overlap or touch (stop₁ = start₂) are merged into a single interval
+- Automatically compresses state when accumulating >1M intervals (prevents memory issues)
+- Thread-safe: works correctly with parallel GROUP BY operations
+- Returns NULL for empty groups
+
+**Examples:**
+```sql
+-- Calculate coverage regions per reference from SAM alignments
+SELECT reference, 
+       compress_intervals(position, stop_position) AS coverage
+FROM read_sam('alignments.sam')
+GROUP BY reference;
+
+-- Count number of distinct coverage regions per reference
+SELECT reference,
+       LEN(compress_intervals(position, stop_position)) AS num_regions
+FROM read_sam('alignments.bam')
+GROUP BY reference;
+
+-- Calculate total covered bases per reference
+SELECT reference,
+       SUM(c.stop - c.start) AS total_coverage
+FROM (
+  SELECT reference,
+         UNNEST(compress_intervals(position, stop_position)) AS c
+  FROM read_sam('alignments.bam')
+  GROUP BY reference
+);
+
+-- Find gaps in coverage (regions with no reads)
+WITH coverage AS (
+  SELECT reference,
+         UNNEST(compress_intervals(position, stop_position)) AS interval
+  FROM read_sam('alignments.bam')
+  GROUP BY reference
+)
+SELECT reference,
+       interval.stop AS gap_start,
+       LEAD(interval.start) OVER (PARTITION BY reference ORDER BY interval.start) AS gap_end
+FROM coverage
+WHERE LEAD(interval.start) OVER (PARTITION BY reference ORDER BY interval.start) IS NOT NULL;
+
+-- Merge overlapping genomic features from different sources
+CREATE TABLE features AS
+  SELECT 'gene1' AS name, 'genome1' AS ref, 1000 AS start, 2000 AS stop
+  UNION ALL SELECT 'gene2', 'genome1', 1500, 2500
+  UNION ALL SELECT 'gene3', 'genome1', 3000, 4000;
+
+SELECT ref,
+       compress_intervals(start, stop) AS merged_regions
+FROM features
+GROUP BY ref;
+```
+
+**Performance Notes:**
+- Automatic periodic compression at 1M intervals prevents memory bloat with large datasets
+- Multi-threaded aggregation: each thread maintains its own state, merged at finalization
+- Algorithm: sorts intervals by start position, then single-pass merge (O(n log n))
+
 ## COPY Formats
 
 DuckDB miint provides custom COPY formats for writing bioinformatics file formats.
@@ -239,23 +309,23 @@ Write query results to SAM format files. Requires all mandatory SAM columns from
 
 **Parameters:**
 - `INCLUDE_HEADER` (default: true): Include @SQ header lines with reference sequences
-- `REFERENCE_LENGTHS` (required if INCLUDE_HEADER=true): MAP of reference names to their lengths (e.g., `MAP{'chr1': 248956422, 'chr2': 242193529}`)
+- `REFERENCE_LENGTHS` (required if INCLUDE_HEADER=true): MAP of reference names to their lengths (e.g., `MAP{'genome1': 248956422, 'genome2': 242193529}`)
 - `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension)
 
 **Examples:**
 ```sql
 -- Basic SAM output with header (requires reference lengths)
 COPY (SELECT * FROM read_sam('input.sam'))
-TO 'output.sam' (FORMAT SAM, REFERENCE_LENGTHS MAP{'chr1': 248956422, 'chr2': 242193529});
+TO 'output.sam' (FORMAT SAM, REFERENCE_LENGTHS MAP{'genome1': 248956422, 'genome2': 242193529});
 
 -- Using a variable for reference lengths (recommended for reuse)
-SET VARIABLE my_refs = MAP{'chr1': 248956422, 'chr2': 242193529};
+SET VARIABLE my_refs = MAP{'genome1': 248956422, 'genome2': 242193529};
 COPY (SELECT * FROM read_sam('input.sam'))
 TO 'output.sam' (FORMAT SAM, REFERENCE_LENGTHS getvariable('my_refs'));
 
 -- Constructing reference lengths from a query/table
-CREATE TABLE refs AS SELECT 'chr1' as name, 248956422 as length 
-                     UNION ALL SELECT 'chr2', 242193529;
+CREATE TABLE refs AS SELECT 'genome1' as name, 248956422 as length 
+                     UNION ALL SELECT 'genome2', 242193529;
 SET VARIABLE ref_map = (SELECT MAP(LIST(name), LIST(length)) FROM refs);
 COPY (SELECT * FROM read_sam('input.sam'))
 TO 'output.sam' (FORMAT SAM, REFERENCE_LENGTHS getvariable('ref_map'));
@@ -266,7 +336,7 @@ TO 'output.sam' (FORMAT SAM, INCLUDE_HEADER false);
 
 -- Compressed SAM output with header
 COPY (SELECT * FROM read_sam('input.sam'))
-TO 'output.sam.gz' (FORMAT SAM, COMPRESSION gzip, REFERENCE_LENGTHS MAP{'chr1': 248956422});
+TO 'output.sam.gz' (FORMAT SAM, COMPRESSION gzip, REFERENCE_LENGTHS MAP{'genome1': 248956422});
 
 -- Filter and write high-quality alignments (headerless)
 COPY (

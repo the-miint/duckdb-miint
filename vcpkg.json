@@ -1,6 +1,7 @@
 {
         "dependencies": [
-                "openssl"
+                "openssl",
+                "zstd"
         ],
         "vcpkg-configuration": {
                 "overlay-ports": [

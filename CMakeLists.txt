@@ -17,6 +17,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(ZLIB)
 find_package(Threads REQUIRED)
 
+# Find zstd for compression support (optional - build will succeed without it but zstd won't work)
+find_package(zstd QUIET)
+if(zstd_FOUND)
+    message(STATUS "Found zstd: enabling zstd compression support")
+    set(HAVE_LIBZSTD ON)
+else()
+    message(WARNING "zstd not found - building without zstd compression support")
+    set(HAVE_LIBZSTD OFF)
+endif()
+
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
@@ -25,10 +35,18 @@ project(${TARGET_NAME})
 include(ExternalProject)
 
 # Build htslib from release tarball
+# Configure with zstd support if available (htslib autodetects via pkg-config)
+if(HAVE_LIBZSTD)
+    # Set PKG_CONFIG_PATH so htslib configure can find zstd
+    set(HTSLIB_PKG_CONFIG_PATH "PKG_CONFIG_PATH=${CMAKE_CURRENT_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib/pkgconfig")
+else()
+    set(HTSLIB_PKG_CONFIG_PATH "")
+endif()
+
 ExternalProject_Add(
     htslib_build
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1
-    CONFIGURE_COMMAND env CFLAGS=-fPIC ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1/configure
+    CONFIGURE_COMMAND env CFLAGS=-fPIC ${HTSLIB_PKG_CONFIG_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1/configure
         --prefix=${CMAKE_CURRENT_BINARY_DIR}/htslib
         --disable-libcurl
         --disable-bz2
@@ -62,6 +80,8 @@ set(EXTENSION_SOURCES
     src/SAMReader.cpp
     src/alignment_flag_functions.cpp
     src/alignment_functions.cpp
+    src/IntervalCompressor.cpp
+    src/compress_intervals.cpp
     src/copy_format_common.cpp
     src/copy_fastq.cpp
     src/copy_fasta.cpp
@@ -75,10 +95,17 @@ target_link_libraries(${EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
                       hts)
+if(HAVE_LIBZSTD)
+    target_link_libraries(${EXTENSION_NAME} zstd::libzstd_static)
+endif()
+
 target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
                       hts)
+if(HAVE_LIBZSTD)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} zstd::libzstd_static)
+endif()
 
 install(
   TARGETS ${EXTENSION_NAME}
@@ -100,6 +127,8 @@ set(TEST_SOURCES
     src/SAMReader.cpp
     test/cpp/test_SAMReader.cpp
     test/cpp/test_AlignmentFunctions.cpp
+    src/IntervalCompressor.cpp
+    test/cpp/test_IntervalCompressor.cpp
 )
 
 add_executable(tests ${TEST_SOURCES})
@@ -110,4 +139,7 @@ target_link_libraries(tests
   ZLIB::ZLIB
   hts
 )
+if(HAVE_LIBZSTD)
+    target_link_libraries(tests zstd::libzstd_static)
+endif()
 target_include_directories(tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_BINARY_DIR}/htslib/include)

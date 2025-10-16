@@ -3,6 +3,7 @@
 #include "miint_extension.hpp"
 #include <alignment_flag_functions.hpp>
 #include <alignment_functions.hpp>
+#include <compress_intervals.hpp>
 #include <copy_fasta.hpp>
 #include <copy_fastq.hpp>
 #include <copy_sam.hpp>
@@ -26,6 +27,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	AlignmentFlagFunctions::Register(loader);
 	AlignmentSeqIdentityFunction::Register(loader);
+	CompressIntervalsFunction::Register(loader);
 	
 	// Register COPY functions
 	loader.RegisterFunction(CopyFastqFunction::GetFunction());

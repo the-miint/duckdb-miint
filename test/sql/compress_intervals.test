@@ -1,0 +1,110 @@
+# name: test/sql/compress_intervals.test
+# description: Test compress_intervals aggregate function
+# group: [sql]
+
+require miint
+
+statement ok
+CREATE TABLE intervals (id INT, start BIGINT, stop BIGINT);
+
+# Test 1: Non-overlapping intervals
+statement ok
+INSERT INTO intervals VALUES (1, 10, 20), (1, 100, 120), (1, 200, 220);
+
+query I
+SELECT compress_intervals(start, stop) FROM intervals WHERE id = 1;
+----
+[{'start': 10, 'stop': 20}, {'start': 100, 'stop': 120}, {'start': 200, 'stop': 220}]
+
+# Test 2: Fully overlapping intervals (merges to single interval)
+statement ok
+DELETE FROM intervals;
+
+statement ok
+INSERT INTO intervals VALUES (2, 10, 110), (2, 100, 220), (2, 200, 300);
+
+query I
+SELECT compress_intervals(start, stop) FROM intervals WHERE id = 2;
+----
+[{'start': 10, 'stop': 300}]
+
+# Test 3: Partially overlapping intervals
+statement ok
+DELETE FROM intervals;
+
+statement ok
+INSERT INTO intervals VALUES (3, 10, 50), (3, 40, 80), (3, 100, 150);
+
+query I
+SELECT compress_intervals(start, stop) FROM intervals WHERE id = 3;
+----
+[{'start': 10, 'stop': 80}, {'start': 100, 'stop': 150}]
+
+# Test 4: Empty result
+query I
+SELECT compress_intervals(start, stop) FROM intervals WHERE id = 999;
+----
+NULL
+
+# Test 5: Single interval
+statement ok
+DELETE FROM intervals;
+
+statement ok
+INSERT INTO intervals VALUES (5, 42, 100);
+
+query I
+SELECT compress_intervals(start, stop) FROM intervals WHERE id = 5;
+----
+[{'start': 42, 'stop': 100}]
+
+# Test 6: GROUP BY multiple groups
+statement ok
+DELETE FROM intervals;
+
+statement ok
+INSERT INTO intervals VALUES 
+	(1, 10, 20), (1, 15, 25), (1, 30, 40),
+	(2, 100, 110), (2, 200, 210);
+
+query II
+SELECT id, compress_intervals(start, stop) FROM intervals GROUP BY id ORDER BY id;
+----
+1	[{'start': 10, 'stop': 25}, {'start': 30, 'stop': 40}]
+2	[{'start': 100, 'stop': 110}, {'start': 200, 'stop': 210}]
+
+# Test 7: NULL values (should be ignored)
+statement ok
+DELETE FROM intervals;
+
+statement ok
+INSERT INTO intervals VALUES (7, 10, 20), (7, NULL, 30), (7, 40, NULL), (7, 50, 60);
+
+query I
+SELECT compress_intervals(start, stop) FROM intervals WHERE id = 7;
+----
+[{'start': 10, 'stop': 20}, {'start': 50, 'stop': 60}]
+
+# Test 8: Touching intervals (should merge)
+statement ok
+DELETE FROM intervals;
+
+statement ok
+INSERT INTO intervals VALUES (8, 10, 20), (8, 20, 30), (8, 30, 40);
+
+query I
+SELECT compress_intervals(start, stop) FROM intervals WHERE id = 8;
+----
+[{'start': 10, 'stop': 40}]
+
+# Test 9: Unsorted input (function should handle)
+statement ok
+DELETE FROM intervals;
+
+statement ok
+INSERT INTO intervals VALUES (9, 200, 220), (9, 10, 20), (9, 100, 120);
+
+query I
+SELECT compress_intervals(start, stop) FROM intervals WHERE id = 9;
+----
+[{'start': 10, 'stop': 20}, {'start': 100, 'stop': 120}, {'start': 200, 'stop': 220}]
