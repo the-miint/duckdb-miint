@@ -1,0 +1,86 @@
+# name: test/sql/woltka.test
+# description: Test woltka OGU table construction
+# group: [sql]
+
+require miint
+
+require parquet
+
+# Setup test data
+statement ok
+CREATE TABLE test_sam_data AS SELECT * FROM read_parquet('data/sam/miint-woltka-test.parquet');
+
+statement ok
+CREATE TABLE mock_lengths AS SELECT DISTINCT reference, 10000000 AS length FROM test_sam_data;
+
+statement ok
+COPY (SELECT * FROM test_sam_data) 
+TO '__TEST_DIR__/test_woltka_sam_data.sam' (FORMAT SAM, INCLUDE_HEADER false);
+
+# Test against woltka produced outputs
+# woltka classify ... --no-demux --digits 10
+query II
+SELECT * FROM woltka_ogu(test_sam_data, read_id) order by value;
+----
+H000003450	477.800                           
+H000000556	849.086                           
+G002234575	1302.833                           
+H000003668	1468.333
+H000000425	2165.002                           
+H000000962	6509.969                           
+G012273055	6638.369                           
+H000001008	15743.819                           
+G025152275	17770.333                           
+G000156075	30911.302                           
+G016766915	58468.152                           
+
+# Test against woltka produced outputs per sample
+# woltka classify ... --no-demux --digits 10
+query III
+SELECT * FROM woltka_ogu_per_sample(test_sam_data, common_sample_name, read_id) order by sample_id, value;
+----
+bar	H000003450	477.800
+bar	H000000556	847.669
+bar	G002234575	1302.833
+bar	H000003668	1468.333
+bar	H000000425	2163.086
+bar	H000000962	6507.302
+bar	G012273055	6633.619
+bar	H000001008	15730.569
+bar	G025152275	17768.333
+bar	G000156075	30901.802
+bar	G016766915	58452.652 
+foo	H000000556	1.417
+foo	H000000425	1.917
+foo	G025152275	2.000
+foo	H000000962	2.667
+foo	G012273055	4.750
+foo	G000156075	9.500
+foo	H000001008	13.250
+foo	G016766915	15.500
+
+# Test direct from headerless SAM
+statement ok
+CREATE TABLE from_sam AS FROM read_sam('__TEST_DIR__/test_woltka_sam_data.sam', reference_lengths='mock_lengths');
+
+query II
+SELECT * FROM woltka_ogu(from_sam, read_id) order by value;
+----
+H000003450	477.800                           
+H000000556	849.086                           
+G002234575	1302.833                           
+H000003668	1468.333
+H000000425	2165.002                           
+H000000962	6509.969                           
+G012273055	6638.369                           
+H000001008	15743.819                           
+G025152275	17770.333                           
+G000156075	30911.302                           
+G016766915	58468.152                           
+
+# Cleanup
+statement ok
+DROP TABLE test_sam_data;
+
+statement ok
+DROP TABLE mock_lengths;
