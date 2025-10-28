@@ -16,7 +16,7 @@ struct FastaCopyBindData : public FunctionData {
 	bool id_as_sequence_index = false;
 	bool include_comment = false;
 	FileCompressionType compression = FileCompressionType::UNCOMPRESSED;
-	idx_t flush_size = 1024 * 1024;
+	idx_t flush_size = 1024 * 1024; // NOLINT
 	string file_path;
 	bool is_paired = false;
 	vector<string> names;
@@ -312,4 +312,7 @@ CopyFunction CopyFastaFunction::GetFunction() {
 	return func;
 }
 
-} // namespace duckdb
+void CopyFastaFunction::Register(ExtensionLoader &loader) {
+	loader.RegisterFunction(GetFunction());
+}
+}; // namespace duckdb

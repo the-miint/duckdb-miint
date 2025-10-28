@@ -18,7 +18,7 @@ struct FastqCopyBindData : public FunctionData {
 	bool include_comment = false;
 	uint8_t qual_offset = 33;
 	FileCompressionType compression = FileCompressionType::UNCOMPRESSED;
-	idx_t flush_size = 1024 * 1024;
+	idx_t flush_size = 1024 * 1024; // NOLINT
 	string file_path;
 	bool is_paired = false;
 	vector<string> names;
@@ -365,6 +365,10 @@ CopyFunction CopyFastqFunction::GetFunction() {
 	func.copy_to_combine = FastqCopyCombine;
 	func.copy_to_finalize = FastqCopyFinalize;
 	return func;
+}
+
+void CopyFastqFunction::Register(ExtensionLoader &loader) {
+	loader.RegisterFunction(GetFunction());
 }
 
 } // namespace duckdb

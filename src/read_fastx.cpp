@@ -2,6 +2,7 @@
 #include "SequenceRecord.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include <read_fastx.hpp>
 
 namespace duckdb {
@@ -302,5 +303,9 @@ TableFunction ReadFastxTableFunction::GetFunction() {
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
 	tf.named_parameters["qual_offset"] = LogicalType::BIGINT;
 	return tf;
+}
+
+void ReadFastxTableFunction::Register(ExtensionLoader &loader) {
+	loader.RegisterFunction(GetFunction());
 }
 }; // namespace duckdb

@@ -19,7 +19,7 @@ namespace duckdb {
 struct SAMCopyBindData : public FunctionData {
 	bool include_header = true;
 	FileCompressionType compression = FileCompressionType::UNCOMPRESSED;
-	idx_t flush_size = 1024 * 1024;
+	idx_t flush_size = 1024 * 1024; // NOLINT
 	string file_path;
 	vector<string> names;
 	std::optional<string> reference_lengths_table;
@@ -599,6 +599,10 @@ CopyFunction CopySAMFunction::GetFunction() {
 	function.extension = "sam";
 
 	return function;
+}
+
+void CopySAMFunction::Register(ExtensionLoader &loader) {
+	loader.RegisterFunction(GetFunction());
 }
 
 } // namespace duckdb

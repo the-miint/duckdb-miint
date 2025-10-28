@@ -299,4 +299,9 @@ TableFunction ReadSAMTableFunction::GetFunction() {
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
 	return tf;
 }
+
+void ReadSAMTableFunction::Register(ExtensionLoader &loader) {
+	loader.RegisterFunction(GetFunction());
+}
+
 }; // namespace duckdb
