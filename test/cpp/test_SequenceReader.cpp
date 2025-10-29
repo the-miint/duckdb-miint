@@ -221,6 +221,7 @@ TEST_CASE("SequenceReader large batch size", "[SequenceReader]") {
 	TempFileFixture fixture;
 	auto path = "large_batch.fq";
 	std::vector<std::string> records;
+	records.reserve(10000);
 	for (int i = 0; i < 10000; i++) {
 		records.push_back(fixture.simple_read("read" + std::to_string(i), "ACGT", "IIII"));
 	}

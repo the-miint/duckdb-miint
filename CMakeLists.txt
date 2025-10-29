@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.15)
 include(FetchContent)   # <--- REQUIRED for FetchContent_Declare!
 
 # Set extension name here
@@ -16,6 +16,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Note that it should also be removed from vcpkg.json to prevent needlessly installing it..
 find_package(ZLIB REQUIRED)
 find_package(Threads REQUIRED)
+find_package(HDF5 REQUIRED COMPONENTS CXX)
 
 # Find zstd for compression support (optional - build will succeed without it but zstd won't work)
 find_package(zstd QUIET)
@@ -178,6 +179,10 @@ set(TEST_SOURCES
     test/cpp/test_AlignmentFunctions.cpp
     src/IntervalCompressor.cpp
     test/cpp/test_IntervalCompressor.cpp
+    src/BIOMTable.cpp
+    src/BIOMReader.cpp
+    test/cpp/test_BIOMReader.cpp
+    test/cpp/test_BIOMTable.cpp
 )
 
 add_executable(tests ${TEST_SOURCES})
@@ -187,6 +192,7 @@ target_link_libraries(tests
   Threads::Threads
   ZLIB::ZLIB
   hts
+  HDF5::HDF5
 )
 if(HAVE_LIBZSTD)
     target_link_libraries(tests ${ZSTD_TARGET})
