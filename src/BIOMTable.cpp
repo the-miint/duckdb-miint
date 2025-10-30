@@ -105,7 +105,8 @@ void BIOMTable::InitCOOFromCSC(const std::vector<int32_t> &indptr, const std::ve
 		}
 	}
 
-	compress_coo();
+	// Skip compress_coo() since BIOM files are already in canonical form
+	// (sorted by row then column, no duplicates, no zeros)
 	coo_sample_indices_as_ids = indices_to_ids(coo_sample_indices, sample_ids_ordered);
 	coo_feature_indices_as_ids = indices_to_ids(coo_feature_indices, feature_ids_ordered);
 }

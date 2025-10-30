@@ -188,7 +188,7 @@ S5	10.0
 S6	14.0
 
 # Performance test with large files (if available)
-#query I
-#SELECT COUNT(*) FROM read_biom('data/biom/large_table.biom');
-#----
-#13052393
+query I
+SELECT COUNT(*) FROM read_biom('data/biom/large_table1.biom');
+----
+13052393

@@ -101,12 +101,10 @@ void ReadBIOMTableFunction::SetResultVectorString(Vector &result_vector, const m
                                                   const size_t &n_rows) {
 	auto result_data = FlatVector::GetData<string_t>(result_vector);
 
-	std::vector<std::string> current_names;
-	if (field == miint::BIOMTableField::SAMPLE_ID) {
-		current_names = record.COOSamples();
-	} else if (field == miint::BIOMTableField::FEATURE_ID) {
-		current_names = record.COOFeatures();
-	}
+	// Use const reference to avoid copying the entire string vector
+	const auto &current_names = (field == miint::BIOMTableField::SAMPLE_ID)
+	                            ? record.COOSamples()
+	                            : record.COOFeatures();
 
 	for (size_t i = 0; i < n_rows; i++) {
 		result_data[i] = StringVector::AddString(result_vector, current_names[current_row + i]);
