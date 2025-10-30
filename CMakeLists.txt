@@ -135,6 +135,9 @@ set(EXTENSION_SOURCES
     src/copy_fastq.cpp
     src/copy_fasta.cpp
     src/copy_sam.cpp
+    src/BIOMTable.cpp
+    src/BIOMReader.cpp
+    src/read_biom.cpp
     src/reference_table_reader.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
@@ -144,7 +147,9 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 target_link_libraries(${EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
-                      hts)
+                      hts
+                      HDF5::HDF5
+)
 if(HAVE_LIBZSTD)
     target_link_libraries(${EXTENSION_NAME} ${ZSTD_TARGET})
 endif()
@@ -152,7 +157,9 @@ endif()
 target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
-                      hts)
+                      hts
+                      HDF5::HDF5
+)
 if(HAVE_LIBZSTD)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} ${ZSTD_TARGET})
 endif()

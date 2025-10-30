@@ -1,4 +1,5 @@
 #include "BIOMReader.hpp"
+#include <iostream>
 
 namespace miint {
 
@@ -21,6 +22,36 @@ BIOMReader::BIOMReader(const std::string &path1) {
 }
 
 BIOMTable BIOMReader::read() const {
-	return BIOMTable(ds_indices, ds_indptr, ds_data, ds_samp_ids, ds_obs_ids);
+	return BIOMTable(ds_indices, ds_indptr, ds_data, ds_obs_ids, ds_samp_ids);
+}
+
+bool BIOMReader::IsBIOM(const std::string &path) {
+	std::string target = "format-version";
+	bool valid = false;
+	H5::Exception::dontPrint();
+
+	try {
+		auto file = H5::H5File(path, H5F_ACC_RDONLY);
+
+		H5::Group root = file.openGroup("/");
+		int num_attrs = root.getNumAttrs();
+
+		for (int i = 0; i < num_attrs; i++) {
+			H5::Attribute attr = root.openAttribute(i);
+			std::string attr_name = attr.getName();
+			if (attr_name == target) {
+				int values[2];
+				attr.read(H5::PredType::NATIVE_INT, &values);
+
+				if (values[0] == 2) {
+					valid = true;
+					break;
+				}
+			}
+		}
+	} catch (H5::Exception &e) {
+		return false;
+	}
+	return valid;
 }
 } // namespace miint

@@ -3,18 +3,21 @@
 
 namespace miint {
 
+enum class BIOMTableField { SAMPLE_ID = 0, FEATURE_ID, VALUE };
+
 class BIOMTable {
 public:
 	BIOMTable(const H5::DataSet &indices, const H5::DataSet &indptr, const H5::DataSet &data,
 	          const H5::DataSet &obs_ids, const H5::DataSet &samp_ids);
 	BIOMTable(const std::vector<std::string> &feature_ids, const std::vector<std::string> &sample_ids,
 	          const std::vector<double> &values);
+	BIOMTable();
 	uint32_t nnz(); // not const as it implicitly calls compress_coo
-	std::vector<std::string> COOFeatures() const;
-	std::vector<size_t> COOFeatureIndices() const;
-	std::vector<std::string> COOSamples() const;
-	std::vector<size_t> COOSampleIndices() const;
-	std::vector<double> COOValues() const;
+	const std::vector<std::string> &COOFeatures() const;
+	const std::vector<size_t> &COOFeatureIndices() const;
+	const std::vector<std::string> &COOSamples() const;
+	const std::vector<size_t> &COOSampleIndices() const;
+	const std::vector<double> &COOValues() const;
 
 private:
 	std::vector<size_t> coo_feature_indices;
@@ -23,6 +26,8 @@ private:
 
 	std::vector<std::string> feature_ids_ordered;
 	std::vector<std::string> sample_ids_ordered;
+	std::vector<std::string> coo_sample_indices_as_ids;
+	std::vector<std::string> coo_feature_indices_as_ids;
 
 	void InitCOOFromCSC(const std::vector<int32_t> &indptr, const std::vector<int32_t> &indices);
 	void InitCOOFromCOO(const std::vector<std::string> &feature_ids, const std::vector<std::string> &sample_ids);
@@ -30,8 +35,7 @@ private:
 	// accumulate duplicate sample / feature pairs
 	// remove zeros
 	void compress_coo();
-	std::vector<std::string> indices_to_ids(const std::vector<size_t> &indices,
-	                                        const std::vector<std::string> &names) const;
+	std::vector<std::string> indices_to_ids(const std::vector<size_t> &indices, const std::vector<std::string> &names);
 
 	std::vector<std::string> load_dataset_1D_str(const H5::DataSet &ds_ids);
 

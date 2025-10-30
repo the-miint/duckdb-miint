@@ -10,6 +10,7 @@
 #include <kseq++/seqio.hpp>
 #include <read_fastx.hpp>
 #include <read_sam.hpp>
+#include <read_biom.hpp>
 #include <miint_macros.hpp>
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include <hdf5.h>
@@ -31,12 +32,16 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// TODO: //! comment on headers
 	ReadFastxTableFunction::Register(loader);
 	ReadSAMTableFunction::Register(loader);
+	ReadBIOMTableFunction::Register(loader);
+
 	AlignmentFlagFunctions::Register(loader);
 	AlignmentSeqIdentityFunction::Register(loader);
 	CompressIntervalsFunction::Register(loader);
+
 	CopyFastqFunction::Register(loader);
 	CopyFastaFunction::Register(loader);
 	CopySAMFunction::Register(loader);
+
 	MIINTMacros::Register(loader);
 }
 

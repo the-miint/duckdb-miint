@@ -7,6 +7,10 @@
 
 namespace miint {
 
+BIOMTable::BIOMTable()
+    : coo_values({}), feature_ids_ordered({}), sample_ids_ordered({}), coo_feature_indices({}), coo_sample_indices({}) {
+}
+
 BIOMTable::BIOMTable(const H5::DataSet &ds_indices, const H5::DataSet &ds_indptr, const H5::DataSet &ds_data,
                      const H5::DataSet &ds_obs_ids, const H5::DataSet &ds_samp_ids) {
 	// adapted from
@@ -32,6 +36,8 @@ void BIOMTable::InitCOOFromCOO(const std::vector<std::string> &feature_ids,
 	coo_feature_indices = ids_to_indices(feature_ids, feature_ids_ordered);
 	coo_sample_indices = ids_to_indices(sample_ids, sample_ids_ordered);
 	compress_coo();
+	coo_sample_indices_as_ids = indices_to_ids(coo_sample_indices, sample_ids_ordered);
+	coo_feature_indices_as_ids = indices_to_ids(coo_feature_indices, feature_ids_ordered);
 }
 
 std::vector<size_t> ids_to_indices(const std::vector<std::string> &ids, const std::vector<std::string> &ordered) {
@@ -70,7 +76,6 @@ std::vector<std::string> unique_ids_in_order(const std::vector<std::string> &ids
 	// reallocations
 	unique_ordered_ids.reserve(std::min(ids.size(), size_t(10000)));
 	seen.reserve(std::min(ids.size(), size_t(10000)));
-
 	for (auto &id : ids) {
 		if (!seen.contains(id)) {
 			unique_ordered_ids.push_back(id);
@@ -101,13 +106,14 @@ void BIOMTable::InitCOOFromCSC(const std::vector<int32_t> &indptr, const std::ve
 	}
 
 	compress_coo();
+	coo_sample_indices_as_ids = indices_to_ids(coo_sample_indices, sample_ids_ordered);
+	coo_feature_indices_as_ids = indices_to_ids(coo_feature_indices, feature_ids_ordered);
 }
 
 std::vector<std::string> BIOMTable::indices_to_ids(const std::vector<size_t> &indices,
-                                                   const std::vector<std::string> &names) const {
+                                                   const std::vector<std::string> &names) {
 	std::vector<std::string> result;
 	result.reserve(indices.size());
-
 	for (auto index : indices) {
 		result.push_back(names[index]);
 	}
@@ -115,20 +121,21 @@ std::vector<std::string> BIOMTable::indices_to_ids(const std::vector<size_t> &in
 	return result;
 }
 
-std::vector<std::string> BIOMTable::COOFeatures() const {
-	return indices_to_ids(coo_feature_indices, feature_ids_ordered);
+const std::vector<std::string> &BIOMTable::COOFeatures() const {
+	return coo_feature_indices_as_ids;
 }
-std::vector<size_t> BIOMTable::COOFeatureIndices() const {
+const std::vector<size_t> &BIOMTable::COOFeatureIndices() const {
 	return coo_feature_indices;
 }
 
-std::vector<std::string> BIOMTable::COOSamples() const {
-	return indices_to_ids(coo_feature_indices, feature_ids_ordered);
+const std::vector<std::string> &BIOMTable::COOSamples() const {
+	return coo_sample_indices_as_ids;
 }
-std::vector<size_t> BIOMTable::COOSampleIndices() const {
+
+const std::vector<size_t> &BIOMTable::COOSampleIndices() const {
 	return coo_sample_indices;
 }
-std::vector<double> BIOMTable::COOValues() const {
+const std::vector<double> &BIOMTable::COOValues() const {
 	return coo_values;
 }
 
@@ -170,7 +177,8 @@ std::vector<std::string> BIOMTable::load_dataset_1D_str(const H5::DataSet &ds_id
 	ds_ids.read((void *)rdata.data(), datatype);
 
 	// Convert to std::vector<std::string>
-	std::vector<std::string> ids(dims[0]);
+	std::vector<std::string> ids;
+	ids.reserve(dims[0]);
 	for (hsize_t i = 0; i < dims[0]; i++) {
 		ids.emplace_back(rdata[i]);
 	}
@@ -178,6 +186,8 @@ std::vector<std::string> BIOMTable::load_dataset_1D_str(const H5::DataSet &ds_id
 	// Free memory allocated by HDF5
 	ds_ids.vlenReclaim((void *)rdata.data(), datatype, dataspace);
 
+	for (auto &id : ids) {
+	}
 	return ids;
 }
 
@@ -223,8 +233,6 @@ std::vector<T> BIOMTable::load_dataset_1D(const H5::DataSet &ds, const H5::PredT
 }
 
 uint32_t BIOMTable::nnz() {
-	compress_coo();
-
 	auto values_size = coo_values.size();
 	auto sids_size = coo_sample_indices.size();
 	auto fids_size = coo_feature_indices.size();

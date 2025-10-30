@@ -31,5 +31,6 @@ private:
 public:
 	explicit BIOMReader(const std::string &path1);
 	BIOMTable read() const;
+	static bool IsBIOM(const std::string &path);
 };
 } // namespace miint
