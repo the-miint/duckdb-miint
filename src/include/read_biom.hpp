@@ -36,12 +36,16 @@ public:
 
 	struct GlobalState : public GlobalTableFunctionState {
 		mutex lock;
+		mutex hdf5_lock; // Serialize HDF5 operations (HDF5 is not thread-safe)
 		std::vector<std::string> filepaths;
 		size_t current_file_idx;
 		bool finished;
 
 		idx_t MaxThreads() const override {
-			return filepaths.size();
+			// Use conservative fixed-thread approach with 4 threads
+			// Each thread processes complete files sequentially from shared queue
+			// Bounded parallelism prevents excessive memory usage
+			return 4;
 		}
 
 		explicit GlobalState(const std::vector<std::string> &paths)
@@ -72,9 +76,15 @@ public:
 				global_state.current_file_idx++;
 			}
 
-			auto reader = miint::BIOMReader(path);
-			table = reader.read();
+			// Serialize HDF5 operations since HDF5 is not thread-safe
+			{
+				std::lock_guard<std::mutex> hdf5_guard(global_state.hdf5_lock);
+				auto reader = miint::BIOMReader(path);
+				table = reader.read();
+			}
+
 			total_rows = table.nnz();
+			current_row = 0;
 
 			return true;
 		}

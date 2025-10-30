@@ -1,0 +1,194 @@
+# name: test/sql/read_biom.test
+# description: test read_biom table function
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+# Before we load the extension, this will fail
+statement error
+SELECT * FROM read_biom('foo.biom');
+----
+Catalog Error: Table Function with name read_biom does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require miint
+
+# Error: file not found
+statement error
+SELECT * FROM read_biom('missing.biom');
+----
+IO Error: File not found: missing.biom
+
+# Error: not a BIOM file
+statement error
+SELECT * FROM read_biom('data/biom/notbiom.h5');
+----
+IO Error: File is not a BIOM file: data/biom/notbiom.h5
+
+# Basic single file read
+query III
+SELECT * FROM read_biom('data/biom/test.biom') ORDER BY sample_id, feature_id;
+----
+Sample1	GG_OTU_2	5.0 
+Sample1	GG_OTU_4	2.0 
+Sample2	GG_OTU_2	1.0 
+Sample2	GG_OTU_4	1.0 
+Sample2	GG_OTU_5	1.0 
+Sample3	GG_OTU_1	1.0 
+Sample3	GG_OTU_3	1.0 
+Sample3	GG_OTU_4	1.0 
+Sample3	GG_OTU_5	1.0 
+Sample4	GG_OTU_2	2.0 
+Sample4	GG_OTU_3	4.0 
+Sample5	GG_OTU_2	3.0 
+Sample6	GG_OTU_2	1.0 
+Sample6	GG_OTU_3	2.0 
+Sample6	GG_OTU_4	1.0
+
+# VARCHAR[] multiple files concatenated
+query III
+SELECT * FROM read_biom(['data/biom/file1.biom', 'data/biom/file2.biom'])
+ORDER BY sample_id, feature_id;
+----
+S1	O2	3.0
+S2	O1	1.0
+S2	O2	4.0
+S3	O1	2.0
+S3	O2	5.0
+S4	O2	6.0
+S5	O1	2.0
+S5	O2	8.0
+S6	O1	4.0
+S6	O2	10.0
+
+# include_filepath parameter with single file
+query IIII
+SELECT * FROM read_biom('data/biom/test.biom', include_filepath=true)
+ORDER BY sample_id, feature_id;
+----
+Sample1	GG_OTU_2	5.0	data/biom/test.biom
+Sample1	GG_OTU_4	2.0	data/biom/test.biom
+Sample2	GG_OTU_2	1.0	data/biom/test.biom
+Sample2	GG_OTU_4	1.0	data/biom/test.biom
+Sample2	GG_OTU_5	1.0	data/biom/test.biom
+Sample3	GG_OTU_1	1.0	data/biom/test.biom
+Sample3	GG_OTU_3	1.0	data/biom/test.biom
+Sample3	GG_OTU_4	1.0	data/biom/test.biom
+Sample3	GG_OTU_5	1.0	data/biom/test.biom
+Sample4	GG_OTU_2	2.0	data/biom/test.biom
+Sample4	GG_OTU_3	4.0	data/biom/test.biom
+Sample5	GG_OTU_2	3.0	data/biom/test.biom
+Sample6	GG_OTU_2	1.0	data/biom/test.biom
+Sample6	GG_OTU_3	2.0	data/biom/test.biom
+Sample6	GG_OTU_4	1.0	data/biom/test.biom
+
+# include_filepath parameter with multiple files
+query IIII
+SELECT * FROM read_biom(['data/biom/file1.biom', 'data/biom/file2.biom'],
+                        include_filepath=true)
+ORDER BY sample_id, feature_id;
+----
+S1	O2	3.0	data/biom/file1.biom
+S2	O1	1.0	data/biom/file1.biom
+S2	O2	4.0	data/biom/file1.biom
+S3	O1	2.0	data/biom/file1.biom
+S3	O2	5.0	data/biom/file1.biom
+S4	O2	6.0	data/biom/file2.biom
+S5	O1	2.0	data/biom/file2.biom
+S5	O2	8.0	data/biom/file2.biom
+S6	O1	4.0	data/biom/file2.biom
+S6	O2	10.0	data/biom/file2.biom
+
+# COUNT to verify all rows read from single file
+query I
+SELECT COUNT(*) FROM read_biom('data/biom/test.biom');
+----
+15
+
+# COUNT to verify all rows read from multiple files
+query I
+SELECT COUNT(*) FROM read_biom(['data/biom/file1.biom', 'data/biom/file2.biom']);
+----
+10
+
+# Verify data types are correct
+query III
+SELECT
+    typeof(sample_id),
+    typeof(feature_id),
+    typeof(value)
+FROM read_biom('data/biom/test.biom')
+LIMIT 1;
+----
+VARCHAR	VARCHAR	DOUBLE
+
+# Verify filepath column type when included
+query I
+SELECT typeof(filepath)
+FROM read_biom('data/biom/test.biom', include_filepath=true)
+LIMIT 1;
+----
+VARCHAR
+
+# Test with empty array (should error)
+statement error
+SELECT * FROM read_biom([]);
+----
+Invalid Input Error: read_biom: first argument must be VARCHAR or VARCHAR[]
+
+# Test NULL handling in values (if applicable to test data)
+# This test assumes test.biom may have explicit zeros stored
+query I
+SELECT COUNT(*) FROM read_biom('data/biom/test.biom') WHERE value = 0.0;
+----
+0
+
+# Test ordering without ORDER BY to verify deterministic output
+query III
+SELECT * FROM read_biom('data/biom/test.biom');
+----
+Sample1	GG_OTU_2	5.0 
+Sample1	GG_OTU_4	2.0 
+Sample2	GG_OTU_2	1.0 
+Sample2	GG_OTU_4	1.0 
+Sample2	GG_OTU_5	1.0 
+Sample3	GG_OTU_1	1.0 
+Sample3	GG_OTU_3	1.0 
+Sample3	GG_OTU_4	1.0 
+Sample3	GG_OTU_5	1.0 
+Sample4	GG_OTU_2	2.0 
+Sample4	GG_OTU_3	4.0 
+Sample5	GG_OTU_2	3.0 
+Sample6	GG_OTU_2	1.0 
+Sample6	GG_OTU_3	2.0 
+Sample6	GG_OTU_4	1.0
+
+# Test parallel execution (set preserve_insertion_order=false)
+statement ok
+SET preserve_insertion_order=false;
+
+query I
+SELECT COUNT(*) FROM read_biom(['data/biom/file1.biom', 'data/biom/file2.biom']);
+----
+10
+
+# Verify we can aggregate results
+query II
+SELECT sample_id, SUM(value) as total_value
+FROM read_biom(['data/biom/file1.biom', 'data/biom/file2.biom'])
+GROUP BY sample_id
+ORDER BY sample_id;
+----
+S1	3.0
+S2	5.0
+S3	7.0
+S4	6.0
+S5	10.0
+S6	14.0
+
+# Performance test with large files (if available)
+#query I
+#SELECT COUNT(*) FROM read_biom('data/biom/large_table.biom');
+#----
+#13052393

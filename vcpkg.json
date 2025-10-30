@@ -1,15 +1,7 @@
 {
-        "dependencies": [
-                "openssl",
-                "zlib",
-                "zstd"
-        ],
-        "vcpkg-configuration": {
-                "overlay-ports": [
-                        "./extension-ci-tools/vcpkg_ports"
-                ],
-                "overlay-triplets": [
-                        "./extension-ci-tools/toolchains"
-                ]
-        }
+  "dependencies": ["zlib", "zstd", { "name": "hdf5", "features": ["cpp"] }],
+  "vcpkg-configuration": {
+    "overlay-ports": ["./extension-ci-tools/vcpkg_ports"],
+    "overlay-triplets": ["./extension-ci-tools/toolchains"]
+  }
 }

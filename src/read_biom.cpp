@@ -26,6 +26,11 @@ unique_ptr<FunctionData> ReadBIOMTableFunction::Bind(ClientContext &context, Tab
 		throw InvalidInputException("read_biom: first argument must be VARCHAR or VARCHAR[]");
 	}
 
+	// Validate that at least one file was provided
+	if (biom_paths.empty()) {
+		throw InvalidInputException("read_biom: first argument must be VARCHAR or VARCHAR[]");
+	}
+
 	// Validate all files exist and are BIOM
 	for (const auto &path : biom_paths) {
 		if (!fs.FileExists(path)) {
@@ -96,8 +101,6 @@ void ReadBIOMTableFunction::SetResultVectorString(Vector &result_vector, const m
                                                   const size_t &n_rows) {
 	auto result_data = FlatVector::GetData<string_t>(result_vector);
 
-	// TODO: these function calls incur creation overhead and will be made many times
-	// we need to do a single time Table side
 	std::vector<std::string> current_names;
 	if (field == miint::BIOMTableField::SAMPLE_ID) {
 		current_names = record.COOSamples();
@@ -105,8 +108,8 @@ void ReadBIOMTableFunction::SetResultVectorString(Vector &result_vector, const m
 		current_names = record.COOFeatures();
 	}
 
-	for (size_t i = current_row; i < n_rows; i++) {
-		result_data[i] = StringVector::AddString(result_vector, current_names[i]);
+	for (size_t i = 0; i < n_rows; i++) {
+		result_data[i] = StringVector::AddString(result_vector, current_names[current_row + i]);
 	}
 }
 
@@ -116,8 +119,8 @@ void ReadBIOMTableFunction::SetResultVectorDouble(Vector &result_vector, const m
 	auto result_data = FlatVector::GetData<double>(result_vector);
 	auto &data = record.COOValues();
 
-	for (size_t i = current_row; i < n_rows; i++) {
-		result_data[i] = data[i];
+	for (size_t i = 0; i < n_rows; i++) {
+		result_data[i] = data[current_row + i];
 	}
 }
 
@@ -133,20 +136,23 @@ void ReadBIOMTableFunction::Execute(ClientContext &context, TableFunctionInput &
 	auto &global_state = data_p.global_state->Cast<GlobalState>();
 	auto &local_state = data_p.local_state->Cast<LocalState>();
 
+	// Check if we need to load the next file
+	while (local_state.current_row >= local_state.total_rows) {
+		// Current file is exhausted, try to get next file
+		bool got_file = local_state.GetNextFile(global_state);
+		if (!got_file) {
+			// No more files to process
+			output.SetCardinality(0);
+			return;
+		}
+		// GetNextFile resets current_row to 0 and loads new table
+	}
+
+	// Calculate how many rows we can emit in this chunk
 	size_t n_rows =
 	    std::min(local_state.current_row + STANDARD_VECTOR_SIZE, local_state.total_rows) - local_state.current_row;
 
-	if (n_rows == 0) {
-		bool done = local_state.GetNextFile(global_state);
-		if (done) {
-			output.SetCardinality(0);
-			return;
-		} else {
-			size_t n_rows = std::min(local_state.current_row + STANDARD_VECTOR_SIZE, local_state.total_rows) -
-			                local_state.current_row;
-		}
-	}
-
+	// Populate output vectors
 	for (size_t i = 0; i < bind_data.fields.size(); i++) {
 		auto &result_vector = output.data[i];
 		auto &field = bind_data.fields[i];
