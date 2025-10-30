@@ -177,3 +177,239 @@ TEST_CASE("Permutation with cycle following", "[BIOMTable]") {
 		REQUIRE((values == std::vector<double> {500.0, 400.0, 300.0, 200.0, 100.0}));
 	}
 }
+
+TEST_CASE("BIOMTable ToCSR conversion", "[BIOMTable]") {
+	SECTION("Simple 2x3 matrix") {
+		// Matrix (2 features × 3 samples):
+		//         S0   S1   S2
+		//   F0    1.0  2.0  4.0
+		//   F1    3.0  0.0  0.0
+		std::vector<std::string> features = {"F0", "F0", "F0", "F1"};
+		std::vector<std::string> samples = {"S0", "S1", "S2", "S0"};
+		std::vector<double> values = {1.0, 2.0, 4.0, 3.0};
+		miint::BIOMTable table(features, samples, values);
+
+		auto csr = table.ToCSR();
+
+		// Expected CSR (scipy verified):
+		std::vector<double> exp_data = {1.0, 2.0, 4.0, 3.0};
+		std::vector<int32_t> exp_indices = {0, 1, 2, 0};
+		std::vector<int32_t> exp_indptr = {0, 3, 4};
+
+		REQUIRE((csr.data == exp_data));
+		REQUIRE((csr.indices == exp_indices));
+		REQUIRE((csr.indptr == exp_indptr));
+	}
+
+	SECTION("Empty matrix") {
+		std::vector<std::string> features;
+		std::vector<std::string> samples;
+		std::vector<double> values;
+		miint::BIOMTable table(features, samples, values);
+
+		auto csr = table.ToCSR();
+
+		REQUIRE(csr.data.empty());
+		REQUIRE(csr.indices.empty());
+		REQUIRE((csr.indptr == std::vector<int32_t>{0}));
+	}
+
+	SECTION("Single row") {
+		// Matrix (1 feature × 3 samples):
+		//         S0   S1   S2
+		//   F0    1.0  2.0  3.0
+		std::vector<std::string> features = {"F0", "F0", "F0"};
+		std::vector<std::string> samples = {"S0", "S1", "S2"};
+		std::vector<double> values = {1.0, 2.0, 3.0};
+		miint::BIOMTable table(features, samples, values);
+
+		auto csr = table.ToCSR();
+
+		std::vector<double> exp_data = {1.0, 2.0, 3.0};
+		std::vector<int32_t> exp_indices = {0, 1, 2};
+		std::vector<int32_t> exp_indptr = {0, 3};
+
+		REQUIRE((csr.data == exp_data));
+		REQUIRE((csr.indices == exp_indices));
+		REQUIRE((csr.indptr == exp_indptr));
+	}
+
+	SECTION("Single column") {
+		// Matrix (3 features × 1 sample):
+		//         S0
+		//   F0    1.0
+		//   F1    2.0
+		//   F2    3.0
+		std::vector<std::string> features = {"F0", "F1", "F2"};
+		std::vector<std::string> samples = {"S0", "S0", "S0"};
+		std::vector<double> values = {1.0, 2.0, 3.0};
+		miint::BIOMTable table(features, samples, values);
+
+		auto csr = table.ToCSR();
+
+		std::vector<double> exp_data = {1.0, 2.0, 3.0};
+		std::vector<int32_t> exp_indices = {0, 0, 0};
+		std::vector<int32_t> exp_indptr = {0, 1, 2, 3};
+
+		REQUIRE((csr.data == exp_data));
+		REQUIRE((csr.indices == exp_indices));
+		REQUIRE((csr.indptr == exp_indptr));
+	}
+
+	SECTION("3x3 diagonal") {
+		// Matrix (3 features × 3 samples):
+		//         S0   S1   S2
+		//   F0    1.0  0.0  0.0
+		//   F1    0.0  2.0  0.0
+		//   F2    0.0  0.0  3.0
+		std::vector<std::string> features = {"F0", "F1", "F2"};
+		std::vector<std::string> samples = {"S0", "S1", "S2"};
+		std::vector<double> values = {1.0, 2.0, 3.0};
+		miint::BIOMTable table(features, samples, values);
+
+		auto csr = table.ToCSR();
+
+		std::vector<double> exp_data = {1.0, 2.0, 3.0};
+		std::vector<int32_t> exp_indices = {0, 1, 2};
+		std::vector<int32_t> exp_indptr = {0, 1, 2, 3};
+
+		REQUIRE((csr.data == exp_data));
+		REQUIRE((csr.indices == exp_indices));
+		REQUIRE((csr.indptr == exp_indptr));
+	}
+
+	SECTION("Single value") {
+		std::vector<std::string> features = {"F0"};
+		std::vector<std::string> samples = {"S0"};
+		std::vector<double> values = {5.0};
+		miint::BIOMTable table(features, samples, values);
+
+		auto csr = table.ToCSR();
+
+		std::vector<double> exp_data = {5.0};
+		std::vector<int32_t> exp_indices = {0};
+		std::vector<int32_t> exp_indptr = {0, 1};
+
+		REQUIRE((csr.data == exp_data));
+		REQUIRE((csr.indices == exp_indices));
+		REQUIRE((csr.indptr == exp_indptr));
+	}
+}
+
+TEST_CASE("BIOMTable ToCSC conversion", "[BIOMTable]") {
+	SECTION("Simple 2x3 matrix") {
+		// Matrix (2 features × 3 samples):
+		//         S0   S1   S2
+		//   F0    1.0  2.0  4.0
+		//   F1    3.0  0.0  0.0
+		std::vector<std::string> features = {"F0", "F0", "F0", "F1"};
+		std::vector<std::string> samples = {"S0", "S1", "S2", "S0"};
+		std::vector<double> values = {1.0, 2.0, 4.0, 3.0};
+		miint::BIOMTable table(features, samples, values);
+
+		auto csc = table.ToCSC();
+
+		// Expected CSC (scipy verified):
+		std::vector<double> exp_data = {1.0, 3.0, 2.0, 4.0};
+		std::vector<int32_t> exp_indices = {0, 1, 0, 0};
+		std::vector<int32_t> exp_indptr = {0, 2, 3, 4};
+
+		REQUIRE((csc.data == exp_data));
+		REQUIRE((csc.indices == exp_indices));
+		REQUIRE((csc.indptr == exp_indptr));
+	}
+
+	SECTION("Empty matrix") {
+		std::vector<std::string> features;
+		std::vector<std::string> samples;
+		std::vector<double> values;
+		miint::BIOMTable table(features, samples, values);
+
+		auto csc = table.ToCSC();
+
+		REQUIRE(csc.data.empty());
+		REQUIRE(csc.indices.empty());
+		REQUIRE((csc.indptr == std::vector<int32_t>{0}));
+	}
+
+	SECTION("Single row") {
+		// Matrix (1 feature × 3 samples):
+		//         S0   S1   S2
+		//   F0    1.0  2.0  3.0
+		std::vector<std::string> features = {"F0", "F0", "F0"};
+		std::vector<std::string> samples = {"S0", "S1", "S2"};
+		std::vector<double> values = {1.0, 2.0, 3.0};
+		miint::BIOMTable table(features, samples, values);
+
+		auto csc = table.ToCSC();
+
+		std::vector<double> exp_data = {1.0, 2.0, 3.0};
+		std::vector<int32_t> exp_indices = {0, 0, 0};
+		std::vector<int32_t> exp_indptr = {0, 1, 2, 3};
+
+		REQUIRE((csc.data == exp_data));
+		REQUIRE((csc.indices == exp_indices));
+		REQUIRE((csc.indptr == exp_indptr));
+	}
+
+	SECTION("Single column") {
+		// Matrix (3 features × 1 sample):
+		//         S0
+		//   F0    1.0
+		//   F1    2.0
+		//   F2    3.0
+		std::vector<std::string> features = {"F0", "F1", "F2"};
+		std::vector<std::string> samples = {"S0", "S0", "S0"};
+		std::vector<double> values = {1.0, 2.0, 3.0};
+		miint::BIOMTable table(features, samples, values);
+
+		auto csc = table.ToCSC();
+
+		std::vector<double> exp_data = {1.0, 2.0, 3.0};
+		std::vector<int32_t> exp_indices = {0, 1, 2};
+		std::vector<int32_t> exp_indptr = {0, 3};
+
+		REQUIRE((csc.data == exp_data));
+		REQUIRE((csc.indices == exp_indices));
+		REQUIRE((csc.indptr == exp_indptr));
+	}
+
+	SECTION("3x3 diagonal") {
+		// Matrix (3 features × 3 samples):
+		//         S0   S1   S2
+		//   F0    1.0  0.0  0.0
+		//   F1    0.0  2.0  0.0
+		//   F2    0.0  0.0  3.0
+		std::vector<std::string> features = {"F0", "F1", "F2"};
+		std::vector<std::string> samples = {"S0", "S1", "S2"};
+		std::vector<double> values = {1.0, 2.0, 3.0};
+		miint::BIOMTable table(features, samples, values);
+
+		auto csc = table.ToCSC();
+
+		std::vector<double> exp_data = {1.0, 2.0, 3.0};
+		std::vector<int32_t> exp_indices = {0, 1, 2};
+		std::vector<int32_t> exp_indptr = {0, 1, 2, 3};
+
+		REQUIRE((csc.data == exp_data));
+		REQUIRE((csc.indices == exp_indices));
+		REQUIRE((csc.indptr == exp_indptr));
+	}
+
+	SECTION("Single value") {
+		std::vector<std::string> features = {"F0"};
+		std::vector<std::string> samples = {"S0"};
+		std::vector<double> values = {5.0};
+		miint::BIOMTable table(features, samples, values);
+
+		auto csc = table.ToCSC();
+
+		std::vector<double> exp_data = {5.0};
+		std::vector<int32_t> exp_indices = {0};
+		std::vector<int32_t> exp_indptr = {0, 1};
+
+		REQUIRE((csc.data == exp_data));
+		REQUIRE((csc.indices == exp_indices));
+		REQUIRE((csc.indptr == exp_indptr));
+	}
+}

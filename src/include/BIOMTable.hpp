@@ -5,6 +5,18 @@ namespace miint {
 
 enum class BIOMTableField { SAMPLE_ID = 0, FEATURE_ID, VALUE };
 
+// Sparse matrix representation for CSR/CSC formats
+struct SparseMatrix {
+	std::vector<double> data;
+	std::vector<int32_t> indices;
+	std::vector<int32_t> indptr;
+
+	SparseMatrix() = default;
+	SparseMatrix(std::vector<double> data_, std::vector<int32_t> indices_, std::vector<int32_t> indptr_)
+	    : data(std::move(data_)), indices(std::move(indices_)), indptr(std::move(indptr_)) {
+	}
+};
+
 class BIOMTable {
 public:
 	BIOMTable(const H5::DataSet &indices, const H5::DataSet &indptr, const H5::DataSet &data,
@@ -18,6 +30,30 @@ public:
 	const std::vector<std::string> &COOSamples() const;
 	const std::vector<size_t> &COOSampleIndices() const;
 	const std::vector<double> &COOValues() const;
+
+	// Get ordered feature and sample IDs
+	const std::vector<std::string> &FeatureIDs() const {
+		return feature_ids_ordered;
+	}
+	const std::vector<std::string> &SampleIDs() const {
+		return sample_ids_ordered;
+	}
+
+	// Get matrix dimensions
+	size_t NumFeatures() const {
+		return feature_ids_ordered.size();
+	}
+	size_t NumSamples() const {
+		return sample_ids_ordered.size();
+	}
+
+	// Convert COO to CSR (Compressed Sparse Row) format
+	// Used for observation/matrix in BIOM (features = rows, samples = columns)
+	SparseMatrix ToCSR() const;
+
+	// Convert COO to CSC (Compressed Sparse Column) format
+	// Used for sample/matrix in BIOM (features = rows, samples = columns)
+	SparseMatrix ToCSC() const;
 
 private:
 	std::vector<size_t> coo_feature_indices;
@@ -36,6 +72,10 @@ private:
 	// remove zeros
 	void compress_coo();
 	std::vector<std::string> indices_to_ids(const std::vector<size_t> &indices, const std::vector<std::string> &names);
+
+	// Helper for ToCSR/ToCSC: convert COO to compressed format
+	// by_row=true: CSR, by_row=false: CSC
+	SparseMatrix ConvertCOOToCompressed(bool by_row) const;
 
 	std::vector<std::string> load_dataset_1D_str(const H5::DataSet &ds_ids);
 

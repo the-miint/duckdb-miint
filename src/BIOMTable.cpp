@@ -352,4 +352,86 @@ void BIOMTable::compress_coo() {
 	coo_feature_indices = std::move(coo_feature_indices_compressed);
 	coo_values = std::move(coo_values_compressed);
 }
+
+SparseMatrix BIOMTable::ToCSR() const {
+	// CSR: features are rows (major axis), samples are columns (minor axis)
+	// Sort by (feature, sample) and build row pointers
+	return ConvertCOOToCompressed(true);
+}
+
+SparseMatrix BIOMTable::ToCSC() const {
+	// CSC: samples are columns (major axis), features are rows (minor axis)
+	// Sort by (sample, feature) and build column pointers
+	// Note: COO is already sorted by (sample, feature) after compress_coo()
+	return ConvertCOOToCompressed(false);
+}
+
+SparseMatrix BIOMTable::ConvertCOOToCompressed(bool by_row) const {
+	// Convert COO to compressed format (CSR or CSC)
+	// by_row=true:  CSR (features=rows=major, samples=cols=minor)
+	// by_row=false: CSC (samples=cols=major, features=rows=minor)
+
+	auto n_major = by_row ? NumFeatures() : NumSamples();
+	auto n_values = coo_values.size();
+
+	if (n_values == 0) {
+		return SparseMatrix({}, {}, {0});
+	}
+
+	// Create index array for sorting
+	std::vector<size_t> sort_indices(n_values);
+	std::iota(sort_indices.begin(), sort_indices.end(), 0);
+
+	// Sort by (major_axis, minor_axis)
+	if (by_row) {
+		// CSR: sort by (feature, sample)
+		std::ranges::sort(sort_indices, [&](size_t i, size_t j) {
+			return std::tie(coo_feature_indices[i], coo_sample_indices[i]) <
+			       std::tie(coo_feature_indices[j], coo_sample_indices[j]);
+		});
+	} else {
+		// CSC: sort by (sample, feature)
+		// COO is already sorted this way after compress_coo(), but be explicit
+		std::ranges::sort(sort_indices, [&](size_t i, size_t j) {
+			return std::tie(coo_sample_indices[i], coo_feature_indices[i]) <
+			       std::tie(coo_sample_indices[j], coo_feature_indices[j]);
+		});
+	}
+
+	// Build compressed arrays
+	std::vector<double> data;
+	std::vector<int32_t> minor_indices; // column indices for CSR, row indices for CSC
+	std::vector<int32_t> indptr;        // row pointers for CSR, column pointers for CSC
+
+	data.reserve(n_values);
+	minor_indices.reserve(n_values);
+	indptr.reserve(n_major + 1);
+
+	indptr.push_back(0);
+
+	size_t current_major = 0;
+	for (size_t i = 0; i < n_values; i++) {
+		auto idx = sort_indices[i];
+		auto major_axis = by_row ? coo_feature_indices[idx] : coo_sample_indices[idx];
+		auto minor_axis = by_row ? coo_sample_indices[idx] : coo_feature_indices[idx];
+		auto value = coo_values[idx];
+
+		// Add indptr entries for any empty major axis positions
+		while (current_major < major_axis) {
+			indptr.push_back(static_cast<int32_t>(data.size()));
+			current_major++;
+		}
+
+		data.push_back(value);
+		minor_indices.push_back(static_cast<int32_t>(minor_axis));
+	}
+
+	// Add final indptr entries for any trailing empty major axis positions
+	while (current_major < n_major) {
+		indptr.push_back(static_cast<int32_t>(data.size()));
+		current_major++;
+	}
+
+	return SparseMatrix(std::move(data), std::move(minor_indices), std::move(indptr));
+}
 } // namespace miint

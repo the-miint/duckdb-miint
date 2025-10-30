@@ -132,6 +132,7 @@ set(EXTENSION_SOURCES
     src/IntervalCompressor.cpp
     src/compress_intervals.cpp
     src/copy_format_common.cpp
+    src/copy_biom.cpp
     src/copy_fastq.cpp
     src/copy_fasta.cpp
     src/copy_sam.cpp
