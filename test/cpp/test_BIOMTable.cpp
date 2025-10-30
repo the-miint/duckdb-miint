@@ -211,7 +211,7 @@ TEST_CASE("BIOMTable ToCSR conversion", "[BIOMTable]") {
 
 		REQUIRE(csr.data.empty());
 		REQUIRE(csr.indices.empty());
-		REQUIRE((csr.indptr == std::vector<int32_t>{0}));
+		REQUIRE((csr.indptr == std::vector<int32_t> {0}));
 	}
 
 	SECTION("Single row") {
@@ -329,7 +329,7 @@ TEST_CASE("BIOMTable ToCSC conversion", "[BIOMTable]") {
 
 		REQUIRE(csc.data.empty());
 		REQUIRE(csc.indices.empty());
-		REQUIRE((csc.indptr == std::vector<int32_t>{0}));
+		REQUIRE((csc.indptr == std::vector<int32_t> {0}));
 	}
 
 	SECTION("Single row") {

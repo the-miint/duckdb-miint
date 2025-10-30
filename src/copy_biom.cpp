@@ -124,7 +124,7 @@ struct BiomCopyGlobalState : public GlobalFunctionData {
 };
 
 static unique_ptr<GlobalFunctionData> BiomCopyInitializeGlobal(ClientContext &context, FunctionData &bind_data,
-                                                                const string &file_path) {
+                                                               const string &file_path) {
 	auto gstate = make_uniq<BiomCopyGlobalState>();
 	return std::move(gstate);
 }
@@ -198,8 +198,7 @@ static void BiomCopyCombine(ExecutionContext &context, FunctionData &bind_data, 
 	// Append local data to global
 	gstate.feature_ids.insert(gstate.feature_ids.end(), lstate.local_feature_ids.begin(),
 	                          lstate.local_feature_ids.end());
-	gstate.sample_ids.insert(gstate.sample_ids.end(), lstate.local_sample_ids.begin(),
-	                         lstate.local_sample_ids.end());
+	gstate.sample_ids.insert(gstate.sample_ids.end(), lstate.local_sample_ids.begin(), lstate.local_sample_ids.end());
 	gstate.values.insert(gstate.values.end(), lstate.local_values.begin(), lstate.local_values.end());
 }
 
@@ -218,7 +217,7 @@ static string GetCurrentTimestamp() {
 }
 
 static void WriteRootAttributes(H5::H5File &file, size_t nnz, size_t n_features, size_t n_samples, const string &id,
-                                 const string &generated_by) {
+                                const string &generated_by) {
 	H5::Group root = file.openGroup("/");
 
 	// creation-date
@@ -270,7 +269,7 @@ static void WriteRootAttributes(H5::H5File &file, size_t nnz, size_t n_features,
 }
 
 static void WriteStringDataset(H5::Group &group, const string &name, const std::vector<std::string> &data,
-                                bool use_compression) {
+                               bool use_compression) {
 	if (data.empty()) {
 		// Write empty dataset
 		hsize_t dims[1] = {0};
@@ -307,8 +306,8 @@ static void WriteStringDataset(H5::Group &group, const string &name, const std::
 }
 
 template <typename T>
-static void WriteNumericDataset(H5::Group &group, const string &name, const std::vector<T> &data, const H5::DataType &dtype,
-                                 bool use_compression) {
+static void WriteNumericDataset(H5::Group &group, const string &name, const std::vector<T> &data,
+                                const H5::DataType &dtype, bool use_compression) {
 	if (data.empty()) {
 		// Write empty dataset
 		hsize_t dims[1] = {0};
