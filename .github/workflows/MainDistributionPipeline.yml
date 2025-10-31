@@ -7,9 +7,6 @@ on:
   pull_request:
   workflow_dispatch:
 
-env:
-  HDF5_USE_FILE_LOCKING: FALSE
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' && github.sha || '' }}
   cancel-in-progress: true
@@ -22,6 +19,8 @@ jobs:
       duckdb_version: v1.4.1
       ci_tools_version: v1.4.1
       extension_name: miint
+      # Set environment variables for HDF5
+      environment_variables: "HDF5_USE_FILE_LOCKING=FALSE"
 
   code-quality-check:
     name: Code Quality Check
