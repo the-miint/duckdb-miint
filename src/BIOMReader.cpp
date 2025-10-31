@@ -1,9 +1,22 @@
 #include "BIOMReader.hpp"
 #include <iostream>
+#include <cstdlib>
 
 namespace miint {
 
+// Helper function to disable HDF5 file locking for containerized environments
+static void DisableHDF5FileLocking() {
+	static bool initialized = false;
+	if (!initialized) {
+		// Set environment variable to disable HDF5 file locking
+		// This is necessary in containerized CI environments where file locking may not work
+		setenv("HDF5_USE_FILE_LOCKING", "FALSE", 0); // 0 = don't overwrite if already set
+		initialized = true;
+	}
+}
+
 BIOMReader::BIOMReader(const std::string &path1) {
+	DisableHDF5FileLocking();
 	try {
 		file_handle = H5::H5File(path1, H5F_ACC_RDONLY);
 
@@ -55,6 +68,7 @@ BIOMTable BIOMReader::read() const {
 }
 
 bool BIOMReader::IsBIOM(const std::string &path) {
+	DisableHDF5FileLocking();
 	std::string target = "format-version";
 	bool valid = false;
 	H5::Exception::dontPrint();
