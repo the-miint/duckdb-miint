@@ -2,7 +2,7 @@
   "dependencies": [
     "zlib",
     "zstd",
-    { "name": "hdf5", "features": ["cpp", "zlib"] }
+    { "name": "hdf5", "features": ["cpp", "zlib", "szip"] }
   ],
   "vcpkg-configuration": {
     "overlay-ports": ["./extension-ci-tools/vcpkg_ports"],

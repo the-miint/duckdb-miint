@@ -1,35 +1,62 @@
 #include "BIOMReader.hpp"
 #include <iostream>
+#include <sys/stat.h>
 
 namespace miint {
 
 BIOMReader::BIOMReader(const std::string &path1) {
-	try {
-		// Create file access property list and disable file locking
-		// This is necessary for containerized CI environments where file locking may not work
-		H5::FileAccPropList fapl;
-		// Use H5Pset_file_locking to disable file locking (HDF5 1.10.7+)
-		hid_t fapl_id = fapl.getId();
-		H5Pset_file_locking(fapl_id, false, false); // (use_file_locking, ignore_when_disabled)
+	// Enable detailed HDF5 error reporting
+	H5::Exception::printErrorStack();
 
+	try {
+		// Log HDF5 version info
+		unsigned majnum, minnum, relnum;
+		H5get_libversion(&majnum, &minnum, &relnum);
+		std::cerr << "DEBUG: HDF5 version " << majnum << "." << minnum << "." << relnum << std::endl;
+		std::cerr << "DEBUG: Opening file: " << path1 << std::endl;
+
+		// Check if file exists and get size
+		struct stat st;
+		if (stat(path1.c_str(), &st) != 0) {
+			throw std::runtime_error("File does not exist or cannot be accessed: " + path1);
+		}
+		std::cerr << "DEBUG: File exists, size: " << st.st_size << " bytes" << std::endl;
+
+		// Create file access property list and disable file locking
+		H5::FileAccPropList fapl;
+		hid_t fapl_id = fapl.getId();
+		H5Pset_file_locking(fapl_id, false, false);
+
+		std::cerr << "DEBUG: Attempting to open HDF5 file..." << std::endl;
 		file_handle = H5::H5File(path1, H5F_ACC_RDONLY, H5::FileCreatPropList::DEFAULT, fapl);
+		std::cerr << "DEBUG: File opened successfully, handle ID: " << file_handle.getId() << std::endl;
 
 		try {
+			std::cerr << "DEBUG: Opening dataset: " << SAMPLE_INDICES << std::endl;
 			ds_indices = file_handle.openDataSet(SAMPLE_INDICES);
+			std::cerr << "DEBUG: Opening dataset: " << SAMPLE_INDPTR << std::endl;
 			ds_indptr = file_handle.openDataSet(SAMPLE_INDPTR);
+			std::cerr << "DEBUG: Opening dataset: " << SAMPLE_DATA << std::endl;
 			ds_data = file_handle.openDataSet(SAMPLE_DATA);
+			std::cerr << "DEBUG: Opening dataset: " << SAMPLE_IDS << std::endl;
 			ds_samp_ids = file_handle.openDataSet(SAMPLE_IDS);
+			std::cerr << "DEBUG: Opening dataset: " << OBS_IDS << std::endl;
 			ds_obs_ids = file_handle.openDataSet(OBS_IDS);
+			std::cerr << "DEBUG: All datasets opened successfully" << std::endl;
 		} catch (...) {
-			// If dataset opening fails, close file before re-throwing
+			std::cerr << "ERROR: Failed to open one or more datasets" << std::endl;
 			if (file_handle.getId() >= 0) {
 				file_handle.close();
 			}
 			throw;
 		}
 	} catch (H5::FileIException &e) {
+		std::cerr << "ERROR: H5::FileIException - " << e.getDetailMsg() << std::endl;
+		std::cerr << "ERROR: Function: " << e.getFuncName() << std::endl;
 		throw std::runtime_error("Failed to open HDF5 file: " + std::string(e.getDetailMsg()));
 	} catch (H5::DataSetIException &e) {
+		std::cerr << "ERROR: H5::DataSetIException - " << e.getDetailMsg() << std::endl;
+		std::cerr << "ERROR: Function: " << e.getFuncName() << std::endl;
 		throw std::runtime_error("Failed to access dataset: " + std::string(e.getDetailMsg()));
 	}
 }
