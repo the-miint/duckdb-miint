@@ -30,6 +30,7 @@ private:
 
 public:
 	explicit BIOMReader(const std::string &path1);
+	~BIOMReader();
 	BIOMTable read() const;
 	static bool IsBIOM(const std::string &path);
 };

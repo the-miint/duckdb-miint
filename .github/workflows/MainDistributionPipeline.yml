@@ -19,8 +19,6 @@ jobs:
       duckdb_version: v1.4.1
       ci_tools_version: v1.4.1
       extension_name: miint
-      # Set environment variables for HDF5
-      environment_variables: "HDF5_USE_FILE_LOCKING=FALSE"
 
   code-quality-check:
     name: Code Quality Check
