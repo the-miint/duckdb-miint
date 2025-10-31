@@ -16,7 +16,21 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Note that it should also be removed from vcpkg.json to prevent needlessly installing it..
 find_package(ZLIB REQUIRED)
 find_package(Threads REQUIRED)
-find_package(HDF5 REQUIRED COMPONENTS CXX)
+
+# HDF5 is required for BIOM support, but make it optional for clang-tidy runs
+# In CI, the tidy-check doesn't have HDF5 available, but it doesn't need to link - just parse
+if(CLANG_TIDY)
+	find_package(HDF5 COMPONENTS CXX)
+	if(HDF5_FOUND)
+		message(STATUS "HDF5 found for tidy-check")
+	else()
+		message(STATUS "HDF5 not found for tidy-check - BIOM support will be excluded from analysis")
+		# Create dummy targets so the build can configure
+		add_library(HDF5::HDF5 INTERFACE IMPORTED)
+	endif()
+else()
+	find_package(HDF5 REQUIRED COMPONENTS CXX)
+endif()
 
 # Find zstd for compression support (optional - build will succeed without it but zstd won't work)
 find_package(zstd QUIET)
@@ -149,8 +163,10 @@ target_link_libraries(${EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
                       hts
-                      HDF5::HDF5
 )
+if(HDF5_FOUND)
+    target_link_libraries(${EXTENSION_NAME} HDF5::HDF5)
+endif()
 if(HAVE_LIBZSTD)
     target_link_libraries(${EXTENSION_NAME} ${ZSTD_TARGET})
 endif()
@@ -159,8 +175,10 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
                       hts
-                      HDF5::HDF5
 )
+if(HDF5_FOUND)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} HDF5::HDF5)
+endif()
 if(HAVE_LIBZSTD)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} ${ZSTD_TARGET})
 endif()
@@ -200,8 +218,10 @@ target_link_libraries(tests
   Threads::Threads
   ZLIB::ZLIB
   hts
-  HDF5::HDF5
 )
+if(HDF5_FOUND)
+    target_link_libraries(tests HDF5::HDF5)
+endif()
 if(HAVE_LIBZSTD)
     target_link_libraries(tests ${ZSTD_TARGET})
 endif()
