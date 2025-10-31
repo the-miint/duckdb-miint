@@ -5,55 +5,121 @@
 namespace miint {
 
 BIOMReader::BIOMReader(const std::string &path1) {
-	// Enable detailed HDF5 error reporting
-	H5::Exception::printErrorStack();
+	// Log HDF5 version info
+	unsigned majnum, minnum, relnum;
+	H5get_libversion(&majnum, &minnum, &relnum);
+	std::cerr << "DEBUG: HDF5 version " << majnum << "." << minnum << "." << relnum << std::endl;
+	std::cerr << "DEBUG: Opening file: " << path1 << std::endl;
+
+	// Check if file exists and get size
+	struct stat st;
+	if (stat(path1.c_str(), &st) != 0) {
+		throw std::runtime_error("File does not exist or cannot be accessed: " + path1);
+	}
+	std::cerr << "DEBUG: File exists, size: " << st.st_size << " bytes" << std::endl;
+
+	// Use C API for maximum control and error reporting
+	herr_t status;
+	hid_t file_id = -1;
+	hid_t ds_indices_id = -1, ds_indptr_id = -1, ds_data_id = -1;
+	hid_t ds_samp_ids_id = -1, ds_obs_ids_id = -1;
 
 	try {
-		// Log HDF5 version info
-		unsigned majnum, minnum, relnum;
-		H5get_libversion(&majnum, &minnum, &relnum);
-		std::cerr << "DEBUG: HDF5 version " << majnum << "." << minnum << "." << relnum << std::endl;
-		std::cerr << "DEBUG: Opening file: " << path1 << std::endl;
+		// Open file with C API
+		std::cerr << "DEBUG: Calling H5Fopen..." << std::endl;
+		file_id = H5Fopen(path1.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+		std::cerr << "DEBUG: H5Fopen returned: " << file_id << std::endl;
 
-		// Check if file exists and get size
-		struct stat st;
-		if (stat(path1.c_str(), &st) != 0) {
-			throw std::runtime_error("File does not exist or cannot be accessed: " + path1);
+		if (file_id < 0) {
+			throw std::runtime_error("H5Fopen failed with return value: " + std::to_string(file_id));
 		}
-		std::cerr << "DEBUG: File exists, size: " << st.st_size << " bytes" << std::endl;
 
-		// Try opening WITHOUT the file locking property list first
-		std::cerr << "DEBUG: Attempting to open HDF5 file (without file locking property)..." << std::endl;
-		file_handle = H5::H5File(path1, H5F_ACC_RDONLY);
-		std::cerr << "DEBUG: File opened successfully, handle ID: " << file_handle.getId() << std::endl;
+		// Check if file is actually HDF5
+		htri_t is_hdf5 = H5Fis_hdf5(path1.c_str());
+		std::cerr << "DEBUG: H5Fis_hdf5 returned: " << is_hdf5 << " (1=yes, 0=no, <0=error)" << std::endl;
 
-		try {
-			std::cerr << "DEBUG: Opening dataset: " << SAMPLE_INDICES << std::endl;
-			ds_indices = file_handle.openDataSet(SAMPLE_INDICES);
-			std::cerr << "DEBUG: Opening dataset: " << SAMPLE_INDPTR << std::endl;
-			ds_indptr = file_handle.openDataSet(SAMPLE_INDPTR);
-			std::cerr << "DEBUG: Opening dataset: " << SAMPLE_DATA << std::endl;
-			ds_data = file_handle.openDataSet(SAMPLE_DATA);
-			std::cerr << "DEBUG: Opening dataset: " << SAMPLE_IDS << std::endl;
-			ds_samp_ids = file_handle.openDataSet(SAMPLE_IDS);
-			std::cerr << "DEBUG: Opening dataset: " << OBS_IDS << std::endl;
-			ds_obs_ids = file_handle.openDataSet(OBS_IDS);
-			std::cerr << "DEBUG: All datasets opened successfully" << std::endl;
-		} catch (...) {
-			std::cerr << "ERROR: Failed to open one or more datasets" << std::endl;
-			if (file_handle.getId() >= 0) {
-				file_handle.close();
+		// Get file intent
+		unsigned intent;
+		status = H5Fget_intent(file_id, &intent);
+		std::cerr << "DEBUG: H5Fget_intent returned status=" << status << ", intent=" << intent << std::endl;
+
+		// Try to open first dataset
+		std::cerr << "DEBUG: Attempting H5Dopen2 for: " << SAMPLE_INDICES << std::endl;
+		ds_indices_id = H5Dopen2(file_id, SAMPLE_INDICES, H5P_DEFAULT);
+		std::cerr << "DEBUG: H5Dopen2 returned: " << ds_indices_id << std::endl;
+
+		if (ds_indices_id < 0) {
+			// Get more detailed error info
+			std::cerr << "ERROR: H5Dopen2 failed for " << SAMPLE_INDICES << std::endl;
+			std::cerr << "ERROR: Checking if path exists..." << std::endl;
+
+			// Check if the dataset path exists by trying to open as object
+			htri_t exists = H5Lexists(file_id, SAMPLE_INDICES, H5P_DEFAULT);
+			std::cerr << "ERROR: H5Lexists returned: " << exists << " (1=exists, 0=no, <0=error)" << std::endl;
+
+			if (exists > 0) {
+				// Path exists but can't open as dataset - check what type it is
+				H5O_info2_t obj_info;
+				status = H5Oget_info_by_name3(file_id, SAMPLE_INDICES, &obj_info, H5O_INFO_BASIC, H5P_DEFAULT);
+				std::cerr << "ERROR: H5Oget_info_by_name3 status=" << status << std::endl;
+				if (status >= 0) {
+					std::cerr << "ERROR: Object type: " << (int)obj_info.type
+					          << " (0=group, 1=dataset, 2=datatype)" << std::endl;
+				}
 			}
-			throw;
+
+			H5Fclose(file_id);
+			throw std::runtime_error("Failed to open dataset " + std::string(SAMPLE_INDICES));
 		}
-	} catch (H5::FileIException &e) {
-		std::cerr << "ERROR: H5::FileIException - " << e.getDetailMsg() << std::endl;
-		std::cerr << "ERROR: Function: " << e.getFuncName() << std::endl;
-		throw std::runtime_error("Failed to open HDF5 file: " + std::string(e.getDetailMsg()));
-	} catch (H5::DataSetIException &e) {
-		std::cerr << "ERROR: H5::DataSetIException - " << e.getDetailMsg() << std::endl;
-		std::cerr << "ERROR: Function: " << e.getFuncName() << std::endl;
-		throw std::runtime_error("Failed to access dataset: " + std::string(e.getDetailMsg()));
+
+		std::cerr << "DEBUG: Opening remaining datasets..." << std::endl;
+		ds_indptr_id = H5Dopen2(file_id, SAMPLE_INDPTR, H5P_DEFAULT);
+		if (ds_indptr_id < 0) throw std::runtime_error("Failed to open " + std::string(SAMPLE_INDPTR));
+
+		ds_data_id = H5Dopen2(file_id, SAMPLE_DATA, H5P_DEFAULT);
+		if (ds_data_id < 0) throw std::runtime_error("Failed to open " + std::string(SAMPLE_DATA));
+
+		ds_samp_ids_id = H5Dopen2(file_id, SAMPLE_IDS, H5P_DEFAULT);
+		if (ds_samp_ids_id < 0) throw std::runtime_error("Failed to open " + std::string(SAMPLE_IDS));
+
+		ds_obs_ids_id = H5Dopen2(file_id, OBS_IDS, H5P_DEFAULT);
+		if (ds_obs_ids_id < 0) throw std::runtime_error("Failed to open " + std::string(OBS_IDS));
+
+		std::cerr << "DEBUG: All C API calls succeeded, wrapping in C++ objects..." << std::endl;
+
+		// Wrap C handles in C++ objects
+		file_handle = H5::H5File();
+		file_handle.setId(file_id);
+
+		ds_indices = H5::DataSet();
+		ds_indices.setId(ds_indices_id);
+
+		ds_indptr = H5::DataSet();
+		ds_indptr.setId(ds_indptr_id);
+
+		ds_data = H5::DataSet();
+		ds_data.setId(ds_data_id);
+
+		ds_samp_ids = H5::DataSet();
+		ds_samp_ids.setId(ds_samp_ids_id);
+
+		ds_obs_ids = H5::DataSet();
+		ds_obs_ids.setId(ds_obs_ids_id);
+
+		std::cerr << "DEBUG: BIOMReader constructor completed successfully" << std::endl;
+
+	} catch (const std::exception &e) {
+		std::cerr << "ERROR: Exception in BIOMReader constructor: " << e.what() << std::endl;
+
+		// Clean up any open handles
+		if (ds_obs_ids_id >= 0) H5Dclose(ds_obs_ids_id);
+		if (ds_samp_ids_id >= 0) H5Dclose(ds_samp_ids_id);
+		if (ds_data_id >= 0) H5Dclose(ds_data_id);
+		if (ds_indptr_id >= 0) H5Dclose(ds_indptr_id);
+		if (ds_indices_id >= 0) H5Dclose(ds_indices_id);
+		if (file_id >= 0) H5Fclose(file_id);
+
+		throw;
 	}
 }
 
