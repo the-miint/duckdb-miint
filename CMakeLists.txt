@@ -20,16 +20,16 @@ find_package(Threads REQUIRED)
 # HDF5 is required for BIOM support, but make it optional for clang-tidy runs
 # In CI, the tidy-check doesn't have HDF5 available, but it doesn't need to link - just parse
 if(CLANG_TIDY)
-	find_package(HDF5 COMPONENTS CXX)
-	if(HDF5_FOUND)
-		message(STATUS "HDF5 found for tidy-check")
-	else()
-		message(STATUS "HDF5 not found for tidy-check - BIOM support will be excluded from analysis")
-		# Create dummy targets so the build can configure
-		add_library(HDF5::HDF5 INTERFACE IMPORTED)
-	endif()
+    find_package(HDF5 COMPONENTS CXX)
+    if(HDF5_FOUND)
+        message(STATUS "HDF5 found for tidy-check")
+    else()
+        message(STATUS "HDF5 not found for tidy-check - BIOM support will be excluded from analysis")
+        # Create dummy targets so the build can configure
+        add_library(HDF5::HDF5 INTERFACE IMPORTED)
+    endif()
 else()
-	find_package(HDF5 REQUIRED COMPONENTS CXX)
+    find_package(HDF5 REQUIRED COMPONENTS CXX)
 endif()
 
 # Find zstd for compression support (optional - build will succeed without it but zstd won't work)
@@ -158,14 +158,24 @@ set(EXTENSION_SOURCES
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
-
 target_link_libraries(${EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
                       hts
 )
 if(HDF5_FOUND)
-    target_link_libraries(${EXTENSION_NAME} HDF5::HDF5)
+    target_link_libraries(${EXTENSION_NAME}
+                          hdf5::hdf5-static
+                          hdf5::hdf5_hl-static
+                          hdf5::hdf5_cpp-static
+                          hdf5::hdf5_hl_cpp-static
+    )
+    target_link_libraries(${LOADABLE_EXTENSION_NAME}
+                          hdf5::hdf5-static
+                          hdf5::hdf5_hl-static
+                          hdf5::hdf5_cpp-static
+                          hdf5::hdf5_hl_cpp-static
+    )
 endif()
 if(HAVE_LIBZSTD)
     target_link_libraries(${EXTENSION_NAME} ${ZSTD_TARGET})
@@ -176,12 +186,6 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       ZLIB::ZLIB
                       hts
 )
-if(HDF5_FOUND)
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} HDF5::HDF5)
-endif()
-if(HAVE_LIBZSTD)
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} ${ZSTD_TARGET})
-endif()
 
 install(
   TARGETS ${EXTENSION_NAME}
@@ -220,7 +224,11 @@ target_link_libraries(tests
   hts
 )
 if(HDF5_FOUND)
-    target_link_libraries(tests HDF5::HDF5)
+    target_link_libraries(tests
+                          hdf5::hdf5-static
+                          hdf5::hdf5_hl-static
+                          hdf5::hdf5_cpp-static
+                          hdf5::hdf5_hl_cpp-static)
 endif()
 if(HAVE_LIBZSTD)
     target_link_libraries(tests ${ZSTD_TARGET})
