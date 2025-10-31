@@ -1,24 +1,18 @@
 #include "BIOMReader.hpp"
 #include <iostream>
-#include <cstdlib>
 
 namespace miint {
 
-// Helper function to disable HDF5 file locking for containerized environments
-static void DisableHDF5FileLocking() {
-	static bool initialized = false;
-	if (!initialized) {
-		// Set environment variable to disable HDF5 file locking
-		// This is necessary in containerized CI environments where file locking may not work
-		setenv("HDF5_USE_FILE_LOCKING", "FALSE", 0); // 0 = don't overwrite if already set
-		initialized = true;
-	}
-}
-
 BIOMReader::BIOMReader(const std::string &path1) {
-	DisableHDF5FileLocking();
 	try {
-		file_handle = H5::H5File(path1, H5F_ACC_RDONLY);
+		// Create file access property list and disable file locking
+		// This is necessary for containerized CI environments where file locking may not work
+		H5::FileAccPropList fapl;
+		// Use H5Pset_file_locking to disable file locking (HDF5 1.10.7+)
+		hid_t fapl_id = fapl.getId();
+		H5Pset_file_locking(fapl_id, false, false); // (use_file_locking, ignore_when_disabled)
+
+		file_handle = H5::H5File(path1, H5F_ACC_RDONLY, H5::FileCreatPropList::DEFAULT, fapl);
 
 		try {
 			ds_indices = file_handle.openDataSet(SAMPLE_INDICES);
@@ -68,13 +62,17 @@ BIOMTable BIOMReader::read() const {
 }
 
 bool BIOMReader::IsBIOM(const std::string &path) {
-	DisableHDF5FileLocking();
 	std::string target = "format-version";
 	bool valid = false;
 	H5::Exception::dontPrint();
 
 	try {
-		H5::H5File file(path, H5F_ACC_RDONLY);
+		// Create file access property list and disable file locking
+		H5::FileAccPropList fapl;
+		hid_t fapl_id = fapl.getId();
+		H5Pset_file_locking(fapl_id, false, false);
+
+		H5::H5File file(path, H5F_ACC_RDONLY, H5::FileCreatPropList::DEFAULT, fapl);
 
 		try {
 			H5::Group root = file.openGroup("/");
