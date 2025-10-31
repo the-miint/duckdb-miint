@@ -1,0 +1,291 @@
+# name: test/sql/copy_biom.test
+# description: Test COPY FORMAT BIOM
+# group: [sql]
+
+require miint
+
+# Test 1: Basic BIOM write and read-back (round-trip)
+statement ok
+CREATE TABLE test_biom_basic AS
+SELECT * FROM (VALUES
+    ('Feature1', 'Sample1', 1.0::DOUBLE),
+    ('Feature1', 'Sample2', 2.0::DOUBLE),
+    ('Feature2', 'Sample1', 3.0::DOUBLE)
+) AS t(feature_id, sample_id, value);
+
+statement ok
+COPY (SELECT feature_id, sample_id, value FROM test_biom_basic ORDER BY feature_id, sample_id)
+TO '__TEST_DIR__/output1.biom' (FORMAT BIOM);
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('__TEST_DIR__/output1.biom')
+ORDER BY feature_id, sample_id;
+----
+Feature1	Sample1	1.0
+Feature1	Sample2	2.0
+Feature2	Sample1	3.0
+
+# Test 2: Single value
+statement ok
+CREATE TABLE test_biom_single AS SELECT 'F1' as feature_id, 'S1' as sample_id, 5.0::DOUBLE as value;
+
+statement ok
+COPY (SELECT feature_id, sample_id, value FROM test_biom_single)
+TO '__TEST_DIR__/output2.biom' (FORMAT BIOM);
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('__TEST_DIR__/output2.biom');
+----
+F1	S1	5.0
+
+# Test 3: Empty table (0 rows)
+statement ok
+CREATE TABLE test_biom_empty (feature_id VARCHAR, sample_id VARCHAR, value DOUBLE);
+
+statement ok
+COPY (SELECT feature_id, sample_id, value FROM test_biom_empty)
+TO '__TEST_DIR__/output3.biom' (FORMAT BIOM);
+
+query I
+SELECT COUNT(*) FROM read_biom('__TEST_DIR__/output3.biom');
+----
+0
+
+# Test 4: Duplicate handling (should merge duplicates via compression)
+statement ok
+CREATE TABLE test_biom_dups AS
+SELECT * FROM (VALUES
+    ('F1', 'S1', 1.0::DOUBLE),
+    ('F1', 'S1', 3.0::DOUBLE),
+    ('F2', 'S2', 2.0::DOUBLE)
+) AS t(feature_id, sample_id, value);
+
+statement ok
+COPY (SELECT feature_id, sample_id, value FROM test_biom_dups)
+TO '__TEST_DIR__/output4.biom' (FORMAT BIOM);
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('__TEST_DIR__/output4.biom')
+ORDER BY feature_id, sample_id;
+----
+F1	S1	4.0
+F2	S2	2.0
+
+# Test 5: Zeros should be removed during compression
+statement ok
+CREATE TABLE test_biom_zeros AS
+SELECT * FROM (VALUES
+    ('F1', 'S1', 1.0::DOUBLE),
+    ('F1', 'S2', 0.0::DOUBLE),
+    ('F2', 'S1', 2.0::DOUBLE),
+    ('F2', 'S2', 0.0::DOUBLE)
+) AS t(feature_id, sample_id, value);
+
+statement ok
+COPY (SELECT feature_id, sample_id, value FROM test_biom_zeros)
+TO '__TEST_DIR__/output5.biom' (FORMAT BIOM);
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('__TEST_DIR__/output5.biom')
+ORDER BY feature_id, sample_id;
+----
+F1	S1	1.0
+F2	S1	2.0
+
+# Test 6: Duplicates with zeros (sum to zero = removed)
+statement ok
+CREATE TABLE test_biom_dup_zeros AS
+SELECT * FROM (VALUES
+    ('F1', 'S1', 1.0::DOUBLE),
+    ('F1', 'S1', -1.0::DOUBLE),
+    ('F2', 'S2', 5.0::DOUBLE)
+) AS t(feature_id, sample_id, value);
+
+statement ok
+COPY (SELECT feature_id, sample_id, value FROM test_biom_dup_zeros)
+TO '__TEST_DIR__/output6.biom' (FORMAT BIOM);
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('__TEST_DIR__/output6.biom')
+ORDER BY feature_id, sample_id;
+----
+F2	S2	5.0
+
+# Test 7: With COMPRESSION parameter (HDF5 internal compression)
+statement ok
+COPY (SELECT feature_id, sample_id, value FROM test_biom_basic)
+TO '__TEST_DIR__/output7.biom' (FORMAT BIOM, COMPRESSION 'gzip');
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('__TEST_DIR__/output7.biom')
+ORDER BY feature_id, sample_id;
+----
+Feature1	Sample1	1.0
+Feature1	Sample2	2.0
+Feature2	Sample1	3.0
+
+# Test 8: With custom ID parameter
+statement ok
+COPY (SELECT feature_id, sample_id, value FROM test_biom_basic)
+TO '__TEST_DIR__/output8.biom' (FORMAT BIOM, ID 'MyCustomID');
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('__TEST_DIR__/output8.biom')
+ORDER BY feature_id, sample_id;
+----
+Feature1	Sample1	1.0
+Feature1	Sample2	2.0
+Feature2	Sample1	3.0
+
+# Test 9: With custom GENERATED_BY parameter
+statement ok
+COPY (SELECT feature_id, sample_id, value FROM test_biom_basic)
+TO '__TEST_DIR__/output9.biom' (FORMAT BIOM, GENERATED_BY 'MyTool v1.0');
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('__TEST_DIR__/output9.biom')
+ORDER BY feature_id, sample_id;
+----
+Feature1	Sample1	1.0
+Feature1	Sample2	2.0
+Feature2	Sample1	3.0
+
+# Test 10: Larger table with more features and samples
+statement ok
+CREATE TABLE test_biom_larger AS
+SELECT
+    'Feature' || (i % 10)::VARCHAR as feature_id,
+    'Sample' || (i % 5)::VARCHAR as sample_id,
+    (i * 1.5)::DOUBLE as value
+FROM range(50) t(i)
+WHERE (i % 7) != 0;
+
+statement ok
+COPY (SELECT feature_id, sample_id, value FROM test_biom_larger)
+TO '__TEST_DIR__/output10.biom' (FORMAT BIOM);
+
+query I
+SELECT COUNT(*) FROM read_biom('__TEST_DIR__/output10.biom');
+----
+10
+
+# Test 11: Table with additional columns (only select required columns)
+statement ok
+CREATE TABLE test_biom_extra_cols AS
+SELECT * FROM (VALUES
+    ('F1', 'S1', 1.0::DOUBLE, 'metadata1', 100),
+    ('F1', 'S2', 2.0::DOUBLE, 'metadata2', 200),
+    ('F2', 'S1', 3.0::DOUBLE, 'metadata3', 300)
+) AS t(feature_id, sample_id, value, description, count);
+
+statement ok
+COPY (SELECT feature_id, sample_id, value FROM test_biom_extra_cols ORDER BY feature_id, sample_id)
+TO '__TEST_DIR__/output11.biom' (FORMAT BIOM);
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('__TEST_DIR__/output11.biom')
+ORDER BY feature_id, sample_id;
+----
+F1	S1	1.0
+F1	S2	2.0
+F2	S1	3.0
+
+# Test 12: Verify correct ordering is preserved (feature/sample IDs in first-appearance order)
+statement ok
+CREATE TABLE test_biom_order AS
+SELECT * FROM (VALUES
+    ('Zebra', 'Alpha', 1.0::DOUBLE),
+    ('Apple', 'Zulu', 2.0::DOUBLE),
+    ('Zebra', 'Zulu', 3.0::DOUBLE),
+    ('Apple', 'Alpha', 4.0::DOUBLE)
+) AS t(feature_id, sample_id, value);
+
+statement ok
+COPY (SELECT feature_id, sample_id, value FROM test_biom_order)
+TO '__TEST_DIR__/output12.biom' (FORMAT BIOM);
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('__TEST_DIR__/output12.biom')
+ORDER BY feature_id, sample_id;
+----
+Apple	Alpha	4.0
+Apple	Zulu	2.0
+Zebra	Alpha	1.0
+Zebra	Zulu	3.0
+
+# Test 13: Error - missing feature_id column
+statement error
+COPY (SELECT sample_id, value FROM test_biom_basic)
+TO '__TEST_DIR__/error1.biom' (FORMAT BIOM);
+----
+feature_id
+
+# Test 14: Error - missing sample_id column
+statement error
+COPY (SELECT feature_id, value FROM test_biom_basic)
+TO '__TEST_DIR__/error2.biom' (FORMAT BIOM);
+----
+sample_id
+
+# Test 15: Error - missing value column
+statement error
+COPY (SELECT feature_id, sample_id FROM test_biom_basic)
+TO '__TEST_DIR__/error3.biom' (FORMAT BIOM);
+----
+value
+
+# Test 16: Error - NULL in feature_id
+statement error
+COPY (SELECT NULL::VARCHAR as feature_id, 'S1' as sample_id, 1.0::DOUBLE as value)
+TO '__TEST_DIR__/error4.biom' (FORMAT BIOM);
+----
+NULL
+
+# Test 17: Error - NULL in sample_id
+statement error
+COPY (SELECT 'F1' as feature_id, NULL::VARCHAR as sample_id, 1.0::DOUBLE as value)
+TO '__TEST_DIR__/error5.biom' (FORMAT BIOM);
+----
+NULL
+
+# Test 18: Error - NULL in value
+statement error
+COPY (SELECT 'F1' as feature_id, 'S1' as sample_id, NULL::DOUBLE as value)
+TO '__TEST_DIR__/error6.biom' (FORMAT BIOM);
+----
+NULL
+
+# Test 19: Error - invalid COMPRESSION parameter
+statement error
+COPY (SELECT feature_id, sample_id, value FROM test_biom_basic)
+TO '__TEST_DIR__/error7.biom' (FORMAT BIOM, COMPRESSION 'invalid');
+----
+compression
+
+# Cleanup
+statement ok
+DROP TABLE test_biom_basic;
+
+statement ok
+DROP TABLE test_biom_single;
+
+statement ok
+DROP TABLE test_biom_empty;
+
+statement ok
+DROP TABLE test_biom_dups;
+
+statement ok
+DROP TABLE test_biom_zeros;
+
+statement ok
+DROP TABLE test_biom_dup_zeros;
+
+statement ok
+DROP TABLE test_biom_larger;
+
+statement ok
+DROP TABLE test_biom_extra_cols;
+
+statement ok
+DROP TABLE test_biom_order;
