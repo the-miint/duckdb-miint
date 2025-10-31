@@ -22,13 +22,9 @@ BIOMReader::BIOMReader(const std::string &path1) {
 		}
 		std::cerr << "DEBUG: File exists, size: " << st.st_size << " bytes" << std::endl;
 
-		// Create file access property list and disable file locking
-		H5::FileAccPropList fapl;
-		hid_t fapl_id = fapl.getId();
-		H5Pset_file_locking(fapl_id, false, false);
-
-		std::cerr << "DEBUG: Attempting to open HDF5 file..." << std::endl;
-		file_handle = H5::H5File(path1, H5F_ACC_RDONLY, H5::FileCreatPropList::DEFAULT, fapl);
+		// Try opening WITHOUT the file locking property list first
+		std::cerr << "DEBUG: Attempting to open HDF5 file (without file locking property)..." << std::endl;
+		file_handle = H5::H5File(path1, H5F_ACC_RDONLY);
 		std::cerr << "DEBUG: File opened successfully, handle ID: " << file_handle.getId() << std::endl;
 
 		try {
@@ -94,12 +90,8 @@ bool BIOMReader::IsBIOM(const std::string &path) {
 	H5::Exception::dontPrint();
 
 	try {
-		// Create file access property list and disable file locking
-		H5::FileAccPropList fapl;
-		hid_t fapl_id = fapl.getId();
-		H5Pset_file_locking(fapl_id, false, false);
-
-		H5::H5File file(path, H5F_ACC_RDONLY, H5::FileCreatPropList::DEFAULT, fapl);
+		// Open file without file locking property list
+		H5::H5File file(path, H5F_ACC_RDONLY);
 
 		try {
 			H5::Group root = file.openGroup("/");
