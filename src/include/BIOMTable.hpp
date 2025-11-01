@@ -1,5 +1,6 @@
 #include <vector>
 #include <hdf5.h>
+#include <string>
 
 namespace miint {
 
