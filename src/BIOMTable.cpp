@@ -12,15 +12,14 @@ BIOMTable::BIOMTable()
     : coo_values({}), feature_ids_ordered({}), sample_ids_ordered({}), coo_feature_indices({}), coo_sample_indices({}) {
 }
 
-BIOMTable::BIOMTable(const H5::DataSet &ds_indices, const H5::DataSet &ds_indptr, const H5::DataSet &ds_data,
-                     const H5::DataSet &ds_obs_ids, const H5::DataSet &ds_samp_ids) {
+BIOMTable::BIOMTable(hid_t ds_indices, hid_t ds_indptr, hid_t ds_data, hid_t ds_obs_ids, hid_t ds_samp_ids) {
 	// adapted from
 	// https://github.com/biocore/unifrac-binaries/blob/main/src/biom.cpp
 	feature_ids_ordered = load_dataset_1D_str(ds_obs_ids);
 	sample_ids_ordered = load_dataset_1D_str(ds_samp_ids);
-	std::vector<int32_t> indptr = load_dataset_1D<int32_t>(ds_indptr, H5::PredType::NATIVE_INT32);
-	std::vector<int32_t> indices = load_dataset_1D<int32_t>(ds_indices, H5::PredType::NATIVE_INT32);
-	coo_values = load_dataset_1D<double>(ds_data, H5::PredType::NATIVE_DOUBLE);
+	std::vector<int32_t> indptr = load_dataset_1D<int32_t>(ds_indptr, H5T_NATIVE_INT32);
+	std::vector<int32_t> indices = load_dataset_1D<int32_t>(ds_indices, H5T_NATIVE_INT32);
+	coo_values = load_dataset_1D<double>(ds_data, H5T_NATIVE_DOUBLE);
 
 	InitCOOFromCSC(indptr, indices);
 }
@@ -141,42 +140,49 @@ const std::vector<double> &BIOMTable::COOValues() const {
 	return coo_values;
 }
 
-std::vector<std::string> BIOMTable::load_dataset_1D_str(const H5::DataSet &ds_ids) {
+std::vector<std::string> BIOMTable::load_dataset_1D_str(hid_t ds_id) {
 	// adapted from
 	// https://github.com/biocore/unifrac-binaries/blob/main/src/biom.cpp
-	H5::DataSpace dataspace;
-	try {
-		dataspace = ds_ids.getSpace();
-	} catch (H5::DataSpaceIException &e) {
-		throw std::runtime_error("Failed to access dataspace: " + std::string(e.getDetailMsg()));
+
+	// Get dataspace
+	hid_t dataspace = H5Dget_space(ds_id);
+	if (dataspace < 0) {
+		throw std::runtime_error("Failed to access dataspace");
 	}
 
 	hsize_t dims[1];
-	dataspace.getSimpleExtentDims(dims, nullptr);
+	H5Sget_simple_extent_dims(dataspace, dims, nullptr);
 
 	if (dims[0] == 0) {
+		H5Sclose(dataspace);
 		return std::vector<std::string>();
 	}
 
 	// Get and check datatype
-	H5::DataType dtype = ds_ids.getDataType();
-	H5T_class_t type_class = dtype.getClass();
+	hid_t dtype = H5Dget_type(ds_id);
+	H5T_class_t type_class = H5Tget_class(dtype);
 
 	// Check if it's a string type
 	if (type_class != H5T_STRING) {
+		H5Tclose(dtype);
+		H5Sclose(dataspace);
 		throw std::runtime_error("Dataset is not a string type");
 	}
 
 	// Check if it's variable length
-	H5::StrType strtype = ds_ids.getStrType();
-	if (!strtype.isVariableStr()) {
+	if (!H5Tis_variable_str(dtype)) {
+		H5Tclose(dtype);
+		H5Sclose(dataspace);
 		throw std::runtime_error("Dataset is not variable-length string type");
 	}
 
 	/* the IDs are a dataset of variable length strings */
 	std::vector<char *> rdata(dims[0]);
-	H5::StrType datatype = ds_ids.getStrType();
-	ds_ids.read((void *)rdata.data(), datatype);
+	if (H5Dread(ds_id, dtype, H5S_ALL, H5S_ALL, H5P_DEFAULT, rdata.data()) < 0) {
+		H5Tclose(dtype);
+		H5Sclose(dataspace);
+		throw std::runtime_error("Failed to read dataset");
+	}
 
 	// Convert to std::vector<std::string>
 	std::vector<std::string> ids;
@@ -186,50 +192,68 @@ std::vector<std::string> BIOMTable::load_dataset_1D_str(const H5::DataSet &ds_id
 	}
 
 	// Free memory allocated by HDF5
-	ds_ids.vlenReclaim((void *)rdata.data(), datatype, dataspace);
+	H5Dvlen_reclaim(dtype, dataspace, H5P_DEFAULT, rdata.data());
 
-	for (auto &id : ids) {
-	}
+	H5Tclose(dtype);
+	H5Sclose(dataspace);
+
 	return ids;
 }
 
 // Helper to get the appropriate HDF5 datatype
 template <typename T>
-H5::DataType BIOMTable::get_hdf5_type() {
+hid_t BIOMTable::get_hdf5_type() {
 	if constexpr (std::is_same_v<T, double>) {
-		return H5::PredType::NATIVE_DOUBLE;
+		return H5T_NATIVE_DOUBLE;
 	} else if constexpr (std::is_same_v<T, int32_t>) {
-		return H5::PredType::NATIVE_INT32;
+		return H5T_NATIVE_INT32;
 	} else {
 		throw std::runtime_error("Unsupported type");
 	}
 }
 
 template <typename T>
-std::vector<T> BIOMTable::load_dataset_1D(const H5::DataSet &ds, const H5::PredType &exp_dtype) {
-	H5::DataSpace dataspace;
-	auto dtype = ds.getDataType();
-	auto name = ds.getObjName();
-
-	if (dtype != exp_dtype) {
-		throw std::runtime_error("Invalid data type on BIOM load from dataset: " + name);
+std::vector<T> BIOMTable::load_dataset_1D(hid_t ds_id, hid_t exp_dtype) {
+	// Get datatype
+	hid_t dtype = H5Dget_type(ds_id);
+	if (dtype < 0) {
+		throw std::runtime_error("Failed to get dataset datatype");
 	}
 
-	if (dtype != get_hdf5_type<T>()) {
+	// Get dataset name for error messages
+	char name[256];
+	H5Iget_name(ds_id, name, sizeof(name));
+
+	// Check type matches
+	if (!H5Tequal(dtype, exp_dtype)) {
+		H5Tclose(dtype);
+		throw std::runtime_error("Invalid data type on BIOM load from dataset: " + std::string(name));
+	}
+
+	if (!H5Tequal(dtype, get_hdf5_type<T>())) {
+		H5Tclose(dtype);
 		throw std::runtime_error("Type mismatch");
 	}
 
-	try {
-		dataspace = ds.getSpace();
-	} catch (H5::DataSpaceIException &e) {
-		throw std::runtime_error("Failed to access dataspace: " + std::string(e.getDetailMsg()));
+	// Get dataspace
+	hid_t dataspace = H5Dget_space(ds_id);
+	if (dataspace < 0) {
+		H5Tclose(dtype);
+		throw std::runtime_error("Failed to access dataspace");
 	}
 
 	hsize_t dims[1];
-	dataspace.getSimpleExtentDims(dims, nullptr);
+	H5Sget_simple_extent_dims(dataspace, dims, nullptr);
 
 	std::vector<T> data(dims[0]);
-	ds.read(data.data(), get_hdf5_type<T>());
+	if (H5Dread(ds_id, get_hdf5_type<T>(), H5S_ALL, H5S_ALL, H5P_DEFAULT, data.data()) < 0) {
+		H5Sclose(dataspace);
+		H5Tclose(dtype);
+		throw std::runtime_error("Failed to read dataset");
+	}
+
+	H5Sclose(dataspace);
+	H5Tclose(dtype);
 
 	return data;
 }

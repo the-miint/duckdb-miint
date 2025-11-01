@@ -4,7 +4,7 @@
 #include <string>
 #include <memory>
 #include "BIOMTable.hpp"
-#include <H5Cpp.h>
+#include <hdf5.h>
 
 namespace miint {
 
@@ -21,12 +21,12 @@ static constexpr const char *SAMPLE_IDS = "/sample/ids";
 
 class BIOMReader {
 private:
-	H5::H5File file_handle;
-	H5::DataSet ds_indices;
-	H5::DataSet ds_indptr;
-	H5::DataSet ds_data;
-	H5::DataSet ds_samp_ids;
-	H5::DataSet ds_obs_ids;
+	hid_t file_handle;
+	hid_t ds_indices;
+	hid_t ds_indptr;
+	hid_t ds_data;
+	hid_t ds_samp_ids;
+	hid_t ds_obs_ids;
 
 public:
 	explicit BIOMReader(const std::string &path1);

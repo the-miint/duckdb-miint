@@ -1,5 +1,5 @@
 #include <vector>
-#include "H5Cpp.h"
+#include <hdf5.h>
 
 namespace miint {
 
@@ -19,8 +19,7 @@ struct SparseMatrix {
 
 class BIOMTable {
 public:
-	BIOMTable(const H5::DataSet &indices, const H5::DataSet &indptr, const H5::DataSet &data,
-	          const H5::DataSet &obs_ids, const H5::DataSet &samp_ids);
+	BIOMTable(hid_t indices, hid_t indptr, hid_t data, hid_t obs_ids, hid_t samp_ids);
 	BIOMTable(const std::vector<std::string> &feature_ids, const std::vector<std::string> &sample_ids,
 	          const std::vector<double> &values);
 	BIOMTable();
@@ -77,13 +76,13 @@ private:
 	// by_row=true: CSR, by_row=false: CSC
 	SparseMatrix ConvertCOOToCompressed(bool by_row) const;
 
-	std::vector<std::string> load_dataset_1D_str(const H5::DataSet &ds_ids);
+	std::vector<std::string> load_dataset_1D_str(hid_t ds_id);
 
 	template <typename T>
-	std::vector<T> load_dataset_1D(const H5::DataSet &ds, const H5::PredType &exp_dtype);
+	std::vector<T> load_dataset_1D(hid_t ds_id, hid_t exp_dtype);
 
 	template <typename T>
-	H5::DataType get_hdf5_type();
+	hid_t get_hdf5_type();
 };
 
 std::vector<std::string> unique_ids_in_order(const std::vector<std::string> &ids);
