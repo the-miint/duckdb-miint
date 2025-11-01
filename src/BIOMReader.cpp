@@ -1,6 +1,7 @@
 #include "BIOMReader.hpp"
 #include <iostream>
 #include <sys/stat.h>
+#include <cstring>
 
 namespace miint {
 
