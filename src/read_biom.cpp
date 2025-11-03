@@ -14,6 +14,7 @@ unique_ptr<FunctionData> ReadBIOMTableFunction::Bind(ClientContext &context, Tab
 
 	std::vector<std::string> biom_paths;
 
+	// TODO: the VARCHAR / VARCHAR[] pattern is common for our readers, can this be decomposed?
 	// Handle VARCHAR or VARCHAR[] input for file paths
 	if (input.inputs[0].type().id() == LogicalTypeId::VARCHAR) {
 		biom_paths.push_back(input.inputs[0].ToString());
@@ -42,6 +43,7 @@ unique_ptr<FunctionData> ReadBIOMTableFunction::Bind(ClientContext &context, Tab
 		}
 	}
 
+	// TODO: include_filepath is common for our readers, can this be decomposed?
 	// Parse include_filepath parameter (optional BOOLEAN, default false)
 	bool include_filepath = false;
 	auto fp_param = input.named_parameters.find("include_filepath");
@@ -50,6 +52,8 @@ unique_ptr<FunctionData> ReadBIOMTableFunction::Bind(ClientContext &context, Tab
 	}
 
 	auto data = duckdb::make_uniq<Data>(biom_paths, include_filepath);
+	
+	// TODO: pushing back names and types is common to our readers, can this be decomposed?
 	for (auto &name : data->names) {
 		names.emplace_back(name);
 	}

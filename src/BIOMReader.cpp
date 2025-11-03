@@ -1,75 +1,59 @@
 #include "BIOMReader.hpp"
-#include <iostream>
 #include <sys/stat.h>
 #include <cstring>
 
 namespace miint {
 
-BIOMReader::BIOMReader(const std::string &path1) {
-	// Disable HDF5's automatic error printing
-	H5Eset_auto(H5E_DEFAULT, nullptr, nullptr);
-
+BIOMReader::BIOMReader(const std::string &path) {
 	// Check if file exists and get size
 	struct stat st;
-	if (stat(path1.c_str(), &st) != 0) {
-		throw std::runtime_error("File does not exist or cannot be accessed: " + path1);
+	if (stat(path.c_str(), &st) != 0) {
+		throw std::runtime_error("File does not exist or cannot be accessed: " + path);
 	}
 
-	// Use C API for maximum control and error reporting
-	herr_t status;
+	htri_t is_hdf5 = -1;
 	hid_t file_id = -1;
 	hid_t ds_indices_id = -1, ds_indptr_id = -1, ds_data_id = -1;
 	hid_t ds_samp_ids_id = -1, ds_obs_ids_id = -1;
 
 	try {
+		// Check if file is actually HDF5
+		is_hdf5 = H5Fis_hdf5(path.c_str());
+		if (is_hdf5 < 0) {
+			throw std::runtime_error("File is not HDF5");
+		}
+
 		// Open file with C API
-		file_id = H5Fopen(path1.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+		file_id = H5Fopen(path.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
 
 		if (file_id < 0) {
 			throw std::runtime_error("H5Fopen failed with return value: " + std::to_string(file_id));
 		}
 
-		// Check if file is actually HDF5
-		htri_t is_hdf5 = H5Fis_hdf5(path1.c_str());
-
-		// Get file intent
-		unsigned intent;
-		status = H5Fget_intent(file_id, &intent);
-
-		// Try to open first dataset
 		ds_indices_id = H5Dopen2(file_id, SAMPLE_INDICES, H5P_DEFAULT);
-
 		if (ds_indices_id < 0) {
-			// Get more detailed error info
-
-			// Check if the dataset path exists by trying to open as object
-			htri_t exists = H5Lexists(file_id, SAMPLE_INDICES, H5P_DEFAULT);
-
-			if (exists > 0) {
-				// Path exists but can't open as dataset - check what type it is
-				H5O_info2_t obj_info;
-				status = H5Oget_info_by_name3(file_id, SAMPLE_INDICES, &obj_info, H5O_INFO_BASIC, H5P_DEFAULT);
-			}
-
-			H5Fclose(file_id);
 			throw std::runtime_error("Failed to open dataset " + std::string(SAMPLE_INDICES));
 		}
 
 		ds_indptr_id = H5Dopen2(file_id, SAMPLE_INDPTR, H5P_DEFAULT);
-		if (ds_indptr_id < 0)
+		if (ds_indptr_id < 0) {
 			throw std::runtime_error("Failed to open " + std::string(SAMPLE_INDPTR));
+		}
 
 		ds_data_id = H5Dopen2(file_id, SAMPLE_DATA, H5P_DEFAULT);
-		if (ds_data_id < 0)
+		if (ds_data_id < 0) {
 			throw std::runtime_error("Failed to open " + std::string(SAMPLE_DATA));
+		}
 
 		ds_samp_ids_id = H5Dopen2(file_id, SAMPLE_IDS, H5P_DEFAULT);
-		if (ds_samp_ids_id < 0)
+		if (ds_samp_ids_id < 0) {
 			throw std::runtime_error("Failed to open " + std::string(SAMPLE_IDS));
+		}
 
 		ds_obs_ids_id = H5Dopen2(file_id, OBS_IDS, H5P_DEFAULT);
-		if (ds_obs_ids_id < 0)
+		if (ds_obs_ids_id < 0) {
 			throw std::runtime_error("Failed to open " + std::string(OBS_IDS));
+		}
 
 		// Store the C handles directly
 		file_handle = file_id;
@@ -81,19 +65,24 @@ BIOMReader::BIOMReader(const std::string &path1) {
 
 	} catch (const std::exception &e) {
 		// Clean up any open handles
-		if (ds_obs_ids_id >= 0)
+		if (ds_obs_ids_id >= 0) {
 			H5Dclose(ds_obs_ids_id);
-		if (ds_samp_ids_id >= 0)
+		}
+		if (ds_samp_ids_id >= 0) {
 			H5Dclose(ds_samp_ids_id);
-		if (ds_data_id >= 0)
+		}
+		if (ds_data_id >= 0) {
 			H5Dclose(ds_data_id);
-		if (ds_indptr_id >= 0)
+		}
+		if (ds_indptr_id >= 0) {
 			H5Dclose(ds_indptr_id);
-		if (ds_indices_id >= 0)
+		}
+		if (ds_indices_id >= 0) {
 			H5Dclose(ds_indices_id);
-		if (file_id >= 0)
+		}
+		if (file_id >= 0) {
 			H5Fclose(file_id);
-
+		}
 		throw;
 	}
 }
@@ -126,23 +115,28 @@ BIOMTable BIOMReader::read() const {
 }
 
 bool BIOMReader::IsBIOM(const std::string &path) {
-	// Disable HDF5's automatic error printing
-	H5Eset_auto(H5E_DEFAULT, nullptr, nullptr);
-
 	const char *target = "format-version";
-	bool valid = false;
 
+	htri_t is_hdf5 = -1;
 	hid_t file_id = -1;
 	hid_t root_id = -1;
 	hid_t attr_id = -1;
 
-	// Open file
+	struct stat st;
+	if (stat(path.c_str(), &st) != 0) {
+		return false;
+	}
+
+	is_hdf5 = H5Fis_hdf5(path.c_str());
+	if (is_hdf5 < 0) {
+		return false;
+	}
+
 	file_id = H5Fopen(path.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
 	if (file_id < 0) {
 		return false;
 	}
 
-	// Open root group
 	root_id = H5Gopen(file_id, "/", H5P_DEFAULT);
 	if (root_id < 0) {
 		H5Fclose(file_id);
@@ -158,6 +152,7 @@ bool BIOMReader::IsBIOM(const std::string &path) {
 	}
 
 	// Check each attribute
+	bool valid = false;
 	for (hsize_t i = 0; i < obj_info.num_attrs; i++) {
 		attr_id = H5Aopen_by_idx(root_id, ".", H5_INDEX_NAME, H5_ITER_NATIVE, i, H5P_DEFAULT, H5P_DEFAULT);
 		if (attr_id < 0) {

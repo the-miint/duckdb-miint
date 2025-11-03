@@ -179,7 +179,7 @@ std::vector<std::string> BIOMTable::load_dataset_1D_str(hid_t ds_id) {
 
 	/* the IDs are a dataset of variable length strings */
 	std::vector<char *> rdata(dims[0]);
-	if (H5Dread(ds_id, dtype, H5S_ALL, H5S_ALL, H5P_DEFAULT, rdata.data()) < 0) {
+	if (H5Dread(ds_id, dtype, H5S_ALL, H5S_ALL, H5P_DEFAULT, (void *)rdata.data()) < 0) {
 		H5Tclose(dtype);
 		H5Sclose(dataspace);
 		throw std::runtime_error("Failed to read dataset");
@@ -193,7 +193,7 @@ std::vector<std::string> BIOMTable::load_dataset_1D_str(hid_t ds_id) {
 	}
 
 	// Free memory allocated by HDF5
-	H5Dvlen_reclaim(dtype, dataspace, H5P_DEFAULT, rdata.data());
+	H5Dvlen_reclaim(dtype, dataspace, H5P_DEFAULT, (void *)rdata.data());
 
 	H5Tclose(dtype);
 	H5Sclose(dataspace);

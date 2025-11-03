@@ -41,6 +41,7 @@ TEST_CASE("BIOM basic table", "[BIOMReader]") {
 }
 
 TEST_CASE("BIOM IsBIOM", "[BIOMReader]") {
+	H5Eset_auto(H5E_DEFAULT, nullptr, nullptr); // Disable HDF5 error printing
 	auto path1 = "data/biom/test.biom";
 	auto path2 = "data/biom/empty.biom";
 	auto path3 = "data/sam/foo_no_header.sam";
@@ -50,4 +51,18 @@ TEST_CASE("BIOM IsBIOM", "[BIOMReader]") {
 	REQUIRE(miint::BIOMReader::IsBIOM(path2));
 	REQUIRE(!miint::BIOMReader::IsBIOM(path3));
 	REQUIRE(!miint::BIOMReader::IsBIOM(path4));
+}
+
+TEST_CASE("BIOM file error recovery", "[BIOMReader]") {
+	H5Eset_auto(H5E_DEFAULT, nullptr, nullptr); // Disable HDF5 error printing
+	// Try to open invalid file (should throw)
+	REQUIRE_THROWS_AS(miint::BIOMReader("data/biom/notbiom.h5"), std::runtime_error);
+
+	// Verify we can still open a valid file after the error
+	REQUIRE_NOTHROW(miint::BIOMReader("data/biom/test.biom"));
+
+	// And use it
+	miint::BIOMReader reader("data/biom/test.biom");
+	auto table = reader.read();
+	REQUIRE((table.nnz() == 15));
 }

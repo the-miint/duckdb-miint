@@ -187,7 +187,11 @@ S4	6.0
 S5	10.0
 S6	14.0
 
-# Performance test with large files (if available)
+# Performance test with large files. NOTE: this test runs roughly 4s on a mac (arm64) laptop
+# however directly running the same query outside of the test framework runs in 0.6s. 
+# The inclusion of `PRAGMA enable_verification` triggers internal diagnostics for testing which 
+# appear to be the source of the discrepency, and which make sense as this is a test
+# framework.
 query I
 SELECT COUNT(*) FROM read_biom('data/biom/large_table1.biom');
 ----

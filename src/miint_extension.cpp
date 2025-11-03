@@ -20,12 +20,12 @@ namespace fs = std::filesystem;
 
 namespace duckdb {
 
-static void poke() {
-	// Open HDF5 file
-	auto file_id = H5Fopen("foo.biom", H5F_ACC_RDONLY, H5P_DEFAULT);
-	if (file_id < 0) {
-		throw IOException("Failed to open HDF5 file");
-	}
+static void SetDependencyLogging() {
+	// HTSlib and HDF5 had runtime logging behaviors. Disable globally
+	// for now. It's unclear whether these should be exposed or the
+	// exact benefit, we will defer that decision for the future.
+	hts_set_log_level(HTS_LOG_ERROR);
+	H5Eset_auto(H5E_DEFAULT, nullptr, nullptr);
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
@@ -48,10 +48,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 }
 
 void MiintExtension::Load(ExtensionLoader &loader) {
-	hts_set_log_level(HTS_LOG_ERROR);
-
+	SetDependencyLogging();
 	LoadInternal(loader);
 }
+
 std::string MiintExtension::Name() {
 	return "miint";
 }
