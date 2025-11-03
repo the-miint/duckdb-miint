@@ -118,8 +118,14 @@ static unique_ptr<FunctionData> BiomCopyBind(ClientContext &context, CopyFunctio
 //===--------------------------------------------------------------------===//
 struct BiomCopyGlobalState : public GlobalFunctionData {
 	mutex lock;
-	vector<string> feature_ids;
-	vector<string> sample_ids;
+	// Incremental dictionary building for optimal performance
+	unordered_map<string, int32_t> feature_map;
+	unordered_map<string, int32_t> sample_map;
+	vector<string> feature_ids_ordered;
+	vector<string> sample_ids_ordered;
+	// Store integer indices instead of strings
+	vector<size_t> feature_indices;
+	vector<size_t> sample_indices;
 	vector<double> values;
 };
 
@@ -133,8 +139,9 @@ static unique_ptr<GlobalFunctionData> BiomCopyInitializeGlobal(ClientContext &co
 // Local State
 //===--------------------------------------------------------------------===//
 struct BiomCopyLocalState : public LocalFunctionData {
-	vector<string> local_feature_ids;
-	vector<string> local_sample_ids;
+	// Store integer indices instead of strings for performance
+	vector<size_t> local_feature_indices;
+	vector<size_t> local_sample_indices;
 	vector<double> local_values;
 };
 
@@ -149,6 +156,7 @@ static unique_ptr<LocalFunctionData> BiomCopyInitializeLocal(ExecutionContext &c
 static void BiomCopySink(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p,
                          LocalFunctionData &lstate_p, DataChunk &input) {
 	auto &fdata = bind_data.Cast<BiomCopyBindData>();
+	auto &gstate = gstate_p.Cast<BiomCopyGlobalState>();
 	auto &lstate = lstate_p.Cast<BiomCopyLocalState>();
 
 	// Process each row
@@ -178,10 +186,42 @@ static void BiomCopySink(ExecutionContext &context, FunctionData &bind_data, Glo
 			throw InvalidInputException("COPY FORMAT BIOM: NULL values not allowed in value column");
 		}
 
-		// Accumulate data
-		lstate.local_feature_ids.push_back(feature_strings[feature_idx].GetString());
-		lstate.local_sample_ids.push_back(sample_strings[sample_idx].GetString());
-		lstate.local_values.push_back(value_doubles[value_idx]);
+		// Get string values
+		string feature_id = feature_strings[feature_idx].GetString();
+		string sample_id = sample_strings[sample_idx].GetString();
+		double value = value_doubles[value_idx];
+
+		// Build dictionaries incrementally and get integer indices
+		lock_guard<mutex> glock(gstate.lock);
+
+		// Look up or insert feature_id
+		auto feature_it = gstate.feature_map.find(feature_id);
+		int32_t feature_index;
+		if (feature_it == gstate.feature_map.end()) {
+			// New feature - assign next index
+			feature_index = static_cast<int32_t>(gstate.feature_ids_ordered.size());
+			gstate.feature_map[feature_id] = feature_index;
+			gstate.feature_ids_ordered.push_back(feature_id);
+		} else {
+			feature_index = feature_it->second;
+		}
+
+		// Look up or insert sample_id
+		auto sample_it = gstate.sample_map.find(sample_id);
+		int32_t sample_index;
+		if (sample_it == gstate.sample_map.end()) {
+			// New sample - assign next index
+			sample_index = static_cast<int32_t>(gstate.sample_ids_ordered.size());
+			gstate.sample_map[sample_id] = sample_index;
+			gstate.sample_ids_ordered.push_back(sample_id);
+		} else {
+			sample_index = sample_it->second;
+		}
+
+		// Store integer indices in local state
+		lstate.local_feature_indices.push_back(static_cast<size_t>(feature_index));
+		lstate.local_sample_indices.push_back(static_cast<size_t>(sample_index));
+		lstate.local_values.push_back(value);
 	}
 }
 
@@ -195,10 +235,11 @@ static void BiomCopyCombine(ExecutionContext &context, FunctionData &bind_data, 
 
 	lock_guard<mutex> glock(gstate.lock);
 
-	// Append local data to global
-	gstate.feature_ids.insert(gstate.feature_ids.end(), lstate.local_feature_ids.begin(),
-	                          lstate.local_feature_ids.end());
-	gstate.sample_ids.insert(gstate.sample_ids.end(), lstate.local_sample_ids.begin(), lstate.local_sample_ids.end());
+	// Append local integer indices to global (much faster than string operations)
+	gstate.feature_indices.insert(gstate.feature_indices.end(), lstate.local_feature_indices.begin(),
+	                              lstate.local_feature_indices.end());
+	gstate.sample_indices.insert(gstate.sample_indices.end(), lstate.local_sample_indices.begin(),
+	                             lstate.local_sample_indices.end());
 	gstate.values.insert(gstate.values.end(), lstate.local_values.begin(), lstate.local_values.end());
 }
 
@@ -338,8 +379,10 @@ static void BiomCopyFinalize(ClientContext &context, FunctionData &bind_data, Gl
 	auto &fdata = bind_data.Cast<BiomCopyBindData>();
 	auto &gstate = gstate_p.Cast<BiomCopyGlobalState>();
 
-	// Create BIOMTable from accumulated COO data (this will compress and validate)
-	miint::BIOMTable table(gstate.feature_ids, gstate.sample_ids, gstate.values);
+	// Create BIOMTable using pre-computed integer indices and dictionaries
+	// This skips the expensive string hashing that the old constructor did
+	miint::BIOMTable table(gstate.feature_indices, gstate.sample_indices, gstate.values,
+	                       std::move(gstate.feature_ids_ordered), std::move(gstate.sample_ids_ordered));
 
 	auto n_features = table.NumFeatures();
 	auto n_samples = table.NumSamples();

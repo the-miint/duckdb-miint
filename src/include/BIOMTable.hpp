@@ -23,6 +23,11 @@ public:
 	BIOMTable(hid_t indices, hid_t indptr, hid_t data, hid_t obs_ids, hid_t samp_ids);
 	BIOMTable(const std::vector<std::string> &feature_ids, const std::vector<std::string> &sample_ids,
 	          const std::vector<double> &values);
+	// Constructor accepting pre-computed integer indices and ordered ID lists
+	// Optimized for performance - skips string hashing that happens in string-based constructor
+	BIOMTable(const std::vector<size_t> &feature_indices, const std::vector<size_t> &sample_indices,
+	          const std::vector<double> &values, std::vector<std::string> feature_ids_ordered,
+	          std::vector<std::string> sample_ids_ordered);
 	BIOMTable();
 	uint32_t nnz(); // not const as it implicitly calls compress_coo
 	const std::vector<std::string> &COOFeatures() const;

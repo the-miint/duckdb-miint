@@ -30,6 +30,18 @@ BIOMTable::BIOMTable(const std::vector<std::string> &feature_ids, const std::vec
 	InitCOOFromCOO(feature_ids, sample_ids);
 }
 
+BIOMTable::BIOMTable(const std::vector<size_t> &feature_indices, const std::vector<size_t> &sample_indices,
+                     const std::vector<double> &values, std::vector<std::string> feature_ids_ordered_param,
+                     std::vector<std::string> sample_ids_ordered_param)
+    : coo_feature_indices(feature_indices), coo_sample_indices(sample_indices), coo_values(values),
+      feature_ids_ordered(std::move(feature_ids_ordered_param)), sample_ids_ordered(std::move(sample_ids_ordered_param)) {
+	// Compress COO (sort by row/column, deduplicate, remove zeros)
+	compress_coo();
+	// Build string representations for compatibility with existing interfaces
+	coo_sample_indices_as_ids = indices_to_ids(coo_sample_indices, sample_ids_ordered);
+	coo_feature_indices_as_ids = indices_to_ids(coo_feature_indices, feature_ids_ordered);
+}
+
 void BIOMTable::InitCOOFromCOO(const std::vector<std::string> &feature_ids,
                                const std::vector<std::string> &sample_ids) {
 	feature_ids_ordered = unique_ids_in_order(feature_ids);
