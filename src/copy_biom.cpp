@@ -330,9 +330,9 @@ static void WriteStringDataset(H5::Group &group, const string &name, const std::
 	// Create dataset with optional compression
 	H5::DSetCreatPropList plist;
 	if (use_compression && data.size() > 0) {
-		hsize_t chunk_dims[1] = {std::min(data.size(), size_t(1024))};
+		hsize_t chunk_dims[1] = {std::min(data.size(), size_t(65536))};
 		plist.setChunk(1, chunk_dims);
-		plist.setDeflate(6); // gzip compression level 6
+		plist.setDeflate(4); // gzip compression level 4 (h5py/BIOM default)
 	}
 
 	H5::DataSet dataset = group.createDataSet(name, datatype, dataspace, plist);
@@ -363,9 +363,9 @@ static void WriteNumericDataset(H5::Group &group, const string &name, const std:
 	// Create dataset with optional compression
 	H5::DSetCreatPropList plist;
 	if (use_compression && data.size() > 0) {
-		hsize_t chunk_dims[1] = {std::min(data.size(), size_t(1024))};
+		hsize_t chunk_dims[1] = {std::min(data.size(), size_t(65536))};
 		plist.setChunk(1, chunk_dims);
-		plist.setDeflate(6); // gzip compression level 6
+		plist.setDeflate(4); // gzip compression level 4 (h5py/BIOM default)
 	}
 
 	H5::DataSet dataset = group.createDataSet(name, dtype, dataspace, plist);
