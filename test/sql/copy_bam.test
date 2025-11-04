@@ -1,0 +1,264 @@
+# name: test/sql/copy_bam.test
+# description: Test COPY FORMAT BAM for writing BAM format files
+# group: [sql]
+
+require miint
+
+# Setup: Create test data and reference table
+statement ok
+CREATE TABLE sam_test AS SELECT * FROM read_alignments('data/sam/foo_has_header.sam');
+
+statement ok
+CREATE TABLE ref_table AS SELECT 'G1234' AS name, 20 AS length UNION ALL SELECT 'G000144735', 90;
+
+# Test 1: Basic BAM Writing with explicit FORMAT BAM
+statement ok
+COPY sam_test TO '__TEST_DIR__/basic.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table');
+
+query I
+SELECT COUNT(*) FROM read_alignments('__TEST_DIR__/basic.bam');
+----
+4
+
+query IIIII
+SELECT read_id, flags, reference, position, mapq FROM read_alignments('__TEST_DIR__/basic.bam') ORDER BY read_id, position;
+----
+foo-1	0	G1234	2	60
+foo-2	0	G1234	2	60
+foo-3	99	G000144735	76020	1
+foo-3	147	G000144735	76146	1
+
+# Test 2: Auto-detection from .bam Extension (no FORMAT parameter)
+statement ok
+COPY sam_test TO '__TEST_DIR__/auto_detect.bam' (REFERENCE_LENGTHS 'ref_table');
+
+query I
+SELECT COUNT(*) FROM read_alignments('__TEST_DIR__/auto_detect.bam');
+----
+4
+
+query IIIII
+SELECT read_id, flags, reference, position, mapq FROM read_alignments('__TEST_DIR__/auto_detect.bam') ORDER BY read_id, position;
+----
+foo-1	0	G1234	2	60
+foo-2	0	G1234	2	60
+foo-3	99	G000144735	76020	1
+foo-3	147	G000144735	76146	1
+
+# Test 3: BAM with INCLUDE_HEADER=true (explicit, should be default)
+statement ok
+COPY sam_test TO '__TEST_DIR__/with_header.bam' (FORMAT BAM, INCLUDE_HEADER true, REFERENCE_LENGTHS 'ref_table');
+
+query I
+SELECT COUNT(*) FROM read_alignments('__TEST_DIR__/with_header.bam');
+----
+4
+
+# Test 4: Error - BAM with INCLUDE_HEADER=false (BAM requires headers)
+statement error
+COPY sam_test TO '__TEST_DIR__/no_header.bam' (FORMAT BAM, INCLUDE_HEADER false);
+----
+BAM format requires INCLUDE_HEADER=true
+
+# Test 5: BAM with Compression Level 0 (uncompressed)
+statement ok
+COPY sam_test TO '__TEST_DIR__/level0.bam' (FORMAT BAM, COMPRESSION_LEVEL 0, REFERENCE_LENGTHS 'ref_table');
+
+query I
+SELECT COUNT(*) FROM read_alignments('__TEST_DIR__/level0.bam');
+----
+4
+
+# Test 6: BAM with Compression Level 9 (maximum compression)
+statement ok
+COPY sam_test TO '__TEST_DIR__/level9.bam' (FORMAT BAM, COMPRESSION_LEVEL 9, REFERENCE_LENGTHS 'ref_table');
+
+query I
+SELECT COUNT(*) FROM read_alignments('__TEST_DIR__/level9.bam');
+----
+4
+
+# Test 7: BAM with Tags
+statement ok
+CREATE TABLE sam_tags_test AS SELECT * FROM read_alignments('data/sam/foo_with_tags.sam');
+
+statement ok
+CREATE TABLE ref_table_tags AS SELECT 'G1234' AS name, 1000 AS length UNION ALL SELECT 'G000144735', 100000;
+
+statement ok
+COPY sam_tags_test TO '__TEST_DIR__/with_tags.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table_tags');
+
+query IIIIII
+SELECT read_id, flags, reference, position, mapq, tag_as FROM read_alignments('__TEST_DIR__/with_tags.bam') ORDER BY read_id;
+----
+tagged-1	0	G1234	10	60	100
+tagged-2	99	G000144735	1000	30	200
+
+# Test 8: Round-trip SAM → BAM → SAM
+statement ok
+CREATE TABLE sam_original AS SELECT * FROM read_alignments('data/sam/foo_has_header.sam');
+
+statement ok
+COPY sam_original TO '__TEST_DIR__/roundtrip.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table');
+
+statement ok
+CREATE TABLE bam_intermediate AS SELECT * FROM read_alignments('__TEST_DIR__/roundtrip.bam');
+
+statement ok
+COPY bam_intermediate TO '__TEST_DIR__/roundtrip.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_table');
+
+query IIIII
+SELECT read_id, flags, reference, position, mapq FROM read_alignments('__TEST_DIR__/roundtrip.sam') ORDER BY read_id, position;
+----
+foo-1	0	G1234	2	60
+foo-2	0	G1234	2	60
+foo-3	99	G000144735	76020	1
+foo-3	147	G000144735	76146	1
+
+# Test 9: Round-trip BAM → SAM → BAM
+statement ok
+CREATE TABLE bam_original AS SELECT * FROM read_alignments('data/sam/foo_has_header.bam');
+
+statement ok
+COPY bam_original TO '__TEST_DIR__/roundtrip2.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_table');
+
+statement ok
+CREATE TABLE sam_intermediate AS SELECT * FROM read_alignments('__TEST_DIR__/roundtrip2.sam');
+
+statement ok
+COPY sam_intermediate TO '__TEST_DIR__/roundtrip2.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table');
+
+query IIIII
+SELECT read_id, flags, reference, position, mapq FROM read_alignments('__TEST_DIR__/roundtrip2.bam') ORDER BY read_id, position;
+----
+foo-1	0	G1234	2	60
+foo-2	0	G1234	2	60
+foo-3	99	G000144735	76020	1
+foo-3	147	G000144735	76146	1
+
+# Test 10: FORMAT BAM with .sam extension (unusual but should work)
+statement ok
+COPY sam_test TO '__TEST_DIR__/unusual.sam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table');
+
+query I
+SELECT COUNT(*) FROM read_alignments('__TEST_DIR__/unusual.sam');
+----
+4
+
+# Test 11: Large positions in BAM
+statement ok
+CREATE TABLE large_pos_test AS SELECT * FROM read_alignments('data/sam/foo_large_positions.sam');
+
+statement ok
+CREATE TABLE ref_table_large AS SELECT 'chrLarge' AS name, 2000000000 AS length;
+
+statement ok
+COPY large_pos_test TO '__TEST_DIR__/large_pos.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table_large');
+
+query III
+SELECT read_id, position, stop_position FROM read_alignments('__TEST_DIR__/large_pos.bam') ORDER BY read_id;
+----
+large-pos	1147483647	1147483747
+
+# Test 12: Empty table with header (BAM)
+statement ok
+CREATE TABLE empty_sam AS SELECT * FROM sam_test WHERE 1=0;
+
+statement ok
+COPY empty_sam TO '__TEST_DIR__/empty.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table');
+
+query I
+SELECT COUNT(*) FROM read_alignments('__TEST_DIR__/empty.bam');
+----
+0
+
+# Test 13: Verify CIGAR string preservation in BAM
+query II
+SELECT read_id, cigar FROM read_alignments('__TEST_DIR__/basic.bam') ORDER BY read_id, position;
+----
+foo-1	10M
+foo-2	10M
+foo-3	150M
+foo-3	150M
+
+# Test 14: Error - COMPRESSION_LEVEL without BAM format
+statement error
+COPY sam_test TO '__TEST_DIR__/error.sam' (FORMAT SAM, COMPRESSION_LEVEL 5, REFERENCE_LENGTHS 'ref_table');
+----
+COMPRESSION_LEVEL parameter only applies to BAM format
+
+# Test 15: Error - Invalid compression level (too high)
+statement error
+COPY sam_test TO '__TEST_DIR__/error.bam' (FORMAT BAM, COMPRESSION_LEVEL 10, REFERENCE_LENGTHS 'ref_table');
+----
+COMPRESSION_LEVEL must be between 0 and 9
+
+# Test 16: Error - Invalid compression level (negative)
+statement error
+COPY sam_test TO '__TEST_DIR__/error.bam' (FORMAT BAM, COMPRESSION_LEVEL -2, REFERENCE_LENGTHS 'ref_table');
+----
+COMPRESSION_LEVEL must be between 0 and 9
+
+# Test 17: Error - BAM without reference_lengths (BAM always requires headers and thus reference_lengths)
+statement error
+COPY sam_test TO '__TEST_DIR__/error.bam' (FORMAT BAM);
+----
+COPY FORMAT SAM with INCLUDE_HEADER=true requires REFERENCE_LENGTHS parameter
+
+# Test 18: Verify all optional tags are preserved in BAM
+statement ok
+CREATE TABLE all_tags_test AS
+SELECT
+    'test-read' AS read_id,
+    0::USMALLINT AS flags,
+    'G1234' AS reference,
+    100::BIGINT AS position,
+    500::BIGINT AS stop_position,
+    60::UTINYINT AS mapq,
+    '50M' AS cigar,
+    '*' AS mate_reference,
+    0::BIGINT AS mate_position,
+    0::BIGINT AS template_length,
+    150::BIGINT AS tag_as,
+    200::BIGINT AS tag_xs,
+    250::BIGINT AS tag_ys,
+    5::BIGINT AS tag_xn,
+    10::BIGINT AS tag_xm,
+    2::BIGINT AS tag_xo,
+    3::BIGINT AS tag_xg,
+    8::BIGINT AS tag_nm,
+    'UU' AS tag_yt,
+    '50' AS tag_md,
+    'chrX,1000,+,50M,60,5' AS tag_sa;
+
+statement ok
+COPY all_tags_test TO '__TEST_DIR__/all_tags.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table_tags');
+
+query IIIIIIIIIIIIIIII
+SELECT read_id, flags, reference, position, mapq, tag_as, tag_xs, tag_ys, tag_xn, tag_xm, tag_xo, tag_xg, tag_nm, tag_yt, tag_md, tag_sa
+FROM read_alignments('__TEST_DIR__/all_tags.bam');
+----
+test-read	0	G1234	100	60	150	200	250	5	10	2	3	8	UU	50	chrX,1000,+,50M,60,5
+
+# Test 19: Large position
+statement ok
+CREATE TABLE int32_boundary AS
+SELECT
+    'test-read' AS read_id,
+    16::USMALLINT AS flags,
+    'G1234' AS reference,
+    2147483647::BIGINT AS position,
+    60::UTINYINT AS mapq,
+    '50M' AS cigar,
+    '*' AS mate_reference,
+    0::BIGINT AS mate_position,
+    0::BIGINT AS template_length;
+
+statement ok
+COPY int32_boundary TO '__TEST_DIR__/int32_boundary.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table_tags');
+
+query IIIII
+SELECT read_id, flags, reference, position, mapq
+FROM read_alignments('__TEST_DIR__/int32_boundary.bam');
+----
+test-read	16	G1234	2147483647	60

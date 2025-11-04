@@ -1,0 +1,115 @@
+# name: test/sql/read_alignments.test
+# description: Tests for read_alignments function (SAM/BAM reading)
+# group: [sql]
+
+# Test that the extension loads
+require miint
+
+### Phase 2.1 Tests: Basic SAM reading with renamed function
+
+# Basic SAM reading (verify rename works)
+statement ok
+SELECT * FROM read_alignments('data/sam/foo_has_header.sam')
+
+# Verify read_sam macro alias works for backward compatibility
+statement ok
+SELECT * FROM read_sam('data/sam/foo_has_header.sam')
+
+# Error: file does not exist
+statement error
+SELECT * FROM read_alignments('nonexistent.sam')
+----
+File not found
+
+# Verify same output as before rename
+query IIIIIII
+SELECT read_id, flags, reference, position, mapq, cigar, mate_reference
+FROM read_alignments('data/sam/foo_has_header.sam')
+ORDER BY read_id
+----
+foo-1	0	G1234	2	60	10M	*
+foo-2	0	G1234	2	60	10M	*
+foo-3	99	G000144735	76020	1	150M	=
+foo-3	147	G000144735	76146	1	150M	=
+
+# Test with array of files
+query I
+SELECT COUNT(*) FROM read_alignments(['data/sam/foo_has_header.sam', 'data/sam/foo_has_header_2.sam'])
+----
+8
+
+# Test include_filepath parameter
+query II
+SELECT read_id, COUNT(DISTINCT filepath)
+FROM read_alignments(['data/sam/foo_has_header.sam', 'data/sam/foo_has_header_2.sam'], include_filepath=true)
+GROUP BY read_id
+ORDER BY read_id
+----
+bar-1	1
+bar-2	1
+bar-3	1
+foo-1	1
+foo-2	1
+foo-3	1
+
+### Phase 2.2 Tests: BAM reading support
+
+# Basic BAM reading - count records
+query I
+SELECT COUNT(*) FROM read_alignments('data/sam/foo_has_header.bam')
+----
+4
+
+# Verify BAM output matches SAM output
+query IIIIIII
+SELECT read_id, flags, reference, position, mapq, cigar, mate_reference
+FROM read_alignments('data/sam/foo_has_header.bam')
+ORDER BY read_id
+----
+foo-1	0	G1234	2	60	10M	*
+foo-2	0	G1234	2	60	10M	*
+foo-3	99	G000144735	76020	1	150M	=
+foo-3	147	G000144735	76146	1	150M	=
+
+# BAM with tags
+query I
+SELECT COUNT(*) FROM read_alignments('data/sam/foo_with_tags.bam')
+----
+2
+
+# Test reading BAM with array of files
+query I
+SELECT COUNT(*) FROM read_alignments(['data/sam/foo_has_header.bam', 'data/sam/foo_has_header_2.bam'])
+----
+8
+
+# Mixed SAM and BAM files
+query I
+SELECT COUNT(*) FROM read_alignments(['data/sam/foo_has_header.sam', 'data/sam/foo_has_header.bam'])
+----
+8
+
+# BAM with large positions (test BIGINT handling)
+query II
+SELECT position, stop_position
+FROM read_alignments('data/sam/foo_large_positions.bam')
+ORDER BY position
+----
+2147483648	2147483748
+
+# BAM with include_filepath parameter
+query II
+SELECT read_id, filepath
+FROM read_alignments('data/sam/foo_has_header.bam', include_filepath=true)
+ORDER BY read_id
+LIMIT 2
+----
+foo-1	data/sam/foo_has_header.bam
+foo-2	data/sam/foo_has_header.bam
+
+# Error: reference_lengths not allowed for BAM (BAM always has headers)
+statement error
+CREATE TABLE ref_table AS SELECT 'genome1' AS name, 1000 AS length;
+SELECT * FROM read_alignments('data/sam/foo_has_header.bam', reference_lengths='ref_table')
+----
+BAM file has header
