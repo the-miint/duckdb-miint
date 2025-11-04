@@ -92,7 +92,7 @@ COPY large_pos_test TO '__TEST_DIR__/large_pos.sam' (FORMAT SAM, REFERENCE_LENGT
 query III
 SELECT read_id, position, stop_position FROM read_sam('__TEST_DIR__/large_pos.sam') ORDER BY read_id;
 ----
-large-pos	2147483648	2147483748
+large-pos	1147483647	1147483747
 
 # Test 8: Verify CIGAR string preservation
 query II

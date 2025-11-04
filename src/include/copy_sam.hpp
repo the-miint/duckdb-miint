@@ -9,6 +9,7 @@ namespace duckdb {
 class CopySAMFunction {
 public:
 	static CopyFunction GetFunction();
+	static CopyFunction GetBAMFunction();
 	static void Register(ExtensionLoader &loader);
 };
 

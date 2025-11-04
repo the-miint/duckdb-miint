@@ -52,7 +52,7 @@ unique_ptr<FunctionData> ReadBIOMTableFunction::Bind(ClientContext &context, Tab
 	}
 
 	auto data = duckdb::make_uniq<Data>(biom_paths, include_filepath);
-	
+
 	// TODO: pushing back names and types is common to our readers, can this be decomposed?
 	for (auto &name : data->names) {
 		names.emplace_back(name);

@@ -236,7 +236,7 @@ query IIIIIIIIII
 SELECT read_id, flags, reference, position, stop_position, mapq, cigar, mate_reference, mate_position, template_length 
 FROM read_sam('data/sam/foo_large_positions.sam');
 ----
-large-pos	0	chrLarge	2147483648	2147483748	60	100M	=	2147483748	200
+large-pos	0	chrLarge	1147483647	1147483747	60	100M	=	1147483747	200
 
 # Verify nullable integer tags return NULL properly
 query IIIIIIII

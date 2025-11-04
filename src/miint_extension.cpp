@@ -10,7 +10,7 @@
 #include <copy_sam.hpp>
 #include <kseq++/seqio.hpp>
 #include <read_fastx.hpp>
-#include <read_sam.hpp>
+#include <read_alignments.hpp>
 #include <read_biom.hpp>
 #include <miint_macros.hpp>
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
@@ -32,7 +32,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// TODO: use [[nodiscard]] throughout in headers
 	// TODO: //! comment on headers
 	ReadFastxTableFunction::Register(loader);
-	ReadSAMTableFunction::Register(loader);
+	ReadAlignmentsTableFunction::Register(loader);
 	ReadBIOMTableFunction::Register(loader);
 
 	AlignmentFlagFunctions::Register(loader);

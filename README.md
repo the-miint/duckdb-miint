@@ -37,8 +37,10 @@ To run the extension code, simply start the shell with `./build/release/duckdb`.
 
 ## Functions
 
-### `read_sam(filename, [reference_lengths='table_name'], [include_filepath=false])`
+### `read_alignments(filename, [reference_lengths='table_name'], [include_filepath=false])`
 Read SAM/BAM alignment files.
+
+**Note:** `read_sam` is still supported as a backward-compatible alias.
 
 **Parameters:**
 - `filename` (VARCHAR or VARCHAR[]): Path to SAM/BAM file(s)
@@ -54,16 +56,22 @@ Read SAM/BAM alignment files.
 **Examples:**
 ```sql
 -- Read SAM file with header
-SELECT * FROM read_sam('alignments.sam');
+SELECT * FROM read_alignments('alignments.sam');
+
+-- Read BAM file
+SELECT * FROM read_alignments('alignments.bam');
 
 -- Read headerless SAM file (requires reference table)
 CREATE TABLE my_refs AS
   SELECT 'chr1' AS name, 248956422 AS length
   UNION ALL SELECT 'chr2', 242193529;
-SELECT * FROM read_sam('headerless.sam', reference_lengths='my_refs');
+SELECT * FROM read_alignments('headerless.sam', reference_lengths='my_refs');
 
 -- Read multiple files with filepath tracking
-SELECT * FROM read_sam(['file1.sam', 'file2.sam'], include_filepath=true);
+SELECT * FROM read_alignments(['file1.sam', 'file2.bam'], include_filepath=true);
+
+-- Backward compatible: read_sam still works
+SELECT * FROM read_sam('alignments.sam');
 ```
 
 ### `read_fastx(filename)`
@@ -94,7 +102,7 @@ Test individual SAM flag bits. Each function takes a `USMALLINT` (the flags colu
 **Example:**
 ```sql
 SELECT read_id, flags
-FROM read_sam('alignments.sam')
+FROM read_alignments('alignments.sam')
 WHERE alignment_is_paired(flags)
   AND NOT alignment_is_unmapped(flags);
 ```
@@ -137,12 +145,12 @@ Calculate sequence identity between read and reference using three different met
 ```sql
 -- Calculate gap-compressed identity (default)
 SELECT read_id, alignment_seq_identity(cigar, tag_nm, tag_md, 'gap_compressed') AS identity
-FROM read_sam('alignments.sam')
+FROM read_alignments('alignments.sam')
 WHERE tag_nm IS NOT NULL;
 
 -- Filter high-quality alignments
 SELECT COUNT(*)
-FROM read_sam('alignments.sam')
+FROM read_alignments('alignments.bam')
 WHERE alignment_seq_identity(cigar, tag_nm, tag_md) > 0.95;
 
 -- Compare different identity methods
@@ -150,7 +158,7 @@ SELECT read_id,
   alignment_seq_identity(cigar, tag_nm, tag_md, 'gap_excluded') AS gap_excl,
   alignment_seq_identity(cigar, tag_nm, tag_md, 'blast') AS blast,
   alignment_seq_identity(cigar, tag_nm, tag_md, 'gap_compressed') AS gap_comp
-FROM read_sam('alignments.sam')
+FROM read_alignments('alignments.sam')
 WHERE tag_nm IS NOT NULL AND tag_md IS NOT NULL;
 ```
 
@@ -174,16 +182,16 @@ Aggregate function that merges overlapping genomic intervals into a minimal set 
 
 **Examples:**
 ```sql
--- Calculate coverage regions per reference from SAM alignments
+-- Calculate coverage regions per reference from SAM/BAM alignments
 SELECT reference,
        compress_intervals(position, stop_position) AS coverage
-FROM read_sam('alignments.sam')
+FROM read_alignments('alignments.bam')
 GROUP BY reference;
 
 -- Count number of distinct coverage regions per reference
 SELECT reference,
        LEN(compress_intervals(position, stop_position)) AS num_regions
-FROM read_sam('alignments.bam')
+FROM read_alignments('alignments.bam')
 GROUP BY reference;
 
 -- Calculate total covered bases per reference
@@ -192,7 +200,7 @@ SELECT reference,
 FROM (
   SELECT reference,
          UNNEST(compress_intervals(position, stop_position)) AS c
-  FROM read_sam('alignments.bam')
+  FROM read_alignments('alignments.bam')
   GROUP BY reference
 );
 
@@ -200,7 +208,7 @@ FROM (
 WITH coverage AS (
   SELECT reference,
          UNNEST(compress_intervals(position, stop_position)) AS interval
-  FROM read_sam('alignments.bam')
+  FROM read_alignments('alignments.bam')
   GROUP BY reference
 )
 SELECT reference,
@@ -309,9 +317,9 @@ COPY (SELECT * FROM read_fastx('input.fasta'))
 TO 'output.fasta.gz' (FORMAT FASTA, INCLUDE_COMMENT true);
 ```
 
-### `COPY ... TO '...' (FORMAT SAM)`
+### `COPY ... TO '...' (FORMAT SAM)` and `COPY ... TO '...' (FORMAT BAM)`
 
-Write query results to SAM format files. Requires all mandatory SAM columns from `read_sam` output.
+Write query results to SAM or BAM format files. Requires all mandatory SAM columns from `read_alignments` output.
 
 **Required columns:**
 - `read_id` (VARCHAR): Query template name
@@ -329,11 +337,13 @@ Write query results to SAM format files. Requires all mandatory SAM columns from
 - `tag_yt`, `tag_md`, `tag_sa` (VARCHAR): Optional string tags
 
 **Parameters:**
-- `INCLUDE_HEADER` (default: true): Include @SQ header lines with reference sequences
+- `INCLUDE_HEADER` (default: true): Include header with reference sequences
+  - **Note:** BAM format requires `INCLUDE_HEADER=true` (headers are mandatory in BAM files)
 - `REFERENCE_LENGTHS` (VARCHAR, required if INCLUDE_HEADER=true): Table name containing reference sequences. Table must have at least 2 columns: first column = reference name (VARCHAR), second column = reference length (INTEGER/BIGINT). Column names don't matter.
-- `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension)
+- `COMPRESSION` (default: auto, SAM only): Enable gzip compression (auto-detected from `.gz` extension)
+- `COMPRESSION_LEVEL` (BAM only): BGZF compression level 0-9 (default: 6). Higher = better compression, slower speed.
 
-**Examples:**
+**SAM Format Examples:**
 ```sql
 -- Create reference table (recommended for reuse, especially with large reference sets)
 CREATE TABLE ref_table AS
@@ -341,28 +351,58 @@ CREATE TABLE ref_table AS
   UNION ALL SELECT 'genome2', 242193529;
 
 -- Basic SAM output with header
-COPY (SELECT * FROM read_sam('input.sam'))
+COPY (SELECT * FROM read_alignments('input.sam'))
 TO 'output.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_table');
 
 -- Headerless SAM output (no reference lengths needed)
-COPY (SELECT * FROM read_sam('input.sam'))
+COPY (SELECT * FROM read_alignments('input.sam'))
 TO 'output.sam' (FORMAT SAM, INCLUDE_HEADER false);
 
 -- Compressed SAM output with header
-COPY (SELECT * FROM read_sam('input.sam'))
+COPY (SELECT * FROM read_alignments('input.sam'))
 TO 'output.sam.gz' (FORMAT SAM, COMPRESSION gzip, REFERENCE_LENGTHS 'ref_table');
 
 -- Filter and write high-quality alignments (headerless)
 COPY (
-  SELECT * FROM read_sam('input.sam')
+  SELECT * FROM read_alignments('input.sam')
   WHERE mapq >= 30 AND NOT alignment_is_unmapped(flags)
 ) TO 'filtered.sam' (FORMAT SAM, INCLUDE_HEADER false);
+```
+
+**BAM Format Examples:**
+```sql
+-- Basic BAM output (always includes header)
+COPY (SELECT * FROM read_alignments('input.sam'))
+TO 'output.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table');
+
+-- BAM with maximum compression
+COPY (SELECT * FROM read_alignments('input.bam'))
+TO 'compressed.bam' (FORMAT BAM, COMPRESSION_LEVEL 9, REFERENCE_LENGTHS 'ref_table');
+
+-- BAM with no compression (fastest)
+COPY (SELECT * FROM read_alignments('input.bam'))
+TO 'uncompressed.bam' (FORMAT BAM, COMPRESSION_LEVEL 0, REFERENCE_LENGTHS 'ref_table');
+
+-- Convert SAM to BAM
+COPY (SELECT * FROM read_alignments('input.sam'))
+TO 'output.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table');
+
+-- Convert BAM to SAM
+COPY (SELECT * FROM read_alignments('input.bam'))
+TO 'output.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_table');
+
+-- Filter alignments and write to BAM
+COPY (
+  SELECT * FROM read_alignments('input.bam')
+  WHERE mapq >= 30 AND alignment_is_primary(flags)
+) TO 'filtered.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table');
 ```
 
 **Notes:**
 - SEQ and QUAL fields are always written as `*` in current implementation
 - Reference lengths must be provided explicitly when writing headers - they cannot be inferred from the data
 - All optional tags present in the input are preserved in the output
+- BAM files always require headers (binary format specification)
 
 ## Running the tests
 Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:

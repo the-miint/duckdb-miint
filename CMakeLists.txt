@@ -139,7 +139,7 @@ set(EXTENSION_SOURCES
     src/read_fastx.cpp
     src/miint_extension.cpp
     src/QualScore.cpp
-    src/read_sam.cpp
+    src/read_alignments.cpp
     src/SAMReader.cpp
     src/alignment_flag_functions.cpp
     src/alignment_functions.cpp

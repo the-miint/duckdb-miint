@@ -34,7 +34,8 @@ BIOMTable::BIOMTable(const std::vector<size_t> &feature_indices, const std::vect
                      const std::vector<double> &values, std::vector<std::string> feature_ids_ordered_param,
                      std::vector<std::string> sample_ids_ordered_param)
     : coo_feature_indices(feature_indices), coo_sample_indices(sample_indices), coo_values(values),
-      feature_ids_ordered(std::move(feature_ids_ordered_param)), sample_ids_ordered(std::move(sample_ids_ordered_param)) {
+      feature_ids_ordered(std::move(feature_ids_ordered_param)),
+      sample_ids_ordered(std::move(sample_ids_ordered_param)) {
 	// Compress COO (sort by row/column, deduplicate, remove zeros)
 	compress_coo();
 	// Build string representations for compatibility with existing interfaces
