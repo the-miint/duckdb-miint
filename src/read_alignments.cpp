@@ -136,19 +136,9 @@ unique_ptr<GlobalTableFunctionState> ReadAlignmentsTableFunction::InitGlobal(Cli
 unique_ptr<LocalTableFunctionState> ReadAlignmentsTableFunction::InitLocal(ExecutionContext &context,
                                                                             TableFunctionInitInput &input,
                                                                             GlobalTableFunctionState *global_state) {
-	auto local_state = duckdb::make_uniq<LocalState>();
-	auto &gstate = global_state->Cast<GlobalState>();
-
-	// Try to claim a file immediately for this thread
-	lock_guard<mutex> read_lock(gstate.lock);
-	if (gstate.next_file_idx < gstate.readers.size()) {
-		local_state->current_file_idx = gstate.next_file_idx;
-		gstate.next_file_idx++;
-		local_state->has_file = true;
-	}
-	// If no files available, has_file stays false
-
-	return local_state;
+	// Don't claim files in InitLocal - let Execute do it
+	// DuckDB may call InitLocal under its own locks, claiming here could interfere
+	return duckdb::make_uniq<LocalState>();
 }
 
 unique_ptr<NodeStatistics> ReadAlignmentsTableFunction::Cardinality(ClientContext &context,
@@ -340,11 +330,9 @@ void ReadAlignmentsTableFunction::Execute(ClientContext &context, TableFunctionI
 }
 
 TableFunction ReadAlignmentsTableFunction::GetFunction() {
-	auto tf = TableFunction("read_alignments", {LogicalType::ANY}, Execute, Bind, InitGlobal);
+	auto tf = TableFunction("read_alignments", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
 	tf.named_parameters["reference_lengths"] = LogicalType::ANY;
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
-	tf.init_local = InitLocal;
-	tf.cardinality = Cardinality;
 	return tf;
 }
 
@@ -353,11 +341,9 @@ void ReadAlignmentsTableFunction::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetFunction());
 
 	// Register backward compatibility alias
-	auto read_sam_alias = TableFunction("read_sam", {LogicalType::ANY}, Execute, Bind, InitGlobal);
+	auto read_sam_alias = TableFunction("read_sam", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
 	read_sam_alias.named_parameters["reference_lengths"] = LogicalType::ANY;
 	read_sam_alias.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
-	read_sam_alias.init_local = InitLocal;
-	read_sam_alias.cardinality = Cardinality;
 	loader.RegisterFunction(read_sam_alias);
 }
 

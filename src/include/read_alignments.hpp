@@ -78,7 +78,8 @@ public:
 
 		idx_t MaxThreads() const override {
 			// Allow up to min(files, 64) threads for per-file parallelism
-			return std::min<idx_t>(readers.size(), 64);
+			// But always allow at least 8 threads even with few files
+			return std::max<idx_t>(8, std::min<idx_t>(readers.size(), 64));
 		}
 
 		GlobalState(const std::vector<std::string> &paths,
