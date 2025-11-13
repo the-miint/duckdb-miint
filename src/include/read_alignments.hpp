@@ -14,6 +14,8 @@
 #include <optional>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace duckdb {
 class ReadAlignmentsTableFunction {
@@ -83,8 +85,9 @@ public:
 		// Diagnostics
 		std::atomic<size_t> total_execute_calls{0};
 		std::atomic<size_t> total_rows_read{0};
-		std::unordered_map<std::thread::id, size_t> thread_file_map;
+		std::unordered_map<std::thread::id, std::vector<size_t>> thread_files_claimed; // Track ALL files per thread
 		std::unordered_map<std::thread::id, size_t> thread_chunk_count;
+		std::unordered_set<size_t> files_processed; // Track which files were actually read
 		std::chrono::steady_clock::time_point start_time;
 		bool diagnostics_enabled;
 
@@ -121,8 +124,9 @@ public:
 				fprintf(stderr, "[READ_ALIGNMENTS] Total Execute() calls: %zu\n", total_execute_calls.load());
 				fprintf(stderr, "[READ_ALIGNMENTS] Total rows read: %zu\n", total_rows_read.load());
 				fprintf(stderr, "[READ_ALIGNMENTS] Duration: %ld seconds\n", seconds > 0 ? seconds : 1);
-				fprintf(stderr, "[READ_ALIGNMENTS] Unique threads: %zu\n", thread_file_map.size());
-				fprintf(stderr, "[READ_ALIGNMENTS] Files processed: %zu\n", filepaths.size());
+				fprintf(stderr, "[READ_ALIGNMENTS] Unique threads: %zu\n", thread_files_claimed.size());
+				fprintf(stderr, "[READ_ALIGNMENTS] Files available: %zu\n", filepaths.size());
+				fprintf(stderr, "[READ_ALIGNMENTS] Files actually processed: %zu\n", files_processed.size());
 
 				if (seconds > 0) {
 					fprintf(stderr, "[READ_ALIGNMENTS] Throughput: %.2f rows/second\n",
@@ -130,10 +134,15 @@ public:
 				}
 
 				fprintf(stderr, "[READ_ALIGNMENTS] Thread details:\n");
-				for (const auto &[tid, file_idx] : thread_file_map) {
+				for (const auto &[tid, files] : thread_files_claimed) {
 					size_t chunks = thread_chunk_count[tid];
-					fprintf(stderr, "[READ_ALIGNMENTS]   Thread %zu: claimed file %zu, processed %zu chunks\n",
-					        std::hash<std::thread::id>{}(tid), file_idx, chunks);
+					fprintf(stderr, "[READ_ALIGNMENTS]   Thread %zu: claimed %zu files, processed %zu chunks\n",
+					        std::hash<std::thread::id>{}(tid), files.size(), chunks);
+					fprintf(stderr, "[READ_ALIGNMENTS]     Files: ");
+					for (size_t i = 0; i < files.size(); i++) {
+						fprintf(stderr, "%zu%s", files[i], i < files.size() - 1 ? ", " : "");
+					}
+					fprintf(stderr, "\n");
 				}
 				fprintf(stderr, "[READ_ALIGNMENTS] ========================\n\n");
 			}

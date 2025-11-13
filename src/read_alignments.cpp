@@ -291,11 +291,13 @@ void ReadAlignmentsTableFunction::Execute(ClientContext &context, TableFunctionI
 			global_state.next_file_idx++;
 			local_state.has_file = true;
 
-			// Log first file claim per thread
-			if (global_state.diagnostics_enabled &&
-			    global_state.thread_file_map.find(thread_id) == global_state.thread_file_map.end()) {
-				global_state.thread_file_map[thread_id] = local_state.current_file_idx;
-				global_state.thread_chunk_count[thread_id] = 0;
+			// Track ALL file claims (not just first)
+			if (global_state.diagnostics_enabled) {
+				if (global_state.thread_files_claimed.find(thread_id) == global_state.thread_files_claimed.end()) {
+					global_state.thread_files_claimed[thread_id] = std::vector<size_t>();
+					global_state.thread_chunk_count[thread_id] = 0;
+				}
+				global_state.thread_files_claimed[thread_id].push_back(local_state.current_file_idx);
 				fprintf(stderr, "[READ_ALIGNMENTS] Thread %zu claimed file %zu (%s)\n",
 				        std::hash<std::thread::id>{}(thread_id), local_state.current_file_idx,
 				        global_state.filepaths[local_state.current_file_idx].c_str());
@@ -323,6 +325,7 @@ void ReadAlignmentsTableFunction::Execute(ClientContext &context, TableFunctionI
 		global_state.total_rows_read.fetch_add(records.size());
 		lock_guard<mutex> read_lock(global_state.lock);
 		global_state.thread_chunk_count[thread_id]++;
+		global_state.files_processed.insert(local_state.current_file_idx);
 	}
 
 	// Set result vectors (outside lock - this is CPU work)
