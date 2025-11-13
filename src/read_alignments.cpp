@@ -151,6 +151,15 @@ unique_ptr<LocalTableFunctionState> ReadAlignmentsTableFunction::InitLocal(Execu
 	return local_state;
 }
 
+unique_ptr<NodeStatistics> ReadAlignmentsTableFunction::Cardinality(ClientContext &context,
+                                                                      const FunctionData *bind_data) {
+	auto &data = bind_data->Cast<Data>();
+	// Estimate: each SAM/BAM file has ~1M records on average
+	// This is just a hint for the optimizer - actual count doesn't matter much
+	idx_t estimated_cardinality = data.sam_paths.size() * 1000000;
+	return make_uniq<NodeStatistics>(estimated_cardinality);
+}
+
 void ReadAlignmentsTableFunction::SetResultVector(Vector &result_vector, const miint::SAMRecordField &field,
                                                   const std::vector<miint::SAMRecord> &records) {
 	switch (field) {
@@ -335,6 +344,7 @@ TableFunction ReadAlignmentsTableFunction::GetFunction() {
 	tf.named_parameters["reference_lengths"] = LogicalType::ANY;
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
 	tf.init_local = InitLocal;
+	tf.cardinality = Cardinality;
 	return tf;
 }
 
@@ -347,6 +357,7 @@ void ReadAlignmentsTableFunction::Register(ExtensionLoader &loader) {
 	read_sam_alias.named_parameters["reference_lengths"] = LogicalType::ANY;
 	read_sam_alias.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
 	read_sam_alias.init_local = InitLocal;
+	read_sam_alias.cardinality = Cardinality;
 	loader.RegisterFunction(read_sam_alias);
 }
 

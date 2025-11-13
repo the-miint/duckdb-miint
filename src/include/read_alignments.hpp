@@ -113,6 +113,8 @@ public:
 
 	static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 
+	static unique_ptr<NodeStatistics> Cardinality(ClientContext &context, const FunctionData *bind_data);
+
 	static void SetResultVector(Vector &result_vector, const miint::SAMRecordField &field,
 	                            const std::vector<miint::SAMRecord> &records);
 	static void SetResultVectorString(Vector &result_vector, const miint::SAMRecordField &field,
