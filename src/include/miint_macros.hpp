@@ -25,7 +25,12 @@ namespace duckdb {
 //     a numeric index if it exists. A numeric index will be faster for the
 //     internal GROUP BY operations.
 //
-// constexpr std::string_view WOLTKA_OGU_PER_SAMPLE =
+// IMPORTANT: queries should not be quoted. As in, an operation should look like
+//   SELECT * FROM woltka_ogu_per_sample(some_table, some_field, some_other_field);
+// A query should _not_ look like
+// 	 SELECT * FROM woltka_ogu_per_sample('some_table', 'some_field', 'some_other_field');
+// The specific issue is `some_field` and `some_other_field` will be re-interpreted as
+// a string literal.
 const std::string WOLTKA_OGU_PER_SAMPLE =
     "CREATE OR REPLACE MACRO woltka_ogu_per_sample(relation, sample_id_field, sequence_id_field) AS TABLE "
     "WITH "
@@ -33,7 +38,7 @@ const std::string WOLTKA_OGU_PER_SAMPLE =
     "        SELECT sequence_id_field AS query_local_id_field, "
     "               sample_id_field AS query_local_sample_id, "
     "               reference AS feature_id, "
-    "               alignment_is_read1(flags) AS is_fwd "
+    "               alignment_is_read1(flags::USMALLINT) AS is_fwd "
     "        FROM query_table(relation)), "
     "    fcount AS ( "
     "        SELECT query_local_id_field, "
@@ -71,6 +76,12 @@ const std::string WOLTKA_OGU_PER_SAMPLE =
 //     specify either the SAM standard `read_id` which is VARCHAR or to use
 //     a numeric index if it exists. A numeric index will be faster for the
 //     internal GROUP BY operations.
+//
+// IMPORTANT: queries should not be quoted. As in, an operation should look like
+//   SELECT * FROM woltka_ogu(some_table, some_field);
+// A query should _not_ look like
+// 	 SELECT * FROM woltka_ogu('some_table', 'some_field');
+// The specific issue is `some_field` will be re-interpreted as a string literal.
 const std::string WOLTKA_OGU = // NOLINT
     "CREATE OR REPLACE MACRO woltka_ogu(relation, sequence_id_field) AS TABLE "
     "WITH "

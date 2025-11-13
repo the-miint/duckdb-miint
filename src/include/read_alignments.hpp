@@ -73,7 +73,7 @@ public:
 		mutex lock;
 		std::vector<std::unique_ptr<miint::SAMReader>> readers;
 		std::vector<std::string> filepaths;
-		size_t current_file_idx;
+		size_t next_file_idx; // Next file available for claiming
 		bool finished;
 
 		idx_t MaxThreads() const override {
@@ -82,7 +82,7 @@ public:
 
 		GlobalState(const std::vector<std::string> &paths,
 		            std::optional<std::unordered_map<std::string, uint64_t>> ref_lengths)
-		    : current_file_idx(0), finished(false) {
+		    : next_file_idx(0), finished(false) {
 			filepaths = paths;
 			for (const auto &path : paths) {
 				if (ref_lengths.has_value()) {
@@ -94,10 +94,21 @@ public:
 		}
 	};
 
+	struct LocalState : public LocalTableFunctionState {
+		size_t current_file_idx;
+		bool has_file;
+
+		LocalState() : current_file_idx(0), has_file(false) {
+		}
+	};
+
 	static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
 	                                     vector<LogicalType> &return_types, vector<std::string> &names);
 
 	static unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFunctionInitInput &input);
+
+	static unique_ptr<LocalTableFunctionState> InitLocal(ExecutionContext &context, TableFunctionInitInput &input,
+	                                                      GlobalTableFunctionState *global_state);
 
 	static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 

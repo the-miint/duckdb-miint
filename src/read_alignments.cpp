@@ -133,6 +133,12 @@ unique_ptr<GlobalTableFunctionState> ReadAlignmentsTableFunction::InitGlobal(Cli
 	return std::move(gstate);
 }
 
+unique_ptr<LocalTableFunctionState> ReadAlignmentsTableFunction::InitLocal(ExecutionContext &context,
+                                                                            TableFunctionInitInput &input,
+                                                                            GlobalTableFunctionState *global_state) {
+	return duckdb::make_uniq<LocalState>();
+}
+
 void ReadAlignmentsTableFunction::SetResultVector(Vector &result_vector, const miint::SAMRecordField &field,
                                                   const std::vector<miint::SAMRecord> &records) {
 	switch (field) {
@@ -251,11 +257,13 @@ void ReadAlignmentsTableFunction::SetResultVectorFilepath(Vector &result_vector,
 void ReadAlignmentsTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &bind_data = data_p.bind_data->Cast<Data>();
 	auto &global_state = data_p.global_state->Cast<GlobalState>();
+	auto &local_state = data_p.local_state->Cast<LocalState>();
 
 	std::vector<miint::SAMRecord> records;
 	std::string current_filepath;
 
-	{
+	// If this thread doesn't have a file, claim one
+	if (!local_state.has_file) {
 		lock_guard<mutex> read_lock(global_state.lock);
 
 		if (global_state.finished) {
@@ -263,25 +271,29 @@ void ReadAlignmentsTableFunction::Execute(ClientContext &context, TableFunctionI
 			return;
 		}
 
-		// Try to read from current file
-		while (global_state.current_file_idx < global_state.readers.size()) {
-			records = global_state.readers[global_state.current_file_idx]->read(STANDARD_VECTOR_SIZE);
-
-			if (records.size() > 0) {
-				current_filepath = global_state.filepaths[global_state.current_file_idx];
-				break;
-			}
-
-			// Current file exhausted, move to next
-			global_state.current_file_idx++;
-		}
-
-		// All files exhausted
-		if (records.empty()) {
+		// Check if all files exhausted
+		if (global_state.next_file_idx >= global_state.readers.size()) {
 			global_state.finished = true;
 			output.SetCardinality(0);
 			return;
 		}
+
+		// Claim next available file
+		local_state.current_file_idx = global_state.next_file_idx;
+		global_state.next_file_idx++;
+		local_state.has_file = true;
+	}
+	// Lock released - now do I/O without blocking other threads
+	// This thread has exclusive access to its claimed file
+
+	// Read from claimed file (no lock needed)
+	records = global_state.readers[local_state.current_file_idx]->read(STANDARD_VECTOR_SIZE);
+	current_filepath = global_state.filepaths[local_state.current_file_idx];
+
+	// If this file is exhausted, release it and try to claim another
+	if (records.empty()) {
+		local_state.has_file = false;
+		return Execute(context, data_p, output);
 	}
 
 	// Set result vectors (outside lock - this is CPU work)
@@ -301,7 +313,7 @@ void ReadAlignmentsTableFunction::Execute(ClientContext &context, TableFunctionI
 }
 
 TableFunction ReadAlignmentsTableFunction::GetFunction() {
-	auto tf = TableFunction("read_alignments", {LogicalType::ANY}, Execute, Bind, InitGlobal);
+	auto tf = TableFunction("read_alignments", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
 	tf.named_parameters["reference_lengths"] = LogicalType::ANY;
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
 	return tf;
@@ -312,7 +324,7 @@ void ReadAlignmentsTableFunction::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetFunction());
 
 	// Register backward compatibility alias
-	auto read_sam_alias = TableFunction("read_sam", {LogicalType::ANY}, Execute, Bind, InitGlobal);
+	auto read_sam_alias = TableFunction("read_sam", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
 	read_sam_alias.named_parameters["reference_lengths"] = LogicalType::ANY;
 	read_sam_alias.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
 	loader.RegisterFunction(read_sam_alias);
