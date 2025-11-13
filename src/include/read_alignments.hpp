@@ -8,7 +8,11 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
 #include <optional>
+#include <thread>
 #include <unordered_map>
 
 namespace duckdb {
@@ -76,6 +80,14 @@ public:
 		size_t next_file_idx; // Next file available for claiming
 		bool finished;
 
+		// Diagnostics
+		std::atomic<size_t> total_execute_calls{0};
+		std::atomic<size_t> total_rows_read{0};
+		std::unordered_map<std::thread::id, size_t> thread_file_map;
+		std::unordered_map<std::thread::id, size_t> thread_chunk_count;
+		std::chrono::steady_clock::time_point start_time;
+		bool diagnostics_enabled;
+
 		idx_t MaxThreads() const override {
 			// Allow up to min(files, 64) threads for per-file parallelism
 			// But always allow at least 8 threads even with few files
@@ -84,7 +96,7 @@ public:
 
 		GlobalState(const std::vector<std::string> &paths,
 		            std::optional<std::unordered_map<std::string, uint64_t>> ref_lengths)
-		    : next_file_idx(0), finished(false) {
+		    : next_file_idx(0), finished(false), start_time(std::chrono::steady_clock::now()) {
 			filepaths = paths;
 			for (const auto &path : paths) {
 				if (ref_lengths.has_value()) {
@@ -92,6 +104,38 @@ public:
 				} else {
 					readers.push_back(std::make_unique<miint::SAMReader>(path));
 				}
+			}
+			diagnostics_enabled = std::getenv("DUCKDB_MIINT_DIAGNOSTICS") != nullptr;
+			if (diagnostics_enabled) {
+				fprintf(stderr, "[READ_ALIGNMENTS] Diagnostics enabled. Processing %zu files.\n", filepaths.size());
+				fprintf(stderr, "[READ_ALIGNMENTS] MaxThreads = %zu\n", MaxThreads());
+			}
+		}
+
+		~GlobalState() {
+			if (diagnostics_enabled && total_execute_calls.load() > 0) {
+				auto duration = std::chrono::steady_clock::now() - start_time;
+				auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
+
+				fprintf(stderr, "\n[READ_ALIGNMENTS] === FINAL STATISTICS ===\n");
+				fprintf(stderr, "[READ_ALIGNMENTS] Total Execute() calls: %zu\n", total_execute_calls.load());
+				fprintf(stderr, "[READ_ALIGNMENTS] Total rows read: %zu\n", total_rows_read.load());
+				fprintf(stderr, "[READ_ALIGNMENTS] Duration: %ld seconds\n", seconds > 0 ? seconds : 1);
+				fprintf(stderr, "[READ_ALIGNMENTS] Unique threads: %zu\n", thread_file_map.size());
+				fprintf(stderr, "[READ_ALIGNMENTS] Files processed: %zu\n", filepaths.size());
+
+				if (seconds > 0) {
+					fprintf(stderr, "[READ_ALIGNMENTS] Throughput: %.2f rows/second\n",
+					        total_rows_read.load() / (double)seconds);
+				}
+
+				fprintf(stderr, "[READ_ALIGNMENTS] Thread details:\n");
+				for (const auto &[tid, file_idx] : thread_file_map) {
+					size_t chunks = thread_chunk_count[tid];
+					fprintf(stderr, "[READ_ALIGNMENTS]   Thread %zu: claimed file %zu, processed %zu chunks\n",
+					        std::hash<std::thread::id>{}(tid), file_idx, chunks);
+				}
+				fprintf(stderr, "[READ_ALIGNMENTS] ========================\n\n");
 			}
 		}
 	};
@@ -113,8 +157,6 @@ public:
 	                                                      GlobalTableFunctionState *global_state);
 
 	static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
-
-	static unique_ptr<NodeStatistics> Cardinality(ClientContext &context, const FunctionData *bind_data);
 
 	static void SetResultVector(Vector &result_vector, const miint::SAMRecordField &field,
 	                            const std::vector<miint::SAMRecord> &records);
