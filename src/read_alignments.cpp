@@ -262,38 +262,44 @@ void ReadAlignmentsTableFunction::Execute(ClientContext &context, TableFunctionI
 	std::vector<miint::SAMRecord> records;
 	std::string current_filepath;
 
-	// If this thread doesn't have a file, claim one
-	if (!local_state.has_file) {
-		lock_guard<mutex> read_lock(global_state.lock);
+	// Loop until we get data or run out of files
+	while (true) {
+		// If this thread doesn't have a file, claim one
+		if (!local_state.has_file) {
+			lock_guard<mutex> read_lock(global_state.lock);
 
-		if (global_state.finished) {
-			output.SetCardinality(0);
-			return;
+			if (global_state.finished) {
+				output.SetCardinality(0);
+				return;
+			}
+
+			// Check if all files exhausted
+			if (global_state.next_file_idx >= global_state.readers.size()) {
+				global_state.finished = true;
+				output.SetCardinality(0);
+				return;
+			}
+
+			// Claim next available file
+			local_state.current_file_idx = global_state.next_file_idx;
+			global_state.next_file_idx++;
+			local_state.has_file = true;
+		}
+		// Lock released - now do I/O without blocking other threads
+		// This thread has exclusive access to its claimed file
+
+		// Read from claimed file (no lock needed)
+		records = global_state.readers[local_state.current_file_idx]->read(STANDARD_VECTOR_SIZE);
+		current_filepath = global_state.filepaths[local_state.current_file_idx];
+
+		// If this file is exhausted, release it and try to claim another
+		if (records.empty()) {
+			local_state.has_file = false;
+			continue; // Loop to claim next file
 		}
 
-		// Check if all files exhausted
-		if (global_state.next_file_idx >= global_state.readers.size()) {
-			global_state.finished = true;
-			output.SetCardinality(0);
-			return;
-		}
-
-		// Claim next available file
-		local_state.current_file_idx = global_state.next_file_idx;
-		global_state.next_file_idx++;
-		local_state.has_file = true;
-	}
-	// Lock released - now do I/O without blocking other threads
-	// This thread has exclusive access to its claimed file
-
-	// Read from claimed file (no lock needed)
-	records = global_state.readers[local_state.current_file_idx]->read(STANDARD_VECTOR_SIZE);
-	current_filepath = global_state.filepaths[local_state.current_file_idx];
-
-	// If this file is exhausted, release it and try to claim another
-	if (records.empty()) {
-		local_state.has_file = false;
-		return Execute(context, data_p, output);
+		// Got data, break out of loop
+		break;
 	}
 
 	// Set result vectors (outside lock - this is CPU work)
