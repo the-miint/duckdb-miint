@@ -136,7 +136,19 @@ unique_ptr<GlobalTableFunctionState> ReadAlignmentsTableFunction::InitGlobal(Cli
 unique_ptr<LocalTableFunctionState> ReadAlignmentsTableFunction::InitLocal(ExecutionContext &context,
                                                                             TableFunctionInitInput &input,
                                                                             GlobalTableFunctionState *global_state) {
-	return duckdb::make_uniq<LocalState>();
+	auto local_state = duckdb::make_uniq<LocalState>();
+	auto &gstate = global_state->Cast<GlobalState>();
+
+	// Try to claim a file immediately for this thread
+	lock_guard<mutex> read_lock(gstate.lock);
+	if (gstate.next_file_idx < gstate.readers.size()) {
+		local_state->current_file_idx = gstate.next_file_idx;
+		gstate.next_file_idx++;
+		local_state->has_file = true;
+	}
+	// If no files available, has_file stays false
+
+	return local_state;
 }
 
 void ReadAlignmentsTableFunction::SetResultVector(Vector &result_vector, const miint::SAMRecordField &field,
@@ -319,9 +331,10 @@ void ReadAlignmentsTableFunction::Execute(ClientContext &context, TableFunctionI
 }
 
 TableFunction ReadAlignmentsTableFunction::GetFunction() {
-	auto tf = TableFunction("read_alignments", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
+	auto tf = TableFunction("read_alignments", {LogicalType::ANY}, Execute, Bind, InitGlobal);
 	tf.named_parameters["reference_lengths"] = LogicalType::ANY;
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
+	tf.init_local = InitLocal;
 	return tf;
 }
 
@@ -330,9 +343,10 @@ void ReadAlignmentsTableFunction::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetFunction());
 
 	// Register backward compatibility alias
-	auto read_sam_alias = TableFunction("read_sam", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
+	auto read_sam_alias = TableFunction("read_sam", {LogicalType::ANY}, Execute, Bind, InitGlobal);
 	read_sam_alias.named_parameters["reference_lengths"] = LogicalType::ANY;
 	read_sam_alias.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
+	read_sam_alias.init_local = InitLocal;
 	loader.RegisterFunction(read_sam_alias);
 }
 
