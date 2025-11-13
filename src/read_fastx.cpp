@@ -130,6 +130,12 @@ unique_ptr<GlobalTableFunctionState> ReadFastxTableFunction::InitGlobal(ClientCo
 	return std::move(gstate);
 }
 
+unique_ptr<LocalTableFunctionState> ReadFastxTableFunction::InitLocal(ExecutionContext &context,
+                                                                       TableFunctionInitInput &input,
+                                                                       GlobalTableFunctionState *global_state) {
+	return duckdb::make_uniq<LocalState>();
+}
+
 void ReadFastxTableFunction::SetResultVector(Vector &result_vector, const miint::SequenceRecordField &field,
                                              const std::vector<miint::SequenceRecord> &records, uint8_t qual_offset) {
 	auto is_paired = records[0].is_paired;
@@ -233,44 +239,77 @@ void ReadFastxTableFunction::SetResultVectorFilepath(Vector &result_vector, cons
 void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &bind_data = data_p.bind_data->Cast<Data>();
 	auto &global_state = data_p.global_state->Cast<GlobalState>();
+	auto &local_state = data_p.local_state->Cast<LocalState>();
 
 	std::vector<miint::SequenceRecord> records;
 	std::string current_filepath;
 	uint64_t start_sequence_index;
+	auto thread_id = std::this_thread::get_id();
 
-	{
-		lock_guard<mutex> read_lock(global_state.lock);
+	// Track Execute() calls
+	global_state.total_execute_calls.fetch_add(1);
 
-		if (global_state.finished) {
-			output.SetCardinality(0);
-			return;
-		}
+	// Loop until we get data or run out of files
+	while (true) {
+		// If this thread doesn't have a file, claim one
+		if (!local_state.has_file) {
+			lock_guard<mutex> read_lock(global_state.lock);
 
-		// Try to read from current file
-		while (global_state.current_file_idx < global_state.readers.size()) {
-			records = global_state.readers[global_state.current_file_idx]->read(STANDARD_VECTOR_SIZE);
-
-			if (records.size() > 0) {
-				current_filepath = global_state.sequence1_filepaths[global_state.current_file_idx];
-				// Capture starting sequence_index for this chunk and increment counter
-				start_sequence_index = global_state.sequence_index_counter;
-				global_state.sequence_index_counter += records.size();
-				break;
+			if (global_state.finished) {
+				output.SetCardinality(0);
+				return;
 			}
 
-			// Current file exhausted, move to next
-			global_state.current_file_idx++;
-			if (global_state.current_file_idx < global_state.readers.size()) {
-				global_state.current_filepath = global_state.sequence1_filepaths[global_state.current_file_idx];
+			// Check if all files exhausted
+			if (global_state.next_file_idx >= global_state.readers.size()) {
+				global_state.finished = true;
+				output.SetCardinality(0);
+				return;
+			}
+
+			// Claim next available file
+			local_state.current_file_idx = global_state.next_file_idx;
+			global_state.next_file_idx++;
+			local_state.has_file = true;
+
+			// Track ALL file claims
+			if (global_state.diagnostics_enabled) {
+				if (global_state.thread_files_claimed.find(thread_id) == global_state.thread_files_claimed.end()) {
+					global_state.thread_files_claimed[thread_id] = std::vector<size_t>();
+					global_state.thread_chunk_count[thread_id] = 0;
+				}
+				global_state.thread_files_claimed[thread_id].push_back(local_state.current_file_idx);
+				fprintf(stderr, "[READ_FASTX] Thread %zu claimed file %zu (%s)\n",
+				        std::hash<std::thread::id>{}(thread_id), local_state.current_file_idx,
+				        global_state.sequence1_filepaths[local_state.current_file_idx].c_str());
 			}
 		}
+		// Lock released - now do I/O without blocking other threads
+		// This thread has exclusive access to its claimed file
 
-		// All files exhausted
+		// Read from claimed file (no lock needed)
+		records = global_state.readers[local_state.current_file_idx]->read(STANDARD_VECTOR_SIZE);
+		current_filepath = global_state.sequence1_filepaths[local_state.current_file_idx];
+
+		// If this file is exhausted, release it and try to claim another
 		if (records.empty()) {
-			global_state.finished = true;
-			output.SetCardinality(0);
-			return;
+			local_state.has_file = false;
+			continue; // Loop to claim next file
 		}
+
+		// Got data, break out of loop
+		break;
+	}
+
+	// Atomically claim sequence indices for this chunk
+	start_sequence_index = global_state.sequence_index_counter.fetch_add(records.size());
+
+	// Track rows and chunks
+	if (global_state.diagnostics_enabled) {
+		global_state.total_rows_read.fetch_add(records.size());
+		lock_guard<mutex> read_lock(global_state.lock);
+		global_state.thread_chunk_count[thread_id]++;
+		global_state.files_processed.insert(local_state.current_file_idx);
 	}
 
 	// Set sequence_index column (first column, index 0)
@@ -296,9 +335,7 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 }
 
 TableFunction ReadFastxTableFunction::GetFunction() {
-	// IMPORTANT: "set preserve_insertion_order=false" to run in parallel
-	// otherwise it will default to serial for many (not all) operations
-	auto tf = TableFunction("read_fastx", {LogicalType::ANY}, Execute, Bind, InitGlobal);
+	auto tf = TableFunction("read_fastx", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
 	tf.named_parameters["sequence2"] = LogicalType::ANY;
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
 	tf.named_parameters["qual_offset"] = LogicalType::BIGINT;
