@@ -13,6 +13,7 @@
 #include <read_alignments.hpp>
 #include <read_biom.hpp>
 #include <miint_macros.hpp>
+#include <sequence_functions.hpp>
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include <hdf5.h>
 
@@ -38,6 +39,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	AlignmentFlagFunctions::Register(loader);
 	AlignmentSeqIdentityFunction::Register(loader);
 	CompressIntervalsFunction::Register(loader);
+	SequenceFunctions::Register(loader);
 
 	CopyBiomFunction::Register(loader);
 	CopyFastqFunction::Register(loader);

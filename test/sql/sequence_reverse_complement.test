@@ -1,0 +1,396 @@
+# name: test/sql/sequence_reverse_complement.test
+# description: Test DNA and RNA reverse complement functions with IUPAC support
+# group: [sql]
+
+require miint
+
+# Test basic DNA reverse complement
+query I
+SELECT sequence_dna_reverse_complement('ACGT');
+----
+ACGT
+
+query I
+SELECT sequence_dna_reverse_complement('A');
+----
+T
+
+query I
+SELECT sequence_dna_reverse_complement('T');
+----
+A
+
+query I
+SELECT sequence_dna_reverse_complement('G');
+----
+C
+
+query I
+SELECT sequence_dna_reverse_complement('C');
+----
+G
+
+query I
+SELECT sequence_dna_reverse_complement('');
+----
+(empty)
+
+# Test basic RNA reverse complement
+query I
+SELECT sequence_rna_reverse_complement('ACGU');
+----
+ACGU
+
+query I
+SELECT sequence_rna_reverse_complement('A');
+----
+U
+
+query I
+SELECT sequence_rna_reverse_complement('U');
+----
+A
+
+query I
+SELECT sequence_rna_reverse_complement('G');
+----
+C
+
+query I
+SELECT sequence_rna_reverse_complement('C');
+----
+G
+
+query I
+SELECT sequence_rna_reverse_complement('');
+----
+(empty)
+
+# Test complete IUPAC ambiguity codes for DNA (scikit-bio compatibility)
+query I
+SELECT sequence_dna_reverse_complement('ACGTMRWSYKVHDBN.-');
+----
+-.NVHDBMRSWYKACGT
+
+# Test complete IUPAC ambiguity codes for RNA (scikit-bio compatibility)
+query I
+SELECT sequence_rna_reverse_complement('ACGUMRWSYKVHDBN.-');
+----
+-.NVHDBMRSWYKACGU
+
+# Test individual DNA IUPAC codes
+query I
+SELECT sequence_dna_reverse_complement('R');
+----
+Y
+
+query I
+SELECT sequence_dna_reverse_complement('Y');
+----
+R
+
+query I
+SELECT sequence_dna_reverse_complement('S');
+----
+S
+
+query I
+SELECT sequence_dna_reverse_complement('W');
+----
+W
+
+query I
+SELECT sequence_dna_reverse_complement('K');
+----
+M
+
+query I
+SELECT sequence_dna_reverse_complement('M');
+----
+K
+
+query I
+SELECT sequence_dna_reverse_complement('B');
+----
+V
+
+query I
+SELECT sequence_dna_reverse_complement('V');
+----
+B
+
+query I
+SELECT sequence_dna_reverse_complement('D');
+----
+H
+
+query I
+SELECT sequence_dna_reverse_complement('H');
+----
+D
+
+query I
+SELECT sequence_dna_reverse_complement('N');
+----
+N
+
+# Test individual RNA IUPAC codes
+query I
+SELECT sequence_rna_reverse_complement('R');
+----
+Y
+
+query I
+SELECT sequence_rna_reverse_complement('Y');
+----
+R
+
+query I
+SELECT sequence_rna_reverse_complement('S');
+----
+S
+
+query I
+SELECT sequence_rna_reverse_complement('W');
+----
+W
+
+query I
+SELECT sequence_rna_reverse_complement('K');
+----
+M
+
+query I
+SELECT sequence_rna_reverse_complement('M');
+----
+K
+
+query I
+SELECT sequence_rna_reverse_complement('B');
+----
+V
+
+query I
+SELECT sequence_rna_reverse_complement('V');
+----
+B
+
+query I
+SELECT sequence_rna_reverse_complement('D');
+----
+H
+
+query I
+SELECT sequence_rna_reverse_complement('H');
+----
+D
+
+query I
+SELECT sequence_rna_reverse_complement('N');
+----
+N
+
+# Test gap characters
+query I
+SELECT sequence_dna_reverse_complement('-');
+----
+-
+
+query I
+SELECT sequence_dna_reverse_complement('.');
+----
+.
+
+query I
+SELECT sequence_dna_reverse_complement('A-T.G-C');
+----
+G-C.A-T
+
+query I
+SELECT sequence_rna_reverse_complement('-');
+----
+-
+
+query I
+SELECT sequence_rna_reverse_complement('.');
+----
+.
+
+query I
+SELECT sequence_rna_reverse_complement('A-U.G-C');
+----
+G-C.A-U
+
+# Test case preservation
+query I
+SELECT sequence_dna_reverse_complement('AcGt');
+----
+aCgT
+
+query I
+SELECT sequence_dna_reverse_complement('acgt');
+----
+acgt
+
+query I
+SELECT sequence_dna_reverse_complement('acgtMRWSykvhdbn.-');
+----
+-.nvhdbmrSWYKacgt
+
+query I
+SELECT sequence_rna_reverse_complement('AcGu');
+----
+aCgU
+
+query I
+SELECT sequence_rna_reverse_complement('acgu');
+----
+acgu
+
+query I
+SELECT sequence_rna_reverse_complement('acguMRWSykvhdbn.-');
+----
+-.nvhdbmrSWYKacgu
+
+# Test NULL handling
+query I
+SELECT sequence_dna_reverse_complement(NULL);
+----
+NULL
+
+query I
+SELECT sequence_rna_reverse_complement(NULL);
+----
+NULL
+
+# Test longer sequences
+query I
+SELECT sequence_dna_reverse_complement('AAAAAAAAAA');
+----
+TTTTTTTTTT
+
+query I
+SELECT sequence_dna_reverse_complement('ATGATGATGATG');
+----
+CATCATCATCAT
+
+query I
+SELECT sequence_rna_reverse_complement('AUGAUGAUGAUG');
+----
+CAUCAUCAUCAU
+
+# Test error cases - RNA base (U) in DNA function
+statement error
+SELECT sequence_dna_reverse_complement('AUGC');
+----
+Invalid DNA base 'U'
+
+statement error
+SELECT sequence_dna_reverse_complement('ACGTU');
+----
+Invalid DNA base 'U'
+
+statement error
+SELECT sequence_dna_reverse_complement('u');
+----
+Invalid DNA base 'u'
+
+# Test error cases - DNA base (T) in RNA function
+statement error
+SELECT sequence_rna_reverse_complement('ATGC');
+----
+Invalid RNA base 'T'
+
+statement error
+SELECT sequence_rna_reverse_complement('ACGUT');
+----
+Invalid RNA base 'T'
+
+statement error
+SELECT sequence_rna_reverse_complement('t');
+----
+Invalid RNA base 't'
+
+# Test error cases - invalid characters
+statement error
+SELECT sequence_dna_reverse_complement('ACGT123');
+----
+Invalid DNA base
+
+statement error
+SELECT sequence_dna_reverse_complement('ACGT!@#');
+----
+Invalid DNA base
+
+statement error
+SELECT sequence_dna_reverse_complement('ACGT X');
+----
+Invalid DNA base
+
+statement error
+SELECT sequence_rna_reverse_complement('ACGU123');
+----
+Invalid RNA base
+
+statement error
+SELECT sequence_rna_reverse_complement('ACGU!@#');
+----
+Invalid RNA base
+
+statement error
+SELECT sequence_rna_reverse_complement('ACGU X');
+----
+Invalid RNA base
+
+# Test with real biological sequences
+query I
+SELECT sequence_dna_reverse_complement('ATGGCTAGCTAGCTA');
+----
+TAGCTAGCTAGCCAT
+
+query I
+SELECT sequence_rna_reverse_complement('AUGGCUAGCUAGCUA');
+----
+UAGCUAGCUAGCCAU
+
+# Test mixed ambiguity codes
+query I
+SELECT sequence_dna_reverse_complement('RYMKSW');
+----
+WSMKRY
+
+query I
+SELECT sequence_rna_reverse_complement('RYMKSW');
+----
+WSMKRY
+
+query I
+SELECT sequence_dna_reverse_complement('BDHVN');
+----
+NBDHV
+
+query I
+SELECT sequence_rna_reverse_complement('BDHVN');
+----
+NBDHV
+
+# Test palindromic sequences (sequences that are their own reverse complement)
+query I
+SELECT sequence_dna_reverse_complement('GCGC');
+----
+GCGC
+
+query I
+SELECT sequence_dna_reverse_complement('ATAT');
+----
+ATAT
+
+query I
+SELECT sequence_rna_reverse_complement('GCGC');
+----
+GCGC
+
+query I
+SELECT sequence_rna_reverse_complement('AUAU');
+----
+AUAU

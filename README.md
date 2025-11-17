@@ -164,6 +164,77 @@ WHERE tag_nm IS NOT NULL AND tag_md IS NOT NULL;
 
 **Reference:** [On the definition of sequence identity](https://lh3.github.io/2018/11/25/on-the-definition-of-sequence-identity) by Heng Li
 
+### `sequence_dna_reverse_complement(sequence)` and `sequence_rna_reverse_complement(sequence)`
+
+Calculate the reverse complement of DNA or RNA sequences. Supports full IUPAC nucleotide ambiguity codes and preserves case.
+
+**Parameters:**
+- `sequence` (VARCHAR): DNA or RNA sequence string
+
+**Returns:** VARCHAR - The reverse complement of the input sequence
+
+**Behavior:**
+- Reverses the sequence order (5' to 3' becomes 3' to 5')
+- Complements each base according to Watson-Crick pairing rules
+- Preserves uppercase/lowercase in the input
+- Supports gap characters (`.` and `-`) which map to themselves
+- Strict molecular type validation: DNA function rejects U bases, RNA function rejects T bases
+
+**Supported bases:**
+- **DNA**: A↔T, C↔G, plus IUPAC codes (R↔Y, S↔S, W↔W, K↔M, B↔V, D↔H, N↔N)
+- **RNA**: A↔U, C↔G, plus IUPAC codes (R↔Y, S↔S, W↔W, K↔M, B↔V, D↔H, N↔N)
+
+**Examples:**
+```sql
+-- Basic DNA reverse complement
+SELECT sequence_dna_reverse_complement('ATCG');
+-- Returns: CGAT
+
+-- Basic RNA reverse complement
+SELECT sequence_rna_reverse_complement('AUCG');
+-- Returns: CGAU
+
+-- Works with IUPAC ambiguity codes
+SELECT sequence_dna_reverse_complement('ACGTMRWSYKVHDBN.-');
+-- Returns: -.NVHDBMRSWYKACGT
+
+-- Case is preserved
+SELECT sequence_dna_reverse_complement('AcGt');
+-- Returns: aCgT
+
+-- Process sequences from FASTQ files
+SELECT read_id,
+       sequence1,
+       sequence_dna_reverse_complement(sequence1) AS rev_comp
+FROM read_fastx('sequences.fastq');
+
+-- Find palindromic sequences (equal to their reverse complement)
+SELECT read_id, sequence1
+FROM read_fastx('sequences.fastq')
+WHERE sequence1 = sequence_dna_reverse_complement(sequence1);
+
+-- Error: DNA function rejects U bases
+SELECT sequence_dna_reverse_complement('AUCG');
+-- Error: Invalid DNA base 'U'
+
+-- Error: RNA function rejects T bases
+SELECT sequence_rna_reverse_complement('ATCG');
+-- Error: Invalid RNA base 'T'
+```
+
+**IUPAC Ambiguity Code Reference:**
+- R = A or G (purine)
+- Y = C or T/U (pyrimidine)
+- S = G or C (strong)
+- W = A or T/U (weak)
+- K = G or T/U (keto)
+- M = A or C (amino)
+- B = not A (C, G, T/U)
+- D = not C (A, G, T/U)
+- H = not G (A, C, T/U)
+- V = not T/U (A, C, G)
+- N = any base
+
 ### `compress_intervals(start, stop)`
 
 Aggregate function that merges overlapping genomic intervals into a minimal set of non-overlapping intervals. Useful for computing coverage regions, reducing redundant intervals, and analyzing read depth.
