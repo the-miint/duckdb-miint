@@ -56,6 +56,20 @@ TEST_CASE("SequenceReader single-end", "[SequenceReader]") {
 	REQUIRE((batch[1].read_id == "r2"));
 }
 
+TEST_CASE("SequenceReader single-end / bug", "[SequenceReader]") {
+	TempFileFixture fixture;
+	auto path = "test_R1.fastq";
+	fixture.write_temp_fastq(
+	    path, {fixture.simple_read("r1/foo/bar", "ACGT", "IIII"), fixture.simple_read("r2/123/456", "TGCA", "HHHH")});
+
+	miint::SequenceReader reader(path);
+	auto batch = reader.read(5);
+
+	REQUIRE((batch.size() == 2));
+	REQUIRE((batch[0].read_id == "r1/foo/bar"));
+	REQUIRE((batch[1].read_id == "r2/123/456"));
+}
+
 TEST_CASE("SequenceReader paired-end valid", "[SequenceReader]") {
 	TempFileFixture fixture;
 	auto r1 = "test_p1.fastq";

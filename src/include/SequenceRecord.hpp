@@ -117,9 +117,24 @@ public:
 
 private:
 	inline std::string base_read_id(const std::string &id) const {
-		size_t pos = id.find_first_of(" /");
-		std::string base = (pos == std::string::npos) ? id : id.substr(0, pos);
-		return std::move(base);
+		// First, strip comments (everything after first space)
+		size_t space_pos = id.find(' ');
+		std::string base = (space_pos == std::string::npos) ? id : id.substr(0, space_pos);
+
+		// Check if it ends with /[1-9] (single digit 1-9 only)
+		// Need at least 3 chars for pattern "x/1"
+		if (base.length() >= 3) {
+			size_t len = base.length();
+			char last_char = base[len - 1];
+			char second_last = base[len - 2];
+
+			// If ends with /[1-9], strip that suffix
+			if (second_last == '/' && last_char >= '1' && last_char <= '9') {
+				base = base.substr(0, len - 2);
+			}
+		}
+
+		return base;
 	}
 
 	inline void check_ids(const klibpp::KSeq &r1, const klibpp::KSeq &r2) const {

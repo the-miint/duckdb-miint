@@ -111,7 +111,7 @@ public:
 			diagnostics_enabled = std::getenv("DUCKDB_MIINT_DIAGNOSTICS") != nullptr;
 			if (diagnostics_enabled) {
 				fprintf(stderr, "[READ_ALIGNMENTS] Diagnostics enabled. Processing %zu files.\n", filepaths.size());
-				fprintf(stderr, "[READ_ALIGNMENTS] MaxThreads = %zu\n", MaxThreads());
+				fprintf(stderr, "[READ_ALIGNMENTS] MaxThreads = %llu\n", (unsigned long long)MaxThreads());
 			}
 		}
 
@@ -123,7 +123,7 @@ public:
 				fprintf(stderr, "\n[READ_ALIGNMENTS] === FINAL STATISTICS ===\n");
 				fprintf(stderr, "[READ_ALIGNMENTS] Total Execute() calls: %zu\n", total_execute_calls.load());
 				fprintf(stderr, "[READ_ALIGNMENTS] Total rows read: %zu\n", total_rows_read.load());
-				fprintf(stderr, "[READ_ALIGNMENTS] Duration: %ld seconds\n", seconds > 0 ? seconds : 1);
+				fprintf(stderr, "[READ_ALIGNMENTS] Duration: %lld seconds\n", (long long)(seconds > 0 ? seconds : 1));
 				fprintf(stderr, "[READ_ALIGNMENTS] Unique threads: %zu\n", thread_files_claimed.size());
 				fprintf(stderr, "[READ_ALIGNMENTS] Files available: %zu\n", filepaths.size());
 				fprintf(stderr, "[READ_ALIGNMENTS] Files actually processed: %zu\n", files_processed.size());

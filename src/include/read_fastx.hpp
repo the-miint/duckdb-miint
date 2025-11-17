@@ -100,7 +100,7 @@ public:
 			if (diagnostics_enabled) {
 				fprintf(stderr, "[READ_FASTX] Diagnostics enabled. Processing %zu files.\n",
 				        sequence1_filepaths.size());
-				fprintf(stderr, "[READ_FASTX] MaxThreads = %zu\n", MaxThreads());
+				fprintf(stderr, "[READ_FASTX] MaxThreads = %llu\n", (unsigned long long)MaxThreads());
 			}
 		};
 
@@ -112,7 +112,7 @@ public:
 				fprintf(stderr, "\n[READ_FASTX] === FINAL STATISTICS ===\n");
 				fprintf(stderr, "[READ_FASTX] Total Execute() calls: %zu\n", total_execute_calls.load());
 				fprintf(stderr, "[READ_FASTX] Total rows read: %zu\n", total_rows_read.load());
-				fprintf(stderr, "[READ_FASTX] Duration: %ld seconds\n", seconds > 0 ? seconds : 1);
+				fprintf(stderr, "[READ_FASTX] Duration: %lld seconds\n", (long long)(seconds > 0 ? seconds : 1));
 				fprintf(stderr, "[READ_FASTX] Unique threads: %zu\n", thread_files_claimed.size());
 				fprintf(stderr, "[READ_FASTX] Files available: %zu\n", sequence1_filepaths.size());
 				fprintf(stderr, "[READ_FASTX] Files actually processed: %zu\n", files_processed.size());
