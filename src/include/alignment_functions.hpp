@@ -11,4 +11,16 @@ public:
 	static ScalarFunction GetFunction();
 };
 
+class AlignmentQueryLengthFunction {
+public:
+	static void Register(ExtensionLoader &loader);
+	static ScalarFunction GetFunction();
+};
+
+class AlignmentQueryCoverageFunction {
+public:
+	static void Register(ExtensionLoader &loader);
+	static ScalarFunction GetFunction();
+};
+
 } // namespace duckdb

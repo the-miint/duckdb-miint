@@ -164,6 +164,119 @@ WHERE tag_nm IS NOT NULL AND tag_md IS NOT NULL;
 
 **Reference:** [On the definition of sequence identity](https://lh3.github.io/2018/11/25/on-the-definition-of-sequence-identity) by Heng Li
 
+### `alignment_query_length(cigar, [include_hard_clips=true])`
+
+Calculate the total query length from a CIGAR string. This is useful for understanding read lengths and query coverage.
+
+**Parameters:**
+- `cigar` (VARCHAR): CIGAR string from alignment
+- `include_hard_clips` (BOOLEAN, default=true): Whether to include hard-clipped bases in the length
+
+**Returns:** BIGINT - Total query length, or 0 for NULL/unmapped reads
+
+**Behavior:**
+- When `include_hard_clips=true`: Returns M + I + S + = + X + H (all query-consuming operations)
+- When `include_hard_clips=false`: Returns M + I + S + = + X (matches HTSlib's `bam_cigar2qlen`)
+- Soft clips (S) are always included (they're present in the sequence field)
+- Hard clips (H) are only included when parameter is true
+- Deletions (D) and reference skips (N) don't consume query, so they're never counted
+
+**Examples:**
+```sql
+-- Get query length including hard clips (default)
+SELECT read_id, alignment_query_length(cigar) AS query_len
+FROM read_alignments('alignments.sam');
+
+-- Get query length excluding hard clips (matches bam_cigar2qlen)
+SELECT read_id, alignment_query_length(cigar, false) AS query_len
+FROM read_alignments('alignments.sam');
+
+-- Compare lengths with and without hard clips
+SELECT read_id, cigar,
+  alignment_query_length(cigar, true) AS len_with_hard,
+  alignment_query_length(cigar, false) AS len_without_hard
+FROM read_alignments('alignments.sam')
+WHERE cigar LIKE '%H%';
+
+-- Calculate average query length per reference
+SELECT reference, AVG(alignment_query_length(cigar)) AS avg_query_len
+FROM read_alignments('alignments.bam')
+WHERE NOT alignment_is_unmapped(flags)
+GROUP BY reference;
+```
+
+**Note:** When `include_hard_clips=false`, this function's output matches HTSlib's `bam_cigar2qlen` behavior, which counts M, I, S, =, and X operations.
+
+### `alignment_query_coverage(cigar, [type='aligned'])`
+
+Calculate the proportion of query bases covered by the reference alignment. This helps assess how much of a read actually aligns versus being clipped.
+
+**Parameters:**
+- `cigar` (VARCHAR): CIGAR string from alignment
+- `type` (VARCHAR, default='aligned'): Coverage calculation method
+
+**Coverage types:**
+
+1. **`'aligned'`** (default): Bases that align to the reference
+   - Formula: `(M + = + X) / (M + I + S + = + X + H)`
+   - Only counts bases that match/mismatch the reference
+   - Insertions and clips reduce coverage
+
+2. **`'mapped'`**: Bases that are mapped (not clipped)
+   - Formula: `(M + I + = + X) / (M + I + S + = + X + H)`
+   - Counts insertions as "mapped" even though they don't align
+   - Only clips reduce coverage
+
+**Returns:** DOUBLE between 0.0 and 1.0, or NULL for NULL CIGAR
+
+**Behavior:**
+- Query length denominator always includes hard clips
+- Returns 0.0 for reads with only clipping operations (no alignment)
+- Deletions (D) and reference skips (N) don't affect coverage (they don't consume query)
+
+**Examples:**
+```sql
+-- Get aligned coverage (default)
+SELECT read_id, alignment_query_coverage(cigar) AS aligned_cov
+FROM read_alignments('alignments.sam');
+
+-- Get mapped coverage (includes insertions)
+SELECT read_id, alignment_query_coverage(cigar, 'mapped') AS mapped_cov
+FROM read_alignments('alignments.sam');
+
+-- Compare aligned vs mapped coverage
+SELECT read_id, cigar,
+  alignment_query_coverage(cigar, 'aligned') AS aligned_cov,
+  alignment_query_coverage(cigar, 'mapped') AS mapped_cov
+FROM read_alignments('alignments.sam')
+WHERE cigar LIKE '%I%';  -- Reads with insertions show the difference
+
+-- Filter reads with high query coverage
+SELECT COUNT(*)
+FROM read_alignments('alignments.bam')
+WHERE alignment_query_coverage(cigar, 'aligned') > 0.9;
+
+-- Find heavily clipped reads
+SELECT read_id, cigar, alignment_query_coverage(cigar) AS coverage
+FROM read_alignments('alignments.sam')
+WHERE alignment_query_coverage(cigar) < 0.5
+ORDER BY coverage;
+
+-- Calculate average coverage per reference
+SELECT reference,
+  AVG(alignment_query_coverage(cigar, 'aligned')) AS avg_aligned_cov,
+  AVG(alignment_query_coverage(cigar, 'mapped')) AS avg_mapped_cov
+FROM read_alignments('alignments.bam')
+WHERE NOT alignment_is_unmapped(flags)
+GROUP BY reference;
+```
+
+**Use cases:**
+- **Aligned coverage**: Assess quality of alignment (how much of read actually matches reference)
+- **Mapped coverage**: Identify heavily clipped reads (adapters, chimeras, low-quality ends)
+- Filter reads based on alignment quality thresholds
+- QC metrics for sequencing runs
+
 ### `sequence_dna_reverse_complement(sequence)` and `sequence_rna_reverse_complement(sequence)`
 
 Calculate the reverse complement of DNA or RNA sequences. Supports full IUPAC nucleotide ambiguity codes and preserves case.

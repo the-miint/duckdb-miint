@@ -269,7 +269,411 @@ WHERE alignment_seq_identity(cigar, tag_nm, tag_md, 'blast') IS NULL;
 4
 
 query I
-SELECT COUNT(*) FROM read_sam('data/sam/foo_has_header.sam') 
+SELECT COUNT(*) FROM read_sam('data/sam/foo_has_header.sam')
 WHERE alignment_seq_identity(cigar, tag_nm, tag_md, 'gap_excluded') IS NULL;
+----
+4
+
+###############################################################################
+# ALIGNMENT_QUERY_LENGTH - BASIC FUNCTIONALITY
+###############################################################################
+
+# Simple match - no clipping
+query I
+SELECT alignment_query_length('10M', true);
+----
+10
+
+# Match with default parameter (include_hard_clips defaults to true)
+query I
+SELECT alignment_query_length('10M');
+----
+10
+
+# Match with insertions
+query I
+SELECT alignment_query_length('10M5I', true);
+----
+15
+
+# Match with deletions (deletions don't consume query)
+query I
+SELECT alignment_query_length('10M5D', true);
+----
+10
+
+# With soft clips only
+query I
+SELECT alignment_query_length('5S10M5S', true);
+----
+20
+
+# With hard clips - include them
+query I
+SELECT alignment_query_length('5H10M5H', true);
+----
+20
+
+# With hard clips - exclude them
+query I
+SELECT alignment_query_length('5H10M5H', false);
+----
+10
+
+# With both soft and hard clips - include hard clips
+query I
+SELECT alignment_query_length('5H5S10M5S5H', true);
+----
+30
+
+# With both soft and hard clips - exclude hard clips
+query I
+SELECT alignment_query_length('5H5S10M5S5H', false);
+----
+20
+
+# Complex CIGAR with all operations
+query I
+SELECT alignment_query_length('5H5S10M5I3D5M5S5H', true);
+----
+40
+
+# Complex CIGAR - exclude hard clips
+query I
+SELECT alignment_query_length('5H5S10M5I3D5M5S5H', false);
+----
+30
+
+###############################################################################
+# ALIGNMENT_QUERY_LENGTH - VERIFY MATCHES bam_cigar2qlen BEHAVIOR
+###############################################################################
+
+# When include_hard_clips=false, should match bam_cigar2qlen
+# bam_cigar2qlen counts M, I, S, =, X operations (excludes H, D, N, P)
+
+# HTSlib example 1: 10M5I5S
+query I
+SELECT alignment_query_length('10M5I5S', false);
+----
+20
+
+# HTSlib example 2: 5S10M3D5M5S
+query I
+SELECT alignment_query_length('5S10M3D5M5S', false);
+----
+25
+
+# HTSlib example 3: 5H10M5H (hard clips excluded)
+query I
+SELECT alignment_query_length('5H10M5H', false);
+----
+10
+
+# HTSlib example 4: 5=2X3= (explicit match/mismatch)
+query I
+SELECT alignment_query_length('5=2X3=', false);
+----
+10
+
+# HTSlib example 5: 18M3D2M2D2M1I22M (complex with deletions)
+query I
+SELECT alignment_query_length('18M3D2M2D2M1I22M', false);
+----
+45
+
+###############################################################################
+# ALIGNMENT_QUERY_LENGTH - EDGE CASES
+###############################################################################
+
+# Empty string CIGAR
+query I
+SELECT alignment_query_length('', true);
+----
+0
+
+# Unmapped read (*)
+query I
+SELECT alignment_query_length('*', true);
+----
+0
+
+# Only soft clipping
+query I
+SELECT alignment_query_length('100S', true);
+----
+100
+
+# Only hard clipping - included
+query I
+SELECT alignment_query_length('100H', true);
+----
+100
+
+# Only hard clipping - excluded
+query I
+SELECT alignment_query_length('100H', false);
+----
+0
+
+# Reference skip (N) doesn't consume query
+query I
+SELECT alignment_query_length('10M100N10M', true);
+----
+20
+
+###############################################################################
+# ALIGNMENT_QUERY_LENGTH - NULL HANDLING
+###############################################################################
+
+# NULL CIGAR should return NULL
+query I
+SELECT alignment_query_length(NULL, true) IS NULL;
+----
+true
+
+# NULL with default parameter
+query I
+SELECT alignment_query_length(NULL) IS NULL;
+----
+true
+
+# NULL for include_hard_clips parameter returns NULL (not default)
+# Note: Explicitly passing NULL is different from omitting the parameter
+query I
+SELECT alignment_query_length('5H10M5H', NULL) IS NULL;
+----
+true
+
+###############################################################################
+# ALIGNMENT_QUERY_COVERAGE - ALIGNED TYPE
+###############################################################################
+
+# Perfect alignment - no clipping
+query R
+SELECT alignment_query_coverage('10M', 'aligned')::FLOAT;
+----
+1.0
+
+# Default parameter (type defaults to 'aligned')
+query R
+SELECT alignment_query_coverage('10M')::FLOAT;
+----
+1.0
+
+# Alignment with insertions
+# 10 aligned / 15 total = 0.6667
+query R
+SELECT alignment_query_coverage('10M5I', 'aligned')::FLOAT;
+----
+0.667
+
+# Alignment with soft clips
+# 10 aligned / 20 total = 0.5
+query R
+SELECT alignment_query_coverage('5S10M5S', 'aligned')::FLOAT;
+----
+0.5
+
+# Alignment with hard clips
+# 10 aligned / 20 total = 0.5
+query R
+SELECT alignment_query_coverage('5H10M5H', 'aligned')::FLOAT;
+----
+0.5
+
+# Alignment with both soft and hard clips
+# 10 aligned / 30 total = 0.3333
+query R
+SELECT alignment_query_coverage('5H5S10M5S5H', 'aligned')::FLOAT;
+----
+0.333
+
+# Complex alignment with insertions and clips
+# 10 aligned / 35 total = 0.2857
+query R
+SELECT alignment_query_coverage('5H5S10M5I5S5H', 'aligned')::FLOAT;
+----
+0.286
+
+# Only soft clips - zero coverage
+query R
+SELECT alignment_query_coverage('100S', 'aligned')::FLOAT;
+----
+0.0
+
+# Only hard clips - zero coverage
+query R
+SELECT alignment_query_coverage('100H', 'aligned')::FLOAT;
+----
+0.0
+
+###############################################################################
+# ALIGNMENT_QUERY_COVERAGE - MAPPED TYPE
+###############################################################################
+
+# Perfect alignment - no clipping
+query R
+SELECT alignment_query_coverage('10M', 'mapped')::FLOAT;
+----
+1.0
+
+# Alignment with insertions
+# 15 mapped (M+I) / 15 total = 1.0
+query R
+SELECT alignment_query_coverage('10M5I', 'mapped')::FLOAT;
+----
+1.0
+
+# Alignment with soft clips
+# 10 mapped / 20 total = 0.5
+query R
+SELECT alignment_query_coverage('5S10M5S', 'mapped')::FLOAT;
+----
+0.5
+
+# Alignment with hard clips
+# 10 mapped / 20 total = 0.5
+query R
+SELECT alignment_query_coverage('5H10M5H', 'mapped')::FLOAT;
+----
+0.5
+
+# Alignment with insertions and soft clips
+# 15 mapped (M+I) / 25 total = 0.6
+query R
+SELECT alignment_query_coverage('5S10M5I5S', 'mapped')::FLOAT;
+----
+0.6
+
+# Complex alignment with all operations
+# 15 mapped (M+I) / 35 total = 0.4286
+query R
+SELECT alignment_query_coverage('5H5S10M5I5S5H', 'mapped')::FLOAT;
+----
+0.429
+
+# Only soft clips - zero coverage
+query R
+SELECT alignment_query_coverage('100S', 'mapped')::FLOAT;
+----
+0.0
+
+# Only hard clips - zero coverage
+query R
+SELECT alignment_query_coverage('100H', 'mapped')::FLOAT;
+----
+0.0
+
+###############################################################################
+# ALIGNMENT_QUERY_COVERAGE - EDGE CASES
+###############################################################################
+
+# Empty CIGAR - zero coverage (not NULL)
+query R
+SELECT alignment_query_coverage('', 'aligned')::FLOAT;
+----
+0.0
+
+# Unmapped read (*) - zero coverage
+query R
+SELECT alignment_query_coverage('*', 'aligned')::FLOAT;
+----
+0.0
+
+# Deletions don't affect coverage calculation
+# 20 aligned / 20 total = 1.0
+query R
+SELECT alignment_query_coverage('10M5D10M', 'aligned')::FLOAT;
+----
+1.0
+
+# Reference skip (N) doesn't affect coverage
+# 20 aligned / 20 total = 1.0
+query R
+SELECT alignment_query_coverage('10M100N10M', 'aligned')::FLOAT;
+----
+1.0
+
+# Verify deletions don't affect mapped coverage either
+query R
+SELECT alignment_query_coverage('10M5D10M', 'mapped')::FLOAT;
+----
+1.0
+
+###############################################################################
+# ALIGNMENT_QUERY_COVERAGE - NULL HANDLING
+###############################################################################
+
+# NULL CIGAR should return NULL
+query I
+SELECT alignment_query_coverage(NULL, 'aligned') IS NULL;
+----
+true
+
+# NULL with default parameter
+query I
+SELECT alignment_query_coverage(NULL) IS NULL;
+----
+true
+
+# NULL type parameter should return NULL
+query I
+SELECT alignment_query_coverage('10M', NULL) IS NULL;
+----
+true
+
+# Both NULL
+query I
+SELECT alignment_query_coverage(NULL, NULL) IS NULL;
+----
+true
+
+###############################################################################
+# ALIGNMENT_QUERY_COVERAGE - ERROR HANDLING
+###############################################################################
+
+# Invalid type parameter
+statement error
+SELECT alignment_query_coverage('10M', 'invalid_type');
+----
+Invalid Input Error: Invalid coverage type
+
+###############################################################################
+# ALIGNMENT_QUERY_COVERAGE - ALIGNED VS MAPPED COMPARISON
+###############################################################################
+
+# Insertions increase mapped coverage but not aligned
+# aligned: 10 / 40 = 0.25
+# mapped: 20 / 40 = 0.5
+query RR
+SELECT
+    alignment_query_coverage('10H10M10I10H', 'aligned')::FLOAT,
+    alignment_query_coverage('10H10M10I10H', 'mapped')::FLOAT;
+----
+0.25	0.5
+
+# Without insertions, aligned == mapped
+query RR
+SELECT
+    alignment_query_coverage('5H5S10M5S5H', 'aligned')::FLOAT,
+    alignment_query_coverage('5H5S10M5S5H', 'mapped')::FLOAT;
+----
+0.333	0.333
+
+###############################################################################
+# INTEGRATION WITH read_sam
+###############################################################################
+
+# Test with actual SAM data - verify functions work on real data
+query I
+SELECT COUNT(*) FROM read_sam('data/sam/foo_has_header.sam')
+WHERE alignment_query_length(cigar, true) > 0;
+----
+4
+
+# Verify coverage function works with SAM data
+query I
+SELECT COUNT(*) FROM read_sam('data/sam/foo_has_header.sam')
+WHERE alignment_query_coverage(cigar, 'aligned') >= 0.0;
 ----
 4

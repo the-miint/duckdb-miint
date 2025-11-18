@@ -16,6 +16,8 @@ struct CigarStats {
 	int64_t deletions = 0;         // D operations
 	int64_t gap_opens = 0;         // Number of gap opening events
 	int64_t alignment_columns = 0; // M + I + D operations
+	int64_t soft_clips = 0;        // S operations
+	int64_t hard_clips = 0;        // H operations
 };
 
 // Parse CIGAR string and extract statistics
@@ -74,10 +76,14 @@ static CigarStats ParseCigar(const std::string &cigar_str) {
 				}
 				break;
 			case 'N': // Skipped region (ref skip, e.g., intron)
-			case 'S': // Soft clipping
-			case 'H': // Hard clipping
 			case 'P': // Padding
 				// These don't contribute to alignment columns
+				break;
+			case 'S': // Soft clipping
+				stats.soft_clips += op_len;
+				break;
+			case 'H': // Hard clipping
+				stats.hard_clips += op_len;
 				break;
 			default:
 				throw duckdb::InvalidInputException("Invalid CIGAR operation: " + std::string(1, c));
@@ -142,6 +148,46 @@ static MdStats ParseMd(const std::string &md_str) {
 	}
 
 	return stats;
+}
+
+// Compute query length from CIGAR statistics
+// When include_hard_clips=false, result matches HTSlib's bam_cigar2qlen
+// (which counts M, I, S, =, X operations but excludes H, D, N, P)
+static int64_t ComputeQueryLength(const CigarStats &stats, bool include_hard_clips) {
+	// Query-consuming operations: M, I, S, =, X
+	// matches field contains M + = + X
+	int64_t length = stats.matches + stats.insertions + stats.soft_clips;
+
+	if (include_hard_clips) {
+		length += stats.hard_clips;
+	}
+
+	return length;
+}
+
+// Compute query coverage from CIGAR statistics
+// Returns the proportion of query bases covered by the reference
+static double ComputeQueryCoverage(const CigarStats &stats, const std::string &type) {
+	// Total query length (always includes hard clips)
+	int64_t query_length = stats.matches + stats.insertions + stats.soft_clips + stats.hard_clips;
+
+	if (query_length == 0) {
+		return 0.0; // Avoid division by zero, return 0% coverage
+	}
+
+	int64_t covered_bases = 0;
+	if (type == "aligned") {
+		// Only bases that align to reference (M, =, X)
+		covered_bases = stats.matches;
+	} else if (type == "mapped") {
+		// Bases that are mapped (not clipped): M, I, =, X
+		covered_bases = stats.matches + stats.insertions;
+	} else {
+		throw duckdb::InvalidInputException("Invalid coverage type: " + type +
+		                                    ". Must be 'aligned' or 'mapped'.");
+	}
+
+	return static_cast<double>(covered_bases) / static_cast<double>(query_length);
 }
 
 } // namespace miint
@@ -302,6 +348,162 @@ ScalarFunction AlignmentSeqIdentityFunction::GetFunction() {
 
 void AlignmentSeqIdentityFunction::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetFunction());
+}
+
+// alignment_query_length implementation
+static void AlignmentQueryLengthScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &cigar_vector = args.data[0];
+	auto &include_hard_clips_vector = args.data[1];
+
+	BinaryExecutor::Execute<string_t, bool, int64_t>(
+	    cigar_vector, include_hard_clips_vector, result, args.size(), [&](string_t cigar, bool include_hard_clips) {
+		    // Handle NULL or unmapped CIGAR
+		    if (cigar.GetSize() == 0 || (cigar.GetSize() == 1 && cigar.GetData()[0] == '*')) {
+			    return int64_t(0);
+		    }
+
+		    // Parse CIGAR
+		    std::string cigar_std(cigar.GetData(), cigar.GetSize());
+		    miint::CigarStats cigar_stats;
+		    try {
+			    cigar_stats = miint::ParseCigar(cigar_std);
+		    } catch (const InvalidInputException &) {
+			    return int64_t(0);
+		    }
+
+		    return miint::ComputeQueryLength(cigar_stats, include_hard_clips);
+	    });
+}
+
+ScalarFunction AlignmentQueryLengthFunction::GetFunction() {
+	ScalarFunction func("alignment_query_length", {LogicalType::VARCHAR, LogicalType::BOOLEAN},
+	                    LogicalType::BIGINT, AlignmentQueryLengthScalarFunction);
+
+	// Allow NULL CIGAR (returns NULL)
+	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+
+	// Set default value for include_hard_clips parameter (defaults to true)
+	func.arguments[1] = LogicalType::BOOLEAN;
+	func.varargs = LogicalType::INVALID;
+
+	return func;
+}
+
+void AlignmentQueryLengthFunction::Register(ExtensionLoader &loader) {
+	// Register overload with both parameters
+	ScalarFunction func_two_params = GetFunction();
+
+	// Register overload with single parameter (include_hard_clips defaults to true)
+	ScalarFunction func_one_param("alignment_query_length", {LogicalType::VARCHAR}, LogicalType::BIGINT,
+	                              [](DataChunk &args, ExpressionState &state, Vector &result) {
+		                              UnaryExecutor::Execute<string_t, int64_t>(
+		                                  args.data[0], result, args.size(), [&](string_t cigar) {
+			                                  // Handle NULL or unmapped CIGAR
+			                                  if (cigar.GetSize() == 0 ||
+			                                      (cigar.GetSize() == 1 && cigar.GetData()[0] == '*')) {
+				                                  return int64_t(0);
+			                                  }
+
+			                                  // Parse CIGAR
+			                                  std::string cigar_std(cigar.GetData(), cigar.GetSize());
+			                                  miint::CigarStats cigar_stats;
+			                                  try {
+				                                  cigar_stats = miint::ParseCigar(cigar_std);
+			                                  } catch (const InvalidInputException &) {
+				                                  return int64_t(0);
+			                                  }
+
+			                                  // Default to include_hard_clips = true
+			                                  return miint::ComputeQueryLength(cigar_stats, true);
+		                                  });
+	                              });
+	func_one_param.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+
+	// Register both overloads as a function set
+	ScalarFunctionSet function_set("alignment_query_length");
+	function_set.AddFunction(func_one_param);
+	function_set.AddFunction(func_two_params);
+	loader.RegisterFunction(function_set);
+}
+
+// alignment_query_coverage implementation
+static void AlignmentQueryCoverageScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &cigar_vector = args.data[0];
+	auto &type_vector = args.data[1];
+
+	BinaryExecutor::Execute<string_t, string_t, double>(
+	    cigar_vector, type_vector, result, args.size(), [&](string_t cigar, string_t type) {
+		    // Handle NULL or unmapped CIGAR - return 0.0 for empty/unmapped
+		    if (cigar.GetSize() == 0 || (cigar.GetSize() == 1 && cigar.GetData()[0] == '*')) {
+			    return 0.0;
+		    }
+
+		    // Parse CIGAR
+		    std::string cigar_std(cigar.GetData(), cigar.GetSize());
+		    miint::CigarStats cigar_stats;
+		    try {
+			    cigar_stats = miint::ParseCigar(cigar_std);
+		    } catch (const InvalidInputException &) {
+			    return 0.0;
+		    }
+
+		    // Get type string
+		    std::string type_str(type.GetData(), type.GetSize());
+
+		    // Compute coverage
+		    return miint::ComputeQueryCoverage(cigar_stats, type_str);
+	    });
+}
+
+ScalarFunction AlignmentQueryCoverageFunction::GetFunction() {
+	ScalarFunction func("alignment_query_coverage", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                    LogicalType::DOUBLE, AlignmentQueryCoverageScalarFunction);
+
+	// Allow NULL values (returns NULL for NULL CIGAR, error for invalid type)
+	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+
+	// Set default value for type parameter (defaults to 'aligned')
+	func.arguments[1] = LogicalType::VARCHAR;
+	func.varargs = LogicalType::INVALID;
+
+	return func;
+}
+
+void AlignmentQueryCoverageFunction::Register(ExtensionLoader &loader) {
+	// Register overload with both parameters
+	ScalarFunction func_two_params = GetFunction();
+
+	// Register overload with single parameter (type defaults to 'aligned')
+	ScalarFunction func_one_param("alignment_query_coverage", {LogicalType::VARCHAR}, LogicalType::DOUBLE,
+	                              [](DataChunk &args, ExpressionState &state, Vector &result) {
+		                              UnaryExecutor::Execute<string_t, double>(
+		                                  args.data[0], result, args.size(), [&](string_t cigar) {
+			                                  // Handle NULL or unmapped CIGAR - return 0.0 for empty/unmapped
+			                                  if (cigar.GetSize() == 0 ||
+			                                      (cigar.GetSize() == 1 && cigar.GetData()[0] == '*')) {
+				                                  return 0.0;
+			                                  }
+
+			                                  // Parse CIGAR
+			                                  std::string cigar_std(cigar.GetData(), cigar.GetSize());
+			                                  miint::CigarStats cigar_stats;
+			                                  try {
+				                                  cigar_stats = miint::ParseCigar(cigar_std);
+			                                  } catch (const InvalidInputException &) {
+				                                  return 0.0;
+			                                  }
+
+			                                  // Default to type = 'aligned'
+			                                  return miint::ComputeQueryCoverage(cigar_stats, "aligned");
+		                                  });
+	                              });
+	func_one_param.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+
+	// Register both overloads as a function set
+	ScalarFunctionSet function_set("alignment_query_coverage");
+	function_set.AddFunction(func_one_param);
+	function_set.AddFunction(func_two_params);
+	loader.RegisterFunction(function_set);
 }
 
 } // namespace duckdb
