@@ -1,6 +1,87 @@
 # MIINT: MIcrobiome INTelligence.
 
-This extension, Miint, allow you to ... <extension_goal>.
+The MIINT [DuckDB](https://duckdb.org) extension enables DuckDB to interoperate with file formats and operations central to microbiome research.
+
+## Quick Start
+
+MIINT brings the power of SQL to microbiome data analysis. Here's a complete workflow analyzing metagenomic alignments:
+
+```sql
+-- Load the extension
+-- IMPORTANT: see installing, it is at the moment necessary to allow "unsigned" extensions _before_ loading the extension.
+-- This is because We currently are not available in the DuckDB community repository
+-- but will be in the future.
+LOAD '/path/to/miint.duckdb_extension';
+
+-- Read alignment files and combine samples
+CREATE VIEW all_alignments AS
+    SELECT *, 'sample1' AS sample_id FROM read_alignments('sample1.bam')
+    UNION ALL
+    SELECT *, 'sample2' AS sample_id FROM read_alignments('sample2.bam')
+    UNION ALL
+    SELECT *, 'sample3' AS sample_id FROM read_alignments('sample3.bam');
+
+-- Filter high-quality primary alignments
+CREATE VIEW high_quality AS
+    SELECT * FROM all_alignments
+    WHERE alignment_is_primary(flags)
+      AND mapq >= 30
+      AND alignment_query_coverage(cigar) > 0.9;
+
+-- Compute OGU counts using Woltka algorithm
+CREATE VIEW ogu_counts AS
+    SELECT * FROM woltka_ogu_per_sample(high_quality, sample_id, read_id);
+
+-- Export to BIOM format for downstream analysis (QIIME2, phyloseq, etc.)
+COPY (SELECT * FROM ogu_counts)
+TO 'ogu_table.biom' (FORMAT BIOM, COMPRESSION 'gzip');
+
+-- Or analyze directly in SQL
+SELECT sample_id,
+       COUNT(DISTINCT feature_id) AS richness,
+       SUM(value) AS total_reads
+FROM ogu_counts
+GROUP BY sample_id;
+```
+
+**Key capabilities:**
+- **Read bioinformatics formats as tables**: FASTQ/FASTA, SAM/BAM, BIOM
+- **Analyze with SQL**: Filter, aggregate, join with metadata tables
+- **Write back to standard formats**: Export results to FASTQ, SAM/BAM, BIOM
+- **Powerful functions**: Sequence identity, coverage, flag checking, Woltka classification
+- **Performance**: Parallel processing, efficient compression, streaming I/O
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Installing](#installing)
+- [Building](#building)
+  - [Managing dependencies](#managing-dependencies)
+  - [Build system](#build-system)
+  - [Build steps](#build-steps)
+- [Running the extension](#running-the-extension)
+- [Functions](#functions)
+  - [read_alignments](#read_alignmentsfilename-reference_lengthstable_name-include_filepathfalse)
+  - [read_fastx](#read_fastxfilename-sequence2filename-include_filepathfalse-qual_offset33)
+  - [read_biom](#read_biomfilename-include_filepathfalse)
+  - [SAM Flag Functions](#sam-flag-functions)
+  - [alignment_seq_identity](#alignment_seq_identitycigar-nm-md-type)
+  - [alignment_query_length](#alignment_query_lengthcigar-include_hard_clipstrue)
+  - [alignment_query_coverage](#alignment_query_coveragecigar-typealigned)
+- [Analysis Functions](#analysis-functions)
+  - [woltka_ogu_per_sample](#woltka_ogu_per_samplerelation-sample_id_field-sequence_id_field)
+  - [woltka_ogu](#woltka_ogurelation-sequence_id_field)
+  - [sequence_dna_reverse_complement / sequence_rna_reverse_complement](#sequence_dna_reverse_complementsequence-and-sequence_rna_reverse_complementsequence)
+  - [compress_intervals](#compress_intervalsstart-stop)
+- [COPY Formats](#copy-formats)
+  - [FORMAT FASTQ](#copy--to--format-fastq)
+  - [FORMAT FASTA](#copy--to--format-fasta)
+  - [FORMAT SAM / FORMAT BAM](#copy--to--format-sam-and-copy--to--format-bam)
+  - [FORMAT BIOM](#copy--to--format-biom)
+- [Running the tests](#running-the-tests)
+  - [SQL Logic Tests](#sql-logic-tests)
+  - [C++ Unit Tests](#c-unit-tests)
+  - [Test Data](#test-data)
 
 ## Installing
 To install MIINT the extension binary, DuckDB should be launched with the
@@ -98,8 +179,106 @@ SELECT * FROM read_alignments(['file1.sam', 'file2.bam'], include_filepath=true)
 SELECT * FROM read_sam('alignments.sam');
 ```
 
-### `read_fastx(filename)`
+### `read_fastx(filename, [sequence2=filename], [include_filepath=false], [qual_offset=33])`
 Read FASTA/FASTQ sequence files.
+
+**Parameters:**
+- `filename` (VARCHAR or VARCHAR[]): Path to FASTA/FASTQ file(s) for single-end reads, or R1 files for paired-end
+- `sequence2` (VARCHAR or VARCHAR[], optional): Path to R2 file(s) for paired-end reads. Must have same number of files as `filename`
+- `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
+- `qual_offset` (INTEGER, optional, default 33): Quality score offset (33 for Phred+33, 64 for Phred+64)
+
+**Output schema:**
+- `sequence_index` (BIGINT): 0-based sequential index across all reads
+- `read_id` (VARCHAR): Sequence identifier (without '@' or '>' prefix)
+- `comment` (VARCHAR, nullable): Comment line after identifier
+- `sequence1` (VARCHAR): DNA/RNA sequence (R1 for paired-end)
+- `sequence2` (VARCHAR, nullable): Second sequence for paired-end reads
+- `qual1` (UINT8[], nullable): Quality scores as array of integers (NULL for FASTA)
+- `qual2` (UINT8[], nullable): Quality scores for R2 (NULL for FASTA or single-end)
+- `filepath` (VARCHAR, optional): File path when include_filepath=true
+
+**Behavior:**
+- Auto-detects FASTA (.fasta, .fa, .fna) vs FASTQ (.fastq, .fq) by file extension
+- Supports gzip-compressed files (.gz extension)
+- Supports stdin input using `-` or `/dev/stdin` (single file only, no paired-end)
+- Quality scores converted to integers using specified offset (Phred+33 or Phred+64)
+- Supports parallel processing (8 threads for files, 1 thread for stdin)
+- For paired-end data, reads are matched by position in files (not by ID)
+
+**Examples:**
+```sql
+-- Read single-end FASTQ file
+SELECT * FROM read_fastx('reads.fastq');
+
+-- Read single-end FASTA file
+SELECT * FROM read_fastx('sequences.fasta');
+
+-- Read gzip-compressed FASTQ
+SELECT * FROM read_fastx('reads.fastq.gz');
+
+-- Read paired-end FASTQ files
+SELECT * FROM read_fastx('R1.fastq', sequence2='R2.fastq');
+
+-- Read multiple single-end files
+SELECT * FROM read_fastx(['sample1.fastq', 'sample2.fastq', 'sample3.fastq']);
+
+-- Read multiple paired-end files
+SELECT * FROM read_fastx(
+    ['sample1_R1.fastq', 'sample2_R1.fastq'],
+    sequence2=['sample1_R2.fastq', 'sample2_R2.fastq']
+);
+
+-- Include source filepath for tracking
+SELECT * FROM read_fastx(['batch1.fastq', 'batch2.fastq'], include_filepath=true);
+
+-- Read from stdin
+SELECT * FROM read_fastx('-');
+
+-- Specify quality offset for older Illumina data (Phred+64)
+SELECT * FROM read_fastx('old_illumina.fastq', qual_offset=64);
+
+-- Get basic statistics
+SELECT COUNT(*) as num_reads,
+       AVG(LENGTH(sequence1)) as avg_length,
+       MIN(LENGTH(sequence1)) as min_length,
+       MAX(LENGTH(sequence1)) as max_length
+FROM read_fastx('reads.fastq');
+
+-- Filter by sequence length
+SELECT * FROM read_fastx('reads.fastq')
+WHERE LENGTH(sequence1) >= 100 AND LENGTH(sequence1) <= 150;
+
+-- Count reads per file
+SELECT filepath, COUNT(*) as read_count
+FROM read_fastx(['file1.fastq', 'file2.fastq', 'file3.fastq'], include_filepath=true)
+GROUP BY filepath;
+
+-- Extract sequence IDs
+SELECT read_id FROM read_fastx('reads.fastq')
+ORDER BY sequence_index;
+
+-- Quality control: check average quality scores
+SELECT read_id,
+       CAST(AVG(q) AS INTEGER) as avg_qual
+FROM (
+    SELECT read_id, UNNEST(qual1) as q
+    FROM read_fastx('reads.fastq')
+)
+GROUP BY read_id
+HAVING AVG(q) >= 30;
+```
+
+**Performance:**
+- Multithreaded, but not yet optimized.
+- Streaming I/O minimizes memory usage
+- Quality scores stored as efficient UINT8 arrays
+
+**Notes:**
+- Read IDs must match between R1 and R2 files for paired-end data (not validated, matched by position)
+- For FASTA files, `qual1` and `qual2` are NULL
+- The `sequence_index` provides a global ordering across all files processed
+- Comment field is NULL if no comment is present in the sequence header
 
 ### `read_biom(filename, [include_filepath=false])`
 Read BIOM (Biological Observation Matrix) format files.
@@ -402,13 +581,13 @@ GROUP BY reference;
 - Filter reads based on alignment quality thresholds
 - QC metrics for sequencing runs
 
-## Analysis Macros
+## Analysis Functions
 
 ### `woltka_ogu_per_sample(relation, sample_id_field, sequence_id_field)`
 
-Compute [Woltka](https://github.com/qiyunzhu/woltka) OGU (Operational Genomic Unit) counts over SAM-like alignment data for multiple samples. This macro implements Woltka's classification algorithm, which assigns reads to taxonomic units while accounting for multi-mapped reads.
+Compute [Woltka](https://github.com/qiyunzhu/woltka) OGU (Operational Genomic Unit) counts over SAM-like alignment data for multiple samples. This function implements Woltka's classification algorithm, which assigns reads to taxonomic units while accounting for multi-mapped reads.
 
-**IMPORTANT**: Macro parameters should NOT be quoted. Pass table and column names directly as identifiers, not as string literals.
+**IMPORTANT**: Function parameters should NOT be quoted. Pass table and column names directly as identifiers, not as string literals.
 
 **Parameters:**
 - `relation`: A table, view, or subquery containing SAM-like alignment data
@@ -479,7 +658,7 @@ COPY (
 
 Compute Woltka OGU counts over SAM-like alignment data for a single sample or aggregated across all samples.
 
-**IMPORTANT**: Macro parameters should NOT be quoted. Pass table and column names directly as identifiers, not as string literals.
+**IMPORTANT**: Function parameters should NOT be quoted. Pass table and column names directly as identifiers, not as string literals.
 
 **Parameters:**
 - `relation`: A table, view, or subquery containing SAM-like alignment data
@@ -536,7 +715,8 @@ COPY (
 - Multi-mapped reads (reads aligning to multiple references) are fractionally assigned: each mapping receives weight 1/N where N is the number of unique references
 - Read orientation (forward/reverse) is considered separately using SAM flags
 - For better performance with large datasets, consider adding a numeric index column and using it as `sequence_id_field` instead of `read_id`
-- The macro handles paired-end data by distinguishing R1 and R2 reads via the `alignment_is_read1()` flag
+- This function handles paired-end data by distinguishing R1 and R2 reads via the `alignment_is_read1()` flag
+- **Implementation note:** Implemented as a DuckDB macro (table-returning expression), so parameters are not quoted
 
 ### `sequence_dna_reverse_complement(sequence)` and `sequence_rna_reverse_complement(sequence)`
 
@@ -978,10 +1158,152 @@ TO 'sparse.biom' (FORMAT BIOM);
 - The output follows BIOM format specification v2.1
 
 ## Running the tests
-Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:
+
+The MIINT extension uses two complementary testing approaches to ensure correctness and reliability.
+
+### SQL Logic Tests
+
+The primary testing mechanism for user-facing functionality uses DuckDB's SQL logic test framework. Test files are located in `test/sql/` and use the `.test` extension.
+
+**Running SQL tests:**
 ```sh
+# Run all SQL tests
 make test
+
+# Run a single test file
+./build/release/test/unittest "test/sql/read_alignments.test"
+
+# Run tests matching a pattern
+./build/release/test/unittest "[alignment]"
 ```
+
+**Test file structure:**
+SQL logic tests consist of statements and expected outputs. Each test file follows this format:
+
+```sql
+# name: test/sql/example.test
+# description: Test description
+# group: [sql]
+
+require miint
+
+# Test statement that should succeed
+statement ok
+SELECT * FROM read_fastx('data/fastq/example.fastq');
+
+# Query test with expected output
+query I
+SELECT COUNT(*) FROM read_fastx('data/fastq/example.fastq');
+----
+100
+
+# Test error handling
+statement error
+SELECT * FROM read_fastx('nonexistent.fastq');
+----
+File not found: nonexistent.fastq
+```
+
+**Test organization:**
+- `statement ok` - Statement should execute without error
+- `statement error` - Statement should raise an error (followed by expected error message)
+- `query <types>` - Query should return specific results
+  - Types: `I` (INTEGER), `R` (REAL/DOUBLE), `T` (TEXT), etc.
+- `----` - Separator between query and expected output
+
+**Example test files:**
+- `test/sql/read_alignments.test` - SAM/BAM reading functionality
+- `test/sql/read_fastx.test` - FASTA/FASTQ reading functionality
+- `test/sql/alignment_functions.test` - Alignment analysis functions
+- `test/sql/copy_sam.test` - SAM/BAM writing functionality
+
+**Good practices for SQL tests:**
+- Test error cases first (missing files, invalid parameters)
+- Test basic functionality with simple inputs
+- Test edge cases (empty files, NULL values, boundary conditions)
+- Verify data types and column ordering
+- Keep test data files small and focused
+- Use clear, descriptive comments for each test section
+
+### C++ Unit Tests
+
+Core algorithms and internal utilities are tested using the Catch2 framework. C++ tests are located in `test/cpp/` and compile to `./build/release/extension/miint/tests`.
+
+**Running C++ tests:**
+```sh
+# Build and run all C++ tests
+./build/release/extension/miint/tests
+
+# Run tests matching a specific tag
+./build/release/extension/miint/tests "[alignment_functions]"
+
+# Run a specific test case
+./build/release/extension/miint/tests "ParseCigar - Basic operations"
+```
+
+**Code organization for testing:**
+
+1. **`miint` namespace** - Pure C++ code (algorithms, parsers, utilities)
+   - Location: `src/` files, internal headers
+   - Tested with: Catch2 C++ unit tests (`test/cpp/`)
+   - Examples: CIGAR parsing, MD tag parsing, interval compression
+
+2. **`duckdb` namespace** - DuckDB integration code (table functions, scalar functions)
+   - Location: `src/` files (e.g., `alignment_functions.cpp`, `read_fastx.cpp`)
+   - Tested with: SQL logic tests (`test/sql/`)
+   - Examples: Function registration, DuckDB vector operations, parameter binding
+
+**Example C++ test structure:**
+```cpp
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+
+namespace miint {
+    // Implementation code to test
+    struct CigarStats { /* ... */ };
+    static CigarStats ParseCigar(const std::string &cigar_str);
+}
+
+TEST_CASE("ParseCigar - Basic operations", "[alignment_functions]") {
+    SECTION("Simple match") {
+        auto stats = miint::ParseCigar("10M");
+        REQUIRE(stats.matches == 10);
+        REQUIRE(stats.alignment_columns == 10);
+    }
+
+    SECTION("With insertions and deletions") {
+        auto stats = miint::ParseCigar("10M5I3D10M");
+        REQUIRE(stats.matches == 20);
+        REQUIRE(stats.insertions == 5);
+        REQUIRE(stats.deletions == 3);
+        REQUIRE(stats.gap_opens == 2);
+    }
+}
+```
+
+**Example test files:**
+- `test/cpp/test_AlignmentFunctions.cpp` - CIGAR/MD parsing, identity calculations
+- `test/cpp/test_SequenceReader.cpp` - FASTQ/FASTA parsing
+- `test/cpp/test_SAMReader.cpp` - SAM/BAM reading logic
+- `test/cpp/test_IntervalCompressor.cpp` - Interval merging algorithm
+
+**Good practices for C++ tests:**
+- Use `TEST_CASE()` for grouping related tests
+- Use `SECTION()` for organizing variations within a test case
+- Use descriptive test names that explain what is being tested
+- Use `REQUIRE()` for critical assertions, `CHECK()` for non-critical
+- Use matchers for floating-point comparisons (`REQUIRE_THAT(value, WithinRel(expected, 0.001))`)
+- Test boundary conditions, error cases, and edge cases
+- Keep test data minimal and focused on the specific behavior being tested
+
+### Test Data
+
+Test data files are organized in `data/` subdirectories:
+- `data/sam/` - SAM/BAM test files
+- `data/fastq/` - FASTQ/FASTA test files
+- `data/biom/` - BIOM format test files
+
+**Important:** Keep test data files small (< 1KB when possible) to maintain fast test execution and minimize repository size.
 
 ---
 
