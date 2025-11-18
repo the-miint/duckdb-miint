@@ -1,11 +1,30 @@
-# Miint
-
-This repository is based on https://github.com/duckdb/extension-template, check it out if you want to build and ship your own DuckDB extension.
-
----
+# MIINT: MIcrobiome INTelligence.
 
 This extension, Miint, allow you to ... <extension_goal>.
 
+## Installing
+To install MIINT the extension binary, DuckDB should be launched with the
+`allow_unsigned_extensions` option set to true. How to set this will depend on the client you're using. Some examples:
+
+CLI:
+```shell
+duckdb -unsigned
+```
+
+Python:
+```python
+con = duckdb.connect(':memory:', config={'allow_unsigned_extensions' : 'true'})
+```
+
+NodeJS:
+```js
+db = new duckdb.Database(':memory:', {"allow_unsigned_extensions": "true"});
+```
+
+After running these steps, you can install and load your extension using the regular INSTALL/LOAD commands in DuckDB:
+```sql
+LOAD '/path/to/miint.duckdb_extension';
+```
 
 ## Building
 ### Managing dependencies
@@ -15,19 +34,24 @@ git clone https://github.com/Microsoft/vcpkg.git
 ./vcpkg/bootstrap-vcpkg.sh
 export VCPKG_TOOLCHAIN_PATH=`pwd`/vcpkg/scripts/buildsystems/vcpkg.cmake
 ```
-Note: VCPKG is only required for extensions that want to rely on it for dependency management. If you want to develop an extension without dependencies, or want to do your own dependency management, just skip this step. Note that the example extension uses VCPKG to build with a dependency for instructive purposes, so when skipping this step the build may not work without removing the dependency.
+
+### Build system
+We use [Ninja](https://ninja-build.org) for quick builds. The easiest install is to use prebuild [release](https://github.com/ninja-build/ninja/releases) binaries.
 
 ### Build steps
 Now to build the extension, run:
 ```sh
-make
+GEN=ninja make
 ```
+
 The main binaries that will be built are:
+
 ```sh
 ./build/release/duckdb
 ./build/release/test/unittest
 ./build/release/extension/miint/miint.duckdb_extension
 ```
+
 - `duckdb` is the binary for the duckdb shell with the extension code automatically loaded.
 - `unittest` is the test runner of duckdb. Again, the extension is already linked into the binary.
 - `miint.duckdb_extension` is the loadable binary as it would be distributed.
@@ -76,6 +100,107 @@ SELECT * FROM read_sam('alignments.sam');
 
 ### `read_fastx(filename)`
 Read FASTA/FASTQ sequence files.
+
+### `read_biom(filename, [include_filepath=false])`
+Read BIOM (Biological Observation Matrix) format files.
+
+**Parameters:**
+- `filename` (VARCHAR or VARCHAR[]): Path to BIOM file(s)
+- `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
+
+**Output schema:**
+- `sample_id` (VARCHAR): Sample identifier
+- `feature_id` (VARCHAR): Feature/OGU/OTU/ASV identifier
+- `value` (DOUBLE): Abundance/count value
+- `filepath` (VARCHAR, optional): File path when include_filepath=true
+
+**Behavior:**
+- Reads BIOM format v2.1 files (HDF5-based)
+- Returns data in sparse COO (coordinate) format: one row per non-zero (sample, feature, value) entry
+- Supports parallel processing for faster reads of large files
+- Zero values are not returned (sparse representation)
+- Supports reading multiple files which are concatenated in the output
+
+**Examples:**
+```sql
+-- Read single BIOM file
+SELECT * FROM read_biom('ogu_table.biom');
+
+-- Read multiple BIOM files
+SELECT * FROM read_biom(['sample1.biom', 'sample2.biom', 'sample3.biom']);
+
+-- Include source filepath for each record
+SELECT * FROM read_biom('ogu_table.biom', include_filepath=true);
+
+-- Aggregate counts per sample
+SELECT sample_id, SUM(value) as total_count
+FROM read_biom('ogu_table.biom')
+GROUP BY sample_id
+ORDER BY total_count DESC;
+
+-- Aggregate counts per feature
+SELECT feature_id, SUM(value) as total_abundance
+FROM read_biom('ogu_table.biom')
+GROUP BY feature_id
+ORDER BY total_abundance DESC
+LIMIT 10;
+
+-- Filter for specific samples
+SELECT feature_id, value
+FROM read_biom('ogu_table.biom')
+WHERE sample_id IN ('Sample1', 'Sample2', 'Sample3')
+ORDER BY value DESC;
+
+-- Count unique features per sample
+SELECT sample_id, COUNT(DISTINCT feature_id) as n_features
+FROM read_biom('ogu_table.biom')
+GROUP BY sample_id;
+
+-- Join with metadata table
+CREATE TABLE sample_metadata AS
+SELECT 'Sample1' as sample_id, 'Control' as group
+UNION ALL SELECT 'Sample2', 'Treatment'
+UNION ALL SELECT 'Sample3', 'Treatment';
+
+SELECT sm.group, b.feature_id, SUM(b.value) as group_total
+FROM read_biom('ogu_table.biom') b
+JOIN sample_metadata sm ON b.sample_id = sm.sample_id
+GROUP BY sm.group, b.feature_id
+ORDER BY sm.group, group_total DESC;
+
+-- Round-trip: read BIOM, filter, write back to BIOM
+COPY (
+    SELECT sample_id, feature_id, value
+    FROM read_biom('input.biom')
+    WHERE value >= 10.0  -- Filter low abundance features
+) TO 'filtered.biom' (FORMAT BIOM, COMPRESSION 'gzip');
+
+-- Convert BIOM to CSV
+COPY (
+    SELECT * FROM read_biom('ogu_table.biom')
+    ORDER BY sample_id, feature_id
+) TO 'ogu_table.csv' (HEADER, DELIMITER ',');
+
+-- Read multiple files and track source
+SELECT filepath, sample_id, COUNT(*) as n_features, SUM(value) as total_count
+FROM read_biom(['batch1.biom', 'batch2.biom', 'batch3.biom'], include_filepath=true)
+GROUP BY filepath, sample_id
+ORDER BY filepath, sample_id;
+```
+
+**Compatibility:**
+- Reads BIOM files created by:
+  - QIIME2 (FeatureTable exports)
+  - biom-format Python package
+  - Woltka
+  - This extension's `COPY ... FORMAT BIOM`
+- Follows BIOM format specification v2.1
+- Only supports HDF5-based BIOM files (not JSON format)
+
+**Performance:**
+- Efficiently handles large sparse matrices
+- Parallel processing enabled by default
+- Only non-zero values are read/returned, optimizing memory usage
 
 ### SAM Flag Functions
 
@@ -276,6 +401,142 @@ GROUP BY reference;
 - **Mapped coverage**: Identify heavily clipped reads (adapters, chimeras, low-quality ends)
 - Filter reads based on alignment quality thresholds
 - QC metrics for sequencing runs
+
+## Analysis Macros
+
+### `woltka_ogu_per_sample(relation, sample_id_field, sequence_id_field)`
+
+Compute [Woltka](https://github.com/qiyunzhu/woltka) OGU (Operational Genomic Unit) counts over SAM-like alignment data for multiple samples. This macro implements Woltka's classification algorithm, which assigns reads to taxonomic units while accounting for multi-mapped reads.
+
+**IMPORTANT**: Macro parameters should NOT be quoted. Pass table and column names directly as identifiers, not as string literals.
+
+**Parameters:**
+- `relation`: A table, view, or subquery containing SAM-like alignment data
+- `sample_id_field`: Column name containing sample identifiers
+- `sequence_id_field`: Column name containing sequence identifiers (can be `read_id` or a numeric index for better performance)
+
+**Required columns in relation:**
+- Column specified by `sample_id_field`: Sample identifier
+- Column specified by `sequence_id_field`: Read/sequence identifier
+- `reference` (VARCHAR): Reference sequence name (feature ID)
+- `flags` (USMALLINT): SAM alignment flags
+
+**Returns:**
+- `sample_id`: Sample identifier
+- `feature_id`: Reference/feature identifier
+- `value`: OGU count (fractional, accounts for multi-mapping)
+
+**Algorithm:**
+1. Orients reads using alignment flags (forward/reverse)
+2. For each read orientation, divides 1 by the number of unique features aligned to
+3. Aggregates fractional counts per sample and feature
+
+**Examples:**
+```sql
+-- Basic usage: count OGUs per sample from alignment table
+SELECT * FROM woltka_ogu_per_sample(
+    my_alignments,
+    sample_id,
+    read_id
+);
+
+-- Using with a filtered view
+CREATE VIEW high_quality_alignments AS
+    SELECT *, 'sample1' AS sample_id
+    FROM read_alignments('alignments.bam')
+    WHERE mapq >= 30 AND alignment_is_primary(flags);
+
+SELECT * FROM woltka_ogu_per_sample(
+    high_quality_alignments,
+    sample_id,
+    read_id
+);
+
+-- Process multiple samples with UNION
+CREATE VIEW all_samples AS
+    SELECT *, 'sample1' AS sample_id FROM read_alignments('sample1.bam')
+    UNION ALL
+    SELECT *, 'sample2' AS sample_id FROM read_alignments('sample2.bam')
+    UNION ALL
+    SELECT *, 'sample3' AS sample_id FROM read_alignments('sample3.bam');
+
+SELECT * FROM woltka_ogu_per_sample(
+    all_samples,
+    sample_id,
+    read_id
+) ORDER BY sample_id, feature_id;
+
+-- Export to BIOM format for downstream analysis
+COPY (
+    SELECT * FROM woltka_ogu_per_sample(my_alignments, sample_id, read_id)
+) TO 'ogu_table.biom' (FORMAT BIOM, COMPRESSION 'gzip');
+
+-- WRONG: Do not quote parameters (this will cause an error)
+-- SELECT * FROM woltka_ogu_per_sample('my_alignments', 'sample_id', 'read_id');
+```
+
+### `woltka_ogu(relation, sequence_id_field)`
+
+Compute Woltka OGU counts over SAM-like alignment data for a single sample or aggregated across all samples.
+
+**IMPORTANT**: Macro parameters should NOT be quoted. Pass table and column names directly as identifiers, not as string literals.
+
+**Parameters:**
+- `relation`: A table, view, or subquery containing SAM-like alignment data
+- `sequence_id_field`: Column name containing sequence identifiers (can be `read_id` or a numeric index for better performance)
+
+**Required columns in relation:**
+- Column specified by `sequence_id_field`: Read/sequence identifier
+- `reference` (VARCHAR): Reference sequence name (feature ID)
+- `flags` (USMALLINT): SAM alignment flags
+
+**Returns:**
+- `feature_id`: Reference/feature identifier
+- `value`: OGU count (fractional, accounts for multi-mapping)
+
+**Examples:**
+```sql
+-- Basic usage: count OGUs from alignment table
+SELECT * FROM woltka_ogu(
+    my_alignments,
+    read_id
+);
+
+-- Direct query from read_alignments
+SELECT * FROM woltka_ogu(
+    (SELECT * FROM read_alignments('alignments.bam')),
+    read_id
+) ORDER BY value DESC;
+
+-- Filter high-quality primary alignments
+CREATE VIEW primary_alignments AS
+    SELECT * FROM read_alignments('alignments.bam')
+    WHERE alignment_is_primary(flags) AND mapq >= 20;
+
+SELECT * FROM woltka_ogu(primary_alignments, read_id);
+
+-- Combine with filtering for specific references
+CREATE VIEW bacterial_alignments AS
+    SELECT * FROM read_alignments('metagenome.bam')
+    WHERE reference LIKE 'bacteria_%';
+
+SELECT feature_id, value
+FROM woltka_ogu(bacterial_alignments, read_id)
+WHERE value > 10
+ORDER BY value DESC;
+
+-- Export to BIOM format (add sample_id column)
+COPY (
+    SELECT feature_id, 'MySample' AS sample_id, value
+    FROM woltka_ogu(my_alignments, read_id)
+) TO 'ogu_single.biom' (FORMAT BIOM);
+```
+
+**Notes:**
+- Multi-mapped reads (reads aligning to multiple references) are fractionally assigned: each mapping receives weight 1/N where N is the number of unique references
+- Read orientation (forward/reverse) is considered separately using SAM flags
+- For better performance with large datasets, consider adding a numeric index column and using it as `sequence_id_field` instead of `read_id`
+- The macro handles paired-end data by distinguishing R1 and R2 reads via the `alignment_is_read1()` flag
 
 ### `sequence_dna_reverse_complement(sequence)` and `sequence_rna_reverse_complement(sequence)`
 
@@ -588,41 +849,140 @@ COPY (
 - All optional tags present in the input are preserved in the output
 - BAM files always require headers (binary format specification)
 
+### `COPY ... TO '...' (FORMAT BIOM)`
+
+Write query results to BIOM (Biological Observation Matrix) format files. BIOM is an HDF5-based format commonly used for representing OGU/OTU/ASV tables in microbiome analyses.
+
+**Required columns:**
+- `feature_id` (VARCHAR): Feature/OGU/OTU/ASV identifier
+- `sample_id` (VARCHAR): Sample identifier
+- `value` (DOUBLE): Abundance/count value
+
+**Parameters:**
+- `COMPRESSION` (default: none): HDF5 internal compression algorithm ('gzip', 'lzf', or 'none')
+- `ID` (default: auto-generated): Custom table identifier for BIOM metadata
+- `GENERATED_BY` (default: 'DuckDB-MIINT'): Tool/version string for provenance tracking
+
+**Behavior:**
+- **Automatic deduplication**: Duplicate (feature_id, sample_id) pairs are automatically summed
+- **Sparse optimization**: Zero values are automatically removed from output
+- **Ordering**: Feature and sample IDs appear in order of first occurrence in the input data
+- **NULL handling**: NULL values in any required column cause an error
+
+**Examples:**
+```sql
+-- Basic BIOM output from Woltka results
+COPY (
+    SELECT * FROM woltka_ogu_per_sample(my_alignments, sample_id, read_id)
+) TO 'ogu_table.biom' (FORMAT BIOM);
+
+-- With HDF5 gzip compression (recommended)
+COPY (
+    SELECT * FROM woltka_ogu_per_sample(my_alignments, sample_id, read_id)
+) TO 'ogu_table.biom' (FORMAT BIOM, COMPRESSION 'gzip');
+
+-- With custom metadata
+COPY (
+    SELECT * FROM woltka_ogu_per_sample(my_alignments, sample_id, read_id)
+) TO 'ogu_table.biom' (FORMAT BIOM,
+                       COMPRESSION 'gzip',
+                       ID 'MyStudy_16S',
+                       GENERATED_BY 'DuckDB-MIINT v1.0 + Woltka algorithm');
+
+-- Export filtered high-quality alignments
+CREATE VIEW high_qual AS
+    SELECT *, 'sample1' AS sample_id
+    FROM read_alignments('sample1.bam')
+    WHERE mapq >= 30 AND alignment_is_primary(flags);
+
+COPY (
+    SELECT * FROM woltka_ogu_per_sample(high_qual, sample_id, read_id)
+) TO 'high_qual.biom' (FORMAT BIOM, COMPRESSION 'gzip');
+
+-- Convert any compatible table to BIOM format
+CREATE TABLE feature_counts AS
+SELECT * FROM (VALUES
+    ('OGU_001', 'Sample_A', 45.0),
+    ('OGU_001', 'Sample_B', 32.0),
+    ('OGU_002', 'Sample_A', 18.0),
+    ('OGU_002', 'Sample_B', 27.0)
+) AS t(feature_id, sample_id, value);
+
+COPY (SELECT * FROM feature_counts)
+TO 'counts.biom' (FORMAT BIOM, COMPRESSION 'gzip');
+
+-- Process multiple BAM files and export
+CREATE VIEW all_samples AS
+    SELECT *, 'sample1' AS sample_id FROM read_alignments('sample1.bam')
+    UNION ALL
+    SELECT *, 'sample2' AS sample_id FROM read_alignments('sample2.bam')
+    UNION ALL
+    SELECT *, 'sample3' AS sample_id FROM read_alignments('sample3.bam');
+
+COPY (
+    SELECT * FROM woltka_ogu_per_sample(all_samples, sample_id, read_id)
+) TO 'all_samples.biom' (FORMAT BIOM, COMPRESSION 'gzip');
+
+-- Export single-sample results (add sample_id column)
+COPY (
+    SELECT feature_id, 'MySample' AS sample_id, value
+    FROM woltka_ogu(my_alignments, read_id)
+) TO 'single_sample.biom' (FORMAT BIOM);
+```
+
+**Deduplication behavior:**
+```sql
+-- Duplicates are automatically summed
+CREATE TABLE with_dups AS
+SELECT * FROM (VALUES
+    ('F1', 'S1', 10.0),
+    ('F1', 'S1', 5.0),   -- Same feature + sample
+    ('F2', 'S1', 8.0)
+) AS t(feature_id, sample_id, value);
+
+COPY (SELECT * FROM with_dups)
+TO 'merged.biom' (FORMAT BIOM);
+
+-- Result: F1,S1,15.0 and F2,S1,8.0 (duplicates merged)
+
+-- Zeros are removed
+CREATE TABLE with_zeros AS
+SELECT * FROM (VALUES
+    ('F1', 'S1', 10.0),
+    ('F1', 'S2', 0.0),   -- Zero value
+    ('F2', 'S1', 8.0)
+) AS t(feature_id, sample_id, value);
+
+COPY (SELECT * FROM with_zeros)
+TO 'sparse.biom' (FORMAT BIOM);
+
+-- Result: Only F1,S1,10.0 and F2,S1,8.0 (zero removed)
+```
+
+**Compression options:**
+- `'gzip'`: Good compression, widely compatible (recommended)
+- `'lzf'`: Faster compression/decompression, less space savings
+- `'none'`: No compression, fastest but largest files
+
+**Compatibility:**
+- Output files are compatible with:
+  - QIIME2 (qiime tools import --type FeatureTable[Frequency])
+  - phyloseq (import_biom)
+  - biom-format Python package
+  - The `read_biom()` function in this extension
+
+**Notes:**
+- BIOM format uses HDF5, which provides efficient storage for sparse matrices
+- The format automatically handles very large feature/sample counts
+- Feature and sample metadata columns are not currently supported (data only)
+- The output follows BIOM format specification v2.1
+
 ## Running the tests
 Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:
 ```sh
 make test
 ```
 
-### Installing the deployed binaries
-To install your extension binaries from S3, you will need to do two things. Firstly, DuckDB should be launched with the
-`allow_unsigned_extensions` option set to true. How to set this will depend on the client you're using. Some examples:
+---
 
-CLI:
-```shell
-duckdb -unsigned
-```
-
-Python:
-```python
-con = duckdb.connect(':memory:', config={'allow_unsigned_extensions' : 'true'})
-```
-
-NodeJS:
-```js
-db = new duckdb.Database(':memory:', {"allow_unsigned_extensions": "true"});
-```
-
-Secondly, you will need to set the repository endpoint in DuckDB to the HTTP url of your bucket + version of the extension
-you want to install. To do this run the following SQL query in DuckDB:
-```sql
-SET custom_extension_repository='bucket.s3.eu-west-1.amazonaws.com/<your_extension_name>/latest';
-```
-Note that the `/latest` path will allow you to install the latest extension version available for your current version of
-DuckDB. To specify a specific version, you can pass the version instead.
-
-After running these steps, you can install and load your extension using the regular INSTALL/LOAD commands in DuckDB:
-```sql
-INSTALL miint
-LOAD miint
-```
+This repository is based on https://github.com/duckdb/extension-template, check it out if you want to build and ship your own DuckDB extension.

@@ -6,12 +6,12 @@ require miint
 
 # Test 1: FASTQ - Large dataset with gzip compression
 statement ok
-CREATE TABLE large_fastq_test AS 
-SELECT * FROM read_fastx(['data/fastq/small_a.fq', 'data/fastq/small_b.fq']) 
+CREATE TABLE large_fastq_test AS
+SELECT * FROM read_fastx(['data/fastq/small_a.fq', 'data/fastq/small_b.fq'])
 CROSS JOIN generate_series(1, 500) t(i);
 
 statement ok
-COPY (SELECT read_id, comment, sequence1, qual1 FROM large_fastq_test ORDER BY sequence_index) 
+COPY (SELECT read_id, comment, sequence1, qual1 FROM large_fastq_test ORDER BY read_id)
 TO '__TEST_DIR__/large_fastq.fq.gz' (FORMAT FASTQ);
 
 query I
@@ -19,11 +19,11 @@ SELECT COUNT(*) FROM read_fastx('__TEST_DIR__/large_fastq.fq.gz');
 ----
 2000
 
-# Verify content integrity (first few records - CROSS JOIN creates duplicates in sequence)
+# Verify content integrity (first few records - ordered by read_id for determinism)
 query III
-SELECT read_id, sequence1, qual1 
-FROM read_fastx('__TEST_DIR__/large_fastq.fq.gz') 
-ORDER BY sequence_index LIMIT 5;
+SELECT read_id, sequence1, qual1
+FROM read_fastx('__TEST_DIR__/large_fastq.fq.gz')
+ORDER BY read_id LIMIT 5;
 ----
 read_a1	AAAA	[40, 40, 40, 40]
 read_a1	AAAA	[40, 40, 40, 40]
@@ -33,9 +33,9 @@ read_a1	AAAA	[40, 40, 40, 40]
 
 # Verify last few records to ensure complete write
 query III
-SELECT read_id, sequence1, qual1 
-FROM read_fastx('__TEST_DIR__/large_fastq.fq.gz') 
-ORDER BY sequence_index DESC LIMIT 3;
+SELECT read_id, sequence1, qual1
+FROM read_fastx('__TEST_DIR__/large_fastq.fq.gz')
+ORDER BY read_id DESC LIMIT 3;
 ----
 read_b2	CCCC	[37, 37, 37, 37]
 read_b2	CCCC	[37, 37, 37, 37]
@@ -53,7 +53,7 @@ read_b2	CCCC	[37, 37, 37, 37]
 
 # Test 3: FASTQ - Large dataset uncompressed
 statement ok
-COPY (SELECT read_id, comment, sequence1, qual1 FROM large_fastq_test ORDER BY sequence_index) 
+COPY (SELECT read_id, comment, sequence1, qual1 FROM large_fastq_test ORDER BY read_id)
 TO '__TEST_DIR__/large_fastq.fq' (FORMAT FASTQ);
 
 query I
@@ -68,7 +68,7 @@ SELECT * FROM read_fastx('data/fastq/test.fa')
 CROSS JOIN generate_series(1, 500) t(i);
 
 statement ok
-COPY (SELECT read_id, comment, sequence1 FROM large_fasta_test ORDER BY sequence_index) 
+COPY (SELECT read_id, comment, sequence1 FROM large_fasta_test ORDER BY read_id)
 TO '__TEST_DIR__/large_fasta.fa.gz' (FORMAT FASTA);
 
 query I
@@ -78,9 +78,9 @@ SELECT COUNT(*) FROM read_fastx('__TEST_DIR__/large_fasta.fa.gz');
 
 # Verify content integrity (CROSS JOIN creates duplicates)
 query II
-SELECT read_id, sequence1 
-FROM read_fastx('__TEST_DIR__/large_fasta.fa.gz') 
-ORDER BY sequence_index LIMIT 3;
+SELECT read_id, sequence1
+FROM read_fastx('__TEST_DIR__/large_fasta.fa.gz')
+ORDER BY read_id LIMIT 3;
 ----
 seq1	ATGCATGCATGC
 seq1	ATGCATGCATGC
@@ -143,7 +143,7 @@ SELECT * FROM read_fastx('data/fastq/small_a_r1.fq', sequence2='data/fastq/small
 CROSS JOIN generate_series(1, 500) t(i);
 
 statement ok
-COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM large_paired_test ORDER BY sequence_index) 
+COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM large_paired_test ORDER BY read_id)
 TO '__TEST_DIR__/large_paired.fq.gz' (FORMAT FASTQ, INTERLEAVE true);
 
 # Should have 1000 records (500 * 1 pair * 2 reads)
@@ -154,7 +154,7 @@ SELECT COUNT(*) FROM read_fastx('__TEST_DIR__/large_paired.fq.gz');
 
 # Test 9: FASTQ Paired-end - Large split dataset
 statement ok
-COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM large_paired_test ORDER BY sequence_index) 
+COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM large_paired_test ORDER BY read_id)
 TO '__TEST_DIR__/large_split.{ORIENTATION}.fq.gz' (FORMAT FASTQ, INTERLEAVE false);
 
 query I
@@ -179,22 +179,22 @@ statement ok
 CREATE TABLE verify_test AS SELECT * FROM read_fastx('data/fastq/small_a.fq');
 
 statement ok
-COPY (SELECT read_id, comment, sequence1, qual1 FROM verify_test ORDER BY sequence_index) 
+COPY (SELECT read_id, comment, sequence1, qual1 FROM verify_test ORDER BY read_id)
 TO '__TEST_DIR__/verify_gz.fq.gz' (FORMAT FASTQ);
 
 statement ok
-COPY (SELECT read_id, comment, sequence1, qual1 FROM verify_test ORDER BY sequence_index) 
+COPY (SELECT read_id, comment, sequence1, qual1 FROM verify_test ORDER BY read_id)
 TO '__TEST_DIR__/verify_none.fq' (FORMAT FASTQ);
 
 # Both should produce identical content
 query III
-SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/verify_gz.fq.gz') ORDER BY sequence_index;
+SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/verify_gz.fq.gz') ORDER BY read_id;
 ----
 read_a1	AAAA	[40, 40, 40, 40]
 read_a2	TTTT	[39, 39, 39, 39]
 
 query III
-SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/verify_none.fq') ORDER BY sequence_index;
+SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/verify_none.fq') ORDER BY read_id;
 ----
 read_a1	AAAA	[40, 40, 40, 40]
 read_a2	TTTT	[39, 39, 39, 39]
