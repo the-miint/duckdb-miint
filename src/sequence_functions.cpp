@@ -205,7 +205,13 @@ static constexpr std::array<const char *, 256> CreateRnaRegexpTable() {
 static constexpr auto DNA_REGEXP_TABLE = CreateDnaRegexpTable();
 static constexpr auto RNA_REGEXP_TABLE = CreateRnaRegexpTable();
 
-struct DnaReverseComplementOperator {
+// Molecule type strings for error messages
+static constexpr const char DNA_TYPE[] = "DNA";
+static constexpr const char RNA_TYPE[] = "RNA";
+
+// Templated reverse complement operator - works for both DNA and RNA
+template <const std::array<char, 256> &COMPLEMENT_TABLE, const char *MOLECULE_TYPE>
+struct ReverseComplementOperator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
 	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
 		auto input_data = input.GetData();
@@ -218,11 +224,11 @@ struct DnaReverseComplementOperator {
 		// Reverse complement: iterate input in reverse, compute complement
 		for (idx_t i = 0; i < input_len; i++) {
 			unsigned char base = static_cast<unsigned char>(input_data[input_len - 1 - i]);
-			char complement = DNA_COMPLEMENT_TABLE[base];
+			char complement = COMPLEMENT_TABLE[base];
 
 			if (complement == 0) {
-				throw InvalidInputException("Invalid DNA base '%c' at position %llu", static_cast<char>(base),
-				                            input_len - i);
+				throw InvalidInputException("Invalid %s base '%c' at position %llu", MOLECULE_TYPE,
+				                            static_cast<char>(base), input_len - i);
 			}
 
 			result_data[i] = complement;
@@ -233,35 +239,9 @@ struct DnaReverseComplementOperator {
 	}
 };
 
-struct RnaReverseComplementOperator {
-	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
-		auto input_data = input.GetData();
-		auto input_len = input.GetSize();
-
-		// Pre-allocate result string for performance
-		auto result_str = StringVector::EmptyString(result, input_len);
-		auto result_data = result_str.GetDataWriteable();
-
-		// Reverse complement: iterate input in reverse, compute complement
-		for (idx_t i = 0; i < input_len; i++) {
-			unsigned char base = static_cast<unsigned char>(input_data[input_len - 1 - i]);
-			char complement = RNA_COMPLEMENT_TABLE[base];
-
-			if (complement == 0) {
-				throw InvalidInputException("Invalid RNA base '%c' at position %llu", static_cast<char>(base),
-				                            input_len - i);
-			}
-
-			result_data[i] = complement;
-		}
-
-		result_str.Finalize();
-		return result_str;
-	}
-};
-
-struct DnaAsRegexpOperator {
+// Templated regexp conversion operator - works for both DNA and RNA
+template <const std::array<const char *, 256> &REGEXP_TABLE, const char *MOLECULE_TYPE>
+struct AsRegexpOperator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
 	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
 		auto input_data = input.GetData();
@@ -271,11 +251,11 @@ struct DnaAsRegexpOperator {
 		idx_t output_len = 0;
 		for (idx_t i = 0; i < input_len; i++) {
 			unsigned char base = static_cast<unsigned char>(input_data[i]);
-			const char *regexp = DNA_REGEXP_TABLE[base];
+			const char *regexp = REGEXP_TABLE[base];
 
 			if (regexp == nullptr) {
-				throw InvalidInputException("Invalid DNA base '%c' at position %llu", static_cast<char>(base),
-				                            i + 1);
+				throw InvalidInputException("Invalid %s base '%c' at position %llu", MOLECULE_TYPE,
+				                            static_cast<char>(base), i + 1);
 			}
 
 			// Calculate length of this regexp fragment
@@ -294,7 +274,7 @@ struct DnaAsRegexpOperator {
 		idx_t output_pos = 0;
 		for (idx_t i = 0; i < input_len; i++) {
 			unsigned char base = static_cast<unsigned char>(input_data[i]);
-			const char *regexp = DNA_REGEXP_TABLE[base];
+			const char *regexp = REGEXP_TABLE[base];
 
 			// Copy the regexp fragment
 			while (*regexp) {
@@ -307,51 +287,11 @@ struct DnaAsRegexpOperator {
 	}
 };
 
-struct RnaAsRegexpOperator {
-	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
-		auto input_data = input.GetData();
-		auto input_len = input.GetSize();
-
-		// First pass: validate and calculate output length
-		idx_t output_len = 0;
-		for (idx_t i = 0; i < input_len; i++) {
-			unsigned char base = static_cast<unsigned char>(input_data[i]);
-			const char *regexp = RNA_REGEXP_TABLE[base];
-
-			if (regexp == nullptr) {
-				throw InvalidInputException("Invalid RNA base '%c' at position %llu", static_cast<char>(base),
-				                            i + 1);
-			}
-
-			// Calculate length of this regexp fragment
-			const char *p = regexp;
-			while (*p) {
-				output_len++;
-				p++;
-			}
-		}
-
-		// Allocate result string with exact size
-		auto result_str = StringVector::EmptyString(result, output_len);
-		auto result_data = result_str.GetDataWriteable();
-
-		// Second pass: build the regexp string
-		idx_t output_pos = 0;
-		for (idx_t i = 0; i < input_len; i++) {
-			unsigned char base = static_cast<unsigned char>(input_data[i]);
-			const char *regexp = RNA_REGEXP_TABLE[base];
-
-			// Copy the regexp fragment
-			while (*regexp) {
-				result_data[output_pos++] = *regexp++;
-			}
-		}
-
-		result_str.Finalize();
-		return result_str;
-	}
-};
+// Type aliases for DNA and RNA operators
+using DnaReverseComplementOperator = ReverseComplementOperator<DNA_COMPLEMENT_TABLE, DNA_TYPE>;
+using RnaReverseComplementOperator = ReverseComplementOperator<RNA_COMPLEMENT_TABLE, RNA_TYPE>;
+using DnaAsRegexpOperator = AsRegexpOperator<DNA_REGEXP_TABLE, DNA_TYPE>;
+using RnaAsRegexpOperator = AsRegexpOperator<RNA_REGEXP_TABLE, RNA_TYPE>;
 
 static void SequenceDnaReverseComplementFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	UnaryExecutor::ExecuteString<string_t, string_t, DnaReverseComplementOperator>(args.data[0], result, args.size());
