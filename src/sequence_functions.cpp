@@ -106,6 +106,105 @@ static constexpr std::array<char, 256> CreateRnaComplementTable() {
 static constexpr auto DNA_COMPLEMENT_TABLE = CreateDnaComplementTable();
 static constexpr auto RNA_COMPLEMENT_TABLE = CreateRnaComplementTable();
 
+// DNA regexp lookup table for all 256 ASCII characters
+// nullptr means invalid character
+static constexpr std::array<const char *, 256> CreateDnaRegexpTable() {
+	std::array<const char *, 256> table = {};
+	// Initialize all to nullptr (invalid)
+	for (size_t i = 0; i < 256; i++) {
+		table[i] = nullptr;
+	}
+	// Uppercase unambiguous bases
+	table['A'] = "A";
+	table['C'] = "C";
+	table['G'] = "G";
+	table['T'] = "T";
+	// Uppercase IUPAC ambiguity codes
+	table['R'] = "[AG]";  // A or G
+	table['Y'] = "[CT]";  // C or T
+	table['S'] = "[CG]";  // C or G
+	table['W'] = "[AT]";  // A or T
+	table['K'] = "[GT]";  // G or T
+	table['M'] = "[AC]";  // A or C
+	table['B'] = "[CGT]"; // not A
+	table['D'] = "[AGT]"; // not C
+	table['H'] = "[ACT]"; // not G
+	table['V'] = "[ACG]"; // not T
+	table['N'] = "[ACGT]"; // any
+	// Lowercase unambiguous bases
+	table['a'] = "a";
+	table['c'] = "c";
+	table['g'] = "g";
+	table['t'] = "t";
+	// Lowercase IUPAC ambiguity codes
+	table['r'] = "[ag]";
+	table['y'] = "[ct]";
+	table['s'] = "[cg]";
+	table['w'] = "[at]";
+	table['k'] = "[gt]";
+	table['m'] = "[ac]";
+	table['b'] = "[cgt]";
+	table['d'] = "[agt]";
+	table['h'] = "[act]";
+	table['v'] = "[acg]";
+	table['n'] = "[acgt]";
+	// Gap characters - match any character in regex
+	table['-'] = ".";
+	table['.'] = ".";
+	return table;
+}
+
+// RNA regexp lookup table for all 256 ASCII characters
+// nullptr means invalid character
+static constexpr std::array<const char *, 256> CreateRnaRegexpTable() {
+	std::array<const char *, 256> table = {};
+	// Initialize all to nullptr (invalid)
+	for (size_t i = 0; i < 256; i++) {
+		table[i] = nullptr;
+	}
+	// Uppercase unambiguous bases
+	table['A'] = "A";
+	table['C'] = "C";
+	table['G'] = "G";
+	table['U'] = "U";
+	// Uppercase IUPAC ambiguity codes
+	table['R'] = "[AG]";  // A or G
+	table['Y'] = "[CU]";  // C or U
+	table['S'] = "[CG]";  // C or G
+	table['W'] = "[AU]";  // A or U
+	table['K'] = "[GU]";  // G or U
+	table['M'] = "[AC]";  // A or C
+	table['B'] = "[CGU]"; // not A
+	table['D'] = "[AGU]"; // not C
+	table['H'] = "[ACU]"; // not G
+	table['V'] = "[ACG]"; // not U
+	table['N'] = "[ACGU]"; // any
+	// Lowercase unambiguous bases
+	table['a'] = "a";
+	table['c'] = "c";
+	table['g'] = "g";
+	table['u'] = "u";
+	// Lowercase IUPAC ambiguity codes
+	table['r'] = "[ag]";
+	table['y'] = "[cu]";
+	table['s'] = "[cg]";
+	table['w'] = "[au]";
+	table['k'] = "[gu]";
+	table['m'] = "[ac]";
+	table['b'] = "[cgu]";
+	table['d'] = "[agu]";
+	table['h'] = "[acu]";
+	table['v'] = "[acg]";
+	table['n'] = "[acgu]";
+	// Gap characters - match any character in regex
+	table['-'] = ".";
+	table['.'] = ".";
+	return table;
+}
+
+static constexpr auto DNA_REGEXP_TABLE = CreateDnaRegexpTable();
+static constexpr auto RNA_REGEXP_TABLE = CreateRnaRegexpTable();
+
 struct DnaReverseComplementOperator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
 	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
@@ -162,12 +261,112 @@ struct RnaReverseComplementOperator {
 	}
 };
 
+struct DnaAsRegexpOperator {
+	template <class INPUT_TYPE, class RESULT_TYPE>
+	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
+		auto input_data = input.GetData();
+		auto input_len = input.GetSize();
+
+		// First pass: validate and calculate output length
+		idx_t output_len = 0;
+		for (idx_t i = 0; i < input_len; i++) {
+			unsigned char base = static_cast<unsigned char>(input_data[i]);
+			const char *regexp = DNA_REGEXP_TABLE[base];
+
+			if (regexp == nullptr) {
+				throw InvalidInputException("Invalid DNA base '%c' at position %llu", static_cast<char>(base),
+				                            i + 1);
+			}
+
+			// Calculate length of this regexp fragment
+			const char *p = regexp;
+			while (*p) {
+				output_len++;
+				p++;
+			}
+		}
+
+		// Allocate result string with exact size
+		auto result_str = StringVector::EmptyString(result, output_len);
+		auto result_data = result_str.GetDataWriteable();
+
+		// Second pass: build the regexp string
+		idx_t output_pos = 0;
+		for (idx_t i = 0; i < input_len; i++) {
+			unsigned char base = static_cast<unsigned char>(input_data[i]);
+			const char *regexp = DNA_REGEXP_TABLE[base];
+
+			// Copy the regexp fragment
+			while (*regexp) {
+				result_data[output_pos++] = *regexp++;
+			}
+		}
+
+		result_str.Finalize();
+		return result_str;
+	}
+};
+
+struct RnaAsRegexpOperator {
+	template <class INPUT_TYPE, class RESULT_TYPE>
+	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
+		auto input_data = input.GetData();
+		auto input_len = input.GetSize();
+
+		// First pass: validate and calculate output length
+		idx_t output_len = 0;
+		for (idx_t i = 0; i < input_len; i++) {
+			unsigned char base = static_cast<unsigned char>(input_data[i]);
+			const char *regexp = RNA_REGEXP_TABLE[base];
+
+			if (regexp == nullptr) {
+				throw InvalidInputException("Invalid RNA base '%c' at position %llu", static_cast<char>(base),
+				                            i + 1);
+			}
+
+			// Calculate length of this regexp fragment
+			const char *p = regexp;
+			while (*p) {
+				output_len++;
+				p++;
+			}
+		}
+
+		// Allocate result string with exact size
+		auto result_str = StringVector::EmptyString(result, output_len);
+		auto result_data = result_str.GetDataWriteable();
+
+		// Second pass: build the regexp string
+		idx_t output_pos = 0;
+		for (idx_t i = 0; i < input_len; i++) {
+			unsigned char base = static_cast<unsigned char>(input_data[i]);
+			const char *regexp = RNA_REGEXP_TABLE[base];
+
+			// Copy the regexp fragment
+			while (*regexp) {
+				result_data[output_pos++] = *regexp++;
+			}
+		}
+
+		result_str.Finalize();
+		return result_str;
+	}
+};
+
 static void SequenceDnaReverseComplementFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	UnaryExecutor::ExecuteString<string_t, string_t, DnaReverseComplementOperator>(args.data[0], result, args.size());
 }
 
 static void SequenceRnaReverseComplementFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	UnaryExecutor::ExecuteString<string_t, string_t, RnaReverseComplementOperator>(args.data[0], result, args.size());
+}
+
+static void SequenceDnaAsRegexpFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	UnaryExecutor::ExecuteString<string_t, string_t, DnaAsRegexpOperator>(args.data[0], result, args.size());
+}
+
+static void SequenceRnaAsRegexpFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	UnaryExecutor::ExecuteString<string_t, string_t, RnaAsRegexpOperator>(args.data[0], result, args.size());
 }
 
 void SequenceFunctions::Register(ExtensionLoader &loader) {
@@ -178,6 +377,14 @@ void SequenceFunctions::Register(ExtensionLoader &loader) {
 	ScalarFunction sequence_rna_reverse_complement("sequence_rna_reverse_complement", {LogicalType::VARCHAR},
 	                                               LogicalType::VARCHAR, SequenceRnaReverseComplementFunction);
 	loader.RegisterFunction(sequence_rna_reverse_complement);
+
+	ScalarFunction sequence_dna_as_regexp("sequence_dna_as_regexp", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
+	                                      SequenceDnaAsRegexpFunction);
+	loader.RegisterFunction(sequence_dna_as_regexp);
+
+	ScalarFunction sequence_rna_as_regexp("sequence_rna_as_regexp", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
+	                                      SequenceRnaAsRegexpFunction);
+	loader.RegisterFunction(sequence_rna_as_regexp);
 }
 
 } // namespace duckdb

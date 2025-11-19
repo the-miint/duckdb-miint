@@ -1,0 +1,704 @@
+# name: test/sql/sequence_as_regexp.test
+# description: Test DNA and RNA sequence to regexp conversion with IUPAC support
+# group: [sql]
+
+require miint
+
+# Test basic DNA unambiguous bases (no brackets)
+query I
+SELECT sequence_dna_as_regexp('A');
+----
+A
+
+query I
+SELECT sequence_dna_as_regexp('C');
+----
+C
+
+query I
+SELECT sequence_dna_as_regexp('G');
+----
+G
+
+query I
+SELECT sequence_dna_as_regexp('T');
+----
+T
+
+query I
+SELECT sequence_dna_as_regexp('ACGT');
+----
+ACGT
+
+query I
+SELECT sequence_dna_as_regexp('');
+----
+(empty)
+
+# Test basic RNA unambiguous bases (no brackets)
+query I
+SELECT sequence_rna_as_regexp('A');
+----
+A
+
+query I
+SELECT sequence_rna_as_regexp('C');
+----
+C
+
+query I
+SELECT sequence_rna_as_regexp('G');
+----
+G
+
+query I
+SELECT sequence_rna_as_regexp('U');
+----
+U
+
+query I
+SELECT sequence_rna_as_regexp('ACGU');
+----
+ACGU
+
+query I
+SELECT sequence_rna_as_regexp('');
+----
+(empty)
+
+# Test DNA ambiguous IUPAC codes (with brackets)
+query I
+SELECT sequence_dna_as_regexp('R');
+----
+[AG]
+
+query I
+SELECT sequence_dna_as_regexp('Y');
+----
+[CT]
+
+query I
+SELECT sequence_dna_as_regexp('S');
+----
+[CG]
+
+query I
+SELECT sequence_dna_as_regexp('W');
+----
+[AT]
+
+query I
+SELECT sequence_dna_as_regexp('K');
+----
+[GT]
+
+query I
+SELECT sequence_dna_as_regexp('M');
+----
+[AC]
+
+query I
+SELECT sequence_dna_as_regexp('B');
+----
+[CGT]
+
+query I
+SELECT sequence_dna_as_regexp('D');
+----
+[AGT]
+
+query I
+SELECT sequence_dna_as_regexp('H');
+----
+[ACT]
+
+query I
+SELECT sequence_dna_as_regexp('V');
+----
+[ACG]
+
+query I
+SELECT sequence_dna_as_regexp('N');
+----
+[ACGT]
+
+# Test RNA ambiguous IUPAC codes (with brackets)
+query I
+SELECT sequence_rna_as_regexp('R');
+----
+[AG]
+
+query I
+SELECT sequence_rna_as_regexp('Y');
+----
+[CU]
+
+query I
+SELECT sequence_rna_as_regexp('S');
+----
+[CG]
+
+query I
+SELECT sequence_rna_as_regexp('W');
+----
+[AU]
+
+query I
+SELECT sequence_rna_as_regexp('K');
+----
+[GU]
+
+query I
+SELECT sequence_rna_as_regexp('M');
+----
+[AC]
+
+query I
+SELECT sequence_rna_as_regexp('B');
+----
+[CGU]
+
+query I
+SELECT sequence_rna_as_regexp('D');
+----
+[AGU]
+
+query I
+SELECT sequence_rna_as_regexp('H');
+----
+[ACU]
+
+query I
+SELECT sequence_rna_as_regexp('V');
+----
+[ACG]
+
+query I
+SELECT sequence_rna_as_regexp('N');
+----
+[ACGU]
+
+# Test gap characters (match any in regex)
+query I
+SELECT sequence_dna_as_regexp('-');
+----
+.
+
+query I
+SELECT sequence_dna_as_regexp('.');
+----
+.
+
+query I
+SELECT sequence_rna_as_regexp('-');
+----
+.
+
+query I
+SELECT sequence_rna_as_regexp('.');
+----
+.
+
+# Test mixed sequences (unambiguous + ambiguous)
+query I
+SELECT sequence_dna_as_regexp('ACGTR');
+----
+ACGT[AG]
+
+query I
+SELECT sequence_dna_as_regexp('RYMKSW');
+----
+[AG][CT][AC][GT][CG][AT]
+
+query I
+SELECT sequence_dna_as_regexp('BDHVN');
+----
+[CGT][AGT][ACT][ACG][ACGT]
+
+query I
+SELECT sequence_dna_as_regexp('ACGTMRWSYKVHDBN.-');
+----
+ACGT[AC][AG][AT][CG][CT][GT][ACG][ACT][AGT][CGT][ACGT]..
+
+query I
+SELECT sequence_rna_as_regexp('ACGUR');
+----
+ACGU[AG]
+
+query I
+SELECT sequence_rna_as_regexp('RYMKSW');
+----
+[AG][CU][AC][GU][CG][AU]
+
+query I
+SELECT sequence_rna_as_regexp('BDHVN');
+----
+[CGU][AGU][ACU][ACG][ACGU]
+
+query I
+SELECT sequence_rna_as_regexp('ACGUMRWSYKVHDBN.-');
+----
+ACGU[AC][AG][AU][CG][CU][GU][ACG][ACU][AGU][CGU][ACGU]..
+
+# Test case preservation (lowercase)
+query I
+SELECT sequence_dna_as_regexp('a');
+----
+a
+
+query I
+SELECT sequence_dna_as_regexp('acgt');
+----
+acgt
+
+query I
+SELECT sequence_dna_as_regexp('r');
+----
+[ag]
+
+query I
+SELECT sequence_dna_as_regexp('y');
+----
+[ct]
+
+query I
+SELECT sequence_dna_as_regexp('s');
+----
+[cg]
+
+query I
+SELECT sequence_dna_as_regexp('w');
+----
+[at]
+
+query I
+SELECT sequence_dna_as_regexp('k');
+----
+[gt]
+
+query I
+SELECT sequence_dna_as_regexp('m');
+----
+[ac]
+
+query I
+SELECT sequence_dna_as_regexp('b');
+----
+[cgt]
+
+query I
+SELECT sequence_dna_as_regexp('d');
+----
+[agt]
+
+query I
+SELECT sequence_dna_as_regexp('h');
+----
+[act]
+
+query I
+SELECT sequence_dna_as_regexp('v');
+----
+[acg]
+
+query I
+SELECT sequence_dna_as_regexp('n');
+----
+[acgt]
+
+query I
+SELECT sequence_rna_as_regexp('a');
+----
+a
+
+query I
+SELECT sequence_rna_as_regexp('acgu');
+----
+acgu
+
+query I
+SELECT sequence_rna_as_regexp('r');
+----
+[ag]
+
+query I
+SELECT sequence_rna_as_regexp('n');
+----
+[acgu]
+
+# Test mixed case sequences
+query I
+SELECT sequence_dna_as_regexp('AcGt');
+----
+AcGt
+
+query I
+SELECT sequence_dna_as_regexp('AcGtRy');
+----
+AcGt[AG][ct]
+
+query I
+SELECT sequence_dna_as_regexp('acgtMRWSykvhdbn.-');
+----
+acgt[AC][AG][AT][CG][ct][gt][acg][act][agt][cgt][acgt]..
+
+query I
+SELECT sequence_rna_as_regexp('AcGu');
+----
+AcGu
+
+query I
+SELECT sequence_rna_as_regexp('AcGuRy');
+----
+AcGu[AG][cu]
+
+query I
+SELECT sequence_rna_as_regexp('acguMRWSykvhdbn.-');
+----
+acgu[AC][AG][AU][CG][cu][gu][acg][acu][agu][cgu][acgu]..
+
+# Test NULL handling
+query I
+SELECT sequence_dna_as_regexp(NULL);
+----
+NULL
+
+query I
+SELECT sequence_rna_as_regexp(NULL);
+----
+NULL
+
+# Test longer sequences
+query I
+SELECT sequence_dna_as_regexp('ATGATGATGATG');
+----
+ATGATGATGATG
+
+query I
+SELECT sequence_dna_as_regexp('NNNNNNNNNN');
+----
+[ACGT][ACGT][ACGT][ACGT][ACGT][ACGT][ACGT][ACGT][ACGT][ACGT]
+
+query I
+SELECT sequence_rna_as_regexp('AUGAUGAUGAUG');
+----
+AUGAUGAUGAUG
+
+query I
+SELECT sequence_rna_as_regexp('NNNNNNNNNN');
+----
+[ACGU][ACGU][ACGU][ACGU][ACGU][ACGU][ACGU][ACGU][ACGU][ACGU]
+
+# Test error cases - RNA base (U) in DNA function
+statement error
+SELECT sequence_dna_as_regexp('AUGC');
+----
+Invalid DNA base 'U'
+
+statement error
+SELECT sequence_dna_as_regexp('ACGTU');
+----
+Invalid DNA base 'U'
+
+statement error
+SELECT sequence_dna_as_regexp('u');
+----
+Invalid DNA base 'u'
+
+# Test error cases - DNA base (T) in RNA function
+statement error
+SELECT sequence_rna_as_regexp('ATGC');
+----
+Invalid RNA base 'T'
+
+statement error
+SELECT sequence_rna_as_regexp('ACGUT');
+----
+Invalid RNA base 'T'
+
+statement error
+SELECT sequence_rna_as_regexp('t');
+----
+Invalid RNA base 't'
+
+# Test error cases - invalid characters
+statement error
+SELECT sequence_dna_as_regexp('ACGT123');
+----
+Invalid DNA base
+
+statement error
+SELECT sequence_dna_as_regexp('ACGT!@#');
+----
+Invalid DNA base
+
+statement error
+SELECT sequence_dna_as_regexp('ACGT X');
+----
+Invalid DNA base
+
+statement error
+SELECT sequence_rna_as_regexp('ACGU123');
+----
+Invalid RNA base
+
+statement error
+SELECT sequence_rna_as_regexp('ACGU!@#');
+----
+Invalid RNA base
+
+statement error
+SELECT sequence_rna_as_regexp('ACGU X');
+----
+Invalid RNA base
+
+# Test practical biological use cases
+query I
+SELECT sequence_dna_as_regexp('ATGGCTAGCTAGCTA');
+----
+ATGGCTAGCTAGCTA
+
+query I
+SELECT sequence_rna_as_regexp('AUGGCUAGCUAGCUA');
+----
+AUGGCUAGCUAGCUA
+
+# Test degenerate primers (common bioinformatics use case)
+query I
+SELECT sequence_dna_as_regexp('ATNGG');
+----
+AT[ACGT]GG
+
+query I
+SELECT sequence_dna_as_regexp('GCRAA');
+----
+GC[AG]AA
+
+query I
+SELECT sequence_rna_as_regexp('AUNGG');
+----
+AU[ACGU]GG
+
+# Test with gaps in sequence
+query I
+SELECT sequence_dna_as_regexp('AC-GT');
+----
+AC.GT
+
+query I
+SELECT sequence_dna_as_regexp('AC.GT');
+----
+AC.GT
+
+query I
+SELECT sequence_dna_as_regexp('A-T.G-C');
+----
+A.T.G.C
+
+query I
+SELECT sequence_rna_as_regexp('AC-GU');
+----
+AC.GU
+
+query I
+SELECT sequence_rna_as_regexp('AC.GU');
+----
+AC.GU
+
+query I
+SELECT sequence_rna_as_regexp('A-U.G-C');
+----
+A.U.G.C
+
+# Test integration with regexp_matches - DNA
+query T
+SELECT regexp_matches('ATCG', sequence_dna_as_regexp('ATCG'));
+----
+true
+
+query T
+SELECT regexp_matches('ATCG', sequence_dna_as_regexp('NNNN'));
+----
+true
+
+query T
+SELECT regexp_matches('AGCG', sequence_dna_as_regexp('RNCG'));
+----
+true
+
+query T
+SELECT regexp_matches('AACG', sequence_dna_as_regexp('RNCG'));
+----
+true
+
+query T
+SELECT regexp_matches('ATCG', sequence_dna_as_regexp('YYCG'));
+----
+false
+
+query T
+SELECT regexp_matches('ATGGCTA', sequence_dna_as_regexp('ATGGCTA'));
+----
+true
+
+query T
+SELECT regexp_matches('ATGGCTA', sequence_dna_as_regexp('ATNGCTA'));
+----
+true
+
+query T
+SELECT regexp_matches('ATCGCTA', sequence_dna_as_regexp('ATRGCTA'));
+----
+false
+
+# Test ambiguous code matching - R matches A or G
+query T
+SELECT regexp_matches('A', sequence_dna_as_regexp('R'));
+----
+true
+
+query T
+SELECT regexp_matches('G', sequence_dna_as_regexp('R'));
+----
+true
+
+query T
+SELECT regexp_matches('C', sequence_dna_as_regexp('R'));
+----
+false
+
+# Test ambiguous code matching - Y matches C or T
+query T
+SELECT regexp_matches('C', sequence_dna_as_regexp('Y'));
+----
+true
+
+query T
+SELECT regexp_matches('T', sequence_dna_as_regexp('Y'));
+----
+true
+
+query T
+SELECT regexp_matches('A', sequence_dna_as_regexp('Y'));
+----
+false
+
+# Test case sensitivity in matching
+query T
+SELECT regexp_matches('atcg', sequence_dna_as_regexp('atcg'));
+----
+true
+
+query T
+SELECT regexp_matches('ATCG', sequence_dna_as_regexp('atcg'));
+----
+false
+
+query T
+SELECT regexp_matches('agcg', sequence_dna_as_regexp('rncg'));
+----
+true
+
+query T
+SELECT regexp_matches('AGCG', sequence_dna_as_regexp('rncg'));
+----
+false
+
+# Test integration with regexp_matches - RNA
+query T
+SELECT regexp_matches('AUCG', sequence_rna_as_regexp('AUCG'));
+----
+true
+
+query T
+SELECT regexp_matches('AUCG', sequence_rna_as_regexp('NNNN'));
+----
+true
+
+query T
+SELECT regexp_matches('AGCG', sequence_rna_as_regexp('RNCG'));
+----
+true
+
+query T
+SELECT regexp_matches('AACG', sequence_rna_as_regexp('RNCG'));
+----
+true
+
+query T
+SELECT regexp_matches('AUCG', sequence_rna_as_regexp('YYCG'));
+----
+false
+
+# Test RNA ambiguous code - Y matches C or U
+query T
+SELECT regexp_matches('C', sequence_rna_as_regexp('Y'));
+----
+true
+
+query T
+SELECT regexp_matches('U', sequence_rna_as_regexp('Y'));
+----
+true
+
+query T
+SELECT regexp_matches('A', sequence_rna_as_regexp('Y'));
+----
+false
+
+# Test gap matching (. matches any character)
+query T
+SELECT regexp_matches('AXCG', sequence_dna_as_regexp('A-CG'));
+----
+true
+
+query T
+SELECT regexp_matches('ATCG', sequence_dna_as_regexp('A-CG'));
+----
+true
+
+query T
+SELECT regexp_matches('A', sequence_dna_as_regexp('A-CG'));
+----
+false
+
+# Test practical degenerate primer matching
+query T
+SELECT regexp_matches('ATCGG', sequence_dna_as_regexp('ATNGG'));
+----
+true
+
+query T
+SELECT regexp_matches('ATAGG', sequence_dna_as_regexp('ATNGG'));
+----
+true
+
+query T
+SELECT regexp_matches('ATGGG', sequence_dna_as_regexp('ATNGG'));
+----
+true
+
+query T
+SELECT regexp_matches('ATTGG', sequence_dna_as_regexp('ATNGG'));
+----
+true
+
+query T
+SELECT regexp_matches('ATGG', sequence_dna_as_regexp('ATNGG'));
+----
+false
+
+query T
+SELECT regexp_matches('GCAAA', sequence_dna_as_regexp('GCRAA'));
+----
+true
+
+query T
+SELECT regexp_matches('GCGAA', sequence_dna_as_regexp('GCRAA'));
+----
+true
+
+query T
+SELECT regexp_matches('GCTAA', sequence_dna_as_regexp('GCRAA'));
+----
+false

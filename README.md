@@ -72,6 +72,7 @@ GROUP BY sample_id;
   - [woltka_ogu_per_sample](#woltka_ogu_per_samplerelation-sample_id_field-sequence_id_field)
   - [woltka_ogu](#woltka_ogurelation-sequence_id_field)
   - [sequence_dna_reverse_complement / sequence_rna_reverse_complement](#sequence_dna_reverse_complementsequence-and-sequence_rna_reverse_complementsequence)
+  - [sequence_dna_as_regexp / sequence_rna_as_regexp](#sequence_dna_as_regexpsequence-and-sequence_rna_as_regexpsequence)
   - [compress_intervals](#compress_intervalsstart-stop)
 - [COPY Formats](#copy-formats)
   - [FORMAT FASTQ](#copy--to--format-fastq)
@@ -788,6 +789,89 @@ SELECT sequence_rna_reverse_complement('ATCG');
 - H = not G (A, C, T/U)
 - V = not T/U (A, C, G)
 - N = any base
+
+### `sequence_dna_as_regexp(sequence)` and `sequence_rna_as_regexp(sequence)`
+
+Convert DNA or RNA sequences with IUPAC ambiguity codes to regular expression patterns. Useful for pattern matching with degenerate primers and probes.
+
+**Parameters:**
+- `sequence` (VARCHAR): DNA or RNA sequence string with IUPAC codes
+
+**Returns:** VARCHAR - Regular expression pattern
+
+**Behavior:**
+- Unambiguous bases (A, C, G, T/U) remain unchanged
+- Ambiguous IUPAC codes expand to character classes (e.g., R → `[AG]`, N → `[ACGT]`)
+- Preserves uppercase/lowercase in the output
+- Gap characters (`-` and `.`) convert to `.` (regex wildcard matching any character)
+- Strict molecular type validation: DNA function rejects U bases, RNA function rejects T bases
+
+**Expansion rules:**
+- **Unambiguous bases**: A, C, G, T (DNA) or U (RNA) → no brackets
+- **Two-base codes**: R → `[AG]`, Y → `[CT]` or `[CU]`, S → `[CG]`, W → `[AT]` or `[AU]`, K → `[GT]` or `[GU]`, M → `[AC]`
+- **Three-base codes**: B → `[CGT]` or `[CGU]`, D → `[AGT]` or `[AGU]`, H → `[ACT]` or `[ACU]`, V → `[ACG]`
+- **Any base**: N → `[ACGT]` or `[ACGU]`
+- **Gap characters**: `-` or `.` → `.` (matches any character)
+
+**Examples:**
+```sql
+-- Basic DNA sequence (unambiguous)
+SELECT sequence_dna_as_regexp('ATCG');
+-- Returns: ATCG
+
+-- Degenerate primer with ambiguous positions
+SELECT sequence_dna_as_regexp('ATNGG');
+-- Returns: AT[ACGT]GG
+
+-- Multiple IUPAC codes
+SELECT sequence_dna_as_regexp('RYMKSW');
+-- Returns: [AG][CT][AC][GT][CG][AT]
+
+-- Case is preserved
+SELECT sequence_dna_as_regexp('AcGtRy');
+-- Returns: AcGt[AG][ct]
+
+-- RNA sequence with ambiguity
+SELECT sequence_rna_as_regexp('AUNGG');
+-- Returns: AU[ACGU]GG
+
+-- Use with DuckDB's regexp_matches for pattern searching
+SELECT read_id, sequence1
+FROM read_fastx('sequences.fastq')
+WHERE regexp_matches(sequence1, sequence_dna_as_regexp('ATNGG'));
+
+-- Find sequences matching a degenerate probe
+CREATE TABLE probes AS
+  SELECT 'probe1' AS name, 'GCRAA' AS sequence
+  UNION ALL SELECT 'probe2', 'ATNGG';
+
+SELECT p.name, f.read_id, f.sequence1
+FROM read_fastx('sequences.fastq') f
+CROSS JOIN probes p
+WHERE regexp_matches(f.sequence1, sequence_dna_as_regexp(p.sequence));
+
+-- Count reads matching a consensus pattern
+SELECT COUNT(*) AS matching_reads
+FROM read_fastx('sequences.fastq')
+WHERE regexp_matches(sequence1, sequence_dna_as_regexp('ACGTNNNNACGT'));
+
+-- Error: DNA function rejects U bases
+SELECT sequence_dna_as_regexp('AUNGG');
+-- Error: Invalid DNA base 'U'
+
+-- Error: RNA function rejects T bases
+SELECT sequence_rna_as_regexp('ATNGG');
+-- Error: Invalid RNA base 'T'
+```
+
+**Use cases:**
+- **Degenerate primer matching**: Search for sequences matching primers with ambiguous positions
+- **Motif finding**: Identify consensus sequences with variable positions
+- **Probe design validation**: Check which sequences match a degenerate probe
+- **Quality control**: Filter reads matching specific sequence patterns
+- **Pattern-based classification**: Group sequences by motif presence
+
+**Note:** Gap characters become `.` (regex wildcard), which matches any single character. This is useful for representing unknown or variable positions in alignments.
 
 ### `compress_intervals(start, stop)`
 
