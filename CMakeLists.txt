@@ -154,7 +154,8 @@ set(EXTENSION_SOURCES
     src/BIOMTable.cpp
     src/BIOMReader.cpp
     src/read_biom.cpp
-    src/reference_table_reader.cpp)
+    src/reference_table_reader.cpp
+    src/woltka_batched.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

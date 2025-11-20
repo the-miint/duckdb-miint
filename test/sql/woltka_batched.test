@@ -1,0 +1,208 @@
+# name: test/sql/woltka_batched.test
+# description: Test woltka_ogu_per_sample_batched table function
+# group: [sql]
+
+require miint
+
+require parquet
+
+# Setup test data
+statement ok
+CREATE TABLE test_sam_data AS SELECT * FROM read_parquet('data/sam/miint-woltka-test.parquet');
+
+statement ok
+CREATE TABLE mock_lengths AS SELECT DISTINCT reference, 10000000 AS length FROM test_sam_data;
+
+# Get expected results from unbatched macro
+statement ok
+CREATE TABLE expected_results AS
+SELECT * FROM woltka_ogu_per_sample(test_sam_data, common_sample_name, read_id)
+ORDER BY sample_id, feature_id;
+
+# Test 1: Verify batched with batch_size=1 matches unbatched
+query III
+SELECT * FROM woltka_ogu_per_sample_batched(test_sam_data, common_sample_name, read_id, batch_size := 1)
+ORDER BY sample_id, feature_id, value;
+----
+bar	G000156075	30901.802
+bar	G002234575	1302.833
+bar	G012273055	6633.619
+bar	G016766915	58452.652
+bar	G025152275	17768.333
+bar	H000000425	2163.086
+bar	H000000556	847.669
+bar	H000000962	6507.302
+bar	H000001008	15730.569
+bar	H000003450	477.800
+bar	H000003668	1468.333
+foo	G000156075	9.500
+foo	G012273055	4.750
+foo	G016766915	15.500
+foo	G025152275	2.000
+foo	H000000425	1.917
+foo	H000000556	1.417
+foo	H000000962	2.667
+foo	H000001008	13.250
+
+# Test 2: Verify batched with batch_size=2 matches unbatched
+query III
+SELECT * FROM woltka_ogu_per_sample_batched(test_sam_data, common_sample_name, read_id, batch_size := 2)
+ORDER BY sample_id, feature_id, value;
+----
+bar	G000156075	30901.802
+bar	G002234575	1302.833
+bar	G012273055	6633.619
+bar	G016766915	58452.652
+bar	G025152275	17768.333
+bar	H000000425	2163.086
+bar	H000000556	847.669
+bar	H000000962	6507.302
+bar	H000001008	15730.569
+bar	H000003450	477.800
+bar	H000003668	1468.333
+foo	G000156075	9.500
+foo	G012273055	4.750
+foo	G016766915	15.500
+foo	G025152275	2.000
+foo	H000000425	1.917
+foo	H000000556	1.417
+foo	H000000962	2.667
+foo	H000001008	13.250
+
+# Test 3: Verify batched with large batch_size (larger than sample count) matches unbatched
+query III
+SELECT * FROM woltka_ogu_per_sample_batched(test_sam_data, common_sample_name, read_id, batch_size := 100)
+ORDER BY sample_id, feature_id, value;
+----
+bar	G000156075	30901.802
+bar	G002234575	1302.833
+bar	G012273055	6633.619
+bar	G016766915	58452.652
+bar	G025152275	17768.333
+bar	H000000425	2163.086
+bar	H000000556	847.669
+bar	H000000962	6507.302
+bar	H000001008	15730.569
+bar	H000003450	477.800
+bar	H000003668	1468.333
+foo	G000156075	9.500
+foo	G012273055	4.750
+foo	G016766915	15.500
+foo	G025152275	2.000
+foo	H000000425	1.917
+foo	H000000556	1.417
+foo	H000000962	2.667
+foo	H000001008	13.250
+
+# Test 4: Work with views and subqueries
+statement ok
+CREATE VIEW test_view AS SELECT * FROM test_sam_data WHERE mapq >= 0;
+
+query III
+SELECT * FROM woltka_ogu_per_sample_batched(test_view, common_sample_name, read_id, batch_size := 1)
+ORDER BY sample_id, feature_id, value
+LIMIT 5;
+----
+bar	G000156075	30901.802
+bar	G002234575	1302.833
+bar	G012273055	6633.619
+bar	G016766915	58452.652
+bar	G025152275	17768.333
+
+# Test 5: Error - batch_size must be positive
+statement error
+SELECT * FROM woltka_ogu_per_sample_batched(test_sam_data, common_sample_name, read_id, batch_size := 0);
+----
+batch_size must be a positive integer
+
+statement error
+SELECT * FROM woltka_ogu_per_sample_batched(test_sam_data, common_sample_name, read_id, batch_size := -1);
+----
+batch_size must be a positive integer
+
+# Test 6: Error - relation must exist
+statement error
+SELECT * FROM woltka_ogu_per_sample_batched(nonexistent_table, common_sample_name, read_id, batch_size := 1);
+----
+does not exist
+
+# Test 7: Schema-qualified table names (verify ToString() doesn't break QualifiedName::Parse())
+statement ok
+CREATE SCHEMA test_schema;
+
+statement ok
+CREATE TABLE test_schema.sam_data AS SELECT * FROM test_sam_data;
+
+query III
+SELECT * FROM woltka_ogu_per_sample_batched(test_schema.sam_data, common_sample_name, read_id, batch_size := 1)
+ORDER BY sample_id, feature_id, value
+LIMIT 3;
+----
+bar	G000156075	30901.802
+bar	G002234575	1302.833
+bar	G012273055	6633.619
+
+statement ok
+DROP SCHEMA test_schema CASCADE;
+
+# Test 8: NULL sample_id should error
+statement ok
+CREATE TABLE test_with_null_sample AS SELECT * FROM test_sam_data;
+
+statement ok
+INSERT INTO test_with_null_sample
+SELECT flags, reference, template_length, mate_position, mapq, read_id, mate_reference, position, cigar, seq, qual, NULL
+FROM test_sam_data LIMIT 1;
+
+statement error
+SELECT * FROM woltka_ogu_per_sample_batched(test_with_null_sample, common_sample_name, read_id, batch_size := 1);
+----
+sample_id cannot be NULL
+
+statement ok
+DROP TABLE test_with_null_sample;
+
+# Test 9: Empty table (no samples) should error
+statement ok
+CREATE TABLE empty_samples AS SELECT * FROM test_sam_data WHERE 1=0;
+
+statement error
+SELECT * FROM woltka_ogu_per_sample_batched(empty_samples, common_sample_name, read_id, batch_size := 1);
+----
+No samples found
+
+statement ok
+DROP TABLE empty_samples;
+
+# Test 10: Sample IDs with special characters (single quotes)
+statement ok
+CREATE TABLE test_special_chars AS SELECT * FROM test_sam_data;
+
+statement ok
+UPDATE test_special_chars SET common_sample_name = 'test''s_sample' WHERE common_sample_name = 'foo';
+
+query III
+SELECT * FROM woltka_ogu_per_sample_batched(test_special_chars, common_sample_name, read_id, batch_size := 1)
+WHERE sample_id = 'test''s_sample'
+ORDER BY sample_id, feature_id, value
+LIMIT 3;
+----
+test's_sample	G000156075	9.500
+test's_sample	G012273055	4.750
+test's_sample	G016766915	15.500
+
+statement ok
+DROP TABLE test_special_chars;
+
+# Cleanup
+statement ok
+DROP TABLE test_sam_data;
+
+statement ok
+DROP TABLE mock_lengths;
+
+statement ok
+DROP TABLE expected_results;
+
+statement ok
+DROP VIEW test_view;

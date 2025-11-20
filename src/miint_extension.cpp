@@ -14,6 +14,7 @@
 #include <read_biom.hpp>
 #include <miint_macros.hpp>
 #include <sequence_functions.hpp>
+#include <woltka_batched.hpp>
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include <hdf5.h>
 
@@ -49,6 +50,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	CopySAMFunction::Register(loader);
 
 	MIINTMacros::Register(loader);
+	WoltkaOguPerSampleBatchedTableFunction::Register(loader);
 }
 
 void MiintExtension::Load(ExtensionLoader &loader) {

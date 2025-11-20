@@ -70,6 +70,7 @@ GROUP BY sample_id;
   - [alignment_query_coverage](#alignment_query_coveragecigar-typealigned)
 - [Analysis Functions](#analysis-functions)
   - [woltka_ogu_per_sample](#woltka_ogu_per_samplerelation-sample_id_field-sequence_id_field)
+  - [woltka_ogu_per_sample_batched](#woltka_ogu_per_sample_batchedrelation-sample_id_field-sequence_id_field-batch_size--n)
   - [woltka_ogu](#woltka_ogurelation-sequence_id_field)
   - [sequence_dna_reverse_complement / sequence_rna_reverse_complement](#sequence_dna_reverse_complementsequence-and-sequence_rna_reverse_complementsequence)
   - [sequence_dna_as_regexp / sequence_rna_as_regexp](#sequence_dna_as_regexpsequence-and-sequence_rna_as_regexpsequence)
@@ -654,6 +655,102 @@ COPY (
 -- WRONG: Do not quote parameters (this will cause an error)
 -- SELECT * FROM woltka_ogu_per_sample('my_alignments', 'sample_id', 'read_id');
 ```
+
+### `woltka_ogu_per_sample_batched(relation, sample_id_field, sequence_id_field, batch_size := N)`
+
+Memory-efficient version of `woltka_ogu_per_sample` that processes samples in batches. Useful for large datasets with thousands of samples and billions of reads where memory usage is a concern.
+
+**IMPORTANT**: Function parameters should NOT be quoted. Pass table and column names directly as identifiers, not as string literals.
+
+**Parameters:**
+- `relation`: A table, view, or subquery containing SAM-like alignment data
+- `sample_id_field`: Column name containing sample identifiers
+- `sequence_id_field`: Column name containing sequence identifiers
+- `batch_size` (named parameter, required): Number of samples to process per batch
+
+**Required columns in relation:**
+- Column specified by `sample_id_field`: Sample identifier
+- Column specified by `sequence_id_field`: Read/sequence identifier
+- `reference` (VARCHAR): Reference sequence name (feature ID)
+- `flags` (USMALLINT): SAM alignment flags
+
+**Returns:**
+- `sample_id`: Sample identifier
+- `feature_id`: Reference/feature identifier
+- `value`: OGU count (fractional, accounts for multi-mapping)
+
+**Memory behavior:**
+- Processes samples in configurable batches instead of all at once
+- Streams results without buffering entire batch outputs
+- Reduces memory usage from O(samples × reads) to O(batch_size × reads)
+- Example: 1000 samples with batch_size=100 uses ~90% less memory than unbatched
+
+**Performance considerations:**
+- Single-threaded execution to control memory (internal queries still parallelize)
+- Batch size trades memory for number of queries (smaller = less memory, more queries)
+- Recommended batch_size: 50-100 for typical datasets
+
+**Examples:**
+```sql
+-- Process 1000 samples in batches of 100
+SELECT * FROM woltka_ogu_per_sample_batched(
+    my_alignments,
+    sample_id,
+    read_id,
+    batch_size := 100
+);
+
+-- Use with filtered alignments
+CREATE VIEW high_quality AS
+    SELECT * FROM all_samples
+    WHERE mapq >= 30 AND alignment_is_primary(flags);
+
+SELECT * FROM woltka_ogu_per_sample_batched(
+    high_quality,
+    sample_id,
+    read_id,
+    batch_size := 50
+) ORDER BY sample_id, feature_id;
+
+-- Export large dataset to BIOM
+COPY (
+    SELECT * FROM woltka_ogu_per_sample_batched(
+        huge_dataset,
+        sample_id,
+        read_id,
+        batch_size := 100
+    )
+) TO 'ogu_table.biom' (FORMAT BIOM, COMPRESSION 'gzip');
+
+-- Compare memory usage (unbatched vs batched)
+-- Unbatched: loads all samples into memory at once
+SELECT * FROM woltka_ogu_per_sample(my_alignments, sample_id, read_id);
+
+-- Batched: processes 100 samples at a time
+SELECT * FROM woltka_ogu_per_sample_batched(
+    my_alignments,
+    sample_id,
+    read_id,
+    batch_size := 100
+);
+```
+
+**When to use:**
+- Large datasets with many samples (hundreds to thousands)
+- Memory-constrained environments
+- Processing billions of alignment reads
+- When unbatched version causes out-of-memory errors
+
+**When NOT to use:**
+- Small datasets with few samples (< 50 samples)
+- When maximum query speed is more important than memory
+- Single-sample datasets (use `woltka_ogu` instead)
+
+**Notes:**
+- Produces identical results to `woltka_ogu_per_sample` (same algorithm)
+- Sample processing order is not deterministic (use ORDER BY in query for consistent output)
+- Batch boundaries don't affect results (samples are independent)
+- NULL sample IDs cause an error (validated before processing)
 
 ### `woltka_ogu(relation, sequence_id_field)`
 
