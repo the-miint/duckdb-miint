@@ -98,6 +98,60 @@ const std::string WOLTKA_OGU = // NOLINT
     "FROM with_counts "
     "GROUP BY feature_id;";
 
+const std::string PARSE_GFF_ATTRIBUTES = // NOLINT
+    "CREATE OR REPLACE MACRO parse_gff_attributes(kvp_string) AS ( "
+    "  map_from_entries( "
+    "    list_transform( "
+    "      string_split(kvp_string, ';'), "
+    "      x -> struct_pack( "
+    "        key := string_split(x, '=')[1], "
+    "        value := string_split(x, '=')[2] "
+    "      ) "
+    "    ) "
+    "  ) "
+    "); ";
+
+const std::string READ_GFF = // NOLINT
+    "CREATE OR REPLACE MACRO read_gff(path) AS TABLE "
+    "SELECT "
+    "   column0 AS seqid, "
+    "   column1 AS source, "
+    "   column2 AS type, "
+    "   column3::INTEGER AS position, "
+    "   column4::INTEGER AS stop_position, "
+    "   CASE  "
+    "     WHEN column5 = '.' THEN NULL  "
+    "     ELSE column5::DOUBLE  "
+    "   END AS score, "
+    "   CASE  "
+    "     WHEN column6 = '.' THEN NULL  "
+    "     ELSE column6  "
+    "   END AS strand, "
+    "   CASE  "
+    "     WHEN column7 = '.' THEN NULL  "
+    "     ELSE column7::INTEGER  "
+    "   END AS phase, "
+    "   parse_gff_attributes(column8) AS attributes "
+    "FROM read_csv(path, "
+    " delim = '\t', "
+    "   header = false, "
+    "   columns = { "
+    "     'column0': 'VARCHAR', "
+    "     'column1': 'VARCHAR', "
+    "     'column2': 'VARCHAR', "
+    "     'column3': 'VARCHAR', "
+    "     'column4': 'VARCHAR', "
+    "     'column5': 'VARCHAR', "
+    "     'column6': 'VARCHAR', "
+    "     'column7': 'VARCHAR', "
+    "     'column8': 'VARCHAR' "
+    "   }, auto_detect=false, "
+    "   comment = '#', "
+    "   skip = 0, "
+    "   null_padding = true "
+    " ) "
+    "WHERE column0 NOT LIKE '##%'; ";
+
 class MIINTMacros {
 
 public:
@@ -107,6 +161,8 @@ public:
 
 		con.Query(WOLTKA_OGU_PER_SAMPLE);
 		con.Query(WOLTKA_OGU);
+		con.Query(PARSE_GFF_ATTRIBUTES);
+		con.Query(READ_GFF);
 	}
 };
 

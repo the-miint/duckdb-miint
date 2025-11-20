@@ -64,13 +64,13 @@ GROUP BY sample_id;
   - [read_alignments](#read_alignmentsfilename-reference_lengthstable_name-include_filepathfalse)
   - [read_fastx](#read_fastxfilename-sequence2filename-include_filepathfalse-qual_offset33)
   - [read_biom](#read_biomfilename-include_filepathfalse)
+  - [read_gff](#read_gffpath)
   - [SAM Flag Functions](#sam-flag-functions)
   - [alignment_seq_identity](#alignment_seq_identitycigar-nm-md-type)
   - [alignment_query_length](#alignment_query_lengthcigar-include_hard_clipstrue)
   - [alignment_query_coverage](#alignment_query_coveragecigar-typealigned)
 - [Analysis Functions](#analysis-functions)
   - [woltka_ogu_per_sample](#woltka_ogu_per_samplerelation-sample_id_field-sequence_id_field)
-  - [woltka_ogu_per_sample_batched](#woltka_ogu_per_sample_batchedrelation-sample_id_field-sequence_id_field-batch_size--n)
   - [woltka_ogu](#woltka_ogurelation-sequence_id_field)
   - [sequence_dna_reverse_complement / sequence_rna_reverse_complement](#sequence_dna_reverse_complementsequence-and-sequence_rna_reverse_complementsequence)
   - [sequence_dna_as_regexp / sequence_rna_as_regexp](#sequence_dna_as_regexpsequence-and-sequence_rna_as_regexpsequence)
@@ -383,6 +383,127 @@ ORDER BY filepath, sample_id;
 - Parallel processing enabled by default
 - Only non-zero values are read/returned, optimizing memory usage
 
+### `read_gff(path)`
+
+Read GFF3 (General Feature Format) annotation files. GFF is a standard format for genomic feature annotations including genes, transcripts, exons, and other biological features.
+
+**Parameters:**
+- `path` (VARCHAR): Path to GFF/GFF3 file
+
+**Output schema:**
+- `seqid` (VARCHAR): Sequence/chromosome identifier
+- `source` (VARCHAR): Annotation source (e.g., 'NCBI', 'Ensembl')
+- `type` (VARCHAR): Feature type (e.g., 'gene', 'mRNA', 'exon', 'CDS')
+- `position` (INTEGER): 1-based start position
+- `stop_position` (INTEGER): 1-based end position (inclusive)
+- `score` (DOUBLE, nullable): Feature score (NULL if '.')
+- `strand` (VARCHAR, nullable): Strand ('+', '-', or NULL if '.')
+- `phase` (INTEGER, nullable): CDS phase (0, 1, 2, or NULL if '.')
+- `attributes` (MAP(VARCHAR, VARCHAR)): Parsed key-value attributes
+
+**Behavior:**
+- Reads tab-delimited GFF3 format files
+- Automatically filters comment lines starting with '##'
+- Converts '.' to NULL for score, strand, and phase fields
+- Parses the attributes column (semicolon-separated key=value pairs) into a SQL MAP
+- Supports standard GFF3 specification
+
+**Examples:**
+```sql
+-- Read a GFF file
+SELECT * FROM read_gff('annotations.gff');
+
+-- Extract genes only
+SELECT seqid, position, stop_position, attributes['ID'] AS gene_id, attributes['Name'] AS gene_name
+FROM read_gff('annotations.gff')
+WHERE type = 'gene';
+
+-- Find protein-coding genes
+SELECT seqid, position, stop_position, attributes
+FROM read_gff('annotations.gff')
+WHERE type = 'gene' AND attributes['biotype'] = 'protein_coding';
+
+-- Get feature counts by type
+SELECT type, COUNT(*) AS count
+FROM read_gff('annotations.gff')
+GROUP BY type
+ORDER BY count DESC;
+
+-- Find genes on the plus strand
+SELECT attributes['ID'] AS gene_id, attributes['Name'] AS gene_name
+FROM read_gff('annotations.gff')
+WHERE type = 'gene' AND strand = '+';
+
+-- Calculate feature lengths
+SELECT type,
+       AVG(stop_position - position + 1) AS avg_length,
+       MIN(stop_position - position + 1) AS min_length,
+       MAX(stop_position - position + 1) AS max_length
+FROM read_gff('annotations.gff')
+GROUP BY type;
+
+-- Extract CDS features with phase information
+SELECT seqid, position, stop_position, phase, attributes['Parent'] AS parent_transcript
+FROM read_gff('annotations.gff')
+WHERE type = 'CDS' AND phase IS NOT NULL;
+
+-- Find overlapping features between two positions
+SELECT type, position, stop_position, attributes['ID'] AS feature_id
+FROM read_gff('annotations.gff')
+WHERE seqid = 'chr1'
+  AND position <= 5000
+  AND stop_position >= 1000
+ORDER BY position;
+
+-- Access nested attributes
+SELECT seqid,
+       type,
+       attributes['ID'] AS id,
+       attributes['Parent'] AS parent,
+       attributes['Name'] AS name
+FROM read_gff('annotations.gff')
+WHERE type = 'exon';
+
+-- Join genes with their transcripts
+SELECT g.attributes['ID'] AS gene_id,
+       g.attributes['Name'] AS gene_name,
+       t.attributes['ID'] AS transcript_id
+FROM read_gff('annotations.gff') g
+JOIN read_gff('annotations.gff') t
+  ON t.attributes['Parent'] = g.attributes['ID']
+WHERE g.type = 'gene' AND t.type = 'mRNA';
+```
+
+**Attribute Parsing:**
+The `attributes` column is automatically parsed from GFF format (semicolon-separated key=value pairs) into a DuckDB MAP:
+- Input: `ID=gene1;Name=TEST1;biotype=protein_coding`
+- Output: `{'ID': 'gene1', 'Name': 'TEST1', 'biotype': 'protein_coding'}`
+- Access values using bracket notation: `attributes['ID']`
+
+**GFF3 Format Notes:**
+- Coordinates are 1-based and inclusive (both start and end)
+- Strand: '+' (forward), '-' (reverse), '.' (unknown/not applicable)
+- Phase: Indicates position within codon (0, 1, or 2) for CDS features
+- Comment lines starting with '##' are filtered out (metadata/directives)
+- The 9th column (attributes) must contain at least an ID for most feature types
+
+**Use Cases:**
+- **Gene annotation analysis**: Extract genes, transcripts, exons from genome annotations
+- **Feature filtering**: Select specific feature types or genomic regions
+- **Structural analysis**: Calculate feature lengths, count features, analyze distributions
+- **Hierarchical queries**: Join parent-child relationships (gene → transcript → exon)
+- **Integration**: Combine annotations with alignment data or other genomic datasets
+
+**Compatibility:**
+- Supports GFF3 format specification
+- Compatible with annotations from:
+  - NCBI RefSeq
+  - Ensembl
+  - GENCODE
+  - Other standard GFF3 producers
+
+**Implementation note:** Implemented as a DuckDB macro using `read_csv` with GFF-specific parsing.
+
 ### SAM Flag Functions
 
 Test individual SAM flag bits. Each function takes a `USMALLINT` (the flags column from `read_sam`) and returns a `BOOLEAN`.
@@ -655,102 +776,6 @@ COPY (
 -- WRONG: Do not quote parameters (this will cause an error)
 -- SELECT * FROM woltka_ogu_per_sample('my_alignments', 'sample_id', 'read_id');
 ```
-
-### `woltka_ogu_per_sample_batched(relation, sample_id_field, sequence_id_field, batch_size := N)`
-
-Memory-efficient version of `woltka_ogu_per_sample` that processes samples in batches. Useful for large datasets with thousands of samples and billions of reads where memory usage is a concern.
-
-**IMPORTANT**: Function parameters should NOT be quoted. Pass table and column names directly as identifiers, not as string literals.
-
-**Parameters:**
-- `relation`: A table, view, or subquery containing SAM-like alignment data
-- `sample_id_field`: Column name containing sample identifiers
-- `sequence_id_field`: Column name containing sequence identifiers
-- `batch_size` (named parameter, required): Number of samples to process per batch
-
-**Required columns in relation:**
-- Column specified by `sample_id_field`: Sample identifier
-- Column specified by `sequence_id_field`: Read/sequence identifier
-- `reference` (VARCHAR): Reference sequence name (feature ID)
-- `flags` (USMALLINT): SAM alignment flags
-
-**Returns:**
-- `sample_id`: Sample identifier
-- `feature_id`: Reference/feature identifier
-- `value`: OGU count (fractional, accounts for multi-mapping)
-
-**Memory behavior:**
-- Processes samples in configurable batches instead of all at once
-- Streams results without buffering entire batch outputs
-- Reduces memory usage from O(samples × reads) to O(batch_size × reads)
-- Example: 1000 samples with batch_size=100 uses ~90% less memory than unbatched
-
-**Performance considerations:**
-- Single-threaded execution to control memory (internal queries still parallelize)
-- Batch size trades memory for number of queries (smaller = less memory, more queries)
-- Recommended batch_size: 50-100 for typical datasets
-
-**Examples:**
-```sql
--- Process 1000 samples in batches of 100
-SELECT * FROM woltka_ogu_per_sample_batched(
-    my_alignments,
-    sample_id,
-    read_id,
-    batch_size := 100
-);
-
--- Use with filtered alignments
-CREATE VIEW high_quality AS
-    SELECT * FROM all_samples
-    WHERE mapq >= 30 AND alignment_is_primary(flags);
-
-SELECT * FROM woltka_ogu_per_sample_batched(
-    high_quality,
-    sample_id,
-    read_id,
-    batch_size := 50
-) ORDER BY sample_id, feature_id;
-
--- Export large dataset to BIOM
-COPY (
-    SELECT * FROM woltka_ogu_per_sample_batched(
-        huge_dataset,
-        sample_id,
-        read_id,
-        batch_size := 100
-    )
-) TO 'ogu_table.biom' (FORMAT BIOM, COMPRESSION 'gzip');
-
--- Compare memory usage (unbatched vs batched)
--- Unbatched: loads all samples into memory at once
-SELECT * FROM woltka_ogu_per_sample(my_alignments, sample_id, read_id);
-
--- Batched: processes 100 samples at a time
-SELECT * FROM woltka_ogu_per_sample_batched(
-    my_alignments,
-    sample_id,
-    read_id,
-    batch_size := 100
-);
-```
-
-**When to use:**
-- Large datasets with many samples (hundreds to thousands)
-- Memory-constrained environments
-- Processing billions of alignment reads
-- When unbatched version causes out-of-memory errors
-
-**When NOT to use:**
-- Small datasets with few samples (< 50 samples)
-- When maximum query speed is more important than memory
-- Single-sample datasets (use `woltka_ogu` instead)
-
-**Notes:**
-- Produces identical results to `woltka_ogu_per_sample` (same algorithm)
-- Sample processing order is not deterministic (use ORDER BY in query for consistent output)
-- Batch boundaries don't affect results (samples are independent)
-- NULL sample IDs cause an error (validated before processing)
 
 ### `woltka_ogu(relation, sequence_id_field)`
 
