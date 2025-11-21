@@ -255,7 +255,6 @@ static void AlignmentSeqIdentityScalarFunction(DataChunk &args, ExpressionState 
 		}
 
 		double identity = 0.0;
-		bool valid_result = true;
 
 		if (type_str == "gap_excluded") {
 			// gap_excluded: #matches / (#matches + #mismatches)

@@ -89,7 +89,7 @@ enum class SAMRecordField {
 
 class SAMRecord {
 private:
-	const int64_t get_int_tag(const bam1_t *aln, const char *tag, int64_t default_val = -1) {
+	int64_t get_int_tag(const bam1_t *aln, const char *tag, int64_t default_val = -1) {
 		uint8_t *aux = bam_aux_get(aln, tag);
 		if (!aux) {
 			return default_val;
@@ -223,7 +223,7 @@ public:
 		}
 	}
 
-	const int64_t GetInt64(const SAMRecordField field) const {
+	int64_t GetInt64(const SAMRecordField field) const {
 		switch (field) {
 		case SAMRecordField::POSITION:
 			return position;
@@ -254,7 +254,7 @@ public:
 		}
 	}
 
-	const uint16_t GetUInt16(const SAMRecordField field) const {
+	uint16_t GetUInt16(const SAMRecordField field) const {
 		switch (field) {
 		case SAMRecordField::FLAGS:
 			return flags;
@@ -263,7 +263,7 @@ public:
 		}
 	}
 
-	const uint8_t GetUInt8(const SAMRecordField field) const {
+	uint8_t GetUInt8(const SAMRecordField field) const {
 		switch (field) {
 		case SAMRecordField::MAPQ:
 			return mapq;

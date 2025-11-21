@@ -159,6 +159,15 @@ set(EXTENSION_SOURCES
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
+# Enable compiler warnings for extension code only (not external libraries)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(${EXTENSION_NAME} PRIVATE -Wall -Wextra)
+    target_compile_options(${LOADABLE_EXTENSION_NAME} PRIVATE -Wall -Wextra)
+elseif(MSVC)
+    target_compile_options(${EXTENSION_NAME} PRIVATE /W4)
+    target_compile_options(${LOADABLE_EXTENSION_NAME} PRIVATE /W4)
+endif()
+
 target_link_libraries(${EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB

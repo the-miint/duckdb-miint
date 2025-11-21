@@ -8,12 +8,7 @@
 #include "SequenceRecord.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include <atomic>
-#include <chrono>
-#include <cstdlib>
 #include <optional>
-#include <thread>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace duckdb {
@@ -58,15 +53,6 @@ public:
 		bool uses_stdin;
 		std::atomic<uint64_t> sequence_index_counter; // Atomic for thread-safe increments
 
-		// Diagnostics
-		std::atomic<size_t> total_execute_calls{0};
-		std::atomic<size_t> total_rows_read{0};
-		std::unordered_map<std::thread::id, std::vector<size_t>> thread_files_claimed;
-		std::unordered_map<std::thread::id, size_t> thread_chunk_count;
-		std::unordered_set<size_t> files_processed;
-		std::chrono::steady_clock::time_point start_time;
-		bool diagnostics_enabled;
-
 		// stdin cannot be read in parallel (no seeking/rewinding).
 		// This forces sequential execution, which may be slower than
 		// reading from files where DuckDB can parallelize.
@@ -75,13 +61,12 @@ public:
 				return 1;
 			}
 			// Allow up to min(files, 64) threads for per-file parallelism
-			return std::max<idx_t>(8, std::min<idx_t>(readers.size(), 64));
+			return std::min<idx_t>(readers.size(), 64);
 		};
 
 		GlobalState(const std::vector<std::string> &sequence1_paths,
 		            const std::optional<std::vector<std::string>> &sequence2_paths, bool stdin_used)
-		    : next_file_idx(0), finished(false), uses_stdin(stdin_used), sequence_index_counter(1),
-		      start_time(std::chrono::steady_clock::now()) {
+		    : next_file_idx(0), finished(false), uses_stdin(stdin_used), sequence_index_counter(1) {
 			sequence1_filepaths = sequence1_paths;
 			if (sequence2_paths.has_value()) {
 				sequence2_filepaths = sequence2_paths.value();
@@ -94,46 +79,6 @@ public:
 				} else {
 					readers.push_back(std::make_unique<miint::SequenceReader>(sequence1_paths[i]));
 				}
-			}
-
-			diagnostics_enabled = std::getenv("DUCKDB_MIINT_DIAGNOSTICS") != nullptr;
-			if (diagnostics_enabled) {
-				fprintf(stderr, "[READ_FASTX] Diagnostics enabled. Processing %zu files.\n",
-				        sequence1_filepaths.size());
-				fprintf(stderr, "[READ_FASTX] MaxThreads = %llu\n", (unsigned long long)MaxThreads());
-			}
-		};
-
-		~GlobalState() {
-			if (diagnostics_enabled && total_execute_calls.load() > 0) {
-				auto duration = std::chrono::steady_clock::now() - start_time;
-				auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
-
-				fprintf(stderr, "\n[READ_FASTX] === FINAL STATISTICS ===\n");
-				fprintf(stderr, "[READ_FASTX] Total Execute() calls: %zu\n", total_execute_calls.load());
-				fprintf(stderr, "[READ_FASTX] Total rows read: %zu\n", total_rows_read.load());
-				fprintf(stderr, "[READ_FASTX] Duration: %lld seconds\n", (long long)(seconds > 0 ? seconds : 1));
-				fprintf(stderr, "[READ_FASTX] Unique threads: %zu\n", thread_files_claimed.size());
-				fprintf(stderr, "[READ_FASTX] Files available: %zu\n", sequence1_filepaths.size());
-				fprintf(stderr, "[READ_FASTX] Files actually processed: %zu\n", files_processed.size());
-
-				if (seconds > 0) {
-					fprintf(stderr, "[READ_FASTX] Throughput: %.2f rows/second\n",
-					        total_rows_read.load() / (double)seconds);
-				}
-
-				fprintf(stderr, "[READ_FASTX] Thread details:\n");
-				for (const auto &[tid, files] : thread_files_claimed) {
-					size_t chunks = thread_chunk_count[tid];
-					fprintf(stderr, "[READ_FASTX]   Thread %zu: claimed %zu files, processed %zu chunks\n",
-					        std::hash<std::thread::id>{}(tid), files.size(), chunks);
-					fprintf(stderr, "[READ_FASTX]     Files: ");
-					for (size_t i = 0; i < files.size(); i++) {
-						fprintf(stderr, "%zu%s", files[i], i < files.size() - 1 ? ", " : "");
-					}
-					fprintf(stderr, "\n");
-				}
-				fprintf(stderr, "[READ_FASTX] ========================\n\n");
 			}
 		}
 	};

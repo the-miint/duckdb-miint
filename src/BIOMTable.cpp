@@ -10,7 +10,7 @@
 namespace miint {
 
 BIOMTable::BIOMTable()
-    : coo_values({}), feature_ids_ordered({}), sample_ids_ordered({}), coo_feature_indices({}), coo_sample_indices({}) {
+    : coo_feature_indices({}), coo_sample_indices({}), coo_values({}), feature_ids_ordered({}), sample_ids_ordered({}) {
 }
 
 BIOMTable::BIOMTable(hid_t ds_indices, hid_t ds_indptr, hid_t ds_data, hid_t ds_obs_ids, hid_t ds_samp_ids) {
@@ -107,7 +107,7 @@ void BIOMTable::InitCOOFromCSC(const std::vector<int32_t> &indptr, const std::ve
 	coo_feature_indices.reserve(nnz);
 	coo_sample_indices.reserve(nnz);
 
-	for (auto col = 0; col < n_cols; col++) {
+	for (size_t col = 0; col < n_cols; col++) {
 		auto start = indptr[col];
 		auto end = indptr[col + 1];
 

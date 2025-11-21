@@ -1,0 +1,197 @@
+# name: test/sql/read_gff.test
+# description: Test read_gff function for reading GFF3 annotation files
+# group: [sql]
+
+require miint
+
+# Test basic GFF reading
+query TTTIIRRTT
+SELECT * FROM read_gff('data/gff/test.gff') ORDER BY seqid, position, type, stop_position;
+----
+chr1	NCBI	exon	100	200	NULL	+	NULL	{ID=exon1, Parent=transcript1}
+chr1	NCBI	gene	100	500	NULL	+	NULL	{ID=gene1, Name=TEST1, biotype=protein_coding}
+chr1	NCBI	mRNA	100	500	NULL	+	NULL	{ID=transcript1, Parent=gene1, Name=TEST1-RA}
+chr1	NCBI	CDS	150	200	NULL	+	0	{ID=cds1, Parent=transcript1}
+chr1	NCBI	CDS	300	450	NULL	+	2	{ID=cds2, Parent=transcript1}
+chr1	NCBI	exon	300	500	50.5	+	NULL	{ID=exon2, Parent=transcript1}
+chr2	Ensembl	gene	1000	2000	100.0	-	NULL	{ID=gene2, Name=TEST2}
+
+# Test extracting specific columns
+query TTT
+SELECT seqid, type, attributes['ID'] AS feature_id FROM read_gff('data/gff/test.gff') WHERE type = 'gene' ORDER BY seqid;
+----
+chr1	gene	gene1
+chr2	gene	gene2
+
+# Test filtering by feature type
+query I
+SELECT COUNT(*) FROM read_gff('data/gff/test.gff') WHERE type = 'exon';
+----
+2
+
+# Test filtering by feature type CDS
+query I
+SELECT COUNT(*) FROM read_gff('data/gff/test.gff') WHERE type = 'CDS';
+----
+2
+
+# Test strand filtering
+query TT
+SELECT type, attributes['ID'] FROM read_gff('data/gff/test.gff') WHERE strand = '+' ORDER BY type, attributes['ID'];
+----
+CDS	cds1
+CDS	cds2
+exon	exon1
+exon	exon2
+gene	gene1
+mRNA	transcript1
+
+# Test strand filtering for minus strand
+query TT
+SELECT type, attributes['ID'] FROM read_gff('data/gff/test.gff') WHERE strand = '-' ORDER BY type;
+----
+gene	gene2
+
+# Test NULL score handling
+query I
+SELECT COUNT(*) FROM read_gff('data/gff/test.gff') WHERE score IS NULL;
+----
+5
+
+# Test non-NULL score handling
+query I
+SELECT COUNT(*) FROM read_gff('data/gff/test.gff') WHERE score IS NOT NULL;
+----
+2
+
+# Test score values
+query R
+SELECT score FROM read_gff('data/gff/test.gff') WHERE score IS NOT NULL ORDER BY score;
+----
+50.5
+100.0
+
+# Test phase handling for CDS features
+query II
+SELECT position, phase FROM read_gff('data/gff/test.gff') WHERE type = 'CDS' ORDER BY position;
+----
+150	0
+300	2
+
+# Test NULL phase handling
+query I
+SELECT COUNT(*) FROM read_gff('data/gff/test.gff') WHERE phase IS NULL;
+----
+5
+
+# Test attribute parsing - accessing nested values
+query TT
+SELECT attributes['ID'], attributes['Parent'] FROM read_gff('data/gff/test.gff') WHERE type = 'exon' ORDER BY attributes['ID'];
+----
+exon1	transcript1
+exon2	transcript1
+
+# Test attribute parsing - Name field
+query TT
+SELECT attributes['ID'], attributes['Name'] FROM read_gff('data/gff/test.gff') WHERE type = 'gene' ORDER BY attributes['ID'];
+----
+gene1	TEST1
+gene2	TEST2
+
+# Test feature length calculation
+query TII
+SELECT type, MIN(stop_position - position + 1) AS min_len, MAX(stop_position - position + 1) AS max_len
+FROM read_gff('data/gff/test.gff')
+GROUP BY type
+ORDER BY type;
+----
+CDS	51	151
+exon	101	201
+gene	401	1001
+mRNA	401	401
+
+# Test counting features by type
+query TI
+SELECT type, COUNT(*) AS count FROM read_gff('data/gff/test.gff') GROUP BY type ORDER BY count DESC, type;
+----
+CDS	2
+exon	2
+gene	2
+mRNA	1
+
+# Test joining parent-child relationships
+query TTT
+SELECT
+    g.attributes['ID'] AS gene_id,
+    g.attributes['Name'] AS gene_name,
+    t.attributes['ID'] AS transcript_id
+FROM read_gff('data/gff/test.gff') g
+JOIN read_gff('data/gff/test.gff') t ON t.attributes['Parent'] = g.attributes['ID']
+WHERE g.type = 'gene' AND t.type = 'mRNA'
+ORDER BY gene_id;
+----
+gene1	TEST1	transcript1
+
+# Test empty GFF file (only comments)
+query I
+SELECT COUNT(*) FROM read_gff('data/gff/empty.gff');
+----
+0
+
+# Test seqid filtering
+query TII
+SELECT type, position, stop_position FROM read_gff('data/gff/test.gff') WHERE seqid = 'chr1' AND type = 'gene';
+----
+gene	100	500
+
+# Test range overlap query
+query TTII
+SELECT seqid, type, position, stop_position
+FROM read_gff('data/gff/test.gff')
+WHERE seqid = 'chr1' AND position <= 200 AND stop_position >= 100
+ORDER BY position, type;
+----
+chr1	exon	100	200
+chr1	gene	100	500
+chr1	mRNA	100	500
+chr1	CDS	150	200
+
+# Test source field
+query T
+SELECT DISTINCT source FROM read_gff('data/gff/test.gff') ORDER BY source;
+----
+Ensembl
+NCBI
+
+# Test attribute key existence
+query I
+SELECT COUNT(*) FROM read_gff('data/gff/test.gff') WHERE attributes['biotype'] IS NOT NULL;
+----
+1
+
+# Test complex attribute filtering
+query TT
+SELECT type, attributes['ID']
+FROM read_gff('data/gff/test.gff')
+WHERE type = 'gene' AND attributes['biotype'] = 'protein_coding';
+----
+gene	gene1
+
+# Test that ## comment lines are filtered out (should not appear in results)
+# The test.gff file has ##gff-version 3 and ##sequence-region lines which should not appear
+statement ok
+CREATE TABLE gff_data AS SELECT * FROM read_gff('data/gff/test.gff');
+
+query I
+SELECT COUNT(*) FROM gff_data WHERE seqid LIKE '##%';
+----
+0
+
+statement ok
+DROP TABLE gff_data;
+
+# Test error: nonexistent file
+statement error
+SELECT * FROM read_gff('data/gff/nonexistent.gff');
+----
+data/gff/nonexistent.gff

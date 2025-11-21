@@ -28,9 +28,12 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 	}
 
 	// Detect stdin usage
+	// Note: We detect common stdin paths, but cannot catch all cases (e.g., symlinks to stdin,
+	// /proc/self/fd/0 on Linux). If parallel threads attempt to read from an undetected stdin,
+	// the behavior is undefined and may result in data corruption or crashes.
 	bool uses_stdin = false;
 	auto is_stdin = [](const std::string &path) {
-		return path == "-" || path == "/dev/stdin";
+		return path == "-" || path == "/dev/stdin" || path == "/dev/fd/0" || path == "/proc/self/fd/0";
 	};
 
 	if (sequence1_paths.size() == 1 && is_stdin(sequence1_paths[0])) {
@@ -119,7 +122,7 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 	for (auto &type : data->types) {
 		return_types.emplace_back(type);
 	}
-	return std::move(data);
+	return data;
 }
 
 unique_ptr<GlobalTableFunctionState> ReadFastxTableFunction::InitGlobal(ClientContext &context,
@@ -127,7 +130,7 @@ unique_ptr<GlobalTableFunctionState> ReadFastxTableFunction::InitGlobal(ClientCo
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = duckdb::make_uniq<GlobalState>(data.sequence1_paths, data.sequence2_paths, data.uses_stdin);
 
-	return std::move(gstate);
+	return gstate;
 }
 
 unique_ptr<LocalTableFunctionState> ReadFastxTableFunction::InitLocal(ExecutionContext &context,
@@ -187,6 +190,8 @@ void ReadFastxTableFunction::SetResultVectorListUInt8(Vector &result_vector, con
                                                       const std::vector<miint::SequenceRecord> &records,
                                                       uint8_t qual_offset) {
 	// Check if this is FASTA (quality scores are empty)
+	// Note: All records within a single file are guaranteed to be either FASTA or FASTQ, never mixed.
+	// This is validated in SequenceReader constructor, so checking records[0] is safe.
 	bool is_fasta = records[0].qual1.as_string().empty();
 	bool is_qual2 = (field == miint::SequenceRecordField::QUAL2);
 
@@ -210,7 +215,6 @@ void ReadFastxTableFunction::SetResultVectorListUInt8(Vector &result_vector, con
 
 	const auto output_count = records.size();
 	idx_t value_offset = 0;
-	idx_t row_offset = 0;
 	for (idx_t row_offset = 0; row_offset < output_count; row_offset++) {
 		const auto qual_data = records[row_offset].GetQual(field).as_vec(qual_offset);
 		list_entries[row_offset].offset = value_offset;
@@ -244,10 +248,6 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 	std::vector<miint::SequenceRecord> records;
 	std::string current_filepath;
 	uint64_t start_sequence_index;
-	auto thread_id = std::this_thread::get_id();
-
-	// Track Execute() calls
-	global_state.total_execute_calls.fetch_add(1);
 
 	// Loop until we get data or run out of files
 	while (true) {
@@ -271,18 +271,6 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 			local_state.current_file_idx = global_state.next_file_idx;
 			global_state.next_file_idx++;
 			local_state.has_file = true;
-
-			// Track ALL file claims
-			if (global_state.diagnostics_enabled) {
-				if (global_state.thread_files_claimed.find(thread_id) == global_state.thread_files_claimed.end()) {
-					global_state.thread_files_claimed[thread_id] = std::vector<size_t>();
-					global_state.thread_chunk_count[thread_id] = 0;
-				}
-				global_state.thread_files_claimed[thread_id].push_back(local_state.current_file_idx);
-				fprintf(stderr, "[READ_FASTX] Thread %zu claimed file %zu (%s)\n",
-				        std::hash<std::thread::id>{}(thread_id), local_state.current_file_idx,
-				        global_state.sequence1_filepaths[local_state.current_file_idx].c_str());
-			}
 		}
 		// Lock released - now do I/O without blocking other threads
 		// This thread has exclusive access to its claimed file
@@ -303,14 +291,6 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 
 	// Atomically claim sequence indices for this chunk
 	start_sequence_index = global_state.sequence_index_counter.fetch_add(records.size());
-
-	// Track rows and chunks
-	if (global_state.diagnostics_enabled) {
-		global_state.total_rows_read.fetch_add(records.size());
-		lock_guard<mutex> read_lock(global_state.lock);
-		global_state.thread_chunk_count[thread_id]++;
-		global_state.files_processed.insert(local_state.current_file_idx);
-	}
 
 	// Set sequence_index column (first column, index 0)
 	auto &sequence_index_vector = output.data[0];

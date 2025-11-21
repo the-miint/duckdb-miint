@@ -30,8 +30,8 @@ public:
 	// method of construction
 	SequenceRecord(const std::string &id, const std::string &cmt, const std::string &r1, const std::string &q1,
 	               std::optional<std::string> r2 = std::nullopt, std::optional<std::string> q2 = std::nullopt) noexcept
-	    : read_id(id), comment(cmt), read1(r1), qual1(q1), is_paired(r2.has_value() && q2.has_value()),
-	      read2(std::move(r2)), qual2(std::move(q2)) {
+	    : read_id(id), comment(cmt), read1(r1), read2(std::move(r2)), qual1(q1), qual2(std::move(q2)),
+	      is_paired(r2.has_value() && q2.has_value()) {
 	}
 
 	// qual as QualScore
@@ -39,19 +39,18 @@ public:
 	// method of construction
 	SequenceRecord(const std::string &id, const std::string &cmt, const std::string &r1, const QualScore &q1,
 	               std::optional<std::string> r2 = std::nullopt, std::optional<QualScore> q2 = std::nullopt) noexcept
-	    : read_id(id), comment(cmt), read1(r1), qual1(q1), is_paired(r2.has_value() && q2.has_value()),
-	      read2(std::move(r2)), qual2(std::move(q2)) {
+	    : read_id(id), comment(cmt), read1(r1), read2(std::move(r2)), qual1(q1), qual2(std::move(q2)),
+	      is_paired(r2.has_value() && q2.has_value()) {
 	}
 
 	explicit SequenceRecord(klibpp::KSeq &r1) noexcept
-	    : comment(r1.comment), read1(r1.seq), qual1(r1.qual), is_paired(false) {
-		read_id = base_read_id(r1.name);
+	    : read_id(base_read_id(r1.name)), comment(r1.comment), read1(r1.seq), qual1(r1.qual), is_paired(false) {
 	}
 
 	SequenceRecord(klibpp::KSeq &r1, klibpp::KSeq &r2)
-	    : comment(r1.comment), read1(r1.seq), qual1(r1.qual), read2(r2.seq), qual2(r2.qual), is_paired(true) {
+	    : read_id(base_read_id(r1.name)), comment(r1.comment), read1(r1.seq), read2(r2.seq), qual1(r1.qual),
+	      qual2(r2.qual), is_paired(true) {
 		check_ids(r1, r2);
-		read_id = base_read_id(r1.name);
 	}
 
 	const std::string &GetString(const SequenceRecordField field) const {
@@ -92,7 +91,7 @@ public:
 		}
 	}
 
-	const size_t GetLength(const SequenceRecordField field) const {
+	size_t GetLength(const SequenceRecordField field) const {
 		switch (field) {
 		case SequenceRecordField::SEQUENCE1:
 		case SequenceRecordField::QUAL1:
@@ -104,11 +103,11 @@ public:
 			throw std::invalid_argument("Invalid field");
 		}
 	}
-	const size_t length_read1() const {
+	size_t length_read1() const {
 		return read1.length();
 	}
 
-	const size_t length_read2() const {
+	size_t length_read2() const {
 		if (is_paired) {
 			return read2.value().length();
 		}
