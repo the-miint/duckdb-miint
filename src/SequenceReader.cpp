@@ -1,6 +1,38 @@
 #include <SequenceReader.hpp>
 
 namespace miint {
+// Helper function to extract base read ID by stripping /[1-9] suffix and comments
+static std::string base_read_id(const std::string &id) {
+	// First, strip comments (everything after first space)
+	size_t space_pos = id.find(' ');
+	std::string base = (space_pos == std::string::npos) ? id : id.substr(0, space_pos);
+
+	// Check if it ends with /[1-9] (single digit 1-9 only)
+	// Need at least 3 chars for pattern "x/1"
+	if (base.length() >= 3) {
+		size_t len = base.length();
+		char last_char = base[len - 1];
+		char second_last = base[len - 2];
+
+		// If ends with /[1-9], strip that suffix
+		if (second_last == '/' && last_char >= '1' && last_char <= '9') {
+			base = base.substr(0, len - 2);
+		}
+	}
+
+	return base;
+}
+
+// Helper function to check if two read IDs match after normalization
+static void check_ids(const std::string &name1, const std::string &name2) {
+	std::string base_id1 = base_read_id(name1);
+	std::string base_id2 = base_read_id(name2);
+
+	if (base_id1 != base_id2) {
+		throw std::runtime_error("Mismatched read IDs: " + name1 + " vs " + name2);
+	}
+}
+
 SequenceReader::SequenceReader(const std::string &path1, const std::optional<std::string> &path2)
     : first_read_(true) {
 	sequence1_reader_ = std::make_unique<SeqStreamIn>(path1.c_str());
@@ -40,37 +72,41 @@ SequenceReader::SequenceReader(const std::string &path1, const std::optional<std
 	}
 }
 
-std::vector<SequenceRecord> SequenceReader::read_se(const int n) {
-	std::vector<SequenceRecord> out;
-	out.reserve(n);
+SequenceRecordBatch SequenceReader::read_se(const int n) {
+	SequenceRecordBatch batch(false);
+	batch.reserve(n);
+
+	std::vector<klibpp::KSeq> reads;
 
 	// On first read, return buffered records first
 	if (first_read_) {
 		first_read_ = false;
-		for (auto &rec : buffered_read1_) {
-			out.emplace_back(rec);
-		}
-		buffered_read1_.clear();
+		reads = std::move(buffered_read1_);
 
 		// If we got fewer than n records from buffer, read more
-		int remaining = n - out.size();
+		int remaining = n - reads.size();
 		if (remaining > 0) {
-			for (auto rec : sequence1_reader_->read(remaining)) {
-				out.emplace_back(rec);
-			}
+			auto more = sequence1_reader_->read(remaining);
+			reads.insert(reads.end(), more.begin(), more.end());
 		}
 	} else {
-		for (auto rec : sequence1_reader_->read(n)) {
-			out.emplace_back(rec);
-		}
+		reads = sequence1_reader_->read(n);
 	}
 
-	return out;
+	// Populate batch directly from KSeq records
+	for (auto &rec : reads) {
+		batch.read_ids.emplace_back(base_read_id(rec.name));
+		batch.comments.emplace_back(rec.comment);
+		batch.sequences1.emplace_back(rec.seq);
+		batch.quals1.emplace_back(rec.qual);
+	}
+
+	return batch;
 }
 
-std::vector<SequenceRecord> SequenceReader::read_pe(const int n) {
-	std::vector<SequenceRecord> out;
-	out.reserve(n);
+SequenceRecordBatch SequenceReader::read_pe(const int n) {
+	SequenceRecordBatch batch(true);
+	batch.reserve(n);
 
 	// Read sequence1 and sequence2 sequentially
 	// DuckDB's parallel execution (MaxThreads) provides better parallelism
@@ -101,16 +137,26 @@ std::vector<SequenceRecord> SequenceReader::read_pe(const int n) {
 		throw std::runtime_error("Mismatched number of records: missing mate for " + id1);
 	}
 
+	// Populate batch directly from KSeq records
 	for (size_t i = 0; i < read1s.size(); i++) {
 		auto &rec1 = read1s[i];
 		auto &rec2 = read2s[i];
-		out.emplace_back(rec1, rec2);
+
+		// Validate that read IDs match
+		check_ids(rec1.name, rec2.name);
+
+		batch.read_ids.emplace_back(base_read_id(rec1.name));
+		batch.comments.emplace_back(rec1.comment);
+		batch.sequences1.emplace_back(rec1.seq);
+		batch.sequences2.emplace_back(rec2.seq);
+		batch.quals1.emplace_back(rec1.qual);
+		batch.quals2.emplace_back(rec2.qual);
 	}
 
-	return out;
+	return batch;
 }
 
-std::vector<SequenceRecord> SequenceReader::read(const int n) {
+SequenceRecordBatch SequenceReader::read(const int n) {
 	if (paired_) {
 		return read_pe(n);
 	} else {

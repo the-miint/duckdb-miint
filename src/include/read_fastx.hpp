@@ -6,9 +6,11 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "SequenceRecord.hpp"
+#include "QualScore.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include <atomic>
 #include <optional>
+#include <thread>
 #include <vector>
 
 namespace duckdb {
@@ -49,7 +51,6 @@ public:
 		std::vector<std::string> sequence1_filepaths;
 		std::vector<std::string> sequence2_filepaths;
 		size_t next_file_idx; // Next file available for claiming
-		bool finished;
 		bool uses_stdin;
 		std::atomic<uint64_t> sequence_index_counter; // Atomic for thread-safe increments
 
@@ -60,13 +61,12 @@ public:
 			if (uses_stdin) {
 				return 1;
 			}
-			// Allow up to min(files, 64) threads for per-file parallelism
-			return std::min<idx_t>(readers.size(), 64);
+			return std::min<idx_t>(readers.size(), std::thread::hardware_concurrency());
 		};
 
 		GlobalState(const std::vector<std::string> &sequence1_paths,
 		            const std::optional<std::vector<std::string>> &sequence2_paths, bool stdin_used)
-		    : next_file_idx(0), finished(false), uses_stdin(stdin_used), sequence_index_counter(1) {
+		    : next_file_idx(0), uses_stdin(stdin_used), sequence_index_counter(1) {
 			sequence1_filepaths = sequence1_paths;
 			if (sequence2_paths.has_value()) {
 				sequence2_filepaths = sequence2_paths.value();
@@ -97,20 +97,18 @@ public:
 	static unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFunctionInitInput &input);
 
 	static unique_ptr<LocalTableFunctionState> InitLocal(ExecutionContext &context, TableFunctionInitInput &input,
-	                                                      GlobalTableFunctionState *global_state);
+	                                                     GlobalTableFunctionState *global_state);
 
 	static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 
-	static void SetResultVector(Vector &result_vector, const miint::SequenceRecordField &field,
-	                            const std::vector<miint::SequenceRecord> &records, uint8_t qual_offset);
 	static void SetResultVectorNull(Vector &result_vector);
-	static void SetResultVectorString(Vector &result_vector, const miint::SequenceRecordField &field,
-	                                  const std::vector<miint::SequenceRecord> &records);
-	static void SetResultVectorStringNullable(Vector &result_vector, const miint::SequenceRecordField &field,
-	                                          const std::vector<miint::SequenceRecord> &records);
-	static void SetResultVectorListUInt8(Vector &result_vector, const miint::SequenceRecordField &field,
-	                                     const std::vector<miint::SequenceRecord> &records, uint8_t qual_offset);
-	static void SetResultVectorFilepath(Vector &result_vector, const std::string &filepath, size_t num_records);
+	static void SetResultVectorString(Vector &result_vector, const std::vector<std::string> &values);
+	static void SetResultVectorStringNullable(Vector &result_vector, const std::vector<std::string> &values);
+	static void SetResultVectorListUInt8(Vector &result_vector, const std::vector<miint::QualScore> &values,
+	                                     uint8_t qual_offset);
+	static void SetResultVectorListUInt8Nullable(Vector &result_vector, const std::vector<miint::QualScore> &values,
+	                                             uint8_t qual_offset, bool is_paired);
+	static void SetResultVectorFilepath(Vector &result_vector, const std::string &filepath);
 
 	static TableFunction GetFunction();
 	static void Register(ExtensionLoader &loader);

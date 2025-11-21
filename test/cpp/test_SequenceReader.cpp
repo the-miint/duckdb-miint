@@ -52,8 +52,8 @@ TEST_CASE("SequenceReader single-end", "[SequenceReader]") {
 	auto batch = reader.read(5);
 
 	REQUIRE((batch.size() == 2));
-	REQUIRE((batch[0].read_id == "r1"));
-	REQUIRE((batch[1].read_id == "r2"));
+	REQUIRE((batch.read_ids[0] == "r1"));
+	REQUIRE((batch.read_ids[1] == "r2"));
 }
 
 TEST_CASE("SequenceReader single-end / bug", "[SequenceReader]") {
@@ -66,8 +66,8 @@ TEST_CASE("SequenceReader single-end / bug", "[SequenceReader]") {
 	auto batch = reader.read(5);
 
 	REQUIRE((batch.size() == 2));
-	REQUIRE((batch[0].read_id == "r1/foo/bar"));
-	REQUIRE((batch[1].read_id == "r2/123/456"));
+	REQUIRE((batch.read_ids[0] == "r1/foo/bar"));
+	REQUIRE((batch.read_ids[1] == "r2/123/456"));
 }
 
 TEST_CASE("SequenceReader paired-end valid", "[SequenceReader]") {
@@ -83,9 +83,9 @@ TEST_CASE("SequenceReader paired-end valid", "[SequenceReader]") {
 	miint::SequenceReader reader(r1, r2);
 	auto batch = reader.read(2);
 	REQUIRE((batch.size() == 2));
-	REQUIRE((batch[0].read_id == "x"));
-	REQUIRE((batch[0].read2.value() == "AAAA"));
-	REQUIRE((batch[1].qual2->as_string() == "EEEE"));
+	REQUIRE((batch.read_ids[0] == "x"));
+	REQUIRE((batch.sequences2[0] == "AAAA"));
+	REQUIRE((batch.quals2[1].as_string() == "EEEE"));
 }
 
 TEST_CASE("SequenceReader mismatched IDs", "[SequenceReader]") {
@@ -150,13 +150,13 @@ TEST_CASE("SequenceReader FASTA format single-end", "[SequenceReader][FASTA]") {
 	auto batch = reader.read(5);
 
 	REQUIRE((batch.size() == 2));
-	REQUIRE((batch[0].read_id == "seq1"));
-	REQUIRE((batch[0].comment == "comment1"));
-	REQUIRE((batch[0].read1 == "ATGC"));
-	REQUIRE((batch[0].qual1.as_string().empty()));
-	REQUIRE((batch[1].read_id == "seq2"));
-	REQUIRE((batch[1].comment == ""));
-	REQUIRE((batch[1].qual1.as_string().empty()));
+	REQUIRE((batch.read_ids[0] == "seq1"));
+	REQUIRE((batch.comments[0] == "comment1"));
+	REQUIRE((batch.sequences1[0] == "ATGC"));
+	REQUIRE((batch.quals1[0].as_string().empty()));
+	REQUIRE((batch.read_ids[1] == "seq2"));
+	REQUIRE((batch.comments[1] == ""));
+	REQUIRE((batch.quals1[1].as_string().empty()));
 }
 
 TEST_CASE("SequenceReader FASTA format paired-end", "[SequenceReader][FASTA]") {
@@ -171,11 +171,11 @@ TEST_CASE("SequenceReader FASTA format paired-end", "[SequenceReader][FASTA]") {
 	auto batch = reader.read(5);
 
 	REQUIRE((batch.size() == 2));
-	REQUIRE((batch[0].read_id == "read1"));
-	REQUIRE((batch[0].read1 == "ATGC"));
-	REQUIRE((batch[0].read2.value() == "TGCA"));
-	REQUIRE((batch[0].qual1.as_string().empty()));
-	REQUIRE((batch[0].qual2->as_string().empty()));
+	REQUIRE((batch.read_ids[0] == "read1"));
+	REQUIRE((batch.sequences1[0] == "ATGC"));
+	REQUIRE((batch.sequences2[0] == "TGCA"));
+	REQUIRE((batch.quals1[0].as_string().empty()));
+	REQUIRE((batch.quals2[0].as_string().empty()));
 }
 
 TEST_CASE("SequenceReader mixed FASTA/FASTQ paired-end throws", "[SequenceReader][FASTA][FASTQ][error]") {
@@ -204,8 +204,8 @@ TEST_CASE("SequenceReader gzipped file", "[SequenceReader][compression]") {
 	auto batch = reader.read(5);
 
 	REQUIRE((batch.size() == 2));
-	REQUIRE((batch[0].read_id == "foo1"));
-	REQUIRE((batch[0].read1 == "ATGC"));
+	REQUIRE((batch.read_ids[0] == "foo1"));
+	REQUIRE((batch.sequences1[0] == "ATGC"));
 }
 
 TEST_CASE("SequenceReader multiple sequential exhaustive reads", "[SequenceReader]") {
@@ -219,13 +219,13 @@ TEST_CASE("SequenceReader multiple sequential exhaustive reads", "[SequenceReade
 
 	auto batch1 = reader.read(2);
 	REQUIRE((batch1.size() == 2));
-	REQUIRE((batch1[0].read_id == "r1"));
-	REQUIRE((batch1[1].read_id == "r2"));
+	REQUIRE((batch1.read_ids[0] == "r1"));
+	REQUIRE((batch1.read_ids[1] == "r2"));
 
 	auto batch2 = reader.read(2);
 	REQUIRE((batch2.size() == 2));
-	REQUIRE((batch2[0].read_id == "r3"));
-	REQUIRE((batch2[1].read_id == "r4"));
+	REQUIRE((batch2.read_ids[0] == "r3"));
+	REQUIRE((batch2.read_ids[1] == "r4"));
 
 	auto batch3 = reader.read(2);
 	REQUIRE((batch3.size() == 0));
@@ -245,8 +245,8 @@ TEST_CASE("SequenceReader large batch size", "[SequenceReader]") {
 	auto batch = reader.read(10000);
 
 	REQUIRE((batch.size() == 10000));
-	REQUIRE((batch[0].read_id == "read0"));
-	REQUIRE((batch[9999].read_id == "read9999"));
+	REQUIRE((batch.read_ids[0] == "read0"));
+	REQUIRE((batch.read_ids[9999] == "read9999"));
 }
 
 TEST_CASE("SequenceReader partial read at EOF", "[SequenceReader]") {

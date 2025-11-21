@@ -139,71 +139,49 @@ unique_ptr<LocalTableFunctionState> ReadFastxTableFunction::InitLocal(ExecutionC
 	return duckdb::make_uniq<LocalState>();
 }
 
-void ReadFastxTableFunction::SetResultVector(Vector &result_vector, const miint::SequenceRecordField &field,
-                                             const std::vector<miint::SequenceRecord> &records, uint8_t qual_offset) {
-	auto is_paired = records[0].is_paired;
-	if (!is_paired && (field == miint::SequenceRecordField::SEQUENCE2 || field == miint::SequenceRecordField::QUAL2)) {
-		SetResultVectorNull(result_vector);
-	} else if (field == miint::SequenceRecordField::READ_ID || field == miint::SequenceRecordField::SEQUENCE1 ||
-	           field == miint::SequenceRecordField::SEQUENCE2) {
-		SetResultVectorString(result_vector, field, records);
-	} else if (field == miint::SequenceRecordField::COMMENT) {
-		SetResultVectorStringNullable(result_vector, field, records);
-	} else if (field == miint::SequenceRecordField::QUAL1 || field == miint::SequenceRecordField::QUAL2) {
-		SetResultVectorListUInt8(result_vector, field, records, qual_offset);
-	} else {
-		throw NotImplementedException("field not supported");
-	}
-}
-
 void ReadFastxTableFunction::SetResultVectorNull(Vector &result_vector) {
 	result_vector.SetVectorType(VectorType::CONSTANT_VECTOR);
 	result_vector.SetValue(0, Value());
 }
 
-void ReadFastxTableFunction::SetResultVectorString(Vector &result_vector, const miint::SequenceRecordField &field,
-                                                   const std::vector<miint::SequenceRecord> &records) {
+void ReadFastxTableFunction::SetResultVectorString(Vector &result_vector, const std::vector<std::string> &values) {
 	auto result_data = FlatVector::GetData<string_t>(result_vector);
-	for (idx_t j = 0; j < records.size(); j++) {
-		result_data[j] = StringVector::AddString(result_vector, records[j].GetString(field));
+	for (idx_t j = 0; j < values.size(); j++) {
+		result_data[j] = StringVector::AddString(result_vector, values[j]);
 	}
 }
 
 void ReadFastxTableFunction::SetResultVectorStringNullable(Vector &result_vector,
-                                                           const miint::SequenceRecordField &field,
-                                                           const std::vector<miint::SequenceRecord> &records) {
+                                                           const std::vector<std::string> &values) {
 	auto result_data = FlatVector::GetData<string_t>(result_vector);
 	auto &validity = FlatVector::Validity(result_vector);
-	validity.SetAllInvalid(records.size());
+	validity.SetAllInvalid(values.size());
 
-	for (idx_t j = 0; j < records.size(); j++) {
-		const auto &value = records[j].GetString(field);
-		result_data[j] = StringVector::AddString(result_vector, value);
+	for (idx_t j = 0; j < values.size(); j++) {
+		result_data[j] = StringVector::AddString(result_vector, values[j]);
 
-		if (!value.empty()) {
+		if (!values[j].empty()) {
 			validity.SetValid(j);
 		}
 	}
 }
 
-void ReadFastxTableFunction::SetResultVectorListUInt8(Vector &result_vector, const miint::SequenceRecordField &field,
-                                                      const std::vector<miint::SequenceRecord> &records,
+void ReadFastxTableFunction::SetResultVectorListUInt8(Vector &result_vector, const std::vector<miint::QualScore> &values,
                                                       uint8_t qual_offset) {
 	// Check if this is FASTA (quality scores are empty)
 	// Note: All records within a single file are guaranteed to be either FASTA or FASTQ, never mixed.
-	// This is validated in SequenceReader constructor, so checking records[0] is safe.
-	bool is_fasta = records[0].qual1.as_string().empty();
-	bool is_qual2 = (field == miint::SequenceRecordField::QUAL2);
+	// This is validated in SequenceReader constructor, so checking values[0] is safe.
+	bool is_fasta = values[0].as_string().empty();
 
-	if (is_fasta || (is_qual2 && !records[0].is_paired)) {
+	if (is_fasta) {
 		SetResultVectorNull(result_vector);
 		return;
 	}
 
 	// compute total number of elements
 	idx_t total_child_elements = 0;
-	for (auto &rec : records) {
-		total_child_elements += rec.GetLength(field);
+	for (auto &qual : values) {
+		total_child_elements += qual.as_string().length();
 	}
 
 	ListVector::Reserve(result_vector, total_child_elements);
@@ -213,10 +191,10 @@ void ReadFastxTableFunction::SetResultVectorListUInt8(Vector &result_vector, con
 	auto child_data = FlatVector::GetData<uint8_t>(child_vector);
 	auto list_entries = FlatVector::GetData<list_entry_t>(result_vector);
 
-	const auto output_count = records.size();
+	const auto output_count = values.size();
 	idx_t value_offset = 0;
 	for (idx_t row_offset = 0; row_offset < output_count; row_offset++) {
-		const auto qual_data = records[row_offset].GetQual(field).as_vec(qual_offset);
+		const auto qual_data = values[row_offset].as_vec(qual_offset);
 		list_entries[row_offset].offset = value_offset;
 		list_entries[row_offset].length = qual_data.size();
 
@@ -233,8 +211,20 @@ void ReadFastxTableFunction::SetResultVectorListUInt8(Vector &result_vector, con
 	child_validity.SetAllValid(total_child_elements);
 }
 
-void ReadFastxTableFunction::SetResultVectorFilepath(Vector &result_vector, const std::string &filepath,
-                                                     size_t num_records) {
+void ReadFastxTableFunction::SetResultVectorListUInt8Nullable(Vector &result_vector,
+                                                              const std::vector<miint::QualScore> &values,
+                                                              uint8_t qual_offset, bool is_paired) {
+	// Check if this is FASTA or unpaired (quality scores are empty or not relevant)
+	if (values.empty() || values[0].as_string().empty() || !is_paired) {
+		SetResultVectorNull(result_vector);
+		return;
+	}
+
+	// For paired FASTQ, use same logic as QUAL1
+	SetResultVectorListUInt8(result_vector, values, qual_offset);
+}
+
+void ReadFastxTableFunction::SetResultVectorFilepath(Vector &result_vector, const std::string &filepath) {
 	result_vector.SetVectorType(VectorType::CONSTANT_VECTOR);
 	auto result_data = ConstantVector::GetData<string_t>(result_vector);
 	*result_data = StringVector::AddString(result_vector, filepath);
@@ -245,7 +235,7 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 	auto &global_state = data_p.global_state->Cast<GlobalState>();
 	auto &local_state = data_p.local_state->Cast<LocalState>();
 
-	std::vector<miint::SequenceRecord> records;
+	miint::SequenceRecordBatch batch;
 	std::string current_filepath;
 	uint64_t start_sequence_index;
 
@@ -255,14 +245,8 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 		if (!local_state.has_file) {
 			lock_guard<mutex> read_lock(global_state.lock);
 
-			if (global_state.finished) {
-				output.SetCardinality(0);
-				return;
-			}
-
 			// Check if all files exhausted
 			if (global_state.next_file_idx >= global_state.readers.size()) {
-				global_state.finished = true;
 				output.SetCardinality(0);
 				return;
 			}
@@ -276,11 +260,11 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 		// This thread has exclusive access to its claimed file
 
 		// Read from claimed file (no lock needed)
-		records = global_state.readers[local_state.current_file_idx]->read(STANDARD_VECTOR_SIZE);
+		batch = global_state.readers[local_state.current_file_idx]->read(STANDARD_VECTOR_SIZE);
 		current_filepath = global_state.sequence1_filepaths[local_state.current_file_idx];
 
 		// If this file is exhausted, release it and try to claim another
-		if (records.empty()) {
+		if (batch.empty()) {
 			local_state.has_file = false;
 			continue; // Loop to claim next file
 		}
@@ -290,28 +274,39 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 	}
 
 	// Atomically claim sequence indices for this chunk
-	start_sequence_index = global_state.sequence_index_counter.fetch_add(records.size());
+	start_sequence_index = global_state.sequence_index_counter.fetch_add(batch.size());
 
 	// Set sequence_index column (first column, index 0)
 	auto &sequence_index_vector = output.data[0];
 	auto sequence_index_data = FlatVector::GetData<int64_t>(sequence_index_vector);
-	for (idx_t j = 0; j < records.size(); j++) {
+	for (idx_t j = 0; j < batch.size(); j++) {
 		sequence_index_data[j] = static_cast<int64_t>(start_sequence_index + j);
 	}
 
 	// Set result vectors for sequence fields (now starting at index 1)
-	for (idx_t i = 0; i < bind_data.fields.size(); i++) {
-		auto &result_vector = output.data[i + 1];
-		auto &field = bind_data.fields[i];
-		SetResultVector(result_vector, field, records, bind_data.qual_offset);
+	size_t field_idx = 1;
+	SetResultVectorString(output.data[field_idx++], batch.read_ids);
+	SetResultVectorStringNullable(output.data[field_idx++], batch.comments);
+	SetResultVectorString(output.data[field_idx++], batch.sequences1);
+
+	// SEQUENCE2 - nullable for unpaired
+	if (!batch.is_paired) {
+		SetResultVectorNull(output.data[field_idx++]);
+	} else {
+		SetResultVectorString(output.data[field_idx++], batch.sequences2);
 	}
+
+	// QUAL1
+	SetResultVectorListUInt8(output.data[field_idx++], batch.quals1, bind_data.qual_offset);
+
+	// QUAL2 - nullable for unpaired or FASTA
+	SetResultVectorListUInt8Nullable(output.data[field_idx++], batch.quals2, bind_data.qual_offset, batch.is_paired);
 
 	if (bind_data.include_filepath) {
-		auto &result_vector = output.data[1 + bind_data.fields.size()];
-		SetResultVectorFilepath(result_vector, current_filepath, records.size());
+		SetResultVectorFilepath(output.data[field_idx++], current_filepath);
 	}
 
-	output.SetCardinality(records.size());
+	output.SetCardinality(batch.size());
 }
 
 TableFunction ReadFastxTableFunction::GetFunction() {

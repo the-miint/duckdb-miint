@@ -1,6 +1,7 @@
 #pragma once
 #include <optional>
 #include <string>
+#include <vector>
 #include "QualScore.hpp"
 #include "kseq++/kseq++.hpp"
 #include <stdexcept>
@@ -14,6 +15,49 @@ public:
 };
 
 enum class SequenceRecordField { READ_ID = 0, COMMENT, SEQUENCE1, SEQUENCE2, QUAL1, QUAL2 };
+
+// SOA (Struct of Arrays) layout for efficient batch processing
+// Stores a batch of sequence records with fields organized by column for better cache locality
+struct SequenceRecordBatch {
+	std::vector<std::string> read_ids;
+	std::vector<std::string> comments;
+	std::vector<std::string> sequences1;
+	std::vector<std::string> sequences2; // Empty for unpaired reads
+	std::vector<QualScore> quals1;
+	std::vector<QualScore> quals2; // Empty for unpaired reads
+	bool is_paired;
+
+	size_t size() const {
+		return read_ids.size();
+	}
+
+	bool empty() const {
+		return read_ids.empty();
+	}
+
+	void reserve(size_t n) {
+		read_ids.reserve(n);
+		comments.reserve(n);
+		sequences1.reserve(n);
+		quals1.reserve(n);
+		if (is_paired) {
+			sequences2.reserve(n);
+			quals2.reserve(n);
+		}
+	}
+
+	void clear() {
+		read_ids.clear();
+		comments.clear();
+		sequences1.clear();
+		sequences2.clear();
+		quals1.clear();
+		quals2.clear();
+	}
+
+	SequenceRecordBatch() : is_paired(false) {}
+	explicit SequenceRecordBatch(bool paired) : is_paired(paired) {}
+};
 
 class SequenceRecord {
 public:

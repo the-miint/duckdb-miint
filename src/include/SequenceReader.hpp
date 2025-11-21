@@ -10,7 +10,7 @@ namespace miint {
 class SequenceReader {
 public:
 	explicit SequenceReader(const std::string &path1, const std::optional<std::string> &path2 = std::nullopt);
-	std::vector<SequenceRecord> read(const int n);
+	SequenceRecordBatch read(const int n);
 
 private:
 	using SeqStreamIn = klibpp::SeqStreamIn;
@@ -23,7 +23,7 @@ private:
 	std::vector<klibpp::KSeq> buffered_read1_;
 	std::vector<klibpp::KSeq> buffered_read2_;
 
-	std::vector<SequenceRecord> read_se(const int n);
-	std::vector<SequenceRecord> read_pe(const int n);
+	SequenceRecordBatch read_se(const int n);
+	SequenceRecordBatch read_pe(const int n);
 };
 }; // namespace miint
