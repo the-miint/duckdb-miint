@@ -92,15 +92,18 @@ SAMReader::SAMReader(const std::string &filename, const std::unordered_map<std::
 	}
 }
 
-std::vector<SAMRecord> SAMReader::read(const int n) const {
-	std::vector<SAMRecord> records;
-	records.reserve(n);
+SAMRecordBatch SAMReader::read(const int n) {
+	SAMRecordBatch batch;
+	batch.reserve(n);
 
 	// Read up to n records from the SAM file
 	for (int i = 0; i < n && sam_read1(fp.get(), hdr.get(), aln.get()) >= 0; ++i) {
-		auto rec = SAMRecord(aln.get(), hdr.get());
-		records.emplace_back(std::move(rec));
+		// Note: We cannot validate that references in headerless files match the expected set
+		// because htslib automatically marks reads with unknown references as unmapped (tid=-1, FLAG 0x4)
+		// making them indistinguishable from genuinely unmapped reads. Users must ensure their
+		// reference_lengths table includes all references present in the data files.
+		sam_utils::parse_record_to_batch(aln.get(), hdr.get(), batch);
 	}
-	return records;
+	return batch;
 }
 }; // namespace miint

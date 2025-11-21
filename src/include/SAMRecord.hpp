@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <string>
 #include <sstream>
+#include <vector>
 #include <htslib-1.22.1/htslib/sam.h>
 
 namespace miint {
@@ -87,9 +88,91 @@ enum class SAMRecordField {
 	TAG_SA
 };
 
-class SAMRecord {
-private:
-	int64_t get_int_tag(const bam1_t *aln, const char *tag, int64_t default_val = -1) {
+// SOA (Struct of Arrays) layout for efficient batch processing
+// Stores a batch of SAM records with fields organized by column for better cache locality
+struct SAMRecordBatch {
+	std::vector<std::string> read_ids;
+	std::vector<uint16_t> flags;
+	std::vector<std::string> references;
+	std::vector<int64_t> positions;
+	std::vector<int64_t> stop_positions;
+	std::vector<uint8_t> mapqs;
+	std::vector<std::string> cigars;
+	std::vector<std::string> mate_references;
+	std::vector<int64_t> mate_positions;
+	std::vector<int64_t> template_lengths;
+	std::vector<int64_t> tag_as_values;
+	std::vector<int64_t> tag_xs_values;
+	std::vector<int64_t> tag_ys_values;
+	std::vector<int64_t> tag_xn_values;
+	std::vector<int64_t> tag_xm_values;
+	std::vector<int64_t> tag_xo_values;
+	std::vector<int64_t> tag_xg_values;
+	std::vector<int64_t> tag_nm_values;
+	std::vector<std::string> tag_yt_values;
+	std::vector<std::string> tag_md_values;
+	std::vector<std::string> tag_sa_values;
+
+	size_t size() const {
+		return read_ids.size();
+	}
+
+	bool empty() const {
+		return read_ids.empty();
+	}
+
+	void reserve(size_t n) {
+		read_ids.reserve(n);
+		flags.reserve(n);
+		references.reserve(n);
+		positions.reserve(n);
+		stop_positions.reserve(n);
+		mapqs.reserve(n);
+		cigars.reserve(n);
+		mate_references.reserve(n);
+		mate_positions.reserve(n);
+		template_lengths.reserve(n);
+		tag_as_values.reserve(n);
+		tag_xs_values.reserve(n);
+		tag_ys_values.reserve(n);
+		tag_xn_values.reserve(n);
+		tag_xm_values.reserve(n);
+		tag_xo_values.reserve(n);
+		tag_xg_values.reserve(n);
+		tag_nm_values.reserve(n);
+		tag_yt_values.reserve(n);
+		tag_md_values.reserve(n);
+		tag_sa_values.reserve(n);
+	}
+
+	void clear() {
+		read_ids.clear();
+		flags.clear();
+		references.clear();
+		positions.clear();
+		stop_positions.clear();
+		mapqs.clear();
+		cigars.clear();
+		mate_references.clear();
+		mate_positions.clear();
+		template_lengths.clear();
+		tag_as_values.clear();
+		tag_xs_values.clear();
+		tag_ys_values.clear();
+		tag_xn_values.clear();
+		tag_xm_values.clear();
+		tag_xo_values.clear();
+		tag_xg_values.clear();
+		tag_nm_values.clear();
+		tag_yt_values.clear();
+		tag_md_values.clear();
+		tag_sa_values.clear();
+	}
+};
+
+// Helper functions for extracting fields from bam1_t and populating batches
+namespace sam_utils {
+	inline int64_t get_int_tag(const bam1_t *aln, const char *tag, int64_t default_val = -1) {
 		uint8_t *aux = bam_aux_get(aln, tag);
 		if (!aux) {
 			return default_val;
@@ -97,8 +180,7 @@ private:
 		return bam_aux2i(aux);
 	}
 
-	// Helper to get string tag value, returns empty string if not found
-	std::string get_string_tag(const bam1_t *aln, const char *tag) {
+	inline std::string get_string_tag(const bam1_t *aln, const char *tag) {
 		const uint8_t *aux = bam_aux_get(aln, tag);
 		if (!aux) {
 			return "";
@@ -106,8 +188,7 @@ private:
 		return std::string(bam_aux2Z(aux));
 	}
 
-	// Helper to convert CIGAR to string
-	std::string cigar_to_string(const bam1_t *aln) {
+	inline std::string cigar_to_string(const bam1_t *aln) {
 		std::ostringstream oss;
 		const uint32_t *cigar = reinterpret_cast<uint32_t *>(aln->data + aln->core.l_qname);
 		for (uint32_t i = 0; i < aln->core.n_cigar; i++) {
@@ -118,158 +199,53 @@ private:
 		return oss.str();
 	}
 
-public:
-	std::string read_id;
-	uint16_t flags;
-	std::string reference;
-	int64_t position;
-	int64_t stop_position;
-	uint8_t mapq;
-	std::string cigar;
-	std::string mate_reference;
-	int64_t mate_position;
-	int64_t template_length;
-	int64_t tag_as;
-	int64_t tag_xs;
-	int64_t tag_ys;
-	int64_t tag_xn;
-	int64_t tag_xm;
-	int64_t tag_xo;
-	int64_t tag_xg;
-	int64_t tag_nm;
-	std::string tag_yt;
-	std::string tag_md;
-	std::string tag_sa;
-
-	explicit SAMRecord(const bam1_t *aln, const sam_hdr_t *hdr) noexcept {
-		// bam_get_qname performs a c-style cast
-		// recommended approach from claude for a reinterpret cast
-		read_id = std::string(reinterpret_cast<char *>(aln->data));
-		flags = aln->core.flag;
+	// Parse a single record into a batch (append)
+	inline void parse_record_to_batch(const bam1_t *aln, const sam_hdr_t *hdr, SAMRecordBatch &batch) {
+		batch.read_ids.emplace_back(reinterpret_cast<char *>(aln->data));
+		batch.flags.push_back(aln->core.flag);
 
 		if (aln->core.tid >= 0) {
-			reference = sam_hdr_tid2name(hdr, aln->core.tid);
+			batch.references.emplace_back(sam_hdr_tid2name(hdr, aln->core.tid));
 		} else {
-			reference = "*";
+			batch.references.emplace_back("*");
 		}
-		// Position (POS) - convert from 0-based to 1-based
-		position = aln->core.pos >= 0 ? aln->core.pos + 1 : 0;
 
-		// Stop position (computed from CIGAR using bam_endpos)
-		// bam_endpos returns 0-based coordinate of first base after alignment
-		// Convert to 1-based by adding 1
+		batch.positions.push_back(aln->core.pos >= 0 ? aln->core.pos + 1 : 0);
+
 		if (aln->core.flag & 0x4) { // BAM_FUNMAP
-			stop_position = 0;
+			batch.stop_positions.push_back(0);
 		} else {
 			hts_pos_t end_pos = bam_endpos(aln);
-			stop_position = end_pos >= 0 ? end_pos + 1 : 0;
+			batch.stop_positions.push_back(end_pos >= 0 ? end_pos + 1 : 0);
 		}
 
-		// Mapping quality (MAPQ)
-		mapq = aln->core.qual;
+		batch.mapqs.push_back(aln->core.qual);
+		batch.cigars.emplace_back(cigar_to_string(aln));
 
-		// CIGAR string
-		cigar = cigar_to_string(aln);
-
-		// Mate reference name (RNEXT)
 		if (aln->core.mtid >= 0) {
 			if (aln->core.mtid == aln->core.tid) {
-				mate_reference = "=";
+				batch.mate_references.emplace_back("=");
 			} else {
-				mate_reference = sam_hdr_tid2name(hdr, aln->core.mtid);
+				batch.mate_references.emplace_back(sam_hdr_tid2name(hdr, aln->core.mtid));
 			}
 		} else {
-			mate_reference = "*";
+			batch.mate_references.emplace_back("*");
 		}
 
-		// Mate position (PNEXT) - convert from 0-based to 1-based
-		mate_position = aln->core.mpos >= 0 ? aln->core.mpos + 1 : 0;
+		batch.mate_positions.push_back(aln->core.mpos >= 0 ? aln->core.mpos + 1 : 0);
+		batch.template_lengths.push_back(aln->core.isize);
 
-		// Template length (TLEN)
-		template_length = aln->core.isize;
-
-		// Optional tags
-		tag_as = get_int_tag(aln, "AS");
-		tag_xs = get_int_tag(aln, "XS");
-		tag_ys = get_int_tag(aln, "YS");
-		tag_xn = get_int_tag(aln, "XN");
-		tag_xm = get_int_tag(aln, "XM");
-		tag_xo = get_int_tag(aln, "XO");
-		tag_xg = get_int_tag(aln, "XG");
-		tag_nm = get_int_tag(aln, "NM");
-		tag_yt = get_string_tag(aln, "YT");
-		tag_md = get_string_tag(aln, "MD");
-		tag_sa = get_string_tag(aln, "SA");
+		batch.tag_as_values.push_back(get_int_tag(aln, "AS"));
+		batch.tag_xs_values.push_back(get_int_tag(aln, "XS"));
+		batch.tag_ys_values.push_back(get_int_tag(aln, "YS"));
+		batch.tag_xn_values.push_back(get_int_tag(aln, "XN"));
+		batch.tag_xm_values.push_back(get_int_tag(aln, "XM"));
+		batch.tag_xo_values.push_back(get_int_tag(aln, "XO"));
+		batch.tag_xg_values.push_back(get_int_tag(aln, "XG"));
+		batch.tag_nm_values.push_back(get_int_tag(aln, "NM"));
+		batch.tag_yt_values.emplace_back(get_string_tag(aln, "YT"));
+		batch.tag_md_values.emplace_back(get_string_tag(aln, "MD"));
+		batch.tag_sa_values.emplace_back(get_string_tag(aln, "SA"));
 	}
-
-	const std::string &GetString(const SAMRecordField field) const {
-		switch (field) {
-		case SAMRecordField::READ_ID:
-			return read_id;
-		case SAMRecordField::REFERENCE:
-			return reference;
-		case SAMRecordField::CIGAR:
-			return cigar;
-		case SAMRecordField::MATE_REFERENCE:
-			return mate_reference;
-		case SAMRecordField::TAG_YT:
-			return tag_yt;
-		case SAMRecordField::TAG_MD:
-			return tag_md;
-		case SAMRecordField::TAG_SA:
-			return tag_sa;
-		default:
-			throw std::invalid_argument("Invalid field");
-		}
-	}
-
-	int64_t GetInt64(const SAMRecordField field) const {
-		switch (field) {
-		case SAMRecordField::POSITION:
-			return position;
-		case SAMRecordField::STOP_POSITION:
-			return stop_position;
-		case SAMRecordField::MATE_POSITION:
-			return mate_position;
-		case SAMRecordField::TEMPLATE_LENGTH:
-			return template_length;
-		case SAMRecordField::TAG_AS:
-			return tag_as;
-		case SAMRecordField::TAG_XS:
-			return tag_xs;
-		case SAMRecordField::TAG_YS:
-			return tag_ys;
-		case SAMRecordField::TAG_XN:
-			return tag_xn;
-		case SAMRecordField::TAG_XM:
-			return tag_xm;
-		case SAMRecordField::TAG_XO:
-			return tag_xo;
-		case SAMRecordField::TAG_XG:
-			return tag_xg;
-		case SAMRecordField::TAG_NM:
-			return tag_nm;
-		default:
-			throw std::invalid_argument("Invalid field");
-		}
-	}
-
-	uint16_t GetUInt16(const SAMRecordField field) const {
-		switch (field) {
-		case SAMRecordField::FLAGS:
-			return flags;
-		default:
-			throw std::invalid_argument("Invalid field");
-		}
-	}
-
-	uint8_t GetUInt8(const SAMRecordField field) const {
-		switch (field) {
-		case SAMRecordField::MAPQ:
-			return mapq;
-		default:
-			throw std::invalid_argument("Invalid field");
-		}
-	}
-};
+}
 }; // namespace miint

@@ -47,9 +47,11 @@ public:
 
 	// Constructor for headerless SAM files
 	// Creates a synthetic header from the provided reference map
+	// Note: Cannot validate that all references in the data are in the reference map due to htslib limitations
 	explicit SAMReader(const std::string &filename, const std::unordered_map<std::string, uint64_t> &references);
 
-	std::vector<SAMRecord> read(const int n) const;
+	// Read up to n records into a batch
+	SAMRecordBatch read(const int n);
 
 private:
 	SAMFilePtr fp;

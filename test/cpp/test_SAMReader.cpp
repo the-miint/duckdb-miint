@@ -54,47 +54,47 @@ TEST_CASE("SAMReader with header unpaired no flags", "[SAMReader]") {
 	auto batch = reader.read(5);
 
 	REQUIRE((batch.size() == 2));
-	REQUIRE((batch[0].read_id == "r1"));
-	REQUIRE((batch[0].flags == 0));
-	REQUIRE((batch[0].reference == "g1"));
-	REQUIRE((batch[0].position == 1));
-	REQUIRE((batch[0].mapq == 0));
-	REQUIRE((batch[0].cigar == "4M"));
-	REQUIRE((batch[0].mate_reference == "*"));
-	REQUIRE((batch[0].mate_position == 0));
-	REQUIRE((batch[0].template_length == 0));
-	REQUIRE((batch[0].tag_as == -1));
-	REQUIRE((batch[0].tag_xs == -1));
-	REQUIRE((batch[0].tag_ys == -1));
-	REQUIRE((batch[0].tag_xn == -1));
-	REQUIRE((batch[0].tag_xm == -1));
-	REQUIRE((batch[0].tag_xo == -1));
-	REQUIRE((batch[0].tag_xg == -1));
-	REQUIRE((batch[0].tag_nm == -1));
-	REQUIRE((batch[0].tag_yt == ""));
-	REQUIRE((batch[0].tag_md == ""));
-	REQUIRE((batch[0].tag_sa == ""));
+	REQUIRE((batch.read_ids[0] == "r1"));
+	REQUIRE((batch.flags[0] == 0));
+	REQUIRE((batch.references[0] == "g1"));
+	REQUIRE((batch.positions[0] == 1));
+	REQUIRE((batch.mapqs[0] == 0));
+	REQUIRE((batch.cigars[0] == "4M"));
+	REQUIRE((batch.mate_references[0] == "*"));
+	REQUIRE((batch.mate_positions[0] == 0));
+	REQUIRE((batch.template_lengths[0] == 0));
+	REQUIRE((batch.tag_as_values[0] == -1));
+	REQUIRE((batch.tag_xs_values[0] == -1));
+	REQUIRE((batch.tag_ys_values[0] == -1));
+	REQUIRE((batch.tag_xn_values[0] == -1));
+	REQUIRE((batch.tag_xm_values[0] == -1));
+	REQUIRE((batch.tag_xo_values[0] == -1));
+	REQUIRE((batch.tag_xg_values[0] == -1));
+	REQUIRE((batch.tag_nm_values[0] == -1));
+	REQUIRE((batch.tag_yt_values[0] == ""));
+	REQUIRE((batch.tag_md_values[0] == ""));
+	REQUIRE((batch.tag_sa_values[0] == ""));
 
-	REQUIRE((batch[1].read_id == "r2"));
-	REQUIRE((batch[1].flags == 256));
-	REQUIRE((batch[1].reference == "g1"));
-	REQUIRE((batch[1].position == 1));
-	REQUIRE((batch[1].mapq == 0));
-	REQUIRE((batch[1].cigar == "4M"));
-	REQUIRE((batch[1].mate_reference == "*"));
-	REQUIRE((batch[1].mate_position == 0));
-	REQUIRE((batch[1].template_length == 0));
-	REQUIRE((batch[1].tag_as == -1));
-	REQUIRE((batch[1].tag_xs == -1));
-	REQUIRE((batch[1].tag_ys == -1));
-	REQUIRE((batch[1].tag_xn == -1));
-	REQUIRE((batch[1].tag_xm == -1));
-	REQUIRE((batch[1].tag_xo == -1));
-	REQUIRE((batch[1].tag_xg == -1));
-	REQUIRE((batch[1].tag_nm == -1));
-	REQUIRE((batch[1].tag_yt == ""));
-	REQUIRE((batch[1].tag_md == ""));
-	REQUIRE((batch[1].tag_sa == ""));
+	REQUIRE((batch.read_ids[1] == "r2"));
+	REQUIRE((batch.flags[1] == 256));
+	REQUIRE((batch.references[1] == "g1"));
+	REQUIRE((batch.positions[1] == 1));
+	REQUIRE((batch.mapqs[1] == 0));
+	REQUIRE((batch.cigars[1] == "4M"));
+	REQUIRE((batch.mate_references[1] == "*"));
+	REQUIRE((batch.mate_positions[1] == 0));
+	REQUIRE((batch.template_lengths[1] == 0));
+	REQUIRE((batch.tag_as_values[1] == -1));
+	REQUIRE((batch.tag_xs_values[1] == -1));
+	REQUIRE((batch.tag_ys_values[1] == -1));
+	REQUIRE((batch.tag_xn_values[1] == -1));
+	REQUIRE((batch.tag_xm_values[1] == -1));
+	REQUIRE((batch.tag_xo_values[1] == -1));
+	REQUIRE((batch.tag_xg_values[1] == -1));
+	REQUIRE((batch.tag_nm_values[1] == -1));
+	REQUIRE((batch.tag_yt_values[1] == ""));
+	REQUIRE((batch.tag_md_values[1] == ""));
+	REQUIRE((batch.tag_sa_values[1] == ""));
 }
 
 TEST_CASE("Headerless constructor with single reference", "[SAMReader][headerless]") {
@@ -107,8 +107,8 @@ TEST_CASE("Headerless constructor with single reference", "[SAMReader][headerles
 	auto batch = reader.read(1);
 
 	REQUIRE((batch.size() == 1));
-	REQUIRE((batch[0].read_id == "r1"));
-	REQUIRE((batch[0].reference == "ref1"));
+	REQUIRE((batch.read_ids[0] == "r1"));
+	REQUIRE((batch.references[0] == "ref1"));
 }
 
 TEST_CASE("Headerless constructor with multiple references", "[SAMReader][headerless]") {
@@ -122,9 +122,9 @@ TEST_CASE("Headerless constructor with multiple references", "[SAMReader][header
 	auto batch = reader.read(5);
 
 	REQUIRE((batch.size() == 3));
-	REQUIRE((batch[0].reference == "chr1"));
-	REQUIRE((batch[1].reference == "chr2"));
-	REQUIRE((batch[2].reference == "chr3"));
+	REQUIRE((batch.references[0] == "chr1"));
+	REQUIRE((batch.references[1] == "chr2"));
+	REQUIRE((batch.references[2] == "chr3"));
 }
 
 TEST_CASE("Headerless constructor reads records correctly", "[SAMReader][headerless]") {
@@ -138,14 +138,14 @@ TEST_CASE("Headerless constructor reads records correctly", "[SAMReader][headerl
 	auto batch = reader.read(5);
 
 	REQUIRE((batch.size() == 2));
-	REQUIRE((batch[0].read_id == "read1"));
-	REQUIRE((batch[0].flags == 0));
-	REQUIRE((batch[0].reference == "genome1"));
-	REQUIRE((batch[0].cigar == "4M"));
+	REQUIRE((batch.read_ids[0] == "read1"));
+	REQUIRE((batch.flags[0] == 0));
+	REQUIRE((batch.references[0] == "genome1"));
+	REQUIRE((batch.cigars[0] == "4M"));
 
-	REQUIRE((batch[1].read_id == "read2"));
-	REQUIRE((batch[1].flags == 256));
-	REQUIRE((batch[1].reference == "genome1"));
+	REQUIRE((batch.read_ids[1] == "read2"));
+	REQUIRE((batch.flags[1] == 256));
+	REQUIRE((batch.references[1] == "genome1"));
 }
 
 TEST_CASE("Headerless constructor with large reference length", "[SAMReader][headerless]") {
@@ -158,7 +158,7 @@ TEST_CASE("Headerless constructor with large reference length", "[SAMReader][hea
 	auto batch = reader.read(1);
 
 	REQUIRE((batch.size() == 1));
-	REQUIRE((batch[0].reference == "longref"));
+	REQUIRE((batch.references[0] == "longref"));
 }
 
 // Note: We cannot reliably detect if a SAM file has a header without consuming the file position,
@@ -228,10 +228,17 @@ TEST_CASE("Headerless constructor with unknown reference in data", "[SAMReader][
 
 	std::unordered_map<std::string, uint64_t> refs = {{"ref1", 1000}};
 	miint::SAMReader reader(path, refs);
-	// htslib warns but doesn't throw - it treats unknown references as unmapped
+
+	// LIMITATION: htslib automatically sets the unmapped flag (0x4) when it can't find
+	// a reference in the header. This means we cannot distinguish between genuinely
+	// unmapped reads and reads with unknown references. The record will appear as
+	// unmapped with reference="*".
+	// To catch unknown references, users must ensure their reference_lengths table
+	// includes all references present in the data files.
 	auto batch = reader.read(1);
 	REQUIRE((batch.size() == 1));
-	REQUIRE((batch[0].reference == "*")); // Treated as unmapped
+	REQUIRE((batch.references[0] == "*")); // Treated as unmapped by htslib
+	REQUIRE((batch.flags[0] & 0x4) != 0);  // Unmapped flag is set by htslib
 }
 
 TEST_CASE("Headerless constructor with empty file", "[SAMReader][headerless]") {
@@ -267,13 +274,13 @@ TEST_CASE("Headerless constructor multiple sequential reads", "[SAMReader][heade
 
 	auto batch1 = reader.read(2);
 	REQUIRE((batch1.size() == 2));
-	REQUIRE((batch1[0].read_id == "r1"));
-	REQUIRE((batch1[1].read_id == "r2"));
+	REQUIRE((batch1.read_ids[0] == "r1"));
+	REQUIRE((batch1.read_ids[1] == "r2"));
 
 	auto batch2 = reader.read(2);
 	REQUIRE((batch2.size() == 2));
-	REQUIRE((batch2[0].read_id == "r3"));
-	REQUIRE((batch2[1].read_id == "r4"));
+	REQUIRE((batch2.read_ids[0] == "r3"));
+	REQUIRE((batch2.read_ids[1] == "r4"));
 
 	auto batch3 = reader.read(2);
 	REQUIRE((batch3.size() == 0));
@@ -289,12 +296,12 @@ TEST_CASE("Header constructor multiple sequential reads", "[SAMReader][header]")
 
 	auto batch1 = reader.read(2);
 	REQUIRE((batch1.size() == 2));
-	REQUIRE((batch1[0].read_id == "r1"));
-	REQUIRE((batch1[1].read_id == "r2"));
+	REQUIRE((batch1.read_ids[0] == "r1"));
+	REQUIRE((batch1.read_ids[1] == "r2"));
 
 	auto batch2 = reader.read(2);
 	REQUIRE((batch2.size() == 1));
-	REQUIRE((batch2[0].read_id == "r3"));
+	REQUIRE((batch2.read_ids[0] == "r3"));
 }
 
 TEST_CASE("Headerless constructor throws on reference name with tab", "[SAMReader][headerless]") {
@@ -325,7 +332,7 @@ TEST_CASE("Headerless constructor with reference map superset", "[SAMReader][hea
 	auto batch = reader.read(1);
 
 	REQUIRE((batch.size() == 1));
-	REQUIRE((batch[0].reference == "ref1"));
+	REQUIRE((batch.references[0] == "ref1"));
 }
 
 TEST_CASE("Headerless constructor with existing test data", "[SAMReader][headerless]") {
@@ -334,10 +341,10 @@ TEST_CASE("Headerless constructor with existing test data", "[SAMReader][headerl
 	auto batch = reader.read(10);
 
 	REQUIRE((batch.size() == 4));
-	REQUIRE((batch[0].read_id == "foo-1"));
-	REQUIRE((batch[0].reference == "G1234"));
-	REQUIRE((batch[2].read_id == "foo-3"));
-	REQUIRE((batch[2].reference == "G000144735"));
+	REQUIRE((batch.read_ids[0] == "foo-1"));
+	REQUIRE((batch.references[0] == "G1234"));
+	REQUIRE((batch.read_ids[2] == "foo-3"));
+	REQUIRE((batch.references[2] == "G000144735"));
 }
 
 TEST_CASE("Header constructor with existing test data", "[SAMReader][header]") {
@@ -345,10 +352,10 @@ TEST_CASE("Header constructor with existing test data", "[SAMReader][header]") {
 	auto batch = reader.read(10);
 
 	REQUIRE((batch.size() == 4));
-	REQUIRE((batch[0].read_id == "foo-1"));
-	REQUIRE((batch[0].reference == "G1234"));
-	REQUIRE((batch[2].read_id == "foo-3"));
-	REQUIRE((batch[2].reference == "G000144735"));
+	REQUIRE((batch.read_ids[0] == "foo-1"));
+	REQUIRE((batch.references[0] == "G1234"));
+	REQUIRE((batch.read_ids[2] == "foo-3"));
+	REQUIRE((batch.references[2] == "G000144735"));
 }
 
 TEST_CASE("Headerless constructor throws on reference name starting with asterisk", "[SAMReader][headerless]") {
