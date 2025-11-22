@@ -9,20 +9,14 @@
 namespace duckdb {
 
 //===--------------------------------------------------------------------===//
-// Bind Data
+// Bind Data (inherits from shared base - no FASTA-specific fields needed)
 //===--------------------------------------------------------------------===//
-struct FastaCopyBindData : public FunctionData {
-	bool interleave = false;
-	bool id_as_sequence_index = false;
-	bool include_comment = false;
-	FileCompressionType compression = FileCompressionType::UNCOMPRESSED;
-	idx_t flush_size = 1024 * 1024; // NOLINT
-	string file_path;
-	bool is_paired = false;
-	vector<string> names;
+struct FastaCopyBindData : public SequenceCopyBindData {
+	// No FASTA-specific fields (unlike FASTQ which has qual_offset)
 
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<FastaCopyBindData>();
+		// Copy all base class fields
 		result->interleave = interleave;
 		result->id_as_sequence_index = id_as_sequence_index;
 		result->include_comment = include_comment;
@@ -31,14 +25,17 @@ struct FastaCopyBindData : public FunctionData {
 		result->file_path = file_path;
 		result->is_paired = is_paired;
 		result->names = names;
-		return std::move(result);
+		result->indices = indices;
+		// No FASTA-specific fields to copy
+		return result;
 	}
 
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<FastaCopyBindData>();
 		return interleave == other.interleave && id_as_sequence_index == other.id_as_sequence_index &&
 		       include_comment == other.include_comment && compression == other.compression &&
-		       file_path == other.file_path && is_paired == other.is_paired;
+		       file_path == other.file_path && is_paired == other.is_paired &&
+		       flush_size == other.flush_size && names == other.names;
 	}
 };
 
@@ -51,14 +48,13 @@ static unique_ptr<FunctionData> FastaCopyBind(ClientContext &context, CopyFuncti
 	result->file_path = input.info.file_path;
 	result->names = names;
 
-	// Detect columns
-	ColumnIndices indices;
-	indices.FindIndices(names);
+	// Detect and store column indices (computed once at bind time)
+	result->indices.FindIndices(names);
 
-	bool has_sequence1 = indices.sequence1_idx != DConstants::INVALID_INDEX;
-	bool has_sequence2 = indices.sequence2_idx != DConstants::INVALID_INDEX;
-	bool has_read_id = indices.read_id_idx != DConstants::INVALID_INDEX;
-	bool has_sequence_index = indices.sequence_index_idx != DConstants::INVALID_INDEX;
+	bool has_sequence1 = result->indices.sequence1_idx != DConstants::INVALID_INDEX;
+	bool has_sequence2 = result->indices.sequence2_idx != DConstants::INVALID_INDEX;
+	bool has_read_id = result->indices.read_id_idx != DConstants::INVALID_INDEX;
+	bool has_sequence_index = result->indices.sequence_index_idx != DConstants::INVALID_INDEX;
 
 	// Validate required columns
 	ValidateRequiredColumns(has_read_id, has_sequence1, "FASTA");
@@ -93,75 +89,52 @@ static unique_ptr<FunctionData> FastaCopyBind(ClientContext &context, CopyFuncti
 	// Validate sequence_index parameter
 	ValidateSequenceIndexParameter(result->id_as_sequence_index, has_sequence_index);
 
-	return std::move(result);
+	return result;
 }
 
 //===--------------------------------------------------------------------===//
-// Global State
+// Global State (use shared implementation)
 //===--------------------------------------------------------------------===//
-struct FastaCopyGlobalState : public GlobalFunctionData {
-	mutex lock;
-	unique_ptr<CopyFileHandle> file_r1;
-	unique_ptr<CopyFileHandle> file_r2;
-	bool is_paired = false;
-	bool interleave = false;
-};
+using FastaCopyGlobalState = SequenceCopyGlobalState;
 
 static unique_ptr<GlobalFunctionData> FastaCopyInitializeGlobal(ClientContext &context, FunctionData &bind_data,
                                                                 const string &file_path) {
 	auto &fdata = bind_data.Cast<FastaCopyBindData>();
-	auto &fs = FileSystem::GetFileSystem(context);
-
-	auto gstate = make_uniq<FastaCopyGlobalState>();
-	gstate->is_paired = fdata.is_paired;
-	gstate->interleave = fdata.interleave;
-
-	if (fdata.is_paired && !fdata.interleave) {
-		// Split mode: open two files
-		string path_r1 = SubstituteOrientation(file_path, "R1");
-		string path_r2 = SubstituteOrientation(file_path, "R2");
-
-		gstate->file_r1 = make_uniq<CopyFileHandle>(fs, path_r1, fdata.compression);
-		gstate->file_r2 = make_uniq<CopyFileHandle>(fs, path_r2, fdata.compression);
-	} else {
-		// Interleaved or single-end: open one file
-		gstate->file_r1 = make_uniq<CopyFileHandle>(fs, file_path, fdata.compression);
-	}
-
-	return std::move(gstate);
+	return SequenceCopyInitializeGlobal(context, fdata, file_path);
 }
 
 //===--------------------------------------------------------------------===//
-// Local State
+// Local State (use shared implementation)
 //===--------------------------------------------------------------------===//
-struct FastaCopyLocalState : public LocalFunctionData {
-	unique_ptr<FormatWriterState> writer_state_r1;
-	unique_ptr<FormatWriterState> writer_state_r2; // For split paired-end
-};
+using FastaCopyLocalState = SequenceCopyLocalState;
 
 static unique_ptr<LocalFunctionData> FastaCopyInitializeLocal(ExecutionContext &context, FunctionData &bind_data) {
 	auto &fdata = bind_data.Cast<FastaCopyBindData>();
-	auto lstate = make_uniq<FastaCopyLocalState>();
-
-	lstate->writer_state_r1 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
-
-	if (fdata.is_paired && !fdata.interleave) {
-		lstate->writer_state_r2 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
-	}
-
-	return std::move(lstate);
+	return SequenceCopyInitializeLocal(context, fdata);
 }
 
 //===--------------------------------------------------------------------===//
 // Sink
 //===--------------------------------------------------------------------===//
 static void WriteFastaRecordToBuffer(MemoryStream &stream, const string &id, const string &seq, const string &comment) {
-	// Build record string
-	string record = ">" + id;
+	// Pre-calculate total size to avoid reallocations
+	idx_t size = 1 + id.size() + 1 + seq.size() + 1;  // > + id + \n + seq + \n
 	if (!comment.empty()) {
-		record += " " + comment;
+		size += 1 + comment.size();  // space + comment
 	}
-	record += "\n" + seq + "\n";
+
+	// Build record string with pre-reserved capacity
+	string record;
+	record.reserve(size);
+	record += '>';
+	record += id;
+	if (!comment.empty()) {
+		record += ' ';
+		record += comment;
+	}
+	record += '\n';
+	record += seq;
+	record += '\n';
 
 	// Write to stream
 	stream.WriteData(const_data_ptr_cast(record.c_str()), record.size());
@@ -173,9 +146,8 @@ static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 	auto &gstate = gstate_p.Cast<FastaCopyGlobalState>();
 	auto &lstate = lstate_p.Cast<FastaCopyLocalState>();
 
-	// Get column indices (no lock needed yet!)
-	ColumnIndices indices;
-	indices.FindIndices(fdata.names);
+	// Use pre-computed column indices from bind data
+	auto &indices = fdata.indices;
 
 	// Process each row
 	UnifiedVectorFormat read_id_data, sequence_index_data, comment_data;
@@ -211,6 +183,11 @@ static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 	for (idx_t row = 0; row < input.size(); row++) {
 		auto row_idx = read_id_data.sel->get_index(row);
 
+		// Validate required fields are not NULL
+		if (!read_id_data.validity.RowIsValid(row_idx)) {
+			throw InvalidInputException("NULL value in read_id column (row %llu)", row);
+		}
+
 		// Get ID
 		string id;
 		if (fdata.id_as_sequence_index) {
@@ -233,6 +210,9 @@ static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 
 		// Get R1 data
 		auto seq1_row = seq1_data.sel->get_index(row);
+		if (!seq1_data.validity.RowIsValid(seq1_row)) {
+			throw InvalidInputException("NULL value in sequence1 column (row %llu)", row);
+		}
 		string seq1 = seq1_strings[seq1_row].GetString();
 
 		// Write R1 record to local buffer
@@ -243,6 +223,9 @@ static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 		if (is_paired) {
 			auto seq2_strings = UnifiedVectorFormat::GetData<string_t>(seq2_data);
 			auto seq2_row = seq2_data.sel->get_index(row);
+			if (!seq2_data.validity.RowIsValid(seq2_row)) {
+				throw InvalidInputException("NULL value in sequence2 column (row %llu)", row);
+			}
 			string seq2 = seq2_strings[seq2_row].GetString();
 
 			if (fdata.interleave) {
@@ -267,35 +250,22 @@ static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 }
 
 //===--------------------------------------------------------------------===//
-// Combine
+// Combine (use shared implementation)
 //===--------------------------------------------------------------------===//
 static void FastaCopyCombine(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p,
                              LocalFunctionData &lstate_p) {
 	auto &fdata = bind_data.Cast<FastaCopyBindData>();
 	auto &gstate = gstate_p.Cast<FastaCopyGlobalState>();
 	auto &lstate = lstate_p.Cast<FastaCopyLocalState>();
-
-	// Flush any remaining data in local buffers
-	FlushFormatBuffer(*lstate.writer_state_r1, *gstate.file_r1, gstate.lock);
-
-	if (fdata.is_paired && !fdata.interleave) {
-		FlushFormatBuffer(*lstate.writer_state_r2, *gstate.file_r2, gstate.lock);
-	}
+	SequenceCopyCombine(fdata, gstate, lstate);
 }
 
 //===--------------------------------------------------------------------===//
-// Finalize
+// Finalize (use shared implementation)
 //===--------------------------------------------------------------------===//
 static void FastaCopyFinalize(ClientContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p) {
 	auto &gstate = gstate_p.Cast<FastaCopyGlobalState>();
-	lock_guard<mutex> glock(gstate.lock);
-
-	if (gstate.file_r1) {
-		gstate.file_r1->Close();
-	}
-	if (gstate.file_r2) {
-		gstate.file_r2->Close();
-	}
+	SequenceCopyFinalize(gstate);
 }
 
 //===--------------------------------------------------------------------===//

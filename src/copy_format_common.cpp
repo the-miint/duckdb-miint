@@ -88,7 +88,7 @@ FileCompressionType DetectCompressionType(const string &file_path, const Value &
 		} else if (comp_str == "none") {
 			return FileCompressionType::UNCOMPRESSED;
 		} else {
-			throw InvalidInputException("compression must be 'gzip', 'gz', 'zstd', 'zst', or 'none'");
+			throw InvalidInputException("compression must be 'gzip', 'gz', or 'none' (zstd temporarily disabled)");
 		}
 	}
 
@@ -212,6 +212,66 @@ void ValidatePairedEndParameters(bool is_paired, bool has_interleave_param, bool
 void ValidateSequenceIndexParameter(bool id_as_sequence_index, bool has_sequence_index) {
 	if (id_as_sequence_index && !has_sequence_index) {
 		throw BinderException("ID_AS_SEQUENCE_INDEX=true requires 'sequence_index' column");
+	}
+}
+
+//===--------------------------------------------------------------------===//
+// Shared Sequence Copy Functions
+//===--------------------------------------------------------------------===//
+
+unique_ptr<GlobalFunctionData> SequenceCopyInitializeGlobal(ClientContext &context, const SequenceCopyBindData &fdata,
+                                                             const string &file_path) {
+	auto &fs = FileSystem::GetFileSystem(context);
+
+	auto gstate = make_uniq<SequenceCopyGlobalState>();
+	gstate->is_paired = fdata.is_paired;
+	gstate->interleave = fdata.interleave;
+
+	if (fdata.is_paired && !fdata.interleave) {
+		// Split mode: open two files
+		string path_r1 = SubstituteOrientation(file_path, "R1");
+		string path_r2 = SubstituteOrientation(file_path, "R2");
+
+		gstate->file_r1 = make_uniq<CopyFileHandle>(fs, path_r1, fdata.compression);
+		gstate->file_r2 = make_uniq<CopyFileHandle>(fs, path_r2, fdata.compression);
+	} else {
+		// Interleaved or single-end: open one file
+		gstate->file_r1 = make_uniq<CopyFileHandle>(fs, file_path, fdata.compression);
+	}
+
+	return gstate;
+}
+
+unique_ptr<LocalFunctionData> SequenceCopyInitializeLocal(ExecutionContext &context, const SequenceCopyBindData &fdata) {
+	auto lstate = make_uniq<SequenceCopyLocalState>();
+
+	lstate->writer_state_r1 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
+
+	if (fdata.is_paired && !fdata.interleave) {
+		lstate->writer_state_r2 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
+	}
+
+	return lstate;
+}
+
+void SequenceCopyCombine(const SequenceCopyBindData &fdata, SequenceCopyGlobalState &gstate,
+                         SequenceCopyLocalState &lstate) {
+	// Flush any remaining data in local buffers
+	FlushFormatBuffer(*lstate.writer_state_r1, *gstate.file_r1, gstate.lock);
+
+	if (fdata.is_paired && !fdata.interleave) {
+		FlushFormatBuffer(*lstate.writer_state_r2, *gstate.file_r2, gstate.lock);
+	}
+}
+
+void SequenceCopyFinalize(SequenceCopyGlobalState &gstate) {
+	lock_guard<mutex> glock(gstate.lock);
+
+	if (gstate.file_r1) {
+		gstate.file_r1->Close();
+	}
+	if (gstate.file_r2) {
+		gstate.file_r2->Close();
 	}
 }
 

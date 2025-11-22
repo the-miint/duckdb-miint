@@ -12,47 +12,49 @@ namespace duckdb {
 //===--------------------------------------------------------------------===//
 // Bind Data
 //===--------------------------------------------------------------------===//
-struct FastqCopyBindData : public FunctionData {
-	bool interleave = false;
-	bool id_as_sequence_index = false;
-	bool include_comment = false;
-	uint8_t qual_offset = 33;
-	FileCompressionType compression = FileCompressionType::UNCOMPRESSED;
-	idx_t flush_size = 1024 * 1024; // NOLINT
-	string file_path;
-	bool is_paired = false;
-	vector<string> names;
+struct FastqCopyBindData : public SequenceCopyBindData {
+	uint8_t qual_offset = 33;  // FASTQ-specific: quality score offset
 
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<FastqCopyBindData>();
+		// Copy base class fields
 		result->interleave = interleave;
 		result->id_as_sequence_index = id_as_sequence_index;
 		result->include_comment = include_comment;
-		result->qual_offset = qual_offset;
 		result->compression = compression;
 		result->flush_size = flush_size;
 		result->file_path = file_path;
 		result->is_paired = is_paired;
 		result->names = names;
-		return std::move(result);
+		result->indices = indices;
+		// Copy FASTQ-specific field
+		result->qual_offset = qual_offset;
+		return result;
 	}
 
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<FastqCopyBindData>();
 		return interleave == other.interleave && id_as_sequence_index == other.id_as_sequence_index &&
 		       include_comment == other.include_comment && qual_offset == other.qual_offset &&
-		       compression == other.compression && file_path == other.file_path && is_paired == other.is_paired;
+		       compression == other.compression && file_path == other.file_path && is_paired == other.is_paired &&
+		       flush_size == other.flush_size && names == other.names;
 	}
 };
 
 //===--------------------------------------------------------------------===//
 // Helper Functions
 //===--------------------------------------------------------------------===//
-static string EncodeQuality(const vector<uint8_t> &qual, uint8_t offset) {
+static string EncodeQuality(const uint8_t *qual_data, idx_t length, uint8_t offset) {
 	string result;
-	result.reserve(qual.size());
-	for (auto q : qual) {
-		result.push_back(static_cast<char>(q + offset));
+	result.reserve(length);
+	for (idx_t i = 0; i < length; i++) {
+		uint8_t q = qual_data[i];
+		uint16_t encoded = static_cast<uint16_t>(q) + offset;
+		if (encoded > 126) {
+			throw InvalidInputException("Quality score overflow: %d + %d = %d exceeds valid ASCII range (max 126)",
+			                            q, offset, encoded);
+		}
+		result.push_back(static_cast<char>(encoded));
 	}
 	return result;
 }
@@ -66,16 +68,15 @@ static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFuncti
 	result->file_path = input.info.file_path;
 	result->names = names;
 
-	// Detect columns
-	ColumnIndices indices;
-	indices.FindIndices(names);
+	// Detect and store column indices (computed once at bind time)
+	result->indices.FindIndices(names);
 
-	bool has_sequence1 = indices.sequence1_idx != DConstants::INVALID_INDEX;
-	bool has_sequence2 = indices.sequence2_idx != DConstants::INVALID_INDEX;
-	bool has_read_id = indices.read_id_idx != DConstants::INVALID_INDEX;
-	bool has_qual1 = indices.qual1_idx != DConstants::INVALID_INDEX;
-	bool has_qual2 = indices.qual2_idx != DConstants::INVALID_INDEX;
-	bool has_sequence_index = indices.sequence_index_idx != DConstants::INVALID_INDEX;
+	bool has_sequence1 = result->indices.sequence1_idx != DConstants::INVALID_INDEX;
+	bool has_sequence2 = result->indices.sequence2_idx != DConstants::INVALID_INDEX;
+	bool has_read_id = result->indices.read_id_idx != DConstants::INVALID_INDEX;
+	bool has_qual1 = result->indices.qual1_idx != DConstants::INVALID_INDEX;
+	bool has_qual2 = result->indices.qual2_idx != DConstants::INVALID_INDEX;
+	bool has_sequence_index = result->indices.sequence_index_idx != DConstants::INVALID_INDEX;
 
 	// Validate required columns
 	ValidateRequiredColumns(has_read_id, has_sequence1, "FASTQ");
@@ -126,76 +127,55 @@ static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFuncti
 		result->qual_offset = static_cast<uint8_t>(offset);
 	}
 
-	return std::move(result);
+	return result;
 }
 
 //===--------------------------------------------------------------------===//
-// Global State
+// Global State (use shared implementation)
 //===--------------------------------------------------------------------===//
-struct FastqCopyGlobalState : public GlobalFunctionData {
-	mutex lock;
-	unique_ptr<CopyFileHandle> file_r1;
-	unique_ptr<CopyFileHandle> file_r2;
-	bool is_paired = false;
-	bool interleave = false;
-};
+using FastqCopyGlobalState = SequenceCopyGlobalState;
 
 static unique_ptr<GlobalFunctionData> FastqCopyInitializeGlobal(ClientContext &context, FunctionData &bind_data,
                                                                 const string &file_path) {
 	auto &fdata = bind_data.Cast<FastqCopyBindData>();
-	auto &fs = FileSystem::GetFileSystem(context);
-
-	auto gstate = make_uniq<FastqCopyGlobalState>();
-	gstate->is_paired = fdata.is_paired;
-	gstate->interleave = fdata.interleave;
-
-	if (fdata.is_paired && !fdata.interleave) {
-		// Split mode: open two files
-		string path_r1 = SubstituteOrientation(file_path, "R1");
-		string path_r2 = SubstituteOrientation(file_path, "R2");
-
-		gstate->file_r1 = make_uniq<CopyFileHandle>(fs, path_r1, fdata.compression);
-		gstate->file_r2 = make_uniq<CopyFileHandle>(fs, path_r2, fdata.compression);
-	} else {
-		// Interleaved or single-end: open one file
-		gstate->file_r1 = make_uniq<CopyFileHandle>(fs, file_path, fdata.compression);
-	}
-
-	return std::move(gstate);
+	return SequenceCopyInitializeGlobal(context, fdata, file_path);
 }
 
 //===--------------------------------------------------------------------===//
-// Local State
+// Local State (use shared implementation)
 //===--------------------------------------------------------------------===//
-struct FastqCopyLocalState : public LocalFunctionData {
-	unique_ptr<FormatWriterState> writer_state_r1;
-	unique_ptr<FormatWriterState> writer_state_r2; // For split paired-end
-};
+using FastqCopyLocalState = SequenceCopyLocalState;
 
 static unique_ptr<LocalFunctionData> FastqCopyInitializeLocal(ExecutionContext &context, FunctionData &bind_data) {
 	auto &fdata = bind_data.Cast<FastqCopyBindData>();
-	auto lstate = make_uniq<FastqCopyLocalState>();
-
-	lstate->writer_state_r1 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
-
-	if (fdata.is_paired && !fdata.interleave) {
-		lstate->writer_state_r2 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
-	}
-
-	return std::move(lstate);
+	return SequenceCopyInitializeLocal(context, fdata);
 }
 
 //===--------------------------------------------------------------------===//
 // Sink
 //===--------------------------------------------------------------------===//
 static void WriteFastqRecordToBuffer(MemoryStream &stream, const string &id, const string &seq,
-                                     const vector<uint8_t> &qual, uint8_t qual_offset, const string &comment) {
-	// Build record string
-	string record = "@" + id;
+                                     const uint8_t *qual_data, idx_t qual_length, uint8_t qual_offset, const string &comment) {
+	// Pre-calculate total size to avoid reallocations
+	idx_t size = 1 + id.size() + 1 + seq.size() + 3 + qual_length + 1;  // @ + id + \n + seq + \n+\n + qual + \n
 	if (!comment.empty()) {
-		record += " " + comment;
+		size += 1 + comment.size();  // space + comment
 	}
-	record += "\n" + seq + "\n+\n" + EncodeQuality(qual, qual_offset) + "\n";
+
+	// Build record string with pre-reserved capacity
+	string record;
+	record.reserve(size);
+	record += '@';
+	record += id;
+	if (!comment.empty()) {
+		record += ' ';
+		record += comment;
+	}
+	record += '\n';
+	record += seq;
+	record += "\n+\n";
+	record += EncodeQuality(qual_data, qual_length, qual_offset);
+	record += '\n';
 
 	// Write to stream
 	stream.WriteData(const_data_ptr_cast(record.c_str()), record.size());
@@ -207,9 +187,8 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 	auto &gstate = gstate_p.Cast<FastqCopyGlobalState>();
 	auto &lstate = lstate_p.Cast<FastqCopyLocalState>();
 
-	// Get column indices (no lock needed yet!)
-	ColumnIndices indices;
-	indices.FindIndices(fdata.names);
+	// Use pre-computed column indices from bind data
+	auto &indices = fdata.indices;
 
 	// Process each row
 	UnifiedVectorFormat read_id_data, sequence_index_data, comment_data;
@@ -248,6 +227,11 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 	for (idx_t row = 0; row < input.size(); row++) {
 		auto row_idx = read_id_data.sel->get_index(row);
 
+		// Validate required fields are not NULL
+		if (!read_id_data.validity.RowIsValid(row_idx)) {
+			throw InvalidInputException("NULL value in read_id column (row %llu)", row);
+		}
+
 		// Get ID
 		string id;
 		if (fdata.id_as_sequence_index) {
@@ -270,42 +254,62 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 
 		// Get R1 data
 		auto seq1_row = seq1_data.sel->get_index(row);
+		if (!seq1_data.validity.RowIsValid(seq1_row)) {
+			throw InvalidInputException("NULL value in sequence1 column (row %llu)", row);
+		}
 		string seq1 = seq1_strings[seq1_row].GetString();
 
 		auto qual1_row = qual1_data.sel->get_index(row);
+		if (!qual1_data.validity.RowIsValid(qual1_row)) {
+			throw InvalidInputException("NULL value in qual1 column (row %llu)", row);
+		}
 		auto qual1_list = ListVector::GetEntry(input.data[indices.qual1_idx]);
 		auto qual1_list_data = FlatVector::GetData<uint8_t>(qual1_list);
 		auto qual1_entries = UnifiedVectorFormat::GetData<list_entry_t>(qual1_data);
-		vector<uint8_t> qual1_vec;
-		for (idx_t i = 0; i < qual1_entries[qual1_row].length; i++) {
-			qual1_vec.push_back(qual1_list_data[qual1_entries[qual1_row].offset + i]);
+		idx_t qual1_length = qual1_entries[qual1_row].length;
+		const uint8_t *qual1_ptr = qual1_list_data + qual1_entries[qual1_row].offset;
+
+		// Validate quality score length matches sequence length
+		if (qual1_length != seq1.size()) {
+			throw InvalidInputException("Quality score length (%llu) does not match sequence length (%llu) for row %llu",
+			                            qual1_length, seq1.size(), row);
 		}
 
 		// Write R1 record to local buffer
-		WriteFastqRecordToBuffer(stream_r1, id, seq1, qual1_vec, fdata.qual_offset, comment);
+		WriteFastqRecordToBuffer(stream_r1, id, seq1, qual1_ptr, qual1_length, fdata.qual_offset, comment);
 		lstate.writer_state_r1->written_anything = true;
 
 		// Handle R2 for paired-end
 		if (is_paired) {
 			auto seq2_strings = UnifiedVectorFormat::GetData<string_t>(seq2_data);
 			auto seq2_row = seq2_data.sel->get_index(row);
+			if (!seq2_data.validity.RowIsValid(seq2_row)) {
+				throw InvalidInputException("NULL value in sequence2 column (row %llu)", row);
+			}
 			string seq2 = seq2_strings[seq2_row].GetString();
 
 			auto qual2_row = qual2_data.sel->get_index(row);
+			if (!qual2_data.validity.RowIsValid(qual2_row)) {
+				throw InvalidInputException("NULL value in qual2 column (row %llu)", row);
+			}
 			auto qual2_list = ListVector::GetEntry(input.data[indices.qual2_idx]);
 			auto qual2_list_data = FlatVector::GetData<uint8_t>(qual2_list);
 			auto qual2_entries = UnifiedVectorFormat::GetData<list_entry_t>(qual2_data);
-			vector<uint8_t> qual2_vec;
-			for (idx_t i = 0; i < qual2_entries[qual2_row].length; i++) {
-				qual2_vec.push_back(qual2_list_data[qual2_entries[qual2_row].offset + i]);
+			idx_t qual2_length = qual2_entries[qual2_row].length;
+			const uint8_t *qual2_ptr = qual2_list_data + qual2_entries[qual2_row].offset;
+
+			// Validate quality score length matches sequence length
+			if (qual2_length != seq2.size()) {
+				throw InvalidInputException("Quality score length (%llu) does not match sequence length (%llu) for row %llu (R2)",
+				                            qual2_length, seq2.size(), row);
 			}
 
 			if (fdata.interleave) {
 				// Write R2 to same buffer
-				WriteFastqRecordToBuffer(stream_r1, id, seq2, qual2_vec, fdata.qual_offset, comment);
+				WriteFastqRecordToBuffer(stream_r1, id, seq2, qual2_ptr, qual2_length, fdata.qual_offset, comment);
 			} else {
 				// Write R2 to separate buffer
-				WriteFastqRecordToBuffer(*stream_r2, id, seq2, qual2_vec, fdata.qual_offset, comment);
+				WriteFastqRecordToBuffer(*stream_r2, id, seq2, qual2_ptr, qual2_length, fdata.qual_offset, comment);
 				lstate.writer_state_r2->written_anything = true;
 			}
 		}
@@ -322,35 +326,22 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 }
 
 //===--------------------------------------------------------------------===//
-// Combine
+// Combine (use shared implementation)
 //===--------------------------------------------------------------------===//
 static void FastqCopyCombine(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p,
                              LocalFunctionData &lstate_p) {
 	auto &fdata = bind_data.Cast<FastqCopyBindData>();
 	auto &gstate = gstate_p.Cast<FastqCopyGlobalState>();
 	auto &lstate = lstate_p.Cast<FastqCopyLocalState>();
-
-	// Flush any remaining data in local buffers
-	FlushFormatBuffer(*lstate.writer_state_r1, *gstate.file_r1, gstate.lock);
-
-	if (fdata.is_paired && !fdata.interleave) {
-		FlushFormatBuffer(*lstate.writer_state_r2, *gstate.file_r2, gstate.lock);
-	}
+	SequenceCopyCombine(fdata, gstate, lstate);
 }
 
 //===--------------------------------------------------------------------===//
-// Finalize
+// Finalize (use shared implementation)
 //===--------------------------------------------------------------------===//
 static void FastqCopyFinalize(ClientContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p) {
 	auto &gstate = gstate_p.Cast<FastqCopyGlobalState>();
-	lock_guard<mutex> glock(gstate.lock);
-
-	if (gstate.file_r1) {
-		gstate.file_r1->Close();
-	}
-	if (gstate.file_r2) {
-		gstate.file_r2->Close();
-	}
+	SequenceCopyFinalize(gstate);
 }
 
 //===--------------------------------------------------------------------===//

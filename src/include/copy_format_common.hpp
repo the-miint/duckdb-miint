@@ -9,6 +9,11 @@
 namespace duckdb {
 
 //===--------------------------------------------------------------------===//
+// Constants
+//===--------------------------------------------------------------------===//
+constexpr idx_t DEFAULT_COPY_FLUSH_SIZE = 1024 * 1024; // 1MB default buffer size
+
+//===--------------------------------------------------------------------===//
 // File Handle Wrapper (handles both compressed and uncompressed)
 //===--------------------------------------------------------------------===//
 class CopyFileHandle {
@@ -74,7 +79,7 @@ struct CommonCopyParameters {
 	bool id_as_sequence_index = false;
 	bool include_comment = false;
 	FileCompressionType compression = FileCompressionType::UNCOMPRESSED;
-	idx_t flush_size = 1024 * 1024; // 1MB default buffer size
+	idx_t flush_size = DEFAULT_COPY_FLUSH_SIZE;
 
 	void ParseFromOptions(const case_insensitive_map_t<vector<Value>> &options, const string &file_path);
 };
@@ -85,5 +90,57 @@ struct CommonCopyParameters {
 void ValidateRequiredColumns(bool has_read_id, bool has_sequence1, const string &format_name);
 void ValidatePairedEndParameters(bool is_paired, bool has_interleave_param, bool interleave, const string &file_path);
 void ValidateSequenceIndexParameter(bool id_as_sequence_index, bool has_sequence_index);
+
+//===--------------------------------------------------------------------===//
+// Shared Sequence Copy Structures (FASTA/FASTQ)
+//===--------------------------------------------------------------------===//
+
+// Base bind data for sequence formats (FASTA/FASTQ)
+struct SequenceCopyBindData : public FunctionData {
+	bool interleave = false;
+	bool id_as_sequence_index = false;
+	bool include_comment = false;
+	FileCompressionType compression = FileCompressionType::UNCOMPRESSED;
+	idx_t flush_size = DEFAULT_COPY_FLUSH_SIZE;
+	string file_path;
+	bool is_paired = false;
+	vector<string> names;
+	ColumnIndices indices;  // Pre-computed column indices
+
+	// Subclasses must implement Copy() and Equals()
+};
+
+// Shared global state for sequence formats (100% identical for FASTA/FASTQ)
+struct SequenceCopyGlobalState : public GlobalFunctionData {
+	mutex lock;
+	unique_ptr<CopyFileHandle> file_r1;
+	unique_ptr<CopyFileHandle> file_r2;
+	bool is_paired = false;
+	bool interleave = false;
+};
+
+// Shared local state for sequence formats (100% identical for FASTA/FASTQ)
+struct SequenceCopyLocalState : public LocalFunctionData {
+	unique_ptr<FormatWriterState> writer_state_r1;
+	unique_ptr<FormatWriterState> writer_state_r2; // For split paired-end
+};
+
+//===--------------------------------------------------------------------===//
+// Shared Sequence Copy Functions
+//===--------------------------------------------------------------------===//
+
+// Initialize global state for sequence formats
+unique_ptr<GlobalFunctionData> SequenceCopyInitializeGlobal(ClientContext &context, const SequenceCopyBindData &fdata,
+                                                             const string &file_path);
+
+// Initialize local state for sequence formats
+unique_ptr<LocalFunctionData> SequenceCopyInitializeLocal(ExecutionContext &context, const SequenceCopyBindData &fdata);
+
+// Combine (flush) local buffers for sequence formats
+void SequenceCopyCombine(const SequenceCopyBindData &fdata, SequenceCopyGlobalState &gstate,
+                         SequenceCopyLocalState &lstate);
+
+// Finalize sequence copy
+void SequenceCopyFinalize(SequenceCopyGlobalState &gstate);
 
 } // namespace duckdb
