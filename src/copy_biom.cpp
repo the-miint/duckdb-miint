@@ -35,13 +35,15 @@ struct BiomCopyBindData : public FunctionData {
 		result->feature_id_idx = feature_id_idx;
 		result->sample_id_idx = sample_id_idx;
 		result->value_idx = value_idx;
-		return std::move(result);
+		return result;
 	}
 
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<BiomCopyBindData>();
 		return file_path == other.file_path && id == other.id && generated_by == other.generated_by &&
-		       use_compression == other.use_compression;
+		       use_compression == other.use_compression && names == other.names &&
+		       feature_id_idx == other.feature_id_idx && sample_id_idx == other.sample_id_idx &&
+		       value_idx == other.value_idx;
 	}
 };
 
@@ -110,7 +112,7 @@ static unique_ptr<FunctionData> BiomCopyBind(ClientContext &context, CopyFunctio
 		}
 	}
 
-	return std::move(result);
+	return result;
 }
 
 //===--------------------------------------------------------------------===//
@@ -132,22 +134,22 @@ struct BiomCopyGlobalState : public GlobalFunctionData {
 static unique_ptr<GlobalFunctionData> BiomCopyInitializeGlobal(ClientContext &context, FunctionData &bind_data,
                                                                const string &file_path) {
 	auto gstate = make_uniq<BiomCopyGlobalState>();
-	return std::move(gstate);
+	return gstate;
 }
 
 //===--------------------------------------------------------------------===//
 // Local State
 //===--------------------------------------------------------------------===//
 struct BiomCopyLocalState : public LocalFunctionData {
-	// Store integer indices instead of strings for performance
-	vector<size_t> local_feature_indices;
-	vector<size_t> local_sample_indices;
+	// Store strings locally - dictionary building happens in Combine
+	vector<string> local_feature_ids;
+	vector<string> local_sample_ids;
 	vector<double> local_values;
 };
 
 static unique_ptr<LocalFunctionData> BiomCopyInitializeLocal(ExecutionContext &context, FunctionData &bind_data) {
 	auto lstate = make_uniq<BiomCopyLocalState>();
-	return std::move(lstate);
+	return lstate;
 }
 
 //===--------------------------------------------------------------------===//
@@ -186,41 +188,22 @@ static void BiomCopySink(ExecutionContext &context, FunctionData &bind_data, Glo
 			throw InvalidInputException("COPY FORMAT BIOM: NULL values not allowed in value column");
 		}
 
-		// Get string values
+		// Get values
 		string feature_id = feature_strings[feature_idx].GetString();
 		string sample_id = sample_strings[sample_idx].GetString();
 		double value = value_doubles[value_idx];
 
-		// Build dictionaries incrementally and get integer indices
-		lock_guard<mutex> glock(gstate.lock);
-
-		// Look up or insert feature_id
-		auto feature_it = gstate.feature_map.find(feature_id);
-		int32_t feature_index;
-		if (feature_it == gstate.feature_map.end()) {
-			// New feature - assign next index
-			feature_index = static_cast<int32_t>(gstate.feature_ids_ordered.size());
-			gstate.feature_map[feature_id] = feature_index;
-			gstate.feature_ids_ordered.push_back(feature_id);
-		} else {
-			feature_index = feature_it->second;
+		// Validate feature_id and sample_id are not empty
+		if (feature_id.empty()) {
+			throw InvalidInputException("COPY FORMAT BIOM: empty feature_id not allowed");
+		}
+		if (sample_id.empty()) {
+			throw InvalidInputException("COPY FORMAT BIOM: empty sample_id not allowed");
 		}
 
-		// Look up or insert sample_id
-		auto sample_it = gstate.sample_map.find(sample_id);
-		int32_t sample_index;
-		if (sample_it == gstate.sample_map.end()) {
-			// New sample - assign next index
-			sample_index = static_cast<int32_t>(gstate.sample_ids_ordered.size());
-			gstate.sample_map[sample_id] = sample_index;
-			gstate.sample_ids_ordered.push_back(sample_id);
-		} else {
-			sample_index = sample_it->second;
-		}
-
-		// Store integer indices in local state
-		lstate.local_feature_indices.push_back(static_cast<size_t>(feature_index));
-		lstate.local_sample_indices.push_back(static_cast<size_t>(sample_index));
+		// Store in local state (no locking needed - each thread has its own local state)
+		lstate.local_feature_ids.push_back(std::move(feature_id));
+		lstate.local_sample_ids.push_back(std::move(sample_id));
 		lstate.local_values.push_back(value);
 	}
 }
@@ -233,13 +216,51 @@ static void BiomCopyCombine(ExecutionContext &context, FunctionData &bind_data, 
 	auto &gstate = gstate_p.Cast<BiomCopyGlobalState>();
 	auto &lstate = lstate_p.Cast<BiomCopyLocalState>();
 
+	// Convert local strings to indices using global dictionaries
+	// Lock only during dictionary updates and global state append
 	lock_guard<mutex> glock(gstate.lock);
 
-	// Append local integer indices to global (much faster than string operations)
-	gstate.feature_indices.insert(gstate.feature_indices.end(), lstate.local_feature_indices.begin(),
-	                              lstate.local_feature_indices.end());
-	gstate.sample_indices.insert(gstate.sample_indices.end(), lstate.local_sample_indices.begin(),
-	                             lstate.local_sample_indices.end());
+	idx_t n = lstate.local_feature_ids.size();
+	vector<size_t> local_feature_indices;
+	vector<size_t> local_sample_indices;
+	local_feature_indices.reserve(n);
+	local_sample_indices.reserve(n);
+
+	for (idx_t i = 0; i < n; i++) {
+		const auto &feature_id = lstate.local_feature_ids[i];
+		const auto &sample_id = lstate.local_sample_ids[i];
+
+		// Look up or insert feature_id
+		auto feature_it = gstate.feature_map.find(feature_id);
+		int32_t feature_index;
+		if (feature_it == gstate.feature_map.end()) {
+			feature_index = static_cast<int32_t>(gstate.feature_ids_ordered.size());
+			gstate.feature_map[feature_id] = feature_index;
+			gstate.feature_ids_ordered.push_back(feature_id);
+		} else {
+			feature_index = feature_it->second;
+		}
+
+		// Look up or insert sample_id
+		auto sample_it = gstate.sample_map.find(sample_id);
+		int32_t sample_index;
+		if (sample_it == gstate.sample_map.end()) {
+			sample_index = static_cast<int32_t>(gstate.sample_ids_ordered.size());
+			gstate.sample_map[sample_id] = sample_index;
+			gstate.sample_ids_ordered.push_back(sample_id);
+		} else {
+			sample_index = sample_it->second;
+		}
+
+		local_feature_indices.push_back(static_cast<size_t>(feature_index));
+		local_sample_indices.push_back(static_cast<size_t>(sample_index));
+	}
+
+	// Append local indices to global
+	gstate.feature_indices.insert(gstate.feature_indices.end(), local_feature_indices.begin(),
+	                              local_feature_indices.end());
+	gstate.sample_indices.insert(gstate.sample_indices.end(), local_sample_indices.begin(),
+	                             local_sample_indices.end());
 	gstate.values.insert(gstate.values.end(), lstate.local_values.begin(), lstate.local_values.end());
 }
 

@@ -333,6 +333,7 @@ void BIOMTable::compress_coo() {
 		return;
 	}
 
+	// Sort by (sample, feature) for efficient duplicate merging and optimal CSC conversion
 	sort_by_row_then_column(coo_sample_indices, coo_feature_indices, coo_values);
 
 	std::vector<size_t> coo_sample_indices_compressed;
@@ -347,15 +348,20 @@ void BIOMTable::compress_coo() {
 	size_t last_col = coo_feature_indices[0];
 	double accum_value = coo_values[0];
 
+	// Epsilon for zero comparison (accounts for floating-point rounding errors)
+	constexpr double EPSILON = 1e-10;
+
 	for (size_t i = 1; i < n; i++) {
 		size_t current_row = coo_sample_indices[i];
 		size_t current_col = coo_feature_indices[i];
 		double current_value = coo_values[i];
 
 		if (current_row == last_row && current_col == last_col) {
+			// Merge duplicate (feature, sample) pairs by summing values
 			accum_value += current_value;
 		} else {
-			if (accum_value > 0.) {
+			// Only keep non-zero values (sparse matrix format)
+			if (accum_value > EPSILON) {
 				coo_sample_indices_compressed.push_back(last_row);
 				coo_feature_indices_compressed.push_back(last_col);
 				coo_values_compressed.push_back(accum_value);
@@ -367,7 +373,8 @@ void BIOMTable::compress_coo() {
 		}
 	}
 
-	if (accum_value > 0.) {
+	// Handle final accumulated value
+	if (accum_value > EPSILON) {
 		coo_sample_indices_compressed.push_back(last_row);
 		coo_feature_indices_compressed.push_back(last_col);
 		coo_values_compressed.push_back(accum_value);
@@ -409,19 +416,13 @@ SparseMatrix BIOMTable::ConvertCOOToCompressed(bool by_row) const {
 
 	// Sort by (major_axis, minor_axis)
 	if (by_row) {
-		// CSR: sort by (feature, sample)
+		// CSR: sort by (feature, sample) - need to re-sort since compress_coo sorts by (sample, feature)
 		std::ranges::sort(sort_indices, [&](size_t i, size_t j) {
 			return std::tie(coo_feature_indices[i], coo_sample_indices[i]) <
 			       std::tie(coo_feature_indices[j], coo_sample_indices[j]);
 		});
-	} else {
-		// CSC: sort by (sample, feature)
-		// COO is already sorted this way after compress_coo(), but be explicit
-		std::ranges::sort(sort_indices, [&](size_t i, size_t j) {
-			return std::tie(coo_sample_indices[i], coo_feature_indices[i]) <
-			       std::tie(coo_sample_indices[j], coo_feature_indices[j]);
-		});
 	}
+	// else: CSC doesn't need sorting - compress_coo already sorted by (sample, feature)
 
 	// Build compressed arrays
 	std::vector<double> data;
