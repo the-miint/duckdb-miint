@@ -52,14 +52,12 @@ struct CompressIntervalsBindData : public FunctionData {
 struct CompressIntervalsOperation {
 	template <class STATE>
 	static void Initialize(STATE &state) {
-		new (&state) STATE();
 		state.compressor = new miint::IntervalCompressor();
 	}
 
 	template <class STATE>
 	static void Destroy(STATE &state, AggregateInputData &aggr_input_data) {
 		delete state.compressor;
-		state.~STATE();
 	}
 
 	static void Operation(Vector inputs[], AggregateInputData &aggr_input_data, idx_t input_count, Vector &states,
@@ -98,6 +96,8 @@ struct CompressIntervalsOperation {
 		for (idx_t i = 0; i < source.Size(); i++) {
 			target.Add(source.Starts()[i], source.Stops()[i]);
 		}
+		// Compress after combining to avoid memory bloat in parallel execution
+		target.Compress();
 	}
 
 	static void Finalize(Vector &state_vector, AggregateInputData &aggr_input_data, Vector &result, idx_t count,

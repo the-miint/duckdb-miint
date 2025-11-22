@@ -108,3 +108,68 @@ query I
 SELECT compress_intervals(start, stop) FROM intervals WHERE id = 9;
 ----
 [{'start': 10, 'stop': 20}, {'start': 100, 'stop': 120}, {'start': 200, 'stop': 220}]
+
+# Test 10: Inverted intervals (start > stop should be swapped)
+statement ok
+DELETE FROM intervals;
+
+statement ok
+INSERT INTO intervals VALUES (10, 100, 50), (10, 200, 150);
+
+query I
+SELECT compress_intervals(start, stop) FROM intervals WHERE id = 10;
+----
+[{'start': 50, 'stop': 100}, {'start': 150, 'stop': 200}]
+
+# Test 11: Extreme INT64 values
+statement ok
+DELETE FROM intervals;
+
+statement ok
+INSERT INTO intervals VALUES
+	(11, -9223372036854775807, -9223372036854775800),
+	(11, 9223372036854775800, 9223372036854775807);
+
+query I
+SELECT compress_intervals(start, stop) FROM intervals WHERE id = 11;
+----
+[{'start': -9223372036854775807, 'stop': -9223372036854775800}, {'start': 9223372036854775800, 'stop': 9223372036854775807}]
+
+# Test 12: Large dataset (100K rows) for parallel execution
+statement ok
+DELETE FROM intervals;
+
+statement ok
+INSERT INTO intervals
+SELECT 12 AS id, i AS start, i + 10 AS stop
+FROM range(100000) t(i);
+
+query III
+SELECT
+	id,
+	list_count(compress_intervals(start, stop)) as interval_count,
+	compress_intervals(start, stop)[1] as first_interval
+FROM intervals
+WHERE id = 12
+GROUP BY id;
+----
+12	1	{'start': 0, 'stop': 100009}
+
+# Test 13: Large dataset with gaps (parallel execution stress test)
+statement ok
+DELETE FROM intervals;
+
+statement ok
+INSERT INTO intervals
+SELECT 13 AS id, i * 100 AS start, i * 100 + 10 AS stop
+FROM range(100000) t(i);
+
+query II
+SELECT
+	id,
+	list_count(compress_intervals(start, stop)) as interval_count
+FROM intervals
+WHERE id = 13
+GROUP BY id;
+----
+13	100000

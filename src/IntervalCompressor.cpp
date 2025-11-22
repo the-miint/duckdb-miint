@@ -7,6 +7,11 @@ constexpr size_t COMPRESS_THRESHOLD = 1'000'000;
 IntervalCompressor::IntervalCompressor() = default;
 
 void IntervalCompressor::Add(int64_t start, int64_t stop) {
+	// Ensure start <= stop; swap if inverted
+	if (start > stop) {
+		std::swap(start, stop);
+	}
+
 	starts.push_back(start);
 	stops.push_back(stop);
 
