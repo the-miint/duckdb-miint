@@ -14,8 +14,8 @@ statement ok
 CREATE TABLE mock_lengths AS SELECT DISTINCT reference, 10000000 AS length FROM test_sam_data;
 
 statement ok
-COPY (SELECT * FROM test_sam_data) 
-TO '__TEST_DIR__/test_woltka_sam_data.sam' (FORMAT SAM, INCLUDE_HEADER false);
+COPY (SELECT * FROM test_sam_data)
+TO '__TEST_DIR__/test_woltka_sam_data.sam' (FORMAT SAM, INCLUDE_HEADER false, REFERENCE_LENGTHS 'mock_lengths');
 
 # Test against woltka produced outputs
 # woltka classify ... --no-demux --digits 10

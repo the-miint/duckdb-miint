@@ -199,11 +199,11 @@ COPY sam_test TO '__TEST_DIR__/error.bam' (FORMAT BAM, COMPRESSION_LEVEL -2, REF
 ----
 COMPRESSION_LEVEL must be between 0 and 9
 
-# Test 17: Error - BAM without reference_lengths (BAM always requires headers and thus reference_lengths)
+# Test 17: Error - BAM without reference_lengths (always required)
 statement error
 COPY sam_test TO '__TEST_DIR__/error.bam' (FORMAT BAM);
 ----
-COPY FORMAT SAM with INCLUDE_HEADER=true requires REFERENCE_LENGTHS parameter
+COPY FORMAT SAM requires REFERENCE_LENGTHS parameter
 
 # Test 18: Verify all optional tags are preserved in BAM
 statement ok

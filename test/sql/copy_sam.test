@@ -29,7 +29,7 @@ foo-3	147	G000144735	76146	1
 
 # Test 2: SAM output without header (INCLUDE_HEADER=false)
 statement ok
-COPY sam_test TO '__TEST_DIR__/no_header.sam' (FORMAT SAM, INCLUDE_HEADER false);
+COPY sam_test TO '__TEST_DIR__/no_header.sam' (FORMAT SAM, INCLUDE_HEADER false, REFERENCE_LENGTHS 'ref_table');
 
 # When reading back headerless files, we need to provide reference_lengths (using table)
 query I
@@ -77,7 +77,7 @@ COPY empty_sam TO '__TEST_DIR__/empty.sam' (FORMAT SAM, INCLUDE_HEADER true, REF
 
 # Test 6: SAM without header for empty table
 statement ok
-COPY empty_sam TO '__TEST_DIR__/empty_no_header.sam' (FORMAT SAM, INCLUDE_HEADER false);
+COPY empty_sam TO '__TEST_DIR__/empty_no_header.sam' (FORMAT SAM, INCLUDE_HEADER false, REFERENCE_LENGTHS 'ref_table_single');
 
 # Test 7: Large positions
 statement ok
@@ -129,7 +129,7 @@ foo-3	147	G000144735	76146	1
 
 # Test 11: Test GZIP compression without header
 statement ok
-COPY sam_test TO '__TEST_DIR__/compressed_no_header.sam.gz' (FORMAT SAM, COMPRESSION gzip, INCLUDE_HEADER false);
+COPY sam_test TO '__TEST_DIR__/compressed_no_header.sam.gz' (FORMAT SAM, COMPRESSION gzip, INCLUDE_HEADER false, REFERENCE_LENGTHS 'ref_table');
 
 query I
 SELECT COUNT(*) FROM read_sam('__TEST_DIR__/compressed_no_header.sam.gz', reference_lengths='ref_table');
@@ -171,7 +171,7 @@ statement ok
 CREATE TABLE ref_table_dummy AS SELECT 'dummy' AS name, 1000 AS length;
 
 statement ok
-COPY unmapped TO '__TEST_DIR__/unmapped.sam' (FORMAT SAM, INCLUDE_HEADER false);
+COPY unmapped TO '__TEST_DIR__/unmapped.sam' (FORMAT SAM, INCLUDE_HEADER false, REFERENCE_LENGTHS 'ref_table_dummy');
 
 query IIII
 SELECT read_id, flags, reference, position FROM read_sam('__TEST_DIR__/unmapped.sam', reference_lengths='ref_table_dummy');
@@ -205,11 +205,11 @@ COPY (SELECT read_id, 'wrong'::VARCHAR as flags, reference, position, mapq, ciga
 ----
 Column 'flags' must be USMALLINT
 
-# Test 20: Test error when INCLUDE_HEADER=true without REFERENCE_LENGTHS
+# Test 20: Test error when missing REFERENCE_LENGTHS (always required)
 statement error
 COPY sam_test TO '__TEST_DIR__/error.sam' (FORMAT SAM);
 ----
-COPY FORMAT SAM with INCLUDE_HEADER=true requires REFERENCE_LENGTHS parameter
+COPY FORMAT SAM requires REFERENCE_LENGTHS parameter
 
 # Test 21: Verify sequence and quality score preservation (if provided)
 # Note: Our test data uses * for sequence and quality, which should be preserved
@@ -220,7 +220,7 @@ statement ok
 CREATE TABLE ref_table_seq AS SELECT 'ref1' AS name, 100 AS length;
 
 statement ok
-COPY with_seq TO '__TEST_DIR__/with_seq.sam' (FORMAT SAM, INCLUDE_HEADER false);
+COPY with_seq TO '__TEST_DIR__/with_seq.sam' (FORMAT SAM, INCLUDE_HEADER false, REFERENCE_LENGTHS 'ref_table_seq');
 
 query IIIII
 SELECT read_id, flags, reference, position, mapq FROM read_sam('__TEST_DIR__/with_seq.sam', reference_lengths='ref_table_seq');

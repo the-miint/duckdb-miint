@@ -45,40 +45,6 @@ using SAMHeaderPtr = std::unique_ptr<sam_hdr_t, SAMHeaderDeleter>;
 using BAMRecordPtr = std::unique_ptr<bam1_t, BAMRecordDeleter>;
 
 //===--------------------------------------------------------------------===//
-// Bind Data
-//===--------------------------------------------------------------------===//
-enum class SAMOutputFormat : uint8_t { SAM = 0, BAM = 1 };
-
-struct SAMCopyBindData : public FunctionData {
-	bool include_header = true;
-	bool use_gzip = false;
-	SAMOutputFormat format = SAMOutputFormat::SAM;
-	int compression_level = -1; // -1 means use HTSlib default (6 for BAM)
-	string file_path;
-	vector<string> names;
-	std::optional<string> reference_lengths_table;
-
-	unique_ptr<FunctionData> Copy() const override {
-		auto result = make_uniq<SAMCopyBindData>();
-		result->include_header = include_header;
-		result->use_gzip = use_gzip;
-		result->format = format;
-		result->compression_level = compression_level;
-		result->file_path = file_path;
-		result->names = names;
-		result->reference_lengths_table = reference_lengths_table;
-		return std::move(result);
-	}
-
-	bool Equals(const FunctionData &other_p) const override {
-		auto &other = other_p.Cast<SAMCopyBindData>();
-		return include_header == other.include_header && use_gzip == other.use_gzip && format == other.format &&
-		       compression_level == other.compression_level && file_path == other.file_path &&
-		       reference_lengths_table == other.reference_lengths_table;
-	}
-};
-
-//===--------------------------------------------------------------------===//
 // Column Indices for SAM
 //===--------------------------------------------------------------------===//
 struct SAMColumnIndices {
@@ -157,6 +123,42 @@ struct SAMColumnIndices {
 };
 
 //===--------------------------------------------------------------------===//
+// Bind Data
+//===--------------------------------------------------------------------===//
+enum class SAMOutputFormat : uint8_t { SAM = 0, BAM = 1 };
+
+struct SAMCopyBindData : public FunctionData {
+	bool include_header = true;
+	bool use_gzip = false;
+	SAMOutputFormat format = SAMOutputFormat::SAM;
+	int compression_level = -1; // -1 means use HTSlib default (6 for BAM)
+	string file_path;
+	vector<string> names;
+	std::optional<string> reference_lengths_table;
+	SAMColumnIndices indices; // Cached column indices
+
+	unique_ptr<FunctionData> Copy() const override {
+		auto result = make_uniq<SAMCopyBindData>();
+		result->include_header = include_header;
+		result->use_gzip = use_gzip;
+		result->format = format;
+		result->compression_level = compression_level;
+		result->file_path = file_path;
+		result->names = names;
+		result->reference_lengths_table = reference_lengths_table;
+		result->indices = indices;
+		return std::move(result);
+	}
+
+	bool Equals(const FunctionData &other_p) const override {
+		auto &other = other_p.Cast<SAMCopyBindData>();
+		return include_header == other.include_header && use_gzip == other.use_gzip && format == other.format &&
+		       compression_level == other.compression_level && file_path == other.file_path &&
+		       reference_lengths_table == other.reference_lengths_table;
+	}
+};
+
+//===--------------------------------------------------------------------===//
 // Bind
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, CopyFunctionBindInput &input,
@@ -167,9 +169,9 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 	result->names = names;
 	result->format = default_format;
 
-	// Detect columns
-	SAMColumnIndices indices;
-	indices.FindIndices(names);
+	// Detect and cache column indices
+	result->indices.FindIndices(names);
+	auto &indices = result->indices;
 
 	// Validate required columns exist
 	if (indices.read_id_idx == DConstants::INVALID_INDEX) {
@@ -281,8 +283,10 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 	}
 
 	// Validate reference_lengths requirement
-	if (result->include_header && !result->reference_lengths_table.has_value()) {
-		throw BinderException("COPY FORMAT SAM with INCLUDE_HEADER=true requires REFERENCE_LENGTHS parameter "
+	// Reference lengths are always required because HTSlib needs an internal header to write records
+	// (even in headerless mode where the header isn't written to the file)
+	if (!result->reference_lengths_table.has_value()) {
+		throw BinderException("COPY FORMAT SAM requires REFERENCE_LENGTHS parameter "
 		                      "(e.g., REFERENCE_LENGTHS='ref_table')");
 	}
 
@@ -312,11 +316,11 @@ static unique_ptr<FunctionData> BAMCopyBind(ClientContext &context, CopyFunction
 // Global State
 //===--------------------------------------------------------------------===//
 struct SAMCopyGlobalState : public GlobalFunctionData {
-	mutex lock;
+	mutex write_lock;
 	SAMFilePtr sam_file;
 	SAMHeaderPtr header;
-	bool header_written = false;
-	bool include_header = true; // Track whether we're writing header (for dynamic reference handling)
+	std::atomic<bool> header_written{false};
+	bool include_header = true;
 };
 
 static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &context, FunctionData &bind_data,
@@ -424,29 +428,45 @@ static bool ParseCIGAR(const string &cigar_str, std::vector<uint32_t> &cigar_buf
 }
 
 // Get reference TID from header (or -1 if unmapped)
-// If in headerless mode and reference is not in header, dynamically add it
-static int32_t GetReferenceTID(sam_hdr_t *header, const string &reference, bool headerless_mode) {
+static int32_t GetReferenceTID(sam_hdr_t *header, const string &reference) {
 	if (reference == "*") {
 		return -1;
 	}
 	int32_t tid = sam_hdr_name2tid(header, reference.c_str());
-	if (tid < 0) {
-		// Reference not in header
-		if (headerless_mode) {
-			// In headerless mode, dynamically add reference with placeholder length
-			if (sam_hdr_add_line(header, "SQ", "SN", reference.c_str(), "LN", "0", NULL) < 0) {
-				throw std::runtime_error("Failed to add reference to header: " + reference);
-			}
-			tid = sam_hdr_name2tid(header, reference.c_str());
-			if (tid < 0) {
-				throw std::runtime_error("Failed to get TID for dynamically added reference: " + reference);
-			}
-		} else {
-			// In header mode, missing reference is an error - treat as unmapped
-			return -1;
+	// If reference not in header, treat as unmapped
+	return (tid < 0) ? -1 : tid;
+}
+
+//===--------------------------------------------------------------------===//
+// Tag Helpers
+//===--------------------------------------------------------------------===//
+static inline void AppendIntegerTag(bam1_t *record, const char *tag_name, const int64_t *data_ptr,
+                                    const UnifiedVectorFormat &format, idx_t row_idx, const string &read_id) {
+	if (!data_ptr) {
+		return;
+	}
+	auto data_idx = format.sel->get_index(row_idx);
+	if (format.validity.RowIsValid(data_idx)) {
+		int32_t value = static_cast<int32_t>(data_ptr[data_idx]);
+		if (bam_aux_append(record, tag_name, 'i', sizeof(int32_t), reinterpret_cast<uint8_t *>(&value)) < 0) {
+			throw IOException("Failed to append %s tag to BAM record for read: %s", tag_name, read_id);
 		}
 	}
-	return tid;
+}
+
+static inline void AppendStringTag(bam1_t *record, const char *tag_name, const string_t *data_ptr,
+                                   const UnifiedVectorFormat &format, idx_t row_idx, const string &read_id) {
+	if (!data_ptr) {
+		return;
+	}
+	auto data_idx = format.sel->get_index(row_idx);
+	if (format.validity.RowIsValid(data_idx)) {
+		string value = data_ptr[data_idx].GetString();
+		if (bam_aux_append(record, tag_name, 'Z', (int)value.size() + 1,
+		                   reinterpret_cast<const uint8_t *>(value.c_str())) < 0) {
+			throw IOException("Failed to append %s tag to BAM record for read: %s", tag_name, read_id);
+		}
+	}
 }
 
 //===--------------------------------------------------------------------===//
@@ -458,9 +478,8 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 	auto &gstate = gstate_p.Cast<SAMCopyGlobalState>();
 	auto &lstate = lstate_p.Cast<SAMCopyLocalState>();
 
-	// Get column indices
-	SAMColumnIndices indices;
-	indices.FindIndices(fdata.names);
+	// Use cached column indices from bind data
+	auto &indices = fdata.indices;
 
 	// Extract data from input vectors
 	UnifiedVectorFormat read_id_data, flags_data, reference_data, position_data, mapq_data;
@@ -547,15 +566,15 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 	    indices.tag_sa_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<string_t>(tag_sa_data) : nullptr;
 
 	// Write header once (first thread to arrive)
-	{
-		lock_guard<mutex> glock(gstate.lock);
-		if (!gstate.header_written) {
+	if (!gstate.header_written.load()) {
+		lock_guard<mutex> glock(gstate.write_lock);
+		if (!gstate.header_written.load()) {
 			if (fdata.include_header) {
 				if (sam_hdr_write(gstate.sam_file.get(), gstate.header.get()) < 0) {
 					throw IOException("Failed to write SAM header");
 				}
 			}
-			gstate.header_written = true;
+			gstate.header_written.store(true);
 		}
 	}
 
@@ -583,19 +602,32 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 
 		// Parse CIGAR
 		if (!ParseCIGAR(cigar_str, lstate.cigar_buffer)) {
-			throw std::runtime_error("Failed to parse CIGAR string: " + cigar_str);
+			throw InvalidInputException("Failed to parse CIGAR string '%s' for read: %s", cigar_str, read_id);
 		}
 
-		// Get reference TIDs (headerless_mode means we can dynamically add missing references)
-		bool headerless_mode = !gstate.include_header;
-		int32_t tid = GetReferenceTID(gstate.header.get(), reference, headerless_mode);
+		// Validate position values before casting
+		if (position < 0) {
+			throw InvalidInputException("Invalid position value %lld for read: %s (must be non-negative)", position, read_id);
+		}
+		if (position > 0 && (position - 1) > HTS_POS_MAX) {
+			throw InvalidInputException("Position value %lld exceeds maximum allowed position for read: %s", position, read_id);
+		}
+		if (mate_position < 0) {
+			throw InvalidInputException("Invalid mate_position value %lld for read: %s (must be non-negative)", mate_position, read_id);
+		}
+		if (mate_position > 0 && (mate_position - 1) > HTS_POS_MAX) {
+			throw InvalidInputException("Mate position value %lld exceeds maximum allowed position for read: %s", mate_position, read_id);
+		}
+
+		// Get reference TIDs
+		int32_t tid = GetReferenceTID(gstate.header.get(), reference);
 
 		// Handle mate_reference: "=" means same as reference
 		int32_t mtid;
 		if (mate_reference == "=") {
 			mtid = tid;
 		} else {
-			mtid = GetReferenceTID(gstate.header.get(), mate_reference, headerless_mode);
+			mtid = GetReferenceTID(gstate.header.get(), mate_reference);
 		}
 
 		// Build bam1_t record
@@ -606,94 +638,25 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 		             mapq, lstate.cigar_buffer.size(), lstate.cigar_buffer.data(), mtid,
 		             static_cast<hts_pos_t>(mate_position - 1), // Convert to 0-based
 		             static_cast<hts_pos_t>(template_length), 0, "*", "*", 0) < 0) {
-			throw std::runtime_error("Failed to build BAM record for read: " + read_id);
+			throw IOException("Failed to build BAM record for read: " + read_id);
 		}
 
 		// Add optional tags
-		if (tag_as_ptr && indices.tag_as_idx != DConstants::INVALID_INDEX) {
-			auto tag_idx = tag_as_data.sel->get_index(i);
-			if (tag_as_data.validity.RowIsValid(tag_idx)) {
-				int32_t value = static_cast<int32_t>(tag_as_ptr[tag_idx]);
-				bam_aux_append(lstate.record.get(), "AS", 'i', sizeof(int32_t), reinterpret_cast<uint8_t *>(&value));
-			}
-		}
-		if (tag_xs_ptr && indices.tag_xs_idx != DConstants::INVALID_INDEX) {
-			auto tag_idx = tag_xs_data.sel->get_index(i);
-			if (tag_xs_data.validity.RowIsValid(tag_idx)) {
-				int32_t value = static_cast<int32_t>(tag_xs_ptr[tag_idx]);
-				bam_aux_append(lstate.record.get(), "XS", 'i', sizeof(int32_t), reinterpret_cast<uint8_t *>(&value));
-			}
-		}
-		if (tag_ys_ptr && indices.tag_ys_idx != DConstants::INVALID_INDEX) {
-			auto tag_idx = tag_ys_data.sel->get_index(i);
-			if (tag_ys_data.validity.RowIsValid(tag_idx)) {
-				int32_t value = static_cast<int32_t>(tag_ys_ptr[tag_idx]);
-				bam_aux_append(lstate.record.get(), "YS", 'i', sizeof(int32_t), reinterpret_cast<uint8_t *>(&value));
-			}
-		}
-		if (tag_xn_ptr && indices.tag_xn_idx != DConstants::INVALID_INDEX) {
-			auto tag_idx = tag_xn_data.sel->get_index(i);
-			if (tag_xn_data.validity.RowIsValid(tag_idx)) {
-				int32_t value = static_cast<int32_t>(tag_xn_ptr[tag_idx]);
-				bam_aux_append(lstate.record.get(), "XN", 'i', sizeof(int32_t), reinterpret_cast<uint8_t *>(&value));
-			}
-		}
-		if (tag_xm_ptr && indices.tag_xm_idx != DConstants::INVALID_INDEX) {
-			auto tag_idx = tag_xm_data.sel->get_index(i);
-			if (tag_xm_data.validity.RowIsValid(tag_idx)) {
-				int32_t value = static_cast<int32_t>(tag_xm_ptr[tag_idx]);
-				bam_aux_append(lstate.record.get(), "XM", 'i', sizeof(int32_t), reinterpret_cast<uint8_t *>(&value));
-			}
-		}
-		if (tag_xo_ptr && indices.tag_xo_idx != DConstants::INVALID_INDEX) {
-			auto tag_idx = tag_xo_data.sel->get_index(i);
-			if (tag_xo_data.validity.RowIsValid(tag_idx)) {
-				int32_t value = static_cast<int32_t>(tag_xo_ptr[tag_idx]);
-				bam_aux_append(lstate.record.get(), "XO", 'i', sizeof(int32_t), reinterpret_cast<uint8_t *>(&value));
-			}
-		}
-		if (tag_xg_ptr && indices.tag_xg_idx != DConstants::INVALID_INDEX) {
-			auto tag_idx = tag_xg_data.sel->get_index(i);
-			if (tag_xg_data.validity.RowIsValid(tag_idx)) {
-				int32_t value = static_cast<int32_t>(tag_xg_ptr[tag_idx]);
-				bam_aux_append(lstate.record.get(), "XG", 'i', sizeof(int32_t), reinterpret_cast<uint8_t *>(&value));
-			}
-		}
-		if (tag_nm_ptr && indices.tag_nm_idx != DConstants::INVALID_INDEX) {
-			auto tag_idx = tag_nm_data.sel->get_index(i);
-			if (tag_nm_data.validity.RowIsValid(tag_idx)) {
-				int32_t value = static_cast<int32_t>(tag_nm_ptr[tag_idx]);
-				bam_aux_append(lstate.record.get(), "NM", 'i', sizeof(int32_t), reinterpret_cast<uint8_t *>(&value));
-			}
-		}
-		if (tag_yt_ptr && indices.tag_yt_idx != DConstants::INVALID_INDEX) {
-			auto tag_idx = tag_yt_data.sel->get_index(i);
-			if (tag_yt_data.validity.RowIsValid(tag_idx)) {
-				string value = tag_yt_ptr[tag_idx].GetString();
-				bam_aux_append(lstate.record.get(), "YT", 'Z', (int)value.size() + 1,
-				               reinterpret_cast<const uint8_t *>(value.c_str()));
-			}
-		}
-		if (tag_md_ptr && indices.tag_md_idx != DConstants::INVALID_INDEX) {
-			auto tag_idx = tag_md_data.sel->get_index(i);
-			if (tag_md_data.validity.RowIsValid(tag_idx)) {
-				string value = tag_md_ptr[tag_idx].GetString();
-				bam_aux_append(lstate.record.get(), "MD", 'Z', (int)value.size() + 1,
-				               reinterpret_cast<const uint8_t *>(value.c_str()));
-			}
-		}
-		if (tag_sa_ptr && indices.tag_sa_idx != DConstants::INVALID_INDEX) {
-			auto tag_idx = tag_sa_data.sel->get_index(i);
-			if (tag_sa_data.validity.RowIsValid(tag_idx)) {
-				string value = tag_sa_ptr[tag_idx].GetString();
-				bam_aux_append(lstate.record.get(), "SA", 'Z', (int)value.size() + 1,
-				               reinterpret_cast<const uint8_t *>(value.c_str()));
-			}
-		}
+		AppendIntegerTag(lstate.record.get(), "AS", tag_as_ptr, tag_as_data, i, read_id);
+		AppendIntegerTag(lstate.record.get(), "XS", tag_xs_ptr, tag_xs_data, i, read_id);
+		AppendIntegerTag(lstate.record.get(), "YS", tag_ys_ptr, tag_ys_data, i, read_id);
+		AppendIntegerTag(lstate.record.get(), "XN", tag_xn_ptr, tag_xn_data, i, read_id);
+		AppendIntegerTag(lstate.record.get(), "XM", tag_xm_ptr, tag_xm_data, i, read_id);
+		AppendIntegerTag(lstate.record.get(), "XO", tag_xo_ptr, tag_xo_data, i, read_id);
+		AppendIntegerTag(lstate.record.get(), "XG", tag_xg_ptr, tag_xg_data, i, read_id);
+		AppendIntegerTag(lstate.record.get(), "NM", tag_nm_ptr, tag_nm_data, i, read_id);
+		AppendStringTag(lstate.record.get(), "YT", tag_yt_ptr, tag_yt_data, i, read_id);
+		AppendStringTag(lstate.record.get(), "MD", tag_md_ptr, tag_md_data, i, read_id);
+		AppendStringTag(lstate.record.get(), "SA", tag_sa_ptr, tag_sa_data, i, read_id);
 
-		// Write record (with lock for thread safety)
+		// Write record (with lock for thread safety on file I/O)
 		{
-			lock_guard<mutex> glock(gstate.lock);
+			lock_guard<mutex> glock(gstate.write_lock);
 			if (sam_write1(gstate.sam_file.get(), gstate.header.get(), lstate.record.get()) < 0) {
 				throw IOException("Failed to write SAM record for read: " + read_id);
 			}
@@ -717,7 +680,7 @@ static void SAMCopyFinalize(ClientContext &context, FunctionData &bind_data, Glo
 	auto &gstate = gstate_p.Cast<SAMCopyGlobalState>();
 
 	// Write header if we haven't written anything yet (empty file with header)
-	if (!gstate.header_written && fdata.include_header) {
+	if (!gstate.header_written.load() && fdata.include_header) {
 		if (sam_hdr_write(gstate.sam_file.get(), gstate.header.get()) < 0) {
 			throw IOException("Failed to write SAM header for empty file");
 		}
