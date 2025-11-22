@@ -35,8 +35,22 @@ TEST_CASE("BIOM basic table", "[BIOMReader]") {
 	                                            "GG_OTU_3", "GG_OTU_2", "GG_OTU_2", "GG_OTU_3", "GG_OTU_4"};
 
 	std::vector<double> exp_values = {5.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 4.0, 3.0, 1.0, 2.0, 1.0};
-	REQUIRE((table.COOSamples() == exp_sample_ids));
-	REQUIRE((table.COOFeatures() == exp_feature_ids));
+
+	// Convert indices to IDs for comparison
+	const auto &sample_indices = table.COOSampleIndices();
+	const auto &feature_indices = table.COOFeatureIndices();
+	const auto &sample_ids_ordered = table.SampleIDs();
+	const auto &feature_ids_ordered = table.FeatureIDs();
+
+	std::vector<std::string> actual_sample_ids;
+	std::vector<std::string> actual_feature_ids;
+	for (size_t i = 0; i < sample_indices.size(); i++) {
+		actual_sample_ids.push_back(sample_ids_ordered[sample_indices[i]]);
+		actual_feature_ids.push_back(feature_ids_ordered[feature_indices[i]]);
+	}
+
+	REQUIRE((actual_sample_ids == exp_sample_ids));
+	REQUIRE((actual_feature_ids == exp_feature_ids));
 	REQUIRE((table.COOValues() == exp_values));
 }
 

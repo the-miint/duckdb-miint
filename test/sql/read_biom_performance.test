@@ -1,0 +1,12 @@
+# name: test/sql/read_biom_performance.test
+# description: performance tests for read_biom table function
+# group: [sql]
+
+# Require statement will ensure this test is run with this extension loaded
+require miint
+
+# Performance test with large files
+query I
+SELECT COUNT(*) FROM read_biom('data/biom/large_table1.biom');
+----
+13052393

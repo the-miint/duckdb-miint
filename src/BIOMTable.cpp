@@ -38,9 +38,6 @@ BIOMTable::BIOMTable(const std::vector<size_t> &feature_indices, const std::vect
       sample_ids_ordered(std::move(sample_ids_ordered_param)) {
 	// Compress COO (sort by row/column, deduplicate, remove zeros)
 	compress_coo();
-	// Build string representations for compatibility with existing interfaces
-	coo_sample_indices_as_ids = indices_to_ids(coo_sample_indices, sample_ids_ordered);
-	coo_feature_indices_as_ids = indices_to_ids(coo_feature_indices, feature_ids_ordered);
 }
 
 void BIOMTable::InitCOOFromCOO(const std::vector<std::string> &feature_ids,
@@ -50,8 +47,6 @@ void BIOMTable::InitCOOFromCOO(const std::vector<std::string> &feature_ids,
 	coo_feature_indices = ids_to_indices(feature_ids, feature_ids_ordered);
 	coo_sample_indices = ids_to_indices(sample_ids, sample_ids_ordered);
 	compress_coo();
-	coo_sample_indices_as_ids = indices_to_ids(coo_sample_indices, sample_ids_ordered);
-	coo_feature_indices_as_ids = indices_to_ids(coo_feature_indices, feature_ids_ordered);
 }
 
 std::vector<size_t> ids_to_indices(const std::vector<std::string> &ids, const std::vector<std::string> &ordered) {
@@ -121,8 +116,6 @@ void BIOMTable::InitCOOFromCSC(const std::vector<int32_t> &indptr, const std::ve
 
 	// Skip compress_coo() since BIOM files are already in canonical form
 	// (sorted by row then column, no duplicates, no zeros)
-	coo_sample_indices_as_ids = indices_to_ids(coo_sample_indices, sample_ids_ordered);
-	coo_feature_indices_as_ids = indices_to_ids(coo_feature_indices, feature_ids_ordered);
 }
 
 std::vector<std::string> BIOMTable::indices_to_ids(const std::vector<size_t> &indices,
@@ -136,18 +129,11 @@ std::vector<std::string> BIOMTable::indices_to_ids(const std::vector<size_t> &in
 	return result;
 }
 
-const std::vector<std::string> &BIOMTable::COOFeatures() const {
-	return coo_feature_indices_as_ids;
-}
 const std::vector<size_t> &BIOMTable::COOFeatureIndices() const {
 	return coo_feature_indices;
 }
 
-const std::vector<std::string> &BIOMTable::COOSamples() const {
-	return coo_sample_indices_as_ids;
-}
-
-const std::vector<size_t> &BIOMTable::COOSampleIndices() const {
+const std::vector<size_t> &BIOMTable::COOSampleIndices() const{
 	return coo_sample_indices;
 }
 const std::vector<double> &BIOMTable::COOValues() const {
@@ -272,7 +258,7 @@ std::vector<T> BIOMTable::load_dataset_1D(hid_t ds_id, hid_t exp_dtype) {
 	return data;
 }
 
-uint32_t BIOMTable::nnz() {
+uint32_t BIOMTable::nnz() const {
 	auto values_size = coo_values.size();
 	auto sids_size = coo_sample_indices.size();
 	auto fids_size = coo_feature_indices.size();

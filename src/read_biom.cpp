@@ -1,5 +1,6 @@
 #include "read_biom.hpp"
 #include "BIOMReader.hpp"
+#include "table_function_common.hpp"
 #include "duckdb.h"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
@@ -12,25 +13,7 @@ unique_ptr<FunctionData> ReadBIOMTableFunction::Bind(ClientContext &context, Tab
                                                      vector<LogicalType> &return_types, vector<std::string> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
-	std::vector<std::string> biom_paths;
-
-	// TODO: the VARCHAR / VARCHAR[] pattern is common for our readers, can this be decomposed?
-	// Handle VARCHAR or VARCHAR[] input for file paths
-	if (input.inputs[0].type().id() == LogicalTypeId::VARCHAR) {
-		biom_paths.push_back(input.inputs[0].ToString());
-	} else if (input.inputs[0].type().id() == LogicalTypeId::LIST) {
-		auto &list_children = ListValue::GetChildren(input.inputs[0]);
-		for (const auto &child : list_children) {
-			biom_paths.push_back(child.ToString());
-		}
-	} else {
-		throw InvalidInputException("read_biom: first argument must be VARCHAR or VARCHAR[]");
-	}
-
-	// Validate that at least one file was provided
-	if (biom_paths.empty()) {
-		throw InvalidInputException("read_biom: first argument must be VARCHAR or VARCHAR[]");
-	}
+	auto biom_paths = ParseFilePathsParameter(input.inputs[0], "read_biom");
 
 	// Validate all files exist and are BIOM
 	for (const auto &path : biom_paths) {
@@ -43,17 +26,10 @@ unique_ptr<FunctionData> ReadBIOMTableFunction::Bind(ClientContext &context, Tab
 		}
 	}
 
-	// TODO: include_filepath is common for our readers, can this be decomposed?
-	// Parse include_filepath parameter (optional BOOLEAN, default false)
-	bool include_filepath = false;
-	auto fp_param = input.named_parameters.find("include_filepath");
-	if (fp_param != input.named_parameters.end() && !fp_param->second.IsNull()) {
-		include_filepath = fp_param->second.GetValue<bool>();
-	}
+	bool include_filepath = ParseIncludeFilepathParameter(input.named_parameters);
 
 	auto data = duckdb::make_uniq<Data>(biom_paths, include_filepath);
 
-	// TODO: pushing back names and types is common to our readers, can this be decomposed?
 	for (auto &name : data->names) {
 		names.emplace_back(name);
 	}
@@ -85,8 +61,8 @@ unique_ptr<LocalTableFunctionState> ReadBIOMTableFunction::InitLocal(ExecutionCo
 }
 
 void ReadBIOMTableFunction::SetResultVector(Vector &result_vector, const miint::BIOMTableField &field,
-                                            const miint::BIOMTable &record, const size_t &current_row,
-                                            const size_t &n_rows) {
+                                            const miint::BIOMTable &record, size_t current_row,
+                                            size_t n_rows) {
 	switch (field) {
 	case miint::BIOMTableField::SAMPLE_ID:
 	case miint::BIOMTableField::FEATURE_ID:
@@ -101,22 +77,24 @@ void ReadBIOMTableFunction::SetResultVector(Vector &result_vector, const miint::
 }
 
 void ReadBIOMTableFunction::SetResultVectorString(Vector &result_vector, const miint::BIOMTableField &field,
-                                                  const miint::BIOMTable &record, const size_t &current_row,
-                                                  const size_t &n_rows) {
+                                                  const miint::BIOMTable &record, size_t current_row,
+                                                  size_t n_rows) {
 	auto result_data = FlatVector::GetData<string_t>(result_vector);
 
-	// Use const reference to avoid copying the entire string vector
-	const auto &current_names =
-	    (field == miint::BIOMTableField::SAMPLE_ID) ? record.COOSamples() : record.COOFeatures();
+	const auto &indices =
+	    (field == miint::BIOMTableField::SAMPLE_ID) ? record.COOSampleIndices() : record.COOFeatureIndices();
+	const auto &ordered_ids =
+	    (field == miint::BIOMTableField::SAMPLE_ID) ? record.SampleIDs() : record.FeatureIDs();
 
 	for (size_t i = 0; i < n_rows; i++) {
-		result_data[i] = StringVector::AddString(result_vector, current_names[current_row + i]);
+		auto index = indices[current_row + i];
+		result_data[i] = StringVector::AddString(result_vector, ordered_ids[index]);
 	}
 }
 
 void ReadBIOMTableFunction::SetResultVectorDouble(Vector &result_vector, const miint::BIOMTableField &field,
-                                                  const miint::BIOMTable &record, const size_t &current_row,
-                                                  const size_t &n_rows) {
+                                                  const miint::BIOMTable &record, size_t current_row,
+                                                  size_t n_rows) {
 	auto result_data = FlatVector::GetData<double>(result_vector);
 	auto &data = record.COOValues();
 
@@ -153,7 +131,6 @@ void ReadBIOMTableFunction::Execute(ClientContext &context, TableFunctionInput &
 	size_t n_rows =
 	    std::min(local_state.current_row + STANDARD_VECTOR_SIZE, local_state.total_rows) - local_state.current_row;
 
-	// Populate output vectors
 	for (size_t i = 0; i < bind_data.fields.size(); i++) {
 		auto &result_vector = output.data[i];
 		auto &field = bind_data.fields[i];

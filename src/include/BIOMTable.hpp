@@ -29,10 +29,8 @@ public:
 	          const std::vector<double> &values, std::vector<std::string> feature_ids_ordered,
 	          std::vector<std::string> sample_ids_ordered);
 	BIOMTable();
-	uint32_t nnz(); // not const as it implicitly calls compress_coo
-	const std::vector<std::string> &COOFeatures() const;
+	uint32_t nnz() const;
 	const std::vector<size_t> &COOFeatureIndices() const;
-	const std::vector<std::string> &COOSamples() const;
 	const std::vector<size_t> &COOSampleIndices() const;
 	const std::vector<double> &COOValues() const;
 
@@ -67,8 +65,6 @@ private:
 
 	std::vector<std::string> feature_ids_ordered;
 	std::vector<std::string> sample_ids_ordered;
-	std::vector<std::string> coo_sample_indices_as_ids;
-	std::vector<std::string> coo_feature_indices_as_ids;
 
 	void InitCOOFromCSC(const std::vector<int32_t> &indptr, const std::vector<int32_t> &indices);
 	void InitCOOFromCOO(const std::vector<std::string> &feature_ids, const std::vector<std::string> &sample_ids);

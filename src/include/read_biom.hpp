@@ -39,7 +39,6 @@ public:
 		mutex hdf5_lock; // Serialize HDF5 operations (HDF5 is not thread-safe)
 		std::vector<std::string> filepaths;
 		size_t current_file_idx;
-		bool finished;
 
 		idx_t MaxThreads() const override {
 			// Use conservative fixed-thread approach with 4 threads
@@ -49,7 +48,7 @@ public:
 		}
 
 		explicit GlobalState(const std::vector<std::string> &paths)
-		    : filepaths(paths), current_file_idx(0), finished(false) {
+		    : filepaths(paths), current_file_idx(0) {
 		}
 	};
 
@@ -58,9 +57,6 @@ public:
 		miint::BIOMTable table;
 		size_t current_row = 0;
 		size_t total_rows = 0;
-		std::vector<std::string> sample_ids;
-		std::vector<std::string> feature_ids;
-		std::vector<double> values;
 		bool done = false;
 
 		bool GetNextFile(GlobalState &global_state) {
@@ -79,8 +75,11 @@ public:
 			// Serialize HDF5 operations since HDF5 is not thread-safe
 			{
 				std::lock_guard<std::mutex> hdf5_guard(global_state.hdf5_lock);
-				auto reader = miint::BIOMReader(path);
-				table = reader.read();
+				{
+					auto reader = miint::BIOMReader(path);
+					table = reader.read();
+					// Explicit scope ensures reader destructor runs while holding hdf5_lock
+				}
 			}
 
 			total_rows = table.nnz();
@@ -100,11 +99,11 @@ public:
 	static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 
 	static void SetResultVector(Vector &result_vector, const miint::BIOMTableField &field,
-	                            const miint::BIOMTable &record, const size_t &current_row, const size_t &n_rows);
+	                            const miint::BIOMTable &record, size_t current_row, size_t n_rows);
 	static void SetResultVectorString(Vector &result_vector, const miint::BIOMTableField &field,
-	                                  const miint::BIOMTable &record, const size_t &current_row, const size_t &n_rows);
+	                                  const miint::BIOMTable &record, size_t current_row, size_t n_rows);
 	static void SetResultVectorDouble(Vector &result_vector, const miint::BIOMTableField &field,
-	                                  const miint::BIOMTable &record, const size_t &current_row, const size_t &n_rows);
+	                                  const miint::BIOMTable &record, size_t current_row, size_t n_rows);
 	static void SetResultVectorFilepath(Vector &result_vector, const std::string &filepath, size_t num_records);
 
 	static TableFunction GetFunction();

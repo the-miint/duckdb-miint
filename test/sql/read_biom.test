@@ -135,7 +135,7 @@ VARCHAR
 statement error
 SELECT * FROM read_biom([]);
 ----
-Invalid Input Error: read_biom: first argument must be VARCHAR or VARCHAR[]
+Invalid Input Error: read_biom: at least one file path must be provided
 
 # Test NULL handling in values (if applicable to test data)
 # This test assumes test.biom may have explicit zeros stored
@@ -186,13 +186,3 @@ S3	7.0
 S4	6.0
 S5	10.0
 S6	14.0
-
-# Performance test with large files. NOTE: this test runs roughly 4s on a mac (arm64) laptop
-# however directly running the same query outside of the test framework runs in 0.6s. 
-# The inclusion of `PRAGMA enable_verification` triggers internal diagnostics for testing which 
-# appear to be the source of the discrepency, and which make sense as this is a test
-# framework.
-query I
-SELECT COUNT(*) FROM read_biom('data/biom/large_table1.biom');
-----
-13052393
