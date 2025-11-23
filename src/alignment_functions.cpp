@@ -1,196 +1,9 @@
 #include "alignment_functions.hpp"
+#include "alignment_functions_internal.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/string_type.hpp"
 #include "duckdb/function/scalar_function.hpp"
-#include <cctype>
 #include <string>
-
-namespace miint {
-
-// CIGAR parsing result structure
-struct CigarStats {
-	int64_t matches = 0;           // M, =, X operations
-	int64_t match_ops = 0;         // = operations only
-	int64_t mismatch_ops = 0;      // X operations only
-	int64_t insertions = 0;        // I operations
-	int64_t deletions = 0;         // D operations
-	int64_t gap_opens = 0;         // Number of gap opening events
-	int64_t alignment_columns = 0; // M + I + D operations
-	int64_t soft_clips = 0;        // S operations
-	int64_t hard_clips = 0;        // H operations
-};
-
-// Parse CIGAR string and extract statistics
-static CigarStats ParseCigar(const std::string &cigar_str) {
-	CigarStats stats;
-	const char *cigar = cigar_str.data();
-	size_t len = cigar_str.size();
-
-	if (len == 0 || (len == 1 && cigar[0] == '*')) {
-		return stats; // Empty or unmapped
-	}
-
-	int64_t op_len = 0;
-	char prev_op_type = '\0'; // Track previous operation type for gap opens
-
-	for (size_t i = 0; i < len; i++) {
-		char c = cigar[i];
-
-		if (std::isdigit(c)) {
-			op_len = op_len * 10 + (c - '0');
-		} else {
-			// Operation character
-			if (op_len == 0) {
-				throw duckdb::InvalidInputException("Invalid CIGAR string: operation without length");
-			}
-
-			switch (c) {
-			case 'M': // Match or mismatch (alignment match)
-				stats.matches += op_len;
-				stats.alignment_columns += op_len;
-				break;
-			case '=': // Sequence match
-				stats.matches += op_len;
-				stats.match_ops += op_len;
-				stats.alignment_columns += op_len;
-				break;
-			case 'X': // Sequence mismatch
-				stats.matches += op_len;
-				stats.mismatch_ops += op_len;
-				stats.alignment_columns += op_len;
-				break;
-			case 'I': // Insertion to the reference
-				stats.insertions += op_len;
-				stats.alignment_columns += op_len;
-				// Count gap open if previous op was not I
-				if (prev_op_type != 'I') {
-					stats.gap_opens++;
-				}
-				break;
-			case 'D': // Deletion from the reference
-				stats.deletions += op_len;
-				stats.alignment_columns += op_len;
-				// Count gap open if previous op was not D
-				if (prev_op_type != 'D') {
-					stats.gap_opens++;
-				}
-				break;
-			case 'N': // Skipped region (ref skip, e.g., intron)
-			case 'P': // Padding
-				// These don't contribute to alignment columns
-				break;
-			case 'S': // Soft clipping
-				stats.soft_clips += op_len;
-				break;
-			case 'H': // Hard clipping
-				stats.hard_clips += op_len;
-				break;
-			default:
-				throw duckdb::InvalidInputException("Invalid CIGAR operation: " + std::string(1, c));
-			}
-
-			prev_op_type = c;
-			op_len = 0;
-		}
-	}
-
-	return stats;
-}
-
-// MD parsing result structure
-struct MdStats {
-	int64_t matches = 0;
-	int64_t mismatches = 0;
-};
-
-// Parse MD tag string and extract match/mismatch counts
-static MdStats ParseMd(const std::string &md_str) {
-	MdStats stats;
-	const char *md = md_str.data();
-	size_t len = md_str.size();
-
-	if (len == 0) {
-		return stats; // Empty MD tag
-	}
-
-	int64_t match_len = 0;
-
-	for (size_t i = 0; i < len; i++) {
-		char c = md[i];
-
-		if (std::isdigit(c)) {
-			match_len = match_len * 10 + (c - '0');
-		} else if (c == '^') {
-			// Deletion marker: skip following deleted bases
-			if (match_len > 0) {
-				stats.matches += match_len;
-				match_len = 0;
-			}
-			i++; // Skip the '^'
-			// Skip deletion bases
-			while (i < len && std::isalpha(md[i])) {
-				i++;
-			}
-			i--; // Back up one since loop will increment
-		} else if (std::isalpha(c)) {
-			// Mismatch base
-			if (match_len > 0) {
-				stats.matches += match_len;
-				match_len = 0;
-			}
-			stats.mismatches++;
-		}
-	}
-
-	// Add remaining matches
-	if (match_len > 0) {
-		stats.matches += match_len;
-	}
-
-	return stats;
-}
-
-// Compute query length from CIGAR statistics
-// When include_hard_clips=false, result matches HTSlib's bam_cigar2qlen
-// (which counts M, I, S, =, X operations but excludes H, D, N, P)
-static int64_t ComputeQueryLength(const CigarStats &stats, bool include_hard_clips) {
-	// Query-consuming operations: M, I, S, =, X
-	// matches field contains M + = + X
-	int64_t length = stats.matches + stats.insertions + stats.soft_clips;
-
-	if (include_hard_clips) {
-		length += stats.hard_clips;
-	}
-
-	return length;
-}
-
-// Compute query coverage from CIGAR statistics
-// Returns the proportion of query bases covered by the reference
-static double ComputeQueryCoverage(const CigarStats &stats, const std::string &type) {
-	// Total query length (always includes hard clips)
-	int64_t query_length = stats.matches + stats.insertions + stats.soft_clips + stats.hard_clips;
-
-	if (query_length == 0) {
-		return 0.0; // Avoid division by zero, return 0% coverage
-	}
-
-	int64_t covered_bases = 0;
-	if (type == "aligned") {
-		// Only bases that align to reference (M, =, X)
-		covered_bases = stats.matches;
-	} else if (type == "mapped") {
-		// Bases that are mapped (not clipped): M, I, =, X
-		covered_bases = stats.matches + stats.insertions;
-	} else {
-		throw duckdb::InvalidInputException("Invalid coverage type: " + type +
-		                                    ". Must be 'aligned' or 'mapped'.");
-	}
-
-	return static_cast<double>(covered_bases) / static_cast<double>(query_length);
-}
-
-} // namespace miint
 
 namespace duckdb {
 
@@ -249,7 +62,7 @@ static void AlignmentSeqIdentityScalarFunction(DataChunk &args, ExpressionState 
 		try {
 			std::string cigar_std(cigar.GetData(), cigar.GetSize());
 			cigar_stats = miint::ParseCigar(cigar_std);
-		} catch (const InvalidInputException &) {
+		} catch (const miint::InvalidInputException &) {
 			result_validity.SetInvalid(i);
 			continue;
 		}
@@ -268,13 +81,13 @@ static void AlignmentSeqIdentityScalarFunction(DataChunk &args, ExpressionState 
 			try {
 				std::string md_std(md.GetData(), md.GetSize());
 				md_stats = miint::ParseMd(md_std);
-			} catch (const InvalidInputException &) {
+			} catch (const miint::InvalidInputException &) {
 				result_validity.SetInvalid(i);
 				continue;
 			}
 
 			int64_t total = md_stats.matches + md_stats.mismatches;
-			if (total == 0) {
+			if (total <= 0) {
 				result_validity.SetInvalid(i);
 				continue;
 			}
@@ -290,7 +103,13 @@ static void AlignmentSeqIdentityScalarFunction(DataChunk &args, ExpressionState 
 				continue;
 			}
 
-			if (cigar_stats.alignment_columns == 0) {
+			if (cigar_stats.alignment_columns <= 0) {
+				result_validity.SetInvalid(i);
+				continue;
+			}
+
+			// Validate NM tag doesn't exceed alignment length (per SAM spec)
+			if (nm > cigar_stats.alignment_columns) {
 				result_validity.SetInvalid(i);
 				continue;
 			}
@@ -299,8 +118,16 @@ static void AlignmentSeqIdentityScalarFunction(DataChunk &args, ExpressionState 
 			identity = static_cast<double>(matches) / static_cast<double>(cigar_stats.alignment_columns);
 
 		} else if (type_str == "gap_compressed") {
-			// gap_compressed: 1 - (n - g + o) / (m + o) = (m - n + g) / (m + o)
-			// where m = sum(M/=/X), n = NM, g = sum(I+D), o = gap_opens
+			// gap_compressed: sequence identity with gap compression
+			// Formula: 1 - (n - g + o) / (m + o) = (m - n + g) / (m + o)
+			// where:
+			//   m = sum(M/=/X) - match operations in CIGAR
+			//   n = NM tag - edit distance
+			//   g = sum(I+D) - total gap bases (insertions + deletions)
+			//   o = gap_opens - number of gap opening events
+			// This treats consecutive indel operations as a single event.
+			// Reference: Heng Li's blog post "On the definition of sequence identity"
+			// https://lh3.github.io/2018/11/25/on-the-definition-of-sequence-identity
 			// Requires NM tag
 			if (nm < 0) {
 				result_validity.SetInvalid(i);
@@ -312,8 +139,14 @@ static void AlignmentSeqIdentityScalarFunction(DataChunk &args, ExpressionState 
 			int64_t g = cigar_stats.insertions + cigar_stats.deletions;
 			int64_t o = cigar_stats.gap_opens;
 
+			// Validate NM tag is reasonable (shouldn't exceed matches + gaps)
+			if (n > m + g) {
+				result_validity.SetInvalid(i);
+				continue;
+			}
+
 			int64_t denominator = m + o;
-			if (denominator == 0) {
+			if (denominator <= 0) {
 				result_validity.SetInvalid(i);
 				continue;
 			}
@@ -361,16 +194,16 @@ static void AlignmentQueryLengthScalarFunction(DataChunk &args, ExpressionState 
 			    return int64_t(0);
 		    }
 
-		    // Parse CIGAR
-		    std::string cigar_std(cigar.GetData(), cigar.GetSize());
-		    miint::CigarStats cigar_stats;
 		    try {
-			    cigar_stats = miint::ParseCigar(cigar_std);
-		    } catch (const InvalidInputException &) {
-			    return int64_t(0);
-		    }
+			    // Parse CIGAR
+			    std::string cigar_std(cigar.GetData(), cigar.GetSize());
+			    miint::CigarStats cigar_stats = miint::ParseCigar(cigar_std);
 
-		    return miint::ComputeQueryLength(cigar_stats, include_hard_clips);
+			    return miint::ComputeQueryLength(cigar_stats, include_hard_clips);
+		    } catch (const miint::InvalidInputException &e) {
+			    // Convert miint exceptions to DuckDB exceptions
+			    throw InvalidInputException(e.what());
+		    }
 	    });
 }
 
@@ -403,17 +236,17 @@ void AlignmentQueryLengthFunction::Register(ExtensionLoader &loader) {
 				                                  return int64_t(0);
 			                                  }
 
-			                                  // Parse CIGAR
-			                                  std::string cigar_std(cigar.GetData(), cigar.GetSize());
-			                                  miint::CigarStats cigar_stats;
 			                                  try {
-				                                  cigar_stats = miint::ParseCigar(cigar_std);
-			                                  } catch (const InvalidInputException &) {
-				                                  return int64_t(0);
-			                                  }
+				                                  // Parse CIGAR - let exceptions propagate for invalid input
+				                                  std::string cigar_std(cigar.GetData(), cigar.GetSize());
+				                                  miint::CigarStats cigar_stats = miint::ParseCigar(cigar_std);
 
-			                                  // Default to include_hard_clips = true
-			                                  return miint::ComputeQueryLength(cigar_stats, true);
+				                                  // Default to include_hard_clips = true
+				                                  return miint::ComputeQueryLength(cigar_stats, true);
+			                                  } catch (const miint::InvalidInputException &e) {
+				                                  // Convert miint exceptions to DuckDB exceptions
+				                                  throw InvalidInputException(e.what());
+			                                  }
 		                                  });
 	                              });
 	func_one_param.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
@@ -437,20 +270,20 @@ static void AlignmentQueryCoverageScalarFunction(DataChunk &args, ExpressionStat
 			    return 0.0;
 		    }
 
-		    // Parse CIGAR
-		    std::string cigar_std(cigar.GetData(), cigar.GetSize());
-		    miint::CigarStats cigar_stats;
 		    try {
-			    cigar_stats = miint::ParseCigar(cigar_std);
-		    } catch (const InvalidInputException &) {
-			    return 0.0;
+			    // Parse CIGAR - let exceptions propagate for invalid input
+			    std::string cigar_std(cigar.GetData(), cigar.GetSize());
+			    miint::CigarStats cigar_stats = miint::ParseCigar(cigar_std);
+
+			    // Get type string
+			    std::string type_str(type.GetData(), type.GetSize());
+
+			    // Compute coverage
+			    return miint::ComputeQueryCoverage(cigar_stats, type_str);
+		    } catch (const miint::InvalidInputException &e) {
+			    // Convert miint exceptions to DuckDB exceptions
+			    throw InvalidInputException(e.what());
 		    }
-
-		    // Get type string
-		    std::string type_str(type.GetData(), type.GetSize());
-
-		    // Compute coverage
-		    return miint::ComputeQueryCoverage(cigar_stats, type_str);
 	    });
 }
 
@@ -483,17 +316,17 @@ void AlignmentQueryCoverageFunction::Register(ExtensionLoader &loader) {
 				                                  return 0.0;
 			                                  }
 
-			                                  // Parse CIGAR
-			                                  std::string cigar_std(cigar.GetData(), cigar.GetSize());
-			                                  miint::CigarStats cigar_stats;
 			                                  try {
-				                                  cigar_stats = miint::ParseCigar(cigar_std);
-			                                  } catch (const InvalidInputException &) {
-				                                  return 0.0;
-			                                  }
+				                                  // Parse CIGAR - let exceptions propagate for invalid input
+				                                  std::string cigar_std(cigar.GetData(), cigar.GetSize());
+				                                  miint::CigarStats cigar_stats = miint::ParseCigar(cigar_std);
 
-			                                  // Default to type = 'aligned'
-			                                  return miint::ComputeQueryCoverage(cigar_stats, "aligned");
+				                                  // Default to type = 'aligned'
+				                                  return miint::ComputeQueryCoverage(cigar_stats, "aligned");
+			                                  } catch (const miint::InvalidInputException &e) {
+				                                  // Convert miint exceptions to DuckDB exceptions
+				                                  throw InvalidInputException(e.what());
+			                                  }
 		                                  });
 	                              });
 	func_one_param.null_handling = FunctionNullHandling::SPECIAL_HANDLING;

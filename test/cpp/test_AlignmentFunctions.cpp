@@ -1,187 +1,6 @@
+#include "../../src/include/alignment_functions_internal.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
-#include <stdexcept>
-#include <string>
-// Include just the miint namespace parts we need for testing
-// We need to define the exception type and the parsing functions
-
-namespace miint {
-
-// Copy the struct definitions and parsing functions from alignment_functions.cpp
-struct CigarStats {
-	int64_t matches = 0;
-	int64_t match_ops = 0;
-	int64_t mismatch_ops = 0;
-	int64_t insertions = 0;
-	int64_t deletions = 0;
-	int64_t gap_opens = 0;
-	int64_t alignment_columns = 0;
-	int64_t soft_clips = 0;
-	int64_t hard_clips = 0;
-};
-
-struct MdStats {
-	int64_t matches = 0;
-	int64_t mismatches = 0;
-};
-
-// Simple exception class for testing
-class InvalidInputException : public std::runtime_error {
-public:
-	explicit InvalidInputException(const std::string &msg) : std::runtime_error(msg) {
-	}
-};
-
-// Parse CIGAR string and extract statistics
-static CigarStats ParseCigar(const std::string &cigar_str) {
-	CigarStats stats;
-	const char *cigar = cigar_str.data();
-	size_t len = cigar_str.size();
-
-	if (len == 0 || (len == 1 && cigar[0] == '*')) {
-		return stats;
-	}
-
-	int64_t op_len = 0;
-	char prev_op_type = '\0';
-
-	for (size_t i = 0; i < len; i++) {
-		char c = cigar[i];
-
-		if (std::isdigit(c)) {
-			op_len = op_len * 10 + (c - '0');
-		} else {
-			if (op_len == 0) {
-				throw InvalidInputException("Invalid CIGAR string: operation without length");
-			}
-
-			switch (c) {
-			case 'M':
-				stats.matches += op_len;
-				stats.alignment_columns += op_len;
-				break;
-			case '=':
-				stats.matches += op_len;
-				stats.match_ops += op_len;
-				stats.alignment_columns += op_len;
-				break;
-			case 'X':
-				stats.matches += op_len;
-				stats.mismatch_ops += op_len;
-				stats.alignment_columns += op_len;
-				break;
-			case 'I':
-				stats.insertions += op_len;
-				stats.alignment_columns += op_len;
-				if (prev_op_type != 'I') {
-					stats.gap_opens++;
-				}
-				break;
-			case 'D':
-				stats.deletions += op_len;
-				stats.alignment_columns += op_len;
-				if (prev_op_type != 'D') {
-					stats.gap_opens++;
-				}
-				break;
-			case 'N':
-			case 'P':
-				break;
-			case 'S':
-				stats.soft_clips += op_len;
-				break;
-			case 'H':
-				stats.hard_clips += op_len;
-				break;
-			default:
-				throw InvalidInputException("Invalid CIGAR operation: " + std::string(1, c));
-			}
-
-			prev_op_type = c;
-			op_len = 0;
-		}
-	}
-
-	return stats;
-}
-
-// Parse MD tag string and extract match/mismatch counts
-static MdStats ParseMd(const std::string &md_str) {
-	MdStats stats;
-	const char *md = md_str.data();
-	size_t len = md_str.size();
-
-	if (len == 0) {
-		return stats;
-	}
-
-	int64_t match_len = 0;
-
-	for (size_t i = 0; i < len; i++) {
-		char c = md[i];
-
-		if (std::isdigit(c)) {
-			match_len = match_len * 10 + (c - '0');
-		} else if (c == '^') {
-			if (match_len > 0) {
-				stats.matches += match_len;
-				match_len = 0;
-			}
-			i++;
-			while (i < len && std::isalpha(md[i])) {
-				i++;
-			}
-			i--;
-		} else if (std::isalpha(c)) {
-			if (match_len > 0) {
-				stats.matches += match_len;
-				match_len = 0;
-			}
-			stats.mismatches++;
-		}
-	}
-
-	if (match_len > 0) {
-		stats.matches += match_len;
-	}
-
-	return stats;
-}
-
-// Helper function to compute query length from CIGAR stats
-// When include_hard_clips=false, result should match HTSlib's bam_cigar2qlen
-static int64_t ComputeQueryLength(const CigarStats &stats, bool include_hard_clips) {
-	int64_t length = stats.matches + stats.insertions + stats.soft_clips;
-	if (include_hard_clips) {
-		length += stats.hard_clips;
-	}
-	return length;
-}
-
-// Helper function to compute query coverage from CIGAR stats
-static double ComputeQueryCoverage(const CigarStats &stats, const std::string &type) {
-	// Total query length (always includes hard clips)
-	int64_t query_length = stats.matches + stats.insertions + stats.soft_clips + stats.hard_clips;
-
-	if (query_length == 0) {
-		return 0.0; // Avoid division by zero, return 0% coverage
-	}
-
-	int64_t covered_bases = 0;
-	if (type == "aligned") {
-		// Only bases that align to reference (M, =, X)
-		covered_bases = stats.matches;
-	} else if (type == "mapped") {
-		// Bases that are mapped (not clipped): M, I, =, X
-		covered_bases = stats.matches + stats.insertions;
-	} else {
-		throw InvalidInputException("Invalid coverage type: " + type);
-	}
-
-	return static_cast<double>(covered_bases) / static_cast<double>(query_length);
-}
-
-} // namespace miint
 
 TEST_CASE("ParseCigar - Basic operations", "[alignment_functions]") {
 	SECTION("Simple match") {
@@ -425,6 +244,30 @@ TEST_CASE("ParseMd - Complex patterns", "[alignment_functions]") {
 		auto stats = miint::ParseMd("5A3^TG2C3");
 		REQUIRE((stats.matches == 13));
 		REQUIRE((stats.mismatches == 2));
+	}
+
+	SECTION("MD tag ending with deletion") {
+		auto stats = miint::ParseMd("10^AC");
+		REQUIRE((stats.matches == 10));
+		REQUIRE((stats.mismatches == 0));
+	}
+
+	SECTION("MD tag with only deletions") {
+		auto stats = miint::ParseMd("^AC^TG");
+		REQUIRE((stats.matches == 0));
+		REQUIRE((stats.mismatches == 0));
+	}
+
+	SECTION("MD tag with many consecutive mismatches") {
+		auto stats = miint::ParseMd("5ACGT4");
+		REQUIRE((stats.matches == 9));
+		REQUIRE((stats.mismatches == 4));
+	}
+
+	SECTION("Very long deletion sequence") {
+		auto stats = miint::ParseMd("10^ACGTACGTACGTACGT10");
+		REQUIRE((stats.matches == 20));
+		REQUIRE((stats.mismatches == 0));
 	}
 }
 
@@ -682,6 +525,47 @@ TEST_CASE("ComputeQueryCoverage - Edge cases", "[alignment_functions]") {
 	SECTION("Invalid type throws exception") {
 		auto stats = miint::ParseCigar("10M");
 		REQUIRE_THROWS_AS(miint::ComputeQueryCoverage(stats, "invalid"), miint::InvalidInputException);
+	}
+}
+
+TEST_CASE("ParseCigar - Integer overflow protection", "[alignment_functions]") {
+	SECTION("Huge CIGAR operation length should throw") {
+		// This would overflow int64_t without bounds checking
+		REQUIRE_THROWS_AS(miint::ParseCigar("999999999999999999999M"), miint::InvalidInputException);
+	}
+
+	SECTION("Maximum safe CIGAR operation length") {
+		// Just below overflow threshold should work
+		auto stats = miint::ParseCigar("922337203685477580M");
+		REQUIRE((stats.matches == 922337203685477580));
+	}
+
+	SECTION("CIGAR with multiple operations parsing") {
+		// Multiple operations are allowed - overflow check is per-operation
+		// Note: Accumulated stats could overflow, but that's a usage issue
+		auto stats = miint::ParseCigar("100M50I");
+		REQUIRE((stats.matches == 100));
+		REQUIRE((stats.insertions == 50));
+	}
+}
+
+TEST_CASE("ParseMd - Integer overflow protection", "[alignment_functions]") {
+	SECTION("Huge MD match length should throw") {
+		// This would overflow int64_t without bounds checking
+		REQUIRE_THROWS_AS(miint::ParseMd("999999999999999999999"), miint::InvalidInputException);
+	}
+
+	SECTION("Maximum safe MD match length") {
+		// Just below overflow threshold should work
+		auto stats = miint::ParseMd("922337203685477580");
+		REQUIRE((stats.matches == 922337203685477580));
+	}
+
+	SECTION("MD tag with multiple large numbers") {
+		// Each individual number is safe but total might overflow in usage
+		auto stats = miint::ParseMd("500000000000000000A500000000000000000");
+		REQUIRE((stats.matches == 1000000000000000000));
+		REQUIRE((stats.mismatches == 1));
 	}
 }
 

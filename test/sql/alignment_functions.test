@@ -677,3 +677,75 @@ SELECT COUNT(*) FROM read_sam('data/sam/foo_has_header.sam')
 WHERE alignment_query_coverage(cigar, 'aligned') >= 0.0;
 ----
 4
+
+###############################################################################
+# ERROR HANDLING - INVALID CIGAR STRINGS
+###############################################################################
+
+# Invalid CIGAR - operation without length
+statement error
+SELECT alignment_query_length('M');
+----
+Invalid CIGAR string: operation without length
+
+# Invalid CIGAR - unknown operation character
+statement error
+SELECT alignment_query_length('10Z');
+----
+Invalid CIGAR operation: Z
+
+# Invalid CIGAR - incomplete (number without operation)
+statement error
+SELECT alignment_query_length('10M5');
+----
+Invalid CIGAR string: incomplete operation (missing operation character)
+
+# Test same errors with alignment_query_coverage
+statement error
+SELECT alignment_query_coverage('M', 'aligned');
+----
+Invalid CIGAR string: operation without length
+
+statement error
+SELECT alignment_query_coverage('10Z', 'aligned');
+----
+Invalid CIGAR operation: Z
+
+# Note: alignment_seq_identity returns NULL for invalid CIGAR instead of throwing
+# This is intentional - it processes batches and needs to handle errors gracefully
+query I
+SELECT alignment_seq_identity('10Z', 0, '', 'blast') IS NULL;
+----
+true
+
+###############################################################################
+# ERROR HANDLING - INTEGER OVERFLOW
+###############################################################################
+
+# CIGAR with huge number that would overflow int64
+statement error
+SELECT alignment_query_length('999999999999999999999M');
+----
+CIGAR operation length exceeds maximum
+
+# MD tag with huge number - alignment_seq_identity returns NULL (doesn't throw)
+query I
+SELECT alignment_seq_identity('10M', 0, '999999999999999999999', 'gap_excluded') IS NULL;
+----
+true
+
+###############################################################################
+# ERROR HANDLING - INVALID NM TAG VALUES
+###############################################################################
+
+# NM tag exceeds alignment length (blast mode) - returns NULL
+query I
+SELECT alignment_seq_identity('10M', 20, '', 'blast') IS NULL;
+----
+true
+
+# NM tag exceeds matches+gaps (gap_compressed mode) - returns NULL
+query I
+SELECT alignment_seq_identity('10M', 20, '', 'gap_compressed') IS NULL;
+----
+true
