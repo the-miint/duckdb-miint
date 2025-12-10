@@ -5,8 +5,9 @@
 
 namespace miint {
 // Constructor for SAM files with headers
-SAMReader::SAMReader(const std::string &filename)
-    : fp(sam_open(filename.c_str(), "r")), hdr(sam_hdr_read(fp.get())), aln(bam_init1()) {
+SAMReader::SAMReader(const std::string &filename, bool include_seq_qual)
+    : fp(sam_open(filename.c_str(), "r")), hdr(sam_hdr_read(fp.get())), aln(bam_init1()),
+      include_seq_qual(include_seq_qual) {
 	if (!fp) {
 		throw std::runtime_error("Failed to open SAM file");
 	}
@@ -22,8 +23,9 @@ SAMReader::SAMReader(const std::string &filename)
 }
 
 // Constructor for headerless SAM files
-SAMReader::SAMReader(const std::string &filename, const std::unordered_map<std::string, uint64_t> &references)
-    : fp(sam_open(filename.c_str(), "r")), aln(bam_init1()) {
+SAMReader::SAMReader(const std::string &filename, const std::unordered_map<std::string, uint64_t> &references,
+                     bool include_seq_qual)
+    : fp(sam_open(filename.c_str(), "r")), aln(bam_init1()), include_seq_qual(include_seq_qual) {
 	// Open file
 	if (!fp) {
 		throw std::runtime_error("Failed to open SAM file");
@@ -102,7 +104,7 @@ SAMRecordBatch SAMReader::read(const int n) {
 		// because htslib automatically marks reads with unknown references as unmapped (tid=-1, FLAG 0x4)
 		// making them indistinguishable from genuinely unmapped reads. Users must ensure their
 		// reference_lengths table includes all references present in the data files.
-		sam_utils::parse_record_to_batch(aln.get(), hdr.get(), batch);
+		sam_utils::parse_record_to_batch(aln.get(), hdr.get(), batch, include_seq_qual);
 	}
 	return batch;
 }

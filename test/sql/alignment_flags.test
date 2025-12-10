@@ -105,6 +105,28 @@ SELECT alignment_is_primary(0::USMALLINT);
 ----
 true
 
+# Regression test: alignment_is_primary should return false for supplementary alignments (0x800 = 2048)
+query I
+SELECT alignment_is_primary(2048::USMALLINT);
+----
+false
+
+# Regression test: alignment_is_primary should return false when both secondary and supplementary flags are set (256 + 2048 = 2304)
+query I
+SELECT alignment_is_primary(2304::USMALLINT);
+----
+false
+
+# Verify primary requires both secondary (0x100) and supplementary (0x800) to be unset
+query IIII
+SELECT
+    alignment_is_primary(0::USMALLINT),      -- neither flag: true
+    alignment_is_primary(256::USMALLINT),    -- secondary only: false
+    alignment_is_primary(2048::USMALLINT),   -- supplementary only: false
+    alignment_is_primary(2304::USMALLINT);   -- both flags: false
+----
+true	false	false	false
+
 query I
 SELECT alignment_is_qc_failed(512::USMALLINT);
 ----

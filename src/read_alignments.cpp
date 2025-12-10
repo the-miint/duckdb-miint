@@ -62,7 +62,14 @@ unique_ptr<FunctionData> ReadAlignmentsTableFunction::Bind(ClientContext &contex
 		include_filepath = fp_param->second.GetValue<bool>();
 	}
 
-	auto data = duckdb::make_uniq<Data>(sam_paths, reference_lengths_table, include_filepath);
+	// Parse include_seq_qual parameter (optional BOOLEAN, default false)
+	bool include_seq_qual = false;
+	auto seq_param = input.named_parameters.find("include_seq_qual");
+	if (seq_param != input.named_parameters.end() && !seq_param->second.IsNull()) {
+		include_seq_qual = seq_param->second.GetValue<bool>();
+	}
+
+	auto data = duckdb::make_uniq<Data>(sam_paths, reference_lengths_table, include_filepath, include_seq_qual);
 	for (auto &name : data->names) {
 		names.emplace_back(name);
 	}
@@ -125,7 +132,7 @@ unique_ptr<GlobalTableFunctionState> ReadAlignmentsTableFunction::InitGlobal(Cli
 		}
 	}
 
-	auto gstate = duckdb::make_uniq<GlobalState>(data.sam_paths, reference_lengths);
+	auto gstate = duckdb::make_uniq<GlobalState>(data.sam_paths, reference_lengths, data.include_seq_qual);
 
 	return gstate;
 }
@@ -200,6 +207,12 @@ void ReadAlignmentsTableFunction::Execute(ClientContext &context, TableFunctionI
 	SetResultVectorStringNullable(output.data[field_idx++], batch.tag_md_values);
 	SetResultVectorStringNullable(output.data[field_idx++], batch.tag_sa_values);
 
+	// Set SEQUENCE and QUAL columns if requested
+	if (bind_data.include_seq_qual) {
+		SetResultVectorString(output.data[field_idx++], batch.sequences);
+		SetResultVectorListUInt8(output.data[field_idx++], batch.quals);
+	}
+
 	// Set filepath column if requested
 	if (bind_data.include_filepath) {
 		SetResultVectorFilepath(output.data[field_idx++], current_filepath);
@@ -272,10 +285,47 @@ void ReadAlignmentsTableFunction::SetResultVectorFilepath(Vector &result_vector,
 	*result_data = StringVector::AddString(result_vector, filepath);
 }
 
+void ReadAlignmentsTableFunction::SetResultVectorListUInt8(Vector &result_vector,
+                                                             const std::vector<miint::QualScore> &values) {
+	// Compute total number of elements
+	idx_t total_child_elements = 0;
+	for (auto &qual : values) {
+		total_child_elements += qual.as_string().length();
+	}
+
+	ListVector::Reserve(result_vector, total_child_elements);
+	ListVector::SetListSize(result_vector, total_child_elements);
+
+	auto &child_vector = ListVector::GetEntry(result_vector);
+	auto child_data = FlatVector::GetData<uint8_t>(child_vector);
+	auto list_entries = FlatVector::GetData<list_entry_t>(result_vector);
+
+	const auto output_count = values.size();
+	idx_t value_offset = 0;
+	for (idx_t row_offset = 0; row_offset < output_count; row_offset++) {
+		// Always use offset=33 since we store internally as Phred33 ASCII
+		const auto qual_data = values[row_offset].as_vec(33);
+		list_entries[row_offset].offset = value_offset;
+		list_entries[row_offset].length = qual_data.size();
+
+		for (auto &value : qual_data) {
+			child_data[value_offset++] = value;
+		}
+	}
+
+	// All entries are not null
+	auto &validity = FlatVector::Validity(result_vector);
+	validity.SetAllValid(output_count);
+
+	auto &child_validity = FlatVector::Validity(child_vector);
+	child_validity.SetAllValid(total_child_elements);
+}
+
 TableFunction ReadAlignmentsTableFunction::GetFunction() {
 	auto tf = TableFunction("read_alignments", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
 	tf.named_parameters["reference_lengths"] = LogicalType::ANY;
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
+	tf.named_parameters["include_seq_qual"] = LogicalType::BOOLEAN;
 	return tf;
 }
 
@@ -287,6 +337,7 @@ void ReadAlignmentsTableFunction::Register(ExtensionLoader &loader) {
 	auto read_sam_alias = TableFunction("read_sam", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
 	read_sam_alias.named_parameters["reference_lengths"] = LogicalType::ANY;
 	read_sam_alias.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
+	read_sam_alias.named_parameters["include_seq_qual"] = LogicalType::BOOLEAN;
 	loader.RegisterFunction(read_sam_alias);
 }
 

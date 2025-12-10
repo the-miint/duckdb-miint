@@ -113,3 +113,73 @@ CREATE TABLE ref_table AS SELECT 'genome1' AS name, 1000 AS length;
 SELECT * FROM read_alignments('data/sam/foo_has_header.bam', reference_lengths='ref_table')
 ----
 BAM file has header
+
+# Test include_seq_qual parameter - default false (no sequence/qual columns)
+query I
+SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM read_alignments('data/sam/foo_with_seqqual.sam')) WHERE column_name IN ('sequence', 'qual')
+----
+0
+
+# Test include_seq_qual=true adds sequence and qual columns
+query I
+SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM read_alignments('data/sam/foo_with_seqqual.sam', include_seq_qual=true)) WHERE column_name IN ('sequence', 'qual')
+----
+2
+
+# Test sequence and qual data types
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_alignments('data/sam/foo_with_seqqual.sam', include_seq_qual=true)) WHERE column_name IN ('sequence', 'qual') ORDER BY column_name
+----
+qual	UTINYINT[]
+sequence	VARCHAR
+
+# Test actual sequence and quality values
+query TTII
+SELECT read_id, sequence, list_extract(qual, 1) as first_qual, len(sequence) as seq_len
+FROM read_alignments('data/sam/foo_with_seqqual.sam', include_seq_qual=true)
+WHERE read_id = 'read1'
+----
+read1	ACGTACGTAC	0	10
+
+# Test that sequence and quality lengths match
+query I
+SELECT COUNT(*) FROM read_alignments('data/sam/foo_with_seqqual.sam', include_seq_qual=true)
+WHERE len(sequence) = len(qual)
+----
+5
+
+# Test include_seq_qual with include_filepath
+query III
+SELECT COUNT(*), COUNT(DISTINCT sequence), COUNT(DISTINCT filepath)
+FROM read_alignments('data/sam/foo_with_seqqual.sam', include_seq_qual=true, include_filepath=true)
+----
+5	5	1
+
+# Test quality score values (should be 0-93 range)
+query II
+SELECT MIN(list_min(qual)), MAX(list_max(qual))
+FROM read_alignments('data/sam/foo_with_seqqual.sam', include_seq_qual=true)
+WHERE len(qual) > 0
+----
+0	41
+
+# Test with multiple files
+query I
+SELECT COUNT(DISTINCT sequence)
+FROM read_alignments(['data/sam/foo_with_seqqual.sam', 'data/sam/foo_with_seqqual.sam'], include_seq_qual=true)
+----
+5
+
+# Test read_sam alias with include_seq_qual
+query I
+SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM read_sam('data/sam/foo_with_seqqual.sam', include_seq_qual=true)) WHERE column_name IN ('sequence', 'qual')
+----
+2
+
+# Test unmapped reads with missing SEQ/QUAL (should fail - unmapped reads must have SEQ/QUAL)
+statement error
+SELECT read_id, len(sequence)
+FROM read_alignments('data/sam/foo_unmapped_no_seq.sam', include_seq_qual=true)
+ORDER BY read_id
+----
+Primary/unmapped read missing sequence

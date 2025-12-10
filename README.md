@@ -144,7 +144,7 @@ To run the extension code, simply start the shell with `./build/release/duckdb`.
 
 ## Functions
 
-### `read_alignments(filename, [reference_lengths='table_name'], [include_filepath=false])`
+### `read_alignments(filename, [reference_lengths='table_name'], [include_filepath=false], [include_seq_qual=false])`
 Read SAM/BAM alignment files.
 
 **Note:** `read_sam` is still supported as a backward-compatible alias.
@@ -153,11 +153,14 @@ Read SAM/BAM alignment files.
 - `filename` (VARCHAR or VARCHAR[]): Path to SAM/BAM file(s)
 - `reference_lengths` (VARCHAR, optional): Table name containing reference sequences for headerless SAM files. Table must have at least 2 columns: first column = reference name (VARCHAR), second column = reference length (INTEGER/BIGINT). Column names don't matter.
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
+- `include_seq_qual` (BOOLEAN, optional, default false): Add sequence and quality score columns to output. When enabled, primary alignments (non-secondary, non-supplementary) and unmapped reads must have SEQ/QUAL data or an error will be raised.
 
 **Output schema includes:**
 - `position` (BIGINT): 1-based start position
 - `stop_position` (BIGINT): 1-based stop position (computed from CIGAR using `bam_endpos`)
 - `cigar` (VARCHAR): CIGAR string
+- `sequence` (VARCHAR, optional): Read sequence from SEQ field (when include_seq_qual=true)
+- `qual` (UTINYINT[], optional): Quality scores as array of integers 0-93 (when include_seq_qual=true)
 - Plus other standard SAM fields and optional tags
 
 **Examples:**
@@ -176,6 +179,20 @@ SELECT * FROM read_alignments('headerless.sam', reference_lengths='my_refs');
 
 -- Read multiple files with filepath tracking
 SELECT * FROM read_alignments(['file1.sam', 'file2.bam'], include_filepath=true);
+
+-- Include sequence and quality scores
+SELECT read_id, sequence, qual
+FROM read_alignments('alignments.sam', include_seq_qual=true);
+
+-- Analyze quality scores
+SELECT read_id, sequence, list_avg(qual) as avg_qual
+FROM read_alignments('alignments.bam', include_seq_qual=true)
+WHERE list_avg(qual) >= 30;
+
+-- Filter by sequence length
+SELECT read_id, len(sequence) as seq_len
+FROM read_alignments('alignments.sam', include_seq_qual=true)
+WHERE len(sequence) >= 100;
 
 -- Backward compatible: read_sam still works
 SELECT * FROM read_sam('alignments.sam');
@@ -518,7 +535,7 @@ Test individual SAM flag bits. Each function takes a `USMALLINT` (the flags colu
 - `alignment_is_read1(flags)` - Read is first in pair (0x40)
 - `alignment_is_read2(flags)` - Read is second in pair (0x80)
 - `alignment_is_secondary(flags)` - Secondary alignment (0x100)
-- `alignment_is_primary(flags)` - NOT alignment_is_secondary
+- `alignment_is_primary(flags)` - Primary alignment (neither secondary nor supplementary)
 - `alignment_is_qc_failed(flags)` - QC failure (0x200)
 - `alignment_is_duplicate(flags)` - PCR/optical duplicate (0x400)
 - `alignment_is_supplementary(flags)` - Supplementary alignment (0x800)

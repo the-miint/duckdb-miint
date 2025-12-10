@@ -1,0 +1,7 @@
+@SQ	SN:chr1	LN:100
+@SQ	SN:chr2	LN:200
+read1	0	chr1	10	60	10M	*	0	0	ACGTACGTAC	!*5?JJJJJJ	AS:i:10	NM:i:0
+read2	0	chr1	20	60	15M	*	0	0	*	*	AS:i:15	NM:i:1
+read3	99	chr2	30	60	20M	=	50	40	ACGTACGTACGTACGTACGT	!!**55??JJJJJJJJJJJJ	AS:i:20	NM:i:0
+read4	4	*	0	0	*	*	0	0	*	*	AS:i:0
+read5	0	chr1	40	60	5M	*	0	0	ACGTA	JJJJJ	AS:i:5	NM:i:0

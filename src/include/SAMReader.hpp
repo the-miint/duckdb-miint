@@ -43,12 +43,13 @@ using BAMRecordPtr = std::unique_ptr<bam1_t, BAMRecordDeleter>;
 class SAMReader {
 public:
 	// Constructor for SAM files with headers
-	explicit SAMReader(const std::string &filename);
+	explicit SAMReader(const std::string &filename, bool include_seq_qual = false);
 
 	// Constructor for headerless SAM files
 	// Creates a synthetic header from the provided reference map
 	// Note: Cannot validate that all references in the data are in the reference map due to htslib limitations
-	explicit SAMReader(const std::string &filename, const std::unordered_map<std::string, uint64_t> &references);
+	explicit SAMReader(const std::string &filename, const std::unordered_map<std::string, uint64_t> &references,
+	                   bool include_seq_qual = false);
 
 	// Read up to n records into a batch
 	SAMRecordBatch read(const int n);
@@ -57,5 +58,6 @@ private:
 	SAMFilePtr fp;
 	SAMHeaderPtr hdr;
 	BAMRecordPtr aln;
+	bool include_seq_qual;
 };
 }; // namespace miint

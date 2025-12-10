@@ -4,6 +4,7 @@
 #include <sstream>
 #include <vector>
 #include <htslib-1.22.1/htslib/sam.h>
+#include "QualScore.hpp"
 
 namespace miint {
 
@@ -112,6 +113,8 @@ struct SAMRecordBatch {
 	std::vector<std::string> tag_yt_values;
 	std::vector<std::string> tag_md_values;
 	std::vector<std::string> tag_sa_values;
+	std::vector<std::string> sequences;
+	std::vector<miint::QualScore> quals;
 
 	size_t size() const {
 		return read_ids.size();
@@ -143,6 +146,8 @@ struct SAMRecordBatch {
 		tag_yt_values.reserve(n);
 		tag_md_values.reserve(n);
 		tag_sa_values.reserve(n);
+		sequences.reserve(n);
+		quals.reserve(n);
 	}
 
 	void clear() {
@@ -167,6 +172,8 @@ struct SAMRecordBatch {
 		tag_yt_values.clear();
 		tag_md_values.clear();
 		tag_sa_values.clear();
+		sequences.clear();
+		quals.clear();
 	}
 };
 
@@ -200,7 +207,8 @@ namespace sam_utils {
 	}
 
 	// Parse a single record into a batch (append)
-	inline void parse_record_to_batch(const bam1_t *aln, const sam_hdr_t *hdr, SAMRecordBatch &batch) {
+	inline void parse_record_to_batch(const bam1_t *aln, const sam_hdr_t *hdr, SAMRecordBatch &batch,
+	                                   bool include_seq_qual = false) {
 		batch.read_ids.emplace_back(reinterpret_cast<char *>(aln->data));
 		batch.flags.push_back(aln->core.flag);
 
@@ -246,6 +254,50 @@ namespace sam_utils {
 		batch.tag_yt_values.emplace_back(get_string_tag(aln, "YT"));
 		batch.tag_md_values.emplace_back(get_string_tag(aln, "MD"));
 		batch.tag_sa_values.emplace_back(get_string_tag(aln, "SA"));
+
+		// Extract SEQUENCE and QUALITY (optional)
+		if (include_seq_qual) {
+			// Extract SEQUENCE
+			uint8_t *seq = bam_get_seq(aln);
+			std::string sequence;
+			sequence.reserve(aln->core.l_qseq);
+			for (int i = 0; i < aln->core.l_qseq; i++) {
+				sequence.push_back(seq_nt16_str[bam_seqi(seq, i)]);
+			}
+
+			// Extract QUALITY
+			uint8_t *qual = bam_get_qual(aln);
+			std::string qual_str;
+
+			// Validate: primary and unmapped reads must have sequence
+			bool is_unmapped = (aln->core.flag & 4) != 0;
+			bool is_secondary = (aln->core.flag & 0x100) != 0;
+			bool is_supplementary = (aln->core.flag & 0x800) != 0;
+			bool is_primary = !is_secondary && !is_supplementary;
+
+			if (aln->core.l_qseq == 0 && (is_primary || is_unmapped)) {
+				throw std::runtime_error("Primary/unmapped read missing sequence (SEQ='*'): " +
+				                         std::string(reinterpret_cast<char *>(aln->data)));
+			}
+
+			// Note: HTSlib enforces that sequence and quality lengths match during parsing
+			// If quality is present (qual[0] != 0xFF), it's guaranteed to match l_qseq
+			// No explicit validation needed here - HTSlib handles this
+
+			if (qual[0] == 0xFF) {
+				// No quality scores (indicated by 0xFF in first byte)
+				qual_str = ""; // Empty string for QualScore
+			} else {
+				qual_str.reserve(aln->core.l_qseq);
+				for (int i = 0; i < aln->core.l_qseq; i++) {
+					// HTSlib returns raw Phred scores (0-93), convert to Phred33 ASCII for storage
+					qual_str.push_back(qual[i] + 33);
+				}
+			}
+
+			batch.sequences.emplace_back(sequence);
+			batch.quals.emplace_back(QualScore(qual_str));
+		}
 	}
 }
 }; // namespace miint

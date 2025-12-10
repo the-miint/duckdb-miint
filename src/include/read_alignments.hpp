@@ -20,14 +20,16 @@ public:
 		std::vector<std::string> sam_paths;
 		std::optional<std::string> reference_lengths_table;
 		bool include_filepath;
+		bool include_seq_qual;
 
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 		std::vector<miint::SAMRecordField> fields;
 
 		explicit Data(const std::vector<std::string> &paths, const std::optional<std::string> &ref_table,
-		              bool include_fp)
+		              bool include_fp, bool include_sq)
 		    : sam_paths(paths), reference_lengths_table(ref_table), include_filepath(include_fp),
+		      include_seq_qual(include_sq),
 		      names({"read_id", "flags",          "reference",     "position",        "stop_position", "mapq",
 		             "cigar",   "mate_reference", "mate_position", "template_length", "tag_as",        "tag_xs",
 		             "tag_ys",  "tag_xn",         "tag_xm",        "tag_xo",          "tag_xg",        "tag_nm",
@@ -64,6 +66,12 @@ public:
 		              miint::SAMRecordField::TAG_XG,        miint::SAMRecordField::TAG_NM,
 		              miint::SAMRecordField::TAG_YT,        miint::SAMRecordField::TAG_MD,
 		              miint::SAMRecordField::TAG_SA}) {
+			if (include_seq_qual) {
+				names.emplace_back("sequence");
+				types.emplace_back(LogicalType::VARCHAR);
+				names.emplace_back("qual");
+				types.emplace_back(LogicalType::LIST(LogicalType::UTINYINT));
+			}
 			if (include_filepath) {
 				names.emplace_back("filepath");
 				types.emplace_back(LogicalType::VARCHAR);
@@ -82,14 +90,14 @@ public:
 		}
 
 		GlobalState(const std::vector<std::string> &paths,
-		            std::optional<std::unordered_map<std::string, uint64_t>> ref_lengths)
+		            std::optional<std::unordered_map<std::string, uint64_t>> ref_lengths, bool include_seq_qual)
 		    : next_file_idx(0) {
 			filepaths = paths;
 			for (const auto &path : paths) {
 				if (ref_lengths.has_value()) {
-					readers.push_back(std::make_unique<miint::SAMReader>(path, ref_lengths.value()));
+					readers.push_back(std::make_unique<miint::SAMReader>(path, ref_lengths.value(), include_seq_qual));
 				} else {
-					readers.push_back(std::make_unique<miint::SAMReader>(path));
+					readers.push_back(std::make_unique<miint::SAMReader>(path, include_seq_qual));
 				}
 			}
 		}
@@ -119,6 +127,7 @@ public:
 	static void SetResultVectorUInt16(Vector &result_vector, const std::vector<uint16_t> &values);
 	static void SetResultVectorInt64(Vector &result_vector, const std::vector<int64_t> &values);
 	static void SetResultVectorInt64Nullable(Vector &result_vector, const std::vector<int64_t> &values);
+	static void SetResultVectorListUInt8(Vector &result_vector, const std::vector<miint::QualScore> &values);
 	static void SetResultVectorFilepath(Vector &result_vector, const std::string &filepath);
 
 	static TableFunction GetFunction();
