@@ -33,8 +33,7 @@ static void check_ids(const std::string &name1, const std::string &name2) {
 	}
 }
 
-SequenceReader::SequenceReader(const std::string &path1, const std::optional<std::string> &path2)
-    : first_read_(true) {
+SequenceReader::SequenceReader(const std::string &path1, const std::optional<std::string> &path2) : first_read_(true) {
 	sequence1_reader_ = std::make_unique<SeqStreamIn>(path1.c_str());
 
 	// Check if first file is empty by attempting to peek at first record
@@ -84,7 +83,7 @@ SequenceRecordBatch SequenceReader::read_se(const int n) {
 		reads = std::move(buffered_read1_);
 
 		// If we got fewer than n records from buffer, read more
-		int remaining = n - reads.size();
+		int remaining = n - (int)reads.size();
 		if (remaining > 0) {
 			auto more = sequence1_reader_->read(remaining);
 			reads.insert(reads.end(), more.begin(), more.end());
@@ -120,7 +119,7 @@ SequenceRecordBatch SequenceReader::read_pe(const int n) {
 		read2s = std::move(buffered_read2_);
 
 		// If we got fewer than n records from buffer, read more
-		int remaining = n - read1s.size();
+		int remaining = n - (int)read1s.size();
 		if (remaining > 0) {
 			auto more1 = sequence1_reader_->read(remaining);
 			auto more2 = sequence2_reader_.value()->read(remaining);
