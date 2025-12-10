@@ -56,6 +56,14 @@ static unique_ptr<FunctionData> BiomCopyBind(ClientContext &context, CopyFunctio
 	result->file_path = input.info.file_path;
 	result->names = names;
 
+	// Check if file already exists - fail early before any computation
+	auto &fs = FileSystem::GetFileSystem(context);
+	if (fs.FileExists(result->file_path)) {
+		throw IOException("COPY FORMAT BIOM: Cannot overwrite existing file '%s'. Delete it first or choose a "
+		                  "different path.",
+		                  result->file_path);
+	}
+
 	// Find required columns
 	for (idx_t i = 0; i < names.size(); i++) {
 		if (names[i] == "feature_id") {

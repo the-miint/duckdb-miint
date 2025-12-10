@@ -262,6 +262,17 @@ TO '__TEST_DIR__/error7.biom' (FORMAT BIOM, COMPRESSION 'invalid');
 ----
 compression
 
+# Test 20: Error - cannot overwrite existing file (file exists protection)
+statement ok
+COPY (SELECT feature_id, sample_id, value FROM test_biom_basic)
+TO '__TEST_DIR__/output_overwrite_test.biom' (FORMAT BIOM);
+
+statement error
+COPY (SELECT feature_id, sample_id, value FROM test_biom_basic)
+TO '__TEST_DIR__/output_overwrite_test.biom' (FORMAT BIOM);
+----
+Cannot overwrite existing file
+
 # Cleanup
 statement ok
 DROP TABLE test_biom_basic;
