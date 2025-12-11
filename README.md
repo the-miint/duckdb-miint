@@ -150,7 +150,7 @@ Read SAM/BAM alignment files.
 **Note:** `read_sam` is still supported as a backward-compatible alias.
 
 **Parameters:**
-- `filename` (VARCHAR or VARCHAR[]): Path to SAM/BAM file(s)
+- `filename` (VARCHAR or VARCHAR[]): Path to SAM/BAM file(s), or `-` / `/dev/stdin` for standard input
 - `reference_lengths` (VARCHAR, optional): Table name containing reference sequences for headerless SAM files. Table must have at least 2 columns: first column = reference name (VARCHAR), second column = reference length (INTEGER/BIGINT). Column names don't matter.
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
 - `include_seq_qual` (BOOLEAN, optional, default false): Add sequence and quality score columns to output. When enabled, primary alignments (non-secondary, non-supplementary) and unmapped reads must have SEQ/QUAL data or an error will be raised.
@@ -162,6 +162,14 @@ Read SAM/BAM alignment files.
 - `sequence` (VARCHAR, optional): Read sequence from SEQ field (when include_seq_qual=true)
 - `qual` (UTINYINT[], optional): Quality scores as array of integers 0-93 (when include_seq_qual=true)
 - Plus other standard SAM fields and optional tags
+
+**Behavior:**
+- Supports both SAM (text) and BAM (binary) formats
+- Auto-detects file format from content
+- Supports gzip-compressed SAM files
+- Supports stdin input using `-` or `/dev/stdin` (single file only, not in arrays)
+- Supports parallel processing (4 threads for files, single-threaded for stdin)
+- For headerless SAM files, provide reference information via `reference_lengths` parameter
 
 **Examples:**
 ```sql
@@ -194,9 +202,22 @@ SELECT read_id, len(sequence) as seq_len
 FROM read_alignments('alignments.sam', include_seq_qual=true)
 WHERE len(sequence) >= 100;
 
+-- Read from stdin with header
+SELECT * FROM read_alignments('/dev/stdin');
+
+-- Read headerless SAM from stdin (requires reference table)
+CREATE TABLE refs AS SELECT 'chr1' AS name, 248956422 AS length;
+SELECT * FROM read_alignments('-', reference_lengths='refs');
+
 -- Backward compatible: read_sam still works
 SELECT * FROM read_sam('alignments.sam');
 ```
+
+**Stdin limitations:**
+- Cannot be used in multi-file arrays (e.g., `['/dev/stdin', 'file.sam']` will error)
+- Data with headers works without `reference_lengths`
+- Headerless data requires `reference_lengths` parameter
+- User must know whether their stdin data contains headers
 
 ### `read_fastx(filename, [sequence2=filename], [include_filepath=false], [qual_offset=33])`
 Read FASTA/FASTQ sequence files.
@@ -1382,7 +1403,7 @@ TO 'sparse.biom' (FORMAT BIOM);
 
 ## Running the tests
 
-The MIINT extension uses two complementary testing approaches to ensure correctness and reliability.
+The MIINT extension uses three complementary testing approaches to ensure correctness and reliability.
 
 ### SQL Logic Tests
 
@@ -1518,6 +1539,76 @@ TEST_CASE("ParseCigar - Basic operations", "[alignment_functions]") {
 - Use matchers for floating-point comparisons (`REQUIRE_THAT(value, WithinRel(expected, 0.001))`)
 - Test boundary conditions, error cases, and edge cases
 - Keep test data minimal and focused on the specific behavior being tested
+
+### Shell Script Tests
+
+Some functionality cannot be tested through SQL logic tests, such as stdin handling. These features are tested using bash scripts located in `test/shell/`.
+
+**Running shell tests:**
+```sh
+# Run all shell tests
+for test in test/shell/*.sh; do bash "$test"; done
+
+# Run a specific shell test
+bash test/shell/read_alignments_stdin.sh
+
+# All tests (SQL, C++, and shell)
+bash run_tests.sh
+```
+
+**Test file structure:**
+Shell tests use simple bash scripts with conditional logic and exit codes:
+
+```bash
+#!/bin/bash
+set -e  # Exit on error
+
+DUCKDB="./build/release/duckdb"
+FAILED=0
+
+# Helper function to run a test
+run_test() {
+    local test_name="$1"
+    local expected="$2"
+    shift 2
+    local cmd="$@"
+
+    echo "Running: $test_name"
+    result=$(eval "$cmd" 2>&1 || true)
+
+    if echo "$result" | grep -q "$expected"; then
+        echo "  ✓ PASS"
+    else
+        echo "  ✗ FAIL"
+        FAILED=1
+    fi
+}
+
+# Test cases
+run_test "Test description" \
+    "expected output substring" \
+    "cat data.txt | $DUCKDB -c 'SELECT * FROM read_alignments(\"/dev/stdin\");'"
+
+# Return status
+if [ $FAILED -eq 0 ]; then
+    echo "All tests passed!"
+    exit 0
+else
+    echo "Some tests failed!"
+    exit 1
+fi
+```
+
+**Example test files:**
+- `test/shell/read_alignments_stdin.sh` - Tests for reading SAM/BAM from stdin
+
+**Good practices for shell tests:**
+- Use `set -e` to exit on first error
+- Test both success and error cases
+- Use `grep -q` to verify expected output substrings
+- Always return proper exit codes (0 for success, 1 for failure)
+- Use clear, descriptive test names
+- Capture both stdout and stderr (`2>&1`)
 
 ### Test Data
 

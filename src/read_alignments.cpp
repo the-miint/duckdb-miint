@@ -7,6 +7,11 @@
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
 
+// Helper function to detect stdin paths
+static bool IsStdinPath(const std::string &path) {
+	return path == "-" || path == "/dev/stdin";
+}
+
 namespace duckdb {
 
 unique_ptr<FunctionData> ReadAlignmentsTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
@@ -28,9 +33,23 @@ unique_ptr<FunctionData> ReadAlignmentsTableFunction::Bind(ClientContext &contex
 		throw InvalidInputException("read_alignments: first argument must be VARCHAR or VARCHAR[]");
 	}
 
-	// Validate all files exist
+	// Check if any path is stdin
+	bool has_stdin = false;
 	for (const auto &path : sam_paths) {
-		if (!fs.FileExists(path)) {
+		if (IsStdinPath(path)) {
+			has_stdin = true;
+			break;
+		}
+	}
+
+	// Error if stdin is used with multiple files
+	if (has_stdin && sam_paths.size() > 1) {
+		throw InvalidInputException("Cannot use stdin (/dev/stdin or -) with multiple files");
+	}
+
+	// Validate all files exist (skip stdin)
+	for (const auto &path : sam_paths) {
+		if (!IsStdinPath(path) && !fs.FileExists(path)) {
 			throw IOException("File not found: " + path);
 		}
 	}
@@ -89,44 +108,55 @@ unique_ptr<GlobalTableFunctionState> ReadAlignmentsTableFunction::InitGlobal(Cli
 		reference_lengths = ReadReferenceTable(context, data.reference_lengths_table.value());
 	}
 
-	// Check header consistency across all files
-	bool first_file_has_header = false;
-	for (size_t i = 0; i < data.sam_paths.size(); i++) {
-		const auto &path = data.sam_paths[i];
+	// Check if reading from stdin (single file that is a stdin path)
+	bool reading_from_stdin = (data.sam_paths.size() == 1 && IsStdinPath(data.sam_paths[0]));
 
-		// Check if file has header by attempting to read it
-		miint::SAMFilePtr test_fp(sam_open(path.c_str(), "r"));
-		if (!test_fp) {
-			throw IOException("Failed to open SAM file: " + path);
-		}
-		miint::SAMHeaderPtr test_hdr(sam_hdr_read(test_fp.get()));
-		bool has_header = (test_hdr && test_hdr->n_targets > 0);
+	// For stdin, skip header checking to avoid consuming data
+	// Validation will occur in SAMReader constructor when GlobalState is created
+	// - If stdin has header without reference_lengths: SAMReader(path) succeeds
+	// - If stdin is headerless without reference_lengths: SAMReader(path) throws "SAM file missing required header"
+	// - If stdin is headerless with reference_lengths: SAMReader(path, refs) succeeds
+	// - If stdin has header with reference_lengths: User error, cannot detect early (documented limitation)
+	if (!reading_from_stdin) {
+		// Check header consistency across all files
+		bool first_file_has_header = false;
+		for (size_t i = 0; i < data.sam_paths.size(); i++) {
+			const auto &path = data.sam_paths[i];
 
-		if (i == 0) {
-			first_file_has_header = has_header;
-
-			// Validate first file: if no header, require reference_lengths
-			if (!has_header && !reference_lengths.has_value()) {
-				throw IOException("File lacks a header, and no reference information provided");
+			// Check if file has header by attempting to read it
+			miint::SAMFilePtr test_fp(sam_open(path.c_str(), "r"));
+			if (!test_fp) {
+				throw IOException("Failed to open SAM file: " + path);
 			}
+			miint::SAMHeaderPtr test_hdr(sam_hdr_read(test_fp.get()));
+			bool has_header = (test_hdr && test_hdr->n_targets > 0);
 
-			// Validate first file: if has header, reject reference_lengths
-			if (has_header && reference_lengths.has_value()) {
-				// Get actual format type from HTSlib
-				const htsFormat *fmt = hts_get_format(test_fp.get());
-				const char *format_name = (fmt && fmt->format == bam) ? "BAM" : "SAM";
-				throw IOException(std::string(format_name) +
-				                  " file has header, but reference_lengths parameter was provided");
-			}
-		} else {
-			// Validate subsequent files have same header status
-			if (has_header != first_file_has_header) {
-				if (first_file_has_header) {
-					throw IOException("Inconsistent headers across files: '" + data.sam_paths[0] + "' has header, '" + path +
-					                  "' does not");
-				} else {
-					throw IOException("Inconsistent headers across files: '" + data.sam_paths[0] + "' lacks header, '" +
-					                  path + "' has header");
+			if (i == 0) {
+				first_file_has_header = has_header;
+
+				// Validate first file: if no header, require reference_lengths
+				if (!has_header && !reference_lengths.has_value()) {
+					throw IOException("File lacks a header, and no reference information provided");
+				}
+
+				// Validate first file: if has header, reject reference_lengths
+				if (has_header && reference_lengths.has_value()) {
+					// Get actual format type from HTSlib
+					const htsFormat *fmt = hts_get_format(test_fp.get());
+					const char *format_name = (fmt && fmt->format == bam) ? "BAM" : "SAM";
+					throw IOException(std::string(format_name) +
+					                  " file has header, but reference_lengths parameter was provided");
+				}
+			} else {
+				// Validate subsequent files have same header status
+				if (has_header != first_file_has_header) {
+					if (first_file_has_header) {
+						throw IOException("Inconsistent headers across files: '" + data.sam_paths[0] + "' has header, '" + path +
+						                  "' does not");
+					} else {
+						throw IOException("Inconsistent headers across files: '" + data.sam_paths[0] + "' lacks header, '" +
+						                  path + "' has header");
+					}
 				}
 			}
 		}
