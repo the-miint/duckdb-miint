@@ -203,7 +203,7 @@ COMPRESSION_LEVEL must be between 0 and 9
 statement error
 COPY sam_test TO '__TEST_DIR__/error.bam' (FORMAT BAM);
 ----
-COPY FORMAT SAM requires REFERENCE_LENGTHS parameter
+COPY FORMAT BAM requires REFERENCE_LENGTHS parameter
 
 # Test 18: Verify all optional tags are preserved in BAM
 statement ok

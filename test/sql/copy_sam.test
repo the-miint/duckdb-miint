@@ -205,13 +205,29 @@ COPY (SELECT read_id, 'wrong'::VARCHAR as flags, reference, position, mapq, ciga
 ----
 Column 'flags' must be USMALLINT
 
-# Test 20: Test error when missing REFERENCE_LENGTHS (always required)
+# Test 20: Test error when missing REFERENCE_LENGTHS with INCLUDE_HEADER=true
 statement error
-COPY sam_test TO '__TEST_DIR__/error.sam' (FORMAT SAM);
+COPY sam_test TO '__TEST_DIR__/error.sam' (FORMAT SAM, INCLUDE_HEADER true);
 ----
-COPY FORMAT SAM requires REFERENCE_LENGTHS parameter
+COPY FORMAT SAM with INCLUDE_HEADER=true requires REFERENCE_LENGTHS parameter
 
-# Test 21: Verify sequence and quality score preservation (if provided)
+# Test 21: Write SAM without header and without REFERENCE_LENGTHS (headerless mode)
+statement ok
+CREATE TABLE headerless_test AS SELECT 'read-1' as read_id, 0::UINT16 as flags, 'chr1' as reference, 100::INT64 as position, 110::INT64 as stop_position, 60::UINT8 as mapq, '10M' as cigar, '*' as mate_reference, 0::INT64 as mate_position, 0::INT64 as template_length, NULL::INT64 as tag_as, NULL::INT64 as tag_xs, NULL::INT64 as tag_ys, NULL::INT64 as tag_xn, NULL::INT64 as tag_xm, NULL::INT64 as tag_xo, NULL::INT64 as tag_xg, NULL::INT64 as tag_nm, NULL::VARCHAR as tag_yt, NULL::VARCHAR as tag_md, NULL::VARCHAR as tag_sa;
+
+statement ok
+COPY headerless_test TO '__TEST_DIR__/headerless.sam' (FORMAT SAM, INCLUDE_HEADER false);
+
+# Verify the file was written (need reference_lengths to read headerless SAM)
+statement ok
+CREATE TABLE ref_for_read AS SELECT 'chr1' AS name, 1000 AS length;
+
+query IIIII
+SELECT read_id, flags, reference, position, mapq FROM read_sam('__TEST_DIR__/headerless.sam', reference_lengths='ref_for_read');
+----
+read-1	0	chr1	100	60
+
+# Test 22: Verify sequence and quality score preservation (if provided)
 # Note: Our test data uses * for sequence and quality, which should be preserved
 statement ok
 CREATE TABLE with_seq AS SELECT 'read-seq' as read_id, 0::UINT16 as flags, 'ref1' as reference, 1::INT64 as position, 4::INT64 as stop_position, 30::UINT8 as mapq, '4M' as cigar, '*' as mate_reference, 0::INT64 as mate_position, 0::INT64 as template_length, NULL::INT64 as tag_as, NULL::INT64 as tag_xs, NULL::INT64 as tag_ys, NULL::INT64 as tag_xn, NULL::INT64 as tag_xm, NULL::INT64 as tag_xo, NULL::INT64 as tag_xg, NULL::INT64 as tag_nm, NULL::VARCHAR as tag_yt, NULL::VARCHAR as tag_md, NULL::VARCHAR as tag_sa;

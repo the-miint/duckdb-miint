@@ -283,10 +283,15 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 	}
 
 	// Validate reference_lengths requirement
-	// Reference lengths are always required because HTSlib needs an internal header to write records
-	// (even in headerless mode where the header isn't written to the file)
-	if (!result->reference_lengths_table.has_value()) {
-		throw BinderException("COPY FORMAT SAM requires REFERENCE_LENGTHS parameter "
+	// For BAM format, reference_lengths is always required (BAM needs complete header upfront)
+	// For SAM format with INCLUDE_HEADER=true, reference_lengths is required to build the header
+	// For SAM format with INCLUDE_HEADER=false, reference_lengths is optional
+	if (result->format == SAMOutputFormat::BAM && !result->reference_lengths_table.has_value()) {
+		throw BinderException("COPY FORMAT BAM requires REFERENCE_LENGTHS parameter "
+		                      "(e.g., REFERENCE_LENGTHS='ref_table')");
+	}
+	if (result->include_header && !result->reference_lengths_table.has_value()) {
+		throw BinderException("COPY FORMAT SAM with INCLUDE_HEADER=true requires REFERENCE_LENGTHS parameter "
 		                      "(e.g., REFERENCE_LENGTHS='ref_table')");
 	}
 
@@ -352,7 +357,7 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 		throw IOException("Failed to open file for writing: " + file_path);
 	}
 
-	// Create header from reference_lengths if provided
+	// Create header from reference_lengths if provided, otherwise create empty header
 	gstate->header = SAMHeaderPtr(sam_hdr_init());
 	if (!gstate->header) {
 		throw std::runtime_error("Failed to create SAM header");
@@ -369,6 +374,8 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 			}
 		}
 	}
+	// If no reference_lengths provided, header remains empty
+	// References will be added dynamically as we encounter them during writing
 
 	return std::move(gstate);
 }
@@ -427,14 +434,29 @@ static bool ParseCIGAR(const string &cigar_str, std::vector<uint32_t> &cigar_buf
 	return true;
 }
 
-// Get reference TID from header (or -1 if unmapped)
+// Get reference TID from header, adding it dynamically if not present
+// When writing headerless SAM files, we add references with a sentinel length
 static int32_t GetReferenceTID(sam_hdr_t *header, const string &reference) {
 	if (reference == "*") {
 		return -1;
 	}
 	int32_t tid = sam_hdr_name2tid(header, reference.c_str());
-	// If reference not in header, treat as unmapped
-	return (tid < 0) ? -1 : tid;
+
+	// If reference not in header, add it with a sentinel length (2^31-1)
+	// This allows writing headerless SAM files without pre-defined reference lengths
+	if (tid < 0) {
+		constexpr const char *SENTINEL_LENGTH = "2147483647"; // 2^31-1, unknown length
+		if (sam_hdr_add_line(header, "SQ", "SN", reference.c_str(), "LN", SENTINEL_LENGTH, NULL) < 0) {
+			throw std::runtime_error("Failed to dynamically add reference to SAM header: " + reference);
+		}
+		// Get the tid after adding
+		tid = sam_hdr_name2tid(header, reference.c_str());
+		if (tid < 0) {
+			throw std::runtime_error("Failed to get TID for dynamically added reference: " + reference);
+		}
+	}
+
+	return tid;
 }
 
 //===--------------------------------------------------------------------===//
