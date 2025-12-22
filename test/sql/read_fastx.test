@@ -66,6 +66,14 @@ SELECT * FROM read_fastx('data/fastq/test.fa')
 1	seq1	test sequence 1	ATGCATGCATGC	NULL	NULL	NULL
 2	seq2	NULL	GGCCGGCCGGCC	NULL	NULL	NULL
 
+# Test FASTA with whitespace in sequences (should be stripped)
+query IIIIIII
+SELECT * FROM read_fastx('data/fastq/sequence_with_spaces.fasta')
+----
+1	foo	NULL	AATTGGCCAAATATAGCGCGTA	NULL	NULL	NULL
+2	bar	NULL	GGTTAACCGGTTAATTGG	NULL	NULL	NULL
+3	baz	NULL	AAAAAAAAAA	NULL	NULL	NULL
+
 # Test VARCHAR[] single-end (multiple files concatenated)
 query IIIIIII
 SELECT * FROM read_fastx(['data/fastq/small_a.fq', 'data/fastq/small_b.fq'])
