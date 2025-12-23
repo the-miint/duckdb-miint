@@ -273,8 +273,10 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 		break;
 	}
 
-	// Atomically claim sequence indices for this chunk
-	start_sequence_index = global_state.sequence_index_counter.fetch_add(batch.size());
+	// Get sequence indices for this chunk from the current file's counter
+	// No atomic operation needed - this thread has exclusive access to this file
+	start_sequence_index = global_state.file_sequence_counters[local_state.current_file_idx];
+	global_state.file_sequence_counters[local_state.current_file_idx] += batch.size();
 
 	// Set sequence_index column (first column, index 0)
 	auto &sequence_index_vector = output.data[0];

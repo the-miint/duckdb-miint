@@ -140,11 +140,12 @@ COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single) TO '__TEST_DIR
 QUAL_OFFSET must be 33 or 64
 
 # Test 17: Round-trip test with multiple records
+# Note: With per-file sequence_index, we need to include filepath to maintain order
 statement ok
-CREATE TABLE test_multi AS SELECT * FROM read_fastx(['data/fastq/small_a.fq', 'data/fastq/small_b.fq']);
+CREATE TABLE test_multi AS SELECT * FROM read_fastx(['data/fastq/small_a.fq', 'data/fastq/small_b.fq'], include_filepath=true);
 
 statement ok
-COPY (SELECT read_id, comment, sequence1, qual1 FROM test_multi ORDER BY sequence_index) TO '__TEST_DIR__/output_multi.fq' (FORMAT FASTQ);
+COPY (SELECT read_id, comment, sequence1, qual1 FROM test_multi ORDER BY filepath, sequence_index) TO '__TEST_DIR__/output_multi.fq' (FORMAT FASTQ);
 
 query I
 SELECT COUNT(*) FROM read_fastx('__TEST_DIR__/output_multi.fq');

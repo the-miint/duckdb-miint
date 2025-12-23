@@ -33,7 +33,7 @@ export VCPKG_TOOLCHAIN_PATH=`pwd`/vcpkg/scripts/buildsystems/vcpkg.cmake
 
 ### Build the extension
 ```bash
-make
+bash build.sh
 ```
 
 This creates:
@@ -48,7 +48,7 @@ If a test produces an **incorrect expected value**: DO NOT change the expected v
 
 ```bash
 # Run all SQL tests
-bash build.sh
+bash run_tests.sh
 
 # Run C++ unit tests
 ./build/release/extension/miint/tests

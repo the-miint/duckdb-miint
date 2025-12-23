@@ -229,7 +229,7 @@ Read FASTA/FASTQ sequence files.
 - `qual_offset` (INTEGER, optional, default 33): Quality score offset (33 for Phred+33, 64 for Phred+64)
 
 **Output schema:**
-- `sequence_index` (BIGINT): 0-based sequential index across all reads
+- `sequence_index` (BIGINT): 1-based sequential index per file (resets to 1 for each file when reading multiple files)
 - `read_id` (VARCHAR): Sequence identifier (without '@' or '>' prefix)
 - `comment` (VARCHAR, nullable): Comment line after identifier
 - `sequence1` (VARCHAR): DNA/RNA sequence (R1 for paired-end)
@@ -269,8 +269,10 @@ SELECT * FROM read_fastx(
     sequence2=['sample1_R2.fastq', 'sample2_R2.fastq']
 );
 
--- Include source filepath for tracking
-SELECT * FROM read_fastx(['batch1.fastq', 'batch2.fastq'], include_filepath=true);
+-- Include source filepath for tracking (recommended for multiple files)
+-- Note: sequence_index resets to 1 for each file
+SELECT * FROM read_fastx(['batch1.fastq', 'batch2.fastq'], include_filepath=true)
+ORDER BY filepath, sequence_index;
 
 -- Read from stdin
 SELECT * FROM read_fastx('-');
@@ -317,7 +319,7 @@ HAVING AVG(q) >= 30;
 **Notes:**
 - Read IDs must match between R1 and R2 files for paired-end data (not validated, matched by position)
 - For FASTA files, `qual1` and `qual2` are NULL
-- The `sequence_index` provides a global ordering across all files processed
+- The `sequence_index` resets to 1 for each file. To distinguish sequences from different files, use `include_filepath=true` and order by `filepath, sequence_index`
 - Comment field is NULL if no comment is present in the sequence header
 
 ### `read_biom(filename, [include_filepath=false])`

@@ -52,7 +52,7 @@ public:
 		std::vector<std::string> sequence2_filepaths;
 		size_t next_file_idx; // Next file available for claiming
 		bool uses_stdin;
-		std::atomic<uint64_t> sequence_index_counter; // Atomic for thread-safe increments
+		std::vector<uint64_t> file_sequence_counters; // Per-file sequence counters (no atomic needed - file access is exclusive)
 
 		// stdin cannot be read in parallel (no seeking/rewinding).
 		// This forces sequential execution, which may be slower than
@@ -66,7 +66,7 @@ public:
 
 		GlobalState(const std::vector<std::string> &sequence1_paths,
 		            const std::optional<std::vector<std::string>> &sequence2_paths, bool stdin_used)
-		    : next_file_idx(0), uses_stdin(stdin_used), sequence_index_counter(1) {
+		    : next_file_idx(0), uses_stdin(stdin_used) {
 			sequence1_filepaths = sequence1_paths;
 			if (sequence2_paths.has_value()) {
 				sequence2_filepaths = sequence2_paths.value();
@@ -79,6 +79,8 @@ public:
 				} else {
 					readers.push_back(std::make_unique<miint::SequenceReader>(sequence1_paths[i]));
 				}
+				// Initialize per-file sequence counter to 1 (1-based indexing)
+				file_sequence_counters.emplace_back(1);
 			}
 		}
 	};

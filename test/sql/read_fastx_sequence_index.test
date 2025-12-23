@@ -23,12 +23,15 @@ SELECT sequence_index, read_id, sequence2 FROM read_fastx('data/fastq/small_a_r1
 ----
 1	pair_a1	TTTT
 
-# Test sequence_index across multiple files (file order not guaranteed due to parallelism)
-# Verify we get all 4 unique sequence indices (1-4) and all 4 records
+# Test sequence_index across multiple files (per-file indexing)
+# Each file resets sequence_index to 1, so with 2 files of 2 records each:
+# - Total records: 4
+# - MIN(sequence_index): 1 (both files start at 1)
+# - MAX(sequence_index): 2 (both files have 2 records, indexed 1-2)
 query III
 SELECT COUNT(*), MIN(sequence_index), MAX(sequence_index) FROM read_fastx(['data/fastq/small_a.fq', 'data/fastq/small_b.fq']);
 ----
-4	1	4
+4	1	2
 
 # Verify all expected read_ids are present
 query I

@@ -74,31 +74,33 @@ SELECT * FROM read_fastx('data/fastq/sequence_with_spaces.fasta')
 2	bar	NULL	GGTTAACCGGTTAATTGG	NULL	NULL	NULL
 3	baz	NULL	AAAAAAAAAA	NULL	NULL	NULL
 
-# Test VARCHAR[] single-end (multiple files concatenated)
-query IIIIIII
-SELECT * FROM read_fastx(['data/fastq/small_a.fq', 'data/fastq/small_b.fq'])
-----
-1	read_a1	NULL	AAAA	NULL	[40, 40, 40, 40]	NULL
-2	read_a2	NULL	TTTT	NULL	[39, 39, 39, 39]	NULL
-3	read_b1	NULL	GGGG	NULL	[38, 38, 38, 38]	NULL
-4	read_b2	NULL	CCCC	NULL	[37, 37, 37, 37]	NULL
-
-# Test VARCHAR[] paired-end
-query IIIIIII
-SELECT * FROM read_fastx(['data/fastq/small_a_r1.fq', 'data/fastq/small_b_r1.fq'], 
-                          sequence2=['data/fastq/small_a_r2.fq', 'data/fastq/small_b_r2.fq'])
-----
-1	pair_a1	NULL	AAAA	TTTT	[40, 40, 40, 40]	[39, 39, 39, 39]
-2	pair_b1	NULL	GGGG	CCCC	[38, 38, 38, 38]	[37, 37, 37, 37]
-
-# Test include_filepath parameter
+# Test VARCHAR[] single-end (multiple files, each with per-file sequence_index)
+# Note: sequence_index now resets to 1 for each file, so we need include_filepath to distinguish
 query IIIIIIII
 SELECT * FROM read_fastx(['data/fastq/small_a.fq', 'data/fastq/small_b.fq'], include_filepath=true)
+ORDER BY filepath, sequence_index
 ----
 1	read_a1	NULL	AAAA	NULL	[40, 40, 40, 40]	NULL	data/fastq/small_a.fq
 2	read_a2	NULL	TTTT	NULL	[39, 39, 39, 39]	NULL	data/fastq/small_a.fq
-3	read_b1	NULL	GGGG	NULL	[38, 38, 38, 38]	NULL	data/fastq/small_b.fq
-4	read_b2	NULL	CCCC	NULL	[37, 37, 37, 37]	NULL	data/fastq/small_b.fq
+1	read_b1	NULL	GGGG	NULL	[38, 38, 38, 38]	NULL	data/fastq/small_b.fq
+2	read_b2	NULL	CCCC	NULL	[37, 37, 37, 37]	NULL	data/fastq/small_b.fq
+
+# Test VARCHAR[] paired-end (per-file sequence_index)
+query IIIIIIII
+SELECT * FROM read_fastx(['data/fastq/small_a_r1.fq', 'data/fastq/small_b_r1.fq'],
+                          sequence2=['data/fastq/small_a_r2.fq', 'data/fastq/small_b_r2.fq'],
+                          include_filepath=true)
+ORDER BY filepath, sequence_index
+----
+1	pair_a1	NULL	AAAA	TTTT	[40, 40, 40, 40]	[39, 39, 39, 39]	data/fastq/small_a_r1.fq
+1	pair_b1	NULL	GGGG	CCCC	[38, 38, 38, 38]	[37, 37, 37, 37]	data/fastq/small_b_r1.fq
+
+# Test include_filepath parameter with single file
+query IIIIIIII
+SELECT * FROM read_fastx('data/fastq/small_a.fq', include_filepath=true)
+----
+1	read_a1	NULL	AAAA	NULL	[40, 40, 40, 40]	NULL	data/fastq/small_a.fq
+2	read_a2	NULL	TTTT	NULL	[39, 39, 39, 39]	NULL	data/fastq/small_a.fq
 
 # Test include_filepath with paired-end
 query IIIIIIII
@@ -125,6 +127,68 @@ SELECT COUNT(*) FROM read_fastx(['data/fastq/foo.r1.fastq.gz', 'data/fastq/bar.r
 
 statement ok
 SET preserve_insertion_order=true;
+
+# ===== PER-FILE SEQUENCE_INDEX TESTS =====
+
+# Test: single file sequence_index works as expected (1 to N)
+query I
+SELECT sequence_index FROM read_fastx('data/fastq/bar.r1.fastq.gz')
+ORDER BY sequence_index
+----
+1
+2
+3
+
+# Test: multiple files each start from 1 (verified with include_filepath)
+query II
+SELECT sequence_index, filepath FROM read_fastx(
+    ['data/fastq/small_a.fq', 'data/fastq/small_b.fq', 'data/fastq/small_c.fq'],
+    include_filepath=true
+)
+ORDER BY filepath, sequence_index
+----
+1	data/fastq/small_a.fq
+2	data/fastq/small_a.fq
+1	data/fastq/small_b.fq
+2	data/fastq/small_b.fq
+1	data/fastq/small_c.fq
+
+# Test: paired-end reads increment sequence_index once per pair (not twice)
+query II
+SELECT sequence_index, read_id FROM read_fastx(
+    'data/fastq/foo.r1.fastq.gz',
+    sequence2='data/fastq/foo.r2.fastq.gz'
+)
+ORDER BY sequence_index
+----
+1	foo1
+2	foo2
+
+# Test: multiple paired-end files each start from 1
+query II
+SELECT sequence_index, filepath FROM read_fastx(
+    ['data/fastq/small_a_r1.fq', 'data/fastq/small_b_r1.fq'],
+    sequence2=['data/fastq/small_a_r2.fq', 'data/fastq/small_b_r2.fq'],
+    include_filepath=true
+)
+ORDER BY filepath, sequence_index
+----
+1	data/fastq/small_a_r1.fq
+1	data/fastq/small_b_r1.fq
+
+# Test: verify sequence_index resets for each file with larger dataset
+# foo has 2 sequences, bar has 3 sequences, so we expect indices [1,2,3]
+query I
+SELECT COUNT(DISTINCT sequence_index) FROM read_fastx(
+    ['data/fastq/foo.r1.fastq.gz', 'data/fastq/bar.r1.fastq.gz'],
+    include_filepath=true
+)
+----
+3
+
+# Note: stdin testing (e.g., cat file.fq | duckdb -c "SELECT * FROM read_fastx('-')")
+# is not easily done in this test framework, but stdin is treated as a single file,
+# so sequence_index behavior should match single file tests (indices 1 to N)
 
 # Error: empty file should throw
 statement error
