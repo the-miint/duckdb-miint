@@ -61,7 +61,7 @@ GROUP BY sample_id;
   - [Build steps](#build-steps)
 - [Running the extension](#running-the-extension)
 - [Functions](#functions)
-  - [read_alignments](#read_alignmentsfilename-reference_lengthstable_name-include_filepathfalse)
+  - [read_alignments](#read_alignmentsfilename-reference_lengthstable_name-include_filepathfalse-include_seq_qualfalse)
   - [read_fastx](#read_fastxfilename-sequence2filename-include_filepathfalse-qual_offset33)
   - [read_biom](#read_biomfilename-include_filepathfalse)
   - [read_gff](#read_gffpath)
@@ -83,6 +83,7 @@ GROUP BY sample_id;
 - [Running the tests](#running-the-tests)
   - [SQL Logic Tests](#sql-logic-tests)
   - [C++ Unit Tests](#c-unit-tests)
+  - [Shell Script Tests](#shell-script-tests)
   - [Test Data](#test-data)
 
 ## Installing
