@@ -13,7 +13,24 @@ unique_ptr<FunctionData> ReadBIOMTableFunction::Bind(ClientContext &context, Tab
                                                      vector<LogicalType> &return_types, vector<std::string> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
-	auto biom_paths = ParseFilePathsParameter(input.inputs[0], "read_biom");
+	std::vector<std::string> biom_paths;
+
+	// Handle VARCHAR (single path, potentially a glob) or VARCHAR[] (array of literal paths)
+	if (input.inputs[0].type().id() == LogicalTypeId::VARCHAR) {
+		// Single string - could be a glob pattern
+		biom_paths = ExpandGlobPattern(fs, context, input.inputs[0].ToString());
+	} else if (input.inputs[0].type().id() == LogicalTypeId::LIST) {
+		// Array of strings - literal paths only (no glob expansion)
+		auto &list_children = ListValue::GetChildren(input.inputs[0]);
+		for (const auto &child : list_children) {
+			biom_paths.push_back(child.ToString());
+		}
+		if (biom_paths.empty()) {
+			throw InvalidInputException("read_biom: at least one file path must be provided");
+		}
+	} else {
+		throw InvalidInputException("read_biom: first argument must be VARCHAR or VARCHAR[]");
+	}
 
 	// Validate all files exist and are BIOM
 	for (const auto &path : biom_paths) {

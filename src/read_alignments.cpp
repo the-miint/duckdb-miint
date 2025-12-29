@@ -1,5 +1,6 @@
 #include "read_alignments.hpp"
 #include "reference_table_reader.hpp"
+#include "table_function_common.hpp"
 #include "SAMReader.hpp"
 #include "SAMRecord.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -21,13 +22,18 @@ unique_ptr<FunctionData> ReadAlignmentsTableFunction::Bind(ClientContext &contex
 
 	std::vector<std::string> sam_paths;
 
-	// Handle VARCHAR or VARCHAR[] input for file paths
+	// Handle VARCHAR (single path, potentially a glob) or VARCHAR[] (array of literal paths)
 	if (input.inputs[0].type().id() == LogicalTypeId::VARCHAR) {
-		sam_paths.push_back(input.inputs[0].ToString());
+		// Single string - could be a glob pattern
+		sam_paths = ExpandGlobPattern(fs, context, input.inputs[0].ToString());
 	} else if (input.inputs[0].type().id() == LogicalTypeId::LIST) {
+		// Array of strings - literal paths only (no glob expansion)
 		auto &list_children = ListValue::GetChildren(input.inputs[0]);
 		for (const auto &child : list_children) {
 			sam_paths.push_back(child.ToString());
+		}
+		if (sam_paths.empty()) {
+			throw InvalidInputException("read_alignments: at least one file path must be provided");
 		}
 	} else {
 		throw InvalidInputException("read_alignments: first argument must be VARCHAR or VARCHAR[]");

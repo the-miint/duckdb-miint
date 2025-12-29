@@ -1,0 +1,110 @@
+# name: test/sql/glob_read_alignments.test
+# description: test glob pattern support for read_alignments table function
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+# ===== BASIC GLOB EXPANSION =====
+
+# Glob pattern matches multiple SAM files with headers (sorted alphabetically)
+# foo_has_header.sam has 4 records, foo_has_header_2.sam has 4 records
+query I
+SELECT COUNT(*) FROM read_alignments('data/sam/foo_has_header*.sam');
+----
+8
+
+# Verify sorting by checking filepath order
+query II
+SELECT read_id, filepath
+FROM read_alignments('data/sam/foo_has_header*.sam', include_filepath=true)
+ORDER BY filepath, read_id
+LIMIT 4;
+----
+foo-1	data/sam/foo_has_header.sam
+foo-2	data/sam/foo_has_header.sam
+foo-3	data/sam/foo_has_header.sam
+foo-3	data/sam/foo_has_header.sam
+
+# Glob pattern matches BAM files
+query I
+SELECT COUNT(*) FROM read_alignments('data/sam/foo_has_header*.bam');
+----
+8
+
+# Mixed SAM/BAM via glob (matches both .sam and .bam with same prefix)
+# This should error since the pattern would need to match both
+# Actually, the user likely wants to glob same format files
+# Let's test BAM specifically
+
+query IIII
+SELECT read_id, flags, reference, filepath
+FROM read_alignments('data/sam/foo_has_header*.bam', include_filepath=true)
+ORDER BY filepath, read_id
+LIMIT 2;
+----
+foo-1	0	G1234	data/sam/foo_has_header.bam
+foo-2	0	G1234	data/sam/foo_has_header.bam
+
+# ===== ERROR CASES =====
+
+# Error: glob pattern matches zero files
+statement error
+SELECT * FROM read_alignments('data/sam/nonexistent*.sam');
+----
+IO Error: No files matched pattern: data/sam/nonexistent*.sam
+
+# Error: glob pattern with stdin path
+statement error
+SELECT * FROM read_alignments('/dev/std*');
+----
+Invalid Input Error: Glob patterns cannot include stdin paths
+
+# Error: glob pattern with stdin path (dash)
+statement error
+SELECT * FROM read_alignments('-*');
+----
+Invalid Input Error: Glob patterns cannot include stdin paths
+
+# ===== GLOB VS ARRAY =====
+
+# Glob should NOT work inside arrays (treated as literal path)
+statement error
+SELECT * FROM read_alignments(['data/sam/foo_has_header*.sam']);
+----
+IO Error: File not found: data/sam/foo_has_header*.sam
+
+# ===== SINGLE FILE GLOB =====
+
+# Glob that matches single file should work
+query I
+SELECT COUNT(*) FROM read_alignments('data/sam/foo_with_tags.sam');
+----
+2
+
+# Pattern matching single file
+query I
+SELECT COUNT(*) FROM read_alignments('data/sam/foo_with_tags*.sam');
+----
+2
+
+# ===== HEADER CONSISTENCY WITH GLOB =====
+
+# Error: mixing header and no-header files via glob should error
+# We need files with different header status - let's use existing ones
+# foo_has_header.sam has header, foo_no_header.sam doesn't
+
+# First verify foo_no_header exists but has no header
+statement error
+SELECT * FROM read_alignments('data/sam/foo_no_header.sam');
+----
+File lacks a header
+
+# Now test that globbing files with inconsistent headers errors
+# The pattern foo_*header*.sam would match both foo_has_header.sam and foo_no_header.sam
+statement error
+SELECT * FROM read_alignments('data/sam/foo_*header.sam');
+----
+Inconsistent headers across files

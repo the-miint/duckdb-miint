@@ -1,0 +1,75 @@
+# name: test/sql/glob_read_biom.test
+# description: test glob pattern support for read_biom table function
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+# ===== BASIC GLOB EXPANSION =====
+
+# Glob pattern matches multiple files (file1.biom, file2.biom)
+# Files are sorted alphabetically, so file1.biom comes before file2.biom
+query IIII
+SELECT * FROM read_biom('data/biom/file*.biom', include_filepath=true)
+ORDER BY filepath, sample_id, feature_id;
+----
+S1	O2	3.0	data/biom/file1.biom
+S2	O1	1.0	data/biom/file1.biom
+S2	O2	4.0	data/biom/file1.biom
+S3	O1	2.0	data/biom/file1.biom
+S3	O2	5.0	data/biom/file1.biom
+S4	O2	6.0	data/biom/file2.biom
+S5	O1	2.0	data/biom/file2.biom
+S5	O2	8.0	data/biom/file2.biom
+S6	O1	4.0	data/biom/file2.biom
+S6	O2	10.0	data/biom/file2.biom
+
+# COUNT to verify all rows read via glob
+query I
+SELECT COUNT(*) FROM read_biom('data/biom/file*.biom');
+----
+10
+
+# ===== ERROR CASES =====
+
+# Error: glob pattern matches zero files
+statement error
+SELECT * FROM read_biom('data/biom/nonexistent*.biom');
+----
+IO Error: No files matched pattern: data/biom/nonexistent*.biom
+
+# Error: glob pattern with stdin path
+statement error
+SELECT * FROM read_biom('/dev/std*');
+----
+Invalid Input Error: Glob patterns cannot include stdin paths
+
+# Error: glob pattern with stdin path (dash)
+statement error
+SELECT * FROM read_biom('-*');
+----
+Invalid Input Error: Glob patterns cannot include stdin paths
+
+# ===== GLOB VS ARRAY =====
+
+# Glob should NOT work inside arrays (treated as literal path)
+statement error
+SELECT * FROM read_biom(['data/biom/file*.biom']);
+----
+IO Error: File not found: data/biom/file*.biom
+
+# ===== SINGLE FILE GLOB =====
+
+# Glob that matches single file should work
+query I
+SELECT COUNT(*) FROM read_biom('data/biom/test.biom');
+----
+15
+
+# Glob pattern matching single file
+query I
+SELECT COUNT(*) FROM read_biom('data/biom/tes*.biom');
+----
+15

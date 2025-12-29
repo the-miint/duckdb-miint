@@ -1,0 +1,111 @@
+# name: test/sql/glob_read_fastx.test
+# description: test glob pattern support for read_fastx table function
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+# ===== BASIC SINGLE-END GLOB EXPANSION =====
+
+# Glob pattern matches multiple files (sorted alphabetically)
+query IIIIIIII
+SELECT * FROM read_fastx('data/fastq/glob_single*.fq', include_filepath=true)
+ORDER BY filepath, sequence_index;
+----
+1	single1_read1	NULL	AAAA	NULL	[40, 40, 40, 40]	NULL	data/fastq/glob_single1.fq
+1	single2_read1	NULL	TTTT	NULL	[39, 39, 39, 39]	NULL	data/fastq/glob_single2.fq
+1	single3_read1	NULL	CCCC	NULL	[38, 38, 38, 38]	NULL	data/fastq/glob_single3.fq
+
+# COUNT to verify all rows read via glob
+query I
+SELECT COUNT(*) FROM read_fastx('data/fastq/glob_single*.fq');
+----
+3
+
+# ===== PAIRED-END GLOB EXPANSION =====
+
+# Both sequence1 and sequence2 are globs - files sorted and paired
+# glob_sample1_R1.fq pairs with glob_sample1_R2.fq
+# glob_sample2_R1.fq pairs with glob_sample2_R2.fq
+query IIIIIIII
+SELECT * FROM read_fastx('data/fastq/glob_sample*_R1.fq',
+                          sequence2='data/fastq/glob_sample*_R2.fq',
+                          include_filepath=true)
+ORDER BY filepath, sequence_index;
+----
+1	glob_s1_read1	NULL	AAAA	CCCC	[40, 40, 40, 40]	[38, 38, 38, 38]	data/fastq/glob_sample1_R1.fq
+2	glob_s1_read2	NULL	TTTT	GGGG	[39, 39, 39, 39]	[37, 37, 37, 37]	data/fastq/glob_sample1_R1.fq
+1	glob_s2_read1	NULL	ACGT	TGCA	[41, 41, 41, 41]	[36, 36, 36, 36]	data/fastq/glob_sample2_R1.fq
+
+# COUNT for paired-end glob
+query I
+SELECT COUNT(*) FROM read_fastx('data/fastq/glob_sample*_R1.fq',
+                                 sequence2='data/fastq/glob_sample*_R2.fq');
+----
+3
+
+# ===== ERROR CASES =====
+
+# Error: glob pattern matches zero files
+statement error
+SELECT * FROM read_fastx('data/fastq/nonexistent*.fq');
+----
+IO Error: No files matched pattern: data/fastq/nonexistent*.fq
+
+# Error: glob pattern with stdin path
+statement error
+SELECT * FROM read_fastx('/dev/std*');
+----
+Invalid Input Error: Glob patterns cannot include stdin paths
+
+# Error: glob pattern with stdin path (dash)
+statement error
+SELECT * FROM read_fastx('-*');
+----
+Invalid Input Error: Glob patterns cannot include stdin paths
+
+# Error: sequence1 is glob but sequence2 is literal
+statement error
+SELECT * FROM read_fastx('data/fastq/glob_sample*_R1.fq',
+                          sequence2='data/fastq/glob_sample1_R2.fq');
+----
+Invalid Input Error: When using glob patterns, both sequence1 and sequence2 must use glob patterns
+
+# Error: sequence1 is literal but sequence2 is glob
+statement error
+SELECT * FROM read_fastx('data/fastq/glob_sample1_R1.fq',
+                          sequence2='data/fastq/glob_sample*_R2.fq');
+----
+Invalid Input Error: When using glob patterns, both sequence1 and sequence2 must use glob patterns
+
+# Error: paired globs with mismatched file counts
+# Create scenario where R1 glob matches different count than R2
+statement error
+SELECT * FROM read_fastx('data/fastq/glob_s*.fq',
+                          sequence2='data/fastq/glob_sample*_R2.fq');
+----
+Invalid Input Error: Glob patterns matched different number of files
+
+# ===== GLOB VS ARRAY =====
+
+# Glob should NOT work inside arrays (treated as literal path)
+statement error
+SELECT * FROM read_fastx(['data/fastq/glob_single*.fq']);
+----
+IO Error: File not found: data/fastq/glob_single*.fq
+
+# ===== SINGLE FILE GLOB =====
+
+# Glob that matches single file should work
+query I
+SELECT COUNT(*) FROM read_fastx('data/fastq/glob_single1.fq');
+----
+1
+
+# Pattern matching single file
+query I
+SELECT COUNT(*) FROM read_fastx('data/fastq/glob_single1*.fq');
+----
+1

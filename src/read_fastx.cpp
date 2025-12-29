@@ -1,5 +1,6 @@
 #include "SequenceReader.hpp"
 #include "SequenceRecord.hpp"
+#include "table_function_common.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -14,14 +15,27 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
 	std::vector<std::string> sequence1_paths;
+	bool sequence1_is_glob = false;
 
-	// Handle VARCHAR or VARCHAR[] input for sequence1
+	// Helper to detect stdin paths
+	auto is_stdin = [](const std::string &path) {
+		return path == "-" || path == "/dev/stdin" || path == "/dev/fd/0" || path == "/proc/self/fd/0";
+	};
+
+	// Handle VARCHAR (single path, potentially a glob) or VARCHAR[] (array of literal paths)
 	if (input.inputs[0].type().id() == LogicalTypeId::VARCHAR) {
-		sequence1_paths.push_back(input.inputs[0].ToString());
+		// Single string - could be a glob pattern
+		auto result = ExpandGlobPatternWithInfo(fs, context, input.inputs[0].ToString());
+		sequence1_paths = std::move(result.paths);
+		sequence1_is_glob = result.is_glob;
 	} else if (input.inputs[0].type().id() == LogicalTypeId::LIST) {
+		// Array of strings - literal paths only (no glob expansion)
 		auto &list_children = ListValue::GetChildren(input.inputs[0]);
 		for (const auto &child : list_children) {
 			sequence1_paths.push_back(child.ToString());
+		}
+		if (sequence1_paths.empty()) {
+			throw InvalidInputException("read_fastx: at least one file path must be provided");
 		}
 	} else {
 		throw InvalidInputException("read_fastx: first argument must be VARCHAR or VARCHAR[]");
@@ -32,9 +46,6 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 	// /proc/self/fd/0 on Linux). If parallel threads attempt to read from an undetected stdin,
 	// the behavior is undefined and may result in data corruption or crashes.
 	bool uses_stdin = false;
-	auto is_stdin = [](const std::string &path) {
-		return path == "-" || path == "/dev/stdin" || path == "/dev/fd/0" || path == "/proc/self/fd/0";
-	};
 
 	if (sequence1_paths.size() == 1 && is_stdin(sequence1_paths[0])) {
 		uses_stdin = true;
@@ -71,9 +82,15 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 		const auto &path2_value = path2_param->second;
 
 		std::vector<std::string> seq2_paths;
+		bool sequence2_is_glob = false;
+
 		if (path2_value.type().id() == LogicalTypeId::VARCHAR) {
-			seq2_paths.push_back(path2_value.ToString());
+			// Single string - could be a glob pattern
+			auto result = ExpandGlobPatternWithInfo(fs, context, path2_value.ToString());
+			seq2_paths = std::move(result.paths);
+			sequence2_is_glob = result.is_glob;
 		} else if (path2_value.type().id() == LogicalTypeId::LIST) {
+			// Array of strings - literal paths only
 			auto &list_children = ListValue::GetChildren(path2_value);
 			for (const auto &child : list_children) {
 				seq2_paths.push_back(child.ToString());
@@ -82,11 +99,23 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 			throw InvalidInputException("sequence2 parameter must be VARCHAR or VARCHAR[]");
 		}
 
-		// Validate array length consistency
+		// For paired-end with globs: both must be globs or both must be literals
+		if (sequence1_is_glob != sequence2_is_glob) {
+			throw InvalidInputException(
+			    "When using glob patterns, both sequence1 and sequence2 must use glob patterns");
+		}
+
+		// Validate file counts match
 		if (seq2_paths.size() != sequence1_paths.size()) {
-			throw InvalidInputException("Mismatched array lengths: sequence1 has " +
-			                            std::to_string(sequence1_paths.size()) + " files, sequence2 has " +
-			                            std::to_string(seq2_paths.size()) + " files");
+			if (sequence1_is_glob && sequence2_is_glob) {
+				throw InvalidInputException("Glob patterns matched different number of files: sequence1 matched " +
+				                            std::to_string(sequence1_paths.size()) + " files, sequence2 matched " +
+				                            std::to_string(seq2_paths.size()) + " files");
+			} else {
+				throw InvalidInputException("Mismatched array lengths: sequence1 has " +
+				                            std::to_string(sequence1_paths.size()) + " files, sequence2 has " +
+				                            std::to_string(seq2_paths.size()) + " files");
+			}
 		}
 
 		// Validate all sequence2 files exist

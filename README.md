@@ -13,13 +13,11 @@ MIINT brings the power of SQL to microbiome data analysis. Here's a complete wor
 -- but will be in the future.
 LOAD '/path/to/miint.duckdb_extension';
 
--- Read alignment files and combine samples
+-- Read alignment files using glob pattern (files sorted alphabetically)
+-- Use include_filepath to track source file as sample identifier
 CREATE VIEW all_alignments AS
-    SELECT *, 'sample1' AS sample_id FROM read_alignments('sample1.bam')
-    UNION ALL
-    SELECT *, 'sample2' AS sample_id FROM read_alignments('sample2.bam')
-    UNION ALL
-    SELECT *, 'sample3' AS sample_id FROM read_alignments('sample3.bam');
+    SELECT *, regexp_extract(filepath, '.*/(.*)\.bam', 1) AS sample_id
+    FROM read_alignments('samples/*.bam', include_filepath=true);
 
 -- Filter high-quality primary alignments
 CREATE VIEW high_quality AS
@@ -151,7 +149,9 @@ Read SAM/BAM alignment files.
 **Note:** `read_sam` is still supported as a backward-compatible alias.
 
 **Parameters:**
-- `filename` (VARCHAR or VARCHAR[]): Path to SAM/BAM file(s), or `-` / `/dev/stdin` for standard input
+- `filename` (VARCHAR or VARCHAR[]): Path to SAM/BAM file(s), glob pattern (e.g., `'data/*.bam'`), or `-` / `/dev/stdin` for standard input
+  - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
+  - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
 - `reference_lengths` (VARCHAR, optional): Table name containing reference sequences for headerless SAM files. Table must have at least 2 columns: first column = reference name (VARCHAR), second column = reference length (INTEGER/BIGINT). Column names don't matter.
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
 - `include_seq_qual` (BOOLEAN, optional, default false): Add sequence and quality score columns to output. When enabled, primary alignments (non-secondary, non-supplementary) and unmapped reads must have SEQ/QUAL data or an error will be raised.
@@ -189,6 +189,12 @@ SELECT * FROM read_alignments('headerless.sam', reference_lengths='my_refs');
 -- Read multiple files with filepath tracking
 SELECT * FROM read_alignments(['file1.sam', 'file2.bam'], include_filepath=true);
 
+-- Read all BAM files matching a glob pattern (sorted alphabetically)
+SELECT * FROM read_alignments('samples/*.bam', include_filepath=true);
+
+-- Glob pattern matching specific files
+SELECT COUNT(*) FROM read_alignments('data/sample_*.bam');
+
 -- Include sequence and quality scores
 SELECT read_id, sequence, qual
 FROM read_alignments('alignments.sam', include_seq_qual=true);
@@ -224,8 +230,11 @@ SELECT * FROM read_sam('alignments.sam');
 Read FASTA/FASTQ sequence files.
 
 **Parameters:**
-- `filename` (VARCHAR or VARCHAR[]): Path to FASTA/FASTQ file(s) for single-end reads, or R1 files for paired-end
+- `filename` (VARCHAR or VARCHAR[]): Path to FASTA/FASTQ file(s), glob pattern (e.g., `'data/*.fastq'`), or R1 files for paired-end
+  - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
+  - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
 - `sequence2` (VARCHAR or VARCHAR[], optional): Path to R2 file(s) for paired-end reads. Must have same number of files as `filename`
+  - **Paired-end with globs**: When `filename` is a glob pattern, `sequence2` must also be a glob pattern. Both are expanded and sorted independently, then paired by position. The expanded file counts must match.
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
 - `qual_offset` (INTEGER, optional, default 33): Quality score offset (33 for Phred+33, 64 for Phred+64)
 
@@ -268,6 +277,15 @@ SELECT * FROM read_fastx(['sample1.fastq', 'sample2.fastq', 'sample3.fastq']);
 SELECT * FROM read_fastx(
     ['sample1_R1.fastq', 'sample2_R1.fastq'],
     sequence2=['sample1_R2.fastq', 'sample2_R2.fastq']
+);
+
+-- Read all FASTQ files matching a glob pattern (sorted alphabetically)
+SELECT * FROM read_fastx('samples/*.fastq', include_filepath=true);
+
+-- Paired-end with glob patterns (both must be globs, paired by sorted order)
+SELECT * FROM read_fastx(
+    'samples/*_R1.fastq',
+    sequence2='samples/*_R2.fastq'
 );
 
 -- Include source filepath for tracking (recommended for multiple files)
@@ -327,7 +345,9 @@ HAVING AVG(q) >= 30;
 Read BIOM (Biological Observation Matrix) format files.
 
 **Parameters:**
-- `filename` (VARCHAR or VARCHAR[]): Path to BIOM file(s)
+- `filename` (VARCHAR or VARCHAR[]): Path to BIOM file(s) or glob pattern (e.g., `'data/*.biom'`)
+  - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
+  - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
 
 **Output schema:**
@@ -350,6 +370,14 @@ SELECT * FROM read_biom('ogu_table.biom');
 
 -- Read multiple BIOM files
 SELECT * FROM read_biom(['sample1.biom', 'sample2.biom', 'sample3.biom']);
+
+-- Read all BIOM files matching a glob pattern (sorted alphabetically)
+SELECT * FROM read_biom('results/*.biom', include_filepath=true);
+
+-- Glob pattern for batch processing
+SELECT sample_id, SUM(value) as total_count
+FROM read_biom('batches/batch_*.biom')
+GROUP BY sample_id;
 
 -- Include source filepath for each record
 SELECT * FROM read_biom('ogu_table.biom', include_filepath=true);
