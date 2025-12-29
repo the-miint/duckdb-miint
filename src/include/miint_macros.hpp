@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb.hpp"
+#include "duckdb/main/extension_helper.hpp"
 
 namespace duckdb {
 
@@ -152,6 +153,46 @@ const std::string READ_GFF = // NOLINT
     " ) "
     "WHERE column0 NOT LIKE '##%'; ";
 
+// read_jplace(path)
+//
+// Read jplace phylogenetic placement file(s) and return the best placement
+// for each fragment. Supports glob patterns for multiple files.
+// The jplace format is defined in:
+// Matsen FA, Hoffman NG, Gallagher A, Stamatakis A (2012) A Format for
+// Phylogenetic Placements. PLoS ONE 7(2): e31009.
+//
+// Parameters:
+// path : VARCHAR, path to a jplace file (supports glob patterns)
+//
+// Returns a table with columns:
+// - fragment: VARCHAR (fragment/sequence name)
+// - edge_num: INTEGER (edge number in the reference tree)
+// - likelihood: DOUBLE (log likelihood of placement)
+// - like_weight_ratio: DOUBLE (likelihood weight ratio)
+// - distal_length: DOUBLE (distance from distal end of edge)
+// - pendant_length: DOUBLE (pendant branch length)
+// - filepath: VARCHAR (source file path)
+//
+// Note: Only the best placement (first in 'p' array) is returned.
+// Supports both 'nm' (named multiplicities) and 'n' (names) formats.
+const std::string READ_JPLACE = // NOLINT
+    "CREATE OR REPLACE MACRO read_jplace(path) AS TABLE "
+    "SELECT "
+    "    COALESCE( "
+    "        json_extract_string(placement, '$.nm[0][0]'), "
+    "        json_extract_string(placement, '$.n[0]') "
+    "    ) AS fragment, "
+    "    json_extract(placement, '$.p[0][0]')::INTEGER AS edge_num, "
+    "    json_extract(placement, '$.p[0][1]')::DOUBLE AS likelihood, "
+    "    json_extract(placement, '$.p[0][2]')::DOUBLE AS like_weight_ratio, "
+    "    json_extract(placement, '$.p[0][3]')::DOUBLE AS distal_length, "
+    "    json_extract(placement, '$.p[0][4]')::DOUBLE AS pendant_length, "
+    "    filepath "
+    "FROM ( "
+    "    SELECT unnest(placements) AS placement, filename AS filepath "
+    "    FROM read_json(path, filename := true) "
+    "); ";
+
 class MIINTMacros {
 
 public:
@@ -163,6 +204,10 @@ public:
 		con.Query(WOLTKA_OGU);
 		con.Query(PARSE_GFF_ATTRIBUTES);
 		con.Query(READ_GFF);
+
+		// read_jplace requires the json extension for read_json function
+		ExtensionHelper::AutoLoadExtension(instance, "json");
+		con.Query(READ_JPLACE);
 	}
 };
 

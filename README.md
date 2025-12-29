@@ -63,6 +63,7 @@ GROUP BY sample_id;
   - [read_fastx](#read_fastxfilename-sequence2filename-include_filepathfalse-qual_offset33)
   - [read_biom](#read_biomfilename-include_filepathfalse)
   - [read_gff](#read_gffpath)
+  - [read_jplace](#read_jplacepath)
   - [SAM Flag Functions](#sam-flag-functions)
   - [alignment_seq_identity](#alignment_seq_identitycigar-nm-md-type)
   - [alignment_query_length](#alignment_query_lengthcigar-include_hard_clipstrue)
@@ -572,6 +573,90 @@ The `attributes` column is automatically parsed from GFF format (semicolon-separ
   - Other standard GFF3 producers
 
 **Implementation note:** Implemented as a DuckDB macro using `read_csv` with GFF-specific parsing.
+
+### `read_jplace(path)`
+
+Read jplace phylogenetic placement files. The jplace format stores query sequence placements onto a reference phylogenetic tree, as defined in [Matsen et al. 2012](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0031009).
+
+**Parameters:**
+- `path` (VARCHAR): Path to jplace file(s), supports glob patterns (e.g., `'data/*.jplace'`)
+
+**Output schema:**
+- `fragment` (VARCHAR): Fragment/sequence name (from `nm` or `n` field)
+- `edge_num` (INTEGER): Edge number in the reference tree where placement occurs
+- `likelihood` (DOUBLE): Log likelihood of the placement
+- `like_weight_ratio` (DOUBLE): Likelihood weight ratio (proportion of total likelihood)
+- `distal_length` (DOUBLE): Distance from distal end of edge to placement point
+- `pendant_length` (DOUBLE): Pendant branch length (branch to the placed sequence)
+- `filepath` (VARCHAR): Source file path
+
+**Behavior:**
+- Returns only the best placement (first in `p` array) for each fragment
+- Supports both `nm` (named multiplicities) and `n` (names) formats
+- Supports glob patterns for reading multiple files
+- Requires the json extension (automatically loaded)
+
+**Examples:**
+```sql
+-- Read a single jplace file
+SELECT * FROM read_jplace('placements.jplace');
+
+-- Read multiple jplace files with glob pattern
+SELECT * FROM read_jplace('results/*.jplace');
+
+-- Filter placements by likelihood weight ratio
+SELECT fragment, edge_num, like_weight_ratio
+FROM read_jplace('placements.jplace')
+WHERE like_weight_ratio > 0.5
+ORDER BY like_weight_ratio DESC;
+
+-- Count placements per edge
+SELECT edge_num, COUNT(*) AS num_placements
+FROM read_jplace('placements.jplace')
+GROUP BY edge_num
+ORDER BY num_placements DESC;
+
+-- Aggregate placements from multiple files
+SELECT filepath, COUNT(*) AS num_fragments
+FROM read_jplace('batch_*.jplace')
+GROUP BY filepath;
+
+-- Find high-confidence placements
+SELECT fragment, edge_num, likelihood, like_weight_ratio
+FROM read_jplace('placements.jplace')
+WHERE like_weight_ratio >= 0.9;
+
+-- Join with edge metadata (if available)
+CREATE TABLE edge_taxa AS
+SELECT 0 AS edge_num, 'Bacteria' AS taxon
+UNION ALL SELECT 1, 'Archaea'
+UNION ALL SELECT 2, 'Eukarya';
+
+SELECT p.fragment, e.taxon, p.like_weight_ratio
+FROM read_jplace('placements.jplace') p
+JOIN edge_taxa e ON p.edge_num = e.edge_num;
+```
+
+**jplace Format Notes:**
+- Standard format for phylogenetic placement tools (pplacer, EPA-ng, etc.)
+- The `fields` array in the file defines column order: typically `[edge_num, likelihood, like_weight_ratio, distal_length, pendant_length]`
+- Multiple placements per fragment are supported in the format, but this function returns only the best (first) placement
+- The `nm` field contains `[[name, multiplicity], ...]` pairs; `n` field contains simple name arrays
+
+**Use Cases:**
+- **Taxonomic profiling**: Analyze where metagenomic reads place on a reference tree
+- **Community composition**: Aggregate placements to quantify taxa
+- **Quality filtering**: Filter by likelihood weight ratio to retain confident placements
+- **Multi-sample analysis**: Process multiple jplace files with glob patterns
+
+**Compatibility:**
+- Reads jplace files created by:
+  - pplacer
+  - EPA-ng
+  - SEPP
+  - Other tools following the jplace specification
+
+**Implementation note:** Implemented as a DuckDB macro using `read_json` with JSON path extraction.
 
 ### SAM Flag Functions
 

@@ -56,15 +56,15 @@ bool ParseIncludeFilepathParameter(const named_parameter_map_t &named_parameters
 }
 
 std::vector<std::string> ExpandGlobPattern(FileSystem &fs, ClientContext &context, const std::string &pattern) {
-	// Check if pattern could match stdin paths
-	if (GlobCouldMatchStdin(pattern)) {
-		throw InvalidInputException("Glob patterns cannot include stdin paths");
-	}
-
 	// Check if this is a glob pattern
 	if (!FileSystem::HasGlob(pattern)) {
 		// Not a glob pattern, return as-is (validation happens elsewhere)
 		return {pattern};
+	}
+
+	// Only check for stdin paths when it's actually a glob pattern
+	if (GlobCouldMatchStdin(pattern)) {
+		throw InvalidInputException("Glob patterns cannot include stdin paths");
 	}
 
 	// Expand the glob pattern

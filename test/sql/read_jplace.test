@@ -1,0 +1,104 @@
+# name: test/sql/read_jplace.test
+# description: Test read_jplace function for reading jplace phylogenetic placement files
+# group: [sql]
+
+require miint
+
+# Test basic jplace reading - best placement only
+query TIRRR
+SELECT fragment, edge_num, like_weight_ratio, distal_length, pendant_length
+FROM read_jplace('data/jplace/test.jplace')
+ORDER BY fragment;
+----
+fragment1	0	0.95	0.05	0.001
+fragment2	1	0.80	0.15	0.003
+fragment3	2	0.70	0.20	0.004
+
+# Test all columns present (excluding filepath for simplicity)
+query TIRRRR
+SELECT fragment, edge_num, likelihood, like_weight_ratio, distal_length, pendant_length
+FROM read_jplace('data/jplace/test.jplace')
+ORDER BY fragment;
+----
+fragment1	0	-1234.56	0.95	0.05	0.001
+fragment2	1	-2000.00	0.80	0.15	0.003
+fragment3	2	-1500.50	0.70	0.20	0.004
+
+# Test filtering by edge
+query TI
+SELECT fragment, edge_num FROM read_jplace('data/jplace/test.jplace') WHERE edge_num = 1;
+----
+fragment2	1
+
+# Test filtering by like_weight_ratio
+query TR
+SELECT fragment, like_weight_ratio FROM read_jplace('data/jplace/test.jplace') WHERE like_weight_ratio >= 0.80 ORDER BY fragment;
+----
+fragment1	0.95
+fragment2	0.80
+
+# Test count
+query I
+SELECT COUNT(*) FROM read_jplace('data/jplace/test.jplace');
+----
+3
+
+# Test empty jplace file
+query I
+SELECT COUNT(*) FROM read_jplace('data/jplace/empty.jplace');
+----
+0
+
+# Test aggregation by edge
+query II
+SELECT edge_num, COUNT(*) AS count FROM read_jplace('data/jplace/test.jplace') GROUP BY edge_num ORDER BY edge_num;
+----
+0	1
+1	1
+2	1
+
+# Test jplace with 'n' format (array of names) - takes first name
+query TI
+SELECT fragment, edge_num FROM read_jplace('data/jplace/with_n.jplace');
+----
+seq1	0
+
+# Test filepath column is present
+query TT
+SELECT fragment, filepath FROM read_jplace('data/jplace/test.jplace') WHERE fragment = 'fragment1';
+----
+fragment1	data/jplace/test.jplace
+
+# Test glob pattern - multiple files
+query I
+SELECT COUNT(*) FROM read_jplace('data/jplace/test*.jplace');
+----
+4
+
+# Test glob pattern with filepath
+query TT
+SELECT fragment, filepath FROM read_jplace('data/jplace/test*.jplace') ORDER BY fragment;
+----
+fragment1	data/jplace/test.jplace
+fragment2	data/jplace/test.jplace
+fragment3	data/jplace/test.jplace
+fragment4	data/jplace/test2.jplace
+
+# Test creating table from jplace
+statement ok
+CREATE TABLE placements AS SELECT * FROM read_jplace('data/jplace/test.jplace');
+
+query I
+SELECT COUNT(*) FROM placements;
+----
+3
+
+statement ok
+DROP TABLE placements;
+
+# Test nonexistent file
+statement error
+SELECT * FROM read_jplace('data/jplace/nonexistent.jplace');
+----
+nonexistent.jplace
+

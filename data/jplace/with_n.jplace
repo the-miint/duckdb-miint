@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "tree": "(A:0.1,B:0.2):0.0{0};",
+  "fields": ["edge_num", "likelihood", "like_weight_ratio", "distal_length", "pendant_length"],
+  "placements": [
+    {
+      "p": [[0, -100.0, 0.99, 0.01, 0.001]],
+      "n": ["seq1", "seq2"]
+    }
+  ]
+}
