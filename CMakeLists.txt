@@ -155,7 +155,8 @@ set(EXTENSION_SOURCES
     src/BIOMTable.cpp
     src/BIOMReader.cpp
     src/read_biom.cpp
-    src/reference_table_reader.cpp)
+    src/reference_table_reader.cpp
+    src/NewickTree.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
@@ -224,6 +225,8 @@ set(TEST_SOURCES
     src/BIOMReader.cpp
     test/cpp/test_BIOMReader.cpp
     test/cpp/test_BIOMTable.cpp
+    src/NewickTree.cpp
+    test/cpp/test_NewickParser.cpp
 )
 
 add_executable(tests ${TEST_SOURCES})
