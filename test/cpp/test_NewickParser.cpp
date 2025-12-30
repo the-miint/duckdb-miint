@@ -840,3 +840,136 @@ TEST_CASE("NewickTree roundtrip with complex structure", "[NewickTree][serialize
 		REQUIRE(reparsed.num_tips() == tree.num_tips());
 	}
 }
+
+// ============================================================================
+// Build from node data
+// ============================================================================
+
+TEST_CASE("NewickTree build simple tree", "[NewickTree][build]") {
+	// Build: ((A,B),C)
+	std::vector<miint::NodeInput> nodes = {
+	    {.node_id = 0, .parent_id = std::nullopt, .name = "", .branch_length = std::numeric_limits<double>::quiet_NaN(), .edge_id = std::nullopt},  // root
+	    {.node_id = 1, .parent_id = 0, .name = "", .branch_length = 0.5, .edge_id = std::nullopt},  // internal
+	    {.node_id = 2, .parent_id = 1, .name = "A", .branch_length = 0.1, .edge_id = std::nullopt},
+	    {.node_id = 3, .parent_id = 1, .name = "B", .branch_length = 0.2, .edge_id = std::nullopt},
+	    {.node_id = 4, .parent_id = 0, .name = "C", .branch_length = 0.3, .edge_id = std::nullopt},
+	};
+
+	auto tree = miint::NewickTree::build(nodes);
+
+	REQUIRE(tree.num_nodes() == 5);
+	REQUIRE(tree.num_tips() == 3);
+
+	auto tip_names = tree.tip_names();
+	std::set<std::string> names(tip_names.begin(), tip_names.end());
+	REQUIRE(names == std::set<std::string>{"A", "B", "C"});
+}
+
+TEST_CASE("NewickTree build with edge IDs", "[NewickTree][build]") {
+	std::vector<miint::NodeInput> nodes = {
+	    {.node_id = 0, .parent_id = std::nullopt, .name = "root", .branch_length = 0.0, .edge_id = 4},
+	    {.node_id = 1, .parent_id = 0, .name = "A", .branch_length = 0.1, .edge_id = 0},
+	    {.node_id = 2, .parent_id = 0, .name = "B", .branch_length = 0.2, .edge_id = 1},
+	};
+
+	auto tree = miint::NewickTree::build(nodes);
+
+	REQUIRE(tree.num_nodes() == 3);
+
+	auto a_node = tree.find_node_by_name("A");
+	REQUIRE(a_node.has_value());
+	REQUIRE(tree.edge_id(a_node.value()) == 0);
+
+	auto root_node = tree.find_node_by_name("root");
+	REQUIRE(root_node.has_value());
+	REQUIRE(tree.edge_id(root_node.value()) == 4);
+}
+
+TEST_CASE("NewickTree build preserves structure for serialization", "[NewickTree][build]") {
+	// Build a tree and serialize it
+	std::vector<miint::NodeInput> nodes = {
+	    {.node_id = 100, .parent_id = std::nullopt, .name = "", .branch_length = std::numeric_limits<double>::quiet_NaN(), .edge_id = std::nullopt},
+	    {.node_id = 101, .parent_id = 100, .name = "A", .branch_length = 1.5, .edge_id = std::nullopt},
+	    {.node_id = 102, .parent_id = 100, .name = "B", .branch_length = 2.5, .edge_id = std::nullopt},
+	};
+
+	auto tree = miint::NewickTree::build(nodes);
+	auto newick = tree.to_newick();
+
+	// Parse the serialized tree
+	auto reparsed = miint::NewickTree::parse(newick);
+
+	REQUIRE(reparsed.num_nodes() == 3);
+	REQUIRE(reparsed.num_tips() == 2);
+
+	auto tip_names = reparsed.tip_names();
+	std::set<std::string> names(tip_names.begin(), tip_names.end());
+	REQUIRE(names == std::set<std::string>{"A", "B"});
+}
+
+TEST_CASE("NewickTree build empty list throws", "[NewickTree][build][error]") {
+	std::vector<miint::NodeInput> nodes;
+	REQUIRE_THROWS_WITH(miint::NewickTree::build(nodes), ContainsSubstring("empty"));
+}
+
+TEST_CASE("NewickTree build no root throws", "[NewickTree][build][error]") {
+	// All nodes have parents - no root
+	std::vector<miint::NodeInput> nodes = {
+	    {.node_id = 0, .parent_id = 1, .name = "A", .branch_length = 0.1, .edge_id = std::nullopt},
+	    {.node_id = 1, .parent_id = 0, .name = "B", .branch_length = 0.2, .edge_id = std::nullopt},
+	};
+
+	REQUIRE_THROWS_WITH(miint::NewickTree::build(nodes), ContainsSubstring("root"));
+}
+
+TEST_CASE("NewickTree build multiple roots throws", "[NewickTree][build][error]") {
+	std::vector<miint::NodeInput> nodes = {
+	    {.node_id = 0, .parent_id = std::nullopt, .name = "A", .branch_length = 0.1, .edge_id = std::nullopt},
+	    {.node_id = 1, .parent_id = std::nullopt, .name = "B", .branch_length = 0.2, .edge_id = std::nullopt},
+	};
+
+	REQUIRE_THROWS_WITH(miint::NewickTree::build(nodes), ContainsSubstring("Multiple roots"));
+}
+
+TEST_CASE("NewickTree build invalid parent throws", "[NewickTree][build][error]") {
+	std::vector<miint::NodeInput> nodes = {
+	    {.node_id = 0, .parent_id = std::nullopt, .name = "root", .branch_length = 0.0, .edge_id = std::nullopt},
+	    {.node_id = 1, .parent_id = 999, .name = "A", .branch_length = 0.1, .edge_id = std::nullopt},  // Invalid parent
+	};
+
+	REQUIRE_THROWS_WITH(miint::NewickTree::build(nodes), ContainsSubstring("non-existent parent"));
+}
+
+TEST_CASE("NewickTree build duplicate node_id throws", "[NewickTree][build][error]") {
+	std::vector<miint::NodeInput> nodes = {
+	    {.node_id = 0, .parent_id = std::nullopt, .name = "root", .branch_length = 0.0, .edge_id = std::nullopt},
+	    {.node_id = 0, .parent_id = 0, .name = "A", .branch_length = 0.1, .edge_id = std::nullopt},  // Duplicate
+	};
+
+	REQUIRE_THROWS_WITH(miint::NewickTree::build(nodes), ContainsSubstring("Duplicate"));
+}
+
+TEST_CASE("NewickTree build disconnected node throws", "[NewickTree][build][error]") {
+	// Node 2 is not connected to root
+	std::vector<miint::NodeInput> nodes = {
+	    {.node_id = 0, .parent_id = std::nullopt, .name = "root", .branch_length = 0.0, .edge_id = std::nullopt},
+	    {.node_id = 1, .parent_id = 0, .name = "A", .branch_length = 0.1, .edge_id = std::nullopt},
+	    {.node_id = 2, .parent_id = 3, .name = "B", .branch_length = 0.2, .edge_id = std::nullopt},  // Parent exists but not connected
+	    {.node_id = 3, .parent_id = 2, .name = "C", .branch_length = 0.3, .edge_id = std::nullopt},  // Creates isolated cycle
+	};
+
+	REQUIRE_THROWS_WITH(miint::NewickTree::build(nodes), ContainsSubstring("not reachable"));
+}
+
+TEST_CASE("NewickTree build single node tree", "[NewickTree][build]") {
+	std::vector<miint::NodeInput> nodes = {
+	    {.node_id = 42, .parent_id = std::nullopt, .name = "lonely", .branch_length = 1.0, .edge_id = 0},
+	};
+
+	auto tree = miint::NewickTree::build(nodes);
+
+	REQUIRE(tree.num_nodes() == 1);
+	REQUIRE(tree.num_tips() == 1);
+	REQUIRE(tree.name(tree.root()) == "lonely");
+	REQUIRE(tree.edge_id(tree.root()) == 0);
+}

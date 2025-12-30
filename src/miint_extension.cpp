@@ -7,7 +7,9 @@
 #include <copy_biom.hpp>
 #include <copy_fasta.hpp>
 #include <copy_fastq.hpp>
+#include <copy_newick.hpp>
 #include <copy_sam.hpp>
+#include <parse_newick.hpp>
 #include <kseq++/seqio.hpp>
 #include <read_fastx.hpp>
 #include <read_alignments.hpp>
@@ -35,6 +37,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadFastxTableFunction::Register(loader);
 	ReadAlignmentsTableFunction::Register(loader);
 	ReadBIOMTableFunction::Register(loader);
+	ParseNewickTableFunction::Register(loader);
 
 	AlignmentFlagFunctions::Register(loader);
 	AlignmentSeqIdentityFunction::Register(loader);
@@ -46,6 +49,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	CopyBiomFunction::Register(loader);
 	CopyFastqFunction::Register(loader);
 	CopyFastaFunction::Register(loader);
+	CopyNewickFunction::Register(loader);
 	CopySAMFunction::Register(loader);
 
 	MIINTMacros::Register(loader);

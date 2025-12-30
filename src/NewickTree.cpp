@@ -1,11 +1,10 @@
 #include "NewickTree.hpp"
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cmath>
 #include <stdexcept>
 #include <stack>
-#include <sstream>
-#include <iomanip>
 
 namespace miint {
 
@@ -344,7 +343,7 @@ std::string NewickTree::to_newick() const {
 	}
 
 	std::string result;
-	result.reserve(nodes_.size() * 20); // Rough estimate
+	result.reserve(nodes_.size() * 40); // Rough estimate (name + branch length + edge_id + delimiters)
 
 	// Iterative serialization using explicit stack
 	// Each entry: (node_index, child_index, state)
@@ -414,12 +413,14 @@ std::string NewickTree::to_newick() const {
 				}
 			}
 
-			// Branch length - use max_digits10 for proper round-trip
+			// Branch length - use to_chars for performance and proper round-trip
 			if (!std::isnan(n.branch_length)) {
 				result += ':';
-				std::ostringstream oss;
-				oss << std::setprecision(std::numeric_limits<double>::max_digits10) << n.branch_length;
-				result += oss.str();
+				std::array<char, 32> buf;
+				auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), n.branch_length);
+				if (ec == std::errc()) {
+					result.append(buf.data(), ptr);
+				}
 			}
 
 			// Edge identifier
@@ -531,6 +532,132 @@ std::optional<uint32_t> NewickTree::find_node_by_edge_id(int64_t edge_id) const 
 		}
 	}
 	return std::nullopt;
+}
+
+// ============================================================================
+// Build from node data
+// ============================================================================
+
+NewickTree NewickTree::build(const std::vector<NodeInput> &nodes) {
+	if (nodes.empty()) {
+		throw std::runtime_error("Cannot build tree from empty node list");
+	}
+
+	if (nodes.size() > MAX_NODES) {
+		throw std::runtime_error("Too many nodes: " + std::to_string(nodes.size()) +
+		                         " exceeds maximum of " + std::to_string(MAX_NODES));
+	}
+
+	// Build mapping from input node_id to index in input vector
+	std::unordered_map<int64_t, size_t> id_to_input_idx;
+	for (size_t i = 0; i < nodes.size(); ++i) {
+		auto [it, inserted] = id_to_input_idx.emplace(nodes[i].node_id, i);
+		if (!inserted) {
+			throw std::runtime_error("Duplicate node_id: " + std::to_string(nodes[i].node_id));
+		}
+	}
+
+	// Find root(s) and validate parent references
+	std::vector<size_t> roots;
+	for (size_t i = 0; i < nodes.size(); ++i) {
+		const auto &node = nodes[i];
+		if (!node.parent_id.has_value()) {
+			roots.push_back(i);
+		} else {
+			if (id_to_input_idx.find(node.parent_id.value()) == id_to_input_idx.end()) {
+				throw std::runtime_error("Node " + std::to_string(node.node_id) +
+				                         " references non-existent parent " + std::to_string(node.parent_id.value()));
+			}
+		}
+	}
+
+	if (roots.empty()) {
+		throw std::runtime_error("No root found (no node with null parent_id)");
+	}
+	if (roots.size() > 1) {
+		throw std::runtime_error("Multiple roots found (" + std::to_string(roots.size()) +
+		                         " nodes with null parent_id)");
+	}
+
+	// Cycle detection using DFS - verify all nodes are reachable from root
+	// and no back edges exist
+	std::vector<bool> visited(nodes.size(), false);
+	std::vector<bool> in_stack(nodes.size(), false);
+
+	// Build children map for traversal
+	std::unordered_map<int64_t, std::vector<size_t>> children_map;
+	for (size_t i = 0; i < nodes.size(); ++i) {
+		if (nodes[i].parent_id.has_value()) {
+			children_map[nodes[i].parent_id.value()].push_back(i);
+		}
+	}
+
+	// Iterative DFS for cycle detection
+	std::vector<std::pair<size_t, size_t>> stack; // (node_idx, child_iterator)
+	stack.emplace_back(roots[0], 0);
+	visited[roots[0]] = true;
+	in_stack[roots[0]] = true;
+
+	while (!stack.empty()) {
+		auto &[node_idx, child_iter] = stack.back();
+		const auto &node = nodes[node_idx];
+		auto &children = children_map[node.node_id];
+
+		if (child_iter < children.size()) {
+			size_t child_idx = children[child_iter];
+			child_iter++;
+
+			if (in_stack[child_idx]) {
+				throw std::runtime_error("Cycle detected involving node " +
+				                         std::to_string(nodes[child_idx].node_id));
+			}
+
+			if (!visited[child_idx]) {
+				visited[child_idx] = true;
+				in_stack[child_idx] = true;
+				stack.emplace_back(child_idx, 0);
+			}
+		} else {
+			in_stack[node_idx] = false;
+			stack.pop_back();
+		}
+	}
+
+	// Check all nodes are reachable from root
+	for (size_t i = 0; i < nodes.size(); ++i) {
+		if (!visited[i]) {
+			throw std::runtime_error("Node " + std::to_string(nodes[i].node_id) +
+			                         " is not reachable from root (disconnected tree)");
+		}
+	}
+
+	// Build the tree
+	NewickTree tree;
+	tree.nodes_.reserve(nodes.size());
+
+	// Add all nodes (input order preserved for node indices)
+	std::unordered_map<int64_t, uint32_t> id_to_tree_idx;
+	for (size_t i = 0; i < nodes.size(); ++i) {
+		const auto &node = nodes[i];
+		uint32_t tree_idx = tree.add_node(node.name, node.branch_length, node.edge_id);
+		id_to_tree_idx[node.node_id] = tree_idx;
+	}
+
+	// Set parent relationships and identify root
+	for (size_t i = 0; i < nodes.size(); ++i) {
+		const auto &node = nodes[i];
+		uint32_t tree_idx = id_to_tree_idx[node.node_id];
+
+		if (node.parent_id.has_value()) {
+			uint32_t parent_tree_idx = id_to_tree_idx[node.parent_id.value()];
+			tree.set_parent(tree_idx, parent_tree_idx);
+		} else {
+			// This is the root
+			tree.root_ = tree_idx;
+		}
+	}
+
+	return tree;
 }
 
 std::unordered_map<int64_t, uint32_t> NewickTree::build_edge_index() const {

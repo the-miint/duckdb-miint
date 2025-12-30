@@ -8,6 +8,12 @@
 
 namespace duckdb {
 
+// Check if a path refers to stdin (-, /dev/stdin, /dev/fd/0, /proc/self/fd/0)
+bool IsStdinPath(const std::string &path);
+
+// Check if a path has .gz extension (for gzip-compressed files)
+bool IsGzipped(const std::string &path);
+
 // Parse file paths parameter that can be VARCHAR or VARCHAR[]
 // Validates that at least one path is provided
 std::vector<std::string> ParseFilePathsParameter(const Value &input, const std::string &function_name);

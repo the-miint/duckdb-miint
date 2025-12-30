@@ -1,0 +1,240 @@
+# name: test/sql/parse_newick.test
+# description: Test parse_newick table function for parsing Newick tree files
+# group: [sql]
+
+require miint
+
+# =============================================================================
+# Basic parsing tests
+# =============================================================================
+
+# Test basic tree structure - count nodes
+query I
+SELECT COUNT(*) FROM parse_newick('data/newick/simple.nwk');
+----
+5
+
+# Test tip count
+query I
+SELECT COUNT(*) FROM parse_newick('data/newick/simple.nwk') WHERE is_tip = true;
+----
+3
+
+# Test internal node count
+query I
+SELECT COUNT(*) FROM parse_newick('data/newick/simple.nwk') WHERE is_tip = false;
+----
+2
+
+# Test tip names are present
+query T
+SELECT name FROM parse_newick('data/newick/simple.nwk') WHERE is_tip = true ORDER BY name;
+----
+A
+B
+C
+
+# Test root has NULL parent
+query I
+SELECT COUNT(*) FROM parse_newick('data/newick/simple.nwk') WHERE parent_index IS NULL;
+----
+1
+
+# Test branch lengths for tips
+query TR
+SELECT name, branch_length FROM parse_newick('data/newick/simple.nwk') WHERE is_tip = true ORDER BY name;
+----
+A	0.1
+B	0.2
+C	0.4
+
+# =============================================================================
+# Edge ID support (jplace format)
+# =============================================================================
+
+# Test edge IDs are parsed
+query TI
+SELECT name, edge_id FROM parse_newick('data/newick/with_edge_ids.nwk') WHERE edge_id IS NOT NULL ORDER BY edge_id;
+----
+A	0
+B	1
+(empty)	2
+C	3
+(empty)	4
+
+# Test all nodes have edge IDs in this file
+query I
+SELECT COUNT(*) FROM parse_newick('data/newick/with_edge_ids.nwk') WHERE edge_id IS NOT NULL;
+----
+5
+
+# =============================================================================
+# Tree without branch lengths
+# =============================================================================
+
+# Test tree without branch lengths
+query I
+SELECT COUNT(*) FROM parse_newick('data/newick/no_lengths.nwk');
+----
+4
+
+# All branch lengths should be NULL
+query I
+SELECT COUNT(*) FROM parse_newick('data/newick/no_lengths.nwk') WHERE branch_length IS NULL;
+----
+4
+
+# Tip names present
+query T
+SELECT name FROM parse_newick('data/newick/no_lengths.nwk') WHERE is_tip = true ORDER BY name;
+----
+A
+B
+C
+
+# =============================================================================
+# Single tip tree
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM parse_newick('data/newick/single_tip.nwk');
+----
+1
+
+query TI
+SELECT name, CASE WHEN parent_index IS NULL THEN 1 ELSE 0 END AS is_root
+FROM parse_newick('data/newick/single_tip.nwk');
+----
+A	1
+
+# =============================================================================
+# Schema validation
+# =============================================================================
+
+# Verify column types by selecting specific node
+query TRII
+SELECT name, branch_length, edge_id, CASE WHEN is_tip THEN 1 ELSE 0 END
+FROM parse_newick('data/newick/simple.nwk')
+WHERE name = 'A';
+----
+A	0.1	NULL	1
+
+# Verify node_index and parent_index are integers
+query II
+SELECT COUNT(*), SUM(CASE WHEN node_index >= 0 THEN 1 ELSE 0 END)
+FROM parse_newick('data/newick/simple.nwk');
+----
+5	5
+
+# =============================================================================
+# Parent-child relationship validation
+# =============================================================================
+
+# Every non-root node has a valid parent
+query I
+SELECT COUNT(*) FROM parse_newick('data/newick/simple.nwk') AS t1
+WHERE parent_index IS NOT NULL
+AND NOT EXISTS (
+    SELECT 1 FROM parse_newick('data/newick/simple.nwk') AS t2
+    WHERE t2.node_index = t1.parent_index
+);
+----
+0
+
+# =============================================================================
+# Glob pattern support
+# =============================================================================
+
+# Test glob pattern matches multiple files
+query I
+SELECT COUNT(*) FROM parse_newick('data/newick/simple*.nwk');
+----
+10
+
+# Test glob with include_filepath
+query I
+SELECT COUNT(DISTINCT filepath) FROM parse_newick('data/newick/simple*.nwk', include_filepath=true);
+----
+2
+
+# =============================================================================
+# Array of paths
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM parse_newick(['data/newick/simple.nwk', 'data/newick/simple2.nwk']);
+----
+10
+
+# =============================================================================
+# include_filepath parameter
+# =============================================================================
+
+# Test include_filepath = true
+query TT
+SELECT name, filepath FROM parse_newick('data/newick/simple.nwk', include_filepath=true)
+WHERE is_tip = true ORDER BY name;
+----
+A	data/newick/simple.nwk
+B	data/newick/simple.nwk
+C	data/newick/simple.nwk
+
+# Test include_filepath = false (default) - column should not exist
+statement error
+SELECT filepath FROM parse_newick('data/newick/simple.nwk');
+----
+filepath
+
+# =============================================================================
+# Gzip compression support
+# =============================================================================
+
+# Test reading gzipped file
+query I
+SELECT COUNT(*) FROM parse_newick('data/newick/simple.nwk.gz');
+----
+5
+
+# Same content as uncompressed
+query T
+SELECT name FROM parse_newick('data/newick/simple.nwk.gz') WHERE is_tip = true ORDER BY name;
+----
+A
+B
+C
+
+# =============================================================================
+# Error handling
+# =============================================================================
+
+# Test nonexistent file
+statement error
+SELECT * FROM parse_newick('data/newick/nonexistent.nwk');
+----
+nonexistent.nwk
+
+# Test empty array
+statement error
+SELECT * FROM parse_newick([]);
+----
+at least one
+
+# =============================================================================
+# Creating table from parse_newick
+# =============================================================================
+
+statement ok
+CREATE TABLE tree_nodes AS SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk');
+
+query I
+SELECT COUNT(*) FROM tree_nodes;
+----
+5
+
+query I
+SELECT COUNT(*) FROM tree_nodes WHERE edge_id IS NOT NULL;
+----
+5
+
+statement ok
+DROP TABLE tree_nodes;

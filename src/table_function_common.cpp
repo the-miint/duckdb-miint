@@ -7,8 +7,13 @@
 namespace duckdb {
 
 // Check if a path refers to stdin
-static bool IsStdinPath(const std::string &path) {
+bool IsStdinPath(const std::string &path) {
 	return path == "-" || path == "/dev/stdin" || path == "/dev/fd/0" || path == "/proc/self/fd/0";
+}
+
+// Check if a path has .gz extension
+bool IsGzipped(const std::string &path) {
+	return path.size() >= 3 && path.substr(path.size() - 3) == ".gz";
 }
 
 // Check if any part of the pattern could match stdin paths

@@ -40,14 +40,32 @@ struct NewickNode {
 	}
 };
 
+// Input data for building a tree programmatically
+struct NodeInput {
+	int64_t node_id;                      // Unique identifier for this node
+	std::optional<int64_t> parent_id;     // Parent's node_id (nullopt for root)
+	std::string name;                     // Node label (may be empty)
+	double branch_length;                 // Branch length (NaN if not specified)
+	std::optional<int64_t> edge_id;       // Edge identifier (nullopt if not specified)
+};
+
 class NewickTree {
 public:
 	// Constants
 	static constexpr uint32_t NO_PARENT = UINT32_MAX;
+	static constexpr uint32_t MAX_NODES = UINT32_MAX - 1;
 
 	// Parse a Newick string into a tree
 	// Throws on parse errors (strict mode)
 	static NewickTree parse(std::string_view newick);
+
+	// Build a tree from node input data
+	// Validates:
+	// - Exactly one root (node with nullopt parent_id)
+	// - All parent references are valid
+	// - No cycles
+	// Throws on validation errors
+	static NewickTree build(const std::vector<NodeInput> &nodes);
 
 	// Serialize tree back to Newick format
 	// Includes edge identifiers if present

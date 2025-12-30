@@ -43,9 +43,9 @@ GROUP BY sample_id;
 ```
 
 **Key capabilities:**
-- **Read bioinformatics formats as tables**: FASTQ/FASTA, SAM/BAM, BIOM
+- **Read bioinformatics formats as tables**: FASTQ/FASTA, SAM/BAM, BIOM, Newick trees
 - **Analyze with SQL**: Filter, aggregate, join with metadata tables
-- **Write back to standard formats**: Export results to FASTQ, SAM/BAM, BIOM
+- **Write back to standard formats**: Export results to FASTQ, SAM/BAM, BIOM, Newick
 - **Powerful functions**: Sequence identity, coverage, flag checking, Woltka classification
 - **Performance**: Parallel processing, efficient compression, streaming I/O
 
@@ -64,6 +64,7 @@ GROUP BY sample_id;
   - [read_biom](#read_biomfilename-include_filepathfalse)
   - [read_gff](#read_gffpath)
   - [read_jplace](#read_jplacepath)
+  - [parse_newick](#parse_newickfilename-include_filepathfalse)
   - [SAM Flag Functions](#sam-flag-functions)
   - [alignment_seq_identity](#alignment_seq_identitycigar-nm-md-type)
   - [alignment_query_length](#alignment_query_lengthcigar-include_hard_clipstrue)
@@ -79,6 +80,7 @@ GROUP BY sample_id;
   - [FORMAT FASTA](#copy--to--format-fasta)
   - [FORMAT SAM / FORMAT BAM](#copy--to--format-sam-and-copy--to--format-bam)
   - [FORMAT BIOM](#copy--to--format-biom)
+  - [FORMAT NEWICK](#copy--to--format-newick)
 - [Running the tests](#running-the-tests)
   - [SQL Logic Tests](#sql-logic-tests)
   - [C++ Unit Tests](#c-unit-tests)
@@ -657,6 +659,106 @@ JOIN edge_taxa e ON p.edge_num = e.edge_num;
   - Other tools following the jplace specification
 
 **Implementation note:** Implemented as a DuckDB macro using `read_json` with JSON path extraction.
+
+### `parse_newick(filename, [include_filepath=false])`
+
+Read Newick phylogenetic tree files and return a table with one row per node.
+
+**Parameters:**
+- `filename` (VARCHAR or VARCHAR[]): Path to Newick file(s), glob pattern (e.g., `'data/*.nwk'`), or `-` / `/dev/stdin` for standard input
+  - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
+  - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
+- `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
+
+**Output schema:**
+- `node_index` (BIGINT): 0-based index of node in tree (internal representation)
+- `name` (VARCHAR): Node label (empty string for unlabeled internal nodes)
+- `branch_length` (DOUBLE, nullable): Branch length (NULL if not specified in file)
+- `edge_id` (BIGINT, nullable): Edge identifier from jplace format `{n}` syntax (NULL if not specified)
+- `parent_index` (BIGINT, nullable): Parent node's node_index (NULL for root)
+- `is_tip` (BOOLEAN): Whether node is a tip/leaf (has no children)
+- `filepath` (VARCHAR, optional): File path when include_filepath=true
+
+**Behavior:**
+- Parses standard Newick format including:
+  - Node names (quoted or unquoted)
+  - Branch lengths (`:0.123`)
+  - Edge identifiers for jplace compatibility (`{0}`, `{1}`, etc.)
+- Supports gzip-compressed files (auto-detected from `.gz` extension)
+- Supports stdin input using `-` or `/dev/stdin` (single file only)
+- Returns exactly one row per node in the tree
+- Root node has `parent_index = NULL`
+
+**Examples:**
+```sql
+-- Read a single Newick file
+SELECT * FROM parse_newick('tree.nwk');
+
+-- Get tip names only
+SELECT name FROM parse_newick('tree.nwk')
+WHERE is_tip = true;
+
+-- Count nodes in tree
+SELECT COUNT(*) AS total_nodes,
+       COUNT(*) FILTER (WHERE is_tip) AS tips,
+       COUNT(*) FILTER (WHERE NOT is_tip) AS internal_nodes
+FROM parse_newick('tree.nwk');
+
+-- Read tree with edge IDs (jplace format)
+SELECT name, edge_id, branch_length
+FROM parse_newick('reference.nwk')
+WHERE edge_id IS NOT NULL;
+
+-- Read multiple trees with glob pattern
+SELECT filepath, COUNT(*) AS num_nodes
+FROM parse_newick('trees/*.nwk', include_filepath=true)
+GROUP BY filepath;
+
+-- Read gzip-compressed tree
+SELECT * FROM parse_newick('tree.nwk.gz');
+
+-- Read from stdin
+SELECT * FROM parse_newick('/dev/stdin');
+
+-- Find the root node
+SELECT * FROM parse_newick('tree.nwk')
+WHERE parent_index IS NULL;
+
+-- Calculate tree depth (distance from root)
+WITH RECURSIVE node_depth AS (
+    SELECT node_index, name, parent_index, 0 AS depth
+    FROM parse_newick('tree.nwk')
+    WHERE parent_index IS NULL
+    UNION ALL
+    SELECT t.node_index, t.name, t.parent_index, nd.depth + 1
+    FROM parse_newick('tree.nwk') t
+    JOIN node_depth nd ON t.parent_index = nd.node_index
+)
+SELECT name, depth FROM node_depth
+WHERE is_tip ORDER BY depth DESC;
+```
+
+**Stdin limitations:**
+- Cannot be used in multi-file arrays (e.g., `['/dev/stdin', 'file.nwk']` will error)
+- User must know the format of their stdin data
+
+**Roundtrip with COPY FORMAT NEWICK:**
+Trees can be read with `parse_newick`, modified via SQL, and written back to Newick format:
+```sql
+-- Read, filter to subtree, write back
+COPY (
+    SELECT node_index, name, branch_length, edge_id, parent_index
+    FROM parse_newick('input.nwk')
+    -- Your filtering/modification logic here
+) TO 'output.nwk' (FORMAT NEWICK);
+```
+
+**Newick Format Notes:**
+- Standard format for representing phylogenetic trees as text
+- Parentheses denote tree structure: `(A,B)` means A and B share a parent
+- Colons precede branch lengths: `A:0.1` means tip A with branch length 0.1
+- Semicolons terminate the tree: `(A,B);`
+- Edge IDs in braces are an extension for jplace: `A:0.1{0}` has edge_id 0
 
 ### SAM Flag Functions
 
@@ -1517,6 +1619,108 @@ TO 'sparse.biom' (FORMAT BIOM);
 - Feature and sample metadata columns are not currently supported (data only)
 - The output follows BIOM format specification v2.1
 
+### `COPY ... TO '...' (FORMAT NEWICK)`
+
+Write query results to Newick phylogenetic tree format. Reconstructs a tree from tabular node data and serializes to standard Newick format.
+
+**Required columns:**
+- `node_index` (BIGINT): Unique identifier for each node
+- `parent_index` (BIGINT, nullable): Parent node's node_index (NULL for root)
+
+**Optional columns:**
+- `name` (VARCHAR): Node label
+- `branch_length` (DOUBLE): Branch length
+- `edge_id` (BIGINT): Edge identifier for jplace format
+
+**Parameters:**
+- `EDGE_IDS` (BOOLEAN, default: auto): Include edge identifiers `{n}` in output
+  - Default: true if `edge_id` column exists, false otherwise
+  - Set to `false` to explicitly exclude edge IDs
+- `COMPRESSION` (default: auto): Enable gzip compression
+  - `'gzip'`: Enable gzip compression
+  - `'none'`: No compression
+  - Auto-detected from `.gz` extension
+
+**Behavior:**
+- Reconstructs tree structure from parent-child relationships
+- Validates tree structure:
+  - Exactly one root (node with NULL parent_index)
+  - All parent references valid
+  - No cycles
+  - All nodes connected
+- Serializes to standard Newick format with semicolon terminator
+- Extra columns (e.g., `is_tip`, `filepath`) are ignored
+
+**Examples:**
+```sql
+-- Basic roundtrip: read and write tree
+COPY (SELECT * FROM parse_newick('input.nwk'))
+TO 'output.nwk' (FORMAT NEWICK);
+
+-- Write compressed tree
+COPY (SELECT * FROM parse_newick('input.nwk'))
+TO 'output.nwk.gz' (FORMAT NEWICK);
+
+-- Explicit compression parameter
+COPY (SELECT * FROM parse_newick('input.nwk'))
+TO 'output.nwk' (FORMAT NEWICK, COMPRESSION 'gzip');
+
+-- Include edge IDs (for jplace compatibility)
+COPY (SELECT * FROM parse_newick('reference.nwk'))
+TO 'with_edges.nwk' (FORMAT NEWICK, EDGE_IDS true);
+
+-- Exclude edge IDs even if present in input
+COPY (SELECT * FROM parse_newick('reference.nwk'))
+TO 'no_edges.nwk' (FORMAT NEWICK, EDGE_IDS false);
+
+-- Modify tree before writing (e.g., scale branch lengths)
+COPY (
+    SELECT node_index, name, branch_length * 2.0 AS branch_length,
+           edge_id, parent_index
+    FROM parse_newick('input.nwk')
+) TO 'scaled.nwk' (FORMAT NEWICK);
+
+-- Create tree from scratch
+CREATE TABLE my_tree AS
+SELECT * FROM (VALUES
+    (0, NULL::BIGINT, '', 0.0),      -- root
+    (1, 0, 'A', 0.1),                 -- tip A
+    (2, 0, 'B', 0.2)                  -- tip B
+) AS t(node_index, parent_index, name, branch_length);
+
+COPY (SELECT * FROM my_tree)
+TO 'new_tree.nwk' (FORMAT NEWICK);
+-- Produces: (A:0.1,B:0.2);
+
+-- Filter to subtree (advanced - requires careful node_index management)
+-- Note: Ensure parent references remain valid after filtering
+```
+
+**Validation errors:**
+- "No data to write" - Empty result set
+- "no root" - All nodes have a parent_index
+- "multiple roots" - More than one node has NULL parent_index
+- "invalid parent reference" - parent_index references non-existent node
+- "cycle detected" - Circular parent-child relationship
+- "disconnected nodes" - Nodes not reachable from root
+
+**Roundtrip guarantee:**
+Trees written with `COPY FORMAT NEWICK` can be read back with `parse_newick` and will produce equivalent structure:
+```sql
+-- Write tree
+COPY (SELECT * FROM parse_newick('original.nwk'))
+TO 'copy.nwk' (FORMAT NEWICK);
+
+-- Read back - should have same structure
+SELECT * FROM parse_newick('copy.nwk');
+```
+
+**Newick Format Output:**
+- Node names are included without quotes (unless containing special characters)
+- Branch lengths are included after colon (`:0.123`)
+- Edge IDs are included in braces when EDGE_IDS=true (`{0}`)
+- Tree is terminated with semicolon (`;`)
+
 ## Running the tests
 
 The MIINT extension uses three complementary testing approaches to ensure correctness and reliability.
@@ -1732,6 +1936,7 @@ Test data files are organized in `data/` subdirectories:
 - `data/sam/` - SAM/BAM test files
 - `data/fastq/` - FASTQ/FASTA test files
 - `data/biom/` - BIOM format test files
+- `data/newick/` - Newick phylogenetic tree test files
 
 **Important:** Keep test data files small (< 1KB when possible) to maintain fast test execution and minimize repository size.
 
