@@ -156,6 +156,7 @@ set(EXTENSION_SOURCES
     src/BIOMReader.cpp
     src/read_biom.cpp
     src/reference_table_reader.cpp
+    src/placement_table_reader.cpp
     src/NewickTree.cpp
     src/parse_newick.cpp
     src/copy_newick.cpp)

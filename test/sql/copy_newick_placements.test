@@ -1,0 +1,497 @@
+# name: test/sql/copy_newick_placements.test
+# description: Test COPY FORMAT NEWICK with PLACEMENTS parameter for phylogenetic placement
+# group: [sql]
+
+require miint
+
+# =============================================================================
+# Setup: Create test placement tables
+# =============================================================================
+
+# Valid placements table matching with_edge_ids.nwk edge IDs (0-4)
+# Use explicit casts since VALUES creates DECIMAL type for decimal literals
+statement ok
+CREATE TABLE valid_placements AS
+SELECT * FROM (VALUES
+    ('frag1', 0::BIGINT, 0.95::DOUBLE, 0.05::DOUBLE, 0.001::DOUBLE),
+    ('frag2', 1::BIGINT, 0.80::DOUBLE, 0.10::DOUBLE, 0.002::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+# Single placement
+statement ok
+CREATE TABLE single_placement AS
+SELECT * FROM (VALUES
+    ('single_frag', 2::BIGINT, 0.90::DOUBLE, 0.15::DOUBLE, 0.003::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+# =============================================================================
+# Error Cases: Missing/Invalid PLACEMENTS table
+# =============================================================================
+
+# PLACEMENTS table does not exist
+statement error
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/error_nonexistent.nwk' (FORMAT NEWICK, PLACEMENTS 'nonexistent_table');
+----
+does not exist
+
+# =============================================================================
+# Error Cases: Wrong column schema in PLACEMENTS table
+# =============================================================================
+
+# Missing fragment_id column
+statement ok
+CREATE TABLE missing_fragment_id AS
+SELECT edge_id, like_weight_ratio, distal_length, pendant_length FROM valid_placements;
+
+statement error
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/error_missing_col.nwk' (FORMAT NEWICK, PLACEMENTS 'missing_fragment_id');
+----
+fragment_id
+
+statement ok
+DROP TABLE missing_fragment_id;
+
+# Missing edge_id column
+statement ok
+CREATE TABLE missing_edge_id AS
+SELECT fragment_id, like_weight_ratio, distal_length, pendant_length FROM valid_placements;
+
+statement error
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/error_missing_edge.nwk' (FORMAT NEWICK, PLACEMENTS 'missing_edge_id');
+----
+edge_id
+
+statement ok
+DROP TABLE missing_edge_id;
+
+# Missing like_weight_ratio column
+statement ok
+CREATE TABLE missing_lwr AS
+SELECT fragment_id, edge_id, distal_length, pendant_length FROM valid_placements;
+
+statement error
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/error_missing_lwr.nwk' (FORMAT NEWICK, PLACEMENTS 'missing_lwr');
+----
+like_weight_ratio
+
+statement ok
+DROP TABLE missing_lwr;
+
+# Missing distal_length column
+statement ok
+CREATE TABLE missing_distal AS
+SELECT fragment_id, edge_id, like_weight_ratio, pendant_length FROM valid_placements;
+
+statement error
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/error_missing_distal.nwk' (FORMAT NEWICK, PLACEMENTS 'missing_distal');
+----
+distal_length
+
+statement ok
+DROP TABLE missing_distal;
+
+# Missing pendant_length column
+statement ok
+CREATE TABLE missing_pendant AS
+SELECT fragment_id, edge_id, like_weight_ratio, distal_length FROM valid_placements;
+
+statement error
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/error_missing_pendant.nwk' (FORMAT NEWICK, PLACEMENTS 'missing_pendant');
+----
+pendant_length
+
+statement ok
+DROP TABLE missing_pendant;
+
+# =============================================================================
+# Error Cases: Empty PLACEMENTS table
+# =============================================================================
+
+statement ok
+CREATE TABLE empty_placements AS
+SELECT * FROM valid_placements WHERE 1=0;
+
+statement error
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/error_empty.nwk' (FORMAT NEWICK, PLACEMENTS 'empty_placements');
+----
+empty
+
+statement ok
+DROP TABLE empty_placements;
+
+# =============================================================================
+# Error Cases: NULL values in required columns
+# =============================================================================
+
+# NULL edge_id
+statement ok
+CREATE TABLE null_edge_id AS
+SELECT * FROM (VALUES
+    ('frag1', NULL::BIGINT, 0.95::DOUBLE, 0.05::DOUBLE, 0.001::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+statement error
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/error_null_edge.nwk' (FORMAT NEWICK, PLACEMENTS 'null_edge_id');
+----
+NULL edge_id
+
+statement ok
+DROP TABLE null_edge_id;
+
+# NULL like_weight_ratio
+statement ok
+CREATE TABLE null_lwr AS
+SELECT * FROM (VALUES
+    ('frag1', 0::BIGINT, NULL::DOUBLE, 0.05::DOUBLE, 0.001::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+statement error
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/error_null_lwr.nwk' (FORMAT NEWICK, PLACEMENTS 'null_lwr');
+----
+NULL like_weight_ratio
+
+statement ok
+DROP TABLE null_lwr;
+
+# NULL distal_length
+statement ok
+CREATE TABLE null_distal AS
+SELECT * FROM (VALUES
+    ('frag1', 0::BIGINT, 0.95::DOUBLE, NULL::DOUBLE, 0.001::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+statement error
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/error_null_distal.nwk' (FORMAT NEWICK, PLACEMENTS 'null_distal');
+----
+NULL distal_length
+
+statement ok
+DROP TABLE null_distal;
+
+# NULL pendant_length
+statement ok
+CREATE TABLE null_pendant AS
+SELECT * FROM (VALUES
+    ('frag1', 0::BIGINT, 0.95::DOUBLE, 0.05::DOUBLE, NULL::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+statement error
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/error_null_pendant.nwk' (FORMAT NEWICK, PLACEMENTS 'null_pendant');
+----
+NULL pendant_length
+
+statement ok
+DROP TABLE null_pendant;
+
+# NULL fragment_id is silently skipped (not an error)
+statement ok
+CREATE TABLE null_fragment_id AS
+SELECT * FROM (VALUES
+    (NULL::VARCHAR, 0::BIGINT, 0.95::DOUBLE, 0.05::DOUBLE, 0.001::DOUBLE),
+    ('valid_frag', 1::BIGINT, 0.90::DOUBLE, 0.10::DOUBLE, 0.002::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+statement ok
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/null_fragment_skipped.nwk' (FORMAT NEWICK, PLACEMENTS 'null_fragment_id');
+
+# Only the valid fragment should be inserted (5 original + 2 = 7)
+query I
+SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/null_fragment_skipped.nwk');
+----
+7
+
+statement ok
+DROP TABLE null_fragment_id;
+
+# =============================================================================
+# Error Cases: Tree lacks edge_id column
+# =============================================================================
+
+statement error
+COPY (SELECT node_index, name, branch_length, parent_index FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/error_no_edge_col.nwk' (FORMAT NEWICK, PLACEMENTS 'valid_placements');
+----
+edge_id
+
+# =============================================================================
+# Error Cases: Tree has all NULL edge_ids
+# =============================================================================
+
+statement error
+COPY (SELECT node_index, name, branch_length, NULL::BIGINT AS edge_id, parent_index
+      FROM parse_newick('data/newick/simple.nwk'))
+TO '__TEST_DIR__/error_null_edges.nwk' (FORMAT NEWICK, PLACEMENTS 'valid_placements');
+----
+edge_id
+
+# =============================================================================
+# Error Cases: Placement references unknown edge_id
+# =============================================================================
+
+statement ok
+CREATE TABLE bad_edge_placement AS
+SELECT * FROM (VALUES
+    ('bad_frag', 999::BIGINT, 0.90::DOUBLE, 0.05::DOUBLE, 0.001::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+statement error
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/error_bad_edge.nwk' (FORMAT NEWICK, PLACEMENTS 'bad_edge_placement');
+----
+Unknown edge_id
+
+statement ok
+DROP TABLE bad_edge_placement;
+
+# =============================================================================
+# Error Cases: Negative distal_length
+# =============================================================================
+
+statement ok
+CREATE TABLE negative_distal AS
+SELECT * FROM (VALUES
+    ('neg_frag', 0::BIGINT, 0.90::DOUBLE, -0.05::DOUBLE, 0.001::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+statement error
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/error_neg_distal.nwk' (FORMAT NEWICK, PLACEMENTS 'negative_distal');
+----
+distal_length
+
+statement ok
+DROP TABLE negative_distal;
+
+# =============================================================================
+# Error Cases: Negative pendant_length
+# =============================================================================
+
+statement ok
+CREATE TABLE negative_pendant AS
+SELECT * FROM (VALUES
+    ('neg_frag', 0::BIGINT, 0.90::DOUBLE, 0.05::DOUBLE, -0.001::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+statement error
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/error_neg_pendant.nwk' (FORMAT NEWICK, PLACEMENTS 'negative_pendant');
+----
+pendant_length
+
+statement ok
+DROP TABLE negative_pendant;
+
+# =============================================================================
+# Error Cases: distal_length exceeds edge length
+# =============================================================================
+
+# Edge 0 (tip A) has branch_length 0.1, distal_length 0.5 exceeds it
+statement ok
+CREATE TABLE exceeds_edge AS
+SELECT * FROM (VALUES
+    ('exceed_frag', 0::BIGINT, 0.90::DOUBLE, 0.5::DOUBLE, 0.001::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+statement error
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/error_exceeds.nwk' (FORMAT NEWICK, PLACEMENTS 'exceeds_edge');
+----
+exceeds
+
+statement ok
+DROP TABLE exceeds_edge;
+
+# =============================================================================
+# Basic Functionality: Single placement
+# =============================================================================
+
+# Write tree with single placement
+statement ok
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/single_placement.nwk' (FORMAT NEWICK, PLACEMENTS 'single_placement');
+
+# Verify node count increased (original 5 + 2 new nodes per placement = 7)
+query I
+SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/single_placement.nwk');
+----
+7
+
+# Verify fragment name appears in tree
+query I
+SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/single_placement.nwk') WHERE name = 'single_frag';
+----
+1
+
+# Verify fragment is a tip
+query I
+SELECT CASE WHEN is_tip THEN 1 ELSE 0 END FROM parse_newick('__TEST_DIR__/single_placement.nwk') WHERE name = 'single_frag';
+----
+1
+
+# =============================================================================
+# Basic Functionality: Multiple placements
+# =============================================================================
+
+statement ok
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/multi_placement.nwk' (FORMAT NEWICK, PLACEMENTS 'valid_placements');
+
+# Verify node count (original 5 + 2*2 = 9)
+query I
+SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/multi_placement.nwk');
+----
+9
+
+# Verify both fragments appear
+query T
+SELECT name FROM parse_newick('__TEST_DIR__/multi_placement.nwk')
+WHERE name IN ('frag1', 'frag2') ORDER BY name;
+----
+frag1
+frag2
+
+# =============================================================================
+# Edge Case: Multiple placements on same edge
+# =============================================================================
+
+statement ok
+CREATE TABLE same_edge_placements AS
+SELECT * FROM (VALUES
+    ('frag_a', 0::BIGINT, 0.90::DOUBLE, 0.08::DOUBLE, 0.001::DOUBLE),
+    ('frag_b', 0::BIGINT, 0.85::DOUBLE, 0.04::DOUBLE, 0.002::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+statement ok
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/same_edge.nwk' (FORMAT NEWICK, PLACEMENTS 'same_edge_placements');
+
+# Both fragments should appear (5 original + 4 new = 9)
+query I
+SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/same_edge.nwk');
+----
+9
+
+query T
+SELECT name FROM parse_newick('__TEST_DIR__/same_edge.nwk')
+WHERE name IN ('frag_a', 'frag_b') ORDER BY name;
+----
+frag_a
+frag_b
+
+statement ok
+DROP TABLE same_edge_placements;
+
+# =============================================================================
+# Edge Case: Duplicate fragment_id (keeps best by like_weight_ratio)
+# =============================================================================
+
+statement ok
+CREATE TABLE duplicate_frags AS
+SELECT * FROM (VALUES
+    ('dup_frag', 0::BIGINT, 0.90::DOUBLE, 0.05::DOUBLE, 0.001::DOUBLE),
+    ('dup_frag', 1::BIGINT, 0.95::DOUBLE, 0.10::DOUBLE, 0.002::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+statement ok
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/dup_frag.nwk' (FORMAT NEWICK, PLACEMENTS 'duplicate_frags');
+
+# Only one dup_frag should appear (5 original + 2 = 7)
+query I
+SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/dup_frag.nwk');
+----
+7
+
+query I
+SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/dup_frag.nwk') WHERE name = 'dup_frag';
+----
+1
+
+statement ok
+DROP TABLE duplicate_frags;
+
+# =============================================================================
+# Edge Case: EDGE_IDS=false with PLACEMENTS (user choice respected)
+# =============================================================================
+
+statement ok
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/no_edge_ids.nwk' (FORMAT NEWICK, PLACEMENTS 'single_placement', EDGE_IDS false);
+
+# Verify output has no edge_ids
+query I
+SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/no_edge_ids.nwk') WHERE edge_id IS NOT NULL;
+----
+0
+
+# But placements were still inserted
+query I
+SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/no_edge_ids.nwk') WHERE name = 'single_frag';
+----
+1
+
+# =============================================================================
+# Edge Case: Compressed output with placements
+# =============================================================================
+
+statement ok
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/compressed_placements.nwk.gz' (FORMAT NEWICK, PLACEMENTS 'single_placement');
+
+query I
+SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/compressed_placements.nwk.gz');
+----
+7
+
+# =============================================================================
+# Integration: read_jplace -> PLACEMENTS workflow
+# =============================================================================
+
+# Create a table from jplace data that matches with_edge_ids.nwk tree
+# Note: View support is not yet implemented (requires future work)
+statement ok
+CREATE TABLE jplace_style_placements AS
+SELECT fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length
+FROM valid_placements;
+
+statement ok
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/jplace_workflow.nwk' (FORMAT NEWICK, PLACEMENTS 'jplace_style_placements');
+
+query I
+SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/jplace_workflow.nwk');
+----
+9
+
+# Verify both fragments are present
+query T
+SELECT name FROM parse_newick('__TEST_DIR__/jplace_workflow.nwk')
+WHERE name IN ('frag1', 'frag2') ORDER BY name;
+----
+frag1
+frag2
+
+statement ok
+DROP TABLE jplace_style_placements;
+
+# =============================================================================
+# Cleanup
+# =============================================================================
+
+statement ok
+DROP TABLE valid_placements;
+
+statement ok
+DROP TABLE single_placement;

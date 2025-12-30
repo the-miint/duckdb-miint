@@ -5,6 +5,7 @@
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
+#include <limits>
 
 namespace duckdb {
 
@@ -53,6 +54,8 @@ std::unordered_map<std::string, uint64_t> ReadReferenceTable(ClientContext &cont
 	vector<LogicalType> chunk_types = {name_type, length_type};
 	chunk.Initialize(Allocator::Get(context), chunk_types);
 
+	idx_t row_number = 0;
+
 	while (true) {
 		chunk.Reset();
 		storage.Scan(transaction, chunk, scan_state);
@@ -65,8 +68,20 @@ std::unordered_map<std::string, uint64_t> ReadReferenceTable(ClientContext &cont
 		auto &length_vector = chunk.data[1];
 
 		auto name_data = FlatVector::GetData<string_t>(name_vector);
+		auto &name_validity = FlatVector::Validity(name_vector);
+		auto &length_validity = FlatVector::Validity(length_vector);
 
 		for (idx_t i = 0; i < chunk.size(); i++) {
+			row_number++;
+
+			// Check for NULL values
+			if (!name_validity.RowIsValid(i)) {
+				throw InvalidInputException("NULL reference name at row %llu in table '%s'", row_number, table_name);
+			}
+			if (!length_validity.RowIsValid(i)) {
+				throw InvalidInputException("NULL reference length at row %llu in table '%s'", row_number, table_name);
+			}
+
 			auto name = name_data[i].GetString();
 
 			// Get length value - handle different integer types
@@ -78,9 +93,16 @@ std::unordered_map<std::string, uint64_t> ReadReferenceTable(ClientContext &cont
 			case LogicalTypeId::INTEGER:
 				length = FlatVector::GetData<int32_t>(length_vector)[i];
 				break;
-			case LogicalTypeId::UBIGINT:
-				length = static_cast<int64_t>(FlatVector::GetData<uint64_t>(length_vector)[i]);
+			case LogicalTypeId::UBIGINT: {
+				uint64_t uval = FlatVector::GetData<uint64_t>(length_vector)[i];
+				if (uval > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+					throw InvalidInputException(
+					    "Reference length %llu at row %llu exceeds INT64_MAX in table '%s'", uval, row_number,
+					    table_name);
+				}
+				length = static_cast<int64_t>(uval);
 				break;
+			}
 			case LogicalTypeId::UINTEGER:
 				length = FlatVector::GetData<uint32_t>(length_vector)[i];
 				break;
@@ -89,7 +111,8 @@ std::unordered_map<std::string, uint64_t> ReadReferenceTable(ClientContext &cont
 			}
 
 			if (length < 0) {
-				throw InvalidInputException("Reference length must be non-negative for '%s'", name);
+				throw InvalidInputException("Reference length must be non-negative for '%s' at row %llu", name,
+				                            row_number);
 			}
 
 			result.emplace(name, static_cast<uint64_t>(length));

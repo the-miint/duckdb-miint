@@ -1640,6 +1640,12 @@ Write query results to Newick phylogenetic tree format. Reconstructs a tree from
   - `'gzip'`: Enable gzip compression
   - `'none'`: No compression
   - Auto-detected from `.gz` extension
+- `PLACEMENTS` (VARCHAR): Name of a table containing phylogenetic placement data to insert
+  - Inserts fragment sequences into the tree at their placement locations
+  - Requires tree to have `edge_id` column with valid edge identifiers
+  - Required table columns: `fragment_id` (VARCHAR), `edge_id` (BIGINT/INTEGER), `like_weight_ratio` (DOUBLE), `distal_length` (DOUBLE), `pendant_length` (DOUBLE)
+  - Duplicate fragment_ids are deduplicated (keeps highest like_weight_ratio)
+  - Multiple placements on same edge are handled correctly
 
 **Behavior:**
 - Reconstructs tree structure from parent-child relationships
@@ -1694,6 +1700,26 @@ TO 'new_tree.nwk' (FORMAT NEWICK);
 
 -- Filter to subtree (advanced - requires careful node_index management)
 -- Note: Ensure parent references remain valid after filtering
+
+-- Insert phylogenetic placements into a reference tree
+-- First, create a placement table (e.g., from read_jplace output)
+CREATE TABLE placements AS
+SELECT * FROM (VALUES
+    ('fragment_1', 0::BIGINT, 0.95::DOUBLE, 0.05::DOUBLE, 0.001::DOUBLE),
+    ('fragment_2', 1::BIGINT, 0.80::DOUBLE, 0.10::DOUBLE, 0.002::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+-- Write tree with placements inserted
+COPY (SELECT * FROM parse_newick('reference.nwk'))
+TO 'with_placements.nwk' (FORMAT NEWICK, PLACEMENTS 'placements');
+
+-- Combine with read_jplace for seamless jplace to newick workflow
+CREATE TABLE jplace_placements AS
+SELECT fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length
+FROM read_jplace('placements.jplace');
+
+COPY (SELECT * FROM parse_newick('reference.nwk'))
+TO 'resolved_tree.nwk' (FORMAT NEWICK, PLACEMENTS 'jplace_placements');
 ```
 
 **Validation errors:**
@@ -1703,6 +1729,16 @@ TO 'new_tree.nwk' (FORMAT NEWICK);
 - "invalid parent reference" - parent_index references non-existent node
 - "cycle detected" - Circular parent-child relationship
 - "disconnected nodes" - Nodes not reachable from root
+
+**Placement-specific errors (when using PLACEMENTS):**
+- "Placement table does not exist" - The specified table doesn't exist
+- "Placement table is empty" - The table has no rows
+- "missing required column" - Missing one of: fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length
+- "Tree has no edge_id values" - Tree data lacks edge identifiers
+- "Unknown edge_id" - Placement references an edge_id not present in tree
+- "distal_length is negative" - distal_length must be ≥ 0
+- "pendant_length is negative" - pendant_length must be ≥ 0
+- "distal_length exceeds edge length" - distal_length is larger than the edge's branch_length
 
 **Roundtrip guarantee:**
 Trees written with `COPY FORMAT NEWICK` can be read back with `parse_newick` and will produce equivalent structure:

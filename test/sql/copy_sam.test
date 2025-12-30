@@ -242,3 +242,31 @@ query IIIII
 SELECT read_id, flags, reference, position, mapq FROM read_sam('__TEST_DIR__/with_seq.sam', reference_lengths='ref_table_seq');
 ----
 read-seq	0	ref1	1	30
+
+# =============================================================================
+# Error Cases: NULL values in reference_lengths table
+# =============================================================================
+
+# Test 23: NULL reference name
+statement ok
+CREATE TABLE ref_null_name AS SELECT NULL::VARCHAR AS name, 100::BIGINT AS length;
+
+statement error
+COPY sam_test TO '__TEST_DIR__/error_null_name.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_null_name');
+----
+NULL reference name
+
+statement ok
+DROP TABLE ref_null_name;
+
+# Test 24: NULL reference length
+statement ok
+CREATE TABLE ref_null_length AS SELECT 'chr1'::VARCHAR AS name, NULL::BIGINT AS length;
+
+statement error
+COPY sam_test TO '__TEST_DIR__/error_null_length.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_null_length');
+----
+NULL reference length
+
+statement ok
+DROP TABLE ref_null_length;
