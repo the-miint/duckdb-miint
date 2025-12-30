@@ -533,6 +533,264 @@ std::optional<uint32_t> NewickTree::find_node_by_edge_id(int64_t edge_id) const 
 	return std::nullopt;
 }
 
+std::unordered_map<int64_t, uint32_t> NewickTree::build_edge_index() const {
+	std::unordered_map<int64_t, uint32_t> index;
+	for (uint32_t i = 0; i < nodes_.size(); ++i) {
+		if (nodes_[i].edge_id.has_value()) {
+			index[nodes_[i].edge_id.value()] = i;
+		}
+	}
+	return index;
+}
+
+// ============================================================================
+// Distance calculations
+// ============================================================================
+
+std::vector<uint32_t> NewickTree::tips() const {
+	std::vector<uint32_t> result;
+	for (uint32_t i = 0; i < nodes_.size(); ++i) {
+		if (nodes_[i].children.empty()) {
+			result.push_back(i);
+		}
+	}
+	return result;
+}
+
+std::vector<std::string> NewickTree::tip_names() const {
+	std::vector<std::string> result;
+	for (const auto &node : nodes_) {
+		if (node.children.empty()) {
+			result.push_back(node.name);
+		}
+	}
+	return result;
+}
+
+double NewickTree::distance_to_root(uint32_t node) const {
+	if (node >= nodes_.size()) {
+		throw std::out_of_range("Invalid node index: " + std::to_string(node));
+	}
+
+	double dist = 0.0;
+	uint32_t current = node;
+	while (current != root_) {
+		double bl = nodes_[current].branch_length;
+		if (!std::isnan(bl)) {
+			dist += bl;
+		}
+		current = nodes_[current].parent;
+		if (current == NO_PARENT) {
+			break; // Reached root or disconnected node
+		}
+	}
+	return dist;
+}
+
+uint32_t NewickTree::find_lca(uint32_t a, uint32_t b) const {
+	if (a >= nodes_.size()) {
+		throw std::out_of_range("Invalid node index: " + std::to_string(a));
+	}
+	if (b >= nodes_.size()) {
+		throw std::out_of_range("Invalid node index: " + std::to_string(b));
+	}
+
+	// Collect ancestors of a (including a itself)
+	std::vector<bool> is_ancestor_of_a(nodes_.size(), false);
+	uint32_t current = a;
+	while (current != NO_PARENT) {
+		is_ancestor_of_a[current] = true;
+		current = nodes_[current].parent;
+	}
+
+	// Find first ancestor of b that is also ancestor of a
+	current = b;
+	while (current != NO_PARENT) {
+		if (is_ancestor_of_a[current]) {
+			return current;
+		}
+		current = nodes_[current].parent;
+	}
+
+	// Should not happen in a valid tree
+	throw std::runtime_error("Nodes have no common ancestor - tree may be disconnected");
+}
+
+double NewickTree::pairwise_distance(uint32_t a, uint32_t b) const {
+	if (a == b) {
+		return 0.0;
+	}
+
+	uint32_t lca = find_lca(a, b);
+
+	// Sum distances from a to LCA
+	double dist = 0.0;
+	uint32_t current = a;
+	while (current != lca) {
+		double bl = nodes_[current].branch_length;
+		if (!std::isnan(bl)) {
+			dist += bl;
+		}
+		current = nodes_[current].parent;
+	}
+
+	// Sum distances from b to LCA
+	current = b;
+	while (current != lca) {
+		double bl = nodes_[current].branch_length;
+		if (!std::isnan(bl)) {
+			dist += bl;
+		}
+		current = nodes_[current].parent;
+	}
+
+	return dist;
+}
+
+// ============================================================================
+// Phylogenetic placement
+// ============================================================================
+
+void NewickTree::insert_fully_resolved(const std::vector<Placement> &placements) {
+	if (placements.empty()) {
+		return;
+	}
+
+	// Step 1: Build edge_id -> node_id index
+	auto edge_index = build_edge_index();
+
+	// Step 2: Validate ALL placements upfront before any processing
+	// This ensures we catch and report all invalid data, not just the "winning" placements
+	for (const auto &p : placements) {
+		if (edge_index.find(p.edge_id) == edge_index.end()) {
+			throw std::runtime_error("Unknown edge_id " + std::to_string(p.edge_id) +
+			                         " for fragment '" + p.fragment_id + "'");
+		}
+		if (p.distal_length < 0) {
+			throw std::runtime_error("Negative distal_length " + std::to_string(p.distal_length) +
+			                         " for fragment '" + p.fragment_id + "'");
+		}
+		if (p.pendant_length < 0) {
+			throw std::runtime_error("Negative pendant_length " + std::to_string(p.pendant_length) +
+			                         " for fragment '" + p.fragment_id + "'");
+		}
+		// Validate distal_length against edge length
+		uint32_t edge_node = edge_index.at(p.edge_id);
+		double edge_length = nodes_[edge_node].branch_length;
+		if (!std::isnan(edge_length) && p.distal_length > edge_length) {
+			throw std::runtime_error("distal_length " + std::to_string(p.distal_length) +
+			                         " exceeds edge length " + std::to_string(edge_length) +
+			                         " for fragment '" + p.fragment_id + "'");
+		}
+	}
+
+	// Step 3: Deduplicate placements by fragment_id
+	// Keep the one with highest like_weight_ratio, then lowest pendant_length
+	// Note: Using epsilon comparison for floating-point like_weight_ratio
+	constexpr double EPSILON = 1e-9;
+	std::unordered_map<std::string, const Placement *> best_placement;
+	for (const auto &p : placements) {
+		auto it = best_placement.find(p.fragment_id);
+		if (it == best_placement.end()) {
+			best_placement[p.fragment_id] = &p;
+		} else {
+			const Placement *existing = it->second;
+			double diff = p.like_weight_ratio - existing->like_weight_ratio;
+			// Prefer higher like_weight_ratio (with epsilon tolerance)
+			if (diff > EPSILON) {
+				it->second = &p;
+			} else if (std::abs(diff) <= EPSILON) {
+				// Tiebreaker: prefer lower pendant_length
+				if (p.pendant_length < existing->pendant_length) {
+					it->second = &p;
+				}
+			}
+		}
+	}
+
+	// Step 4: Check node limit before any allocation
+	// Each unique placement creates 2 nodes: internal + fragment
+	size_t new_nodes_needed = best_placement.size() * 2;
+	if (nodes_.size() + new_nodes_needed > MAX_NODES) {
+		throw std::runtime_error("Too many placements: would create " + std::to_string(new_nodes_needed) +
+		                         " new nodes, exceeding maximum of " + std::to_string(MAX_NODES) + " total nodes");
+	}
+
+	// Step 5: Group placements by edge_id
+	std::unordered_map<int64_t, std::vector<const Placement *>> by_edge;
+	for (const auto &[frag_id, p] : best_placement) {
+		by_edge[p->edge_id].push_back(p);
+	}
+
+	// Step 6: Sort each edge's placements by distal_length descending
+	for (auto &[edge_id, edge_placements] : by_edge) {
+		std::sort(edge_placements.begin(), edge_placements.end(),
+		          [](const Placement *a, const Placement *b) { return a->distal_length > b->distal_length; });
+	}
+
+	// Step 7: Reserve space for new nodes (2 per placement: internal + fragment)
+	nodes_.reserve(nodes_.size() + best_placement.size() * 2);
+
+	// Step 8: Process each edge
+	for (const auto &[edge_id, edge_placements] : by_edge) {
+		uint32_t edge_node = edge_index.at(edge_id);
+		double original_length = nodes_[edge_node].branch_length;
+
+		// Get original parent
+		uint32_t original_parent = nodes_[edge_node].parent;
+		// Note: If original_parent == NO_PARENT, we're inserting on the root's edge.
+		// In this case, current_parent starts as NO_PARENT, and the first new internal
+		// node will become the new root (handled at line ~760 below).
+
+		// Remove edge_node from its parent
+		if (original_parent != NO_PARENT) {
+			remove_child(original_parent, edge_node);
+			nodes_[edge_node].parent = NO_PARENT;
+		}
+
+		// Insert placements from highest distal_length to lowest
+		// This creates a chain: original_parent -> new_internal_1 -> new_internal_2 -> ... -> edge_node
+		double remaining_length = original_length;
+		uint32_t current_parent = original_parent;
+
+		for (size_t i = 0; i < edge_placements.size(); ++i) {
+			const Placement *p = edge_placements[i];
+
+			// Calculate the branch length from current_parent to new internal node
+			// This is: remaining_length - distal_length
+			double internal_branch_length = remaining_length - p->distal_length;
+			if (std::isnan(remaining_length)) {
+				internal_branch_length = std::numeric_limits<double>::quiet_NaN();
+			}
+
+			// Create new internal node
+			uint32_t new_internal = add_node("", internal_branch_length, std::nullopt);
+
+			// Create fragment node
+			uint32_t fragment_node = add_node(p->fragment_id, p->pendant_length, std::nullopt);
+
+			// Connect internal node to current parent
+			if (current_parent != NO_PARENT) {
+				set_parent(new_internal, current_parent);
+			} else {
+				// This internal node becomes the new root
+				root_ = new_internal;
+			}
+
+			// Connect fragment to internal
+			set_parent(fragment_node, new_internal);
+
+			// Update for next iteration
+			current_parent = new_internal;
+			remaining_length = p->distal_length;
+		}
+
+		// Finally, connect edge_node to the last internal node
+		nodes_[edge_node].branch_length = remaining_length;
+		set_parent(edge_node, current_parent);
+	}
+}
+
 // ============================================================================
 // Modification
 // ============================================================================

@@ -227,6 +227,7 @@ set(TEST_SOURCES
     test/cpp/test_BIOMTable.cpp
     src/NewickTree.cpp
     test/cpp/test_NewickParser.cpp
+    test/cpp/test_InsertFullyResolved.cpp
 )
 
 add_executable(tests ${TEST_SOURCES})

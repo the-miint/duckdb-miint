@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace miint {
@@ -12,6 +13,16 @@ namespace miint {
 // Forward declarations
 class NewickTree;
 class NewickParser;
+
+// Placement data for insert_fully_resolved
+// Represents where a query sequence should be placed on a reference tree
+struct Placement {
+	std::string fragment_id;     // Name of the query sequence
+	int64_t edge_id;             // Edge to place on (from jplace)
+	double distal_length;        // Distance from child end of edge
+	double pendant_length;       // Branch length of the new fragment
+	double like_weight_ratio;    // Quality score (higher is better, for deduplication)
+};
 
 // Node data stored in contiguous array for cache efficiency
 struct NewickNode {
@@ -118,6 +129,48 @@ public:
 	// Find node by edge ID (returns nullopt if not found)
 	// Note: O(n) scan, consider building index for frequent lookups
 	std::optional<uint32_t> find_node_by_edge_id(int64_t edge_id) const;
+
+	// Build a map from edge_id to node index for O(1) lookups
+	// Call once before repeated find_node_by_edge_id calls
+	std::unordered_map<int64_t, uint32_t> build_edge_index() const;
+
+	// ========================================================================
+	// Distance calculations
+	// ========================================================================
+
+	// Get all tip node indices
+	std::vector<uint32_t> tips() const;
+
+	// Get all tip names
+	std::vector<std::string> tip_names() const;
+
+	// Calculate distance from a node to the root (sum of branch lengths)
+	// NaN branch lengths are treated as 0
+	double distance_to_root(uint32_t node) const;
+
+	// Find the lowest common ancestor of two nodes
+	uint32_t find_lca(uint32_t a, uint32_t b) const;
+
+	// Calculate pairwise distance between two nodes via their LCA
+	// NaN branch lengths are treated as 0
+	double pairwise_distance(uint32_t a, uint32_t b) const;
+
+	// ========================================================================
+	// Phylogenetic placement
+	// ========================================================================
+
+	// Insert query sequences into the tree at their placement positions
+	// Creates a fully resolved tree where each placement gets its own edge
+	//
+	// Algorithm:
+	// 1. Deduplicates placements by fragment_id (keeps highest like_weight_ratio,
+	//    then lowest pendant_length)
+	// 2. Groups placements by edge_id
+	// 3. Sorts each group by distal_length descending
+	// 4. For each edge, creates a chain of new internal nodes with fragments
+	//
+	// Throws if edge_id not found or distal_length exceeds edge length
+	void insert_fully_resolved(const std::vector<Placement> &placements);
 
 	// ========================================================================
 	// Modification (for insert_fully_resolved)
