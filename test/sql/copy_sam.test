@@ -270,3 +270,71 @@ NULL reference length
 
 statement ok
 DROP TABLE ref_null_length;
+
+# =============================================================================
+# View Support: REFERENCE_LENGTHS can be a view
+# =============================================================================
+
+# Test 25: View as REFERENCE_LENGTHS parameter
+statement ok
+CREATE TABLE ref_base_table AS SELECT 'G1234' AS name, 20 AS length UNION ALL SELECT 'G000144735', 90;
+
+statement ok
+CREATE VIEW ref_view AS SELECT * FROM ref_base_table;
+
+statement ok
+COPY sam_test TO '__TEST_DIR__/view_ref.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_view');
+
+query I
+SELECT COUNT(*) FROM read_sam('__TEST_DIR__/view_ref.sam');
+----
+4
+
+query IIIII
+SELECT read_id, flags, reference, position, mapq FROM read_sam('__TEST_DIR__/view_ref.sam') ORDER BY read_id, position;
+----
+foo-1	0	G1234	2	60
+foo-2	0	G1234	2	60
+foo-3	99	G000144735	76020	1
+foo-3	147	G000144735	76146	1
+
+# Test 26: View with computed columns
+statement ok
+CREATE VIEW ref_computed_view AS SELECT name, length * 2 AS length FROM ref_base_table;
+
+statement ok
+COPY sam_test TO '__TEST_DIR__/view_computed_ref.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_computed_view');
+
+query I
+SELECT COUNT(*) FROM read_sam('__TEST_DIR__/view_computed_ref.sam');
+----
+4
+
+# Test 27: View for headerless SAM output
+statement ok
+COPY sam_test TO '__TEST_DIR__/view_headerless.sam' (FORMAT SAM, INCLUDE_HEADER false, REFERENCE_LENGTHS 'ref_view');
+
+# Read it back using the view
+query I
+SELECT COUNT(*) FROM read_sam('__TEST_DIR__/view_headerless.sam', reference_lengths='ref_view');
+----
+4
+
+# Test 28: BAM output with view as REFERENCE_LENGTHS
+statement ok
+COPY sam_test TO '__TEST_DIR__/view_ref.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_view');
+
+query I
+SELECT COUNT(*) FROM read_sam('__TEST_DIR__/view_ref.bam');
+----
+4
+
+# Cleanup
+statement ok
+DROP VIEW ref_computed_view;
+
+statement ok
+DROP VIEW ref_view;
+
+statement ok
+DROP TABLE ref_base_table;

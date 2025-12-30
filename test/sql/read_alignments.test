@@ -183,3 +183,43 @@ FROM read_alignments('data/sam/foo_unmapped_no_seq.sam', include_seq_qual=true)
 ORDER BY read_id
 ----
 Primary/unmapped read missing sequence
+
+### Phase 2.3 Tests: View support for reference_lengths parameter
+
+# Create a reference table
+statement ok
+CREATE TABLE ref_lengths_table AS SELECT 'G1234' AS name, 1000 AS length UNION ALL SELECT 'G000144735', 100000;
+
+# Create a view from the table
+statement ok
+CREATE VIEW ref_lengths_view AS SELECT * FROM ref_lengths_table;
+
+# Test reading headerless SAM with view as reference_lengths
+query IIIII
+SELECT read_id, flags, reference, position, mapq
+FROM read_alignments('data/sam/foo_no_header.sam', reference_lengths='ref_lengths_view')
+ORDER BY read_id, position
+----
+foo-1	0	G1234	2	60
+foo-2	0	G1234	2	60
+foo-3	99	G000144735	76020	1
+foo-3	147	G000144735	76146	1
+
+# Test view with computed columns
+statement ok
+CREATE VIEW ref_lengths_computed AS SELECT name, length * 2 AS length FROM ref_lengths_table;
+
+query I
+SELECT COUNT(*) FROM read_alignments('data/sam/foo_no_header.sam', reference_lengths='ref_lengths_computed')
+----
+4
+
+# Cleanup
+statement ok
+DROP VIEW ref_lengths_computed;
+
+statement ok
+DROP VIEW ref_lengths_view;
+
+statement ok
+DROP TABLE ref_lengths_table;

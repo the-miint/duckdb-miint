@@ -456,11 +456,72 @@ SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/compressed_placements.nwk.gz');
 7
 
 # =============================================================================
+# View Support: PLACEMENTS can be a view (not just a table)
+# =============================================================================
+
+# Create a view that selects from the placements table
+statement ok
+CREATE VIEW placements_view AS
+SELECT fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length
+FROM valid_placements;
+
+# Using a view as PLACEMENTS should work
+statement ok
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/view_placements.nwk' (FORMAT NEWICK, PLACEMENTS 'placements_view');
+
+# Verify the output is correct
+query I
+SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/view_placements.nwk');
+----
+9
+
+# Verify both fragments from the view are present
+query T
+SELECT name FROM parse_newick('__TEST_DIR__/view_placements.nwk')
+WHERE name IN ('frag1', 'frag2') ORDER BY name;
+----
+frag1
+frag2
+
+statement ok
+DROP VIEW placements_view;
+
+# Create a more complex view with filtering
+statement ok
+CREATE VIEW filtered_placements_view AS
+SELECT fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length
+FROM valid_placements
+WHERE like_weight_ratio > 0.85;
+
+statement ok
+COPY (SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk'))
+TO '__TEST_DIR__/filtered_view.nwk' (FORMAT NEWICK, PLACEMENTS 'filtered_placements_view');
+
+# Only frag1 (lwr=0.95) should be included, not frag2 (lwr=0.80)
+query I
+SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/filtered_view.nwk');
+----
+7
+
+query I
+SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/filtered_view.nwk') WHERE name = 'frag1';
+----
+1
+
+query I
+SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/filtered_view.nwk') WHERE name = 'frag2';
+----
+0
+
+statement ok
+DROP VIEW filtered_placements_view;
+
+# =============================================================================
 # Integration: read_jplace -> PLACEMENTS workflow
 # =============================================================================
 
 # Create a table from jplace data that matches with_edge_ids.nwk tree
-# Note: View support is not yet implemented (requires future work)
 statement ok
 CREATE TABLE jplace_style_placements AS
 SELECT fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length

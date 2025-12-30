@@ -1,30 +1,54 @@
 #include "placement_table_reader.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/storage/data_table.hpp"
-#include "duckdb/storage/table/scan_state.hpp"
-#include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/main/connection.hpp"
+#include "duckdb/main/database.hpp"
+#include "duckdb/main/query_result.hpp"
+#include "duckdb/common/types/data_chunk.hpp"
 #include <limits>
 
 namespace duckdb {
 
-void ValidatePlacementTableSchema(ClientContext &context, const std::string &table_name) {
-	// Validate table exists at bind time
-	auto catalog_entry = Catalog::GetEntry<TableCatalogEntry>(context, INVALID_CATALOG, INVALID_SCHEMA, table_name,
-	                                                          OnEntryNotFound::RETURN_NULL);
-	if (!catalog_entry) {
-		throw BinderException("Placement table '%s' does not exist", table_name);
+// Helper to get column names and types from either a table or view
+static void GetTableOrViewColumns(ClientContext &context, const std::string &table_name,
+                                  vector<string> &out_names, vector<LogicalType> &out_types) {
+	// Use TABLE_ENTRY lookup which can return either tables or views
+	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
+	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
+
+	if (!entry) {
+		throw BinderException("Placement table or view '%s' does not exist", table_name);
 	}
 
-	auto &columns = catalog_entry->GetColumns();
+	if (entry->type == CatalogType::TABLE_ENTRY) {
+		auto &table = entry->Cast<TableCatalogEntry>();
+		auto &columns = table.GetColumns();
+		for (idx_t i = 0; i < columns.LogicalColumnCount(); i++) {
+			auto &col = columns.GetColumn(LogicalIndex(i));
+			out_names.push_back(col.Name());
+			out_types.push_back(col.Type());
+		}
+	} else if (entry->type == CatalogType::VIEW_ENTRY) {
+		auto &view = entry->Cast<ViewCatalogEntry>();
+		out_names = view.names;
+		out_types = view.types;
+	} else {
+		throw BinderException("'%s' is not a table or view", table_name);
+	}
+}
 
-	// Build name-to-index map
+void ValidatePlacementTableSchema(ClientContext &context, const std::string &table_name) {
+	vector<string> col_names;
+	vector<LogicalType> col_types;
+	GetTableOrViewColumns(context, table_name, col_names, col_types);
+
+	// Build name-to-index map (case-insensitive)
 	std::unordered_map<string, idx_t> name_to_idx;
-	for (idx_t i = 0; i < columns.LogicalColumnCount(); i++) {
-		auto &col = columns.GetColumn(LogicalIndex(i));
-		name_to_idx[StringUtil::Lower(col.Name())] = i;
+	for (idx_t i = 0; i < col_names.size(); i++) {
+		name_to_idx[StringUtil::Lower(col_names[i])] = i;
 	}
 
 	// Check required columns exist and have correct types
@@ -34,7 +58,7 @@ void ValidatePlacementTableSchema(ClientContext &context, const std::string &tab
 		if (it == name_to_idx.end()) {
 			throw BinderException("Placement table '%s' missing required column '%s'", table_name, col_name);
 		}
-		auto &col_type = columns.GetColumn(LogicalIndex(it->second)).Type();
+		auto &col_type = col_types[it->second];
 		bool valid = false;
 		for (auto &allowed : allowed_types) {
 			if (col_type.id() == allowed) {
@@ -59,139 +83,105 @@ void ValidatePlacementTableSchema(ClientContext &context, const std::string &tab
 std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const std::string &table_name) {
 	std::vector<miint::Placement> result;
 
-	// Get the table catalog entry
-	auto catalog_entry = Catalog::GetEntry<TableCatalogEntry>(context, INVALID_CATALOG, INVALID_SCHEMA, table_name,
-	                                                          OnEntryNotFound::RETURN_NULL);
-	if (!catalog_entry) {
-		throw InvalidInputException("Placement table '%s' does not exist", table_name);
+	// Create a new connection to avoid deadlocking the current context.
+	// This is necessary because context.Query() requires locking the context,
+	// but during bind/finalize the context is already locked.
+	// Using a separate connection allows us to execute queries for both tables and views.
+	auto &db = DatabaseInstance::GetDatabase(context);
+	Connection conn(db);
+
+	// Execute a query to read from the table/view
+	// This approach works for both tables and views uniformly
+	std::string query = "SELECT fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length FROM " +
+	                    KeywordHelper::WriteOptionallyQuoted(table_name);
+
+	auto query_result = conn.Query(query);
+
+	if (query_result->HasError()) {
+		throw InvalidInputException("Failed to read from placement table '%s': %s", table_name,
+		                            query_result->GetError());
 	}
 
-	auto &storage = catalog_entry->GetStorage();
-	auto &columns = catalog_entry->GetColumns();
+	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+	auto &result_types = materialized.types;
 
-	// Find column indices by name
-	idx_t fragment_id_col = DConstants::INVALID_INDEX;
-	idx_t edge_id_col = DConstants::INVALID_INDEX;
-	idx_t lwr_col = DConstants::INVALID_INDEX;
-	idx_t distal_col = DConstants::INVALID_INDEX;
-	idx_t pendant_col = DConstants::INVALID_INDEX;
-
-	for (idx_t i = 0; i < columns.LogicalColumnCount(); i++) {
-		auto &col = columns.GetColumn(LogicalIndex(i));
-		auto lower_name = StringUtil::Lower(col.Name());
-		if (lower_name == "fragment_id") {
-			fragment_id_col = i;
-		} else if (lower_name == "edge_id") {
-			edge_id_col = i;
-		} else if (lower_name == "like_weight_ratio") {
-			lwr_col = i;
-		} else if (lower_name == "distal_length") {
-			distal_col = i;
-		} else if (lower_name == "pendant_length") {
-			pendant_col = i;
-		}
-	}
-
-	// Validate all required columns found
-	if (fragment_id_col == DConstants::INVALID_INDEX) {
-		throw InvalidInputException("Placement table '%s' missing required column 'fragment_id'", table_name);
-	}
-	if (edge_id_col == DConstants::INVALID_INDEX) {
-		throw InvalidInputException("Placement table '%s' missing required column 'edge_id'", table_name);
-	}
-	if (lwr_col == DConstants::INVALID_INDEX) {
-		throw InvalidInputException("Placement table '%s' missing required column 'like_weight_ratio'", table_name);
-	}
-	if (distal_col == DConstants::INVALID_INDEX) {
-		throw InvalidInputException("Placement table '%s' missing required column 'distal_length'", table_name);
-	}
-	if (pendant_col == DConstants::INVALID_INDEX) {
-		throw InvalidInputException("Placement table '%s' missing required column 'pendant_length'", table_name);
-	}
-
-	// Get column types
-	auto &fragment_id_type = columns.GetColumn(LogicalIndex(fragment_id_col)).Type();
-	auto &edge_id_type = columns.GetColumn(LogicalIndex(edge_id_col)).Type();
-	auto &lwr_type = columns.GetColumn(LogicalIndex(lwr_col)).Type();
-	auto &distal_type = columns.GetColumn(LogicalIndex(distal_col)).Type();
-	auto &pendant_type = columns.GetColumn(LogicalIndex(pendant_col)).Type();
-
-	// Set up scan for required columns
-	vector<StorageIndex> column_ids = {StorageIndex(fragment_id_col), StorageIndex(edge_id_col),
-	                                   StorageIndex(lwr_col), StorageIndex(distal_col), StorageIndex(pendant_col)};
-
-	auto &transaction = DuckTransaction::Get(context, catalog_entry->catalog);
-	TableScanState scan_state;
-	scan_state.Initialize(column_ids, &context);
-	storage.InitializeScan(context, transaction, scan_state, column_ids);
-
-	// Set up chunk for results
-	DataChunk chunk;
-	vector<LogicalType> chunk_types = {fragment_id_type, edge_id_type, lwr_type, distal_type, pendant_type};
-	chunk.Initialize(Allocator::Get(context), chunk_types);
+	// Get column types for proper data extraction
+	// Column order: fragment_id(0), edge_id(1), like_weight_ratio(2), distal_length(3), pendant_length(4)
+	auto &edge_id_type = result_types[1];
+	auto &lwr_type = result_types[2];
+	auto &distal_type = result_types[3];
+	auto &pendant_type = result_types[4];
 
 	idx_t row_number = 0;
 
+	// Process all chunks from the result
 	while (true) {
-		chunk.Reset();
-		storage.Scan(transaction, chunk, scan_state);
-
-		if (chunk.size() == 0) {
+		auto chunk = materialized.Fetch();
+		if (!chunk || chunk->size() == 0) {
 			break;
 		}
 
-		auto &fragment_id_vec = chunk.data[0];
-		auto &edge_id_vec = chunk.data[1];
-		auto &lwr_vec = chunk.data[2];
-		auto &distal_vec = chunk.data[3];
-		auto &pendant_vec = chunk.data[4];
+		auto &fragment_id_vec = chunk->data[0];
+		auto &edge_id_vec = chunk->data[1];
+		auto &lwr_vec = chunk->data[2];
+		auto &distal_vec = chunk->data[3];
+		auto &pendant_vec = chunk->data[4];
 
-		auto fragment_ids = FlatVector::GetData<string_t>(fragment_id_vec);
-		auto &fragment_validity = FlatVector::Validity(fragment_id_vec);
-		auto &edge_validity = FlatVector::Validity(edge_id_vec);
-		auto &lwr_validity = FlatVector::Validity(lwr_vec);
-		auto &distal_validity = FlatVector::Validity(distal_vec);
-		auto &pendant_validity = FlatVector::Validity(pendant_vec);
+		// Convert to unified format for proper NULL handling
+		UnifiedVectorFormat fragment_data, edge_data, lwr_data, distal_data, pendant_data;
+		fragment_id_vec.ToUnifiedFormat(chunk->size(), fragment_data);
+		edge_id_vec.ToUnifiedFormat(chunk->size(), edge_data);
+		lwr_vec.ToUnifiedFormat(chunk->size(), lwr_data);
+		distal_vec.ToUnifiedFormat(chunk->size(), distal_data);
+		pendant_vec.ToUnifiedFormat(chunk->size(), pendant_data);
 
-		for (idx_t i = 0; i < chunk.size(); i++) {
+		auto fragment_ids = UnifiedVectorFormat::GetData<string_t>(fragment_data);
+
+		for (idx_t i = 0; i < chunk->size(); i++) {
 			row_number++;
 
+			auto frag_idx = fragment_data.sel->get_index(i);
+			auto edge_idx = edge_data.sel->get_index(i);
+			auto lwr_idx = lwr_data.sel->get_index(i);
+			auto distal_idx = distal_data.sel->get_index(i);
+			auto pendant_idx = pendant_data.sel->get_index(i);
+
 			// Skip rows with NULL fragment_id
-			if (!fragment_validity.RowIsValid(i)) {
+			if (!fragment_data.validity.RowIsValid(frag_idx)) {
 				continue;
 			}
 
 			// Check for NULL values in required columns
-			if (!edge_validity.RowIsValid(i)) {
+			if (!edge_data.validity.RowIsValid(edge_idx)) {
 				throw InvalidInputException("NULL edge_id at row %llu in placement table '%s'", row_number,
 				                            table_name);
 			}
-			if (!lwr_validity.RowIsValid(i)) {
+			if (!lwr_data.validity.RowIsValid(lwr_idx)) {
 				throw InvalidInputException("NULL like_weight_ratio at row %llu in placement table '%s'", row_number,
 				                            table_name);
 			}
-			if (!distal_validity.RowIsValid(i)) {
+			if (!distal_data.validity.RowIsValid(distal_idx)) {
 				throw InvalidInputException("NULL distal_length at row %llu in placement table '%s'", row_number,
 				                            table_name);
 			}
-			if (!pendant_validity.RowIsValid(i)) {
+			if (!pendant_data.validity.RowIsValid(pendant_idx)) {
 				throw InvalidInputException("NULL pendant_length at row %llu in placement table '%s'", row_number,
 				                            table_name);
 			}
 
 			miint::Placement p;
-			p.fragment_id = fragment_ids[i].GetString();
+			p.fragment_id = fragment_ids[frag_idx].GetString();
 
 			// Get edge_id (handle different integer types)
 			switch (edge_id_type.id()) {
 			case LogicalTypeId::BIGINT:
-				p.edge_id = FlatVector::GetData<int64_t>(edge_id_vec)[i];
+				p.edge_id = UnifiedVectorFormat::GetData<int64_t>(edge_data)[edge_idx];
 				break;
 			case LogicalTypeId::INTEGER:
-				p.edge_id = FlatVector::GetData<int32_t>(edge_id_vec)[i];
+				p.edge_id = UnifiedVectorFormat::GetData<int32_t>(edge_data)[edge_idx];
 				break;
 			case LogicalTypeId::UBIGINT: {
-				uint64_t uval = FlatVector::GetData<uint64_t>(edge_id_vec)[i];
+				uint64_t uval = UnifiedVectorFormat::GetData<uint64_t>(edge_data)[edge_idx];
 				if (uval > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
 					throw InvalidInputException("edge_id %llu at row %llu exceeds INT64_MAX in placement table '%s'",
 					                            uval, row_number, table_name);
@@ -200,7 +190,7 @@ std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const s
 				break;
 			}
 			case LogicalTypeId::UINTEGER:
-				p.edge_id = FlatVector::GetData<uint32_t>(edge_id_vec)[i];
+				p.edge_id = UnifiedVectorFormat::GetData<uint32_t>(edge_data)[edge_idx];
 				break;
 			default:
 				throw InvalidInputException("Unsupported integer type for edge_id");
@@ -208,23 +198,23 @@ std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const s
 
 			// Get like_weight_ratio
 			if (lwr_type.id() == LogicalTypeId::DOUBLE) {
-				p.like_weight_ratio = FlatVector::GetData<double>(lwr_vec)[i];
+				p.like_weight_ratio = UnifiedVectorFormat::GetData<double>(lwr_data)[lwr_idx];
 			} else {
-				p.like_weight_ratio = FlatVector::GetData<float>(lwr_vec)[i];
+				p.like_weight_ratio = UnifiedVectorFormat::GetData<float>(lwr_data)[lwr_idx];
 			}
 
 			// Get distal_length
 			if (distal_type.id() == LogicalTypeId::DOUBLE) {
-				p.distal_length = FlatVector::GetData<double>(distal_vec)[i];
+				p.distal_length = UnifiedVectorFormat::GetData<double>(distal_data)[distal_idx];
 			} else {
-				p.distal_length = FlatVector::GetData<float>(distal_vec)[i];
+				p.distal_length = UnifiedVectorFormat::GetData<float>(distal_data)[distal_idx];
 			}
 
 			// Get pendant_length
 			if (pendant_type.id() == LogicalTypeId::DOUBLE) {
-				p.pendant_length = FlatVector::GetData<double>(pendant_vec)[i];
+				p.pendant_length = UnifiedVectorFormat::GetData<double>(pendant_data)[pendant_idx];
 			} else {
-				p.pendant_length = FlatVector::GetData<float>(pendant_vec)[i];
+				p.pendant_length = UnifiedVectorFormat::GetData<float>(pendant_data)[pendant_idx];
 			}
 
 			result.push_back(std::move(p));

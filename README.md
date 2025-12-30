@@ -155,7 +155,7 @@ Read SAM/BAM alignment files.
 - `filename` (VARCHAR or VARCHAR[]): Path to SAM/BAM file(s), glob pattern (e.g., `'data/*.bam'`), or `-` / `/dev/stdin` for standard input
   - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
   - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
-- `reference_lengths` (VARCHAR, optional): Table name containing reference sequences for headerless SAM files. Table must have at least 2 columns: first column = reference name (VARCHAR), second column = reference length (INTEGER/BIGINT). Column names don't matter.
+- `reference_lengths` (VARCHAR, optional): Table or view name containing reference sequences for headerless SAM files. Must have at least 2 columns: first column = reference name (VARCHAR), second column = reference length (INTEGER/BIGINT). Column names don't matter. Views are fully supported and can include computed columns.
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
 - `include_seq_qual` (BOOLEAN, optional, default false): Add sequence and quality score columns to output. When enabled, primary alignments (non-secondary, non-supplementary) and unmapped reads must have SEQ/QUAL data or an error will be raised.
 
@@ -1426,7 +1426,7 @@ Write query results to SAM or BAM format files. Requires all mandatory SAM colum
 **Parameters:**
 - `INCLUDE_HEADER` (default: true): Include header with reference sequences
   - **Note:** BAM format requires `INCLUDE_HEADER=true` (headers are mandatory in BAM files)
-- `REFERENCE_LENGTHS` (VARCHAR, required if INCLUDE_HEADER=true): Table name containing reference sequences. Table must have at least 2 columns: first column = reference name (VARCHAR), second column = reference length (INTEGER/BIGINT). Column names don't matter.
+- `REFERENCE_LENGTHS` (VARCHAR, required if INCLUDE_HEADER=true): Table or view name containing reference sequences. Must have at least 2 columns: first column = reference name (VARCHAR), second column = reference length (INTEGER/BIGINT). Column names don't matter. Views are fully supported and can include computed columns.
 - `COMPRESSION` (default: auto, SAM only): Enable gzip compression (auto-detected from `.gz` extension)
 - `COMPRESSION_LEVEL` (BAM only): BGZF compression level 0-9 (default: 6). Higher = better compression, slower speed.
 

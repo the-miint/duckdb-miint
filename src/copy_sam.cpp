@@ -2,6 +2,7 @@
 #include "reference_table_reader.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
@@ -255,17 +256,19 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 		} else if (StringUtil::CIEquals(option.first, "reference_lengths")) {
 			const auto &table_value = option.second[0];
 			if (table_value.type().id() != LogicalTypeId::VARCHAR) {
-				throw BinderException("reference_lengths must be a VARCHAR (table name)");
+				throw BinderException("reference_lengths must be a VARCHAR (table or view name)");
 			}
 
 			result->reference_lengths_table = table_value.ToString();
 
-			// Validate table exists
-			auto catalog_entry = Catalog::GetEntry<TableCatalogEntry>(context, INVALID_CATALOG, INVALID_SCHEMA,
-			                                                          result->reference_lengths_table.value(),
-			                                                          OnEntryNotFound::RETURN_NULL);
-			if (!catalog_entry) {
-				throw BinderException("Table '%s' does not exist", result->reference_lengths_table.value());
+			// Validate table or view exists (use TABLE_ENTRY lookup which returns either)
+			EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, result->reference_lengths_table.value(), QueryErrorContext());
+			auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
+			if (!entry) {
+				throw BinderException("Table or view '%s' does not exist", result->reference_lengths_table.value());
+			}
+			if (entry->type != CatalogType::TABLE_ENTRY && entry->type != CatalogType::VIEW_ENTRY) {
+				throw BinderException("'%s' is not a table or view", result->reference_lengths_table.value());
 			}
 		} else {
 			throw BinderException("Unknown option for COPY FORMAT SAM: %s", option.first);

@@ -7,12 +7,11 @@
 
 namespace duckdb {
 
-// Read a placement table and return vector of Placement structs.
+// Read a placement table or view and return vector of Placement structs.
 //
-// IMPORTANT: Only tables are supported, not views. This is because view execution
-// requires running queries during COPY operations, which causes deadlocks in DuckDB.
-// View support may be added in the future if DuckDB provides a safe mechanism for
-// executing queries during COPY finalize.
+// Both tables and views are supported. The implementation uses ClientContext::Query()
+// to execute a SELECT statement, which DuckDB's binder resolves appropriately for
+// either tables or views.
 //
 // Required columns (by name, case-insensitive):
 //   - fragment_id (VARCHAR) - NULL values are silently skipped
@@ -29,9 +28,9 @@ namespace duckdb {
 //   - UBIGINT edge_id exceeds INT64_MAX
 std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const std::string &table_name);
 
-// Validate that a placement table has the required columns with correct types.
+// Validate that a placement table or view has the required columns with correct types.
 // Called at bind time to provide early error detection.
-// Only validates tables (not views) - see note above.
+// Supports both tables and views.
 // Throws BinderException if validation fails.
 void ValidatePlacementTableSchema(ClientContext &context, const std::string &table_name);
 

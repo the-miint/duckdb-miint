@@ -16,7 +16,12 @@ struct NewickCopyBindData : public FunctionData {
 	std::string file_path;
 	bool include_edge_ids = false;
 	FileCompressionType compression = FileCompressionType::UNCOMPRESSED;
-	std::optional<std::string> placements_table;
+
+	// Placements are read at bind time (not during finalize) to avoid deadlocks
+	// when executing queries during an active COPY operation.
+	// This is consistent with SQL snapshot semantics - placement data is captured
+	// when the query is planned.
+	std::vector<miint::Placement> placements;
 
 	// Column indices (DConstants::INVALID_INDEX if not present)
 	idx_t node_index_idx = DConstants::INVALID_INDEX;
@@ -30,7 +35,7 @@ struct NewickCopyBindData : public FunctionData {
 		result->file_path = file_path;
 		result->include_edge_ids = include_edge_ids;
 		result->compression = compression;
-		result->placements_table = placements_table;
+		result->placements = placements;
 		result->node_index_idx = node_index_idx;
 		result->parent_index_idx = parent_index_idx;
 		result->name_idx = name_idx;
@@ -41,8 +46,10 @@ struct NewickCopyBindData : public FunctionData {
 
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<NewickCopyBindData>();
+		// Note: we don't compare placements for equality - if all other fields match,
+		// we consider the bind data equal (placements are derived from the table reference)
 		return file_path == other.file_path && include_edge_ids == other.include_edge_ids &&
-		       compression == other.compression && placements_table == other.placements_table &&
+		       compression == other.compression && placements.size() == other.placements.size() &&
 		       node_index_idx == other.node_index_idx && parent_index_idx == other.parent_index_idx &&
 		       name_idx == other.name_idx && branch_length_idx == other.branch_length_idx &&
 		       edge_id_idx == other.edge_id_idx;
@@ -57,7 +64,9 @@ struct NewickCopyGlobalState : public GlobalFunctionData {
 	std::string file_path;
 	FileCompressionType compression;
 	bool include_edge_ids;
-	std::optional<std::string> placements_table;
+
+	// Placements are copied from bind data (read at bind time)
+	std::vector<miint::Placement> placements;
 
 	// File handle (opened in finalize, not at init)
 	unique_ptr<CopyFileHandle> file;
@@ -66,8 +75,8 @@ struct NewickCopyGlobalState : public GlobalFunctionData {
 	std::vector<miint::NodeInput> nodes;
 
 	NewickCopyGlobalState(const std::string &path, FileCompressionType comp, bool edge_ids,
-	                      std::optional<std::string> placements)
-	    : file_path(path), compression(comp), include_edge_ids(edge_ids), placements_table(std::move(placements)) {
+	                      std::vector<miint::Placement> placements_p)
+	    : file_path(path), compression(comp), include_edge_ids(edge_ids), placements(std::move(placements_p)) {
 	}
 };
 
@@ -115,6 +124,7 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 	// Parse parameters
 	Value compression_param;
 	bool edge_ids_specified = false;
+	std::optional<std::string> placements_table;
 	for (auto &option : input.info.options) {
 		auto loption = StringUtil::Lower(option.first);
 		if (loption == "edge_ids") {
@@ -130,11 +140,11 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 			compression_param = option.second[0];
 		} else if (loption == "placements") {
 			if (option.second.size() != 1 || option.second[0].type().id() != LogicalTypeId::VARCHAR) {
-				throw BinderException("PLACEMENTS option requires a string value (table name)");
+				throw BinderException("PLACEMENTS option requires a string value (table or view name)");
 			}
-			result->placements_table = option.second[0].ToString();
-			// Validate placements table exists and has correct schema
-			ValidatePlacementTableSchema(context, result->placements_table.value());
+			placements_table = option.second[0].ToString();
+			// Validate placements table/view exists and has correct schema
+			ValidatePlacementTableSchema(context, placements_table.value());
 		} else {
 			throw BinderException("Unknown option for COPY FORMAT NEWICK: %s", option.first);
 		}
@@ -154,8 +164,14 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 	}
 
 	// Validate edge_id column if PLACEMENTS is specified (required for placement lookup)
-	if (result->placements_table.has_value() && result->edge_id_idx == DConstants::INVALID_INDEX) {
+	if (placements_table.has_value() && result->edge_id_idx == DConstants::INVALID_INDEX) {
 		throw BinderException("PLACEMENTS option requires 'edge_id' column in input tree data");
+	}
+
+	// Read placements at bind time to avoid deadlocks during COPY execution.
+	// This is safe because bind happens before query execution starts.
+	if (placements_table.has_value()) {
+		result->placements = ReadPlacementTable(context, placements_table.value());
 	}
 
 	return result;
@@ -168,7 +184,7 @@ static unique_ptr<GlobalFunctionData> NewickCopyInitializeGlobal(ClientContext &
                                                                  const string &file_path) {
 	auto &fdata = bind_data.Cast<NewickCopyBindData>();
 	return make_uniq<NewickCopyGlobalState>(file_path, fdata.compression, fdata.include_edge_ids,
-	                                        fdata.placements_table);
+	                                        fdata.placements);
 }
 
 //===--------------------------------------------------------------------===//
@@ -310,8 +326,8 @@ static void NewickCopyFinalize(ClientContext &context, FunctionData &bind_data, 
 		throw InvalidInputException("COPY FORMAT NEWICK: Failed to build tree: %s", e.what());
 	}
 
-	// Insert placements if specified
-	if (gstate.placements_table.has_value()) {
+	// Insert placements if any were provided (read at bind time)
+	if (!gstate.placements.empty()) {
 		// Validate tree has at least one non-NULL edge_id
 		bool has_edge_id = false;
 		for (uint32_t i = 0; i < tree.num_nodes(); i++) {
@@ -326,17 +342,9 @@ static void NewickCopyFinalize(ClientContext &context, FunctionData &bind_data, 
 			    "Placements require a tree with edge identifiers.");
 		}
 
-		// Read placements from table
-		std::vector<miint::Placement> placements;
+		// Insert placements into tree (placements were already read at bind time)
 		try {
-			placements = ReadPlacementTable(context, gstate.placements_table.value());
-		} catch (const std::exception &e) {
-			throw InvalidInputException("COPY FORMAT NEWICK: Failed to read placements: %s", e.what());
-		}
-
-		// Insert placements into tree
-		try {
-			tree.insert_fully_resolved(placements);
+			tree.insert_fully_resolved(gstate.placements);
 		} catch (const std::runtime_error &e) {
 			throw InvalidInputException("COPY FORMAT NEWICK: Failed to insert placements: %s", e.what());
 		}

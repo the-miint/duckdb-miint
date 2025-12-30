@@ -6,23 +6,22 @@
 
 namespace duckdb {
 
-// Read a reference table and return map of reference name -> length.
+// Read a reference table or view and return map of reference name -> length.
 // Used by read_alignments and COPY FORMAT SAM/BAM for headerless SAM support.
 //
-// IMPORTANT: Only tables are supported, not views. This is because view execution
-// requires running queries during COPY operations, which causes deadlocks in DuckDB.
-// View support may be added in the future if DuckDB provides a safe mechanism for
-// executing queries during COPY finalize.
+// Both tables and views are supported. The implementation uses a separate Connection
+// to execute a SELECT statement, which DuckDB's binder resolves appropriately for
+// either tables or views.
 //
 // Required columns (by position):
 //   - Column 0: reference name (VARCHAR) - must not be NULL
 //   - Column 1: reference length (BIGINT, INTEGER, UBIGINT, or UINTEGER) - must not be NULL
 //
 // Throws InvalidInputException if:
-//   - Table doesn't exist (views will fail with this error)
-//   - Table has fewer than 2 columns
+//   - Table/view doesn't exist
+//   - Table/view has fewer than 2 columns
 //   - Column types are incorrect
-//   - Table is empty
+//   - Table/view is empty
 //   - NULL value in name or length column
 //   - Negative length value
 //   - UBIGINT length exceeds INT64_MAX

@@ -5,6 +5,7 @@
 #include "SAMRecord.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
 
@@ -72,11 +73,14 @@ unique_ptr<FunctionData> ReadAlignmentsTableFunction::Bind(ClientContext &contex
 
 		reference_lengths_table = table_value.ToString();
 
-		// Validate table exists
-		auto catalog_entry = Catalog::GetEntry<TableCatalogEntry>(
-		    context, INVALID_CATALOG, INVALID_SCHEMA, reference_lengths_table.value(), OnEntryNotFound::RETURN_NULL);
-		if (!catalog_entry) {
-			throw InvalidInputException("Table '%s' does not exist", reference_lengths_table.value());
+		// Validate table or view exists (use TABLE_ENTRY lookup which returns either)
+		EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, reference_lengths_table.value(), QueryErrorContext());
+		auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
+		if (!entry) {
+			throw InvalidInputException("Table or view '%s' does not exist", reference_lengths_table.value());
+		}
+		if (entry->type != CatalogType::TABLE_ENTRY && entry->type != CatalogType::VIEW_ENTRY) {
+			throw InvalidInputException("'%s' is not a table or view", reference_lengths_table.value());
 		}
 	}
 
