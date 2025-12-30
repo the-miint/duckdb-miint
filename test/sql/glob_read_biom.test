@@ -68,8 +68,8 @@ SELECT COUNT(*) FROM read_biom('data/biom/test.biom');
 ----
 15
 
-# Glob pattern matching single file
+# Glob pattern matching single file (test.bio* matches only test.biom, not test_compressed_backup.biom)
 query I
-SELECT COUNT(*) FROM read_biom('data/biom/tes*.biom');
+SELECT COUNT(*) FROM read_biom('data/biom/test.bio*');
 ----
 15

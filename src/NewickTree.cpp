@@ -1,8 +1,10 @@
 #include "NewickTree.hpp"
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <charconv>
 #include <cmath>
+#include <cstdlib>
 #include <stdexcept>
 #include <stack>
 
@@ -268,14 +270,21 @@ private:
 		}
 
 		std::string_view num_str = input_.substr(start, pos_ - start);
-		double value;
 
-		auto [ptr, ec] = std::from_chars(num_str.data(), num_str.data() + num_str.size(), value);
+		// Use strtod for platform compatibility (std::from_chars for float not available on macOS yet)
+		// Need null-terminated string for strtod
+		std::string num_cstr(num_str);
+		char *endptr;
+		errno = 0;
+		double value = std::strtod(num_cstr.c_str(), &endptr);
 
-		if (ec != std::errc()) {
+		if (errno == ERANGE) {
+			throw std::runtime_error("Invalid branch length: '" + std::string(num_str) + "' (out of range)");
+		}
+		if (endptr == num_cstr.c_str()) {
 			throw std::runtime_error("Invalid branch length: '" + std::string(num_str) + "'");
 		}
-		if (ptr != num_str.data() + num_str.size()) {
+		if (endptr != num_cstr.c_str() + num_cstr.size()) {
 			throw std::runtime_error("Invalid branch length: unexpected characters in '" + std::string(num_str) + "'");
 		}
 
@@ -413,13 +422,14 @@ std::string NewickTree::to_newick() const {
 				}
 			}
 
-			// Branch length - use to_chars for performance and proper round-trip
+			// Branch length - use snprintf for platform compatibility
 			if (!std::isnan(n.branch_length)) {
 				result += ':';
+				// Use snprintf for portability (std::to_chars for float not available on macOS yet)
 				std::array<char, 32> buf;
-				auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), n.branch_length);
-				if (ec == std::errc()) {
-					result.append(buf.data(), ptr);
+				int len = std::snprintf(buf.data(), buf.size(), "%.15g", n.branch_length);
+				if (len > 0 && len < static_cast<int>(buf.size())) {
+					result.append(buf.data(), len);
 				}
 			}
 

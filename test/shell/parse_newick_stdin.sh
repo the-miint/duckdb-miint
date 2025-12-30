@@ -62,10 +62,10 @@ run_test "Tree with edge IDs from stdin" \
     "│            5 │" \
     "cat data/newick/with_edge_ids.nwk | $DUCKDB -c \"SELECT COUNT(*) FROM parse_newick('/dev/stdin') WHERE edge_id IS NOT NULL;\""
 
-# Test 8: Gzipped input from stdin
+# Test 8: Gzipped input from stdin (use gunzip -c for portability across Linux/macOS)
 run_test "Gzipped newick from stdin" \
     "│            5 │" \
-    "zcat data/newick/simple.nwk.gz | $DUCKDB -c \"SELECT COUNT(*) FROM parse_newick('/dev/stdin');\""
+    "gunzip -c data/newick/simple.nwk.gz | $DUCKDB -c \"SELECT COUNT(*) FROM parse_newick('/dev/stdin');\""
 
 # Test 9: Error - stdin in multi-file array with /dev/stdin
 run_test "Error: stdin in multi-file array (/dev/stdin)" \

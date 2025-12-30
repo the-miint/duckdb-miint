@@ -206,6 +206,8 @@ public:
 		con.Query(READ_GFF);
 
 		// read_jplace requires the json extension for read_json function
+		ExtensionInstallOptions options;
+		ExtensionHelper::InstallExtension(*con.context, "json", options);
 		ExtensionHelper::AutoLoadExtension(instance, "json");
 		con.Query(READ_JPLACE);
 	}
