@@ -14,6 +14,7 @@
 #include <read_fastx.hpp>
 #include <read_alignments.hpp>
 #include <read_biom.hpp>
+#include <align_minimap2.hpp>
 #include <miint_macros.hpp>
 #include <sequence_functions.hpp>
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
@@ -38,6 +39,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadAlignmentsTableFunction::Register(loader);
 	ReadBIOMTableFunction::Register(loader);
 	ParseNewickTableFunction::Register(loader);
+	AlignMinimap2TableFunction::Register(loader);
 
 	AlignmentFlagFunctions::Register(loader);
 	AlignmentSeqIdentityFunction::Register(loader);

@@ -1,0 +1,154 @@
+# name: test/sql/align_minimap2.test
+# description: Test align_minimap2 table function
+# group: [miint]
+
+require miint
+
+# Setup: Create test tables with sequence data
+
+statement ok
+CREATE TABLE subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('ref2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCAAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAA')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE queries AS SELECT * FROM (VALUES
+    ('query1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('query2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(read_id, sequence1);
+
+# Test basic alignment (using max_secondary=0 to get only primary alignments)
+query IIII
+SELECT read_id, reference, position, mapq >= 0 as has_mapq
+FROM align_minimap2('queries', 'subjects', max_secondary=0)
+ORDER BY read_id, reference;
+----
+query1	ref1	1	true
+query2	ref2	1	true
+
+# Test CIGAR string is generated
+query II
+SELECT read_id, cigar != '*' AND cigar != '' as has_cigar
+FROM align_minimap2('queries', 'subjects', max_secondary=0)
+ORDER BY read_id;
+----
+query1	true
+query2	true
+
+# Test with EQX mode (default is on, so CIGAR should have = for matches)
+query II
+SELECT read_id, cigar LIKE '%=%' as has_eq_op
+FROM align_minimap2('queries', 'subjects', max_secondary=0)
+ORDER BY read_id;
+----
+query1	true
+query2	true
+
+# Test alignment score tag
+query II
+SELECT read_id, tag_as > 0 as has_score
+FROM align_minimap2('queries', 'subjects', max_secondary=0)
+ORDER BY read_id;
+----
+query1	true
+query2	true
+
+# Test stop_position is computed
+query III
+SELECT read_id, position, stop_position >= position as stop_after_start
+FROM align_minimap2('queries', 'subjects', max_secondary=0)
+ORDER BY read_id;
+----
+query1	1	true
+query2	1	true
+
+# Test with different preset (map-ont uses smaller k, so still aligns)
+query II
+SELECT read_id, reference
+FROM align_minimap2('queries', 'subjects', preset='map-ont', max_secondary=0)
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# Test with views
+statement ok
+CREATE VIEW query_view AS SELECT * FROM queries;
+
+statement ok
+CREATE VIEW subject_view AS SELECT * FROM subjects;
+
+query II
+SELECT read_id, reference
+FROM align_minimap2('query_view', 'subject_view', max_secondary=0)
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# Test max_secondary parameter (should limit secondary alignments)
+# Create a reference with identical sequences
+statement ok
+CREATE TABLE multi_subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('ref2', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('ref3', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE single_query AS SELECT * FROM (VALUES
+    ('q1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT')
+) AS t(read_id, sequence1);
+
+# With max_secondary=0, should get at most 1 alignment
+query I
+SELECT COUNT(*) <= 1 as limited
+FROM align_minimap2('single_query', 'multi_subjects', max_secondary=0);
+----
+true
+
+# Test error: non-existent query table
+statement error
+SELECT * FROM align_minimap2('nonexistent_table', 'subjects');
+----
+does not exist
+
+# Test error: non-existent subject table
+statement error
+SELECT * FROM align_minimap2('queries', 'nonexistent_table');
+----
+does not exist
+
+# Test error: subject table with paired data (sequence2)
+statement ok
+CREATE TABLE paired_subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT', 'TGCATGCATGCATGCATGCATGCA')
+) AS t(read_id, sequence1, sequence2);
+
+statement error
+SELECT * FROM align_minimap2('queries', 'paired_subjects');
+----
+cannot be paired-end
+
+# Clean up
+statement ok
+DROP TABLE subjects;
+
+statement ok
+DROP TABLE queries;
+
+statement ok
+DROP VIEW query_view;
+
+statement ok
+DROP VIEW subject_view;
+
+statement ok
+DROP TABLE multi_subjects;
+
+statement ok
+DROP TABLE single_query;
+
+statement ok
+DROP TABLE paired_subjects;

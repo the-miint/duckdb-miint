@@ -131,6 +131,24 @@ set_property(TARGET hts PROPERTY
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/htslib/include)
 add_dependencies(hts htslib_build)
 
+# Build minimap2 from source (v2.30)
+ExternalProject_Add(
+    minimap2_build
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2 libminimap2.a "CFLAGS=-g -Wall -O2 -Wc++-compat -fPIC" "CPPFLAGS=-DHAVE_KALLOC"
+    INSTALL_COMMAND ""
+    BUILD_IN_SOURCE 1
+    BUILD_BYPRODUCTS ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2/libminimap2.a
+)
+
+# Create imported library for minimap2
+add_library(minimap2 STATIC IMPORTED GLOBAL)
+set_target_properties(minimap2 PROPERTIES
+    IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2/libminimap2.a
+)
+add_dependencies(minimap2 minimap2_build)
+
 # adapted kseq++ include use from strobealign
 include_directories(src/include ext)
 set(EXTENSION_SOURCES
@@ -159,7 +177,10 @@ set(EXTENSION_SOURCES
     src/placement_table_reader.cpp
     src/NewickTree.cpp
     src/parse_newick.cpp
-    src/copy_newick.cpp)
+    src/copy_newick.cpp
+    src/Minimap2Aligner.cpp
+    src/sequence_table_reader.cpp
+    src/align_minimap2.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
@@ -177,6 +198,7 @@ target_link_libraries(${EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
                       hts
+                      minimap2
 )
 if(HDF5_FOUND)
     target_link_libraries(${EXTENSION_NAME}
@@ -200,6 +222,7 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
                       hts
+                      minimap2
 )
 
 install(
@@ -231,6 +254,8 @@ set(TEST_SOURCES
     src/NewickTree.cpp
     test/cpp/test_NewickParser.cpp
     test/cpp/test_InsertFullyResolved.cpp
+    src/Minimap2Aligner.cpp
+    test/cpp/test_Minimap2Aligner.cpp
 )
 
 add_executable(tests ${TEST_SOURCES})
@@ -240,6 +265,7 @@ target_link_libraries(tests
   Threads::Threads
   ZLIB::ZLIB
   hts
+  minimap2
 )
 if(HDF5_FOUND)
     target_link_libraries(tests

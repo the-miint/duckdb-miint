@@ -65,6 +65,7 @@ GROUP BY sample_id;
   - [read_gff](#read_gffpath)
   - [read_jplace](#read_jplacepath)
   - [parse_newick](#parse_newickfilename-include_filepathfalse)
+  - [align_minimap2](#align_minimap2query_table-subject_table-options)
   - [SAM Flag Functions](#sam-flag-functions)
   - [alignment_seq_identity](#alignment_seq_identitycigar-nm-md-type)
   - [alignment_query_length](#alignment_query_lengthcigar-include_hard_clipstrue)
@@ -759,6 +760,126 @@ COPY (
 - Colons precede branch lengths: `A:0.1` means tip A with branch length 0.1
 - Semicolons terminate the tree: `(A,B);`
 - Edge IDs in braces are an extension for jplace: `A:0.1{0}` has edge_id 0
+
+### `align_minimap2(query_table, subject_table, [options])`
+
+Align query sequences to subject sequences using minimap2. This function enables sequence alignment directly within SQL by reading sequences from DuckDB tables/views and returning alignments in the same format as `read_alignments`.
+
+**Parameters:**
+- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2)
+- `subject_table` (VARCHAR): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent)
+- `per_subject_database` (BOOLEAN, default: false): Build separate index for each subject sequence
+  - `false` (default): Build single index from all subjects, align all queries once (efficient for many subjects)
+  - `true`: Build index per subject, align all queries against each (useful for per-genome analysis)
+- `preset` (VARCHAR, default: 'sr'): Minimap2 preset
+  - `'sr'`: Short reads (Illumina), k=21
+  - `'map-ont'`: Oxford Nanopore reads, k=15
+  - `'map-pb'`: PacBio reads, k=19
+  - Other minimap2 presets also supported
+- `max_secondary` (INTEGER, default: 5): Maximum secondary alignments to report per query. Set to 0 for primary alignments only
+- `k` (INTEGER, optional): K-mer size (overrides preset default if specified)
+- `w` (INTEGER, optional): Minimizer window size (overrides preset default if specified)
+- `eqx` (BOOLEAN, default: true): Use =/X CIGAR operators instead of M
+
+**Output schema:**
+Returns the same schema as `read_alignments` (21 columns):
+- `read_id` (VARCHAR): Query sequence identifier
+- `flags` (USMALLINT): SAM alignment flags
+- `reference` (VARCHAR): Subject sequence identifier
+- `position` (BIGINT): 1-based start position on reference
+- `stop_position` (BIGINT): 1-based stop position on reference
+- `mapq` (UTINYINT): Mapping quality
+- `cigar` (VARCHAR): CIGAR string (with =/X by default)
+- `mate_reference` (VARCHAR): Mate reference (for paired-end)
+- `mate_position` (BIGINT): Mate position (for paired-end)
+- `template_length` (BIGINT): Template length (for paired-end)
+- `tag_as` (BIGINT): Alignment score
+- `tag_xs` (BIGINT): Suboptimal alignment score
+- `tag_ys` (BIGINT): Mate alignment score
+- `tag_xn` (BIGINT): Number of ambiguous bases
+- `tag_xm` (BIGINT): Number of mismatches
+- `tag_xo` (BIGINT): Number of gap opens
+- `tag_xg` (BIGINT): Number of gap extensions
+- `tag_nm` (BIGINT): Edit distance
+- `tag_yt` (VARCHAR): Pair type (UU/CP/DP/UP)
+- `tag_md` (VARCHAR): MD tag string
+- `tag_sa` (VARCHAR): Supplementary alignment info
+
+**Behavior:**
+- Subject sequences are loaded into memory at bind time (must fit in RAM)
+- Query sequences are processed in batches for memory efficiency
+- Supports both single-end and paired-end query sequences
+- Uses minimap2's in-memory indexing for fast alignment
+- Secondary alignments are controlled by `max_secondary` parameter
+
+**Examples:**
+```sql
+-- Create tables with sequence data
+CREATE TABLE subjects AS SELECT * FROM read_fastx('references.fasta');
+CREATE TABLE queries AS SELECT * FROM read_fastx('reads.fastq');
+
+-- Basic alignment (using short-read preset)
+SELECT * FROM align_minimap2('queries', 'subjects');
+
+-- Get only primary alignments
+SELECT read_id, reference, position, mapq, cigar
+FROM align_minimap2('queries', 'subjects', max_secondary=0)
+ORDER BY read_id;
+
+-- Use Oxford Nanopore preset for long reads
+SELECT * FROM align_minimap2('queries', 'subjects', preset='map-ont');
+
+-- Filter by mapping quality and identity
+SELECT read_id, reference, position, alignment_seq_identity(cigar, tag_nm, tag_md) AS identity
+FROM align_minimap2('queries', 'subjects', max_secondary=0)
+WHERE mapq >= 30
+  AND alignment_seq_identity(cigar, tag_nm, tag_md) > 0.95;
+
+-- Works with views
+CREATE VIEW filtered_queries AS
+    SELECT * FROM read_fastx('reads.fastq')
+    WHERE LENGTH(sequence1) >= 50;
+
+SELECT * FROM align_minimap2('filtered_queries', 'subjects', max_secondary=0);
+
+-- Align all queries against each subject separately (per-subject mode)
+SELECT reference, COUNT(*) AS aligned_reads
+FROM align_minimap2('queries', 'subjects', per_subject_database=true, max_secondary=0)
+GROUP BY reference;
+
+-- Export alignments to SAM format
+CREATE TABLE refs AS SELECT read_id AS name, LENGTH(sequence1) AS length FROM subjects;
+COPY (
+    SELECT * FROM align_minimap2('queries', 'subjects', max_secondary=0)
+) TO 'alignments.sam' (FORMAT SAM, REFERENCE_LENGTHS 'refs');
+
+-- Calculate coverage per reference
+SELECT reference,
+       compress_intervals(position, stop_position) AS coverage_regions,
+       SUM(stop_position - position + 1) AS total_aligned_bases
+FROM align_minimap2('queries', 'subjects', max_secondary=0)
+GROUP BY reference;
+
+-- Paired-end alignment
+CREATE TABLE paired_queries AS SELECT * FROM read_fastx('R1.fastq', sequence2='R2.fastq');
+SELECT * FROM align_minimap2('paired_queries', 'subjects', max_secondary=0);
+```
+
+**Error handling:**
+- Error if query_table or subject_table does not exist
+- Error if subject_table contains paired-end data (sequence2 not NULL)
+- Error if tables lack required columns (read_id, sequence1)
+- Error if preset is unknown to minimap2
+
+**Performance notes:**
+- For large reference sets, the default mode (single index) is most efficient
+- The `per_subject_database=true` mode rebuilds the index for each subject, which is slower but useful for specific analyses
+- Query sequences are streamed in batches of 1024 to limit memory usage
+- Secondary alignments can significantly increase output size; use `max_secondary=0` for primary-only results
+
+**Limitations:**
+- Subject sequences must fit in memory (loaded at bind time for indexing)
+- No support for reading sequences directly from files (use tables/views from `read_fastx`)
 
 ### SAM Flag Functions
 
