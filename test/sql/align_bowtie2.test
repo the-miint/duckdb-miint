@@ -1,0 +1,223 @@
+# name: test/sql/align_bowtie2.test
+# description: Test align_bowtie2 table function
+# group: [miint]
+
+require miint
+
+# Setup: Create test tables with sequence data
+# Using 100bp sequences to satisfy bowtie2's minimum reference length requirements
+
+statement ok
+CREATE TABLE subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('ref2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCAAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAA')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE queries AS SELECT * FROM (VALUES
+    ('query1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('query2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(read_id, sequence1);
+
+# Test basic alignment
+query IIII
+SELECT read_id, reference, position, mapq >= 0 as has_mapq
+FROM align_bowtie2('queries', 'subjects')
+ORDER BY read_id, reference;
+----
+query1	ref1	1	true
+query2	ref2	1	true
+
+# Test CIGAR string is generated
+query II
+SELECT read_id, cigar != '*' AND cigar != '' as has_cigar
+FROM align_bowtie2('queries', 'subjects')
+ORDER BY read_id;
+----
+query1	true
+query2	true
+
+# Test alignment score tag (bowtie2 uses AS:i tag, 0 is valid for perfect matches)
+query II
+SELECT read_id, tag_as >= 0 as has_score
+FROM align_bowtie2('queries', 'subjects')
+ORDER BY read_id;
+----
+query1	true
+query2	true
+
+# Test stop_position is computed
+query III
+SELECT read_id, position, stop_position >= position as stop_after_start
+FROM align_bowtie2('queries', 'subjects')
+ORDER BY read_id;
+----
+query1	1	true
+query2	1	true
+
+# Test with preset parameter
+query II
+SELECT read_id, reference
+FROM align_bowtie2('queries', 'subjects', preset='very-sensitive')
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# Test with local alignment mode
+query II
+SELECT read_id, reference
+FROM align_bowtie2('queries', 'subjects', local=true)
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# Test with views
+statement ok
+CREATE VIEW query_view AS SELECT * FROM queries;
+
+statement ok
+CREATE VIEW subject_view AS SELECT * FROM subjects;
+
+query II
+SELECT read_id, reference
+FROM align_bowtie2('query_view', 'subject_view')
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# Test max_secondary parameter
+# Create a reference with identical sequences
+statement ok
+CREATE TABLE multi_subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('ref2', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('ref3', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE single_query AS SELECT * FROM (VALUES
+    ('q1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT')
+) AS t(read_id, sequence1);
+
+# With max_secondary=1, should get only 1 alignment
+query I
+SELECT COUNT(*) = 1 as exactly_one
+FROM align_bowtie2('single_query', 'multi_subjects', max_secondary=1);
+----
+true
+
+# With max_secondary=3, should get up to 3 alignments
+query I
+SELECT COUNT(*) >= 1 AND COUNT(*) <= 3 as limited
+FROM align_bowtie2('single_query', 'multi_subjects', max_secondary=3);
+----
+true
+
+# Test paired-end alignment
+statement ok
+CREATE TABLE paired_queries AS SELECT * FROM (VALUES
+    ('read1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT', 'GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAA')
+) AS t(read_id, sequence1, sequence2);
+
+query II
+SELECT read_id, reference
+FROM align_bowtie2('paired_queries', 'subjects')
+WHERE read_id = 'read1'
+ORDER BY read_id, position
+LIMIT 2;
+----
+read1	ref1
+read1	ref1
+
+# Test quiet parameter (default is true, so stderr is suppressed)
+# This just verifies the parameter is accepted
+query II
+SELECT read_id, reference
+FROM align_bowtie2('queries', 'subjects', quiet=true)
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# Test quiet=false (allows stderr output - no assertion on output, just verify it works)
+query II
+SELECT read_id, reference
+FROM align_bowtie2('queries', 'subjects', quiet=false)
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# Test command injection prevention - malicious reference names should be treated as literal strings
+# The aligner uses fork/exec with explicit arguments, so shell metacharacters have no effect
+# Note: Reference names cannot contain spaces (FASTA header limitation)
+statement ok
+CREATE TABLE injection_subjects AS SELECT * FROM (VALUES
+    ('ref;echo_INJECTED', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('ref$(whoami)', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCAAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAA'),
+    ('ref`id`', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')
+) AS t(read_id, sequence1);
+
+# These should work without executing any shell commands
+# The reference names with shell metacharacters are treated as literal strings
+query II
+SELECT read_id, reference
+FROM align_bowtie2('queries', 'injection_subjects')
+ORDER BY read_id;
+----
+query1	ref;echo_INJECTED
+query2	ref$(whoami)
+
+statement ok
+DROP TABLE injection_subjects;
+
+# Test error: non-existent query table
+statement error
+SELECT * FROM align_bowtie2('nonexistent_table', 'subjects');
+----
+does not exist
+
+# Test error: non-existent subject table
+statement error
+SELECT * FROM align_bowtie2('queries', 'nonexistent_table');
+----
+does not exist
+
+# Test error: subject table with paired data (sequence2)
+statement ok
+CREATE TABLE paired_subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT', 'TGCATGCATGCATGCATGCATGCA')
+) AS t(read_id, sequence1, sequence2);
+
+statement error
+SELECT * FROM align_bowtie2('queries', 'paired_subjects');
+----
+cannot be paired-end
+
+# Clean up
+statement ok
+DROP TABLE subjects;
+
+statement ok
+DROP TABLE queries;
+
+statement ok
+DROP VIEW query_view;
+
+statement ok
+DROP VIEW subject_view;
+
+statement ok
+DROP TABLE multi_subjects;
+
+statement ok
+DROP TABLE single_query;
+
+statement ok
+DROP TABLE paired_queries;
+
+statement ok
+DROP TABLE paired_subjects;

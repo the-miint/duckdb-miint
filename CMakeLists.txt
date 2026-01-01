@@ -180,7 +180,9 @@ set(EXTENSION_SOURCES
     src/copy_newick.cpp
     src/Minimap2Aligner.cpp
     src/sequence_table_reader.cpp
-    src/align_minimap2.cpp)
+    src/align_minimap2.cpp
+    src/Bowtie2Aligner.cpp
+    src/align_bowtie2.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
@@ -256,6 +258,8 @@ set(TEST_SOURCES
     test/cpp/test_InsertFullyResolved.cpp
     src/Minimap2Aligner.cpp
     test/cpp/test_Minimap2Aligner.cpp
+    src/Bowtie2Aligner.cpp
+    test/cpp/test_Bowtie2Aligner.cpp
 )
 
 add_executable(tests ${TEST_SOURCES})

@@ -1,7 +1,9 @@
 #include <SAMReader.hpp>
 #include <htslib-1.22.1/htslib/sam.h>
+#include <htslib-1.22.1/htslib/hfile.h>
 #include <sys/resource.h>
 #include <regex>
+#include <unistd.h>
 
 namespace miint {
 // Constructor for SAM files with headers
@@ -86,6 +88,38 @@ SAMReader::SAMReader(const std::string &filename, const std::unordered_map<std::
 	hdr.reset(sam_hdr_parse(header_text.length(), header_text.c_str()));
 	if (!hdr) {
 		throw std::runtime_error("Failed to parse SAM header");
+	}
+
+	// Initialize alignment record
+	if (!aln) {
+		throw std::runtime_error("Cannot initialize BAM record");
+	}
+}
+
+// Constructor for reading SAM from a file descriptor (e.g., pipe from subprocess)
+SAMReader::SAMReader(int fd, const std::string &name, bool include_seq_qual)
+    : aln(bam_init1()), include_seq_qual(include_seq_qual) {
+
+	// Wrap fd in HTSlib's hFILE
+	hFILE *hfile = hdopen(fd, "r");
+	if (!hfile) {
+		close(fd);
+		throw std::runtime_error("Failed to wrap file descriptor in hFILE");
+	}
+
+	// Wrap hFILE in htsFile for SAM parsing
+	// "r" mode = auto-detect format (SAM/BAM/CRAM)
+	htsFile *hts_fp = hts_hopen(hfile, name.c_str(), "r");
+	if (!hts_fp) {
+		hclose(hfile);
+		throw std::runtime_error("Failed to open file descriptor as SAM stream");
+	}
+	fp.reset(hts_fp);
+
+	// Read header
+	hdr.reset(sam_hdr_read(fp.get()));
+	if (!hdr) {
+		throw std::runtime_error("Failed to read SAM header from stream");
 	}
 
 	// Initialize alignment record

@@ -66,6 +66,7 @@ GROUP BY sample_id;
   - [read_jplace](#read_jplacepath)
   - [parse_newick](#parse_newickfilename-include_filepathfalse)
   - [align_minimap2](#align_minimap2query_table-subject_table-options)
+  - [align_bowtie2](#align_bowtie2query_table-subject_table-options)
   - [SAM Flag Functions](#sam-flag-functions)
   - [alignment_seq_identity](#alignment_seq_identitycigar-nm-md-type)
   - [alignment_query_length](#alignment_query_lengthcigar-include_hard_clipstrue)
@@ -880,6 +881,128 @@ SELECT * FROM align_minimap2('paired_queries', 'subjects', max_secondary=0);
 **Limitations:**
 - Subject sequences must fit in memory (loaded at bind time for indexing)
 - No support for reading sequences directly from files (use tables/views from `read_fastx`)
+
+### `align_bowtie2(query_table, subject_table, [options])`
+
+Align query sequences to subject sequences using Bowtie2. This function enables short-read alignment directly within SQL by reading sequences from DuckDB tables/views and returning alignments in the same format as `read_alignments`.
+
+**Requirements:**
+- Bowtie2 must be installed and available in PATH (`bowtie2` and `bowtie2-build` commands)
+
+**Parameters:**
+- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2)
+- `subject_table` (VARCHAR): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent)
+- `preset` (VARCHAR, optional): Bowtie2 preset for alignment sensitivity
+  - `'very-fast'`: Fastest, least sensitive
+  - `'fast'`: Fast alignment
+  - `'sensitive'`: More sensitive (slower)
+  - `'very-sensitive'`: Most sensitive, slowest
+- `local` (BOOLEAN, default: false): Use local alignment mode instead of end-to-end
+  - `false` (default): End-to-end alignment (entire read must align)
+  - `true`: Local alignment (soft-clipping allowed at ends)
+- `threads` (INTEGER, default: 1): Number of threads for Bowtie2 alignment (-p parameter)
+- `max_secondary` (INTEGER, default: 1): Maximum alignments to report per query (-k parameter)
+- `extra_args` (VARCHAR, optional): Additional Bowtie2 command-line arguments (space-separated)
+- `quiet` (BOOLEAN, default: true): Suppress Bowtie2 stderr output (alignment statistics)
+
+**Output schema:**
+Returns the same schema as `read_alignments` (21 columns):
+- `read_id` (VARCHAR): Query sequence identifier
+- `flags` (USMALLINT): SAM alignment flags
+- `reference` (VARCHAR): Subject sequence identifier
+- `position` (BIGINT): 1-based start position on reference
+- `stop_position` (BIGINT): 1-based stop position on reference
+- `mapq` (UTINYINT): Mapping quality
+- `cigar` (VARCHAR): CIGAR string
+- `mate_reference` (VARCHAR): Mate reference (for paired-end)
+- `mate_position` (BIGINT): Mate position (for paired-end)
+- `template_length` (BIGINT): Template length (for paired-end)
+- `tag_as` (BIGINT): Alignment score
+- `tag_xs` (BIGINT): Suboptimal alignment score
+- `tag_ys` (BIGINT): Mate alignment score
+- `tag_xn` (BIGINT): Number of ambiguous bases
+- `tag_xm` (BIGINT): Number of mismatches
+- `tag_xo` (BIGINT): Number of gap opens
+- `tag_xg` (BIGINT): Number of gap extensions
+- `tag_nm` (BIGINT): Edit distance
+- `tag_yt` (VARCHAR): Pair type (UU/CP/DP/UP)
+- `tag_md` (VARCHAR): MD tag string
+- `tag_sa` (VARCHAR): Supplementary alignment info
+
+**Behavior:**
+- Subject sequences are loaded into memory at bind time and indexed (must fit in RAM)
+- Query sequences are processed in batches for memory efficiency
+- Supports both single-end and paired-end query sequences (paired-end uses interleaved format internally)
+- Uses Bowtie2's subprocess interface for alignment
+- Bowtie2 is optimized for short reads (Illumina); use `align_minimap2` for long reads
+
+**Examples:**
+```sql
+-- Create tables with sequence data
+CREATE TABLE subjects AS SELECT * FROM read_fastx('references.fasta');
+CREATE TABLE queries AS SELECT * FROM read_fastx('reads.fastq');
+
+-- Basic alignment
+SELECT * FROM align_bowtie2('queries', 'subjects');
+
+-- Get primary alignments only with high sensitivity
+SELECT read_id, reference, position, mapq, cigar
+FROM align_bowtie2('queries', 'subjects', preset='very-sensitive', max_secondary=1)
+ORDER BY read_id;
+
+-- Use local alignment mode for reads with adapters
+SELECT * FROM align_bowtie2('queries', 'subjects', local=true);
+
+-- Multi-threaded alignment
+SELECT * FROM align_bowtie2('queries', 'subjects', threads=4);
+
+-- Filter by mapping quality and identity
+SELECT read_id, reference, position, alignment_seq_identity(cigar, tag_nm, tag_md) AS identity
+FROM align_bowtie2('queries', 'subjects', max_secondary=1)
+WHERE mapq >= 30
+  AND alignment_seq_identity(cigar, tag_nm, tag_md) > 0.95;
+
+-- Works with views
+CREATE VIEW filtered_queries AS
+    SELECT * FROM read_fastx('reads.fastq')
+    WHERE LENGTH(sequence1) >= 50;
+
+SELECT * FROM align_bowtie2('filtered_queries', 'subjects');
+
+-- Paired-end alignment (table has sequence2 column)
+CREATE TABLE paired_queries AS SELECT * FROM read_fastx('R1.fastq', sequence2='R2.fastq');
+SELECT * FROM align_bowtie2('paired_queries', 'subjects');
+
+-- Export alignments to SAM format
+CREATE TABLE refs AS SELECT read_id AS name, LENGTH(sequence1) AS length FROM subjects;
+COPY (
+    SELECT * FROM align_bowtie2('queries', 'subjects', max_secondary=1)
+) TO 'alignments.sam' (FORMAT SAM, REFERENCE_LENGTHS 'refs');
+
+-- Pass additional Bowtie2 arguments
+SELECT * FROM align_bowtie2('queries', 'subjects', extra_args='--no-unal --rdg 5,3');
+```
+
+**Error handling:**
+- Error if query_table or subject_table does not exist
+- Error if subject_table contains paired-end data (sequence2 not NULL)
+- Error if tables lack required columns (read_id, sequence1)
+- Error if bowtie2 or bowtie2-build is not found in PATH
+
+**Performance notes:**
+- Bowtie2 is optimized for short reads (typically <500bp); for long reads, use `align_minimap2`
+- The `threads` parameter controls Bowtie2's internal parallelism
+- Query sequences are streamed in batches of 1024 to limit memory usage
+- Subject sequences must fit in memory for index building
+
+**Comparison with align_minimap2:**
+| Feature | align_bowtie2 | align_minimap2 |
+|---------|---------------|----------------|
+| Best for | Short reads (Illumina) | Long reads (ONT, PacBio) |
+| Alignment mode | End-to-end or local | Various presets |
+| Index type | FM-index | Minimizer index |
+| Paired-end | Interleaved stdin | Native support |
+| Per-subject mode | No | Yes |
 
 ### SAM Flag Functions
 
