@@ -1,0 +1,135 @@
+# name: test/sql/read_ncbi_annotation.test
+# description: Test read_ncbi_annotation table function
+# group: [miint]
+# NOTE: This test requires network access to NCBI servers
+
+require miint
+
+require httpfs
+
+# Test error: empty accession
+statement error
+SELECT * FROM read_ncbi_annotation('');
+----
+accession cannot be empty
+
+# Test error: empty array
+statement error
+SELECT * FROM read_ncbi_annotation([]);
+----
+at least one accession must be provided
+
+# Test schema
+query TTTTTTTTT
+DESCRIBE SELECT * FROM read_ncbi_annotation('NC_001416.1');
+----
+seqid	VARCHAR	YES	NULL	NULL	NULL
+source	VARCHAR	YES	NULL	NULL	NULL
+type	VARCHAR	YES	NULL	NULL	NULL
+position	INTEGER	YES	NULL	NULL	NULL
+stop_position	INTEGER	YES	NULL	NULL	NULL
+score	DOUBLE	YES	NULL	NULL	NULL
+strand	VARCHAR	YES	NULL	NULL	NULL
+phase	INTEGER	YES	NULL	NULL	NULL
+attributes	MAP(VARCHAR, VARCHAR)	YES	NULL	NULL	NULL
+
+# Test schema with include_filepath
+query TTTTTTTTTT
+DESCRIBE SELECT * FROM read_ncbi_annotation('NC_001416.1', include_filepath=true);
+----
+seqid	VARCHAR	YES	NULL	NULL	NULL
+source	VARCHAR	YES	NULL	NULL	NULL
+type	VARCHAR	YES	NULL	NULL	NULL
+position	INTEGER	YES	NULL	NULL	NULL
+stop_position	INTEGER	YES	NULL	NULL	NULL
+score	DOUBLE	YES	NULL	NULL	NULL
+strand	VARCHAR	YES	NULL	NULL	NULL
+phase	INTEGER	YES	NULL	NULL	NULL
+attributes	MAP(VARCHAR, VARCHAR)	YES	NULL	NULL	NULL
+filepath	VARCHAR	YES	NULL	NULL	NULL
+
+# Test basic fetch - Lambda phage has many features
+query I
+SELECT COUNT(*) > 100 AS has_many_features
+FROM read_ncbi_annotation('NC_001416.1');
+----
+true
+
+# Test seqid is populated correctly
+query I
+SELECT COUNT(DISTINCT seqid) = 1 AND MIN(seqid) = 'NC_001416.1' AS correct_seqid
+FROM read_ncbi_annotation('NC_001416.1');
+----
+true
+
+# Test source is RefSeq
+query I
+SELECT COUNT(DISTINCT source) = 1 AND MIN(source) = 'RefSeq' AS correct_source
+FROM read_ncbi_annotation('NC_001416.1');
+----
+true
+
+# Test feature types include gene and CDS
+query I
+SELECT COUNT(DISTINCT type) > 1 AS has_multiple_types
+FROM read_ncbi_annotation('NC_001416.1');
+----
+true
+
+# Test positions are valid (positive and stop >= position)
+query I
+SELECT COUNT(*) = 0 AS all_valid
+FROM read_ncbi_annotation('NC_001416.1')
+WHERE position <= 0 OR stop_position < position;
+----
+true
+
+# Test strand values are valid
+query I
+SELECT COUNT(DISTINCT strand) AS strand_count
+FROM read_ncbi_annotation('NC_001416.1')
+WHERE strand IN ('+', '-', '.');
+----
+2
+
+# Test attributes map is populated
+query I
+SELECT COUNT(*) > 0 AS has_attributes
+FROM read_ncbi_annotation('NC_001416.1')
+WHERE map_keys(attributes) IS NOT NULL AND len(map_keys(attributes)) > 0;
+----
+true
+
+# Test can extract specific attribute using element_at
+query I
+SELECT element_at(attributes, 'gene') IS NOT NULL AS has_gene_attr
+FROM read_ncbi_annotation('NC_001416.1')
+WHERE type = 'gene'
+LIMIT 1;
+----
+true
+
+# Test multiple accessions
+query II
+SELECT seqid, COUNT(*) AS count
+FROM read_ncbi_annotation(['NC_001416.1', 'NC_001422.1'])
+GROUP BY seqid
+ORDER BY seqid;
+----
+NC_001416.1	282
+NC_001422.1	31
+
+# Test COUNT works correctly
+query I
+SELECT COUNT(*) > 300 AS has_many
+FROM read_ncbi_annotation(['NC_001416.1', 'NC_001422.1']);
+----
+true
+
+# Test include_filepath shows NCBI URL
+query I
+SELECT filepath LIKE '%eutils.ncbi.nlm.nih.gov%' AS is_ncbi_url
+FROM read_ncbi_annotation('NC_001416.1', include_filepath=true)
+LIMIT 1;
+----
+true

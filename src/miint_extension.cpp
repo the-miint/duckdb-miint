@@ -16,6 +16,9 @@
 #include <read_biom.hpp>
 #include <align_minimap2.hpp>
 #include <align_bowtie2.hpp>
+#include <read_ncbi_fasta.hpp>
+#include <read_ncbi.hpp>
+#include <read_ncbi_annotation.hpp>
 #include <miint_macros.hpp>
 #include <sequence_functions.hpp>
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
@@ -42,6 +45,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ParseNewickTableFunction::Register(loader);
 	AlignMinimap2TableFunction::Register(loader);
 	AlignBowtie2TableFunction::Register(loader);
+	ReadNCBIFastaTableFunction::Register(loader);
+	ReadNCBITableFunction::Register(loader);
+	ReadNCBIAnnotationTableFunction::Register(loader);
 
 	AlignmentFlagFunctions::Register(loader);
 	AlignmentSeqIdentityFunction::Register(loader);

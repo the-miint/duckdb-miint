@@ -1,0 +1,97 @@
+# name: test/sql/read_ncbi_fasta.test
+# description: Test read_ncbi_fasta table function
+# group: [miint]
+# NOTE: This test requires network access to NCBI servers
+
+require miint
+
+require httpfs
+
+# Test error: empty accession
+statement error
+SELECT * FROM read_ncbi_fasta('');
+----
+accession cannot be empty
+
+# Test error: empty array
+statement error
+SELECT * FROM read_ncbi_fasta([]);
+----
+at least one accession must be provided
+
+# Test schema - fetch Lambda phage genome (small, stable)
+# NC_001416.1 is Enterobacteria phage lambda, complete genome (48502 bp)
+query TTTTTTT
+DESCRIBE SELECT * FROM read_ncbi_fasta('NC_001416.1');
+----
+sequence_index	BIGINT	YES	NULL	NULL	NULL
+read_id	VARCHAR	YES	NULL	NULL	NULL
+comment	VARCHAR	YES	NULL	NULL	NULL
+sequence1	VARCHAR	YES	NULL	NULL	NULL
+sequence2	VARCHAR	YES	NULL	NULL	NULL
+qual1	UTINYINT[]	YES	NULL	NULL	NULL
+qual2	UTINYINT[]	YES	NULL	NULL	NULL
+
+# Test schema with include_filepath
+query TTTTTTTT
+DESCRIBE SELECT * FROM read_ncbi_fasta('NC_001416.1', include_filepath=true);
+----
+sequence_index	BIGINT	YES	NULL	NULL	NULL
+read_id	VARCHAR	YES	NULL	NULL	NULL
+comment	VARCHAR	YES	NULL	NULL	NULL
+sequence1	VARCHAR	YES	NULL	NULL	NULL
+sequence2	VARCHAR	YES	NULL	NULL	NULL
+qual1	UTINYINT[]	YES	NULL	NULL	NULL
+qual2	UTINYINT[]	YES	NULL	NULL	NULL
+filepath	VARCHAR	YES	NULL	NULL	NULL
+
+# Test basic fetch - Lambda phage
+query III
+SELECT sequence_index, read_id, LENGTH(sequence1) AS seq_len
+FROM read_ncbi_fasta('NC_001416.1');
+----
+0	NC_001416.1	48502
+
+# Test comment contains description
+query I
+SELECT comment LIKE '%Lambda%' OR comment LIKE '%lambda%' AS has_lambda
+FROM read_ncbi_fasta('NC_001416.1');
+----
+true
+
+# Test sequence2 and quality scores are NULL (FASTA has no quality)
+query II
+SELECT sequence2 IS NULL AS seq2_null, qual1 IS NULL AS qual1_null
+FROM read_ncbi_fasta('NC_001416.1');
+----
+true	true
+
+# Test include_filepath shows NCBI URL
+query I
+SELECT filepath LIKE '%eutils.ncbi.nlm.nih.gov%' AS is_ncbi_url
+FROM read_ncbi_fasta('NC_001416.1', include_filepath=true);
+----
+true
+
+# Test array input with multiple accessions
+# NC_001416.1 = Lambda phage (48502 bp), NC_001422.1 = PhiX174 (5386 bp)
+query III
+SELECT sequence_index, read_id, LENGTH(sequence1) AS seq_len
+FROM read_ncbi_fasta(['NC_001416.1', 'NC_001422.1'])
+ORDER BY sequence_index;
+----
+0	NC_001416.1	48502
+1	NC_001422.1	5386
+
+# Test that sequence contains expected nucleotides (Lambda phage starts with GGGCGGCGACCT)
+query I
+SELECT LEFT(sequence1, 12) = 'GGGCGGCGACCT' AS correct_start
+FROM read_ncbi_fasta('NC_001416.1');
+----
+true
+
+# Test COUNT works correctly
+query I
+SELECT COUNT(*) FROM read_ncbi_fasta(['NC_001416.1', 'NC_001422.1']);
+----
+2
