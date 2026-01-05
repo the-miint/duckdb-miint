@@ -152,3 +152,28 @@ DROP TABLE single_query;
 
 statement ok
 DROP TABLE paired_subjects;
+# Test reading from table created by read_fastx with all columns
+# This reproduces a bug where sequence2/qual1/qual2 columns (even if NULL)
+# cause incorrect sequence lengths to be passed to minimap2
+
+statement ok
+CREATE OR REPLACE TABLE fastx_queries AS SELECT * FROM read_fastx('data/fastq/test.fa');
+
+statement ok
+CREATE TABLE fastx_subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('ref2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCAGGCCGGCCGGCCATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAA')
+) AS t(read_id, sequence1);
+
+# This should work even though fastx_queries has sequence2/qual1/qual2 columns with NULLs
+query II
+SELECT read_id, reference
+FROM align_minimap2('fastx_queries', 'fastx_subjects', max_secondary=0, k := 5)
+ORDER BY read_id;
+----
+
+statement ok
+DROP TABLE fastx_queries;
+
+statement ok
+DROP TABLE fastx_subjects;

@@ -282,6 +282,12 @@ bool ReadQueryBatch(ClientContext &context, const std::string &table_name, const
 			chunk->data[qual2_col].ToUnifiedFormat(chunk->size(), qual2_data);
 		}
 
+		// IMPORTANT: Extract ALL string data FIRST before calling ExtractQualScore
+		// ExtractQualScore calls ListVector::GetEntry() which may corrupt string pointers
+		std::vector<std::string> batch_read_ids;
+		std::vector<std::string> batch_seq1;
+		std::vector<std::string> batch_seq2;
+
 		for (idx_t i = 0; i < chunk->size(); i++) {
 			auto rid_idx = read_id_data.sel->get_index(i);
 			auto seq1_idx = seq1_data.sel->get_index(i);
@@ -294,11 +300,41 @@ bool ReadQueryBatch(ClientContext &context, const std::string &table_name, const
 				continue;
 			}
 
-			output.read_ids.push_back(read_ids[rid_idx].GetString());
-			output.comments.push_back("");  // No comment column in schema
-			output.sequences1.push_back(sequences1[seq1_idx].GetString());
+			// Extract strings NOW before any LIST operations
+			batch_read_ids.push_back(read_ids[rid_idx].GetString());
+			batch_seq1.push_back(sequences1[seq1_idx].GetString());
 
-			// Extract qual1
+			if (output.is_paired && schema.has_sequence2 && sequences2) {
+				auto seq2_idx = seq2_data.sel->get_index(i);
+				if (seq2_data.validity.RowIsValid(seq2_idx)) {
+					batch_seq2.push_back(sequences2[seq2_idx].GetString());
+				} else {
+					batch_seq2.push_back("");
+				}
+			} else if (output.is_paired) {
+				batch_seq2.push_back("");
+			}
+		}
+
+		// Now process the extracted strings and quality scores
+		idx_t batch_idx = 0;
+		for (idx_t i = 0; i < chunk->size(); i++) {
+			auto rid_idx = read_id_data.sel->get_index(i);
+			auto seq1_idx = seq1_data.sel->get_index(i);
+
+			// Skip rows with NULL read_id or sequence1 (same logic as above)
+			if (!read_id_data.validity.RowIsValid(rid_idx)) {
+				continue;
+			}
+			if (!seq1_data.validity.RowIsValid(seq1_idx)) {
+				continue;
+			}
+
+			output.read_ids.push_back(std::move(batch_read_ids[batch_idx]));
+			output.comments.push_back("");
+			output.sequences1.push_back(std::move(batch_seq1[batch_idx]));
+
+			// Extract qual1 - NOW it's safe to call ExtractQualScore
 			if (schema.has_qual1) {
 				output.quals1.push_back(ExtractQualScore(*chunk, qual1_col, qual1_data, i));
 			} else {
@@ -306,13 +342,8 @@ bool ReadQueryBatch(ClientContext &context, const std::string &table_name, const
 			}
 
 			// Handle sequence2 and qual2 for paired reads
-			if (schema.has_sequence2 && sequences2) {
-				auto seq2_idx = seq2_data.sel->get_index(i);
-				if (seq2_data.validity.RowIsValid(seq2_idx)) {
-					output.sequences2.push_back(sequences2[seq2_idx].GetString());
-				} else {
-					output.sequences2.push_back("");
-				}
+			if (output.is_paired) {
+				output.sequences2.push_back(std::move(batch_seq2[batch_idx]));
 
 				if (schema.has_qual2) {
 					output.quals2.push_back(ExtractQualScore(*chunk, qual2_col, qual2_data, i));
@@ -320,6 +351,8 @@ bool ReadQueryBatch(ClientContext &context, const std::string &table_name, const
 					output.quals2.push_back(miint::QualScore(""));
 				}
 			}
+
+			batch_idx++;
 		}
 	}
 

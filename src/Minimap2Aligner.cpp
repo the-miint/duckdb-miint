@@ -83,9 +83,6 @@ Minimap2Aligner::Minimap2Aligner(const Minimap2Config &config)
 		throw std::runtime_error("Unknown minimap2 preset: " + config_.preset);
 	}
 
-	fprintf(stderr, "DEBUG: After mm_set_opt('%s'): k=%d, w=%d\n",
-	        config_.preset.c_str(), (int)iopt_->k, (int)iopt_->w);
-
 	// Validate preset set valid k and w values
 	if (iopt_->k <= 0 || iopt_->k > 28) {
 		throw std::runtime_error("Preset '" + config_.preset + "' set invalid k-mer size: " +
@@ -174,12 +171,8 @@ void Minimap2Aligner::build_index(const std::vector<AlignmentSubject> &subjects)
 	}
 
 	// Build index using mm_idx_str
-	fprintf(stderr, "DEBUG: About to call mm_idx_str with w=%d, k=%d, n_seq=%d\n",
-	        (int)iopt_->w, (int)iopt_->k, (int)subjects.size());
-	fprintf(stderr, "DEBUG: First sequence length: %zu\n", subjects[0].sequence.length());
-
 	mm_idx_t *idx = mm_idx_str(iopt_->w, iopt_->k,
-	                           0, // is_hpc
+	                           iopt_->flag & 1, // is_hpc: extract bit 0 only (MM_I_HPC flag)
 	                           iopt_->bucket_bits, static_cast<int>(subjects.size()), seqs.data(), names.data());
 
 	if (!idx) {
@@ -208,7 +201,11 @@ void Minimap2Aligner::align(const SequenceRecordBatch &queries, SAMRecordBatch &
 
 	// Process each query
 	for (size_t i = 0; i < queries.size(); i++) {
-		if (queries.is_paired) {
+		// Check if this query is actually paired (has non-empty sequence2)
+		// is_paired flag just means the column exists, not that all rows have data
+		bool actually_paired = queries.is_paired && i < queries.sequences2.size() && !queries.sequences2[i].empty();
+
+		if (actually_paired) {
 			align_paired(queries.read_ids[i], queries.sequences1[i], queries.sequences2[i], output);
 		} else {
 			align_single(queries.read_ids[i], queries.sequences1[i], output);
