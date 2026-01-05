@@ -83,11 +83,27 @@ Minimap2Aligner::Minimap2Aligner(const Minimap2Config &config)
 		throw std::runtime_error("Unknown minimap2 preset: " + config_.preset);
 	}
 
+	// Validate preset set valid k and w values
+	if (iopt_->k <= 0 || iopt_->k > 28) {
+		throw std::runtime_error("Preset '" + config_.preset + "' set invalid k-mer size: " +
+		                         std::to_string(iopt_->k));
+	}
+	if (iopt_->w <= 0 || iopt_->w >= 256) {
+		throw std::runtime_error("Preset '" + config_.preset + "' set invalid window size: " +
+		                         std::to_string(iopt_->w));
+	}
+
 	// Override k and w if specified
 	if (config_.k > 0) {
+		if (config_.k > 28) {
+			throw std::runtime_error("k-mer size must be <= 28 (got " + std::to_string(config_.k) + ")");
+		}
 		iopt_->k = static_cast<short>(config_.k);
 	}
 	if (config_.w > 0) {
+		if (config_.w >= 256) {
+			throw std::runtime_error("Window size must be < 256 (got " + std::to_string(config_.w) + ")");
+		}
 		iopt_->w = static_cast<short>(config_.w);
 	}
 
@@ -145,6 +161,10 @@ void Minimap2Aligner::build_index(const std::vector<AlignmentSubject> &subjects)
 	subject_names_.reserve(subjects.size());
 
 	for (const auto &subject : subjects) {
+		// Validate sequence is non-empty (required by minimap2)
+		if (subject.sequence.empty()) {
+			throw std::runtime_error("Cannot build index: sequence '" + subject.read_id + "' is empty");
+		}
 		seqs.push_back(subject.sequence.c_str());
 		names.push_back(subject.read_id.c_str());
 		subject_names_.push_back(subject.read_id);
@@ -190,6 +210,11 @@ void Minimap2Aligner::align(const SequenceRecordBatch &queries, SAMRecordBatch &
 }
 
 void Minimap2Aligner::align_single(const std::string &read_id, const std::string &sequence, SAMRecordBatch &output) {
+	// Skip empty query sequences (minimap2 requires len > 0)
+	if (sequence.empty()) {
+		return; // No alignments for empty query
+	}
+
 	int n_regs = 0;
 	mm_reg1_t *regs =
 	    mm_map(index_.get(), static_cast<int>(sequence.length()), sequence.c_str(), &n_regs, tbuf_.get(), mopt_.get(),
@@ -238,6 +263,11 @@ void Minimap2Aligner::align_single(const std::string &read_id, const std::string
 
 void Minimap2Aligner::align_paired(const std::string &read_id, const std::string &sequence1,
                                    const std::string &sequence2, SAMRecordBatch &output) {
+	// Skip if both sequences are empty (minimap2 requires len > 0)
+	if (sequence1.empty() && sequence2.empty()) {
+		return; // No alignments for empty queries
+	}
+
 	// Setup for paired-end
 	int qlens[2] = {static_cast<int>(sequence1.length()), static_cast<int>(sequence2.length())};
 	const char *seqs[2] = {sequence1.c_str(), sequence2.c_str()};
