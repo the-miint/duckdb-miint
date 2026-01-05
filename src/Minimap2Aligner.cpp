@@ -83,6 +83,9 @@ Minimap2Aligner::Minimap2Aligner(const Minimap2Config &config)
 		throw std::runtime_error("Unknown minimap2 preset: " + config_.preset);
 	}
 
+	fprintf(stderr, "DEBUG: After mm_set_opt('%s'): k=%d, w=%d\n",
+	        config_.preset.c_str(), (int)iopt_->k, (int)iopt_->w);
+
 	// Validate preset set valid k and w values
 	if (iopt_->k <= 0 || iopt_->k > 28) {
 		throw std::runtime_error("Preset '" + config_.preset + "' set invalid k-mer size: " +
@@ -171,6 +174,10 @@ void Minimap2Aligner::build_index(const std::vector<AlignmentSubject> &subjects)
 	}
 
 	// Build index using mm_idx_str
+	fprintf(stderr, "DEBUG: About to call mm_idx_str with w=%d, k=%d, n_seq=%d\n",
+	        (int)iopt_->w, (int)iopt_->k, (int)subjects.size());
+	fprintf(stderr, "DEBUG: First sequence length: %zu\n", subjects[0].sequence.length());
+
 	mm_idx_t *idx = mm_idx_str(iopt_->w, iopt_->k,
 	                           0, // is_hpc
 	                           iopt_->bucket_bits, static_cast<int>(subjects.size()), seqs.data(), names.data());
