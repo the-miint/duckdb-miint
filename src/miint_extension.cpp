@@ -9,7 +9,7 @@
 #include <copy_fastq.hpp>
 #include <copy_newick.hpp>
 #include <copy_sam.hpp>
-#include <parse_newick.hpp>
+#include <read_newick.hpp>
 #include <kseq++/seqio.hpp>
 #include <read_fastx.hpp>
 #include <read_alignments.hpp>
@@ -42,7 +42,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadFastxTableFunction::Register(loader);
 	ReadAlignmentsTableFunction::Register(loader);
 	ReadBIOMTableFunction::Register(loader);
-	ParseNewickTableFunction::Register(loader);
+	ReadNewickTableFunction::Register(loader);
 	AlignMinimap2TableFunction::Register(loader);
 	AlignBowtie2TableFunction::Register(loader);
 	ReadNCBIFastaTableFunction::Register(loader);

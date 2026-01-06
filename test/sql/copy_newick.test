@@ -10,7 +10,7 @@ require miint
 
 # Create table from parsed newick
 statement ok
-CREATE TABLE tree1 AS SELECT * FROM parse_newick('data/newick/simple.nwk');
+CREATE TABLE tree1 AS SELECT * FROM read_newick('data/newick/simple.nwk');
 
 # Copy to new file
 statement ok
@@ -18,13 +18,13 @@ COPY tree1 TO '__TEST_DIR__/tree1_out.nwk' (FORMAT NEWICK);
 
 # Parse the output and verify structure
 query I
-SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/tree1_out.nwk');
+SELECT COUNT(*) FROM read_newick('__TEST_DIR__/tree1_out.nwk');
 ----
 5
 
 # Verify tip names preserved
 query T
-SELECT name FROM parse_newick('__TEST_DIR__/tree1_out.nwk') WHERE is_tip = true ORDER BY name;
+SELECT name FROM read_newick('__TEST_DIR__/tree1_out.nwk') WHERE is_tip = true ORDER BY name;
 ----
 A
 B
@@ -32,7 +32,7 @@ C
 
 # Verify branch lengths preserved (with tolerance for floating point)
 query TR
-SELECT name, ROUND(branch_length, 2) FROM parse_newick('__TEST_DIR__/tree1_out.nwk')
+SELECT name, ROUND(branch_length, 2) FROM read_newick('__TEST_DIR__/tree1_out.nwk')
 WHERE is_tip = true ORDER BY name;
 ----
 A	0.1
@@ -47,7 +47,7 @@ DROP TABLE tree1;
 # =============================================================================
 
 statement ok
-CREATE TABLE tree_edges AS SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk');
+CREATE TABLE tree_edges AS SELECT * FROM read_newick('data/newick/with_edge_ids.nwk');
 
 # Copy with edge IDs enabled
 statement ok
@@ -55,7 +55,7 @@ COPY tree_edges TO '__TEST_DIR__/tree_edges_out.nwk' (FORMAT NEWICK, EDGE_IDS tr
 
 # Verify edge IDs are present in output
 query I
-SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/tree_edges_out.nwk') WHERE edge_id IS NOT NULL;
+SELECT COUNT(*) FROM read_newick('__TEST_DIR__/tree_edges_out.nwk') WHERE edge_id IS NOT NULL;
 ----
 5
 
@@ -65,7 +65,7 @@ COPY tree_edges TO '__TEST_DIR__/tree_no_edges_out.nwk' (FORMAT NEWICK, EDGE_IDS
 
 # Verify no edge IDs in output
 query I
-SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/tree_no_edges_out.nwk') WHERE edge_id IS NOT NULL;
+SELECT COUNT(*) FROM read_newick('__TEST_DIR__/tree_no_edges_out.nwk') WHERE edge_id IS NOT NULL;
 ----
 0
 
@@ -78,13 +78,13 @@ DROP TABLE tree_edges;
 
 # When input has edge_ids, default should preserve them
 statement ok
-CREATE TABLE tree_default AS SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk');
+CREATE TABLE tree_default AS SELECT * FROM read_newick('data/newick/with_edge_ids.nwk');
 
 statement ok
 COPY tree_default TO '__TEST_DIR__/tree_default_out.nwk' (FORMAT NEWICK);
 
 query I
-SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/tree_default_out.nwk') WHERE edge_id IS NOT NULL;
+SELECT COUNT(*) FROM read_newick('__TEST_DIR__/tree_default_out.nwk') WHERE edge_id IS NOT NULL;
 ----
 5
 
@@ -96,7 +96,7 @@ DROP TABLE tree_default;
 # =============================================================================
 
 statement ok
-CREATE TABLE tree_compress AS SELECT * FROM parse_newick('data/newick/simple.nwk');
+CREATE TABLE tree_compress AS SELECT * FROM read_newick('data/newick/simple.nwk');
 
 # Test gzip compression
 statement ok
@@ -104,7 +104,7 @@ COPY tree_compress TO '__TEST_DIR__/tree_compress.nwk.gz' (FORMAT NEWICK, COMPRE
 
 # Read back compressed file
 query I
-SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/tree_compress.nwk.gz');
+SELECT COUNT(*) FROM read_newick('__TEST_DIR__/tree_compress.nwk.gz');
 ----
 5
 
@@ -113,7 +113,7 @@ statement ok
 COPY tree_compress TO '__TEST_DIR__/tree_nocompress.nwk' (FORMAT NEWICK, COMPRESSION 'none');
 
 query I
-SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/tree_nocompress.nwk');
+SELECT COUNT(*) FROM read_newick('__TEST_DIR__/tree_nocompress.nwk');
 ----
 5
 
@@ -127,7 +127,7 @@ DROP TABLE tree_compress;
 # Missing node_index should error
 statement ok
 CREATE TABLE missing_node_index AS
-SELECT name, branch_length, parent_index FROM parse_newick('data/newick/simple.nwk');
+SELECT name, branch_length, parent_index FROM read_newick('data/newick/simple.nwk');
 
 statement error
 COPY missing_node_index TO '__TEST_DIR__/missing.nwk' (FORMAT NEWICK);
@@ -140,7 +140,7 @@ DROP TABLE missing_node_index;
 # Missing parent_index should error
 statement ok
 CREATE TABLE missing_parent AS
-SELECT node_index, name, branch_length FROM parse_newick('data/newick/simple.nwk');
+SELECT node_index, name, branch_length FROM read_newick('data/newick/simple.nwk');
 
 statement error
 COPY missing_parent TO '__TEST_DIR__/missing.nwk' (FORMAT NEWICK);
@@ -157,7 +157,7 @@ DROP TABLE missing_parent;
 # No root (all nodes have parents) should error
 statement ok
 CREATE TABLE no_root AS
-SELECT node_index, name, branch_length, 0::BIGINT AS parent_index FROM parse_newick('data/newick/simple.nwk');
+SELECT node_index, name, branch_length, 0::BIGINT AS parent_index FROM read_newick('data/newick/simple.nwk');
 
 statement error
 COPY no_root TO '__TEST_DIR__/noroot.nwk' (FORMAT NEWICK);
@@ -170,7 +170,7 @@ DROP TABLE no_root;
 # Multiple roots should error
 statement ok
 CREATE TABLE multi_root AS
-SELECT node_index, name, branch_length, NULL::BIGINT AS parent_index FROM parse_newick('data/newick/simple.nwk');
+SELECT node_index, name, branch_length, NULL::BIGINT AS parent_index FROM read_newick('data/newick/simple.nwk');
 
 statement error
 COPY multi_root TO '__TEST_DIR__/multiroot.nwk' (FORMAT NEWICK);
@@ -187,13 +187,13 @@ DROP TABLE multi_root;
 # name is optional (internal nodes often unnamed)
 statement ok
 CREATE TABLE no_names AS
-SELECT node_index, NULL::VARCHAR AS name, branch_length, parent_index FROM parse_newick('data/newick/simple.nwk');
+SELECT node_index, NULL::VARCHAR AS name, branch_length, parent_index FROM read_newick('data/newick/simple.nwk');
 
 statement ok
 COPY no_names TO '__TEST_DIR__/no_names.nwk' (FORMAT NEWICK);
 
 query I
-SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/no_names.nwk');
+SELECT COUNT(*) FROM read_newick('__TEST_DIR__/no_names.nwk');
 ----
 5
 
@@ -203,13 +203,13 @@ DROP TABLE no_names;
 # branch_length is optional
 statement ok
 CREATE TABLE no_lengths AS
-SELECT node_index, name, NULL::DOUBLE AS branch_length, parent_index FROM parse_newick('data/newick/simple.nwk');
+SELECT node_index, name, NULL::DOUBLE AS branch_length, parent_index FROM read_newick('data/newick/simple.nwk');
 
 statement ok
 COPY no_lengths TO '__TEST_DIR__/no_lengths.nwk' (FORMAT NEWICK);
 
 query I
-SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/no_lengths.nwk') WHERE branch_length IS NULL;
+SELECT COUNT(*) FROM read_newick('__TEST_DIR__/no_lengths.nwk') WHERE branch_length IS NULL;
 ----
 5
 
@@ -219,13 +219,13 @@ DROP TABLE no_lengths;
 # edge_id is optional
 statement ok
 CREATE TABLE no_edge_ids AS
-SELECT node_index, name, branch_length, parent_index FROM parse_newick('data/newick/simple.nwk');
+SELECT node_index, name, branch_length, parent_index FROM read_newick('data/newick/simple.nwk');
 
 statement ok
 COPY no_edge_ids TO '__TEST_DIR__/no_edge_ids.nwk' (FORMAT NEWICK);
 
 query I
-SELECT COUNT(*) FROM parse_newick('__TEST_DIR__/no_edge_ids.nwk');
+SELECT COUNT(*) FROM read_newick('__TEST_DIR__/no_edge_ids.nwk');
 ----
 5
 
@@ -237,7 +237,7 @@ DROP TABLE no_edge_ids;
 # =============================================================================
 
 statement ok
-CREATE TABLE tree_opt AS SELECT * FROM parse_newick('data/newick/simple.nwk');
+CREATE TABLE tree_opt AS SELECT * FROM read_newick('data/newick/simple.nwk');
 
 statement error
 COPY tree_opt TO '__TEST_DIR__/opt.nwk' (FORMAT NEWICK, UNKNOWN_OPT true);
@@ -252,7 +252,7 @@ DROP TABLE tree_opt;
 # =============================================================================
 
 statement ok
-CREATE TABLE full_tree AS SELECT * FROM parse_newick('data/newick/with_edge_ids.nwk');
+CREATE TABLE full_tree AS SELECT * FROM read_newick('data/newick/with_edge_ids.nwk');
 
 # Export with all features
 statement ok
@@ -260,7 +260,7 @@ COPY full_tree TO '__TEST_DIR__/full_roundtrip.nwk.gz' (FORMAT NEWICK, EDGE_IDS 
 
 # Import and compare
 statement ok
-CREATE TABLE reimported AS SELECT * FROM parse_newick('__TEST_DIR__/full_roundtrip.nwk.gz');
+CREATE TABLE reimported AS SELECT * FROM read_newick('__TEST_DIR__/full_roundtrip.nwk.gz');
 
 # Same node count
 query II
@@ -307,13 +307,13 @@ DROP TABLE reimported;
 # =============================================================================
 
 statement ok
-CREATE TABLE compress_verify AS SELECT * FROM parse_newick('data/newick/simple.nwk');
+CREATE TABLE compress_verify AS SELECT * FROM read_newick('data/newick/simple.nwk');
 
 statement ok
 COPY compress_verify TO '__TEST_DIR__/compress_verify.nwk.gz' (FORMAT NEWICK, COMPRESSION 'gzip');
 
 statement ok
-CREATE TABLE compress_reimported AS SELECT * FROM parse_newick('__TEST_DIR__/compress_verify.nwk.gz');
+CREATE TABLE compress_reimported AS SELECT * FROM read_newick('__TEST_DIR__/compress_verify.nwk.gz');
 
 # Verify branch lengths match (within tolerance)
 query I
@@ -337,7 +337,7 @@ DROP TABLE compress_reimported;
 
 statement ok
 CREATE TABLE negative_bl AS
-SELECT node_index, name, CAST(-0.1 AS DOUBLE) AS branch_length, parent_index FROM parse_newick('data/newick/simple.nwk');
+SELECT node_index, name, CAST(-0.1 AS DOUBLE) AS branch_length, parent_index FROM read_newick('data/newick/simple.nwk');
 
 statement error
 COPY negative_bl TO '__TEST_DIR__/negative.nwk' (FORMAT NEWICK);

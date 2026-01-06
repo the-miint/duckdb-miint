@@ -14,7 +14,7 @@
 
 namespace duckdb {
 
-class ParseNewickTableFunction {
+class ReadNewickTableFunction {
 public:
 	// Row of output data for a single node
 	struct NodeRow {

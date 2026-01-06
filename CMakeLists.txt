@@ -176,7 +176,7 @@ set(EXTENSION_SOURCES
     src/reference_table_reader.cpp
     src/placement_table_reader.cpp
     src/NewickTree.cpp
-    src/parse_newick.cpp
+    src/read_newick.cpp
     src/copy_newick.cpp
     src/Minimap2Aligner.cpp
     src/sequence_table_reader.cpp

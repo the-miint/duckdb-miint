@@ -1,4 +1,4 @@
-#include "parse_newick.hpp"
+#include "read_newick.hpp"
 #include "table_function_common.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
@@ -23,7 +23,7 @@ using GzFilePtr = std::unique_ptr<gzFile_s, GzFileDeleter>;
 // Buffer size for gzip decompression (16KB recommended by zlib)
 static constexpr size_t GZIP_BUFFER_SIZE = 16384;
 
-std::string ParseNewickTableFunction::ReadNewickFile(const std::string &path) {
+std::string ReadNewickTableFunction::ReadNewickFile(const std::string &path) {
 	// Handle stdin
 	if (IsStdinPath(path)) {
 		std::stringstream buffer;
@@ -67,7 +67,7 @@ std::string ParseNewickTableFunction::ReadNewickFile(const std::string &path) {
 	return buffer.str();
 }
 
-std::vector<ParseNewickTableFunction::NodeRow> ParseNewickTableFunction::TreeToRows(const miint::NewickTree &tree) {
+std::vector<ReadNewickTableFunction::NodeRow> ReadNewickTableFunction::TreeToRows(const miint::NewickTree &tree) {
 	std::vector<NodeRow> rows;
 	rows.reserve(tree.num_nodes());
 
@@ -92,7 +92,7 @@ std::vector<ParseNewickTableFunction::NodeRow> ParseNewickTableFunction::TreeToR
 	return rows;
 }
 
-unique_ptr<FunctionData> ParseNewickTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
+unique_ptr<FunctionData> ReadNewickTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                         vector<LogicalType> &return_types, vector<std::string> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
@@ -108,10 +108,10 @@ unique_ptr<FunctionData> ParseNewickTableFunction::Bind(ClientContext &context, 
 			file_paths.push_back(child.ToString());
 		}
 		if (file_paths.empty()) {
-			throw InvalidInputException("parse_newick: at least one file path must be provided");
+			throw InvalidInputException("read_newick: at least one file path must be provided");
 		}
 	} else {
-		throw InvalidInputException("parse_newick: first argument must be VARCHAR or VARCHAR[]");
+		throw InvalidInputException("read_newick: first argument must be VARCHAR or VARCHAR[]");
 	}
 
 	// Detect stdin usage
@@ -153,19 +153,19 @@ unique_ptr<FunctionData> ParseNewickTableFunction::Bind(ClientContext &context, 
 	return data;
 }
 
-unique_ptr<GlobalTableFunctionState> ParseNewickTableFunction::InitGlobal(ClientContext &context,
+unique_ptr<GlobalTableFunctionState> ReadNewickTableFunction::InitGlobal(ClientContext &context,
                                                                           TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	return duckdb::make_uniq<GlobalState>(data.file_paths, data.uses_stdin);
 }
 
-unique_ptr<LocalTableFunctionState> ParseNewickTableFunction::InitLocal(ExecutionContext &context,
+unique_ptr<LocalTableFunctionState> ReadNewickTableFunction::InitLocal(ExecutionContext &context,
                                                                         TableFunctionInitInput &input,
                                                                         GlobalTableFunctionState *global_state) {
 	return duckdb::make_uniq<LocalState>();
 }
 
-void ParseNewickTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+void ReadNewickTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &bind_data = data_p.bind_data->Cast<Data>();
 	auto &global_state = data_p.global_state->Cast<GlobalState>();
 	auto &local_state = data_p.local_state->Cast<LocalState>();
@@ -262,13 +262,13 @@ void ParseNewickTableFunction::Execute(ClientContext &context, TableFunctionInpu
 	output.SetCardinality(output_idx);
 }
 
-TableFunction ParseNewickTableFunction::GetFunction() {
-	auto tf = TableFunction("parse_newick", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
+TableFunction ReadNewickTableFunction::GetFunction() {
+	auto tf = TableFunction("read_newick", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
 	return tf;
 }
 
-void ParseNewickTableFunction::Register(ExtensionLoader &loader) {
+void ReadNewickTableFunction::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetFunction());
 }
 
