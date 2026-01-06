@@ -52,8 +52,9 @@ public:
 	std::string FetchFasta(const std::string &accession);
 	std::string FetchFeatureTable(const std::string &accession);
 
-	// Datasets API (assembly metadata only, JSON response)
-	std::string FetchAssemblyReport(const std::string &accession);
+	// Datasets API methods
+	std::string FetchAssemblyReport(const std::string &accession); // JSON metadata
+	std::string FetchAssemblyFasta(const std::string &accession);  // ZIP download, extract FASTA
 
 	// Parsing methods - delegate to NCBIParser
 	static GenBankMetadata ParseGenBankXML(const std::string &xml) {
@@ -78,6 +79,9 @@ private:
 	// Rate limiting (thread-safe)
 	void RespectRateLimit();
 	double GetRateLimit() const;
+
+	// ZIP extraction helper
+	static std::string ExtractFromZip(const std::string &zip_data, const std::string &pattern);
 };
 
 } // namespace miint

@@ -40,8 +40,18 @@ bool ReadNCBIFastaTableFunction::GlobalState::FetchNextAccession() {
 	current_accession = accessions[next_accession_idx];
 	next_accession_idx++;
 
-	// Fetch FASTA from NCBI
-	std::string fasta_text = client->FetchFasta(current_accession);
+	std::string fasta_text;
+
+	// Check accession type
+	auto acc_type = miint::NCBIParser::DetectAccessionType(current_accession);
+
+	if (acc_type == miint::AccessionType::ASSEMBLY) {
+		// Fetch from Datasets API (returns ZIP with FASTA)
+		fasta_text = client->FetchAssemblyFasta(current_accession);
+	} else {
+		// Fetch from E-utilities (existing behavior)
+		fasta_text = client->FetchFasta(current_accession);
+	}
 
 	// Check for empty response (indicates invalid accession or no data)
 	if (fasta_text.empty()) {

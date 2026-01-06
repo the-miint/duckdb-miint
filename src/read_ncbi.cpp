@@ -74,10 +74,18 @@ unique_ptr<FunctionData> ReadNCBITableFunction::Bind(ClientContext &context, Tab
 		throw InvalidInputException("read_ncbi: at least one accession must be provided");
 	}
 
-	// Validate that no accession is empty
+	// Validate that no accession is empty or an assembly accession
 	for (const auto &acc : accessions) {
 		if (acc.empty()) {
 			throw InvalidInputException("read_ncbi: accession cannot be empty");
+		}
+		if (miint::NCBIParser::IsAssemblyAccession(acc)) {
+			throw InvalidInputException(
+			    "read_ncbi: Assembly accession '%s' is not supported. "
+			    "Assembly accessions (GCF_/GCA_) represent collections of sequences. "
+			    "Use read_ncbi_fasta('%s') to retrieve sequences from this assembly, "
+			    "or find the component RefSeq accessions (e.g., NC_XXXXXX.X) for metadata.",
+			    acc, acc);
 		}
 	}
 

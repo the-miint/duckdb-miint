@@ -19,6 +19,12 @@ SELECT * FROM read_ncbi([]);
 ----
 at least one accession must be provided
 
+# Test error: assembly accession (GCF_/GCA_) not supported
+statement error
+SELECT * FROM read_ncbi('GCF_000005845.2');
+----
+Assembly accession
+
 # Test schema
 query TTTTTTTT
 DESCRIBE SELECT * FROM read_ncbi('NC_001416.1');

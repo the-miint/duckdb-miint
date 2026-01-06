@@ -95,3 +95,33 @@ query I
 SELECT COUNT(*) FROM read_ncbi_fasta(['NC_001416.1', 'NC_001422.1']);
 ----
 2
+
+# Test assembly accession support (GCF_000005845.2 = E. coli O157:H7 Sakai)
+# This assembly has a chromosome (NC_002695.2) and plasmids
+# Note: This test downloads a ~5.5MB assembly ZIP and may take a few seconds
+query I
+SELECT COUNT(*) > 0 AS has_sequences
+FROM read_ncbi_fasta('GCF_000005845.2');
+----
+true
+
+# Test that assembly returns multiple sequences (chromosome + plasmids)
+query I
+SELECT COUNT(*) >= 2 AS has_multiple_sequences
+FROM read_ncbi_fasta('GCF_000005845.2');
+----
+true
+
+# Test that assembly sequences have content
+query I
+SELECT MIN(LENGTH(sequence1)) > 1000 AS has_content
+FROM read_ncbi_fasta('GCF_000005845.2');
+----
+true
+
+# Test that read_ids are populated for assembly sequences
+query I
+SELECT COUNT(*) = COUNT(read_id) AS all_have_ids
+FROM read_ncbi_fasta('GCF_000005845.2');
+----
+true
