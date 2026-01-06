@@ -67,7 +67,7 @@ GROUP BY sample_id;
   - [read_ncbi_fasta](#read_ncbi_fastaaccession-api_key-include_filepathfalse)
   - [read_ncbi_annotation](#read_ncbi_annotationaccession-api_key-include_filepathfalse)
   - [read_jplace](#read_jplacepath)
-  - [parse_newick](#parse_newickfilename-include_filepathfalse)
+  - [read_newick](#read_newickfilename-include_filepathfalse)
   - [align_minimap2](#align_minimap2query_table-subject_table-options)
   - [align_bowtie2](#align_bowtie2query_table-subject_table-options)
   - [SAM Flag Functions](#sam-flag-functions)
@@ -862,7 +862,7 @@ JOIN edge_taxa e ON p.edge_num = e.edge_num;
 
 **Implementation note:** Implemented as a DuckDB macro using `read_json` with JSON path extraction.
 
-### `parse_newick(filename, [include_filepath=false])`
+### `read_newick(filename, [include_filepath=false])`
 
 Read Newick phylogenetic tree files and return a table with one row per node.
 
@@ -894,46 +894,46 @@ Read Newick phylogenetic tree files and return a table with one row per node.
 **Examples:**
 ```sql
 -- Read a single Newick file
-SELECT * FROM parse_newick('tree.nwk');
+SELECT * FROM read_newick('tree.nwk');
 
 -- Get tip names only
-SELECT name FROM parse_newick('tree.nwk')
+SELECT name FROM read_newick('tree.nwk')
 WHERE is_tip = true;
 
 -- Count nodes in tree
 SELECT COUNT(*) AS total_nodes,
        COUNT(*) FILTER (WHERE is_tip) AS tips,
        COUNT(*) FILTER (WHERE NOT is_tip) AS internal_nodes
-FROM parse_newick('tree.nwk');
+FROM read_newick('tree.nwk');
 
 -- Read tree with edge IDs (jplace format)
 SELECT name, edge_id, branch_length
-FROM parse_newick('reference.nwk')
+FROM read_newick('reference.nwk')
 WHERE edge_id IS NOT NULL;
 
 -- Read multiple trees with glob pattern
 SELECT filepath, COUNT(*) AS num_nodes
-FROM parse_newick('trees/*.nwk', include_filepath=true)
+FROM read_newick('trees/*.nwk', include_filepath=true)
 GROUP BY filepath;
 
 -- Read gzip-compressed tree
-SELECT * FROM parse_newick('tree.nwk.gz');
+SELECT * FROM read_newick('tree.nwk.gz');
 
 -- Read from stdin
-SELECT * FROM parse_newick('/dev/stdin');
+SELECT * FROM read_newick('/dev/stdin');
 
 -- Find the root node
-SELECT * FROM parse_newick('tree.nwk')
+SELECT * FROM read_newick('tree.nwk')
 WHERE parent_index IS NULL;
 
 -- Calculate tree depth (distance from root)
 WITH RECURSIVE node_depth AS (
     SELECT node_index, name, parent_index, 0 AS depth
-    FROM parse_newick('tree.nwk')
+    FROM read_newick('tree.nwk')
     WHERE parent_index IS NULL
     UNION ALL
     SELECT t.node_index, t.name, t.parent_index, nd.depth + 1
-    FROM parse_newick('tree.nwk') t
+    FROM read_newick('tree.nwk') t
     JOIN node_depth nd ON t.parent_index = nd.node_index
 )
 SELECT name, depth FROM node_depth
@@ -945,12 +945,12 @@ WHERE is_tip ORDER BY depth DESC;
 - User must know the format of their stdin data
 
 **Roundtrip with COPY FORMAT NEWICK:**
-Trees can be read with `parse_newick`, modified via SQL, and written back to Newick format:
+Trees can be read with `read_newick`, modified via SQL, and written back to Newick format:
 ```sql
 -- Read, filter to subtree, write back
 COPY (
     SELECT node_index, name, branch_length, edge_id, parent_index
-    FROM parse_newick('input.nwk')
+    FROM read_newick('input.nwk')
     -- Your filtering/modification logic here
 ) TO 'output.nwk' (FORMAT NEWICK);
 ```
@@ -2104,30 +2104,30 @@ Write query results to Newick phylogenetic tree format. Reconstructs a tree from
 **Examples:**
 ```sql
 -- Basic roundtrip: read and write tree
-COPY (SELECT * FROM parse_newick('input.nwk'))
+COPY (SELECT * FROM read_newick('input.nwk'))
 TO 'output.nwk' (FORMAT NEWICK);
 
 -- Write compressed tree
-COPY (SELECT * FROM parse_newick('input.nwk'))
+COPY (SELECT * FROM read_newick('input.nwk'))
 TO 'output.nwk.gz' (FORMAT NEWICK);
 
 -- Explicit compression parameter
-COPY (SELECT * FROM parse_newick('input.nwk'))
+COPY (SELECT * FROM read_newick('input.nwk'))
 TO 'output.nwk' (FORMAT NEWICK, COMPRESSION 'gzip');
 
 -- Include edge IDs (for jplace compatibility)
-COPY (SELECT * FROM parse_newick('reference.nwk'))
+COPY (SELECT * FROM read_newick('reference.nwk'))
 TO 'with_edges.nwk' (FORMAT NEWICK, EDGE_IDS true);
 
 -- Exclude edge IDs even if present in input
-COPY (SELECT * FROM parse_newick('reference.nwk'))
+COPY (SELECT * FROM read_newick('reference.nwk'))
 TO 'no_edges.nwk' (FORMAT NEWICK, EDGE_IDS false);
 
 -- Modify tree before writing (e.g., scale branch lengths)
 COPY (
     SELECT node_index, name, branch_length * 2.0 AS branch_length,
            edge_id, parent_index
-    FROM parse_newick('input.nwk')
+    FROM read_newick('input.nwk')
 ) TO 'scaled.nwk' (FORMAT NEWICK);
 
 -- Create tree from scratch
@@ -2154,7 +2154,7 @@ SELECT * FROM (VALUES
 ) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
 
 -- Write tree with placements inserted
-COPY (SELECT * FROM parse_newick('reference.nwk'))
+COPY (SELECT * FROM read_newick('reference.nwk'))
 TO 'with_placements.nwk' (FORMAT NEWICK, PLACEMENTS 'placements');
 
 -- Combine with read_jplace for seamless jplace to newick workflow
@@ -2162,7 +2162,7 @@ CREATE TABLE jplace_placements AS
 SELECT fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length
 FROM read_jplace('placements.jplace');
 
-COPY (SELECT * FROM parse_newick('reference.nwk'))
+COPY (SELECT * FROM read_newick('reference.nwk'))
 TO 'resolved_tree.nwk' (FORMAT NEWICK, PLACEMENTS 'jplace_placements');
 ```
 
@@ -2185,14 +2185,14 @@ TO 'resolved_tree.nwk' (FORMAT NEWICK, PLACEMENTS 'jplace_placements');
 - "distal_length exceeds edge length" - distal_length is larger than the edge's branch_length
 
 **Roundtrip guarantee:**
-Trees written with `COPY FORMAT NEWICK` can be read back with `parse_newick` and will produce equivalent structure:
+Trees written with `COPY FORMAT NEWICK` can be read back with `read_newick` and will produce equivalent structure:
 ```sql
 -- Write tree
-COPY (SELECT * FROM parse_newick('original.nwk'))
+COPY (SELECT * FROM read_newick('original.nwk'))
 TO 'copy.nwk' (FORMAT NEWICK);
 
 -- Read back - should have same structure
-SELECT * FROM parse_newick('copy.nwk');
+SELECT * FROM read_newick('copy.nwk');
 ```
 
 **Newick Format Output:**
