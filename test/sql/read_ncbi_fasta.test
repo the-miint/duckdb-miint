@@ -5,7 +5,7 @@
 
 require miint
 
-require httpfs
+# httpfs is auto-loaded by the miint extension
 
 # Test error: empty accession
 statement error
@@ -21,7 +21,7 @@ at least one accession must be provided
 
 # Test schema - fetch Lambda phage genome (small, stable)
 # NC_001416.1 is Enterobacteria phage lambda, complete genome (48502 bp)
-query TTTTTTT
+query IIIIII
 DESCRIBE SELECT * FROM read_ncbi_fasta('NC_001416.1');
 ----
 sequence_index	BIGINT	YES	NULL	NULL	NULL
@@ -33,7 +33,7 @@ qual1	UTINYINT[]	YES	NULL	NULL	NULL
 qual2	UTINYINT[]	YES	NULL	NULL	NULL
 
 # Test schema with include_filepath
-query TTTTTTTT
+query IIIIII
 DESCRIBE SELECT * FROM read_ncbi_fasta('NC_001416.1', include_filepath=true);
 ----
 sequence_index	BIGINT	YES	NULL	NULL	NULL

@@ -5,7 +5,7 @@
 
 require miint
 
-require httpfs
+# httpfs is auto-loaded by the miint extension
 
 # Test error: empty accession
 statement error
@@ -20,7 +20,7 @@ SELECT * FROM read_ncbi_annotation([]);
 at least one accession must be provided
 
 # Test schema
-query TTTTTTTTT
+query IIIIII
 DESCRIBE SELECT * FROM read_ncbi_annotation('NC_001416.1');
 ----
 seqid	VARCHAR	YES	NULL	NULL	NULL
@@ -34,7 +34,7 @@ phase	INTEGER	YES	NULL	NULL	NULL
 attributes	MAP(VARCHAR, VARCHAR)	YES	NULL	NULL	NULL
 
 # Test schema with include_filepath
-query TTTTTTTTTT
+query IIIIII
 DESCRIBE SELECT * FROM read_ncbi_annotation('NC_001416.1', include_filepath=true);
 ----
 seqid	VARCHAR	YES	NULL	NULL	NULL
