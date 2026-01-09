@@ -539,4 +539,77 @@ const std::string &Minimap2Aligner::get_reference_name(int32_t rid) const {
 	return subject_names_[rid];
 }
 
+void Minimap2Aligner::load_index(const std::string &index_path) {
+	// Use mm_idx_reader API to load index (handles both single and multi-part indexes)
+	mm_idx_reader_t *reader = mm_idx_reader_open(index_path.c_str(), iopt_.get(), nullptr);
+	if (!reader) {
+		throw std::runtime_error("Cannot open index file: " + index_path);
+	}
+
+	// Read the index (n_threads=1 for loading)
+	mm_idx_t *idx = mm_idx_reader_read(reader, 1);
+	mm_idx_reader_close(reader);
+
+	if (!idx) {
+		throw std::runtime_error("Failed to load index from: " + index_path);
+	}
+
+	// Extract reference names from loaded index
+	subject_names_.clear();
+	subject_names_.reserve(idx->n_seq);
+	for (uint32_t i = 0; i < idx->n_seq; i++) {
+		if (!idx->seq[i].name) {
+			// Index is malformed - sequences must have names
+			mm_idx_destroy(idx);
+			throw std::runtime_error("Index contains unnamed sequence at position " + std::to_string(i) +
+			                         " in file: " + index_path);
+		}
+		subject_names_.push_back(std::string(idx->seq[i].name));
+	}
+
+	// Store index and update mapping options
+	index_.reset(idx);
+	mm_mapopt_update(mopt_.get(), index_.get());
+}
+
+void Minimap2Aligner::save_index(const std::string &output_path) const {
+	// Validate index exists
+	if (!index_) {
+		throw std::runtime_error("No index to save. Build or load an index first.");
+	}
+
+	// Open output file
+	FILE *fp = fopen(output_path.c_str(), "wb");
+	if (!fp) {
+		throw std::runtime_error("Cannot create index file: " + output_path);
+	}
+
+	// Write index using minimap2 API with proper error handling
+	try {
+		mm_idx_dump(fp, index_.get());
+
+		// Check for write errors after dump
+		if (ferror(fp)) {
+			fclose(fp); // Clean up before throwing
+			throw std::runtime_error("Write error while saving index to: " + output_path);
+		}
+
+		// Close and check for errors
+		if (fclose(fp) != 0) {
+			throw std::runtime_error("Error closing index file: " + output_path);
+		}
+	} catch (...) {
+		// Ensure file handle is closed on any exception
+		fclose(fp);
+		throw;
+	}
+}
+
+bool Minimap2Aligner::is_index_file(const std::string &path) {
+	// Use minimap2's built-in check function
+	// Returns file size if valid index, 0 if not
+	int64_t file_size = mm_idx_is_idx(path.c_str());
+	return file_size > 0;
+}
+
 } // namespace miint

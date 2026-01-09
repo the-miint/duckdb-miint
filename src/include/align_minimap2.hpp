@@ -19,11 +19,17 @@ class AlignMinimap2TableFunction {
 public:
 	struct Data : public TableFunctionData {
 		std::string query_table;
-		std::string subject_table;
+		std::string subject_table;           // OPTIONAL (either this or index_path required)
+		std::string index_path;              // OPTIONAL: path to .mmi file
 		bool per_subject_database;
 		miint::Minimap2Config config;
 		SequenceTableSchema query_schema;
-		std::vector<miint::AlignmentSubject> subjects; // Pre-loaded at bind time
+		std::vector<miint::AlignmentSubject> subjects; // Pre-loaded at bind time (empty if using index_path)
+
+		// Helper to check if using pre-built index
+		bool using_prebuilt_index() const {
+			return !index_path.empty();
+		}
 
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;

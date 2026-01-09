@@ -21,7 +21,7 @@ CREATE TABLE queries AS SELECT * FROM (VALUES
 # Test basic alignment (using max_secondary=0 to get only primary alignments)
 query IIII
 SELECT read_id, reference, position, mapq >= 0 as has_mapq
-FROM align_minimap2('queries', 'subjects', max_secondary=0)
+FROM align_minimap2('queries', subject_table='subjects', max_secondary=0)
 ORDER BY read_id, reference;
 ----
 query1	ref1	1	true
@@ -30,7 +30,7 @@ query2	ref2	1	true
 # Test CIGAR string is generated
 query II
 SELECT read_id, cigar != '*' AND cigar != '' as has_cigar
-FROM align_minimap2('queries', 'subjects', max_secondary=0)
+FROM align_minimap2('queries', subject_table='subjects', max_secondary=0)
 ORDER BY read_id;
 ----
 query1	true
@@ -39,7 +39,7 @@ query2	true
 # Test with EQX mode (default is on, so CIGAR should have = for matches)
 query II
 SELECT read_id, cigar LIKE '%=%' as has_eq_op
-FROM align_minimap2('queries', 'subjects', max_secondary=0)
+FROM align_minimap2('queries', subject_table='subjects', max_secondary=0)
 ORDER BY read_id;
 ----
 query1	true
@@ -48,7 +48,7 @@ query2	true
 # Test alignment score tag
 query II
 SELECT read_id, tag_as > 0 as has_score
-FROM align_minimap2('queries', 'subjects', max_secondary=0)
+FROM align_minimap2('queries', subject_table='subjects', max_secondary=0)
 ORDER BY read_id;
 ----
 query1	true
@@ -57,7 +57,7 @@ query2	true
 # Test stop_position is computed
 query III
 SELECT read_id, position, stop_position >= position as stop_after_start
-FROM align_minimap2('queries', 'subjects', max_secondary=0)
+FROM align_minimap2('queries', subject_table='subjects', max_secondary=0)
 ORDER BY read_id;
 ----
 query1	1	true
@@ -66,7 +66,7 @@ query2	1	true
 # Test with different preset (map-ont uses smaller k, so still aligns)
 query II
 SELECT read_id, reference
-FROM align_minimap2('queries', 'subjects', preset='map-ont', max_secondary=0)
+FROM align_minimap2('queries', subject_table='subjects', preset='map-ont', max_secondary=0)
 ORDER BY read_id;
 ----
 query1	ref1
@@ -81,7 +81,7 @@ CREATE VIEW subject_view AS SELECT * FROM subjects;
 
 query II
 SELECT read_id, reference
-FROM align_minimap2('query_view', 'subject_view', max_secondary=0)
+FROM align_minimap2('query_view', subject_table='subject_view', max_secondary=0)
 ORDER BY read_id;
 ----
 query1	ref1
@@ -104,19 +104,19 @@ CREATE TABLE single_query AS SELECT * FROM (VALUES
 # With max_secondary=0, should get at most 1 alignment
 query I
 SELECT COUNT(*) <= 1 as limited
-FROM align_minimap2('single_query', 'multi_subjects', max_secondary=0);
+FROM align_minimap2('single_query', subject_table='multi_subjects', max_secondary=0);
 ----
 true
 
 # Test error: non-existent query table
 statement error
-SELECT * FROM align_minimap2('nonexistent_table', 'subjects');
+SELECT * FROM align_minimap2('nonexistent_table', subject_table='subjects');
 ----
 does not exist
 
 # Test error: non-existent subject table
 statement error
-SELECT * FROM align_minimap2('queries', 'nonexistent_table');
+SELECT * FROM align_minimap2('queries', subject_table='nonexistent_table');
 ----
 does not exist
 
@@ -127,7 +127,7 @@ CREATE TABLE paired_subjects AS SELECT * FROM (VALUES
 ) AS t(read_id, sequence1, sequence2);
 
 statement error
-SELECT * FROM align_minimap2('queries', 'paired_subjects');
+SELECT * FROM align_minimap2('queries', subject_table='paired_subjects');
 ----
 cannot be paired-end
 
@@ -168,7 +168,7 @@ CREATE TABLE fastx_subjects AS SELECT * FROM (VALUES
 # This should work even though fastx_queries has sequence2/qual1/qual2 columns with NULLs
 query II
 SELECT read_id, reference
-FROM align_minimap2('fastx_queries', 'fastx_subjects', max_secondary=0, k := 5)
+FROM align_minimap2('fastx_queries', subject_table='fastx_subjects', max_secondary=0, k := 5)
 ORDER BY read_id;
 ----
 
@@ -177,3 +177,118 @@ DROP TABLE fastx_queries;
 
 statement ok
 DROP TABLE fastx_subjects;
+
+# Test: Save minimap2 index and load it back
+statement ok
+CREATE TABLE index_test_subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('ref2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCAAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAA')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE index_test_queries AS SELECT * FROM (VALUES
+    ('query1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('query2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(read_id, sequence1);
+
+# Save index to file
+query III
+SELECT success, num_subjects > 0 as has_subjects, index_path LIKE '%test_index.mmi%' as path_matches
+FROM save_minimap2_index('index_test_subjects', 'test_index.mmi', k := 5);
+----
+true	true	true
+
+# Use saved index for alignment
+query IIII
+SELECT read_id, reference, position, mapq >= 0 as has_mapq
+FROM align_minimap2('index_test_queries', index_path='test_index.mmi', max_secondary=0)
+ORDER BY read_id, reference;
+----
+query1	ref1	1	true
+query2	ref2	1	true
+
+# Test: Compare results between table-based and index-based alignment
+query IIII
+SELECT read_id, reference, position, LENGTH(cigar) > 0 as has_cigar
+FROM align_minimap2('index_test_queries', subject_table='index_test_subjects', max_secondary=0, k := 5)
+ORDER BY read_id;
+----
+query1	ref1	1	true
+query2	ref2	1	true
+
+# NOTE: Index files (test_index.mmi, test_index2.mmi, invalid.txt)
+# are left in working directory - DuckDB test framework will clean them up
+
+# Test error: both subject_table and index_path provided
+statement error
+SELECT * FROM align_minimap2('index_test_queries', subject_table='index_test_subjects', index_path='test_index.mmi');
+----
+Cannot specify both subject_table and index_path
+
+# Test error: neither subject_table nor index_path provided
+statement error
+SELECT * FROM align_minimap2('index_test_queries');
+----
+requires either subject_table or index_path
+
+# Test error: index file doesn't exist
+statement error
+SELECT * FROM align_minimap2('index_test_queries', index_path='nonexistent.mmi');
+----
+Index file does not exist
+
+# Test error: file is not a valid index
+statement ok
+CREATE TABLE invalid_index_file AS SELECT 'not an index' as content;
+
+statement ok
+COPY invalid_index_file TO 'invalid.txt';
+
+statement error
+SELECT * FROM align_minimap2('index_test_queries', index_path='invalid.txt');
+----
+not a valid minimap2 index
+
+# Test error: per_subject_database incompatible with index_path
+statement error
+SELECT * FROM align_minimap2('index_test_queries', index_path='test_index.mmi', per_subject_database=true);
+----
+per_subject_database mode is incompatible with index_path
+
+# Test: save_minimap2_index with different preset
+query III
+SELECT success, num_subjects, index_path LIKE '%test_index2.mmi%' as path_matches
+FROM save_minimap2_index('index_test_subjects', 'test_index2.mmi', preset='map-ont', k := 8);
+----
+true	2	true
+
+# Test: Use index saved with different preset
+query II
+SELECT read_id, reference
+FROM align_minimap2('index_test_queries', index_path='test_index2.mmi', max_secondary=0)
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# Test error: save_minimap2_index with empty subject table
+statement ok
+CREATE TABLE empty_subjects AS SELECT * FROM (VALUES ('empty', 'A')) AS t(read_id, sequence1) WHERE FALSE;
+
+statement error
+SELECT * FROM save_minimap2_index('empty_subjects', 'empty_index.mmi');
+----
+is empty
+
+# Clean up
+statement ok
+DROP TABLE index_test_subjects;
+
+statement ok
+DROP TABLE index_test_queries;
+
+statement ok
+DROP TABLE invalid_index_file;
+
+statement ok
+DROP TABLE empty_subjects;

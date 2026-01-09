@@ -64,6 +64,15 @@ public:
 	// Build index from a single subject (for per_subject_database mode)
 	void build_single_index(const AlignmentSubject &subject);
 
+	// Load index from .mmi file
+	void load_index(const std::string &index_path);
+
+	// Save current index to .mmi file
+	void save_index(const std::string &output_path) const;
+
+	// Check if file is a valid minimap2 index
+	static bool is_index_file(const std::string &path);
+
 	// Align queries against current index, append results to batch
 	// Uses SequenceRecordBatch which matches read_fastx output schema
 	void align(const SequenceRecordBatch &queries, SAMRecordBatch &output);

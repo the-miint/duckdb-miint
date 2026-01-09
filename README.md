@@ -68,7 +68,8 @@ GROUP BY sample_id;
   - [read_ncbi_annotation](#read_ncbi_annotationaccession-api_key-include_filepathfalse)
   - [read_jplace](#read_jplacepath)
   - [read_newick](#read_newickfilename-include_filepathfalse)
-  - [align_minimap2](#align_minimap2query_table-subject_table-options)
+  - [align_minimap2](#align_minimap2query_table-subject_tablenull-index_pathnull-options)
+  - [save_minimap2_index](#save_minimap2_indexsubject_table-output_path-options)
   - [align_bowtie2](#align_bowtie2query_table-subject_table-options)
   - [SAM Flag Functions](#sam-flag-functions)
   - [alignment_seq_identity](#alignment_seq_identitycigar-nm-md-type)
@@ -962,14 +963,17 @@ COPY (
 - Semicolons terminate the tree: `(A,B);`
 - Edge IDs in braces are an extension for jplace: `A:0.1{0}` has edge_id 0
 
-### `align_minimap2(query_table, subject_table, [options])`
+### `align_minimap2(query_table, [subject_table=NULL], [index_path=NULL], [options])`
 
 Align query sequences to subject sequences using minimap2. This function enables sequence alignment directly within SQL by reading sequences from DuckDB tables/views and returning alignments in the same format as `read_alignments`.
 
+**Performance:** For large reference databases (e.g., human genome), use pre-built indexes via `index_path` for 10-30x faster alignment. Build indexes once with `save_minimap2_index`, then reuse them across multiple queries.
+
 **Parameters:**
 - `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2)
-- `subject_table` (VARCHAR): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent)
-- `per_subject_database` (BOOLEAN, default: false): Build separate index for each subject sequence
+- `subject_table` (VARCHAR, optional): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent). **Either `subject_table` OR `index_path` must be provided, but not both.**
+- `index_path` (VARCHAR, optional): Path to pre-built minimap2 index file (.mmi). Use `save_minimap2_index()` to create index files. **Either `subject_table` OR `index_path` must be provided, but not both.**
+- `per_subject_database` (BOOLEAN, default: false): Build separate index for each subject sequence (only valid with `subject_table`, not with `index_path`)
   - `false` (default): Build single index from all subjects, align all queries once (efficient for many subjects)
   - `true`: Build index per subject, align all queries against each (useful for per-genome analysis)
 - `preset` (VARCHAR, default: 'sr'): Minimap2 preset
@@ -978,8 +982,8 @@ Align query sequences to subject sequences using minimap2. This function enables
   - `'map-pb'`: PacBio reads, k=19
   - Other minimap2 presets also supported
 - `max_secondary` (INTEGER, default: 5): Maximum secondary alignments to report per query. Set to 0 for primary alignments only
-- `k` (INTEGER, optional): K-mer size (overrides preset default if specified)
-- `w` (INTEGER, optional): Minimizer window size (overrides preset default if specified)
+- `k` (INTEGER, optional): K-mer size (overrides preset default if specified). **Warning:** Ignored when using `index_path` (k-mer size is baked into the pre-built index)
+- `w` (INTEGER, optional): Minimizer window size (overrides preset default if specified). **Warning:** Ignored when using `index_path` (window size is baked into the pre-built index)
 - `eqx` (BOOLEAN, default: true): Use =/X CIGAR operators instead of M
 
 **Output schema:**
@@ -1019,20 +1023,41 @@ Returns the same schema as `read_alignments` (21 columns):
 CREATE TABLE subjects AS SELECT * FROM read_fastx('references.fasta');
 CREATE TABLE queries AS SELECT * FROM read_fastx('reads.fastq');
 
--- Basic alignment (using short-read preset)
-SELECT * FROM align_minimap2('queries', 'subjects');
+-- Basic alignment using subject_table (builds index on-the-fly)
+SELECT * FROM align_minimap2('queries', subject_table='subjects');
 
 -- Get only primary alignments
 SELECT read_id, reference, position, mapq, cigar
-FROM align_minimap2('queries', 'subjects', max_secondary=0)
+FROM align_minimap2('queries', subject_table='subjects', max_secondary=0)
 ORDER BY read_id;
 
 -- Use Oxford Nanopore preset for long reads
-SELECT * FROM align_minimap2('queries', 'subjects', preset='map-ont');
+SELECT * FROM align_minimap2('queries', subject_table='subjects', preset='map-ont');
+
+-- === Using Pre-built Indexes (Recommended for large references) ===
+
+-- Step 1: Build and save index once (see save_minimap2_index for details)
+SELECT * FROM save_minimap2_index('subjects', 'references.mmi', preset='sr');
+
+-- Step 2: Use pre-built index for fast alignment (10-30x faster for large references)
+SELECT * FROM align_minimap2('queries', index_path='references.mmi', max_secondary=0);
+
+-- Align different query sets against the same index
+CREATE TABLE queries_batch1 AS SELECT * FROM read_fastx('batch1.fastq');
+CREATE TABLE queries_batch2 AS SELECT * FROM read_fastx('batch2.fastq');
+
+SELECT * FROM align_minimap2('queries_batch1', index_path='references.mmi');
+SELECT * FROM align_minimap2('queries_batch2', index_path='references.mmi');
+
+-- Pre-built index with different preset
+SELECT * FROM save_minimap2_index('subjects', 'references_ont.mmi', preset='map-ont');
+SELECT * FROM align_minimap2('long_reads', index_path='references_ont.mmi');
+
+-- === Advanced Usage ===
 
 -- Filter by mapping quality and identity
 SELECT read_id, reference, position, alignment_seq_identity(cigar, tag_nm, tag_md) AS identity
-FROM align_minimap2('queries', 'subjects', max_secondary=0)
+FROM align_minimap2('queries', subject_table='subjects', max_secondary=0)
 WHERE mapq >= 30
   AND alignment_seq_identity(cigar, tag_nm, tag_md) > 0.95;
 
@@ -1041,46 +1066,153 @@ CREATE VIEW filtered_queries AS
     SELECT * FROM read_fastx('reads.fastq')
     WHERE LENGTH(sequence1) >= 50;
 
-SELECT * FROM align_minimap2('filtered_queries', 'subjects', max_secondary=0);
+SELECT * FROM align_minimap2('filtered_queries', subject_table='subjects', max_secondary=0);
 
 -- Align all queries against each subject separately (per-subject mode)
 SELECT reference, COUNT(*) AS aligned_reads
-FROM align_minimap2('queries', 'subjects', per_subject_database=true, max_secondary=0)
+FROM align_minimap2('queries', subject_table='subjects', per_subject_database=true, max_secondary=0)
 GROUP BY reference;
 
 -- Export alignments to SAM format
 CREATE TABLE refs AS SELECT read_id AS name, LENGTH(sequence1) AS length FROM subjects;
 COPY (
-    SELECT * FROM align_minimap2('queries', 'subjects', max_secondary=0)
+    SELECT * FROM align_minimap2('queries', subject_table='subjects', max_secondary=0)
 ) TO 'alignments.sam' (FORMAT SAM, REFERENCE_LENGTHS 'refs');
 
 -- Calculate coverage per reference
 SELECT reference,
        compress_intervals(position, stop_position) AS coverage_regions,
        SUM(stop_position - position + 1) AS total_aligned_bases
-FROM align_minimap2('queries', 'subjects', max_secondary=0)
+FROM align_minimap2('queries', subject_table='subjects', max_secondary=0)
 GROUP BY reference;
 
 -- Paired-end alignment
 CREATE TABLE paired_queries AS SELECT * FROM read_fastx('R1.fastq', sequence2='R2.fastq');
-SELECT * FROM align_minimap2('paired_queries', 'subjects', max_secondary=0);
+SELECT * FROM align_minimap2('paired_queries', subject_table='subjects', max_secondary=0);
 ```
 
 **Error handling:**
-- Error if query_table or subject_table does not exist
+- Error if query_table does not exist
+- Error if neither `subject_table` nor `index_path` is provided
+- Error if both `subject_table` and `index_path` are provided
+- Error if `index_path` file does not exist or is not a valid minimap2 index
 - Error if subject_table contains paired-end data (sequence2 not NULL)
 - Error if tables lack required columns (read_id, sequence1)
 - Error if preset is unknown to minimap2
+- Error if `per_subject_database=true` is used with `index_path` (incompatible modes)
+- Warning if `k` or `w` parameters are specified with `index_path` (these values are ignored)
 
 **Performance notes:**
+- **Pre-built indexes provide 10-30x faster alignment** for large reference databases
+- Use `save_minimap2_index()` to build indexes once, then reuse them across multiple query sets
+- Index files (.mmi) store k-mer size and window size, so `k` and `w` parameters are ignored when using `index_path`
 - For large reference sets, the default mode (single index) is most efficient
 - The `per_subject_database=true` mode rebuilds the index for each subject, which is slower but useful for specific analyses
 - Query sequences are streamed in batches of 1024 to limit memory usage
 - Secondary alignments can significantly increase output size; use `max_secondary=0` for primary-only results
 
 **Limitations:**
-- Subject sequences must fit in memory (loaded at bind time for indexing)
+- Subject sequences must fit in memory (loaded at bind time for indexing when using `subject_table`)
 - No support for reading sequences directly from files (use tables/views from `read_fastx`)
+
+### `save_minimap2_index(subject_table, output_path, [options])`
+
+Build and save a minimap2 index to disk for reuse. This provides 10-30x performance improvement when aligning multiple query sets against the same large reference database.
+
+**Use case:** Build indexes once for large reference databases (e.g., WoLr2 phylogenetic markers, RefSeq genomes, custom OGU databases), then use them repeatedly with `align_minimap2(..., index_path='file.mmi')` instead of rebuilding the index each time.
+
+**Parameters:**
+- `subject_table` (VARCHAR): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent)
+- `output_path` (VARCHAR): Path where the index file (.mmi) will be saved
+- `preset` (VARCHAR, default: 'sr'): Minimap2 preset (same options as `align_minimap2`)
+- `k` (INTEGER, optional): K-mer size (overrides preset default if specified)
+- `w` (INTEGER, optional): Minimizer window size (overrides preset default if specified)
+- `eqx` (BOOLEAN, default: true): Use =/X CIGAR operators instead of M
+
+**Output schema:**
+- `success` (BOOLEAN): Always true if function completes successfully
+- `index_path` (VARCHAR): Path to the created index file
+- `num_subjects` (BIGINT): Number of subject sequences indexed
+
+**Behavior:**
+- Loads all subject sequences from the table
+- Builds minimap2 index in memory with specified parameters
+- Writes index to disk in .mmi format
+- Index file stores k-mer size, window size, and preset configuration
+- Returns a single row with success status and metadata
+
+**Examples:**
+```sql
+-- Create reference table from WoLr2 phylogenetic markers
+CREATE TABLE wolr2_refs AS SELECT * FROM read_fastx('WoLr2_db.fna');
+
+-- Build index for short reads (default preset)
+SELECT * FROM save_minimap2_index('wolr2_refs', 'wolr2.mmi');
+
+-- Build index with specific preset
+SELECT * FROM save_minimap2_index('wolr2_refs', 'wolr2_sr.mmi', preset='sr');
+SELECT * FROM save_minimap2_index('wolr2_refs', 'wolr2_ont.mmi', preset='map-ont');
+
+-- Build index with custom k-mer size
+SELECT * FROM save_minimap2_index('wolr2_refs', 'wolr2_k15.mmi', k=15);
+
+-- Check the result
+SELECT success, index_path, num_subjects
+FROM save_minimap2_index('wolr2_refs', 'my_index.mmi', preset='sr');
+-- Returns: true | /path/to/my_index.mmi | 10575
+
+-- Use the saved index for alignment (10-30x faster than rebuilding)
+CREATE TABLE metagenomic_reads AS SELECT * FROM read_fastx('metagenome.fastq');
+SELECT * FROM align_minimap2('metagenomic_reads', index_path='wolr2.mmi', max_secondary=0);
+
+-- Build indexes for different sequencing technologies
+CREATE TABLE refseq_genomes AS SELECT * FROM read_fastx('refseq/*.fna');
+SELECT * FROM save_minimap2_index('refseq_genomes', 'refseq_sr.mmi', preset='sr');
+SELECT * FROM save_minimap2_index('refseq_genomes', 'refseq_ont.mmi', preset='map-ont');
+SELECT * FROM save_minimap2_index('refseq_genomes', 'refseq_pb.mmi', preset='map-pb');
+
+-- Then use them as needed
+SELECT * FROM align_minimap2('illumina_metagenome', index_path='refseq_sr.mmi');
+SELECT * FROM align_minimap2('nanopore_metagenome', index_path='refseq_ont.mmi');
+SELECT * FROM align_minimap2('pacbio_metagenome', index_path='refseq_pb.mmi');
+
+-- Build index from bacterial genomes fetched from NCBI
+CREATE TABLE ecoli_genomes AS
+    SELECT * FROM read_ncbi_fasta(['NC_000913.3', 'NC_002695.2', 'NC_011751.1']);
+
+SELECT * FROM save_minimap2_index('ecoli_genomes', 'ecoli_strains.mmi', preset='sr');
+
+-- Works with views
+CREATE VIEW marker_genes AS
+    SELECT * FROM read_fastx('markers/*.fna')
+    WHERE LENGTH(sequence1) >= 500;
+
+SELECT * FROM save_minimap2_index('marker_genes', 'markers.mmi');
+```
+
+**Error handling:**
+- Error if subject_table does not exist
+- Error if subject_table contains paired-end data (sequence2 not NULL)
+- Error if subject_table is empty (no sequences to index)
+- Error if output_path cannot be written (permissions, disk space, invalid path)
+- Error if tables lack required columns (read_id, sequence1)
+
+**Performance notes:**
+- Building an index takes time proportional to the total reference size
+- Index files are typically 10-30% of the original FASTA size
+- Loading a pre-built index is 10-30x faster than building it from sequences
+- For workflows that align multiple query sets, build the index once and reuse it
+- Index files are portable across systems with the same minimap2 version
+
+**When to use pre-built indexes:**
+- **Large reference databases**: WoLr2, RefSeq bacterial genomes, custom marker gene databases
+- **Multiple metagenome samples**: When aligning different samples to the same reference database
+- **Production pipelines**: Build indexes during setup, use them in production runs
+- **Shared infrastructure**: Build indexes once, share them across users/jobs
+
+**When NOT to use pre-built indexes:**
+- **Small references**: For small reference sets (<10MB), on-the-fly indexing is fast enough
+- **One-time alignments**: If aligning only once, the index-building time won't be recovered
 
 ### `align_bowtie2(query_table, subject_table, [options])`
 

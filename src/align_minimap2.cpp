@@ -1,5 +1,6 @@
 #include "align_minimap2.hpp"
 #include "align_result_utils.hpp"
+#include "duckdb/common/printer.hpp"
 #include "duckdb/common/vector_size.hpp"
 
 namespace duckdb {
@@ -12,22 +13,51 @@ unique_ptr<FunctionData> AlignMinimap2TableFunction::Bind(ClientContext &context
                                                           vector<std::string> &names) {
 	auto data = make_uniq<Data>();
 
-	// Required positional parameters: query_table, subject_table
-	if (input.inputs.size() < 2) {
-		throw BinderException("align_minimap2 requires query_table and subject_table parameters");
+	// Required: query_table (first positional parameter)
+	if (input.inputs.size() < 1) {
+		throw BinderException("align_minimap2 requires query_table parameter");
 	}
 
 	data->query_table = input.inputs[0].ToString();
-	data->subject_table = input.inputs[1].ToString();
 
-	// Validate query and subject tables/views exist
+	// Parse subject_table named parameter
+	auto subject_param = input.named_parameters.find("subject_table");
+	if (subject_param != input.named_parameters.end() && !subject_param->second.IsNull()) {
+		data->subject_table = subject_param->second.ToString();
+	}
+
+	// Parse index_path named parameter
+	auto index_path_param = input.named_parameters.find("index_path");
+	if (index_path_param != input.named_parameters.end() && !index_path_param->second.IsNull()) {
+		data->index_path = index_path_param->second.ToString();
+	}
+
+	// VALIDATION: Exactly one of subject_table or index_path must be provided
+	bool has_subject = !data->subject_table.empty();
+	bool has_index = data->using_prebuilt_index();
+
+	if (!has_subject && !has_index) {
+		throw BinderException("align_minimap2 requires either subject_table or index_path parameter");
+	}
+	if (has_subject && has_index) {
+		throw BinderException(
+		    "align_minimap2: Cannot specify both subject_table and index_path. "
+		    "Use subject_table to build index from sequences, or index_path to load pre-built index.");
+	}
+
+	// Validate query table/view exists
 	data->query_schema = ValidateSequenceTableSchema(context, data->query_table, true /* allow_paired */);
-	ValidateSequenceTableSchema(context, data->subject_table, false /* allow_paired */);
 
 	// Parse optional named parameters
 	auto per_subject_param = input.named_parameters.find("per_subject_database");
 	if (per_subject_param != input.named_parameters.end() && !per_subject_param->second.IsNull()) {
 		data->per_subject_database = per_subject_param->second.GetValue<bool>();
+
+		// Validate per_subject_database incompatible with index_path
+		if (data->per_subject_database && data->using_prebuilt_index()) {
+			throw BinderException("per_subject_database mode is incompatible with index_path. "
+			                      "Pre-built indexes contain all subjects.");
+		}
 	}
 
 	auto preset_param = input.named_parameters.find("preset");
@@ -43,11 +73,23 @@ unique_ptr<FunctionData> AlignMinimap2TableFunction::Bind(ClientContext &context
 	auto k_param = input.named_parameters.find("k");
 	if (k_param != input.named_parameters.end() && !k_param->second.IsNull()) {
 		data->config.k = k_param->second.GetValue<int32_t>();
+
+		// WARNING: k ignored when using pre-built index
+		if (data->using_prebuilt_index()) {
+			Printer::Print("WARNING: Parameter 'k' is ignored when using index_path. "
+			               "The k-mer size is baked into the pre-built index.\n");
+		}
 	}
 
 	auto w_param = input.named_parameters.find("w");
 	if (w_param != input.named_parameters.end() && !w_param->second.IsNull()) {
 		data->config.w = w_param->second.GetValue<int32_t>();
+
+		// WARNING: w ignored when using pre-built index
+		if (data->using_prebuilt_index()) {
+			Printer::Print("WARNING: Parameter 'w' is ignored when using index_path. "
+			               "The window size is baked into the pre-built index.\n");
+		}
 	}
 
 	auto eqx_param = input.named_parameters.find("eqx");
@@ -55,8 +97,26 @@ unique_ptr<FunctionData> AlignMinimap2TableFunction::Bind(ClientContext &context
 		data->config.eqx = eqx_param->second.GetValue<bool>();
 	}
 
-	// Pre-load all subjects at bind time (required for indexing)
-	data->subjects = ReadSubjectTable(context, data->subject_table);
+	// Handle subject_table vs index_path modes
+	if (data->using_prebuilt_index()) {
+		// Validate index file exists
+		auto &fs = FileSystem::GetFileSystem(context);
+		if (!fs.FileExists(data->index_path)) {
+			throw BinderException("Index file does not exist: %s", data->index_path);
+		}
+
+		// Validate it's a valid minimap2 index
+		// NOTE: This is advisory only (TOCTOU) - actual load may still fail
+		if (!miint::Minimap2Aligner::is_index_file(data->index_path)) {
+			throw BinderException("File is not a valid minimap2 index: %s", data->index_path);
+		}
+
+		// Note: subjects vector remains empty in this mode
+	} else {
+		// Traditional mode: validate subject table and load subjects
+		ValidateSequenceTableSchema(context, data->subject_table, false /* allow_paired */);
+		data->subjects = ReadSubjectTable(context, data->subject_table);
+	}
 
 	// Set output schema
 	for (const auto &name : data->names) {
@@ -77,9 +137,20 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2TableFunction::InitGlobal(Clie
 	// Create aligner with config
 	gstate->aligner = std::make_unique<miint::Minimap2Aligner>(data.config);
 
-	// Build index if not per-subject mode
-	if (!data.per_subject_database) {
-		gstate->aligner->build_index(data.subjects);
+	// Load or build index based on mode
+	if (data.using_prebuilt_index()) {
+		// Load pre-built index from file
+		try {
+			gstate->aligner->load_index(data.index_path);
+		} catch (const std::exception &e) {
+			throw IOException("Failed to load minimap2 index from '%s': %s", data.index_path, e.what());
+		}
+	} else {
+		// Traditional mode: build index from subjects
+		if (!data.per_subject_database) {
+			gstate->aligner->build_index(data.subjects);
+		}
+		// Note: per_subject mode builds index per-subject in Execute()
 	}
 
 	return gstate;
@@ -212,10 +283,12 @@ void AlignMinimap2TableFunction::Execute(ClientContext &context, TableFunctionIn
 }
 
 TableFunction AlignMinimap2TableFunction::GetFunction() {
-	auto tf = TableFunction("align_minimap2", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal,
-	                        InitLocal);
+	// Only query_table is a positional parameter
+	auto tf = TableFunction("align_minimap2", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
 
 	// Named parameters
+	tf.named_parameters["subject_table"] = LogicalType::VARCHAR;
+	tf.named_parameters["index_path"] = LogicalType::VARCHAR;
 	tf.named_parameters["per_subject_database"] = LogicalType::BOOLEAN;
 	tf.named_parameters["preset"] = LogicalType::VARCHAR;
 	tf.named_parameters["max_secondary"] = LogicalType::INTEGER;
