@@ -223,3 +223,22 @@ DROP VIEW ref_lengths_view;
 
 statement ok
 DROP TABLE ref_lengths_table;
+
+### Phase 2.4 Tests: Partial header support (header without @SQ lines)
+
+# Create reference table for partial header test
+statement ok
+CREATE TABLE partial_ref_lengths AS SELECT 'chr1' AS name, 1000 AS length;
+
+# Test reading SAM with partial header (@HD only, no @SQ lines) and reference_lengths
+query IIIII
+SELECT read_id, flags, reference, position, mapq
+FROM read_alignments('data/sam/partial_header.sam', reference_lengths='partial_ref_lengths')
+ORDER BY read_id
+----
+read1	0	chr1	100	60
+read2	0	chr1	200	60
+
+# Cleanup
+statement ok
+DROP TABLE partial_ref_lengths;

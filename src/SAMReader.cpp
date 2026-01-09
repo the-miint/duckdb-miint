@@ -33,10 +33,6 @@ SAMReader::SAMReader(const std::string &filename, const std::unordered_map<std::
 		throw std::runtime_error("Failed to open SAM file");
 	}
 
-	// Note: We don't call sam_hdr_read() to detect headers because it consumes the file position.
-	// The user must use the correct constructor based on whether the file has a header.
-	// The header-based constructor will validate that a header exists.
-
 	// Validate reference map
 	if (references.empty()) {
 		throw std::runtime_error("Reference map cannot be empty");
@@ -77,17 +73,39 @@ SAMReader::SAMReader(const std::string &filename, const std::unordered_map<std::
 		}
 	}
 
-	// Create synthetic header
-	// Build header text as string for efficiency with large reference sets
-	std::string header_text;
-	for (const auto &[name, length] : references) {
-		header_text += "@SQ\tSN:" + name + "\tLN:" + std::to_string(length) + "\n";
-	}
+	// Try to read any existing header from the file (even partial headers like @HD without @SQ)
+	// This consumes header lines and positions the file pointer at the first alignment record
+	SAMHeaderPtr existing_hdr(sam_hdr_read(fp.get()));
 
-	// Parse header text once (much faster than repeated sam_hdr_add_line calls)
-	hdr.reset(sam_hdr_parse(header_text.length(), header_text.c_str()));
-	if (!hdr) {
-		throw std::runtime_error("Failed to parse SAM header");
+	// If file has a partial header (header lines present but no @SQ lines), we need to add @SQ lines
+	// If file has no header at all, we create a synthetic header
+	if (existing_hdr && existing_hdr->n_targets == 0) {
+		// Partial header exists (e.g., @HD line) but no @SQ lines
+		// Add @SQ lines from reference_lengths to the existing header
+		for (const auto &[name, length] : references) {
+			std::string length_str = std::to_string(length);
+			if (sam_hdr_add_line(existing_hdr.get(), "SQ", "SN", name.c_str(), "LN", length_str.c_str(), NULL) != 0) {
+				throw std::runtime_error("Failed to add @SQ line to existing header");
+			}
+		}
+		hdr = std::move(existing_hdr);
+	} else if (!existing_hdr || existing_hdr->n_targets == 0) {
+		// No header in file - create synthetic header
+		// Build header text as string for efficiency with large reference sets
+		std::string header_text;
+		for (const auto &[name, length] : references) {
+			header_text += "@SQ\tSN:" + name + "\tLN:" + std::to_string(length) + "\n";
+		}
+
+		// Parse header text once (much faster than repeated sam_hdr_add_line calls)
+		hdr.reset(sam_hdr_parse(header_text.length(), header_text.c_str()));
+		if (!hdr) {
+			throw std::runtime_error("Failed to parse SAM header");
+		}
+	} else {
+		// File has a complete header with @SQ lines - this shouldn't happen with this constructor
+		// but if it does, we'll use it as-is (existing behavior for compatibility)
+		hdr = std::move(existing_hdr);
 	}
 
 	// Initialize alignment record
