@@ -15,6 +15,7 @@
 #include <read_alignments.hpp>
 #include <read_biom.hpp>
 #include <align_minimap2.hpp>
+#include <align_minimap2_sharded.hpp>
 #include <save_minimap2_index.hpp>
 #include <align_bowtie2.hpp>
 #include <read_ncbi_fasta.hpp>
@@ -45,6 +46,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadBIOMTableFunction::Register(loader);
 	ReadNewickTableFunction::Register(loader);
 	AlignMinimap2TableFunction::Register(loader);
+	AlignMinimap2ShardedTableFunction::Register(loader);
 	SaveMinimap2IndexTableFunction::Register(loader);
 	AlignBowtie2TableFunction::Register(loader);
 	ReadNCBIFastaTableFunction::Register(loader);

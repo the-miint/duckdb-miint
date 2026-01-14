@@ -11,7 +11,8 @@
 namespace duckdb {
 
 // Helper to get column names and types from either a table or view
-static void GetTableOrViewColumns(ClientContext &context, const std::string &table_name,
+// Returns true if it's a physical table (has rowid), false if it's a view
+static bool GetTableOrViewColumns(ClientContext &context, const std::string &table_name,
                                   vector<string> &out_names, vector<LogicalType> &out_types) {
 	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
 	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
@@ -28,10 +29,12 @@ static void GetTableOrViewColumns(ClientContext &context, const std::string &tab
 			out_names.push_back(col.Name());
 			out_types.push_back(col.Type());
 		}
+		return true; // Physical table
 	} else if (entry->type == CatalogType::VIEW_ENTRY) {
 		auto &view = entry->Cast<ViewCatalogEntry>();
 		out_names = view.names;
 		out_types = view.types;
+		return false; // View
 	} else {
 		throw BinderException("'%s' is not a table or view", table_name);
 	}
@@ -41,7 +44,7 @@ SequenceTableSchema ValidateSequenceTableSchema(ClientContext &context, const st
                                                 bool allow_paired) {
 	vector<string> col_names;
 	vector<LogicalType> col_types;
-	GetTableOrViewColumns(context, table_name, col_names, col_types);
+	bool is_physical_table = GetTableOrViewColumns(context, table_name, col_names, col_types);
 
 	// Build name-to-index map (case-insensitive)
 	std::unordered_map<string, idx_t> name_to_idx;
@@ -50,6 +53,7 @@ SequenceTableSchema ValidateSequenceTableSchema(ClientContext &context, const st
 	}
 
 	SequenceTableSchema schema;
+	schema.is_physical_table = is_physical_table;
 
 	// Check required columns
 	auto check_column = [&](const string &col_name, const vector<LogicalTypeId> &allowed_types,
@@ -197,43 +201,12 @@ static miint::QualScore ExtractQualScore(DataChunk &chunk, idx_t qual_col_idx, U
 	return miint::QualScore(qual_vec_data);
 }
 
-bool ReadQueryBatch(ClientContext &context, const std::string &table_name, const SequenceTableSchema &schema,
-                    idx_t batch_size, idx_t &offset, miint::SequenceRecordBatch &output) {
-	// Create a new connection to avoid deadlocking
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
-
-	// Build column list based on schema
-	std::string columns = "read_id, sequence1";
-	if (schema.has_sequence2) {
-		columns += ", sequence2";
-	}
-	if (schema.has_qual1) {
-		columns += ", qual1";
-	}
-	if (schema.has_qual2) {
-		columns += ", qual2";
-	}
-
-	// Query with LIMIT and OFFSET for batching
-	std::string query = "SELECT " + columns + " FROM " +
-	                    KeywordHelper::WriteOptionallyQuoted(table_name) +
-	                    " LIMIT " + std::to_string(batch_size) +
-	                    " OFFSET " + std::to_string(offset);
-
-	auto query_result = conn.Query(query);
-
-	if (query_result->HasError()) {
-		throw InvalidInputException("Failed to read from query table '%s': %s", table_name,
-		                            query_result->GetError());
-	}
-
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+// Helper to process query result chunks into SequenceRecordBatch.
+// Handles two-pass extraction (strings first, then quals) to avoid pointer corruption.
+// Returns total number of rows processed.
+static idx_t ProcessQueryResultChunks(MaterializedQueryResult &materialized, const SequenceTableSchema &schema,
+                                       miint::SequenceRecordBatch &output) {
 	idx_t total_rows = 0;
-
-	// Clear output and set paired flag
-	output.clear();
-	output.is_paired = schema.has_sequence2;
 
 	while (true) {
 		auto chunk = materialized.Fetch();
@@ -355,6 +328,96 @@ bool ReadQueryBatch(ClientContext &context, const std::string &table_name, const
 			batch_idx++;
 		}
 	}
+
+	return total_rows;
+}
+
+// Helper to build column list for sequence queries based on schema
+static std::string BuildSequenceColumnList(const SequenceTableSchema &schema, const std::string &prefix = "") {
+	std::string columns = prefix + "read_id, " + prefix + "sequence1";
+	if (schema.has_sequence2) {
+		columns += ", " + prefix + "sequence2";
+	}
+	if (schema.has_qual1) {
+		columns += ", " + prefix + "qual1";
+	}
+	if (schema.has_qual2) {
+		columns += ", " + prefix + "qual2";
+	}
+	return columns;
+}
+
+bool ReadQueryBatch(ClientContext &context, const std::string &table_name, const SequenceTableSchema &schema,
+                    idx_t batch_size, idx_t &offset, miint::SequenceRecordBatch &output) {
+	// Create a new connection to avoid deadlocking
+	auto &db = DatabaseInstance::GetDatabase(context);
+	Connection conn(db);
+
+	// Build query with ORDER BY for deterministic pagination
+	// Use rowid for physical tables (fast), read_id for views
+	std::string order_col = schema.is_physical_table ? "rowid" : "read_id";
+	std::string query = "SELECT " + BuildSequenceColumnList(schema) + " FROM " +
+	                    KeywordHelper::WriteOptionallyQuoted(table_name) +
+	                    " ORDER BY " + order_col +
+	                    " LIMIT " + std::to_string(batch_size) +
+	                    " OFFSET " + std::to_string(offset);
+
+	auto query_result = conn.Query(query);
+
+	if (query_result->HasError()) {
+		throw InvalidInputException("Failed to read from query table '%s': %s", table_name,
+		                            query_result->GetError());
+	}
+
+	// Clear output and set paired flag
+	output.clear();
+	output.is_paired = schema.has_sequence2;
+
+	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+	idx_t total_rows = ProcessQueryResultChunks(materialized, schema, output);
+
+	// Update offset for next batch
+	offset += total_rows;
+
+	// Return true if we got a full batch (more rows may exist)
+	return total_rows == batch_size;
+}
+
+bool ReadShardQueryBatch(ClientContext &context, const std::string &query_table,
+                         const std::string &read_to_shard_table, const std::string &shard_name,
+                         const SequenceTableSchema &schema, idx_t batch_size, idx_t &offset,
+                         miint::SequenceRecordBatch &output) {
+	// Create a new connection to avoid deadlocking
+	auto &db = DatabaseInstance::GetDatabase(context);
+	Connection conn(db);
+
+	// Build query with JOIN to read_to_shard table, filtering by shard_name
+	// Use "q." prefix for query table columns
+	// ORDER BY is required for deterministic LIMIT/OFFSET pagination
+	// Use rowid for physical tables (fast), read_id for views
+	std::string order_col = schema.is_physical_table ? "q.rowid" : "q.read_id";
+	std::string query = "SELECT " + BuildSequenceColumnList(schema, "q.") + " FROM " +
+	                    KeywordHelper::WriteOptionallyQuoted(query_table) + " q JOIN " +
+	                    KeywordHelper::WriteOptionallyQuoted(read_to_shard_table) + " r " +
+	                    "ON q.read_id = r.read_id WHERE r.shard_name = " +
+	                    KeywordHelper::WriteQuoted(shard_name, '\'') +
+	                    " ORDER BY " + order_col +
+	                    " LIMIT " + std::to_string(batch_size) +
+	                    " OFFSET " + std::to_string(offset);
+
+	auto query_result = conn.Query(query);
+
+	if (query_result->HasError()) {
+		throw InvalidInputException("Failed to read queries for shard '%s': %s", shard_name,
+		                            query_result->GetError());
+	}
+
+	// Clear output and set paired flag
+	output.clear();
+	output.is_paired = schema.has_sequence2;
+
+	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+	idx_t total_rows = ProcessQueryResultChunks(materialized, schema, output);
 
 	// Update offset for next batch
 	offset += total_rows;

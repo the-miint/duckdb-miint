@@ -181,6 +181,7 @@ set(EXTENSION_SOURCES
     src/Minimap2Aligner.cpp
     src/sequence_table_reader.cpp
     src/align_minimap2.cpp
+    src/align_minimap2_sharded.cpp
     src/save_minimap2_index.cpp
     src/Bowtie2Aligner.cpp
     src/align_bowtie2.cpp

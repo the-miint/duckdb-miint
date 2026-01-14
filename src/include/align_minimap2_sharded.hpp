@@ -16,59 +16,55 @@
 
 namespace duckdb {
 
-class AlignMinimap2TableFunction {
+// Information about a single shard
+struct ShardInfo {
+	std::string name;        // e.g., "shard_001"
+	std::string index_path;  // e.g., "/path/shards/shard_001.mmi"
+	idx_t read_count;        // Number of reads for this shard (for priority ordering)
+};
+
+class AlignMinimap2ShardedTableFunction {
 public:
 	struct Data : public TableFunctionData {
 		std::string query_table;
-		std::string subject_table;           // OPTIONAL (either this or index_path required)
-		std::string index_path;              // OPTIONAL: path to .mmi file
-		bool per_subject_database;
-		miint::Minimap2Config config;
+		std::string shard_directory;
+		std::string read_to_shard_table;
 		SequenceTableSchema query_schema;
-		std::vector<miint::AlignmentSubject> subjects; // Pre-loaded at bind time (empty if using index_path)
+		miint::Minimap2Config config;
+		std::vector<ShardInfo> shards;  // Sorted by read_count DESC (largest first)
 
-		// Helper to check if using pre-built index
-		bool using_prebuilt_index() const {
-			return !index_path.empty();
-		}
-
-		// Output schema (shared with align_minimap2_sharded)
+		// Output schema (shared with align_minimap2)
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
 		Data()
-		    : per_subject_database(false),
-		      names(GetAlignmentOutputNames()),
+		    : names(GetAlignmentOutputNames()),
 		      types(GetAlignmentOutputTypes()) {
 		}
 	};
 
 	struct GlobalState : public GlobalTableFunctionState {
 		std::mutex lock;
-		std::unique_ptr<miint::Minimap2Aligner> aligner;
-		idx_t current_query_offset;
-		idx_t current_subject_idx;    // For per_subject mode
-		miint::SAMRecordBatch result_buffer;
-		idx_t buffer_offset;
-		bool done;
-
-		// For per-subject mode: store all queries in memory to avoid re-reading
-		miint::SequenceRecordBatch all_queries;
-		bool queries_loaded;
+		idx_t next_shard_idx = 0;
+		idx_t shard_count = 1;
 
 		idx_t MaxThreads() const override {
-			// Single-threaded for now - minimap2 has internal threading
-			return 1;
+			// No cap - one thread per shard, let DuckDB scheduler manage
+			return shard_count;
 		}
 
-		GlobalState() : current_query_offset(0), current_subject_idx(0), buffer_offset(0), done(false),
-		                queries_loaded(false) {
-		}
+		GlobalState() = default;
 	};
 
 	struct LocalState : public LocalTableFunctionState {
-		LocalState() {
-		}
+		std::unique_ptr<miint::Minimap2Aligner> aligner;
+		idx_t current_shard_idx = DConstants::INVALID_INDEX;
+		bool has_shard = false;
+		idx_t current_read_offset = 0;  // For LIMIT/OFFSET streaming per shard
+		miint::SAMRecordBatch result_buffer;
+		idx_t buffer_offset = 0;
+
+		LocalState() = default;
 	};
 
 	static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,

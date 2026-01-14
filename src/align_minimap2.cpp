@@ -1,12 +1,9 @@
 #include "align_minimap2.hpp"
-#include "align_result_utils.hpp"
+#include "align_minimap2_common.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/vector_size.hpp"
 
 namespace duckdb {
-
-// Batch size for reading queries
-static constexpr idx_t QUERY_BATCH_SIZE = 1024;
 
 unique_ptr<FunctionData> AlignMinimap2TableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                           vector<LogicalType> &return_types,
@@ -60,42 +57,8 @@ unique_ptr<FunctionData> AlignMinimap2TableFunction::Bind(ClientContext &context
 		}
 	}
 
-	auto preset_param = input.named_parameters.find("preset");
-	if (preset_param != input.named_parameters.end() && !preset_param->second.IsNull()) {
-		data->config.preset = preset_param->second.ToString();
-	}
-
-	auto max_secondary_param = input.named_parameters.find("max_secondary");
-	if (max_secondary_param != input.named_parameters.end() && !max_secondary_param->second.IsNull()) {
-		data->config.max_secondary = max_secondary_param->second.GetValue<int32_t>();
-	}
-
-	auto k_param = input.named_parameters.find("k");
-	if (k_param != input.named_parameters.end() && !k_param->second.IsNull()) {
-		data->config.k = k_param->second.GetValue<int32_t>();
-
-		// WARNING: k ignored when using pre-built index
-		if (data->using_prebuilt_index()) {
-			Printer::Print("WARNING: Parameter 'k' is ignored when using index_path. "
-			               "The k-mer size is baked into the pre-built index.\n");
-		}
-	}
-
-	auto w_param = input.named_parameters.find("w");
-	if (w_param != input.named_parameters.end() && !w_param->second.IsNull()) {
-		data->config.w = w_param->second.GetValue<int32_t>();
-
-		// WARNING: w ignored when using pre-built index
-		if (data->using_prebuilt_index()) {
-			Printer::Print("WARNING: Parameter 'w' is ignored when using index_path. "
-			               "The window size is baked into the pre-built index.\n");
-		}
-	}
-
-	auto eqx_param = input.named_parameters.find("eqx");
-	if (eqx_param != input.named_parameters.end() && !eqx_param->second.IsNull()) {
-		data->config.eqx = eqx_param->second.GetValue<bool>();
-	}
+	// Parse minimap2 config parameters (preset, max_secondary, k, w, eqx)
+	ParseMinimap2ConfigParams(input.named_parameters, data->config, data->using_prebuilt_index());
 
 	// Handle subject_table vs index_path modes
 	if (data->using_prebuilt_index()) {
@@ -194,7 +157,7 @@ void AlignMinimap2TableFunction::Execute(ClientContext &context, TableFunctionIn
 				while (has_more) {
 					batch.clear();
 					has_more = ReadQueryBatch(context, bind_data.query_table, bind_data.query_schema,
-					                          QUERY_BATCH_SIZE, query_offset, batch);
+					                          MINIMAP2_QUERY_BATCH_SIZE, query_offset, batch);
 					// Append batch to all_queries
 					for (size_t i = 0; i < batch.size(); i++) {
 						global_state.all_queries.read_ids.push_back(std::move(batch.read_ids[i]));
@@ -232,7 +195,7 @@ void AlignMinimap2TableFunction::Execute(ClientContext &context, TableFunctionIn
 		} else {
 			// Standard mode: stream queries against single index
 			miint::SequenceRecordBatch query_batch;
-			bool has_more = ReadQueryBatch(context, bind_data.query_table, bind_data.query_schema, QUERY_BATCH_SIZE,
+			bool has_more = ReadQueryBatch(context, bind_data.query_table, bind_data.query_schema, MINIMAP2_QUERY_BATCH_SIZE,
 			                               global_state.current_query_offset, query_batch);
 
 			if (query_batch.empty() && !has_more) {
@@ -251,34 +214,7 @@ void AlignMinimap2TableFunction::Execute(ClientContext &context, TableFunctionIn
 
 	// Output up to STANDARD_VECTOR_SIZE results
 	idx_t output_count = std::min(available, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
-	idx_t offset = global_state.buffer_offset;
-	auto &batch = global_state.result_buffer;
-
-	// Set result vectors using shared utilities
-	idx_t field_idx = 0;
-	SetAlignResultString(output.data[field_idx++], batch.read_ids, offset, output_count);
-	SetAlignResultUInt16(output.data[field_idx++], batch.flags, offset, output_count);
-	SetAlignResultString(output.data[field_idx++], batch.references, offset, output_count);
-	SetAlignResultInt64(output.data[field_idx++], batch.positions, offset, output_count);
-	SetAlignResultInt64(output.data[field_idx++], batch.stop_positions, offset, output_count);
-	SetAlignResultUInt8(output.data[field_idx++], batch.mapqs, offset, output_count);
-	SetAlignResultString(output.data[field_idx++], batch.cigars, offset, output_count);
-	SetAlignResultString(output.data[field_idx++], batch.mate_references, offset, output_count);
-	SetAlignResultInt64(output.data[field_idx++], batch.mate_positions, offset, output_count);
-	SetAlignResultInt64(output.data[field_idx++], batch.template_lengths, offset, output_count);
-	SetAlignResultInt64Nullable(output.data[field_idx++], batch.tag_as_values, offset, output_count);
-	SetAlignResultInt64Nullable(output.data[field_idx++], batch.tag_xs_values, offset, output_count);
-	SetAlignResultInt64Nullable(output.data[field_idx++], batch.tag_ys_values, offset, output_count);
-	SetAlignResultInt64Nullable(output.data[field_idx++], batch.tag_xn_values, offset, output_count);
-	SetAlignResultInt64Nullable(output.data[field_idx++], batch.tag_xm_values, offset, output_count);
-	SetAlignResultInt64Nullable(output.data[field_idx++], batch.tag_xo_values, offset, output_count);
-	SetAlignResultInt64Nullable(output.data[field_idx++], batch.tag_xg_values, offset, output_count);
-	SetAlignResultInt64Nullable(output.data[field_idx++], batch.tag_nm_values, offset, output_count);
-	SetAlignResultStringNullable(output.data[field_idx++], batch.tag_yt_values, offset, output_count);
-	SetAlignResultStringNullable(output.data[field_idx++], batch.tag_md_values, offset, output_count);
-	SetAlignResultStringNullable(output.data[field_idx++], batch.tag_sa_values, offset, output_count);
-
-	output.SetCardinality(output_count);
+	OutputSAMRecordBatch(output, global_state.result_buffer, global_state.buffer_offset, output_count);
 	global_state.buffer_offset += output_count;
 }
 
