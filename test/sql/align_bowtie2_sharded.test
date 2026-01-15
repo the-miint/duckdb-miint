@@ -1,0 +1,299 @@
+# name: test/sql/align_bowtie2_sharded.test
+# description: Test align_bowtie2_sharded table function
+# group: [miint]
+
+require miint
+
+# NOTE: Set threads=1 because sqllogictest framework runs in a constrained mode
+# that doesn't handle parallel table function execution well. Parallel execution
+# works correctly in the DuckDB CLI with SET threads=2.
+statement ok
+SET threads=1;
+
+# Setup: Create test tables
+
+statement ok
+CREATE TABLE queries AS SELECT * FROM (VALUES
+    ('query1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('query2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA'),
+    ('query3', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE read_to_shard AS SELECT * FROM (VALUES
+    ('query1', 'shard_a'),
+    ('query2', 'shard_b'),
+    ('query3', 'shard_a')
+) AS t(read_id, shard_name);
+
+# ==============================================================================
+# ERROR HANDLING TESTS (Fail Fast)
+# ==============================================================================
+
+# Test error: missing shard_directory parameter
+statement error
+SELECT * FROM align_bowtie2_sharded('queries', read_to_shard := 'read_to_shard');
+----
+requires shard_directory parameter
+
+# Test error: missing read_to_shard parameter
+statement error
+SELECT * FROM align_bowtie2_sharded('queries', shard_directory := 'data/bowtie2_shards/');
+----
+requires read_to_shard parameter
+
+# Test error: non-existent query table
+statement error
+SELECT * FROM align_bowtie2_sharded('nonexistent_table',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard');
+----
+does not exist
+
+# Test error: non-existent read_to_shard table
+statement error
+SELECT * FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'nonexistent_mapping');
+----
+does not exist
+
+# Test error: read_to_shard missing read_id column
+statement ok
+CREATE TABLE bad_mapping_no_read_id AS SELECT * FROM (VALUES
+    ('shard_a'),
+    ('shard_b')
+) AS t(shard_name);
+
+statement error
+SELECT * FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'bad_mapping_no_read_id');
+----
+read_id
+
+# Test error: read_to_shard missing shard_name column
+statement ok
+CREATE TABLE bad_mapping_no_shard AS SELECT * FROM (VALUES
+    ('query1'),
+    ('query2')
+) AS t(read_id);
+
+statement error
+SELECT * FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'bad_mapping_no_shard');
+----
+shard_name
+
+# Test error: shard_directory does not exist
+statement error
+SELECT * FROM align_bowtie2_sharded('queries',
+    shard_directory := 'nonexistent_directory/',
+    read_to_shard := 'read_to_shard');
+----
+does not exist
+
+# Test error: shard index does not exist
+statement ok
+CREATE TABLE mapping_missing_shard AS SELECT * FROM (VALUES
+    ('query1', 'missing_shard')
+) AS t(read_id, shard_name);
+
+statement error
+SELECT * FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'mapping_missing_shard');
+----
+No valid bowtie2 index found
+
+# Clean up error test tables
+statement ok
+DROP TABLE bad_mapping_no_read_id;
+
+statement ok
+DROP TABLE bad_mapping_no_shard;
+
+statement ok
+DROP TABLE mapping_missing_shard;
+
+# ==============================================================================
+# BASIC FUNCTIONALITY TESTS
+# Pre-built indexes in data/bowtie2_shards/shard_a/index and shard_b/index
+# ==============================================================================
+
+# Test basic alignment with shards
+# query1 -> shard_a (should align to ref1)
+# query2 -> shard_b (should align to ref2)
+# query3 -> shard_a (may not align as sequence is all A's)
+query II
+SELECT read_id, reference
+FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# Test that unmapped reads are filtered out (flags & 4 != 0 should be excluded)
+query I
+SELECT COUNT(*) FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    max_secondary := 0)
+WHERE flags & 4 != 0;
+----
+0
+
+# ==============================================================================
+# READ-TO-MULTIPLE-SHARDS TEST
+# ==============================================================================
+
+# Test: Same read maps to multiple shards - should get results from both
+statement ok
+CREATE TABLE multi_shard_mapping AS SELECT * FROM (VALUES
+    ('query1', 'shard_a'),
+    ('query1', 'shard_b')
+) AS t(read_id, shard_name);
+
+# query1 aligns to shard_a (ref1) but not shard_b (different sequence)
+query II
+SELECT read_id, reference
+FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'multi_shard_mapping',
+    max_secondary := 0)
+ORDER BY read_id, reference;
+----
+query1	ref1
+
+statement ok
+DROP TABLE multi_shard_mapping;
+
+# ==============================================================================
+# VIEW SUPPORT TEST
+# ==============================================================================
+
+statement ok
+CREATE VIEW query_view AS SELECT * FROM queries;
+
+statement ok
+CREATE VIEW mapping_view AS SELECT * FROM read_to_shard;
+
+query II
+SELECT read_id, reference
+FROM align_bowtie2_sharded('query_view',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'mapping_view',
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+statement ok
+DROP VIEW query_view;
+
+statement ok
+DROP VIEW mapping_view;
+
+# ==============================================================================
+# BOWTIE2 PARAMETER TESTS
+# ==============================================================================
+
+# Test with preset parameter
+query II
+SELECT read_id, reference
+FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    preset := 'very-fast',
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# Test with local alignment mode
+query II
+SELECT read_id, reference
+FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    local := true,
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# ==============================================================================
+# PAIRED-END TEST
+# ==============================================================================
+
+# Test paired-end alignment with sequence1 and sequence2 columns
+statement ok
+CREATE TABLE paired_queries AS SELECT * FROM (VALUES
+    ('pair1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('pair2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(read_id, sequence1, sequence2);
+
+statement ok
+CREATE TABLE paired_mapping AS SELECT * FROM (VALUES
+    ('pair1', 'shard_a'),
+    ('pair2', 'shard_b')
+) AS t(read_id, shard_name);
+
+# Paired-end alignment should produce 2 records per pair (R1 and R2)
+# Each pair should align to its respective shard
+# Note: bowtie2 keeps original read_id, uses flags to distinguish R1/R2
+query II
+SELECT read_id, reference
+FROM align_bowtie2_sharded('paired_queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'paired_mapping',
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id, flags;
+----
+pair1	ref1
+pair1	ref1
+pair2	ref2
+pair2	ref2
+
+# Verify paired-end flags are set (0x1 = paired, 0x40 = first in pair, 0x80 = second in pair)
+query III
+SELECT read_id, flags & 1 as is_paired, flags & 64 as is_first
+FROM align_bowtie2_sharded('paired_queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'paired_mapping',
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id, flags;
+----
+pair1	1	64
+pair1	1	0
+pair2	1	64
+pair2	1	0
+
+statement ok
+DROP TABLE paired_queries;
+
+statement ok
+DROP TABLE paired_mapping;
+
+# ==============================================================================
+# CLEANUP
+# ==============================================================================
+
+statement ok
+DROP TABLE queries;
+
+statement ok
+DROP TABLE read_to_shard;

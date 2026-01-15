@@ -2,7 +2,7 @@
 #include "Minimap2Aligner.hpp"
 #include "SAMRecord.hpp"
 #include "SequenceRecord.hpp"
-#include "align_minimap2_common.hpp"
+#include "align_common.hpp"
 #include "sequence_table_reader.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/typedefs.hpp"

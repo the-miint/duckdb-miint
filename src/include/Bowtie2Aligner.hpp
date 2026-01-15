@@ -122,7 +122,7 @@ public:
 	Bowtie2Aligner &operator=(Bowtie2Aligner &&other);
 
 	// ========================================================================
-	// Index Building
+	// Index Building / Loading
 	// ========================================================================
 
 	// Build index from multiple reference sequences
@@ -132,6 +132,15 @@ public:
 
 	// Convenience: build index from a single reference
 	void build_single_index(const AlignmentSubject &subject);
+
+	// Load a pre-built index from prefix (validates files exist)
+	// The prefix should be the path without extension, e.g., "/path/to/index"
+	// which expects files like /path/to/index.1.bt2, /path/to/index.rev.1.bt2, etc.
+	void load_index(const std::string &index_prefix);
+
+	// Check if a bowtie2 index exists at the given prefix
+	// Returns true if the required index files (.1.bt2, .2.bt2, .rev.1.bt2, .rev.2.bt2) exist
+	static bool is_index_prefix(const std::string &prefix);
 
 	// ========================================================================
 	// Alignment
@@ -147,8 +156,15 @@ public:
 
 	// Finish alignment: close stdin, drain remaining output, wait for process
 	// Must be called after all align() calls to collect remaining results
-	// After finish(), no more align() calls are allowed on this instance
+	// After finish(), call reset() to reuse for another index, or destroy the instance
 	void finish(SAMRecordBatch &output);
+
+	// Reset aligner state for reuse with a new index (after finish())
+	// This is more efficient than creating a new Bowtie2Aligner instance because:
+	// - Preserves validated executable paths (avoids fork/exec for 'which' commands)
+	// - Preserves temp directory (if one was created for build_index())
+	// Usage: after finish(), call reset(), then load_index() or build_index(), then align()
+	void reset();
 
 	// ========================================================================
 	// Accessors (for testing)

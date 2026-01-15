@@ -1,0 +1,65 @@
+# name: test/sql/simple_bowtie2.test
+# group: [miint]
+
+require miint
+
+# NOTE: Set threads=1 because sqllogictest framework runs in a constrained mode
+# that doesn't handle parallel table function execution well.
+statement ok
+SET threads=1;
+
+# First query
+statement ok
+CREATE TABLE queries AS SELECT * FROM (VALUES
+    ('query1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('query2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE read_to_shard AS SELECT * FROM (VALUES
+    ('query1', 'shard_a'),
+    ('query2', 'shard_b')
+) AS t(read_id, shard_name);
+
+query II
+SELECT read_id, reference
+FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+statement ok
+DROP TABLE queries;
+
+statement ok
+DROP TABLE read_to_shard;
+
+# Second query - same as first
+statement ok
+CREATE TABLE queries AS SELECT * FROM (VALUES
+    ('query1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('query2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE read_to_shard AS SELECT * FROM (VALUES
+    ('query1', 'shard_a'),
+    ('query2', 'shard_b')
+) AS t(read_id, shard_name);
+
+query II
+SELECT read_id, reference
+FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2

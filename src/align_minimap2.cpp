@@ -1,5 +1,5 @@
 #include "align_minimap2.hpp"
-#include "align_minimap2_common.hpp"
+#include "align_common.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/vector_size.hpp"
 

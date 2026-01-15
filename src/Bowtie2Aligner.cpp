@@ -337,6 +337,50 @@ void Bowtie2Aligner::build_single_index(const AlignmentSubject &subject) {
 	build_index(subjects);
 }
 
+bool Bowtie2Aligner::is_index_prefix(const std::string &prefix) {
+	// Bowtie2 creates 6 index files for small genomes (<4GB):
+	// .1.bt2, .2.bt2, .3.bt2, .4.bt2, .rev.1.bt2, .rev.2.bt2
+	// For large genomes, it creates .1.bt2l files instead
+	// We check for the minimum required files
+	std::vector<std::string> required_extensions = {".1.bt2", ".2.bt2", ".rev.1.bt2", ".rev.2.bt2"};
+
+	// Also check for large index format (.bt2l)
+	std::vector<std::string> required_extensions_large = {".1.bt2l", ".2.bt2l", ".rev.1.bt2l", ".rev.2.bt2l"};
+
+	// Check standard format first
+	bool all_exist = true;
+	for (const auto &ext : required_extensions) {
+		if (!std::filesystem::exists(prefix + ext)) {
+			all_exist = false;
+			break;
+		}
+	}
+	if (all_exist) {
+		return true;
+	}
+
+	// Check large index format
+	all_exist = true;
+	for (const auto &ext : required_extensions_large) {
+		if (!std::filesystem::exists(prefix + ext)) {
+			all_exist = false;
+			break;
+		}
+	}
+	return all_exist;
+}
+
+void Bowtie2Aligner::load_index(const std::string &index_prefix) {
+	if (!is_index_prefix(index_prefix)) {
+		throw std::runtime_error("No valid bowtie2 index found at prefix: " + index_prefix +
+		                         ". Expected files like " + index_prefix + ".1.bt2, " + index_prefix +
+		                         ".rev.1.bt2, etc.");
+	}
+
+	index_prefix_ = index_prefix;
+	index_built_ = true;
+}
+
 // =============================================================================
 // Alignment - Query Writing
 // =============================================================================
@@ -555,9 +599,8 @@ void Bowtie2Aligner::start_aligner_process(bool use_fasta, bool is_paired) {
 	}
 
 	// Parent process
-
-	// Fix #7: Ignore SIGPIPE so writes to closed pipe return EPIPE instead of killing us
-	std::signal(SIGPIPE, SIG_IGN);
+	// Note: SIGPIPE is set to SIG_IGN at extension initialization (miint_extension.cpp)
+	// to ensure thread-safe signal handling across all subprocess management.
 
 	// Close unused pipe ends
 	close(stdin_pipe[0]);  // Close read end of stdin pipe
@@ -574,6 +617,10 @@ void Bowtie2Aligner::start_aligner_process(bool use_fasta, bool is_paired) {
 		close(stdout_pipe[0]);
 		throw std::runtime_error("Failed to wrap stdin pipe in FILE*");
 	}
+
+	// Set line buffering on stdin pipe to ensure data is sent to bowtie2 immediately
+	// Without this, data may be stuck in stdio buffer even after fflush() in some edge cases
+	setvbuf(stdin_pipe_, nullptr, _IOLBF, 0);
 
 	// Fix #3/#4: Transfer fd ownership to reader thread immediately
 	// Pass fd by value to thread, so ownership is clear from the start
@@ -855,6 +902,31 @@ void Bowtie2Aligner::finish(SAMRecordBatch &output) {
 
 	// Drain remaining results
 	drain_results(output);
+}
+
+void Bowtie2Aligner::reset() {
+	// Ensure any running process is stopped
+	if (aligner_running_) {
+		cleanup_process();
+	}
+
+	// Reset process state (preserves executable paths and temp directory)
+	index_built_ = false;
+	index_prefix_.clear();
+	aligner_running_ = false;
+	use_fasta_ = false;
+	is_paired_ = false;
+	reader_finished_ = false;
+	reader_error_.clear();
+	reader_should_stop_.store(false);
+
+	// Clear result queue
+	{
+		std::lock_guard<std::mutex> lock(queue_mutex_);
+		while (!result_queue_.empty()) {
+			result_queue_.pop();
+		}
+	}
 }
 
 } // namespace miint

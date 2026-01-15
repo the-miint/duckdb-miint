@@ -185,6 +185,7 @@ set(EXTENSION_SOURCES
     src/save_minimap2_index.cpp
     src/Bowtie2Aligner.cpp
     src/align_bowtie2.cpp
+    src/align_bowtie2_sharded.cpp
     src/ncbi_parser.cpp
     src/ncbi_client.cpp
     src/read_ncbi_fasta.cpp

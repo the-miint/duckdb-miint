@@ -4,6 +4,7 @@
 #include "SAMRecord.hpp"
 #include "SequenceRecord.hpp"
 #include <filesystem>
+#include <fstream>
 #include <set>
 #include <string>
 
@@ -255,6 +256,165 @@ TEST_CASE("Bowtie2Aligner build_index with multiple subjects", "[Bowtie2Aligner]
 		// Verify index files exist
 		auto temp_dir = aligner.get_temp_dir();
 		REQUIRE(std::filesystem::exists(temp_dir / "index.1.bt2"));
+	} catch (const std::runtime_error &e) {
+		if (std::string(e.what()).find("bowtie2") != std::string::npos &&
+		    std::string(e.what()).find("PATH") != std::string::npos) {
+			SKIP("bowtie2 not installed");
+		}
+		throw;
+	}
+}
+
+// =============================================================================
+// Phase 2b Tests: Pre-built Index Loading (load_index)
+// =============================================================================
+
+TEST_CASE("Bowtie2Aligner is_index_prefix detects valid index", "[Bowtie2Aligner]") {
+	Bowtie2Config config;
+
+	try {
+		Bowtie2Aligner aligner(config);
+
+		// Build an index first
+		std::vector<AlignmentSubject> subjects;
+		subjects.push_back({"ref1", "ACGTACGTACGTACGTACGTACGTACGTACGT"});
+		aligner.build_index(subjects);
+
+		// The temp_dir/index prefix should be a valid index
+		auto temp_dir = aligner.get_temp_dir();
+		std::string prefix = (temp_dir / "index").string();
+		REQUIRE(Bowtie2Aligner::is_index_prefix(prefix));
+	} catch (const std::runtime_error &e) {
+		if (std::string(e.what()).find("bowtie2") != std::string::npos &&
+		    std::string(e.what()).find("PATH") != std::string::npos) {
+			SKIP("bowtie2 not installed");
+		}
+		throw;
+	}
+}
+
+TEST_CASE("Bowtie2Aligner is_index_prefix returns false for non-existent prefix", "[Bowtie2Aligner]") {
+	// No need for aligner instance - is_index_prefix is static
+	REQUIRE_FALSE(Bowtie2Aligner::is_index_prefix("/nonexistent/path/to/index"));
+}
+
+TEST_CASE("Bowtie2Aligner is_index_prefix returns false for incomplete index", "[Bowtie2Aligner]") {
+	// Create a temp dir with only some index files
+	auto temp = std::filesystem::temp_directory_path() / "bowtie2_test_incomplete";
+	std::filesystem::create_directories(temp);
+
+	// Create only one of the required files
+	{
+		std::ofstream f((temp / "index.1.bt2").string());
+		f << "dummy";
+	}
+
+	REQUIRE_FALSE(Bowtie2Aligner::is_index_prefix((temp / "index").string()));
+
+	// Cleanup
+	std::filesystem::remove_all(temp);
+}
+
+TEST_CASE("Bowtie2Aligner load_index with valid index", "[Bowtie2Aligner]") {
+	Bowtie2Config config;
+
+	try {
+		// First build an index to have something to load
+		Bowtie2Aligner builder(config);
+
+		std::string ref_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+		                      "GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC";
+		std::vector<AlignmentSubject> subjects;
+		subjects.push_back({"reference", ref_seq});
+		builder.build_index(subjects);
+
+		auto temp_dir = builder.get_temp_dir();
+		std::string index_prefix = (temp_dir / "index").string();
+
+		// Now create a new aligner and load the pre-built index
+		Bowtie2Aligner loader(config);
+		REQUIRE_NOTHROW(loader.load_index(index_prefix));
+
+		// Should be able to align using the loaded index
+		SequenceRecordBatch queries(false);
+		queries.read_ids.push_back("test_query");
+		queries.comments.push_back("");
+		queries.sequences1.push_back("ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");
+		queries.quals1.push_back(QualScore(""));
+
+		SAMRecordBatch batch;
+		loader.align(queries, batch);
+		loader.finish(batch);
+
+		REQUIRE(batch.size() >= 1);
+		REQUIRE(batch.read_ids[0] == "test_query");
+		REQUIRE(batch.references[0] == "reference");
+	} catch (const std::runtime_error &e) {
+		if (std::string(e.what()).find("bowtie2") != std::string::npos &&
+		    std::string(e.what()).find("PATH") != std::string::npos) {
+			SKIP("bowtie2 not installed");
+		}
+		throw;
+	}
+}
+
+TEST_CASE("Bowtie2Aligner load_index with invalid prefix throws", "[Bowtie2Aligner]") {
+	Bowtie2Config config;
+
+	try {
+		Bowtie2Aligner aligner(config);
+
+		REQUIRE_THROWS_WITH(aligner.load_index("/nonexistent/path/to/index"),
+		                    Catch::Matchers::ContainsSubstring("No valid bowtie2 index found"));
+	} catch (const std::runtime_error &e) {
+		if (std::string(e.what()).find("bowtie2") != std::string::npos &&
+		    std::string(e.what()).find("PATH") != std::string::npos) {
+			SKIP("bowtie2 not installed");
+		}
+		throw;
+	}
+}
+
+TEST_CASE("Bowtie2Aligner load_index does not clean up external index", "[Bowtie2Aligner]") {
+	Bowtie2Config config;
+
+	try {
+		// Create a separate temp dir for the "external" index
+		auto external_dir = std::filesystem::temp_directory_path() / "bowtie2_external_index_test";
+		std::filesystem::create_directories(external_dir);
+		std::string external_prefix = (external_dir / "index").string();
+
+		// Build index in external location using bowtie2-build directly
+		{
+			Bowtie2Aligner builder(config);
+			std::vector<AlignmentSubject> subjects;
+			subjects.push_back({"ref1", "ACGTACGTACGTACGTACGTACGTACGTACGT"});
+			builder.build_index(subjects);
+
+			// Copy index files to external location
+			auto builder_dir = builder.get_temp_dir();
+			for (const auto &entry : std::filesystem::directory_iterator(builder_dir)) {
+				if (entry.path().string().find("index") != std::string::npos) {
+					std::filesystem::copy(entry.path(),
+					                      external_dir / entry.path().filename());
+				}
+			}
+		}
+
+		// Verify the external index exists
+		REQUIRE(Bowtie2Aligner::is_index_prefix(external_prefix));
+
+		// Load index in new aligner, then destroy it
+		{
+			Bowtie2Aligner loader(config);
+			loader.load_index(external_prefix);
+		}
+
+		// External index should still exist after loader is destroyed
+		REQUIRE(Bowtie2Aligner::is_index_prefix(external_prefix));
+
+		// Cleanup
+		std::filesystem::remove_all(external_dir);
 	} catch (const std::runtime_error &e) {
 		if (std::string(e.what()).find("bowtie2") != std::string::npos &&
 		    std::string(e.what()).find("PATH") != std::string::npos) {
