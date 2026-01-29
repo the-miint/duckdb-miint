@@ -18,9 +18,9 @@ namespace duckdb {
 
 // Information about a single bowtie2 shard
 struct Bowtie2ShardInfo {
-	std::string name;          // e.g., "shard_a"
-	std::string index_prefix;  // e.g., "/path/shards/shard_a/index"
-	idx_t read_count;          // Number of reads for this shard (for priority ordering)
+	std::string name;         // e.g., "shard_a"
+	std::string index_prefix; // e.g., "/path/shards/shard_a/index"
+	idx_t read_count;         // Number of reads for this shard (for priority ordering)
 };
 
 class AlignBowtie2ShardedTableFunction {
@@ -31,15 +31,13 @@ public:
 		std::string read_to_shard_table;
 		SequenceTableSchema query_schema;
 		miint::Bowtie2Config config;
-		std::vector<Bowtie2ShardInfo> shards;  // Sorted by read_count DESC (largest first)
+		std::vector<Bowtie2ShardInfo> shards; // Sorted by read_count DESC (largest first)
 
 		// Output schema (shared with align_bowtie2)
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
-		Data()
-		    : names(GetAlignmentOutputNames()),
-		      types(GetAlignmentOutputTypes()) {
+		Data() : names(GetAlignmentOutputNames()), types(GetAlignmentOutputTypes()) {
 		}
 	};
 
@@ -62,8 +60,8 @@ public:
 		std::unique_ptr<miint::Bowtie2Aligner> aligner;
 		idx_t current_shard_idx = DConstants::INVALID_INDEX;
 		bool has_shard = false;
-		bool finished_aligning = false;  // True after calling finish() for current shard
-		idx_t current_read_offset = 0;   // For streaming queries
+		bool finished_aligning = false; // True after calling finish() for current shard
+		idx_t current_read_offset = 0;  // For streaming queries
 		miint::SAMRecordBatch result_buffer;
 		idx_t buffer_offset = 0;
 

@@ -105,7 +105,7 @@ struct SequenceCopyBindData : public FunctionData {
 	string file_path;
 	bool is_paired = false;
 	vector<string> names;
-	ColumnIndices indices;  // Pre-computed column indices
+	ColumnIndices indices; // Pre-computed column indices
 
 	// Subclasses must implement Copy() and Equals()
 };
@@ -131,7 +131,7 @@ struct SequenceCopyLocalState : public LocalFunctionData {
 
 // Initialize global state for sequence formats
 unique_ptr<GlobalFunctionData> SequenceCopyInitializeGlobal(ClientContext &context, const SequenceCopyBindData &fdata,
-                                                             const string &file_path);
+                                                            const string &file_path);
 
 // Initialize local state for sequence formats
 unique_ptr<LocalFunctionData> SequenceCopyInitializeLocal(ExecutionContext &context, const SequenceCopyBindData &fdata);

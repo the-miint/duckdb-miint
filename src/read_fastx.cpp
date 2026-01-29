@@ -163,8 +163,8 @@ unique_ptr<GlobalTableFunctionState> ReadFastxTableFunction::InitGlobal(ClientCo
 }
 
 unique_ptr<LocalTableFunctionState> ReadFastxTableFunction::InitLocal(ExecutionContext &context,
-                                                                       TableFunctionInitInput &input,
-                                                                       GlobalTableFunctionState *global_state) {
+                                                                      TableFunctionInitInput &input,
+                                                                      GlobalTableFunctionState *global_state) {
 	return duckdb::make_uniq<LocalState>();
 }
 
@@ -195,7 +195,8 @@ void ReadFastxTableFunction::SetResultVectorStringNullable(Vector &result_vector
 	}
 }
 
-void ReadFastxTableFunction::SetResultVectorListUInt8(Vector &result_vector, const std::vector<miint::QualScore> &values,
+void ReadFastxTableFunction::SetResultVectorListUInt8(Vector &result_vector,
+                                                      const std::vector<miint::QualScore> &values,
                                                       uint8_t qual_offset) {
 	// Check if this is FASTA (quality scores are empty)
 	// Note: All records within a single file are guaranteed to be either FASTA or FASTQ, never mixed.

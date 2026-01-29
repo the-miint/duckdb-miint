@@ -93,7 +93,7 @@ std::vector<ReadNewickTableFunction::NodeRow> ReadNewickTableFunction::TreeToRow
 }
 
 unique_ptr<FunctionData> ReadNewickTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                        vector<LogicalType> &return_types, vector<std::string> &names) {
+                                                       vector<LogicalType> &return_types, vector<std::string> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
 	std::vector<std::string> file_paths;
@@ -154,14 +154,14 @@ unique_ptr<FunctionData> ReadNewickTableFunction::Bind(ClientContext &context, T
 }
 
 unique_ptr<GlobalTableFunctionState> ReadNewickTableFunction::InitGlobal(ClientContext &context,
-                                                                          TableFunctionInitInput &input) {
+                                                                         TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	return duckdb::make_uniq<GlobalState>(data.file_paths, data.uses_stdin);
 }
 
 unique_ptr<LocalTableFunctionState> ReadNewickTableFunction::InitLocal(ExecutionContext &context,
-                                                                        TableFunctionInitInput &input,
-                                                                        GlobalTableFunctionState *global_state) {
+                                                                       TableFunctionInitInput &input,
+                                                                       GlobalTableFunctionState *global_state) {
 	return duckdb::make_uniq<LocalState>();
 }
 
@@ -175,8 +175,8 @@ void ReadNewickTableFunction::Execute(ClientContext &context, TableFunctionInput
 	while (output_idx < STANDARD_VECTOR_SIZE) {
 		// If we have remaining rows from current file, output them
 		if (local_state.current_row_idx < local_state.current_rows.size()) {
-			size_t rows_to_output =
-			    std::min<size_t>(STANDARD_VECTOR_SIZE - output_idx, local_state.current_rows.size() - local_state.current_row_idx);
+			size_t rows_to_output = std::min<size_t>(STANDARD_VECTOR_SIZE - output_idx,
+			                                         local_state.current_rows.size() - local_state.current_row_idx);
 
 			for (size_t i = 0; i < rows_to_output; ++i) {
 				const auto &row = local_state.current_rows[local_state.current_row_idx + i];
@@ -186,8 +186,7 @@ void ReadNewickTableFunction::Execute(ClientContext &context, TableFunctionInput
 
 				// name (empty string if not specified, never NULL)
 				auto &name_vec = output.data[1];
-				FlatVector::GetData<string_t>(name_vec)[output_idx + i] =
-				    StringVector::AddString(name_vec, row.name);
+				FlatVector::GetData<string_t>(name_vec)[output_idx + i] = StringVector::AddString(name_vec, row.name);
 
 				// branch_length (nullable - NaN becomes NULL)
 				auto &bl_vec = output.data[2];

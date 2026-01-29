@@ -220,7 +220,7 @@ void ValidateSequenceIndexParameter(bool id_as_sequence_index, bool has_sequence
 //===--------------------------------------------------------------------===//
 
 unique_ptr<GlobalFunctionData> SequenceCopyInitializeGlobal(ClientContext &context, const SequenceCopyBindData &fdata,
-                                                             const string &file_path) {
+                                                            const string &file_path) {
 	auto &fs = FileSystem::GetFileSystem(context);
 
 	auto gstate = make_uniq<SequenceCopyGlobalState>();
@@ -242,7 +242,8 @@ unique_ptr<GlobalFunctionData> SequenceCopyInitializeGlobal(ClientContext &conte
 	return gstate;
 }
 
-unique_ptr<LocalFunctionData> SequenceCopyInitializeLocal(ExecutionContext &context, const SequenceCopyBindData &fdata) {
+unique_ptr<LocalFunctionData> SequenceCopyInitializeLocal(ExecutionContext &context,
+                                                          const SequenceCopyBindData &fdata) {
 	auto lstate = make_uniq<SequenceCopyLocalState>();
 
 	lstate->writer_state_r1 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);

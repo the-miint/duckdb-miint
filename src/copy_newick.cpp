@@ -183,8 +183,7 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 static unique_ptr<GlobalFunctionData> NewickCopyInitializeGlobal(ClientContext &context, FunctionData &bind_data,
                                                                  const string &file_path) {
 	auto &fdata = bind_data.Cast<NewickCopyBindData>();
-	return make_uniq<NewickCopyGlobalState>(file_path, fdata.compression, fdata.include_edge_ids,
-	                                        fdata.placements);
+	return make_uniq<NewickCopyGlobalState>(file_path, fdata.compression, fdata.include_edge_ids, fdata.placements);
 }
 
 //===--------------------------------------------------------------------===//
@@ -269,8 +268,8 @@ static void NewickCopySink(ExecutionContext &context, FunctionData &bind_data, G
 			if (branch_length_data.validity.RowIsValid(bl_row)) {
 				double bl = branch_lengths_ptr[bl_row];
 				if (bl < 0) {
-					throw InvalidInputException("Negative branch_length " + std::to_string(bl) +
-					                            " for node_index " + std::to_string(node.node_id));
+					throw InvalidInputException("Negative branch_length " + std::to_string(bl) + " for node_index " +
+					                            std::to_string(node.node_id));
 				}
 				node.branch_length = bl;
 			}
@@ -337,9 +336,8 @@ static void NewickCopyFinalize(ClientContext &context, FunctionData &bind_data, 
 			}
 		}
 		if (!has_edge_id) {
-			throw InvalidInputException(
-			    "COPY FORMAT NEWICK with PLACEMENTS: Tree has no edge_id values (all NULL). "
-			    "Placements require a tree with edge identifiers.");
+			throw InvalidInputException("COPY FORMAT NEWICK with PLACEMENTS: Tree has no edge_id values (all NULL). "
+			                            "Placements require a tree with edge identifiers.");
 		}
 
 		// Insert placements into tree (placements were already read at bind time)

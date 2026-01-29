@@ -8,8 +8,8 @@ namespace duckdb {
 static constexpr idx_t QUERY_BATCH_SIZE = 1024;
 
 unique_ptr<FunctionData> AlignBowtie2TableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                          vector<LogicalType> &return_types,
-                                                          vector<std::string> &names) {
+                                                         vector<LogicalType> &return_types,
+                                                         vector<std::string> &names) {
 	auto data = make_uniq<Data>();
 
 	// Required positional parameters: query_table, subject_table
@@ -70,7 +70,7 @@ unique_ptr<FunctionData> AlignBowtie2TableFunction::Bind(ClientContext &context,
 }
 
 unique_ptr<GlobalTableFunctionState> AlignBowtie2TableFunction::InitGlobal(ClientContext &context,
-                                                                             TableFunctionInitInput &input) {
+                                                                           TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 
@@ -84,8 +84,8 @@ unique_ptr<GlobalTableFunctionState> AlignBowtie2TableFunction::InitGlobal(Clien
 }
 
 unique_ptr<LocalTableFunctionState> AlignBowtie2TableFunction::InitLocal(ExecutionContext &context,
-                                                                           TableFunctionInitInput &input,
-                                                                           GlobalTableFunctionState *global_state) {
+                                                                         TableFunctionInitInput &input,
+                                                                         GlobalTableFunctionState *global_state) {
 	return make_uniq<LocalState>();
 }
 
@@ -179,12 +179,12 @@ TableFunction AlignBowtie2TableFunction::GetFunction() {
 	                        InitLocal);
 
 	// Named parameters matching Bowtie2Config options
-	tf.named_parameters["preset"] = LogicalType::VARCHAR;     // --very-fast, --fast, --sensitive, --very-sensitive
-	tf.named_parameters["local"] = LogicalType::BOOLEAN;      // --local mode
-	tf.named_parameters["threads"] = LogicalType::INTEGER;    // -p parameter
+	tf.named_parameters["preset"] = LogicalType::VARCHAR;        // --very-fast, --fast, --sensitive, --very-sensitive
+	tf.named_parameters["local"] = LogicalType::BOOLEAN;         // --local mode
+	tf.named_parameters["threads"] = LogicalType::INTEGER;       // -p parameter
 	tf.named_parameters["max_secondary"] = LogicalType::INTEGER; // -k parameter
-	tf.named_parameters["extra_args"] = LogicalType::VARCHAR; // Additional arguments
-	tf.named_parameters["quiet"] = LogicalType::BOOLEAN;      // Suppress stderr output (default: true)
+	tf.named_parameters["extra_args"] = LogicalType::VARCHAR;    // Additional arguments
+	tf.named_parameters["quiet"] = LogicalType::BOOLEAN;         // Suppress stderr output (default: true)
 
 	return tf;
 }

@@ -267,8 +267,7 @@ static void BiomCopyCombine(ExecutionContext &context, FunctionData &bind_data, 
 	// Append local indices to global
 	gstate.feature_indices.insert(gstate.feature_indices.end(), local_feature_indices.begin(),
 	                              local_feature_indices.end());
-	gstate.sample_indices.insert(gstate.sample_indices.end(), local_sample_indices.begin(),
-	                             local_sample_indices.end());
+	gstate.sample_indices.insert(gstate.sample_indices.end(), local_sample_indices.begin(), local_sample_indices.end());
 	gstate.values.insert(gstate.values.end(), lstate.local_values.begin(), lstate.local_values.end());
 }
 

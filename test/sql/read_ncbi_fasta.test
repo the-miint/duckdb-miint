@@ -1,6 +1,7 @@
 # name: test/sql/read_ncbi_fasta.test
 # description: Test read_ncbi_fasta table function
-# group: [miint]
+# group: [sql]
+
 # NOTE: This test requires network access to NCBI servers
 
 require miint

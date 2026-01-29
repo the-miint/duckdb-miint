@@ -13,7 +13,7 @@ namespace duckdb {
 // Bind Data
 //===--------------------------------------------------------------------===//
 struct FastqCopyBindData : public SequenceCopyBindData {
-	uint8_t qual_offset = 33;  // FASTQ-specific: quality score offset
+	uint8_t qual_offset = 33; // FASTQ-specific: quality score offset
 
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<FastqCopyBindData>();
@@ -51,8 +51,8 @@ static string EncodeQuality(const uint8_t *qual_data, idx_t length, uint8_t offs
 		uint8_t q = qual_data[i];
 		uint16_t encoded = static_cast<uint16_t>(q) + offset;
 		if (encoded > 126) {
-			throw InvalidInputException("Quality score overflow: %d + %d = %d exceeds valid ASCII range (max 126)",
-			                            q, offset, encoded);
+			throw InvalidInputException("Quality score overflow: %d + %d = %d exceeds valid ASCII range (max 126)", q,
+			                            offset, encoded);
 		}
 		result.push_back(static_cast<char>(encoded));
 	}
@@ -155,11 +155,12 @@ static unique_ptr<LocalFunctionData> FastqCopyInitializeLocal(ExecutionContext &
 // Sink
 //===--------------------------------------------------------------------===//
 static void WriteFastqRecordToBuffer(MemoryStream &stream, const string &id, const string &seq,
-                                     const uint8_t *qual_data, idx_t qual_length, uint8_t qual_offset, const string &comment) {
+                                     const uint8_t *qual_data, idx_t qual_length, uint8_t qual_offset,
+                                     const string &comment) {
 	// Pre-calculate total size to avoid reallocations
-	idx_t size = 1 + id.size() + 1 + seq.size() + 3 + qual_length + 1;  // @ + id + \n + seq + \n+\n + qual + \n
+	idx_t size = 1 + id.size() + 1 + seq.size() + 3 + qual_length + 1; // @ + id + \n + seq + \n+\n + qual + \n
 	if (!comment.empty()) {
-		size += 1 + comment.size();  // space + comment
+		size += 1 + comment.size(); // space + comment
 	}
 
 	// Build record string with pre-reserved capacity
@@ -271,8 +272,9 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 
 		// Validate quality score length matches sequence length
 		if (qual1_length != seq1.size()) {
-			throw InvalidInputException("Quality score length (%llu) does not match sequence length (%llu) for row %llu",
-			                            qual1_length, seq1.size(), row);
+			throw InvalidInputException(
+			    "Quality score length (%llu) does not match sequence length (%llu) for row %llu", qual1_length,
+			    seq1.size(), row);
 		}
 
 		// Write R1 record to local buffer
@@ -300,8 +302,9 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 
 			// Validate quality score length matches sequence length
 			if (qual2_length != seq2.size()) {
-				throw InvalidInputException("Quality score length (%llu) does not match sequence length (%llu) for row %llu (R2)",
-				                            qual2_length, seq2.size(), row);
+				throw InvalidInputException(
+				    "Quality score length (%llu) does not match sequence length (%llu) for row %llu (R2)", qual2_length,
+				    seq2.size(), row);
 			}
 
 			if (fdata.interleave) {

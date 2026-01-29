@@ -13,8 +13,8 @@
 namespace duckdb {
 
 // Helper to get column names and types from either a table or view
-static void GetTableOrViewColumns(ClientContext &context, const std::string &table_name,
-                                  vector<string> &out_names, vector<LogicalType> &out_types) {
+static void GetTableOrViewColumns(ClientContext &context, const std::string &table_name, vector<string> &out_names,
+                                  vector<LogicalType> &out_types) {
 	// Use TABLE_ENTRY lookup which can return either tables or views
 	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
 	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
@@ -153,8 +153,7 @@ std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const s
 
 			// Check for NULL values in required columns
 			if (!edge_data.validity.RowIsValid(edge_idx)) {
-				throw InvalidInputException("NULL edge_id at row %llu in placement table '%s'", row_number,
-				                            table_name);
+				throw InvalidInputException("NULL edge_id at row %llu in placement table '%s'", row_number, table_name);
 			}
 			if (!lwr_data.validity.RowIsValid(lwr_idx)) {
 				throw InvalidInputException("NULL like_weight_ratio at row %llu in placement table '%s'", row_number,

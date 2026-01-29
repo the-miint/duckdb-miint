@@ -175,8 +175,7 @@ std::string NCBIClient::FetchAssemblyFasta(const std::string &accession) {
 	std::string zip_data = MakeRequest(url.str(), true); // Use API key header for Datasets API
 
 	// Validate ZIP magic bytes (PK\x03\x04)
-	if (zip_data.size() < 4 || zip_data[0] != 'P' || zip_data[1] != 'K' || zip_data[2] != 0x03 ||
-	    zip_data[3] != 0x04) {
+	if (zip_data.size() < 4 || zip_data[0] != 'P' || zip_data[1] != 'K' || zip_data[2] != 0x03 || zip_data[3] != 0x04) {
 		throw duckdb::IOException("Datasets API returned invalid ZIP file for assembly '%s'. "
 		                          "Response starts with: %s",
 		                          accession.c_str(),

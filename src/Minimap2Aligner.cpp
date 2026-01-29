@@ -22,9 +22,9 @@ void Minimap2TbufDeleter::operator()(mm_tbuf_t *tbuf) const {
 
 // Helper struct to hold alignment stats computed from CIGAR
 struct AlignmentStats {
-	int64_t mismatches = 0;  // XM: number of mismatches
-	int64_t gap_opens = 0;   // XO: number of gap opens
-	int64_t gap_extends = 0; // XG: number of gap extensions
+	int64_t mismatches = 0;    // XM: number of mismatches
+	int64_t gap_opens = 0;     // XO: number of gap opens
+	int64_t gap_extends = 0;   // XG: number of gap extensions
 	int64_t edit_distance = 0; // NM: total edit distance
 };
 
@@ -85,12 +85,11 @@ Minimap2Aligner::Minimap2Aligner(const Minimap2Config &config)
 
 	// Validate preset set valid k and w values
 	if (iopt_->k <= 0 || iopt_->k > 28) {
-		throw std::runtime_error("Preset '" + config_.preset + "' set invalid k-mer size: " +
-		                         std::to_string(iopt_->k));
+		throw std::runtime_error("Preset '" + config_.preset + "' set invalid k-mer size: " + std::to_string(iopt_->k));
 	}
 	if (iopt_->w <= 0 || iopt_->w >= 256) {
-		throw std::runtime_error("Preset '" + config_.preset + "' set invalid window size: " +
-		                         std::to_string(iopt_->w));
+		throw std::runtime_error("Preset '" + config_.preset +
+		                         "' set invalid window size: " + std::to_string(iopt_->w));
 	}
 
 	// Override k and w if specified
@@ -129,8 +128,7 @@ Minimap2Aligner::~Minimap2Aligner() = default;
 // Move constructor
 Minimap2Aligner::Minimap2Aligner(Minimap2Aligner &&other) noexcept
     : config_(std::move(other.config_)), iopt_(std::move(other.iopt_)), mopt_(std::move(other.mopt_)),
-      index_(std::move(other.index_)), subject_names_(std::move(other.subject_names_)),
-      tbuf_(std::move(other.tbuf_)) {
+      index_(std::move(other.index_)), subject_names_(std::move(other.subject_names_)), tbuf_(std::move(other.tbuf_)) {
 }
 
 // Move assignment
@@ -220,9 +218,8 @@ void Minimap2Aligner::align_single(const std::string &read_id, const std::string
 	}
 
 	int n_regs = 0;
-	mm_reg1_t *regs =
-	    mm_map(index_.get(), static_cast<int>(sequence.length()), sequence.c_str(), &n_regs, tbuf_.get(), mopt_.get(),
-	           read_id.c_str());
+	mm_reg1_t *regs = mm_map(index_.get(), static_cast<int>(sequence.length()), sequence.c_str(), &n_regs, tbuf_.get(),
+	                         mopt_.get(), read_id.c_str());
 
 	int secondary_count = 0;
 
@@ -415,11 +412,11 @@ void Minimap2Aligner::reg_to_sam(const void *reg_ptr, const std::string &read_id
 	// Tags
 	batch.tag_as_values.push_back(reg->score);
 	batch.tag_xs_values.push_back(reg->subsc > 0 ? reg->subsc : -1);
-	batch.tag_ys_values.push_back(-1); // Not available from minimap2
-	batch.tag_xn_values.push_back(-1); // Not available from minimap2
-	batch.tag_xm_values.push_back(is_unmapped ? -1 : stats.mismatches);  // XM: mismatches
-	batch.tag_xo_values.push_back(is_unmapped ? -1 : stats.gap_opens);   // XO: gap opens
-	batch.tag_xg_values.push_back(is_unmapped ? -1 : stats.gap_extends); // XG: gap extensions
+	batch.tag_ys_values.push_back(-1);                                     // Not available from minimap2
+	batch.tag_xn_values.push_back(-1);                                     // Not available from minimap2
+	batch.tag_xm_values.push_back(is_unmapped ? -1 : stats.mismatches);    // XM: mismatches
+	batch.tag_xo_values.push_back(is_unmapped ? -1 : stats.gap_opens);     // XO: gap opens
+	batch.tag_xg_values.push_back(is_unmapped ? -1 : stats.gap_extends);   // XG: gap extensions
 	batch.tag_nm_values.push_back(is_unmapped ? -1 : stats.edit_distance); // NM: edit distance
 
 	// YT tag (pair type)

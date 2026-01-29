@@ -10,7 +10,7 @@ using namespace miint;
 
 // Helper to create a single unpaired query batch
 static SequenceRecordBatch make_query_batch(const std::string &read_id, const std::string &sequence) {
-	SequenceRecordBatch batch(false);  // unpaired
+	SequenceRecordBatch batch(false); // unpaired
 	batch.read_ids.push_back(read_id);
 	batch.comments.push_back("");
 	batch.sequences1.push_back(sequence);
@@ -19,10 +19,9 @@ static SequenceRecordBatch make_query_batch(const std::string &read_id, const st
 }
 
 // Helper to create a paired query batch
-static SequenceRecordBatch make_paired_query_batch(const std::string &read_id,
-                                                    const std::string &seq1,
-                                                    const std::string &seq2) {
-	SequenceRecordBatch batch(true);  // paired
+static SequenceRecordBatch make_paired_query_batch(const std::string &read_id, const std::string &seq1,
+                                                   const std::string &seq2) {
+	SequenceRecordBatch batch(true); // paired
 	batch.read_ids.push_back(read_id);
 	batch.comments.push_back("");
 	batch.sequences1.push_back(seq1);
@@ -37,7 +36,7 @@ TEST_CASE("Minimap2Aligner construction with default config", "[Minimap2Aligner]
 	REQUIRE(config.preset == "sr");
 	REQUIRE(config.max_secondary == 5);
 	REQUIRE(config.eqx == true);
-	REQUIRE(config.k == 0);  // 0 means use preset default
+	REQUIRE(config.k == 0); // 0 means use preset default
 	REQUIRE(config.w == 0);
 
 	Minimap2Aligner aligner(config);
@@ -78,7 +77,7 @@ TEST_CASE("Minimap2Aligner single-end alignment - exact match", "[Minimap2Aligne
 	REQUIRE(batch.size() >= 1);
 	REQUIRE(batch.read_ids[0] == "query1");
 	REQUIRE(batch.references[0] == "reference");
-	REQUIRE(batch.positions[0] == 1);  // 1-based position
+	REQUIRE(batch.positions[0] == 1); // 1-based position
 	// With EQX mode, CIGAR should contain = for matches
 	INFO("CIGAR: " << batch.cigars[0]);
 	REQUIRE(batch.cigars[0].find('=') != std::string::npos);
@@ -126,8 +125,7 @@ TEST_CASE("Minimap2Aligner unmapped query", "[Minimap2Aligner]") {
 	aligner.build_index(subjects);
 
 	// Completely different sequence (50bp of Ts)
-	auto queries = make_query_batch("unmapped_query",
-		"TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT");
+	auto queries = make_query_batch("unmapped_query", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT");
 
 	SAMRecordBatch batch;
 	aligner.align(queries, batch);
@@ -147,7 +145,7 @@ TEST_CASE("Minimap2Aligner unmapped query", "[Minimap2Aligner]") {
 TEST_CASE("Minimap2Aligner max_secondary limits alignments", "[Minimap2Aligner]") {
 	Minimap2Config config;
 	config.preset = "sr";
-	config.max_secondary = 2;  // Only allow 2 secondary alignments
+	config.max_secondary = 2; // Only allow 2 secondary alignments
 	Minimap2Aligner aligner(config);
 
 	// Create a single reference with multiple similar regions (the query will map to
@@ -155,7 +153,8 @@ TEST_CASE("Minimap2Aligner max_secondary limits alignments", "[Minimap2Aligner]"
 	// 400bp reference with the query sequence repeated multiple times with gaps
 	std::string query_part = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT";
 	std::string spacer = "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT";
-	std::string ref_seq = query_part + spacer + query_part + spacer + query_part + spacer + query_part + spacer + query_part;
+	std::string ref_seq =
+	    query_part + spacer + query_part + spacer + query_part + spacer + query_part + spacer + query_part;
 	std::vector<AlignmentSubject> subjects;
 	subjects.push_back({"reference", ref_seq});
 	aligner.build_index(subjects);
@@ -168,8 +167,8 @@ TEST_CASE("Minimap2Aligner max_secondary limits alignments", "[Minimap2Aligner]"
 	// Should have at most max_secondary + 1 (primary) = 3 alignments
 	// minimap2's behavior with repetitive sequences may vary, so we use <=
 	INFO("Number of alignments: " << batch.size());
-	REQUIRE(batch.size() >= 1);  // At least one alignment
-	REQUIRE(batch.size() <= config.max_secondary + 1);  // At most primary + secondaries
+	REQUIRE(batch.size() >= 1);                        // At least one alignment
+	REQUIRE(batch.size() <= config.max_secondary + 1); // At most primary + secondaries
 }
 
 TEST_CASE("Minimap2Aligner SAM fields are populated correctly", "[Minimap2Aligner]") {
@@ -194,7 +193,7 @@ TEST_CASE("Minimap2Aligner SAM fields are populated correctly", "[Minimap2Aligne
 	// Check all required fields are populated
 	REQUIRE(!batch.read_ids[0].empty());
 	REQUIRE(!batch.references[0].empty());
-	REQUIRE(batch.positions[0] > 0);  // 1-based
+	REQUIRE(batch.positions[0] > 0); // 1-based
 	REQUIRE(batch.stop_positions[0] >= batch.positions[0]);
 	REQUIRE(!batch.cigars[0].empty());
 	// mapq should be reasonable (0-60)
@@ -219,7 +218,7 @@ TEST_CASE("Minimap2Aligner different presets", "[Minimap2Aligner]") {
 	                       "ATATATATATATATATATATATATATATATATATATATATATATATATATAT"
 	                       "GCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGC";
 
-	for (const auto& preset : presets) {
+	for (const auto &preset : presets) {
 		INFO("Testing preset: " << preset);
 		Minimap2Config config;
 		config.preset = preset;
@@ -240,16 +239,15 @@ TEST_CASE("Minimap2Aligner paired-end alignment", "[Minimap2Aligner]") {
 	// sr preset uses k=21, so we need sequences longer than 21bp
 	std::string read1_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"; // 52bp
 	std::string read2_seq = "TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA"; // 52bp
-	std::string spacer = std::string(200, 'N');  // N's won't match
+	std::string spacer = std::string(200, 'N');                                     // N's won't match
 	std::string long_ref = read1_seq + spacer + read2_seq;
 	std::vector<AlignmentSubject> subjects;
 	subjects.push_back({"reference", long_ref});
 	aligner.build_index(subjects);
 
-	auto queries = make_paired_query_batch(
-		"paired_query",
-		read1_seq,  // Matches at position 1
-		read2_seq   // Matches at position ~254
+	auto queries = make_paired_query_batch("paired_query",
+	                                       read1_seq, // Matches at position 1
+	                                       read2_seq  // Matches at position ~254
 	);
 
 	SAMRecordBatch batch;
@@ -269,8 +267,10 @@ TEST_CASE("Minimap2Aligner paired-end alignment", "[Minimap2Aligner]") {
 		bool is_read2 = (flags & 0x80) != 0;
 
 		if (is_paired) {
-			if (is_read1) found_read1 = true;
-			if (is_read2) found_read2 = true;
+			if (is_read1)
+				found_read1 = true;
+			if (is_read2)
+				found_read2 = true;
 		}
 	}
 	REQUIRE(found_read1);
@@ -285,7 +285,7 @@ TEST_CASE("Minimap2Aligner build_single_index for per-subject mode", "[Minimap2A
 	// 100bp reference
 	std::string ref_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
 	                      "GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC";
-	AlignmentSubject subject{"single_ref", ref_seq};
+	AlignmentSubject subject {"single_ref", ref_seq};
 
 	REQUIRE_NOTHROW(aligner.build_single_index(subject));
 
@@ -300,17 +300,17 @@ TEST_CASE("Minimap2Aligner build_single_index for per-subject mode", "[Minimap2A
 }
 
 TEST_CASE("AlignmentSubject length computed from sequence", "[Minimap2Aligner]") {
-	AlignmentSubject subject{"test", "ACGTACGT"};
+	AlignmentSubject subject {"test", "ACGTACGT"};
 	REQUIRE(subject.length() == 8);
 
-	AlignmentSubject empty_subject{"empty", ""};
+	AlignmentSubject empty_subject {"empty", ""};
 	REQUIRE(empty_subject.length() == 0);
 }
 
 TEST_CASE("Minimap2Aligner CIGAR string generation", "[Minimap2Aligner]") {
 	Minimap2Config config;
 	config.preset = "sr";
-	config.eqx = true;  // Use =/X instead of M
+	config.eqx = true; // Use =/X instead of M
 	Minimap2Aligner aligner(config);
 
 	// 100bp reference
@@ -393,7 +393,7 @@ TEST_CASE("Minimap2Aligner multiple queries in batch", "[Minimap2Aligner]") {
 
 	// Check that all query IDs appear in results
 	std::set<std::string> found_ids;
-	for (const auto& id : batch.read_ids) {
+	for (const auto &id : batch.read_ids) {
 		found_ids.insert(id);
 	}
 	REQUIRE(found_ids.count("query1") > 0);

@@ -79,11 +79,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	CopySAMFunction::Register(loader);
 
 	MIINTMacros::Register(loader);
-		
-    // read_ncbi and related need httpfs
-    auto &instance = loader.GetDatabaseInstance();
-    Connection con(instance);
-    ExtensionInstallOptions options;
+
+	// read_ncbi and related need httpfs
+	auto &instance = loader.GetDatabaseInstance();
+	Connection con(instance);
+	ExtensionInstallOptions options;
 	ExtensionHelper::InstallExtension(*con.context, "httpfs", options);
 	ExtensionHelper::AutoLoadExtension(instance, "httpfs");
 }

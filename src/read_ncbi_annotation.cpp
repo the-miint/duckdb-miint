@@ -6,19 +6,19 @@ namespace duckdb {
 
 // Data constructor - sets up schema matching read_gff
 ReadNCBIAnnotationTableFunction::Data::Data(std::vector<std::string> accessions, const std::string &api_key,
-                                             bool include_filepath)
+                                            bool include_filepath)
     : accessions(std::move(accessions)), api_key(api_key), include_filepath(include_filepath) {
 
 	// Schema matches read_gff macro output
 	names = {"seqid", "source", "type", "position", "stop_position", "score", "strand", "phase", "attributes"};
-	types = {LogicalType::VARCHAR,                                // seqid
-	         LogicalType::VARCHAR,                                // source
-	         LogicalType::VARCHAR,                                // type
-	         LogicalType::INTEGER,                                // position
-	         LogicalType::INTEGER,                                // stop_position
-	         LogicalType::DOUBLE,                                 // score
-	         LogicalType::VARCHAR,                                // strand
-	         LogicalType::INTEGER,                                // phase
+	types = {LogicalType::VARCHAR,                                          // seqid
+	         LogicalType::VARCHAR,                                          // source
+	         LogicalType::VARCHAR,                                          // type
+	         LogicalType::INTEGER,                                          // position
+	         LogicalType::INTEGER,                                          // stop_position
+	         LogicalType::DOUBLE,                                           // score
+	         LogicalType::VARCHAR,                                          // strand
+	         LogicalType::INTEGER,                                          // phase
 	         LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR)}; // attributes
 
 	if (include_filepath) {
@@ -29,7 +29,7 @@ ReadNCBIAnnotationTableFunction::Data::Data(std::vector<std::string> accessions,
 
 // GlobalState constructor
 ReadNCBIAnnotationTableFunction::GlobalState::GlobalState(DatabaseInstance &db, const std::string &api_key,
-                                                           const std::vector<std::string> &accessions)
+                                                          const std::vector<std::string> &accessions)
     : client(make_uniq<miint::NCBIClient>(db, api_key)), next_accession_idx(0), batch_offset(0),
       accessions(accessions) {
 }
@@ -60,8 +60,8 @@ bool ReadNCBIAnnotationTableFunction::GlobalState::FetchNextAccession() {
 }
 
 unique_ptr<FunctionData> ReadNCBIAnnotationTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                                vector<LogicalType> &return_types,
-                                                                vector<std::string> &names) {
+                                                               vector<LogicalType> &return_types,
+                                                               vector<std::string> &names) {
 	// Parse accession(s) - can be VARCHAR or VARCHAR[]
 	std::vector<std::string> accessions;
 
@@ -114,15 +114,15 @@ unique_ptr<FunctionData> ReadNCBIAnnotationTableFunction::Bind(ClientContext &co
 }
 
 unique_ptr<GlobalTableFunctionState> ReadNCBIAnnotationTableFunction::InitGlobal(ClientContext &context,
-                                                                                   TableFunctionInitInput &input) {
+                                                                                 TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	auto &db = DatabaseInstance::GetDatabase(context);
 	return make_uniq<GlobalState>(db, data.api_key, data.accessions);
 }
 
 unique_ptr<LocalTableFunctionState> ReadNCBIAnnotationTableFunction::InitLocal(ExecutionContext &context,
-                                                                                 TableFunctionInitInput &input,
-                                                                                 GlobalTableFunctionState *global_state) {
+                                                                               TableFunctionInitInput &input,
+                                                                               GlobalTableFunctionState *global_state) {
 	return make_uniq<LocalState>();
 }
 

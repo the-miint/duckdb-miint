@@ -75,7 +75,8 @@ unique_ptr<FunctionData> ReadAlignmentsTableFunction::Bind(ClientContext &contex
 
 		// Validate table or view exists (use TABLE_ENTRY lookup which returns either)
 		EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, reference_lengths_table.value(), QueryErrorContext());
-		auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
+		auto entry =
+		    Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
 		if (!entry) {
 			throw InvalidInputException("Table or view '%s' does not exist", reference_lengths_table.value());
 		}
@@ -161,11 +162,11 @@ unique_ptr<GlobalTableFunctionState> ReadAlignmentsTableFunction::InitGlobal(Cli
 				// Validate subsequent files have same header status
 				if (has_header != first_file_has_header) {
 					if (first_file_has_header) {
-						throw IOException("Inconsistent headers across files: '" + data.sam_paths[0] + "' has header, '" + path +
-						                  "' does not");
+						throw IOException("Inconsistent headers across files: '" + data.sam_paths[0] +
+						                  "' has header, '" + path + "' does not");
 					} else {
-						throw IOException("Inconsistent headers across files: '" + data.sam_paths[0] + "' lacks header, '" +
-						                  path + "' has header");
+						throw IOException("Inconsistent headers across files: '" + data.sam_paths[0] +
+						                  "' lacks header, '" + path + "' has header");
 					}
 				}
 			}
@@ -178,8 +179,8 @@ unique_ptr<GlobalTableFunctionState> ReadAlignmentsTableFunction::InitGlobal(Cli
 }
 
 unique_ptr<LocalTableFunctionState> ReadAlignmentsTableFunction::InitLocal(ExecutionContext &context,
-                                                                            TableFunctionInitInput &input,
-                                                                            GlobalTableFunctionState *global_state) {
+                                                                           TableFunctionInitInput &input,
+                                                                           GlobalTableFunctionState *global_state) {
 	return duckdb::make_uniq<LocalState>();
 }
 
@@ -261,8 +262,7 @@ void ReadAlignmentsTableFunction::Execute(ClientContext &context, TableFunctionI
 	output.SetCardinality(batch.size());
 }
 
-void ReadAlignmentsTableFunction::SetResultVectorString(Vector &result_vector,
-                                                         const std::vector<std::string> &values) {
+void ReadAlignmentsTableFunction::SetResultVectorString(Vector &result_vector, const std::vector<std::string> &values) {
 	auto result_data = FlatVector::GetData<string_t>(result_vector);
 	for (idx_t j = 0; j < values.size(); j++) {
 		result_data[j] = StringVector::AddString(result_vector, values[j]);
@@ -270,7 +270,7 @@ void ReadAlignmentsTableFunction::SetResultVectorString(Vector &result_vector,
 }
 
 void ReadAlignmentsTableFunction::SetResultVectorStringNullable(Vector &result_vector,
-                                                                 const std::vector<std::string> &values) {
+                                                                const std::vector<std::string> &values) {
 	auto result_data = FlatVector::GetData<string_t>(result_vector);
 	auto &validity = FlatVector::Validity(result_vector);
 	validity.SetAllInvalid(values.size());
@@ -305,7 +305,7 @@ void ReadAlignmentsTableFunction::SetResultVectorInt64(Vector &result_vector, co
 }
 
 void ReadAlignmentsTableFunction::SetResultVectorInt64Nullable(Vector &result_vector,
-                                                                const std::vector<int64_t> &values) {
+                                                               const std::vector<int64_t> &values) {
 	auto result_data = FlatVector::GetData<int64_t>(result_vector);
 	auto &validity = FlatVector::Validity(result_vector);
 	validity.SetAllInvalid(values.size());
@@ -326,7 +326,7 @@ void ReadAlignmentsTableFunction::SetResultVectorFilepath(Vector &result_vector,
 }
 
 void ReadAlignmentsTableFunction::SetResultVectorListUInt8(Vector &result_vector,
-                                                             const std::vector<miint::QualScore> &values) {
+                                                           const std::vector<miint::QualScore> &values) {
 	// Compute total number of elements
 	idx_t total_child_elements = 0;
 	for (auto &qual : values) {

@@ -41,8 +41,8 @@ static std::vector<Bowtie2ShardInfo> BuildBowtie2ShardInfos(ClientContext &conte
 }
 
 unique_ptr<FunctionData> AlignBowtie2ShardedTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                                  vector<LogicalType> &return_types,
-                                                                  vector<std::string> &names) {
+                                                                vector<LogicalType> &return_types,
+                                                                vector<std::string> &names) {
 	auto data = make_uniq<Data>();
 
 	// Required: query_table (first positional parameter)
@@ -109,16 +109,16 @@ unique_ptr<FunctionData> AlignBowtie2ShardedTableFunction::Bind(ClientContext &c
 }
 
 unique_ptr<GlobalTableFunctionState> AlignBowtie2ShardedTableFunction::InitGlobal(ClientContext &context,
-                                                                                    TableFunctionInitInput &input) {
+                                                                                  TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 	gstate->shard_count = data.shards.size();
 	return gstate;
 }
 
-unique_ptr<LocalTableFunctionState> AlignBowtie2ShardedTableFunction::InitLocal(ExecutionContext &context,
-                                                                                  TableFunctionInitInput &input,
-                                                                                  GlobalTableFunctionState *global_state) {
+unique_ptr<LocalTableFunctionState>
+AlignBowtie2ShardedTableFunction::InitLocal(ExecutionContext &context, TableFunctionInitInput &input,
+                                            GlobalTableFunctionState *global_state) {
 	auto &data = input.bind_data->Cast<Data>();
 	auto lstate = make_uniq<LocalState>();
 	// Create per-thread aligner with config
@@ -181,9 +181,9 @@ void AlignBowtie2ShardedTableFunction::Execute(ClientContext &context, TableFunc
 		miint::SequenceRecordBatch query_batch;
 
 		// Use STANDARD_VECTOR_SIZE as query batch size to bound result buffer memory
-		bool has_more = ReadShardQueryBatch(context, bind_data.query_table, bind_data.read_to_shard_table,
-		                                     shard.name, bind_data.query_schema, STANDARD_VECTOR_SIZE,
-		                                     local_state.current_read_offset, query_batch);
+		bool has_more = ReadShardQueryBatch(context, bind_data.query_table, bind_data.read_to_shard_table, shard.name,
+		                                    bind_data.query_schema, STANDARD_VECTOR_SIZE,
+		                                    local_state.current_read_offset, query_batch);
 
 		// Clear buffer for new results
 		local_state.result_buffer.clear();

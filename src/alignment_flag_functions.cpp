@@ -60,8 +60,9 @@ static void AlignmentIsSecondaryFunction(DataChunk &args, ExpressionState &state
 
 static void AlignmentIsPrimaryFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &flags_vector = args.data[0];
-	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(),
-	                                       [&](uint16_t flags) { return (flags & 0x100) == 0 && (flags & 0x800) == 0; });
+	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(), [&](uint16_t flags) {
+		return (flags & 0x100) == 0 && (flags & 0x800) == 0;
+	});
 }
 
 static void AlignmentIsQcFailedFunction(DataChunk &args, ExpressionState &state, Vector &result) {

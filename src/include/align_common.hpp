@@ -31,10 +31,9 @@ static constexpr idx_t MINIMAP2_QUERY_BATCH_SIZE = ALIGNMENT_QUERY_BATCH_SIZE;
 
 // Get the standard alignment output column names
 inline std::vector<std::string> GetAlignmentOutputNames() {
-	return {"read_id", "flags",          "reference",     "position",        "stop_position", "mapq",
-	        "cigar",   "mate_reference", "mate_position", "template_length", "tag_as",        "tag_xs",
-	        "tag_ys",  "tag_xn",         "tag_xm",        "tag_xo",          "tag_xg",        "tag_nm",
-	        "tag_yt",  "tag_md",         "tag_sa"};
+	return {"read_id",        "flags",         "reference",       "position", "stop_position", "mapq",   "cigar",
+	        "mate_reference", "mate_position", "template_length", "tag_as",   "tag_xs",        "tag_ys", "tag_xn",
+	        "tag_xm",         "tag_xo",        "tag_xg",          "tag_nm",   "tag_yt",        "tag_md", "tag_sa"};
 }
 
 // Get the standard alignment output column types
@@ -65,7 +64,7 @@ inline std::vector<LogicalType> GetAlignmentOutputTypes() {
 // Parse minimap2 config parameters from named_parameters map
 // Set warn_prebuilt_index=true to warn when k/w are specified but will be ignored
 inline void ParseMinimap2ConfigParams(const named_parameter_map_t &params, miint::Minimap2Config &config,
-                                       bool warn_prebuilt_index = false) {
+                                      bool warn_prebuilt_index = false) {
 	auto preset_param = params.find("preset");
 	if (preset_param != params.end() && !preset_param->second.IsNull()) {
 		config.preset = preset_param->second.ToString();
@@ -299,14 +298,12 @@ inline std::vector<ShardNameCount> ReadShardNameCounts(ClientContext &context, c
 	Connection conn(db);
 
 	// Query shard counts ordered by count descending (largest first)
-	std::string query = "SELECT shard_name, COUNT(*) as cnt FROM " +
-	                    KeywordHelper::WriteOptionallyQuoted(table_name) +
+	std::string query = "SELECT shard_name, COUNT(*) as cnt FROM " + KeywordHelper::WriteOptionallyQuoted(table_name) +
 	                    " GROUP BY shard_name ORDER BY cnt DESC";
 
 	auto query_result = conn.Query(query);
 	if (query_result->HasError()) {
-		throw InvalidInputException("Failed to read shard counts from '%s': %s", table_name,
-		                            query_result->GetError());
+		throw InvalidInputException("Failed to read shard counts from '%s': %s", table_name, query_result->GetError());
 	}
 
 	std::vector<ShardNameCount> shards;

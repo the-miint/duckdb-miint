@@ -8,20 +8,21 @@ ReadNCBITableFunction::Data::Data(std::vector<std::string> accessions, const std
     : accessions(std::move(accessions)), api_key(api_key) {
 
 	// Schema for GenBank metadata
-	names = {"accession", "version", "description", "organism", "taxonomy_id", "length", "molecule_type", "update_date"};
-	types = {LogicalType::VARCHAR,  // accession
-	         LogicalType::INTEGER,  // version
-	         LogicalType::VARCHAR,  // description
-	         LogicalType::VARCHAR,  // organism
-	         LogicalType::BIGINT,   // taxonomy_id
-	         LogicalType::BIGINT,   // length
-	         LogicalType::VARCHAR,  // molecule_type
-	         LogicalType::DATE};    // update_date
+	names = {"accession",   "version", "description",   "organism",
+	         "taxonomy_id", "length",  "molecule_type", "update_date"};
+	types = {LogicalType::VARCHAR, // accession
+	         LogicalType::INTEGER, // version
+	         LogicalType::VARCHAR, // description
+	         LogicalType::VARCHAR, // organism
+	         LogicalType::BIGINT,  // taxonomy_id
+	         LogicalType::BIGINT,  // length
+	         LogicalType::VARCHAR, // molecule_type
+	         LogicalType::DATE};   // update_date
 }
 
 // GlobalState constructor
 ReadNCBITableFunction::GlobalState::GlobalState(DatabaseInstance &db, const std::string &api_key,
-                                                  const std::vector<std::string> &accessions)
+                                                const std::vector<std::string> &accessions)
     : client(make_uniq<miint::NCBIClient>(db, api_key)), next_accession_idx(0), result_offset(0),
       accessions(accessions) {
 }
@@ -54,8 +55,7 @@ bool ReadNCBITableFunction::GlobalState::FetchNextAccession() {
 }
 
 unique_ptr<FunctionData> ReadNCBITableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                      vector<LogicalType> &return_types,
-                                                      vector<std::string> &names) {
+                                                     vector<LogicalType> &return_types, vector<std::string> &names) {
 	// Parse accession(s) - can be VARCHAR or VARCHAR[]
 	std::vector<std::string> accessions;
 
@@ -80,12 +80,11 @@ unique_ptr<FunctionData> ReadNCBITableFunction::Bind(ClientContext &context, Tab
 			throw InvalidInputException("read_ncbi: accession cannot be empty");
 		}
 		if (miint::NCBIParser::IsAssemblyAccession(acc)) {
-			throw InvalidInputException(
-			    "read_ncbi: Assembly accession '%s' is not supported. "
-			    "Assembly accessions (GCF_/GCA_) represent collections of sequences. "
-			    "Use read_ncbi_fasta('%s') to retrieve sequences from this assembly, "
-			    "or find the component RefSeq accessions (e.g., NC_XXXXXX.X) for metadata.",
-			    acc, acc);
+			throw InvalidInputException("read_ncbi: Assembly accession '%s' is not supported. "
+			                            "Assembly accessions (GCF_/GCA_) represent collections of sequences. "
+			                            "Use read_ncbi_fasta('%s') to retrieve sequences from this assembly, "
+			                            "or find the component RefSeq accessions (e.g., NC_XXXXXX.X) for metadata.",
+			                            acc, acc);
 		}
 	}
 
@@ -109,15 +108,15 @@ unique_ptr<FunctionData> ReadNCBITableFunction::Bind(ClientContext &context, Tab
 }
 
 unique_ptr<GlobalTableFunctionState> ReadNCBITableFunction::InitGlobal(ClientContext &context,
-                                                                         TableFunctionInitInput &input) {
+                                                                       TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	auto &db = DatabaseInstance::GetDatabase(context);
 	return make_uniq<GlobalState>(db, data.api_key, data.accessions);
 }
 
 unique_ptr<LocalTableFunctionState> ReadNCBITableFunction::InitLocal(ExecutionContext &context,
-                                                                       TableFunctionInitInput &input,
-                                                                       GlobalTableFunctionState *global_state) {
+                                                                     TableFunctionInitInput &input,
+                                                                     GlobalTableFunctionState *global_state) {
 	return make_uniq<LocalState>();
 }
 
@@ -146,19 +145,16 @@ void ReadNCBITableFunction::Execute(ClientContext &context, TableFunctionInput &
 		const auto &meta = global_state.metadata_results[offset + i];
 
 		// accession (column 0)
-		FlatVector::GetData<string_t>(output.data[0])[i] =
-		    StringVector::AddString(output.data[0], meta.accession);
+		FlatVector::GetData<string_t>(output.data[0])[i] = StringVector::AddString(output.data[0], meta.accession);
 
 		// version (column 1)
 		FlatVector::GetData<int32_t>(output.data[1])[i] = meta.version;
 
 		// description (column 2)
-		FlatVector::GetData<string_t>(output.data[2])[i] =
-		    StringVector::AddString(output.data[2], meta.description);
+		FlatVector::GetData<string_t>(output.data[2])[i] = StringVector::AddString(output.data[2], meta.description);
 
 		// organism (column 3)
-		FlatVector::GetData<string_t>(output.data[3])[i] =
-		    StringVector::AddString(output.data[3], meta.organism);
+		FlatVector::GetData<string_t>(output.data[3])[i] = StringVector::AddString(output.data[3], meta.organism);
 
 		// taxonomy_id (column 4)
 		FlatVector::GetData<int64_t>(output.data[4])[i] = meta.taxonomy_id;
@@ -167,8 +163,7 @@ void ReadNCBITableFunction::Execute(ClientContext &context, TableFunctionInput &
 		FlatVector::GetData<int64_t>(output.data[5])[i] = meta.length;
 
 		// molecule_type (column 6)
-		FlatVector::GetData<string_t>(output.data[6])[i] =
-		    StringVector::AddString(output.data[6], meta.molecule_type);
+		FlatVector::GetData<string_t>(output.data[6])[i] = StringVector::AddString(output.data[6], meta.molecule_type);
 
 		// update_date (column 7) - parse YYYY-MM-DD to DATE
 		if (!meta.update_date.empty()) {

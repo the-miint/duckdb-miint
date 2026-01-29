@@ -824,11 +824,7 @@ TEST_CASE("NewickTree parse with whitespace variations", "[NewickTree][parse][sk
 
 TEST_CASE("NewickTree roundtrip with complex structure", "[NewickTree][serialize][skbio]") {
 	std::vector<std::string> test_cases = {
-	    "(,,(,));",
-	    "((,),(,));",
-	    "(A:0.1,B:0.2,C:0.3);",
-	    "((A,B)AB,(C,D)CD)root;",
-	    "(:0.1,:0.2,(:0.3,:0.4):0.5):0.0;",
+	    "(,,(,));", "((,),(,));", "(A:0.1,B:0.2,C:0.3);", "((A,B)AB,(C,D)CD)root;", "(:0.1,:0.2,(:0.3,:0.4):0.5):0.0;",
 	};
 
 	for (const auto &original : test_cases) {
@@ -848,8 +844,12 @@ TEST_CASE("NewickTree roundtrip with complex structure", "[NewickTree][serialize
 TEST_CASE("NewickTree build simple tree", "[NewickTree][build]") {
 	// Build: ((A,B),C)
 	std::vector<miint::NodeInput> nodes = {
-	    {.node_id = 0, .parent_id = std::nullopt, .name = "", .branch_length = std::numeric_limits<double>::quiet_NaN(), .edge_id = std::nullopt},  // root
-	    {.node_id = 1, .parent_id = 0, .name = "", .branch_length = 0.5, .edge_id = std::nullopt},  // internal
+	    {.node_id = 0,
+	     .parent_id = std::nullopt,
+	     .name = "",
+	     .branch_length = std::numeric_limits<double>::quiet_NaN(),
+	     .edge_id = std::nullopt},                                                                 // root
+	    {.node_id = 1, .parent_id = 0, .name = "", .branch_length = 0.5, .edge_id = std::nullopt}, // internal
 	    {.node_id = 2, .parent_id = 1, .name = "A", .branch_length = 0.1, .edge_id = std::nullopt},
 	    {.node_id = 3, .parent_id = 1, .name = "B", .branch_length = 0.2, .edge_id = std::nullopt},
 	    {.node_id = 4, .parent_id = 0, .name = "C", .branch_length = 0.3, .edge_id = std::nullopt},
@@ -862,7 +862,7 @@ TEST_CASE("NewickTree build simple tree", "[NewickTree][build]") {
 
 	auto tip_names = tree.tip_names();
 	std::set<std::string> names(tip_names.begin(), tip_names.end());
-	REQUIRE(names == std::set<std::string>{"A", "B", "C"});
+	REQUIRE(names == std::set<std::string> {"A", "B", "C"});
 }
 
 TEST_CASE("NewickTree build with edge IDs", "[NewickTree][build]") {
@@ -888,7 +888,11 @@ TEST_CASE("NewickTree build with edge IDs", "[NewickTree][build]") {
 TEST_CASE("NewickTree build preserves structure for serialization", "[NewickTree][build]") {
 	// Build a tree and serialize it
 	std::vector<miint::NodeInput> nodes = {
-	    {.node_id = 100, .parent_id = std::nullopt, .name = "", .branch_length = std::numeric_limits<double>::quiet_NaN(), .edge_id = std::nullopt},
+	    {.node_id = 100,
+	     .parent_id = std::nullopt,
+	     .name = "",
+	     .branch_length = std::numeric_limits<double>::quiet_NaN(),
+	     .edge_id = std::nullopt},
 	    {.node_id = 101, .parent_id = 100, .name = "A", .branch_length = 1.5, .edge_id = std::nullopt},
 	    {.node_id = 102, .parent_id = 100, .name = "B", .branch_length = 2.5, .edge_id = std::nullopt},
 	};
@@ -904,7 +908,7 @@ TEST_CASE("NewickTree build preserves structure for serialization", "[NewickTree
 
 	auto tip_names = reparsed.tip_names();
 	std::set<std::string> names(tip_names.begin(), tip_names.end());
-	REQUIRE(names == std::set<std::string>{"A", "B"});
+	REQUIRE(names == std::set<std::string> {"A", "B"});
 }
 
 TEST_CASE("NewickTree build empty list throws", "[NewickTree][build][error]") {
@@ -934,7 +938,7 @@ TEST_CASE("NewickTree build multiple roots throws", "[NewickTree][build][error]"
 TEST_CASE("NewickTree build invalid parent throws", "[NewickTree][build][error]") {
 	std::vector<miint::NodeInput> nodes = {
 	    {.node_id = 0, .parent_id = std::nullopt, .name = "root", .branch_length = 0.0, .edge_id = std::nullopt},
-	    {.node_id = 1, .parent_id = 999, .name = "A", .branch_length = 0.1, .edge_id = std::nullopt},  // Invalid parent
+	    {.node_id = 1, .parent_id = 999, .name = "A", .branch_length = 0.1, .edge_id = std::nullopt}, // Invalid parent
 	};
 
 	REQUIRE_THROWS_WITH(miint::NewickTree::build(nodes), ContainsSubstring("non-existent parent"));
@@ -943,7 +947,7 @@ TEST_CASE("NewickTree build invalid parent throws", "[NewickTree][build][error]"
 TEST_CASE("NewickTree build duplicate node_id throws", "[NewickTree][build][error]") {
 	std::vector<miint::NodeInput> nodes = {
 	    {.node_id = 0, .parent_id = std::nullopt, .name = "root", .branch_length = 0.0, .edge_id = std::nullopt},
-	    {.node_id = 0, .parent_id = 0, .name = "A", .branch_length = 0.1, .edge_id = std::nullopt},  // Duplicate
+	    {.node_id = 0, .parent_id = 0, .name = "A", .branch_length = 0.1, .edge_id = std::nullopt}, // Duplicate
 	};
 
 	REQUIRE_THROWS_WITH(miint::NewickTree::build(nodes), ContainsSubstring("Duplicate"));
@@ -954,8 +958,16 @@ TEST_CASE("NewickTree build disconnected node throws", "[NewickTree][build][erro
 	std::vector<miint::NodeInput> nodes = {
 	    {.node_id = 0, .parent_id = std::nullopt, .name = "root", .branch_length = 0.0, .edge_id = std::nullopt},
 	    {.node_id = 1, .parent_id = 0, .name = "A", .branch_length = 0.1, .edge_id = std::nullopt},
-	    {.node_id = 2, .parent_id = 3, .name = "B", .branch_length = 0.2, .edge_id = std::nullopt},  // Parent exists but not connected
-	    {.node_id = 3, .parent_id = 2, .name = "C", .branch_length = 0.3, .edge_id = std::nullopt},  // Creates isolated cycle
+	    {.node_id = 2,
+	     .parent_id = 3,
+	     .name = "B",
+	     .branch_length = 0.2,
+	     .edge_id = std::nullopt}, // Parent exists but not connected
+	    {.node_id = 3,
+	     .parent_id = 2,
+	     .name = "C",
+	     .branch_length = 0.3,
+	     .edge_id = std::nullopt}, // Creates isolated cycle
 	};
 
 	REQUIRE_THROWS_WITH(miint::NewickTree::build(nodes), ContainsSubstring("not reachable"));

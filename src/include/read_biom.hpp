@@ -47,8 +47,7 @@ public:
 			return 4;
 		}
 
-		explicit GlobalState(const std::vector<std::string> &paths)
-		    : filepaths(paths), current_file_idx(0) {
+		explicit GlobalState(const std::vector<std::string> &paths) : filepaths(paths), current_file_idx(0) {
 		}
 	};
 

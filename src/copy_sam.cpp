@@ -262,8 +262,10 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 			result->reference_lengths_table = table_value.ToString();
 
 			// Validate table or view exists (use TABLE_ENTRY lookup which returns either)
-			EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, result->reference_lengths_table.value(), QueryErrorContext());
-			auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
+			EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, result->reference_lengths_table.value(),
+			                            QueryErrorContext());
+			auto entry =
+			    Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
 			if (!entry) {
 				throw BinderException("Table or view '%s' does not exist", result->reference_lengths_table.value());
 			}
@@ -327,7 +329,7 @@ struct SAMCopyGlobalState : public GlobalFunctionData {
 	mutex write_lock;
 	SAMFilePtr sam_file;
 	SAMHeaderPtr header;
-	std::atomic<bool> header_written{false};
+	std::atomic<bool> header_written {false};
 	bool include_header = true;
 };
 
@@ -632,16 +634,20 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 
 		// Validate position values before casting
 		if (position < 0) {
-			throw InvalidInputException("Invalid position value %lld for read: %s (must be non-negative)", position, read_id);
+			throw InvalidInputException("Invalid position value %lld for read: %s (must be non-negative)", position,
+			                            read_id);
 		}
 		if (position > 0 && (position - 1) > HTS_POS_MAX) {
-			throw InvalidInputException("Position value %lld exceeds maximum allowed position for read: %s", position, read_id);
+			throw InvalidInputException("Position value %lld exceeds maximum allowed position for read: %s", position,
+			                            read_id);
 		}
 		if (mate_position < 0) {
-			throw InvalidInputException("Invalid mate_position value %lld for read: %s (must be non-negative)", mate_position, read_id);
+			throw InvalidInputException("Invalid mate_position value %lld for read: %s (must be non-negative)",
+			                            mate_position, read_id);
 		}
 		if (mate_position > 0 && (mate_position - 1) > HTS_POS_MAX) {
-			throw InvalidInputException("Mate position value %lld exceeds maximum allowed position for read: %s", mate_position, read_id);
+			throw InvalidInputException("Mate position value %lld exceeds maximum allowed position for read: %s",
+			                            mate_position, read_id);
 		}
 
 		// Get reference TIDs

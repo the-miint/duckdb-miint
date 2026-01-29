@@ -34,8 +34,8 @@ struct FastaCopyBindData : public SequenceCopyBindData {
 		auto &other = other_p.Cast<FastaCopyBindData>();
 		return interleave == other.interleave && id_as_sequence_index == other.id_as_sequence_index &&
 		       include_comment == other.include_comment && compression == other.compression &&
-		       file_path == other.file_path && is_paired == other.is_paired &&
-		       flush_size == other.flush_size && names == other.names;
+		       file_path == other.file_path && is_paired == other.is_paired && flush_size == other.flush_size &&
+		       names == other.names;
 	}
 };
 
@@ -118,9 +118,9 @@ static unique_ptr<LocalFunctionData> FastaCopyInitializeLocal(ExecutionContext &
 //===--------------------------------------------------------------------===//
 static void WriteFastaRecordToBuffer(MemoryStream &stream, const string &id, const string &seq, const string &comment) {
 	// Pre-calculate total size to avoid reallocations
-	idx_t size = 1 + id.size() + 1 + seq.size() + 1;  // > + id + \n + seq + \n
+	idx_t size = 1 + id.size() + 1 + seq.size() + 1; // > + id + \n + seq + \n
 	if (!comment.empty()) {
-		size += 1 + comment.size();  // space + comment
+		size += 1 + comment.size(); // space + comment
 	}
 
 	// Build record string with pre-reserved capacity

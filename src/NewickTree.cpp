@@ -399,9 +399,8 @@ std::string NewickTree::to_newick() const {
 			if (!n.name.empty()) {
 				bool needs_quote = false;
 				for (char c : n.name) {
-					if (c == '(' || c == ')' || c == ',' || c == ':' || c == ';' || c == '{' || c == '}' ||
-					    c == '\'' || c == '"' || c == '[' || c == ']' ||
-					    std::isspace(static_cast<unsigned char>(c))) {
+					if (c == '(' || c == ')' || c == ',' || c == ':' || c == ';' || c == '{' || c == '}' || c == '\'' ||
+					    c == '"' || c == '[' || c == ']' || std::isspace(static_cast<unsigned char>(c))) {
 						needs_quote = true;
 						break;
 					}
@@ -554,8 +553,8 @@ NewickTree NewickTree::build(const std::vector<NodeInput> &nodes) {
 	}
 
 	if (nodes.size() > MAX_NODES) {
-		throw std::runtime_error("Too many nodes: " + std::to_string(nodes.size()) +
-		                         " exceeds maximum of " + std::to_string(MAX_NODES));
+		throw std::runtime_error("Too many nodes: " + std::to_string(nodes.size()) + " exceeds maximum of " +
+		                         std::to_string(MAX_NODES));
 	}
 
 	// Build mapping from input node_id to index in input vector
@@ -575,8 +574,8 @@ NewickTree NewickTree::build(const std::vector<NodeInput> &nodes) {
 			roots.push_back(i);
 		} else {
 			if (id_to_input_idx.find(node.parent_id.value()) == id_to_input_idx.end()) {
-				throw std::runtime_error("Node " + std::to_string(node.node_id) +
-				                         " references non-existent parent " + std::to_string(node.parent_id.value()));
+				throw std::runtime_error("Node " + std::to_string(node.node_id) + " references non-existent parent " +
+				                         std::to_string(node.parent_id.value()));
 			}
 		}
 	}
@@ -618,8 +617,7 @@ NewickTree NewickTree::build(const std::vector<NodeInput> &nodes) {
 			child_iter++;
 
 			if (in_stack[child_idx]) {
-				throw std::runtime_error("Cycle detected involving node " +
-				                         std::to_string(nodes[child_idx].node_id));
+				throw std::runtime_error("Cycle detected involving node " + std::to_string(nodes[child_idx].node_id));
 			}
 
 			if (!visited[child_idx]) {
@@ -800,24 +798,23 @@ void NewickTree::insert_fully_resolved(const std::vector<Placement> &placements)
 	// This ensures we catch and report all invalid data, not just the "winning" placements
 	for (const auto &p : placements) {
 		if (edge_index.find(p.edge_id) == edge_index.end()) {
-			throw std::runtime_error("Unknown edge_id " + std::to_string(p.edge_id) +
-			                         " for fragment '" + p.fragment_id + "'");
+			throw std::runtime_error("Unknown edge_id " + std::to_string(p.edge_id) + " for fragment '" +
+			                         p.fragment_id + "'");
 		}
 		if (p.distal_length < 0) {
-			throw std::runtime_error("Negative distal_length " + std::to_string(p.distal_length) +
-			                         " for fragment '" + p.fragment_id + "'");
+			throw std::runtime_error("Negative distal_length " + std::to_string(p.distal_length) + " for fragment '" +
+			                         p.fragment_id + "'");
 		}
 		if (p.pendant_length < 0) {
-			throw std::runtime_error("Negative pendant_length " + std::to_string(p.pendant_length) +
-			                         " for fragment '" + p.fragment_id + "'");
+			throw std::runtime_error("Negative pendant_length " + std::to_string(p.pendant_length) + " for fragment '" +
+			                         p.fragment_id + "'");
 		}
 		// Validate distal_length against edge length
 		uint32_t edge_node = edge_index.at(p.edge_id);
 		double edge_length = nodes_[edge_node].branch_length;
 		if (!std::isnan(edge_length) && p.distal_length > edge_length) {
-			throw std::runtime_error("distal_length " + std::to_string(p.distal_length) +
-			                         " exceeds edge length " + std::to_string(edge_length) +
-			                         " for fragment '" + p.fragment_id + "'");
+			throw std::runtime_error("distal_length " + std::to_string(p.distal_length) + " exceeds edge length " +
+			                         std::to_string(edge_length) + " for fragment '" + p.fragment_id + "'");
 		}
 	}
 

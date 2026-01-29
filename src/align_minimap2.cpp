@@ -93,7 +93,7 @@ unique_ptr<FunctionData> AlignMinimap2TableFunction::Bind(ClientContext &context
 }
 
 unique_ptr<GlobalTableFunctionState> AlignMinimap2TableFunction::InitGlobal(ClientContext &context,
-                                                                             TableFunctionInitInput &input) {
+                                                                            TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 
@@ -120,8 +120,8 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2TableFunction::InitGlobal(Clie
 }
 
 unique_ptr<LocalTableFunctionState> AlignMinimap2TableFunction::InitLocal(ExecutionContext &context,
-                                                                           TableFunctionInitInput &input,
-                                                                           GlobalTableFunctionState *global_state) {
+                                                                          TableFunctionInitInput &input,
+                                                                          GlobalTableFunctionState *global_state) {
 	return make_uniq<LocalState>();
 }
 
@@ -195,8 +195,8 @@ void AlignMinimap2TableFunction::Execute(ClientContext &context, TableFunctionIn
 		} else {
 			// Standard mode: stream queries against single index
 			miint::SequenceRecordBatch query_batch;
-			bool has_more = ReadQueryBatch(context, bind_data.query_table, bind_data.query_schema, MINIMAP2_QUERY_BATCH_SIZE,
-			                               global_state.current_query_offset, query_batch);
+			bool has_more = ReadQueryBatch(context, bind_data.query_table, bind_data.query_schema,
+			                               MINIMAP2_QUERY_BATCH_SIZE, global_state.current_query_offset, query_batch);
 
 			if (query_batch.empty() && !has_more) {
 				global_state.done = true;

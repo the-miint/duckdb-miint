@@ -20,8 +20,8 @@ class AlignMinimap2TableFunction {
 public:
 	struct Data : public TableFunctionData {
 		std::string query_table;
-		std::string subject_table;           // OPTIONAL (either this or index_path required)
-		std::string index_path;              // OPTIONAL: path to .mmi file
+		std::string subject_table; // OPTIONAL (either this or index_path required)
+		std::string index_path;    // OPTIONAL: path to .mmi file
 		bool per_subject_database;
 		miint::Minimap2Config config;
 		SequenceTableSchema query_schema;
@@ -36,10 +36,7 @@ public:
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
-		Data()
-		    : per_subject_database(false),
-		      names(GetAlignmentOutputNames()),
-		      types(GetAlignmentOutputTypes()) {
+		Data() : per_subject_database(false), names(GetAlignmentOutputNames()), types(GetAlignmentOutputTypes()) {
 		}
 	};
 
@@ -47,7 +44,7 @@ public:
 		std::mutex lock;
 		std::unique_ptr<miint::Minimap2Aligner> aligner;
 		idx_t current_query_offset;
-		idx_t current_subject_idx;    // For per_subject mode
+		idx_t current_subject_idx; // For per_subject mode
 		miint::SAMRecordBatch result_buffer;
 		idx_t buffer_offset;
 		bool done;
@@ -61,8 +58,8 @@ public:
 			return 1;
 		}
 
-		GlobalState() : current_query_offset(0), current_subject_idx(0), buffer_offset(0), done(false),
-		                queries_loaded(false) {
+		GlobalState()
+		    : current_query_offset(0), current_subject_idx(0), buffer_offset(0), done(false), queries_loaded(false) {
 		}
 	};
 

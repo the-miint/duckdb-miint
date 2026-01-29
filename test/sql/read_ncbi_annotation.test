@@ -1,6 +1,7 @@
 # name: test/sql/read_ncbi_annotation.test
 # description: Test read_ncbi_annotation table function
-# group: [miint]
+# group: [sql]
+
 # NOTE: This test requires network access to NCBI servers
 
 require miint

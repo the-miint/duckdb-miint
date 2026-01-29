@@ -179,125 +179,125 @@ struct SAMRecordBatch {
 
 // Helper functions for extracting fields from bam1_t and populating batches
 namespace sam_utils {
-	inline int64_t get_int_tag(const bam1_t *aln, const char *tag, int64_t default_val = -1) {
-		uint8_t *aux = bam_aux_get(aln, tag);
-		if (!aux) {
-			return default_val;
-		}
-		return bam_aux2i(aux);
+inline int64_t get_int_tag(const bam1_t *aln, const char *tag, int64_t default_val = -1) {
+	uint8_t *aux = bam_aux_get(aln, tag);
+	if (!aux) {
+		return default_val;
+	}
+	return bam_aux2i(aux);
+}
+
+inline std::string get_string_tag(const bam1_t *aln, const char *tag) {
+	const uint8_t *aux = bam_aux_get(aln, tag);
+	if (!aux) {
+		return "";
+	}
+	return std::string(bam_aux2Z(aux));
+}
+
+inline std::string cigar_to_string(const bam1_t *aln) {
+	std::ostringstream oss;
+	const uint32_t *cigar = reinterpret_cast<uint32_t *>(aln->data + aln->core.l_qname);
+	for (uint32_t i = 0; i < aln->core.n_cigar; i++) {
+		uint32_t op_len = bam_cigar_oplen(cigar[i]);
+		char op_chr = bam_cigar_opchr(cigar[i]);
+		oss << op_len << op_chr;
+	}
+	return oss.str();
+}
+
+// Parse a single record into a batch (append)
+inline void parse_record_to_batch(const bam1_t *aln, const sam_hdr_t *hdr, SAMRecordBatch &batch,
+                                  bool include_seq_qual = false) {
+	batch.read_ids.emplace_back(reinterpret_cast<char *>(aln->data));
+	batch.flags.push_back(aln->core.flag);
+
+	if (aln->core.tid >= 0) {
+		batch.references.emplace_back(sam_hdr_tid2name(hdr, aln->core.tid));
+	} else {
+		batch.references.emplace_back("*");
 	}
 
-	inline std::string get_string_tag(const bam1_t *aln, const char *tag) {
-		const uint8_t *aux = bam_aux_get(aln, tag);
-		if (!aux) {
-			return "";
-		}
-		return std::string(bam_aux2Z(aux));
+	batch.positions.push_back(aln->core.pos >= 0 ? aln->core.pos + 1 : 0);
+
+	if (aln->core.flag & 0x4) { // BAM_FUNMAP
+		batch.stop_positions.push_back(0);
+	} else {
+		hts_pos_t end_pos = bam_endpos(aln);
+		batch.stop_positions.push_back(end_pos >= 0 ? end_pos + 1 : 0);
 	}
 
-	inline std::string cigar_to_string(const bam1_t *aln) {
-		std::ostringstream oss;
-		const uint32_t *cigar = reinterpret_cast<uint32_t *>(aln->data + aln->core.l_qname);
-		for (uint32_t i = 0; i < aln->core.n_cigar; i++) {
-			uint32_t op_len = bam_cigar_oplen(cigar[i]);
-			char op_chr = bam_cigar_opchr(cigar[i]);
-			oss << op_len << op_chr;
+	batch.mapqs.push_back(aln->core.qual);
+	batch.cigars.emplace_back(cigar_to_string(aln));
+
+	if (aln->core.mtid >= 0) {
+		if (aln->core.mtid == aln->core.tid) {
+			batch.mate_references.emplace_back("=");
+		} else {
+			batch.mate_references.emplace_back(sam_hdr_tid2name(hdr, aln->core.mtid));
 		}
-		return oss.str();
+	} else {
+		batch.mate_references.emplace_back("*");
 	}
 
-	// Parse a single record into a batch (append)
-	inline void parse_record_to_batch(const bam1_t *aln, const sam_hdr_t *hdr, SAMRecordBatch &batch,
-	                                   bool include_seq_qual = false) {
-		batch.read_ids.emplace_back(reinterpret_cast<char *>(aln->data));
-		batch.flags.push_back(aln->core.flag);
+	batch.mate_positions.push_back(aln->core.mpos >= 0 ? aln->core.mpos + 1 : 0);
+	batch.template_lengths.push_back(aln->core.isize);
 
-		if (aln->core.tid >= 0) {
-			batch.references.emplace_back(sam_hdr_tid2name(hdr, aln->core.tid));
-		} else {
-			batch.references.emplace_back("*");
+	batch.tag_as_values.push_back(get_int_tag(aln, "AS"));
+	batch.tag_xs_values.push_back(get_int_tag(aln, "XS"));
+	batch.tag_ys_values.push_back(get_int_tag(aln, "YS"));
+	batch.tag_xn_values.push_back(get_int_tag(aln, "XN"));
+	batch.tag_xm_values.push_back(get_int_tag(aln, "XM"));
+	batch.tag_xo_values.push_back(get_int_tag(aln, "XO"));
+	batch.tag_xg_values.push_back(get_int_tag(aln, "XG"));
+	batch.tag_nm_values.push_back(get_int_tag(aln, "NM"));
+	batch.tag_yt_values.emplace_back(get_string_tag(aln, "YT"));
+	batch.tag_md_values.emplace_back(get_string_tag(aln, "MD"));
+	batch.tag_sa_values.emplace_back(get_string_tag(aln, "SA"));
+
+	// Extract SEQUENCE and QUALITY (optional)
+	if (include_seq_qual) {
+		// Extract SEQUENCE
+		uint8_t *seq = bam_get_seq(aln);
+		std::string sequence;
+		sequence.reserve(aln->core.l_qseq);
+		for (int i = 0; i < aln->core.l_qseq; i++) {
+			sequence.push_back(seq_nt16_str[bam_seqi(seq, i)]);
 		}
 
-		batch.positions.push_back(aln->core.pos >= 0 ? aln->core.pos + 1 : 0);
+		// Extract QUALITY
+		uint8_t *qual = bam_get_qual(aln);
+		std::string qual_str;
 
-		if (aln->core.flag & 0x4) { // BAM_FUNMAP
-			batch.stop_positions.push_back(0);
-		} else {
-			hts_pos_t end_pos = bam_endpos(aln);
-			batch.stop_positions.push_back(end_pos >= 0 ? end_pos + 1 : 0);
+		// Validate: primary and unmapped reads must have sequence
+		bool is_unmapped = (aln->core.flag & 4) != 0;
+		bool is_secondary = (aln->core.flag & 0x100) != 0;
+		bool is_supplementary = (aln->core.flag & 0x800) != 0;
+		bool is_primary = !is_secondary && !is_supplementary;
+
+		if (aln->core.l_qseq == 0 && (is_primary || is_unmapped)) {
+			throw std::runtime_error("Primary/unmapped read missing sequence (SEQ='*'): " +
+			                         std::string(reinterpret_cast<char *>(aln->data)));
 		}
 
-		batch.mapqs.push_back(aln->core.qual);
-		batch.cigars.emplace_back(cigar_to_string(aln));
+		// Note: HTSlib enforces that sequence and quality lengths match during parsing
+		// If quality is present (qual[0] != 0xFF), it's guaranteed to match l_qseq
+		// No explicit validation needed here - HTSlib handles this
 
-		if (aln->core.mtid >= 0) {
-			if (aln->core.mtid == aln->core.tid) {
-				batch.mate_references.emplace_back("=");
-			} else {
-				batch.mate_references.emplace_back(sam_hdr_tid2name(hdr, aln->core.mtid));
-			}
+		if (qual[0] == 0xFF) {
+			// No quality scores (indicated by 0xFF in first byte)
+			qual_str = ""; // Empty string for QualScore
 		} else {
-			batch.mate_references.emplace_back("*");
-		}
-
-		batch.mate_positions.push_back(aln->core.mpos >= 0 ? aln->core.mpos + 1 : 0);
-		batch.template_lengths.push_back(aln->core.isize);
-
-		batch.tag_as_values.push_back(get_int_tag(aln, "AS"));
-		batch.tag_xs_values.push_back(get_int_tag(aln, "XS"));
-		batch.tag_ys_values.push_back(get_int_tag(aln, "YS"));
-		batch.tag_xn_values.push_back(get_int_tag(aln, "XN"));
-		batch.tag_xm_values.push_back(get_int_tag(aln, "XM"));
-		batch.tag_xo_values.push_back(get_int_tag(aln, "XO"));
-		batch.tag_xg_values.push_back(get_int_tag(aln, "XG"));
-		batch.tag_nm_values.push_back(get_int_tag(aln, "NM"));
-		batch.tag_yt_values.emplace_back(get_string_tag(aln, "YT"));
-		batch.tag_md_values.emplace_back(get_string_tag(aln, "MD"));
-		batch.tag_sa_values.emplace_back(get_string_tag(aln, "SA"));
-
-		// Extract SEQUENCE and QUALITY (optional)
-		if (include_seq_qual) {
-			// Extract SEQUENCE
-			uint8_t *seq = bam_get_seq(aln);
-			std::string sequence;
-			sequence.reserve(aln->core.l_qseq);
+			qual_str.reserve(aln->core.l_qseq);
 			for (int i = 0; i < aln->core.l_qseq; i++) {
-				sequence.push_back(seq_nt16_str[bam_seqi(seq, i)]);
+				// HTSlib returns raw Phred scores (0-93), convert to Phred33 ASCII for storage
+				qual_str.push_back(qual[i] + 33);
 			}
-
-			// Extract QUALITY
-			uint8_t *qual = bam_get_qual(aln);
-			std::string qual_str;
-
-			// Validate: primary and unmapped reads must have sequence
-			bool is_unmapped = (aln->core.flag & 4) != 0;
-			bool is_secondary = (aln->core.flag & 0x100) != 0;
-			bool is_supplementary = (aln->core.flag & 0x800) != 0;
-			bool is_primary = !is_secondary && !is_supplementary;
-
-			if (aln->core.l_qseq == 0 && (is_primary || is_unmapped)) {
-				throw std::runtime_error("Primary/unmapped read missing sequence (SEQ='*'): " +
-				                         std::string(reinterpret_cast<char *>(aln->data)));
-			}
-
-			// Note: HTSlib enforces that sequence and quality lengths match during parsing
-			// If quality is present (qual[0] != 0xFF), it's guaranteed to match l_qseq
-			// No explicit validation needed here - HTSlib handles this
-
-			if (qual[0] == 0xFF) {
-				// No quality scores (indicated by 0xFF in first byte)
-				qual_str = ""; // Empty string for QualScore
-			} else {
-				qual_str.reserve(aln->core.l_qseq);
-				for (int i = 0; i < aln->core.l_qseq; i++) {
-					// HTSlib returns raw Phred scores (0-93), convert to Phred33 ASCII for storage
-					qual_str.push_back(qual[i] + 33);
-				}
-			}
-
-			batch.sequences.emplace_back(sequence);
-			batch.quals.emplace_back(QualScore(qual_str));
 		}
+
+		batch.sequences.emplace_back(sequence);
+		batch.quals.emplace_back(QualScore(qual_str));
 	}
 }
+} // namespace sam_utils
 }; // namespace miint

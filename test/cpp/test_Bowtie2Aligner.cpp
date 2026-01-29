@@ -208,8 +208,7 @@ TEST_CASE("Bowtie2Aligner build_index with empty subjects throws", "[Bowtie2Alig
 		Bowtie2Aligner aligner(config);
 
 		std::vector<AlignmentSubject> subjects;
-		REQUIRE_THROWS_WITH(aligner.build_index(subjects),
-		                    Catch::Matchers::ContainsSubstring("empty"));
+		REQUIRE_THROWS_WITH(aligner.build_index(subjects), Catch::Matchers::ContainsSubstring("empty"));
 	} catch (const std::runtime_error &e) {
 		if (std::string(e.what()).find("bowtie2") != std::string::npos &&
 		    std::string(e.what()).find("PATH") != std::string::npos) {
@@ -225,7 +224,7 @@ TEST_CASE("Bowtie2Aligner build_single_index works", "[Bowtie2Aligner]") {
 	try {
 		Bowtie2Aligner aligner(config);
 
-		AlignmentSubject subject{"single_ref", "ACGTACGTACGTACGTACGTACGTACGTACGT"};
+		AlignmentSubject subject {"single_ref", "ACGTACGTACGTACGTACGTACGTACGTACGT"};
 		REQUIRE_NOTHROW(aligner.build_single_index(subject));
 
 		// Verify index files exist
@@ -395,8 +394,7 @@ TEST_CASE("Bowtie2Aligner load_index does not clean up external index", "[Bowtie
 			auto builder_dir = builder.get_temp_dir();
 			for (const auto &entry : std::filesystem::directory_iterator(builder_dir)) {
 				if (entry.path().string().find("index") != std::string::npos) {
-					std::filesystem::copy(entry.path(),
-					                      external_dir / entry.path().filename());
+					std::filesystem::copy(entry.path(), external_dir / entry.path().filename());
 				}
 			}
 		}
@@ -501,8 +499,7 @@ TEST_CASE("Bowtie2Aligner align without index throws", "[Bowtie2Aligner]") {
 		auto queries = make_query_batch("q1", "ACGTACGTACGTACGTACGTACGT");
 		SAMRecordBatch batch;
 
-		REQUIRE_THROWS_WITH(aligner.align(queries, batch),
-		                    Catch::Matchers::ContainsSubstring("index"));
+		REQUIRE_THROWS_WITH(aligner.align(queries, batch), Catch::Matchers::ContainsSubstring("index"));
 	} catch (const std::runtime_error &e) {
 		if (std::string(e.what()).find("bowtie2") != std::string::npos &&
 		    std::string(e.what()).find("PATH") != std::string::npos) {
@@ -1258,8 +1255,7 @@ TEST_CASE("Bowtie2Aligner with extra_args option", "[Bowtie2Aligner]") {
 		SequenceRecordBatch queries(false);
 		queries.read_ids = {"maps", "unmaps"};
 		queries.comments = {"", ""};
-		queries.sequences1 = {"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-		                      "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"};
+		queries.sequences1 = {"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"};
 		queries.quals1 = {QualScore(""), QualScore("")};
 
 		SAMRecordBatch batch;

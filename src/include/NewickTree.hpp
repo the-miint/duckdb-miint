@@ -17,20 +17,20 @@ class NewickParser;
 // Placement data for insert_fully_resolved
 // Represents where a query sequence should be placed on a reference tree
 struct Placement {
-	std::string fragment_id;     // Name of the query sequence
-	int64_t edge_id;             // Edge to place on (from jplace)
-	double distal_length;        // Distance from child end of edge
-	double pendant_length;       // Branch length of the new fragment
-	double like_weight_ratio;    // Quality score (higher is better, for deduplication)
+	std::string fragment_id;  // Name of the query sequence
+	int64_t edge_id;          // Edge to place on (from jplace)
+	double distal_length;     // Distance from child end of edge
+	double pendant_length;    // Branch length of the new fragment
+	double like_weight_ratio; // Quality score (higher is better, for deduplication)
 };
 
 // Node data stored in contiguous array for cache efficiency
 struct NewickNode {
-	std::string name;                    // Node label (empty for unlabeled internal nodes)
-	double branch_length;                // Branch length (NaN if not specified)
-	std::optional<int64_t> edge_id;      // Edge identifier from {n} syntax (jplace format)
-	uint32_t parent;                     // Index of parent (UINT32_MAX for root)
-	std::vector<uint32_t> children;      // Indices of children (empty for tips)
+	std::string name;               // Node label (empty for unlabeled internal nodes)
+	double branch_length;           // Branch length (NaN if not specified)
+	std::optional<int64_t> edge_id; // Edge identifier from {n} syntax (jplace format)
+	uint32_t parent;                // Index of parent (UINT32_MAX for root)
+	std::vector<uint32_t> children; // Indices of children (empty for tips)
 
 	NewickNode() : branch_length(std::numeric_limits<double>::quiet_NaN()), parent(UINT32_MAX) {
 	}
@@ -42,11 +42,11 @@ struct NewickNode {
 
 // Input data for building a tree programmatically
 struct NodeInput {
-	int64_t node_id;                      // Unique identifier for this node
-	std::optional<int64_t> parent_id;     // Parent's node_id (nullopt for root)
-	std::string name;                     // Node label (may be empty)
-	double branch_length;                 // Branch length (NaN if not specified)
-	std::optional<int64_t> edge_id;       // Edge identifier (nullopt if not specified)
+	int64_t node_id;                  // Unique identifier for this node
+	std::optional<int64_t> parent_id; // Parent's node_id (nullopt for root)
+	std::string name;                 // Node label (may be empty)
+	double branch_length;             // Branch length (NaN if not specified)
+	std::optional<int64_t> edge_id;   // Edge identifier (nullopt if not specified)
 };
 
 class NewickTree {

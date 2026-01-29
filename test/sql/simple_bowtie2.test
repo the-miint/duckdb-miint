@@ -1,5 +1,5 @@
 # name: test/sql/simple_bowtie2.test
-# group: [miint]
+# group: [sql]
 
 require miint
 

@@ -18,9 +18,9 @@ namespace duckdb {
 
 // Information about a single shard
 struct ShardInfo {
-	std::string name;        // e.g., "shard_001"
-	std::string index_path;  // e.g., "/path/shards/shard_001.mmi"
-	idx_t read_count;        // Number of reads for this shard (for priority ordering)
+	std::string name;       // e.g., "shard_001"
+	std::string index_path; // e.g., "/path/shards/shard_001.mmi"
+	idx_t read_count;       // Number of reads for this shard (for priority ordering)
 };
 
 class AlignMinimap2ShardedTableFunction {
@@ -31,15 +31,13 @@ public:
 		std::string read_to_shard_table;
 		SequenceTableSchema query_schema;
 		miint::Minimap2Config config;
-		std::vector<ShardInfo> shards;  // Sorted by read_count DESC (largest first)
+		std::vector<ShardInfo> shards; // Sorted by read_count DESC (largest first)
 
 		// Output schema (shared with align_minimap2)
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
-		Data()
-		    : names(GetAlignmentOutputNames()),
-		      types(GetAlignmentOutputTypes()) {
+		Data() : names(GetAlignmentOutputNames()), types(GetAlignmentOutputTypes()) {
 		}
 	};
 
@@ -60,7 +58,7 @@ public:
 		std::unique_ptr<miint::Minimap2Aligner> aligner;
 		idx_t current_shard_idx = DConstants::INVALID_INDEX;
 		bool has_shard = false;
-		idx_t current_read_offset = 0;  // For LIMIT/OFFSET streaming per shard
+		idx_t current_read_offset = 0; // For LIMIT/OFFSET streaming per shard
 		miint::SAMRecordBatch result_buffer;
 		idx_t buffer_offset = 0;
 

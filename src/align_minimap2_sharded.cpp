@@ -7,7 +7,7 @@ namespace duckdb {
 // Build minimap2 ShardInfo from raw shard name/counts
 // Validates index files exist and are valid minimap2 indexes
 static std::vector<ShardInfo> BuildMinimap2ShardInfos(ClientContext &context, const std::string &table_name,
-                                                       const std::string &shard_directory, FileSystem &fs) {
+                                                      const std::string &shard_directory, FileSystem &fs) {
 	// Get raw shard names and counts from shared utility
 	auto raw_shards = ReadShardNameCounts(context, table_name);
 
@@ -43,8 +43,8 @@ static std::vector<ShardInfo> BuildMinimap2ShardInfos(ClientContext &context, co
 }
 
 unique_ptr<FunctionData> AlignMinimap2ShardedTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                                   vector<LogicalType> &return_types,
-                                                                   vector<std::string> &names) {
+                                                                 vector<LogicalType> &return_types,
+                                                                 vector<std::string> &names) {
 	auto data = make_uniq<Data>();
 
 	// Required: query_table (first positional parameter)
@@ -98,16 +98,16 @@ unique_ptr<FunctionData> AlignMinimap2ShardedTableFunction::Bind(ClientContext &
 }
 
 unique_ptr<GlobalTableFunctionState> AlignMinimap2ShardedTableFunction::InitGlobal(ClientContext &context,
-                                                                                     TableFunctionInitInput &input) {
+                                                                                   TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 	gstate->shard_count = data.shards.size();
 	return gstate;
 }
 
-unique_ptr<LocalTableFunctionState> AlignMinimap2ShardedTableFunction::InitLocal(ExecutionContext &context,
-                                                                                   TableFunctionInitInput &input,
-                                                                                   GlobalTableFunctionState *global_state) {
+unique_ptr<LocalTableFunctionState>
+AlignMinimap2ShardedTableFunction::InitLocal(ExecutionContext &context, TableFunctionInitInput &input,
+                                             GlobalTableFunctionState *global_state) {
 	auto &data = input.bind_data->Cast<Data>();
 	auto lstate = make_uniq<LocalState>();
 	// Create per-thread aligner with config
@@ -161,9 +161,9 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 
 		// Use STANDARD_VECTOR_SIZE as query batch size to bound result buffer memory
 		// (each query can produce multiple alignments)
-		bool has_more = ReadShardQueryBatch(context, bind_data.query_table, bind_data.read_to_shard_table,
-		                                     shard.name, bind_data.query_schema, STANDARD_VECTOR_SIZE,
-		                                     local_state.current_read_offset, query_batch);
+		bool has_more = ReadShardQueryBatch(context, bind_data.query_table, bind_data.read_to_shard_table, shard.name,
+		                                    bind_data.query_schema, STANDARD_VECTOR_SIZE,
+		                                    local_state.current_read_offset, query_batch);
 
 		if (query_batch.empty() && !has_more) {
 			// Shard exhausted - this thread is done (no work stealing)

@@ -208,8 +208,8 @@ static void AlignmentQueryLengthScalarFunction(DataChunk &args, ExpressionState 
 }
 
 ScalarFunction AlignmentQueryLengthFunction::GetFunction() {
-	ScalarFunction func("alignment_query_length", {LogicalType::VARCHAR, LogicalType::BOOLEAN},
-	                    LogicalType::BIGINT, AlignmentQueryLengthScalarFunction);
+	ScalarFunction func("alignment_query_length", {LogicalType::VARCHAR, LogicalType::BOOLEAN}, LogicalType::BIGINT,
+	                    AlignmentQueryLengthScalarFunction);
 
 	// Allow NULL CIGAR (returns NULL)
 	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
@@ -226,29 +226,28 @@ void AlignmentQueryLengthFunction::Register(ExtensionLoader &loader) {
 	ScalarFunction func_two_params = GetFunction();
 
 	// Register overload with single parameter (include_hard_clips defaults to true)
-	ScalarFunction func_one_param("alignment_query_length", {LogicalType::VARCHAR}, LogicalType::BIGINT,
-	                              [](DataChunk &args, ExpressionState &state, Vector &result) {
-		                              UnaryExecutor::Execute<string_t, int64_t>(
-		                                  args.data[0], result, args.size(), [&](string_t cigar) {
-			                                  // Handle NULL or unmapped CIGAR
-			                                  if (cigar.GetSize() == 0 ||
-			                                      (cigar.GetSize() == 1 && cigar.GetData()[0] == '*')) {
-				                                  return int64_t(0);
-			                                  }
+	ScalarFunction func_one_param(
+	    "alignment_query_length", {LogicalType::VARCHAR}, LogicalType::BIGINT,
+	    [](DataChunk &args, ExpressionState &state, Vector &result) {
+		    UnaryExecutor::Execute<string_t, int64_t>(args.data[0], result, args.size(), [&](string_t cigar) {
+			    // Handle NULL or unmapped CIGAR
+			    if (cigar.GetSize() == 0 || (cigar.GetSize() == 1 && cigar.GetData()[0] == '*')) {
+				    return int64_t(0);
+			    }
 
-			                                  try {
-				                                  // Parse CIGAR - let exceptions propagate for invalid input
-				                                  std::string cigar_std(cigar.GetData(), cigar.GetSize());
-				                                  miint::CigarStats cigar_stats = miint::ParseCigar(cigar_std);
+			    try {
+				    // Parse CIGAR - let exceptions propagate for invalid input
+				    std::string cigar_std(cigar.GetData(), cigar.GetSize());
+				    miint::CigarStats cigar_stats = miint::ParseCigar(cigar_std);
 
-				                                  // Default to include_hard_clips = true
-				                                  return miint::ComputeQueryLength(cigar_stats, true);
-			                                  } catch (const miint::InvalidInputException &e) {
-				                                  // Convert miint exceptions to DuckDB exceptions
-				                                  throw InvalidInputException(e.what());
-			                                  }
-		                                  });
-	                              });
+				    // Default to include_hard_clips = true
+				    return miint::ComputeQueryLength(cigar_stats, true);
+			    } catch (const miint::InvalidInputException &e) {
+				    // Convert miint exceptions to DuckDB exceptions
+				    throw InvalidInputException(e.what());
+			    }
+		    });
+	    });
 	func_one_param.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 
 	// Register both overloads as a function set
@@ -288,8 +287,8 @@ static void AlignmentQueryCoverageScalarFunction(DataChunk &args, ExpressionStat
 }
 
 ScalarFunction AlignmentQueryCoverageFunction::GetFunction() {
-	ScalarFunction func("alignment_query_coverage", {LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                    LogicalType::DOUBLE, AlignmentQueryCoverageScalarFunction);
+	ScalarFunction func("alignment_query_coverage", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::DOUBLE,
+	                    AlignmentQueryCoverageScalarFunction);
 
 	// Allow NULL values (returns NULL for NULL CIGAR, error for invalid type)
 	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
@@ -306,29 +305,28 @@ void AlignmentQueryCoverageFunction::Register(ExtensionLoader &loader) {
 	ScalarFunction func_two_params = GetFunction();
 
 	// Register overload with single parameter (type defaults to 'aligned')
-	ScalarFunction func_one_param("alignment_query_coverage", {LogicalType::VARCHAR}, LogicalType::DOUBLE,
-	                              [](DataChunk &args, ExpressionState &state, Vector &result) {
-		                              UnaryExecutor::Execute<string_t, double>(
-		                                  args.data[0], result, args.size(), [&](string_t cigar) {
-			                                  // Handle NULL or unmapped CIGAR - return 0.0 for empty/unmapped
-			                                  if (cigar.GetSize() == 0 ||
-			                                      (cigar.GetSize() == 1 && cigar.GetData()[0] == '*')) {
-				                                  return 0.0;
-			                                  }
+	ScalarFunction func_one_param(
+	    "alignment_query_coverage", {LogicalType::VARCHAR}, LogicalType::DOUBLE,
+	    [](DataChunk &args, ExpressionState &state, Vector &result) {
+		    UnaryExecutor::Execute<string_t, double>(args.data[0], result, args.size(), [&](string_t cigar) {
+			    // Handle NULL or unmapped CIGAR - return 0.0 for empty/unmapped
+			    if (cigar.GetSize() == 0 || (cigar.GetSize() == 1 && cigar.GetData()[0] == '*')) {
+				    return 0.0;
+			    }
 
-			                                  try {
-				                                  // Parse CIGAR - let exceptions propagate for invalid input
-				                                  std::string cigar_std(cigar.GetData(), cigar.GetSize());
-				                                  miint::CigarStats cigar_stats = miint::ParseCigar(cigar_std);
+			    try {
+				    // Parse CIGAR - let exceptions propagate for invalid input
+				    std::string cigar_std(cigar.GetData(), cigar.GetSize());
+				    miint::CigarStats cigar_stats = miint::ParseCigar(cigar_std);
 
-				                                  // Default to type = 'aligned'
-				                                  return miint::ComputeQueryCoverage(cigar_stats, "aligned");
-			                                  } catch (const miint::InvalidInputException &e) {
-				                                  // Convert miint exceptions to DuckDB exceptions
-				                                  throw InvalidInputException(e.what());
-			                                  }
-		                                  });
-	                              });
+				    // Default to type = 'aligned'
+				    return miint::ComputeQueryCoverage(cigar_stats, "aligned");
+			    } catch (const miint::InvalidInputException &e) {
+				    // Convert miint exceptions to DuckDB exceptions
+				    throw InvalidInputException(e.what());
+			    }
+		    });
+	    });
 	func_one_param.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 
 	// Register both overloads as a function set

@@ -136,9 +136,8 @@ std::unordered_map<std::string, uint64_t> ReadReferenceTable(ClientContext &cont
 			case LogicalTypeId::UBIGINT: {
 				uint64_t uval = UnifiedVectorFormat::GetData<uint64_t>(length_data)[length_idx];
 				if (uval > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-					throw InvalidInputException(
-					    "Reference length %llu at row %llu exceeds INT64_MAX in table '%s'", uval, row_number,
-					    table_name);
+					throw InvalidInputException("Reference length %llu at row %llu exceeds INT64_MAX in table '%s'",
+					                            uval, row_number, table_name);
 				}
 				length = static_cast<int64_t>(uval);
 				break;

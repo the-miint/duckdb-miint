@@ -52,7 +52,8 @@ public:
 		std::vector<std::string> sequence2_filepaths;
 		size_t next_file_idx; // Next file available for claiming
 		bool uses_stdin;
-		std::vector<uint64_t> file_sequence_counters; // Per-file sequence counters (no atomic needed - file access is exclusive)
+		std::vector<uint64_t>
+		    file_sequence_counters; // Per-file sequence counters (no atomic needed - file access is exclusive)
 
 		// stdin cannot be read in parallel (no seeking/rewinding).
 		// This forces sequential execution, which may be slower than

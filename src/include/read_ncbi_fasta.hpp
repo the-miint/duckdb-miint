@@ -27,8 +27,8 @@ public:
 		std::unique_ptr<miint::NCBIClient> client;
 		miint::SequenceRecordBatch current_batch;
 		size_t next_accession_idx;
-		size_t batch_offset;   // Current position within batch
-		int64_t sequence_index; // Global sequence counter
+		size_t batch_offset;           // Current position within batch
+		int64_t sequence_index;        // Global sequence counter
 		std::string current_accession; // Track current accession for filepath
 
 		GlobalState(DatabaseInstance &db, const std::string &api_key, const std::vector<std::string> &accessions);

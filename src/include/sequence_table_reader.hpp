@@ -39,9 +39,8 @@ bool ReadQueryBatch(ClientContext &context, const std::string &table_name, const
 // Joins query_table with read_to_shard_table, filtering by shard_name.
 // Returns true if there are more rows to read, false if done.
 // offset is updated to the next position after reading.
-bool ReadShardQueryBatch(ClientContext &context, const std::string &query_table,
-                         const std::string &read_to_shard_table, const std::string &shard_name,
-                         const SequenceTableSchema &schema, idx_t batch_size, idx_t &offset,
-                         miint::SequenceRecordBatch &output);
+bool ReadShardQueryBatch(ClientContext &context, const std::string &query_table, const std::string &read_to_shard_table,
+                         const std::string &shard_name, const SequenceTableSchema &schema, idx_t batch_size,
+                         idx_t &offset, miint::SequenceRecordBatch &output);
 
 } // namespace duckdb

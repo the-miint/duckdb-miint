@@ -120,16 +120,16 @@ static constexpr std::array<const char *, 256> CreateDnaRegexpTable() {
 	table['G'] = "G";
 	table['T'] = "T";
 	// Uppercase IUPAC ambiguity codes
-	table['R'] = "[AG]";  // A or G
-	table['Y'] = "[CT]";  // C or T
-	table['S'] = "[CG]";  // C or G
-	table['W'] = "[AT]";  // A or T
-	table['K'] = "[GT]";  // G or T
-	table['M'] = "[AC]";  // A or C
-	table['B'] = "[CGT]"; // not A
-	table['D'] = "[AGT]"; // not C
-	table['H'] = "[ACT]"; // not G
-	table['V'] = "[ACG]"; // not T
+	table['R'] = "[AG]";   // A or G
+	table['Y'] = "[CT]";   // C or T
+	table['S'] = "[CG]";   // C or G
+	table['W'] = "[AT]";   // A or T
+	table['K'] = "[GT]";   // G or T
+	table['M'] = "[AC]";   // A or C
+	table['B'] = "[CGT]";  // not A
+	table['D'] = "[AGT]";  // not C
+	table['H'] = "[ACT]";  // not G
+	table['V'] = "[ACG]";  // not T
 	table['N'] = "[ACGT]"; // any
 	// Lowercase unambiguous bases
 	table['a'] = "a";
@@ -168,16 +168,16 @@ static constexpr std::array<const char *, 256> CreateRnaRegexpTable() {
 	table['G'] = "G";
 	table['U'] = "U";
 	// Uppercase IUPAC ambiguity codes
-	table['R'] = "[AG]";  // A or G
-	table['Y'] = "[CU]";  // C or U
-	table['S'] = "[CG]";  // C or G
-	table['W'] = "[AU]";  // A or U
-	table['K'] = "[GU]";  // G or U
-	table['M'] = "[AC]";  // A or C
-	table['B'] = "[CGU]"; // not A
-	table['D'] = "[AGU]"; // not C
-	table['H'] = "[ACU]"; // not G
-	table['V'] = "[ACG]"; // not U
+	table['R'] = "[AG]";   // A or G
+	table['Y'] = "[CU]";   // C or U
+	table['S'] = "[CG]";   // C or G
+	table['W'] = "[AU]";   // A or U
+	table['K'] = "[GU]";   // G or U
+	table['M'] = "[AC]";   // A or C
+	table['B'] = "[CGU]";  // not A
+	table['D'] = "[AGU]";  // not C
+	table['H'] = "[ACU]";  // not G
+	table['V'] = "[ACG]";  // not U
 	table['N'] = "[ACGU]"; // any
 	// Lowercase unambiguous bases
 	table['a'] = "a";

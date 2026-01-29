@@ -32,7 +32,7 @@ TEST_CASE("NewickTree tips() returns leaf nodes", "[NewickTree][distance]") {
 	for (auto idx : tip_indices) {
 		names.insert(tree.name(idx));
 	}
-	REQUIRE(names == std::set<std::string>{"A", "B", "C"});
+	REQUIRE(names == std::set<std::string> {"A", "B", "C"});
 }
 
 TEST_CASE("NewickTree tip_names() returns leaf names", "[NewickTree][distance]") {
@@ -42,7 +42,7 @@ TEST_CASE("NewickTree tip_names() returns leaf names", "[NewickTree][distance]")
 	REQUIRE(names.size() == 3);
 
 	std::set<std::string> name_set(names.begin(), names.end());
-	REQUIRE(name_set == std::set<std::string>{"A", "B", "C"});
+	REQUIRE(name_set == std::set<std::string> {"A", "B", "C"});
 }
 
 TEST_CASE("NewickTree distance_to_root", "[NewickTree][distance]") {
@@ -152,11 +152,8 @@ TEST_CASE("insert_fully_resolved single placement", "[insert][basic]") {
 	REQUIRE(tree.num_tips() == 3);
 	REQUIRE(tree.num_nodes() == 5);
 
-	std::vector<miint::Placement> placements = {{.fragment_id = "F",
-	                                             .edge_id = 0,
-	                                             .distal_length = 0.3,
-	                                             .pendant_length = 0.1,
-	                                             .like_weight_ratio = 1.0}};
+	std::vector<miint::Placement> placements = {
+	    {.fragment_id = "F", .edge_id = 0, .distal_length = 0.3, .pendant_length = 0.1, .like_weight_ratio = 1.0}};
 
 	tree.insert_fully_resolved(placements);
 
@@ -374,8 +371,7 @@ TEST_CASE("insert_fully_resolved many placements on single edge", "[insert][scal
 TEST_CASE("insert_fully_resolved many placements on different edges", "[insert][scale]") {
 	// Build a larger tree and insert placements on multiple edges
 	// Edge lengths: A,B,C,D = 1.0; internal edges = 0.5
-	auto tree = miint::NewickTree::parse(
-	    "((A:1.0{0},B:1.0{1}):0.5{2},(C:1.0{3},D:1.0{4}):0.5{5}):0.0{6};");
+	auto tree = miint::NewickTree::parse("((A:1.0{0},B:1.0{1}):0.5{2},(C:1.0{3},D:1.0{4}):0.5{5}):0.0{6};");
 
 	std::vector<miint::Placement> placements;
 	int frag_id = 0;

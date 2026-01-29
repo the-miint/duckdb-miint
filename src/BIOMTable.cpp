@@ -133,7 +133,7 @@ const std::vector<size_t> &BIOMTable::COOFeatureIndices() const {
 	return coo_feature_indices;
 }
 
-const std::vector<size_t> &BIOMTable::COOSampleIndices() const{
+const std::vector<size_t> &BIOMTable::COOSampleIndices() const {
 	return coo_sample_indices;
 }
 const std::vector<double> &BIOMTable::COOValues() const {

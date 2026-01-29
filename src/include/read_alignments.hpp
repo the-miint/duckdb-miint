@@ -117,7 +117,7 @@ public:
 	static unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFunctionInitInput &input);
 
 	static unique_ptr<LocalTableFunctionState> InitLocal(ExecutionContext &context, TableFunctionInitInput &input,
-	                                                      GlobalTableFunctionState *global_state);
+	                                                     GlobalTableFunctionState *global_state);
 
 	static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 

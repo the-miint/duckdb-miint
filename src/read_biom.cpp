@@ -78,8 +78,7 @@ unique_ptr<LocalTableFunctionState> ReadBIOMTableFunction::InitLocal(ExecutionCo
 }
 
 void ReadBIOMTableFunction::SetResultVector(Vector &result_vector, const miint::BIOMTableField &field,
-                                            const miint::BIOMTable &record, size_t current_row,
-                                            size_t n_rows) {
+                                            const miint::BIOMTable &record, size_t current_row, size_t n_rows) {
 	switch (field) {
 	case miint::BIOMTableField::SAMPLE_ID:
 	case miint::BIOMTableField::FEATURE_ID:
@@ -94,14 +93,12 @@ void ReadBIOMTableFunction::SetResultVector(Vector &result_vector, const miint::
 }
 
 void ReadBIOMTableFunction::SetResultVectorString(Vector &result_vector, const miint::BIOMTableField &field,
-                                                  const miint::BIOMTable &record, size_t current_row,
-                                                  size_t n_rows) {
+                                                  const miint::BIOMTable &record, size_t current_row, size_t n_rows) {
 	auto result_data = FlatVector::GetData<string_t>(result_vector);
 
 	const auto &indices =
 	    (field == miint::BIOMTableField::SAMPLE_ID) ? record.COOSampleIndices() : record.COOFeatureIndices();
-	const auto &ordered_ids =
-	    (field == miint::BIOMTableField::SAMPLE_ID) ? record.SampleIDs() : record.FeatureIDs();
+	const auto &ordered_ids = (field == miint::BIOMTableField::SAMPLE_ID) ? record.SampleIDs() : record.FeatureIDs();
 
 	for (size_t i = 0; i < n_rows; i++) {
 		auto index = indices[current_row + i];
@@ -110,8 +107,7 @@ void ReadBIOMTableFunction::SetResultVectorString(Vector &result_vector, const m
 }
 
 void ReadBIOMTableFunction::SetResultVectorDouble(Vector &result_vector, const miint::BIOMTableField &field,
-                                                  const miint::BIOMTable &record, size_t current_row,
-                                                  size_t n_rows) {
+                                                  const miint::BIOMTable &record, size_t current_row, size_t n_rows) {
 	auto result_data = FlatVector::GetData<double>(result_vector);
 	auto &data = record.COOValues();
 

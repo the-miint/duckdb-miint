@@ -209,8 +209,7 @@ static inline double ComputeQueryCoverage(const CigarStats &stats, const std::st
 		// Bases that are mapped (not clipped): M, I, =, X
 		covered_bases = stats.matches + stats.insertions;
 	} else {
-		throw InvalidInputException("Invalid coverage type: " + type +
-		                                    ". Must be 'aligned' or 'mapped'.");
+		throw InvalidInputException("Invalid coverage type: " + type + ". Must be 'aligned' or 'mapped'.");
 	}
 
 	return static_cast<double>(covered_bases) / static_cast<double>(query_length);

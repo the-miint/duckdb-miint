@@ -6,8 +6,8 @@
 namespace duckdb {
 
 unique_ptr<FunctionData> SaveMinimap2IndexTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                               vector<LogicalType> &return_types,
-                                                               vector<std::string> &names) {
+                                                              vector<LogicalType> &return_types,
+                                                              vector<std::string> &names) {
 	auto data = make_uniq<Data>();
 
 	// Required positional parameters: subject_table, output_path
@@ -62,7 +62,7 @@ unique_ptr<FunctionData> SaveMinimap2IndexTableFunction::Bind(ClientContext &con
 }
 
 unique_ptr<GlobalTableFunctionState> SaveMinimap2IndexTableFunction::InitGlobal(ClientContext &context,
-                                                                                 TableFunctionInitInput &input) {
+                                                                                TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 
@@ -87,8 +87,8 @@ unique_ptr<GlobalTableFunctionState> SaveMinimap2IndexTableFunction::InitGlobal(
 }
 
 unique_ptr<LocalTableFunctionState> SaveMinimap2IndexTableFunction::InitLocal(ExecutionContext &context,
-                                                                               TableFunctionInitInput &input,
-                                                                               GlobalTableFunctionState *global_state) {
+                                                                              TableFunctionInitInput &input,
+                                                                              GlobalTableFunctionState *global_state) {
 	return make_uniq<LocalState>();
 }
 
@@ -103,8 +103,8 @@ void SaveMinimap2IndexTableFunction::Execute(ClientContext &context, TableFuncti
 	}
 
 	// Set output values
-	output.data[0].SetValue(0, Value::BOOLEAN(true)); // success
-	output.data[1].SetValue(0, Value(bind_data.output_path)); // index_path
+	output.data[0].SetValue(0, Value::BOOLEAN(true));                                           // success
+	output.data[1].SetValue(0, Value(bind_data.output_path));                                   // index_path
 	output.data[2].SetValue(0, Value::BIGINT(static_cast<int64_t>(bind_data.subjects.size()))); // num_subjects
 
 	output.SetCardinality(1);

@@ -95,12 +95,12 @@ namespace miint {
 // Configuration for Bowtie2 alignment
 // These map to bowtie2 command-line arguments
 struct Bowtie2Config {
-	std::string preset = "";      // Preset: --very-fast, --fast, --sensitive, --very-sensitive
-	bool local = false;           // --local vs --end-to-end (default)
-	int threads = 1;              // -p parameter (bowtie2 internal threading)
-	int max_secondary = 0;        // -k parameter (0 = default bowtie2 behavior)
-	std::string extra_args = "";  // Additional bowtie2 arguments (space-separated)
-	bool quiet = true;            // Suppress stderr output (alignment statistics)
+	std::string preset = "";     // Preset: --very-fast, --fast, --sensitive, --very-sensitive
+	bool local = false;          // --local vs --end-to-end (default)
+	int threads = 1;             // -p parameter (bowtie2 internal threading)
+	int max_secondary = 0;       // -k parameter (0 = default bowtie2 behavior)
+	std::string extra_args = ""; // Additional bowtie2 arguments (space-separated)
+	bool quiet = true;           // Suppress stderr output (alignment statistics)
 };
 
 // ============================================================================
@@ -194,26 +194,26 @@ private:
 	// Persistent Process State
 	// ========================================================================
 
-	pid_t bowtie2_pid_ = -1;         // PID of running bowtie2 process
-	FILE *stdin_pipe_ = nullptr;     // Pipe to write queries to bowtie2 stdin
+	pid_t bowtie2_pid_ = -1;     // PID of running bowtie2 process
+	FILE *stdin_pipe_ = nullptr; // Pipe to write queries to bowtie2 stdin
 	// Note: stdout pipe fd is transferred to reader thread (SAMReader) immediately after fork
-	bool aligner_running_ = false;   // True while bowtie2 process is active
-	bool use_fasta_ = false;         // True if first batch had no quality scores
-	bool is_paired_ = false;         // True if first batch was paired-end
+	bool aligner_running_ = false; // True while bowtie2 process is active
+	bool use_fasta_ = false;       // True if first batch had no quality scores
+	bool is_paired_ = false;       // True if first batch was paired-end
 
 	// ========================================================================
 	// Reader Thread and Result Queue
 	// ========================================================================
 
-	std::thread reader_thread_;                  // Background thread reading SAM output
-	std::atomic<bool> reader_should_stop_{false}; // Signal reader thread to stop
+	std::thread reader_thread_;                    // Background thread reading SAM output
+	std::atomic<bool> reader_should_stop_ {false}; // Signal reader thread to stop
 
 	// Thread-safe queue for passing SAM records from reader to main thread
 	std::mutex queue_mutex_;
 	std::condition_variable queue_cv_;
 	std::queue<SAMRecordBatch> result_queue_;
-	bool reader_finished_ = false;               // True when reader thread exits
-	std::string reader_error_;                   // Error message from reader thread
+	bool reader_finished_ = false; // True when reader thread exits
+	std::string reader_error_;     // Error message from reader thread
 
 	// ========================================================================
 	// Binary Discovery
@@ -240,8 +240,7 @@ private:
 	// ========================================================================
 
 	// Write reference sequences to FASTA file
-	void write_subjects_fasta(const std::vector<AlignmentSubject> &subjects,
-	                          const std::filesystem::path &fasta_path);
+	void write_subjects_fasta(const std::vector<AlignmentSubject> &subjects, const std::filesystem::path &fasta_path);
 
 	// Run bowtie2-build to create index files
 	void run_bowtie2_build(const std::filesystem::path &fasta_path);

@@ -55,8 +55,10 @@ struct SequenceRecordBatch {
 		quals2.clear();
 	}
 
-	SequenceRecordBatch() : is_paired(false) {}
-	explicit SequenceRecordBatch(bool paired) : is_paired(paired) {}
+	SequenceRecordBatch() : is_paired(false) {
+	}
+	explicit SequenceRecordBatch(bool paired) : is_paired(paired) {
+	}
 };
 
 class SequenceRecord {

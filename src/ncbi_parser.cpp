@@ -288,9 +288,9 @@ GenBankMetadata NCBIParser::ParseGenBankXML(const std::string &xml) {
 	// Parse update date (format: DD-MON-YYYY -> YYYY-MM-DD)
 	std::string update_date = ExtractXMLValue(xml, "GBSeq_update-date");
 	if (!update_date.empty()) {
-		static const std::map<std::string, int> months = {{"JAN", 1},  {"FEB", 2},  {"MAR", 3}, {"APR", 4},
-		                                                  {"MAY", 5},  {"JUN", 6},  {"JUL", 7}, {"AUG", 8},
-		                                                  {"SEP", 9},  {"OCT", 10}, {"NOV", 11}, {"DEC", 12}};
+		static const std::map<std::string, int> months = {{"JAN", 1}, {"FEB", 2},  {"MAR", 3},  {"APR", 4},
+		                                                  {"MAY", 5}, {"JUN", 6},  {"JUL", 7},  {"AUG", 8},
+		                                                  {"SEP", 9}, {"OCT", 10}, {"NOV", 11}, {"DEC", 12}};
 
 		std::regex date_regex(R"((\d{1,2})-([A-Za-z]{3})-(\d{4}))");
 		std::smatch match;
@@ -323,10 +323,9 @@ static std::string DetectSource(const std::string &seqid) {
 	}
 
 	// RefSeq accessions start with specific prefixes
-	if (StartsWith(seqid, "NC_") || StartsWith(seqid, "NM_") || StartsWith(seqid, "NP_") ||
-	    StartsWith(seqid, "NR_") || StartsWith(seqid, "XM_") || StartsWith(seqid, "XP_") ||
-	    StartsWith(seqid, "XR_") || StartsWith(seqid, "NG_") || StartsWith(seqid, "NT_") ||
-	    StartsWith(seqid, "NW_") || StartsWith(seqid, "NZ_")) {
+	if (StartsWith(seqid, "NC_") || StartsWith(seqid, "NM_") || StartsWith(seqid, "NP_") || StartsWith(seqid, "NR_") ||
+	    StartsWith(seqid, "XM_") || StartsWith(seqid, "XP_") || StartsWith(seqid, "XR_") || StartsWith(seqid, "NG_") ||
+	    StartsWith(seqid, "NT_") || StartsWith(seqid, "NW_") || StartsWith(seqid, "NZ_")) {
 		return "RefSeq";
 	}
 
@@ -383,8 +382,7 @@ static int64_t ParseSimplePosition(const std::string &pos_str) {
 	}
 }
 
-FeatureAnnotationBatch NCBIParser::ParseFeatureTable(const std::string &feature_table,
-                                                      WarningCallback warn_callback) {
+FeatureAnnotationBatch NCBIParser::ParseFeatureTable(const std::string &feature_table, WarningCallback warn_callback) {
 	FeatureAnnotationBatch batch;
 
 	if (feature_table.empty()) {
@@ -420,9 +418,8 @@ FeatureAnnotationBatch NCBIParser::ParseFeatureTable(const std::string &feature_
 			static const std::string feature_prefix = ">Feature";
 			if (StartsWith(line, feature_prefix)) {
 				// Extract sequence ID from header
-				std::string header = line.length() > feature_prefix.length() + 1
-				                         ? line.substr(feature_prefix.length() + 1)
-				                         : "";
+				std::string header =
+				    line.length() > feature_prefix.length() + 1 ? line.substr(feature_prefix.length() + 1) : "";
 
 				// Remove leading whitespace
 				size_t start = header.find_first_not_of(" \t");

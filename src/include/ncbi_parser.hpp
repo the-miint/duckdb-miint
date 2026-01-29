@@ -15,8 +15,8 @@ void DefaultWarningCallback(const std::string &msg);
 
 // Accession type for routing to appropriate API
 enum class AccessionType {
-	ASSEMBLY,  // GCF_/GCA_ -> Datasets API for metadata
-	SEQUENCE,  // NC_/NM_/NP_/etc -> E-utilities
+	ASSEMBLY, // GCF_/GCA_ -> Datasets API for metadata
+	SEQUENCE, // NC_/NM_/NP_/etc -> E-utilities
 	UNKNOWN
 };
 
@@ -81,7 +81,7 @@ public:
 	// - Phase is derived from codon_start qualifier for CDS features
 	// Set warn_callback to nullptr or empty function for quiet mode
 	static FeatureAnnotationBatch ParseFeatureTable(const std::string &feature_table,
-	                                                 WarningCallback warn_callback = DefaultWarningCallback);
+	                                                WarningCallback warn_callback = DefaultWarningCallback);
 
 	// Helper to extract accession from various FASTA ID formats
 	// Handles: "NC_001416.1", "ref|NC_001416.1|", "gi|123|ref|NC_001416.1|description"

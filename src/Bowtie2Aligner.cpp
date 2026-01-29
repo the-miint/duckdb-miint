@@ -96,7 +96,7 @@ void Bowtie2Aligner::validate_executables() {
 			missing += "bowtie2-build";
 		}
 		throw std::runtime_error(missing + " not found in PATH. "
-		                         "Please install bowtie2 and ensure it is in your PATH.");
+		                                   "Please install bowtie2 and ensure it is in your PATH.");
 	}
 }
 
@@ -255,16 +255,14 @@ void Bowtie2Aligner::run_bowtie2_build(const std::filesystem::path &fasta_path) 
 	// Use fork/exec to run bowtie2-build - avoids shell injection risks
 	int pipefd[2];
 	if (pipe(pipefd) == -1) {
-		throw std::runtime_error("Failed to create pipe for bowtie2-build: " +
-		                         std::string(strerror(errno)));
+		throw std::runtime_error("Failed to create pipe for bowtie2-build: " + std::string(strerror(errno)));
 	}
 
 	pid_t pid = fork();
 	if (pid == -1) {
 		close(pipefd[0]);
 		close(pipefd[1]);
-		throw std::runtime_error("Failed to fork for bowtie2-build: " +
-		                         std::string(strerror(errno)));
+		throw std::runtime_error("Failed to fork for bowtie2-build: " + std::string(strerror(errno)));
 	}
 
 	if (pid == 0) {
@@ -278,12 +276,8 @@ void Bowtie2Aligner::run_bowtie2_build(const std::filesystem::path &fasta_path) 
 
 		// Execute bowtie2-build with arguments passed directly (no shell)
 		std::string fasta_str = fasta_path.string();
-		execl(bowtie2_build_path_.c_str(),
-		      bowtie2_build_path_.c_str(),
-		      "--quiet",
-		      fasta_str.c_str(),
-		      index_prefix_.c_str(),
-		      nullptr);
+		execl(bowtie2_build_path_.c_str(), bowtie2_build_path_.c_str(), "--quiet", fasta_str.c_str(),
+		      index_prefix_.c_str(), nullptr);
 
 		// If exec fails, write error and exit
 		std::string err = "Failed to execute bowtie2-build: " + std::string(strerror(errno));
@@ -312,8 +306,7 @@ void Bowtie2Aligner::run_bowtie2_build(const std::filesystem::path &fasta_path) 
 
 	int exit_code = WEXITSTATUS(status);
 	if (exit_code != 0) {
-		throw std::runtime_error("bowtie2-build failed with exit code " +
-		                         std::to_string(exit_code) + ": " + output);
+		throw std::runtime_error("bowtie2-build failed with exit code " + std::to_string(exit_code) + ": " + output);
 	}
 }
 
@@ -372,9 +365,8 @@ bool Bowtie2Aligner::is_index_prefix(const std::string &prefix) {
 
 void Bowtie2Aligner::load_index(const std::string &index_prefix) {
 	if (!is_index_prefix(index_prefix)) {
-		throw std::runtime_error("No valid bowtie2 index found at prefix: " + index_prefix +
-		                         ". Expected files like " + index_prefix + ".1.bt2, " + index_prefix +
-		                         ".rev.1.bt2, etc.");
+		throw std::runtime_error("No valid bowtie2 index found at prefix: " + index_prefix + ". Expected files like " +
+		                         index_prefix + ".1.bt2, " + index_prefix + ".rev.1.bt2, etc.");
 	}
 
 	index_prefix_ = index_prefix;
@@ -817,22 +809,14 @@ void Bowtie2Aligner::drain_results(SAMRecordBatch &output) {
 		output.template_lengths.insert(output.template_lengths.end(), batch.template_lengths.begin(),
 		                               batch.template_lengths.end());
 		// Tag fields
-		output.tag_as_values.insert(output.tag_as_values.end(), batch.tag_as_values.begin(),
-		                            batch.tag_as_values.end());
-		output.tag_xs_values.insert(output.tag_xs_values.end(), batch.tag_xs_values.begin(),
-		                            batch.tag_xs_values.end());
-		output.tag_ys_values.insert(output.tag_ys_values.end(), batch.tag_ys_values.begin(),
-		                            batch.tag_ys_values.end());
-		output.tag_xn_values.insert(output.tag_xn_values.end(), batch.tag_xn_values.begin(),
-		                            batch.tag_xn_values.end());
-		output.tag_xm_values.insert(output.tag_xm_values.end(), batch.tag_xm_values.begin(),
-		                            batch.tag_xm_values.end());
-		output.tag_xo_values.insert(output.tag_xo_values.end(), batch.tag_xo_values.begin(),
-		                            batch.tag_xo_values.end());
-		output.tag_xg_values.insert(output.tag_xg_values.end(), batch.tag_xg_values.begin(),
-		                            batch.tag_xg_values.end());
-		output.tag_nm_values.insert(output.tag_nm_values.end(), batch.tag_nm_values.begin(),
-		                            batch.tag_nm_values.end());
+		output.tag_as_values.insert(output.tag_as_values.end(), batch.tag_as_values.begin(), batch.tag_as_values.end());
+		output.tag_xs_values.insert(output.tag_xs_values.end(), batch.tag_xs_values.begin(), batch.tag_xs_values.end());
+		output.tag_ys_values.insert(output.tag_ys_values.end(), batch.tag_ys_values.begin(), batch.tag_ys_values.end());
+		output.tag_xn_values.insert(output.tag_xn_values.end(), batch.tag_xn_values.begin(), batch.tag_xn_values.end());
+		output.tag_xm_values.insert(output.tag_xm_values.end(), batch.tag_xm_values.begin(), batch.tag_xm_values.end());
+		output.tag_xo_values.insert(output.tag_xo_values.end(), batch.tag_xo_values.begin(), batch.tag_xo_values.end());
+		output.tag_xg_values.insert(output.tag_xg_values.end(), batch.tag_xg_values.begin(), batch.tag_xg_values.end());
+		output.tag_nm_values.insert(output.tag_nm_values.end(), batch.tag_nm_values.begin(), batch.tag_nm_values.end());
 		output.tag_yt_values.insert(output.tag_yt_values.end(), std::make_move_iterator(batch.tag_yt_values.begin()),
 		                            std::make_move_iterator(batch.tag_yt_values.end()));
 		output.tag_md_values.insert(output.tag_md_values.end(), std::make_move_iterator(batch.tag_md_values.begin()),

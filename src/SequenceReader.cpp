@@ -96,9 +96,8 @@ SequenceRecordBatch SequenceReader::read_se(const int n) {
 	// Populate batch directly from KSeq records
 	for (auto &rec : reads) {
 		// Strip whitespace from sequence (FASTA files may contain spaces/newlines in sequences)
-		rec.seq.erase(std::remove_if(rec.seq.begin(), rec.seq.end(),
-		    [](unsigned char c) { return std::isspace(c); }),
-		    rec.seq.end());
+		rec.seq.erase(std::remove_if(rec.seq.begin(), rec.seq.end(), [](unsigned char c) { return std::isspace(c); }),
+		              rec.seq.end());
 
 		batch.read_ids.emplace_back(base_read_id(rec.name));
 		batch.comments.emplace_back(rec.comment);
@@ -151,11 +150,11 @@ SequenceRecordBatch SequenceReader::read_pe(const int n) {
 		check_ids(rec1.name, rec2.name);
 
 		// Strip whitespace from sequences (FASTA files may contain spaces/newlines in sequences)
-		rec1.seq.erase(std::remove_if(rec1.seq.begin(), rec1.seq.end(),
-		    [](unsigned char c) { return std::isspace(c); }),
+		rec1.seq.erase(
+		    std::remove_if(rec1.seq.begin(), rec1.seq.end(), [](unsigned char c) { return std::isspace(c); }),
 		    rec1.seq.end());
-		rec2.seq.erase(std::remove_if(rec2.seq.begin(), rec2.seq.end(),
-		    [](unsigned char c) { return std::isspace(c); }),
+		rec2.seq.erase(
+		    std::remove_if(rec2.seq.begin(), rec2.seq.end(), [](unsigned char c) { return std::isspace(c); }),
 		    rec2.seq.end());
 
 		batch.read_ids.emplace_back(base_read_id(rec1.name));
