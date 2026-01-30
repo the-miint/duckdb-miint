@@ -9,3 +9,4 @@
 [submodule "ext/minimap2"]
 	path = ext/minimap2
 	url = https://github.com/lh3/minimap2.git
+	branch = main
