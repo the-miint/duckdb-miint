@@ -131,12 +131,18 @@ set_property(TARGET hts PROPERTY
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/htslib/include)
 add_dependencies(hts htslib_build)
 
+# Detect architecture for minimap2 SIMD support
+set(MINIMAP2_ARCH_FLAGS "")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    set(MINIMAP2_ARCH_FLAGS "aarch64=1")
+endif()
+
 # Build minimap2 from source (v2.30)
 ExternalProject_Add(
     minimap2_build
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2
     CONFIGURE_COMMAND ""
-    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2 libminimap2.a "CFLAGS=-g -Wall -O2 -Wc++-compat -fPIC -I${ZLIB_INCLUDE_DIRS}" "CPPFLAGS=-DHAVE_KALLOC"
+    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2 libminimap2.a "CFLAGS=-g -Wall -O2 -Wc++-compat -fPIC -I${ZLIB_INCLUDE_DIRS}" "CPPFLAGS=-DHAVE_KALLOC" ${MINIMAP2_ARCH_FLAGS}
     INSTALL_COMMAND ""
     BUILD_IN_SOURCE 1
     BUILD_BYPRODUCTS ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2/libminimap2.a
