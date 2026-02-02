@@ -136,7 +136,7 @@ ExternalProject_Add(
     minimap2_build
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2
     CONFIGURE_COMMAND ""
-    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2 libminimap2.a "CFLAGS=-g -Wall -O2 -Wc++-compat -fPIC" "CPPFLAGS=-DHAVE_KALLOC"
+    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2 libminimap2.a "CFLAGS=-g -Wall -O2 -Wc++-compat -fPIC -I${ZLIB_INCLUDE_DIRS}" "CPPFLAGS=-DHAVE_KALLOC"
     INSTALL_COMMAND ""
     BUILD_IN_SOURCE 1
     BUILD_BYPRODUCTS ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2/libminimap2.a
