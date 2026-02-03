@@ -19,6 +19,8 @@ jobs:
       duckdb_version: v1.4.4
       ci_tools_version: v1.4.4
       extension_name: miint
+      # Skip bowtie2 tests - bowtie2 is not installed in the CI environment
+      exclude_tests: 'test/sql/align_bowtie2.test;test/sql/align_bowtie2_sharded.test;test/sql/simple_bowtie2.test'
 
   code-quality-check:
     name: Code Quality Check

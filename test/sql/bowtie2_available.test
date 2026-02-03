@@ -1,0 +1,18 @@
+# name: test/sql/bowtie2_available.test
+# description: Test bowtie2_available() scalar function
+# group: [sql]
+
+require miint
+
+# Test that bowtie2_available() returns a valid boolean (true or false)
+# This test always passes regardless of whether bowtie2 is installed
+query I
+SELECT bowtie2_available() IN (true, false);
+----
+true
+
+# Test that the function is deterministic (same result on repeated calls)
+query I
+SELECT bowtie2_available() = bowtie2_available();
+----
+true

@@ -2,6 +2,10 @@
 #include "align_result_utils.hpp"
 #include "duckdb/common/vector_size.hpp"
 
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
 namespace duckdb {
 
 // Batch size for reading queries
@@ -191,6 +195,68 @@ TableFunction AlignBowtie2TableFunction::GetFunction() {
 
 void AlignBowtie2TableFunction::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetFunction());
+}
+
+// Scalar function to check if bowtie2 is available in PATH
+static void Bowtie2AvailableFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	// Check once and cache the result
+	static bool checked = false;
+	static bool available = false;
+
+	if (!checked) {
+		// Use the same find_executable logic as Bowtie2Aligner
+		// Check for both bowtie2 and bowtie2-build
+		auto check_executable = [](const char *name) -> bool {
+			int pipefd[2];
+			if (pipe(pipefd) == -1) {
+				return false;
+			}
+
+			pid_t pid = fork();
+			if (pid == -1) {
+				close(pipefd[0]);
+				close(pipefd[1]);
+				return false;
+			}
+
+			if (pid == 0) {
+				// Child process
+				close(pipefd[0]);
+				dup2(pipefd[1], STDOUT_FILENO);
+				close(pipefd[1]);
+				// Redirect stderr to /dev/null
+				int devnull = open("/dev/null", O_WRONLY);
+				if (devnull != -1) {
+					dup2(devnull, STDERR_FILENO);
+					close(devnull);
+				}
+				execlp("which", "which", name, nullptr);
+				_exit(1);
+			}
+
+			// Parent process
+			close(pipefd[1]);
+			char buffer[256];
+			ssize_t n = read(pipefd[0], buffer, sizeof(buffer) - 1);
+			close(pipefd[0]);
+
+			int status;
+			waitpid(pid, &status, 0);
+
+			return WIFEXITED(status) && WEXITSTATUS(status) == 0 && n > 0;
+		};
+
+		available = check_executable("bowtie2") && check_executable("bowtie2-build");
+		checked = true;
+	}
+
+	result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	ConstantVector::GetData<bool>(result)[0] = available;
+}
+
+void RegisterBowtie2AvailableFunction(ExtensionLoader &loader) {
+	ScalarFunction bowtie2_available("bowtie2_available", {}, LogicalType::BOOLEAN, Bowtie2AvailableFunction);
+	loader.RegisterFunction(bowtie2_available);
 }
 
 } // namespace duckdb

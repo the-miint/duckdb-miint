@@ -94,4 +94,7 @@ public:
 	static void Register(ExtensionLoader &loader);
 };
 
+// Scalar function to check if bowtie2 is available in PATH
+void RegisterBowtie2AvailableFunction(ExtensionLoader &loader);
+
 } // namespace duckdb

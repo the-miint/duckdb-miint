@@ -61,6 +61,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	SaveMinimap2IndexTableFunction::Register(loader);
 	AlignBowtie2TableFunction::Register(loader);
 	AlignBowtie2ShardedTableFunction::Register(loader);
+	RegisterBowtie2AvailableFunction(loader);
 	ReadNCBIFastaTableFunction::Register(loader);
 	ReadNCBITableFunction::Register(loader);
 	ReadNCBIAnnotationTableFunction::Register(loader);
