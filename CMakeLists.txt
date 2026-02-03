@@ -106,10 +106,35 @@ else()
     set(HTSLIB_LDFLAGS "")
 endif()
 
+# Get the actual zlib library file for explicit linking
+# This is needed because HTSlib's configure uses -lz which may not find vcpkg's zlib
+if(ZLIB_LIBRARY_RELEASE)
+    set(ZLIB_LIBRARY_FILE "${ZLIB_LIBRARY_RELEASE}")
+elseif(ZLIB_LIBRARY)
+    set(ZLIB_LIBRARY_FILE "${ZLIB_LIBRARY}")
+else()
+    # Find first actual library file in ZLIB_LIBRARIES
+    set(ZLIB_LIBRARY_FILE "")
+    foreach(lib ${ZLIB_LIBRARIES})
+        if(EXISTS "${lib}" AND NOT ZLIB_LIBRARY_FILE)
+            set(ZLIB_LIBRARY_FILE "${lib}")
+        endif()
+    endforeach()
+endif()
+
+# Set LIBS to pass explicit library path to configure (needed for OSX with vcpkg)
+if(ZLIB_LIBRARY_FILE)
+    set(HTSLIB_LIBS "LIBS=${ZLIB_LIBRARY_FILE}")
+    message(STATUS "HTSlib will use explicit ZLIB library: ${ZLIB_LIBRARY_FILE}")
+else()
+    set(HTSLIB_LIBS "")
+    message(WARNING "Could not determine explicit ZLIB library file for HTSlib")
+endif()
+
 ExternalProject_Add(
     htslib_build
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1
-    CONFIGURE_COMMAND env ${HTSLIB_CFLAGS} ${HTSLIB_LDFLAGS} ${HTSLIB_PKG_CONFIG_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1/configure
+    CONFIGURE_COMMAND env ${HTSLIB_CFLAGS} ${HTSLIB_LDFLAGS} ${HTSLIB_LIBS} ${HTSLIB_PKG_CONFIG_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1/configure
         --prefix=${CMAKE_CURRENT_BINARY_DIR}/htslib
         --disable-libcurl
         --disable-bz2
