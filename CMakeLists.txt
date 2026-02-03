@@ -194,6 +194,7 @@ set(EXTENSION_SOURCES
     src/align_bowtie2_sharded.cpp
     src/ncbi_parser.cpp
     src/ncbi_client.cpp
+    src/zip_utils.cpp
     src/read_ncbi_fasta.cpp
     src/read_ncbi.cpp
     src/read_ncbi_annotation.cpp)
@@ -275,6 +276,8 @@ set(TEST_SOURCES
     src/Bowtie2Aligner.cpp
     test/cpp/test_Bowtie2Aligner.cpp
     src/ncbi_parser.cpp
+    src/zip_utils.cpp
+    duckdb/third_party/miniz/miniz.cpp  # For ExtractFromZip tests
     test/cpp/test_ncbi_client.cpp
 )
 
@@ -297,4 +300,8 @@ endif()
 if(HAVE_LIBZSTD)
     target_link_libraries(tests ${ZSTD_TARGET})
 endif()
-target_include_directories(tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_BINARY_DIR}/htslib/include)
+target_include_directories(tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_BINARY_DIR}/htslib/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/duckdb/third_party/miniz  # For ExtractFromZip tests
+)

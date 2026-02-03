@@ -1,6 +1,6 @@
 #include "ncbi_client.hpp"
+#include "zip_utils.hpp"
 #include "duckdb/common/exception/http_exception.hpp"
-#include "miniz.hpp"
 #include <sstream>
 #include <thread>
 
@@ -114,55 +114,6 @@ std::string NCBIClient::FetchAssemblyReport(const std::string &accession) {
 	return MakeRequest(url.str(), true); // Use API key header for Datasets API
 }
 
-std::string NCBIClient::ExtractFromZip(const std::string &zip_data, const std::string &pattern) {
-	duckdb_miniz::mz_zip_archive zip;
-	memset(&zip, 0, sizeof(zip));
-
-	// Initialize ZIP reader from memory
-	if (!duckdb_miniz::mz_zip_reader_init_mem(&zip, zip_data.data(), zip_data.size(), 0)) {
-		throw duckdb::IOException("Failed to read ZIP archive from Datasets API");
-	}
-
-	// RAII guard to ensure ZIP reader cleanup on exception or return
-	auto cleanup = [&zip](void *) {
-		duckdb_miniz::mz_zip_reader_end(&zip);
-	};
-	std::unique_ptr<void, decltype(cleanup)> guard(reinterpret_cast<void *>(1), cleanup);
-
-	std::string result;
-
-	// Iterate through files in ZIP
-	duckdb_miniz::mz_uint num_files = duckdb_miniz::mz_zip_reader_get_num_files(&zip);
-	for (duckdb_miniz::mz_uint i = 0; i < num_files; i++) {
-		duckdb_miniz::mz_zip_archive_file_stat file_stat;
-		if (!duckdb_miniz::mz_zip_reader_file_stat(&zip, i, &file_stat)) {
-			continue;
-		}
-
-		std::string filename = file_stat.m_filename;
-
-		// Check if filename matches pattern (e.g., "*_genomic.fna")
-		if (filename.find(pattern) != std::string::npos) {
-			// Extract file to memory
-			size_t uncompressed_size;
-			void *data = duckdb_miniz::mz_zip_reader_extract_to_heap(&zip, i, &uncompressed_size, 0);
-			if (!data) {
-				throw duckdb::IOException("Failed to extract '%s' from ZIP: %s", filename.c_str(),
-				                          duckdb_miniz::mz_zip_get_error_string(zip.m_last_error));
-			}
-			result.assign(static_cast<char *>(data), uncompressed_size);
-			free(data); // Use standard free(), not mz_free() - allocated by pZip->m_pAlloc (malloc)
-			break;
-		}
-	}
-
-	if (result.empty()) {
-		throw duckdb::IOException("No FASTA file found in assembly package");
-	}
-
-	return result;
-}
-
 // NOTE: This loads the entire ZIP file and extracted FASTA into memory simultaneously.
 // For large assemblies (e.g., human genome ~3GB), this will use ~6GB RAM.
 // TODO: Implement streaming extraction for memory efficiency if needed.
@@ -182,8 +133,12 @@ std::string NCBIClient::FetchAssemblyFasta(const std::string &accession) {
 		                          zip_data.substr(0, std::min<size_t>(100, zip_data.size())).c_str());
 	}
 
-	// Extract *_genomic.fna from ZIP using miniz
-	return ExtractFromZip(zip_data, "_genomic.fna");
+	// Extract *_genomic.fna from ZIP
+	try {
+		return ExtractFromZip(zip_data, "_genomic.fna");
+	} catch (const std::runtime_error &e) {
+		throw duckdb::IOException("Failed to extract assembly FASTA from ZIP: %s", e.what());
+	}
 }
 
 } // namespace miint

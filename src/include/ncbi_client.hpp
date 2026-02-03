@@ -79,9 +79,6 @@ private:
 	// Rate limiting (thread-safe)
 	void RespectRateLimit();
 	double GetRateLimit() const;
-
-	// ZIP extraction helper
-	static std::string ExtractFromZip(const std::string &zip_data, const std::string &pattern);
 };
 
 } // namespace miint
