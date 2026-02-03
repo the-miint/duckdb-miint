@@ -19,8 +19,50 @@ jobs:
       duckdb_version: v1.4.4
       ci_tools_version: v1.4.4
       extension_name: miint
-      # Skip bowtie2 tests - bowtie2 is not installed in the CI environment
-      exclude_tests: 'test/sql/align_bowtie2.test;test/sql/align_bowtie2_sharded.test;test/sql/simple_bowtie2.test'
+      # Skip tests here - run separately with bowtie2 installed
+      skip_tests: true
+
+  test-with-bowtie2:
+    name: Test with Bowtie2
+    runs-on: ubuntu-latest
+    env:
+      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+      VCPKG_TARGET_TRIPLET: 'x64-linux'
+      GEN: ninja
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: 'true'
+
+      - name: Install build dependencies
+        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
+
+      - name: Install bowtie2 via conda
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-update-conda: true
+          channels: bioconda,conda-forge,defaults
+          channel-priority: strict
+
+      - name: Install bowtie2
+        shell: bash -el {0}
+        run: |
+          conda install -y bowtie2
+          bowtie2 --version
+          bowtie2-build --version
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11.1
+        with:
+          vcpkgGitCommitId: ce613c41372b23b1f51333815feb3edd87ef8a8b
+
+      - name: Build extension
+        run: make release
+
+      - name: Run all tests
+        shell: bash -el {0}
+        run: make test
 
   code-quality-check:
     name: Code Quality Check
