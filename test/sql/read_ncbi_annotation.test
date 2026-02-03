@@ -3,6 +3,7 @@
 # group: [sql]
 
 # NOTE: This test requires network access to NCBI servers
+# Tests are structured to minimize NCBI requests by fetching data once into temp tables
 
 require miint
 
@@ -49,38 +50,43 @@ phase	INTEGER	YES	NULL	NULL	NULL
 attributes	MAP(VARCHAR, VARCHAR)	YES	NULL	NULL	NULL
 filepath	VARCHAR	YES	NULL	NULL	NULL
 
+# Fetch Lambda phage annotations once with filepath, reuse for multiple tests
+statement ok
+CREATE TEMP TABLE lambda_annot AS
+SELECT * FROM read_ncbi_annotation('NC_001416.1', include_filepath=true);
+
 # Test basic fetch - Lambda phage has many features
 query I
 SELECT COUNT(*) > 100 AS has_many_features
-FROM read_ncbi_annotation('NC_001416.1');
+FROM lambda_annot;
 ----
 true
 
 # Test seqid is populated correctly
 query I
 SELECT COUNT(DISTINCT seqid) = 1 AND MIN(seqid) = 'NC_001416.1' AS correct_seqid
-FROM read_ncbi_annotation('NC_001416.1');
+FROM lambda_annot;
 ----
 true
 
 # Test source is RefSeq
 query I
 SELECT COUNT(DISTINCT source) = 1 AND MIN(source) = 'RefSeq' AS correct_source
-FROM read_ncbi_annotation('NC_001416.1');
+FROM lambda_annot;
 ----
 true
 
 # Test feature types include gene and CDS
 query I
 SELECT COUNT(DISTINCT type) > 1 AS has_multiple_types
-FROM read_ncbi_annotation('NC_001416.1');
+FROM lambda_annot;
 ----
 true
 
 # Test positions are valid (positive and stop >= position)
 query I
 SELECT COUNT(*) = 0 AS all_valid
-FROM read_ncbi_annotation('NC_001416.1')
+FROM lambda_annot
 WHERE position <= 0 OR stop_position < position;
 ----
 true
@@ -88,7 +94,7 @@ true
 # Test strand values are valid
 query I
 SELECT COUNT(DISTINCT strand) AS strand_count
-FROM read_ncbi_annotation('NC_001416.1')
+FROM lambda_annot
 WHERE strand IN ('+', '-', '.');
 ----
 2
@@ -96,7 +102,7 @@ WHERE strand IN ('+', '-', '.');
 # Test attributes map is populated
 query I
 SELECT COUNT(*) > 0 AS has_attributes
-FROM read_ncbi_annotation('NC_001416.1')
+FROM lambda_annot
 WHERE map_keys(attributes) IS NOT NULL AND len(map_keys(attributes)) > 0;
 ----
 true
@@ -104,16 +110,29 @@ true
 # Test can extract specific attribute using element_at
 query I
 SELECT element_at(attributes, 'gene') IS NOT NULL AS has_gene_attr
-FROM read_ncbi_annotation('NC_001416.1')
+FROM lambda_annot
 WHERE type = 'gene'
 LIMIT 1;
 ----
 true
 
+# Test include_filepath shows NCBI URL
+query I
+SELECT filepath LIKE '%eutils.ncbi.nlm.nih.gov%' AS is_ncbi_url
+FROM lambda_annot
+LIMIT 1;
+----
+true
+
+# Fetch multiple accessions once, reuse for tests
+statement ok
+CREATE TEMP TABLE multi_annot AS
+SELECT * FROM read_ncbi_annotation(['NC_001416.1', 'NC_001422.1']);
+
 # Test multiple accessions
 query II
 SELECT seqid, COUNT(*) AS count
-FROM read_ncbi_annotation(['NC_001416.1', 'NC_001422.1'])
+FROM multi_annot
 GROUP BY seqid
 ORDER BY seqid;
 ----
@@ -123,14 +142,6 @@ NC_001422.1	31
 # Test COUNT works correctly
 query I
 SELECT COUNT(*) > 300 AS has_many
-FROM read_ncbi_annotation(['NC_001416.1', 'NC_001422.1']);
-----
-true
-
-# Test include_filepath shows NCBI URL
-query I
-SELECT filepath LIKE '%eutils.ncbi.nlm.nih.gov%' AS is_ncbi_url
-FROM read_ncbi_annotation('NC_001416.1', include_filepath=true)
-LIMIT 1;
+FROM multi_annot;
 ----
 true

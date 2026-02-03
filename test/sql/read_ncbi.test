@@ -3,6 +3,7 @@
 # group: [sql]
 
 # NOTE: This test requires network access to NCBI servers
+# Tests are structured to minimize NCBI requests by fetching data once into temp tables
 
 require miint
 
@@ -39,38 +40,48 @@ length	BIGINT	YES	NULL	NULL	NULL
 molecule_type	VARCHAR	YES	NULL	NULL	NULL
 update_date	DATE	YES	NULL	NULL	NULL
 
+# Fetch Lambda phage metadata once, reuse for multiple tests
+statement ok
+CREATE TEMP TABLE lambda_meta AS
+SELECT * FROM read_ncbi('NC_001416.1');
+
 # Test basic fetch - Lambda phage
 query IIIII
 SELECT accession, version, length, molecule_type, taxonomy_id > 0 AS has_taxid
-FROM read_ncbi('NC_001416.1');
+FROM lambda_meta;
 ----
 NC_001416.1	1	48502	DNA	true
 
 # Test description contains expected text
 query I
 SELECT description LIKE '%lambda%' OR description LIKE '%Lambda%' AS has_lambda
-FROM read_ncbi('NC_001416.1');
+FROM lambda_meta;
 ----
 true
 
 # Test organism is populated
 query I
 SELECT organism LIKE '%phage%' OR organism LIKE '%Phage%' AS has_phage
-FROM read_ncbi('NC_001416.1');
+FROM lambda_meta;
 ----
 true
 
 # Test update_date is a valid date
 query I
 SELECT update_date IS NOT NULL AND update_date > '2000-01-01'::DATE AS valid_date
-FROM read_ncbi('NC_001416.1');
+FROM lambda_meta;
 ----
 true
+
+# Fetch multiple accessions once, reuse for tests
+statement ok
+CREATE TEMP TABLE multi_meta AS
+SELECT * FROM read_ncbi(['NC_001416.1', 'NC_001422.1']);
 
 # Test multiple accessions
 query III
 SELECT accession, length, version
-FROM read_ncbi(['NC_001416.1', 'NC_001422.1'])
+FROM multi_meta
 ORDER BY accession;
 ----
 NC_001416.1	48502	1
@@ -78,13 +89,14 @@ NC_001422.1	5386	1
 
 # Test COUNT works correctly
 query I
-SELECT COUNT(*) FROM read_ncbi(['NC_001416.1', 'NC_001422.1']);
+SELECT COUNT(*) FROM multi_meta;
 ----
 2
 
 # Test with PhiX174 bacteriophage (NC_001422.1)
 query II
 SELECT accession, molecule_type
-FROM read_ncbi('NC_001422.1');
+FROM multi_meta
+WHERE accession = 'NC_001422.1';
 ----
 NC_001422.1	DNA

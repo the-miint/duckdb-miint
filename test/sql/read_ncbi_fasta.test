@@ -3,6 +3,7 @@
 # group: [sql]
 
 # NOTE: This test requires network access to NCBI servers
+# Tests are structured to minimize NCBI requests by fetching data once into temp tables
 
 require miint
 
@@ -46,78 +47,93 @@ qual1	UTINYINT[]	YES	NULL	NULL	NULL
 qual2	UTINYINT[]	YES	NULL	NULL	NULL
 filepath	VARCHAR	YES	NULL	NULL	NULL
 
+# Fetch Lambda phage once with filepath, reuse for multiple tests
+statement ok
+CREATE TEMP TABLE lambda_fasta AS
+SELECT * FROM read_ncbi_fasta('NC_001416.1', include_filepath=true);
+
 # Test basic fetch - Lambda phage
 query III
 SELECT sequence_index, read_id, LENGTH(sequence1) AS seq_len
-FROM read_ncbi_fasta('NC_001416.1');
+FROM lambda_fasta;
 ----
 0	NC_001416.1	48502
 
 # Test comment contains description
 query I
 SELECT comment LIKE '%Lambda%' OR comment LIKE '%lambda%' AS has_lambda
-FROM read_ncbi_fasta('NC_001416.1');
+FROM lambda_fasta;
 ----
 true
 
 # Test sequence2 and quality scores are NULL (FASTA has no quality)
 query II
 SELECT sequence2 IS NULL AS seq2_null, qual1 IS NULL AS qual1_null
-FROM read_ncbi_fasta('NC_001416.1');
+FROM lambda_fasta;
 ----
 true	true
 
 # Test include_filepath shows NCBI URL
 query I
 SELECT filepath LIKE '%eutils.ncbi.nlm.nih.gov%' AS is_ncbi_url
-FROM read_ncbi_fasta('NC_001416.1', include_filepath=true);
+FROM lambda_fasta;
 ----
 true
 
-# Test array input with multiple accessions
+# Test that sequence contains expected nucleotides (Lambda phage starts with GGGCGGCGACCT)
+query I
+SELECT LEFT(sequence1, 12) = 'GGGCGGCGACCT' AS correct_start
+FROM lambda_fasta;
+----
+true
+
+# Fetch multiple accessions once, reuse for tests
 # NC_001416.1 = Lambda phage (48502 bp), NC_001422.1 = PhiX174 (5386 bp)
+statement ok
+CREATE TEMP TABLE multi_fasta AS
+SELECT * FROM read_ncbi_fasta(['NC_001416.1', 'NC_001422.1']);
+
+# Test array input with multiple accessions
 query III
 SELECT sequence_index, read_id, LENGTH(sequence1) AS seq_len
-FROM read_ncbi_fasta(['NC_001416.1', 'NC_001422.1'])
+FROM multi_fasta
 ORDER BY sequence_index;
 ----
 0	NC_001416.1	48502
 1	NC_001422.1	5386
 
-# Test that sequence contains expected nucleotides (Lambda phage starts with GGGCGGCGACCT)
-query I
-SELECT LEFT(sequence1, 12) = 'GGGCGGCGACCT' AS correct_start
-FROM read_ncbi_fasta('NC_001416.1');
-----
-true
-
 # Test COUNT works correctly
 query I
-SELECT COUNT(*) FROM read_ncbi_fasta(['NC_001416.1', 'NC_001422.1']);
+SELECT COUNT(*) FROM multi_fasta;
 ----
 2
 
-# Test assembly accession support (GCF_000009605.1 = Buchnera aphidicola APS)
+# Fetch assembly once, reuse for tests
+# GCF_000009605.1 = Buchnera aphidicola APS
 # This assembly has a chromosome (NC_002528.1) and two small plasmids
 # (NC_002252.1 pTrp, NC_002253.1 pLeu). Total ~656 KB - much smaller than E. coli for faster CI.
+statement ok
+CREATE TEMP TABLE assembly_fasta AS
+SELECT * FROM read_ncbi_fasta('GCF_000009605.1');
+
 # Test that assembly returns the correct number of sequences
 query I
 SELECT COUNT(*) == 3 AS has_multiple_sequences
-FROM read_ncbi_fasta('GCF_000009605.1');
+FROM assembly_fasta;
 ----
 true
 
 # Test that assembly sequences have content
 query I
 SELECT MIN(LENGTH(sequence1)) > 1000 AS has_content
-FROM read_ncbi_fasta('GCF_000009605.1');
+FROM assembly_fasta;
 ----
 true
 
 # Test that read_ids are populated for assembly sequences
 query I
 SELECT read_id
-FROM read_ncbi_fasta('GCF_000009605.1')
+FROM assembly_fasta
 ORDER BY read_id
 ----
 NC_002252.1
