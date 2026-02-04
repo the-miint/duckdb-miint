@@ -99,11 +99,26 @@ if(NOT ZLIB_LIBRARY_DIR)
     message(WARNING "Could not determine ZLIB library directory. ZLIB_LIBRARY_RELEASE=${ZLIB_LIBRARY_RELEASE}, ZLIB_LIBRARY=${ZLIB_LIBRARY}, ZLIB_LIBRARIES=${ZLIB_LIBRARIES}")
 endif()
 
-set(HTSLIB_CFLAGS "CFLAGS=-fPIC -I${ZLIB_INCLUDE_DIRS}")
+# Handle cross-compilation for OSX (e.g., building x86_64 on ARM64 host)
+set(HTSLIB_HOST_FLAG "")
+set(HTSLIB_ARCH_CFLAGS "")
+if(APPLE AND OSX_BUILD_ARCH)
+    if(OSX_BUILD_ARCH STREQUAL "x86_64")
+        set(HTSLIB_HOST_FLAG "--host=x86_64-apple-darwin")
+        set(HTSLIB_ARCH_CFLAGS "-arch x86_64")
+        message(STATUS "HTSlib cross-compiling for x86_64 on Apple Silicon")
+    elseif(OSX_BUILD_ARCH STREQUAL "arm64")
+        set(HTSLIB_HOST_FLAG "--host=aarch64-apple-darwin")
+        set(HTSLIB_ARCH_CFLAGS "-arch arm64")
+        message(STATUS "HTSlib cross-compiling for arm64")
+    endif()
+endif()
+
+set(HTSLIB_CFLAGS "CFLAGS=-fPIC ${HTSLIB_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}")
 if(ZLIB_LIBRARY_DIR)
-    set(HTSLIB_LDFLAGS "LDFLAGS=-L${ZLIB_LIBRARY_DIR}")
+    set(HTSLIB_LDFLAGS "LDFLAGS=${HTSLIB_ARCH_CFLAGS} -L${ZLIB_LIBRARY_DIR}")
 else()
-    set(HTSLIB_LDFLAGS "")
+    set(HTSLIB_LDFLAGS "LDFLAGS=${HTSLIB_ARCH_CFLAGS}")
 endif()
 
 # Get the actual zlib library file for explicit linking
@@ -135,6 +150,7 @@ ExternalProject_Add(
     htslib_build
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1
     CONFIGURE_COMMAND env ${HTSLIB_CFLAGS} ${HTSLIB_LDFLAGS} ${HTSLIB_LIBS} ${HTSLIB_PKG_CONFIG_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1/configure
+        ${HTSLIB_HOST_FLAG}
         --prefix=${CMAKE_CURRENT_BINARY_DIR}/htslib
         --disable-libcurl
         --disable-bz2
