@@ -65,8 +65,8 @@ bash run_tests.sh
 # Clean build
 make clean
 
-# Build with specific configuration
-make release  # or make debug
+# Build (always use build.sh, not make directly)
+bash build.sh
 ```
 
 ## Architecture Overview

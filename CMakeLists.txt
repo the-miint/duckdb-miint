@@ -173,8 +173,22 @@ file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/htslib/include)
 add_dependencies(hts htslib_build)
 
 # Detect architecture for minimap2 SIMD support
+# Use OSX_BUILD_ARCH for cross-compilation, otherwise use host architecture
 set(MINIMAP2_ARCH_FLAGS "")
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+set(MINIMAP2_ARCH_CFLAGS "")
+if(APPLE AND OSX_BUILD_ARCH)
+    # Cross-compilation: use target architecture, not host
+    if(OSX_BUILD_ARCH STREQUAL "arm64")
+        set(MINIMAP2_ARCH_FLAGS "aarch64=1")
+        set(MINIMAP2_ARCH_CFLAGS "-arch arm64")
+        message(STATUS "Minimap2 cross-compiling for arm64")
+    elseif(OSX_BUILD_ARCH STREQUAL "x86_64")
+        # x86_64 target: don't set aarch64=1, use x86_64 arch flag
+        set(MINIMAP2_ARCH_CFLAGS "-arch x86_64")
+        message(STATUS "Minimap2 cross-compiling for x86_64 on Apple Silicon")
+    endif()
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    # Native ARM64 build
     set(MINIMAP2_ARCH_FLAGS "aarch64=1")
 endif()
 
@@ -183,7 +197,7 @@ ExternalProject_Add(
     minimap2_build
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2
     CONFIGURE_COMMAND ""
-    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2 libminimap2.a "CFLAGS=-g -Wall -O2 -Wc++-compat -fPIC -I${ZLIB_INCLUDE_DIRS}" "CPPFLAGS=-DHAVE_KALLOC" ${MINIMAP2_ARCH_FLAGS}
+    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2 libminimap2.a "CFLAGS=-g -Wall -O2 -Wc++-compat -fPIC ${MINIMAP2_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}" "CPPFLAGS=-DHAVE_KALLOC" ${MINIMAP2_ARCH_FLAGS}
     INSTALL_COMMAND ""
     BUILD_IN_SOURCE 1
     BUILD_BYPRODUCTS ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2/libminimap2.a
