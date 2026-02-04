@@ -1,0 +1,5 @@
+@SQ	SN:ref1	LN:1000
+negative_score	0	ref1	100	60	10M	*	0	0	ACGTACGTAC	*	AS:i:-1	XS:i:-5
+zero_score	0	ref1	200	60	10M	*	0	0	ACGTACGTAC	*	AS:i:0
+no_as_tag	0	ref1	300	60	10M	*	0	0	ACGTACGTAC	*
+positive_score	0	ref1	400	60	10M	*	0	0	ACGTACGTAC	*	AS:i:100

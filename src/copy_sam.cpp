@@ -365,7 +365,7 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 	// Create header from reference_lengths if provided, otherwise create empty header
 	gstate->header = SAMHeaderPtr(sam_hdr_init());
 	if (!gstate->header) {
-		throw std::runtime_error("Failed to create SAM header");
+		throw IOException("Failed to create SAM header");
 	}
 
 	if (fdata.reference_lengths_table.has_value()) {
@@ -375,7 +375,7 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 		for (const auto &ref : reference_lengths_map) {
 			if (sam_hdr_add_line(gstate->header.get(), "SQ", "SN", ref.first.c_str(), "LN",
 			                     std::to_string(ref.second).c_str(), NULL) < 0) {
-				throw std::runtime_error("Failed to add reference to SAM header: " + ref.first);
+				throw IOException("Failed to add reference to SAM header: %s", ref.first);
 			}
 		}
 	}
@@ -396,7 +396,7 @@ struct SAMCopyLocalState : public LocalFunctionData {
 	SAMCopyLocalState() {
 		record = BAMRecordPtr(bam_init1());
 		if (!record) {
-			throw std::runtime_error("Failed to allocate BAM record");
+			throw IOException("Failed to allocate BAM record");
 		}
 	}
 };
@@ -452,12 +452,12 @@ static int32_t GetReferenceTID(sam_hdr_t *header, const string &reference) {
 	if (tid < 0) {
 		constexpr const char *SENTINEL_LENGTH = "2147483647"; // 2^31-1, unknown length
 		if (sam_hdr_add_line(header, "SQ", "SN", reference.c_str(), "LN", SENTINEL_LENGTH, NULL) < 0) {
-			throw std::runtime_error("Failed to dynamically add reference to SAM header: " + reference);
+			throw IOException("Failed to dynamically add reference to SAM header: %s", reference);
 		}
 		// Get the tid after adding
 		tid = sam_hdr_name2tid(header, reference.c_str());
 		if (tid < 0) {
-			throw std::runtime_error("Failed to get TID for dynamically added reference: " + reference);
+			throw IOException("Failed to get TID for dynamically added reference: %s", reference);
 		}
 	}
 

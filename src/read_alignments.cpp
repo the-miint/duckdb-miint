@@ -236,14 +236,14 @@ void ReadAlignmentsTableFunction::Execute(ClientContext &context, TableFunctionI
 	SetResultVectorString(output.data[field_idx++], batch.mate_references);
 	SetResultVectorInt64(output.data[field_idx++], batch.mate_positions);
 	SetResultVectorInt64(output.data[field_idx++], batch.template_lengths);
-	SetResultVectorInt64Nullable(output.data[field_idx++], batch.tag_as_values);
-	SetResultVectorInt64Nullable(output.data[field_idx++], batch.tag_xs_values);
-	SetResultVectorInt64Nullable(output.data[field_idx++], batch.tag_ys_values);
-	SetResultVectorInt64Nullable(output.data[field_idx++], batch.tag_xn_values);
-	SetResultVectorInt64Nullable(output.data[field_idx++], batch.tag_xm_values);
-	SetResultVectorInt64Nullable(output.data[field_idx++], batch.tag_xo_values);
-	SetResultVectorInt64Nullable(output.data[field_idx++], batch.tag_xg_values);
-	SetResultVectorInt64Nullable(output.data[field_idx++], batch.tag_nm_values);
+	SetResultVectorInt64Nullable(output.data[field_idx++], batch.tag_as_values, batch.tag_as_valid);
+	SetResultVectorInt64Nullable(output.data[field_idx++], batch.tag_xs_values, batch.tag_xs_valid);
+	SetResultVectorInt64Nullable(output.data[field_idx++], batch.tag_ys_values, batch.tag_ys_valid);
+	SetResultVectorInt64Nullable(output.data[field_idx++], batch.tag_xn_values, batch.tag_xn_valid);
+	SetResultVectorInt64Nullable(output.data[field_idx++], batch.tag_xm_values, batch.tag_xm_valid);
+	SetResultVectorInt64Nullable(output.data[field_idx++], batch.tag_xo_values, batch.tag_xo_valid);
+	SetResultVectorInt64Nullable(output.data[field_idx++], batch.tag_xg_values, batch.tag_xg_valid);
+	SetResultVectorInt64Nullable(output.data[field_idx++], batch.tag_nm_values, batch.tag_nm_valid);
 	SetResultVectorStringNullable(output.data[field_idx++], batch.tag_yt_values);
 	SetResultVectorStringNullable(output.data[field_idx++], batch.tag_md_values);
 	SetResultVectorStringNullable(output.data[field_idx++], batch.tag_sa_values);
@@ -305,15 +305,15 @@ void ReadAlignmentsTableFunction::SetResultVectorInt64(Vector &result_vector, co
 }
 
 void ReadAlignmentsTableFunction::SetResultVectorInt64Nullable(Vector &result_vector,
-                                                               const std::vector<int64_t> &values) {
+                                                               const std::vector<int64_t> &values,
+                                                               const std::vector<bool> &valid) {
 	auto result_data = FlatVector::GetData<int64_t>(result_vector);
 	auto &validity = FlatVector::Validity(result_vector);
 	validity.SetAllInvalid(values.size());
 
 	for (idx_t j = 0; j < values.size(); j++) {
 		result_data[j] = values[j];
-		// Tags return -1 when not present
-		if (values[j] != -1) {
+		if (valid[j]) {
 			validity.SetValid(j);
 		}
 	}

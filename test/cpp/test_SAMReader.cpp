@@ -63,14 +63,15 @@ TEST_CASE("SAMReader with header unpaired no flags", "[SAMReader]") {
 	REQUIRE((batch.mate_references[0] == "*"));
 	REQUIRE((batch.mate_positions[0] == 0));
 	REQUIRE((batch.template_lengths[0] == 0));
-	REQUIRE((batch.tag_as_values[0] == -1));
-	REQUIRE((batch.tag_xs_values[0] == -1));
-	REQUIRE((batch.tag_ys_values[0] == -1));
-	REQUIRE((batch.tag_xn_values[0] == -1));
-	REQUIRE((batch.tag_xm_values[0] == -1));
-	REQUIRE((batch.tag_xo_values[0] == -1));
-	REQUIRE((batch.tag_xg_values[0] == -1));
-	REQUIRE((batch.tag_nm_values[0] == -1));
+	// Missing integer tags should have valid=false (value is undefined)
+	REQUIRE((batch.tag_as_valid[0] == false));
+	REQUIRE((batch.tag_xs_valid[0] == false));
+	REQUIRE((batch.tag_ys_valid[0] == false));
+	REQUIRE((batch.tag_xn_valid[0] == false));
+	REQUIRE((batch.tag_xm_valid[0] == false));
+	REQUIRE((batch.tag_xo_valid[0] == false));
+	REQUIRE((batch.tag_xg_valid[0] == false));
+	REQUIRE((batch.tag_nm_valid[0] == false));
 	REQUIRE((batch.tag_yt_values[0] == ""));
 	REQUIRE((batch.tag_md_values[0] == ""));
 	REQUIRE((batch.tag_sa_values[0] == ""));
@@ -84,17 +85,58 @@ TEST_CASE("SAMReader with header unpaired no flags", "[SAMReader]") {
 	REQUIRE((batch.mate_references[1] == "*"));
 	REQUIRE((batch.mate_positions[1] == 0));
 	REQUIRE((batch.template_lengths[1] == 0));
-	REQUIRE((batch.tag_as_values[1] == -1));
-	REQUIRE((batch.tag_xs_values[1] == -1));
-	REQUIRE((batch.tag_ys_values[1] == -1));
-	REQUIRE((batch.tag_xn_values[1] == -1));
-	REQUIRE((batch.tag_xm_values[1] == -1));
-	REQUIRE((batch.tag_xo_values[1] == -1));
-	REQUIRE((batch.tag_xg_values[1] == -1));
-	REQUIRE((batch.tag_nm_values[1] == -1));
+	REQUIRE((batch.tag_as_valid[1] == false));
+	REQUIRE((batch.tag_xs_valid[1] == false));
+	REQUIRE((batch.tag_ys_valid[1] == false));
+	REQUIRE((batch.tag_xn_valid[1] == false));
+	REQUIRE((batch.tag_xm_valid[1] == false));
+	REQUIRE((batch.tag_xo_valid[1] == false));
+	REQUIRE((batch.tag_xg_valid[1] == false));
+	REQUIRE((batch.tag_nm_valid[1] == false));
 	REQUIRE((batch.tag_yt_values[1] == ""));
 	REQUIRE((batch.tag_md_values[1] == ""));
 	REQUIRE((batch.tag_sa_values[1] == ""));
+}
+
+TEST_CASE("SAMReader negative tag values not confused with NULL", "[SAMReader]") {
+	// This test verifies the fix for the sentinel bug:
+	// Negative alignment scores (AS=-1, XS=-5) are valid values per Bowtie2 spec
+	// and should not be confused with missing tags
+	TempFileFixture fixture;
+	auto path = "test_negative_tags.sam";
+	fixture.write_temp_sam(
+	    path, {"@SQ\tSN:ref1\tLN:1000\n",
+	           "negative_score\t0\tref1\t100\t60\t10M\t*\t0\t0\tACGTACGTAC\tIIIIIIIIII\tAS:i:-1\tXS:i:-5\n",
+	           "zero_score\t0\tref1\t200\t60\t10M\t*\t0\t0\tACGTACGTAC\tIIIIIIIIII\tAS:i:0\n",
+	           "no_as_tag\t0\tref1\t300\t60\t10M\t*\t0\t0\tACGTACGTAC\tIIIIIIIIII\n",
+	           "positive_score\t0\tref1\t400\t60\t10M\t*\t0\t0\tACGTACGTAC\tIIIIIIIIII\tAS:i:100\n"});
+
+	miint::SAMReader reader(path);
+	auto batch = reader.read(10);
+
+	REQUIRE((batch.size() == 4));
+
+	// Record 0: negative_score - AS=-1 should be valid with value -1
+	REQUIRE((batch.read_ids[0] == "negative_score"));
+	REQUIRE((batch.tag_as_valid[0] == true));
+	REQUIRE((batch.tag_as_values[0] == -1));
+	REQUIRE((batch.tag_xs_valid[0] == true));
+	REQUIRE((batch.tag_xs_values[0] == -5));
+
+	// Record 1: zero_score - AS=0 should be valid
+	REQUIRE((batch.read_ids[1] == "zero_score"));
+	REQUIRE((batch.tag_as_valid[1] == true));
+	REQUIRE((batch.tag_as_values[1] == 0));
+	REQUIRE((batch.tag_xs_valid[1] == false)); // XS not present
+
+	// Record 2: no_as_tag - AS tag not present, should be invalid
+	REQUIRE((batch.read_ids[2] == "no_as_tag"));
+	REQUIRE((batch.tag_as_valid[2] == false));
+
+	// Record 3: positive_score - AS=100 should be valid
+	REQUIRE((batch.read_ids[3] == "positive_score"));
+	REQUIRE((batch.tag_as_valid[3] == true));
+	REQUIRE((batch.tag_as_values[3] == 100));
 }
 
 TEST_CASE("Headerless constructor with single reference", "[SAMReader][headerless]") {

@@ -110,6 +110,17 @@ struct SAMRecordBatch {
 	std::vector<int64_t> tag_xo_values;
 	std::vector<int64_t> tag_xg_values;
 	std::vector<int64_t> tag_nm_values;
+
+	// Validity tracking for nullable integer tags
+	std::vector<bool> tag_as_valid;
+	std::vector<bool> tag_xs_valid;
+	std::vector<bool> tag_ys_valid;
+	std::vector<bool> tag_xn_valid;
+	std::vector<bool> tag_xm_valid;
+	std::vector<bool> tag_xo_valid;
+	std::vector<bool> tag_xg_valid;
+	std::vector<bool> tag_nm_valid;
+
 	std::vector<std::string> tag_yt_values;
 	std::vector<std::string> tag_md_values;
 	std::vector<std::string> tag_sa_values;
@@ -143,6 +154,14 @@ struct SAMRecordBatch {
 		tag_xo_values.reserve(n);
 		tag_xg_values.reserve(n);
 		tag_nm_values.reserve(n);
+		tag_as_valid.reserve(n);
+		tag_xs_valid.reserve(n);
+		tag_ys_valid.reserve(n);
+		tag_xn_valid.reserve(n);
+		tag_xm_valid.reserve(n);
+		tag_xo_valid.reserve(n);
+		tag_xg_valid.reserve(n);
+		tag_nm_valid.reserve(n);
 		tag_yt_values.reserve(n);
 		tag_md_values.reserve(n);
 		tag_sa_values.reserve(n);
@@ -169,6 +188,14 @@ struct SAMRecordBatch {
 		tag_xo_values.clear();
 		tag_xg_values.clear();
 		tag_nm_values.clear();
+		tag_as_valid.clear();
+		tag_xs_valid.clear();
+		tag_ys_valid.clear();
+		tag_xn_valid.clear();
+		tag_xm_valid.clear();
+		tag_xo_valid.clear();
+		tag_xg_valid.clear();
+		tag_nm_valid.clear();
 		tag_yt_values.clear();
 		tag_md_values.clear();
 		tag_sa_values.clear();
@@ -179,12 +206,19 @@ struct SAMRecordBatch {
 
 // Helper functions for extracting fields from bam1_t and populating batches
 namespace sam_utils {
-inline int64_t get_int_tag(const bam1_t *aln, const char *tag, int64_t default_val = -1) {
+
+// Result struct for integer tag extraction with validity tracking
+struct IntTagResult {
+	int64_t value;
+	bool present;
+};
+
+inline IntTagResult get_int_tag(const bam1_t *aln, const char *tag) {
 	uint8_t *aux = bam_aux_get(aln, tag);
 	if (!aux) {
-		return default_val;
+		return {0, false};
 	}
-	return bam_aux2i(aux);
+	return {bam_aux2i(aux), true};
 }
 
 inline std::string get_string_tag(const bam1_t *aln, const char *tag) {
@@ -243,14 +277,37 @@ inline void parse_record_to_batch(const bam1_t *aln, const sam_hdr_t *hdr, SAMRe
 	batch.mate_positions.push_back(aln->core.mpos >= 0 ? aln->core.mpos + 1 : 0);
 	batch.template_lengths.push_back(aln->core.isize);
 
-	batch.tag_as_values.push_back(get_int_tag(aln, "AS"));
-	batch.tag_xs_values.push_back(get_int_tag(aln, "XS"));
-	batch.tag_ys_values.push_back(get_int_tag(aln, "YS"));
-	batch.tag_xn_values.push_back(get_int_tag(aln, "XN"));
-	batch.tag_xm_values.push_back(get_int_tag(aln, "XM"));
-	batch.tag_xo_values.push_back(get_int_tag(aln, "XO"));
-	batch.tag_xg_values.push_back(get_int_tag(aln, "XG"));
-	batch.tag_nm_values.push_back(get_int_tag(aln, "NM"));
+	auto as_result = get_int_tag(aln, "AS");
+	batch.tag_as_values.push_back(as_result.value);
+	batch.tag_as_valid.push_back(as_result.present);
+
+	auto xs_result = get_int_tag(aln, "XS");
+	batch.tag_xs_values.push_back(xs_result.value);
+	batch.tag_xs_valid.push_back(xs_result.present);
+
+	auto ys_result = get_int_tag(aln, "YS");
+	batch.tag_ys_values.push_back(ys_result.value);
+	batch.tag_ys_valid.push_back(ys_result.present);
+
+	auto xn_result = get_int_tag(aln, "XN");
+	batch.tag_xn_values.push_back(xn_result.value);
+	batch.tag_xn_valid.push_back(xn_result.present);
+
+	auto xm_result = get_int_tag(aln, "XM");
+	batch.tag_xm_values.push_back(xm_result.value);
+	batch.tag_xm_valid.push_back(xm_result.present);
+
+	auto xo_result = get_int_tag(aln, "XO");
+	batch.tag_xo_values.push_back(xo_result.value);
+	batch.tag_xo_valid.push_back(xo_result.present);
+
+	auto xg_result = get_int_tag(aln, "XG");
+	batch.tag_xg_values.push_back(xg_result.value);
+	batch.tag_xg_valid.push_back(xg_result.present);
+
+	auto nm_result = get_int_tag(aln, "NM");
+	batch.tag_nm_values.push_back(nm_result.value);
+	batch.tag_nm_valid.push_back(nm_result.present);
 	batch.tag_yt_values.emplace_back(get_string_tag(aln, "YT"));
 	batch.tag_md_values.emplace_back(get_string_tag(aln, "MD"));
 	batch.tag_sa_values.emplace_back(get_string_tag(aln, "SA"));

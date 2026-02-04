@@ -126,7 +126,8 @@ public:
 	static void SetResultVectorUInt8(Vector &result_vector, const std::vector<uint8_t> &values);
 	static void SetResultVectorUInt16(Vector &result_vector, const std::vector<uint16_t> &values);
 	static void SetResultVectorInt64(Vector &result_vector, const std::vector<int64_t> &values);
-	static void SetResultVectorInt64Nullable(Vector &result_vector, const std::vector<int64_t> &values);
+	static void SetResultVectorInt64Nullable(Vector &result_vector, const std::vector<int64_t> &values,
+	                                         const std::vector<bool> &valid);
 	static void SetResultVectorListUInt8(Vector &result_vector, const std::vector<miint::QualScore> &values);
 	static void SetResultVectorFilepath(Vector &result_vector, const std::string &filepath);
 

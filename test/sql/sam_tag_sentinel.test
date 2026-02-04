@@ -1,0 +1,45 @@
+# name: test/sql/sam_tag_sentinel.test
+# description: Test that negative SAM tag values are not confused with NULL
+# group: [sql]
+
+require miint
+
+statement ok
+PRAGMA enable_verification;
+
+# Test: AS=-1 should return -1, not NULL
+query I
+SELECT tag_as FROM read_alignments('data/sam/negative_tags.sam') WHERE read_id = 'negative_score'
+----
+-1
+
+# Test: AS=0 should return 0
+query I
+SELECT tag_as FROM read_alignments('data/sam/negative_tags.sam') WHERE read_id = 'zero_score'
+----
+0
+
+# Test: Missing AS tag should return NULL
+query I
+SELECT tag_as IS NULL FROM read_alignments('data/sam/negative_tags.sam') WHERE read_id = 'no_as_tag'
+----
+true
+
+# Test: Count of NULL vs non-NULL
+query II
+SELECT COUNT(*) FILTER (WHERE tag_as IS NULL), COUNT(*) FILTER (WHERE tag_as IS NOT NULL)
+FROM read_alignments('data/sam/negative_tags.sam')
+----
+1	3
+
+# Test: XS=-5 should return -5, not NULL
+query I
+SELECT tag_xs FROM read_alignments('data/sam/negative_tags.sam') WHERE read_id = 'negative_score'
+----
+-5
+
+# Test: Missing XS tag should return NULL (not -1)
+query I
+SELECT tag_xs IS NULL FROM read_alignments('data/sam/negative_tags.sam') WHERE read_id = 'zero_score'
+----
+true

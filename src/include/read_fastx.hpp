@@ -23,9 +23,8 @@ public:
 		bool uses_stdin;
 		uint8_t qual_offset;
 
-		std::vector<std::string> names;                 // field names
-		std::vector<LogicalType> types;                 // field types
-		std::vector<miint::SequenceRecordField> fields; // enum for convenience
+		std::vector<std::string> names; // field names
+		std::vector<LogicalType> types; // field types
 
 		Data(const std::vector<std::string> &r1_paths, const std::optional<std::vector<std::string>> &r2_paths,
 		     bool include_fp, bool stdin_used, uint8_t offset)
@@ -34,10 +33,7 @@ public:
 		      names({"sequence_index", "read_id", "comment", "sequence1", "sequence2", "qual1", "qual2"}),
 		      types({LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
 		             LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT),
-		             LogicalType::LIST(LogicalType::UTINYINT)}),
-		      fields({miint::SequenceRecordField::READ_ID, miint::SequenceRecordField::COMMENT,
-		              miint::SequenceRecordField::SEQUENCE1, miint::SequenceRecordField::SEQUENCE2,
-		              miint::SequenceRecordField::QUAL1, miint::SequenceRecordField::QUAL2}) {
+		             LogicalType::LIST(LogicalType::UTINYINT)}) {
 			if (include_filepath) {
 				names.emplace_back("filepath");
 				types.emplace_back(LogicalType::VARCHAR);
