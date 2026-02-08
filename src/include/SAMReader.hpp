@@ -44,7 +44,9 @@ using BAMRecordPtr = std::unique_ptr<bam1_t, BAMRecordDeleter>;
 class SAMReader {
 public:
 	// Constructor for SAM files with headers
-	explicit SAMReader(const std::string &filename, bool include_seq_qual = false);
+	// require_references: if true (default), throws when header has no @SQ lines (n_targets == 0)
+	//                     if false, accepts headers without @SQ lines (e.g., uBAM files)
+	explicit SAMReader(const std::string &filename, bool include_seq_qual = false, bool require_references = true);
 
 	// Constructor for headerless SAM files
 	// Creates a synthetic header from the provided reference map

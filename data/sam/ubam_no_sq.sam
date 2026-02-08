@@ -1,0 +1,6 @@
+@HD	VN:1.6	SO:unknown
+@RG	ID:bc2001	SM:sample1
+@PG	ID:bazcaller	VN:1.0
+read1	4	*	0	0	*	*	0	0	ACGTACGTACGTACGT	IIIIIIIIIIIIIIII
+read2	4	*	0	0	*	*	0	0	TGCATGCATGCA	!!!555???JJJ
+read3	4	*	0	0	*	*	0	0	NNNNNN	!!!!!!

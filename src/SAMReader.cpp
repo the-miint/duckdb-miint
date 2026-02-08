@@ -7,15 +7,20 @@
 
 namespace miint {
 // Constructor for SAM files with headers
-SAMReader::SAMReader(const std::string &filename, bool include_seq_qual)
+SAMReader::SAMReader(const std::string &filename, bool include_seq_qual, bool require_references)
     : fp(sam_open(filename.c_str(), "r")), hdr(sam_hdr_read(fp.get())), aln(bam_init1()),
       include_seq_qual(include_seq_qual) {
 	if (!fp) {
 		throw std::runtime_error("Failed to open SAM file");
 	}
 
-	// Validate header exists and is not empty
-	if (!hdr || hdr->n_targets == 0) {
+	// Validate header exists
+	if (!hdr) {
+		throw std::runtime_error("SAM file missing required header");
+	}
+
+	// Validate header has reference sequences (unless caller opts out, e.g. for uBAM files)
+	if (require_references && hdr->n_targets == 0) {
 		throw std::runtime_error("SAM file missing required header");
 	}
 

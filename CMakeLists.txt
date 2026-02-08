@@ -219,6 +219,7 @@ set(EXTENSION_SOURCES
     src/miint_extension.cpp
     src/QualScore.cpp
     src/read_alignments.cpp
+    src/read_sequences_sam.cpp
     src/SAMReader.cpp
     src/alignment_flag_functions.cpp
     src/alignment_functions.cpp

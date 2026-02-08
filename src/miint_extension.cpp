@@ -14,6 +14,7 @@
 #include <kseq++/seqio.hpp>
 #include <read_fastx.hpp>
 #include <read_alignments.hpp>
+#include <read_sequences_sam.hpp>
 #include <read_biom.hpp>
 #include <align_minimap2.hpp>
 #include <align_minimap2_sharded.hpp>
@@ -54,6 +55,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// TODO: //! comment on headers
 	ReadFastxTableFunction::Register(loader);
 	ReadAlignmentsTableFunction::Register(loader);
+	ReadSequencesSamTableFunction::Register(loader);
 	ReadBIOMTableFunction::Register(loader);
 	ReadNewickTableFunction::Register(loader);
 	AlignMinimap2TableFunction::Register(loader);

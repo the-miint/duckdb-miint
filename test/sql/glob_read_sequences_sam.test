@@ -1,0 +1,30 @@
+# name: test/sql/glob_read_sequences_sam.test
+# group: [sql]
+
+require miint
+
+# Glob support: match multiple uBAM files
+query II
+SELECT read_id, sequence1 FROM read_sequences_sam('data/sam/ubam_no_sq*.sam') ORDER BY read_id;
+----
+read1	ACGTACGTACGTACGT
+read2	TGCATGCATGCA
+read3	NNNNNN
+read4	AAACCCGGGTTT
+read5	GATTACA
+
+# Glob with include_filepath
+query II
+SELECT read_id, filepath FROM read_sequences_sam('data/sam/ubam_no_sq*.sam', include_filepath=true) ORDER BY filepath, sequence_index;
+----
+read1	data/sam/ubam_no_sq.sam
+read2	data/sam/ubam_no_sq.sam
+read3	data/sam/ubam_no_sq.sam
+read4	data/sam/ubam_no_sq_2.sam
+read5	data/sam/ubam_no_sq_2.sam
+
+# Glob that matches nothing
+statement error
+SELECT * FROM read_sequences_sam('data/sam/zzzzz_nonexistent_*.sam');
+----
+No files matched pattern

@@ -32,7 +32,7 @@ public:
 	}
 
 	//! Return as string (raw stored characters)
-	std::string as_string() const noexcept {
+	const std::string &as_string() const noexcept {
 		return qual_;
 	}
 
@@ -57,4 +57,4 @@ public:
 //! returns: zero‐based index of first low‐quality window, length + 1 if no window
 std::size_t find_low_quality_window(const std::span<uint8_t> &phred_scores, uint8_t min_quality,
                                     std::size_t window_length);
-}; // namespace miint
+} // namespace miint

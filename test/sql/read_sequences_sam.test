@@ -1,0 +1,204 @@
+# name: test/sql/read_sequences_sam.test
+# group: [sql]
+
+require miint
+
+# --- Error handling ---
+
+# File not found
+statement error
+SELECT * FROM read_sequences_sam('nonexistent_file.bam');
+----
+File not found
+
+# Empty array
+statement error
+SELECT * FROM read_sequences_sam([]);
+----
+at least one file path must be provided
+
+# --- Schema verification ---
+
+query IIIIII
+DESCRIBE SELECT * FROM read_sequences_sam('data/sam/ubam_no_sq.sam');
+----
+sequence_index	BIGINT	YES	NULL	NULL	NULL
+read_id	VARCHAR	YES	NULL	NULL	NULL
+comment	VARCHAR	YES	NULL	NULL	NULL
+sequence1	VARCHAR	YES	NULL	NULL	NULL
+sequence2	VARCHAR	YES	NULL	NULL	NULL
+qual1	UTINYINT[]	YES	NULL	NULL	NULL
+qual2	UTINYINT[]	YES	NULL	NULL	NULL
+
+# Schema with include_filepath
+query IIIIII
+DESCRIBE SELECT * FROM read_sequences_sam('data/sam/ubam_no_sq.sam', include_filepath=true);
+----
+sequence_index	BIGINT	YES	NULL	NULL	NULL
+read_id	VARCHAR	YES	NULL	NULL	NULL
+comment	VARCHAR	YES	NULL	NULL	NULL
+sequence1	VARCHAR	YES	NULL	NULL	NULL
+sequence2	VARCHAR	YES	NULL	NULL	NULL
+qual1	UTINYINT[]	YES	NULL	NULL	NULL
+qual2	UTINYINT[]	YES	NULL	NULL	NULL
+filepath	VARCHAR	YES	NULL	NULL	NULL
+
+# --- Basic uBAM reading ---
+
+# read_id and sequence1
+query II
+SELECT read_id, sequence1 FROM read_sequences_sam('data/sam/ubam_no_sq.sam') ORDER BY sequence_index;
+----
+read1	ACGTACGTACGTACGT
+read2	TGCATGCATGCA
+read3	NNNNNN
+
+# comment is always NULL
+query I
+SELECT comment FROM read_sequences_sam('data/sam/ubam_no_sq.sam') ORDER BY sequence_index;
+----
+NULL
+NULL
+NULL
+
+# sequence2 is always NULL
+query I
+SELECT sequence2 FROM read_sequences_sam('data/sam/ubam_no_sq.sam') ORDER BY sequence_index;
+----
+NULL
+NULL
+NULL
+
+# qual2 is always NULL
+query I
+SELECT qual2 FROM read_sequences_sam('data/sam/ubam_no_sq.sam') ORDER BY sequence_index;
+----
+NULL
+NULL
+NULL
+
+# sequence_index is 1-based
+query I
+SELECT sequence_index FROM read_sequences_sam('data/sam/ubam_no_sq.sam') ORDER BY sequence_index;
+----
+1
+2
+3
+
+# --- Quality scores ---
+
+# Quality scores: read1 has all 40s (I=73, 73-33=40)
+query II
+SELECT read_id, qual1 FROM read_sequences_sam('data/sam/ubam_no_sq.sam') WHERE read_id = 'read1';
+----
+read1	[40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40]
+
+# Quality scores: read2 has mixed values (!=0, 5=20, ?=30, J=41)
+query II
+SELECT read_id, qual1 FROM read_sequences_sam('data/sam/ubam_no_sq.sam') WHERE read_id = 'read2';
+----
+read2	[0, 0, 0, 20, 20, 20, 30, 30, 30, 41, 41, 41]
+
+# Quality score range check: all values 0-93
+query I
+SELECT COUNT(*) FROM (
+    SELECT UNNEST(qual1) AS q FROM read_sequences_sam('data/sam/ubam_no_sq.sam')
+) WHERE q < 0 OR q > 93;
+----
+0
+
+# Quality length matches sequence length
+query I
+SELECT COUNT(*) FROM read_sequences_sam('data/sam/ubam_no_sq.sam')
+WHERE LENGTH(sequence1) != LENGTH(qual1);
+----
+0
+
+# --- Aligned BAM/SAM: extract sequences from files with full headers ---
+
+query II
+SELECT read_id, sequence1 FROM read_sequences_sam('data/sam/foo_with_seqqual.sam') ORDER BY sequence_index;
+----
+read1	ACGTACGTAC
+read2	ACGTACGTACGTACG
+read3	ACGTACGTACGTACGTACGT
+read3	TGCATGCATGCATGCATGCA
+read4	NNNNNNNNNN
+
+# Aligned file quality scores
+query II
+SELECT read_id, qual1 FROM read_sequences_sam('data/sam/foo_with_seqqual.sam') WHERE read_id = 'read1';
+----
+read1	[0, 9, 20, 30, 41, 41, 41, 41, 41, 41]
+
+# --- Multi-file ---
+
+# Multi-file: array of files
+query III
+SELECT read_id, sequence1, sequence_index FROM read_sequences_sam(['data/sam/ubam_no_sq.sam', 'data/sam/ubam_no_sq_2.sam']) ORDER BY read_id;
+----
+read1	ACGTACGTACGTACGT	1
+read2	TGCATGCATGCA	2
+read3	NNNNNN	3
+read4	AAACCCGGGTTT	1
+read5	GATTACA	2
+
+# sequence_index resets per file
+query II
+SELECT read_id, sequence_index FROM read_sequences_sam(['data/sam/ubam_no_sq.sam', 'data/sam/ubam_no_sq_2.sam']) ORDER BY read_id;
+----
+read1	1
+read2	2
+read3	3
+read4	1
+read5	2
+
+# --- include_filepath ---
+
+# include_filepath with single file
+query II
+SELECT read_id, filepath FROM read_sequences_sam('data/sam/ubam_no_sq.sam', include_filepath=true) ORDER BY sequence_index LIMIT 1;
+----
+read1	data/sam/ubam_no_sq.sam
+
+# include_filepath with multi-file
+query II
+SELECT read_id, filepath FROM read_sequences_sam(['data/sam/ubam_no_sq.sam', 'data/sam/ubam_no_sq_2.sam'], include_filepath=true) ORDER BY filepath, sequence_index;
+----
+read1	data/sam/ubam_no_sq.sam
+read2	data/sam/ubam_no_sq.sam
+read3	data/sam/ubam_no_sq.sam
+read4	data/sam/ubam_no_sq_2.sam
+read5	data/sam/ubam_no_sq_2.sam
+
+# --- Mixed headers: uBAM (no @SQ) + aligned SAM (with @SQ) ---
+
+query II
+SELECT read_id, sequence1 FROM read_sequences_sam(['data/sam/ubam_no_sq.sam', 'data/sam/foo_with_seqqual.sam'], include_filepath=true) ORDER BY filepath, sequence_index;
+----
+read1	ACGTACGTAC
+read2	ACGTACGTACGTACG
+read3	ACGTACGTACGTACGTACGT
+read3	TGCATGCATGCATGCATGCA
+read4	NNNNNNNNNN
+read1	ACGTACGTACGTACGT
+read2	TGCATGCATGCA
+read3	NNNNNN
+
+# --- COPY pipeline: read_sequences_sam → COPY FORMAT FASTQ → read_fastx round-trip ---
+
+statement ok
+COPY (SELECT sequence_index, read_id, comment, sequence1, qual1 FROM read_sequences_sam('data/sam/ubam_no_sq.sam')) TO '__TEST_DIR__/roundtrip.fastq' (FORMAT FASTQ);
+
+query II
+SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/roundtrip.fastq') ORDER BY sequence_index;
+----
+read1	ACGTACGTACGTACGT
+read2	TGCATGCATGCA
+read3	NNNNNN
+
+# Quality scores survive round-trip
+query II
+SELECT read_id, qual1 FROM read_fastx('__TEST_DIR__/roundtrip.fastq') WHERE read_id = 'read1';
+----
+read1	[40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40]

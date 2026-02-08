@@ -18,6 +18,10 @@ public:
 		}
 	}
 
+	void track_file(const std::string &path) {
+		temp_files_.push_back(path);
+	}
+
 	void write_temp_sam(const std::string &path, const std::vector<std::string> &records) {
 		std::ofstream out(path);
 		if (!out) {
@@ -456,4 +460,99 @@ TEST_CASE("Headerless constructor throws on reference name with position-like pa
 		miint::SAMReader reader(path, refs);
 		REQUIRE_NOTHROW(reader.read(1));
 	}
+}
+
+TEST_CASE("BAM binary quality scores round-trip correctly", "[SAMReader][header]") {
+	// Create a BAM file with known quality scores using HTSlib directly
+	TempFileFixture fixture;
+	auto bam_path = "test_bam_qual.bam";
+
+	// Write BAM using HTSlib
+	{
+		samFile *out = sam_open(bam_path, "wb");
+		REQUIRE(out);
+
+		sam_hdr_t *hdr = sam_hdr_init();
+		sam_hdr_add_line(hdr, "SQ", "SN", "chr1", "LN", "1000", NULL);
+		REQUIRE(sam_hdr_write(out, hdr) == 0);
+
+		bam1_t *rec = bam_init1();
+
+		// Build a record: read_id="bamread1", ref=chr1, pos=10, cigar=5M, seq=ACGTN, qual=[0,10,20,30,40]
+		const char *qname = "bamread1";
+		uint32_t cigar = bam_cigar_gen(5, BAM_CMATCH); // 5M
+		// bam_set1 expects plain text sequence (it encodes internally)
+		const char *seq_str = "ACGTN";
+		// bam_set1 expects raw Phred scores without ASCII offset
+		char qual_arr[] = {0, 10, 20, 30, 40};
+		int l_seq = 5;
+
+		bam_set1(rec, strlen(qname), qname, 0 /*flag*/, 0 /*tid*/, 9 /*pos 0-based*/, 60 /*mapq*/, 1 /*n_cigar*/,
+		         &cigar, -1 /*mtid*/, -1 /*mpos*/, 0 /*isize*/, l_seq, seq_str, qual_arr, 0 /*l_aux*/);
+
+		REQUIRE(sam_write1(out, hdr, rec) >= 0);
+
+		bam_destroy1(rec);
+		sam_hdr_destroy(hdr);
+		sam_close(out);
+	}
+
+	fixture.track_file(bam_path);
+
+	// Read BAM back with SAMReader
+	miint::SAMReader reader(bam_path, /*include_seq_qual=*/true);
+	auto batch = reader.read(10);
+
+	REQUIRE((batch.size() == 1));
+	REQUIRE((batch.read_ids[0] == "bamread1"));
+	REQUIRE((batch.sequences[0] == "ACGTN"));
+
+	// Quality should be stored as Phred33 ASCII internally
+	// Raw Phred [0,10,20,30,40] → ASCII [33,43,53,63,73] → chars ['!','+','5','?','I']
+	auto qual_vec = batch.quals[0].as_vec(33);
+	REQUIRE((qual_vec.size() == 5));
+	REQUIRE((qual_vec[0] == 0));
+	REQUIRE((qual_vec[1] == 10));
+	REQUIRE((qual_vec[2] == 20));
+	REQUIRE((qual_vec[3] == 30));
+	REQUIRE((qual_vec[4] == 40));
+}
+
+TEST_CASE("Header constructor with require_references=false accepts uBAM", "[SAMReader][header]") {
+	// uBAM files have valid headers (@HD, @RG, @PG) but no @SQ lines
+	miint::SAMReader reader("data/sam/ubam_no_sq.sam", /*include_seq_qual=*/true, /*require_references=*/false);
+	auto batch = reader.read(10);
+
+	REQUIRE((batch.size() == 3));
+	REQUIRE((batch.read_ids[0] == "read1"));
+	REQUIRE((batch.read_ids[1] == "read2"));
+	REQUIRE((batch.read_ids[2] == "read3"));
+
+	// All reads should be unmapped (flag 4)
+	REQUIRE((batch.flags[0] == 4));
+	REQUIRE((batch.references[0] == "*"));
+
+	// Verify sequences are extracted
+	REQUIRE((batch.sequences[0] == "ACGTACGTACGTACGT"));
+	REQUIRE((batch.sequences[1] == "TGCATGCATGCA"));
+	REQUIRE((batch.sequences[2] == "NNNNNN"));
+
+	// Verify quality scores are extracted (Phred33 ASCII)
+	REQUIRE((!batch.quals[0].as_string().empty()));
+	REQUIRE((!batch.quals[1].as_string().empty()));
+}
+
+TEST_CASE("Header constructor with require_references=true still rejects uBAM", "[SAMReader][header]") {
+	// Default behavior: require_references=true rejects headers with no @SQ lines
+	REQUIRE_THROWS_WITH(miint::SAMReader("data/sam/ubam_no_sq.sam"), "SAM file missing required header");
+}
+
+TEST_CASE("Header constructor with require_references=false works on aligned files", "[SAMReader][header]") {
+	// Aligned files with @SQ lines should still work with require_references=false
+	miint::SAMReader reader("data/sam/foo_has_header.sam", /*include_seq_qual=*/false, /*require_references=*/false);
+	auto batch = reader.read(10);
+
+	REQUIRE((batch.size() == 4));
+	REQUIRE((batch.read_ids[0] == "foo-1"));
+	REQUIRE((batch.references[0] == "G1234"));
 }
