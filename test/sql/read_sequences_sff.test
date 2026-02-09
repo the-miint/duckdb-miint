@@ -1,0 +1,192 @@
+# name: test/sql/read_sequences_sff.test
+# description: test read_sequences_sff table function
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+# Before we load the extension, this will fail
+statement error
+SELECT * FROM read_sequences_sff('foo');
+----
+Catalog Error: Table Function with name read_sequences_sff does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require miint
+
+# Missing file
+statement error
+SELECT * FROM read_sequences_sff('missing.sff');
+----
+IO Error: File not found: missing.sff
+
+# Empty file (0 reads) - valid SFF with 0 records returns 0 rows
+query I
+SELECT COUNT(*) FROM read_sequences_sff('data/sff/empty.sff')
+----
+0
+
+# Bad magic
+statement error
+SELECT * FROM read_sequences_sff('data/sff/bad_magic.sff');
+----
+Invalid Error
+
+# Not an SFF file (FASTQ)
+statement error
+SELECT * FROM read_sequences_sff('data/fastq/small_a.fq');
+----
+Invalid Error
+
+# Basic read - verify schema matches read_fastx (7 columns: sequence_index, read_id, comment, sequence1, sequence2, qual1, qual2)
+# basic_2reads.sff: 2 reads, no trimming (default trim=true, but clips are 0)
+# READ_1: seq="TCAGATTGCAGG", qual=[30,30,25,35,40,38,36,30,28,25,20,15]
+# READ_2: seq="TCAGCCTAAGTC", qual=[35,35,30,40,38,33,30,28,35,30,25,20]
+query IIIIIII
+SELECT * FROM read_sequences_sff('data/sff/basic_2reads.sff')
+----
+1	READ_1	NULL	TCAGATTGCAGG	NULL	[30, 30, 25, 35, 40, 38, 36, 30, 28, 25, 20, 15]	NULL
+2	READ_2	NULL	TCAGCCTAAGTC	NULL	[35, 35, 30, 40, 38, 33, 30, 28, 35, 30, 25, 20]	NULL
+
+# Verify data types
+query TTTTTTT
+SELECT typeof(sequence_index), typeof(read_id), typeof(comment), typeof(sequence1), typeof(sequence2), typeof(qual1), typeof(qual2)
+FROM read_sequences_sff('data/sff/basic_2reads.sff') LIMIT 1
+----
+BIGINT	VARCHAR	VARCHAR	VARCHAR	VARCHAR	UTINYINT[]	UTINYINT[]
+
+# Verify comment is always NULL and sequence2 is always NULL
+query II
+SELECT comment IS NULL, sequence2 IS NULL FROM read_sequences_sff('data/sff/basic_2reads.sff')
+----
+true	true
+true	true
+
+# Single read file
+query IIIIIII
+SELECT * FROM read_sequences_sff('data/sff/single_read.sff')
+----
+1	SINGLE	NULL	ACGT	NULL	[40, 35, 30, 25]	NULL
+
+# Trimmed data (default trim=true)
+# TRIM_READ_1: trimmed "TCAGATTGCAGG" from "AATCAGATTGCAGGCC"
+# TRIM_READ_2: trimmed "CAGCCTAAGT" from "NNTCAGCCTAAGTCNN"
+query IIIIIII
+SELECT * FROM read_sequences_sff('data/sff/trimmed.sff')
+----
+1	TRIM_READ_1	NULL	TCAGATTGCAGG	NULL	[30, 30, 25, 35, 40, 38, 36, 30, 28, 25, 20, 15]	NULL
+2	TRIM_READ_2	NULL	CAGCCTAAGT	NULL	[30, 35, 30, 40, 38, 33, 30, 28, 35, 30]	NULL
+
+# trim=false returns untrimmed data
+query IIIIIII
+SELECT * FROM read_sequences_sff('data/sff/trimmed.sff', trim=false)
+----
+1	TRIM_READ_1	NULL	AATCAGATTGCAGGCC	NULL	[5, 8, 30, 30, 25, 35, 40, 38, 36, 30, 28, 25, 20, 15, 8, 5]	NULL
+2	TRIM_READ_2	NULL	NNTCAGCCTAAGTCNN	NULL	[2, 2, 10, 30, 35, 30, 40, 38, 33, 30, 28, 35, 30, 10, 2, 2]	NULL
+
+# No-clip file (all clips=0, trim=true should return full sequence)
+query IIIIIII
+SELECT * FROM read_sequences_sff('data/sff/no_clip.sff')
+----
+1	NOCLIP_1	NULL	ACGTACGT	NULL	[40, 40, 35, 35, 30, 30, 25, 25]	NULL
+2	NOCLIP_2	NULL	TGCATGCA	NULL	[38, 38, 33, 33, 28, 28, 23, 23]	NULL
+
+# Adapter-only clips
+query IIIIIII
+SELECT * FROM read_sequences_sff('data/sff/adapter_only_clip.sff')
+----
+1	ADAPT_1	NULL	TCAGATTGCAGG	NULL	[30, 30, 25, 35, 40, 38, 36, 30, 28, 25, 20, 15]	NULL
+2	ADAPT_2	NULL	TCAGCCTAAGTC	NULL	[35, 35, 30, 40, 38, 33, 30, 28, 35, 30, 25, 20]	NULL
+
+# COUNT aggregation on many reads
+query I
+SELECT COUNT(*) FROM read_sequences_sff('data/sff/many_reads.sff')
+----
+50
+
+# include_filepath parameter
+query IIIIIIII
+SELECT * FROM read_sequences_sff('data/sff/single_read.sff', include_filepath=true)
+----
+1	SINGLE	NULL	ACGT	NULL	[40, 35, 30, 25]	NULL	data/sff/single_read.sff
+
+# Multiple files via VARCHAR[]
+query II
+SELECT sequence_index, read_id FROM read_sequences_sff(['data/sff/basic_2reads.sff', 'data/sff/single_read.sff'])
+ORDER BY read_id
+----
+1	READ_1
+2	READ_2
+1	SINGLE
+
+# Sequence index resets per file
+query III
+SELECT sequence_index, read_id, filepath FROM read_sequences_sff(
+    ['data/sff/basic_2reads.sff', 'data/sff/single_read.sff'],
+    include_filepath=true)
+ORDER BY filepath, sequence_index
+----
+1	READ_1	data/sff/basic_2reads.sff
+2	READ_2	data/sff/basic_2reads.sff
+1	SINGLE	data/sff/single_read.sff
+
+# Multiple files total count
+query I
+SELECT COUNT(*) FROM read_sequences_sff(['data/sff/basic_2reads.sff', 'data/sff/many_reads.sff'])
+----
+52
+
+# Index block skipping (with_index.sff has reads interleaved with index block)
+query IIIIIII
+SELECT * FROM read_sequences_sff('data/sff/with_index.sff')
+----
+1	READ_1	NULL	TCAGATTGCAGG	NULL	[30, 30, 25, 35, 40, 38, 36, 30, 28, 25, 20, 15]	NULL
+2	READ_2	NULL	TCAGCCTAAGTC	NULL	[35, 35, 30, 40, 38, 33, 30, 28, 35, 30, 25, 20]	NULL
+
+# Filter by average quality
+query II
+SELECT read_id, list_avg(qual1)::INTEGER as avg_qual FROM read_sequences_sff('data/sff/basic_2reads.sff')
+WHERE list_avg(qual1) >= 31
+----
+READ_2	32
+
+# UNION ALL compatibility with read_fastx (schemas must match)
+query I
+SELECT COUNT(*) FROM (
+    SELECT sequence_index, read_id, comment, sequence1, sequence2, qual1, qual2
+    FROM read_sequences_sff('data/sff/basic_2reads.sff')
+    UNION ALL
+    SELECT * FROM read_fastx('data/fastq/small_a.fq')
+)
+----
+4
+
+# Stdin not supported (SFF is binary, requires seeking)
+statement error
+SELECT * FROM read_sequences_sff('-');
+----
+Invalid Input Error: read_sequences_sff: stdin is not supported
+
+# stdin alternate paths also rejected
+statement error
+SELECT * FROM read_sequences_sff('/dev/stdin');
+----
+Invalid Input Error: read_sequences_sff: stdin is not supported
+
+# Overlapping clips produce empty sequence (trim=true)
+query ITIT
+SELECT read_id, sequence1, length(sequence1), qual1 FROM read_sequences_sff('data/sff/overlapping_clips.sff')
+----
+OVERLAP_CLIP	(empty)	0	[]
+
+# Overlapping clips with trim=false returns full data
+query ITI
+SELECT read_id, sequence1, qual1 FROM read_sequences_sff('data/sff/overlapping_clips.sff', trim=false)
+----
+OVERLAP_CLIP	ACGTACGT	[40, 35, 30, 25, 20, 15, 10, 5]
+
+# Glob pattern
+query I
+SELECT COUNT(*) FROM read_sequences_sff('data/sff/basic_*.sff')
+----
+2

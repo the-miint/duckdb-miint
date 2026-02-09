@@ -5,6 +5,47 @@
 #include <cstdint>
 #include <QualScore.hpp>
 
+TEST_CASE("QualScore vector constructor", "[qualscore]") {
+	SECTION("accepts max Phred score 93 with default offset 33") {
+		// Phred 93 + offset 33 = ASCII 126 ('~'), the max printable ASCII character
+		std::vector<uint8_t> scores = {0, 40, 93};
+		miint::QualScore qs(scores);
+		auto roundtrip = qs.as_vec(33);
+		REQUIRE(roundtrip.size() == 3);
+		CHECK(roundtrip[0] == 0);
+		CHECK(roundtrip[1] == 40);
+		CHECK(roundtrip[2] == 93);
+	}
+
+	SECTION("accepts quality scores in range 60-93 that were previously rejected") {
+		// These would fail with the old offset_q > 93 check
+		std::vector<uint8_t> scores = {61, 70, 80, 93};
+		miint::QualScore qs(scores);
+		auto roundtrip = qs.as_vec(33);
+		REQUIRE(roundtrip.size() == 4);
+		CHECK(roundtrip[0] == 61);
+		CHECK(roundtrip[1] == 70);
+		CHECK(roundtrip[2] == 80);
+		CHECK(roundtrip[3] == 93);
+	}
+
+	SECTION("rejects score that exceeds max ASCII 126") {
+		// Phred 94 + offset 33 = 127, which exceeds printable ASCII range
+		std::vector<uint8_t> scores = {94};
+		CHECK_THROWS_AS(miint::QualScore(scores), std::invalid_argument);
+	}
+
+	SECTION("basic roundtrip with typical quality scores") {
+		std::vector<uint8_t> scores = {0, 10, 20, 30, 40};
+		miint::QualScore qs(scores);
+		auto roundtrip = qs.as_vec(33);
+		REQUIRE(roundtrip.size() == 5);
+		for (size_t i = 0; i < scores.size(); i++) {
+			CHECK(roundtrip[i] == scores[i]);
+		}
+	}
+}
+
 TEST_CASE("miint::find_low_quality_window", "[filter]") {
 	SECTION("no low quality window returns none") {
 		// 'M' => ASCII 77 → 77-33 = 44

@@ -2,6 +2,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/types/value.hpp"
+#include "duckdb/common/types/vector.hpp"
 #include <algorithm>
 
 namespace duckdb {
@@ -120,6 +121,105 @@ GlobExpansionResult ExpandGlobPatternWithInfo(FileSystem &fs, ClientContext &con
 	std::sort(result.paths.begin(), result.paths.end());
 
 	return result;
+}
+
+// --- Result vector helpers ---
+
+void SetResultVectorNull(Vector &result_vector) {
+	result_vector.SetVectorType(VectorType::CONSTANT_VECTOR);
+	result_vector.SetValue(0, Value());
+}
+
+void SetResultVectorString(Vector &result_vector, const std::vector<std::string> &values) {
+	auto result_data = FlatVector::GetData<string_t>(result_vector);
+	for (idx_t j = 0; j < values.size(); j++) {
+		result_data[j] = StringVector::AddString(result_vector, values[j]);
+	}
+}
+
+void SetResultVectorStringNullable(Vector &result_vector, const std::vector<std::string> &values) {
+	auto result_data = FlatVector::GetData<string_t>(result_vector);
+	auto &validity = FlatVector::Validity(result_vector);
+	validity.SetAllInvalid(values.size());
+
+	for (idx_t j = 0; j < values.size(); j++) {
+		result_data[j] = StringVector::AddString(result_vector, values[j]);
+		if (!values[j].empty()) {
+			validity.SetValid(j);
+		}
+	}
+}
+
+void SetResultVectorFilepath(Vector &result_vector, const std::string &filepath) {
+	result_vector.SetVectorType(VectorType::CONSTANT_VECTOR);
+	auto result_data = ConstantVector::GetData<string_t>(result_vector);
+	*result_data = StringVector::AddString(result_vector, filepath);
+}
+
+void SetResultVectorUInt8(Vector &result_vector, const std::vector<uint8_t> &values) {
+	auto result_data = FlatVector::GetData<uint8_t>(result_vector);
+	for (idx_t j = 0; j < values.size(); j++) {
+		result_data[j] = values[j];
+	}
+}
+
+void SetResultVectorUInt16(Vector &result_vector, const std::vector<uint16_t> &values) {
+	auto result_data = FlatVector::GetData<uint16_t>(result_vector);
+	for (idx_t j = 0; j < values.size(); j++) {
+		result_data[j] = values[j];
+	}
+}
+
+void SetResultVectorInt64(Vector &result_vector, const std::vector<int64_t> &values) {
+	auto result_data = FlatVector::GetData<int64_t>(result_vector);
+	for (idx_t j = 0; j < values.size(); j++) {
+		result_data[j] = values[j];
+	}
+}
+
+void SetResultVectorInt64Nullable(Vector &result_vector, const std::vector<int64_t> &values,
+                                  const std::vector<bool> &valid) {
+	auto result_data = FlatVector::GetData<int64_t>(result_vector);
+	auto &validity = FlatVector::Validity(result_vector);
+	validity.SetAllInvalid(values.size());
+
+	for (idx_t j = 0; j < values.size(); j++) {
+		result_data[j] = values[j];
+		if (valid[j]) {
+			validity.SetValid(j);
+		}
+	}
+}
+
+void SetResultVectorListUInt8(Vector &result_vector, const std::vector<miint::QualScore> &values, uint8_t qual_offset) {
+	idx_t total_child_elements = 0;
+	for (auto &qual : values) {
+		total_child_elements += qual.size();
+	}
+
+	ListVector::Reserve(result_vector, total_child_elements);
+	ListVector::SetListSize(result_vector, total_child_elements);
+
+	auto &child_vector = ListVector::GetEntry(result_vector);
+	auto child_data = FlatVector::GetData<uint8_t>(child_vector);
+	auto list_entries = FlatVector::GetData<list_entry_t>(result_vector);
+
+	const auto output_count = values.size();
+	idx_t value_offset = 0;
+	for (idx_t row_offset = 0; row_offset < output_count; row_offset++) {
+		auto len = values[row_offset].size();
+		list_entries[row_offset].offset = value_offset;
+		list_entries[row_offset].length = len;
+
+		values[row_offset].write_decoded(child_data + value_offset, qual_offset);
+		value_offset += len;
+	}
+
+	auto &validity = FlatVector::Validity(result_vector);
+	validity.SetAllValid(output_count);
+
+	auto &child_validity = FlatVector::Validity(child_vector);
+	child_validity.SetAllValid(total_child_elements);
 }
 
 } // namespace duckdb

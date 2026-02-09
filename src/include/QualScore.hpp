@@ -24,7 +24,7 @@ public:
 		for (uint8_t q : qual_vec) {
 			int offset_q = q + offset;
 
-			if (offset_q > 93) {
+			if (offset_q > 126) {
 				throw std::invalid_argument("Invalid quality score: " + std::to_string(q));
 			}
 			qual_.push_back(static_cast<char>(offset_q));
@@ -34,6 +34,25 @@ public:
 	//! Return as string (raw stored characters)
 	const std::string &as_string() const noexcept {
 		return qual_;
+	}
+
+	//! Number of quality scores
+	size_t size() const noexcept {
+		return qual_.size();
+	}
+
+	//! Write decoded quality scores directly to caller-supplied buffer (avoids heap allocation).
+	//! Returns number of bytes written.
+	size_t write_decoded(uint8_t *dest, int offset = 33) const {
+		size_t n = qual_.size();
+		for (size_t i = 0; i < n; i++) {
+			int val = static_cast<int>(qual_[i]) - offset;
+			if (val < 0 || val > 93) {
+				throw std::runtime_error("Stored quality character out of range: " + std::string(1, qual_[i]));
+			}
+			dest[i] = static_cast<uint8_t>(val);
+		}
+		return n;
 	}
 
 	//! Return as vector<uint8_t> (quality scores: stored char minus offset)

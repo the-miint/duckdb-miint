@@ -2,9 +2,11 @@
 #include <string>
 #include <vector>
 #include "duckdb/common/types/value.hpp"
+#include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/named_parameter_map.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "QualScore.hpp"
 
 namespace duckdb {
 
@@ -37,5 +39,20 @@ struct GlobExpansionResult {
 // Expand glob pattern and return whether it was a glob pattern
 // Useful for paired-end read validation where both must be globs or both literals
 GlobExpansionResult ExpandGlobPatternWithInfo(FileSystem &fs, ClientContext &context, const std::string &pattern);
+
+// --- Result vector helpers ---
+// Shared utilities for populating DuckDB result vectors from batch data.
+// Used by read_fastx, read_alignments, read_sequences_sam, and other table functions.
+
+void SetResultVectorNull(Vector &result_vector);
+void SetResultVectorString(Vector &result_vector, const std::vector<std::string> &values);
+void SetResultVectorStringNullable(Vector &result_vector, const std::vector<std::string> &values);
+void SetResultVectorFilepath(Vector &result_vector, const std::string &filepath);
+void SetResultVectorUInt8(Vector &result_vector, const std::vector<uint8_t> &values);
+void SetResultVectorUInt16(Vector &result_vector, const std::vector<uint16_t> &values);
+void SetResultVectorInt64(Vector &result_vector, const std::vector<int64_t> &values);
+void SetResultVectorInt64Nullable(Vector &result_vector, const std::vector<int64_t> &values,
+                                  const std::vector<bool> &valid);
+void SetResultVectorListUInt8(Vector &result_vector, const std::vector<miint::QualScore> &values, uint8_t qual_offset);
 
 } // namespace duckdb

@@ -1,14 +1,14 @@
-#include "SAMReader.hpp"
-#include "SAMRecord.hpp"
+#include "SFFReader.hpp"
+#include "SequenceRecord.hpp"
 #include "table_function_common.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include <read_sequences_sam.hpp>
+#include <read_sequences_sff.hpp>
 
 namespace duckdb {
 
-unique_ptr<FunctionData> ReadSequencesSamTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
+unique_ptr<FunctionData> ReadSequencesSFFTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                              vector<duckdb::LogicalType> &return_types,
                                                              vector<std::string> &names) {
 
@@ -26,38 +26,37 @@ unique_ptr<FunctionData> ReadSequencesSamTableFunction::Bind(ClientContext &cont
 			file_paths.push_back(child.ToString());
 		}
 		if (file_paths.empty()) {
-			throw InvalidInputException("read_sequences_sam: at least one file path must be provided");
+			throw InvalidInputException("read_sequences_sff: at least one file path must be provided");
 		}
 	} else {
-		throw InvalidInputException("read_sequences_sam: first argument must be VARCHAR or VARCHAR[]");
+		throw InvalidInputException("read_sequences_sff: first argument must be VARCHAR or VARCHAR[]");
 	}
 
-	// Detect stdin usage
-	bool uses_stdin = false;
-	if (file_paths.size() == 1 && IsStdinPath(file_paths[0])) {
-		uses_stdin = true;
-		if (file_paths[0] == "-") {
-			file_paths[0] = "/dev/stdin";
-		}
-	} else if (file_paths.size() > 1) {
-		for (const auto &path : file_paths) {
-			if (IsStdinPath(path)) {
-				throw InvalidInputException(
-				    "stdin ('-' or '/dev/stdin') must be a single file path, not part of an array");
-			}
-		}
-	}
-
-	// Validate all files exist (skip stdin)
+	// SFF is a binary format that requires seeking - stdin is not supported
 	for (const auto &path : file_paths) {
-		if (!IsStdinPath(path) && !fs.FileExists(path)) {
+		if (IsStdinPath(path)) {
+			throw InvalidInputException("read_sequences_sff: stdin is not supported (SFF is a binary format "
+			                            "that requires file seeking)");
+		}
+	}
+
+	// Validate all files exist
+	for (const auto &path : file_paths) {
+		if (!fs.FileExists(path)) {
 			throw IOException("File not found: " + path);
 		}
 	}
 
 	bool include_filepath = ParseIncludeFilepathParameter(input.named_parameters);
 
-	auto data = duckdb::make_uniq<Data>(file_paths, include_filepath, uses_stdin);
+	// Parse trim parameter (default: true)
+	bool trim = true;
+	auto trim_param = input.named_parameters.find("trim");
+	if (trim_param != input.named_parameters.end() && !trim_param->second.IsNull()) {
+		trim = trim_param->second.GetValue<bool>();
+	}
+
+	auto data = duckdb::make_uniq<Data>(file_paths, include_filepath, trim);
 	for (auto &name : data->names) {
 		names.emplace_back(name);
 	}
@@ -67,65 +66,24 @@ unique_ptr<FunctionData> ReadSequencesSamTableFunction::Bind(ClientContext &cont
 	return data;
 }
 
-unique_ptr<GlobalTableFunctionState> ReadSequencesSamTableFunction::InitGlobal(ClientContext &context,
+unique_ptr<GlobalTableFunctionState> ReadSequencesSFFTableFunction::InitGlobal(ClientContext &context,
                                                                                TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
-	return duckdb::make_uniq<GlobalState>(data.file_paths, data.uses_stdin);
+	return duckdb::make_uniq<GlobalState>(data.file_paths, data.trim);
 }
 
-unique_ptr<LocalTableFunctionState> ReadSequencesSamTableFunction::InitLocal(ExecutionContext &context,
+unique_ptr<LocalTableFunctionState> ReadSequencesSFFTableFunction::InitLocal(ExecutionContext &context,
                                                                              TableFunctionInitInput &input,
                                                                              GlobalTableFunctionState *global_state) {
 	return duckdb::make_uniq<LocalState>();
 }
 
-// Per-record nullable quality scores: BAM records may individually have or lack quality
-static void SetResultVectorListUInt8PerRecordNullable(Vector &result_vector,
-                                                      const std::vector<miint::QualScore> &values) {
-	constexpr uint8_t PHRED33_OFFSET = 33;
-
-	auto &validity = FlatVector::Validity(result_vector);
-	auto list_entries = FlatVector::GetData<list_entry_t>(result_vector);
-
-	idx_t total_child_elements = 0;
-	for (auto &qual : values) {
-		total_child_elements += qual.size();
-	}
-
-	ListVector::Reserve(result_vector, total_child_elements);
-	ListVector::SetListSize(result_vector, total_child_elements);
-
-	auto &child_vector = ListVector::GetEntry(result_vector);
-	auto child_data = FlatVector::GetData<uint8_t>(child_vector);
-
-	const auto output_count = values.size();
-	validity.SetAllValid(output_count);
-	idx_t value_offset = 0;
-	for (idx_t row_offset = 0; row_offset < output_count; row_offset++) {
-		auto len = values[row_offset].size();
-		if (len == 0) {
-			list_entries[row_offset].offset = value_offset;
-			list_entries[row_offset].length = 0;
-			validity.SetInvalid(row_offset);
-		} else {
-			list_entries[row_offset].offset = value_offset;
-			list_entries[row_offset].length = len;
-
-			values[row_offset].write_decoded(child_data + value_offset, PHRED33_OFFSET);
-			value_offset += len;
-		}
-	}
-
-	auto &child_validity = FlatVector::Validity(child_vector);
-	child_validity.SetAllValid(total_child_elements);
-}
-
-void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+void ReadSequencesSFFTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &bind_data = data_p.bind_data->Cast<Data>();
 	auto &global_state = data_p.global_state->Cast<GlobalState>();
 	auto &local_state = data_p.local_state->Cast<LocalState>();
 
-	miint::SAMRecordBatch batch;
+	miint::SequenceRecordBatch batch;
 	std::string current_filepath;
 
 	// Loop until we get data or run out of files
@@ -134,7 +92,7 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 		if (!local_state.has_file) {
 			lock_guard<mutex> read_lock(global_state.lock);
 
-			if (global_state.next_file_idx >= global_state.readers.size()) {
+			if (global_state.next_file_idx >= global_state.filepaths.size()) {
 				output.SetCardinality(0);
 				return;
 			}
@@ -142,6 +100,12 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 			local_state.current_file_idx = global_state.next_file_idx;
 			global_state.next_file_idx++;
 			local_state.has_file = true;
+		}
+
+		// Lazily open the file (safe without lock - this thread has exclusive access to this file index)
+		if (!global_state.readers[local_state.current_file_idx]) {
+			global_state.readers[local_state.current_file_idx] = std::make_unique<miint::SFFReader>(
+			    global_state.filepaths[local_state.current_file_idx], global_state.trim);
 		}
 
 		batch = global_state.readers[local_state.current_file_idx]->read(STANDARD_VECTOR_SIZE);
@@ -155,7 +119,7 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 		break;
 	}
 
-	// Get sequence indices for this chunk
+	// No lock needed - this thread has exclusive access to this file index
 	uint64_t start_sequence_index = global_state.file_sequence_counters[local_state.current_file_idx];
 	global_state.file_sequence_counters[local_state.current_file_idx] += batch.size();
 
@@ -168,20 +132,20 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 
 	size_t field_idx = 1;
 
-	// read_id from BAM QNAME
+	// read_id
 	SetResultVectorString(output.data[field_idx++], batch.read_ids);
 
-	// comment: always NULL (BAM has no comment field)
+	// comment: always NULL (SFF has no comment field)
 	SetResultVectorNull(output.data[field_idx++]);
 
-	// sequence1 from BAM SEQ
-	SetResultVectorString(output.data[field_idx++], batch.sequences);
+	// sequence1
+	SetResultVectorString(output.data[field_idx++], batch.sequences1);
 
-	// sequence2: always NULL (single-end)
+	// sequence2: always NULL (SFF is single-end)
 	SetResultVectorNull(output.data[field_idx++]);
 
-	// qual1 from BAM QUAL (per-record nullability)
-	SetResultVectorListUInt8PerRecordNullable(output.data[field_idx++], batch.quals);
+	// qual1: SFF always has quality scores, use offset 33 (stored internally as Phred+33)
+	SetResultVectorListUInt8(output.data[field_idx++], batch.quals1, 33);
 
 	// qual2: always NULL
 	SetResultVectorNull(output.data[field_idx++]);
@@ -193,13 +157,14 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 	output.SetCardinality(batch.size());
 }
 
-TableFunction ReadSequencesSamTableFunction::GetFunction() {
-	auto tf = TableFunction("read_sequences_sam", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
+TableFunction ReadSequencesSFFTableFunction::GetFunction() {
+	auto tf = TableFunction("read_sequences_sff", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
+	tf.named_parameters["trim"] = LogicalType::BOOLEAN;
 	return tf;
 }
 
-void ReadSequencesSamTableFunction::Register(ExtensionLoader &loader) {
+void ReadSequencesSFFTableFunction::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetFunction());
 }
 } // namespace duckdb

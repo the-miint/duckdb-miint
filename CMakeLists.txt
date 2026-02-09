@@ -217,7 +217,6 @@ set(EXTENSION_SOURCES
     src/QualScore.cpp
     src/read_fastx.cpp
     src/miint_extension.cpp
-    src/QualScore.cpp
     src/read_alignments.cpp
     src/read_sequences_sam.cpp
     src/SAMReader.cpp
@@ -253,7 +252,9 @@ set(EXTENSION_SOURCES
     src/zip_utils.cpp
     src/read_ncbi_fasta.cpp
     src/read_ncbi.cpp
-    src/read_ncbi_annotation.cpp)
+    src/read_ncbi_annotation.cpp
+    src/SFFReader.cpp
+    src/read_sequences_sff.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
@@ -335,6 +336,8 @@ set(TEST_SOURCES
     src/zip_utils.cpp
     duckdb/third_party/miniz/miniz.cpp  # For ExtractFromZip tests
     test/cpp/test_ncbi_client.cpp
+    src/SFFReader.cpp
+    test/cpp/test_SFFReader.cpp
 )
 
 add_executable(tests ${TEST_SOURCES})

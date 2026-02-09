@@ -93,6 +93,13 @@ Table functions allow querying bioinformatics files as SQL tables.
   - Returns: read_id, flags, reference, position, stop_position, mapq, cigar, mate info, optional tags, [filepath]
   - Supports: headerless SAM (with reference table), multiple files, parallel processing, both SAM and BAM formats
 
+- **read_sequences_sff**: SFF (Standard Flowgram Format) files from 454/Roche sequencing
+  - Implementation: `src/read_sequences_sff.cpp`, `src/include/read_sequences_sff.hpp`
+  - Reader: `src/SFFReader.cpp` (custom binary parser)
+  - Returns: sequence_index, read_id, comment, sequence1, sequence2, qual1, qual2, [filepath]
+  - Supports: trim parameter (default true, applies quality/adapter clips), multiple files, glob patterns, parallel processing
+  - Note: stdin not supported (SFF requires seeking). comment, sequence2, qual2 are always NULL. Schema matches read_fastx for UNION ALL compatibility.
+
 #### 2. Scalar Functions
 Individual functions for alignment analysis:
 

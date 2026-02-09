@@ -100,15 +100,6 @@ public:
 
 	static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 
-	static void SetResultVectorNull(Vector &result_vector);
-	static void SetResultVectorString(Vector &result_vector, const std::vector<std::string> &values);
-	static void SetResultVectorStringNullable(Vector &result_vector, const std::vector<std::string> &values);
-	static void SetResultVectorListUInt8(Vector &result_vector, const std::vector<miint::QualScore> &values,
-	                                     uint8_t qual_offset);
-	static void SetResultVectorListUInt8Nullable(Vector &result_vector, const std::vector<miint::QualScore> &values,
-	                                             uint8_t qual_offset, bool is_paired);
-	static void SetResultVectorFilepath(Vector &result_vector, const std::string &filepath);
-
 	static TableFunction GetFunction();
 	static void Register(ExtensionLoader &loader);
 };

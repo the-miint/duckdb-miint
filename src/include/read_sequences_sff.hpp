@@ -1,5 +1,5 @@
 #pragma once
-#include "SAMReader.hpp"
+#include "SFFReader.hpp"
 #include "QualScore.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/typedefs.hpp"
@@ -8,23 +8,22 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include <atomic>
 #include <thread>
 #include <vector>
 
 namespace duckdb {
-class ReadSequencesSamTableFunction {
+class ReadSequencesSFFTableFunction {
 public:
 	struct Data : public TableFunctionData {
 		std::vector<std::string> file_paths;
 		bool include_filepath;
-		bool uses_stdin;
+		bool trim;
 
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
-		Data(const std::vector<std::string> &paths, bool include_fp, bool stdin_used)
-		    : file_paths(paths), include_filepath(include_fp), uses_stdin(stdin_used),
+		Data(const std::vector<std::string> &paths, bool include_fp, bool do_trim)
+		    : file_paths(paths), include_filepath(include_fp), trim(do_trim),
 		      names({"sequence_index", "read_id", "comment", "sequence1", "sequence2", "qual1", "qual2"}),
 		      types({LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
 		             LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT),
@@ -38,30 +37,24 @@ public:
 
 	struct GlobalState : public GlobalTableFunctionState {
 		mutex lock;
-		std::vector<std::unique_ptr<miint::SAMReader>> readers;
+		std::vector<std::unique_ptr<miint::SFFReader>> readers; // Lazily opened (nullptr until claimed)
 		std::vector<std::string> filepaths;
+		bool trim;
 		size_t next_file_idx;
-		bool uses_stdin;
-		std::vector<uint64_t> file_sequence_counters;
+		std::vector<uint64_t>
+		    file_sequence_counters; // Per-file sequence counters (no atomic needed - file access is exclusive)
 
 		idx_t MaxThreads() const override {
-			if (uses_stdin) {
-				return 1;
-			}
 			auto hw_threads = std::thread::hardware_concurrency();
 			if (hw_threads == 0) {
 				hw_threads = 1;
 			}
-			return std::min<idx_t>(readers.size(), std::min<idx_t>(8, hw_threads));
+			return std::min<idx_t>(filepaths.size(), std::min<idx_t>(8, hw_threads));
 		}
 
-		GlobalState(const std::vector<std::string> &paths, bool stdin_used) : next_file_idx(0), uses_stdin(stdin_used) {
-			filepaths = paths;
-			for (size_t i = 0; i < paths.size(); i++) {
-				readers.push_back(std::make_unique<miint::SAMReader>(paths[i], /*include_seq_qual=*/true,
-				                                                     /*require_references=*/false));
-				file_sequence_counters.emplace_back(1);
-			}
+		GlobalState(const std::vector<std::string> &paths, bool do_trim)
+		    : readers(paths.size()), filepaths(paths), trim(do_trim), next_file_idx(0),
+		      file_sequence_counters(paths.size(), 1) {
 		}
 	};
 
