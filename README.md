@@ -81,6 +81,7 @@ GROUP BY sample_id;
   - [sequence_dna_reverse_complement / sequence_rna_reverse_complement](#sequence_dna_reverse_complementsequence-and-sequence_rna_reverse_complementsequence)
   - [sequence_dna_as_regexp / sequence_rna_as_regexp](#sequence_dna_as_regexpsequence-and-sequence_rna_as_regexpsequence)
   - [compress_intervals](#compress_intervalsstart-stop)
+  - [Pairwise Alignment Functions](#pairwise-alignment-functions)
 - [COPY Formats](#copy-formats)
   - [FORMAT FASTQ](#copy--to--format-fastq)
   - [FORMAT FASTA](#copy--to--format-fasta)
@@ -1896,6 +1897,71 @@ GROUP BY ref;
 - Automatic periodic compression at 1M intervals prevents memory bloat with large datasets
 - Multi-threaded aggregation: each thread maintains its own state, merged at finalization
 - Algorithm: sorts intervals by start position, then single-pass merge (O(n log n))
+
+### Pairwise Alignment Functions
+
+Gap-affine pairwise sequence alignment powered by [WFA2-lib](https://github.com/smarco/WFA2-lib) (Wavefront Alignment Algorithm). Three functions at increasing detail levels:
+
+- `align_pairwise_score` — alignment score only (fastest)
+- `align_pairwise_cigar` — score + extended CIGAR string
+- `align_pairwise_full` — score + CIGAR + aligned sequences with gap characters
+
+Each function has a 2-argument form (uses defaults) and a 6-argument form (explicit penalties):
+
+```sql
+-- 2-arg: uses default penalties (mismatch=4, gap_open=6, gap_extend=2)
+SELECT align_pairwise_score(query, subject);
+
+-- 6-arg: custom penalties
+SELECT align_pairwise_score(query, subject, 'wfa2', 2, 6, 2);
+```
+
+**Parameters (6-arg form):**
+- `query` (VARCHAR): Query sequence
+- `subject` (VARCHAR): Subject sequence
+- `method` (VARCHAR): Alignment method, currently only `'wfa2'`
+- `mismatch` (INTEGER): Mismatch penalty (must be > 0)
+- `gap_open` (INTEGER): Gap opening penalty (must be >= 0)
+- `gap_extend` (INTEGER): Gap extension penalty (must be > 0)
+
+Penalty parameters must be constant values, not column references.
+
+**Returns:**
+- `align_pairwise_score` → `INTEGER` — alignment score (0 = identical, higher = more divergent)
+- `align_pairwise_cigar` → `STRUCT(score INTEGER, cigar VARCHAR)` — score and extended CIGAR (`=`/`X` ops, not `M`)
+- `align_pairwise_full` → `STRUCT(score INTEGER, cigar VARCHAR, query_aligned VARCHAR, subject_aligned VARCHAR)` — score, CIGAR, and aligned sequences with `-` gap characters
+
+NULL inputs produce NULL output. Alignment failure (e.g., excessive divergence) also produces NULL.
+
+**Examples:**
+```sql
+-- Score identical sequences
+SELECT align_pairwise_score('ACGT', 'ACGT');
+-- 0
+
+-- Score with single mismatch (default mismatch penalty = 4)
+SELECT align_pairwise_score('ACGT', 'ACAT');
+-- 4
+
+-- Get CIGAR string
+SELECT (align_pairwise_cigar('ACGT', 'ACAT')).cigar;
+-- 2=1X1=
+
+-- Get full alignment with gap characters
+SELECT (align_pairwise_full('ACGT', 'AGT')).query_aligned,
+       (align_pairwise_full('ACGT', 'AGT')).subject_aligned;
+-- Shows aligned sequences with '-' for gaps
+
+-- Use with table data
+SELECT name,
+       align_pairwise_score(query_seq, ref_seq) AS score,
+       (align_pairwise_cigar(query_seq, ref_seq)).cigar AS cigar
+FROM sequence_pairs;
+
+-- Custom penalties for more sensitive alignment
+SELECT (align_pairwise_full(seq_a, seq_b, 'wfa2', 2, 4, 1)).query_aligned
+FROM amplicon_pairs;
+```
 
 ## COPY Formats
 

@@ -27,6 +27,7 @@
 #include <read_ncbi_annotation.hpp>
 #include <miint_macros.hpp>
 #include <sequence_functions.hpp>
+#include <align_pairwise_functions.hpp>
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include <hdf5.h>
 
@@ -76,6 +77,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	AlignmentQueryCoverageFunction::Register(loader);
 	CompressIntervalsFunction::Register(loader);
 	SequenceFunctions::Register(loader);
+
+	AlignPairwiseScoreFunction::Register(loader);
+	AlignPairwiseCigarFunction::Register(loader);
+	AlignPairwiseFullFunction::Register(loader);
 
 	CopyBiomFunction::Register(loader);
 	CopyFastqFunction::Register(loader);

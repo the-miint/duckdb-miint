@@ -1,0 +1,170 @@
+# name: test/sql/align_pairwise.test
+# group: [sql]
+
+require miint
+
+###############################################################################
+# align_pairwise_score — error handling
+###############################################################################
+
+# Missing args
+statement error
+SELECT align_pairwise_score('ACGT');
+----
+
+# Invalid method
+statement error
+SELECT align_pairwise_score('ACGT', 'ACGT', 'invalid_method', 4, 6, 2);
+----
+Invalid Input Error
+
+# Invalid penalties: mismatch=0
+statement error
+SELECT align_pairwise_score('ACGT', 'ACGT', 'wfa2', 0, 6, 2);
+----
+Invalid Input Error
+
+# Invalid penalties: negative gap_extend
+statement error
+SELECT align_pairwise_score('ACGT', 'ACGT', 'wfa2', 4, 6, -1);
+----
+Invalid Input Error
+
+###############################################################################
+# align_pairwise_score — basic functionality
+###############################################################################
+
+# Identical sequences → 0
+query I
+SELECT align_pairwise_score('ACGT', 'ACGT');
+----
+0
+
+# Single mismatch (default mismatch=4) → 4
+query I
+SELECT align_pairwise_score('ACGT', 'ACAT');
+----
+4
+
+# NULL input → NULL
+query I
+SELECT align_pairwise_score(NULL, 'ACGT') IS NULL;
+----
+true
+
+query I
+SELECT align_pairwise_score('ACGT', NULL) IS NULL;
+----
+true
+
+# Empty sequences → 0
+query I
+SELECT align_pairwise_score('', '');
+----
+0
+
+# One empty, one non-empty → all-gap score (gap_open=6 + 4*gap_extend=2 = 14)
+query I
+SELECT align_pairwise_score('ACGT', '');
+----
+14
+
+query I
+SELECT align_pairwise_score('', 'ACGT');
+----
+14
+
+# Custom penalties (6-arg): mismatch=2 → score 2 for single mismatch
+query I
+SELECT align_pairwise_score('ACGT', 'ACAT', 'wfa2', 2, 6, 2);
+----
+2
+
+# Table usage
+statement ok
+CREATE TABLE seqs AS SELECT * FROM (VALUES
+    ('s1', 'ACGT', 'ACGT'),
+    ('s2', 'ACGT', 'ACAT')
+) AS t(name, query, subject);
+
+query IT
+SELECT name, align_pairwise_score(query, subject) FROM seqs ORDER BY name;
+----
+s1	0
+s2	4
+
+###############################################################################
+# align_pairwise_cigar
+###############################################################################
+
+# Identical → struct with score 0 and extended CIGAR
+query IT
+SELECT (align_pairwise_cigar('ACGT', 'ACGT')).score,
+       (align_pairwise_cigar('ACGT', 'ACGT')).cigar;
+----
+0	4=
+
+# Single mismatch
+query IT
+SELECT (align_pairwise_cigar('ACGT', 'ACAT')).score,
+       (align_pairwise_cigar('ACGT', 'ACAT')).cigar;
+----
+4	2=1X1=
+
+# NULL → NULL
+query I
+SELECT align_pairwise_cigar(NULL, 'ACGT') IS NULL;
+----
+true
+
+# Custom penalties (6-arg)
+query IT
+SELECT (align_pairwise_cigar('ACGT', 'ACAT', 'wfa2', 2, 6, 2)).score,
+       (align_pairwise_cigar('ACGT', 'ACAT', 'wfa2', 2, 6, 2)).cigar;
+----
+2	2=1X1=
+
+###############################################################################
+# align_pairwise_full
+###############################################################################
+
+# Identical → all fields match
+query ITTT
+SELECT (align_pairwise_full('ACGT', 'ACGT')).score,
+       (align_pairwise_full('ACGT', 'ACGT')).cigar,
+       (align_pairwise_full('ACGT', 'ACGT')).query_aligned,
+       (align_pairwise_full('ACGT', 'ACGT')).subject_aligned;
+----
+0	4=	ACGT	ACGT
+
+# Single mismatch → aligned seqs match originals (no gaps)
+query TT
+SELECT (align_pairwise_full('ACGT', 'ACAT')).query_aligned,
+       (align_pairwise_full('ACGT', 'ACAT')).subject_aligned;
+----
+ACGT	ACAT
+
+# NULL → NULL
+query I
+SELECT align_pairwise_full(NULL, 'ACGT') IS NULL;
+----
+true
+
+# Indel → aligned lengths equal
+query I
+SELECT length((align_pairwise_full('ACGT', 'AGT')).query_aligned) =
+       length((align_pairwise_full('ACGT', 'AGT')).subject_aligned);
+----
+true
+
+# Insertion → '-' appears in subject_aligned
+query I
+SELECT (align_pairwise_full('ACGT', 'AGT')).subject_aligned LIKE '%-%';
+----
+true
+
+# Custom penalties (6-arg)
+query I
+SELECT (align_pairwise_full('ACGT', 'ACAT', 'wfa2', 2, 6, 2)).score;
+----
+2

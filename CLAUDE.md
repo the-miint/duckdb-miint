@@ -117,6 +117,17 @@ Individual functions for alignment analysis:
 - **Alignment analysis**: `src/alignment_functions.cpp`
   - `alignment_seq_identity()`: Calculate sequence identity (gap_compressed, gap_excluded, blast methods)
 
+- **Pairwise alignment**: `src/align_pairwise_functions.cpp`, `src/include/align_pairwise_functions.hpp`
+  - Wrapper: `src/WFA2Aligner.cpp`, `src/include/WFA2Aligner.hpp` (wraps WFA2-lib)
+  - `align_pairwise_score(query, subject [, method, mismatch, gap_open, gap_extend])` → INTEGER
+  - `align_pairwise_cigar(...)` → STRUCT(score INTEGER, cigar VARCHAR)
+  - `align_pairwise_full(...)` → STRUCT(score INTEGER, cigar VARCHAR, query_aligned VARCHAR, subject_aligned VARCHAR)
+  - 2-arg (defaults: wfa2, mismatch=4, gap_open=6, gap_extend=2) and 6-arg overloads via ScalarFunctionSet
+  - Penalty parameters must be bind-time constants (not column references)
+  - Per-thread aligner reuse via FunctionLocalState; STRUCT results via StructVector
+  - `method` parameter for future backend extensibility (currently only `'wfa2'`)
+  - Extended CIGAR format (`=`/`X` ops, not `M`)
+
 #### 3. Aggregate Functions
 
 - **compress_intervals**: `src/compress_intervals.cpp`, `src/IntervalCompressor.cpp`
@@ -183,6 +194,14 @@ For headerless SAM files and SAM writing:
 - **kseq++** (`ext/kseq++/`): Modern C++ FASTA/FASTQ parser
   - Header-only library
   - Included directly in compilation
+
+- **WFA2-lib v2.3.5** (`ext/WFA2-lib/`): Wavefront Alignment Algorithm for pairwise alignment
+  - Git submodule pinned to v2.3.5
+  - Built as ExternalProject via Makefile (not CMake — WFA2's primary build is Makefile)
+  - Produces `libwfa.a` (C core) and `libwfacpp.a` (C++ bindings)
+  - Link order: `wfa2cpp` before `wfa2` (C++ depends on C)
+  - Uses `CC_FLAGS` (not `CFLAGS`/`CXXFLAGS`) — WFA2's Makefile convention
+  - Known bug: BiWFA alignment-scope score returns INT32_MIN for short sequences (see `ext/WFA2-lib/bialign_score_bug.c`)
 
 - **VCPKG dependencies**:
   - zlib (required)

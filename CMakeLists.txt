@@ -210,8 +210,46 @@ set_target_properties(minimap2 PROPERTIES
 )
 add_dependencies(minimap2 minimap2_build)
 
+# Handle cross-compilation arch flags for WFA2
+set(WFA2_ARCH_CFLAGS "")
+if(APPLE AND OSX_BUILD_ARCH)
+    if(OSX_BUILD_ARCH STREQUAL "x86_64")
+        set(WFA2_ARCH_CFLAGS "-arch x86_64")
+    elseif(OSX_BUILD_ARCH STREQUAL "arm64")
+        set(WFA2_ARCH_CFLAGS "-arch arm64")
+    endif()
+endif()
+
+# Build WFA2-lib from source (v2.3.5) using Makefile (matching minimap2 pattern)
+ExternalProject_Add(
+    wfa2_build
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib clean all
+        "BUILD_TOOLS=0" "BUILD_EXAMPLES=0" "BUILD_WFA_PARALLEL=0"
+        "CC_FLAGS=-Wall -O2 -fPIC ${WFA2_ARCH_CFLAGS}"
+    INSTALL_COMMAND ""
+    BUILD_IN_SOURCE 1
+    BUILD_BYPRODUCTS
+        ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib/lib/libwfa.a
+        ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib/lib/libwfacpp.a
+)
+
+# Create imported libraries for WFA2 (C++ bindings depend on C core — link order matters)
+add_library(wfa2 STATIC IMPORTED GLOBAL)
+set_target_properties(wfa2 PROPERTIES
+    IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib/lib/libwfa.a
+)
+add_dependencies(wfa2 wfa2_build)
+
+add_library(wfa2cpp STATIC IMPORTED GLOBAL)
+set_target_properties(wfa2cpp PROPERTIES
+    IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib/lib/libwfacpp.a
+)
+add_dependencies(wfa2cpp wfa2_build)
+
 # adapted kseq++ include use from strobealign
-include_directories(src/include ext)
+include_directories(src/include ext ext/WFA2-lib)
 set(EXTENSION_SOURCES
     src/SequenceReader.cpp
     src/QualScore.cpp
@@ -254,7 +292,9 @@ set(EXTENSION_SOURCES
     src/read_ncbi.cpp
     src/read_ncbi_annotation.cpp
     src/SFFReader.cpp
-    src/read_sequences_sff.cpp)
+    src/read_sequences_sff.cpp
+    src/WFA2Aligner.cpp
+    src/align_pairwise_functions.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
@@ -273,6 +313,8 @@ target_link_libraries(${EXTENSION_NAME}
                       ZLIB::ZLIB
                       hts
                       minimap2
+                      wfa2cpp
+                      wfa2
 )
 if(HDF5_FOUND)
     target_link_libraries(${EXTENSION_NAME}
@@ -297,6 +339,8 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       ZLIB::ZLIB
                       hts
                       minimap2
+                      wfa2cpp
+                      wfa2
 )
 
 install(
@@ -338,6 +382,8 @@ set(TEST_SOURCES
     test/cpp/test_ncbi_client.cpp
     src/SFFReader.cpp
     test/cpp/test_SFFReader.cpp
+    src/WFA2Aligner.cpp
+    test/cpp/test_WFA2Aligner.cpp
 )
 
 add_executable(tests ${TEST_SOURCES})
@@ -348,6 +394,8 @@ target_link_libraries(tests
   ZLIB::ZLIB
   hts
   minimap2
+  wfa2cpp
+  wfa2
 )
 if(HDF5_FOUND)
     target_link_libraries(tests

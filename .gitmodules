@@ -10,3 +10,6 @@
 	path = ext/minimap2
 	url = https://github.com/lh3/minimap2.git
 	branch = main
+[submodule "ext/WFA2-lib"]
+	path = ext/WFA2-lib
+	url = https://github.com/smarco/WFA2-lib.git
