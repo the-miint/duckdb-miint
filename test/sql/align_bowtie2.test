@@ -4,6 +4,8 @@
 
 require miint
 
+require-env BOWTIE2_AVAILABLE
+
 # Setup: Create test tables with sequence data
 # Using 100bp sequences to satisfy bowtie2's minimum reference length requirements
 

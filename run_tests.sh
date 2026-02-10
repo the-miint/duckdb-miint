@@ -1,4 +1,10 @@
 set -e
+
+# Detect optional external tools
+if command -v bowtie2 &> /dev/null; then
+    export BOWTIE2_AVAILABLE=1
+fi
+
 make test
 ./build/release/extension/miint/tests
 

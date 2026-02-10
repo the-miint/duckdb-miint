@@ -4,6 +4,8 @@
 
 require miint
 
+require-env BOWTIE2_AVAILABLE
+
 # NOTE: Set threads=1 because sqllogictest framework runs in a constrained mode
 # that doesn't handle parallel table function execution well. Parallel execution
 # works correctly in the DuckDB CLI with SET threads=2.
