@@ -69,6 +69,13 @@ make clean
 bash build.sh
 ```
 
+### Formatting
+The pre-commit hook runs `make format-check`. To auto-fix formatting issues:
+```bash
+conda run -n duckdb-143 make format-fix
+```
+The `duckdb-143` conda environment has the required `clang-format` and `black` tools.
+
 ## Architecture Overview
 
 ### Extension Entry Point
@@ -347,3 +354,26 @@ if (entry->type == CatalogType::TABLE_ENTRY) {
 - **Test isolation**: Each test file should be independent, use temp tables for references
 - **Data files**: Test data in `data/sam/`, `data/fastq/`, etc. Keep files small
 - **Platform differences**: Be aware of path separators, newline conventions
+
+### Optional External Dependencies in SQL Tests
+When a test depends on an external binary that may not be installed (e.g., `bowtie2`), use `require-env` to skip the test file gracefully:
+
+1. **In the test file**, add `require-env <VAR_NAME>` after `require miint`:
+   ```
+   require miint
+
+   require-env BOWTIE2_AVAILABLE
+   ```
+   If `BOWTIE2_AVAILABLE` is not set in the environment, the entire test file is skipped (not failed).
+
+2. **In `run_tests.sh`**, auto-detect the binary and export the env var:
+   ```bash
+   if command -v bowtie2 &> /dev/null; then
+       export BOWTIE2_AVAILABLE=1
+   fi
+   ```
+
+3. **Tests that don't invoke the binary** (e.g., `bowtie2_available.test` which only tests the scalar availability check) should NOT use `require-env`, so they always run.
+
+Current optional dependencies managed this way:
+- `BOWTIE2_AVAILABLE` — guards `align_bowtie2.test`, `align_bowtie2_sharded.test`, `simple_bowtie2.test`
