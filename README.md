@@ -7,11 +7,9 @@ The MIINT [DuckDB](https://duckdb.org) extension enables DuckDB to interoperate 
 MIINT brings the power of SQL to microbiome data analysis. Here's a complete workflow analyzing metagenomic alignments:
 
 ```sql
--- Load the extension
--- IMPORTANT: see installing, it is at the moment necessary to allow "unsigned" extensions _before_ loading the extension.
--- This is because We currently are not available in the DuckDB community repository
--- but will be in the future.
-LOAD '/path/to/miint.duckdb_extension';
+-- Install and load the extension
+INSTALL miint FROM community;
+LOAD miint;
 
 -- Read alignment files using glob pattern (files sorted alphabetically)
 -- Use include_filepath to track source file as sample identifier
@@ -53,6 +51,7 @@ GROUP BY sample_id;
 
 - [Quick Start](#quick-start)
 - [Installing](#installing)
+  - [Installing from a local build](#installing-from-a-local-build)
 - [Building](#building)
   - [Managing dependencies](#managing-dependencies)
   - [Build system](#build-system)
@@ -82,6 +81,8 @@ GROUP BY sample_id;
   - [sequence_dna_as_regexp / sequence_rna_as_regexp](#sequence_dna_as_regexpsequence-and-sequence_rna_as_regexpsequence)
   - [compress_intervals](#compress_intervalsstart-stop)
   - [Pairwise Alignment Functions](#pairwise-alignment-functions)
+- [Utility Functions](#utility-functions)
+  - [miint_version](#miint_version)
 - [COPY Formats](#copy-formats)
   - [FORMAT FASTQ](#copy--to--format-fastq)
   - [FORMAT FASTA](#copy--to--format-fasta)
@@ -95,8 +96,22 @@ GROUP BY sample_id;
   - [Test Data](#test-data)
 
 ## Installing
-To install MIINT the extension binary, DuckDB should be launched with the
-`allow_unsigned_extensions` option set to true. How to set this will depend on the client you're using. Some examples:
+
+MIINT is available in the [DuckDB Community Extensions](https://community-extensions.duckdb.org/) repository:
+
+```sql
+INSTALL miint FROM community;
+LOAD miint;
+```
+
+You can verify the installed version with:
+```sql
+SELECT miint_version();
+```
+
+### Installing from a local build
+
+If you are building MIINT from source (see [Building](#building)), launch DuckDB with the `allow_unsigned_extensions` option:
 
 CLI:
 ```shell
@@ -113,14 +128,14 @@ NodeJS:
 db = new duckdb.Database(':memory:', {"allow_unsigned_extensions": "true"});
 ```
 
-After running these steps, you can install and load your extension using the regular INSTALL/LOAD commands in DuckDB:
+Then load the extension binary directly:
 ```sql
 LOAD '/path/to/miint.duckdb_extension';
 ```
 
 ## Building
 ### Managing dependencies
-DuckDB extensions uses VCPKG for dependency management. Enabling VCPKG is very simple: follow the [installation instructions](https://vcpkg.io/en/getting-started) or just run the following:
+DuckDB extensions use VCPKG for dependency management. Enabling VCPKG is very simple: follow the [installation instructions](https://vcpkg.io/en/getting-started) or just run the following:
 ```shell
 git clone https://github.com/Microsoft/vcpkg.git
 ./vcpkg/bootstrap-vcpkg.sh
@@ -128,11 +143,17 @@ export VCPKG_TOOLCHAIN_PATH=`pwd`/vcpkg/scripts/buildsystems/vcpkg.cmake
 ```
 
 ### Build system
-We use [Ninja](https://ninja-build.org) for quick builds. The easiest install is to use prebuild [release](https://github.com/ninja-build/ninja/releases) binaries.
+We use [Ninja](https://ninja-build.org) for quick builds. The easiest install is to use prebuilt [release](https://github.com/ninja-build/ninja/releases) binaries.
 
 ### Build steps
 Now to build the extension, run:
 ```sh
+bash build.sh
+```
+
+This is equivalent to:
+```sh
+export VCPKG_TOOLCHAIN_PATH=`pwd`/vcpkg/scripts/buildsystems/vcpkg.cmake
 GEN=ninja make
 ```
 
@@ -142,11 +163,13 @@ The main binaries that will be built are:
 ./build/release/duckdb
 ./build/release/test/unittest
 ./build/release/extension/miint/miint.duckdb_extension
+./build/release/extension/miint/tests
 ```
 
-- `duckdb` is the binary for the duckdb shell with the extension code automatically loaded.
-- `unittest` is the test runner of duckdb. Again, the extension is already linked into the binary.
+- `duckdb` is the binary for the DuckDB shell with the extension code automatically loaded.
+- `unittest` is the DuckDB test runner with the extension linked in (for SQL logic tests).
 - `miint.duckdb_extension` is the loadable binary as it would be distributed.
+- `tests` is the Catch2 C++ unit test runner.
 
 ## Running the extension
 To run the extension code, simply start the shell with `./build/release/duckdb`.
@@ -1339,7 +1362,7 @@ SELECT * FROM align_bowtie2('queries', 'subjects', extra_args='--no-unal --rdg 5
 
 ### SAM Flag Functions
 
-Test individual SAM flag bits. Each function takes a `USMALLINT` (the flags column from `read_sam`) and returns a `BOOLEAN`.
+Test individual SAM flag bits. Each function takes a `USMALLINT` (the flags column from `read_alignments`) and returns a `BOOLEAN`.
 
 **Primary names:**
 - `alignment_is_paired(flags)` - Read is paired (0x1)
@@ -1963,6 +1986,19 @@ SELECT (align_pairwise_full(seq_a, seq_b, 'wfa2', 2, 4, 1)).query_aligned
 FROM amplicon_pairs;
 ```
 
+## Utility Functions
+
+### `miint_version()`
+
+Returns the MIINT extension version string.
+
+**Returns:** VARCHAR - Version string derived from the git tag at build time (e.g., `v0.1.0`, or `v0.1.0-3-gabcdef1` if built from a commit after a tag).
+
+**Example:**
+```sql
+SELECT miint_version();
+```
+
 ## COPY Formats
 
 DuckDB miint provides custom COPY formats for writing bioinformatics file formats.
@@ -2409,6 +2445,9 @@ The primary testing mechanism for user-facing functionality uses DuckDB's SQL lo
 
 **Running SQL tests:**
 ```sh
+# Run all tests (SQL, C++, and shell)
+bash run_tests.sh
+
 # Run all SQL tests
 make test
 

@@ -1,0 +1,23 @@
+# name: test/sql/miint_version.test
+# description: Test miint_version() scalar function
+# group: [sql]
+
+require miint
+
+# Test that miint_version() returns a non-empty string
+query I
+SELECT length(miint_version()) > 0;
+----
+true
+
+# Test that miint_version() is not 'unversioned' when built properly
+query I
+SELECT miint_version() != 'unversioned';
+----
+true
+
+# Test that the function is deterministic
+query I
+SELECT miint_version() = miint_version();
+----
+true

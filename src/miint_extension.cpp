@@ -52,9 +52,21 @@ static void SetupSignalHandling() {
 	std::signal(SIGPIPE, SIG_IGN);
 }
 
+static void MiintVersionFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+#ifdef EXT_VERSION_MIINT
+	result.Reference(Value(EXT_VERSION_MIINT));
+#else
+	result.Reference(Value("unversioned"));
+#endif
+}
+
 static void LoadInternal(ExtensionLoader &loader) {
 	// TODO: use [[nodiscard]] throughout in headers
 	// TODO: //! comment on headers
+
+	ScalarFunction version_func("miint_version", {}, LogicalType::VARCHAR, MiintVersionFunction);
+	loader.RegisterFunction(version_func);
+
 	ReadFastxTableFunction::Register(loader);
 	ReadAlignmentsTableFunction::Register(loader);
 	ReadSequencesSamTableFunction::Register(loader);
