@@ -1,0 +1,268 @@
+# name: test/sql/rype_classify.test
+# description: Test rype_classify table function
+# group: [sql]
+
+#
+# RYpe 2.0.0 Changes:
+# - Index format changed from binary .ryidx files to Parquet-based .ryxdi directories
+# - The .ryxdi format contains: manifest.toml, buckets.parquet, and inverted/*.parquet shards
+# - Old .ryidx format is NO LONGER SUPPORTED - users must rebuild indices
+# - Arrow FFI feature renamed from "arrow" to "arrow-ffi" in Cargo.toml
+# - Classification uses RY-space encoding (purine/pyrimidine) which causes sequences
+#   differing only in A/G or C/T substitutions to share minimizers
+
+require miint
+
+# Setup: Create test tables with sequence data
+
+statement ok
+CREATE TABLE sequences AS SELECT * FROM (VALUES
+    ('seq1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('seq2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA'),
+    ('seq3', 'GGGGCCCCGGGGCCCCGGGGCCCCGGGGCCCCGGGGCCCCGGGGCCCCGGGG')
+) AS t(read_id, sequence1);
+
+# =============================================================================
+# Error handling tests
+# =============================================================================
+
+# Test error: non-existent index path
+# Error comes from rype_index_load() with detailed message about missing manifest
+statement error
+SELECT * FROM rype_classify('nonexistent.ryxdi', 'sequences');
+----
+Failed to load
+
+# Test error: directory exists but is not a valid RYpe index
+statement error
+SELECT * FROM rype_classify('data/', 'sequences');
+----
+Failed to load
+
+# Test error: non-existent table
+statement error
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'nonexistent_table');
+----
+does not exist
+
+# Test error: missing required column (read_id)
+statement ok
+CREATE TABLE bad_table1 AS SELECT 'ACGT' as sequence1;
+
+statement error
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'bad_table1');
+----
+missing required column
+
+statement ok
+DROP TABLE bad_table1;
+
+# Test error: missing required column (sequence1)
+statement ok
+CREATE TABLE bad_table2 AS SELECT 'seq1' as read_id;
+
+statement error
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'bad_table2');
+----
+missing required column
+
+statement ok
+DROP TABLE bad_table2;
+
+# Test error: invalid threshold (too low)
+statement error
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'sequences', threshold := -0.1);
+----
+threshold must be between
+
+# Test error: invalid threshold (too high)
+statement error
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'sequences', threshold := 1.5);
+----
+threshold must be between
+
+# Test error: negative index doesn't exist
+statement error
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'sequences', negative_index := 'nonexistent.ryxdi');
+----
+Failed to load negative index
+
+# =============================================================================
+# Basic functionality tests
+# =============================================================================
+
+# Test basic classification - results should have expected columns
+query IIII
+SELECT
+    read_id IS NOT NULL as has_read_id,
+    bucket_id IS NOT NULL as has_bucket_id,
+    bucket_name IS NOT NULL as has_bucket_name,
+    score IS NOT NULL as has_score
+FROM rype_classify('data/rype/test.ryxdi', 'sequences')
+LIMIT 1;
+----
+true	true	true	true
+
+# Test classification returns results for matching sequences
+# Note: RY-space encoding (purine/pyrimidine) causes minimizers to be shared across
+# buckets. All sequences match bucket_alpha and bucket_gamma. seq3 (GGGGCCCC...)
+# doesn't match bucket_beta because it lacks the RYRY pattern.
+query II
+SELECT bucket_name, COUNT(*) as hits
+FROM rype_classify('data/rype/test.ryxdi', 'sequences', threshold := 0.05)
+GROUP BY bucket_name
+ORDER BY bucket_name;
+----
+bucket_alpha	3
+bucket_beta	2
+bucket_gamma	3
+
+# Test that score is in valid range
+query I
+SELECT COUNT(*) = 0 as all_valid_scores
+FROM rype_classify('data/rype/test.ryxdi', 'sequences')
+WHERE score < 0.0 OR score > 1.0;
+----
+true
+
+# Test with custom id_column
+statement ok
+CREATE TABLE sequences_custom_id AS SELECT * FROM (VALUES
+    ('custom1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('custom2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(my_id, sequence1);
+
+query II
+SELECT bucket_name, COUNT(*) as hits
+FROM rype_classify('data/rype/test.ryxdi', 'sequences_custom_id', id_column := 'my_id', threshold := 0.05)
+GROUP BY bucket_name
+ORDER BY bucket_name;
+----
+bucket_alpha	2
+bucket_beta	2
+bucket_gamma	2
+
+statement ok
+DROP TABLE sequences_custom_id;
+
+# Test with high threshold - all matches have score 1.0, so all 8 pass
+query I
+SELECT COUNT(*) as high_threshold_hits
+FROM rype_classify('data/rype/test.ryxdi', 'sequences', threshold := 0.99);
+----
+8
+
+# Test with views
+statement ok
+CREATE VIEW sequences_view AS SELECT * FROM sequences;
+
+query II
+SELECT bucket_name, COUNT(*) as hits
+FROM rype_classify('data/rype/test.ryxdi', 'sequences_view', threshold := 0.05)
+GROUP BY bucket_name
+ORDER BY bucket_name;
+----
+bucket_alpha	3
+bucket_beta	2
+bucket_gamma	3
+
+statement ok
+DROP VIEW sequences_view;
+
+# Test empty table handling
+statement ok
+CREATE TABLE empty_sequences AS SELECT * FROM sequences WHERE FALSE;
+
+query I
+SELECT COUNT(*) as empty_result
+FROM rype_classify('data/rype/test.ryxdi', 'empty_sequences');
+----
+0
+
+statement ok
+DROP TABLE empty_sequences;
+
+# Test with paired-end sequences (sequence2 column)
+statement ok
+CREATE TABLE paired_sequences AS SELECT * FROM (VALUES
+    ('paired1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT', 'GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('paired2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA', 'AATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATT')
+) AS t(read_id, sequence1, sequence2);
+
+query II
+SELECT bucket_name, COUNT(*) as hits
+FROM rype_classify('data/rype/test.ryxdi', 'paired_sequences', threshold := 0.05)
+GROUP BY bucket_name
+ORDER BY bucket_name;
+----
+bucket_alpha	2
+bucket_beta	2
+bucket_gamma	2
+
+statement ok
+DROP TABLE paired_sequences;
+
+# =============================================================================
+# Tests with partial matches and threshold filtering
+# =============================================================================
+
+# Create sequences with varying match quality
+statement ok
+CREATE TABLE varied_sequences AS SELECT * FROM (VALUES
+    ('perfect_match', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('partial_match', 'ACGTACGTACGTACGTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'),
+    ('no_match', 'ATATCGCGATATCGCGATATCGCGATATCGCGATATCGCGATATCGCGATAT'),
+    ('homopolymer', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')
+) AS t(read_id, sequence1);
+
+# Test with threshold 0 - should get all non-zero matches
+# perfect_match: score 1.0 to all buckets
+# partial_match: score ~0.11-0.22 to buckets
+# no_match and homopolymer: no matches (no shared minimizers)
+query I
+SELECT COUNT(DISTINCT read_id) as matching_reads
+FROM rype_classify('data/rype/test.ryxdi', 'varied_sequences', threshold := 0.0);
+----
+2
+
+# Test threshold filtering - at 0.5, only perfect_match passes
+query II
+SELECT read_id, COUNT(*) as bucket_count
+FROM rype_classify('data/rype/test.ryxdi', 'varied_sequences', threshold := 0.5)
+GROUP BY read_id
+ORDER BY read_id;
+----
+perfect_match	3
+
+# Test threshold filtering - at 0.15, partial_match gets 2 buckets (score ~0.22)
+query II
+SELECT read_id, COUNT(*) as bucket_count
+FROM rype_classify('data/rype/test.ryxdi', 'varied_sequences', threshold := 0.15)
+GROUP BY read_id
+ORDER BY read_id;
+----
+partial_match	2
+perfect_match	3
+
+# Test that partial matches have scores < 1.0
+query I
+SELECT COUNT(*) as partial_hits
+FROM rype_classify('data/rype/test.ryxdi', 'varied_sequences', threshold := 0.0)
+WHERE score < 1.0;
+----
+3
+
+# Test sequences that don't match any bucket return no results
+query I
+SELECT COUNT(*) as no_match_hits
+FROM rype_classify('data/rype/test.ryxdi', 'varied_sequences', threshold := 0.0)
+WHERE read_id IN ('no_match', 'homopolymer');
+----
+0
+
+statement ok
+DROP TABLE varied_sequences;
+
+# Clean up
+statement ok
+DROP TABLE sequences;

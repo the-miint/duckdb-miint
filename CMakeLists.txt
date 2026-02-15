@@ -248,8 +248,53 @@ set_target_properties(wfa2cpp PROPERTIES
 )
 add_dependencies(wfa2cpp wfa2_build)
 
+# Build RYpe from Rust source with Arrow support
+find_program(CARGO cargo)
+if(CARGO)
+    message(STATUS "Found cargo: ${CARGO}")
+
+    # Determine the static library name based on platform
+    if(WIN32)
+        set(RYPE_LIB_NAME "rype.lib")
+    else()
+        set(RYPE_LIB_NAME "librype.a")
+    endif()
+
+    set(RYPE_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/rype_target)
+    set(RYPE_LIB_PATH ${RYPE_TARGET_DIR}/release/${RYPE_LIB_NAME})
+
+    # Build RYpe with Arrow FFI support for zero-copy data exchange.
+    ExternalProject_Add(
+        rype_build
+        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype
+        CONFIGURE_COMMAND ""
+        BUILD_COMMAND ${CARGO} rustc --release --features arrow-ffi --lib --crate-type=staticlib
+            --target-dir ${RYPE_TARGET_DIR}
+            --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype/Cargo.toml
+        INSTALL_COMMAND ""
+        BUILD_IN_SOURCE 0
+        BUILD_BYPRODUCTS ${RYPE_LIB_PATH}
+    )
+
+    # Create imported library for rype
+    add_library(rype STATIC IMPORTED GLOBAL)
+    set_target_properties(rype PROPERTIES
+        IMPORTED_LOCATION ${RYPE_LIB_PATH}
+    )
+    add_dependencies(rype rype_build)
+
+    set(HAVE_RYPE ON)
+    message(STATUS "RYpe will be built with Arrow support")
+else()
+    message(WARNING "cargo not found - building without RYpe support")
+    set(HAVE_RYPE OFF)
+endif()
+
 # adapted kseq++ include use from strobealign
 include_directories(src/include ext ext/WFA2-lib)
+if(HAVE_RYPE)
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/ext/rype)
+endif()
 set(EXTENSION_SOURCES
     src/SequenceReader.cpp
     src/QualScore.cpp
@@ -294,7 +339,8 @@ set(EXTENSION_SOURCES
     src/SFFReader.cpp
     src/read_sequences_sff.cpp
     src/WFA2Aligner.cpp
-    src/align_pairwise_functions.cpp)
+    src/align_pairwise_functions.cpp
+    src/rype_classify.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
@@ -316,6 +362,13 @@ target_link_libraries(${EXTENSION_NAME}
                       wfa2cpp
                       wfa2
 )
+if(HAVE_RYPE)
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE RYPE_ARROW)
+    target_link_libraries(${EXTENSION_NAME} rype)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(${EXTENSION_NAME} dl m)
+    endif()
+endif()
 if(HDF5_FOUND)
     target_link_libraries(${EXTENSION_NAME}
                           hdf5::hdf5-static
@@ -342,6 +395,13 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       wfa2cpp
                       wfa2
 )
+if(HAVE_RYPE)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE RYPE_ARROW)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} rype)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(${LOADABLE_EXTENSION_NAME} dl m)
+    endif()
+endif()
 
 install(
   TARGETS ${EXTENSION_NAME}

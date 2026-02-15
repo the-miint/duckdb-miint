@@ -13,3 +13,6 @@
 [submodule "ext/WFA2-lib"]
 	path = ext/WFA2-lib
 	url = https://github.com/smarco/WFA2-lib.git
+[submodule "ext/rype"]
+	path = ext/rype
+	url = git@github.com:the-miint/rype.git
