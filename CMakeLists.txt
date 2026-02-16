@@ -261,7 +261,25 @@ if(CARGO)
     endif()
 
     set(RYPE_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/rype_target)
-    set(RYPE_LIB_PATH ${RYPE_TARGET_DIR}/release/${RYPE_LIB_NAME})
+
+    # Handle cross-compilation for Rust via --target flag.
+    # When cross-compiling, cargo places output in <target-dir>/<triple>/release/
+    # instead of <target-dir>/release/.
+    set(RYPE_CARGO_TARGET_FLAG "")
+    set(RYPE_LIB_SUBDIR "release")
+    if(APPLE AND OSX_BUILD_ARCH)
+        if(OSX_BUILD_ARCH STREQUAL "x86_64")
+            set(RYPE_CARGO_TARGET_FLAG "--target" "x86_64-apple-darwin")
+            set(RYPE_LIB_SUBDIR "x86_64-apple-darwin/release")
+            message(STATUS "RYpe cross-compiling for x86_64 on Apple Silicon")
+        elseif(OSX_BUILD_ARCH STREQUAL "arm64")
+            set(RYPE_CARGO_TARGET_FLAG "--target" "aarch64-apple-darwin")
+            set(RYPE_LIB_SUBDIR "aarch64-apple-darwin/release")
+            message(STATUS "RYpe cross-compiling for arm64")
+        endif()
+    endif()
+
+    set(RYPE_LIB_PATH ${RYPE_TARGET_DIR}/${RYPE_LIB_SUBDIR}/${RYPE_LIB_NAME})
 
     # Build RYpe with Arrow FFI support for zero-copy data exchange.
     ExternalProject_Add(
@@ -271,6 +289,7 @@ if(CARGO)
         BUILD_COMMAND ${CARGO} rustc --release --features arrow-ffi --lib --crate-type=staticlib
             --target-dir ${RYPE_TARGET_DIR}
             --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype/Cargo.toml
+            ${RYPE_CARGO_TARGET_FLAG}
         INSTALL_COMMAND ""
         BUILD_IN_SOURCE 0
         BUILD_BYPRODUCTS ${RYPE_LIB_PATH}
