@@ -1,5 +1,3 @@
-#ifdef RYPE_ARROW
-
 #include "rype_classify.hpp"
 #include "rype_common.hpp"
 #include "duckdb/common/arrow/result_arrow_wrapper.hpp"
@@ -392,5 +390,3 @@ void RypeClassifyTableFunction::Register(ExtensionLoader &loader) {
 }
 
 } // namespace duckdb
-
-#endif // RYPE_ARROW

@@ -1,7 +1,5 @@
 #pragma once
 
-#ifdef RYPE_ARROW
-
 #include "rype.h"
 
 #include "duckdb/common/arrow/arrow.hpp"
@@ -105,5 +103,3 @@ public:
 };
 
 } // namespace duckdb
-
-#endif // RYPE_ARROW

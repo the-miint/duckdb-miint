@@ -41,10 +41,10 @@ GROUP BY sample_id;
 ```
 
 **Key capabilities:**
-- **Read bioinformatics formats as tables**: FASTQ/FASTA, SAM/BAM, BIOM, Newick trees
+- **Read bioinformatics formats as tables**: FASTQ/FASTA, SAM/BAM, SFF, BIOM, Newick trees
 - **Analyze with SQL**: Filter, aggregate, join with metadata tables
 - **Write back to standard formats**: Export results to FASTQ, SAM/BAM, BIOM, Newick
-- **Powerful functions**: Sequence identity, coverage, flag checking, Woltka classification
+- **Powerful functions**: Sequence identity, coverage, flag checking, Woltka classification, RYpe sequence classification
 - **Performance**: Parallel processing, efficient compression, streaming I/O
 
 ## Table of Contents
@@ -60,6 +60,7 @@ GROUP BY sample_id;
 - [Functions](#functions)
   - [read_alignments](#read_alignmentsfilename-reference_lengthstable_name-include_filepathfalse-include_seq_qualfalse)
   - [read_fastx](#read_fastxfilename-sequence2filename-include_filepathfalse-qual_offset33)
+  - [read_sequences_sff](#read_sequences_sfffilename-include_filepathfalse-trimtrue)
   - [read_biom](#read_biomfilename-include_filepathfalse)
   - [read_gff](#read_gffpath)
   - [read_ncbi](#read_ncbiaccession-api_key)
@@ -74,6 +75,7 @@ GROUP BY sample_id;
   - [alignment_seq_identity](#alignment_seq_identitycigar-nm-md-type)
   - [alignment_query_length](#alignment_query_lengthcigar-include_hard_clipstrue)
   - [alignment_query_coverage](#alignment_query_coveragecigar-typealigned)
+  - [RYpe Classification and Extraction Functions](#rype-classification-and-extraction-functions)
 - [Analysis Functions](#analysis-functions)
   - [woltka_ogu_per_sample](#woltka_ogu_per_samplerelation-sample_id_field-sequence_id_field)
   - [woltka_ogu](#woltka_ogurelation-sequence_id_field)
@@ -135,7 +137,13 @@ LOAD '/path/to/miint.duckdb_extension';
 
 ## Building
 ### Managing dependencies
-DuckDB extensions use VCPKG for dependency management. Enabling VCPKG is very simple: follow the [installation instructions](https://vcpkg.io/en/getting-started) or just run the following:
+
+**Rust toolchain (required):** The RYpe sequence classification library is written in Rust. Install Rust via [rustup](https://rustup.rs/):
+```shell
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+**VCPKG (required):** DuckDB extensions use VCPKG for dependency management. Enabling VCPKG is very simple: follow the [installation instructions](https://vcpkg.io/en/getting-started) or just run the following:
 ```shell
 git clone https://github.com/Microsoft/vcpkg.git
 ./vcpkg/bootstrap-vcpkg.sh
@@ -373,6 +381,65 @@ HAVING AVG(q) >= 30;
 - For FASTA files, `qual1` and `qual2` are NULL
 - The `sequence_index` resets to 1 for each file. To distinguish sequences from different files, use `include_filepath=true` and order by `filepath, sequence_index`
 - Comment field is NULL if no comment is present in the sequence header
+
+### `read_sequences_sff(filename, [include_filepath=false], [trim=true])`
+Read SFF (Standard Flowgram Format) files from 454/Roche sequencing platforms.
+
+**Parameters:**
+- `filename` (VARCHAR or VARCHAR[]): Path to SFF file(s) or glob pattern (e.g., `'data/*.sff'`)
+  - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
+  - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
+  - **Stdin not supported**: SFF is a binary format that requires seeking, so `-` and `/dev/stdin` are not allowed
+- `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
+- `trim` (BOOLEAN, optional, default true): Apply quality and adapter clip positions from the SFF header to trim sequences and quality scores
+
+**Output schema:**
+- `sequence_index` (BIGINT): 1-based sequential index per file (resets to 1 for each file)
+- `read_id` (VARCHAR): Read name from the SFF read header
+- `comment` (VARCHAR, nullable): Always NULL (SFF format has no comment field)
+- `sequence1` (VARCHAR): DNA sequence (trimmed by default)
+- `sequence2` (VARCHAR, nullable): Always NULL (SFF is single-end only)
+- `qual1` (UINT8[], nullable): Quality scores as array of integers (trimmed by default)
+- `qual2` (UINT8[], nullable): Always NULL (SFF is single-end only)
+- `filepath` (VARCHAR, optional): File path when include_filepath=true
+
+**Behavior:**
+- Schema matches `read_fastx` for `UNION ALL` compatibility
+- When `trim=true` (default), quality and adapter clip positions from the SFF header are applied. Overlapping clips produce an empty sequence
+- When `trim=false`, the full untrimmed sequence and quality scores are returned
+- SFF index blocks (if present) are automatically skipped
+- Supports parallel processing (up to 8 threads, one per file)
+
+**Examples:**
+```sql
+-- Read a single SFF file
+SELECT * FROM read_sequences_sff('reads.sff');
+
+-- Read without trimming
+SELECT * FROM read_sequences_sff('reads.sff', trim=false);
+
+-- Read multiple SFF files with glob
+SELECT * FROM read_sequences_sff('data/*.sff', include_filepath=true);
+
+-- Read multiple SFF files via array
+SELECT * FROM read_sequences_sff(['batch1.sff', 'batch2.sff']);
+
+-- Combine SFF and FASTQ data (schemas match)
+SELECT sequence_index, read_id, comment, sequence1, sequence2, qual1, qual2
+FROM read_sequences_sff('legacy_454.sff')
+UNION ALL
+SELECT * FROM read_fastx('modern_illumina.fastq');
+
+-- Filter by average quality
+SELECT read_id, list_avg(qual1)::INTEGER as avg_qual
+FROM read_sequences_sff('reads.sff')
+WHERE list_avg(qual1) >= 30;
+```
+
+**Notes:**
+- The `comment`, `sequence2`, and `qual2` columns are always NULL for SFF files
+- The `sequence_index` resets to 1 for each file. Use `include_filepath=true` to distinguish sequences from different files
+- Stdin is not supported because SFF is a binary format that requires file seeking
 
 ### `read_biom(filename, [include_filepath=false])`
 Read BIOM (Biological Observation Matrix) format files.
@@ -1559,6 +1626,150 @@ GROUP BY reference;
 - **Mapped coverage**: Identify heavily clipped reads (adapters, chimeras, low-quality ends)
 - Filter reads based on alignment quality thresholds
 - QC metrics for sequencing runs
+
+### RYpe Classification and Extraction Functions
+
+[RYpe](https://github.com/biocore/rype) is a minimizer-based sequence classification tool that uses RY-space encoding (purine/pyrimidine) for robust sequence matching. These functions require a RYpe index directory (`.ryxdi`), which contains a Parquet-based inverted index built from reference sequences.
+
+All RYpe functions take a `sequence_table` parameter that references a DuckDB table or view containing sequence data. The table must have a `sequence1` column and an identifier column (default `read_id`).
+
+#### `rype_classify(index_path, sequence_table, [id_column='read_id'], [threshold=0.1], [negative_index=path])`
+
+Classify sequences against a RYpe index, returning bucket assignments with confidence scores.
+
+**Parameters:**
+- `index_path` (VARCHAR): Path to a RYpe index directory (`.ryxdi`)
+- `sequence_table` (VARCHAR): Name of a DuckDB table or view containing sequences. Must have columns: identifier column + `sequence1` + optional `sequence2`
+- `id_column` (VARCHAR, optional, default `'read_id'`): Name of the identifier column in the sequence table
+- `threshold` (DOUBLE, optional, default 0.1): Minimum score threshold (0.0-1.0). Only matches with score >= threshold are returned
+- `negative_index` (VARCHAR, optional): Path to a second RYpe index used as a negative filter
+
+**Output schema:**
+- `read_id` (VARCHAR): Sequence identifier from the input table
+- `bucket_id` (UINTEGER): Numeric bucket identifier
+- `bucket_name` (VARCHAR): Human-readable bucket name from the index
+- `score` (DOUBLE): Classification confidence score (0.0-1.0)
+
+**Behavior:**
+- A sequence can match multiple buckets (one row per match above threshold)
+- Sequences with no matches above the threshold produce no output rows
+- If the sequence table has a `sequence2` column, paired-end classification is used
+- Works with both tables and views
+
+**Examples:**
+```sql
+-- Load sequences and classify
+CREATE TABLE seqs AS SELECT * FROM read_fastx('reads.fastq');
+SELECT * FROM rype_classify('my_index.ryxdi', 'seqs');
+
+-- Classify with stricter threshold
+SELECT * FROM rype_classify('my_index.ryxdi', 'seqs', threshold := 0.5);
+
+-- Use a custom identifier column
+CREATE TABLE custom_seqs AS SELECT read_id AS sample_id, sequence1 FROM read_fastx('reads.fastq');
+SELECT * FROM rype_classify('my_index.ryxdi', 'custom_seqs', id_column := 'sample_id');
+
+-- Count hits per bucket
+SELECT bucket_name, COUNT(*) as hits
+FROM rype_classify('my_index.ryxdi', 'seqs')
+GROUP BY bucket_name
+ORDER BY hits DESC;
+
+-- Use negative index to filter host sequences
+SELECT * FROM rype_classify('microbe.ryxdi', 'seqs', negative_index := 'host.ryxdi');
+
+-- Classify paired-end reads (table must have sequence2 column)
+CREATE TABLE paired AS SELECT * FROM read_fastx('R1.fastq', sequence2='R2.fastq');
+SELECT * FROM rype_classify('my_index.ryxdi', 'paired');
+```
+
+#### `rype_extract_minimizer_set(sequence_table, k, w, [salt=0], [id_column='read_id'])`
+
+Extract deduplicated minimizer hash sets from sequences for both forward and reverse complement strands.
+
+**Parameters:**
+- `sequence_table` (VARCHAR): Name of a DuckDB table or view with identifier column + `sequence1`
+- `k` (BIGINT): K-mer size. Must be 16, 32, or 64 (constrained by RY-space 1-bit encoding fitting in uint64)
+- `w` (BIGINT): Window size for minimizer selection. Must be > 0
+- `salt` (UBIGINT, optional, default 0): Hash salt for reproducible but varied minimizer selection
+- `id_column` (VARCHAR, optional, default `'read_id'`): Name of the identifier column
+
+**Output schema:**
+- `read_id` (VARCHAR): Sequence identifier from the input table
+- `fwd_set` (UBIGINT[]): Sorted, deduplicated minimizer hashes from the forward strand
+- `rc_set` (UBIGINT[]): Sorted, deduplicated minimizer hashes from the reverse complement strand
+
+**Behavior:**
+- Returns one row per input sequence
+- Sequences shorter than k produce empty lists
+- Hash sets are sorted and deduplicated (set semantics)
+- Different salt values produce different hash sets for the same input
+
+**Examples:**
+```sql
+-- Extract minimizer sets with k=32, w=10
+CREATE TABLE seqs AS SELECT * FROM read_fastx('reads.fastq');
+SELECT * FROM rype_extract_minimizer_set('seqs', 32, 10);
+
+-- Use k=16 for shorter k-mers
+SELECT read_id, len(fwd_set) as num_minimizers
+FROM rype_extract_minimizer_set('seqs', 16, 5);
+
+-- Extract with a salt value
+SELECT * FROM rype_extract_minimizer_set('seqs', 32, 10, salt := 42);
+
+-- Compare minimizer overlap between two sequences
+WITH mins AS (
+    SELECT read_id, fwd_set
+    FROM rype_extract_minimizer_set('seqs', 32, 10)
+)
+SELECT a.read_id, b.read_id,
+       len(list_intersect(a.fwd_set, b.fwd_set)) as shared_minimizers
+FROM mins a, mins b
+WHERE a.read_id < b.read_id;
+```
+
+#### `rype_extract_strand_minimizers(sequence_table, k, w, [salt=0], [id_column='read_id'])`
+
+Extract minimizer hashes with their positions for both forward and reverse complement strands. Unlike `rype_extract_minimizer_set`, this preserves positional information and may contain duplicate hashes at different positions.
+
+**Parameters:**
+- `sequence_table` (VARCHAR): Name of a DuckDB table or view with identifier column + `sequence1`
+- `k` (BIGINT): K-mer size. Must be 16, 32, or 64
+- `w` (BIGINT): Window size for minimizer selection. Must be > 0
+- `salt` (UBIGINT, optional, default 0): Hash salt for reproducible but varied minimizer selection
+- `id_column` (VARCHAR, optional, default `'read_id'`): Name of the identifier column
+
+**Output schema:**
+- `read_id` (VARCHAR): Sequence identifier from the input table
+- `fwd_hashes` (UBIGINT[]): Minimizer hashes from the forward strand
+- `fwd_positions` (UBIGINT[]): Positions corresponding to each forward hash
+- `rc_hashes` (UBIGINT[]): Minimizer hashes from the reverse complement strand
+- `rc_positions` (UBIGINT[]): Positions corresponding to each reverse complement hash
+
+**Behavior:**
+- Returns one row per input sequence
+- Sequences shorter than k produce empty lists
+- Hash and position arrays always have the same length per strand (i.e., `len(fwd_hashes) = len(fwd_positions)`)
+- Positions are 0-based offsets into the sequence
+
+**Examples:**
+```sql
+-- Extract strand minimizers with positions
+CREATE TABLE seqs AS SELECT * FROM read_fastx('reads.fastq');
+SELECT * FROM rype_extract_strand_minimizers('seqs', 32, 10);
+
+-- Verify hash/position alignment
+SELECT read_id,
+       len(fwd_hashes) = len(fwd_positions) as fwd_aligned,
+       len(rc_hashes) = len(rc_positions) as rc_aligned
+FROM rype_extract_strand_minimizers('seqs', 32, 10);
+
+-- Examine minimizer positions along a sequence
+SELECT read_id, unnest(fwd_hashes) as hash, unnest(fwd_positions) as pos
+FROM rype_extract_strand_minimizers('seqs', 32, 10)
+ORDER BY read_id, pos;
+```
 
 ## Analysis Functions
 

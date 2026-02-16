@@ -249,80 +249,69 @@ set_target_properties(wfa2cpp PROPERTIES
 add_dependencies(wfa2cpp wfa2_build)
 
 # Build RYpe from Rust source with Arrow support
-find_program(CARGO cargo)
-if(CARGO)
-    message(STATUS "Found cargo: ${CARGO}")
+find_program(CARGO cargo REQUIRED)
+message(STATUS "Found cargo: ${CARGO}")
 
-    # Determine the static library name based on platform
-    if(WIN32)
-        set(RYPE_LIB_NAME "rype.lib")
-    else()
-        set(RYPE_LIB_NAME "librype.a")
-    endif()
-
-    set(RYPE_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/rype_target)
-
-    # Handle cross-compilation for Rust via --target flag.
-    # When cross-compiling, cargo places output in <target-dir>/<triple>/release/
-    # instead of <target-dir>/release/.
-    # Also ensure the Rust target is installed via `rustup target add`.
-    set(RYPE_CARGO_TARGET_FLAG "")
-    set(RYPE_LIB_SUBDIR "release")
-    set(RYPE_CONFIGURE_CMD "")
-    if(APPLE AND OSX_BUILD_ARCH)
-        find_program(RUSTUP rustup)
-        if(OSX_BUILD_ARCH STREQUAL "x86_64")
-            set(RYPE_CARGO_TARGET_FLAG "--target" "x86_64-apple-darwin")
-            set(RYPE_LIB_SUBDIR "x86_64-apple-darwin/release")
-            if(RUSTUP)
-                set(RYPE_CONFIGURE_CMD ${RUSTUP} target add x86_64-apple-darwin)
-            endif()
-            message(STATUS "RYpe cross-compiling for x86_64 on Apple Silicon")
-        elseif(OSX_BUILD_ARCH STREQUAL "arm64")
-            set(RYPE_CARGO_TARGET_FLAG "--target" "aarch64-apple-darwin")
-            set(RYPE_LIB_SUBDIR "aarch64-apple-darwin/release")
-            if(RUSTUP)
-                set(RYPE_CONFIGURE_CMD ${RUSTUP} target add aarch64-apple-darwin)
-            endif()
-            message(STATUS "RYpe cross-compiling for arm64")
-        endif()
-    endif()
-
-    set(RYPE_LIB_PATH ${RYPE_TARGET_DIR}/${RYPE_LIB_SUBDIR}/${RYPE_LIB_NAME})
-
-    # Build RYpe with Arrow FFI support for zero-copy data exchange.
-    ExternalProject_Add(
-        rype_build
-        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype
-        CONFIGURE_COMMAND "${RYPE_CONFIGURE_CMD}"
-        BUILD_COMMAND ${CARGO} rustc --release --features arrow-ffi --lib --crate-type=staticlib
-            --target-dir ${RYPE_TARGET_DIR}
-            --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype/Cargo.toml
-            ${RYPE_CARGO_TARGET_FLAG}
-        INSTALL_COMMAND ""
-        BUILD_IN_SOURCE 0
-        BUILD_BYPRODUCTS ${RYPE_LIB_PATH}
-    )
-
-    # Create imported library for rype
-    add_library(rype STATIC IMPORTED GLOBAL)
-    set_target_properties(rype PROPERTIES
-        IMPORTED_LOCATION ${RYPE_LIB_PATH}
-    )
-    add_dependencies(rype rype_build)
-
-    set(HAVE_RYPE ON)
-    message(STATUS "RYpe will be built with Arrow support")
+# Determine the static library name based on platform
+if(WIN32)
+    set(RYPE_LIB_NAME "rype.lib")
 else()
-    message(WARNING "cargo not found - building without RYpe support")
-    set(HAVE_RYPE OFF)
+    set(RYPE_LIB_NAME "librype.a")
 endif()
+
+set(RYPE_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/rype_target)
+
+# Handle cross-compilation for Rust via --target flag.
+# When cross-compiling, cargo places output in <target-dir>/<triple>/release/
+# instead of <target-dir>/release/.
+# Also ensure the Rust target is installed via `rustup target add`.
+set(RYPE_CARGO_TARGET_FLAG "")
+set(RYPE_LIB_SUBDIR "release")
+set(RYPE_CONFIGURE_CMD "")
+if(APPLE AND OSX_BUILD_ARCH)
+    find_program(RUSTUP rustup)
+    if(OSX_BUILD_ARCH STREQUAL "x86_64")
+        set(RYPE_CARGO_TARGET_FLAG "--target" "x86_64-apple-darwin")
+        set(RYPE_LIB_SUBDIR "x86_64-apple-darwin/release")
+        if(RUSTUP)
+            set(RYPE_CONFIGURE_CMD ${RUSTUP} target add x86_64-apple-darwin)
+        endif()
+        message(STATUS "RYpe cross-compiling for x86_64 on Apple Silicon")
+    elseif(OSX_BUILD_ARCH STREQUAL "arm64")
+        set(RYPE_CARGO_TARGET_FLAG "--target" "aarch64-apple-darwin")
+        set(RYPE_LIB_SUBDIR "aarch64-apple-darwin/release")
+        if(RUSTUP)
+            set(RYPE_CONFIGURE_CMD ${RUSTUP} target add aarch64-apple-darwin)
+        endif()
+        message(STATUS "RYpe cross-compiling for arm64")
+    endif()
+endif()
+
+set(RYPE_LIB_PATH ${RYPE_TARGET_DIR}/${RYPE_LIB_SUBDIR}/${RYPE_LIB_NAME})
+
+# Build RYpe with Arrow FFI support for zero-copy data exchange.
+ExternalProject_Add(
+    rype_build
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype
+    CONFIGURE_COMMAND "${RYPE_CONFIGURE_CMD}"
+    BUILD_COMMAND ${CARGO} rustc --release --features arrow-ffi --lib --crate-type=staticlib
+        --target-dir ${RYPE_TARGET_DIR}
+        --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype/Cargo.toml
+        ${RYPE_CARGO_TARGET_FLAG}
+    INSTALL_COMMAND ""
+    BUILD_IN_SOURCE 0
+    BUILD_BYPRODUCTS ${RYPE_LIB_PATH}
+)
+
+# Create imported library for rype
+add_library(rype STATIC IMPORTED GLOBAL)
+set_target_properties(rype PROPERTIES
+    IMPORTED_LOCATION ${RYPE_LIB_PATH}
+)
+add_dependencies(rype rype_build)
 
 # adapted kseq++ include use from strobealign
-include_directories(src/include ext ext/WFA2-lib)
-if(HAVE_RYPE)
-    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/ext/rype)
-endif()
+include_directories(src/include ext ext/WFA2-lib ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype)
 set(EXTENSION_SOURCES
     src/SequenceReader.cpp
     src/QualScore.cpp
@@ -383,6 +372,7 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 #    target_compile_options(${LOADABLE_EXTENSION_NAME} PRIVATE /W4)
 #endif()
 
+target_compile_definitions(${EXTENSION_NAME} PRIVATE RYPE_ARROW)
 target_link_libraries(${EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
@@ -390,15 +380,12 @@ target_link_libraries(${EXTENSION_NAME}
                       minimap2
                       wfa2cpp
                       wfa2
+                      rype
 )
-if(HAVE_RYPE)
-    target_compile_definitions(${EXTENSION_NAME} PRIVATE RYPE_ARROW)
-    target_link_libraries(${EXTENSION_NAME} rype)
-    if(APPLE)
-        target_link_libraries(${EXTENSION_NAME} "-framework CoreFoundation")
-    elseif(UNIX)
-        target_link_libraries(${EXTENSION_NAME} dl m)
-    endif()
+if(APPLE)
+    target_link_libraries(${EXTENSION_NAME} "-framework CoreFoundation")
+elseif(UNIX)
+    target_link_libraries(${EXTENSION_NAME} dl m)
 endif()
 if(HDF5_FOUND)
     target_link_libraries(${EXTENSION_NAME}
@@ -418,6 +405,7 @@ if(HAVE_LIBZSTD)
     target_link_libraries(${EXTENSION_NAME} ${ZSTD_TARGET})
 endif()
 
+target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE RYPE_ARROW)
 target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
@@ -425,15 +413,12 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       minimap2
                       wfa2cpp
                       wfa2
+                      rype
 )
-if(HAVE_RYPE)
-    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE RYPE_ARROW)
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} rype)
-    if(APPLE)
-        target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework CoreFoundation")
-    elseif(UNIX)
-        target_link_libraries(${LOADABLE_EXTENSION_NAME} dl m)
-    endif()
+if(APPLE)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework CoreFoundation")
+elseif(UNIX)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} dl m)
 endif()
 
 install(

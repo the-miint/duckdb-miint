@@ -1,7 +1,5 @@
 #pragma once
 
-#ifdef RYPE_ARROW
-
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
@@ -58,5 +56,3 @@ inline bool ValidateSequenceTable(ClientContext &context, const std::string &tab
 }
 
 } // namespace duckdb
-
-#endif // RYPE_ARROW

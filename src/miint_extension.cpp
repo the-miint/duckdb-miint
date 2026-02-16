@@ -28,10 +28,8 @@
 #include <miint_macros.hpp>
 #include <sequence_functions.hpp>
 #include <align_pairwise_functions.hpp>
-#ifdef RYPE_ARROW
 #include <rype_classify.hpp>
 #include <rype_extract.hpp>
-#endif
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include <hdf5.h>
 
@@ -106,11 +104,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	MIINTMacros::Register(loader);
 
-#ifdef RYPE_ARROW
 	RypeClassifyTableFunction::Register(loader);
 	RypeExtractMinimizerSetTableFunction::Register(loader);
 	RypeExtractStrandMinimizersTableFunction::Register(loader);
-#endif
 
 	// read_ncbi and related need httpfs
 	auto &instance = loader.GetDatabaseInstance();

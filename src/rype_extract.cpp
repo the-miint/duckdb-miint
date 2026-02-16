@@ -1,5 +1,3 @@
-#ifdef RYPE_ARROW
-
 #include "rype_extract.hpp"
 #include "rype_common.hpp"
 #include "duckdb/common/arrow/result_arrow_wrapper.hpp"
@@ -390,5 +388,3 @@ void RypeExtractStrandMinimizersTableFunction::Register(ExtensionLoader &loader)
 }
 
 } // namespace duckdb
-
-#endif // RYPE_ARROW
