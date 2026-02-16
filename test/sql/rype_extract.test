@@ -1,0 +1,315 @@
+# name: test/sql/rype_extract.test
+# description: Test rype_extract_minimizer_set and rype_extract_strand_minimizers table functions
+# group: [sql]
+
+require miint
+
+# Setup: Create test table with sequence data
+statement ok
+CREATE TABLE sequences AS SELECT * FROM (VALUES
+    ('seq1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('seq2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA'),
+    ('seq3', 'GGGGCCCCGGGGCCCCGGGGCCCCGGGGCCCCGGGGCCCCGGGGCCCCGGGG')
+) AS t(read_id, sequence1);
+
+# =============================================================================
+# Error handling tests
+# =============================================================================
+
+# Test error: invalid k (not 16, 32, or 64)
+statement error
+SELECT * FROM rype_extract_minimizer_set('sequences', 31, 10);
+----
+k must be 16, 32, or 64
+
+# Test error: invalid w (zero)
+statement error
+SELECT * FROM rype_extract_minimizer_set('sequences', 32, 0);
+----
+w must be > 0
+
+# Test error: non-existent table
+statement error
+SELECT * FROM rype_extract_minimizer_set('nonexistent_table', 32, 10);
+----
+does not exist
+
+# Test error: missing required column (read_id)
+statement ok
+CREATE TABLE bad_table1 AS SELECT 'ACGT' as sequence1;
+
+statement error
+SELECT * FROM rype_extract_minimizer_set('bad_table1', 32, 10);
+----
+missing required column
+
+statement ok
+DROP TABLE bad_table1;
+
+# Test error: missing required column (sequence1)
+statement ok
+CREATE TABLE bad_table2 AS SELECT 'seq1' as read_id;
+
+statement error
+SELECT * FROM rype_extract_minimizer_set('bad_table2', 32, 10);
+----
+missing required column
+
+statement ok
+DROP TABLE bad_table2;
+
+# Same errors for strand minimizers
+statement error
+SELECT * FROM rype_extract_strand_minimizers('sequences', 31, 10);
+----
+k must be 16, 32, or 64
+
+statement error
+SELECT * FROM rype_extract_strand_minimizers('sequences', 32, 0);
+----
+w must be > 0
+
+statement error
+SELECT * FROM rype_extract_strand_minimizers('nonexistent_table', 32, 10);
+----
+does not exist
+
+# =============================================================================
+# rype_extract_minimizer_set: basic functionality
+# =============================================================================
+
+# Test output has expected columns and non-null values
+query IIII
+SELECT
+    read_id IS NOT NULL as has_read_id,
+    fwd_set IS NOT NULL as has_fwd_set,
+    rc_set IS NOT NULL as has_rc_set,
+    typeof(fwd_set) = 'UBIGINT[]' as correct_type
+FROM rype_extract_minimizer_set('sequences', 32, 10)
+LIMIT 1;
+----
+true	true	true	true
+
+# Test that we get one row per input sequence
+query I
+SELECT COUNT(*) FROM rype_extract_minimizer_set('sequences', 32, 10);
+----
+3
+
+# Test that lists are non-empty for sequences longer than k
+query III
+SELECT
+    read_id,
+    len(fwd_set) > 0 as has_fwd,
+    len(rc_set) > 0 as has_rc
+FROM rype_extract_minimizer_set('sequences', 32, 10)
+ORDER BY read_id;
+----
+seq1	true	true
+seq2	true	true
+seq3	true	true
+
+# Test with k=16 (smaller k → more minimizers)
+query I
+SELECT COUNT(*) FROM rype_extract_minimizer_set('sequences', 16, 5);
+----
+3
+
+# Test with salt parameter
+query I
+SELECT COUNT(*) FROM rype_extract_minimizer_set('sequences', 32, 10, salt := 42);
+----
+3
+
+# Test with custom id_column
+statement ok
+CREATE TABLE sequences_custom_id AS SELECT * FROM (VALUES
+    ('custom1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('custom2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(my_id, sequence1);
+
+query I
+SELECT COUNT(*) FROM rype_extract_minimizer_set('sequences_custom_id', 32, 10, id_column := 'my_id');
+----
+2
+
+statement ok
+DROP TABLE sequences_custom_id;
+
+# Test with a view
+statement ok
+CREATE VIEW sequences_view AS SELECT * FROM sequences;
+
+query I
+SELECT COUNT(*) FROM rype_extract_minimizer_set('sequences_view', 32, 10);
+----
+3
+
+statement ok
+DROP VIEW sequences_view;
+
+# Test empty table
+statement ok
+CREATE TABLE empty_sequences AS SELECT * FROM sequences WHERE FALSE;
+
+query I
+SELECT COUNT(*) FROM rype_extract_minimizer_set('empty_sequences', 32, 10);
+----
+0
+
+statement ok
+DROP TABLE empty_sequences;
+
+# Test that fwd_set values are sorted (deduplicated set)
+query I
+SELECT COUNT(*) = 0 as all_sorted
+FROM (
+    SELECT read_id, fwd_set
+    FROM rype_extract_minimizer_set('sequences', 32, 10)
+) t
+WHERE NOT list_sort(fwd_set) = fwd_set;
+----
+true
+
+# =============================================================================
+# rype_extract_strand_minimizers: basic functionality
+# =============================================================================
+
+# Test output has expected columns
+query IIIIII
+SELECT
+    read_id IS NOT NULL as has_read_id,
+    fwd_hashes IS NOT NULL as has_fwd_hashes,
+    fwd_positions IS NOT NULL as has_fwd_positions,
+    rc_hashes IS NOT NULL as has_rc_hashes,
+    rc_positions IS NOT NULL as has_rc_positions,
+    typeof(fwd_hashes) = 'UBIGINT[]' as correct_type
+FROM rype_extract_strand_minimizers('sequences', 32, 10)
+LIMIT 1;
+----
+true	true	true	true	true	true
+
+# Test one row per input sequence
+query I
+SELECT COUNT(*) FROM rype_extract_strand_minimizers('sequences', 32, 10);
+----
+3
+
+# Test that hashes and positions have same length per row
+query I
+SELECT COUNT(*) = 0 as lengths_match
+FROM rype_extract_strand_minimizers('sequences', 32, 10)
+WHERE len(fwd_hashes) != len(fwd_positions)
+   OR len(rc_hashes) != len(rc_positions);
+----
+true
+
+# Test non-empty results for sequences longer than k
+query III
+SELECT
+    read_id,
+    len(fwd_hashes) > 0 as has_fwd,
+    len(rc_hashes) > 0 as has_rc
+FROM rype_extract_strand_minimizers('sequences', 32, 10)
+ORDER BY read_id;
+----
+seq1	true	true
+seq2	true	true
+seq3	true	true
+
+# Test determinism: same input produces same output
+query I
+SELECT COUNT(*) = 0 as is_deterministic
+FROM (
+    SELECT fwd_set AS a FROM rype_extract_minimizer_set('sequences', 32, 10)
+    EXCEPT
+    SELECT fwd_set AS a FROM rype_extract_minimizer_set('sequences', 32, 10)
+);
+----
+true
+
+# Test that salt changes the output
+query I
+SELECT COUNT(*) = 0 as salt_changes_nothing
+FROM (
+    SELECT fwd_set FROM rype_extract_minimizer_set('sequences', 32, 10, salt := 0)
+    INTERSECT
+    SELECT fwd_set FROM rype_extract_minimizer_set('sequences', 32, 10, salt := 99999)
+);
+----
+true
+
+# Test sequence shorter than k produces empty lists
+statement ok
+CREATE TABLE short_seq AS SELECT * FROM (VALUES
+    ('short1', 'ACGTACGT')
+) AS t(read_id, sequence1);
+
+query III
+SELECT read_id, len(fwd_set), len(rc_set)
+FROM rype_extract_minimizer_set('short_seq', 32, 10);
+----
+short1	0	0
+
+query III
+SELECT read_id, len(fwd_hashes), len(rc_hashes)
+FROM rype_extract_strand_minimizers('short_seq', 32, 10);
+----
+short1	0	0
+
+statement ok
+DROP TABLE short_seq;
+
+# Test position column types are UBIGINT[]
+query II
+SELECT
+    typeof(fwd_positions) = 'UBIGINT[]' as fwd_pos_type,
+    typeof(rc_positions) = 'UBIGINT[]' as rc_pos_type
+FROM rype_extract_strand_minimizers('sequences', 32, 10)
+LIMIT 1;
+----
+true	true
+
+# Test rc_set is also sorted (deduplicated set)
+query I
+SELECT COUNT(*) = 0 as all_sorted
+FROM (
+    SELECT read_id, rc_set
+    FROM rype_extract_minimizer_set('sequences', 32, 10)
+) t
+WHERE NOT list_sort(rc_set) = rc_set;
+----
+true
+
+# Test with k=64
+query I
+SELECT COUNT(*) FROM rype_extract_minimizer_set('sequences', 64, 10);
+----
+3
+
+# Test with real FASTA data via read_fastx
+statement ok
+CREATE TABLE fastx_seqs AS SELECT read_id, sequence1 FROM read_fastx('data/rype/test_refs.fasta');
+
+query I
+SELECT COUNT(*) FROM rype_extract_minimizer_set('fastx_seqs', 32, 10);
+----
+3
+
+# Strand minimizers from FASTA data should have non-empty results
+query I
+SELECT COUNT(*) = 0 as all_nonempty
+FROM rype_extract_strand_minimizers('fastx_seqs', 32, 10)
+WHERE len(fwd_hashes) = 0;
+----
+true
+
+statement ok
+DROP TABLE fastx_seqs;
+
+# =============================================================================
+# Cleanup
+# =============================================================================
+
+statement ok
+DROP TABLE sequences;

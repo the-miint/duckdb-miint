@@ -1,12 +1,9 @@
 #ifdef RYPE_ARROW
 
 #include "rype_classify.hpp"
-#include "duckdb/catalog/catalog.hpp"
-#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
+#include "rype_common.hpp"
 #include "duckdb/common/arrow/result_arrow_wrapper.hpp"
 #include "duckdb/common/helper.hpp"
-#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
@@ -17,10 +14,9 @@ namespace duckdb {
 // GlobalState destructor - cleanup RYpe resources
 // ============================================================================
 RypeClassifyTableFunction::GlobalState::~GlobalState() {
-	// Release current Arrow batch
-	if (current_batch.release) {
-		current_batch.release(&current_batch);
-	}
+	// Release shared_ptr to current batch. Any DuckDB Vectors that still
+	// reference this batch via ArrowAuxiliaryData will keep it alive.
+	current_chunk.reset();
 
 	// IMPORTANT: Clear arrow_table BEFORE releasing output_schema.
 	// ArrowTableSchema holds pointers into the schema data, so we must
@@ -70,51 +66,6 @@ void RypeClassifyTableFunction::LocalState::ResetStates() {
 
 RypeClassifyTableFunction::LocalState::~LocalState() {
 	array_states.clear();
-}
-
-// ============================================================================
-// Helper: Validate table/view exists and has required columns
-// Returns true if sequence2 column exists (for paired-end support)
-// ============================================================================
-static bool ValidateSequenceTable(ClientContext &context, const std::string &table_name, const std::string &id_column) {
-	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
-	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
-
-	if (!entry) {
-		throw BinderException("Table or view '%s' does not exist", table_name);
-	}
-
-	// Get column names
-	vector<string> col_names;
-	if (entry->type == CatalogType::TABLE_ENTRY) {
-		auto &table = entry->Cast<TableCatalogEntry>();
-		auto &columns = table.GetColumns();
-		for (idx_t i = 0; i < columns.LogicalColumnCount(); i++) {
-			col_names.push_back(StringUtil::Lower(columns.GetColumn(LogicalIndex(i)).Name()));
-		}
-	} else if (entry->type == CatalogType::VIEW_ENTRY) {
-		auto &view = entry->Cast<ViewCatalogEntry>();
-		for (const auto &name : view.names) {
-			col_names.push_back(StringUtil::Lower(name));
-		}
-	} else {
-		throw BinderException("'%s' is not a table or view", table_name);
-	}
-
-	// Check required columns exist
-	auto id_col_lower = StringUtil::Lower(id_column);
-	bool has_id = std::find(col_names.begin(), col_names.end(), id_col_lower) != col_names.end();
-	bool has_seq1 = std::find(col_names.begin(), col_names.end(), "sequence1") != col_names.end();
-	bool has_seq2 = std::find(col_names.begin(), col_names.end(), "sequence2") != col_names.end();
-
-	if (!has_id) {
-		throw BinderException("Table '%s' missing required column '%s'", table_name, id_column);
-	}
-	if (!has_seq1) {
-		throw BinderException("Table '%s' missing required column 'sequence1'", table_name);
-	}
-
-	return has_seq2;
 }
 
 // ============================================================================
@@ -287,6 +238,11 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 	ArrowTableFunction::PopulateArrowTableSchema(DBConfig::GetConfig(context), gstate->arrow_table,
 	                                             gstate->output_schema);
 
+	// Verify RYpe's output schema matches expected columns (query_id, bucket_id, score)
+	if (gstate->arrow_table.GetColumns().size() != 3) {
+		throw IOException("RYpe classify returned %zu columns, expected 3", gstate->arrow_table.GetColumns().size());
+	}
+
 	gstate->schema_initialized = true;
 
 	return gstate;
@@ -316,54 +272,56 @@ void RypeClassifyTableFunction::Execute(ClientContext &context, TableFunctionInp
 	}
 
 	// Fetch next batch if needed
-	while (gstate.batch_offset >= static_cast<idx_t>(gstate.current_batch.length) || !gstate.current_batch.release) {
-		// Release previous batch
-		if (gstate.current_batch.release) {
-			gstate.current_batch.release(&gstate.current_batch);
-		}
+	auto batch_length = gstate.current_chunk ? gstate.current_chunk->arrow_array.length : 0;
+	while (gstate.batch_offset >= static_cast<idx_t>(batch_length) || !gstate.current_chunk) {
+		gstate.current_chunk.reset();
 		gstate.batch_offset = 0;
 		lstate.ResetStates();
 
 		// Get next batch from RYpe
-		if (gstate.output_stream.get_next(&gstate.output_stream, &gstate.current_batch) != 0) {
+		auto wrapper = make_shared_ptr<ArrowArrayWrapper>();
+		if (gstate.output_stream.get_next(&gstate.output_stream, &wrapper->arrow_array) != 0) {
 			const char *err = gstate.output_stream.get_last_error(&gstate.output_stream);
 			throw IOException("Error getting next batch from RYpe: %s", err ? err : "unknown error");
 		}
 
 		// Check if stream is exhausted
-		if (!gstate.current_batch.release) {
+		if (!wrapper->arrow_array.release) {
 			gstate.done = true;
 			output.SetCardinality(0);
 			return;
 		}
+
+		gstate.current_chunk = std::move(wrapper);
+		batch_length = gstate.current_chunk->arrow_array.length;
 	}
 
-	// Calculate how many rows to output
-	idx_t remaining = static_cast<idx_t>(gstate.current_batch.length) - gstate.batch_offset;
+	auto &batch = gstate.current_chunk->arrow_array;
+	idx_t remaining = static_cast<idx_t>(batch.length) - gstate.batch_offset;
 	idx_t to_output = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
 
 	output.SetCardinality(to_output);
 
 	// RYpe output schema: query_id (Int64), bucket_id (UInt32), score (Float64)
-	// Our output schema: read_id, bucket_id, bucket_name, score
+	// Our output schema: read_id (VARCHAR), bucket_id (UINTEGER), bucket_name (VARCHAR), score (DOUBLE)
 
-	// Get raw Arrow arrays for direct access
-	auto &query_id_array = *gstate.current_batch.children[0];
-	auto &bucket_id_array = *gstate.current_batch.children[1];
-	auto &score_array = *gstate.current_batch.children[2];
+	// --- Column 0 (read_id) and Column 2 (bucket_name): manual transformation ---
+	// These require per-row lookups so they cannot be zero-copy.
+	auto &query_id_array = *batch.children[0];
+	auto &bucket_id_array = *batch.children[1];
+
+	if (!query_id_array.buffers[1] || !bucket_id_array.buffers[1]) {
+		throw IOException("Arrow array has null data buffer in RYpe classify output");
+	}
 
 	auto query_ids = reinterpret_cast<const int64_t *>(query_id_array.buffers[1]);
 	auto bucket_ids = reinterpret_cast<const uint32_t *>(bucket_id_array.buffers[1]);
-	auto scores = reinterpret_cast<const double *>(score_array.buffers[1]);
 
 	for (idx_t i = 0; i < to_output; i++) {
-		idx_t array_idx = gstate.batch_offset + i + gstate.current_batch.offset;
-
-		int64_t query_id = query_ids[array_idx + query_id_array.offset];
-		uint32_t bucket_id = bucket_ids[array_idx + bucket_id_array.offset];
-		double score = scores[array_idx + score_array.offset];
+		idx_t array_idx = gstate.batch_offset + i + batch.offset;
 
 		// Column 0: read_id (lookup from query_id which is a row index)
+		int64_t query_id = query_ids[array_idx + query_id_array.offset];
 		if (query_id < 0 || static_cast<size_t>(query_id) >= gstate.read_ids.size()) {
 			throw IOException("RYpe returned invalid query_id %lld (expected 0-%zu)", static_cast<long long>(query_id),
 			                  gstate.read_ids.size() - 1);
@@ -371,18 +329,41 @@ void RypeClassifyTableFunction::Execute(ClientContext &context, TableFunctionInp
 		FlatVector::GetData<string_t>(output.data[0])[i] =
 		    StringVector::AddString(output.data[0], gstate.read_ids[query_id]);
 
-		// Column 1: bucket_id
-		FlatVector::GetData<uint32_t>(output.data[1])[i] = bucket_id;
-
-		// Column 2: bucket_name (lookup from index)
+		// Column 2: bucket_name (lookup from index using bucket_id)
+		uint32_t bucket_id = bucket_ids[array_idx + bucket_id_array.offset];
 		const char *name = rype_bucket_name(gstate.index, bucket_id);
 		if (!name) {
 			throw IOException("RYpe returned unknown bucket_id %u - index may be corrupted", bucket_id);
 		}
 		FlatVector::GetData<string_t>(output.data[2])[i] = StringVector::AddString(output.data[2], name);
+	}
 
-		// Column 3: score
-		FlatVector::GetData<double>(output.data[3])[i] = score;
+	// --- Column 1 (bucket_id) and Column 3 (score): zero-copy via Arrow conversion ---
+	// Arrow col 1 (UInt32) → DuckDB col 1, Arrow col 2 (Float64) → DuckDB col 3
+	auto &arrow_columns = gstate.arrow_table.GetColumns();
+
+	// bucket_id: Arrow col 1 → DuckDB col 1
+	{
+		auto &array = *batch.children[1];
+		auto &arrow_type = *arrow_columns.at(1);
+		auto &array_state = lstate.GetState(1);
+		array_state.owned_data = gstate.current_chunk;
+		ArrowToDuckDBConversion::SetValidityMask(output.data[1], array, gstate.batch_offset, to_output, batch.offset,
+		                                         -1);
+		ArrowToDuckDBConversion::ColumnArrowToDuckDB(output.data[1], array, gstate.batch_offset, array_state, to_output,
+		                                             arrow_type);
+	}
+
+	// score: Arrow col 2 → DuckDB col 3
+	{
+		auto &array = *batch.children[2];
+		auto &arrow_type = *arrow_columns.at(2);
+		auto &array_state = lstate.GetState(2);
+		array_state.owned_data = gstate.current_chunk;
+		ArrowToDuckDBConversion::SetValidityMask(output.data[3], array, gstate.batch_offset, to_output, batch.offset,
+		                                         -1);
+		ArrowToDuckDBConversion::ColumnArrowToDuckDB(output.data[3], array, gstate.batch_offset, array_state, to_output,
+		                                             arrow_type);
 	}
 
 	gstate.batch_offset += to_output;

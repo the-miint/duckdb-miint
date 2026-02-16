@@ -340,7 +340,8 @@ set(EXTENSION_SOURCES
     src/read_sequences_sff.cpp
     src/WFA2Aligner.cpp
     src/align_pairwise_functions.cpp
-    src/rype_classify.cpp)
+    src/rype_classify.cpp
+    src/rype_extract.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

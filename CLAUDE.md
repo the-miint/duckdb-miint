@@ -325,6 +325,55 @@ if (entry->type == CatalogType::TABLE_ENTRY) {
 - Read placements/references at bind time if possible, storing results in bind data to avoid issues during finalize
 - See `src/placement_table_reader.cpp` for a complete example
 
+#### Consuming Arrow Streams (Zero-Copy Pattern)
+
+When consuming Arrow C Data Interface streams (e.g., from RYpe or other FFI libraries), use DuckDB's built-in Arrow-to-DuckDB conversion instead of manually copying data. This gets zero-copy for fixed-width types (integers, floats) including inside List children.
+
+**Key components:**
+
+- `ArrowTableFunction::PopulateArrowTableSchema()` — parses Arrow schema into `ArrowTableSchema` with type metadata needed by the converter
+- `ArrowToDuckDBConversion::SetValidityMask()` — copies null bitmap from Arrow to DuckDB
+- `ArrowToDuckDBConversion::ColumnArrowToDuckDB()` — converts one column, dispatching by type:
+  - Fixed-width types (UBIGINT, DOUBLE, etc.) → `DirectConversion()` → `FlatVector::SetData()` (zero-copy pointer swap)
+  - List types → converts offset buffer, then recursively converts child (child gets zero-copy)
+  - Strings → copies (different layout between Arrow and DuckDB)
+
+**Lifetime management for zero-copy:**
+
+Arrow buffers must stay alive while DuckDB Vectors reference them. The pattern:
+
+1. Wrap each Arrow batch in `shared_ptr<ArrowArrayWrapper>` (not raw `ArrowArray`)
+2. Set `ArrowArrayScanState::owned_data = shared_ptr` before calling `ColumnArrowToDuckDB`
+3. DuckDB stores the shared_ptr in `ArrowAuxiliaryData` on the Vector's buffer, preventing premature deallocation
+
+```cpp
+// In GlobalState: use shared_ptr, NOT raw ArrowArray
+shared_ptr<ArrowArrayWrapper> current_chunk;
+
+// Fetching a new batch:
+auto wrapper = make_shared_ptr<ArrowArrayWrapper>();
+stream.get_next(&stream, &wrapper->arrow_array);
+current_chunk = std::move(wrapper);
+
+// In Execute, for each Arrow column that maps directly to a DuckDB column:
+auto &array_state = lstate.GetState(col_idx);
+array_state.owned_data = gstate.current_chunk;  // ref-count keeps batch alive
+ArrowToDuckDBConversion::SetValidityMask(output.data[col], array, batch_offset, size, batch.offset, -1);
+ArrowToDuckDBConversion::ColumnArrowToDuckDB(output.data[col], array, batch_offset, array_state, size, arrow_type);
+```
+
+**When manual access is needed** (e.g., id→read_id transformation), direct buffer access is fine for that column — use `reinterpret_cast` on `array.buffers[1]` as in `rype_classify.cpp`.
+
+**Anti-pattern:** Do NOT manually iterate Arrow List child data with element-by-element copy. Use `ColumnArrowToDuckDB` which handles List→LIST conversion with zero-copy on the child values.
+
+**Headers needed:** `duckdb/common/arrow/arrow_wrapper.hpp`, `duckdb/function/table/arrow.hpp`
+
+**Reference implementations:**
+- `src/rype_extract.cpp` — zero-copy Arrow List<UInt64> → DuckDB LIST(UBIGINT)
+- `src/rype_classify.cpp` — manual Arrow access (all columns need transformation)
+- `duckdb/src/function/table/arrow_conversion.cpp` — DuckDB's internal conversion engine
+- `duckdb/src/main/capi/arrow-c.cpp` (`duckdb_data_chunk_from_arrow`) — C API usage example
+
 ## Code Style and Conventions
 
 - **C++ Standard**: C++20 (required for kseq++)

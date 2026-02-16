@@ -5,6 +5,7 @@
 #include "rype.h"
 
 #include "duckdb/common/arrow/arrow.hpp"
+#include "duckdb/common/arrow/arrow_wrapper.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/types.hpp"
@@ -55,14 +56,14 @@ public:
 
 		// Arrow output stream from RYpe.
 		// OWNERSHIP HIERARCHY (destruction must be in reverse order):
-		// 1. current_batch - obtained via get_next(), release before getting next or on destruction
+		// 1. current_chunk (shared_ptr — may outlive gstate via Vector ArrowAuxiliaryData)
 		// 2. arrow_table - holds pointers INTO output_schema, clear before releasing schema
 		// 3. output_schema - obtained via get_schema(), separately owned copy, release on destruction
 		// 4. output_stream - returned by rype_classify_arrow(), release on destruction
 		ArrowArrayStream output_stream;
 		ArrowSchema output_schema;
 		ArrowTableSchema arrow_table;
-		ArrowArray current_batch;
+		shared_ptr<ArrowArrayWrapper> current_chunk;
 
 		idx_t batch_offset = 0;
 		bool schema_initialized = false;
