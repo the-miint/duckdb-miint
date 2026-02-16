@@ -265,16 +265,25 @@ if(CARGO)
     # Handle cross-compilation for Rust via --target flag.
     # When cross-compiling, cargo places output in <target-dir>/<triple>/release/
     # instead of <target-dir>/release/.
+    # Also ensure the Rust target is installed via `rustup target add`.
     set(RYPE_CARGO_TARGET_FLAG "")
     set(RYPE_LIB_SUBDIR "release")
+    set(RYPE_CONFIGURE_CMD "")
     if(APPLE AND OSX_BUILD_ARCH)
+        find_program(RUSTUP rustup)
         if(OSX_BUILD_ARCH STREQUAL "x86_64")
             set(RYPE_CARGO_TARGET_FLAG "--target" "x86_64-apple-darwin")
             set(RYPE_LIB_SUBDIR "x86_64-apple-darwin/release")
+            if(RUSTUP)
+                set(RYPE_CONFIGURE_CMD ${RUSTUP} target add x86_64-apple-darwin)
+            endif()
             message(STATUS "RYpe cross-compiling for x86_64 on Apple Silicon")
         elseif(OSX_BUILD_ARCH STREQUAL "arm64")
             set(RYPE_CARGO_TARGET_FLAG "--target" "aarch64-apple-darwin")
             set(RYPE_LIB_SUBDIR "aarch64-apple-darwin/release")
+            if(RUSTUP)
+                set(RYPE_CONFIGURE_CMD ${RUSTUP} target add aarch64-apple-darwin)
+            endif()
             message(STATUS "RYpe cross-compiling for arm64")
         endif()
     endif()
@@ -285,7 +294,7 @@ if(CARGO)
     ExternalProject_Add(
         rype_build
         SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype
-        CONFIGURE_COMMAND ""
+        CONFIGURE_COMMAND "${RYPE_CONFIGURE_CMD}"
         BUILD_COMMAND ${CARGO} rustc --release --features arrow-ffi --lib --crate-type=staticlib
             --target-dir ${RYPE_TARGET_DIR}
             --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype/Cargo.toml
