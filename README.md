@@ -70,7 +70,9 @@ GROUP BY sample_id;
   - [read_newick](#read_newickfilename-include_filepathfalse)
   - [align_minimap2](#align_minimap2query_table-subject_tablenull-index_pathnull-options)
   - [save_minimap2_index](#save_minimap2_indexsubject_table-output_path-options)
+  - [align_minimap2_sharded](#align_minimap2_shardedquery_table-shard_directory-read_to_shard-options)
   - [align_bowtie2](#align_bowtie2query_table-subject_table-options)
+  - [align_bowtie2_sharded](#align_bowtie2_shardedquery_table-shard_directory-read_to_shard-options)
   - [SAM Flag Functions](#sam-flag-functions)
   - [alignment_seq_identity](#alignment_seq_identitycigar-nm-md-type)
   - [alignment_query_length](#alignment_query_lengthcigar-include_hard_clipstrue)
@@ -1305,6 +1307,96 @@ SELECT * FROM save_minimap2_index('marker_genes', 'markers.mmi');
 - **Small references**: For small reference sets (<10MB), on-the-fly indexing is fast enough
 - **One-time alignments**: If aligning only once, the index-building time won't be recovered
 
+### `align_minimap2_sharded(query_table, shard_directory, read_to_shard, [options])`
+
+Align query sequences against multiple pre-built minimap2 index shards in parallel. Each shard is a separate `.mmi` index file, and a mapping table specifies which reads should be aligned against which shard. This is designed for large-scale metagenomic workflows where the reference database is split across multiple shards and reads have been pre-assigned to shards (e.g., by a prior classification step).
+
+**Parameters:**
+- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2)
+- `shard_directory` (VARCHAR, required): Path to directory containing pre-built minimap2 index files. Each shard's index is expected at `<shard_directory>/<shard_name>.mmi`
+- `read_to_shard` (VARCHAR, required): Name of table or view that maps reads to shards. Must have columns:
+  - `read_id` (VARCHAR): Read identifier (must match read_id in query_table)
+  - `shard_name` (VARCHAR): Name of the shard this read should be aligned against
+- `preset` (VARCHAR, default: 'sr'): Minimap2 preset ('sr', 'map-ont', 'map-pb', etc.)
+- `max_secondary` (INTEGER, default: 5): Maximum secondary alignments per query. Set to 0 for primary only
+- `eqx` (BOOLEAN, default: true): Use =/X CIGAR operators instead of M
+
+**Output schema:**
+Returns the same 21-column schema as `align_minimap2` and `read_alignments`.
+
+**Behavior:**
+- At bind time, reads the `read_to_shard` table to discover shards and validate that each `<shard_name>.mmi` file exists in `shard_directory`
+- Shards are processed in parallel (one DuckDB thread per shard), each loading its `.mmi` index independently
+- For each shard, only the reads assigned to that shard (via the `read_to_shard` mapping) are queried
+- A read can appear in multiple shards (mapped to multiple shard_name values) and will be aligned against each
+- Unmapped reads (flag 0x4) are automatically filtered out of results
+- Supports both single-end and paired-end query sequences
+- Supports views for both `query_table` and `read_to_shard`
+
+**Examples:**
+```sql
+-- Setup: Pre-build shard indexes (one-time)
+-- Assume reference database is split into shards, each saved as a .mmi file
+SELECT * FROM save_minimap2_index('shard_a_refs', 'indexes/shard_a.mmi', preset='sr');
+SELECT * FROM save_minimap2_index('shard_b_refs', 'indexes/shard_b.mmi', preset='sr');
+
+-- Load query sequences
+CREATE TABLE queries AS SELECT * FROM read_fastx('reads.fastq');
+
+-- Create read-to-shard mapping (from prior classification, e.g., RYpe)
+CREATE TABLE read_to_shard AS SELECT * FROM (VALUES
+    ('read1', 'shard_a'),
+    ('read2', 'shard_b'),
+    ('read3', 'shard_a')
+) AS t(read_id, shard_name);
+
+-- Align reads against their assigned shards in parallel
+SELECT * FROM align_minimap2_sharded('queries',
+    shard_directory := 'indexes/',
+    read_to_shard := 'read_to_shard',
+    max_secondary := 0);
+
+-- Filter by mapping quality
+SELECT read_id, reference, position, mapq
+FROM align_minimap2_sharded('queries',
+    shard_directory := 'indexes/',
+    read_to_shard := 'read_to_shard',
+    max_secondary := 0)
+WHERE mapq >= 30;
+
+-- Works with views
+CREATE VIEW filtered_queries AS
+    SELECT * FROM read_fastx('reads.fastq') WHERE LENGTH(sequence1) >= 50;
+CREATE VIEW shard_mapping AS
+    SELECT * FROM read_to_shard WHERE shard_name != 'excluded_shard';
+
+SELECT * FROM align_minimap2_sharded('filtered_queries',
+    shard_directory := 'indexes/',
+    read_to_shard := 'shard_mapping',
+    max_secondary := 0);
+
+-- Use with long-read preset
+SELECT * FROM align_minimap2_sharded('nanopore_reads',
+    shard_directory := 'indexes/',
+    read_to_shard := 'read_to_shard',
+    preset := 'map-ont',
+    max_secondary := 0);
+```
+
+**Error handling:**
+- Error if `shard_directory` does not exist
+- Error if any `<shard_name>.mmi` file referenced in `read_to_shard` does not exist in `shard_directory`
+- Error if a `.mmi` file is not a valid minimap2 index
+- Error if `query_table` or `read_to_shard` table/view does not exist
+- Error if `read_to_shard` table is missing `read_id` or `shard_name` columns
+- Error if `read_to_shard` table contains NULL `shard_name` values
+
+**Performance notes:**
+- Parallelism is one DuckDB thread per shard; control with `SET threads=N`
+- Shards are sorted by read count (largest first) for better load balancing
+- Pre-built indexes avoid redundant index building across runs
+- `k` and `w` parameters are ignored (baked into the pre-built index); a warning is printed if specified
+
 ### `align_bowtie2(query_table, subject_table, [options])`
 
 Align query sequences to subject sequences using Bowtie2. This function enables short-read alignment directly within SQL by reading sequences from DuckDB tables/views and returning alignments in the same format as `read_alignments`.
@@ -1426,6 +1518,107 @@ SELECT * FROM align_bowtie2('queries', 'subjects', extra_args='--no-unal --rdg 5
 | Index type | FM-index | Minimizer index |
 | Paired-end | Interleaved stdin | Native support |
 | Per-subject mode | No | Yes |
+
+### `align_bowtie2_sharded(query_table, shard_directory, read_to_shard, [options])`
+
+Align query sequences against multiple pre-built Bowtie2 index shards in parallel. Each shard is a directory containing a Bowtie2 index (with prefix `index`), and a mapping table specifies which reads should be aligned against which shard. This is the Bowtie2 counterpart to `align_minimap2_sharded`, designed for the same large-scale sharded alignment workflows.
+
+**Requirements:**
+- Bowtie2 must be installed and available in PATH (`bowtie2` command)
+
+**Parameters:**
+- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2)
+- `shard_directory` (VARCHAR, required): Path to directory containing shard subdirectories. Each shard's Bowtie2 index is expected at `<shard_directory>/<shard_name>/index` (i.e., files like `<shard_name>/index.1.bt2`, `<shard_name>/index.rev.1.bt2`, etc.)
+- `read_to_shard` (VARCHAR, required): Name of table or view that maps reads to shards. Must have columns:
+  - `read_id` (VARCHAR): Read identifier (must match read_id in query_table)
+  - `shard_name` (VARCHAR): Name of the shard this read should be aligned against
+- `preset` (VARCHAR, optional): Bowtie2 sensitivity preset ('very-fast', 'fast', 'sensitive', 'very-sensitive')
+- `local` (BOOLEAN, default: false): Use local alignment mode instead of end-to-end
+- `max_secondary` (INTEGER, default: 1): Maximum alignments to report per query (-k parameter)
+- `extra_args` (VARCHAR, optional): Additional Bowtie2 command-line arguments (space-separated)
+- `quiet` (BOOLEAN, default: true): Suppress Bowtie2 stderr output
+- `threads` (INTEGER): Ignored in sharded mode. Parallelism comes from running multiple single-threaded Bowtie2 processes (one per shard). A warning is printed if set to a value other than 1
+
+**Output schema:**
+Returns the same 21-column schema as `align_bowtie2` and `read_alignments`.
+
+**Behavior:**
+- At bind time, reads the `read_to_shard` table to discover shards and validate that each Bowtie2 index exists at `<shard_directory>/<shard_name>/index`
+- Shards are processed in parallel, with each DuckDB thread running a separate single-threaded Bowtie2 process
+- For each shard, only the reads assigned to that shard (via the `read_to_shard` mapping) are queried
+- A read can appear in multiple shards and will be aligned against each
+- Unmapped reads (flag 0x4) are automatically filtered out of results
+- Supports both single-end and paired-end query sequences
+- Supports views for both `query_table` and `read_to_shard`
+
+**Examples:**
+```sql
+-- Setup: Pre-build shard indexes (one-time, using bowtie2-build externally)
+-- Expected directory structure:
+--   indexes/shard_a/index.1.bt2, indexes/shard_a/index.rev.1.bt2, ...
+--   indexes/shard_b/index.1.bt2, indexes/shard_b/index.rev.1.bt2, ...
+
+-- Load query sequences
+CREATE TABLE queries AS SELECT * FROM read_fastx('reads.fastq');
+
+-- Create read-to-shard mapping
+CREATE TABLE read_to_shard AS SELECT * FROM (VALUES
+    ('read1', 'shard_a'),
+    ('read2', 'shard_b'),
+    ('read3', 'shard_a')
+) AS t(read_id, shard_name);
+
+-- Align reads against their assigned shards in parallel
+SELECT * FROM align_bowtie2_sharded('queries',
+    shard_directory := 'indexes/',
+    read_to_shard := 'read_to_shard',
+    max_secondary := 0);
+
+-- With sensitivity preset and local alignment
+SELECT read_id, reference, position, mapq
+FROM align_bowtie2_sharded('queries',
+    shard_directory := 'indexes/',
+    read_to_shard := 'read_to_shard',
+    preset := 'very-sensitive',
+    local := true,
+    max_secondary := 0)
+WHERE mapq >= 30;
+
+-- Paired-end alignment
+CREATE TABLE paired_queries AS SELECT * FROM read_fastx('R1.fastq', sequence2='R2.fastq');
+SELECT * FROM align_bowtie2_sharded('paired_queries',
+    shard_directory := 'indexes/',
+    read_to_shard := 'read_to_shard',
+    max_secondary := 0);
+
+-- Pass additional Bowtie2 arguments
+SELECT * FROM align_bowtie2_sharded('queries',
+    shard_directory := 'indexes/',
+    read_to_shard := 'read_to_shard',
+    extra_args := '--no-unal --rdg 5,3');
+```
+
+**Error handling:**
+- Error if `shard_directory` does not exist
+- Error if any shard's Bowtie2 index files are missing (e.g., no `index.1.bt2` at `<shard_directory>/<shard_name>/index`)
+- Error if `query_table` or `read_to_shard` table/view does not exist
+- Error if `read_to_shard` table is missing `read_id` or `shard_name` columns
+- Error if `read_to_shard` table contains NULL `shard_name` values
+- Error if `bowtie2` is not found in PATH
+
+**Performance notes:**
+- Each shard runs a single-threaded Bowtie2 process; parallelism comes from running multiple shards concurrently
+- Control shard parallelism with `SET threads=N` in DuckDB
+- The `threads` parameter is ignored (always 1 per shard) to avoid CPU oversubscription
+- Shards are sorted by read count (largest first) for better load balancing
+
+**Comparison of sharded vs non-sharded alignment functions:**
+| Feature | `align_minimap2` / `align_bowtie2` | `align_minimap2_sharded` / `align_bowtie2_sharded` |
+|---------|--------------------------------------|------------------------------------------------------|
+| Index source | Build on-the-fly or single pre-built index | Multiple pre-built indexes (one per shard) |
+| Read routing | All reads against one index | Reads routed to specific shards via mapping table |
+| Parallelism | Single aligner thread(s) | One aligner per shard, concurrent |
+| Use case | Single reference database | Sharded reference databases (e.g., from prior classification) |
 
 ### SAM Flag Functions
 
