@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mzML xmlns="http://psi.hupo.org/ms/mzml">
+<cvList count="2">
+  <cv id="MS" fullName="Proteomics Standards Initiative Mass Spectrometry Ontology"/>
+  <cv id="UO" fullName="Unit Ontology"/>
+</cvList>
+<fileDescription>
+  <fileContent>
+    <cvParam cvRef="MS" accession="MS:1000579" name="MS1 spectrum"/>
+  </fileContent>
+</fileDescription>
+<run defaultInstrumentConfigurationRef="IC1">
+  <spectrumList count="1" defaultDataProcessingRef="dp">
+    <spectrum index="0" id="scan=1" defaultArrayLength="3">
+      <cvParam cvRef="MS" accession="MS:1000511" name="ms level" value="1"/>
+      <cvParam cvRef="MS" accession="MS:1000127" name="centroid spectrum"/>
+      <cvParam cvRef="MS" accession="MS:1000130" name="positive scan"/>
+      <scanList count="1">
+        <scan>
+          <cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="1.5" unitCvRef="UO" unitAccession="UO:0000031" unitName="minute"/>
+        </scan>
+      </scanList>
+      <binaryDataArrayList count="2">
+        <binaryDataArray encodedLength="32">
+          <cvParam cvRef="MS" accession="MS:1000576" name="no compression"/>
+          <cvParam cvRef="MS" accession="MS:1000523" name="64-bit float"/>
+          <cvParam cvRef="MS" accession="MS:1000514" name="m/z array" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>
+          <binary>AAAAAAAAWUAAAAAAAABpQAAAAAAAwHJA</binary>
+        </binaryDataArray>
+        <binaryDataArray encodedLength="32">
+          <cvParam cvRef="MS" accession="MS:1000576" name="no compression"/>
+          <cvParam cvRef="MS" accession="MS:1000523" name="64-bit float"/>
+          <cvParam cvRef="MS" accession="MS:1000515" name="intensity array" unitCvRef="MS" unitAccession="MS:1000131" unitName="number of detector counts"/>
+          <binary>AAAAAABAj0AAAAAAAIizQAAAAAAAQJ9A</binary>
+        </binaryDataArray>
+      </binaryDataArrayList>
+    </spectrum>
+  </spectrumList>
+</run>
+</mzML>

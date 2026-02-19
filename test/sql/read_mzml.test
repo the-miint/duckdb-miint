@@ -1,0 +1,263 @@
+# name: test/sql/read_mzml.test
+# description: test read_mzml table function
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+# Before we load the extension, this will fail
+statement error
+SELECT * FROM read_mzml('foo');
+----
+Catalog Error: Table Function with name read_mzml does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require miint
+
+# Missing file
+statement error
+SELECT * FROM read_mzml('missing.mzML');
+----
+IO Error: File not found: missing.mzML
+
+# Stdin not supported
+statement error
+SELECT * FROM read_mzml('-');
+----
+Invalid Input Error: read_mzml: stdin is not supported
+
+# stdin alternate paths also rejected
+statement error
+SELECT * FROM read_mzml('/dev/stdin');
+----
+Invalid Input Error: read_mzml: stdin is not supported
+
+# Row count
+query I
+SELECT COUNT(*) FROM read_mzml('data/mzml/basic_3spectra.mzML')
+----
+3
+
+# Schema type verification
+query TTTTTTTTTTTTTTTTTTTTTTTTTT
+SELECT typeof(spectrum_index), typeof(spectrum_id), typeof(ms_level),
+       typeof(retention_time), typeof(spectrum_type), typeof(polarity),
+       typeof(base_peak_mz), typeof(base_peak_intensity), typeof(total_ion_current),
+       typeof(lowest_mz), typeof(highest_mz), typeof(default_array_length),
+       typeof(precursor_mz), typeof(precursor_charge), typeof(precursor_intensity),
+       typeof(isolation_window_target), typeof(isolation_window_lower), typeof(isolation_window_upper),
+       typeof(activation_method), typeof(collision_energy),
+       typeof(mz_array), typeof(intensity_array),
+       typeof(filter_string), typeof(scan_window_lower), typeof(scan_window_upper),
+       typeof(ms1_scan_index)
+FROM read_mzml('data/mzml/basic_3spectra.mzML') LIMIT 1
+----
+INTEGER	VARCHAR	INTEGER	DOUBLE	VARCHAR	VARCHAR	DOUBLE	DOUBLE	DOUBLE	DOUBLE	DOUBLE	INTEGER	DOUBLE	INTEGER	DOUBLE	DOUBLE	DOUBLE	DOUBLE	VARCHAR	DOUBLE	DOUBLE[]	DOUBLE[]	VARCHAR	DOUBLE	DOUBLE	INTEGER
+
+# MS1 metadata
+query IIIRRTTRRRRIRTT
+SELECT spectrum_index, ms_level, default_array_length,
+       retention_time, base_peak_mz,
+       spectrum_type, polarity,
+       base_peak_intensity, total_ion_current,
+       lowest_mz, highest_mz,
+       precursor_mz IS NULL AS no_precursor,
+       ms1_scan_index IS NULL AS no_ms1_idx,
+       filter_string,
+       scan_window_lower
+FROM read_mzml('data/mzml/basic_3spectra.mzML')
+WHERE spectrum_index = 0
+----
+0	1	3	1.5	200.0	centroid	positive	5000.0	8000.0	100.0	300.0	1	1	FTMS + p NSI Full ms [100.00-500.00]	100.0
+
+# MS2 precursor info
+query IIRRIRRRTR
+SELECT spectrum_index, ms_level,
+       precursor_mz, precursor_charge,
+       precursor_intensity,
+       isolation_window_target, isolation_window_lower, isolation_window_upper,
+       activation_method, collision_energy
+FROM read_mzml('data/mzml/basic_3spectra.mzML')
+WHERE spectrum_index = 1
+----
+1	2	200.0	2	5000.0	200.0	1.5	1.5	CID	35.0
+
+# RT seconds conversion: spectrum_index=2 has RT=108 seconds = 1.8 minutes
+query IR
+SELECT spectrum_index, round(retention_time, 1) FROM read_mzml('data/mzml/basic_3spectra.mzML')
+WHERE spectrum_index = 2
+----
+2	1.8
+
+# Negative polarity, profile type
+query ITT
+SELECT spectrum_index, spectrum_type, polarity FROM read_mzml('data/mzml/basic_3spectra.mzML')
+WHERE spectrum_index = 2
+----
+2	profile	negative
+
+# Binary arrays: len and specific values
+query III
+SELECT spectrum_index, len(mz_array), len(intensity_array)
+FROM read_mzml('data/mzml/basic_3spectra.mzML')
+WHERE spectrum_index = 0
+----
+0	3	3
+
+query RRR
+SELECT mz_array[1], mz_array[2], mz_array[3]
+FROM read_mzml('data/mzml/basic_3spectra.mzML')
+WHERE spectrum_index = 0
+----
+100.0	200.0	300.0
+
+query RRR
+SELECT intensity_array[1], intensity_array[2], intensity_array[3]
+FROM read_mzml('data/mzml/basic_3spectra.mzML')
+WHERE spectrum_index = 0
+----
+1000.0	5000.0	2000.0
+
+# ms1_scan_index: NULL for MS1, 0 for both MS2s
+query II
+SELECT spectrum_index, ms1_scan_index FROM read_mzml('data/mzml/basic_3spectra.mzML')
+ORDER BY spectrum_index
+----
+0	NULL
+1	0
+2	0
+
+# Zlib compressed file reads correctly
+query IRRR
+SELECT spectrum_index, mz_array[1], mz_array[2], mz_array[3]
+FROM read_mzml('data/mzml/compressed.mzML')
+----
+0	100.0	200.0	300.0
+
+# 32-bit float file reads correctly
+query II
+SELECT spectrum_index, len(mz_array)
+FROM read_mzml('data/mzml/float32.mzML')
+----
+0	3
+
+# Empty file returns 0 rows
+query I
+SELECT COUNT(*) FROM read_mzml('data/mzml/empty_spectra.mzML')
+----
+0
+
+# include_filepath parameter
+query IT
+SELECT spectrum_index, filepath FROM read_mzml('data/mzml/basic_3spectra.mzML', include_filepath=true) LIMIT 1
+----
+0	data/mzml/basic_3spectra.mzML
+
+# Glob pattern matching
+query I
+SELECT COUNT(*) FROM read_mzml('data/mzml/basic_*.mzML')
+----
+3
+
+# Multi-file via VARCHAR[]
+query I
+SELECT COUNT(*) FROM read_mzml(['data/mzml/basic_3spectra.mzML', 'data/mzml/compressed.mzML'])
+----
+4
+
+# scan_window_lower/upper values
+query RR
+SELECT scan_window_lower, scan_window_upper FROM read_mzml('data/mzml/basic_3spectra.mzML')
+WHERE spectrum_index = 0
+----
+100.0	500.0
+
+# Missing optional metadata results in NULLs
+query ITTIIIII
+SELECT spectrum_index, spectrum_type, polarity,
+       base_peak_mz IS NULL, base_peak_intensity IS NULL,
+       total_ion_current IS NULL, retention_time IS NULL,
+       precursor_mz IS NULL
+FROM read_mzml('data/mzml/missing_optional.mzML')
+----
+0	NULL	NULL	1	1	1	1	1
+
+# Param group resolution
+query IRRR
+SELECT spectrum_index, mz_array[1], mz_array[2], mz_array[3]
+FROM read_mzml('data/mzml/param_groups.mzML')
+----
+0	100.0	200.0	300.0
+
+# Orphan MS2 (no preceding MS1) has NULL ms1_scan_index
+query III
+SELECT spectrum_index, ms_level, ms1_scan_index FROM read_mzml('data/mzml/orphan_ms2.mzML')
+ORDER BY spectrum_index
+----
+0	2	NULL
+1	2	NULL
+
+# Macro: mzml_i_norm
+query R
+SELECT round(mzml_i_norm(intensity_array, base_peak_intensity)[1], 4)
+FROM read_mzml('data/mzml/basic_3spectra.mzML')
+WHERE spectrum_index = 0
+----
+0.2
+
+# Macro: mzml_i_tic_norm
+query R
+SELECT round(mzml_i_tic_norm(intensity_array, total_ion_current)[1], 4)
+FROM read_mzml('data/mzml/basic_3spectra.mzML')
+WHERE spectrum_index = 0
+----
+0.125
+
+# Macro edge case: NULL base_peak_intensity -> list of NULLs
+query I
+SELECT mzml_i_norm(intensity_array, base_peak_intensity)[1] IS NULL
+FROM read_mzml('data/mzml/missing_optional.mzML')
+----
+1
+
+# Bare mzML root (no indexedmzML wrapper)
+query IIRR
+SELECT spectrum_index, ms_level, mz_array[1], mz_array[3]
+FROM read_mzml('data/mzml/no_index.mzML')
+----
+0	1	100.0	300.0
+
+# Mixed precision (32-bit mz + 64-bit intensity)
+query IIRR
+SELECT spectrum_index, len(mz_array), intensity_array[1], intensity_array[2]
+FROM read_mzml('data/mzml/mixed_precision.mzML')
+----
+0	3	1000.0	5000.0
+
+# Large spectrum (10K data points)
+query II
+SELECT len(mz_array), len(intensity_array)
+FROM read_mzml('data/mzml/large_spectrum.mzML')
+----
+10000	10000
+
+# Zero intensity spectrum
+query RR
+SELECT base_peak_intensity, total_ion_current
+FROM read_mzml('data/mzml/zero_intensity.mzML')
+----
+0.0	0.0
+
+# Macro with zero intensity: division by zero produces inf (IEEE 754 behavior)
+query R
+SELECT mzml_i_norm(intensity_array, base_peak_intensity)[1]
+FROM read_mzml('data/mzml/zero_intensity.mzML')
+----
+nan
+
+# Macro TIC norm with zero TIC: division by zero produces inf
+query R
+SELECT mzml_i_tic_norm(intensity_array, total_ion_current)[1]
+FROM read_mzml('data/mzml/zero_intensity.mzML')
+----
+nan

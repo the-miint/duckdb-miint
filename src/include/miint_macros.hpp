@@ -193,6 +193,66 @@ const std::string READ_JPLACE = // NOLINT
     "    FROM read_json(path, filename := true) "
     "); ";
 
+// mzml_peaks(filepath)
+//
+// Unnests mz_array and intensity_array from read_mzml into per-peak rows.
+// Each output row is one (mz, intensity) peak with its parent spectrum's metadata.
+// i_norm = intensity / base_peak_intensity (NULL when base_peak_intensity is NULL).
+const std::string MZML_PEAKS = // NOLINT
+    "CREATE OR REPLACE MACRO mzml_peaks(filepath) AS TABLE "
+    "SELECT spectrum_index, ms_level, retention_time, spectrum_type, polarity, "
+    "       base_peak_intensity, total_ion_current, "
+    "       precursor_mz, precursor_charge, precursor_intensity, ms1_scan_index, "
+    "       mz, intensity, intensity / base_peak_intensity AS i_norm "
+    "FROM ( "
+    "    SELECT spectrum_index, ms_level, retention_time, spectrum_type, polarity, "
+    "           base_peak_intensity, total_ion_current, "
+    "           precursor_mz, precursor_charge, precursor_intensity, ms1_scan_index, "
+    "           UNNEST(mz_array) AS mz, UNNEST(intensity_array) AS intensity "
+    "    FROM read_mzml(filepath) "
+    "); ";
+
+// mzml_scaninfo(relation)
+//
+// Re-aggregates peak-level data back to one-row-per-scan with summary statistics.
+// Takes any relation (typically filtered output of mzml_peaks).
+// Uses query_table(relation) for the relation parameter.
+const std::string MZML_SCANINFO = // NOLINT
+    "CREATE OR REPLACE MACRO mzml_scaninfo(relation) AS TABLE "
+    "SELECT "
+    "    spectrum_index, "
+    "    first(ms_level) AS ms_level, "
+    "    first(retention_time) AS retention_time, "
+    "    first(spectrum_type) AS spectrum_type, "
+    "    first(polarity) AS polarity, "
+    "    SUM(intensity) AS total_ion_current, "
+    "    MAX(intensity) AS base_peak_intensity, "
+    "    MAX(i_norm) AS i_norm, "
+    "    first(precursor_mz) AS precursor_mz, "
+    "    first(precursor_charge) AS precursor_charge, "
+    "    first(precursor_intensity) AS precursor_intensity, "
+    "    first(ms1_scan_index) AS ms1_scan_index "
+    "FROM query_table(relation) "
+    "GROUP BY spectrum_index; ";
+
+// mzml_i_norm(intensity_array, base_peak_intensity)
+//
+// Max-normalize an intensity array by dividing each value by the base peak intensity.
+// Returns NULL if base_peak_intensity is NULL (natural NULL propagation).
+const std::string MZML_I_NORM = // NOLINT
+    "CREATE OR REPLACE MACRO mzml_i_norm(intensity_array, base_peak_intensity) AS ("
+    "  list_transform(intensity_array, x -> x / base_peak_intensity)"
+    ");";
+
+// mzml_i_tic_norm(intensity_array, total_ion_current)
+//
+// TIC-normalize an intensity array by dividing each value by the total ion current.
+// Returns NULL if total_ion_current is NULL (natural NULL propagation).
+const std::string MZML_I_TIC_NORM = // NOLINT
+    "CREATE OR REPLACE MACRO mzml_i_tic_norm(intensity_array, total_ion_current) AS ("
+    "  list_transform(intensity_array, x -> x / total_ion_current)"
+    ");";
+
 class MIINTMacros {
 
 public:
@@ -210,6 +270,11 @@ public:
 		ExtensionHelper::InstallExtension(*con.context, "json", options);
 		ExtensionHelper::AutoLoadExtension(instance, "json");
 		con.Query(READ_JPLACE);
+
+		con.Query(MZML_PEAKS);
+		con.Query(MZML_SCANINFO);
+		con.Query(MZML_I_NORM);
+		con.Query(MZML_I_TIC_NORM);
 	}
 };
 

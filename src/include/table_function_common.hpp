@@ -54,5 +54,12 @@ void SetResultVectorInt64(Vector &result_vector, const std::vector<int64_t> &val
 void SetResultVectorInt64Nullable(Vector &result_vector, const std::vector<int64_t> &values,
                                   const std::vector<bool> &valid);
 void SetResultVectorListUInt8(Vector &result_vector, const std::vector<miint::QualScore> &values, uint8_t qual_offset);
+void SetResultVectorInt32(Vector &result_vector, const std::vector<int32_t> &values);
+void SetResultVectorInt32Nullable(Vector &result_vector, const std::vector<int32_t> &values,
+                                  const std::vector<bool> &valid);
+void SetResultVectorDouble(Vector &result_vector, const std::vector<double> &values);
+void SetResultVectorDoubleNullable(Vector &result_vector, const std::vector<double> &values,
+                                   const std::vector<bool> &valid);
+void SetResultVectorListDouble(Vector &result_vector, const std::vector<std::vector<double>> &values);
 
 } // namespace duckdb

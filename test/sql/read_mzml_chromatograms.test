@@ -1,0 +1,130 @@
+# name: test/sql/read_mzml_chromatograms.test
+# description: test read_mzml_chromatograms table function
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+# Before we load the extension, this will fail
+statement error
+SELECT * FROM read_mzml_chromatograms('foo');
+----
+Catalog Error: Table Function with name read_mzml_chromatograms does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require miint
+
+# Missing file
+statement error
+SELECT * FROM read_mzml_chromatograms('missing.mzML');
+----
+IO Error: File not found: missing.mzML
+
+# Stdin not supported
+statement error
+SELECT * FROM read_mzml_chromatograms('-');
+----
+Invalid Input Error: read_mzml_chromatograms: stdin is not supported
+
+# stdin alternate paths also rejected
+statement error
+SELECT * FROM read_mzml_chromatograms('/dev/stdin');
+----
+Invalid Input Error: read_mzml_chromatograms: stdin is not supported
+
+# Row count (3 chromatograms from with_chromatograms.mzML)
+query I
+SELECT COUNT(*) FROM read_mzml_chromatograms('data/mzml/with_chromatograms.mzML')
+----
+3
+
+# Schema type verification (7 columns)
+query TTTTTTT
+SELECT typeof(chromatogram_index), typeof(chromatogram_id), typeof(chromatogram_type),
+       typeof(precursor_mz), typeof(product_mz),
+       typeof(time_array), typeof(intensity_array)
+FROM read_mzml_chromatograms('data/mzml/with_chromatograms.mzML') LIMIT 1
+----
+INTEGER	VARCHAR	VARCHAR	DOUBLE	DOUBLE	DOUBLE[]	DOUBLE[]
+
+# TIC chromatogram: type='TIC', precursor_mz IS NULL
+query ITTII
+SELECT chromatogram_index, chromatogram_id, chromatogram_type,
+       precursor_mz IS NULL, product_mz IS NULL
+FROM read_mzml_chromatograms('data/mzml/with_chromatograms.mzML')
+WHERE chromatogram_index = 0
+----
+0	TIC	TIC	1	1
+
+# SRM chromatogram: precursor_mz and product_mz populated
+query ITTRR
+SELECT chromatogram_index, chromatogram_id, chromatogram_type,
+       precursor_mz, product_mz
+FROM read_mzml_chromatograms('data/mzml/with_chromatograms.mzML')
+WHERE chromatogram_index = 1
+----
+1	SRM_500.0_250.0	SRM	500.0	250.0
+
+# BPC chromatogram
+query IT
+SELECT chromatogram_index, chromatogram_type
+FROM read_mzml_chromatograms('data/mzml/with_chromatograms.mzML')
+WHERE chromatogram_index = 2
+----
+2	BPC
+
+# Time array length and values (minutes)
+query IIR
+SELECT chromatogram_index, len(time_array), time_array[1]
+FROM read_mzml_chromatograms('data/mzml/with_chromatograms.mzML')
+WHERE chromatogram_index = 0
+----
+0	4	0.5
+
+query R
+SELECT time_array[4]
+FROM read_mzml_chromatograms('data/mzml/with_chromatograms.mzML')
+WHERE chromatogram_index = 0
+----
+2.0
+
+# Intensity array
+query IR
+SELECT len(intensity_array), intensity_array[1]
+FROM read_mzml_chromatograms('data/mzml/with_chromatograms.mzML')
+WHERE chromatogram_index = 0
+----
+4	10000.0
+
+# File with no chromatograms returns 0 rows
+query I
+SELECT COUNT(*) FROM read_mzml_chromatograms('data/mzml/basic_3spectra.mzML')
+----
+0
+
+# include_filepath parameter
+query IT
+SELECT chromatogram_index, filepath
+FROM read_mzml_chromatograms('data/mzml/with_chromatograms.mzML', include_filepath=true) LIMIT 1
+----
+0	data/mzml/with_chromatograms.mzML
+
+# Glob pattern
+query I
+SELECT COUNT(*) FROM read_mzml_chromatograms('data/mzml/with_*.mzML')
+----
+3
+
+# Multi-file via VARCHAR[]
+query I
+SELECT COUNT(*) FROM read_mzml_chromatograms(['data/mzml/with_chromatograms.mzML', 'data/mzml/basic_3spectra.mzML'])
+----
+3
+
+# Non-standard binary arrays (e.g. 32-bit integer "ms level") are skipped without crashing
+query ITIIRR
+SELECT chromatogram_index, chromatogram_id, chromatogram_type,
+       len(time_array), time_array[1], intensity_array[1]
+FROM read_mzml_chromatograms('data/mzml/nonstandard_array.mzML')
+----
+0	TIC	TIC	3	1.0	100.0

@@ -28,6 +28,8 @@
 #include <miint_macros.hpp>
 #include <sequence_functions.hpp>
 #include <align_pairwise_functions.hpp>
+#include <read_mzml.hpp>
+#include <read_mzml_chromatograms.hpp>
 #include <rype_classify.hpp>
 #include <rype_extract.hpp>
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
@@ -101,6 +103,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	CopyFastaFunction::Register(loader);
 	CopyNewickFunction::Register(loader);
 	CopySAMFunction::Register(loader);
+
+	ReadMzMLTableFunction::Register(loader);
+	ReadMzMLChromatogramsTableFunction::Register(loader);
 
 	MIINTMacros::Register(loader);
 

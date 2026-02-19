@@ -1,0 +1,139 @@
+# name: test/sql/mzml_macros.test
+# description: test mzml_peaks and mzml_scaninfo TABLE macros
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+# ----- mzml_peaks tests -----
+
+# Row count: 3+2+4 = 9 peaks total
+query I
+SELECT COUNT(*) FROM mzml_peaks('data/mzml/basic_3spectra.mzML')
+----
+9
+
+# Schema type verification for all 14 columns
+query TTTTTTTTTTTTTT
+SELECT typeof(spectrum_index), typeof(ms_level), typeof(retention_time),
+       typeof(spectrum_type), typeof(polarity),
+       typeof(base_peak_intensity), typeof(total_ion_current),
+       typeof(precursor_mz), typeof(precursor_charge), typeof(precursor_intensity),
+       typeof(ms1_scan_index),
+       typeof(mz), typeof(intensity), typeof(i_norm)
+FROM mzml_peaks('data/mzml/basic_3spectra.mzML') LIMIT 1
+----
+INTEGER	INTEGER	DOUBLE	VARCHAR	VARCHAR	DOUBLE	DOUBLE	DOUBLE	INTEGER	DOUBLE	INTEGER	DOUBLE	DOUBLE	DOUBLE
+
+# Correct mz/intensity/i_norm values for spectrum 0
+query IRRR
+SELECT spectrum_index, mz, intensity, round(i_norm, 4)
+FROM mzml_peaks('data/mzml/basic_3spectra.mzML')
+WHERE spectrum_index = 0
+ORDER BY mz
+----
+0	100.0	1000.0	0.2
+0	200.0	5000.0	1.0
+0	300.0	2000.0	0.4
+
+# MS2 metadata preserved: precursor_mz populated for ms_level=2
+query IRRI
+SELECT spectrum_index, precursor_mz, precursor_intensity, precursor_charge
+FROM mzml_peaks('data/mzml/basic_3spectra.mzML')
+WHERE spectrum_index = 1
+LIMIT 1
+----
+1	200.0	5000.0	2
+
+# MS1 metadata: precursor_mz IS NULL for ms_level=1
+query III
+SELECT spectrum_index,
+       precursor_mz IS NULL AS no_precursor,
+       ms1_scan_index IS NULL AS no_ms1_idx
+FROM mzml_peaks('data/mzml/basic_3spectra.mzML')
+WHERE ms_level = 1
+LIMIT 1
+----
+0	1	1
+
+# ----- mzml_scaninfo tests (unfiltered) -----
+
+statement ok
+CREATE TABLE all_peaks AS SELECT * FROM mzml_peaks('data/mzml/basic_3spectra.mzML');
+
+# Row count: 3 scans
+query I
+SELECT COUNT(*) FROM mzml_scaninfo(all_peaks)
+----
+3
+
+# total_ion_current and base_peak_intensity match originals; i_norm=1.0 unfiltered
+query IRRR
+SELECT spectrum_index, total_ion_current, base_peak_intensity, i_norm
+FROM mzml_scaninfo(all_peaks)
+ORDER BY spectrum_index
+----
+0	8000.0	5000.0	1.0
+1	4500.0	3000.0	1.0
+2	5000.0	2500.0	1.0
+
+# MS2 metadata preserved through scaninfo
+query IRRI
+SELECT spectrum_index, precursor_mz, precursor_intensity, precursor_charge
+FROM mzml_scaninfo(all_peaks)
+WHERE spectrum_index = 1
+----
+1	200.0	5000.0	2
+
+# ----- Filtered pipeline tests -----
+
+# Filter mz > 150 on spectrum 0: 2 peaks remain (mz=200, mz=300)
+query I
+SELECT COUNT(*)
+FROM mzml_peaks('data/mzml/basic_3spectra.mzML')
+WHERE spectrum_index = 0 AND mz > 150
+----
+2
+
+# scaninfo after mz filter: total_ion_current = 7000.0, base_peak = 5000.0
+statement ok
+CREATE VIEW filtered_peaks AS
+SELECT * FROM mzml_peaks('data/mzml/basic_3spectra.mzML')
+WHERE spectrum_index = 0 AND mz > 150;
+
+query IRR
+SELECT spectrum_index, total_ion_current, base_peak_intensity
+FROM mzml_scaninfo(filtered_peaks)
+----
+0	7000.0	5000.0
+
+# Filter ms_level = 2: only MS2 scans in result
+statement ok
+CREATE VIEW ms2_peaks AS
+SELECT * FROM mzml_peaks('data/mzml/basic_3spectra.mzML')
+WHERE ms_level = 2;
+
+query I
+SELECT COUNT(*)
+FROM mzml_scaninfo(ms2_peaks)
+----
+2
+
+# ----- Edge cases -----
+
+# missing_optional.mzML: i_norm is NULL when base_peak_intensity is NULL
+query I
+SELECT i_norm IS NULL
+FROM mzml_peaks('data/mzml/missing_optional.mzML')
+----
+1
+
+# zero_intensity.mzML: i_norm = 0/0 = nan
+query R
+SELECT i_norm
+FROM mzml_peaks('data/mzml/zero_intensity.mzML')
+LIMIT 1
+----
+nan

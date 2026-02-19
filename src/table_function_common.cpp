@@ -4,6 +4,7 @@
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include <algorithm>
+#include <cstring>
 
 namespace duckdb {
 
@@ -137,6 +138,9 @@ void SetResultVectorString(Vector &result_vector, const std::vector<std::string>
 	}
 }
 
+// Empty strings are treated as NULL. This convention is used for fields like
+// spectrum_type, polarity, and activation_method where an empty string indicates
+// the value was absent in the source data.
 void SetResultVectorStringNullable(Vector &result_vector, const std::vector<std::string> &values) {
 	auto result_data = FlatVector::GetData<string_t>(result_vector);
 	auto &validity = FlatVector::Validity(result_vector);
@@ -217,6 +221,80 @@ void SetResultVectorListUInt8(Vector &result_vector, const std::vector<miint::Qu
 
 	auto &validity = FlatVector::Validity(result_vector);
 	validity.SetAllValid(output_count);
+
+	auto &child_validity = FlatVector::Validity(child_vector);
+	child_validity.SetAllValid(total_child_elements);
+}
+
+void SetResultVectorInt32(Vector &result_vector, const std::vector<int32_t> &values) {
+	auto result_data = FlatVector::GetData<int32_t>(result_vector);
+	for (idx_t j = 0; j < values.size(); j++) {
+		result_data[j] = values[j];
+	}
+}
+
+void SetResultVectorInt32Nullable(Vector &result_vector, const std::vector<int32_t> &values,
+                                  const std::vector<bool> &valid) {
+	auto result_data = FlatVector::GetData<int32_t>(result_vector);
+	auto &validity = FlatVector::Validity(result_vector);
+	validity.SetAllInvalid(values.size());
+
+	for (idx_t j = 0; j < values.size(); j++) {
+		result_data[j] = values[j];
+		if (valid[j]) {
+			validity.SetValid(j);
+		}
+	}
+}
+
+void SetResultVectorDouble(Vector &result_vector, const std::vector<double> &values) {
+	auto result_data = FlatVector::GetData<double>(result_vector);
+	for (idx_t j = 0; j < values.size(); j++) {
+		result_data[j] = values[j];
+	}
+}
+
+void SetResultVectorDoubleNullable(Vector &result_vector, const std::vector<double> &values,
+                                   const std::vector<bool> &valid) {
+	auto result_data = FlatVector::GetData<double>(result_vector);
+	auto &validity = FlatVector::Validity(result_vector);
+	validity.SetAllInvalid(values.size());
+
+	for (idx_t j = 0; j < values.size(); j++) {
+		result_data[j] = values[j];
+		if (valid[j]) {
+			validity.SetValid(j);
+		}
+	}
+}
+
+void SetResultVectorListDouble(Vector &result_vector, const std::vector<std::vector<double>> &values) {
+	idx_t total_child_elements = 0;
+	for (const auto &vec : values) {
+		total_child_elements += vec.size();
+	}
+
+	ListVector::Reserve(result_vector, total_child_elements);
+	ListVector::SetListSize(result_vector, total_child_elements);
+
+	auto &child_vector = ListVector::GetEntry(result_vector);
+	auto child_data = FlatVector::GetData<double>(child_vector);
+	auto list_entries = FlatVector::GetData<list_entry_t>(result_vector);
+
+	idx_t value_offset = 0;
+	for (idx_t row_offset = 0; row_offset < values.size(); row_offset++) {
+		auto len = values[row_offset].size();
+		list_entries[row_offset].offset = value_offset;
+		list_entries[row_offset].length = len;
+
+		if (len > 0) {
+			std::memcpy(child_data + value_offset, values[row_offset].data(), len * sizeof(double));
+		}
+		value_offset += len;
+	}
+
+	auto &validity = FlatVector::Validity(result_vector);
+	validity.SetAllValid(values.size());
 
 	auto &child_validity = FlatVector::Validity(child_vector);
 	child_validity.SetAllValid(total_child_elements);

@@ -2,6 +2,7 @@
   "dependencies": [
     "zlib",
     "zstd",
+    "expat",
     { "name": "hdf5", "features": ["cpp", "zlib", "szip"] }
   ],
   "vcpkg-configuration": {

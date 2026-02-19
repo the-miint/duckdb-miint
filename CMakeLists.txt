@@ -16,6 +16,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Note that it should also be removed from vcpkg.json to prevent needlessly installing it..
 find_package(ZLIB REQUIRED)
 find_package(Threads REQUIRED)
+find_package(expat CONFIG REQUIRED)
 
 # HDF5 is required for BIOM support, but make it optional for clang-tidy runs
 # In CI, the tidy-check doesn't have HDF5 available, but it doesn't need to link - just parse
@@ -358,7 +359,11 @@ set(EXTENSION_SOURCES
     src/WFA2Aligner.cpp
     src/align_pairwise_functions.cpp
     src/rype_classify.cpp
-    src/rype_extract.cpp)
+    src/rype_extract.cpp
+    src/MzMLBinaryDecoder.cpp
+    src/MzMLReader.cpp
+    src/read_mzml.cpp
+    src/read_mzml_chromatograms.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
@@ -381,6 +386,7 @@ target_link_libraries(${EXTENSION_NAME}
                       wfa2cpp
                       wfa2
                       rype
+                      expat::expat
 )
 if(APPLE)
     target_link_libraries(${EXTENSION_NAME} "-framework CoreFoundation")
@@ -414,6 +420,7 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       wfa2cpp
                       wfa2
                       rype
+                      expat::expat
 )
 if(APPLE)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework CoreFoundation")
@@ -462,6 +469,10 @@ set(TEST_SOURCES
     test/cpp/test_SFFReader.cpp
     src/WFA2Aligner.cpp
     test/cpp/test_WFA2Aligner.cpp
+    src/MzMLBinaryDecoder.cpp
+    test/cpp/test_MzMLBinaryDecoder.cpp
+    src/MzMLReader.cpp
+    test/cpp/test_MzMLReader.cpp
 )
 
 add_executable(tests ${TEST_SOURCES})
@@ -474,6 +485,7 @@ target_link_libraries(tests
   minimap2
   wfa2cpp
   wfa2
+  expat::expat
 )
 if(HDF5_FOUND)
     target_link_libraries(tests

@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<indexedmzML xmlns="http://psi.hupo.org/ms/mzml"
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             xsi:schemaLocation="http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.2_idx.xsd">
+<mzML xmlns="http://psi.hupo.org/ms/mzml">
+<cvList count="2">
+  <cv id="MS" fullName="Proteomics Standards Initiative Mass Spectrometry Ontology" URI="https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo"/>
+  <cv id="UO" fullName="Unit Ontology" URI="http://obo.cvs.sourceforge.net/viewvc/obo/obo/ontology/phenotype/unit.obo"/>
+</cvList>
+<fileDescription>
+  <fileContent>
+    <cvParam cvRef="MS" accession="MS:1000579" name="MS1 spectrum"/>
+    <cvParam cvRef="MS" accession="MS:1000580" name="MSn spectrum"/>
+  </fileContent>
+</fileDescription>
+<run defaultInstrumentConfigurationRef="IC1">
+  <spectrumList count="0" defaultDataProcessingRef="dp">
+  </spectrumList>
+  <chromatogramList count="3" defaultDataProcessingRef="dp">
+    <chromatogram index="0" id="TIC" defaultArrayLength="4">
+      <cvParam cvRef="MS" accession="MS:1000235" name="total ion current chromatogram"/>
+      <binaryDataArrayList count="2">
+        <binaryDataArray encodedLength="44">
+          <cvParam cvRef="MS" accession="MS:1000576" name="no compression"/>
+          <cvParam cvRef="MS" accession="MS:1000523" name="64-bit float"/>
+          <cvParam cvRef="MS" accession="MS:1000595" name="time array" unitCvRef="UO" unitAccession="UO:0000031" unitName="minute"/>
+          <binary>AAAAAAAA4D8AAAAAAADwPwAAAAAAAPg/AAAAAAAAAEA=</binary>
+        </binaryDataArray>
+        <binaryDataArray encodedLength="44">
+          <cvParam cvRef="MS" accession="MS:1000576" name="no compression"/>
+          <cvParam cvRef="MS" accession="MS:1000523" name="64-bit float"/>
+          <cvParam cvRef="MS" accession="MS:1000515" name="intensity array" unitCvRef="MS" unitAccession="MS:1000131" unitName="number of detector counts"/>
+          <binary>AAAAAACIw0AAAAAAAGrYQAAAAAAATN1AAAAAAABMzUA=</binary>
+        </binaryDataArray>
+      </binaryDataArrayList>
+    </chromatogram>
+    <chromatogram index="1" id="SRM_500.0_250.0" defaultArrayLength="3">
+      <cvParam cvRef="MS" accession="MS:1001473" name="selected reaction monitoring chromatogram"/>
+      <precursor>
+        <isolationWindow>
+          <cvParam cvRef="MS" accession="MS:1000827" name="isolation window target m/z" value="500.0"/>
+        </isolationWindow>
+      </precursor>
+      <product>
+        <isolationWindow>
+          <cvParam cvRef="MS" accession="MS:1000827" name="isolation window target m/z" value="250.0"/>
+        </isolationWindow>
+      </product>
+      <binaryDataArrayList count="2">
+        <binaryDataArray encodedLength="32">
+          <cvParam cvRef="MS" accession="MS:1000576" name="no compression"/>
+          <cvParam cvRef="MS" accession="MS:1000523" name="64-bit float"/>
+          <cvParam cvRef="MS" accession="MS:1000595" name="time array" unitCvRef="UO" unitAccession="UO:0000031" unitName="minute"/>
+          <binary>AAAAAAAA4D8AAAAAAADwPwAAAAAAAPg/</binary>
+        </binaryDataArray>
+        <binaryDataArray encodedLength="32">
+          <cvParam cvRef="MS" accession="MS:1000576" name="no compression"/>
+          <cvParam cvRef="MS" accession="MS:1000523" name="64-bit float"/>
+          <cvParam cvRef="MS" accession="MS:1000515" name="intensity array" unitCvRef="MS" unitAccession="MS:1000131" unitName="number of detector counts"/>
+          <binary>AAAAAABAf0AAAAAAAMCSQAAAAAAAAIlA</binary>
+        </binaryDataArray>
+      </binaryDataArrayList>
+    </chromatogram>
+    <chromatogram index="2" id="BPC" defaultArrayLength="4">
+      <cvParam cvRef="MS" accession="MS:1000628" name="basepeak chromatogram"/>
+      <binaryDataArrayList count="2">
+        <binaryDataArray encodedLength="44">
+          <cvParam cvRef="MS" accession="MS:1000576" name="no compression"/>
+          <cvParam cvRef="MS" accession="MS:1000523" name="64-bit float"/>
+          <cvParam cvRef="MS" accession="MS:1000595" name="time array" unitCvRef="UO" unitAccession="UO:0000031" unitName="minute"/>
+          <binary>AAAAAAAA4D8AAAAAAADwPwAAAAAAAPg/AAAAAAAAAEA=</binary>
+        </binaryDataArray>
+        <binaryDataArray encodedLength="44">
+          <cvParam cvRef="MS" accession="MS:1000576" name="no compression"/>
+          <cvParam cvRef="MS" accession="MS:1000523" name="64-bit float"/>
+          <cvParam cvRef="MS" accession="MS:1000515" name="intensity array" unitCvRef="MS" unitAccession="MS:1000131" unitName="number of detector counts"/>
+          <binary>AAAAAACIs0AAAAAAAHDHQAAAAAAATM1AAAAAAABAv0A=</binary>
+        </binaryDataArray>
+      </binaryDataArrayList>
+    </chromatogram>
+  </chromatogramList>
+</run>
+</mzML>
+</indexedmzML>
