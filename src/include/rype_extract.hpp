@@ -31,7 +31,7 @@ struct RypeExtractData : public TableFunctionData {
 	std::vector<std::string> names;
 	std::vector<LogicalType> types;
 
-	RypeExtractData() : id_column("read_id"), k(0), w(0), salt(0) {
+	RypeExtractData() : id_column("read_id"), k(0), w(0), salt(6148914691236517205ULL) {
 	}
 };
 

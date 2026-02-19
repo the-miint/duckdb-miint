@@ -1876,7 +1876,7 @@ CREATE TABLE paired AS SELECT * FROM read_fastx('R1.fastq', sequence2='R2.fastq'
 SELECT * FROM rype_classify('my_index.ryxdi', 'paired');
 ```
 
-#### `rype_extract_minimizer_set(sequence_table, k, w, [salt=0], [id_column='read_id'])`
+#### `rype_extract_minimizer_set(sequence_table, k, w, [salt=6148914691236517205], [id_column='read_id'])`
 
 Extract deduplicated minimizer hash sets from sequences for both forward and reverse complement strands.
 
@@ -1884,7 +1884,7 @@ Extract deduplicated minimizer hash sets from sequences for both forward and rev
 - `sequence_table` (VARCHAR): Name of a DuckDB table or view with identifier column + `sequence1`
 - `k` (BIGINT): K-mer size. Must be 16, 32, or 64 (constrained by RY-space 1-bit encoding fitting in uint64)
 - `w` (BIGINT): Window size for minimizer selection. Must be > 0
-- `salt` (UBIGINT, optional, default 0): Hash salt for reproducible but varied minimizer selection
+- `salt` (UBIGINT, optional, default 6148914691236517205): Hash salt for reproducible but varied minimizer selection
 - `id_column` (VARCHAR, optional, default `'read_id'`): Name of the identifier column
 
 **Output schema:**
@@ -1922,7 +1922,7 @@ FROM mins a, mins b
 WHERE a.read_id < b.read_id;
 ```
 
-#### `rype_extract_strand_minimizers(sequence_table, k, w, [salt=0], [id_column='read_id'])`
+#### `rype_extract_strand_minimizers(sequence_table, k, w, [salt=6148914691236517205], [id_column='read_id'])`
 
 Extract minimizer hashes with their positions for both forward and reverse complement strands. Unlike `rype_extract_minimizer_set`, this preserves positional information and may contain duplicate hashes at different positions.
 
@@ -1930,7 +1930,7 @@ Extract minimizer hashes with their positions for both forward and reverse compl
 - `sequence_table` (VARCHAR): Name of a DuckDB table or view with identifier column + `sequence1`
 - `k` (BIGINT): K-mer size. Must be 16, 32, or 64
 - `w` (BIGINT): Window size for minimizer selection. Must be > 0
-- `salt` (UBIGINT, optional, default 0): Hash salt for reproducible but varied minimizer selection
+- `salt` (UBIGINT, optional, default 6148914691236517205): Hash salt for reproducible but varied minimizer selection
 - `id_column` (VARCHAR, optional, default `'read_id'`): Name of the identifier column
 
 **Output schema:**
