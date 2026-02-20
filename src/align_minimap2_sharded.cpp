@@ -159,10 +159,10 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 		auto &shard = bind_data.shards[local_state.current_shard_idx];
 		miint::SequenceRecordBatch query_batch;
 
-		// Use STANDARD_VECTOR_SIZE as query batch size to bound result buffer memory
-		// (each query can produce multiple alignments)
+		// Use large batch size to reduce per-batch overhead (each batch creates a
+		// new Connection and re-executes a JOIN query against the shard table)
 		bool has_more = ReadShardQueryBatch(context, bind_data.query_table, bind_data.read_to_shard_table, shard.name,
-		                                    bind_data.query_schema, STANDARD_VECTOR_SIZE,
+		                                    bind_data.query_schema, SHARDED_QUERY_BATCH_SIZE,
 		                                    local_state.current_read_offset, query_batch);
 
 		if (query_batch.empty() && !has_more) {

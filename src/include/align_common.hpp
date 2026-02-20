@@ -29,6 +29,12 @@ static constexpr idx_t ALIGNMENT_QUERY_BATCH_SIZE = 1024;
 // Backward compatibility alias
 static constexpr idx_t MINIMAP2_QUERY_BATCH_SIZE = ALIGNMENT_QUERY_BATCH_SIZE;
 
+// Batch size for sharded alignment query reads.
+// Larger than ALIGNMENT_QUERY_BATCH_SIZE to reduce per-batch overhead:
+// each batch creates a new Connection and re-executes a JOIN query,
+// so fewer larger batches means threads spend more time aligning.
+static constexpr idx_t SHARDED_QUERY_BATCH_SIZE = 100000;
+
 // Get the standard alignment output column names
 inline std::vector<std::string> GetAlignmentOutputNames() {
 	return {"read_id",        "flags",         "reference",       "position", "stop_position", "mapq",   "cigar",
