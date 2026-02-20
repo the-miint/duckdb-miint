@@ -113,6 +113,11 @@ unique_ptr<GlobalTableFunctionState> AlignBowtie2ShardedTableFunction::InitGloba
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 	gstate->shard_count = data.shards.size();
+	idx_t total = 0;
+	for (const auto &shard : data.shards) {
+		total += shard.read_count;
+	}
+	gstate->total_associations = total;
 	return gstate;
 }
 
@@ -209,10 +214,22 @@ void AlignBowtie2ShardedTableFunction::Execute(ClientContext &context, TableFunc
 			local_state.aligner->align(query_batch, local_state.result_buffer);
 			// Filter out unmapped reads
 			FilterMappedOnly(local_state.result_buffer);
+			// Track progress by associations processed
+			global_state.associations_processed.fetch_add(query_batch.size(), std::memory_order_relaxed);
 		}
 
 		// Loop back to output results (or get more if none)
 	}
+}
+
+double AlignBowtie2ShardedTableFunction::Progress(ClientContext &context, const FunctionData *bind_data,
+                                                  const GlobalTableFunctionState *global_state) {
+	auto &gstate = global_state->Cast<GlobalState>();
+	if (gstate.total_associations == 0) {
+		return 100.0;
+	}
+	return 100.0 * static_cast<double>(gstate.associations_processed.load(std::memory_order_relaxed)) /
+	       static_cast<double>(gstate.total_associations);
 }
 
 TableFunction AlignBowtie2ShardedTableFunction::GetFunction() {
@@ -227,6 +244,8 @@ TableFunction AlignBowtie2ShardedTableFunction::GetFunction() {
 	tf.named_parameters["max_secondary"] = LogicalType::INTEGER;
 	tf.named_parameters["extra_args"] = LogicalType::VARCHAR;
 	tf.named_parameters["quiet"] = LogicalType::BOOLEAN;
+
+	tf.table_scan_progress = Progress;
 
 	return tf;
 }
