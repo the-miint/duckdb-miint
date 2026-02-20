@@ -193,6 +193,55 @@ const std::string READ_JPLACE = // NOLINT
     "    FROM read_json(path, filename := true) "
     "); ";
 
+// genome_coverage(alignments, subject_total_length, subject_genome_id)
+//
+// Compute genome coverage from alignment data by:
+// 1. Compressing overlapping alignment intervals per reference contig
+// 2. Mapping contigs to genomes and summing covered bases
+// 3. Joining with total genome lengths to compute proportion covered
+//
+// Parameters:
+// alignments : a relation with columns: reference (VARCHAR), position (BIGINT),
+//     stop_position (BIGINT)
+// subject_total_length : a relation with columns: genome_id (VARCHAR),
+//     total_length (BIGINT)
+// subject_genome_id : a relation with columns: contig_id (VARCHAR),
+//     genome_id (VARCHAR)
+//
+// Returns: genome_id (VARCHAR), covered (BIGINT), proportion_covered (DOUBLE)
+const std::string GENOME_COVERAGE = // NOLINT
+    "CREATE OR REPLACE MACRO genome_coverage(alignments, subject_total_length, subject_genome_id) AS TABLE "
+    "WITH compressed_intervals AS ( "
+    "    SELECT "
+    "        reference, "
+    "        UNNEST(compress_intervals(position, stop_position)) AS ci "
+    "    FROM query_table(alignments) "
+    "    GROUP BY reference "
+    "), "
+    "internal_coverage AS ( "
+    "    SELECT "
+    "        sg.genome_id, "
+    "        SUM(ci.stop - ci.start) AS covered_internal "
+    "    FROM compressed_intervals "
+    "    JOIN query_table(subject_genome_id) sg "
+    "      ON reference = sg.contig_id "
+    "    GROUP BY sg.genome_id, reference "
+    "), "
+    "total_coverage AS ( "
+    "    SELECT "
+    "        genome_id, "
+    "        SUM(covered_internal) AS covered "
+    "    FROM internal_coverage "
+    "    GROUP BY genome_id "
+    ") "
+    "SELECT "
+    "    tc.genome_id, "
+    "    tc.covered, "
+    "    tc.covered::DOUBLE / tl.total_length AS proportion_covered "
+    "FROM total_coverage tc "
+    "JOIN query_table(subject_total_length) tl "
+    "  USING (genome_id);";
+
 class MIINTMacros {
 
 public:
@@ -204,6 +253,7 @@ public:
 		con.Query(WOLTKA_OGU);
 		con.Query(PARSE_GFF_ATTRIBUTES);
 		con.Query(READ_GFF);
+		con.Query(GENOME_COVERAGE);
 
 		// read_jplace requires the json extension for read_json function
 		ExtensionInstallOptions options;

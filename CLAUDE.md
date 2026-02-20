@@ -264,7 +264,9 @@ All COPY formats support compression:
 #### Stop Position Calculation
 SAM alignments compute `stop_position` using HTSlib's `bam_endpos()`:
 - Accounts for CIGAR operations (M, D, N, =, X)
-- 1-based inclusive coordinate
+- Half-open coordinate: `stop_position = position + reference_length_from_cigar` (exclusive end)
+- Example: 10M at position 2 → stop_position = 12, covering bases [2, 12)
+- Coverage length = `stop_position - position` (no +1)
 - Critical for interval operations and coverage analysis
 
 #### Reading from Tables and Views in Extensions
