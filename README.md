@@ -84,6 +84,7 @@ GROUP BY sample_id;
   - [sequence_dna_reverse_complement / sequence_rna_reverse_complement](#sequence_dna_reverse_complementsequence-and-sequence_rna_reverse_complementsequence)
   - [sequence_dna_as_regexp / sequence_rna_as_regexp](#sequence_dna_as_regexpsequence-and-sequence_rna_as_regexpsequence)
   - [compress_intervals](#compress_intervalsstart-stop)
+  - [genome_coverage](#genome_coveragealignments-subject_total_length-subject_genome_id)
   - [Pairwise Alignment Functions](#pairwise-alignment-functions)
 - [Utility Functions](#utility-functions)
   - [miint_version](#miint_version)
@@ -2324,6 +2325,54 @@ GROUP BY ref;
 - Automatic periodic compression at 1M intervals prevents memory bloat with large datasets
 - Multi-threaded aggregation: each thread maintains its own state, merged at finalization
 - Algorithm: sorts intervals by start position, then single-pass merge (O(n log n))
+
+### `genome_coverage(alignments, subject_total_length, subject_genome_id)`
+
+Table macro that computes genome coverage from alignment data. It compresses overlapping alignment intervals per reference contig using `compress_intervals`, maps contigs to genomes, sums covered bases, and joins with total genome lengths to compute the proportion covered.
+
+**Parameters:**
+
+All three parameters are unquoted table/view names (not string literals):
+
+- `alignments`: A relation with columns `reference` (VARCHAR), `position` (BIGINT), `stop_position` (BIGINT)
+- `subject_total_length`: A relation with columns `genome_id` (VARCHAR), `total_length` (BIGINT)
+- `subject_genome_id`: A relation with columns `contig_id` (VARCHAR), `genome_id` (VARCHAR)
+
+**Returns:**
+| Column | Type | Description |
+|--------|------|-------------|
+| `genome_id` | VARCHAR | Genome identifier |
+| `covered` | BIGINT | Total number of bases covered |
+| `proportion_covered` | DOUBLE | Fraction of genome covered (`covered / total_length`) |
+
+**Behavior:**
+- Overlapping alignments on the same contig are merged before counting (via `compress_intervals`)
+- Multiple contigs mapping to the same genome have their coverage summed
+- Contigs in `alignments` that are not present in `subject_genome_id` are excluded from output
+- Uses half-open coordinates consistent with `read_alignments` output
+
+**Examples:**
+```sql
+-- Setup: alignment data and genome metadata
+CREATE TABLE alignments AS
+  SELECT reference, position, stop_position
+  FROM read_alignments('alignments.bam');
+
+CREATE TABLE genome_lengths (genome_id VARCHAR, total_length BIGINT);
+INSERT INTO genome_lengths VALUES ('genomeA', 100000), ('genomeB', 200000);
+
+CREATE TABLE contig_to_genome (contig_id VARCHAR, genome_id VARCHAR);
+INSERT INTO contig_to_genome VALUES
+  ('contig1', 'genomeA'), ('contig2', 'genomeA'),
+  ('contig3', 'genomeB');
+
+-- Compute genome coverage
+SELECT * FROM genome_coverage(alignments, genome_lengths, contig_to_genome);
+
+-- Filter to genomes with >50% coverage
+SELECT * FROM genome_coverage(alignments, genome_lengths, contig_to_genome)
+WHERE proportion_covered > 0.5;
+```
 
 ### Pairwise Alignment Functions
 
