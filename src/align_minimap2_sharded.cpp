@@ -166,11 +166,9 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 		                                    local_state.current_read_offset, query_batch);
 
 		if (query_batch.empty() && !has_more) {
-			// Shard exhausted - this thread is done (no work stealing)
-			// Each thread owns its shard for the lifetime of the query
-			// This ensures each index is loaded exactly once
-			output.SetCardinality(0);
-			return;
+			// Shard exhausted - release and claim next available shard
+			local_state.has_shard = false;
+			continue;
 		}
 
 		// Align batch
