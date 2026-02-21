@@ -113,6 +113,7 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2ShardedTableFunction::InitGlob
 	auto gstate = make_uniq<GlobalState>();
 	gstate->shard_count = data.shards.size();
 	gstate->max_threads_per_shard = data.max_threads_per_shard;
+	gstate->max_active_shards = std::min(gstate->shard_count, GlobalState::MAX_CONCURRENT_SHARDS);
 	idx_t total = 0;
 	for (const auto &shard : data.shards) {
 		total += shard.read_count;
@@ -137,46 +138,73 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Global
 	idx_t shard_idx;
 
 	{
-		std::lock_guard<std::mutex> guard(gstate.lock);
+		std::unique_lock<std::mutex> lock(gstate.lock);
 
-		// Phase 1: Try to join an existing active shard with capacity
-		for (auto &shard : gstate.active_shards) {
-			if (shard->ready.load(std::memory_order_acquire) && !shard->exhausted.load(std::memory_order_acquire) &&
-			    shard->active_workers.load(std::memory_order_acquire) < gstate.max_threads_per_shard) {
-				shard->active_workers.fetch_add(1, std::memory_order_acq_rel);
-				return shard;
+		while (true) {
+			// Phase 1: Try to join an existing active shard with capacity
+			for (auto &shard : gstate.active_shards) {
+				if (shard->ready.load(std::memory_order_acquire) && !shard->exhausted.load(std::memory_order_acquire) &&
+				    shard->active_workers.load(std::memory_order_acquire) < gstate.max_threads_per_shard) {
+					shard->active_workers.fetch_add(1, std::memory_order_acq_rel);
+					return shard;
+				}
 			}
-		}
 
-		// Phase 2: Reserve next shard slot (but don't load yet)
-		if (gstate.next_shard_idx >= bind_data.shards.size()) {
-			return nullptr; // no more work
-		}
-		shard_idx = gstate.next_shard_idx++;
+			// Phase 2: Try to claim a new shard if under the active shard limit
+			bool has_unclaimed = gstate.next_shard_idx < bind_data.shards.size();
+			if (has_unclaimed && gstate.active_shards.size() < gstate.max_active_shards) {
+				shard_idx = gstate.next_shard_idx++;
+				active = std::make_shared<ActiveShard>();
+				active->shard_idx = shard_idx;
+				active->active_workers.store(1, std::memory_order_release);
+				// ready=false (default); set to true after index loads
+				gstate.active_shards.push_back(active);
+				break; // exit lock to load index
+			}
 
-		// Create placeholder ActiveShard (ready=false)
-		active = std::make_shared<ActiveShard>();
-		active->shard_idx = shard_idx;
-		active->active_workers.store(1, std::memory_order_release);
-		// ready starts as false (default); set to true in Phase 4 after index loads
-		gstate.active_shards.push_back(active);
+			// Phase 3: Can't join or start - check if waiting is worthwhile
+			bool any_not_exhausted = false;
+			for (auto &shard : gstate.active_shards) {
+				if (!shard->exhausted.load(std::memory_order_acquire)) {
+					any_not_exhausted = true;
+					break;
+				}
+			}
+
+			if (!has_unclaimed && !any_not_exhausted) {
+				return nullptr; // All shards processed, no active work remaining
+			}
+
+			// Wait for: a shard to become ready, capacity to open, or a shard to be removed
+			gstate.cv.wait(lock);
+		}
 	}
 	// Lock released
 
-	// Phase 3: Load index OUTSIDE lock
+	// Phase 4: Load index OUTSIDE lock
 	auto &shard_info = bind_data.shards[shard_idx];
 	try {
 		auto shared_idx = std::make_shared<miint::SharedMinimap2Index>(shard_info.index_path, bind_data.config);
 		active->index = std::move(shared_idx);
 	} catch (...) {
-		// Mark shard as exhausted so no one else tries it
+		// Remove failed shard from active list and notify waiters
 		active->exhausted.store(true, std::memory_order_release);
 		active->active_workers.fetch_sub(1, std::memory_order_acq_rel);
-		throw; // propagate error
+		{
+			std::lock_guard<std::mutex> guard(gstate.lock);
+			auto &shards = gstate.active_shards;
+			shards.erase(std::remove(shards.begin(), shards.end(), active), shards.end());
+		}
+		gstate.cv.notify_all();
+		throw;
 	}
 
-	// Phase 4: Publish (other threads can now join)
-	active->ready.store(true, std::memory_order_release);
+	// Phase 5: Publish under lock to prevent lost wake-ups with CV
+	{
+		std::lock_guard<std::mutex> guard(gstate.lock);
+		active->ready.store(true, std::memory_order_release);
+	}
+	gstate.cv.notify_all();
 	return active;
 }
 
@@ -197,6 +225,9 @@ void AlignMinimap2ShardedTableFunction::ReleaseWork(GlobalState &gstate, LocalSt
 	}
 
 	lstate.current_active_shard = nullptr;
+
+	// Always notify: capacity may have opened or a shard slot freed
+	gstate.cv.notify_all();
 }
 
 void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {

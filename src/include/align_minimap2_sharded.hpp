@@ -13,6 +13,7 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <vector>
 
@@ -58,18 +59,18 @@ public:
 
 	struct GlobalState : public GlobalTableFunctionState {
 		std::mutex lock;
+		std::condition_variable cv;
 		idx_t next_shard_idx = 0;
 		idx_t shard_count = 0;
 		idx_t max_threads_per_shard = 4;
+		idx_t max_active_shards = 4; // Limits concurrent index loads to bound memory
 		std::vector<std::shared_ptr<ActiveShard>> active_shards;
 		idx_t total_associations = 0;
 		std::atomic<idx_t> associations_processed {0};
 
+		static constexpr idx_t MAX_CONCURRENT_SHARDS = 4;
+
 		idx_t MaxThreads() const override {
-			// Cap to avoid oversubscription: at most a few shards are active
-			// simultaneously, so requesting shard_count * max_threads_per_shard
-			// would be misleading. We cap at a reasonable multiple.
-			constexpr idx_t MAX_CONCURRENT_SHARDS = 4;
 			idx_t concurrent = std::min(shard_count, MAX_CONCURRENT_SHARDS);
 			return concurrent * max_threads_per_shard;
 		}
