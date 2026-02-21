@@ -177,7 +177,7 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2ShardedTableFunction::InitGlob
 	for (const auto &shard : data.shards) {
 		total += shard.read_count;
 	}
-	gstate->total_associations = total;
+	gstate->total_associations.store(total, std::memory_order_relaxed);
 	SHARD_DBG_MEM(*gstate, "InitGlobal: shards=%zu db_threads=%zu max_tps=%zu max_active=%zu MaxThreads=%zu",
 	              static_cast<size_t>(gstate->shard_count), static_cast<size_t>(db_threads),
 	              static_cast<size_t>(gstate->max_threads_per_shard), static_cast<size_t>(gstate->max_active_shards),
@@ -305,6 +305,16 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 	              static_cast<size_t>(id_count), static_cast<size_t>(shard_idx), static_cast<long>(ids_ms),
 	              static_cast<size_t>(active->batch_size));
 
+	// Adjust total_associations if materialized count differs from GROUP BY estimate
+	// (e.g., NULL read_ids are counted by COUNT(*) but skipped by ReadShardIds)
+	idx_t estimated = bind_data.shards[shard_idx].read_count;
+	if (id_count != estimated) {
+		auto old_total = gstate.total_associations.fetch_add(id_count - estimated, std::memory_order_relaxed);
+		SHARD_DBG(gstate, "ClaimWork: adjusted total_associations %zu -> %zu (shard %zu: estimated=%zu, actual=%zu)",
+		          static_cast<size_t>(old_total), static_cast<size_t>(old_total + id_count - estimated),
+		          static_cast<size_t>(shard_idx), static_cast<size_t>(estimated), static_cast<size_t>(id_count));
+	}
+
 	// Phase 5: Publish under lock to prevent lost wake-ups with CV
 	{
 		std::lock_guard<std::mutex> guard(gstate.lock);
@@ -392,6 +402,9 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 		idx_t batch_count = std::min(active->batch_size, id_count - my_offset);
 		bool is_last_batch = (my_offset + batch_count >= id_count);
 
+		// Track progress by IDs claimed (before read/align, so progress updates during I/O)
+		global_state.associations_processed.fetch_add(batch_count, std::memory_order_relaxed);
+
 		// Read sequences by joining a temp table of exact IDs against the query view
 		miint::SequenceRecordBatch query_batch;
 		SHARD_DBG(global_state, "Execute: shard %zu READ offset=%zu count=%zu (temp table of IDs JOIN %s, is_last=%s)",
@@ -439,8 +452,6 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 			SHARD_DBG_MEM(global_state, "Execute: shard %zu ALIGN %zu reads -> %zu results in %ldms",
 			              static_cast<size_t>(active->shard_idx), static_cast<size_t>(query_batch.size()),
 			              static_cast<size_t>(local_state.result_buffer.size()), static_cast<long>(align_ms));
-			// Track progress by associations processed
-			global_state.associations_processed.fetch_add(query_batch.size(), std::memory_order_relaxed);
 		}
 
 		// If this was the last batch and we got results, we'll output them in the next iteration.
@@ -451,11 +462,12 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 double AlignMinimap2ShardedTableFunction::Progress(ClientContext &context, const FunctionData *bind_data,
                                                    const GlobalTableFunctionState *global_state) {
 	auto &gstate = global_state->Cast<GlobalState>();
-	if (gstate.total_associations == 0) {
+	auto total = gstate.total_associations.load(std::memory_order_relaxed);
+	if (total == 0) {
 		return 100.0;
 	}
-	return 100.0 * static_cast<double>(gstate.associations_processed.load(std::memory_order_relaxed)) /
-	       static_cast<double>(gstate.total_associations);
+	auto processed = gstate.associations_processed.load(std::memory_order_relaxed);
+	return std::min(100.0, 100.0 * static_cast<double>(processed) / static_cast<double>(total));
 }
 
 TableFunction AlignMinimap2ShardedTableFunction::GetFunction() {

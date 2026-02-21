@@ -73,7 +73,7 @@ public:
 		bool debug = false;
 		std::chrono::steady_clock::time_point start_time;
 		std::vector<std::shared_ptr<ActiveShard>> active_shards;
-		idx_t total_associations = 0;
+		std::atomic<idx_t> total_associations {0};
 		std::atomic<idx_t> associations_processed {0};
 
 		idx_t MaxThreads() const override {
