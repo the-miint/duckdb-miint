@@ -2,8 +2,11 @@
 #include "Minimap2Aligner.hpp"
 #include "SAMRecord.hpp"
 #include "SequenceRecord.hpp"
+#include <cstdio>
+#include <memory>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace miint;
@@ -399,4 +402,312 @@ TEST_CASE("Minimap2Aligner multiple queries in batch", "[Minimap2Aligner]") {
 	REQUIRE(found_ids.count("query1") > 0);
 	REQUIRE(found_ids.count("query2") > 0);
 	REQUIRE(found_ids.count("query3") > 0);
+}
+
+// =============================================================================
+// SharedMinimap2Index and shared index support tests
+// =============================================================================
+
+TEST_CASE("InitOptions produces valid options", "[Minimap2Aligner]") {
+	Minimap2Config config;
+	config.preset = "sr";
+	config.eqx = true;
+	config.max_secondary = 3;
+
+	mm_idxopt_t iopt;
+	mm_mapopt_t mopt;
+	Minimap2Aligner::InitOptions(config, iopt, mopt);
+
+	// Check preset-specific values for sr
+	REQUIRE(iopt.k == 21);
+	REQUIRE(iopt.w == 11);
+	// Check CIGAR output enabled
+	REQUIRE((mopt.flag & MM_F_CIGAR) != 0);
+	// Check EQX enabled
+	REQUIRE((mopt.flag & MM_F_EQX) != 0);
+	// Check MD tag output
+	REQUIRE((mopt.flag & MM_F_OUT_MD) != 0);
+	// Check best_n = max_secondary + 1
+	REQUIRE(mopt.best_n == 4);
+}
+
+TEST_CASE("InitOptions with custom k and w", "[Minimap2Aligner]") {
+	Minimap2Config config;
+	config.preset = "sr";
+	config.k = 15;
+	config.w = 10;
+
+	mm_idxopt_t iopt;
+	mm_mapopt_t mopt;
+	Minimap2Aligner::InitOptions(config, iopt, mopt);
+
+	REQUIRE(iopt.k == 15);
+	REQUIRE(iopt.w == 10);
+}
+
+TEST_CASE("LoadIndexFromFile loads test .mmi correctly", "[Minimap2Aligner]") {
+	// First build and save a test index
+	Minimap2Config config;
+	config.preset = "sr";
+	config.k = 5;
+	Minimap2Aligner builder(config);
+
+	std::string ref_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+	                      "GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC";
+	std::vector<AlignmentSubject> subjects;
+	subjects.push_back({"test_ref", ref_seq});
+	builder.build_index(subjects);
+	builder.save_index("data/shards/test_load_helper.mmi");
+
+	// Now load it with the static helper
+	mm_idxopt_t iopt;
+	mm_mapopt_t mopt;
+	Minimap2Aligner::InitOptions(config, iopt, mopt);
+
+	mm_idx_t *idx = nullptr;
+	std::vector<std::string> names;
+	REQUIRE_NOTHROW(Minimap2Aligner::LoadIndexFromFile("data/shards/test_load_helper.mmi", iopt, idx, names));
+
+	REQUIRE(idx != nullptr);
+	REQUIRE(names.size() == 1);
+	REQUIRE(names[0] == "test_ref");
+
+	mm_idx_destroy(idx);
+}
+
+TEST_CASE("SharedMinimap2Index construction and accessors", "[Minimap2Aligner]") {
+	// Build and save a test index first
+	Minimap2Config config;
+	config.preset = "sr";
+	config.k = 5;
+	Minimap2Aligner builder(config);
+
+	std::string ref_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+	                      "GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC";
+	std::vector<AlignmentSubject> subjects;
+	subjects.push_back({"shared_ref", ref_seq});
+	builder.build_index(subjects);
+	builder.save_index("data/shards/test_shared_idx.mmi");
+
+	// Construct SharedMinimap2Index
+	SharedMinimap2Index shared_idx("data/shards/test_shared_idx.mmi", config);
+
+	REQUIRE(shared_idx.index() != nullptr);
+	REQUIRE(shared_idx.subject_names().size() == 1);
+	REQUIRE(shared_idx.subject_names()[0] == "shared_ref");
+	// mapopt should have CIGAR flag set
+	REQUIRE((shared_idx.mapopt().flag & MM_F_CIGAR) != 0);
+}
+
+TEST_CASE("Two aligners sharing same SharedMinimap2Index produce identical results", "[Minimap2Aligner]") {
+	// Build and save a test index
+	Minimap2Config config;
+	config.preset = "sr";
+	config.k = 5;
+	config.max_secondary = 0;
+	Minimap2Aligner builder(config);
+
+	std::string ref_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+	                      "GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC";
+	std::vector<AlignmentSubject> subjects;
+	subjects.push_back({"reference", ref_seq});
+	builder.build_index(subjects);
+	builder.save_index("data/shards/test_shared_align.mmi");
+
+	// Create shared index
+	auto shared_idx = std::make_shared<SharedMinimap2Index>("data/shards/test_shared_align.mmi", config);
+
+	// Create two aligners and attach the same shared index
+	Minimap2Aligner aligner1(config);
+	Minimap2Aligner aligner2(config);
+	aligner1.attach_shared_index(shared_idx);
+	aligner2.attach_shared_index(shared_idx);
+
+	auto queries = make_query_batch("query1", "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");
+
+	SAMRecordBatch batch1, batch2;
+	aligner1.align(queries, batch1);
+	aligner2.align(queries, batch2);
+
+	REQUIRE(batch1.size() == batch2.size());
+	REQUIRE(batch1.size() >= 1);
+	REQUIRE(batch1.references[0] == batch2.references[0]);
+	REQUIRE(batch1.positions[0] == batch2.positions[0]);
+	REQUIRE(batch1.cigars[0] == batch2.cigars[0]);
+}
+
+TEST_CASE("attach_shared_index clears owned index", "[Minimap2Aligner]") {
+	Minimap2Config config;
+	config.preset = "sr";
+	config.k = 5;
+	Minimap2Aligner aligner(config);
+
+	// Build an owned index
+	std::string ref_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+	                      "GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC";
+	std::vector<AlignmentSubject> subjects;
+	subjects.push_back({"owned_ref", ref_seq});
+	aligner.build_index(subjects);
+
+	// Align with owned index
+	auto queries = make_query_batch("q1", "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");
+	SAMRecordBatch batch1;
+	aligner.align(queries, batch1);
+	REQUIRE(batch1.size() >= 1);
+	REQUIRE(batch1.references[0] == "owned_ref");
+
+	// Save and create shared index with different ref name
+	aligner.save_index("data/shards/test_owned_clear.mmi");
+	auto shared_idx = std::make_shared<SharedMinimap2Index>("data/shards/test_owned_clear.mmi", config);
+
+	// Attach shared index - should clear owned
+	aligner.attach_shared_index(shared_idx);
+
+	SAMRecordBatch batch2;
+	aligner.align(queries, batch2);
+	REQUIRE(batch2.size() >= 1);
+	// After attach, ref name comes from shared index (same .mmi file, so same name)
+	REQUIRE(batch2.references[0] == "owned_ref");
+}
+
+TEST_CASE("load_index clears shared index", "[Minimap2Aligner]") {
+	Minimap2Config config;
+	config.preset = "sr";
+	config.k = 5;
+
+	// Build and save two indexes with different ref names
+	Minimap2Aligner builder(config);
+	std::string ref_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+	                      "GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC";
+
+	std::vector<AlignmentSubject> subjects1;
+	subjects1.push_back({"ref_shared", ref_seq});
+	builder.build_index(subjects1);
+	builder.save_index("data/shards/test_load_clear_shared.mmi");
+
+	std::vector<AlignmentSubject> subjects2;
+	subjects2.push_back({"ref_owned", ref_seq});
+	builder.build_index(subjects2);
+	builder.save_index("data/shards/test_load_clear_owned.mmi");
+
+	// Aligner starts with shared index
+	Minimap2Aligner aligner(config);
+	auto shared_idx = std::make_shared<SharedMinimap2Index>("data/shards/test_load_clear_shared.mmi", config);
+	aligner.attach_shared_index(shared_idx);
+
+	auto queries = make_query_batch("q1", "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");
+	SAMRecordBatch batch1;
+	aligner.align(queries, batch1);
+	REQUIRE(batch1.size() >= 1);
+	REQUIRE(batch1.references[0] == "ref_shared");
+
+	// load_index should clear shared and use owned
+	aligner.load_index("data/shards/test_load_clear_owned.mmi");
+
+	SAMRecordBatch batch2;
+	aligner.align(queries, batch2);
+	REQUIRE(batch2.size() >= 1);
+	REQUIRE(batch2.references[0] == "ref_owned");
+}
+
+TEST_CASE("detach then re-attach different shared index", "[Minimap2Aligner]") {
+	Minimap2Config config;
+	config.preset = "sr";
+	config.k = 5;
+
+	// Build two indexes
+	Minimap2Aligner builder(config);
+	std::string ref_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+	                      "GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC";
+
+	std::vector<AlignmentSubject> subjects1;
+	subjects1.push_back({"ref_A", ref_seq});
+	builder.build_index(subjects1);
+	builder.save_index("data/shards/test_reattach_A.mmi");
+
+	std::vector<AlignmentSubject> subjects2;
+	subjects2.push_back({"ref_B", ref_seq});
+	builder.build_index(subjects2);
+	builder.save_index("data/shards/test_reattach_B.mmi");
+
+	auto shared_A = std::make_shared<SharedMinimap2Index>("data/shards/test_reattach_A.mmi", config);
+	auto shared_B = std::make_shared<SharedMinimap2Index>("data/shards/test_reattach_B.mmi", config);
+
+	Minimap2Aligner aligner(config);
+	auto queries = make_query_batch("q1", "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");
+
+	// Attach A
+	aligner.attach_shared_index(shared_A);
+	SAMRecordBatch batch1;
+	aligner.align(queries, batch1);
+	REQUIRE(batch1.size() >= 1);
+	REQUIRE(batch1.references[0] == "ref_A");
+
+	// Detach
+	aligner.detach_shared_index();
+
+	// Attach B
+	aligner.attach_shared_index(shared_B);
+	SAMRecordBatch batch2;
+	aligner.align(queries, batch2);
+	REQUIRE(batch2.size() >= 1);
+	REQUIRE(batch2.references[0] == "ref_B");
+}
+
+TEST_CASE("Concurrent alignment on shared index from two threads", "[Minimap2Aligner]") {
+	Minimap2Config config;
+	config.preset = "sr";
+	config.k = 5;
+	config.max_secondary = 0;
+	Minimap2Aligner builder(config);
+
+	std::string ref_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+	                      "GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC";
+	std::vector<AlignmentSubject> subjects;
+	subjects.push_back({"reference", ref_seq});
+	builder.build_index(subjects);
+	builder.save_index("data/shards/test_concurrent.mmi");
+
+	auto shared_idx = std::make_shared<SharedMinimap2Index>("data/shards/test_concurrent.mmi", config);
+
+	auto queries = make_query_batch("query1", "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");
+
+	SAMRecordBatch batch1, batch2;
+	bool ok1 = false, ok2 = false;
+
+	// Run two alignments concurrently on separate aligners sharing one index
+	std::thread t1([&]() {
+		Minimap2Aligner aligner(config);
+		aligner.attach_shared_index(shared_idx);
+		aligner.align(queries, batch1);
+		ok1 = (batch1.size() >= 1 && batch1.references[0] == "reference");
+	});
+	std::thread t2([&]() {
+		Minimap2Aligner aligner(config);
+		aligner.attach_shared_index(shared_idx);
+		aligner.align(queries, batch2);
+		ok2 = (batch2.size() >= 1 && batch2.references[0] == "reference");
+	});
+
+	t1.join();
+	t2.join();
+
+	REQUIRE(ok1);
+	REQUIRE(ok2);
+	REQUIRE(batch1.size() == batch2.size());
+	REQUIRE(batch1.positions[0] == batch2.positions[0]);
+	REQUIRE(batch1.cigars[0] == batch2.cigars[0]);
+}
+
+// Clean up temporary .mmi files created by tests
+TEST_CASE("Cleanup temp .mmi files", "[Minimap2Aligner]") {
+	std::vector<std::string> temp_files = {
+	    "data/shards/test_load_helper.mmi",       "data/shards/test_shared_idx.mmi",
+	    "data/shards/test_shared_align.mmi",      "data/shards/test_owned_clear.mmi",
+	    "data/shards/test_load_clear_shared.mmi", "data/shards/test_load_clear_owned.mmi",
+	    "data/shards/test_reattach_A.mmi",        "data/shards/test_reattach_B.mmi",
+	    "data/shards/test_concurrent.mmi"};
+	for (const auto &path : temp_files) {
+		std::remove(path.c_str());
+	}
 }

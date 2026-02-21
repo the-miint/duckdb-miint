@@ -83,6 +83,16 @@ unique_ptr<FunctionData> AlignMinimap2ShardedTableFunction::Bind(ClientContext &
 	// Always warn about k/w since we use pre-built indexes
 	ParseMinimap2ConfigParams(input.named_parameters, data->config, true /* warn_prebuilt_index */);
 
+	// Parse max_threads_per_shard parameter
+	auto max_tps_param = input.named_parameters.find("max_threads_per_shard");
+	if (max_tps_param != input.named_parameters.end() && !max_tps_param->second.IsNull()) {
+		auto val = max_tps_param->second.GetValue<int32_t>();
+		if (val < 1 || val > 64) {
+			throw BinderException("max_threads_per_shard must be between 1 and 64 (got %d)", val);
+		}
+		data->max_threads_per_shard = static_cast<idx_t>(val);
+	}
+
 	// Read shard counts and validate .mmi files exist (fail fast)
 	data->shards = BuildMinimap2ShardInfos(context, data->read_to_shard_table, data->shard_directory, fs);
 
@@ -102,6 +112,7 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2ShardedTableFunction::InitGlob
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 	gstate->shard_count = data.shards.size();
+	gstate->max_threads_per_shard = data.max_threads_per_shard;
 	idx_t total = 0;
 	for (const auto &shard : data.shards) {
 		total += shard.read_count;
@@ -118,6 +129,74 @@ AlignMinimap2ShardedTableFunction::InitLocal(ExecutionContext &context, TableFun
 	// Create per-thread aligner with config
 	lstate->aligner = std::make_unique<miint::Minimap2Aligner>(data.config);
 	return lstate;
+}
+
+std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(GlobalState &gstate, const Data &bind_data,
+                                                                          LocalState &lstate) {
+	std::shared_ptr<ActiveShard> active;
+	idx_t shard_idx;
+
+	{
+		std::lock_guard<std::mutex> guard(gstate.lock);
+
+		// Phase 1: Try to join an existing active shard with capacity
+		for (auto &shard : gstate.active_shards) {
+			if (shard->ready.load(std::memory_order_acquire) && !shard->exhausted.load(std::memory_order_acquire) &&
+			    shard->active_workers.load(std::memory_order_acquire) < gstate.max_threads_per_shard) {
+				shard->active_workers.fetch_add(1, std::memory_order_acq_rel);
+				return shard;
+			}
+		}
+
+		// Phase 2: Reserve next shard slot (but don't load yet)
+		if (gstate.next_shard_idx >= bind_data.shards.size()) {
+			return nullptr; // no more work
+		}
+		shard_idx = gstate.next_shard_idx++;
+
+		// Create placeholder ActiveShard (ready=false)
+		active = std::make_shared<ActiveShard>();
+		active->shard_idx = shard_idx;
+		active->active_workers.store(1, std::memory_order_release);
+		// ready starts as false (default); set to true in Phase 4 after index loads
+		gstate.active_shards.push_back(active);
+	}
+	// Lock released
+
+	// Phase 3: Load index OUTSIDE lock
+	auto &shard_info = bind_data.shards[shard_idx];
+	try {
+		auto shared_idx = std::make_shared<miint::SharedMinimap2Index>(shard_info.index_path, bind_data.config);
+		active->index = std::move(shared_idx);
+	} catch (...) {
+		// Mark shard as exhausted so no one else tries it
+		active->exhausted.store(true, std::memory_order_release);
+		active->active_workers.fetch_sub(1, std::memory_order_acq_rel);
+		throw; // propagate error
+	}
+
+	// Phase 4: Publish (other threads can now join)
+	active->ready.store(true, std::memory_order_release);
+	return active;
+}
+
+void AlignMinimap2ShardedTableFunction::ReleaseWork(GlobalState &gstate, LocalState &lstate) {
+	auto active = lstate.current_active_shard;
+	lstate.aligner->detach_shared_index();
+	lstate.has_shard = false;
+
+	auto prev_workers = active->active_workers.fetch_sub(1, std::memory_order_acq_rel);
+	// prev_workers is the value BEFORE decrement
+
+	if (prev_workers == 1 && active->exhausted.load(std::memory_order_acquire)) {
+		// Last worker on an exhausted shard - remove from active list
+		std::lock_guard<std::mutex> guard(gstate.lock);
+		auto &shards = gstate.active_shards;
+		shards.erase(std::remove(shards.begin(), shards.end(), active), shards.end());
+		// shared_ptr ref-count handles index lifetime
+	}
+
+	lstate.current_active_shard = nullptr;
 }
 
 void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
@@ -141,39 +220,48 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 
 		// Claim a shard if we don't have one
 		if (!local_state.has_shard) {
-			std::lock_guard<std::mutex> lock(global_state.lock);
-			if (global_state.next_shard_idx >= bind_data.shards.size()) {
+			auto active = ClaimWork(global_state, bind_data, local_state);
+			if (!active) {
 				// No more shards to process
 				output.SetCardinality(0);
 				return;
 			}
-			local_state.current_shard_idx = global_state.next_shard_idx++;
+			local_state.current_active_shard = active;
 			local_state.has_shard = true;
-			local_state.current_read_offset = 0;
-
-			// Load index for new shard
-			auto &shard = bind_data.shards[local_state.current_shard_idx];
-			try {
-				local_state.aligner->load_index(shard.index_path);
-			} catch (const std::exception &e) {
-				throw IOException("Failed to load minimap2 index from '%s': %s", shard.index_path, e.what());
-			}
+			local_state.aligner->attach_shared_index(active->index);
 		}
 
-		// Read next batch of queries for current shard
-		auto &shard = bind_data.shards[local_state.current_shard_idx];
-		miint::SequenceRecordBatch query_batch;
+		// Atomically claim batch offset
+		auto &active = local_state.current_active_shard;
+		auto &shard_info = bind_data.shards[active->shard_idx];
+		idx_t my_offset = active->next_batch_offset.fetch_add(SHARDED_QUERY_BATCH_SIZE, std::memory_order_acq_rel);
 
-		// Use large batch size to reduce per-batch overhead (each batch creates a
-		// new Connection and re-executes a JOIN query against the shard table)
-		bool has_more = ReadShardQueryBatch(context, bind_data.query_table, bind_data.read_to_shard_table, shard.name,
-		                                    bind_data.query_schema, SHARDED_QUERY_BATCH_SIZE,
-		                                    local_state.current_read_offset, query_batch);
+		if (my_offset >= shard_info.read_count) {
+			// All batches claimed already
+			active->exhausted.store(true, std::memory_order_release);
+			ReleaseWork(global_state, local_state);
+			continue;
+		}
+
+		// Read query batch at claimed offset.
+		// ReadShardQueryBatch takes offset by reference and updates it; we use a
+		// throwaway copy because the atomic next_batch_offset drives pagination.
+		idx_t batch_offset = my_offset;
+		miint::SequenceRecordBatch query_batch;
+		bool has_more =
+		    ReadShardQueryBatch(context, bind_data.query_table, bind_data.read_to_shard_table, shard_info.name,
+		                        bind_data.query_schema, SHARDED_QUERY_BATCH_SIZE, batch_offset, query_batch);
 
 		if (query_batch.empty() && !has_more) {
-			// Shard exhausted - release and claim next available shard
-			local_state.has_shard = false;
+			// Actual data exhausted (read_count was approximate)
+			active->exhausted.store(true, std::memory_order_release);
+			ReleaseWork(global_state, local_state);
 			continue;
+		}
+
+		if (!has_more) {
+			// Last batch - mark exhausted so no new workers join
+			active->exhausted.store(true, std::memory_order_release);
 		}
 
 		// Align batch
@@ -188,7 +276,8 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 			global_state.associations_processed.fetch_add(query_batch.size(), std::memory_order_relaxed);
 		}
 
-		// Loop back to output results
+		// If this was the last batch and we got results, we'll output them in the next iteration.
+		// If no results, we'll loop back and ReleaseWork will happen when we try to claim the next batch.
 	}
 }
 
@@ -211,6 +300,7 @@ TableFunction AlignMinimap2ShardedTableFunction::GetFunction() {
 	tf.named_parameters["preset"] = LogicalType::VARCHAR;
 	tf.named_parameters["max_secondary"] = LogicalType::INTEGER;
 	tf.named_parameters["eqx"] = LogicalType::BOOLEAN;
+	tf.named_parameters["max_threads_per_shard"] = LogicalType::INTEGER;
 
 	tf.table_scan_progress = Progress;
 

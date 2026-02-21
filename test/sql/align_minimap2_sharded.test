@@ -234,6 +234,65 @@ query1	ref1
 query2	ref2
 
 # ==============================================================================
+# MAX_THREADS_PER_SHARD PARAMETER TESTS
+# ==============================================================================
+
+# Test error: max_threads_per_shard = 0
+statement error
+SELECT * FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard',
+    max_threads_per_shard := 0);
+----
+max_threads_per_shard must be between 1 and 64
+
+# Test error: max_threads_per_shard = -1
+statement error
+SELECT * FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard',
+    max_threads_per_shard := -1);
+----
+max_threads_per_shard must be between 1 and 64
+
+# Test error: max_threads_per_shard = 65 (above upper bound)
+statement error
+SELECT * FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard',
+    max_threads_per_shard := 65);
+----
+max_threads_per_shard must be between 1 and 64
+
+# Test: max_threads_per_shard = 1 (backward compat - same results)
+query II
+SELECT read_id, reference
+FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard',
+    max_secondary := 0,
+    max_threads_per_shard := 1)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# Test: max_threads_per_shard = 4 explicit (same results)
+query II
+SELECT read_id, reference
+FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard',
+    max_secondary := 0,
+    max_threads_per_shard := 4)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# ==============================================================================
 # CLEANUP
 # ==============================================================================
 

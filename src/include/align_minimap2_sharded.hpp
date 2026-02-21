@@ -11,6 +11,7 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <vector>
@@ -24,6 +25,18 @@ struct ShardInfo {
 	idx_t read_count;       // Number of reads for this shard (for priority ordering)
 };
 
+// A shard that is currently being processed by one or more threads.
+// The shared index is immutable after construction; atomic counters
+// coordinate batch claiming and worker tracking without holding the global lock.
+struct ActiveShard {
+	idx_t shard_idx;                                   // Index into Data::shards
+	std::shared_ptr<miint::SharedMinimap2Index> index; // Shared index, immutable after construction
+	std::atomic<idx_t> next_batch_offset {0};          // Threads atomically claim ranges
+	std::atomic<idx_t> active_workers {0};             // Threads currently on this shard
+	std::atomic<bool> exhausted {false};               // Set when no more batches to read
+	std::atomic<bool> ready {false};                   // Set when index is loaded and published
+};
+
 class AlignMinimap2ShardedTableFunction {
 public:
 	struct Data : public TableFunctionData {
@@ -33,6 +46,7 @@ public:
 		SequenceTableSchema query_schema;
 		miint::Minimap2Config config;
 		std::vector<ShardInfo> shards; // Sorted by read_count DESC (largest first)
+		idx_t max_threads_per_shard = 4;
 
 		// Output schema (shared with align_minimap2)
 		std::vector<std::string> names;
@@ -45,13 +59,19 @@ public:
 	struct GlobalState : public GlobalTableFunctionState {
 		std::mutex lock;
 		idx_t next_shard_idx = 0;
-		idx_t shard_count = 1;
+		idx_t shard_count = 0;
+		idx_t max_threads_per_shard = 4;
+		std::vector<std::shared_ptr<ActiveShard>> active_shards;
 		idx_t total_associations = 0;
 		std::atomic<idx_t> associations_processed {0};
 
 		idx_t MaxThreads() const override {
-			// No cap - one thread per shard, let DuckDB scheduler manage
-			return shard_count;
+			// Cap to avoid oversubscription: at most a few shards are active
+			// simultaneously, so requesting shard_count * max_threads_per_shard
+			// would be misleading. We cap at a reasonable multiple.
+			constexpr idx_t MAX_CONCURRENT_SHARDS = 4;
+			idx_t concurrent = std::min(shard_count, MAX_CONCURRENT_SHARDS);
+			return concurrent * max_threads_per_shard;
 		}
 
 		GlobalState() = default;
@@ -59,9 +79,8 @@ public:
 
 	struct LocalState : public LocalTableFunctionState {
 		std::unique_ptr<miint::Minimap2Aligner> aligner;
-		idx_t current_shard_idx = DConstants::INVALID_INDEX;
+		std::shared_ptr<ActiveShard> current_active_shard;
 		bool has_shard = false;
-		idx_t current_read_offset = 0; // For LIMIT/OFFSET streaming per shard
 		miint::SAMRecordBatch result_buffer;
 		idx_t buffer_offset = 0;
 
@@ -83,6 +102,15 @@ public:
 
 	static TableFunction GetFunction();
 	static void Register(ExtensionLoader &loader);
+
+private:
+	// Claim work: join an existing active shard or start a new one.
+	// Returns the ActiveShard to work on, or nullptr if no more work.
+	// Index loading happens outside the lock.
+	static std::shared_ptr<ActiveShard> ClaimWork(GlobalState &gstate, const Data &bind_data, LocalState &lstate);
+
+	// Release work: detach from current shard, clean up if last worker on exhausted shard.
+	static void ReleaseWork(GlobalState &gstate, LocalState &lstate);
 };
 
 } // namespace duckdb
