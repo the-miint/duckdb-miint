@@ -43,4 +43,15 @@ bool ReadShardQueryBatch(ClientContext &context, const std::string &query_table,
                          const std::string &shard_name, const SequenceTableSchema &schema, idx_t batch_size,
                          idx_t &offset, miint::SequenceRecordBatch &output);
 
+// Read all read_ids for a shard from the read_to_shard table, ordered.
+// Returns the IDs as a vector of strings for use with ReadBatchByIds.
+std::vector<std::string> ReadShardIds(ClientContext &context, const std::string &read_to_shard_table,
+                                      const std::string &shard_name);
+
+// Read sequences for a known set of IDs by creating a temp table and joining.
+// Reads ids[offset..offset+count] from the pre-materialized ID list,
+// loads them into a temp table, and joins against query_table to fetch sequences.
+void ReadBatchByIds(ClientContext &context, const std::string &query_table, const SequenceTableSchema &schema,
+                    const std::vector<std::string> &ids, idx_t offset, idx_t count, miint::SequenceRecordBatch &output);
+
 } // namespace duckdb

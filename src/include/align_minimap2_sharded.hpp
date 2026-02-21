@@ -34,12 +34,13 @@ struct ShardInfo {
 // coordinate batch claiming and worker tracking without holding the global lock.
 struct ActiveShard {
 	idx_t shard_idx;                                   // Index into Data::shards
-	idx_t batch_size;                                  // Per-shard batch size (read_count / max_threads_per_shard)
+	idx_t batch_size;                                  // Per-shard batch size (id_count / max_threads_per_shard)
+	std::vector<std::string> shard_read_ids;           // Pre-materialized read IDs for this shard (sorted)
 	std::shared_ptr<miint::SharedMinimap2Index> index; // Shared index, immutable after construction
-	std::atomic<idx_t> next_batch_offset {0};          // Threads atomically claim ranges
+	std::atomic<idx_t> next_batch_offset {0};          // Threads atomically claim ranges into shard_read_ids
 	std::atomic<idx_t> active_workers {0};             // Threads currently on this shard
 	std::atomic<bool> exhausted {false};               // Set when no more batches to read
-	std::atomic<bool> ready {false};                   // Set when index is loaded and published
+	std::atomic<bool> ready {false};                   // Set when index is loaded and IDs materialized
 };
 
 class AlignMinimap2ShardedTableFunction {
@@ -112,7 +113,8 @@ private:
 	// Claim work: join an existing active shard or start a new one.
 	// Returns the ActiveShard to work on, or nullptr if no more work.
 	// Index loading happens outside the lock.
-	static std::shared_ptr<ActiveShard> ClaimWork(GlobalState &gstate, const Data &bind_data, LocalState &lstate);
+	static std::shared_ptr<ActiveShard> ClaimWork(ClientContext &context, GlobalState &gstate, const Data &bind_data,
+	                                              LocalState &lstate);
 
 	// Release work: detach from current shard, clean up if last worker on exhausted shard.
 	static void ReleaseWork(GlobalState &gstate, LocalState &lstate);

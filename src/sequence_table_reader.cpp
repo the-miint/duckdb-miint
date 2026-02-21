@@ -3,6 +3,7 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/main/appender.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
@@ -416,6 +417,91 @@ bool ReadShardQueryBatch(ClientContext &context, const std::string &query_table,
 
 	// Return true if we got a full batch (more rows may exist)
 	return total_rows == batch_size;
+}
+
+std::vector<std::string> ReadShardIds(ClientContext &context, const std::string &read_to_shard_table,
+                                      const std::string &shard_name) {
+	auto &db = DatabaseInstance::GetDatabase(context);
+	Connection conn(db);
+
+	std::string query = "SELECT read_id FROM " + KeywordHelper::WriteOptionallyQuoted(read_to_shard_table) +
+	                    " WHERE shard_name = " + KeywordHelper::WriteQuoted(shard_name, '\'') + " ORDER BY read_id";
+
+	auto query_result = conn.Query(query);
+	if (query_result->HasError()) {
+		throw InvalidInputException("Failed to read IDs for shard '%s': %s", shard_name, query_result->GetError());
+	}
+
+	std::vector<std::string> ids;
+	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+
+	while (true) {
+		auto chunk = materialized.Fetch();
+		if (!chunk || chunk->size() == 0) {
+			break;
+		}
+
+		UnifiedVectorFormat id_data;
+		chunk->data[0].ToUnifiedFormat(chunk->size(), id_data);
+		auto id_strings = UnifiedVectorFormat::GetData<string_t>(id_data);
+
+		for (idx_t i = 0; i < chunk->size(); i++) {
+			auto idx = id_data.sel->get_index(i);
+			if (id_data.validity.RowIsValid(idx)) {
+				ids.push_back(id_strings[idx].GetString());
+			}
+		}
+	}
+
+	return ids;
+}
+
+void ReadBatchByIds(ClientContext &context, const std::string &query_table, const SequenceTableSchema &schema,
+                    const std::vector<std::string> &ids, idx_t offset, idx_t count,
+                    miint::SequenceRecordBatch &output) {
+	// Clamp count to available IDs
+	if (offset >= ids.size()) {
+		return;
+	}
+	count = std::min(count, static_cast<idx_t>(ids.size()) - offset);
+	if (count == 0) {
+		return;
+	}
+
+	auto &db = DatabaseInstance::GetDatabase(context);
+	Connection conn(db);
+
+	// Create temp table and load the ID slice via Appender
+	auto create_result = conn.Query("CREATE TEMPORARY TABLE _batch_ids (read_id VARCHAR)");
+	if (create_result->HasError()) {
+		throw InvalidInputException("Failed to create temp table for batch IDs: %s", create_result->GetError());
+	}
+
+	{
+		Appender appender(conn, "_batch_ids");
+		for (idx_t i = offset; i < offset + count; i++) {
+			appender.AppendRow(Value(ids[i]));
+		}
+		appender.Close();
+	}
+
+	// Join against query table using the temp table of exact IDs
+	// No ORDER BY needed — alignment doesn't depend on order
+	std::string query = "SELECT " + BuildSequenceColumnList(schema, "q.") + " FROM " +
+	                    KeywordHelper::WriteOptionallyQuoted(query_table) +
+	                    " q JOIN _batch_ids b ON q.read_id = b.read_id";
+
+	auto query_result = conn.Query(query);
+	if (query_result->HasError()) {
+		throw InvalidInputException("Failed to read batch sequences: %s", query_result->GetError());
+	}
+
+	// Clear output and set paired flag
+	output.clear();
+	output.is_paired = schema.has_sequence2;
+
+	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+	ProcessQueryResultChunks(materialized, schema, output);
 }
 
 } // namespace duckdb
