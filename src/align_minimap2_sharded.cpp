@@ -289,9 +289,11 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 	active->shard_read_ids = ReadShardIds(context, bind_data.read_to_shard_table, shard_info.name);
 	auto ids_ms =
 	    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - ids_start).count();
-	// Recompute batch_size from actual ID count (may differ from read_count estimate)
+	// Fixed batch size to bound per-thread memory usage during ReadBatchByIds.
+	// Each thread materializes one batch at a time; 2048 HiFi reads ≈ ~30MB.
+	static constexpr idx_t SHARD_READ_BATCH_SIZE = 2048;
 	idx_t id_count = active->shard_read_ids.size();
-	active->batch_size = std::max<idx_t>(1, id_count / gstate.max_threads_per_shard);
+	active->batch_size = std::min(SHARD_READ_BATCH_SIZE, std::max<idx_t>(1, id_count));
 	SHARD_DBG_MEM(gstate, "ClaimWork: MATERIALIZED %zu IDs for shard %zu in %ldms (batch_size=%zu)",
 	              static_cast<size_t>(id_count), static_cast<size_t>(shard_idx), static_cast<long>(ids_ms),
 	              static_cast<size_t>(active->batch_size));
