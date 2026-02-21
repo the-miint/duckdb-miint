@@ -14,8 +14,10 @@
 #include "duckdb/parallel/task_scheduler.hpp"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 namespace duckdb {
@@ -49,6 +51,7 @@ public:
 		miint::Minimap2Config config;
 		std::vector<ShardInfo> shards; // Sorted by read_count DESC (largest first)
 		idx_t max_threads_per_shard = 4;
+		bool debug = false;
 
 		// Output schema (shared with align_minimap2)
 		std::vector<std::string> names;
@@ -65,6 +68,8 @@ public:
 		idx_t shard_count = 0;
 		idx_t max_threads_per_shard = 4;
 		idx_t max_active_shards = 1; // ceil(db_threads / max_threads_per_shard)
+		bool debug = false;
+		std::chrono::steady_clock::time_point start_time;
 		std::vector<std::shared_ptr<ActiveShard>> active_shards;
 		idx_t total_associations = 0;
 		std::atomic<idx_t> associations_processed {0};
