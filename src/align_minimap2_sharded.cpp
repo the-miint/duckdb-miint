@@ -195,6 +195,10 @@ AlignMinimap2ShardedTableFunction::InitLocal(ExecutionContext &context, TableFun
 	return lstate;
 }
 
+// Fixed batch size to bound per-thread memory usage during ReadBatchByIds.
+// Each thread materializes one batch at a time; 2048 HiFi reads ≈ ~30MB.
+static constexpr idx_t SHARD_READ_BATCH_SIZE = 2048;
+
 std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(ClientContext &context, GlobalState &gstate,
                                                                           const Data &bind_data, LocalState &lstate) {
 	std::shared_ptr<ActiveShard> active;
@@ -221,7 +225,13 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 
 			// Phase 2: Try to claim a new shard if under the active shard limit
 			bool has_unclaimed = gstate.next_shard_idx < bind_data.shards.size();
-			if (has_unclaimed && gstate.active_shards.size() < gstate.max_active_shards) {
+			// For small shards (≤ batch_size reads), allow one shard per thread
+			// instead of the normal limit, so all threads stay busy
+			idx_t max_active = gstate.max_active_shards;
+			if (has_unclaimed && bind_data.shards[gstate.next_shard_idx].read_count <= SHARD_READ_BATCH_SIZE) {
+				max_active = gstate.max_active_shards * gstate.max_threads_per_shard;
+			}
+			if (has_unclaimed && gstate.active_shards.size() < max_active) {
 				shard_idx = gstate.next_shard_idx++;
 				active = std::make_shared<ActiveShard>();
 				active->shard_idx = shard_idx;
@@ -289,9 +299,6 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 	active->shard_read_ids = ReadShardIds(context, bind_data.read_to_shard_table, shard_info.name);
 	auto ids_ms =
 	    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - ids_start).count();
-	// Fixed batch size to bound per-thread memory usage during ReadBatchByIds.
-	// Each thread materializes one batch at a time; 2048 HiFi reads ≈ ~30MB.
-	static constexpr idx_t SHARD_READ_BATCH_SIZE = 2048;
 	idx_t id_count = active->shard_read_ids.size();
 	active->batch_size = std::min(SHARD_READ_BATCH_SIZE, std::max<idx_t>(1, id_count));
 	SHARD_DBG_MEM(gstate, "ClaimWork: MATERIALIZED %zu IDs for shard %zu in %ldms (batch_size=%zu)",
