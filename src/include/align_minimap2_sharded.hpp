@@ -11,6 +11,7 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -63,16 +64,13 @@ public:
 		idx_t next_shard_idx = 0;
 		idx_t shard_count = 0;
 		idx_t max_threads_per_shard = 4;
-		idx_t max_active_shards = 4; // Limits concurrent index loads to bound memory
+		idx_t max_active_shards = 1; // ceil(db_threads / max_threads_per_shard)
 		std::vector<std::shared_ptr<ActiveShard>> active_shards;
 		idx_t total_associations = 0;
 		std::atomic<idx_t> associations_processed {0};
 
-		static constexpr idx_t MAX_CONCURRENT_SHARDS = 4;
-
 		idx_t MaxThreads() const override {
-			idx_t concurrent = std::min(shard_count, MAX_CONCURRENT_SHARDS);
-			return concurrent * max_threads_per_shard;
+			return max_active_shards * max_threads_per_shard;
 		}
 
 		GlobalState() = default;

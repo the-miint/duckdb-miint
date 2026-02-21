@@ -113,7 +113,12 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2ShardedTableFunction::InitGlob
 	auto gstate = make_uniq<GlobalState>();
 	gstate->shard_count = data.shards.size();
 	gstate->max_threads_per_shard = data.max_threads_per_shard;
-	gstate->max_active_shards = std::min(gstate->shard_count, GlobalState::MAX_CONCURRENT_SHARDS);
+
+	// Derive max_active_shards from available threads: ceil(db_threads / max_threads_per_shard)
+	// This bounds peak index memory to ceil(threads/tps) * index_size
+	idx_t db_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+	idx_t derived = (db_threads + data.max_threads_per_shard - 1) / data.max_threads_per_shard;
+	gstate->max_active_shards = std::max<idx_t>(1, std::min(derived, gstate->shard_count));
 	idx_t total = 0;
 	for (const auto &shard : data.shards) {
 		total += shard.read_count;
