@@ -202,6 +202,41 @@ struct SAMRecordBatch {
 		sequences.clear();
 		quals.clear();
 	}
+
+	// Release excess capacity back to allocator (call after draining buffer)
+	void shrink_to_fit() {
+		read_ids.shrink_to_fit();
+		flags.shrink_to_fit();
+		references.shrink_to_fit();
+		positions.shrink_to_fit();
+		stop_positions.shrink_to_fit();
+		mapqs.shrink_to_fit();
+		cigars.shrink_to_fit();
+		mate_references.shrink_to_fit();
+		mate_positions.shrink_to_fit();
+		template_lengths.shrink_to_fit();
+		tag_as_values.shrink_to_fit();
+		tag_xs_values.shrink_to_fit();
+		tag_ys_values.shrink_to_fit();
+		tag_xn_values.shrink_to_fit();
+		tag_xm_values.shrink_to_fit();
+		tag_xo_values.shrink_to_fit();
+		tag_xg_values.shrink_to_fit();
+		tag_nm_values.shrink_to_fit();
+		tag_as_valid.shrink_to_fit();
+		tag_xs_valid.shrink_to_fit();
+		tag_ys_valid.shrink_to_fit();
+		tag_xn_valid.shrink_to_fit();
+		tag_xm_valid.shrink_to_fit();
+		tag_xo_valid.shrink_to_fit();
+		tag_xg_valid.shrink_to_fit();
+		tag_nm_valid.shrink_to_fit();
+		tag_yt_values.shrink_to_fit();
+		tag_md_values.shrink_to_fit();
+		tag_sa_values.shrink_to_fit();
+		sequences.shrink_to_fit();
+		quals.shrink_to_fit();
+	}
 };
 
 // Helper functions for extracting fields from bam1_t and populating batches

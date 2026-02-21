@@ -30,9 +30,9 @@ static constexpr idx_t ALIGNMENT_QUERY_BATCH_SIZE = 1024;
 static constexpr idx_t MINIMAP2_QUERY_BATCH_SIZE = ALIGNMENT_QUERY_BATCH_SIZE;
 
 // Batch size for sharded alignment query reads.
-// Larger than ALIGNMENT_QUERY_BATCH_SIZE to reduce per-batch overhead:
-// each batch creates a new Connection and re-executes a JOIN query,
-// so fewer larger batches means threads spend more time aligning.
+// Used by align_bowtie2_sharded. align_minimap2_sharded computes a dynamic
+// per-shard batch size instead (shard.read_count / max_threads_per_shard).
+// TODO: Apply dynamic batch sizing to align_bowtie2_sharded as well.
 static constexpr idx_t SHARDED_QUERY_BATCH_SIZE = 100000;
 
 // Get the standard alignment output column names

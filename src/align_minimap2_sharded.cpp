@@ -225,11 +225,15 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Global
 				shard_idx = gstate.next_shard_idx++;
 				active = std::make_shared<ActiveShard>();
 				active->shard_idx = shard_idx;
+				// Compute per-shard batch size: divide reads evenly across threads
+				auto &si = bind_data.shards[shard_idx];
+				active->batch_size = std::max<idx_t>(1, si.read_count / gstate.max_threads_per_shard);
 				active->active_workers.store(1, std::memory_order_release);
 				// ready=false (default); set to true after index loads
 				gstate.active_shards.push_back(active);
-				SHARD_DBG(gstate, "ClaimWork: NEW shard %zu '%s' (active_shards=%zu)", static_cast<size_t>(shard_idx),
-				          bind_data.shards[shard_idx].name.c_str(), static_cast<size_t>(gstate.active_shards.size()));
+				SHARD_DBG(gstate, "ClaimWork: NEW shard %zu '%s' (active_shards=%zu, batch_size=%zu)",
+				          static_cast<size_t>(shard_idx), si.name.c_str(),
+				          static_cast<size_t>(gstate.active_shards.size()), static_cast<size_t>(active->batch_size));
 				break; // exit lock to load index
 			}
 
@@ -352,7 +356,7 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 		// Atomically claim batch offset
 		auto &active = local_state.current_active_shard;
 		auto &shard_info = bind_data.shards[active->shard_idx];
-		idx_t my_offset = active->next_batch_offset.fetch_add(SHARDED_QUERY_BATCH_SIZE, std::memory_order_acq_rel);
+		idx_t my_offset = active->next_batch_offset.fetch_add(active->batch_size, std::memory_order_acq_rel);
 
 		if (my_offset >= shard_info.read_count) {
 			// All batches claimed already
@@ -369,19 +373,24 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 		// throwaway copy because the atomic next_batch_offset drives pagination.
 		idx_t batch_offset = my_offset;
 		miint::SequenceRecordBatch query_batch;
-		SHARD_DBG(global_state, "Execute: shard %zu READ offset=%zu batch_size=%zu",
+		SHARD_DBG(global_state,
+		          "Execute: shard %zu READ offset=%zu batch_size=%zu (query: SELECT ... FROM %s q JOIN %s r "
+		          "ON q.read_id=r.read_id WHERE r.shard_name='%s' ORDER BY %s LIMIT %zu OFFSET %zu)",
 		          static_cast<size_t>(active->shard_idx), static_cast<size_t>(my_offset),
-		          static_cast<size_t>(SHARDED_QUERY_BATCH_SIZE));
+		          static_cast<size_t>(active->batch_size), bind_data.query_table.c_str(),
+		          bind_data.read_to_shard_table.c_str(), shard_info.name.c_str(),
+		          bind_data.query_schema.is_physical_table ? "q.rowid" : "q.read_id",
+		          static_cast<size_t>(active->batch_size), static_cast<size_t>(batch_offset));
 		auto read_start = std::chrono::steady_clock::now();
 		bool has_more =
 		    ReadShardQueryBatch(context, bind_data.query_table, bind_data.read_to_shard_table, shard_info.name,
-		                        bind_data.query_schema, SHARDED_QUERY_BATCH_SIZE, batch_offset, query_batch);
+		                        bind_data.query_schema, active->batch_size, batch_offset, query_batch);
 		auto read_ms =
 		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - read_start)
 		        .count();
-		SHARD_DBG(global_state, "Execute: shard %zu READ done: %zu reads in %ldms (has_more=%s)",
-		          static_cast<size_t>(active->shard_idx), static_cast<size_t>(query_batch.size()),
-		          static_cast<long>(read_ms), has_more ? "yes" : "no");
+		SHARD_DBG_MEM(global_state, "Execute: shard %zu READ done: %zu reads in %ldms (has_more=%s)",
+		              static_cast<size_t>(active->shard_idx), static_cast<size_t>(query_batch.size()),
+		              static_cast<long>(read_ms), has_more ? "yes" : "no");
 
 		if (query_batch.empty() && !has_more) {
 			// Actual data exhausted (read_count was approximate)
@@ -395,8 +404,11 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 			active->exhausted.store(true, std::memory_order_release);
 		}
 
-		// Align batch
+		// Align batch — release old buffer capacity before allocating new results
 		local_state.result_buffer.clear();
+		local_state.result_buffer.shrink_to_fit();
+		SHARD_DBG_MEM(global_state, "Execute: shard %zu buffer cleared+shrunk before align",
+		              static_cast<size_t>(active->shard_idx));
 		local_state.buffer_offset = 0;
 
 		if (!query_batch.empty()) {
