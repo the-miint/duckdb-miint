@@ -54,6 +54,7 @@ public:
 		std::vector<ShardInfo> shards; // Sorted by read_count DESC (largest first)
 		idx_t max_threads_per_shard = 4;
 		bool debug = false;
+		bool include_shard_name = false;
 
 		// Output schema (shared with align_minimap2)
 		std::vector<std::string> names;
@@ -89,6 +90,7 @@ public:
 		bool has_shard = false;
 		miint::SAMRecordBatch result_buffer;
 		idx_t buffer_offset = 0;
+		std::string current_shard_name;
 
 		LocalState() = default;
 	};

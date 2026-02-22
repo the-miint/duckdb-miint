@@ -293,6 +293,48 @@ query1	ref1
 query2	ref2
 
 # ==============================================================================
+# INCLUDE_SHARD_NAME PARAMETER TESTS
+# ==============================================================================
+
+# Test: include_shard_name shows which shard each alignment came from
+query III
+SELECT read_id, reference, shard_name
+FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard',
+    max_secondary := 0,
+    include_shard_name := true)
+ORDER BY read_id;
+----
+query1	ref1	shard_a
+query2	ref2	shard_b
+
+# Test: without include_shard_name, shard_name column is not present (default)
+query II
+SELECT read_id, reference
+FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard',
+    max_secondary := 0)
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# Test: include_shard_name = false (explicit)
+query II
+SELECT read_id, reference
+FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard',
+    max_secondary := 0,
+    include_shard_name := false)
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# ==============================================================================
 # CLEANUP
 # ==============================================================================
 

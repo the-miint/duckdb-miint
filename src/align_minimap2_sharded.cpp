@@ -145,8 +145,20 @@ unique_ptr<FunctionData> AlignMinimap2ShardedTableFunction::Bind(ClientContext &
 		data->debug = debug_param->second.GetValue<bool>();
 	}
 
+	// Parse include_shard_name parameter
+	auto include_shard_param = input.named_parameters.find("include_shard_name");
+	if (include_shard_param != input.named_parameters.end() && !include_shard_param->second.IsNull()) {
+		data->include_shard_name = include_shard_param->second.GetValue<bool>();
+	}
+
 	// Read shard counts and validate .mmi files exist (fail fast)
 	data->shards = BuildMinimap2ShardInfos(context, data->read_to_shard_table, data->shard_directory, fs);
+
+	// Conditionally add shard_name column
+	if (data->include_shard_name) {
+		data->names.emplace_back("shard_name");
+		data->types.emplace_back(LogicalType::VARCHAR);
+	}
 
 	// Set output schema
 	for (const auto &name : data->names) {
@@ -364,6 +376,14 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 			// Output up to STANDARD_VECTOR_SIZE results
 			idx_t output_count = std::min(available, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
 			OutputSAMRecordBatch(output, local_state.result_buffer, local_state.buffer_offset, output_count);
+			if (bind_data.include_shard_name) {
+				auto shard_col_idx = output.ColumnCount() - 1;
+				auto &shard_vec = output.data[shard_col_idx];
+				for (idx_t i = 0; i < output_count; i++) {
+					FlatVector::GetData<string_t>(shard_vec)[i] =
+					    StringVector::AddString(shard_vec, local_state.current_shard_name);
+				}
+			}
 			local_state.buffer_offset += output_count;
 			return;
 		}
@@ -380,6 +400,7 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 			}
 			local_state.current_active_shard = active;
 			local_state.has_shard = true;
+			local_state.current_shard_name = bind_data.shards[active->shard_idx].name;
 			local_state.aligner->attach_shared_index(active->index);
 		}
 
@@ -481,6 +502,7 @@ TableFunction AlignMinimap2ShardedTableFunction::GetFunction() {
 	tf.named_parameters["eqx"] = LogicalType::BOOLEAN;
 	tf.named_parameters["max_threads_per_shard"] = LogicalType::INTEGER;
 	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
+	tf.named_parameters["include_shard_name"] = LogicalType::BOOLEAN;
 
 	tf.table_scan_progress = Progress;
 

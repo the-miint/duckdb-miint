@@ -32,6 +32,7 @@
 #include <rype_extract.hpp>
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include <hdf5.h>
+#include <minimap2/minimap.h>
 
 namespace fs = std::filesystem;
 
@@ -62,12 +63,19 @@ static void MiintVersionFunction(DataChunk &args, ExpressionState &state, Vector
 #endif
 }
 
+static void Minimap2VersionFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	result.Reference(Value(MM_VERSION));
+}
+
 static void LoadInternal(ExtensionLoader &loader) {
 	// TODO: use [[nodiscard]] throughout in headers
 	// TODO: //! comment on headers
 
 	ScalarFunction version_func("miint_version", {}, LogicalType::VARCHAR, MiintVersionFunction);
 	loader.RegisterFunction(version_func);
+
+	ScalarFunction mm2_version_func("minimap2_version", {}, LogicalType::VARCHAR, Minimap2VersionFunction);
+	loader.RegisterFunction(mm2_version_func);
 
 	ReadFastxTableFunction::Register(loader);
 	ReadAlignmentsTableFunction::Register(loader);
