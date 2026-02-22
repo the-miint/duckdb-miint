@@ -68,6 +68,30 @@ project(${TARGET_NAME})
 
 include(ExternalProject)
 
+# Capture git describe for submodules at configure time
+execute_process(COMMAND git describe --tags --dirty --always
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2
+    OUTPUT_VARIABLE MINIMAP2_GIT_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT MINIMAP2_GIT_VERSION)
+    set(MINIMAP2_GIT_VERSION "unknown")
+endif()
+
+execute_process(COMMAND git describe --tags --dirty --always
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib
+    OUTPUT_VARIABLE WFA2_GIT_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT WFA2_GIT_VERSION)
+    set(WFA2_GIT_VERSION "unknown")
+endif()
+
+execute_process(COMMAND git describe --tags --dirty --always
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype
+    OUTPUT_VARIABLE RYPE_GIT_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT RYPE_GIT_VERSION)
+    set(RYPE_GIT_VERSION "unknown")
+endif()
+
+message(STATUS "Submodule versions: minimap2=${MINIMAP2_GIT_VERSION} WFA2=${WFA2_GIT_VERSION} rype=${RYPE_GIT_VERSION}")
+
 # Build htslib from release tarball
 # Configure with zstd support if available (htslib autodetects via pkg-config)
 if(HAVE_LIBZSTD)
@@ -372,7 +396,10 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 #    target_compile_options(${LOADABLE_EXTENSION_NAME} PRIVATE /W4)
 #endif()
 
-target_compile_definitions(${EXTENSION_NAME} PRIVATE RYPE_ARROW)
+target_compile_definitions(${EXTENSION_NAME} PRIVATE RYPE_ARROW
+    MINIMAP2_GIT_VERSION="${MINIMAP2_GIT_VERSION}"
+    WFA2_GIT_VERSION="${WFA2_GIT_VERSION}"
+    RYPE_GIT_VERSION="${RYPE_GIT_VERSION}")
 target_link_libraries(${EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
@@ -405,7 +432,10 @@ if(HAVE_LIBZSTD)
     target_link_libraries(${EXTENSION_NAME} ${ZSTD_TARGET})
 endif()
 
-target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE RYPE_ARROW)
+target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE RYPE_ARROW
+    MINIMAP2_GIT_VERSION="${MINIMAP2_GIT_VERSION}"
+    WFA2_GIT_VERSION="${WFA2_GIT_VERSION}"
+    RYPE_GIT_VERSION="${RYPE_GIT_VERSION}")
 target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB

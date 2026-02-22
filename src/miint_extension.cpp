@@ -32,7 +32,9 @@
 #include <rype_extract.hpp>
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include <hdf5.h>
-#include <minimap2/minimap.h>
+#include <htslib-1.22.1/htslib/hts.h>
+#include <kseq++/config.hpp>
+#include <zlib.h>
 
 namespace fs = std::filesystem;
 
@@ -63,8 +65,47 @@ static void MiintVersionFunction(DataChunk &args, ExpressionState &state, Vector
 #endif
 }
 
-static void Minimap2VersionFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	result.Reference(Value(MM_VERSION));
+struct MiintVersionsData : public TableFunctionData {
+	vector<pair<string, string>> versions;
+	bool done = false;
+};
+
+static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableFunctionBindInput &input,
+                                                  vector<LogicalType> &return_types, vector<string> &names) {
+	auto data = make_uniq<MiintVersionsData>();
+	names = {"library", "version"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR};
+
+#ifdef EXT_VERSION_MIINT
+	data->versions.emplace_back("miint", EXT_VERSION_MIINT);
+#else
+	data->versions.emplace_back("miint", "unversioned");
+#endif
+	data->versions.emplace_back("htslib", hts_version());
+	data->versions.emplace_back("minimap2", MINIMAP2_GIT_VERSION);
+	data->versions.emplace_back("kseq++", KSEQPP_PROJECT_VERSION);
+	data->versions.emplace_back("WFA2-lib", WFA2_GIT_VERSION);
+	data->versions.emplace_back("HDF5", H5_VERS_STR);
+	data->versions.emplace_back("zlib", zlibVersion());
+	data->versions.emplace_back("rype", RYPE_GIT_VERSION);
+	return data;
+}
+
+static void MiintVersionsExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &data = data_p.bind_data->CastNoConst<MiintVersionsData>();
+	if (data.done) {
+		output.SetCardinality(0);
+		return;
+	}
+	idx_t count = data.versions.size();
+	for (idx_t i = 0; i < count; i++) {
+		FlatVector::GetData<string_t>(output.data[0])[i] =
+		    StringVector::AddString(output.data[0], data.versions[i].first);
+		FlatVector::GetData<string_t>(output.data[1])[i] =
+		    StringVector::AddString(output.data[1], data.versions[i].second);
+	}
+	output.SetCardinality(count);
+	data.done = true;
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
@@ -74,8 +115,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ScalarFunction version_func("miint_version", {}, LogicalType::VARCHAR, MiintVersionFunction);
 	loader.RegisterFunction(version_func);
 
-	ScalarFunction mm2_version_func("minimap2_version", {}, LogicalType::VARCHAR, Minimap2VersionFunction);
-	loader.RegisterFunction(mm2_version_func);
+	TableFunction versions_table_func("miint_versions", {}, MiintVersionsExecute, MiintVersionsBind);
+	loader.RegisterFunction(versions_table_func);
 
 	ReadFastxTableFunction::Register(loader);
 	ReadAlignmentsTableFunction::Register(loader);
