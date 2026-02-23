@@ -85,7 +85,15 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 	data->versions.emplace_back("minimap2", MINIMAP2_GIT_VERSION);
 	data->versions.emplace_back("kseq++", KSEQPP_PROJECT_VERSION);
 	data->versions.emplace_back("WFA2-lib", WFA2_GIT_VERSION);
+#ifdef H5_VERS_STR
 	data->versions.emplace_back("HDF5", H5_VERS_STR);
+#elif defined(H5_VERSION)
+	data->versions.emplace_back("HDF5", H5_VERSION);
+#else
+	data->versions.emplace_back("HDF5",
+	                             std::to_string(H5_VERS_MAJOR) + "." + std::to_string(H5_VERS_MINOR) + "." +
+	                                 std::to_string(H5_VERS_RELEASE));
+#endif
 	data->versions.emplace_back("zlib", zlibVersion());
 	data->versions.emplace_back("rype", RYPE_GIT_VERSION);
 	return data;
