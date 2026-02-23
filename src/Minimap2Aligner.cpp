@@ -466,8 +466,9 @@ void Minimap2Aligner::reg_to_sam(const void *reg_ptr, const std::string &read_id
 	bool is_paired = (segment_idx >= 0);
 	bool is_unmapped = (reg->rid < 0);
 
+	uint16_t flags = calculate_flags(reg, is_paired, segment_idx, mate_mapped, mate_rev, is_unmapped);
 	batch.read_ids.push_back(read_id);
-	batch.flags.push_back(calculate_flags(reg, is_paired, segment_idx, mate_mapped, mate_rev, is_unmapped));
+	batch.flags.push_back(flags);
 
 	if (is_unmapped) {
 		batch.references.push_back("*");
@@ -480,7 +481,7 @@ void Minimap2Aligner::reg_to_sam(const void *reg_ptr, const std::string &read_id
 		batch.positions.push_back(reg->rs + 1); // Convert to 1-based
 		batch.stop_positions.push_back(calculate_stop_position(reg->rs + 1, reg));
 		batch.mapqs.push_back(static_cast<uint8_t>(reg->mapq));
-		batch.cigars.push_back(cigar_string(reg));
+		batch.cigars.push_back(cigar_string(reg, static_cast<int32_t>(query_seq.length()), flags));
 	}
 
 	// Mate reference
@@ -542,18 +543,42 @@ void Minimap2Aligner::reg_to_sam(const void *reg_ptr, const std::string &read_id
 	batch.tag_sa_values.push_back("");
 }
 
-std::string Minimap2Aligner::cigar_string(const void *reg_ptr) const {
+std::string Minimap2Aligner::cigar_string(const void *reg_ptr, int32_t query_len, uint16_t sam_flags) const {
 	const mm_reg1_t *reg = static_cast<const mm_reg1_t *>(reg_ptr);
 
 	if (!reg->p || reg->p->n_cigar == 0) {
 		return "*";
 	}
 
+	// Bounds validation: qs/qe must be within [0, query_len]
+	if (reg->qs < 0 || reg->qe < 0 || reg->qs > query_len || reg->qe > query_len || reg->qs > reg->qe) {
+		return "*";
+	}
+
+	// Compute clip lengths from query start/end, accounting for strand
+	// (matches minimap2 format.c:490-491)
+	int clip_front = reg->rev ? (query_len - reg->qe) : reg->qs;
+	int clip_back = reg->rev ? reg->qs : (query_len - reg->qe);
+
+	// Supplementary (0x800) → hard clip; primary/secondary → soft clip.
+	// This is a simplification of minimap2 format.c:501-502 which also checks
+	// MM_F_SECONDARY_SEQ and MM_F_SOFTCLIP flags — neither is set by this extension.
+	char clip_char = (sam_flags & 0x800) ? 'H' : 'S';
+
 	std::ostringstream oss;
+
+	if (clip_front > 0) {
+		oss << clip_front << clip_char;
+	}
+
 	for (uint32_t i = 0; i < reg->p->n_cigar; i++) {
 		uint32_t op = reg->p->cigar[i] & 0xf;
 		uint32_t len = reg->p->cigar[i] >> 4;
 		oss << len << MM_CIGAR_STR[op];
+	}
+
+	if (clip_back > 0) {
+		oss << clip_back << clip_char;
 	}
 
 	return oss.str();
@@ -606,16 +631,11 @@ uint16_t Minimap2Aligner::calculate_flags(const void *reg_ptr, bool is_paired, i
 		}
 	}
 
-	// Check for secondary/supplementary
+	// Secondary/supplementary detection (matches minimap2 format.c:546-547)
 	if (reg->parent != reg->id) {
-		if (reg->sam_pri == 0) {
-			flags |= 0x100; // Secondary alignment
-		}
-	}
-
-	// Supplementary alignment flag
-	if (reg->split == 2) { // split type indicates supplementary
-		flags |= 0x800;    // Supplementary
+		flags |= 0x100; // Secondary alignment
+	} else if (!reg->sam_pri) {
+		flags |= 0x800; // Supplementary alignment
 	}
 
 	return flags;
@@ -654,24 +674,18 @@ void Minimap2Aligner::save_index(const std::string &output_path) const {
 		throw std::runtime_error("Cannot create index file: " + output_path);
 	}
 
-	// Write index using minimap2 API with proper error handling
-	try {
-		mm_idx_dump(fp, index_.get());
+	// Write index using minimap2 API
+	mm_idx_dump(fp, index_.get());
 
-		// Check for write errors after dump
-		if (ferror(fp)) {
-			fclose(fp); // Clean up before throwing
-			throw std::runtime_error("Write error while saving index to: " + output_path);
-		}
-
-		// Close and check for errors
-		if (fclose(fp) != 0) {
-			throw std::runtime_error("Error closing index file: " + output_path);
-		}
-	} catch (...) {
-		// Ensure file handle is closed on any exception
+	// Check for write errors after dump
+	if (ferror(fp)) {
 		fclose(fp);
-		throw;
+		throw std::runtime_error("Write error while saving index to: " + output_path);
+	}
+
+	// Close and check for errors (fclose flushes, so check return value)
+	if (fclose(fp) != 0) {
+		throw std::runtime_error("Error closing index file: " + output_path);
 	}
 }
 

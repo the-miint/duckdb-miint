@@ -2,12 +2,31 @@
 #include "Minimap2Aligner.hpp"
 #include "SAMRecord.hpp"
 #include "SequenceRecord.hpp"
+#include "sequence_utils.hpp"
 #include <cstdio>
 #include <memory>
 #include <set>
 #include <string>
 #include <thread>
 #include <vector>
+
+// Helper to sum query-consuming CIGAR operations (M, I, S, =, X)
+// D, N, H, P do not consume query bases
+static int cigar_query_consumed(const std::string &cigar) {
+	int total = 0;
+	int num = 0;
+	for (char c : cigar) {
+		if (c >= '0' && c <= '9') {
+			num = num * 10 + (c - '0');
+		} else {
+			if (c == 'M' || c == 'I' || c == 'S' || c == '=' || c == 'X') {
+				total += num;
+			}
+			num = 0;
+		}
+	}
+	return total;
+}
 
 using namespace miint;
 
@@ -710,4 +729,100 @@ TEST_CASE("Cleanup temp .mmi files", "[Minimap2Aligner]") {
 	for (const auto &path : temp_files) {
 		std::remove(path.c_str());
 	}
+}
+
+TEST_CASE("Minimap2Aligner CIGAR includes soft clips for partial query alignment", "[Minimap2Aligner]") {
+	Minimap2Config config;
+	config.preset = "sr";
+	config.eqx = true;
+	Minimap2Aligner aligner(config);
+
+	// Reference sequence
+	std::string ref_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+	                      "GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC";
+	aligner.build_index({{"reference", ref_seq}});
+
+	// Query: 25bp of non-matching poly-T + full reference sequence + 25bp of non-matching poly-T
+	// The reference portion should align perfectly; the poly-T flanks should be soft-clipped
+	std::string junk(25, 'T');
+	std::string query = junk + ref_seq + junk;
+
+	auto queries = make_query_batch("clipped_query", query);
+	SAMRecordBatch batch;
+	aligner.align(queries, batch);
+
+	REQUIRE(batch.size() >= 1);
+	INFO("CIGAR: " << batch.cigars[0]);
+
+	// The CIGAR must contain soft clips (S) for the non-matching flanking regions
+	REQUIRE(batch.cigars[0].find('S') != std::string::npos);
+
+	// Sum of query-consuming CIGAR operations (M/I/S/=/X) must equal query length
+	REQUIRE(cigar_query_consumed(batch.cigars[0]) == static_cast<int>(query.length()));
+}
+
+TEST_CASE("Minimap2Aligner CIGAR soft clips with map-hifi preset", "[Minimap2Aligner]") {
+	Minimap2Config config;
+	config.preset = "map-hifi";
+	config.eqx = true;
+	Minimap2Aligner aligner(config);
+
+	// 300+ bp reference required because map-hifi sets a=1 and min_dp_max=200,
+	// so alignment score must reach 200 which needs at least 200bp of exact match
+	std::string ref_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+	                      "GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC"
+	                      "AATTCCGGAATTCCGGAATTCCGGAATTCCGGAATTCCGGAATTCCGGAATT"
+	                      "TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA"
+	                      "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA"
+	                      "CGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGAT";
+	aligner.build_index({{"reference", ref_seq}});
+
+	// Query: 30bp non-matching + full reference + 30bp non-matching
+	std::string junk(30, 'T');
+	std::string query = junk + ref_seq + junk;
+
+	auto queries = make_query_batch("hifi_clipped", query);
+	SAMRecordBatch batch;
+	aligner.align(queries, batch);
+
+	REQUIRE(batch.size() >= 1);
+	INFO("CIGAR: " << batch.cigars[0]);
+
+	REQUIRE(batch.cigars[0].find('S') != std::string::npos);
+	REQUIRE(cigar_query_consumed(batch.cigars[0]) == static_cast<int>(query.length()));
+}
+
+TEST_CASE("Minimap2Aligner CIGAR soft clips on reverse strand", "[Minimap2Aligner]") {
+	Minimap2Config config;
+	config.preset = "sr";
+	config.eqx = true;
+	Minimap2Aligner aligner(config);
+
+	// Reference sequence
+	std::string ref_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+	                      "GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC";
+	aligner.build_index({{"reference", ref_seq}});
+
+	// Query: poly-T flank + reverse complement of reference + poly-T flank
+	// This forces alignment on the reverse strand (reg->rev = 1),
+	// exercising the clip_front/clip_back strand swap logic
+	std::string junk(25, 'T');
+	std::string query = junk + miint::dna_reverse_complement(ref_seq) + junk;
+
+	auto queries = make_query_batch("rev_clipped", query);
+	SAMRecordBatch batch;
+	aligner.align(queries, batch);
+
+	REQUIRE(batch.size() >= 1);
+	INFO("CIGAR: " << batch.cigars[0]);
+	INFO("Flags: " << batch.flags[0]);
+
+	// Must be on reverse strand
+	REQUIRE((batch.flags[0] & 0x10) != 0);
+
+	// CIGAR must contain soft clips
+	REQUIRE(batch.cigars[0].find('S') != std::string::npos);
+
+	// Query-consuming CIGAR operations must equal query length
+	REQUIRE(cigar_query_consumed(batch.cigars[0]) == static_cast<int>(query.length()));
 }

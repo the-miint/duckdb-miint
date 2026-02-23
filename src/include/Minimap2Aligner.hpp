@@ -136,8 +136,8 @@ private:
 	                SAMRecordBatch &batch, int segment_idx, bool mate_mapped, bool mate_rev, int32_t mate_rid,
 	                int32_t mate_pos, int32_t tlen);
 
-	// Generate CIGAR string from mm_extra_t
-	std::string cigar_string(const void *reg_ptr) const;
+	// Generate CIGAR string from mm_extra_t, including soft/hard clips
+	std::string cigar_string(const void *reg_ptr, int32_t query_len, uint16_t sam_flags) const;
 
 	// Calculate stop position from CIGAR
 	int64_t calculate_stop_position(int64_t start_pos, const void *reg_ptr) const;
