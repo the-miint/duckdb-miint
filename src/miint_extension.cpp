@@ -90,9 +90,8 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 #elif defined(H5_VERSION)
 	data->versions.emplace_back("HDF5", H5_VERSION);
 #else
-	data->versions.emplace_back("HDF5",
-	                             std::to_string(H5_VERS_MAJOR) + "." + std::to_string(H5_VERS_MINOR) + "." +
-	                                 std::to_string(H5_VERS_RELEASE));
+	data->versions.emplace_back("HDF5", std::to_string(H5_VERS_MAJOR) + "." + std::to_string(H5_VERS_MINOR) + "." +
+	                                        std::to_string(H5_VERS_RELEASE));
 #endif
 	data->versions.emplace_back("zlib", zlibVersion());
 	data->versions.emplace_back("rype", RYPE_GIT_VERSION);
