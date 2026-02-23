@@ -138,8 +138,10 @@ void Minimap2Aligner::InitOptions(const Minimap2Config &config, mm_idxopt_t &iop
 	mopt.flag |= MM_F_OUT_MD;
 
 	// Set max secondary alignments
-	// best_n controls how many chains go to DP alignment
-	mopt.best_n = config.max_secondary + 1;
+	// best_n controls how many chains go to DP alignment and how many
+	// secondary alignments are retained. Match minimap2 command-line
+	// behavior: -N sets best_n directly (default 5).
+	mopt.best_n = config.max_secondary;
 }
 
 // Static helper: load index from .mmi file

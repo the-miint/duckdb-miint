@@ -427,8 +427,8 @@ TEST_CASE("InitOptions produces valid options", "[Minimap2Aligner]") {
 	REQUIRE((mopt.flag & MM_F_EQX) != 0);
 	// Check MD tag output
 	REQUIRE((mopt.flag & MM_F_OUT_MD) != 0);
-	// Check best_n = max_secondary + 1
-	REQUIRE(mopt.best_n == 4);
+	// Check best_n = max_secondary (matches minimap2 CLI default behavior)
+	REQUIRE(mopt.best_n == 3);
 }
 
 TEST_CASE("InitOptions with custom k and w", "[Minimap2Aligner]") {
