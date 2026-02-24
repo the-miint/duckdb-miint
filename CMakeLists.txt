@@ -216,12 +216,25 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
     set(MINIMAP2_ARCH_FLAGS "aarch64=1")
 endif()
 
+# Detect DuckDB's jemalloc (not present on musl/macOS/Windows builds).
+# DUCKDB_EXTENSION_JEMALLOC_SHOULD_LINK is set during extension registration,
+# before add_subdirectory, so it's available here.
+if(DUCKDB_EXTENSION_JEMALLOC_SHOULD_LINK)
+    set(MIINT_HAS_JEMALLOC TRUE)
+    set(MINIMAP2_ALLOC_FLAGS "-DMIINT_USE_JEMALLOC -include ${CMAKE_CURRENT_SOURCE_DIR}/src/include/mm_alloc.h")
+    message(STATUS "DuckDB jemalloc detected — minimap2 will use jemalloc allocator")
+else()
+    set(MIINT_HAS_JEMALLOC FALSE)
+    set(MINIMAP2_ALLOC_FLAGS "")
+    message(STATUS "DuckDB jemalloc not detected — minimap2 will use system allocator")
+endif()
+
 # Build minimap2 from source (v2.30)
 ExternalProject_Add(
     minimap2_build
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2
     CONFIGURE_COMMAND ""
-    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2 libminimap2.a "CFLAGS=-g -Wall -O2 -Wc++-compat -fPIC ${MINIMAP2_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}" "CPPFLAGS=-DHAVE_KALLOC" ${MINIMAP2_ARCH_FLAGS}
+    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2 libminimap2.a "CFLAGS=-g -Wall -O2 -Wc++-compat -fPIC ${MINIMAP2_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}" "CPPFLAGS=-DHAVE_KALLOC ${MINIMAP2_ALLOC_FLAGS}" ${MINIMAP2_ARCH_FLAGS}
     INSTALL_COMMAND ""
     BUILD_IN_SOURCE 1
     BUILD_BYPRODUCTS ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2/libminimap2.a
@@ -399,7 +412,8 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 target_compile_definitions(${EXTENSION_NAME} PRIVATE RYPE_ARROW
     MINIMAP2_GIT_VERSION="${MINIMAP2_GIT_VERSION}"
     WFA2_GIT_VERSION="${WFA2_GIT_VERSION}"
-    RYPE_GIT_VERSION="${RYPE_GIT_VERSION}")
+    RYPE_GIT_VERSION="${RYPE_GIT_VERSION}"
+    $<$<BOOL:${MIINT_HAS_JEMALLOC}>:MIINT_USE_JEMALLOC>)
 target_link_libraries(${EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
@@ -435,7 +449,8 @@ endif()
 target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE RYPE_ARROW
     MINIMAP2_GIT_VERSION="${MINIMAP2_GIT_VERSION}"
     WFA2_GIT_VERSION="${WFA2_GIT_VERSION}"
-    RYPE_GIT_VERSION="${RYPE_GIT_VERSION}")
+    RYPE_GIT_VERSION="${RYPE_GIT_VERSION}"
+    $<$<BOOL:${MIINT_HAS_JEMALLOC}>:MIINT_USE_JEMALLOC>)
 target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
@@ -520,3 +535,7 @@ target_include_directories(tests PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/htslib/include
     ${CMAKE_CURRENT_SOURCE_DIR}/duckdb/third_party/miniz  # For ExtractFromZip tests
 )
+if(MIINT_HAS_JEMALLOC)
+    target_sources(tests PRIVATE src/mm_alloc_stubs.c)
+    target_compile_definitions(tests PRIVATE MIINT_USE_JEMALLOC)
+endif()

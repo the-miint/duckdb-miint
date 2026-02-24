@@ -5,6 +5,17 @@
 #include <sstream>
 #include <stdexcept>
 
+// When MIINT_USE_JEMALLOC is defined, minimap2 is compiled with malloc/free
+// redirected to duckdb_je_* (jemalloc). Our C++ code must free minimap2-allocated
+// memory through the same allocator. On builds without jemalloc (musl, macOS),
+// minimap2 uses system malloc and we use system free.
+#ifdef MIINT_USE_JEMALLOC
+#include "duckdb_je_decl.h"
+#define MM_FREE(ptr) duckdb_je_free(ptr)
+#else
+#define MM_FREE(ptr) free(ptr)
+#endif
+
 namespace miint {
 
 // Custom deleters
@@ -348,11 +359,11 @@ void Minimap2Aligner::align_single(const std::string &read_id, const std::string
 		);
 	}
 
-	// Free results
+	// Free results (must use MM_FREE — minimap2 may use jemalloc allocator)
 	for (int j = 0; j < n_regs; j++) {
-		free(regs[j].p);
+		MM_FREE(regs[j].p);
 	}
-	free(regs);
+	MM_FREE(regs);
 }
 
 void Minimap2Aligner::align_paired(const std::string &read_id, const std::string &sequence1,
@@ -449,12 +460,12 @@ void Minimap2Aligner::align_paired(const std::string &read_id, const std::string
 		}
 	}
 
-	// Free results
+	// Free results (must use MM_FREE — minimap2 may use jemalloc allocator)
 	for (int seg = 0; seg < 2; seg++) {
 		for (int j = 0; j < n_regs[seg]; j++) {
-			free(regs[seg][j].p);
+			MM_FREE(regs[seg][j].p);
 		}
-		free(regs[seg]);
+		MM_FREE(regs[seg]);
 	}
 }
 
@@ -527,6 +538,9 @@ void Minimap2Aligner::reg_to_sam(const void *reg_ptr, const std::string &read_id
 	batch.tag_yt_values.push_back(yt);
 
 	// MD tag - generate if available
+	// km=nullptr causes mm_gen_MD → krealloc(NULL, ...) → realloc(). When
+	// MIINT_USE_JEMALLOC is defined, realloc is redirected to duckdb_je_realloc
+	// at compile time in kalloc.c, so MM_FREE is correct in both configurations.
 	std::string md_tag;
 	if (reg->p && !is_unmapped) {
 		char *md_buf = nullptr;
@@ -535,7 +549,7 @@ void Minimap2Aligner::reg_to_sam(const void *reg_ptr, const std::string &read_id
 		if (md_len > 0 && md_buf) {
 			md_tag = std::string(md_buf, md_len);
 		}
-		free(md_buf);
+		MM_FREE(md_buf);
 	}
 	batch.tag_md_values.push_back(md_tag);
 
