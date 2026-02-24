@@ -23,13 +23,14 @@ WHERE library IN ('miint', 'htslib', 'minimap2', 'kseq++', 'WFA2-lib', 'HDF5', '
 ----
 8
 
-# Known stable versions (vendored/vcpkg — not submodule-dependent)
+# Known stable versions (vendored — not submodule-dependent)
 query I
 SELECT version FROM miint_versions() WHERE library = 'kseq++';
 ----
 1.1.2
 
+# HDF5 comes from vcpkg — version varies by environment, just check it starts with 1.14
 query I
-SELECT version FROM miint_versions() WHERE library = 'HDF5';
+SELECT version LIKE '1.14%' FROM miint_versions() WHERE library = 'HDF5';
 ----
-1.14.6
+true
