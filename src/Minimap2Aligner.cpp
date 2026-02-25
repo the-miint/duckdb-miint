@@ -5,6 +5,17 @@
 #include <sstream>
 #include <stdexcept>
 
+// When MIINT_USE_JEMALLOC is defined, minimap2 is compiled with malloc/free
+// redirected to duckdb_je_* (jemalloc). Our C++ code must free minimap2-allocated
+// memory through the same allocator. On builds without jemalloc (musl, macOS),
+// minimap2 uses system malloc and we use system free.
+#ifdef MIINT_USE_JEMALLOC
+#include "duckdb_je_decl.h"
+#define MM_FREE(ptr) duckdb_je_free(ptr)
+#else
+#define MM_FREE(ptr) free(ptr)
+#endif
+
 namespace miint {
 
 // Custom deleters
@@ -69,57 +80,116 @@ static AlignmentStats compute_alignment_stats(const mm_reg1_t *reg) {
 	return stats;
 }
 
+// SharedMinimap2Index implementation
+SharedMinimap2Index::SharedMinimap2Index(const std::string &index_path, const Minimap2Config &config) : mopt_() {
+	mm_idxopt_t iopt;
+	Minimap2Aligner::InitOptions(config, iopt, mopt_);
+	mm_idx_t *raw_idx = nullptr;
+	Minimap2Aligner::LoadIndexFromFile(index_path, iopt, raw_idx, subject_names_);
+	index_.reset(raw_idx);
+	mm_mapopt_update(&mopt_, index_.get());
+}
+
+SharedMinimap2Index::~SharedMinimap2Index() = default;
+
+const mm_idx_t *SharedMinimap2Index::index() const {
+	return index_.get();
+}
+
+const mm_mapopt_t &SharedMinimap2Index::mapopt() const {
+	return mopt_;
+}
+
+const std::vector<std::string> &SharedMinimap2Index::subject_names() const {
+	return subject_names_;
+}
+
+// Static helper: initialize indexing and mapping options from config
+void Minimap2Aligner::InitOptions(const Minimap2Config &config, mm_idxopt_t &iopt, mm_mapopt_t &mopt) {
+	// Initialize with default values first (required before mm_set_opt)
+	mm_idxopt_init(&iopt);
+	mm_mapopt_init(&mopt);
+
+	// Apply preset-specific options
+	if (mm_set_opt(config.preset.c_str(), &iopt, &mopt) != 0) {
+		throw std::runtime_error("Unknown minimap2 preset: " + config.preset);
+	}
+
+	// Validate preset set valid k and w values
+	if (iopt.k <= 0 || iopt.k > 28) {
+		throw std::runtime_error("Preset '" + config.preset + "' set invalid k-mer size: " + std::to_string(iopt.k));
+	}
+	if (iopt.w <= 0 || iopt.w >= 256) {
+		throw std::runtime_error("Preset '" + config.preset + "' set invalid window size: " + std::to_string(iopt.w));
+	}
+
+	// Override k and w if specified
+	if (config.k > 0) {
+		if (config.k > 28) {
+			throw std::runtime_error("k-mer size must be <= 28 (got " + std::to_string(config.k) + ")");
+		}
+		iopt.k = static_cast<short>(config.k);
+	}
+	if (config.w > 0) {
+		if (config.w >= 256) {
+			throw std::runtime_error("Window size must be < 256 (got " + std::to_string(config.w) + ")");
+		}
+		iopt.w = static_cast<short>(config.w);
+	}
+
+	// Enable CIGAR output
+	mopt.flag |= MM_F_CIGAR;
+
+	// Enable EQX mode (=/X instead of M)
+	if (config.eqx) {
+		mopt.flag |= MM_F_EQX;
+	}
+
+	// Enable MD tag output
+	mopt.flag |= MM_F_OUT_MD;
+
+	// Set max secondary alignments
+	// best_n controls how many chains go to DP alignment and how many
+	// secondary alignments are retained. Match minimap2 command-line
+	// behavior: -N sets best_n directly (default 5).
+	mopt.best_n = config.max_secondary;
+}
+
+// Static helper: load index from .mmi file
+void Minimap2Aligner::LoadIndexFromFile(const std::string &path, const mm_idxopt_t &iopt, mm_idx_t *&out_idx,
+                                        std::vector<std::string> &out_names) {
+	mm_idx_reader_t *reader = mm_idx_reader_open(path.c_str(), &iopt, nullptr);
+	if (!reader) {
+		throw std::runtime_error("Cannot open index file: " + path);
+	}
+
+	mm_idx_t *idx = mm_idx_reader_read(reader, 1);
+	mm_idx_reader_close(reader);
+
+	if (!idx) {
+		throw std::runtime_error("Failed to load index from: " + path);
+	}
+
+	// Extract reference names from loaded index
+	out_names.clear();
+	out_names.reserve(idx->n_seq);
+	for (uint32_t i = 0; i < idx->n_seq; i++) {
+		if (!idx->seq[i].name) {
+			mm_idx_destroy(idx);
+			throw std::runtime_error("Index contains unnamed sequence at position " + std::to_string(i) +
+			                         " in file: " + path);
+		}
+		out_names.push_back(std::string(idx->seq[i].name));
+	}
+
+	out_idx = idx;
+}
+
 // Constructor
 Minimap2Aligner::Minimap2Aligner(const Minimap2Config &config)
     : config_(config), iopt_(std::make_unique<mm_idxopt_t>()), mopt_(std::make_unique<mm_mapopt_t>()),
       tbuf_(mm_tbuf_init()) {
-
-	// Initialize with default values first (required before mm_set_opt)
-	mm_idxopt_init(iopt_.get());
-	mm_mapopt_init(mopt_.get());
-
-	// Apply preset-specific options
-	if (mm_set_opt(config_.preset.c_str(), iopt_.get(), mopt_.get()) != 0) {
-		throw std::runtime_error("Unknown minimap2 preset: " + config_.preset);
-	}
-
-	// Validate preset set valid k and w values
-	if (iopt_->k <= 0 || iopt_->k > 28) {
-		throw std::runtime_error("Preset '" + config_.preset + "' set invalid k-mer size: " + std::to_string(iopt_->k));
-	}
-	if (iopt_->w <= 0 || iopt_->w >= 256) {
-		throw std::runtime_error("Preset '" + config_.preset +
-		                         "' set invalid window size: " + std::to_string(iopt_->w));
-	}
-
-	// Override k and w if specified
-	if (config_.k > 0) {
-		if (config_.k > 28) {
-			throw std::runtime_error("k-mer size must be <= 28 (got " + std::to_string(config_.k) + ")");
-		}
-		iopt_->k = static_cast<short>(config_.k);
-	}
-	if (config_.w > 0) {
-		if (config_.w >= 256) {
-			throw std::runtime_error("Window size must be < 256 (got " + std::to_string(config_.w) + ")");
-		}
-		iopt_->w = static_cast<short>(config_.w);
-	}
-
-	// Enable CIGAR output
-	mopt_->flag |= MM_F_CIGAR;
-
-	// Enable EQX mode (=/X instead of M)
-	if (config_.eqx) {
-		mopt_->flag |= MM_F_EQX;
-	}
-
-	// Enable MD tag output
-	mopt_->flag |= MM_F_OUT_MD;
-
-	// Set max secondary alignments
-	// best_n controls how many chains go to DP alignment
-	mopt_->best_n = config_.max_secondary + 1;
+	InitOptions(config_, *iopt_, *mopt_);
 }
 
 // Destructor
@@ -128,7 +198,8 @@ Minimap2Aligner::~Minimap2Aligner() = default;
 // Move constructor
 Minimap2Aligner::Minimap2Aligner(Minimap2Aligner &&other) noexcept
     : config_(std::move(other.config_)), iopt_(std::move(other.iopt_)), mopt_(std::move(other.mopt_)),
-      index_(std::move(other.index_)), subject_names_(std::move(other.subject_names_)), tbuf_(std::move(other.tbuf_)) {
+      index_(std::move(other.index_)), subject_names_(std::move(other.subject_names_)), tbuf_(std::move(other.tbuf_)),
+      shared_index_(std::move(other.shared_index_)) {
 }
 
 // Move assignment
@@ -140,8 +211,41 @@ Minimap2Aligner &Minimap2Aligner::operator=(Minimap2Aligner &&other) noexcept {
 		index_ = std::move(other.index_);
 		subject_names_ = std::move(other.subject_names_);
 		tbuf_ = std::move(other.tbuf_);
+		shared_index_ = std::move(other.shared_index_);
 	}
 	return *this;
+}
+
+void Minimap2Aligner::attach_shared_index(std::shared_ptr<SharedMinimap2Index> shared_idx) {
+	// Clear owned index (mutually exclusive)
+	index_.reset();
+	subject_names_.clear();
+	shared_index_ = std::move(shared_idx);
+}
+
+void Minimap2Aligner::detach_shared_index() {
+	shared_index_.reset();
+}
+
+const mm_idx_t *Minimap2Aligner::active_index() const {
+	if (shared_index_) {
+		return shared_index_->index();
+	}
+	return index_.get();
+}
+
+const mm_mapopt_t *Minimap2Aligner::active_mapopt() const {
+	if (shared_index_) {
+		return &shared_index_->mapopt();
+	}
+	return mopt_.get();
+}
+
+const std::vector<std::string> &Minimap2Aligner::active_subject_names() const {
+	if (shared_index_) {
+		return shared_index_->subject_names();
+	}
+	return subject_names_;
 }
 
 void Minimap2Aligner::build_index(const std::vector<AlignmentSubject> &subjects) {
@@ -193,8 +297,8 @@ void Minimap2Aligner::align(const SequenceRecordBatch &queries, SAMRecordBatch &
 		return;
 	}
 
-	if (!index_) {
-		throw std::runtime_error("No index built. Call build_index() first.");
+	if (!active_index()) {
+		throw std::runtime_error("No index built. Call build_index() or attach_shared_index() first.");
 	}
 
 	// Process each query
@@ -218,8 +322,8 @@ void Minimap2Aligner::align_single(const std::string &read_id, const std::string
 	}
 
 	int n_regs = 0;
-	mm_reg1_t *regs = mm_map(index_.get(), static_cast<int>(sequence.length()), sequence.c_str(), &n_regs, tbuf_.get(),
-	                         mopt_.get(), read_id.c_str());
+	mm_reg1_t *regs = mm_map(active_index(), static_cast<int>(sequence.length()), sequence.c_str(), &n_regs,
+	                         tbuf_.get(), active_mapopt(), read_id.c_str());
 
 	int secondary_count = 0;
 
@@ -228,7 +332,7 @@ void Minimap2Aligner::align_single(const std::string &read_id, const std::string
 		mm_reg1_t *reg = &regs[j];
 
 		// Bounds check for reference ID before using it
-		if (reg->rid < 0 || static_cast<size_t>(reg->rid) >= subject_names_.size()) {
+		if (reg->rid < 0 || static_cast<size_t>(reg->rid) >= active_subject_names().size()) {
 			continue; // Skip alignments with invalid reference ID
 		}
 
@@ -255,11 +359,11 @@ void Minimap2Aligner::align_single(const std::string &read_id, const std::string
 		);
 	}
 
-	// Free results
+	// Free results (must use MM_FREE — minimap2 may use jemalloc allocator)
 	for (int j = 0; j < n_regs; j++) {
-		free(regs[j].p);
+		MM_FREE(regs[j].p);
 	}
-	free(regs);
+	MM_FREE(regs);
 }
 
 void Minimap2Aligner::align_paired(const std::string &read_id, const std::string &sequence1,
@@ -276,10 +380,10 @@ void Minimap2Aligner::align_paired(const std::string &read_id, const std::string
 	mm_reg1_t *regs[2] = {nullptr, nullptr};
 
 	// Enable fragment mode for paired-end
-	mm_mapopt_t mopt_copy = *mopt_;
+	mm_mapopt_t mopt_copy = *active_mapopt();
 	mopt_copy.flag |= MM_F_FRAG_MODE;
 
-	mm_map_frag(index_.get(), 2, qlens, seqs, n_regs, regs, tbuf_.get(), &mopt_copy, read_id.c_str());
+	mm_map_frag(active_index(), 2, qlens, seqs, n_regs, regs, tbuf_.get(), &mopt_copy, read_id.c_str());
 
 	// Find primary alignments for each segment (with bounds checking)
 	mm_reg1_t *primary[2] = {nullptr, nullptr};
@@ -287,7 +391,7 @@ void Minimap2Aligner::align_paired(const std::string &read_id, const std::string
 		for (int j = 0; j < n_regs[seg]; j++) {
 			mm_reg1_t *reg = &regs[seg][j];
 			// Bounds check for reference ID
-			if (reg->rid < 0 || static_cast<size_t>(reg->rid) >= subject_names_.size()) {
+			if (reg->rid < 0 || static_cast<size_t>(reg->rid) >= active_subject_names().size()) {
 				continue;
 			}
 			if (reg->parent == reg->id) { // Primary
@@ -332,7 +436,7 @@ void Minimap2Aligner::align_paired(const std::string &read_id, const std::string
 			mm_reg1_t *reg = &regs[seg][j];
 
 			// Bounds check for reference ID
-			if (reg->rid < 0 || static_cast<size_t>(reg->rid) >= subject_names_.size()) {
+			if (reg->rid < 0 || static_cast<size_t>(reg->rid) >= active_subject_names().size()) {
 				continue;
 			}
 
@@ -356,12 +460,12 @@ void Minimap2Aligner::align_paired(const std::string &read_id, const std::string
 		}
 	}
 
-	// Free results
+	// Free results (must use MM_FREE — minimap2 may use jemalloc allocator)
 	for (int seg = 0; seg < 2; seg++) {
 		for (int j = 0; j < n_regs[seg]; j++) {
-			free(regs[seg][j].p);
+			MM_FREE(regs[seg][j].p);
 		}
-		free(regs[seg]);
+		MM_FREE(regs[seg]);
 	}
 }
 
@@ -373,8 +477,9 @@ void Minimap2Aligner::reg_to_sam(const void *reg_ptr, const std::string &read_id
 	bool is_paired = (segment_idx >= 0);
 	bool is_unmapped = (reg->rid < 0);
 
+	uint16_t flags = calculate_flags(reg, is_paired, segment_idx, mate_mapped, mate_rev, is_unmapped);
 	batch.read_ids.push_back(read_id);
-	batch.flags.push_back(calculate_flags(reg, is_paired, segment_idx, mate_mapped, mate_rev, is_unmapped));
+	batch.flags.push_back(flags);
 
 	if (is_unmapped) {
 		batch.references.push_back("*");
@@ -387,7 +492,7 @@ void Minimap2Aligner::reg_to_sam(const void *reg_ptr, const std::string &read_id
 		batch.positions.push_back(reg->rs + 1); // Convert to 1-based
 		batch.stop_positions.push_back(calculate_stop_position(reg->rs + 1, reg));
 		batch.mapqs.push_back(static_cast<uint8_t>(reg->mapq));
-		batch.cigars.push_back(cigar_string(reg));
+		batch.cigars.push_back(cigar_string(reg, static_cast<int32_t>(query_seq.length()), flags));
 	}
 
 	// Mate reference
@@ -433,15 +538,18 @@ void Minimap2Aligner::reg_to_sam(const void *reg_ptr, const std::string &read_id
 	batch.tag_yt_values.push_back(yt);
 
 	// MD tag - generate if available
+	// km=nullptr causes mm_gen_MD → krealloc(NULL, ...) → realloc(). When
+	// MIINT_USE_JEMALLOC is defined, realloc is redirected to duckdb_je_realloc
+	// at compile time in kalloc.c, so MM_FREE is correct in both configurations.
 	std::string md_tag;
 	if (reg->p && !is_unmapped) {
 		char *md_buf = nullptr;
 		int md_max_len = 0;
-		int md_len = mm_gen_MD(nullptr, &md_buf, &md_max_len, index_.get(), reg, query_seq.c_str());
+		int md_len = mm_gen_MD(nullptr, &md_buf, &md_max_len, active_index(), reg, query_seq.c_str());
 		if (md_len > 0 && md_buf) {
 			md_tag = std::string(md_buf, md_len);
 		}
-		free(md_buf);
+		MM_FREE(md_buf);
 	}
 	batch.tag_md_values.push_back(md_tag);
 
@@ -449,18 +557,42 @@ void Minimap2Aligner::reg_to_sam(const void *reg_ptr, const std::string &read_id
 	batch.tag_sa_values.push_back("");
 }
 
-std::string Minimap2Aligner::cigar_string(const void *reg_ptr) const {
+std::string Minimap2Aligner::cigar_string(const void *reg_ptr, int32_t query_len, uint16_t sam_flags) const {
 	const mm_reg1_t *reg = static_cast<const mm_reg1_t *>(reg_ptr);
 
 	if (!reg->p || reg->p->n_cigar == 0) {
 		return "*";
 	}
 
+	// Bounds validation: qs/qe must be within [0, query_len]
+	if (reg->qs < 0 || reg->qe < 0 || reg->qs > query_len || reg->qe > query_len || reg->qs > reg->qe) {
+		return "*";
+	}
+
+	// Compute clip lengths from query start/end, accounting for strand
+	// (matches minimap2 format.c:490-491)
+	int clip_front = reg->rev ? (query_len - reg->qe) : reg->qs;
+	int clip_back = reg->rev ? reg->qs : (query_len - reg->qe);
+
+	// Supplementary (0x800) → hard clip; primary/secondary → soft clip.
+	// This is a simplification of minimap2 format.c:501-502 which also checks
+	// MM_F_SECONDARY_SEQ and MM_F_SOFTCLIP flags — neither is set by this extension.
+	char clip_char = (sam_flags & 0x800) ? 'H' : 'S';
+
 	std::ostringstream oss;
+
+	if (clip_front > 0) {
+		oss << clip_front << clip_char;
+	}
+
 	for (uint32_t i = 0; i < reg->p->n_cigar; i++) {
 		uint32_t op = reg->p->cigar[i] & 0xf;
 		uint32_t len = reg->p->cigar[i] >> 4;
 		oss << len << MM_CIGAR_STR[op];
+	}
+
+	if (clip_back > 0) {
+		oss << clip_back << clip_char;
 	}
 
 	return oss.str();
@@ -513,60 +645,35 @@ uint16_t Minimap2Aligner::calculate_flags(const void *reg_ptr, bool is_paired, i
 		}
 	}
 
-	// Check for secondary/supplementary
+	// Secondary/supplementary detection (matches minimap2 format.c:546-547)
 	if (reg->parent != reg->id) {
-		if (reg->sam_pri == 0) {
-			flags |= 0x100; // Secondary alignment
-		}
-	}
-
-	// Supplementary alignment flag
-	if (reg->split == 2) { // split type indicates supplementary
-		flags |= 0x800;    // Supplementary
+		flags |= 0x100; // Secondary alignment
+	} else if (!reg->sam_pri) {
+		flags |= 0x800; // Supplementary alignment
 	}
 
 	return flags;
 }
 
 const std::string &Minimap2Aligner::get_reference_name(int32_t rid) const {
-	if (rid < 0 || static_cast<size_t>(rid) >= subject_names_.size()) {
+	auto &names = active_subject_names();
+	if (rid < 0 || static_cast<size_t>(rid) >= names.size()) {
 		static const std::string unknown = "*";
 		return unknown;
 	}
-	return subject_names_[rid];
+	return names[rid];
 }
 
 void Minimap2Aligner::load_index(const std::string &index_path) {
-	// Use mm_idx_reader API to load index (handles both single and multi-part indexes)
-	mm_idx_reader_t *reader = mm_idx_reader_open(index_path.c_str(), iopt_.get(), nullptr);
-	if (!reader) {
-		throw std::runtime_error("Cannot open index file: " + index_path);
-	}
-
-	// Read the index (n_threads=1 for loading)
-	mm_idx_t *idx = mm_idx_reader_read(reader, 1);
-	mm_idx_reader_close(reader);
-
-	if (!idx) {
-		throw std::runtime_error("Failed to load index from: " + index_path);
-	}
-
-	// Extract reference names from loaded index
-	subject_names_.clear();
-	subject_names_.reserve(idx->n_seq);
-	for (uint32_t i = 0; i < idx->n_seq; i++) {
-		if (!idx->seq[i].name) {
-			// Index is malformed - sequences must have names
-			mm_idx_destroy(idx);
-			throw std::runtime_error("Index contains unnamed sequence at position " + std::to_string(i) +
-			                         " in file: " + index_path);
-		}
-		subject_names_.push_back(std::string(idx->seq[i].name));
-	}
+	mm_idx_t *idx = nullptr;
+	LoadIndexFromFile(index_path, *iopt_, idx, subject_names_);
 
 	// Store index and update mapping options
 	index_.reset(idx);
 	mm_mapopt_update(mopt_.get(), index_.get());
+
+	// Clear shared index (owned and shared are mutually exclusive)
+	shared_index_.reset();
 }
 
 void Minimap2Aligner::save_index(const std::string &output_path) const {
@@ -581,24 +688,18 @@ void Minimap2Aligner::save_index(const std::string &output_path) const {
 		throw std::runtime_error("Cannot create index file: " + output_path);
 	}
 
-	// Write index using minimap2 API with proper error handling
-	try {
-		mm_idx_dump(fp, index_.get());
+	// Write index using minimap2 API
+	mm_idx_dump(fp, index_.get());
 
-		// Check for write errors after dump
-		if (ferror(fp)) {
-			fclose(fp); // Clean up before throwing
-			throw std::runtime_error("Write error while saving index to: " + output_path);
-		}
-
-		// Close and check for errors
-		if (fclose(fp) != 0) {
-			throw std::runtime_error("Error closing index file: " + output_path);
-		}
-	} catch (...) {
-		// Ensure file handle is closed on any exception
+	// Check for write errors after dump
+	if (ferror(fp)) {
 		fclose(fp);
-		throw;
+		throw std::runtime_error("Write error while saving index to: " + output_path);
+	}
+
+	// Close and check for errors (fclose flushes, so check return value)
+	if (fclose(fp) != 0) {
+		throw std::runtime_error("Error closing index file: " + output_path);
 	}
 }
 

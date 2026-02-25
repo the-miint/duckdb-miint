@@ -11,6 +11,7 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include <atomic>
 #include <mutex>
 #include <vector>
 
@@ -45,6 +46,8 @@ public:
 		std::mutex lock;
 		idx_t next_shard_idx = 0;
 		idx_t shard_count = 1;
+		idx_t total_associations = 0;
+		std::atomic<idx_t> associations_processed {0};
 
 		idx_t MaxThreads() const override {
 			// One DuckDB thread per shard, each running one single-threaded bowtie2 process.
@@ -77,6 +80,9 @@ public:
 	                                                     GlobalTableFunctionState *global_state);
 
 	static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
+
+	static double Progress(ClientContext &context, const FunctionData *bind_data,
+	                       const GlobalTableFunctionState *global_state);
 
 	static TableFunction GetFunction();
 	static void Register(ExtensionLoader &loader);
