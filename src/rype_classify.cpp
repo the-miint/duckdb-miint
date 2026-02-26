@@ -181,6 +181,16 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 		}
 	}
 
+	// Step 4: Estimate batch size before the main sequence query.
+	// RYpe processes one batch at a time; using STANDARD_VECTOR_SIZE (2048) causes
+	// shard I/O to dominate. Sample actual average read length for accurate estimation.
+	size_t avg_read_length = SampleAvgReadLength(conn, table_quoted);
+	int is_paired = bind_data.has_sequence2 ? 1 : 0;
+	size_t batch_size = rype_recommend_batch_size(gstate->index, avg_read_length, is_paired, 0);
+	if (batch_size == 0) {
+		batch_size = STANDARD_VECTOR_SIZE;
+	}
+
 	// Query sequence data for RYpe with row indices as id
 	// RYpe expects: id (Int64), sequence (Binary), pair_sequence (Binary nullable)
 	std::string query;
@@ -200,11 +210,10 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 		                            query_result->GetError());
 	}
 
-	// Step 4: Wrap as ArrowArrayStream
 	// NOTE: ResultArrowArrayStreamWrapper's release callback (MyStreamRelease) deletes
 	// the wrapper when the stream is released. We create it with make_uniq but then
 	// release ownership after passing to RYpe, so there's no double-free.
-	auto input_wrapper = make_uniq<ResultArrowArrayStreamWrapper>(std::move(query_result), STANDARD_VECTOR_SIZE);
+	auto input_wrapper = make_uniq<ResultArrowArrayStreamWrapper>(std::move(query_result), batch_size);
 	ArrowArrayStream *input_stream = &input_wrapper->stream;
 
 	// Step 5: Call RYpe classify

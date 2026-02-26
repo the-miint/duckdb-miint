@@ -121,6 +121,25 @@ BuildExtractionInputStream(ClientContext &context, const RypeExtractData &bind_d
 		}
 	}
 
+	// Estimate batch size before the main sequence query.
+	// Extraction has no index overhead — just sequence data + minimizer lists.
+	size_t avg_read_length = SampleAvgReadLength(conn, table_quoted);
+	size_t minimizers_per_read = (bind_data.w > 0 && avg_read_length > bind_data.k)
+	                                 ? ((avg_read_length - bind_data.k + 1) / bind_data.w + 1)
+	                                 : 1;
+	size_t record_cost = avg_read_length + minimizers_per_read * sizeof(uint64_t);
+
+	size_t available = rype_detect_available_memory();
+	size_t safety = available / 10;
+	if (safety < 256ULL * 1024 * 1024) {
+		safety = 256ULL * 1024 * 1024;
+	}
+	size_t budget = (available > safety) ? available - safety : 0;
+	size_t batch_size = budget / record_cost;
+	if (batch_size < 1000) {
+		batch_size = STANDARD_VECTOR_SIZE;
+	}
+
 	// Query sequence data — extraction only uses single sequence (no pair_sequence).
 	// RYpe extraction expects: id (Int64), sequence (Binary)
 	std::string query =
@@ -132,7 +151,7 @@ BuildExtractionInputStream(ClientContext &context, const RypeExtractData &bind_d
 		                            query_result->GetError());
 	}
 
-	out_wrapper = make_uniq<ResultArrowArrayStreamWrapper>(std::move(query_result), STANDARD_VECTOR_SIZE);
+	out_wrapper = make_uniq<ResultArrowArrayStreamWrapper>(std::move(query_result), batch_size);
 	*out_input_stream = &out_wrapper->stream;
 
 	return gstate;

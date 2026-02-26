@@ -7,11 +7,33 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 
+#include "duckdb/main/connection.hpp"
+#include "duckdb/main/database.hpp"
+
 #include <algorithm>
 #include <string>
 #include <vector>
 
 namespace duckdb {
+
+//! Sample average read length from the first 1000 sequences in a table.
+//! Returns fallback (default 300) if the query fails or the table is empty.
+inline size_t SampleAvgReadLength(Connection &conn, const std::string &table_quoted, size_t fallback = 300) {
+	std::string query =
+	    "SELECT AVG(LENGTH(sequence1))::BIGINT FROM (SELECT sequence1 FROM " + table_quoted + " LIMIT 1000)";
+	auto result = conn.Query(query);
+	if (!result->HasError()) {
+		auto &materialized = result->Cast<MaterializedQueryResult>();
+		auto chunk = materialized.Fetch();
+		if (chunk && chunk->size() > 0 && !chunk->data[0].GetValue(0).IsNull()) {
+			auto val = chunk->data[0].GetValue(0).GetValue<int64_t>();
+			if (val > 0) {
+				return static_cast<size_t>(val);
+			}
+		}
+	}
+	return fallback;
+}
 
 //! Validate that a table/view exists and has the required columns for RYpe functions.
 //! Returns true if the optional "sequence2" column is present (used by rype_classify
