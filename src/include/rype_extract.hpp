@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rype.h"
+#include "rype_common.hpp"
 
 #include "duckdb/common/arrow/arrow.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
@@ -58,7 +59,6 @@ struct RypeExtractGlobalState : public GlobalTableFunctionState {
 	shared_ptr<ArrowArrayWrapper> current_chunk;
 
 	idx_t batch_offset = 0;
-	bool schema_initialized = false;
 	bool done = false;
 
 	idx_t MaxThreads() const override {
@@ -68,20 +68,8 @@ struct RypeExtractGlobalState : public GlobalTableFunctionState {
 	~RypeExtractGlobalState();
 };
 
-// ============================================================================
-// Shared local state
-// ============================================================================
-struct RypeExtractLocalState : public LocalTableFunctionState {
-	std::unordered_map<idx_t, unique_ptr<ArrowArrayScanState>> array_states;
-	ClientContext &context;
-
-	explicit RypeExtractLocalState(ClientContext &ctx) : context(ctx) {
-	}
-	~RypeExtractLocalState();
-
-	ArrowArrayScanState &GetState(idx_t col_idx);
-	void ResetStates();
-};
+// Use shared RypeArrowLocalState — identical across all RYpe table functions
+using RypeExtractLocalState = RypeArrowLocalState;
 
 // ============================================================================
 // rype_extract_minimizer_set table function

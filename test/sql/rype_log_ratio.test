@@ -1,0 +1,290 @@
+# name: test/sql/rype_log_ratio.test
+# description: Test rype_log_ratio table function
+# group: [sql]
+
+#
+# Log-ratio uses two single-bucket RYpe indices (numerator vs denominator).
+# Returns one result per input query with log10(num_score / denom_score).
+#
+# Test index construction:
+# - test_numerator.ryxdi: built from bucket_alpha sequences (ACGTACGT..., GGCCTTAA...)
+# - test_denominator.ryxdi: built from bucket_beta sequences (TGCATGCA..., AATTAATT...)
+#
+# In RY-space, canonical k-mers collapse purine/pyrimidine variants:
+# - ACGTACGT and TGCATGCA share canonical minimizers → both_match scores equal
+# - GGCCTTAA has unique canonical minimizers → only in numerator index
+# - AATTAATT has unique canonical minimizers → only in denominator index
+
+require miint
+
+# Setup: Use sequences with distinct RY-space signatures for clear log-ratio directionality
+# num_match: GGCCTTAA... matches numerator only → +inf
+# denom_match: AATTAATT... matches denominator only → -inf
+# both_match: ACGTACGT... matches both equally → 0.0
+# neither: AAAA... matches neither → NaN
+
+statement ok
+CREATE TABLE sequences AS SELECT * FROM (VALUES
+    ('num_match', 'GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('denom_match', 'AATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATT'),
+    ('both_match', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('neither', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')
+) AS t(read_id, sequence1);
+
+# =============================================================================
+# Error handling tests
+# =============================================================================
+
+# Test error: non-existent numerator index path
+statement error
+SELECT * FROM rype_log_ratio('nonexistent.ryxdi', 'data/rype/test_denominator.ryxdi', 'sequences');
+----
+Failed to load numerator index
+
+# Test error: non-existent denominator index path
+statement error
+SELECT * FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'nonexistent.ryxdi', 'sequences');
+----
+Failed to load denominator index
+
+# Test error: non-existent table
+statement error
+SELECT * FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'nonexistent_table');
+----
+does not exist
+
+# Test error: missing required column (read_id)
+statement ok
+CREATE TABLE bad_table1 AS SELECT 'ACGT' as sequence1;
+
+statement error
+SELECT * FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'bad_table1');
+----
+missing required column
+
+statement ok
+DROP TABLE bad_table1;
+
+# Test error: missing required column (sequence1)
+statement ok
+CREATE TABLE bad_table2 AS SELECT 'seq1' as read_id;
+
+statement error
+SELECT * FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'bad_table2');
+----
+missing required column
+
+statement ok
+DROP TABLE bad_table2;
+
+# Test error: multi-bucket index used as numerator
+statement error
+SELECT * FROM rype_log_ratio('data/rype/test.ryxdi', 'data/rype/test_denominator.ryxdi', 'sequences');
+----
+Log-ratio index validation failed
+
+# Test error: multi-bucket index used as denominator
+statement error
+SELECT * FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test.ryxdi', 'sequences');
+----
+Log-ratio index validation failed
+
+# Test error: skip_threshold > 1.0
+statement error
+SELECT * FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'sequences', skip_threshold := 1.5);
+----
+skip_threshold must be
+
+# Test error: skip_threshold = NaN
+statement error
+SELECT * FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'sequences', skip_threshold := 'NaN'::DOUBLE);
+----
+skip_threshold must not be NaN
+
+# Test error: skip_threshold = +Inf (caught by > 1.0 check via IEEE 754)
+statement error
+SELECT * FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'sequences', skip_threshold := 'Inf'::DOUBLE);
+----
+skip_threshold must be
+
+# =============================================================================
+# Basic functionality tests
+# =============================================================================
+
+# Test basic log-ratio - results should have expected columns and types
+query IIII
+SELECT
+    read_id IS NOT NULL as has_read_id,
+    log_ratio IS NOT NULL as has_log_ratio,
+    fast_path IS NOT NULL as has_fast_path,
+    typeof(log_ratio) = 'DOUBLE' as log_ratio_is_double
+FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'sequences')
+LIMIT 1;
+----
+true	true	true	true
+
+# Test row count = input sequence count (log-ratio returns one result per query)
+query I
+SELECT COUNT(*) as result_count
+FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'sequences');
+----
+4
+
+# Test read_id values are preserved correctly
+query I
+SELECT read_id
+FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'sequences')
+ORDER BY read_id;
+----
+both_match
+denom_match
+neither
+num_match
+
+# =============================================================================
+# Log-ratio value semantics
+# =============================================================================
+
+# With skip_threshold=0 (fast-path disabled), verify directionality:
+# num_match → +inf (only numerator has minimizers)
+# denom_match → -inf (only denominator has minimizers)
+# both_match → 0.0 (equal scores)
+# neither → NaN (no minimizers in either)
+query II
+SELECT read_id,
+    CASE WHEN isnan(log_ratio) THEN 'nan'
+         WHEN log_ratio > 0 THEN 'positive'
+         WHEN log_ratio < 0 THEN 'negative'
+         WHEN log_ratio = 0 THEN 'zero'
+         ELSE 'other' END as direction
+FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'sequences',
+    skip_threshold := 0.0)
+ORDER BY read_id;
+----
+both_match	zero
+denom_match	negative
+neither	nan
+num_match	positive
+
+# Swapping numerator and denominator negates log_ratio
+query I
+SELECT COUNT(*) = 0 as symmetry_holds
+FROM (
+    SELECT a.read_id, a.log_ratio as fwd, b.log_ratio as rev
+    FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'sequences',
+        skip_threshold := 0.0) a
+    JOIN rype_log_ratio('data/rype/test_denominator.ryxdi', 'data/rype/test_numerator.ryxdi', 'sequences',
+        skip_threshold := 0.0) b ON a.read_id = b.read_id
+    WHERE NOT (
+        -- Both zero
+        (fwd = 0 AND rev = 0) OR
+        -- Opposite signs (handling inf)
+        (fwd > 0 AND rev < 0) OR
+        (fwd < 0 AND rev > 0) OR
+        -- Both NaN (sequence matches neither)
+        (isnan(fwd) AND isnan(rev))
+    )
+);
+----
+true
+
+# =============================================================================
+# skip_threshold + fast_path tests
+# =============================================================================
+
+# skip_threshold = 0.0 → fast-path disabled, all fast_path = 0
+query I
+SELECT COUNT(*) = 0 as no_fast_path
+FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'sequences',
+    skip_threshold := 0.0)
+WHERE fast_path != 0;
+----
+true
+
+# Negative skip_threshold also disables fast-path
+query I
+SELECT COUNT(*) = 0 as no_fast_path
+FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'sequences',
+    skip_threshold := -1.0)
+WHERE fast_path != 0;
+----
+true
+
+# Default skip_threshold (0.5) enables fast-path for reads with high numerator score
+# num_match (score=1.0 to numerator) and both_match (score=1.0 to numerator) get fast_path=1
+query II
+SELECT read_id, fast_path
+FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'sequences')
+ORDER BY read_id;
+----
+both_match	1
+denom_match	0
+neither	0
+num_match	1
+
+# =============================================================================
+# Views, empty tables, custom id_column, paired-end
+# =============================================================================
+
+# Test with views
+statement ok
+CREATE VIEW sequences_view AS SELECT * FROM sequences;
+
+query I
+SELECT COUNT(*) as result_count
+FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'sequences_view');
+----
+4
+
+statement ok
+DROP VIEW sequences_view;
+
+# Test empty table → 0 rows
+statement ok
+CREATE TABLE empty_sequences AS SELECT * FROM sequences WHERE FALSE;
+
+query I
+SELECT COUNT(*) as empty_result
+FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'empty_sequences');
+----
+0
+
+statement ok
+DROP TABLE empty_sequences;
+
+# Test with custom id_column
+statement ok
+CREATE TABLE sequences_custom_id AS SELECT * FROM (VALUES
+    ('custom1', 'GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('custom2', 'AATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATT')
+) AS t(my_id, sequence1);
+
+query I
+SELECT COUNT(*) as result_count
+FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'sequences_custom_id',
+    id_column := 'my_id');
+----
+2
+
+statement ok
+DROP TABLE sequences_custom_id;
+
+# Test with paired-end sequences
+statement ok
+CREATE TABLE paired_sequences AS SELECT * FROM (VALUES
+    ('paired1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT', 'GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('paired2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA', 'AATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATT')
+) AS t(read_id, sequence1, sequence2);
+
+query I
+SELECT COUNT(*) as result_count
+FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'paired_sequences');
+----
+2
+
+statement ok
+DROP TABLE paired_sequences;
+
+# Clean up
+statement ok
+DROP TABLE sequences;

@@ -28,30 +28,6 @@ RypeExtractGlobalState::~RypeExtractGlobalState() {
 }
 
 // ============================================================================
-// LocalState helpers
-// ============================================================================
-ArrowArrayScanState &RypeExtractLocalState::GetState(idx_t col_idx) {
-	auto it = array_states.find(col_idx);
-	if (it == array_states.end()) {
-		auto state = make_uniq<ArrowArrayScanState>(context);
-		auto &ref = *state;
-		array_states.emplace(col_idx, std::move(state));
-		return ref;
-	}
-	return *it->second;
-}
-
-void RypeExtractLocalState::ResetStates() {
-	for (auto &state : array_states) {
-		state.second->Reset();
-	}
-}
-
-RypeExtractLocalState::~RypeExtractLocalState() {
-	array_states.clear();
-}
-
-// ============================================================================
 // Shared helpers
 // ============================================================================
 
@@ -291,7 +267,6 @@ unique_ptr<GlobalTableFunctionState> RypeExtractMinimizerSetTableFunction::InitG
 		                  bind_data.names.size());
 	}
 
-	gstate->schema_initialized = true;
 	return gstate;
 }
 
@@ -376,7 +351,6 @@ RypeExtractStrandMinimizersTableFunction::InitGlobal(ClientContext &context, Tab
 		                  bind_data.names.size());
 	}
 
-	gstate->schema_initialized = true;
 	return gstate;
 }
 

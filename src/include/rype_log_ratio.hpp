@@ -19,38 +19,37 @@
 
 namespace duckdb {
 
-class RypeClassifyTableFunction {
+class RypeLogRatioTableFunction {
 public:
 	struct Data : public TableFunctionData {
-		std::string index_path;
+		std::string numerator_path;
+		std::string denominator_path;
 		std::string sequence_table;
 		std::string id_column;
-		double threshold;
-		std::string negative_index_path;
-		bool has_sequence2 = false; // Cached from ValidateSequenceTable
+		double skip_threshold;
+		bool has_sequence2 = false;
 
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
 		Data()
-		    : id_column("read_id"), threshold(0.1), names({"read_id", "bucket_id", "bucket_name", "score"}),
+		    : id_column("read_id"),
+		      // Default 0.5: reads with numerator score >= 50% skip denominator classification
+		      // and get +inf log_ratio immediately (fast-path). Set to 0 or negative to disable.
+		      skip_threshold(0.5), names({"read_id", "log_ratio", "fast_path"}),
 		      types({LogicalType::VARCHAR,  // read_id (original identifier)
-		             LogicalType::UINTEGER, // bucket_id (UInt32)
-		             LogicalType::VARCHAR,  // bucket_name
-		             LogicalType::DOUBLE})  // score (Float64)
+		             LogicalType::DOUBLE,   // log_ratio (Float64)
+		             LogicalType::INTEGER}) // fast_path (Int32)
 		{
 		}
 	};
 
 	struct GlobalState : public GlobalTableFunctionState {
-		// RYpe index (opaque pointer from C API)
-		RypeIndex *index = nullptr;
-
-		// Optional negative set for filtering
-		RypeNegativeSet *negative_set = nullptr;
+		// RYpe indices (opaque pointers from C API)
+		RypeIndex *numerator_index = nullptr;
+		RypeIndex *denominator_index = nullptr;
 
 		// Original read_ids indexed by row number (0-based).
-		// RYpe receives row indices as query_id, so read_ids[query_id] gives the original identifier.
 		std::vector<std::string> read_ids;
 
 		// Arrow output stream from RYpe.
@@ -58,7 +57,7 @@ public:
 		// 1. current_chunk (shared_ptr — may outlive gstate via Vector ArrowAuxiliaryData)
 		// 2. arrow_table - holds pointers INTO output_schema, clear before releasing schema
 		// 3. output_schema - obtained via get_schema(), separately owned copy, release on destruction
-		// 4. output_stream - returned by rype_classify_arrow(), release on destruction
+		// 4. output_stream - returned by rype_classify_arrow_log_ratio(), release on destruction
 		ArrowArrayStream output_stream;
 		ArrowSchema output_schema;
 		ArrowTableSchema arrow_table;
@@ -66,8 +65,6 @@ public:
 
 		idx_t batch_offset = 0;
 		bool done = false;
-
-		// No mutex needed - MaxThreads() returns 1, enforcing single-threaded execution.
 
 		idx_t MaxThreads() const override {
 			return 1;

@@ -30,6 +30,7 @@
 #include <align_pairwise_functions.hpp>
 #include <rype_classify.hpp>
 #include <rype_extract.hpp>
+#include <rype_log_ratio.hpp>
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include <hdf5.h>
 #include <htslib-1.22.1/htslib/hts.h>
@@ -163,6 +164,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RypeClassifyTableFunction::Register(loader);
 	RypeExtractMinimizerSetTableFunction::Register(loader);
 	RypeExtractStrandMinimizersTableFunction::Register(loader);
+	RypeLogRatioTableFunction::Register(loader);
 
 	// read_ncbi and related need httpfs
 	auto &instance = loader.GetDatabaseInstance();
