@@ -60,6 +60,18 @@ bash run_tests.sh
 ./build/release/test/unittest "[alignment]"
 ```
 
+### Python CLI smoke tests
+```bash
+# Install CLI (use duckdb-144 conda env)
+cd python && conda run -n duckdb-144 pip install -e . && cd ..
+
+# Run a quick smoke test
+EXT=./build/release/extension/miint/miint.duckdb_extension
+conda run -n duckdb-144 miint --extension-path $EXT convert sequence \
+  -1 data/fastq/small_a.fq -o /tmp/test.parquet
+```
+See `localdocs/cli-smoke-tests.md` for the full manual smoke test procedure.
+
 ### Development workflow
 ```bash
 # Clean build

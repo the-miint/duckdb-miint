@@ -3,6 +3,7 @@
 ## Table of Contents
 
 - [Installing](#installing)
+- [Python CLI](#python-cli)
 - [Building](#building)
 - [Running the extension](#running-the-extension)
 
@@ -43,6 +44,47 @@ Then load the extension binary directly:
 ```sql
 LOAD '/path/to/miint.duckdb_extension';
 ```
+
+## Python CLI
+
+A lightweight Python CLI (`miint`) wraps the DuckDB extension for common bioinformatics workflows: format conversion, sequence alignment, and feature table generation. All computation happens in SQL — Python handles argument parsing and query construction.
+
+### Installing from a local checkout
+
+```shell
+cd python
+pip install -e .
+```
+
+This requires the `duckdb` Python package (installed automatically as a dependency). The CLI is **not** published to PyPI at this time.
+
+### Usage
+
+```shell
+# Use a local extension build
+miint --extension-path ./build/release/extension/miint/miint.duckdb_extension \
+    convert sequence -1 reads.fastq.gz -o reads.parquet
+
+# Without --extension-path, the CLI installs miint from community extensions
+miint convert alignment -i alignments.bam -o alignments.parquet
+```
+
+### Available commands
+
+```
+miint convert sequence    Convert FASTQ/FASTA to parquet
+miint convert alignment   Convert SAM/BAM to parquet
+miint convert biom        Convert BIOM to parquet
+miint convert parquet     Convert parquet to FASTQ/FASTA/SAM/BAM/BIOM
+
+miint transform genome-coverage   Compute genome coverage from alignments
+miint transform woltka-ogu        Generate OGU feature table (with optional filters)
+
+miint align minimap2              Align sequences with minimap2
+miint align minimap2-sharded      Sharded minimap2 alignment with RYpe classification
+```
+
+Run `miint --help` or `miint <command> --help` for detailed usage.
 
 ## Building
 

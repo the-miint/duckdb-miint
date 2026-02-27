@@ -69,6 +69,25 @@ LOAD miint;
 
 See [Installation & Building](docs/installation.md) for building from source.
 
+## Python CLI
+
+A lightweight Python CLI wraps the extension for common workflows (format conversion, alignment, feature table generation):
+
+```sh
+# Install from a local checkout (requires duckdb Python package)
+cd python && pip install -e .
+
+# Convert FASTQ to parquet using a local extension build
+miint --extension-path ./build/release/extension/miint/miint.duckdb_extension \
+    convert sequence -1 reads.fastq.gz -o reads.parquet
+
+# Align and compute OGU feature table
+miint align minimap2 -1 reads.parquet -d reference.fasta.gz -o alignments.parquet
+miint transform woltka-ogu -i alignments.parquet -o feature_table.parquet
+```
+
+See `miint --help` for all commands. Without `--extension-path`, the CLI installs miint from community extensions automatically.
+
 ## Running the Tests
 
 ```sh
