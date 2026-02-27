@@ -1,9 +1,13 @@
 #include "align_bowtie2_sharded.hpp"
 #include "align_common.hpp"
+#include "shard_debug.hpp"
 #include "duckdb/common/file_system.hpp"
-#include "duckdb/common/printer.hpp"
 
 namespace duckdb {
+
+// Fixed batch size to bound per-thread memory usage during ReadBatchByIds.
+// Each thread materializes one batch at a time; 2048 reads is a good balance.
+static constexpr idx_t SHARD_READ_BATCH_SIZE = 2048;
 
 // Build bowtie2 ShardInfo from raw shard name/counts
 // Validates index files exist and are valid bowtie2 indexes
@@ -80,22 +84,51 @@ unique_ptr<FunctionData> AlignBowtie2ShardedTableFunction::Bind(ClientContext &c
 	// Parse bowtie2 config parameters
 	ParseBowtie2ConfigParams(input.named_parameters, data->config);
 
-	// In sharded mode, parallelism comes from multiple bowtie2 processes (one per shard),
-	// so each bowtie2 process uses a single thread to avoid CPU oversubscription.
-	// Warn user if they specified a threads value other than 1.
+	// In sharded mode, each bowtie2 process uses a single thread.
+	// Parallelism comes from running multiple processes per shard (max_threads_per_shard)
+	// across multiple shards.
 	auto threads_param = input.named_parameters.find("threads");
 	if (threads_param != input.named_parameters.end() && !threads_param->second.IsNull()) {
 		int32_t threads_val = threads_param->second.GetValue<int32_t>();
 		if (threads_val != 1) {
 			Printer::Print("WARNING: Parameter 'threads' is ignored in sharded mode. "
-			               "Parallelism comes from multiple single-threaded bowtie2 processes "
-			               "(one per shard). Use DuckDB's SET threads=N to control shard parallelism.\n");
+			               "In sharded mode, each bowtie2 process uses a single thread. "
+			               "Parallelism comes from running multiple processes per shard "
+			               "(max_threads_per_shard) across multiple shards.\n");
 		}
 	}
 	data->config.threads = 1;
 
+	// Parse max_threads_per_shard parameter
+	auto max_tps_param = input.named_parameters.find("max_threads_per_shard");
+	if (max_tps_param != input.named_parameters.end() && !max_tps_param->second.IsNull()) {
+		auto val = max_tps_param->second.GetValue<int32_t>();
+		if (val < 1 || val > 64) {
+			throw BinderException("max_threads_per_shard must be between 1 and 64 (got %d)", val);
+		}
+		data->max_threads_per_shard = static_cast<idx_t>(val);
+	}
+
+	// Parse debug parameter
+	auto debug_param = input.named_parameters.find("debug");
+	if (debug_param != input.named_parameters.end() && !debug_param->second.IsNull()) {
+		data->debug = debug_param->second.GetValue<bool>();
+	}
+
+	// Parse include_shard_name parameter
+	auto include_shard_param = input.named_parameters.find("include_shard_name");
+	if (include_shard_param != input.named_parameters.end() && !include_shard_param->second.IsNull()) {
+		data->include_shard_name = include_shard_param->second.GetValue<bool>();
+	}
+
 	// Read shard counts and validate index files exist (fail fast)
 	data->shards = BuildBowtie2ShardInfos(context, data->read_to_shard_table, data->shard_directory);
+
+	// Conditionally add shard_name column
+	if (data->include_shard_name) {
+		data->names.emplace_back("shard_name");
+		data->types.emplace_back(LogicalType::VARCHAR);
+	}
 
 	// Set output schema
 	for (const auto &name : data->names) {
@@ -113,11 +146,23 @@ unique_ptr<GlobalTableFunctionState> AlignBowtie2ShardedTableFunction::InitGloba
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 	gstate->shard_count = data.shards.size();
+	gstate->max_threads_per_shard = data.max_threads_per_shard;
+
+	// Derive max_active_shards from available threads: ceil(db_threads / max_threads_per_shard)
+	idx_t db_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+	idx_t derived = (db_threads + data.max_threads_per_shard - 1) / data.max_threads_per_shard;
+	gstate->max_active_shards = std::max<idx_t>(1, std::min(derived, gstate->shard_count));
+	gstate->debug = data.debug;
+	gstate->start_time = std::chrono::steady_clock::now();
 	idx_t total = 0;
 	for (const auto &shard : data.shards) {
 		total += shard.read_count;
 	}
-	gstate->total_associations = total;
+	gstate->total_associations.store(total, std::memory_order_relaxed);
+	SHARD_DBG_MEM(*gstate, "InitGlobal: shards=%zu db_threads=%zu max_tps=%zu max_active=%zu MaxThreads=%zu",
+	              static_cast<size_t>(gstate->shard_count), static_cast<size_t>(db_threads),
+	              static_cast<size_t>(gstate->max_threads_per_shard), static_cast<size_t>(gstate->max_active_shards),
+	              static_cast<size_t>(gstate->MaxThreads()));
 	return gstate;
 }
 
@@ -131,40 +176,186 @@ AlignBowtie2ShardedTableFunction::InitLocal(ExecutionContext &context, TableFunc
 	return lstate;
 }
 
+std::shared_ptr<Bowtie2ActiveShard> AlignBowtie2ShardedTableFunction::ClaimWork(ClientContext &context,
+                                                                                GlobalState &gstate,
+                                                                                const Data &bind_data,
+                                                                                LocalState &lstate) {
+	std::shared_ptr<Bowtie2ActiveShard> active;
+	idx_t shard_idx;
+
+	SHARD_DBG(gstate, "ClaimWork: enter");
+
+	{
+		std::unique_lock<std::mutex> lock(gstate.lock);
+
+		while (true) {
+			// Phase 1: Try to join an existing active shard with capacity
+			for (auto &shard : gstate.active_shards) {
+				if (shard->ready.load(std::memory_order_acquire) && !shard->exhausted.load(std::memory_order_acquire) &&
+				    shard->active_workers.load(std::memory_order_acquire) < gstate.max_threads_per_shard) {
+					shard->active_workers.fetch_add(1, std::memory_order_acq_rel);
+					auto &info = bind_data.shards[shard->shard_idx];
+					SHARD_DBG(gstate, "ClaimWork: JOIN shard %zu '%s' (workers=%zu)",
+					          static_cast<size_t>(shard->shard_idx), info.name.c_str(),
+					          static_cast<size_t>(shard->active_workers.load(std::memory_order_relaxed)));
+					return shard;
+				}
+			}
+
+			// Phase 2: Try to claim a new shard if under the active shard limit
+			bool has_unclaimed = gstate.next_shard_idx < bind_data.shards.size();
+			// For small shards (<= batch_size reads), allow one shard per thread
+			// instead of the normal limit, so all threads stay busy
+			idx_t max_active = gstate.max_active_shards;
+			if (has_unclaimed && bind_data.shards[gstate.next_shard_idx].read_count <= SHARD_READ_BATCH_SIZE) {
+				max_active = gstate.max_active_shards * gstate.max_threads_per_shard;
+			}
+			if (has_unclaimed && gstate.active_shards.size() < max_active) {
+				shard_idx = gstate.next_shard_idx++;
+				active = std::make_shared<Bowtie2ActiveShard>();
+				active->shard_idx = shard_idx;
+				active->active_workers.store(1, std::memory_order_release);
+				// ready=false (default); set to true after IDs materialized
+				gstate.active_shards.push_back(active);
+				SHARD_DBG(gstate, "ClaimWork: NEW shard %zu '%s' (active_shards=%zu)", static_cast<size_t>(shard_idx),
+				          bind_data.shards[shard_idx].name.c_str(), static_cast<size_t>(gstate.active_shards.size()));
+				break; // exit lock to materialize IDs
+			}
+
+			// Phase 3: Can't join or start - check if waiting is worthwhile
+			bool any_not_exhausted = false;
+			for (auto &shard : gstate.active_shards) {
+				if (!shard->exhausted.load(std::memory_order_acquire)) {
+					any_not_exhausted = true;
+					break;
+				}
+			}
+
+			if (!has_unclaimed && !any_not_exhausted) {
+				SHARD_DBG(gstate, "ClaimWork: DONE (no more work)");
+				return nullptr; // All shards processed, no active work remaining
+			}
+
+			// Wait for: a shard to become ready, capacity to open, or a shard to be removed
+			SHARD_DBG(gstate, "ClaimWork: WAIT (active=%zu, unclaimed=%s, any_alive=%s)",
+			          static_cast<size_t>(gstate.active_shards.size()), has_unclaimed ? "yes" : "no",
+			          any_not_exhausted ? "yes" : "no");
+			gstate.cv.wait(lock);
+		}
+	}
+	// Lock released
+
+	// Phase 4: Materialize read IDs OUTSIDE lock
+	// Unlike minimap2, bowtie2 has no index to load here — subprocess spawn is deferred to align().
+	auto &shard_info = bind_data.shards[shard_idx];
+	SHARD_DBG(gstate, "ClaimWork: MATERIALIZING IDs for shard %zu '%s'", static_cast<size_t>(shard_idx),
+	          shard_info.name.c_str());
+	auto ids_start = std::chrono::steady_clock::now();
+	try {
+		active->shard_read_ids = ReadShardIds(context, bind_data.read_to_shard_table, shard_info.name);
+	} catch (...) {
+		// Remove failed shard from active list and notify waiters to prevent deadlock
+		SHARD_DBG(gstate, "ClaimWork: ID MATERIALIZATION FAILED shard %zu", static_cast<size_t>(shard_idx));
+		active->exhausted.store(true, std::memory_order_release);
+		active->active_workers.fetch_sub(1, std::memory_order_acq_rel);
+		{
+			std::lock_guard<std::mutex> guard(gstate.lock);
+			auto &shards = gstate.active_shards;
+			shards.erase(std::remove(shards.begin(), shards.end(), active), shards.end());
+		}
+		gstate.cv.notify_all();
+		throw;
+	}
+	auto ids_ms =
+	    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - ids_start).count();
+	idx_t id_count = active->shard_read_ids.size();
+	SHARD_DBG_MEM(gstate, "ClaimWork: MATERIALIZED %zu IDs for shard %zu in %ldms", static_cast<size_t>(id_count),
+	              static_cast<size_t>(shard_idx), static_cast<long>(ids_ms));
+
+	// Adjust total_associations if materialized count differs from GROUP BY estimate
+	// (e.g., NULL read_ids are counted by COUNT(*) but skipped by ReadShardIds)
+	idx_t estimated = bind_data.shards[shard_idx].read_count;
+	if (id_count != estimated) {
+		auto old_total = gstate.total_associations.fetch_add(id_count - estimated, std::memory_order_relaxed);
+		SHARD_DBG(gstate, "ClaimWork: adjusted total_associations %zu -> %zu (shard %zu: estimated=%zu, actual=%zu)",
+		          static_cast<size_t>(old_total), static_cast<size_t>(old_total + id_count - estimated),
+		          static_cast<size_t>(shard_idx), static_cast<size_t>(estimated), static_cast<size_t>(id_count));
+	}
+
+	// Phase 5: Publish under lock to prevent lost wake-ups with CV
+	{
+		std::lock_guard<std::mutex> guard(gstate.lock);
+		active->ready.store(true, std::memory_order_release);
+	}
+	gstate.cv.notify_all();
+	return active;
+}
+
+void AlignBowtie2ShardedTableFunction::ReleaseWork(GlobalState &gstate, LocalState &lstate) {
+	auto active = lstate.current_active_shard;
+	lstate.has_shard = false;
+
+	auto prev_workers = active->active_workers.fetch_sub(1, std::memory_order_acq_rel);
+	// prev_workers is the value BEFORE decrement
+
+	SHARD_DBG(gstate, "ReleaseWork: shard %zu (workers %zu->%zu, exhausted=%s)", static_cast<size_t>(active->shard_idx),
+	          static_cast<size_t>(prev_workers), static_cast<size_t>(prev_workers - 1),
+	          active->exhausted.load(std::memory_order_relaxed) ? "yes" : "no");
+
+	if (prev_workers == 1 && active->exhausted.load(std::memory_order_acquire)) {
+		// Last worker on an exhausted shard - remove from active list
+		std::lock_guard<std::mutex> guard(gstate.lock);
+		auto &shards = gstate.active_shards;
+		shards.erase(std::remove(shards.begin(), shards.end(), active), shards.end());
+		SHARD_DBG_MEM(gstate, "ReleaseWork: REMOVED shard %zu (active_shards=%zu)",
+		              static_cast<size_t>(active->shard_idx), static_cast<size_t>(shards.size()));
+	}
+
+	lstate.current_active_shard = nullptr;
+
+	// Always notify: capacity may have opened or a shard slot freed
+	gstate.cv.notify_all();
+}
+
 void AlignBowtie2ShardedTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &bind_data = data_p.bind_data->Cast<Data>();
 	auto &global_state = data_p.global_state->Cast<GlobalState>();
 	auto &local_state = data_p.local_state->Cast<LocalState>();
 
 	while (true) {
-		// Check if we have buffered results to output
+		// 1. Output buffered results
 		idx_t available = local_state.result_buffer.size() - local_state.buffer_offset;
 
 		if (available > 0) {
-			// Output up to STANDARD_VECTOR_SIZE results
 			idx_t output_count = std::min(available, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
 			OutputSAMRecordBatch(output, local_state.result_buffer, local_state.buffer_offset, output_count);
+			if (bind_data.include_shard_name) {
+				auto shard_col_idx = output.ColumnCount() - 1;
+				auto &shard_vec = output.data[shard_col_idx];
+				for (idx_t i = 0; i < output_count; i++) {
+					FlatVector::GetData<string_t>(shard_vec)[i] =
+					    StringVector::AddString(shard_vec, local_state.current_shard_name);
+				}
+			}
 			local_state.buffer_offset += output_count;
 			return;
 		}
 
-		// Buffer is empty, need to get more results
-
-		// Claim a shard if we don't have one
+		// 2. Claim work if needed
 		if (!local_state.has_shard) {
-			std::lock_guard<std::mutex> lock(global_state.lock);
-			if (global_state.next_shard_idx >= bind_data.shards.size()) {
+			auto active = ClaimWork(context, global_state, bind_data, local_state);
+			if (!active) {
 				// No more shards to process
 				output.SetCardinality(0);
 				return;
 			}
-			local_state.current_shard_idx = global_state.next_shard_idx++;
+			local_state.current_active_shard = active;
 			local_state.has_shard = true;
-			local_state.current_read_offset = 0;
-			local_state.finished_aligning = false;
+			local_state.current_shard_name = bind_data.shards[active->shard_idx].name;
 
-			// Load index for new shard
-			auto &shard = bind_data.shards[local_state.current_shard_idx];
+			// Load bowtie2 index for new shard
+			auto &shard = bind_data.shards[active->shard_idx];
+			SHARD_DBG(global_state, "Execute: loading bowtie2 index '%s'", shard.index_prefix.c_str());
 			try {
 				local_state.aligner->load_index(shard.index_prefix);
 			} catch (const std::exception &e) {
@@ -172,51 +363,89 @@ void AlignBowtie2ShardedTableFunction::Execute(ClientContext &context, TableFunc
 			}
 		}
 
-		// If we've finished aligning for this shard, move to next
-		if (local_state.finished_aligning) {
-			// Reset state for claiming a new shard
-			local_state.has_shard = false;
-			// Reset aligner for reuse with next shard
+		// 3. Atomically claim batch offset into the pre-materialized ID list
+		auto &active = local_state.current_active_shard;
+		idx_t id_count = active->shard_read_ids.size();
+		idx_t my_offset = active->next_batch_offset.fetch_add(SHARD_READ_BATCH_SIZE, std::memory_order_acq_rel);
+
+		if (my_offset >= id_count) {
+			// All batches claimed — close this thread's bowtie2 subprocess stdin and
+			// drain any buffered SAM output. The subprocess may not have been started
+			// if this thread never called align() (e.g., joined a nearly-exhausted shard).
+			// In that case finish() is a no-op.
+			SHARD_DBG(global_state, "Execute: shard %zu offset %zu >= id_count %zu, finishing subprocess",
+			          static_cast<size_t>(active->shard_idx), static_cast<size_t>(my_offset),
+			          static_cast<size_t>(id_count));
+			active->exhausted.store(true, std::memory_order_release);
+
+			local_state.result_buffer.clear();
+			local_state.buffer_offset = 0;
+			local_state.aligner->finish(local_state.result_buffer);
+			FilterMappedOnly(local_state.result_buffer);
 			local_state.aligner->reset();
+
+			ReleaseWork(global_state, local_state);
 			continue;
 		}
 
-		// Read next batch of queries for current shard
-		auto &shard = bind_data.shards[local_state.current_shard_idx];
+		// 4. Clamp batch count to remaining IDs
+		idx_t batch_count = std::min(SHARD_READ_BATCH_SIZE, id_count - my_offset);
+		bool is_last_batch = (my_offset + batch_count >= id_count);
+
+		// Track progress by IDs claimed (before read/align, so progress updates during I/O)
+		global_state.associations_processed.fetch_add(batch_count, std::memory_order_relaxed);
+
+		// 5. Read sequences by ID batch
 		miint::SequenceRecordBatch query_batch;
+		SHARD_DBG(global_state, "Execute: shard %zu READ offset=%zu count=%zu (is_last=%s)",
+		          static_cast<size_t>(active->shard_idx), static_cast<size_t>(my_offset),
+		          static_cast<size_t>(batch_count), is_last_batch ? "yes" : "no");
+		auto read_start = std::chrono::steady_clock::now();
+		ReadBatchByIds(context, bind_data.query_table, bind_data.query_schema, active->shard_read_ids, my_offset,
+		               batch_count, query_batch);
+		auto read_ms =
+		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - read_start)
+		        .count();
+		SHARD_DBG_MEM(global_state, "Execute: shard %zu READ done: %zu reads in %ldms",
+		              static_cast<size_t>(active->shard_idx), static_cast<size_t>(query_batch.size()),
+		              static_cast<long>(read_ms));
 
-		// Use large batch size to reduce per-batch overhead (each batch creates a
-		// new Connection and re-executes a JOIN query against the shard table)
-		bool has_more = ReadShardQueryBatch(context, bind_data.query_table, bind_data.read_to_shard_table, shard.name,
-		                                    bind_data.query_schema, SHARDED_QUERY_BATCH_SIZE,
-		                                    local_state.current_read_offset, query_batch);
+		if (query_batch.empty()) {
+			// No sequences found for these IDs (shouldn't happen, but handle gracefully)
+			if (is_last_batch) {
+				active->exhausted.store(true, std::memory_order_release);
+			}
+			// Still need to finish/drain the subprocess
+			local_state.result_buffer.clear();
+			local_state.buffer_offset = 0;
+			local_state.aligner->finish(local_state.result_buffer);
+			FilterMappedOnly(local_state.result_buffer);
+			local_state.aligner->reset();
+			ReleaseWork(global_state, local_state);
+			continue;
+		}
 
-		// Clear buffer for new results
+		if (is_last_batch) {
+			// Last batch - mark exhausted so no new workers join
+			active->exhausted.store(true, std::memory_order_release);
+		}
+
+		// 6. Clear buffer + shrink_to_fit, then align
 		local_state.result_buffer.clear();
+		local_state.result_buffer.shrink_to_fit();
+		SHARD_DBG_MEM(global_state, "Execute: shard %zu buffer cleared+shrunk before align",
+		              static_cast<size_t>(active->shard_idx));
 		local_state.buffer_offset = 0;
 
-		if (query_batch.empty() && !has_more) {
-			// Shard queries exhausted - call finish() to get remaining results from bowtie2
-			local_state.aligner->finish(local_state.result_buffer);
-			local_state.finished_aligning = true;
-
-			// Filter out unmapped reads
-			FilterMappedOnly(local_state.result_buffer);
-
-			// If still no results after finish(), move to next shard
-			if (local_state.result_buffer.empty()) {
-				local_state.has_shard = false;
-				local_state.aligner->reset();
-				continue;
-			}
-		} else if (!query_batch.empty()) {
-			// Align batch
-			local_state.aligner->align(query_batch, local_state.result_buffer);
-			// Filter out unmapped reads
-			FilterMappedOnly(local_state.result_buffer);
-			// Track progress by associations processed
-			global_state.associations_processed.fetch_add(query_batch.size(), std::memory_order_relaxed);
-		}
+		auto align_start = std::chrono::steady_clock::now();
+		local_state.aligner->align(query_batch, local_state.result_buffer);
+		auto align_ms =
+		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - align_start)
+		        .count();
+		FilterMappedOnly(local_state.result_buffer);
+		SHARD_DBG_MEM(global_state, "Execute: shard %zu ALIGN %zu reads -> %zu results in %ldms",
+		              static_cast<size_t>(active->shard_idx), static_cast<size_t>(query_batch.size()),
+		              static_cast<size_t>(local_state.result_buffer.size()), static_cast<long>(align_ms));
 
 		// Loop back to output results (or get more if none)
 	}
@@ -225,11 +454,12 @@ void AlignBowtie2ShardedTableFunction::Execute(ClientContext &context, TableFunc
 double AlignBowtie2ShardedTableFunction::Progress(ClientContext &context, const FunctionData *bind_data,
                                                   const GlobalTableFunctionState *global_state) {
 	auto &gstate = global_state->Cast<GlobalState>();
-	if (gstate.total_associations == 0) {
+	auto total = gstate.total_associations.load(std::memory_order_relaxed);
+	if (total == 0) {
 		return 100.0;
 	}
-	return 100.0 * static_cast<double>(gstate.associations_processed.load(std::memory_order_relaxed)) /
-	       static_cast<double>(gstate.total_associations);
+	auto processed = gstate.associations_processed.load(std::memory_order_relaxed);
+	return std::min(100.0, 100.0 * static_cast<double>(processed) / static_cast<double>(total));
 }
 
 TableFunction AlignBowtie2ShardedTableFunction::GetFunction() {
@@ -244,6 +474,9 @@ TableFunction AlignBowtie2ShardedTableFunction::GetFunction() {
 	tf.named_parameters["max_secondary"] = LogicalType::INTEGER;
 	tf.named_parameters["extra_args"] = LogicalType::VARCHAR;
 	tf.named_parameters["quiet"] = LogicalType::BOOLEAN;
+	tf.named_parameters["max_threads_per_shard"] = LogicalType::INTEGER;
+	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
+	tf.named_parameters["include_shard_name"] = LogicalType::BOOLEAN;
 
 	tf.table_scan_progress = Progress;
 

@@ -35,14 +35,6 @@ std::vector<miint::AlignmentSubject> ReadSubjectTable(ClientContext &context, co
 bool ReadQueryBatch(ClientContext &context, const std::string &table_name, const SequenceTableSchema &schema,
                     idx_t batch_size, idx_t &offset, miint::SequenceRecordBatch &output);
 
-// Read a batch of query sequences for a specific shard.
-// Joins query_table with read_to_shard_table, filtering by shard_name.
-// Returns true if there are more rows to read, false if done.
-// offset is updated to the next position after reading.
-bool ReadShardQueryBatch(ClientContext &context, const std::string &query_table, const std::string &read_to_shard_table,
-                         const std::string &shard_name, const SequenceTableSchema &schema, idx_t batch_size,
-                         idx_t &offset, miint::SequenceRecordBatch &output);
-
 // Read all read_ids for a shard from the read_to_shard table, ordered.
 // Returns the IDs as a vector of strings for use with ReadBatchByIds.
 std::vector<std::string> ReadShardIds(ClientContext &context, const std::string &read_to_shard_table,
