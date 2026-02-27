@@ -2,6 +2,13 @@
 
 Scalar functions for alignment analysis and sequence processing.
 
+## Table of Contents
+
+- [SAM Flag Functions](#sam-flag-functions) - Test individual SAM flag bits
+- [`alignment_seq_identity`](#alignment_seq_identitycigar-nm-md-type) - Sequence identity calculation
+- [`alignment_query_length`](#alignment_query_lengthcigar-include_hard_clipstrue) - Query length from CIGAR
+- [`alignment_query_coverage`](#alignment_query_coveragecigar-typealigned) - Query coverage from CIGAR
+
 ## SAM Flag Functions
 
 Test individual SAM flag bits. Each function takes a `USMALLINT` (the flags column from `read_alignments`) and returns a `BOOLEAN`.

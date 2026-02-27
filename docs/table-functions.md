@@ -2,6 +2,24 @@
 
 Table functions allow querying bioinformatics files as SQL tables.
 
+## Table of Contents
+
+- [`read_alignments`](#read_alignmentsfilename-reference_lengthstable_name-include_filepathfalse-include_seq_qualfalse) - SAM/BAM alignment files
+- [`read_fastx`](#read_fastxfilename-sequence2filename-include_filepathfalse-qual_offset33) - FASTA/FASTQ sequence files
+- [`read_sequences_sff`](#read_sequences_sfffilename-include_filepathfalse-trimtrue) - SFF (454/Roche) sequence files
+- [`read_biom`](#read_biomfilename-include_filepathfalse) - BIOM observation matrix files
+- [`read_gff`](#read_gffpath) - GFF3 genome annotation files
+- [`read_ncbi`](#read_ncbiaccession-api_key) - NCBI accession metadata
+- [`read_ncbi_fasta`](#read_ncbi_fastaaccession-api_key-include_filepathfalse) - NCBI FASTA sequences
+- [`read_ncbi_annotation`](#read_ncbi_annotationaccession-api_key-include_filepathfalse) - NCBI genome annotations
+- [`read_jplace`](#read_jplacepath) - Phylogenetic placement files
+- [`read_newick`](#read_newickfilename-include_filepathfalse) - Newick phylogenetic trees
+- [`align_minimap2`](#align_minimap2query_table-subject_tablenull-index_pathnull-options) - Minimap2 alignment
+- [`save_minimap2_index`](#save_minimap2_indexsubject_table-output_path-options) - Save minimap2 index
+- [`align_minimap2_sharded`](#align_minimap2_shardedquery_table-shard_directory-read_to_shard-options) - Sharded minimap2 alignment
+- [`align_bowtie2`](#align_bowtie2query_table-subject_table-options) - Bowtie2 alignment
+- [`align_bowtie2_sharded`](#align_bowtie2_shardedquery_table-shard_directory-read_to_shard-options) - Sharded bowtie2 alignment
+
 ## `read_alignments(filename, [reference_lengths='table_name'], [include_filepath=false], [include_seq_qual=false])`
 Read SAM/BAM alignment files.
 

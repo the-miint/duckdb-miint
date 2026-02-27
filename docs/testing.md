@@ -2,6 +2,13 @@
 
 The MIINT extension uses three complementary testing approaches to ensure correctness and reliability.
 
+## Table of Contents
+
+- [SQL Logic Tests](#sql-logic-tests)
+- [C++ Unit Tests](#c-unit-tests)
+- [Shell Script Tests](#shell-script-tests)
+- [Test Data](#test-data)
+
 ## SQL Logic Tests
 
 The primary testing mechanism for user-facing functionality uses DuckDB's SQL logic test framework. Test files are located in `test/sql/` and use the `.test` extension.

@@ -1,5 +1,11 @@
 # Installation and Building
 
+## Table of Contents
+
+- [Installing](#installing)
+- [Building](#building)
+- [Running the extension](#running-the-extension)
+
 ## Installing
 
 MIINT is available in the [DuckDB Community Extensions](https://community-extensions.duckdb.org/) repository:

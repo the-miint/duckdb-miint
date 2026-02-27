@@ -2,6 +2,14 @@
 
 DuckDB miint provides custom COPY formats for writing bioinformatics file formats.
 
+## Table of Contents
+
+- [FORMAT FASTQ](#copy-to-format-fastq) - Write FASTQ sequence files
+- [FORMAT FASTA](#copy-to-format-fasta) - Write FASTA sequence files
+- [FORMAT SAM / FORMAT BAM](#copy-to-format-sam-and-copy-to-format-bam) - Write SAM/BAM alignment files
+- [FORMAT BIOM](#copy-to-format-biom) - Write BIOM observation matrix files
+- [FORMAT NEWICK](#copy-to-format-newick) - Write Newick phylogenetic trees
+
 ## `COPY ... TO '...' (FORMAT FASTQ)`
 
 Write query results to FASTQ format files. Requires `read_id`, `sequence1`, and `qual1` columns from `read_fastx` output.

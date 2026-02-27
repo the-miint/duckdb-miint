@@ -2,6 +2,16 @@
 
 Functions for higher-level genomic analysis, sequence manipulation, and pairwise alignment.
 
+## Table of Contents
+
+- [`woltka_ogu_per_sample`](#woltka_ogu_per_samplerelation-sample_id_field-sequence_id_field) - Multi-sample OGU counts
+- [`woltka_ogu`](#woltka_ogurelation-sequence_id_field) - Single-sample OGU counts
+- [`sequence_dna_reverse_complement` / `sequence_rna_reverse_complement`](#sequence_dna_reverse_complementsequence-and-sequence_rna_reverse_complementsequence) - Reverse complement
+- [`sequence_dna_as_regexp` / `sequence_rna_as_regexp`](#sequence_dna_as_regexpsequence-and-sequence_rna_as_regexpsequence) - IUPAC to regex
+- [`compress_intervals`](#compress_intervalsstart-stop) - Merge overlapping intervals
+- [Pairwise Alignment Functions](#pairwise-alignment-functions) - WFA2-based pairwise alignment
+- [Utility Functions](#utility-functions) - `miint_version()` and others
+
 ## `woltka_ogu_per_sample(relation, sample_id_field, sequence_id_field)`
 
 Compute [Woltka](https://github.com/qiyunzhu/woltka) OGU (Operational Genomic Unit) counts over SAM-like alignment data for multiple samples. This function implements Woltka's classification algorithm, which assigns reads to taxonomic units while accounting for multi-mapped reads.
