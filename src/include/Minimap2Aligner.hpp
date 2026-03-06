@@ -10,6 +10,13 @@
 
 namespace miint {
 
+// Alignment stats computed during CIGAR string generation
+struct AlignmentStats {
+	int64_t mismatches = 0;  // XM: number of mismatches
+	int64_t gap_opens = 0;   // XO: number of gap opens
+	int64_t gap_extends = 0; // XG: number of gap extensions
+};
+
 // Subject sequence for indexing (subjects cannot be paired-end)
 struct AlignmentSubject {
 	std::string read_id;
@@ -127,6 +134,8 @@ private:
 	std::vector<std::string> subject_names_;            // For reference name lookup
 	Minimap2TbufPtr tbuf_;                              // Reusable thread buffer
 	std::shared_ptr<SharedMinimap2Index> shared_index_; // Shared index (mutually exclusive with index_)
+	char *md_buf_ = nullptr;                            // Pooled buffer for mm_gen_MD (Opt 5)
+	int md_max_len_ = 0;                                // Current capacity of md_buf_
 
 	// Build raw mm_idx_t* from subjects (shared by build_index and BuildSharedIndex)
 	static mm_idx_t *BuildRawIndex(const std::vector<AlignmentSubject> &subjects, const mm_idxopt_t &iopt,
@@ -143,18 +152,20 @@ private:
 	                  SAMRecordBatch &output);
 
 	// Convert minimap2 result to SAM fields
-	void reg_to_sam(const void *reg_ptr, const std::string &read_id, const std::string &query_seq,
+	void reg_to_sam(const mm_reg1_t *reg, const std::string &read_id, const std::string &query_seq,
 	                SAMRecordBatch &batch, int segment_idx, bool mate_mapped, bool mate_rev, int32_t mate_rid,
 	                int32_t mate_pos, int32_t tlen);
 
-	// Generate CIGAR string from mm_extra_t, including soft/hard clips
-	std::string cigar_string(const void *reg_ptr, int32_t query_len, uint16_t sam_flags) const;
+	// Generate CIGAR string from mm_extra_t, including soft/hard clips.
+	// When stats_out is non-null, computes XM/XO/XG during the same CIGAR walk.
+	std::string cigar_string(const mm_reg1_t *reg, int32_t query_len, uint16_t sam_flags,
+	                         AlignmentStats *stats_out = nullptr) const;
 
 	// Calculate stop position from CIGAR
-	int64_t calculate_stop_position(int64_t start_pos, const void *reg_ptr) const;
+	int64_t calculate_stop_position(int64_t start_pos, const mm_reg1_t *reg) const;
 
 	// Calculate SAM flags
-	uint16_t calculate_flags(const void *reg_ptr, bool is_paired, int segment_idx, bool mate_mapped, bool mate_rev,
+	uint16_t calculate_flags(const mm_reg1_t *reg, bool is_paired, int segment_idx, bool mate_mapped, bool mate_rev,
 	                         bool is_unmapped) const;
 
 	// Get reference name by ID

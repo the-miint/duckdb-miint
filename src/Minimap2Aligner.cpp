@@ -2,7 +2,6 @@
 #include <minimap2/minimap.h>
 #include <minimap2/mmpriv.h>
 #include <cstdlib>
-#include <sstream>
 #include <stdexcept>
 
 // When MIINT_USE_JEMALLOC is defined, minimap2 is compiled with malloc/free
@@ -29,55 +28,6 @@ void Minimap2TbufDeleter::operator()(mm_tbuf_t *tbuf) const {
 	if (tbuf) {
 		mm_tbuf_destroy(tbuf);
 	}
-}
-
-// Helper struct to hold alignment stats computed from CIGAR
-struct AlignmentStats {
-	int64_t mismatches = 0;    // XM: number of mismatches
-	int64_t gap_opens = 0;     // XO: number of gap opens
-	int64_t gap_extends = 0;   // XG: number of gap extensions
-	int64_t edit_distance = 0; // NM: total edit distance
-};
-
-// Compute alignment statistics from CIGAR
-static AlignmentStats compute_alignment_stats(const mm_reg1_t *reg) {
-	AlignmentStats stats;
-
-	if (!reg->p || reg->p->n_cigar == 0) {
-		return stats;
-	}
-
-	for (uint32_t i = 0; i < reg->p->n_cigar; i++) {
-		uint32_t op = reg->p->cigar[i] & 0xf;
-		uint32_t len = reg->p->cigar[i] >> 4;
-
-		switch (op) {
-		case MM_CIGAR_X_MISMATCH: // X: sequence mismatch
-			stats.mismatches += len;
-			stats.edit_distance += len;
-			break;
-		case MM_CIGAR_INS: // I: insertion to reference
-			stats.gap_opens += 1;
-			stats.gap_extends += (len > 1) ? (len - 1) : 0;
-			stats.edit_distance += len;
-			break;
-		case MM_CIGAR_DEL: // D: deletion from reference
-			stats.gap_opens += 1;
-			stats.gap_extends += (len > 1) ? (len - 1) : 0;
-			stats.edit_distance += len;
-			break;
-		case MM_CIGAR_EQ_MATCH: // =: sequence match
-		case MM_CIGAR_MATCH:    // M: alignment match (can be match or mismatch)
-		case MM_CIGAR_N_SKIP:   // N: skipped region (intron)
-		case MM_CIGAR_SOFTCLIP: // S: soft clipping
-		case MM_CIGAR_HARDCLIP: // H: hard clipping
-		case MM_CIGAR_PADDING:  // P: padding
-		default:
-			break;
-		}
-	}
-
-	return stats;
 }
 
 // SharedMinimap2Index implementation
@@ -197,13 +147,17 @@ Minimap2Aligner::Minimap2Aligner(const Minimap2Config &config)
 }
 
 // Destructor
-Minimap2Aligner::~Minimap2Aligner() = default;
+Minimap2Aligner::~Minimap2Aligner() {
+	MM_FREE(md_buf_);
+}
 
 // Move constructor
 Minimap2Aligner::Minimap2Aligner(Minimap2Aligner &&other) noexcept
     : config_(std::move(other.config_)), iopt_(std::move(other.iopt_)), mopt_(std::move(other.mopt_)),
       index_(std::move(other.index_)), subject_names_(std::move(other.subject_names_)), tbuf_(std::move(other.tbuf_)),
-      shared_index_(std::move(other.shared_index_)) {
+      shared_index_(std::move(other.shared_index_)), md_buf_(other.md_buf_), md_max_len_(other.md_max_len_) {
+	other.md_buf_ = nullptr;
+	other.md_max_len_ = 0;
 }
 
 // Move assignment
@@ -216,6 +170,11 @@ Minimap2Aligner &Minimap2Aligner::operator=(Minimap2Aligner &&other) noexcept {
 		subject_names_ = std::move(other.subject_names_);
 		tbuf_ = std::move(other.tbuf_);
 		shared_index_ = std::move(other.shared_index_);
+		MM_FREE(md_buf_);
+		md_buf_ = other.md_buf_;
+		md_max_len_ = other.md_max_len_;
+		other.md_buf_ = nullptr;
+		other.md_max_len_ = 0;
 	}
 	return *this;
 }
@@ -316,6 +275,9 @@ void Minimap2Aligner::align(const SequenceRecordBatch &queries, SAMRecordBatch &
 	if (!active_index()) {
 		throw std::runtime_error("No index built. Call build_index() or attach_shared_index() first.");
 	}
+
+	// Heuristic: ~3 alignments per query (primary + secondaries)
+	output.reserve(output.size() + queries.size() * 3);
 
 	// Process each query
 	for (size_t i = 0; i < queries.size(); i++) {
@@ -446,7 +408,7 @@ void Minimap2Aligner::align_paired(const std::string &read_id, const std::string
 	// Process alignments for each segment
 	for (int seg = 0; seg < 2; seg++) {
 		const std::string &query_seq = (seg == 0) ? sequence1 : sequence2;
-		int n_output = 0;
+		int secondary_count = 0;
 
 		for (int j = 0; j < n_regs[seg]; j++) {
 			mm_reg1_t *reg = &regs[seg][j];
@@ -460,10 +422,10 @@ void Minimap2Aligner::align_paired(const std::string &read_id, const std::string
 			bool is_secondary = !is_primary;
 
 			if (is_secondary) {
-				int secondary_count = n_output - 1;
 				if (secondary_count >= config_.max_secondary) {
 					continue;
 				}
+				secondary_count++;
 			}
 
 			// For paired, tlen has opposite sign for read2
@@ -471,8 +433,6 @@ void Minimap2Aligner::align_paired(const std::string &read_id, const std::string
 
 			reg_to_sam(reg, read_id, query_seq, output, seg, mate_mapped[seg], mate_rev[seg], mate_rid[seg],
 			           mate_pos[seg], this_tlen);
-
-			n_output++;
 		}
 	}
 
@@ -485,11 +445,9 @@ void Minimap2Aligner::align_paired(const std::string &read_id, const std::string
 	}
 }
 
-void Minimap2Aligner::reg_to_sam(const void *reg_ptr, const std::string &read_id, const std::string &query_seq,
+void Minimap2Aligner::reg_to_sam(const mm_reg1_t *reg, const std::string &read_id, const std::string &query_seq,
                                  SAMRecordBatch &batch, int segment_idx, bool mate_mapped, bool mate_rev,
                                  int32_t mate_rid, int32_t mate_pos, int32_t tlen) {
-	const mm_reg1_t *reg = static_cast<const mm_reg1_t *>(reg_ptr);
-
 	bool is_paired = (segment_idx >= 0);
 	bool is_unmapped = (reg->rid < 0);
 
@@ -497,6 +455,8 @@ void Minimap2Aligner::reg_to_sam(const void *reg_ptr, const std::string &read_id
 	batch.read_ids.push_back(read_id);
 	batch.flags.push_back(flags);
 
+	// Compute CIGAR string and alignment stats in a single pass (Opt 2+3)
+	AlignmentStats stats;
 	if (is_unmapped) {
 		batch.references.push_back("*");
 		batch.positions.push_back(0);
@@ -508,7 +468,7 @@ void Minimap2Aligner::reg_to_sam(const void *reg_ptr, const std::string &read_id
 		batch.positions.push_back(reg->rs + 1); // Convert to 1-based
 		batch.stop_positions.push_back(calculate_stop_position(reg->rs + 1, reg));
 		batch.mapqs.push_back(static_cast<uint8_t>(reg->mapq));
-		batch.cigars.push_back(cigar_string(reg, static_cast<int32_t>(query_seq.length()), flags));
+		batch.cigars.push_back(cigar_string(reg, static_cast<int32_t>(query_seq.length()), flags, &stats));
 	}
 
 	// Mate reference
@@ -527,18 +487,18 @@ void Minimap2Aligner::reg_to_sam(const void *reg_ptr, const std::string &read_id
 
 	batch.template_lengths.push_back(tlen);
 
-	// Compute alignment statistics from CIGAR
-	AlignmentStats stats = compute_alignment_stats(reg);
-
 	// Tags
-	batch.tag_as_values.push_back(reg->score);
+	batch.tag_as_values.push_back(is_unmapped ? -1 : (reg->p ? reg->p->dp_score : -1));
 	batch.tag_xs_values.push_back(reg->subsc > 0 ? reg->subsc : -1);
-	batch.tag_ys_values.push_back(-1);                                     // Not available from minimap2
-	batch.tag_xn_values.push_back(-1);                                     // Not available from minimap2
-	batch.tag_xm_values.push_back(is_unmapped ? -1 : stats.mismatches);    // XM: mismatches
-	batch.tag_xo_values.push_back(is_unmapped ? -1 : stats.gap_opens);     // XO: gap opens
-	batch.tag_xg_values.push_back(is_unmapped ? -1 : stats.gap_extends);   // XG: gap extensions
-	batch.tag_nm_values.push_back(is_unmapped ? -1 : stats.edit_distance); // NM: edit distance
+	batch.tag_ys_values.push_back(-1);                                   // Not available from minimap2
+	batch.tag_xn_values.push_back(-1);                                   // Not available from minimap2
+	batch.tag_xm_values.push_back(is_unmapped ? -1 : stats.mismatches);  // XM: mismatches
+	batch.tag_xo_values.push_back(is_unmapped ? -1 : stats.gap_opens);   // XO: gap opens
+	batch.tag_xg_values.push_back(is_unmapped ? -1 : stats.gap_extends); // XG: gap extensions
+
+	// NM: use minimap2's O(1) formula instead of CIGAR walk (Opt 7)
+	int64_t nm = reg->blen - reg->mlen + (reg->p ? reg->p->n_ambi : 0);
+	batch.tag_nm_values.push_back(is_unmapped ? -1 : nm);
 
 	// YT tag (pair type)
 	std::string yt;
@@ -553,19 +513,16 @@ void Minimap2Aligner::reg_to_sam(const void *reg_ptr, const std::string &read_id
 	}
 	batch.tag_yt_values.push_back(yt);
 
-	// MD tag - generate if available
-	// km=nullptr causes mm_gen_MD → krealloc(NULL, ...) → realloc(). When
-	// MIINT_USE_JEMALLOC is defined, realloc is redirected to duckdb_je_realloc
-	// at compile time in kalloc.c, so MM_FREE is correct in both configurations.
+	// MD tag - use arena allocator for internal temp buffers (Opt 1),
+	// and pooled md_buf_ member to avoid per-call alloc/free (Opt 5)
 	std::string md_tag;
 	if (reg->p && !is_unmapped) {
-		char *md_buf = nullptr;
-		int md_max_len = 0;
-		int md_len = mm_gen_MD(nullptr, &md_buf, &md_max_len, active_index(), reg, query_seq.c_str());
-		if (md_len > 0 && md_buf) {
-			md_tag = std::string(md_buf, md_len);
+		int md_len =
+		    mm_gen_MD(mm_tbuf_get_km(tbuf_.get()), &md_buf_, &md_max_len_, active_index(), reg, query_seq.c_str());
+		if (md_len > 0 && md_buf_) {
+			md_tag = std::string(md_buf_, md_len);
 		}
-		MM_FREE(md_buf);
+		// Do NOT free md_buf_ here — reused across calls, freed in destructor
 	}
 	batch.tag_md_values.push_back(md_tag);
 
@@ -573,9 +530,8 @@ void Minimap2Aligner::reg_to_sam(const void *reg_ptr, const std::string &read_id
 	batch.tag_sa_values.push_back("");
 }
 
-std::string Minimap2Aligner::cigar_string(const void *reg_ptr, int32_t query_len, uint16_t sam_flags) const {
-	const mm_reg1_t *reg = static_cast<const mm_reg1_t *>(reg_ptr);
-
+std::string Minimap2Aligner::cigar_string(const mm_reg1_t *reg, int32_t query_len, uint16_t sam_flags,
+                                          AlignmentStats *stats_out) const {
 	if (!reg->p || reg->p->n_cigar == 0) {
 		return "*";
 	}
@@ -591,44 +547,68 @@ std::string Minimap2Aligner::cigar_string(const void *reg_ptr, int32_t query_len
 	int clip_back = reg->rev ? reg->qs : (query_len - reg->qe);
 
 	// Supplementary (0x800) → hard clip; primary/secondary → soft clip.
-	// This is a simplification of minimap2 format.c:501-502 which also checks
-	// MM_F_SECONDARY_SEQ and MM_F_SOFTCLIP flags — neither is set by this extension.
 	char clip_char = (sam_flags & 0x800) ? 'H' : 'S';
 
-	std::ostringstream oss;
+	// Pre-size: each CIGAR op is at most 10 digits + 1 char, plus 2 clips
+	std::string result;
+	result.reserve((reg->p->n_cigar + 2) * 11);
+
+	auto append_int = [&result](uint32_t val) {
+		char buf[10];
+		int len = 0;
+		do {
+			buf[len++] = '0' + (val % 10);
+			val /= 10;
+		} while (val);
+		for (int i = len - 1; i >= 0; --i) {
+			result.push_back(buf[i]);
+		}
+	};
 
 	if (clip_front > 0) {
-		oss << clip_front << clip_char;
+		append_int(clip_front);
+		result.push_back(clip_char);
 	}
 
 	for (uint32_t i = 0; i < reg->p->n_cigar; i++) {
 		uint32_t op = reg->p->cigar[i] & 0xf;
 		uint32_t len = reg->p->cigar[i] >> 4;
-		oss << len << MM_CIGAR_STR[op];
+		append_int(len);
+		result.push_back(MM_CIGAR_STR[op]);
+		if (stats_out) {
+			switch (op) {
+			case MM_CIGAR_X_MISMATCH:
+				stats_out->mismatches += len;
+				break;
+			case MM_CIGAR_INS:
+			case MM_CIGAR_DEL:
+				stats_out->gap_opens += 1;
+				stats_out->gap_extends += (len > 1) ? (len - 1) : 0;
+				break;
+			default:
+				break;
+			}
+		}
 	}
 
 	if (clip_back > 0) {
-		oss << clip_back << clip_char;
+		append_int(clip_back);
+		result.push_back(clip_char);
 	}
 
-	return oss.str();
+	return result;
 }
 
-int64_t Minimap2Aligner::calculate_stop_position(int64_t start_pos, const void *reg_ptr) const {
-	const mm_reg1_t *reg = static_cast<const mm_reg1_t *>(reg_ptr);
-
+int64_t Minimap2Aligner::calculate_stop_position(int64_t start_pos, const mm_reg1_t *reg) const {
 	// minimap2 uses 0-based half-open coordinates: [rs, re)
-	// For example, alignment from position 0 to 49 is represented as rs=0, re=50
-	// SAM format uses 1-based inclusive coordinates: [POS, stop_position]
-	// Converting: if [0, 50) in 0-based half-open = [1, 50] in 1-based inclusive
-	// So 0-based exclusive end (re) equals 1-based inclusive end directly
-	return reg->re;
+	// stop_position uses 1-based half-open coordinates: position + ref_length
+	// Convert: 0-based exclusive end → 1-based exclusive end = re + 1
+	// Example: rs=0, re=50 → position=1, stop_position=51, length=50
+	return reg->re + 1;
 }
 
-uint16_t Minimap2Aligner::calculate_flags(const void *reg_ptr, bool is_paired, int segment_idx, bool mate_mapped,
+uint16_t Minimap2Aligner::calculate_flags(const mm_reg1_t *reg, bool is_paired, int segment_idx, bool mate_mapped,
                                           bool mate_rev, bool is_unmapped) const {
-	const mm_reg1_t *reg = static_cast<const mm_reg1_t *>(reg_ptr);
-
 	uint16_t flags = 0;
 
 	if (is_paired) {
