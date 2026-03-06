@@ -2,6 +2,7 @@
 #include "align_common.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 
 namespace duckdb {
 
@@ -43,7 +44,7 @@ unique_ptr<FunctionData> AlignMinimap2TableFunction::Bind(ClientContext &context
 	}
 
 	// Validate query table/view exists
-	data->query_schema = ValidateSequenceTableSchema(context, data->query_table, true /* allow_paired */);
+	data->query_schema = ValidateSequenceTableSchema(context, data->query_table);
 
 	// Parse optional named parameters
 	auto per_subject_param = input.named_parameters.find("per_subject_database");
@@ -76,8 +77,7 @@ unique_ptr<FunctionData> AlignMinimap2TableFunction::Bind(ClientContext &context
 
 		// Note: subjects vector remains empty in this mode
 	} else {
-		// Traditional mode: validate subject table and load subjects
-		ValidateSequenceTableSchema(context, data->subject_table, false /* allow_paired */);
+		// Traditional mode: load subjects (ReadSubjectTable validates internally)
 		data->subjects = ReadSubjectTable(context, data->subject_table);
 	}
 
@@ -97,23 +97,29 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2TableFunction::InitGlobal(Clie
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 
-	// Create aligner with config
-	gstate->aligner = std::make_unique<miint::Minimap2Aligner>(data.config);
-
-	// Load or build index based on mode
-	if (data.using_prebuilt_index()) {
-		// Load pre-built index from file
+	if (data.per_subject_database) {
+		// Per-subject mode: single-threaded, builds index per-subject in Execute()
+		gstate->per_subject_mode = true;
+		gstate->num_threads = 1;
+		auto ps = std::make_unique<PerSubjectModeState>();
+		ps->aligner = std::make_unique<miint::Minimap2Aligner>(data.config);
+		gstate->per_subject = std::move(ps);
+	} else if (data.using_prebuilt_index()) {
+		// Prebuilt index: load into SharedMinimap2Index for multi-threaded access
+		auto st = std::make_unique<StandardModeState>();
 		try {
-			gstate->aligner->load_index(data.index_path);
+			st->shared_index = std::make_shared<miint::SharedMinimap2Index>(data.index_path, data.config);
 		} catch (const std::exception &e) {
 			throw IOException("Failed to load minimap2 index from '%s': %s", data.index_path, e.what());
 		}
+		gstate->standard = std::move(st);
+		gstate->num_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
 	} else {
-		// Traditional mode: build index from subjects
-		if (!data.per_subject_database) {
-			gstate->aligner->build_index(data.subjects);
-		}
-		// Note: per_subject mode builds index per-subject in Execute()
+		// Standard mode with subject table: build shared index
+		auto st = std::make_unique<StandardModeState>();
+		st->shared_index = miint::Minimap2Aligner::BuildSharedIndex(data.subjects, data.config);
+		gstate->standard = std::move(st);
+		gstate->num_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
 	}
 
 	return gstate;
@@ -122,100 +128,127 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2TableFunction::InitGlobal(Clie
 unique_ptr<LocalTableFunctionState> AlignMinimap2TableFunction::InitLocal(ExecutionContext &context,
                                                                           TableFunctionInitInput &input,
                                                                           GlobalTableFunctionState *global_state) {
-	return make_uniq<LocalState>();
+	auto &gstate = global_state->Cast<GlobalState>();
+	auto lstate = make_uniq<LocalState>();
+
+	if (!gstate.per_subject_mode) {
+		// Standard mode: create per-thread aligner and attach shared index
+		auto &data = input.bind_data->Cast<Data>();
+		lstate->aligner = std::make_unique<miint::Minimap2Aligner>(data.config);
+		lstate->aligner->attach_shared_index(gstate.standard->shared_index);
+	}
+
+	return lstate;
 }
 
-void AlignMinimap2TableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &bind_data = data_p.bind_data->Cast<Data>();
-	auto &global_state = data_p.global_state->Cast<GlobalState>();
+// Per-subject mode: single-threaded with global mutex
+static void ExecutePerSubject(ClientContext &context, const AlignMinimap2TableFunction::Data &bind_data,
+                              AlignMinimap2TableFunction::PerSubjectModeState &ps, DataChunk &output) {
+	std::lock_guard<std::mutex> lock(ps.lock);
 
-	std::lock_guard<std::mutex> lock(global_state.lock);
-
-	// Check if we're done
-	if (global_state.done) {
+	if (ps.done) {
 		output.SetCardinality(0);
 		return;
 	}
 
-	// Determine how many results we can output this call
-	idx_t available = global_state.result_buffer.size() - global_state.buffer_offset;
+	idx_t available = ps.result_buffer.size() - ps.buffer_offset;
 
-	// If buffer is empty or exhausted, fill it with more alignments
 	while (available == 0) {
-		// Clear buffer for new batch
-		global_state.result_buffer.clear();
-		global_state.buffer_offset = 0;
+		ps.result_buffer.clear();
+		ps.buffer_offset = 0;
 
-		if (bind_data.per_subject_database) {
-			// Per-subject mode: load all queries once, then align against each subject
-
-			// Load all queries into memory on first use (avoids re-reading table for each subject)
-			if (!global_state.queries_loaded) {
-				idx_t query_offset = 0;
-				miint::SequenceRecordBatch batch;
-				bool has_more = true;
-				while (has_more) {
-					batch.clear();
-					has_more = ReadQueryBatch(context, bind_data.query_table, bind_data.query_schema,
-					                          MINIMAP2_QUERY_BATCH_SIZE, query_offset, batch);
-					// Append batch to all_queries
-					for (size_t i = 0; i < batch.size(); i++) {
-						global_state.all_queries.read_ids.push_back(std::move(batch.read_ids[i]));
-						global_state.all_queries.comments.push_back(std::move(batch.comments[i]));
-						global_state.all_queries.sequences1.push_back(std::move(batch.sequences1[i]));
-						global_state.all_queries.quals1.push_back(std::move(batch.quals1[i]));
-						if (batch.is_paired) {
-							global_state.all_queries.sequences2.push_back(std::move(batch.sequences2[i]));
-							global_state.all_queries.quals2.push_back(std::move(batch.quals2[i]));
-						}
+		// Load all queries into memory on first use
+		if (!ps.queries_loaded) {
+			ps.all_queries.is_paired = bind_data.query_schema.has_sequence2;
+			idx_t query_offset = 0;
+			miint::SequenceRecordBatch batch;
+			bool has_more = true;
+			while (has_more) {
+				batch.clear();
+				has_more = ReadQueryBatch(context, bind_data.query_table, bind_data.query_schema,
+				                          MINIMAP2_QUERY_BATCH_SIZE, query_offset, batch);
+				for (size_t i = 0; i < batch.size(); i++) {
+					ps.all_queries.read_ids.push_back(std::move(batch.read_ids[i]));
+					ps.all_queries.comments.push_back(std::move(batch.comments[i]));
+					ps.all_queries.sequences1.push_back(std::move(batch.sequences1[i]));
+					ps.all_queries.quals1.push_back(std::move(batch.quals1[i]));
+					if (ps.all_queries.is_paired) {
+						ps.all_queries.sequences2.push_back(std::move(batch.sequences2[i]));
+						ps.all_queries.quals2.push_back(std::move(batch.quals2[i]));
 					}
-					global_state.all_queries.is_paired = batch.is_paired;
 				}
-				global_state.queries_loaded = true;
 			}
-
-			// Check if we've processed all subjects
-			if (global_state.current_subject_idx >= bind_data.subjects.size()) {
-				global_state.done = true;
-				output.SetCardinality(0);
-				return;
-			}
-
-			// Build index for current subject
-			global_state.aligner->build_single_index(bind_data.subjects[global_state.current_subject_idx]);
-
-			// Align all queries against this subject (queries already in memory)
-			if (!global_state.all_queries.empty()) {
-				global_state.aligner->align(global_state.all_queries, global_state.result_buffer);
-			}
-
-			// Move to next subject
-			global_state.current_subject_idx++;
-
-		} else {
-			// Standard mode: stream queries against single index
-			miint::SequenceRecordBatch query_batch;
-			bool has_more = ReadQueryBatch(context, bind_data.query_table, bind_data.query_schema,
-			                               MINIMAP2_QUERY_BATCH_SIZE, global_state.current_query_offset, query_batch);
-
-			if (query_batch.empty() && !has_more) {
-				global_state.done = true;
-				output.SetCardinality(0);
-				return;
-			}
-
-			if (!query_batch.empty()) {
-				global_state.aligner->align(query_batch, global_state.result_buffer);
-			}
+			ps.queries_loaded = true;
 		}
 
-		available = global_state.result_buffer.size() - global_state.buffer_offset;
+		if (ps.current_subject_idx >= bind_data.subjects.size()) {
+			ps.done = true;
+			output.SetCardinality(0);
+			return;
+		}
+
+		ps.aligner->build_single_index(bind_data.subjects[ps.current_subject_idx]);
+
+		if (!ps.all_queries.empty()) {
+			ps.aligner->align(ps.all_queries, ps.result_buffer);
+		}
+
+		ps.current_subject_idx++;
+		available = ps.result_buffer.size() - ps.buffer_offset;
 	}
 
-	// Output up to STANDARD_VECTOR_SIZE results
 	idx_t output_count = std::min(available, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
-	OutputSAMRecordBatch(output, global_state.result_buffer, global_state.buffer_offset, output_count);
-	global_state.buffer_offset += output_count;
+	OutputSAMRecordBatch(output, ps.result_buffer, ps.buffer_offset, output_count);
+	ps.buffer_offset += output_count;
+}
+
+// Standard mode: multi-threaded with per-thread aligner and atomic batch claiming
+static void ExecuteStandard(ClientContext &context, const AlignMinimap2TableFunction::Data &bind_data,
+                            AlignMinimap2TableFunction::StandardModeState &st,
+                            AlignMinimap2TableFunction::LocalState &lstate, DataChunk &output) {
+	while (true) {
+		// 1. If local result_buffer has data, output a chunk
+		idx_t available = lstate.result_buffer.size() - lstate.buffer_offset;
+		if (available > 0) {
+			idx_t output_count = std::min(available, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
+			OutputSAMRecordBatch(output, lstate.result_buffer, lstate.buffer_offset, output_count);
+			lstate.buffer_offset += output_count;
+			return;
+		}
+
+		// 2. Buffer exhausted — claim a new batch atomically
+		lstate.result_buffer.clear();
+		lstate.buffer_offset = 0;
+
+		idx_t my_offset = st.next_query_offset.fetch_add(MINIMAP2_QUERY_BATCH_SIZE);
+
+		// 3. Read the batch at the claimed offset (each Connection is independent, so concurrent calls are safe)
+		miint::SequenceRecordBatch query_batch;
+		idx_t local_offset = my_offset;
+		ReadQueryBatch(context, bind_data.query_table, bind_data.query_schema, MINIMAP2_QUERY_BATCH_SIZE, local_offset,
+		               query_batch);
+
+		// 4. If batch empty, we're done
+		if (query_batch.empty()) {
+			output.SetCardinality(0);
+			return;
+		}
+
+		// 5. Align using per-thread aligner
+		lstate.aligner->align(query_batch, lstate.result_buffer);
+	}
+}
+
+void AlignMinimap2TableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &bind_data = data_p.bind_data->Cast<Data>();
+	auto &gstate = data_p.global_state->Cast<GlobalState>();
+
+	if (gstate.per_subject_mode) {
+		ExecutePerSubject(context, bind_data, *gstate.per_subject, output);
+	} else {
+		auto &lstate = data_p.local_state->Cast<LocalState>();
+		ExecuteStandard(context, bind_data, *gstate.standard, lstate, output);
+	}
 }
 
 TableFunction AlignMinimap2TableFunction::GetFunction() {

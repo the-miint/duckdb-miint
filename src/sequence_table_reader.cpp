@@ -41,8 +41,7 @@ static bool GetTableOrViewColumns(ClientContext &context, const std::string &tab
 	}
 }
 
-SequenceTableSchema ValidateSequenceTableSchema(ClientContext &context, const std::string &table_name,
-                                                bool allow_paired) {
+SequenceTableSchema ValidateSequenceTableSchema(ClientContext &context, const std::string &table_name) {
 	vector<string> col_names;
 	vector<LogicalType> col_types;
 	bool is_physical_table = GetTableOrViewColumns(context, table_name, col_names, col_types);
@@ -88,10 +87,6 @@ SequenceTableSchema ValidateSequenceTableSchema(ClientContext &context, const st
 	schema.has_sequence2 = check_column("sequence2", {LogicalTypeId::VARCHAR}, "VARCHAR", false);
 	schema.has_qual1 = check_column("qual1", {LogicalTypeId::LIST}, "LIST", false);
 	schema.has_qual2 = check_column("qual2", {LogicalTypeId::LIST}, "LIST", false);
-
-	if (schema.has_sequence2 && !allow_paired) {
-		throw BinderException("Subject table '%s' has sequence2 column but subjects cannot be paired-end", table_name);
-	}
 
 	return schema;
 }

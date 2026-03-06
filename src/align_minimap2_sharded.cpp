@@ -75,7 +75,7 @@ unique_ptr<FunctionData> AlignMinimap2ShardedTableFunction::Bind(ClientContext &
 	}
 
 	// Validate query table/view exists
-	data->query_schema = ValidateSequenceTableSchema(context, data->query_table, true /* allow_paired */);
+	data->query_schema = ValidateSequenceTableSchema(context, data->query_table);
 
 	// Validate read_to_shard table schema
 	ValidateReadToShardSchema(context, data->read_to_shard_table);

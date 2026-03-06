@@ -19,9 +19,7 @@ struct SequenceTableSchema {
 // Validate that a table/view has required columns for sequence data.
 // Returns schema information about what optional columns are present.
 // Throws BinderException if required columns are missing or have wrong types.
-// If allow_paired is false, will throw if sequence2 column exists and has non-NULL data.
-SequenceTableSchema ValidateSequenceTableSchema(ClientContext &context, const std::string &table_name,
-                                                bool allow_paired = true);
+SequenceTableSchema ValidateSequenceTableSchema(ClientContext &context, const std::string &table_name);
 
 // Read all subjects from a table/view into memory.
 // Subjects cannot be paired-end (sequence2 must be NULL for all rows).

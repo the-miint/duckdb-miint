@@ -129,7 +129,21 @@ CREATE TABLE paired_subjects AS SELECT * FROM (VALUES
 statement error
 SELECT * FROM align_minimap2('queries', subject_table='paired_subjects');
 ----
-cannot be paired-end
+non-NULL sequence2
+
+# Test: subject table with sequence2 column (all NULL) should be accepted
+# Previously this failed at bind time; now the sequence2 column is tolerated if all NULL
+statement ok
+CREATE TABLE subjects_with_seq2 AS SELECT read_id, sequence1, CAST(NULL AS VARCHAR) AS sequence2 FROM subjects;
+
+query I
+SELECT COUNT(*) >= 0 as accepted
+FROM align_minimap2('queries', subject_table='subjects_with_seq2', max_secondary=0);
+----
+true
+
+statement ok
+DROP TABLE subjects_with_seq2;
 
 # Clean up
 statement ok
@@ -292,3 +306,31 @@ DROP TABLE invalid_index_file;
 
 statement ok
 DROP TABLE empty_subjects;
+
+# Test: Multi-threaded alignment with 100 queries
+# Generates queries by sliding a 50bp window across a 100bp subject
+statement ok
+CREATE TABLE mt_subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE mt_queries AS
+    SELECT 'q' || i AS read_id,
+           substr('ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC',
+                  1 + (i % 51), 50) AS sequence1
+    FROM generate_series(1, 100) AS t(i);
+
+# All 100 queries should produce at least one alignment each
+query I
+SELECT COUNT(DISTINCT read_id) = 100
+FROM align_minimap2('mt_queries', subject_table='mt_subjects', max_secondary=0, k := 5)
+WHERE reference = 'ref1';
+----
+true
+
+statement ok
+DROP TABLE mt_subjects;
+
+statement ok
+DROP TABLE mt_queries;

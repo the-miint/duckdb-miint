@@ -90,6 +90,10 @@ SharedMinimap2Index::SharedMinimap2Index(const std::string &index_path, const Mi
 	mm_mapopt_update(&mopt_, index_.get());
 }
 
+SharedMinimap2Index::SharedMinimap2Index(mm_idx_t *idx, const mm_mapopt_t &mopt, std::vector<std::string> subject_names)
+    : index_(idx), mopt_(mopt), subject_names_(std::move(subject_names)) {
+}
+
 SharedMinimap2Index::~SharedMinimap2Index() = default;
 
 const mm_idx_t *SharedMinimap2Index::index() const {
@@ -227,6 +231,52 @@ void Minimap2Aligner::detach_shared_index() {
 	shared_index_.reset();
 }
 
+mm_idx_t *Minimap2Aligner::BuildRawIndex(const std::vector<AlignmentSubject> &subjects, const mm_idxopt_t &iopt,
+                                         std::vector<std::string> &out_names) {
+	if (subjects.empty()) {
+		throw std::runtime_error("Cannot build index from empty subject list");
+	}
+
+	std::vector<const char *> seqs;
+	std::vector<const char *> names;
+
+	seqs.reserve(subjects.size());
+	names.reserve(subjects.size());
+	out_names.clear();
+	out_names.reserve(subjects.size());
+
+	for (const auto &subject : subjects) {
+		if (subject.sequence.empty()) {
+			throw std::runtime_error("Cannot build index: sequence '" + subject.read_id + "' is empty");
+		}
+		seqs.push_back(subject.sequence.c_str());
+		names.push_back(subject.read_id.c_str());
+		out_names.push_back(subject.read_id);
+	}
+
+	mm_idx_t *idx = mm_idx_str(iopt.w, iopt.k, iopt.flag & 1, iopt.bucket_bits, static_cast<int>(subjects.size()),
+	                           seqs.data(), names.data());
+
+	if (!idx) {
+		throw std::runtime_error("Failed to build minimap2 index");
+	}
+
+	return idx;
+}
+
+std::shared_ptr<SharedMinimap2Index> Minimap2Aligner::BuildSharedIndex(const std::vector<AlignmentSubject> &subjects,
+                                                                       const Minimap2Config &config) {
+	mm_idxopt_t iopt;
+	mm_mapopt_t mopt;
+	InitOptions(config, iopt, mopt);
+
+	std::vector<std::string> subject_names;
+	mm_idx_t *idx = BuildRawIndex(subjects, iopt, subject_names);
+	mm_mapopt_update(&mopt, idx);
+
+	return std::make_shared<SharedMinimap2Index>(idx, mopt, std::move(subject_names));
+}
+
 const mm_idx_t *Minimap2Aligner::active_index() const {
 	if (shared_index_) {
 		return shared_index_->index();
@@ -249,41 +299,7 @@ const std::vector<std::string> &Minimap2Aligner::active_subject_names() const {
 }
 
 void Minimap2Aligner::build_index(const std::vector<AlignmentSubject> &subjects) {
-	if (subjects.empty()) {
-		throw std::runtime_error("Cannot build index from empty subject list");
-	}
-
-	// Prepare sequence and name arrays for mm_idx_str
-	std::vector<const char *> seqs;
-	std::vector<const char *> names;
-	subject_names_.clear();
-
-	seqs.reserve(subjects.size());
-	names.reserve(subjects.size());
-	subject_names_.reserve(subjects.size());
-
-	for (const auto &subject : subjects) {
-		// Validate sequence is non-empty (required by minimap2)
-		if (subject.sequence.empty()) {
-			throw std::runtime_error("Cannot build index: sequence '" + subject.read_id + "' is empty");
-		}
-		seqs.push_back(subject.sequence.c_str());
-		names.push_back(subject.read_id.c_str());
-		subject_names_.push_back(subject.read_id);
-	}
-
-	// Build index using mm_idx_str
-	mm_idx_t *idx = mm_idx_str(iopt_->w, iopt_->k,
-	                           iopt_->flag & 1, // is_hpc: extract bit 0 only (MM_I_HPC flag)
-	                           iopt_->bucket_bits, static_cast<int>(subjects.size()), seqs.data(), names.data());
-
-	if (!idx) {
-		throw std::runtime_error("Failed to build minimap2 index");
-	}
-
-	index_.reset(idx);
-
-	// Update mapping options based on index
+	index_.reset(BuildRawIndex(subjects, *iopt_, subject_names_));
 	mm_mapopt_update(mopt_.get(), index_.get());
 }
 

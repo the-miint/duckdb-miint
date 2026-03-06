@@ -197,7 +197,20 @@ CREATE TABLE paired_subjects AS SELECT * FROM (VALUES
 statement error
 SELECT * FROM align_bowtie2('queries', 'paired_subjects');
 ----
-cannot be paired-end
+non-NULL sequence2
+
+# Test: subject table with sequence2 column (all NULL) should be accepted
+statement ok
+CREATE TABLE subjects_with_seq2 AS SELECT read_id, sequence1, CAST(NULL AS VARCHAR) AS sequence2 FROM subjects;
+
+query I
+SELECT COUNT(*) >= 0 as accepted
+FROM align_bowtie2('queries', 'subjects_with_seq2');
+----
+true
+
+statement ok
+DROP TABLE subjects_with_seq2;
 
 # Clean up
 statement ok

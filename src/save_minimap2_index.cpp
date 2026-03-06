@@ -19,7 +19,7 @@ unique_ptr<FunctionData> SaveMinimap2IndexTableFunction::Bind(ClientContext &con
 	data->output_path = input.inputs[1].ToString();
 
 	// Validate subject table exists and has correct schema
-	ValidateSequenceTableSchema(context, data->subject_table, false /* allow_paired */);
+	ValidateSequenceTableSchema(context, data->subject_table);
 
 	// Parse optional named parameters (same as align_minimap2)
 	auto preset_param = input.named_parameters.find("preset");

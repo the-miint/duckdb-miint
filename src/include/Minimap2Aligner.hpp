@@ -49,7 +49,10 @@ using Minimap2TbufPtr = std::unique_ptr<mm_tbuf_t, Minimap2TbufDeleter>;
 // concurrently (each aligner has its own mm_tbuf_t).
 class SharedMinimap2Index {
 public:
+	// Load from .mmi file
 	SharedMinimap2Index(const std::string &index_path, const Minimap2Config &config);
+	// Take ownership of a pre-built index
+	SharedMinimap2Index(mm_idx_t *idx, const mm_mapopt_t &mopt, std::vector<std::string> subject_names);
 	~SharedMinimap2Index();
 
 	// Non-copyable
@@ -103,6 +106,10 @@ public:
 	static void LoadIndexFromFile(const std::string &path, const mm_idxopt_t &iopt, mm_idx_t *&out_idx,
 	                              std::vector<std::string> &out_names);
 
+	// Build a SharedMinimap2Index from subjects (for multi-threaded standard mode)
+	static std::shared_ptr<SharedMinimap2Index> BuildSharedIndex(const std::vector<AlignmentSubject> &subjects,
+	                                                             const Minimap2Config &config);
+
 	// Attach a shared index (clears any owned index)
 	void attach_shared_index(std::shared_ptr<SharedMinimap2Index> shared_idx);
 	// Detach the shared index (does not destroy it; other aligners may still reference it)
@@ -120,6 +127,10 @@ private:
 	std::vector<std::string> subject_names_;            // For reference name lookup
 	Minimap2TbufPtr tbuf_;                              // Reusable thread buffer
 	std::shared_ptr<SharedMinimap2Index> shared_index_; // Shared index (mutually exclusive with index_)
+
+	// Build raw mm_idx_t* from subjects (shared by build_index and BuildSharedIndex)
+	static mm_idx_t *BuildRawIndex(const std::vector<AlignmentSubject> &subjects, const mm_idxopt_t &iopt,
+	                               std::vector<std::string> &out_names);
 
 	// Accessors that transparently pick shared or owned state
 	const mm_idx_t *active_index() const;
