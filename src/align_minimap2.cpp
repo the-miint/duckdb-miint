@@ -1,5 +1,6 @@
 #include "align_minimap2.hpp"
 #include "align_common.hpp"
+#include "shard_debug.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
@@ -58,6 +59,12 @@ unique_ptr<FunctionData> AlignMinimap2TableFunction::Bind(ClientContext &context
 		}
 	}
 
+	// Parse debug parameter
+	auto debug_param = input.named_parameters.find("debug");
+	if (debug_param != input.named_parameters.end() && !debug_param->second.IsNull()) {
+		data->debug = debug_param->second.GetValue<bool>();
+	}
+
 	// Parse minimap2 config parameters (preset, max_secondary, k, w, eqx)
 	ParseMinimap2ConfigParams(input.named_parameters, data->config, data->using_prebuilt_index());
 
@@ -96,6 +103,8 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2TableFunction::InitGlobal(Clie
                                                                             TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
+	gstate->debug = data.debug;
+	gstate->start_time = std::chrono::steady_clock::now();
 
 	if (data.per_subject_database) {
 		// Per-subject mode: single-threaded, builds index per-subject in Execute()
@@ -104,6 +113,7 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2TableFunction::InitGlobal(Clie
 		auto ps = std::make_unique<PerSubjectModeState>();
 		ps->aligner = std::make_unique<miint::Minimap2Aligner>(data.config);
 		gstate->per_subject = std::move(ps);
+		SHARD_DBG(*gstate, "InitGlobal: per_subject_mode, num_threads=1");
 	} else if (data.using_prebuilt_index()) {
 		// Prebuilt index: load into SharedMinimap2Index for multi-threaded access
 		auto st = std::make_unique<StandardModeState>();
@@ -114,12 +124,49 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2TableFunction::InitGlobal(Clie
 		}
 		gstate->standard = std::move(st);
 		gstate->num_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+		SHARD_DBG_MEM(*gstate, "InitGlobal: prebuilt index loaded, MaxThreads()=%zu",
+		              static_cast<size_t>(gstate->num_threads));
 	} else {
 		// Standard mode with subject table: build shared index
 		auto st = std::make_unique<StandardModeState>();
 		st->shared_index = miint::Minimap2Aligner::BuildSharedIndex(data.subjects, data.config);
 		gstate->standard = std::move(st);
 		gstate->num_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+		SHARD_DBG_MEM(*gstate, "InitGlobal: shared index built from %zu subjects, MaxThreads()=%zu",
+		              data.subjects.size(), static_cast<size_t>(gstate->num_threads));
+	}
+
+	// Materialize all query read_ids for standard mode (avoids slow OFFSET pagination)
+	if (!gstate->per_subject_mode) {
+		auto id_start = std::chrono::steady_clock::now();
+		auto &db = DatabaseInstance::GetDatabase(context);
+		Connection conn(db);
+		std::string query = "SELECT read_id FROM " + KeywordHelper::WriteOptionallyQuoted(data.query_table);
+		auto query_result = conn.Query(query);
+		if (query_result->HasError()) {
+			throw InvalidInputException("Failed to read query IDs from '%s': %s", data.query_table,
+			                            query_result->GetError());
+		}
+		auto &materialized = query_result->Cast<MaterializedQueryResult>();
+		auto &ids = gstate->standard->all_query_ids;
+		while (true) {
+			auto chunk = materialized.Fetch();
+			if (!chunk || chunk->size() == 0) {
+				break;
+			}
+			UnifiedVectorFormat id_data;
+			chunk->data[0].ToUnifiedFormat(chunk->size(), id_data);
+			auto id_strings = UnifiedVectorFormat::GetData<string_t>(id_data);
+			for (idx_t i = 0; i < chunk->size(); i++) {
+				auto idx = id_data.sel->get_index(i);
+				if (id_data.validity.RowIsValid(idx)) {
+					ids.push_back(id_strings[idx].GetString());
+				}
+			}
+		}
+		auto id_ms =
+		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - id_start).count();
+		SHARD_DBG(*gstate, "InitGlobal: materialized %zu query IDs in %ldms", ids.size(), static_cast<long>(id_ms));
 	}
 
 	return gstate;
@@ -136,6 +183,9 @@ unique_ptr<LocalTableFunctionState> AlignMinimap2TableFunction::InitLocal(Execut
 		auto &data = input.bind_data->Cast<Data>();
 		lstate->aligner = std::make_unique<miint::Minimap2Aligner>(data.config);
 		lstate->aligner->attach_shared_index(gstate.standard->shared_index);
+		auto thread_num = gstate.init_local_count.fetch_add(1) + 1;
+		SHARD_DBG(gstate, "InitLocal: thread %zu of %zu initialized", static_cast<size_t>(thread_num),
+		          static_cast<size_t>(gstate.num_threads));
 	}
 
 	return lstate;
@@ -204,8 +254,11 @@ static void ExecutePerSubject(ClientContext &context, const AlignMinimap2TableFu
 
 // Standard mode: multi-threaded with per-thread aligner and atomic batch claiming
 static void ExecuteStandard(ClientContext &context, const AlignMinimap2TableFunction::Data &bind_data,
-                            AlignMinimap2TableFunction::StandardModeState &st,
+                            AlignMinimap2TableFunction::GlobalState &gstate,
                             AlignMinimap2TableFunction::LocalState &lstate, DataChunk &output) {
+	auto &st = *gstate.standard;
+	idx_t id_count = st.all_query_ids.size();
+
 	while (true) {
 		// 1. If local result_buffer has data, output a chunk
 		idx_t available = lstate.result_buffer.size() - lstate.buffer_offset;
@@ -220,22 +273,42 @@ static void ExecuteStandard(ClientContext &context, const AlignMinimap2TableFunc
 		lstate.result_buffer.clear();
 		lstate.buffer_offset = 0;
 
-		idx_t my_offset = st.next_query_offset.fetch_add(MINIMAP2_QUERY_BATCH_SIZE);
+		idx_t my_offset = st.next_query_offset.fetch_add(st.batch_size);
 
-		// 3. Read the batch at the claimed offset (each Connection is independent, so concurrent calls are safe)
-		miint::SequenceRecordBatch query_batch;
-		idx_t local_offset = my_offset;
-		ReadQueryBatch(context, bind_data.query_table, bind_data.query_schema, MINIMAP2_QUERY_BATCH_SIZE, local_offset,
-		               query_batch);
-
-		// 4. If batch empty, we're done
-		if (query_batch.empty()) {
+		if (my_offset >= id_count) {
+			SHARD_DBG(gstate, "ExecuteStandard: DONE (offset %zu >= id_count %zu)", static_cast<size_t>(my_offset),
+			          static_cast<size_t>(id_count));
 			output.SetCardinality(0);
 			return;
 		}
 
-		// 5. Align using per-thread aligner
+		idx_t batch_count = std::min(st.batch_size, id_count - my_offset);
+		SHARD_DBG(gstate, "ExecuteStandard: claimed batch at offset %zu count %zu", static_cast<size_t>(my_offset),
+		          static_cast<size_t>(batch_count));
+
+		// 3. Read sequences by joining a temp table of IDs against the query table
+		miint::SequenceRecordBatch query_batch;
+		auto read_start = std::chrono::steady_clock::now();
+		ReadBatchByIds(context, bind_data.query_table, bind_data.query_schema, st.all_query_ids, my_offset, batch_count,
+		               query_batch);
+		auto read_ms =
+		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - read_start)
+		        .count();
+		SHARD_DBG(gstate, "ExecuteStandard: read %zu queries in %ldms (offset=%zu)", query_batch.size(),
+		          static_cast<long>(read_ms), static_cast<size_t>(my_offset));
+
+		if (query_batch.empty()) {
+			continue;
+		}
+
+		// 4. Align using per-thread aligner
+		auto align_start = std::chrono::steady_clock::now();
 		lstate.aligner->align(query_batch, lstate.result_buffer);
+		auto align_ms =
+		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - align_start)
+		        .count();
+		SHARD_DBG(gstate, "ExecuteStandard: aligned %zu queries -> %zu results in %ldms", query_batch.size(),
+		          lstate.result_buffer.size(), static_cast<long>(align_ms));
 	}
 }
 
@@ -247,7 +320,7 @@ void AlignMinimap2TableFunction::Execute(ClientContext &context, TableFunctionIn
 		ExecutePerSubject(context, bind_data, *gstate.per_subject, output);
 	} else {
 		auto &lstate = data_p.local_state->Cast<LocalState>();
-		ExecuteStandard(context, bind_data, *gstate.standard, lstate, output);
+		ExecuteStandard(context, bind_data, gstate, lstate, output);
 	}
 }
 
@@ -264,6 +337,7 @@ TableFunction AlignMinimap2TableFunction::GetFunction() {
 	tf.named_parameters["k"] = LogicalType::INTEGER;
 	tf.named_parameters["w"] = LogicalType::INTEGER;
 	tf.named_parameters["eqx"] = LogicalType::BOOLEAN;
+	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
 
 	return tf;
 }

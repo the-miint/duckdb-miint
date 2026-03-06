@@ -12,6 +12,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <vector>
 
@@ -37,6 +38,8 @@ public:
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
+		bool debug = false;
+
 		Data() : per_subject_database(false), names(GetAlignmentOutputNames()), types(GetAlignmentOutputTypes()) {
 		}
 	};
@@ -44,6 +47,8 @@ public:
 	// Standard mode state: multi-threaded, shared index, atomic batch claiming
 	struct StandardModeState {
 		std::shared_ptr<miint::SharedMinimap2Index> shared_index;
+		std::vector<std::string> all_query_ids; // Pre-materialized read IDs
+		idx_t batch_size = 2048;                // Batch size for ReadBatchByIds
 		std::atomic<idx_t> next_query_offset {0};
 	};
 
@@ -62,6 +67,9 @@ public:
 	struct GlobalState : public GlobalTableFunctionState {
 		bool per_subject_mode = false;
 		idx_t num_threads = 1;
+		bool debug = false;
+		std::chrono::steady_clock::time_point start_time;
+		std::atomic<idx_t> init_local_count {0};
 
 		// Exactly one of these is populated based on per_subject_mode
 		std::unique_ptr<StandardModeState> standard;
