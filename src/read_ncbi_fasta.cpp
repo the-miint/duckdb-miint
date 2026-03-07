@@ -8,7 +8,6 @@ namespace duckdb {
 ReadNCBIFastaTableFunction::Data::Data(std::vector<std::string> accessions, const std::string &api_key,
                                        bool include_filepath)
     : accessions(std::move(accessions)), api_key(api_key), include_filepath(include_filepath) {
-
 	// Schema matches read_fastx exactly
 	names = {"sequence_index", "read_id", "comment", "sequence1", "sequence2", "qual1", "qual2"};
 	types = {LogicalType::BIGINT,

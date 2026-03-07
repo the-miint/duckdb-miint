@@ -243,7 +243,6 @@ const std::string GENOME_COVERAGE = // NOLINT
     "  USING (genome_id);";
 
 class MIINTMacros {
-
 public:
 	static void Register(ExtensionLoader &loader) {
 		auto &instance = loader.GetDatabaseInstance();
@@ -255,10 +254,7 @@ public:
 		con.Query(READ_GFF);
 		con.Query(GENOME_COVERAGE);
 
-		// read_jplace requires the json extension for read_json function
-		ExtensionInstallOptions options;
-		ExtensionHelper::InstallExtension(*con.context, "json", options);
-		ExtensionHelper::AutoLoadExtension(instance, "json");
+		// read_jplace requires json extension (installed in LoadInternal)
 		con.Query(READ_JPLACE);
 	}
 };

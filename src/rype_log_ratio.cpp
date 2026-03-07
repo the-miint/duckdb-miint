@@ -216,8 +216,7 @@ unique_ptr<GlobalTableFunctionState> RypeLogRatioTableFunction::InitGlobal(Clien
 	}
 
 	// Step 9: Parse Arrow schema for conversion
-	ArrowTableFunction::PopulateArrowTableSchema(DBConfig::GetConfig(context), gstate->arrow_table,
-	                                             gstate->output_schema);
+	ArrowTableFunction::PopulateArrowTableSchema(context, gstate->arrow_table, gstate->output_schema);
 
 	// Verify RYpe's output schema matches expected columns (query_id, log_ratio, fast_path)
 	if (gstate->arrow_table.GetColumns().size() != 3) {

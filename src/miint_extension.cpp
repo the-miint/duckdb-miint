@@ -41,7 +41,7 @@ namespace fs = std::filesystem;
 
 namespace duckdb {
 
-static void SetDependencyLogging() {
+void SetDependencyLogging() {
 	// HTSlib and HDF5 had runtime logging behaviors. Disable globally
 	// for now. It's unclear whether these should be exposed or the
 	// exact benefit, we will defer that decision for the future.
@@ -49,7 +49,7 @@ static void SetDependencyLogging() {
 	H5Eset_auto(H5E_DEFAULT, nullptr, nullptr);
 }
 
-static void SetupSignalHandling() {
+void SetupSignalHandling() {
 	// Ignore SIGPIPE globally so that writes to closed pipes return EPIPE instead of
 	// killing the process. This is needed for Bowtie2Aligner and other subprocess
 	// management where pipes may close unexpectedly.
@@ -166,12 +166,16 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RypeExtractStrandMinimizersTableFunction::Register(loader);
 	RypeLogRatioTableFunction::Register(loader);
 
-	// read_ncbi and related need httpfs
+	// Install extension dependencies
 	auto &instance = loader.GetDatabaseInstance();
 	Connection con(instance);
 	ExtensionInstallOptions options;
+	// httpfs: needed by read_ncbi and related
 	ExtensionHelper::InstallExtension(*con.context, "httpfs", options);
 	ExtensionHelper::AutoLoadExtension(instance, "httpfs");
+	// json: needed by read_jplace macro (uses read_json)
+	ExtensionHelper::InstallExtension(*con.context, "json", options);
+	ExtensionHelper::AutoLoadExtension(instance, "json");
 }
 
 void MiintExtension::Load(ExtensionLoader &loader) {
@@ -197,6 +201,8 @@ std::string MiintExtension::Version() const {
 extern "C" {
 
 DUCKDB_CPP_EXTENSION_ENTRY(miint, loader) {
+	duckdb::SetDependencyLogging();
+	duckdb::SetupSignalHandling();
 	duckdb::LoadInternal(loader);
 }
 }

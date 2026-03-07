@@ -179,6 +179,7 @@ ExternalProject_Add(
         --disable-libcurl
         --disable-bz2
         --disable-lzma
+        --without-libdeflate
     BUILD_COMMAND make
     INSTALL_COMMAND make install
     BUILD_IN_SOURCE 0

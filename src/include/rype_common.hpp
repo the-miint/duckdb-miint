@@ -93,7 +93,9 @@ inline bool ValidateSequenceTable(ClientContext &context, const std::string &tab
 		}
 	} else if (entry->type == CatalogType::VIEW_ENTRY) {
 		auto &view = entry->Cast<ViewCatalogEntry>();
-		for (const auto &name : view.names) {
+		view.BindView(context);
+		auto col_info = view.GetColumnInfo();
+		for (const auto &name : col_info->names) {
 			col_names.push_back(StringUtil::Lower(name));
 		}
 	} else {

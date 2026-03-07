@@ -8,7 +8,6 @@ namespace duckdb {
 ReadNCBIAnnotationTableFunction::Data::Data(std::vector<std::string> accessions, const std::string &api_key,
                                             bool include_filepath)
     : accessions(std::move(accessions)), api_key(api_key), include_filepath(include_filepath) {
-
 	// Schema matches read_gff macro output
 	names = {"seqid", "source", "type", "position", "stop_position", "score", "strand", "phase", "attributes"};
 	types = {LogicalType::VARCHAR,                                          // seqid

@@ -33,8 +33,10 @@ static void GetTableOrViewColumns(ClientContext &context, const std::string &tab
 		}
 	} else if (entry->type == CatalogType::VIEW_ENTRY) {
 		auto &view = entry->Cast<ViewCatalogEntry>();
-		out_names = view.names;
-		out_types = view.types;
+		view.BindView(context);
+		auto col_info = view.GetColumnInfo();
+		out_names = col_info->names;
+		out_types = col_info->types;
 	} else {
 		throw BinderException("'%s' is not a table or view", table_name);
 	}

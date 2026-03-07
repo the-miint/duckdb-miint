@@ -111,7 +111,6 @@ TEST_CASE("Unique ID ordering", "[BIOMTable]") {
 	}
 }
 TEST_CASE("Permutation with cycle following", "[BIOMTable]") {
-
 	SECTION("Identity permutation") {
 		std::vector<size_t> rows = {0, 1, 2, 3};
 		std::vector<size_t> cols = {0, 1, 2, 3};

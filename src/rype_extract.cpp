@@ -258,8 +258,7 @@ unique_ptr<GlobalTableFunctionState> RypeExtractMinimizerSetTableFunction::InitG
 		throw IOException("Failed to get RYpe output schema: %s", err ? err : "unknown error");
 	}
 
-	ArrowTableFunction::PopulateArrowTableSchema(DBConfig::GetConfig(context), gstate->arrow_table,
-	                                             gstate->output_schema);
+	ArrowTableFunction::PopulateArrowTableSchema(context, gstate->arrow_table, gstate->output_schema);
 
 	// Verify RYpe's output schema matches our declared columns (id + 2 list columns)
 	if (gstate->arrow_table.GetColumns().size() != bind_data.names.size()) {
@@ -342,8 +341,7 @@ RypeExtractStrandMinimizersTableFunction::InitGlobal(ClientContext &context, Tab
 		throw IOException("Failed to get RYpe output schema: %s", err ? err : "unknown error");
 	}
 
-	ArrowTableFunction::PopulateArrowTableSchema(DBConfig::GetConfig(context), gstate->arrow_table,
-	                                             gstate->output_schema);
+	ArrowTableFunction::PopulateArrowTableSchema(context, gstate->arrow_table, gstate->output_schema);
 
 	// Verify RYpe's output schema matches our declared columns (id + 4 list columns)
 	if (gstate->arrow_table.GetColumns().size() != bind_data.names.size()) {
