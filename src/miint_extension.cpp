@@ -165,17 +165,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RypeExtractMinimizerSetTableFunction::Register(loader);
 	RypeExtractStrandMinimizersTableFunction::Register(loader);
 	RypeLogRatioTableFunction::Register(loader);
-
-	// Install extension dependencies
-	auto &instance = loader.GetDatabaseInstance();
-	Connection con(instance);
-	ExtensionInstallOptions options;
-	// httpfs: needed by read_ncbi and related
-	ExtensionHelper::InstallExtension(*con.context, "httpfs", options);
-	ExtensionHelper::AutoLoadExtension(instance, "httpfs");
-	// json: needed by read_jplace macro (uses read_json)
-	ExtensionHelper::InstallExtension(*con.context, "json", options);
-	ExtensionHelper::AutoLoadExtension(instance, "json");
 }
 
 void MiintExtension::Load(ExtensionLoader &loader) {
