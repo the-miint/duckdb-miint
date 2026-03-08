@@ -136,37 +136,12 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2TableFunction::InitGlobal(Clie
 		              data.subjects.size(), static_cast<size_t>(gstate->num_threads));
 	}
 
-	// Materialize all query read_ids for standard mode (avoids slow OFFSET pagination)
+	// Set up lazy streaming reader for standard mode.
+	// Sub-batches are fetched on demand in Execute(), overlapping I/O with alignment.
 	if (!gstate->per_subject_mode) {
-		auto id_start = std::chrono::steady_clock::now();
-		auto &db = DatabaseInstance::GetDatabase(context);
-		Connection conn(db);
-		std::string query = "SELECT read_id FROM " + KeywordHelper::WriteOptionallyQuoted(data.query_table);
-		auto query_result = conn.Query(query);
-		if (query_result->HasError()) {
-			throw InvalidInputException("Failed to read query IDs from '%s': %s", data.query_table,
-			                            query_result->GetError());
-		}
-		auto &materialized = query_result->Cast<MaterializedQueryResult>();
-		auto &ids = gstate->standard->all_query_ids;
-		while (true) {
-			auto chunk = materialized.Fetch();
-			if (!chunk || chunk->size() == 0) {
-				break;
-			}
-			UnifiedVectorFormat id_data;
-			chunk->data[0].ToUnifiedFormat(chunk->size(), id_data);
-			auto id_strings = UnifiedVectorFormat::GetData<string_t>(id_data);
-			for (idx_t i = 0; i < chunk->size(); i++) {
-				auto idx = id_data.sel->get_index(i);
-				if (id_data.validity.RowIsValid(idx)) {
-					ids.push_back(id_strings[idx].GetString());
-				}
-			}
-		}
-		auto id_ms =
-		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - id_start).count();
-		SHARD_DBG(*gstate, "InitGlobal: materialized %zu query IDs in %ldms", ids.size(), static_cast<long>(id_ms));
+		gstate->standard->query_stream =
+		    std::make_unique<QuerySequenceStream>(context, data.query_table, data.query_schema);
+		SHARD_DBG(*gstate, "InitGlobal: query stream initialized for lazy sub-batching");
 	}
 
 	return gstate;
@@ -252,12 +227,11 @@ static void ExecutePerSubject(ClientContext &context, const AlignMinimap2TableFu
 	ps.buffer_offset += output_count;
 }
 
-// Standard mode: multi-threaded with per-thread aligner and atomic batch claiming
+// Standard mode: multi-threaded with per-thread aligner and lazy sub-batch streaming
 static void ExecuteStandard(ClientContext &context, const AlignMinimap2TableFunction::Data &bind_data,
                             AlignMinimap2TableFunction::GlobalState &gstate,
                             AlignMinimap2TableFunction::LocalState &lstate, DataChunk &output) {
 	auto &st = *gstate.standard;
-	idx_t id_count = st.all_query_ids.size();
 
 	while (true) {
 		// 1. If local result_buffer has data, output a chunk
@@ -269,39 +243,21 @@ static void ExecuteStandard(ClientContext &context, const AlignMinimap2TableFunc
 			return;
 		}
 
-		// 2. Buffer exhausted — claim a new batch atomically
+		// 2. Buffer exhausted — fetch next sub-batch from stream (thread-safe)
 		lstate.result_buffer.clear();
 		lstate.buffer_offset = 0;
 
-		idx_t my_offset = st.next_query_offset.fetch_add(st.batch_size);
+		auto query_batch = st.query_stream->FetchSubBatch();
 
-		if (my_offset >= id_count) {
-			SHARD_DBG(gstate, "ExecuteStandard: DONE (offset %zu >= id_count %zu)", static_cast<size_t>(my_offset),
-			          static_cast<size_t>(id_count));
+		if (query_batch.empty()) {
+			SHARD_DBG(gstate, "ExecuteStandard: DONE (stream exhausted)");
 			output.SetCardinality(0);
 			return;
 		}
 
-		idx_t batch_count = std::min(st.batch_size, id_count - my_offset);
-		SHARD_DBG(gstate, "ExecuteStandard: claimed batch at offset %zu count %zu", static_cast<size_t>(my_offset),
-		          static_cast<size_t>(batch_count));
+		SHARD_DBG(gstate, "ExecuteStandard: fetched sub-batch (%zu queries)", query_batch.size());
 
-		// 3. Read sequences by joining a temp table of IDs against the query table
-		miint::SequenceRecordBatch query_batch;
-		auto read_start = std::chrono::steady_clock::now();
-		ReadBatchByIds(context, bind_data.query_table, bind_data.query_schema, st.all_query_ids, my_offset, batch_count,
-		               query_batch);
-		auto read_ms =
-		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - read_start)
-		        .count();
-		SHARD_DBG(gstate, "ExecuteStandard: read %zu queries in %ldms (offset=%zu)", query_batch.size(),
-		          static_cast<long>(read_ms), static_cast<size_t>(my_offset));
-
-		if (query_batch.empty()) {
-			continue;
-		}
-
-		// 4. Align using per-thread aligner
+		// 3. Align using per-thread aligner
 		auto align_start = std::chrono::steady_clock::now();
 		lstate.aligner->align(query_batch, lstate.result_buffer);
 		auto align_ms =
@@ -338,6 +294,11 @@ TableFunction AlignMinimap2TableFunction::GetFunction() {
 	tf.named_parameters["w"] = LogicalType::INTEGER;
 	tf.named_parameters["eqx"] = LogicalType::BOOLEAN;
 	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
+
+	// Alignment output order is non-deterministic (depends on thread scheduling),
+	// so NO_ORDER lets DuckDB parallelize CTAS pipelines instead of serializing
+	// them via preserve_insertion_order.
+	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 
 	return tf;
 }
