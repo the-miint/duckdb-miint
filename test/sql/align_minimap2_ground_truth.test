@@ -1,0 +1,45 @@
+# name: test/sql/align_minimap2_ground_truth.test
+# description: Verify align_minimap2 output matches native minimap2 (2.30-r1287) field-by-field
+# group: [sql]
+
+# Ground truth generated with:
+#   minimap2 -a -2 -x map-hifi --eqx --MD data/minimap2/subject.fasta data/minimap2/queries.fasta
+#   minimap2 version: 2.30-r1287
+# Test data:
+#   data/minimap2/queries.fasta - 5 HiFi reads extracted from PERF-CHECK dataset
+#   data/minimap2/subject.fasta - NC_000913.3 (E. coli K-12 MG1655, 4641652 bp)
+# All 5 reads produce primary alignments with mapq=60. Mix of forward/reverse strand
+# and perfect/imperfect matches (NM=0 and NM=1).
+
+require miint
+
+statement ok
+CREATE TABLE subject AS SELECT * FROM read_fastx('data/minimap2/subject.fasta');
+
+statement ok
+CREATE TABLE queries AS SELECT * FROM read_fastx('data/minimap2/queries.fasta');
+
+# Verify correct number of alignments (5 queries, all mapped, no secondaries)
+query I
+SELECT count(*) FROM align_minimap2('queries', subject_table:='subject', preset:='map-hifi', eqx:=true);
+----
+5
+
+# Verify all fields match native minimap2 2.30-r1287 output
+# Columns: read_id, flags, reference, position, stop_position, mapq, cigar,
+#           mate_reference, mate_position, template_length,
+#           tag_as, tag_xs, tag_ys, tag_xn, tag_xm, tag_xo, tag_xg, tag_nm,
+#           tag_yt, tag_md
+query IIIIIITTIIIIIIIIIITT
+SELECT read_id, flags, reference, position, stop_position, mapq, cigar,
+       mate_reference, mate_position, template_length,
+       tag_as, tag_xs, tag_ys, tag_xn, tag_xm, tag_xo, tag_xg, tag_nm,
+       tag_yt, tag_md
+FROM align_minimap2('queries', subject_table:='subject', preset:='map-hifi', eqx:=true)
+ORDER BY read_id, position;
+----
+m84137_260130_125423_s3/135594187/ccs	16	NC_000913.3	3338111	3339866	60	1755=14S	*	0	0	1755	NULL	NULL	NULL	0	0	0	0	UU	1755
+m84137_260130_125423_s3/18156364/ccs	0	NC_000913.3	4177174	4178821	60	285=1X1361=	*	0	0	1642	NULL	NULL	NULL	1	0	0	1	UU	285T1361
+m84137_260130_125423_s3/219548324/ccs	0	NC_000913.3	1012833	1015181	60	14S2348=	*	0	0	2348	NULL	NULL	NULL	0	0	0	0	UU	2348
+m84137_260130_125423_s3/234685748/ccs	16	NC_000913.3	2938461	2940752	60	2291=9S	*	0	0	2291	NULL	NULL	NULL	0	0	0	0	UU	2291
+m84137_260130_125423_s3/63641322/ccs	16	NC_000913.3	3445575	3448277	60	1923=1X778=	*	0	0	2697	NULL	NULL	NULL	1	0	0	1	UU	1923A778

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "miint-cli"
+version = "0.1.0"
+description = "CLI for the miint DuckDB extension — bioinformatics SQL toolkit"
+requires-python = ">=3.9"
+dependencies = ["duckdb==1.4.4"]
+
+[project.scripts]
+miint = "miint_cli.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/miint_cli"]

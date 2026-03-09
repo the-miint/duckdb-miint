@@ -11,6 +11,8 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include <atomic>
+#include <chrono>
 #include <mutex>
 #include <vector>
 
@@ -36,36 +38,54 @@ public:
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
+		bool debug = false;
+
 		Data() : per_subject_database(false), names(GetAlignmentOutputNames()), types(GetAlignmentOutputTypes()) {
 		}
 	};
 
-	struct GlobalState : public GlobalTableFunctionState {
+	// Standard mode state: multi-threaded, shared index, atomic batch claiming
+	struct StandardModeState {
+		std::shared_ptr<miint::SharedMinimap2Index> shared_index;
+		std::vector<std::string> all_query_ids; // Pre-materialized read IDs
+		idx_t batch_size = 2048;                // Batch size for ReadBatchByIds
+		std::atomic<idx_t> next_query_offset {0};
+	};
+
+	// Per-subject mode state: single-threaded, builds index per subject
+	struct PerSubjectModeState {
 		std::mutex lock;
 		std::unique_ptr<miint::Minimap2Aligner> aligner;
-		idx_t current_query_offset;
-		idx_t current_subject_idx; // For per_subject mode
+		idx_t current_subject_idx = 0;
 		miint::SAMRecordBatch result_buffer;
-		idx_t buffer_offset;
-		bool done;
-
-		// For per-subject mode: store all queries in memory to avoid re-reading
+		idx_t buffer_offset = 0;
+		bool done = false;
 		miint::SequenceRecordBatch all_queries;
-		bool queries_loaded;
+		bool queries_loaded = false;
+	};
+
+	struct GlobalState : public GlobalTableFunctionState {
+		bool per_subject_mode = false;
+		idx_t num_threads = 1;
+		bool debug = false;
+		std::chrono::steady_clock::time_point start_time;
+		std::atomic<idx_t> init_local_count {0};
+
+		// Exactly one of these is populated based on per_subject_mode
+		std::unique_ptr<StandardModeState> standard;
+		std::unique_ptr<PerSubjectModeState> per_subject;
 
 		idx_t MaxThreads() const override {
-			// Single-threaded for now - minimap2 has internal threading
-			return 1;
-		}
-
-		GlobalState()
-		    : current_query_offset(0), current_subject_idx(0), buffer_offset(0), done(false), queries_loaded(false) {
+			return num_threads;
 		}
 	};
 
 	struct LocalState : public LocalTableFunctionState {
-		LocalState() {
-		}
+		// Per-thread aligner (standard mode)
+		std::unique_ptr<miint::Minimap2Aligner> aligner;
+		// Per-thread output buffer
+		miint::SAMRecordBatch result_buffer;
+		idx_t buffer_offset = 0;
 	};
 
 	static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,

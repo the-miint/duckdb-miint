@@ -2,6 +2,7 @@
 #include "rype_common.hpp"
 #include "duckdb/common/arrow/result_arrow_wrapper.hpp"
 #include "duckdb/common/helper.hpp"
+#include "duckdb/common/printer.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
@@ -40,30 +41,6 @@ RypeClassifyTableFunction::GlobalState::~GlobalState() {
 	if (index) {
 		rype_index_free(index);
 	}
-}
-
-// ============================================================================
-// LocalState helpers
-// ============================================================================
-ArrowArrayScanState &RypeClassifyTableFunction::LocalState::GetState(idx_t col_idx) {
-	auto it = array_states.find(col_idx);
-	if (it == array_states.end()) {
-		auto state = make_uniq<ArrowArrayScanState>(context);
-		auto &ref = *state;
-		array_states.emplace(col_idx, std::move(state));
-		return ref;
-	}
-	return *it->second;
-}
-
-void RypeClassifyTableFunction::LocalState::ResetStates() {
-	for (auto &state : array_states) {
-		state.second->Reset();
-	}
-}
-
-RypeClassifyTableFunction::LocalState::~LocalState() {
-	array_states.clear();
 }
 
 // ============================================================================
@@ -181,6 +158,20 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 		}
 	}
 
+	// Step 4: Estimate batch size before the main sequence query.
+	// RYpe processes one batch at a time; using STANDARD_VECTOR_SIZE (2048) causes
+	// shard I/O to dominate. Sample actual average read length for accurate estimation.
+	size_t avg_read_length = SampleAvgReadLength(conn, table_quoted);
+	int is_paired = bind_data.has_sequence2 ? 1 : 0;
+	size_t batch_size = rype_recommend_batch_size(gstate->index, avg_read_length, is_paired, 0);
+	if (batch_size == 0) {
+		// rype_recommend_batch_size returns 0 on error — log but use safe fallback
+		const char *err = rype_get_last_error();
+		Printer::Print(StringUtil::Format("Warning: rype_recommend_batch_size failed (%s), using default",
+		                                  err ? err : "unknown error"));
+		batch_size = STANDARD_VECTOR_SIZE;
+	}
+
 	// Query sequence data for RYpe with row indices as id
 	// RYpe expects: id (Int64), sequence (Binary), pair_sequence (Binary nullable)
 	std::string query;
@@ -200,11 +191,10 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 		                            query_result->GetError());
 	}
 
-	// Step 4: Wrap as ArrowArrayStream
 	// NOTE: ResultArrowArrayStreamWrapper's release callback (MyStreamRelease) deletes
 	// the wrapper when the stream is released. We create it with make_uniq but then
 	// release ownership after passing to RYpe, so there's no double-free.
-	auto input_wrapper = make_uniq<ResultArrowArrayStreamWrapper>(std::move(query_result), STANDARD_VECTOR_SIZE);
+	auto input_wrapper = make_uniq<ResultArrowArrayStreamWrapper>(std::move(query_result), batch_size);
 	ArrowArrayStream *input_stream = &input_wrapper->stream;
 
 	// Step 5: Call RYpe classify
@@ -233,15 +223,12 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 	}
 
 	// Step 7: Parse Arrow schema for conversion
-	ArrowTableFunction::PopulateArrowTableSchema(DBConfig::GetConfig(context), gstate->arrow_table,
-	                                             gstate->output_schema);
+	ArrowTableFunction::PopulateArrowTableSchema(context, gstate->arrow_table, gstate->output_schema);
 
 	// Verify RYpe's output schema matches expected columns (query_id, bucket_id, score)
 	if (gstate->arrow_table.GetColumns().size() != 3) {
 		throw IOException("RYpe classify returned %zu columns, expected 3", gstate->arrow_table.GetColumns().size());
 	}
-
-	gstate->schema_initialized = true;
 
 	return gstate;
 }

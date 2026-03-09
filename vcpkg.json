@@ -3,6 +3,8 @@
     "zlib",
     "zstd",
     "expat",
+    "openssl",
+    "curl",
     { "name": "hdf5", "features": ["cpp", "zlib", "szip"] }
   ],
   "vcpkg-configuration": {

@@ -34,8 +34,10 @@ static void ValidateReferenceTableSchema(ClientContext &context, const std::stri
 		}
 	} else if (entry->type == CatalogType::VIEW_ENTRY) {
 		auto &view = entry->Cast<ViewCatalogEntry>();
-		col_names = view.names;
-		col_types = view.types;
+		view.BindView(context);
+		auto col_info = view.GetColumnInfo();
+		col_names = col_info->names;
+		col_types = col_info->types;
 	} else {
 		throw InvalidInputException("'%s' is not a table or view", table_name);
 	}

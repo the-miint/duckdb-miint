@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rype.h"
+#include "rype_common.hpp"
 
 #include "duckdb/common/arrow/arrow.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
@@ -64,7 +65,6 @@ public:
 		shared_ptr<ArrowArrayWrapper> current_chunk;
 
 		idx_t batch_offset = 0;
-		bool schema_initialized = false;
 		bool done = false;
 
 		// No mutex needed - MaxThreads() returns 1, enforcing single-threaded execution.
@@ -76,17 +76,8 @@ public:
 		~GlobalState();
 	};
 
-	struct LocalState : public LocalTableFunctionState {
-		std::unordered_map<idx_t, unique_ptr<ArrowArrayScanState>> array_states;
-		ClientContext &context;
-
-		explicit LocalState(ClientContext &ctx) : context(ctx) {
-		}
-		~LocalState();
-
-		ArrowArrayScanState &GetState(idx_t col_idx);
-		void ResetStates();
-	};
+	// Use shared RypeArrowLocalState — identical across all RYpe table functions
+	using LocalState = RypeArrowLocalState;
 
 	static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
 	                                     vector<LogicalType> &return_types, vector<std::string> &names);

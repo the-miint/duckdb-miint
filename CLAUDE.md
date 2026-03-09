@@ -60,6 +60,18 @@ bash run_tests.sh
 ./build/release/test/unittest "[alignment]"
 ```
 
+### Python CLI smoke tests
+```bash
+# Install CLI (use duckdb-144 conda env)
+cd python && conda run -n duckdb-144 pip install -e . && cd ..
+
+# Run a quick smoke test
+EXT=./build/release/extension/miint/miint.duckdb_extension
+conda run -n duckdb-144 miint --extension-path $EXT convert sequence \
+  -1 data/fastq/small_a.fq -o /tmp/test.parquet
+```
+See `localdocs/cli-smoke-tests.md` for the full manual smoke test procedure.
+
 ### Development workflow
 ```bash
 # Clean build
@@ -264,7 +276,9 @@ All COPY formats support compression:
 #### Stop Position Calculation
 SAM alignments compute `stop_position` using HTSlib's `bam_endpos()`:
 - Accounts for CIGAR operations (M, D, N, =, X)
-- 1-based inclusive coordinate
+- Half-open coordinate: `stop_position = position + reference_length_from_cigar` (exclusive end)
+- Example: 10M at position 2 → stop_position = 12, covering bases [2, 12)
+- Coverage length = `stop_position - position` (no +1)
 - Critical for interval operations and coverage analysis
 
 #### Reading from Tables and Views in Extensions

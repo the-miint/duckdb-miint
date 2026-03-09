@@ -1,0 +1,20 @@
+magic = "RYPE_PARQUET_V1"
+format_version = 1
+k = 16
+w = 8
+salt = "0x5555555555555555"
+source_hash = "0xf1dd4ba9368e41e6"
+num_buckets = 1
+total_minimizers = 10
+
+[inverted]
+format = "parquet"
+num_shards = 1
+total_entries = 10
+has_overlapping_shards = true
+
+[[inverted.shards]]
+shard_id = 0
+min_minimizer = "0x5555555555550000"
+max_minimizer = "0x5555555555552d2d"
+num_entries = 10

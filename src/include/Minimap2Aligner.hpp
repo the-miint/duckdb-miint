@@ -10,6 +10,13 @@
 
 namespace miint {
 
+// Alignment stats computed during CIGAR string generation
+struct AlignmentStats {
+	int64_t mismatches = 0;  // XM: number of mismatches
+	int64_t gap_opens = 0;   // XO: number of gap opens
+	int64_t gap_extends = 0; // XG: number of gap extensions
+};
+
 // Subject sequence for indexing (subjects cannot be paired-end)
 struct AlignmentSubject {
 	std::string read_id;
@@ -44,7 +51,35 @@ struct Minimap2TbufDeleter {
 using Minimap2IndexPtr = std::unique_ptr<mm_idx_t, Minimap2IndexDeleter>;
 using Minimap2TbufPtr = std::unique_ptr<mm_tbuf_t, Minimap2TbufDeleter>;
 
-// Main aligner class
+// Shared, immutable minimap2 index for multi-thread-per-shard alignment.
+// Multiple Minimap2Aligner instances can reference the same SharedMinimap2Index
+// concurrently (each aligner has its own mm_tbuf_t).
+class SharedMinimap2Index {
+public:
+	// Load from .mmi file
+	SharedMinimap2Index(const std::string &index_path, const Minimap2Config &config);
+	// Take ownership of a pre-built index
+	SharedMinimap2Index(mm_idx_t *idx, const mm_mapopt_t &mopt, std::vector<std::string> subject_names);
+	~SharedMinimap2Index();
+
+	// Non-copyable
+	SharedMinimap2Index(const SharedMinimap2Index &) = delete;
+	SharedMinimap2Index &operator=(const SharedMinimap2Index &) = delete;
+
+	const mm_idx_t *index() const;
+	const mm_mapopt_t &mapopt() const;
+	const std::vector<std::string> &subject_names() const;
+
+private:
+	Minimap2IndexPtr index_;
+	mm_mapopt_t mopt_;
+	std::vector<std::string> subject_names_;
+};
+
+// Main aligner class.
+// NOT thread-safe: each thread must have its own Minimap2Aligner instance.
+// Multiple instances may share a SharedMinimap2Index concurrently, but the
+// aligner itself (including its mm_tbuf_t) must not be used from multiple threads.
 class Minimap2Aligner {
 public:
 	explicit Minimap2Aligner(const Minimap2Config &config);
@@ -73,6 +108,20 @@ public:
 	// Check if file is a valid minimap2 index
 	static bool is_index_file(const std::string &path);
 
+	// Static helpers for option/index initialization (shared with SharedMinimap2Index)
+	static void InitOptions(const Minimap2Config &config, mm_idxopt_t &iopt, mm_mapopt_t &mopt);
+	static void LoadIndexFromFile(const std::string &path, const mm_idxopt_t &iopt, mm_idx_t *&out_idx,
+	                              std::vector<std::string> &out_names);
+
+	// Build a SharedMinimap2Index from subjects (for multi-threaded standard mode)
+	static std::shared_ptr<SharedMinimap2Index> BuildSharedIndex(const std::vector<AlignmentSubject> &subjects,
+	                                                             const Minimap2Config &config);
+
+	// Attach a shared index (clears any owned index)
+	void attach_shared_index(std::shared_ptr<SharedMinimap2Index> shared_idx);
+	// Detach the shared index (does not destroy it; other aligners may still reference it)
+	void detach_shared_index();
+
 	// Align queries against current index, append results to batch
 	// Uses SequenceRecordBatch which matches read_fastx output schema
 	void align(const SequenceRecordBatch &queries, SAMRecordBatch &output);
@@ -82,8 +131,20 @@ private:
 	std::unique_ptr<mm_idxopt_t> iopt_;
 	std::unique_ptr<mm_mapopt_t> mopt_;
 	Minimap2IndexPtr index_;
-	std::vector<std::string> subject_names_; // For reference name lookup
-	Minimap2TbufPtr tbuf_;                   // Reusable thread buffer
+	std::vector<std::string> subject_names_;            // For reference name lookup
+	Minimap2TbufPtr tbuf_;                              // Reusable thread buffer
+	std::shared_ptr<SharedMinimap2Index> shared_index_; // Shared index (mutually exclusive with index_)
+	char *md_buf_ = nullptr;                            // Pooled buffer for mm_gen_MD (Opt 5)
+	int md_max_len_ = 0;                                // Current capacity of md_buf_
+
+	// Build raw mm_idx_t* from subjects (shared by build_index and BuildSharedIndex)
+	static mm_idx_t *BuildRawIndex(const std::vector<AlignmentSubject> &subjects, const mm_idxopt_t &iopt,
+	                               std::vector<std::string> &out_names);
+
+	// Accessors that transparently pick shared or owned state
+	const mm_idx_t *active_index() const;
+	const mm_mapopt_t *active_mapopt() const;
+	const std::vector<std::string> &active_subject_names() const;
 
 	// Internal alignment functions
 	void align_single(const std::string &read_id, const std::string &sequence, SAMRecordBatch &output);
@@ -91,18 +152,20 @@ private:
 	                  SAMRecordBatch &output);
 
 	// Convert minimap2 result to SAM fields
-	void reg_to_sam(const void *reg_ptr, const std::string &read_id, const std::string &query_seq,
+	void reg_to_sam(const mm_reg1_t *reg, const std::string &read_id, const std::string &query_seq,
 	                SAMRecordBatch &batch, int segment_idx, bool mate_mapped, bool mate_rev, int32_t mate_rid,
 	                int32_t mate_pos, int32_t tlen);
 
-	// Generate CIGAR string from mm_extra_t
-	std::string cigar_string(const void *reg_ptr) const;
+	// Generate CIGAR string from mm_extra_t, including soft/hard clips.
+	// When stats_out is non-null, computes XM/XO/XG during the same CIGAR walk.
+	std::string cigar_string(const mm_reg1_t *reg, int32_t query_len, uint16_t sam_flags,
+	                         AlignmentStats *stats_out = nullptr) const;
 
 	// Calculate stop position from CIGAR
-	int64_t calculate_stop_position(int64_t start_pos, const void *reg_ptr) const;
+	int64_t calculate_stop_position(int64_t start_pos, const mm_reg1_t *reg) const;
 
 	// Calculate SAM flags
-	uint16_t calculate_flags(const void *reg_ptr, bool is_paired, int segment_idx, bool mate_mapped, bool mate_rev,
+	uint16_t calculate_flags(const mm_reg1_t *reg, bool is_paired, int segment_idx, bool mate_mapped, bool mate_rev,
 	                         bool is_unmapped) const;
 
 	// Get reference name by ID

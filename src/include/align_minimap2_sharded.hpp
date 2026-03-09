@@ -11,7 +11,13 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 namespace duckdb {
@@ -23,6 +29,20 @@ struct ShardInfo {
 	idx_t read_count;       // Number of reads for this shard (for priority ordering)
 };
 
+// A shard that is currently being processed by one or more threads.
+// The shared index is immutable after construction; atomic counters
+// coordinate batch claiming and worker tracking without holding the global lock.
+struct ActiveShard {
+	idx_t shard_idx;                                   // Index into Data::shards
+	idx_t batch_size;                                  // Per-shard batch size (id_count / max_threads_per_shard)
+	std::vector<std::string> shard_read_ids;           // Pre-materialized read IDs for this shard (sorted)
+	std::shared_ptr<miint::SharedMinimap2Index> index; // Shared index, immutable after construction
+	std::atomic<idx_t> next_batch_offset {0};          // Threads atomically claim ranges into shard_read_ids
+	std::atomic<idx_t> active_workers {0};             // Threads currently on this shard
+	std::atomic<bool> exhausted {false};               // Set when no more batches to read
+	std::atomic<bool> ready {false};                   // Set when index is loaded and IDs materialized
+};
+
 class AlignMinimap2ShardedTableFunction {
 public:
 	struct Data : public TableFunctionData {
@@ -32,6 +52,9 @@ public:
 		SequenceTableSchema query_schema;
 		miint::Minimap2Config config;
 		std::vector<ShardInfo> shards; // Sorted by read_count DESC (largest first)
+		idx_t max_threads_per_shard = 4;
+		bool debug = false;
+		bool include_shard_name = false;
 
 		// Output schema (shared with align_minimap2)
 		std::vector<std::string> names;
@@ -43,12 +66,19 @@ public:
 
 	struct GlobalState : public GlobalTableFunctionState {
 		std::mutex lock;
+		std::condition_variable cv;
 		idx_t next_shard_idx = 0;
-		idx_t shard_count = 1;
+		idx_t shard_count = 0;
+		idx_t max_threads_per_shard = 4;
+		idx_t max_active_shards = 1; // ceil(db_threads / max_threads_per_shard)
+		bool debug = false;
+		std::chrono::steady_clock::time_point start_time;
+		std::vector<std::shared_ptr<ActiveShard>> active_shards;
+		std::atomic<idx_t> total_associations {0};
+		std::atomic<idx_t> associations_processed {0};
 
 		idx_t MaxThreads() const override {
-			// No cap - one thread per shard, let DuckDB scheduler manage
-			return shard_count;
+			return max_active_shards * max_threads_per_shard;
 		}
 
 		GlobalState() = default;
@@ -56,11 +86,11 @@ public:
 
 	struct LocalState : public LocalTableFunctionState {
 		std::unique_ptr<miint::Minimap2Aligner> aligner;
-		idx_t current_shard_idx = DConstants::INVALID_INDEX;
+		std::shared_ptr<ActiveShard> current_active_shard;
 		bool has_shard = false;
-		idx_t current_read_offset = 0; // For LIMIT/OFFSET streaming per shard
 		miint::SAMRecordBatch result_buffer;
 		idx_t buffer_offset = 0;
+		std::string current_shard_name;
 
 		LocalState() = default;
 	};
@@ -75,8 +105,21 @@ public:
 
 	static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 
+	static double Progress(ClientContext &context, const FunctionData *bind_data,
+	                       const GlobalTableFunctionState *global_state);
+
 	static TableFunction GetFunction();
 	static void Register(ExtensionLoader &loader);
+
+private:
+	// Claim work: join an existing active shard or start a new one.
+	// Returns the ActiveShard to work on, or nullptr if no more work.
+	// Index loading happens outside the lock.
+	static std::shared_ptr<ActiveShard> ClaimWork(ClientContext &context, GlobalState &gstate, const Data &bind_data,
+	                                              LocalState &lstate);
+
+	// Release work: detach from current shard, clean up if last worker on exhausted shard.
+	static void ReleaseWork(GlobalState &gstate, LocalState &lstate);
 };
 
 } // namespace duckdb

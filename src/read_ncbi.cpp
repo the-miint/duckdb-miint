@@ -6,7 +6,6 @@ namespace duckdb {
 // Data constructor - sets up schema
 ReadNCBITableFunction::Data::Data(std::vector<std::string> accessions, const std::string &api_key)
     : accessions(std::move(accessions)), api_key(api_key) {
-
 	// Schema for GenBank metadata
 	names = {"accession",   "version", "description",   "organism",
 	         "taxonomy_id", "length",  "molecule_type", "update_date"};

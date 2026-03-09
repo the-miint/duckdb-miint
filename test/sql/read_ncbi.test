@@ -5,6 +5,8 @@
 # NOTE: This test requires network access to NCBI servers
 # Tests are structured to minimize NCBI requests by fetching data once into temp tables
 
+require httpfs
+
 require miint
 
 # httpfs is auto-loaded by the miint extension

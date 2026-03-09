@@ -11,7 +11,13 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 namespace duckdb {
@@ -23,6 +29,18 @@ struct Bowtie2ShardInfo {
 	idx_t read_count;         // Number of reads for this shard (for priority ordering)
 };
 
+// A shard that is currently being processed by one or more threads.
+// Each thread spawns its own bowtie2 subprocess (no shared index object).
+// Atomic counters coordinate batch claiming and worker tracking without holding the global lock.
+struct Bowtie2ActiveShard {
+	idx_t shard_idx;                          // Index into Data::shards
+	std::vector<std::string> shard_read_ids;  // Pre-materialized IDs (shared across threads)
+	std::atomic<idx_t> next_batch_offset {0}; // Threads atomically claim ranges
+	std::atomic<idx_t> active_workers {0};    // Threads currently on this shard
+	std::atomic<bool> exhausted {false};      // No more batches to claim
+	std::atomic<bool> ready {false};          // IDs materialized, ready for workers to join
+};
+
 class AlignBowtie2ShardedTableFunction {
 public:
 	struct Data : public TableFunctionData {
@@ -32,6 +50,9 @@ public:
 		SequenceTableSchema query_schema;
 		miint::Bowtie2Config config;
 		std::vector<Bowtie2ShardInfo> shards; // Sorted by read_count DESC (largest first)
+		idx_t max_threads_per_shard = 4;
+		bool debug = false;
+		bool include_shard_name = false;
 
 		// Output schema (shared with align_bowtie2)
 		std::vector<std::string> names;
@@ -43,14 +64,19 @@ public:
 
 	struct GlobalState : public GlobalTableFunctionState {
 		std::mutex lock;
+		std::condition_variable cv;
 		idx_t next_shard_idx = 0;
-		idx_t shard_count = 1;
+		idx_t shard_count = 0;
+		idx_t max_threads_per_shard = 4;
+		idx_t max_active_shards = 1; // ceil(db_threads / max_threads_per_shard)
+		bool debug = false;
+		std::chrono::steady_clock::time_point start_time;
+		std::vector<std::shared_ptr<Bowtie2ActiveShard>> active_shards;
+		std::atomic<idx_t> total_associations {0};
+		std::atomic<idx_t> associations_processed {0};
 
 		idx_t MaxThreads() const override {
-			// One DuckDB thread per shard, each running one single-threaded bowtie2 process.
-			// The 'threads' parameter is ignored in sharded mode - parallelism comes from
-			// running multiple shards concurrently, not from bowtie2's internal threading.
-			return shard_count;
+			return max_active_shards * max_threads_per_shard;
 		}
 
 		GlobalState() = default;
@@ -58,12 +84,11 @@ public:
 
 	struct LocalState : public LocalTableFunctionState {
 		std::unique_ptr<miint::Bowtie2Aligner> aligner;
-		idx_t current_shard_idx = DConstants::INVALID_INDEX;
+		std::shared_ptr<Bowtie2ActiveShard> current_active_shard;
 		bool has_shard = false;
-		bool finished_aligning = false; // True after calling finish() for current shard
-		idx_t current_read_offset = 0;  // For streaming queries
 		miint::SAMRecordBatch result_buffer;
 		idx_t buffer_offset = 0;
+		std::string current_shard_name;
 
 		LocalState() = default;
 	};
@@ -78,8 +103,21 @@ public:
 
 	static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 
+	static double Progress(ClientContext &context, const FunctionData *bind_data,
+	                       const GlobalTableFunctionState *global_state);
+
 	static TableFunction GetFunction();
 	static void Register(ExtensionLoader &loader);
+
+private:
+	// Claim work: join an existing active shard or start a new one.
+	// Returns the Bowtie2ActiveShard to work on, or nullptr if no more work.
+	// ID materialization happens outside the lock.
+	static std::shared_ptr<Bowtie2ActiveShard> ClaimWork(ClientContext &context, GlobalState &gstate,
+	                                                     const Data &bind_data, LocalState &lstate);
+
+	// Release work: detach from current shard, clean up if last worker on exhausted shard.
+	static void ReleaseWork(GlobalState &gstate, LocalState &lstate);
 };
 
 } // namespace duckdb

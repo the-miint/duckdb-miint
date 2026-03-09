@@ -122,7 +122,6 @@ SAMReader::SAMReader(const std::string &filename, const std::unordered_map<std::
 // Constructor for reading SAM from a file descriptor (e.g., pipe from subprocess)
 SAMReader::SAMReader(int fd, const std::string &name, bool include_seq_qual)
     : aln(bam_init1()), include_seq_qual(include_seq_qual) {
-
 	// Wrap fd in HTSlib's hFILE
 	hFILE *hfile = hdopen(fd, "r");
 	if (!hfile) {

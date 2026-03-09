@@ -236,6 +236,66 @@ query1	ref1
 query2	ref2
 
 # ==============================================================================
+# INCLUDE_SHARD_NAME TEST
+# ==============================================================================
+
+# Test include_shard_name adds shard_name column
+query III
+SELECT read_id, reference, shard_name
+FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    include_shard_name := true,
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+query1	ref1	shard_a
+query2	ref2	shard_b
+
+# Test default (no include_shard_name) does NOT have shard_name column
+statement error
+SELECT shard_name FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    max_secondary := 0);
+----
+shard_name
+
+# ==============================================================================
+# MAX_THREADS_PER_SHARD PARAMETER TEST
+# ==============================================================================
+
+# Test max_threads_per_shard parameter is accepted (just verify no error)
+query I
+SELECT COUNT(*) FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    max_threads_per_shard := 2,
+    max_secondary := 0)
+WHERE flags & 4 = 0;
+----
+2
+
+# Test max_threads_per_shard validation: too low
+statement error
+SELECT * FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    max_threads_per_shard := 0);
+----
+max_threads_per_shard must be between 1 and 64
+
+# Test max_threads_per_shard validation: too high
+statement error
+SELECT * FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    max_threads_per_shard := 100);
+----
+max_threads_per_shard must be between 1 and 64
+
+# ==============================================================================
 # PAIRED-END TEST
 # ==============================================================================
 

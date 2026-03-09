@@ -19,9 +19,7 @@ struct SequenceTableSchema {
 // Validate that a table/view has required columns for sequence data.
 // Returns schema information about what optional columns are present.
 // Throws BinderException if required columns are missing or have wrong types.
-// If allow_paired is false, will throw if sequence2 column exists and has non-NULL data.
-SequenceTableSchema ValidateSequenceTableSchema(ClientContext &context, const std::string &table_name,
-                                                bool allow_paired = true);
+SequenceTableSchema ValidateSequenceTableSchema(ClientContext &context, const std::string &table_name);
 
 // Read all subjects from a table/view into memory.
 // Subjects cannot be paired-end (sequence2 must be NULL for all rows).
@@ -35,12 +33,15 @@ std::vector<miint::AlignmentSubject> ReadSubjectTable(ClientContext &context, co
 bool ReadQueryBatch(ClientContext &context, const std::string &table_name, const SequenceTableSchema &schema,
                     idx_t batch_size, idx_t &offset, miint::SequenceRecordBatch &output);
 
-// Read a batch of query sequences for a specific shard.
-// Joins query_table with read_to_shard_table, filtering by shard_name.
-// Returns true if there are more rows to read, false if done.
-// offset is updated to the next position after reading.
-bool ReadShardQueryBatch(ClientContext &context, const std::string &query_table, const std::string &read_to_shard_table,
-                         const std::string &shard_name, const SequenceTableSchema &schema, idx_t batch_size,
-                         idx_t &offset, miint::SequenceRecordBatch &output);
+// Read all read_ids for a shard from the read_to_shard table, ordered.
+// Returns the IDs as a vector of strings for use with ReadBatchByIds.
+std::vector<std::string> ReadShardIds(ClientContext &context, const std::string &read_to_shard_table,
+                                      const std::string &shard_name);
+
+// Read sequences for a known set of IDs by creating a temp table and joining.
+// Reads ids[offset..offset+count] from the pre-materialized ID list,
+// loads them into a temp table, and joins against query_table to fetch sequences.
+void ReadBatchByIds(ClientContext &context, const std::string &query_table, const SequenceTableSchema &schema,
+                    const std::vector<std::string> &ids, idx_t offset, idx_t count, miint::SequenceRecordBatch &output);
 
 } // namespace duckdb

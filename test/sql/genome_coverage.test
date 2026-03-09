@@ -1,0 +1,215 @@
+# name: test/sql/genome_coverage.test
+# description: Test genome_coverage table macro
+# group: [sql]
+
+require miint
+
+# ---- Setup tables ----
+# Note: stop_position uses half-open coordinates (exclusive end),
+# matching read_alignments output where stop_position = position + ref_length.
+
+statement ok
+CREATE TABLE alignments (reference VARCHAR, position BIGINT, stop_position BIGINT);
+
+statement ok
+CREATE TABLE subject_total_length (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+CREATE TABLE subject_genome_id (contig_id VARCHAR, genome_id VARCHAR);
+
+# ---- Test 1: Non-overlapping alignments, single genome, single contig ----
+# contig1 [10,21) and [30,41) → 11 + 11 = 22 bases covered out of 100
+
+statement ok
+INSERT INTO alignments VALUES ('contig1', 10, 21), ('contig1', 30, 41);
+
+statement ok
+INSERT INTO subject_genome_id VALUES ('contig1', 'genome_A');
+
+statement ok
+INSERT INTO subject_total_length VALUES ('genome_A', 100);
+
+query TIR
+SELECT * FROM genome_coverage(alignments, subject_total_length, subject_genome_id);
+----
+genome_A	22	0.22
+
+# ---- Test 2: Overlapping alignments merged by compress_intervals ----
+# contig1 [10,21) and [15,26) → compressed to [10,26) → 16 bases
+
+statement ok
+DELETE FROM alignments;
+
+statement ok
+DELETE FROM subject_total_length;
+
+statement ok
+DELETE FROM subject_genome_id;
+
+statement ok
+INSERT INTO alignments VALUES ('contig1', 10, 21), ('contig1', 15, 26);
+
+statement ok
+INSERT INTO subject_genome_id VALUES ('contig1', 'genome_A');
+
+statement ok
+INSERT INTO subject_total_length VALUES ('genome_A', 100);
+
+query TIR
+SELECT * FROM genome_coverage(alignments, subject_total_length, subject_genome_id);
+----
+genome_A	16	0.16
+
+# ---- Test 3: Multiple contigs map to same genome ----
+# contig1 [10,21) → 11 bases, contig2 [30,41) → 11 bases, both → genome_A
+
+statement ok
+DELETE FROM alignments;
+
+statement ok
+DELETE FROM subject_total_length;
+
+statement ok
+DELETE FROM subject_genome_id;
+
+statement ok
+INSERT INTO alignments VALUES ('contig1', 10, 21), ('contig2', 30, 41);
+
+statement ok
+INSERT INTO subject_genome_id VALUES ('contig1', 'genome_A'), ('contig2', 'genome_A');
+
+statement ok
+INSERT INTO subject_total_length VALUES ('genome_A', 100);
+
+query TIR
+SELECT * FROM genome_coverage(alignments, subject_total_length, subject_genome_id);
+----
+genome_A	22	0.22
+
+# ---- Test 4: Multiple genomes ----
+# contig1 [10,21) → genome_A (len 100), contig2 [30,51) → genome_B (len 200)
+
+statement ok
+DELETE FROM alignments;
+
+statement ok
+DELETE FROM subject_total_length;
+
+statement ok
+DELETE FROM subject_genome_id;
+
+statement ok
+INSERT INTO alignments VALUES ('contig1', 10, 21), ('contig2', 30, 51);
+
+statement ok
+INSERT INTO subject_genome_id VALUES ('contig1', 'genome_A'), ('contig2', 'genome_B');
+
+statement ok
+INSERT INTO subject_total_length VALUES ('genome_A', 100), ('genome_B', 200);
+
+query TIR
+SELECT * FROM genome_coverage(alignments, subject_total_length, subject_genome_id) ORDER BY genome_id;
+----
+genome_A	11	0.11
+genome_B	21	0.105
+
+# ---- Test 5: Unknown references excluded ----
+# contig_unknown not in genome_id mapping → should not appear in output
+
+statement ok
+DELETE FROM alignments;
+
+statement ok
+DELETE FROM subject_total_length;
+
+statement ok
+DELETE FROM subject_genome_id;
+
+statement ok
+INSERT INTO alignments VALUES ('contig1', 10, 21), ('contig_unknown', 50, 61);
+
+statement ok
+INSERT INTO subject_genome_id VALUES ('contig1', 'genome_A');
+
+statement ok
+INSERT INTO subject_total_length VALUES ('genome_A', 100);
+
+query TIR
+SELECT * FROM genome_coverage(alignments, subject_total_length, subject_genome_id);
+----
+genome_A	11	0.11
+
+# ---- Test 6: Integration with read_alignments and real SAM data ----
+
+statement ok
+CREATE TABLE sam_alignments AS
+SELECT reference, position, stop_position FROM read_alignments('data/sam/foo_has_header.sam');
+
+# Test 6a: Both contigs map to same genome
+# G1234 [2,12) → 10 bases, G000144735 [76020,76296) (overlap merged) → 276 bases
+# Total: 286 bases, genomeX total_length=100000 → 0.00286
+
+statement ok
+CREATE TABLE genome_id_6a (contig_id VARCHAR, genome_id VARCHAR);
+
+statement ok
+INSERT INTO genome_id_6a VALUES ('G1234', 'genomeX'), ('G000144735', 'genomeX');
+
+statement ok
+CREATE TABLE total_length_6a (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO total_length_6a VALUES ('genomeX', 100000);
+
+query TIR
+SELECT * FROM genome_coverage(sam_alignments, total_length_6a, genome_id_6a);
+----
+genomeX	286	0.00286
+
+# Test 6b: Contigs map to separate genomes
+# G1234 → genome1 (len 1000): covered=10, proportion=0.01
+# G000144735 → genome2 (len 100000): covered=276, proportion=0.00276
+
+statement ok
+CREATE TABLE genome_id_6b (contig_id VARCHAR, genome_id VARCHAR);
+
+statement ok
+INSERT INTO genome_id_6b VALUES ('G1234', 'genome1'), ('G000144735', 'genome2');
+
+statement ok
+CREATE TABLE total_length_6b (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO total_length_6b VALUES ('genome1', 1000), ('genome2', 100000);
+
+query TIR
+SELECT * FROM genome_coverage(sam_alignments, total_length_6b, genome_id_6b) ORDER BY genome_id;
+----
+genome1	10	0.01
+genome2	276	0.00276
+
+# ---- Cleanup ----
+
+statement ok
+DROP TABLE alignments;
+
+statement ok
+DROP TABLE subject_total_length;
+
+statement ok
+DROP TABLE subject_genome_id;
+
+statement ok
+DROP TABLE sam_alignments;
+
+statement ok
+DROP TABLE genome_id_6a;
+
+statement ok
+DROP TABLE total_length_6a;
+
+statement ok
+DROP TABLE genome_id_6b;
+
+statement ok
+DROP TABLE total_length_6b;

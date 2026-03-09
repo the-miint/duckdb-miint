@@ -11,7 +11,6 @@ namespace duckdb {
 unique_ptr<FunctionData> ReadSequencesSamTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                              vector<duckdb::LogicalType> &return_types,
                                                              vector<std::string> &names) {
-
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
 	std::vector<std::string> file_paths;

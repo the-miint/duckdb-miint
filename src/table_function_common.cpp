@@ -75,7 +75,7 @@ std::vector<std::string> ExpandGlobPattern(FileSystem &fs, ClientContext &contex
 	}
 
 	// Expand the glob pattern
-	auto files = fs.GlobFiles(pattern, context, FileGlobOptions::ALLOW_EMPTY);
+	auto files = fs.GlobFiles(pattern, FileGlobOptions::ALLOW_EMPTY);
 
 	if (files.empty()) {
 		throw IOException("No files matched pattern: " + pattern);
@@ -108,7 +108,7 @@ GlobExpansionResult ExpandGlobPatternWithInfo(FileSystem &fs, ClientContext &con
 	}
 
 	// Expand the glob pattern
-	auto files = fs.GlobFiles(pattern, context, FileGlobOptions::ALLOW_EMPTY);
+	auto files = fs.GlobFiles(pattern, FileGlobOptions::ALLOW_EMPTY);
 
 	if (files.empty()) {
 		throw IOException("No files matched pattern: " + pattern);

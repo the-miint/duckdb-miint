@@ -3,6 +3,7 @@
 #include "duckdb/common/vector_size.hpp"
 
 #include <fcntl.h>
+#include <mutex>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -25,8 +26,8 @@ unique_ptr<FunctionData> AlignBowtie2TableFunction::Bind(ClientContext &context,
 	data->subject_table = input.inputs[1].ToString();
 
 	// Validate query and subject tables/views exist
-	data->query_schema = ValidateSequenceTableSchema(context, data->query_table, true /* allow_paired */);
-	ValidateSequenceTableSchema(context, data->subject_table, false /* allow_paired */);
+	data->query_schema = ValidateSequenceTableSchema(context, data->query_table);
+	ValidateSequenceTableSchema(context, data->subject_table);
 
 	// Parse optional named parameters
 	auto preset_param = input.named_parameters.find("preset");
@@ -199,13 +200,10 @@ void AlignBowtie2TableFunction::Register(ExtensionLoader &loader) {
 
 // Scalar function to check if bowtie2 is available in PATH
 static void Bowtie2AvailableFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	// Check once and cache the result
-	static bool checked = false;
+	static std::once_flag flag;
 	static bool available = false;
 
-	if (!checked) {
-		// Use the same find_executable logic as Bowtie2Aligner
-		// Check for both bowtie2 and bowtie2-build
+	std::call_once(flag, []() {
 		auto check_executable = [](const char *name) -> bool {
 			int pipefd[2];
 			if (pipe(pipefd) == -1) {
@@ -247,8 +245,7 @@ static void Bowtie2AvailableFunction(DataChunk &args, ExpressionState &state, Ve
 		};
 
 		available = check_executable("bowtie2") && check_executable("bowtie2-build");
-		checked = true;
-	}
+	});
 
 	result.SetVectorType(VectorType::CONSTANT_VECTOR);
 	ConstantVector::GetData<bool>(result)[0] = available;
