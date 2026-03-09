@@ -484,6 +484,7 @@ TableFunction AlignMinimap2ShardedTableFunction::GetFunction() {
 	tf.named_parameters["eqx"] = LogicalType::BOOLEAN;
 	tf.named_parameters["max_threads_per_shard"] = LogicalType::INTEGER;
 	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
+	tf.named_parameters["min_chain_coverage"] = LogicalType::FLOAT;
 	tf.named_parameters["include_shard_name"] = LogicalType::BOOLEAN;
 
 	tf.table_scan_progress = Progress;

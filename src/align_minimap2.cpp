@@ -294,6 +294,7 @@ TableFunction AlignMinimap2TableFunction::GetFunction() {
 	tf.named_parameters["w"] = LogicalType::INTEGER;
 	tf.named_parameters["eqx"] = LogicalType::BOOLEAN;
 	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
+	tf.named_parameters["min_chain_coverage"] = LogicalType::FLOAT;
 
 	// Alignment output order is non-deterministic (depends on thread scheduling),
 	// so NO_ORDER lets DuckDB parallelize CTAS pipelines instead of serializing

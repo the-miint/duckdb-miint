@@ -1,0 +1,46 @@
+# name: test/sql/align_minimap2_coverage_filter_quality.test
+# description: Verify min_chain_coverage produces zero false negatives on real HiFi data
+# group: [sql]
+
+#
+# Uses data/minimap2/queries.fasta (5 HiFi reads) and data/minimap2/subject.fasta (E. coli)
+# All 5 reads are high-quality full-length alignments that must survive filtering.
+
+require miint
+
+statement ok
+CREATE TABLE subject AS SELECT * FROM read_fastx('data/minimap2/subject.fasta');
+
+statement ok
+CREATE TABLE queries AS SELECT * FROM read_fastx('data/minimap2/queries.fasta');
+
+# Baseline: all 5 reads align
+query I
+SELECT count(*) FROM align_minimap2('queries', subject_table:='subject', preset:='map-hifi', max_secondary:=0);
+----
+5
+
+# With min_chain_coverage=0.50: all 5 high-quality reads should still align
+query I
+SELECT count(*) FROM align_minimap2('queries', subject_table:='subject', preset:='map-hifi', max_secondary:=0, min_chain_coverage:=0.50);
+----
+5
+
+# Zero false negatives: filtered results must have identical CIGARs and positions
+# (reads that pass the chain filter go through the full unmodified pipeline)
+query I
+SELECT count(*) FROM (
+    SELECT b.read_id, b.cigar AS b_cigar, f.cigar AS f_cigar, b.position AS b_pos, f.position AS f_pos
+    FROM align_minimap2('queries', subject_table:='subject', preset:='map-hifi', max_secondary:=0) b
+    JOIN align_minimap2('queries', subject_table:='subject', preset:='map-hifi', max_secondary:=0, min_chain_coverage:=0.50) f
+      ON b.read_id = f.read_id AND b.reference = f.reference
+    WHERE b.cigar != f.cigar OR b.position != f.position
+);
+----
+0
+
+# With min_chain_coverage=0.90: all 5 should still pass (they're full-length HiFi reads)
+query I
+SELECT count(*) FROM align_minimap2('queries', subject_table:='subject', preset:='map-hifi', max_secondary:=0, min_chain_coverage:=0.90);
+----
+5

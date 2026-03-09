@@ -30,11 +30,12 @@ struct AlignmentSubject {
 
 // Configuration for alignment
 struct Minimap2Config {
-	std::string preset = "sr"; // Preset: sr, map-ont, map-pb, asm5, etc.
-	int max_secondary = 5;     // Max secondary alignments per query
-	bool eqx = true;           // Use =/X instead of M in CIGAR
-	int k = 0;                 // k-mer size (0 = use preset default)
-	int w = 0;                 // minimizer window (0 = use preset default)
+	std::string preset = "sr";       // Preset: sr, map-ont, map-pb, asm5, etc.
+	int max_secondary = 5;           // Max secondary alignments per query
+	bool eqx = true;                 // Use =/X instead of M in CIGAR
+	int k = 0;                       // k-mer size (0 = use preset default)
+	int w = 0;                       // minimizer window (0 = use preset default)
+	float min_chain_coverage = 0.0f; // min best-chain span (qe-qs)/qlen to attempt DP (0.0 = disabled)
 };
 
 // Custom deleter for minimap2 index

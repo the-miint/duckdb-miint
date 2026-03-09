@@ -97,6 +97,14 @@ inline void ParseMinimap2ConfigParams(const named_parameter_map_t &params, miint
 	if (eqx_param != params.end() && !eqx_param->second.IsNull()) {
 		config.eqx = eqx_param->second.GetValue<bool>();
 	}
+
+	auto min_qcov_param = params.find("min_chain_coverage");
+	if (min_qcov_param != params.end() && !min_qcov_param->second.IsNull()) {
+		config.min_chain_coverage = min_qcov_param->second.GetValue<float>();
+		if (config.min_chain_coverage < 0.0f || config.min_chain_coverage > 1.0f) {
+			throw InvalidInputException("min_chain_coverage must be between 0.0 and 1.0");
+		}
+	}
 }
 
 // Parse bowtie2 config parameters from named_parameters map
