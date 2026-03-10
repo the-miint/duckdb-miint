@@ -193,20 +193,38 @@ const std::string READ_JPLACE = // NOLINT
     "    FROM read_json(path, filename := true) "
     "); ";
 
+// mz_within(observed, target, tolerance_da)
+//
+// Returns true if abs(observed - target) < tolerance_da (strict inequality).
+// Matches MassQL TOLERANCEMZ semantics.
+const std::string MZ_WITHIN = // NOLINT
+    "CREATE OR REPLACE MACRO mz_within(observed, target, tolerance_da) AS "
+    "(observed > target - tolerance_da AND observed < target + tolerance_da);";
+
+// mz_within_ppm(observed, target, ppm)
+//
+// Returns true if abs(observed - target) < target * ppm * 1e-6 (strict inequality).
+// Matches MassQL TOLERANCEPPM semantics.
+const std::string MZ_WITHIN_PPM = // NOLINT
+    "CREATE OR REPLACE MACRO mz_within_ppm(observed, target, ppm) AS "
+    "(observed > target * (1.0 - ppm * 1e-6) AND observed < target * (1.0 + ppm * 1e-6));";
+
 // mzml_peaks(relation)
 //
 // Unnests mz_array and intensity_array into per-peak rows.
 // Takes any relation containing read_mzml output (table, view, subquery).
 // Each output row is one (mz, intensity) peak with its parent spectrum's metadata.
 // i_norm = intensity / base_peak_intensity (NULL when base_peak_intensity is NULL).
+// neutral_loss = precursor_mz - mz (NULL for MS1 spectra).
 const std::string MZML_PEAKS = // NOLINT
     "CREATE OR REPLACE MACRO mzml_peaks(relation) AS TABLE "
-    "SELECT spectrum_index, ms_level, retention_time, spectrum_type, polarity, "
+    "SELECT spectrum_index, spectrum_id, ms_level, retention_time, spectrum_type, polarity, "
     "       base_peak_intensity, total_ion_current, "
     "       precursor_mz, precursor_charge, precursor_intensity, ms1_scan_index, "
-    "       mz, intensity, intensity / base_peak_intensity AS i_norm "
+    "       mz, intensity, intensity / base_peak_intensity AS i_norm, "
+    "       precursor_mz - mz AS neutral_loss "
     "FROM ( "
-    "    SELECT spectrum_index, ms_level, retention_time, spectrum_type, polarity, "
+    "    SELECT spectrum_index, spectrum_id, ms_level, retention_time, spectrum_type, polarity, "
     "           base_peak_intensity, total_ion_current, "
     "           precursor_mz, precursor_charge, precursor_intensity, ms1_scan_index, "
     "           UNNEST(mz_array) AS mz, UNNEST(intensity_array) AS intensity "
@@ -233,6 +251,41 @@ const std::string MZML_SCANINFO = // NOLINT
     "    first(precursor_charge) AS precursor_charge, "
     "    first(precursor_intensity) AS precursor_intensity, "
     "    first(ms1_scan_index) AS ms1_scan_index "
+    "FROM query_table(relation) "
+    "GROUP BY spectrum_index; ";
+
+// mzml_scansum(relation)
+//
+// Aggregate peak-level data to one row per scan with total intensity.
+const std::string MZML_SCANSUM = // NOLINT
+    "CREATE OR REPLACE MACRO mzml_scansum(relation) AS TABLE "
+    "SELECT spectrum_index, SUM(intensity) AS total_intensity "
+    "FROM query_table(relation) "
+    "GROUP BY spectrum_index; ";
+
+// mzml_scannum(relation)
+//
+// Return distinct spectrum indices from peak-level data.
+const std::string MZML_SCANNUM = // NOLINT
+    "CREATE OR REPLACE MACRO mzml_scannum(relation) AS TABLE "
+    "SELECT DISTINCT spectrum_index "
+    "FROM query_table(relation); ";
+
+// mzml_scanmz(relation)
+//
+// Return distinct non-NULL precursor_mz values from peak-level data.
+const std::string MZML_SCANMZ = // NOLINT
+    "CREATE OR REPLACE MACRO mzml_scanmz(relation) AS TABLE "
+    "SELECT DISTINCT precursor_mz "
+    "FROM query_table(relation) "
+    "WHERE precursor_mz IS NOT NULL; ";
+
+// mzml_scanmaxint(relation)
+//
+// Aggregate peak-level data to one row per scan with max intensity.
+const std::string MZML_SCANMAXINT = // NOLINT
+    "CREATE OR REPLACE MACRO mzml_scanmaxint(relation) AS TABLE "
+    "SELECT spectrum_index, MAX(intensity) AS max_intensity "
     "FROM query_table(relation) "
     "GROUP BY spectrum_index; ";
 
@@ -364,8 +417,14 @@ public:
 		// read_jplace requires json extension (installed in LoadInternal)
 		con.Query(READ_JPLACE);
 
+		con.Query(MZ_WITHIN);
+		con.Query(MZ_WITHIN_PPM);
 		con.Query(MZML_PEAKS);
 		con.Query(MZML_SCANINFO);
+		con.Query(MZML_SCANSUM);
+		con.Query(MZML_SCANNUM);
+		con.Query(MZML_SCANMZ);
+		con.Query(MZML_SCANMAXINT);
 		con.Query(MZML_PEAK_PAIR);
 		con.Query(MZML_I_NORM);
 		con.Query(MZML_I_TIC_NORM);

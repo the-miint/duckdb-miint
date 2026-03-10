@@ -1,0 +1,131 @@
+# name: test/sql/mz_tolerance.test
+# description: test mz_within and mz_within_ppm tolerance helper macros
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+# ----- mz_within (absolute Da tolerance) -----
+
+# Within tolerance: |100.0 - 100.05| = 0.05 < 0.1
+query I
+SELECT mz_within(100.0, 100.05, 0.1)::INTEGER
+----
+1
+
+# Outside tolerance: |100.0 - 100.11| = 0.11 > 0.1
+query I
+SELECT mz_within(100.0, 100.11, 0.1)::INTEGER
+----
+0
+
+# Boundary: exactly at tolerance edge -> false (strict inequality)
+query I
+SELECT mz_within(100.0, 100.1, 0.1)::INTEGER
+----
+0
+
+# Symmetric: works regardless of which side observed falls on
+query I
+SELECT mz_within(100.15, 100.1, 0.1)::INTEGER
+----
+1
+
+# NULL propagation
+query I
+SELECT mz_within(NULL, 100.0, 0.1) IS NULL
+----
+1
+
+# ----- mz_within_ppm (relative PPM tolerance) -----
+
+# 10 ppm of 500 = 0.005 Da. 500.0 is exactly on target -> true
+query I
+SELECT mz_within_ppm(500.0, 500.0, 10)::INTEGER
+----
+1
+
+# 500.004 is within 0.005 of 500.0 -> true
+query I
+SELECT mz_within_ppm(500.004, 500.0, 10)::INTEGER
+----
+1
+
+# 500.01 is outside 0.005 of 500.0 -> false
+query I
+SELECT mz_within_ppm(500.01, 500.0, 10)::INTEGER
+----
+0
+
+# NULL propagation
+query I
+SELECT mz_within_ppm(NULL, 226.18, 5) IS NULL
+----
+1
+
+# ----- Edge cases -----
+
+# Zero Da tolerance: exact match excluded by strict inequality
+query I
+SELECT mz_within(100.0, 100.0, 0.0)::INTEGER
+----
+0
+
+# Both observed and target NULL
+query I
+SELECT mz_within(NULL, NULL, 0.1) IS NULL
+----
+1
+
+# Zero PPM tolerance: exact match excluded by strict inequality
+query I
+SELECT mz_within_ppm(500.0, 500.0, 0)::INTEGER
+----
+0
+
+# Very small PPM precision: 0.1 ppm of 1000.0 = 0.0001 Da window
+query I
+SELECT mz_within_ppm(1000.00005, 1000.0, 0.1)::INTEGER
+----
+1
+
+# Outside 0.1 ppm window (0.0002 > 0.0001 Da) -> false
+query I
+SELECT mz_within_ppm(1000.0002, 1000.0, 0.1)::INTEGER
+----
+0
+
+# PPM is undefined at target=0: window degenerates to empty (0,0), always false
+query I
+SELECT mz_within_ppm(0.0, 0.0, 10)::INTEGER
+----
+0
+
+query I
+SELECT mz_within_ppm(0.001, 0.0, 10)::INTEGER
+----
+0
+
+# ----- Integration with mzml_peaks -----
+
+statement ok
+CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML');
+
+# Find MS2 peaks near mz=150 with 0.1 Da tolerance (spectrum 1, mz=150.0)
+query IR
+SELECT spectrum_index, mz
+FROM mzml_peaks(spectra)
+WHERE ms_level = 2 AND mz_within(mz, 150.0, 0.1)
+----
+1	150.0
+
+# Find MS2 peaks with neutral loss near 80.0 Da (spectrum 2, mz=220.0, NL=80.0)
+# NOTE: depends on Cycle 1 (neutral_loss column)
+query IRR
+SELECT spectrum_index, mz, neutral_loss
+FROM mzml_peaks(spectra)
+WHERE ms_level = 2 AND mz_within(neutral_loss, 80.0, 0.5)
+----
+2	220.0	80.0
