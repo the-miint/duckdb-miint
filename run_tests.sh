@@ -5,6 +5,23 @@ if command -v bowtie2 &> /dev/null; then
     export BOWTIE2_AVAILABLE=1
 fi
 
+# Download and cache MassQL test data if not present
+CACHE_DIR="data/cache"
+mkdir -p "$CACHE_DIR"
+MZML_FILE="$CACHE_DIR/bld_plt1_07_120_1.mzML"
+EXPECTED_SHA="9be69d251cbf7d9b3c439ccc76dd65f055ddac96b946fc2f565e9a95bfd4ca46"
+
+if [ ! -f "$MZML_FILE" ]; then
+    echo "Downloading MassQL test data..."
+    if ! wget -q -O "$MZML_FILE" "https://massive.ucsd.edu/ProteoSAFe/DownloadResultFile?forceDownload=true&file=f.MSV000085944/ccms_peak/raw_data/bld_plt1_07_120_1.mzML"; then
+        rm -f "$MZML_FILE"
+        echo "Warning: MassQL test data download failed, skipping MassQL tests"
+    fi
+fi
+if echo "$EXPECTED_SHA  $MZML_FILE" | sha256sum -c --quiet 2>/dev/null; then
+    export MASSQL_TEST_DATA="$MZML_FILE"
+fi
+
 make test
 ./build/release/extension/miint/tests
 

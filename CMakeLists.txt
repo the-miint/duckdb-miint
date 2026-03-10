@@ -401,8 +401,9 @@ set(EXTENSION_SOURCES
     src/MzMLBinaryDecoder.cpp
     src/MzMLReader.cpp
     src/read_mzml.cpp
-    src/read_mzml_chromatograms.cpp)
-    src/rype_log_ratio.cpp)
+    src/read_mzml_chromatograms.cpp
+    src/rype_log_ratio.cpp
+    src/formula_function.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

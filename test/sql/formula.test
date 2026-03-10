@@ -1,0 +1,81 @@
+# name: test/sql/formula.test
+# description: test formula() scalar function for chemical formula to monoisotopic mass
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+# ----- Basic elements -----
+
+# Carbon (exact by definition)
+query R
+SELECT formula('C')
+----
+12.0
+
+# Iron (must match pyteomics)
+query R
+SELECT round(formula('Fe'), 7)
+----
+55.9349375
+
+# Multi-atom element
+query R
+SELECT formula('C10')
+----
+120.0
+
+# ----- Common molecules -----
+
+# Water: H2O = 2*1.00782503207 + 15.99491461956 = 18.0105646837
+query R
+SELECT round(formula('H2O'), 10)
+----
+18.0105646837
+
+# CH2 = 12.0 + 2*1.00782503207 = 14.0156500641
+query R
+SELECT round(formula('CH2'), 11)
+----
+14.01565006414
+
+# NaCl = 22.98976928 + 34.96885268 = 57.95862196
+query R
+SELECT round(formula('NaCl'), 8)
+----
+57.95862196
+
+# ----- Error cases -----
+
+# Empty string
+statement error
+SELECT formula('')
+----
+Invalid Input Error
+
+# Unknown element
+statement error
+SELECT formula('Xx')
+----
+Invalid Input Error
+
+# Starts with digit
+statement error
+SELECT formula('2H')
+----
+Invalid Input Error
+
+# Element count overflow
+statement error
+SELECT formula('H99999999999999999999')
+----
+Invalid Input Error
+
+# ----- NULL propagation -----
+
+query I
+SELECT formula(NULL) IS NULL
+----
+1

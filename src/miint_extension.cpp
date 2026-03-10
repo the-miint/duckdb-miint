@@ -27,6 +27,7 @@
 #include <read_ncbi_annotation.hpp>
 #include <miint_macros.hpp>
 #include <sequence_functions.hpp>
+#include <formula_function.hpp>
 #include <align_pairwise_functions.hpp>
 #include <read_mzml.hpp>
 #include <read_mzml_chromatograms.hpp>
@@ -150,6 +151,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	AlignmentQueryCoverageFunction::Register(loader);
 	CompressIntervalsFunction::Register(loader);
 	SequenceFunctions::Register(loader);
+	FormulaFunction::Register(loader);
 
 	AlignPairwiseScoreFunction::Register(loader);
 	AlignPairwiseCigarFunction::Register(loader);

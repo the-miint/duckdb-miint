@@ -193,13 +193,14 @@ const std::string READ_JPLACE = // NOLINT
     "    FROM read_json(path, filename := true) "
     "); ";
 
-// mzml_peaks(filepath)
+// mzml_peaks(relation)
 //
-// Unnests mz_array and intensity_array from read_mzml into per-peak rows.
+// Unnests mz_array and intensity_array into per-peak rows.
+// Takes any relation containing read_mzml output (table, view, subquery).
 // Each output row is one (mz, intensity) peak with its parent spectrum's metadata.
 // i_norm = intensity / base_peak_intensity (NULL when base_peak_intensity is NULL).
 const std::string MZML_PEAKS = // NOLINT
-    "CREATE OR REPLACE MACRO mzml_peaks(filepath) AS TABLE "
+    "CREATE OR REPLACE MACRO mzml_peaks(relation) AS TABLE "
     "SELECT spectrum_index, ms_level, retention_time, spectrum_type, polarity, "
     "       base_peak_intensity, total_ion_current, "
     "       precursor_mz, precursor_charge, precursor_intensity, ms1_scan_index, "
@@ -209,7 +210,7 @@ const std::string MZML_PEAKS = // NOLINT
     "           base_peak_intensity, total_ion_current, "
     "           precursor_mz, precursor_charge, precursor_intensity, ms1_scan_index, "
     "           UNNEST(mz_array) AS mz, UNNEST(intensity_array) AS intensity "
-    "    FROM read_mzml(filepath) "
+    "    FROM query_table(relation) "
     "); ";
 
 // mzml_scaninfo(relation)
@@ -234,6 +235,52 @@ const std::string MZML_SCANINFO = // NOLINT
     "    first(ms1_scan_index) AS ms1_scan_index "
     "FROM query_table(relation) "
     "GROUP BY spectrum_index; ";
+
+// mzml_peak_pair(relation, formula_str)
+//
+// Find MS2 spectra containing a peak pair where one peak is at m/z = X and
+// another is at m/z = 2*X - formula(formula_str), within 0.1 Da tolerance.
+// Returns all peaks from matching spectra (composable with mzml_scaninfo).
+//
+// This implements the MassQL pattern:
+//   QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=2.0*(X - formula(F))
+//
+// X candidates are drawn from all MS2 peaks across all scans (cross-scan matching)
+// and deduplicated with a greedy 0.05 Da step to match MassQL's algorithm.
+//
+// Usage:
+//   CREATE TABLE spectra AS SELECT * FROM read_mzml('file.mzML');
+//   SELECT * FROM mzml_peak_pair(spectra, 'Fe');
+//   -- Or with scaninfo:
+//   CREATE VIEW matches AS SELECT * FROM mzml_peak_pair(spectra, 'Fe');
+//   SELECT * FROM mzml_scaninfo(matches);
+const std::string MZML_PEAK_PAIR = // NOLINT
+    "CREATE OR REPLACE MACRO mzml_peak_pair(relation, formula_str) AS TABLE "
+    "WITH RECURSIVE ms2 AS ( "
+    "    SELECT * FROM mzml_peaks(relation) WHERE ms_level = 2 AND intensity > 0 "
+    "), "
+    "formula_mass AS ( "
+    "    SELECT formula(formula_str) AS mass "
+    "), "
+    "x_candidates(x_val, next_min) AS ( "
+    "    (SELECT mz, mz + 0.05 FROM ms2 ORDER BY mz LIMIT 1) "
+    "    UNION ALL "
+    "    (SELECT s.mz, s.mz + 0.05 "
+    "     FROM x_candidates g "
+    "     JOIN (SELECT DISTINCT mz FROM ms2) s ON s.mz >= g.next_min "
+    "     ORDER BY s.mz "
+    "     LIMIT 1) "
+    ") "
+    "SELECT * FROM ms2 "
+    "WHERE spectrum_index IN ( "
+    "    SELECT DISTINCT p1.spectrum_index "
+    "    FROM x_candidates xc "
+    "    CROSS JOIN formula_mass fm "
+    "    JOIN ms2 p1 ON p1.mz > xc.x_val - 0.1 AND p1.mz < xc.x_val + 0.1 "
+    "    JOIN ms2 p2 ON p2.spectrum_index = p1.spectrum_index "
+    "        AND p2.mz > 2.0 * xc.x_val - fm.mass - 0.1 "
+    "        AND p2.mz < 2.0 * xc.x_val - fm.mass + 0.1 "
+    "); ";
 
 // mzml_i_norm(intensity_array, base_peak_intensity)
 //
@@ -319,6 +366,7 @@ public:
 
 		con.Query(MZML_PEAKS);
 		con.Query(MZML_SCANINFO);
+		con.Query(MZML_PEAK_PAIR);
 		con.Query(MZML_I_NORM);
 		con.Query(MZML_I_TIC_NORM);
 	}

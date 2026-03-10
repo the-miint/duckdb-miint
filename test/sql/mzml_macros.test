@@ -7,11 +7,15 @@ PRAGMA enable_verification;
 
 require miint
 
+# Load spectra into a table for mzml_peaks (which now takes a relation, not a filepath)
+statement ok
+CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML');
+
 # ----- mzml_peaks tests -----
 
 # Row count: 3+2+4 = 9 peaks total
 query I
-SELECT COUNT(*) FROM mzml_peaks('data/mzml/basic_3spectra.mzML')
+SELECT COUNT(*) FROM mzml_peaks(spectra)
 ----
 9
 
@@ -23,14 +27,14 @@ SELECT typeof(spectrum_index), typeof(ms_level), typeof(retention_time),
        typeof(precursor_mz), typeof(precursor_charge), typeof(precursor_intensity),
        typeof(ms1_scan_index),
        typeof(mz), typeof(intensity), typeof(i_norm)
-FROM mzml_peaks('data/mzml/basic_3spectra.mzML') LIMIT 1
+FROM mzml_peaks(spectra) LIMIT 1
 ----
 INTEGER	INTEGER	DOUBLE	VARCHAR	VARCHAR	DOUBLE	DOUBLE	DOUBLE	INTEGER	DOUBLE	INTEGER	DOUBLE	DOUBLE	DOUBLE
 
 # Correct mz/intensity/i_norm values for spectrum 0
 query IRRR
 SELECT spectrum_index, mz, intensity, round(i_norm, 4)
-FROM mzml_peaks('data/mzml/basic_3spectra.mzML')
+FROM mzml_peaks(spectra)
 WHERE spectrum_index = 0
 ORDER BY mz
 ----
@@ -41,7 +45,7 @@ ORDER BY mz
 # MS2 metadata preserved: precursor_mz populated for ms_level=2
 query IRRI
 SELECT spectrum_index, precursor_mz, precursor_intensity, precursor_charge
-FROM mzml_peaks('data/mzml/basic_3spectra.mzML')
+FROM mzml_peaks(spectra)
 WHERE spectrum_index = 1
 LIMIT 1
 ----
@@ -52,7 +56,7 @@ query III
 SELECT spectrum_index,
        precursor_mz IS NULL AS no_precursor,
        ms1_scan_index IS NULL AS no_ms1_idx
-FROM mzml_peaks('data/mzml/basic_3spectra.mzML')
+FROM mzml_peaks(spectra)
 WHERE ms_level = 1
 LIMIT 1
 ----
@@ -61,7 +65,7 @@ LIMIT 1
 # ----- mzml_scaninfo tests (unfiltered) -----
 
 statement ok
-CREATE TABLE all_peaks AS SELECT * FROM mzml_peaks('data/mzml/basic_3spectra.mzML');
+CREATE TABLE all_peaks AS SELECT * FROM mzml_peaks(spectra);
 
 # Row count: 3 scans
 query I
@@ -92,7 +96,7 @@ WHERE spectrum_index = 1
 # Filter mz > 150 on spectrum 0: 2 peaks remain (mz=200, mz=300)
 query I
 SELECT COUNT(*)
-FROM mzml_peaks('data/mzml/basic_3spectra.mzML')
+FROM mzml_peaks(spectra)
 WHERE spectrum_index = 0 AND mz > 150
 ----
 2
@@ -100,7 +104,7 @@ WHERE spectrum_index = 0 AND mz > 150
 # scaninfo after mz filter: total_ion_current = 7000.0, base_peak = 5000.0
 statement ok
 CREATE VIEW filtered_peaks AS
-SELECT * FROM mzml_peaks('data/mzml/basic_3spectra.mzML')
+SELECT * FROM mzml_peaks(spectra)
 WHERE spectrum_index = 0 AND mz > 150;
 
 query IRR
@@ -112,7 +116,7 @@ FROM mzml_scaninfo(filtered_peaks)
 # Filter ms_level = 2: only MS2 scans in result
 statement ok
 CREATE VIEW ms2_peaks AS
-SELECT * FROM mzml_peaks('data/mzml/basic_3spectra.mzML')
+SELECT * FROM mzml_peaks(spectra)
 WHERE ms_level = 2;
 
 query I
@@ -121,19 +125,48 @@ FROM mzml_scaninfo(ms2_peaks)
 ----
 2
 
+# ----- mzml_peak_pair tests -----
+
+# No iron pattern in basic_3spectra MS2 data (peaks at round numbers)
+query I
+SELECT COUNT(*) FROM mzml_peak_pair(spectra, 'Fe')
+----
+0
+
+# Positive test: construct data with a known iron pair (X=200, partner=2*200-55.935=344.065)
+statement ok
+CREATE TABLE iron_test AS
+SELECT 0 AS spectrum_index, 2 AS ms_level, 1.0 AS retention_time,
+       'centroid' AS spectrum_type, 'positive' AS polarity,
+       1000.0 AS base_peak_intensity, 2000.0 AS total_ion_current,
+       200.0 AS precursor_mz, 2 AS precursor_charge, 1000.0 AS precursor_intensity,
+       NULL::INTEGER AS ms1_scan_index, 'scan=1' AS spectrum_id,
+       [200.0, 344.0650625] AS mz_array, [1000.0, 500.0] AS intensity_array;
+
+query I
+SELECT COUNT(*) FROM mzml_peak_pair(iron_test, 'Fe')
+----
+2
+
 # ----- Edge cases -----
 
 # missing_optional.mzML: i_norm is NULL when base_peak_intensity is NULL
+statement ok
+CREATE TABLE missing_opt AS SELECT * FROM read_mzml('data/mzml/missing_optional.mzML');
+
 query I
 SELECT i_norm IS NULL
-FROM mzml_peaks('data/mzml/missing_optional.mzML')
+FROM mzml_peaks(missing_opt)
 ----
 1
 
 # zero_intensity.mzML: i_norm = 0/0 = nan
+statement ok
+CREATE TABLE zero_int AS SELECT * FROM read_mzml('data/mzml/zero_intensity.mzML');
+
 query R
 SELECT i_norm
-FROM mzml_peaks('data/mzml/zero_intensity.mzML')
+FROM mzml_peaks(zero_int)
 LIMIT 1
 ----
 nan
