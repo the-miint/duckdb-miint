@@ -1,0 +1,36 @@
+# name: test/sql/massql_isotope_pattern_integration.test
+# description: integration test for isotope pattern matching with GNPS data
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+require-env MASSQL_GNPS_DATA
+
+# Load GNPS data
+statement ok
+CREATE TABLE g AS SELECT * FROM read_mzml('data/cache/GNPS00002_A3_p.mzML');
+
+# Sanity check: total MS1 scans
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_peaks(g) WHERE ms_level = 1
+----
+30
+
+# Ground truth: 2-offset pattern [1.0, 2.0], ratios [0.5, 0.1], 30% tolerance
+# 29 out of 30 MS1 scans match (one scan lacks a +2 satellite within ratio)
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_isotope_pattern(g, [1.0, 2.0], [0.5, 0.1], [30, 30], 0.1)
+----
+29
+
+# Composition with scaninfo
+statement ok
+CREATE VIEW pattern_gnps AS SELECT * FROM mzml_isotope_pattern(g, [1.0, 2.0], [0.5, 0.1], [30, 30], 0.1);
+
+query I
+SELECT COUNT(*) FROM mzml_scaninfo(pattern_gnps)
+----
+29

@@ -633,6 +633,127 @@ const std::string MZML_I_TIC_NORM = // NOLINT
     "  list_transform(intensity_array, x -> x / total_ion_current)"
     ");";
 
+// mzml_excluded_ms2prod(relation, target_mz, tolerance := 0.5)
+//
+// MassQL: MS2PROD=target_mz:EXCLUDED
+// Returns MS2 peaks from scans that do NOT contain a product ion near target_mz.
+const std::string MZML_EXCLUDED_MS2PROD = // NOLINT
+    "CREATE OR REPLACE MACRO mzml_excluded_ms2prod(relation, target_mz, tolerance := 0.5) AS TABLE "
+    "SELECT * FROM mzml_peaks(relation) WHERE ms_level = 2 "
+    "AND spectrum_index NOT IN ("
+    "  SELECT DISTINCT spectrum_index"
+    "  FROM mzml_peaks(relation)"
+    "  WHERE ms_level = 2"
+    "    AND mz_within(mz, target_mz, tolerance)"
+    "); ";
+
+// mzml_excluded_ms1mz(relation, target_mz, tolerance := 0.5)
+//
+// MassQL: MS1MZ=target_mz:EXCLUDED
+// Returns MS1 peaks from scans that do NOT contain a peak near target_mz.
+const std::string MZML_EXCLUDED_MS1MZ = // NOLINT
+    "CREATE OR REPLACE MACRO mzml_excluded_ms1mz(relation, target_mz, tolerance := 0.5) AS TABLE "
+    "SELECT * FROM mzml_peaks(relation) WHERE ms_level = 1 "
+    "AND spectrum_index NOT IN ("
+    "  SELECT DISTINCT spectrum_index"
+    "  FROM mzml_peaks(relation)"
+    "  WHERE ms_level = 1"
+    "    AND mz_within(mz, target_mz, tolerance)"
+    "); ";
+
+// mzml_excluded_ms2prec(relation, target_mz, tolerance := 0.5)
+//
+// MassQL: MS2PREC=target_mz:EXCLUDED
+// Returns MS2 peaks from scans whose precursor m/z is NOT near target_mz.
+// MS2 scans with NULL precursor_mz are retained (they cannot match the target).
+const std::string MZML_EXCLUDED_MS2PREC = // NOLINT
+    "CREATE OR REPLACE MACRO mzml_excluded_ms2prec(relation, target_mz, tolerance := 0.5) AS TABLE "
+    "SELECT * FROM mzml_peaks(relation) WHERE ms_level = 2 "
+    "AND spectrum_index NOT IN ("
+    "  SELECT DISTINCT spectrum_index"
+    "  FROM mzml_peaks(relation)"
+    "  WHERE ms_level = 2"
+    "    AND mz_within(precursor_mz, target_mz, tolerance)"
+    "); ";
+
+// mzml_isotope_pattern(relation, target_offsets, target_ratios, target_tol_pcts, mz_tolerance := 0.1)
+//
+// MassQL Y variable: isotope pattern matching.
+// Finds MS1 spectra where a reference peak (X) has satellite peaks at specified Da offsets
+// with intensity ratios (relative to X) within specified percentage tolerances.
+// Returns all MS1 peaks from matching spectra.
+//
+// Parameters:
+// target_offsets : LIST of DOUBLE, Da offsets from reference peak (e.g. [1.0, 2.0])
+// target_ratios  : LIST of DOUBLE, expected intensity ratios (e.g. [0.5, 0.1])
+// target_tol_pcts: LIST of DOUBLE, percentage tolerances (e.g. [30, 30] for ±30%)
+// mz_tolerance   : DOUBLE, m/z matching tolerance in Da (default 0.1)
+//
+// Intensity semantics: Y = SUM(intensity) for all peaks within mz_tolerance of reference
+// or satellite m/z, per MassQL convention. In centroid data this is typically one peak;
+// in profile data or with wide mz_tolerance, multiple peaks may be summed.
+//
+// Ratio window uses strict inequalities (consistent with mz_within).
+//
+// Performance note: the recursive CTE enumerates all distinct m/z values across all spectra
+// (deduplicated with 0.05 Da step). For large datasets, pre-filter to a retention time
+// window or m/z range before calling this macro.
+const std::string MZML_ISOTOPE_PATTERN = // NOLINT
+    "CREATE OR REPLACE MACRO mzml_isotope_pattern("
+    "  relation, target_offsets, target_ratios, target_tol_pcts, "
+    "  mz_tolerance := 0.1) AS TABLE "
+    "WITH RECURSIVE ms1 AS ( "
+    "    SELECT * FROM mzml_peaks(relation) WHERE ms_level = 1 AND intensity > 0 "
+    "), "
+    "x_candidates(x_val, next_min) AS ( "
+    "    (SELECT mz, mz + 0.05 FROM ms1 ORDER BY mz LIMIT 1) "
+    "    UNION ALL "
+    "    (SELECT s.mz, s.mz + 0.05 "
+    "     FROM x_candidates g "
+    "     JOIN (SELECT DISTINCT mz FROM ms1) s ON s.mz >= g.next_min "
+    "     ORDER BY s.mz "
+    "     LIMIT 1) "
+    "), "
+    "targets AS ( "
+    "    SELECT UNNEST(target_offsets) AS offset_val, "
+    "           UNNEST(target_ratios) AS ratio, "
+    "           UNNEST(target_tol_pcts) AS tol_pct "
+    "), "
+    "target_count AS (SELECT COUNT(*) AS n FROM targets), "
+    "ref_intensity AS ( "
+    "    SELECT xc.x_val, ms1.spectrum_index, SUM(ms1.intensity) AS y_ref "
+    "    FROM x_candidates xc "
+    "    JOIN ms1 ON ms1.mz > xc.x_val - mz_tolerance "
+    "            AND ms1.mz < xc.x_val + mz_tolerance "
+    "    GROUP BY xc.x_val, ms1.spectrum_index "
+    "), "
+    "target_intensity AS ( "
+    "    SELECT ri.x_val, ri.spectrum_index, ri.y_ref, "
+    "           t.offset_val, t.ratio, t.tol_pct, "
+    "           SUM(ms1.intensity) AS t_int "
+    "    FROM ref_intensity ri "
+    "    CROSS JOIN targets t "
+    "    JOIN ms1 ON ms1.spectrum_index = ri.spectrum_index "
+    "            AND ms1.mz > ri.x_val + t.offset_val - mz_tolerance "
+    "            AND ms1.mz < ri.x_val + t.offset_val + mz_tolerance "
+    "    GROUP BY ri.x_val, ri.spectrum_index, ri.y_ref, "
+    "             t.offset_val, t.ratio, t.tol_pct "
+    "), "
+    "matched_targets AS ( "
+    "    SELECT x_val, spectrum_index, offset_val "
+    "    FROM target_intensity "
+    "    WHERE t_int > y_ref * ratio * (1.0 - tol_pct / 100.0) "
+    "      AND t_int < y_ref * ratio * (1.0 + tol_pct / 100.0) "
+    "), "
+    "qualifying AS ( "
+    "    SELECT spectrum_index "
+    "    FROM matched_targets, target_count "
+    "    GROUP BY spectrum_index, x_val, target_count.n "
+    "    HAVING COUNT(DISTINCT offset_val) = target_count.n "
+    ") "
+    "SELECT * FROM ms1 "
+    "WHERE spectrum_index IN (SELECT spectrum_index FROM qualifying); ";
+
 // genome_coverage(alignments, subject_total_length, subject_genome_id)
 //
 // Compute genome coverage from alignment data by:
@@ -731,6 +852,10 @@ public:
 		register_macro(MZML_PEAK_PAIR, "mzml_peak_pair");
 		register_macro(MZML_I_NORM, "mzml_i_norm");
 		register_macro(MZML_I_TIC_NORM, "mzml_i_tic_norm");
+		register_macro(MZML_EXCLUDED_MS2PROD, "mzml_excluded_ms2prod");
+		register_macro(MZML_EXCLUDED_MS1MZ, "mzml_excluded_ms1mz");
+		register_macro(MZML_EXCLUDED_MS2PREC, "mzml_excluded_ms2prec");
+		register_macro(MZML_ISOTOPE_PATTERN, "mzml_isotope_pattern");
 	}
 };
 
