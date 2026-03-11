@@ -1,0 +1,16 @@
+# name: test/sql/massql_x_prec_massdefect_integration.test
+# description: Integration test for mzml_x_prec_massdefect on GNPS data
+# group: [sql]
+
+require miint
+
+require-env MASSQL_GNPS_DATA
+
+statement ok
+CREATE TABLE g AS SELECT * FROM read_mzml('data/cache/GNPS00002_A3_p.mzML');
+
+# Ground truth from MassQL Python test_defect(): 21 scans
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_prec_massdefect(g, 0.1, 0.2)
+----
+21

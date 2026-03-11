@@ -996,6 +996,250 @@ def generate_isotope_pattern():
         f.write(content)
 
 
+def generate_prec_prod_link():
+    """MS2 spectra for testing mzml_x_prec_prod (X from precursor, match product).
+
+    | Idx | Level | precursor_mz | Peaks (mz: intensity)      | Match delta=358.2871? |
+    |-----|-------|-------------|---------------------------|----------------------|
+    | 0   | MS1   | -           | 100:1000, 200:5000, 500:3000 | N/A                |
+    | 1   | MS2   | 500.0       | 150:3000, 250:1500          | No (500-358.29=141.71, no peak) |
+    | 2   | MS2   | 500.0       | 141.71:2500, 250:1500       | Yes (peak at 141.71) |
+    | 3   | MS2   | 400.0       | 180:1000, 200:2000          | No (400-358.29=41.71, no peak) |
+    | 4   | MS2   | 600.0       | 241.71:100, 300:5000        | Yes but low intensity (2%) |
+
+    Spectrum 4: product intensity = 100/5000 = 2% of base peak.
+    min_intensity_pct=3 excludes it, min_intensity_pct=1 includes it.
+    """
+    spectra = []
+
+    # Spectrum 0: MS1
+    spectra.append(
+        make_spectrum(
+            index=0,
+            spectrum_id="scan=1",
+            ms_level=1,
+            rt_value=1.0,
+            rt_unit="minute",
+            spectrum_type="centroid",
+            polarity="positive",
+            base_peak_mz=200.0,
+            base_peak_intensity=5000.0,
+            tic=9000.0,
+            mz_values=[100.0, 200.0, 500.0],
+            intensity_values=[1000.0, 5000.0, 3000.0],
+        )
+    )
+
+    # Spectrum 1: MS2, prec=500, no match for delta=358.2871
+    spectra.append(
+        make_spectrum(
+            index=1,
+            spectrum_id="scan=2",
+            ms_level=2,
+            rt_value=1.1,
+            rt_unit="minute",
+            spectrum_type="centroid",
+            polarity="positive",
+            base_peak_mz=150.0,
+            base_peak_intensity=3000.0,
+            tic=4500.0,
+            mz_values=[150.0, 250.0],
+            intensity_values=[3000.0, 1500.0],
+            precursor_mz=500.0,
+            precursor_charge=2,
+            activation_method="CID",
+            collision_energy=35.0,
+        )
+    )
+
+    # Spectrum 2: MS2, prec=500, match for delta=358.2871 (500-358.2871=141.7129)
+    spectra.append(
+        make_spectrum(
+            index=2,
+            spectrum_id="scan=3",
+            ms_level=2,
+            rt_value=1.2,
+            rt_unit="minute",
+            spectrum_type="centroid",
+            polarity="positive",
+            base_peak_mz=141.71,
+            base_peak_intensity=2500.0,
+            tic=4000.0,
+            mz_values=[141.71, 250.0],
+            intensity_values=[2500.0, 1500.0],
+            precursor_mz=500.0,
+            precursor_charge=2,
+            activation_method="CID",
+            collision_energy=35.0,
+        )
+    )
+
+    # Spectrum 3: MS2, prec=400, no match for delta=358.2871
+    spectra.append(
+        make_spectrum(
+            index=3,
+            spectrum_id="scan=4",
+            ms_level=2,
+            rt_value=1.3,
+            rt_unit="minute",
+            spectrum_type="centroid",
+            polarity="positive",
+            base_peak_mz=200.0,
+            base_peak_intensity=2000.0,
+            tic=3000.0,
+            mz_values=[180.0, 200.0],
+            intensity_values=[1000.0, 2000.0],
+            precursor_mz=400.0,
+            precursor_charge=2,
+            activation_method="CID",
+            collision_energy=35.0,
+        )
+    )
+
+    # Spectrum 4: MS2, prec=600, match but low intensity product
+    # 600-358.2871=241.7129, peak at 241.71 with intensity 100
+    # base_peak = 5000, so i_norm = 100/5000 = 0.02 (2%)
+    spectra.append(
+        make_spectrum(
+            index=4,
+            spectrum_id="scan=5",
+            ms_level=2,
+            rt_value=1.4,
+            rt_unit="minute",
+            spectrum_type="centroid",
+            polarity="positive",
+            base_peak_mz=300.0,
+            base_peak_intensity=5000.0,
+            tic=5100.0,
+            mz_values=[241.71, 300.0],
+            intensity_values=[100.0, 5000.0],
+            precursor_mz=600.0,
+            precursor_charge=2,
+            activation_method="CID",
+            collision_energy=35.0,
+        )
+    )
+
+    content = INDEXED_MZML_HEADER
+    content += RUN_OPEN + "\n"
+    content += '  <spectrumList count="5" defaultDataProcessingRef="dp">\n'
+    content += "\n".join(spectra) + "\n"
+    content += "  </spectrumList>\n"
+    content += RUN_CLOSE + "\n"
+    content += INDEXED_MZML_FOOTER
+
+    with open(os.path.join(OUTPUT_DIR, "prec_prod_link.mzML"), "w") as f:
+        f.write(content)
+
+
+def generate_massdefect_prec():
+    """MS2 spectra with known precursor mass defects for mzml_x_prec_massdefect.
+
+    | Idx | Level | precursor_mz | Mass defect | Peaks              |
+    |-----|-------|-------------|-------------|--------------------|
+    | 0   | MS1   | -           | -           | 100:1000, 200:5000 |
+    | 1   | MS2   | 200.15      | 0.15        | 150:3000, 250:1500 |
+    | 2   | MS2   | 300.92      | 0.92        | 120:500, 220:2500  |
+    | 3   | MS2   | 400.50      | 0.50        | 160:1000, 260:2000 |
+    """
+    spectra = []
+
+    # Spectrum 0: MS1
+    spectra.append(
+        make_spectrum(
+            index=0,
+            spectrum_id="scan=1",
+            ms_level=1,
+            rt_value=1.0,
+            rt_unit="minute",
+            spectrum_type="centroid",
+            polarity="positive",
+            base_peak_mz=200.0,
+            base_peak_intensity=5000.0,
+            tic=6000.0,
+            mz_values=[100.0, 200.0],
+            intensity_values=[1000.0, 5000.0],
+        )
+    )
+
+    # Spectrum 1: MS2, prec=200.15 (defect=0.15)
+    spectra.append(
+        make_spectrum(
+            index=1,
+            spectrum_id="scan=2",
+            ms_level=2,
+            rt_value=1.1,
+            rt_unit="minute",
+            spectrum_type="centroid",
+            polarity="positive",
+            base_peak_mz=150.0,
+            base_peak_intensity=3000.0,
+            tic=4500.0,
+            mz_values=[150.0, 250.0],
+            intensity_values=[3000.0, 1500.0],
+            precursor_mz=200.15,
+            precursor_charge=2,
+            activation_method="CID",
+            collision_energy=35.0,
+        )
+    )
+
+    # Spectrum 2: MS2, prec=300.92 (defect=0.92)
+    spectra.append(
+        make_spectrum(
+            index=2,
+            spectrum_id="scan=3",
+            ms_level=2,
+            rt_value=1.2,
+            rt_unit="minute",
+            spectrum_type="centroid",
+            polarity="positive",
+            base_peak_mz=220.0,
+            base_peak_intensity=2500.0,
+            tic=3000.0,
+            mz_values=[120.0, 220.0],
+            intensity_values=[500.0, 2500.0],
+            precursor_mz=300.92,
+            precursor_charge=2,
+            activation_method="HCD",
+            collision_energy=30.0,
+        )
+    )
+
+    # Spectrum 3: MS2, prec=400.50 (defect=0.50)
+    spectra.append(
+        make_spectrum(
+            index=3,
+            spectrum_id="scan=4",
+            ms_level=2,
+            rt_value=1.3,
+            rt_unit="minute",
+            spectrum_type="centroid",
+            polarity="positive",
+            base_peak_mz=260.0,
+            base_peak_intensity=2000.0,
+            tic=3000.0,
+            mz_values=[160.0, 260.0],
+            intensity_values=[1000.0, 2000.0],
+            precursor_mz=400.50,
+            precursor_charge=2,
+            activation_method="CID",
+            collision_energy=35.0,
+        )
+    )
+
+    content = INDEXED_MZML_HEADER
+    content += RUN_OPEN + "\n"
+    content += '  <spectrumList count="4" defaultDataProcessingRef="dp">\n'
+    content += "\n".join(spectra) + "\n"
+    content += "  </spectrumList>\n"
+    content += RUN_CLOSE + "\n"
+    content += INDEXED_MZML_FOOTER
+
+    with open(os.path.join(OUTPUT_DIR, "massdefect_prec.mzML"), "w") as f:
+        f.write(content)
+
+
 if __name__ == "__main__":
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     generate_basic_3spectra()
@@ -1011,4 +1255,6 @@ if __name__ == "__main__":
     generate_large_spectrum()
     generate_zero_intensity()
     generate_isotope_pattern()
+    generate_prec_prod_link()
+    generate_massdefect_prec()
     print(f"Generated test data in {OUTPUT_DIR}")

@@ -434,39 +434,32 @@ const std::string MZ_MASSDEFECT_WITHIN = // NOLINT
 //
 // MassQL: MS2PROD=X AND MS2PROD=X+delta
 // Find MS2 spectra where two peaks differ by delta Da.
-// X candidates are deduplicated with greedy 0.05 Da step (same as mzml_peak_pair).
+// Delegates to mzml_x_offset_ntuple([0, delta]).
 // Default tolerance: 0.5 Da.
 const std::string MZML_X_OFFSET_PAIR = // NOLINT
     "CREATE OR REPLACE MACRO mzml_x_offset_pair(relation, delta, tolerance := 0.5) AS TABLE "
-    "WITH RECURSIVE ms2 AS ( "
-    "    SELECT * FROM mzml_peaks(relation) WHERE ms_level = 2 AND intensity > 0 "
-    "), "
-    "x_candidates(x_val, next_min) AS ( "
-    "    (SELECT mz, mz + 0.05 FROM ms2 ORDER BY mz LIMIT 1) "
-    "    UNION ALL "
-    "    (SELECT s.mz, s.mz + 0.05 "
-    "     FROM x_candidates g "
-    "     JOIN (SELECT DISTINCT mz FROM ms2) s ON s.mz >= g.next_min "
-    "     ORDER BY s.mz "
-    "     LIMIT 1) "
-    ") "
-    "SELECT * FROM ms2 "
-    "WHERE spectrum_index IN ( "
-    "    SELECT DISTINCT p1.spectrum_index "
-    "    FROM x_candidates xc "
-    "    JOIN ms2 p1 ON p1.mz > xc.x_val - tolerance AND p1.mz < xc.x_val + tolerance "
-    "    JOIN ms2 p2 ON p2.spectrum_index = p1.spectrum_index "
-    "        AND p2.mz > xc.x_val + delta - tolerance "
-    "        AND p2.mz < xc.x_val + delta + tolerance "
-    "); ";
+    "SELECT * FROM mzml_x_offset_ntuple(relation, [0, delta], tolerance); ";
 
 // mzml_x_offset_triplet(relation, delta2, delta3 [, tolerance])
 //
 // MassQL: MS2PROD=X AND MS2PROD=X+delta2 AND MS2PROD=X+delta3
 // Find MS2 spectra where three peaks match X, X+delta2, X+delta3.
+// Delegates to mzml_x_offset_ntuple([0, delta2, delta3]).
 // Default tolerance: 0.5 Da.
 const std::string MZML_X_OFFSET_TRIPLET = // NOLINT
     "CREATE OR REPLACE MACRO mzml_x_offset_triplet(relation, delta2, delta3, tolerance := 0.5) AS TABLE "
+    "SELECT * FROM mzml_x_offset_ntuple(relation, [0, delta2, delta3], tolerance); ";
+
+// mzml_x_offset_ntuple(relation, offsets [, tolerance])
+//
+// Generalized N-tuple offset matching: find MS2 spectra where peaks exist at
+// X+offset[0], X+offset[1], ..., X+offset[N-1] simultaneously (ALL must match).
+// X candidates are drawn from all MS2 peaks across all scans (cross-scan matching)
+// and deduplicated with greedy 0.05 Da step.
+// offsets must contain distinct values; duplicate offsets will produce no matches.
+// Default tolerance: 0.5 Da.
+const std::string MZML_X_OFFSET_NTUPLE = // NOLINT
+    "CREATE OR REPLACE MACRO mzml_x_offset_ntuple(relation, offsets, tolerance := 0.5) AS TABLE "
     "WITH RECURSIVE ms2 AS ( "
     "    SELECT * FROM mzml_peaks(relation) WHERE ms_level = 2 AND intensity > 0 "
     "), "
@@ -478,19 +471,64 @@ const std::string MZML_X_OFFSET_TRIPLET = // NOLINT
     "     JOIN (SELECT DISTINCT mz FROM ms2) s ON s.mz >= g.next_min "
     "     ORDER BY s.mz "
     "     LIMIT 1) "
+    "), "
+    "offset_targets AS ( "
+    "    SELECT UNNEST(offsets) AS offset_val "
+    "), "
+    "offset_count AS (SELECT COUNT(*) AS n FROM offset_targets), "
+    "matched AS ( "
+    "    SELECT xc.x_val, p.spectrum_index, ot.offset_val "
+    "    FROM x_candidates xc "
+    "    CROSS JOIN offset_targets ot "
+    "    JOIN ms2 p ON p.mz > xc.x_val + ot.offset_val - tolerance "
+    "              AND p.mz < xc.x_val + ot.offset_val + tolerance "
+    "), "
+    "qualifying AS ( "
+    "    SELECT spectrum_index "
+    "    FROM matched, offset_count "
+    "    GROUP BY spectrum_index, x_val, offset_count.n "
+    "    HAVING COUNT(DISTINCT offset_val) = offset_count.n "
     ") "
     "SELECT * FROM ms2 "
-    "WHERE spectrum_index IN ( "
-    "    SELECT DISTINCT p1.spectrum_index "
-    "    FROM x_candidates xc "
-    "    JOIN ms2 p1 ON p1.mz > xc.x_val - tolerance AND p1.mz < xc.x_val + tolerance "
-    "    JOIN ms2 p2 ON p2.spectrum_index = p1.spectrum_index "
-    "        AND p2.mz > xc.x_val + delta2 - tolerance "
-    "        AND p2.mz < xc.x_val + delta2 + tolerance "
-    "    JOIN ms2 p3 ON p3.spectrum_index = p1.spectrum_index "
-    "        AND p3.mz > xc.x_val + delta3 - tolerance "
-    "        AND p3.mz < xc.x_val + delta3 + tolerance "
+    "WHERE spectrum_index IN (SELECT spectrum_index FROM qualifying); ";
+
+// mzml_x_prec_prod(relation, delta [, tolerance, min_intensity_pct])
+//
+// MassQL: MS2PREC=X AND MS2PROD=X-delta[:INTENSITYPERCENT=N]
+// Per-spectrum: X is the spectrum's own precursor_mz. Find MS2 spectra that
+// contain a product ion at precursor_mz - delta within tolerance.
+// min_intensity_pct: product ion intensity as % of base peak (0 = no filter).
+// Default tolerance: 0.5 Da.
+const std::string MZML_X_PREC_PROD = // NOLINT
+    "CREATE OR REPLACE MACRO mzml_x_prec_prod("
+    "  relation, delta, tolerance := 0.5, min_intensity_pct := 0) AS TABLE "
+    "WITH ms2 AS ( "
+    "    SELECT * FROM mzml_peaks(relation) WHERE ms_level = 2 AND intensity > 0 "
+    ") "
+    "SELECT * FROM ms2 "
+    "WHERE precursor_mz IS NOT NULL "
+    "AND spectrum_index IN ( "
+    "    SELECT DISTINCT p.spectrum_index "
+    "    FROM ms2 p "
+    "    WHERE p.precursor_mz IS NOT NULL "
+    "      AND p.mz > p.precursor_mz - delta - tolerance "
+    "      AND p.mz < p.precursor_mz - delta + tolerance "
+    "      AND (min_intensity_pct = 0 OR p.i_norm >= min_intensity_pct / 100.0) "
     "); ";
+
+// mzml_x_prec_massdefect(relation, min_defect, max_defect)
+//
+// MassQL: MS2PREC=X AND X=massdefect(min=min_defect, max=max_defect)
+// X is the precursor_mz. Returns MS2 peaks from scans whose precursor_mz
+// has mass defect in [min_defect, max_defect].
+// Convenience wrapper for MassQL parity.
+const std::string MZML_X_PREC_MASSDEFECT = // NOLINT
+    "CREATE OR REPLACE MACRO mzml_x_prec_massdefect("
+    "  relation, min_defect, max_defect) AS TABLE "
+    "SELECT * FROM mzml_peaks(relation) "
+    "WHERE ms_level = 2 "
+    "  AND precursor_mz IS NOT NULL "
+    "  AND mz_massdefect_within(precursor_mz, min_defect, max_defect); ";
 
 // mzml_x_ms1_ms2_prec(relation [, tolerance])
 //
@@ -844,8 +882,12 @@ public:
 		register_macro(MZML_FILTER_NL, "mzml_filter_nl");
 		register_macro(MASSDEFECT, "massdefect");
 		register_macro(MZ_MASSDEFECT_WITHIN, "mz_massdefect_within");
+		// ntuple must be registered before pair and triplet (they delegate to it)
+		register_macro(MZML_X_OFFSET_NTUPLE, "mzml_x_offset_ntuple");
 		register_macro(MZML_X_OFFSET_PAIR, "mzml_x_offset_pair");
 		register_macro(MZML_X_OFFSET_TRIPLET, "mzml_x_offset_triplet");
+		register_macro(MZML_X_PREC_PROD, "mzml_x_prec_prod");
+		register_macro(MZML_X_PREC_MASSDEFECT, "mzml_x_prec_massdefect");
 		register_macro(MZML_X_MS1_MS2_PREC, "mzml_x_ms1_ms2_prec");
 		register_macro(MZML_X_OFFSET_PAIR_RANGE, "mzml_x_offset_pair_range");
 		register_macro(MZML_OR_CARDINALITY, "mzml_or_cardinality");

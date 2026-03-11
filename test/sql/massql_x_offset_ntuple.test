@@ -1,0 +1,91 @@
+# name: test/sql/massql_x_offset_ntuple.test
+# description: Test mzml_x_offset_ntuple macro
+# group: [sql]
+
+require miint
+
+statement ok
+CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML');
+
+# 2-tuple [0,100]: both MS2 spectra have peaks 100 Da apart
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_ntuple(spectra, [0, 100])
+----
+2
+
+# 3-tuple [0,100,200]: only spectrum_index=2 (120->220->320)
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_ntuple(spectra, [0, 100, 200])
+----
+1
+
+# 4-tuple [0,100,200,300]: only spectrum_index=2 (120->220->320->420)
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_ntuple(spectra, [0, 100, 200, 300])
+----
+1
+
+# No match: [0,500]
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_ntuple(spectra, [0, 500])
+----
+0
+
+# N=1 edge case: [0] matches any MS2 spectrum with a peak (degenerates to all MS2)
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_ntuple(spectra, [0])
+----
+2
+
+# Duplicate offsets: COUNT(DISTINCT) < list length, so no matches (documented behavior)
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_ntuple(spectra, [0, 0, 100])
+----
+0
+
+# Empty table: no matches
+statement ok
+CREATE TABLE empty_spectra AS SELECT * FROM read_mzml('data/mzml/empty_spectra.mzML');
+
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_ntuple(empty_spectra, [0, 100])
+----
+0
+
+# Backward compatible: ntuple [0,d] produces same spectrum set as pair(d)
+query I
+SELECT COUNT(*) FROM (
+  SELECT DISTINCT spectrum_index FROM mzml_x_offset_pair(spectra, 100)
+  EXCEPT
+  SELECT DISTINCT spectrum_index FROM mzml_x_offset_ntuple(spectra, [0, 100])
+)
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT DISTINCT spectrum_index FROM mzml_x_offset_ntuple(spectra, [0, 100])
+  EXCEPT
+  SELECT DISTINCT spectrum_index FROM mzml_x_offset_pair(spectra, 100)
+)
+----
+0
+
+# Backward compatible: ntuple [0,d2,d3] produces same spectrum set as triplet(d2,d3)
+query I
+SELECT COUNT(*) FROM (
+  SELECT DISTINCT spectrum_index FROM mzml_x_offset_triplet(spectra, 100, 200)
+  EXCEPT
+  SELECT DISTINCT spectrum_index FROM mzml_x_offset_ntuple(spectra, [0, 100, 200])
+)
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT DISTINCT spectrum_index FROM mzml_x_offset_ntuple(spectra, [0, 100, 200])
+  EXCEPT
+  SELECT DISTINCT spectrum_index FROM mzml_x_offset_triplet(spectra, 100, 200)
+)
+----
+0
