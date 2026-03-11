@@ -19,17 +19,17 @@ SELECT COUNT(*) FROM mzml_peaks(spectra)
 ----
 9
 
-# Schema type verification for all 16 columns
-query TTTTTTTTTTTTTTTT
+# Schema type verification for all 17 columns
+query TTTTTTTTTTTTTTTTT
 SELECT typeof(spectrum_index), typeof(spectrum_id), typeof(ms_level), typeof(retention_time),
        typeof(spectrum_type), typeof(polarity),
        typeof(base_peak_intensity), typeof(total_ion_current),
        typeof(precursor_mz), typeof(precursor_charge), typeof(precursor_intensity),
        typeof(ms1_scan_index),
-       typeof(mz), typeof(intensity), typeof(i_norm), typeof(neutral_loss)
+       typeof(mz), typeof(intensity), typeof(i_norm), typeof(i_tic), typeof(neutral_loss)
 FROM mzml_peaks(spectra) LIMIT 1
 ----
-INTEGER	VARCHAR	INTEGER	DOUBLE	VARCHAR	VARCHAR	DOUBLE	DOUBLE	DOUBLE	INTEGER	DOUBLE	INTEGER	DOUBLE	DOUBLE	DOUBLE	DOUBLE
+INTEGER	VARCHAR	INTEGER	DOUBLE	VARCHAR	VARCHAR	DOUBLE	DOUBLE	DOUBLE	INTEGER	DOUBLE	INTEGER	DOUBLE	DOUBLE	DOUBLE	DOUBLE	DOUBLE
 
 # Correct mz/intensity/i_norm values for spectrum 0
 query IRRR

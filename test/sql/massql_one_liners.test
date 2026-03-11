@@ -1,0 +1,122 @@
+# name: test/sql/massql_one_liners.test
+# description: test one-liner compound macros for common MassQL patterns
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+# Load test data
+# basic_3spectra.mzML:
+#   Spectrum 0 (MS1): peaks at 100/200/300, intensities 1000/5000/2000, TIC=8000
+#   Spectrum 1 (MS2): peaks at 150/250, precursor_mz=200, charge=2, ms1_scan_index=0
+#   Spectrum 2 (MS2): peaks at 120/220/320/420, precursor_mz=300, charge=3, ms1_scan_index=0
+statement ok
+CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML');
+
+statement ok
+CREATE TABLE orphan AS SELECT * FROM read_mzml('data/mzml/orphan_ms2.mzML');
+
+# ----- Phase 2A: mzml_ms1_where_ms2prod -----
+
+# Spectrum 2 has peak at 220. Parent is spectrum 0 (MS1) with 3 peaks.
+query I
+SELECT COUNT(*) FROM mzml_ms1_where_ms2prod(spectra, 220.0)
+----
+3
+
+# scansum of parent MS1
+statement ok
+CREATE VIEW ms1_from_ms2prod_220 AS SELECT * FROM mzml_ms1_where_ms2prod(spectra, 220.0);
+
+query R
+SELECT total_intensity FROM mzml_scansum(ms1_from_ms2prod_220)
+----
+8000.0
+
+# With explicit tolerance override
+query I
+SELECT COUNT(*) FROM mzml_ms1_where_ms2prod(spectra, 220.0, tolerance := 0.01)
+----
+3
+
+# No match
+query I
+SELECT COUNT(*) FROM mzml_ms1_where_ms2prod(spectra, 999.0)
+----
+0
+
+# Orphan MS2 (NULL ms1_scan_index) -> 0 rows
+query I
+SELECT COUNT(*) FROM mzml_ms1_where_ms2prod(orphan, 220.0)
+----
+0
+
+# ----- Phase 2B: mzml_ms2_where_ms1mz -----
+
+# MS1 spectrum 0 has peak at 200.0 -> return all MS2 children (spectra 1, 2)
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_ms2_where_ms1mz(spectra, 200.0)
+----
+2
+
+# Total MS2 peaks: 2 + 4 = 6
+query I
+SELECT COUNT(*) FROM mzml_ms2_where_ms1mz(spectra, 200.0)
+----
+6
+
+# No MS1 peak at 999
+query I
+SELECT COUNT(*) FROM mzml_ms2_where_ms1mz(spectra, 999.0)
+----
+0
+
+# ----- Phase 2C: mzml_ms1_where_ms2prec -----
+
+# MS2 spectrum 1 has precursor_mz=200 -> parent is spectrum 0 (3 MS1 peaks)
+query I
+SELECT COUNT(*) FROM mzml_ms1_where_ms2prec(spectra, 200.0)
+----
+3
+
+# Both MS2 have precursors (200, 300). With tolerance=100, 250+/-100 covers both.
+# Both map to same parent spectrum 0, so only 1 distinct spectrum.
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_ms1_where_ms2prec(spectra, 250.0, tolerance := 100.0)
+----
+1
+
+# No precursor near 999
+query I
+SELECT COUNT(*) FROM mzml_ms1_where_ms2prec(spectra, 999.0)
+----
+0
+
+# ----- Phase 2D: mzml_ms2_where_ms2prod_and_ms1mz -----
+
+# Spectrum 1: has peak at 250, parent MS1 has peak at 200 -> match
+# Spectrum 2: has no peak near 250 -> no match
+query I
+SELECT DISTINCT spectrum_index FROM mzml_ms2_where_ms2prod_and_ms1mz(spectra, 250.0, 200.0)
+----
+1
+
+# Total peaks from matching spectrum 1: 2
+query I
+SELECT COUNT(*) FROM mzml_ms2_where_ms2prod_and_ms1mz(spectra, 250.0, 200.0)
+----
+2
+
+# Neither condition met
+query I
+SELECT COUNT(*) FROM mzml_ms2_where_ms2prod_and_ms1mz(spectra, 999.0, 200.0)
+----
+0
+
+# Both conditions but no intersection
+query I
+SELECT COUNT(*) FROM mzml_ms2_where_ms2prod_and_ms1mz(spectra, 250.0, 999.0)
+----
+0

@@ -1,0 +1,85 @@
+# name: test/sql/massql_massdefect.test
+# description: test massdefect scalar and mz_massdefect_within predicate
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+# ----- Phase 7: massdefect -----
+
+query R
+SELECT round(massdefect(100.15), 4)
+----
+0.15
+
+query R
+SELECT round(massdefect(0.0), 4)
+----
+0.0
+
+query R
+SELECT round(massdefect(99.999), 4)
+----
+0.999
+
+query R
+SELECT round(massdefect(1.0), 4)
+----
+0.0
+
+query R
+SELECT round(massdefect(500.5), 4)
+----
+0.5
+
+# ----- mz_massdefect_within -----
+
+query I
+SELECT mz_massdefect_within(100.15, 0.1, 0.2)::INTEGER
+----
+1
+
+query I
+SELECT mz_massdefect_within(100.05, 0.1, 0.2)::INTEGER
+----
+0
+
+# Boundary: exactly at min -> true (inclusive)
+query I
+SELECT mz_massdefect_within(100.1, 0.1, 0.2)::INTEGER
+----
+1
+
+# Boundary: exactly at max -> true (inclusive)
+query I
+SELECT mz_massdefect_within(100.2, 0.1, 0.2)::INTEGER
+----
+1
+
+# Just outside
+query I
+SELECT mz_massdefect_within(100.09, 0.1, 0.2)::INTEGER
+----
+0
+
+# ----- Integration with mzml data -----
+
+statement ok
+CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML');
+
+# MS2 precursors: 200.0 (defect=0.0) and 300.0 (defect=0.0)
+# Filter for defect in [0.0, 0.0] -> both match
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_ms2_peaks(spectra)
+WHERE mz_massdefect_within(precursor_mz, 0.0, 0.0)
+----
+2
+
+# Filter for defect in [0.1, 0.9] -> neither match (defect=0.0)
+query I
+SELECT COUNT(*) FROM mzml_ms2_peaks(spectra)
+WHERE mz_massdefect_within(precursor_mz, 0.1, 0.9)
+----
+0

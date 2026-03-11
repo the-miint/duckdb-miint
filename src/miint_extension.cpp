@@ -26,6 +26,8 @@
 #include <read_ncbi.hpp>
 #include <read_ncbi_annotation.hpp>
 #include <miint_macros.hpp>
+#include "duckdb/main/extension_helper.hpp"
+#include "duckdb/main/database.hpp"
 #include <sequence_functions.hpp>
 #include <formula_function.hpp>
 #include <align_pairwise_functions.hpp>
@@ -165,6 +167,22 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	ReadMzMLTableFunction::Register(loader);
 	ReadMzMLChromatogramsTableFunction::Register(loader);
+
+	// Ensure dependency extensions are loaded before registering macros that
+	// reference their functions (e.g., read_jplace needs json's read_json,
+	// parse_gff_attributes needs core_functions' map_from_entries).
+	// TryAutoLoadExtension handles disk-based loading in production.
+	// LoadExtension handles statically-linked extensions in test/CLI binaries.
+	auto &instance = loader.GetDatabaseInstance();
+	for (const auto *dep : {"json", "core_functions"}) {
+		if (!instance.ExtensionIsLoaded(dep)) {
+			ExtensionHelper::TryAutoLoadExtension(instance, dep);
+		}
+		if (!instance.ExtensionIsLoaded(dep)) {
+			DuckDB db_wrapper(instance);
+			ExtensionHelper::LoadExtension(db_wrapper, dep);
+		}
+	}
 
 	MIINTMacros::Register(loader);
 

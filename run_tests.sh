@@ -22,6 +22,19 @@ if echo "$EXPECTED_SHA  $MZML_FILE" | sha256sum -c --quiet 2>/dev/null; then
     export MASSQL_TEST_DATA="$MZML_FILE"
 fi
 
+# Download and cache GNPS test data if not present
+GNPS_FILE="$CACHE_DIR/GNPS00002_A3_p.mzML"
+if [ ! -f "$GNPS_FILE" ]; then
+    echo "Downloading GNPS test data..."
+    if ! wget -q -O "$GNPS_FILE" "https://massive.ucsd.edu/ProteoSAFe/DownloadResultFile?forceDownload=true&file=f.MSV000084494/ccms_peak/raw/GNPS00002_A3_p.mzML"; then
+        rm -f "$GNPS_FILE"
+        echo "Warning: GNPS test data download failed, skipping GNPS tests"
+    fi
+fi
+if [ -f "$GNPS_FILE" ]; then
+    export MASSQL_GNPS_DATA=1
+fi
+
 make test
 ./build/release/extension/miint/tests
 
