@@ -20,8 +20,10 @@ enum class TokenType {
 	PLUS,
 	MINUS,
 	STAR,
+	SLASH,
 	COLON,
 	GREATER,
+	LESS,
 	COMMA,
 	END_OF_INPUT
 };
@@ -77,6 +79,14 @@ public:
 		if (c == '>') {
 			pos_++;
 			return {TokenType::GREATER, ">"};
+		}
+		if (c == '<') {
+			pos_++;
+			return {TokenType::LESS, "<"};
+		}
+		if (c == '/') {
+			pos_++;
+			return {TokenType::SLASH, "/"};
 		}
 		if (c == ',') {
 			pos_++;
@@ -163,8 +173,8 @@ static const std::unordered_map<std::string, ConditionField> FIELD_MAP = {
 // ── Qualifier name set ───────────────────────────────────────────────────────
 
 static const std::unordered_map<std::string, bool> QUALIFIER_MAP = {
-    {"TOLERANCEMZ", true},    {"TOLERANCEPPM", true}, {"INTENSITYPERCENT", true},
-    {"INTENSITYVALUE", true}, {"EXCLUDED", false},    {"CARDINALITY", true},
+    {"TOLERANCEMZ", true}, {"TOLERANCEPPM", true}, {"INTENSITYPERCENT", true}, {"INTENSITYVALUE", true},
+    {"EXCLUDED", false},   {"CARDINALITY", true},  {"MATCHCOUNT", true}, // alias for CARDINALITY
 };
 
 // ── Parser ───────────────────────────────────────────────────────────────────
@@ -241,6 +251,17 @@ static ConditionValue parse_condition_value(Tokenizer &tokenizer) {
 
 	if (tok.type == TokenType::NUMBER) {
 		double num_val = std::stod(tok.text);
+
+		// Handle division: NUMBER/NUMBER folds to constant
+		if (tokenizer.peek().type == TokenType::SLASH) {
+			tokenizer.next(); // consume /
+			double divisor = parse_atomic_value(tokenizer);
+			if (divisor == 0.0) {
+				throw std::runtime_error("MassQL parse error: division by zero");
+			}
+			num_val /= divisor;
+		}
+
 		auto peek = tokenizer.peek();
 
 		if (peek.type == TokenType::STAR) {
@@ -336,15 +357,22 @@ static void parse_qualifiers(Tokenizer &tokenizer, Condition &cond) {
 		}
 
 		Qualifier qual;
-		qual.name = qname;
+		// Normalize MATCHCOUNT → CARDINALITY
+		qual.name = (qname == "MATCHCOUNT") ? "CARDINALITY" : qname;
 
 		if (it->second) {
-			// Qualifier takes a value: = or >
+			// Qualifier takes a value: =, >, or <
 			auto op = tokenizer.next();
-			if (op.type != TokenType::EQUALS && op.type != TokenType::GREATER) {
-				throw std::runtime_error("MassQL parse error: expected '=' or '>' after qualifier name");
+			if (op.type != TokenType::EQUALS && op.type != TokenType::GREATER && op.type != TokenType::LESS) {
+				throw std::runtime_error("MassQL parse error: expected '=', '>', or '<' after qualifier name");
 			}
-			qual.op = (op.type == TokenType::GREATER) ? QualifierOp::GREATER_THAN : QualifierOp::EQUALS;
+			if (op.type == TokenType::GREATER) {
+				qual.op = QualifierOp::GREATER_THAN;
+			} else if (op.type == TokenType::LESS) {
+				qual.op = QualifierOp::LESS_THAN;
+			} else {
+				qual.op = QualifierOp::EQUALS;
+			}
 			auto val_tok = tokenizer.next();
 
 			// Handle range(min=a,max=b) for CARDINALITY

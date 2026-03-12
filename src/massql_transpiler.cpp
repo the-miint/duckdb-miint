@@ -123,13 +123,13 @@ static std::string peak_match_expr(const std::string &col, double target, const 
 	if (has_qualifier(cond.qualifiers, "INTENSITYPERCENT")) {
 		double pct = get_qualifier_value(cond.qualifiers, "INTENSITYPERCENT");
 		auto op = get_qualifier_op(cond.qualifiers, "INTENSITYPERCENT");
-		std::string cmp = (op == QualifierOp::GREATER_THAN) ? " > " : " >= ";
+		std::string cmp = (op == QualifierOp::GREATER_THAN) ? " > " : (op == QualifierOp::LESS_THAN) ? " < " : " >= ";
 		expr += " AND i_norm" + cmp + fmt_double(pct / 100.0);
 	}
 	if (has_qualifier(cond.qualifiers, "INTENSITYVALUE")) {
 		double val = get_qualifier_value(cond.qualifiers, "INTENSITYVALUE");
 		auto op = get_qualifier_op(cond.qualifiers, "INTENSITYVALUE");
-		std::string cmp = (op == QualifierOp::GREATER_THAN) ? " > " : " >= ";
+		std::string cmp = (op == QualifierOp::GREATER_THAN) ? " > " : (op == QualifierOp::LESS_THAN) ? " < " : " >= ";
 		expr += " AND intensity" + cmp + fmt_double(val);
 	}
 

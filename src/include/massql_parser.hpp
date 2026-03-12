@@ -30,7 +30,7 @@ struct ConditionValue {
 	double x_coefficient = 1.0;
 };
 
-enum class QualifierOp { EQUALS, GREATER_THAN, NONE };
+enum class QualifierOp { EQUALS, GREATER_THAN, LESS_THAN, NONE };
 
 struct Qualifier {
 	std::string name;

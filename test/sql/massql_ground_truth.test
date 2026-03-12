@@ -239,3 +239,34 @@ query I
 SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS1MZ=X AND MS2PREC=X AND CHARGE=2', '__gt_spectra')
 ----
 1
+
+# ===== Group 12: Cycle 2 — MATCHCOUNT, < operator, division =====
+
+# MATCHCOUNT is alias for CARDINALITY — same result as card_min2
+# Python: scan 2 (spectrum_index=1)
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=(150 OR 250):MATCHCOUNT=range(min=2,max=5)', '__gt_spectra')
+----
+1
+
+# Division constant folding: 400/2 = 200.0, matches MS2PREC=200 -> spectrum_index=1
+# Python: scan 2 (spectrum_index=1)
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PREC=400/2', '__gt_spectra')
+----
+1
+
+# LESS_THAN operator: INTENSITYPERCENT<50 on peak with i_norm=0.2 (20%) -> matches
+# Note: Python MassQL has a bug — parser discards the < operator and always uses >.
+# See localdocs/massql-bug.md for details. Our implementation uses correct < semantics.
+# MS1 peak at 100 has i_norm=0.2 (20%), which IS < 50%.
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS1DATA) WHERE MS1MZ=100:INTENSITYPERCENT<50', '__gt_spectra')
+----
+0
+
+# LESS_THAN: peak at 200 has i_norm=1.0 (100%), NOT < 50% -> no match
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS1DATA) WHERE MS1MZ=200:INTENSITYPERCENT<50', '__gt_spectra')
+----
+0

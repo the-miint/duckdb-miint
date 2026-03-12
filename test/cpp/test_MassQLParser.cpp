@@ -307,3 +307,31 @@ TEST_CASE("constant folding with formula: 100+formula(Fe)", "[massql][parser]") 
 	REQUIRE_FALSE(q.where_conditions[0].values[0].has_x_variable);
 	REQUIRE_THAT(q.where_conditions[0].values[0].constant_value, Catch::Matchers::WithinAbs(100.0 + 55.9349375, 1e-4));
 }
+
+// ===== Cycle 2 (Phase 7): MATCHCOUNT alias, < operator, division =====
+
+TEST_CASE("MATCHCOUNT is alias for CARDINALITY", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY scannum(MS2DATA) WHERE MS2PROD=(150 OR 250):MATCHCOUNT=range(min=1,max=2)");
+	REQUIRE(q.where_conditions[0].qualifiers.size() == 1);
+	REQUIRE(q.where_conditions[0].qualifiers[0].name == "CARDINALITY");
+	REQUIRE_THAT(q.where_conditions[0].qualifiers[0].value, Catch::Matchers::WithinAbs(1.0, 0.001));
+	REQUIRE_THAT(q.where_conditions[0].qualifiers[0].max_value, Catch::Matchers::WithinAbs(2.0, 0.001));
+}
+
+TEST_CASE("LESS_THAN operator: INTENSITYPERCENT<50", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY scannum(MS2DATA) WHERE MS2PROD=220:INTENSITYPERCENT<50");
+	REQUIRE(q.where_conditions[0].qualifiers[0].name == "INTENSITYPERCENT");
+	REQUIRE(q.where_conditions[0].qualifiers[0].op == QualifierOp::LESS_THAN);
+	REQUIRE_THAT(q.where_conditions[0].qualifiers[0].value, Catch::Matchers::WithinAbs(50.0, 0.001));
+}
+
+TEST_CASE("division constant folding: MS2PROD=400/2", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=400/2");
+	REQUIRE_FALSE(q.where_conditions[0].values[0].has_x_variable);
+	REQUIRE_THAT(q.where_conditions[0].values[0].constant_value, Catch::Matchers::WithinAbs(200.0, 0.001));
+}
+
+TEST_CASE("division with addition: MS2PROD=400/2+10", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=400/2+10");
+	REQUIRE_THAT(q.where_conditions[0].values[0].constant_value, Catch::Matchers::WithinAbs(210.0, 0.001));
+}
