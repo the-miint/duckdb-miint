@@ -43,12 +43,20 @@ struct RypeExtractGlobalState : public GlobalTableFunctionState {
 	// Original read_ids indexed by row number (0-based).
 	std::vector<std::string> read_ids;
 
+	// Sub-connection used to query the sequence table. Must outlive the RYpe
+	// output_stream because RYpe lazily consumes the input Arrow stream (backed
+	// by a ResultArrowArrayStreamWrapper whose QueryResult holds a non-owning
+	// optional_ptr<ClientContext> into this connection). Destroyed explicitly
+	// in the destructor AFTER releasing RYpe streams.
+	unique_ptr<Connection> input_connection;
+
 	// Arrow output stream from RYpe extraction.
 	// OWNERSHIP HIERARCHY (destruction must be in reverse order):
 	// 1. current_chunk (shared_ptr — may outlive gstate via Vector ArrowAuxiliaryData)
 	// 2. arrow_table (holds pointers into output_schema)
 	// 3. output_schema
 	// 4. output_stream
+	// 5. input_connection - must outlive output_stream (RYpe holds ref to input Arrow stream)
 	ArrowArrayStream output_stream;
 	ArrowSchema output_schema;
 	ArrowTableSchema arrow_table;

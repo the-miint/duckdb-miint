@@ -53,12 +53,20 @@ public:
 		// RYpe receives row indices as query_id, so read_ids[query_id] gives the original identifier.
 		std::vector<std::string> read_ids;
 
+		// Sub-connection used to query the sequence table. Must outlive the RYpe
+		// output_stream because RYpe lazily consumes the input Arrow stream (backed
+		// by a ResultArrowArrayStreamWrapper whose QueryResult holds a non-owning
+		// optional_ptr<ClientContext> into this connection). Destroyed explicitly
+		// in the destructor AFTER releasing RYpe streams.
+		unique_ptr<Connection> input_connection;
+
 		// Arrow output stream from RYpe.
 		// OWNERSHIP HIERARCHY (destruction must be in reverse order):
 		// 1. current_chunk (shared_ptr — may outlive gstate via Vector ArrowAuxiliaryData)
 		// 2. arrow_table - holds pointers INTO output_schema, clear before releasing schema
 		// 3. output_schema - obtained via get_schema(), separately owned copy, release on destruction
 		// 4. output_stream - returned by rype_classify_arrow(), release on destruction
+		// 5. input_connection - must outlive output_stream (RYpe holds ref to input Arrow stream)
 		ArrowArrayStream output_stream;
 		ArrowSchema output_schema;
 		ArrowTableSchema arrow_table;

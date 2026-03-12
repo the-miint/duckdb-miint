@@ -25,6 +25,9 @@ RypeExtractGlobalState::~RypeExtractGlobalState() {
 	if (output_stream.release) {
 		output_stream.release(&output_stream);
 	}
+
+	// Release sub-connection LAST — see rype_classify.cpp destructor for rationale.
+	input_connection.reset();
 }
 
 // ============================================================================
@@ -75,8 +78,10 @@ BuildExtractionInputStream(ClientContext &context, const RypeExtractData &bind_d
                            unique_ptr<ResultArrowArrayStreamWrapper> &out_wrapper) {
 	auto gstate = make_uniq<RypeExtractGlobalState>();
 
+	// Store connection in GlobalState — see rype_classify.cpp InitGlobal for rationale.
 	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	gstate->input_connection = make_uniq<Connection>(db);
+	auto &conn = *gstate->input_connection;
 
 	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
 	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);

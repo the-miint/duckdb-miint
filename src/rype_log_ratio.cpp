@@ -39,6 +39,9 @@ RypeLogRatioTableFunction::GlobalState::~GlobalState() {
 	if (numerator_index) {
 		rype_index_free(numerator_index);
 	}
+
+	// Release sub-connection LAST — see rype_classify.cpp destructor for rationale.
+	input_connection.reset();
 }
 
 // ============================================================================
@@ -133,8 +136,10 @@ unique_ptr<GlobalTableFunctionState> RypeLogRatioTableFunction::InitGlobal(Clien
 	}
 
 	// Step 4: Build read_id mapping and query sequence data for RYpe
+	// Store connection in GlobalState — see rype_classify.cpp InitGlobal for rationale.
 	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	gstate->input_connection = make_uniq<Connection>(db);
+	auto &conn = *gstate->input_connection;
 
 	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
 	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);
@@ -167,7 +172,9 @@ unique_ptr<GlobalTableFunctionState> RypeLogRatioTableFunction::InitGlobal(Clien
 	const RypeIndex *sizing_index =
 	    (denom_shard_bytes > num_shard_bytes) ? gstate->denominator_index : gstate->numerator_index;
 
-	size_t batch_size = rype_recommend_batch_size(sizing_index, avg_read_length, is_paired, 0);
+	// is_large_binary=0: DuckDB BLOB → Arrow Binary (i32 offsets), so RYpe caps
+	// batch size to keep total sequence data under 2 GiB per array.
+	size_t batch_size = rype_recommend_batch_size(sizing_index, avg_read_length, is_paired, 0, 0);
 	if (batch_size == 0) {
 		// rype_recommend_batch_size returns 0 on error — log but use safe fallback
 		const char *err = rype_get_last_error();
