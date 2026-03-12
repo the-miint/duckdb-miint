@@ -30,6 +30,7 @@
 #include "duckdb/main/database.hpp"
 #include <sequence_functions.hpp>
 #include <formula_function.hpp>
+#include <massql_function.hpp>
 #include <align_pairwise_functions.hpp>
 #include <read_mzml.hpp>
 #include <read_mzml_chromatograms.hpp>
@@ -154,6 +155,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	CompressIntervalsFunction::Register(loader);
 	SequenceFunctions::Register(loader);
 	FormulaFunction::Register(loader);
+	MassQLFunction::Register(loader);
 
 	AlignPairwiseScoreFunction::Register(loader);
 	AlignPairwiseCigarFunction::Register(loader);

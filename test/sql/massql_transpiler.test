@@ -1,0 +1,382 @@
+# name: test/sql/massql_transpiler.test
+# group: [sql]
+
+require miint
+
+statement ok
+CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML');
+
+# ===== Cycle 10a: Table function skeleton =====
+
+# Table function exists and is callable
+statement ok
+SELECT * FROM massql('QUERY MS2DATA', 'spectra') LIMIT 0;
+
+# ===== Cycle 10b: First real query — MS2PROD + scaninfo =====
+
+# MS2PROD=220 with default tolerance 0.5 -> spectrum 2 matches (peak at 220)
+query I
+SELECT COUNT(*) FROM massql('QUERY scaninfo(MS2DATA) WHERE MS2PROD=220', 'spectra')
+----
+1
+
+# No WHERE clause -> returns all MS2 scans (spectra 1 and 2)
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA)', 'spectra')
+----
+2
+
+# ===== Cycle 11: MS2PREC, MS2NL, MS1MZ =====
+
+# MS2PREC=200 -> spectrum 1 (precursor_mz=200.0)
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PREC=200', 'spectra')
+----
+1
+
+# MS2NL=80 -> spectrum 2 (neutral_loss=80 at mz=220, precursor_mz=300)
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2NL=80', 'spectra')
+----
+2
+
+# MS1MZ=200 -> spectrum 0 (MS1 with peak at mz=200)
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS1DATA) WHERE MS1MZ=200', 'spectra')
+----
+1
+
+# ===== Cycle 12: Metadata conditions =====
+
+# RTMIN=1.7 -> only spectrum 2 (RT=1.8)
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE RTMIN=1.7', 'spectra')
+----
+1
+
+# POLARITY=Positive -> spectrum 1 (positive MS2)
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE POLARITY=Positive', 'spectra')
+----
+1
+
+# CHARGE=2 -> spectrum 1
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE CHARGE=2', 'spectra')
+----
+1
+
+# ===== Cycle 13: Tolerance qualifiers =====
+
+statement ok
+CREATE TABLE tb AS SELECT * FROM read_mzml('data/mzml/tolerance_boundary.mzML');
+
+# Peaks at 200.049 and 200.051. TOLERANCEMZ=0.001 strict -> 0
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=200.05:TOLERANCEMZ=0.001', 'tb')
+----
+0
+
+# TOLERANCEMZ=0.002 -> includes 200.051 -> 1
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=200.05:TOLERANCEMZ=0.002', 'tb')
+----
+1
+
+# ===== Cycle 14: Intensity qualifiers =====
+
+# INTENSITYPERCENT>50 on MS1MZ=200: i_norm(200)=1.0 > 0.50 -> YES
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS1DATA) WHERE MS1MZ=200:INTENSITYPERCENT>50', 'spectra')
+----
+1
+
+# INTENSITYVALUE>3000 on MS1MZ=200: intensity(200)=5000 > 3000 -> YES
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS1DATA) WHERE MS1MZ=200:INTENSITYVALUE>3000', 'spectra')
+----
+1
+
+# INTENSITYVALUE>6000 -> NO
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS1DATA) WHERE MS1MZ=200:INTENSITYVALUE>6000', 'spectra')
+----
+0
+
+# ===== Cycle 15: EXCLUDED qualifier =====
+
+# MS2PROD=150:EXCLUDED -> scans WITHOUT peak near 150 -> spectrum 2
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=150:EXCLUDED', 'spectra')
+----
+2
+
+# ===== Cycle 16: AND multi-condition =====
+
+# MS2PROD=150 AND MS2PREC=200 -> spectrum 1 only
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=150 AND MS2PREC=200', 'spectra')
+----
+1
+
+# MS2PROD=220 AND MS2PREC=300 -> spectrum 2 only
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=220 AND MS2PREC=300', 'spectra')
+----
+1
+
+# MS2PROD=150 AND MS2PREC=300 -> no spectrum has both -> 0
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=150 AND MS2PREC=300', 'spectra')
+----
+0
+
+# ===== Cycle 17: All aggregation functions =====
+
+# scaninfo: 1 row with 12 columns for spectrum 2
+query I
+SELECT COUNT(*) FROM massql('QUERY scaninfo(MS2DATA) WHERE MS2PROD=220', 'spectra')
+----
+1
+
+# scansum: total_intensity for spectrum 2 = 500+2500+1200+800 = 5000
+query R
+SELECT total_intensity FROM massql('QUERY scansum(MS2DATA) WHERE MS2PROD=220', 'spectra')
+----
+5000.0
+
+# scannum: just spectrum_index
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=220', 'spectra')
+----
+2
+
+# scanmaxint: max_intensity for spectrum 2 = 2500
+query R
+SELECT max_intensity FROM massql('QUERY scanmaxint(MS2DATA) WHERE MS2PROD=220', 'spectra')
+----
+2500.0
+
+# scanmz: precursor_mz = 300.0
+query R
+SELECT precursor_mz FROM massql('QUERY scanmz(MS2DATA) WHERE MS2PROD=220', 'spectra')
+----
+300.0
+
+# No agg: all 4 peaks from spectrum 2
+query I
+SELECT COUNT(*) FROM massql('QUERY MS2DATA WHERE MS2PROD=220', 'spectra')
+----
+4
+
+# ===== Cycle 18: FILTER clause =====
+
+# WHERE finds spectrum 2 (4 peaks), FILTER keeps only mz near 220 -> 1 peak
+query I
+SELECT COUNT(*) FROM massql('QUERY MS2DATA WHERE MS2PROD=220 FILTER MS2PROD=220', 'spectra')
+----
+1
+
+# FILTER + aggregation: scansum only includes the filtered peak's intensity
+query R
+SELECT total_intensity FROM massql('QUERY scansum(MS2DATA) WHERE MS2PROD=220 FILTER MS2PROD=220', 'spectra')
+----
+2500.0
+
+# FILTER does NOT re-evaluate scan membership: spectrum 2 was found by WHERE,
+# even though FILTER narrows to 1 peak near 320, the scan is still in the result
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=220 FILTER MS2PROD=320', 'spectra')
+----
+1
+
+# ===== Cycle 19: OR values + CARDINALITY =====
+
+# MS2PROD=(150 OR 250) -> spectrum 1 has both -> 1 scan
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=(150 OR 250)', 'spectra')
+----
+1
+
+# CARDINALITY min=2: need 2 distinct targets matching -> spectrum 1 has both 150 and 250 -> YES
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=(150 OR 250):CARDINALITY=range(min=2,max=5)', 'spectra')
+----
+1
+
+# CARDINALITY max=1: spectrum 1 matches 2 targets (150 and 250), exceeds max=1 -> excluded
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=(150 OR 250):CARDINALITY=range(min=1,max=1)', 'spectra')
+----
+0
+
+# ===== Cycle 23: File path source variant =====
+
+query I
+SELECT COUNT(*) FROM massql('QUERY scaninfo(MS2DATA) WHERE MS2PROD=220', 'data/mzml/basic_3spectra.mzML')
+----
+1
+
+# ===== Cycle 24: massql_to_sql() scalar function =====
+
+query I
+SELECT length(massql_to_sql('QUERY scaninfo(MS2DATA) WHERE MS2PROD=220', 'spectra')) > 0
+----
+true
+
+statement error
+SELECT massql_to_sql('BOGUS', 'spectra')
+----
+expected QUERY keyword
+
+# Snapshot: generated SQL uses mz_within macro
+query T
+SELECT massql_to_sql('QUERY scannum(MS2DATA) WHERE MS2PROD=220', 'spectra') LIKE '%mz_within(%'
+----
+true
+
+# Snapshot: MS1 queries filter on ms_level = 1
+query T
+SELECT massql_to_sql('QUERY scannum(MS1DATA) WHERE MS1MZ=100', 'spectra') LIKE '%ms_level = 1%'
+----
+true
+
+# Snapshot: EXCLUDED uses NOT IN
+query T
+SELECT massql_to_sql('QUERY MS2DATA WHERE MS2PROD=150:EXCLUDED', 'spectra') LIKE '%NOT IN%'
+----
+true
+
+# Snapshot: uses mzml_peaks() macro instead of inline unnesting
+query T
+SELECT massql_to_sql('QUERY MS2DATA', 'spectra') LIKE '%mzml_peaks(%'
+----
+true
+
+# ===== Cycle 25: Error messages =====
+
+statement error
+SELECT * FROM massql('QUERY MS2DATA BLAH', 'spectra')
+----
+parse error
+
+statement error
+SELECT * FROM massql('', 'spectra')
+----
+empty query
+
+# ===== Cycle 20: X offset patterns =====
+
+# X offset pair: MS2PROD=X AND MS2PROD=X+100
+# Spec 1: peaks 150,250 (diff 100). Spec 2: peaks 120,220,320,420 (diff 100).
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100', 'spectra')
+----
+1
+2
+
+# X offset triplet: only spectrum 2 has 3 peaks spaced by 100
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100 AND MS2PROD=X+200', 'spectra')
+----
+2
+
+# X offset + metadata: RTMIN=1.7 eliminates spectrum 1 (RT=1.6)
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100 AND RTMIN=1.7', 'spectra')
+----
+2
+
+# X offset with tolerance qualifier
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X:TOLERANCEMZ=0.1 AND MS2PROD=X+100', 'spectra')
+----
+1
+2
+
+# X offset with scaninfo aggregation
+query II rowsort
+SELECT spectrum_index, ms_level FROM massql('QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100', 'spectra')
+----
+1	2
+2	2
+
+# X offset no match
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+500', 'spectra')
+----
+0
+
+# X offset snapshot: generated SQL uses WITH RECURSIVE
+query T
+SELECT massql_to_sql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100', 'spectra') LIKE '%WITH RECURSIVE%'
+----
+true
+
+# ===== Cycle 21: Cross-level X (MS1MZ=X AND MS2PREC=X) =====
+
+# Both MS2 spectra have precursors (200, 300) matching MS1 peaks
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS1MZ=X AND MS2PREC=X', 'spectra')
+----
+1
+2
+
+# Cross-level + metadata: CHARGE=2 keeps only spectrum 1
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS1MZ=X AND MS2PREC=X AND CHARGE=2', 'spectra')
+----
+1
+
+# Cross-level with scaninfo aggregation
+query II rowsort
+SELECT spectrum_index, ms_level FROM massql('QUERY scaninfo(MS2DATA) WHERE MS1MZ=X AND MS2PREC=X', 'spectra')
+----
+1	2
+2	2
+
+# Cross-level snapshot: does NOT use WITH RECURSIVE
+query T
+SELECT massql_to_sql('QUERY scannum(MS2DATA) WHERE MS1MZ=X AND MS2PREC=X', 'spectra') LIKE '%WITH RECURSIVE%'
+----
+false
+
+# Cross-level snapshot: uses mz_within for tolerance matching
+query T
+SELECT massql_to_sql('QUERY scannum(MS2DATA) WHERE MS1MZ=X AND MS2PREC=X', 'spectra') LIKE '%mz_within(%'
+----
+true
+
+# ===== Cycle 22: Peak pair / iron pattern =====
+
+# formula(Fe) as constant: no MS2 peaks near 55.93
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=formula(Fe)', 'spectra')
+----
+0
+
+# Peak pair: MS2PROD=X AND MS2PROD=2*(X-10)
+# X=120: 2*120-20=220 (peak at 220 ✓). X=220: 2*220-20=420 (peak at 420 ✓)
+# Only spectrum 2 has the right peak spacing
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=2*(X-10)', 'spectra')
+----
+2
+
+# Peak pair with scaninfo aggregation
+query II
+SELECT spectrum_index, ms_level FROM massql('QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=2*(X-10)', 'spectra')
+----
+2	2
+
+# Peak pair with formula: valid query but no matches in this data
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=2*(X-formula(Fe))', 'spectra')
+----
+0
+
+# Peak pair snapshot: uses WITH RECURSIVE
+query T
+SELECT massql_to_sql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=2*(X-10)', 'spectra') LIKE '%WITH RECURSIVE%'
+----
+true
