@@ -332,11 +332,11 @@ const std::string MZML_MS2_CHILD_PEAKS = // NOLINT
 //
 // MassQL: QUERY scansum(MS1DATA) WHERE MS2PROD=target_mz
 // Returns MS1 peaks from parent scans of MS2 spectra containing a product ion near target_mz.
-// Default tolerance: 0.5 Da.
+// Default tolerance: 0.1 Da.
 // Note: inlines cross-level logic rather than composing mzml_ms1_parent_peaks/mzml_ms2_peaks
 // because DuckDB table macros cannot appear in subquery positions.
 const std::string MZML_MS1_WHERE_MS2PROD = // NOLINT
-    "CREATE OR REPLACE MACRO mzml_ms1_where_ms2prod(relation, target_mz, tolerance := 0.5) AS TABLE "
+    "CREATE OR REPLACE MACRO mzml_ms1_where_ms2prod(relation, target_mz, tolerance := 0.1) AS TABLE "
     "SELECT * FROM mzml_peaks(relation) WHERE ms_level = 1 "
     "AND spectrum_index IN ("
     "  SELECT DISTINCT ms1_scan_index"
@@ -350,10 +350,10 @@ const std::string MZML_MS1_WHERE_MS2PROD = // NOLINT
 //
 // MassQL: QUERY scaninfo(MS2DATA) WHERE MS1MZ=target_mz
 // Returns MS2 peaks from child scans of MS1 spectra containing a peak near target_mz.
-// Default tolerance: 0.5 Da.
+// Default tolerance: 0.1 Da.
 // Note: inlines cross-level logic because DuckDB table macros cannot appear in subquery positions.
 const std::string MZML_MS2_WHERE_MS1MZ = // NOLINT
-    "CREATE OR REPLACE MACRO mzml_ms2_where_ms1mz(relation, target_mz, tolerance := 0.5) AS TABLE "
+    "CREATE OR REPLACE MACRO mzml_ms2_where_ms1mz(relation, target_mz, tolerance := 0.1) AS TABLE "
     "SELECT * FROM mzml_peaks(relation) WHERE ms_level = 2 "
     "AND ms1_scan_index IN ("
     "  SELECT DISTINCT spectrum_index"
@@ -366,9 +366,9 @@ const std::string MZML_MS2_WHERE_MS1MZ = // NOLINT
 //
 // MassQL: QUERY scansum(MS1DATA) WHERE MS2PREC=target_mz
 // Returns MS1 peaks from parent scans of MS2 spectra whose precursor m/z matches.
-// Default tolerance: 0.5 Da.
+// Default tolerance: 0.1 Da.
 const std::string MZML_MS1_WHERE_MS2PREC = // NOLINT
-    "CREATE OR REPLACE MACRO mzml_ms1_where_ms2prec(relation, target_mz, tolerance := 0.5) AS TABLE "
+    "CREATE OR REPLACE MACRO mzml_ms1_where_ms2prec(relation, target_mz, tolerance := 0.1) AS TABLE "
     "SELECT * FROM mzml_peaks(relation) WHERE ms_level = 1 "
     "AND spectrum_index IN ("
     "  SELECT DISTINCT ms1_scan_index FROM ("
@@ -382,10 +382,10 @@ const std::string MZML_MS1_WHERE_MS2PREC = // NOLINT
 // MassQL: QUERY scaninfo(MS2DATA) WHERE MS2PROD=prod_mz AND MS1MZ=ms1_mz
 // Combined cross-level: MS2 scans that contain a product ion near prod_mz
 // AND whose parent MS1 scan contains a peak near ms1_mz.
-// Default tolerance: 0.5 Da.
+// Default tolerance: 0.1 Da.
 const std::string MZML_MS2_WHERE_MS2PROD_AND_MS1MZ = // NOLINT
     "CREATE OR REPLACE MACRO mzml_ms2_where_ms2prod_and_ms1mz("
-    "  relation, prod_mz, ms1_mz, tolerance := 0.5) AS TABLE "
+    "  relation, prod_mz, ms1_mz, tolerance := 0.1) AS TABLE "
     "SELECT * FROM mzml_peaks(relation) WHERE ms_level = 2 "
     "AND spectrum_index IN ("
     "  SELECT DISTINCT spectrum_index FROM ("
@@ -435,9 +435,9 @@ const std::string MZ_MASSDEFECT_WITHIN = // NOLINT
 // MassQL: MS2PROD=X AND MS2PROD=X+delta
 // Find MS2 spectra where two peaks differ by delta Da.
 // Delegates to mzml_x_offset_ntuple([0, delta]).
-// Default tolerance: 0.5 Da.
+// Default tolerance: 0.1 Da.
 const std::string MZML_X_OFFSET_PAIR = // NOLINT
-    "CREATE OR REPLACE MACRO mzml_x_offset_pair(relation, delta, tolerance := 0.5) AS TABLE "
+    "CREATE OR REPLACE MACRO mzml_x_offset_pair(relation, delta, tolerance := 0.1) AS TABLE "
     "SELECT * FROM mzml_x_offset_ntuple(relation, [0, delta], tolerance); ";
 
 // mzml_x_offset_triplet(relation, delta2, delta3 [, tolerance])
@@ -445,9 +445,9 @@ const std::string MZML_X_OFFSET_PAIR = // NOLINT
 // MassQL: MS2PROD=X AND MS2PROD=X+delta2 AND MS2PROD=X+delta3
 // Find MS2 spectra where three peaks match X, X+delta2, X+delta3.
 // Delegates to mzml_x_offset_ntuple([0, delta2, delta3]).
-// Default tolerance: 0.5 Da.
+// Default tolerance: 0.1 Da.
 const std::string MZML_X_OFFSET_TRIPLET = // NOLINT
-    "CREATE OR REPLACE MACRO mzml_x_offset_triplet(relation, delta2, delta3, tolerance := 0.5) AS TABLE "
+    "CREATE OR REPLACE MACRO mzml_x_offset_triplet(relation, delta2, delta3, tolerance := 0.1) AS TABLE "
     "SELECT * FROM mzml_x_offset_ntuple(relation, [0, delta2, delta3], tolerance); ";
 
 // mzml_x_offset_ntuple(relation, offsets [, tolerance])
@@ -457,9 +457,9 @@ const std::string MZML_X_OFFSET_TRIPLET = // NOLINT
 // X candidates are drawn from all MS2 peaks across all scans (cross-scan matching)
 // and deduplicated with greedy 0.05 Da step.
 // offsets must contain distinct values; duplicate offsets will produce no matches.
-// Default tolerance: 0.5 Da.
+// Default tolerance: 0.1 Da.
 const std::string MZML_X_OFFSET_NTUPLE = // NOLINT
-    "CREATE OR REPLACE MACRO mzml_x_offset_ntuple(relation, offsets, tolerance := 0.5) AS TABLE "
+    "CREATE OR REPLACE MACRO mzml_x_offset_ntuple(relation, offsets, tolerance := 0.1) AS TABLE "
     "WITH RECURSIVE ms2 AS ( "
     "    SELECT * FROM mzml_peaks(relation) WHERE ms_level = 2 AND intensity > 0 "
     "), "
@@ -498,10 +498,10 @@ const std::string MZML_X_OFFSET_NTUPLE = // NOLINT
 // Per-spectrum: X is the spectrum's own precursor_mz. Find MS2 spectra that
 // contain a product ion at precursor_mz - delta within tolerance.
 // min_intensity_pct: product ion intensity as % of base peak (0 = no filter).
-// Default tolerance: 0.5 Da.
+// Default tolerance: 0.1 Da.
 const std::string MZML_X_PREC_PROD = // NOLINT
     "CREATE OR REPLACE MACRO mzml_x_prec_prod("
-    "  relation, delta, tolerance := 0.5, min_intensity_pct := 0) AS TABLE "
+    "  relation, delta, tolerance := 0.1, min_intensity_pct := 0) AS TABLE "
     "WITH ms2 AS ( "
     "    SELECT * FROM mzml_peaks(relation) WHERE ms_level = 2 AND intensity > 0 "
     ") "
@@ -534,9 +534,9 @@ const std::string MZML_X_PREC_MASSDEFECT = // NOLINT
 //
 // MassQL: MS1MZ=X AND MS2PREC=X
 // MS2 spectra whose precursor matches an MS1 peak in the parent scan.
-// Default tolerance: 0.5 Da.
+// Default tolerance: 0.1 Da.
 const std::string MZML_X_MS1_MS2_PREC = // NOLINT
-    "CREATE OR REPLACE MACRO mzml_x_ms1_ms2_prec(relation, tolerance := 0.5) AS TABLE "
+    "CREATE OR REPLACE MACRO mzml_x_ms1_ms2_prec(relation, tolerance := 0.1) AS TABLE "
     "SELECT ms2.* FROM ("
     "  SELECT * FROM mzml_peaks(relation) WHERE ms_level = 2"
     ") ms2 "
@@ -549,10 +549,10 @@ const std::string MZML_X_MS1_MS2_PREC = // NOLINT
 //
 // MassQL: MS2PROD=X AND MS2PROD=X+delta WHERE X=range(min=x_min, max=x_max)
 // Same as mzml_x_offset_pair but X candidates are constrained to [x_min, x_max].
-// Default tolerance: 0.5 Da.
+// Default tolerance: 0.1 Da.
 const std::string MZML_X_OFFSET_PAIR_RANGE = // NOLINT
     "CREATE OR REPLACE MACRO mzml_x_offset_pair_range("
-    "  relation, delta, x_min, x_max, tolerance := 0.5) AS TABLE "
+    "  relation, delta, x_min, x_max, tolerance := 0.1) AS TABLE "
     "WITH RECURSIVE ms2 AS ( "
     "    SELECT * FROM mzml_peaks(relation) WHERE ms_level = 2 AND intensity > 0 "
     "), "
@@ -671,12 +671,12 @@ const std::string MZML_I_TIC_NORM = // NOLINT
     "  list_transform(intensity_array, x -> x / total_ion_current)"
     ");";
 
-// mzml_excluded_ms2prod(relation, target_mz, tolerance := 0.5)
+// mzml_excluded_ms2prod(relation, target_mz, tolerance := 0.1)
 //
 // MassQL: MS2PROD=target_mz:EXCLUDED
 // Returns MS2 peaks from scans that do NOT contain a product ion near target_mz.
 const std::string MZML_EXCLUDED_MS2PROD = // NOLINT
-    "CREATE OR REPLACE MACRO mzml_excluded_ms2prod(relation, target_mz, tolerance := 0.5) AS TABLE "
+    "CREATE OR REPLACE MACRO mzml_excluded_ms2prod(relation, target_mz, tolerance := 0.1) AS TABLE "
     "SELECT * FROM mzml_peaks(relation) WHERE ms_level = 2 "
     "AND spectrum_index NOT IN ("
     "  SELECT DISTINCT spectrum_index"
@@ -685,12 +685,12 @@ const std::string MZML_EXCLUDED_MS2PROD = // NOLINT
     "    AND mz_within(mz, target_mz, tolerance)"
     "); ";
 
-// mzml_excluded_ms1mz(relation, target_mz, tolerance := 0.5)
+// mzml_excluded_ms1mz(relation, target_mz, tolerance := 0.1)
 //
 // MassQL: MS1MZ=target_mz:EXCLUDED
 // Returns MS1 peaks from scans that do NOT contain a peak near target_mz.
 const std::string MZML_EXCLUDED_MS1MZ = // NOLINT
-    "CREATE OR REPLACE MACRO mzml_excluded_ms1mz(relation, target_mz, tolerance := 0.5) AS TABLE "
+    "CREATE OR REPLACE MACRO mzml_excluded_ms1mz(relation, target_mz, tolerance := 0.1) AS TABLE "
     "SELECT * FROM mzml_peaks(relation) WHERE ms_level = 1 "
     "AND spectrum_index NOT IN ("
     "  SELECT DISTINCT spectrum_index"
@@ -699,13 +699,13 @@ const std::string MZML_EXCLUDED_MS1MZ = // NOLINT
     "    AND mz_within(mz, target_mz, tolerance)"
     "); ";
 
-// mzml_excluded_ms2prec(relation, target_mz, tolerance := 0.5)
+// mzml_excluded_ms2prec(relation, target_mz, tolerance := 0.1)
 //
 // MassQL: MS2PREC=target_mz:EXCLUDED
 // Returns MS2 peaks from scans whose precursor m/z is NOT near target_mz.
 // MS2 scans with NULL precursor_mz are retained (they cannot match the target).
 const std::string MZML_EXCLUDED_MS2PREC = // NOLINT
-    "CREATE OR REPLACE MACRO mzml_excluded_ms2prec(relation, target_mz, tolerance := 0.5) AS TABLE "
+    "CREATE OR REPLACE MACRO mzml_excluded_ms2prec(relation, target_mz, tolerance := 0.1) AS TABLE "
     "SELECT * FROM mzml_peaks(relation) WHERE ms_level = 2 "
     "AND spectrum_index NOT IN ("
     "  SELECT DISTINCT spectrum_index"

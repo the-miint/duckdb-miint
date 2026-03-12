@@ -103,8 +103,8 @@ static std::string tolerance_expr(const std::string &col, double target, const s
 			return "mz_within(" + col + ", " + fmt_double(target) + ", " + fmt_double(q.value) + ")";
 		}
 	}
-	// Default: 0.5 Da
-	return "mz_within(" + col + ", " + fmt_double(target) + ", 0.5)";
+	// Default: 0.1 Da (matches Python MassQL)
+	return "mz_within(" + col + ", " + fmt_double(target) + ", 0.1)";
 }
 
 static QualifierOp get_qualifier_op(const std::vector<Qualifier> &qualifiers, const std::string &name) {
@@ -160,7 +160,7 @@ static std::string x_offset_tolerance(const std::vector<const Condition *> &x_co
 			}
 		}
 	}
-	return "0.5";
+	return "0.1";
 }
 
 // Generate CTEs for X-variable offset pattern (mirrors mzml_x_offset_ntuple macro)
@@ -312,7 +312,7 @@ static std::string x_cross_level_ctes(const std::vector<const Condition *> &x_co
 		}
 	}
 	if (tol_value.empty()) {
-		tol_value = "0.5";
+		tol_value = "0.1";
 	}
 
 	qualifying_cte_name = "__x_cross_qualifying";
