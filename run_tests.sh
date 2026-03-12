@@ -5,6 +5,10 @@ if command -v bowtie2 &> /dev/null; then
     export BOWTIE2_AVAILABLE=1
 fi
 
+if conda run -n massql python3 -c "from massql import msql_engine" 2>/dev/null; then
+    export MASSQL_PYTHON_AVAILABLE=1
+fi
+
 # Download and cache MassQL test data if not present
 CACHE_DIR="data/cache"
 mkdir -p "$CACHE_DIR"

@@ -1,0 +1,418 @@
+{
+  "metadata": {
+    "mzml_file": "data/mzml/basic_3spectra.mzML",
+    "massql_version": "unknown",
+    "note": "scan numbers are 1-based (Python convention). spectrum_indices are 0-based (DuckDB convention = scan - 1)."
+  },
+  "queries": {
+    "basic_ms2prod_220_raw": {
+      "query": "QUERY MS2DATA WHERE MS2PROD=220",
+      "description": "All peaks from scans containing peak near 220",
+      "row_count": 4,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ],
+      "sum_intensity": 5000.0,
+      "max_intensity": 2500.0,
+      "mz_values": [
+        120.0,
+        220.0,
+        320.0,
+        420.0
+      ],
+      "precursor_mz_values": [
+        300.0
+      ]
+    },
+    "basic_ms2prod_220_scaninfo": {
+      "query": "QUERY scaninfo(MS2DATA) WHERE MS2PROD=220",
+      "description": "Scan info for scans with peak near 220",
+      "row_count": 1,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ],
+      "sum_intensity": 5000.0,
+      "max_intensity": 5000.0,
+      "precursor_mz_values": [
+        300.0
+      ]
+    },
+    "basic_ms2prod_220_scannum": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=220",
+      "description": "Scan numbers for scans with peak near 220",
+      "row_count": 1,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ]
+    },
+    "basic_ms2prec_200": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PREC=200",
+      "description": "Scans with precursor near 200",
+      "row_count": 1,
+      "scans": [
+        2
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        1
+      ]
+    },
+    "basic_ms2nl_80": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2NL=80",
+      "description": "Scans with neutral loss near 80",
+      "row_count": 1,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ]
+    },
+    "basic_ms1mz_200": {
+      "query": "QUERY scannum(MS1DATA) WHERE MS1MZ=200",
+      "description": "MS1 scans with peak near 200",
+      "row_count": 1,
+      "scans": [
+        1
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        0
+      ]
+    },
+    "meta_rtmin": {
+      "query": "QUERY scannum(MS2DATA) WHERE RTMIN=1.7",
+      "description": "MS2 scans with RT >= 1.7",
+      "row_count": 1,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ]
+    },
+    "meta_polarity_positive": {
+      "query": "QUERY scannum(MS2DATA) WHERE POLARITY=Positive",
+      "description": "Positive polarity MS2 scans",
+      "row_count": 1,
+      "scans": [
+        2
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        1
+      ]
+    },
+    "meta_charge_2": {
+      "query": "QUERY scannum(MS2DATA) WHERE CHARGE=2",
+      "description": "MS2 scans with charge 2",
+      "row_count": 1,
+      "scans": [
+        2
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        1
+      ]
+    },
+    "qual_intensitypercent_gt50": {
+      "query": "QUERY scannum(MS1DATA) WHERE MS1MZ=200:INTENSITYPERCENT>50",
+      "description": "MS1 peak at 200 with normalized intensity > 50%",
+      "row_count": 1,
+      "scans": [
+        1
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        0
+      ]
+    },
+    "qual_intensityvalue_gt3000": {
+      "query": "QUERY scannum(MS1DATA) WHERE MS1MZ=200:INTENSITYVALUE>3000",
+      "description": "MS1 peak at 200 with raw intensity > 3000",
+      "row_count": 1,
+      "scans": [
+        1
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        0
+      ]
+    },
+    "qual_intensityvalue_gt6000": {
+      "query": "QUERY scannum(MS1DATA) WHERE MS1MZ=200:INTENSITYVALUE>6000",
+      "description": "MS1 peak at 200 with raw intensity > 6000 (none match)",
+      "row_count": 0
+    },
+    "qual_excluded": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=150:EXCLUDED",
+      "description": "MS2 scans WITHOUT peak near 150",
+      "row_count": 1,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ]
+    },
+    "and_prod150_prec200": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=150 AND MS2PREC=200",
+      "description": "MS2 with peak near 150 AND precursor near 200",
+      "row_count": 1,
+      "scans": [
+        2
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        1
+      ]
+    },
+    "and_prod220_prec300": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=220 AND MS2PREC=300",
+      "description": "MS2 with peak near 220 AND precursor near 300",
+      "row_count": 1,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ]
+    },
+    "and_prod150_prec300_nomatch": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=150 AND MS2PREC=300",
+      "description": "MS2 with peak near 150 AND precursor near 300 (no match)",
+      "row_count": 0
+    },
+    "or_150_250": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=(150 OR 250)",
+      "description": "MS2 scans with peak near 150 OR 250",
+      "row_count": 1,
+      "scans": [
+        2
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        1
+      ]
+    },
+    "card_min2": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=(150 OR 250):CARDINALITY=range(min=2,max=5)",
+      "description": "MS2 with at least 2 of (150, 250) matching",
+      "row_count": 1,
+      "scans": [
+        2
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        1
+      ]
+    },
+    "card_max1": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=(150 OR 250):CARDINALITY=range(min=1,max=1)",
+      "description": "MS2 with exactly 1 of (150, 250) matching",
+      "row_count": 0
+    },
+    "filter_same_peak": {
+      "query": "QUERY MS2DATA WHERE MS2PROD=220 FILTER MS2PROD=220",
+      "description": "WHERE finds scan, FILTER keeps only peak near 220",
+      "row_count": 1,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ],
+      "sum_intensity": 2500.0,
+      "max_intensity": 2500.0,
+      "mz_values": [
+        220.0
+      ],
+      "precursor_mz_values": [
+        300.0
+      ]
+    },
+    "filter_scansum": {
+      "query": "QUERY scansum(MS2DATA) WHERE MS2PROD=220 FILTER MS2PROD=220",
+      "description": "scansum with FILTER narrowing to single peak",
+      "row_count": 1,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ],
+      "sum_intensity": 2500.0,
+      "max_intensity": 2500.0,
+      "mz_values": [
+        220.0
+      ],
+      "precursor_mz_values": [
+        300.0
+      ]
+    },
+    "filter_cross_peak": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=220 FILTER MS2PROD=320",
+      "description": "FILTER does not re-evaluate scan membership",
+      "row_count": 1,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ]
+    },
+    "agg_scansum": {
+      "query": "QUERY scansum(MS2DATA) WHERE MS2PROD=220",
+      "description": "Total intensity of scan with peak near 220",
+      "row_count": 1,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ],
+      "sum_intensity": 5000.0,
+      "max_intensity": 5000.0,
+      "mz_values": [
+        120.0
+      ],
+      "precursor_mz_values": [
+        300.0
+      ]
+    },
+    "agg_scanmaxint": {
+      "query": "QUERY scanmaxint(MS2DATA) WHERE MS2PROD=220",
+      "description": "Max intensity of scan with peak near 220",
+      "row_count": 1,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ],
+      "sum_intensity": 2500.0,
+      "max_intensity": 2500.0,
+      "mz_values": [
+        120.0
+      ],
+      "precursor_mz_values": [
+        300.0
+      ]
+    },
+    "agg_scanmz": {
+      "query": "QUERY scanmz(MS2DATA) WHERE MS2PROD=220",
+      "description": "Precursor mz of scan with peak near 220",
+      "row_count": 1,
+      "precursor_mz_values": [
+        300.0
+      ]
+    },
+    "tol_default_within": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=220.09",
+      "description": "Default 0.1 Da tolerance: 220.09 matches peak at 220",
+      "row_count": 1,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ]
+    },
+    "tol_default_outside": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=220.11",
+      "description": "Default 0.1 Da tolerance: 220.11 does NOT match peak at 220",
+      "row_count": 0
+    },
+    "xoffset_pair": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100",
+      "description": "X-offset pair: scans with two peaks 100 Da apart",
+      "row_count": 4,
+      "scans": [
+        2,
+        3
+      ],
+      "unique_scan_count": 2,
+      "spectrum_indices": [
+        1,
+        2
+      ]
+    },
+    "xoffset_triplet": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100 AND MS2PROD=X+200",
+      "description": "X-offset triplet: three peaks spaced by 100",
+      "row_count": 2,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ]
+    },
+    "xoffset_plus_rtmin": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100 AND RTMIN=1.7",
+      "description": "X-offset pair with RT filter",
+      "row_count": 3,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ]
+    },
+    "xoffset_nomatch": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+500",
+      "description": "X-offset pair with no match",
+      "row_count": 0
+    },
+    "crosslevel_ms1_ms2prec": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS1MZ=X AND MS2PREC=X",
+      "description": "MS2 scans whose precursor matches an MS1 peak",
+      "row_count": 2,
+      "scans": [
+        2,
+        3
+      ],
+      "unique_scan_count": 2,
+      "spectrum_indices": [
+        1,
+        2
+      ]
+    },
+    "crosslevel_plus_charge": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS1MZ=X AND MS2PREC=X AND CHARGE=2",
+      "description": "Cross-level with charge filter",
+      "row_count": 1,
+      "scans": [
+        2
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        1
+      ]
+    }
+  }
+}
