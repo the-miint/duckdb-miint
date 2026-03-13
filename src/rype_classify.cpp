@@ -148,6 +148,10 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 	gstate->input_connection = make_uniq<Connection>(db);
 	auto &conn = *gstate->input_connection;
 
+	// Use Arrow LargeBinary (i64 offsets) for BLOB columns to avoid the 2 GiB
+	// per-array limit of regular Binary (i32 offsets). RYpe supports both formats.
+	conn.Query("SET arrow_large_buffer_size = true");
+
 	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
 	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);
 
@@ -173,9 +177,9 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 	// shard I/O to dominate. Sample actual average read length for accurate estimation.
 	size_t avg_read_length = SampleAvgReadLength(conn, table_quoted);
 	int is_paired = bind_data.has_sequence2 ? 1 : 0;
-	// is_large_binary=0: DuckDB BLOB → Arrow Binary (i32 offsets), so RYpe caps
-	// batch size to keep total sequence data under 2 GiB per array.
-	size_t batch_size = rype_recommend_batch_size(gstate->index, avg_read_length, is_paired, 0, 0);
+	// is_large_binary=1: sub-connection uses arrow_large_buffer_size=true, so DuckDB
+	// exports BLOB as Arrow LargeBinary (i64 offsets) — no 2 GiB per-array limit.
+	size_t batch_size = rype_recommend_batch_size(gstate->index, avg_read_length, is_paired, 0, 1);
 	if (batch_size == 0) {
 		// rype_recommend_batch_size returns 0 on error — log but use safe fallback
 		const char *err = rype_get_last_error();

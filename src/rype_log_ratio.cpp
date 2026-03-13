@@ -141,6 +141,9 @@ unique_ptr<GlobalTableFunctionState> RypeLogRatioTableFunction::InitGlobal(Clien
 	gstate->input_connection = make_uniq<Connection>(db);
 	auto &conn = *gstate->input_connection;
 
+	// Use Arrow LargeBinary (i64 offsets) — see rype_classify.cpp InitGlobal for rationale.
+	conn.Query("SET arrow_large_buffer_size = true");
+
 	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
 	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);
 
@@ -172,9 +175,9 @@ unique_ptr<GlobalTableFunctionState> RypeLogRatioTableFunction::InitGlobal(Clien
 	const RypeIndex *sizing_index =
 	    (denom_shard_bytes > num_shard_bytes) ? gstate->denominator_index : gstate->numerator_index;
 
-	// is_large_binary=0: DuckDB BLOB → Arrow Binary (i32 offsets), so RYpe caps
-	// batch size to keep total sequence data under 2 GiB per array.
-	size_t batch_size = rype_recommend_batch_size(sizing_index, avg_read_length, is_paired, 0, 0);
+	// is_large_binary=1: sub-connection uses arrow_large_buffer_size=true, so DuckDB
+	// exports BLOB as Arrow LargeBinary (i64 offsets) — no 2 GiB per-array limit.
+	size_t batch_size = rype_recommend_batch_size(sizing_index, avg_read_length, is_paired, 0, 1);
 	if (batch_size == 0) {
 		// rype_recommend_batch_size returns 0 on error — log but use safe fallback
 		const char *err = rype_get_last_error();
