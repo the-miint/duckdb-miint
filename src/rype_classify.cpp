@@ -148,9 +148,9 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 	gstate->input_connection = make_uniq<Connection>(db);
 	auto &conn = *gstate->input_connection;
 
-	// Use Arrow LargeBinary (i64 offsets) for BLOB columns to avoid the 2 GiB
-	// per-array limit of regular Binary (i32 offsets). RYpe supports both formats.
-	conn.Query("SET arrow_large_buffer_size = true");
+	// Use Arrow BinaryView (v1.4+) for BLOB columns — no offset-size limits.
+	// RYpe supports Binary, LargeBinary, and BinaryView.
+	conn.Query("SET arrow_output_version = '1.4'");
 
 	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
 	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);

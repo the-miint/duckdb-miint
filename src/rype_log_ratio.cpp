@@ -141,8 +141,8 @@ unique_ptr<GlobalTableFunctionState> RypeLogRatioTableFunction::InitGlobal(Clien
 	gstate->input_connection = make_uniq<Connection>(db);
 	auto &conn = *gstate->input_connection;
 
-	// Use Arrow LargeBinary (i64 offsets) — see rype_classify.cpp InitGlobal for rationale.
-	conn.Query("SET arrow_large_buffer_size = true");
+	// Use Arrow BinaryView (v1.4+) — see rype_classify.cpp InitGlobal for rationale.
+	conn.Query("SET arrow_output_version = '1.4'");
 
 	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
 	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);
