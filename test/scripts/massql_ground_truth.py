@@ -212,6 +212,72 @@ QUERIES = [
         "query": "QUERY scannum(MS2DATA) WHERE MS1MZ=X AND MS2PREC=X AND CHARGE=2",
         "description": "Cross-level with charge filter",
     },
+    # --- Group 12: Cycle 3 — INTENSITYTICPERCENT ---
+    {
+        "id": "qual_intensityticpercent_gt50",
+        "query": "QUERY scannum(MS1DATA) WHERE MS1MZ=200:INTENSITYTICPERCENT>50",
+        "description": "MS1 peak at 200 with TIC-normalized intensity > 50%",
+    },
+    # --- Group 13: Cycle 4 — MASSDEFECT ---
+    {
+        "id": "massdefect_220",
+        "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=220:MASSDEFECT=massdefect(min=0.0,max=0.5)",
+        "description": "Peak near 220 with mass defect in [0.0, 0.5) — integer m/z qualifies",
+    },
+    # --- Group 14: Cycle 6 — aminoaciddelta ---
+    {
+        "id": "aminoaciddelta_nomatch",
+        "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=aminoaciddelta(AG)",
+        "description": "Peak at amino acid delta mass of AG (~128.058) — no match expected",
+    },
+    # --- Group 15: Cycle 13 — OTHERSCAN ---
+    # Note: Python MassQL's OTHERSCAN does not expand to neighboring scans (appears buggy).
+    # Our implementation correctly expands. We record Python's result but expect our result to differ.
+    {
+        "id": "otherscan_basic",
+        "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=220:OTHERSCAN=rtrange(left=0.5,right=0.5)",
+        "description": "Scan with peak at 220 + neighboring scans within ±0.5 min RT",
+    },
+    # --- Group 16: Explicit TOLERANCEMZ ---
+    {
+        "id": "explicit_tol_wide",
+        "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=220:TOLERANCEMZ=1.0",
+        "description": "Wide tolerance 1.0 Da still matches peak at 220",
+    },
+    {
+        "id": "explicit_tol_tight_miss",
+        "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=220.06:TOLERANCEMZ=0.05",
+        "description": "Tight tolerance 0.05 Da, 220.06 is 0.06 away from 220 — no match",
+    },
+    # --- Group 17: ANY wildcard ---
+    {
+        "id": "any_ms2prod",
+        "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=ANY",
+        "description": "ANY matches all MS2 scans with any peak",
+    },
+    {
+        "id": "any_ms2prod_raw",
+        "query": "QUERY MS2DATA WHERE MS2PROD=ANY",
+        "description": "ALL MS2 peaks from all scans",
+    },
+    # --- Group 18: MASSDEFECT exclusion test ---
+    {
+        "id": "massdefect_exclude_integer",
+        "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=220:MASSDEFECT=massdefect(min=0.5,max=0.9)",
+        "description": "Integer m/z has defect 0.0, not in (0.5, 0.9) — no match expected",
+    },
+    # --- Group 19: FILTER with intensity qualifier ---
+    {
+        "id": "filter_with_intensity",
+        "query": "QUERY MS2DATA WHERE MS2PROD=220 FILTER MS2PROD=220:INTENSITYPERCENT>50",
+        "description": "WHERE matches scan, FILTER keeps peaks near 220 with high intensity",
+    },
+    # --- Group 20: peptide() ---
+    {
+        "id": "peptide_nomatch",
+        "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=peptide(ACD,charge=1,ion=b)",
+        "description": "Peptide b-ion mass for ACD — no match expected in basic_3spectra",
+    },
 ]
 
 

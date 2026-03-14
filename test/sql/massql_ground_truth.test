@@ -270,3 +270,208 @@ query I
 SELECT COUNT(*) FROM massql('QUERY scannum(MS1DATA) WHERE MS1MZ=200:INTENSITYPERCENT<50', '__gt_spectra')
 ----
 0
+
+# ===== Group 13: Cycle 3 — INTENSITYTICPERCENT =====
+
+# qual_intensityticpercent_gt50: MS1 peak at 200, i_tic > 50%
+# Python: scan 1 (spectrum_index=0). Matches our result.
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS1DATA) WHERE MS1MZ=200:INTENSITYTICPERCENT>50', '__gt_spectra')
+----
+0
+
+# ===== Group 14: Cycle 4 — MASSDEFECT =====
+
+# massdefect_220: Peak at 220 with mass defect in (0.0, 0.5) — strict inequality
+# Integer m/z has defect exactly 0.0, and 0.0 > 0.0 is false -> no match.
+# Python MassQL bug: returns 1 row (MASSDEFECT ignored on MS2PROD).
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=220:MASSDEFECT=massdefect(min=0.0,max=0.5)', '__gt_spectra')
+----
+0
+
+# MASSDEFECT that excludes all peaks — integer m/z has defect 0.0, not in [0.5, 0.9)
+# Note: Python MassQL bug — returns 4 rows (MASSDEFECT ignored on MS2PROD).
+# Our implementation correctly returns 0 rows.
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=220:MASSDEFECT=massdefect(min=0.5,max=0.9)', '__gt_spectra')
+----
+0
+
+# ANY wildcard: all MS2 peaks from all MS2 scans
+query I
+SELECT COUNT(*) FROM massql('QUERY MS2DATA WHERE MS2PROD=ANY', '__gt_spectra')
+----
+6
+
+# ANY + MASSDEFECT: all MS2 peaks with mass defect in [0.0, 0.1)
+# All peaks in basic_3spectra have integer m/z (defect=0.0), so all 6 pass
+query I
+SELECT COUNT(*) FROM massql('QUERY MS2DATA WHERE MS2PROD=ANY:MASSDEFECT=massdefect(min=0.0,max=0.1)', '__gt_spectra')
+----
+0
+
+# ===== Group 15: Cycle 6 — aminoaciddelta =====
+
+# aminoaciddelta_nomatch: aminoaciddelta(AG) ~= 128.058, no peak near that m/z
+# Python: 0 rows. Matches our result.
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=aminoaciddelta(AG)', '__gt_spectra')
+----
+0
+
+# aminoaciddelta match: aminoaciddelta(G) = 57.02147 ≈ not near any peak
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=aminoaciddelta(G)', '__gt_spectra')
+----
+0
+
+# ===== Group 16: Cycle 13 — OTHERSCAN =====
+
+# otherscan_basic: MS2PROD=220 matches scan 3 (RT=1.8). ±0.5 min window
+# includes scan 2 (RT=1.6, delta=0.2 min < 0.5). Our implementation expands.
+# Note: Python MassQL bug — returns only scan 3 (OTHERSCAN ignored on MS2PROD).
+# Our implementation correctly returns both scans.
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=220:OTHERSCAN=rtrange(left=0.5,right=0.5)', '__gt_spectra')
+----
+1
+2
+
+# OTHERSCAN narrow window: ±0.1 min. Scan 2 is 0.2 min away, outside window.
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=220:OTHERSCAN=rtrange(left=0.1,right=0.1)', '__gt_spectra')
+----
+2
+
+# ===== Group 17: Explicit TOLERANCEMZ =====
+
+# explicit_tol_wide: 1.0 Da tolerance still matches peak at 220
+# Python: scan 3 (spectrum_index=2). Matches our result.
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=220:TOLERANCEMZ=1.0', '__gt_spectra')
+----
+2
+
+# explicit_tol_tight_miss: 0.05 Da tolerance, 220.06 is 0.06 away -> no match
+# Python: 0 rows. Matches our result.
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=220.06:TOLERANCEMZ=0.05', '__gt_spectra')
+----
+0
+
+# ===== Group 18: ANY wildcard =====
+
+# any_ms2prod: ANY matches all MS2 scans with any peak -> 2 MS2 scans
+# Note: Python MassQL returns 0 rows (ANY not supported). Our implementation is correct.
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=ANY', '__gt_spectra')
+----
+1
+2
+
+# any_ms2prod_raw: all MS2 peaks -> 6 rows (2 peaks in spec 1 + 4 peaks in spec 2)
+query I
+SELECT COUNT(*) FROM massql('QUERY MS2DATA WHERE MS2PROD=ANY', '__gt_spectra')
+----
+6
+
+# ===== Group 19: FILTER with intensity qualifier =====
+
+# FILTER keeps only peaks near 220 with i_norm > 50%. Peak at 220 has i=2500, max=2500 -> i_norm=1.0 > 0.5.
+# Python: 1 row. Matches our result.
+query I
+SELECT COUNT(*) FROM massql('QUERY MS2DATA WHERE MS2PROD=220 FILTER MS2PROD=220:INTENSITYPERCENT>50', '__gt_spectra')
+----
+1
+
+# ===== Group 20: peptide() =====
+
+# peptide b-ion for ACD at charge 1 — mass not near any peak in basic_3spectra
+# Python: 0 rows. Matches our result.
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=peptide(ACD,charge=1,ion=b)', '__gt_spectra')
+----
+0
+
+# ===== Group 21: Degenerate edge cases (Cycle 17) =====
+
+statement ok
+CREATE TABLE __degen AS SELECT * FROM read_mzml('data/mzml/degenerate.mzML');
+
+# MS2PROD=200: spectrum 0 is empty (invisible to massql), spectrum 2 has peaks at 200 -> 1 match
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=200', '__degen')
+----
+1
+
+# Single-peak spectrum: MS2PROD=100 matches spectrum 1 only
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=100', '__degen')
+----
+1
+
+# Duplicate m/z: spectrum 2 has two peaks at 200.0. Query should match.
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=200', '__degen')
+----
+2
+
+# Duplicate m/z raw data: should return both peaks
+query I
+SELECT COUNT(*) FROM massql('QUERY MS2DATA WHERE MS2PROD=200', '__degen')
+----
+2
+
+# Very large m/z: spectrum 3 has peak at 15000
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=15000', '__degen')
+----
+3
+
+# MS1 with precursor (malformed): MS1 queries should still find spectrum 4
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS1DATA) WHERE MS1MZ=300', '__degen')
+----
+4
+
+# MS2PREC on empty spectrum: spectrum 0 has precursor_mz=200 but 0 peaks.
+# mzml_peaks() has no rows for empty spectra, so spectrum 0 is invisible to massql().
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PREC=200', '__degen')
+----
+1
+
+# ANY on data with empty spectrum: should not return spectrum 0 (no peaks)
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=ANY', '__degen')
+----
+1
+2
+3
+
+# scansum on single-peak spectrum: total_intensity = 500
+query R
+SELECT total_intensity FROM massql('QUERY scansum(MS2DATA) WHERE MS2PROD=100', '__degen')
+----
+500.0
+
+# scansum on duplicate-mz spectrum: total_intensity = 1000 + 500 = 1500
+query R
+SELECT total_intensity FROM massql('QUERY scansum(MS2DATA) WHERE MS2PROD=200', '__degen')
+----
+1500.0
+
+# X-offset with no match in degenerate data: single-peak spectra can't form pairs
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100', '__degen')
+----
+0
+
+# EXCLUDED on degenerate data: spectra WITHOUT peak near 100
+# Spectrum 0 is invisible (empty). Spectra 2 (peaks at 200) and 3 (peak at 15000) qualify.
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=100:EXCLUDED', '__degen')
+----
+2
+3

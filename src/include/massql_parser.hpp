@@ -7,7 +7,7 @@ namespace miint {
 
 enum class DataType { MS1DATA, MS2DATA };
 
-enum class AggFunction { NONE, SCANINFO, SCANSUM, SCANNUM, SCANMZ, SCANMAXINT };
+enum class AggFunction { NONE, SCANINFO, SCANSUM, SCANNUM, SCANMZ, SCANMAXINT, SCANRANGESUM };
 
 enum class ConditionField {
 	// Peak-level fields
@@ -27,6 +27,7 @@ enum class ConditionField {
 struct ConditionValue {
 	double constant_value = 0.0;
 	bool has_x_variable = false;
+	bool has_any_wildcard = false;
 	double x_coefficient = 1.0;
 };
 
@@ -37,6 +38,10 @@ struct Qualifier {
 	double value = 0.0;
 	double max_value = 0.0; // for range(min=a,max=b)
 	QualifierOp op = QualifierOp::NONE;
+	// Y-expression fields (for INTENSITYMATCH qualifier)
+	double y_expr_constant = 1.0; // Y * constant (or Y * (constant + x_coeff*X))
+	double y_expr_x_coeff = 0.0;  // coefficient of X in Y expression
+	bool y_expr_has_x = false;
 };
 
 struct Condition {
@@ -49,6 +54,7 @@ struct Condition {
 struct MassQLQuery {
 	DataType data_type;
 	AggFunction agg_function = AggFunction::NONE;
+	double scanrangesum_tolerance = 0.0; // 0 means use default (0.1 Da)
 	std::vector<Condition> where_conditions;
 	std::vector<Condition> filter_conditions;
 };

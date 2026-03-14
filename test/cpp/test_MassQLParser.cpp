@@ -152,6 +152,27 @@ TEST_CASE("INTENSITYVALUE qualifier with >", "[massql][parser]") {
 	REQUIRE_THAT(q.where_conditions[0].qualifiers[0].value, Catch::Matchers::WithinAbs(3000.0, 0.001));
 }
 
+TEST_CASE("INTENSITYTICPERCENT qualifier with =", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY scannum(MS2DATA) WHERE MS2PROD=220:INTENSITYTICPERCENT=5");
+	REQUIRE(q.where_conditions[0].qualifiers[0].name == "INTENSITYTICPERCENT");
+	REQUIRE(q.where_conditions[0].qualifiers[0].op == QualifierOp::EQUALS);
+	REQUIRE_THAT(q.where_conditions[0].qualifiers[0].value, Catch::Matchers::WithinAbs(5.0, 0.001));
+}
+
+TEST_CASE("INTENSITYTICPERCENT qualifier with >", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY scannum(MS1DATA) WHERE MS1MZ=200:INTENSITYTICPERCENT>50");
+	REQUIRE(q.where_conditions[0].qualifiers[0].name == "INTENSITYTICPERCENT");
+	REQUIRE(q.where_conditions[0].qualifiers[0].op == QualifierOp::GREATER_THAN);
+	REQUIRE_THAT(q.where_conditions[0].qualifiers[0].value, Catch::Matchers::WithinAbs(50.0, 0.001));
+}
+
+TEST_CASE("INTENSITYTICPERCENT qualifier with <", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY scannum(MS2DATA) WHERE MS2PROD=150:INTENSITYTICPERCENT<80");
+	REQUIRE(q.where_conditions[0].qualifiers[0].name == "INTENSITYTICPERCENT");
+	REQUIRE(q.where_conditions[0].qualifiers[0].op == QualifierOp::LESS_THAN);
+	REQUIRE_THAT(q.where_conditions[0].qualifiers[0].value, Catch::Matchers::WithinAbs(80.0, 0.001));
+}
+
 TEST_CASE("EXCLUDED qualifier", "[massql][parser]") {
 	auto q = MassQLParser::parse("QUERY scannum(MS2DATA) WHERE MS2PROD=150:EXCLUDED");
 	REQUIRE(q.where_conditions[0].qualifiers.size() == 1);
@@ -325,6 +346,155 @@ TEST_CASE("LESS_THAN operator: INTENSITYPERCENT<50", "[massql][parser]") {
 	REQUIRE_THAT(q.where_conditions[0].qualifiers[0].value, Catch::Matchers::WithinAbs(50.0, 0.001));
 }
 
+// ===== Phase 7 Cycle 4: ANY wildcard + MASSDEFECT =====
+
+TEST_CASE("ANY wildcard: MS2PROD=ANY", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY scannum(MS2DATA) WHERE MS2PROD=ANY");
+	REQUIRE(q.where_conditions[0].values.size() == 1);
+	REQUIRE(q.where_conditions[0].values[0].has_any_wildcard == true);
+}
+
+TEST_CASE("ANY wildcard with qualifiers: MS2PROD=ANY:INTENSITYPERCENT>50", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY scannum(MS2DATA) WHERE MS2PROD=ANY:INTENSITYPERCENT>50");
+	REQUIRE(q.where_conditions[0].values[0].has_any_wildcard == true);
+	REQUIRE(q.where_conditions[0].qualifiers[0].name == "INTENSITYPERCENT");
+}
+
+TEST_CASE("MASSDEFECT qualifier: massdefect(min=0.1,max=0.2)", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY scannum(MS2DATA) WHERE MS2PROD=ANY:MASSDEFECT=massdefect(min=0.1,max=0.2)");
+	REQUIRE(q.where_conditions[0].values[0].has_any_wildcard == true);
+	REQUIRE(q.where_conditions[0].qualifiers[0].name == "MASSDEFECT");
+	REQUIRE_THAT(q.where_conditions[0].qualifiers[0].value, Catch::Matchers::WithinAbs(0.1, 0.001));
+	REQUIRE_THAT(q.where_conditions[0].qualifiers[0].max_value, Catch::Matchers::WithinAbs(0.2, 0.001));
+}
+
+TEST_CASE("MASSDEFECT on fixed mz: MS2PROD=220:MASSDEFECT=massdefect(min=0.0,max=0.5)", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY scannum(MS2DATA) WHERE MS2PROD=220:MASSDEFECT=massdefect(min=0.0,max=0.5)");
+	REQUIRE(q.where_conditions[0].values[0].has_any_wildcard == false);
+	REQUIRE_THAT(q.where_conditions[0].values[0].constant_value, Catch::Matchers::WithinAbs(220.0, 0.001));
+	REQUIRE(q.where_conditions[0].qualifiers[0].name == "MASSDEFECT");
+}
+
+// ===== Phase 7 Cycle 8: Y-variable parser =====
+
+TEST_CASE("INTENSITYMATCHREFERENCE qualifier", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY scaninfo(MS2DATA) WHERE MS2PROD=150:INTENSITYMATCH=Y:INTENSITYMATCHREFERENCE");
+	auto &quals = q.where_conditions[0].qualifiers;
+	bool has_ref = false, has_match = false;
+	for (const auto &qual : quals) {
+		if (qual.name == "INTENSITYMATCHREFERENCE") {
+			has_ref = true;
+		}
+		if (qual.name == "INTENSITYMATCH") {
+			has_match = true;
+			REQUIRE_THAT(qual.y_expr_constant, Catch::Matchers::WithinAbs(1.0, 0.001));
+		}
+	}
+	REQUIRE(has_ref);
+	REQUIRE(has_match);
+}
+
+TEST_CASE("INTENSITYMATCH=Y*0.66 with INTENSITYMATCHPERCENT", "[massql][parser]") {
+	auto q =
+	    MassQLParser::parse("QUERY scaninfo(MS2DATA) WHERE MS2PROD=250:INTENSITYMATCH=Y*0.5:INTENSITYMATCHPERCENT=10");
+	auto &quals = q.where_conditions[0].qualifiers;
+	bool has_match = false, has_pct = false;
+	for (const auto &qual : quals) {
+		if (qual.name == "INTENSITYMATCH") {
+			has_match = true;
+			REQUIRE_THAT(qual.y_expr_constant, Catch::Matchers::WithinAbs(0.5, 0.001));
+			REQUIRE_FALSE(qual.y_expr_has_x);
+		}
+		if (qual.name == "INTENSITYMATCHPERCENT") {
+			has_pct = true;
+			REQUIRE_THAT(qual.value, Catch::Matchers::WithinAbs(10.0, 0.001));
+		}
+	}
+	REQUIRE(has_match);
+	REQUIRE(has_pct);
+}
+
+TEST_CASE("INTENSITYMATCH=Y (coefficient 1.0)", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY scaninfo(MS2DATA) WHERE MS2PROD=150:INTENSITYMATCH=Y");
+	auto &quals = q.where_conditions[0].qualifiers;
+	bool has_match = false;
+	for (const auto &qual : quals) {
+		if (qual.name == "INTENSITYMATCH") {
+			has_match = true;
+			REQUIRE_THAT(qual.y_expr_constant, Catch::Matchers::WithinAbs(1.0, 0.001));
+		}
+	}
+	REQUIRE(has_match);
+}
+
+TEST_CASE("INTENSITYMATCH=Y*(0.0608+(0.000002*X)) X-dependent", "[massql][parser]") {
+	auto q = MassQLParser::parse(
+	    "QUERY scaninfo(MS1DATA) WHERE MS1MZ=X:INTENSITYMATCH=Y*(0.0608+(0.000002*X)):INTENSITYMATCHREFERENCE AND "
+	    "MS1MZ=X+1.003:INTENSITYMATCH=Y*(0.0608+(0.000002*X)):INTENSITYMATCHPERCENT=30");
+	// Second condition should have the X-dependent Y expression
+	auto &quals = q.where_conditions[1].qualifiers;
+	for (const auto &qual : quals) {
+		if (qual.name == "INTENSITYMATCH") {
+			REQUIRE_THAT(qual.y_expr_constant, Catch::Matchers::WithinAbs(0.0608, 0.001));
+			REQUIRE_THAT(qual.y_expr_x_coeff, Catch::Matchers::WithinAbs(0.000002, 0.0000001));
+			REQUIRE(qual.y_expr_has_x);
+		}
+	}
+}
+
+// ===== Phase 7 Cycle 6: aminoaciddelta() =====
+
+TEST_CASE("aminoaciddelta constant fold: AG", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=aminoaciddelta(AG)");
+	REQUIRE_FALSE(q.where_conditions[0].values[0].has_x_variable);
+	// Ala=71.03711 + Gly=57.02147 = 128.05858
+	REQUIRE_THAT(q.where_conditions[0].values[0].constant_value, Catch::Matchers::WithinAbs(128.05858, 0.001));
+}
+
+TEST_CASE("aminoaciddelta in X+offset: MS2PROD=X+aminoaciddelta(K)", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=X+aminoaciddelta(K)");
+	REQUIRE(q.where_conditions[0].values[0].has_x_variable);
+	// Lys=128.09496
+	REQUIRE_THAT(q.where_conditions[0].values[0].constant_value, Catch::Matchers::WithinAbs(128.09496, 0.001));
+}
+
+// ===== Phase 7 Cycle 7: peptide() =====
+
+TEST_CASE("peptide constant fold: ACDE charge=1 ion=b", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=peptide(ACDE,charge=1,ion=b)");
+	REQUIRE_FALSE(q.where_conditions[0].values[0].has_x_variable);
+	// A=71.03711 + C=103.00919 + D=115.02694 + E=129.04259 = 418.11583
+	// b ion = sum + proton = 418.11583 + 1.00728 = 419.12311
+	REQUIRE_THAT(q.where_conditions[0].values[0].constant_value, Catch::Matchers::WithinAbs(419.12311, 0.01));
+}
+
+TEST_CASE("peptide constant fold: ACDE charge=2 ion=b", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=peptide(ACDE,charge=2,ion=b)");
+	// b ion charge 2 = (sum + 2*proton) / 2 = (418.11583 + 2*1.00728) / 2 = 210.06520
+	REQUIRE_THAT(q.where_conditions[0].values[0].constant_value, Catch::Matchers::WithinAbs(210.06520, 0.01));
+}
+
+TEST_CASE("peptide constant fold: ACDE charge=1 ion=y", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=peptide(ACDE,charge=1,ion=y)");
+	// y ion = sum + water + proton = 418.11583 + 18.01056 + 1.00728 = 437.13367
+	REQUIRE_THAT(q.where_conditions[0].values[0].constant_value, Catch::Matchers::WithinAbs(437.13367, 0.01));
+}
+
+// ===== Phase 7 Cycle 5: scanrangesum() =====
+
+TEST_CASE("scanrangesum aggregation", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY scanrangesum(MS2DATA) WHERE MS2PROD=220");
+	REQUIRE(q.agg_function == AggFunction::SCANRANGESUM);
+	REQUIRE(q.data_type == DataType::MS2DATA);
+	REQUIRE(q.scanrangesum_tolerance == 0.0); // 0 means use default
+}
+
+TEST_CASE("scanrangesum with TOLERANCE parameter", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY scanrangesum(MS2DATA, TOLERANCE=0.5) WHERE MS2PROD=220");
+	REQUIRE(q.agg_function == AggFunction::SCANRANGESUM);
+	REQUIRE_THAT(q.scanrangesum_tolerance, Catch::Matchers::WithinAbs(0.5, 0.001));
+}
+
 TEST_CASE("division constant folding: MS2PROD=400/2", "[massql][parser]") {
 	auto q = MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=400/2");
 	REQUIRE_FALSE(q.where_conditions[0].values[0].has_x_variable);
@@ -334,4 +504,121 @@ TEST_CASE("division constant folding: MS2PROD=400/2", "[massql][parser]") {
 TEST_CASE("division with addition: MS2PROD=400/2+10", "[massql][parser]") {
 	auto q = MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=400/2+10");
 	REQUIRE_THAT(q.where_conditions[0].values[0].constant_value, Catch::Matchers::WithinAbs(210.0, 0.001));
+}
+
+// ===== Phase 7 Cycle 13: OTHERSCAN qualifier =====
+
+TEST_CASE("OTHERSCAN=rtrange(left=0.5,right=0.5) parses", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY scaninfo(MS2DATA) WHERE MS2PROD=226.18:OTHERSCAN=rtrange(left=0.5,right=0.5)");
+	REQUIRE(q.where_conditions.size() == 1);
+	auto &quals = q.where_conditions[0].qualifiers;
+	bool found = false;
+	for (const auto &qual : quals) {
+		if (qual.name == "OTHERSCAN") {
+			found = true;
+			REQUIRE_THAT(qual.value, Catch::Matchers::WithinAbs(0.5, 0.001));
+			REQUIRE_THAT(qual.max_value, Catch::Matchers::WithinAbs(0.5, 0.001));
+		}
+	}
+	REQUIRE(found);
+}
+
+// ===== Pre-work D: Out-of-scope error messages =====
+
+TEST_CASE("MOBILITY qualifier error", "[massql][parser]") {
+	try {
+		MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=220:MOBILITY=5");
+		REQUIRE(false); // should have thrown
+	} catch (const std::runtime_error &e) {
+		REQUIRE(std::string(e.what()).find("MOBILITY is not supported") != std::string::npos);
+	}
+}
+
+// ===== Phase 7 Cycle 14: Error message quality =====
+
+TEST_CASE("Did you mean? for misspelled field MS2PRODUCT", "[massql][parser]") {
+	try {
+		MassQLParser::parse("QUERY MS2DATA WHERE MS2PRODUCT=220");
+		REQUIRE(false);
+	} catch (const std::runtime_error &e) {
+		std::string msg = e.what();
+		REQUIRE(msg.find("Did you mean") != std::string::npos);
+		REQUIRE(msg.find("MS2PROD") != std::string::npos);
+	}
+}
+
+TEST_CASE("Did you mean? for misspelled qualifier TOLERENCE", "[massql][parser]") {
+	try {
+		MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=220:TOLERENCE=0.5");
+		REQUIRE(false);
+	} catch (const std::runtime_error &e) {
+		std::string msg = e.what();
+		REQUIRE(msg.find("Did you mean") != std::string::npos);
+		REQUIRE(msg.find("TOLERANCEMZ") != std::string::npos);
+	}
+}
+
+TEST_CASE("Did you mean? for misspelled aggregation SCANINF", "[massql][parser]") {
+	try {
+		MassQLParser::parse("QUERY SCANINF(MS2DATA) WHERE MS2PROD=220");
+		REQUIRE(false);
+	} catch (const std::runtime_error &e) {
+		std::string msg = e.what();
+		REQUIRE(msg.find("Did you mean") != std::string::npos);
+		REQUIRE(msg.find("scaninfo") != std::string::npos);
+	}
+}
+
+TEST_CASE("Position info in unexpected character error", "[massql][parser]") {
+	try {
+		MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=220 @");
+		REQUIRE(false);
+	} catch (const std::runtime_error &e) {
+		std::string msg = e.what();
+		REQUIRE(msg.find("position") != std::string::npos);
+	}
+}
+
+TEST_CASE("OTHERSCAN=rtrange asymmetric left/right", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=220:OTHERSCAN=rtrange(left=0.3,right=1.0)");
+	auto &quals = q.where_conditions[0].qualifiers;
+	for (const auto &qual : quals) {
+		if (qual.name == "OTHERSCAN") {
+			REQUIRE_THAT(qual.value, Catch::Matchers::WithinAbs(0.3, 0.001));
+			REQUIRE_THAT(qual.max_value, Catch::Matchers::WithinAbs(1.0, 0.001));
+		}
+	}
+}
+
+// ===== Code review fixes: edge case tests =====
+
+TEST_CASE("lowercase amino acids: aminoaciddelta(ag) same as AG", "[massql][parser]") {
+	auto q = MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=aminoaciddelta(ag)");
+	REQUIRE_FALSE(q.where_conditions[0].values[0].has_x_variable);
+	// Ala=71.03711 + Gly=57.02147 = 128.05858
+	REQUIRE_THAT(q.where_conditions[0].values[0].constant_value, Catch::Matchers::WithinAbs(128.05858, 0.001));
+}
+
+TEST_CASE("uppercase ion type: peptide(ACD,charge=1,ion=B) same as ion=b", "[massql][parser]") {
+	auto q_upper = MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=peptide(ACD,charge=1,ion=B)");
+	auto q_lower = MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=peptide(ACD,charge=1,ion=b)");
+	REQUIRE_THAT(q_upper.where_conditions[0].values[0].constant_value,
+	             Catch::Matchers::WithinAbs(q_lower.where_conditions[0].values[0].constant_value, 1e-9));
+}
+
+TEST_CASE("TOLERANCE=0 throws", "[massql][parser]") {
+	REQUIRE_THROWS(MassQLParser::parse("QUERY scanrangesum(MS2DATA, TOLERANCE=0) WHERE MS2PROD=220"));
+}
+
+TEST_CASE("peptide() error message says peptide not aminoaciddelta", "[massql][parser]") {
+	try {
+		// Empty sequence inside peptide() — AminoacidDeltaMass throws "aminoaciddelta(): empty sequence"
+		// but the error should be rewritten to say "peptide()"
+		MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=peptide(J,charge=1,ion=b)");
+		REQUIRE(false);
+	} catch (const std::runtime_error &e) {
+		std::string msg = e.what();
+		// Should mention peptide, not aminoaciddelta, since user called peptide()
+		REQUIRE(msg.find("peptide") != std::string::npos);
+	}
 }

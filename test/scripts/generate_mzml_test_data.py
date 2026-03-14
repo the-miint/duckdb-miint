@@ -1240,6 +1240,269 @@ def generate_massdefect_prec():
         f.write(content)
 
 
+def generate_intensity_match():
+    """MS2 spectra with controlled intensity ratios for Y-variable testing.
+
+    | Spectrum | Peaks (m/z -> intensity) | Purpose                                    |
+    |----------|--------------------------|--------------------------------------------|
+    | 0        | 150->1000, 250->500, 350->100 | Y*0.5 match at 250 (ref=150)          |
+    | 1        | 150->1000, 250->490, 350->100 | Y*0.5 within 10% at 250               |
+    | 2        | 150->1000, 250->200, 350->100 | Y*0.5 does NOT match at 250           |
+    | 3        | 150->1000, 250->500, 350->500 | Two peaks same intensity               |
+
+    All MS2, precursor_mz=400.0, RT=1.0, 2.0, 3.0, 4.0 min.
+    """
+    spectra = []
+
+    for i, (intensities, rt) in enumerate(
+        [
+            ([1000.0, 500.0, 100.0], 1.0),
+            ([1000.0, 490.0, 100.0], 2.0),
+            ([1000.0, 200.0, 100.0], 3.0),
+            ([1000.0, 500.0, 500.0], 4.0),
+        ]
+    ):
+        spectra.append(
+            make_spectrum(
+                index=i,
+                spectrum_id=f"scan={i + 1}",
+                ms_level=2,
+                rt_value=rt,
+                rt_unit="minute",
+                spectrum_type="centroid",
+                polarity="positive",
+                base_peak_mz=150.0,
+                base_peak_intensity=intensities[0],
+                tic=sum(intensities),
+                mz_values=[150.0, 250.0, 350.0],
+                intensity_values=intensities,
+                precursor_mz=400.0,
+                precursor_charge=2,
+                activation_method="HCD",
+                collision_energy=30.0,
+            )
+        )
+
+    content = INDEXED_MZML_HEADER
+    content += RUN_OPEN + "\n"
+    content += f'  <spectrumList count="{len(spectra)}" defaultDataProcessingRef="dp">\n'
+    content += "\n".join(spectra) + "\n"
+    content += "  </spectrumList>\n"
+    content += RUN_CLOSE + "\n"
+    content += INDEXED_MZML_FOOTER
+
+    with open(os.path.join(OUTPUT_DIR, "intensity_match.mzML"), "w") as f:
+        f.write(content)
+
+
+def generate_isotope_pattern_xy():
+    """MS1 spectra with known isotope envelopes for X+Y pattern testing.
+
+    | Spectrum | Peaks (m/z -> intensity) | Purpose                                     |
+    |----------|--------------------------|---------------------------------------------|
+    | 0        | 500->10000, 501.003->3000, 502.006->500 | M+1=Y*0.30, M+2=Y*0.05  |
+    | 1        | 600->8000, 601.003->5000, 602.006->2000 | M+1=Y*0.625, M+2=Y*0.25 |
+    | 2        | 700->5000, 701.003->1500                | Only M and M+1, no M+2   |
+    """
+    spectra = []
+
+    for i, (mzs, ints, rt) in enumerate(
+        [
+            ([500.0, 501.003, 502.006], [10000.0, 3000.0, 500.0], 1.0),
+            ([600.0, 601.003, 602.006], [8000.0, 5000.0, 2000.0], 2.0),
+            ([700.0, 701.003], [5000.0, 1500.0], 3.0),
+        ]
+    ):
+        spectra.append(
+            make_spectrum(
+                index=i,
+                spectrum_id=f"scan={i + 1}",
+                ms_level=1,
+                rt_value=rt,
+                rt_unit="minute",
+                spectrum_type="centroid",
+                polarity="positive",
+                base_peak_mz=mzs[0],
+                base_peak_intensity=ints[0],
+                tic=sum(ints),
+                mz_values=mzs,
+                intensity_values=ints,
+            )
+        )
+
+    content = INDEXED_MZML_HEADER
+    content += RUN_OPEN + "\n"
+    content += f'  <spectrumList count="{len(spectra)}" defaultDataProcessingRef="dp">\n'
+    content += "\n".join(spectra) + "\n"
+    content += "  </spectrumList>\n"
+    content += RUN_CLOSE + "\n"
+    content += INDEXED_MZML_FOOTER
+
+    with open(os.path.join(OUTPUT_DIR, "isotope_pattern_xy.mzML"), "w") as f:
+        f.write(content)
+
+
+def generate_degenerate():
+    """Edge-case spectra for MassQL degenerate input testing.
+
+    | Spectrum | MS Level | Peaks                        | Purpose                        |
+    |----------|----------|------------------------------|--------------------------------|
+    | 0        | 2        | (none)                       | Empty spectrum, 0 peaks        |
+    | 1        | 2        | 100.0->500                   | Single peak                    |
+    | 2        | 2        | 200.0->1000, 200.0->500      | Duplicate m/z                  |
+    | 3        | 2        | 15000.0->100                 | Very large m/z                 |
+    | 4        | 1        | 300.0->2000                  | MS1 with precursor (malformed) |
+    """
+    spectra = []
+
+    # Spectrum 0: empty (0 peaks)
+    spectra.append(
+        make_spectrum(
+            index=0,
+            spectrum_id="scan=1",
+            ms_level=2,
+            rt_value=1.0,
+            rt_unit="minute",
+            spectrum_type="centroid",
+            polarity="positive",
+            tic=0,
+            mz_values=[],
+            intensity_values=[],
+            precursor_mz=200.0,
+        )
+    )
+
+    # Spectrum 1: single peak
+    spectra.append(
+        make_spectrum(
+            index=1,
+            spectrum_id="scan=2",
+            ms_level=2,
+            rt_value=2.0,
+            rt_unit="minute",
+            spectrum_type="centroid",
+            polarity="positive",
+            base_peak_mz=100.0,
+            base_peak_intensity=500.0,
+            tic=500.0,
+            mz_values=[100.0],
+            intensity_values=[500.0],
+            precursor_mz=200.0,
+        )
+    )
+
+    # Spectrum 2: duplicate m/z values
+    spectra.append(
+        make_spectrum(
+            index=2,
+            spectrum_id="scan=3",
+            ms_level=2,
+            rt_value=3.0,
+            rt_unit="minute",
+            spectrum_type="centroid",
+            polarity="positive",
+            base_peak_mz=200.0,
+            base_peak_intensity=1000.0,
+            tic=1500.0,
+            mz_values=[200.0, 200.0],
+            intensity_values=[1000.0, 500.0],
+            precursor_mz=400.0,
+        )
+    )
+
+    # Spectrum 3: very large m/z
+    spectra.append(
+        make_spectrum(
+            index=3,
+            spectrum_id="scan=4",
+            ms_level=2,
+            rt_value=4.0,
+            rt_unit="minute",
+            spectrum_type="centroid",
+            polarity="positive",
+            base_peak_mz=15000.0,
+            base_peak_intensity=100.0,
+            tic=100.0,
+            mz_values=[15000.0],
+            intensity_values=[100.0],
+            precursor_mz=15100.0,
+        )
+    )
+
+    # Spectrum 4: MS1 with precursor_mz (malformed)
+    spectra.append(
+        make_spectrum(
+            index=4,
+            spectrum_id="scan=5",
+            ms_level=1,
+            rt_value=5.0,
+            rt_unit="minute",
+            spectrum_type="centroid",
+            polarity="positive",
+            base_peak_mz=300.0,
+            base_peak_intensity=2000.0,
+            tic=2000.0,
+            mz_values=[300.0],
+            intensity_values=[2000.0],
+            precursor_mz=300.0,
+        )
+    )
+
+    content = INDEXED_MZML_HEADER
+    content += RUN_OPEN + "\n"
+    content += f'  <spectrumList count="{len(spectra)}" defaultDataProcessingRef="dp">\n'
+    content += "\n".join(spectra) + "\n"
+    content += "  </spectrumList>\n"
+    content += RUN_CLOSE + "\n"
+    content += INDEXED_MZML_FOOTER
+
+    with open(os.path.join(OUTPUT_DIR, "degenerate.mzML"), "w") as f:
+        f.write(content)
+
+
+def generate_perf_10k():
+    """10,000 MS2 spectra with 100 peaks each, for performance benchmarks.
+
+    Peaks are spaced 10 Da apart: mz = 50 + j*10 for j in 0..99.
+    Intensities are random-looking but deterministic (based on index).
+    Precursor m/z increments by 0.1 per spectrum.
+    RT increments by 0.01 min per spectrum (0 to 100 min).
+    """
+    import math
+
+    spectra = []
+    for i in range(10000):
+        mz_values = [50.0 + j * 10.0 for j in range(100)]
+        # Deterministic pseudo-random intensities using simple hash
+        intensity_values = [100.0 + 900.0 * abs(math.sin(i * 100 + j * 7 + 0.5)) for j in range(100)]
+        spectra.append(
+            make_spectrum(
+                index=i,
+                spectrum_id=f"scan={i + 1}",
+                ms_level=2,
+                rt_value=round(i * 0.01, 4),
+                rt_unit="minute",
+                spectrum_type="centroid",
+                polarity="positive",
+                tic=round(sum(intensity_values), 1),
+                mz_values=mz_values,
+                intensity_values=intensity_values,
+                precursor_mz=round(100.0 + i * 0.1, 4),
+            )
+        )
+
+    content = INDEXED_MZML_HEADER
+    content += RUN_OPEN + "\n"
+    content += f'  <spectrumList count="{len(spectra)}" defaultDataProcessingRef="dp">\n'
+    content += "\n".join(spectra) + "\n"
+    content += "  </spectrumList>\n"
+    content += RUN_CLOSE + "\n"
+    content += INDEXED_MZML_FOOTER
+
+    with open(os.path.join(OUTPUT_DIR, "perf_10k.mzML"), "w") as f:
+        f.write(content)
+
+
 if __name__ == "__main__":
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     generate_basic_3spectra()
@@ -1257,4 +1520,8 @@ if __name__ == "__main__":
     generate_isotope_pattern()
     generate_prec_prod_link()
     generate_massdefect_prec()
+    generate_intensity_match()
+    generate_isotope_pattern_xy()
+    generate_degenerate()
+    generate_perf_10k()
     print(f"Generated test data in {OUTPUT_DIR}")

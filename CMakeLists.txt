@@ -407,7 +407,8 @@ set(EXTENSION_SOURCES
     src/formula_function.cpp
     src/massql_parser.cpp
     src/massql_transpiler.cpp
-    src/massql_function.cpp)
+    src/massql_function.cpp
+    src/mass_tables.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
@@ -527,6 +528,7 @@ set(TEST_SOURCES
     test/cpp/test_MzMLReader.cpp
     src/formula_parser.cpp
     src/massql_parser.cpp
+    src/mass_tables.cpp
     test/cpp/test_MassQLParser.cpp
 )
 

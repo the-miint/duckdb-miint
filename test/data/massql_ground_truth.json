@@ -413,6 +413,111 @@
       "spectrum_indices": [
         1
       ]
+    },
+    "qual_intensityticpercent_gt50": {
+      "query": "QUERY scannum(MS1DATA) WHERE MS1MZ=200:INTENSITYTICPERCENT>50",
+      "description": "MS1 peak at 200 with TIC-normalized intensity > 50%",
+      "row_count": 1,
+      "scans": [
+        1
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        0
+      ]
+    },
+    "massdefect_220": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=220:MASSDEFECT=massdefect(min=0.0,max=0.5)",
+      "description": "Peak near 220 with mass defect in [0.0, 0.5) \u2014 integer m/z qualifies",
+      "row_count": 1,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ]
+    },
+    "aminoaciddelta_nomatch": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=aminoaciddelta(AG)",
+      "description": "Peak at amino acid delta mass of AG (~128.058) \u2014 no match expected",
+      "row_count": 0
+    },
+    "otherscan_basic": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=220:OTHERSCAN=rtrange(left=0.5,right=0.5)",
+      "description": "Scan with peak at 220 + neighboring scans within \u00b10.5 min RT",
+      "row_count": 1,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ]
+    },
+    "explicit_tol_wide": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=220:TOLERANCEMZ=1.0",
+      "description": "Wide tolerance 1.0 Da still matches peak at 220",
+      "row_count": 1,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ]
+    },
+    "explicit_tol_tight_miss": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=220.06:TOLERANCEMZ=0.05",
+      "description": "Tight tolerance 0.05 Da, 220.06 is 0.06 away from 220 \u2014 no match",
+      "row_count": 0
+    },
+    "any_ms2prod": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=ANY",
+      "description": "ANY matches all MS2 scans with any peak",
+      "row_count": 0
+    },
+    "any_ms2prod_raw": {
+      "query": "QUERY MS2DATA WHERE MS2PROD=ANY",
+      "description": "ALL MS2 peaks from all scans",
+      "row_count": 0
+    },
+    "massdefect_exclude_integer": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=220:MASSDEFECT=massdefect(min=0.5,max=0.9)",
+      "description": "Integer m/z has defect 0.0, not in (0.5, 0.9) \u2014 no match expected",
+      "row_count": 1,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ]
+    },
+    "filter_with_intensity": {
+      "query": "QUERY MS2DATA WHERE MS2PROD=220 FILTER MS2PROD=220:INTENSITYPERCENT>50",
+      "description": "WHERE matches scan, FILTER keeps peaks near 220 with high intensity",
+      "row_count": 1,
+      "scans": [
+        3
+      ],
+      "unique_scan_count": 1,
+      "spectrum_indices": [
+        2
+      ],
+      "sum_intensity": 2500.0,
+      "max_intensity": 2500.0,
+      "mz_values": [
+        220.0
+      ],
+      "precursor_mz_values": [
+        300.0
+      ]
+    },
+    "peptide_nomatch": {
+      "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=peptide(ACD,charge=1,ion=b)",
+      "description": "Peptide b-ion mass for ACD \u2014 no match expected in basic_3spectra",
+      "row_count": 0
     }
   }
 }
