@@ -304,8 +304,8 @@ SELECT COUNT(*) FROM massql('QUERY MS2DATA WHERE MS2PROD=ANY', '__gt_spectra')
 ----
 6
 
-# ANY + MASSDEFECT: all MS2 peaks with mass defect in [0.0, 0.1)
-# All peaks in basic_3spectra have integer m/z (defect=0.0), so all 6 pass
+# ANY + MASSDEFECT: all MS2 peaks with mass defect in (0.0, 0.1) — strict inequality
+# All peaks in basic_3spectra have integer m/z (defect=0.0), and 0.0 > 0.0 is false, so 0 pass
 query I
 SELECT COUNT(*) FROM massql('QUERY MS2DATA WHERE MS2PROD=ANY:MASSDEFECT=massdefect(min=0.0,max=0.1)', '__gt_spectra')
 ----
@@ -394,7 +394,97 @@ SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=peptide(ACD,ch
 ----
 0
 
-# ===== Group 21: Degenerate edge cases (Cycle 17) =====
+# ===== Group 21: SCANMIN/SCANMAX (Phase 8) =====
+
+# meta_scanmin_2: scan_number >= 2 -> spectrum_indices=[1, 2]
+# Python ground truth: scans [2, 3]
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE SCANMIN=2', '__gt_spectra')
+----
+1
+2
+
+# meta_scanmax_2: scan_number <= 2 -> spectrum_index=1
+# Python ground truth: scans [2]
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE SCANMAX=2', '__gt_spectra')
+----
+1
+
+# meta_scan_range: scan_number in [2, 3] -> spectrum_indices=[1, 2]
+# Python ground truth: scans [2, 3]
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE SCANMIN=2 AND SCANMAX=3', '__gt_spectra')
+----
+1
+2
+
+# ===== Group 22: TOLERANCEPPM (Phase 8) =====
+
+# tol_ppm_ms1: MS1MZ=200 with 5 ppm tolerance -> spectrum_index=0
+# Python ground truth: scans [1]
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS1DATA) WHERE MS1MZ=200:TOLERANCEPPM=5', '__gt_spectra')
+----
+0
+
+# ===== Group 23: Phase 9 Cycle 2 — MOBILITY no-op =====
+
+# Ground truth: MOBILITY no-op (matches Python: all MS2 scans)
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MOBILITY=range(min=0,max=100)', '__gt_spectra')
+----
+1
+2
+
+# Ground truth: MOBILITY narrow range still no-op (matches Python; possible Bug 5)
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MOBILITY=range(min=99,max=100)', '__gt_spectra')
+----
+1
+2
+
+# ===== Group 24: Phase 9 Cycle 3 — OTHERSCAN+OR =====
+
+# Ground truth: OTHERSCAN+OR (Python returns scans [2] due to Bug 2; we correctly expand)
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=(150 OR 250):OTHERSCAN=rtrange(left=0.5,right=0.5)', '__gt_spectra')
+----
+1
+2
+
+# ===== Group 25: Phase 9 Cycle 4 — X=range() and X=massdefect() =====
+
+# Ground truth: X=range (matches Python: scans [2,3])
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100 AND X=range(min=100,max=300)', '__gt_spectra')
+----
+1
+2
+
+# Ground truth: X=massdefect inclusive (matches Python: defect=0.0 included)
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100 AND X=massdefect(min=0.0,max=0.5)', '__gt_spectra')
+----
+1
+2
+
+# Ground truth: X=massdefect exclusive (matches Python: 0 rows)
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100 AND X=massdefect(min=0.1,max=0.9)', '__gt_spectra')
+----
+0
+
+# ===== Group 26: Phase 9 Cycle 1 — PPM on X-offset =====
+
+# Ground truth: PPM on X-offset (matches Python: scans [2,3])
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X:TOLERANCEPPM=10 AND MS2PROD=X+100:TOLERANCEPPM=10', '__gt_spectra')
+----
+1
+2
+
+# ===== Group 27: Degenerate edge cases (Cycle 17) =====
 
 statement ok
 CREATE TABLE __degen AS SELECT * FROM read_mzml('data/mzml/degenerate.mzML');

@@ -1,0 +1,86 @@
+# name: test/sql/massql_x_constraint.test
+# description: X=range() and X=massdefect() constraints for MassQL X-variable patterns
+# group: [sql]
+
+require miint
+
+statement ok
+CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML');
+
+# X=range(min=100,max=300): X from 100-300, X+100 offset
+# spec 1: X=150->250 match. spec 2: X=120->220 match, X=220->320 match
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100 AND X=range(min=100,max=300)', 'spectra')
+----
+1
+2
+
+# X=range(min=200,max=400): only X=220->320 and X=320->420 from spec 2
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100 AND X=range(min=200,max=400)', 'spectra')
+----
+2
+
+# X=range no match
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100 AND X=range(min=500,max=600)', 'spectra')
+----
+0
+
+# X=massdefect inclusive boundary: defect=0.0 passes min=0.0
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100 AND X=massdefect(min=0.0,max=0.5)', 'spectra')
+----
+1
+2
+
+# X=massdefect excludes: defect=0.0 not in [0.1,0.9]
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100 AND X=massdefect(min=0.1,max=0.9)', 'spectra')
+----
+0
+
+# Combined: X=range + X=massdefect applied together
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100 AND X=range(min=100,max=300) AND X=massdefect(min=0.0,max=0.5)', 'spectra')
+----
+1
+2
+
+# Combined: X=range narrows out all candidates that massdefect would match
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100 AND X=range(min=500,max=600) AND X=massdefect(min=0.0,max=0.5)', 'spectra')
+----
+0
+
+# X=range with cross-level pattern: MS1MZ=X AND MS2PREC=X
+# MS1 peaks at 100,200,300,500. Precursors at 200,300. X=range(min=250,max=350) limits to mz=300.
+# Spectrum 2 has precursor_mz=300 matching MS1 peak at 300.
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS1MZ=X AND MS2PREC=X AND X=range(min=250,max=350)', 'spectra')
+----
+2
+
+# X=range with cross-level: range excludes all MS1 peaks that match precursors
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS1MZ=X AND MS2PREC=X AND X=range(min=500,max=600)', 'spectra')
+----
+0
+
+# Error: X constraint without X-variable conditions
+statement error
+SELECT * FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=220 AND X=range(min=100,max=300)', 'spectra')
+----
+X constraint
+
+# Error: X=range with min > max
+statement error
+SELECT * FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100 AND X=range(min=500,max=100)', 'spectra')
+----
+min must be <= max
+
+# Error: X with unsupported function
+statement error
+SELECT * FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND X=rtrange(left=0,right=1)', 'spectra')
+----
+range() or massdefect()

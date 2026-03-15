@@ -278,6 +278,68 @@ QUERIES = [
         "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=peptide(ACD,charge=1,ion=b)",
         "description": "Peptide b-ion mass for ACD — no match expected in basic_3spectra",
     },
+    # --- Group 21: SCANMIN/SCANMAX (Phase 8) ---
+    {
+        "id": "meta_scanmin_2",
+        "query": "QUERY scannum(MS2DATA) WHERE SCANMIN=2",
+        "description": "MS2 scans with scan_number >= 2",
+    },
+    {
+        "id": "meta_scanmax_2",
+        "query": "QUERY scannum(MS2DATA) WHERE SCANMAX=2",
+        "description": "MS2 scans with scan_number <= 2",
+    },
+    {
+        "id": "meta_scan_range",
+        "query": "QUERY scannum(MS2DATA) WHERE SCANMIN=2 AND SCANMAX=3",
+        "description": "MS2 scans with scan_number in [2, 3]",
+    },
+    # --- Group 22: TOLERANCEPPM (Phase 8) ---
+    {
+        "id": "tol_ppm_ms1",
+        "query": "QUERY scannum(MS1DATA) WHERE MS1MZ=200:TOLERANCEPPM=5",
+        "description": "MS1 peak at 200 with 5 ppm tolerance",
+    },
+    # --- Group 23: Phase 9 — PPM on X-offset ---
+    {
+        "id": "ppm_x_offset",
+        "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=X:TOLERANCEPPM=10 AND MS2PROD=X+100:TOLERANCEPPM=10",
+        "description": "PPM tolerance on X-offset pattern (integer m/z, same result as Da)",
+    },
+    # --- Group 24: Phase 9 — MOBILITY ---
+    {
+        "id": "mobility_wide",
+        "query": "QUERY scannum(MS2DATA) WHERE MOBILITY=range(min=0,max=100)",
+        "description": "MOBILITY wide range (no-op, returns all MS2 scans)",
+    },
+    {
+        "id": "mobility_narrow",
+        "query": "QUERY scannum(MS2DATA) WHERE MOBILITY=range(min=99,max=100)",
+        "description": "MOBILITY narrow range still no-op (possible Bug 5)",
+    },
+    # --- Group 25: Phase 9 — OTHERSCAN+OR ---
+    # Note: Python OTHERSCAN is broken on MS2PROD (Bug 2). Our result differs.
+    {
+        "id": "otherscan_or",
+        "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=(150 OR 250):OTHERSCAN=rtrange(left=0.5,right=0.5)",
+        "description": "OTHERSCAN with OR value list (Python: Bug 2 ignores OTHERSCAN)",
+    },
+    # --- Group 26: Phase 9 — X=range() and X=massdefect() ---
+    {
+        "id": "x_range",
+        "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100 AND X=range(min=100,max=300)",
+        "description": "X-offset with X=range constraint",
+    },
+    {
+        "id": "x_massdefect_inclusive",
+        "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100 AND X=massdefect(min=0.0,max=0.5)",
+        "description": "X-offset with X=massdefect (inclusive boundary, defect=0.0 passes)",
+    },
+    {
+        "id": "x_massdefect_exclusive",
+        "query": "QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+100 AND X=massdefect(min=0.1,max=0.9)",
+        "description": "X-offset with X=massdefect (defect=0.0 excluded from [0.1, 0.9])",
+    },
 ]
 
 

@@ -54,6 +54,7 @@ static bool is_metadata_field(ConditionField field) {
 	case ConditionField::SCANMAX:
 	case ConditionField::CHARGE:
 	case ConditionField::POLARITY:
+	case ConditionField::MOBILITY:
 		return true;
 	default:
 		return false;
@@ -194,25 +195,52 @@ static bool condition_has_x_variable(const Condition &cond) {
 	return false;
 }
 
-// Extract Da tolerance from X-conditions (PPM not supported for offset patterns)
-static std::string x_offset_tolerance(const std::vector<const Condition *> &x_conds) {
+// Build tolerance expression for X-variable patterns using mz_within / mz_within_ppm
+// Returns e.g. "mz_within_ppm(p.mz, xc.x_val + 100.0, 10)" or "mz_within(p.mz, xc.x_val + 100.0, 0.1)"
+static std::string x_tolerance_expr(const std::vector<const Condition *> &x_conds, const std::string &lhs,
+                                    const std::string &rhs) {
+	std::string func = "mz_within";
+	std::string value = "0.1";
+	bool found_ppm = false, found_da = false;
 	for (const auto *cond : x_conds) {
 		for (const auto &q : cond->qualifiers) {
 			if (q.name == "TOLERANCEPPM") {
-				throw std::runtime_error(
-				    "MassQL transpiler: PPM tolerance not supported for X-variable offset patterns");
+				func = "mz_within_ppm";
+				value = fmt_double(q.value);
+				found_ppm = true;
 			}
 			if (q.name == "TOLERANCEMZ") {
-				return fmt_double(q.value);
+				value = fmt_double(q.value);
+				found_da = true;
 			}
 		}
 	}
-	return "0.1";
+	if (found_ppm && found_da) {
+		throw std::runtime_error(
+		    "MassQL transpiler: mixed tolerance types (TOLERANCEPPM and TOLERANCEMZ) on X-variable conditions");
+	}
+	return func + "(" + lhs + ", " + rhs + ", " + value + ")";
+}
+
+// Build additional WHERE clause for X-candidate filtering (range and/or mass defect constraints).
+// Uses inclusive boundaries (>=/<=) for both range and massdefect — this matches Python MassQL's
+// X constraint semantics where defect=0.0 passes min=0.0. This intentionally differs from the
+// MASSDEFECT *qualifier* on peaks (append_qualifier_exprs) which uses strict inequality (>/<).
+static std::string x_candidate_filter(const MassQLQuery &query) {
+	std::string s;
+	if (query.has_x_range) {
+		s += " AND mz >= " + fmt_double(query.x_range_min) + " AND mz <= " + fmt_double(query.x_range_max);
+	}
+	if (query.has_x_massdefect) {
+		s += " AND (mz - FLOOR(mz)) >= " + fmt_double(query.x_massdefect_min) +
+		     " AND (mz - FLOOR(mz)) <= " + fmt_double(query.x_massdefect_max);
+	}
+	return s;
 }
 
 // Generate CTEs for X-variable offset pattern (mirrors mzml_x_offset_ntuple macro)
 static std::string x_offset_ctes(const std::vector<const Condition *> &x_conds, const std::string &base_cte,
-                                 std::string &qualifying_cte_name) {
+                                 const MassQLQuery &query, std::string &qualifying_cte_name) {
 	// Extract and validate offsets
 	std::vector<double> offsets;
 	for (const auto *cond : x_conds) {
@@ -231,13 +259,13 @@ static std::string x_offset_ctes(const std::vector<const Condition *> &x_conds, 
 		o -= min_offset;
 	}
 
-	std::string tol = x_offset_tolerance(x_conds);
 	qualifying_cte_name = "__x_qualifying";
 
 	std::ostringstream ss;
 	// Enumerate distinct mz values as X candidates
 	ss << "__x_candidates AS (\n"
-	   << "  SELECT DISTINCT mz AS x_val FROM " << base_cte << " WHERE intensity > 0\n"
+	   << "  SELECT DISTINCT mz AS x_val FROM " << base_cte << " WHERE intensity > 0" << x_candidate_filter(query)
+	   << "\n"
 	   << "),\n";
 
 	// Match candidates against all offsets
@@ -252,8 +280,7 @@ static std::string x_offset_ctes(const std::vector<const Condition *> &x_conds, 
 		ss << "(" << fmt_double(offsets[i]) << ")";
 	}
 	ss << ") AS ot(offset_val)\n"
-	   << "  JOIN " << base_cte << " p ON p.mz > xc.x_val + ot.offset_val - " << tol << "\n"
-	   << "              AND p.mz < xc.x_val + ot.offset_val + " << tol << "\n"
+	   << "  JOIN " << base_cte << " p ON " << x_tolerance_expr(x_conds, "p.mz", "xc.x_val + ot.offset_val") << "\n"
 	   << "              AND p.intensity > 0\n"
 	   << "),\n";
 
@@ -270,7 +297,7 @@ static std::string x_offset_ctes(const std::vector<const Condition *> &x_conds, 
 // Generate CTEs for peak-pair X pattern (mirrors mzml_peak_pair macro)
 // Pattern: MS2PROD=X AND MS2PROD=2*(X-formula(Fe)) — N-way self-join with arbitrary coefficients
 static std::string x_peak_pair_ctes(const std::vector<const Condition *> &x_conds, const std::string &base_cte,
-                                    std::string &qualifying_cte_name) {
+                                    const MassQLQuery &query, std::string &qualifying_cte_name) {
 	// Validate each condition
 	for (const auto *cond : x_conds) {
 		if (cond->values.size() != 1 || !cond->values[0].has_x_variable) {
@@ -278,13 +305,13 @@ static std::string x_peak_pair_ctes(const std::vector<const Condition *> &x_cond
 		}
 	}
 
-	std::string tol = x_offset_tolerance(x_conds);
 	qualifying_cte_name = "__x_qualifying";
 
 	std::ostringstream ss;
 	// Enumerate distinct mz values as X candidates
 	ss << "__x_candidates AS (\n"
-	   << "  SELECT DISTINCT mz AS x_val FROM " << base_cte << " WHERE intensity > 0\n"
+	   << "  SELECT DISTINCT mz AS x_val FROM " << base_cte << " WHERE intensity > 0" << x_candidate_filter(query)
+	   << "\n"
 	   << "),\n";
 
 	// N-way self-join: one JOIN per X-condition
@@ -314,8 +341,7 @@ static std::string x_peak_pair_ctes(const std::vector<const Condition *> &x_cond
 		if (i > 0) {
 			ss << alias << ".spectrum_index = p1.spectrum_index AND ";
 		}
-		ss << alias << ".mz > " << target << " - " << tol << "\n"
-		   << "              AND " << alias << ".mz < " << target << " + " << tol << "\n"
+		ss << x_tolerance_expr(x_conds, alias + ".mz", target) << "\n"
 		   << "              AND " << alias << ".intensity > 0\n";
 	}
 
@@ -326,7 +352,7 @@ static std::string x_peak_pair_ctes(const std::vector<const Condition *> &x_cond
 // Generate CTEs for cross-level X pattern (mirrors mzml_x_ms1_ms2_prec macro)
 // Pattern: MS1MZ=X AND MS2PREC=X — MS2 spectra whose precursor matches an MS1 peak
 static std::string x_cross_level_ctes(const std::vector<const Condition *> &x_conds, const std::string &source,
-                                      std::string &qualifying_cte_name) {
+                                      const MassQLQuery &query, std::string &qualifying_cte_name) {
 	// Extract tolerance from any X-condition
 	std::string tol_value;
 	std::string tol_func = "mz_within";
@@ -354,7 +380,8 @@ static std::string x_cross_level_ctes(const std::vector<const Condition *> &x_co
 
 	std::ostringstream ss;
 	ss << "__ms1_peaks AS (\n"
-	   << "  SELECT DISTINCT spectrum_index, mz FROM mzml_peaks(" << source << ") WHERE ms_level = 1\n"
+	   << "  SELECT DISTINCT spectrum_index, mz FROM mzml_peaks(" << source << ") WHERE ms_level = 1"
+	   << x_candidate_filter(query) << "\n"
 	   << "),\n";
 
 	ss << qualifying_cte_name << " AS (\n"
@@ -363,6 +390,21 @@ static std::string x_cross_level_ctes(const std::vector<const Condition *> &x_co
 	   << "  AND " << tol_func << "(ms1.mz, b.precursor_mz, " << tol_value << ")\n"
 	   << ")";
 
+	return ss.str();
+}
+
+// ── OTHERSCAN RT-expansion helper ─────────────────────────────────────────────
+
+// Wraps an inner match subquery with OTHERSCAN RT-expansion JOIN.
+// inner_select: SQL selecting (spectrum_index, retention_time) of matching scans.
+// Returns the CTE body: SELECT DISTINCT b2.spectrum_index FROM (...) b1 JOIN base_cte b2 ...
+static std::string otherscan_expand(const std::string &inner_select, const std::string &base_cte, double rt_left,
+                                    double rt_right) {
+	std::ostringstream ss;
+	ss << "  SELECT DISTINCT b2.spectrum_index\n"
+	   << "  FROM (" << inner_select << ") b1\n"
+	   << "  JOIN " << base_cte << " b2 ON b2.retention_time >= b1.retention_time - " << fmt_double(rt_left) << "\n"
+	   << "                AND b2.retention_time <= b1.retention_time + " << fmt_double(rt_right) << "\n";
 	return ss.str();
 }
 
@@ -388,20 +430,11 @@ static std::string scan_match_cte(const Condition &cond, const std::string &base
 		}
 	}
 
-	if (has_otherscan && cond.values.size() > 1) {
-		throw std::runtime_error("MassQL transpiler: OTHERSCAN is not supported with OR value lists");
-	}
-
 	if (cond.field == ConditionField::MS2PREC) {
 		if (has_otherscan) {
-			ss << cte_name << " AS (\n"
-			   << "  SELECT DISTINCT b2.spectrum_index\n"
-			   << "  FROM (SELECT DISTINCT spectrum_index, retention_time FROM " << base_cte << " WHERE "
-			   << tolerance_expr("precursor_mz", cond.values[0].constant_value, cond.qualifiers) << ") b1\n"
-			   << "  JOIN " << base_cte << " b2 ON b2.retention_time >= b1.retention_time - " << fmt_double(rt_left)
-			   << "\n"
-			   << "                AND b2.retention_time <= b1.retention_time + " << fmt_double(rt_right) << "\n"
-			   << ")";
+			std::string inner = "SELECT DISTINCT spectrum_index, retention_time FROM " + base_cte + " WHERE " +
+			                    tolerance_expr("precursor_mz", cond.values[0].constant_value, cond.qualifiers);
+			ss << cte_name << " AS (\n" << otherscan_expand(inner, base_cte, rt_left, rt_right) << ")";
 		} else {
 			ss << cte_name << " AS (\n  SELECT DISTINCT spectrum_index FROM " << base_cte << "\n  WHERE "
 			   << tolerance_expr("precursor_mz", cond.values[0].constant_value, cond.qualifiers) << "\n)";
@@ -411,21 +444,40 @@ static std::string scan_match_cte(const Condition &cond, const std::string &base
 
 		if (has_otherscan && cond.values.size() == 1) {
 			// OTHERSCAN: find scans with peak match, then expand to neighboring scans by RT window
-			// Use subquery to avoid column ambiguity between b1 and b2 aliases
 			std::string inner_match;
 			if (cond.values[0].has_any_wildcard) {
 				inner_match = any_match_expr(cond);
 			} else {
 				inner_match = peak_match_expr(col, cond.values[0].constant_value, cond);
 			}
-			ss << cte_name << " AS (\n"
-			   << "  SELECT DISTINCT b2.spectrum_index\n"
-			   << "  FROM (SELECT DISTINCT spectrum_index, retention_time FROM " << base_cte << " WHERE " << inner_match
-			   << ") b1\n"
-			   << "  JOIN " << base_cte << " b2 ON b2.retention_time >= b1.retention_time - " << fmt_double(rt_left)
-			   << "\n"
-			   << "                AND b2.retention_time <= b1.retention_time + " << fmt_double(rt_right) << "\n"
-			   << ")";
+			std::string inner =
+			    "SELECT DISTINCT spectrum_index, retention_time FROM " + base_cte + " WHERE " + inner_match;
+			ss << cte_name << " AS (\n" << otherscan_expand(inner, base_cte, rt_left, rt_right) << ")";
+		} else if (has_otherscan && cond.values.size() > 1) {
+			// OR list + OTHERSCAN: cardinality check, then RT expansion
+			int min_card = 1;
+			int max_card = 0;
+			for (const auto &q : cond.qualifiers) {
+				if (q.name == "CARDINALITY") {
+					min_card = static_cast<int>(q.value);
+					max_card = static_cast<int>(q.max_value);
+				}
+			}
+			std::ostringstream inner;
+			inner << "SELECT spectrum_index, MIN(retention_time) AS retention_time FROM (\n";
+			for (size_t i = 0; i < cond.values.size(); i++) {
+				if (i > 0) {
+					inner << "      UNION ALL\n";
+				}
+				inner << "      SELECT DISTINCT spectrum_index, retention_time, " << i << " AS target_idx FROM "
+				      << base_cte << "\n"
+				      << "      WHERE " << peak_match_expr(col, cond.values[i].constant_value, cond) << "\n";
+			}
+			inner << "    )\n    GROUP BY spectrum_index\n    HAVING COUNT(DISTINCT target_idx) >= " << min_card;
+			if (max_card > 0) {
+				inner << " AND COUNT(DISTINCT target_idx) <= " << max_card;
+			}
+			ss << cte_name << " AS (\n" << otherscan_expand(inner.str(), base_cte, rt_left, rt_right) << ")";
 		} else if (cond.values.size() == 1 && cond.values[0].has_any_wildcard) {
 			ss << cte_name << " AS (\n  SELECT DISTINCT spectrum_index FROM " << base_cte << "\n  WHERE "
 			   << any_match_expr(cond) << "\n)";
@@ -467,7 +519,7 @@ static std::string scan_match_cte(const Condition &cond, const std::string &base
 // ── Metadata WHERE clause ────────────────────────────────────────────────────
 
 static std::string metadata_where(const Condition &cond) {
-	if (cond.values.empty() && cond.field != ConditionField::POLARITY) {
+	if (cond.values.empty() && cond.field != ConditionField::POLARITY && cond.field != ConditionField::MOBILITY) {
 		throw std::runtime_error("MassQL transpiler: metadata condition has no values");
 	}
 	std::ostringstream ss;
@@ -479,10 +531,10 @@ static std::string metadata_where(const Condition &cond) {
 		ss << "retention_time <= " << fmt_double(cond.values[0].constant_value);
 		break;
 	case ConditionField::SCANMIN:
-		ss << "spectrum_index >= " << static_cast<int64_t>(cond.values[0].constant_value);
+		ss << "scan_number >= " << static_cast<int64_t>(cond.values[0].constant_value);
 		break;
 	case ConditionField::SCANMAX:
-		ss << "spectrum_index <= " << static_cast<int64_t>(cond.values[0].constant_value);
+		ss << "scan_number <= " << static_cast<int64_t>(cond.values[0].constant_value);
 		break;
 	case ConditionField::CHARGE:
 		ss << "precursor_charge = " << static_cast<int64_t>(cond.values[0].constant_value);
@@ -492,6 +544,11 @@ static std::string metadata_where(const Condition &cond) {
 			throw std::runtime_error("MassQL transpiler: invalid polarity value '" + cond.string_value + "'");
 		}
 		ss << "polarity = '" << cond.string_value << "'";
+		break;
+	case ConditionField::MOBILITY:
+		// No-op: read_mzml does not provide ion mobility data.
+		// Matches Python behavior: files without mobility pass all rows.
+		ss << "1=1";
 		break;
 	default:
 		throw std::runtime_error("MassQL transpiler: not a metadata field");
@@ -531,7 +588,7 @@ static std::string aggregation_sql(AggFunction agg, const std::string &source_ct
 		ss << "SELECT * FROM " << source_cte;
 		break;
 	case AggFunction::SCANINFO:
-		ss << "SELECT spectrum_index, first(ms_level) AS ms_level, "
+		ss << "SELECT spectrum_index, first(scan_number) AS scan_number, first(ms_level) AS ms_level, "
 		   << "first(retention_time) AS retention_time, first(spectrum_type) AS spectrum_type, "
 		   << "first(polarity) AS polarity, SUM(intensity) AS total_ion_current, "
 		   << "MAX(intensity) AS base_peak_intensity, MAX(i_norm) AS i_norm, "
@@ -575,6 +632,11 @@ std::string MassQLTranspiler::to_sql(const MassQLQuery &query, const std::string
 		if (condition_has_x_variable(cond)) {
 			x_conds.push_back(&cond);
 		}
+	}
+
+	// Validate: X constraints require X-variable conditions
+	if ((query.has_x_range || query.has_x_massdefect) && x_conds.empty()) {
+		throw std::runtime_error("MassQL transpiler: X constraint (range/massdefect) requires X-variable conditions");
 	}
 
 	XPattern x_pattern = XPattern::NONE;
@@ -661,19 +723,19 @@ std::string MassQLTranspiler::to_sql(const MassQLQuery &query, const std::string
 
 		// Extract offsets, normalize so ref offset is 0
 		double ref_offset = xy_ref->values[0].constant_value;
-		std::string tol = x_offset_tolerance(x_conds);
 
 		// Enumerate distinct mz values as X candidates
 		sql << "__x_candidates AS (\n"
-		    << "  SELECT DISTINCT mz AS x_val FROM " << base_cte << " WHERE intensity > 0\n"
+		    << "  SELECT DISTINCT mz AS x_val FROM " << base_cte << " WHERE intensity > 0" << x_candidate_filter(query)
+		    << "\n"
 		    << "),\n";
 
 		// Y-ref CTE: for each X candidate, find intensity at ref offset
 		sql << "__y_ref AS (\n"
 		    << "  SELECT xc.x_val, p.spectrum_index, SUM(p.intensity) AS y_val\n"
 		    << "  FROM __x_candidates xc\n"
-		    << "  JOIN " << base_cte << " p ON p.mz > xc.x_val + " << fmt_double(ref_offset) << " - " << tol << "\n"
-		    << "              AND p.mz < xc.x_val + " << fmt_double(ref_offset) << " + " << tol << "\n"
+		    << "  JOIN " << base_cte << " p ON "
+		    << x_tolerance_expr(x_conds, "p.mz", "xc.x_val + " + fmt_double(ref_offset)) << "\n"
 		    << "              AND p.intensity > 0\n"
 		    << "  GROUP BY xc.x_val, p.spectrum_index\n"
 		    << "),\n";
@@ -707,8 +769,7 @@ std::string MassQLTranspiler::to_sql(const MassQLQuery &query, const std::string
 			    << "  SELECT DISTINCT r.x_val, r.spectrum_index\n"
 			    << "  FROM __y_ref r\n"
 			    << "  JOIN " << base_cte << " p ON p.spectrum_index = r.spectrum_index\n"
-			    << "    AND p.mz > r.x_val + " << fmt_double(match_offset) << " - " << tol << "\n"
-			    << "    AND p.mz < r.x_val + " << fmt_double(match_offset) << " + " << tol << "\n"
+			    << "    AND " << x_tolerance_expr(x_conds, "p.mz", "r.x_val + " + fmt_double(match_offset)) << "\n"
 			    << "    AND p.intensity > " << y_expected << " * (1.0 - " << fmt_double(y_match_pct / 100.0) << ")\n"
 			    << "    AND p.intensity < " << y_expected << " * (1.0 + " << fmt_double(y_match_pct / 100.0) << ")\n"
 			    << "),\n";
@@ -729,15 +790,15 @@ std::string MassQLTranspiler::to_sql(const MassQLQuery &query, const std::string
 		match_ctes.emplace_back(xy_qual_name, false);
 	} else if (x_pattern == XPattern::OFFSET) {
 		std::string x_qual_name;
-		sql << x_offset_ctes(x_conds, base_cte, x_qual_name) << ",\n";
+		sql << x_offset_ctes(x_conds, base_cte, query, x_qual_name) << ",\n";
 		match_ctes.emplace_back(x_qual_name, false);
 	} else if (x_pattern == XPattern::PEAK_PAIR) {
 		std::string x_qual_name;
-		sql << x_peak_pair_ctes(x_conds, base_cte, x_qual_name) << ",\n";
+		sql << x_peak_pair_ctes(x_conds, base_cte, query, x_qual_name) << ",\n";
 		match_ctes.emplace_back(x_qual_name, false);
 	} else if (x_pattern == XPattern::CROSS_LEVEL) {
 		std::string x_qual_name;
-		sql << x_cross_level_ctes(x_conds, source, x_qual_name) << ",\n";
+		sql << x_cross_level_ctes(x_conds, source, query, x_qual_name) << ",\n";
 		match_ctes.emplace_back(x_qual_name, false);
 	}
 

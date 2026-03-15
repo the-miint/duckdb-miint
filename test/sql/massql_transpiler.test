@@ -218,7 +218,7 @@ SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=150 AND MS2PRE
 
 # ===== Cycle 17: All aggregation functions =====
 
-# scaninfo: 1 row with 12 columns for spectrum 2
+# scaninfo: 1 row with 13 columns for spectrum 2
 query I
 SELECT COUNT(*) FROM massql('QUERY scaninfo(MS2DATA) WHERE MS2PROD=220', 'spectra')
 ----
@@ -613,9 +613,147 @@ SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=(150 OR 
 ----
 1
 
-# ===== Error: OTHERSCAN with OR list is unsupported =====
+# ===== Phase 9 Cycle 3: OTHERSCAN + OR lists =====
 
-statement error
-SELECT * FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=(150 OR 250):OTHERSCAN=rtrange(left=0.5,right=0.5)', 'spectra')
+# OTHERSCAN + OR: MS2PROD=(150 OR 250) matches scan 2 (spectrum 1).
+# OTHERSCAN ±0.5 from RT=1.6 covers RT=[1.1, 2.1] -> includes scan 3 (RT=1.8)
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=(150 OR 250):OTHERSCAN=rtrange(left=0.5,right=0.5)', 'spectra')
 ----
-OTHERSCAN is not supported with OR value lists
+1
+2
+
+# Narrow OTHERSCAN: only the matching scan itself
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=(150 OR 250):OTHERSCAN=rtrange(left=0.01,right=0.01)', 'spectra')
+----
+1
+
+# OTHERSCAN + OR with CARDINALITY
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=(150 OR 250):OTHERSCAN=rtrange(left=0.5,right=0.5):CARDINALITY=range(min=2,max=5)', 'spectra')
+----
+1
+2
+
+# ===== Phase 8 Cycle 2: SCANMIN/SCANMAX bug fix =====
+
+# SCANMIN=2 should match scans 2 and 3 (both MS2 spectra)
+# Python ground truth: SCANMIN=2 → scans [2, 3]
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE SCANMIN=2', 'spectra')
+----
+1
+2
+
+# SCANMAX=2 should match only scan 2
+# Python ground truth: SCANMAX=2 → scans [2]
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE SCANMAX=2', 'spectra')
+----
+1
+
+# Range: SCANMIN=2 AND SCANMAX=3 matches both MS2 scans
+# Python ground truth: → scans [2, 3]
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE SCANMIN=2 AND SCANMAX=3', 'spectra')
+----
+1
+2
+
+# Edge: SCANMIN=0 matches all MS2 (scans 2,3 both >= 0)
+# Python ground truth: SCANMIN=0 → scans [2, 3]
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE SCANMIN=0', 'spectra')
+----
+1
+2
+
+# Edge: SCANMIN=999 matches nothing
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE SCANMIN=999', 'spectra')
+----
+0
+
+# Edge: SCANMAX=1 — scan 1 is MS1, no MS2 scans have scan <= 1
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE SCANMAX=1', 'spectra')
+----
+0
+
+# ===== Phase 8 Cycle 3: TOLERANCEPPM SQL tests =====
+
+# TOLERANCEPPM: peak at 200.0, 5 ppm = 200 * 5e-6 = 0.001 Da window
+# Python ground truth: MS1MZ=200:TOLERANCEPPM=5 → scans [1]
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS1DATA) WHERE MS1MZ=200:TOLERANCEPPM=5', 'spectra')
+----
+1
+
+# TOLERANCEPPM snapshot: generated SQL uses mz_within_ppm
+query T
+SELECT massql_to_sql('QUERY scannum(MS2DATA) WHERE MS2PROD=220:TOLERANCEPPM=10', 'spectra') LIKE '%mz_within_ppm(%'
+----
+true
+
+# ===== Phase 9 Cycle 2: MOBILITY qualifier (no-op) =====
+
+# MOBILITY=range() parsed as no-op (data has no mobility)
+query I
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=220 AND MOBILITY=range(min=0,max=100)', 'spectra')
+----
+2
+
+# MOBILITY alone: no-op, returns all MS2 scans
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MOBILITY=range(min=0,max=100)', 'spectra')
+----
+1
+2
+
+# Error: MOBILITY with non-range syntax
+statement error
+SELECT * FROM massql('QUERY scannum(MS2DATA) WHERE MOBILITY=100', 'spectra')
+----
+MOBILITY requires range(min=
+
+# Error: MOBILITY with massdefect syntax
+statement error
+SELECT * FROM massql('QUERY scannum(MS2DATA) WHERE MOBILITY=massdefect(min=0,max=1)', 'spectra')
+----
+MOBILITY requires range(min=
+
+# Error: MOBILITY with non-numeric range values
+statement error
+SELECT * FROM massql('QUERY scannum(MS2DATA) WHERE MOBILITY=range(min=foo,max=bar)', 'spectra')
+----
+invalid number
+
+# ===== Phase 9 Cycle 1: TOLERANCEPPM on X-variable patterns =====
+
+# PPM on X-offset: integer m/z in test data, same result as Da tolerance
+query I rowsort
+SELECT spectrum_index FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X:TOLERANCEPPM=10 AND MS2PROD=X+100:TOLERANCEPPM=10', 'spectra')
+----
+1
+2
+
+# PPM snapshot: generated SQL uses mz_within_ppm for X patterns
+query T
+SELECT massql_to_sql('QUERY scannum(MS2DATA) WHERE MS2PROD=X:TOLERANCEPPM=10 AND MS2PROD=X+100:TOLERANCEPPM=10', 'spectra') LIKE '%mz_within_ppm(%'
+----
+true
+
+# Error: mixed TOLERANCEPPM and TOLERANCEMZ on X conditions
+statement error
+SELECT * FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X:TOLERANCEPPM=10 AND MS2PROD=X+100:TOLERANCEMZ=0.5', 'spectra')
+----
+mixed tolerance
+
+# ===== Phase 8 Cycle 4: Mixed X-pattern error test =====
+
+# Mixed X fields: MS2PROD=X with MS1MZ=X is not cross-level (would need MS2PREC=X)
+statement error
+SELECT * FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS1MZ=X', 'spectra')
+----
+unsupported X-variable pattern

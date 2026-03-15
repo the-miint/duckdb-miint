@@ -229,12 +229,13 @@ static std::string suggest_agg_function(const std::string &input) {
 // ── Field name lookup ────────────────────────────────────────────────────────
 
 static const std::unordered_map<std::string, ConditionField> FIELD_MAP = {
-    {"MS1MZ", ConditionField::MS1MZ},     {"MS2PROD", ConditionField::MS2PROD},
+    {"MS1MZ", ConditionField::MS1MZ},       {"MS2PROD", ConditionField::MS2PROD},
     {"MS2MZ", ConditionField::MS2PROD}, // alias
-    {"MS2PREC", ConditionField::MS2PREC}, {"MS2NL", ConditionField::MS2NL},
-    {"RTMIN", ConditionField::RTMIN},     {"RTMAX", ConditionField::RTMAX},
-    {"SCANMIN", ConditionField::SCANMIN}, {"SCANMAX", ConditionField::SCANMAX},
-    {"CHARGE", ConditionField::CHARGE},   {"POLARITY", ConditionField::POLARITY},
+    {"MS2PREC", ConditionField::MS2PREC},   {"MS2NL", ConditionField::MS2NL},
+    {"RTMIN", ConditionField::RTMIN},       {"RTMAX", ConditionField::RTMAX},
+    {"SCANMIN", ConditionField::SCANMIN},   {"SCANMAX", ConditionField::SCANMAX},
+    {"CHARGE", ConditionField::CHARGE},     {"POLARITY", ConditionField::POLARITY},
+    {"MOBILITY", ConditionField::MOBILITY},
 };
 
 // ── Qualifier name set ───────────────────────────────────────────────────────
@@ -558,10 +559,6 @@ static void parse_qualifiers(Tokenizer &tokenizer, Condition &cond) {
 		}
 
 		auto qname = to_upper(name_tok.text);
-		if (qname == "MOBILITY") {
-			throw std::runtime_error(
-			    "MassQL parse error: MOBILITY is not supported (read_mzml does not provide ion mobility data)");
-		}
 		auto it = QUALIFIER_MAP.find(qname);
 		if (it == QUALIFIER_MAP.end()) {
 			throw std::runtime_error("MassQL parse error: unknown qualifier '" + name_tok.text + "'" +
@@ -713,6 +710,58 @@ static void parse_qualifiers(Tokenizer &tokenizer, Condition &cond) {
 	}
 }
 
+// Parse X=range(min=N,max=N) or X=massdefect(min=N,max=N) constraint.
+// Caller must have already consumed the "X" token. Stores result in query.
+static void parse_x_constraint(Tokenizer &tokenizer, MassQLQuery &query) {
+	auto eq = tokenizer.next();
+	if (eq.type != TokenType::EQUALS) {
+		throw std::runtime_error("MassQL parse error: expected '=' after X");
+	}
+	auto func_tok = tokenizer.next();
+	auto func_name = to_lower(func_tok.text);
+	if (func_name != "range" && func_name != "massdefect") {
+		throw std::runtime_error("MassQL parse error: X requires range() or massdefect() constraint");
+	}
+	auto lp = tokenizer.next();
+	if (lp.type != TokenType::LPAREN) {
+		throw std::runtime_error("MassQL parse error: expected '(' after " + func_tok.text);
+	}
+	auto min_kw = tokenizer.next();
+	if (to_lower(min_kw.text) != "min") {
+		throw std::runtime_error("MassQL parse error: expected 'min' in " + func_tok.text + "()");
+	}
+	expect_equals(tokenizer, "min");
+	auto min_val_tok = tokenizer.next();
+	double min_val = safe_stod(min_val_tok.text);
+	auto comma = tokenizer.next();
+	if (comma.type != TokenType::COMMA) {
+		throw std::runtime_error("MassQL parse error: expected ',' in " + func_tok.text + "()");
+	}
+	auto max_kw = tokenizer.next();
+	if (to_lower(max_kw.text) != "max") {
+		throw std::runtime_error("MassQL parse error: expected 'max' in " + func_tok.text + "()");
+	}
+	expect_equals(tokenizer, "max");
+	auto max_val_tok = tokenizer.next();
+	double max_val = safe_stod(max_val_tok.text);
+	auto rp = tokenizer.next();
+	if (rp.type != TokenType::RPAREN) {
+		throw std::runtime_error("MassQL parse error: expected ')' after " + func_tok.text + " values");
+	}
+	if (min_val > max_val) {
+		throw std::runtime_error("MassQL parse error: X=" + func_name + "() min must be <= max");
+	}
+	if (func_name == "range") {
+		query.has_x_range = true;
+		query.x_range_min = min_val;
+		query.x_range_max = max_val;
+	} else {
+		query.has_x_massdefect = true;
+		query.x_massdefect_min = min_val;
+		query.x_massdefect_max = max_val;
+	}
+}
+
 // Parse a single condition: FIELD=value[:qualifiers]
 static Condition parse_condition(Tokenizer &tokenizer) {
 	Condition cond;
@@ -743,6 +792,38 @@ static Condition parse_condition(Tokenizer &tokenizer) {
 			throw std::runtime_error("MassQL parse error: expected polarity value (Positive/Negative)");
 		}
 		cond.string_value = to_lower(val_tok.text);
+	} else if (cond.field == ConditionField::MOBILITY) {
+		// MOBILITY=range(min=N,max=N) — consume and discard values (no-op in transpiler)
+		auto val_tok = tokenizer.next();
+		if (val_tok.type != TokenType::IDENTIFIER || to_lower(val_tok.text) != "range") {
+			throw std::runtime_error("MassQL parse error: MOBILITY requires range(min=N,max=N) syntax");
+		}
+		auto lp = tokenizer.next();
+		if (lp.type != TokenType::LPAREN) {
+			throw std::runtime_error("MassQL parse error: expected '(' after range");
+		}
+		auto min_kw = tokenizer.next();
+		if (to_lower(min_kw.text) != "min") {
+			throw std::runtime_error("MassQL parse error: expected 'min' in range()");
+		}
+		expect_equals(tokenizer, "min");
+		auto min_val_tok = tokenizer.next();
+		safe_stod(min_val_tok.text); // validate numeric, discard value
+		auto comma = tokenizer.next();
+		if (comma.type != TokenType::COMMA) {
+			throw std::runtime_error("MassQL parse error: expected ',' in range()");
+		}
+		auto max_kw = tokenizer.next();
+		if (to_lower(max_kw.text) != "max") {
+			throw std::runtime_error("MassQL parse error: expected 'max' in range()");
+		}
+		expect_equals(tokenizer, "max");
+		auto max_val_tok = tokenizer.next();
+		safe_stod(max_val_tok.text); // validate numeric, discard value
+		auto rp = tokenizer.next();
+		if (rp.type != TokenType::RPAREN) {
+			throw std::runtime_error("MassQL parse error: expected ')' after range values");
+		}
 	} else {
 		// Check for parenthesized OR list: (val1 OR val2 OR ...)
 		auto peek = tokenizer.peek();
@@ -773,15 +854,30 @@ static Condition parse_condition(Tokenizer &tokenizer) {
 }
 
 // Parse condition list: condition [AND condition]*
-static std::vector<Condition> parse_condition_list(Tokenizer &tokenizer) {
+// X=range()/X=massdefect() constraints are stored directly in query, not in the condition list.
+static std::vector<Condition> parse_condition_list(Tokenizer &tokenizer, MassQLQuery &query) {
 	std::vector<Condition> conditions;
-	conditions.push_back(parse_condition(tokenizer));
+
+	// Parse first condition (may be X constraint)
+	auto field_tok = tokenizer.peek();
+	if (field_tok.type == TokenType::IDENTIFIER && to_upper(field_tok.text) == "X") {
+		tokenizer.next(); // consume X
+		parse_x_constraint(tokenizer, query);
+	} else {
+		conditions.push_back(parse_condition(tokenizer));
+	}
 
 	while (true) {
 		auto peek = tokenizer.peek();
 		if (peek.type == TokenType::IDENTIFIER && to_upper(peek.text) == "AND") {
 			tokenizer.next(); // consume AND
-			conditions.push_back(parse_condition(tokenizer));
+			auto next_peek = tokenizer.peek();
+			if (next_peek.type == TokenType::IDENTIFIER && to_upper(next_peek.text) == "X") {
+				tokenizer.next(); // consume X
+				parse_x_constraint(tokenizer, query);
+			} else {
+				conditions.push_back(parse_condition(tokenizer));
+			}
 		} else {
 			break;
 		}
@@ -852,14 +948,14 @@ MassQLQuery MassQLParser::parse(const std::string &query) {
 	peek = tokenizer.peek();
 	if (peek.type == TokenType::IDENTIFIER && to_upper(peek.text) == "WHERE") {
 		tokenizer.next(); // consume WHERE
-		result.where_conditions = parse_condition_list(tokenizer);
+		result.where_conditions = parse_condition_list(tokenizer, result);
 	}
 
 	// Optional FILTER clause
 	peek = tokenizer.peek();
 	if (peek.type == TokenType::IDENTIFIER && to_upper(peek.text) == "FILTER") {
 		tokenizer.next(); // consume FILTER
-		result.filter_conditions = parse_condition_list(tokenizer);
+		result.filter_conditions = parse_condition_list(tokenizer, result);
 	}
 
 	// Reject unexpected trailing tokens

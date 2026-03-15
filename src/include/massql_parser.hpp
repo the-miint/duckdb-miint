@@ -21,7 +21,8 @@ enum class ConditionField {
 	SCANMIN,
 	SCANMAX,
 	CHARGE,
-	POLARITY
+	POLARITY,
+	MOBILITY
 };
 
 struct ConditionValue {
@@ -57,6 +58,11 @@ struct MassQLQuery {
 	double scanrangesum_tolerance = 0.0; // 0 means use default (0.1 Da)
 	std::vector<Condition> where_conditions;
 	std::vector<Condition> filter_conditions;
+	// X-variable constraints (parsed from X=range()/X=massdefect() conditions)
+	bool has_x_range = false;
+	double x_range_min = 0.0, x_range_max = 0.0;
+	bool has_x_massdefect = false;
+	double x_massdefect_min = 0.0, x_massdefect_max = 0.0;
 };
 
 class MassQLParser {
