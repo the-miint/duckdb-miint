@@ -155,10 +155,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterBowtie2AvailableFunction(loader);
 #else
 	// Stub: bowtie2_available() always returns false when Bowtie2 support is compiled out
-	ScalarFunction bowtie2_stub("bowtie2_available", {}, LogicalType::BOOLEAN,
-	                            [](DataChunk &args, ExpressionState &state, Vector &result) {
-		                            result.Reference(Value::BOOLEAN(false));
-	                            });
+	ScalarFunction bowtie2_stub(
+	    "bowtie2_available", {}, LogicalType::BOOLEAN,
+	    [](DataChunk &args, ExpressionState &state, Vector &result) { result.Reference(Value::BOOLEAN(false)); });
 	loader.RegisterFunction(bowtie2_stub);
 #endif
 	ReadNCBIFastaTableFunction::Register(loader);

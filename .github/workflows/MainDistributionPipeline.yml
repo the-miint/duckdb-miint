@@ -22,7 +22,7 @@ jobs:
       extra_toolchains: 'rust'
       # Skip tests here - run separately with bowtie2 installed
       skip_tests: true
-      exclude_archs: 'windows_amd64_mingw;windows_amd64_rtools;windows_amd64'
+      exclude_archs: 'windows_amd64_rtools;windows_amd64'
 
   test-with-bowtie2:
     name: Test with Bowtie2

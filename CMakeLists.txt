@@ -21,12 +21,15 @@ find_package(Threads REQUIRED)
 option(MIINT_ENABLE_HDF5 "Build with HDF5/BIOM support" ON)
 option(MIINT_ENABLE_BOWTIE2 "Build with Bowtie2 alignment support" ON)
 
-# Auto-disable WASM-incompatible features when targeting Emscripten.
-# HDF5 has no known WASM build; Bowtie2 requires fork/exec.
+# Auto-disable platform-incompatible features.
+# HDF5 has no known WASM build; Bowtie2 requires POSIX fork/exec.
 if(EMSCRIPTEN)
     set(MIINT_ENABLE_HDF5 OFF)
     set(MIINT_ENABLE_BOWTIE2 OFF)
     message(STATUS "Emscripten detected: disabling HDF5 and Bowtie2 (WASM-incompatible)")
+elseif(WIN32)
+    set(MIINT_ENABLE_BOWTIE2 OFF)
+    message(STATUS "Windows detected: disabling Bowtie2 (requires POSIX fork/exec)")
 endif()
 
 # HDF5 is required for BIOM support, but can be disabled entirely or made optional for clang-tidy

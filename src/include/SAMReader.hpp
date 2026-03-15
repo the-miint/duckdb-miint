@@ -54,10 +54,12 @@ public:
 	explicit SAMReader(const std::string &filename, const std::unordered_map<std::string, uint64_t> &references,
 	                   bool include_seq_qual = false);
 
+#ifndef _WIN32
 	// Constructor for reading SAM from a file descriptor (e.g., pipe from subprocess)
 	// Takes ownership of the file descriptor - it will be closed when the reader is destroyed
-	// The SAM stream must include a header
+	// The SAM stream must include a header (POSIX only — used by Bowtie2Aligner)
 	explicit SAMReader(int fd, const std::string &name, bool include_seq_qual = false);
+#endif
 
 	// Read up to n records into a batch
 	SAMRecordBatch read(const int n);
