@@ -6,7 +6,15 @@
 #include <exception>
 #include <expat.h>
 #include <stdexcept>
+#include <regex>
 #include <unordered_map>
+
+// Compiled once at startup; used to extract scan number from spectrum_id strings
+// (e.g., "controllerType=0 controllerNumber=1 scan=15" → 15).
+// Only matches the "scan=N" convention used by Thermo/ProteoWizard.
+// Non-matching IDs (e.g., Waters "index=N") produce scan_number=NULL,
+// which silently excludes the spectrum from SCANMIN/SCANMAX filters.
+static const std::regex s_scan_re(R"(scan=(\d+))");
 
 namespace miint {
 
@@ -69,6 +77,8 @@ struct SpectrumState {
 	bool retention_time_valid = false;
 	std::vector<double> mz_array;
 	std::vector<double> intensity_array;
+	int32_t scan_number = 0;
+	bool scan_number_valid = false;
 	// ms1_scan_index: recorded at parse time (not batch-drain time)
 	int32_t ms1_scan_index = 0;
 	bool ms1_scan_index_valid = false;
@@ -532,6 +542,10 @@ struct MzMLReader::Impl {
 			auto *id = get_attr(attrs, "id");
 			if (id) {
 				current_spectrum.id = id;
+				std::smatch m;
+				if (std::regex_search(current_spectrum.id, m, s_scan_re)) {
+					current_spectrum.scan_number_valid = safe_stoi(m[1].str(), current_spectrum.scan_number);
+				}
 			}
 			auto *dal = get_attr(attrs, "defaultArrayLength");
 			if (dal) {
@@ -965,6 +979,8 @@ MzMLSpectrumBatch MzMLReader::read_spectra(size_t n) {
 	// Pre-allocate all batch vectors to avoid geometric reallocation
 	batch.spectrum_index.reserve(count);
 	batch.spectrum_id.reserve(count);
+	batch.scan_number.reserve(count);
+	batch.scan_number_valid.reserve(count);
 	batch.ms_level.reserve(count);
 	batch.retention_time.reserve(count);
 	batch.retention_time_valid.reserve(count);
@@ -1010,6 +1026,8 @@ MzMLSpectrumBatch MzMLReader::read_spectra(size_t n) {
 		auto &spec = impl_->completed_spectra.front();
 		batch.spectrum_index.push_back(spec.index);
 		batch.spectrum_id.push_back(std::move(spec.id));
+		batch.scan_number.push_back(spec.scan_number);
+		batch.scan_number_valid.push_back(spec.scan_number_valid);
 		batch.ms_level.push_back(spec.ms_level);
 		batch.retention_time.push_back(spec.retention_time);
 		batch.retention_time_valid.push_back(spec.retention_time_valid);

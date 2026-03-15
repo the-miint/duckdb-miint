@@ -19,9 +19,9 @@ SELECT COUNT(*) FROM mzml_peaks(spectra)
 ----
 9
 
-# Schema type verification for all 17 columns
-query TTTTTTTTTTTTTTTTT
-SELECT typeof(spectrum_index), typeof(spectrum_id), typeof(ms_level), typeof(retention_time),
+# Schema type verification for all 18 columns
+query TTTTTTTTTTTTTTTTTT
+SELECT typeof(spectrum_index), typeof(spectrum_id), typeof(scan_number), typeof(ms_level), typeof(retention_time),
        typeof(spectrum_type), typeof(polarity),
        typeof(base_peak_intensity), typeof(total_ion_current),
        typeof(precursor_mz), typeof(precursor_charge), typeof(precursor_intensity),
@@ -29,7 +29,7 @@ SELECT typeof(spectrum_index), typeof(spectrum_id), typeof(ms_level), typeof(ret
        typeof(mz), typeof(intensity), typeof(i_norm), typeof(i_tic), typeof(neutral_loss)
 FROM mzml_peaks(spectra) LIMIT 1
 ----
-INTEGER	VARCHAR	INTEGER	DOUBLE	VARCHAR	VARCHAR	DOUBLE	DOUBLE	DOUBLE	INTEGER	DOUBLE	INTEGER	DOUBLE	DOUBLE	DOUBLE	DOUBLE	DOUBLE
+INTEGER	VARCHAR	INTEGER	INTEGER	DOUBLE	VARCHAR	VARCHAR	DOUBLE	DOUBLE	DOUBLE	INTEGER	DOUBLE	INTEGER	DOUBLE	DOUBLE	DOUBLE	DOUBLE	DOUBLE
 
 # Correct mz/intensity/i_norm values for spectrum 0
 query IRRR
@@ -140,7 +140,7 @@ SELECT 0 AS spectrum_index, 2 AS ms_level, 1.0 AS retention_time,
        'centroid' AS spectrum_type, 'positive' AS polarity,
        1000.0 AS base_peak_intensity, 2000.0 AS total_ion_current,
        200.0 AS precursor_mz, 2 AS precursor_charge, 1000.0 AS precursor_intensity,
-       NULL::INTEGER AS ms1_scan_index, 'scan=1' AS spectrum_id,
+       NULL::INTEGER AS ms1_scan_index, 'scan=1' AS spectrum_id, 1 AS scan_number,
        [200.0, 344.0650625] AS mz_array, [1000.0, 500.0] AS intensity_array;
 
 query I

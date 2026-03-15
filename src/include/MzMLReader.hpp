@@ -11,6 +11,8 @@ namespace miint {
 struct MzMLSpectrumBatch {
 	std::vector<int32_t> spectrum_index;
 	std::vector<std::string> spectrum_id;
+	std::vector<int32_t> scan_number;
+	std::vector<bool> scan_number_valid;
 	std::vector<int32_t> ms_level;
 	std::vector<double> retention_time;
 	std::vector<bool> retention_time_valid;

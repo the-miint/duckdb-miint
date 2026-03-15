@@ -113,6 +113,9 @@ void ReadMzMLTableFunction::Execute(ClientContext &context, TableFunctionInput &
 	// spectrum_id (VARCHAR, NOT NULL)
 	SetResultVectorString(output.data[col++], batch.spectrum_id);
 
+	// scan_number (INTEGER, nullable)
+	SetResultVectorInt32Nullable(output.data[col++], batch.scan_number, batch.scan_number_valid);
+
 	// ms_level (INTEGER, NOT NULL)
 	SetResultVectorInt32(output.data[col++], batch.ms_level);
 

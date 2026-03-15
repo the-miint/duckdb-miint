@@ -23,6 +23,7 @@ public:
 		Data(const std::vector<std::string> &paths, bool include_fp)
 		    : file_paths(paths), include_filepath(include_fp), names({"spectrum_index",
 		                                                              "spectrum_id",
+		                                                              "scan_number",
 		                                                              "ms_level",
 		                                                              "retention_time",
 		                                                              "spectrum_type",
@@ -49,6 +50,7 @@ public:
 		                                                              "ms1_scan_index"}),
 		      types({LogicalType::INTEGER,
 		             LogicalType::VARCHAR,
+		             LogicalType::INTEGER,
 		             LogicalType::INTEGER,
 		             LogicalType::DOUBLE,
 		             LogicalType::VARCHAR,

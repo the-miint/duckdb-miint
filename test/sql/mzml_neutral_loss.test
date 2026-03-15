@@ -56,7 +56,7 @@ SELECT 0 AS spectrum_index, 2 AS ms_level, 1.0 AS retention_time,
        'centroid' AS spectrum_type, 'positive' AS polarity,
        1000.0 AS base_peak_intensity, 1000.0 AS total_ion_current,
        200.0 AS precursor_mz, 2 AS precursor_charge, 1000.0 AS precursor_intensity,
-       NULL::INTEGER AS ms1_scan_index, 'scan=1' AS spectrum_id,
+       NULL::INTEGER AS ms1_scan_index, 'scan=1' AS spectrum_id, 1 AS scan_number,
        [200.0] AS mz_array, [1000.0] AS intensity_array;
 
 query R

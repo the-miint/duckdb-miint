@@ -38,9 +38,9 @@ SELECT COUNT(*) FROM read_mzml('data/mzml/basic_3spectra.mzML')
 ----
 3
 
-# Schema type verification
-query TTTTTTTTTTTTTTTTTTTTTTTTTT
-SELECT typeof(spectrum_index), typeof(spectrum_id), typeof(ms_level),
+# Schema type verification (27 columns)
+query TTTTTTTTTTTTTTTTTTTTTTTTTTT
+SELECT typeof(spectrum_index), typeof(spectrum_id), typeof(scan_number), typeof(ms_level),
        typeof(retention_time), typeof(spectrum_type), typeof(polarity),
        typeof(base_peak_mz), typeof(base_peak_intensity), typeof(total_ion_current),
        typeof(lowest_mz), typeof(highest_mz), typeof(default_array_length),
@@ -52,7 +52,16 @@ SELECT typeof(spectrum_index), typeof(spectrum_id), typeof(ms_level),
        typeof(ms1_scan_index)
 FROM read_mzml('data/mzml/basic_3spectra.mzML') LIMIT 1
 ----
-INTEGER	VARCHAR	INTEGER	DOUBLE	VARCHAR	VARCHAR	DOUBLE	DOUBLE	DOUBLE	DOUBLE	DOUBLE	INTEGER	DOUBLE	INTEGER	DOUBLE	DOUBLE	DOUBLE	DOUBLE	VARCHAR	DOUBLE	DOUBLE[]	DOUBLE[]	VARCHAR	DOUBLE	DOUBLE	INTEGER
+INTEGER	VARCHAR	INTEGER	INTEGER	DOUBLE	VARCHAR	VARCHAR	DOUBLE	DOUBLE	DOUBLE	DOUBLE	DOUBLE	INTEGER	DOUBLE	INTEGER	DOUBLE	DOUBLE	DOUBLE	DOUBLE	VARCHAR	DOUBLE	DOUBLE[]	DOUBLE[]	VARCHAR	DOUBLE	DOUBLE	INTEGER
+
+# scan_number extracted from spectrum_id
+query III
+SELECT spectrum_index, scan_number, ms_level FROM read_mzml('data/mzml/basic_3spectra.mzML')
+ORDER BY spectrum_index
+----
+0	1	1
+1	2	2
+2	3	2
 
 # MS1 metadata
 query IIIRRTTRRRRIRTT
