@@ -17,19 +17,33 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(ZLIB REQUIRED)
 find_package(Threads REQUIRED)
 
-# HDF5 is required for BIOM support, but make it optional for clang-tidy runs
-# In CI, the tidy-check doesn't have HDF5 available, but it doesn't need to link - just parse
-if(CLANG_TIDY)
-    find_package(HDF5 COMPONENTS CXX)
-    if(HDF5_FOUND)
-        message(STATUS "HDF5 found for tidy-check")
+# Optional feature flags for WASM-compatible builds
+option(MIINT_ENABLE_HDF5 "Build with HDF5/BIOM support" ON)
+option(MIINT_ENABLE_BOWTIE2 "Build with Bowtie2 alignment support" ON)
+
+# Auto-disable WASM-incompatible features when targeting Emscripten.
+# HDF5 has no known WASM build; Bowtie2 requires fork/exec.
+if(EMSCRIPTEN)
+    set(MIINT_ENABLE_HDF5 OFF)
+    set(MIINT_ENABLE_BOWTIE2 OFF)
+    message(STATUS "Emscripten detected: disabling HDF5 and Bowtie2 (WASM-incompatible)")
+endif()
+
+# HDF5 is required for BIOM support, but can be disabled entirely or made optional for clang-tidy
+if(MIINT_ENABLE_HDF5)
+    if(CLANG_TIDY)
+        find_package(HDF5 COMPONENTS CXX)
+        if(HDF5_FOUND)
+            message(STATUS "HDF5 found for tidy-check")
+        else()
+            message(STATUS "HDF5 not found for tidy-check - BIOM support will be excluded from analysis")
+        endif()
     else()
-        message(STATUS "HDF5 not found for tidy-check - BIOM support will be excluded from analysis")
-        # Create dummy targets so the build can configure
-        add_library(HDF5::HDF5 INTERFACE IMPORTED)
+        find_package(HDF5 REQUIRED COMPONENTS CXX)
     endif()
 else()
-    find_package(HDF5 REQUIRED COMPONENTS CXX)
+    set(HDF5_FOUND OFF)
+    message(STATUS "HDF5/BIOM support disabled (MIINT_ENABLE_HDF5=OFF)")
 endif()
 
 # Find zstd for compression support (optional - build will succeed without it but zstd won't work)
@@ -126,7 +140,11 @@ endif()
 # Handle cross-compilation for OSX (e.g., building x86_64 on ARM64 host)
 set(HTSLIB_HOST_FLAG "")
 set(HTSLIB_ARCH_CFLAGS "")
-if(APPLE AND OSX_BUILD_ARCH)
+if(EMSCRIPTEN)
+    # Emscripten: tell autotools we are cross-compiling, drop -fPIC (not meaningful)
+    set(HTSLIB_HOST_FLAG "--host=wasm32-unknown-emscripten")
+    message(STATUS "HTSlib cross-compiling for Emscripten/WASM")
+elseif(APPLE AND OSX_BUILD_ARCH)
     if(OSX_BUILD_ARCH STREQUAL "x86_64")
         set(HTSLIB_HOST_FLAG "--host=x86_64-apple-darwin")
         set(HTSLIB_ARCH_CFLAGS "-arch x86_64")
@@ -138,7 +156,11 @@ if(APPLE AND OSX_BUILD_ARCH)
     endif()
 endif()
 
-set(HTSLIB_CFLAGS "CFLAGS=-fPIC ${HTSLIB_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}")
+if(EMSCRIPTEN)
+    set(HTSLIB_CFLAGS "CFLAGS=${HTSLIB_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}")
+else()
+    set(HTSLIB_CFLAGS "CFLAGS=-fPIC ${HTSLIB_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}")
+endif()
 if(ZLIB_LIBRARY_DIR)
     set(HTSLIB_LDFLAGS "LDFLAGS=${HTSLIB_ARCH_CFLAGS} -L${ZLIB_LIBRARY_DIR}")
 else()
@@ -201,7 +223,15 @@ add_dependencies(hts htslib_build)
 # Use OSX_BUILD_ARCH for cross-compilation, otherwise use host architecture
 set(MINIMAP2_ARCH_FLAGS "")
 set(MINIMAP2_ARCH_CFLAGS "")
-if(APPLE AND OSX_BUILD_ARCH)
+set(MINIMAP2_FPIC "-fPIC")
+if(EMSCRIPTEN)
+    # Emscripten: use WASM SIMD via SSE2 emulation (minimap2 has SIMDe support).
+    # sse2only=1 avoids SSE4.1 dispatch which requires runtime CPU detection.
+    set(MINIMAP2_ARCH_FLAGS "sse2only=1")
+    set(MINIMAP2_ARCH_CFLAGS "-msimd128 -msse -msse2")
+    set(MINIMAP2_FPIC "")
+    message(STATUS "Minimap2 building for Emscripten/WASM with SIMD via SSE2 emulation")
+elseif(APPLE AND OSX_BUILD_ARCH)
     # Cross-compilation: use target architecture, not host
     if(OSX_BUILD_ARCH STREQUAL "arm64")
         set(MINIMAP2_ARCH_FLAGS "aarch64=1")
@@ -235,7 +265,7 @@ ExternalProject_Add(
     minimap2_build
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2
     CONFIGURE_COMMAND ""
-    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2 clean libminimap2.a "CFLAGS=-g -Wall -O2 -Wc++-compat -fPIC ${MINIMAP2_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}" "CPPFLAGS=-DHAVE_KALLOC ${MINIMAP2_ALLOC_FLAGS}" ${MINIMAP2_ARCH_FLAGS}
+    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2 clean libminimap2.a "CFLAGS=-g -Wall -O2 -Wc++-compat ${MINIMAP2_FPIC} ${MINIMAP2_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}" "CPPFLAGS=-DHAVE_KALLOC ${MINIMAP2_ALLOC_FLAGS}" ${MINIMAP2_ARCH_FLAGS}
     INSTALL_COMMAND ""
     BUILD_IN_SOURCE 1
     BUILD_BYPRODUCTS ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2/libminimap2.a
@@ -250,7 +280,10 @@ add_dependencies(minimap2 minimap2_build)
 
 # Handle cross-compilation arch flags for WFA2
 set(WFA2_ARCH_CFLAGS "")
-if(APPLE AND OSX_BUILD_ARCH)
+set(WFA2_FPIC "-fPIC")
+if(EMSCRIPTEN)
+    set(WFA2_FPIC "")
+elseif(APPLE AND OSX_BUILD_ARCH)
     if(OSX_BUILD_ARCH STREQUAL "x86_64")
         set(WFA2_ARCH_CFLAGS "-arch x86_64")
     elseif(OSX_BUILD_ARCH STREQUAL "arm64")
@@ -265,7 +298,7 @@ ExternalProject_Add(
     CONFIGURE_COMMAND ""
     BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib clean all
         "BUILD_TOOLS=0" "BUILD_EXAMPLES=0" "BUILD_WFA_PARALLEL=0"
-        "CC_FLAGS=-Wall -O2 -fPIC ${WFA2_ARCH_CFLAGS}"
+        "CC_FLAGS=-Wall -O2 ${WFA2_FPIC} ${WFA2_ARCH_CFLAGS}"
     INSTALL_COMMAND ""
     BUILD_IN_SOURCE 1
     BUILD_BYPRODUCTS
@@ -306,7 +339,15 @@ set(RYPE_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/rype_target)
 set(RYPE_CARGO_TARGET_FLAG "")
 set(RYPE_LIB_SUBDIR "release")
 set(RYPE_CONFIGURE_CMD "")
-if(APPLE AND OSX_BUILD_ARCH)
+if(EMSCRIPTEN)
+    find_program(RUSTUP rustup)
+    set(RYPE_CARGO_TARGET_FLAG "--target" "wasm32-unknown-emscripten")
+    set(RYPE_LIB_SUBDIR "wasm32-unknown-emscripten/release")
+    if(RUSTUP)
+        set(RYPE_CONFIGURE_CMD ${RUSTUP} target add wasm32-unknown-emscripten)
+    endif()
+    message(STATUS "RYpe cross-compiling for wasm32-unknown-emscripten")
+elseif(APPLE AND OSX_BUILD_ARCH)
     find_program(RUSTUP rustup)
     if(OSX_BUILD_ARCH STREQUAL "x86_64")
         set(RYPE_CARGO_TARGET_FLAG "--target" "x86_64-apple-darwin")
@@ -365,13 +406,9 @@ set(EXTENSION_SOURCES
     src/compress_intervals.cpp
     src/copy_format_common.cpp
     src/table_function_common.cpp
-    src/copy_biom.cpp
     src/copy_fastq.cpp
     src/copy_fasta.cpp
     src/copy_sam.cpp
-    src/BIOMTable.cpp
-    src/BIOMReader.cpp
-    src/read_biom.cpp
     src/reference_table_reader.cpp
     src/placement_table_reader.cpp
     src/NewickTree.cpp
@@ -382,9 +419,6 @@ set(EXTENSION_SOURCES
     src/align_minimap2.cpp
     src/align_minimap2_sharded.cpp
     src/save_minimap2_index.cpp
-    src/Bowtie2Aligner.cpp
-    src/align_bowtie2.cpp
-    src/align_bowtie2_sharded.cpp
     src/ncbi_parser.cpp
     src/ncbi_client.cpp
     src/zip_utils.cpp
@@ -398,6 +432,13 @@ set(EXTENSION_SOURCES
     src/rype_classify.cpp
     src/rype_extract.cpp
     src/rype_log_ratio.cpp)
+
+if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
+    list(APPEND EXTENSION_SOURCES src/copy_biom.cpp src/BIOMTable.cpp src/BIOMReader.cpp src/read_biom.cpp)
+endif()
+if(MIINT_ENABLE_BOWTIE2)
+    list(APPEND EXTENSION_SOURCES src/Bowtie2Aligner.cpp src/align_bowtie2.cpp src/align_bowtie2_sharded.cpp)
+endif()
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
@@ -416,6 +457,12 @@ target_compile_definitions(${EXTENSION_NAME} PRIVATE RYPE_ARROW
     WFA2_GIT_VERSION="${WFA2_GIT_VERSION}"
     RYPE_GIT_VERSION="${RYPE_GIT_VERSION}"
     $<$<BOOL:${MIINT_HAS_JEMALLOC}>:MIINT_USE_JEMALLOC>)
+if(MIINT_ENABLE_BOWTIE2)
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_BOWTIE2)
+endif()
+if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_HDF5)
+endif()
 target_link_libraries(${EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
@@ -430,7 +477,7 @@ if(APPLE)
 elseif(UNIX)
     target_link_libraries(${EXTENSION_NAME} dl m)
 endif()
-if(HDF5_FOUND)
+if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     target_link_libraries(${EXTENSION_NAME}
                           hdf5::hdf5-static
                           hdf5::hdf5_hl-static
@@ -453,6 +500,12 @@ target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE RYPE_ARROW
     WFA2_GIT_VERSION="${WFA2_GIT_VERSION}"
     RYPE_GIT_VERSION="${RYPE_GIT_VERSION}"
     $<$<BOOL:${MIINT_HAS_JEMALLOC}>:MIINT_USE_JEMALLOC>)
+if(MIINT_ENABLE_BOWTIE2)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_BOWTIE2)
+endif()
+if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_HDF5)
+endif()
 target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
@@ -466,6 +519,9 @@ if(APPLE)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework CoreFoundation")
 elseif(UNIX)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} dl m)
+endif()
+if(HAVE_LIBZSTD)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} ${ZSTD_TARGET})
 endif()
 
 install(
@@ -490,17 +546,11 @@ set(TEST_SOURCES
     test/cpp/test_AlignmentFunctions.cpp
     src/IntervalCompressor.cpp
     test/cpp/test_IntervalCompressor.cpp
-    src/BIOMTable.cpp
-    src/BIOMReader.cpp
-    test/cpp/test_BIOMReader.cpp
-    test/cpp/test_BIOMTable.cpp
     src/NewickTree.cpp
     test/cpp/test_NewickParser.cpp
     test/cpp/test_InsertFullyResolved.cpp
     src/Minimap2Aligner.cpp
     test/cpp/test_Minimap2Aligner.cpp
-    src/Bowtie2Aligner.cpp
-    test/cpp/test_Bowtie2Aligner.cpp
     src/ncbi_parser.cpp
     src/zip_utils.cpp
     duckdb/third_party/miniz/miniz.cpp  # For ExtractFromZip tests
@@ -510,6 +560,13 @@ set(TEST_SOURCES
     src/WFA2Aligner.cpp
     test/cpp/test_WFA2Aligner.cpp
 )
+if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
+    list(APPEND TEST_SOURCES src/BIOMTable.cpp src/BIOMReader.cpp
+         test/cpp/test_BIOMReader.cpp test/cpp/test_BIOMTable.cpp)
+endif()
+if(MIINT_ENABLE_BOWTIE2)
+    list(APPEND TEST_SOURCES src/Bowtie2Aligner.cpp test/cpp/test_Bowtie2Aligner.cpp)
+endif()
 
 add_executable(tests ${TEST_SOURCES})
 
@@ -522,7 +579,7 @@ target_link_libraries(tests
   wfa2cpp
   wfa2
 )
-if(HDF5_FOUND)
+if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     target_link_libraries(tests
                           hdf5::hdf5-static
                           hdf5::hdf5_hl-static

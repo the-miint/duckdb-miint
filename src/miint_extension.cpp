@@ -5,7 +5,6 @@
 #include <alignment_flag_functions.hpp>
 #include <alignment_functions.hpp>
 #include <compress_intervals.hpp>
-#include <copy_biom.hpp>
 #include <copy_fasta.hpp>
 #include <copy_fastq.hpp>
 #include <copy_newick.hpp>
@@ -16,12 +15,9 @@
 #include <read_alignments.hpp>
 #include <read_sequences_sam.hpp>
 #include <read_sequences_sff.hpp>
-#include <read_biom.hpp>
 #include <align_minimap2.hpp>
 #include <align_minimap2_sharded.hpp>
 #include <save_minimap2_index.hpp>
-#include <align_bowtie2.hpp>
-#include <align_bowtie2_sharded.hpp>
 #include <read_ncbi_fasta.hpp>
 #include <read_ncbi.hpp>
 #include <read_ncbi_annotation.hpp>
@@ -32,10 +28,20 @@
 #include <rype_extract.hpp>
 #include <rype_log_ratio.hpp>
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
-#include <hdf5.h>
 #include <htslib-1.22.1/htslib/hts.h>
 #include <kseq++/config.hpp>
 #include <zlib.h>
+
+#ifdef MIINT_HAS_HDF5
+#include <copy_biom.hpp>
+#include <read_biom.hpp>
+#include <hdf5.h>
+#endif
+
+#ifdef MIINT_HAS_BOWTIE2
+#include <align_bowtie2.hpp>
+#include <align_bowtie2_sharded.hpp>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -46,16 +52,20 @@ void SetDependencyLogging() {
 	// for now. It's unclear whether these should be exposed or the
 	// exact benefit, we will defer that decision for the future.
 	hts_set_log_level(HTS_LOG_ERROR);
+#ifdef MIINT_HAS_HDF5
 	H5Eset_auto(H5E_DEFAULT, nullptr, nullptr);
+#endif
 }
 
 void SetupSignalHandling() {
+#ifdef MIINT_HAS_BOWTIE2
 	// Ignore SIGPIPE globally so that writes to closed pipes return EPIPE instead of
 	// killing the process. This is needed for Bowtie2Aligner and other subprocess
 	// management where pipes may close unexpectedly.
 	// Note: This is a PROCESS-WIDE setting that persists for the lifetime of the process.
 	// Setting it once at extension load is thread-safe (vs calling signal() from multiple threads).
 	std::signal(SIGPIPE, SIG_IGN);
+#endif
 }
 
 static void MiintVersionFunction(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -86,6 +96,7 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 	data->versions.emplace_back("minimap2", MINIMAP2_GIT_VERSION);
 	data->versions.emplace_back("kseq++", KSEQPP_PROJECT_VERSION);
 	data->versions.emplace_back("WFA2-lib", WFA2_GIT_VERSION);
+#ifdef MIINT_HAS_HDF5
 #ifdef H5_VERS_STR
 	data->versions.emplace_back("HDF5", H5_VERS_STR);
 #elif defined(H5_VERSION)
@@ -93,6 +104,7 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 #else
 	data->versions.emplace_back("HDF5", std::to_string(H5_VERS_MAJOR) + "." + std::to_string(H5_VERS_MINOR) + "." +
 	                                        std::to_string(H5_VERS_RELEASE));
+#endif
 #endif
 	data->versions.emplace_back("zlib", zlibVersion());
 	data->versions.emplace_back("rype", RYPE_GIT_VERSION);
@@ -130,14 +142,25 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadAlignmentsTableFunction::Register(loader);
 	ReadSequencesSamTableFunction::Register(loader);
 	ReadSequencesSFFTableFunction::Register(loader);
+#ifdef MIINT_HAS_HDF5
 	ReadBIOMTableFunction::Register(loader);
+#endif
 	ReadNewickTableFunction::Register(loader);
 	AlignMinimap2TableFunction::Register(loader);
 	AlignMinimap2ShardedTableFunction::Register(loader);
 	SaveMinimap2IndexTableFunction::Register(loader);
+#ifdef MIINT_HAS_BOWTIE2
 	AlignBowtie2TableFunction::Register(loader);
 	AlignBowtie2ShardedTableFunction::Register(loader);
 	RegisterBowtie2AvailableFunction(loader);
+#else
+	// Stub: bowtie2_available() always returns false when Bowtie2 support is compiled out
+	ScalarFunction bowtie2_stub("bowtie2_available", {}, LogicalType::BOOLEAN,
+	                            [](DataChunk &args, ExpressionState &state, Vector &result) {
+		                            result.Reference(Value::BOOLEAN(false));
+	                            });
+	loader.RegisterFunction(bowtie2_stub);
+#endif
 	ReadNCBIFastaTableFunction::Register(loader);
 	ReadNCBITableFunction::Register(loader);
 	ReadNCBIAnnotationTableFunction::Register(loader);
@@ -153,7 +176,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	AlignPairwiseCigarFunction::Register(loader);
 	AlignPairwiseFullFunction::Register(loader);
 
+#ifdef MIINT_HAS_HDF5
 	CopyBiomFunction::Register(loader);
+#endif
 	CopyFastqFunction::Register(loader);
 	CopyFastaFunction::Register(loader);
 	CopyNewickFunction::Register(loader);
