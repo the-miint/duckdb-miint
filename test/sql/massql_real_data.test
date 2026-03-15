@@ -1,0 +1,32 @@
+# name: test/sql/massql_real_data.test
+# description: Real-world validation against Python MassQL on bld_plt1_07_120_1.mzML
+# group: [sql]
+
+require miint
+
+require-env MASSQL_TEST_DATA
+
+statement ok
+CREATE TABLE bld AS SELECT * FROM read_mzml('data/cache/bld_plt1_07_120_1.mzML');
+
+# test_diphen: MS2PROD=167.0857 with 5 ppm tolerance
+# Python ground truth: 11 unique scans
+# Explicit TOLERANCEPPM makes both implementations use the same window.
+# We return a superset (SELECT DISTINCT mz vs greedy dedup), so >= 11.
+query T
+SELECT COUNT(DISTINCT spectrum_index) >= 11
+  FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=167.0857:TOLERANCEPPM=5', 'bld')
+----
+true
+
+# test_formula iron pattern: MS2PROD=X AND MS2PROD=2*(X-formula(Fe))
+# Python ground truth: 370 unique scans, BUT Python has a parser bug —
+# it computes 2*X - Fe instead of 2*X - 2*Fe (doesn't distribute the
+# coefficient over the subtracted formula). Our implementation correctly
+# computes 2*X - 2*Fe = 2*X - 111.87. Different formula, different results.
+# Verify we find a substantial number of matches on real data (345 observed).
+query T
+SELECT COUNT(DISTINCT spectrum_index) >= 300
+  FROM massql('QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=2*(X-formula(Fe))', 'bld')
+----
+true
