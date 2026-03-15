@@ -162,8 +162,8 @@ AlignMinimap2ShardedTableFunction::InitLocal(ExecutionContext &context, TableFun
 	return lstate;
 }
 
-// Fixed batch size to bound per-thread memory usage during ReadBatchByIds.
-// Each thread materializes one batch at a time; 2048 HiFi reads ≈ ~30MB.
+// Sub-batch size for claiming ranges from pre-fetched shard sequences.
+// Controls granularity of per-thread work claiming via atomic counter.
 static constexpr idx_t SHARD_READ_BATCH_SIZE = 2048;
 
 std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(ClientContext &context, GlobalState &gstate,
@@ -259,27 +259,63 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 	SHARD_DBG_MEM(gstate, "ClaimWork: LOADED index shard %zu '%s' in %ldms", static_cast<size_t>(shard_idx),
 	              shard_info.name.c_str(), static_cast<long>(load_ms));
 
-	// Phase 4b: Materialize read IDs for this shard (one scan of associations table)
-	SHARD_DBG(gstate, "ClaimWork: MATERIALIZING IDs for shard %zu '%s'", static_cast<size_t>(shard_idx),
-	          shard_info.name.c_str());
-	auto ids_start = std::chrono::steady_clock::now();
-	active->shard_read_ids = ReadShardIds(context, bind_data.read_to_shard_table, shard_info.name);
-	auto ids_ms =
-	    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - ids_start).count();
-	idx_t id_count = active->shard_read_ids.size();
-	active->batch_size = std::min(SHARD_READ_BATCH_SIZE, std::max<idx_t>(1, id_count));
-	SHARD_DBG_MEM(gstate, "ClaimWork: MATERIALIZED %zu IDs for shard %zu in %ldms (batch_size=%zu)",
-	              static_cast<size_t>(id_count), static_cast<size_t>(shard_idx), static_cast<long>(ids_ms),
-	              static_cast<size_t>(active->batch_size));
+	// Phase 4b+4c: Materialize read IDs and pre-fetch sequences.
+	// Wrapped in try-catch to prevent deadlock if either step fails — without cleanup,
+	// the ActiveShard would remain in active_shards with ready=false, blocking all waiters.
+	idx_t seq_count;
+	try {
+		// Phase 4b: Materialize read IDs for this shard (one scan of associations table)
+		SHARD_DBG(gstate, "ClaimWork: MATERIALIZING IDs for shard %zu '%s'", static_cast<size_t>(shard_idx),
+		          shard_info.name.c_str());
+		auto ids_start = std::chrono::steady_clock::now();
+		auto shard_read_ids = ReadShardIds(context, bind_data.read_to_shard_table, shard_info.name);
+		auto ids_ms =
+		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - ids_start).count();
+		idx_t id_count = shard_read_ids.size();
+		SHARD_DBG_MEM(gstate, "ClaimWork: MATERIALIZED %zu IDs for shard %zu in %ldms", static_cast<size_t>(id_count),
+		              static_cast<size_t>(shard_idx), static_cast<long>(ids_ms));
 
-	// Adjust total_associations if materialized count differs from GROUP BY estimate
-	// (e.g., NULL read_ids are counted by COUNT(*) but skipped by ReadShardIds)
+		// Phase 4c: Pre-fetch ALL sequences for this shard in one bulk query.
+		// Eliminates per-batch ReadBatchByIds calls in Execute (temp table + JOIN per batch).
+		SHARD_DBG(gstate, "ClaimWork: PRE-FETCHING sequences for shard %zu '%s'", static_cast<size_t>(shard_idx),
+		          shard_info.name.c_str());
+		auto fetch_start = std::chrono::steady_clock::now();
+		ReadBatchByIds(context, bind_data.query_table, bind_data.query_schema, shard_read_ids, 0, shard_read_ids.size(),
+		               active->shard_sequences);
+		auto fetch_ms =
+		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - fetch_start)
+		        .count();
+		seq_count = active->shard_sequences.size();
+		active->batch_size = std::min(SHARD_READ_BATCH_SIZE, std::max<idx_t>(1, seq_count));
+		SHARD_DBG_MEM(gstate, "ClaimWork: PRE-FETCHED %zu sequences for shard %zu in %ldms (batch_size=%zu)",
+		              static_cast<size_t>(seq_count), static_cast<size_t>(shard_idx), static_cast<long>(fetch_ms),
+		              static_cast<size_t>(active->batch_size));
+	} catch (...) {
+		SHARD_DBG(gstate, "ClaimWork: ID/SEQUENCE FETCH FAILED shard %zu", static_cast<size_t>(shard_idx));
+		active->exhausted.store(true, std::memory_order_release);
+		active->active_workers.fetch_sub(1, std::memory_order_acq_rel);
+		{
+			std::lock_guard<std::mutex> guard(gstate.lock);
+			auto &shards = gstate.active_shards;
+			shards.erase(std::remove(shards.begin(), shards.end(), active), shards.end());
+		}
+		gstate.cv.notify_all();
+		throw;
+	}
+
+	// Adjust total_associations based on actual sequence count vs GROUP BY estimate.
+	// Must use separate fetch_add/fetch_sub to avoid unsigned underflow when seq_count < estimated.
 	idx_t estimated = bind_data.shards[shard_idx].read_count;
-	if (id_count != estimated) {
-		auto old_total = gstate.total_associations.fetch_add(id_count - estimated, std::memory_order_relaxed);
+	if (seq_count > estimated) {
+		auto old_total = gstate.total_associations.fetch_add(seq_count - estimated, std::memory_order_relaxed);
 		SHARD_DBG(gstate, "ClaimWork: adjusted total_associations %zu -> %zu (shard %zu: estimated=%zu, actual=%zu)",
-		          static_cast<size_t>(old_total), static_cast<size_t>(old_total + id_count - estimated),
-		          static_cast<size_t>(shard_idx), static_cast<size_t>(estimated), static_cast<size_t>(id_count));
+		          static_cast<size_t>(old_total), static_cast<size_t>(old_total + seq_count - estimated),
+		          static_cast<size_t>(shard_idx), static_cast<size_t>(estimated), static_cast<size_t>(seq_count));
+	} else if (seq_count < estimated) {
+		auto old_total = gstate.total_associations.fetch_sub(estimated - seq_count, std::memory_order_relaxed);
+		SHARD_DBG(gstate, "ClaimWork: adjusted total_associations %zu -> %zu (shard %zu: estimated=%zu, actual=%zu)",
+		          static_cast<size_t>(old_total), static_cast<size_t>(old_total - (estimated - seq_count)),
+		          static_cast<size_t>(shard_idx), static_cast<size_t>(estimated), static_cast<size_t>(seq_count));
 	}
 
 	// Phase 5: Publish under lock to prevent lost wake-ups with CV
@@ -303,19 +339,19 @@ void AlignMinimap2ShardedTableFunction::ReleaseWork(GlobalState &gstate, LocalSt
 	          static_cast<size_t>(prev_workers), static_cast<size_t>(prev_workers - 1),
 	          active->exhausted.load(std::memory_order_relaxed) ? "yes" : "no");
 
-	if (prev_workers == 1 && active->exhausted.load(std::memory_order_acquire)) {
-		// Last worker on an exhausted shard - remove from active list
+	{
 		std::lock_guard<std::mutex> guard(gstate.lock);
-		auto &shards = gstate.active_shards;
-		shards.erase(std::remove(shards.begin(), shards.end(), active), shards.end());
-		SHARD_DBG_MEM(gstate, "ReleaseWork: REMOVED shard %zu (active_shards=%zu)",
-		              static_cast<size_t>(active->shard_idx), static_cast<size_t>(shards.size()));
+		if (prev_workers == 1 && active->exhausted.load(std::memory_order_acquire)) {
+			// Last worker on an exhausted shard - remove from active list
+			auto &shards = gstate.active_shards;
+			shards.erase(std::remove(shards.begin(), shards.end(), active), shards.end());
+			SHARD_DBG_MEM(gstate, "ReleaseWork: REMOVED shard %zu (active_shards=%zu)",
+			              static_cast<size_t>(active->shard_idx), static_cast<size_t>(shards.size()));
+		}
+		lstate.current_active_shard = nullptr;
+		// Notify under lock to prevent lost wake-ups with CV
+		gstate.cv.notify_all();
 	}
-
-	lstate.current_active_shard = nullptr;
-
-	// Always notify: capacity may have opened or a shard slot freed
-	gstate.cv.notify_all();
 }
 
 void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
@@ -359,42 +395,33 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 			local_state.aligner->attach_shared_index(active->index);
 		}
 
-		// Atomically claim batch offset into the pre-materialized ID list
+		// Atomically claim batch offset into the pre-fetched sequence list
 		auto &active = local_state.current_active_shard;
-		idx_t id_count = active->shard_read_ids.size();
+		idx_t seq_count = active->shard_sequences.size();
 		idx_t my_offset = active->next_batch_offset.fetch_add(active->batch_size, std::memory_order_acq_rel);
 
-		if (my_offset >= id_count) {
+		if (my_offset >= seq_count) {
 			// All batches claimed already
-			SHARD_DBG(global_state, "Execute: shard %zu offset %zu >= id_count %zu, exhausted",
+			SHARD_DBG(global_state, "Execute: shard %zu offset %zu >= seq_count %zu, exhausted",
 			          static_cast<size_t>(active->shard_idx), static_cast<size_t>(my_offset),
-			          static_cast<size_t>(id_count));
+			          static_cast<size_t>(seq_count));
 			active->exhausted.store(true, std::memory_order_release);
 			ReleaseWork(global_state, local_state);
 			continue;
 		}
 
-		// Clamp batch count to remaining IDs
-		idx_t batch_count = std::min(active->batch_size, id_count - my_offset);
-		bool is_last_batch = (my_offset + batch_count >= id_count);
+		// Clamp batch count to remaining sequences
+		idx_t batch_count = std::min(active->batch_size, seq_count - my_offset);
+		bool is_last_batch = (my_offset + batch_count >= seq_count);
 
-		// Track progress by IDs claimed (before read/align, so progress updates during I/O)
+		// Track progress by sequences claimed (before align, so progress updates during I/O)
 		global_state.associations_processed.fetch_add(batch_count, std::memory_order_relaxed);
 
-		// Read sequences by joining a temp table of exact IDs against the query view
-		miint::SequenceRecordBatch query_batch;
-		SHARD_DBG(global_state, "Execute: shard %zu READ offset=%zu count=%zu (temp table of IDs JOIN %s, is_last=%s)",
+		// Extract sub-batch from pre-fetched sequences (no per-batch SQL round-trip)
+		auto query_batch = active->shard_sequences.SubRange(my_offset, batch_count);
+		SHARD_DBG(global_state, "Execute: shard %zu SUB-RANGE offset=%zu count=%zu (is_last=%s)",
 		          static_cast<size_t>(active->shard_idx), static_cast<size_t>(my_offset),
-		          static_cast<size_t>(batch_count), bind_data.query_table.c_str(), is_last_batch ? "yes" : "no");
-		auto read_start = std::chrono::steady_clock::now();
-		ReadBatchByIds(context, bind_data.query_table, bind_data.query_schema, active->shard_read_ids, my_offset,
-		               batch_count, query_batch);
-		auto read_ms =
-		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - read_start)
-		        .count();
-		SHARD_DBG_MEM(global_state, "Execute: shard %zu READ done: %zu reads in %ldms",
-		              static_cast<size_t>(active->shard_idx), static_cast<size_t>(query_batch.size()),
-		              static_cast<long>(read_ms));
+		          static_cast<size_t>(query_batch.size()), is_last_batch ? "yes" : "no");
 
 		if (query_batch.empty()) {
 			// No sequences found for these IDs (shouldn't happen, but handle gracefully)
@@ -457,9 +484,13 @@ TableFunction AlignMinimap2ShardedTableFunction::GetFunction() {
 	tf.named_parameters["eqx"] = LogicalType::BOOLEAN;
 	tf.named_parameters["max_threads_per_shard"] = LogicalType::INTEGER;
 	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
+	tf.named_parameters["min_chain_coverage"] = LogicalType::FLOAT;
 	tf.named_parameters["include_shard_name"] = LogicalType::BOOLEAN;
 
 	tf.table_scan_progress = Progress;
+
+	// Alignment output order is non-deterministic — NO_ORDER enables parallel CTAS.
+	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 
 	return tf;
 }

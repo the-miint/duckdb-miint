@@ -107,6 +107,9 @@ void Minimap2Aligner::InitOptions(const Minimap2Config &config, mm_idxopt_t &iop
 	// secondary alignments are retained. Match minimap2 command-line
 	// behavior: -N sets best_n directly (default 5).
 	mopt.best_n = config.max_secondary;
+
+	// Coverage pre-filter threshold
+	mopt.min_chain_coverage = config.min_chain_coverage;
 }
 
 // Static helper: load index from .mmi file

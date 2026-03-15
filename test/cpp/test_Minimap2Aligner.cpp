@@ -826,3 +826,134 @@ TEST_CASE("Minimap2Aligner CIGAR soft clips on reverse strand", "[Minimap2Aligne
 	// Query-consuming CIGAR operations must equal query length
 	REQUIRE(cigar_query_consumed(batch.cigars[0]) == static_cast<int>(query.length()));
 }
+
+// =============================================================================
+// Coverage pre-filter tests
+// =============================================================================
+
+TEST_CASE("Minimap2Config min_chain_coverage defaults to 0.0", "[Minimap2Aligner]") {
+	Minimap2Config config;
+	REQUIRE(config.min_chain_coverage == 0.0f);
+}
+
+TEST_CASE("InitOptions passes min_chain_coverage to mopt", "[Minimap2Aligner]") {
+	Minimap2Config config;
+	config.preset = "sr";
+	config.min_chain_coverage = 0.75f;
+
+	mm_idxopt_t iopt;
+	mm_mapopt_t mopt;
+	Minimap2Aligner::InitOptions(config, iopt, mopt);
+
+	REQUIRE(mopt.min_chain_coverage == 0.75f);
+}
+
+TEST_CASE("min_chain_coverage=0.0 produces identical results to default", "[Minimap2Aligner]") {
+	// 100bp reference
+	std::string ref_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+	                      "GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC";
+	std::vector<AlignmentSubject> subjects;
+	subjects.push_back({"reference", ref_seq});
+
+	// 50bp exact-match query
+	std::string query_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT";
+
+	// Align with default config (min_chain_coverage=0.0)
+	Minimap2Config config;
+	config.preset = "sr";
+	Minimap2Aligner aligner(config);
+	aligner.build_index(subjects);
+
+	auto queries = make_query_batch("q1", query_seq);
+	SAMRecordBatch batch_default;
+	aligner.align(queries, batch_default);
+
+	// Align with explicit min_chain_coverage=0.0
+	Minimap2Config config2;
+	config2.preset = "sr";
+	config2.min_chain_coverage = 0.0f;
+	Minimap2Aligner aligner2(config2);
+	aligner2.build_index(subjects);
+
+	auto queries2 = make_query_batch("q1", query_seq);
+	SAMRecordBatch batch_explicit;
+	aligner2.align(queries2, batch_explicit);
+
+	REQUIRE(batch_default.size() == batch_explicit.size());
+	for (size_t i = 0; i < batch_default.size(); i++) {
+		REQUIRE(batch_default.cigars[i] == batch_explicit.cigars[i]);
+		REQUIRE(batch_default.positions[i] == batch_explicit.positions[i]);
+	}
+}
+
+TEST_CASE("min_chain_coverage=0.99 filters unmappable queries", "[Minimap2Aligner]") {
+	// 100bp reference
+	std::string ref_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+	                      "GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC";
+	std::vector<AlignmentSubject> subjects;
+	subjects.push_back({"reference", ref_seq});
+
+	// Random query that does NOT match the reference
+	std::string query_seq = "TTTTTTTTTTTTTTTTTTTTTTAAAAAAAAAAAAAAAAAAAACCCCCCCCCC";
+
+	// Without filter: may produce low-quality mapping or unmapped
+	Minimap2Config config_base;
+	config_base.preset = "sr";
+	Minimap2Aligner aligner_base(config_base);
+	aligner_base.build_index(subjects);
+
+	auto queries_base = make_query_batch("q_random", query_seq);
+	SAMRecordBatch batch_base;
+	aligner_base.align(queries_base, batch_base);
+
+	// With filter at 0.99: random sequence has no seed hits → no chains → 0 coverage → filtered
+	Minimap2Config config;
+	config.preset = "sr";
+	config.min_chain_coverage = 0.99f;
+	Minimap2Aligner aligner(config);
+	aligner.build_index(subjects);
+
+	auto queries = make_query_batch("q_random", query_seq);
+	SAMRecordBatch batch;
+	aligner.align(queries, batch);
+
+	// Random sequence cannot produce chains against this reference, so zero mapped reads
+	int mapped_filtered = 0;
+	for (size_t i = 0; i < batch.size(); i++) {
+		if ((batch.flags[i] & 0x4) == 0)
+			mapped_filtered++;
+	}
+	REQUIRE(mapped_filtered == 0);
+}
+
+TEST_CASE("Coverage filter preserves full-length alignments", "[Minimap2Aligner]") {
+	// 100bp reference
+	std::string ref_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+	                      "GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC";
+	std::vector<AlignmentSubject> subjects;
+	subjects.push_back({"reference", ref_seq});
+
+	// 50bp exact match (100% coverage chain)
+	std::string query_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT";
+
+	Minimap2Config config;
+	config.preset = "sr";
+	config.min_chain_coverage = 0.5f;
+	Minimap2Aligner aligner(config);
+	aligner.build_index(subjects);
+
+	auto queries = make_query_batch("q_full", query_seq);
+	SAMRecordBatch batch;
+	aligner.align(queries, batch);
+
+	// Full-length alignment should survive even at 0.5 threshold
+	REQUIRE(batch.size() >= 1);
+	bool has_mapped = false;
+	for (size_t i = 0; i < batch.size(); i++) {
+		if ((batch.flags[i] & 0x4) == 0) {
+			has_mapped = true;
+			REQUIRE(batch.references[i] == "reference");
+		}
+	}
+	REQUIRE(has_mapped);
+}

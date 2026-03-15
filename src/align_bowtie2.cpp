@@ -191,6 +191,9 @@ TableFunction AlignBowtie2TableFunction::GetFunction() {
 	tf.named_parameters["extra_args"] = LogicalType::VARCHAR;    // Additional arguments
 	tf.named_parameters["quiet"] = LogicalType::BOOLEAN;         // Suppress stderr output (default: true)
 
+	// Alignment output order is non-deterministic — NO_ORDER enables parallel CTAS.
+	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
+
 	return tf;
 }
 
