@@ -1,4 +1,4 @@
-#include "MzMLBinaryDecoder.hpp"
+#include "MsBinaryDecoder.hpp"
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -33,7 +33,7 @@ static const uint8_t BASE64_DECODE_TABLE[256] = {
 };
 // NOLINTEND(cppcoreguidelines-avoid-c-arrays)
 
-std::vector<uint8_t> MzMLBinaryDecoder::base64_decode(const std::string &input) {
+std::vector<uint8_t> MsBinaryDecoder::base64_decode(const std::string &input) {
 	if (input.empty()) {
 		return {};
 	}
@@ -130,7 +130,7 @@ std::vector<uint8_t> MzMLBinaryDecoder::base64_decode(const std::string &input) 
 	return result;
 }
 
-std::vector<uint8_t> MzMLBinaryDecoder::zlib_inflate(const std::vector<uint8_t> &compressed) {
+std::vector<uint8_t> MsBinaryDecoder::zlib_inflate(const std::vector<uint8_t> &compressed) {
 	if (compressed.empty()) {
 		return {};
 	}
@@ -168,7 +168,7 @@ std::vector<uint8_t> MzMLBinaryDecoder::zlib_inflate(const std::vector<uint8_t> 
 	return result;
 }
 
-std::vector<double> MzMLBinaryDecoder::to_doubles_64(const std::vector<uint8_t> &bytes) {
+std::vector<double> MsBinaryDecoder::to_doubles_64(const std::vector<uint8_t> &bytes) {
 	if (bytes.size() % 8 != 0) {
 		throw std::invalid_argument("to_doubles_64: byte count is not a multiple of 8");
 	}
@@ -184,7 +184,7 @@ std::vector<double> MzMLBinaryDecoder::to_doubles_64(const std::vector<uint8_t> 
 	return result;
 }
 
-std::vector<double> MzMLBinaryDecoder::to_doubles_32(const std::vector<uint8_t> &bytes) {
+std::vector<double> MsBinaryDecoder::to_doubles_32(const std::vector<uint8_t> &bytes) {
 	if (bytes.size() % 4 != 0) {
 		throw std::invalid_argument("to_doubles_32: byte count is not a multiple of 4");
 	}
@@ -201,7 +201,7 @@ std::vector<double> MzMLBinaryDecoder::to_doubles_32(const std::vector<uint8_t> 
 	return result;
 }
 
-std::vector<double> MzMLBinaryDecoder::decode(const std::string &base64_text, bool is_compressed, bool is_64bit) {
+std::vector<double> MsBinaryDecoder::decode(const std::string &base64_text, bool is_compressed, bool is_64bit) {
 	auto raw_bytes = base64_decode(base64_text);
 
 	if (is_compressed) {
@@ -215,7 +215,63 @@ std::vector<double> MzMLBinaryDecoder::decode(const std::string &base64_text, bo
 	}
 }
 
-std::vector<uint8_t> MzMLBinaryDecoder::zlib_compress_for_test(const std::vector<uint8_t> &data) {
+std::pair<std::vector<double>, std::vector<double>>
+MsBinaryDecoder::deinterleave(const std::vector<double> &interleaved) {
+	if (interleaved.empty()) {
+		return {{}, {}};
+	}
+	if (interleaved.size() % 2 != 0) {
+		throw std::invalid_argument("deinterleave: input size must be even (interleaved m/z-intensity pairs)");
+	}
+	size_t n = interleaved.size() / 2;
+	std::vector<double> mz(n);
+	std::vector<double> intensity(n);
+	for (size_t i = 0; i < n; i++) {
+		mz[i] = interleaved[i * 2];
+		intensity[i] = interleaved[i * 2 + 1];
+	}
+	return {std::move(mz), std::move(intensity)};
+}
+
+std::pair<std::vector<double>, std::vector<double>> MsBinaryDecoder::decode_mzxml(const std::string &base64_text,
+                                                                                  bool is_compressed, bool is_64bit) {
+	auto raw_bytes = base64_decode(base64_text);
+
+	if (raw_bytes.empty()) {
+		return {{}, {}};
+	}
+
+	if (is_compressed) {
+		raw_bytes = zlib_inflate(raw_bytes);
+	}
+
+	// mzXML binary data is big-endian — swap each element in-place to little-endian
+	if (is_64bit) {
+		if (raw_bytes.size() % 8 != 0) {
+			throw std::invalid_argument("decode_mzxml: byte count is not a multiple of 8");
+		}
+		for (size_t i = 0; i < raw_bytes.size(); i += 8) {
+			uint64_t val;
+			std::memcpy(&val, raw_bytes.data() + i, 8);
+			val = __builtin_bswap64(val);
+			std::memcpy(raw_bytes.data() + i, &val, 8);
+		}
+		return deinterleave(to_doubles_64(raw_bytes));
+	} else {
+		if (raw_bytes.size() % 4 != 0) {
+			throw std::invalid_argument("decode_mzxml: byte count is not a multiple of 4");
+		}
+		for (size_t i = 0; i < raw_bytes.size(); i += 4) {
+			uint32_t val;
+			std::memcpy(&val, raw_bytes.data() + i, 4);
+			val = __builtin_bswap32(val);
+			std::memcpy(raw_bytes.data() + i, &val, 4);
+		}
+		return deinterleave(to_doubles_32(raw_bytes));
+	}
+}
+
+std::vector<uint8_t> MsBinaryDecoder::zlib_compress_for_test(const std::vector<uint8_t> &data) {
 	if (data.empty()) {
 		return {};
 	}

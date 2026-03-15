@@ -526,11 +526,12 @@ TEST_CASE("OTHERSCAN=rtrange(left=0.5,right=0.5) parses", "[massql][parser]") {
 // ===== Pre-work D: Out-of-scope error messages =====
 
 TEST_CASE("MOBILITY qualifier error", "[massql][parser]") {
+	// MOBILITY is a condition field, not a qualifier — using it as :MOBILITY=5 is an error
 	try {
 		MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=220:MOBILITY=5");
 		REQUIRE(false); // should have thrown
 	} catch (const std::runtime_error &e) {
-		REQUIRE(std::string(e.what()).find("MOBILITY is not supported") != std::string::npos);
+		REQUIRE(std::string(e.what()).find("unknown qualifier") != std::string::npos);
 	}
 }
 

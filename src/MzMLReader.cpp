@@ -1,5 +1,6 @@
 #include "MzMLReader.hpp"
-#include "MzMLBinaryDecoder.hpp"
+#include "MsBinaryDecoder.hpp"
+#include "mz_parse_utils.hpp"
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -129,36 +130,8 @@ enum class ParseContext {
 	CHROMATOGRAM_BINARY,
 };
 
-// Safe numeric conversion helpers: return false on failure instead of throwing
-static bool safe_stoi(const std::string &s, int32_t &out) {
-	if (s.empty()) {
-		return false;
-	}
-	try {
-		size_t pos = 0;
-		long val = std::stol(s, &pos);
-		if (pos != s.size() || val < INT32_MIN || val > INT32_MAX) {
-			return false;
-		}
-		out = static_cast<int32_t>(val);
-		return true;
-	} catch (...) {
-		return false;
-	}
-}
-
-static bool safe_stod(const std::string &s, double &out) {
-	if (s.empty()) {
-		return false;
-	}
-	try {
-		size_t pos = 0;
-		out = std::stod(s, &pos);
-		return pos == s.size();
-	} catch (...) {
-		return false;
-	}
-}
+using miint::safe_stod;
+using miint::safe_stoi;
 
 struct MzMLReader::Impl {
 	std::string filepath;
@@ -315,7 +288,7 @@ struct MzMLReader::Impl {
 		const auto &val = cv.value;
 
 		if (acc == "MS:1000511") {
-			safe_stoi(val, current_spectrum.ms_level);
+			(void)safe_stoi(val, current_spectrum.ms_level);
 		} else if (acc == "MS:1000127") {
 			current_spectrum.spectrum_type = "centroid";
 		} else if (acc == "MS:1000128") {
@@ -537,7 +510,7 @@ struct MzMLReader::Impl {
 			current_spectrum = SpectrumState {};
 			auto *idx = get_attr(attrs, "index");
 			if (idx) {
-				safe_stoi(std::string(idx), current_spectrum.index);
+				(void)safe_stoi(std::string(idx), current_spectrum.index);
 			}
 			auto *id = get_attr(attrs, "id");
 			if (id) {
@@ -549,7 +522,7 @@ struct MzMLReader::Impl {
 			}
 			auto *dal = get_attr(attrs, "defaultArrayLength");
 			if (dal) {
-				safe_stoi(std::string(dal), current_spectrum.default_array_length);
+				(void)safe_stoi(std::string(dal), current_spectrum.default_array_length);
 			}
 			return;
 		}
@@ -695,7 +668,7 @@ struct MzMLReader::Impl {
 			current_chromatogram = ChromatogramState {};
 			auto *idx = get_attr(attrs, "index");
 			if (idx) {
-				safe_stoi(std::string(idx), current_chromatogram.index);
+				(void)safe_stoi(std::string(idx), current_chromatogram.index);
 			}
 			auto *id = get_attr(attrs, "id");
 			if (id) {
@@ -879,8 +852,8 @@ struct MzMLReader::Impl {
 			// Only decode arrays we care about; skip non-standard arrays (e.g. "ms level")
 			if (current_binary_array.is_mz || current_binary_array.is_intensity) {
 				auto decoded =
-				    MzMLBinaryDecoder::decode(current_binary_array.binary_text, current_binary_array.is_compressed,
-				                              current_binary_array.is_64bit);
+				    MsBinaryDecoder::decode(current_binary_array.binary_text, current_binary_array.is_compressed,
+				                            current_binary_array.is_64bit);
 				if (current_binary_array.is_mz) {
 					current_spectrum.mz_array = std::move(decoded);
 				} else {
@@ -930,8 +903,8 @@ struct MzMLReader::Impl {
 			// Only decode arrays we care about; skip non-standard arrays (e.g. "ms level")
 			if (current_binary_array.is_time || current_binary_array.is_intensity) {
 				auto decoded =
-				    MzMLBinaryDecoder::decode(current_binary_array.binary_text, current_binary_array.is_compressed,
-				                              current_binary_array.is_64bit);
+				    MsBinaryDecoder::decode(current_binary_array.binary_text, current_binary_array.is_compressed,
+				                            current_binary_array.is_64bit);
 				if (current_binary_array.is_time) {
 					current_chromatogram.time_array = std::move(decoded);
 				} else {

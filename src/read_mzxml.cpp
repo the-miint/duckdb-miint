@@ -1,15 +1,15 @@
-#include "MzMLReader.hpp"
+#include "MzXMLReader.hpp"
 #include "table_function_common.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include <read_mzml.hpp>
+#include <read_mzxml.hpp>
 
 namespace duckdb {
 
-unique_ptr<FunctionData> ReadMzMLTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                     vector<duckdb::LogicalType> &return_types,
-                                                     vector<std::string> &names) {
+unique_ptr<FunctionData> ReadMzXMLTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
+                                                      vector<duckdb::LogicalType> &return_types,
+                                                      vector<std::string> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
 	std::vector<std::string> file_paths;
@@ -23,15 +23,15 @@ unique_ptr<FunctionData> ReadMzMLTableFunction::Bind(ClientContext &context, Tab
 			file_paths.push_back(child.ToString());
 		}
 		if (file_paths.empty()) {
-			throw InvalidInputException("read_mzml: at least one file path must be provided");
+			throw InvalidInputException("read_mzxml: at least one file path must be provided");
 		}
 	} else {
-		throw InvalidInputException("read_mzml: first argument must be VARCHAR or VARCHAR[]");
+		throw InvalidInputException("read_mzxml: first argument must be VARCHAR or VARCHAR[]");
 	}
 
 	for (const auto &path : file_paths) {
 		if (IsStdinPath(path)) {
-			throw InvalidInputException("read_mzml: stdin is not supported (mzML requires file seeking)");
+			throw InvalidInputException("read_mzxml: stdin is not supported (mzXML requires file seeking)");
 		}
 	}
 
@@ -53,19 +53,19 @@ unique_ptr<FunctionData> ReadMzMLTableFunction::Bind(ClientContext &context, Tab
 	return data;
 }
 
-unique_ptr<GlobalTableFunctionState> ReadMzMLTableFunction::InitGlobal(ClientContext &context,
-                                                                       TableFunctionInitInput &input) {
+unique_ptr<GlobalTableFunctionState> ReadMzXMLTableFunction::InitGlobal(ClientContext &context,
+                                                                        TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	return duckdb::make_uniq<GlobalState>(data.file_paths);
 }
 
-unique_ptr<LocalTableFunctionState> ReadMzMLTableFunction::InitLocal(ExecutionContext &context,
-                                                                     TableFunctionInitInput &input,
-                                                                     GlobalTableFunctionState *global_state) {
+unique_ptr<LocalTableFunctionState> ReadMzXMLTableFunction::InitLocal(ExecutionContext &context,
+                                                                      TableFunctionInitInput &input,
+                                                                      GlobalTableFunctionState *global_state) {
 	return duckdb::make_uniq<LocalState>();
 }
 
-void ReadMzMLTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+void ReadMzXMLTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &bind_data = data_p.bind_data->Cast<Data>();
 	auto &global_state = data_p.global_state->Cast<GlobalState>();
 	auto &local_state = data_p.local_state->Cast<LocalState>();
@@ -87,11 +87,9 @@ void ReadMzMLTableFunction::Execute(ClientContext &context, TableFunctionInput &
 			local_state.has_file = true;
 		}
 
-		// Safe without lock: each thread claims an exclusive file index via next_file_idx++
-		// under the lock above, so no two threads access the same reader slot.
 		if (!global_state.readers[local_state.current_file_idx]) {
 			global_state.readers[local_state.current_file_idx] =
-			    std::make_unique<miint::MzMLReader>(global_state.filepaths[local_state.current_file_idx]);
+			    std::make_unique<miint::MzXMLReader>(global_state.filepaths[local_state.current_file_idx]);
 		}
 
 		batch = global_state.readers[local_state.current_file_idx]->read_spectra(STANDARD_VECTOR_SIZE);
@@ -108,13 +106,13 @@ void ReadMzMLTableFunction::Execute(ClientContext &context, TableFunctionInput &
 	PopulateSpectrumBatchOutput(output, batch, bind_data.include_filepath, current_filepath);
 }
 
-TableFunction ReadMzMLTableFunction::GetFunction() {
-	auto tf = TableFunction("read_mzml", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
+TableFunction ReadMzXMLTableFunction::GetFunction() {
+	auto tf = TableFunction("read_mzxml", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
 	return tf;
 }
 
-void ReadMzMLTableFunction::Register(ExtensionLoader &loader) {
+void ReadMzXMLTableFunction::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetFunction());
 }
 } // namespace duckdb

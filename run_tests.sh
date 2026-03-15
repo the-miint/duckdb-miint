@@ -39,6 +39,20 @@ if [ -f "$GNPS_FILE" ]; then
     export MASSQL_GNPS_DATA=1
 fi
 
+# Download and cache real mzXML test data if not present
+MZXML_FILE="$CACHE_DIR/10125_P1_RA12_01_49.mzXML"
+MZXML_EXPECTED_SHA="d026938157e5f640568c371ed6a0bca0de34e8c181da1443298671005e7ffe5a"
+if [ ! -f "$MZXML_FILE" ]; then
+    echo "Downloading mzXML test data..."
+    if ! wget -q -O "$MZXML_FILE" "https://massive.ucsd.edu/ProteoSAFe/DownloadResultFile?file=f.MSV000080179%2Fccms_peak%2FmzXMLs%2F10125_P1_RA12_01_49.mzXML&forceDownload=true"; then
+        rm -f "$MZXML_FILE"
+        echo "Warning: mzXML test data download failed, skipping mzXML real data tests"
+    fi
+fi
+if echo "$MZXML_EXPECTED_SHA  $MZXML_FILE" | sha256sum -c --quiet 2>/dev/null; then
+    export MZXML_REAL_DATA="$MZXML_FILE"
+fi
+
 make test
 ./build/release/extension/miint/tests
 

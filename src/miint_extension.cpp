@@ -34,6 +34,7 @@
 #include <align_pairwise_functions.hpp>
 #include <read_mzml.hpp>
 #include <read_mzml_chromatograms.hpp>
+#include <read_mzxml.hpp>
 #include <rype_classify.hpp>
 #include <rype_extract.hpp>
 #include <rype_log_ratio.hpp>
@@ -169,6 +170,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	ReadMzMLTableFunction::Register(loader);
 	ReadMzMLChromatogramsTableFunction::Register(loader);
+	ReadMzXMLTableFunction::Register(loader);
 
 	// Ensure dependency extensions are loaded before registering macros that
 	// reference their functions (e.g., read_jplace needs json's read_json,

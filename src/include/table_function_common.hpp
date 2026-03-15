@@ -1,11 +1,13 @@
 #pragma once
 #include <string>
 #include <vector>
+#include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/named_parameter_map.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "SpectrumBatch.hpp"
 #include "QualScore.hpp"
 
 namespace duckdb {
@@ -61,5 +63,10 @@ void SetResultVectorDouble(Vector &result_vector, const std::vector<double> &val
 void SetResultVectorDoubleNullable(Vector &result_vector, const std::vector<double> &values,
                                    const std::vector<bool> &valid);
 void SetResultVectorListDouble(Vector &result_vector, const std::vector<std::vector<double>> &values);
+
+// Populate a DataChunk from a SpectrumBatch (shared by read_mzml and read_mzxml).
+// Maps the 27-column schema from MzMLSpectrumBatch to output vectors.
+void PopulateSpectrumBatchOutput(DataChunk &output, const miint::MzMLSpectrumBatch &batch, bool include_filepath,
+                                 const std::string &filepath);
 
 } // namespace duckdb

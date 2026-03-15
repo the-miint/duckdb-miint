@@ -398,7 +398,7 @@ set(EXTENSION_SOURCES
     src/align_pairwise_functions.cpp
     src/rype_classify.cpp
     src/rype_extract.cpp
-    src/MzMLBinaryDecoder.cpp
+    src/MsBinaryDecoder.cpp
     src/MzMLReader.cpp
     src/read_mzml.cpp
     src/read_mzml_chromatograms.cpp
@@ -408,7 +408,9 @@ set(EXTENSION_SOURCES
     src/massql_parser.cpp
     src/massql_transpiler.cpp
     src/massql_function.cpp
-    src/mass_tables.cpp)
+    src/mass_tables.cpp
+    src/MzXMLReader.cpp
+    src/read_mzxml.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
@@ -522,10 +524,12 @@ set(TEST_SOURCES
     test/cpp/test_SFFReader.cpp
     src/WFA2Aligner.cpp
     test/cpp/test_WFA2Aligner.cpp
-    src/MzMLBinaryDecoder.cpp
-    test/cpp/test_MzMLBinaryDecoder.cpp
+    src/MsBinaryDecoder.cpp
+    test/cpp/test_MsBinaryDecoder.cpp
     src/MzMLReader.cpp
     test/cpp/test_MzMLReader.cpp
+    src/MzXMLReader.cpp
+    test/cpp/test_MzXMLReader.cpp
     src/formula_parser.cpp
     src/massql_parser.cpp
     src/mass_tables.cpp

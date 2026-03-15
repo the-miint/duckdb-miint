@@ -1,26 +1,26 @@
-#include <MzMLBinaryDecoder.hpp>
+#include <MsBinaryDecoder.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <cstring>
 
-using miint::MzMLBinaryDecoder;
+using miint::MsBinaryDecoder;
 
 // ===== base64_decode =====
 
 TEST_CASE("base64_decode: empty string", "[mzml][binary]") {
-	auto result = MzMLBinaryDecoder::base64_decode("");
+	auto result = MsBinaryDecoder::base64_decode("");
 	CHECK(result.empty());
 }
 
 TEST_CASE("base64_decode: whitespace only", "[mzml][binary]") {
-	auto result = MzMLBinaryDecoder::base64_decode("  \n\t\r  ");
+	auto result = MsBinaryDecoder::base64_decode("  \n\t\r  ");
 	CHECK(result.empty());
 }
 
 TEST_CASE("base64_decode: known value Hello", "[mzml][binary]") {
 	// "SGVsbG8=" -> "Hello"
-	auto result = MzMLBinaryDecoder::base64_decode("SGVsbG8=");
+	auto result = MsBinaryDecoder::base64_decode("SGVsbG8=");
 	REQUIRE(result.size() == 5);
 	CHECK(result[0] == 'H');
 	CHECK(result[1] == 'e');
@@ -31,7 +31,7 @@ TEST_CASE("base64_decode: known value Hello", "[mzml][binary]") {
 
 TEST_CASE("base64_decode: handles embedded whitespace", "[mzml][binary]") {
 	// Same as "SGVsbG8=" but with whitespace
-	auto result = MzMLBinaryDecoder::base64_decode("SGVs\nbG8=");
+	auto result = MsBinaryDecoder::base64_decode("SGVs\nbG8=");
 	REQUIRE(result.size() == 5);
 	std::string str(result.begin(), result.end());
 	CHECK(str == "Hello");
@@ -39,7 +39,7 @@ TEST_CASE("base64_decode: handles embedded whitespace", "[mzml][binary]") {
 
 TEST_CASE("base64_decode: handles + and / characters", "[mzml][binary]") {
 	// "++++", decodes to bytes 0xfb 0xef 0xbe
-	auto result = MzMLBinaryDecoder::base64_decode("++++");
+	auto result = MsBinaryDecoder::base64_decode("++++");
 	REQUIRE(result.size() == 3);
 	CHECK(result[0] == 0xfb);
 	CHECK(result[1] == 0xef);
@@ -47,30 +47,30 @@ TEST_CASE("base64_decode: handles + and / characters", "[mzml][binary]") {
 }
 
 TEST_CASE("base64_decode: invalid characters", "[mzml][binary]") {
-	CHECK_THROWS_AS(MzMLBinaryDecoder::base64_decode("!!!@"), std::invalid_argument);
+	CHECK_THROWS_AS(MsBinaryDecoder::base64_decode("!!!@"), std::invalid_argument);
 }
 
 TEST_CASE("base64_decode: non-multiple-of-4 length", "[mzml][binary]") {
-	CHECK_THROWS_AS(MzMLBinaryDecoder::base64_decode("SGVSB"), std::invalid_argument);
-	CHECK_THROWS_AS(MzMLBinaryDecoder::base64_decode("AB"), std::invalid_argument);
+	CHECK_THROWS_AS(MsBinaryDecoder::base64_decode("SGVSB"), std::invalid_argument);
+	CHECK_THROWS_AS(MsBinaryDecoder::base64_decode("AB"), std::invalid_argument);
 }
 
 // ===== zlib_inflate =====
 
 TEST_CASE("zlib_inflate: round-trip compress/decompress", "[mzml][binary]") {
 	std::vector<uint8_t> original = {1, 2, 3, 4, 5, 6, 7, 8};
-	auto compressed = MzMLBinaryDecoder::zlib_compress_for_test(original);
-	auto decompressed = MzMLBinaryDecoder::zlib_inflate(compressed);
+	auto compressed = MsBinaryDecoder::zlib_compress_for_test(original);
+	auto decompressed = MsBinaryDecoder::zlib_inflate(compressed);
 	CHECK(decompressed == original);
 }
 
 TEST_CASE("zlib_inflate: corrupt data rejection", "[mzml][binary]") {
 	std::vector<uint8_t> garbage = {0xFF, 0xFE, 0xFD, 0xFC};
-	CHECK_THROWS_WITH(MzMLBinaryDecoder::zlib_inflate(garbage), Catch::Matchers::ContainsSubstring("corrupt"));
+	CHECK_THROWS_WITH(MsBinaryDecoder::zlib_inflate(garbage), Catch::Matchers::ContainsSubstring("corrupt"));
 }
 
 TEST_CASE("zlib_inflate: empty input", "[mzml][binary]") {
-	auto result = MzMLBinaryDecoder::zlib_inflate({});
+	auto result = MsBinaryDecoder::zlib_inflate({});
 	CHECK(result.empty());
 }
 
@@ -79,7 +79,7 @@ TEST_CASE("zlib_inflate: empty input", "[mzml][binary]") {
 TEST_CASE("to_doubles_64: known IEEE 754 LE value 100.0", "[mzml][binary]") {
 	// 100.0 = 0x4059000000000000 in LE: 00 00 00 00 00 00 59 40
 	std::vector<uint8_t> bytes = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x59, 0x40};
-	auto result = MzMLBinaryDecoder::to_doubles_64(bytes);
+	auto result = MsBinaryDecoder::to_doubles_64(bytes);
 	REQUIRE(result.size() == 1);
 	CHECK(result[0] == 100.0);
 }
@@ -90,7 +90,7 @@ TEST_CASE("to_doubles_64: multiple values", "[mzml][binary]") {
 	std::vector<uint8_t> bytes(24);
 	std::memcpy(bytes.data(), vals, 24);
 
-	auto result = MzMLBinaryDecoder::to_doubles_64(bytes);
+	auto result = MsBinaryDecoder::to_doubles_64(bytes);
 	REQUIRE(result.size() == 3);
 	CHECK(result[0] == 100.0);
 	CHECK(result[1] == 200.0);
@@ -99,7 +99,7 @@ TEST_CASE("to_doubles_64: multiple values", "[mzml][binary]") {
 
 TEST_CASE("to_doubles_64: non-aligned rejection", "[mzml][binary]") {
 	std::vector<uint8_t> bytes = {0x00, 0x00, 0x00}; // 3 bytes, not multiple of 8
-	CHECK_THROWS_AS(MzMLBinaryDecoder::to_doubles_64(bytes), std::invalid_argument);
+	CHECK_THROWS_AS(MsBinaryDecoder::to_doubles_64(bytes), std::invalid_argument);
 }
 
 // ===== to_doubles_32 =====
@@ -110,7 +110,7 @@ TEST_CASE("to_doubles_32: 32-bit float to double upcast", "[mzml][binary]") {
 	std::vector<uint8_t> bytes(4);
 	std::memcpy(bytes.data(), &val, 4);
 
-	auto result = MzMLBinaryDecoder::to_doubles_32(bytes);
+	auto result = MsBinaryDecoder::to_doubles_32(bytes);
 	REQUIRE(result.size() == 1);
 	CHECK_THAT(result[0], Catch::Matchers::WithinRel(100.0, 1e-6));
 }
@@ -120,7 +120,7 @@ TEST_CASE("to_doubles_32: multiple values", "[mzml][binary]") {
 	std::vector<uint8_t> bytes(12);
 	std::memcpy(bytes.data(), vals, 12);
 
-	auto result = MzMLBinaryDecoder::to_doubles_32(bytes);
+	auto result = MsBinaryDecoder::to_doubles_32(bytes);
 	REQUIRE(result.size() == 3);
 	CHECK_THAT(result[0], Catch::Matchers::WithinRel(100.0, 1e-6));
 	CHECK_THAT(result[1], Catch::Matchers::WithinRel(200.0, 1e-6));
@@ -129,14 +129,14 @@ TEST_CASE("to_doubles_32: multiple values", "[mzml][binary]") {
 
 TEST_CASE("to_doubles_32: non-aligned rejection", "[mzml][binary]") {
 	std::vector<uint8_t> bytes = {0x00, 0x00, 0x00}; // 3 bytes, not multiple of 4
-	CHECK_THROWS_AS(MzMLBinaryDecoder::to_doubles_32(bytes), std::invalid_argument);
+	CHECK_THROWS_AS(MsBinaryDecoder::to_doubles_32(bytes), std::invalid_argument);
 }
 
 // ===== decode (full pipeline) =====
 
 TEST_CASE("decode: uncompressed 64-bit", "[mzml][binary]") {
 	// base64 of 3 doubles (100.0, 200.0, 300.0) LE 64-bit
-	auto result = MzMLBinaryDecoder::decode("AAAAAAAAWUAAAAAAAABpQAAAAAAAwHJA", false, true);
+	auto result = MsBinaryDecoder::decode("AAAAAAAAWUAAAAAAAABpQAAAAAAAwHJA", false, true);
 	REQUIRE(result.size() == 3);
 	CHECK(result[0] == 100.0);
 	CHECK(result[1] == 200.0);
@@ -145,7 +145,7 @@ TEST_CASE("decode: uncompressed 64-bit", "[mzml][binary]") {
 
 TEST_CASE("decode: compressed 64-bit", "[mzml][binary]") {
 	// zlib-compressed base64 of 3 doubles (100.0, 200.0, 300.0)
-	auto result = MzMLBinaryDecoder::decode("eJxjYACBSAcwxZAJoQ8UOQAAFFgCtQ==", true, true);
+	auto result = MsBinaryDecoder::decode("eJxjYACBSAcwxZAJoQ8UOQAAFFgCtQ==", true, true);
 	REQUIRE(result.size() == 3);
 	CHECK(result[0] == 100.0);
 	CHECK(result[1] == 200.0);
@@ -154,7 +154,7 @@ TEST_CASE("decode: compressed 64-bit", "[mzml][binary]") {
 
 TEST_CASE("decode: uncompressed 32-bit", "[mzml][binary]") {
 	// base64 of 3 floats (100.0, 200.0, 300.0) LE 32-bit
-	auto result = MzMLBinaryDecoder::decode("AADIQgAASEMAAJZD", false, false);
+	auto result = MsBinaryDecoder::decode("AADIQgAASEMAAJZD", false, false);
 	REQUIRE(result.size() == 3);
 	CHECK_THAT(result[0], Catch::Matchers::WithinRel(100.0, 1e-6));
 	CHECK_THAT(result[1], Catch::Matchers::WithinRel(200.0, 1e-6));
@@ -162,7 +162,7 @@ TEST_CASE("decode: uncompressed 32-bit", "[mzml][binary]") {
 }
 
 TEST_CASE("decode: empty base64", "[mzml][binary]") {
-	auto result = MzMLBinaryDecoder::decode("", false, true);
+	auto result = MsBinaryDecoder::decode("", false, true);
 	CHECK(result.empty());
 }
 
@@ -170,26 +170,101 @@ TEST_CASE("decode: empty base64", "[mzml][binary]") {
 
 TEST_CASE("base64_decode: rejects mid-string padding", "[mzml][binary]") {
 	// "AA==" is valid (one output byte), but "AA==AAAA" has padding mid-string
-	CHECK_THROWS_AS(MzMLBinaryDecoder::base64_decode("AA==AAAA"), std::invalid_argument);
+	CHECK_THROWS_AS(MsBinaryDecoder::base64_decode("AA==AAAA"), std::invalid_argument);
 }
 
 TEST_CASE("base64_decode: rejects padding at position 0 or 1 in group", "[mzml][binary]") {
 	// Padding only valid at positions 2 and 3 of the last 4-char group
-	CHECK_THROWS_AS(MzMLBinaryDecoder::base64_decode("===="), std::invalid_argument);
-	CHECK_THROWS_AS(MzMLBinaryDecoder::base64_decode("=AAA"), std::invalid_argument);
+	CHECK_THROWS_AS(MsBinaryDecoder::base64_decode("===="), std::invalid_argument);
+	CHECK_THROWS_AS(MsBinaryDecoder::base64_decode("=AAA"), std::invalid_argument);
 }
 
 TEST_CASE("base64_decode: accepts valid double-padding", "[mzml][binary]") {
 	// "QQ==" encodes single byte 'A' (0x41)
-	auto result = MzMLBinaryDecoder::base64_decode("QQ==");
+	auto result = MsBinaryDecoder::base64_decode("QQ==");
 	REQUIRE(result.size() == 1);
 	CHECK(result[0] == 0x41);
 }
 
 TEST_CASE("base64_decode: accepts valid single-padding", "[mzml][binary]") {
 	// "QUI=" encodes two bytes 'AB' (0x41, 0x42)
-	auto result = MzMLBinaryDecoder::base64_decode("QUI=");
+	auto result = MsBinaryDecoder::base64_decode("QUI=");
 	REQUIRE(result.size() == 2);
 	CHECK(result[0] == 0x41);
 	CHECK(result[1] == 0x42);
+}
+
+// ===== deinterleave =====
+
+TEST_CASE("deinterleave: three pairs", "[mzxml][binary]") {
+	std::vector<double> interleaved = {100.0, 1000.0, 200.0, 5000.0, 300.0, 2000.0};
+	auto [mz, intensity] = MsBinaryDecoder::deinterleave(interleaved);
+	REQUIRE(mz.size() == 3);
+	REQUIRE(intensity.size() == 3);
+	CHECK(mz[0] == 100.0);
+	CHECK(mz[1] == 200.0);
+	CHECK(mz[2] == 300.0);
+	CHECK(intensity[0] == 1000.0);
+	CHECK(intensity[1] == 5000.0);
+	CHECK(intensity[2] == 2000.0);
+}
+
+TEST_CASE("deinterleave: empty input", "[mzxml][binary]") {
+	auto [mz, intensity] = MsBinaryDecoder::deinterleave({});
+	CHECK(mz.empty());
+	CHECK(intensity.empty());
+}
+
+TEST_CASE("deinterleave: single pair", "[mzxml][binary]") {
+	auto [mz, intensity] = MsBinaryDecoder::deinterleave({150.0, 999.0});
+	REQUIRE(mz.size() == 1);
+	CHECK(mz[0] == 150.0);
+	CHECK(intensity[0] == 999.0);
+}
+
+TEST_CASE("deinterleave: odd count rejection", "[mzxml][binary]") {
+	CHECK_THROWS_AS(MsBinaryDecoder::deinterleave({1.0, 2.0, 3.0}), std::invalid_argument);
+}
+
+// ===== decode_mzxml (full pipeline) =====
+
+TEST_CASE("decode_mzxml: uncompressed 64-bit", "[mzxml][binary]") {
+	// Big-endian interleaved: (100,1000), (200,5000), (300,2000)
+	auto [mz, intensity] =
+	    MsBinaryDecoder::decode_mzxml("QFkAAAAAAABAj0AAAAAAAEBpAAAAAAAAQLOIAAAAAABAcsAAAAAAAECfQAAAAAAA", false, true);
+	REQUIRE(mz.size() == 3);
+	CHECK(mz[0] == 100.0);
+	CHECK(mz[1] == 200.0);
+	CHECK(mz[2] == 300.0);
+	CHECK(intensity[0] == 1000.0);
+	CHECK(intensity[1] == 5000.0);
+	CHECK(intensity[2] == 2000.0);
+}
+
+TEST_CASE("decode_mzxml: compressed 64-bit", "[mzxml][binary]") {
+	auto [mz, intensity] = MsBinaryDecoder::decode_mzxml("eJxziGQAA4d+BwidCeVv7oDQRQcg9HyIPACZUwZe", true, true);
+	REQUIRE(mz.size() == 3);
+	CHECK(mz[0] == 100.0);
+	CHECK(mz[1] == 200.0);
+	CHECK(mz[2] == 300.0);
+	CHECK(intensity[0] == 1000.0);
+	CHECK(intensity[1] == 5000.0);
+	CHECK(intensity[2] == 2000.0);
+}
+
+TEST_CASE("decode_mzxml: 32-bit", "[mzxml][binary]") {
+	auto [mz, intensity] = MsBinaryDecoder::decode_mzxml("QsgAAER6AABDSAAARZxAAEOWAABE+gAA", false, false);
+	REQUIRE(mz.size() == 3);
+	CHECK_THAT(mz[0], Catch::Matchers::WithinRel(100.0, 1e-5));
+	CHECK_THAT(mz[1], Catch::Matchers::WithinRel(200.0, 1e-5));
+	CHECK_THAT(mz[2], Catch::Matchers::WithinRel(300.0, 1e-5));
+	CHECK_THAT(intensity[0], Catch::Matchers::WithinRel(1000.0, 1e-5));
+	CHECK_THAT(intensity[1], Catch::Matchers::WithinRel(5000.0, 1e-5));
+	CHECK_THAT(intensity[2], Catch::Matchers::WithinRel(2000.0, 1e-5));
+}
+
+TEST_CASE("decode_mzxml: empty input", "[mzxml][binary]") {
+	auto [mz, intensity] = MsBinaryDecoder::decode_mzxml("", false, true);
+	CHECK(mz.empty());
+	CHECK(intensity.empty());
 }
