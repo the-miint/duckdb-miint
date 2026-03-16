@@ -4,7 +4,7 @@
     "zstd",
     "openssl",
     "curl",
-    { "name": "hdf5", "features": ["cpp", "zlib", "szip"] }
+    { "name": "hdf5", "features": ["cpp", "zlib", "szip"], "platform": "!emscripten" }
   ],
   "vcpkg-configuration": {
     "overlay-ports": ["./extension-ci-tools/vcpkg_ports"],
