@@ -49,6 +49,20 @@ else()
     message(STATUS "HDF5/BIOM support disabled (MIINT_ENABLE_HDF5=OFF)")
 endif()
 
+# Detect threading flags for Emscripten wasm_threads builds.
+# DuckDB passes -pthread in CMAKE_CXX_FLAGS for wasm_threads but not wasm_eh/wasm_mvp.
+# ExternalProject builds (htslib, minimap2, WFA2) use explicit CFLAGS and don't
+# inherit CMAKE_CXX_FLAGS, so we propagate -pthread to their compile flags here.
+# Without this, object files like kthread.o lack atomics/bulk-memory features and
+# the linker rejects them when --shared-memory is used.
+# Note: CMAKE_CXX_FLAGS may not be visible here (set via -D on parent cmake),
+# so we also check DUCKDB_EXPLICIT_PLATFORM which is reliably propagated.
+set(EMSCRIPTEN_THREAD_CFLAGS "")
+if(EMSCRIPTEN AND (CMAKE_CXX_FLAGS MATCHES "-pthread" OR DUCKDB_EXPLICIT_PLATFORM STREQUAL "wasm_threads"))
+    set(EMSCRIPTEN_THREAD_CFLAGS "-pthread")
+    message(STATUS "Emscripten threading detected: propagating -pthread to C library builds")
+endif()
+
 # Find zstd for compression support (optional - build will succeed without it but zstd won't work)
 find_package(zstd QUIET)
 if(zstd_FOUND)
@@ -160,7 +174,7 @@ elseif(APPLE AND OSX_BUILD_ARCH)
 endif()
 
 if(EMSCRIPTEN)
-    set(HTSLIB_CFLAGS "CFLAGS=${HTSLIB_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}")
+    set(HTSLIB_CFLAGS "CFLAGS=${HTSLIB_ARCH_CFLAGS} ${EMSCRIPTEN_THREAD_CFLAGS} -I${ZLIB_INCLUDE_DIRS}")
 else()
     set(HTSLIB_CFLAGS "CFLAGS=-fPIC ${HTSLIB_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}")
 endif()
@@ -231,7 +245,7 @@ if(EMSCRIPTEN)
     # Emscripten: use WASM SIMD via SSE2 emulation (minimap2 has SIMDe support).
     # sse2only=1 avoids SSE4.1 dispatch which requires runtime CPU detection.
     set(MINIMAP2_ARCH_FLAGS "sse2only=1")
-    set(MINIMAP2_ARCH_CFLAGS "-msimd128 -msse -msse2")
+    set(MINIMAP2_ARCH_CFLAGS "-msimd128 -msse -msse2 ${EMSCRIPTEN_THREAD_CFLAGS}")
     set(MINIMAP2_FPIC "")
     message(STATUS "Minimap2 building for Emscripten/WASM with SIMD via SSE2 emulation")
 elseif(APPLE AND OSX_BUILD_ARCH)
@@ -286,6 +300,7 @@ set(WFA2_ARCH_CFLAGS "")
 set(WFA2_FPIC "-fPIC")
 if(EMSCRIPTEN)
     set(WFA2_FPIC "")
+    set(WFA2_ARCH_CFLAGS "${EMSCRIPTEN_THREAD_CFLAGS}")
 elseif(APPLE AND OSX_BUILD_ARCH)
     if(OSX_BUILD_ARCH STREQUAL "x86_64")
         set(WFA2_ARCH_CFLAGS "-arch x86_64")
