@@ -372,11 +372,18 @@ endif()
 set(RYPE_LIB_PATH ${RYPE_TARGET_DIR}/${RYPE_LIB_SUBDIR}/${RYPE_LIB_NAME})
 
 # Build RYpe with Arrow FFI support for zero-copy data exchange.
+# For Emscripten: --no-default-features disables the "fastx" feature (needletail),
+# which has a cdylib crate-type that triggers emcc standalone linking errors.
+if(EMSCRIPTEN)
+    set(RYPE_CARGO_FEATURES "--no-default-features" "--features" "arrow-ffi")
+else()
+    set(RYPE_CARGO_FEATURES "--features" "arrow-ffi")
+endif()
 ExternalProject_Add(
     rype_build
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype
     CONFIGURE_COMMAND "${RYPE_CONFIGURE_CMD}"
-    BUILD_COMMAND ${CARGO} rustc --release --features arrow-ffi --lib --crate-type=staticlib
+    BUILD_COMMAND ${CARGO} rustc --release ${RYPE_CARGO_FEATURES} --lib --crate-type=staticlib
         --target-dir ${RYPE_TARGET_DIR}
         --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype/Cargo.toml
         ${RYPE_CARGO_TARGET_FLAG}
