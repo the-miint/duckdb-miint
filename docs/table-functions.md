@@ -7,6 +7,9 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`read_alignments`](#read_alignmentsfilename-reference_lengthstable_name-include_filepathfalse-include_seq_qualfalse) - SAM/BAM alignment files
 - [`read_fastx`](#read_fastxfilename-sequence2filename-include_filepathfalse-qual_offset33) - FASTA/FASTQ sequence files
 - [`read_sequences_sff`](#read_sequences_sfffilename-include_filepathfalse-trimtrue) - SFF (454/Roche) sequence files
+- [`read_mzml`](#read_mzmlfilename-include_filepathfalse) - mzML mass spectrometry files
+- [`read_mzxml`](#read_mzxmlfilename-include_filepathfalse) - mzXML mass spectrometry files
+- [`read_mzml_chromatograms`](#read_mzml_chromatogramsfilename-include_filepathfalse) - mzML chromatogram data
 - [`read_biom`](#read_biomfilename-include_filepathfalse) - BIOM observation matrix files
 - [`read_gff`](#read_gffpath) - GFF3 genome annotation files
 - [`read_ncbi`](#read_ncbiaccession-api_key) - NCBI accession metadata
@@ -387,6 +390,111 @@ ORDER BY filepath, sample_id;
 - Efficiently handles large sparse matrices
 - Parallel processing enabled by default
 - Only non-zero values are read/returned, optimizing memory usage
+
+## `read_mzml(filename, [include_filepath=false])`
+
+Read mzML mass spectrometry files. Returns one row per spectrum with metadata and peak arrays.
+
+**Parameters:**
+- `filename` (VARCHAR or VARCHAR[]): Path to mzML file(s) or glob pattern
+- `include_filepath` (BOOLEAN, default false): Add a `filepath` column
+
+**Output columns (27):**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `spectrum_index` | INTEGER | 0-based spectrum position |
+| `spectrum_id` | VARCHAR | Spectrum identifier from file |
+| `scan_number` | INTEGER | Scan number (extracted from spectrum_id, nullable) |
+| `ms_level` | INTEGER | MS level (1, 2, ...) |
+| `retention_time` | DOUBLE | Retention time in minutes (nullable) |
+| `spectrum_type` | VARCHAR | "centroid" or "profile" (nullable) |
+| `polarity` | VARCHAR | "positive" or "negative" (nullable) |
+| `base_peak_mz` | DOUBLE | m/z of base peak (nullable) |
+| `base_peak_intensity` | DOUBLE | Intensity of base peak (nullable) |
+| `total_ion_current` | DOUBLE | Total ion current (nullable) |
+| `lowest_mz` | DOUBLE | Lowest observed m/z (nullable) |
+| `highest_mz` | DOUBLE | Highest observed m/z (nullable) |
+| `default_array_length` | INTEGER | Number of peaks |
+| `precursor_mz` | DOUBLE | Precursor m/z for MS2+ (nullable) |
+| `precursor_charge` | INTEGER | Precursor charge state (nullable) |
+| `precursor_intensity` | DOUBLE | Precursor intensity (nullable) |
+| `isolation_window_target` | DOUBLE | Isolation window center (nullable) |
+| `isolation_window_lower` | DOUBLE | Isolation window lower offset (nullable) |
+| `isolation_window_upper` | DOUBLE | Isolation window upper offset (nullable) |
+| `activation_method` | VARCHAR | "CID", "HCD", "ETD" (nullable) |
+| `collision_energy` | DOUBLE | Collision energy (nullable) |
+| `mz_array` | DOUBLE[] | Array of m/z values |
+| `intensity_array` | DOUBLE[] | Array of intensity values |
+| `filter_string` | VARCHAR | Instrument filter string (nullable) |
+| `scan_window_lower` | DOUBLE | Scan window lower bound (nullable) |
+| `scan_window_upper` | DOUBLE | Scan window upper bound (nullable) |
+| `ms1_scan_index` | INTEGER | spectrum_index of parent MS1 scan (nullable) |
+
+**Examples:**
+```sql
+-- Count spectra by MS level
+SELECT ms_level, COUNT(*) FROM read_mzml('sample.mzML') GROUP BY ms_level;
+
+-- Get MS2 spectra with precursor info
+SELECT scan_number, precursor_mz, precursor_charge, activation_method
+FROM read_mzml('sample.mzML')
+WHERE ms_level = 2;
+
+-- Unnest peak arrays for peak-level analysis
+SELECT s.spectrum_index, s.ms_level, unnest(s.mz_array) AS mz, unnest(s.intensity_array) AS intensity
+FROM read_mzml('sample.mzML') s;
+
+-- Read multiple files
+SELECT * FROM read_mzml('data/mzml/*.mzML', include_filepath=true);
+```
+
+**Notes:**
+- Stdin is not supported (mzML requires file seeking)
+- Supports zlib-compressed and uncompressed binary arrays, 32-bit and 64-bit precision
+- Also reads chromatograms via `read_mzml_chromatograms`
+- See [Mass Spectrometry & MassQL](massql.md) for higher-level analysis macros
+
+## `read_mzxml(filename, [include_filepath=false])`
+
+Read mzXML mass spectrometry files. Returns the **same 27-column schema** as `read_mzml`, enabling `UNION ALL` across formats.
+
+**Parameters:** Same as `read_mzml`.
+
+**Output columns:** Identical to `read_mzml` (see above).
+
+**Examples:**
+```sql
+-- Read mzXML file
+SELECT * FROM read_mzxml('sample.mzXML');
+
+-- Combine mzML and mzXML files
+SELECT * FROM read_mzml('batch1.mzML')
+UNION ALL
+SELECT * FROM read_mzxml('batch2.mzXML');
+```
+
+**Notes:**
+- Handles big-endian interleaved binary data (mzXML spec)
+- Supports nested `<scan>` elements (child scans emitted before parents)
+- `scan_number` always populated from the `<scan num>` attribute
+- Supports zlib compression, 32-bit and 64-bit precision
+
+## `read_mzml_chromatograms(filename, [include_filepath=false])`
+
+Read chromatogram data from mzML files (TIC, BPC, SRM, SIC).
+
+**Output columns (7):**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `chromatogram_index` | INTEGER | 0-based chromatogram position |
+| `chromatogram_id` | VARCHAR | Chromatogram identifier |
+| `chromatogram_type` | VARCHAR | "TIC", "BPC", "SRM", "SIC" (nullable) |
+| `precursor_mz` | DOUBLE | Precursor m/z (nullable) |
+| `product_mz` | DOUBLE | Product m/z (nullable) |
+| `time_array` | DOUBLE[] | Array of time values |
+| `intensity_array` | DOUBLE[] | Array of intensity values |
 
 ## `read_gff(path)`
 
