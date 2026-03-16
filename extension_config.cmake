@@ -5,10 +5,14 @@
 # that aren't available in the tidy CI environment, and tidy only analyzes our source code
 if(NOT CLANG_TIDY)
     duckdb_extension_load(json)
-    duckdb_extension_load(httpfs
-        GIT_URL https://github.com/duckdb/duckdb-httpfs
-        GIT_TAG main
-    )
+    # httpfs disabled: upstream API incompatibility between DuckDB v1.5-variegata
+    # and httpfs main (GetHTTPUtil return type mismatch). Users can still
+    # INSTALL httpfs; LOAD httpfs; at runtime for HTTP URL support.
+    # Re-enable when httpfs is updated for the v1.5 API.
+    # duckdb_extension_load(httpfs
+    #     GIT_URL https://github.com/duckdb/duckdb-httpfs
+    #     GIT_TAG main
+    # )
 endif()
 
 # Extension from this repo
