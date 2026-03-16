@@ -549,7 +549,8 @@ if(APPLE)
 elseif(WIN32)
     # HTSlib's hts_expr.c uses POSIX regex (regcomp/regexec/regfree).
     # On MinGW, these are in a separate -lregex library.
-    target_link_libraries(${EXTENSION_NAME} regex ws2_32)
+    # Rust std (1.78+) references RtlNtStatusToDosError which is in ntdll.
+    target_link_libraries(${EXTENSION_NAME} regex ws2_32 ntdll)
 elseif(UNIX)
     target_link_libraries(${EXTENSION_NAME} dl m)
 endif()
@@ -594,7 +595,7 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
 if(APPLE)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework CoreFoundation")
 elseif(WIN32)
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} regex ws2_32)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} regex ws2_32 ntdll)
 elseif(UNIX)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} dl m)
 endif()
@@ -658,7 +659,7 @@ target_link_libraries(tests
   wfa2
 )
 if(WIN32)
-    target_link_libraries(tests regex ws2_32)
+    target_link_libraries(tests regex ws2_32 ntdll)
 endif()
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     target_link_libraries(tests
