@@ -2,17 +2,12 @@
 # description: test read_biom table function
 # group: [sql]
 
+require miint
+
+require-env HDF5_AVAILABLE
+
 statement ok
 PRAGMA enable_verification;
-
-# Before we load the extension, this will fail
-statement error
-SELECT * FROM read_biom('foo.biom');
-----
-Catalog Error: Table Function with name read_biom does not exist!
-
-# Require statement will ensure this test is run with this extension loaded
-require miint
 
 # Error: file not found
 statement error

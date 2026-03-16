@@ -4,6 +4,8 @@
 
 require miint
 
+require-env HDF5_AVAILABLE
+
 # Test 1: Basic BIOM write and read-back (round-trip)
 statement ok
 CREATE TABLE test_biom_basic AS

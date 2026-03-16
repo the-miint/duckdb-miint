@@ -31,6 +31,7 @@ jobs:
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
       VCPKG_TARGET_TRIPLET: 'x64-linux'
       GEN: ninja
+      HDF5_AVAILABLE: 1
     steps:
       - uses: actions/checkout@v4
         with:

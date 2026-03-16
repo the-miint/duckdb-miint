@@ -2,8 +2,9 @@
 # description: performance tests for read_biom table function
 # group: [sql]
 
-# Require statement will ensure this test is run with this extension loaded
 require miint
+
+require-env HDF5_AVAILABLE
 
 # Performance test with large files
 query I
