@@ -209,21 +209,46 @@ else()
     message(WARNING "Could not determine explicit ZLIB library file for HTSlib")
 endif()
 
-ExternalProject_Add(
-    htslib_build
-    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1
-    CONFIGURE_COMMAND env ${HTSLIB_CFLAGS} ${HTSLIB_LDFLAGS} ${HTSLIB_LIBS} ${HTSLIB_PKG_CONFIG_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1/configure
-        ${HTSLIB_HOST_FLAG}
-        --prefix=${CMAKE_CURRENT_BINARY_DIR}/htslib
-        --disable-libcurl
-        --disable-bz2
-        --disable-lzma
-        --without-libdeflate
-    BUILD_COMMAND make
-    INSTALL_COMMAND make install
-    BUILD_IN_SOURCE 0
-    BUILD_BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib/libhts.a
-)
+if(WIN32)
+    # Windows/MinGW: skip autotools configure (requires MSYS2 shell which may not
+    # be available in the ExternalProject subprocess). Build directly with the
+    # Makefile, which supports running without configure via -include config.mk.
+    # Override LIBS to use only zlib (no curl/bz2/lzma/libdeflate).
+    # Install step copies libhts.a and headers manually (the Makefile install target
+    # requires programs we don't build).
+    set(HTSLIB_SRC ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1)
+    ExternalProject_Add(
+        htslib_build
+        SOURCE_DIR ${HTSLIB_SRC}
+        CONFIGURE_COMMAND ""
+        BUILD_COMMAND make -C ${HTSLIB_SRC} clean libhts.a
+            "CFLAGS=-g -Wall -O2 -fvisibility=hidden -I${ZLIB_INCLUDE_DIRS}"
+            "LDFLAGS=-fvisibility=hidden"
+            "LIBS=-lz"
+        INSTALL_COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib
+            COMMAND ${CMAKE_COMMAND} -E copy ${HTSLIB_SRC}/libhts.a ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib/libhts.a
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/htslib/include/htslib
+            COMMAND ${CMAKE_COMMAND} -E copy_directory ${HTSLIB_SRC}/htslib ${CMAKE_CURRENT_BINARY_DIR}/htslib/include/htslib
+        BUILD_IN_SOURCE 1
+        BUILD_BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib/libhts.a
+    )
+else()
+    ExternalProject_Add(
+        htslib_build
+        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1
+        CONFIGURE_COMMAND env ${HTSLIB_CFLAGS} ${HTSLIB_LDFLAGS} ${HTSLIB_LIBS} ${HTSLIB_PKG_CONFIG_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1/configure
+            ${HTSLIB_HOST_FLAG}
+            --prefix=${CMAKE_CURRENT_BINARY_DIR}/htslib
+            --disable-libcurl
+            --disable-bz2
+            --disable-lzma
+            --without-libdeflate
+        BUILD_COMMAND make
+        INSTALL_COMMAND make install
+        BUILD_IN_SOURCE 0
+        BUILD_BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib/libhts.a
+    )
+endif()
 
 # Create imported library
 add_library(hts STATIC IMPORTED GLOBAL)
@@ -387,9 +412,10 @@ endif()
 set(RYPE_LIB_PATH ${RYPE_TARGET_DIR}/${RYPE_LIB_SUBDIR}/${RYPE_LIB_NAME})
 
 # Build RYpe with Arrow FFI support for zero-copy data exchange.
-# For Emscripten: --no-default-features disables the "fastx" feature (needletail),
-# which has a cdylib crate-type that triggers emcc standalone linking errors.
-if(EMSCRIPTEN)
+# On Emscripten and Windows: --no-default-features disables the "fastx" feature
+# (needletail), whose cdylib crate-type triggers linker errors (emcc standalone
+# linking on WASM, unresolved ___chkstk_ms on MSVC).
+if(EMSCRIPTEN OR WIN32)
     set(RYPE_CARGO_FEATURES "--no-default-features" "--features" "arrow-ffi")
 else()
     set(RYPE_CARGO_FEATURES "--features" "arrow-ffi")
