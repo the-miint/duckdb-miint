@@ -175,17 +175,18 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Ensure dependency extensions are loaded before registering macros that
 	// reference their functions (e.g., read_jplace needs json's read_json,
 	// parse_gff_attributes needs core_functions' map_from_entries).
-	// TryAutoLoadExtension handles disk-based loading in production.
-	// LoadExtension handles statically-linked extensions in test/CLI binaries.
 	auto &instance = loader.GetDatabaseInstance();
 	for (const auto *dep : {"json", "core_functions"}) {
 		if (!instance.ExtensionIsLoaded(dep)) {
 			ExtensionHelper::TryAutoLoadExtension(instance, dep);
 		}
+#ifdef MIINT_STATIC_BUILD
+		// LoadExtension links against symbols not available in loadable extension builds
 		if (!instance.ExtensionIsLoaded(dep)) {
 			DuckDB db_wrapper(instance);
 			ExtensionHelper::LoadExtension(db_wrapper, dep);
 		}
+#endif
 	}
 
 	MIINTMacros::Register(loader);
