@@ -30,15 +30,6 @@ if(EMSCRIPTEN)
 elseif(WIN32)
     set(MIINT_ENABLE_BOWTIE2 OFF)
     message(STATUS "Windows detected: disabling Bowtie2 (requires POSIX fork/exec)")
-    # MinGW's ld treats duplicate COMDAT symbols (from C++ constexpr/inline in DuckDB
-    # headers) as errors when the extension's static lib is linked alongside DuckDB's
-    # static lib into libduckdb.dll/duckdb.exe. GCC/ld on Linux and MSVC handle this
-    # via COMDAT folding. MinGW needs --allow-multiple-definition.
-    if(MINGW)
-        set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--allow-multiple-definition")
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--allow-multiple-definition")
-        message(STATUS "MinGW detected: adding --allow-multiple-definition for DuckDB symbol COMDAT folding")
-    endif()
 endif()
 
 # HDF5 is required for BIOM support, but can be disabled entirely or made optional for clang-tidy
