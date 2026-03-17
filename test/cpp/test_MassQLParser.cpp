@@ -1,4 +1,5 @@
 #include <massql_parser.hpp>
+#include <massql_transpiler.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
@@ -6,6 +7,7 @@ using miint::AggFunction;
 using miint::ConditionField;
 using miint::DataType;
 using miint::MassQLParser;
+using miint::MassQLTranspiler;
 using miint::QualifierOp;
 
 // ===== Cycle 1: Parser skeleton — QUERY keyword + data type =====
@@ -622,4 +624,62 @@ TEST_CASE("peptide() error message says peptide not aminoaciddelta", "[massql][p
 		// Should mention peptide, not aminoaciddelta, since user called peptide()
 		REQUIRE(msg.find("peptide") != std::string::npos);
 	}
+}
+
+// ===== Materialization API (performance optimization) =====
+
+TEST_CASE("to_sql still uses mzml_peaks", "[massql][transpiler]") {
+	auto q = MassQLParser::parse("QUERY scannum(MS2DATA) WHERE MS2PROD=220");
+	auto sql = MassQLTranspiler::to_sql(q, "src");
+	REQUIRE(sql.find("mzml_peaks(") != std::string::npos);
+}
+
+TEST_CASE("to_sql_materialized references table not mzml_peaks", "[massql][transpiler]") {
+	auto q = MassQLParser::parse("QUERY scannum(MS2DATA) WHERE MS2PROD=220");
+	auto sql = MassQLTranspiler::to_sql_materialized(q, "src", "__massql_base");
+	REQUIRE(sql.find("mzml_peaks(") == std::string::npos);
+	REQUIRE(sql.find("__massql_base") != std::string::npos);
+}
+
+TEST_CASE("materialize_base_sql generates CREATE OR REPLACE TEMP TABLE with ms_level and metadata",
+          "[massql][transpiler]") {
+	auto q = MassQLParser::parse("QUERY MS2DATA WHERE MS2PROD=220 AND RTMIN=1.0");
+	auto sql = MassQLTranspiler::materialize_base_sql(q, "src", "__massql_base");
+	REQUIRE(sql.find("CREATE OR REPLACE TEMP TABLE __massql_base") != std::string::npos);
+	REQUIRE(sql.find("mzml_peaks(src)") != std::string::npos);
+	REQUIRE(sql.find("ms_level = 2") != std::string::npos);
+	REQUIRE(sql.find("retention_time >= 1") != std::string::npos);
+}
+
+TEST_CASE("materialize_base_sql MS1DATA uses ms_level 1", "[massql][transpiler]") {
+	auto q = MassQLParser::parse("QUERY MS1DATA WHERE MS1MZ=200");
+	auto sql = MassQLTranspiler::materialize_base_sql(q, "src", "__massql_base");
+	REQUIRE(sql.find("ms_level = 1") != std::string::npos);
+}
+
+TEST_CASE("to_sql_materialized cross-level uses ms1_table not mzml_peaks", "[massql][transpiler]") {
+	auto q = MassQLParser::parse("QUERY scannum(MS2DATA) WHERE MS1MZ=X AND MS2PREC=X");
+	auto sql = MassQLTranspiler::to_sql_materialized(q, "src", "__massql_base", "__massql_ms1");
+	REQUIRE(sql.find("mzml_peaks(") == std::string::npos);
+	REQUIRE(sql.find("__massql_ms1") != std::string::npos);
+}
+
+TEST_CASE("get_materialization_plan: cross-level needs_ms1", "[massql][transpiler]") {
+	auto q = MassQLParser::parse("QUERY scannum(MS2DATA) WHERE MS1MZ=X AND MS2PREC=X");
+	auto plan = MassQLTranspiler::get_materialization_plan(q);
+	REQUIRE(plan.needs_ms1 == true);
+}
+
+TEST_CASE("get_materialization_plan: non-cross-level does not need ms1", "[massql][transpiler]") {
+	auto q = MassQLParser::parse("QUERY scannum(MS2DATA) WHERE MS2PROD=X AND MS2PROD=X+14");
+	auto plan = MassQLTranspiler::get_materialization_plan(q);
+	REQUIRE(plan.needs_ms1 == false);
+}
+
+TEST_CASE("to_sql_materialized cross-level references base_table not __base", "[massql][transpiler]") {
+	auto q = MassQLParser::parse("QUERY scannum(MS2DATA) WHERE MS1MZ=X AND MS2PREC=X");
+	auto sql = MassQLTranspiler::to_sql_materialized(q, "src", "__massql_base", "__massql_ms1");
+	// __base must not appear; the qualifying CTE should reference __massql_base directly
+	REQUIRE(sql.find("__base") == std::string::npos);
+	REQUIRE(sql.find("__massql_base") != std::string::npos);
 }

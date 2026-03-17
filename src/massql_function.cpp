@@ -14,7 +14,6 @@ namespace duckdb {
 //        SELECT * FROM massql('QUERY ...', 'path/to/file.mzML')
 
 struct MassQLData : public TableFunctionData {
-	string generated_sql;
 	unique_ptr<MaterializedQueryResult> result;
 	unique_ptr<DataChunk> current_chunk; // keeps fetched chunk alive for Reference()
 };
@@ -49,18 +48,38 @@ static unique_ptr<FunctionData> MassQLBind(ClientContext &context, TableFunction
 		}
 	}
 
-	// Transpile AST to SQL
+	// Materialize peaks into a temp table to avoid repeated mzml_peaks() UNNEST evaluation
+	auto mat_sql = miint::MassQLTranspiler::materialize_base_sql(parsed, effective_source, "__massql_base");
+	auto mat_result = conn.Query(mat_sql);
+	if (mat_result->HasError()) {
+		throw InvalidInputException("MassQL: failed to materialize peaks: %s", mat_result->GetError());
+	}
+
+	// For cross-level queries (MS1MZ=X AND MS2PREC=X), also materialize MS1 peaks.
+	// get_materialization_plan() is the authoritative source for which tables are needed.
+	auto plan = miint::MassQLTranspiler::get_materialization_plan(parsed);
+	string ms1_table;
+	if (plan.needs_ms1) {
+		ms1_table = "__massql_ms1";
+		auto ms1_sql = miint::MassQLTranspiler::materialize_ms1_sql(effective_source, ms1_table);
+		auto ms1_result = conn.Query(ms1_sql);
+		if (ms1_result->HasError()) {
+			throw InvalidInputException("MassQL: failed to materialize MS1 peaks: %s", ms1_result->GetError());
+		}
+	}
+
+	// Execute using pre-materialized tables for performance
+	string exec_sql;
 	try {
-		data->generated_sql = miint::MassQLTranspiler::to_sql(parsed, effective_source);
+		exec_sql = miint::MassQLTranspiler::to_sql_materialized(parsed, effective_source, "__massql_base", ms1_table);
 	} catch (const std::exception &e) {
 		throw InvalidInputException(e.what());
 	}
 
-	data->result = conn.Query(data->generated_sql);
+	data->result = conn.Query(exec_sql);
 
 	if (data->result->HasError()) {
-		throw InvalidInputException("MassQL query failed: %s\nGenerated SQL: %s", data->result->GetError(),
-		                            data->generated_sql);
+		throw InvalidInputException("MassQL query failed: %s\nGenerated SQL: %s", data->result->GetError(), exec_sql);
 	}
 
 	// Extract schema from result
