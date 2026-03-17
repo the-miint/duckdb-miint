@@ -16,3 +16,5 @@ clean: clean-ext
 clean-ext:
 	-make -C $(PROJ_DIR)ext/minimap2 clean 2>/dev/null
 	-make -C $(PROJ_DIR)ext/WFA2-lib clean 2>/dev/null
+	-make -C $(PROJ_DIR)ext/htslib-1.22.1 clean 2>/dev/null
+	-rm -f $(PROJ_DIR)ext/htslib-1.22.1/config.h $(PROJ_DIR)ext/htslib-1.22.1/config.mk 2>/dev/null

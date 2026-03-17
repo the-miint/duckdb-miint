@@ -17,19 +17,50 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(ZLIB REQUIRED)
 find_package(Threads REQUIRED)
 
-# HDF5 is required for BIOM support, but make it optional for clang-tidy runs
-# In CI, the tidy-check doesn't have HDF5 available, but it doesn't need to link - just parse
-if(CLANG_TIDY)
-    find_package(HDF5 COMPONENTS CXX)
-    if(HDF5_FOUND)
-        message(STATUS "HDF5 found for tidy-check")
+# Optional feature flags for WASM-compatible builds
+option(MIINT_ENABLE_HDF5 "Build with HDF5/BIOM support" ON)
+option(MIINT_ENABLE_BOWTIE2 "Build with Bowtie2 alignment support" ON)
+
+# Auto-disable platform-incompatible features.
+# HDF5 has no known WASM build; Bowtie2 requires POSIX fork/exec.
+if(EMSCRIPTEN)
+    set(MIINT_ENABLE_HDF5 OFF)
+    set(MIINT_ENABLE_BOWTIE2 OFF)
+    message(STATUS "Emscripten detected: disabling HDF5 and Bowtie2 (WASM-incompatible)")
+elseif(WIN32)
+    set(MIINT_ENABLE_BOWTIE2 OFF)
+    message(STATUS "Windows detected: disabling Bowtie2 (requires POSIX fork/exec)")
+endif()
+
+# HDF5 is required for BIOM support, but can be disabled entirely or made optional for clang-tidy
+if(MIINT_ENABLE_HDF5)
+    if(CLANG_TIDY)
+        find_package(HDF5 COMPONENTS CXX)
+        if(HDF5_FOUND)
+            message(STATUS "HDF5 found for tidy-check")
+        else()
+            message(STATUS "HDF5 not found for tidy-check - BIOM support will be excluded from analysis")
+        endif()
     else()
-        message(STATUS "HDF5 not found for tidy-check - BIOM support will be excluded from analysis")
-        # Create dummy targets so the build can configure
-        add_library(HDF5::HDF5 INTERFACE IMPORTED)
+        find_package(HDF5 REQUIRED COMPONENTS CXX)
     endif()
 else()
-    find_package(HDF5 REQUIRED COMPONENTS CXX)
+    set(HDF5_FOUND OFF)
+    message(STATUS "HDF5/BIOM support disabled (MIINT_ENABLE_HDF5=OFF)")
+endif()
+
+# Detect threading flags for Emscripten wasm_threads builds.
+# DuckDB passes -pthread in CMAKE_CXX_FLAGS for wasm_threads but not wasm_eh/wasm_mvp.
+# ExternalProject builds (htslib, minimap2, WFA2) use explicit CFLAGS and don't
+# inherit CMAKE_CXX_FLAGS, so we propagate -pthread to their compile flags here.
+# Without this, object files like kthread.o lack atomics/bulk-memory features and
+# the linker rejects them when --shared-memory is used.
+# Note: CMAKE_CXX_FLAGS may not be visible here (set via -D on parent cmake),
+# so we also check DUCKDB_EXPLICIT_PLATFORM which is reliably propagated.
+set(EMSCRIPTEN_THREAD_CFLAGS "")
+if(EMSCRIPTEN AND (CMAKE_CXX_FLAGS MATCHES "-pthread" OR DUCKDB_EXPLICIT_PLATFORM STREQUAL "wasm_threads"))
+    set(EMSCRIPTEN_THREAD_CFLAGS "-pthread")
+    message(STATUS "Emscripten threading detected: propagating -pthread to C library builds")
 endif()
 
 # Find zstd for compression support (optional - build will succeed without it but zstd won't work)
@@ -126,7 +157,11 @@ endif()
 # Handle cross-compilation for OSX (e.g., building x86_64 on ARM64 host)
 set(HTSLIB_HOST_FLAG "")
 set(HTSLIB_ARCH_CFLAGS "")
-if(APPLE AND OSX_BUILD_ARCH)
+if(EMSCRIPTEN)
+    # Emscripten: tell autotools we are cross-compiling, drop -fPIC (not meaningful)
+    set(HTSLIB_HOST_FLAG "--host=wasm32-unknown-emscripten")
+    message(STATUS "HTSlib cross-compiling for Emscripten/WASM")
+elseif(APPLE AND OSX_BUILD_ARCH)
     if(OSX_BUILD_ARCH STREQUAL "x86_64")
         set(HTSLIB_HOST_FLAG "--host=x86_64-apple-darwin")
         set(HTSLIB_ARCH_CFLAGS "-arch x86_64")
@@ -138,7 +173,11 @@ if(APPLE AND OSX_BUILD_ARCH)
     endif()
 endif()
 
-set(HTSLIB_CFLAGS "CFLAGS=-fPIC ${HTSLIB_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}")
+if(EMSCRIPTEN)
+    set(HTSLIB_CFLAGS "CFLAGS=${HTSLIB_ARCH_CFLAGS} ${EMSCRIPTEN_THREAD_CFLAGS} -I${ZLIB_INCLUDE_DIRS}")
+else()
+    set(HTSLIB_CFLAGS "CFLAGS=-fPIC ${HTSLIB_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}")
+endif()
 if(ZLIB_LIBRARY_DIR)
     set(HTSLIB_LDFLAGS "LDFLAGS=${HTSLIB_ARCH_CFLAGS} -L${ZLIB_LIBRARY_DIR}")
 else()
@@ -170,21 +209,60 @@ else()
     message(WARNING "Could not determine explicit ZLIB library file for HTSlib")
 endif()
 
-ExternalProject_Add(
-    htslib_build
-    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1
-    CONFIGURE_COMMAND env ${HTSLIB_CFLAGS} ${HTSLIB_LDFLAGS} ${HTSLIB_LIBS} ${HTSLIB_PKG_CONFIG_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1/configure
-        ${HTSLIB_HOST_FLAG}
-        --prefix=${CMAKE_CURRENT_BINARY_DIR}/htslib
-        --disable-libcurl
-        --disable-bz2
-        --disable-lzma
-        --without-libdeflate
-    BUILD_COMMAND make
-    INSTALL_COMMAND make install
-    BUILD_IN_SOURCE 0
-    BUILD_BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib/libhts.a
-)
+if(WIN32)
+    # Windows/MinGW: skip autotools configure (requires full MSYS2 shell which is
+    # not available in DuckDB's rtools42 CI environment). Instead, generate config.h
+    # and config.mk manually to match our --disable-libcurl --disable-bz2 etc. flags.
+    # config.mk sets NONCONFIGURE_OBJS= to prevent hfile_libcurl.o from being built.
+    # config.h is generated with only the features we need (zlib only).
+    # See: https://github.com/samtools/htslib/blob/develop/.github/workflows/windows-build.yml
+    set(HTSLIB_SRC ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1)
+    set(HTSLIB_CONFIG_H "${HTSLIB_SRC}/config.h")
+    set(HTSLIB_CONFIG_MK "${HTSLIB_SRC}/config.mk")
+    # Generate config.h: minimal — zlib only, no curl/bz2/lzma/libdeflate
+    file(WRITE ${HTSLIB_CONFIG_H}
+        "/* config.h generated by CMake for Windows/MinGW (no autotools) */\n"
+        "#define HAVE_FSEEKO 1\n"
+    )
+    # Generate config.mk: blank NONCONFIGURE_OBJS to prevent hfile_libcurl.o,
+    # set LIBS to just -lz, and disable features we don't need.
+    file(WRITE ${HTSLIB_CONFIG_MK}
+        "# config.mk generated by CMake for Windows/MinGW (no autotools)\n"
+        "NONCONFIGURE_OBJS =\n"
+        "CFLAGS = -g -Wall -O2 -fvisibility=hidden -I${ZLIB_INCLUDE_DIRS}\n"
+        "LDFLAGS = -fvisibility=hidden\n"
+        "LIBS = -lz\n"
+        "prefix = ${CMAKE_CURRENT_BINARY_DIR}/htslib\n"
+    )
+    ExternalProject_Add(
+        htslib_build
+        SOURCE_DIR ${HTSLIB_SRC}
+        CONFIGURE_COMMAND ""
+        BUILD_COMMAND make -C ${HTSLIB_SRC} clean libhts.a
+        INSTALL_COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib
+            COMMAND ${CMAKE_COMMAND} -E copy ${HTSLIB_SRC}/libhts.a ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib/libhts.a
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/htslib/include/htslib
+            COMMAND ${CMAKE_COMMAND} -E copy_directory ${HTSLIB_SRC}/htslib ${CMAKE_CURRENT_BINARY_DIR}/htslib/include/htslib
+        BUILD_IN_SOURCE 1
+        BUILD_BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib/libhts.a
+    )
+else()
+    ExternalProject_Add(
+        htslib_build
+        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1
+        CONFIGURE_COMMAND env ${HTSLIB_CFLAGS} ${HTSLIB_LDFLAGS} ${HTSLIB_LIBS} ${HTSLIB_PKG_CONFIG_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1/configure
+            ${HTSLIB_HOST_FLAG}
+            --prefix=${CMAKE_CURRENT_BINARY_DIR}/htslib
+            --disable-libcurl
+            --disable-bz2
+            --disable-lzma
+            --without-libdeflate
+        BUILD_COMMAND make
+        INSTALL_COMMAND make install
+        BUILD_IN_SOURCE 0
+        BUILD_BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib/libhts.a
+    )
+endif()
 
 # Create imported library
 add_library(hts STATIC IMPORTED GLOBAL)
@@ -201,7 +279,15 @@ add_dependencies(hts htslib_build)
 # Use OSX_BUILD_ARCH for cross-compilation, otherwise use host architecture
 set(MINIMAP2_ARCH_FLAGS "")
 set(MINIMAP2_ARCH_CFLAGS "")
-if(APPLE AND OSX_BUILD_ARCH)
+set(MINIMAP2_FPIC "-fPIC")
+if(EMSCRIPTEN)
+    # Emscripten: use WASM SIMD via SSE2 emulation (minimap2 has SIMDe support).
+    # sse2only=1 avoids SSE4.1 dispatch which requires runtime CPU detection.
+    set(MINIMAP2_ARCH_FLAGS "sse2only=1")
+    set(MINIMAP2_ARCH_CFLAGS "-msimd128 -msse -msse2 ${EMSCRIPTEN_THREAD_CFLAGS}")
+    set(MINIMAP2_FPIC "")
+    message(STATUS "Minimap2 building for Emscripten/WASM with SIMD via SSE2 emulation")
+elseif(APPLE AND OSX_BUILD_ARCH)
     # Cross-compilation: use target architecture, not host
     if(OSX_BUILD_ARCH STREQUAL "arm64")
         set(MINIMAP2_ARCH_FLAGS "aarch64=1")
@@ -235,7 +321,7 @@ ExternalProject_Add(
     minimap2_build
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2
     CONFIGURE_COMMAND ""
-    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2 clean libminimap2.a "CFLAGS=-g -Wall -O2 -Wc++-compat -fPIC ${MINIMAP2_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}" "CPPFLAGS=-DHAVE_KALLOC ${MINIMAP2_ALLOC_FLAGS}" ${MINIMAP2_ARCH_FLAGS}
+    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2 clean libminimap2.a "CFLAGS=-g -Wall -O2 -Wc++-compat ${MINIMAP2_FPIC} ${MINIMAP2_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}" "CPPFLAGS=-DHAVE_KALLOC ${MINIMAP2_ALLOC_FLAGS}" ${MINIMAP2_ARCH_FLAGS}
     INSTALL_COMMAND ""
     BUILD_IN_SOURCE 1
     BUILD_BYPRODUCTS ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2/libminimap2.a
@@ -250,7 +336,11 @@ add_dependencies(minimap2 minimap2_build)
 
 # Handle cross-compilation arch flags for WFA2
 set(WFA2_ARCH_CFLAGS "")
-if(APPLE AND OSX_BUILD_ARCH)
+set(WFA2_FPIC "-fPIC")
+if(EMSCRIPTEN)
+    set(WFA2_FPIC "")
+    set(WFA2_ARCH_CFLAGS "${EMSCRIPTEN_THREAD_CFLAGS}")
+elseif(APPLE AND OSX_BUILD_ARCH)
     if(OSX_BUILD_ARCH STREQUAL "x86_64")
         set(WFA2_ARCH_CFLAGS "-arch x86_64")
     elseif(OSX_BUILD_ARCH STREQUAL "arm64")
@@ -265,7 +355,7 @@ ExternalProject_Add(
     CONFIGURE_COMMAND ""
     BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib clean all
         "BUILD_TOOLS=0" "BUILD_EXAMPLES=0" "BUILD_WFA_PARALLEL=0"
-        "CC_FLAGS=-Wall -O2 -fPIC ${WFA2_ARCH_CFLAGS}"
+        "CC_FLAGS=-Wall -O2 ${WFA2_FPIC} ${WFA2_ARCH_CFLAGS}"
     INSTALL_COMMAND ""
     BUILD_IN_SOURCE 1
     BUILD_BYPRODUCTS
@@ -290,12 +380,9 @@ add_dependencies(wfa2cpp wfa2_build)
 find_program(CARGO cargo REQUIRED)
 message(STATUS "Found cargo: ${CARGO}")
 
-# Determine the static library name based on platform
-if(WIN32)
-    set(RYPE_LIB_NAME "rype.lib")
-else()
-    set(RYPE_LIB_NAME "librype.a")
-endif()
+# Determine the static library name based on platform.
+# On Windows/MinGW, cargo with --target x86_64-pc-windows-gnu produces librype.a (not .lib).
+set(RYPE_LIB_NAME "librype.a")
 
 set(RYPE_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/rype_target)
 
@@ -306,7 +393,25 @@ set(RYPE_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/rype_target)
 set(RYPE_CARGO_TARGET_FLAG "")
 set(RYPE_LIB_SUBDIR "release")
 set(RYPE_CONFIGURE_CMD "")
-if(APPLE AND OSX_BUILD_ARCH)
+if(EMSCRIPTEN)
+    find_program(RUSTUP rustup)
+    set(RYPE_CARGO_TARGET_FLAG "--target" "wasm32-unknown-emscripten")
+    set(RYPE_LIB_SUBDIR "wasm32-unknown-emscripten/release")
+    if(RUSTUP)
+        set(RYPE_CONFIGURE_CMD ${RUSTUP} target add wasm32-unknown-emscripten)
+    endif()
+    message(STATUS "RYpe cross-compiling for wasm32-unknown-emscripten")
+elseif(WIN32)
+    # Windows/MinGW: Rust defaults to MSVC target but we link with MinGW ld.exe.
+    # Must target x86_64-pc-windows-gnu to produce compatible object files.
+    find_program(RUSTUP rustup)
+    set(RYPE_CARGO_TARGET_FLAG "--target" "x86_64-pc-windows-gnu")
+    set(RYPE_LIB_SUBDIR "x86_64-pc-windows-gnu/release")
+    if(RUSTUP)
+        set(RYPE_CONFIGURE_CMD ${RUSTUP} target add x86_64-pc-windows-gnu)
+    endif()
+    message(STATUS "RYpe targeting x86_64-pc-windows-gnu for MinGW compatibility")
+elseif(APPLE AND OSX_BUILD_ARCH)
     find_program(RUSTUP rustup)
     if(OSX_BUILD_ARCH STREQUAL "x86_64")
         set(RYPE_CARGO_TARGET_FLAG "--target" "x86_64-apple-darwin")
@@ -328,11 +433,19 @@ endif()
 set(RYPE_LIB_PATH ${RYPE_TARGET_DIR}/${RYPE_LIB_SUBDIR}/${RYPE_LIB_NAME})
 
 # Build RYpe with Arrow FFI support for zero-copy data exchange.
+# On Emscripten and Windows: --no-default-features disables the "fastx" feature
+# (needletail), whose cdylib crate-type triggers linker errors (emcc standalone
+# linking on WASM, unresolved ___chkstk_ms on MSVC).
+if(EMSCRIPTEN OR WIN32)
+    set(RYPE_CARGO_FEATURES "--no-default-features" "--features" "arrow-ffi")
+else()
+    set(RYPE_CARGO_FEATURES "--features" "arrow-ffi")
+endif()
 ExternalProject_Add(
     rype_build
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype
     CONFIGURE_COMMAND "${RYPE_CONFIGURE_CMD}"
-    BUILD_COMMAND ${CARGO} rustc --release --features arrow-ffi --lib --crate-type=staticlib
+    BUILD_COMMAND ${CARGO} rustc --release ${RYPE_CARGO_FEATURES} --lib --crate-type=staticlib
         --target-dir ${RYPE_TARGET_DIR}
         --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype/Cargo.toml
         ${RYPE_CARGO_TARGET_FLAG}
@@ -365,13 +478,9 @@ set(EXTENSION_SOURCES
     src/compress_intervals.cpp
     src/copy_format_common.cpp
     src/table_function_common.cpp
-    src/copy_biom.cpp
     src/copy_fastq.cpp
     src/copy_fasta.cpp
     src/copy_sam.cpp
-    src/BIOMTable.cpp
-    src/BIOMReader.cpp
-    src/read_biom.cpp
     src/reference_table_reader.cpp
     src/placement_table_reader.cpp
     src/NewickTree.cpp
@@ -382,9 +491,6 @@ set(EXTENSION_SOURCES
     src/align_minimap2.cpp
     src/align_minimap2_sharded.cpp
     src/save_minimap2_index.cpp
-    src/Bowtie2Aligner.cpp
-    src/align_bowtie2.cpp
-    src/align_bowtie2_sharded.cpp
     src/ncbi_parser.cpp
     src/ncbi_client.cpp
     src/zip_utils.cpp
@@ -398,6 +504,13 @@ set(EXTENSION_SOURCES
     src/rype_classify.cpp
     src/rype_extract.cpp
     src/rype_log_ratio.cpp)
+
+if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
+    list(APPEND EXTENSION_SOURCES src/copy_biom.cpp src/BIOMTable.cpp src/BIOMReader.cpp src/read_biom.cpp)
+endif()
+if(MIINT_ENABLE_BOWTIE2)
+    list(APPEND EXTENSION_SOURCES src/Bowtie2Aligner.cpp src/align_bowtie2.cpp src/align_bowtie2_sharded.cpp)
+endif()
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
@@ -416,6 +529,12 @@ target_compile_definitions(${EXTENSION_NAME} PRIVATE RYPE_ARROW
     WFA2_GIT_VERSION="${WFA2_GIT_VERSION}"
     RYPE_GIT_VERSION="${RYPE_GIT_VERSION}"
     $<$<BOOL:${MIINT_HAS_JEMALLOC}>:MIINT_USE_JEMALLOC>)
+if(MIINT_ENABLE_BOWTIE2)
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_BOWTIE2)
+endif()
+if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_HDF5)
+endif()
 target_link_libraries(${EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
@@ -427,10 +546,17 @@ target_link_libraries(${EXTENSION_NAME}
 )
 if(APPLE)
     target_link_libraries(${EXTENSION_NAME} "-framework CoreFoundation")
+elseif(WIN32)
+    # HTSlib: -lregex for POSIX regex (regcomp/regexec/regfree).
+    # Rust x86_64-pc-windows-gnu stdlib system deps (from rustc_target spec and
+    # std #[link] attributes): ntdll, userenv, bcrypt, advapi32, ws2_32.
+    # MinGW driver auto-adds: kernel32, user32, msvcrt, mingwex, mingw32, gcc.
+    target_link_libraries(${EXTENSION_NAME}
+        regex ws2_32 ntdll userenv bcrypt advapi32)
 elseif(UNIX)
     target_link_libraries(${EXTENSION_NAME} dl m)
 endif()
-if(HDF5_FOUND)
+if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     target_link_libraries(${EXTENSION_NAME}
                           hdf5::hdf5-static
                           hdf5::hdf5_hl-static
@@ -453,6 +579,12 @@ target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE RYPE_ARROW
     WFA2_GIT_VERSION="${WFA2_GIT_VERSION}"
     RYPE_GIT_VERSION="${RYPE_GIT_VERSION}"
     $<$<BOOL:${MIINT_HAS_JEMALLOC}>:MIINT_USE_JEMALLOC>)
+if(MIINT_ENABLE_BOWTIE2)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_BOWTIE2)
+endif()
+if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_HDF5)
+endif()
 target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
@@ -464,8 +596,14 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
 )
 if(APPLE)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework CoreFoundation")
+elseif(WIN32)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME}
+        regex ws2_32 ntdll userenv bcrypt advapi32)
 elseif(UNIX)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} dl m)
+endif()
+if(HAVE_LIBZSTD)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} ${ZSTD_TARGET})
 endif()
 
 install(
@@ -490,17 +628,11 @@ set(TEST_SOURCES
     test/cpp/test_AlignmentFunctions.cpp
     src/IntervalCompressor.cpp
     test/cpp/test_IntervalCompressor.cpp
-    src/BIOMTable.cpp
-    src/BIOMReader.cpp
-    test/cpp/test_BIOMReader.cpp
-    test/cpp/test_BIOMTable.cpp
     src/NewickTree.cpp
     test/cpp/test_NewickParser.cpp
     test/cpp/test_InsertFullyResolved.cpp
     src/Minimap2Aligner.cpp
     test/cpp/test_Minimap2Aligner.cpp
-    src/Bowtie2Aligner.cpp
-    test/cpp/test_Bowtie2Aligner.cpp
     src/ncbi_parser.cpp
     src/zip_utils.cpp
     duckdb/third_party/miniz/miniz.cpp  # For ExtractFromZip tests
@@ -510,6 +642,13 @@ set(TEST_SOURCES
     src/WFA2Aligner.cpp
     test/cpp/test_WFA2Aligner.cpp
 )
+if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
+    list(APPEND TEST_SOURCES src/BIOMTable.cpp src/BIOMReader.cpp
+         test/cpp/test_BIOMReader.cpp test/cpp/test_BIOMTable.cpp)
+endif()
+if(MIINT_ENABLE_BOWTIE2)
+    list(APPEND TEST_SOURCES src/Bowtie2Aligner.cpp test/cpp/test_Bowtie2Aligner.cpp)
+endif()
 
 add_executable(tests ${TEST_SOURCES})
 
@@ -522,7 +661,11 @@ target_link_libraries(tests
   wfa2cpp
   wfa2
 )
-if(HDF5_FOUND)
+if(WIN32)
+    # Tests target only needs HTSlib deps (no Rust code linked here)
+    target_link_libraries(tests regex ws2_32)
+endif()
+if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     target_link_libraries(tests
                           hdf5::hdf5-static
                           hdf5::hdf5_hl-static

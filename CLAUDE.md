@@ -459,3 +459,4 @@ When a test depends on an external binary that may not be installed (e.g., `bowt
 
 Current optional dependencies managed this way:
 - `BOWTIE2_AVAILABLE` — guards `align_bowtie2.test`, `align_bowtie2_sharded.test`, `simple_bowtie2.test`
+- `HDF5_AVAILABLE` — guards `read_biom.test`, `copy_biom.test`, `read_biom_performance.test`, `glob_read_biom.test` (compile-time: `MIINT_ENABLE_HDF5=OFF` excludes HDF5)

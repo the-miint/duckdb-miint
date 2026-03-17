@@ -4,11 +4,11 @@
 
 require miint
 
-# All 8 libraries present
+# At least 7 core libraries always present (HDF5 is optional)
 query I
-SELECT COUNT(*) FROM miint_versions();
+SELECT COUNT(*) >= 7 FROM miint_versions();
 ----
-8
+true
 
 # No empty or null versions
 query I
@@ -16,21 +16,22 @@ SELECT COUNT(*) FROM miint_versions() WHERE version = '' OR version IS NULL;
 ----
 0
 
-# All expected library names
+# All always-present library names
 query I
 SELECT COUNT(*) FROM miint_versions()
-WHERE library IN ('miint', 'htslib', 'minimap2', 'kseq++', 'WFA2-lib', 'HDF5', 'zlib', 'rype');
+WHERE library IN ('miint', 'htslib', 'minimap2', 'kseq++', 'WFA2-lib', 'zlib', 'rype');
 ----
-8
+7
+
+# Every row matches either a core or optional library name
+query I
+SELECT COUNT(*) FROM miint_versions()
+WHERE library NOT IN ('miint', 'htslib', 'minimap2', 'kseq++', 'WFA2-lib', 'HDF5', 'zlib', 'rype');
+----
+0
 
 # Known stable versions (vendored — not submodule-dependent)
 query I
 SELECT version FROM miint_versions() WHERE library = 'kseq++';
 ----
 1.1.2
-
-# HDF5 comes from vcpkg — version varies by environment, just check it starts with 1.14
-query I
-SELECT version LIKE '1.14%' FROM miint_versions() WHERE library = 'HDF5';
-----
-true

@@ -2,10 +2,12 @@
 # description: test glob pattern support for read_biom table function
 # group: [sql]
 
+require miint
+
+require-env HDF5_AVAILABLE
+
 statement ok
 PRAGMA enable_verification;
-
-require miint
 
 # ===== BASIC GLOB EXPANSION =====
 
