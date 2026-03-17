@@ -8,8 +8,8 @@
 	branch = main
 [submodule "ext/minimap2"]
 	path = ext/minimap2
-	url = https://github.com/lh3/minimap2.git
-	branch = main
+	url = https://github.com/the-miint/minimap2.git
+	branch = v2.30-miint
 [submodule "ext/WFA2-lib"]
 	path = ext/WFA2-lib
 	url = https://github.com/smarco/WFA2-lib.git

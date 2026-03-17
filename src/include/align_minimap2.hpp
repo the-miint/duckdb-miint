@@ -44,12 +44,10 @@ public:
 		}
 	};
 
-	// Standard mode state: multi-threaded, shared index, atomic batch claiming
+	// Standard mode state: multi-threaded, shared index, lazy sub-batch streaming
 	struct StandardModeState {
 		std::shared_ptr<miint::SharedMinimap2Index> shared_index;
-		std::vector<std::string> all_query_ids; // Pre-materialized read IDs
-		idx_t batch_size = 2048;                // Batch size for ReadBatchByIds
-		std::atomic<idx_t> next_query_offset {0};
+		std::unique_ptr<QuerySequenceStream> query_stream; // Lazy streaming reader
 	};
 
 	// Per-subject mode state: single-threaded, builds index per subject

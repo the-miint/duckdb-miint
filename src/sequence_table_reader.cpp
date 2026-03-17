@@ -198,132 +198,156 @@ static miint::QualScore ExtractQualScore(DataChunk &chunk, idx_t qual_col_idx, U
 	return miint::QualScore(qual_vec_data);
 }
 
-// Helper to process query result chunks into SequenceRecordBatch.
+// Helper to create a new sub-batch with reserved capacity.
+static miint::SequenceRecordBatch MakeSubBatch(bool is_paired, idx_t capacity) {
+	miint::SequenceRecordBatch batch(is_paired);
+	if (capacity > 0) {
+		batch.reserve(capacity);
+	}
+	return batch;
+}
+
+// Process a single DataChunk into a SequenceRecordBatch.
 // Handles two-pass extraction (strings first, then quals) to avoid pointer corruption.
+// temp_* vectors are caller-owned and reused across calls to avoid re-allocation.
+// When sub_batches and sub_batch_size are provided, flushes full sub-batches as rows
+// are appended — `output` acts as the current partial sub-batch.
+static void ProcessSingleChunk(DataChunk &chunk, const SequenceTableSchema &schema, miint::SequenceRecordBatch &output,
+                               std::vector<std::string> &temp_read_ids, std::vector<std::string> &temp_seq1,
+                               std::vector<std::string> &temp_seq2,
+                               std::vector<miint::SequenceRecordBatch> *sub_batches = nullptr,
+                               idx_t sub_batch_size = 0) {
+	// Column indices based on schema
+	idx_t read_id_col = 0;
+	idx_t seq1_col = 1;
+	idx_t seq2_col = schema.has_sequence2 ? 2 : DConstants::INVALID_INDEX;
+	idx_t qual1_col = DConstants::INVALID_INDEX;
+	idx_t qual2_col = DConstants::INVALID_INDEX;
+
+	idx_t next_col = 2;
+	if (schema.has_sequence2) {
+		next_col = 3;
+	}
+	if (schema.has_qual1) {
+		qual1_col = next_col++;
+	}
+	if (schema.has_qual2) {
+		qual2_col = next_col++;
+	}
+
+	// Prepare unified formats
+	UnifiedVectorFormat read_id_data, seq1_data;
+	chunk.data[read_id_col].ToUnifiedFormat(chunk.size(), read_id_data);
+	chunk.data[seq1_col].ToUnifiedFormat(chunk.size(), seq1_data);
+
+	auto read_ids = UnifiedVectorFormat::GetData<string_t>(read_id_data);
+	auto sequences1 = UnifiedVectorFormat::GetData<string_t>(seq1_data);
+
+	UnifiedVectorFormat seq2_data, qual1_data, qual2_data;
+	const string_t *sequences2 = nullptr;
+	if (schema.has_sequence2) {
+		chunk.data[seq2_col].ToUnifiedFormat(chunk.size(), seq2_data);
+		sequences2 = UnifiedVectorFormat::GetData<string_t>(seq2_data);
+	}
+	if (schema.has_qual1) {
+		chunk.data[qual1_col].ToUnifiedFormat(chunk.size(), qual1_data);
+	}
+	if (schema.has_qual2) {
+		chunk.data[qual2_col].ToUnifiedFormat(chunk.size(), qual2_data);
+	}
+
+	// IMPORTANT: Extract ALL string data FIRST before calling ExtractQualScore.
+	// ExtractQualScore calls ListVector::GetEntry() which may corrupt string pointers.
+	// clear() preserves heap capacity — no re-allocation after first chunk.
+	temp_read_ids.clear();
+	temp_seq1.clear();
+	temp_seq2.clear();
+
+	for (idx_t i = 0; i < chunk.size(); i++) {
+		auto rid_idx = read_id_data.sel->get_index(i);
+		auto seq1_idx = seq1_data.sel->get_index(i);
+
+		if (!read_id_data.validity.RowIsValid(rid_idx)) {
+			continue;
+		}
+		if (!seq1_data.validity.RowIsValid(seq1_idx)) {
+			continue;
+		}
+
+		temp_read_ids.push_back(read_ids[rid_idx].GetString());
+		temp_seq1.push_back(sequences1[seq1_idx].GetString());
+
+		if (output.is_paired && schema.has_sequence2 && sequences2) {
+			auto seq2_idx = seq2_data.sel->get_index(i);
+			if (seq2_data.validity.RowIsValid(seq2_idx)) {
+				temp_seq2.push_back(sequences2[seq2_idx].GetString());
+			} else {
+				temp_seq2.push_back("");
+			}
+		} else if (output.is_paired) {
+			temp_seq2.push_back("");
+		}
+	}
+
+	// Now process the extracted strings and quality scores
+	idx_t batch_idx = 0;
+	for (idx_t i = 0; i < chunk.size(); i++) {
+		auto rid_idx = read_id_data.sel->get_index(i);
+		auto seq1_idx = seq1_data.sel->get_index(i);
+
+		if (!read_id_data.validity.RowIsValid(rid_idx)) {
+			continue;
+		}
+		if (!seq1_data.validity.RowIsValid(seq1_idx)) {
+			continue;
+		}
+
+		output.read_ids.push_back(std::move(temp_read_ids[batch_idx]));
+		output.comments.push_back("");
+		output.sequences1.push_back(std::move(temp_seq1[batch_idx]));
+
+		if (schema.has_qual1) {
+			output.quals1.push_back(ExtractQualScore(chunk, qual1_col, qual1_data, i));
+		} else {
+			output.quals1.push_back(miint::QualScore(""));
+		}
+
+		if (output.is_paired) {
+			output.sequences2.push_back(std::move(temp_seq2[batch_idx]));
+
+			if (schema.has_qual2) {
+				output.quals2.push_back(ExtractQualScore(chunk, qual2_col, qual2_data, i));
+			} else {
+				output.quals2.push_back(miint::QualScore(""));
+			}
+		}
+
+		batch_idx++;
+
+		if (sub_batches && sub_batch_size > 0 && output.size() >= sub_batch_size) {
+			sub_batches->push_back(std::move(output));
+			output = MakeSubBatch(schema.has_sequence2, sub_batch_size);
+		}
+	}
+}
+
+// Helper to process all chunks from a query result into SequenceRecordBatch.
 // Returns total number of rows processed.
-static idx_t ProcessQueryResultChunks(MaterializedQueryResult &materialized, const SequenceTableSchema &schema,
-                                      miint::SequenceRecordBatch &output) {
+static idx_t ProcessQueryResultChunks(QueryResult &result, const SequenceTableSchema &schema,
+                                      miint::SequenceRecordBatch &output,
+                                      std::vector<miint::SequenceRecordBatch> *sub_batches = nullptr,
+                                      idx_t sub_batch_size = 0) {
 	idx_t total_rows = 0;
+	// Reusable temp vectors — allocated once, cleared per chunk
+	std::vector<std::string> temp_read_ids, temp_seq1, temp_seq2;
 
 	while (true) {
-		auto chunk = materialized.Fetch();
+		auto chunk = result.Fetch();
 		if (!chunk || chunk->size() == 0) {
 			break;
 		}
-
 		total_rows += chunk->size();
-
-		// Column indices based on schema
-		idx_t read_id_col = 0;
-		idx_t seq1_col = 1;
-		idx_t seq2_col = schema.has_sequence2 ? 2 : DConstants::INVALID_INDEX;
-		idx_t qual1_col = DConstants::INVALID_INDEX;
-		idx_t qual2_col = DConstants::INVALID_INDEX;
-
-		idx_t next_col = 2;
-		if (schema.has_sequence2) {
-			next_col = 3;
-		}
-		if (schema.has_qual1) {
-			qual1_col = next_col++;
-		}
-		if (schema.has_qual2) {
-			qual2_col = next_col++;
-		}
-
-		// Prepare unified formats
-		UnifiedVectorFormat read_id_data, seq1_data;
-		chunk->data[read_id_col].ToUnifiedFormat(chunk->size(), read_id_data);
-		chunk->data[seq1_col].ToUnifiedFormat(chunk->size(), seq1_data);
-
-		auto read_ids = UnifiedVectorFormat::GetData<string_t>(read_id_data);
-		auto sequences1 = UnifiedVectorFormat::GetData<string_t>(seq1_data);
-
-		UnifiedVectorFormat seq2_data, qual1_data, qual2_data;
-		const string_t *sequences2 = nullptr;
-		if (schema.has_sequence2) {
-			chunk->data[seq2_col].ToUnifiedFormat(chunk->size(), seq2_data);
-			sequences2 = UnifiedVectorFormat::GetData<string_t>(seq2_data);
-		}
-		if (schema.has_qual1) {
-			chunk->data[qual1_col].ToUnifiedFormat(chunk->size(), qual1_data);
-		}
-		if (schema.has_qual2) {
-			chunk->data[qual2_col].ToUnifiedFormat(chunk->size(), qual2_data);
-		}
-
-		// IMPORTANT: Extract ALL string data FIRST before calling ExtractQualScore
-		// ExtractQualScore calls ListVector::GetEntry() which may corrupt string pointers
-		std::vector<std::string> batch_read_ids;
-		std::vector<std::string> batch_seq1;
-		std::vector<std::string> batch_seq2;
-
-		for (idx_t i = 0; i < chunk->size(); i++) {
-			auto rid_idx = read_id_data.sel->get_index(i);
-			auto seq1_idx = seq1_data.sel->get_index(i);
-
-			// Skip rows with NULL read_id or sequence1
-			if (!read_id_data.validity.RowIsValid(rid_idx)) {
-				continue;
-			}
-			if (!seq1_data.validity.RowIsValid(seq1_idx)) {
-				continue;
-			}
-
-			// Extract strings NOW before any LIST operations
-			batch_read_ids.push_back(read_ids[rid_idx].GetString());
-			batch_seq1.push_back(sequences1[seq1_idx].GetString());
-
-			if (output.is_paired && schema.has_sequence2 && sequences2) {
-				auto seq2_idx = seq2_data.sel->get_index(i);
-				if (seq2_data.validity.RowIsValid(seq2_idx)) {
-					batch_seq2.push_back(sequences2[seq2_idx].GetString());
-				} else {
-					batch_seq2.push_back("");
-				}
-			} else if (output.is_paired) {
-				batch_seq2.push_back("");
-			}
-		}
-
-		// Now process the extracted strings and quality scores
-		idx_t batch_idx = 0;
-		for (idx_t i = 0; i < chunk->size(); i++) {
-			auto rid_idx = read_id_data.sel->get_index(i);
-			auto seq1_idx = seq1_data.sel->get_index(i);
-
-			// Skip rows with NULL read_id or sequence1 (same logic as above)
-			if (!read_id_data.validity.RowIsValid(rid_idx)) {
-				continue;
-			}
-			if (!seq1_data.validity.RowIsValid(seq1_idx)) {
-				continue;
-			}
-
-			output.read_ids.push_back(std::move(batch_read_ids[batch_idx]));
-			output.comments.push_back("");
-			output.sequences1.push_back(std::move(batch_seq1[batch_idx]));
-
-			// Extract qual1 - NOW it's safe to call ExtractQualScore
-			if (schema.has_qual1) {
-				output.quals1.push_back(ExtractQualScore(*chunk, qual1_col, qual1_data, i));
-			} else {
-				output.quals1.push_back(miint::QualScore(""));
-			}
-
-			// Handle sequence2 and qual2 for paired reads
-			if (output.is_paired) {
-				output.sequences2.push_back(std::move(batch_seq2[batch_idx]));
-
-				if (schema.has_qual2) {
-					output.quals2.push_back(ExtractQualScore(*chunk, qual2_col, qual2_data, i));
-				} else {
-					output.quals2.push_back(miint::QualScore(""));
-				}
-			}
-
-			batch_idx++;
-		}
+		ProcessSingleChunk(*chunk, schema, output, temp_read_ids, temp_seq1, temp_seq2, sub_batches, sub_batch_size);
 	}
 
 	return total_rows;
@@ -460,6 +484,59 @@ void ReadBatchByIds(ClientContext &context, const std::string &query_table, cons
 
 	auto &materialized = query_result->Cast<MaterializedQueryResult>();
 	ProcessQueryResultChunks(materialized, schema, output);
+}
+
+QuerySequenceStream::QuerySequenceStream(ClientContext &context, const std::string &table_name,
+                                         const SequenceTableSchema &schema, idx_t sub_batch_size)
+    : conn_(DatabaseInstance::GetDatabase(context)), schema_(schema), sub_batch_size_(sub_batch_size),
+      partial_(schema.has_sequence2) {
+	partial_.reserve(sub_batch_size_);
+
+	std::string query =
+	    "SELECT " + BuildSequenceColumnList(schema_) + " FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+
+	stream_ = conn_.SendQuery(query);
+	if (stream_->HasError()) {
+		throw InvalidInputException("Failed to read from query table '%s': %s", table_name, stream_->GetError());
+	}
+}
+
+miint::SequenceRecordBatch QuerySequenceStream::FetchSubBatch() {
+	std::lock_guard<std::mutex> lock(mutex_);
+
+	if (exhausted_ && partial_.empty()) {
+		return miint::SequenceRecordBatch(schema_.has_sequence2);
+	}
+
+	// Fetch chunks from stream until we have a full sub-batch or stream is exhausted
+	while (!exhausted_ && partial_.size() < sub_batch_size_) {
+		auto chunk = stream_->Fetch();
+		if (!chunk || chunk->size() == 0) {
+			exhausted_ = true;
+			break;
+		}
+		ProcessSingleChunk(*chunk, schema_, partial_, temp_read_ids_, temp_seq1_, temp_seq2_);
+	}
+
+	if (partial_.size() >= sub_batch_size_) {
+		if (partial_.size() == sub_batch_size_) {
+			// Exact fit — return as-is
+			miint::SequenceRecordBatch result = std::move(partial_);
+			partial_ = MakeSubBatch(schema_.has_sequence2, sub_batch_size_);
+			return result;
+		}
+		// Chunk pushed partial_ past sub_batch_size_ — split: return exactly
+		// sub_batch_size_ rows and keep the remainder for the next call.
+		miint::SequenceRecordBatch result = partial_.SubRange(0, sub_batch_size_);
+		miint::SequenceRecordBatch remainder = partial_.SubRange(sub_batch_size_, partial_.size() - sub_batch_size_);
+		partial_ = std::move(remainder);
+		return result;
+	}
+
+	// Stream exhausted — return whatever remains
+	miint::SequenceRecordBatch result = std::move(partial_);
+	partial_ = miint::SequenceRecordBatch(schema_.has_sequence2);
+	return result;
 }
 
 } // namespace duckdb

@@ -55,6 +55,29 @@ struct SequenceRecordBatch {
 		quals2.clear();
 	}
 
+	// Extract a sub-range [offset, offset+count) into a new batch.
+	// Each element is copied (safe for concurrent access by multiple threads).
+	// Returns empty batch if offset >= size().
+	SequenceRecordBatch SubRange(size_t offset, size_t count) const {
+		if (offset >= size()) {
+			return SequenceRecordBatch(is_paired);
+		}
+		count = std::min(count, size() - offset);
+		SequenceRecordBatch result(is_paired);
+		result.reserve(count);
+		for (size_t i = offset; i < offset + count; i++) {
+			result.read_ids.push_back(read_ids[i]);
+			result.comments.push_back(comments[i]);
+			result.sequences1.push_back(sequences1[i]);
+			result.quals1.push_back(quals1[i]);
+			if (is_paired) {
+				result.sequences2.push_back(sequences2[i]);
+				result.quals2.push_back(quals2[i]);
+			}
+		}
+		return result;
+	}
+
 	SequenceRecordBatch() : is_paired(false) {
 	}
 	explicit SequenceRecordBatch(bool paired) : is_paired(paired) {

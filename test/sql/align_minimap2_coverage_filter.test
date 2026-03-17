@@ -1,0 +1,70 @@
+# name: test/sql/align_minimap2_coverage_filter.test
+# description: Test min_chain_coverage parameter for align_minimap2
+# group: [sql]
+
+require miint
+
+# Setup test data
+statement ok
+CREATE TABLE subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC')
+) AS t(read_id, sequence1);
+
+# Full-length query (50bp exact match)
+statement ok
+CREATE TABLE queries_full AS SELECT * FROM (VALUES
+    ('q1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT')
+) AS t(read_id, sequence1);
+
+# Error: min_chain_coverage < 0
+statement error
+SELECT * FROM align_minimap2('queries_full', subject_table:='subjects', min_chain_coverage:=-0.1);
+----
+min_chain_coverage must be between 0.0 and 1.0
+
+# Error: min_chain_coverage > 1
+statement error
+SELECT * FROM align_minimap2('queries_full', subject_table:='subjects', min_chain_coverage:=1.5);
+----
+min_chain_coverage must be between 0.0 and 1.0
+
+# Default behavior (no parameter): alignment produced
+query I
+SELECT count(*) FROM align_minimap2('queries_full', subject_table:='subjects', max_secondary:=0)
+WHERE flags & 4 = 0;
+----
+1
+
+# min_chain_coverage=0.0: same as default (alignment produced)
+query I
+SELECT count(*) FROM align_minimap2('queries_full', subject_table:='subjects', max_secondary:=0, min_chain_coverage:=0.0)
+WHERE flags & 4 = 0;
+----
+1
+
+# min_chain_coverage=0.5: full-length alignment survives
+query I
+SELECT count(*) FROM align_minimap2('queries_full', subject_table:='subjects', max_secondary:=0, min_chain_coverage:=0.5)
+WHERE flags & 4 = 0;
+----
+1
+
+# Partial query: first 35bp match ref, last 15bp are random (chain coverage ~0.72)
+statement ok
+CREATE TABLE queries_partial AS SELECT * FROM (VALUES
+    ('q_partial', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTTGGATCCAAGGTCCT')
+) AS t(read_id, sequence1);
+
+# Without filter: partial query aligns (mapped)
+query I
+SELECT count(*) FROM align_minimap2('queries_partial', subject_table:='subjects', max_secondary:=0)
+WHERE flags & 4 = 0;
+----
+1
+
+# With min_chain_coverage=0.99: partial query is filtered out (no mapped alignments)
+query I
+SELECT count(*) FROM align_minimap2('queries_partial', subject_table:='subjects', max_secondary:=0, min_chain_coverage:=0.99)
+WHERE flags & 4 = 0;
+----
+0

@@ -1,5 +1,14 @@
 # This file is included by DuckDB's build system. It specifies which extension to load
 
+# MinGW's ld treats duplicate COMDAT symbols (C++ constexpr/inline from DuckDB headers)
+# as errors when the extension's static lib and DuckDB's static lib are linked into the
+# same binary. This is set here (not in the extension's CMakeLists.txt) because this file
+# runs in DuckDB's CMake scope before libduckdb.dll/duckdb.exe targets are configured.
+if(MINGW)
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--allow-multiple-definition")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--allow-multiple-definition")
+endif()
+
 # Extensions that miint depends on (must load before miint)
 # Load order matters for LoadAllExtensions: macros reference functions from
 # core_functions (FLOOR, map_from_entries) and json (read_json).

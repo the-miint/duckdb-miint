@@ -41,6 +41,11 @@ RypeClassifyTableFunction::GlobalState::~GlobalState() {
 	if (index) {
 		rype_index_free(index);
 	}
+
+	// Release sub-connection LAST — RYpe's input stream (released above via
+	// output_stream.release) holds a ResultArrowArrayStreamWrapper whose
+	// QueryResult has a non-owning optional_ptr<ClientContext> into this connection.
+	input_connection.reset();
 }
 
 // ============================================================================
@@ -135,8 +140,17 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 	}
 
 	// Step 3: Build read_id mapping and query sequence data for RYpe
+	// Store connection in GlobalState so it outlives the RYpe input stream.
+	// RYpe lazily consumes the input Arrow stream (backed by ResultArrowArrayStreamWrapper
+	// whose QueryResult holds a non-owning optional_ptr<ClientContext>). If the connection
+	// is destroyed before RYpe finishes consuming, the dangling pointer causes use-after-free.
 	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	gstate->input_connection = make_uniq<Connection>(db);
+	auto &conn = *gstate->input_connection;
+
+	// Use Arrow BinaryView (v1.4+) for BLOB columns — no offset-size limits.
+	// RYpe supports Binary, LargeBinary, and BinaryView.
+	conn.Query("SET arrow_output_version = '1.4'");
 
 	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
 	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);
@@ -163,7 +177,9 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 	// shard I/O to dominate. Sample actual average read length for accurate estimation.
 	size_t avg_read_length = SampleAvgReadLength(conn, table_quoted);
 	int is_paired = bind_data.has_sequence2 ? 1 : 0;
-	size_t batch_size = rype_recommend_batch_size(gstate->index, avg_read_length, is_paired, 0);
+	// is_large_binary=1: sub-connection uses arrow_large_buffer_size=true, so DuckDB
+	// exports BLOB as Arrow LargeBinary (i64 offsets) — no 2 GiB per-array limit.
+	size_t batch_size = rype_recommend_batch_size(gstate->index, avg_read_length, is_paired, 0, 1);
 	if (batch_size == 0) {
 		// rype_recommend_batch_size returns 0 on error — log but use safe fallback
 		const char *err = rype_get_last_error();

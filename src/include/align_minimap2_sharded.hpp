@@ -34,10 +34,10 @@ struct ShardInfo {
 // coordinate batch claiming and worker tracking without holding the global lock.
 struct ActiveShard {
 	idx_t shard_idx;                                   // Index into Data::shards
-	idx_t batch_size;                                  // Per-shard batch size (id_count / max_threads_per_shard)
-	std::vector<std::string> shard_read_ids;           // Pre-materialized read IDs for this shard (sorted)
+	idx_t batch_size;                                  // Per-shard batch size
+	miint::SequenceRecordBatch shard_sequences;        // Pre-fetched sequences for this shard
 	std::shared_ptr<miint::SharedMinimap2Index> index; // Shared index, immutable after construction
-	std::atomic<idx_t> next_batch_offset {0};          // Threads atomically claim ranges into shard_read_ids
+	std::atomic<idx_t> next_batch_offset {0};          // Threads atomically claim ranges into shard_sequences
 	std::atomic<idx_t> active_workers {0};             // Threads currently on this shard
 	std::atomic<bool> exhausted {false};               // Set when no more batches to read
 	std::atomic<bool> ready {false};                   // Set when index is loaded and IDs materialized

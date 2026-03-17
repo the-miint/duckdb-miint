@@ -2,7 +2,11 @@
 
 #include "Minimap2Aligner.hpp"
 #include "SequenceRecord.hpp"
+#include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/connection.hpp"
+#include "duckdb/main/query_result.hpp"
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -43,5 +47,31 @@ std::vector<std::string> ReadShardIds(ClientContext &context, const std::string 
 // loads them into a temp table, and joins against query_table to fetch sequences.
 void ReadBatchByIds(ClientContext &context, const std::string &query_table, const SequenceTableSchema &schema,
                     const std::vector<std::string> &ids, idx_t offset, idx_t count, miint::SequenceRecordBatch &output);
+
+// Streaming query sequence reader for lazy sub-batching.
+// Produces sub-batches on demand from a streaming query result.
+// Thread-safe: multiple threads can call FetchSubBatch() concurrently.
+class QuerySequenceStream {
+public:
+	QuerySequenceStream(ClientContext &context, const std::string &table_name, const SequenceTableSchema &schema,
+	                    idx_t sub_batch_size = STANDARD_VECTOR_SIZE);
+
+	// Fetch the next sub-batch. Returns an empty batch when the stream is exhausted.
+	// Thread-safe — serializes access to the underlying stream via mutex.
+	miint::SequenceRecordBatch FetchSubBatch();
+
+private:
+	Connection conn_;
+	unique_ptr<QueryResult> stream_;
+	SequenceTableSchema schema_;
+	idx_t sub_batch_size_;
+	miint::SequenceRecordBatch partial_; // Partially-filled sub-batch carried across Fetch() calls
+	bool exhausted_ = false;
+	mutable std::mutex mutex_;
+	// Reusable temp vectors for string extraction (avoids per-chunk allocation)
+	std::vector<std::string> temp_read_ids_;
+	std::vector<std::string> temp_seq1_;
+	std::vector<std::string> temp_seq2_;
+};
 
 } // namespace duckdb

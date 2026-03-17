@@ -22,7 +22,7 @@ jobs:
       extra_toolchains: 'rust'
       # Skip tests here - run separately with bowtie2 installed
       skip_tests: true
-      exclude_archs: 'windows_amd64_mingw;windows_amd64_rtools;windows_amd64;wasm_mvp;wasm_eh;wasm_threads'
+      exclude_archs: 'windows_amd64_rtools;windows_amd64'
 
   test-with-bowtie2:
     name: Test with Bowtie2
@@ -31,6 +31,7 @@ jobs:
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
       VCPKG_TARGET_TRIPLET: 'x64-linux'
       GEN: ninja
+      HDF5_AVAILABLE: 1
     steps:
       - uses: actions/checkout@v4
         with:
@@ -65,6 +66,36 @@ jobs:
       - name: Run all tests
         shell: bash -el {0}
         run: make test
+
+  test-wasm-compatible-build:
+    name: Test WASM-compatible build (no HDF5/Bowtie2)
+    runs-on: ubuntu-latest
+    env:
+      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+      VCPKG_TARGET_TRIPLET: 'x64-linux'
+      GEN: ninja
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: 'true'
+
+      - name: Install build dependencies
+        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11.1
+        with:
+          vcpkgGitCommitId: ce613c41372b23b1f51333815feb3edd87ef8a8b
+
+      - name: Build extension (HDF5=OFF, Bowtie2=OFF)
+        run: EXT_FLAGS="-DMIINT_ENABLE_HDF5=OFF -DMIINT_ENABLE_BOWTIE2=OFF" make release
+
+      - name: Run SQL tests
+        run: make test
+
+      - name: Run C++ unit tests
+        run: ./build/release/extension/miint/tests
 
   code-quality-check:
     name: Code Quality Check

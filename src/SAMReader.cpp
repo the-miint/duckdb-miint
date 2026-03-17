@@ -1,9 +1,10 @@
 #include <SAMReader.hpp>
 #include <htslib-1.22.1/htslib/sam.h>
 #include <htslib-1.22.1/htslib/hfile.h>
-#include <sys/resource.h>
 #include <regex>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 namespace miint {
 // Constructor for SAM files with headers
@@ -119,7 +120,9 @@ SAMReader::SAMReader(const std::string &filename, const std::unordered_map<std::
 	}
 }
 
-// Constructor for reading SAM from a file descriptor (e.g., pipe from subprocess)
+#ifndef _WIN32
+// Constructor for reading SAM from a file descriptor (e.g., pipe from subprocess).
+// Only available on POSIX — used by Bowtie2Aligner for subprocess piping.
 SAMReader::SAMReader(int fd, const std::string &name, bool include_seq_qual)
     : aln(bam_init1()), include_seq_qual(include_seq_qual) {
 	// Wrap fd in HTSlib's hFILE
@@ -149,6 +152,7 @@ SAMReader::SAMReader(int fd, const std::string &name, bool include_seq_qual)
 		throw std::runtime_error("Cannot initialize BAM record");
 	}
 }
+#endif
 
 SAMRecordBatch SAMReader::read(const int n) {
 	SAMRecordBatch batch;
