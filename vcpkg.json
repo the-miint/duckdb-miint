@@ -4,10 +4,11 @@
     "zstd",
     "openssl",
     "curl",
-    { "name": "hdf5", "features": ["cpp", "zlib", "szip"], "platform": "!emscripten" }
+    { "name": "hdf5", "features": ["cpp", "zlib", "szip"], "platform": "!emscripten" },
+    { "name": "hdf5", "default-features": false, "features": ["cpp", "zlib"], "platform": "emscripten" }
   ],
   "vcpkg-configuration": {
-    "overlay-ports": ["./extension-ci-tools/vcpkg_ports"],
+    "overlay-ports": ["./vcpkg_overlay_ports", "./extension-ci-tools/vcpkg_ports"],
     "overlay-triplets": ["./extension-ci-tools/toolchains"]
   }
 }

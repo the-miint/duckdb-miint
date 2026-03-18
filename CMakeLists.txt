@@ -22,11 +22,10 @@ option(MIINT_ENABLE_HDF5 "Build with HDF5/BIOM support" ON)
 option(MIINT_ENABLE_BOWTIE2 "Build with Bowtie2 alignment support" ON)
 
 # Auto-disable platform-incompatible features.
-# HDF5 has no known WASM build; Bowtie2 requires POSIX fork/exec.
+# Bowtie2 requires POSIX fork/exec (unavailable on WASM and Windows).
 if(EMSCRIPTEN)
-    set(MIINT_ENABLE_HDF5 OFF)
     set(MIINT_ENABLE_BOWTIE2 OFF)
-    message(STATUS "Emscripten detected: disabling HDF5 and Bowtie2 (WASM-incompatible)")
+    message(STATUS "Emscripten detected: disabling Bowtie2 (WASM-incompatible)")
 elseif(WIN32)
     set(MIINT_ENABLE_BOWTIE2 OFF)
     message(STATUS "Windows detected: disabling Bowtie2 (requires POSIX fork/exec)")
@@ -247,6 +246,23 @@ if(WIN32)
         BUILD_BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib/libhts.a
     )
 else()
+    if(EMSCRIPTEN)
+        # Emscripten/WASM doesn't support shared libraries, so htslib's default
+        # 'make' (which builds both static and shared) and 'make install' (which
+        # requires the shared lib) both fail. Build only the static library and
+        # manually copy the artifacts.
+        set(HTSLIB_BUILD_COMMAND make lib-static)
+        # libhts.a is in <BINARY_DIR> (out-of-source build), but headers are
+        # read-only source files so we copy them from the source tree directly.
+        set(HTSLIB_INSTALL_COMMAND
+            ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib
+            COMMAND ${CMAKE_COMMAND} -E copy <BINARY_DIR>/libhts.a ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib/libhts.a
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/htslib/include/htslib
+            COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1/htslib ${CMAKE_CURRENT_BINARY_DIR}/htslib/include/htslib)
+    else()
+        set(HTSLIB_BUILD_COMMAND make)
+        set(HTSLIB_INSTALL_COMMAND make install)
+    endif()
     ExternalProject_Add(
         htslib_build
         SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1
@@ -257,8 +273,8 @@ else()
             --disable-bz2
             --disable-lzma
             --without-libdeflate
-        BUILD_COMMAND make
-        INSTALL_COMMAND make install
+        BUILD_COMMAND ${HTSLIB_BUILD_COMMAND}
+        INSTALL_COMMAND ${HTSLIB_INSTALL_COMMAND}
         BUILD_IN_SOURCE 0
         BUILD_BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib/libhts.a
     )
