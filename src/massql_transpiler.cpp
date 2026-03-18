@@ -351,8 +351,11 @@ static std::string x_peak_pair_ctes(const std::vector<const Condition *> &x_cond
 
 // Generate CTEs for cross-level X pattern (mirrors mzml_x_ms1_ms2_prec macro)
 // Pattern: MS1MZ=X AND MS2PREC=X — MS2 spectra whose precursor matches an MS1 peak
+// base_cte: the MS2 peaks source table/CTE (may be a pre-materialized table)
+// ms1_source: if non-empty, use this table instead of mzml_peaks(source) for MS1 peaks
 static std::string x_cross_level_ctes(const std::vector<const Condition *> &x_conds, const std::string &source,
-                                      const MassQLQuery &query, std::string &qualifying_cte_name) {
+                                      const MassQLQuery &query, std::string &qualifying_cte_name,
+                                      const std::string &base_cte, const std::string &ms1_source = "") {
 	// Extract tolerance from any X-condition
 	std::string tol_value;
 	std::string tol_func = "mz_within";
@@ -379,13 +382,20 @@ static std::string x_cross_level_ctes(const std::vector<const Condition *> &x_co
 	qualifying_cte_name = "__x_cross_qualifying";
 
 	std::ostringstream ss;
-	ss << "__ms1_peaks AS (\n"
-	   << "  SELECT DISTINCT spectrum_index, mz FROM mzml_peaks(" << source << ") WHERE ms_level = 1"
-	   << x_candidate_filter(query) << "\n"
-	   << "),\n";
+	if (!ms1_source.empty()) {
+		ss << "__ms1_peaks AS (\n"
+		   << "  SELECT DISTINCT spectrum_index, mz FROM " << ms1_source << " WHERE 1=1" << x_candidate_filter(query)
+		   << "\n"
+		   << "),\n";
+	} else {
+		ss << "__ms1_peaks AS (\n"
+		   << "  SELECT DISTINCT spectrum_index, mz FROM mzml_peaks(" << source << ") WHERE ms_level = 1"
+		   << x_candidate_filter(query) << "\n"
+		   << "),\n";
+	}
 
 	ss << qualifying_cte_name << " AS (\n"
-	   << "  SELECT DISTINCT b.spectrum_index FROM __base b\n"
+	   << "  SELECT DISTINCT b.spectrum_index FROM " << base_cte << " b\n"
 	   << "  JOIN __ms1_peaks ms1 ON b.ms1_scan_index = ms1.spectrum_index\n"
 	   << "  AND " << tol_func << "(ms1.mz, b.precursor_mz, " << tol_value << ")\n"
 	   << ")";
@@ -620,79 +630,101 @@ static std::string aggregation_sql(AggFunction agg, const std::string &source_ct
 	return ss.str();
 }
 
-// ── Main transpiler ──────────────────────────────────────────────────────────
+// ── X-pattern classification ─────────────────────────────────────────────────
 
-std::string MassQLTranspiler::to_sql(const MassQLQuery &query, const std::string &source) {
-	int ms_level = (query.data_type == DataType::MS1DATA) ? 1 : 2;
+enum class XPattern { NONE, OFFSET, PEAK_PAIR, CROSS_LEVEL };
 
-	// Detect and classify X-variable conditions
-	enum class XPattern { NONE, OFFSET, PEAK_PAIR, CROSS_LEVEL };
-	std::vector<const Condition *> x_conds;
+// Classify the X-variable pattern in query. Populates x_conds_out with X-variable conditions.
+// Single authoritative source used by both to_sql_internal() and get_materialization_plan().
+static XPattern classify_x_pattern(const MassQLQuery &query, std::vector<const Condition *> &x_conds_out) {
+	x_conds_out.clear();
 	for (const auto &cond : query.where_conditions) {
 		if (condition_has_x_variable(cond)) {
-			x_conds.push_back(&cond);
+			x_conds_out.push_back(&cond);
 		}
 	}
 
 	// Validate: X constraints require X-variable conditions
-	if ((query.has_x_range || query.has_x_massdefect) && x_conds.empty()) {
+	if ((query.has_x_range || query.has_x_massdefect) && x_conds_out.empty()) {
 		throw std::runtime_error("MassQL transpiler: X constraint (range/massdefect) requires X-variable conditions");
 	}
 
-	XPattern x_pattern = XPattern::NONE;
-	if (!x_conds.empty()) {
-		// Check if all X-conditions share the same peak-level field
-		bool all_same_field = true;
-		ConditionField x_field = x_conds[0]->field;
-		for (const auto *c : x_conds) {
-			if (c->field != x_field) {
-				all_same_field = false;
+	if (x_conds_out.empty()) {
+		return XPattern::NONE;
+	}
+
+	// Check if all X-conditions share the same peak-level field
+	bool all_same_field = true;
+	ConditionField x_field = x_conds_out[0]->field;
+	for (const auto *c : x_conds_out) {
+		if (c->field != x_field) {
+			all_same_field = false;
+			break;
+		}
+	}
+
+	if (all_same_field && is_peak_level_field(x_field)) {
+		// Same field: check for non-unit coefficients → peak-pair vs offset
+		bool has_nonunit_coeff = false;
+		for (const auto *c : x_conds_out) {
+			if (c->values[0].x_coefficient != 1.0) {
+				has_nonunit_coeff = true;
 				break;
 			}
 		}
-
-		if (all_same_field && is_peak_level_field(x_field)) {
-			// Same field: check for non-unit coefficients → peak-pair vs offset
-			bool has_nonunit_coeff = false;
-			for (const auto *c : x_conds) {
-				if (c->values[0].x_coefficient != 1.0) {
-					has_nonunit_coeff = true;
-					break;
-				}
+		return has_nonunit_coeff ? XPattern::PEAK_PAIR : XPattern::OFFSET;
+	} else {
+		// Check for cross-level: MS1MZ=X AND MS2PREC=X
+		bool has_ms1mz = false, has_ms2prec = false;
+		for (const auto *c : x_conds_out) {
+			if (c->field == ConditionField::MS1MZ) {
+				has_ms1mz = true;
 			}
-			x_pattern = has_nonunit_coeff ? XPattern::PEAK_PAIR : XPattern::OFFSET;
-		} else {
-			// Check for cross-level: MS1MZ=X AND MS2PREC=X
-			bool has_ms1mz = false, has_ms2prec = false;
-			for (const auto *c : x_conds) {
-				if (c->field == ConditionField::MS1MZ) {
-					has_ms1mz = true;
-				}
-				if (c->field == ConditionField::MS2PREC) {
-					has_ms2prec = true;
-				}
-			}
-			if (has_ms1mz && has_ms2prec && x_conds.size() == 2) {
-				x_pattern = XPattern::CROSS_LEVEL;
-			} else {
-				throw std::runtime_error("MassQL transpiler: unsupported X-variable pattern");
+			if (c->field == ConditionField::MS2PREC) {
+				has_ms2prec = true;
 			}
 		}
+		if (has_ms1mz && has_ms2prec && x_conds_out.size() == 2) {
+			return XPattern::CROSS_LEVEL;
+		} else {
+			throw std::runtime_error("MassQL transpiler: unsupported X-variable pattern");
+		}
 	}
+}
+
+// ── Main transpiler ──────────────────────────────────────────────────────────
+
+// Internal implementation.
+// materialized_base: if non-empty, used directly as the base table (mzml_peaks() already called
+//   by the caller; metadata filters are already baked in — do NOT re-apply them here).
+// materialized_ms1: if non-empty, used for __ms1_peaks in cross-level queries instead of
+//   calling mzml_peaks(source) again.
+static std::string to_sql_internal(const MassQLQuery &query, const std::string &source,
+                                   const std::string &materialized_base, const std::string &materialized_ms1) {
+	int ms_level = (query.data_type == DataType::MS1DATA) ? 1 : 2;
+
+	std::vector<const Condition *> x_conds;
+	XPattern x_pattern = classify_x_pattern(query, x_conds);
 
 	std::ostringstream sql;
 
-	// Base CTE: reuse mzml_peaks() macro for unnesting + enrichment
-	std::string base_cte = "__base";
-	sql << "WITH " << base_cte << " AS (\n"
-	    << "  SELECT * FROM mzml_peaks(" << source << ") WHERE ms_level = " << ms_level;
-
-	for (const auto &cond : query.where_conditions) {
-		if (is_metadata_field(cond.field)) {
-			sql << " AND " << metadata_where(cond);
+	// Base table: when pre-materialized, use directly (metadata filters already applied).
+	// When not materialized, wrap mzml_peaks() with ms_level + metadata filters in a CTE.
+	std::string base_cte;
+	if (!materialized_base.empty()) {
+		base_cte = materialized_base;
+		sql << "WITH ";
+	} else {
+		base_cte = "__base";
+		sql << "WITH " << base_cte << " AS (\n"
+		    << "  SELECT * FROM mzml_peaks(" << source << ") WHERE ms_level = " << ms_level;
+		for (const auto &cond : query.where_conditions) {
+			if (is_metadata_field(cond.field)) {
+				sql << " AND " << metadata_where(cond);
+			}
 		}
+		sql << "\n),\n";
 	}
-	sql << "\n),\n";
 
 	// Check if X-conditions also have Y-variable qualifiers
 	bool x_has_y = false;
@@ -798,7 +830,7 @@ std::string MassQLTranspiler::to_sql(const MassQLQuery &query, const std::string
 		match_ctes.emplace_back(x_qual_name, false);
 	} else if (x_pattern == XPattern::CROSS_LEVEL) {
 		std::string x_qual_name;
-		sql << x_cross_level_ctes(x_conds, source, query, x_qual_name) << ",\n";
+		sql << x_cross_level_ctes(x_conds, source, query, x_qual_name, base_cte, materialized_ms1) << ",\n";
 		match_ctes.emplace_back(x_qual_name, false);
 	}
 
@@ -910,6 +942,51 @@ std::string MassQLTranspiler::to_sql(const MassQLQuery &query, const std::string
 	sql << "\n" << aggregation_sql(query.agg_function, final_cte, query.scanrangesum_tolerance);
 
 	return sql.str();
+}
+
+std::string MassQLTranspiler::to_sql(const MassQLQuery &query, const std::string &source) {
+	return to_sql_internal(query, source, "", "");
+}
+
+std::string MassQLTranspiler::to_sql_materialized(const MassQLQuery &query, const std::string &source,
+                                                  const std::string &base_table, const std::string &ms1_table) {
+	return to_sql_internal(query, source, base_table, ms1_table);
+}
+
+std::string MassQLTranspiler::materialize_base_sql(const MassQLQuery &query, const std::string &source,
+                                                   const std::string &table_name) {
+	int ms_level = (query.data_type == DataType::MS1DATA) ? 1 : 2;
+	std::ostringstream ss;
+	ss << "CREATE OR REPLACE TEMP TABLE " << table_name << " AS\n"
+	   << "SELECT * FROM mzml_peaks(" << source << ") WHERE ms_level = " << ms_level;
+	for (const auto &cond : query.where_conditions) {
+		if (is_metadata_field(cond.field)) {
+			ss << " AND " << metadata_where(cond);
+		}
+	}
+	return ss.str();
+}
+
+std::string MassQLTranspiler::materialize_ms1_sql(const std::string &source, const std::string &table_name) {
+	// Materialize MS1 peaks for cross-level queries (MS1MZ=X AND MS2PREC=X).
+	// No metadata filters: MS1 peaks are the reference set for precursor matching,
+	// not the primary filtered data, so retention time / charge filters do not apply.
+	std::ostringstream ss;
+	ss << "CREATE OR REPLACE TEMP TABLE " << table_name << " AS\n"
+	   << "SELECT * FROM mzml_peaks(" << source << ") WHERE ms_level = 1";
+	return ss.str();
+}
+
+MaterializationPlan MassQLTranspiler::get_materialization_plan(const MassQLQuery &query) {
+	std::vector<const Condition *> x_conds;
+	// classify_x_pattern throws on unsupported patterns; catch here since plan-checking
+	// should not fail — to_sql_internal will surface the error when the query executes.
+	try {
+		XPattern pattern = classify_x_pattern(query, x_conds);
+		return MaterializationPlan {pattern == XPattern::CROSS_LEVEL};
+	} catch (...) {
+		return MaterializationPlan {false};
+	}
 }
 
 } // namespace miint

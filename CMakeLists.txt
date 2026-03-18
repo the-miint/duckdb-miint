@@ -665,6 +665,7 @@ set(TEST_SOURCES
     test/cpp/test_MzXMLReader.cpp
     src/formula_parser.cpp
     src/massql_parser.cpp
+    src/massql_transpiler.cpp
     src/mass_tables.cpp
     test/cpp/test_MassQLParser.cpp
 )
