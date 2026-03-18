@@ -1,0 +1,68 @@
+# name: test/sql/mzml_neutral_loss.test
+# description: test neutral_loss column in mzml_peaks
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+statement ok
+CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML');
+
+# neutral_loss column exists and has correct type
+query T
+SELECT typeof(neutral_loss) FROM mzml_peaks(spectra) LIMIT 1
+----
+DOUBLE
+
+# MS1: neutral_loss is NULL (no precursor_mz)
+query I
+SELECT neutral_loss IS NULL
+FROM mzml_peaks(spectra)
+WHERE ms_level = 1
+LIMIT 1
+----
+1
+
+# MS2 spectrum 1: precursor_mz=200, peaks at 150 and 250
+query RR
+SELECT mz, neutral_loss
+FROM mzml_peaks(spectra)
+WHERE spectrum_index = 1
+ORDER BY mz
+----
+150.0	50.0
+250.0	-50.0
+
+# MS2 spectrum 2: precursor_mz=300, peaks at 120/220/320/420
+query RR
+SELECT mz, neutral_loss
+FROM mzml_peaks(spectra)
+WHERE spectrum_index = 2
+ORDER BY mz
+----
+120.0	180.0
+220.0	80.0
+320.0	-20.0
+420.0	-120.0
+
+# ----- Edge cases -----
+
+# neutral_loss = 0 when mz equals precursor_mz
+statement ok
+CREATE TABLE nl_zero AS
+SELECT 0 AS spectrum_index, 2 AS ms_level, 1.0 AS retention_time,
+       'centroid' AS spectrum_type, 'positive' AS polarity,
+       1000.0 AS base_peak_intensity, 1000.0 AS total_ion_current,
+       200.0 AS precursor_mz, 2 AS precursor_charge, 1000.0 AS precursor_intensity,
+       NULL::INTEGER AS ms1_scan_index, 'scan=1' AS spectrum_id, 1 AS scan_number,
+       [200.0] AS mz_array, [1000.0] AS intensity_array;
+
+query R
+SELECT neutral_loss FROM mzml_peaks(nl_zero)
+----
+0.0
+
+# Sign is meaningful: positive = fragment lost mass, negative = fragment heavier.
+# Already verified above: spectrum 1 has +50.0 (mz=150) and -50.0 (mz=250).

@@ -1,0 +1,174 @@
+# name: test/sql/read_mzxml.test
+# description: test read_mzxml table function
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+# Before we load the extension, this will fail
+statement error
+SELECT * FROM read_mzxml('foo');
+----
+Catalog Error: Table Function with name read_mzxml does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require miint
+
+# Missing file
+statement error
+SELECT * FROM read_mzxml('missing.mzXML');
+----
+IO Error: File not found: missing.mzXML
+
+# Stdin not supported
+statement error
+SELECT * FROM read_mzxml('-');
+----
+Invalid Input Error: read_mzxml: stdin is not supported
+
+# stdin alternate paths also rejected
+statement error
+SELECT * FROM read_mzxml('/dev/stdin');
+----
+Invalid Input Error: read_mzxml: stdin is not supported
+
+# Row count
+query I
+SELECT COUNT(*) FROM read_mzxml('data/mzxml/basic_3spectra.mzXML')
+----
+3
+
+# Schema type verification (27 columns)
+query TTTTTTTTTTTTTTTTTTTTTTTTTTT
+SELECT typeof(spectrum_index), typeof(spectrum_id), typeof(scan_number), typeof(ms_level),
+       typeof(retention_time), typeof(spectrum_type), typeof(polarity),
+       typeof(base_peak_mz), typeof(base_peak_intensity), typeof(total_ion_current),
+       typeof(lowest_mz), typeof(highest_mz), typeof(default_array_length),
+       typeof(precursor_mz), typeof(precursor_charge), typeof(precursor_intensity),
+       typeof(isolation_window_target), typeof(isolation_window_lower), typeof(isolation_window_upper),
+       typeof(activation_method), typeof(collision_energy),
+       typeof(mz_array), typeof(intensity_array),
+       typeof(filter_string), typeof(scan_window_lower), typeof(scan_window_upper),
+       typeof(ms1_scan_index)
+FROM read_mzxml('data/mzxml/basic_3spectra.mzXML') LIMIT 1
+----
+INTEGER	VARCHAR	INTEGER	INTEGER	DOUBLE	VARCHAR	VARCHAR	DOUBLE	DOUBLE	DOUBLE	DOUBLE	DOUBLE	INTEGER	DOUBLE	INTEGER	DOUBLE	DOUBLE	DOUBLE	DOUBLE	VARCHAR	DOUBLE	DOUBLE[]	DOUBLE[]	VARCHAR	DOUBLE	DOUBLE	INTEGER
+
+# MS1 metadata values
+query IIIRTTRRRRRI
+SELECT spectrum_index, scan_number, ms_level, retention_time,
+       spectrum_type, polarity,
+       base_peak_mz, base_peak_intensity, total_ion_current,
+       lowest_mz, highest_mz, default_array_length
+FROM read_mzxml('data/mzxml/basic_3spectra.mzXML')
+WHERE ms_level = 1
+----
+0	1	1	1.5	centroid	positive	200.0	5000.0	8000.0	100.0	300.0	3
+
+# MS2 precursor values
+query IRIRIRRRT
+SELECT spectrum_index, precursor_mz, precursor_charge, precursor_intensity,
+       isolation_window_target, isolation_window_lower, isolation_window_upper,
+       collision_energy, activation_method
+FROM read_mzxml('data/mzxml/basic_3spectra.mzXML')
+WHERE scan_number = 2
+----
+1	200.0	2	5000.0	200.0	1.5	1.5	NULL	CID
+
+# RT conversion: PT108S = 1.8 min
+query R
+SELECT retention_time FROM read_mzxml('data/mzxml/basic_3spectra.mzXML')
+WHERE scan_number = 3
+----
+1.8
+
+# Binary arrays
+query II
+SELECT mz_array, intensity_array FROM read_mzxml('data/mzxml/basic_3spectra.mzXML')
+WHERE scan_number = 1
+----
+[100.0, 200.0, 300.0]	[1000.0, 5000.0, 2000.0]
+
+# ms1_scan_index: NULL for MS1, 0 for MS2s
+query III
+SELECT spectrum_index, ms_level, ms1_scan_index FROM read_mzxml('data/mzxml/basic_3spectra.mzXML')
+ORDER BY spectrum_index
+----
+0	1	NULL
+1	2	0
+2	2	0
+
+# Compressed file
+query II
+SELECT mz_array, intensity_array FROM read_mzxml('data/mzxml/compressed.mzXML')
+----
+[100.0, 200.0, 300.0]	[1000.0, 5000.0, 2000.0]
+
+# 32-bit float file (values same but through float32 encoding)
+query I
+SELECT default_array_length FROM read_mzxml('data/mzxml/float32.mzXML')
+----
+3
+
+# Empty file
+query I
+SELECT COUNT(*) FROM read_mzxml('data/mzxml/empty.mzXML')
+----
+0
+
+# Zero peaks
+query III
+SELECT default_array_length, mz_array, intensity_array FROM read_mzxml('data/mzxml/zero_peaks.mzXML')
+----
+0	[]	[]
+
+# include_filepath
+query IT
+SELECT spectrum_index, filepath FROM read_mzxml('data/mzxml/basic_3spectra.mzXML', include_filepath=true)
+WHERE spectrum_index = 0
+----
+0	data/mzxml/basic_3spectra.mzXML
+
+# Glob pattern
+query I
+SELECT COUNT(*) FROM read_mzxml('data/mzxml/basic_*.mzXML')
+----
+3
+
+# Multi-file array
+query I
+SELECT COUNT(*) FROM read_mzxml(['data/mzxml/basic_3spectra.mzXML', 'data/mzxml/compressed.mzXML'])
+----
+4
+
+# Missing optional metadata: empty spectrum_type/polarity -> NULL
+query TT
+SELECT spectrum_type, polarity FROM read_mzxml('data/mzxml/missing_optional.mzXML')
+----
+NULL	NULL
+
+# Orphan MS2: ms1_scan_index IS NULL
+query II
+SELECT ms_level, ms1_scan_index FROM read_mzxml('data/mzxml/orphan_ms2.mzXML')
+ORDER BY spectrum_index
+----
+2	NULL
+2	NULL
+
+# Filter string and scan window
+query TRR
+SELECT filter_string, scan_window_lower, scan_window_upper
+FROM read_mzxml('data/mzxml/basic_3spectra.mzXML')
+WHERE scan_number = 1
+----
+FTMS + p NSI Full ms [100.00-500.00]	100.0	500.0
+
+# UNION ALL with mzML (same schema)
+query I
+SELECT COUNT(*) FROM (
+  SELECT spectrum_index, ms_level, mz_array FROM read_mzml('data/mzml/basic_3spectra.mzML')
+  UNION ALL
+  SELECT spectrum_index, ms_level, mz_array FROM read_mzxml('data/mzxml/basic_3spectra.mzXML')
+)
+----
+6

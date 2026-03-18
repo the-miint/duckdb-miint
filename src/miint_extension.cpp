@@ -22,8 +22,15 @@
 #include <read_ncbi.hpp>
 #include <read_ncbi_annotation.hpp>
 #include <miint_macros.hpp>
+#include "duckdb/main/extension_helper.hpp"
+#include "duckdb/main/database.hpp"
 #include <sequence_functions.hpp>
+#include <formula_function.hpp>
+#include <massql_function.hpp>
 #include <align_pairwise_functions.hpp>
+#include <read_mzml.hpp>
+#include <read_mzml_chromatograms.hpp>
+#include <read_mzxml.hpp>
 #include <rype_classify.hpp>
 #include <rype_extract.hpp>
 #include <rype_log_ratio.hpp>
@@ -170,6 +177,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	AlignmentQueryCoverageFunction::Register(loader);
 	CompressIntervalsFunction::Register(loader);
 	SequenceFunctions::Register(loader);
+	FormulaFunction::Register(loader);
+	MassQLFunction::Register(loader);
 
 	AlignPairwiseScoreFunction::Register(loader);
 	AlignPairwiseCigarFunction::Register(loader);
@@ -182,6 +191,27 @@ static void LoadInternal(ExtensionLoader &loader) {
 	CopyFastaFunction::Register(loader);
 	CopyNewickFunction::Register(loader);
 	CopySAMFunction::Register(loader);
+
+	ReadMzMLTableFunction::Register(loader);
+	ReadMzMLChromatogramsTableFunction::Register(loader);
+	ReadMzXMLTableFunction::Register(loader);
+
+	// Ensure dependency extensions are loaded before registering macros that
+	// reference their functions (e.g., read_jplace needs json's read_json,
+	// parse_gff_attributes needs core_functions' map_from_entries).
+	auto &instance = loader.GetDatabaseInstance();
+	for (const auto *dep : {"json", "core_functions"}) {
+		if (!instance.ExtensionIsLoaded(dep)) {
+			ExtensionHelper::TryAutoLoadExtension(instance, dep);
+		}
+#ifdef MIINT_STATIC_BUILD
+		// LoadExtension links against symbols not available in loadable extension builds
+		if (!instance.ExtensionIsLoaded(dep)) {
+			DuckDB db_wrapper(instance);
+			ExtensionHelper::LoadExtension(db_wrapper, dep);
+		}
+#endif
+	}
 
 	MIINTMacros::Register(loader);
 

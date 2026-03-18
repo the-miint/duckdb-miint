@@ -1,0 +1,87 @@
+# name: test/sql/massql_filter.test
+# description: test FILTER clause macros (mzml_filter_mz, mzml_filter_nl)
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+# Load test data
+statement ok
+CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML');
+
+# ----- Phase 3A: mzml_filter_mz -----
+
+# Get all MS1 peaks, then filter to only the peak at mz=200
+statement ok
+CREATE TABLE all_ms1 AS SELECT * FROM mzml_ms1_peaks(spectra);
+
+query I
+SELECT COUNT(*) FROM mzml_filter_mz(all_ms1, 200.0, 0.5)
+----
+1
+
+# scansum of filtered MS1: only intensity of mz=200 peak = 5000.0
+statement ok
+CREATE VIEW filtered_ms1 AS SELECT * FROM mzml_filter_mz(all_ms1, 200.0, 0.5);
+
+query R
+SELECT total_intensity FROM mzml_scansum(filtered_ms1)
+----
+5000.0
+
+# Filter all MS2 peaks to mz=220 (spectrum 2 only has peak at 220)
+statement ok
+CREATE TABLE all_ms2 AS SELECT * FROM mzml_ms2_peaks(spectra);
+
+query I
+SELECT COUNT(*) FROM mzml_filter_mz(all_ms2, 220.0, 0.5)
+----
+1
+
+# Wider tolerance: mz=220 +/- 50 (strict: 170-270) -> catches 250 in spec1 and 220 in spec2
+query I
+SELECT COUNT(*) FROM mzml_filter_mz(all_ms2, 220.0, 50.0)
+----
+2
+
+# No match
+query I
+SELECT COUNT(*) FROM mzml_filter_mz(all_ms1, 999.0, 0.5)
+----
+0
+
+# ----- Phase 3B: mzml_filter_nl -----
+
+# MS2 spectrum 2: precursor=300, peaks at 120/220/320/420
+# neutral_loss = precursor_mz - mz: 180/80/-20/-120
+# Filter to NL=80 -> peak at mz=220
+query I
+SELECT COUNT(*) FROM mzml_filter_nl(all_ms2, 80.0, 0.5)
+----
+1
+
+query R
+SELECT mz FROM mzml_filter_nl(all_ms2, 80.0, 0.5)
+----
+220.0
+
+# MS2 spectrum 1: precursor=200, peaks at 150/250
+# neutral_loss = 50/-50
+# Filter to NL=50 -> peak at mz=150
+query I
+SELECT COUNT(*) FROM mzml_filter_nl(all_ms2, 50.0, 0.5)
+----
+1
+
+query R
+SELECT mz FROM mzml_filter_nl(all_ms2, 50.0, 0.5)
+----
+150.0
+
+# No NL match
+query I
+SELECT COUNT(*) FROM mzml_filter_nl(all_ms2, 999.0, 0.5)
+----
+0

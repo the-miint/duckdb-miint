@@ -1,0 +1,99 @@
+# name: test/sql/massql_tolerance_boundary.test
+# description: test tolerance boundary behavior and edge cases
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+# tolerance_boundary.mzML:
+#   Spectrum 0 (MS2, precursor=150.0, TIC=4000):
+#     peaks at 200.049, 200.051, 300.499, 300.501 (all intensity 1000)
+#   Spectrum 1 (MS2, precursor=250.0, TIC=0):
+#     peak at 500.0, intensity 0
+
+statement ok
+CREATE TABLE tb AS SELECT * FROM read_mzml('data/mzml/tolerance_boundary.mzML');
+
+# ----- mz_within boundary tests -----
+
+# mz_within uses strict inequality (< not <=)
+# 200.05 +/- 0.001 -> range (200.049, 200.051) strict
+# 200.049 is NOT > 200.049 (equal), 200.051 is NOT < 200.051 (equal)
+query I
+SELECT COUNT(*) FROM mzml_peaks(tb) WHERE mz_within(mz, 200.05, 0.001)
+----
+0
+
+# Widen tolerance slightly: 200.05 +/- 0.002 -> range (200.048, 200.052)
+# Both 200.049 and 200.051 are within -> 2 matches
+query I
+SELECT COUNT(*) FROM mzml_peaks(tb) WHERE mz_within(mz, 200.05, 0.002)
+----
+2
+
+# ----- i_tic with zero TIC -----
+
+# Spectrum 1 has TIC=0, so i_tic should be NULL (avoids division by zero)
+query I
+SELECT COUNT(*) FROM mzml_peaks(tb) WHERE i_tic IS NULL
+----
+1
+
+# Spectrum 0 has TIC=4000, peaks have i_tic = 1000/4000 = 0.25
+query R
+SELECT DISTINCT round(i_tic, 4) FROM mzml_peaks(tb) WHERE i_tic IS NOT NULL
+----
+0.25
+
+# ----- mzml_filter_mz boundary tests -----
+
+# mzml_filter_mz also uses strict inequality
+# Filter mz=200.05 +/- 0.001 -> same strict range as mz_within -> 0
+statement ok
+CREATE TABLE tb_peaks AS SELECT * FROM mzml_peaks(tb);
+
+query I
+SELECT COUNT(*) FROM mzml_filter_mz(tb_peaks, 200.05, 0.001)
+----
+0
+
+# Filter mz=200.05 +/- 0.002 -> both 200.049 and 200.051 match
+query I
+SELECT COUNT(*) FROM mzml_filter_mz(tb_peaks, 200.05, 0.002)
+----
+2
+
+# Filter mz=300.5 +/- 0.001 -> strict (300.499, 300.501) -> 0
+query I
+SELECT COUNT(*) FROM mzml_filter_mz(tb_peaks, 300.5, 0.001)
+----
+0
+
+# Filter mz=300.5 +/- 0.002 -> catches both boundary peaks
+query I
+SELECT COUNT(*) FROM mzml_filter_mz(tb_peaks, 300.5, 0.002)
+----
+2
+
+# ----- mzml_filter_nl with MS1 data (fix 6) -----
+
+# MS1 peaks have NULL neutral_loss, so mzml_filter_nl should return 0 rows
+statement ok
+CREATE TABLE ms1_data AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML');
+
+statement ok
+CREATE TABLE ms1_peaks AS SELECT * FROM mzml_ms1_peaks(ms1_data);
+
+# Verify MS1 peaks have NULL neutral_loss
+query I
+SELECT COUNT(*) FROM ms1_peaks WHERE neutral_loss IS NOT NULL
+----
+0
+
+# mzml_filter_nl on MS1 data returns empty (NULL neutral_loss excluded by WHERE)
+query I
+SELECT COUNT(*) FROM mzml_filter_nl(ms1_peaks, 100.0, 50.0)
+----
+0

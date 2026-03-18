@@ -1,0 +1,38 @@
+# name: test/sql/massql_excluded_integration.test
+# description: integration test for EXCLUDED macros with GNPS data
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+require-env MASSQL_GNPS_DATA
+
+# Load GNPS data
+statement ok
+CREATE TABLE g AS SELECT * FROM read_mzml('data/cache/GNPS00002_A3_p.mzML');
+
+# MassQL ground truth: MS2PROD=226.18:EXCLUDED with 0.1 Da tolerance -> 78 scans
+# Total MS2 scans = 79, so 1 scan has a product ion near 226.18
+
+# Sanity check: total MS2 scans
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_peaks(g) WHERE ms_level = 2
+----
+79
+
+# EXCLUDED: 78 distinct scans
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_excluded_ms2prod(g, 226.18, 0.1)
+----
+78
+
+# Composition with scaninfo
+statement ok
+CREATE VIEW excluded_gnps AS SELECT * FROM mzml_excluded_ms2prod(g, 226.18, 0.1);
+
+query I
+SELECT COUNT(*) FROM mzml_scaninfo(excluded_gnps)
+----
+78

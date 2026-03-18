@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<indexedmzML xmlns="http://psi.hupo.org/ms/mzml"
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<mzML xmlns="http://psi.hupo.org/ms/mzml">
+<cvList count="2">
+  <cv id="MS" fullName="Proteomics Standards Initiative Mass Spectrometry Ontology"/>
+  <cv id="UO" fullName="Unit Ontology"/>
+</cvList>
+<fileDescription>
+  <fileContent>
+    <cvParam cvRef="MS" accession="MS:1000579" name="MS1 spectrum"/>
+  </fileContent>
+</fileDescription>
+<referenceableParamGroupList count="2">
+  <referenceableParamGroup id="mz_params">
+    <cvParam cvRef="MS" accession="MS:1000576" name="no compression"/>
+    <cvParam cvRef="MS" accession="MS:1000523" name="64-bit float"/>
+    <cvParam cvRef="MS" accession="MS:1000514" name="m/z array"/>
+  </referenceableParamGroup>
+  <referenceableParamGroup id="int_params">
+    <cvParam cvRef="MS" accession="MS:1000576" name="no compression"/>
+    <cvParam cvRef="MS" accession="MS:1000523" name="64-bit float"/>
+    <cvParam cvRef="MS" accession="MS:1000515" name="intensity array"/>
+  </referenceableParamGroup>
+</referenceableParamGroupList>
+<run defaultInstrumentConfigurationRef="IC1">
+  <spectrumList count="1" defaultDataProcessingRef="dp">
+    <spectrum index="0" id="scan=1" defaultArrayLength="3">
+      <cvParam cvRef="MS" accession="MS:1000511" name="ms level" value="1"/>
+      <cvParam cvRef="MS" accession="MS:1000127" name="centroid spectrum"/>
+      <scanList count="1">
+        <scan>
+          <cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="1.0" unitCvRef="UO" unitAccession="UO:0000031" unitName="minute"/>
+        </scan>
+      </scanList>
+      <binaryDataArrayList count="2">
+        <binaryDataArray encodedLength="32">
+          <referenceableParamGroupRef ref="mz_params"/>
+          <binary>AAAAAAAAWUAAAAAAAABpQAAAAAAAwHJA</binary>
+        </binaryDataArray>
+        <binaryDataArray encodedLength="32">
+          <referenceableParamGroupRef ref="int_params"/>
+          <binary>AAAAAABAj0AAAAAAAIizQAAAAAAAQJ9A</binary>
+        </binaryDataArray>
+      </binaryDataArrayList>
+    </spectrum>
+  </spectrumList>
+</run>
+</mzML>
+</indexedmzML>

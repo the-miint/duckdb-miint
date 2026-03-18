@@ -4,6 +4,7 @@
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include <algorithm>
+#include <cstring>
 
 namespace duckdb {
 
@@ -137,6 +138,9 @@ void SetResultVectorString(Vector &result_vector, const std::vector<std::string>
 	}
 }
 
+// Empty strings are treated as NULL. This convention is used for fields like
+// spectrum_type, polarity, and activation_method where an empty string indicates
+// the value was absent in the source data.
 void SetResultVectorStringNullable(Vector &result_vector, const std::vector<std::string> &values) {
 	auto result_data = FlatVector::GetData<string_t>(result_vector);
 	auto &validity = FlatVector::Validity(result_vector);
@@ -220,6 +224,117 @@ void SetResultVectorListUInt8(Vector &result_vector, const std::vector<miint::Qu
 
 	auto &child_validity = FlatVector::Validity(child_vector);
 	child_validity.SetAllValid(total_child_elements);
+}
+
+void SetResultVectorInt32(Vector &result_vector, const std::vector<int32_t> &values) {
+	auto result_data = FlatVector::GetData<int32_t>(result_vector);
+	for (idx_t j = 0; j < values.size(); j++) {
+		result_data[j] = values[j];
+	}
+}
+
+void SetResultVectorInt32Nullable(Vector &result_vector, const std::vector<int32_t> &values,
+                                  const std::vector<bool> &valid) {
+	auto result_data = FlatVector::GetData<int32_t>(result_vector);
+	auto &validity = FlatVector::Validity(result_vector);
+	validity.SetAllInvalid(values.size());
+
+	for (idx_t j = 0; j < values.size(); j++) {
+		result_data[j] = values[j];
+		if (valid[j]) {
+			validity.SetValid(j);
+		}
+	}
+}
+
+void SetResultVectorDouble(Vector &result_vector, const std::vector<double> &values) {
+	auto result_data = FlatVector::GetData<double>(result_vector);
+	for (idx_t j = 0; j < values.size(); j++) {
+		result_data[j] = values[j];
+	}
+}
+
+void SetResultVectorDoubleNullable(Vector &result_vector, const std::vector<double> &values,
+                                   const std::vector<bool> &valid) {
+	auto result_data = FlatVector::GetData<double>(result_vector);
+	auto &validity = FlatVector::Validity(result_vector);
+	validity.SetAllInvalid(values.size());
+
+	for (idx_t j = 0; j < values.size(); j++) {
+		result_data[j] = values[j];
+		if (valid[j]) {
+			validity.SetValid(j);
+		}
+	}
+}
+
+void SetResultVectorListDouble(Vector &result_vector, const std::vector<std::vector<double>> &values) {
+	idx_t total_child_elements = 0;
+	for (const auto &vec : values) {
+		total_child_elements += vec.size();
+	}
+
+	ListVector::Reserve(result_vector, total_child_elements);
+	ListVector::SetListSize(result_vector, total_child_elements);
+
+	auto &child_vector = ListVector::GetEntry(result_vector);
+	auto child_data = FlatVector::GetData<double>(child_vector);
+	auto list_entries = FlatVector::GetData<list_entry_t>(result_vector);
+
+	idx_t value_offset = 0;
+	for (idx_t row_offset = 0; row_offset < values.size(); row_offset++) {
+		auto len = values[row_offset].size();
+		list_entries[row_offset].offset = value_offset;
+		list_entries[row_offset].length = len;
+
+		if (len > 0) {
+			std::memcpy(child_data + value_offset, values[row_offset].data(), len * sizeof(double));
+		}
+		value_offset += len;
+	}
+
+	auto &validity = FlatVector::Validity(result_vector);
+	validity.SetAllValid(values.size());
+
+	auto &child_validity = FlatVector::Validity(child_vector);
+	child_validity.SetAllValid(total_child_elements);
+}
+
+void PopulateSpectrumBatchOutput(DataChunk &output, const miint::MzMLSpectrumBatch &batch, bool include_filepath,
+                                 const std::string &filepath) {
+	size_t col = 0;
+	SetResultVectorInt32(output.data[col++], batch.spectrum_index);
+	SetResultVectorString(output.data[col++], batch.spectrum_id);
+	SetResultVectorInt32Nullable(output.data[col++], batch.scan_number, batch.scan_number_valid);
+	SetResultVectorInt32(output.data[col++], batch.ms_level);
+	SetResultVectorDoubleNullable(output.data[col++], batch.retention_time, batch.retention_time_valid);
+	SetResultVectorStringNullable(output.data[col++], batch.spectrum_type);
+	SetResultVectorStringNullable(output.data[col++], batch.polarity);
+	SetResultVectorDoubleNullable(output.data[col++], batch.base_peak_mz, batch.base_peak_mz_valid);
+	SetResultVectorDoubleNullable(output.data[col++], batch.base_peak_intensity, batch.base_peak_intensity_valid);
+	SetResultVectorDoubleNullable(output.data[col++], batch.total_ion_current, batch.total_ion_current_valid);
+	SetResultVectorDoubleNullable(output.data[col++], batch.lowest_mz, batch.lowest_mz_valid);
+	SetResultVectorDoubleNullable(output.data[col++], batch.highest_mz, batch.highest_mz_valid);
+	SetResultVectorInt32(output.data[col++], batch.default_array_length);
+	SetResultVectorDoubleNullable(output.data[col++], batch.precursor_mz, batch.precursor_mz_valid);
+	SetResultVectorInt32Nullable(output.data[col++], batch.precursor_charge, batch.precursor_charge_valid);
+	SetResultVectorDoubleNullable(output.data[col++], batch.precursor_intensity, batch.precursor_intensity_valid);
+	SetResultVectorDoubleNullable(output.data[col++], batch.isolation_window_target,
+	                              batch.isolation_window_target_valid);
+	SetResultVectorDoubleNullable(output.data[col++], batch.isolation_window_lower, batch.isolation_window_lower_valid);
+	SetResultVectorDoubleNullable(output.data[col++], batch.isolation_window_upper, batch.isolation_window_upper_valid);
+	SetResultVectorStringNullable(output.data[col++], batch.activation_method);
+	SetResultVectorDoubleNullable(output.data[col++], batch.collision_energy, batch.collision_energy_valid);
+	SetResultVectorListDouble(output.data[col++], batch.mz_array);
+	SetResultVectorListDouble(output.data[col++], batch.intensity_array);
+	SetResultVectorStringNullable(output.data[col++], batch.filter_string);
+	SetResultVectorDoubleNullable(output.data[col++], batch.scan_window_lower, batch.scan_window_lower_valid);
+	SetResultVectorDoubleNullable(output.data[col++], batch.scan_window_upper, batch.scan_window_upper_valid);
+	SetResultVectorInt32Nullable(output.data[col++], batch.ms1_scan_index, batch.ms1_scan_index_valid);
+	if (include_filepath) {
+		SetResultVectorFilepath(output.data[col++], filepath);
+	}
+	output.SetCardinality(batch.size());
 }
 
 } // namespace duckdb

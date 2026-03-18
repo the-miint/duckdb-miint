@@ -233,3 +233,42 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+---
+
+## Pyteomics
+
+Monoisotopic element masses in `src/formula_function.cpp` are derived from the
+`_nist_mass` data table in pyteomics (`pyteomics/auxiliary/constants.py`).
+
+- Repository: https://github.com/levitsky/pyteomics
+- Version: commit 3f1fd4afb51a5033222851666bef585c9253cd68
+- License: Apache License 2.0
+
+### Citations
+
+Goloborodko, A.A.; Levitsky, L.I.; Ivanov, M.V.; and Gorshkov, M.V. (2013)
+"Pyteomics - a Python Framework for Exploratory Data Analysis and Rapid Software
+Prototyping in Proteomics", Journal of The American Society for Mass Spectrometry,
+24(2), 301-304. doi: 10.1007/s13361-012-0516-6
+
+Levitsky, L.I.; Klein, J.; Ivanov, M.V.; and Gorshkov, M.V. (2018)
+"Pyteomics 4.0: five years of development of a Python proteomics framework",
+Journal of Proteome Research.
+doi: 10.1021/acs.jproteome.8b00717
+
+### Apache License 2.0
+
+Copyright (c) Lev Levitsky and Joshua Klein
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.

@@ -1,0 +1,50 @@
+# name: test/sql/massql_x_prec_massdefect.test
+# description: Test mzml_x_prec_massdefect macro (X from precursor filtered by mass defect)
+# group: [sql]
+
+require miint
+
+statement ok
+CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/massdefect_prec.mzML');
+
+# [0.1, 0.2] matches prec=200.15 (defect=0.15) -> spec 1
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_prec_massdefect(spectra, 0.1, 0.2)
+----
+1
+
+# [0.9, 1.0] matches prec=300.92 (defect=0.92) -> spec 2
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_prec_massdefect(spectra, 0.9, 1.0)
+----
+1
+
+# [0.0, 1.0] matches all MS2 -> specs 1,2,3
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_prec_massdefect(spectra, 0.0, 1.0)
+----
+3
+
+# [0.7, 0.8] matches none
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_prec_massdefect(spectra, 0.7, 0.8)
+----
+0
+
+# Composable with scaninfo via view
+statement ok
+CREATE VIEW defect_match AS SELECT * FROM mzml_x_prec_massdefect(spectra, 0.1, 0.2);
+
+query I
+SELECT COUNT(*) FROM mzml_scaninfo(defect_match)
+----
+1
+
+# Empty table: no matches
+statement ok
+CREATE TABLE empty_spectra AS SELECT * FROM read_mzml('data/mzml/empty_spectra.mzML');
+
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_prec_massdefect(empty_spectra, 0.1, 0.2)
+----
+0

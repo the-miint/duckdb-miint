@@ -1,0 +1,164 @@
+# name: test/sql/massql_excluded.test
+# description: test EXCLUDED qualifier macros (anti-join)
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+# Load test data: basic_3spectra.mzML
+# Spectrum 0 (MS1): peaks at 100/200/300, intensities 1000/5000/2000
+# Spectrum 1 (MS2, prec=200): peaks at 150/250, intensities 3000/1500
+# Spectrum 2 (MS2, prec=300): peaks at 120/220/320/420, intensities 500/2500/1200/800
+statement ok
+CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML');
+
+# ----- mzml_excluded_ms2prod -----
+# Returns MS2 peaks from scans that do NOT contain a product ion near target_mz.
+
+# Exclude 150.0: Spec 1 has 150 -> excluded. Spec 2 (4 peaks) remains.
+query I
+SELECT COUNT(*) FROM mzml_excluded_ms2prod(spectra, 150.0, 0.5)
+----
+4
+
+query I
+SELECT DISTINCT spectrum_index FROM mzml_excluded_ms2prod(spectra, 150.0, 0.5)
+----
+2
+
+# Exclude 220.0: Spec 2 has 220 -> excluded. Spec 1 (2 peaks) remains.
+query I
+SELECT COUNT(*) FROM mzml_excluded_ms2prod(spectra, 220.0, 0.5)
+----
+2
+
+query I
+SELECT DISTINCT spectrum_index FROM mzml_excluded_ms2prod(spectra, 220.0, 0.5)
+----
+1
+
+# Exclude 999.0: No match -> all MS2 scans kept (6 peaks)
+query I
+SELECT COUNT(*) FROM mzml_excluded_ms2prod(spectra, 999.0, 0.5)
+----
+6
+
+# Wide tolerance: 250.0 +/- 200 -> catches all MS2 peaks -> all excluded
+query I
+SELECT COUNT(*) FROM mzml_excluded_ms2prod(spectra, 250.0, 200.0)
+----
+0
+
+# Tight tolerance: 150.0 +/- 0.01 -> still exact match on 150
+query I
+SELECT COUNT(*) FROM mzml_excluded_ms2prod(spectra, 150.0, 0.01)
+----
+4
+
+# Composition with scaninfo
+statement ok
+CREATE VIEW excluded_view AS SELECT * FROM mzml_excluded_ms2prod(spectra, 150.0, 0.5);
+
+query I
+SELECT COUNT(*) FROM mzml_scaninfo(excluded_view)
+----
+1
+
+# ----- mzml_excluded_ms1mz -----
+# Returns MS1 peaks from scans that do NOT contain a peak near target_mz.
+
+# Exclude 200.0: The only MS1 scan (spec 0) has 200 -> all excluded
+query I
+SELECT COUNT(*) FROM mzml_excluded_ms1mz(spectra, 200.0, 0.5)
+----
+0
+
+# Exclude 150.0: No MS1 peak near 150 -> spec 0 kept (3 peaks)
+query I
+SELECT COUNT(*) FROM mzml_excluded_ms1mz(spectra, 150.0, 0.5)
+----
+3
+
+# ----- mzml_excluded_ms2prec -----
+# Returns MS2 peaks from scans whose precursor is NOT near target_mz.
+
+# Exclude prec=200: Spec 1 (prec=200) excluded -> spec 2 (4 peaks) remains
+query I
+SELECT COUNT(*) FROM mzml_excluded_ms2prec(spectra, 200.0, 0.5)
+----
+4
+
+query I
+SELECT DISTINCT spectrum_index FROM mzml_excluded_ms2prec(spectra, 200.0, 0.5)
+----
+2
+
+# Exclude prec=300: Spec 2 (prec=300) excluded -> spec 1 (2 peaks) remains
+query I
+SELECT COUNT(*) FROM mzml_excluded_ms2prec(spectra, 300.0, 0.5)
+----
+2
+
+query I
+SELECT DISTINCT spectrum_index FROM mzml_excluded_ms2prec(spectra, 300.0, 0.5)
+----
+1
+
+# Exclude prec=999: No match -> all MS2 scans kept (6 peaks)
+query I
+SELECT COUNT(*) FROM mzml_excluded_ms2prec(spectra, 999.0, 0.5)
+----
+6
+
+# ----- Edge cases -----
+
+# Empty dataset: no spectra at all -> 0 rows for all macros
+statement ok
+CREATE TABLE empty_spectra AS SELECT * FROM read_mzml('data/mzml/empty_spectra.mzML');
+
+query I
+SELECT COUNT(*) FROM mzml_excluded_ms2prod(empty_spectra, 100.0, 0.5)
+----
+0
+
+query I
+SELECT COUNT(*) FROM mzml_excluded_ms1mz(empty_spectra, 100.0, 0.5)
+----
+0
+
+query I
+SELECT COUNT(*) FROM mzml_excluded_ms2prec(empty_spectra, 100.0, 0.5)
+----
+0
+
+# MS1-only dataset: ms2prod and ms2prec return 0 (no MS2 scans exist)
+statement ok
+CREATE TABLE ms1_only AS SELECT * FROM read_mzml('data/mzml/missing_optional.mzML');
+
+query I
+SELECT COUNT(*) FROM mzml_excluded_ms2prod(ms1_only, 100.0, 0.5)
+----
+0
+
+query I
+SELECT COUNT(*) FROM mzml_excluded_ms2prec(ms1_only, 100.0, 0.5)
+----
+0
+
+# MS2-only dataset (orphan_ms2.mzML): ms1mz returns 0 (no MS1 scans)
+# ms2prec correctly filters by precursor (both have non-NULL precursors)
+statement ok
+CREATE TABLE orphan AS SELECT * FROM read_mzml('data/mzml/orphan_ms2.mzML');
+
+query I
+SELECT COUNT(*) FROM mzml_excluded_ms1mz(orphan, 100.0, 0.5)
+----
+0
+
+# Exclude prec=200 from orphan: spec 0 (prec=200) excluded, spec 1 (prec=300, 2 peaks) remains
+query I
+SELECT COUNT(*) FROM mzml_excluded_ms2prec(orphan, 200.0, 0.5)
+----
+2

@@ -1,0 +1,198 @@
+# name: test/sql/massql_cross_level.test
+# description: test cross-level (MS1 ↔ MS2) building blocks
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+# Load test data
+statement ok
+CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML');
+
+statement ok
+CREATE TABLE orphan AS SELECT * FROM read_mzml('data/mzml/orphan_ms2.mzML');
+
+# ----- Phase 1A: mzml_ms1_peaks / mzml_ms2_peaks -----
+
+# MS1 peaks: spectrum 0 has 3 peaks
+query I
+SELECT COUNT(*) FROM mzml_ms1_peaks(spectra)
+----
+3
+
+# MS2 peaks: spectra 1 (2 peaks) + 2 (4 peaks) = 6
+query I
+SELECT COUNT(*) FROM mzml_ms2_peaks(spectra)
+----
+6
+
+# All MS1 peaks are from spectrum 0
+query I
+SELECT DISTINCT spectrum_index FROM mzml_ms1_peaks(spectra)
+----
+0
+
+# MS2 peaks are from spectra 1 and 2
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_ms2_peaks(spectra)
+----
+2
+
+# No MS1 in orphan data -> 0 rows
+query I
+SELECT COUNT(*) FROM mzml_ms1_peaks(orphan)
+----
+0
+
+# ----- Phase 1B: mzml_ms1_parent_peaks -----
+
+# MS2 spectrum 2 has peak at mz=220. Filter MS2 to scans containing mz≈220,
+# then get parent MS1 peaks from spectrum 0.
+statement ok
+CREATE VIEW ms2_with_220 AS
+SELECT * FROM mzml_ms2_peaks(spectra)
+WHERE spectrum_index IN (
+    SELECT DISTINCT spectrum_index FROM mzml_ms2_peaks(spectra)
+    WHERE mz_within(mz, 220.0, 0.5));
+
+# Parent MS1 should have 3 peaks (spectrum 0)
+query I
+SELECT COUNT(*) FROM mzml_ms1_parent_peaks(spectra, ms2_with_220)
+----
+3
+
+# Only spectrum 0
+query I
+SELECT DISTINCT spectrum_index FROM mzml_ms1_parent_peaks(spectra, ms2_with_220)
+----
+0
+
+# scansum composition: total intensity of parent MS1 = 8000.0
+statement ok
+CREATE VIEW parent_ms1_peaks AS SELECT * FROM mzml_ms1_parent_peaks(spectra, ms2_with_220);
+
+query R
+SELECT total_intensity FROM mzml_scansum(parent_ms1_peaks)
+----
+8000.0
+
+# Edge: orphan MS2 (NULL ms1_scan_index) -> 0 rows
+statement ok
+CREATE TABLE orphan_ms2_peaks AS SELECT * FROM mzml_ms2_peaks(orphan);
+
+query I
+SELECT COUNT(*) FROM mzml_ms1_parent_peaks(orphan, orphan_ms2_peaks)
+----
+0
+
+# Edge: empty MS2 set -> 0 rows
+statement ok
+CREATE VIEW empty_ms2 AS SELECT * FROM mzml_ms2_peaks(spectra) WHERE FALSE;
+
+query I
+SELECT COUNT(*) FROM mzml_ms1_parent_peaks(spectra, empty_ms2)
+----
+0
+
+# ----- Phase 1C: mzml_ms2_child_peaks -----
+
+# MS1 spectrum 0 has peak at 200.0 -> filter to that scan, get child MS2
+statement ok
+CREATE VIEW ms1_with_200 AS
+SELECT * FROM mzml_ms1_peaks(spectra)
+WHERE spectrum_index IN (
+    SELECT DISTINCT spectrum_index FROM mzml_ms1_peaks(spectra)
+    WHERE mz_within(mz, 200.0, 0.5));
+
+# Both MS2 spectra (1 and 2) are children of spectrum 0
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_ms2_child_peaks(spectra, ms1_with_200)
+----
+2
+
+# Total peaks: 2 + 4 = 6
+query I
+SELECT COUNT(*) FROM mzml_ms2_child_peaks(spectra, ms1_with_200)
+----
+6
+
+# No MS1 match -> 0 MS2 rows
+statement ok
+CREATE VIEW no_match_ms1 AS SELECT * FROM mzml_ms1_peaks(spectra) WHERE FALSE;
+
+query I
+SELECT COUNT(*) FROM mzml_ms2_child_peaks(spectra, no_match_ms1)
+----
+0
+
+# ----- Phase 1D: Cross-level composition test -----
+
+# MS1MZ=X AND MS2PREC=X AND MS2PROD=250:
+# X=200: MS1 has peak at 200, MS2 spectrum 1 has precursor=200 AND peak at 250 -> match
+# X=300: MS1 has peak at 300, MS2 spectrum 2 has precursor=300 but no peak at 250 -> no match
+# Result: only spectrum 1
+
+# Step 1: MS1 scans with peak near 200 -> spectrum 0
+# Step 2: MS2 children of that MS1 -> spectra 1, 2
+# Step 3: Filter to MS2 with precursor near 200 -> spectrum 1 only
+# Step 4: Filter to MS2 scans with peak near 250 -> spectrum 1 has 250 -> match
+query I
+SELECT DISTINCT spectrum_index
+FROM mzml_ms2_child_peaks(spectra, ms1_with_200)
+WHERE spectrum_index IN (
+    SELECT DISTINCT spectrum_index
+    FROM mzml_ms2_child_peaks(spectra, ms1_with_200)
+    WHERE mz_within(precursor_mz, 200.0, 0.5)
+)
+AND spectrum_index IN (
+    SELECT DISTINCT spectrum_index
+    FROM mzml_ms2_child_peaks(spectra, ms1_with_200)
+    WHERE mz_within(mz, 250.0, 0.5)
+)
+----
+1
+
+# ----- Phase 4A: i_tic column -----
+
+# Spectrum 0: TIC=8000, mz=100 intensity=1000 -> i_tic=0.125
+query R
+SELECT round(i_tic, 4) FROM mzml_peaks(spectra)
+WHERE spectrum_index = 0 AND mz_within(mz, 100.0, 0.1)
+----
+0.125
+
+# Spectrum 0: all i_tic values
+query RR
+SELECT round(i_tic, 4), mz FROM mzml_peaks(spectra)
+WHERE spectrum_index = 0
+ORDER BY mz
+----
+0.125	100.0
+0.625	200.0
+0.25	300.0
+
+# INTENSITYTICPERCENT pattern: WHERE i_tic >= 0.10
+# Spectrum 0: 0.125, 0.625, 0.25 — all >= 0.10
+query I
+SELECT COUNT(*) FROM mzml_peaks(spectra)
+WHERE spectrum_index = 0 AND i_tic >= 0.10
+----
+3
+
+# WHERE i_tic >= 0.20: mz=100 at 0.125 drops out
+query I
+SELECT COUNT(*) FROM mzml_peaks(spectra)
+WHERE spectrum_index = 0 AND i_tic >= 0.20
+----
+2
+
+# Division-by-zero: zero_intensity.mzML (TIC=0) -> i_tic is NULL
+statement ok
+CREATE TABLE zero_int AS SELECT * FROM read_mzml('data/mzml/zero_intensity.mzML');
+
+query I
+SELECT i_tic IS NULL FROM mzml_peaks(zero_int) LIMIT 1
+----
+1

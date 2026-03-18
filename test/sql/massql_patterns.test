@@ -1,0 +1,185 @@
+# name: test/sql/massql_patterns.test
+# description: MassQL-equivalent query patterns using DuckDB SQL
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+statement ok
+CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML');
+
+statement ok
+CREATE TABLE all_peaks AS SELECT * FROM mzml_peaks(spectra);
+
+statement ok
+CREATE VIEW ms2_peaks AS SELECT * FROM all_peaks WHERE ms_level = 2;
+
+# =====================================================================
+# MassQL: QUERY scansum(MS2DATA) WHERE MS2PROD=220:TOLERANCEMZ=0.5
+# Scan-level semantics: find scans containing mz near 220, then
+# aggregate ALL peaks from matching scans.
+# =====================================================================
+statement ok
+CREATE VIEW scansum_220 AS
+SELECT * FROM ms2_peaks
+WHERE spectrum_index IN (
+    SELECT DISTINCT spectrum_index FROM ms2_peaks
+    WHERE mz_within(mz, 220.0, 0.5)
+);
+
+query IR
+SELECT spectrum_index, total_intensity
+FROM mzml_scansum(scansum_220)
+----
+2	5000.0
+
+# =====================================================================
+# MassQL: QUERY scannum(MS2DATA) WHERE MS2PREC=200:TOLERANCEMZ=0.1
+# Filter by precursor_mz (scan-level metadata, no indirection needed)
+# =====================================================================
+statement ok
+CREATE VIEW prec200 AS
+SELECT * FROM ms2_peaks WHERE mz_within(precursor_mz, 200.0, 0.1);
+
+query I
+SELECT COUNT(*) FROM mzml_scannum(prec200)
+----
+1
+
+# =====================================================================
+# MassQL: QUERY scanmz(MS2DATA) WHERE CHARGE=2
+# =====================================================================
+statement ok
+CREATE VIEW charge2 AS
+SELECT * FROM ms2_peaks WHERE precursor_charge = 2;
+
+query R
+SELECT precursor_mz FROM mzml_scanmz(charge2)
+----
+200.0
+
+# =====================================================================
+# MassQL: QUERY scannum(MS2DATA) WHERE POLARITY=Positive
+# =====================================================================
+statement ok
+CREATE VIEW pos_peaks AS
+SELECT * FROM ms2_peaks WHERE polarity = 'positive';
+
+query I
+SELECT COUNT(*) FROM mzml_scannum(pos_peaks)
+----
+1
+
+# =====================================================================
+# MassQL: QUERY scanmaxint(MS2DATA) WHERE RTMIN=1.7
+# MS2 scans with RT >= 1.7 (spectrum 2: RT=1.8)
+# =====================================================================
+statement ok
+CREATE VIEW rt_ge17 AS
+SELECT * FROM ms2_peaks WHERE retention_time >= 1.7;
+
+query IR
+SELECT spectrum_index, max_intensity
+FROM mzml_scanmaxint(rt_ge17)
+----
+2	2500.0
+
+# =====================================================================
+# MassQL: QUERY scannum(MS2DATA) WHERE MS2PROD=150:EXCLUDED
+# Scans that do NOT contain peak near 150 -> spectrum 2
+# =====================================================================
+statement ok
+CREATE VIEW excluded_150 AS
+SELECT * FROM ms2_peaks
+WHERE spectrum_index NOT IN (
+    SELECT DISTINCT spectrum_index FROM ms2_peaks
+    WHERE mz_within(mz, 150.0, 0.1)
+);
+
+query I
+SELECT spectrum_index FROM mzml_scannum(excluded_150)
+----
+2
+
+# =====================================================================
+# MassQL: QUERY scansum(MS2DATA) WHERE MS2PROD=150 AND MS2PREC=200
+# Both conditions on same scan (INTERSECT)
+# =====================================================================
+statement ok
+CREATE VIEW scansum_150_and_prec200 AS
+SELECT * FROM ms2_peaks
+WHERE spectrum_index IN (
+    SELECT spectrum_index FROM ms2_peaks WHERE mz_within(mz, 150.0, 0.1)
+    INTERSECT
+    SELECT spectrum_index FROM ms2_peaks WHERE mz_within(precursor_mz, 200.0, 0.1)
+);
+
+query IR
+SELECT spectrum_index, total_intensity
+FROM mzml_scansum(scansum_150_and_prec200)
+----
+1	4500.0
+
+# =====================================================================
+# Edge cases
+# =====================================================================
+
+# No scans match product filter -> 0 rows
+statement ok
+CREATE VIEW no_match AS
+SELECT * FROM ms2_peaks
+WHERE spectrum_index IN (
+    SELECT DISTINCT spectrum_index FROM ms2_peaks
+    WHERE mz_within(mz, 999.0, 0.1)
+);
+
+query I
+SELECT COUNT(*) FROM mzml_scannum(no_match)
+----
+0
+
+# All scans excluded -> 0 rows
+statement ok
+CREATE VIEW all_excluded AS
+SELECT * FROM ms2_peaks
+WHERE spectrum_index NOT IN (
+    SELECT DISTINCT spectrum_index FROM ms2_peaks
+    WHERE mz_within(mz, 150.0, 0.1)
+)
+AND spectrum_index NOT IN (
+    SELECT DISTINCT spectrum_index FROM ms2_peaks
+    WHERE mz_within(mz, 220.0, 0.1)
+);
+
+query I
+SELECT COUNT(*) FROM mzml_scannum(all_excluded)
+----
+0
+
+# RTMIN + RTMAX combined: spectrum 1 only (RT=1.6 is in [1.5, 1.7])
+statement ok
+CREATE VIEW rt_range AS
+SELECT * FROM ms2_peaks
+WHERE retention_time >= 1.5 AND retention_time <= 1.7;
+
+query I
+SELECT spectrum_index FROM mzml_scannum(rt_range)
+----
+1
+
+# Neutral loss filter: MS2NL=80 with 0.5 Da tolerance
+# Spectrum 2, mz=220, NL=80.0 (composes Cycle 1 + 2 + 3)
+statement ok
+CREATE VIEW nl_filter AS
+SELECT * FROM ms2_peaks
+WHERE spectrum_index IN (
+    SELECT DISTINCT spectrum_index FROM ms2_peaks
+    WHERE mz_within(neutral_loss, 80.0, 0.5)
+);
+
+query I
+SELECT spectrum_index FROM mzml_scannum(nl_filter)
+----
+2

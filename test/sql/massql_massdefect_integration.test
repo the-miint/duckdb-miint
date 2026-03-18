@@ -1,0 +1,34 @@
+# name: test/sql/massql_massdefect_integration.test
+# description: integration tests for mass defect macros with real GNPS data
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+require-env MASSQL_GNPS_DATA
+
+statement ok
+CREATE TABLE g AS SELECT * FROM read_mzml('data/cache/GNPS00002_A3_p.mzML');
+
+statement ok
+CREATE TABLE gp AS SELECT * FROM mzml_ms2_peaks(g);
+
+# MS2 peaks with mass defect in [0.9, 1.0)
+query I
+SELECT COUNT(*) FROM gp WHERE mz_massdefect_within(mz, 0.9, 1.0)
+----
+584
+
+# MS2 peaks with mass defect in [0.0, 0.1] (near-integer masses)
+query I
+SELECT COUNT(*) > 0 FROM gp WHERE mz_massdefect_within(mz, 0.0, 0.1)
+----
+true
+
+# Verify massdefect values are in [0, 1)
+query I
+SELECT COUNT(*) FROM gp WHERE massdefect(mz) < 0 OR massdefect(mz) >= 1.0
+----
+0

@@ -1,0 +1,84 @@
+# name: test/sql/massql_x_prec_prod.test
+# description: Test mzml_x_prec_prod macro (X from precursor, match product)
+# group: [sql]
+
+require miint
+
+statement ok
+CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/prec_prod_link.mzML');
+
+# Only spectra 2 and 4 match delta=358.2871 (tolerance 0.5)
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_prec_prod(spectra, 358.2871)
+----
+2
+
+# The matching spectra are indices 2 and 4
+query I rowsort
+SELECT DISTINCT spectrum_index FROM mzml_x_prec_prod(spectra, 358.2871)
+----
+2
+4
+
+# delta=350: spec 1 matches (500-350=150, peak at 150)
+query I
+SELECT DISTINCT spectrum_index FROM mzml_x_prec_prod(spectra, 350.0)
+----
+1
+
+# delta=100: no match
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_prec_prod(spectra, 100.0)
+----
+0
+
+# Composable with scaninfo via view
+statement ok
+CREATE VIEW prec_prod_match AS SELECT * FROM mzml_x_prec_prod(spectra, 358.2871);
+
+query I
+SELECT COUNT(*) FROM mzml_scaninfo(prec_prod_match)
+----
+2
+
+# Custom tolerance
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_prec_prod(spectra, 358.2871, tolerance := 0.01)
+----
+2
+
+# --- INTENSITYPERCENT tests ---
+
+# min_intensity_pct=3: excludes spec 4 (product at 2% of base peak)
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_prec_prod(spectra, 358.2871, min_intensity_pct := 3)
+----
+1
+
+# The surviving spectrum is index 2 (product at 100% of base peak)
+query I
+SELECT DISTINCT spectrum_index FROM mzml_x_prec_prod(spectra, 358.2871, min_intensity_pct := 3)
+----
+2
+
+# min_intensity_pct=1: includes both (spec 2 at 100%, spec 4 at 2%)
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_prec_prod(spectra, 358.2871, min_intensity_pct := 1)
+----
+2
+
+# min_intensity_pct=0 (default): same as no filter
+query I
+SELECT (SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_prec_prod(spectra, 358.2871, min_intensity_pct := 0))
+  = (SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_prec_prod(spectra, 358.2871))
+----
+true
+
+# Empty table: no matches
+statement ok
+CREATE TABLE empty_spectra AS SELECT * FROM read_mzml('data/mzml/empty_spectra.mzML');
+
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_prec_prod(empty_spectra, 358.2871)
+----
+0

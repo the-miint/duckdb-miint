@@ -11,6 +11,8 @@ Functions for higher-level genomic analysis, sequence manipulation, and pairwise
 - [`compress_intervals`](#compress_intervalsstart-stop) - Merge overlapping intervals
 - [`genome_coverage`](#genome_coveragealignments-subject_total_length-subject_genome_id) - Compute genome coverage from alignments
 - [Pairwise Alignment Functions](#pairwise-alignment-functions) - WFA2-based pairwise alignment
+- [`formula`](#formulaformula_string) - Chemical formula to monoisotopic mass
+- [`massql`](#massqlquery-source) - MassQL query language for mass spectrometry
 - [Utility Functions](#utility-functions) - `miint_version()` and others
 
 ## `woltka_ogu_per_sample(relation, sample_id_field, sequence_id_field)`
@@ -483,6 +485,48 @@ FROM sequence_pairs;
 -- Custom penalties for more sensitive alignment
 SELECT (align_pairwise_full(seq_a, seq_b, 'wfa2', 2, 4, 1)).query_aligned
 FROM amplicon_pairs;
+```
+
+## Utility Functions
+
+## `formula(formula_string)`
+
+Compute the monoisotopic mass of a chemical formula.
+
+**Parameters:**
+- `formula_string` (VARCHAR): Chemical formula (e.g., `'C6H12O6'`, `'Fe'`, `'H2O'`)
+
+**Returns:** DOUBLE - Monoisotopic mass in Daltons.
+
+**Examples:**
+```sql
+SELECT formula('H2O');       -- 18.010565
+SELECT formula('C6H12O6');   -- 180.063388
+SELECT formula('Fe');        -- 55.934936
+```
+
+## `massql(query, source)`
+
+Execute a [MassQL](https://github.com/mwang87/MassQueryLanguage) query against mass spectrometry data. Parses the MassQL query string, transpiles it to SQL, and executes it against the source table or file.
+
+**Parameters:**
+- `query` (VARCHAR): MassQL query string
+- `source` (VARCHAR): Table name or file path (`.mzML` files are detected automatically)
+
+**Returns:** Table with columns depending on the aggregation function used.
+
+See [Mass Spectrometry & MassQL](massql.md) for full syntax reference and examples.
+
+**Quick examples:**
+```sql
+-- Find MS2 spectra with a product ion at m/z 167.0857
+SELECT * FROM massql('QUERY scaninfo(MS2DATA) WHERE MS2PROD=167.0857', 'my_table');
+
+-- Find MS1 spectra with a peak at m/z 200 within 5 ppm
+SELECT * FROM massql('QUERY scannum(MS1DATA) WHERE MS1MZ=200:TOLERANCEPPM=5', 'sample.mzML');
+
+-- Iron isotope pattern matching
+SELECT * FROM massql('QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=2*(X-formula(Fe))', 'my_table');
 ```
 
 ## Utility Functions

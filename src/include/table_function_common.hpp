@@ -1,11 +1,13 @@
 #pragma once
 #include <string>
 #include <vector>
+#include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/named_parameter_map.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "SpectrumBatch.hpp"
 #include "QualScore.hpp"
 
 namespace duckdb {
@@ -54,5 +56,17 @@ void SetResultVectorInt64(Vector &result_vector, const std::vector<int64_t> &val
 void SetResultVectorInt64Nullable(Vector &result_vector, const std::vector<int64_t> &values,
                                   const std::vector<bool> &valid);
 void SetResultVectorListUInt8(Vector &result_vector, const std::vector<miint::QualScore> &values, uint8_t qual_offset);
+void SetResultVectorInt32(Vector &result_vector, const std::vector<int32_t> &values);
+void SetResultVectorInt32Nullable(Vector &result_vector, const std::vector<int32_t> &values,
+                                  const std::vector<bool> &valid);
+void SetResultVectorDouble(Vector &result_vector, const std::vector<double> &values);
+void SetResultVectorDoubleNullable(Vector &result_vector, const std::vector<double> &values,
+                                   const std::vector<bool> &valid);
+void SetResultVectorListDouble(Vector &result_vector, const std::vector<std::vector<double>> &values);
+
+// Populate a DataChunk from a SpectrumBatch (shared by read_mzml and read_mzxml).
+// Maps the 27-column schema from MzMLSpectrumBatch to output vectors.
+void PopulateSpectrumBatchOutput(DataChunk &output, const miint::MzMLSpectrumBatch &batch, bool include_filepath,
+                                 const std::string &filepath);
 
 } // namespace duckdb

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<mzXML xmlns="http://sashimi.sourceforge.net/schema_revision/mzXML_3.2">
+ <msRun>
+  <scan num="1"
+        msLevel="1"
+        peaksCount="3"
+        retentionTime="PT90S"
+        centroided="1"
+        polarity="+"
+        basePeakMz="200.0"
+        basePeakIntensity="5000.0"
+        totIonCurrent="8000.0"
+        lowMz="100.0"
+        highMz="300.0">
+   <peaks precision="64"
+          byteOrder="network"
+          contentType="m/z-int"
+          compressionType="none">QFkAAAAAAABAj0AAAAAAAEBpAAAAAAAAQLOIAAAAAABAcsAAAAAAAECfQAAAAAAA</peaks>
+   <scan num="2"
+         msLevel="2"
+         peaksCount="3"
+         retentionTime="PT95S">
+    <precursorMz precursorIntensity="5000.0"
+                 precursorCharge="2"
+                 activationMethod="CID"
+                 windowWideness="3.0">200.0</precursorMz>
+    <peaks precision="64"
+           byteOrder="network"
+           contentType="m/z-int"
+           compressionType="none">QGhgAAAAAABAf0AAAAAAAEBpAAAAAAAAQKdwAAAAAABAaaAAAAAAAECJAAAAAAAA</peaks>
+   </scan>
+   <scan num="3"
+         msLevel="2"
+         peaksCount="3"
+         retentionTime="PT100S">
+    <precursorMz precursorIntensity="2000.0"
+                 precursorCharge="3"
+                 activationMethod="HCD"
+                 windowWideness="4.0">300.0</precursorMz>
+    <peaks precision="64"
+           byteOrder="network"
+           contentType="m/z-int"
+           compressionType="none">QHIgAAAAAABAeQAAAAAAAEBywAAAAAAAQKOIAAAAAABAc2AAAAAAAECCwAAAAAAA</peaks>
+   </scan>
+  </scan>
+ </msRun>
+</mzXML>

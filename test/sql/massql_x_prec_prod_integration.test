@@ -1,0 +1,23 @@
+# name: test/sql/massql_x_prec_prod_integration.test
+# description: Integration test for mzml_x_prec_prod on GNPS data
+# group: [sql]
+
+require miint
+
+require-env MASSQL_GNPS_DATA
+
+statement ok
+CREATE TABLE g AS SELECT * FROM read_mzml('data/cache/GNPS00002_A3_p.mzML');
+
+# Ground truth from MassQL Python: delta=100, tol=0.1 -> 22 distinct scans
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_prec_prod(g, 100.0, tolerance := 0.1)
+----
+22
+
+# Structural: result is subset of MS2 scans
+query I
+SELECT (SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_prec_prod(g, 100.0, tolerance := 0.1))
+  <= (SELECT COUNT(*) FROM g WHERE ms_level = 2)
+----
+true

@@ -16,6 +16,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Note that it should also be removed from vcpkg.json to prevent needlessly installing it..
 find_package(ZLIB REQUIRED)
 find_package(Threads REQUIRED)
+find_package(expat CONFIG REQUIRED)
 
 # Optional feature flags for WASM-compatible builds
 option(MIINT_ENABLE_HDF5 "Build with HDF5/BIOM support" ON)
@@ -519,7 +520,19 @@ set(EXTENSION_SOURCES
     src/align_pairwise_functions.cpp
     src/rype_classify.cpp
     src/rype_extract.cpp
-    src/rype_log_ratio.cpp)
+    src/MsBinaryDecoder.cpp
+    src/MzMLReader.cpp
+    src/read_mzml.cpp
+    src/read_mzml_chromatograms.cpp
+    src/rype_log_ratio.cpp
+    src/formula_parser.cpp
+    src/formula_function.cpp
+    src/massql_parser.cpp
+    src/massql_transpiler.cpp
+    src/massql_function.cpp
+    src/mass_tables.cpp
+    src/MzXMLReader.cpp
+    src/read_mzxml.cpp)
 
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND EXTENSION_SOURCES src/copy_biom.cpp src/BIOMTable.cpp src/BIOMReader.cpp src/read_biom.cpp)
@@ -541,6 +554,7 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 #endif()
 
 target_compile_definitions(${EXTENSION_NAME} PRIVATE RYPE_ARROW
+    MIINT_STATIC_BUILD
     MINIMAP2_GIT_VERSION="${MINIMAP2_GIT_VERSION}"
     WFA2_GIT_VERSION="${WFA2_GIT_VERSION}"
     RYPE_GIT_VERSION="${RYPE_GIT_VERSION}"
@@ -559,6 +573,7 @@ target_link_libraries(${EXTENSION_NAME}
                       wfa2cpp
                       wfa2
                       rype
+                      expat::expat
 )
 if(APPLE)
     target_link_libraries(${EXTENSION_NAME} "-framework CoreFoundation")
@@ -609,6 +624,7 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       wfa2cpp
                       wfa2
                       rype
+                      expat::expat
 )
 if(APPLE)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework CoreFoundation")
@@ -657,6 +673,17 @@ set(TEST_SOURCES
     test/cpp/test_SFFReader.cpp
     src/WFA2Aligner.cpp
     test/cpp/test_WFA2Aligner.cpp
+    src/MsBinaryDecoder.cpp
+    test/cpp/test_MsBinaryDecoder.cpp
+    src/MzMLReader.cpp
+    test/cpp/test_MzMLReader.cpp
+    src/MzXMLReader.cpp
+    test/cpp/test_MzXMLReader.cpp
+    src/formula_parser.cpp
+    src/massql_parser.cpp
+    src/massql_transpiler.cpp
+    src/mass_tables.cpp
+    test/cpp/test_MassQLParser.cpp
 )
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND TEST_SOURCES src/BIOMTable.cpp src/BIOMReader.cpp
@@ -676,6 +703,7 @@ target_link_libraries(tests
   minimap2
   wfa2cpp
   wfa2
+  expat::expat
 )
 if(WIN32)
     # Tests target only needs HTSlib deps (no Rust code linked here)

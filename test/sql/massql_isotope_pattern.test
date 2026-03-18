@@ -1,0 +1,88 @@
+# name: test/sql/massql_isotope_pattern.test
+# description: test isotope pattern matching macro (Y variable)
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+# Load test data: isotope_pattern.mzML
+# Spectrum 0 (MS1): 500:10000, 501:5000, 502:1000, 600:8000 -> pattern at 500 (+1=0.5, +2=0.1)
+# Spectrum 1 (MS1): 500:10000, 501:100, 502:1000 -> NO pattern (+1 ratio=0.01)
+# Spectrum 2 (MS1): 300:6000, 301:3000, 302:600 -> pattern at 300 (+1=0.5, +2=0.1)
+# Spectrum 3 (MS2): 500:10000, 501:5000 (prec=600) -> MS2, excluded
+statement ok
+CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/isotope_pattern.mzML');
+
+# ----- 2-offset pattern: offsets [1.0, 2.0], ratios [0.5, 0.1], tol 30% -----
+# Spec 0: 500+1=501 (5000/10000=0.5), 500+2=502 (1000/10000=0.1) -> MATCH
+# Spec 2: 300+1=301 (3000/6000=0.5), 300+2=302 (600/6000=0.1) -> MATCH
+# Spec 1: 500+1=501 (100/10000=0.01) -> NO (ratio 0.01 vs target 0.5)
+# Spec 3: MS2 -> excluded
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_isotope_pattern(spectra, [1.0, 2.0], [0.5, 0.1], [30, 30], 0.5)
+----
+2
+
+# Single offset: [1.0], [0.5], [30%]
+# Spec 0: 501/500 = 0.5 -> MATCH
+# Spec 2: 301/300 = 0.5 -> MATCH
+# Spec 1: 501/500 = 0.01 -> NO
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_isotope_pattern(spectra, [1.0], [0.5], [30], 0.5)
+----
+2
+
+# Tight tolerance (1%): exact ratios still pass
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_isotope_pattern(spectra, [1.0, 2.0], [0.5, 0.1], [1, 1], 0.5)
+----
+2
+
+# Wrong ratio: no spectrum has 99% ratio at +1
+query I
+SELECT COUNT(*) FROM mzml_isotope_pattern(spectra, [1.0], [0.99], [1], 0.5)
+----
+0
+
+# No peak at offset 50 Da
+query I
+SELECT COUNT(*) FROM mzml_isotope_pattern(spectra, [50.0], [0.5], [30], 0.5)
+----
+0
+
+# Default mz_tolerance (0.1): peaks at integer Da still within 0.1
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_isotope_pattern(spectra, [1.0, 2.0], [0.5, 0.1], [30, 30])
+----
+2
+
+# mz_tolerance discrimination: offset 0.95 Da — with default 0.1 tolerance,
+# looks for peaks in [X+0.85, X+1.05], catches peak at X+1. Should match.
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_isotope_pattern(spectra, [0.95], [0.5], [30])
+----
+2
+
+# mz_tolerance too tight: offset 0.95 Da with 0.01 tolerance
+# looks for peaks in [X+0.94, X+0.96] — no peak exists there. Should NOT match.
+query I
+SELECT COUNT(*) FROM mzml_isotope_pattern(spectra, [0.95], [0.5], [30], 0.01)
+----
+0
+
+# Composition with scaninfo
+statement ok
+CREATE VIEW pattern_view AS SELECT * FROM mzml_isotope_pattern(spectra, [1.0, 2.0], [0.5, 0.1], [30, 30], 0.5);
+
+query I
+SELECT COUNT(*) FROM mzml_scaninfo(pattern_view)
+----
+2
+
+# Peak count: spec 0 has 4 peaks + spec 2 has 3 peaks = 7
+query I
+SELECT COUNT(*) FROM mzml_isotope_pattern(spectra, [1.0, 2.0], [0.5, 0.1], [30, 30], 0.5)
+----
+7

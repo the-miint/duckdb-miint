@@ -1,0 +1,88 @@
+# name: test/sql/massql_iron_pattern.test
+# description: MassQL iron-pattern integration test using mzml_peak_pair macro
+# group: [sql]
+
+require miint
+
+require-env MASSQL_TEST_DATA
+
+# Load mzML data (downloaded to data/cache/ by run_tests.sh)
+statement ok
+CREATE TABLE spectra AS SELECT * FROM read_mzml('data/cache/bld_plt1_07_120_1.mzML');
+
+# Iron-pattern match via macro — equivalent to MassQL query:
+#   QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=2.0*(X - formula(Fe))
+statement ok
+CREATE VIEW iron_peaks AS SELECT * FROM mzml_peak_pair(spectra, 'Fe');
+
+# Unique scan count must match MassQL ground truth (370)
+query I
+SELECT COUNT(DISTINCT spectrum_index) FROM iron_peaks
+----
+370
+
+# Scaninfo composition works
+query I
+SELECT COUNT(*) FROM mzml_scaninfo(iron_peaks)
+----
+370
+
+# Verify specific scans from the reference are present
+statement ok
+CREATE TABLE scan_map AS
+SELECT spectrum_index,
+       CAST(regexp_extract(spectrum_id, 'scan=(\d+)', 1) AS INTEGER) AS scan_number
+FROM spectra;
+
+query I
+SELECT COUNT(DISTINCT sm.scan_number)
+FROM iron_peaks p
+JOIN scan_map sm USING (spectrum_index)
+WHERE sm.scan_number IN (15, 17, 85, 88, 95)
+----
+5
+
+# ----- Aggregation macro integration tests -----
+
+# Materialize for scan macro composability
+statement ok
+CREATE TABLE iron_peaks_tbl AS SELECT * FROM iron_peaks;
+
+# scansum: one row per matching scan, all with positive intensity
+query I
+SELECT COUNT(*) FROM mzml_scansum(iron_peaks_tbl)
+----
+370
+
+query I
+SELECT COUNT(*) FROM mzml_scansum(iron_peaks_tbl) WHERE total_intensity <= 0
+----
+0
+
+# scannum: same count as distinct scans
+query I
+SELECT COUNT(*) FROM mzml_scannum(iron_peaks_tbl)
+----
+370
+
+# scanmaxint: one row per scan, all positive
+query I
+SELECT COUNT(*) FROM mzml_scanmaxint(iron_peaks_tbl)
+----
+370
+
+query I
+SELECT COUNT(*) FROM mzml_scanmaxint(iron_peaks_tbl) WHERE max_intensity <= 0
+----
+0
+
+# scanmz: distinct precursor_mz values, at least 1
+query I
+SELECT COUNT(*) > 0 FROM mzml_scanmz(iron_peaks_tbl)
+----
+1
+
+query I
+SELECT COUNT(*) <= 370 FROM mzml_scanmz(iron_peaks_tbl)
+----
+1

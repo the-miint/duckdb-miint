@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<mzXML xmlns="http://sashimi.sourceforge.net/schema_revision/mzXML_3.2">
+ <msRun>
+  <scan num="1"
+        msLevel="1"
+        peaksCount="1"
+        retentionTime="PT1M30S">
+   <peaks precision="64"
+          byteOrder="network"
+          contentType="m/z-int"
+          compressionType="none">QGLAAAAAAABAjzgAAAAAAA==</peaks>
+  </scan>
+ </msRun>
+</mzXML>
