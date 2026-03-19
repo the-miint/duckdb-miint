@@ -1,0 +1,109 @@
+# name: test/sql/massql_sample_id.test
+# description: test massql sample_id named parameter
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+# Load test data
+statement ok
+CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML');
+
+# ----- Cycle 1: Error on invalid sample_id -----
+
+# sample_id column doesn't exist in the source relation
+statement error
+SELECT * FROM massql('QUERY scannum(MS2DATA)', 'spectra', sample_id := 'no_such_column')
+----
+sample_id column 'no_such_column' not found
+
+# sample_id must not be empty string
+statement error
+SELECT * FROM massql('QUERY scannum(MS2DATA)', 'spectra', sample_id := '')
+----
+sample_id column name must not be empty
+
+# ----- Cycle 2: Output schema includes sample_id, results streamed per-sample -----
+
+statement ok
+CREATE VIEW multi_sample AS
+  SELECT 'A' AS sample, * FROM spectra
+  UNION ALL
+  SELECT 'B' AS sample, * FROM spectra;
+
+query TI
+SELECT sample, COUNT(*) FROM massql('QUERY scannum(MS2DATA)', 'multi_sample', sample_id := 'sample')
+  GROUP BY sample ORDER BY sample
+----
+A	2
+B	2
+
+# ----- Cycle 3: Per-sample isolation (different results per sample) -----
+
+# 'has_peak' gets all spectra (includes MS2 with peak near 220)
+# 'no_peak' gets only MS1 spectra (no MS2 data at all)
+statement ok
+CREATE VIEW diff_samples AS
+  SELECT 'has_peak' AS sid, * FROM spectra
+  UNION ALL
+  SELECT 'no_peak' AS sid, * FROM spectra WHERE ms_level = 1;
+
+# MS2PROD=220 should match only in 'has_peak'
+query T
+SELECT sid
+  FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=220', 'diff_samples', sample_id := 'sid')
+  ORDER BY sid
+----
+has_peak
+
+# ----- Cycle 4: Without sample_id, existing behavior unchanged -----
+
+query I
+SELECT COUNT(*) FROM massql('QUERY scaninfo(MS2DATA) WHERE MS2PROD=220', 'spectra')
+----
+1
+
+# ----- Cycle 5: sample_id rejected with file path source -----
+
+statement error
+SELECT * FROM massql('QUERY scannum(MS2DATA)', 'data/mzml/basic_3spectra.mzML', sample_id := 'sample')
+----
+sample_id cannot be used with a file path source
+
+# ----- Cycle 6: NULL sample_id values are rejected -----
+
+statement ok
+CREATE VIEW null_sample AS
+  SELECT NULL::VARCHAR AS sid, * FROM spectra;
+
+statement error
+SELECT * FROM massql('QUERY scannum(MS2DATA)', 'null_sample', sample_id := 'sid')
+----
+NULL values in sample_id column
+
+# ----- Cycle 7: Integer sample_id column preserves type -----
+
+statement ok
+CREATE VIEW int_sample AS
+  SELECT 1 AS sample_num, * FROM spectra
+  UNION ALL
+  SELECT 2 AS sample_num, * FROM spectra;
+
+query II
+SELECT sample_num, COUNT(*) FROM massql('QUERY scannum(MS2DATA)', 'int_sample', sample_id := 'sample_num')
+  GROUP BY sample_num ORDER BY sample_num
+----
+1	2
+2	2
+
+# ----- Empty source table errors -----
+
+statement ok
+CREATE VIEW empty_spectra AS SELECT 'A' AS sample, * FROM spectra WHERE 1=0;
+
+statement error
+SELECT * FROM massql('QUERY scannum(MS2DATA)', 'empty_spectra', sample_id := 'sample')
+----
+has no non-NULL values
