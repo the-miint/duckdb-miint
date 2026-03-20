@@ -107,3 +107,72 @@ statement error
 SELECT * FROM massql('QUERY scannum(MS2DATA)', 'empty_spectra', sample_id := 'sample')
 ----
 has no non-NULL values
+
+# ----- Cycle 8: Parallel execution correctness -----
+
+
+# With threads=4 and 4 samples, all samples must appear exactly once
+statement ok
+SET threads=4;
+
+statement ok
+CREATE VIEW four_samples AS
+  SELECT 'S1' AS sid, * FROM spectra
+  UNION ALL SELECT 'S2' AS sid, * FROM spectra
+  UNION ALL SELECT 'S3' AS sid, * FROM spectra
+  UNION ALL SELECT 'S4' AS sid, * FROM spectra;
+
+query TI
+SELECT sid, COUNT(*) FROM massql('QUERY scannum(MS2DATA)', 'four_samples', sample_id := 'sid')
+  GROUP BY sid ORDER BY sid
+----
+S1	2
+S2	2
+S3	2
+S4	2
+
+# With threads > samples, no samples should be duplicated or missed
+statement ok
+SET threads=8;
+
+query TI
+SELECT sid, COUNT(*) FROM massql('QUERY scannum(MS2DATA)', 'four_samples', sample_id := 'sid')
+  GROUP BY sid ORDER BY sid
+----
+S1	2
+S2	2
+S3	2
+S4	2
+
+# Restore to default
+statement ok
+RESET threads;
+
+# ----- Cycle 9: Missing coverage -----
+
+# Cross-level query (MS1MZ=X AND MS2PREC=X) with sample_id — exercises the __massql_ms1
+# temp table path (needs_ms1=true) under per-thread Connection isolation.
+# multi_sample has A and B, each 3 spectra: 1 MS1 + 2 MS2 (spectra 1, 2 match the pattern).
+query TI
+SELECT sample, COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS1MZ=X AND MS2PREC=X', 'multi_sample', sample_id := 'sample')
+  GROUP BY sample ORDER BY sample
+----
+A	2
+B	2
+
+# Single-sample case: max_threads is clamped to 1 regardless of thread setting;
+# the sample0 pre-run path must complete cleanly.
+statement ok
+CREATE VIEW single_sample AS SELECT 'only' AS sid, * FROM spectra;
+
+query TI
+SELECT sid, COUNT(*) FROM massql('QUERY scannum(MS2DATA)', 'single_sample', sample_id := 'sid')
+  GROUP BY sid ORDER BY sid
+----
+only	2
+
+# All samples return zero rows: function must complete without error.
+query I
+SELECT COUNT(*) FROM massql('QUERY scannum(MS2DATA) WHERE MS2PROD=999', 'multi_sample', sample_id := 'sample')
+----
+0
