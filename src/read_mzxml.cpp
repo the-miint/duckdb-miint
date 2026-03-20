@@ -1,4 +1,5 @@
 #include "MzXMLReader.hpp"
+#include "remote_file_helper.hpp"
 #include "table_function_common.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
@@ -31,12 +32,12 @@ unique_ptr<FunctionData> ReadMzXMLTableFunction::Bind(ClientContext &context, Ta
 
 	for (const auto &path : file_paths) {
 		if (IsStdinPath(path)) {
-			throw InvalidInputException("read_mzxml: stdin is not supported (mzXML requires file seeking)");
+			throw InvalidInputException("read_mzxml: stdin is not supported");
 		}
 	}
 
 	for (const auto &path : file_paths) {
-		if (!fs.FileExists(path)) {
+		if (!miint::RemoteFileHelper::IsRemotePath(path) && !fs.FileExists(path)) {
 			throw IOException("File not found: " + path);
 		}
 	}
@@ -56,7 +57,8 @@ unique_ptr<FunctionData> ReadMzXMLTableFunction::Bind(ClientContext &context, Ta
 unique_ptr<GlobalTableFunctionState> ReadMzXMLTableFunction::InitGlobal(ClientContext &context,
                                                                         TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
-	return duckdb::make_uniq<GlobalState>(data.file_paths);
+	auto &fs = FileSystem::GetFileSystem(context);
+	return duckdb::make_uniq<GlobalState>(data.file_paths, fs);
 }
 
 unique_ptr<LocalTableFunctionState> ReadMzXMLTableFunction::InitLocal(ExecutionContext &context,
@@ -88,8 +90,8 @@ void ReadMzXMLTableFunction::Execute(ClientContext &context, TableFunctionInput 
 		}
 
 		if (!global_state.readers[local_state.current_file_idx]) {
-			global_state.readers[local_state.current_file_idx] =
-			    std::make_unique<miint::MzXMLReader>(global_state.filepaths[local_state.current_file_idx]);
+			global_state.readers[local_state.current_file_idx] = std::make_unique<miint::MzXMLReader>(
+			    global_state.fs, global_state.filepaths[local_state.current_file_idx]);
 		}
 
 		batch = global_state.readers[local_state.current_file_idx]->read_spectra(STANDARD_VECTOR_SIZE);

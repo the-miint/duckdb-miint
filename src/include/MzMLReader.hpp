@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SpectrumBatch.hpp"
+#include "duckdb/common/file_system.hpp"
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -31,6 +32,7 @@ struct MzMLChromatogramBatch {
 class MzMLReader {
 public:
 	explicit MzMLReader(const std::string &path);
+	MzMLReader(duckdb::FileSystem &fs, const std::string &path);
 	~MzMLReader();
 
 	// Non-copyable, moveable

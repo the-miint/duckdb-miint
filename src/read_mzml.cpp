@@ -1,4 +1,5 @@
 #include "MzMLReader.hpp"
+#include "remote_file_helper.hpp"
 #include "table_function_common.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
@@ -31,12 +32,12 @@ unique_ptr<FunctionData> ReadMzMLTableFunction::Bind(ClientContext &context, Tab
 
 	for (const auto &path : file_paths) {
 		if (IsStdinPath(path)) {
-			throw InvalidInputException("read_mzml: stdin is not supported (mzML requires file seeking)");
+			throw InvalidInputException("read_mzml: stdin is not supported");
 		}
 	}
 
 	for (const auto &path : file_paths) {
-		if (!fs.FileExists(path)) {
+		if (!miint::RemoteFileHelper::IsRemotePath(path) && !fs.FileExists(path)) {
 			throw IOException("File not found: " + path);
 		}
 	}
@@ -56,7 +57,8 @@ unique_ptr<FunctionData> ReadMzMLTableFunction::Bind(ClientContext &context, Tab
 unique_ptr<GlobalTableFunctionState> ReadMzMLTableFunction::InitGlobal(ClientContext &context,
                                                                        TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
-	return duckdb::make_uniq<GlobalState>(data.file_paths);
+	auto &fs = FileSystem::GetFileSystem(context);
+	return duckdb::make_uniq<GlobalState>(data.file_paths, fs);
 }
 
 unique_ptr<LocalTableFunctionState> ReadMzMLTableFunction::InitLocal(ExecutionContext &context,
@@ -90,8 +92,8 @@ void ReadMzMLTableFunction::Execute(ClientContext &context, TableFunctionInput &
 		// Safe without lock: each thread claims an exclusive file index via next_file_idx++
 		// under the lock above, so no two threads access the same reader slot.
 		if (!global_state.readers[local_state.current_file_idx]) {
-			global_state.readers[local_state.current_file_idx] =
-			    std::make_unique<miint::MzMLReader>(global_state.filepaths[local_state.current_file_idx]);
+			global_state.readers[local_state.current_file_idx] = std::make_unique<miint::MzMLReader>(
+			    global_state.fs, global_state.filepaths[local_state.current_file_idx]);
 		}
 
 		batch = global_state.readers[local_state.current_file_idx]->read_spectra(STANDARD_VECTOR_SIZE);

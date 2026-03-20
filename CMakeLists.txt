@@ -532,7 +532,8 @@ set(EXTENSION_SOURCES
     src/massql_function.cpp
     src/mass_tables.cpp
     src/MzXMLReader.cpp
-    src/read_mzxml.cpp)
+    src/read_mzxml.cpp
+    src/remote_file_helper.cpp)
 
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND EXTENSION_SOURCES src/copy_biom.cpp src/BIOMTable.cpp src/BIOMReader.cpp src/read_biom.cpp)
@@ -606,6 +607,7 @@ if(HAVE_LIBZSTD)
 endif()
 
 target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE RYPE_ARROW
+    MIINT_STATIC_BUILD
     MINIMAP2_GIT_VERSION="${MINIMAP2_GIT_VERSION}"
     WFA2_GIT_VERSION="${WFA2_GIT_VERSION}"
     RYPE_GIT_VERSION="${RYPE_GIT_VERSION}"
@@ -684,6 +686,8 @@ set(TEST_SOURCES
     src/massql_transpiler.cpp
     src/mass_tables.cpp
     test/cpp/test_MassQLParser.cpp
+    src/remote_file_helper.cpp
+    test/cpp/test_RemoteFileHelper.cpp
 )
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND TEST_SOURCES src/BIOMTable.cpp src/BIOMReader.cpp

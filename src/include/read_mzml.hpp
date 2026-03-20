@@ -87,6 +87,7 @@ public:
 		std::vector<std::unique_ptr<miint::MzMLReader>> readers;
 		std::vector<std::string> filepaths;
 		size_t next_file_idx;
+		FileSystem &fs;
 
 		idx_t MaxThreads() const override {
 			auto hw_threads = std::thread::hardware_concurrency();
@@ -96,7 +97,8 @@ public:
 			return std::min<idx_t>(filepaths.size(), std::min<idx_t>(8, hw_threads));
 		}
 
-		GlobalState(const std::vector<std::string> &paths) : readers(paths.size()), filepaths(paths), next_file_idx(0) {
+		GlobalState(const std::vector<std::string> &paths, FileSystem &fs)
+		    : readers(paths.size()), filepaths(paths), next_file_idx(0), fs(fs) {
 		}
 	};
 

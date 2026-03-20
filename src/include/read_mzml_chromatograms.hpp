@@ -48,7 +48,10 @@ public:
 			return std::min<idx_t>(filepaths.size(), std::min<idx_t>(8, hw_threads));
 		}
 
-		GlobalState(const std::vector<std::string> &paths) : readers(paths.size()), filepaths(paths), next_file_idx(0) {
+		FileSystem &fs;
+
+		GlobalState(const std::vector<std::string> &paths, FileSystem &fs)
+		    : readers(paths.size()), filepaths(paths), next_file_idx(0), fs(fs) {
 		}
 	};
 

@@ -1,11 +1,13 @@
 #include "MzXMLReader.hpp"
 #include "MsBinaryDecoder.hpp"
 #include "mz_parse_utils.hpp"
+#include "duckdb/common/file_open_flags.hpp"
 #include <cstdio>
 #include <cstring>
 #include <deque>
 #include <exception>
 #include <expat.h>
+#include <functional>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -112,6 +114,7 @@ enum class MzXMLContext {
 struct MzXMLReader::Impl {
 	std::string filepath;
 	FILE *file = nullptr;
+	std::function<size_t(void *, size_t)> read_fn;
 	XML_Parser parser = nullptr;
 
 	std::vector<MzXMLContext> context_stack;
@@ -130,19 +133,31 @@ struct MzXMLReader::Impl {
 		if (!file) {
 			throw std::runtime_error("MzXMLReader: cannot open file: " + path);
 		}
-
-		parser = XML_ParserCreateNS(nullptr, '|');
-		if (!parser) {
-			std::fclose(file);
-			throw std::runtime_error("MzXMLReader: failed to create XML parser");
-		}
-
-		XML_SetUserData(parser, this);
-		XML_SetElementHandler(parser, start_element_handler, end_element_handler);
-		XML_SetCharacterDataHandler(parser, char_data_handler);
-
-		context_stack.push_back(MzXMLContext::NONE);
+		read_fn = [this](void *buf, size_t n) {
+			return std::fread(buf, 1, n, file);
+		};
+		init_parser();
 	}
+
+	// Constructor for DuckDB FileSystem access (supports local + remote).
+	// Guarded because the test binary does not link DuckDB.
+#ifdef MIINT_STATIC_BUILD
+	Impl(duckdb::FileSystem &fs, const std::string &path) : filepath(path) {
+		auto handle = fs.OpenFile(path, duckdb::FileOpenFlags(duckdb::FileOpenFlags::FILE_FLAGS_READ));
+		if (!handle) {
+			throw std::runtime_error("MzXMLReader: cannot open file: " + path);
+		}
+		auto shared_handle = std::shared_ptr<duckdb::FileHandle>(handle.release());
+		read_fn = [shared_handle](void *buf, size_t n) -> size_t {
+			auto result = shared_handle->Read(buf, n);
+			if (result < 0) {
+				throw std::runtime_error("MzXMLReader: I/O error reading file");
+			}
+			return static_cast<size_t>(result);
+		};
+		init_parser();
+	}
+#endif
 
 	~Impl() {
 		if (parser) {
@@ -151,6 +166,17 @@ struct MzXMLReader::Impl {
 		if (file) {
 			std::fclose(file);
 		}
+	}
+
+	void init_parser() {
+		parser = XML_ParserCreateNS(nullptr, '|');
+		if (!parser) {
+			throw std::runtime_error("MzXMLReader: failed to create XML parser");
+		}
+		XML_SetUserData(parser, this);
+		XML_SetElementHandler(parser, start_element_handler, end_element_handler);
+		XML_SetCharacterDataHandler(parser, char_data_handler);
+		context_stack.push_back(MzXMLContext::NONE);
 	}
 
 	MzXMLContext current_context() const {
@@ -174,7 +200,7 @@ struct MzXMLReader::Impl {
 				return;
 			}
 
-			size_t bytes_read = std::fread(buffer, 1, sizeof(buffer), file);
+			size_t bytes_read = read_fn(buffer, sizeof(buffer));
 			bool is_final = (bytes_read == 0);
 
 			auto status = XML_Parse(parser, buffer, static_cast<int>(bytes_read), is_final);
@@ -496,6 +522,11 @@ struct MzXMLReader::Impl {
 
 MzXMLReader::MzXMLReader(const std::string &path) : impl_(std::make_unique<Impl>(path)) {
 }
+
+#ifdef MIINT_STATIC_BUILD
+MzXMLReader::MzXMLReader(duckdb::FileSystem &fs, const std::string &path) : impl_(std::make_unique<Impl>(fs, path)) {
+}
+#endif
 
 MzXMLReader::~MzXMLReader() = default;
 MzXMLReader::MzXMLReader(MzXMLReader &&) noexcept = default;
