@@ -1,6 +1,7 @@
 #pragma once
 #include "SAMReader.hpp"
 #include "SAMRecord.hpp"
+#include "remote_file_helper.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/types.hpp"
@@ -82,18 +83,22 @@ public:
 	struct GlobalState : public GlobalTableFunctionState {
 		mutex lock;
 		std::vector<std::unique_ptr<miint::SAMReader>> readers;
-		std::vector<std::string> filepaths;
+		std::vector<std::string> filepaths;    // Original paths (for include_filepath)
+		std::vector<std::string> local_paths;  // Resolved local paths (for SAMReader)
+		miint::ResolvedFileSet resolved_files; // RAII cleanup for temp files
 		size_t next_file_idx;
 
 		idx_t MaxThreads() const override {
 			return std::min<idx_t>(readers.size(), std::thread::hardware_concurrency());
 		}
 
-		GlobalState(const std::vector<std::string> &paths,
+		GlobalState(const std::vector<std::string> &original_paths, miint::ResolvedFileSet resolved,
 		            std::optional<std::unordered_map<std::string, uint64_t>> ref_lengths, bool include_seq_qual)
-		    : next_file_idx(0) {
-			filepaths = paths;
-			for (const auto &path : paths) {
+		    : filepaths(original_paths), resolved_files(std::move(resolved)), next_file_idx(0) {
+			for (const auto &rf : resolved_files.Files()) {
+				local_paths.push_back(rf.local_path);
+			}
+			for (const auto &path : local_paths) {
 				if (ref_lengths.has_value()) {
 					readers.push_back(std::make_unique<miint::SAMReader>(path, ref_lengths.value(), include_seq_qual));
 				} else {
