@@ -14,7 +14,7 @@ PRAGMA enable_verification;
 # Glob pattern matches multiple files (file1.biom, file2.biom)
 # Files are sorted alphabetically, so file1.biom comes before file2.biom
 query IIII
-SELECT sample_id, feature_id, count, replace(filepath, '\', '/') as filepath
+SELECT sample_id, feature_id, value, replace(filepath, '\', '/') as filepath
 FROM read_biom('data/biom/file*.biom', include_filepath=true)
 ORDER BY filepath, sample_id, feature_id;
 ----
