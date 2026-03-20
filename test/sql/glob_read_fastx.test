@@ -11,7 +11,9 @@ require miint
 
 # Glob pattern matches multiple files (sorted alphabetically)
 query IIIIIIII
-SELECT * FROM read_fastx('data/fastq/glob_single*.fq', include_filepath=true)
+SELECT sequence_index, read_id, comment, sequence1, sequence2, qual1, qual2,
+       replace(filepath, '\', '/') as filepath
+FROM read_fastx('data/fastq/glob_single*.fq', include_filepath=true)
 ORDER BY filepath, sequence_index;
 ----
 1	single1_read1	NULL	AAAA	NULL	[40, 40, 40, 40]	NULL	data/fastq/glob_single1.fq
@@ -30,9 +32,11 @@ SELECT COUNT(*) FROM read_fastx('data/fastq/glob_single*.fq');
 # glob_sample1_R1.fq pairs with glob_sample1_R2.fq
 # glob_sample2_R1.fq pairs with glob_sample2_R2.fq
 query IIIIIIII
-SELECT * FROM read_fastx('data/fastq/glob_sample*_R1.fq',
-                          sequence2='data/fastq/glob_sample*_R2.fq',
-                          include_filepath=true)
+SELECT sequence_index, read_id, comment, sequence1, sequence2, qual1, qual2,
+       replace(filepath, '\', '/') as filepath
+FROM read_fastx('data/fastq/glob_sample*_R1.fq',
+                 sequence2='data/fastq/glob_sample*_R2.fq',
+                 include_filepath=true)
 ORDER BY filepath, sequence_index;
 ----
 1	glob_s1_read1	NULL	AAAA	CCCC	[40, 40, 40, 40]	[38, 38, 38, 38]	data/fastq/glob_sample1_R1.fq

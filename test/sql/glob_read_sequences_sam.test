@@ -15,7 +15,7 @@ read5	GATTACA
 
 # Glob with include_filepath
 query II
-SELECT read_id, filepath FROM read_sequences_sam('data/sam/ubam_no_sq*.sam', include_filepath=true) ORDER BY filepath, sequence_index;
+SELECT read_id, replace(filepath, '\', '/') as filepath FROM read_sequences_sam('data/sam/ubam_no_sq*.sam', include_filepath=true) ORDER BY filepath, sequence_index;
 ----
 read1	data/sam/ubam_no_sq.sam
 read2	data/sam/ubam_no_sq.sam
