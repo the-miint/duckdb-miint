@@ -55,8 +55,7 @@ static string MaterializePeaks(Connection &conn, const miint::MassQLQuery &parse
 }
 
 // Materialize peaks, transpile, execute, and store result in data.result.
-static void RunPipeline(Connection &conn, const miint::MassQLQuery &parsed, const string &source,
-                        MassQLData &data) {
+static void RunPipeline(Connection &conn, const miint::MassQLQuery &parsed, const string &source, MassQLData &data) {
 	auto ms1_table = MaterializePeaks(conn, parsed, source);
 
 	string exec_sql;
@@ -94,8 +93,8 @@ static void RunSamplePipeline(MassQLData &data, const Value &sample_value) {
 	// Generate transpiled SQL and wrap with sample_id column (single execution)
 	string exec_sql;
 	try {
-		exec_sql =
-		    miint::MassQLTranspiler::to_sql_materialized(data.parsed, "__massql_per_sample", "__massql_base", ms1_table);
+		exec_sql = miint::MassQLTranspiler::to_sql_materialized(data.parsed, "__massql_per_sample", "__massql_base",
+		                                                        ms1_table);
 	} catch (const std::exception &e) {
 		throw InvalidInputException(e.what());
 	}
@@ -168,8 +167,7 @@ static unique_ptr<FunctionData> MassQLBind(ClientContext &context, TableFunction
 		data->sample_id_type = probe->types[0];
 
 		// Reject NULLs early before collecting distinct values
-		auto null_check =
-		    conn.Query("SELECT COUNT(*) FROM " + quoted_source + " WHERE " + quoted_col + " IS NULL");
+		auto null_check = conn.Query("SELECT COUNT(*) FROM " + quoted_source + " WHERE " + quoted_col + " IS NULL");
 		if (null_check->HasError()) {
 			throw InvalidInputException("MassQL: failed to check for NULLs: %s", null_check->GetError());
 		}
@@ -179,8 +177,8 @@ static unique_ptr<FunctionData> MassQLBind(ClientContext &context, TableFunction
 		}
 
 		// Collect distinct values
-		auto distinct_result = conn.Query("SELECT DISTINCT " + quoted_col + " FROM " + quoted_source + " ORDER BY " +
-		                                  quoted_col);
+		auto distinct_result =
+		    conn.Query("SELECT DISTINCT " + quoted_col + " FROM " + quoted_source + " ORDER BY " + quoted_col);
 		if (distinct_result->HasError()) {
 			throw InvalidInputException("MassQL: failed to query sample_id values: %s", distinct_result->GetError());
 		}
