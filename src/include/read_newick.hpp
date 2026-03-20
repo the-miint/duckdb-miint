@@ -51,6 +51,7 @@ public:
 		std::vector<std::string> file_paths;
 		size_t next_file_idx;
 		bool uses_stdin;
+		FileSystem &fs;
 
 		idx_t MaxThreads() const override {
 			if (uses_stdin) {
@@ -59,8 +60,8 @@ public:
 			return std::min<idx_t>(file_paths.size(), std::thread::hardware_concurrency());
 		}
 
-		GlobalState(const std::vector<std::string> &paths, bool stdin_used)
-		    : file_paths(paths), next_file_idx(0), uses_stdin(stdin_used) {
+		GlobalState(const std::vector<std::string> &paths, bool stdin_used, FileSystem &fs)
+		    : file_paths(paths), next_file_idx(0), uses_stdin(stdin_used), fs(fs) {
 		}
 	};
 
@@ -85,8 +86,8 @@ public:
 
 	static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 
-	// Helper to read and parse a newick file (handles gzip)
-	static std::string ReadNewickFile(const std::string &path);
+	// Helper to read and parse a newick file (handles gzip, local + remote)
+	static std::string ReadNewickFile(FileSystem &fs, const std::string &path);
 
 	// Convert parsed tree to row format
 	static std::vector<NodeRow> TreeToRows(const miint::NewickTree &tree);

@@ -1,10 +1,11 @@
 #include "read_newick.hpp"
+#include "remote_file_helper.hpp"
 #include "table_function_common.hpp"
+#include "duckdb/common/file_open_flags.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include <zlib.h>
-#include <fstream>
 #include <memory>
 #include <sstream>
 
@@ -20,10 +21,75 @@ struct GzFileDeleter {
 };
 using GzFilePtr = std::unique_ptr<gzFile_s, GzFileDeleter>;
 
-// Buffer size for gzip decompression (16KB recommended by zlib)
-static constexpr size_t GZIP_BUFFER_SIZE = 16384;
+static constexpr size_t READ_BUFFER_SIZE = 65536;
 
-std::string ReadNewickTableFunction::ReadNewickFile(const std::string &path) {
+// Read entire contents of a FileHandle into a string
+static std::string ReadFileHandleToString(FileHandle &handle) {
+	std::string content;
+	char buf[READ_BUFFER_SIZE];
+	while (true) {
+		auto n = handle.Read(buf, sizeof(buf));
+		if (n <= 0) {
+			break;
+		}
+		content.append(buf, static_cast<size_t>(n));
+	}
+	return content;
+}
+
+// Read gzipped data from a FileHandle via zlib inflate into a string
+static std::string InflateFileHandleToString(FileHandle &handle, const std::string &path) {
+	z_stream zs = {};
+	// 16 + MAX_WBITS: auto-detect gzip/zlib header
+	if (inflateInit2(&zs, 16 + MAX_WBITS) != Z_OK) {
+		throw IOException("Failed to initialize zlib for: " + path);
+	}
+
+	std::string content;
+	char compressed_buf[READ_BUFFER_SIZE];
+	char decompressed_buf[READ_BUFFER_SIZE];
+
+	bool input_eof = false;
+	while (true) {
+		// Refill compressed buffer if needed
+		if (zs.avail_in == 0 && !input_eof) {
+			auto n = handle.Read(compressed_buf, sizeof(compressed_buf));
+			if (n <= 0) {
+				input_eof = true;
+			} else {
+				zs.avail_in = static_cast<uInt>(n);
+				zs.next_in = reinterpret_cast<Bytef *>(compressed_buf);
+			}
+		}
+
+		zs.avail_out = sizeof(decompressed_buf);
+		zs.next_out = reinterpret_cast<Bytef *>(decompressed_buf);
+
+		int ret = inflate(&zs, Z_NO_FLUSH);
+		size_t produced = sizeof(decompressed_buf) - zs.avail_out;
+		if (produced > 0) {
+			content.append(decompressed_buf, produced);
+		}
+
+		if (ret == Z_STREAM_END) {
+			break;
+		}
+		if (ret != Z_OK) {
+			inflateEnd(&zs);
+			throw IOException("Error decompressing gzipped file: " + path + " (zlib error " + std::to_string(ret) +
+			                  ")");
+		}
+		if (input_eof && zs.avail_in == 0 && produced == 0) {
+			inflateEnd(&zs);
+			throw IOException("Truncated gzip stream: " + path);
+		}
+	}
+
+	inflateEnd(&zs);
+	return content;
+}
+
+std::string ReadNewickTableFunction::ReadNewickFile(FileSystem &fs, const std::string &path) {
 	// Handle stdin
 	if (IsStdinPath(path)) {
 		std::stringstream buffer;
@@ -31,40 +97,13 @@ std::string ReadNewickTableFunction::ReadNewickFile(const std::string &path) {
 		return buffer.str();
 	}
 
-	// Handle gzipped files
+	auto handle = fs.OpenFile(path, FileOpenFlags(FileOpenFlags::FILE_FLAGS_READ));
+
 	if (IsGzipped(path)) {
-		GzFilePtr gz(gzopen(path.c_str(), "rb"));
-		if (!gz) {
-			throw IOException("Failed to open gzipped file: " + path);
-		}
-
-		std::string content;
-		char buf[GZIP_BUFFER_SIZE];
-		int bytes_read;
-		while ((bytes_read = gzread(gz.get(), buf, sizeof(buf))) > 0) {
-			content.append(buf, bytes_read);
-		}
-
-		if (bytes_read < 0) {
-			int err;
-			const char *error_msg = gzerror(gz.get(), &err);
-			std::string msg = error_msg ? error_msg : "unknown error";
-			throw IOException("Error reading gzipped file: " + path + " - " + msg);
-		}
-
-		// gz automatically closed by unique_ptr
-		return content;
+		return InflateFileHandleToString(*handle, path);
 	}
 
-	// Regular file
-	std::ifstream file(path, std::ios::binary);
-	if (!file) {
-		throw IOException("File not found: " + path);
-	}
-
-	std::stringstream buffer;
-	buffer << file.rdbuf();
-	return buffer.str();
+	return ReadFileHandleToString(*handle);
 }
 
 std::vector<ReadNewickTableFunction::NodeRow> ReadNewickTableFunction::TreeToRows(const miint::NewickTree &tree) {
@@ -131,9 +170,9 @@ unique_ptr<FunctionData> ReadNewickTableFunction::Bind(ClientContext &context, T
 		}
 	}
 
-	// Validate files exist (skip stdin)
+	// Validate files exist (skip stdin and remote paths)
 	for (const auto &path : file_paths) {
-		if (!IsStdinPath(path) && !fs.FileExists(path)) {
+		if (!IsStdinPath(path) && !miint::RemoteFileHelper::IsRemotePath(path) && !fs.FileExists(path)) {
 			throw IOException("File not found: " + path);
 		}
 	}
@@ -156,7 +195,8 @@ unique_ptr<FunctionData> ReadNewickTableFunction::Bind(ClientContext &context, T
 unique_ptr<GlobalTableFunctionState> ReadNewickTableFunction::InitGlobal(ClientContext &context,
                                                                          TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
-	return duckdb::make_uniq<GlobalState>(data.file_paths, data.uses_stdin);
+	auto &fs = FileSystem::GetFileSystem(context);
+	return duckdb::make_uniq<GlobalState>(data.file_paths, data.uses_stdin, fs);
 }
 
 unique_ptr<LocalTableFunctionState> ReadNewickTableFunction::InitLocal(ExecutionContext &context,
@@ -247,7 +287,7 @@ void ReadNewickTableFunction::Execute(ClientContext &context, TableFunctionInput
 		local_state.current_filepath = path;
 
 		try {
-			std::string content = ReadNewickFile(path);
+			std::string content = ReadNewickFile(global_state.fs, path);
 			auto tree = miint::NewickTree::parse(content);
 			local_state.current_rows = TreeToRows(tree);
 			local_state.current_row_idx = 0;
