@@ -20,6 +20,16 @@ SELECT * FROM massql(
 
 That's it. The `massql()` function takes your MassQL query string and a data source (file path or table name), and returns results as a table.
 
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `query` | VARCHAR | MassQL query string (positional, required) |
+| `source` | VARCHAR | File path or table/view name (positional, required) |
+| `sample_id` | VARCHAR | Column name to iterate over per-sample (named, optional) |
+
+When `sample_id` is provided, the function queries distinct values of that column, runs the MassQL pipeline independently for each value, and streams results back with the sample identifier prepended as the first output column. The output column preserves the original column's type (VARCHAR, INTEGER, etc.).
+
 ## Quick Comparison: Python MassQL vs MIINT
 
 | Python MassQL | MIINT (DuckDB) |
@@ -229,6 +239,32 @@ SELECT COUNT(*) FROM massql(
   'sample.mzML'
 );
 ```
+
+### Query per sample
+
+When your table contains data from multiple samples, use `sample_id` to run the MassQL query independently for each sample:
+
+```sql
+-- Load multiple files with filepath as sample identifier
+CREATE TABLE all_spectra AS
+  SELECT * FROM read_mzml('data/*.mzML', include_filepath=true);
+
+-- Run the query per file — results include 'filepath' as the first column
+SELECT * FROM massql(
+  'QUERY scaninfo(MS2DATA) WHERE MS2PROD=167.0857',
+  'all_spectra',
+  sample_id := 'filepath'
+);
+
+-- Count matching spectra per sample
+SELECT filepath, COUNT(*) FROM massql(
+  'QUERY scannum(MS2DATA) WHERE MS2PROD=167.0857',
+  'all_spectra',
+  sample_id := 'filepath'
+) GROUP BY filepath;
+```
+
+The `sample_id` column must not contain NULL values. It works with any column type (VARCHAR, INTEGER, etc.) and cannot be used with file path sources — load the file into a table first.
 
 ### Work with multiple files
 
