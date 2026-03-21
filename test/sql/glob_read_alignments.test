@@ -18,7 +18,7 @@ SELECT COUNT(*) FROM read_alignments('data/sam/foo_has_header*.sam');
 
 # Verify sorting by checking filepath order
 query II
-SELECT read_id, filepath
+SELECT read_id, replace(filepath, '\', '/') as filepath
 FROM read_alignments('data/sam/foo_has_header*.sam', include_filepath=true)
 ORDER BY filepath, read_id
 LIMIT 4;
@@ -40,7 +40,7 @@ SELECT COUNT(*) FROM read_alignments('data/sam/foo_has_header*.bam');
 # Let's test BAM specifically
 
 query IIII
-SELECT read_id, flags, reference, filepath
+SELECT read_id, flags, reference, replace(filepath, '\', '/') as filepath
 FROM read_alignments('data/sam/foo_has_header*.bam', include_filepath=true)
 ORDER BY filepath, read_id
 LIMIT 2;

@@ -79,7 +79,7 @@ SELECT COUNT(*) FROM read_jplace('data/jplace/test*.jplace');
 
 # Test glob pattern with filepath
 query TT
-SELECT fragment, filepath FROM read_jplace('data/jplace/test*.jplace') ORDER BY fragment;
+SELECT fragment, replace(filepath, '\', '/') as filepath FROM read_jplace('data/jplace/test*.jplace') ORDER BY fragment;
 ----
 fragment1	data/jplace/test.jplace
 fragment2	data/jplace/test.jplace
