@@ -1,5 +1,6 @@
 #include "SAMReader.hpp"
 #include "SAMRecord.hpp"
+#include "remote_file_helper.hpp"
 #include "table_function_common.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
@@ -47,9 +48,9 @@ unique_ptr<FunctionData> ReadSequencesSamTableFunction::Bind(ClientContext &cont
 		}
 	}
 
-	// Validate all files exist (skip stdin)
+	// Validate all files exist (skip stdin and remote paths)
 	for (const auto &path : file_paths) {
-		if (!IsStdinPath(path) && !fs.FileExists(path)) {
+		if (!IsStdinPath(path) && !miint::RemoteFileHelper::IsRemotePath(path) && !fs.FileExists(path)) {
 			throw IOException("File not found: " + path);
 		}
 	}
@@ -69,7 +70,9 @@ unique_ptr<FunctionData> ReadSequencesSamTableFunction::Bind(ClientContext &cont
 unique_ptr<GlobalTableFunctionState> ReadSequencesSamTableFunction::InitGlobal(ClientContext &context,
                                                                                TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
-	return duckdb::make_uniq<GlobalState>(data.file_paths, data.uses_stdin);
+	auto &fs = FileSystem::GetFileSystem(context);
+
+	return duckdb::make_uniq<GlobalState>(data.file_paths, fs, data.uses_stdin);
 }
 
 unique_ptr<LocalTableFunctionState> ReadSequencesSamTableFunction::InitLocal(ExecutionContext &context,

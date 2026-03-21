@@ -1,5 +1,6 @@
 #include "SequenceReader.hpp"
 #include "SequenceRecord.hpp"
+#include "remote_file_helper.hpp"
 #include "table_function_common.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
@@ -62,9 +63,9 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 		}
 	}
 
-	// Validate all sequence1 files exist (skip stdin)
+	// Validate all sequence1 files exist (skip stdin and remote paths)
 	for (const auto &path : sequence1_paths) {
-		if (!is_stdin(path) && !fs.FileExists(path)) {
+		if (!is_stdin(path) && !miint::RemoteFileHelper::IsRemotePath(path) && !fs.FileExists(path)) {
 			throw IOException("File not found: " + path);
 		}
 	}
@@ -117,9 +118,9 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 			}
 		}
 
-		// Validate all sequence2 files exist
+		// Validate all sequence2 files exist (skip remote paths)
 		for (const auto &path : seq2_paths) {
-			if (!fs.FileExists(path)) {
+			if (!miint::RemoteFileHelper::IsRemotePath(path) && !fs.FileExists(path)) {
 				throw IOException("File not found: " + path);
 			}
 		}
@@ -156,9 +157,8 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 unique_ptr<GlobalTableFunctionState> ReadFastxTableFunction::InitGlobal(ClientContext &context,
                                                                         TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
-	auto gstate = duckdb::make_uniq<GlobalState>(data.sequence1_paths, data.sequence2_paths, data.uses_stdin);
-
-	return gstate;
+	auto &fs = FileSystem::GetFileSystem(context);
+	return duckdb::make_uniq<GlobalState>(fs, data.sequence1_paths, data.sequence2_paths, data.uses_stdin);
 }
 
 unique_ptr<LocalTableFunctionState> ReadFastxTableFunction::InitLocal(ExecutionContext &context,

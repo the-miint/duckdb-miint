@@ -204,7 +204,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 		if (!instance.ExtensionIsLoaded(dep)) {
 			ExtensionHelper::TryAutoLoadExtension(instance, dep);
 		}
-#ifdef MIINT_STATIC_BUILD
+#ifndef DUCKDB_BUILD_LOADABLE_EXTENSION
 		// LoadExtension links against symbols not available in loadable extension builds
 		if (!instance.ExtensionIsLoaded(dep)) {
 			DuckDB db_wrapper(instance);

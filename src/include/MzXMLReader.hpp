@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SpectrumBatch.hpp"
+#include "duckdb/common/file_system.hpp"
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -10,6 +11,7 @@ namespace miint {
 class MzXMLReader {
 public:
 	explicit MzXMLReader(const std::string &path);
+	MzXMLReader(duckdb::FileSystem &fs, const std::string &path);
 	~MzXMLReader();
 
 	// Non-copyable, moveable

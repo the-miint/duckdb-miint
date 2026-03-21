@@ -1,5 +1,6 @@
 #include "SFFReader.hpp"
 #include "SequenceRecord.hpp"
+#include "remote_file_helper.hpp"
 #include "table_function_common.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
@@ -39,9 +40,9 @@ unique_ptr<FunctionData> ReadSequencesSFFTableFunction::Bind(ClientContext &cont
 		}
 	}
 
-	// Validate all files exist
+	// Validate all files exist (skip remote paths)
 	for (const auto &path : file_paths) {
-		if (!fs.FileExists(path)) {
+		if (!miint::RemoteFileHelper::IsRemotePath(path) && !fs.FileExists(path)) {
 			throw IOException("File not found: " + path);
 		}
 	}
@@ -68,7 +69,12 @@ unique_ptr<FunctionData> ReadSequencesSFFTableFunction::Bind(ClientContext &cont
 unique_ptr<GlobalTableFunctionState> ReadSequencesSFFTableFunction::InitGlobal(ClientContext &context,
                                                                                TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
-	return duckdb::make_uniq<GlobalState>(data.file_paths, data.trim);
+	auto &fs = FileSystem::GetFileSystem(context);
+
+	// Resolve remote paths to local temp files
+	auto resolved = miint::RemoteFileHelper::ResolveAllToLocal(fs, context, data.file_paths);
+
+	return duckdb::make_uniq<GlobalState>(data.file_paths, std::move(resolved), data.trim);
 }
 
 unique_ptr<LocalTableFunctionState> ReadSequencesSFFTableFunction::InitLocal(ExecutionContext &context,
@@ -104,7 +110,7 @@ void ReadSequencesSFFTableFunction::Execute(ClientContext &context, TableFunctio
 		// Lazily open the file (safe without lock - this thread has exclusive access to this file index)
 		if (!global_state.readers[local_state.current_file_idx]) {
 			global_state.readers[local_state.current_file_idx] = std::make_unique<miint::SFFReader>(
-			    global_state.filepaths[local_state.current_file_idx], global_state.trim);
+			    global_state.local_paths[local_state.current_file_idx], global_state.trim);
 		}
 
 		batch = global_state.readers[local_state.current_file_idx]->read(STANDARD_VECTOR_SIZE);

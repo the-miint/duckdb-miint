@@ -1,6 +1,7 @@
 #pragma once
 #include "SFFReader.hpp"
 #include "QualScore.hpp"
+#include "remote_file_helper.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/types.hpp"
@@ -38,7 +39,9 @@ public:
 	struct GlobalState : public GlobalTableFunctionState {
 		mutex lock;
 		std::vector<std::unique_ptr<miint::SFFReader>> readers; // Lazily opened (nullptr until claimed)
-		std::vector<std::string> filepaths;
+		std::vector<std::string> filepaths;                     // Original paths (for include_filepath)
+		std::vector<std::string> local_paths;                   // Resolved local paths (for SFFReader)
+		miint::ResolvedFileSet resolved_files;                  // RAII cleanup for temp files
 		bool trim;
 		size_t next_file_idx;
 		std::vector<uint64_t>
@@ -52,9 +55,12 @@ public:
 			return std::min<idx_t>(filepaths.size(), std::min<idx_t>(8, hw_threads));
 		}
 
-		GlobalState(const std::vector<std::string> &paths, bool do_trim)
-		    : readers(paths.size()), filepaths(paths), trim(do_trim), next_file_idx(0),
-		      file_sequence_counters(paths.size(), 1) {
+		GlobalState(const std::vector<std::string> &original_paths, miint::ResolvedFileSet resolved, bool do_trim)
+		    : readers(original_paths.size()), filepaths(original_paths), resolved_files(std::move(resolved)),
+		      trim(do_trim), next_file_idx(0), file_sequence_counters(original_paths.size(), 1) {
+			for (const auto &rf : resolved_files.Files()) {
+				local_paths.push_back(rf.local_path);
+			}
 		}
 	};
 
