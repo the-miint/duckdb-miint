@@ -5,6 +5,9 @@
 #include <cstring>
 #include <random>
 #include <thread>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #ifdef MIINT_STATIC_BUILD
 #include "duckdb/common/exception.hpp"

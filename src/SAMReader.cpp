@@ -122,7 +122,7 @@ SAMReader::SAMReader(hFILE *hf, const std::string &name, bool include_seq_qual, 
 
 	htsFile *hts_fp = hts_hopen(hf, name.c_str(), "r");
 	if (!hts_fp) {
-		hclose(hf);
+		(void)hclose(hf);
 		throw std::runtime_error("Failed to open hFILE as SAM/BAM stream");
 	}
 	fp.reset(hts_fp);
@@ -151,7 +151,7 @@ SAMReader::SAMReader(hFILE *hf, const std::string &name, const std::unordered_ma
 
 	htsFile *hts_fp = hts_hopen(hf, name.c_str(), "r");
 	if (!hts_fp) {
-		hclose(hf);
+		(void)hclose(hf);
 		throw std::runtime_error("Failed to open hFILE as SAM/BAM stream");
 	}
 	fp.reset(hts_fp);
