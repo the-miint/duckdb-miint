@@ -72,10 +72,7 @@ unique_ptr<GlobalTableFunctionState> ReadSequencesSamTableFunction::InitGlobal(C
 	auto &data = input.bind_data->Cast<Data>();
 	auto &fs = FileSystem::GetFileSystem(context);
 
-	// Resolve remote paths to local temp files
-	auto resolved = miint::RemoteFileHelper::ResolveAllToLocal(fs, context, data.file_paths);
-
-	return duckdb::make_uniq<GlobalState>(data.file_paths, std::move(resolved), data.uses_stdin);
+	return duckdb::make_uniq<GlobalState>(data.file_paths, fs, data.uses_stdin);
 }
 
 unique_ptr<LocalTableFunctionState> ReadSequencesSamTableFunction::InitLocal(ExecutionContext &context,

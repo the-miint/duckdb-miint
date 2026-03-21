@@ -54,6 +54,17 @@ public:
 	explicit SAMReader(const std::string &filename, const std::unordered_map<std::string, uint64_t> &references,
 	                   bool include_seq_qual = false);
 
+	// Constructor for reading SAM/BAM via a pre-opened hFILE (e.g., DuckDB FileHandle for remote files).
+	// Takes ownership of the hFILE — hts_close() will close it via the hFILE backend's close callback.
+	// require_references: if true (default), throws when header has no @SQ lines
+	explicit SAMReader(hFILE *hf, const std::string &name, bool include_seq_qual = false,
+	                   bool require_references = true);
+
+	// Constructor for reading headerless SAM via a pre-opened hFILE.
+	// Creates a synthetic header from the provided reference map.
+	explicit SAMReader(hFILE *hf, const std::string &name, const std::unordered_map<std::string, uint64_t> &references,
+	                   bool include_seq_qual = false);
+
 #ifndef _WIN32
 	// Constructor for reading SAM from a file descriptor (e.g., pipe from subprocess)
 	// Takes ownership of the file descriptor - it will be closed when the reader is destroyed
@@ -63,6 +74,21 @@ public:
 
 	// Read up to n records into a batch
 	SAMRecordBatch read(const int n);
+
+	// Number of reference sequences in the header (@SQ lines).
+	// Returns 0 if no references (headerless/uBAM without synthetic header).
+	int n_targets() const {
+		return hdr ? hdr->n_targets : 0;
+	}
+
+	// Detect format (true if BAM, false if SAM/other).
+	bool is_bam() const {
+		if (!fp) {
+			return false;
+		}
+		const htsFormat *fmt = hts_get_format(fp.get());
+		return (fmt && fmt->format == bam);
+	}
 
 private:
 	SAMFilePtr fp;

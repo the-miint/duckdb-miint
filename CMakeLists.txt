@@ -534,7 +534,8 @@ set(EXTENSION_SOURCES
     src/MzXMLReader.cpp
     src/read_mzxml.cpp
     src/remote_file_helper.cpp
-    src/duckdb_seq_stream.cpp)
+    src/duckdb_seq_stream.cpp
+    src/hfile_duckdb.cpp)
 
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND EXTENSION_SOURCES src/copy_biom.cpp src/BIOMTable.cpp src/BIOMReader.cpp src/read_biom.cpp)
@@ -689,6 +690,7 @@ set(TEST_SOURCES
     test/cpp/test_MassQLParser.cpp
     src/remote_file_helper.cpp
     test/cpp/test_RemoteFileHelper.cpp
+    test/cpp/test_hfile_duckdb.cpp
 )
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND TEST_SOURCES src/BIOMTable.cpp src/BIOMReader.cpp

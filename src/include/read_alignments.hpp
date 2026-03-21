@@ -2,6 +2,7 @@
 #include "SAMReader.hpp"
 #include "SAMRecord.hpp"
 #include "remote_file_helper.hpp"
+#include "hfile_duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/types.hpp"
@@ -83,26 +84,43 @@ public:
 	struct GlobalState : public GlobalTableFunctionState {
 		mutex lock;
 		std::vector<std::unique_ptr<miint::SAMReader>> readers;
-		std::vector<std::string> filepaths;    // Original paths (for include_filepath)
-		std::vector<std::string> local_paths;  // Resolved local paths (for SAMReader)
-		miint::ResolvedFileSet resolved_files; // RAII cleanup for temp files
+		std::vector<std::string> filepaths; // Original paths (for include_filepath)
 		size_t next_file_idx;
 
 		idx_t MaxThreads() const override {
-			return std::min<idx_t>(readers.size(), std::thread::hardware_concurrency());
+			auto hw = std::thread::hardware_concurrency();
+			if (hw == 0) {
+				hw = 1;
+			}
+			return std::min<idx_t>(readers.size(), hw);
 		}
 
-		GlobalState(const std::vector<std::string> &original_paths, miint::ResolvedFileSet resolved,
+		GlobalState(const std::vector<std::string> &paths, FileSystem &fs,
 		            std::optional<std::unordered_map<std::string, uint64_t>> ref_lengths, bool include_seq_qual)
-		    : filepaths(original_paths), resolved_files(std::move(resolved)), next_file_idx(0) {
-			for (const auto &rf : resolved_files.Files()) {
-				local_paths.push_back(rf.local_path);
-			}
-			for (const auto &path : local_paths) {
-				if (ref_lengths.has_value()) {
-					readers.push_back(std::make_unique<miint::SAMReader>(path, ref_lengths.value(), include_seq_qual));
-				} else {
-					readers.push_back(std::make_unique<miint::SAMReader>(path, include_seq_qual));
+		    : filepaths(paths), next_file_idx(0) {
+			for (const auto &path : paths) {
+				try {
+					if (miint::RemoteFileHelper::IsRemotePath(path)) {
+						hFILE *hf = miint::hfile_duckdb_open(fs, path);
+						if (!hf) {
+							throw IOException("Failed to open remote file: " + path);
+						}
+						if (ref_lengths.has_value()) {
+							readers.push_back(
+							    std::make_unique<miint::SAMReader>(hf, path, ref_lengths.value(), include_seq_qual));
+						} else {
+							readers.push_back(std::make_unique<miint::SAMReader>(hf, path, include_seq_qual));
+						}
+					} else {
+						if (ref_lengths.has_value()) {
+							readers.push_back(
+							    std::make_unique<miint::SAMReader>(path, ref_lengths.value(), include_seq_qual));
+						} else {
+							readers.push_back(std::make_unique<miint::SAMReader>(path, include_seq_qual));
+						}
+					}
+				} catch (std::exception &e) {
+					throw IOException("Error opening '%s': %s", path, e.what());
 				}
 			}
 		}

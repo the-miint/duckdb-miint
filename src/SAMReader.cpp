@@ -7,6 +7,72 @@
 #endif
 
 namespace miint {
+
+// Validate a reference map for SAM spec compliance.
+static void ValidateReferenceMap(const std::unordered_map<std::string, uint64_t> &references) {
+	if (references.empty()) {
+		throw std::runtime_error("Reference map cannot be empty");
+	}
+
+	static const std::regex position_pattern(":[0-9]+(-[0-9]+)?$");
+
+	for (const auto &[name, length] : references) {
+		if (name.empty()) {
+			throw std::runtime_error("Reference name cannot be empty");
+		}
+		if (length == 0) {
+			throw std::runtime_error("Reference length cannot be zero");
+		}
+		if (name[0] == '*' || name[0] == '=') {
+			throw std::runtime_error("Reference name cannot start with '*' or '='");
+		}
+		if (name.find('\t') != std::string::npos || name.find('\n') != std::string::npos) {
+			throw std::runtime_error("Reference name contains invalid characters");
+		}
+		if (name.length() > 1024) {
+			throw std::runtime_error("Reference name exceeds maximum length of 1024 characters");
+		}
+		if (std::regex_search(name, position_pattern)) {
+			throw std::runtime_error(
+			    "Reference name ends with position-like pattern (:<digits> or :<digits>-<digits>)");
+		}
+	}
+}
+
+// Read any existing header from the file, then build or augment it with the provided references.
+// Returns a valid SAMHeaderPtr with @SQ lines.
+static SAMHeaderPtr BuildHeaderFromReferences(samFile *fp,
+                                              const std::unordered_map<std::string, uint64_t> &references) {
+	// Try to read any existing header (even partial headers like @HD without @SQ).
+	// This consumes header lines and positions the file pointer at the first alignment record.
+	SAMHeaderPtr existing_hdr(sam_hdr_read(fp));
+
+	if (existing_hdr && existing_hdr->n_targets == 0) {
+		// Partial header exists (e.g., @HD line) but no @SQ lines — add them
+		for (const auto &[name, length] : references) {
+			std::string length_str = std::to_string(length);
+			if (sam_hdr_add_line(existing_hdr.get(), "SQ", "SN", name.c_str(), "LN", length_str.c_str(), NULL) != 0) {
+				throw std::runtime_error("Failed to add @SQ line to existing header");
+			}
+		}
+		return existing_hdr;
+	} else if (!existing_hdr || existing_hdr->n_targets == 0) {
+		// No header — create synthetic
+		std::string header_text;
+		for (const auto &[name, length] : references) {
+			header_text += "@SQ\tSN:" + name + "\tLN:" + std::to_string(length) + "\n";
+		}
+		SAMHeaderPtr hdr(sam_hdr_parse(header_text.length(), header_text.c_str()));
+		if (!hdr) {
+			throw std::runtime_error("Failed to parse SAM header");
+		}
+		return hdr;
+	} else {
+		// File has a complete header with @SQ lines — use as-is
+		return existing_hdr;
+	}
+}
+
 // Constructor for SAM files with headers
 SAMReader::SAMReader(const std::string &filename, bool include_seq_qual, bool require_references)
     : fp(sam_open(filename.c_str(), "r")), hdr(sam_hdr_read(fp.get())), aln(bam_init1()),
@@ -34,87 +100,65 @@ SAMReader::SAMReader(const std::string &filename, bool include_seq_qual, bool re
 SAMReader::SAMReader(const std::string &filename, const std::unordered_map<std::string, uint64_t> &references,
                      bool include_seq_qual)
     : fp(sam_open(filename.c_str(), "r")), aln(bam_init1()), include_seq_qual(include_seq_qual) {
-	// Open file
 	if (!fp) {
 		throw std::runtime_error("Failed to open SAM file");
 	}
 
-	// Validate reference map
-	if (references.empty()) {
-		throw std::runtime_error("Reference map cannot be empty");
+	ValidateReferenceMap(references);
+	hdr = BuildHeaderFromReferences(fp.get(), references);
+
+	if (!aln) {
+		throw std::runtime_error("Cannot initialize BAM record");
+	}
+}
+
+// Constructor for reading SAM/BAM via a pre-opened hFILE.
+// Takes ownership of the hFILE — hts_close() will close it.
+SAMReader::SAMReader(hFILE *hf, const std::string &name, bool include_seq_qual, bool require_references)
+    : aln(bam_init1()), include_seq_qual(include_seq_qual) {
+	if (!hf) {
+		throw std::runtime_error("hFILE is null");
 	}
 
-	for (const auto &[name, length] : references) {
-		// Check for empty name
-		if (name.empty()) {
-			throw std::runtime_error("Reference name cannot be empty");
-		}
+	htsFile *hts_fp = hts_hopen(hf, name.c_str(), "r");
+	if (!hts_fp) {
+		hclose(hf);
+		throw std::runtime_error("Failed to open hFILE as SAM/BAM stream");
+	}
+	fp.reset(hts_fp);
 
-		// Check for zero length
-		if (length == 0) {
-			throw std::runtime_error("Reference length cannot be zero");
-		}
-
-		// Check first character restrictions
-		if (name[0] == '*' || name[0] == '=') {
-			throw std::runtime_error("Reference name cannot start with '*' or '='");
-		}
-
-		// Check for invalid characters (tab, newline)
-		if (name.find('\t') != std::string::npos || name.find('\n') != std::string::npos) {
-			throw std::runtime_error("Reference name contains invalid characters");
-		}
-
-		// Check length limit
-		if (name.length() > 1024) {
-			throw std::runtime_error("Reference name exceeds maximum length of 1024 characters");
-		}
-
-		// Check for position-like pattern at end: :<digits> or :<digits>-<digits>
-		// Regex pattern: :[0-9]+(-[0-9]+)?$
-		std::regex position_pattern(":[0-9]+(-[0-9]+)?$");
-		if (std::regex_search(name, position_pattern)) {
-			throw std::runtime_error(
-			    "Reference name ends with position-like pattern (:<digits> or :<digits>-<digits>)");
-		}
+	hdr.reset(sam_hdr_read(fp.get()));
+	if (!hdr) {
+		throw std::runtime_error("SAM file missing required header");
 	}
 
-	// Try to read any existing header from the file (even partial headers like @HD without @SQ)
-	// This consumes header lines and positions the file pointer at the first alignment record
-	SAMHeaderPtr existing_hdr(sam_hdr_read(fp.get()));
-
-	// If file has a partial header (header lines present but no @SQ lines), we need to add @SQ lines
-	// If file has no header at all, we create a synthetic header
-	if (existing_hdr && existing_hdr->n_targets == 0) {
-		// Partial header exists (e.g., @HD line) but no @SQ lines
-		// Add @SQ lines from reference_lengths to the existing header
-		for (const auto &[name, length] : references) {
-			std::string length_str = std::to_string(length);
-			if (sam_hdr_add_line(existing_hdr.get(), "SQ", "SN", name.c_str(), "LN", length_str.c_str(), NULL) != 0) {
-				throw std::runtime_error("Failed to add @SQ line to existing header");
-			}
-		}
-		hdr = std::move(existing_hdr);
-	} else if (!existing_hdr || existing_hdr->n_targets == 0) {
-		// No header in file - create synthetic header
-		// Build header text as string for efficiency with large reference sets
-		std::string header_text;
-		for (const auto &[name, length] : references) {
-			header_text += "@SQ\tSN:" + name + "\tLN:" + std::to_string(length) + "\n";
-		}
-
-		// Parse header text once (much faster than repeated sam_hdr_add_line calls)
-		hdr.reset(sam_hdr_parse(header_text.length(), header_text.c_str()));
-		if (!hdr) {
-			throw std::runtime_error("Failed to parse SAM header");
-		}
-	} else {
-		// File has a complete header with @SQ lines - this shouldn't happen with this constructor
-		// but if it does, we'll use it as-is (existing behavior for compatibility)
-		hdr = std::move(existing_hdr);
+	if (require_references && hdr->n_targets == 0) {
+		throw std::runtime_error("SAM file missing required header");
 	}
 
-	// Initialize alignment record
+	if (!aln) {
+		throw std::runtime_error("Cannot initialize BAM record");
+	}
+}
+
+// Constructor for reading headerless SAM via a pre-opened hFILE.
+SAMReader::SAMReader(hFILE *hf, const std::string &name, const std::unordered_map<std::string, uint64_t> &references,
+                     bool include_seq_qual)
+    : aln(bam_init1()), include_seq_qual(include_seq_qual) {
+	if (!hf) {
+		throw std::runtime_error("hFILE is null");
+	}
+
+	htsFile *hts_fp = hts_hopen(hf, name.c_str(), "r");
+	if (!hts_fp) {
+		hclose(hf);
+		throw std::runtime_error("Failed to open hFILE as SAM/BAM stream");
+	}
+	fp.reset(hts_fp);
+
+	ValidateReferenceMap(references);
+	hdr = BuildHeaderFromReferences(fp.get(), references);
+
 	if (!aln) {
 		throw std::runtime_error("Cannot initialize BAM record");
 	}

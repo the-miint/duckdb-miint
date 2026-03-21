@@ -110,9 +110,6 @@ unique_ptr<GlobalTableFunctionState> ReadAlignmentsTableFunction::InitGlobal(Cli
 	auto &data = input.bind_data->Cast<Data>();
 	auto &fs = FileSystem::GetFileSystem(context);
 
-	// Resolve remote paths to local temp files
-	auto resolved = miint::RemoteFileHelper::ResolveAllToLocal(fs, context, data.sam_paths);
-
 	// Read reference table if provided
 	std::optional<std::unordered_map<std::string, uint64_t>> reference_lengths;
 	if (data.reference_lengths_table.has_value()) {
@@ -122,17 +119,20 @@ unique_ptr<GlobalTableFunctionState> ReadAlignmentsTableFunction::InitGlobal(Cli
 	// Check if reading from stdin (single file that is a stdin path)
 	bool reading_from_stdin = (data.sam_paths.size() == 1 && IsStdinPath(data.sam_paths[0]));
 
-	// For stdin, skip header checking to avoid consuming data
+	// For local files, pre-check header consistency (cheap — kernel caches the file).
+	// For remote files, skip the probe to avoid a double HTTP request.
+	// Remote files are validated during SAMReader construction instead.
 	if (!reading_from_stdin) {
-		// Check header consistency across all files (using resolved local paths)
 		bool first_file_has_header = false;
-		for (size_t i = 0; i < resolved.Files().size(); i++) {
-			const auto &local_path = resolved.Files()[i].local_path;
+		for (size_t i = 0; i < data.sam_paths.size(); i++) {
+			const auto &path = data.sam_paths[i];
+			if (miint::RemoteFileHelper::IsRemotePath(path)) {
+				continue; // Validated at SAMReader construction time
+			}
 
-			// Check if file has header by attempting to read it
-			miint::SAMFilePtr test_fp(sam_open(local_path.c_str(), "r"));
+			miint::SAMFilePtr test_fp(sam_open(path.c_str(), "r"));
 			if (!test_fp) {
-				throw IOException("Failed to open SAM file: " + data.sam_paths[i]);
+				throw IOException("Failed to open SAM file: " + path);
 			}
 			miint::SAMHeaderPtr test_hdr(sam_hdr_read(test_fp.get()));
 			bool has_header = (test_hdr && test_hdr->n_targets > 0);
@@ -140,12 +140,9 @@ unique_ptr<GlobalTableFunctionState> ReadAlignmentsTableFunction::InitGlobal(Cli
 			if (i == 0) {
 				first_file_has_header = has_header;
 
-				// Validate first file: if no header, require reference_lengths
 				if (!has_header && !reference_lengths.has_value()) {
 					throw IOException("File lacks a header, and no reference information provided");
 				}
-
-				// Validate first file: if has header, reject reference_lengths
 				if (has_header && reference_lengths.has_value()) {
 					const htsFormat *fmt = hts_get_format(test_fp.get());
 					const char *format_name = (fmt && fmt->format == bam) ? "BAM" : "SAM";
@@ -153,7 +150,6 @@ unique_ptr<GlobalTableFunctionState> ReadAlignmentsTableFunction::InitGlobal(Cli
 					                  " file has header, but reference_lengths parameter was provided");
 				}
 			} else {
-				// Validate subsequent files have same header status
 				if (has_header != first_file_has_header) {
 					if (first_file_has_header) {
 						throw IOException("Inconsistent headers across files: '" + data.sam_paths[0] +
@@ -167,8 +163,7 @@ unique_ptr<GlobalTableFunctionState> ReadAlignmentsTableFunction::InitGlobal(Cli
 		}
 	}
 
-	return duckdb::make_uniq<GlobalState>(data.sam_paths, std::move(resolved), reference_lengths,
-	                                      data.include_seq_qual);
+	return duckdb::make_uniq<GlobalState>(data.sam_paths, fs, reference_lengths, data.include_seq_qual);
 }
 
 unique_ptr<LocalTableFunctionState> ReadAlignmentsTableFunction::InitLocal(ExecutionContext &context,
