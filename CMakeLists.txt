@@ -533,7 +533,8 @@ set(EXTENSION_SOURCES
     src/mass_tables.cpp
     src/MzXMLReader.cpp
     src/read_mzxml.cpp
-    src/remote_file_helper.cpp)
+    src/remote_file_helper.cpp
+    src/duckdb_seq_stream.cpp)
 
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND EXTENSION_SOURCES src/copy_biom.cpp src/BIOMTable.cpp src/BIOMReader.cpp src/read_biom.cpp)

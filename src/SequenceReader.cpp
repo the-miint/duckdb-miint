@@ -34,11 +34,17 @@ static void check_ids(const std::string &name1, const std::string &name2) {
 	}
 }
 
+// Read from whichever stream variant is active
+std::vector<klibpp::KSeq> SequenceReader::read_stream(StreamVar &var, int n) {
+	return std::visit([n](auto &reader) { return reader->read(static_cast<std::vector<klibpp::KSeq>::size_type>(n)); },
+	                  var);
+}
+
 SequenceReader::SequenceReader(const std::string &path1, const std::optional<std::string> &path2) : first_read_(true) {
 	sequence1_reader_ = std::make_unique<SeqStreamIn>(path1.c_str());
 
 	// Check if first file is empty by attempting to peek at first record
-	buffered_read1_ = sequence1_reader_->read(1);
+	buffered_read1_ = read_stream(sequence1_reader_, 1);
 	bool is_empty1 = buffered_read1_.empty();
 	bool is_fasta1 = !is_empty1 && buffered_read1_[0].qual.empty();
 
@@ -53,7 +59,7 @@ SequenceReader::SequenceReader(const std::string &path1, const std::optional<std
 		sequence2_reader_.emplace(std::make_unique<SeqStreamIn>(path2->c_str()));
 
 		// Check if second file is empty and detect format
-		buffered_read2_ = sequence2_reader_.value()->read(1);
+		buffered_read2_ = read_stream(sequence2_reader_.value(), 1);
 		bool is_empty2 = buffered_read2_.empty();
 		bool is_fasta2 = !is_empty2 && buffered_read2_[0].qual.empty();
 
@@ -72,6 +78,41 @@ SequenceReader::SequenceReader(const std::string &path1, const std::optional<std
 	}
 }
 
+#ifdef MIINT_STATIC_BUILD
+SequenceReader::SequenceReader(DuckDBSeqStream *stream1, DuckDBSeqStream *stream2_or_null) : first_read_(true) {
+	sequence1_reader_ = std::make_unique<DuckDBSeqStreamIn>(stream1, duckdb_seq_read, duckdb_seq_close);
+
+	// Check if first stream is empty by attempting to peek at first record
+	buffered_read1_ = read_stream(sequence1_reader_, 1);
+	bool is_empty1 = buffered_read1_.empty();
+	bool is_fasta1 = !is_empty1 && buffered_read1_[0].qual.empty();
+
+	if (is_empty1) {
+		throw std::runtime_error("Empty stream");
+	}
+
+	paired_ = (stream2_or_null != nullptr);
+	if (paired_) {
+		sequence2_reader_.emplace(
+		    std::make_unique<DuckDBSeqStreamIn>(stream2_or_null, duckdb_seq_read, duckdb_seq_close));
+
+		buffered_read2_ = read_stream(sequence2_reader_.value(), 1);
+		bool is_empty2 = buffered_read2_.empty();
+		bool is_fasta2 = !is_empty2 && buffered_read2_[0].qual.empty();
+
+		if (is_empty2) {
+			throw std::runtime_error("Empty stream (sequence2)");
+		}
+
+		if (is_fasta1 != is_fasta2) {
+			throw std::runtime_error("Cannot mix FASTA and FASTQ formats: sequence1 is " +
+			                         std::string(is_fasta1 ? "FASTA" : "FASTQ") + ", sequence2 is " +
+			                         std::string(is_fasta2 ? "FASTA" : "FASTQ"));
+		}
+	}
+}
+#endif
+
 SequenceRecordBatch SequenceReader::read_se(const int n) {
 	SequenceRecordBatch batch(false);
 	batch.reserve(n);
@@ -86,11 +127,11 @@ SequenceRecordBatch SequenceReader::read_se(const int n) {
 		// If we got fewer than n records from buffer, read more
 		int remaining = n - (int)reads.size();
 		if (remaining > 0) {
-			auto more = sequence1_reader_->read(remaining);
+			auto more = read_stream(sequence1_reader_, remaining);
 			reads.insert(reads.end(), more.begin(), more.end());
 		}
 	} else {
-		reads = sequence1_reader_->read(n);
+		reads = read_stream(sequence1_reader_, n);
 	}
 
 	// Populate batch directly from KSeq records
@@ -126,14 +167,14 @@ SequenceRecordBatch SequenceReader::read_pe(const int n) {
 		// If we got fewer than n records from buffer, read more
 		int remaining = n - (int)read1s.size();
 		if (remaining > 0) {
-			auto more1 = sequence1_reader_->read(remaining);
-			auto more2 = sequence2_reader_.value()->read(remaining);
+			auto more1 = read_stream(sequence1_reader_, remaining);
+			auto more2 = read_stream(sequence2_reader_.value(), remaining);
 			read1s.insert(read1s.end(), more1.begin(), more1.end());
 			read2s.insert(read2s.end(), more2.begin(), more2.end());
 		}
 	} else {
-		read1s = sequence1_reader_->read(n);
-		read2s = sequence2_reader_.value()->read(n);
+		read1s = read_stream(sequence1_reader_, n);
+		read2s = read_stream(sequence2_reader_.value(), n);
 	}
 
 	if (read1s.size() != read2s.size()) {

@@ -1,5 +1,6 @@
 #pragma once
 #include "BIOMReader.hpp"
+#include "remote_file_helper.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/types.hpp"
@@ -36,8 +37,10 @@ public:
 
 	struct GlobalState : public GlobalTableFunctionState {
 		mutex lock;
-		mutex hdf5_lock; // Serialize HDF5 operations (HDF5 is not thread-safe)
-		std::vector<std::string> filepaths;
+		mutex hdf5_lock;                       // Serialize HDF5 operations (HDF5 is not thread-safe)
+		std::vector<std::string> filepaths;    // Original paths (for include_filepath)
+		std::vector<std::string> local_paths;  // Resolved local paths (for BIOMReader)
+		miint::ResolvedFileSet resolved_files; // RAII cleanup for temp files
 		size_t current_file_idx;
 
 		idx_t MaxThreads() const override {
@@ -47,18 +50,23 @@ public:
 			return 4;
 		}
 
-		explicit GlobalState(const std::vector<std::string> &paths) : filepaths(paths), current_file_idx(0) {
+		GlobalState(const std::vector<std::string> &original_paths, miint::ResolvedFileSet resolved)
+		    : filepaths(original_paths), resolved_files(std::move(resolved)), current_file_idx(0) {
+			for (const auto &rf : resolved_files.Files()) {
+				local_paths.push_back(rf.local_path);
+			}
 		}
 	};
 
 	struct LocalState : public LocalTableFunctionState {
-		std::string path;
+		std::string path; // Original path (for include_filepath display)
 		miint::BIOMTable table;
 		size_t current_row = 0;
 		size_t total_rows = 0;
 		bool done = false;
 
 		bool GetNextFile(GlobalState &global_state) {
+			std::string local_path;
 			{
 				std::lock_guard<std::mutex> guard(global_state.lock);
 
@@ -68,6 +76,7 @@ public:
 				}
 
 				path = global_state.filepaths[global_state.current_file_idx];
+				local_path = global_state.local_paths[global_state.current_file_idx];
 				global_state.current_file_idx++;
 			}
 
@@ -75,7 +84,7 @@ public:
 			{
 				std::lock_guard<std::mutex> hdf5_guard(global_state.hdf5_lock);
 				{
-					auto reader = miint::BIOMReader(path);
+					auto reader = miint::BIOMReader(local_path);
 					table = reader.read();
 					// Explicit scope ensures reader destructor runs while holding hdf5_lock
 				}

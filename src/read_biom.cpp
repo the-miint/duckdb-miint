@@ -1,5 +1,6 @@
 #include "read_biom.hpp"
 #include "BIOMReader.hpp"
+#include "remote_file_helper.hpp"
 #include "table_function_common.hpp"
 #include "duckdb.h"
 #include "duckdb/catalog/catalog.hpp"
@@ -32,14 +33,15 @@ unique_ptr<FunctionData> ReadBIOMTableFunction::Bind(ClientContext &context, Tab
 		throw InvalidInputException("read_biom: first argument must be VARCHAR or VARCHAR[]");
 	}
 
-	// Validate all files exist and are BIOM
+	// Validate all files exist and are BIOM (skip remote paths - validated at read time)
 	for (const auto &path : biom_paths) {
-		if (!fs.FileExists(path)) {
-			throw IOException("File not found: " + path);
-		}
-
-		if (!miint::BIOMReader::IsBIOM(path)) {
-			throw IOException("File is not a BIOM file: " + path);
+		if (!miint::RemoteFileHelper::IsRemotePath(path)) {
+			if (!fs.FileExists(path)) {
+				throw IOException("File not found: " + path);
+			}
+			if (!miint::BIOMReader::IsBIOM(path)) {
+				throw IOException("File is not a BIOM file: " + path);
+			}
 		}
 	}
 
@@ -59,10 +61,12 @@ unique_ptr<FunctionData> ReadBIOMTableFunction::Bind(ClientContext &context, Tab
 unique_ptr<GlobalTableFunctionState> ReadBIOMTableFunction::InitGlobal(ClientContext &context,
                                                                        TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
+	auto &fs = FileSystem::GetFileSystem(context);
 
-	auto gstate = duckdb::make_uniq<GlobalState>(data.biom_paths);
+	// Resolve remote paths to local temp files
+	auto resolved = miint::RemoteFileHelper::ResolveAllToLocal(fs, context, data.biom_paths);
 
-	return std::move(gstate);
+	return duckdb::make_uniq<GlobalState>(data.biom_paths, std::move(resolved));
 }
 
 unique_ptr<LocalTableFunctionState> ReadBIOMTableFunction::InitLocal(ExecutionContext &context,
