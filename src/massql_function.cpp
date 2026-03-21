@@ -270,7 +270,7 @@ static unique_ptr<GlobalTableFunctionState> MassQLInitGlobal(ClientContext &cont
 	auto gstate = make_uniq<MassQLGlobalState>();
 	if (data.has_sample_id) {
 		idx_t db_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
-		gstate->max_threads = std::max<idx_t>(1, std::min(db_threads, data.sample_values.size()));
+		gstate->max_threads = std::max<idx_t>(1, std::min<idx_t>(db_threads, data.sample_values.size()));
 		// Transfer sample[0]'s pre-run result; Execute threads start claiming from index 1.
 		gstate->sample0_result = std::move(data.sample0_result);
 		gstate->next_sample_idx = 1;
