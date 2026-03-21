@@ -1,0 +1,21 @@
+# name: test/sql/read_biom_https.test
+# description: Test read_biom from HTTP URL
+# group: [sql]
+
+# NOTE: Skipped in CI because httpfs is disabled at build time.
+# Active coverage is in test/shell/read_https.sh (uses LOAD httpfs at runtime).
+
+require miint
+
+require httpfs
+
+require-env MIINT_HTTPS_TEST_URL
+
+require-env HDF5_AVAILABLE
+
+# BIOM via HTTP
+query I
+SELECT COUNT(*) FROM read_biom(getenv('MIINT_HTTPS_TEST_URL') || '/biom/test.biom');
+----
+15
+

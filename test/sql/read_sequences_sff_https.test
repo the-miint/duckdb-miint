@@ -1,0 +1,28 @@
+# name: test/sql/read_sequences_sff_https.test
+# description: Test read_sequences_sff from HTTP URL
+# group: [sql]
+
+# NOTE: Skipped in CI because httpfs is disabled at build time.
+# Active coverage is in test/shell/read_https.sh (uses LOAD httpfs at runtime).
+
+require miint
+
+require httpfs
+
+require-env MIINT_HTTPS_TEST_URL
+
+# SFF via HTTP
+query I
+SELECT COUNT(*) FROM read_sequences_sff(getenv('MIINT_HTTPS_TEST_URL') || '/sff/basic_2reads.sff');
+----
+2
+
+# Multiple remote SFF files
+query I
+SELECT COUNT(*) FROM read_sequences_sff([
+    getenv('MIINT_HTTPS_TEST_URL') || '/sff/basic_2reads.sff',
+    getenv('MIINT_HTTPS_TEST_URL') || '/sff/single_read.sff'
+]);
+----
+3
+

@@ -1,0 +1,40 @@
+# name: test/sql/read_alignments_https.test
+# description: Test read_alignments from HTTP URL
+# group: [sql]
+
+# NOTE: Skipped in CI because httpfs is disabled at build time.
+# Active coverage is in test/shell/read_https.sh (uses LOAD httpfs at runtime).
+
+require miint
+
+require httpfs
+
+require-env MIINT_HTTPS_TEST_URL
+
+# SAM via HTTP
+query I
+SELECT COUNT(*) FROM read_alignments(getenv('MIINT_HTTPS_TEST_URL') || '/sam/foo_has_header.sam');
+----
+4
+
+# BAM via HTTP
+query I
+SELECT COUNT(*) FROM read_alignments(getenv('MIINT_HTTPS_TEST_URL') || '/sam/foo_has_header.bam');
+----
+4
+
+# BAM with tags via HTTP
+query I
+SELECT COUNT(*) FROM read_alignments(getenv('MIINT_HTTPS_TEST_URL') || '/sam/foo_with_tags.bam');
+----
+2
+
+# Multiple remote files via VARCHAR[]
+query I
+SELECT COUNT(*) FROM read_alignments([
+    getenv('MIINT_HTTPS_TEST_URL') || '/sam/foo_has_header.sam',
+    getenv('MIINT_HTTPS_TEST_URL') || '/sam/foo_has_header_2.sam'
+]);
+----
+8
+
