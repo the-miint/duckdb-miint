@@ -641,6 +641,12 @@ endif()
 if(HAVE_LIBZSTD)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} ${ZSTD_TARGET})
 endif()
+# The loadable extension is dlopen'd at runtime. When the host DuckDB is loaded
+# via Python (RTLD_LOCAL), duckdb_je_* symbols from the host are not visible.
+# Link stubs that forward to system malloc so the .so is self-contained.
+if(MIINT_HAS_JEMALLOC)
+    target_sources(${LOADABLE_EXTENSION_NAME} PRIVATE src/mm_alloc_stubs.c)
+endif()
 
 install(
   TARGETS ${EXTENSION_NAME}
