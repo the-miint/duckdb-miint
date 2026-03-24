@@ -1,0 +1,5 @@
+build/
+vcpkg/
+.git/
+*.o
+*.a
