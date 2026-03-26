@@ -42,7 +42,7 @@ GROUP BY sample_id;
 
 - **Read bioinformatics formats as tables**: FASTQ/FASTA, SAM/BAM, SFF, BIOM, GFF, Newick trees, jplace, mzML, mzXML
 - **Mass spectrometry analysis**: MassQL query language, `read_mzml`/`read_mzxml` with `UNION ALL`-compatible schemas, 30+ helper macros for peak matching, isotope patterns, and cross-level queries
-- **Align sequences in SQL**: minimap2 and Bowtie2 integration with sharded parallel alignment
+- **Align sequences in SQL**: minimap2 and Bowtie2 integration with sharded parallel alignment, MAFFT multiple sequence alignment
 - **Classify sequences**: RYpe minimizer-based sequence classification
 - **Analyze with SQL**: Filter, aggregate, join with metadata tables
 - **Write back to standard formats**: Export results to FASTQ, FASTA, SAM/BAM, BIOM, Newick
@@ -54,7 +54,7 @@ GROUP BY sample_id;
 | Document | Description |
 |----------|-------------|
 | [Installation & Building](docs/installation.md) | Installing from community extensions, building from source, dependencies |
-| [Table Functions](docs/table-functions.md) | `read_alignments`, `read_fastx`, `read_mzml`, `read_mzxml`, `read_biom`, `align_minimap2`, `align_bowtie2`, and more |
+| [Table Functions](docs/table-functions.md) | `read_alignments`, `read_fastx`, `read_mzml`, `read_mzxml`, `read_biom`, `align_minimap2`, `align_bowtie2`, `align_mafft`, and more |
 | [Mass Spectrometry & MassQL](docs/massql.md) | MassQL query language, `read_mzml`/`read_mzxml`, helper macros, formula functions |
 | [Scalar Functions](docs/scalar-functions.md) | SAM flag functions, sequence identity, query length, query coverage |
 | [RYpe Functions](docs/rype.md) | RYpe sequence classification and minimizer extraction |
