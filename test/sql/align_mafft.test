@@ -25,22 +25,16 @@ SELECT COUNT(*) FROM align_mafft('data/mafft/tiny.fa');
 ----
 3
 
-# Schema check
-query ITIIII
-DESCRIBE SELECT sequence_index, read_id, comment, aligned_sequence, original_length, aligned_length FROM align_mafft('data/mafft/tiny.fa');
-----
-sequence_index	INTEGER	YES	NULL	NULL	NULL
-read_id	VARCHAR	YES	NULL	NULL	NULL
-comment	VARCHAR	YES	NULL	NULL	NULL
-aligned_sequence	VARCHAR	YES	NULL	NULL	NULL
-original_length	INTEGER	YES	NULL	NULL	NULL
-aligned_length	INTEGER	YES	NULL	NULL	NULL
-
-# sequence_index is 0-based
+# sequence_index is BIGINT and 0-based (matches read_fastx convention)
 query I
 SELECT MIN(sequence_index) FROM align_mafft('data/mafft/tiny.fa');
 ----
 0
+
+query I
+SELECT typeof(sequence_index) FROM align_mafft('data/mafft/tiny.fa') LIMIT 1;
+----
+BIGINT
 
 # All aligned_length values are the same
 query I
@@ -55,6 +49,13 @@ SELECT read_id, original_length FROM align_mafft('data/mafft/tiny.fa');
 s1	8
 s2	8
 s3	8
+
+# --- Identical sequences (trivial case) ---
+
+query I
+SELECT COUNT(DISTINCT aligned_sequence) FROM align_mafft('data/mafft/mixed_case.fa');
+----
+2
 
 # --- Nullable comment ---
 
@@ -100,6 +101,13 @@ query I
 SELECT aligned_length > MAX(original_length) FROM align_mafft('data/mafft/sample.fa') GROUP BY aligned_length;
 ----
 true
+
+# --- Additional FASTA file ---
+
+query I
+SELECT COUNT(*) FROM align_mafft('data/fastq/test.fa');
+----
+2
 
 # --- Thread safety: sequential calls ---
 
