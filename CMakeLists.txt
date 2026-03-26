@@ -393,6 +393,39 @@ set_target_properties(wfa2cpp PROPERTIES
 )
 add_dependencies(wfa2cpp wfa2_build)
 
+# Build MAFFT PartTree static library for multiple sequence alignment
+# Handle cross-compilation arch flags for MAFFT (same pattern as WFA2/minimap2)
+set(MAFFT_ARCH_CFLAGS "")
+set(MAFFT_FPIC "-fPIC")
+if(EMSCRIPTEN)
+    set(MAFFT_FPIC "")
+    set(MAFFT_ARCH_CFLAGS "${EMSCRIPTEN_THREAD_CFLAGS}")
+elseif(APPLE AND OSX_BUILD_ARCH)
+    if(OSX_BUILD_ARCH STREQUAL "x86_64")
+        set(MAFFT_ARCH_CFLAGS "-arch x86_64")
+    elseif(OSX_BUILD_ARCH STREQUAL "arm64")
+        set(MAFFT_ARCH_CFLAGS "-arch arm64")
+    endif()
+endif()
+
+ExternalProject_Add(
+    mafft_build
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core clean libmafft_parttree.a
+        "CFLAGS=-O3 ${MAFFT_FPIC} ${MAFFT_ARCH_CFLAGS}"
+        "ENABLE_MULTITHREAD=-Denablemultithread"
+    INSTALL_COMMAND ""
+    BUILD_IN_SOURCE 1
+    BUILD_BYPRODUCTS ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core/libmafft_parttree.a
+)
+
+add_library(mafft_parttree STATIC IMPORTED GLOBAL)
+set_target_properties(mafft_parttree PROPERTIES
+    IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core/libmafft_parttree.a
+)
+add_dependencies(mafft_parttree mafft_build)
+
 # Build RYpe from Rust source with Arrow support
 find_program(CARGO cargo REQUIRED)
 message(STATUS "Found cargo: ${CARGO}")
@@ -479,7 +512,7 @@ set_target_properties(rype PROPERTIES
 add_dependencies(rype rype_build)
 
 # adapted kseq++ include use from strobealign
-include_directories(src/include ext ext/WFA2-lib ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype)
+include_directories(src/include ext ext/WFA2-lib ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype ext/mafft/core)
 set(EXTENSION_SOURCES
     src/SequenceReader.cpp
     src/QualScore.cpp
@@ -535,7 +568,8 @@ set(EXTENSION_SOURCES
     src/read_mzxml.cpp
     src/remote_file_helper.cpp
     src/duckdb_seq_stream.cpp
-    src/hfile_duckdb.cpp)
+    src/hfile_duckdb.cpp
+    src/MafftAligner.cpp)
 
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND EXTENSION_SOURCES src/copy_biom.cpp src/BIOMTable.cpp src/BIOMReader.cpp src/read_biom.cpp)
@@ -575,6 +609,7 @@ target_link_libraries(${EXTENSION_NAME}
                       minimap2
                       wfa2cpp
                       wfa2
+                      mafft_parttree
                       rype
                       expat::expat
 )
@@ -627,6 +662,7 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       minimap2
                       wfa2cpp
                       wfa2
+                      mafft_parttree
                       rype
                       expat::expat
 )
@@ -697,6 +733,8 @@ set(TEST_SOURCES
     src/remote_file_helper.cpp
     test/cpp/test_RemoteFileHelper.cpp
     test/cpp/test_hfile_duckdb.cpp
+    src/MafftAligner.cpp
+    test/cpp/test_MafftAligner.cpp
 )
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND TEST_SOURCES src/BIOMTable.cpp src/BIOMReader.cpp
@@ -716,6 +754,7 @@ target_link_libraries(tests
   minimap2
   wfa2cpp
   wfa2
+  mafft_parttree
   expat::expat
 )
 if(WIN32)
