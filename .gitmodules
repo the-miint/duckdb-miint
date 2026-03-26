@@ -16,3 +16,7 @@
 [submodule "ext/rype"]
 	path = ext/rype
 	url = git@github.com:the-miint/rype.git
+[submodule "ext/mafft"]
+	path = ext/mafft
+	url = https://github.com/the-miint/mafft.git
+	branch = v7.471-miint
