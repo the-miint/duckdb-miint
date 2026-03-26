@@ -407,6 +407,11 @@ elseif(APPLE AND OSX_BUILD_ARCH)
         set(MAFFT_ARCH_CFLAGS "-arch arm64")
     endif()
 endif()
+# MAFFT's mltaln.h guards POSIX-only headers (sys/resource.h, sys/shm.h) with
+# #if !defined(mingw). MinGW does not define this automatically — pass it.
+if(MINGW)
+    set(MAFFT_ARCH_CFLAGS "${MAFFT_ARCH_CFLAGS} -Dmingw")
+endif()
 
 ExternalProject_Add(
     mafft_build
