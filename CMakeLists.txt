@@ -569,7 +569,8 @@ set(EXTENSION_SOURCES
     src/remote_file_helper.cpp
     src/duckdb_seq_stream.cpp
     src/hfile_duckdb.cpp
-    src/MafftAligner.cpp)
+    src/MafftAligner.cpp
+    src/align_mafft.cpp)
 
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND EXTENSION_SOURCES src/copy_biom.cpp src/BIOMTable.cpp src/BIOMReader.cpp src/read_biom.cpp)

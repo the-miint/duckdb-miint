@@ -27,6 +27,7 @@
 #include <sequence_functions.hpp>
 #include <formula_function.hpp>
 #include <massql_function.hpp>
+#include <align_mafft.hpp>
 #include <align_pairwise_functions.hpp>
 #include <read_mzml.hpp>
 #include <read_mzml_chromatograms.hpp>
@@ -183,6 +184,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	AlignPairwiseScoreFunction::Register(loader);
 	AlignPairwiseCigarFunction::Register(loader);
 	AlignPairwiseFullFunction::Register(loader);
+
+	AlignMafftTableFunction::Register(loader);
 
 #ifdef MIINT_HAS_HDF5
 	CopyBiomFunction::Register(loader);

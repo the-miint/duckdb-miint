@@ -1,0 +1,110 @@
+# name: test/sql/align_mafft.test
+# group: [sql]
+
+require miint
+
+# --- Error handling ---
+
+# Missing file
+statement error
+SELECT * FROM align_mafft('nonexistent_file.fa');
+----
+IO Error
+
+# Single sequence (need at least 2)
+statement error
+SELECT * FROM align_mafft('data/mafft/single.fa');
+----
+Invalid Input Error
+
+# --- Basic functionality ---
+
+# Row count matches input
+query I
+SELECT COUNT(*) FROM align_mafft('data/mafft/tiny.fa');
+----
+3
+
+# Schema check
+query ITIIII
+DESCRIBE SELECT sequence_index, read_id, comment, aligned_sequence, original_length, aligned_length FROM align_mafft('data/mafft/tiny.fa');
+----
+sequence_index	INTEGER	YES	NULL	NULL	NULL
+read_id	VARCHAR	YES	NULL	NULL	NULL
+comment	VARCHAR	YES	NULL	NULL	NULL
+aligned_sequence	VARCHAR	YES	NULL	NULL	NULL
+original_length	INTEGER	YES	NULL	NULL	NULL
+aligned_length	INTEGER	YES	NULL	NULL	NULL
+
+# sequence_index is 0-based
+query I
+SELECT MIN(sequence_index) FROM align_mafft('data/mafft/tiny.fa');
+----
+0
+
+# All aligned_length values are the same
+query I
+SELECT COUNT(DISTINCT aligned_length) FROM align_mafft('data/mafft/tiny.fa');
+----
+1
+
+# original_length matches input lengths
+query II rowsort
+SELECT read_id, original_length FROM align_mafft('data/mafft/tiny.fa');
+----
+s1	8
+s2	8
+s3	8
+
+# --- Nullable comment ---
+
+# Sequences without comments have NULL comment
+query I
+SELECT comment IS NULL FROM align_mafft('data/mafft/tiny.fa') WHERE read_id = 's2';
+----
+true
+
+# Sequences with comments have non-NULL comment
+query I
+SELECT comment IS NOT NULL FROM align_mafft('data/mafft/tiny.fa') WHERE read_id = 's1';
+----
+true
+
+# --- Case preservation ---
+
+# Non-gap characters should match input case exactly
+query I
+SELECT replace(aligned_sequence, '-', '') = 'AcGtAcGt' FROM align_mafft('data/mafft/mixed_case.fa') WHERE read_id = 's1';
+----
+true
+
+query I
+SELECT replace(aligned_sequence, '-', '') = 'aCgTaCgT' FROM align_mafft('data/mafft/mixed_case.fa') WHERE read_id = 's2';
+----
+true
+
+# --- Larger dataset (36 opsin protein sequences) ---
+
+query I
+SELECT COUNT(*) FROM align_mafft('data/mafft/sample.fa');
+----
+36
+
+query I
+SELECT COUNT(DISTINCT aligned_length) FROM align_mafft('data/mafft/sample.fa');
+----
+1
+
+# aligned_length > max original_length (gaps inserted)
+query I
+SELECT aligned_length > MAX(original_length) FROM align_mafft('data/mafft/sample.fa') GROUP BY aligned_length;
+----
+true
+
+# --- Thread safety: sequential calls ---
+
+query I
+SELECT (SELECT COUNT(*) FROM align_mafft('data/mafft/tiny.fa'))
+     + (SELECT COUNT(*) FROM align_mafft('data/mafft/tiny.fa'));
+----
+6
