@@ -119,6 +119,12 @@ TEST_CASE("MafftAligner - Error handling", "[MafftAligner]") {
 	SECTION("Empty sequence in input throws") {
 		REQUIRE_THROWS_AS(aligner.align({"seq1", "seq2"}, {"", ""}, {"ACGTACGT", ""}), std::invalid_argument);
 	}
+	SECTION("Sequence shorter than 6 chars throws") {
+		REQUIRE_THROWS_AS(aligner.align({"seq1", "seq2"}, {"", ""}, {"ACGT", "ACGTACGT"}), std::invalid_argument);
+	}
+	SECTION("Sequence of exactly 5 chars throws") {
+		REQUIRE_THROWS_AS(aligner.align({"seq1", "seq2"}, {"", ""}, {"ACGTA", "ACGTACGT"}), std::invalid_argument);
+	}
 }
 
 // Cycle 2.5: Case preservation

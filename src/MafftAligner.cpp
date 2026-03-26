@@ -72,6 +72,13 @@ MafftAlignResult MafftAligner::align(const std::vector<std::string> &names, cons
 		if (sequences[i].empty()) {
 			throw std::invalid_argument("MafftAligner: sequence " + std::to_string(i) + " is empty");
 		}
+		// MAFFT's internal code calls ErrorExit() (which invokes exit(1)) for
+		// sequences shorter than 6 characters. Validate here to throw a C++
+		// exception instead of killing the process.
+		if (sequences[i].size() < 6) {
+			throw std::invalid_argument("MafftAligner: sequence " + std::to_string(i) + " too short (" +
+			                            std::to_string(sequences[i].size()) + " chars, minimum 6)");
+		}
 	}
 
 	int n = static_cast<int>(sequences.size());
