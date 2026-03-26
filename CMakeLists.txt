@@ -413,6 +413,7 @@ ExternalProject_Add(
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core
     CONFIGURE_COMMAND ""
     BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core clean libmafft_parttree.a
+        "CC=${CMAKE_C_COMPILER}"
         "CFLAGS=-O3 ${MAFFT_FPIC} ${MAFFT_ARCH_CFLAGS}"
         "ENABLE_MULTITHREAD=-Denablemultithread"
     INSTALL_COMMAND ""
