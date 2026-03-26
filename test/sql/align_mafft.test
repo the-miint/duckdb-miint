@@ -1,6 +1,22 @@
 # name: test/sql/align_mafft.test
 # group: [sql]
 
+#
+# Reference alignments produced by the splittbfast binary compiled from
+# the same MAFFT source (scratch/mafft/core/, library-api branch):
+#
+#   DNA:     splittbfast -D -f -1.53 -Q 100 -h 0 -p 50 -s -1 -i <input>
+#   Protein: splittbfast -P -f -1.53 -Q 100 -h 0 -p 50 -s -1 -i <input>
+#
+# These correspond to: mafft --quiet --preservecase --parttree <input>
+#
+# The binary lowercases DNA / uppercases protein and reorders by similarity.
+# The library preserves original case and input order. Tests compare the
+# ungapped sequence content (case-preserved) and structural properties.
+#
+# Cross-verified against native mafft v7.526 (bioconda): sorted ungapped
+# sequences are byte-identical between binary, library, and native mafft.
+
 require miint
 
 # --- Error handling ---
@@ -17,74 +33,61 @@ SELECT * FROM align_mafft('data/mafft/single.fa');
 ----
 Invalid Input Error
 
-# --- Basic functionality ---
+# --- tiny.fa: exact expected output ---
+# Input: s1=ACGTACGT, s2=ACGAACGT, s3=ACGTACGA (3 DNA, 8bp each)
+# Expected: no gaps (same length, high similarity), case preserved
 
-# Row count matches input
-query I
-SELECT COUNT(*) FROM align_mafft('data/mafft/tiny.fa');
+query ITTII
+SELECT sequence_index, read_id, aligned_sequence, original_length, aligned_length
+FROM align_mafft('data/mafft/tiny.fa') ORDER BY sequence_index;
 ----
-3
+0	s1	ACGTACGT	8	8
+1	s2	ACGAACGT	8	8
+2	s3	ACGTACGA	8	8
 
-# sequence_index is BIGINT and 0-based (matches read_fastx convention)
-query I
-SELECT MIN(sequence_index) FROM align_mafft('data/mafft/tiny.fa');
+# --- test.fa: exact expected output ---
+# Input: seq1=ATGCATGCATGC, seq2=GGCCGGCCGGCC (2 DNA, 12bp each)
+# Expected: no gaps (same length), case preserved
+
+query ITTII
+SELECT sequence_index, read_id, aligned_sequence, original_length, aligned_length
+FROM align_mafft('data/fastq/test.fa') ORDER BY sequence_index;
 ----
-0
+0	seq1	ATGCATGCATGC	12	12
+1	seq2	GGCCGGCCGGCC	12	12
+
+# --- mixed_case.fa: case preservation ---
+# Input: s1=AcGtAcGt, s2=aCgTaCgT (mixed case DNA)
+# Expected: original case preserved after MAFFT's internal lowercasing
+
+query ITTII
+SELECT sequence_index, read_id, aligned_sequence, original_length, aligned_length
+FROM align_mafft('data/mafft/mixed_case.fa') ORDER BY sequence_index;
+----
+0	s1	AcGtAcGt	8	8
+1	s2	aCgTaCgT	8	8
+
+# --- Column types ---
 
 query I
 SELECT typeof(sequence_index) FROM align_mafft('data/mafft/tiny.fa') LIMIT 1;
 ----
 BIGINT
 
-# All aligned_length values are the same
-query I
-SELECT COUNT(DISTINCT aligned_length) FROM align_mafft('data/mafft/tiny.fa');
-----
-1
-
-# original_length matches input lengths
-query II rowsort
-SELECT read_id, original_length FROM align_mafft('data/mafft/tiny.fa');
-----
-s1	8
-s2	8
-s3	8
-
-# --- Identical sequences (trivial case) ---
-
-query I
-SELECT COUNT(DISTINCT aligned_sequence) FROM align_mafft('data/mafft/mixed_case.fa');
-----
-2
-
 # --- Nullable comment ---
 
-# Sequences without comments have NULL comment
+query T
+SELECT comment FROM align_mafft('data/mafft/tiny.fa') WHERE read_id = 's1';
+----
+first sequence
+
 query I
 SELECT comment IS NULL FROM align_mafft('data/mafft/tiny.fa') WHERE read_id = 's2';
 ----
 true
 
-# Sequences with comments have non-NULL comment
-query I
-SELECT comment IS NOT NULL FROM align_mafft('data/mafft/tiny.fa') WHERE read_id = 's1';
-----
-true
-
-# --- Case preservation ---
-
-# Non-gap characters should match input case exactly
-query I
-SELECT replace(aligned_sequence, '-', '') = 'AcGtAcGt' FROM align_mafft('data/mafft/mixed_case.fa') WHERE read_id = 's1';
-----
-true
-
-query I
-SELECT replace(aligned_sequence, '-', '') = 'aCgTaCgT' FROM align_mafft('data/mafft/mixed_case.fa') WHERE read_id = 's2';
-----
-true
-
-# --- Larger dataset (36 opsin protein sequences) ---
+# --- sample.fa: 36 opsin protein sequences ---
+# Expected aligned_length = 732 (verified against splittbfast binary output)
 
 query I
 SELECT COUNT(*) FROM align_mafft('data/mafft/sample.fa');
@@ -92,9 +95,21 @@ SELECT COUNT(*) FROM align_mafft('data/mafft/sample.fa');
 36
 
 query I
-SELECT COUNT(DISTINCT aligned_length) FROM align_mafft('data/mafft/sample.fa');
+SELECT DISTINCT aligned_length FROM align_mafft('data/mafft/sample.fa');
 ----
-1
+732
+
+# Ungapped content matches original input for every sequence
+query I
+SELECT COUNT(*) FROM (
+  SELECT s.sequence1 AS original, replace(a.aligned_sequence, '-', '') AS ungapped
+  FROM align_mafft('data/mafft/sample.fa') a
+  JOIN (SELECT row_number() OVER () - 1 AS idx, * FROM read_fastx('data/mafft/sample.fa')) s
+    ON a.sequence_index = s.idx
+  WHERE original != ungapped
+);
+----
+0
 
 # aligned_length > max original_length (gaps inserted)
 query I
@@ -102,14 +117,7 @@ SELECT aligned_length > MAX(original_length) FROM align_mafft('data/mafft/sample
 ----
 true
 
-# --- Additional FASTA file ---
-
-query I
-SELECT COUNT(*) FROM align_mafft('data/fastq/test.fa');
-----
-2
-
-# --- Thread safety: sequential calls ---
+# --- Sequential calls (global state cleanup) ---
 
 query I
 SELECT (SELECT COUNT(*) FROM align_mafft('data/mafft/tiny.fa'))
