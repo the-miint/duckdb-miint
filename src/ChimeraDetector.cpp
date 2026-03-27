@@ -531,11 +531,6 @@ UchimeResult ChimeraDetector::detect_impl(const std::string &query_label, const 
 	result.id_query_a = compute_identity(parents->align_a.query_aligned, parents->align_a.subject_aligned);
 	result.id_query_b = compute_identity(parents->align_b.query_aligned, parents->align_b.subject_aligned);
 
-	auto ab_align = aligner.align_full(ref_sequences_[parents->parent_a_idx], ref_sequences_[parents->parent_b_idx]);
-	if (ab_align.has_value()) {
-		result.id_a_b = compute_identity(ab_align->query_aligned, ab_align->subject_aligned);
-	}
-
 	result.id_query_top = std::max(result.id_query_a, result.id_query_b);
 	result.closest_parent_label =
 	    (result.id_query_a >= result.id_query_b) ? result.parent_a_label : result.parent_b_label;
@@ -553,6 +548,18 @@ UchimeResult ChimeraDetector::detect_impl(const std::string &query_label, const 
 			result.flag = "Y";
 		} else {
 			result.flag = "?";
+		}
+
+		// Compute A-B identity only for chimeric/borderline results.
+		// This requires an extra WFA2 alignment (parent A vs parent B) that is
+		// purely informational — not used for chimera classification. We skip it
+		// for non-chimeric queries to save ~6% of total alignment cost.
+		// Note: vsearch computes id_a_b for ALL queries unconditionally. Our
+		// non-chimeric results report id_a_b=0.0 (vsearch reports *).
+		auto ab_align =
+		    aligner.align_full(ref_sequences_[parents->parent_a_idx], ref_sequences_[parents->parent_b_idx]);
+		if (ab_align.has_value()) {
+			result.id_a_b = compute_identity(ab_align->query_aligned, ab_align->subject_aligned);
 		}
 	} else {
 		// Non-chimeric: match vsearch convention of reporting * for parents/identities

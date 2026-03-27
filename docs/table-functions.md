@@ -1622,6 +1622,7 @@ SELECT flag, count(*) FROM uchime_ref('queries', db:='refs') GROUP BY flag;
 **Behavior:**
 - One output row per query sequence (all queries are reported, not just chimeras)
 - Non-chimeric sequences (flag=`N`) have `*` for parent columns and 0 for all vote/identity columns
+- `id_a_b` (parent A vs parent B identity) is only computed for chimeric (`Y`) and borderline (`?`) results. Non-chimeric results report `id_a_b=0.0`. This avoids an extra pairwise alignment per query that is not needed for classification. Note: vsearch computes `id_a_b` for all queries unconditionally.
 - Multi-threaded: queries are processed in parallel with per-thread WFA2 aligners
 - The reference database is fully materialized in memory at init time
 - Tables and views are both supported for query and reference inputs
