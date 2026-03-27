@@ -535,7 +535,9 @@ set(EXTENSION_SOURCES
     src/read_mzxml.cpp
     src/remote_file_helper.cpp
     src/duckdb_seq_stream.cpp
-    src/hfile_duckdb.cpp)
+    src/hfile_duckdb.cpp
+    src/KmerIndex.cpp
+    src/ChimeraDetector.cpp)
 
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND EXTENSION_SOURCES src/copy_biom.cpp src/BIOMTable.cpp src/BIOMReader.cpp src/read_biom.cpp)
@@ -697,6 +699,10 @@ set(TEST_SOURCES
     src/remote_file_helper.cpp
     test/cpp/test_RemoteFileHelper.cpp
     test/cpp/test_hfile_duckdb.cpp
+    src/KmerIndex.cpp
+    test/cpp/test_KmerIndex.cpp
+    src/ChimeraDetector.cpp
+    test/cpp/test_ChimeraDetector.cpp
 )
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND TEST_SOURCES src/BIOMTable.cpp src/BIOMReader.cpp
