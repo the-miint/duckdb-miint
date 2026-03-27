@@ -1,6 +1,10 @@
 #pragma once
 
+#include "KmerIndex.hpp"
+#include "WFA2Aligner.hpp"
+
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -24,36 +28,114 @@ struct StarAlignment {
 	std::vector<DiffType> diffs;
 };
 
-// Build a 3-way star alignment from two pairwise alignments.
-// qa/sa are query-aligned and subject-aligned strings from align_full(query, parentA).
-// qb/sb are query-aligned and subject-aligned strings from align_full(query, parentB).
-// The query acts as the hub: both pairwise alignments are merged by walking query
-// positions in lockstep, inserting gap columns where one pairwise has gaps the other doesn't.
 StarAlignment build_star_alignment(const std::string &query_aligned_a, const std::string &subject_aligned_a,
                                    const std::string &query_aligned_b, const std::string &subject_aligned_b);
 
-// Classify each column in a star alignment into diff types.
-// Fills star.diffs with one entry per column.
 void classify_diffs(StarAlignment &star);
 
 // WFA2 penalty parameters equivalent to vsearch's NW scoring.
-//
-// vsearch uses a score-maximization model: match=+2, mismatch=-4,
-// gap_open=-20, gap_extend=-2. A gap of length k costs: gap_open + k*gap_extend.
-//
-// WFA2 uses a penalty-minimization model: mismatch, gap_open, gap_extend are
-// positive penalties. A gap of length k costs: gap_open + k*gap_extend.
-// Both use the same affine gap convention.
-//
-// Conversion: in vsearch, choosing mismatch over match costs (match - mismatch) = 6.
-// Choosing gap_extend over match costs (match + |gap_extend|) = 4.
-// gap_open is a one-time penalty: |gap_open| = 20.
-//
-// Note: our test sequences are substitution-only (no indels), so these gap
-// penalties haven't been validated against vsearch's alignment for gapped cases.
-// If gapped alignments diverge, this conversion should be revisited.
+// See ChimeraDetector.cpp for detailed derivation.
 static constexpr int UCHIME_WFA2_MISMATCH = 6;
 static constexpr int UCHIME_WFA2_GAP_OPEN = 20;
 static constexpr int UCHIME_WFA2_GAP_EXTEND = 4;
+static constexpr int SMOOTHING_WINDOW = 32;
+
+// UCHIME scoring parameters with defaults from Edgar et al. 2011.
+struct UchimeParams {
+	double minh = 0.28;
+	double xn = 8.0;
+	double dn = 1.4;
+	double mindiv = 0.8;
+	int mindiffs = 3;
+	double abskew = 2.0; // only used in de novo mode
+};
+
+// Result of breakpoint sweep.
+struct BreakpointResult {
+	double best_h = 0.0;
+	int best_pos = -1; // alignment column index of best breakpoint
+	bool reversed = false;
+	int left_yes = 0, left_no = 0, left_abstain = 0;
+	int right_yes = 0, right_no = 0, right_abstain = 0;
+};
+
+// Full UCHIME result for a single query (mirrors vsearch --uchimeout 18 columns).
+struct UchimeResult {
+	double score = 0.0;
+	std::string query_label;
+	std::string parent_a_label;
+	std::string parent_b_label;
+	std::string closest_parent_label;
+	double id_query_model = 0.0;
+	double id_query_a = 0.0;
+	double id_query_b = 0.0;
+	double id_a_b = 0.0;
+	double id_query_top = 0.0;
+	int left_yes = 0, left_no = 0, left_abstain = 0;
+	int right_yes = 0, right_no = 0, right_abstain = 0;
+	double divergence = 0.0;
+	std::string flag = "N"; // Y, N, or ?
+};
+
+// Selected parent pair with cached alignment results.
+struct ParentPair {
+	uint32_t parent_a_idx;
+	uint32_t parent_b_idx;
+	WFA2FullResult align_a; // query aligned to parent A
+	WFA2FullResult align_b; // query aligned to parent B
+};
+
+// Compute per-position match profile from a pairwise alignment.
+// Returns vector of 0/1: 1 if bases match and neither is a gap, else 0.
+std::vector<int> compute_match_profile(const std::string &query_aligned, const std::string &subject_aligned);
+
+// Compute smoothed identity using a sliding window.
+// Returns vector of running sums of match_profile over window_size positions.
+// Output[i] is defined for i >= window_size-1 (earlier positions are partial).
+std::vector<int> compute_smoothed(const std::vector<int> &match_profile, int window_size = SMOOTHING_WINDOW);
+
+// Select the two best parents from candidate indices.
+// Aligns query to each candidate, selects Parent A (most "wins" by smoothed identity),
+// then wipes A's winning positions and selects Parent B.
+// Returns nullopt if fewer than 2 valid candidates exist.
+std::optional<ParentPair> select_parents(const std::string &query, const std::vector<uint32_t> &candidate_indices,
+                                         const std::vector<std::string> &ref_sequences, WFA2Aligner &aligner);
+
+// Sweep all breakpoints left-to-right over a diff vector.
+BreakpointResult sweep_breakpoints(const std::vector<DiffType> &diffs, const UchimeParams &params);
+
+// Full UCHIME chimera detection pipeline.
+class ChimeraDetector {
+public:
+	explicit ChimeraDetector(const UchimeParams &params = UchimeParams {});
+
+	// Load reference sequences. Builds k-mer index.
+	void set_reference(const std::vector<std::string> &labels, const std::vector<std::string> &sequences);
+
+	// Add a single sequence to the reference (for de novo incremental mode).
+	void add_to_reference(const std::string &label, const std::string &sequence);
+
+	// Detect chimera for a single query. Thread-safe (aligner is per-thread).
+	UchimeResult detect(const std::string &query_label, const std::string &query_sequence, WFA2Aligner &aligner) const;
+
+	const std::vector<std::string> &ref_labels() const {
+		return ref_labels_;
+	}
+	const std::vector<std::string> &ref_sequences() const {
+		return ref_sequences_;
+	}
+
+private:
+	UchimeParams params_;
+	KmerIndex kmer_index_;
+	std::vector<std::string> ref_labels_;
+	std::vector<std::string> ref_sequences_;
+
+	// Compute identity % between two aligned sequences over non-ignored columns.
+	static double compute_identity(const std::string &aligned_a, const std::string &aligned_b);
+
+	// Compute model identity: query matches model (parent A left of breakpoint, B right).
+	static double compute_model_identity(const StarAlignment &star, int breakpoint, bool reversed);
+};
 
 } // namespace miint
