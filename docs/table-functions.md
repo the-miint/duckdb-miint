@@ -22,6 +22,8 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`align_minimap2_sharded`](#align_minimap2_shardedquery_table-shard_directory-read_to_shard-options) - Sharded minimap2 alignment
 - [`align_bowtie2`](#align_bowtie2query_table-subject_table-options) - Bowtie2 alignment
 - [`align_bowtie2_sharded`](#align_bowtie2_shardedquery_table-shard_directory-read_to_shard-options) - Sharded bowtie2 alignment
+- [`uchime_ref`](#uchime_refquery_table-dbrefs_table-options) - Reference-based chimera detection (UCHIME)
+- [`uchime_denovo`](#uchime_denovoinput_table-options) - De novo chimera detection (UCHIME)
 
 ## `read_alignments(filename, [reference_lengths='table_name'], [include_filepath=false], [include_seq_qual=false])`
 Read SAM/BAM alignment files.
@@ -1561,3 +1563,124 @@ SELECT * FROM align_bowtie2_sharded('queries',
 | Read routing | All reads against one index | Reads routed to specific shards via mapping table |
 | Parallelism | Single aligner thread(s) | One aligner per shard, concurrent |
 | Use case | Single reference database | Sharded reference databases (e.g., from prior classification) |
+
+## `uchime_ref(query_table, db='refs_table', [options])`
+
+Reference-based chimera detection using the UCHIME algorithm (Edgar et al. 2011, Bioinformatics 27:2194-2200). Detects chimeric sequences by comparing queries against a trusted chimera-free reference database.
+
+**Parameters:**
+- `query_table` (VARCHAR): Name of a table or view containing query sequences. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns.
+- `db` (VARCHAR, required): Name of a table or view containing reference sequences. Same schema requirements as `query_table`.
+- `minh` (DOUBLE, default 0.28): Minimum h-score to flag as chimeric. Range [0, 1].
+- `xn` (DOUBLE, default 8.0): Weight of "no" votes in h-score computation. Must be >= 1.0.
+- `dn` (DOUBLE, default 1.4): Pseudo-count prior on "no" votes. Must be >= 0.
+- `mindiv` (DOUBLE, default 0.8): Minimum divergence (percentage points) from closest parent. Must be >= 0.
+- `mindiffs` (INTEGER, default 3): Minimum number of diffs in each segment (left and right). Must be >= 1.
+
+**Output schema (18 columns, compatible with vsearch `--uchimeout`):**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `score` | DOUBLE | Chimera h-score (higher = more likely chimeric) |
+| `query` | VARCHAR | Query sequence identifier |
+| `parent_a` | VARCHAR | Parent A identifier (or `*` if non-chimeric) |
+| `parent_b` | VARCHAR | Parent B identifier (or `*` if non-chimeric) |
+| `closest_parent` | VARCHAR | Closest parent to query (or `*`) |
+| `id_query_model` | DOUBLE | Query-to-chimeric-model identity % |
+| `id_query_a` | DOUBLE | Query-to-parent-A identity % |
+| `id_query_b` | DOUBLE | Query-to-parent-B identity % |
+| `id_a_b` | DOUBLE | Parent-A-to-parent-B identity % |
+| `id_query_top` | DOUBLE | Query-to-closest-parent identity % |
+| `left_yes` | INTEGER | Left segment yes votes |
+| `left_no` | INTEGER | Left segment no votes |
+| `left_abstain` | INTEGER | Left segment abstain votes |
+| `right_yes` | INTEGER | Right segment yes votes |
+| `right_no` | INTEGER | Right segment no votes |
+| `right_abstain` | INTEGER | Right segment abstain votes |
+| `divergence` | DOUBLE | Model divergence (id_query_model - id_query_top) |
+| `flag` | VARCHAR | Classification: `Y` (chimera), `N` (non-chimera), `?` (borderline) |
+
+**Example:**
+```sql
+-- Load sequences from FASTA files into tables
+CREATE TABLE refs AS SELECT read_id, sequence1 FROM read_fastx('gold.fasta');
+CREATE TABLE queries AS SELECT read_id, sequence1 FROM read_fastx('amplicons.fasta');
+
+-- Detect chimeras
+SELECT * FROM uchime_ref('queries', db:='refs');
+
+-- Filter chimeric sequences
+CREATE TABLE clean_seqs AS
+SELECT q.* FROM queries q
+JOIN uchime_ref('queries', db:='refs') u ON q.read_id = u.query
+WHERE u.flag = 'N';
+
+-- Count chimeras
+SELECT flag, count(*) FROM uchime_ref('queries', db:='refs') GROUP BY flag;
+```
+
+**Behavior:**
+- One output row per query sequence (all queries are reported, not just chimeras)
+- Non-chimeric sequences (flag=`N`) have `*` for parent columns and 0 for all vote/identity columns
+- Multi-threaded: queries are processed in parallel with per-thread WFA2 aligners
+- The reference database is fully materialized in memory at init time
+- Tables and views are both supported for query and reference inputs
+
+**Error handling:**
+- Error if `db` parameter is missing
+- Error if query or reference table does not exist or lacks `read_id`/`sequence1` columns
+- Error if reference table is empty
+- Error if query table contains NULL `read_id` values
+- Error if scoring parameters are out of valid range
+
+**Algorithm:**
+1. For each query, partition into 4 chunks and search the reference DB using an 8-mer index for candidate parents (up to 16)
+2. Align query to each candidate using WFA2 global alignment
+3. Select the 2 best parents via smoothed identity (32bp sliding window)
+4. Build a 3-way star alignment and classify each column (match-A, match-B, no-vote, abstain)
+5. Sweep all breakpoints left-to-right, computing h-score at each position
+6. Classify based on h-score, divergence, and minimum diff thresholds
+
+---
+
+## `uchime_denovo(input_table, [options])`
+
+De novo chimera detection using the UCHIME algorithm. Detects chimeric sequences without a reference database by using abundance information: more abundant sequences are assumed to be non-chimeric and serve as parents for less abundant sequences.
+
+**Parameters:**
+- `input_table` (VARCHAR): Name of a table or view containing sequences with abundance. Must have `read_id` (VARCHAR), `sequence1` (VARCHAR), and `size` (integer type) columns.
+- `abskew` (DOUBLE, default 2.0): Abundance skew. Candidate parents must have abundance >= abskew * query abundance. Must be >= 1.0.
+- `minh`, `xn`, `dn`, `mindiv`, `mindiffs`: Same as `uchime_ref`.
+
+**Output schema:** Same 18 columns as `uchime_ref`.
+
+**Example:**
+```sql
+-- Load sequences and compute abundance
+CREATE TABLE seqs AS
+SELECT read_id, sequence1, count(*) AS size
+FROM read_fastx('amplicons.fasta')
+GROUP BY read_id, sequence1;
+
+-- De novo chimera detection
+SELECT * FROM uchime_denovo('seqs');
+
+-- Filter out chimeras
+SELECT s.* FROM seqs s
+JOIN uchime_denovo('seqs') u ON s.read_id = u.query
+WHERE u.flag != 'Y';
+```
+
+**Behavior:**
+- Sequences are processed in decreasing abundance order (highest first)
+- The first two sequences (most abundant) are unconditionally treated as non-chimeric to seed the reference database
+- Non-chimeric and borderline sequences are added to the reference DB incrementally
+- Chimeric sequences are NOT added to the reference DB
+- Single-threaded (inherently sequential — each result depends on previous classifications)
+- One output row per input sequence
+
+**Error handling:**
+- Error if table does not exist or lacks required columns (`read_id`, `sequence1`, `size`)
+- Error if `size` column is not an integer type
+- Error if table is empty
+- Error if scoring parameters are out of valid range

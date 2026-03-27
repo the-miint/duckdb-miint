@@ -122,7 +122,8 @@ SOFTWARE.
 ## WFA2-lib
 
 Pairwise sequence alignment using the Wavefront Alignment Algorithm (WFA).
-Used by `align_pairwise_score`, `align_pairwise_cigar`, and `align_pairwise_full`.
+Used by `align_pairwise_score`, `align_pairwise_cigar`, `align_pairwise_full`,
+`uchime_ref`, and `uchime_denovo`.
 
 - Repository: https://github.com/smarco/WFA2-lib
 - Version: v2.3.5
@@ -156,6 +157,59 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+## VSEARCH
+
+The UCHIME chimera detection algorithm implemented in `uchime_ref` and
+`uchime_denovo` was developed as a cleanroom reimplementation based on the
+published paper (Edgar et al. 2011). The VSEARCH open-source implementation
+(BSD-2-Clause licensed) was used as a reference for validating output
+correctness and understanding implementation details such as the uchimeout
+tab-separated output format, vote counting conventions, and alignment
+parameter defaults. No VSEARCH source code was copied into this project.
+
+- Repository: https://github.com/torognes/vsearch
+- License: BSD-2-Clause (dual-licensed with GPL-3.0)
+
+### Citations
+
+Rognes T, Flouri T, Nichols B, Quince C, Mahe F.
+"VSEARCH: a versatile open source tool for metagenomics."
+*PeerJ*, 2016; 4:e2584.
+doi: [10.7717/peerj.2584](https://doi.org/10.7717/peerj.2584)
+
+Edgar RC, Haas BJ, Clemente JC, Quince C, Knight R.
+"UCHIME improves sensitivity and speed of chimera detection."
+*Bioinformatics*, 2011; 27(16):2194-2200.
+doi: [10.1093/bioinformatics/btr381](https://doi.org/10.1093/bioinformatics/btr381)
+
+### BSD 2-Clause License
+
+Copyright (C) 2014-2025, Torbjorn Rognes, Frederic Mahe and Tomas Flouri
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ---
 
