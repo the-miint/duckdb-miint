@@ -1,0 +1,115 @@
+# name: test/sql/uchime_denovo.test
+# description: test uchime_denovo table function
+# group: [sql]
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+# --- Setup: load test data into a table with read_id, sequence1, size columns ---
+# The denovo_input.fasta has ;size=N; in headers. We parse that into an integer column.
+# In production, users would do: SELECT read_id, sequence1, count(*) AS size FROM ... GROUP BY ...
+
+statement ok
+CREATE TABLE denovo_seqs AS
+SELECT
+    split_part(read_id, ';', 1) AS read_id,
+    sequence1,
+    CAST(replace(split_part(read_id, ';', 2), 'size=', '') AS INTEGER) AS size
+FROM read_fastx('data/uchime/denovo_input.fasta');
+
+# Verify the table looks right
+query III
+SELECT read_id, length(sequence1), size FROM denovo_seqs ORDER BY size DESC;
+----
+seq1	300	1000
+seq2	300	800
+seq3	300	500
+seq4	300	10
+seq5	300	5
+seq6	300	3
+
+# --- Error handling ---
+
+# Missing required column (size)
+statement ok
+CREATE TABLE no_size(read_id VARCHAR, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM uchime_denovo('no_size');
+----
+missing required column 'size'
+
+# Nonexistent table
+statement error
+SELECT * FROM uchime_denovo('nonexistent_table');
+----
+does not exist
+
+# Parameter validation
+statement error
+SELECT * FROM uchime_denovo('denovo_seqs', abskew:=0.5);
+----
+must be >= 1.0
+
+# --- Basic functionality ---
+
+# Row count should equal number of input sequences (6)
+query I
+SELECT count(*) FROM uchime_denovo('denovo_seqs');
+----
+6
+
+# --- Ground truth validation against vsearch v2.30.5 ---
+# vsearch --uchime_denovo denovo_input.fasta --sizein --uchimeout expected_denovo.tsv
+#
+# Expected: seq1=N, seq2=N, seq3=N, seq4=Y, seq5=Y, seq6=N
+# (seq4 is chimera of seq1+seq2, seq5 is chimera of seq2+seq3)
+
+# Verify all flags match vsearch
+query TT
+SELECT query, flag FROM uchime_denovo('denovo_seqs') ORDER BY query;
+----
+seq1	N
+seq2	N
+seq3	N
+seq4	Y
+seq5	Y
+seq6	N
+
+# Verify chimera counts
+query I
+SELECT count(*) FROM uchime_denovo('denovo_seqs') WHERE flag = 'Y';
+----
+2
+
+# Verify seq4 (chimera of seq1+seq2) detailed results
+# vsearch: score=16.5019, parentA=seq1;size=1000, parentB=seq2;size=800
+# LY=45, LN=0, LA=0, RY=46, RN=0, RA=0, div=15.0
+# Note: our parent labels will be "seq1" and "seq2" (without ;size= suffix)
+query IRTTIIIIIIRT
+SELECT round(score, 2), query, parent_a, parent_b,
+       left_yes, left_no, left_abstain,
+       right_yes, right_no, right_abstain,
+       round(divergence, 1), flag
+FROM uchime_denovo('denovo_seqs')
+WHERE query = 'seq4';
+----
+16.50	seq4	seq1	seq2	45	0	0	46	0	0	15.0	Y
+
+# Verify non-chimeric sequences have * parents
+query IIIII
+SELECT query, parent_a, parent_b, closest_parent, flag
+FROM uchime_denovo('denovo_seqs')
+WHERE query = 'seq1';
+----
+seq1	*	*	*	N
+
+# --- View support ---
+statement ok
+CREATE VIEW denovo_view AS SELECT * FROM denovo_seqs;
+
+query I
+SELECT count(*) FROM uchime_denovo('denovo_view') WHERE flag = 'Y';
+----
+2

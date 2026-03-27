@@ -113,10 +113,16 @@ public:
 	void set_reference(const std::vector<std::string> &labels, const std::vector<std::string> &sequences);
 
 	// Add a single sequence to the reference (for de novo incremental mode).
-	void add_to_reference(const std::string &label, const std::string &sequence);
+	// abundance is optional (default 0, only used when detect_denovo filters by abskew).
+	void add_to_reference(const std::string &label, const std::string &sequence, int64_t abundance = 0);
 
 	// Detect chimera for a single query. Thread-safe (aligner is per-thread).
 	UchimeResult detect(const std::string &query_label, const std::string &query_sequence, WFA2Aligner &aligner) const;
+
+	// Detect chimera with abundance skew filtering (de novo mode).
+	// Candidate parents must have abundance >= abskew * query_abundance.
+	UchimeResult detect_denovo(const std::string &query_label, const std::string &query_sequence,
+	                           int64_t query_abundance, WFA2Aligner &aligner) const;
 
 	const std::vector<std::string> &ref_labels() const {
 		return ref_labels_;
@@ -130,6 +136,7 @@ private:
 	KmerIndex kmer_index_;
 	std::vector<std::string> ref_labels_;
 	std::vector<std::string> ref_sequences_;
+	std::vector<int64_t> ref_abundances_; // For de novo abundance skew filtering
 
 	// Compute identity % between two aligned sequences over non-ignored columns.
 	static double compute_identity(const std::string &aligned_a, const std::string &aligned_b);

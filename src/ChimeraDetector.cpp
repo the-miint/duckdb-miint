@@ -475,9 +475,10 @@ void ChimeraDetector::set_reference(const std::vector<std::string> &labels, cons
 	}
 }
 
-void ChimeraDetector::add_to_reference(const std::string &label, const std::string &sequence) {
+void ChimeraDetector::add_to_reference(const std::string &label, const std::string &sequence, int64_t abundance) {
 	ref_labels_.push_back(label);
 	ref_sequences_.push_back(sequence);
+	ref_abundances_.push_back(abundance);
 	kmer_index_.add_sequence(sequence);
 }
 
@@ -557,6 +558,105 @@ UchimeResult ChimeraDetector::detect(const std::string &query_label, const std::
 		}
 	} else {
 		// Non-chimeric: match vsearch convention of reporting * for parents/identities
+		result.flag = "N";
+		result.score = 0.0;
+		result.parent_a_label = "*";
+		result.parent_b_label = "*";
+		result.closest_parent_label = "*";
+		result.id_query_model = 0.0;
+		result.id_query_a = 0.0;
+		result.id_query_b = 0.0;
+		result.id_a_b = 0.0;
+		result.id_query_top = 0.0;
+		result.divergence = 0.0;
+		result.left_yes = 0;
+		result.left_no = 0;
+		result.left_abstain = 0;
+		result.right_yes = 0;
+		result.right_no = 0;
+		result.right_abstain = 0;
+	}
+
+	return result;
+}
+
+UchimeResult ChimeraDetector::detect_denovo(const std::string &query_label, const std::string &query_sequence,
+                                            int64_t query_abundance, WFA2Aligner &aligner) const {
+	UchimeResult result;
+	result.query_label = query_label;
+
+	// Step 1: Find candidate parents via k-mer index
+	auto all_candidates = kmer_index_.find_candidates(query_sequence);
+
+	// Step 1b: Filter by abundance skew — candidate must have abundance >= abskew * query_abundance
+	double min_abundance = params_.abskew * static_cast<double>(query_abundance);
+	std::vector<uint32_t> candidates;
+	for (uint32_t idx : all_candidates) {
+		if (idx < ref_abundances_.size() && static_cast<double>(ref_abundances_[idx]) >= min_abundance) {
+			candidates.push_back(idx);
+		}
+	}
+
+	if (candidates.size() < 2) {
+		result.parent_a_label = "*";
+		result.parent_b_label = "*";
+		result.closest_parent_label = "*";
+		return result;
+	}
+
+	// Steps 2-6: same as detect()
+	auto parents = select_parents(query_sequence, candidates, ref_sequences_, aligner);
+	if (!parents.has_value()) {
+		result.parent_a_label = "*";
+		result.parent_b_label = "*";
+		result.closest_parent_label = "*";
+		return result;
+	}
+
+	result.parent_a_label = ref_labels_[parents->parent_a_idx];
+	result.parent_b_label = ref_labels_[parents->parent_b_idx];
+
+	auto star = build_star_alignment(parents->align_a.query_aligned, parents->align_a.subject_aligned,
+	                                 parents->align_b.query_aligned, parents->align_b.subject_aligned);
+	classify_diffs(star);
+
+	auto bp = sweep_breakpoints(star.diffs, params_);
+
+	result.score = bp.best_h;
+	result.left_yes = bp.left_yes;
+	result.left_no = bp.left_no;
+	result.left_abstain = bp.left_abstain;
+	result.right_yes = bp.right_yes;
+	result.right_no = bp.right_no;
+	result.right_abstain = bp.right_abstain;
+
+	result.id_query_a = compute_identity(parents->align_a.query_aligned, parents->align_a.subject_aligned);
+	result.id_query_b = compute_identity(parents->align_b.query_aligned, parents->align_b.subject_aligned);
+
+	auto ab_align = aligner.align_full(ref_sequences_[parents->parent_a_idx], ref_sequences_[parents->parent_b_idx]);
+	if (ab_align.has_value()) {
+		result.id_a_b = compute_identity(ab_align->query_aligned, ab_align->subject_aligned);
+	}
+
+	result.id_query_top = std::max(result.id_query_a, result.id_query_b);
+	result.closest_parent_label =
+	    (result.id_query_a >= result.id_query_b) ? result.parent_a_label : result.parent_b_label;
+
+	if (bp.best_pos >= 0) {
+		result.id_query_model = compute_model_identity(star, bp.best_pos, bp.reversed);
+		result.divergence = result.id_query_model - result.id_query_top;
+	}
+
+	int sum_left = bp.left_yes + bp.left_no + bp.left_abstain;
+	int sum_right = bp.right_yes + bp.right_no + bp.right_abstain;
+
+	if (bp.best_h >= params_.minh) {
+		if (result.divergence >= params_.mindiv && sum_left >= params_.mindiffs && sum_right >= params_.mindiffs) {
+			result.flag = "Y";
+		} else {
+			result.flag = "?";
+		}
+	} else {
 		result.flag = "N";
 		result.score = 0.0;
 		result.parent_a_label = "*";
