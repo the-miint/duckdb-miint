@@ -36,10 +36,12 @@ public:
 		std::vector<std::string> sequences;
 		std::vector<int64_t> sizes;
 
-		// Buffered results (all computed in one pass during first Execute call)
+		// Incremental processing state. Each Execute() call processes a batch of
+		// input sequences and buffers the results, allowing DuckDB to check for
+		// cancellation between calls.
+		idx_t input_offset = 0;
 		std::vector<miint::UchimeResult> results;
 		idx_t result_offset = 0;
-		bool processed = false;
 
 		GlobalState()
 		    : aligner(miint::UCHIME_WFA2_MISMATCH, miint::UCHIME_WFA2_GAP_OPEN, miint::UCHIME_WFA2_GAP_EXTEND) {

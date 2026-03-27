@@ -4,8 +4,6 @@
 
 require miint
 
-require-env VSEARCH_AVAILABLE
-
 # --- Setup: load test data into a table with read_id, sequence1, size columns ---
 # The denovo_input.fasta has ;size=N; in headers. We parse that into an integer column.
 # In production, users would do: SELECT read_id, sequence1, count(*) AS size FROM ... GROUP BY ...
@@ -13,9 +11,9 @@ require-env VSEARCH_AVAILABLE
 statement ok
 CREATE TABLE denovo_seqs AS
 SELECT
-    split_part(read_id, ';', 1) AS read_id,
+    regexp_extract(read_id, '^([^;]+)', 1) AS read_id,
     sequence1,
-    CAST(replace(split_part(read_id, ';', 2), 'size=', '') AS INTEGER) AS size
+    CAST(regexp_extract(read_id, 'size=(\d+)', 1) AS INTEGER) AS size
 FROM read_fastx('data/uchime/denovo_input.fasta');
 
 # Verify the table looks right
@@ -60,13 +58,11 @@ SELECT count(*) FROM uchime_denovo('denovo_seqs');
 ----
 6
 
-# --- Ground truth validation against vsearch v2.30.5 ---
+# --- Regression tests (hardcoded ground truth from vsearch v2.30.5) ---
+# These tests do NOT require vsearch at runtime — expected values are baked in.
 # vsearch --uchime_denovo denovo_input.fasta --sizein --uchimeout expected_denovo.tsv
-#
-# Expected: seq1=N, seq2=N, seq3=N, seq4=Y, seq5=Y, seq6=N
-# (seq4 is chimera of seq1+seq2, seq5 is chimera of seq2+seq3)
 
-# Verify all flags match vsearch
+# Verify all flags
 query TT
 SELECT query, flag FROM uchime_denovo('denovo_seqs') ORDER BY query;
 ----
@@ -84,9 +80,7 @@ SELECT count(*) FROM uchime_denovo('denovo_seqs') WHERE flag = 'Y';
 2
 
 # Verify seq4 (chimera of seq1+seq2) detailed results
-# vsearch: score=16.5019, parentA=seq1;size=1000, parentB=seq2;size=800
-# LY=45, LN=0, LA=0, RY=46, RN=0, RA=0, div=15.0
-# Note: our parent labels will be "seq1" and "seq2" (without ;size= suffix)
+# vsearch: score=16.5019, LY=45, LN=0, LA=0, RY=46, RN=0, RA=0, div=15.0
 query IRTTIIIIIIRT
 SELECT round(score, 2), query, parent_a, parent_b,
        left_yes, left_no, left_abstain,
@@ -97,7 +91,7 @@ WHERE query = 'seq4';
 ----
 16.50	seq4	seq1	seq2	45	0	0	46	0	0	15.0	Y
 
-# Verify non-chimeric sequences have * parents
+# Verify non-chimeric sequences have * parents and 0 votes
 query IIIII
 SELECT query, parent_a, parent_b, closest_parent, flag
 FROM uchime_denovo('denovo_seqs')

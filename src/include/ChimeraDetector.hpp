@@ -138,6 +138,10 @@ private:
 	std::vector<std::string> ref_sequences_;
 	std::vector<int64_t> ref_abundances_; // For de novo abundance skew filtering
 
+	// Shared pipeline: given pre-filtered candidates, run select_parents through classification.
+	UchimeResult detect_impl(const std::string &query_label, const std::string &query_sequence,
+	                         const std::vector<uint32_t> &candidates, WFA2Aligner &aligner) const;
+
 	// Compute identity % between two aligned sequences over non-ignored columns.
 	static double compute_identity(const std::string &aligned_a, const std::string &aligned_b);
 

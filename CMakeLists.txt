@@ -538,6 +538,7 @@ set(EXTENSION_SOURCES
     src/hfile_duckdb.cpp
     src/KmerIndex.cpp
     src/ChimeraDetector.cpp
+    src/uchime_common.cpp
     src/uchime_ref.cpp
     src/uchime_denovo.cpp)
 

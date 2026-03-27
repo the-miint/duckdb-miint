@@ -1,5 +1,6 @@
 #include "uchime_denovo.hpp"
 #include "table_function_common.hpp"
+#include "uchime_common.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
@@ -10,106 +11,12 @@
 #include "duckdb/main/database.hpp"
 
 #include <algorithm>
-#include <numeric>
 
 namespace duckdb {
 
-// Reuse the same output schema as uchime_ref (defined in uchime_ref.cpp).
-// Duplicated here to avoid cross-file dependency — both produce identical 18-column output.
-static std::vector<std::string> GetUchimeOutputNames() {
-	return {"score",        "query",      "parent_a", "parent_b",      "closest_parent", "id_query_model",
-	        "id_query_a",   "id_query_b", "id_a_b",   "id_query_top",  "left_yes",       "left_no",
-	        "left_abstain", "right_yes",  "right_no", "right_abstain", "divergence",     "flag"};
-}
-
-static std::vector<LogicalType> GetUchimeOutputTypes() {
-	return {LogicalType::DOUBLE,  LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	        LogicalType::VARCHAR, LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE,
-	        LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::INTEGER, LogicalType::INTEGER,
-	        LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::INTEGER,
-	        LogicalType::DOUBLE,  LogicalType::VARCHAR};
-}
-
-// Same OutputUchimeResults as uchime_ref — duplicated to avoid cross-file linkage.
-static idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResult> &results, idx_t offset,
-                                 idx_t count) {
-	idx_t actual = std::min(count, static_cast<idx_t>(results.size()) - offset);
-	if (actual == 0) {
-		output.SetCardinality(0);
-		return 0;
-	}
-
-	idx_t col = 0;
-
-	auto score_data = FlatVector::GetData<double>(output.data[col++]);
-	for (idx_t i = 0; i < actual; i++) {
-		score_data[i] = results[offset + i].score;
-	}
-
-	auto &query_vec = output.data[col++];
-	auto &parent_a_vec = output.data[col++];
-	auto &parent_b_vec = output.data[col++];
-	auto &closest_parent_vec = output.data[col++];
-	for (idx_t i = 0; i < actual; i++) {
-		auto &r = results[offset + i];
-		FlatVector::GetData<string_t>(query_vec)[i] = StringVector::AddString(query_vec, r.query_label);
-		FlatVector::GetData<string_t>(parent_a_vec)[i] = StringVector::AddString(parent_a_vec, r.parent_a_label);
-		FlatVector::GetData<string_t>(parent_b_vec)[i] = StringVector::AddString(parent_b_vec, r.parent_b_label);
-		FlatVector::GetData<string_t>(closest_parent_vec)[i] =
-		    StringVector::AddString(closest_parent_vec, r.closest_parent_label);
-	}
-
-	auto id_qm = FlatVector::GetData<double>(output.data[col++]);
-	auto id_qa = FlatVector::GetData<double>(output.data[col++]);
-	auto id_qb = FlatVector::GetData<double>(output.data[col++]);
-	auto id_ab = FlatVector::GetData<double>(output.data[col++]);
-	auto id_qt = FlatVector::GetData<double>(output.data[col++]);
-	for (idx_t i = 0; i < actual; i++) {
-		auto &r = results[offset + i];
-		id_qm[i] = r.id_query_model;
-		id_qa[i] = r.id_query_a;
-		id_qb[i] = r.id_query_b;
-		id_ab[i] = r.id_a_b;
-		id_qt[i] = r.id_query_top;
-	}
-
-	auto ly = FlatVector::GetData<int32_t>(output.data[col++]);
-	auto ln = FlatVector::GetData<int32_t>(output.data[col++]);
-	auto la = FlatVector::GetData<int32_t>(output.data[col++]);
-	auto ry = FlatVector::GetData<int32_t>(output.data[col++]);
-	auto rn = FlatVector::GetData<int32_t>(output.data[col++]);
-	auto ra = FlatVector::GetData<int32_t>(output.data[col++]);
-	for (idx_t i = 0; i < actual; i++) {
-		auto &r = results[offset + i];
-		ly[i] = r.left_yes;
-		ln[i] = r.left_no;
-		la[i] = r.left_abstain;
-		ry[i] = r.right_yes;
-		rn[i] = r.right_no;
-		ra[i] = r.right_abstain;
-	}
-
-	auto div_data = FlatVector::GetData<double>(output.data[col++]);
-	for (idx_t i = 0; i < actual; i++) {
-		div_data[i] = results[offset + i].divergence;
-	}
-
-	auto &flag_vec = output.data[col++];
-	for (idx_t i = 0; i < actual; i++) {
-		FlatVector::GetData<string_t>(flag_vec)[i] = StringVector::AddString(flag_vec, results[offset + i].flag);
-	}
-
-	D_ASSERT(col == output.ColumnCount());
-	output.SetCardinality(actual);
-	return actual;
-}
-
-// Validate that a table has read_id (VARCHAR), sequence1 (VARCHAR), and size (INTEGER/BIGINT).
+// Validate that a table has read_id (VARCHAR), sequence1 (VARCHAR), and size (integer type).
+// Single catalog lookup — checks all three columns in one pass.
 static void ValidateDenovoTableSchema(ClientContext &context, const std::string &table_name) {
-	// First validate read_id + sequence1 via existing infrastructure
-	ValidateSequenceTableSchema(context, table_name);
-
-	// Additionally check for size column
 	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
 	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
 	if (!entry) {
@@ -132,22 +39,45 @@ static void ValidateDenovoTableSchema(ClientContext &context, const std::string 
 		auto col_info = view.GetColumnInfo();
 		col_names = col_info->names;
 		col_types = col_info->types;
+	} else {
+		throw BinderException("'%s' is not a table or view", table_name);
 	}
 
-	bool found_size = false;
+	// Build case-insensitive lookup
+	std::unordered_map<string, idx_t> name_to_idx;
 	for (idx_t i = 0; i < col_names.size(); i++) {
-		if (StringUtil::Lower(col_names[i]) == "size") {
-			auto tid = col_types[i].id();
-			if (tid != LogicalTypeId::INTEGER && tid != LogicalTypeId::BIGINT && tid != LogicalTypeId::SMALLINT &&
-			    tid != LogicalTypeId::TINYINT && tid != LogicalTypeId::HUGEINT) {
-				throw BinderException("Column 'size' in table '%s' must be an integer type", table_name);
-			}
-			found_size = true;
-			break;
-		}
+		name_to_idx[StringUtil::Lower(col_names[i])] = i;
 	}
-	if (!found_size) {
-		throw BinderException("Table '%s' missing required column 'size' (INTEGER)", table_name);
+
+	// Check read_id
+	auto it = name_to_idx.find("read_id");
+	if (it == name_to_idx.end()) {
+		throw BinderException("Table '%s' missing required column 'read_id' (VARCHAR)", table_name);
+	}
+	if (col_types[it->second].id() != LogicalTypeId::VARCHAR) {
+		throw BinderException("Column 'read_id' in table '%s' must be VARCHAR", table_name);
+	}
+
+	// Check sequence1
+	it = name_to_idx.find("sequence1");
+	if (it == name_to_idx.end()) {
+		throw BinderException("Table '%s' missing required column 'sequence1' (VARCHAR)", table_name);
+	}
+	if (col_types[it->second].id() != LogicalTypeId::VARCHAR) {
+		throw BinderException("Column 'sequence1' in table '%s' must be VARCHAR", table_name);
+	}
+
+	// Check size (any integer type)
+	it = name_to_idx.find("size");
+	if (it == name_to_idx.end()) {
+		throw BinderException("Table '%s' missing required column 'size' (integer type)", table_name);
+	}
+	auto size_type = col_types[it->second].id();
+	if (size_type != LogicalTypeId::INTEGER && size_type != LogicalTypeId::BIGINT &&
+	    size_type != LogicalTypeId::SMALLINT && size_type != LogicalTypeId::TINYINT &&
+	    size_type != LogicalTypeId::HUGEINT) {
+		throw BinderException("Column 'size' in table '%s' must be an integer type (got %s)", table_name,
+		                      col_types[it->second].ToString());
 	}
 }
 
@@ -158,7 +88,7 @@ unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context,
 
 	data->input_table = input.inputs[0].GetValue<std::string>();
 
-	// Validate table schema: read_id (VARCHAR), sequence1 (VARCHAR), size (INTEGER)
+	// Validate table schema: read_id (VARCHAR), sequence1 (VARCHAR), size (integer)
 	ValidateDenovoTableSchema(context, data->input_table);
 
 	// Optional scoring parameters with range validation
@@ -208,6 +138,7 @@ unique_ptr<GlobalTableFunctionState> UchimeDenovoTableFunction::InitGlobal(Clien
 	gstate->detector = miint::ChimeraDetector(data.params);
 
 	// Load all sequences with their abundance via a separate connection.
+	// Sorted by size DESC so the most abundant sequences are processed first.
 	auto &db = DatabaseInstance::GetDatabase(context);
 	Connection conn(db);
 	auto result = conn.Query("SELECT read_id, sequence1, size FROM " +
@@ -245,47 +176,63 @@ unique_ptr<GlobalTableFunctionState> UchimeDenovoTableFunction::InitGlobal(Clien
 void UchimeDenovoTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
-	// Process all sequences on first Execute call (single-threaded, sequential).
-	// De novo mode is inherently sequential: each non-chimera is added to the
-	// reference DB before processing the next query (lower abundance).
-	if (!gstate.processed) {
-		gstate.processed = true;
-		gstate.results.reserve(gstate.labels.size());
+	// De novo mode is inherently sequential: each non-chimera must be added to the
+	// reference DB before processing the next (lower abundance) query. We process
+	// a small batch per Execute() call to allow DuckDB's cancellation mechanism to
+	// work between calls, rather than processing everything in a single blocking call.
 
-		for (idx_t i = 0; i < gstate.labels.size(); i++) {
-			miint::UchimeResult result;
-
-			if (gstate.detector.ref_sequences().size() < 2) {
-				// Not enough references yet — cannot detect chimeras.
-				// Add this sequence to the reference and report as non-chimeric.
-				result.query_label = gstate.labels[i];
-				result.parent_a_label = "*";
-				result.parent_b_label = "*";
-				result.closest_parent_label = "*";
-				result.flag = "N";
-			} else {
-				result = gstate.detector.detect_denovo(gstate.labels[i], gstate.sequences[i], gstate.sizes[i],
-				                                       gstate.aligner);
-			}
-
-			// De novo: non-chimeras (and borderline) are added to the reference DB
-			if (result.flag != "Y") {
-				gstate.detector.add_to_reference(gstate.labels[i], gstate.sequences[i], gstate.sizes[i]);
-			}
-
-			gstate.results.push_back(std::move(result));
-		}
-	}
-
-	// Drain results in STANDARD_VECTOR_SIZE chunks
+	// 1. Drain any buffered results first
 	if (gstate.result_offset < gstate.results.size()) {
 		idx_t remaining = gstate.results.size() - gstate.result_offset;
 		idx_t count = std::min(remaining, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
 		OutputUchimeResults(output, gstate.results, gstate.result_offset, count);
 		gstate.result_offset += count;
-	} else {
-		output.SetCardinality(0);
+		return;
 	}
+
+	// 2. Process next batch of input sequences
+	gstate.results.clear();
+	gstate.result_offset = 0;
+
+	idx_t batch_size = STANDARD_VECTOR_SIZE;
+	idx_t processed = 0;
+
+	while (gstate.input_offset < gstate.labels.size() && processed < batch_size) {
+		idx_t i = gstate.input_offset++;
+		miint::UchimeResult result;
+
+		if (gstate.detector.ref_sequences().size() < 2) {
+			// Bootstrap: the first two sequences (highest abundance) cannot be chimeras
+			// because no more-abundant parents exist. They are unconditionally added to
+			// the reference DB to seed the k-mer index for subsequent queries.
+			result.query_label = gstate.labels[i];
+			result.parent_a_label = "*";
+			result.parent_b_label = "*";
+			result.closest_parent_label = "*";
+			result.flag = "N";
+		} else {
+			result =
+			    gstate.detector.detect_denovo(gstate.labels[i], gstate.sequences[i], gstate.sizes[i], gstate.aligner);
+		}
+
+		// Non-chimeras (and borderline ?) are added to the reference DB
+		if (result.flag != "Y") {
+			gstate.detector.add_to_reference(gstate.labels[i], gstate.sequences[i], gstate.sizes[i]);
+		}
+
+		gstate.results.push_back(std::move(result));
+		processed++;
+	}
+
+	if (gstate.results.empty()) {
+		output.SetCardinality(0);
+		return;
+	}
+
+	// Output the first chunk of results
+	idx_t count = std::min(static_cast<idx_t>(gstate.results.size()), static_cast<idx_t>(STANDARD_VECTOR_SIZE));
+	OutputUchimeResults(output, gstate.results, 0, count);
+	gstate.result_offset = count;
 }
 
 TableFunction UchimeDenovoTableFunction::GetFunction() {
