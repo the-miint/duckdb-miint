@@ -1,4 +1,5 @@
 #include "ChimeraDetector.hpp"
+#include "DustMasker.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -489,12 +490,18 @@ void ChimeraDetector::set_reference(const std::vector<std::string> &labels, cons
 	for (auto &seq : ref_sequences_) {
 		normalize_rna_to_dna(seq);
 	}
-	// Initialize abundances to 0 so detect_denovo's abundance filter passes all
-	// candidates when set_reference is used (no abundance constraint).
 	ref_abundances_.assign(sequences.size(), 0);
+
+	// Build k-mer index using DUST-masked copies of the sequences.
+	// DUST lowercases low-complexity regions; KmerIndex::encode_kmer skips
+	// k-mers containing any lowercase base. This prevents conserved/repetitive
+	// regions from flooding the index with non-discriminative hits.
+	// The unmasked ref_sequences_ are used for alignment (not the masked copies).
 	kmer_index_ = KmerIndex();
 	for (size_t i = 0; i < ref_sequences_.size(); i++) {
-		kmer_index_.add_sequence(ref_sequences_[i]);
+		std::string masked = ref_sequences_[i];
+		dust_mask(masked);
+		kmer_index_.add_sequence(masked);
 	}
 }
 
@@ -503,7 +510,10 @@ void ChimeraDetector::add_to_reference(const std::string &label, const std::stri
 	ref_sequences_.push_back(sequence);
 	normalize_rna_to_dna(ref_sequences_.back());
 	ref_abundances_.push_back(abundance);
-	kmer_index_.add_sequence(sequence);
+	// DUST-mask for k-mer indexing
+	std::string masked = ref_sequences_.back();
+	dust_mask(masked);
+	kmer_index_.add_sequence(masked);
 }
 
 // Shared pipeline: given pre-filtered candidate indices, run the full UCHIME
@@ -607,7 +617,10 @@ UchimeResult ChimeraDetector::detect(const std::string &query_label, const std::
 	// Normalize RNA (U→T) for consistent k-mer matching and alignment.
 	std::string normalized_query = query_sequence;
 	normalize_rna_to_dna(normalized_query);
-	auto candidates = kmer_index_.find_candidates(normalized_query);
+	// DUST-mask query for k-mer search (use unmasked for alignment in detect_impl)
+	std::string masked_query = normalized_query;
+	dust_mask(masked_query);
+	auto candidates = kmer_index_.find_candidates(masked_query);
 	return detect_impl(query_label, normalized_query, candidates, aligner);
 }
 
@@ -615,7 +628,9 @@ UchimeResult ChimeraDetector::detect_denovo(const std::string &query_label, cons
                                             int64_t query_abundance, WFA2Aligner &aligner) const {
 	std::string normalized_query = query_sequence;
 	normalize_rna_to_dna(normalized_query);
-	auto all_candidates = kmer_index_.find_candidates(normalized_query);
+	std::string masked_query = normalized_query;
+	dust_mask(masked_query);
+	auto all_candidates = kmer_index_.find_candidates(masked_query);
 
 	// Filter by abundance skew: candidate parents must have abundance >= abskew * query_abundance.
 	// ref_abundances_ is always sized to match ref_sequences_ (set_reference fills with 0,

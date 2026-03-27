@@ -11,26 +11,24 @@ bool KmerIndex::encode_kmer(const std::string &seq, size_t pos, uint16_t &out) {
 		char c = seq[pos + i];
 		uint16_t base;
 		switch (c) {
+		// Uppercase = unmasked DNA/RNA bases
 		case 'A':
-		case 'a':
 			base = 0;
 			break;
 		case 'C':
-		case 'c':
 			base = 1;
 			break;
 		case 'G':
-		case 'g':
 			base = 2;
 			break;
 		case 'T':
-		case 't':
 		case 'U':
-		case 'u':
 			base = 3;
 			break;
+		// Lowercase = DUST-masked (low-complexity) bases — skip this k-mer.
+		// Also reject ambiguous bases (N, R, Y, etc.).
 		default:
-			return false; // Ambiguous base
+			return false;
 		}
 		code = (code << 2) | base;
 	}

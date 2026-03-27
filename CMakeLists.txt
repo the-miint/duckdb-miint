@@ -537,6 +537,7 @@ set(EXTENSION_SOURCES
     src/duckdb_seq_stream.cpp
     src/hfile_duckdb.cpp
     src/KmerIndex.cpp
+    src/DustMasker.cpp
     src/ChimeraDetector.cpp
     src/uchime_common.cpp
     src/uchime_ref.cpp
@@ -704,6 +705,8 @@ set(TEST_SOURCES
     test/cpp/test_hfile_duckdb.cpp
     src/KmerIndex.cpp
     test/cpp/test_KmerIndex.cpp
+    src/DustMasker.cpp
+    test/cpp/test_DustMasker.cpp
     src/ChimeraDetector.cpp
     test/cpp/test_ChimeraDetector.cpp
 )
