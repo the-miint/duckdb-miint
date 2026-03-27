@@ -1582,10 +1582,10 @@ Reference-based chimera detection using the UCHIME algorithm (Edgar et al. 2011,
 | Column | Type | Description |
 |--------|------|-------------|
 | `score` | DOUBLE | Chimera h-score (higher = more likely chimeric) |
-| `query` | VARCHAR | Query sequence identifier |
-| `parent_a` | VARCHAR | Parent A identifier (or `*` if non-chimeric) |
-| `parent_b` | VARCHAR | Parent B identifier (or `*` if non-chimeric) |
-| `closest_parent` | VARCHAR | Closest parent to query (or `*`) |
+| `query_id` | VARCHAR | Query sequence identifier |
+| `parent_a_id` | VARCHAR | Parent A identifier (NULL if non-chimeric) |
+| `parent_b_id` | VARCHAR | Parent B identifier (NULL if non-chimeric) |
+| `closest_parent_id` | VARCHAR | Closest parent to query (NULL if non-chimeric) |
 | `id_query_model` | DOUBLE | Query-to-chimeric-model identity % |
 | `id_query_a` | DOUBLE | Query-to-parent-A identity % |
 | `id_query_b` | DOUBLE | Query-to-parent-B identity % |
@@ -1612,7 +1612,7 @@ SELECT * FROM uchime_ref('queries', db:='refs');
 -- Filter chimeric sequences
 CREATE TABLE clean_seqs AS
 SELECT q.* FROM queries q
-JOIN uchime_ref('queries', db:='refs') u ON q.read_id = u.query
+JOIN uchime_ref('queries', db:='refs') u ON q.read_id = u.query_id
 WHERE u.flag = 'N';
 
 -- Count chimeras
@@ -1621,7 +1621,7 @@ SELECT flag, count(*) FROM uchime_ref('queries', db:='refs') GROUP BY flag;
 
 **Behavior:**
 - One output row per query sequence (all queries are reported, not just chimeras)
-- Non-chimeric sequences (flag=`N`) have `*` for parent columns and 0 for all vote/identity columns
+- Non-chimeric sequences (flag=`N`) have NULL for parent and identity columns, and 0 for vote columns
 - `id_a_b` (parent A vs parent B identity) is only computed for chimeric (`Y`) and borderline (`?`) results. Non-chimeric results report `id_a_b=0.0`. This avoids an extra pairwise alignment per query that is not needed for classification. Note: vsearch computes `id_a_b` for all queries unconditionally.
 - Multi-threaded: queries are processed in parallel with per-thread WFA2 aligners
 - The reference database is fully materialized in memory at init time
@@ -1668,7 +1668,7 @@ SELECT * FROM uchime_denovo('seqs');
 
 -- Filter out chimeras
 SELECT s.* FROM seqs s
-JOIN uchime_denovo('seqs') u ON s.read_id = u.query
+JOIN uchime_denovo('seqs') u ON s.read_id = u.query_id
 WHERE u.flag != 'Y';
 ```
 

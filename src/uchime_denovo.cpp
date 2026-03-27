@@ -206,9 +206,9 @@ void UchimeDenovoTableFunction::Execute(ClientContext &context, TableFunctionInp
 			// because no more-abundant parents exist. They are unconditionally added to
 			// the reference DB to seed the k-mer index for subsequent queries.
 			result.query_label = gstate.labels[i];
-			result.parent_a_label = "*";
-			result.parent_b_label = "*";
-			result.closest_parent_label = "*";
+			result.parent_a_label = "";
+			result.parent_b_label = "";
+			result.closest_parent_label = "";
 			result.flag = "N";
 		} else {
 			result =

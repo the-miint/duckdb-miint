@@ -64,7 +64,7 @@ SELECT count(*) FROM uchime_denovo('denovo_seqs');
 
 # Verify all flags
 query TT
-SELECT query, flag FROM uchime_denovo('denovo_seqs') ORDER BY query;
+SELECT query_id, flag FROM uchime_denovo('denovo_seqs') ORDER BY query_id;
 ----
 seq1	N
 seq2	N
@@ -82,22 +82,22 @@ SELECT count(*) FROM uchime_denovo('denovo_seqs') WHERE flag = 'Y';
 # Verify seq4 (chimera of seq1+seq2) detailed results
 # vsearch: score=16.5019, LY=45, LN=0, LA=0, RY=46, RN=0, RA=0, div=15.0
 query IRTTIIIIIIRT
-SELECT round(score, 2), query, parent_a, parent_b,
+SELECT round(score, 2), query_id, parent_a_id, parent_b_id,
        left_yes, left_no, left_abstain,
        right_yes, right_no, right_abstain,
        round(divergence, 1), flag
 FROM uchime_denovo('denovo_seqs')
-WHERE query = 'seq4';
+WHERE query_id = 'seq4';
 ----
 16.50	seq4	seq1	seq2	45	0	0	46	0	0	15.0	Y
 
-# Verify non-chimeric sequences have * parents and 0 votes
+# Verify non-chimeric sequences have NULL parents
 query IIIII
-SELECT query, parent_a, parent_b, closest_parent, flag
+SELECT query_id, parent_a_id, parent_b_id, closest_parent_id, flag
 FROM uchime_denovo('denovo_seqs')
-WHERE query = 'seq1';
+WHERE query_id = 'seq1';
 ----
-seq1	*	*	*	N
+seq1	NULL	NULL	NULL	N
 
 # --- View support ---
 statement ok

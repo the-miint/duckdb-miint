@@ -497,17 +497,17 @@ UchimeResult ChimeraDetector::detect_impl(const std::string &query_label, const 
 	result.query_label = query_label;
 
 	if (candidates.size() < 2) {
-		result.parent_a_label = "*";
-		result.parent_b_label = "*";
-		result.closest_parent_label = "*";
+		result.parent_a_label = "";
+		result.parent_b_label = "";
+		result.closest_parent_label = "";
 		return result;
 	}
 
 	auto parents = select_parents(query_sequence, candidates, ref_sequences_, aligner);
 	if (!parents.has_value()) {
-		result.parent_a_label = "*";
-		result.parent_b_label = "*";
-		result.closest_parent_label = "*";
+		result.parent_a_label = "";
+		result.parent_b_label = "";
+		result.closest_parent_label = "";
 		return result;
 	}
 
@@ -565,9 +565,9 @@ UchimeResult ChimeraDetector::detect_impl(const std::string &query_label, const 
 		// Non-chimeric: match vsearch convention of reporting * for parents/identities
 		result.flag = "N";
 		result.score = 0.0;
-		result.parent_a_label = "*";
-		result.parent_b_label = "*";
-		result.closest_parent_label = "*";
+		result.parent_a_label = "";
+		result.parent_b_label = "";
+		result.closest_parent_label = "";
 		result.id_query_model = 0.0;
 		result.id_query_a = 0.0;
 		result.id_query_b = 0.0;
