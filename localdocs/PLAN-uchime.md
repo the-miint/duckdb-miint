@@ -137,133 +137,86 @@ Implemented and reviewed. Key design decisions from code review:
   - divergent: 46A + 43B + 11N + 2? = 102 (exact)
 - 14 test cases, 86 assertions
 
-### Phase 4: Smoothed Parent Selection — IN PROGRESS
+### Phase 4: Smoothed Parent Selection — DONE ✓
 
-**RED** — `test/cpp/test_ChimeraDetector.cpp`:
-- `compute_match_profile()`: from pairwise alignment, produce per-position match array
-- `compute_smoothed_identity()`: 32bp sliding window over match profile
-- `select_parents()`: chimeric query → correct parent A (left winner) and parent B (right winner)
-- Single dominant parent → both A and B same sequence
-- Ties broken deterministically
-- **vsearch-validated**: select_parents on chimera1 with ref1+ref2 candidates → picks correct parents
+Implemented and reviewed. Key design decisions from code review:
+- **Win-counting starts at SMOOTHING_WINDOW-1**: positions 0..30 have partial sums and are skipped
+- **`std::min` across all smoothed vector sizes**: prevents OOB read when candidates have different alignment lengths (due to indels)
+- **ParentPair caches pairwise alignments**: reused in detect() for star alignment + identity computation
+- select_parents on chimera1 correctly picks ref1 (parent A) and ref2 (parent B)
+- Parent assignment order may differ from vsearch for asymmetric chimeras (handled by reversed breakpoint sweep)
 
-**GREEN**:
-- `compute_match_profile()`: for each aligned column, 1 if Q==S and neither is gap, else 0
-- `compute_smoothed_identity()`: running sum of match array over window of 32
-- `select_parents()`: for each candidate, compute smoothed profile. At each position, candidate with max smooth value "wins". Parent A = most total wins. Wipe A's winning positions, recompute, Parent B = most wins in round 2.
-- Return struct with parent indices AND cached pairwise alignments (reused in Phase 5)
+### Phase 5: H-Score Sweep + Classification — DONE ✓
 
-**REFACTOR** — Ensure alignment cache is shared with detect()
+Implemented and reviewed. Key design decisions from code review:
+- **Divergence gated on `best_pos >= 0`**: non-chimeric sequences get divergence=0.0, not garbage negative values
+- **Reversed configuration**: when B-diffs dominate left and A-diffs dominate right, parents are effectively swapped in the sweep
+- **WFA2Aligner reuse verified**: bit-identical scores across repeated detect() calls with same aligner
+- **Gapped sequence tests**: parents with different alignment lengths tested for OOB safety
 
-### Phase 5: H-Score Sweep + Classification
+vsearch ground truth validation:
+- chimera1: score=16.50±0.01, votes=45/0/0/46/0/0, identities QA=84.7/QB=85.0/AB=69.7/QM=100.0 (all within ±0.5)
+- All 8 queries classified correctly (4Y, 4N)
+- 21 test cases, 156 assertions
 
-**RED** — `test/cpp/test_ChimeraDetector.cpp`:
-- `sweep_breakpoints()`: 30 A-diffs then 30 B-diffs → h-score ≈ 1.0, clear chimera
-- All A-diffs → h-score 0 (one-sided)
-- All IGNORE → h-score 0
-- Reversed configuration (B-diffs left, A-diffs right)
-- Hand-computed example with mixed diffs → expected H value
-- Classification: H≥minh + divdiff≥mindiv + diffs≥mindiffs → Y
-- H≥minh but fails other checks → ? (borderline)
-- H<minh → N
-- **Full pipeline test**: detect() on synthetic chimera → flag=Y, clean → flag=N
-- **vsearch ground truth**: compare full UchimeResult (score, votes, identities, flag) for all 8 queries against expected_ref.tsv
-  - Note: pre-breakpoint diff counts (Phase 3) ≠ post-breakpoint vote counts (this phase).
-    vsearch's LY/RY/LN/RN/LA/RA are votes assigned *after* breakpoint selection.
-    N-diffs become "no-votes" when they fall on the "wrong" side, "abstain" otherwise.
-  - Identity %: matches / non-ignored columns × 100
+### Phase 6: uchime_ref Table Function — DONE ✓
 
-**GREEN**:
-- `sweep_breakpoints()`: initialize all votes on right side, sweep left-to-right transferring votes, compute H=H_left×H_right at each position, track best. Handle reversed configuration (swap A↔B if left_n > left_y and right_n > right_y).
-- `UchimeResult` struct with all 18 output fields
-- `UchimeParams` struct (minh, xn, dn, mindiv, mindiffs, abskew)
-- `ChimeraDetector` class with:
-  - `set_reference()` — load reference sequences + build k-mer index
-  - `detect()` — full pipeline: find_candidates → align → select_parents → build_star_alignment → classify_diffs → sweep_breakpoints → compute identities → classify
-- Identity computation: matches/non-ignored-columns × 100
-- Divergence: id_query_model - id_query_top
+Implemented and reviewed. Key design decisions from code review:
+- **QuerySequenceStream** for lazy streaming queries (thread-safe, no full materialization)
+- **Schema validation at bind time** via ValidateSequenceTableSchema
+- **Thread count capped at 8** (not raw hardware_concurrency)
+- **NULL/empty reference rows skipped** (not silent data loss)
+- **D_ASSERT(col == output.ColumnCount())** in OutputUchimeResults
+- **Parameter range validation** (minh>=0, xn>=1.0, dn>=0, mindiffs>=1)
+- **Non-chimeric flag=N uses * for parents/identities** (vsearch convention)
+- View support tested, wrong column names tested
+- 73 SQL assertions
 
-**REFACTOR** — Extract identity calculation helper, clean up detect() flow
+### Phase 7: uchime_denovo Table Function — DONE ✓
 
-**WFA2 reuse verification**: The same WFA2Aligner instance must be reused across:
-- Multiple candidate alignments within select_parents()
-- The A-B identity alignment in detect()
-- Multiple detect() calls from the same thread
-Tests verify this by calling detect() repeatedly with the same aligner and checking for consistent results. The table function's LocalState will hold one WFA2Aligner per thread.
+Implemented and reviewed. Key design decisions from code review:
+- **detect_impl() private helper** eliminates 80 lines of duplicated pipeline code
+- **set_reference() initializes ref_abundances_ to 0** preventing silent filter-all bug
+- **Single catalog lookup** in ValidateDenovoTableSchema
+- **uchime_common.hpp/.cpp** with shared output functions (no more duplication)
+- **Incremental Execute()** processes STANDARD_VECTOR_SIZE per call for DuckDB cancellation
+- **Regression tests run unconditionally** (no require-env guard on hardcoded expected values)
+- **regexp_extract** for robust ;size=N; parsing
+- **Bootstrap comment** explains why first two sequences skip chimera testing
+- Input table requires `read_id` (VARCHAR), `sequence1` (VARCHAR), `size` (integer type)
+- 56 SQL assertions
 
-### Phase 6: uchime_ref Table Function
+### Phase 8: Performance Validation — IN PROGRESS
 
-**RED** — `test/sql/uchime_ref.test`:
-- Error cases: missing table, missing db parameter, nonexistent reference table, missing required columns
-- Row count matches query count
-- Column types correct
-- Ground truth validation: all 18 columns compared to `expected_ref.tsv` (score rounded to 4dp, identities to 1dp, votes and flag exact)
-- Parameter override tests (minh=0.01 catches borderline cases)
+Benchmark uchime_ref using real 16S data: `scratch/LTPs132_SSU.fasta` (LTP database).
+Use an arbitrary subset as reference, remainder as queries.
 
-**GREEN** — `src/include/uchime_ref.hpp` + `src/uchime_ref.cpp`:
+**Benchmark plan:**
+1. Load LTPs132_SSU.fasta, split into reference (~500 seqs) and queries (~rest)
+2. Time vsearch: `vsearch --uchime_ref queries.fasta --db refs.fasta --uchimeout /dev/null --threads 1`
+3. Time miint: `SELECT count(*) FROM uchime_ref('queries', db:='refs')`
+4. Compare wall-clock times, chimera counts, and flag agreement
+5. If miint is slower, profile and optimize
 
-Follows the align_minimap2 streaming pattern: reference materialized + indexed at init; queries streamed in batches.
+**Benchmark results** (LTPs132_SSU.fasta: 500 refs × 2000 queries, ~1462bp mean):
 
-- Data struct: query/ref table names, UchimeParams, output schema
-- GlobalState:
-  - ChimeraDetector with reference loaded + k-mer index built at init (shared read-only across threads)
-  - `all_query_ids` — materialized read_id list (lightweight, no sequences)
-  - `atomic<idx_t> next_batch_offset` — for lock-free batch claiming
-- LocalState:
-  - Per-thread WFA2Aligner(6, 20, 4)
-  - `result_buffer` + `buffer_offset` — buffered UchimeResults, drained in STANDARD_VECTOR_SIZE chunks
-- Bind(): validate tables exist (TABLE_ENTRY lookup), check required columns (read_id, sequence), parse named params, build schema
-- InitGlobal(): read reference table via separate Connection → detector.set_reference() + build k-mer index. Materialize query read_ids only (not sequences).
-- Execute(): streaming producer-consumer loop (same as align_minimap2):
-  1. If result_buffer has data → output a chunk
-  2. If buffer empty → atomic `fetch_add(batch_size)` to claim next batch of query IDs
-  3. `ReadBatchByIds()` — fetch sequences for claimed IDs via temp table JOIN (no OFFSET)
-  4. `detect()` each query against the shared ChimeraDetector
-  5. Buffer results, loop back to step 1
-- MaxThreads(): min(total_queries/batch_size, hardware_concurrency)
+| Config | Wall time | Per-query |
+|--------|-----------|-----------|
+| vsearch --threads 1 | 22s | 11ms |
+| vsearch default (12 cores) | 5s | — |
+| miint SET threads=1 | 50s | 25ms |
+| miint default threads | 50s | — (no wall improvement, threads contend on stream mutex) |
 
-Register in `miint_extension.cpp`, add to `CMakeLists.txt`.
+**Assessment:** miint is ~2.3x slower than vsearch single-threaded. The bottleneck is WFA2 alignment (gap_open=20 on ~1500bp seqs with ~30% divergence). vsearch uses SIMD-optimized NW which is inherently faster for this workload.
 
-**REFACTOR** — Extract param parsing, output population helpers
+Multi-threading shows no wall-time benefit because QuerySequenceStream serializes query fetching. Threads do useful alignment work (CPU time > wall time) but the mutex is the bottleneck.
 
-### Phase 7: uchime_denovo Table Function
-
-**Input**: a DuckDB table/view name (VARCHAR) with required columns: `read_id` (VARCHAR), `sequence` (VARCHAR), `size` (INTEGER). No FASTA header parsing — the caller provides abundance as a proper integer column. This is cleaner than vsearch's `;size=N;` convention and composes naturally with DuckDB workflows:
-
-```sql
--- Example usage: read sequences, add abundance, detect chimeras
-CREATE TABLE seqs AS SELECT read_id, sequence1 AS sequence, count(*) AS size
-  FROM read_fastx('amplicons.fasta') GROUP BY ALL;
-SELECT * FROM uchime_denovo('seqs');
-```
-
-**RED** — `test/sql/uchime_denovo.test`:
-- Error cases: missing table, missing required columns, non-integer size column
-- Row count correct (all sequences reported, not just chimeras)
-- Ground truth against `expected_denovo.tsv` (generated by creating equivalent vsearch input with `;size=N;` headers)
-- `abskew` parameter test
-
-**GREEN** — `src/include/uchime_denovo.hpp` + `src/uchime_denovo.cpp`:
-- Bind(): validate table exists, check required columns (read_id, sequence, size)
-- InitGlobal(): read table via separate Connection, sort by size descending
-- MaxThreads() = 1 (sequential)
-- Execute(): process one query at a time, call detect_denovo() which filters candidates by abundance skew, add non-chimeras to detector's reference incrementally
-
-**REFACTOR** — Share output schema with uchime_ref
-
-### Phase 8: Performance Validation
-
-Benchmark script comparing vsearch vs miint on:
-- 1000 queries × gold.fa reference (~5000 seqs, ~1500bp each)
-- 5000 queries × same reference
-
-Target: same wall-clock time or faster than vsearch with equivalent thread count.
-
-Performance levers:
-- Multi-threaded uchime_ref (each thread has own WFA2Aligner)
-- Array-based k-mer index (cache-friendly flat array vs hash map)
-- WFA2 BiWFA O(s) memory mode (fast for similar sequences)
-- Batch query claiming (64 at a time, minimal lock contention)
+**Optimization opportunities (future):**
+- Use WFA2 `align_score` (score-only mode, faster) for candidate ranking, `align_full` only for the selected 2 parents
+- Pre-filter candidates more aggressively (skip very dissimilar candidates before full alignment)
+- Reduce candidate count from 16 to 8 for sequences with many hits
+- Consider WFA2 `alignEndsFree` for sequences with significant length differences
+- Parallelize query fetching: use atomic batch claiming instead of mutex-protected stream
 
 ---
 
