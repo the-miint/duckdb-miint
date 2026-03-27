@@ -25,6 +25,8 @@ bool KmerIndex::encode_kmer(const std::string &seq, size_t pos, uint16_t &out) {
 			break;
 		case 'T':
 		case 't':
+		case 'U':
+		case 'u':
 			base = 3;
 			break;
 		default:

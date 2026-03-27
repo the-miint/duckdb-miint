@@ -7,6 +7,18 @@
 
 namespace miint {
 
+// Normalize RNA (U) to DNA (T) for consistent k-mer indexing and alignment.
+// Operates in-place. Also handles lowercase.
+static void normalize_rna_to_dna(std::string &seq) {
+	for (auto &c : seq) {
+		if (c == 'U') {
+			c = 'T';
+		} else if (c == 'u') {
+			c = 't';
+		}
+	}
+}
+
 static bool is_gap(char c) {
 	return c == '-';
 }
@@ -473,18 +485,23 @@ ChimeraDetector::ChimeraDetector(const UchimeParams &params) : params_(params) {
 void ChimeraDetector::set_reference(const std::vector<std::string> &labels, const std::vector<std::string> &sequences) {
 	ref_labels_ = labels;
 	ref_sequences_ = sequences;
+	// Normalize RNA (U→T) for consistent k-mer indexing and alignment.
+	for (auto &seq : ref_sequences_) {
+		normalize_rna_to_dna(seq);
+	}
 	// Initialize abundances to 0 so detect_denovo's abundance filter passes all
 	// candidates when set_reference is used (no abundance constraint).
 	ref_abundances_.assign(sequences.size(), 0);
 	kmer_index_ = KmerIndex();
-	for (size_t i = 0; i < sequences.size(); i++) {
-		kmer_index_.add_sequence(sequences[i]);
+	for (size_t i = 0; i < ref_sequences_.size(); i++) {
+		kmer_index_.add_sequence(ref_sequences_[i]);
 	}
 }
 
 void ChimeraDetector::add_to_reference(const std::string &label, const std::string &sequence, int64_t abundance) {
 	ref_labels_.push_back(label);
 	ref_sequences_.push_back(sequence);
+	normalize_rna_to_dna(ref_sequences_.back());
 	ref_abundances_.push_back(abundance);
 	kmer_index_.add_sequence(sequence);
 }
@@ -587,13 +604,18 @@ UchimeResult ChimeraDetector::detect_impl(const std::string &query_label, const 
 
 UchimeResult ChimeraDetector::detect(const std::string &query_label, const std::string &query_sequence,
                                      WFA2Aligner &aligner) const {
-	auto candidates = kmer_index_.find_candidates(query_sequence);
-	return detect_impl(query_label, query_sequence, candidates, aligner);
+	// Normalize RNA (U→T) for consistent k-mer matching and alignment.
+	std::string normalized_query = query_sequence;
+	normalize_rna_to_dna(normalized_query);
+	auto candidates = kmer_index_.find_candidates(normalized_query);
+	return detect_impl(query_label, normalized_query, candidates, aligner);
 }
 
 UchimeResult ChimeraDetector::detect_denovo(const std::string &query_label, const std::string &query_sequence,
                                             int64_t query_abundance, WFA2Aligner &aligner) const {
-	auto all_candidates = kmer_index_.find_candidates(query_sequence);
+	std::string normalized_query = query_sequence;
+	normalize_rna_to_dna(normalized_query);
+	auto all_candidates = kmer_index_.find_candidates(normalized_query);
 
 	// Filter by abundance skew: candidate parents must have abundance >= abskew * query_abundance.
 	// ref_abundances_ is always sized to match ref_sequences_ (set_reference fills with 0,
@@ -606,7 +628,7 @@ UchimeResult ChimeraDetector::detect_denovo(const std::string &query_label, cons
 		}
 	}
 
-	return detect_impl(query_label, query_sequence, candidates, aligner);
+	return detect_impl(query_label, normalized_query, candidates, aligner);
 }
 
 } // namespace miint
