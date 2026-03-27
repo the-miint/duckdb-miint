@@ -5,30 +5,40 @@
 
 namespace miint {
 
+// Threshold below which the BiWFA alignment-scope score bug can trigger.
+// The bug affects sequences <= WF_BIALIGN_FALLBACK_MIN_LENGTH (100bp) or
+// alignment scores <= WF_BIALIGN_FALLBACK_MIN_SCORE (250). For sequences
+// above this threshold, the alignment-scope aligner's getAlignmentScore()
+// is correct, and we don't need the separate score-scope aligner.
+// See ext/WFA2-lib/bialign_score_bug.c for a standalone reproduction.
+static constexpr size_t BIWFA_SCORE_BUG_LENGTH_THRESHOLD = 100;
+
 struct WFA2Aligner::Impl {
-	// Two aligner instances for different scopes, both using BiWFA (MemoryUltralow)
-	// for O(s) memory instead of O(s^2):
-	// - Score-scope: faster, only returns alignment score
-	// - Alignment-scope: computes CIGAR traceback (but NOT used for score — see below)
+	// Score-scope aligner: used ONLY for align_score() calls AND as a fallback
+	// for short sequences (<=100bp) where the BiWFA alignment-scope score bug
+	// can trigger.
 	//
-	// WFA2-lib v2.3.5 bug workaround: the BiWFA alignment-scope path does not
-	// populate cigar->score when it falls back to unidirectional alignment for
-	// sequences <= WF_BIALIGN_FALLBACK_MIN_LENGTH (100bp) or scores <=
-	// WF_BIALIGN_FALLBACK_MIN_SCORE (250). The fallback in wavefront_bialign_base()
-	// correctly appends CIGAR operations but returns WF_STATUS_OK without propagating
-	// the base aligner's score to the parent cigar. The score remains at INT32_MIN.
-	// See ext/WFA2-lib/bialign_score_bug.c for a standalone reproduction.
-	//
-	// Workaround: always obtain the score from the score-scope aligner (which does
-	// not have this bug), and only use the alignment-scope aligner for CIGAR retrieval.
+	// For sequences >100bp, the alignment-scope aligner's score is reliable
+	// (set via wavefront_bialign.c:651 breakpoint.score propagation), so we
+	// skip the redundant score-scope alignment. This halves WFA2 computation
+	// for typical UCHIME workloads (~1500bp sequences).
 	std::unique_ptr<wfa::WFAlignerGapAffine> score_aligner;
+
+	// Alignment-scope aligner: computes CIGAR traceback. Uses MemoryMed
+	// (piggyback backtrace) instead of MemoryUltralow (BiWFA recursive).
+	//
+	// MemoryUltralow (BiWFA) is designed for ultra-long sequences (>30Kbp)
+	// where O(s^2) memory is prohibitive. For 1500bp 16S sequences, BiWFA's
+	// recursive forward+reverse wavefront expansion adds 1.25-2x overhead
+	// with no memory benefit. MemoryMed gives near-MemoryHigh speed with
+	// bounded memory via piggyback wavefront offloading.
 	std::unique_ptr<wfa::WFAlignerGapAffine> alignment_aligner;
 
 	Impl(int mismatch, int gap_open, int gap_extend) {
 		score_aligner = std::make_unique<wfa::WFAlignerGapAffine>(mismatch, gap_open, gap_extend, wfa::WFAligner::Score,
-		                                                          wfa::WFAligner::MemoryUltralow);
+		                                                          wfa::WFAligner::MemoryMed);
 		alignment_aligner = std::make_unique<wfa::WFAlignerGapAffine>(
-		    mismatch, gap_open, gap_extend, wfa::WFAligner::Alignment, wfa::WFAligner::MemoryUltralow);
+		    mismatch, gap_open, gap_extend, wfa::WFAligner::Alignment, wfa::WFAligner::MemoryMed);
 	}
 };
 
@@ -56,16 +66,10 @@ std::optional<int> WFA2Aligner::align_score(const std::string &query, const std:
 	if (query.empty() && subject.empty()) {
 		return 0;
 	}
-	// One empty, one non-empty: WFA2 handles correctly as all-gap alignment
-	// (score = gap_open + gap_extend * len, CIGAR = <len>I or <len>D).
-	// WFA2 convention: pattern=subject, text=query. This matches SAM convention
-	// where subject is the reference and query is the read.
 	auto status = impl_->score_aligner->alignEnd2End(subject, query);
 	if (status != wfa::WFAligner::StatusAlgCompleted) {
 		return std::nullopt;
 	}
-	// WFA2 returns negative scores (penalties as negative costs). We negate to
-	// return positive values where lower score = more similar.
 	return -(impl_->score_aligner->getAlignmentScore());
 }
 
@@ -73,21 +77,27 @@ std::optional<WFA2CigarResult> WFA2Aligner::align_cigar(const std::string &query
 	if (query.empty() && subject.empty()) {
 		return WFA2CigarResult {0, ""};
 	}
-	// Run both aligners: score-scope for reliable score, alignment-scope for CIGAR.
-	// See Impl comment for why we don't trust alignment_aligner->getAlignmentScore().
-	auto score_status = impl_->score_aligner->alignEnd2End(subject, query);
-	if (score_status != wfa::WFAligner::StatusAlgCompleted) {
-		return std::nullopt;
-	}
+
 	auto align_status = impl_->alignment_aligner->alignEnd2End(subject, query);
 	if (align_status != wfa::WFAligner::StatusAlgCompleted) {
 		return std::nullopt;
 	}
+
 	WFA2CigarResult result;
-	result.score = -(impl_->score_aligner->getAlignmentScore());
-	// getCIGAR(true) produces extended CIGAR with =/X ops (not M).
-	// This is more informative and SAM-spec compliant.
 	result.cigar = impl_->alignment_aligner->getCIGAR(true);
+
+	// For short sequences, the alignment-scope score may be unreliable (BiWFA bug).
+	// Fall back to the score-scope aligner for sequences <= 100bp.
+	if (query.size() <= BIWFA_SCORE_BUG_LENGTH_THRESHOLD || subject.size() <= BIWFA_SCORE_BUG_LENGTH_THRESHOLD) {
+		auto score_status = impl_->score_aligner->alignEnd2End(subject, query);
+		if (score_status != wfa::WFAligner::StatusAlgCompleted) {
+			return std::nullopt;
+		}
+		result.score = -(impl_->score_aligner->getAlignmentScore());
+	} else {
+		result.score = -(impl_->alignment_aligner->getAlignmentScore());
+	}
+
 	return result;
 }
 
@@ -95,37 +105,32 @@ std::optional<WFA2FullResult> WFA2Aligner::align_full(const std::string &query, 
 	if (query.empty() && subject.empty()) {
 		return WFA2FullResult {0, "", "", ""};
 	}
-	// Run both aligners: score-scope for reliable score, alignment-scope for CIGAR.
-	// See Impl comment for why we don't trust alignment_aligner->getAlignmentScore().
-	auto score_status = impl_->score_aligner->alignEnd2End(subject, query);
-	if (score_status != wfa::WFAligner::StatusAlgCompleted) {
-		return std::nullopt;
-	}
+
 	auto align_status = impl_->alignment_aligner->alignEnd2End(subject, query);
 	if (align_status != wfa::WFAligner::StatusAlgCompleted) {
 		return std::nullopt;
 	}
+
 	WFA2FullResult result;
-	result.score = -(impl_->score_aligner->getAlignmentScore());
 	result.cigar = impl_->alignment_aligner->getCIGAR(true);
+
+	// For short sequences, the alignment-scope score may be unreliable (BiWFA bug).
+	// Fall back to the score-scope aligner for sequences <= 100bp.
+	if (query.size() <= BIWFA_SCORE_BUG_LENGTH_THRESHOLD || subject.size() <= BIWFA_SCORE_BUG_LENGTH_THRESHOLD) {
+		auto score_status = impl_->score_aligner->alignEnd2End(subject, query);
+		if (score_status != wfa::WFAligner::StatusAlgCompleted) {
+			return std::nullopt;
+		}
+		result.score = -(impl_->score_aligner->getAlignmentScore());
+	} else {
+		result.score = -(impl_->alignment_aligner->getAlignmentScore());
+	}
+
 	reconstruct_aligned(query, subject, result.cigar, result.query_aligned, result.subject_aligned);
 	return result;
 }
 
 // Reconstruct gapped alignment strings from an extended CIGAR and the original sequences.
-//
-// This is intentionally a separate implementation from ParseCigar() in
-// alignment_functions_internal.hpp. ParseCigar() accumulates aggregate statistics
-// (total match count, gap count, etc.) and never touches the underlying sequences.
-// Here we need a positional walk: we consume characters from query and subject in
-// lockstep with CIGAR ops, inserting gap characters ('-') to produce the aligned
-// representation. The two loops have fundamentally different structure and output,
-// so sharing code would add coupling without reducing complexity.
-//
-// We also intentionally avoid HTSlib's CIGAR utilities here. HTSlib operates on
-// binary uint32_t arrays from bam1_t records; WFA2 produces string CIGARs. Converting
-// string -> HTSlib binary -> positional walk would add an unnecessary dependency and
-// extra conversion step for a straightforward ~30-line function.
 void WFA2Aligner::reconstruct_aligned(const std::string &query, const std::string &subject, const std::string &cigar,
                                       std::string &query_aligned, std::string &subject_aligned) {
 	query_aligned.clear();

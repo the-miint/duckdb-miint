@@ -219,7 +219,40 @@ Use an arbitrary subset as reference, remainder as queries.
 **Optimization NOT applied (correctness issue):**
 - Score-only pre-filter was reverted. Global edit distance does not predict positional smoothed-identity competition. A chimera's true parent could rank poorly by global score. Cutting from 16→6 candidates silently missed real chimeras. The UCHIME algorithm is designed with 16 as the tractable bound.
 
-**Future optimization: investigate WFA2 performance.** WFA2 is O(ns) where s is edit distance. For ~1500bp seqs at ~30% divergence, s≈450, so work≈675K per alignment. At 16 candidates this is ~10.8M per query. vsearch's SIMD NW at 22s/2000q ≈ 11ms/q — our 25ms/q suggests WFA2 has higher constant factors. Worth investigating whether WFA2's BiWFA mode, memory settings, or penalty parameters are suboptimal for this use case.
+### WFA2 Performance Investigation — DONE ✓
+
+**Root cause**: Three compounding factors inflated WFA2 cost by ~5x:
+1. **Dual-pass alignment** (score + alignment scope): 2x overhead. The BiWFA score bug
+   only affects sequences ≤100bp; for ≥1500bp the alignment-scope score is reliable.
+2. **MemoryUltralow (BiWFA)**: Designed for >30Kbp. For 1500bp, recursive forward+reverse
+   wavefront expansion adds 1.25-2x overhead. MemoryMed (piggyback backtrace) is optimal.
+3. **High penalties (6,20,4)**: Inflate alignment score s by ~1.7x vs (4,6,2), directly
+   inflating O(ns) runtime. Not changed — tied to vsearch alignment equivalence.
+
+**Fixes applied**: Eliminate dual-pass for >100bp sequences + switch to MemoryMed.
+
+**Final benchmark** (LTPs132_SSU.fasta: 500 refs × 2000 queries, ~1462bp mean):
+
+| Config | Wall time | vs vsearch |
+|--------|-----------|------------|
+| vsearch 1 thread | 22s | baseline |
+| vsearch default (12 cores) | 4.8s | baseline |
+| **miint 1 thread** | **27s** | 1.25x slower |
+| **miint default threads** | **3.6s** | **25% faster** |
+
+**Future considerations:**
+- **Penalty reduction**: Using (4,6,2) instead of (6,20,4) would reduce s by ~1.7x,
+  bringing single-threaded time closer to vsearch. Requires validating that the changed
+  gap placement doesn't affect chimera classification on real data.
+- **WFAdaptive heuristic**: Conservative pruning (min_wavefront_length=10, max_distance=50)
+  could give 2-5x speedup for candidate screening. Not compatible with BiWFA but works
+  with MemoryMed. Requires tolerance for approximate results on candidate ranking.
+- **Potential WFA2-lib contribution**: The wavefront extend kernel
+  (`wavefront_extend_matches_kernel_blockwise`) does 8-byte XOR comparison but operates
+  on individual diagonals in a scalar loop. SIMD vectorization across diagonals (processing
+  multiple diagonals in parallel via SSE2/AVX2) could significantly improve throughput for
+  the extend phase, which is the second-hottest function at 15% of CPU time. This would
+  benefit all WFA2 users, not just UCHIME.
 
 ---
 
