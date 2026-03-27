@@ -197,43 +197,17 @@ std::vector<int> compute_smoothed(const std::vector<int> &match_profile, int win
 	return smoothed;
 }
 
-// Maximum number of candidates to fully align (CIGAR + reconstruction).
-// The rest are pre-filtered using score-only alignment (much faster).
-static constexpr size_t MAX_FULL_ALIGN_CANDIDATES = 6;
-
 std::optional<ParentPair> select_parents(const std::string &query, const std::vector<uint32_t> &candidate_indices,
                                          const std::vector<std::string> &ref_sequences, WFA2Aligner &aligner) {
 	if (candidate_indices.size() < 2) {
 		return std::nullopt;
 	}
 
-	// Phase 1: Score-only alignment on all candidates to rank them.
-	// align_score() is much faster than align_full() (no CIGAR traceback).
-	struct ScoredCandidate {
-		uint32_t idx;
-		int score; // lower = better match (WFA2 penalty model)
-	};
-	std::vector<ScoredCandidate> scored;
-	scored.reserve(candidate_indices.size());
-	for (uint32_t cidx : candidate_indices) {
-		auto score = aligner.align_score(query, ref_sequences[cidx]);
-		if (score.has_value()) {
-			scored.push_back({cidx, *score});
-		}
-	}
-
-	if (scored.size() < 2) {
-		return std::nullopt;
-	}
-
-	// Keep only the top MAX_FULL_ALIGN_CANDIDATES by score (lowest penalty = best match).
-	if (scored.size() > MAX_FULL_ALIGN_CANDIDATES) {
-		std::partial_sort(scored.begin(), scored.begin() + MAX_FULL_ALIGN_CANDIDATES, scored.end(),
-		                  [](const ScoredCandidate &a, const ScoredCandidate &b) { return a.score < b.score; });
-		scored.resize(MAX_FULL_ALIGN_CANDIDATES);
-	}
-
-	// Phase 2: Full alignment (CIGAR + reconstruction) only on top candidates.
+	// Full alignment on all candidates (up to KmerIndex::MAX_CANDIDATES = 16).
+	// The UCHIME algorithm is designed with 16 as the tractable bound. Do NOT
+	// pre-filter by score — global edit distance does not predict which candidate
+	// wins the positional smoothed-identity competition. A chimera's true parent
+	// could rank poorly by global score but win the right-side positional match.
 	struct CandidateAlignment {
 		uint32_t idx;
 		WFA2FullResult alignment;
@@ -241,16 +215,16 @@ std::optional<ParentPair> select_parents(const std::string &query, const std::ve
 	};
 
 	std::vector<CandidateAlignment> candidates;
-	candidates.reserve(scored.size());
+	candidates.reserve(candidate_indices.size());
 
-	for (auto &sc : scored) {
-		auto result = aligner.align_full(query, ref_sequences[sc.idx]);
+	for (uint32_t cidx : candidate_indices) {
+		auto result = aligner.align_full(query, ref_sequences[cidx]);
 		if (!result.has_value()) {
 			continue;
 		}
 		auto match = compute_match_profile(result->query_aligned, result->subject_aligned);
 		auto smooth = compute_smoothed(match, SMOOTHING_WINDOW);
-		candidates.push_back({sc.idx, std::move(*result), std::move(smooth)});
+		candidates.push_back({cidx, std::move(*result), std::move(smooth)});
 	}
 
 	if (candidates.size() < 2) {

@@ -9,10 +9,10 @@
 #include "duckdb/function/function.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/connection.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
 #include <atomic>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -25,7 +25,6 @@ public:
 		std::string ref_table;
 		miint::UchimeParams params;
 
-		// Validated schemas from Bind() (confirms read_id + sequence1 exist)
 		SequenceTableSchema query_schema;
 		SequenceTableSchema ref_schema;
 
@@ -33,25 +32,31 @@ public:
 		std::vector<LogicalType> types;
 	};
 
+	// Each thread claims BATCH_SIZE query IDs atomically, then fetches sequences
+	// and runs chimera detection independently with no shared mutable state.
+	static constexpr idx_t BATCH_SIZE = 64;
+	static constexpr idx_t MAX_THREADS = 8;
+
 	struct GlobalState : public GlobalTableFunctionState {
 		// Reference DB loaded at init, shared read-only across threads.
 		miint::ChimeraDetector detector;
 
-		// Lazy streaming reader for query sequences (thread-safe).
-		std::unique_ptr<QuerySequenceStream> query_stream;
+		// Pre-materialized query IDs (lightweight — just strings, no sequences).
+		std::vector<std::string> all_query_ids;
+		std::atomic<idx_t> next_batch_offset {0};
 
-		idx_t num_threads = 1;
+		// Query table name and schema for per-thread ReadBatchByIds calls.
+		std::string query_table;
+		SequenceTableSchema query_schema;
 
 		idx_t MaxThreads() const override {
-			return num_threads;
+			return MAX_THREADS;
 		}
 	};
 
 	struct LocalState : public LocalTableFunctionState {
-		// Per-thread WFA2 aligner with UCHIME-equivalent penalties.
 		miint::WFA2Aligner aligner;
 
-		// Buffered results from processing a sub-batch of queries.
 		std::vector<miint::UchimeResult> result_buffer;
 		idx_t buffer_offset = 0;
 

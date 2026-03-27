@@ -200,23 +200,26 @@ Use an arbitrary subset as reference, remainder as queries.
 
 **Benchmark results** (LTPs132_SSU.fasta: 500 refs × 2000 queries, ~1462bp mean):
 
-| Config | Wall time | Per-query |
-|--------|-----------|-----------|
-| vsearch --threads 1 | 22s | 11ms |
-| vsearch default (12 cores) | 5s | — |
-| miint SET threads=1 | 50s | 25ms |
-| miint default threads | 50s | — (no wall improvement, threads contend on stream mutex) |
+| Config | Wall time | Parallel speedup |
+|--------|-----------|-----------------|
+| vsearch --threads 1 | 22s | — |
+| vsearch default (12 cores) | 4.8s | 4.6x |
+| miint SET threads=1 | 51s | — |
+| miint default threads | 7.3s | 7.0x |
 
-**Assessment:** miint is ~2.3x slower than vsearch single-threaded. The bottleneck is WFA2 alignment (gap_open=20 on ~1500bp seqs with ~30% divergence). vsearch uses SIMD-optimized NW which is inherently faster for this workload.
+**Assessment:** miint single-threaded is 2.3x slower than vsearch (WFA2 vs SIMD-optimized NW). Multi-threaded is 1.5x slower (7.3s vs 4.8s) — acceptable given WFA2's per-alignment cost. Parallel scaling is actually better than vsearch (7.0x vs 4.6x) thanks to atomic batch claiming.
 
-Multi-threading shows no wall-time benefit because QuerySequenceStream serializes query fetching. Threads do useful alignment work (CPU time > wall time) but the mutex is the bottleneck.
+**Profiling** (perf): 86% of CPU in WFA2 `wavefront_*` functions. KmerIndex is <1%. The bottleneck is pairwise alignment of 16 candidates × ~1500bp sequences.
 
-**Optimization opportunities (future):**
-- Use WFA2 `align_score` (score-only mode, faster) for candidate ranking, `align_full` only for the selected 2 parents
-- Pre-filter candidates more aggressively (skip very dissimilar candidates before full alignment)
-- Reduce candidate count from 16 to 8 for sequences with many hits
-- Consider WFA2 `alignEndsFree` for sequences with significant length differences
-- Parallelize query fetching: use atomic batch claiming instead of mutex-protected stream
+**Optimizations applied:**
+- Atomic batch claiming (fetch_add + ReadBatchByIds) replaces mutex-serialized QuerySequenceStream
+- MaxThreads = 8 (fixed cap, respects DuckDB scheduler)
+- NULL read_ids rejected with clear error
+
+**Optimization NOT applied (correctness issue):**
+- Score-only pre-filter was reverted. Global edit distance does not predict positional smoothed-identity competition. A chimera's true parent could rank poorly by global score. Cutting from 16→6 candidates silently missed real chimeras. The UCHIME algorithm is designed with 16 as the tractable bound.
+
+**Future optimization: investigate WFA2 performance.** WFA2 is O(ns) where s is edit distance. For ~1500bp seqs at ~30% divergence, s≈450, so work≈675K per alignment. At 16 candidates this is ~10.8M per query. vsearch's SIMD NW at 22s/2000q ≈ 11ms/q — our 25ms/q suggests WFA2 has higher constant factors. Worth investigating whether WFA2's BiWFA mode, memory settings, or penalty parameters are suboptimal for this use case.
 
 ---
 

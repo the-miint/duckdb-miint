@@ -11,28 +11,21 @@
 
 namespace duckdb {
 
-static constexpr idx_t UCHIME_MAX_THREADS = 8;
-
 unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                       vector<LogicalType> &return_types, vector<std::string> &names) {
 	auto data = make_uniq<Data>();
 
-	// Positional argument: query table name
 	data->query_table = input.inputs[0].GetValue<std::string>();
 
-	// Required named parameter: db (reference table name)
 	auto db_it = input.named_parameters.find("db");
 	if (db_it == input.named_parameters.end()) {
 		throw BinderException("uchime_ref requires 'db' parameter (reference table name)");
 	}
 	data->ref_table = db_it->second.GetValue<std::string>();
 
-	// Validate both tables exist and have required columns (read_id, sequence1).
-	// This catches schema errors at bind time, not execution time.
 	data->query_schema = ValidateSequenceTableSchema(context, data->query_table);
 	data->ref_schema = ValidateSequenceTableSchema(context, data->ref_table);
 
-	// Optional scoring parameters with range validation
 	auto get_double = [&](const std::string &name, double &out, double min_val, const char *constraint) {
 		auto it = input.named_parameters.find(name);
 		if (it != input.named_parameters.end()) {
@@ -58,7 +51,6 @@ unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, Ta
 	get_double("mindiv", data->params.mindiv, 0.0, ">= 0");
 	get_int("mindiffs", data->params.mindiffs, 1, ">= 1");
 
-	// Set output schema
 	data->names = GetUchimeOutputNames();
 	data->types = GetUchimeOutputTypes();
 	for (auto &n : data->names) {
@@ -77,10 +69,11 @@ unique_ptr<GlobalTableFunctionState> UchimeRefTableFunction::InitGlobal(ClientCo
 	auto gstate = make_uniq<GlobalState>();
 
 	gstate->detector = miint::ChimeraDetector(data.params);
+	gstate->query_table = data.query_table;
+	gstate->query_schema = data.query_schema;
 
-	// Load reference sequences via a separate connection (avoids deadlocking the current context).
-	// NOTE: The entire reference database is held in memory. For large reference
-	// databases (e.g., full SILVA at 2GB+), ensure sufficient process memory.
+	// Load reference sequences via a separate connection.
+	// NOTE: The entire reference database is held in memory.
 	auto &db = DatabaseInstance::GetDatabase(context);
 	Connection ref_conn(db);
 	auto ref_result =
@@ -97,11 +90,11 @@ unique_ptr<GlobalTableFunctionState> UchimeRefTableFunction::InitGlobal(ClientCo
 			auto read_id_val = chunk->GetValue(0, i);
 			auto seq_val = chunk->GetValue(1, i);
 			if (read_id_val.IsNull() || seq_val.IsNull()) {
-				continue; // Skip rows with NULL read_id or sequence1
+				continue;
 			}
 			auto seq_str = seq_val.GetValue<std::string>();
 			if (seq_str.empty()) {
-				continue; // Skip empty sequences
+				continue;
 			}
 			ref_labels.push_back(read_id_val.GetValue<std::string>());
 			ref_sequences.push_back(std::move(seq_str));
@@ -115,12 +108,23 @@ unique_ptr<GlobalTableFunctionState> UchimeRefTableFunction::InitGlobal(ClientCo
 
 	gstate->detector.set_reference(ref_labels, ref_sequences);
 
-	// Set up lazy streaming reader for query sequences using validated schema.
-	gstate->query_stream = std::make_unique<QuerySequenceStream>(context, data.query_table, data.query_schema);
-
-	gstate->num_threads = std::min(static_cast<idx_t>(std::thread::hardware_concurrency()), UCHIME_MAX_THREADS);
-	if (gstate->num_threads == 0) {
-		gstate->num_threads = 4;
+	// Materialize all query IDs (lightweight — just strings, no sequences).
+	// This allows lock-free atomic batch claiming in Execute().
+	// NULL read_ids are rejected — every query must have an identifier.
+	Connection id_conn(db);
+	auto id_result = id_conn.Query("SELECT read_id FROM " + KeywordHelper::WriteOptionallyQuoted(data.query_table));
+	if (id_result->HasError()) {
+		throw InvalidInputException("Failed to read query table '%s': %s", data.query_table, id_result->GetError());
+	}
+	auto &id_mat = id_result->Cast<MaterializedQueryResult>();
+	while (auto chunk = id_mat.Fetch()) {
+		for (idx_t i = 0; i < chunk->size(); i++) {
+			auto val = chunk->GetValue(0, i);
+			if (val.IsNull()) {
+				throw InvalidInputException("Query table '%s' contains NULL read_id values", data.query_table);
+			}
+			gstate->all_query_ids.push_back(val.GetValue<std::string>());
+		}
 	}
 
 	return gstate;
@@ -146,17 +150,28 @@ void UchimeRefTableFunction::Execute(ClientContext &context, TableFunctionInput 
 			return;
 		}
 
-		// 2. Buffer exhausted — fetch next sub-batch from stream (thread-safe)
+		// 2. Buffer exhausted — claim next batch of query IDs atomically (no mutex).
 		lstate.result_buffer.clear();
 		lstate.buffer_offset = 0;
 
-		auto query_batch = gstate.query_stream->FetchSubBatch();
-		if (query_batch.empty()) {
+		idx_t offset = gstate.next_batch_offset.fetch_add(BATCH_SIZE);
+		if (offset >= gstate.all_query_ids.size()) {
 			output.SetCardinality(0);
 			return;
 		}
 
-		// 3. Run chimera detection on each query in the sub-batch
+		// 3. Fetch sequences for claimed IDs via ReadBatchByIds (temp table JOIN).
+		miint::SequenceRecordBatch query_batch;
+		ReadBatchByIds(context, gstate.query_table, gstate.query_schema, gstate.all_query_ids, offset, BATCH_SIZE,
+		               query_batch);
+
+		if (query_batch.empty()) {
+			// Batch claimed valid IDs but join returned nothing — skip and try next batch.
+			// This can happen if the table was modified between InitGlobal and Execute.
+			continue;
+		}
+
+		// 4. Run chimera detection on each query in the batch
 		lstate.result_buffer.reserve(query_batch.size());
 		for (idx_t i = 0; i < query_batch.size(); i++) {
 			auto result = gstate.detector.detect(query_batch.read_ids[i], query_batch.sequences1[i], lstate.aligner);
