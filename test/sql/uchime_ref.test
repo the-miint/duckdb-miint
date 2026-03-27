@@ -1,0 +1,136 @@
+# name: test/sql/uchime_ref.test
+# description: test uchime_ref table function
+# group: [sql]
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+# --- Setup: load test data into tables ---
+# Tables use read_fastx output schema directly (read_id, sequence1 columns).
+
+statement ok
+CREATE TABLE refs AS SELECT read_id, sequence1 FROM read_fastx('data/uchime/chimera_ref.fasta');
+
+statement ok
+CREATE TABLE queries AS SELECT read_id, sequence1 FROM read_fastx('data/uchime/chimera_queries.fasta');
+
+# --- Error handling ---
+
+# Missing db parameter
+statement error
+SELECT * FROM uchime_ref('queries');
+----
+uchime_ref requires 'db' parameter
+
+# Nonexistent table
+statement error
+SELECT * FROM uchime_ref('nonexistent_table', db:='refs');
+----
+does not exist
+
+# Wrong column names in db table
+statement ok
+CREATE TABLE bad_refs(id VARCHAR, seq VARCHAR);
+
+statement error
+SELECT * FROM uchime_ref('queries', db:='bad_refs');
+----
+missing required column
+
+# Empty reference table
+statement ok
+CREATE TABLE empty_refs(read_id VARCHAR, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM uchime_ref('queries', db:='empty_refs');
+----
+empty
+
+# Parameter range validation
+statement error
+SELECT * FROM uchime_ref('queries', db:='refs', mindiffs:=0);
+----
+must be >= 1
+
+statement error
+SELECT * FROM uchime_ref('queries', db:='refs', xn:=0.5);
+----
+must be >= 1.0
+
+# --- Basic functionality ---
+
+# Row count should equal number of query sequences (8)
+query I
+SELECT count(*) FROM uchime_ref('queries', db:='refs');
+----
+8
+
+# --- View support ---
+statement ok
+CREATE VIEW refs_view AS SELECT read_id, sequence1 FROM refs;
+
+query I
+SELECT count(*) FROM uchime_ref('queries', db:='refs_view');
+----
+8
+
+# --- Ground truth validation against vsearch v2.30.5 ---
+# vsearch --uchime_ref chimera_queries.fasta --db chimera_ref.fasta --uchimeout expected_ref.tsv
+
+# Verify all flags match vsearch
+query TT
+SELECT query, flag FROM uchime_ref('queries', db:='refs') ORDER BY query;
+----
+query_chimera1	Y
+query_chimera2	Y
+query_chimera3	Y
+query_clean1	N
+query_clean2	N
+query_divergent_chimera	Y
+query_noparent	N
+query_short	N
+
+# Verify chimera1 detailed results match vsearch:
+# score=16.5019, parentA=ref1, parentB=ref2, QA=84.7, QB=85.0, AB=69.7, QM=100.0
+# LY=45, LN=0, LA=0, RY=46, RN=0, RA=0, div=15.0
+query IRTTRRRRRIIIIIIRT
+SELECT round(score, 2), query, parent_a, parent_b,
+       round(id_query_a, 1), round(id_query_b, 1), round(id_a_b, 1),
+       round(id_query_model, 1), round(id_query_top, 1),
+       left_yes, left_no, left_abstain,
+       right_yes, right_no, right_abstain,
+       round(divergence, 1), flag
+FROM uchime_ref('queries', db:='refs')
+WHERE query = 'query_chimera1';
+----
+16.50	query_chimera1	ref1	ref2	84.7	85.0	69.7	100.0	85.0	45	0	0	46	0	0	15.0	Y
+
+# Verify clean sequence (non-chimeric) has proper output:
+# vsearch: score=0.0, parent_a=*, parent_b=*, votes all 0, flag=N
+query IIIIIIIIIIIII
+SELECT round(score, 2), query, parent_a, parent_b, closest_parent,
+       left_yes, left_no, left_abstain,
+       right_yes, right_no, right_abstain,
+       round(divergence, 1), flag
+FROM uchime_ref('queries', db:='refs')
+WHERE query = 'query_clean1';
+----
+0.0	query_clean1	*	*	*	0	0	0	0	0	0	0.0	N
+
+# Verify noparent sequence also has proper output
+query IIIIIIIIIIIII
+SELECT round(score, 2), query, parent_a, parent_b, closest_parent,
+       left_yes, left_no, left_abstain,
+       right_yes, right_no, right_abstain,
+       round(divergence, 1), flag
+FROM uchime_ref('queries', db:='refs')
+WHERE query = 'query_noparent';
+----
+0.0	query_noparent	*	*	*	0	0	0	0	0	0	0.0	N
+
+# Count chimeras
+query I
+SELECT count(*) FROM uchime_ref('queries', db:='refs') WHERE flag = 'Y';
+----
+4

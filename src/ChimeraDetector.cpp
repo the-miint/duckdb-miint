@@ -556,7 +556,24 @@ UchimeResult ChimeraDetector::detect(const std::string &query_label, const std::
 			result.flag = "?";
 		}
 	} else {
+		// Non-chimeric: match vsearch convention of reporting * for parents/identities
 		result.flag = "N";
+		result.score = 0.0;
+		result.parent_a_label = "*";
+		result.parent_b_label = "*";
+		result.closest_parent_label = "*";
+		result.id_query_model = 0.0;
+		result.id_query_a = 0.0;
+		result.id_query_b = 0.0;
+		result.id_a_b = 0.0;
+		result.id_query_top = 0.0;
+		result.divergence = 0.0;
+		result.left_yes = 0;
+		result.left_no = 0;
+		result.left_abstain = 0;
+		result.right_yes = 0;
+		result.right_no = 0;
+		result.right_abstain = 0;
 	}
 
 	return result;

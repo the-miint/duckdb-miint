@@ -537,7 +537,8 @@ set(EXTENSION_SOURCES
     src/duckdb_seq_stream.cpp
     src/hfile_duckdb.cpp
     src/KmerIndex.cpp
-    src/ChimeraDetector.cpp)
+    src/ChimeraDetector.cpp
+    src/uchime_ref.cpp)
 
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND EXTENSION_SOURCES src/copy_biom.cpp src/BIOMTable.cpp src/BIOMReader.cpp src/read_biom.cpp)

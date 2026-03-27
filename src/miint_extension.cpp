@@ -34,6 +34,7 @@
 #include <rype_classify.hpp>
 #include <rype_extract.hpp>
 #include <rype_log_ratio.hpp>
+#include <uchime_ref.hpp>
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include <htslib-1.22.1/htslib/hts.h>
 #include <kseq++/config.hpp>
@@ -219,6 +220,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RypeExtractMinimizerSetTableFunction::Register(loader);
 	RypeExtractStrandMinimizersTableFunction::Register(loader);
 	RypeLogRatioTableFunction::Register(loader);
+	UchimeRefTableFunction::Register(loader);
 }
 
 void MiintExtension::Load(ExtensionLoader &loader) {
