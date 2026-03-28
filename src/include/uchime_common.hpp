@@ -1,13 +1,43 @@
 #pragma once
 
-#include "ChimeraDetector.hpp"
-
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 
 #include <string>
 #include <vector>
+
+namespace miint {
+
+// UCHIME scoring parameters with defaults from Edgar et al. 2011.
+struct UchimeParams {
+	double minh = 0.28;
+	double xn = 8.0;
+	double dn = 1.4;
+	double mindiv = 0.8;
+	int mindiffs = 3;
+	double abskew = 2.0; // only used in de novo mode
+};
+
+// Full UCHIME result for a single query (mirrors vsearch --uchimeout 18 columns).
+struct UchimeResult {
+	double score = 0.0;
+	std::string query_label;
+	std::string parent_a_label;
+	std::string parent_b_label;
+	std::string closest_parent_label;
+	double id_query_model = 0.0;
+	double id_query_a = 0.0;
+	double id_query_b = 0.0;
+	double id_a_b = 0.0;
+	double id_query_top = 0.0;
+	int left_yes = 0, left_no = 0, left_abstain = 0;
+	int right_yes = 0, right_no = 0, right_abstain = 0;
+	double divergence = 0.0;
+	std::string flag = "N"; // Y, N, or ?
+};
+
+} // namespace miint
 
 namespace duckdb {
 

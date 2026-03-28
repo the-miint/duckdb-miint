@@ -393,6 +393,46 @@ set_target_properties(wfa2cpp PROPERTIES
 )
 add_dependencies(wfa2cpp wfa2_build)
 
+# Build vsearch from source (v2.30.5 + api-layer) using autotools.
+# Produces libvsearch.a — a PIC static archive for embedding vsearch's chimera
+# detection (and potentially other algorithms) into the extension.
+# TODO: Once the-miint/vsearch fork is set up, change SOURCE_DIR to ext/vsearch.
+set(VSEARCH_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/scratch/vsearch-debug)
+
+# Handle cross-compilation for vsearch (same pattern as htslib)
+set(VSEARCH_HOST_FLAG "")
+set(VSEARCH_ARCH_CFLAGS "")
+if(EMSCRIPTEN)
+    set(VSEARCH_HOST_FLAG "--host=wasm32-unknown-emscripten")
+    message(STATUS "vsearch cross-compiling for Emscripten/WASM")
+elseif(APPLE AND OSX_BUILD_ARCH)
+    if(OSX_BUILD_ARCH STREQUAL "x86_64")
+        set(VSEARCH_HOST_FLAG "--host=x86_64-apple-darwin")
+        set(VSEARCH_ARCH_CFLAGS "-arch x86_64")
+    elseif(OSX_BUILD_ARCH STREQUAL "arm64")
+        set(VSEARCH_HOST_FLAG "--host=aarch64-apple-darwin")
+        set(VSEARCH_ARCH_CFLAGS "-arch arm64")
+    endif()
+endif()
+
+ExternalProject_Add(
+    vsearch_build
+    SOURCE_DIR ${VSEARCH_SRC_DIR}
+    CONFIGURE_COMMAND autoreconf -fi
+        COMMAND ${VSEARCH_SRC_DIR}/configure ${VSEARCH_HOST_FLAG}
+    BUILD_COMMAND make -C src libvsearch.a
+    INSTALL_COMMAND ""
+    BUILD_IN_SOURCE 1
+    BUILD_BYPRODUCTS ${VSEARCH_SRC_DIR}/src/libvsearch.a
+)
+
+# Create imported library for vsearch
+add_library(vsearch STATIC IMPORTED GLOBAL)
+set_target_properties(vsearch PROPERTIES
+    IMPORTED_LOCATION ${VSEARCH_SRC_DIR}/src/libvsearch.a
+)
+add_dependencies(vsearch vsearch_build)
+
 # Build RYpe from Rust source with Arrow support
 find_program(CARGO cargo REQUIRED)
 message(STATUS "Found cargo: ${CARGO}")
@@ -479,7 +519,7 @@ set_target_properties(rype PROPERTIES
 add_dependencies(rype rype_build)
 
 # adapted kseq++ include use from strobealign
-include_directories(src/include ext ext/WFA2-lib ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype)
+include_directories(src/include ext ext/WFA2-lib ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype ${VSEARCH_SRC_DIR}/src)
 set(EXTENSION_SOURCES
     src/SequenceReader.cpp
     src/QualScore.cpp
@@ -539,6 +579,7 @@ set(EXTENSION_SOURCES
     src/KmerIndex.cpp
     src/DustMasker.cpp
     src/ChimeraDetector.cpp
+    src/VsearchChimeraWrapper.cpp
     src/uchime_common.cpp
     src/uchime_ref.cpp
     src/uchime_denovo.cpp)
@@ -581,6 +622,7 @@ target_link_libraries(${EXTENSION_NAME}
                       minimap2
                       wfa2cpp
                       wfa2
+                      vsearch
                       rype
                       expat::expat
 )
@@ -633,6 +675,7 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       minimap2
                       wfa2cpp
                       wfa2
+                      vsearch
                       rype
                       expat::expat
 )
@@ -728,6 +771,7 @@ target_link_libraries(tests
   minimap2
   wfa2cpp
   wfa2
+  vsearch
   expat::expat
 )
 if(WIN32)

@@ -2,6 +2,7 @@
 
 #include "KmerIndex.hpp"
 #include "WFA2Aligner.hpp"
+#include "uchime_common.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -35,20 +36,27 @@ void classify_diffs(StarAlignment &star);
 
 // WFA2 penalty parameters equivalent to vsearch's NW scoring.
 // See ChimeraDetector.cpp for detailed derivation.
+// WFA2 penalty parameters for UCHIME chimera detection alignment.
+//
+// vsearch uses: match=+2, mismatch=-4, gap_open=-20, gap_extend=-2
+// (interior), gap_extend=-1 (terminal).
+//
+// For the mismatch penalty: relative cost of mismatch vs match =
+// match + |mismatch| = 2 + 4 = 6.
+//
+// For gap penalties: vsearch's gap_extend=-2 means each gap extension base
+// costs 2 in absolute terms. The match-reward conversion would give 2+2=4,
+// but vsearch also uses cheaper terminal gaps (extend=-1). Since 16S sequences
+// have significant length variation (1300-1550bp), terminal gaps are common
+// and using gap_extend=4 over-penalizes them compared to vsearch. Using
+// gap_extend=2 (matching vsearch's raw interior gap_extend) produces
+// alignments with more similar gap placement to vsearch's NW, especially
+// for length-mismatched sequences. This is empirically validated against
+// vsearch's chimera detection output on real 16S data.
 static constexpr int UCHIME_WFA2_MISMATCH = 6;
 static constexpr int UCHIME_WFA2_GAP_OPEN = 20;
-static constexpr int UCHIME_WFA2_GAP_EXTEND = 4;
+static constexpr int UCHIME_WFA2_GAP_EXTEND = 2;
 static constexpr int SMOOTHING_WINDOW = 32;
-
-// UCHIME scoring parameters with defaults from Edgar et al. 2011.
-struct UchimeParams {
-	double minh = 0.28;
-	double xn = 8.0;
-	double dn = 1.4;
-	double mindiv = 0.8;
-	int mindiffs = 3;
-	double abskew = 2.0; // only used in de novo mode
-};
 
 // Result of breakpoint sweep.
 struct BreakpointResult {
@@ -57,24 +65,6 @@ struct BreakpointResult {
 	bool reversed = false;
 	int left_yes = 0, left_no = 0, left_abstain = 0;
 	int right_yes = 0, right_no = 0, right_abstain = 0;
-};
-
-// Full UCHIME result for a single query (mirrors vsearch --uchimeout 18 columns).
-struct UchimeResult {
-	double score = 0.0;
-	std::string query_label;
-	std::string parent_a_label;
-	std::string parent_b_label;
-	std::string closest_parent_label;
-	double id_query_model = 0.0;
-	double id_query_a = 0.0;
-	double id_query_b = 0.0;
-	double id_a_b = 0.0;
-	double id_query_top = 0.0;
-	int left_yes = 0, left_no = 0, left_abstain = 0;
-	int right_yes = 0, right_no = 0, right_abstain = 0;
-	double divergence = 0.0;
-	std::string flag = "N"; // Y, N, or ?
 };
 
 // Selected parent pair with cached alignment results.
@@ -141,6 +131,15 @@ private:
 	// Shared pipeline: given pre-filtered candidates, run select_parents through classification.
 	UchimeResult detect_impl(const std::string &query_label, const std::string &query_sequence,
 	                         const std::vector<uint32_t> &candidates, WFA2Aligner &aligner) const;
+
+	// Per-segment candidate search with alignment filtering (matching vsearch's flow).
+	// For each of 4 segments: k-mer search → align top candidates to segment →
+	// accept only those with >= min_identity (55%). Dedup accepted hits across segments.
+	static constexpr double CHIMERA_MIN_ID = 0.55; // 55% identity threshold for candidate acceptance
+	static constexpr int MAX_ACCEPTS_PER_SEGMENT = 4;
+	static constexpr int MAX_REJECTS_PER_SEGMENT = 16;
+	std::vector<uint32_t> find_chimera_candidates(const std::string &query, const std::string &masked_query,
+	                                              WFA2Aligner &aligner) const;
 
 	// Compute identity % between two aligned sequences over non-ignored columns.
 	static double compute_identity(const std::string &aligned_a, const std::string &aligned_b);
