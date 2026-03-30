@@ -135,7 +135,7 @@ unique_ptr<GlobalTableFunctionState> UchimeDenovoTableFunction::InitGlobal(Clien
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 
-	gstate->detector = miint::ChimeraDetector(data.params);
+	gstate->wrapper = miint::VsearchChimeraWrapper(data.params);
 
 	// Load all sequences with their abundance via a separate connection.
 	// Sorted by size DESC so the most abundant sequences are processed first.
@@ -170,15 +170,19 @@ unique_ptr<GlobalTableFunctionState> UchimeDenovoTableFunction::InitGlobal(Clien
 		throw InvalidInputException("Table '%s' is empty (or contains only NULL/empty sequences)", data.input_table);
 	}
 
+	// Load all sequences into vsearch's DB with DUST masking. K-mer index is
+	// allocated but empty — non-chimeras are indexed incrementally in Execute().
+	gstate->wrapper.prepare_denovo(gstate->labels, gstate->sequences, gstate->sizes);
+
 	return gstate;
 }
 
 void UchimeDenovoTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
-	// De novo mode is inherently sequential: each non-chimera must be added to the
-	// reference DB before processing the next (lower abundance) query. We process
-	// a small batch per Execute() call to allow DuckDB's cancellation mechanism to
+	// De novo mode is inherently sequential: each non-chimera must be indexed
+	// before processing the next (lower abundance) query. We process a small
+	// batch per Execute() call to allow DuckDB's cancellation mechanism to
 	// work between calls, rather than processing everything in a single blocking call.
 
 	// 1. Drain any buffered results first
@@ -201,23 +205,25 @@ void UchimeDenovoTableFunction::Execute(ClientContext &context, TableFunctionInp
 		idx_t i = gstate.input_offset++;
 		miint::UchimeResult result;
 
-		if (gstate.detector.ref_sequences().size() < 2) {
-			// Bootstrap: the first two sequences (highest abundance) cannot be chimeras
-			// because no more-abundant parents exist. They are unconditionally added to
-			// the reference DB to seed the k-mer index for subsequent queries.
+		if (gstate.indexed_count < 2) {
+			// Bootstrap: the first two sequences (highest abundance) are unconditionally
+			// treated as non-chimeric and indexed to seed the k-mer index. Input is
+			// sorted by size DESC in InitGlobal; equal-abundance tie-break depends on
+			// SQL ORDER BY semantics (unspecified for ties).
 			result.query_label = gstate.labels[i];
 			result.parent_a_label = "";
 			result.parent_b_label = "";
 			result.closest_parent_label = "";
 			result.flag = "N";
 		} else {
-			result =
-			    gstate.detector.detect_denovo(gstate.labels[i], gstate.sequences[i], gstate.sizes[i], gstate.aligner);
+			result = gstate.wrapper.detect_denovo(gstate.labels[i], gstate.sequences[i], gstate.sizes[i]);
 		}
 
-		// Non-chimeras (and borderline ?) are added to the reference DB
+		// Non-chimeras (and borderline ?) are added to the k-mer index.
+		// The sequences are already in vsearch's DB from prepare_denovo().
 		if (result.flag != "Y") {
-			gstate.detector.add_to_reference(gstate.labels[i], gstate.sequences[i], gstate.sizes[i]);
+			gstate.wrapper.index_sequence(i);
+			gstate.indexed_count++;
 		}
 
 		gstate.results.push_back(std::move(result));

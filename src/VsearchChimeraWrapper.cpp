@@ -5,29 +5,61 @@
 // Needleman-Wunsch alignment, DUST masking, k-mer candidate search, and
 // parent selection. This wrapper manages vsearch's global state lifecycle
 // and converts results to miint's UchimeResult format.
+//
+// Session lifecycle (from vsearch_api.h):
+//   1.  vsearch_init_defaults()            — acquires session mutex
+//   2.  set opt_* overrides
+//   3.  vsearch_apply_defaults_fixups()
+//   4.  db_init / db_add / dust_all        — load reference
+//   5.  dbindex_prepare / addallsequences   — build k-mer index
+//   6.  chimera_session_init()              — session-level chimera setup
+//   7.  chimera_detect_thread_init(ci)      — per-thread working state (N times)
+//   8.  chimera_detect_single(ci, ...)      — detection (thread-safe)
+//   9.  chimera_detect_thread_cleanup(ci)   — per-thread teardown (N times)
+//   10. chimera_session_cleanup()           — session-level chimera teardown
+//   11. dbindex_free / db_free              — release database
+//   12. vsearch_session_end()               — release session mutex
 
 #include "VsearchChimeraWrapper.hpp"
 
-// vsearch headers (Pimpl pattern — only included in this .cpp file).
-// vsearch.h is the aggregate header: config.h, system headers, global opt_*
-// variables, and core module headers (db.h, searchcore.h, etc.).
-// Additional module headers included explicitly for their API declarations.
-#include "vsearch.h"
-#include "chimera.h"
-#include "dbindex.h"
-#include "mask.h"
+#include "vsearch_api.h"
 
-#include <cstring>
+#include <cassert>
 
 namespace miint {
 
-struct VsearchChimeraWrapper::Impl {
-	chimera_info_s *ci = nullptr;
-	bool ci_initialized = false;
+// ============================================================================
+// Shared helper
+// ============================================================================
 
-	Impl() : ci(chimera_info_alloc()) {
+std::string VsearchChimeraWrapper::normalize_rna(const std::string &seq) {
+	std::string out = seq;
+	for (auto &c : out) {
+		if (c == 'U') {
+			c = 'T';
+		} else if (c == 'u') {
+			c = 't';
+		}
 	}
+	return out;
+}
+
+// ============================================================================
+// DetectHandle — per-thread chimera detection state
+// ============================================================================
+
+struct VsearchChimeraWrapper::DetectHandle::Impl {
+	chimera_info_s *ci = nullptr;
+	bool initialized = false;
+
+	// ci is allocated lazily by create_detect_handle, NOT in the constructor,
+	// because chimera_info_alloc must be called after vsearch_init_defaults.
+	Impl() = default;
+
 	~Impl() {
+		if (initialized) {
+			chimera_detect_thread_cleanup(ci);
+		}
 		if (ci) {
 			chimera_info_free(ci);
 		}
@@ -36,141 +68,200 @@ struct VsearchChimeraWrapper::Impl {
 	Impl &operator=(const Impl &) = delete;
 };
 
-VsearchChimeraWrapper::VsearchChimeraWrapper(const UchimeParams &params)
-    : impl_(std::make_unique<Impl>()), params_(params) {
+VsearchChimeraWrapper::DetectHandle::DetectHandle() : impl_(std::make_unique<Impl>()) {
+}
+
+VsearchChimeraWrapper::DetectHandle::~DetectHandle() = default;
+VsearchChimeraWrapper::DetectHandle::DetectHandle(DetectHandle &&) noexcept = default;
+VsearchChimeraWrapper::DetectHandle &VsearchChimeraWrapper::DetectHandle::operator=(DetectHandle &&) noexcept = default;
+
+UchimeResult VsearchChimeraWrapper::DetectHandle::detect(const std::string &query_label,
+                                                         const std::string &query_sequence) {
+	assert(impl_ && impl_->initialized && "DetectHandle::detect called on uninitialized handle");
+
+	auto seq = normalize_rna(query_sequence);
+
+	chimera_result_s vsearch_result {};
+	chimera_detect_single(impl_->ci, seq.c_str(), query_label.c_str(), static_cast<int>(seq.size()),
+	                      1, // abundance = 1 for uchime_ref
+	                      &vsearch_result);
+
+	return convert_result(&vsearch_result);
+}
+
+// ============================================================================
+// VsearchState — all vsearch global state in one place for correct teardown
+// ============================================================================
+
+struct VsearchChimeraWrapper::VsearchState {
+	chimera_info_s *ci = nullptr;
+	bool thread_initialized = false;
+	bool session_initialized = false;
+	bool db_initialized = false;
+	bool session_mutex_held = false;
+
+	VsearchState() = default;
+
+	~VsearchState() {
+		// Teardown in reverse order of initialization (steps 9-12).
+		if (thread_initialized) {
+			chimera_detect_thread_cleanup(ci);
+		}
+		if (ci) {
+			chimera_info_free(ci);
+		}
+		if (session_initialized) {
+			chimera_session_cleanup();
+		}
+		if (db_initialized) {
+			dbindex_free();
+			db_free();
+		}
+		if (session_mutex_held) {
+			vsearch_session_end();
+		}
+	}
+
+	VsearchState(const VsearchState &) = delete;
+	VsearchState &operator=(const VsearchState &) = delete;
+};
+
+// ============================================================================
+// VsearchChimeraWrapper — public API
+// ============================================================================
+
+VsearchChimeraWrapper::VsearchChimeraWrapper(const UchimeParams &params) : params_(params) {
+	// No vsearch state allocated here. chimera_info_alloc() requires
+	// vsearch_init_defaults() to have been called first, so we defer
+	// all allocation to set_reference() / prepare_denovo().
 }
 
 VsearchChimeraWrapper::~VsearchChimeraWrapper() {
-	if (impl_ && impl_->ci_initialized) {
-		chimera_detect_cleanup(impl_->ci);
-	}
+	// VsearchState destructor handles all cleanup in correct order.
+	// If state_ is null (never initialized, or moved-from), this is a no-op.
 }
 
-VsearchChimeraWrapper::VsearchChimeraWrapper(VsearchChimeraWrapper &&) noexcept = default;
-VsearchChimeraWrapper &VsearchChimeraWrapper::operator=(VsearchChimeraWrapper &&) noexcept = default;
+VsearchChimeraWrapper::VsearchChimeraWrapper(VsearchChimeraWrapper &&other) noexcept
+    : params_(other.params_), ref_labels_(std::move(other.ref_labels_)),
+      ref_sequences_(std::move(other.ref_sequences_)), ref_abundances_(std::move(other.ref_abundances_)),
+      state_(std::move(other.state_)) {
+	// other.state_ is now nullptr — its destructor is a no-op.
+}
 
-void VsearchChimeraWrapper::init_vsearch_globals() {
-	// Set vsearch global options to match our UchimeParams.
-	// These are the opt_* extern variables defined in vsearch.cc.
+VsearchChimeraWrapper &VsearchChimeraWrapper::operator=(VsearchChimeraWrapper &&other) noexcept {
+	if (this != &other) {
+		// Release our current session (if any). VsearchState destructor
+		// handles all cleanup including session mutex release.
+		state_.reset();
+
+		params_ = other.params_;
+		ref_labels_ = std::move(other.ref_labels_);
+		ref_sequences_ = std::move(other.ref_sequences_);
+		ref_abundances_ = std::move(other.ref_abundances_);
+		state_ = std::move(other.state_);
+	}
+	return *this;
+}
+
+void VsearchChimeraWrapper::init_common(bool denovo) {
+	// Allocate state RAII object. If anything below throws, the destructor
+	// releases the session mutex and any partially-initialized resources.
+	auto state = std::make_unique<VsearchState>();
+
+	// Step 1: acquire session mutex
+	vsearch_init_defaults();
+	state->session_mutex_held = true;
+
+	// Step 2-3: set parameters and resolve sentinels
+	opt_wordlength = 8;
 	opt_minh = params_.minh;
 	opt_xn = params_.xn;
 	opt_dn = params_.dn;
 	opt_mindiv = params_.mindiv;
 	opt_mindiffs = params_.mindiffs;
-	opt_abskew = params_.abskew;
+	// abskew: set explicitly in both modes to avoid depending on vsearch defaults.
+	opt_abskew = denovo ? params_.abskew : 0.0;
+	vsearch_apply_defaults_fixups();
 
-	// Alignment scoring defaults (matching vsearch's chimera detection)
-	opt_match = 2;
-	opt_mismatch = -4;
-	opt_gap_open_query_interior = 20;
-	opt_gap_open_target_interior = 20;
-	opt_gap_open_query_left = 20;
-	opt_gap_open_target_left = 20;
-	opt_gap_open_query_right = 20;
-	opt_gap_open_target_right = 20;
-	opt_gap_extension_query_interior = 2;
-	opt_gap_extension_target_interior = 2;
-	opt_gap_extension_query_left = 1;
-	opt_gap_extension_target_left = 1;
-	opt_gap_extension_query_right = 1;
-	opt_gap_extension_target_right = 1;
+	// Step 4-5: load DB (caller finishes index setup after this)
+	db_init();
+	state->db_initialized = true;
 
-	// Masking and search defaults
-	opt_dbmask = MASK_DUST;
-	opt_qmask = MASK_DUST;
-	opt_hardmask = 0;
-	opt_wordlength = 8;
-	opt_notrunclabels = 0;
-	opt_xsize = 0;
-	opt_xee = 0;
-	opt_xlength = 0;
-	opt_fasta_score = 0;
+	// Commit state to the wrapper. Caller (set_reference/prepare_denovo)
+	// continues filling in DB, index, and chimera init on this state.
+	state_ = std::move(state);
+}
 
-	// Chimera-specific (NULL = not in that mode)
-	opt_uchime_ref = nullptr;
-	opt_uchime_denovo = nullptr;
-	opt_uchime2_denovo = nullptr;
-	opt_uchime3_denovo = nullptr;
-	opt_chimeras_denovo = nullptr;
-	opt_chimeras = nullptr;
-	opt_nonchimeras = nullptr;
-	opt_borderline = nullptr;
-	opt_uchimealns = nullptr;
-	opt_uchimeout = nullptr;
-	opt_uchimeout5 = 0;
-	opt_tabbedout = nullptr;
-	opt_alnout = nullptr;
+void VsearchChimeraWrapper::load_sequences_into_db(const std::vector<std::string> &labels,
+                                                   const std::vector<std::string> &sequences,
+                                                   const std::vector<int64_t> &abundances) {
+	for (size_t i = 0; i < labels.size(); i++) {
+		auto seq = normalize_rna(sequences[i]);
+		int64_t abund = i < abundances.size() ? abundances[i] : 1;
+		db_add(false, labels[i].c_str(), seq.c_str(), nullptr, labels[i].size(), seq.size(), abund);
+	}
 }
 
 void VsearchChimeraWrapper::set_reference(const std::vector<std::string> &labels,
                                           const std::vector<std::string> &sequences) {
 	ref_labels_ = labels;
 	ref_sequences_ = sequences;
-	ref_abundances_.assign(sequences.size(), 0);
+	ref_abundances_.assign(sequences.size(), 1);
 
-	init_vsearch_globals();
+	// Release previous session if re-initializing. VsearchState destructor
+	// handles all cleanup including session mutex release.
+	state_.reset();
 
-	// Clear any previous database
-	db_free();
-	dbindex_free();
+	init_common(false); // Reference mode: abskew=0
 
-	// Load sequences into vsearch's global DB via db_add()
-	for (size_t i = 0; i < labels.size(); i++) {
-		// Normalize U→T for RNA sequences
-		std::string seq = sequences[i];
-		for (auto &c : seq) {
-			if (c == 'U') {
-				c = 'T';
-			} else if (c == 'u') {
-				c = 't';
-			}
-		}
-
-		db_add(false, // not fastq
-		       labels[i].c_str(), seq.c_str(),
-		       nullptr, // no quality
-		       labels[i].size(), seq.size(),
-		       1); // abundance (default 1 for uchime_ref)
-	}
-
-	// Apply DUST masking to all sequences
+	load_sequences_into_db(labels, sequences, ref_abundances_);
 	dust_all();
-
-	// Build k-mer index
 	dbindex_prepare(1, opt_dbmask);
 	dbindex_addallsequences(opt_dbmask);
 
-	// Initialize per-thread chimera working state
-	if (impl_->ci_initialized) {
-		chimera_detect_cleanup(impl_->ci);
-		chimera_info_free(impl_->ci);
-		impl_->ci = chimera_info_alloc();
-	}
-	chimera_detect_init(impl_->ci);
-	impl_->ci_initialized = true;
-
-	initialized_ = true;
+	// Step 6-7: chimera session + per-thread init
+	chimera_session_init();
+	state_->session_initialized = true;
+	state_->ci = chimera_info_alloc();
+	chimera_detect_thread_init(state_->ci);
+	state_->thread_initialized = true;
 }
 
-void VsearchChimeraWrapper::add_to_reference(const std::string &label, const std::string &sequence, int64_t abundance) {
-	ref_labels_.push_back(label);
-	ref_sequences_.push_back(sequence);
-	ref_abundances_.push_back(abundance);
+void VsearchChimeraWrapper::prepare_denovo(const std::vector<std::string> &labels,
+                                           const std::vector<std::string> &sequences,
+                                           const std::vector<int64_t> &abundances) {
+	ref_labels_ = labels;
+	ref_sequences_ = sequences;
+	ref_abundances_ = abundances;
 
-	std::string seq = sequence;
-	for (auto &c : seq) {
-		if (c == 'U') {
-			c = 'T';
-		} else if (c == 'u') {
-			c = 't';
-		}
-	}
+	state_.reset();
 
-	db_add(false, label.c_str(), seq.c_str(), nullptr, label.size(), seq.size(), abundance);
+	init_common(true); // De novo mode: abskew from params
+
+	load_sequences_into_db(labels, sequences, abundances);
+	dust_all();
+	dbindex_prepare(1, opt_dbmask);
+	// De novo: do NOT index all sequences — caller indexes incrementally.
+
+	chimera_session_init();
+	state_->session_initialized = true;
+	state_->ci = chimera_info_alloc();
+	chimera_detect_thread_init(state_->ci);
+	state_->thread_initialized = true;
+}
+
+VsearchChimeraWrapper::DetectHandle VsearchChimeraWrapper::create_detect_handle() {
+	assert(state_ && state_->session_initialized && "create_detect_handle called before set_reference/prepare_denovo");
+
+	DetectHandle handle;
+	handle.impl_->ci = chimera_info_alloc();
+	chimera_detect_thread_init(handle.impl_->ci);
+	handle.impl_->initialized = true;
+	return handle;
 }
 
 void VsearchChimeraWrapper::index_sequence(uint64_t seqno) {
-	dbindex_addsequence(static_cast<unsigned int>(seqno), opt_qmask);
+	dbindex_addsequence(static_cast<unsigned int>(seqno), opt_dbmask);
 }
 
 UchimeResult VsearchChimeraWrapper::convert_result(const void *vsearch_result_ptr) {
@@ -182,7 +273,6 @@ UchimeResult VsearchChimeraWrapper::convert_result(const void *vsearch_result_pt
 	result.flag = std::string(1, r->flag);
 
 	if (r->flag == 'N') {
-		// Non-chimeric: NULL parents and identities (vsearch convention)
 		return result;
 	}
 
@@ -205,38 +295,14 @@ UchimeResult VsearchChimeraWrapper::convert_result(const void *vsearch_result_pt
 	return result;
 }
 
-UchimeResult VsearchChimeraWrapper::detect(const std::string &query_label, const std::string &query_sequence) {
-	// Normalize U→T
-	std::string seq = query_sequence;
-	for (auto &c : seq) {
-		if (c == 'U') {
-			c = 'T';
-		} else if (c == 'u') {
-			c = 't';
-		}
-	}
-
-	chimera_result_s vsearch_result {};
-	chimera_detect_single(impl_->ci, seq.c_str(), query_label.c_str(), static_cast<int>(seq.size()),
-	                      1, // abundance = 1 for uchime_ref
-	                      &vsearch_result);
-
-	return convert_result(&vsearch_result);
-}
-
 UchimeResult VsearchChimeraWrapper::detect_denovo(const std::string &query_label, const std::string &query_sequence,
                                                   int64_t query_abundance) {
-	std::string seq = query_sequence;
-	for (auto &c : seq) {
-		if (c == 'U') {
-			c = 'T';
-		} else if (c == 'u') {
-			c = 't';
-		}
-	}
+	assert(state_ && state_->thread_initialized && "detect_denovo called before prepare_denovo");
+
+	auto seq = normalize_rna(query_sequence);
 
 	chimera_result_s vsearch_result {};
-	chimera_detect_single(impl_->ci, seq.c_str(), query_label.c_str(), static_cast<int>(seq.size()),
+	chimera_detect_single(state_->ci, seq.c_str(), query_label.c_str(), static_cast<int>(seq.size()),
 	                      static_cast<int>(query_abundance), &vsearch_result);
 
 	return convert_result(&vsearch_result);

@@ -1,7 +1,6 @@
 #pragma once
 
-#include "ChimeraDetector.hpp"
-#include "WFA2Aligner.hpp"
+#include "VsearchChimeraWrapper.hpp"
 #include "sequence_table_reader.hpp"
 
 #include "duckdb/common/typedefs.hpp"
@@ -13,6 +12,7 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 
 #include <atomic>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -39,7 +39,7 @@ public:
 
 	struct GlobalState : public GlobalTableFunctionState {
 		// Reference DB loaded at init, shared read-only across threads.
-		miint::ChimeraDetector detector;
+		miint::VsearchChimeraWrapper wrapper;
 
 		// Pre-materialized query IDs (lightweight — just strings, no sequences).
 		std::vector<std::string> all_query_ids;
@@ -55,14 +55,12 @@ public:
 	};
 
 	struct LocalState : public LocalTableFunctionState {
-		miint::WFA2Aligner aligner;
+		// Per-thread vsearch detection handle (wraps chimera_info_s).
+		// Initialized in InitLocal after the global DB is ready.
+		std::optional<miint::VsearchChimeraWrapper::DetectHandle> handle;
 
 		std::vector<miint::UchimeResult> result_buffer;
 		idx_t buffer_offset = 0;
-
-		LocalState()
-		    : aligner(miint::UCHIME_WFA2_MISMATCH, miint::UCHIME_WFA2_GAP_OPEN, miint::UCHIME_WFA2_GAP_EXTEND) {
-		}
 	};
 
 	static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,

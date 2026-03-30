@@ -4,8 +4,6 @@
 
 require miint
 
-require-env VSEARCH_AVAILABLE
-
 # --- Setup: load test data into tables ---
 # Tables use read_fastx output schema directly (read_id, sequence1 columns).
 

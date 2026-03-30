@@ -68,7 +68,7 @@ unique_ptr<GlobalTableFunctionState> UchimeRefTableFunction::InitGlobal(ClientCo
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 
-	gstate->detector = miint::ChimeraDetector(data.params);
+	gstate->wrapper = miint::VsearchChimeraWrapper(data.params);
 	gstate->query_table = data.query_table;
 	gstate->query_schema = data.query_schema;
 
@@ -106,7 +106,7 @@ unique_ptr<GlobalTableFunctionState> UchimeRefTableFunction::InitGlobal(ClientCo
 		                            data.ref_table);
 	}
 
-	gstate->detector.set_reference(ref_labels, ref_sequences);
+	gstate->wrapper.set_reference(ref_labels, ref_sequences);
 
 	// Materialize all query IDs (lightweight — just strings, no sequences).
 	// This allows lock-free atomic batch claiming in Execute().
@@ -133,7 +133,10 @@ unique_ptr<GlobalTableFunctionState> UchimeRefTableFunction::InitGlobal(ClientCo
 unique_ptr<LocalTableFunctionState> UchimeRefTableFunction::InitLocal(ExecutionContext &context,
                                                                       TableFunctionInitInput &input,
                                                                       GlobalTableFunctionState *global_state) {
-	return make_uniq<LocalState>();
+	auto &gstate = global_state->Cast<GlobalState>();
+	auto lstate = make_uniq<LocalState>();
+	lstate->handle.emplace(gstate.wrapper.create_detect_handle());
+	return lstate;
 }
 
 void UchimeRefTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
@@ -174,7 +177,7 @@ void UchimeRefTableFunction::Execute(ClientContext &context, TableFunctionInput 
 		// 4. Run chimera detection on each query in the batch
 		lstate.result_buffer.reserve(query_batch.size());
 		for (idx_t i = 0; i < query_batch.size(); i++) {
-			auto result = gstate.detector.detect(query_batch.read_ids[i], query_batch.sequences1[i], lstate.aligner);
+			auto result = lstate.handle->detect(query_batch.read_ids[i], query_batch.sequences1[i]);
 			lstate.result_buffer.push_back(std::move(result));
 		}
 	}
