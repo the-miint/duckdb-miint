@@ -752,6 +752,8 @@ set(TEST_SOURCES
     test/cpp/test_DustMasker.cpp
     src/ChimeraDetector.cpp
     test/cpp/test_ChimeraDetector.cpp
+    src/VsearchChimeraWrapper.cpp
+    test/cpp/test_VsearchChimeraWrapper.cpp
 )
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND TEST_SOURCES src/BIOMTable.cpp src/BIOMReader.cpp

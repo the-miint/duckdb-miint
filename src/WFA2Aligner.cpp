@@ -130,6 +130,39 @@ std::optional<WFA2FullResult> WFA2Aligner::align_full(const std::string &query, 
 	return result;
 }
 
+std::optional<WFA2FullResult> WFA2Aligner::align_full_semiglobal(const std::string &query, const std::string &subject) {
+	if (query.empty() && subject.empty()) {
+		return WFA2FullResult {0, "", "", ""};
+	}
+
+	// Semi-global: query (text) anchored end-to-end, subject (pattern) has free end gaps.
+	// WFA2 convention: pattern=subject, text=query.
+	// patternBeginFree/patternEndFree = subject length (all free)
+	// textBeginFree/textEndFree = 0 (query anchored)
+	auto align_status = impl_->alignment_aligner->alignEndsFree(subject, static_cast<int>(subject.size()),
+	                                                            static_cast<int>(subject.size()), query, 0, 0);
+	if (align_status != wfa::WFAligner::StatusAlgCompleted) {
+		return std::nullopt;
+	}
+
+	WFA2FullResult result;
+	result.cigar = impl_->alignment_aligner->getCIGAR(true);
+
+	if (query.size() <= BIWFA_SCORE_BUG_LENGTH_THRESHOLD || subject.size() <= BIWFA_SCORE_BUG_LENGTH_THRESHOLD) {
+		auto score_status = impl_->score_aligner->alignEndsFree(subject, static_cast<int>(subject.size()),
+		                                                        static_cast<int>(subject.size()), query, 0, 0);
+		if (score_status != wfa::WFAligner::StatusAlgCompleted) {
+			return std::nullopt;
+		}
+		result.score = -(impl_->score_aligner->getAlignmentScore());
+	} else {
+		result.score = -(impl_->alignment_aligner->getAlignmentScore());
+	}
+
+	reconstruct_aligned(query, subject, result.cigar, result.query_aligned, result.subject_aligned);
+	return result;
+}
+
 // Reconstruct gapped alignment strings from an extended CIGAR and the original sequences.
 void WFA2Aligner::reconstruct_aligned(const std::string &query, const std::string &subject, const std::string &cigar,
                                       std::string &query_aligned, std::string &subject_aligned) {
