@@ -418,7 +418,17 @@ endif()
 ExternalProject_Add(
     vsearch_build
     SOURCE_DIR ${VSEARCH_SRC_DIR}
-    CONFIGURE_COMMAND ${VSEARCH_SRC_DIR}/configure ${VSEARCH_HOST_FLAG}
+    # Touch pre-generated autotools files so make doesn't try to regenerate
+    # them (git checkout gives all files the same timestamp, which can trigger
+    # autotools rebuild rules if make thinks sources are newer).
+    CONFIGURE_COMMAND ${CMAKE_COMMAND} -E touch
+        ${VSEARCH_SRC_DIR}/aclocal.m4
+        ${VSEARCH_SRC_DIR}/configure
+        ${VSEARCH_SRC_DIR}/Makefile.in
+        ${VSEARCH_SRC_DIR}/src/Makefile.in
+        ${VSEARCH_SRC_DIR}/man/Makefile.in
+        ${VSEARCH_SRC_DIR}/config.h.in
+        COMMAND ${VSEARCH_SRC_DIR}/configure ${VSEARCH_HOST_FLAG}
     BUILD_COMMAND make -C src libvsearch.a
     INSTALL_COMMAND ""
     BUILD_IN_SOURCE 1
