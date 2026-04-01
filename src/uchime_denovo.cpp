@@ -75,7 +75,9 @@ static void ValidateDenovoTableSchema(ClientContext &context, const std::string 
 	auto size_type = col_types[it->second].id();
 	if (size_type != LogicalTypeId::INTEGER && size_type != LogicalTypeId::BIGINT &&
 	    size_type != LogicalTypeId::SMALLINT && size_type != LogicalTypeId::TINYINT &&
-	    size_type != LogicalTypeId::HUGEINT) {
+	    size_type != LogicalTypeId::HUGEINT && size_type != LogicalTypeId::UINTEGER &&
+	    size_type != LogicalTypeId::UBIGINT && size_type != LogicalTypeId::USMALLINT &&
+	    size_type != LogicalTypeId::UTINYINT && size_type != LogicalTypeId::UHUGEINT) {
 		throw BinderException("Column 'size' in table '%s' must be an integer type (got %s)", table_name,
 		                      col_types[it->second].ToString());
 	}
@@ -97,7 +99,8 @@ unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context,
 		if (it != input.named_parameters.end()) {
 			out = it->second.GetValue<double>();
 			if (out < min_val) {
-				throw InvalidInputException("uchime_denovo: %s must be %s (got %g)", name, constraint, out);
+				throw InvalidInputException("detect_chimera_uchime_denovo: %s must be %s (got %g)", name, constraint,
+				                            out);
 			}
 		}
 	};
@@ -106,7 +109,8 @@ unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context,
 		if (it != input.named_parameters.end()) {
 			out = it->second.GetValue<int>();
 			if (out < min_val) {
-				throw InvalidInputException("uchime_denovo: %s must be %s (got %d)", name, constraint, out);
+				throw InvalidInputException("detect_chimera_uchime_denovo: %s must be %s (got %d)", name, constraint,
+				                            out);
 			}
 		}
 	};
@@ -242,7 +246,7 @@ void UchimeDenovoTableFunction::Execute(ClientContext &context, TableFunctionInp
 }
 
 TableFunction UchimeDenovoTableFunction::GetFunction() {
-	auto tf = TableFunction("uchime_denovo", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
+	auto tf = TableFunction("detect_chimera_uchime_denovo", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
 
 	tf.named_parameters["minh"] = LogicalType::DOUBLE;
 	tf.named_parameters["xn"] = LogicalType::DOUBLE;
@@ -251,11 +255,14 @@ TableFunction UchimeDenovoTableFunction::GetFunction() {
 	tf.named_parameters["mindiffs"] = LogicalType::INTEGER;
 	tf.named_parameters["abskew"] = LogicalType::DOUBLE;
 
+	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
+
 	return tf;
 }
 
 void UchimeDenovoTableFunction::Register(ExtensionLoader &loader) {
-	loader.RegisterFunction(GetFunction());
+	auto tf = GetFunction();
+	loader.RegisterFunction(tf);
 }
 
 } // namespace duckdb

@@ -8,6 +8,8 @@ Scalar functions for alignment analysis and sequence processing.
 - [`alignment_seq_identity`](#alignment_seq_identitycigar-nm-md-type) - Sequence identity calculation
 - [`alignment_query_length`](#alignment_query_lengthcigar-include_hard_clipstrue) - Query length from CIGAR
 - [`alignment_query_coverage`](#alignment_query_coveragecigar-typealigned) - Query coverage from CIGAR
+- [`mask_dust`](#mask_dustsequence-hardmaskfalse) - DUST low-complexity masking
+- [`merge_pairs_vsearch`](#merge_pairsfwd_seq-fwd_qual-rev_seq-rev_qual-options) - Paired-end read merging
 
 ## SAM Flag Functions
 
@@ -208,3 +210,88 @@ GROUP BY reference;
 - **Mapped coverage**: Identify heavily clipped reads (adapters, chimeras, low-quality ends)
 - Filter reads based on alignment quality thresholds
 - QC metrics for sequencing runs
+
+---
+
+## `mask_dust(sequence, [hardmask=false])`
+
+DUST low-complexity masking, powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Identifies low-complexity regions (e.g., homopolymers, dinucleotide repeats) and masks them.
+
+**Parameters:**
+- `sequence` (VARCHAR): DNA sequence to mask.
+- `hardmask` (BOOLEAN, default false): If false, soft-mask by lowercasing. If true, replace low-complexity regions with `N`.
+
+**Returns:** VARCHAR — the masked sequence.
+
+**Example:**
+```sql
+-- Soft-mask (lowercase low-complexity regions)
+SELECT mask_dust('AAAAAAAAAAAACCCCCCCC');
+
+-- Hard-mask (replace with N)
+SELECT mask_dust('AAAAAAAAAAAACCCCCCCC', true);
+
+-- Mask sequences in a table
+SELECT read_id, mask_dust(sequence1) AS masked_seq
+FROM read_fastx('sequences.fasta');
+```
+
+**Behavior:**
+- High-complexity sequences are returned unchanged
+- NULL input returns NULL
+- Empty string returns empty string
+
+---
+
+## `merge_pairs_vsearch(fwd_seq, fwd_qual, rev_seq, rev_qual, [options])`
+
+Paired-end read merging, powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Merges overlapping forward and reverse reads into a single consensus sequence with merged quality scores.
+
+**Parameters (4-arg form, default tuning):**
+- `fwd_seq` (VARCHAR): Forward read sequence.
+- `fwd_qual` (LIST(UTINYINT)): Forward read quality scores (numeric Phred, as output by `read_fastx`).
+- `rev_seq` (VARCHAR): Reverse read sequence.
+- `rev_qual` (LIST(UTINYINT)): Reverse read quality scores.
+
+**Parameters (10-arg form, with tuning):**
+- Same first 4 arguments, plus:
+- `minovlen` (INTEGER): Minimum overlap length.
+- `maxdiffs` (INTEGER): Maximum differences in overlap region.
+- `maxdiffpct` (DOUBLE): Maximum difference percentage in overlap.
+- `maxee` (DOUBLE): Maximum expected errors in merged sequence.
+- `minlen` (INTEGER): Minimum merged sequence length.
+- `maxlen` (INTEGER): Maximum merged sequence length.
+
+**Returns:** STRUCT with fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `merged` | BOOLEAN | Whether merging succeeded |
+| `sequence` | VARCHAR | Merged sequence (NULL if not merged) |
+| `quality` | LIST(UTINYINT) | Merged quality scores (NULL if not merged) |
+| `ee_merged` | DOUBLE | Expected errors of merged sequence |
+| `ee_fwd` | DOUBLE | Expected errors of forward read |
+| `ee_rev` | DOUBLE | Expected errors of reverse read |
+| `fwd_errors` | INTEGER | Errors in forward read overlap region |
+| `rev_errors` | INTEGER | Errors in reverse read overlap region |
+| `overlap` | INTEGER | Length of overlap region |
+
+**Example:**
+```sql
+-- Merge paired-end reads
+SELECT read_id,
+       (merge_pairs_vsearch(sequence1, qual1, sequence2, qual2)).merged AS merged,
+       (merge_pairs_vsearch(sequence1, qual1, sequence2, qual2)).sequence AS merged_seq
+FROM read_fastx('forward.fq', 'reverse.fq');
+
+-- Filter to only successfully merged reads
+SELECT read_id, m.*
+FROM read_fastx('forward.fq', 'reverse.fq'),
+     LATERAL (SELECT merge_pairs_vsearch(sequence1, qual1, sequence2, qual2)) AS m(result)
+WHERE m.result.merged;
+```
+
+**Behavior:**
+- NULL inputs return a STRUCT with `merged=false` and NULL fields
+- Input length guard: throws if forward + reverse > 9,999 bases (vsearch fixed buffer)
+- Quality inputs and outputs use numeric Phred (LIST(UTINYINT)), matching `read_fastx` output

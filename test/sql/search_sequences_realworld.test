@@ -1,0 +1,105 @@
+# name: test/sql/search_sequences_realworld.test
+# description: Real-world search_sequences validation against LTP 16S database
+# group: [sql]
+
+#
+# Ground truth: vsearch --usearch_global data/search/ltp_query_50.fasta
+#   --db data/uchime/ltp_subset_500.fasta --id 0.97 --maxaccepts 1
+#   --maxrejects 32 --userout data/search/expected_97.tsv
+#   --userfields query+target+id+alnlen+mism+gaps+ql+tl
+# Run date: 2026-03-30, vsearch v2.30.5
+#
+# All 50 queries find exact self-matches at 100% identity.
+
+require miint
+
+# Load reference DB (500 LTP 16S sequences)
+statement ok
+CREATE TABLE ltp_refs AS SELECT read_id, sequence1 FROM read_fastx('data/uchime/ltp_subset_500.fasta');
+
+# Load queries (50 LTP sequences — subset of refs)
+statement ok
+CREATE TABLE ltp_queries AS SELECT read_id, sequence1 FROM read_fastx('data/search/ltp_query_50.fasta');
+
+# Verify data loaded
+query I
+SELECT count(*) FROM ltp_refs;
+----
+500
+
+query I
+SELECT count(*) FROM ltp_queries;
+----
+50
+
+# --- 97% identity threshold, maxaccepts=1 ---
+
+# All 50 queries should find at least one hit at 97%
+query I
+SELECT count(*) FROM search_sequences_vsearch('ltp_queries', db:='ltp_refs', id:=0.97);
+----
+50
+
+# All hits should be accepted and at 100% identity (self-matches)
+query I
+SELECT count(*) FROM search_sequences_vsearch('ltp_queries', db:='ltp_refs', id:=0.97)
+WHERE accepted = true AND identity = 100.0;
+----
+50
+
+# Query and target should be the same (self-match)
+query I
+SELECT count(*) FROM search_sequences_vsearch('ltp_queries', db:='ltp_refs', id:=0.97)
+WHERE query_id = target_id;
+----
+50
+
+# Alignment length should equal query length for exact matches
+query I
+SELECT count(*) FROM search_sequences_vsearch('ltp_queries', db:='ltp_refs', id:=0.97)
+WHERE alignment_length = query_length AND mismatches = 0 AND gaps = 0;
+----
+50
+
+# --- 90% identity threshold, maxaccepts=3 ---
+# Ground truth: vsearch with --id 0.90 --maxaccepts 3 gives 150 hits total
+#   (3 hits per query — many closely related 16S sequences in LTP)
+
+query I
+SELECT count(*) FROM search_sequences_vsearch('ltp_queries', db:='ltp_refs', id:=0.90, maxaccepts:=3);
+----
+150
+
+# All first hits (highest identity) should be self-matches at 100%
+query I
+SELECT count(*) FROM (
+    SELECT query_id, target_id, identity,
+           ROW_NUMBER() OVER (PARTITION BY query_id ORDER BY identity DESC) AS rn
+    FROM search_sequences_vsearch('ltp_queries', db:='ltp_refs', id:=0.90, maxaccepts:=3)
+) WHERE rn = 1 AND identity = 100.0 AND query_id = target_id;
+----
+50
+
+# All secondary hits should be < 100% identity (different sequences)
+query I
+SELECT count(*) FROM (
+    SELECT query_id, target_id, identity,
+           ROW_NUMBER() OVER (PARTITION BY query_id ORDER BY identity DESC) AS rn
+    FROM search_sequences_vsearch('ltp_queries', db:='ltp_refs', id:=0.90, maxaccepts:=3)
+) WHERE rn > 1 AND identity < 100.0;
+----
+100
+
+# --- 99% identity threshold ---
+# At 99%, fewer hits (only very close relatives)
+
+query I
+SELECT count(*) FROM search_sequences_vsearch('ltp_queries', db:='ltp_refs', id:=0.99);
+----
+50
+
+# --- Verify no RNA U remains (data is DNA) ---
+query I
+SELECT count(*) FROM ltp_refs WHERE sequence1 LIKE '%U%';
+----
+0

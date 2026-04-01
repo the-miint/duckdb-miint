@@ -162,16 +162,15 @@ SOFTWARE.
 
 ## VSEARCH
 
-The UCHIME chimera detection algorithm implemented in `uchime_ref` and
-`uchime_denovo` was developed as a cleanroom reimplementation based on the
-published paper (Edgar et al. 2011). The VSEARCH open-source implementation
-(BSD-2-Clause licensed) was used as a reference for validating output
-correctness and understanding implementation details such as the uchimeout
-tab-separated output format, vote counting conventions, and alignment
-parameter defaults. No VSEARCH source code was copied into this project.
+Embedded as a static library (`ext/vsearch`, branch `v2.30.5-miint` from
+`the-miint/vsearch` fork). Used by `detect_chimera_uchime`,
+`detect_chimera_uchime_denovo`, `search_sequences`, `cluster_sequences`,
+`merge_pairs`, and `mask_dust`. We use the BSD-2-Clause license (vsearch is
+dual-licensed BSD-2-Clause / GPL-3.0).
 
-- Repository: https://github.com/torognes/vsearch
-- License: BSD-2-Clause (dual-licensed with GPL-3.0)
+- Upstream: https://github.com/torognes/vsearch
+- Fork: https://github.com/the-miint/vsearch (branch `v2.30.5-miint`)
+- License: BSD-2-Clause (chosen from dual-license with GPL-3.0)
 
 ### Citations
 
@@ -187,7 +186,7 @@ doi: [10.1093/bioinformatics/btr381](https://doi.org/10.1093/bioinformatics/btr3
 
 ### BSD 2-Clause License
 
-Copyright (C) 2014-2025, Torbjorn Rognes, Frederic Mahe and Tomas Flouri
+Copyright (C) 2014-2026, Torbjorn Rognes, Frederic Mahe and Tomas Flouri
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without

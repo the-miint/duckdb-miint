@@ -19,7 +19,7 @@ unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, Ta
 
 	auto db_it = input.named_parameters.find("db");
 	if (db_it == input.named_parameters.end()) {
-		throw BinderException("uchime_ref requires 'db' parameter (reference table name)");
+		throw BinderException("detect_chimera_uchime requires 'db' parameter (reference table name)");
 	}
 	data->ref_table = db_it->second.GetValue<std::string>();
 
@@ -31,7 +31,7 @@ unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, Ta
 		if (it != input.named_parameters.end()) {
 			out = it->second.GetValue<double>();
 			if (out < min_val) {
-				throw InvalidInputException("uchime_ref: %s must be %s (got %g)", name, constraint, out);
+				throw InvalidInputException("detect_chimera_uchime: %s must be %s (got %g)", name, constraint, out);
 			}
 		}
 	};
@@ -40,7 +40,7 @@ unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, Ta
 		if (it != input.named_parameters.end()) {
 			out = it->second.GetValue<int>();
 			if (out < min_val) {
-				throw InvalidInputException("uchime_ref: %s must be %s (got %d)", name, constraint, out);
+				throw InvalidInputException("detect_chimera_uchime: %s must be %s (got %d)", name, constraint, out);
 			}
 		}
 	};
@@ -72,45 +72,13 @@ unique_ptr<GlobalTableFunctionState> UchimeRefTableFunction::InitGlobal(ClientCo
 	gstate->query_table = data.query_table;
 	gstate->query_schema = data.query_schema;
 
-	// Load reference sequences via a separate connection.
-	// NOTE: The entire reference database is held in memory.
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection ref_conn(db);
-	auto ref_result =
-	    ref_conn.Query("SELECT read_id, sequence1 FROM " + KeywordHelper::WriteOptionallyQuoted(data.ref_table));
-	if (ref_result->HasError()) {
-		throw InvalidInputException("Failed to read reference table '%s': %s", data.ref_table, ref_result->GetError());
-	}
-
-	std::vector<std::string> ref_labels;
-	std::vector<std::string> ref_sequences;
-	auto &materialized = ref_result->Cast<MaterializedQueryResult>();
-	while (auto chunk = materialized.Fetch()) {
-		for (idx_t i = 0; i < chunk->size(); i++) {
-			auto read_id_val = chunk->GetValue(0, i);
-			auto seq_val = chunk->GetValue(1, i);
-			if (read_id_val.IsNull() || seq_val.IsNull()) {
-				continue;
-			}
-			auto seq_str = seq_val.GetValue<std::string>();
-			if (seq_str.empty()) {
-				continue;
-			}
-			ref_labels.push_back(read_id_val.GetValue<std::string>());
-			ref_sequences.push_back(std::move(seq_str));
-		}
-	}
-
-	if (ref_labels.empty()) {
-		throw InvalidInputException("Reference table '%s' is empty (or contains only NULL/empty sequences)",
-		                            data.ref_table);
-	}
-
-	gstate->wrapper.set_reference(ref_labels, ref_sequences);
+	auto ref = LoadSingleEndSequences(context, data.ref_table, "detect_chimera_uchime");
+	gstate->wrapper.set_reference(ref.labels, ref.sequences);
 
 	// Materialize all query IDs (lightweight — just strings, no sequences).
 	// This allows lock-free atomic batch claiming in Execute().
 	// NULL read_ids are rejected — every query must have an identifier.
+	auto &db = DatabaseInstance::GetDatabase(context);
 	Connection id_conn(db);
 	auto id_result = id_conn.Query("SELECT read_id FROM " + KeywordHelper::WriteOptionallyQuoted(data.query_table));
 	if (id_result->HasError()) {
@@ -184,7 +152,7 @@ void UchimeRefTableFunction::Execute(ClientContext &context, TableFunctionInput 
 }
 
 TableFunction UchimeRefTableFunction::GetFunction() {
-	auto tf = TableFunction("uchime_ref", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
+	auto tf = TableFunction("detect_chimera_uchime", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
 
 	tf.named_parameters["db"] = LogicalType::VARCHAR;
 	tf.named_parameters["minh"] = LogicalType::DOUBLE;
@@ -199,7 +167,8 @@ TableFunction UchimeRefTableFunction::GetFunction() {
 }
 
 void UchimeRefTableFunction::Register(ExtensionLoader &loader) {
-	loader.RegisterFunction(GetFunction());
+	auto tf = GetFunction();
+	loader.RegisterFunction(tf);
 }
 
 } // namespace duckdb

@@ -104,7 +104,6 @@ private:
 	static void load_sequences_into_db(const std::vector<std::string> &labels,
 	                                   const std::vector<std::string> &sequences,
 	                                   const std::vector<int64_t> &abundances);
-	static std::string normalize_rna(const std::string &seq);
 	static UchimeResult convert_result(const void *vsearch_result);
 };
 

@@ -22,8 +22,10 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`align_minimap2_sharded`](#align_minimap2_shardedquery_table-shard_directory-read_to_shard-options) - Sharded minimap2 alignment
 - [`align_bowtie2`](#align_bowtie2query_table-subject_table-options) - Bowtie2 alignment
 - [`align_bowtie2_sharded`](#align_bowtie2_shardedquery_table-shard_directory-read_to_shard-options) - Sharded bowtie2 alignment
-- [`uchime_ref`](#uchime_refquery_table-dbrefs_table-options) - Reference-based chimera detection (UCHIME)
-- [`uchime_denovo`](#uchime_denovoinput_table-options) - De novo chimera detection (UCHIME)
+- [`detect_chimera_uchime`](#detect_chimera_uchimequery_table-dbrefs_table-options) - Reference-based chimera detection (UCHIME)
+- [`detect_chimera_uchime_denovo`](#detect_chimera_uchime_denovoinput_table-options) - De novo chimera detection (UCHIME)
+- [`search_sequences_vsearch`](#search_sequencesquery_table-dbref_table-idthreshold-options) - Global sequence search
+- [`cluster_sequences_vsearch`](#cluster_sequencesinput_table-idthreshold-options) - Greedy sequence clustering
 
 ## `read_alignments(filename, [reference_lengths='table_name'], [include_filepath=false], [include_seq_qual=false])`
 Read SAM/BAM alignment files.
@@ -1564,9 +1566,9 @@ SELECT * FROM align_bowtie2_sharded('queries',
 | Parallelism | Single aligner thread(s) | One aligner per shard, concurrent |
 | Use case | Single reference database | Sharded reference databases (e.g., from prior classification) |
 
-## `uchime_ref(query_table, db='refs_table', [options])`
+## `detect_chimera_uchime(query_table, db='refs_table', [options])`
 
-Reference-based chimera detection using the UCHIME algorithm (Edgar et al. 2011, Bioinformatics 27:2194-2200). Detects chimeric sequences by comparing queries against a trusted chimera-free reference database.
+Reference-based chimera detection using the UCHIME algorithm (Edgar et al. 2011, Bioinformatics 27:2194-2200), powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Detects chimeric sequences by comparing queries against a trusted chimera-free reference database.
 
 **Parameters:**
 - `query_table` (VARCHAR): Name of a table or view containing query sequences. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns.
@@ -1607,16 +1609,16 @@ CREATE TABLE refs AS SELECT read_id, sequence1 FROM read_fastx('gold.fasta');
 CREATE TABLE queries AS SELECT read_id, sequence1 FROM read_fastx('amplicons.fasta');
 
 -- Detect chimeras
-SELECT * FROM uchime_ref('queries', db:='refs');
+SELECT * FROM detect_chimera_uchime('queries', db:='refs');
 
 -- Filter chimeric sequences
 CREATE TABLE clean_seqs AS
 SELECT q.* FROM queries q
-JOIN uchime_ref('queries', db:='refs') u ON q.read_id = u.query_id
+JOIN detect_chimera_uchime('queries', db:='refs') u ON q.read_id = u.query_id
 WHERE u.flag = 'N';
 
 -- Count chimeras
-SELECT flag, count(*) FROM uchime_ref('queries', db:='refs') GROUP BY flag;
+SELECT flag, count(*) FROM detect_chimera_uchime('queries', db:='refs') GROUP BY flag;
 ```
 
 **Behavior:**
@@ -1644,16 +1646,16 @@ SELECT flag, count(*) FROM uchime_ref('queries', db:='refs') GROUP BY flag;
 
 ---
 
-## `uchime_denovo(input_table, [options])`
+## `detect_chimera_uchime_denovo(input_table, [options])`
 
-De novo chimera detection using the UCHIME algorithm. Detects chimeric sequences without a reference database by using abundance information: more abundant sequences are assumed to be non-chimeric and serve as parents for less abundant sequences.
+De novo chimera detection using the UCHIME algorithm, powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Detects chimeric sequences without a reference database by using abundance information: more abundant sequences are assumed to be non-chimeric and serve as parents for less abundant sequences.
 
 **Parameters:**
 - `input_table` (VARCHAR): Name of a table or view containing sequences with abundance. Must have `read_id` (VARCHAR), `sequence1` (VARCHAR), and `size` (integer type) columns.
 - `abskew` (DOUBLE, default 2.0): Abundance skew. Candidate parents must have abundance >= abskew * query abundance. Must be >= 1.0.
-- `minh`, `xn`, `dn`, `mindiv`, `mindiffs`: Same as `uchime_ref`.
+- `minh`, `xn`, `dn`, `mindiv`, `mindiffs`: Same as `detect_chimera_uchime`.
 
-**Output schema:** Same 18 columns as `uchime_ref`.
+**Output schema:** Same 18 columns as `detect_chimera_uchime`.
 
 **Example:**
 ```sql
@@ -1664,11 +1666,11 @@ FROM read_fastx('amplicons.fasta')
 GROUP BY read_id, sequence1;
 
 -- De novo chimera detection
-SELECT * FROM uchime_denovo('seqs');
+SELECT * FROM detect_chimera_uchime_denovo('seqs');
 
 -- Filter out chimeras
 SELECT s.* FROM seqs s
-JOIN uchime_denovo('seqs') u ON s.read_id = u.query_id
+JOIN detect_chimera_uchime_denovo('seqs') u ON s.read_id = u.query_id
 WHERE u.flag != 'Y';
 ```
 
@@ -1685,3 +1687,123 @@ WHERE u.flag != 'Y';
 - Error if `size` column is not an integer type
 - Error if table is empty
 - Error if scoring parameters are out of valid range
+
+---
+
+## `search_sequences_vsearch(query_table, db='ref_table', id=threshold, [options])`
+
+Global pairwise sequence search, powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Finds the best matching sequences in a reference database for each query sequence using SIMD-optimized Needleman-Wunsch alignment with k-mer candidate filtering.
+
+**Parameters:**
+- `query_table` (VARCHAR): Name of a table or view containing query sequences. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns.
+- `db` (VARCHAR, required): Name of a table or view containing reference sequences. Same schema requirements as `query_table`.
+- `id` (DOUBLE, required): Minimum identity threshold (0.0-1.0). No silent default — must be specified explicitly.
+- `maxaccepts` (INTEGER, default 1): Maximum number of accepted hits per query. Must be >= 1.
+- `maxrejects` (INTEGER, default 32): Maximum rejected targets before stopping search. Must be >= 1.
+
+**Output schema:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `query_id` | VARCHAR | Query sequence identifier |
+| `target_id` | VARCHAR | Reference sequence identifier |
+| `identity` | DOUBLE | Percent identity (0-100) |
+| `matches` | INTEGER | Number of matching columns |
+| `mismatches` | INTEGER | Number of mismatching columns |
+| `gaps` | INTEGER | Number of gap columns |
+| `alignment_length` | INTEGER | Total alignment length |
+| `query_length` | INTEGER | Query sequence length |
+| `target_length` | INTEGER | Target sequence length |
+| `accepted` | BOOLEAN | True if hit passes identity threshold |
+
+**Example:**
+```sql
+CREATE TABLE refs AS SELECT read_id, sequence1 FROM read_fastx('database.fasta');
+CREATE TABLE queries AS SELECT read_id, sequence1 FROM read_fastx('queries.fasta');
+
+-- Search at 97% identity
+SELECT * FROM search_sequences_vsearch('queries', db:='refs', id:=0.97);
+
+-- Top 3 hits per query at 90% identity
+SELECT * FROM search_sequences_vsearch('queries', db:='refs', id:=0.90, maxaccepts:=3);
+
+-- Count queries with hits
+SELECT count(DISTINCT query_id) FROM search_sequences_vsearch('queries', db:='refs', id:=0.97);
+```
+
+**Behavior:**
+- Each query produces 0 to `maxaccepts` output rows
+- Results include both accepted (above threshold) and weak (near-miss) hits; use the `accepted` column to filter
+- Plus-strand only (no reverse complement search)
+- Multi-threaded: up to 8 threads for parallel query searching
+- Reference database is fully materialized in memory at init time
+- RNA sequences (U) are automatically converted to DNA (T)
+
+**Error handling:**
+- Error if `db` or `id` parameter is missing
+- Error if `id` is not between 0.0 and 1.0
+- Error if query or reference table does not exist or lacks required columns
+- Error if reference table is empty
+
+---
+
+## `cluster_sequences_vsearch(input_table, id=threshold, [options])`
+
+Greedy sequence clustering, powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Clusters sequences by iterating in input order: each sequence is compared against existing centroids, and either joins the best matching cluster (if above the identity threshold) or becomes a new centroid.
+
+**Parameters:**
+- `input_table` (VARCHAR): Name of a table or view containing sequences. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns.
+- `id` (DOUBLE, required): Minimum identity threshold (0.0-1.0). No silent default — must be specified explicitly.
+- `strand` (VARCHAR, default `'plus'`): `'plus'` for plus-strand only, `'both'` to also search reverse complements.
+
+**Output schema:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `read_id` | VARCHAR | Input sequence identifier |
+| `is_centroid` | BOOLEAN | True if this sequence started a new cluster |
+| `cluster_id` | INTEGER | Cluster number (0-based) |
+| `centroid_id` | VARCHAR | Identifier of the cluster's centroid |
+| `identity` | DOUBLE | Percent identity to centroid (100.0 if centroid) |
+| `cigar` | VARCHAR | CIGAR alignment to centroid (empty if centroid) |
+| `cigar_truncated` | BOOLEAN | True if CIGAR was truncated (>4096 chars) |
+
+**Sort order is the caller's responsibility.** The function clusters sequences in the order they appear in the input table. For `cluster_fast`-equivalent behavior (longest first), sort by length descending. For `cluster_size`-equivalent behavior (most abundant first), sort by abundance descending:
+
+```sql
+-- Load and sort by length descending (like vsearch --cluster_fast)
+CREATE TABLE sorted_seqs AS
+  SELECT * FROM read_fastx('sequences.fasta')
+  ORDER BY length(sequence1) DESC;
+SELECT * FROM cluster_sequences_vsearch('sorted_seqs', id:=0.97);
+
+-- Cluster by abundance (like vsearch --cluster_size)
+CREATE TABLE by_abundance AS
+  SELECT read_id, sequence1, count(*) AS size
+  FROM read_fastx('amplicons.fasta')
+  GROUP BY read_id, sequence1
+  ORDER BY size DESC;
+SELECT * FROM cluster_sequences_vsearch('by_abundance', id:=0.97);
+
+-- Count clusters
+SELECT count(*) FROM cluster_sequences_vsearch('sorted_seqs', id:=0.97) WHERE is_centroid;
+
+-- Get cluster sizes
+SELECT centroid_id, count(*) AS size
+FROM cluster_sequences_vsearch('sorted_seqs', id:=0.97)
+GROUP BY centroid_id ORDER BY size DESC;
+```
+
+**Behavior:**
+- One output row per input sequence
+- Single-threaded (inherently sequential — each centroid must be indexed before the next sequence is processed)
+- RNA sequences (U) are automatically converted to DNA (T)
+- All results are materialized before returning (vsearch session mutex held for the duration)
+
+**Error handling:**
+- Error if `id` parameter is missing
+- Error if `id` is not between 0.0 and 1.0
+- Error if `strand` is not `'plus'` or `'both'`
+- Error if table does not exist or lacks required columns
+- Error if table is empty or contains NULL read_ids, NULL sequences, or empty sequences
+- Error if any read_id exceeds 1023 characters

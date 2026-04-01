@@ -70,6 +70,23 @@ public:
 	}
 };
 
+//! Encode numeric Phred scores to ASCII quality string (score + offset).
+//! Used by COPY FORMAT FASTQ and merge_pairs_vsearch to convert LIST(UTINYINT) back to ASCII.
+inline std::string encode_quality_ascii(const uint8_t *qual_data, size_t length, int offset = 33) {
+	std::string result;
+	result.reserve(length);
+	for (size_t i = 0; i < length; i++) {
+		int encoded = static_cast<int>(qual_data[i]) + offset;
+		if (encoded > 126) {
+			throw std::runtime_error("Quality score overflow: " + std::to_string(qual_data[i]) + " + " +
+			                         std::to_string(offset) + " = " + std::to_string(encoded) +
+			                         " exceeds valid ASCII range (max 126)");
+		}
+		result.push_back(static_cast<char>(encoded));
+	}
+	return result;
+}
+
 //! phred_scores: already decoded (ASCII–offset), one entry per base
 //! min_quality: minimum acceptable score
 //! window_length: number of consecutive low‐quality bases to flag

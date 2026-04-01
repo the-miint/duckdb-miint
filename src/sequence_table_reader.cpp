@@ -539,4 +539,61 @@ miint::SequenceRecordBatch QuerySequenceStream::FetchSubBatch() {
 	return result;
 }
 
+LoadedSingleEndSequences LoadSingleEndSequences(ClientContext &context, const std::string &table_name,
+                                                const std::string &function_name, bool strict) {
+	auto &db = DatabaseInstance::GetDatabase(context);
+	Connection conn(db);
+	auto result = conn.Query("SELECT read_id, sequence1 FROM " + KeywordHelper::WriteOptionallyQuoted(table_name));
+	if (result->HasError()) {
+		throw InvalidInputException("Failed to read table '%s': %s", table_name, result->GetError());
+	}
+
+	LoadedSingleEndSequences loaded;
+	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto row_count = materialized.RowCount();
+	loaded.labels.reserve(row_count);
+	loaded.sequences.reserve(row_count);
+
+	while (auto chunk = materialized.Fetch()) {
+		for (idx_t i = 0; i < chunk->size(); i++) {
+			auto read_id_val = chunk->GetValue(0, i);
+			auto seq_val = chunk->GetValue(1, i);
+			if (strict) {
+				if (read_id_val.IsNull()) {
+					throw InvalidInputException("%s: NULL read_id found in table '%s'. "
+					                            "All rows must have a non-NULL read_id.",
+					                            function_name, table_name);
+				}
+				if (seq_val.IsNull()) {
+					throw InvalidInputException("%s: NULL sequence1 found for read_id '%s' in table '%s'",
+					                            function_name, read_id_val.GetValue<std::string>(), table_name);
+				}
+				auto seq_str = seq_val.GetValue<std::string>();
+				if (seq_str.empty()) {
+					throw InvalidInputException("%s: empty sequence1 found for read_id '%s' in table '%s'",
+					                            function_name, read_id_val.GetValue<std::string>(), table_name);
+				}
+				loaded.labels.push_back(read_id_val.GetValue<std::string>());
+				loaded.sequences.push_back(std::move(seq_str));
+			} else {
+				if (read_id_val.IsNull() || seq_val.IsNull()) {
+					continue;
+				}
+				auto seq_str = seq_val.GetValue<std::string>();
+				if (seq_str.empty()) {
+					continue;
+				}
+				loaded.labels.push_back(read_id_val.GetValue<std::string>());
+				loaded.sequences.push_back(std::move(seq_str));
+			}
+		}
+	}
+
+	if (loaded.labels.empty()) {
+		throw InvalidInputException("Table '%s' is empty (or contains only NULL/empty sequences)", table_name);
+	}
+
+	return loaded;
+}
+
 } // namespace duckdb

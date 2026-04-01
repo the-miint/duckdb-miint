@@ -21,28 +21,13 @@
 //   12. vsearch_session_end()               — release session mutex
 
 #include "VsearchChimeraWrapper.hpp"
+#include "vsearch_utils.hpp"
 
 #include "vsearch_api.h"
 
 #include <cassert>
 
 namespace miint {
-
-// ============================================================================
-// Shared helper
-// ============================================================================
-
-std::string VsearchChimeraWrapper::normalize_rna(const std::string &seq) {
-	std::string out = seq;
-	for (auto &c : out) {
-		if (c == 'U') {
-			c = 'T';
-		} else if (c == 'u') {
-			c = 't';
-		}
-	}
-	return out;
-}
 
 // ============================================================================
 // DetectHandle — per-thread chimera detection state
@@ -78,6 +63,8 @@ VsearchChimeraWrapper::DetectHandle &VsearchChimeraWrapper::DetectHandle::operat
 UchimeResult VsearchChimeraWrapper::DetectHandle::detect(const std::string &query_label,
                                                          const std::string &query_sequence) {
 	assert(impl_ && impl_->initialized && "DetectHandle::detect called on uninitialized handle");
+
+	validate_label_length(query_label, "detect");
 
 	auto seq = normalize_rna(query_sequence);
 
@@ -196,6 +183,7 @@ void VsearchChimeraWrapper::load_sequences_into_db(const std::vector<std::string
                                                    const std::vector<std::string> &sequences,
                                                    const std::vector<int64_t> &abundances) {
 	for (size_t i = 0; i < labels.size(); i++) {
+		validate_label_length(labels[i], "chimera detection");
 		auto seq = normalize_rna(sequences[i]);
 		int64_t abund = i < abundances.size() ? abundances[i] : 1;
 		db_add(false, labels[i].c_str(), seq.c_str(), nullptr, labels[i].size(), seq.size(), abund);
@@ -298,6 +286,8 @@ UchimeResult VsearchChimeraWrapper::convert_result(const void *vsearch_result_pt
 UchimeResult VsearchChimeraWrapper::detect_denovo(const std::string &query_label, const std::string &query_sequence,
                                                   int64_t query_abundance) {
 	assert(state_ && state_->thread_initialized && "detect_denovo called before prepare_denovo");
+
+	validate_label_length(query_label, "detect_denovo");
 
 	auto seq = normalize_rna(query_sequence);
 

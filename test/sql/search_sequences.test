@@ -1,0 +1,158 @@
+# name: test/sql/search_sequences.test
+# description: search_sequences table function tests
+# group: [sql]
+
+require miint
+
+# --- Error handling ---
+
+# Missing db parameter
+statement error
+SELECT * FROM search_sequences_vsearch('nonexistent');
+----
+search_sequences_vsearch requires 'db' parameter
+
+# Missing id parameter (required — no silent default)
+statement ok
+CREATE TABLE dummy_queries AS SELECT 'q1' AS read_id, 'ATCG' AS sequence1;
+
+statement ok
+CREATE TABLE dummy_refs AS SELECT 'r1' AS read_id, 'ATCG' AS sequence1;
+
+statement error
+SELECT * FROM search_sequences_vsearch('dummy_queries', db:='dummy_refs');
+----
+search_sequences_vsearch requires 'id' parameter
+
+# Nonexistent query table
+statement error
+SELECT * FROM search_sequences_vsearch('no_such_table', db:='also_missing', id:=0.97);
+----
+does not exist
+
+# Nonexistent ref table
+statement error
+SELECT * FROM search_sequences_vsearch('dummy_queries', db:='no_such_ref', id:=0.97);
+----
+does not exist
+
+# Invalid id parameter (out of range)
+statement error
+SELECT * FROM search_sequences_vsearch('dummy_queries', db:='dummy_refs', id:=1.5);
+----
+between 0.0 and 1.0
+
+statement error
+SELECT * FROM search_sequences_vsearch('dummy_queries', db:='dummy_refs', id:=-0.1);
+----
+between 0.0 and 1.0
+
+# Invalid maxaccepts
+statement error
+SELECT * FROM search_sequences_vsearch('dummy_queries', db:='dummy_refs', id:=0.97, maxaccepts:=0);
+----
+>= 1
+
+# Invalid maxrejects
+statement error
+SELECT * FROM search_sequences_vsearch('dummy_queries', db:='dummy_refs', id:=0.97, maxrejects:=0);
+----
+>= 1
+
+# Empty ref table
+statement ok
+CREATE TABLE empty_refs AS SELECT read_id, sequence1 FROM dummy_refs WHERE 1=0;
+
+statement error
+SELECT * FROM search_sequences_vsearch('dummy_queries', db:='empty_refs', id:=0.97);
+----
+empty
+
+# NULL read_id in query table
+statement ok
+CREATE TABLE null_id_queries AS SELECT NULL::VARCHAR AS read_id, 'ATCG' AS sequence1;
+
+# NULL read_ids are silently skipped by QuerySequenceStream (no crash)
+query I
+SELECT count(*) FROM search_sequences_vsearch('null_id_queries', db:='dummy_refs', id:=0.97);
+----
+0
+
+# --- Synthetic tests ---
+
+# Exact match
+statement ok
+CREATE TABLE syn_refs AS SELECT * FROM (VALUES
+    ('refA', 'ATCGATCGATCGATCGATCGATCG'),
+    ('refB', 'GGCCTTAAGGCCTTAAGGCCTTAA'),
+    ('refC', 'AAAAAAAACCCCCCCCGGGGGGGG')
+) t(read_id, sequence1);
+
+statement ok
+CREATE TABLE syn_queries AS SELECT * FROM (VALUES
+    ('qA', 'ATCGATCGATCGATCGATCGATCG'),
+    ('qB', 'GGCCTTAAGGCCTTAAGGCCTTAA')
+) t(read_id, sequence1);
+
+query TTRI
+SELECT query_id, target_id, identity, accepted
+FROM search_sequences_vsearch('syn_queries', db:='syn_refs', id:=0.97)
+ORDER BY query_id;
+----
+qA	refA	100.0	true
+qB	refB	100.0	true
+
+# Verify all output columns exist and have correct types
+query TTRIIIIIII
+SELECT query_id, target_id, identity, matches, mismatches, gaps,
+       alignment_length, query_length, target_length, accepted::int
+FROM search_sequences_vsearch('syn_queries', db:='syn_refs', id:=0.97)
+WHERE query_id = 'qA';
+----
+qA	refA	100.0	24	0	0	24	24	24	1
+
+# No match at high threshold with divergent sequence
+statement ok
+CREATE TABLE div_queries AS SELECT 'qDiv' AS read_id, 'TTTTTTTTTTTTTTTTTTTTTTTT' AS sequence1;
+
+query I
+SELECT count(*) FROM search_sequences_vsearch('div_queries', db:='syn_refs', id:=0.97);
+----
+0
+
+# View support — search against a view
+statement ok
+CREATE VIEW syn_refs_view AS SELECT * FROM syn_refs;
+
+query TT
+SELECT query_id, target_id
+FROM search_sequences_vsearch('syn_queries', db:='syn_refs_view', id:=0.97)
+ORDER BY query_id;
+----
+qA	refA
+qB	refB
+
+# --- Cleanup ---
+statement ok
+DROP TABLE dummy_queries;
+
+statement ok
+DROP TABLE dummy_refs;
+
+statement ok
+DROP TABLE empty_refs;
+
+statement ok
+DROP TABLE null_id_queries;
+
+statement ok
+DROP TABLE syn_refs;
+
+statement ok
+DROP TABLE syn_queries;
+
+statement ok
+DROP TABLE div_queries;
+
+statement ok
+DROP VIEW syn_refs_view;

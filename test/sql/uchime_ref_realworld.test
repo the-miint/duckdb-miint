@@ -1,5 +1,5 @@
 # name: test/sql/uchime_ref_realworld.test
-# description: Real-world uchime_ref validation against LTP 16S database
+# description: Real-world detect_chimera_uchime validation against LTP 16S database
 # group: [sql]
 
 #
@@ -42,7 +42,7 @@ SELECT count(*) FROM ltp_queries;
 # EU778281.1 = N (its actual parents MK567960/JAOQKB000000000 are NOT in the 500-ref subset)
 
 query TT
-SELECT query_id, flag FROM uchime_ref('ltp_queries', db:='ltp_refs') ORDER BY query_id;
+SELECT query_id, flag FROM detect_chimera_uchime('ltp_queries', db:='ltp_refs') ORDER BY query_id;
 ----
 EU778281.1	N
 chimera_10_100	Y
@@ -56,20 +56,20 @@ clean_HF558388	N
 
 # All 5 synthetic chimeras detected
 query I
-SELECT count(*) FROM uchime_ref('ltp_queries', db:='ltp_refs') WHERE flag = 'Y';
+SELECT count(*) FROM detect_chimera_uchime('ltp_queries', db:='ltp_refs') WHERE flag = 'Y';
 ----
 5
 
 # Clean sequences have NULL parents
 query I
-SELECT count(*) FROM uchime_ref('ltp_queries', db:='ltp_refs')
+SELECT count(*) FROM detect_chimera_uchime('ltp_queries', db:='ltp_refs')
 WHERE flag = 'N' AND parent_a_id IS NULL;
 ----
 4
 
 # Chimeric sequences have non-NULL parents
 query I
-SELECT count(*) FROM uchime_ref('ltp_queries', db:='ltp_refs')
+SELECT count(*) FROM detect_chimera_uchime('ltp_queries', db:='ltp_refs')
 WHERE flag = 'Y' AND parent_a_id IS NOT NULL;
 ----
 5

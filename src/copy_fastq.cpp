@@ -45,18 +45,7 @@ struct FastqCopyBindData : public SequenceCopyBindData {
 // Helper Functions
 //===--------------------------------------------------------------------===//
 static string EncodeQuality(const uint8_t *qual_data, idx_t length, uint8_t offset) {
-	string result;
-	result.reserve(length);
-	for (idx_t i = 0; i < length; i++) {
-		uint8_t q = qual_data[i];
-		uint16_t encoded = static_cast<uint16_t>(q) + offset;
-		if (encoded > 126) {
-			throw InvalidInputException("Quality score overflow: %d + %d = %d exceeds valid ASCII range (max 126)", q,
-			                            offset, encoded);
-		}
-		result.push_back(static_cast<char>(encoded));
-	}
-	return result;
+	return miint::encode_quality_ascii(qual_data, static_cast<size_t>(length), offset);
 }
 
 //===--------------------------------------------------------------------===//

@@ -36,6 +36,10 @@
 #include <rype_log_ratio.hpp>
 #include <uchime_ref.hpp>
 #include <uchime_denovo.hpp>
+#include <mask_dust_function.hpp>
+#include <merge_pairs_function.hpp>
+#include <search_sequences.hpp>
+#include <cluster_sequences.hpp>
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include <htslib-1.22.1/htslib/hts.h>
 #include <kseq++/config.hpp>
@@ -223,6 +227,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RypeLogRatioTableFunction::Register(loader);
 	UchimeRefTableFunction::Register(loader);
 	UchimeDenovoTableFunction::Register(loader);
+	MaskDustFunction::Register(loader);
+	MergePairsFunction::Register(loader);
+	SearchSequencesTableFunction::Register(loader);
+	ClusterSequencesTableFunction::Register(loader);
 }
 
 void MiintExtension::Load(ExtensionLoader &loader) {

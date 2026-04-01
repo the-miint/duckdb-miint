@@ -393,11 +393,11 @@ set_target_properties(wfa2cpp PROPERTIES
 )
 add_dependencies(wfa2cpp wfa2_build)
 
-# Build vsearch from source (v2.30.5 + api-layer) using autotools.
-# Produces libvsearch.a — a PIC static archive for embedding vsearch's chimera
-# detection (and potentially other algorithms) into the extension.
-# TODO: Once the-miint/vsearch fork is set up, change SOURCE_DIR to ext/vsearch.
-set(VSEARCH_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/scratch/vsearch-debug)
+# Build vsearch from source (v2.30.5-miint fork) using autotools.
+# Produces libvsearch.a — a PIC static archive for embedding vsearch's
+# search, clustering, chimera detection, DUST masking, and merge-pairs
+# algorithms into the extension.
+set(VSEARCH_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/vsearch)
 
 # Handle cross-compilation for vsearch (same pattern as htslib)
 set(VSEARCH_HOST_FLAG "")
@@ -576,10 +576,13 @@ set(EXTENSION_SOURCES
     src/remote_file_helper.cpp
     src/duckdb_seq_stream.cpp
     src/hfile_duckdb.cpp
-    src/KmerIndex.cpp
-    src/DustMasker.cpp
-    src/ChimeraDetector.cpp
     src/VsearchChimeraWrapper.cpp
+    src/VsearchSearchWrapper.cpp
+    src/mask_dust_function.cpp
+    src/merge_pairs_function.cpp
+    src/search_sequences.cpp
+    src/VsearchClusterWrapper.cpp
+    src/cluster_sequences.cpp
     src/uchime_common.cpp
     src/uchime_ref.cpp
     src/uchime_denovo.cpp)
@@ -746,14 +749,12 @@ set(TEST_SOURCES
     src/remote_file_helper.cpp
     test/cpp/test_RemoteFileHelper.cpp
     test/cpp/test_hfile_duckdb.cpp
-    src/KmerIndex.cpp
-    test/cpp/test_KmerIndex.cpp
-    src/DustMasker.cpp
-    test/cpp/test_DustMasker.cpp
-    src/ChimeraDetector.cpp
-    test/cpp/test_ChimeraDetector.cpp
     src/VsearchChimeraWrapper.cpp
     test/cpp/test_VsearchChimeraWrapper.cpp
+    src/VsearchSearchWrapper.cpp
+    test/cpp/test_VsearchSearchWrapper.cpp
+    src/VsearchClusterWrapper.cpp
+    test/cpp/test_VsearchClusterWrapper.cpp
 )
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND TEST_SOURCES src/BIOMTable.cpp src/BIOMReader.cpp

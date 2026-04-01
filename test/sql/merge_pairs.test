@@ -1,0 +1,195 @@
+# name: test/sql/merge_pairs.test
+# description: test merge_pairs scalar function
+# group: [sql]
+
+require miint
+
+# --- Setup: load paired-end test data ---
+# Synthetic pairs generated from LTP 16S with 50bp overlap, Q40 uniform quality.
+# data/merge/generate_test_pairs.py data/uchime/ltp_subset_500.fasta ... --overlap 50
+
+statement ok
+CREATE TABLE r1 AS SELECT read_id, sequence1, qual1 FROM read_fastx('data/merge/ltp_50_R1.fq');
+
+statement ok
+CREATE TABLE r2 AS SELECT read_id, sequence1, qual1 FROM read_fastx('data/merge/ltp_50_R2.fq');
+
+# --- NULL handling ---
+
+query I
+SELECT merge_pairs_vsearch(NULL, [40, 40, 40, 40]::UTINYINT[], 'ACGT', [40, 40, 40, 40]::UTINYINT[]);
+----
+NULL
+
+query I
+SELECT merge_pairs_vsearch('ACGT', NULL, 'ACGT', [40, 40, 40, 40]::UTINYINT[]);
+----
+NULL
+
+query I
+SELECT merge_pairs_vsearch('ACGT', [40, 40, 40, 40]::UTINYINT[], NULL, [40, 40, 40, 40]::UTINYINT[]);
+----
+NULL
+
+query I
+SELECT merge_pairs_vsearch('ACGT', [40, 40, 40, 40]::UTINYINT[], 'ACGT', NULL);
+----
+NULL
+
+# --- Basic merge: synthetic overlapping reads ---
+
+query II
+SELECT (m).merged, length((m).sequence)
+FROM (
+    SELECT merge_pairs_vsearch(r1.sequence1, r1.qual1, r2.sequence1, r2.qual1) AS m
+    FROM r1 JOIN r2 ON r1.read_id = r2.read_id
+    WHERE r1.read_id = 'AF530475'
+);
+----
+true	1473
+
+# --- All STRUCT fields populated for a merged read ---
+
+query IIIIIII
+SELECT (m).merged,
+       length((m).sequence) > 0,
+       length((m).quality) > 0,
+       (m).ee_merged >= 0.0,
+       (m).fwd_errors >= 0,
+       (m).rev_errors >= 0,
+       (m).overlap > 0
+FROM (
+    SELECT merge_pairs_vsearch(r1.sequence1, r1.qual1, r2.sequence1, r2.qual1) AS m
+    FROM r1 JOIN r2 ON r1.read_id = r2.read_id
+    WHERE r1.read_id = 'AF530475'
+);
+----
+true	true	true	true	true	true	true
+
+# --- Merged quality is LIST(UTINYINT) with same length as sequence ---
+
+query I
+SELECT length((m).sequence) = length((m).quality)
+FROM (
+    SELECT merge_pairs_vsearch(r1.sequence1, r1.qual1, r2.sequence1, r2.qual1) AS m
+    FROM r1 JOIN r2 ON r1.read_id = r2.read_id
+    WHERE r1.read_id = 'AF530475'
+);
+----
+true
+
+# --- Non-overlapping reads: merged=false ---
+
+query I
+SELECT (merge_pairs_vsearch('ACGTACGTACGT', [40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+                     'NNNNNNNNNNNN', [40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[])).merged;
+----
+false
+
+# --- Unmerged reads return empty quality list ---
+
+query I
+SELECT length((merge_pairs_vsearch('ACGTACGTACGT', [40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+                            'NNNNNNNNNNNN', [40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[])).quality);
+----
+0
+
+# --- 10-arg overload with custom parameters ---
+# minovlen=60 rejects our 50bp-overlap reads
+
+query I
+SELECT count(*)
+FROM r1 JOIN r2 ON r1.read_id = r2.read_id
+WHERE (merge_pairs_vsearch(r1.sequence1, r1.qual1, r2.sequence1, r2.qual1,
+                   60, 10, 100.0, 1e18, 1, 1000000)).merged;
+----
+0
+
+# --- 10-arg overload with default-equivalent params: same results as 4-arg ---
+
+query I
+SELECT count(*)
+FROM r1 JOIN r2 ON r1.read_id = r2.read_id
+WHERE (merge_pairs_vsearch(r1.sequence1, r1.qual1, r2.sequence1, r2.qual1,
+                   10, 10, 100.0, 1e18, 1, 1000000)).merged;
+----
+50
+
+# --- Parameter validation ---
+
+statement error
+SELECT merge_pairs_vsearch('A', [40]::UTINYINT[], 'A', [40]::UTINYINT[], 0, 10, 100.0, 1e18, 1, 1000000);
+----
+minovlen must be >= 1
+
+statement error
+SELECT merge_pairs_vsearch('A', [40]::UTINYINT[], 'A', [40]::UTINYINT[], 10, 10, 100.0, 1e18, 100, 10);
+----
+minlen (100) must be <= maxlen (10)
+
+# --- Real-data validation against vsearch v2.30.5 ---
+# Ground truth: vsearch --fastq_mergepairs data/merge/ltp_50_R1.fq \
+#   --reverse data/merge/ltp_50_R2.fq --fastqout data/merge/ltp_50_merged.fq
+# Run date: 2026-03-30, vsearch v2.30.5
+# Result: 50/50 pairs merged
+
+# All 50 pairs merge successfully
+query I
+SELECT count(*)
+FROM r1 JOIN r2 ON r1.read_id = r2.read_id
+WHERE (merge_pairs_vsearch(r1.sequence1, r1.qual1, r2.sequence1, r2.qual1)).merged;
+----
+50
+
+# All overlaps are 50bp (matching our synthetic data generation)
+query II
+SELECT min((m).overlap), max((m).overlap)
+FROM (
+    SELECT merge_pairs_vsearch(r1.sequence1, r1.qual1, r2.sequence1, r2.qual1) AS m
+    FROM r1 JOIN r2 ON r1.read_id = r2.read_id
+);
+----
+50	50
+
+# Merged sequence lengths match vsearch output exactly
+# vsearch: min=420, max=1552 (from awk on ltp_50_merged.fq)
+query II
+SELECT min(length((m).sequence)), max(length((m).sequence))
+FROM (
+    SELECT merge_pairs_vsearch(r1.sequence1, r1.qual1, r2.sequence1, r2.qual1) AS m
+    FROM r1 JOIN r2 ON r1.read_id = r2.read_id
+);
+----
+420	1552
+
+# Spot-check: 5 merged lengths match vsearch exactly
+# vsearch: AF530475=1473, X96963=1488, FR870445=1530, X80725=1450, HF558388=1515
+query TI rowsort
+SELECT r1.read_id, length((m).sequence)
+FROM r1
+JOIN r2 ON r1.read_id = r2.read_id
+CROSS JOIN LATERAL (SELECT merge_pairs_vsearch(r1.sequence1, r1.qual1, r2.sequence1, r2.qual1) AS m) sub
+WHERE r1.read_id IN ('AF530475', 'X96963', 'FR870445', 'X80725', 'HF558388');
+----
+AF530475	1473
+FR870445	1530
+HF558388	1515
+X80725	1450
+X96963	1488
+
+# Verify merged sequences match vsearch character-by-character
+statement ok
+CREATE TABLE vsearch_merged AS
+SELECT read_id, sequence1 AS vsearch_sequence
+FROM read_fastx('data/merge/ltp_50_merged.fq');
+
+query I
+SELECT count(*)
+FROM (
+    SELECT r1.read_id, merge_pairs_vsearch(r1.sequence1, r1.qual1, r2.sequence1, r2.qual1) AS m
+    FROM r1 JOIN r2 ON r1.read_id = r2.read_id
+) miint_out
+JOIN vsearch_merged v ON miint_out.read_id = v.read_id
+WHERE (miint_out.m).sequence = v.vsearch_sequence;
+----
+50

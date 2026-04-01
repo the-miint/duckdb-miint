@@ -1,5 +1,5 @@
 # name: test/sql/uchime_ref.test
-# description: test uchime_ref table function
+# description: test detect_chimera_uchime table function
 # group: [sql]
 
 require miint
@@ -17,13 +17,13 @@ CREATE TABLE queries AS SELECT read_id, sequence1 FROM read_fastx('data/uchime/c
 
 # Missing db parameter
 statement error
-SELECT * FROM uchime_ref('queries');
+SELECT * FROM detect_chimera_uchime('queries');
 ----
-uchime_ref requires 'db' parameter
+detect_chimera_uchime requires 'db' parameter
 
 # Nonexistent table
 statement error
-SELECT * FROM uchime_ref('nonexistent_table', db:='refs');
+SELECT * FROM detect_chimera_uchime('nonexistent_table', db:='refs');
 ----
 does not exist
 
@@ -32,7 +32,7 @@ statement ok
 CREATE TABLE bad_refs(id VARCHAR, seq VARCHAR);
 
 statement error
-SELECT * FROM uchime_ref('queries', db:='bad_refs');
+SELECT * FROM detect_chimera_uchime('queries', db:='bad_refs');
 ----
 missing required column
 
@@ -41,18 +41,18 @@ statement ok
 CREATE TABLE empty_refs(read_id VARCHAR, sequence1 VARCHAR);
 
 statement error
-SELECT * FROM uchime_ref('queries', db:='empty_refs');
+SELECT * FROM detect_chimera_uchime('queries', db:='empty_refs');
 ----
 empty
 
 # Parameter range validation
 statement error
-SELECT * FROM uchime_ref('queries', db:='refs', mindiffs:=0);
+SELECT * FROM detect_chimera_uchime('queries', db:='refs', mindiffs:=0);
 ----
 must be >= 1
 
 statement error
-SELECT * FROM uchime_ref('queries', db:='refs', xn:=0.5);
+SELECT * FROM detect_chimera_uchime('queries', db:='refs', xn:=0.5);
 ----
 must be >= 1.0
 
@@ -60,7 +60,7 @@ must be >= 1.0
 
 # Row count should equal number of query sequences (8)
 query I
-SELECT count(*) FROM uchime_ref('queries', db:='refs');
+SELECT count(*) FROM detect_chimera_uchime('queries', db:='refs');
 ----
 8
 
@@ -69,7 +69,7 @@ statement ok
 CREATE VIEW refs_view AS SELECT read_id, sequence1 FROM refs;
 
 query I
-SELECT count(*) FROM uchime_ref('queries', db:='refs_view');
+SELECT count(*) FROM detect_chimera_uchime('queries', db:='refs_view');
 ----
 8
 
@@ -78,7 +78,7 @@ SELECT count(*) FROM uchime_ref('queries', db:='refs_view');
 
 # Verify all flags match vsearch
 query TT
-SELECT query_id, flag FROM uchime_ref('queries', db:='refs') ORDER BY query_id;
+SELECT query_id, flag FROM detect_chimera_uchime('queries', db:='refs') ORDER BY query_id;
 ----
 query_chimera1	Y
 query_chimera2	Y
@@ -99,7 +99,7 @@ SELECT round(score, 2), query_id, parent_a_id, parent_b_id,
        left_yes, left_no, left_abstain,
        right_yes, right_no, right_abstain,
        round(divergence, 1), flag
-FROM uchime_ref('queries', db:='refs')
+FROM detect_chimera_uchime('queries', db:='refs')
 WHERE query_id = 'query_chimera1';
 ----
 16.50	query_chimera1	ref1	ref2	84.7	85.0	69.7	100.0	85.0	45	0	0	46	0	0	15.0	Y
@@ -109,7 +109,7 @@ query IIIIIIIIIT
 SELECT round(score, 2), query_id, parent_a_id, parent_b_id, closest_parent_id,
        left_yes, left_no, left_abstain,
        right_yes, flag
-FROM uchime_ref('queries', db:='refs')
+FROM detect_chimera_uchime('queries', db:='refs')
 WHERE query_id = 'query_clean1';
 ----
 0.0	query_clean1	NULL	NULL	NULL	0	0	0	0	N
@@ -119,7 +119,7 @@ query IIIIIIIIIT
 SELECT round(score, 2), query_id, parent_a_id, parent_b_id, closest_parent_id,
        left_yes, left_no, left_abstain,
        right_yes, flag
-FROM uchime_ref('queries', db:='refs')
+FROM detect_chimera_uchime('queries', db:='refs')
 WHERE query_id = 'query_noparent';
 ----
 0.0	query_noparent	NULL	NULL	NULL	0	0	0	0	N
@@ -127,7 +127,7 @@ WHERE query_id = 'query_noparent';
 # Non-chimeric identity columns are NULL
 query II
 SELECT id_query_model IS NULL, divergence IS NULL
-FROM uchime_ref('queries', db:='refs')
+FROM detect_chimera_uchime('queries', db:='refs')
 WHERE query_id = 'query_clean1';
 ----
 true	true
@@ -135,13 +135,13 @@ true	true
 # Chimeric identity columns are NOT NULL
 query II
 SELECT id_query_model IS NOT NULL, divergence IS NOT NULL
-FROM uchime_ref('queries', db:='refs')
+FROM detect_chimera_uchime('queries', db:='refs')
 WHERE query_id = 'query_chimera1';
 ----
 true	true
 
 # Count chimeras
 query I
-SELECT count(*) FROM uchime_ref('queries', db:='refs') WHERE flag = 'Y';
+SELECT count(*) FROM detect_chimera_uchime('queries', db:='refs') WHERE flag = 'Y';
 ----
 4

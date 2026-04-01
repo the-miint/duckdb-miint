@@ -1,5 +1,5 @@
 # name: test/sql/uchime_denovo.test
-# description: test uchime_denovo table function
+# description: test detect_chimera_uchime_denovo table function
 # group: [sql]
 
 require miint
@@ -34,19 +34,19 @@ statement ok
 CREATE TABLE no_size(read_id VARCHAR, sequence1 VARCHAR);
 
 statement error
-SELECT * FROM uchime_denovo('no_size');
+SELECT * FROM detect_chimera_uchime_denovo('no_size');
 ----
 missing required column 'size'
 
 # Nonexistent table
 statement error
-SELECT * FROM uchime_denovo('nonexistent_table');
+SELECT * FROM detect_chimera_uchime_denovo('nonexistent_table');
 ----
 does not exist
 
 # Parameter validation
 statement error
-SELECT * FROM uchime_denovo('denovo_seqs', abskew:=0.5);
+SELECT * FROM detect_chimera_uchime_denovo('denovo_seqs', abskew:=0.5);
 ----
 must be >= 1.0
 
@@ -54,7 +54,7 @@ must be >= 1.0
 
 # Row count should equal number of input sequences (6)
 query I
-SELECT count(*) FROM uchime_denovo('denovo_seqs');
+SELECT count(*) FROM detect_chimera_uchime_denovo('denovo_seqs');
 ----
 6
 
@@ -64,7 +64,7 @@ SELECT count(*) FROM uchime_denovo('denovo_seqs');
 
 # Verify all flags
 query TT
-SELECT query_id, flag FROM uchime_denovo('denovo_seqs') ORDER BY query_id;
+SELECT query_id, flag FROM detect_chimera_uchime_denovo('denovo_seqs') ORDER BY query_id;
 ----
 seq1	N
 seq2	N
@@ -75,7 +75,7 @@ seq6	N
 
 # Verify chimera counts
 query I
-SELECT count(*) FROM uchime_denovo('denovo_seqs') WHERE flag = 'Y';
+SELECT count(*) FROM detect_chimera_uchime_denovo('denovo_seqs') WHERE flag = 'Y';
 ----
 2
 
@@ -86,7 +86,7 @@ SELECT round(score, 2), query_id, parent_a_id, parent_b_id,
        left_yes, left_no, left_abstain,
        right_yes, right_no, right_abstain,
        round(divergence, 1), flag
-FROM uchime_denovo('denovo_seqs')
+FROM detect_chimera_uchime_denovo('denovo_seqs')
 WHERE query_id = 'seq4';
 ----
 16.50	seq4	seq1	seq2	45	0	0	46	0	0	15.0	Y
@@ -94,7 +94,7 @@ WHERE query_id = 'seq4';
 # Verify non-chimeric sequences have NULL parents
 query IIIII
 SELECT query_id, parent_a_id, parent_b_id, closest_parent_id, flag
-FROM uchime_denovo('denovo_seqs')
+FROM detect_chimera_uchime_denovo('denovo_seqs')
 WHERE query_id = 'seq1';
 ----
 seq1	NULL	NULL	NULL	N
@@ -104,6 +104,6 @@ statement ok
 CREATE VIEW denovo_view AS SELECT * FROM denovo_seqs;
 
 query I
-SELECT count(*) FROM uchime_denovo('denovo_view') WHERE flag = 'Y';
+SELECT count(*) FROM detect_chimera_uchime_denovo('denovo_view') WHERE flag = 'Y';
 ----
 2
