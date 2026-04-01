@@ -20,3 +20,7 @@
 	path = ext/vsearch
 	url = git@github.com:the-miint/vsearch.git
 	branch = v2.30.5-miint
+[submodule "ext/mafft"]
+	path = ext/mafft
+	url = https://github.com/the-miint/mafft.git
+	branch = v7.471-miint

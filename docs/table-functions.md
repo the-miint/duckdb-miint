@@ -22,10 +22,11 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`align_minimap2_sharded`](#align_minimap2_shardedquery_table-shard_directory-read_to_shard-options) - Sharded minimap2 alignment
 - [`align_bowtie2`](#align_bowtie2query_table-subject_table-options) - Bowtie2 alignment
 - [`align_bowtie2_sharded`](#align_bowtie2_shardedquery_table-shard_directory-read_to_shard-options) - Sharded bowtie2 alignment
+- [`align_mafft`](#align_mafftfilename) - MAFFT multiple sequence alignment (PartTree)
 - [`detect_chimera_uchime`](#detect_chimera_uchimequery_table-dbrefs_table-options) - Reference-based chimera detection (UCHIME)
 - [`detect_chimera_uchime_denovo`](#detect_chimera_uchime_denovoinput_table-options) - De novo chimera detection (UCHIME)
-- [`search_sequences_vsearch`](#search_sequencesquery_table-dbref_table-idthreshold-options) - Global sequence search
-- [`cluster_sequences_vsearch`](#cluster_sequencesinput_table-idthreshold-options) - Greedy sequence clustering
+- [`search_sequences_vsearch`](#search_sequences_vsearchquery_table-dbref_table-idthreshold-options) - Global sequence search
+- [`cluster_sequences_vsearch`](#cluster_sequences_vsearchinput_table-idthreshold-options) - Greedy sequence clustering
 
 ## `read_alignments(filename, [reference_lengths='table_name'], [include_filepath=false], [include_seq_qual=false])`
 Read SAM/BAM alignment files.
@@ -1565,6 +1566,74 @@ SELECT * FROM align_bowtie2_sharded('queries',
 | Read routing | All reads against one index | Reads routed to specific shards via mapping table |
 | Parallelism | Single aligner thread(s) | One aligner per shard, concurrent |
 | Use case | Single reference database | Sharded reference databases (e.g., from prior classification) |
+
+## `align_mafft(filename)`
+
+Multiple sequence alignment using MAFFT's PartTree algorithm. Reads all sequences from a FASTA file, aligns them, and returns the aligned sequences with gap characters inserted.
+
+MAFFT is embedded as a statically linked C library (no external binary required). The PartTree algorithm uses O(N log N) guide tree construction with k-tuple distances, making it suitable for large datasets (tested up to 5,000+ sequences).
+
+**Parameters:**
+- `filename` (VARCHAR): Path to a FASTA file containing sequences to align. Minimum 2 sequences, each at least 6 characters. DNA and protein sequences are auto-detected.
+
+**Output schema:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `sequence_index` | BIGINT | 0-based position matching input order |
+| `read_id` | VARCHAR | Sequence identifier from FASTA header |
+| `comment` | VARCHAR | Header text after first space (NULL if absent) |
+| `aligned_sequence` | VARCHAR | Aligned sequence with `-` gap characters |
+| `original_length` | INTEGER | Length of the input sequence (no gaps) |
+| `aligned_length` | INTEGER | Length of aligned sequences (same for all rows) |
+
+**Algorithm:** Equivalent to `mafft --quiet --preservecase --parttree`. Original case is preserved (MAFFT internally lowercases DNA; the wrapper restores the original characters after alignment).
+
+**Thread safety:** Alignment uses a process-wide mutex (one alignment at a time). The function is safe to call from concurrent queries but they will serialize.
+
+**Examples:**
+
+```sql
+-- Basic multiple sequence alignment
+SELECT * FROM align_mafft('sequences.fasta');
+
+-- Align, then analyze gap content
+SELECT read_id,
+       original_length,
+       aligned_length,
+       aligned_length - original_length AS gaps_inserted
+FROM align_mafft('16s_sequences.fasta')
+ORDER BY gaps_inserted DESC;
+
+-- Combine with read_fastx for filtering before alignment
+COPY (
+  SELECT read_id, sequence1
+  FROM read_fastx('large_dataset.fasta')
+  WHERE length(sequence1) >= 100
+) TO '/tmp/filtered.fasta' (FORMAT FASTA);
+SELECT * FROM align_mafft('/tmp/filtered.fasta');
+
+-- Compute pairwise identity from aligned sequences
+WITH aligned AS (
+  SELECT read_id, aligned_sequence FROM align_mafft('seqs.fasta')
+)
+SELECT a.read_id AS seq1, b.read_id AS seq2,
+       sum(CASE WHEN a.c = b.c AND a.c != '-' THEN 1 ELSE 0 END)::FLOAT
+       / nullif(sum(CASE WHEN a.c != '-' OR b.c != '-' THEN 1 ELSE 0 END), 0) AS identity
+FROM aligned a, aligned b,
+     unnest(string_split(a.aligned_sequence, '')) WITH ORDINALITY AS a(c, pos),
+     unnest(string_split(b.aligned_sequence, '')) WITH ORDINALITY AS b(c, bpos)
+WHERE a.read_id < b.read_id AND a.pos = b.bpos;
+```
+
+**Performance:** ~2x faster than native `mafft --parttree` for 1,000-5,000 sequences (no shell script overhead or temp file I/O). For 36 sequences, ~15x faster.
+
+**Limitations:**
+- All sequences are materialized in memory (required by the MSA algorithm)
+- Sequences must be at least 6 characters (MAFFT internal requirement)
+- Single-threaded alignment (process-wide mutex)
+
+---
 
 ## `detect_chimera_uchime(query_table, db='refs_table', [options])`
 
