@@ -418,8 +418,7 @@ endif()
 ExternalProject_Add(
     vsearch_build
     SOURCE_DIR ${VSEARCH_SRC_DIR}
-    CONFIGURE_COMMAND autoreconf -fi
-        COMMAND ${VSEARCH_SRC_DIR}/configure ${VSEARCH_HOST_FLAG}
+    CONFIGURE_COMMAND ${VSEARCH_SRC_DIR}/configure ${VSEARCH_HOST_FLAG}
     BUILD_COMMAND make -C src libvsearch.a
     INSTALL_COMMAND ""
     BUILD_IN_SOURCE 1
