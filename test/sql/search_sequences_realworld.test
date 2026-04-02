@@ -13,6 +13,8 @@
 
 require miint
 
+require-env VSEARCH_AVAILABLE
+
 # Load reference DB (500 LTP 16S sequences)
 statement ok
 CREATE TABLE ltp_refs AS SELECT read_id, sequence1 FROM read_fastx('data/uchime/ltp_subset_500.fasta');

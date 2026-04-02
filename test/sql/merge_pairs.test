@@ -4,6 +4,8 @@
 
 require miint
 
+require-env VSEARCH_AVAILABLE
+
 # --- Setup: load paired-end test data ---
 # Synthetic pairs generated from LTP 16S with 50bp overlap, Q40 uniform quality.
 # data/merge/generate_test_pairs.py data/uchime/ltp_subset_500.fasta ... --overlap 50

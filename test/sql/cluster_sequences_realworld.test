@@ -9,6 +9,8 @@
 
 require miint
 
+require-env VSEARCH_AVAILABLE
+
 # Load sequences sorted by length descending (matching vsearch --cluster_fast behavior).
 # ORDER BY ensures the table's physical row order matches the sorted FASTA.
 statement ok

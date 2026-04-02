@@ -35,12 +35,14 @@
 #include <rype_classify.hpp>
 #include <rype_extract.hpp>
 #include <rype_log_ratio.hpp>
+#ifdef MIINT_HAS_VSEARCH
 #include <uchime_ref.hpp>
 #include <uchime_denovo.hpp>
 #include <mask_dust_function.hpp>
 #include <merge_pairs_function.hpp>
 #include <search_sequences.hpp>
 #include <cluster_sequences.hpp>
+#endif
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include <htslib-1.22.1/htslib/hts.h>
 #include <kseq++/config.hpp>
@@ -228,12 +230,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RypeExtractMinimizerSetTableFunction::Register(loader);
 	RypeExtractStrandMinimizersTableFunction::Register(loader);
 	RypeLogRatioTableFunction::Register(loader);
+#ifdef MIINT_HAS_VSEARCH
 	UchimeRefTableFunction::Register(loader);
 	UchimeDenovoTableFunction::Register(loader);
 	MaskDustFunction::Register(loader);
 	MergePairsFunction::Register(loader);
 	SearchSequencesTableFunction::Register(loader);
 	ClusterSequencesTableFunction::Register(loader);
+#endif
 }
 
 void MiintExtension::Load(ExtensionLoader &loader) {

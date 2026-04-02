@@ -85,6 +85,9 @@ fi
 if echo "SELECT * FROM miint_versions() WHERE library = 'HDF5';" | ./build/release/duckdb -csv 2>/dev/null | grep -q HDF5; then
     export HDF5_AVAILABLE=1
 fi
+if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'detect_chimera_uchime';" | ./build/release/duckdb -csv 2>/dev/null | grep -q 1; then
+    export VSEARCH_AVAILABLE=1
+fi
 
 make test
 ./build/release/extension/miint/tests

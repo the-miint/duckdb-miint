@@ -4,6 +4,8 @@
 
 require miint
 
+require-env VSEARCH_AVAILABLE
+
 # --- Setup: load test data into a table with read_id, sequence1, size columns ---
 # The denovo_input.fasta has ;size=N; in headers. We parse that into an integer column.
 # In production, users would do: SELECT read_id, sequence1, count(*) AS size FROM ... GROUP BY ...
