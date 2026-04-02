@@ -122,7 +122,8 @@ SOFTWARE.
 ## WFA2-lib
 
 Pairwise sequence alignment using the Wavefront Alignment Algorithm (WFA).
-Used by `align_pairwise_score`, `align_pairwise_cigar`, and `align_pairwise_full`.
+Used by `align_pairwise_score`, `align_pairwise_cigar`, `align_pairwise_full`,
+`uchime_ref`, and `uchime_denovo`.
 
 - Repository: https://github.com/smarco/WFA2-lib
 - Version: v2.3.5
@@ -156,6 +157,58 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+## VSEARCH
+
+Embedded as a static library (`ext/vsearch`, branch `v2.30.5-miint` from
+`the-miint/vsearch` fork). Used by `detect_chimera_uchime`,
+`detect_chimera_uchime_denovo`, `search_sequences`, `cluster_sequences`,
+`merge_pairs`, and `mask_dust`. We use the BSD-2-Clause license (vsearch is
+dual-licensed BSD-2-Clause / GPL-3.0).
+
+- Upstream: https://github.com/torognes/vsearch
+- Fork: https://github.com/the-miint/vsearch (branch `v2.30.5-miint`)
+- License: BSD-2-Clause (chosen from dual-license with GPL-3.0)
+
+### Citations
+
+Rognes T, Flouri T, Nichols B, Quince C, Mahe F.
+"VSEARCH: a versatile open source tool for metagenomics."
+*PeerJ*, 2016; 4:e2584.
+doi: [10.7717/peerj.2584](https://doi.org/10.7717/peerj.2584)
+
+Edgar RC, Haas BJ, Clemente JC, Quince C, Knight R.
+"UCHIME improves sensitivity and speed of chimera detection."
+*Bioinformatics*, 2011; 27(16):2194-2200.
+doi: [10.1093/bioinformatics/btr381](https://doi.org/10.1093/bioinformatics/btr381)
+
+### BSD 2-Clause License
+
+Copyright (C) 2014-2026, Torbjorn Rognes, Frederic Mahe and Tomas Flouri
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ---
 

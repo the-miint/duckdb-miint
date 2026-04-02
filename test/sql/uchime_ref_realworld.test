@@ -1,0 +1,84 @@
+# name: test/sql/uchime_ref_realworld.test
+# description: Real-world detect_chimera_uchime validation against LTP 16S database
+# group: [sql]
+
+#
+# This test uses a 500-sequence subset of LTPs132_SSU (real 16S database with
+# RNA alphabet) and a mix of synthetic chimeras + a real published chimera
+# (EU778281.1 from Greengenes chimera list). Ground truth validated against
+# vsearch v2.30.5.
+#
+# This catches issues that toy data (6 sequences) cannot:
+# - RNA U→T normalization
+# - K-mer candidate search at realistic scale
+# - Real sequence length variation (416-1561bp)
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+# Load 500-sequence LTP subset as reference (DNA alphabet, U already converted)
+statement ok
+CREATE TABLE ltp_refs AS SELECT read_id, sequence1 FROM read_fastx('data/uchime/ltp_subset_500.fasta');
+
+# Load queries: 5 synthetic chimeras + 3 clean + 1 real published chimera
+statement ok
+CREATE TABLE ltp_queries AS SELECT read_id, sequence1 FROM read_fastx('data/uchime/ltp_chimera_queries.fasta');
+
+# Verify data loaded
+query I
+SELECT count(*) FROM ltp_refs;
+----
+500
+
+query I
+SELECT count(*) FROM ltp_queries;
+----
+9
+
+# --- Ground truth validation against vsearch v2.30.5 ---
+# vsearch --uchime_ref ltp_chimera_queries.fasta --db ltp_subset_500.fasta --uchimeout expected_ltp_ref.tsv
+#
+# 5 synthetic chimeras = Y (parents are in the 500-ref subset)
+# 3 clean sequences = N (exact copies of refs)
+# EU778281.1 = N (its actual parents MK567960/JAOQKB000000000 are NOT in the 500-ref subset)
+
+query TT
+SELECT query_id, flag FROM detect_chimera_uchime('ltp_queries', db:='ltp_refs') ORDER BY query_id;
+----
+EU778281.1	N
+chimera_10_100	Y
+chimera_1_50	Y
+chimera_20_200	Y
+chimera_30_300	Y
+chimera_40_400	Y
+clean_AF025368	N
+clean_DQ358146	N
+clean_HF558388	N
+
+# All 5 synthetic chimeras detected
+query I
+SELECT count(*) FROM detect_chimera_uchime('ltp_queries', db:='ltp_refs') WHERE flag = 'Y';
+----
+5
+
+# Clean sequences have NULL parents
+query I
+SELECT count(*) FROM detect_chimera_uchime('ltp_queries', db:='ltp_refs')
+WHERE flag = 'N' AND parent_a_id IS NULL;
+----
+4
+
+# Chimeric sequences have non-NULL parents
+query I
+SELECT count(*) FROM detect_chimera_uchime('ltp_queries', db:='ltp_refs')
+WHERE flag = 'Y' AND parent_a_id IS NOT NULL;
+----
+5
+
+# The LTP subset was exported with U→T conversion, so sequences are DNA.
+# Verify no U remains (confirms export was correct).
+query I
+SELECT count(*) FROM ltp_refs WHERE sequence1 LIKE '%U%';
+----
+0

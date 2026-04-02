@@ -1,0 +1,105 @@
+# name: test/sql/cluster_sequences_realworld.test
+# description: Real-world cluster_sequences tests against vsearch v2.30.5 ground truth
+# group: [sql]
+
+# Ground truth:
+# vsearch --cluster_fast data/cluster/ltp_200.fasta --id 0.97 --uc data/cluster/expected_97.uc
+# vsearch --cluster_fast data/cluster/ltp_200.fasta --id 0.99 --uc data/cluster/expected_99.uc
+# Run date: 2026-03-31, vsearch v2.30.5
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+# Load sequences sorted by length descending (matching vsearch --cluster_fast behavior).
+# ORDER BY ensures the table's physical row order matches the sorted FASTA.
+statement ok
+CREATE TABLE ltp_sorted AS
+  SELECT * FROM read_fastx('data/cluster/ltp_200_sorted.fasta')
+  ORDER BY length(sequence1) DESC, read_id;
+
+# Verify 200 sequences loaded
+query I
+SELECT count(*) FROM ltp_sorted;
+----
+200
+
+# --- 97% identity threshold: expect 24 clusters ---
+
+statement ok
+CREATE TABLE clusters_97 AS
+  SELECT * FROM cluster_sequences_vsearch('ltp_sorted', id:=0.97);
+
+query I
+SELECT count(*) FROM clusters_97;
+----
+200
+
+# Number of clusters (centroids)
+query I
+SELECT count(*) FROM clusters_97 WHERE is_centroid;
+----
+24
+
+# All identities are >= 97% for non-centroids
+query I
+SELECT count(*) FROM clusters_97 WHERE NOT is_centroid AND identity < 97.0;
+----
+0
+
+# All centroids have 100% identity
+query I
+SELECT count(*) FROM clusters_97 WHERE is_centroid AND identity != 100.0;
+----
+0
+
+# No cigar_truncated flags (16S sequences are short)
+query I
+SELECT count(*) FROM clusters_97 WHERE cigar_truncated;
+----
+0
+
+# Every non-centroid has a non-empty CIGAR
+query I
+SELECT count(*) FROM clusters_97 WHERE NOT is_centroid AND (cigar IS NULL OR cigar = '');
+----
+0
+
+# --- 99% identity threshold: expect more clusters ---
+
+statement ok
+CREATE TABLE clusters_99 AS
+  SELECT * FROM cluster_sequences_vsearch('ltp_sorted', id:=0.99);
+
+query I
+SELECT count(*) FROM clusters_99;
+----
+200
+
+query I
+SELECT count(*) FROM clusters_99 WHERE is_centroid;
+----
+114
+
+# More clusters at 99% than 97%
+query I
+SELECT CASE WHEN (SELECT count(*) FROM clusters_99 WHERE is_centroid) >
+                 (SELECT count(*) FROM clusters_97 WHERE is_centroid) THEN 1 ELSE 0 END;
+----
+1
+
+# All identities are >= 99% for non-centroids
+query I
+SELECT count(*) FROM clusters_99 WHERE NOT is_centroid AND identity < 99.0;
+----
+0
+
+# --- Cleanup ---
+statement ok
+DROP TABLE ltp_sorted;
+
+statement ok
+DROP TABLE clusters_97;
+
+statement ok
+DROP TABLE clusters_99;

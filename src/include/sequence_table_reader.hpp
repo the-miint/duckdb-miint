@@ -48,6 +48,22 @@ std::vector<std::string> ReadShardIds(ClientContext &context, const std::string 
 void ReadBatchByIds(ClientContext &context, const std::string &query_table, const SequenceTableSchema &schema,
                     const std::vector<std::string> &ids, idx_t offset, idx_t count, miint::SequenceRecordBatch &output);
 
+// Labels and single-end sequences loaded from a table for vsearch operations.
+struct LoadedSingleEndSequences {
+	std::vector<std::string> labels;
+	std::vector<std::string> sequences;
+};
+
+// Load all (read_id, sequence1) pairs from a table via a separate connection.
+// Used by vsearch-backed table functions (search, chimera, cluster) that operate
+// on single-end sequences only.
+// If strict=true: throws on NULL read_id, NULL sequence1, or empty sequence1.
+// If strict=false: silently skips those rows.
+// Always throws if the result set is empty after filtering.
+// function_name is used in error messages (e.g. "cluster_sequences").
+LoadedSingleEndSequences LoadSingleEndSequences(ClientContext &context, const std::string &table_name,
+                                                const std::string &function_name, bool strict = false);
+
 // Streaming query sequence reader for lazy sub-batching.
 // Produces sub-batches on demand from a streaming query result.
 // Thread-safe: multiple threads can call FetchSubBatch() concurrently.

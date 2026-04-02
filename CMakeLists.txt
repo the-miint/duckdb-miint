@@ -393,6 +393,62 @@ set_target_properties(wfa2cpp PROPERTIES
 )
 add_dependencies(wfa2cpp wfa2_build)
 
+# vsearch: autotools-based build, not supported on Windows or WASM.
+if(WIN32 OR EMSCRIPTEN)
+    set(MIINT_ENABLE_VSEARCH OFF)
+else()
+    set(MIINT_ENABLE_VSEARCH ON)
+endif()
+
+if(MIINT_ENABLE_VSEARCH)
+    # Build vsearch from source (v2.30.5-miint fork) using autotools.
+    # Produces libvsearch.a — a PIC static archive for embedding vsearch's
+    # search, clustering, chimera detection, DUST masking, and merge-pairs
+    # algorithms into the extension.
+    set(VSEARCH_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/vsearch)
+
+    # Handle cross-compilation for vsearch (same pattern as htslib)
+    set(VSEARCH_HOST_FLAG "")
+    set(VSEARCH_ARCH_CFLAGS "")
+    if(APPLE AND OSX_BUILD_ARCH)
+        if(OSX_BUILD_ARCH STREQUAL "x86_64")
+            set(VSEARCH_HOST_FLAG "--host=x86_64-apple-darwin")
+            set(VSEARCH_ARCH_CFLAGS "-arch x86_64")
+        elseif(OSX_BUILD_ARCH STREQUAL "arm64")
+            set(VSEARCH_HOST_FLAG "--host=aarch64-apple-darwin")
+            set(VSEARCH_ARCH_CFLAGS "-arch arm64")
+        endif()
+    endif()
+
+    ExternalProject_Add(
+        vsearch_build
+        SOURCE_DIR ${VSEARCH_SRC_DIR}
+        # Touch pre-generated autotools files so make doesn't try to regenerate
+        # them (git checkout gives all files the same timestamp, which can trigger
+        # autotools rebuild rules if make thinks sources are newer).
+        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E touch
+            ${VSEARCH_SRC_DIR}/aclocal.m4
+            ${VSEARCH_SRC_DIR}/configure
+            ${VSEARCH_SRC_DIR}/Makefile.in
+            ${VSEARCH_SRC_DIR}/src/Makefile.in
+            ${VSEARCH_SRC_DIR}/man/Makefile.in
+            ${VSEARCH_SRC_DIR}/config.h.in
+            COMMAND ${CMAKE_COMMAND} -E env "CXXFLAGS=-fPIC ${VSEARCH_ARCH_CFLAGS}" "CFLAGS=-fPIC ${VSEARCH_ARCH_CFLAGS}"
+            ${VSEARCH_SRC_DIR}/configure ${VSEARCH_HOST_FLAG}
+        BUILD_COMMAND make -C src libvsearch.a
+        INSTALL_COMMAND ""
+        BUILD_IN_SOURCE 1
+        BUILD_BYPRODUCTS ${VSEARCH_SRC_DIR}/src/libvsearch.a
+    )
+
+    # Create imported library for vsearch
+    add_library(vsearch STATIC IMPORTED GLOBAL)
+    set_target_properties(vsearch PROPERTIES
+        IMPORTED_LOCATION ${VSEARCH_SRC_DIR}/src/libvsearch.a
+    )
+    add_dependencies(vsearch vsearch_build)
+endif()
+
 # Build MAFFT PartTree static library for multiple sequence alignment
 # Handle cross-compilation arch flags for MAFFT (same pattern as WFA2/minimap2)
 set(MAFFT_ARCH_CFLAGS "")
@@ -519,6 +575,9 @@ add_dependencies(rype rype_build)
 
 # adapted kseq++ include use from strobealign
 include_directories(src/include ext ext/WFA2-lib ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype ext/mafft/core)
+if(MIINT_ENABLE_VSEARCH)
+    include_directories(${VSEARCH_SRC_DIR}/src)
+endif()
 set(EXTENSION_SOURCES
     src/SequenceReader.cpp
     src/QualScore.cpp
@@ -578,6 +637,12 @@ set(EXTENSION_SOURCES
     src/MafftAligner.cpp
     src/align_mafft.cpp)
 
+if(MIINT_ENABLE_VSEARCH)
+    list(APPEND EXTENSION_SOURCES
+        src/VsearchChimeraWrapper.cpp src/VsearchSearchWrapper.cpp src/VsearchClusterWrapper.cpp
+        src/mask_dust_function.cpp src/merge_pairs_function.cpp src/search_sequences.cpp
+        src/cluster_sequences.cpp src/uchime_common.cpp src/uchime_ref.cpp src/uchime_denovo.cpp)
+endif()
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND EXTENSION_SOURCES src/copy_biom.cpp src/BIOMTable.cpp src/BIOMReader.cpp src/read_biom.cpp)
 endif()
@@ -603,6 +668,9 @@ target_compile_definitions(${EXTENSION_NAME} PRIVATE RYPE_ARROW
     WFA2_GIT_VERSION="${WFA2_GIT_VERSION}"
     RYPE_GIT_VERSION="${RYPE_GIT_VERSION}"
     $<$<BOOL:${MIINT_HAS_JEMALLOC}>:MIINT_USE_JEMALLOC>)
+if(MIINT_ENABLE_VSEARCH)
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_VSEARCH)
+endif()
 if(MIINT_ENABLE_BOWTIE2)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_BOWTIE2)
 endif()
@@ -620,6 +688,9 @@ target_link_libraries(${EXTENSION_NAME}
                       rype
                       expat::expat
 )
+if(MIINT_ENABLE_VSEARCH)
+    target_link_libraries(${EXTENSION_NAME} vsearch)
+endif()
 if(APPLE)
     target_link_libraries(${EXTENSION_NAME} "-framework CoreFoundation")
 elseif(WIN32)
@@ -656,6 +727,9 @@ target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE RYPE_ARROW
     WFA2_GIT_VERSION="${WFA2_GIT_VERSION}"
     RYPE_GIT_VERSION="${RYPE_GIT_VERSION}"
     $<$<BOOL:${MIINT_HAS_JEMALLOC}>:MIINT_USE_JEMALLOC>)
+if(MIINT_ENABLE_VSEARCH)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_VSEARCH)
+endif()
 if(MIINT_ENABLE_BOWTIE2)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_BOWTIE2)
 endif()
@@ -673,6 +747,9 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       rype
                       expat::expat
 )
+if(MIINT_ENABLE_VSEARCH)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} vsearch)
+endif()
 if(APPLE)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework CoreFoundation")
 elseif(WIN32)
@@ -747,6 +824,12 @@ if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND TEST_SOURCES src/BIOMTable.cpp src/BIOMReader.cpp
          test/cpp/test_BIOMReader.cpp test/cpp/test_BIOMTable.cpp)
 endif()
+if(MIINT_ENABLE_VSEARCH)
+    list(APPEND TEST_SOURCES
+        src/VsearchChimeraWrapper.cpp test/cpp/test_VsearchChimeraWrapper.cpp
+        src/VsearchSearchWrapper.cpp test/cpp/test_VsearchSearchWrapper.cpp
+        src/VsearchClusterWrapper.cpp test/cpp/test_VsearchClusterWrapper.cpp)
+endif()
 if(MIINT_ENABLE_BOWTIE2)
     list(APPEND TEST_SOURCES src/Bowtie2Aligner.cpp test/cpp/test_Bowtie2Aligner.cpp)
 endif()
@@ -764,6 +847,9 @@ target_link_libraries(tests
   mafft_parttree
   expat::expat
 )
+if(MIINT_ENABLE_VSEARCH)
+    target_link_libraries(tests vsearch)
+endif()
 if(WIN32)
     # Tests target only needs HTSlib deps (no Rust code linked here)
     target_link_libraries(tests regex ws2_32)

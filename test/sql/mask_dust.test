@@ -1,0 +1,102 @@
+# name: test/sql/mask_dust.test
+# description: test mask_dust scalar function
+# group: [sql]
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+# --- NULL handling ---
+
+query I
+SELECT mask_dust(NULL);
+----
+NULL
+
+query I
+SELECT mask_dust(NULL, true);
+----
+NULL
+
+# --- Empty string ---
+
+query T
+SELECT mask_dust('');
+----
+(empty)
+
+# --- High-complexity sequence unchanged ---
+
+query T
+SELECT mask_dust('GCTGGCGGCAGGCCTAACACATGCAAGTCGAAC');
+----
+GCTGGCGGCAGGCCTAACACATGCAAGTCGAAC
+
+# --- Homopolymer soft-masked (lowercase) ---
+# Ground truth: vsearch --maskfasta with homopolymer input, --qmask dust
+# A 99-bp poly-A run is low-complexity and gets fully masked to lowercase
+
+query I
+SELECT mask_dust('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA') = lower('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+----
+true
+
+# --- Dinucleotide repeat soft-masked ---
+# Ground truth: vsearch --maskfasta with AT-repeat input, --qmask dust
+
+query I
+SELECT mask_dust('ATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATAT') = lower('ATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATATAT');
+----
+true
+
+# --- Hard-mask mode: 'N' replacement ---
+# Ground truth: vsearch --maskfasta --hardmask --qmask dust
+
+query I
+SELECT length(mask_dust('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', true));
+----
+99
+
+query I
+SELECT mask_dust('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', true) = repeat('N', 99);
+----
+true
+
+# --- Hard-mask mode with false = soft-mask ---
+
+query I
+SELECT mask_dust('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', false) = lower('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+----
+true
+
+# --- Mixed sequence: only low-complexity region masked ---
+# Ground truth: vsearch --maskfasta on this exact input, --qmask dust
+# The poly-A interior gets masked, flanking high-complexity stays uppercase
+
+query T
+SELECT mask_dust('GCTGGCGGCAGGCCTAACACATGCAAGTCGAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGCTTGCTGATTCGCTGACGAGTGGCGGAC');
+----
+GCTGGCGGCAGGCCTAACACATGCAAGTCGAACaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaGCTTGCTGATTCGCTGACGAGTGGCGGAC
+
+# --- Real-data validation against vsearch v2.30.5 ---
+# vsearch --maskfasta data/dust/ltp_100.fasta --output data/dust/ltp_100_softmasked.fasta --qmask dust
+# Run date: 2026-03-30, vsearch v2.30.5
+#
+# 16S rRNA is high-complexity — DUST should NOT mask any positions.
+# This verifies no false positives on real biological data.
+
+# All 100 sequences should be unchanged after masking
+query I
+SELECT count(*)
+FROM read_fastx('data/dust/ltp_100.fasta')
+WHERE mask_dust(sequence1) = sequence1;
+----
+100
+
+# Zero sequences should have any lowercase after masking (no false positives)
+query I
+SELECT count(*)
+FROM read_fastx('data/dust/ltp_100.fasta')
+WHERE mask_dust(sequence1) != sequence1;
+----
+0

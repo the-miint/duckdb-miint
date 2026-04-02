@@ -32,6 +32,7 @@ if command -v bowtie2 &> /dev/null; then
     export BOWTIE2_AVAILABLE=1
 fi
 
+
 if conda run -n massql python3 -c "from massql import msql_engine" 2>/dev/null; then
     export MASSQL_PYTHON_AVAILABLE=1
 fi
@@ -83,6 +84,9 @@ fi
 # Detect compile-time optional features by querying the built extension
 if echo "SELECT * FROM miint_versions() WHERE library = 'HDF5';" | ./build/release/duckdb -csv 2>/dev/null | grep -q HDF5; then
     export HDF5_AVAILABLE=1
+fi
+if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'detect_chimera_uchime';" | ./build/release/duckdb -csv 2>/dev/null | grep -q 1; then
+    export VSEARCH_AVAILABLE=1
 fi
 
 make test

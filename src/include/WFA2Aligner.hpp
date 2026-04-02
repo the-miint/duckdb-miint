@@ -41,6 +41,11 @@ public:
 	std::optional<WFA2CigarResult> align_cigar(const std::string &query, const std::string &subject);
 	std::optional<WFA2FullResult> align_full(const std::string &query, const std::string &subject);
 
+	// Semi-global alignment: query anchored end-to-end, subject (reference) has
+	// free end gaps (can overhang at both ends). This matches vsearch's chimera
+	// detection alignment where terminal gaps on the target are penalized less.
+	std::optional<WFA2FullResult> align_full_semiglobal(const std::string &query, const std::string &subject);
+
 private:
 	struct Impl;
 	std::unique_ptr<Impl> impl_;

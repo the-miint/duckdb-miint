@@ -1,0 +1,252 @@
+# name: test/sql/cluster_sequences.test
+# description: cluster_sequences table function tests
+# group: [sql]
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+# --- Error handling ---
+
+# Missing id parameter
+statement ok
+CREATE TABLE dummy_seqs AS SELECT 'q1' AS read_id, 'ATCG' AS sequence1;
+
+statement error
+SELECT * FROM cluster_sequences_vsearch('dummy_seqs');
+----
+cluster_sequences_vsearch requires 'id' parameter
+
+# Nonexistent table
+statement error
+SELECT * FROM cluster_sequences_vsearch('no_such_table', id:=0.97);
+----
+does not exist
+
+# Invalid id parameter (out of range)
+statement error
+SELECT * FROM cluster_sequences_vsearch('dummy_seqs', id:=1.5);
+----
+between 0.0 and 1.0
+
+statement error
+SELECT * FROM cluster_sequences_vsearch('dummy_seqs', id:=-0.1);
+----
+between 0.0 and 1.0
+
+# Invalid strand parameter
+statement error
+SELECT * FROM cluster_sequences_vsearch('dummy_seqs', id:=0.97, strand:='invalid');
+----
+'plus' or 'both'
+
+# Empty table
+statement ok
+CREATE TABLE empty_seqs AS SELECT read_id, sequence1 FROM dummy_seqs WHERE 1=0;
+
+statement error
+SELECT * FROM cluster_sequences_vsearch('empty_seqs', id:=0.97);
+----
+empty
+
+# --- Synthetic tests ---
+
+# Three identical sequences → one cluster
+statement ok
+CREATE TABLE ident_seqs AS SELECT * FROM (VALUES
+    ('s1', 'ATCGATCGATCGATCGATCGATCG'),
+    ('s2', 'ATCGATCGATCGATCGATCGATCG'),
+    ('s3', 'ATCGATCGATCGATCGATCGATCG')
+) t(read_id, sequence1);
+
+query TIITRI
+SELECT read_id, is_centroid, cluster_id, centroid_id, identity, cigar_truncated
+FROM cluster_sequences_vsearch('ident_seqs', id:=0.97)
+ORDER BY read_id;
+----
+s1	true	0	s1	100.0	false
+s2	false	0	s1	100.0	false
+s3	false	0	s1	100.0	false
+
+# Three divergent sequences → three clusters
+statement ok
+CREATE TABLE div_seqs AS SELECT * FROM (VALUES
+    ('a', 'ATCGATCGATCGATCGATCGATCG'),
+    ('b', 'GGCCTTAAGGCCTTAAGGCCTTAA'),
+    ('c', 'AAAAAAAACCCCCCCCGGGGGGGG')
+) t(read_id, sequence1);
+
+query TII
+SELECT read_id, is_centroid::int, cluster_id
+FROM cluster_sequences_vsearch('div_seqs', id:=0.97)
+ORDER BY read_id;
+----
+a	1	0
+b	1	1
+c	1	2
+
+# Verify all output columns present and typed
+query TIITRTI
+SELECT read_id, is_centroid::int, cluster_id, centroid_id, identity, cigar, cigar_truncated::int
+FROM cluster_sequences_vsearch('ident_seqs', id:=0.97)
+WHERE read_id = 's1';
+----
+s1	1	0	s1	100.0	(empty)	0
+
+# Non-centroids have a CIGAR string
+query T
+SELECT cigar
+FROM cluster_sequences_vsearch('ident_seqs', id:=0.97)
+WHERE read_id = 's2' AND cigar != '';
+----
+24M
+
+# View support
+statement ok
+CREATE VIEW div_view AS SELECT * FROM div_seqs;
+
+query TI
+SELECT read_id, cluster_id
+FROM cluster_sequences_vsearch('div_view', id:=0.97)
+ORDER BY read_id;
+----
+a	0
+b	1
+c	2
+
+# Strand parameter (default is plus)
+query TI
+SELECT read_id, cluster_id
+FROM cluster_sequences_vsearch('div_seqs', id:=0.97, strand:='plus')
+ORDER BY read_id;
+----
+a	0
+b	1
+c	2
+
+# strand:='both' clusters RC matches; strand:='plus' does not
+statement ok
+CREATE TABLE rc_seqs AS SELECT * FROM (VALUES
+    ('fwd', 'AAAAAAAAAAAAAAAAAAAAAAACCCCCCCCCCCCCCCCCCCCCCC'),
+    ('rc_of_fwd', 'GGGGGGGGGGGGGGGGGGGGGGGTTTTTTTTTTTTTTTTTTTTTTTT')
+) t(read_id, sequence1);
+
+# Plus-only: 2 clusters (no RC match)
+query I
+SELECT count(*) FROM cluster_sequences_vsearch('rc_seqs', id:=0.90, strand:='plus') WHERE is_centroid;
+----
+2
+
+# Both strands: 1 cluster (RC match found)
+query I
+SELECT count(*) FROM cluster_sequences_vsearch('rc_seqs', id:=0.90, strand:='both') WHERE is_centroid;
+----
+1
+
+# NULL read_id throws
+statement ok
+CREATE TABLE null_id_seqs AS SELECT * FROM (VALUES
+    (NULL, 'ATCGATCGATCGATCGATCGATCG'),
+    ('s1', 'ATCGATCGATCGATCGATCGATCG')
+) t(read_id, sequence1);
+
+statement error
+SELECT * FROM cluster_sequences_vsearch('null_id_seqs', id:=0.97);
+----
+NULL read_id
+
+# NULL sequence throws (include a valid row so "empty table" check doesn't trigger first)
+statement ok
+CREATE TABLE null_seq_seqs AS SELECT * FROM (VALUES
+    ('s1', NULL),
+    ('s2', 'ATCGATCGATCGATCGATCGATCG')
+) t(read_id, sequence1);
+
+statement error
+SELECT * FROM cluster_sequences_vsearch('null_seq_seqs', id:=0.97);
+----
+NULL sequence1
+
+# Empty sequence throws
+statement ok
+CREATE TABLE empty_seq_seqs AS SELECT * FROM (VALUES
+    ('s1', ''),
+    ('s2', 'ATCGATCGATCGATCGATCGATCG')
+) t(read_id, sequence1);
+
+statement error
+SELECT * FROM cluster_sequences_vsearch('empty_seq_seqs', id:=0.97);
+----
+empty sequence1
+
+# Label > 1023 chars throws
+statement ok
+CREATE TABLE long_id_seqs AS SELECT repeat('X', 1024) AS read_id, 'ATCGATCGATCGATCGATCGATCG' AS sequence1;
+
+statement error
+SELECT * FROM cluster_sequences_vsearch('long_id_seqs', id:=0.97);
+----
+1023-character limit
+
+# Re-initialization: two sequential cluster_sequences calls on different tables
+statement ok
+CREATE TABLE reuse_a AS SELECT * FROM (VALUES
+    ('a1', 'ATCGATCGATCGATCGATCGATCG'),
+    ('a2', 'ATCGATCGATCGATCGATCGATCG')
+) t(read_id, sequence1);
+
+statement ok
+CREATE TABLE reuse_b AS SELECT * FROM (VALUES
+    ('b1', 'GGCCTTAAGGCCTTAAGGCCTTAA'),
+    ('b2', 'AAAAAAAACCCCCCCCGGGGGGGG'),
+    ('b3', 'TTTTTTTTTTTTTTTTTTTTTTTT')
+) t(read_id, sequence1);
+
+# First call
+query I
+SELECT count(*) FROM cluster_sequences_vsearch('reuse_a', id:=0.97) WHERE is_centroid;
+----
+1
+
+# Second call on different table — must not be contaminated by first
+query I
+SELECT count(*) FROM cluster_sequences_vsearch('reuse_b', id:=0.97) WHERE is_centroid;
+----
+3
+
+# --- Cleanup ---
+statement ok
+DROP TABLE long_id_seqs;
+
+statement ok
+DROP TABLE reuse_a;
+
+statement ok
+DROP TABLE reuse_b;
+
+statement ok
+DROP TABLE rc_seqs;
+
+statement ok
+DROP TABLE dummy_seqs;
+
+statement ok
+DROP TABLE empty_seqs;
+
+statement ok
+DROP TABLE ident_seqs;
+
+statement ok
+DROP TABLE div_seqs;
+
+statement ok
+DROP VIEW div_view;
+
+statement ok
+DROP TABLE null_id_seqs;
+
+statement ok
+DROP TABLE null_seq_seqs;
+
+statement ok
+DROP TABLE empty_seq_seqs;

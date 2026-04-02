@@ -16,6 +16,10 @@
 [submodule "ext/rype"]
 	path = ext/rype
 	url = git@github.com:the-miint/rype.git
+[submodule "ext/vsearch"]
+	path = ext/vsearch
+	url = git@github.com:the-miint/vsearch.git
+	branch = v2.30.5-miint
 [submodule "ext/mafft"]
 	path = ext/mafft
 	url = https://github.com/the-miint/mafft.git

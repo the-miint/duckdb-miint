@@ -54,7 +54,7 @@ GROUP BY sample_id;
 | Document | Description |
 |----------|-------------|
 | [Installation & Building](docs/installation.md) | Installing from community extensions, building from source, dependencies |
-| [Table Functions](docs/table-functions.md) | `read_alignments`, `read_fastx`, `read_mzml`, `read_mzxml`, `read_biom`, `align_minimap2`, `align_bowtie2`, `align_mafft`, and more |
+| [Table Functions](docs/table-functions.md) | `read_alignments`, `read_fastx`, `read_mzml`, `read_mzxml`, `read_biom`, `align_minimap2`, `align_bowtie2`, `align_mafft`, `detect_chimera_uchime`, `search_sequences_vsearch`, `cluster_sequences_vsearch`, and more |
 | [Mass Spectrometry & MassQL](docs/massql.md) | MassQL query language, `read_mzml`/`read_mzxml`, helper macros, formula functions |
 | [Scalar Functions](docs/scalar-functions.md) | SAM flag functions, sequence identity, query length, query coverage |
 | [RYpe Functions](docs/rype.md) | RYpe sequence classification and minimizer extraction |
