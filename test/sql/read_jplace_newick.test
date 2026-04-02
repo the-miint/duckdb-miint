@@ -1,0 +1,134 @@
+# name: test/sql/read_jplace_newick.test
+# description: Test read_jplace_newick table function for extracting Newick trees from jplace files
+# group: [sql]
+
+require miint
+
+# =============================================================================
+# Error Cases
+# =============================================================================
+
+# Nonexistent file
+statement error
+SELECT * FROM read_jplace_newick('nonexistent.jplace');
+----
+
+# =============================================================================
+# Basic parsing: test.jplace
+# Tree: ((A:0.1,B:0.2):0.3{0},(C:0.4,D:0.5):0.6{1}):0.0{2};
+# 7 nodes: 4 tips (A,B,C,D) + 3 internal
+# =============================================================================
+
+# Total node count
+query I
+SELECT COUNT(*) FROM read_jplace_newick('data/jplace/test.jplace');
+----
+7
+
+# Tip count
+query I
+SELECT COUNT(*) FROM read_jplace_newick('data/jplace/test.jplace') WHERE is_tip = true;
+----
+4
+
+# Internal node count
+query I
+SELECT COUNT(*) FROM read_jplace_newick('data/jplace/test.jplace') WHERE is_tip = false;
+----
+3
+
+# Tip names
+query T
+SELECT name FROM read_jplace_newick('data/jplace/test.jplace') WHERE is_tip = true ORDER BY name;
+----
+A
+B
+C
+D
+
+# Exactly one root (NULL parent)
+query I
+SELECT COUNT(*) FROM read_jplace_newick('data/jplace/test.jplace') WHERE parent_index IS NULL;
+----
+1
+
+# Edge IDs present on 3 of 7 nodes (only internal nodes have {n} in this test tree)
+query I
+SELECT COUNT(*) FROM read_jplace_newick('data/jplace/test.jplace') WHERE edge_id IS NOT NULL;
+----
+3
+
+# Branch lengths for tips
+query TR
+SELECT name, branch_length FROM read_jplace_newick('data/jplace/test.jplace') WHERE is_tip = true ORDER BY name;
+----
+A	0.1
+B	0.2
+C	0.4
+D	0.5
+
+# =============================================================================
+# Schema consistency with read_newick
+# =============================================================================
+
+# UNION ALL with read_newick must work (same column types)
+statement ok
+SELECT node_index, name, branch_length, edge_id, parent_index, is_tip
+FROM read_newick('data/newick/with_edge_ids.nwk')
+UNION ALL
+SELECT node_index, name, branch_length, edge_id, parent_index, is_tip
+FROM read_jplace_newick('data/jplace/test.jplace');
+
+# =============================================================================
+# Multiple files
+# =============================================================================
+
+# Glob: test.jplace and test2.jplace have the same tree (7 nodes each)
+query I
+SELECT COUNT(*) FROM read_jplace_newick('data/jplace/test*.jplace');
+----
+14
+
+# =============================================================================
+# include_filepath parameter
+# =============================================================================
+
+# Single file with filepath
+query I
+SELECT COUNT(DISTINCT filepath) FROM read_jplace_newick('data/jplace/test.jplace', include_filepath := true);
+----
+1
+
+# Glob with filepath shows distinct files
+query I
+SELECT COUNT(DISTINCT filepath) FROM read_jplace_newick('data/jplace/test*.jplace', include_filepath := true);
+----
+2
+
+# Without include_filepath, filepath column should not exist
+statement error
+SELECT filepath FROM read_jplace_newick('data/jplace/test.jplace');
+----
+
+# =============================================================================
+# Different jplace formats
+# =============================================================================
+
+# with_n.jplace uses 'n' format, tree: (A:0.1,B:0.2):0.0{0};
+# 3 nodes: 2 tips + 1 root
+query I
+SELECT COUNT(*) FROM read_jplace_newick('data/jplace/with_n.jplace');
+----
+3
+
+query T
+SELECT name FROM read_jplace_newick('data/jplace/with_n.jplace') WHERE is_tip = true ORDER BY name;
+----
+A
+B
+
+# empty.jplace has same tree structure as with_n.jplace
+query I
+SELECT COUNT(*) FROM read_jplace_newick('data/jplace/empty.jplace');
+----
+3

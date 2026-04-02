@@ -1,7 +1,5 @@
 #include "reference_table_reader.hpp"
-#include "duckdb/catalog/catalog.hpp"
-#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
+#include "catalog_utils.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
@@ -11,48 +9,18 @@
 
 namespace duckdb {
 
-// Helper to validate table/view schema for reference lengths
 static void ValidateReferenceTableSchema(ClientContext &context, const std::string &table_name) {
-	// Use TABLE_ENTRY lookup which can return either tables or views
-	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
-	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
+	auto info = GetTableOrViewColumns(context, table_name, "Reference table");
+	auto &col_types = info.types;
 
-	if (!entry) {
-		throw InvalidInputException("Reference table or view '%s' does not exist", table_name);
-	}
-
-	vector<string> col_names;
-	vector<LogicalType> col_types;
-
-	if (entry->type == CatalogType::TABLE_ENTRY) {
-		auto &table = entry->Cast<TableCatalogEntry>();
-		auto &columns = table.GetColumns();
-		for (idx_t i = 0; i < columns.LogicalColumnCount(); i++) {
-			auto &col = columns.GetColumn(LogicalIndex(i));
-			col_names.push_back(col.Name());
-			col_types.push_back(col.Type());
-		}
-	} else if (entry->type == CatalogType::VIEW_ENTRY) {
-		auto &view = entry->Cast<ViewCatalogEntry>();
-		view.BindView(context);
-		auto col_info = view.GetColumnInfo();
-		col_names = col_info->names;
-		col_types = col_info->types;
-	} else {
-		throw InvalidInputException("'%s' is not a table or view", table_name);
-	}
-
-	// Validate has at least 2 columns
 	if (col_types.size() < 2) {
 		throw InvalidInputException("Reference table '%s' must have at least 2 columns (name, length)", table_name);
 	}
 
-	// First column should be VARCHAR (reference name)
 	if (col_types[0].id() != LogicalTypeId::VARCHAR) {
 		throw InvalidInputException("First column of reference table must be VARCHAR (reference name)");
 	}
 
-	// Second column should be integer type (length)
 	auto length_type = col_types[1].id();
 	if (length_type != LogicalTypeId::BIGINT && length_type != LogicalTypeId::INTEGER &&
 	    length_type != LogicalTypeId::UBIGINT && length_type != LogicalTypeId::UINTEGER) {

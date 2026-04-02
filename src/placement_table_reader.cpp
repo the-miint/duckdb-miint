@@ -1,7 +1,5 @@
 #include "placement_table_reader.hpp"
-#include "duckdb/catalog/catalog.hpp"
-#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
+#include "catalog_utils.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
@@ -12,40 +10,10 @@
 
 namespace duckdb {
 
-// Helper to get column names and types from either a table or view
-static void GetTableOrViewColumns(ClientContext &context, const std::string &table_name, vector<string> &out_names,
-                                  vector<LogicalType> &out_types) {
-	// Use TABLE_ENTRY lookup which can return either tables or views
-	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
-	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
-
-	if (!entry) {
-		throw BinderException("Placement table or view '%s' does not exist", table_name);
-	}
-
-	if (entry->type == CatalogType::TABLE_ENTRY) {
-		auto &table = entry->Cast<TableCatalogEntry>();
-		auto &columns = table.GetColumns();
-		for (idx_t i = 0; i < columns.LogicalColumnCount(); i++) {
-			auto &col = columns.GetColumn(LogicalIndex(i));
-			out_names.push_back(col.Name());
-			out_types.push_back(col.Type());
-		}
-	} else if (entry->type == CatalogType::VIEW_ENTRY) {
-		auto &view = entry->Cast<ViewCatalogEntry>();
-		view.BindView(context);
-		auto col_info = view.GetColumnInfo();
-		out_names = col_info->names;
-		out_types = col_info->types;
-	} else {
-		throw BinderException("'%s' is not a table or view", table_name);
-	}
-}
-
 void ValidatePlacementTableSchema(ClientContext &context, const std::string &table_name) {
-	vector<string> col_names;
-	vector<LogicalType> col_types;
-	GetTableOrViewColumns(context, table_name, col_names, col_types);
+	auto info = GetTableOrViewColumns(context, table_name, "Placement table");
+	auto &col_names = info.names;
+	auto &col_types = info.types;
 
 	// Build name-to-index map (case-insensitive)
 	std::unordered_map<string, idx_t> name_to_idx;

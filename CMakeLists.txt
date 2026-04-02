@@ -596,10 +596,14 @@ set(EXTENSION_SOURCES
     src/copy_fastq.cpp
     src/copy_fasta.cpp
     src/copy_sam.cpp
+    src/catalog_utils.cpp
     src/reference_table_reader.cpp
     src/placement_table_reader.cpp
     src/NewickTree.cpp
+    src/read_jplace_newick.cpp
     src/read_newick.cpp
+    src/tree_table_reader.cpp
+    src/tree_resolve_placement.cpp
     src/copy_newick.cpp
     src/Minimap2Aligner.cpp
     src/sequence_table_reader.cpp

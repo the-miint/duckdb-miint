@@ -16,7 +16,9 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`read_ncbi_fasta`](#read_ncbi_fastaaccession-api_key-include_filepathfalse) - NCBI FASTA sequences
 - [`read_ncbi_annotation`](#read_ncbi_annotationaccession-api_key-include_filepathfalse) - NCBI genome annotations
 - [`read_jplace`](#read_jplacepath) - Phylogenetic placement files
+- [`read_jplace_newick`](#read_jplace_newickpath-include_filepathfalse) - Newick tree from jplace files
 - [`read_newick`](#read_newickfilename-include_filepathfalse) - Newick phylogenetic trees
+- [`tree_resolve_placement`](#tree_resolve_placementtree_table-placements_table) - Resolve phylogenetic placements into a tree
 - [`align_minimap2`](#align_minimap2query_table-subject_tablenull-index_pathnull-options) - Minimap2 alignment
 - [`save_minimap2_index`](#save_minimap2_indexsubject_table-output_path-options) - Save minimap2 index
 - [`align_minimap2_sharded`](#align_minimap2_shardedquery_table-shard_directory-read_to_shard-options) - Sharded minimap2 alignment
@@ -903,6 +905,57 @@ JOIN edge_taxa e ON p.edge_num = e.edge_num;
 
 **Implementation note:** Implemented as a DuckDB macro using `read_json` with JSON path extraction.
 
+## `read_jplace_newick(path, [include_filepath=false])`
+
+Extract the reference Newick tree from jplace phylogenetic placement files. Returns the tree in the same schema as `read_newick`, with one row per node.
+
+**Parameters:**
+- `path` (VARCHAR or VARCHAR[]): Path to jplace file(s), supports glob patterns (e.g., `'data/*.jplace'`)
+- `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
+
+**Output schema:** Same as [`read_newick`](#read_newickfilename-include_filepathfalse):
+- `node_index` (BIGINT): 0-based index of node in tree
+- `name` (VARCHAR): Node label (empty string for unlabeled internal nodes)
+- `branch_length` (DOUBLE, nullable): Branch length
+- `edge_id` (BIGINT, nullable): Edge identifier from `{n}` syntax
+- `parent_index` (BIGINT, nullable): Parent node's node_index (NULL for root)
+- `is_tip` (BOOLEAN): Whether node is a tip/leaf
+- `filepath` (VARCHAR, optional): File path when include_filepath=true
+
+**Behavior:**
+- Reads the `"tree"` field from each jplace JSON file and parses it as Newick
+- Schema is UNION ALL-compatible with `read_newick`
+- Supports glob patterns for reading trees from multiple jplace files
+- Supports gzip-compressed jplace files
+
+**Examples:**
+```sql
+-- Extract the reference tree from a jplace file
+SELECT * FROM read_jplace_newick('placements.jplace');
+
+-- Get tip names from the reference tree
+SELECT name FROM read_jplace_newick('placements.jplace')
+WHERE is_tip = true;
+
+-- Combine with placement data for a full workflow
+CREATE TABLE ref_tree AS
+SELECT * FROM read_jplace_newick('placements.jplace');
+
+CREATE TABLE placements AS
+SELECT fragment AS fragment_id, edge_num::BIGINT AS edge_id,
+       like_weight_ratio, distal_length, pendant_length
+FROM read_jplace('placements.jplace');
+
+-- Now use tree_resolve_placement to insert placements into the tree
+SELECT * FROM tree_resolve_placement('ref_tree', 'placements');
+
+-- Compare trees across multiple jplace files
+SELECT filepath, COUNT(*) AS num_nodes,
+       COUNT(*) FILTER (WHERE is_tip) AS num_tips
+FROM read_jplace_newick('results/*.jplace', include_filepath=true)
+GROUP BY filepath;
+```
+
 ## `read_newick(filename, [include_filepath=false])`
 
 Read Newick phylogenetic tree files and return a table with one row per node.
@@ -1002,6 +1055,82 @@ COPY (
 - Colons precede branch lengths: `A:0.1` means tip A with branch length 0.1
 - Semicolons terminate the tree: `(A,B);`
 - Edge IDs in braces are an extension for jplace: `A:0.1{0}` has edge_id 0
+
+## `tree_resolve_placement(tree_table, placements_table)`
+
+Resolve phylogenetic placements into a reference tree, returning a fully resolved tree with placed fragments as new tips. This exposes the `insert_fully_resolved` algorithm as a SQL-accessible table function.
+
+**Parameters:**
+- `tree_table` (VARCHAR): Name of a table or view containing tree data in `read_newick` schema (requires `node_index` and `parent_index` columns; `name`, `branch_length`, `edge_id` are optional)
+- `placements_table` (VARCHAR): Name of a table or view containing placement data (requires `fragment_id`, `edge_id`, `like_weight_ratio`, `distal_length`, `pendant_length` columns)
+
+**Output schema:** Same as [`read_newick`](#read_newickfilename-include_filepathfalse) (without filepath):
+- `node_index` (BIGINT): 0-based index of node in resolved tree
+- `name` (VARCHAR): Node label (placed fragments use their fragment_id as name)
+- `branch_length` (DOUBLE, nullable): Branch length
+- `edge_id` (BIGINT, nullable): Edge identifier (NULL for newly created nodes)
+- `parent_index` (BIGINT, nullable): Parent node's node_index (NULL for root)
+- `is_tip` (BOOLEAN): Whether node is a tip/leaf
+
+**Behavior:**
+- Reads tree data from the tree table and builds a `NewickTree`
+- Reads placements and inserts each fragment as a new tip on the specified edge
+- Each placement creates 2 new nodes: an internal node (splitting the edge) and a fragment tip
+- Deduplicates placements by `fragment_id` (keeps highest `like_weight_ratio`, then lowest `pendant_length`)
+- Multiple placements on the same edge are sorted by `distal_length` and inserted as a chain
+- Preserves original tip-to-tip distances in the tree
+- Works with both tables and views for either parameter
+- Schema is UNION ALL-compatible with `read_newick`
+
+**Examples:**
+```sql
+-- Basic workflow: load tree, load placements, resolve
+CREATE TABLE ref_tree AS
+SELECT * FROM read_newick('reference.nwk');
+
+CREATE TABLE placements AS
+SELECT * FROM (VALUES
+    ('seq1', 0::BIGINT, 0.95::DOUBLE, 0.05::DOUBLE, 0.001::DOUBLE),
+    ('seq2', 1::BIGINT, 0.80::DOUBLE, 0.10::DOUBLE, 0.002::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+SELECT * FROM tree_resolve_placement('ref_tree', 'placements');
+
+-- Full jplace workflow: extract tree and placements from jplace file
+CREATE TABLE jplace_tree AS
+SELECT * FROM read_jplace_newick('results.jplace');
+
+CREATE TABLE jplace_placements AS
+SELECT fragment AS fragment_id, edge_num::BIGINT AS edge_id,
+       like_weight_ratio, distal_length, pendant_length
+FROM read_jplace('results.jplace');
+
+-- Resolve and inspect the result
+SELECT name FROM tree_resolve_placement('jplace_tree', 'jplace_placements')
+WHERE is_tip = true
+ORDER BY name;
+
+-- Write resolved tree to Newick format
+COPY (
+    SELECT node_index, name, branch_length, edge_id, parent_index
+    FROM tree_resolve_placement('ref_tree', 'placements')
+) TO 'resolved.nwk' (FORMAT NEWICK);
+
+-- Use a view for filtered placements
+CREATE VIEW confident_placements AS
+SELECT * FROM jplace_placements WHERE like_weight_ratio > 0.8;
+
+SELECT COUNT(*) FROM tree_resolve_placement('jplace_tree', 'confident_placements')
+WHERE is_tip = true;
+```
+
+**Error conditions:**
+- Tree table or placements table does not exist
+- Tree table missing required `node_index` or `parent_index` columns
+- Placements table missing required columns (`fragment_id`, `edge_id`, `like_weight_ratio`, `distal_length`, `pendant_length`)
+- Placement references an `edge_id` not present in the tree
+- `distal_length` exceeds the edge's branch length
+- Negative `distal_length` or `pendant_length`
 
 ## `align_minimap2(query_table, [subject_table=NULL], [index_path=NULL], [options])`
 
