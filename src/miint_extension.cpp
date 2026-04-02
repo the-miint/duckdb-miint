@@ -9,7 +9,9 @@
 #include <copy_fastq.hpp>
 #include <copy_newick.hpp>
 #include <copy_sam.hpp>
+#include <read_jplace_newick.hpp>
 #include <read_newick.hpp>
+#include <tree_resolve_placement.hpp>
 #include <kseq++/seqio.hpp>
 #include <read_fastx.hpp>
 #include <read_alignments.hpp>
@@ -162,6 +164,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadBIOMTableFunction::Register(loader);
 #endif
 	ReadNewickTableFunction::Register(loader);
+	ReadJplaceNewickTableFunction::Register(loader);
+	TreeResolvePlacementTableFunction::Register(loader);
 	AlignMinimap2TableFunction::Register(loader);
 	AlignMinimap2ShardedTableFunction::Register(loader);
 	SaveMinimap2IndexTableFunction::Register(loader);

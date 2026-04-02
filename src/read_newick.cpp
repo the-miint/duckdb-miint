@@ -106,6 +106,17 @@ std::string ReadNewickTableFunction::ReadNewickFile(FileSystem &fs, const std::s
 	return ReadFileHandleToString(*handle);
 }
 
+void ReadNewickTableFunction::GetSchema(std::vector<std::string> &names, std::vector<LogicalType> &types,
+                                        bool include_filepath) {
+	names = {"node_index", "name", "branch_length", "edge_id", "parent_index", "is_tip"};
+	types = {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::DOUBLE,
+	         LogicalType::BIGINT, LogicalType::BIGINT,  LogicalType::BOOLEAN};
+	if (include_filepath) {
+		names.emplace_back("filepath");
+		types.emplace_back(LogicalType::VARCHAR);
+	}
+}
+
 std::vector<ReadNewickTableFunction::NodeRow> ReadNewickTableFunction::TreeToRows(const miint::NewickTree &tree) {
 	std::vector<NodeRow> rows;
 	rows.reserve(tree.num_nodes());
@@ -205,6 +216,54 @@ unique_ptr<LocalTableFunctionState> ReadNewickTableFunction::InitLocal(Execution
 	return duckdb::make_uniq<LocalState>();
 }
 
+void ReadNewickTableFunction::EmitNodeRows(const std::vector<NodeRow> &rows, size_t start_idx, size_t count,
+                                           DataChunk &output, idx_t output_offset, bool include_filepath,
+                                           const std::string &filepath) {
+	for (size_t i = 0; i < count; ++i) {
+		const auto &row = rows[start_idx + i];
+
+		// node_index
+		FlatVector::GetData<int64_t>(output.data[0])[output_offset + i] = row.node_index;
+
+		// name (empty string if not specified, never NULL)
+		auto &name_vec = output.data[1];
+		FlatVector::GetData<string_t>(name_vec)[output_offset + i] = StringVector::AddString(name_vec, row.name);
+
+		// branch_length (nullable - NaN becomes NULL)
+		auto &bl_vec = output.data[2];
+		if (std::isnan(row.branch_length)) {
+			FlatVector::Validity(bl_vec).SetInvalid(output_offset + i);
+		} else {
+			FlatVector::GetData<double>(bl_vec)[output_offset + i] = row.branch_length;
+		}
+
+		// edge_id (nullable)
+		auto &edge_vec = output.data[3];
+		if (row.edge_id.has_value()) {
+			FlatVector::GetData<int64_t>(edge_vec)[output_offset + i] = row.edge_id.value();
+		} else {
+			FlatVector::Validity(edge_vec).SetInvalid(output_offset + i);
+		}
+
+		// parent_index (nullable)
+		auto &parent_vec = output.data[4];
+		if (row.parent_index.has_value()) {
+			FlatVector::GetData<int64_t>(parent_vec)[output_offset + i] = row.parent_index.value();
+		} else {
+			FlatVector::Validity(parent_vec).SetInvalid(output_offset + i);
+		}
+
+		// is_tip
+		FlatVector::GetData<bool>(output.data[5])[output_offset + i] = row.is_tip;
+
+		// filepath (if included)
+		if (include_filepath) {
+			auto &fp_vec = output.data[6];
+			FlatVector::GetData<string_t>(fp_vec)[output_offset + i] = StringVector::AddString(fp_vec, filepath);
+		}
+	}
+}
+
 void ReadNewickTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &bind_data = data_p.bind_data->Cast<Data>();
 	auto &global_state = data_p.global_state->Cast<GlobalState>();
@@ -218,50 +277,8 @@ void ReadNewickTableFunction::Execute(ClientContext &context, TableFunctionInput
 			size_t rows_to_output = std::min<size_t>(STANDARD_VECTOR_SIZE - output_idx,
 			                                         local_state.current_rows.size() - local_state.current_row_idx);
 
-			for (size_t i = 0; i < rows_to_output; ++i) {
-				const auto &row = local_state.current_rows[local_state.current_row_idx + i];
-
-				// node_index
-				FlatVector::GetData<int64_t>(output.data[0])[output_idx + i] = row.node_index;
-
-				// name (empty string if not specified, never NULL)
-				auto &name_vec = output.data[1];
-				FlatVector::GetData<string_t>(name_vec)[output_idx + i] = StringVector::AddString(name_vec, row.name);
-
-				// branch_length (nullable - NaN becomes NULL)
-				auto &bl_vec = output.data[2];
-				if (std::isnan(row.branch_length)) {
-					FlatVector::Validity(bl_vec).SetInvalid(output_idx + i);
-				} else {
-					FlatVector::GetData<double>(bl_vec)[output_idx + i] = row.branch_length;
-				}
-
-				// edge_id (nullable)
-				auto &edge_vec = output.data[3];
-				if (row.edge_id.has_value()) {
-					FlatVector::GetData<int64_t>(edge_vec)[output_idx + i] = row.edge_id.value();
-				} else {
-					FlatVector::Validity(edge_vec).SetInvalid(output_idx + i);
-				}
-
-				// parent_index (nullable)
-				auto &parent_vec = output.data[4];
-				if (row.parent_index.has_value()) {
-					FlatVector::GetData<int64_t>(parent_vec)[output_idx + i] = row.parent_index.value();
-				} else {
-					FlatVector::Validity(parent_vec).SetInvalid(output_idx + i);
-				}
-
-				// is_tip
-				FlatVector::GetData<bool>(output.data[5])[output_idx + i] = row.is_tip;
-
-				// filepath (if included)
-				if (bind_data.include_filepath) {
-					auto &fp_vec = output.data[6];
-					FlatVector::GetData<string_t>(fp_vec)[output_idx + i] =
-					    StringVector::AddString(fp_vec, local_state.current_filepath);
-				}
-			}
+			EmitNodeRows(local_state.current_rows, local_state.current_row_idx, rows_to_output, output, output_idx,
+			             bind_data.include_filepath, local_state.current_filepath);
 
 			output_idx += rows_to_output;
 			local_state.current_row_idx += rows_to_output;

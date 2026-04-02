@@ -1,7 +1,5 @@
 #include "sequence_table_reader.hpp"
-#include "duckdb/catalog/catalog.hpp"
-#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
+#include "catalog_utils.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/appender.hpp"
 #include "duckdb/main/connection.hpp"
@@ -11,42 +9,11 @@
 
 namespace duckdb {
 
-// Helper to get column names and types from either a table or view
-// Returns true if it's a physical table (has rowid), false if it's a view
-static bool GetTableOrViewColumns(ClientContext &context, const std::string &table_name, vector<string> &out_names,
-                                  vector<LogicalType> &out_types) {
-	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
-	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
-
-	if (!entry) {
-		throw BinderException("Table or view '%s' does not exist", table_name);
-	}
-
-	if (entry->type == CatalogType::TABLE_ENTRY) {
-		auto &table = entry->Cast<TableCatalogEntry>();
-		auto &columns = table.GetColumns();
-		for (idx_t i = 0; i < columns.LogicalColumnCount(); i++) {
-			auto &col = columns.GetColumn(LogicalIndex(i));
-			out_names.push_back(col.Name());
-			out_types.push_back(col.Type());
-		}
-		return true; // Physical table
-	} else if (entry->type == CatalogType::VIEW_ENTRY) {
-		auto &view = entry->Cast<ViewCatalogEntry>();
-		view.BindView(context);
-		auto col_info = view.GetColumnInfo();
-		out_names = col_info->names;
-		out_types = col_info->types;
-		return false; // View
-	} else {
-		throw BinderException("'%s' is not a table or view", table_name);
-	}
-}
-
 SequenceTableSchema ValidateSequenceTableSchema(ClientContext &context, const std::string &table_name) {
-	vector<string> col_names;
-	vector<LogicalType> col_types;
-	bool is_physical_table = GetTableOrViewColumns(context, table_name, col_names, col_types);
+	auto info = GetTableOrViewColumns(context, table_name, "Sequence table");
+	auto &col_names = info.names;
+	auto &col_types = info.types;
+	bool is_physical_table = info.is_physical_table;
 
 	// Build name-to-index map (case-insensitive)
 	std::unordered_map<string, idx_t> name_to_idx;

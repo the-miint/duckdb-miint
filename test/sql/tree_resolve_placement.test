@@ -1,0 +1,231 @@
+# name: test/sql/tree_resolve_placement.test
+# description: Test tree_resolve_placement table function for phylogenetic placement resolution
+# group: [sql]
+
+require miint
+
+require json
+
+# =============================================================================
+# Setup
+# =============================================================================
+
+# Tree from with_edge_ids.nwk: ((A:0.1{0},B:0.2{1}):0.3{2},C:0.4{3}):0.0{4};
+# 5 nodes: A(0), B(1), internal(2), C(3), root(4)
+statement ok
+CREATE TABLE ref_tree AS SELECT * FROM read_newick('data/newick/with_edge_ids.nwk');
+
+# Single placement on edge 0 (A's edge, length 0.1)
+statement ok
+CREATE TABLE single_placement AS
+SELECT * FROM (VALUES
+    ('frag1', 0::BIGINT, 0.95::DOUBLE, 0.05::DOUBLE, 0.001::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+# =============================================================================
+# Error Cases
+# =============================================================================
+
+# Nonexistent tree table
+statement error
+SELECT * FROM tree_resolve_placement('no_tree', 'single_placement');
+----
+does not exist
+
+# Nonexistent placements table
+statement error
+SELECT * FROM tree_resolve_placement('ref_tree', 'no_placements');
+----
+does not exist
+
+# Tree table missing required node_index column
+statement ok
+CREATE TABLE bad_tree AS SELECT 1 AS x;
+
+statement error
+SELECT * FROM tree_resolve_placement('bad_tree', 'single_placement');
+----
+node_index
+
+statement ok
+DROP TABLE bad_tree;
+
+# Placements table missing required columns
+statement ok
+CREATE TABLE bad_placements AS SELECT 1 AS x;
+
+statement error
+SELECT * FROM tree_resolve_placement('ref_tree', 'bad_placements');
+----
+fragment_id
+
+statement ok
+DROP TABLE bad_placements;
+
+# Placements reference unknown edge_id
+statement ok
+CREATE TABLE bad_edge_placements AS
+SELECT * FROM (VALUES
+    ('frag1', 999::BIGINT, 0.95::DOUBLE, 0.05::DOUBLE, 0.001::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+statement error
+SELECT * FROM tree_resolve_placement('ref_tree', 'bad_edge_placements');
+----
+edge
+
+statement ok
+DROP TABLE bad_edge_placements;
+
+# =============================================================================
+# Basic: single placement
+# =============================================================================
+
+# Single placement adds 2 nodes (1 internal + 1 fragment tip)
+# 5 original + 2 = 7
+query I
+SELECT COUNT(*) FROM tree_resolve_placement('ref_tree', 'single_placement');
+----
+7
+
+# Placed fragment appears as a tip
+query T
+SELECT name FROM tree_resolve_placement('ref_tree', 'single_placement')
+WHERE is_tip = true ORDER BY name;
+----
+A
+B
+C
+frag1
+
+# Still exactly one root
+query I
+SELECT COUNT(*) FROM tree_resolve_placement('ref_tree', 'single_placement')
+WHERE parent_index IS NULL;
+----
+1
+
+# Output has correct column types (no filepath column)
+query ITRIIT rowsort
+SELECT node_index, name, branch_length, edge_id, parent_index, is_tip
+FROM tree_resolve_placement('ref_tree', 'single_placement')
+WHERE parent_index IS NULL;
+----
+4
+(empty)
+0.0
+4
+NULL
+false
+
+# =============================================================================
+# Multiple placements on same edge
+# =============================================================================
+
+statement ok
+CREATE TABLE multi_placements AS
+SELECT * FROM (VALUES
+    ('frag1', 0::BIGINT, 0.95::DOUBLE, 0.05::DOUBLE, 0.001::DOUBLE),
+    ('frag2', 0::BIGINT, 0.80::DOUBLE, 0.02::DOUBLE, 0.002::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+# Two placements = 4 new nodes. 5 + 4 = 9
+query I
+SELECT COUNT(*) FROM tree_resolve_placement('ref_tree', 'multi_placements');
+----
+9
+
+# Both fragments are tips
+query T
+SELECT name FROM tree_resolve_placement('ref_tree', 'multi_placements')
+WHERE is_tip = true ORDER BY name;
+----
+A
+B
+C
+frag1
+frag2
+
+# =============================================================================
+# Works with views
+# =============================================================================
+
+statement ok
+CREATE VIEW placement_view AS SELECT * FROM single_placement;
+
+query I
+SELECT COUNT(*) FROM tree_resolve_placement('ref_tree', 'placement_view');
+----
+7
+
+statement ok
+DROP VIEW placement_view;
+
+# =============================================================================
+# Works with tree from read_jplace_newick
+# =============================================================================
+
+# jplace tree has 7 nodes; use 2 valid placements (fragment3 targets root edge
+# with branch_length=0.0, which distal_length=0.2 exceeds)
+# 2 placements add 4 nodes = 11 total, 6 tips
+statement ok
+CREATE TABLE jplace_tree AS SELECT * FROM read_jplace_newick('data/jplace/test.jplace');
+
+statement ok
+CREATE TABLE jplace_placements AS
+SELECT fragment AS fragment_id, edge_num::BIGINT AS edge_id,
+       like_weight_ratio, distal_length, pendant_length
+FROM read_jplace('data/jplace/test.jplace')
+WHERE fragment != 'fragment3';
+
+query I
+SELECT COUNT(*) FROM tree_resolve_placement('jplace_tree', 'jplace_placements');
+----
+11
+
+query I
+SELECT COUNT(*) FROM tree_resolve_placement('jplace_tree', 'jplace_placements')
+WHERE is_tip = true;
+----
+6
+
+query T
+SELECT name FROM tree_resolve_placement('jplace_tree', 'jplace_placements')
+WHERE is_tip = true ORDER BY name;
+----
+A
+B
+C
+D
+fragment1
+fragment2
+
+# =============================================================================
+# Schema matches read_newick (UNION ALL compatibility)
+# =============================================================================
+
+statement ok
+SELECT node_index, name, branch_length, edge_id, parent_index, is_tip
+FROM read_newick('data/newick/with_edge_ids.nwk')
+UNION ALL
+SELECT node_index, name, branch_length, edge_id, parent_index, is_tip
+FROM tree_resolve_placement('ref_tree', 'single_placement');
+
+# =============================================================================
+# Cleanup
+# =============================================================================
+
+statement ok
+DROP TABLE ref_tree;
+
+statement ok
+DROP TABLE single_placement;
+
+statement ok
+DROP TABLE multi_placements;
+
+statement ok
+DROP TABLE jplace_tree;
+
+statement ok
+DROP TABLE jplace_placements;
