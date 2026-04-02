@@ -433,7 +433,8 @@ if(MIINT_ENABLE_VSEARCH)
             ${VSEARCH_SRC_DIR}/src/Makefile.in
             ${VSEARCH_SRC_DIR}/man/Makefile.in
             ${VSEARCH_SRC_DIR}/config.h.in
-            COMMAND ${VSEARCH_SRC_DIR}/configure ${VSEARCH_HOST_FLAG}
+            COMMAND ${CMAKE_COMMAND} -E env "CXXFLAGS=-fPIC ${VSEARCH_ARCH_CFLAGS}" "CFLAGS=-fPIC ${VSEARCH_ARCH_CFLAGS}"
+            ${VSEARCH_SRC_DIR}/configure ${VSEARCH_HOST_FLAG}
         BUILD_COMMAND make -C src libvsearch.a
         INSTALL_COMMAND ""
         BUILD_IN_SOURCE 1
