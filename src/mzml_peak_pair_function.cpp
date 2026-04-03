@@ -73,7 +73,8 @@ static unique_ptr<FunctionData> PeakPairBind(ClientContext &context, TableFuncti
 	Connection conn(db);
 
 	// Materialize MS2 peaks into a temp table.
-	auto mat_sql = "CREATE TEMP TABLE " + ms2_table + " AS "
+	auto mat_sql = "CREATE TEMP TABLE " + ms2_table +
+	               " AS "
 	               "SELECT * FROM mzml_peaks(" +
 	               quoted_relation + ") WHERE ms_level = 2 AND intensity > 0";
 	auto mat_result = conn.Query(mat_sql);
@@ -84,8 +85,10 @@ static unique_ptr<FunctionData> PeakPairBind(ClientContext &context, TableFuncti
 	// Materialize distinct m/z values. The recursive CTE re-evaluates
 	// SELECT DISTINCT mz at every recursion step (~3k iterations); pre-materializing
 	// this set is the key optimization (18s → <1s on real data).
-	auto distinct_sql = "CREATE TEMP TABLE " + mz_table + " AS "
-	                    "SELECT DISTINCT mz FROM " + ms2_table;
+	auto distinct_sql = "CREATE TEMP TABLE " + mz_table +
+	                    " AS "
+	                    "SELECT DISTINCT mz FROM " +
+	                    ms2_table;
 	auto distinct_result = conn.Query(distinct_sql);
 	if (distinct_result->HasError()) {
 		throw InvalidInputException("mzml_peak_pair: failed to materialize distinct mz: %s",
@@ -113,7 +116,8 @@ static unique_ptr<FunctionData> PeakPairBind(ClientContext &context, TableFuncti
 	                 "    SELECT DISTINCT p1.spectrum_index "
 	                 "    FROM x_candidates xc "
 	                 "    JOIN " +
-	                 ms2_table + " p1 ON p1.mz > xc.x_val - 0.1 AND p1.mz < xc.x_val + 0.1 "
+	                 ms2_table +
+	                 " p1 ON p1.mz > xc.x_val - 0.1 AND p1.mz < xc.x_val + 0.1 "
 	                 "    JOIN " +
 	                 ms2_table +
 	                 " p2 ON p2.spectrum_index = p1.spectrum_index "
