@@ -133,6 +133,10 @@ Notice two patterns here:
 
 ## Complex analytical SQL
 
+The remaining examples in this tutorial are meant to be run interactively in
+the DuckDB shell (`duckdb`), rather than inlined in Bash scripts. Start a new
+shell session and paste the SQL blocks below.
+
 ### Verifying alignments against gene annotations
 
 In the intermediate tutorial we saw that 16S V4 reads cover only a tiny
@@ -168,11 +172,14 @@ CREATE TABLE alignments AS
         max_secondary=5
     );
 
+CREATE TABLE ncbi_annotations AS
+    SELECT * FROM read_ncbi_annotation('U00096.3');
+
 CREATE TABLE rrna_16s AS
     SELECT position AS gene_start,
            stop_position AS gene_end,
            strand
-    FROM read_ncbi_annotation('U00096.3')
+    FROM ncbi_annotations
     WHERE type = 'rRNA'
       AND attributes['product'] LIKE '%16S%';
 
@@ -199,6 +206,13 @@ Now, merge the alignment positions using
 and
 [`JOIN`](https://duckdb.org/docs/current/sql/query_syntax/from) them against
 the gene annotations to see which operons our reads hit:
+
+We filter to primary alignments with high
+[query coverage](../docs/scalar-functions.md#alignment_query_coveragecigar-typealigned)
+(&ge; 99% of the read aligned) to exclude partial soft-clipped matches that
+inflate counts &mdash; see the
+[intermediate tutorial](intermediate.md#step-5-the-query-coverage-lesson) for
+a detailed explanation of why this matters.
 
 ```sql
 WITH good_alns AS (
@@ -348,7 +362,7 @@ SELECT ci.start AS read_start,
        a.stop_position AS gene_end,
        a.attributes['product'] AS product
 FROM unmatched
-JOIN (SELECT * FROM read_ncbi_annotation('U00096.3')) a
+JOIN ncbi_annotations a
   ON ci.start >= a.position
  AND ci.stop <= a.stop_position
 WHERE a.type = 'CDS'
@@ -362,6 +376,20 @@ ORDER BY a.position;
 A read aligned with 100% identity and 100% query coverage to a region inside
 the *dosP* gene, which encodes an oxygen-sensing phosphodiesterase &mdash; not
 a 16S rRNA gene at all.
+
+Which read produced this alignment? We can find it by joining back to the
+alignments table on position:
+
+```sql
+SELECT read_id, position, cigar
+FROM alignments
+WHERE alignment_is_primary(flags)
+  AND position = 1565200;
+```
+
+| read_id | position | cigar |
+|---|---|---|
+| 10317.000004216_6599 | 1565200 | 151= |
 
 Unlike the 16S reads, which have multiple secondary alignments across operons,
 this read has **no secondary alignments** &mdash; the DosP location is its
