@@ -69,7 +69,7 @@ jobs:
 
       - name: Install tutorial test dependencies
         shell: bash -el {0}
-        run: pip install duckdb==$(./build/release/duckdb -csv -noheader -c "SELECT library_version();") pyarrow pandas matplotlib
+        run: pip install duckdb==$(./build/release/duckdb -csv -noheader -c "SELECT ltrim(version(), 'v');") pyarrow pandas matplotlib
 
       - name: Run tutorial tests
         shell: bash -el {0}
