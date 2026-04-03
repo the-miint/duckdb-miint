@@ -7,6 +7,7 @@ All RYpe functions take a `sequence_table` parameter that references a DuckDB ta
 ## Table of Contents
 
 - [`rype_classify`](#rype_classifyindex_path-sequence_table-id_columnread_id-threshold01-negative_indexpath) - Classify sequences against an index
+- [`rype_log_ratio`](#rype_log_rationumerator_path-denominator_path-sequence_table-id_columnread_id-skip_threshold05) - Log-ratio classification between two single-bucket indices
 - [`rype_extract_minimizer_set`](#rype_extract_minimizer_setsequence_table-k-w-salt6148914691236517205-id_columnread_id) - Extract deduplicated minimizer hash sets
 - [`rype_extract_strand_minimizers`](#rype_extract_strand_minimizerssequence_table-k-w-salt6148914691236517205-id_columnread_id) - Extract minimizers with positions
 
@@ -58,6 +59,62 @@ SELECT * FROM rype_classify('microbe.ryxdi', 'seqs', negative_index := 'host.ryx
 -- Classify paired-end reads (table must have sequence2 column)
 CREATE TABLE paired AS SELECT * FROM read_fastx('R1.fastq', sequence2='R2.fastq');
 SELECT * FROM rype_classify('my_index.ryxdi', 'paired');
+```
+
+## `rype_log_ratio(numerator_path, denominator_path, sequence_table, [id_column='read_id'], [skip_threshold=0.5])`
+
+Compute the log-ratio of classification scores between two single-bucket RYpe indices. For each input sequence, this returns `log10(numerator_score / denominator_score)`, indicating which index the sequence is more similar to.
+
+**Parameters:**
+- `numerator_path` (VARCHAR): Path to a single-bucket RYpe index directory (`.ryxdi`) used as the numerator
+- `denominator_path` (VARCHAR): Path to a single-bucket RYpe index directory (`.ryxdi`) used as the denominator
+- `sequence_table` (VARCHAR): Name of a DuckDB table or view containing sequences. Must have columns: identifier column + `sequence1` + optional `sequence2`
+- `id_column` (VARCHAR, optional, default `'read_id'`): Name of the identifier column in the sequence table
+- `skip_threshold` (DOUBLE, optional, default 0.5): Numerator score threshold for fast-path. Reads with numerator score >= this value skip denominator classification and get `+inf` log_ratio immediately. Set to 0 or negative to disable the fast-path
+
+**Output schema:**
+- `read_id` (VARCHAR): Sequence identifier from the input table
+- `log_ratio` (DOUBLE): `log10(numerator_score / denominator_score)`. Positive values indicate the sequence matches the numerator index more strongly; negative values indicate the denominator. Special values: `+inf` (only numerator matches), `-inf` (only denominator matches), `NaN` (neither index matches)
+- `fast_path` (INTEGER): 1 if the read was classified via the fast-path (skipped denominator), 0 otherwise
+
+**Behavior:**
+- Both indices must be single-bucket indices (multi-bucket indices are rejected)
+- Returns exactly one row per input sequence
+- If the sequence table has a `sequence2` column, paired-end classification is used
+- Works with both tables and views
+- Swapping numerator and denominator negates the log_ratio (symmetry property)
+
+**Examples:**
+```sql
+-- Load sequences and compute log-ratio between two indices
+CREATE TABLE seqs AS SELECT * FROM read_fastx('reads.fastq');
+SELECT * FROM rype_log_ratio('host.ryxdi', 'microbe.ryxdi', 'seqs');
+
+-- Disable fast-path for exact classification against both indices
+SELECT * FROM rype_log_ratio('host.ryxdi', 'microbe.ryxdi', 'seqs', skip_threshold := 0.0);
+
+-- Filter for sequences that strongly match the numerator
+SELECT read_id, log_ratio
+FROM rype_log_ratio('host.ryxdi', 'microbe.ryxdi', 'seqs', skip_threshold := 0.0)
+WHERE log_ratio > 1.0
+ORDER BY log_ratio DESC;
+
+-- Classify reads as host vs microbe based on log-ratio sign
+SELECT read_id,
+       CASE WHEN isinf(log_ratio) AND log_ratio > 0 THEN 'host_only'
+            WHEN isinf(log_ratio) AND log_ratio < 0 THEN 'microbe_only'
+            WHEN isnan(log_ratio) THEN 'unclassified'
+            WHEN log_ratio > 0 THEN 'host'
+            WHEN log_ratio < 0 THEN 'microbe'
+            ELSE 'ambiguous' END as classification
+FROM rype_log_ratio('host.ryxdi', 'microbe.ryxdi', 'seqs', skip_threshold := 0.0);
+
+-- Use with paired-end reads
+CREATE TABLE paired AS SELECT * FROM read_fastx('R1.fastq', sequence2='R2.fastq');
+SELECT * FROM rype_log_ratio('host.ryxdi', 'microbe.ryxdi', 'paired');
+
+-- Use a custom identifier column
+SELECT * FROM rype_log_ratio('host.ryxdi', 'microbe.ryxdi', 'seqs', id_column := 'sample_id');
 ```
 
 ## `rype_extract_minimizer_set(sequence_table, k, w, [salt=6148914691236517205], [id_column='read_id'])`
