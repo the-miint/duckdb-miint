@@ -9,9 +9,14 @@ By the end you will be able to read a FASTQ file directly from the internet,
 explore its contents, and save the results as a Parquet file for downstream
 analysis.
 
-> **Prerequisites:** Python 3.9+, a Jupyter environment (JupyterLab, VS Code,
-> Google Colab, etc.), and the `duckdb` and `pandas` packages.
-> Install them with `pip install duckdb pandas matplotlib`.
+> **Prerequisites:** Python 3.9+ and a Jupyter environment (JupyterLab,
+> VS Code, Google Colab, etc.). Install the required packages:
+>
+> ```bash
+> pip install duckdb pyarrow pandas matplotlib           # pip
+> uv pip install duckdb pyarrow pandas matplotlib        # or uv
+> conda install -c conda-forge python-duckdb pyarrow pandas matplotlib  # or conda
+> ```
 
 ## Setup
 
@@ -166,8 +171,11 @@ rounds to one decimal place.
 ```python
 import os, tempfile
 import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+# Use a non-interactive backend when running outside a notebook
+if "get_ipython" not in dir():
+    matplotlib.use("Agg")
 
 outdir = tempfile.gettempdir()
 

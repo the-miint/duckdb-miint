@@ -9,13 +9,23 @@ taxa. You will learn
 [macros](https://duckdb.org/docs/current/sql/statements/create_macro), and
 &mdash; most importantly &mdash; why query coverage filtering matters.
 
-> **Prerequisites:** The [beginner tutorial](beginner.md). Familiarity with
-> running SQL queries in the
-> [DuckDB shell](https://duckdb.org/docs/current/clients/cli/overview).
+> **Prerequisites:** The [beginner tutorial](beginner.md). Install the DuckDB
+> command-line interface:
+>
+> ```bash
+> pip install duckdb-cli               # pip
+> uv pip install duckdb-cli            # or uv
+> conda install -c conda-forge duckdb-cli  # or conda
+> ```
+>
+> See the
+> [DuckDB installation page](https://duckdb.org/docs/current/installation/)
+> for other options (Homebrew, standalone binaries, etc.).
 
 ## Setup
 
-Start the DuckDB CLI and load the extensions we need:
+Open a terminal and start the DuckDB shell by running `duckdb`. You'll see an
+interactive prompt where you can type SQL queries. Load the extensions we need:
 
 ```sql
 INSTALL httpfs;

@@ -29,6 +29,34 @@ et al., 2017) &mdash; and builds on the ideas introduced in the previous one.
 
 ## Installation
 
+### Install DuckDB
+
+DuckDB is available for many languages and platforms &mdash; see the
+[DuckDB installation page](https://duckdb.org/docs/current/installation/) for
+the full list. These tutorials use the
+[Python client](https://duckdb.org/docs/current/clients/python/overview) and
+the [command-line interface](https://duckdb.org/docs/current/clients/cli/overview);
+installation instructions for each are below.
+
+**Python library** (for the [beginner tutorial](beginner.md)):
+
+```bash
+pip install duckdb pyarrow pandas matplotlib           # pip
+uv pip install duckdb pyarrow pandas matplotlib        # or uv
+conda install -c conda-forge python-duckdb pyarrow pandas matplotlib  # or conda
+```
+
+**Command-line interface** (for the
+[intermediate](intermediate.md) and [advanced](advanced.md) tutorials):
+
+```bash
+pip install duckdb-cli               # pip
+uv pip install duckdb-cli            # or uv
+conda install -c conda-forge duckdb-cli  # or conda
+```
+
+### Install miint
+
 miint is published in the
 [DuckDB Community Extensions](https://community-extensions.duckdb.org/) repository.
 No compilation required &mdash; DuckDB will download and verify the extension
