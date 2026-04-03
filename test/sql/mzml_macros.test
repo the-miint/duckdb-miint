@@ -129,7 +129,7 @@ FROM mzml_scaninfo(ms2_peaks)
 
 # No iron pattern in basic_3spectra MS2 data (peaks at round numbers)
 query I
-SELECT COUNT(*) FROM mzml_peak_pair(spectra, 'Fe')
+SELECT COUNT(*) FROM mzml_peak_pair('spectra', 'Fe')
 ----
 0
 
@@ -144,7 +144,7 @@ SELECT 0 AS spectrum_index, 2 AS ms_level, 1.0 AS retention_time,
        [200.0, 344.0650625] AS mz_array, [1000.0, 500.0] AS intensity_array;
 
 query I
-SELECT COUNT(*) FROM mzml_peak_pair(iron_test, 'Fe')
+SELECT COUNT(*) FROM mzml_peak_pair('iron_test', 'Fe')
 ----
 2
 

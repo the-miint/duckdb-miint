@@ -632,6 +632,7 @@ set(EXTENSION_SOURCES
     src/massql_parser.cpp
     src/massql_transpiler.cpp
     src/massql_function.cpp
+    src/mzml_peak_pair_function.cpp
     src/mass_tables.cpp
     src/MzXMLReader.cpp
     src/read_mzxml.cpp
