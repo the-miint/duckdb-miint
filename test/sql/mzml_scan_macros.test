@@ -159,7 +159,7 @@ SELECT 0 AS spectrum_index, 2 AS ms_level, 1.0 AS retention_time,
 
 # Materialize peak_pair result for composability with scan macros
 statement ok
-CREATE TABLE iron_peaks AS SELECT * FROM mzml_peak_pair(iron_test, 'Fe');
+CREATE TABLE iron_peaks AS SELECT * FROM mzml_peak_pair('iron_test', 'Fe');
 
 query IR
 SELECT spectrum_index, total_intensity FROM mzml_scansum(iron_peaks)

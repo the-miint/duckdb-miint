@@ -1,5 +1,5 @@
 # name: test/sql/massql_iron_pattern.test
-# description: MassQL iron-pattern integration test using mzml_peak_pair macro
+# description: MassQL iron-pattern integration test using mzml_peak_pair table function
 # group: [sql]
 
 require miint
@@ -13,7 +13,7 @@ CREATE TABLE spectra AS SELECT * FROM read_mzml('data/cache/bld_plt1_07_120_1.mz
 # Iron-pattern match via macro — equivalent to MassQL query:
 #   QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=2.0*(X - formula(Fe))
 statement ok
-CREATE VIEW iron_peaks AS SELECT * FROM mzml_peak_pair(spectra, 'Fe');
+CREATE VIEW iron_peaks AS SELECT * FROM mzml_peak_pair('spectra', 'Fe');
 
 # Unique scan count must match MassQL ground truth (370)
 query I

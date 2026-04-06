@@ -29,6 +29,7 @@
 #include <sequence_functions.hpp>
 #include <formula_function.hpp>
 #include <massql_function.hpp>
+#include <mzml_peak_pair_function.hpp>
 #include <align_mafft.hpp>
 #include <align_pairwise_functions.hpp>
 #include <read_mzml.hpp>
@@ -192,6 +193,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	SequenceFunctions::Register(loader);
 	FormulaFunction::Register(loader);
 	MassQLFunction::Register(loader);
+	MzmlPeakPairFunction::Register(loader);
 
 	AlignPairwiseScoreFunction::Register(loader);
 	AlignPairwiseCigarFunction::Register(loader);
