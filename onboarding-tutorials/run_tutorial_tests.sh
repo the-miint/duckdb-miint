@@ -20,6 +20,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUTDIR="${TMPDIR:-/tmp}/miint_tutorial_tests"
 mkdir -p "$OUTDIR"
 
+# Locate the built extension for the Python test. The CLI has miint statically
+# linked so "LOAD miint" works, but the Python duckdb package needs the
+# .duckdb_extension file loaded by path with unsigned extensions enabled.
+EXT_PATH="$(cd "$(dirname "$DUCKDB")" && pwd)/extension/miint/miint.duckdb_extension"
+if [ ! -f "$EXT_PATH" ]; then
+    EXT_PATH="$(pwd)/build/release/extension/miint/miint.duckdb_extension"
+fi
+
 PASS=0
 FAIL=0
 
@@ -40,12 +48,30 @@ extract_blocks() {
     ' "$file"
 }
 
-rewrite_extension_loading() {
-    # Replace community install with local extension load.
-    # Works for both SQL and Python (con.sql("...")) contexts.
+rewrite_extension_loading_cli() {
+    # For the built CLI binary which has miint statically linked:
+    # just strip the INSTALL, keep LOAD miint as-is.
     sed \
         -e "s|INSTALL miint FROM community; ||g" \
         -e "s|INSTALL miint FROM community;||g"
+}
+
+rewrite_extension_loading_python() {
+    # For the Python duckdb package which needs the .duckdb_extension file:
+    # load the unsigned local build by path when available.
+    # allow_unsigned_extensions must be set at connect() time in Python,
+    # so we patch the connect() call and the LOAD statement separately.
+    if [ -f "$EXT_PATH" ]; then
+        sed \
+            -e "s|duckdb.connect()|duckdb.connect(config={'allow_unsigned_extensions': 'true'})|g" \
+            -e "s|INSTALL miint FROM community; LOAD miint;|LOAD '${EXT_PATH}';|g" \
+            -e "s|INSTALL miint FROM community;||g" \
+            -e "s|LOAD miint;|LOAD '${EXT_PATH}';|g"
+    else
+        sed \
+            -e "s|INSTALL miint FROM community; ||g" \
+            -e "s|INSTALL miint FROM community;||g"
+    fi
 }
 
 # --------------------------------------------------------------------------
@@ -56,7 +82,7 @@ echo "=== Testing beginner.md ==="
 
 BEGINNER_PY="$OUTDIR/beginner_test.py"
 extract_blocks "$SCRIPT_DIR/beginner.md" "python" \
-    | rewrite_extension_loading \
+    | rewrite_extension_loading_python \
     > "$BEGINNER_PY"
 
 PYTHON="${PYTHON:-conda run -n duckdb-151 python3}"
@@ -77,7 +103,7 @@ echo "=== Testing intermediate.md ==="
 
 INTERMEDIATE_SQL="$OUTDIR/intermediate_test.sql"
 extract_blocks "$SCRIPT_DIR/intermediate.md" "sql" \
-    | rewrite_extension_loading \
+    | rewrite_extension_loading_cli \
     > "$INTERMEDIATE_SQL"
 
 if "$DUCKDB" < "$INTERMEDIATE_SQL" 2>&1; then
@@ -97,7 +123,7 @@ echo "=== Testing advanced.md (SQL blocks) ==="
 
 ADVANCED_SQL="$OUTDIR/advanced_test.sql"
 extract_blocks "$SCRIPT_DIR/advanced.md" "sql" \
-    | rewrite_extension_loading \
+    | rewrite_extension_loading_cli \
     > "$ADVANCED_SQL"
 
 if "$DUCKDB" < "$ADVANCED_SQL" 2>&1; then
@@ -115,7 +141,7 @@ echo "=== Testing advanced.md (bash blocks) ==="
 ADVANCED_BASH="$OUTDIR/advanced_test.sh"
 extract_blocks "$SCRIPT_DIR/advanced.md" "bash" \
     | sed "s|duckdb |${DUCKDB} |g" \
-    | rewrite_extension_loading \
+    | rewrite_extension_loading_cli \
     > "$ADVANCED_BASH"
 
 if bash "$ADVANCED_BASH" 2>&1; then
