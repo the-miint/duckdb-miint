@@ -29,6 +29,7 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`detect_chimera_uchime_denovo`](#detect_chimera_uchime_denovoinput_table-options) - De novo chimera detection (UCHIME)
 - [`search_sequences_vsearch`](#search_sequences_vsearchquery_table-dbref_table-idthreshold-options) - Global sequence search
 - [`cluster_sequences_vsearch`](#cluster_sequences_vsearchinput_table-idthreshold-options) - Greedy sequence clustering
+- [`deblur`](#deblurinput_table-options) - Deblur amplicon sequence denoising
 
 ## `read_alignments(filename, [reference_lengths='table_name'], [include_filepath=false], [include_seq_qual=false])`
 Read SAM/BAM alignment files.
@@ -2005,3 +2006,96 @@ GROUP BY centroid_id ORDER BY size DESC;
 - Error if table does not exist or lacks required columns
 - Error if table is empty or contains NULL read_ids, NULL sequences, or empty sequences
 - Error if any read_id exceeds 1023 characters
+
+## `deblur(input_table, [options])`
+
+Deblur amplicon sequence denoising (Amir et al. 2017, mSystems 2:e00191-16). A greedy deconvolution algorithm that removes sequencing errors from amplicon data by iteratively subtracting expected error-derived reads from less-abundant sequences. Sequences whose corrected abundance rounds to zero are removed as errors; the remainder are denoised "sub-OTUs" (sOTUs).
+
+Designed as a composable SQL building block. Dereplication is native SQL (`GROUP BY`), alignment is `align_mafft()`, and `deblur()` does the core denoising. See the full workflow example below.
+
+**Parameters:**
+- `input_table` (VARCHAR): Name of a table or view containing pre-aligned, pre-dereplicated sequences. Must have `read_id` (VARCHAR), `sequence1` (VARCHAR), and `abundance` (integer type) columns. All sequences in `sequence1` must have the same aligned length and the same unaligned length (number of non-gap characters).
+- `mean_error` (DOUBLE, default `0.005`): Per-base Illumina error rate. **This is the primary tuning knob.** The default 0.005 reflects MiSeq/HiSeq circa 2015. For modern NovaSeq or stitched reads (~250nt), use 0.001-0.002. Lowering `mean_error` makes denoising more conservative (fewer sequences removed). Must be > 0 and < 1.
+- `error_profile` (LIST(DOUBLE), optional): Override the default 12-element error probability profile. Each element represents the fraction of reads from a true sequence that land at exactly that Hamming distance. Default: `[1, 0.06, 0.02, 0.02, 0.01, 0.005, 0.005, 0.005, 0.001, 0.001, 0.001, 0.0005]`. All values must be non-negative.
+- `indel_prob` (DOUBLE, default `0.01`): Multiplicative penalty applied to corrections involving indels. A value of 0 disables indel-based corrections entirely.
+- `indel_max` (INTEGER, default `3`): Maximum number of indels before a sequence is protected from correction (treated as a real variant, not an error).
+
+**Error model:** The error profile is normalized by sequence length: `mod_factor = (1 - mean_error)^unaligned_length`. This is the probability a read has zero errors. The profile is divided by `mod_factor`, so longer sequences or higher error rates produce larger corrections. The profile shape was empirically derived from Illumina data and is deliberately lower than a binomial prediction (accounts for error collision). Use `error_profile` to provide custom calibration from mock community data.
+
+**Output schema:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `read_id` | VARCHAR | Sequence identifier from input |
+| `sequence` | VARCHAR | Denoised sequence (gaps stripped) |
+| `abundance` | BIGINT | Corrected abundance (banker's rounding) |
+
+**Full workflow example:**
+
+```sql
+-- 1. Read and trim to fixed length
+CREATE TABLE trimmed AS
+  SELECT read_id, substr(sequence1, 1, 150) AS sequence1
+  FROM read_fastx('sample.fq')
+  WHERE length(sequence1) >= 150;
+
+-- 2. Dereplicate (SQL GROUP BY replaces vsearch --derep_fulllength)
+CREATE TABLE dereplicated AS
+  SELECT MIN(read_id) AS read_id, sequence1, COUNT(*) AS abundance
+  FROM trimmed
+  GROUP BY sequence1
+  HAVING COUNT(*) >= 2;
+
+-- 3. Align (required when sequences may have indels relative to each other)
+-- For same-length amplicons without indels, this step can be skipped.
+CREATE TABLE aligned AS
+  SELECT a.read_id, a.aligned_sequence AS sequence1, d.abundance
+  FROM align_mafft('dereplicated_seqs.fa') a
+  JOIN dereplicated d ON a.read_id = d.read_id;
+
+-- 4. Deblur
+CREATE TABLE denoised AS
+  SELECT * FROM deblur('aligned');
+
+-- 5. Optional: de novo chimera removal
+SELECT * FROM detect_chimera_uchime_denovo(
+  (SELECT read_id, sequence AS sequence1, abundance AS size FROM denoised)
+);
+```
+
+**Minimal example (pre-aligned sequences of equal length):**
+
+```sql
+CREATE TABLE seqs(read_id VARCHAR, sequence1 VARCHAR, abundance BIGINT);
+INSERT INTO seqs VALUES
+  ('true_seq', 'ACGTACGTACGTACGT', 1000),
+  ('error_seq', 'ACGTACGTACGTACGA', 3);
+
+SELECT * FROM deblur('seqs');
+-- Only true_seq survives (error_seq is explained by sequencing error)
+```
+
+**Tuning for modern platforms:**
+
+```sql
+-- NovaSeq with stitched 250nt reads
+SELECT * FROM deblur('aligned_seqs', mean_error := 0.002);
+
+-- Custom error profile from mock community calibration
+SELECT * FROM deblur('aligned_seqs', error_profile := [1, 0.04, 0.01, 0.005]);
+```
+
+**Behavior:**
+- Sequences are uppercased internally (matching the Python deblur reference implementation)
+- Output is ordered by corrected abundance descending
+- Single-threaded (inherently sequential — each sequence's correction depends on all previous corrections)
+- Empty input tables return zero rows (not an error)
+- Uses banker's rounding (round half to even) for the final abundance, matching Python 3's `round()`
+
+**Error handling:**
+- Error if table does not exist or lacks required columns (`read_id`, `sequence1`, `abundance`)
+- Error if `abundance` column is not an integer type
+- Error if `mean_error` is not in the open interval (0, 1)
+- Error if `indel_max` is negative
+- Error if `error_profile` contains negative values or is empty
+- Error if sequences have different aligned lengths or different unaligned lengths
