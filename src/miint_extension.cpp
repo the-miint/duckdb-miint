@@ -31,6 +31,7 @@
 #include <massql_function.hpp>
 #include <mzml_peak_pair_function.hpp>
 #include <align_mafft.hpp>
+#include <deblur_table_function.hpp>
 #include <align_pairwise_functions.hpp>
 #include <read_mzml.hpp>
 #include <read_mzml_chromatograms.hpp>
@@ -200,6 +201,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	AlignPairwiseFullFunction::Register(loader);
 
 	AlignMafftTableFunction::Register(loader);
+	DeblurTableFunction::Register(loader);
 
 #ifdef MIINT_HAS_HDF5
 	CopyBiomFunction::Register(loader);

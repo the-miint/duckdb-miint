@@ -640,7 +640,9 @@ set(EXTENSION_SOURCES
     src/duckdb_seq_stream.cpp
     src/hfile_duckdb.cpp
     src/MafftAligner.cpp
-    src/align_mafft.cpp)
+    src/align_mafft.cpp
+    src/deblur.cpp
+    src/deblur_table_function.cpp)
 
 if(MIINT_ENABLE_VSEARCH)
     list(APPEND EXTENSION_SOURCES
@@ -824,6 +826,8 @@ set(TEST_SOURCES
     test/cpp/test_hfile_duckdb.cpp
     src/MafftAligner.cpp
     test/cpp/test_MafftAligner.cpp
+    src/deblur.cpp
+    test/cpp/test_deblur.cpp
 )
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND TEST_SOURCES src/BIOMTable.cpp src/BIOMReader.cpp

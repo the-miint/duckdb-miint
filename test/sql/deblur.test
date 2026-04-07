@@ -1,0 +1,208 @@
+# name: test/sql/deblur.test
+# description: test deblur() table function
+# group: [sql]
+
+require miint
+
+# ---------------------------------------------------------------------------
+# Error handling (Cycle 4)
+# ---------------------------------------------------------------------------
+
+# Missing table
+statement error
+SELECT * FROM deblur('nonexistent_table');
+----
+does not exist
+
+# Missing abundance column
+statement ok
+CREATE TABLE no_abundance(read_id VARCHAR, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM deblur('no_abundance');
+----
+missing required column 'abundance'
+
+# Wrong type for abundance
+statement ok
+CREATE TABLE bad_abundance(read_id VARCHAR, sequence1 VARCHAR, abundance VARCHAR);
+
+statement error
+SELECT * FROM deblur('bad_abundance');
+----
+must be an integer type
+
+# Missing read_id column
+statement ok
+CREATE TABLE no_readid(sequence1 VARCHAR, abundance INTEGER);
+
+statement error
+SELECT * FROM deblur('no_readid');
+----
+missing required column 'read_id'
+
+# mean_error out of range (too high)
+statement error
+SELECT * FROM deblur('no_abundance', mean_error := 1.5);
+----
+mean_error
+
+# mean_error out of range (too low)
+statement error
+SELECT * FROM deblur('no_abundance', mean_error := -0.1);
+----
+mean_error
+
+# indel_max negative
+statement error
+SELECT * FROM deblur('no_abundance', indel_max := -1);
+----
+indel_max
+
+# mean_error exactly 0.0 (boundary)
+statement error
+SELECT * FROM deblur('no_abundance', mean_error := 0.0);
+----
+mean_error
+
+# mean_error exactly 1.0 (boundary)
+statement error
+SELECT * FROM deblur('no_abundance', mean_error := 1.0);
+----
+mean_error
+
+# error_profile with negative value
+statement ok
+CREATE TABLE ep_test(read_id VARCHAR, sequence1 VARCHAR, abundance INTEGER);
+
+statement error
+SELECT * FROM deblur('ep_test', error_profile := [-0.1, 0.5]);
+----
+non-negative
+
+# ---------------------------------------------------------------------------
+# End-to-end positive tests (Cycle 5)
+# ---------------------------------------------------------------------------
+
+# TEST_SEQS_1 as inline table: E.Coli (1000) + Error (3), 149bp, 1bp diff
+statement ok
+CREATE TABLE deblur_test1(read_id VARCHAR, sequence1 VARCHAR, abundance BIGINT);
+
+statement ok
+INSERT INTO deblur_test1 VALUES
+    ('E.Coli',
+     'TACGGAGGGTGCAAGCGTTAATCGGAATTACTGGGCGTAAAGCGCACGCAGGCGGTTTGTTAAGTCAGATGTGAAATCCCCGGGCTCAACCTGGGAACTGCATCTGATACTGGCAAGCTTGAGTCTCGTAGAGGGGGGCAGAATTCCAG',
+     1000),
+    ('Error',
+     'AACGGAGGGTGCAAGCGTTAATCGGAATTACTGGGCGTAAAGCGCACGCAGGCGGTTTGTTAAGTCAGATGTGAAATCCCCGGGCTCAACCTGGGAACTGCATCTGATACTGGCAAGCTTGAGTCTCGTAGAGGGGGGCAGAATTCCAG',
+     3);
+
+# Only E.Coli survives
+query ITI
+SELECT read_id, length(sequence), abundance FROM deblur('deblur_test1') ORDER BY abundance DESC;
+----
+E.Coli	149	1000
+
+# Row count
+query I
+SELECT count(*) FROM deblur('deblur_test1');
+----
+1
+
+# Output has no gaps
+query I
+SELECT sequence LIKE '%-%' FROM deblur('deblur_test1');
+----
+false
+
+# Output schema types
+query TTT
+SELECT typeof(read_id), typeof(sequence), typeof(abundance) FROM deblur('deblur_test1') LIMIT 1;
+----
+VARCHAR	VARCHAR	BIGINT
+
+# View support
+statement ok
+CREATE VIEW deblur_view1 AS SELECT * FROM deblur_test1;
+
+query I
+SELECT count(*) FROM deblur('deblur_view1');
+----
+1
+
+# Custom mean_error (lower error rate, still removes the Error sequence)
+query I
+SELECT count(*) FROM deblur('deblur_test1', mean_error := 0.001);
+----
+1
+
+# Empty table returns 0 rows
+statement ok
+CREATE TABLE empty_deblur(read_id VARCHAR, sequence1 VARCHAR, abundance BIGINT);
+
+query I
+SELECT count(*) FROM deblur('empty_deblur');
+----
+0
+
+# ---------------------------------------------------------------------------
+# Full pipeline tests with FASTA data (Cycle 6)
+# ---------------------------------------------------------------------------
+
+# Full deblur workflow:
+# 1. Read:        read_fastx('sample.fq')
+# 2. Trim:        WHERE length(sequence1) >= 150, substr(sequence1, 1, 150)
+# 3. Dereplicate: GROUP BY sequence HAVING COUNT(*) >= 2
+# 4. Align:       align_mafft(...) or pass through if already same length
+# 5. Deblur:      deblur('aligned_table')
+# 6. Chimeras:    detect_chimera_uchime_denovo('deblurred_table')
+
+# Load TEST_SEQS_1 from file (lowercase, with ;size=N; in headers)
+statement ok
+CREATE TABLE test1_from_file AS
+SELECT
+    regexp_extract(read_id, '^([^;]+)', 1) AS read_id,
+    sequence1,
+    CAST(regexp_extract(read_id, 'size=(\d+)', 1) AS BIGINT) AS abundance
+FROM read_fastx('data/deblur/test_seqs_1.fa');
+
+query I
+SELECT count(*) FROM test1_from_file;
+----
+2
+
+query ITI
+SELECT read_id, length(sequence), abundance FROM deblur('test1_from_file') ORDER BY abundance DESC;
+----
+E.Coli	149	1000
+
+# Load TEST_SEQS_2 from file (61 sequences)
+statement ok
+CREATE TABLE test2_from_file AS
+SELECT
+    regexp_extract(read_id, '^([^;]+)', 1) AS read_id,
+    sequence1,
+    CAST(regexp_extract(read_id, 'size=(\d+)', 1) AS BIGINT) AS abundance
+FROM read_fastx('data/deblur/test_seqs_2.fa');
+
+query I
+SELECT count(*) FROM test2_from_file;
+----
+61
+
+query ITI
+SELECT read_id, length(sequence), abundance FROM deblur('test2_from_file') ORDER BY abundance DESC;
+----
+E.Coli-999	149	720
+
+# Custom error_profile parameter
+query ITI
+SELECT read_id, length(sequence), abundance FROM deblur('test2_from_file', error_profile := [1, 0.05, 0.000005, 0.000005, 0.000005, 0.000005, 0.0000025, 0.0000025, 0.0000025, 0.0000025, 0.0000025, 0.0000005, 0.0000005, 0.0000005, 0.0000005]) ORDER BY abundance DESC;
+----
+E.Coli-999	149	720
+
+# indel_prob and indel_max parameters are accepted (functional test is in C++ unit tests)
+query I
+SELECT count(*) FROM deblur('deblur_test1', indel_prob := 0.02, indel_max := 5);
+----
+1
