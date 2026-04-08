@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 #include <cctype>
 #include <stdexcept>
 
@@ -27,6 +28,67 @@ struct CigarStats {
 	int64_t soft_clips = 0;        // S operations
 	int64_t hard_clips = 0;        // H operations
 };
+
+// Individual CIGAR operation for positional walking (e.g., coverage depth calculation).
+// Deliberately separate from ParseCigar() which returns aggregate CigarStats — that function
+// is hot-path for sequence identity and adding vector allocation there would regress performance.
+struct CigarOperation {
+	char op;
+	int64_t length;
+};
+
+// Parse CIGAR string into per-operation type+length pairs for positional walking.
+// Uses same validation as ParseCigar() but returns individual operations instead of aggregates.
+static inline std::vector<CigarOperation> ParseCigarOperations(const std::string &cigar_str) {
+	std::vector<CigarOperation> ops;
+	const char *cigar = cigar_str.data();
+	size_t len = cigar_str.size();
+
+	if (len == 0 || (len == 1 && cigar[0] == '*')) {
+		return ops; // Empty or unmapped
+	}
+
+	int64_t op_len = 0;
+
+	for (size_t i = 0; i < len; i++) {
+		char c = cigar[i];
+
+		if (std::isdigit(c)) {
+			if (op_len > (INT64_MAX - 9) / 10) {
+				throw InvalidInputException("CIGAR operation length exceeds maximum");
+			}
+			op_len = op_len * 10 + (c - '0');
+		} else {
+			if (op_len == 0) {
+				throw InvalidInputException("Invalid CIGAR string: operation without length");
+			}
+
+			switch (c) {
+			case 'M':
+			case '=':
+			case 'X':
+			case 'I':
+			case 'D':
+			case 'N':
+			case 'P':
+			case 'S':
+			case 'H':
+				ops.push_back({c, op_len});
+				break;
+			default:
+				throw InvalidInputException("Invalid CIGAR operation: " + std::string(1, c));
+			}
+
+			op_len = 0;
+		}
+	}
+
+	if (op_len > 0) {
+		throw InvalidInputException("Invalid CIGAR string: incomplete operation (missing operation character)");
+	}
+
+	return ops;
+}
 
 // MD parsing result structure
 struct MdStats {
