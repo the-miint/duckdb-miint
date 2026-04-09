@@ -118,6 +118,41 @@ TEST_CASE("VsearchChimeraWrapper synthetic uchime_ref", "[VsearchChimera]") {
 	}
 }
 
+TEST_CASE("VsearchChimeraWrapper detect_batch lifecycle", "[VsearchChimera]") {
+	// Regression test: detect_batch manages its own chimera session lifecycle
+	// internally (chimera_detect_batch calls chimera_session_init/cleanup).
+	// Previously, set_reference() eagerly initialized the chimera session,
+	// causing double mutex destroy on wrapper destruction.
+	std::vector<std::string> ref_labels, ref_seqs;
+	read_fasta("data/uchime/chimera_ref.fasta", ref_labels, ref_seqs);
+	REQUIRE(ref_labels.size() == 6);
+
+	std::vector<std::string> query_labels, query_seqs;
+	read_fasta("data/uchime/chimera_queries.fasta", query_labels, query_seqs);
+	REQUIRE(query_labels.size() == 8);
+
+	miint::VsearchChimeraWrapper wrapper;
+	wrapper.set_reference(ref_labels, ref_seqs);
+
+	// First batch
+	std::vector<miint::UchimeResult> results1;
+	wrapper.detect_batch(query_labels, query_seqs, results1);
+	REQUIRE(results1.size() == 8);
+
+	// Second batch — exercises repeated session init/cleanup
+	std::vector<miint::UchimeResult> results2;
+	wrapper.detect_batch(query_labels, query_seqs, results2);
+	REQUIRE(results2.size() == 8);
+
+	// Results should be identical
+	for (size_t i = 0; i < results1.size(); i++) {
+		CHECK(results1[i].flag == results2[i].flag);
+		CHECK(results1[i].query_label == results2[i].query_label);
+	}
+
+	// Wrapper destruction should not crash (no double mutex destroy)
+}
+
 TEST_CASE("VsearchChimeraWrapper real-world LTP chimera", "[VsearchChimera]") {
 	std::vector<std::string> ref_labels, ref_seqs;
 	read_fasta("data/uchime/ltp_subset_500.fasta", ref_labels, ref_seqs);
