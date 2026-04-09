@@ -4,8 +4,6 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/vector_size.hpp"
-#include "duckdb/main/connection.hpp"
-#include "duckdb/main/database.hpp"
 
 #include <algorithm>
 
@@ -69,90 +67,47 @@ unique_ptr<GlobalTableFunctionState> UchimeRefTableFunction::InitGlobal(ClientCo
 	auto gstate = make_uniq<GlobalState>();
 
 	gstate->wrapper = miint::VsearchChimeraWrapper(data.params);
-	gstate->query_table = data.query_table;
-	gstate->query_schema = data.query_schema;
 
 	auto ref = LoadSingleEndSequences(context, data.ref_table, "detect_chimera_uchime");
 	gstate->wrapper.set_reference(ref.labels, ref.sequences);
 
-	// Materialize all query IDs (lightweight — just strings, no sequences).
-	// This allows lock-free atomic batch claiming in Execute().
-	// NULL read_ids are rejected — every query must have an identifier.
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection id_conn(db);
-	auto id_result = id_conn.Query("SELECT read_id FROM " + KeywordHelper::WriteOptionallyQuoted(data.query_table));
-	if (id_result->HasError()) {
-		throw InvalidInputException("Failed to read query table '%s': %s", data.query_table, id_result->GetError());
-	}
-	auto &id_mat = id_result->Cast<MaterializedQueryResult>();
-	while (auto chunk = id_mat.Fetch()) {
-		for (idx_t i = 0; i < chunk->size(); i++) {
-			auto val = chunk->GetValue(0, i);
-			if (val.IsNull()) {
-				throw InvalidInputException("Query table '%s' contains NULL read_id values", data.query_table);
-			}
-			gstate->all_query_ids.push_back(val.GetValue<std::string>());
-		}
-	}
+	// Lazy streaming reader — one STANDARD_VECTOR_SIZE chunk per Execute call.
+	gstate->query_stream =
+	    std::make_unique<QuerySequenceStream>(context, data.query_table, data.query_schema, STANDARD_VECTOR_SIZE);
 
 	return gstate;
 }
 
-unique_ptr<LocalTableFunctionState> UchimeRefTableFunction::InitLocal(ExecutionContext &context,
-                                                                      TableFunctionInitInput &input,
-                                                                      GlobalTableFunctionState *global_state) {
-	auto &gstate = global_state->Cast<GlobalState>();
-	auto lstate = make_uniq<LocalState>();
-	lstate->handle.emplace(gstate.wrapper.create_detect_handle());
-	return lstate;
-}
-
 void UchimeRefTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
-	auto &lstate = data_p.local_state->Cast<LocalState>();
 
 	while (true) {
-		// 1. Drain buffered results
-		if (lstate.buffer_offset < lstate.result_buffer.size()) {
-			idx_t remaining = lstate.result_buffer.size() - lstate.buffer_offset;
+		// 1. Drain buffered results from last batch
+		if (gstate.result_offset < gstate.result_buffer.size()) {
+			idx_t remaining = gstate.result_buffer.size() - gstate.result_offset;
 			idx_t count = std::min(remaining, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
-			OutputUchimeResults(output, lstate.result_buffer, lstate.buffer_offset, count);
-			lstate.buffer_offset += count;
+			OutputUchimeResults(output, gstate.result_buffer, gstate.result_offset, count);
+			gstate.result_offset += count;
 			return;
 		}
 
-		// 2. Buffer exhausted — claim next batch of query IDs atomically (no mutex).
-		lstate.result_buffer.clear();
-		lstate.buffer_offset = 0;
+		// 2. Buffer exhausted — fetch next chunk and detect via batch API.
+		gstate.result_buffer.clear();
+		gstate.result_offset = 0;
 
-		idx_t offset = gstate.next_batch_offset.fetch_add(BATCH_SIZE);
-		if (offset >= gstate.all_query_ids.size()) {
+		auto query_batch = gstate.query_stream->FetchSubBatch();
+		if (query_batch.empty()) {
 			output.SetCardinality(0);
 			return;
 		}
 
-		// 3. Fetch sequences for claimed IDs via ReadBatchByIds (temp table JOIN).
-		miint::SequenceRecordBatch query_batch;
-		ReadBatchByIds(context, gstate.query_table, gstate.query_schema, gstate.all_query_ids, offset, BATCH_SIZE,
-		               query_batch);
-
-		if (query_batch.empty()) {
-			// Batch claimed valid IDs but join returned nothing — skip and try next batch.
-			// This can happen if the table was modified between InitGlobal and Execute.
-			continue;
-		}
-
-		// 4. Run chimera detection on each query in the batch
-		lstate.result_buffer.reserve(query_batch.size());
-		for (idx_t i = 0; i < query_batch.size(); i++) {
-			auto result = lstate.handle->detect(query_batch.read_ids[i], query_batch.sequences1[i]);
-			lstate.result_buffer.push_back(std::move(result));
-		}
+		// 3. Detect chimeras for entire chunk via vsearch's internal thread pool.
+		gstate.wrapper.detect_batch(query_batch.read_ids, query_batch.sequences1, gstate.result_buffer);
 	}
 }
 
 TableFunction UchimeRefTableFunction::GetFunction() {
-	auto tf = TableFunction("detect_chimera_uchime", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
+	auto tf = TableFunction("detect_chimera_uchime", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
 
 	tf.named_parameters["db"] = LogicalType::VARCHAR;
 	tf.named_parameters["minh"] = LogicalType::DOUBLE;

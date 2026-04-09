@@ -156,41 +156,29 @@ unique_ptr<GlobalTableFunctionState> SearchSequencesTableFunction::InitGlobal(Cl
 	auto ref = LoadSingleEndSequences(context, data.ref_table, "search_sequences_vsearch");
 	gstate->wrapper.set_database(ref.labels, ref.sequences);
 
-	// Create lazy streaming reader for query sequences.
-	// Thread-safe — multiple Execute threads call FetchSubBatch() concurrently.
-	// No upfront materialization of query IDs.
+	// Lazy streaming reader — one STANDARD_VECTOR_SIZE chunk per Execute call.
 	gstate->query_stream =
-	    std::make_unique<QuerySequenceStream>(context, data.query_table, data.query_schema, BATCH_SIZE);
+	    std::make_unique<QuerySequenceStream>(context, data.query_table, data.query_schema, STANDARD_VECTOR_SIZE);
 
 	return gstate;
 }
 
-unique_ptr<LocalTableFunctionState> SearchSequencesTableFunction::InitLocal(ExecutionContext &context,
-                                                                            TableFunctionInitInput &input,
-                                                                            GlobalTableFunctionState *global_state) {
-	auto &gstate = global_state->Cast<GlobalState>();
-	auto lstate = make_uniq<LocalState>();
-	lstate->handle.emplace(gstate.wrapper.create_search_handle());
-	return lstate;
-}
-
 void SearchSequencesTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
-	auto &lstate = data_p.local_state->Cast<LocalState>();
 
 	while (true) {
-		// 1. Drain buffered results
-		if (lstate.buffer_offset < lstate.result_buffer.size()) {
-			idx_t remaining = lstate.result_buffer.size() - lstate.buffer_offset;
+		// 1. Drain buffered results from last batch
+		if (gstate.result_offset < gstate.result_buffer.size()) {
+			idx_t remaining = gstate.result_buffer.size() - gstate.result_offset;
 			idx_t count = std::min(remaining, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
-			OutputSearchResults(output, lstate.result_buffer, lstate.buffer_offset, count);
-			lstate.buffer_offset += count;
+			OutputSearchResults(output, gstate.result_buffer, gstate.result_offset, count);
+			gstate.result_offset += count;
 			return;
 		}
 
-		// 2. Buffer exhausted — fetch next batch from stream.
-		lstate.result_buffer.clear();
-		lstate.buffer_offset = 0;
+		// 2. Buffer exhausted — fetch next chunk and search via batch API.
+		gstate.result_buffer.clear();
+		gstate.result_offset = 0;
 
 		auto query_batch = gstate.query_stream->FetchSubBatch();
 		if (query_batch.empty()) {
@@ -198,22 +186,13 @@ void SearchSequencesTableFunction::Execute(ClientContext &context, TableFunction
 			return;
 		}
 
-		// 3. Run search on each query in the batch.
-		// Skip empty sequences — vsearch crashes on zero-length queries.
-		for (idx_t i = 0; i < query_batch.size(); i++) {
-			if (query_batch.sequences1[i].empty()) {
-				continue;
-			}
-			auto results = lstate.handle->search(query_batch.read_ids[i], query_batch.sequences1[i]);
-			for (auto &r : results) {
-				lstate.result_buffer.push_back(std::move(r));
-			}
-		}
+		// 3. Search entire chunk via vsearch's internal thread pool.
+		gstate.wrapper.search_batch(query_batch.read_ids, query_batch.sequences1, gstate.result_buffer);
 	}
 }
 
 TableFunction SearchSequencesTableFunction::GetFunction() {
-	auto tf = TableFunction("search_sequences_vsearch", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
+	auto tf = TableFunction("search_sequences_vsearch", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
 
 	tf.named_parameters["db"] = LogicalType::VARCHAR;
 	tf.named_parameters["id"] = LogicalType::DOUBLE;

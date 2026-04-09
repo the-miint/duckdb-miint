@@ -5,14 +5,14 @@
 
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/types.hpp"
+#include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/function.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
-#include <atomic>
-#include <optional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -32,44 +32,25 @@ public:
 		std::vector<LogicalType> types;
 	};
 
-	// Each thread claims BATCH_SIZE query IDs atomically, then fetches sequences
-	// and runs chimera detection independently with no shared mutable state.
-	static constexpr idx_t BATCH_SIZE = 64;
-	static constexpr idx_t MAX_THREADS = 8;
-
 	struct GlobalState : public GlobalTableFunctionState {
-		// Reference DB loaded at init, shared read-only across threads.
 		miint::VsearchChimeraWrapper wrapper;
 
-		// Pre-materialized query IDs (lightweight — just strings, no sequences).
-		std::vector<std::string> all_query_ids;
-		std::atomic<idx_t> next_batch_offset {0};
+		// Lazy streaming of query sequences.
+		std::unique_ptr<QuerySequenceStream> query_stream;
 
-		// Query table name and schema for per-thread ReadBatchByIds calls.
-		std::string query_table;
-		SequenceTableSchema query_schema;
+		// Buffered results from the last detect_batch call.
+		std::vector<miint::UchimeResult> result_buffer;
+		idx_t result_offset = 0;
 
 		idx_t MaxThreads() const override {
-			return MAX_THREADS;
+			return 1;
 		}
-	};
-
-	struct LocalState : public LocalTableFunctionState {
-		// Per-thread vsearch detection handle (wraps chimera_info_s).
-		// Initialized in InitLocal after the global DB is ready.
-		std::optional<miint::VsearchChimeraWrapper::DetectHandle> handle;
-
-		std::vector<miint::UchimeResult> result_buffer;
-		idx_t buffer_offset = 0;
 	};
 
 	static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
 	                                     vector<LogicalType> &return_types, vector<std::string> &names);
 
 	static unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFunctionInitInput &input);
-
-	static unique_ptr<LocalTableFunctionState> InitLocal(ExecutionContext &context, TableFunctionInitInput &input,
-	                                                     GlobalTableFunctionState *global_state);
 
 	static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 

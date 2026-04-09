@@ -2,6 +2,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace miint {
 
@@ -27,5 +28,31 @@ inline std::string normalize_rna(const std::string &seq) {
 	}
 	return out;
 }
+
+// Prepared batch of sequences for vsearch C batch APIs.
+// Owns the normalized sequence data; pointer arrays are valid for its lifetime.
+struct VsearchBatchArgs {
+	std::vector<std::string> seqs_normalized;
+	std::vector<const char *> seq_ptrs;
+	std::vector<const char *> head_ptrs;
+	std::vector<int> lens;
+	std::vector<int> sizes;
+	int count = 0;
+
+	VsearchBatchArgs(const std::vector<std::string> &labels, const std::vector<std::string> &sequences) {
+		count = static_cast<int>(labels.size());
+		seqs_normalized.resize(count);
+		seq_ptrs.resize(count);
+		head_ptrs.resize(count);
+		lens.resize(count);
+		sizes.assign(count, 1);
+		for (int i = 0; i < count; i++) {
+			seqs_normalized[i] = normalize_rna(sequences[i]);
+			seq_ptrs[i] = seqs_normalized[i].c_str();
+			head_ptrs[i] = labels[i].c_str();
+			lens[i] = static_cast<int>(seqs_normalized[i].size());
+		}
+	}
+};
 
 } // namespace miint

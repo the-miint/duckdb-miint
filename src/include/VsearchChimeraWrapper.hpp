@@ -76,6 +76,13 @@ public:
 	// Index a single sequence in the k-mer index (de novo mode).
 	void index_sequence(uint64_t seqno);
 
+	// Detect chimeras for a batch of queries using vsearch's internal thread pool.
+	// Internally parallelizes across opt_threads. Results are appended to output.
+	// Must be called AFTER set_reference(). Not thread-safe — call from one thread.
+	// Reference mode only (not for de novo).
+	void detect_batch(const std::vector<std::string> &query_labels, const std::vector<std::string> &query_sequences,
+	                  std::vector<UchimeResult> &output);
+
 	// Detect chimera with abundance skew filtering (de novo mode, single-threaded).
 	UchimeResult detect_denovo(const std::string &query_label, const std::string &query_sequence,
 	                           int64_t query_abundance);
