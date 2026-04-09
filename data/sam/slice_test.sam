@@ -1,0 +1,9 @@
+@SQ	SN:ref1	LN:200
+read_m	0	ref1	10	60	10M	*	0	0	ACGTACGTAC	*	NM:i:0	MD:Z:10
+read_eq	0	ref1	30	60	5=5X	*	0	0	AAAAABBBBB	*	NM:i:5	MD:Z:5A4
+read_ins	0	ref1	50	60	5M3I5M	*	0	0	ACGTANNNACGTG	*	NM:i:3
+read_del	0	ref1	70	60	5M3D5M	*	0	0	ACGTAACGTG	*	NM:i:3	MD:Z:5^TTT5
+read_clip	0	ref1	90	60	3S7M	*	0	0	NNNACGTACG	*
+read_intron	0	ref1	110	60	5M20N5M	*	0	0	ACGTAACGTG	*
+read_hclip	0	ref1	140	60	5H5M5H	*	0	0	ACGTG	*
+read_outside	0	ref1	180	60	5M	*	0	0	ACGTG	*

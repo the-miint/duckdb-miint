@@ -30,6 +30,7 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`search_sequences_vsearch`](#search_sequences_vsearchquery_table-dbref_table-idthreshold-options) - Global sequence search
 - [`cluster_sequences_vsearch`](#cluster_sequences_vsearchinput_table-idthreshold-options) - Greedy sequence clustering
 - [`deblur`](#deblurinput_table-options) - Deblur amplicon sequence denoising
+- [`alignment_slice`](#alignment_slicetable_name-start-stop-include_deletionsfalse) - Slice alignments to a genomic region
 
 ## `read_alignments(filename, [reference_lengths='table_name'], [include_filepath=false], [include_seq_qual=false])`
 Read SAM/BAM alignment files.
@@ -113,6 +114,56 @@ SELECT * FROM read_sam('alignments.sam');
 - Data with headers works without `reference_lengths`
 - Headerless data requires `reference_lengths` parameter
 - User must know whether their stdin data contains headers
+
+## `alignment_slice(table_name, start, stop, [include_deletions=false])`
+
+Slice alignment data from a table or view to a genomic region. Each alignment is trimmed to the specified region `[start, stop)`, with trimmed portions represented as hard clips (H) in the output CIGAR.
+
+**Parameters:**
+- `table_name` (VARCHAR): Name of a table or view containing alignment data
+- `start` (BIGINT): Region start position (1-based, inclusive)
+- `stop` (BIGINT): Region stop position (1-based, exclusive)
+- `include_deletions` (BOOLEAN, default `false`): Whether deletion (D) operations count as overlap evidence. When `false`, reads whose only overlap with the region is through deletions are excluded.
+
+**Coordinates:** 1-based half-open `[start, stop)`, consistent with `position` and `stop_position` from `read_alignments`.
+
+**Required input columns:** `cigar` (VARCHAR), `position` (BIGINT), `stop_position` (BIGINT)
+
+**Output schema:** Same columns as found in the input table (from the recognized alignment column set), with adjusted values for overlapping reads.
+
+**Behavior:**
+- Reads that don't overlap the region are excluded
+- Soft clips (S) do not count as overlap evidence
+- Trimmed portions of the CIGAR become hard clips (H)
+- Tags (`tag_as` through `tag_sa`) are set to NULL when trimming occurs
+- `template_length` is set to NULL when trimming occurs
+- `mapq` and mate fields are preserved
+- If the input table has a `reference` column, all rows must have the same reference (single-region slicing)
+- Rows with NULL `cigar`, `position`, or `stop_position` are skipped
+
+**Examples:**
+
+```sql
+-- Load alignments and filter to a single reference
+CREATE VIEW chr1_alns AS
+  SELECT * FROM read_alignments('sample.bam')
+  WHERE reference = 'chr1';
+
+-- Slice to a region of interest
+SELECT * FROM alignment_slice('chr1_alns', 1000, 2000);
+
+-- Include reads that overlap only via deletions
+SELECT * FROM alignment_slice('chr1_alns', 1000, 2000, include_deletions := true);
+
+-- Composable: compute coverage depth on sliced alignments
+SELECT compute_coverage_depth(position, stop_position, cigar, 1000, 'exclude_deletions')
+FROM alignment_slice('chr1_alns', 1000, 2000);
+```
+
+**Notes:**
+- The function reads from the input table via a separate connection, so uncommitted changes in the current transaction may not be visible
+- Multi-region slicing (different regions per reference) is not yet supported; use separate queries per region
+- `alignment_seq_identity` with the `'cigar'` method works on sliced output because it reads identity directly from `=`/`X` CIGAR ops without needing tags. Other methods (`gap_compressed`, `blast`, `gap_excluded`) require NM or MD tags which are NULLed after trimming.
 
 ## `read_fastx(filename, [sequence2=filename], [include_filepath=false], [qual_offset=33])`
 Read FASTA/FASTQ sequence files.

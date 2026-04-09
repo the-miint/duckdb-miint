@@ -1,0 +1,391 @@
+# name: test/sql/alignment_slice.test
+# description: Test alignment_slice table function
+# group: [sql]
+
+require miint
+
+# =====================================================================
+# Phase 2: Bind and schema discovery error tests
+# =====================================================================
+
+# Error: nonexistent table
+statement error
+SELECT * FROM alignment_slice('nonexistent_table', 1, 10)
+----
+does not exist
+
+# Error: missing required columns
+statement ok
+CREATE TABLE bad_table (foo VARCHAR)
+
+statement error
+SELECT * FROM alignment_slice('bad_table', 1, 10)
+----
+missing required column
+
+# Error: region start > stop
+statement ok
+CREATE TABLE good_table (cigar VARCHAR, position BIGINT, stop_position BIGINT)
+
+statement error
+SELECT * FROM alignment_slice('good_table', 10, 5)
+----
+region start
+
+# Error: region start < 1
+statement error
+SELECT * FROM alignment_slice('good_table', 0, 5)
+----
+region start must be >= 1
+
+# Successful bind with empty table
+query III
+SELECT * FROM alignment_slice('good_table', 1, 10)
+----
+
+# =====================================================================
+# Phase 3: End-to-end slicing tests
+# =====================================================================
+
+# 3a. Pass-through (fully within region)
+statement ok
+CREATE TABLE t1 (cigar VARCHAR, position BIGINT, stop_position BIGINT, read_id VARCHAR)
+
+statement ok
+INSERT INTO t1 VALUES ('10M', 5, 15, 'r1')
+
+query TITT
+SELECT cigar, position, stop_position, read_id FROM alignment_slice('t1', 1, 20) ORDER BY read_id
+----
+10M	5	15	r1
+
+# 3b. Filtering (non-overlapping excluded)
+statement ok
+INSERT INTO t1 VALUES ('5M', 50, 55, 'r_far')
+
+query I
+SELECT count(*) FROM alignment_slice('t1', 1, 20)
+----
+1
+
+# 3c. Trimming through full pipeline
+statement ok
+CREATE TABLE t2 (cigar VARCHAR, position BIGINT, stop_position BIGINT, sequence VARCHAR, read_id VARCHAR)
+
+statement ok
+INSERT INTO t2 VALUES ('10M', 1, 11, 'ABCDEFGHIJ', 'trim_read')
+
+query TIIT
+SELECT cigar, position, stop_position, sequence FROM alignment_slice('t2', 4, 8)
+----
+3H4M3H	4	8	DEFG
+
+# 3d. Tag invalidation
+statement ok
+CREATE TABLE t3 (cigar VARCHAR, position BIGINT, stop_position BIGINT, tag_as BIGINT, tag_md VARCHAR)
+
+statement ok
+INSERT INTO t3 VALUES ('10M', 1, 11, 100, '10')
+
+# When trimmed, tags should be NULL
+query II
+SELECT tag_as, tag_md FROM alignment_slice('t3', 4, 8)
+----
+NULL	NULL
+
+# When NOT trimmed (fully within), tags should be preserved
+query II
+SELECT tag_as, tag_md FROM alignment_slice('t3', 1, 100)
+----
+100	10
+
+# 3e. template_length NULLed, mapq preserved
+statement ok
+CREATE TABLE t4_meta (cigar VARCHAR, position BIGINT, stop_position BIGINT, mapq UTINYINT, template_length BIGINT)
+
+statement ok
+INSERT INTO t4_meta VALUES ('10M', 1, 11, 60, 500)
+
+# When trimmed: mapq preserved, template_length NULLed
+query II
+SELECT mapq, template_length FROM alignment_slice('t4_meta', 4, 8)
+----
+60	NULL
+
+# When NOT trimmed: both preserved
+query II
+SELECT mapq, template_length FROM alignment_slice('t4_meta', 1, 100)
+----
+60	500
+
+# 3f. include_deletions parameter
+statement ok
+CREATE TABLE t5 (cigar VARCHAR, position BIGINT, stop_position BIGINT)
+
+statement ok
+INSERT INTO t5 VALUES ('3M5D3M', 1, 12)
+
+# D-only overlap region [5,9): excluded by default
+query I
+SELECT count(*) FROM alignment_slice('t5', 5, 9)
+----
+0
+
+# D-only overlap region [5,9): included with flag
+query I
+SELECT count(*) FROM alignment_slice('t5', 5, 9, include_deletions := true)
+----
+1
+
+# 3g. Single reference enforcement
+statement ok
+CREATE TABLE single_ref (cigar VARCHAR, position BIGINT, stop_position BIGINT, reference VARCHAR)
+
+statement ok
+INSERT INTO single_ref VALUES ('5M', 1, 6, 'chr1'), ('5M', 10, 15, 'chr1')
+
+query I
+SELECT count(*) FROM alignment_slice('single_ref', 1, 20)
+----
+2
+
+# No reference column: OK (no check performed)
+statement ok
+CREATE TABLE no_ref (cigar VARCHAR, position BIGINT, stop_position BIGINT)
+
+statement ok
+INSERT INTO no_ref VALUES ('5M', 1, 6), ('5M', 10, 15)
+
+query I
+SELECT count(*) FROM alignment_slice('no_ref', 1, 20)
+----
+2
+
+# Multiple references: error
+statement ok
+CREATE TABLE multi_ref (cigar VARCHAR, position BIGINT, stop_position BIGINT, reference VARCHAR)
+
+statement ok
+INSERT INTO multi_ref VALUES ('5M', 1, 6, 'chr1'), ('5M', 10, 15, 'chr2')
+
+statement error
+SELECT * FROM alignment_slice('multi_ref', 1, 20)
+----
+multiple references found
+
+# =====================================================================
+# Phase 4: Views, quality column, edge cases
+# =====================================================================
+
+# 4a. View support
+statement ok
+CREATE VIEW v1 AS SELECT * FROM t1 WHERE read_id = 'r1'
+
+query TITT
+SELECT cigar, position, stop_position, read_id FROM alignment_slice('v1', 1, 20)
+----
+10M	5	15	r1
+
+# 4b. qual column (LIST(UTINYINT)) trimming
+statement ok
+CREATE TABLE tq (cigar VARCHAR, position BIGINT, stop_position BIGINT, sequence VARCHAR, qual UTINYINT[])
+
+statement ok
+INSERT INTO tq VALUES ('5M', 1, 6, 'ACGTG', [30, 31, 32, 33, 34])
+
+query TT
+SELECT sequence, qual FROM alignment_slice('tq', 2, 5)
+----
+CGT	[31, 32, 33]
+
+# qual preserved when no trimming
+query TT
+SELECT sequence, qual FROM alignment_slice('tq', 1, 6)
+----
+ACGTG	[30, 31, 32, 33, 34]
+
+# 4c. NULL cigar/position/stop_position rows are skipped
+statement ok
+CREATE TABLE null_alns (cigar VARCHAR, position BIGINT, stop_position BIGINT, read_id VARCHAR)
+
+statement ok
+INSERT INTO null_alns VALUES (NULL, 5, 10, 'null_cigar'), ('5M', NULL, 10, 'null_pos'), ('5M', 5, NULL, 'null_stop'), ('5M', 5, 10, 'valid')
+
+query I
+SELECT count(*) FROM alignment_slice('null_alns', 1, 20)
+----
+1
+
+query T
+SELECT read_id FROM alignment_slice('null_alns', 1, 20)
+----
+valid
+
+# 4d. Empty region (start == stop) returns no rows
+query I
+SELECT count(*) FROM alignment_slice('t1', 5, 5)
+----
+0
+
+# 4e. All reads filtered out (none overlap)
+statement ok
+CREATE TABLE far_alns (cigar VARCHAR, position BIGINT, stop_position BIGINT)
+
+statement ok
+INSERT INTO far_alns VALUES ('5M', 100, 105), ('5M', 200, 205)
+
+query I
+SELECT count(*) FROM alignment_slice('far_alns', 1, 10)
+----
+0
+
+# 4f. Empty table returns no rows
+statement ok
+CREATE TABLE empty_alns (cigar VARCHAR, position BIGINT, stop_position BIGINT)
+
+query I
+SELECT count(*) FROM alignment_slice('empty_alns', 1, 100)
+----
+0
+
+# 4g. Reference column with NULL values (should not affect single-reference check)
+statement ok
+CREATE TABLE ref_with_nulls (cigar VARCHAR, position BIGINT, stop_position BIGINT, reference VARCHAR)
+
+statement ok
+INSERT INTO ref_with_nulls VALUES ('5M', 1, 6, 'chr1'), ('5M', 10, 15, NULL), ('5M', 20, 25, 'chr1')
+
+query I
+SELECT count(*) FROM alignment_slice('ref_with_nulls', 1, 30)
+----
+3
+
+# 4h. Multi-ref check fires even when one ref row has NULL cigar
+statement ok
+CREATE TABLE multi_ref_null_cigar (cigar VARCHAR, position BIGINT, stop_position BIGINT, reference VARCHAR)
+
+statement ok
+INSERT INTO multi_ref_null_cigar VALUES ('5M', 1, 6, 'chr1'), (NULL, 10, 15, 'chr2')
+
+statement error
+SELECT * FROM alignment_slice('multi_ref_null_cigar', 1, 20)
+----
+multiple references found
+
+# =====================================================================
+# Phase 5: Integration with real SAM data
+# =====================================================================
+
+# Load SAM data into a table
+statement ok
+CREATE TABLE sam_data AS SELECT * FROM read_alignments('data/sam/slice_test.sam', include_seq_qual := true)
+
+# Verify we loaded all reads
+query I
+SELECT count(*) FROM sam_data
+----
+8
+
+# Slice region [15, 25): should include read_m (trimmed), exclude far reads
+# read_m: pos=10, cigar=10M, covers [10,20). Region [15,25) overlaps [15,20).
+# Trim: 5 bases from left. CIGAR: 5H5M. pos=15, stop=20. seq trimmed.
+query TIIT
+SELECT read_id, cigar, position, stop_position FROM alignment_slice('sam_data', 15, 25) ORDER BY read_id
+----
+read_m	5H5M	15	20
+
+# Slice region [50, 65): includes read_ins (with insertion)
+# read_ins: pos=50, cigar=5M3I5M, covers [50,60). Region [50,65) fully contains.
+query TIIT
+SELECT read_id, cigar, position, stop_position FROM alignment_slice('sam_data', 50, 65) ORDER BY read_id
+----
+read_ins	5M3I5M	50	60
+
+# Slice region [53, 58): trims read_ins
+# 5M covers [50,55). 3I at ref 55. 5M covers [55,60).
+# Region [53,58): trim 3 from first M, 2 from last M. I at 55 is in region.
+# left_query_trim=3, right_query_trim=2. CIGAR: 3H2M3I3M2H.
+query TIIT
+SELECT read_id, cigar, position, stop_position FROM alignment_slice('sam_data', 53, 58) ORDER BY read_id
+----
+read_ins	3H2M3I3M2H	53	58
+
+# Slice region [70, 85): includes read_del, test D handling
+# read_del: pos=70, cigar=5M3D5M, covers [70,83). Fully within.
+query TIIT
+SELECT read_id, cigar, position, stop_position FROM alignment_slice('sam_data', 70, 85) ORDER BY read_id
+----
+read_del	5M3D5M	70	83
+
+# Region [76, 82) falls partially into D region of read_del
+# 5M [70,75). 3D [75,78). 5M [78,83).
+# Region [76,82): D partial within (1D trimmed from left, 76-77 = 2D within).
+# Second M: [78,83) partially in [76,82): 4M within, 1M after.
+# First M: fully before → left_query_trim=5.
+# With include_deletions: overlaps via D.
+query TIIT
+SELECT read_id, cigar, position, stop_position FROM alignment_slice('sam_data', 76, 82, include_deletions := true) ORDER BY read_id
+----
+read_del	5H2D4M1H	76	82
+
+# Without include_deletions: also overlaps because second M is in region [78,82)
+query TIIT
+SELECT read_id, cigar, position, stop_position FROM alignment_slice('sam_data', 76, 82) ORDER BY read_id
+----
+read_del	5H2D4M1H	76	82
+
+# Verify alignment_seq_identity works on sliced output (composability)
+# read_m sliced to [15,20): CIGAR 5H5M, all matches. Should have identity 1.0.
+statement ok
+CREATE TABLE sliced_m AS SELECT * FROM alignment_slice('sam_data', 15, 20) WHERE read_id = 'read_m'
+
+# Tags are NULLed after trimming, but seq_identity from CIGAR alone (gap_compressed)
+# requires NM tag which is NULLed. Let's just verify the sliced output has valid CIGAR.
+query TI
+SELECT cigar, stop_position - position AS ref_len FROM sliced_m
+----
+5H5M	5
+
+# Slice region containing intron read
+# read_intron: pos=110, cigar=5M20N5M, covers [110,140). stop=110+5+20+5=140.
+# Region [108, 140): fully contains read_intron. read_hclip at pos=140 is outside (stop exclusive).
+query TIIT
+SELECT read_id, cigar, position, stop_position FROM alignment_slice('sam_data', 108, 140) ORDER BY read_id
+----
+read_intron	5M20N5M	110	140
+
+# Slice completely outside all reads returns empty
+query I
+SELECT count(*) FROM alignment_slice('sam_data', 190, 200)
+----
+0
+
+# Integration: read_clip (3S7M at pos 90, covers [90,97))
+# Region [92,96): trim 2M from left, 1M from right.
+# left_query_trim = 3(S) + 2(M) = 5. right_query_trim = 1(M).
+# CIGAR: 5H4M1H. pos=92, stop=96.
+query TIIT
+SELECT read_id, cigar, position, stop_position FROM alignment_slice('sam_data', 92, 96) ORDER BY read_id
+----
+read_clip	5H4M1H	92	96
+
+# Integration: read_clip fully in region (no M trimming, S preserved)
+# Region [90,97): M fully within, leading S preserved.
+query TIIT
+SELECT read_id, cigar, position, stop_position FROM alignment_slice('sam_data', 90, 97) ORDER BY read_id
+----
+read_clip	3S7M	90	97
+
+# Integration: read_hclip (5H5M5H at pos 140, covers [140,145))
+# Region [142,145): trim 2M from left. Existing H=5 + trimmed=2 = 7H.
+# CIGAR: 7H3M5H. pos=142, stop=145.
+query TIIT
+SELECT read_id, cigar, position, stop_position FROM alignment_slice('sam_data', 142, 145) ORDER BY read_id
+----
+read_hclip	7H3M5H	142	145
+
+# Integration: read_hclip fully in region (existing H preserved, no additional trim)
+query TIIT
+SELECT read_id, cigar, position, stop_position FROM alignment_slice('sam_data', 140, 145) ORDER BY read_id
+----
+read_hclip	5H5M5H	140	145

@@ -200,14 +200,122 @@ SELECT alignment_seq_identity(NULL, NULL, NULL, NULL) IS NULL;
 true
 
 ###############################################################################
+# CIGAR METHOD (identity from =/X ops, no tags needed)
+###############################################################################
+
+# Perfect match: 10= (all matches, no mismatches)
+# match_ops=10, alignment_columns=10. 10/10 = 1.0
+query R
+SELECT alignment_seq_identity('10=', NULL, NULL, 'cigar')::FLOAT;
+----
+1.0
+
+# Mixed =/X: 5=2X3= (8 matches, 2 mismatches)
+# match_ops=8, alignment_columns=10. 8/10 = 0.8
+query R
+SELECT alignment_seq_identity('5=2X3=', NULL, NULL, 'cigar')::FLOAT;
+----
+0.8
+
+# With insertions: 5=2I3= (8 matches in 10 alignment columns)
+# match_ops=8, alignment_columns=8+2=10. 8/10 = 0.8
+query R
+SELECT alignment_seq_identity('5=2I3=', NULL, NULL, 'cigar')::FLOAT;
+----
+0.8
+
+# With deletions: 5=3D5= (10 matches in 13 alignment columns)
+# match_ops=10, alignment_columns=10+3=13. 10/13 ≈ 0.769
+query R
+SELECT alignment_seq_identity('5=3D5=', NULL, NULL, 'cigar')::FLOAT;
+----
+0.769
+
+# All mismatches: 10X
+# match_ops=0, alignment_columns=10. 0/10 = 0.0
+query R
+SELECT alignment_seq_identity('10X', NULL, NULL, 'cigar')::FLOAT;
+----
+0.0
+
+# Complex: 3=1X2=1I3=2D2=1X1= (from Heng Li's blog example rewritten with =/X)
+# match_ops = 3+2+3+2+1 = 11
+# mismatch_ops = 1+1 = 2
+# insertions = 1
+# deletions = 2
+# alignment_columns = 11+2+1+2 = 16
+# 11/16 = 0.6875
+query R
+SELECT alignment_seq_identity('3=1X2=1I3=2D2=1X1=', NULL, NULL, 'cigar')::FLOAT;
+----
+0.688
+
+# With soft clips (ignored in identity): 3S5=2X3=3S
+# match_ops=8, alignment_columns=10. 8/10 = 0.8
+query R
+SELECT alignment_seq_identity('3S5=2X3=3S', NULL, NULL, 'cigar')::FLOAT;
+----
+0.8
+
+# With hard clips: 5H5=5X5H
+# match_ops=5, alignment_columns=10. 5/10 = 0.5
+query R
+SELECT alignment_seq_identity('5H5=5X5H', NULL, NULL, 'cigar')::FLOAT;
+----
+0.5
+
+# With N operation (intron skip, ignored): 5=100N5=
+# match_ops=10, alignment_columns=10. 10/10 = 1.0
+query R
+SELECT alignment_seq_identity('5=100N5=', NULL, NULL, 'cigar')::FLOAT;
+----
+1.0
+
+# M-only CIGAR should return NULL (ambiguous - can't distinguish matches from mismatches)
+query I
+SELECT alignment_seq_identity('10M', NULL, NULL, 'cigar') IS NULL;
+----
+true
+
+# Mixed M and = should return NULL (inconsistent)
+query I
+SELECT alignment_seq_identity('5M5=', NULL, NULL, 'cigar') IS NULL;
+----
+true
+
+# Mixed M and X should return NULL (inconsistent)
+query I
+SELECT alignment_seq_identity('5M5X', NULL, NULL, 'cigar') IS NULL;
+----
+true
+
+# NM and MD are ignored for cigar method (can be NULL)
+query R
+SELECT alignment_seq_identity('5=5X', NULL, NULL, 'cigar')::FLOAT;
+----
+0.5
+
+# Unmapped CIGAR should return NULL
+query I
+SELECT alignment_seq_identity('*', NULL, NULL, 'cigar') IS NULL;
+----
+true
+
+# NULL CIGAR should return NULL
+query I
+SELECT alignment_seq_identity(NULL, NULL, NULL, 'cigar') IS NULL;
+----
+true
+
+###############################################################################
 # ERROR HANDLING
 ###############################################################################
 
-# Invalid type parameter
+# Invalid type parameter (error message includes the bad value)
 statement error
 SELECT alignment_seq_identity('10M', 0, '', 'invalid_type');
 ----
-Invalid Input Error: Invalid type parameter for alignment_seq_identity
+Invalid Input Error: Invalid type parameter for alignment_seq_identity: 'invalid_type'
 
 ###############################################################################
 # COMPLEX CIGAR PATTERNS
@@ -273,6 +381,39 @@ SELECT COUNT(*) FROM read_sam('data/sam/foo_has_header.sam')
 WHERE alignment_seq_identity(cigar, tag_nm, tag_md, 'gap_excluded') IS NULL;
 ----
 4
+
+###############################################################################
+# INTEGRATION: cigar method with alignment_slice
+###############################################################################
+
+# read_eq in slice_test.sam has CIGAR 5=5X. After slicing, tags are NULLed
+# but cigar method still works because it only needs the CIGAR string.
+statement ok
+CREATE TABLE slice_eq AS SELECT * FROM read_alignments('data/sam/slice_test.sam') WHERE read_id = 'read_eq'
+
+# Verify it has =/X ops
+query T
+SELECT cigar FROM slice_eq;
+----
+5=5X
+
+# cigar method works on the original
+query R
+SELECT alignment_seq_identity(cigar, tag_nm, tag_md, 'cigar')::FLOAT FROM slice_eq;
+----
+0.5
+
+# Slice to region [32,37) — trims into the = and X regions
+# 5= covers [30,35), 5X covers [35,40). Region [32,37):
+# = trimmed: 2 before, 3 within. X trimmed: 2 within, 3 after.
+# CIGAR: 2H3=2X3H. match_ops=3, alignment_columns=5. 3/5 = 0.6
+statement ok
+CREATE TABLE sliced_eq AS SELECT * FROM alignment_slice('slice_eq', 32, 37)
+
+query TR
+SELECT cigar, alignment_seq_identity(cigar, tag_nm, tag_md, 'cigar')::FLOAT FROM sliced_eq;
+----
+2H3=2X3H	0.6
 
 ###############################################################################
 # ALIGNMENT_QUERY_LENGTH - BASIC FUNCTIONALITY
