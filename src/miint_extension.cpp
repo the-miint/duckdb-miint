@@ -3,6 +3,7 @@
 #include "miint_extension.hpp"
 #include <csignal>
 #include <alignment_flag_functions.hpp>
+#include <alignment_slice.hpp>
 #include <alignment_functions.hpp>
 #include <compress_intervals.hpp>
 #include <compute_coverage_depth.hpp>
@@ -193,6 +194,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	AlignmentQueryCoverageFunction::Register(loader);
 	CompressIntervalsFunction::Register(loader);
 	ComputeCoverageDepthFunction::Register(loader);
+	AlignmentSliceTableFunction::Register(loader);
 	SequenceFunctions::Register(loader);
 	FormulaFunction::Register(loader);
 	MassQLFunction::Register(loader);
