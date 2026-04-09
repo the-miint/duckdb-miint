@@ -163,7 +163,7 @@ FROM alignment_slice('chr1_alns', 1000, 2000);
 **Notes:**
 - The function reads from the input table via a separate connection, so uncommitted changes in the current transaction may not be visible
 - Multi-region slicing (different regions per reference) is not yet supported; use separate queries per region
-- `alignment_seq_identity` works on sliced output CIGARs, but tags like NM and MD are NULLed after trimming, so only CIGAR-based identity methods (`gap_compressed`) are available
+- `alignment_seq_identity` with the `'cigar'` method works on sliced output because it reads identity directly from `=`/`X` CIGAR ops without needing tags. Other methods (`gap_compressed`, `blast`, `gap_excluded`) require NM or MD tags which are NULLed after trimming.
 
 ## `read_fastx(filename, [sequence2=filename], [include_filepath=false], [qual_offset=33])`
 Read FASTA/FASTQ sequence files.
