@@ -141,22 +141,23 @@ std::vector<ClusterResult> VsearchClusterWrapper::cluster_all() {
 	struct cluster_session_s *cs = cluster_session_alloc();
 	cluster_session_init(cs);
 
-	// Step 7: assign each sequence to a cluster sequentially
+	// Step 7: assign sequences to clusters using batch API
+	// (internally parallelizes search across opt_threads)
+	std::vector<cluster_result_s> raw_results(state_->sequence_count);
+	cluster_assign_batch(cs, 0, state_->sequence_count, raw_results.data());
+
 	std::vector<ClusterResult> results;
 	results.reserve(state_->sequence_count);
-
-	struct cluster_result_s raw_result;
 	for (int i = 0; i < state_->sequence_count; i++) {
-		cluster_assign_single(cs, i, &raw_result);
-
+		auto &raw = raw_results[i];
 		ClusterResult cr;
 		cr.read_id = state_->labels[i];
-		cr.is_centroid = raw_result.is_centroid;
-		cr.cluster_id = raw_result.cluster_id;
-		cr.centroid_id = raw_result.centroid_label;
-		cr.identity = raw_result.identity;
-		cr.cigar = raw_result.cigar;
-		cr.cigar_truncated = raw_result.cigar_truncated;
+		cr.is_centroid = raw.is_centroid;
+		cr.cluster_id = raw.cluster_id;
+		cr.centroid_id = raw.centroid_label;
+		cr.identity = raw.identity;
+		cr.cigar = raw.cigar;
+		cr.cigar_truncated = raw.cigar_truncated;
 		results.push_back(std::move(cr));
 	}
 

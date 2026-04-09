@@ -283,6 +283,28 @@ UchimeResult VsearchChimeraWrapper::convert_result(const void *vsearch_result_pt
 	return result;
 }
 
+void VsearchChimeraWrapper::detect_batch(const std::vector<std::string> &query_labels,
+                                         const std::vector<std::string> &query_sequences,
+                                         std::vector<UchimeResult> &output) {
+	if (!state_ || !state_->db_initialized) {
+		throw std::runtime_error("detect_batch called before set_reference");
+	}
+	if (query_labels.empty()) {
+		return;
+	}
+
+	VsearchBatchArgs args(query_labels, query_sequences);
+
+	std::vector<chimera_result_s> raw_results(args.count);
+
+	chimera_detect_batch(args.seq_ptrs.data(), args.head_ptrs.data(), args.lens.data(), args.sizes.data(), args.count,
+	                     raw_results.data());
+
+	for (int i = 0; i < args.count; i++) {
+		output.push_back(convert_result(&raw_results[i]));
+	}
+}
+
 UchimeResult VsearchChimeraWrapper::detect_denovo(const std::string &query_label, const std::string &query_sequence,
                                                   int64_t query_abundance) {
 	assert(state_ && state_->thread_initialized && "detect_denovo called before prepare_denovo");

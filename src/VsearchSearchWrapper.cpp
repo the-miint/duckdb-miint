@@ -216,4 +216,42 @@ VsearchSearchWrapper::SearchHandle VsearchSearchWrapper::create_search_handle() 
 	return handle;
 }
 
+void VsearchSearchWrapper::search_batch(const std::vector<std::string> &query_labels,
+                                        const std::vector<std::string> &query_sequences,
+                                        std::vector<SearchResult> &output) {
+	if (!state_ || !state_->db_initialized) {
+		throw std::runtime_error("search_batch called before set_database");
+	}
+	if (query_labels.empty()) {
+		return;
+	}
+
+	VsearchBatchArgs args(query_labels, query_sequences);
+	int max_results = params_.maxaccepts;
+
+	std::vector<search_result_s> raw_results(args.count * max_results);
+	std::vector<int> result_counts(args.count);
+
+	::search_batch(args.seq_ptrs.data(), args.head_ptrs.data(), args.lens.data(), args.sizes.data(), args.count,
+	               raw_results.data(), max_results, result_counts.data());
+
+	for (int qi = 0; qi < args.count; qi++) {
+		for (int hi = 0; hi < result_counts[qi]; hi++) {
+			auto &r = raw_results[qi * max_results + hi];
+			SearchResult sr;
+			sr.query_id = query_labels[qi];
+			sr.target_id = r.target_label;
+			sr.identity = r.id;
+			sr.matches = r.matches;
+			sr.mismatches = r.mismatches;
+			sr.gaps = r.gaps;
+			sr.alignment_length = r.alignment_length;
+			sr.query_length = r.query_length;
+			sr.target_length = r.target_length;
+			sr.accepted = r.accepted;
+			output.push_back(std::move(sr));
+		}
+	}
+}
+
 } // namespace miint

@@ -79,6 +79,12 @@ public:
 	// Must be called AFTER set_database().
 	SearchHandle create_search_handle();
 
+	// Search a batch of queries using vsearch's internal thread pool.
+	// Internally parallelizes across opt_threads. Results are appended to output.
+	// Must be called AFTER set_database(). Not thread-safe — call from one thread.
+	void search_batch(const std::vector<std::string> &query_labels, const std::vector<std::string> &query_sequences,
+	                  std::vector<SearchResult> &output);
+
 private:
 	SearchParams params_;
 
