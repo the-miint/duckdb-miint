@@ -374,6 +374,73 @@ GROUP BY ref;
 - Multi-threaded aggregation: each thread maintains its own state, merged at finalization
 - Algorithm: sorts intervals by start position, then single-pass merge (O(n log n))
 
+## `compute_coverage_depth(position, stop_position, cigar, reference_length, mode)`
+
+Aggregate function that computes per-position depth of coverage across a reference sequence. Follows `samtools depth` semantics: two modes for handling deletion (D) operations, and N (ref-skip) operations are always excluded.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `position` | BIGINT | 1-based inclusive start position |
+| `stop_position` | BIGINT | 1-based exclusive end position (half-open, matches `read_alignments` output) |
+| `cigar` | VARCHAR | CIGAR string |
+| `reference_length` | BIGINT | Determines output list size (must be positive, max 2,000,000,000) |
+| `mode` | VARCHAR | `'include_deletions'` or `'exclude_deletions'` (must be a constant) |
+
+**Returns:** `LIST(UINTEGER)` — element `i` is the depth at 1-based position `i+1`.
+
+**Mode Semantics:**
+- `'include_deletions'`: M/=/X/D count as coverage, N excluded (equivalent to `samtools depth -J`)
+- `'exclude_deletions'`: only M/=/X count, D and N excluded (equivalent to `samtools depth` default)
+
+**Behavior:**
+- NULL rows are ignored
+- Empty groups (all NULLs) return NULL
+- All rows in a group must have the same `reference_length`
+- Mode parameter must be a bind-time constant string (not a column reference)
+
+**SQL Examples:**
+
+```sql
+-- Per-position depth for a single reference
+SELECT compute_coverage_depth(position, stop_position, cigar, 1000, 'exclude_deletions')
+FROM read_alignments('alignments.bam')
+WHERE reference = 'chr1';
+
+-- Per-reference depth with GROUP BY
+SELECT reference,
+       compute_coverage_depth(position, stop_position, cigar,
+           ref_lengths.length, 'include_deletions') AS depths
+FROM read_alignments('alignments.bam') AS a
+JOIN ref_lengths ON a.reference = ref_lengths.name
+GROUP BY reference, ref_lengths.length;
+
+-- Mean depth via UNNEST
+SELECT AVG(depth) AS mean_depth
+FROM (
+  SELECT UNNEST(compute_coverage_depth(position, stop_position, cigar, 1000, 'exclude_deletions')) AS depth
+  FROM read_alignments('alignments.bam')
+  WHERE reference = 'chr1'
+);
+
+-- Positions with depth >= 10
+SELECT position, depth
+FROM (
+  SELECT ROW_NUMBER() OVER () AS position,
+         UNNEST(compute_coverage_depth(position, stop_position, cigar, 1000, 'exclude_deletions')) AS depth
+  FROM read_alignments('alignments.bam')
+  WHERE reference = 'chr1'
+)
+WHERE depth >= 10;
+```
+
+**Performance Notes:**
+- Memory: allocates `reference_length * 4` bytes per group (e.g., ~1GB for a 250M-position human chromosome)
+- Multi-threaded aggregation: each thread maintains independent state, merged at finalization
+- Fast path: reads with only M/=/X operations (no N or excluded D) skip CIGAR walking
+- Maximum reference_length is 2,000,000,000; use `compress_intervals` for larger references
+
 ## `genome_coverage(alignments, subject_total_length, subject_genome_id)`
 
 Table macro that computes genome coverage from alignment data. It compresses overlapping alignment intervals per reference contig using `compress_intervals`, maps contigs to genomes, sums covered bases, and joins with total genome lengths to compute the proportion covered.

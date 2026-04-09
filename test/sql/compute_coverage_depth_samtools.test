@@ -1,0 +1,99 @@
+# name: test/sql/compute_coverage_depth_samtools.test
+# description: Validate compute_coverage_depth against samtools depth ground truth
+# group: [sql]
+
+#
+# Ground truth generated with samtools 1.23.1:
+#   conda run -n samtools-validation samtools depth <file>           # exclude_deletions
+#   conda run -n samtools-validation samtools depth -J <file>        # include_deletions
+#
+# samtools depth default: M/=/X count as coverage, D and N excluded
+# samtools depth -J:      M/=/X/D count as coverage, N excluded
+
+require miint
+
+# --- Basic: two overlapping M-only reads ---
+# samtools depth data/sam/coverage_test_basic.sam
+#   ref1  2  1 / ref1  3  1 / ref1  4  2 / ref1  5  2 / ref1  6  2 / ref1  7  1 / ref1  8  1
+# samtools depth -J data/sam/coverage_test_basic.sam  (same -- no D or N ops)
+
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 20, 'exclude_deletions')
+FROM read_alignments('data/sam/coverage_test_basic.sam')
+----
+[0, 1, 1, 2, 2, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 20, 'include_deletions')
+FROM read_alignments('data/sam/coverage_test_basic.sam')
+----
+[0, 1, 1, 2, 2, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+# --- Deletion: 3M2D3M ---
+# samtools depth data/sam/coverage_test_deletion.sam
+#   ref1  2  1 / ref1  3  1 / ref1  4  1 / ref1  5  0 / ref1  6  0 / ref1  7  1 / ref1  8  1 / ref1  9  1
+# samtools depth -J data/sam/coverage_test_deletion.sam
+#   ref1  2  1 / ref1  3  1 / ref1  4  1 / ref1  5  1 / ref1  6  1 / ref1  7  1 / ref1  8  1 / ref1  9  1
+
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 20, 'exclude_deletions')
+FROM read_alignments('data/sam/coverage_test_deletion.sam')
+----
+[0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 20, 'include_deletions')
+FROM read_alignments('data/sam/coverage_test_deletion.sam')
+----
+[0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+# --- Ref-skip: 3M4N3M ---
+# samtools depth data/sam/coverage_test_refskip.sam
+#   ref1  2  1 / ref1  3  1 / ref1  4  1 / ref1  5-8  0 / ref1  9  1 / ref1  10  1 / ref1  11  1
+# samtools depth -J data/sam/coverage_test_refskip.sam  (same -- N always excluded)
+
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 20, 'exclude_deletions')
+FROM read_alignments('data/sam/coverage_test_refskip.sam')
+----
+[0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 20, 'include_deletions')
+FROM read_alignments('data/sam/coverage_test_refskip.sam')
+----
+[0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+# --- Complex: 4M2I3M2D2M5N3M ---
+# samtools depth data/sam/coverage_test_complex.sam
+#   ref1  3-9  1 / ref1  10-11  0 / ref1  12-13  1 / ref1  14-18  0 / ref1  19-21  1
+# samtools depth -J data/sam/coverage_test_complex.sam
+#   ref1  3-13  1 / ref1  14-18  0 / ref1  19-21  1
+
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 30, 'exclude_deletions')
+FROM read_alignments('data/sam/coverage_test_complex.sam')
+----
+[0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 30, 'include_deletions')
+FROM read_alignments('data/sam/coverage_test_complex.sam')
+----
+[0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+# --- Multi-ref with GROUP BY ---
+# samtools depth data/sam/coverage_test_multi_ref.sam
+#   ref1: 1  1 / 2  1 / 3  2 / 4  2 / 5  1 / 6  1
+#   ref2: 2  1 / 3  1 / 4  1 / 5  2 / 6  2 / 7  1 / 8  1 / 9  1
+
+query TI rowsort
+SELECT reference,
+       compute_coverage_depth(position, stop_position, cigar,
+           CASE reference WHEN 'ref1' THEN 10 WHEN 'ref2' THEN 15 END,
+           'exclude_deletions')
+FROM read_alignments('data/sam/coverage_test_multi_ref.sam')
+GROUP BY reference
+----
+ref1	[1, 1, 2, 2, 1, 1, 0, 0, 0, 0]
+ref2	[0, 1, 1, 1, 2, 2, 1, 1, 1, 0, 0, 0, 0, 0, 0]

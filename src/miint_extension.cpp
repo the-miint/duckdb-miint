@@ -5,6 +5,7 @@
 #include <alignment_flag_functions.hpp>
 #include <alignment_functions.hpp>
 #include <compress_intervals.hpp>
+#include <compute_coverage_depth.hpp>
 #include <copy_fasta.hpp>
 #include <copy_fastq.hpp>
 #include <copy_newick.hpp>
@@ -191,6 +192,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	AlignmentQueryLengthFunction::Register(loader);
 	AlignmentQueryCoverageFunction::Register(loader);
 	CompressIntervalsFunction::Register(loader);
+	ComputeCoverageDepthFunction::Register(loader);
 	SequenceFunctions::Register(loader);
 	FormulaFunction::Register(loader);
 	MassQLFunction::Register(loader);

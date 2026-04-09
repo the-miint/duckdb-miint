@@ -591,6 +591,8 @@ set(EXTENSION_SOURCES
     src/sequence_functions.cpp
     src/IntervalCompressor.cpp
     src/compress_intervals.cpp
+    src/CoverageDepthCalculator.cpp
+    src/compute_coverage_depth.cpp
     src/copy_format_common.cpp
     src/table_function_common.cpp
     src/copy_fastq.cpp
@@ -797,6 +799,8 @@ set(TEST_SOURCES
     test/cpp/test_AlignmentFunctions.cpp
     src/IntervalCompressor.cpp
     test/cpp/test_IntervalCompressor.cpp
+    src/CoverageDepthCalculator.cpp
+    test/cpp/test_CoverageDepthCalculator.cpp
     src/NewickTree.cpp
     test/cpp/test_NewickParser.cpp
     test/cpp/test_InsertFullyResolved.cpp

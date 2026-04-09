@@ -1,0 +1,155 @@
+# name: test/sql/compute_coverage_depth.test
+# description: Test compute_coverage_depth aggregate function
+# group: [sql]
+
+require miint
+
+# --- Error handling ---
+
+# Invalid mode string
+statement error
+SELECT compute_coverage_depth(1, 10, '9M', 20, 'bad_mode')
+FROM (VALUES (1)) t(x)
+----
+Invalid mode
+
+# Non-positive reference_length
+statement error
+SELECT compute_coverage_depth(1, 10, '9M', 0, 'include_deletions')
+FROM (VALUES (1)) t(x)
+----
+reference_length must be positive
+
+statement error
+SELECT compute_coverage_depth(1, 10, '9M', -5, 'include_deletions')
+FROM (VALUES (1)) t(x)
+----
+reference_length must be positive
+
+# reference_length exceeds maximum
+statement error
+SELECT compute_coverage_depth(1, 10, '9M', 3000000000, 'include_deletions')
+FROM (VALUES (1)) t(x)
+----
+exceeds maximum
+
+# --- Functional tests using inline tables ---
+
+# Single read M-only
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 10, 'include_deletions')
+FROM (VALUES (2, 7, '5M')) AS t(position, stop_position, cigar)
+----
+[0, 1, 1, 1, 1, 1, 0, 0, 0, 0]
+
+# Two overlapping reads
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 20, 'include_deletions')
+FROM (VALUES (2, 7, '5M'), (4, 9, '5M')) AS t(position, stop_position, cigar)
+----
+[0, 1, 1, 2, 2, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+# Deletion in include mode
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 20, 'include_deletions')
+FROM (VALUES (2, 10, '3M2D3M')) AS t(position, stop_position, cigar)
+----
+[0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+# Deletion in exclude mode
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 20, 'exclude_deletions')
+FROM (VALUES (2, 10, '3M2D3M')) AS t(position, stop_position, cigar)
+----
+[0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+# N operation in include mode (N always excluded)
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 20, 'include_deletions')
+FROM (VALUES (2, 12, '3M4N3M')) AS t(position, stop_position, cigar)
+----
+[0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+# N operation in exclude mode
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 20, 'exclude_deletions')
+FROM (VALUES (2, 12, '3M4N3M')) AS t(position, stop_position, cigar)
+----
+[0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+# Complex CIGAR in include mode
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 30, 'include_deletions')
+FROM (VALUES (3, 22, '4M2I3M2D2M5N3M')) AS t(position, stop_position, cigar)
+----
+[0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+# Complex CIGAR in exclude mode
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 30, 'exclude_deletions')
+FROM (VALUES (3, 22, '4M2I3M2D2M5N3M')) AS t(position, stop_position, cigar)
+----
+[0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+# GROUP BY reference with different ref_lengths
+query TI rowsort
+SELECT ref, compute_coverage_depth(position, stop_position, cigar, ref_length, 'include_deletions')
+FROM (VALUES
+    ('ref1', 1, 5, '4M', 10),
+    ('ref1', 3, 7, '4M', 10),
+    ('ref2', 2, 7, '5M', 15),
+    ('ref2', 5, 10, '5M', 15)
+) AS t(ref, position, stop_position, cigar, ref_length)
+GROUP BY ref
+----
+ref1	[1, 1, 2, 2, 1, 1, 0, 0, 0, 0]
+ref2	[0, 1, 1, 1, 2, 2, 1, 1, 1, 0, 0, 0, 0, 0, 0]
+
+# NULL handling (NULL rows ignored)
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 10, 'include_deletions')
+FROM (VALUES (1, 5, '4M'), (NULL, NULL, NULL), (3, 7, '4M')) AS t(position, stop_position, cigar)
+----
+[1, 1, 2, 2, 1, 1, 0, 0, 0, 0]
+
+# Empty group returns NULL
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 10, 'include_deletions')
+FROM (VALUES (CAST(NULL AS BIGINT), CAST(NULL AS BIGINT), CAST(NULL AS VARCHAR))) AS t(position, stop_position, cigar)
+----
+NULL
+
+# --- Integration with read_alignments() ---
+
+# Read from coverage_test_basic.sam
+query I
+SELECT compute_coverage_depth(position, stop_position, cigar, 20, 'include_deletions')
+FROM read_alignments('data/sam/coverage_test_basic.sam')
+----
+[0, 1, 1, 2, 2, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+# Read from coverage_test_multi_ref.sam with GROUP BY
+query TI rowsort
+SELECT reference,
+       compute_coverage_depth(position, stop_position, cigar,
+           CASE reference WHEN 'ref1' THEN 10 WHEN 'ref2' THEN 15 END,
+           'include_deletions')
+FROM read_alignments('data/sam/coverage_test_multi_ref.sam')
+GROUP BY reference
+----
+ref1	[1, 1, 2, 2, 1, 1, 0, 0, 0, 0]
+ref2	[0, 1, 1, 1, 2, 2, 1, 1, 1, 0, 0, 0, 0, 0, 0]
+
+# --- Large parallel test ---
+# 1000 rows of M-only reads to exercise parallel aggregation
+query I
+SELECT list_sum(compute_coverage_depth(
+    ((i % 10) * 10) + 1,
+    ((i % 10) * 10) + 11,
+    '10M',
+    200,
+    'include_deletions'
+))
+FROM generate_series(1, 1000) AS t(i)
+----
+10000

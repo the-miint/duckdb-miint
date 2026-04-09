@@ -1,0 +1,6 @@
+@SQ	SN:ref1	LN:10
+@SQ	SN:ref2	LN:15
+read1	0	ref1	1	60	4M	*	0	0	AAAA	*
+read2	0	ref1	3	60	4M	*	0	0	AAAA	*
+read3	0	ref2	2	60	5M	*	0	0	AAAAA	*
+read4	0	ref2	5	60	5M	*	0	0	AAAAA	*
