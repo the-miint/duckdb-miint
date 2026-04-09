@@ -159,11 +159,12 @@ Custom formats for exporting query results to bioinformatics files:
   - Similar structure to FASTQ without quality scores
 
 - **FORMAT SAM / FORMAT BAM**: `src/copy_sam.cpp`
-  - Parameters: INCLUDE_HEADER, REFERENCE_LENGTHS, COMPRESSION (SAM only), COMPRESSION_LEVEL (BAM only)
+  - Parameters: INCLUDE_HEADER, REFERENCE_LENGTHS, SEQUENCE_DATA, COMPRESSION (SAM only), COMPRESSION_LEVEL (BAM only)
   - Requires reference_lengths table for header generation
   - BAM format always requires headers (binary format specification)
   - COMPRESSION_LEVEL for BAM: 0-9, default 6 (BGZF compression)
-  - Currently writes SEQ/QUAL as `*` (future enhancement opportunity)
+  - SEQUENCE_DATA: optional table/view with read_fastx schema (read_id, sequence1, qual1, and optionally sequence2, qual2) to populate SEQ/QUAL at write time. Handles reverse complement, hard clipping, paired-end selection. Without this parameter, writes SEQ/QUAL as `*`.
+  - Sequence data reader: `src/sequence_data_reader.cpp`
 
 - **Common utilities**: `src/copy_format_common.cpp`
   - Shared buffering and compression infrastructure

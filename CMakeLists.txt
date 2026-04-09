@@ -609,6 +609,7 @@ set(EXTENSION_SOURCES
     src/copy_newick.cpp
     src/Minimap2Aligner.cpp
     src/sequence_table_reader.cpp
+    src/sequence_data_reader.cpp
     src/align_minimap2.cpp
     src/align_minimap2_sharded.cpp
     src/save_minimap2_index.cpp
