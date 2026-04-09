@@ -73,6 +73,12 @@ Calculate sequence identity between read and reference using three different met
    - Use case: Filtering alignments (recommended)
    - Note: More robust to structural variations
 
+4. **`'cigar'`**: Identity from extended CIGAR operations only (no tags needed)
+   - Formula: `match_ops / alignment_columns` where match_ops = count of `=` ops
+   - Requires: CIGAR with `=`/`X` ops (not `M`). NM and MD tags are ignored.
+   - Returns NULL if CIGAR uses `M` (ambiguous) or mixes `M` with `=`/`X` (inconsistent)
+   - Use case: Computing identity on trimmed alignments from `alignment_slice`, where tags have been invalidated
+
 **Returns:** DOUBLE between 0.0 and 1.0, or NULL for unmapped reads or missing required tags
 
 **Example:**
@@ -94,6 +100,10 @@ SELECT read_id,
   alignment_seq_identity(cigar, tag_nm, tag_md, 'gap_compressed') AS gap_comp
 FROM read_alignments('alignments.sam')
 WHERE tag_nm IS NOT NULL AND tag_md IS NOT NULL;
+
+-- Compute identity on sliced alignments (tags NULLed, cigar method still works)
+SELECT read_id, alignment_seq_identity(cigar, tag_nm, tag_md, 'cigar') AS identity
+FROM alignment_slice('my_alignments', 1000, 2000);
 ```
 
 **Reference:** [On the definition of sequence identity](https://lh3.github.io/2018/11/25/on-the-definition-of-sequence-identity) by Heng Li

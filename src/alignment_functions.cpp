@@ -154,9 +154,33 @@ static void AlignmentSeqIdentityScalarFunction(DataChunk &args, ExpressionState 
 			int64_t numerator = m - n + g;
 			identity = static_cast<double>(numerator) / static_cast<double>(denominator);
 
+		} else if (type_str == "cigar") {
+			// cigar: identity from extended CIGAR ops (= and X) only.
+			// Requires CIGAR to use =/X (not M). Does not need NM or MD tags.
+			// Formula: match_ops / alignment_columns
+			// Returns NULL if:
+			//   - CIGAR uses only M (ambiguous — can't distinguish matches from mismatches)
+			//   - CIGAR mixes M with =/X (inconsistent)
+			if (cigar_stats.match_ops + cigar_stats.mismatch_ops == 0) {
+				// No = or X ops observed (M-only, or degenerate S/N/P-only CIGAR)
+				result_validity.SetInvalid(i);
+				continue;
+			}
+
+			// If M ops are present alongside =/X, the CIGAR is inconsistent — return NULL
+			int64_t m_only = cigar_stats.matches - cigar_stats.match_ops - cigar_stats.mismatch_ops;
+			if (m_only > 0) {
+				result_validity.SetInvalid(i);
+				continue;
+			}
+
+			// alignment_columns is guaranteed > 0 here because =/X ops exist
+			identity = static_cast<double>(cigar_stats.match_ops) / static_cast<double>(cigar_stats.alignment_columns);
+
 		} else {
-			throw InvalidInputException("Invalid type parameter for alignment_seq_identity. "
-			                            "Must be 'gap_excluded', 'blast', or 'gap_compressed'.");
+			throw InvalidInputException("Invalid type parameter for alignment_seq_identity: '%s'. "
+			                            "Must be 'gap_excluded', 'blast', 'gap_compressed', or 'cigar'.",
+			                            type_str);
 		}
 
 		result_data[i] = identity;
