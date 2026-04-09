@@ -1,6 +1,7 @@
 # name: test/sql/compute_coverage_depth_samtools.test
 # description: Validate compute_coverage_depth against samtools depth ground truth
-# group: [miint]
+# group: [sql]
+
 #
 # Ground truth generated with samtools 1.23.1:
 #   conda run -n samtools-validation samtools depth <file>           # exclude_deletions

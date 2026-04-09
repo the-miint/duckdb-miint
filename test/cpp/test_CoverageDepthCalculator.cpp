@@ -109,8 +109,8 @@ TEST_CASE("CoverageDepthCalculator - M-only include_deletions", "[coverage_depth
 
 TEST_CASE("CoverageDepthCalculator - two overlapping M-only reads", "[coverage_depth]") {
 	CoverageDepthCalculator calc(20, true);
-	calc.AddRead(2, 7, "5M");  // covers 2-6
-	calc.AddRead(4, 9, "5M");  // covers 4-8
+	calc.AddRead(2, 7, "5M"); // covers 2-6
+	calc.AddRead(4, 9, "5M"); // covers 4-8
 
 	auto &depths = calc.GetDepths();
 	std::vector<uint32_t> expected = {0, 1, 1, 2, 2, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -167,7 +167,8 @@ TEST_CASE("CoverageDepthCalculator - complex CIGAR include_deletions", "[coverag
 
 	auto &depths = calc.GetDepths();
 	// include_deletions: M at {3-6}, M at {7-9}, D at {10-11}, M at {12-13}, N skip {14-18}, M at {19-21}
-	std::vector<uint32_t> expected = {0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+	std::vector<uint32_t> expected = {0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0,
+	                                  0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 	REQUIRE(depths == expected);
 }
 
@@ -178,7 +179,8 @@ TEST_CASE("CoverageDepthCalculator - complex CIGAR exclude_deletions", "[coverag
 
 	auto &depths = calc.GetDepths();
 	// exclude_deletions: M at {3-6}, M at {7-9}, D skip {10-11}, M at {12-13}, N skip {14-18}, M at {19-21}
-	std::vector<uint32_t> expected = {0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+	std::vector<uint32_t> expected = {0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0,
+	                                  0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 	REQUIRE(depths == expected);
 }
 

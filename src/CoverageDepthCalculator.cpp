@@ -100,10 +100,9 @@ void CoverageDepthCalculator::AddRead(int64_t position, int64_t stop_position, c
 void CoverageDepthCalculator::Combine(const CoverageDepthCalculator &other) {
 	for (size_t i = 0; i < depths.size() && i < other.depths.size(); i++) {
 		if (depths[i] > UINT32_MAX - other.depths[i]) {
-			throw InvalidInputException("Coverage depth overflow at position " +
-			                            std::to_string(static_cast<int64_t>(i) + 1) +
-			                            " during parallel merge: depth exceeds maximum (" +
-			                            std::to_string(UINT32_MAX) + ")");
+			throw InvalidInputException(
+			    "Coverage depth overflow at position " + std::to_string(static_cast<int64_t>(i) + 1) +
+			    " during parallel merge: depth exceeds maximum (" + std::to_string(UINT32_MAX) + ")");
 		}
 		depths[i] += other.depths[i];
 	}

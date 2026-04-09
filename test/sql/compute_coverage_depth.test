@@ -1,6 +1,6 @@
 # name: test/sql/compute_coverage_depth.test
 # description: Test compute_coverage_depth aggregate function
-# group: [miint]
+# group: [sql]
 
 require miint
 

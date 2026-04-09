@@ -106,8 +106,7 @@ struct CoverageDepthOperation {
 
 			if (!state->initialized) {
 				state->reference_length = ref_length;
-				state->calculator =
-				    new miint::CoverageDepthCalculator(ref_length, bind_data.include_deletions);
+				state->calculator = new miint::CoverageDepthCalculator(ref_length, bind_data.include_deletions);
 				state->initialized = true;
 			} else if (state->reference_length != ref_length) {
 				throw InvalidInputException(
@@ -200,8 +199,7 @@ void ComputeCoverageDepthFunction::Register(ExtensionLoader &loader) {
 	    {LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::VARCHAR},
 	    LogicalType::LIST(LogicalType::UINTEGER), AggregateFunction::StateSize<CoverageDepthState>,
 	    AggregateFunction::StateInitialize<CoverageDepthState, CoverageDepthOperation>,
-	    CoverageDepthOperation::Operation,
-	    AggregateFunction::StateCombine<CoverageDepthState, CoverageDepthOperation>,
+	    CoverageDepthOperation::Operation, AggregateFunction::StateCombine<CoverageDepthState, CoverageDepthOperation>,
 	    CoverageDepthOperation::Finalize, nullptr, nullptr,
 	    AggregateFunction::StateDestroy<CoverageDepthState, CoverageDepthOperation>);
 
@@ -224,9 +222,8 @@ void ComputeCoverageDepthFunction::Register(ExtensionLoader &loader) {
 				}
 			}
 		}
-		throw InvalidInputException(
-		    "compute_coverage_depth: mode parameter must be a constant string "
-		    "('include_deletions' or 'exclude_deletions')");
+		throw InvalidInputException("compute_coverage_depth: mode parameter must be a constant string "
+		                            "('include_deletions' or 'exclude_deletions')");
 	};
 
 	loader.RegisterFunction(fun);
