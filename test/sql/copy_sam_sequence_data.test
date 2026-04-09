@@ -1,0 +1,295 @@
+# name: test/sql/copy_sam_sequence_data.test
+# description: Test COPY FORMAT SAM/BAM with SEQUENCE_DATA parameter
+# group: [sql]
+
+require miint
+
+# ===================================================================
+# Setup: create reference lengths, alignment data, and sequence data
+# ===================================================================
+
+statement ok
+CREATE TABLE ref_lens AS SELECT * FROM (VALUES ('chr1', 1000), ('chr2', 2000)) t(name, length);
+
+# Load alignment data (no SEQ/QUAL in this SAM file)
+statement ok
+CREATE TABLE alignments AS SELECT * FROM read_alignments('data/sam/seqdata_test.sam');
+
+# Create sequence data table with read_fastx schema
+# readA: forward 10M
+# readB: reverse 10M (will be reverse-complemented)
+# readC: forward 2H8M (leading hard clip)
+# readD: paired (R1 forward, R2 reverse)
+# readE: unmapped
+# readF: forward 8M2H (trailing hard clip)
+# readG: forward 2H6M2H (combined hard clips)
+statement ok
+CREATE TABLE seq_data AS SELECT * FROM (VALUES
+    ('readA', 'AAACCCGGGT', [40,40,40,40,40,37,37,37,37,37]::UTINYINT[], NULL::VARCHAR, NULL::UTINYINT[]),
+    ('readB', 'ACGTAACCGG', [40,39,38,37,36,35,34,33,32,31]::UTINYINT[], NULL::VARCHAR, NULL::UTINYINT[]),
+    ('readC', 'TTAAAACCCC', [36,36,35,35,34,34,33,33,32,32]::UTINYINT[], NULL::VARCHAR, NULL::UTINYINT[]),
+    ('readD', 'AAAACCCCGG', [40,40,40,40,37,37,37,37,35,35]::UTINYINT[], 'TTTTAAAACG', [40,39,38,37,36,35,34,33,32,31]::UTINYINT[]),
+    ('readE', 'NNNNNNNNNN', [0,0,0,0,0,0,0,0,0,0]::UTINYINT[], NULL::VARCHAR, NULL::UTINYINT[]),
+    ('readF', 'AAACCCGGGT', [40,40,40,40,40,37,37,37,37,37]::UTINYINT[], NULL::VARCHAR, NULL::UTINYINT[]),
+    ('readG', 'TTAAAACCCCGG', [36,36,35,35,34,34,33,33,32,32,31,31]::UTINYINT[], NULL::VARCHAR, NULL::UTINYINT[])
+) t(read_id, sequence1, qual1, sequence2, qual2);
+
+# ===================================================================
+# Test 1: Error - SEQUENCE_DATA table does not exist
+# ===================================================================
+statement error
+COPY alignments TO '__TEST_DIR__/err1.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'nonexistent_table');
+----
+does not exist
+
+# ===================================================================
+# Test 2: Without SEQUENCE_DATA (existing behavior preserved)
+# ===================================================================
+statement ok
+COPY alignments TO '__TEST_DIR__/no_seqdata.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens');
+
+# ===================================================================
+# Test 3: Write SAM with SEQUENCE_DATA
+# ===================================================================
+statement ok
+COPY alignments TO '__TEST_DIR__/with_seqdata.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'seq_data');
+
+# ===================================================================
+# Test 4: Verify forward strand (readA: flag 0, 10M)
+# ===================================================================
+query IT
+SELECT sequence, qual FROM read_alignments('__TEST_DIR__/with_seqdata.sam', include_seq_qual=true) WHERE read_id='readA';
+----
+AAACCCGGGT	[40, 40, 40, 40, 40, 37, 37, 37, 37, 37]
+
+# ===================================================================
+# Test 5: Verify reverse strand (readB: flag 16, 10M)
+# revcomp(ACGTAACCGG) = CCGGTTACGT
+# qual reversed: [31,32,33,34,35,36,37,38,39,40]
+# ===================================================================
+query IT
+SELECT sequence, qual FROM read_alignments('__TEST_DIR__/with_seqdata.sam', include_seq_qual=true) WHERE read_id='readB';
+----
+CCGGTTACGT	[31, 32, 33, 34, 35, 36, 37, 38, 39, 40]
+
+# ===================================================================
+# Test 6: Verify leading hard clip (readC: flag 0, 2H8M)
+# Original: TTAAAACCCC (10bp), clip first 2 -> AAAACCCC (8bp)
+# qual: [35,35,34,34,33,33,32,32]
+# ===================================================================
+query IT
+SELECT sequence, qual FROM read_alignments('__TEST_DIR__/with_seqdata.sam', include_seq_qual=true) WHERE read_id='readC';
+----
+AAAACCCC	[35, 35, 34, 34, 33, 33, 32, 32]
+
+# ===================================================================
+# Test 7: Verify paired-end R1 (readD: flag 99, forward, 10M)
+# Uses sequence1: AAAACCCCGG
+# ===================================================================
+query IT
+SELECT sequence, qual FROM read_alignments('__TEST_DIR__/with_seqdata.sam', include_seq_qual=true) WHERE read_id='readD' AND flags=99;
+----
+AAAACCCCGG	[40, 40, 40, 40, 37, 37, 37, 37, 35, 35]
+
+# ===================================================================
+# Test 8: Verify paired-end R2 (readD: flag 147, reverse, 10M)
+# Uses sequence2: TTTTAAAACG, revcomp -> CGTTTTAAAA
+# qual reversed: [31,32,33,34,35,36,37,38,39,40]
+# ===================================================================
+query IT
+SELECT sequence, qual FROM read_alignments('__TEST_DIR__/with_seqdata.sam', include_seq_qual=true) WHERE read_id='readD' AND flags=147;
+----
+CGTTTTAAAA	[31, 32, 33, 34, 35, 36, 37, 38, 39, 40]
+
+# ===================================================================
+# Test 9: Verify unmapped (readE: flag 4, no CIGAR)
+# SEQ = original sequence, no reverse complement
+# ===================================================================
+query IT
+SELECT sequence, qual FROM read_alignments('__TEST_DIR__/with_seqdata.sam', include_seq_qual=true) WHERE read_id='readE';
+----
+NNNNNNNNNN	[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+# ===================================================================
+# Test 10: Verify trailing hard clip (readF: flag 0, 8M2H)
+# Original: AAACCCGGGT (10bp), clip last 2 -> AAACCCGG (8bp)
+# qual: [40,40,40,40,40,37,37,37]
+# ===================================================================
+query IT
+SELECT sequence, qual FROM read_alignments('__TEST_DIR__/with_seqdata.sam', include_seq_qual=true) WHERE read_id='readF';
+----
+AAACCCGG	[40, 40, 40, 40, 40, 37, 37, 37]
+
+# ===================================================================
+# Test 11: Verify combined hard clips (readG: flag 0, 2H8M2H)
+# Original: TTAAAACCCCGG (12bp), clip first 2 + last 2 -> AAAACCCC (8bp)
+# qual positions 2..9: [35,35,34,34,33,33,32,32]
+# ===================================================================
+query IT
+SELECT sequence, qual FROM read_alignments('__TEST_DIR__/with_seqdata.sam', include_seq_qual=true) WHERE read_id='readG';
+----
+AAAACCCC	[35, 35, 34, 34, 33, 33, 32, 32]
+
+# ===================================================================
+# Test 12: Missing read_id in SEQUENCE_DATA throws error
+# ===================================================================
+statement ok
+CREATE TABLE partial_seqs AS SELECT * FROM seq_data WHERE read_id = 'readA';
+
+statement error
+COPY alignments TO '__TEST_DIR__/err_missing.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'partial_seqs');
+----
+not found in SEQUENCE_DATA
+
+# ===================================================================
+# Test 13: BAM format roundtrip with SEQUENCE_DATA
+# ===================================================================
+statement ok
+COPY alignments TO '__TEST_DIR__/with_seqdata.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'seq_data');
+
+query IT
+SELECT sequence, qual FROM read_alignments('__TEST_DIR__/with_seqdata.bam', include_seq_qual=true) WHERE read_id='readA';
+----
+AAACCCGGGT	[40, 40, 40, 40, 40, 37, 37, 37, 37, 37]
+
+query IT
+SELECT sequence, qual FROM read_alignments('__TEST_DIR__/with_seqdata.bam', include_seq_qual=true) WHERE read_id='readB';
+----
+CCGGTTACGT	[31, 32, 33, 34, 35, 36, 37, 38, 39, 40]
+
+# ===================================================================
+# Test 14: View as SEQUENCE_DATA source
+# ===================================================================
+statement ok
+CREATE VIEW seq_view AS SELECT * FROM seq_data;
+
+statement ok
+COPY alignments TO '__TEST_DIR__/with_seqview.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'seq_view');
+
+query IT
+SELECT sequence, qual FROM read_alignments('__TEST_DIR__/with_seqview.sam', include_seq_qual=true) WHERE read_id='readA';
+----
+AAACCCGGGT	[40, 40, 40, 40, 40, 37, 37, 37, 37, 37]
+
+# ===================================================================
+# Test 15: INCLUDE_HEADER=false with SEQUENCE_DATA (headerless SAM)
+# ===================================================================
+statement ok
+COPY alignments TO '__TEST_DIR__/noheader_seqdata.sam' (FORMAT SAM, INCLUDE_HEADER false, SEQUENCE_DATA 'seq_data');
+
+query IT
+SELECT sequence, qual FROM read_alignments('__TEST_DIR__/noheader_seqdata.sam', reference_lengths='ref_lens', include_seq_qual=true) WHERE read_id='readA';
+----
+AAACCCGGGT	[40, 40, 40, 40, 40, 37, 37, 37, 37, 37]
+
+# ===================================================================
+# Test 16: Duplicate read_id in SEQUENCE_DATA throws error
+# ===================================================================
+statement ok
+CREATE TABLE dup_seqs AS
+    SELECT 'readA' AS read_id, 'AAACCCGGGT' AS sequence1, [40,40,40,40,40,37,37,37,37,37]::UTINYINT[] AS qual1
+    UNION ALL
+    SELECT 'readA', 'TTTCCCGGGA', [31,31,31,31,31,31,31,31,31,31]::UTINYINT[];
+
+statement error
+COPY alignments TO '__TEST_DIR__/err_dup.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'dup_seqs');
+----
+Duplicate read_id
+
+# ===================================================================
+# Test 17: NULL read_id in SEQUENCE_DATA throws error
+# ===================================================================
+statement ok
+CREATE TABLE null_rid_seqs AS
+    SELECT NULL::VARCHAR AS read_id, 'AAACCCGGGT' AS sequence1, [40,40,40,40,40,37,37,37,37,37]::UTINYINT[] AS qual1;
+
+statement error
+COPY alignments TO '__TEST_DIR__/err_nullrid.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'null_rid_seqs');
+----
+NULL read_id
+
+# ===================================================================
+# Test 18: NULL sequence1 in SEQUENCE_DATA throws error
+# ===================================================================
+statement ok
+CREATE TABLE null_seq_seqs AS
+    SELECT 'readA' AS read_id, NULL::VARCHAR AS sequence1, [40,40,40,40,40,37,37,37,37,37]::UTINYINT[] AS qual1;
+
+statement error
+COPY alignments TO '__TEST_DIR__/err_nullseq.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'null_seq_seqs');
+----
+NULL sequence1
+
+# ===================================================================
+# Test 19: Wrong schema - missing qual1 column
+# ===================================================================
+statement ok
+CREATE TABLE bad_schema AS SELECT 'readA' AS read_id, 'AAACCCGGGT' AS sequence1;
+
+statement error
+COPY alignments TO '__TEST_DIR__/err_schema.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'bad_schema');
+----
+missing required column 'qual1'
+
+# ===================================================================
+# Test 20: Wrong schema - qual1 is wrong type (LIST(INTEGER) instead of LIST(UTINYINT))
+# ===================================================================
+statement ok
+CREATE TABLE bad_qual_type AS SELECT 'readA' AS read_id, 'AAACCCGGGT' AS sequence1, [40,40,40]::INTEGER[] AS qual1;
+
+statement error
+COPY alignments TO '__TEST_DIR__/err_qualtype.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'bad_qual_type');
+----
+must be LIST(UTINYINT)
+
+# ===================================================================
+# Test 21: Empty SEQUENCE_DATA table throws error
+# ===================================================================
+statement ok
+CREATE TABLE empty_seqs AS SELECT * FROM seq_data WHERE false;
+
+statement error
+COPY alignments TO '__TEST_DIR__/err_empty.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'empty_seqs');
+----
+is empty
+
+# ===================================================================
+# Test 22: Single-end table (no sequence2/qual2 columns) works
+# ===================================================================
+statement ok
+CREATE TABLE se_seqs AS SELECT read_id, sequence1, qual1 FROM seq_data;
+
+# Only write the non-paired reads (readD is paired, needs sequence2)
+statement ok
+CREATE TABLE se_alignments AS SELECT * FROM alignments WHERE read_id != 'readD';
+
+statement ok
+COPY se_alignments TO '__TEST_DIR__/se_seqdata.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'se_seqs');
+
+query IT
+SELECT sequence, qual FROM read_alignments('__TEST_DIR__/se_seqdata.sam', include_seq_qual=true) WHERE read_id='readA';
+----
+AAACCCGGGT	[40, 40, 40, 40, 40, 37, 37, 37, 37, 37]
+
+# ===================================================================
+# Test 23: NULL quality (sequence present, qual1 is NULL)
+# bam_set1 should write quality as missing (0xFF bytes)
+# ===================================================================
+statement ok
+CREATE TABLE null_qual_seqs AS SELECT * FROM (VALUES
+    ('readA', 'AAACCCGGGT', NULL::UTINYINT[]),
+    ('readB', 'ACGTAACCGG', NULL::UTINYINT[]),
+    ('readC', 'TTAAAACCCC', NULL::UTINYINT[]),
+    ('readE', 'NNNNNNNNNN', NULL::UTINYINT[]),
+    ('readF', 'AAACCCGGGT', NULL::UTINYINT[]),
+    ('readG', 'TTAAAACCCCGG', NULL::UTINYINT[])
+) t(read_id, sequence1, qual1);
+
+statement ok
+COPY se_alignments TO '__TEST_DIR__/null_qual.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'null_qual_seqs');
+
+# When quality is missing, read_alignments returns empty list for qual
+query IT
+SELECT sequence, qual FROM read_alignments('__TEST_DIR__/null_qual.sam', include_seq_qual=true) WHERE read_id='readA';
+----
+AAACCCGGGT	[]

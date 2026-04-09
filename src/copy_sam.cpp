@@ -1,5 +1,7 @@
 #include "copy_sam.hpp"
 #include "reference_table_reader.hpp"
+#include "sequence_data_reader.hpp"
+#include "sequence_utils.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
@@ -136,6 +138,7 @@ struct SAMCopyBindData : public FunctionData {
 	string file_path;
 	vector<string> names;
 	std::optional<string> reference_lengths_table;
+	std::optional<string> sequence_data_table;
 	SAMColumnIndices indices; // Cached column indices
 
 	unique_ptr<FunctionData> Copy() const override {
@@ -147,6 +150,7 @@ struct SAMCopyBindData : public FunctionData {
 		result->file_path = file_path;
 		result->names = names;
 		result->reference_lengths_table = reference_lengths_table;
+		result->sequence_data_table = sequence_data_table;
 		result->indices = indices;
 		return std::move(result);
 	}
@@ -155,7 +159,8 @@ struct SAMCopyBindData : public FunctionData {
 		auto &other = other_p.Cast<SAMCopyBindData>();
 		return include_header == other.include_header && use_gzip == other.use_gzip && format == other.format &&
 		       compression_level == other.compression_level && file_path == other.file_path &&
-		       reference_lengths_table == other.reference_lengths_table;
+		       reference_lengths_table == other.reference_lengths_table &&
+		       sequence_data_table == other.sequence_data_table;
 	}
 };
 
@@ -272,6 +277,25 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 			if (entry->type != CatalogType::TABLE_ENTRY && entry->type != CatalogType::VIEW_ENTRY) {
 				throw BinderException("'%s' is not a table or view", result->reference_lengths_table.value());
 			}
+		} else if (StringUtil::CIEquals(option.first, "sequence_data")) {
+			const auto &table_value = option.second[0];
+			if (table_value.type().id() != LogicalTypeId::VARCHAR) {
+				throw BinderException("SEQUENCE_DATA must be a VARCHAR (table or view name)");
+			}
+
+			result->sequence_data_table = table_value.ToString();
+
+			// Validate table or view exists
+			EntryLookupInfo sd_lookup(CatalogType::TABLE_ENTRY, result->sequence_data_table.value(),
+			                          QueryErrorContext());
+			auto sd_entry =
+			    Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, sd_lookup, OnEntryNotFound::RETURN_NULL);
+			if (!sd_entry) {
+				throw BinderException("Table or view '%s' does not exist", result->sequence_data_table.value());
+			}
+			if (sd_entry->type != CatalogType::TABLE_ENTRY && sd_entry->type != CatalogType::VIEW_ENTRY) {
+				throw BinderException("'%s' is not a table or view", result->sequence_data_table.value());
+			}
 		} else {
 			throw BinderException("Unknown option for COPY FORMAT SAM: %s", option.first);
 		}
@@ -331,6 +355,7 @@ struct SAMCopyGlobalState : public GlobalFunctionData {
 	SAMHeaderPtr header;
 	std::atomic<bool> header_written {false};
 	bool include_header = true;
+	std::optional<SequenceDataMap> sequence_data;
 };
 
 static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &context, FunctionData &bind_data,
@@ -382,6 +407,11 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 	// If no reference_lengths provided, header remains empty
 	// References will be added dynamically as we encounter them during writing
 
+	// Load sequence data if provided
+	if (fdata.sequence_data_table.has_value()) {
+		gstate->sequence_data = ReadSequenceDataTable(context, fdata.sequence_data_table.value());
+	}
+
 	return std::move(gstate);
 }
 
@@ -392,6 +422,8 @@ struct SAMCopyLocalState : public LocalFunctionData {
 	BAMRecordPtr record;
 	std::vector<uint32_t> cigar_buffer;
 	size_t cigar_buffer_capacity = 0;
+	std::string seq_buffer;
+	std::vector<uint8_t> qual_buffer;
 
 	SAMCopyLocalState() {
 		record = BAMRecordPtr(bam_init1());
@@ -492,6 +524,89 @@ static inline void AppendStringTag(bam1_t *record, const char *tag_name, const s
 		if (bam_aux_append(record, tag_name, 'Z', (int)value.size() + 1,
 		                   reinterpret_cast<const uint8_t *>(value.c_str())) < 0) {
 			throw IOException("Failed to append %s tag to BAM record for read: %s", tag_name, read_id);
+		}
+	}
+}
+
+//===--------------------------------------------------------------------===//
+// Sequence/Quality Preparation
+//===--------------------------------------------------------------------===//
+
+// Prepare SEQ and QUAL for a single alignment record by looking up the original
+// FASTQ sequence, applying hard clipping and reverse complement as needed.
+static void PrepareSeqQual(const SequenceDataMap &seq_data, const std::string &read_id, uint16_t flags,
+                           const std::vector<uint32_t> &cigar, std::string &out_seq, std::vector<uint8_t> &out_qual) {
+	auto it = seq_data.find(read_id);
+	if (it == seq_data.end()) {
+		throw InvalidInputException("Read '%s' not found in SEQUENCE_DATA table", read_id);
+	}
+
+	const auto &entry = it->second;
+
+	// Pick read1 vs read2 based on paired-end flag
+	bool is_read2 = (flags & 0x80) != 0;
+	const std::string &raw_seq = is_read2 ? entry.sequence2 : entry.sequence1;
+	const std::vector<uint8_t> &raw_qual = is_read2 ? entry.qual2 : entry.qual1;
+
+	if (raw_seq.empty()) {
+		throw InvalidInputException("Read '%s' has no %s sequence in SEQUENCE_DATA table", read_id,
+		                            is_read2 ? "sequence2" : "sequence1");
+	}
+
+	// Validate sequence and quality lengths match (when quality is present)
+	if (!raw_qual.empty() && raw_qual.size() != raw_seq.size()) {
+		throw InvalidInputException("Sequence and quality lengths differ for read '%s' %s (seq=%llu, qual=%llu)",
+		                            read_id, is_read2 ? "R2" : "R1", static_cast<uint64_t>(raw_seq.size()),
+		                            static_cast<uint64_t>(raw_qual.size()));
+	}
+
+	// Determine hard clipping from CIGAR
+	int64_t leading_clip = 0;
+	int64_t trailing_clip = 0;
+	if (!cigar.empty()) {
+		if (bam_cigar_op(cigar.front()) == BAM_CHARD_CLIP) {
+			leading_clip = bam_cigar_oplen(cigar.front());
+		}
+		if (cigar.size() > 1 && bam_cigar_op(cigar.back()) == BAM_CHARD_CLIP) {
+			trailing_clip = bam_cigar_oplen(cigar.back());
+		}
+	}
+
+	int64_t full_len = static_cast<int64_t>(raw_seq.size());
+	int64_t clipped_len = full_len - leading_clip - trailing_clip;
+
+	if (clipped_len <= 0) {
+		throw InvalidInputException("Hard clipping (%lld + %lld) exceeds sequence length (%lld) for read '%s'",
+		                            leading_clip, trailing_clip, full_len, read_id);
+	}
+
+	out_seq = raw_seq.substr(leading_clip, clipped_len);
+	if (!raw_qual.empty()) {
+		out_qual.assign(raw_qual.begin() + leading_clip, raw_qual.begin() + leading_clip + clipped_len);
+	} else {
+		out_qual.clear();
+	}
+
+	// Reverse complement if on reverse strand
+	if (flags & 0x10) {
+		out_seq = miint::dna_reverse_complement(out_seq);
+		std::reverse(out_qual.begin(), out_qual.end());
+	}
+
+	// Validate: SEQ length must match sum of query-consuming CIGAR ops (skip for unmapped)
+	if (!cigar.empty()) {
+		int64_t expected_len = 0;
+		for (auto c : cigar) {
+			int op = bam_cigar_op(c);
+			// Query-consuming operations: M(0), I(1), S(4), =(7), X(8)
+			if (op == BAM_CMATCH || op == BAM_CINS || op == BAM_CSOFT_CLIP || op == BAM_CEQUAL || op == BAM_CDIFF) {
+				expected_len += bam_cigar_oplen(c);
+			}
+		}
+		if (static_cast<int64_t>(out_seq.size()) != expected_len) {
+			throw InvalidInputException(
+			    "After hard clipping, sequence length (%lld) does not match CIGAR query length (%lld) for read '%s'",
+			    static_cast<int64_t>(out_seq.size()), expected_len, read_id);
 		}
 	}
 }
@@ -650,44 +765,59 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 			                            mate_position, read_id);
 		}
 
-		// Get reference TIDs
-		int32_t tid = GetReferenceTID(gstate.header.get(), reference);
+		// Prepare SEQ and QUAL (thread-local, no lock needed)
+		size_t l_seq = 0;
+		const char *final_seq = nullptr;
+		const char *final_qual = nullptr;
 
-		// Handle mate_reference: "=" means same as reference
-		int32_t mtid;
-		if (mate_reference == "=") {
-			mtid = tid;
-		} else {
-			mtid = GetReferenceTID(gstate.header.get(), mate_reference);
+		if (gstate.sequence_data.has_value()) {
+			PrepareSeqQual(gstate.sequence_data.value(), read_id, flags, lstate.cigar_buffer, lstate.seq_buffer,
+			               lstate.qual_buffer);
+			l_seq = lstate.seq_buffer.size();
+			final_seq = lstate.seq_buffer.c_str();
+			final_qual =
+			    lstate.qual_buffer.empty() ? nullptr : reinterpret_cast<const char *>(lstate.qual_buffer.data());
 		}
 
-		// Build bam1_t record
-		// Note: SEQ and QUAL are "*" (represented as NULL/0-length in bam_set1)
-		// l_qname is the length WITHOUT null terminator (bam_set1 adds it internally)
-		if (bam_set1(lstate.record.get(), read_id.length(), read_id.c_str(), flags, tid,
-		             static_cast<hts_pos_t>(position - 1), // Convert to 0-based
-		             mapq, lstate.cigar_buffer.size(), lstate.cigar_buffer.data(), mtid,
-		             static_cast<hts_pos_t>(mate_position - 1), // Convert to 0-based
-		             static_cast<hts_pos_t>(template_length), 0, "*", "*", 0) < 0) {
-			throw IOException("Failed to build BAM record for read: " + read_id);
-		}
-
-		// Add optional tags
-		AppendIntegerTag(lstate.record.get(), "AS", tag_as_ptr, tag_as_data, i, read_id);
-		AppendIntegerTag(lstate.record.get(), "XS", tag_xs_ptr, tag_xs_data, i, read_id);
-		AppendIntegerTag(lstate.record.get(), "YS", tag_ys_ptr, tag_ys_data, i, read_id);
-		AppendIntegerTag(lstate.record.get(), "XN", tag_xn_ptr, tag_xn_data, i, read_id);
-		AppendIntegerTag(lstate.record.get(), "XM", tag_xm_ptr, tag_xm_data, i, read_id);
-		AppendIntegerTag(lstate.record.get(), "XO", tag_xo_ptr, tag_xo_data, i, read_id);
-		AppendIntegerTag(lstate.record.get(), "XG", tag_xg_ptr, tag_xg_data, i, read_id);
-		AppendIntegerTag(lstate.record.get(), "NM", tag_nm_ptr, tag_nm_data, i, read_id);
-		AppendStringTag(lstate.record.get(), "YT", tag_yt_ptr, tag_yt_data, i, read_id);
-		AppendStringTag(lstate.record.get(), "MD", tag_md_ptr, tag_md_data, i, read_id);
-		AppendStringTag(lstate.record.get(), "SA", tag_sa_ptr, tag_sa_data, i, read_id);
-
-		// Write record (with lock for thread safety on file I/O)
+		// Lock for TID resolution (may mutate header) + record build + write
 		{
 			lock_guard<mutex> glock(gstate.write_lock);
+
+			// Get reference TIDs (may add to header for headerless SAM)
+			int32_t tid = GetReferenceTID(gstate.header.get(), reference);
+
+			// Handle mate_reference: "=" means same as reference
+			int32_t mtid;
+			if (mate_reference == "=") {
+				mtid = tid;
+			} else {
+				mtid = GetReferenceTID(gstate.header.get(), mate_reference);
+			}
+
+			// Build bam1_t record
+			// l_qname is the length WITHOUT null terminator (bam_set1 adds it internally)
+			if (bam_set1(lstate.record.get(), read_id.length(), read_id.c_str(), flags, tid,
+			             static_cast<hts_pos_t>(position - 1), // Convert to 0-based
+			             mapq, lstate.cigar_buffer.size(), lstate.cigar_buffer.data(), mtid,
+			             static_cast<hts_pos_t>(mate_position - 1), // Convert to 0-based
+			             static_cast<hts_pos_t>(template_length), l_seq, final_seq, final_qual, 0) < 0) {
+				throw IOException("Failed to build BAM record for read: " + read_id);
+			}
+
+			// Add optional tags
+			AppendIntegerTag(lstate.record.get(), "AS", tag_as_ptr, tag_as_data, i, read_id);
+			AppendIntegerTag(lstate.record.get(), "XS", tag_xs_ptr, tag_xs_data, i, read_id);
+			AppendIntegerTag(lstate.record.get(), "YS", tag_ys_ptr, tag_ys_data, i, read_id);
+			AppendIntegerTag(lstate.record.get(), "XN", tag_xn_ptr, tag_xn_data, i, read_id);
+			AppendIntegerTag(lstate.record.get(), "XM", tag_xm_ptr, tag_xm_data, i, read_id);
+			AppendIntegerTag(lstate.record.get(), "XO", tag_xo_ptr, tag_xo_data, i, read_id);
+			AppendIntegerTag(lstate.record.get(), "XG", tag_xg_ptr, tag_xg_data, i, read_id);
+			AppendIntegerTag(lstate.record.get(), "NM", tag_nm_ptr, tag_nm_data, i, read_id);
+			AppendStringTag(lstate.record.get(), "YT", tag_yt_ptr, tag_yt_data, i, read_id);
+			AppendStringTag(lstate.record.get(), "MD", tag_md_ptr, tag_md_data, i, read_id);
+			AppendStringTag(lstate.record.get(), "SA", tag_sa_ptr, tag_sa_data, i, read_id);
+
+			// Write record
 			if (sam_write1(gstate.sam_file.get(), gstate.header.get(), lstate.record.get()) < 0) {
 				throw IOException("Failed to write SAM record for read: " + read_id);
 			}

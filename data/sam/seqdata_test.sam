@@ -1,0 +1,10 @@
+@SQ	SN:chr1	LN:1000
+@SQ	SN:chr2	LN:2000
+readA	0	chr1	10	60	10M	*	0	0	*	*
+readB	16	chr1	50	60	10M	*	0	0	*	*
+readC	0	chr2	100	60	2H8M	*	0	0	*	*
+readD	99	chr1	200	60	10M	=	300	110	*	*
+readD	147	chr1	300	60	10M	=	200	-110	*	*
+readE	4	*	0	0	*	*	0	0	*	*
+readF	0	chr1	400	60	8M2H	*	0	0	*	*
+readG	0	chr2	500	60	2H8M2H	*	0	0	*	*

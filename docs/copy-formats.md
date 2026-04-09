@@ -112,6 +112,7 @@ Write query results to SAM or BAM format files. Requires all mandatory SAM colum
 - `INCLUDE_HEADER` (default: true): Include header with reference sequences
   - **Note:** BAM format requires `INCLUDE_HEADER=true` (headers are mandatory in BAM files)
 - `REFERENCE_LENGTHS` (VARCHAR, required if INCLUDE_HEADER=true): Table or view name containing reference sequences. Must have at least 2 columns: first column = reference name (VARCHAR), second column = reference length (INTEGER/BIGINT). Column names don't matter. Views are fully supported and can include computed columns.
+- `SEQUENCE_DATA` (VARCHAR, optional): Table or view name containing original read sequences from `read_fastx`. When provided, writes actual SEQ and QUAL fields into the output instead of `*`. See [Sequence Data](#sequence-data) below.
 - `COMPRESSION` (default: auto, SAM only): Enable gzip compression (auto-detected from `.gz` extension)
 - `COMPRESSION_LEVEL` (BAM only): BGZF compression level 0-9 (default: 6). Higher = better compression, slower speed.
 
@@ -168,10 +169,53 @@ COPY (
   SELECT * FROM read_alignments('input.bam')
   WHERE mapq >= 30 AND alignment_is_primary(flags)
 ) TO 'filtered.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table');
+
+-- Write BAM with sequence data (SEQ and QUAL populated from FASTQ)
+CREATE TABLE sequences AS SELECT * FROM read_fastx('reads_R1.fastq', 'reads_R2.fastq');
+
+COPY (SELECT * FROM read_alignments('input.bam'))
+TO 'with_seq.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table', SEQUENCE_DATA 'sequences');
 ```
 
+### Sequence Data
+
+The `SEQUENCE_DATA` parameter allows writing actual SEQ and QUAL fields into SAM/BAM output by looking up original read sequences from a table or view. Without this parameter, SEQ and QUAL are written as `*`.
+
+This design avoids duplicating immutable sequence data across alignment records. The original FASTQ sequences are stored once and joined at write time.
+
+**Required columns in the SEQUENCE_DATA table:**
+- `read_id` (VARCHAR): Read identifier (must match alignment read_id values)
+- `sequence1` (VARCHAR): Forward-strand DNA sequence for read 1
+- `qual1` (LIST(UTINYINT)): Phred quality scores for read 1 (raw values 0-93, no ASCII offset)
+
+**Optional columns (for paired-end):**
+- `sequence2` (VARCHAR): Forward-strand DNA sequence for read 2
+- `qual2` (LIST(UTINYINT)): Phred quality scores for read 2
+
+These columns match the output schema of `read_fastx`, so the typical workflow is:
+
+```sql
+-- Load sequences
+CREATE TABLE sequences AS SELECT * FROM read_fastx('R1.fastq', 'R2.fastq');
+
+-- Load alignments
+CREATE TABLE alignments AS SELECT * FROM read_alignments('aligned.bam');
+
+-- Write with sequences
+COPY (SELECT * FROM alignments)
+TO 'output.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table', SEQUENCE_DATA 'sequences');
+```
+
+**Behavior:**
+- **Paired-end reads**: Uses SAM flag bit 0x80 (second in pair) to select `sequence2`/`qual2` vs `sequence1`/`qual1`
+- **Reverse strand**: When flag bit 0x10 is set, the sequence is reverse-complemented and quality scores are reversed
+- **Hard clipping**: CIGAR H operations trim the original sequence accordingly (leading H trims from start, trailing H from end)
+- **CIGAR validation**: After hard clipping, sequence length must match the sum of query-consuming CIGAR operations (M, I, S, =, X)
+- **NULL quality**: If `qual1`/`qual2` is NULL, sequence is written but quality is marked as missing
+- **Missing reads**: An error is thrown if any alignment's `read_id` is not found in the SEQUENCE_DATA table
+
 **Notes:**
-- SEQ and QUAL fields are always written as `*` in current implementation
+- The SEQUENCE_DATA table is loaded entirely into memory at initialization. For very large datasets, ensure sufficient RAM is available.
 - Reference lengths must be provided explicitly when writing headers - they cannot be inferred from the data
 - All optional tags present in the input are preserved in the output
 - BAM files always require headers (binary format specification)
