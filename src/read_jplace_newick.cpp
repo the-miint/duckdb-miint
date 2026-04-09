@@ -4,7 +4,49 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
+#include <cctype>
+
 namespace duckdb {
+
+// Convert jplace square-bracket edge numbers [n] to curly-brace syntax {n}
+// that the Newick parser understands. The Newick parser treats [...] as comments
+// and skips them, but jplace files use [integer] for edge numbering.
+// Only converts brackets whose content is a non-negative integer (digits only).
+// Non-integer bracket content (e.g., [some comment]) is left as-is for the
+// Newick parser to handle as a standard comment.
+// Note: jplace edge numbers are non-negative per spec (Matsen et al. 2012).
+static std::string ConvertBracketEdgeIds(const std::string &newick) {
+	std::string result;
+	result.reserve(newick.size());
+
+	size_t i = 0;
+	while (i < newick.size()) {
+		if (newick[i] == '[') {
+			// Check if content is a non-negative integer
+			size_t start = i + 1;
+			size_t j = start;
+			while (j < newick.size() && std::isdigit(static_cast<unsigned char>(newick[j]))) {
+				++j;
+			}
+			if (j > start && j < newick.size() && newick[j] == ']') {
+				// It's [digits] — convert to {digits}
+				result += '{';
+				result.append(newick, start, j - start);
+				result += '}';
+				i = j + 1;
+			} else {
+				// Not a pure integer — keep as-is (actual comment)
+				result += newick[i];
+				++i;
+			}
+		} else {
+			result += newick[i];
+			++i;
+		}
+	}
+
+	return result;
+}
 
 // Extract the "tree" string value from jplace JSON content.
 // The jplace format (Matsen et al., 2012) has a top-level "tree" key whose value
@@ -34,7 +76,9 @@ std::string ReadJplaceNewickTableFunction::ExtractTreeFromJplaceContent(const st
 		throw IOException("Jplace file '%s': 'tree' field value is not a string", path);
 	}
 
-	// Extract the JSON string value (handle escape sequences)
+	// Quick-and-dirty JSON string extraction: only handles \\ and \" escapes.
+	// Does NOT decode \n, \t, \uXXXX etc. — sufficient for Newick tree strings
+	// which contain no such escapes in practice.
 	pos++;
 	std::string result;
 	while (pos < content.size() && content[pos] != '"') {
@@ -51,7 +95,10 @@ std::string ReadJplaceNewickTableFunction::ExtractTreeFromJplaceContent(const st
 		throw IOException("Jplace file '%s': 'tree' field is empty", path);
 	}
 
-	return result;
+	// Convert [integer] edge IDs to {integer} syntax.
+	// Many jplace tools (pplacer, SEPP, gappa) use square brackets for edge numbering,
+	// but the Newick parser treats [...] as comments. Only pure integers are converted.
+	return ConvertBracketEdgeIds(result);
 }
 
 ReadJplaceNewickTableFunction::Data::Data(const std::vector<std::string> &paths, bool include_fp)

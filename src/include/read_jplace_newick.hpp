@@ -34,7 +34,6 @@ public:
 	};
 
 	struct LocalState : public LocalTableFunctionState {
-		bool has_file = false;
 		std::vector<ReadNewickTableFunction::NodeRow> current_rows;
 		size_t current_row_idx = 0;
 		std::string current_filepath;

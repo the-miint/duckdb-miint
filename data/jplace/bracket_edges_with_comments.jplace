@@ -1,0 +1,9 @@
+{
+  "version": 3,
+  "tree": "((A:0.1[0],B[a tip comment]:0.2[1]):0.3[2],(C:0.4[3],D:0.5[4]):0.6[5]):0.0[6];",
+  "fields": ["edge_num", "likelihood", "like_weight_ratio", "distal_length", "pendant_length"],
+  "placements": [],
+  "metadata": {
+    "tool": "test-mixed-comments-and-bracket-edges"
+  }
+}

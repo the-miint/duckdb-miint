@@ -132,3 +132,72 @@ query I
 SELECT COUNT(*) FROM read_jplace_newick('data/jplace/empty.jplace');
 ----
 3
+
+# =============================================================================
+# Square-bracket edge IDs (regression test)
+# Many jplace tools (pplacer, SEPP, gappa) use [n] instead of {n} for edge
+# numbering. The Newick parser must not treat these as comments.
+# Tree: ((A:0.1,B:0.2):0.3[0],(C:0.4,D:0.5):0.6[1]):0.0[2];
+# Same structure as test.jplace but with [...] instead of {...}
+# =============================================================================
+
+# Total node count matches curly-brace version
+query I
+SELECT COUNT(*) FROM read_jplace_newick('data/jplace/bracket_edges.jplace');
+----
+7
+
+# Edge IDs are NOT null — the [n] values must be parsed as edge identifiers
+query I
+SELECT COUNT(*) FROM read_jplace_newick('data/jplace/bracket_edges.jplace') WHERE edge_id IS NOT NULL;
+----
+3
+
+# Edge ID values match expected integers
+query II
+SELECT name, edge_id FROM read_jplace_newick('data/jplace/bracket_edges.jplace') WHERE edge_id IS NOT NULL ORDER BY edge_id;
+----
+(empty)	0
+(empty)	1
+(empty)	2
+
+# Branch lengths are preserved correctly alongside bracket edge IDs
+query TR
+SELECT name, branch_length FROM read_jplace_newick('data/jplace/bracket_edges.jplace') WHERE is_tip = true ORDER BY name;
+----
+A	0.1
+B	0.2
+C	0.4
+D	0.5
+
+# =============================================================================
+# Mixed: bracket edge IDs on tips + non-integer Newick comments
+# Tree: ((A:0.1[0],B[a tip comment]:0.2[1]):0.3[2],(C:0.4[3],D:0.5[4]):0.6[5]):0.0[6];
+# [0]-[6] are edge IDs (integers), [a tip comment] is a Newick comment (dropped)
+# =============================================================================
+
+# All 7 nodes present, edge IDs on every node (tips and internals)
+query I
+SELECT COUNT(*) FROM read_jplace_newick('data/jplace/bracket_edges_with_comments.jplace');
+----
+7
+
+query I
+SELECT COUNT(*) FROM read_jplace_newick('data/jplace/bracket_edges_with_comments.jplace') WHERE edge_id IS NOT NULL;
+----
+7
+
+# Tip edge IDs are parsed correctly — bracket IDs work on tips, not just internals
+query TI
+SELECT name, edge_id FROM read_jplace_newick('data/jplace/bracket_edges_with_comments.jplace') WHERE is_tip = true ORDER BY edge_id;
+----
+A	0
+B	1
+C	3
+D	4
+
+# Non-integer comment [a tip comment] on B is silently dropped (not in name or edge_id)
+query TI
+SELECT name, edge_id FROM read_jplace_newick('data/jplace/bracket_edges_with_comments.jplace') WHERE name = 'B';
+----
+B	1
