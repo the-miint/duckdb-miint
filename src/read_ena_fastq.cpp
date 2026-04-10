@@ -22,20 +22,29 @@ ReadENAFastqTableFunction::Data::Data(std::vector<RunInfo> runs, bool include_fp
 // ---- GlobalState ----
 
 ReadENAFastqTableFunction::GlobalState::GlobalState(FileSystem &fs, const std::vector<RunInfo> &runs)
-    : runs(runs), next_run_idx(0) {
-	for (const auto &run : runs) {
-		if (run.fastq_urls.empty()) {
-			throw IOException("read_ena_fastq: no FASTQ URLs available for run '%s'", run.run_accession);
-		}
+    : runs(runs), next_run_idx(0), fs(fs) {
+	// Pre-allocate slots but don't open any connections yet.
+	// Readers are created lazily in OpenReader() to avoid opening hundreds of
+	// HTTP connections simultaneously for large projects.
+	readers.resize(runs.size());
+	run_sequence_counters.resize(runs.size(), 1);
+}
 
-		auto *s1 = CreateDuckDBSeqStream(fs, run.fastq_urls[0]);
-		miint::DuckDBSeqStream *s2 = nullptr;
-		if (run.is_paired && run.fastq_urls.size() >= 2) {
-			s2 = CreateDuckDBSeqStream(fs, run.fastq_urls[1]);
-		}
-		readers.push_back(std::make_unique<miint::SequenceReader>(s1, s2));
-		run_sequence_counters.emplace_back(1);
+void ReadENAFastqTableFunction::GlobalState::OpenReader(size_t run_idx) {
+	if (readers[run_idx]) {
+		return; // Already opened
 	}
+	const auto &run = runs[run_idx];
+	if (run.fastq_urls.empty()) {
+		throw IOException("read_ena_fastq: no FASTQ URLs available for run '%s'", run.run_accession);
+	}
+
+	auto *s1 = CreateDuckDBSeqStream(fs, run.fastq_urls[0]);
+	miint::DuckDBSeqStream *s2 = nullptr;
+	if (run.is_paired && run.fastq_urls.size() >= 2) {
+		s2 = CreateDuckDBSeqStream(fs, run.fastq_urls[1]);
+	}
+	readers[run_idx] = std::make_unique<miint::SequenceReader>(s1, s2);
 }
 
 // ---- Bind ----
@@ -178,14 +187,20 @@ void ReadENAFastqTableFunction::Execute(ClientContext &context, TableFunctionInp
 	// Claim-read-release loop (same pattern as read_fastx)
 	while (true) {
 		if (!local_state.has_run) {
-			lock_guard<mutex> read_lock(global_state.lock);
-			if (global_state.next_run_idx >= global_state.readers.size()) {
-				output.SetCardinality(0);
-				return;
-			}
-			local_state.current_run_idx = global_state.next_run_idx;
-			global_state.next_run_idx++;
-			local_state.has_run = true;
+			{
+				lock_guard<mutex> read_lock(global_state.lock);
+				if (global_state.next_run_idx >= global_state.runs.size()) {
+					output.SetCardinality(0);
+					return;
+				}
+				local_state.current_run_idx = global_state.next_run_idx;
+				global_state.next_run_idx++;
+				local_state.has_run = true;
+			} // Lock released before I/O
+
+			// Open reader without holding the lock — safe because this thread
+			// has exclusive ownership of the claimed run index
+			global_state.OpenReader(local_state.current_run_idx);
 		}
 
 		current_run_idx = local_state.current_run_idx;

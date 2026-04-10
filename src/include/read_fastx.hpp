@@ -1,3 +1,4 @@
+#pragma once
 #include "SequenceReader.hpp"
 #include "duckdb_seq_stream.hpp"
 #include "remote_file_helper.hpp"
@@ -47,6 +48,8 @@ public:
 
 	struct GlobalState : public GlobalTableFunctionState {
 		mutex lock;
+		// Readers are created lazily when a thread claims a file, not all upfront.
+		// This avoids opening many HTTP connections simultaneously for remote file arrays.
 		std::vector<std::unique_ptr<miint::SequenceReader>> readers;
 		std::vector<std::string> sequence1_filepaths;
 		std::vector<std::string> sequence2_filepaths;
@@ -54,6 +57,7 @@ public:
 		bool uses_stdin;
 		std::vector<uint64_t>
 		    file_sequence_counters; // Per-file sequence counters (no atomic needed - file access is exclusive)
+		FileSystem &fs;
 
 		// stdin cannot be read in parallel (no seeking/rewinding).
 		// This forces sequential execution, which may be slower than
@@ -62,37 +66,43 @@ public:
 			if (uses_stdin) {
 				return 1;
 			}
-			return std::min<idx_t>(readers.size(), std::thread::hardware_concurrency());
+			return std::min<idx_t>(sequence1_filepaths.size(), std::thread::hardware_concurrency());
 		};
 
 		GlobalState(FileSystem &fs, const std::vector<std::string> &sequence1_paths,
 		            const std::optional<std::vector<std::string>> &sequence2_paths, bool stdin_used)
-		    : next_file_idx(0), uses_stdin(stdin_used) {
+		    : next_file_idx(0), uses_stdin(stdin_used), fs(fs) {
 			sequence1_filepaths = sequence1_paths;
 			if (sequence2_paths.has_value()) {
 				sequence2_filepaths = sequence2_paths.value();
 			}
 
-			for (size_t i = 0; i < sequence1_paths.size(); i++) {
-				bool r1_remote = miint::RemoteFileHelper::IsRemotePath(sequence1_paths[i]);
-				bool r2_remote =
-				    sequence2_paths.has_value() && miint::RemoteFileHelper::IsRemotePath(sequence2_paths.value()[i]);
+			// Pre-allocate slots but don't open connections yet
+			readers.resize(sequence1_paths.size());
+			file_sequence_counters.resize(sequence1_paths.size(), 1);
+		}
 
-				if (r1_remote || r2_remote) {
-					// Stream via DuckDB FileHandle for remote paths
-					auto *s1 = CreateDuckDBSeqStream(fs, sequence1_paths[i]);
-					miint::DuckDBSeqStream *s2 = nullptr;
-					if (sequence2_paths.has_value()) {
-						s2 = CreateDuckDBSeqStream(fs, sequence2_paths.value()[i]);
-					}
-					readers.push_back(std::make_unique<miint::SequenceReader>(s1, s2));
-				} else if (sequence2_paths.has_value()) {
-					readers.push_back(
-					    std::make_unique<miint::SequenceReader>(sequence1_paths[i], sequence2_paths.value()[i]));
-				} else {
-					readers.push_back(std::make_unique<miint::SequenceReader>(sequence1_paths[i]));
+		// Open reader for a specific file index. Called under lock when a thread claims the file.
+		void OpenReader(size_t file_idx) {
+			if (readers[file_idx]) {
+				return; // Already opened
+			}
+			bool r1_remote = miint::RemoteFileHelper::IsRemotePath(sequence1_filepaths[file_idx]);
+			bool r2_remote =
+			    !sequence2_filepaths.empty() && miint::RemoteFileHelper::IsRemotePath(sequence2_filepaths[file_idx]);
+
+			if (r1_remote || r2_remote) {
+				auto *s1 = CreateDuckDBSeqStream(fs, sequence1_filepaths[file_idx]);
+				miint::DuckDBSeqStream *s2 = nullptr;
+				if (!sequence2_filepaths.empty()) {
+					s2 = CreateDuckDBSeqStream(fs, sequence2_filepaths[file_idx]);
 				}
-				file_sequence_counters.emplace_back(1);
+				readers[file_idx] = std::make_unique<miint::SequenceReader>(s1, s2);
+			} else if (!sequence2_filepaths.empty()) {
+				readers[file_idx] = std::make_unique<miint::SequenceReader>(sequence1_filepaths[file_idx],
+				                                                            sequence2_filepaths[file_idx]);
+			} else {
+				readers[file_idx] = std::make_unique<miint::SequenceReader>(sequence1_filepaths[file_idx]);
 			}
 		}
 	};

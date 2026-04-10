@@ -180,21 +180,25 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 	while (true) {
 		// If this thread doesn't have a file, claim one
 		if (!local_state.has_file) {
-			lock_guard<mutex> read_lock(global_state.lock);
+			{
+				lock_guard<mutex> read_lock(global_state.lock);
 
-			// Check if all files exhausted
-			if (global_state.next_file_idx >= global_state.readers.size()) {
-				output.SetCardinality(0);
-				return;
-			}
+				// Check if all files exhausted
+				if (global_state.next_file_idx >= global_state.sequence1_filepaths.size()) {
+					output.SetCardinality(0);
+					return;
+				}
 
-			// Claim next available file
-			local_state.current_file_idx = global_state.next_file_idx;
-			global_state.next_file_idx++;
-			local_state.has_file = true;
+				// Claim next available file index
+				local_state.current_file_idx = global_state.next_file_idx;
+				global_state.next_file_idx++;
+				local_state.has_file = true;
+			} // Lock released before I/O
+
+			// Open reader without holding the lock — safe because this thread
+			// has exclusive ownership of the claimed file index
+			global_state.OpenReader(local_state.current_file_idx);
 		}
-		// Lock released - now do I/O without blocking other threads
-		// This thread has exclusive access to its claimed file
 
 		// Read from claimed file (no lock needed)
 		batch = global_state.readers[local_state.current_file_idx]->read(STANDARD_VECTOR_SIZE);
