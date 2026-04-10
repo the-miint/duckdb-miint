@@ -621,6 +621,11 @@ set(EXTENSION_SOURCES
     src/read_ncbi_fasta.cpp
     src/read_ncbi.cpp
     src/read_ncbi_annotation.cpp
+    src/ena_parser.cpp
+    src/ena_client.cpp
+    src/read_ena.cpp
+    src/read_ena_attributes.cpp
+    src/read_ena_fastq.cpp
     src/SFFReader.cpp
     src/read_sequences_sff.cpp
     src/WFA2Aligner.cpp
@@ -815,6 +820,8 @@ set(TEST_SOURCES
     src/zip_utils.cpp
     duckdb/third_party/miniz/miniz.cpp  # For ExtractFromZip tests
     test/cpp/test_ncbi_client.cpp
+    src/ena_parser.cpp
+    test/cpp/test_ENAClient.cpp
     src/SFFReader.cpp
     test/cpp/test_SFFReader.cpp
     src/WFA2Aligner.cpp

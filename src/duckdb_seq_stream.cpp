@@ -72,4 +72,28 @@ int duckdb_seq_close(DuckDBSeqStream *stream) {
 
 } // namespace miint
 
+#include "table_function_common.hpp"
+#include "duckdb/common/exception.hpp"
+#include "duckdb/common/file_open_flags.hpp"
+#include "duckdb/common/file_system.hpp"
+#include <memory>
+
+namespace duckdb {
+
+miint::DuckDBSeqStream *CreateDuckDBSeqStream(FileSystem &fs, const std::string &path) {
+	auto stream = std::make_unique<miint::DuckDBSeqStream>();
+	auto handle = fs.OpenFile(path, FileOpenFlags(FileOpenFlags::FILE_FLAGS_READ));
+	stream->handle = std::shared_ptr<FileHandle>(handle.release());
+	stream->is_gzipped = IsGzipped(path);
+	if (stream->is_gzipped) {
+		if (inflateInit2(&stream->zs, 16 + MAX_WBITS) != Z_OK) {
+			throw IOException("Failed to initialize zlib for: " + path);
+		}
+		stream->zs_initialized = true;
+	}
+	return stream.release();
+}
+
+} // namespace duckdb
+
 #endif // MIINT_STATIC_BUILD

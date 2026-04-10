@@ -1,0 +1,103 @@
+# name: test/sql/read_ena_fastq.test
+# description: Test read_ena_fastq table function
+# group: [sql]
+
+# NOTE: This test requires network access to EBI/ENA servers.
+# ERR1074767 is a SINGLE-end run from the American Gut Project.
+
+require httpfs
+
+require miint
+
+# ---- Error handling ----
+
+statement error
+SELECT * FROM read_ena_fastq('');
+----
+read_ena_fastq: accession cannot be empty
+
+# ---- Schema (no filepath by default) ----
+
+query IIIIII
+DESCRIBE SELECT * FROM read_ena_fastq('ERR1074767');
+----
+sequence_index	BIGINT	YES	NULL	NULL	NULL
+read_id	VARCHAR	YES	NULL	NULL	NULL
+comment	VARCHAR	YES	NULL	NULL	NULL
+sequence1	VARCHAR	YES	NULL	NULL	NULL
+sequence2	VARCHAR	YES	NULL	NULL	NULL
+qual1	UTINYINT[]	YES	NULL	NULL	NULL
+qual2	UTINYINT[]	YES	NULL	NULL	NULL
+run_accession	VARCHAR	YES	NULL	NULL	NULL
+sample_accession	VARCHAR	YES	NULL	NULL	NULL
+experiment_accession	VARCHAR	YES	NULL	NULL	NULL
+
+# ---- Stream reads from a single run ----
+
+statement ok
+CREATE TEMP TABLE ena_reads AS SELECT * FROM read_ena_fastq('ERR1074767') LIMIT 10;
+
+query I
+SELECT COUNT(*) FROM ena_reads;
+----
+10
+
+# run_accession populated for all rows
+query I
+SELECT DISTINCT run_accession FROM ena_reads;
+----
+ERR1074767
+
+# sequence1 should be non-empty
+query I
+SELECT LENGTH(sequence1) > 0 AS has_seq FROM ena_reads LIMIT 1;
+----
+true
+
+# qual1 should be populated (FASTQ has quality)
+query I
+SELECT qual1 IS NOT NULL AS has_qual FROM ena_reads LIMIT 1;
+----
+true
+
+# ERR1074767 is SINGLE-end: sequence2 and qual2 should be NULL
+query I
+SELECT COUNT(*) = 0 AS all_null FROM ena_reads WHERE sequence2 IS NOT NULL;
+----
+true
+
+# Sequences should contain only valid nucleotide characters
+query I
+SELECT COUNT(*) = 0 AS valid_chars FROM ena_reads WHERE NOT regexp_matches(sequence1, '^[ACGTN]+$');
+----
+true
+
+# Quality scores should be in valid Phred+33 range (0-41 typical)
+query I
+SELECT COUNT(*) = 0 AS valid_qual FROM ena_reads
+WHERE list_any_value(list_transform(qual1, x -> x > 60));
+----
+true
+
+# ---- Schema with include_filepath ----
+
+query IIIIII
+DESCRIBE SELECT * FROM read_ena_fastq('ERR1074767', include_filepath=true);
+----
+sequence_index	BIGINT	YES	NULL	NULL	NULL
+read_id	VARCHAR	YES	NULL	NULL	NULL
+comment	VARCHAR	YES	NULL	NULL	NULL
+sequence1	VARCHAR	YES	NULL	NULL	NULL
+sequence2	VARCHAR	YES	NULL	NULL	NULL
+qual1	UTINYINT[]	YES	NULL	NULL	NULL
+qual2	UTINYINT[]	YES	NULL	NULL	NULL
+run_accession	VARCHAR	YES	NULL	NULL	NULL
+sample_accession	VARCHAR	YES	NULL	NULL	NULL
+experiment_accession	VARCHAR	YES	NULL	NULL	NULL
+filepath	VARCHAR	YES	NULL	NULL	NULL
+
+# filepath should contain ebi.ac.uk
+query I
+SELECT filepath LIKE '%ebi.ac.uk%' AS has_ebi FROM read_ena_fastq('ERR1074767', include_filepath=true) LIMIT 1;
+----
+true

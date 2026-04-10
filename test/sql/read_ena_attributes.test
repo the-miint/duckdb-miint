@@ -1,0 +1,58 @@
+# name: test/sql/read_ena_attributes.test
+# description: Test read_ena_attributes table function
+# group: [sql]
+
+# NOTE: This test requires network access to EBI/ENA servers.
+
+require httpfs
+
+require miint
+
+# ---- Error handling ----
+
+statement error
+SELECT * FROM read_ena_attributes('');
+----
+read_ena_attributes: accession cannot be empty
+
+# ---- Schema ----
+
+query IIIIII
+DESCRIBE SELECT * FROM read_ena_attributes('ERR1074767');
+----
+sample_accession	VARCHAR	YES	NULL	NULL	NULL
+tag	VARCHAR	YES	NULL	NULL	NULL
+value	VARCHAR	YES	NULL	NULL	NULL
+
+# ---- Single run accession ----
+
+statement ok
+CREATE TEMP TABLE run_attrs AS SELECT * FROM read_ena_attributes('ERR1074767');
+
+# Should have at least one attribute
+query I
+SELECT COUNT(*) > 0 AS has_attrs FROM run_attrs;
+----
+true
+
+# All rows should have sample_accession populated
+query I
+SELECT COUNT(*) = 0 AS no_nulls FROM run_attrs WHERE sample_accession IS NULL;
+----
+true
+
+# ---- Sample accession direct ----
+
+statement ok
+CREATE TEMP TABLE sample_attrs AS SELECT * FROM read_ena_attributes('SAMEA3610311');
+
+query I
+SELECT COUNT(*) > 0 AS has_attrs FROM sample_attrs;
+----
+true
+
+# Should only contain this sample
+query I
+SELECT COUNT(DISTINCT sample_accession) FROM sample_attrs;
+----
+1

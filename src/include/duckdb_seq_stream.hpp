@@ -45,3 +45,12 @@ using DuckDBSeqStreamIn = klibpp::KStreamIn<DuckDBSeqStream *, int (*)(DuckDBSeq
 #endif // MIINT_STATIC_BUILD
 
 } // namespace miint
+
+#ifdef MIINT_STATIC_BUILD
+namespace duckdb {
+// Create a DuckDBSeqStream for reading a remote (or local) file through DuckDB's FileSystem.
+// Handles gzip detection and decompression initialization.
+// Caller takes ownership of the returned pointer (kseq++ close callback deletes it).
+miint::DuckDBSeqStream *CreateDuckDBSeqStream(FileSystem &fs, const std::string &path);
+} // namespace duckdb
+#endif

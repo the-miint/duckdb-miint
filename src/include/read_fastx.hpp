@@ -80,10 +80,10 @@ public:
 
 				if (r1_remote || r2_remote) {
 					// Stream via DuckDB FileHandle for remote paths
-					auto *s1 = CreateDuckDBStream(fs, sequence1_paths[i]);
+					auto *s1 = CreateDuckDBSeqStream(fs, sequence1_paths[i]);
 					miint::DuckDBSeqStream *s2 = nullptr;
 					if (sequence2_paths.has_value()) {
-						s2 = CreateDuckDBStream(fs, sequence2_paths.value()[i]);
+						s2 = CreateDuckDBSeqStream(fs, sequence2_paths.value()[i]);
 					}
 					readers.push_back(std::make_unique<miint::SequenceReader>(s1, s2));
 				} else if (sequence2_paths.has_value()) {
@@ -94,22 +94,6 @@ public:
 				}
 				file_sequence_counters.emplace_back(1);
 			}
-		}
-
-	private:
-		static miint::DuckDBSeqStream *CreateDuckDBStream(FileSystem &fs, const std::string &path) {
-			auto *stream = new miint::DuckDBSeqStream();
-			auto handle = fs.OpenFile(path, FileOpenFlags(FileOpenFlags::FILE_FLAGS_READ));
-			stream->handle = std::shared_ptr<FileHandle>(handle.release());
-			stream->is_gzipped = IsGzipped(path);
-			if (stream->is_gzipped) {
-				if (inflateInit2(&stream->zs, 16 + MAX_WBITS) != Z_OK) {
-					delete stream;
-					throw IOException("Failed to initialize zlib for: " + path);
-				}
-				stream->zs_initialized = true;
-			}
-			return stream;
 		}
 	};
 
