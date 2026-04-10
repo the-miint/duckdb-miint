@@ -42,8 +42,7 @@ public:
 
 	struct GlobalState : public GlobalTableFunctionState {
 		mutex lock;
-		// Readers are created lazily when a thread claims a run, not all upfront.
-		// This avoids opening hundreds of HTTP connections simultaneously for large projects.
+		mutex open_mutex; // Serializes file opens to avoid overwhelming remote servers
 		std::vector<std::unique_ptr<miint::SequenceReader>> readers;
 		std::vector<RunInfo> runs;
 		size_t next_run_idx;
@@ -56,7 +55,8 @@ public:
 
 		GlobalState(FileSystem &fs, const std::vector<RunInfo> &runs);
 
-		// Open reader for a specific run index. Called under lock.
+		// Open reader for a specific run index.
+		// Called outside the lock — each thread owns its run_idx exclusively.
 		void OpenReader(size_t run_idx);
 	};
 
