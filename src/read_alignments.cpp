@@ -184,18 +184,24 @@ void ReadAlignmentsTableFunction::Execute(ClientContext &context, TableFunctionI
 	while (true) {
 		// If this thread doesn't have a file, claim one
 		if (!local_state.has_file) {
-			lock_guard<mutex> lock(global_state.lock);
+			{
+				lock_guard<mutex> lock(global_state.lock);
 
-			// Check if all files exhausted
-			if (global_state.next_file_idx >= global_state.readers.size()) {
-				output.SetCardinality(0);
-				return;
-			}
+				// Check if all files exhausted
+				if (global_state.next_file_idx >= global_state.filepaths.size()) {
+					output.SetCardinality(0);
+					return;
+				}
 
-			// Claim next available file
-			local_state.current_file_idx = global_state.next_file_idx;
-			global_state.next_file_idx++;
-			local_state.has_file = true;
+				// Claim next available file index
+				local_state.current_file_idx = global_state.next_file_idx;
+				global_state.next_file_idx++;
+				local_state.has_file = true;
+			} // Lock released before I/O
+
+			// Open reader without holding the lock — safe because this thread
+			// has exclusive ownership of the claimed file index
+			global_state.OpenReader(local_state.current_file_idx);
 		}
 
 		// Read from claimed file (no lock needed - exclusive access)

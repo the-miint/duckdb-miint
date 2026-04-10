@@ -83,45 +83,59 @@ public:
 
 	struct GlobalState : public GlobalTableFunctionState {
 		mutex lock;
+		// Readers are created lazily when a thread claims a file, not all upfront.
+		// This avoids opening many HTTP connections simultaneously for remote file arrays.
 		std::vector<std::unique_ptr<miint::SAMReader>> readers;
 		std::vector<std::string> filepaths; // Original paths (for include_filepath)
 		size_t next_file_idx;
+		FileSystem &fs;
+		std::optional<std::unordered_map<std::string, uint64_t>> ref_lengths;
+		bool include_seq_qual;
 
 		idx_t MaxThreads() const override {
 			auto hw = std::thread::hardware_concurrency();
 			if (hw == 0) {
 				hw = 1;
 			}
-			return std::min<idx_t>(readers.size(), hw);
+			return std::min<idx_t>(filepaths.size(), hw);
 		}
 
 		GlobalState(const std::vector<std::string> &paths, FileSystem &fs,
 		            std::optional<std::unordered_map<std::string, uint64_t>> ref_lengths, bool include_seq_qual)
-		    : filepaths(paths), next_file_idx(0) {
-			for (const auto &path : paths) {
-				try {
-					if (miint::RemoteFileHelper::IsRemotePath(path)) {
-						hFILE *hf = miint::hfile_duckdb_open(fs, path);
-						if (!hf) {
-							throw IOException("Failed to open remote file: " + path);
-						}
-						if (ref_lengths.has_value()) {
-							readers.push_back(
-							    std::make_unique<miint::SAMReader>(hf, path, ref_lengths.value(), include_seq_qual));
-						} else {
-							readers.push_back(std::make_unique<miint::SAMReader>(hf, path, include_seq_qual));
-						}
-					} else {
-						if (ref_lengths.has_value()) {
-							readers.push_back(
-							    std::make_unique<miint::SAMReader>(path, ref_lengths.value(), include_seq_qual));
-						} else {
-							readers.push_back(std::make_unique<miint::SAMReader>(path, include_seq_qual));
-						}
+		    : filepaths(paths), next_file_idx(0), fs(fs), ref_lengths(std::move(ref_lengths)),
+		      include_seq_qual(include_seq_qual) {
+			// Pre-allocate slots but don't open connections yet
+			readers.resize(paths.size());
+		}
+
+		// Open reader for a specific file index. Called under lock when a thread claims the file.
+		void OpenReader(size_t file_idx) {
+			if (readers[file_idx]) {
+				return; // Already opened
+			}
+			const auto &path = filepaths[file_idx];
+			try {
+				if (miint::RemoteFileHelper::IsRemotePath(path)) {
+					hFILE *hf = miint::hfile_duckdb_open(fs, path);
+					if (!hf) {
+						throw IOException("Failed to open remote file: " + path);
 					}
-				} catch (std::exception &e) {
-					throw IOException("Error opening '%s': %s", path, e.what());
+					if (ref_lengths.has_value()) {
+						readers[file_idx] =
+						    std::make_unique<miint::SAMReader>(hf, path, ref_lengths.value(), include_seq_qual);
+					} else {
+						readers[file_idx] = std::make_unique<miint::SAMReader>(hf, path, include_seq_qual);
+					}
+				} else {
+					if (ref_lengths.has_value()) {
+						readers[file_idx] =
+						    std::make_unique<miint::SAMReader>(path, ref_lengths.value(), include_seq_qual);
+					} else {
+						readers[file_idx] = std::make_unique<miint::SAMReader>(path, include_seq_qual);
+					}
 				}
+			} catch (std::exception &e) {
+				throw IOException("Error opening '%s': %s", path, e.what());
 			}
 		}
 	};
