@@ -15,6 +15,9 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`read_ncbi`](#read_ncbiaccession-api_key) - NCBI accession metadata
 - [`read_ncbi_fasta`](#read_ncbi_fastaaccession-api_key-include_filepathfalse) - NCBI FASTA sequences
 - [`read_ncbi_annotation`](#read_ncbi_annotationaccession-api_key-include_filepathfalse) - NCBI genome annotations
+- [`read_ena`](#read_enaaccession-resultread_run-fields) - EBI/ENA metadata queries
+- [`read_ena_attributes`](#read_ena_attributesaccession) - EBI/ENA custom sample attributes
+- [`read_ena_fastq`](#read_ena_fastqaccession-include_filepathfalse-qual_offset33) - Stream FASTQ from EBI/ENA with accession columns
 - [`read_jplace`](#read_jplacepath) - Phylogenetic placement files
 - [`read_jplace_newick`](#read_jplace_newickpath-include_filepathfalse) - Newick tree from jplace files
 - [`read_newick`](#read_newickfilename-include_filepathfalse) - Newick phylogenetic trees
@@ -872,6 +875,153 @@ COPY (
 - Complex feature locations (join, complement) emit a warning and use outer bounds only
 - The `phase` column is set from the `codon_start` qualifier for CDS features
 - Source is detected from accession prefix: NC_/NM_/NP_ -> 'RefSeq', others -> 'GenBank' or 'NCBI'
+
+## `read_ena(accession, [result='read_run'], [fields])`
+
+Query metadata from the EBI European Nucleotide Archive (ENA) Portal API. Returns run, sample, or study metadata as a table of VARCHAR columns.
+
+**Requirements:**
+- Requires the `httpfs` extension (automatically loaded)
+- Network access to EBI servers (www.ebi.ac.uk)
+
+**Parameters:**
+- `accession` (VARCHAR or VARCHAR[]): ENA/SRA accession(s). Supports study (PRJNA\*, PRJEB\*, ERP\*, SRP\*), sample (SAMN\*, SAME\*), run (SRR\*, ERR\*), and experiment (SRX\*, ERX\*) accessions.
+- `result` (VARCHAR, optional, default 'read_run'): ENA result type. One of: `read_run`, `sample`, `study`. When the accession type doesn't match the result type (e.g., run accession with `result='study'`), the accession is automatically resolved.
+- `fields` (VARCHAR, optional): Comma-separated list of ENA field names to return. If omitted, a sensible default set is used per result type.
+
+**Output schema:**
+- All columns are VARCHAR, named according to the requested fields
+- Default `read_run` fields include: `run_accession`, `experiment_accession`, `sample_accession`, `study_accession`, `fastq_ftp`, `fastq_bytes`, `fastq_md5`, `library_strategy`, `library_layout`, `instrument_model`, `read_count`, `base_count`, and more
+- Default `sample` fields include: `sample_accession`, `scientific_name`, `tax_id`, `collection_date`, `country`, `lat`, `lon`, `depth`, and more
+- Default `study` fields include: `study_accession`, `study_title`, `study_description`, `center_name`, and more
+
+**Behavior:**
+- Queries the ENA Portal API (`/search` endpoint) with `format=tsv`
+- Accession type is auto-detected from prefix and mapped to the appropriate query parameter
+- Cross-type resolution: e.g., a run accession with `result='study'` first resolves to the study accession, then queries the study
+- Rate-limited to ~3 requests/second with retry on 429/500/502/503
+
+**Examples:**
+```sql
+-- Get all run metadata for a single run
+SELECT * FROM read_ena('ERR1074767');
+
+-- Get specific fields
+SELECT run_accession, library_layout, read_count
+FROM read_ena('ERR1074767', fields='run_accession,library_layout,read_count');
+
+-- Get sample metadata (auto-resolves run -> sample)
+SELECT * FROM read_ena('ERR1074767', result='sample');
+
+-- Get study info
+SELECT study_title FROM read_ena('PRJEB11419', result='study');
+
+-- Get all runs for a BioProject
+CREATE TABLE project_runs AS SELECT * FROM read_ena('PRJNA555783');
+```
+
+## `read_ena_attributes(accession)`
+
+Fetch custom sample attributes from EBI/ENA via the Browser XML API. Returns all submitter-defined key-value attributes that are not available through the Portal API's fixed schema.
+
+**Requirements:**
+- Requires the `httpfs` extension (automatically loaded)
+- Network access to EBI servers (www.ebi.ac.uk)
+
+**Parameters:**
+- `accession` (VARCHAR or VARCHAR[]): ENA/SRA accession(s). Supports study, sample, run, and experiment accessions. Non-sample accessions are automatically resolved to their associated sample accession(s).
+
+**Output schema:**
+- `sample_accession` (VARCHAR): BioSample accession (SAMN\*/SAME\*)
+- `tag` (VARCHAR): Attribute name (e.g., 'collection date', 'geographic location', custom fields)
+- `value` (VARCHAR): Attribute value
+
+**Behavior:**
+- Resolves non-sample accessions to sample accessions via the Portal API
+- Fetches XML from the Browser API in batches of 50 samples
+- Parses `<SAMPLE_ATTRIBUTE>` `<TAG>`/`<VALUE>` pairs
+- Returns ALL attributes including custom/submitter-defined ones (e.g., primer sequences, custom identifiers) that are not available via `read_ena`
+
+**Examples:**
+```sql
+-- Get all attributes for a run's sample
+SELECT * FROM read_ena_attributes('ERR1074767');
+
+-- Get attributes for a specific sample
+SELECT * FROM read_ena_attributes('SAMEA3610311');
+
+-- Find primer information
+SELECT tag, value FROM read_ena_attributes('ERR1074767')
+WHERE tag LIKE '%primer%' OR tag LIKE '%Primer%';
+
+-- Pivot attributes to wide format for a study
+SELECT sample_accession,
+       MAX(CASE WHEN tag = 'collection date' THEN value END) AS collection_date,
+       MAX(CASE WHEN tag = 'geographic location (country and/or sea)' THEN value END) AS country
+FROM read_ena_attributes('PRJEB11419')
+GROUP BY sample_accession;
+```
+
+## `read_ena_fastq(accession, [include_filepath=false], [qual_offset=33])`
+
+Stream FASTQ sequence data from EBI/ENA with run, sample, and experiment accession columns. Returns data in the same schema as `read_fastx` plus accession metadata columns, enabling direct association of sequence data with project metadata.
+
+**Requirements:**
+- Requires the `httpfs` extension (automatically loaded)
+- Network access to EBI servers (ftp.sra.ebi.ac.uk via HTTPS)
+
+**Parameters:**
+- `accession` (VARCHAR or VARCHAR[]): ENA/SRA accession(s). Supports study (bulk download all runs), sample, run, and experiment accessions.
+- `include_filepath` (BOOLEAN, optional, default false): Add filepath column with the HTTPS download URL(s). For paired-end runs, URLs are semicolon-separated.
+- `qual_offset` (BIGINT, optional, default 33): Quality score offset (33 for Phred+33/Sanger, 64 for Phred+64/Illumina 1.3+)
+
+**Output schema:**
+- `sequence_index` (BIGINT): 1-based sequence index (per run)
+- `read_id` (VARCHAR): FASTQ read identifier
+- `comment` (VARCHAR): FASTQ comment line (nullable)
+- `sequence1` (VARCHAR): Forward read sequence
+- `sequence2` (VARCHAR): Reverse read sequence (NULL for single-end)
+- `qual1` (UTINYINT[]): Forward quality scores
+- `qual2` (UTINYINT[]): Reverse quality scores (NULL for single-end)
+- `run_accession` (VARCHAR): SRR/ERR run accession
+- `sample_accession` (VARCHAR): SAMN/SAME BioSample accession
+- `experiment_accession` (VARCHAR): SRX/ERX experiment accession
+- `filepath` (VARCHAR, optional): HTTPS download URL(s)
+
+**Behavior:**
+- At bind time, queries ENA Portal API to discover runs, FASTQ URLs, and library layout (paired vs single-end)
+- Constructs HTTPS URLs from ENA's FTP paths
+- Streams FASTQ data through the same `SequenceReader`/`DuckDBSeqStream` infrastructure as `read_fastx`
+- Paired-end detection is automatic from the `library_layout` field
+- Supports parallel streaming across multiple runs (up to 8 concurrent)
+
+**Examples:**
+```sql
+-- Stream reads from a single run
+SELECT * FROM read_ena_fastq('ERR1074767') LIMIT 100;
+
+-- Stream all reads for a BioProject directly to Parquet
+COPY (SELECT * FROM read_ena_fastq('PRJNA555783'))
+  TO 'project_sequences.parquet' (FORMAT PARQUET);
+
+-- Join sequence data with metadata
+CREATE TABLE runs AS SELECT * FROM read_ena('PRJNA555783');
+CREATE TABLE seqs AS SELECT * FROM read_ena_fastq('PRJNA555783');
+
+SELECT s.run_accession, r.library_strategy, COUNT(*) AS read_count
+FROM seqs s
+JOIN runs r USING (run_accession)
+GROUP BY ALL;
+
+-- Stream with filepath for provenance tracking
+SELECT run_accession, read_id, filepath
+FROM read_ena_fastq('ERR1074767', include_filepath=true) LIMIT 5;
+```
+
+**Notes:**
+- For large projects, the FASTQ download can take significant time and bandwidth
+- The `run_accession` column enables easy JOIN back to metadata from `read_ena`
+- Quality scores are converted to numeric values using the specified offset (default Phred+33)
 
 ## `read_jplace(path)`
 

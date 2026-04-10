@@ -1,0 +1,87 @@
+# name: test/sql/read_ena.test
+# description: Test read_ena table function
+# group: [sql]
+
+# NOTE: This test requires network access to EBI/ENA servers.
+# Tests are structured to minimize ENA requests by fetching data once into temp tables.
+
+require httpfs
+
+require miint
+
+# ---- Error handling (no network needed) ----
+
+statement error
+SELECT * FROM read_ena('');
+----
+read_ena: accession cannot be empty
+
+statement error
+SELECT * FROM read_ena([]);
+----
+read_ena: at least one accession must be provided
+
+statement error
+SELECT * FROM read_ena('ERR1074767', result='invalid_type');
+----
+read_ena: result must be one of: read_run, sample, study
+
+# ---- Single run accession with custom fields ----
+
+statement ok
+CREATE TEMP TABLE ena_run AS
+SELECT * FROM read_ena('ERR1074767', fields='run_accession,sample_accession,experiment_accession,library_layout');
+
+query I
+SELECT run_accession FROM ena_run;
+----
+ERR1074767
+
+query I
+SELECT sample_accession IS NOT NULL AS has_sample FROM ena_run;
+----
+true
+
+query I
+SELECT experiment_accession IS NOT NULL AS has_experiment FROM ena_run;
+----
+true
+
+query I
+SELECT library_layout FROM ena_run;
+----
+SINGLE
+
+# ---- Custom fields determine schema ----
+
+query II nosort
+SELECT column_name, column_type
+FROM (DESCRIBE SELECT * FROM read_ena('ERR1074767', fields='run_accession,library_layout'));
+----
+run_accession	VARCHAR
+library_layout	VARCHAR
+
+# ---- Sample result type (resolves run -> sample accession) ----
+
+query I
+SELECT sample_accession IS NOT NULL AS has_sample
+FROM read_ena('ERR1074767', result='sample', fields='sample_accession,scientific_name')
+LIMIT 1;
+----
+true
+
+# ---- Study result type (resolves run -> study accession) ----
+
+query I
+SELECT study_accession IS NOT NULL AS has_study
+FROM read_ena('ERR1074767', result='study', fields='study_accession,study_title')
+LIMIT 1;
+----
+true
+
+# ---- Array of accessions ----
+
+query I
+SELECT run_accession FROM read_ena(['ERR1074767'], fields='run_accession');
+----
+ERR1074767
