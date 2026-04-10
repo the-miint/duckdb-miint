@@ -106,7 +106,6 @@ private:
 	struct VsearchState;
 	std::unique_ptr<VsearchState> state_;
 
-	void teardown();
 	void init_common(bool denovo);
 	static void load_sequences_into_db(const std::vector<std::string> &labels,
 	                                   const std::vector<std::string> &sequences,

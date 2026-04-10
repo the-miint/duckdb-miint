@@ -25,7 +25,7 @@
 
 #include "vsearch_api.h"
 
-#include <cassert>
+#include <stdexcept>
 
 namespace miint {
 
@@ -62,7 +62,9 @@ VsearchChimeraWrapper::DetectHandle &VsearchChimeraWrapper::DetectHandle::operat
 
 UchimeResult VsearchChimeraWrapper::DetectHandle::detect(const std::string &query_label,
                                                          const std::string &query_sequence) {
-	assert(impl_ && impl_->initialized && "DetectHandle::detect called on uninitialized handle");
+	if (!impl_ || !impl_->initialized) {
+		throw std::logic_error("DetectHandle::detect called on uninitialized handle");
+	}
 
 	validate_label_length(query_label, "detect");
 
@@ -207,12 +209,11 @@ void VsearchChimeraWrapper::set_reference(const std::vector<std::string> &labels
 	dbindex_prepare(1, opt_dbmask);
 	dbindex_addallsequences(opt_dbmask);
 
-	// Step 6-7: chimera session + per-thread init
-	chimera_session_init();
-	state_->session_initialized = true;
-	state_->ci = chimera_info_alloc();
-	chimera_detect_thread_init(state_->ci);
-	state_->thread_initialized = true;
+	// Chimera session/thread init is deferred — callers use ONE of:
+	// - detect_batch(): manages its own session lifecycle internally
+	//   (chimera_detect_batch calls chimera_session_init/cleanup)
+	// - create_detect_handle(): lazily initializes the session on first call
+	// These two paths must NOT be mixed on the same wrapper instance.
 }
 
 void VsearchChimeraWrapper::prepare_denovo(const std::vector<std::string> &labels,
@@ -239,7 +240,17 @@ void VsearchChimeraWrapper::prepare_denovo(const std::vector<std::string> &label
 }
 
 VsearchChimeraWrapper::DetectHandle VsearchChimeraWrapper::create_detect_handle() {
-	assert(state_ && state_->session_initialized && "create_detect_handle called before set_reference/prepare_denovo");
+	if (!state_ || !state_->db_initialized) {
+		throw std::logic_error("create_detect_handle called before set_reference/prepare_denovo");
+	}
+
+	// Lazily initialize chimera session on first handle creation.
+	// This is deferred from set_reference() because detect_batch() manages
+	// its own session lifecycle and would conflict (double mutex destroy).
+	if (!state_->session_initialized) {
+		chimera_session_init();
+		state_->session_initialized = true;
+	}
 
 	DetectHandle handle;
 	handle.impl_->ci = chimera_info_alloc();
@@ -287,7 +298,7 @@ void VsearchChimeraWrapper::detect_batch(const std::vector<std::string> &query_l
                                          const std::vector<std::string> &query_sequences,
                                          std::vector<UchimeResult> &output) {
 	if (!state_ || !state_->db_initialized) {
-		throw std::runtime_error("detect_batch called before set_reference");
+		throw std::logic_error("detect_batch called before set_reference");
 	}
 	if (query_labels.empty()) {
 		return;
@@ -307,7 +318,9 @@ void VsearchChimeraWrapper::detect_batch(const std::vector<std::string> &query_l
 
 UchimeResult VsearchChimeraWrapper::detect_denovo(const std::string &query_label, const std::string &query_sequence,
                                                   int64_t query_abundance) {
-	assert(state_ && state_->thread_initialized && "detect_denovo called before prepare_denovo");
+	if (!state_ || !state_->thread_initialized) {
+		throw std::logic_error("detect_denovo called before prepare_denovo");
+	}
 
 	validate_label_length(query_label, "detect_denovo");
 
