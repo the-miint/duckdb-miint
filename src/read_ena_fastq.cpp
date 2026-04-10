@@ -32,12 +32,17 @@ ReadENAFastqTableFunction::GlobalState::GlobalState(FileSystem &fs, const std::v
 
 void ReadENAFastqTableFunction::GlobalState::OpenReader(size_t run_idx) {
 	if (readers[run_idx]) {
-		return; // Already opened
+		return;
 	}
 	const auto &run = runs[run_idx];
 	if (run.fastq_urls.empty()) {
 		throw IOException("read_ena_fastq: no FASTQ URLs available for run '%s'", run.run_accession);
 	}
+
+	// Serialize file opens to avoid overwhelming remote servers with
+	// simultaneous HTTP HEAD requests (e.g., EBI rejects concurrent connections).
+	// Reading from opened files is still fully parallel — only the open is serialized.
+	lock_guard<mutex> open_guard(open_mutex);
 
 	auto *s1 = CreateDuckDBSeqStream(fs, run.fastq_urls[0]);
 	miint::DuckDBSeqStream *s2 = nullptr;
@@ -207,6 +212,8 @@ void ReadENAFastqTableFunction::Execute(ClientContext &context, TableFunctionInp
 		batch = global_state.readers[current_run_idx]->read(STANDARD_VECTOR_SIZE);
 
 		if (batch.empty()) {
+			// Release the reader to free the HTTP connection for subsequent runs
+			global_state.readers[current_run_idx].reset();
 			local_state.has_run = false;
 			continue;
 		}
