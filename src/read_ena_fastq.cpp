@@ -58,7 +58,7 @@ void ReadENAFastqTableFunction::GlobalState::OpenReader(size_t run_idx) {
 	if (run.is_paired && run.fastq_urls.size() >= 2) {
 		s2 = CreateDuckDBSeqStream(fs, run.fastq_urls[1]);
 	}
-	readers[run_idx] = std::make_unique<miint::SequenceReader>(s1, s2);
+	readers[run_idx] = std::make_unique<miint::SequenceReader>(s1, static_cast<miint::DuckDBSeqStream *>(s2));
 }
 
 #if MIINT_ASPERA_SUPPORTED
