@@ -49,7 +49,21 @@ void ReadENAFastqTableFunction::GlobalState::OpenReader(size_t run_idx) {
 	if (run.is_paired && run.fastq_urls.size() >= 2) {
 		s2 = CreateDuckDBSeqStream(fs, run.fastq_urls[1]);
 	}
-	readers[run_idx] = std::make_unique<miint::SequenceReader>(s1, s2);
+
+	try {
+		readers[run_idx] = std::make_unique<miint::SequenceReader>(s1, s2);
+	} catch (const std::runtime_error &e) {
+		if (s2 && std::string(e.what()) == "Empty stream (sequence2)") {
+			// ENA metadata may report PAIRED layout but the second FASTQ file
+			// can be empty (e.g., single-end data deposited with PAIRED metadata).
+			// The failed constructor consumed the original streams, so re-open
+			// just the first file and fall back to single-end for this run.
+			auto *s1_retry = CreateDuckDBSeqStream(fs, run.fastq_urls[0]);
+			readers[run_idx] = std::make_unique<miint::SequenceReader>(s1_retry, nullptr);
+		} else {
+			throw;
+		}
+	}
 }
 
 // ---- Bind ----
