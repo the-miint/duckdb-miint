@@ -9,6 +9,7 @@
 
 #ifdef MIINT_STATIC_BUILD
 #include "duckdb_seq_stream.hpp"
+#include "aspera_stream.hpp"
 #endif
 
 namespace miint {
@@ -20,14 +21,26 @@ public:
 	// Streaming constructor for remote files via DuckDB FileHandle.
 	// Takes ownership of stream pointers (freed by kseq++ close callback).
 	SequenceReader(DuckDBSeqStream *stream1, DuckDBSeqStream *stream2_or_null);
-#endif
+
+#if MIINT_ASPERA_SUPPORTED
+	// Streaming constructor for Aspera pipe-backed streams.
+	SequenceReader(AsperaSeqStream *stream1, AsperaSeqStream *stream2_or_null);
+
+	// Mixed constructor: DuckDB stream for s1 (e.g., temp file), Aspera stream for s2 (live pipe).
+	// Used for paired-end Aspera downloads where R1 is buffered to temp file.
+	SequenceReader(DuckDBSeqStream *stream1, AsperaSeqStream *stream2);
+#endif // MIINT_ASPERA_SUPPORTED
+#endif // MIINT_STATIC_BUILD
 
 	SequenceRecordBatch read(const int n);
 
 private:
 	using SeqStreamIn = klibpp::SeqStreamIn;
 
-#ifdef MIINT_STATIC_BUILD
+#if defined(MIINT_STATIC_BUILD) && MIINT_ASPERA_SUPPORTED
+	using StreamVar = std::variant<std::unique_ptr<SeqStreamIn>, std::unique_ptr<DuckDBSeqStreamIn>,
+	                               std::unique_ptr<AsperaSeqStreamIn>>;
+#elif defined(MIINT_STATIC_BUILD)
 	using StreamVar = std::variant<std::unique_ptr<SeqStreamIn>, std::unique_ptr<DuckDBSeqStreamIn>>;
 #else
 	using StreamVar = std::variant<std::unique_ptr<SeqStreamIn>>;

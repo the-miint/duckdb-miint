@@ -32,6 +32,9 @@ if command -v bowtie2 &> /dev/null; then
     export BOWTIE2_AVAILABLE=1
 fi
 
+if command -v ascp &> /dev/null; then
+    export ASPERA_AVAILABLE=1
+fi
 
 if conda run -n massql python3 -c "from massql import msql_engine" 2>/dev/null; then
     export MASSQL_PYTHON_AVAILABLE=1

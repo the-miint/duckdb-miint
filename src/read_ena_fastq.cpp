@@ -1,13 +1,14 @@
 #include "read_ena_fastq.hpp"
 #include "SequenceRecord.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include <fstream>
 
 namespace duckdb {
 
 // ---- Data ----
 
 ReadENAFastqTableFunction::Data::Data(std::vector<RunInfo> runs, bool include_fp, uint8_t offset)
-    : runs(std::move(runs)), include_filepath(include_fp), qual_offset(offset),
+    : runs(std::move(runs)), include_filepath(include_fp), qual_offset(offset), use_aspera(false),
       names({"sequence_index", "read_id", "comment", "sequence1", "sequence2", "qual1", "qual2", "run_accession",
              "sample_accession", "experiment_accession"}),
       types({LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
@@ -21,13 +22,21 @@ ReadENAFastqTableFunction::Data::Data(std::vector<RunInfo> runs, bool include_fp
 
 // ---- GlobalState ----
 
-ReadENAFastqTableFunction::GlobalState::GlobalState(FileSystem &fs, const std::vector<RunInfo> &runs)
-    : runs(runs), next_run_idx(0), fs(fs) {
-	// Pre-allocate slots but don't open any connections yet.
-	// Readers are created lazily in OpenReader() to avoid opening hundreds of
-	// HTTP connections simultaneously for large projects.
+ReadENAFastqTableFunction::GlobalState::GlobalState(FileSystem &fs, const std::vector<RunInfo> &runs, bool use_aspera)
+    : runs(runs), next_run_idx(0), fs(fs), use_aspera(use_aspera) {
 	readers.resize(runs.size());
 	run_sequence_counters.resize(runs.size(), 1);
+}
+
+ReadENAFastqTableFunction::GlobalState::~GlobalState() {
+#if MIINT_ASPERA_SUPPORTED
+	// Clean up temp file if one exists
+	if (!temp_file_path.empty()) {
+		std::remove(temp_file_path.c_str());
+		temp_file_path.clear();
+	}
+	// AsperaProcess destructor handles killing child + closing pipe
+#endif
 }
 
 void ReadENAFastqTableFunction::GlobalState::OpenReader(size_t run_idx) {
@@ -52,6 +61,97 @@ void ReadENAFastqTableFunction::GlobalState::OpenReader(size_t run_idx) {
 	readers[run_idx] = std::make_unique<miint::SequenceReader>(s1, s2);
 }
 
+#if MIINT_ASPERA_SUPPORTED
+
+static std::string GetTempDir() {
+	const char *tmpdir = getenv("TMPDIR");
+	if (tmpdir && tmpdir[0] != '\0') {
+		return std::string(tmpdir);
+	}
+	return "/tmp";
+}
+
+void ReadENAFastqTableFunction::GlobalState::OpenReaderAspera(size_t run_idx) {
+	if (readers[run_idx]) {
+		return;
+	}
+	const auto &run = runs[run_idx];
+
+	std::string filename;
+	size_t file_size;
+
+	if (!aspera_process->NextFile(filename, file_size)) {
+		throw IOException("read_ena_fastq: Aspera stream ended unexpectedly (expected files for run '%s')",
+		                  run.run_accession);
+	}
+
+	// Determine gzip from tar filename, fall back to aspera path if available
+	std::string gz_hint = filename;
+	if (gz_hint.empty() && !run.aspera_paths.empty()) {
+		gz_hint = run.aspera_paths[0].remote_path;
+	}
+	bool is_gz = IsGzipped(gz_hint);
+
+	if (!run.is_paired) {
+		auto *s1 = miint::CreateAsperaSeqStream(aspera_process.get(), is_gz);
+		readers[run_idx] = std::make_unique<miint::SequenceReader>(s1, static_cast<miint::AsperaSeqStream *>(nullptr));
+	} else {
+		// Paired-end: stream R1 from pipe to temp file in chunks, then stream R2 live
+		static constexpr size_t COPY_BUF_SIZE = 1024 * 1024; // 1 MB
+
+		std::string tmpl = GetTempDir() + "/miint_aspera_r1_XXXXXX";
+		std::vector<char> tmpl_buf(tmpl.begin(), tmpl.end());
+		tmpl_buf.push_back('\0');
+		int fd = mkstemp(tmpl_buf.data());
+		if (fd == -1) {
+			throw IOException("read_ena_fastq: failed to create temp file for paired-end Aspera buffering");
+		}
+		temp_file_path = std::string(tmpl_buf.data());
+
+		// Stream-copy R1 from pipe to temp file in 1MB chunks (no full-file buffering)
+		std::vector<char> copy_buf(COPY_BUF_SIZE);
+		while (true) {
+			int n = aspera_process->ReadBounded(copy_buf.data(), COPY_BUF_SIZE);
+			if (n <= 0) {
+				break;
+			}
+			size_t written = 0;
+			while (written < static_cast<size_t>(n)) {
+				ssize_t w = write(fd, copy_buf.data() + written, static_cast<size_t>(n) - written);
+				if (w <= 0) {
+					close(fd);
+					std::remove(temp_file_path.c_str());
+					temp_file_path.clear();
+					throw IOException("read_ena_fastq: failed to write temp file for paired-end Aspera buffering");
+				}
+				written += static_cast<size_t>(w);
+			}
+		}
+		close(fd);
+
+		// Advance tar stream to R2
+		std::string filename2;
+		size_t file_size2;
+		if (!aspera_process->NextFile(filename2, file_size2)) {
+			std::remove(temp_file_path.c_str());
+			temp_file_path.clear();
+			throw IOException("read_ena_fastq: Aspera stream ended unexpectedly (expected R2 for run '%s')",
+			                  run.run_accession);
+		}
+
+		std::string gz_hint2 = filename2;
+		if (gz_hint2.empty() && run.aspera_paths.size() >= 2) {
+			gz_hint2 = run.aspera_paths[1].remote_path;
+		}
+		bool is_gz2 = IsGzipped(gz_hint2);
+
+		auto *s1 = CreateDuckDBSeqStream(fs, temp_file_path);
+		auto *s2 = miint::CreateAsperaSeqStream(aspera_process.get(), is_gz2);
+		readers[run_idx] = std::make_unique<miint::SequenceReader>(s1, s2);
+	}
+}
+#endif // MIINT_ASPERA_SUPPORTED
+
 // ---- Bind ----
 
 // Resolve accessions to run info via ENA Portal API
@@ -60,12 +160,13 @@ static std::vector<ReadENAFastqTableFunction::RunInfo> ResolveRuns(miint::ENACli
 	std::vector<ReadENAFastqTableFunction::RunInfo> runs;
 
 	for (const auto &acc : accessions) {
-		auto tsv = client.Search(acc, "read_run",
-		                         "run_accession,sample_accession,experiment_accession,fastq_ftp,library_layout");
+		auto tsv =
+		    client.Search(acc, "read_run",
+		                  "run_accession,sample_accession,experiment_accession,fastq_ftp,fastq_aspera,library_layout");
 		auto parsed = miint::ENAParser::ParseTSV(tsv);
 
 		// Find column indices by name
-		int run_col = -1, sample_col = -1, exp_col = -1, ftp_col = -1, layout_col = -1;
+		int run_col = -1, sample_col = -1, exp_col = -1, ftp_col = -1, aspera_col = -1, layout_col = -1;
 		for (size_t i = 0; i < parsed.column_names.size(); i++) {
 			if (parsed.column_names[i] == "run_accession")
 				run_col = static_cast<int>(i);
@@ -75,6 +176,8 @@ static std::vector<ReadENAFastqTableFunction::RunInfo> ResolveRuns(miint::ENACli
 				exp_col = static_cast<int>(i);
 			else if (parsed.column_names[i] == "fastq_ftp")
 				ftp_col = static_cast<int>(i);
+			else if (parsed.column_names[i] == "fastq_aspera")
+				aspera_col = static_cast<int>(i);
 			else if (parsed.column_names[i] == "library_layout")
 				layout_col = static_cast<int>(i);
 		}
@@ -87,6 +190,9 @@ static std::vector<ReadENAFastqTableFunction::RunInfo> ResolveRuns(miint::ENACli
 
 			std::string ftp_field = (ftp_col >= 0 && ftp_col < (int)row.size()) ? row[ftp_col] : "";
 			info.fastq_urls = miint::ENAParser::FTPtoHTTPS(ftp_field);
+
+			std::string aspera_field = (aspera_col >= 0 && aspera_col < (int)row.size()) ? row[aspera_col] : "";
+			info.aspera_paths = miint::AsperaUtils::ParseAsperaPaths(aspera_field);
 
 			std::string layout = (layout_col >= 0 && layout_col < (int)row.size()) ? row[layout_col] : "";
 			info.is_paired = (layout == "PAIRED");
@@ -143,6 +249,16 @@ unique_ptr<FunctionData> ReadENAFastqTableFunction::Bind(ClientContext &context,
 		qual_offset = static_cast<uint8_t>(qo_param->second.GetValue<int64_t>());
 	}
 
+	std::string download_method = "auto";
+	auto dm_param = input.named_parameters.find("download_method");
+	if (dm_param != input.named_parameters.end() && !dm_param->second.IsNull()) {
+		download_method = dm_param->second.ToString();
+		if (download_method != "auto" && download_method != "aspera" && download_method != "http") {
+			throw InvalidInputException(
+			    "read_ena_fastq: download_method must be 'auto', 'aspera', or 'http' (got '%s')", download_method);
+		}
+	}
+
 	// Resolve accessions to run info via ENA Portal API
 	auto &db = DatabaseInstance::GetDatabase(context);
 	miint::ENAClient client(db);
@@ -153,6 +269,43 @@ unique_ptr<FunctionData> ReadENAFastqTableFunction::Bind(ClientContext &context,
 	}
 
 	auto data = make_uniq<Data>(std::move(runs), include_filepath, qual_offset);
+
+	// Determine whether to use Aspera
+	data->use_aspera = false;
+#if MIINT_ASPERA_SUPPORTED
+	if (download_method == "aspera" || download_method == "auto") {
+		bool aspera_available = miint::AsperaUtils::IsAvailable();
+		if (download_method == "aspera" && !aspera_available) {
+			throw IOException("read_ena_fastq: download_method='aspera' but ascp not found in PATH. "
+			                  "Install IBM Aspera CLI or use download_method='http'");
+		}
+		if (aspera_available) {
+			// Check that ALL runs have aspera paths (required for single-process stdio-tar)
+			bool all_have_aspera = true;
+			for (const auto &run : data->runs) {
+				if (run.aspera_paths.empty()) {
+					all_have_aspera = false;
+					break;
+				}
+			}
+			if (download_method == "aspera" && !all_have_aspera) {
+				throw IOException("read_ena_fastq: download_method='aspera' but not all runs have Aspera paths");
+			}
+			if (all_have_aspera) {
+				std::string ascp_path = miint::AsperaUtils::FindAscp();
+				std::string key_path = miint::AsperaUtils::ResolveKey(db, ascp_path, download_method == "aspera");
+				if (!key_path.empty()) {
+					data->use_aspera = true;
+					data->aspera_config = miint::AsperaUtils::BuildConfig(ascp_path, key_path);
+				}
+			}
+		}
+	}
+#else
+	if (download_method == "aspera") {
+		throw IOException("read_ena_fastq: Aspera is not supported on this platform");
+	}
+#endif
 
 	for (auto &name : data->names) {
 		names.emplace_back(name);
@@ -170,7 +323,31 @@ unique_ptr<GlobalTableFunctionState> ReadENAFastqTableFunction::InitGlobal(Clien
                                                                            TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	FileSystem &fs = FileSystem::GetFileSystem(context);
-	return make_uniq<GlobalState>(fs, data.runs);
+	auto state = make_uniq<GlobalState>(fs, data.runs, data.use_aspera);
+
+#if MIINT_ASPERA_SUPPORTED
+	if (data.use_aspera) {
+		// Collect all remote paths across all runs (ordered: for each run, R1 then R2)
+		std::vector<std::string> remote_paths;
+		std::string host;
+		for (const auto &run : data.runs) {
+			for (const auto &ap : run.aspera_paths) {
+				if (host.empty()) {
+					host = ap.host;
+				}
+				remote_paths.push_back(ap.remote_path);
+			}
+		}
+
+		auto config = data.aspera_config;
+		if (!host.empty()) {
+			config.host = host;
+		}
+		state->aspera_process = std::make_unique<miint::AsperaProcess>(config, remote_paths);
+	}
+#endif
+
+	return state;
 }
 
 unique_ptr<LocalTableFunctionState> ReadENAFastqTableFunction::InitLocal(ExecutionContext &context,
@@ -195,6 +372,16 @@ void ReadENAFastqTableFunction::Execute(ClientContext &context, TableFunctionInp
 			{
 				lock_guard<mutex> read_lock(global_state.lock);
 				if (global_state.next_run_idx >= global_state.runs.size()) {
+#if MIINT_ASPERA_SUPPORTED
+					// All runs consumed — check ascp exit code
+					if (global_state.aspera_process) {
+						int exit_code = global_state.aspera_process->WaitForExit();
+						global_state.aspera_process.reset();
+						if (exit_code != 0 && exit_code != -1) {
+							throw IOException("read_ena_fastq: ascp exited with code %d", exit_code);
+						}
+					}
+#endif
 					output.SetCardinality(0);
 					return;
 				}
@@ -205,15 +392,30 @@ void ReadENAFastqTableFunction::Execute(ClientContext &context, TableFunctionInp
 
 			// Open reader without holding the lock — safe because this thread
 			// has exclusive ownership of the claimed run index
+#if MIINT_ASPERA_SUPPORTED
+			if (global_state.use_aspera) {
+				global_state.OpenReaderAspera(local_state.current_run_idx);
+			} else {
+				global_state.OpenReader(local_state.current_run_idx);
+			}
+#else
 			global_state.OpenReader(local_state.current_run_idx);
+#endif
 		}
 
 		current_run_idx = local_state.current_run_idx;
 		batch = global_state.readers[current_run_idx]->read(STANDARD_VECTOR_SIZE);
 
 		if (batch.empty()) {
-			// Release the reader to free the HTTP connection for subsequent runs
+			// Release the reader to free the HTTP connection (or Aspera pipe slot)
 			global_state.readers[current_run_idx].reset();
+#if MIINT_ASPERA_SUPPORTED
+			// Clean up temp file for paired-end Aspera
+			if (!global_state.temp_file_path.empty()) {
+				std::remove(global_state.temp_file_path.c_str());
+				global_state.temp_file_path.clear();
+			}
+#endif
 			local_state.has_run = false;
 			continue;
 		}
@@ -268,9 +470,17 @@ void ReadENAFastqTableFunction::Execute(ClientContext &context, TableFunctionInp
 
 	// filepath (column 10) - optional, semicolon-separated for paired-end
 	if (bind_data.include_filepath) {
-		std::string filepath = run.fastq_urls[0];
-		for (size_t u = 1; u < run.fastq_urls.size(); u++) {
-			filepath += ";" + run.fastq_urls[u];
+		std::string filepath;
+		if (bind_data.use_aspera && !run.aspera_paths.empty()) {
+			filepath = run.aspera_paths[0].host + ":" + run.aspera_paths[0].remote_path;
+			for (size_t u = 1; u < run.aspera_paths.size(); u++) {
+				filepath += ";" + run.aspera_paths[u].host + ":" + run.aspera_paths[u].remote_path;
+			}
+		} else {
+			filepath = run.fastq_urls[0];
+			for (size_t u = 1; u < run.fastq_urls.size(); u++) {
+				filepath += ";" + run.fastq_urls[u];
+			}
 		}
 		SetResultVectorFilepath(output.data[field_idx++], filepath);
 	}
@@ -284,6 +494,7 @@ TableFunction ReadENAFastqTableFunction::GetFunction() {
 	auto tf = TableFunction("read_ena_fastq", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
 	tf.named_parameters["qual_offset"] = LogicalType::BIGINT;
+	tf.named_parameters["download_method"] = LogicalType::VARCHAR;
 	return tf;
 }
 
