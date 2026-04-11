@@ -5,6 +5,7 @@
 #include "table_function_common.hpp"
 #include "duckdb/common/exception.hpp"
 #include <algorithm>
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>

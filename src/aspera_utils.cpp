@@ -258,7 +258,7 @@ std::string AsperaUtils::DownloadAndCacheKey(duckdb::DatabaseInstance &) {
 }
 std::string AsperaUtils::ResolveKey(duckdb::DatabaseInstance &, const std::string &, bool required) {
 	if (required) {
-		throw duckdb::IOException("read_ena_fastq: Aspera is not supported on this platform");
+		throw std::runtime_error("read_ena_fastq: Aspera is not supported on this platform");
 	}
 	return "";
 }
