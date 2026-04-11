@@ -15,20 +15,21 @@
 namespace miint {
 class SequenceReader {
 public:
-	explicit SequenceReader(const std::string &path1, const std::optional<std::string> &path2 = std::nullopt);
+	explicit SequenceReader(const std::string &path1, const std::optional<std::string> &path2 = std::nullopt,
+	                        bool allow_format_mismatch = false);
 
 #ifdef MIINT_STATIC_BUILD
 	// Streaming constructor for remote files via DuckDB FileHandle.
 	// Takes ownership of stream pointers (freed by kseq++ close callback).
-	SequenceReader(DuckDBSeqStream *stream1, DuckDBSeqStream *stream2_or_null);
+	SequenceReader(DuckDBSeqStream *stream1, DuckDBSeqStream *stream2_or_null, bool allow_format_mismatch = false);
 
 #if MIINT_ASPERA_SUPPORTED
 	// Streaming constructor for Aspera pipe-backed streams.
-	SequenceReader(AsperaSeqStream *stream1, AsperaSeqStream *stream2_or_null);
+	SequenceReader(AsperaSeqStream *stream1, AsperaSeqStream *stream2_or_null, bool allow_format_mismatch = false);
 
 	// Mixed constructor: DuckDB stream for s1 (e.g., temp file), Aspera stream for s2 (live pipe).
 	// Used for paired-end Aspera downloads where R1 is buffered to temp file.
-	SequenceReader(DuckDBSeqStream *stream1, AsperaSeqStream *stream2);
+	SequenceReader(DuckDBSeqStream *stream1, AsperaSeqStream *stream2, bool allow_format_mismatch = false);
 #endif // MIINT_ASPERA_SUPPORTED
 #endif // MIINT_STATIC_BUILD
 

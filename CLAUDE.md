@@ -119,13 +119,14 @@ Table functions allow querying bioinformatics files as SQL tables.
   - Supports: trim parameter (default true, applies quality/adapter clips), multiple files, glob patterns, parallel processing
   - Note: stdin not supported (SFF requires seeking). comment, sequence2, qual2 are always NULL. Schema matches read_fastx for UNION ALL compatibility.
 
-- **read_ena_fastq**: Stream FASTQ from ENA (European Nucleotide Archive) by accession
-  - Implementation: `src/read_ena_fastq.cpp`, `src/include/read_ena_fastq.hpp`
+- **read_ena_fastx**: Stream FASTA/FASTQ from ENA (European Nucleotide Archive) by accession
+  - Implementation: `src/read_ena_fastx.cpp`, `src/include/read_ena_fastx.hpp`
   - ENA API: `src/ena_client.cpp`, `src/ena_parser.cpp`
   - Aspera support: `src/aspera_utils.cpp`, `src/aspera_stream.cpp`
   - Returns: sequence_index, read_id, comment, sequence1, sequence2, qual1, qual2, run_accession, sample_accession, experiment_accession, [filepath]
   - Parameters: `include_filepath`, `qual_offset`, `download_method` ('auto'|'aspera'|'http')
   - Accepts: study (PRJNA/PRJEB/ERP/SRP), sample (SAMN/SAME), run (SRR/ERR), experiment (SRX/ERX) accessions
+  - Supports mixed FASTA/FASTQ paired-end data (unlike read_fastx which rejects format mismatches)
   - Aspera: streams via `ascp stdio-tar://` for high-speed FASP downloads (5-50x faster than HTTP)
     - Auto-detects `ascp` in PATH, auto-discovers SSH key at known paths, downloads key if not found
     - Single ascp subprocess for all files; DuckDB reads from pipe
@@ -481,4 +482,3 @@ When a test depends on an external binary that may not be installed (e.g., `bowt
 Current optional dependencies managed this way:
 - `BOWTIE2_AVAILABLE` — guards `align_bowtie2.test`, `align_bowtie2_sharded.test`, `simple_bowtie2.test`
 - `HDF5_AVAILABLE` — guards `read_biom.test`, `copy_biom.test`, `read_biom_performance.test`, `glob_read_biom.test` (compile-time: `MIINT_ENABLE_HDF5=OFF` excludes HDF5)
-- `ASPERA_AVAILABLE` — guards `read_ena_fastq_aspera.test` (runtime: requires `ascp` in PATH)

@@ -28,7 +28,7 @@
 #include <read_ncbi_annotation.hpp>
 #include <read_ena.hpp>
 #include <read_ena_attributes.hpp>
-#include <read_ena_fastq.hpp>
+#include <read_ena_fastx.hpp>
 #include <miint_macros.hpp>
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/database.hpp"
@@ -193,7 +193,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadNCBIAnnotationTableFunction::Register(loader);
 	ReadENATableFunction::Register(loader);
 	ReadENAAttributesTableFunction::Register(loader);
-	ReadENAFastqTableFunction::Register(loader);
+	ReadENAFastxTableFunction::Register(loader);
 
 	AlignmentFlagFunctions::Register(loader);
 	AlignmentSeqIdentityFunction::Register(loader);

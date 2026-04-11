@@ -1,4 +1,4 @@
-#include "read_ena_fastq.hpp"
+#include "read_ena_fastx.hpp"
 #include "SequenceRecord.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include <fstream>
@@ -7,7 +7,7 @@ namespace duckdb {
 
 // ---- Data ----
 
-ReadENAFastqTableFunction::Data::Data(std::vector<RunInfo> runs, bool include_fp, uint8_t offset)
+ReadENAFastxTableFunction::Data::Data(std::vector<RunInfo> runs, bool include_fp, uint8_t offset)
     : runs(std::move(runs)), include_filepath(include_fp), qual_offset(offset), use_aspera(false),
       names({"sequence_index", "read_id", "comment", "sequence1", "sequence2", "qual1", "qual2", "run_accession",
              "sample_accession", "experiment_accession"}),
@@ -22,13 +22,13 @@ ReadENAFastqTableFunction::Data::Data(std::vector<RunInfo> runs, bool include_fp
 
 // ---- GlobalState ----
 
-ReadENAFastqTableFunction::GlobalState::GlobalState(FileSystem &fs, const std::vector<RunInfo> &runs, bool use_aspera)
+ReadENAFastxTableFunction::GlobalState::GlobalState(FileSystem &fs, const std::vector<RunInfo> &runs, bool use_aspera)
     : runs(runs), next_run_idx(0), fs(fs), use_aspera(use_aspera) {
 	readers.resize(runs.size());
 	run_sequence_counters.resize(runs.size(), 1);
 }
 
-ReadENAFastqTableFunction::GlobalState::~GlobalState() {
+ReadENAFastxTableFunction::GlobalState::~GlobalState() {
 #if MIINT_ASPERA_SUPPORTED
 	// Clean up temp file if one exists
 	if (!temp_file_path.empty()) {
@@ -39,13 +39,13 @@ ReadENAFastqTableFunction::GlobalState::~GlobalState() {
 #endif
 }
 
-void ReadENAFastqTableFunction::GlobalState::OpenReader(size_t run_idx) {
+void ReadENAFastxTableFunction::GlobalState::OpenReader(size_t run_idx) {
 	if (readers[run_idx]) {
 		return;
 	}
 	const auto &run = runs[run_idx];
 	if (run.fastq_urls.empty()) {
-		throw IOException("read_ena_fastq: no FASTQ URLs available for run '%s'", run.run_accession);
+		throw IOException("read_ena_fastx: no FASTQ URLs available for run '%s'", run.run_accession);
 	}
 
 	// Serialize file opens to avoid overwhelming remote servers with
@@ -60,7 +60,7 @@ void ReadENAFastqTableFunction::GlobalState::OpenReader(size_t run_idx) {
 	}
 
 	try {
-		readers[run_idx] = std::make_unique<miint::SequenceReader>(s1, static_cast<miint::DuckDBSeqStream *>(s2));
+		readers[run_idx] = std::make_unique<miint::SequenceReader>(s1, static_cast<miint::DuckDBSeqStream *>(s2), true);
 	} catch (const std::runtime_error &e) {
 		if (s2 && std::string(e.what()) == "Empty stream (sequence2)") {
 			// ENA metadata may report PAIRED layout but the second FASTQ file
@@ -69,7 +69,7 @@ void ReadENAFastqTableFunction::GlobalState::OpenReader(size_t run_idx) {
 			// just the first file and fall back to single-end for this run.
 			auto *s1_retry = CreateDuckDBSeqStream(fs, run.fastq_urls[0]);
 			readers[run_idx] =
-			    std::make_unique<miint::SequenceReader>(s1_retry, static_cast<miint::DuckDBSeqStream *>(nullptr));
+			    std::make_unique<miint::SequenceReader>(s1_retry, static_cast<miint::DuckDBSeqStream *>(nullptr), true);
 		} else {
 			throw;
 		}
@@ -86,7 +86,7 @@ static std::string GetTempDir() {
 	return "/tmp";
 }
 
-void ReadENAFastqTableFunction::GlobalState::OpenReaderAspera(size_t run_idx) {
+void ReadENAFastxTableFunction::GlobalState::OpenReaderAspera(size_t run_idx) {
 	if (readers[run_idx]) {
 		return;
 	}
@@ -96,7 +96,7 @@ void ReadENAFastqTableFunction::GlobalState::OpenReaderAspera(size_t run_idx) {
 	size_t file_size;
 
 	if (!aspera_process->NextFile(filename, file_size)) {
-		throw IOException("read_ena_fastq: Aspera stream ended unexpectedly (expected files for run '%s')",
+		throw IOException("read_ena_fastx: Aspera stream ended unexpectedly (expected files for run '%s')",
 		                  run.run_accession);
 	}
 
@@ -109,7 +109,8 @@ void ReadENAFastqTableFunction::GlobalState::OpenReaderAspera(size_t run_idx) {
 
 	if (!run.is_paired) {
 		auto *s1 = miint::CreateAsperaSeqStream(aspera_process.get(), is_gz);
-		readers[run_idx] = std::make_unique<miint::SequenceReader>(s1, static_cast<miint::AsperaSeqStream *>(nullptr));
+		readers[run_idx] =
+		    std::make_unique<miint::SequenceReader>(s1, static_cast<miint::AsperaSeqStream *>(nullptr), true);
 	} else {
 		// Paired-end: stream R1 from pipe to temp file in chunks, then stream R2 live
 		static constexpr size_t COPY_BUF_SIZE = 1024 * 1024; // 1 MB
@@ -119,7 +120,7 @@ void ReadENAFastqTableFunction::GlobalState::OpenReaderAspera(size_t run_idx) {
 		tmpl_buf.push_back('\0');
 		int fd = mkstemp(tmpl_buf.data());
 		if (fd == -1) {
-			throw IOException("read_ena_fastq: failed to create temp file for paired-end Aspera buffering");
+			throw IOException("read_ena_fastx: failed to create temp file for paired-end Aspera buffering");
 		}
 		temp_file_path = std::string(tmpl_buf.data());
 
@@ -137,7 +138,7 @@ void ReadENAFastqTableFunction::GlobalState::OpenReaderAspera(size_t run_idx) {
 					close(fd);
 					std::remove(temp_file_path.c_str());
 					temp_file_path.clear();
-					throw IOException("read_ena_fastq: failed to write temp file for paired-end Aspera buffering");
+					throw IOException("read_ena_fastx: failed to write temp file for paired-end Aspera buffering");
 				}
 				written += static_cast<size_t>(w);
 			}
@@ -150,7 +151,7 @@ void ReadENAFastqTableFunction::GlobalState::OpenReaderAspera(size_t run_idx) {
 		if (!aspera_process->NextFile(filename2, file_size2)) {
 			std::remove(temp_file_path.c_str());
 			temp_file_path.clear();
-			throw IOException("read_ena_fastq: Aspera stream ended unexpectedly (expected R2 for run '%s')",
+			throw IOException("read_ena_fastx: Aspera stream ended unexpectedly (expected R2 for run '%s')",
 			                  run.run_accession);
 		}
 
@@ -162,7 +163,7 @@ void ReadENAFastqTableFunction::GlobalState::OpenReaderAspera(size_t run_idx) {
 
 		auto *s1 = CreateDuckDBSeqStream(fs, temp_file_path);
 		auto *s2 = miint::CreateAsperaSeqStream(aspera_process.get(), is_gz2);
-		readers[run_idx] = std::make_unique<miint::SequenceReader>(s1, s2);
+		readers[run_idx] = std::make_unique<miint::SequenceReader>(s1, s2, true);
 	}
 }
 #endif // MIINT_ASPERA_SUPPORTED
@@ -170,9 +171,9 @@ void ReadENAFastqTableFunction::GlobalState::OpenReaderAspera(size_t run_idx) {
 // ---- Bind ----
 
 // Resolve accessions to run info via ENA Portal API
-static std::vector<ReadENAFastqTableFunction::RunInfo> ResolveRuns(miint::ENAClient &client,
+static std::vector<ReadENAFastxTableFunction::RunInfo> ResolveRuns(miint::ENAClient &client,
                                                                    const std::vector<std::string> &accessions) {
-	std::vector<ReadENAFastqTableFunction::RunInfo> runs;
+	std::vector<ReadENAFastxTableFunction::RunInfo> runs;
 
 	for (const auto &acc : accessions) {
 		auto tsv =
@@ -198,7 +199,7 @@ static std::vector<ReadENAFastqTableFunction::RunInfo> ResolveRuns(miint::ENACli
 		}
 
 		for (const auto &row : parsed.rows) {
-			ReadENAFastqTableFunction::RunInfo info;
+			ReadENAFastxTableFunction::RunInfo info;
 			info.run_accession = (run_col >= 0 && run_col < (int)row.size()) ? row[run_col] : "";
 			info.sample_accession = (sample_col >= 0 && sample_col < (int)row.size()) ? row[sample_col] : "";
 			info.experiment_accession = (exp_col >= 0 && exp_col < (int)row.size()) ? row[exp_col] : "";
@@ -221,7 +222,7 @@ static std::vector<ReadENAFastqTableFunction::RunInfo> ResolveRuns(miint::ENACli
 	return runs;
 }
 
-unique_ptr<FunctionData> ReadENAFastqTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
+unique_ptr<FunctionData> ReadENAFastxTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                          vector<LogicalType> &return_types,
                                                          vector<std::string> &names) {
 	std::vector<std::string> accessions;
@@ -233,11 +234,11 @@ unique_ptr<FunctionData> ReadENAFastqTableFunction::Bind(ClientContext &context,
 			accessions.push_back(child.ToString());
 		}
 	} else {
-		throw InvalidInputException("read_ena_fastq: first argument must be VARCHAR or VARCHAR[]");
+		throw InvalidInputException("read_ena_fastx: first argument must be VARCHAR or VARCHAR[]");
 	}
 
 	if (accessions.empty()) {
-		throw InvalidInputException("read_ena_fastq: at least one accession must be provided");
+		throw InvalidInputException("read_ena_fastx: at least one accession must be provided");
 	}
 	for (auto &acc : accessions) {
 		// Trim whitespace
@@ -248,7 +249,7 @@ unique_ptr<FunctionData> ReadENAFastqTableFunction::Bind(ClientContext &context,
 			acc = acc.substr(start, acc.find_last_not_of(" \t\n\r") - start + 1);
 		}
 		if (acc.empty()) {
-			throw InvalidInputException("read_ena_fastq: accession cannot be empty");
+			throw InvalidInputException("read_ena_fastx: accession cannot be empty");
 		}
 	}
 
@@ -270,7 +271,7 @@ unique_ptr<FunctionData> ReadENAFastqTableFunction::Bind(ClientContext &context,
 		download_method = dm_param->second.ToString();
 		if (download_method != "auto" && download_method != "aspera" && download_method != "http") {
 			throw InvalidInputException(
-			    "read_ena_fastq: download_method must be 'auto', 'aspera', or 'http' (got '%s')", download_method);
+			    "read_ena_fastx: download_method must be 'auto', 'aspera', or 'http' (got '%s')", download_method);
 		}
 	}
 
@@ -280,7 +281,7 @@ unique_ptr<FunctionData> ReadENAFastqTableFunction::Bind(ClientContext &context,
 	auto runs = ResolveRuns(client, accessions);
 
 	if (runs.empty()) {
-		throw IOException("read_ena_fastq: no FASTQ data found for the provided accession(s)");
+		throw IOException("read_ena_fastx: no FASTQ data found for the provided accession(s)");
 	}
 
 	auto data = make_uniq<Data>(std::move(runs), include_filepath, qual_offset);
@@ -291,7 +292,7 @@ unique_ptr<FunctionData> ReadENAFastqTableFunction::Bind(ClientContext &context,
 	if (download_method == "aspera" || download_method == "auto") {
 		bool aspera_available = miint::AsperaUtils::IsAvailable();
 		if (download_method == "aspera" && !aspera_available) {
-			throw IOException("read_ena_fastq: download_method='aspera' but ascp not found in PATH. "
+			throw IOException("read_ena_fastx: download_method='aspera' but ascp not found in PATH. "
 			                  "Install IBM Aspera CLI or use download_method='http'");
 		}
 		if (aspera_available) {
@@ -304,7 +305,7 @@ unique_ptr<FunctionData> ReadENAFastqTableFunction::Bind(ClientContext &context,
 				}
 			}
 			if (download_method == "aspera" && !all_have_aspera) {
-				throw IOException("read_ena_fastq: download_method='aspera' but not all runs have Aspera paths");
+				throw IOException("read_ena_fastx: download_method='aspera' but not all runs have Aspera paths");
 			}
 			if (all_have_aspera) {
 				std::string ascp_path = miint::AsperaUtils::FindAscp();
@@ -318,7 +319,7 @@ unique_ptr<FunctionData> ReadENAFastqTableFunction::Bind(ClientContext &context,
 	}
 #else
 	if (download_method == "aspera") {
-		throw IOException("read_ena_fastq: Aspera is not supported on this platform");
+		throw IOException("read_ena_fastx: Aspera is not supported on this platform");
 	}
 #endif
 
@@ -334,7 +335,7 @@ unique_ptr<FunctionData> ReadENAFastqTableFunction::Bind(ClientContext &context,
 
 // ---- InitGlobal / InitLocal ----
 
-unique_ptr<GlobalTableFunctionState> ReadENAFastqTableFunction::InitGlobal(ClientContext &context,
+unique_ptr<GlobalTableFunctionState> ReadENAFastxTableFunction::InitGlobal(ClientContext &context,
                                                                            TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	FileSystem &fs = FileSystem::GetFileSystem(context);
@@ -365,7 +366,7 @@ unique_ptr<GlobalTableFunctionState> ReadENAFastqTableFunction::InitGlobal(Clien
 	return state;
 }
 
-unique_ptr<LocalTableFunctionState> ReadENAFastqTableFunction::InitLocal(ExecutionContext &context,
+unique_ptr<LocalTableFunctionState> ReadENAFastxTableFunction::InitLocal(ExecutionContext &context,
                                                                          TableFunctionInitInput &input,
                                                                          GlobalTableFunctionState *global_state) {
 	return make_uniq<LocalState>();
@@ -373,7 +374,7 @@ unique_ptr<LocalTableFunctionState> ReadENAFastqTableFunction::InitLocal(Executi
 
 // ---- Execute ----
 
-void ReadENAFastqTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+void ReadENAFastxTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &bind_data = data_p.bind_data->Cast<Data>();
 	auto &global_state = data_p.global_state->Cast<GlobalState>();
 	auto &local_state = data_p.local_state->Cast<LocalState>();
@@ -393,7 +394,7 @@ void ReadENAFastqTableFunction::Execute(ClientContext &context, TableFunctionInp
 						int exit_code = global_state.aspera_process->WaitForExit();
 						global_state.aspera_process.reset();
 						if (exit_code != 0 && exit_code != -1) {
-							throw IOException("read_ena_fastq: ascp exited with code %d", exit_code);
+							throw IOException("read_ena_fastx: ascp exited with code %d", exit_code);
 						}
 					}
 #endif
@@ -505,15 +506,15 @@ void ReadENAFastqTableFunction::Execute(ClientContext &context, TableFunctionInp
 
 // ---- Registration ----
 
-TableFunction ReadENAFastqTableFunction::GetFunction() {
-	auto tf = TableFunction("read_ena_fastq", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
+TableFunction ReadENAFastxTableFunction::GetFunction() {
+	auto tf = TableFunction("read_ena_fastx", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
 	tf.named_parameters["qual_offset"] = LogicalType::BIGINT;
 	tf.named_parameters["download_method"] = LogicalType::VARCHAR;
 	return tf;
 }
 
-void ReadENAFastqTableFunction::Register(ExtensionLoader &loader) {
+void ReadENAFastxTableFunction::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetFunction());
 }
 

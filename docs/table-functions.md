@@ -17,7 +17,7 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`read_ncbi_annotation`](#read_ncbi_annotationaccession-api_key-include_filepathfalse) - NCBI genome annotations
 - [`read_ena`](#read_enaaccession-resultread_run-fields) - EBI/ENA metadata queries
 - [`read_ena_attributes`](#read_ena_attributesaccession) - EBI/ENA custom sample attributes
-- [`read_ena_fastq`](#read_ena_fastqaccession-include_filepathfalse-qual_offset33) - Stream FASTQ from EBI/ENA with accession columns
+- [`read_ena_fastx`](#read_ena_fastxaccession-include_filepathfalse-qual_offset33) - Stream FASTA/FASTQ from EBI/ENA with accession columns
 - [`read_jplace`](#read_jplacepath) - Phylogenetic placement files
 - [`read_jplace_newick`](#read_jplace_newickpath-include_filepathfalse) - Newick tree from jplace files
 - [`read_newick`](#read_newickfilename-include_filepathfalse) - Newick phylogenetic trees
@@ -962,9 +962,9 @@ FROM read_ena_attributes('PRJEB11419')
 GROUP BY sample_accession;
 ```
 
-## `read_ena_fastq(accession, [include_filepath=false], [qual_offset=33])`
+## `read_ena_fastx(accession, [include_filepath=false], [qual_offset=33])`
 
-Stream FASTQ sequence data from EBI/ENA with run, sample, and experiment accession columns. Returns data in the same schema as `read_fastx` plus accession metadata columns, enabling direct association of sequence data with project metadata.
+Stream FASTA/FASTQ sequence data from EBI/ENA with run, sample, and experiment accession columns. Returns data in the same schema as `read_fastx` plus accession metadata columns, enabling direct association of sequence data with project metadata. Supports mixed FASTA/FASTQ paired-end data (unlike `read_fastx` which rejects format mismatches).
 
 **Requirements:**
 - Requires the `httpfs` extension (automatically loaded)
@@ -998,15 +998,15 @@ Stream FASTQ sequence data from EBI/ENA with run, sample, and experiment accessi
 **Examples:**
 ```sql
 -- Stream reads from a single run
-SELECT * FROM read_ena_fastq('ERR1074767') LIMIT 100;
+SELECT * FROM read_ena_fastx('ERR1074767') LIMIT 100;
 
 -- Stream all reads for a BioProject directly to Parquet
-COPY (SELECT * FROM read_ena_fastq('PRJNA555783'))
+COPY (SELECT * FROM read_ena_fastx('PRJNA555783'))
   TO 'project_sequences.parquet' (FORMAT PARQUET);
 
 -- Join sequence data with metadata
 CREATE TABLE runs AS SELECT * FROM read_ena('PRJNA555783');
-CREATE TABLE seqs AS SELECT * FROM read_ena_fastq('PRJNA555783');
+CREATE TABLE seqs AS SELECT * FROM read_ena_fastx('PRJNA555783');
 
 SELECT s.run_accession, r.library_strategy, COUNT(*) AS read_count
 FROM seqs s
@@ -1015,7 +1015,7 @@ GROUP BY ALL;
 
 -- Stream with filepath for provenance tracking
 SELECT run_accession, read_id, filepath
-FROM read_ena_fastq('ERR1074767', include_filepath=true) LIMIT 5;
+FROM read_ena_fastx('ERR1074767', include_filepath=true) LIMIT 5;
 ```
 
 **Notes:**

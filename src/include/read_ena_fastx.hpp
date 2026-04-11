@@ -21,7 +21,7 @@
 
 namespace duckdb {
 
-class ReadENAFastqTableFunction {
+class ReadENAFastxTableFunction {
 public:
 	struct RunInfo {
 		std::string run_accession;

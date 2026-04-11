@@ -625,7 +625,7 @@ set(EXTENSION_SOURCES
     src/ena_client.cpp
     src/read_ena.cpp
     src/read_ena_attributes.cpp
-    src/read_ena_fastq.cpp
+    src/read_ena_fastx.cpp
     src/aspera_utils.cpp
     src/aspera_stream.cpp
     src/SFFReader.cpp

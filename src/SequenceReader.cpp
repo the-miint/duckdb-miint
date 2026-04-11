@@ -34,13 +34,24 @@ static void check_ids(const std::string &name1, const std::string &name2) {
 	}
 }
 
+// Validate that paired-end files use the same format (both FASTA or both FASTQ)
+static void validate_format_consistency(bool is_fasta1, bool is_fasta2, bool allow_format_mismatch) {
+	if (!allow_format_mismatch && is_fasta1 != is_fasta2) {
+		throw std::runtime_error("Cannot mix FASTA and FASTQ formats: sequence1 is " +
+		                         std::string(is_fasta1 ? "FASTA" : "FASTQ") + ", sequence2 is " +
+		                         std::string(is_fasta2 ? "FASTA" : "FASTQ"));
+	}
+}
+
 // Read from whichever stream variant is active
 std::vector<klibpp::KSeq> SequenceReader::read_stream(StreamVar &var, int n) {
 	return std::visit([n](auto &reader) { return reader->read(static_cast<std::vector<klibpp::KSeq>::size_type>(n)); },
 	                  var);
 }
 
-SequenceReader::SequenceReader(const std::string &path1, const std::optional<std::string> &path2) : first_read_(true) {
+SequenceReader::SequenceReader(const std::string &path1, const std::optional<std::string> &path2,
+                               bool allow_format_mismatch)
+    : first_read_(true) {
 	sequence1_reader_ = std::make_unique<SeqStreamIn>(path1.c_str());
 
 	// Check if first file is empty by attempting to peek at first record
@@ -67,19 +78,15 @@ SequenceReader::SequenceReader(const std::string &path1, const std::optional<std
 			throw std::runtime_error("Empty file: " + path2.value());
 		}
 
-		// Validate format consistency
-		if (is_fasta1 != is_fasta2) {
-			throw std::runtime_error("Cannot mix FASTA and FASTQ formats: sequence1 is " +
-			                         std::string(is_fasta1 ? "FASTA" : "FASTQ") + ", sequence2 is " +
-			                         std::string(is_fasta2 ? "FASTA" : "FASTQ"));
-		}
+		validate_format_consistency(is_fasta1, is_fasta2, allow_format_mismatch);
 
 		// Keep buffered_read2_ to return on first read() call instead of recreating reader
 	}
 }
 
 #ifdef MIINT_STATIC_BUILD
-SequenceReader::SequenceReader(DuckDBSeqStream *stream1, DuckDBSeqStream *stream2_or_null) : first_read_(true) {
+SequenceReader::SequenceReader(DuckDBSeqStream *stream1, DuckDBSeqStream *stream2_or_null, bool allow_format_mismatch)
+    : first_read_(true) {
 	sequence1_reader_ = std::make_unique<DuckDBSeqStreamIn>(stream1, duckdb_seq_read, duckdb_seq_close);
 
 	// Check if first stream is empty by attempting to peek at first record
@@ -104,16 +111,13 @@ SequenceReader::SequenceReader(DuckDBSeqStream *stream1, DuckDBSeqStream *stream
 			throw std::runtime_error("Empty stream (sequence2)");
 		}
 
-		if (is_fasta1 != is_fasta2) {
-			throw std::runtime_error("Cannot mix FASTA and FASTQ formats: sequence1 is " +
-			                         std::string(is_fasta1 ? "FASTA" : "FASTQ") + ", sequence2 is " +
-			                         std::string(is_fasta2 ? "FASTA" : "FASTQ"));
-		}
+		validate_format_consistency(is_fasta1, is_fasta2, allow_format_mismatch);
 	}
 }
 
 #if MIINT_ASPERA_SUPPORTED
-SequenceReader::SequenceReader(AsperaSeqStream *stream1, AsperaSeqStream *stream2_or_null) : first_read_(true) {
+SequenceReader::SequenceReader(AsperaSeqStream *stream1, AsperaSeqStream *stream2_or_null, bool allow_format_mismatch)
+    : first_read_(true) {
 	// Take ownership of both pointers immediately so they are cleaned up on throw
 	sequence1_reader_ = std::make_unique<AsperaSeqStreamIn>(stream1, aspera_seq_read, aspera_seq_close);
 	paired_ = (stream2_or_null != nullptr);
@@ -135,15 +139,12 @@ SequenceReader::SequenceReader(AsperaSeqStream *stream1, AsperaSeqStream *stream
 		}
 		bool is_fasta2 = buffered_read2_[0].qual.empty();
 
-		if (is_fasta1 != is_fasta2) {
-			throw std::runtime_error("Cannot mix FASTA and FASTQ formats: sequence1 is " +
-			                         std::string(is_fasta1 ? "FASTA" : "FASTQ") + ", sequence2 is " +
-			                         std::string(is_fasta2 ? "FASTA" : "FASTQ"));
-		}
+		validate_format_consistency(is_fasta1, is_fasta2, allow_format_mismatch);
 	}
 }
 
-SequenceReader::SequenceReader(DuckDBSeqStream *stream1, AsperaSeqStream *stream2) : first_read_(true) {
+SequenceReader::SequenceReader(DuckDBSeqStream *stream1, AsperaSeqStream *stream2, bool allow_format_mismatch)
+    : first_read_(true) {
 	// Take ownership of both pointers immediately so they are cleaned up on throw
 	sequence1_reader_ = std::make_unique<DuckDBSeqStreamIn>(stream1, duckdb_seq_read, duckdb_seq_close);
 	paired_ = true;
@@ -161,11 +162,7 @@ SequenceReader::SequenceReader(DuckDBSeqStream *stream1, AsperaSeqStream *stream
 	}
 	bool is_fasta2 = buffered_read2_[0].qual.empty();
 
-	if (is_fasta1 != is_fasta2) {
-		throw std::runtime_error("Cannot mix FASTA and FASTQ formats: sequence1 is " +
-		                         std::string(is_fasta1 ? "FASTA" : "FASTQ") + ", sequence2 is " +
-		                         std::string(is_fasta2 ? "FASTA" : "FASTQ"));
-	}
+	validate_format_consistency(is_fasta1, is_fasta2, allow_format_mismatch);
 }
 #endif // MIINT_ASPERA_SUPPORTED
 #endif // MIINT_STATIC_BUILD

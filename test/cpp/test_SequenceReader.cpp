@@ -191,6 +191,49 @@ TEST_CASE("SequenceReader mixed FASTA/FASTQ paired-end throws", "[SequenceReader
 	                    Catch::Matchers::ContainsSubstring("Cannot mix FASTA and FASTQ"));
 }
 
+TEST_CASE("SequenceReader mixed FASTA/FASTQ paired-end allowed when flag set",
+          "[SequenceReader][FASTA][FASTQ][paired-end]") {
+	TempFileFixture fixture;
+	auto r1 = "test_allowed_r1.fa";
+	auto r2 = "test_allowed_r2.fq";
+
+	fixture.write_temp_fastq(r1, {fixture.simple_fasta("read1/1", "ATGC"), fixture.simple_fasta("read2", "GGCC")});
+	fixture.write_temp_fastq(
+	    r2, {fixture.simple_read("read1/2", "TGCA", "IIII"), fixture.simple_read("read2", "CCGG", "HHHH")});
+
+	miint::SequenceReader reader(r1, r2, true);
+	auto batch = reader.read(5);
+
+	REQUIRE((batch.size() == 2));
+	REQUIRE((batch.read_ids[0] == "read1"));
+	REQUIRE((batch.sequences1[0] == "ATGC"));
+	REQUIRE((batch.sequences2[0] == "TGCA"));
+	REQUIRE((batch.quals1[0].as_string().empty()));   // FASTA: no quality
+	REQUIRE((batch.quals2[0].as_string() == "IIII")); // FASTQ: has quality
+}
+
+TEST_CASE("SequenceReader mixed FASTA/FASTQ with longer sequences", "[SequenceReader][FASTA][FASTQ][paired-end]") {
+	TempFileFixture fixture;
+	auto r1 = "test_long_r1.fa";
+	auto r2 = "test_long_r2.fq";
+
+	fixture.write_temp_fastq(
+	    r1, {fixture.simple_fasta("read1/1", "ATGCATGC"), fixture.simple_fasta("read2/1", "GGCCGGCC")});
+	fixture.write_temp_fastq(r2, {fixture.simple_read("read1/2", "TGCATGCA", "IIIIIIII"),
+	                              fixture.simple_read("read2/2", "CCGGCCGG", "HHHHHHHH")});
+
+	miint::SequenceReader reader(r1, r2, true);
+	auto batch = reader.read(5);
+
+	REQUIRE((batch.size() == 2));
+	REQUIRE((batch.read_ids[0] == "read1"));
+	REQUIRE((batch.read_ids[1] == "read2"));
+	REQUIRE((batch.sequences1[0] == "ATGCATGC"));
+	REQUIRE((batch.sequences2[0] == "TGCATGCA"));
+	REQUIRE((batch.quals1[0].as_string().empty()));
+	REQUIRE((batch.quals2[0].as_string() == "IIIIIIII"));
+}
+
 TEST_CASE("SequenceReader empty file throws", "[SequenceReader][error]") {
 	TempFileFixture fixture;
 	auto path = "empty.fq";
