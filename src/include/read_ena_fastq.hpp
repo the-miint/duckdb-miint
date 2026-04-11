@@ -1,6 +1,8 @@
 #pragma once
 
 #include "SequenceReader.hpp"
+#include "aspera_stream.hpp"
+#include "aspera_utils.hpp"
 #include "duckdb_seq_stream.hpp"
 #include "ena_client.hpp"
 #include "ena_parser.hpp"
@@ -25,7 +27,8 @@ public:
 		std::string run_accession;
 		std::string sample_accession;
 		std::string experiment_accession;
-		std::vector<std::string> fastq_urls; // 1 for single-end, 2 for paired-end
+		std::vector<std::string> fastq_urls;         // HTTPS URLs (1 for single-end, 2 for paired-end)
+		std::vector<miint::AsperaPath> aspera_paths; // Parsed host + remote_path pairs
 		bool is_paired;
 	};
 
@@ -33,6 +36,10 @@ public:
 		std::vector<RunInfo> runs;
 		bool include_filepath;
 		uint8_t qual_offset;
+		bool use_aspera;
+#if MIINT_ASPERA_SUPPORTED
+		miint::AsperaConfig aspera_config;
+#endif
 
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
@@ -48,16 +55,31 @@ public:
 		size_t next_run_idx;
 		std::vector<uint64_t> run_sequence_counters;
 		FileSystem &fs;
+		bool use_aspera;
+
+#if MIINT_ASPERA_SUPPORTED
+		std::unique_ptr<miint::AsperaProcess> aspera_process;
+		std::string temp_file_path; // For paired-end R1 buffering
+#endif
 
 		idx_t MaxThreads() const override {
+			if (use_aspera) {
+				return 1; // Pipe is sequential
+			}
 			return std::min<idx_t>(runs.size(), 8);
 		}
 
-		GlobalState(FileSystem &fs, const std::vector<RunInfo> &runs);
+		GlobalState(FileSystem &fs, const std::vector<RunInfo> &runs, bool use_aspera);
+		~GlobalState();
 
-		// Open reader for a specific run index.
-		// Called outside the lock — each thread owns its run_idx exclusively.
+		// Open reader for a specific run index (HTTP path).
 		void OpenReader(size_t run_idx);
+
+#if MIINT_ASPERA_SUPPORTED
+		// Open reader for a specific run index (Aspera path).
+		// Reads from the shared aspera_process pipe.
+		void OpenReaderAspera(size_t run_idx);
+#endif
 	};
 
 	struct LocalState : public LocalTableFunctionState {

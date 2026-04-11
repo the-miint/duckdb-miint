@@ -626,6 +626,8 @@ set(EXTENSION_SOURCES
     src/read_ena.cpp
     src/read_ena_attributes.cpp
     src/read_ena_fastq.cpp
+    src/aspera_utils.cpp
+    src/aspera_stream.cpp
     src/SFFReader.cpp
     src/read_sequences_sff.cpp
     src/WFA2Aligner.cpp
@@ -822,6 +824,8 @@ set(TEST_SOURCES
     test/cpp/test_ncbi_client.cpp
     src/ena_parser.cpp
     test/cpp/test_ENAClient.cpp
+    src/aspera_utils.cpp
+    test/cpp/test_AsperaUtils.cpp
     src/SFFReader.cpp
     test/cpp/test_SFFReader.cpp
     src/WFA2Aligner.cpp

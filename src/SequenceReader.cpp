@@ -111,7 +111,64 @@ SequenceReader::SequenceReader(DuckDBSeqStream *stream1, DuckDBSeqStream *stream
 		}
 	}
 }
-#endif
+
+#if MIINT_ASPERA_SUPPORTED
+SequenceReader::SequenceReader(AsperaSeqStream *stream1, AsperaSeqStream *stream2_or_null) : first_read_(true) {
+	// Take ownership of both pointers immediately so they are cleaned up on throw
+	sequence1_reader_ = std::make_unique<AsperaSeqStreamIn>(stream1, aspera_seq_read, aspera_seq_close);
+	paired_ = (stream2_or_null != nullptr);
+	if (paired_) {
+		sequence2_reader_.emplace(
+		    std::make_unique<AsperaSeqStreamIn>(stream2_or_null, aspera_seq_read, aspera_seq_close));
+	}
+
+	buffered_read1_ = read_stream(sequence1_reader_, 1);
+	if (buffered_read1_.empty()) {
+		throw std::runtime_error("Empty stream");
+	}
+	bool is_fasta1 = buffered_read1_[0].qual.empty();
+
+	if (paired_) {
+		buffered_read2_ = read_stream(sequence2_reader_.value(), 1);
+		if (buffered_read2_.empty()) {
+			throw std::runtime_error("Empty stream (sequence2)");
+		}
+		bool is_fasta2 = buffered_read2_[0].qual.empty();
+
+		if (is_fasta1 != is_fasta2) {
+			throw std::runtime_error("Cannot mix FASTA and FASTQ formats: sequence1 is " +
+			                         std::string(is_fasta1 ? "FASTA" : "FASTQ") + ", sequence2 is " +
+			                         std::string(is_fasta2 ? "FASTA" : "FASTQ"));
+		}
+	}
+}
+
+SequenceReader::SequenceReader(DuckDBSeqStream *stream1, AsperaSeqStream *stream2) : first_read_(true) {
+	// Take ownership of both pointers immediately so they are cleaned up on throw
+	sequence1_reader_ = std::make_unique<DuckDBSeqStreamIn>(stream1, duckdb_seq_read, duckdb_seq_close);
+	paired_ = true;
+	sequence2_reader_.emplace(std::make_unique<AsperaSeqStreamIn>(stream2, aspera_seq_read, aspera_seq_close));
+
+	buffered_read1_ = read_stream(sequence1_reader_, 1);
+	if (buffered_read1_.empty()) {
+		throw std::runtime_error("Empty stream");
+	}
+	bool is_fasta1 = buffered_read1_[0].qual.empty();
+
+	buffered_read2_ = read_stream(sequence2_reader_.value(), 1);
+	if (buffered_read2_.empty()) {
+		throw std::runtime_error("Empty stream (sequence2)");
+	}
+	bool is_fasta2 = buffered_read2_[0].qual.empty();
+
+	if (is_fasta1 != is_fasta2) {
+		throw std::runtime_error("Cannot mix FASTA and FASTQ formats: sequence1 is " +
+		                         std::string(is_fasta1 ? "FASTA" : "FASTQ") + ", sequence2 is " +
+		                         std::string(is_fasta2 ? "FASTA" : "FASTQ"));
+	}
+}
+#endif // MIINT_ASPERA_SUPPORTED
+#endif // MIINT_STATIC_BUILD
 
 SequenceRecordBatch SequenceReader::read_se(const int n) {
 	SequenceRecordBatch batch(false);

@@ -8,6 +8,49 @@
 
 namespace miint {
 
+// Shared zlib inflate helper used by both DuckDBSeqStream and AsperaSeqStream.
+// ReadRawFn signature: int(void *dst, size_t len) — returns bytes read (>0), 0=EOF, <0=error.
+// Returns: decompressed bytes written to dst.
+template <typename ReadRawFn>
+int InflateFromSource(z_stream &zs, char *compressed_buf, size_t buf_size, int &compressed_avail,
+                      char *&compressed_next, bool &input_eof, ReadRawFn read_raw, void *dst, unsigned int len) {
+	zs.avail_out = len;
+	zs.next_out = reinterpret_cast<Bytef *>(dst);
+
+	while (zs.avail_out > 0) {
+		if (compressed_avail == 0 && !input_eof) {
+			auto n = read_raw(compressed_buf, buf_size);
+			if (n <= 0) {
+				input_eof = true;
+			} else {
+				compressed_avail = static_cast<int>(n);
+				compressed_next = compressed_buf;
+			}
+		}
+
+		zs.avail_in = static_cast<uInt>(compressed_avail);
+		zs.next_in = reinterpret_cast<Bytef *>(compressed_next);
+
+		int ret = inflate(&zs, Z_NO_FLUSH);
+
+		int consumed = compressed_avail - static_cast<int>(zs.avail_in);
+		compressed_avail -= consumed;
+		compressed_next += consumed;
+
+		if (ret == Z_STREAM_END) {
+			break;
+		}
+		if (ret != Z_OK) {
+			return -1;
+		}
+		if (input_eof && compressed_avail == 0) {
+			break;
+		}
+	}
+
+	return static_cast<int>(len - zs.avail_out);
+}
+
 #ifdef MIINT_STATIC_BUILD
 
 // Stream adapter that reads from DuckDB FileHandle with optional gzip decompression.

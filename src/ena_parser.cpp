@@ -278,7 +278,7 @@ std::vector<std::string> ENAParser::FTPtoHTTPS(const std::string &ftp_field) {
 std::string ENAParser::DefaultFields(const std::string &result_type) {
 	if (result_type == "read_run") {
 		return "run_accession,experiment_accession,sample_accession,study_accession,"
-		       "fastq_ftp,fastq_bytes,fastq_md5,"
+		       "fastq_ftp,fastq_aspera,fastq_bytes,fastq_md5,"
 		       "library_strategy,library_source,library_selection,library_layout,library_name,"
 		       "instrument_model,instrument_platform,"
 		       "read_count,base_count,"

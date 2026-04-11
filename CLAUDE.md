@@ -119,6 +119,20 @@ Table functions allow querying bioinformatics files as SQL tables.
   - Supports: trim parameter (default true, applies quality/adapter clips), multiple files, glob patterns, parallel processing
   - Note: stdin not supported (SFF requires seeking). comment, sequence2, qual2 are always NULL. Schema matches read_fastx for UNION ALL compatibility.
 
+- **read_ena_fastq**: Stream FASTQ from ENA (European Nucleotide Archive) by accession
+  - Implementation: `src/read_ena_fastq.cpp`, `src/include/read_ena_fastq.hpp`
+  - ENA API: `src/ena_client.cpp`, `src/ena_parser.cpp`
+  - Aspera support: `src/aspera_utils.cpp`, `src/aspera_stream.cpp`
+  - Returns: sequence_index, read_id, comment, sequence1, sequence2, qual1, qual2, run_accession, sample_accession, experiment_accession, [filepath]
+  - Parameters: `include_filepath`, `qual_offset`, `download_method` ('auto'|'aspera'|'http')
+  - Accepts: study (PRJNA/PRJEB/ERP/SRP), sample (SAMN/SAME), run (SRR/ERR), experiment (SRX/ERX) accessions
+  - Aspera: streams via `ascp stdio-tar://` for high-speed FASP downloads (5-50x faster than HTTP)
+    - Auto-detects `ascp` in PATH, auto-discovers SSH key at known paths, downloads key if not found
+    - Single ascp subprocess for all files; DuckDB reads from pipe
+    - Paired-end: R1 streamed to temp file (1MB chunks), R2 streamed live from pipe
+    - Falls back to HTTP transparently if ascp not available (`download_method='auto'`)
+    - Requires explicit `--mode=recv --user=X --host=X` syntax (NOT `user@host:path` shorthand with stdio://)
+
 #### 2. Scalar Functions
 Individual functions for alignment analysis:
 
@@ -220,6 +234,12 @@ For headerless SAM files and SAM writing:
   - zlib (required)
   - zstd (optional, for compression)
   - Catch2 (C++ testing framework)
+
+- **IBM Aspera ascp** (optional runtime dependency, not compiled in):
+  - Detected at runtime via `which ascp`; not required at build time
+  - SSH key auto-discovered at `~/.aspera/connect/etc/`, `$CONDA_PREFIX/etc/`, or downloaded from GitHub
+  - `stdio://` and `stdio-tar://` protocols stream data to stdout (confirmed working with ENA FASP servers)
+  - Platform: POSIX only (fork/exec); `MIINT_ASPERA_SUPPORTED=0` on Windows/WASM
 
 ### Testing Strategy
 
@@ -461,3 +481,4 @@ When a test depends on an external binary that may not be installed (e.g., `bowt
 Current optional dependencies managed this way:
 - `BOWTIE2_AVAILABLE` — guards `align_bowtie2.test`, `align_bowtie2_sharded.test`, `simple_bowtie2.test`
 - `HDF5_AVAILABLE` — guards `read_biom.test`, `copy_biom.test`, `read_biom_performance.test`, `glob_read_biom.test` (compile-time: `MIINT_ENABLE_HDF5=OFF` excludes HDF5)
+- `ASPERA_AVAILABLE` — guards `read_ena_fastq_aspera.test` (runtime: requires `ascp` in PATH)

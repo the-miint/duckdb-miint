@@ -1,6 +1,7 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "miint_extension.hpp"
+#include "aspera_utils.hpp"
 #include <csignal>
 #include <alignment_flag_functions.hpp>
 #include <alignment_slice.hpp>
@@ -83,9 +84,9 @@ void SetDependencyLogging() {
 }
 
 void SetupSignalHandling() {
-#ifdef MIINT_HAS_BOWTIE2
+#if defined(MIINT_HAS_BOWTIE2) || MIINT_ASPERA_SUPPORTED
 	// Ignore SIGPIPE globally so that writes to closed pipes return EPIPE instead of
-	// killing the process. This is needed for Bowtie2Aligner and other subprocess
+	// killing the process. Needed for Bowtie2Aligner, AsperaProcess, and other subprocess
 	// management where pipes may close unexpectedly.
 	// Note: This is a PROCESS-WIDE setting that persists for the lifetime of the process.
 	// Setting it once at extension load is thread-safe (vs calling signal() from multiple threads).

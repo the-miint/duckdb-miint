@@ -97,7 +97,8 @@ public:
 				if (!sequence2_filepaths.empty()) {
 					s2 = CreateDuckDBSeqStream(fs, sequence2_filepaths[file_idx]);
 				}
-				readers[file_idx] = std::make_unique<miint::SequenceReader>(s1, s2);
+				readers[file_idx] =
+				    std::make_unique<miint::SequenceReader>(s1, static_cast<miint::DuckDBSeqStream *>(s2));
 			} else if (!sequence2_filepaths.empty()) {
 				readers[file_idx] = std::make_unique<miint::SequenceReader>(sequence1_filepaths[file_idx],
 				                                                            sequence2_filepaths[file_idx]);
