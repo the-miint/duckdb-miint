@@ -95,5 +95,9 @@ namespace duckdb {
 // Handles gzip detection and decompression initialization.
 // Caller takes ownership of the returned pointer (kseq++ close callback deletes it).
 miint::DuckDBSeqStream *CreateDuckDBSeqStream(FileSystem &fs, const std::string &path);
+
+// Overload that accepts an explicit gzip flag instead of inferring from path extension.
+// Use when the file path does not reflect the actual compression (e.g., temp files).
+miint::DuckDBSeqStream *CreateDuckDBSeqStream(FileSystem &fs, const std::string &path, bool is_gzipped);
 } // namespace duckdb
 #endif

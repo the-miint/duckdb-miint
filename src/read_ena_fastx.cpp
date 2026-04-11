@@ -161,7 +161,7 @@ void ReadENAFastxTableFunction::GlobalState::OpenReaderAspera(size_t run_idx) {
 		}
 		bool is_gz2 = IsGzipped(gz_hint2);
 
-		auto *s1 = CreateDuckDBSeqStream(fs, temp_file_path);
+		auto *s1 = CreateDuckDBSeqStream(fs, temp_file_path, is_gz);
 		auto *s2 = miint::CreateAsperaSeqStream(aspera_process.get(), is_gz2);
 		readers[run_idx] = std::make_unique<miint::SequenceReader>(s1, s2, true);
 	}
