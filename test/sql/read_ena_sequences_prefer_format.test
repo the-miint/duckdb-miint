@@ -1,0 +1,26 @@
+# name: test/sql/read_ena_sequences_prefer_format.test
+# description: Test read_ena_sequences prefer_format and trim parameter validation (no network required)
+# group: [sql]
+
+require miint
+
+# ---- Invalid prefer_format values ----
+
+statement error
+SELECT * FROM read_ena_sequences('ERR1074767', prefer_format='invalid');
+----
+read_ena_sequences: prefer_format must be 'auto', 'fastq', or 'sff'
+
+statement error
+SELECT * FROM read_ena_sequences('ERR1074767', prefer_format='');
+----
+read_ena_sequences: prefer_format must be 'auto', 'fastq', or 'sff'
+
+# ---- trim parameter is accepted (proves it's registered as a named param) ----
+# If trim were unknown, this would error with "Unknown named parameter 'trim'"
+# instead of the prefer_format error.
+
+statement error
+SELECT * FROM read_ena_sequences('ERR1074767', trim=true, prefer_format='bad');
+----
+read_ena_sequences: prefer_format must be 'auto', 'fastq', or 'sff'

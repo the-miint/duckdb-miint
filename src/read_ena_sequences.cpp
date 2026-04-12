@@ -386,6 +386,22 @@ unique_ptr<FunctionData> ReadENASequencesTableFunction::Bind(ClientContext &cont
 		}
 	}
 
+	std::string prefer_format = "auto";
+	auto pf_param = input.named_parameters.find("prefer_format");
+	if (pf_param != input.named_parameters.end() && !pf_param->second.IsNull()) {
+		prefer_format = pf_param->second.ToString();
+		if (prefer_format != "auto" && prefer_format != "fastq" && prefer_format != "sff") {
+			throw InvalidInputException(
+			    "read_ena_sequences: prefer_format must be 'auto', 'fastq', or 'sff' (got '%s')", prefer_format);
+		}
+	}
+
+	bool trim = true;
+	auto trim_param = input.named_parameters.find("trim");
+	if (trim_param != input.named_parameters.end() && !trim_param->second.IsNull()) {
+		trim = trim_param->second.GetValue<bool>();
+	}
+
 	// Resolve accessions to run info via ENA Portal API
 	auto &db = DatabaseInstance::GetDatabase(context);
 	miint::ENAClient client(db);
@@ -718,6 +734,8 @@ TableFunction ReadENASequencesTableFunction::GetFunction() {
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
 	tf.named_parameters["qual_offset"] = LogicalType::BIGINT;
 	tf.named_parameters["download_method"] = LogicalType::VARCHAR;
+	tf.named_parameters["prefer_format"] = LogicalType::VARCHAR;
+	tf.named_parameters["trim"] = LogicalType::BOOLEAN;
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	tf.table_scan_progress = Progress;
 	return tf;
