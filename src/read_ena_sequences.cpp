@@ -9,10 +9,11 @@ namespace duckdb {
 
 // ---- Data ----
 
-ReadENASequencesTableFunction::Data::Data(std::vector<RunInfo> runs, bool include_fp, uint8_t offset)
-    : runs(std::move(runs)), include_filepath(include_fp), qual_offset(offset), use_aspera(false),
-      names({"sequence_index", "read_id", "comment", "sequence1", "sequence2", "qual1", "qual2", "run_accession",
-             "sample_accession", "experiment_accession"}),
+ReadENASequencesTableFunction::Data::Data(std::vector<RunInfo> runs, bool include_fp, uint8_t offset, bool trim,
+                                          const std::string &prefer_format)
+    : runs(std::move(runs)), include_filepath(include_fp), qual_offset(offset), use_aspera(false), trim(trim),
+      prefer_format(prefer_format), names({"sequence_index", "read_id", "comment", "sequence1", "sequence2", "qual1",
+                                           "qual2", "run_accession", "sample_accession", "experiment_accession"}),
       types({LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
              LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT), LogicalType::LIST(LogicalType::UTINYINT),
              LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}) {
@@ -25,15 +26,17 @@ ReadENASequencesTableFunction::Data::Data(std::vector<RunInfo> runs, bool includ
 // ---- GlobalState ----
 
 ReadENASequencesTableFunction::GlobalState::GlobalState(FileSystem &fs, const std::vector<RunInfo> &runs,
-                                                        bool use_aspera)
-    : runs(runs), next_run_idx(0), fs(fs), use_aspera(use_aspera), runs_completed(0), total_runs(runs.size()),
-      bytes_completed(0), skipped_warned(false) {
+                                                        bool use_aspera, bool trim)
+    : runs(runs), next_run_idx(0), fs(fs), use_aspera(use_aspera), trim(trim), runs_completed(0),
+      total_runs(runs.size()), bytes_completed(0), skipped_warned(false) {
 	uint64_t sum_bytes = 0;
 	for (const auto &r : runs) {
 		sum_bytes += r.total_bytes;
 	}
 	total_bytes = sum_bytes;
 	readers.resize(runs.size());
+	sff_readers.resize(runs.size());
+	sff_temp_paths.resize(runs.size());
 	run_sequence_counters.resize(runs.size(), 1);
 #if MIINT_ASPERA_SUPPORTED
 	aspera_processes.resize(runs.size());
@@ -42,6 +45,13 @@ ReadENASequencesTableFunction::GlobalState::GlobalState(FileSystem &fs, const st
 }
 
 ReadENASequencesTableFunction::GlobalState::~GlobalState() {
+	// Clean up SFF temp files
+	for (auto &path : sff_temp_paths) {
+		if (!path.empty()) {
+			std::remove(path.c_str());
+			path.clear();
+		}
+	}
 #if MIINT_ASPERA_SUPPORTED
 	for (auto &path : temp_file_paths) {
 		if (!path.empty()) {
@@ -88,6 +98,65 @@ void ReadENASequencesTableFunction::GlobalState::OpenReader(size_t run_idx) {
 			throw;
 		}
 	}
+}
+
+void ReadENASequencesTableFunction::GlobalState::OpenReaderSFF(size_t run_idx) {
+	if (sff_readers[run_idx]) {
+		return;
+	}
+	const auto &run = runs[run_idx];
+	if (run.sff_url.empty()) {
+		throw IOException("read_ena_sequences: no SFF URL available for run '%s'", run.run_accession);
+	}
+
+	// Serialize downloads to avoid overwhelming remote servers
+	lock_guard<mutex> open_guard(open_mutex);
+
+	// Download the SFF file to a local temp file via DuckDB's FileSystem
+	auto temp_dir = miint::GetTempDir();
+	auto temp_path = temp_dir + "/miint_ena_sff_XXXXXX";
+	std::vector<char> tmpl_buf(temp_path.begin(), temp_path.end());
+	tmpl_buf.push_back('\0');
+	int fd = mkstemp(tmpl_buf.data());
+	if (fd == -1) {
+		throw IOException("read_ena_sequences: failed to create temp file for SFF download");
+	}
+	temp_path = std::string(tmpl_buf.data());
+	sff_temp_paths[run_idx] = temp_path;
+
+	try {
+		// Download via DuckDB FileSystem (handles HTTPS)
+		auto source = fs.OpenFile(run.sff_url, FileOpenFlags(FileOpenFlags::FILE_FLAGS_READ));
+		static constexpr size_t DOWNLOAD_BUF_SIZE = 1048576; // 1MB
+		std::vector<char> buf(DOWNLOAD_BUF_SIZE);
+		while (true) {
+			auto bytes_read = source->Read(buf.data(), DOWNLOAD_BUF_SIZE);
+			if (bytes_read == 0) {
+				break;
+			}
+			size_t written = 0;
+			while (written < bytes_read) {
+				ssize_t w = write(fd, buf.data() + written, bytes_read - written);
+				if (w < 0) {
+					if (errno == EINTR) {
+						continue;
+					}
+					close(fd);
+					throw IOException("read_ena_sequences: failed writing SFF temp file for run '%s'",
+					                  run.run_accession);
+				}
+				written += static_cast<size_t>(w);
+			}
+		}
+		close(fd);
+	} catch (...) {
+		close(fd);
+		std::remove(temp_path.c_str());
+		sff_temp_paths[run_idx].clear();
+		throw;
+	}
+
+	sff_readers[run_idx] = std::make_unique<miint::SFFReader>(temp_path, trim);
 }
 
 #if MIINT_ASPERA_SUPPORTED
@@ -219,114 +288,167 @@ void ReadENASequencesTableFunction::GlobalState::OpenReaderAspera(size_t run_idx
 
 // ---- Bind ----
 
+// Helper: get column value from a TSV row, or empty string if not present
+static std::string GetCol(const std::vector<std::string> &row, int col) {
+	return (col >= 0 && col < static_cast<int>(row.size())) ? row[col] : "";
+}
+
 // Resolve accessions to run info via ENA Portal API
-static std::vector<ReadENASequencesTableFunction::RunInfo> ResolveRuns(miint::ENAClient &client,
-                                                                       const std::vector<std::string> &accessions) {
+static std::vector<ReadENASequencesTableFunction::RunInfo>
+ResolveRuns(miint::ENAClient &client, const std::vector<std::string> &accessions, const std::string &prefer_format) {
 	std::vector<ReadENASequencesTableFunction::RunInfo> runs;
 
 	for (const auto &acc : accessions) {
-		auto tsv = client.Search(
-		    acc, "read_run",
-		    "run_accession,sample_accession,experiment_accession,fastq_ftp,fastq_aspera,fastq_bytes,library_layout");
+		auto tsv = client.Search(acc, "read_run",
+		                         "run_accession,sample_accession,experiment_accession,"
+		                         "fastq_ftp,fastq_aspera,fastq_bytes,library_layout,"
+		                         "submitted_ftp,submitted_aspera,submitted_bytes,submitted_format");
 		auto parsed = miint::ENAParser::ParseTSV(tsv);
 
 		// Find column indices by name
 		int run_col = -1, sample_col = -1, exp_col = -1, ftp_col = -1, aspera_col = -1, bytes_col = -1, layout_col = -1;
+		int sub_ftp_col = -1, sub_aspera_col = -1, sub_bytes_col = -1, sub_format_col = -1;
 		for (size_t i = 0; i < parsed.column_names.size(); i++) {
-			if (parsed.column_names[i] == "run_accession")
+			const auto &name = parsed.column_names[i];
+			if (name == "run_accession")
 				run_col = static_cast<int>(i);
-			else if (parsed.column_names[i] == "sample_accession")
+			else if (name == "sample_accession")
 				sample_col = static_cast<int>(i);
-			else if (parsed.column_names[i] == "experiment_accession")
+			else if (name == "experiment_accession")
 				exp_col = static_cast<int>(i);
-			else if (parsed.column_names[i] == "fastq_ftp")
+			else if (name == "fastq_ftp")
 				ftp_col = static_cast<int>(i);
-			else if (parsed.column_names[i] == "fastq_aspera")
+			else if (name == "fastq_aspera")
 				aspera_col = static_cast<int>(i);
-			else if (parsed.column_names[i] == "fastq_bytes")
+			else if (name == "fastq_bytes")
 				bytes_col = static_cast<int>(i);
-			else if (parsed.column_names[i] == "library_layout")
+			else if (name == "library_layout")
 				layout_col = static_cast<int>(i);
+			else if (name == "submitted_ftp")
+				sub_ftp_col = static_cast<int>(i);
+			else if (name == "submitted_aspera")
+				sub_aspera_col = static_cast<int>(i);
+			else if (name == "submitted_bytes")
+				sub_bytes_col = static_cast<int>(i);
+			else if (name == "submitted_format")
+				sub_format_col = static_cast<int>(i);
 		}
 
 		for (const auto &row : parsed.rows) {
-			ReadENASequencesTableFunction::RunInfo info;
-			info.run_accession = (run_col >= 0 && run_col < (int)row.size()) ? row[run_col] : "";
-			info.sample_accession = (sample_col >= 0 && sample_col < (int)row.size()) ? row[sample_col] : "";
-			info.experiment_accession = (exp_col >= 0 && exp_col < (int)row.size()) ? row[exp_col] : "";
+			std::string run_accession = GetCol(row, run_col);
+			std::string sample_accession = GetCol(row, sample_col);
+			std::string experiment_accession = GetCol(row, exp_col);
+			std::string ftp_field = GetCol(row, ftp_col);
+			std::string aspera_field = GetCol(row, aspera_col);
+			std::string bytes_field = GetCol(row, bytes_col);
+			std::string layout = GetCol(row, layout_col);
 
-			std::string ftp_field = (ftp_col >= 0 && ftp_col < (int)row.size()) ? row[ftp_col] : "";
-			info.fastq_urls = miint::ENAParser::FTPtoHTTPS(ftp_field);
+			auto fastq_urls = miint::ENAParser::FTPtoHTTPS(ftp_field);
+			bool has_fastq = !fastq_urls.empty();
 
-			std::string aspera_field = (aspera_col >= 0 && aspera_col < (int)row.size()) ? row[aspera_col] : "";
-			info.aspera_paths = miint::AsperaUtils::ParseAsperaPaths(aspera_field);
+			// Check for submitted SFF files
+			std::string sub_ftp = GetCol(row, sub_ftp_col);
+			std::string sub_aspera = GetCol(row, sub_aspera_col);
+			std::string sub_bytes = GetCol(row, sub_bytes_col);
+			std::string sub_format = GetCol(row, sub_format_col);
+			auto sff_filter =
+			    miint::ENAParser::FilterSubmittedByFormat(sub_ftp, sub_aspera, sub_format, sub_bytes, "SFF");
+			bool has_sff = !sff_filter.urls.empty();
 
-			// Parse fastq_bytes (semicolon-separated, positionally aligned with fastq_ftp)
-			std::string bytes_field = (bytes_col >= 0 && bytes_col < (int)row.size()) ? row[bytes_col] : "";
-			std::vector<uint64_t> file_bytes;
-			if (!bytes_field.empty()) {
-				std::string::size_type bstart = 0;
-				while (true) {
-					auto bsemi = bytes_field.find(';', bstart);
-					std::string bs = (bsemi == std::string::npos) ? bytes_field.substr(bstart)
-					                                              : bytes_field.substr(bstart, bsemi - bstart);
-					try {
-						file_bytes.push_back(std::stoull(bs));
-					} catch (...) {
-						file_bytes.push_back(0);
-					}
-					if (bsemi == std::string::npos) {
-						break;
-					}
-					bstart = bsemi + 1;
-				}
+			// Decide format: prefer_format='sff' prefers SFF, 'auto' prefers FASTQ, 'fastq' forces FASTQ
+			bool use_sff = false;
+			if (prefer_format == "sff") {
+				use_sff = has_sff;
+			} else if (prefer_format == "auto") {
+				use_sff = !has_fastq && has_sff;
 			}
+			// prefer_format == "fastq": use_sff stays false
 
-			std::string layout = (layout_col >= 0 && layout_col < (int)row.size()) ? row[layout_col] : "";
-			info.is_paired = (layout == "PAIRED");
+			if (use_sff) {
+				// Flatten: one RunInfo per SFF file, all sharing the same accession metadata
+				for (size_t si = 0; si < sff_filter.urls.size(); si++) {
+					ReadENASequencesTableFunction::RunInfo info;
+					info.run_accession = run_accession;
+					info.sample_accession = sample_accession;
+					info.experiment_accession = experiment_accession;
+					info.format = ENASequenceFormat::SFF;
+					info.sff_url = sff_filter.urls[si];
+					info.is_paired = false; // SFF is always single-end
+					// Distribute bytes across SFF files (approximate)
+					if (sff_filter.urls.size() > 0) {
+						info.total_bytes = sff_filter.total_bytes / sff_filter.urls.size();
+					}
+					runs.push_back(std::move(info));
+				}
+			} else if (has_fastq) {
+				// Standard FASTQ path (existing behavior)
+				ReadENASequencesTableFunction::RunInfo info;
+				info.run_accession = run_accession;
+				info.sample_accession = sample_accession;
+				info.experiment_accession = experiment_accession;
+				info.fastq_urls = std::move(fastq_urls);
+				info.aspera_paths = miint::AsperaUtils::ParseAsperaPaths(aspera_field);
+				info.is_paired = (layout == "PAIRED");
 
-			// ENA sometimes returns 3 files for paired-end runs: unsplit + _1 + _2.
-			// Filter to only _1/_2 for paired-end so we don't accidentally use
-			// the unsplit file as R1. Also filter the corresponding byte sizes.
-			if (info.is_paired && info.fastq_urls.size() > 2) {
-				std::vector<std::string> filtered;
-				std::vector<uint64_t> filtered_bytes;
-				for (size_t fi = 0; fi < info.fastq_urls.size(); fi++) {
-					if (info.fastq_urls[fi].find("_1.fast") != std::string::npos ||
-					    info.fastq_urls[fi].find("_2.fast") != std::string::npos) {
-						filtered.push_back(info.fastq_urls[fi]);
-						if (fi < file_bytes.size()) {
-							filtered_bytes.push_back(file_bytes[fi]);
+				// Parse fastq_bytes
+				std::vector<uint64_t> file_bytes;
+				if (!bytes_field.empty()) {
+					std::string::size_type bstart = 0;
+					while (true) {
+						auto bsemi = bytes_field.find(';', bstart);
+						std::string bs = (bsemi == std::string::npos) ? bytes_field.substr(bstart)
+						                                              : bytes_field.substr(bstart, bsemi - bstart);
+						try {
+							file_bytes.push_back(std::stoull(bs));
+						} catch (...) {
+							file_bytes.push_back(0);
+						}
+						if (bsemi == std::string::npos) {
+							break;
+						}
+						bstart = bsemi + 1;
+					}
+				}
+
+				// ENA 3-file paired-end filtering (existing logic)
+				if (info.is_paired && info.fastq_urls.size() > 2) {
+					std::vector<std::string> filtered;
+					std::vector<uint64_t> filtered_bytes;
+					for (size_t fi = 0; fi < info.fastq_urls.size(); fi++) {
+						if (info.fastq_urls[fi].find("_1.fast") != std::string::npos ||
+						    info.fastq_urls[fi].find("_2.fast") != std::string::npos) {
+							filtered.push_back(info.fastq_urls[fi]);
+							if (fi < file_bytes.size()) {
+								filtered_bytes.push_back(file_bytes[fi]);
+							}
 						}
 					}
-				}
-				if (filtered.size() == 2) {
-					info.fastq_urls = std::move(filtered);
-					file_bytes = std::move(filtered_bytes);
-				}
-			}
-			if (info.is_paired && info.aspera_paths.size() > 2) {
-				std::vector<miint::AsperaPath> filtered;
-				for (const auto &ap : info.aspera_paths) {
-					if (ap.remote_path.find("_1.fast") != std::string::npos ||
-					    ap.remote_path.find("_2.fast") != std::string::npos) {
-						filtered.push_back(ap);
+					if (filtered.size() == 2) {
+						info.fastq_urls = std::move(filtered);
+						file_bytes = std::move(filtered_bytes);
 					}
 				}
-				if (filtered.size() == 2) {
-					info.aspera_paths = std::move(filtered);
+				if (info.is_paired && info.aspera_paths.size() > 2) {
+					std::vector<miint::AsperaPath> filtered;
+					for (const auto &ap : info.aspera_paths) {
+						if (ap.remote_path.find("_1.fast") != std::string::npos ||
+						    ap.remote_path.find("_2.fast") != std::string::npos) {
+							filtered.push_back(ap);
+						}
+					}
+					if (filtered.size() == 2) {
+						info.aspera_paths = std::move(filtered);
+					}
 				}
-			}
 
-			// Sum file sizes for this run
-			info.total_bytes = 0;
-			for (auto b : file_bytes) {
-				info.total_bytes += b;
-			}
+				info.total_bytes = 0;
+				for (auto b : file_bytes) {
+					info.total_bytes += b;
+				}
 
-			if (!info.fastq_urls.empty()) {
 				runs.push_back(std::move(info));
 			}
+			// else: no FASTQ and no SFF (or prefer_format='fastq' with no FASTQ) — skip run
 		}
 	}
 
@@ -405,13 +527,13 @@ unique_ptr<FunctionData> ReadENASequencesTableFunction::Bind(ClientContext &cont
 	// Resolve accessions to run info via ENA Portal API
 	auto &db = DatabaseInstance::GetDatabase(context);
 	miint::ENAClient client(db);
-	auto runs = ResolveRuns(client, accessions);
+	auto runs = ResolveRuns(client, accessions, prefer_format);
 
 	if (runs.empty()) {
-		throw IOException("read_ena_sequences: no FASTQ data found for the provided accession(s)");
+		throw IOException("read_ena_sequences: no sequence data found for the provided accession(s)");
 	}
 
-	auto data = make_uniq<Data>(std::move(runs), include_filepath, qual_offset);
+	auto data = make_uniq<Data>(std::move(runs), include_filepath, qual_offset, trim, prefer_format);
 
 	// Determine whether to use Aspera
 	data->use_aspera = false;
@@ -423,10 +545,10 @@ unique_ptr<FunctionData> ReadENASequencesTableFunction::Bind(ClientContext &cont
 			                  "Install IBM Aspera CLI or use download_method='http'");
 		}
 		if (aspera_available) {
-			// Check that ALL runs have aspera paths (required for single-process stdio-tar)
+			// Check that all FASTX runs have aspera paths (SFF runs use HTTP only)
 			bool all_have_aspera = true;
 			for (const auto &run : data->runs) {
-				if (run.aspera_paths.empty()) {
+				if (run.format == ENASequenceFormat::FASTX && run.aspera_paths.empty()) {
 					all_have_aspera = false;
 					break;
 				}
@@ -466,7 +588,7 @@ unique_ptr<GlobalTableFunctionState> ReadENASequencesTableFunction::InitGlobal(C
                                                                                TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	FileSystem &fs = FileSystem::GetFileSystem(context);
-	auto state = make_uniq<GlobalState>(fs, data.runs, data.use_aspera);
+	auto state = make_uniq<GlobalState>(fs, data.runs, data.use_aspera, data.trim);
 
 #if MIINT_ASPERA_SUPPORTED
 	if (data.use_aspera) {
@@ -495,7 +617,16 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 
 	// Helper: tear down a failed run's reader and process
 	auto cleanup_run = [&](size_t idx) {
-		global_state.readers[idx].reset();
+		auto &run = global_state.runs[idx];
+		if (run.format == ENASequenceFormat::SFF) {
+			global_state.sff_readers[idx].reset();
+			if (!global_state.sff_temp_paths[idx].empty()) {
+				std::remove(global_state.sff_temp_paths[idx].c_str());
+				global_state.sff_temp_paths[idx].clear();
+			}
+		} else {
+			global_state.readers[idx].reset();
+		}
 #if MIINT_ASPERA_SUPPORTED
 		if (global_state.use_aspera && global_state.aspera_processes[idx]) {
 			global_state.aspera_processes[idx].reset();
@@ -509,15 +640,20 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 
 	// Helper: open reader for the current run
 	auto open_run = [&](size_t idx) {
-#if MIINT_ASPERA_SUPPORTED
-		if (global_state.use_aspera) {
-			global_state.OpenReaderAspera(idx);
+		auto &run = global_state.runs[idx];
+		if (run.format == ENASequenceFormat::SFF) {
+			global_state.OpenReaderSFF(idx);
 		} else {
-			global_state.OpenReader(idx);
-		}
+#if MIINT_ASPERA_SUPPORTED
+			if (global_state.use_aspera) {
+				global_state.OpenReaderAspera(idx);
+			} else {
+				global_state.OpenReader(idx);
+			}
 #else
-		global_state.OpenReader(idx);
+			global_state.OpenReader(idx);
 #endif
+		}
 	};
 
 	// Claim-read-release loop (same pattern as read_fastx)
@@ -581,11 +717,21 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 		}
 
 		current_run_idx = local_state.current_run_idx;
+
+		// Read batch — dispatch based on format
+		auto read_batch = [&]() -> miint::SequenceRecordBatch {
+			auto &run = global_state.runs[current_run_idx];
+			if (run.format == ENASequenceFormat::SFF) {
+				return global_state.sff_readers[current_run_idx]->read(STANDARD_VECTOR_SIZE);
+			} else {
+				return global_state.readers[current_run_idx]->read(STANDARD_VECTOR_SIZE);
+			}
+		};
+
 		try {
-			batch = global_state.readers[current_run_idx]->read(STANDARD_VECTOR_SIZE);
+			batch = read_batch();
 		} catch (const std::exception &e) {
-			// Mid-stream read failure (e.g., truncated stream, mismatched R1/R2).
-			// Tear down and retry the entire run from scratch.
+			// Mid-stream read failure. Tear down and retry from scratch.
 			auto &run = global_state.runs[current_run_idx];
 			Printer::PrintF("read_ena_sequences: warning: run '%s' failed mid-stream (%s), retrying...",
 			                run.run_accession, e.what());
@@ -593,7 +739,7 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 			global_state.run_sequence_counters[current_run_idx] = 1;
 			try {
 				open_run(current_run_idx);
-				batch = global_state.readers[current_run_idx]->read(STANDARD_VECTOR_SIZE);
+				batch = read_batch();
 			} catch (const std::exception &e2) {
 				Printer::PrintF("read_ena_sequences: warning: run '%s' failed on retry (%s), skipping",
 				                run.run_accession, e2.what());
@@ -611,14 +757,23 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 
 		if (batch.empty()) {
 			// Run completed successfully — release resources
-			global_state.readers[current_run_idx].reset();
+			auto &completed_run = global_state.runs[current_run_idx];
+			if (completed_run.format == ENASequenceFormat::SFF) {
+				global_state.sff_readers[current_run_idx].reset();
+				if (!global_state.sff_temp_paths[current_run_idx].empty()) {
+					std::remove(global_state.sff_temp_paths[current_run_idx].c_str());
+					global_state.sff_temp_paths[current_run_idx].clear();
+				}
+			} else {
+				global_state.readers[current_run_idx].reset();
+			}
 #if MIINT_ASPERA_SUPPORTED
 			if (global_state.use_aspera && global_state.aspera_processes[current_run_idx]) {
 				int exit_code = global_state.aspera_processes[current_run_idx]->WaitForExit();
 				global_state.aspera_processes[current_run_idx].reset();
 				if (exit_code != 0 && exit_code != -1) {
 					throw IOException("read_ena_sequences: ascp exited with code %d for run '%s'", exit_code,
-					                  global_state.runs[current_run_idx].run_accession);
+					                  completed_run.run_accession);
 				}
 			}
 			if (!global_state.temp_file_paths[current_run_idx].empty()) {
@@ -681,15 +836,17 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 	// experiment_accession (column 9) - constant
 	SetResultVectorFilepath(output.data[field_idx++], run.experiment_accession);
 
-	// filepath (column 10) - optional, semicolon-separated for paired-end
+	// filepath (column 10) - optional
 	if (bind_data.include_filepath) {
 		std::string filepath;
-		if (bind_data.use_aspera && !run.aspera_paths.empty()) {
+		if (run.format == ENASequenceFormat::SFF) {
+			filepath = run.sff_url;
+		} else if (bind_data.use_aspera && !run.aspera_paths.empty()) {
 			filepath = run.aspera_paths[0].host + ":" + run.aspera_paths[0].remote_path;
 			for (size_t u = 1; u < run.aspera_paths.size(); u++) {
 				filepath += ";" + run.aspera_paths[u].host + ":" + run.aspera_paths[u].remote_path;
 			}
-		} else {
+		} else if (!run.fastq_urls.empty()) {
 			filepath = run.fastq_urls[0];
 			for (size_t u = 1; u < run.fastq_urls.size(); u++) {
 				filepath += ";" + run.fastq_urls[u];
