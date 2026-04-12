@@ -41,6 +41,7 @@ TEST_CASE("AsperaUtils path parsing", "[aspera]") {
 	}
 }
 
+#if !defined(_WIN32)
 TEST_CASE("GetTempDir respects TMPDIR", "[aspera]") {
 	SECTION("returns /tmp when TMPDIR unset") {
 		unsetenv("TMPDIR");
@@ -57,6 +58,7 @@ TEST_CASE("GetTempDir respects TMPDIR", "[aspera]") {
 		unsetenv("TMPDIR");
 	}
 }
+#endif
 
 TEST_CASE("AsperaUtils config building", "[aspera]") {
 	auto config = miint::AsperaUtils::BuildConfig("/usr/bin/ascp", "/home/user/.aspera/key.openssh");
