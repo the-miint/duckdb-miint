@@ -57,15 +57,17 @@ public:
 		FileSystem &fs;
 		bool use_aspera;
 
+		// Progress tracking
+		std::atomic<idx_t> runs_completed;
+		idx_t total_runs;
+
 #if MIINT_ASPERA_SUPPORTED
-		std::unique_ptr<miint::AsperaProcess> aspera_process;
-		std::string temp_file_path; // For paired-end R1 buffering
+		std::vector<std::unique_ptr<miint::AsperaProcess>> aspera_processes;
+		std::vector<std::string> temp_file_paths;
+		miint::AsperaConfig aspera_config;
 #endif
 
 		idx_t MaxThreads() const override {
-			if (use_aspera) {
-				return 1; // Pipe is sequential
-			}
 			return std::min<idx_t>(runs.size(), 8);
 		}
 
@@ -96,6 +98,8 @@ public:
 	static unique_ptr<LocalTableFunctionState> InitLocal(ExecutionContext &context, TableFunctionInitInput &input,
 	                                                     GlobalTableFunctionState *global_state);
 	static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
+	static double Progress(ClientContext &context, const FunctionData *bind_data,
+	                       const GlobalTableFunctionState *global_state);
 	static TableFunction GetFunction();
 	static void Register(ExtensionLoader &loader);
 };

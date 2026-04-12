@@ -41,6 +41,23 @@ TEST_CASE("AsperaUtils path parsing", "[aspera]") {
 	}
 }
 
+TEST_CASE("GetTempDir respects TMPDIR", "[aspera]") {
+	SECTION("returns /tmp when TMPDIR unset") {
+		unsetenv("TMPDIR");
+		REQUIRE(miint::GetTempDir() == "/tmp");
+	}
+	SECTION("returns TMPDIR value when set") {
+		setenv("TMPDIR", "/my/custom/tmp", 1);
+		REQUIRE(miint::GetTempDir() == "/my/custom/tmp");
+		unsetenv("TMPDIR");
+	}
+	SECTION("returns /tmp when TMPDIR is empty") {
+		setenv("TMPDIR", "", 1);
+		REQUIRE(miint::GetTempDir() == "/tmp");
+		unsetenv("TMPDIR");
+	}
+}
+
 TEST_CASE("AsperaUtils config building", "[aspera]") {
 	auto config = miint::AsperaUtils::BuildConfig("/usr/bin/ascp", "/home/user/.aspera/key.openssh");
 	CHECK(config.ascp_path == "/usr/bin/ascp");
