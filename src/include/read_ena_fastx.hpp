@@ -30,6 +30,7 @@ public:
 		std::vector<std::string> fastq_urls;         // HTTPS URLs (1 for single-end, 2 for paired-end)
 		std::vector<miint::AsperaPath> aspera_paths; // Parsed host + remote_path pairs
 		bool is_paired;
+		uint64_t total_bytes = 0; // Sum of fastq_bytes for files in this run (0 if unavailable)
 	};
 
 	struct Data : public TableFunctionData {
@@ -57,13 +58,16 @@ public:
 		FileSystem &fs;
 		bool use_aspera;
 
-		// Progress tracking
+		// Progress tracking (byte-based when fastq_bytes available, run-count fallback)
 		std::atomic<idx_t> runs_completed;
 		idx_t total_runs;
+		std::atomic<uint64_t> bytes_completed;
+		uint64_t total_bytes; // Sum across all runs; 0 means fall back to run-count progress
 
 		// Skipped runs (transient failures after retry)
 		mutex skipped_lock;
 		std::vector<std::string> skipped_runs;
+		std::atomic<bool> skipped_warned;
 
 #if MIINT_ASPERA_SUPPORTED
 		std::vector<std::unique_ptr<miint::AsperaProcess>> aspera_processes;

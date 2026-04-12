@@ -25,7 +25,13 @@ ReadENAFastxTableFunction::Data::Data(std::vector<RunInfo> runs, bool include_fp
 // ---- GlobalState ----
 
 ReadENAFastxTableFunction::GlobalState::GlobalState(FileSystem &fs, const std::vector<RunInfo> &runs, bool use_aspera)
-    : runs(runs), next_run_idx(0), fs(fs), use_aspera(use_aspera), runs_completed(0), total_runs(runs.size()) {
+    : runs(runs), next_run_idx(0), fs(fs), use_aspera(use_aspera), runs_completed(0), total_runs(runs.size()),
+      bytes_completed(0), skipped_warned(false) {
+	uint64_t sum_bytes = 0;
+	for (const auto &r : runs) {
+		sum_bytes += r.total_bytes;
+	}
+	total_bytes = sum_bytes;
 	readers.resize(runs.size());
 	run_sequence_counters.resize(runs.size(), 1);
 #if MIINT_ASPERA_SUPPORTED
@@ -217,13 +223,13 @@ static std::vector<ReadENAFastxTableFunction::RunInfo> ResolveRuns(miint::ENACli
 	std::vector<ReadENAFastxTableFunction::RunInfo> runs;
 
 	for (const auto &acc : accessions) {
-		auto tsv =
-		    client.Search(acc, "read_run",
-		                  "run_accession,sample_accession,experiment_accession,fastq_ftp,fastq_aspera,library_layout");
+		auto tsv = client.Search(
+		    acc, "read_run",
+		    "run_accession,sample_accession,experiment_accession,fastq_ftp,fastq_aspera,fastq_bytes,library_layout");
 		auto parsed = miint::ENAParser::ParseTSV(tsv);
 
 		// Find column indices by name
-		int run_col = -1, sample_col = -1, exp_col = -1, ftp_col = -1, aspera_col = -1, layout_col = -1;
+		int run_col = -1, sample_col = -1, exp_col = -1, ftp_col = -1, aspera_col = -1, bytes_col = -1, layout_col = -1;
 		for (size_t i = 0; i < parsed.column_names.size(); i++) {
 			if (parsed.column_names[i] == "run_accession")
 				run_col = static_cast<int>(i);
@@ -235,6 +241,8 @@ static std::vector<ReadENAFastxTableFunction::RunInfo> ResolveRuns(miint::ENACli
 				ftp_col = static_cast<int>(i);
 			else if (parsed.column_names[i] == "fastq_aspera")
 				aspera_col = static_cast<int>(i);
+			else if (parsed.column_names[i] == "fastq_bytes")
+				bytes_col = static_cast<int>(i);
 			else if (parsed.column_names[i] == "library_layout")
 				layout_col = static_cast<int>(i);
 		}
@@ -251,22 +259,48 @@ static std::vector<ReadENAFastxTableFunction::RunInfo> ResolveRuns(miint::ENACli
 			std::string aspera_field = (aspera_col >= 0 && aspera_col < (int)row.size()) ? row[aspera_col] : "";
 			info.aspera_paths = miint::AsperaUtils::ParseAsperaPaths(aspera_field);
 
+			// Parse fastq_bytes (semicolon-separated, positionally aligned with fastq_ftp)
+			std::string bytes_field = (bytes_col >= 0 && bytes_col < (int)row.size()) ? row[bytes_col] : "";
+			std::vector<uint64_t> file_bytes;
+			if (!bytes_field.empty()) {
+				std::string::size_type bstart = 0;
+				while (true) {
+					auto bsemi = bytes_field.find(';', bstart);
+					std::string bs = (bsemi == std::string::npos) ? bytes_field.substr(bstart)
+					                                              : bytes_field.substr(bstart, bsemi - bstart);
+					try {
+						file_bytes.push_back(std::stoull(bs));
+					} catch (...) {
+						file_bytes.push_back(0);
+					}
+					if (bsemi == std::string::npos) {
+						break;
+					}
+					bstart = bsemi + 1;
+				}
+			}
+
 			std::string layout = (layout_col >= 0 && layout_col < (int)row.size()) ? row[layout_col] : "";
 			info.is_paired = (layout == "PAIRED");
 
 			// ENA sometimes returns 3 files for paired-end runs: unsplit + _1 + _2.
 			// Filter to only _1/_2 for paired-end so we don't accidentally use
-			// the unsplit file as R1.
+			// the unsplit file as R1. Also filter the corresponding byte sizes.
 			if (info.is_paired && info.fastq_urls.size() > 2) {
 				std::vector<std::string> filtered;
-				for (const auto &url : info.fastq_urls) {
-					// Match _1.fastq or _2.fastq (with optional .gz)
-					if (url.find("_1.fast") != std::string::npos || url.find("_2.fast") != std::string::npos) {
-						filtered.push_back(url);
+				std::vector<uint64_t> filtered_bytes;
+				for (size_t fi = 0; fi < info.fastq_urls.size(); fi++) {
+					if (info.fastq_urls[fi].find("_1.fast") != std::string::npos ||
+					    info.fastq_urls[fi].find("_2.fast") != std::string::npos) {
+						filtered.push_back(info.fastq_urls[fi]);
+						if (fi < file_bytes.size()) {
+							filtered_bytes.push_back(file_bytes[fi]);
+						}
 					}
 				}
 				if (filtered.size() == 2) {
 					info.fastq_urls = std::move(filtered);
+					file_bytes = std::move(filtered_bytes);
 				}
 			}
 			if (info.is_paired && info.aspera_paths.size() > 2) {
@@ -280,6 +314,12 @@ static std::vector<ReadENAFastxTableFunction::RunInfo> ResolveRuns(miint::ENACli
 				if (filtered.size() == 2) {
 					info.aspera_paths = std::move(filtered);
 				}
+			}
+
+			// Sum file sizes for this run
+			info.total_bytes = 0;
+			for (auto b : file_bytes) {
+				info.total_bytes += b;
 			}
 
 			if (!info.fastq_urls.empty()) {
@@ -465,29 +505,35 @@ void ReadENAFastxTableFunction::Execute(ClientContext &context, TableFunctionInp
 	// Claim-read-release loop (same pattern as read_fastx)
 	while (true) {
 		if (!local_state.has_run) {
+			bool all_claimed = false;
 			{
 				lock_guard<mutex> read_lock(global_state.lock);
 				if (global_state.next_run_idx >= global_state.runs.size()) {
-					// Report skipped runs as a warning so the user knows
-					if (!global_state.skipped_runs.empty()) {
-						lock_guard<mutex> skip_guard(global_state.skipped_lock);
-						if (!global_state.skipped_runs.empty()) {
-							std::string msg =
-							    "read_ena_fastx: WARNING: " + std::to_string(global_state.skipped_runs.size()) +
-							    " run(s) skipped due to download errors:";
-							for (const auto &acc : global_state.skipped_runs) {
-								msg += " " + acc;
-							}
-							Printer::Print(msg);
-						}
-					}
-					output.SetCardinality(0);
-					return;
+					all_claimed = true;
+				} else {
+					local_state.current_run_idx = global_state.next_run_idx;
+					global_state.next_run_idx++;
+					local_state.has_run = true;
 				}
-				local_state.current_run_idx = global_state.next_run_idx;
-				global_state.next_run_idx++;
-				local_state.has_run = true;
-			} // Lock released before I/O
+			} // Lock released before I/O or warning output
+
+			if (all_claimed) {
+				// Print skipped-runs warning exactly once across all threads
+				if (!global_state.skipped_warned.exchange(true, std::memory_order_acq_rel)) {
+					lock_guard<mutex> skip_guard(global_state.skipped_lock);
+					if (!global_state.skipped_runs.empty()) {
+						std::string msg =
+						    "read_ena_fastx: WARNING: " + std::to_string(global_state.skipped_runs.size()) +
+						    " run(s) skipped due to download errors:";
+						for (const auto &acc : global_state.skipped_runs) {
+							msg += " " + acc;
+						}
+						Printer::Print(msg);
+					}
+				}
+				output.SetCardinality(0);
+				return;
+			}
 
 			// Open reader — retry once on failure before skipping
 			try {
@@ -508,6 +554,7 @@ void ReadENAFastxTableFunction::Execute(ClientContext &context, TableFunctionInp
 						lock_guard<mutex> skip_guard(global_state.skipped_lock);
 						global_state.skipped_runs.push_back(run.run_accession);
 					}
+					global_state.bytes_completed.fetch_add(run.total_bytes, std::memory_order_relaxed);
 					global_state.runs_completed.fetch_add(1, std::memory_order_relaxed);
 					local_state.has_run = false;
 					continue;
@@ -537,6 +584,7 @@ void ReadENAFastxTableFunction::Execute(ClientContext &context, TableFunctionInp
 					lock_guard<mutex> skip_guard(global_state.skipped_lock);
 					global_state.skipped_runs.push_back(run.run_accession);
 				}
+				global_state.bytes_completed.fetch_add(run.total_bytes, std::memory_order_relaxed);
 				global_state.runs_completed.fetch_add(1, std::memory_order_relaxed);
 				local_state.has_run = false;
 				continue;
@@ -560,6 +608,8 @@ void ReadENAFastxTableFunction::Execute(ClientContext &context, TableFunctionInp
 				global_state.temp_file_paths[current_run_idx].clear();
 			}
 #endif
+			global_state.bytes_completed.fetch_add(global_state.runs[current_run_idx].total_bytes,
+			                                       std::memory_order_relaxed);
 			global_state.runs_completed.fetch_add(1, std::memory_order_relaxed);
 			local_state.has_run = false;
 			continue;
@@ -644,13 +694,18 @@ double ReadENAFastxTableFunction::Progress(ClientContext &context, const Functio
 	if (state.total_runs == 0) {
 		return 100.0;
 	}
-	idx_t completed = state.runs_completed.load(std::memory_order_relaxed);
-	if (completed == 0) {
-		// Work is in progress (downloading) but no run has completed yet.
-		// Return a small positive value so the shell progress bar's time
-		// remaining estimator does not divide by zero progress rate.
-		return 0.5;
+
+	// Prefer byte-based progress when ENA provided fastq_bytes metadata.
+	// Falls back to run-count progress when byte sizes are unavailable.
+	// Returning 0.0 when no work is done is safe — DuckDB's Kalman filter
+	// defers initialization until progress > 0.
+	if (state.total_bytes > 0) {
+		uint64_t done = state.bytes_completed.load(std::memory_order_relaxed);
+		return std::min(100.0, static_cast<double>(done) / static_cast<double>(state.total_bytes) * 100.0);
 	}
+
+	// Fallback: run-count based progress
+	idx_t completed = state.runs_completed.load(std::memory_order_relaxed);
 	return std::min(100.0, static_cast<double>(completed) / static_cast<double>(state.total_runs) * 100.0);
 }
 
