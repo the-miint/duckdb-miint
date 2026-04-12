@@ -240,6 +240,71 @@ std::vector<SampleAttribute> ENAParser::ParseSampleAttributesXML(const std::stri
 	return state.attributes;
 }
 
+// ---- Filter submitted files by format ----
+
+// Split a semicolon-delimited string into a vector of strings.
+static std::vector<std::string> SplitSemicolon(const std::string &field) {
+	std::vector<std::string> parts;
+	if (field.empty()) {
+		return parts;
+	}
+	std::string::size_type start = 0;
+	while (true) {
+		auto pos = field.find(';', start);
+		if (pos == std::string::npos) {
+			parts.push_back(field.substr(start));
+			break;
+		}
+		parts.push_back(field.substr(start, pos - start));
+		start = pos + 1;
+	}
+	return parts;
+}
+
+ENAParser::SubmittedFilterResult ENAParser::FilterSubmittedByFormat(const std::string &submitted_ftp,
+                                                                    const std::string &submitted_aspera,
+                                                                    const std::string &submitted_format,
+                                                                    const std::string &submitted_bytes,
+                                                                    const std::string &target_format) {
+	SubmittedFilterResult result;
+
+	auto ftp_parts = SplitSemicolon(submitted_ftp);
+	auto aspera_parts = SplitSemicolon(submitted_aspera);
+	auto format_parts = SplitSemicolon(submitted_format);
+	auto bytes_parts = SplitSemicolon(submitted_bytes);
+
+	// Use minimum count across ftp and format (both are required)
+	size_t count = std::min(ftp_parts.size(), format_parts.size());
+
+	for (size_t i = 0; i < count; i++) {
+		if (format_parts[i] != target_format) {
+			continue;
+		}
+
+		// Convert FTP path to HTTPS URL
+		auto urls = FTPtoHTTPS(ftp_parts[i]);
+		if (!urls.empty()) {
+			result.urls.push_back(std::move(urls[0]));
+		}
+
+		// Preserve raw aspera entry if available at this index
+		if (i < aspera_parts.size() && !aspera_parts[i].empty()) {
+			result.aspera_raw.push_back(aspera_parts[i]);
+		}
+
+		// Accumulate bytes
+		if (i < bytes_parts.size()) {
+			try {
+				result.total_bytes += std::stoull(bytes_parts[i]);
+			} catch (...) {
+				// Invalid number — treat as 0
+			}
+		}
+	}
+
+	return result;
+}
+
 // ---- FTP to HTTPS ----
 
 std::vector<std::string> ENAParser::FTPtoHTTPS(const std::string &ftp_field) {
