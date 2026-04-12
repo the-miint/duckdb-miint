@@ -1,5 +1,5 @@
-# name: test/sql/read_ena_fastx.test
-# description: Test read_ena_fastx table function
+# name: test/sql/read_ena_sequences.test
+# description: Test read_ena_sequences table function
 # group: [sql]
 
 # NOTE: This test requires network access to EBI/ENA servers.
@@ -12,14 +12,14 @@ require miint
 # ---- Error handling ----
 
 statement error
-SELECT * FROM read_ena_fastx('');
+SELECT * FROM read_ena_sequences('');
 ----
-read_ena_fastx: accession cannot be empty
+read_ena_sequences: accession cannot be empty
 
 # ---- Schema (no filepath by default) ----
 
 query IIIIII
-DESCRIBE SELECT * FROM read_ena_fastx('ERR1074767');
+DESCRIBE SELECT * FROM read_ena_sequences('ERR1074767');
 ----
 sequence_index	BIGINT	YES	NULL	NULL	NULL
 read_id	VARCHAR	YES	NULL	NULL	NULL
@@ -35,7 +35,7 @@ experiment_accession	VARCHAR	YES	NULL	NULL	NULL
 # ---- Stream reads from a single run ----
 
 statement ok
-CREATE TEMP TABLE ena_reads AS SELECT * FROM read_ena_fastx('ERR1074767') LIMIT 10;
+CREATE TEMP TABLE ena_reads AS SELECT * FROM read_ena_sequences('ERR1074767') LIMIT 10;
 
 query I
 SELECT COUNT(*) FROM ena_reads;
@@ -82,7 +82,7 @@ true
 # ---- Schema with include_filepath ----
 
 query IIIIII
-DESCRIBE SELECT * FROM read_ena_fastx('ERR1074767', include_filepath=true);
+DESCRIBE SELECT * FROM read_ena_sequences('ERR1074767', include_filepath=true);
 ----
 sequence_index	BIGINT	YES	NULL	NULL	NULL
 read_id	VARCHAR	YES	NULL	NULL	NULL
@@ -98,6 +98,6 @@ filepath	VARCHAR	YES	NULL	NULL	NULL
 
 # filepath should contain ebi.ac.uk
 query I
-SELECT filepath LIKE '%ebi.ac.uk%' AS has_ebi FROM read_ena_fastx('ERR1074767', include_filepath=true) LIMIT 1;
+SELECT filepath LIKE '%ebi.ac.uk%' AS has_ebi FROM read_ena_sequences('ERR1074767', include_filepath=true) LIMIT 1;
 ----
 true
