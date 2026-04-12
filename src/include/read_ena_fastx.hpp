@@ -61,6 +61,10 @@ public:
 		std::atomic<idx_t> runs_completed;
 		idx_t total_runs;
 
+		// Skipped runs (transient failures after retry)
+		mutex skipped_lock;
+		std::vector<std::string> skipped_runs;
+
 #if MIINT_ASPERA_SUPPORTED
 		std::vector<std::unique_ptr<miint::AsperaProcess>> aspera_processes;
 		std::vector<std::string> temp_file_paths;

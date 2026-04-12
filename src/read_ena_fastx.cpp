@@ -1,5 +1,6 @@
 #include "read_ena_fastx.hpp"
 #include "SequenceRecord.hpp"
+#include "duckdb/common/printer.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include <cerrno>
 #include <fstream>
@@ -434,12 +435,52 @@ void ReadENAFastxTableFunction::Execute(ClientContext &context, TableFunctionInp
 	miint::SequenceRecordBatch batch;
 	size_t current_run_idx;
 
+	// Helper: tear down a failed run's reader and process
+	auto cleanup_run = [&](size_t idx) {
+		global_state.readers[idx].reset();
+#if MIINT_ASPERA_SUPPORTED
+		if (global_state.use_aspera && global_state.aspera_processes[idx]) {
+			global_state.aspera_processes[idx].reset();
+		}
+		if (!global_state.temp_file_paths[idx].empty()) {
+			std::remove(global_state.temp_file_paths[idx].c_str());
+			global_state.temp_file_paths[idx].clear();
+		}
+#endif
+	};
+
+	// Helper: open reader for the current run
+	auto open_run = [&](size_t idx) {
+#if MIINT_ASPERA_SUPPORTED
+		if (global_state.use_aspera) {
+			global_state.OpenReaderAspera(idx);
+		} else {
+			global_state.OpenReader(idx);
+		}
+#else
+		global_state.OpenReader(idx);
+#endif
+	};
+
 	// Claim-read-release loop (same pattern as read_fastx)
 	while (true) {
 		if (!local_state.has_run) {
 			{
 				lock_guard<mutex> read_lock(global_state.lock);
 				if (global_state.next_run_idx >= global_state.runs.size()) {
+					// Report skipped runs as a warning so the user knows
+					if (!global_state.skipped_runs.empty()) {
+						lock_guard<mutex> skip_guard(global_state.skipped_lock);
+						if (!global_state.skipped_runs.empty()) {
+							std::string msg =
+							    "read_ena_fastx: WARNING: " + std::to_string(global_state.skipped_runs.size()) +
+							    " run(s) skipped due to download errors:";
+							for (const auto &acc : global_state.skipped_runs) {
+								msg += " " + acc;
+							}
+							Printer::Print(msg);
+						}
+					}
 					output.SetCardinality(0);
 					return;
 				}
@@ -448,24 +489,62 @@ void ReadENAFastxTableFunction::Execute(ClientContext &context, TableFunctionInp
 				local_state.has_run = true;
 			} // Lock released before I/O
 
-			// Open reader without holding the lock — safe because this thread
-			// has exclusive ownership of the claimed run index
-#if MIINT_ASPERA_SUPPORTED
-			if (global_state.use_aspera) {
-				global_state.OpenReaderAspera(local_state.current_run_idx);
-			} else {
-				global_state.OpenReader(local_state.current_run_idx);
+			// Open reader — retry once on failure before skipping
+			try {
+				open_run(local_state.current_run_idx);
+			} catch (const std::exception &e) {
+				auto &run = global_state.runs[local_state.current_run_idx];
+				Printer::PrintF("read_ena_fastx: warning: run '%s' failed to open (%s), retrying...", run.run_accession,
+				                e.what());
+				cleanup_run(local_state.current_run_idx);
+				global_state.run_sequence_counters[local_state.current_run_idx] = 1;
+				try {
+					open_run(local_state.current_run_idx);
+				} catch (const std::exception &e2) {
+					Printer::PrintF("read_ena_fastx: warning: run '%s' failed on retry (%s), skipping",
+					                run.run_accession, e2.what());
+					cleanup_run(local_state.current_run_idx);
+					{
+						lock_guard<mutex> skip_guard(global_state.skipped_lock);
+						global_state.skipped_runs.push_back(run.run_accession);
+					}
+					global_state.runs_completed.fetch_add(1, std::memory_order_relaxed);
+					local_state.has_run = false;
+					continue;
+				}
 			}
-#else
-			global_state.OpenReader(local_state.current_run_idx);
-#endif
 		}
 
 		current_run_idx = local_state.current_run_idx;
-		batch = global_state.readers[current_run_idx]->read(STANDARD_VECTOR_SIZE);
+		try {
+			batch = global_state.readers[current_run_idx]->read(STANDARD_VECTOR_SIZE);
+		} catch (const std::exception &e) {
+			// Mid-stream read failure (e.g., truncated stream, mismatched R1/R2).
+			// Tear down and retry the entire run from scratch.
+			auto &run = global_state.runs[current_run_idx];
+			Printer::PrintF("read_ena_fastx: warning: run '%s' failed mid-stream (%s), retrying...", run.run_accession,
+			                e.what());
+			cleanup_run(current_run_idx);
+			global_state.run_sequence_counters[current_run_idx] = 1;
+			try {
+				open_run(current_run_idx);
+				batch = global_state.readers[current_run_idx]->read(STANDARD_VECTOR_SIZE);
+			} catch (const std::exception &e2) {
+				Printer::PrintF("read_ena_fastx: warning: run '%s' failed on retry (%s), skipping", run.run_accession,
+				                e2.what());
+				cleanup_run(current_run_idx);
+				{
+					lock_guard<mutex> skip_guard(global_state.skipped_lock);
+					global_state.skipped_runs.push_back(run.run_accession);
+				}
+				global_state.runs_completed.fetch_add(1, std::memory_order_relaxed);
+				local_state.has_run = false;
+				continue;
+			}
+		}
 
 		if (batch.empty()) {
-			// Release the reader to free the HTTP connection (or Aspera pipe slot)
+			// Run completed successfully — release resources
 			global_state.readers[current_run_idx].reset();
 #if MIINT_ASPERA_SUPPORTED
 			if (global_state.use_aspera && global_state.aspera_processes[current_run_idx]) {
