@@ -1,6 +1,8 @@
 #include "read_ena_fastx.hpp"
 #include "SequenceRecord.hpp"
+#include "duckdb/common/printer.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include <cerrno>
 #include <fstream>
 
 namespace duckdb {
@@ -23,19 +25,24 @@ ReadENAFastxTableFunction::Data::Data(std::vector<RunInfo> runs, bool include_fp
 // ---- GlobalState ----
 
 ReadENAFastxTableFunction::GlobalState::GlobalState(FileSystem &fs, const std::vector<RunInfo> &runs, bool use_aspera)
-    : runs(runs), next_run_idx(0), fs(fs), use_aspera(use_aspera) {
+    : runs(runs), next_run_idx(0), fs(fs), use_aspera(use_aspera), runs_completed(0), total_runs(runs.size()) {
 	readers.resize(runs.size());
 	run_sequence_counters.resize(runs.size(), 1);
+#if MIINT_ASPERA_SUPPORTED
+	aspera_processes.resize(runs.size());
+	temp_file_paths.resize(runs.size());
+#endif
 }
 
 ReadENAFastxTableFunction::GlobalState::~GlobalState() {
 #if MIINT_ASPERA_SUPPORTED
-	// Clean up temp file if one exists
-	if (!temp_file_path.empty()) {
-		std::remove(temp_file_path.c_str());
-		temp_file_path.clear();
+	for (auto &path : temp_file_paths) {
+		if (!path.empty()) {
+			std::remove(path.c_str());
+			path.clear();
+		}
 	}
-	// AsperaProcess destructor handles killing child + closing pipe
+	// AsperaProcess destructors handle killing children + closing pipes
 #endif
 }
 
@@ -78,24 +85,34 @@ void ReadENAFastxTableFunction::GlobalState::OpenReader(size_t run_idx) {
 
 #if MIINT_ASPERA_SUPPORTED
 
-static std::string GetTempDir() {
-	const char *tmpdir = getenv("TMPDIR");
-	if (tmpdir && tmpdir[0] != '\0') {
-		return std::string(tmpdir);
-	}
-	return "/tmp";
-}
-
 void ReadENAFastxTableFunction::GlobalState::OpenReaderAspera(size_t run_idx) {
 	if (readers[run_idx]) {
 		return;
 	}
 	const auto &run = runs[run_idx];
 
+	// Collect remote paths for this run only
+	std::vector<std::string> remote_paths;
+	for (const auto &ap : run.aspera_paths) {
+		remote_paths.push_back(ap.remote_path);
+	}
+
+	auto config = aspera_config;
+	if (!run.aspera_paths.empty()) {
+		config.host = run.aspera_paths[0].host;
+	}
+
+	// Serialize ascp launches (fork/exec) — pipe reads happen on each thread's own pipe
+	{
+		lock_guard<mutex> open_guard(open_mutex);
+		aspera_processes[run_idx] = std::make_unique<miint::AsperaProcess>(config, remote_paths);
+	}
+	auto *proc = aspera_processes[run_idx].get();
+
 	std::string filename;
 	size_t file_size;
 
-	if (!aspera_process->NextFile(filename, file_size)) {
+	if (!proc->NextFile(filename, file_size)) {
 		throw IOException("read_ena_fastx: Aspera stream ended unexpectedly (expected files for run '%s')",
 		                  run.run_accession);
 	}
@@ -108,37 +125,54 @@ void ReadENAFastxTableFunction::GlobalState::OpenReaderAspera(size_t run_idx) {
 	bool is_gz = IsGzipped(gz_hint);
 
 	if (!run.is_paired) {
-		auto *s1 = miint::CreateAsperaSeqStream(aspera_process.get(), is_gz);
-		readers[run_idx] =
-		    std::make_unique<miint::SequenceReader>(s1, static_cast<miint::AsperaSeqStream *>(nullptr), true);
+		auto *s1 = miint::CreateAsperaSeqStream(proc, is_gz);
+		try {
+			readers[run_idx] =
+			    std::make_unique<miint::SequenceReader>(s1, static_cast<miint::AsperaSeqStream *>(nullptr), true);
+		} catch (...) {
+			delete s1;
+			throw;
+		}
 	} else {
 		// Paired-end: stream R1 from pipe to temp file in chunks, then stream R2 live
 		static constexpr size_t COPY_BUF_SIZE = 1024 * 1024; // 1 MB
 
-		std::string tmpl = GetTempDir() + "/miint_aspera_r1_XXXXXX";
+		std::string tmpl = miint::GetTempDir() + "/miint_aspera_r1_XXXXXX";
 		std::vector<char> tmpl_buf(tmpl.begin(), tmpl.end());
 		tmpl_buf.push_back('\0');
 		int fd = mkstemp(tmpl_buf.data());
 		if (fd == -1) {
 			throw IOException("read_ena_fastx: failed to create temp file for paired-end Aspera buffering");
 		}
-		temp_file_path = std::string(tmpl_buf.data());
+		temp_file_paths[run_idx] = std::string(tmpl_buf.data());
 
 		// Stream-copy R1 from pipe to temp file in 1MB chunks (no full-file buffering)
 		std::vector<char> copy_buf(COPY_BUF_SIZE);
 		while (true) {
-			int n = aspera_process->ReadBounded(copy_buf.data(), COPY_BUF_SIZE);
-			if (n <= 0) {
+			int n = proc->ReadBounded(copy_buf.data(), COPY_BUF_SIZE);
+			if (n == 0) {
 				break;
+			}
+			if (n < 0) {
+				close(fd);
+				std::remove(temp_file_paths[run_idx].c_str());
+				temp_file_paths[run_idx].clear();
+				throw IOException("read_ena_fastx: pipe read error while buffering R1 for run '%s'", run.run_accession);
 			}
 			size_t written = 0;
 			while (written < static_cast<size_t>(n)) {
 				ssize_t w = write(fd, copy_buf.data() + written, static_cast<size_t>(n) - written);
-				if (w <= 0) {
+				if (w < 0) {
+					if (errno == EINTR) {
+						continue;
+					}
+					int err = errno;
 					close(fd);
-					std::remove(temp_file_path.c_str());
-					temp_file_path.clear();
-					throw IOException("read_ena_fastx: failed to write temp file for paired-end Aspera buffering");
+					std::remove(temp_file_paths[run_idx].c_str());
+					temp_file_paths[run_idx].clear();
+					throw IOException("read_ena_fastx: failed to write temp file for paired-end Aspera buffering "
+					                  "(run '%s', errno=%d: %s)",
+					                  run.run_accession, err, strerror(err));
 				}
 				written += static_cast<size_t>(w);
 			}
@@ -148,9 +182,9 @@ void ReadENAFastxTableFunction::GlobalState::OpenReaderAspera(size_t run_idx) {
 		// Advance tar stream to R2
 		std::string filename2;
 		size_t file_size2;
-		if (!aspera_process->NextFile(filename2, file_size2)) {
-			std::remove(temp_file_path.c_str());
-			temp_file_path.clear();
+		if (!proc->NextFile(filename2, file_size2)) {
+			std::remove(temp_file_paths[run_idx].c_str());
+			temp_file_paths[run_idx].clear();
 			throw IOException("read_ena_fastx: Aspera stream ended unexpectedly (expected R2 for run '%s')",
 			                  run.run_accession);
 		}
@@ -161,9 +195,16 @@ void ReadENAFastxTableFunction::GlobalState::OpenReaderAspera(size_t run_idx) {
 		}
 		bool is_gz2 = IsGzipped(gz_hint2);
 
-		auto *s1 = CreateDuckDBSeqStream(fs, temp_file_path, is_gz);
-		auto *s2 = miint::CreateAsperaSeqStream(aspera_process.get(), is_gz2);
-		readers[run_idx] = std::make_unique<miint::SequenceReader>(s1, s2, true);
+		auto *s1 = CreateDuckDBSeqStream(fs, temp_file_paths[run_idx], is_gz);
+		miint::AsperaSeqStream *s2 = nullptr;
+		try {
+			s2 = miint::CreateAsperaSeqStream(proc, is_gz2);
+			readers[run_idx] = std::make_unique<miint::SequenceReader>(s1, s2, true);
+		} catch (...) {
+			delete s2;
+			delete s1;
+			throw;
+		}
 	}
 }
 #endif // MIINT_ASPERA_SUPPORTED
@@ -212,6 +253,34 @@ static std::vector<ReadENAFastxTableFunction::RunInfo> ResolveRuns(miint::ENACli
 
 			std::string layout = (layout_col >= 0 && layout_col < (int)row.size()) ? row[layout_col] : "";
 			info.is_paired = (layout == "PAIRED");
+
+			// ENA sometimes returns 3 files for paired-end runs: unsplit + _1 + _2.
+			// Filter to only _1/_2 for paired-end so we don't accidentally use
+			// the unsplit file as R1.
+			if (info.is_paired && info.fastq_urls.size() > 2) {
+				std::vector<std::string> filtered;
+				for (const auto &url : info.fastq_urls) {
+					// Match _1.fastq or _2.fastq (with optional .gz)
+					if (url.find("_1.fast") != std::string::npos || url.find("_2.fast") != std::string::npos) {
+						filtered.push_back(url);
+					}
+				}
+				if (filtered.size() == 2) {
+					info.fastq_urls = std::move(filtered);
+				}
+			}
+			if (info.is_paired && info.aspera_paths.size() > 2) {
+				std::vector<miint::AsperaPath> filtered;
+				for (const auto &ap : info.aspera_paths) {
+					if (ap.remote_path.find("_1.fast") != std::string::npos ||
+					    ap.remote_path.find("_2.fast") != std::string::npos) {
+						filtered.push_back(ap);
+					}
+				}
+				if (filtered.size() == 2) {
+					info.aspera_paths = std::move(filtered);
+				}
+			}
 
 			if (!info.fastq_urls.empty()) {
 				runs.push_back(std::move(info));
@@ -343,23 +412,7 @@ unique_ptr<GlobalTableFunctionState> ReadENAFastxTableFunction::InitGlobal(Clien
 
 #if MIINT_ASPERA_SUPPORTED
 	if (data.use_aspera) {
-		// Collect all remote paths across all runs (ordered: for each run, R1 then R2)
-		std::vector<std::string> remote_paths;
-		std::string host;
-		for (const auto &run : data.runs) {
-			for (const auto &ap : run.aspera_paths) {
-				if (host.empty()) {
-					host = ap.host;
-				}
-				remote_paths.push_back(ap.remote_path);
-			}
-		}
-
-		auto config = data.aspera_config;
-		if (!host.empty()) {
-			config.host = host;
-		}
-		state->aspera_process = std::make_unique<miint::AsperaProcess>(config, remote_paths);
+		state->aspera_config = data.aspera_config;
 	}
 #endif
 
@@ -382,22 +435,52 @@ void ReadENAFastxTableFunction::Execute(ClientContext &context, TableFunctionInp
 	miint::SequenceRecordBatch batch;
 	size_t current_run_idx;
 
+	// Helper: tear down a failed run's reader and process
+	auto cleanup_run = [&](size_t idx) {
+		global_state.readers[idx].reset();
+#if MIINT_ASPERA_SUPPORTED
+		if (global_state.use_aspera && global_state.aspera_processes[idx]) {
+			global_state.aspera_processes[idx].reset();
+		}
+		if (!global_state.temp_file_paths[idx].empty()) {
+			std::remove(global_state.temp_file_paths[idx].c_str());
+			global_state.temp_file_paths[idx].clear();
+		}
+#endif
+	};
+
+	// Helper: open reader for the current run
+	auto open_run = [&](size_t idx) {
+#if MIINT_ASPERA_SUPPORTED
+		if (global_state.use_aspera) {
+			global_state.OpenReaderAspera(idx);
+		} else {
+			global_state.OpenReader(idx);
+		}
+#else
+		global_state.OpenReader(idx);
+#endif
+	};
+
 	// Claim-read-release loop (same pattern as read_fastx)
 	while (true) {
 		if (!local_state.has_run) {
 			{
 				lock_guard<mutex> read_lock(global_state.lock);
 				if (global_state.next_run_idx >= global_state.runs.size()) {
-#if MIINT_ASPERA_SUPPORTED
-					// All runs consumed — check ascp exit code
-					if (global_state.aspera_process) {
-						int exit_code = global_state.aspera_process->WaitForExit();
-						global_state.aspera_process.reset();
-						if (exit_code != 0 && exit_code != -1) {
-							throw IOException("read_ena_fastx: ascp exited with code %d", exit_code);
+					// Report skipped runs as a warning so the user knows
+					if (!global_state.skipped_runs.empty()) {
+						lock_guard<mutex> skip_guard(global_state.skipped_lock);
+						if (!global_state.skipped_runs.empty()) {
+							std::string msg =
+							    "read_ena_fastx: WARNING: " + std::to_string(global_state.skipped_runs.size()) +
+							    " run(s) skipped due to download errors:";
+							for (const auto &acc : global_state.skipped_runs) {
+								msg += " " + acc;
+							}
+							Printer::Print(msg);
 						}
 					}
-#endif
 					output.SetCardinality(0);
 					return;
 				}
@@ -406,32 +489,78 @@ void ReadENAFastxTableFunction::Execute(ClientContext &context, TableFunctionInp
 				local_state.has_run = true;
 			} // Lock released before I/O
 
-			// Open reader without holding the lock — safe because this thread
-			// has exclusive ownership of the claimed run index
-#if MIINT_ASPERA_SUPPORTED
-			if (global_state.use_aspera) {
-				global_state.OpenReaderAspera(local_state.current_run_idx);
-			} else {
-				global_state.OpenReader(local_state.current_run_idx);
+			// Open reader — retry once on failure before skipping
+			try {
+				open_run(local_state.current_run_idx);
+			} catch (const std::exception &e) {
+				auto &run = global_state.runs[local_state.current_run_idx];
+				Printer::PrintF("read_ena_fastx: warning: run '%s' failed to open (%s), retrying...", run.run_accession,
+				                e.what());
+				cleanup_run(local_state.current_run_idx);
+				global_state.run_sequence_counters[local_state.current_run_idx] = 1;
+				try {
+					open_run(local_state.current_run_idx);
+				} catch (const std::exception &e2) {
+					Printer::PrintF("read_ena_fastx: warning: run '%s' failed on retry (%s), skipping",
+					                run.run_accession, e2.what());
+					cleanup_run(local_state.current_run_idx);
+					{
+						lock_guard<mutex> skip_guard(global_state.skipped_lock);
+						global_state.skipped_runs.push_back(run.run_accession);
+					}
+					global_state.runs_completed.fetch_add(1, std::memory_order_relaxed);
+					local_state.has_run = false;
+					continue;
+				}
 			}
-#else
-			global_state.OpenReader(local_state.current_run_idx);
-#endif
 		}
 
 		current_run_idx = local_state.current_run_idx;
-		batch = global_state.readers[current_run_idx]->read(STANDARD_VECTOR_SIZE);
+		try {
+			batch = global_state.readers[current_run_idx]->read(STANDARD_VECTOR_SIZE);
+		} catch (const std::exception &e) {
+			// Mid-stream read failure (e.g., truncated stream, mismatched R1/R2).
+			// Tear down and retry the entire run from scratch.
+			auto &run = global_state.runs[current_run_idx];
+			Printer::PrintF("read_ena_fastx: warning: run '%s' failed mid-stream (%s), retrying...", run.run_accession,
+			                e.what());
+			cleanup_run(current_run_idx);
+			global_state.run_sequence_counters[current_run_idx] = 1;
+			try {
+				open_run(current_run_idx);
+				batch = global_state.readers[current_run_idx]->read(STANDARD_VECTOR_SIZE);
+			} catch (const std::exception &e2) {
+				Printer::PrintF("read_ena_fastx: warning: run '%s' failed on retry (%s), skipping", run.run_accession,
+				                e2.what());
+				cleanup_run(current_run_idx);
+				{
+					lock_guard<mutex> skip_guard(global_state.skipped_lock);
+					global_state.skipped_runs.push_back(run.run_accession);
+				}
+				global_state.runs_completed.fetch_add(1, std::memory_order_relaxed);
+				local_state.has_run = false;
+				continue;
+			}
+		}
 
 		if (batch.empty()) {
-			// Release the reader to free the HTTP connection (or Aspera pipe slot)
+			// Run completed successfully — release resources
 			global_state.readers[current_run_idx].reset();
 #if MIINT_ASPERA_SUPPORTED
-			// Clean up temp file for paired-end Aspera
-			if (!global_state.temp_file_path.empty()) {
-				std::remove(global_state.temp_file_path.c_str());
-				global_state.temp_file_path.clear();
+			if (global_state.use_aspera && global_state.aspera_processes[current_run_idx]) {
+				int exit_code = global_state.aspera_processes[current_run_idx]->WaitForExit();
+				global_state.aspera_processes[current_run_idx].reset();
+				if (exit_code != 0 && exit_code != -1) {
+					throw IOException("read_ena_fastx: ascp exited with code %d for run '%s'", exit_code,
+					                  global_state.runs[current_run_idx].run_accession);
+				}
+			}
+			if (!global_state.temp_file_paths[current_run_idx].empty()) {
+				std::remove(global_state.temp_file_paths[current_run_idx].c_str());
+				global_state.temp_file_paths[current_run_idx].clear();
 			}
 #endif
+			global_state.runs_completed.fetch_add(1, std::memory_order_relaxed);
 			local_state.has_run = false;
 			continue;
 		}
@@ -504,6 +633,27 @@ void ReadENAFastxTableFunction::Execute(ClientContext &context, TableFunctionInp
 	output.SetCardinality(count);
 }
 
+// ---- Progress ----
+
+double ReadENAFastxTableFunction::Progress(ClientContext &context, const FunctionData *bind_data,
+                                           const GlobalTableFunctionState *global_state) {
+	if (!global_state) {
+		return -1.0;
+	}
+	auto &state = global_state->Cast<GlobalState>();
+	if (state.total_runs == 0) {
+		return 100.0;
+	}
+	idx_t completed = state.runs_completed.load(std::memory_order_relaxed);
+	if (completed == 0) {
+		// Work is in progress (downloading) but no run has completed yet.
+		// Return a small positive value so the shell progress bar's time
+		// remaining estimator does not divide by zero progress rate.
+		return 0.5;
+	}
+	return std::min(100.0, static_cast<double>(completed) / static_cast<double>(state.total_runs) * 100.0);
+}
+
 // ---- Registration ----
 
 TableFunction ReadENAFastxTableFunction::GetFunction() {
@@ -511,6 +661,8 @@ TableFunction ReadENAFastxTableFunction::GetFunction() {
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
 	tf.named_parameters["qual_offset"] = LogicalType::BIGINT;
 	tf.named_parameters["download_method"] = LogicalType::VARCHAR;
+	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
+	tf.table_scan_progress = Progress;
 	return tf;
 }
 

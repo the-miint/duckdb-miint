@@ -1,5 +1,17 @@
 #include "aspera_utils.hpp"
 
+namespace miint {
+
+std::string GetTempDir() {
+	const char *tmpdir = getenv("TMPDIR");
+	if (tmpdir && tmpdir[0] != '\0') {
+		return std::string(tmpdir);
+	}
+	return "/tmp";
+}
+
+} // namespace miint
+
 #if MIINT_ASPERA_SUPPORTED
 
 #include "duckdb/common/exception.hpp"

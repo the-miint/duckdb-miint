@@ -12,6 +12,9 @@
 
 namespace miint {
 
+// Return the temp directory: $TMPDIR if set and non-empty, otherwise /tmp.
+std::string GetTempDir();
+
 struct AsperaPath {
 	std::string host;
 	std::string remote_path;

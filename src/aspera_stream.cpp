@@ -42,8 +42,8 @@ AsperaProcess::AsperaProcess(const AsperaConfig &config, const std::vector<std::
 	};
 
 	push_arg(config.ascp_path);
-	push_arg("-T"); // Disable encryption
-	push_arg("-l"); // Max transfer rate
+	push_arg("-QT"); // Adaptive rate + disable encryption
+	push_arg("-l");  // Max transfer rate
 	push_arg(config.max_rate);
 	push_arg("-P"); // SSH port
 	push_arg(std::to_string(config.port));
@@ -61,12 +61,14 @@ AsperaProcess::AsperaProcess(const AsperaConfig &config, const std::vector<std::
 
 	if (total_path_chars > 100000) {
 		// Write paths to temp file
-		char tmpl[] = "/tmp/miint_aspera_XXXXXX";
-		int fd = mkstemp(tmpl);
+		std::string tmpl_str = miint::GetTempDir() + "/miint_aspera_XXXXXX";
+		std::vector<char> tmpl_buf(tmpl_str.begin(), tmpl_str.end());
+		tmpl_buf.push_back('\0');
+		int fd = mkstemp(tmpl_buf.data());
 		if (fd == -1) {
 			throw duckdb::IOException("AsperaProcess: failed to create temp file for --file-list");
 		}
-		file_list_path_ = tmpl;
+		file_list_path_ = std::string(tmpl_buf.data());
 		for (const auto &p : remote_paths) {
 			auto line = p + "\n";
 			auto written = write(fd, line.data(), line.size());
@@ -88,6 +90,9 @@ AsperaProcess::AsperaProcess(const AsperaConfig &config, const std::vector<std::
 	// Create pipe for stdout
 	int stdout_pipe[2];
 	if (pipe(stdout_pipe) == -1) {
+		if (!file_list_path_.empty()) {
+			unlink(file_list_path_.c_str());
+		}
 		throw duckdb::IOException("AsperaProcess: failed to create pipe: %s", strerror(errno));
 	}
 
@@ -95,6 +100,9 @@ AsperaProcess::AsperaProcess(const AsperaConfig &config, const std::vector<std::
 	if (child_pid_ == -1) {
 		close(stdout_pipe[0]);
 		close(stdout_pipe[1]);
+		if (!file_list_path_.empty()) {
+			unlink(file_list_path_.c_str());
+		}
 		throw duckdb::IOException("AsperaProcess: failed to fork: %s", strerror(errno));
 	}
 
@@ -134,8 +142,20 @@ AsperaProcess::~AsperaProcess() {
 	}
 	if (child_pid_ > 0) {
 		kill(child_pid_, SIGTERM);
+		// Give ascp a moment to exit cleanly, then force-kill.
+		// ascp catches SIGTERM and may block during network cleanup.
 		int status;
+		for (int i = 0; i < 10; i++) {
+			pid_t ret = waitpid(child_pid_, &status, WNOHANG);
+			if (ret > 0) {
+				goto reaped;
+			}
+			usleep(100000); // 100ms
+		}
+		// Still alive after 1s — force kill
+		kill(child_pid_, SIGKILL);
 		waitpid(child_pid_, &status, 0);
+	reaped:
 		child_pid_ = -1;
 	}
 	if (!file_list_path_.empty()) {
