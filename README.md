@@ -1,6 +1,8 @@
 # MIINT: MIcrobiome INTelligence.
 
-The MIINT [DuckDB](https://duckdb.org) extension enables DuckDB to interoperate with file formats and operations central to microbiome research.
+## Introduction
+
+The MIINT [DuckDB](https://duckdb.org) extension brings columnar analytics to microbiome data. Databases like DuckDB that store data by columns rather than rows allow for greatly increased query performance on analytical tasks, especially those that involve scanning large datasets and aggregating data across a few columns. To enable researchers to exploit these incredible performance improvements, MIINT bridges existing data and tools to DuckDB's rich ecosystem, enabling DuckDB to interoperate with file formats and operations central to microbiome studies.
 
 ## Quick Start
 
