@@ -4,6 +4,12 @@
 
 require miint
 
+# prefer_format controls format selection:
+#   'auto'  (default) - use FASTQ when available, fall back to SFF
+#   'sff'   - prefer SFF, fall back to FASTQ when SFF is unavailable
+#   'fastq' - FASTQ only, skip runs that lack FASTQ
+# trim (BOOLEAN, default true) - applies SFF clip trimming (ignored for FASTQ)
+
 # ---- Invalid prefer_format values ----
 
 statement error

@@ -109,10 +109,7 @@ void ReadENASequencesTableFunction::GlobalState::OpenReaderSFF(size_t run_idx) {
 		throw IOException("read_ena_sequences: no SFF URL available for run '%s'", run.run_accession);
 	}
 
-	// Serialize downloads to avoid overwhelming remote servers
-	lock_guard<mutex> open_guard(open_mutex);
-
-	// Download the SFF file to a local temp file via DuckDB's FileSystem
+	// Create temp file for the SFF download
 	auto temp_dir = miint::GetTempDir();
 	auto temp_path = temp_dir + "/miint_ena_sff_XXXXXX";
 	std::vector<char> tmpl_buf(temp_path.begin(), temp_path.end());
@@ -124,9 +121,27 @@ void ReadENASequencesTableFunction::GlobalState::OpenReaderSFF(size_t run_idx) {
 	temp_path = std::string(tmpl_buf.data());
 	sff_temp_paths[run_idx] = temp_path;
 
+	// RAII guard: ensures fd is closed exactly once and temp file is removed on error
+	bool fd_closed = false;
+	auto cleanup_on_error = [&]() {
+		if (!fd_closed) {
+			close(fd);
+			fd_closed = true;
+		}
+		std::remove(temp_path.c_str());
+		sff_temp_paths[run_idx].clear();
+	};
+
 	try {
-		// Download via DuckDB FileSystem (handles HTTPS)
-		auto source = fs.OpenFile(run.sff_url, FileOpenFlags(FileOpenFlags::FILE_FLAGS_READ));
+		// Serialize only the HTTP connection setup, not the full download.
+		// This avoids blocking all threads for the duration of multi-MB downloads
+		// while still rate-limiting simultaneous connection opens to remote servers.
+		unique_ptr<FileHandle> source;
+		{
+			lock_guard<mutex> open_guard(open_mutex);
+			source = fs.OpenFile(run.sff_url, FileOpenFlags(FileOpenFlags::FILE_FLAGS_READ));
+		}
+
 		static constexpr size_t DOWNLOAD_BUF_SIZE = 1048576; // 1MB
 		std::vector<char> buf(DOWNLOAD_BUF_SIZE);
 		while (true) {
@@ -141,18 +156,18 @@ void ReadENASequencesTableFunction::GlobalState::OpenReaderSFF(size_t run_idx) {
 					if (errno == EINTR) {
 						continue;
 					}
-					close(fd);
-					throw IOException("read_ena_sequences: failed writing SFF temp file for run '%s'",
-					                  run.run_accession);
+					int saved_errno = errno;
+					cleanup_on_error();
+					throw IOException("read_ena_sequences: failed writing SFF temp file for run '%s' (errno=%d: %s)",
+					                  run.run_accession, saved_errno, strerror(saved_errno));
 				}
 				written += static_cast<size_t>(w);
 			}
 		}
 		close(fd);
+		fd_closed = true;
 	} catch (...) {
-		close(fd);
-		std::remove(temp_path.c_str());
-		sff_temp_paths[run_idx].clear();
+		cleanup_on_error();
 		throw;
 	}
 
@@ -355,14 +370,16 @@ ResolveRuns(miint::ENAClient &client, const std::vector<std::string> &accessions
 			    miint::ENAParser::FilterSubmittedByFormat(sub_ftp, sub_aspera, sub_format, sub_bytes, "SFF");
 			bool has_sff = !sff_filter.urls.empty();
 
-			// Decide format: prefer_format='sff' prefers SFF, 'auto' prefers FASTQ, 'fastq' forces FASTQ
+			// Format selection:
+			// - 'sff':   use SFF if available, otherwise fall back to FASTQ silently
+			// - 'auto':  use FASTQ if available, otherwise fall back to SFF
+			// - 'fastq': FASTQ only, skip runs that lack FASTQ
 			bool use_sff = false;
 			if (prefer_format == "sff") {
 				use_sff = has_sff;
 			} else if (prefer_format == "auto") {
 				use_sff = !has_fastq && has_sff;
 			}
-			// prefer_format == "fastq": use_sff stays false
 
 			if (use_sff) {
 				// Flatten: one RunInfo per SFF file, all sharing the same accession metadata
@@ -374,10 +391,7 @@ ResolveRuns(miint::ENAClient &client, const std::vector<std::string> &accessions
 					info.format = ENASequenceFormat::SFF;
 					info.sff_url = sff_filter.urls[si];
 					info.is_paired = false; // SFF is always single-end
-					// Distribute bytes across SFF files (approximate)
-					if (sff_filter.urls.size() > 0) {
-						info.total_bytes = sff_filter.total_bytes / sff_filter.urls.size();
-					}
+					info.total_bytes = sff_filter.total_bytes / sff_filter.urls.size();
 					runs.push_back(std::move(info));
 				}
 			} else if (has_fastq) {
@@ -535,17 +549,25 @@ unique_ptr<FunctionData> ReadENASequencesTableFunction::Bind(ClientContext &cont
 
 	auto data = make_uniq<Data>(std::move(runs), include_filepath, qual_offset, trim, prefer_format);
 
-	// Determine whether to use Aspera
+	// Determine whether to use Aspera (only relevant for FASTX runs; SFF uses HTTP only)
 	data->use_aspera = false;
 #if MIINT_ASPERA_SUPPORTED
-	if (download_method == "aspera" || download_method == "auto") {
+	// Check if there are any FASTX runs that could benefit from Aspera
+	bool has_fastx_runs = false;
+	for (const auto &run : data->runs) {
+		if (run.format == ENASequenceFormat::FASTX) {
+			has_fastx_runs = true;
+			break;
+		}
+	}
+	if (has_fastx_runs && (download_method == "aspera" || download_method == "auto")) {
 		bool aspera_available = miint::AsperaUtils::IsAvailable();
 		if (download_method == "aspera" && !aspera_available) {
 			throw IOException("read_ena_sequences: download_method='aspera' but ascp not found in PATH. "
 			                  "Install IBM Aspera CLI or use download_method='http'");
 		}
 		if (aspera_available) {
-			// Check that all FASTX runs have aspera paths (SFF runs use HTTP only)
+			// Check that all FASTX runs have aspera paths
 			bool all_have_aspera = true;
 			for (const auto &run : data->runs) {
 				if (run.format == ENASequenceFormat::FASTX && run.aspera_paths.empty()) {
@@ -818,11 +840,13 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 	}
 
 	// qual1 (column 5)
-	SetResultVectorListUInt8(output.data[field_idx++], batch.quals1, bind_data.qual_offset);
+	// SFF stores raw Phred internally with offset 33; user's qual_offset only applies to FASTQ
+	uint8_t effective_qual_offset = (run.format == ENASequenceFormat::SFF) ? 33 : bind_data.qual_offset;
+	SetResultVectorListUInt8(output.data[field_idx++], batch.quals1, effective_qual_offset);
 
 	// qual2 (column 6)
 	if (batch.is_paired) {
-		SetResultVectorListUInt8(output.data[field_idx++], batch.quals2, bind_data.qual_offset);
+		SetResultVectorListUInt8(output.data[field_idx++], batch.quals2, effective_qual_offset);
 	} else {
 		SetResultVectorNull(output.data[field_idx++]);
 	}

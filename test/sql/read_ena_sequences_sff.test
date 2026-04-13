@@ -56,6 +56,8 @@ SELECT COUNT(*) > 0 FROM sff_untrimmed;
 true
 
 # ---- default (auto) prefers FASTQ ----
+# Note: prefer_format='sff' falls back to FASTQ when SFF is unavailable.
+# prefer_format='auto' (default) uses FASTQ when available, falls back to SFF.
 
 statement ok
 CREATE TEMP TABLE auto_reads AS
