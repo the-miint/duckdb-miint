@@ -22,11 +22,3 @@ set(VCPKG_CRT_LINKAGE dynamic)
 set(VCPKG_LIBRARY_LINKAGE static)
 set(VCPKG_CMAKE_SYSTEM_NAME Emscripten)
 set(VCPKG_CHAINLOAD_TOOLCHAIN_FILE "${EMSCRIPTEN_ROOT}/cmake/Modules/Platform/Emscripten.cmake")
-
-# Emscripten's fenv.h stubs out floating-point exception support (FE_ALL_EXCEPT=0)
-# but omits individual exception flag macros like FE_INVALID. HDF5 1.14.x uses
-# FE_INVALID unconditionally (fixed upstream in HDF5 2.0.0 via HDFGroup/hdf5#4952).
-# Define it as 0 (no-op) to match Emscripten's no-FP-exception semantics.
-# Injected via VCPKG_CMAKE_CONFIGURE_OPTIONS because VCPKG_C_FLAGS doesn't propagate
-# for Emscripten (vcpkg has no emscripten toolchain in scripts/toolchains/).
-set(VCPKG_CMAKE_CONFIGURE_OPTIONS "-DCMAKE_C_FLAGS=-DFE_INVALID=0" "-DCMAKE_CXX_FLAGS=-DFE_INVALID=0")

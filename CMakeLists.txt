@@ -24,9 +24,13 @@ option(MIINT_ENABLE_BOWTIE2 "Build with Bowtie2 alignment support" ON)
 
 # Auto-disable platform-incompatible features.
 # Bowtie2 requires POSIX fork/exec (unavailable on WASM and Windows).
+# HDF5 C++ static class members (e.g. LinkCreatPropList::DEFAULT) become
+# unresolvable GOT.mem imports in WASM, causing "bad export type: undefined"
+# at extension load time.
 if(EMSCRIPTEN)
     set(MIINT_ENABLE_BOWTIE2 OFF)
-    message(STATUS "Emscripten detected: disabling Bowtie2 (WASM-incompatible)")
+    set(MIINT_ENABLE_HDF5 OFF)
+    message(STATUS "Emscripten detected: disabling Bowtie2 and HDF5 (WASM-incompatible)")
 elseif(WIN32)
     set(MIINT_ENABLE_BOWTIE2 OFF)
     message(STATUS "Windows detected: disabling Bowtie2 (requires POSIX fork/exec)")
