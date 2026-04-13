@@ -1,5 +1,6 @@
 #pragma once
 
+#include "SFFReader.hpp"
 #include "SequenceReader.hpp"
 #include "aspera_stream.hpp"
 #include "aspera_utils.hpp"
@@ -21,7 +22,9 @@
 
 namespace duckdb {
 
-class ReadENAFastxTableFunction {
+enum class ENASequenceFormat { FASTX, SFF };
+
+class ReadENASequencesTableFunction {
 public:
 	struct RunInfo {
 		std::string run_accession;
@@ -29,8 +32,10 @@ public:
 		std::string experiment_accession;
 		std::vector<std::string> fastq_urls;         // HTTPS URLs (1 for single-end, 2 for paired-end)
 		std::vector<miint::AsperaPath> aspera_paths; // Parsed host + remote_path pairs
-		bool is_paired;
-		uint64_t total_bytes = 0; // Sum of fastq_bytes for files in this run (0 if unavailable)
+		bool is_paired = false;
+		uint64_t total_bytes = 0;
+		ENASequenceFormat format = ENASequenceFormat::FASTX;
+		std::string sff_url; // Single HTTPS URL (one RunInfo per SFF file when format == SFF)
 	};
 
 	struct Data : public TableFunctionData {
@@ -38,6 +43,8 @@ public:
 		bool include_filepath;
 		uint8_t qual_offset;
 		bool use_aspera;
+		bool trim;
+		std::string prefer_format;
 #if MIINT_ASPERA_SUPPORTED
 		miint::AsperaConfig aspera_config;
 #endif
@@ -45,20 +52,25 @@ public:
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
-		Data(std::vector<RunInfo> runs, bool include_fp, uint8_t offset);
+		Data(std::vector<RunInfo> runs, bool include_fp, uint8_t offset, bool trim, const std::string &prefer_format);
 	};
 
 	struct GlobalState : public GlobalTableFunctionState {
 		mutex lock;
 		mutex open_mutex; // Serializes file opens to avoid overwhelming remote servers
 		std::vector<std::unique_ptr<miint::SequenceReader>> readers;
+		std::vector<std::unique_ptr<miint::SFFReader>> sff_readers;
 		std::vector<RunInfo> runs;
 		size_t next_run_idx;
 		std::vector<uint64_t> run_sequence_counters;
 		FileSystem &fs;
 		bool use_aspera;
+		bool trim;
 
-		// Progress tracking (byte-based when fastq_bytes available, run-count fallback)
+		// SFF temp file management (downloaded SFF files)
+		std::vector<std::string> sff_temp_paths;
+
+		// Progress tracking (byte-based when available, run-count fallback)
 		std::atomic<idx_t> runs_completed;
 		idx_t total_runs;
 		std::atomic<uint64_t> bytes_completed;
@@ -79,11 +91,14 @@ public:
 			return std::min<idx_t>(runs.size(), 8);
 		}
 
-		GlobalState(FileSystem &fs, const std::vector<RunInfo> &runs, bool use_aspera);
+		GlobalState(FileSystem &fs, const std::vector<RunInfo> &runs, bool use_aspera, bool trim);
 		~GlobalState();
 
-		// Open reader for a specific run index (HTTP path).
+		// Open reader for a specific run index (HTTP FASTQ path).
 		void OpenReader(size_t run_idx);
+
+		// Open reader for a specific run index (SFF: download to temp, parse).
+		void OpenReaderSFF(size_t run_idx);
 
 #if MIINT_ASPERA_SUPPORTED
 		// Open reader for a specific run index (Aspera path).

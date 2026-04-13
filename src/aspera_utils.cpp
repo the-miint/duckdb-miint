@@ -216,7 +216,7 @@ std::string AsperaUtils::ResolveKey(duckdb::DatabaseInstance &db, const std::str
 	}
 
 	if (required) {
-		throw duckdb::IOException("read_ena_fastx: Aspera SSH key not found. Searched: ~/.aspera/connect/etc/, "
+		throw duckdb::IOException("read_ena_sequences: Aspera SSH key not found. Searched: ~/.aspera/connect/etc/, "
 		                          "~/.aspera/cli/etc/, $CONDA_PREFIX/etc/, and attempted download from %s",
 		                          KEY_DOWNLOAD_URL);
 	}
@@ -270,7 +270,7 @@ std::string AsperaUtils::DownloadAndCacheKey(duckdb::DatabaseInstance &) {
 }
 std::string AsperaUtils::ResolveKey(duckdb::DatabaseInstance &, const std::string &, bool required) {
 	if (required) {
-		throw std::runtime_error("read_ena_fastx: Aspera is not supported on this platform");
+		throw std::runtime_error("read_ena_sequences: Aspera is not supported on this platform");
 	}
 	return "";
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,19 @@ public:
 	// Parsing
 	static ENATSVResult ParseTSV(const std::string &tsv);
 	static std::vector<SampleAttribute> ParseSampleAttributesXML(const std::string &xml);
+
+	// Filter submitted_* fields by format (e.g., "SFF").
+	// Returns HTTPS URLs, raw aspera entries, and total bytes for matching entries.
+	struct SubmittedFilterResult {
+		std::vector<std::string> urls;       // HTTPS URLs (via FTPtoHTTPS)
+		std::vector<std::string> aspera_raw; // Raw aspera field entries (unparsed)
+		uint64_t total_bytes = 0;
+	};
+	static SubmittedFilterResult FilterSubmittedByFormat(const std::string &submitted_ftp,
+	                                                     const std::string &submitted_aspera,
+	                                                     const std::string &submitted_format,
+	                                                     const std::string &submitted_bytes,
+	                                                     const std::string &target_format);
 
 	// Helpers
 	static std::vector<std::string> FTPtoHTTPS(const std::string &ftp_field);

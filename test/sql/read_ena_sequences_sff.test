@@ -1,0 +1,69 @@
+# name: test/sql/read_ena_sequences_sff.test
+# description: Test read_ena_sequences SFF support from ENA submitted_* fields
+# group: [sql]
+
+# NOTE: This test requires network access to EBI/ENA servers.
+# ERR215818 has 9 submitted SFF files (~14MB total, 454 SINGLE layout).
+
+require httpfs
+
+require miint
+
+# ---- prefer_format='sff' returns data ----
+
+statement ok
+CREATE TEMP TABLE sff_reads AS
+SELECT * FROM read_ena_sequences('ERR215818', prefer_format='sff') LIMIT 50;
+
+query I
+SELECT COUNT(*) > 0 FROM sff_reads;
+----
+true
+
+# run_accession is populated
+query I
+SELECT DISTINCT run_accession FROM sff_reads;
+----
+ERR215818
+
+# SFF is single-end: sequence2 and qual2 should be NULL
+query I
+SELECT COUNT(*) = 0 FROM sff_reads WHERE sequence2 IS NOT NULL;
+----
+true
+
+# Sequences contain only valid nucleotide characters
+query I
+SELECT COUNT(*) = 0 FROM sff_reads WHERE NOT regexp_matches(sequence1, '^[ACGTNacgtn]+$');
+----
+true
+
+# Quality scores present
+query I
+SELECT COUNT(*) = 0 FROM sff_reads WHERE qual1 IS NULL;
+----
+true
+
+# ---- trim=false should work ----
+
+statement ok
+CREATE TEMP TABLE sff_untrimmed AS
+SELECT * FROM read_ena_sequences('ERR215818', prefer_format='sff', trim=false) LIMIT 10;
+
+query I
+SELECT COUNT(*) > 0 FROM sff_untrimmed;
+----
+true
+
+# ---- default (auto) prefers FASTQ ----
+# Note: prefer_format='sff' falls back to FASTQ when SFF is unavailable.
+# prefer_format='auto' (default) uses FASTQ when available, falls back to SFF.
+
+statement ok
+CREATE TEMP TABLE auto_reads AS
+SELECT * FROM read_ena_sequences('ERR215818') LIMIT 10;
+
+query I
+SELECT COUNT(*) FROM auto_reads;
+----
+10

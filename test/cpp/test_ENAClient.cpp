@@ -337,3 +337,62 @@ TEST_CASE("ENAParser input validation", "[ena]") {
 		CHECK(urls[0] == "https://ftp.sra.ebi.ac.uk/vol1/fastq/ERR107/file.gz");
 	}
 }
+
+// ---- FilterSubmittedByFormat ----
+
+TEST_CASE("FilterSubmittedByFormat extracts matching files", "[ena]") {
+	SECTION("Two SFF files among mixed formats") {
+		auto result = miint::ENAParser::FilterSubmittedByFormat(
+		    "ftp.example.com/a.sff;ftp.example.com/b.fastq.gz;ftp.example.com/c.sff", "", "SFF;FASTQ;SFF",
+		    "100;200;300", "SFF");
+		REQUIRE(result.urls.size() == 2);
+		CHECK(result.urls[0] == "https://ftp.example.com/a.sff");
+		CHECK(result.urls[1] == "https://ftp.example.com/c.sff");
+		CHECK(result.total_bytes == 400);
+		CHECK(result.aspera_raw.empty());
+	}
+
+	SECTION("No matches returns empty") {
+		auto result =
+		    miint::ENAParser::FilterSubmittedByFormat("ftp.example.com/a.fastq.gz", "", "FASTQ", "100", "SFF");
+		CHECK(result.urls.empty());
+		CHECK(result.total_bytes == 0);
+	}
+
+	SECTION("Empty inputs returns empty") {
+		auto result = miint::ENAParser::FilterSubmittedByFormat("", "", "", "", "SFF");
+		CHECK(result.urls.empty());
+		CHECK(result.total_bytes == 0);
+	}
+
+	SECTION("Mismatched field counts uses minimum") {
+		// More formats than FTP entries — only process indices where all fields exist
+		auto result =
+		    miint::ENAParser::FilterSubmittedByFormat("ftp.example.com/a.sff", "", "SFF;SFF", "100;200", "SFF");
+		REQUIRE(result.urls.size() == 1);
+		CHECK(result.total_bytes == 100);
+	}
+
+	SECTION("Aspera paths extracted alongside URLs") {
+		auto result = miint::ENAParser::FilterSubmittedByFormat(
+		    "ftp.example.com/a.sff;ftp.example.com/b.fastq.gz",
+		    "fasp.example.com:/vol1/a.sff;fasp.example.com:/vol1/b.fastq.gz", "SFF;FASTQ", "100;200", "SFF");
+		REQUIRE(result.urls.size() == 1);
+		CHECK(result.urls[0] == "https://ftp.example.com/a.sff");
+		REQUIRE(result.aspera_raw.size() == 1);
+		CHECK(result.aspera_raw[0] == "fasp.example.com:/vol1/a.sff");
+		CHECK(result.total_bytes == 100);
+	}
+
+	SECTION("Case-sensitive format matching") {
+		auto result = miint::ENAParser::FilterSubmittedByFormat("ftp.example.com/a.sff", "", "sff", "100", "SFF");
+		CHECK(result.urls.empty());
+	}
+
+	SECTION("Bytes field with invalid number treated as 0") {
+		auto result =
+		    miint::ENAParser::FilterSubmittedByFormat("ftp.example.com/a.sff", "", "SFF", "notanumber", "SFF");
+		REQUIRE(result.urls.size() == 1);
+		CHECK(result.total_bytes == 0);
+	}
+}
