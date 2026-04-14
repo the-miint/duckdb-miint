@@ -29,7 +29,6 @@ jobs:
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
       VCPKG_TARGET_TRIPLET: 'x64-linux'
       GEN: ninja
-      HDF5_AVAILABLE: 1
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,7 +62,7 @@ jobs:
 
       - name: Run all tests
         shell: bash -el {0}
-        run: make test
+        run: bash run_tests.sh
 
       - name: Install tutorial test dependencies
         shell: bash -el {0}

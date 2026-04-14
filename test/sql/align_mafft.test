@@ -19,6 +19,8 @@
 
 require miint
 
+require-env MAFFT_AVAILABLE
+
 # --- Error handling ---
 
 # Missing file
