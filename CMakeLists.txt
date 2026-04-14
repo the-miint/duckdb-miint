@@ -24,9 +24,13 @@ option(MIINT_ENABLE_BOWTIE2 "Build with Bowtie2 alignment support" ON)
 
 # Auto-disable platform-incompatible features.
 # Bowtie2 requires POSIX fork/exec (unavailable on WASM and Windows).
+# HDF5 C++ static class members (e.g. LinkCreatPropList::DEFAULT) become
+# unresolvable GOT.mem imports in WASM, causing "bad export type: undefined"
+# at extension load time.
 if(EMSCRIPTEN)
     set(MIINT_ENABLE_BOWTIE2 OFF)
-    message(STATUS "Emscripten detected: disabling Bowtie2 (WASM-incompatible)")
+    set(MIINT_ENABLE_HDF5 OFF)
+    message(STATUS "Emscripten detected: disabling Bowtie2 and HDF5 (WASM-incompatible)")
 elseif(WIN32)
     set(MIINT_ENABLE_BOWTIE2 OFF)
     message(STATUS "Windows detected: disabling Bowtie2 (requires POSIX fork/exec)")
@@ -339,15 +343,17 @@ ExternalProject_Add(
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2
     CONFIGURE_COMMAND ""
     BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2 clean libminimap2.a "CFLAGS=-g -Wall -O2 -Wc++-compat ${MINIMAP2_FPIC} ${MINIMAP2_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}" "CPPFLAGS=-DHAVE_KALLOC ${MINIMAP2_ALLOC_FLAGS}" ${MINIMAP2_ARCH_FLAGS}
-    INSTALL_COMMAND ""
+    INSTALL_COMMAND ${CMAKE_COMMAND} -E copy
+        ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2/libminimap2.a
+        ${CMAKE_CURRENT_BINARY_DIR}/minimap2/lib/libminimap2.a
     BUILD_IN_SOURCE 1
-    BUILD_BYPRODUCTS ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2/libminimap2.a
+    BUILD_BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/minimap2/lib/libminimap2.a
 )
 
 # Create imported library for minimap2
 add_library(minimap2 STATIC IMPORTED GLOBAL)
 set_target_properties(minimap2 PROPERTIES
-    IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2/libminimap2.a
+    IMPORTED_LOCATION ${CMAKE_CURRENT_BINARY_DIR}/minimap2/lib/libminimap2.a
 )
 add_dependencies(minimap2 minimap2_build)
 
@@ -373,23 +379,28 @@ ExternalProject_Add(
     BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib clean all
         "BUILD_TOOLS=0" "BUILD_EXAMPLES=0" "BUILD_WFA_PARALLEL=0"
         "CC_FLAGS=-Wall -O2 ${WFA2_FPIC} ${WFA2_ARCH_CFLAGS}"
-    INSTALL_COMMAND ""
+    INSTALL_COMMAND ${CMAKE_COMMAND} -E copy
+        ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib/lib/libwfa.a
+        ${CMAKE_CURRENT_BINARY_DIR}/wfa2/lib/libwfa.a
+        COMMAND ${CMAKE_COMMAND} -E copy
+        ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib/lib/libwfacpp.a
+        ${CMAKE_CURRENT_BINARY_DIR}/wfa2/lib/libwfacpp.a
     BUILD_IN_SOURCE 1
     BUILD_BYPRODUCTS
-        ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib/lib/libwfa.a
-        ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib/lib/libwfacpp.a
+        ${CMAKE_CURRENT_BINARY_DIR}/wfa2/lib/libwfa.a
+        ${CMAKE_CURRENT_BINARY_DIR}/wfa2/lib/libwfacpp.a
 )
 
 # Create imported libraries for WFA2 (C++ bindings depend on C core — link order matters)
 add_library(wfa2 STATIC IMPORTED GLOBAL)
 set_target_properties(wfa2 PROPERTIES
-    IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib/lib/libwfa.a
+    IMPORTED_LOCATION ${CMAKE_CURRENT_BINARY_DIR}/wfa2/lib/libwfa.a
 )
 add_dependencies(wfa2 wfa2_build)
 
 add_library(wfa2cpp STATIC IMPORTED GLOBAL)
 set_target_properties(wfa2cpp PROPERTIES
-    IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib/lib/libwfacpp.a
+    IMPORTED_LOCATION ${CMAKE_CURRENT_BINARY_DIR}/wfa2/lib/libwfacpp.a
 )
 add_dependencies(wfa2cpp wfa2_build)
 
@@ -477,14 +488,16 @@ ExternalProject_Add(
         "CC=${CMAKE_C_COMPILER}"
         "CFLAGS=-O3 ${MAFFT_FPIC} ${MAFFT_ARCH_CFLAGS}"
         "ENABLE_MULTITHREAD=-Denablemultithread"
-    INSTALL_COMMAND ""
+    INSTALL_COMMAND ${CMAKE_COMMAND} -E copy
+        ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core/libmafft_parttree.a
+        ${CMAKE_CURRENT_BINARY_DIR}/mafft/lib/libmafft_parttree.a
     BUILD_IN_SOURCE 1
-    BUILD_BYPRODUCTS ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core/libmafft_parttree.a
+    BUILD_BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/mafft/lib/libmafft_parttree.a
 )
 
 add_library(mafft_parttree STATIC IMPORTED GLOBAL)
 set_target_properties(mafft_parttree PROPERTIES
-    IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core/libmafft_parttree.a
+    IMPORTED_LOCATION ${CMAKE_CURRENT_BINARY_DIR}/mafft/lib/libmafft_parttree.a
 )
 add_dependencies(mafft_parttree mafft_build)
 
