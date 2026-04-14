@@ -36,7 +36,9 @@
 #include <formula_function.hpp>
 #include <massql_function.hpp>
 #include <mzml_peak_pair_function.hpp>
+#ifdef MIINT_HAS_MAFFT
 #include <align_mafft.hpp>
+#endif
 #include <deblur_table_function.hpp>
 #include <align_pairwise_functions.hpp>
 #include <read_mzml.hpp>
@@ -211,7 +213,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	AlignPairwiseCigarFunction::Register(loader);
 	AlignPairwiseFullFunction::Register(loader);
 
+#ifdef MIINT_HAS_MAFFT
 	AlignMafftTableFunction::Register(loader);
+#endif
 	DeblurTableFunction::Register(loader);
 
 #ifdef MIINT_HAS_HDF5

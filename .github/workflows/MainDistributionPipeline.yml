@@ -20,8 +20,6 @@ jobs:
       ci_tools_version: v1.5-variegata
       extension_name: miint
       extra_toolchains: 'rust'
-      # Skip tests here - run separately with bowtie2 installed
-      skip_tests: true
       exclude_archs: 'windows_amd64_rtools;windows_amd64'
 
   test-with-bowtie2:
@@ -31,7 +29,6 @@ jobs:
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
       VCPKG_TARGET_TRIPLET: 'x64-linux'
       GEN: ninja
-      HDF5_AVAILABLE: 1
     steps:
       - uses: actions/checkout@v4
         with:
@@ -65,7 +62,7 @@ jobs:
 
       - name: Run all tests
         shell: bash -el {0}
-        run: make test
+        run: bash run_tests.sh
 
       - name: Install tutorial test dependencies
         shell: bash -el {0}

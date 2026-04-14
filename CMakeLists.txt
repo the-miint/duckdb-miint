@@ -21,9 +21,11 @@ find_package(expat CONFIG REQUIRED)
 # Optional feature flags for WASM-compatible builds
 option(MIINT_ENABLE_HDF5 "Build with HDF5/BIOM support" ON)
 option(MIINT_ENABLE_BOWTIE2 "Build with Bowtie2 alignment support" ON)
+option(MIINT_ENABLE_MAFFT "Build with MAFFT multiple sequence alignment support" ON)
 
 # Auto-disable platform-incompatible features.
 # Bowtie2 requires POSIX fork/exec (unavailable on WASM and Windows).
+# MAFFT uses mkdtemp and other POSIX APIs (unavailable on Windows; segfaults on MinGW).
 # HDF5 C++ static class members (e.g. LinkCreatPropList::DEFAULT) become
 # unresolvable GOT.mem imports in WASM, causing "bad export type: undefined"
 # at extension load time.
@@ -33,7 +35,8 @@ if(EMSCRIPTEN)
     message(STATUS "Emscripten detected: disabling Bowtie2 and HDF5 (WASM-incompatible)")
 elseif(WIN32)
     set(MIINT_ENABLE_BOWTIE2 OFF)
-    message(STATUS "Windows detected: disabling Bowtie2 (requires POSIX fork/exec)")
+    set(MIINT_ENABLE_MAFFT OFF)
+    message(STATUS "Windows detected: disabling Bowtie2 and MAFFT (require POSIX APIs)")
 endif()
 
 # HDF5 is required for BIOM support, but can be disabled entirely or made optional for clang-tidy
@@ -461,45 +464,42 @@ if(MIINT_ENABLE_VSEARCH)
 endif()
 
 # Build MAFFT PartTree static library for multiple sequence alignment
-# Handle cross-compilation arch flags for MAFFT (same pattern as WFA2/minimap2)
-set(MAFFT_ARCH_CFLAGS "")
-set(MAFFT_FPIC "-fPIC")
-if(EMSCRIPTEN)
-    set(MAFFT_FPIC "")
-    set(MAFFT_ARCH_CFLAGS "${EMSCRIPTEN_THREAD_CFLAGS}")
-elseif(APPLE AND OSX_BUILD_ARCH)
-    if(OSX_BUILD_ARCH STREQUAL "x86_64")
-        set(MAFFT_ARCH_CFLAGS "-arch x86_64")
-    elseif(OSX_BUILD_ARCH STREQUAL "arm64")
-        set(MAFFT_ARCH_CFLAGS "-arch arm64")
+if(MIINT_ENABLE_MAFFT)
+    # Handle cross-compilation arch flags for MAFFT (same pattern as WFA2/minimap2)
+    set(MAFFT_ARCH_CFLAGS "")
+    set(MAFFT_FPIC "-fPIC")
+    if(EMSCRIPTEN)
+        set(MAFFT_FPIC "")
+        set(MAFFT_ARCH_CFLAGS "${EMSCRIPTEN_THREAD_CFLAGS}")
+    elseif(APPLE AND OSX_BUILD_ARCH)
+        if(OSX_BUILD_ARCH STREQUAL "x86_64")
+            set(MAFFT_ARCH_CFLAGS "-arch x86_64")
+        elseif(OSX_BUILD_ARCH STREQUAL "arm64")
+            set(MAFFT_ARCH_CFLAGS "-arch arm64")
+        endif()
     endif()
-endif()
-# MAFFT's mltaln.h guards POSIX-only headers (sys/resource.h, sys/shm.h) with
-# #if !defined(mingw). MinGW does not define this automatically — pass it.
-if(MINGW)
-    set(MAFFT_ARCH_CFLAGS "${MAFFT_ARCH_CFLAGS} -Dmingw")
-endif()
 
-ExternalProject_Add(
-    mafft_build
-    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core
-    CONFIGURE_COMMAND ""
-    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core clean libmafft_parttree.a
-        "CC=${CMAKE_C_COMPILER}"
-        "CFLAGS=-O3 ${MAFFT_FPIC} ${MAFFT_ARCH_CFLAGS}"
-        "ENABLE_MULTITHREAD=-Denablemultithread"
-    INSTALL_COMMAND ${CMAKE_COMMAND} -E copy
-        ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core/libmafft_parttree.a
-        ${CMAKE_CURRENT_BINARY_DIR}/mafft/lib/libmafft_parttree.a
-    BUILD_IN_SOURCE 1
-    BUILD_BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/mafft/lib/libmafft_parttree.a
-)
+    ExternalProject_Add(
+        mafft_build
+        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core
+        CONFIGURE_COMMAND ""
+        BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core clean libmafft_parttree.a
+            "CC=${CMAKE_C_COMPILER}"
+            "CFLAGS=-O3 ${MAFFT_FPIC} ${MAFFT_ARCH_CFLAGS}"
+            "ENABLE_MULTITHREAD=-Denablemultithread"
+        INSTALL_COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core/libmafft_parttree.a
+            ${CMAKE_CURRENT_BINARY_DIR}/mafft/lib/libmafft_parttree.a
+        BUILD_IN_SOURCE 1
+        BUILD_BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/mafft/lib/libmafft_parttree.a
+    )
 
-add_library(mafft_parttree STATIC IMPORTED GLOBAL)
-set_target_properties(mafft_parttree PROPERTIES
-    IMPORTED_LOCATION ${CMAKE_CURRENT_BINARY_DIR}/mafft/lib/libmafft_parttree.a
-)
-add_dependencies(mafft_parttree mafft_build)
+    add_library(mafft_parttree STATIC IMPORTED GLOBAL)
+    set_target_properties(mafft_parttree PROPERTIES
+        IMPORTED_LOCATION ${CMAKE_CURRENT_BINARY_DIR}/mafft/lib/libmafft_parttree.a
+    )
+    add_dependencies(mafft_parttree mafft_build)
+endif()
 
 # Build RYpe from Rust source with Arrow support
 find_program(CARGO cargo REQUIRED)
@@ -587,7 +587,10 @@ set_target_properties(rype PROPERTIES
 add_dependencies(rype rype_build)
 
 # adapted kseq++ include use from strobealign
-include_directories(src/include ext ext/WFA2-lib ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype ext/mafft/core)
+include_directories(src/include ext ext/WFA2-lib ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype)
+if(MIINT_ENABLE_MAFFT)
+    include_directories(ext/mafft/core)
+endif()
 if(MIINT_ENABLE_VSEARCH)
     include_directories(${VSEARCH_SRC_DIR}/src)
 endif()
@@ -664,8 +667,6 @@ set(EXTENSION_SOURCES
     src/remote_file_helper.cpp
     src/duckdb_seq_stream.cpp
     src/hfile_duckdb.cpp
-    src/MafftAligner.cpp
-    src/align_mafft.cpp
     src/deblur.cpp
     src/deblur_table_function.cpp)
 
@@ -680,6 +681,9 @@ if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
 endif()
 if(MIINT_ENABLE_BOWTIE2)
     list(APPEND EXTENSION_SOURCES src/Bowtie2Aligner.cpp src/align_bowtie2.cpp src/align_bowtie2_sharded.cpp)
+endif()
+if(MIINT_ENABLE_MAFFT)
+    list(APPEND EXTENSION_SOURCES src/MafftAligner.cpp src/align_mafft.cpp)
 endif()
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
@@ -706,6 +710,9 @@ endif()
 if(MIINT_ENABLE_BOWTIE2)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_BOWTIE2)
 endif()
+if(MIINT_ENABLE_MAFFT)
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_MAFFT)
+endif()
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_HDF5)
 endif()
@@ -716,10 +723,12 @@ target_link_libraries(${EXTENSION_NAME}
                       minimap2
                       wfa2cpp
                       wfa2
-                      mafft_parttree
                       rype
                       expat::expat
 )
+if(MIINT_ENABLE_MAFFT)
+    target_link_libraries(${EXTENSION_NAME} mafft_parttree)
+endif()
 if(MIINT_ENABLE_VSEARCH)
     target_link_libraries(${EXTENSION_NAME} vsearch)
 endif()
@@ -765,6 +774,9 @@ endif()
 if(MIINT_ENABLE_BOWTIE2)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_BOWTIE2)
 endif()
+if(MIINT_ENABLE_MAFFT)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_MAFFT)
+endif()
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_HDF5)
 endif()
@@ -775,10 +787,12 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       minimap2
                       wfa2cpp
                       wfa2
-                      mafft_parttree
                       rype
                       expat::expat
 )
+if(MIINT_ENABLE_MAFFT)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} mafft_parttree)
+endif()
 if(MIINT_ENABLE_VSEARCH)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} vsearch)
 endif()
@@ -857,8 +871,6 @@ set(TEST_SOURCES
     src/remote_file_helper.cpp
     test/cpp/test_RemoteFileHelper.cpp
     test/cpp/test_hfile_duckdb.cpp
-    src/MafftAligner.cpp
-    test/cpp/test_MafftAligner.cpp
     src/deblur.cpp
     test/cpp/test_deblur.cpp
 )
@@ -875,6 +887,9 @@ endif()
 if(MIINT_ENABLE_BOWTIE2)
     list(APPEND TEST_SOURCES src/Bowtie2Aligner.cpp test/cpp/test_Bowtie2Aligner.cpp)
 endif()
+if(MIINT_ENABLE_MAFFT)
+    list(APPEND TEST_SOURCES src/MafftAligner.cpp test/cpp/test_MafftAligner.cpp)
+endif()
 
 add_executable(tests ${TEST_SOURCES})
 
@@ -886,9 +901,11 @@ target_link_libraries(tests
   minimap2
   wfa2cpp
   wfa2
-  mafft_parttree
   expat::expat
 )
+if(MIINT_ENABLE_MAFFT)
+    target_link_libraries(tests mafft_parttree)
+endif()
 if(MIINT_ENABLE_VSEARCH)
     target_link_libraries(tests vsearch)
 endif()
