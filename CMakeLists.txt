@@ -165,7 +165,9 @@ endif()
 set(HTSLIB_HOST_FLAG "")
 set(HTSLIB_ARCH_CFLAGS "")
 if(EMSCRIPTEN)
-    # Emscripten: tell autotools we are cross-compiling, drop -fPIC (not meaningful)
+    # Emscripten: tell autotools we are cross-compiling.
+    # -fPIC IS required: the extension is linked as a WASM side module (-sSIDE_MODULE=2)
+    # which needs position-independent code for all linked objects.
     set(HTSLIB_HOST_FLAG "--host=wasm32-unknown-emscripten")
     message(STATUS "HTSlib cross-compiling for Emscripten/WASM")
 elseif(APPLE AND OSX_BUILD_ARCH)
@@ -181,7 +183,7 @@ elseif(APPLE AND OSX_BUILD_ARCH)
 endif()
 
 if(EMSCRIPTEN)
-    set(HTSLIB_CFLAGS "CFLAGS=${HTSLIB_ARCH_CFLAGS} ${EMSCRIPTEN_THREAD_CFLAGS} -I${ZLIB_INCLUDE_DIRS}")
+    set(HTSLIB_CFLAGS "CFLAGS=-fPIC ${HTSLIB_ARCH_CFLAGS} ${EMSCRIPTEN_THREAD_CFLAGS} -I${ZLIB_INCLUDE_DIRS}")
 else()
     set(HTSLIB_CFLAGS "CFLAGS=-fPIC ${HTSLIB_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}")
 endif()
@@ -309,7 +311,7 @@ if(EMSCRIPTEN)
     # sse2only=1 avoids SSE4.1 dispatch which requires runtime CPU detection.
     set(MINIMAP2_ARCH_FLAGS "sse2only=1")
     set(MINIMAP2_ARCH_CFLAGS "-msimd128 -msse -msse2 ${EMSCRIPTEN_THREAD_CFLAGS}")
-    set(MINIMAP2_FPIC "")
+    # Keep -fPIC: required for WASM side module linking (-sSIDE_MODULE=2)
     message(STATUS "Minimap2 building for Emscripten/WASM with SIMD via SSE2 emulation")
 elseif(APPLE AND OSX_BUILD_ARCH)
     # Cross-compilation: use target architecture, not host
@@ -364,7 +366,7 @@ add_dependencies(minimap2 minimap2_build)
 set(WFA2_ARCH_CFLAGS "")
 set(WFA2_FPIC "-fPIC")
 if(EMSCRIPTEN)
-    set(WFA2_FPIC "")
+    # Keep -fPIC: required for WASM side module linking (-sSIDE_MODULE=2)
     set(WFA2_ARCH_CFLAGS "${EMSCRIPTEN_THREAD_CFLAGS}")
 elseif(APPLE AND OSX_BUILD_ARCH)
     if(OSX_BUILD_ARCH STREQUAL "x86_64")
@@ -469,7 +471,7 @@ if(MIINT_ENABLE_MAFFT)
     set(MAFFT_ARCH_CFLAGS "")
     set(MAFFT_FPIC "-fPIC")
     if(EMSCRIPTEN)
-        set(MAFFT_FPIC "")
+        # Keep -fPIC: required for WASM side module linking (-sSIDE_MODULE=2)
         set(MAFFT_ARCH_CFLAGS "${EMSCRIPTEN_THREAD_CFLAGS}")
     elseif(APPLE AND OSX_BUILD_ARCH)
         if(OSX_BUILD_ARCH STREQUAL "x86_64")
@@ -566,11 +568,19 @@ if(EMSCRIPTEN OR WIN32)
 else()
     set(RYPE_CARGO_FEATURES "--features" "arrow-ffi")
 endif()
+# For WASM side modules (-sSIDE_MODULE=2), all objects need PIC relocations.
+# Rust's default for wasm32-unknown-emscripten is static; override to PIC.
+if(EMSCRIPTEN)
+    set(RYPE_BUILD_ENV ${CMAKE_COMMAND} -E env "RUSTFLAGS=-C relocation-model=pic")
+else()
+    # Unset (not empty string "") so it expands to zero arguments in BUILD_COMMAND
+    set(RYPE_BUILD_ENV)
+endif()
 ExternalProject_Add(
     rype_build
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype
     CONFIGURE_COMMAND "${RYPE_CONFIGURE_CMD}"
-    BUILD_COMMAND ${CARGO} rustc --release ${RYPE_CARGO_FEATURES} --lib --crate-type=staticlib
+    BUILD_COMMAND ${RYPE_BUILD_ENV} ${CARGO} rustc --release ${RYPE_CARGO_FEATURES} --lib --crate-type=staticlib
         --target-dir ${RYPE_TARGET_DIR}
         --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype/Cargo.toml
         ${RYPE_CARGO_TARGET_FLAG}
@@ -687,6 +697,35 @@ if(MIINT_ENABLE_MAFFT)
 endif()
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
+
+# WASM builds: DuckDB's build_loadable_extension runs a POST_BUILD emcc command
+# to create the .wasm side module. It reads additional libraries to link from
+# DUCKDB_EXTENSION_<NAME>_LINKED_LIBS — NOT from target_link_libraries (which
+# only records metadata for STATIC library targets on Emscripten). Without this,
+# symbols like gzclose become unresolved imports and fail at extension load time
+# with "bad export type: undefined".
+if(EMSCRIPTEN)
+    # Space-separated string of library paths. extension_build_tools.cmake runs
+    # separate_arguments() then passes the result to add_custom_command COMMAND,
+    # where generator expressions ($<TARGET_FILE:...>) are evaluated at build time.
+    set(WASM_LIBS "")
+    string(APPEND WASM_LIBS "$<TARGET_FILE:ZLIB::ZLIB> ")
+    string(APPEND WASM_LIBS "$<TARGET_FILE:expat::expat> ")
+    string(APPEND WASM_LIBS "${CMAKE_CURRENT_BINARY_DIR}/htslib/lib/libhts.a ")
+    string(APPEND WASM_LIBS "${CMAKE_CURRENT_BINARY_DIR}/minimap2/lib/libminimap2.a ")
+    string(APPEND WASM_LIBS "${CMAKE_CURRENT_BINARY_DIR}/wfa2/lib/libwfacpp.a ")
+    string(APPEND WASM_LIBS "${CMAKE_CURRENT_BINARY_DIR}/wfa2/lib/libwfa.a ")
+    string(APPEND WASM_LIBS "${RYPE_LIB_PATH}")
+    if(HAVE_LIBZSTD)
+        string(APPEND WASM_LIBS " $<TARGET_FILE:${ZSTD_TARGET}>")
+    endif()
+    if(MIINT_ENABLE_MAFFT)
+        string(APPEND WASM_LIBS " ${CMAKE_CURRENT_BINARY_DIR}/mafft/lib/libmafft_parttree.a")
+    endif()
+    set(DUCKDB_EXTENSION_MIINT_LINKED_LIBS "${WASM_LIBS}")
+    message(STATUS "WASM linked libs: ${DUCKDB_EXTENSION_MIINT_LINKED_LIBS}")
+endif()
+
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
 # Enable compiler warnings for extension code only (not external libraries)
