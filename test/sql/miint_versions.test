@@ -4,9 +4,9 @@
 
 require miint
 
-# At least 7 core libraries always present (HDF5 is optional)
+# At least 8 core libraries always present (HDF5 and vsearch are optional)
 query I
-SELECT COUNT(*) >= 7 FROM miint_versions();
+SELECT COUNT(*) >= 8 FROM miint_versions();
 ----
 true
 
@@ -19,14 +19,14 @@ SELECT COUNT(*) FROM miint_versions() WHERE version = '' OR version IS NULL;
 # All always-present library names
 query I
 SELECT COUNT(*) FROM miint_versions()
-WHERE library IN ('miint', 'htslib', 'minimap2', 'kseq++', 'WFA2-lib', 'zlib', 'rype');
+WHERE library IN ('miint', 'htslib', 'minimap2', 'kseq++', 'WFA2-lib', 'zlib', 'rype', 'mafft');
 ----
-7
+8
 
 # Every row matches either a core or optional library name
 query I
 SELECT COUNT(*) FROM miint_versions()
-WHERE library NOT IN ('miint', 'htslib', 'minimap2', 'kseq++', 'WFA2-lib', 'HDF5', 'zlib', 'rype');
+WHERE library NOT IN ('miint', 'htslib', 'minimap2', 'kseq++', 'WFA2-lib', 'HDF5', 'zlib', 'rype', 'vsearch', 'mafft');
 ----
 0
 
