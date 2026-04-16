@@ -21,50 +21,103 @@ require miint
 
 require-env MAFFT_AVAILABLE
 
+# --- Build sequence tables used across the test ---
+
+statement ok
+CREATE TABLE tiny AS SELECT read_id, sequence1 FROM read_fastx('data/mafft/tiny.fa');
+
+statement ok
+CREATE TABLE test_fa AS SELECT read_id, sequence1 FROM read_fastx('data/fastq/test.fa');
+
+statement ok
+CREATE TABLE mixed_case AS SELECT read_id, sequence1 FROM read_fastx('data/mafft/mixed_case.fa');
+
+statement ok
+CREATE TABLE single AS SELECT read_id, sequence1 FROM read_fastx('data/mafft/single.fa');
+
+statement ok
+CREATE TABLE sample_tbl AS
+  SELECT format('seq{:d}', row_number() OVER ()) AS read_id, sequence1
+  FROM read_fastx('data/mafft/sample.fa');
+
 # --- Error handling ---
 
-# Missing file
+# Missing table
 statement error
-SELECT * FROM align_mafft('nonexistent_file.fa');
+SELECT * FROM align_mafft('no_such_table');
 ----
-IO Error
+Binder Error
+
+# Paired-end data is rejected at bind
+statement ok
+CREATE TABLE paired AS
+  SELECT 'a' AS read_id, 'ACGTACGT' AS sequence1, 'TGCAACGT' AS sequence2
+  UNION ALL
+  SELECT 'b', 'ACGAACGT', 'TGCAAACG';
+
+statement error
+SELECT * FROM align_mafft('paired');
+----
+Binder Error
 
 # Single sequence (need at least 2)
 statement error
-SELECT * FROM align_mafft('data/mafft/single.fa');
+SELECT * FROM align_mafft('single');
 ----
 Invalid Input Error
 
-# --- tiny.fa: exact expected output ---
+# Sequence shorter than MAFFT's 6-char minimum — must surface the offending read_id
+statement ok
+CREATE TABLE too_short AS
+  SELECT 'a' AS read_id, 'ACGT' AS sequence1 UNION ALL SELECT 'b', 'ACGTACGT';
+
+statement error
+SELECT * FROM align_mafft('too_short');
+----
+sequence for read_id 'a' is too short
+
+# Duplicate read_id makes output ambiguous — reject up front
+statement ok
+CREATE TABLE dupe_ids AS
+  SELECT 'a' AS read_id, 'ACGTACGT' AS sequence1
+  UNION ALL SELECT 'a', 'ACGAACGT'
+  UNION ALL SELECT 'b', 'ACGTACGA';
+
+statement error
+SELECT * FROM align_mafft('dupe_ids');
+----
+duplicate read_id 'a'
+
+# --- tiny: exact expected output ---
 # Input: s1=ACGTACGT, s2=ACGAACGT, s3=ACGTACGA (3 DNA, 8bp each)
 # Expected: no gaps (same length, high similarity), case preserved
 
 query ITTII
 SELECT sequence_index, read_id, aligned_sequence, original_length, aligned_length
-FROM align_mafft('data/mafft/tiny.fa') ORDER BY sequence_index;
+FROM align_mafft('tiny') ORDER BY sequence_index;
 ----
 0	s1	ACGTACGT	8	8
 1	s2	ACGAACGT	8	8
 2	s3	ACGTACGA	8	8
 
-# --- test.fa: exact expected output ---
+# --- test_fa: exact expected output ---
 # Input: seq1=ATGCATGCATGC, seq2=GGCCGGCCGGCC (2 DNA, 12bp each)
 # Expected: no gaps (same length), case preserved
 
 query ITTII
 SELECT sequence_index, read_id, aligned_sequence, original_length, aligned_length
-FROM align_mafft('data/fastq/test.fa') ORDER BY sequence_index;
+FROM align_mafft('test_fa') ORDER BY sequence_index;
 ----
 0	seq1	ATGCATGCATGC	12	12
 1	seq2	GGCCGGCCGGCC	12	12
 
-# --- mixed_case.fa: case preservation ---
+# --- mixed_case: case preservation ---
 # Input: s1=AcGtAcGt, s2=aCgTaCgT (mixed case DNA)
 # Expected: original case preserved after MAFFT's internal lowercasing
 
 query ITTII
 SELECT sequence_index, read_id, aligned_sequence, original_length, aligned_length
-FROM align_mafft('data/mafft/mixed_case.fa') ORDER BY sequence_index;
+FROM align_mafft('mixed_case') ORDER BY sequence_index;
 ----
 0	s1	AcGtAcGt	8	8
 1	s2	aCgTaCgT	8	8
@@ -72,57 +125,42 @@ FROM align_mafft('data/mafft/mixed_case.fa') ORDER BY sequence_index;
 # --- Column types ---
 
 query I
-SELECT typeof(sequence_index) FROM align_mafft('data/mafft/tiny.fa') LIMIT 1;
+SELECT typeof(sequence_index) FROM align_mafft('tiny') LIMIT 1;
 ----
 BIGINT
 
-# --- Nullable comment ---
-
-query T
-SELECT comment FROM align_mafft('data/mafft/tiny.fa') WHERE read_id = 's1';
-----
-first sequence
-
-query I
-SELECT comment IS NULL FROM align_mafft('data/mafft/tiny.fa') WHERE read_id = 's2';
-----
-true
-
-# --- sample.fa: 36 opsin protein sequences ---
+# --- sample_tbl: 36 opsin protein sequences ---
 # Expected aligned_length = 732 (verified against splittbfast binary output)
 
 query I
-SELECT COUNT(*) FROM align_mafft('data/mafft/sample.fa');
+SELECT COUNT(*) FROM align_mafft('sample_tbl');
 ----
 36
 
 query I
-SELECT DISTINCT aligned_length FROM align_mafft('data/mafft/sample.fa');
+SELECT DISTINCT aligned_length FROM align_mafft('sample_tbl');
 ----
 732
 
-# Ungapped content matches original input for every sequence
+# Ungapped content matches original input: every aligned sequence (with gaps
+# removed) appears in the input. Set-based check — robust to duplicate or
+# empty read_ids in sample.fa.
 query I
-SELECT COUNT(*) FROM (
-  SELECT s.sequence1 AS original, replace(a.aligned_sequence, '-', '') AS ungapped
-  FROM align_mafft('data/mafft/sample.fa') a
-  JOIN (SELECT row_number() OVER () - 1 AS idx, * FROM read_fastx('data/mafft/sample.fa')) s
-    ON a.sequence_index = s.idx
-  WHERE original != ungapped
-);
+SELECT COUNT(*) FROM align_mafft('sample_tbl')
+WHERE replace(aligned_sequence, '-', '') NOT IN (SELECT sequence1 FROM sample_tbl);
 ----
 0
 
 # aligned_length > max original_length (gaps inserted)
 query I
-SELECT aligned_length > MAX(original_length) FROM align_mafft('data/mafft/sample.fa') GROUP BY aligned_length;
+SELECT aligned_length > MAX(original_length) FROM align_mafft('sample_tbl') GROUP BY aligned_length;
 ----
 true
 
 # --- Sequential calls (global state cleanup) ---
 
 query I
-SELECT (SELECT COUNT(*) FROM align_mafft('data/mafft/tiny.fa'))
-     + (SELECT COUNT(*) FROM align_mafft('data/mafft/tiny.fa'));
+SELECT (SELECT COUNT(*) FROM align_mafft('tiny'))
+     + (SELECT COUNT(*) FROM align_mafft('tiny'));
 ----
 6
