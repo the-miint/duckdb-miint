@@ -168,6 +168,36 @@ jobs:
             });
           "
 
+  test-wasm-load:
+    name: Test WASM extension loads
+    runs-on: ubuntu-latest
+    env:
+      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: 'true'
+
+      - uses: mymindstorm/setup-emsdk@v13
+        with:
+          version: 3.1.71
+
+      - uses: dtolnay/rust-toolchain@1.86.0
+        with:
+          targets: wasm32-unknown-emscripten
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11.1
+        with:
+          vcpkgGitCommitId: 84bab45d415d22042bd0b9081aea57f362da3f35
+
+      - name: Build WASM extension
+        run: ./scripts/build_wasm.sh --build-only
+
+      - name: Build DuckDB WASM core and run load test
+        run: ./scripts/test_wasm_load.sh
+
   code-quality-check:
     name: Code Quality Check
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v1.5-variegata

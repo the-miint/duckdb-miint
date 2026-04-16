@@ -127,12 +127,16 @@ Building DuckDB from our submodule eliminates all ABI mismatch issues.
 
 ## CI Integration
 
-The `verify-wasm` job in `.github/workflows/MainDistributionPipeline.yml`
-runs Level 2 verification on CI-built WASM artifacts. It downloads the
-extension `.wasm` from the distribution build and checks for unresolved imports.
+Two CI jobs in `.github/workflows/MainDistributionPipeline.yml`:
 
-Level 3 (headless load test) is not yet in CI because it requires building
-DuckDB WASM from source, which adds ~5 minutes to the pipeline.
+- **`verify-wasm`** (Level 2) — Downloads the extension `.wasm` artifacts
+  from the distribution build and checks for unresolved library imports.
+  Runs in ~30 seconds.
+
+- **`test-wasm-load`** (Level 3) — Builds the extension and DuckDB WASM
+  from source (matching emsdk 3.1.71 + Rust 1.86.0 + vcpkg), compiles the
+  test harness, and runs the headless load test. This is a full independent
+  build that catches ABI mismatches. Runs in ~10-15 minutes.
 
 ## Build Artifacts
 
