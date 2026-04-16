@@ -31,8 +31,21 @@ void FlushFormatBuffer(FormatWriterState &local_state, CopyFileHandle &file, mut
 
 	lock_guard<mutex> glock(lock);
 
-	// Write accumulated buffer to file
-	file.Write(local_state.stream->GetData(), local_state.stream->GetPosition());
+	// Write accumulated buffer to file in <= 1 GiB slices. DuckDB's MiniZStreamWrapper
+	// (the gzip path) casts the write size to unsigned int internally, so a single write
+	// larger than 4 GiB throws "Information loss on integer cast". Chunking keeps every
+	// underlying compressor call within 32-bit bounds regardless of how much the local
+	// MemoryStream accumulated.
+	constexpr idx_t MAX_WRITE_CHUNK = 1ULL * 1024 * 1024 * 1024; // 1 GiB
+	const_data_ptr_t data = local_state.stream->GetData();
+	idx_t remaining = local_state.stream->GetPosition();
+	idx_t offset = 0;
+	while (remaining > 0) {
+		idx_t to_write = remaining < MAX_WRITE_CHUNK ? remaining : MAX_WRITE_CHUNK;
+		file.Write(data + offset, to_write);
+		offset += to_write;
+		remaining -= to_write;
+	}
 
 	// Reset local buffer
 	local_state.Reset();

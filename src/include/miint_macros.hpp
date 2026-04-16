@@ -190,7 +190,7 @@ const std::string READ_JPLACE = // NOLINT
     "    filepath "
     "FROM ( "
     "    SELECT unnest(placements) AS placement, filename AS filepath "
-    "    FROM read_json(path, filename := true) "
+    "    FROM read_json(path, filename := true, maximum_object_size=1000000000) "
     "); ";
 
 // mz_within(observed, target, tolerance_da)

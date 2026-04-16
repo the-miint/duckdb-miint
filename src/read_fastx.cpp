@@ -2,9 +2,12 @@
 #include "SequenceRecord.hpp"
 #include "remote_file_helper.hpp"
 #include "table_function_common.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/storage/statistics/node_statistics.hpp"
+#include <filesystem>
 #include <read_fastx.hpp>
 
 namespace duckdb {
@@ -144,7 +147,27 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 		qual_offset = static_cast<uint8_t>(offset_value);
 	}
 
-	auto data = duckdb::make_uniq<Data>(sequence1_paths, sequence2_paths, include_filepath, uses_stdin, qual_offset);
+	// Default byte budget: 512 MiB. Large enough that typical short-read workflows
+	// always fill STANDARD_VECTOR_SIZE (~600 KB per chunk) without being capped, but
+	// small enough to prevent multi-GB chunks when reading large sequences
+	// (e.g. bacterial genomes at ~5 MB/record would otherwise blow past RAM at 2048x).
+	uint64_t max_batch_bytes = 512ULL * 1024 * 1024;
+	auto mbb_param = input.named_parameters.find("max_batch_bytes");
+	if (mbb_param != input.named_parameters.end() && !mbb_param->second.IsNull()) {
+		std::string raw = mbb_param->second.ToString();
+		idx_t parsed = 0;
+		std::string err = StringUtil::TryParseFormattedBytes(raw, parsed);
+		if (!err.empty()) {
+			throw InvalidInputException("max_batch_bytes: %s", err);
+		}
+		if (parsed == 0) {
+			throw InvalidInputException("max_batch_bytes must be greater than 0");
+		}
+		max_batch_bytes = static_cast<uint64_t>(parsed);
+	}
+
+	auto data = duckdb::make_uniq<Data>(sequence1_paths, sequence2_paths, include_filepath, uses_stdin, qual_offset,
+	                                    max_batch_bytes);
 	for (auto &name : data->names) {
 		names.emplace_back(name);
 	}
@@ -201,7 +224,8 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 		}
 
 		// Read from claimed file (no lock needed)
-		batch = global_state.readers[local_state.current_file_idx]->read(STANDARD_VECTOR_SIZE);
+		batch = global_state.readers[local_state.current_file_idx]->read(STANDARD_VECTOR_SIZE,
+		                                                                  bind_data.max_batch_bytes);
 		current_filepath = global_state.sequence1_filepaths[local_state.current_file_idx];
 
 		// If this file is exhausted, release it and try to claim another
@@ -260,11 +284,77 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 	output.SetCardinality(batch.size());
 }
 
+// Cardinality estimate so the query optimizer knows roughly how big the scan is. Without
+// this, DuckDB defaults unknown table-function scans to a tiny cardinality, which causes
+// joins to pick read_fastx as the BUILD side -- catastrophic when the file is multi-GB of
+// genomic sequence (e.g. bacterial genome catalogs): DuckDB ends up hashing ~50 GB of
+// sequence into memory instead of streaming.
+//
+// We deliberately err on the side of OVER-estimating record count:
+//   - if the estimate is too high, the optimizer treats the scan as "large" and probes it
+//     -- always the safe choice for a streaming file source.
+//   - if it's too low (the status quo), the optimizer builds a hash table on it -> OOM.
+//
+// Heuristic: bytes-on-disk / AVG_RECORD_BYTES. 50 bytes/record is intentionally small so
+// that bacterial-genome FASTA (~5 MB/record) and short-read FASTQ (~300 B/record) both
+// resolve to "big" when the file is big. Gzipped files use a 4x expansion factor.
+// Remote files and stdin fall back to a large constant (exact record count is unknown but
+// streaming is always the right plan).
+static unique_ptr<NodeStatistics> ReadFastxCardinality(ClientContext &context, const FunctionData *bind_data_p) {
+	constexpr idx_t AVG_BYTES_PER_RECORD = 50;
+	constexpr idx_t GZIP_EXPANSION_FACTOR = 4;
+	constexpr idx_t REMOTE_OR_STDIN_ESTIMATE = 10'000'000; // err large
+
+	auto &bind_data = bind_data_p->Cast<ReadFastxTableFunction::Data>();
+
+	if (bind_data.uses_stdin) {
+		return make_uniq<NodeStatistics>(REMOTE_OR_STDIN_ESTIMATE);
+	}
+
+	idx_t total_bytes = 0;
+	auto accumulate = [&](const std::string &path) -> bool {
+		if (miint::RemoteFileHelper::IsRemotePath(path)) {
+			return false; // signal "unknown, fall back"
+		}
+		std::error_code ec;
+		auto sz = std::filesystem::file_size(path, ec);
+		if (ec) {
+			return false;
+		}
+		if (IsGzipped(path)) {
+			sz *= GZIP_EXPANSION_FACTOR;
+		}
+		total_bytes += sz;
+		return true;
+	};
+
+	for (const auto &path : bind_data.sequence1_paths) {
+		if (!accumulate(path)) {
+			return make_uniq<NodeStatistics>(REMOTE_OR_STDIN_ESTIMATE);
+		}
+	}
+	if (bind_data.sequence2_paths.has_value()) {
+		for (const auto &path : bind_data.sequence2_paths.value()) {
+			if (!accumulate(path)) {
+				return make_uniq<NodeStatistics>(REMOTE_OR_STDIN_ESTIMATE);
+			}
+		}
+	}
+
+	idx_t estimated = total_bytes / AVG_BYTES_PER_RECORD;
+	if (estimated < 1) {
+		estimated = 1;
+	}
+	return make_uniq<NodeStatistics>(estimated);
+}
+
 TableFunction ReadFastxTableFunction::GetFunction() {
 	auto tf = TableFunction("read_fastx", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
 	tf.named_parameters["sequence2"] = LogicalType::ANY;
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
 	tf.named_parameters["qual_offset"] = LogicalType::BIGINT;
+	tf.named_parameters["max_batch_bytes"] = LogicalType::VARCHAR;
+	tf.cardinality = ReadFastxCardinality;
 	return tf;
 }
 

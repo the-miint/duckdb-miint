@@ -42,13 +42,6 @@ struct FastqCopyBindData : public SequenceCopyBindData {
 };
 
 //===--------------------------------------------------------------------===//
-// Helper Functions
-//===--------------------------------------------------------------------===//
-static string EncodeQuality(const uint8_t *qual_data, idx_t length, uint8_t offset) {
-	return miint::encode_quality_ascii(qual_data, static_cast<size_t>(length), offset);
-}
-
-//===--------------------------------------------------------------------===//
 // Bind
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFunctionBindInput &input,
@@ -143,32 +136,36 @@ static unique_ptr<LocalFunctionData> FastqCopyInitializeLocal(ExecutionContext &
 //===--------------------------------------------------------------------===//
 // Sink
 //===--------------------------------------------------------------------===//
-static void WriteFastqRecordToBuffer(MemoryStream &stream, const string &id, const string &seq,
-                                     const uint8_t *qual_data, idx_t qual_length, uint8_t qual_offset,
-                                     const string &comment) {
-	// Pre-calculate total size to avoid reallocations
-	idx_t size = 1 + id.size() + 1 + seq.size() + 3 + qual_length + 1; // @ + id + \n + seq + \n+\n + qual + \n
-	if (!comment.empty()) {
-		size += 1 + comment.size(); // space + comment
+// Write a FASTQ record directly to the stream without a per-record intermediate string.
+// `qual_encoded_buf` is a caller-owned scratch buffer reused across records -- we resize
+// it to qual_length and fill in place, amortizing quality-encoding allocation across the
+// DataChunk instead of allocating fresh per row. Saves several large copies per record
+// on long-read FASTQ (sequence + quality can each be multi-kB).
+static void WriteFastqRecordToBuffer(MemoryStream &stream, const char *id, idx_t id_size, const char *seq,
+                                     idx_t seq_size, const uint8_t *qual_data, idx_t qual_length, uint8_t qual_offset,
+                                     const char *comment, idx_t comment_size, string &qual_encoded_buf) {
+	qual_encoded_buf.resize(qual_length);
+	for (idx_t k = 0; k < qual_length; k++) {
+		int encoded = static_cast<int>(qual_data[k]) + qual_offset;
+		if (encoded > 126) {
+			throw InvalidInputException("Quality score overflow: " + std::to_string(qual_data[k]) + " + " +
+			                            std::to_string(qual_offset) + " = " + std::to_string(encoded) +
+			                            " exceeds valid ASCII range (max 126)");
+		}
+		qual_encoded_buf[k] = static_cast<char>(encoded);
 	}
 
-	// Build record string with pre-reserved capacity
-	string record;
-	record.reserve(size);
-	record += '@';
-	record += id;
-	if (!comment.empty()) {
-		record += ' ';
-		record += comment;
+	stream.WriteData(const_data_ptr_cast("@"), 1);
+	stream.WriteData(const_data_ptr_cast(id), id_size);
+	if (comment_size > 0) {
+		stream.WriteData(const_data_ptr_cast(" "), 1);
+		stream.WriteData(const_data_ptr_cast(comment), comment_size);
 	}
-	record += '\n';
-	record += seq;
-	record += "\n+\n";
-	record += EncodeQuality(qual_data, qual_length, qual_offset);
-	record += '\n';
-
-	// Write to stream
-	stream.WriteData(const_data_ptr_cast(record.c_str()), record.size());
+	stream.WriteData(const_data_ptr_cast("\n"), 1);
+	stream.WriteData(const_data_ptr_cast(seq), seq_size);
+	stream.WriteData(const_data_ptr_cast("\n+\n"), 3);
+	stream.WriteData(const_data_ptr_cast(qual_encoded_buf.data()), qual_length);
+	stream.WriteData(const_data_ptr_cast("\n"), 1);
 }
 
 static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p,
@@ -213,7 +210,13 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 		stream_r2 = lstate.writer_state_r2->stream.get();
 	}
 
-	// Build all records into local buffer(s) - NO LOCK
+	// Build all records into local buffer(s) - NO LOCK.
+	// Hot-path rule: never call string_t::GetString() on sequence/quality fields -- it
+	// makes a heap copy per record. Use GetData()/GetSize() and write directly to the
+	// MemoryStream. The quality-encoding buffer is reused across rows so ASCII-offset
+	// encoding doesn't allocate per record either.
+	string id_buf;            // reused when id_as_sequence_index is true
+	string qual_encoded_buf;  // reused across all rows and both mates
 	for (idx_t row = 0; row < input.size(); row++) {
 		auto row_idx = read_id_data.sel->get_index(row);
 
@@ -223,22 +226,28 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 		}
 
 		// Get ID
-		string id;
+		const char *id_ptr;
+		idx_t id_size;
 		if (fdata.id_as_sequence_index) {
 			auto seq_idx_data = UnifiedVectorFormat::GetData<int64_t>(sequence_index_data);
 			auto seq_idx_row = sequence_index_data.sel->get_index(row);
-			id = to_string(seq_idx_data[seq_idx_row]);
+			id_buf = to_string(seq_idx_data[seq_idx_row]);
+			id_ptr = id_buf.data();
+			id_size = id_buf.size();
 		} else {
-			id = read_ids[row_idx].GetString();
+			id_ptr = read_ids[row_idx].GetData();
+			id_size = read_ids[row_idx].GetSize();
 		}
 
-		// Get comment
-		string comment;
+		// Get comment (may be absent or NULL)
+		const char *comment_ptr = nullptr;
+		idx_t comment_size = 0;
 		if (fdata.include_comment && indices.comment_idx != DConstants::INVALID_INDEX) {
 			auto comment_strings = UnifiedVectorFormat::GetData<string_t>(comment_data);
 			auto comment_row = comment_data.sel->get_index(row);
 			if (comment_data.validity.RowIsValid(comment_row)) {
-				comment = comment_strings[comment_row].GetString();
+				comment_ptr = comment_strings[comment_row].GetData();
+				comment_size = comment_strings[comment_row].GetSize();
 			}
 		}
 
@@ -247,7 +256,8 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 		if (!seq1_data.validity.RowIsValid(seq1_row)) {
 			throw InvalidInputException("NULL value in sequence1 column (row %llu)", row);
 		}
-		string seq1 = seq1_strings[seq1_row].GetString();
+		const char *seq1_ptr = seq1_strings[seq1_row].GetData();
+		idx_t seq1_size = seq1_strings[seq1_row].GetSize();
 
 		auto qual1_row = qual1_data.sel->get_index(row);
 		if (!qual1_data.validity.RowIsValid(qual1_row)) {
@@ -260,14 +270,15 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 		const uint8_t *qual1_ptr = qual1_list_data + qual1_entries[qual1_row].offset;
 
 		// Validate quality score length matches sequence length
-		if (qual1_length != seq1.size()) {
+		if (qual1_length != seq1_size) {
 			throw InvalidInputException(
 			    "Quality score length (%llu) does not match sequence length (%llu) for row %llu", qual1_length,
-			    seq1.size(), row);
+			    seq1_size, row);
 		}
 
 		// Write R1 record to local buffer
-		WriteFastqRecordToBuffer(stream_r1, id, seq1, qual1_ptr, qual1_length, fdata.qual_offset, comment);
+		WriteFastqRecordToBuffer(stream_r1, id_ptr, id_size, seq1_ptr, seq1_size, qual1_ptr, qual1_length,
+		                         fdata.qual_offset, comment_ptr, comment_size, qual_encoded_buf);
 		lstate.writer_state_r1->written_anything = true;
 
 		// Handle R2 for paired-end
@@ -277,7 +288,8 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 			if (!seq2_data.validity.RowIsValid(seq2_row)) {
 				throw InvalidInputException("NULL value in sequence2 column (row %llu)", row);
 			}
-			string seq2 = seq2_strings[seq2_row].GetString();
+			const char *seq2_ptr = seq2_strings[seq2_row].GetData();
+			idx_t seq2_size = seq2_strings[seq2_row].GetSize();
 
 			auto qual2_row = qual2_data.sel->get_index(row);
 			if (!qual2_data.validity.RowIsValid(qual2_row)) {
@@ -290,30 +302,33 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 			const uint8_t *qual2_ptr = qual2_list_data + qual2_entries[qual2_row].offset;
 
 			// Validate quality score length matches sequence length
-			if (qual2_length != seq2.size()) {
+			if (qual2_length != seq2_size) {
 				throw InvalidInputException(
 				    "Quality score length (%llu) does not match sequence length (%llu) for row %llu (R2)", qual2_length,
-				    seq2.size(), row);
+				    seq2_size, row);
 			}
 
 			if (fdata.interleave) {
 				// Write R2 to same buffer
-				WriteFastqRecordToBuffer(stream_r1, id, seq2, qual2_ptr, qual2_length, fdata.qual_offset, comment);
+				WriteFastqRecordToBuffer(stream_r1, id_ptr, id_size, seq2_ptr, seq2_size, qual2_ptr, qual2_length,
+				                         fdata.qual_offset, comment_ptr, comment_size, qual_encoded_buf);
 			} else {
 				// Write R2 to separate buffer
-				WriteFastqRecordToBuffer(*stream_r2, id, seq2, qual2_ptr, qual2_length, fdata.qual_offset, comment);
+				WriteFastqRecordToBuffer(*stream_r2, id_ptr, id_size, seq2_ptr, seq2_size, qual2_ptr, qual2_length,
+				                         fdata.qual_offset, comment_ptr, comment_size, qual_encoded_buf);
 				lstate.writer_state_r2->written_anything = true;
 			}
 		}
-	}
 
-	// Check if we need to flush (buffer exceeded threshold)
-	if (lstate.writer_state_r1->stream->GetPosition() >= lstate.writer_state_r1->flush_size) {
-		FlushFormatBuffer(*lstate.writer_state_r1, *gstate.file_r1, gstate.lock);
-	}
-
-	if (stream_r2 && lstate.writer_state_r2->stream->GetPosition() >= lstate.writer_state_r2->flush_size) {
-		FlushFormatBuffer(*lstate.writer_state_r2, *gstate.file_r2, gstate.lock);
+		// Flush per-record once the threshold is crossed, not per-chunk. Keeps the local
+		// buffer bounded even when individual records are very large (e.g. long-read
+		// FASTQ), so we never hand gzip more than flush_size + one_record at a time.
+		if (lstate.writer_state_r1->stream->GetPosition() >= lstate.writer_state_r1->flush_size) {
+			FlushFormatBuffer(*lstate.writer_state_r1, *gstate.file_r1, gstate.lock);
+		}
+		if (stream_r2 && lstate.writer_state_r2->stream->GetPosition() >= lstate.writer_state_r2->flush_size) {
+			FlushFormatBuffer(*lstate.writer_state_r2, *gstate.file_r2, gstate.lock);
+		}
 	}
 }
 
