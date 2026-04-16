@@ -102,6 +102,102 @@ jobs:
       - name: Run C++ unit tests
         run: ./build/release/extension/miint/tests
 
+  verify-wasm:
+    name: Verify WASM extension imports
+    needs: duckdb-stable-build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        wasm_arch: [wasm_eh, wasm_mvp, wasm_threads]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: miint-v1.5-variegata-extension-${{ matrix.wasm_arch }}
+
+      - name: Find WASM file
+        id: find-wasm
+        run: |
+          WASM_FILE=$(find . -name "*.duckdb_extension.wasm" | head -1)
+          echo "wasm_file=$WASM_FILE" >> $GITHUB_OUTPUT
+          echo "Found: $WASM_FILE ($(du -h "$WASM_FILE" | cut -f1))"
+
+      - name: Verify no unresolved library imports
+        run: |
+          node -e "
+            const fs = require('fs');
+            const buf = fs.readFileSync('${{ steps.find-wasm.outputs.wasm_file }}');
+            WebAssembly.compile(buf).then(mod => {
+                const imports = WebAssembly.Module.imports(mod);
+                const exports = WebAssembly.Module.exports(mod);
+                const exportNames = new Set(exports.map(e => e.name));
+
+                // Library symbols that must be statically linked
+                const libPatterns = [
+                    /^gz(close|open|d?open|read|write|gets|puts|eof|rewind|seek|tell|flush)/,
+                    /^(deflate|inflate|compress|uncompress|adler32|crc32)/,
+                    /^hts_/,  /^sam_/,  /^bam_/,  /^bcf_/,  /^bgzf_/,
+                    /^mm_/,  /^mm2_/,  /^wavefront/,  /^XML_/,  /^rype_/,
+                ];
+                const isLib = name => libPatterns.some(p => p.test(name));
+
+                // Direct env imports = not linked at all
+                const badDirect = imports.filter(i => i.module === 'env' && isLib(i.name));
+                // GOT imports without matching exports = linked but PIC resolution broken
+                const gotImports = imports.filter(i =>
+                    (i.module === 'GOT.func' || i.module === 'GOT.mem') && isLib(i.name)
+                );
+                const badGot = gotImports.filter(i => !exportNames.has(i.name));
+                const hasInit = exportNames.has('miint_duckdb_cpp_init');
+
+                const problems = [];
+                if (!hasInit) problems.push('Missing miint_duckdb_cpp_init export');
+                badDirect.forEach(i => problems.push('Unlinked: env.' + i.name));
+                badGot.forEach(i => problems.push('GOT without export: ' + i.module + '.' + i.name));
+
+                if (problems.length > 0) {
+                    console.error('WASM import verification FAILED:');
+                    problems.forEach(p => console.error('  ' + p));
+                    process.exit(1);
+                }
+                console.log('Imports: ' + imports.length + ' total, ' + gotImports.length + ' library GOT (all self-resolved)');
+                console.log('Exports: ' + exports.length + ' total, miint_duckdb_cpp_init present');
+                console.log('PASS');
+            }).catch(err => {
+                console.error('WebAssembly.compile failed:', err.message);
+                process.exit(1);
+            });
+          "
+
+  test-wasm-load:
+    name: Test WASM extension loads
+    runs-on: ubuntu-latest
+    env:
+      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: 'true'
+
+      - uses: mymindstorm/setup-emsdk@v13
+        with:
+          version: 3.1.71
+
+      - uses: dtolnay/rust-toolchain@1.86.0
+        with:
+          targets: wasm32-unknown-emscripten
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11.1
+        with:
+          vcpkgGitCommitId: 84bab45d415d22042bd0b9081aea57f362da3f35
+
+      - name: Build WASM extension
+        run: ./scripts/build_wasm.sh --build-only
+
+      - name: Build DuckDB WASM core and run load test
+        run: ./scripts/test_wasm_load.sh
+
   code-quality-check:
     name: Code Quality Check
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v1.5-variegata
