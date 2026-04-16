@@ -224,8 +224,8 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 		}
 
 		// Read from claimed file (no lock needed)
-		batch = global_state.readers[local_state.current_file_idx]->read(STANDARD_VECTOR_SIZE,
-		                                                                  bind_data.max_batch_bytes);
+		batch =
+		    global_state.readers[local_state.current_file_idx]->read(STANDARD_VECTOR_SIZE, bind_data.max_batch_bytes);
 		current_filepath = global_state.sequence1_filepaths[local_state.current_file_idx];
 
 		// If this file is exhausted, release it and try to claim another

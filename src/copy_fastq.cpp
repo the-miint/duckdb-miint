@@ -215,8 +215,8 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 	// makes a heap copy per record. Use GetData()/GetSize() and write directly to the
 	// MemoryStream. The quality-encoding buffer is reused across rows so ASCII-offset
 	// encoding doesn't allocate per record either.
-	string id_buf;            // reused when id_as_sequence_index is true
-	string qual_encoded_buf;  // reused across all rows and both mates
+	string id_buf;           // reused when id_as_sequence_index is true
+	string qual_encoded_buf; // reused across all rows and both mates
 	for (idx_t row = 0; row < input.size(); row++) {
 		auto row_idx = read_id_data.sel->get_index(row);
 
