@@ -7,18 +7,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**duckdb-miint** is a DuckDB extension for bioinformatics that enables SQL-based analysis of genomic sequence files (FASTA/FASTQ) and alignment files (SAM/BAM). Built on the DuckDB extension template, it integrates HTSlib for BAM/SAM processing and kseq++ for FASTQ/FASTA parsing.
+**duckdb-miint** is a DuckDB extension that brings columnar analytics to microbiome research. It enables SQL-based analysis of microbiome sequence (FASTA/FASTQ), alignment (SAM/BAM/MSA), phylogeny (Newick), and mass spectrometry (mzML, mzXML) data. It provides powerful, and correct, mechanisms to manipulate and store these data.
 
 The extension provides:
-- Table functions to read bioinformatics file formats as DuckDB tables
-- Scalar functions for alignment analysis (flag checking, sequence identity)
-- Aggregate functions for genomic interval operations
-- Custom COPY formats for writing bioinformatics files
+- Functions to read and write common formats.
+- Functions to perform important operations on data such as query coverage filtering.
+- Embedded libraries to expose critical capabilities such as high throughput alignment.
 
 ## Priorities
 
-1. Test Driven Development (TDD)
-2. Correct code as verified by tests
+1. Red/green/refactor Test Driven Development (TDD)
+2. Verifiably correct code
 3. Maintainable code, using Don't Repeat Yourself (DRY) and Keep It Simple Stupid (KISS)
 4. Performance
 
@@ -37,448 +36,70 @@ bash build.sh
 ```
 
 This creates:
-- `./build/release/duckdb` - DuckDB shell with extension preloaded
-- `./build/release/test/unittest` - DuckDB test runner with extension linked
-- `./build/release/extension/miint/miint.duckdb_extension` - Loadable extension binary
-- `./build/release/tests` - C++ unit tests (Catch2)
+- `./build/release/duckdb` — DuckDB shell with extension preloaded
+- `./build/release/test/unittest` — DuckDB test runner with extension linked
+- `./build/release/extension/miint/miint.duckdb_extension` — Loadable extension binary
+- `./build/release/tests` — C++ unit tests (Catch2)
 
-### Testing
+### Development workflow
+```bash
+make clean            # clean build
+bash build.sh         # always use build.sh, not make directly
+```
+
+### Formatting
+Pre-commit hook runs `make format-check`. Auto-fix:
+```bash
+conda run -n duckdb-143 make format-fix
+```
+The `duckdb-143` conda env has the required `clang-format` and `black` tools.
+
+## Testing
 
 If a test produces an **incorrect expected value**: DO NOT change the expected value without permission.
 
 ```bash
-# Run all SQL tests
-bash run_tests.sh
-
-# Run C++ unit tests
-./build/release/extension/miint/tests
-
-# Run a single SQL test file
-./build/release/test/unittest "test/sql/read_alignments.test"
-
-# Run tests matching a pattern
-./build/release/test/unittest "[alignment]"
+bash run_tests.sh                                                 # all SQL tests
+./build/release/extension/miint/tests                             # C++ unit tests
+./build/release/test/unittest "test/sql/read_alignments.test"     # single SQL test
+./build/release/test/unittest "[alignment]"                       # tests matching a pattern
 ```
 
 ### Python CLI smoke tests
 ```bash
-# Install CLI (use duckdb-144 conda env)
 cd python && conda run -n duckdb-144 pip install -e . && cd ..
-
-# Run a quick smoke test
 EXT=./build/release/extension/miint/miint.duckdb_extension
 conda run -n duckdb-144 miint --extension-path $EXT convert sequence \
   -1 data/fastq/small_a.fq -o /tmp/test.parquet
 ```
-See `localdocs/cli-smoke-tests.md` for the full manual smoke test procedure.
+Full manual smoke test procedure: `localdocs/cli-smoke-tests.md`.
 
-### Development workflow
-```bash
-# Clean build
-make clean
+### Optional-dependency guards in SQL tests
+SQL tests use `require-env VAR_NAME` (after `require miint`) to skip gracefully when a dependency isn't present. If the env var isn't set, the test file is skipped, not failed.
 
-# Build (always use build.sh, not make directly)
-bash build.sh
-```
+`run_tests.sh` is the authoritative source for what gets detected and exported. It covers three kinds of guards:
+- **Runtime binaries** detected via `command -v` (e.g., `BOWTIE2_AVAILABLE`, `ASPERA_AVAILABLE`, `MASSQL_PYTHON_AVAILABLE`)
+- **Compile-time features** detected by querying the built extension (e.g., `HDF5_AVAILABLE`, `VSEARCH_AVAILABLE`, `MAFFT_AVAILABLE` — each checks for a registered function or library entry)
+- **Downloaded / served test data** (e.g., `MIINT_HTTPS_TEST_URL`, `MASSQL_TEST_DATA`, `MASSQL_GNPS_DATA`, `MZXML_REAL_DATA`)
 
-### Formatting
-The pre-commit hook runs `make format-check`. To auto-fix formatting issues:
-```bash
-conda run -n duckdb-143 make format-fix
-```
-The `duckdb-143` conda environment has the required `clang-format` and `black` tools.
+When adding a new guard: detect in `run_tests.sh`, add `require-env` to the test file(s), and leave availability-check tests (that only verify the scalar/feature-flag query itself) unguarded so they always run.
 
-## Architecture Overview
+## Architecture and Patterns (detailed docs)
 
-### Extension Entry Point
-- **src/miint_extension.cpp**: Main extension registration. The `LoadInternal()` function registers all table functions, scalar functions, and COPY formats. This is where new functionality should be registered.
+The entry point is `src/miint_extension.cpp` — `LoadInternal()` registers every table function, scalar function, aggregate, and COPY format. That file is the authoritative catalog.
 
-### Core Components
+Developer-facing deep dives live under `docs/internals/`:
 
-#### 1. Table Functions (Reading Files)
-Table functions allow querying bioinformatics files as SQL tables.
+- **[`docs/internals/architecture.md`](docs/internals/architecture.md)** — design patterns (file reading, record abstraction, reference table), code style, testing strategy, cross-cutting impl details (thread safety, headerless SAM, stop-position math, quality scores, compression), and how to add new table/COPY/scalar/aggregate functions.
+- **[`docs/internals/embedded-tools.md`](docs/internals/embedded-tools.md)** — how every external library/tool is embedded: static libraries from source (HTSlib, minimap2, WFA2, vsearch, MAFFT, rype), header-only (kseq++), vcpkg/system (zlib, zstd, expat, HDF5, Catch2), and runtime binaries (bowtie2, Aspera). Platform-specific gotchas and feature flags.
+- **[`docs/internals/reading-tables-views.md`](docs/internals/reading-tables-views.md)** — the separate-connection recipe for reading user-specified tables/views from extension code (avoids the `context.Query()` deadlock). Covers both data reads and schema validation.
+- **[`docs/internals/arrow-zero-copy.md`](docs/internals/arrow-zero-copy.md)** — zero-copy Arrow C Data Interface → DuckDB Vector conversion, with lifetime management and reference implementations.
 
-- **read_fastx**: FASTA/FASTQ sequence files
-  - Implementation: `src/read_fastx.cpp`, `src/include/read_fastx.hpp`
-  - Reader: `src/SequenceReader.cpp` (wraps kseq++)
-  - Record: `src/include/SequenceRecord.hpp`
-  - Returns: sequence_index, read_id, comment, sequence1, sequence2, qual1, qual2, [filepath]
-  - Supports: single/paired-end, multiple files, stdin, quality score offset conversion
+User-facing API reference (parameters, return types, examples): `docs/table-functions.md`, `docs/scalar-functions.md`, `docs/copy-formats.md`, `docs/analysis-functions.md`.
 
-- **read_alignments**: SAM/BAM alignment files (previously `read_sam`, which still works as an alias)
-  - Implementation: `src/read_alignments.cpp`, `src/include/read_alignments.hpp`
-  - Reader: `src/SAMReader.cpp` (wraps HTSlib)
-  - Record: `src/include/SAMRecord.hpp`
-  - Returns: read_id, flags, reference, position, stop_position, mapq, cigar, mate info, optional tags, [filepath]
-  - Supports: headerless SAM (with reference table), multiple files, parallel processing, both SAM and BAM formats
+## Common Runtime Issues
 
-- **read_sequences_sff**: SFF (Standard Flowgram Format) files from 454/Roche sequencing
-  - Implementation: `src/read_sequences_sff.cpp`, `src/include/read_sequences_sff.hpp`
-  - Reader: `src/SFFReader.cpp` (custom binary parser)
-  - Returns: sequence_index, read_id, comment, sequence1, sequence2, qual1, qual2, [filepath]
-  - Supports: trim parameter (default true, applies quality/adapter clips), multiple files, glob patterns, parallel processing
-  - Note: stdin not supported (SFF requires seeking). comment, sequence2, qual2 are always NULL. Schema matches read_fastx for UNION ALL compatibility.
-
-- **read_ena_fastx**: Stream FASTA/FASTQ from ENA (European Nucleotide Archive) by accession
-  - Implementation: `src/read_ena_fastx.cpp`, `src/include/read_ena_fastx.hpp`
-  - ENA API: `src/ena_client.cpp`, `src/ena_parser.cpp`
-  - Aspera support: `src/aspera_utils.cpp`, `src/aspera_stream.cpp`
-  - Returns: sequence_index, read_id, comment, sequence1, sequence2, qual1, qual2, run_accession, sample_accession, experiment_accession, [filepath]
-  - Parameters: `include_filepath`, `qual_offset`, `download_method` ('auto'|'aspera'|'http')
-  - Accepts: study (PRJNA/PRJEB/ERP/SRP), sample (SAMN/SAME), run (SRR/ERR), experiment (SRX/ERX) accessions
-  - Supports mixed FASTA/FASTQ paired-end data (unlike read_fastx which rejects format mismatches)
-  - Aspera: streams via `ascp stdio-tar://` for high-speed FASP downloads (5-50x faster than HTTP)
-    - Auto-detects `ascp` in PATH, auto-discovers SSH key at known paths, downloads key if not found
-    - Single ascp subprocess for all files; DuckDB reads from pipe
-    - Paired-end: R1 streamed to temp file (1MB chunks), R2 streamed live from pipe
-    - Falls back to HTTP transparently if ascp not available (`download_method='auto'`)
-    - Requires explicit `--mode=recv --user=X --host=X` syntax (NOT `user@host:path` shorthand with stdio://)
-
-#### 2. Scalar Functions
-Individual functions for alignment analysis:
-
-- **Alignment flags**: `src/alignment_flag_functions.cpp`
-  - Functions like `alignment_is_paired()`, `alignment_is_unmapped()`, `alignment_is_primary()`
-  - Test individual SAM flag bits
-
-- **Alignment analysis**: `src/alignment_functions.cpp`
-  - `alignment_seq_identity()`: Calculate sequence identity (gap_compressed, gap_excluded, blast methods)
-
-- **Pairwise alignment**: `src/align_pairwise_functions.cpp`, `src/include/align_pairwise_functions.hpp`
-  - Wrapper: `src/WFA2Aligner.cpp`, `src/include/WFA2Aligner.hpp` (wraps WFA2-lib)
-  - `align_pairwise_score(query, subject [, method, mismatch, gap_open, gap_extend])` → INTEGER
-  - `align_pairwise_cigar(...)` → STRUCT(score INTEGER, cigar VARCHAR)
-  - `align_pairwise_full(...)` → STRUCT(score INTEGER, cigar VARCHAR, query_aligned VARCHAR, subject_aligned VARCHAR)
-  - 2-arg (defaults: wfa2, mismatch=4, gap_open=6, gap_extend=2) and 6-arg overloads via ScalarFunctionSet
-  - Penalty parameters must be bind-time constants (not column references)
-  - Per-thread aligner reuse via FunctionLocalState; STRUCT results via StructVector
-  - `method` parameter for future backend extensibility (currently only `'wfa2'`)
-  - Extended CIGAR format (`=`/`X` ops, not `M`)
-
-#### 3. Aggregate Functions
-
-- **compress_intervals**: `src/compress_intervals.cpp`, `src/IntervalCompressor.cpp`
-  - Merges overlapping genomic intervals
-  - Uses efficient algorithm with periodic compression for large datasets
-  - Thread-safe for parallel GROUP BY operations
-
-#### 4. COPY Formats (Writing Files)
-Custom formats for exporting query results to bioinformatics files:
-
-- **FORMAT FASTQ**: `src/copy_fastq.cpp`
-  - Parameters: QUAL_OFFSET, INCLUDE_COMMENT, ID_AS_SEQUENCE_INDEX, INTERLEAVE, COMPRESSION
-  - Supports: single/paired-end, interleaved, split files with {ORIENTATION} placeholder
-
-- **FORMAT FASTA**: `src/copy_fasta.cpp`
-  - Parameters: INCLUDE_COMMENT, ID_AS_SEQUENCE_INDEX, INTERLEAVE, COMPRESSION
-  - Similar structure to FASTQ without quality scores
-
-- **FORMAT SAM / FORMAT BAM**: `src/copy_sam.cpp`
-  - Parameters: INCLUDE_HEADER, REFERENCE_LENGTHS, SEQUENCE_DATA, COMPRESSION (SAM only), COMPRESSION_LEVEL (BAM only)
-  - Requires reference_lengths table for header generation
-  - BAM format always requires headers (binary format specification)
-  - COMPRESSION_LEVEL for BAM: 0-9, default 6 (BGZF compression)
-  - SEQUENCE_DATA: optional table/view with read_fastx schema (read_id, sequence1, qual1, and optionally sequence2, qual2) to populate SEQ/QUAL at write time. Handles reverse complement, hard clipping, paired-end selection. Without this parameter, writes SEQ/QUAL as `*`.
-  - Sequence data reader: `src/sequence_data_reader.cpp`
-
-- **Common utilities**: `src/copy_format_common.cpp`
-  - Shared buffering and compression infrastructure
-  - Reference table reading: `src/reference_table_reader.cpp`
-
-### Key Design Patterns
-
-#### File Reading Pattern
-All table functions follow similar structure:
-1. **Data struct**: Stores configuration (paths, parameters, field definitions)
-2. **GlobalState struct**: Manages file readers, thread coordination, file iteration
-3. **Bind()**: Validates parameters, returns schema
-4. **InitGlobal()**: Opens files, creates readers
-5. **Execute()**: Reads records in chunks, populates DataChunk output
-
-MaxThreads() controls parallelism:
-- `read_fastx`: 1 for stdin, 8 for files
-- `read_alignments`: 4 threads
-
-#### Record Abstraction
-Each file format has a record struct (SAMRecord, SequenceRecord) that:
-- Wraps underlying C library objects (HTSlib bam1_t, kseq record)
-- Provides type-safe field access via enums
-- Handles memory management with RAII
-
-#### Reference Table Pattern
-For headerless SAM files and SAM writing:
-- User provides DuckDB table name via parameter
-- `reference_table_reader.cpp` executes query, extracts name/length columns
-- Validates reference names per SAM spec (no `*`, `=`, tabs, newlines, position patterns)
-- Returns `unordered_map<string, uint64_t>` for header construction
-
-### External Dependencies
-
-- **HTSlib 1.22.1** (`ext/htslib-1.22.1/`): SAM/BAM/CRAM parsing
-  - Built as ExternalProject in CMake
-  - Configured with zlib and optional zstd support
-  - Static library linked into extension
-
-- **kseq++** (`ext/kseq++/`): Modern C++ FASTA/FASTQ parser
-  - Header-only library
-  - Included directly in compilation
-
-- **WFA2-lib v2.3.5** (`ext/WFA2-lib/`): Wavefront Alignment Algorithm for pairwise alignment
-  - Git submodule pinned to v2.3.5
-  - Built as ExternalProject via Makefile (not CMake — WFA2's primary build is Makefile)
-  - Produces `libwfa.a` (C core) and `libwfacpp.a` (C++ bindings)
-  - Link order: `wfa2cpp` before `wfa2` (C++ depends on C)
-  - Uses `CC_FLAGS` (not `CFLAGS`/`CXXFLAGS`) — WFA2's Makefile convention
-  - Known bug: BiWFA alignment-scope score returns INT32_MIN for short sequences (see `ext/WFA2-lib/bialign_score_bug.c`)
-
-- **VCPKG dependencies**:
-  - zlib (required)
-  - zstd (optional, for compression)
-  - Catch2 (C++ testing framework)
-
-- **IBM Aspera ascp** (optional runtime dependency, not compiled in):
-  - Detected at runtime via `which ascp`; not required at build time
-  - SSH key auto-discovered at `~/.aspera/connect/etc/`, `$CONDA_PREFIX/etc/`, or downloaded from GitHub
-  - `stdio://` and `stdio-tar://` protocols stream data to stdout (confirmed working with ENA FASP servers)
-  - Platform: POSIX only (fork/exec); `MIINT_ASPERA_SUPPORTED=0` on Windows/WASM
-
-### Testing Strategy
-
-#### SQL Tests (`test/sql/`)
-Primary test mechanism using DuckDB's test framework:
-- Each `.test` file contains SQL statements and expected outputs
-- Format: `statement ok`, `query <types>`, `----` separators
-- Coverage: error handling, basic functionality, edge cases, data types, ordering
-
-Test file structure:
-1. Error handling tests (missing files, invalid parameters)
-2. Basic functionality tests (single/multi-file, different input types)
-3. Feature-specific tests (include_filepath, compression, etc.)
-4. Edge cases (empty files, large values, NULL handling)
-5. Data type verification
-
-#### C++ Tests (`test/cpp/`)
-Unit tests for core components using Catch2:
-- `test_SequenceReader.cpp`: FASTQ/FASTA parsing
-- `test_SAMReader.cpp`: SAM/BAM parsing, headerless support
-- `test_QualScore.cpp`: Quality score conversion
-- `test_IntervalCompressor.cpp`: Interval merging algorithm
-- `test_AlignmentFunctions.cpp`: Sequence identity calculations
-
-Use `TEST_CASE()` and `SECTION()` for test organization.
-
-### Important Implementation Details
-
-#### Thread Safety
-- **SAMReader/SequenceReader**: NOT thread-safe for concurrent calls on same instance
-- **Multiple reader instances**: Thread-safe (each has independent file handles)
-- **GlobalState**: Uses mutex for file iteration coordination
-- **compress_intervals**: Thread-safe aggregate (each thread has independent state)
-
-#### Headerless SAM Support
-Critical implementation in `SAMReader.cpp`:
-- Constructor accepts `unordered_map<string, uint64_t>` for reference lengths
-- Synthetic header created via `sam_hdr_add_line()`
-- Validation: reference names checked per SAM spec (no `*`, `=`, special chars, position patterns)
-- File position preserved (no reopen) for stdin support
-- Missing references in data → records appear as unmapped with reference `*`
-
-#### Quality Score Handling
-`src/QualScore.cpp` provides:
-- Offset detection (Phred33 vs Phred64)
-- Conversion between offsets
-- Validation (scores must fit in valid range)
-
-#### Compression Support
-All COPY formats support compression:
-- Auto-detection from `.gz` extension
-- Manual override with `COMPRESSION` parameter
-- Buffered writing for performance
-
-#### Stop Position Calculation
-SAM alignments compute `stop_position` using HTSlib's `bam_endpos()`:
-- Accounts for CIGAR operations (M, D, N, =, X)
-- Half-open coordinate: `stop_position = position + reference_length_from_cigar` (exclusive end)
-- Example: 10M at position 2 → stop_position = 12, covering bases [2, 12)
-- Coverage length = `stop_position - position` (no +1)
-- Critical for interval operations and coverage analysis
-
-#### Reading from Tables and Views in Extensions
-When extension code needs to read data from a user-specified table or view (e.g., PLACEMENTS parameter in COPY FORMAT NEWICK, or REFERENCE_LENGTHS in COPY FORMAT SAM), use the following pattern:
-
-**The Problem:**
-- `Catalog::GetEntry<TableCatalogEntry>` only works for tables, not views
-- Views are stored query definitions without physical storage
-- `context.Query()` causes deadlocks when called during bind or execution (context is already locked)
-
-**The Solution: Use a Separate Connection**
-```cpp
-#include "duckdb/main/connection.hpp"
-#include "duckdb/main/database.hpp"
-
-// Create a new connection to avoid deadlocking the current context
-auto &db = DatabaseInstance::GetDatabase(context);
-Connection conn(db);
-
-// Execute a query - works for both tables and views
-std::string query = "SELECT col1, col2 FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
-auto result = conn.Query(query);
-
-if (result->HasError()) {
-    throw InvalidInputException("Failed to read: %s", result->GetError());
-}
-
-// Process the MaterializedQueryResult
-auto &materialized = result->Cast<MaterializedQueryResult>();
-while (auto chunk = materialized.Fetch()) {
-    // Process chunk->data[0], chunk->data[1], etc.
-}
-```
-
-**Schema Validation for Tables/Views:**
-```cpp
-// Use TABLE_ENTRY lookup which returns either tables or views
-EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
-auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
-
-if (!entry) {
-    throw BinderException("'%s' does not exist", table_name);
-}
-
-// Check entry type and get columns
-if (entry->type == CatalogType::TABLE_ENTRY) {
-    auto &table = entry->Cast<TableCatalogEntry>();
-    // Use table.GetColumns()
-} else if (entry->type == CatalogType::VIEW_ENTRY) {
-    auto &view = entry->Cast<ViewCatalogEntry>();
-    // Use view.names and view.types
-}
-```
-
-**Important Notes:**
-- The separate connection runs in its own transaction, so uncommitted changes from the original context may not be visible
-- For most use cases (reading from persistent tables/views), this is fine
-- Read placements/references at bind time if possible, storing results in bind data to avoid issues during finalize
-- See `src/placement_table_reader.cpp` for a complete example
-
-#### Consuming Arrow Streams (Zero-Copy Pattern)
-
-When consuming Arrow C Data Interface streams (e.g., from RYpe or other FFI libraries), use DuckDB's built-in Arrow-to-DuckDB conversion instead of manually copying data. This gets zero-copy for fixed-width types (integers, floats) including inside List children.
-
-**Key components:**
-
-- `ArrowTableFunction::PopulateArrowTableSchema()` — parses Arrow schema into `ArrowTableSchema` with type metadata needed by the converter
-- `ArrowToDuckDBConversion::SetValidityMask()` — copies null bitmap from Arrow to DuckDB
-- `ArrowToDuckDBConversion::ColumnArrowToDuckDB()` — converts one column, dispatching by type:
-  - Fixed-width types (UBIGINT, DOUBLE, etc.) → `DirectConversion()` → `FlatVector::SetData()` (zero-copy pointer swap)
-  - List types → converts offset buffer, then recursively converts child (child gets zero-copy)
-  - Strings → copies (different layout between Arrow and DuckDB)
-
-**Lifetime management for zero-copy:**
-
-Arrow buffers must stay alive while DuckDB Vectors reference them. The pattern:
-
-1. Wrap each Arrow batch in `shared_ptr<ArrowArrayWrapper>` (not raw `ArrowArray`)
-2. Set `ArrowArrayScanState::owned_data = shared_ptr` before calling `ColumnArrowToDuckDB`
-3. DuckDB stores the shared_ptr in `ArrowAuxiliaryData` on the Vector's buffer, preventing premature deallocation
-
-```cpp
-// In GlobalState: use shared_ptr, NOT raw ArrowArray
-shared_ptr<ArrowArrayWrapper> current_chunk;
-
-// Fetching a new batch:
-auto wrapper = make_shared_ptr<ArrowArrayWrapper>();
-stream.get_next(&stream, &wrapper->arrow_array);
-current_chunk = std::move(wrapper);
-
-// In Execute, for each Arrow column that maps directly to a DuckDB column:
-auto &array_state = lstate.GetState(col_idx);
-array_state.owned_data = gstate.current_chunk;  // ref-count keeps batch alive
-ArrowToDuckDBConversion::SetValidityMask(output.data[col], array, batch_offset, size, batch.offset, -1);
-ArrowToDuckDBConversion::ColumnArrowToDuckDB(output.data[col], array, batch_offset, array_state, size, arrow_type);
-```
-
-**When manual access is needed** (e.g., id→read_id transformation), direct buffer access is fine for that column — use `reinterpret_cast` on `array.buffers[1]` as in `rype_classify.cpp`.
-
-**Anti-pattern:** Do NOT manually iterate Arrow List child data with element-by-element copy. Use `ColumnArrowToDuckDB` which handles List→LIST conversion with zero-copy on the child values.
-
-**Headers needed:** `duckdb/common/arrow/arrow_wrapper.hpp`, `duckdb/function/table/arrow.hpp`
-
-**Reference implementations:**
-- `src/rype_extract.cpp` — zero-copy Arrow List<UInt64> → DuckDB LIST(UBIGINT)
-- `src/rype_classify.cpp` — manual Arrow access (all columns need transformation)
-- `duckdb/src/function/table/arrow_conversion.cpp` — DuckDB's internal conversion engine
-- `duckdb/src/main/capi/arrow-c.cpp` (`duckdb_data_chunk_from_arrow`) — C API usage example
-
-## Code Style and Conventions
-
-- **C++ Standard**: C++20 (required for kseq++)
-- **Namespace**: All extension code in `duckdb` namespace, readers in `miint` namespace
-- **Error Handling**: Use DuckDB exceptions (`InvalidInputException`, `IOException`, `RuntimeException`)
-- **Memory Management**: RAII with smart pointers (HTSlib uses custom deleters)
-- **Formatting**: Follow DuckDB style (clang-format config in `.clang-format`)
-
-## Adding New Functionality
-
-### Adding a new table function
-1. Create header in `src/include/` with TableFunction class
-2. Implement Bind(), InitGlobal(), Execute() in `src/`
-3. Register in `LoadInternal()` in `miint_extension.cpp`
-4. Add to `EXTENSION_SOURCES` in `CMakeLists.txt`
-5. Create SQL test in `test/sql/`
-
-### Adding a new COPY format
-1. Create `copy_<format>.cpp` and header
-2. Implement CopyFunction with Bind(), InitGlobal(), Sink(), Finalize()
-3. Use `copy_format_common.cpp` utilities for buffering/compression
-4. Register in `LoadInternal()`
-5. Add to `EXTENSION_SOURCES`
-6. Create comprehensive SQL tests (basic, compression, edge cases)
-
-### Adding scalar/aggregate functions
-1. Implement in appropriate source file
-2. Create static Register() method
-3. Call Register() in LoadInternal()
-4. Add SQL and/or C++ tests
-
-## Common Issues and Solutions
-
-### Build Issues
-- **zstd not found**: Optional dependency, build continues without it
-- **HTSlib build fails**: Check zlib installation, ensure CFLAGS=-fPIC set
-- **VCPKG errors**: Ensure VCPKG_TOOLCHAIN_PATH is set before running cmake
-
-### Runtime Issues
-- **"File lacks a header"**: SAM file is headerless, provide `reference_lengths` parameter
-- **"Inconsistent headers across files"**: All SAM files must be either header or headerless, not mixed
-- **Unknown reference**: Reference in SAM data not in header or reference_lengths table
-- **Quality offset errors**: Specify `qual_offset` parameter if auto-detection fails
-
-### Testing Issues
-- **Test isolation**: Each test file should be independent, use temp tables for references
-- **Data files**: Test data in `data/sam/`, `data/fastq/`, etc. Keep files small
-- **Platform differences**: Be aware of path separators, newline conventions
-
-### Optional External Dependencies in SQL Tests
-When a test depends on an external binary that may not be installed (e.g., `bowtie2`), use `require-env` to skip the test file gracefully:
-
-1. **In the test file**, add `require-env <VAR_NAME>` after `require miint`:
-   ```
-   require miint
-
-   require-env BOWTIE2_AVAILABLE
-   ```
-   If `BOWTIE2_AVAILABLE` is not set in the environment, the entire test file is skipped (not failed).
-
-2. **In `run_tests.sh`**, auto-detect the binary and export the env var:
-   ```bash
-   if command -v bowtie2 &> /dev/null; then
-       export BOWTIE2_AVAILABLE=1
-   fi
-   ```
-
-3. **Tests that don't invoke the binary** (e.g., `bowtie2_available.test` which only tests the scalar availability check) should NOT use `require-env`, so they always run.
-
-Current optional dependencies managed this way:
-- `BOWTIE2_AVAILABLE` — guards `align_bowtie2.test`, `align_bowtie2_sharded.test`, `simple_bowtie2.test`
-- `HDF5_AVAILABLE` — guards `read_biom.test`, `copy_biom.test`, `read_biom_performance.test`, `glob_read_biom.test` (compile-time: `MIINT_ENABLE_HDF5=OFF` excludes HDF5)
+- **"File lacks a header"**: SAM file is headerless — provide the `reference_lengths` parameter
+- **"Inconsistent headers across files"**: all SAM files must be either headered or headerless, not mixed
+- **Unknown reference**: reference in SAM data is not in the header or `reference_lengths` table
+- **Quality offset errors**: specify `qual_offset` if auto-detection fails
