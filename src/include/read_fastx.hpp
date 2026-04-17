@@ -27,14 +27,15 @@ public:
 		bool include_filepath;
 		bool uses_stdin;
 		uint8_t qual_offset;
+		uint64_t max_batch_bytes;
 
 		std::vector<std::string> names; // field names
 		std::vector<LogicalType> types; // field types
 
 		Data(const std::vector<std::string> &r1_paths, const std::optional<std::vector<std::string>> &r2_paths,
-		     bool include_fp, bool stdin_used, uint8_t offset)
+		     bool include_fp, bool stdin_used, uint8_t offset, uint64_t max_bytes)
 		    : sequence1_paths(r1_paths), sequence2_paths(r2_paths), include_filepath(include_fp),
-		      uses_stdin(stdin_used), qual_offset(offset),
+		      uses_stdin(stdin_used), qual_offset(offset), max_batch_bytes(max_bytes),
 		      names({"sequence_index", "read_id", "comment", "sequence1", "sequence2", "qual1", "qual2"}),
 		      types({LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
 		             LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT),

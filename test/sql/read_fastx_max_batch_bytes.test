@@ -1,0 +1,97 @@
+# name: test/sql/read_fastx_max_batch_bytes.test
+# description: Test max_batch_bytes parameter in read_fastx
+# group: [sql]
+
+require miint
+
+# Default (no parameter) - sanity check baseline row count
+query I
+SELECT count(*) FROM read_fastx('data/fastq/small_a.fq');
+----
+2
+
+# Human-readable sizes are accepted (1GB)
+query I
+SELECT count(*) FROM read_fastx('data/fastq/small_a.fq', max_batch_bytes='1GB');
+----
+2
+
+# MB suffix
+query I
+SELECT count(*) FROM read_fastx('data/fastq/small_a.fq', max_batch_bytes='32MB');
+----
+2
+
+# KB suffix
+query I
+SELECT count(*) FROM read_fastx('data/fastq/small_a.fq', max_batch_bytes='256KB');
+----
+2
+
+# Binary (IEC) suffix
+query I
+SELECT count(*) FROM read_fastx('data/fastq/small_a.fq', max_batch_bytes='1MiB');
+----
+2
+
+# Bytes suffix
+query I
+SELECT count(*) FROM read_fastx('data/fastq/small_a.fq', max_batch_bytes='1048576B');
+----
+2
+
+# Tight budget: correctness unchanged (row count equals unbounded read),
+# even though chunks become smaller.
+query I
+SELECT count(*) FROM read_fastx('data/fastq/small_a.fq', max_batch_bytes='32B');
+----
+2
+
+# Starvation guard: budget of 1 byte still returns every record (at least one per chunk)
+query I
+SELECT count(*) FROM read_fastx('data/fastq/small_a.fq', max_batch_bytes='1B');
+----
+2
+
+# Paired-end still works with max_batch_bytes
+query I
+SELECT count(*) FROM read_fastx('data/fastq/small_a_r1.fq', sequence2='data/fastq/small_a_r2.fq', max_batch_bytes='1MB');
+----
+1
+
+# Invalid: empty string rejected
+statement error
+SELECT * FROM read_fastx('data/fastq/small_a.fq', max_batch_bytes='');
+----
+max_batch_bytes
+
+# Invalid: non-numeric rejected
+statement error
+SELECT * FROM read_fastx('data/fastq/small_a.fq', max_batch_bytes='not_a_size');
+----
+max_batch_bytes
+
+# Invalid: unit-less numeric rejected (DuckDB parser requires a unit)
+statement error
+SELECT * FROM read_fastx('data/fastq/small_a.fq', max_batch_bytes='1048576');
+----
+max_batch_bytes
+
+# Invalid: zero with byte unit rejected
+statement error
+SELECT * FROM read_fastx('data/fastq/small_a.fq', max_batch_bytes='0B');
+----
+max_batch_bytes must be greater than 0
+
+# Invalid: zero with MB unit rejected
+statement error
+SELECT * FROM read_fastx('data/fastq/small_a.fq', max_batch_bytes='0MB');
+----
+max_batch_bytes must be greater than 0
+
+# Content integrity across chunking: tight budget yields same records as unbounded read
+query II
+SELECT read_id, sequence1 FROM read_fastx('data/fastq/small_a.fq', max_batch_bytes='16B') ORDER BY read_id;
+----
+read_a1	AAAA
+read_a2	TTTT

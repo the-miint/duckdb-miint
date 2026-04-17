@@ -116,28 +116,22 @@ static unique_ptr<LocalFunctionData> FastaCopyInitializeLocal(ExecutionContext &
 //===--------------------------------------------------------------------===//
 // Sink
 //===--------------------------------------------------------------------===//
-static void WriteFastaRecordToBuffer(MemoryStream &stream, const string &id, const string &seq, const string &comment) {
-	// Pre-calculate total size to avoid reallocations
-	idx_t size = 1 + id.size() + 1 + seq.size() + 1; // > + id + \n + seq + \n
-	if (!comment.empty()) {
-		size += 1 + comment.size(); // space + comment
+// Write a FASTA record directly to the stream without building an intermediate string.
+// Avoids O(seq.size()) extra copies per record -- the previous implementation copied the
+// sequence bytes twice (into an intermediate `record` string, then into the stream). For
+// a FASTA of bacterial genomes (~5 MB/record) that's ~10 MB of extra memory bandwidth per
+// record; direct writes let the sequence flow kseq->MemoryStream with a single memcpy.
+static void WriteFastaRecordToBuffer(MemoryStream &stream, const char *id, idx_t id_size, const char *seq,
+                                     idx_t seq_size, const char *comment, idx_t comment_size) {
+	stream.WriteData(const_data_ptr_cast(">"), 1);
+	stream.WriteData(const_data_ptr_cast(id), id_size);
+	if (comment_size > 0) {
+		stream.WriteData(const_data_ptr_cast(" "), 1);
+		stream.WriteData(const_data_ptr_cast(comment), comment_size);
 	}
-
-	// Build record string with pre-reserved capacity
-	string record;
-	record.reserve(size);
-	record += '>';
-	record += id;
-	if (!comment.empty()) {
-		record += ' ';
-		record += comment;
-	}
-	record += '\n';
-	record += seq;
-	record += '\n';
-
-	// Write to stream
-	stream.WriteData(const_data_ptr_cast(record.c_str()), record.size());
+	stream.WriteData(const_data_ptr_cast("\n"), 1);
+	stream.WriteData(const_data_ptr_cast(seq), seq_size);
+	stream.WriteData(const_data_ptr_cast("\n"), 1);
 }
 
 static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p,
@@ -179,7 +173,11 @@ static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 		stream_r2 = lstate.writer_state_r2->stream.get();
 	}
 
-	// Build all records into local buffer(s) - NO LOCK
+	// Build all records into local buffer(s) - NO LOCK.
+	// Hot-path rule: never call string_t::GetString() on the sequence -- it makes a heap
+	// copy of the (potentially multi-MB) sequence per record. Use GetData()/GetSize() so
+	// the sequence bytes flow directly from the DuckDB string heap into the MemoryStream.
+	string id_buf; // only used when id_as_sequence_index is true
 	for (idx_t row = 0; row < input.size(); row++) {
 		auto row_idx = read_id_data.sel->get_index(row);
 
@@ -189,22 +187,28 @@ static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 		}
 
 		// Get ID
-		string id;
+		const char *id_ptr;
+		idx_t id_size;
 		if (fdata.id_as_sequence_index) {
 			auto seq_idx_data = UnifiedVectorFormat::GetData<int64_t>(sequence_index_data);
 			auto seq_idx_row = sequence_index_data.sel->get_index(row);
-			id = to_string(seq_idx_data[seq_idx_row]);
+			id_buf = to_string(seq_idx_data[seq_idx_row]);
+			id_ptr = id_buf.data();
+			id_size = id_buf.size();
 		} else {
-			id = read_ids[row_idx].GetString();
+			id_ptr = read_ids[row_idx].GetData();
+			id_size = read_ids[row_idx].GetSize();
 		}
 
-		// Get comment
-		string comment;
+		// Get comment (may be absent or NULL)
+		const char *comment_ptr = nullptr;
+		idx_t comment_size = 0;
 		if (fdata.include_comment && indices.comment_idx != DConstants::INVALID_INDEX) {
 			auto comment_strings = UnifiedVectorFormat::GetData<string_t>(comment_data);
 			auto comment_row = comment_data.sel->get_index(row);
 			if (comment_data.validity.RowIsValid(comment_row)) {
-				comment = comment_strings[comment_row].GetString();
+				comment_ptr = comment_strings[comment_row].GetData();
+				comment_size = comment_strings[comment_row].GetSize();
 			}
 		}
 
@@ -213,10 +217,11 @@ static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 		if (!seq1_data.validity.RowIsValid(seq1_row)) {
 			throw InvalidInputException("NULL value in sequence1 column (row %llu)", row);
 		}
-		string seq1 = seq1_strings[seq1_row].GetString();
+		const char *seq1_ptr = seq1_strings[seq1_row].GetData();
+		idx_t seq1_size = seq1_strings[seq1_row].GetSize();
 
 		// Write R1 record to local buffer
-		WriteFastaRecordToBuffer(stream_r1, id, seq1, comment);
+		WriteFastaRecordToBuffer(stream_r1, id_ptr, id_size, seq1_ptr, seq1_size, comment_ptr, comment_size);
 		lstate.writer_state_r1->written_anything = true;
 
 		// Handle R2 for paired-end
@@ -226,26 +231,29 @@ static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 			if (!seq2_data.validity.RowIsValid(seq2_row)) {
 				throw InvalidInputException("NULL value in sequence2 column (row %llu)", row);
 			}
-			string seq2 = seq2_strings[seq2_row].GetString();
+			const char *seq2_ptr = seq2_strings[seq2_row].GetData();
+			idx_t seq2_size = seq2_strings[seq2_row].GetSize();
 
 			if (fdata.interleave) {
 				// Write R2 to same buffer
-				WriteFastaRecordToBuffer(stream_r1, id, seq2, comment);
+				WriteFastaRecordToBuffer(stream_r1, id_ptr, id_size, seq2_ptr, seq2_size, comment_ptr, comment_size);
 			} else {
 				// Write R2 to separate buffer
-				WriteFastaRecordToBuffer(*stream_r2, id, seq2, comment);
+				WriteFastaRecordToBuffer(*stream_r2, id_ptr, id_size, seq2_ptr, seq2_size, comment_ptr, comment_size);
 				lstate.writer_state_r2->written_anything = true;
 			}
 		}
-	}
 
-	// Check if we need to flush (buffer exceeded threshold)
-	if (lstate.writer_state_r1->stream->GetPosition() >= lstate.writer_state_r1->flush_size) {
-		FlushFormatBuffer(*lstate.writer_state_r1, *gstate.file_r1, gstate.lock);
-	}
-
-	if (stream_r2 && lstate.writer_state_r2->stream->GetPosition() >= lstate.writer_state_r2->flush_size) {
-		FlushFormatBuffer(*lstate.writer_state_r2, *gstate.file_r2, gstate.lock);
+		// Flush per-record once the threshold is crossed, not per-chunk. Large records
+		// (bacterial genomes, plant chromosomes) can each be multiple MB; batching them
+		// until the end of a DataChunk would let the buffer grow to many GB before the
+		// first flush, which blows past gzip's 4 GiB write limit and chews memory.
+		if (lstate.writer_state_r1->stream->GetPosition() >= lstate.writer_state_r1->flush_size) {
+			FlushFormatBuffer(*lstate.writer_state_r1, *gstate.file_r1, gstate.lock);
+		}
+		if (stream_r2 && lstate.writer_state_r2->stream->GetPosition() >= lstate.writer_state_r2->flush_size) {
+			FlushFormatBuffer(*lstate.writer_state_r2, *gstate.file_r2, gstate.lock);
+		}
 	}
 }
 

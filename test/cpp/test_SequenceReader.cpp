@@ -333,3 +333,133 @@ TEST_CASE("SequenceReader paired-end mismatched count with context", "[SequenceR
 	miint::SequenceReader reader(r1, r2);
 	REQUIRE_THROWS_WITH(reader.read(5), Catch::Matchers::ContainsSubstring("missing mate"));
 }
+
+TEST_CASE("SequenceReader byte budget SE: generous budget returns all records", "[SequenceReader][byte_budget]") {
+	TempFileFixture fixture;
+	auto path = "budget_generous.fq";
+	std::vector<std::string> records;
+	for (int i = 0; i < 10; i++) {
+		records.push_back(fixture.simple_read("r" + std::to_string(i), "ACGTACGT", "IIIIIIII"));
+	}
+	fixture.write_temp_fastq(path, records);
+
+	miint::SequenceReader reader(path);
+	auto batch = reader.read(100, 1024 * 1024); // 1 MiB -- way more than needed
+
+	REQUIRE((batch.size() == 10));
+}
+
+TEST_CASE("SequenceReader byte budget SE: tight budget caps records per chunk", "[SequenceReader][byte_budget]") {
+	TempFileFixture fixture;
+	auto path = "budget_tight.fq";
+	std::vector<std::string> records;
+	for (int i = 0; i < 10; i++) {
+		// Each record: name=~3 chars, comment=0, seq=8, qual=8 -> ~19 bytes/record
+		records.push_back(fixture.simple_read("r" + std::to_string(i), "ACGTACGT", "IIIIIIII"));
+	}
+	fixture.write_temp_fastq(path, records);
+
+	miint::SequenceReader reader(path);
+
+	// Budget ~25 bytes -> first record (~19 B) fits, adding a second (~38 B total) exceeds.
+	// Expect 1 record per call.
+	size_t total = 0;
+	for (int call = 0; call < 20; call++) {
+		auto batch = reader.read(100, 25);
+		if (batch.empty()) {
+			break;
+		}
+		REQUIRE((batch.size() == 1));
+		total += batch.size();
+	}
+	REQUIRE((total == 10));
+}
+
+TEST_CASE("SequenceReader byte budget SE: starvation guard returns at least one record",
+          "[SequenceReader][byte_budget]") {
+	TempFileFixture fixture;
+	auto path = "budget_starve.fq";
+	fixture.write_temp_fastq(path, {fixture.simple_read("big", std::string(1000, 'A'), std::string(1000, 'I'))});
+
+	miint::SequenceReader reader(path);
+	auto batch = reader.read(100, 1); // budget absurdly small; single record massively over
+
+	// Starvation guard: always return at least one record when stream has data.
+	REQUIRE((batch.size() == 1));
+	REQUIRE((batch.read_ids[0] == "big"));
+}
+
+TEST_CASE("SequenceReader byte budget SE: budget preserves full content across calls",
+          "[SequenceReader][byte_budget]") {
+	TempFileFixture fixture;
+	auto path = "budget_preserve.fq";
+	std::vector<std::string> expected_ids;
+	std::vector<std::string> records;
+	for (int i = 0; i < 7; i++) {
+		std::string id = "rec" + std::to_string(i);
+		expected_ids.push_back(id);
+		records.push_back(fixture.simple_read(id, "ACGT", "IIII"));
+	}
+	fixture.write_temp_fastq(path, records);
+
+	miint::SequenceReader reader(path);
+
+	std::vector<std::string> seen;
+	for (int call = 0; call < 20; call++) {
+		auto batch = reader.read(100, 20); // tight budget; ~1 record per call
+		if (batch.empty()) {
+			break;
+		}
+		for (auto &id : batch.read_ids) {
+			seen.push_back(id);
+		}
+	}
+
+	REQUIRE((seen == expected_ids));
+}
+
+TEST_CASE("SequenceReader byte budget PE: budget counts both mates", "[SequenceReader][byte_budget]") {
+	TempFileFixture fixture;
+	auto r1 = "pe_budget_r1.fq";
+	auto r2 = "pe_budget_r2.fq";
+
+	std::vector<std::string> recs1, recs2;
+	for (int i = 0; i < 5; i++) {
+		std::string id = "pair" + std::to_string(i);
+		recs1.push_back(fixture.simple_read(id, "ACGT", "IIII"));
+		recs2.push_back(fixture.simple_read(id, "TGCA", "HHHH"));
+	}
+	fixture.write_temp_fastq(r1, recs1);
+	fixture.write_temp_fastq(r2, recs2);
+
+	miint::SequenceReader reader(r1, r2);
+
+	// Each mate is ~5 (name) + 4 (seq) + 4 (qual) = 13 bytes; pair ~26 bytes.
+	// Budget 40 bytes -> pair 1 fits, adding pair 2 (>52 bytes) exceeds -> 1 pair per call.
+	size_t total = 0;
+	for (int call = 0; call < 20; call++) {
+		auto batch = reader.read(100, 40);
+		if (batch.empty()) {
+			break;
+		}
+		REQUIRE((batch.size() == 1));
+		REQUIRE((batch.is_paired));
+		total += batch.size();
+	}
+	REQUIRE((total == 5));
+}
+
+TEST_CASE("SequenceReader byte budget default (SIZE_MAX) unchanged behavior", "[SequenceReader][byte_budget]") {
+	// Regression: callers that don't pass a budget see the same rows-only behavior.
+	TempFileFixture fixture;
+	auto path = "budget_default.fq";
+	std::vector<std::string> records;
+	for (int i = 0; i < 50; i++) {
+		records.push_back(fixture.simple_read("r" + std::to_string(i), "ACGT", "IIII"));
+	}
+	fixture.write_temp_fastq(path, records);
+
+	miint::SequenceReader reader(path);
+	auto batch = reader.read(100); // no budget argument -> default SIZE_MAX
+	REQUIRE((batch.size() == 50));
+}
