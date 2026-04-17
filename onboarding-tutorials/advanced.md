@@ -481,7 +481,7 @@ miint supports a much broader range of bioinformatics workflows:
 - **Alignment** &mdash; align with
   [minimap2](../docs/table-functions.md#align_minimap2query_table-subject_tablenull-index_pathnull-options),
   [Bowtie2](../docs/table-functions.md#align_bowtie2query_table-subject_table-options),
-  [MAFFT](../docs/table-functions.md#align_mafftfilename) (multiple sequence
+  [MAFFT](../docs/table-functions.md#align_maffttable_name) (multiple sequence
   alignment), or compute
   [pairwise alignment scores](../docs/analysis-functions.md#pairwise-alignment-functions)
   with WFA2.

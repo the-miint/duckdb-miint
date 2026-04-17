@@ -27,7 +27,7 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`align_minimap2_sharded`](#align_minimap2_shardedquery_table-shard_directory-read_to_shard-options) - Sharded minimap2 alignment
 - [`align_bowtie2`](#align_bowtie2query_table-subject_table-options) - Bowtie2 alignment
 - [`align_bowtie2_sharded`](#align_bowtie2_shardedquery_table-shard_directory-read_to_shard-options) - Sharded bowtie2 alignment
-- [`align_mafft`](#align_mafftfilename) - MAFFT multiple sequence alignment (PartTree)
+- [`align_mafft`](#align_maffttable_name) - MAFFT multiple sequence alignment (PartTree)
 - [`detect_chimera_uchime`](#detect_chimera_uchimequery_table-dbrefs_table-options) - Reference-based chimera detection (UCHIME)
 - [`detect_chimera_uchime_denovo`](#detect_chimera_uchime_denovoinput_table-options) - De novo chimera detection (UCHIME)
 - [`search_sequences_vsearch`](#search_sequences_vsearchquery_table-dbref_table-idthreshold-options) - Global sequence search
@@ -1898,22 +1898,21 @@ SELECT * FROM align_bowtie2_sharded('queries',
 | Parallelism | Single aligner thread(s) | One aligner per shard, concurrent |
 | Use case | Single reference database | Sharded reference databases (e.g., from prior classification) |
 
-## `align_mafft(filename)`
+## `align_mafft(table_name)`
 
-Multiple sequence alignment using MAFFT's PartTree algorithm. Reads all sequences from a FASTA file, aligns them, and returns the aligned sequences with gap characters inserted.
+Multiple sequence alignment using MAFFT's PartTree algorithm. Reads all sequences from a sequence table/view, aligns them, and returns the aligned sequences with gap characters inserted.
 
 MAFFT is embedded as a statically linked C library (no external binary required). The PartTree algorithm uses O(N log N) guide tree construction with k-tuple distances, making it suitable for large datasets (tested up to 5,000+ sequences).
 
 **Parameters:**
-- `filename` (VARCHAR): Path to a FASTA file containing sequences to align. Minimum 2 sequences, each at least 6 characters. DNA and protein sequences are auto-detected.
+- `table_name` (VARCHAR): Name of a table or view containing sequences to align. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns. Minimum 2 sequences, each at least 6 characters. DNA and protein sequences are auto-detected. Paired-end tables (those with a `sequence2` column) are rejected at bind.
 
 **Output schema:**
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `sequence_index` | BIGINT | 0-based position matching input order |
-| `read_id` | VARCHAR | Sequence identifier from FASTA header |
-| `comment` | VARCHAR | Header text after first space (NULL if absent) |
+| `read_id` | VARCHAR | Sequence identifier from the input `read_id` column |
 | `aligned_sequence` | VARCHAR | Aligned sequence with `-` gap characters |
 | `original_length` | INTEGER | Length of the input sequence (no gaps) |
 | `aligned_length` | INTEGER | Length of aligned sequences (same for all rows) |
@@ -1926,27 +1925,28 @@ MAFFT is embedded as a statically linked C library (no external binary required)
 
 ```sql
 -- Basic multiple sequence alignment
-SELECT * FROM align_mafft('sequences.fasta');
+CREATE TABLE seqs AS SELECT read_id, sequence1 FROM read_fastx('sequences.fasta');
+SELECT * FROM align_mafft('seqs');
 
 -- Align, then analyze gap content
+CREATE TABLE ref_16s AS SELECT read_id, sequence1 FROM read_fastx('16s_sequences.fasta');
 SELECT read_id,
        original_length,
        aligned_length,
        aligned_length - original_length AS gaps_inserted
-FROM align_mafft('16s_sequences.fasta')
+FROM align_mafft('ref_16s')
 ORDER BY gaps_inserted DESC;
 
--- Combine with read_fastx for filtering before alignment
-COPY (
-  SELECT read_id, sequence1
-  FROM read_fastx('large_dataset.fasta')
-  WHERE length(sequence1) >= 100
-) TO '/tmp/filtered.fasta' (FORMAT FASTA);
-SELECT * FROM align_mafft('/tmp/filtered.fasta');
+-- Filter before alignment — operate entirely in SQL, no temp files
+CREATE TABLE filtered AS
+  SELECT read_id, sequence1 FROM read_fastx('large_dataset.fasta')
+  WHERE length(sequence1) >= 100;
+SELECT * FROM align_mafft('filtered');
 
 -- Compute pairwise identity from aligned sequences
+CREATE TABLE seqs2 AS SELECT read_id, sequence1 FROM read_fastx('seqs.fasta');
 WITH aligned AS (
-  SELECT read_id, aligned_sequence FROM align_mafft('seqs.fasta')
+  SELECT read_id, aligned_sequence FROM align_mafft('seqs2')
 )
 SELECT a.read_id AS seq1, b.read_id AS seq2,
        sum(CASE WHEN a.c = b.c AND a.c != '-' THEN 1 ELSE 0 END)::FLOAT
@@ -1954,7 +1954,8 @@ SELECT a.read_id AS seq1, b.read_id AS seq2,
 FROM aligned a, aligned b,
      unnest(string_split(a.aligned_sequence, '')) WITH ORDINALITY AS a(c, pos),
      unnest(string_split(b.aligned_sequence, '')) WITH ORDINALITY AS b(c, bpos)
-WHERE a.read_id < b.read_id AND a.pos = b.bpos;
+WHERE a.read_id < b.read_id AND a.pos = b.bpos
+GROUP BY a.read_id, b.read_id;
 ```
 
 **Performance:** ~2x faster than native `mafft --parttree` for 1,000-5,000 sequences (no shell script overhead or temp file I/O). For 36 sequences, ~15x faster.
@@ -2251,7 +2252,7 @@ CREATE TABLE dereplicated AS
 -- For same-length amplicons without indels, this step can be skipped.
 CREATE TABLE aligned AS
   SELECT a.read_id, a.aligned_sequence AS sequence1, d.abundance
-  FROM align_mafft('dereplicated_seqs.fa') a
+  FROM align_mafft('dereplicated') a
   JOIN dereplicated d ON a.read_id = d.read_id;
 
 -- 4. Deblur
