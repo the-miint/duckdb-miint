@@ -104,6 +104,11 @@ ResolvedFile RemoteFileHelper::ResolveToLocal(duckdb::FileSystem &fs, duckdb::Cl
 	auto source = fs.OpenFile(path, FileOpenFlags(FileOpenFlags::FILE_FLAGS_READ));
 
 	auto temp_dir = GetTempDirectory(context);
+	// DuckDB creates the temp directory lazily when the buffer manager spills;
+	// a pure-read workload may never trigger that path, so ensure it exists
+	// before we try to write. Recursive form handles user-configured nested
+	// paths (e.g. SET temp_directory = '/var/run/myapp/nested/tmp').
+	fs.CreateDirectoriesRecursive(temp_dir);
 	auto temp_path = fs.JoinPath(temp_dir, GenerateTempFileName());
 
 	try {
