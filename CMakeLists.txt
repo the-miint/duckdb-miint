@@ -22,6 +22,7 @@ find_package(expat CONFIG REQUIRED)
 option(MIINT_ENABLE_HDF5 "Build with HDF5/BIOM support" ON)
 option(MIINT_ENABLE_BOWTIE2 "Build with Bowtie2 alignment support" ON)
 option(MIINT_ENABLE_MAFFT "Build with MAFFT multiple sequence alignment support" ON)
+option(MIINT_ENABLE_SORTMERNA "Build with SortMeRNA rRNA alignment support" ON)
 
 # Auto-disable platform-incompatible features.
 # Bowtie2 requires POSIX fork/exec (unavailable on WASM and Windows).
@@ -29,10 +30,13 @@ option(MIINT_ENABLE_MAFFT "Build with MAFFT multiple sequence alignment support"
 # HDF5 C++ static class members (e.g. LinkCreatPropList::DEFAULT) become
 # unresolvable GOT.mem imports in WASM, causing "bad export type: undefined"
 # at extension load time.
+# SortMeRNA library builds on all three OSes (its own CI matrix covers windows/
+# linux/macos). Only disable on WASM.
 if(EMSCRIPTEN)
     set(MIINT_ENABLE_BOWTIE2 OFF)
     set(MIINT_ENABLE_HDF5 OFF)
-    message(STATUS "Emscripten detected: disabling Bowtie2 and HDF5 (WASM-incompatible)")
+    set(MIINT_ENABLE_SORTMERNA OFF)
+    message(STATUS "Emscripten detected: disabling Bowtie2, HDF5, and SortMeRNA (WASM-incompatible)")
 elseif(WIN32)
     set(MIINT_ENABLE_BOWTIE2 OFF)
     set(MIINT_ENABLE_MAFFT OFF)
@@ -465,6 +469,67 @@ if(MIINT_ENABLE_VSEARCH)
     add_dependencies(vsearch vsearch_build)
 endif()
 
+# SortMeRNA: embedded library for rRNA filtering and alignment.
+# Upstream CMake produces several archives; smr_api is the C-API entry point.
+# smr_objs, cmph, alp, build_version are CMake OBJECT libraries whose object
+# files get archived into libsmr_api.a via the STATIC→OBJECT link rule.
+if(MIINT_ENABLE_SORTMERNA)
+    find_package(RocksDB CONFIG REQUIRED)
+
+    set(SORTMERNA_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/sortmerna)
+    set(SORTMERNA_BIN_DIR ${CMAKE_CURRENT_BINARY_DIR}/sortmerna_build)
+    set(SORTMERNA_API_LIB ${SORTMERNA_BIN_DIR}/src/smr_api/libsmr_api.a)
+    set(SORTMERNA_BUNDLE_LIB ${CMAKE_CURRENT_BINARY_DIR}/sortmerna/libsortmerna_bundle.a)
+    set(CONCURRENTQUEUE_HOME ${CMAKE_CURRENT_SOURCE_DIR}/ext/concurrentqueue)
+
+    # alp's sources use the deprecated `register` keyword, which is a hard
+    # error on Clang 16+. Suppress it so the library still compiles.
+    ExternalProject_Add(
+        sortmerna_build
+        SOURCE_DIR ${SORTMERNA_SRC_DIR}
+        BINARY_DIR ${SORTMERNA_BIN_DIR}
+        CMAKE_ARGS
+            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+            -DCMAKE_CXX_FLAGS=-Wno-register
+            -DWITH_TESTS=OFF
+            -DCONCURRENTQUEUE_HOME=${CONCURRENTQUEUE_HOME}
+            -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+            -DVCPKG_TARGET_TRIPLET=${VCPKG_TARGET_TRIPLET}
+            -DVCPKG_MANIFEST_MODE=OFF
+            # Force sortmerna's FindRocksDB branch to use vcpkg's CONFIG file.
+            # Without this, its else-branch runs MODULE mode which hits system
+            # /usr/lib rocksdb first on Debian/Ubuntu.
+            -DROCKSDB_DIST=${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/share/rocksdb
+            # vcpkg builds static-only; switch sortmerna off its default shared target.
+            -DROCKSDB_USE_STATIC_LIBS=ON
+        BUILD_BYPRODUCTS ${SORTMERNA_API_LIB}
+        INSTALL_COMMAND ""
+    )
+
+    # Post-build: bundle cmph/alp/build_version OBJECT library outputs into a
+    # single archive so consumers only need to link one -lsortmerna equivalent.
+    add_custom_command(
+        OUTPUT ${SORTMERNA_BUNDLE_LIB}
+        COMMAND ${CMAKE_COMMAND}
+            -DSORTMERNA_BIN_DIR=${SORTMERNA_BIN_DIR}
+            -DSORTMERNA_API_LIB=${SORTMERNA_API_LIB}
+            -DSORTMERNA_BUNDLE_LIB=${SORTMERNA_BUNDLE_LIB}
+            -DCMAKE_AR=${CMAKE_AR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bundle_sortmerna.cmake
+        DEPENDS sortmerna_build
+        COMMENT "Bundling sortmerna object libraries into ${SORTMERNA_BUNDLE_LIB}"
+    )
+    add_custom_target(sortmerna_bundle DEPENDS ${SORTMERNA_BUNDLE_LIB})
+
+    add_library(sortmerna STATIC IMPORTED GLOBAL)
+    set_target_properties(sortmerna PROPERTIES
+        IMPORTED_LOCATION ${SORTMERNA_BUNDLE_LIB}
+        INTERFACE_INCLUDE_DIRECTORIES ${SORTMERNA_SRC_DIR}/include
+    )
+    add_dependencies(sortmerna sortmerna_bundle)
+endif()
+
 # Build MAFFT PartTree static library for multiple sequence alignment
 if(MIINT_ENABLE_MAFFT)
     # Handle cross-compilation arch flags for MAFFT (same pattern as WFA2/minimap2)
@@ -695,6 +760,9 @@ endif()
 if(MIINT_ENABLE_MAFFT)
     list(APPEND EXTENSION_SOURCES src/MafftAligner.cpp src/align_mafft.cpp)
 endif()
+if(MIINT_ENABLE_SORTMERNA)
+    list(APPEND EXTENSION_SOURCES src/SortMeRNAAligner.cpp src/align_sortmerna_rrna.cpp)
+endif()
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 
@@ -755,6 +823,9 @@ endif()
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_HDF5)
 endif()
+if(MIINT_ENABLE_SORTMERNA)
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_SORTMERNA)
+endif()
 target_link_libraries(${EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
@@ -770,6 +841,9 @@ if(MIINT_ENABLE_MAFFT)
 endif()
 if(MIINT_ENABLE_VSEARCH)
     target_link_libraries(${EXTENSION_NAME} vsearch)
+endif()
+if(MIINT_ENABLE_SORTMERNA)
+    target_link_libraries(${EXTENSION_NAME} sortmerna RocksDB::rocksdb)
 endif()
 if(APPLE)
     target_link_libraries(${EXTENSION_NAME} "-framework CoreFoundation")
@@ -819,6 +893,9 @@ endif()
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_HDF5)
 endif()
+if(MIINT_ENABLE_SORTMERNA)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_SORTMERNA)
+endif()
 target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
@@ -834,6 +911,9 @@ if(MIINT_ENABLE_MAFFT)
 endif()
 if(MIINT_ENABLE_VSEARCH)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} vsearch)
+endif()
+if(MIINT_ENABLE_SORTMERNA)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} sortmerna RocksDB::rocksdb)
 endif()
 if(APPLE)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework CoreFoundation")
@@ -929,6 +1009,12 @@ endif()
 if(MIINT_ENABLE_MAFFT)
     list(APPEND TEST_SOURCES src/MafftAligner.cpp test/cpp/test_MafftAligner.cpp)
 endif()
+if(MIINT_ENABLE_SORTMERNA)
+    list(APPEND TEST_SOURCES
+        src/SortMeRNAAligner.cpp
+        test/cpp/test_sortmerna_build.cpp
+        test/cpp/test_SortMeRNAAligner.cpp)
+endif()
 
 add_executable(tests ${TEST_SOURCES})
 
@@ -947,6 +1033,10 @@ if(MIINT_ENABLE_MAFFT)
 endif()
 if(MIINT_ENABLE_VSEARCH)
     target_link_libraries(tests vsearch)
+endif()
+if(MIINT_ENABLE_SORTMERNA)
+    target_link_libraries(tests sortmerna RocksDB::rocksdb)
+    target_compile_definitions(tests PRIVATE MIINT_HAS_SORTMERNA)
 endif()
 if(WIN32)
     # Tests target only needs HTSlib deps (no Rust code linked here)

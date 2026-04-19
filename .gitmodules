@@ -24,3 +24,7 @@
 	path = ext/mafft
 	url = https://github.com/the-miint/mafft.git
 	branch = v7.471-miint
+[submodule "ext/sortmerna"]
+	path = ext/sortmerna
+	url = https://github.com/the-miint/sortmerna.git
+	branch = v4.4.0-miint

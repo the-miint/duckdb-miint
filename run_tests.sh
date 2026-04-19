@@ -94,6 +94,9 @@ fi
 if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'align_mafft';" | ./build/release/duckdb -csv 2>/dev/null | grep -q 1; then
     export MAFFT_AVAILABLE=1
 fi
+if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'align_sortmerna_rrna';" | ./build/release/duckdb -csv 2>/dev/null | grep -q 1; then
+    export SORTMERNA_AVAILABLE=1
+fi
 
 make test
 ./build/release/extension/miint/tests

@@ -60,6 +60,22 @@ inline void SetAlignResultInt64(Vector &result_vector, const std::vector<int64_t
 	}
 }
 
+// Set an INTEGER vector from an int32_t vector slice
+inline void SetAlignResultInt32(Vector &result_vector, const std::vector<int32_t> &values, idx_t offset, idx_t count) {
+	auto result_data = FlatVector::GetData<int32_t>(result_vector);
+	for (idx_t j = 0; j < count; j++) {
+		result_data[j] = values[offset + j];
+	}
+}
+
+// Set a DOUBLE vector from a double vector slice
+inline void SetAlignResultDouble(Vector &result_vector, const std::vector<double> &values, idx_t offset, idx_t count) {
+	auto result_data = FlatVector::GetData<double>(result_vector);
+	for (idx_t j = 0; j < count; j++) {
+		result_data[j] = values[offset + j];
+	}
+}
+
 // Set a BIGINT vector from an int64_t vector slice, with -1 as NULL (for SAM tags)
 inline void SetAlignResultInt64Nullable(Vector &result_vector, const std::vector<int64_t> &values, idx_t offset,
                                         idx_t count) {

@@ -39,6 +39,9 @@
 #ifdef MIINT_HAS_MAFFT
 #include <align_mafft.hpp>
 #endif
+#ifdef MIINT_HAS_SORTMERNA
+#include <align_sortmerna_rrna.hpp>
+#endif
 #include <deblur_table_function.hpp>
 #include <align_pairwise_functions.hpp>
 #include <read_mzml.hpp>
@@ -215,6 +218,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 #ifdef MIINT_HAS_MAFFT
 	AlignMafftTableFunction::Register(loader);
+#endif
+#ifdef MIINT_HAS_SORTMERNA
+	AlignSortMeRNARRNATableFunction::Register(loader);
 #endif
 	DeblurTableFunction::Register(loader);
 
