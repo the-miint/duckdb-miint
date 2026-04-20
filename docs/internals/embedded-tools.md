@@ -16,7 +16,7 @@ Four embedding categories:
 | `MIINT_ENABLE_BOWTIE2` | ON | Emscripten, Windows (requires POSIX fork/exec) |
 | `MIINT_ENABLE_MAFFT` | ON | Windows (uses `mkdtemp` and other POSIX APIs; segfaults on MinGW) |
 | `MIINT_ENABLE_VSEARCH` | ON | Emscripten, Windows (autotools build not supported) |
-| `MIINT_ENABLE_SORTMERNA` | ON | Emscripten (RocksDB vcpkg port not built for wasm32) |
+| `MIINT_ENABLE_SORTMERNA` | ON | Emscripten (RocksDB vcpkg port not built for wasm32), Windows/MinGW (cmph assumes POSIX `<sys/time.h>`; MSVC-on-Windows would work if anyone wires it up) |
 
 Corresponding preprocessor macros: `MIINT_HAS_HDF5`, `MIINT_HAS_BOWTIE2`, `MIINT_HAS_MAFFT`, `MIINT_HAS_VSEARCH`, `MIINT_HAS_SORTMERNA`. Also `MIINT_ASPERA_SUPPORTED=0` on Windows/WASM (POSIX-only runtime).
 
@@ -70,7 +70,7 @@ Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is li
 ### SortMeRNA 4.4.0 (fork)
 - **Location:** `ext/sortmerna/` (git submodule at `v4.4.0-miint` on the `the-miint/sortmerna` fork)
 - **Purpose:** rRNA read filtering / alignment exposed as `align_sortmerna` (SAM schema) and `align_sortmerna_rrna` (identity/coverage/e-value schema)
-- **Gated by:** `MIINT_ENABLE_SORTMERNA` (defaults on for Linux/macOS/Windows, off for Emscripten). `MIINT_HAS_SORTMERNA` compile define.
+- **Gated by:** `MIINT_ENABLE_SORTMERNA` (defaults on for Linux/macOS, off for Emscripten and MinGW — cmph's `cmph_time.h` assumes POSIX `<sys/time.h>`/`gettimeofday` which MinGW doesn't supply). `MIINT_HAS_SORTMERNA` compile define.
 - **Build:** `ExternalProject_Add(sortmerna_build)` drives sortmerna's own CMake with `-DCONCURRENTQUEUE_HOME=<ext/concurrentqueue>`, `-DROCKSDB_DIST=<vcpkg_share>`, `-DROCKSDB_USE_STATIC_LIBS=ON`, `-DCMAKE_CXX_FLAGS=-Wno-register`, `-DWITH_TESTS=OFF`.
 - **Bundle step:** sortmerna's internal OBJECT libraries (`cmph`, `alp`, `build_version`) are scoped to sortmerna's own CMake configuration. `ExternalProject_Add` isolates that scope from ours, so we cannot `target_link_libraries(... cmph)` against them directly. Additionally, when sortmerna links its STATIC `libsmr_api.a` against those OBJECT libraries, CMake does NOT physically embed the object files into the archive — they remain as loose `.o` files in sortmerna's build tree. `cmake/bundle_sortmerna.cmake` runs after the build, globs those object files, and `ar rs`-appends them into a copy named `libsortmerna_bundle.a`. That is the archive we link. Without this step the final link fails with undefined references to cmph/alp symbols.
 - **Forcing a rebuild:** like `rype_build`, `sortmerna_build` is an ExternalProject and caches aggressively. Touching source files in `ext/sortmerna/` does not invalidate it. To force a rebuild: `touch build/release/extension/miint/sortmerna_build-prefix/src/sortmerna_build-stamp/sortmerna_build-configure`.

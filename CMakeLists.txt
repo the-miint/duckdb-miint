@@ -30,8 +30,11 @@ option(MIINT_ENABLE_SORTMERNA "Build with SortMeRNA rRNA alignment support" ON)
 # HDF5 C++ static class members (e.g. LinkCreatPropList::DEFAULT) become
 # unresolvable GOT.mem imports in WASM, causing "bad export type: undefined"
 # at extension load time.
-# SortMeRNA library builds on all three OSes (its own CI matrix covers windows/
-# linux/macos). Only disable on WASM.
+# SortMeRNA transitively pulls in cmph, whose cmph_time.h assumes POSIX
+# <sys/time.h> / gettimeofday — MinGW headers don't provide these, so the
+# sub-build fails with "storage size of 'e_time' isn't known". Upstream
+# sortmerna CI tests MSVC, not MinGW; we disable it here rather than patching
+# cmph. Still enabled on Linux/macOS/MSVC.
 if(EMSCRIPTEN)
     set(MIINT_ENABLE_BOWTIE2 OFF)
     set(MIINT_ENABLE_HDF5 OFF)
@@ -40,7 +43,12 @@ if(EMSCRIPTEN)
 elseif(WIN32)
     set(MIINT_ENABLE_BOWTIE2 OFF)
     set(MIINT_ENABLE_MAFFT OFF)
-    message(STATUS "Windows detected: disabling Bowtie2 and MAFFT (require POSIX APIs)")
+    if(MINGW)
+        set(MIINT_ENABLE_SORTMERNA OFF)
+        message(STATUS "MinGW detected: disabling Bowtie2, MAFFT, and SortMeRNA (cmph relies on POSIX <sys/time.h>)")
+    else()
+        message(STATUS "Windows detected: disabling Bowtie2 and MAFFT (require POSIX APIs)")
+    endif()
 endif()
 
 # HDF5 is required for BIOM support, but can be disabled entirely or made optional for clang-tidy
