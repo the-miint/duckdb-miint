@@ -140,6 +140,10 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 #endif
 	data->versions.emplace_back("zlib", zlibVersion());
 	data->versions.emplace_back("rype", RYPE_GIT_VERSION);
+#ifdef MIINT_HAS_VSEARCH
+	data->versions.emplace_back("vsearch", VSEARCH_GIT_VERSION);
+#endif
+	data->versions.emplace_back("mafft", MAFFT_GIT_VERSION);
 	return data;
 }
 

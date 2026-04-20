@@ -1,4 +1,6 @@
 #pragma once
+#include <climits>
+#include <cstddef>
 #include <optional>
 #include <variant>
 #include <vector>
@@ -33,7 +35,12 @@ public:
 #endif // MIINT_ASPERA_SUPPORTED
 #endif // MIINT_STATIC_BUILD
 
-	SequenceRecordBatch read(const int n);
+	// Read up to `n` records or until cumulative bytes across the accumulated batch exceed
+	// `max_bytes`, whichever comes first. Byte accounting sums `name + comment + seq + qual`
+	// across both mates in paired-end mode. At least one record is always returned if the
+	// stream has data, even when a single record alone exceeds `max_bytes` (starvation guard).
+	// Defaults to SIZE_MAX, preserving the row-only behavior for existing callers.
+	SequenceRecordBatch read(const int n, const size_t max_bytes = SIZE_MAX);
 
 private:
 	using SeqStreamIn = klibpp::SeqStreamIn;
@@ -57,7 +64,7 @@ private:
 	std::vector<klibpp::KSeq> buffered_read1_;
 	std::vector<klibpp::KSeq> buffered_read2_;
 
-	SequenceRecordBatch read_se(const int n);
-	SequenceRecordBatch read_pe(const int n);
+	SequenceRecordBatch read_se(const int n, const size_t max_bytes);
+	SequenceRecordBatch read_pe(const int n, const size_t max_bytes);
 };
 }; // namespace miint
