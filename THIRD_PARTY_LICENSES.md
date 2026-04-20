@@ -3,6 +3,16 @@
 This file contains licenses for third-party software referenced or used
 by this project.
 
+**Policy.** Full license text is inlined below for permissively licensed
+dependencies (MIT / BSD / Apache 2.0) whose source is embedded in this
+repository. For copyleft dependencies (LGPL-*, MPL) we instead identify
+the SPDX expression and point at the license file that ships alongside
+the upstream source — the source is the authoritative copy and
+reproducing it here would create drift. Downstream distributors of a
+binary that links any copyleft dependency listed below must ship the
+corresponding full license text themselves (LGPL §6 / §10 obligations
+are not satisfied by this file alone).
+
 ---
 
 ## HTSlib
@@ -387,3 +397,151 @@ STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
 OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
 OF SUCH DAMAGE.
+
+---
+
+## SortMeRNA
+
+rRNA read filtering and alignment. Used by `align_sortmerna` and
+`align_sortmerna_rrna`. Embedded as a statically linked C++ library
+from a fork with a streaming C API (`smr_run_seqs_with_index`).
+Full source is available under `ext/sortmerna/` in this repository,
+which satisfies the LGPL-3.0 source-availability requirement for
+distributed binaries that link against it.
+
+- Repository (upstream): https://github.com/biocore/sortmerna
+- Repository (fork used here): https://github.com/the-miint/sortmerna — branch `v4.4.0-miint`, pinned at the submodule SHA recorded in `.gitmodules` / `git submodule status ext/sortmerna`
+- Version: 4.4.0
+- License: LGPL-3.0-or-later (SPDX)
+
+### Citation
+
+Kopylova E, Noé L, Touzet H.
+"SortMeRNA: Fast and accurate filtering of ribosomal RNAs in
+metatranscriptomic data."
+*Bioinformatics*, 2012; 28(24):3211-3217.
+doi: [10.1093/bioinformatics/bts611](https://doi.org/10.1093/bioinformatics/bts611)
+
+### GNU Lesser General Public License v3.0
+
+SortMeRNA is dual-licensed under LGPL-3.0 and GPL-3.0; this project
+uses it under LGPL-3.0-or-later. The full LGPL-3.0 text is in
+`ext/sortmerna/LICENSE.LESSER.txt`. The required GPL-3.0 text
+(referenced by LGPL-3.0 §0) is in `ext/sortmerna/LICENSE.txt`.
+
+---
+
+## RocksDB
+
+Embedded key-value store used by SortMeRNA for index persistence.
+Sourced via vcpkg and linked statically into `libsortmerna_bundle.a`.
+
+- Repository: https://github.com/facebook/rocksdb
+- License: `GPL-2.0-only OR Apache-2.0` (SPDX expression, dual); used here under Apache 2.0. See RocksDB's `LICENSE.Apache` for full text.
+
+### Apache License 2.0 (Summary)
+
+Copyright (c) Meta Platforms, Inc. and affiliates.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+implied. See the License for the specific language governing
+permissions and limitations under the License.
+
+---
+
+## cmph
+
+Minimal perfect hash functions. Transitive dependency of SortMeRNA,
+bundled into `libsortmerna_bundle.a` via the post-build `ar`-append
+step in `cmake/bundle_sortmerna.cmake`.
+
+- Repository: http://cmph.sourceforge.net/
+- Vendored location in this repo: `ext/sortmerna/3rdparty/cmph/` (submodule; same pin as SortMeRNA)
+- License: `LGPL-2.0-only OR MPL-1.1` (SPDX expression, dual)
+
+The cmph sources vendored inside SortMeRNA carry no per-file license
+headers. The upstream SourceForge project declares the dual license
+above. Downstream distributors of a binary linking cmph should include
+the full LGPL-2.0 and/or MPL-1.1 text; inlining them here would
+duplicate content that the upstream project does not itself ship
+alongside the sources.
+
+---
+
+## alp (ascending ladder algorithm for p-values)
+
+NCBI statistical library used by SortMeRNA for alignment p-value
+computation. Transitive dependency bundled into
+`libsortmerna_bundle.a`.
+
+- Origin: NCBI BLAST+ toolkit
+- License: Public domain (U.S. government work per 17 U.S.C. §105)
+
+### NCBI Public Domain Notice
+
+This software/database is a "United States Government Work" under
+the terms of the United States Copyright Act. It was written as part
+of the author's official duties as a United States Government
+employee and thus cannot be copyrighted. This software/database is
+freely available to the public for use. The National Library of
+Medicine and the U.S. Government have not placed any restriction on
+its use or reproduction.
+
+Although all reasonable efforts have been taken to ensure the
+accuracy and reliability of the software and data, the NLM and the
+U.S. Government do not and cannot warrant the performance or
+results that may be obtained by using this software or data. The
+NLM and the U.S. Government disclaim all warranties, express or
+implied, including warranties of performance, merchantability or
+fitness for any particular purpose.
+
+---
+
+## concurrentqueue
+
+Lock-free concurrent queue used by SortMeRNA's producer/consumer
+pipeline. Vendored as a header-only include at
+`ext/concurrentqueue/concurrentqueue.h` (pinned to a specific commit
+for build reproducibility; not carried as a submodule to keep CI
+checkout simple).
+
+- Repository: https://github.com/cameron314/concurrentqueue
+- License: Simplified BSD / Boost Software License 1.0 (dual);
+  used under the Simplified BSD terms.
+
+### Simplified BSD License
+
+Copyright (c) 2013-2016, Cameron Desrochers.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+- Redistributions of source code must retain the above copyright
+  notice, this list of conditions and the following disclaimer.
+- Redistributions in binary form must reproduce the above copyright
+  notice, this list of conditions and the following disclaimer in
+  the documentation and/or other materials provided with the
+  distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.

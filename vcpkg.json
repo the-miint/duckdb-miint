@@ -5,7 +5,8 @@
     "expat",
     "openssl",
     "curl",
-    { "name": "hdf5", "features": ["cpp", "zlib", "szip"], "platform": "!emscripten" }
+    { "name": "hdf5", "features": ["cpp", "zlib", "szip"], "platform": "!emscripten" },
+    { "name": "rocksdb", "platform": "!emscripten" }
   ],
   "vcpkg-configuration": {
     "overlay-ports": ["./extension-ci-tools/vcpkg_ports"],
