@@ -98,6 +98,61 @@ if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'align_sortmerna
     export SORTMERNA_AVAILABLE=1
 fi
 
+# Phase 5: real-data regression oracle.
+#
+# The BLAST-format output of `sortmerna 4.4.0 --blast '1 cigar qcov'` on the
+# in-tree 100k-read environmental amplicons vs. gg_13_8_ref_set.fasta is
+# checked in at data/sortmerna/real_oracle.blast.gz (1.9 MB gzipped). The
+# submodule SHA that produced it is recorded alongside so we can detect when
+# the oracle has gone stale.
+#
+# To regenerate after bumping ext/sortmerna: remove both files and rerun
+# run_tests.sh with MIINT_SORTMERNA_REAL_DATA=1. That rebuilds the oracle
+# using the submodule-built native CLI (the exact binary our library links),
+# so the oracle and our embedded library always run the same version.
+SMR_NATIVE_CLI="./build/release/extension/miint/sortmerna_build/src/sortmerna/sortmerna"
+SMR_REAL_QUERY="ext/sortmerna/data/set2_environmental_study_550_amplicon.fasta"
+SMR_REAL_REF="ext/sortmerna/data/gg_13_8_ref_set.fasta"
+SMR_ORACLE_GZ="data/sortmerna/real_oracle.blast.gz"
+SMR_ORACLE_SHA="data/sortmerna/real_oracle.submodule.sha"
+SMR_SUBMODULE_HEAD=$(git -C ext/sortmerna rev-parse HEAD 2>/dev/null || echo "unknown")
+
+if [ "${MIINT_SORTMERNA_REAL_DATA:-0}" = "1" ] && [ -x "$SMR_NATIVE_CLI" ] \
+        && [ -f "$SMR_REAL_QUERY" ] && [ -f "$SMR_REAL_REF" ]; then
+    echo "Regenerating sortmerna real-data oracle via native 4.4.0 CLI..."
+    SMR_TMP=$(mktemp -d)
+    if "$SMR_NATIVE_CLI" \
+            --ref "$SMR_REAL_REF" --reads "$SMR_REAL_QUERY" \
+            --workdir "$SMR_TMP" --aligned "$SMR_TMP/aligned" \
+            --blast '1 cigar qcov' --num_alignments 1 --threads 4 > "$SMR_TMP/smr.log" 2>&1 \
+            && [ -f "$SMR_TMP/aligned.blast" ]; then
+        mkdir -p data/sortmerna
+        gzip -c "$SMR_TMP/aligned.blast" > "$SMR_ORACLE_GZ"
+        echo "$SMR_SUBMODULE_HEAD" > "$SMR_ORACLE_SHA"
+        echo "Oracle regenerated at $SMR_ORACLE_GZ (submodule $SMR_SUBMODULE_HEAD)"
+        rm -rf "$SMR_TMP"
+    else
+        # Preserve the CLI log for debugging — the tmpdir is about to go.
+        SMR_FAIL_LOG="$(pwd)/smr_oracle_gen_fail.log"
+        cp "$SMR_TMP/smr.log" "$SMR_FAIL_LOG" 2>/dev/null || true
+        echo "Warning: sortmerna oracle generation failed; log saved to $SMR_FAIL_LOG"
+        rm -rf "$SMR_TMP"
+    fi
+fi
+
+# Export the oracle path only if both the gzipped file and its SHA record
+# exist, AND the recorded SHA matches the current submodule HEAD. A mismatch
+# means the submodule was bumped without regenerating — skip the test rather
+# than silently validate against stale goldens.
+if [ -f "$SMR_ORACLE_GZ" ] && [ -f "$SMR_ORACLE_SHA" ]; then
+    SMR_RECORDED_SHA=$(cat "$SMR_ORACLE_SHA")
+    if [ "$SMR_RECORDED_SHA" = "$SMR_SUBMODULE_HEAD" ]; then
+        export SORTMERNA_REAL_ORACLE="$SMR_ORACLE_GZ"
+    else
+        echo "Warning: sortmerna oracle ($SMR_RECORDED_SHA) does not match submodule HEAD ($SMR_SUBMODULE_HEAD); skipping real-data test"
+    fi
+fi
+
 make test
 ./build/release/extension/miint/tests
 

@@ -1,0 +1,177 @@
+# name: test/sql/align_sortmerna_realworld.test
+# description: Real-data regression: embedded sortmerna matches native CLI on 100k env. 16S amplicons (set2) vs GG 13_8 reference
+# group: [sql]
+
+require miint
+
+require-env SORTMERNA_AVAILABLE
+
+require-env SORTMERNA_REAL_ORACLE
+
+# The SORTMERNA_REAL_ORACLE env var is set by run_tests.sh only when the
+# committed oracle (data/sortmerna/real_oracle.blast.gz) matches the current
+# ext/sortmerna submodule HEAD. Running this test outside run_tests.sh, or
+# setting the env var manually against a stale file, is unsupported.
+
+# --- Load 100k reads from sortmerna's bundled environmental dataset ---
+statement ok
+CREATE TABLE smr_rw_q AS
+  SELECT read_id, sequence1
+  FROM read_fastx('ext/sortmerna/data/set2_environmental_study_550_amplicon.fasta');
+
+query I
+SELECT COUNT(*) FROM smr_rw_q;
+----
+100000
+
+# --- read_id uniqueness is a hard prerequisite for the JOIN-USING assertions
+#     below. Duplicate IDs would turn every inner-join count into a cross
+#     product and silently invalidate the rest of the test. ---
+query I
+SELECT COUNT(*) FROM (SELECT read_id FROM smr_rw_q GROUP BY read_id HAVING COUNT(*) > 1);
+----
+0
+
+# --- Materialize our alignment output once; reused by all downstream checks.
+#     num_threads := 1 matches the other sortmerna SQL tests and keeps the
+#     test cheap on small CI runners. sortmerna serializes on its own
+#     g_run_mutex regardless, so the thread count is not exercising parallel
+#     behaviour here.
+statement ok
+CREATE TABLE smr_rw_ours AS
+  SELECT read_id, aligned, ref_name, ref_start, ref_end, cigar,
+         score, edit_distance, identity, coverage
+  FROM align_sortmerna_rrna('smr_rw_q',
+       ref_paths := ['ext/sortmerna/data/gg_13_8_ref_set.fasta'],
+       num_threads := 1);
+
+# Every input row produces exactly one output row.
+query I
+SELECT COUNT(*) FROM smr_rw_ours;
+----
+100000
+
+# --- Load native sortmerna 4.4.0 BLAST oracle (gzipped, checked in) ---
+# The path below is hardcoded rather than read from $SORTMERNA_REAL_ORACLE
+# because sqllogictest's read_csv does not interpolate env vars. run_tests.sh
+# sets SORTMERNA_REAL_ORACLE to exactly this path after the SHA-match check,
+# so the require-env guard above still gates staleness. If you relocate the
+# oracle in run_tests.sh, update this read_csv path in the same commit.
+#
+# sortmerna's `--blast '1 cigar qcov'` emits these fields (0-based):
+#   00:query_id 01:ref_id 02:pident 03:aln_len 04:mismatches 05:gap_opens
+#   06:q_start  07:q_end  08:r_start 09:r_end   10:evalue      11:bitscore
+#   12:cigar    13:qcov
+# Any upstream change to the BLAST layout requires regenerating the oracle;
+# positional access keeps the mapping obvious rather than hidden behind
+# column names the CSV reader invents.
+statement ok
+CREATE TABLE smr_rw_native AS
+  SELECT column00 AS read_id, column01 AS ref_name,
+         CAST(column08 AS INTEGER) AS ref_start,
+         CAST(column09 AS INTEGER) AS ref_end,
+         column12 AS cigar,
+         CAST(column02 AS DOUBLE) AS identity,
+         CAST(column13 AS DOUBLE) AS coverage
+  FROM read_csv('data/sortmerna/real_oracle.blast.gz', delim='\t', header=false);
+
+# Native CLI reports 99985 alignments (1 per read that passes its internal
+# min-score filter). Our embedded library is a strict superset — we also
+# surface 2 additional low-score alignments (score=40/42 on ref 826110) that
+# the CLI filters. Both behaviours are within the documented library/CLI
+# divergence contract.
+query I
+SELECT COUNT(*) FROM smr_rw_native;
+----
+99985
+
+query I
+SELECT COUNT(*) FROM smr_rw_ours WHERE aligned = 1;
+----
+99987
+
+# --- Every native-aligned read must also be aligned in ours. This is the
+#     only check that catches a dropped alignment on our side — the inner
+#     joins below narrow to the intersection and would hide such a bug. ---
+query I
+SELECT COUNT(*)
+FROM smr_rw_native n
+LEFT JOIN smr_rw_ours o USING (read_id)
+WHERE o.aligned IS NULL OR o.aligned = 0;
+----
+0
+
+# --- For every native alignment our library must report bit-identical
+#     ref_name / ref_start / ref_end / cigar. This is the core correctness
+#     invariant: whatever the native CLI picks as the alignment, we pick the
+#     same thing.
+query I
+SELECT COUNT(*) FROM smr_rw_ours o JOIN smr_rw_native n USING (read_id)
+WHERE o.ref_name != n.ref_name OR o.ref_start != n.ref_start
+   OR o.ref_end != n.ref_end OR o.cigar != n.cigar;
+----
+0
+
+# --- Identity / coverage strict equality after banker's rounding. Native's
+#     BLAST output rounds to 1 decimal place using C printf's
+#     round-half-to-even; roundbankers() matches that convention exactly.
+#     Any non-zero count here means the underlying SW scoring diverged. ---
+query I
+SELECT COUNT(*) FROM smr_rw_ours o JOIN smr_rw_native n USING (read_id)
+WHERE roundbankers(o.identity, 1) != n.identity;
+----
+0
+
+query I
+SELECT COUNT(*) FROM smr_rw_ours o JOIN smr_rw_native n USING (read_id)
+WHERE roundbankers(o.coverage, 1) != n.coverage;
+----
+0
+
+# --- Reference hit distribution (17 refs in the ours ∩ native intersection;
+#     ref 826110 is ours-only and excluded by the join). If upstream sortmerna
+#     changes seeding or scoring, every count here moves and we want to know.
+#     To refresh after a submodule bump: delete data/sortmerna/real_oracle.*
+#     and re-run `MIINT_SORTMERNA_REAL_DATA=1 bash run_tests.sh`.
+query II
+SELECT o.ref_name, COUNT(*) AS hits
+FROM smr_rw_ours o JOIN smr_rw_native n USING (read_id)
+GROUP BY o.ref_name ORDER BY hits DESC, o.ref_name;
+----
+289252	24224
+338741	23768
+174974	15292
+143679	13595
+300805	7108
+4397450	6408
+4452437	3240
+209202	3201
+4407478	967
+110876	633
+4416081	454
+82380	264
+190185	227
+3942100	216
+4349059	205
+114151	172
+542922	11
+
+# --- The 2 ours-only alignments are locked down by (ref_name, score). If an
+#     implementation change produces 2 extra alignments elsewhere, the aligned
+#     count stays at 99987 but this assertion fires. ---
+query II
+SELECT ref_name, score FROM smr_rw_ours
+WHERE aligned = 1 AND read_id NOT IN (SELECT read_id FROM smr_rw_native)
+ORDER BY score;
+----
+826110	40
+826110	42
+
+# --- All aligned rows must carry SAM-legal CIGAR strings. sortmerna's SSW
+#     backend emits only M/I/D/S in practice (verified on this dataset), but
+#     the regex allows N for defense-in-depth against backend changes. ---
+query I
+SELECT COUNT(*) FROM smr_rw_ours
+WHERE aligned = 1 AND NOT regexp_matches(cigar, '^([0-9]+[MIDSN])+$');
+----
+0

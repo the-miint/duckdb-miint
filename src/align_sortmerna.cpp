@@ -1,27 +1,28 @@
-#include "align_sortmerna_rrna.hpp"
+#include "align_sortmerna.hpp"
 
 #include "align_sortmerna_common.hpp"
+#include "sortmerna_result_utils.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 
 namespace duckdb {
 
-unique_ptr<FunctionData> AlignSortMeRNARRNATableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                               vector<LogicalType> &return_types,
-                                                               vector<std::string> &names) {
+unique_ptr<FunctionData> AlignSortMeRNATableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
+                                                           vector<LogicalType> &return_types,
+                                                           vector<std::string> &names) {
 	auto data = make_uniq<Data>();
 
 	if (input.inputs.empty() || input.inputs[0].IsNull()) {
-		throw BinderException("align_sortmerna_rrna: query_table is required");
+		throw BinderException("align_sortmerna: query_table is required");
 	}
 	data->query_table = input.inputs[0].ToString();
-	data->ref_paths = ParseSortMeRNARefPaths(input.named_parameters, "align_sortmerna_rrna");
+	data->ref_paths = ParseSortMeRNARefPaths(input.named_parameters, "align_sortmerna");
 	ParseSortMeRNAConfigParams(input.named_parameters, data->config);
 
 	data->query_schema = ValidateSequenceTableSchema(context, data->query_table);
 	if (data->query_schema.has_sequence2 != data->config.paired) {
-		throw BinderException("align_sortmerna_rrna: query table paired-ness (sequence2 %s) does not match "
+		throw BinderException("align_sortmerna: query table paired-ness (sequence2 %s) does not match "
 		                      "paired=%s; set the paired parameter to match or reshape the query",
 		                      data->query_schema.has_sequence2 ? "present" : "absent",
 		                      data->config.paired ? "true" : "false");
@@ -34,8 +35,8 @@ unique_ptr<FunctionData> AlignSortMeRNARRNATableFunction::Bind(ClientContext &co
 	return data;
 }
 
-unique_ptr<GlobalTableFunctionState> AlignSortMeRNARRNATableFunction::InitGlobal(ClientContext &context,
-                                                                                 TableFunctionInitInput &input) {
+unique_ptr<GlobalTableFunctionState> AlignSortMeRNATableFunction::InitGlobal(ClientContext &context,
+                                                                             TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 
@@ -53,33 +54,29 @@ unique_ptr<GlobalTableFunctionState> AlignSortMeRNARRNATableFunction::InitGlobal
 	return gstate;
 }
 
-unique_ptr<LocalTableFunctionState>
-AlignSortMeRNARRNATableFunction::InitLocal(ExecutionContext &, TableFunctionInitInput &, GlobalTableFunctionState *) {
+unique_ptr<LocalTableFunctionState> AlignSortMeRNATableFunction::InitLocal(ExecutionContext &, TableFunctionInitInput &,
+                                                                           GlobalTableFunctionState *) {
 	return make_uniq<LocalState>();
 }
 
-void AlignSortMeRNARRNATableFunction::Execute(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
+void AlignSortMeRNATableFunction::Execute(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 	auto &bind_data = data_p.bind_data->Cast<Data>();
 
-	// MaxThreads() == 1 means only one DuckDB thread ever reaches this body;
-	// the lock is defensive against future changes. Holding it across the
-	// align() call is deliberate — the streaming invariant (one sub-batch in
-	// flight at a time, shared buffer consumed in order) requires it, and
-	// sortmerna's g_run_mutex would serialize concurrent align() calls anyway.
+	// See the parallel note in AlignSortMeRNARRNATableFunction::Execute. The
+	// lock is defensive against a future MaxThreads() change; today the
+	// D_ASSERT in InitGlobal guarantees only one DuckDB thread runs this body.
 	std::lock_guard<std::mutex> lock(gstate.lock);
 
 	while (true) {
-		// 1. Emit buffered rows first.
 		idx_t available = gstate.result_buffer.size() - gstate.buffer_offset;
 		if (available > 0) {
 			idx_t count = std::min(available, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
-			OutputSortMeRNARRNABatch(output, gstate.result_buffer, gstate.buffer_offset, count);
+			OutputSortMeRNASamBatch(output, gstate.result_buffer, gstate.buffer_offset, count, bind_data.config.paired);
 			gstate.buffer_offset += count;
 			return;
 		}
 
-		// 2. Buffer exhausted — pull next sub-batch from the query stream.
 		gstate.result_buffer.clear();
 		gstate.buffer_offset = 0;
 
@@ -89,7 +86,6 @@ void AlignSortMeRNARRNATableFunction::Execute(ClientContext &, TableFunctionInpu
 			return;
 		}
 
-		// 3. Convert SequenceRecordBatch → SortMeRNAQueryBatch.
 		miint::SortMeRNAQueryBatch queries;
 		queries.read_ids = std::move(query_batch.read_ids);
 		queries.sequences = std::move(query_batch.sequences1);
@@ -97,28 +93,23 @@ void AlignSortMeRNARRNATableFunction::Execute(ClientContext &, TableFunctionInpu
 			queries.sequences2 = std::move(query_batch.sequences2);
 		}
 
-		// 4. Align. Rethrow library errors as IOException so DuckDB's
-		//    table-function error path handles them cleanly rather than
-		//    letting std::runtime_error cross the ABI boundary.
 		try {
 			gstate.aligner->align(queries, gstate.result_buffer);
 		} catch (const std::exception &e) {
-			throw IOException("align_sortmerna_rrna: %s", e.what());
+			throw IOException("align_sortmerna: %s", e.what());
 		}
 	}
 }
 
-TableFunction AlignSortMeRNARRNATableFunction::GetFunction() {
-	auto tf = TableFunction("align_sortmerna_rrna", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
+TableFunction AlignSortMeRNATableFunction::GetFunction() {
+	auto tf = TableFunction("align_sortmerna", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
 	RegisterSortMeRNANamedParameters(tf);
-	// Alignment output order depends on sortmerna's internal batch traversal,
-	// not on the input row order. Declare NO_ORDER so DuckDB doesn't try to
-	// preserve insertion order for CTAS pipelines.
+	// See the NO_ORDER note in AlignSortMeRNARRNATableFunction::GetFunction.
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }
 
-void AlignSortMeRNARRNATableFunction::Register(ExtensionLoader &loader) {
+void AlignSortMeRNATableFunction::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetFunction());
 }
 

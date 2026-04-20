@@ -761,7 +761,7 @@ if(MIINT_ENABLE_MAFFT)
     list(APPEND EXTENSION_SOURCES src/MafftAligner.cpp src/align_mafft.cpp)
 endif()
 if(MIINT_ENABLE_SORTMERNA)
-    list(APPEND EXTENSION_SOURCES src/SortMeRNAAligner.cpp src/align_sortmerna_rrna.cpp)
+    list(APPEND EXTENSION_SOURCES src/SortMeRNAAligner.cpp src/align_sortmerna.cpp src/align_sortmerna_rrna.cpp)
 endif()
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
