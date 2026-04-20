@@ -473,9 +473,26 @@ endif()
 # Upstream CMake produces several archives; smr_api is the C-API entry point.
 # smr_objs, cmph, alp, build_version are CMake OBJECT libraries whose object
 # files get archived into libsmr_api.a via the STATIC→OBJECT link rule.
+#
+# Like the HDF5 block above: clang-tidy builds don't have vcpkg wired up, so
+# RocksDB (the only hard external dependency) may be absent. In that case we
+# silently drop sortmerna from the analysis set rather than fail the whole
+# tidy pipeline. Regular builds still REQUIRE RocksDB.
 if(MIINT_ENABLE_SORTMERNA)
-    find_package(RocksDB CONFIG REQUIRED)
+    if(CLANG_TIDY)
+        find_package(RocksDB CONFIG QUIET)
+        if(NOT RocksDB_FOUND)
+            message(STATUS "RocksDB not found for tidy-check - SortMeRNA support will be excluded from analysis")
+            set(MIINT_ENABLE_SORTMERNA OFF)
+        else()
+            message(STATUS "RocksDB found for tidy-check - SortMeRNA support enabled")
+        endif()
+    else()
+        find_package(RocksDB CONFIG REQUIRED)
+    endif()
+endif()
 
+if(MIINT_ENABLE_SORTMERNA)
     set(SORTMERNA_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/sortmerna)
     set(SORTMERNA_BIN_DIR ${CMAKE_CURRENT_BINARY_DIR}/sortmerna_build)
     set(SORTMERNA_API_LIB ${SORTMERNA_BIN_DIR}/src/smr_api/libsmr_api.a)
