@@ -499,6 +499,15 @@ if(MIINT_ENABLE_SORTMERNA)
     set(SORTMERNA_BUNDLE_LIB ${CMAKE_CURRENT_BINARY_DIR}/sortmerna/libsortmerna_bundle.a)
     set(CONCURRENTQUEUE_HOME ${CMAKE_CURRENT_SOURCE_DIR}/ext/concurrentqueue)
 
+    # macOS cross-compile (GitHub runners are arm64; osx_amd64 builds still need
+    # to emit x86_64 objects). Without forwarding CMAKE_OSX_ARCHITECTURES into
+    # the sub-CMake, sortmerna's CLI target gets linked for the host arch and
+    # trips on vcpkg's RocksDB which is built for the target arch.
+    set(SORTMERNA_OSX_ARCH_ARG "")
+    if(APPLE AND OSX_BUILD_ARCH)
+        set(SORTMERNA_OSX_ARCH_ARG "-DCMAKE_OSX_ARCHITECTURES=${OSX_BUILD_ARCH}")
+    endif()
+
     # alp's sources use the deprecated `register` keyword, which is a hard
     # error on Clang 16+. Suppress it so the library still compiles.
     ExternalProject_Add(
@@ -514,6 +523,7 @@ if(MIINT_ENABLE_SORTMERNA)
             -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
             -DVCPKG_TARGET_TRIPLET=${VCPKG_TARGET_TRIPLET}
             -DVCPKG_MANIFEST_MODE=OFF
+            ${SORTMERNA_OSX_ARCH_ARG}
             # Force sortmerna's FindRocksDB branch to use vcpkg's CONFIG file.
             # Without this, its else-branch runs MODULE mode which hits system
             # /usr/lib rocksdb first on Debian/Ubuntu.
