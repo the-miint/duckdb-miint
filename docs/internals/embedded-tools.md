@@ -16,8 +16,9 @@ Four embedding categories:
 | `MIINT_ENABLE_BOWTIE2` | ON | Emscripten, Windows (requires POSIX fork/exec) |
 | `MIINT_ENABLE_MAFFT` | ON | Windows (uses `mkdtemp` and other POSIX APIs; segfaults on MinGW) |
 | `MIINT_ENABLE_VSEARCH` | ON | Emscripten, Windows (autotools build not supported) |
+| `MIINT_ENABLE_SORTMERNA` | ON | Emscripten (RocksDB vcpkg port not built for wasm32) |
 
-Corresponding preprocessor macros: `MIINT_HAS_HDF5`, `MIINT_HAS_BOWTIE2`, `MIINT_HAS_MAFFT`, `MIINT_HAS_VSEARCH`. Also `MIINT_ASPERA_SUPPORTED=0` on Windows/WASM (POSIX-only runtime).
+Corresponding preprocessor macros: `MIINT_HAS_HDF5`, `MIINT_HAS_BOWTIE2`, `MIINT_HAS_MAFFT`, `MIINT_HAS_VSEARCH`, `MIINT_HAS_SORTMERNA`. Also `MIINT_ASPERA_SUPPORTED=0` on Windows/WASM (POSIX-only runtime).
 
 Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is linked (not on musl/macOS/Windows).
 
@@ -66,6 +67,23 @@ Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is li
 - **Build:** Makefile; produces `libmafft_parttree.a` with `ENABLE_MULTITHREAD=-Denablemultithread`
 - **Platform:** POSIX only (uses `mkdtemp`); auto-disabled on Windows
 
+### SortMeRNA 4.4.0 (fork)
+- **Location:** `ext/sortmerna/` (git submodule at `v4.4.0-miint` on the `the-miint/sortmerna` fork)
+- **Purpose:** rRNA read filtering / alignment exposed as `align_sortmerna` (SAM schema) and `align_sortmerna_rrna` (identity/coverage/e-value schema)
+- **Gated by:** `MIINT_ENABLE_SORTMERNA` (defaults on for Linux/macOS/Windows, off for Emscripten). `MIINT_HAS_SORTMERNA` compile define.
+- **Build:** `ExternalProject_Add(sortmerna_build)` drives sortmerna's own CMake with `-DCONCURRENTQUEUE_HOME=<ext/concurrentqueue>`, `-DROCKSDB_DIST=<vcpkg_share>`, `-DROCKSDB_USE_STATIC_LIBS=ON`, `-DCMAKE_CXX_FLAGS=-Wno-register`, `-DWITH_TESTS=OFF`.
+- **Bundle step:** sortmerna's internal OBJECT libraries (`cmph`, `alp`, `build_version`) are scoped to sortmerna's own CMake configuration. `ExternalProject_Add` isolates that scope from ours, so we cannot `target_link_libraries(... cmph)` against them directly. Additionally, when sortmerna links its STATIC `libsmr_api.a` against those OBJECT libraries, CMake does NOT physically embed the object files into the archive — they remain as loose `.o` files in sortmerna's build tree. `cmake/bundle_sortmerna.cmake` runs after the build, globs those object files, and `ar rs`-appends them into a copy named `libsortmerna_bundle.a`. That is the archive we link. Without this step the final link fails with undefined references to cmph/alp symbols.
+- **Forcing a rebuild:** like `rype_build`, `sortmerna_build` is an ExternalProject and caches aggressively. Touching source files in `ext/sortmerna/` does not invalidate it. To force a rebuild: `touch build/release/extension/miint/sortmerna_build-prefix/src/sortmerna_build-stamp/sortmerna_build-configure`.
+- **Submodule deps:**
+  - `cmph` (minimal perfect hashing) — bundled transitively
+  - `alp` (NCBI p-value library) — bundled transitively
+  - `concurrentqueue` (lock-free SPMC queue) — header-only; vendored at `ext/concurrentqueue/concurrentqueue.h` rather than submoduled (upstream has no releases and submodule checkout was flaky)
+- **RocksDB:** supplied by vcpkg (`find_package(RocksDB CONFIG REQUIRED)`). Pinned via `vcpkg.json` entry `{"name": "rocksdb", "platform": "!emscripten"}`.
+- **Threading model:** sortmerna has a process-wide `g_run_mutex` serialising `smr_run_seqs_with_index`. `AlignSortMeRNA*TableFunction::GlobalState::MaxThreads()` returns `1` on the DuckDB side; sortmerna's internal thread pool does the real parallelism (controlled by `num_threads`).
+- **Synthetic read IDs:** `SortMeRNAAligner::align` generates sequential CString IDs `"0".."N-1"` for each call and maps sortmerna's per-alignment output back to caller read IDs by position. Avoids upstream's per-batch ID-uniqueness contract and keeps sortmerna's in-memory CString table small.
+- **Real-data oracle:** `data/sortmerna/real_oracle.blast.gz` is a gzipped native-CLI BLAST run used by `test/sql/align_sortmerna_realworld.test`. `data/sortmerna/real_oracle.submodule.sha` records the submodule HEAD that produced it; `run_tests.sh` refuses to run the regression test against a stale oracle. Regenerate with `MIINT_SORTMERNA_REAL_DATA=1 bash run_tests.sh`.
+- **Known library/CLI divergence:** the streaming library path does not apply the CLI's internal minimum-score filter; our output is a documented strict superset of the CLI's. E-values also differ — library uses per-query Karlin-Altschul; CLI sums/corrects across the DB. Identity / coverage / score / CIGAR / edit_distance are bit-identical.
+
 ### rype (Rust, Arrow FFI)
 - **Location:** `ext/rype/` (git submodule; version captured via `git describe` → `RYPE_GIT_VERSION`)
 - **Purpose:** Rust implementations (e.g., classify, extract, log-ratio) exposed via Arrow C Data Interface for zero-copy FFI
@@ -96,6 +114,7 @@ Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is li
 | expat | `find_package(expat CONFIG REQUIRED)` | yes | XML parsing for mzML/mzXML |
 | zstd | `find_package(zstd QUIET)` | optional | multiple target names tried (`zstd::libzstd_static`, `zstd::libzstd_shared`, `zstd::libzstd`, `zstd`); gates `HAVE_LIBZSTD` |
 | HDF5 | `find_package(HDF5 REQUIRED COMPONENTS CXX)` | conditional | required when `MIINT_ENABLE_HDF5=ON`; links `hdf5-static`, `hdf5_hl-static`, `hdf5_cpp-static`, `hdf5_hl_cpp-static`. For `CLANG_TIDY` builds HDF5 is optional (tidy still runs without BIOM coverage). |
+| RocksDB | `find_package(RocksDB CONFIG REQUIRED)` | conditional | required when `MIINT_ENABLE_SORTMERNA=ON`; vcpkg port gated via `"platform": "!emscripten"`. Linked against `RocksDB::rocksdb` (static archive). |
 | Catch2 | `FetchContent` @ v3.4.0 | yes (test) | used only for the `tests` C++ executable |
 
 `VCPKG_TOOLCHAIN_PATH` must be set before CMake configure.

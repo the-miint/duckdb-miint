@@ -28,6 +28,8 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`align_bowtie2`](#align_bowtie2query_table-subject_table-options) - Bowtie2 alignment
 - [`align_bowtie2_sharded`](#align_bowtie2_shardedquery_table-shard_directory-read_to_shard-options) - Sharded bowtie2 alignment
 - [`align_mafft`](#align_mafftfilename) - MAFFT multiple sequence alignment (PartTree)
+- [`align_sortmerna`](#align_sortmernaquery_table-ref_pathspaths-options) - SortMeRNA rRNA alignment (SAM schema)
+- [`align_sortmerna_rrna`](#align_sortmerna_rrnaquery_table-ref_pathspaths-options) - SortMeRNA rRNA alignment (rRNA schema with identity/coverage/e-value)
 - [`detect_chimera_uchime`](#detect_chimera_uchimequery_table-dbrefs_table-options) - Reference-based chimera detection (UCHIME)
 - [`detect_chimera_uchime_denovo`](#detect_chimera_uchime_denovoinput_table-options) - De novo chimera detection (UCHIME)
 - [`search_sequences_vsearch`](#search_sequences_vsearchquery_table-dbref_table-idthreshold-options) - Global sequence search
@@ -1963,6 +1965,89 @@ WHERE a.read_id < b.read_id AND a.pos = b.bpos;
 - All sequences are materialized in memory (required by the MSA algorithm)
 - Sequences must be at least 6 characters (MAFFT internal requirement)
 - Single-threaded alignment (process-wide mutex)
+
+---
+
+## `align_sortmerna(query_table, ref_paths=paths, [options])`
+
+rRNA filtering / alignment against one or more rRNA reference databases using [SortMeRNA](https://github.com/biocore/sortmerna) (Kopylova et al. 2012, Bioinformatics 28:3211-3217). Embedded as a statically linked library (SortMeRNA 4.4.0 fork; LGPL-3.0-or-later).
+
+Emits the standard 21-column SAM schema shared with `align_minimap2` / `align_bowtie2`. For a schema preserving SortMeRNA's native identity / coverage / e-value / edit-distance fields, use [`align_sortmerna_rrna`](#align_sortmerna_rrnaquery_table-ref_pathspaths-options) below.
+
+**Parameters:**
+- `query_table` (VARCHAR, positional): Name of a table or view with columns `read_id` (VARCHAR), `sequence1` (VARCHAR), and optionally `sequence2` (VARCHAR) when `paired := true`.
+- `ref_paths` (VARCHAR[], required): List of FASTA paths for the reference database(s). The index is built once per query in-memory — re-using references across queries rebuilds the index each time.
+- `num_threads` (INTEGER, default = DuckDB's thread count): Number of threads SortMeRNA's internal pool uses. The DuckDB function runs on a single DuckDB thread; parallelism is inside SortMeRNA.
+- `match`, `mismatch`, `gap_open`, `gap_ext`, `score_N` (INTEGER): SW scoring. Defaults `2 / -3 / 5 / 2 / 0`.
+- `evalue` (DOUBLE, default 1.0): E-value threshold.
+- `seed_win_len` (UINTEGER, default 18): Seed window length.
+- `num_alignments` (UINTEGER, default 1): Max alignments reported per read.
+- `best` (BOOLEAN, default true): Keep only the best-scoring alignment per read.
+- `paired` (BOOLEAN, default false): Paired-end mode. The query table must have a `sequence2` column; bind fails otherwise.
+- `forward_only`, `reverse_only`, `full_search` (BOOLEAN): Strand-search controls.
+
+**Output schema:** Same 21 columns as [`align_minimap2`](#align_minimap2query_table-subject_tablenull-index_pathnull-options). SortMeRNA-specific notes:
+- `mapq` is always `255` — SortMeRNA does not compute mapping quality; 255 is the SAM convention for "unavailable".
+- `tag_as` carries the raw Smith-Waterman score; `tag_nm` carries edit distance. Both are NULL for unaligned rows.
+- `tag_xs`, `tag_ys`, `tag_xn`, `tag_xm`, `tag_xo`, `tag_xg`, `tag_yt`, `tag_md`, `tag_sa` are always NULL — SortMeRNA does not produce these.
+- `stop_position` = `ref_end + 1` (1-based half-open), matching the convention used by `align_minimap2` and `align_bowtie2`.
+- Paired-end: `flags & 0x2` (proper pair) is set when both mates aligned, regardless of reference. This is weaker than SAM's standard "concordant orientation within insert size" meaning — SortMeRNA is an rRNA classifier with no notion of insert size or orientation. When both mates aligned but to different references, `mate_reference` reports the actual partner reference name (rather than `=`), so cross-reference pairs remain distinguishable.
+
+**Caveats:**
+- **No minimum-score filter:** the embedded library returns every positive Smith-Waterman hit. The `sortmerna` CLI applies an internal minimum-score threshold that our streaming API path bypasses; to reproduce CLI output row-for-row, filter on `score` (`tag_as`) or on `e_value` in SQL. Be aware that e-values are not directly comparable between the library and the CLI (see below), so a library-side e-value threshold is not guaranteed to reproduce the exact CLI row set.
+- **E-value divergence from the CLI:** the library computes per-query Karlin-Altschul e-values; the CLI sums / corrects across the full database. Identity, coverage, score, CIGAR, ref_start, ref_end, and edit_distance are bit-identical between the two.
+- **Process-wide serialization:** SortMeRNA's `g_run_mutex` serializes calls process-wide. Concurrent `align_sortmerna` / `align_sortmerna_rrna` queries will block on each other at the library level. The DuckDB function deliberately runs on a single DuckDB thread (`MaxThreads() == 1`) to avoid queueing behind the mutex twice.
+
+**Examples:**
+
+```sql
+CREATE TABLE reads AS SELECT read_id, sequence1 FROM read_fastx('metaT.fastq.gz');
+
+-- Keep only reads that align to any SILVA reference with a reasonable e-value.
+CREATE TABLE rrna_reads AS
+  SELECT read_id, flags, reference, position, cigar, tag_as AS score
+  FROM align_sortmerna('reads', ref_paths := ['silva-bac-16s.fasta', 'silva-arc-16s.fasta'])
+  WHERE (flags & 0x4) = 0;  -- drop unaligned
+```
+
+---
+
+## `align_sortmerna_rrna(query_table, ref_paths=paths, [options])`
+
+Same aligner as `align_sortmerna` but emits SortMeRNA's native output schema, which preserves identity / coverage / e-value / edit-distance (SAM cannot carry all of these as first-class columns).
+
+**Parameters:** identical to `align_sortmerna` above.
+
+**Output schema:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `read_id` | VARCHAR | Query read identifier from the input table |
+| `aligned` | INTEGER | `1` if the read aligned, `0` otherwise |
+| `strand` | INTEGER | `1` for forward, `0` for reverse-complement. `0` for unaligned rows has no meaning. |
+| `ref_name` | VARCHAR | Reference sequence ID (empty for unaligned rows) |
+| `ref_start` | INTEGER | 1-based inclusive start position on reference (`0` for unaligned) |
+| `ref_end` | INTEGER | 1-based inclusive end position on reference (`0` for unaligned) |
+| `cigar` | VARCHAR | CIGAR string, SSW convention (uses `M/I/D/S`) |
+| `score` | INTEGER | Raw Smith-Waterman score (not bitscore) |
+| `e_value` | DOUBLE | Per-query Karlin-Altschul e-value |
+| `identity` | DOUBLE | Percent identity (0..100) at full precision |
+| `coverage` | DOUBLE | Query coverage (0..100) at full precision |
+| `edit_distance` | INTEGER | Number of mismatches + indels |
+| `segment_idx` | INTEGER | `0` for single-end or the forward mate; `1` for the reverse mate in paired-end output |
+
+Paired-end mode produces two rows per input row with `segment_idx` 0 (forward) and 1 (reverse), even when one or both mates failed to align.
+
+**Example:**
+
+```sql
+-- Assign reads to GG references, filter, aggregate.
+SELECT ref_name, COUNT(*) AS hits
+FROM align_sortmerna_rrna('reads',
+       ref_paths := ['gg_13_8.fasta'])
+WHERE aligned = 1 AND e_value <= 1e-5 AND coverage >= 80.0
+GROUP BY ref_name ORDER BY hits DESC;
+```
 
 ---
 
