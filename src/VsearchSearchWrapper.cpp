@@ -7,16 +7,16 @@
 // results to miint's SearchResult format.
 //
 // Session lifecycle (from vsearch_api.h):
-//   1.  vsearch_init_defaults()            — acquires session mutex
+//   1.  vsearch_init_defaults()                  — acquires session mutex
 //   2.  set opt_* overrides (id, maxaccepts, maxrejects)
 //   3.  vsearch_apply_defaults_fixups()
-//   4.  db_init / db_add / dust_all        — load reference DB
-//   5.  dbindex_prepare / addallsequences   — build k-mer index
-//   6.  search_info_alloc + search_init     — per-thread search state (N times)
-//   7.  search_single(si, ...)              — per-query search (thread-safe)
-//   8.  search_cleanup + search_info_free   — per-thread teardown (N times)
-//   9.  dbindex_free / db_free              — release database
-//   10. vsearch_session_end()               — release session mutex
+//   4.  db_init / db_add / dust_all              — load reference DB
+//   5.  dbindex_prepare / addallsequences         — build k-mer index
+//   6.  search_session_alloc + search_session_init — search session state
+//   7.  search_session_single(ss, ...)            — per-query search (one session per process)
+//   8.  search_session_cleanup + search_session_free — session teardown
+//   9.  dbindex_free / db_free                    — release database
+//   10. vsearch_session_end()                     — release session mutex
 //
 // Session serialization: vsearch uses ~200 global opt_* variables.
 // vsearch_init_defaults() acquires a process-wide session mutex that
@@ -37,7 +37,7 @@ namespace miint {
 // ============================================================================
 
 struct VsearchSearchWrapper::SearchHandle::Impl {
-	searchinfo_s *si = nullptr;
+	search_session_s *ss = nullptr;
 	bool initialized = false;
 	int maxaccepts = 1;
 	std::vector<search_result_s> result_buf;
@@ -47,10 +47,10 @@ struct VsearchSearchWrapper::SearchHandle::Impl {
 
 	~Impl() {
 		if (initialized) {
-			search_cleanup(si);
+			search_session_cleanup(ss);
 		}
-		if (si) {
-			search_info_free(si);
+		if (ss) {
+			search_session_free(ss);
 		}
 	}
 	Impl(const Impl &) = delete;
@@ -80,8 +80,8 @@ std::vector<SearchResult> VsearchSearchWrapper::SearchHandle::search(const std::
 	auto seq = normalize_rna(query_sequence);
 
 	int result_count = 0;
-	search_single(impl_->si, seq.c_str(), query_label.c_str(), static_cast<int>(seq.size()), query_size,
-	              impl_->result_buf.data(), impl_->maxaccepts, &result_count);
+	search_session_single(impl_->ss, seq.c_str(), query_label.c_str(), static_cast<int>(seq.size()), query_size,
+	                      impl_->result_buf.data(), impl_->maxaccepts, &result_count);
 
 	std::vector<SearchResult> results;
 	results.reserve(result_count);
@@ -89,7 +89,7 @@ std::vector<SearchResult> VsearchSearchWrapper::SearchHandle::search(const std::
 		auto &r = impl_->result_buf[i];
 		SearchResult sr;
 		sr.query_id = query_label;
-		sr.target_id = r.target_label;
+		sr.target_id = db_getheader(r.target);
 		sr.identity = r.id;
 		sr.matches = r.matches;
 		sr.mismatches = r.mismatches;
@@ -210,8 +210,8 @@ VsearchSearchWrapper::SearchHandle VsearchSearchWrapper::create_search_handle() 
 	}
 
 	SearchHandle handle(params_.maxaccepts);
-	handle.impl_->si = search_info_alloc();
-	search_init(handle.impl_->si);
+	handle.impl_->ss = search_session_alloc();
+	search_session_init(handle.impl_->ss);
 	handle.impl_->initialized = true;
 	return handle;
 }
@@ -240,7 +240,7 @@ void VsearchSearchWrapper::search_batch(const std::vector<std::string> &query_la
 			auto &r = raw_results[qi * max_results + hi];
 			SearchResult sr;
 			sr.query_id = query_labels[qi];
-			sr.target_id = r.target_label;
+			sr.target_id = db_getheader(r.target);
 			sr.identity = r.id;
 			sr.matches = r.matches;
 			sr.mismatches = r.mismatches;

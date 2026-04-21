@@ -33,12 +33,15 @@ struct SearchResult {
 //
 // Thread safety:
 // - set_database(): single-threaded only
-// - SearchHandle::search(): thread-safe (each handle has its own searchinfo_s;
-//   global DB/index is read-only after set_database)
+// - SearchHandle::search(): not thread-safe across handles (vsearch permits
+//   only one active search session per process; do not share a handle across
+//   threads). Use search_batch() for parallel queries.
 class VsearchSearchWrapper {
 public:
-	// Per-thread search handle. Wraps a searchinfo_s for thread-safe
-	// concurrent searching against the shared read-only reference DB.
+	// Search handle. Wraps a search_session_s for per-query search against
+	// the shared reference DB. Only one handle may be active per process
+	// (vsearch enforces one active session); for parallel queries, use
+	// search_batch() which internally parallelizes across opt_threads.
 	//
 	// LIFETIME: Must not outlive the VsearchSearchWrapper that created it.
 	class SearchHandle {
@@ -72,11 +75,11 @@ public:
 
 	// Load reference sequences into vsearch's global DB and build index.
 	// Acquires vsearch session mutex. Applies DUST masking and builds full
-	// k-mer index. After this, create per-thread SearchHandles for search.
+	// k-mer index. After this, create a SearchHandle for per-query search.
 	void set_database(const std::vector<std::string> &labels, const std::vector<std::string> &sequences);
 
-	// Create a per-thread search handle for parallel searching.
-	// Must be called AFTER set_database().
+	// Create a search handle. Must be called AFTER set_database().
+	// Only one handle may be active per process at a time.
 	SearchHandle create_search_handle();
 
 	// Search a batch of queries using vsearch's internal thread pool.
