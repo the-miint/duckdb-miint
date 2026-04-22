@@ -75,7 +75,7 @@ true
 # Quality scores should be in valid Phred+33 range (0-41 typical)
 query I
 SELECT COUNT(*) = 0 AS valid_qual FROM ena_reads
-WHERE list_any_value(list_transform(qual1, x -> x > 60));
+WHERE list_any_value(list_transform(qual1, x : x > 60));
 ----
 true
 
