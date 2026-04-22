@@ -104,7 +104,7 @@ const std::string PARSE_GFF_ATTRIBUTES = // NOLINT
     "  map_from_entries( "
     "    list_transform( "
     "      string_split(kvp_string, ';'), "
-    "      x : struct_pack( "
+    "      lambda x: struct_pack( "
     "        key := string_split(x, '=')[1], "
     "        value := string_split(x, '=')[2] "
     "      ) "
@@ -616,7 +616,7 @@ const std::string MZML_OR_CARDINALITY = // NOLINT
 // Returns NULL if base_peak_intensity is NULL (natural NULL propagation).
 const std::string MZML_I_NORM = // NOLINT
     "CREATE OR REPLACE MACRO mzml_i_norm(intensity_array, base_peak_intensity) AS ("
-    "  list_transform(intensity_array, x : x / base_peak_intensity)"
+    "  list_transform(intensity_array, lambda x: x / base_peak_intensity)"
     ");";
 
 // mzml_i_tic_norm(intensity_array, total_ion_current)
@@ -625,7 +625,7 @@ const std::string MZML_I_NORM = // NOLINT
 // Returns NULL if total_ion_current is NULL (natural NULL propagation).
 const std::string MZML_I_TIC_NORM = // NOLINT
     "CREATE OR REPLACE MACRO mzml_i_tic_norm(intensity_array, total_ion_current) AS ("
-    "  list_transform(intensity_array, x : x / total_ion_current)"
+    "  list_transform(intensity_array, lambda x: x / total_ion_current)"
     ");";
 
 // mzml_excluded_ms2prod(relation, target_mz, tolerance := 0.1)
