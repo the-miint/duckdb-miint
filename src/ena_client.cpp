@@ -9,14 +9,21 @@ ENAClient::ENAClient(duckdb::DatabaseInstance &db)
 }
 
 void ENAClient::RespectRateLimit() {
-	std::lock_guard<std::mutex> lock(rate_limit_mutex);
-	auto now = std::chrono::steady_clock::now();
-	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_request_time);
-	auto min_interval = std::chrono::milliseconds(static_cast<int>(1000.0 / RATE_LIMIT));
-	if (elapsed < min_interval) {
-		std::this_thread::sleep_for(min_interval - elapsed);
+	// Reserve the next request slot under the lock, then sleep outside it.
+	// Sleeping under the lock would serialize every caller behind one thread's
+	// sleep and risks UB on recursive acquisition (std::mutex is non-recursive).
+	const auto min_interval = std::chrono::milliseconds(static_cast<int>(1000.0 / RATE_LIMIT));
+	std::chrono::steady_clock::time_point slot;
+	{
+		std::lock_guard<std::mutex> lock(rate_limit_mutex);
+		auto earliest_next = last_request_time + min_interval;
+		auto now = std::chrono::steady_clock::now();
+		slot = (earliest_next > now) ? earliest_next : now;
+		last_request_time = slot;
 	}
-	last_request_time = std::chrono::steady_clock::now();
+	if (slot > std::chrono::steady_clock::now()) {
+		std::this_thread::sleep_until(slot);
+	}
 }
 
 bool ENAClient::IsRetryableStatus(int status) {
@@ -64,6 +71,10 @@ std::string ENAClient::Search(const std::string &accession, const std::string &r
 
 std::string ENAClient::FetchXML(const std::vector<std::string> &accessions) {
 	auto url = ENAParser::BuildXMLURL(accessions);
+	return MakeRequest(url);
+}
+
+std::string ENAClient::FetchURL(const std::string &url) {
 	return MakeRequest(url);
 }
 

@@ -7,6 +7,7 @@
 #include "duckdb_seq_stream.hpp"
 #include "ena_client.hpp"
 #include "ena_parser.hpp"
+#include "ena_run_info_extractor.hpp"
 #include "remote_file_helper.hpp"
 #include "table_function_common.hpp"
 #include "duckdb/common/exception.hpp"
@@ -22,24 +23,10 @@
 
 namespace duckdb {
 
-enum class ENASequenceFormat { FASTX, SFF };
-
 class ReadENASequencesTableFunction {
 public:
-	struct RunInfo {
-		std::string run_accession;
-		std::string sample_accession;
-		std::string experiment_accession;
-		std::vector<std::string> fastq_urls;         // HTTPS URLs (1 for single-end, 2 for paired-end)
-		std::vector<miint::AsperaPath> aspera_paths; // Parsed host + remote_path pairs
-		bool is_paired = false;
-		uint64_t total_bytes = 0;
-		ENASequenceFormat format = ENASequenceFormat::FASTX;
-		std::string sff_url; // Single HTTPS URL (one RunInfo per SFF file when format == SFF)
-	};
-
 	struct Data : public TableFunctionData {
-		std::vector<RunInfo> runs;
+		std::vector<miint::ENARunInfo> runs;
 		bool include_filepath;
 		uint8_t qual_offset;
 		bool use_aspera;
@@ -52,7 +39,8 @@ public:
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
-		Data(std::vector<RunInfo> runs, bool include_fp, uint8_t offset, bool trim, const std::string &prefer_format);
+		Data(std::vector<miint::ENARunInfo> runs, bool include_fp, uint8_t offset, bool trim,
+		     const std::string &prefer_format);
 	};
 
 	struct GlobalState : public GlobalTableFunctionState {
@@ -60,7 +48,7 @@ public:
 		mutex open_mutex; // Serializes file opens to avoid overwhelming remote servers
 		std::vector<std::unique_ptr<miint::SequenceReader>> readers;
 		std::vector<std::unique_ptr<miint::SFFReader>> sff_readers;
-		std::vector<RunInfo> runs;
+		std::vector<miint::ENARunInfo> runs;
 		size_t next_run_idx;
 		std::vector<uint64_t> run_sequence_counters;
 		FileSystem &fs;
@@ -91,7 +79,7 @@ public:
 			return std::min<idx_t>(runs.size(), 8);
 		}
 
-		GlobalState(FileSystem &fs, const std::vector<RunInfo> &runs, bool use_aspera, bool trim);
+		GlobalState(FileSystem &fs, const std::vector<miint::ENARunInfo> &runs, bool use_aspera, bool trim);
 		~GlobalState();
 
 		// Open reader for a specific run index (HTTP FASTQ path).

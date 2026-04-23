@@ -101,3 +101,13 @@ query I
 SELECT filepath LIKE '%ebi.ac.uk%' AS has_ebi FROM read_ena_sequences('ERR1074767', include_filepath=true) LIMIT 1;
 ----
 true
+
+# ---- Batched resolver: duplicate accession in list exercises the LRU cache ----
+
+# A list containing the same accession twice resolves via the batched path.
+# Dedup inside ResolveRunsBatch + negative cache prevents duplicate HTTP work.
+# Output should still reflect a single distinct run_accession.
+query I
+SELECT COUNT(DISTINCT run_accession) FROM read_ena_sequences(['ERR1074767','ERR1074767']) LIMIT 1;
+----
+1

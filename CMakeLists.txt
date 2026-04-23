@@ -763,6 +763,8 @@ set(EXTENSION_SOURCES
     src/read_ncbi_annotation.cpp
     src/ena_parser.cpp
     src/ena_client.cpp
+    src/ena_run_info_extractor.cpp
+    src/ena_resolver_cache.cpp
     src/read_ena.cpp
     src/read_ena_attributes.cpp
     src/read_ena_sequences.cpp
@@ -1022,7 +1024,10 @@ set(TEST_SOURCES
     duckdb/third_party/miniz/miniz.cpp  # For ExtractFromZip tests
     test/cpp/test_ncbi_client.cpp
     src/ena_parser.cpp
+    src/ena_run_info_extractor.cpp
+    src/ena_resolver_cache.cpp
     test/cpp/test_ENAClient.cpp
+    test/cpp/test_ENAResolverCache.cpp
     src/aspera_utils.cpp
     test/cpp/test_AsperaUtils.cpp
     src/SFFReader.cpp
