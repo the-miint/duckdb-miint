@@ -244,17 +244,17 @@ Write query results to BIOM (Biological Observation Matrix) format files. BIOM i
 ```sql
 -- Basic BIOM output from Woltka results
 COPY (
-    SELECT * FROM woltka_ogu_per_sample(my_alignments, sample_id, read_id)
+    SELECT * FROM woltka_ogu('my_alignments', 'read_id', sample_id := 'sample_id')
 ) TO 'ogu_table.biom' (FORMAT BIOM);
 
 -- With HDF5 gzip compression (recommended)
 COPY (
-    SELECT * FROM woltka_ogu_per_sample(my_alignments, sample_id, read_id)
+    SELECT * FROM woltka_ogu('my_alignments', 'read_id', sample_id := 'sample_id')
 ) TO 'ogu_table.biom' (FORMAT BIOM, COMPRESSION 'gzip');
 
 -- With custom metadata
 COPY (
-    SELECT * FROM woltka_ogu_per_sample(my_alignments, sample_id, read_id)
+    SELECT * FROM woltka_ogu('my_alignments', 'read_id', sample_id := 'sample_id')
 ) TO 'ogu_table.biom' (FORMAT BIOM,
                        COMPRESSION 'gzip',
                        ID 'MyStudy_16S',
@@ -267,7 +267,7 @@ CREATE VIEW high_qual AS
     WHERE mapq >= 30 AND alignment_is_primary(flags);
 
 COPY (
-    SELECT * FROM woltka_ogu_per_sample(high_qual, sample_id, read_id)
+    SELECT * FROM woltka_ogu('high_qual', 'read_id', sample_id := 'sample_id')
 ) TO 'high_qual.biom' (FORMAT BIOM, COMPRESSION 'gzip');
 
 -- Convert any compatible table to BIOM format
@@ -291,13 +291,13 @@ CREATE VIEW all_samples AS
     SELECT *, 'sample3' AS sample_id FROM read_alignments('sample3.bam');
 
 COPY (
-    SELECT * FROM woltka_ogu_per_sample(all_samples, sample_id, read_id)
+    SELECT * FROM woltka_ogu('all_samples', 'read_id', sample_id := 'sample_id')
 ) TO 'all_samples.biom' (FORMAT BIOM, COMPRESSION 'gzip');
 
 -- Export single-sample results (add sample_id column)
 COPY (
     SELECT feature_id, 'MySample' AS sample_id, value
-    FROM woltka_ogu(my_alignments, read_id)
+    FROM woltka_ogu('my_alignments', 'read_id')
 ) TO 'single_sample.biom' (FORMAT BIOM);
 ```
 

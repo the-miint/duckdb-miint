@@ -356,7 +356,7 @@ def cmd_transform_woltka_ogu(con, args):
         con.execute(
             f"""
             COPY (
-                SELECT * FROM woltka_ogu({_V_FILTERED_ALIGNMENTS}, read_id)
+                SELECT * FROM woltka_ogu('{_V_FILTERED_ALIGNMENTS}', 'read_id')
             ) TO $out ({PARQUET_OPTS})
         """,
             {"out": args.output},
@@ -365,7 +365,7 @@ def cmd_transform_woltka_ogu(con, args):
         con.execute(
             f"""
             COPY (
-                SELECT * FROM woltka_ogu({_V_ALIGNMENTS}, read_id)
+                SELECT * FROM woltka_ogu('{_V_ALIGNMENTS}', 'read_id')
             ) TO $out ({PARQUET_OPTS})
         """,
             {"out": args.output},

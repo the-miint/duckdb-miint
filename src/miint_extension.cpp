@@ -35,6 +35,7 @@
 #include <sequence_functions.hpp>
 #include <formula_function.hpp>
 #include <massql_function.hpp>
+#include <woltka_ogu_function.hpp>
 #include <mzml_peak_pair_function.hpp>
 #ifdef MIINT_HAS_MAFFT
 #include <align_mafft.hpp>
@@ -215,6 +216,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	SequenceFunctions::Register(loader);
 	FormulaFunction::Register(loader);
 	MassQLFunction::Register(loader);
+	WoltkaOguFunction::Register(loader);
 	MzmlPeakPairFunction::Register(loader);
 
 	AlignPairwiseScoreFunction::Register(loader);
