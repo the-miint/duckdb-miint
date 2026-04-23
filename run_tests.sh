@@ -36,6 +36,15 @@ if command -v ascp &> /dev/null; then
     export ASPERA_AVAILABLE=1
 fi
 
+# ENA network reachability. Probes the Portal API with a cheap HEAD-ish call
+# so tests that need live ENA access can skip gracefully in offline CI.
+# Timeout is tight (3s) to avoid slowing down the common case.
+if curl -sSf --max-time 3 -o /dev/null \
+        "https://www.ebi.ac.uk/ena/portal/api/search?result=read_run&query=run_accession%3D%22ERR1074767%22&fields=run_accession&limit=1&format=tsv" \
+        2>/dev/null; then
+    export ENA_AVAILABLE=1
+fi
+
 if conda run -n massql python3 -c "from massql import msql_engine" 2>/dev/null; then
     export MASSQL_PYTHON_AVAILABLE=1
 fi

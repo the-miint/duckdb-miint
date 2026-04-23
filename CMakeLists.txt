@@ -765,6 +765,7 @@ set(EXTENSION_SOURCES
     src/ena_client.cpp
     src/ena_run_info_extractor.cpp
     src/ena_resolver_cache.cpp
+    src/per_run_reader.cpp
     src/read_ena.cpp
     src/read_ena_attributes.cpp
     src/read_ena_sequences.cpp

@@ -1024,6 +1024,38 @@ FROM read_ena_sequences('ERR1074767', include_filepath=true) LIMIT 5;
 - For large projects, the FASTQ download can take significant time and bandwidth
 - The `run_accession` column enables easy JOIN back to metadata from `read_ena`
 - Quality scores are converted to numeric values using the specified offset (default Phred+33)
+- **Failure handling**: on a transient open failure, the run is retried once. On
+  a mid-stream failure (connection dropped after some rows have been emitted),
+  the run is NOT retried — re-reading from scratch would emit the same reads
+  again with duplicate `sequence_index` values downstream. Instead, the run is
+  recorded as skipped, a loud warning reports the run accession and the
+  number of reads emitted before the failure, and the scan continues with
+  other runs. If you see such a warning, re-run the query (the metadata
+  lookup is cached) or use a smaller per-run selection to recover the
+  truncated data.
+
+**Lateral invocation (correlated arguments):**
+
+Accessions can come from a correlated column via `LATERAL`. Each outer row opens its
+own run; a `LIMIT` inside the lateral short-circuits that run's download (the reader
+and any HTTP connection are torn down as soon as the limit is reached). Metadata
+lookups share an in-memory LRU cache scoped to the query, so repeated outer-row
+values and within-query batches avoid redundant ENA Portal API calls.
+
+```sql
+-- Find runs containing a probe sequence, downloading only until each match is seen.
+SELECT r.run_accession
+FROM read_ena('PRJEB11419') AS r,
+     LATERAL (SELECT 1 FROM read_ena_sequences(r.run_accession)
+              WHERE sequence1.contains('AACGTAGGTCACAAGCGTTGTCCGGA')
+              LIMIT 1);
+```
+
+Limitations in lateral mode:
+- `download_method='aspera'` is not supported (use HTTP; the lateral use case is
+  short-circuit-driven, not throughput-driven).
+- `table_scan_progress` reports `-1.0` (indeterminate) because the total work is
+  driven by the outer side and not known at bind time.
 
 ## `read_jplace(path)`
 

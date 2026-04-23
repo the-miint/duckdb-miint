@@ -9,6 +9,10 @@ require httpfs
 
 require miint
 
+# Skip when ENA Portal API is not reachable (offline CI, blocked network).
+# run_tests.sh probes and exports this; unset → skip the whole file.
+require-env ENA_AVAILABLE
+
 # ---- Error handling ----
 
 statement error
@@ -111,3 +115,17 @@ query I
 SELECT COUNT(DISTINCT run_accession) FROM read_ena_sequences(['ERR1074767','ERR1074767']) LIMIT 1;
 ----
 1
+
+# ---- Literal-arg dispatch regression guard ----
+
+# Literal calls must stay on the standard (non-in-out) path to preserve
+# parallelism and byte-based progress. The physical plan must not include
+# INOUT_FUNCTION when args are constants.
+
+statement ok
+PRAGMA explain_output = PHYSICAL_ONLY;
+
+query II
+EXPLAIN SELECT * FROM read_ena_sequences('ERR1074767') LIMIT 1;
+----
+physical_plan	<!REGEX>:.*INOUT_FUNCTION.*

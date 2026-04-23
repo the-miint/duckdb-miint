@@ -9,6 +9,9 @@ require httpfs
 
 require miint
 
+# Skip when ENA Portal API is not reachable (offline CI, blocked network).
+require-env ENA_AVAILABLE
+
 # ---- prefer_format='sff' returns data ----
 
 statement ok
