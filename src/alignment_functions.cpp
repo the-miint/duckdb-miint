@@ -325,8 +325,8 @@ void CigarQueryLengthFunction::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(function_set);
 }
 
-// alignment_query_coverage implementation
-static void AlignmentQueryCoverageScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+// cigar_query_coverage implementation
+static void CigarQueryCoverageScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &cigar_vector = args.data[0];
 	auto &type_vector = args.data[1];
 
@@ -354,9 +354,9 @@ static void AlignmentQueryCoverageScalarFunction(DataChunk &args, ExpressionStat
 	    });
 }
 
-ScalarFunction AlignmentQueryCoverageFunction::GetFunction() {
-	ScalarFunction func("alignment_query_coverage", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::DOUBLE,
-	                    AlignmentQueryCoverageScalarFunction);
+ScalarFunction CigarQueryCoverageFunction::GetFunction() {
+	ScalarFunction func("cigar_query_coverage", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::DOUBLE,
+	                    CigarQueryCoverageScalarFunction);
 
 	// Allow NULL values (returns NULL for NULL CIGAR, error for invalid type)
 	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
@@ -368,13 +368,13 @@ ScalarFunction AlignmentQueryCoverageFunction::GetFunction() {
 	return func;
 }
 
-void AlignmentQueryCoverageFunction::Register(ExtensionLoader &loader) {
+void CigarQueryCoverageFunction::Register(ExtensionLoader &loader) {
 	// Register overload with both parameters
 	ScalarFunction func_two_params = GetFunction();
 
 	// Register overload with single parameter (type defaults to 'aligned')
 	ScalarFunction func_one_param(
-	    "alignment_query_coverage", {LogicalType::VARCHAR}, LogicalType::DOUBLE,
+	    "cigar_query_coverage", {LogicalType::VARCHAR}, LogicalType::DOUBLE,
 	    [](DataChunk &args, ExpressionState &state, Vector &result) {
 		    UnaryExecutor::Execute<string_t, double>(args.data[0], result, args.size(), [&](string_t cigar) {
 			    // Handle NULL or unmapped CIGAR - return 0.0 for empty/unmapped
@@ -398,7 +398,7 @@ void AlignmentQueryCoverageFunction::Register(ExtensionLoader &loader) {
 	func_one_param.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 
 	// Register both overloads as a function set
-	ScalarFunctionSet function_set("alignment_query_coverage");
+	ScalarFunctionSet function_set("cigar_query_coverage");
 	function_set.AddFunction(func_one_param);
 	function_set.AddFunction(func_two_params);
 	loader.RegisterFunction(function_set);

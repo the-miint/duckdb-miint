@@ -754,60 +754,60 @@ true
 
 # Perfect alignment - no clipping
 query R
-SELECT alignment_query_coverage('10M', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('10M', 'aligned')::FLOAT;
 ----
 1.0
 
 # Default parameter (type defaults to 'aligned')
 query R
-SELECT alignment_query_coverage('10M')::FLOAT;
+SELECT cigar_query_coverage('10M')::FLOAT;
 ----
 1.0
 
 # Alignment with insertions
 # 10 aligned / 15 total = 0.6667
 query R
-SELECT alignment_query_coverage('10M5I', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('10M5I', 'aligned')::FLOAT;
 ----
 0.667
 
 # Alignment with soft clips
 # 10 aligned / 20 total = 0.5
 query R
-SELECT alignment_query_coverage('5S10M5S', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('5S10M5S', 'aligned')::FLOAT;
 ----
 0.5
 
 # Alignment with hard clips
 # 10 aligned / 20 total = 0.5
 query R
-SELECT alignment_query_coverage('5H10M5H', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('5H10M5H', 'aligned')::FLOAT;
 ----
 0.5
 
 # Alignment with both soft and hard clips
 # 10 aligned / 30 total = 0.3333
 query R
-SELECT alignment_query_coverage('5H5S10M5S5H', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('5H5S10M5S5H', 'aligned')::FLOAT;
 ----
 0.333
 
 # Complex alignment with insertions and clips
 # 10 aligned / 35 total = 0.2857
 query R
-SELECT alignment_query_coverage('5H5S10M5I5S5H', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('5H5S10M5I5S5H', 'aligned')::FLOAT;
 ----
 0.286
 
 # Only soft clips - zero coverage
 query R
-SELECT alignment_query_coverage('100S', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('100S', 'aligned')::FLOAT;
 ----
 0.0
 
 # Only hard clips - zero coverage
 query R
-SELECT alignment_query_coverage('100H', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('100H', 'aligned')::FLOAT;
 ----
 0.0
 
@@ -817,54 +817,54 @@ SELECT alignment_query_coverage('100H', 'aligned')::FLOAT;
 
 # Perfect alignment - no clipping
 query R
-SELECT alignment_query_coverage('10M', 'mapped')::FLOAT;
+SELECT cigar_query_coverage('10M', 'mapped')::FLOAT;
 ----
 1.0
 
 # Alignment with insertions
 # 15 mapped (M+I) / 15 total = 1.0
 query R
-SELECT alignment_query_coverage('10M5I', 'mapped')::FLOAT;
+SELECT cigar_query_coverage('10M5I', 'mapped')::FLOAT;
 ----
 1.0
 
 # Alignment with soft clips
 # 10 mapped / 20 total = 0.5
 query R
-SELECT alignment_query_coverage('5S10M5S', 'mapped')::FLOAT;
+SELECT cigar_query_coverage('5S10M5S', 'mapped')::FLOAT;
 ----
 0.5
 
 # Alignment with hard clips
 # 10 mapped / 20 total = 0.5
 query R
-SELECT alignment_query_coverage('5H10M5H', 'mapped')::FLOAT;
+SELECT cigar_query_coverage('5H10M5H', 'mapped')::FLOAT;
 ----
 0.5
 
 # Alignment with insertions and soft clips
 # 15 mapped (M+I) / 25 total = 0.6
 query R
-SELECT alignment_query_coverage('5S10M5I5S', 'mapped')::FLOAT;
+SELECT cigar_query_coverage('5S10M5I5S', 'mapped')::FLOAT;
 ----
 0.6
 
 # Complex alignment with all operations
 # 15 mapped (M+I) / 35 total = 0.4286
 query R
-SELECT alignment_query_coverage('5H5S10M5I5S5H', 'mapped')::FLOAT;
+SELECT cigar_query_coverage('5H5S10M5I5S5H', 'mapped')::FLOAT;
 ----
 0.429
 
 # Only soft clips - zero coverage
 query R
-SELECT alignment_query_coverage('100S', 'mapped')::FLOAT;
+SELECT cigar_query_coverage('100S', 'mapped')::FLOAT;
 ----
 0.0
 
 # Only hard clips - zero coverage
 query R
-SELECT alignment_query_coverage('100H', 'mapped')::FLOAT;
+SELECT cigar_query_coverage('100H', 'mapped')::FLOAT;
 ----
 0.0
 
@@ -874,33 +874,33 @@ SELECT alignment_query_coverage('100H', 'mapped')::FLOAT;
 
 # Empty CIGAR - zero coverage (not NULL)
 query R
-SELECT alignment_query_coverage('', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('', 'aligned')::FLOAT;
 ----
 0.0
 
 # Unmapped read (*) - zero coverage
 query R
-SELECT alignment_query_coverage('*', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('*', 'aligned')::FLOAT;
 ----
 0.0
 
 # Deletions don't affect coverage calculation
 # 20 aligned / 20 total = 1.0
 query R
-SELECT alignment_query_coverage('10M5D10M', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('10M5D10M', 'aligned')::FLOAT;
 ----
 1.0
 
 # Reference skip (N) doesn't affect coverage
 # 20 aligned / 20 total = 1.0
 query R
-SELECT alignment_query_coverage('10M100N10M', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('10M100N10M', 'aligned')::FLOAT;
 ----
 1.0
 
 # Verify deletions don't affect mapped coverage either
 query R
-SELECT alignment_query_coverage('10M5D10M', 'mapped')::FLOAT;
+SELECT cigar_query_coverage('10M5D10M', 'mapped')::FLOAT;
 ----
 1.0
 
@@ -910,25 +910,25 @@ SELECT alignment_query_coverage('10M5D10M', 'mapped')::FLOAT;
 
 # NULL CIGAR should return NULL
 query I
-SELECT alignment_query_coverage(NULL, 'aligned') IS NULL;
+SELECT cigar_query_coverage(NULL, 'aligned') IS NULL;
 ----
 true
 
 # NULL with default parameter
 query I
-SELECT alignment_query_coverage(NULL) IS NULL;
+SELECT cigar_query_coverage(NULL) IS NULL;
 ----
 true
 
 # NULL type parameter should return NULL
 query I
-SELECT alignment_query_coverage('10M', NULL) IS NULL;
+SELECT cigar_query_coverage('10M', NULL) IS NULL;
 ----
 true
 
 # Both NULL
 query I
-SELECT alignment_query_coverage(NULL, NULL) IS NULL;
+SELECT cigar_query_coverage(NULL, NULL) IS NULL;
 ----
 true
 
@@ -938,7 +938,7 @@ true
 
 # Invalid type parameter
 statement error
-SELECT alignment_query_coverage('10M', 'invalid_type');
+SELECT cigar_query_coverage('10M', 'invalid_type');
 ----
 Invalid Input Error: Invalid coverage type
 
@@ -951,16 +951,16 @@ Invalid Input Error: Invalid coverage type
 # mapped: 20 / 40 = 0.5
 query RR
 SELECT
-    alignment_query_coverage('10H10M10I10H', 'aligned')::FLOAT,
-    alignment_query_coverage('10H10M10I10H', 'mapped')::FLOAT;
+    cigar_query_coverage('10H10M10I10H', 'aligned')::FLOAT,
+    cigar_query_coverage('10H10M10I10H', 'mapped')::FLOAT;
 ----
 0.25	0.5
 
 # Without insertions, aligned == mapped
 query RR
 SELECT
-    alignment_query_coverage('5H5S10M5S5H', 'aligned')::FLOAT,
-    alignment_query_coverage('5H5S10M5S5H', 'mapped')::FLOAT;
+    cigar_query_coverage('5H5S10M5S5H', 'aligned')::FLOAT,
+    cigar_query_coverage('5H5S10M5S5H', 'mapped')::FLOAT;
 ----
 0.333	0.333
 
@@ -978,7 +978,7 @@ WHERE cigar_query_length(cigar, true) > 0;
 # Verify coverage function works with SAM data
 query I
 SELECT COUNT(*) FROM read_sam('data/sam/foo_has_header.sam')
-WHERE alignment_query_coverage(cigar, 'aligned') >= 0.0;
+WHERE cigar_query_coverage(cigar, 'aligned') >= 0.0;
 ----
 4
 
@@ -1004,14 +1004,14 @@ SELECT cigar_query_length('10M5');
 ----
 Invalid CIGAR string: incomplete operation (missing operation character)
 
-# Test same errors with alignment_query_coverage
+# Test same errors with cigar_query_coverage
 statement error
-SELECT alignment_query_coverage('M', 'aligned');
+SELECT cigar_query_coverage('M', 'aligned');
 ----
 Invalid CIGAR string: operation without length
 
 statement error
-SELECT alignment_query_coverage('10Z', 'aligned');
+SELECT cigar_query_coverage('10Z', 'aligned');
 ----
 Invalid CIGAR operation: Z
 

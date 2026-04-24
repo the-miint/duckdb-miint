@@ -7,7 +7,7 @@ Scalar functions for alignment analysis and sequence processing.
 - [SAM Flag Functions](#sam-flag-functions) - Test individual SAM flag bits
 - [`alignment_seq_identity`](#alignment_seq_identitycigar-nm-md-type) - Sequence identity calculation
 - [`cigar_query_length`](#cigar_query_lengthcigar-include_hard_clipstrue) - Query length from CIGAR
-- [`alignment_query_coverage`](#alignment_query_coveragecigar-typealigned) - Query coverage from CIGAR
+- [`cigar_query_coverage`](#cigar_query_coveragecigar-typealigned) - Query coverage from CIGAR
 - [`mask_dust`](#mask_dustsequence-hardmaskfalse) - DUST low-complexity masking
 - [`merge_pairs_vsearch`](#merge_pairsfwd_seq-fwd_qual-rev_seq-rev_qual-options) - Paired-end read merging
 
@@ -151,7 +151,7 @@ GROUP BY reference;
 
 **Note:** When `include_hard_clips=false`, this function's output matches HTSlib's `bam_cigar2qlen` behavior, which counts M, I, S, =, and X operations.
 
-## `alignment_query_coverage(cigar, [type='aligned'])`
+## `cigar_query_coverage(cigar, [type='aligned'])`
 
 Calculate the proportion of query bases covered by the reference alignment. This helps assess how much of a read actually aligns versus being clipped.
 
@@ -181,35 +181,35 @@ Calculate the proportion of query bases covered by the reference alignment. This
 **Examples:**
 ```sql
 -- Get aligned coverage (default)
-SELECT read_id, alignment_query_coverage(cigar) AS aligned_cov
+SELECT read_id, cigar_query_coverage(cigar) AS aligned_cov
 FROM read_alignments('alignments.sam');
 
 -- Get mapped coverage (includes insertions)
-SELECT read_id, alignment_query_coverage(cigar, 'mapped') AS mapped_cov
+SELECT read_id, cigar_query_coverage(cigar, 'mapped') AS mapped_cov
 FROM read_alignments('alignments.sam');
 
 -- Compare aligned vs mapped coverage
 SELECT read_id, cigar,
-  alignment_query_coverage(cigar, 'aligned') AS aligned_cov,
-  alignment_query_coverage(cigar, 'mapped') AS mapped_cov
+  cigar_query_coverage(cigar, 'aligned') AS aligned_cov,
+  cigar_query_coverage(cigar, 'mapped') AS mapped_cov
 FROM read_alignments('alignments.sam')
 WHERE cigar LIKE '%I%';  -- Reads with insertions show the difference
 
 -- Filter reads with high query coverage
 SELECT COUNT(*)
 FROM read_alignments('alignments.bam')
-WHERE alignment_query_coverage(cigar, 'aligned') > 0.9;
+WHERE cigar_query_coverage(cigar, 'aligned') > 0.9;
 
 -- Find heavily clipped reads
-SELECT read_id, cigar, alignment_query_coverage(cigar) AS coverage
+SELECT read_id, cigar, cigar_query_coverage(cigar) AS coverage
 FROM read_alignments('alignments.sam')
-WHERE alignment_query_coverage(cigar) < 0.5
+WHERE cigar_query_coverage(cigar) < 0.5
 ORDER BY coverage;
 
 -- Calculate average coverage per reference
 SELECT reference,
-  AVG(alignment_query_coverage(cigar, 'aligned')) AS avg_aligned_cov,
-  AVG(alignment_query_coverage(cigar, 'mapped')) AS avg_mapped_cov
+  AVG(cigar_query_coverage(cigar, 'aligned')) AS avg_aligned_cov,
+  AVG(cigar_query_coverage(cigar, 'mapped')) AS avg_mapped_cov
 FROM read_alignments('alignments.bam')
 WHERE NOT alignment_is_unmapped(flags)
 GROUP BY reference;

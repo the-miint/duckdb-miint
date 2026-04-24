@@ -23,7 +23,7 @@ public:
 	static ScalarFunction GetFunction();
 };
 
-class AlignmentQueryCoverageFunction {
+class CigarQueryCoverageFunction {
 public:
 	static void Register(ExtensionLoader &loader);
 	static ScalarFunction GetFunction();
