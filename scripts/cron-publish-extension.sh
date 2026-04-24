@@ -81,7 +81,28 @@ send_mail() {
     printf '%s\n' "$body" | mail -s "$subject" "$NOTIFY_EMAIL"
 }
 
+# State file format: TAB-separated "<status>\t<run_id>\t<duckdb_version>".
+# status ∈ {deployed, rejected}. Old one-field format is treated as deployed
+# with an unknown version (forces a re-examination on next run).
+read_state() {
+    [[ -f "$STATE_FILE" ]] || return 0
+    local line fields
+    line=$(cat "$STATE_FILE")
+    IFS=$'\t' read -ra fields <<<"$line"
+    case ${#fields[@]} in
+        0) ;;
+        1) printf 'deployed\t%s\t\n' "${fields[0]}" ;;
+        2) printf '%s\t%s\t\n' "${fields[0]}" "${fields[1]}" ;;
+        *) printf '%s\t%s\t%s\n' "${fields[0]}" "${fields[1]}" "${fields[2]}" ;;
+    esac
+}
+
+write_state() {
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3" > "$STATE_FILE"
+}
+
 fail() {
+    trap - ERR
     local msg="$1"
     log "FAIL: $msg"
     local subject="[FAIL] miint publish on ${HOSTNAME_SHORT} — ${msg}"
@@ -98,8 +119,50 @@ Destination:   ${DEST_USER}@${DEST_HOST}:${DEST_BASE}
 $(tail -n 200 "$LOG_FILE")
 EOF
 )
-    send_mail "$subject" "$body"
+    send_mail "$subject" "$body" || true
     exit 1
+}
+
+# Reject = the latest passing run exists, but its artifacts don't match our
+# expected naming (e.g., workflow on that commit targeted a different
+# duckdb_version). Record in state so we don't re-alert on the same run id,
+# email once, and exit 0 so cron doesn't treat the script itself as failing.
+reject() {
+    trap - ERR
+    local msg="$1" avail="$2"
+    log "REJECT: $msg"
+    write_state rejected "$RUN_ID" "$DUCKDB_VERSION"
+    local avail_fmt
+    avail_fmt=$(while IFS= read -r n; do [[ -n "$n" ]] && printf '  - %s\n' "$n"; done <<<"$avail")
+    local subject="[FAIL] miint publish on ${HOSTNAME_SHORT} — ${msg}"
+    local body
+    body=$(cat <<EOF
+Host:          $HOSTNAME_SHORT
+Repo:          $REPO @ $BRANCH
+Workflow:      $WORKFLOW
+DuckDB ver:    $DUCKDB_VERSION
+
+Expected artifact prefix: $ARTIFACT_PREFIX
+Latest passing run:
+  id:    $RUN_ID
+  sha:   $RUN_SHA
+  title: $RUN_TITLE
+  url:   $RUN_URL
+
+Artifacts actually present on this run:
+$avail_fmt
+
+This typically means the workflow on this commit built against a different
+DuckDB version than \$DUCKDB_VERSION=$DUCKDB_VERSION, so its artifacts are
+named for that other version. Wait for a newer passing run whose workflow
+matches, or bump \$DUCKDB_VERSION and re-run.
+
+The rejection has been recorded in $STATE_FILE so this alert will not
+repeat until a new passing run id appears (or \$DUCKDB_VERSION changes).
+EOF
+)
+    send_mail "$subject" "$body" || true
+    exit 0
 }
 
 trap 'fail "unexpected error at line $LINENO"' ERR
@@ -144,25 +207,40 @@ RUN_URL=$(jq -r '.[0].url // empty' <<<"$RUN_JSON")
 
 [[ -n "$RUN_ID" ]] || fail "no passing run found for $WORKFLOW on $BRANCH"
 
+LAST_STATUS=""
 LAST_RUN_ID=""
-[[ -f "$STATE_FILE" ]] && LAST_RUN_ID=$(cat "$STATE_FILE")
+LAST_DUCKDB_VERSION=""
+LAST_STATE=$(read_state)
+if [[ -n "$LAST_STATE" ]]; then
+    IFS=$'\t' read -r LAST_STATUS LAST_RUN_ID LAST_DUCKDB_VERSION <<<"$LAST_STATE"
+fi
 
 log "Latest passing run: $RUN_ID ($RUN_SHA)"
-log "Last deployed run:  ${LAST_RUN_ID:-<none>}"
+log "Last handled run:   ${LAST_RUN_ID:-<none>} (status=${LAST_STATUS:-<none>}, version=${LAST_DUCKDB_VERSION:-<none>})"
 
 # ----- no-op path: heartbeat SUCCEED -----
+#
+# Same run id AND same duckdb version as what we handled last time: nothing
+# to do. If the last disposition was "rejected", say so in the email body
+# so the user isn't misled into thinking it's deployed.
 
-if [[ "$RUN_ID" == "$LAST_RUN_ID" ]]; then
-    subject="[SUCCEED] miint publish on ${HOSTNAME_SHORT} — no new build (run ${RUN_ID})"
+if [[ "$RUN_ID" == "$LAST_RUN_ID" && "$DUCKDB_VERSION" == "$LAST_DUCKDB_VERSION" ]]; then
+    if [[ "$LAST_STATUS" == "rejected" ]]; then
+        subject="[SUCCEED] miint publish on ${HOSTNAME_SHORT} — awaiting new run (run ${RUN_ID} was rejected)"
+        state_note="Last run was REJECTED (artifact naming mismatch); still waiting for a newer passing run."
+    else
+        subject="[SUCCEED] miint publish on ${HOSTNAME_SHORT} — no new build (run ${RUN_ID})"
+        state_note="No new passing build since last deploy."
+    fi
     body=$(cat <<EOF
 Host:          $HOSTNAME_SHORT
 Repo:          $REPO @ $BRANCH
 Workflow:      $WORKFLOW
 DuckDB ver:    $DUCKDB_VERSION
 
-No new passing build since last deploy.
+$state_note
 
-Latest passing run (already deployed):
+Latest passing run:
   id:    $RUN_ID
   sha:   $RUN_SHA
   title: $RUN_TITLE
@@ -171,9 +249,32 @@ Latest passing run (already deployed):
 EOF
 )
     send_mail "$subject" "$body"
-    log "No new build; exit."
+    log "No-op heartbeat; exit."
     exit 0
 fi
+
+# ----- artifact precheck -----
+#
+# `gh run download --pattern` exits non-zero with a confusing message if no
+# artifact matches. List artifacts up front so we can (a) give a clear error
+# when this run's naming doesn't match $DUCKDB_VERSION, (b) record it in state
+# so we don't re-alert until a newer run appears.
+
+log "Listing artifacts on run $RUN_ID"
+ART_NAMES=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
+    --paginate --jq '.artifacts[].name')
+
+matched=()
+while IFS= read -r n; do
+    [[ -z "$n" ]] && continue
+    [[ "$n" == "$ARTIFACT_PREFIX"* ]] && matched+=("$n")
+done <<<"$ART_NAMES"
+
+if [[ ${#matched[@]} -eq 0 ]]; then
+    reject "artifact naming mismatch on run $RUN_ID" "$ART_NAMES"
+fi
+
+log "Matched ${#matched[@]} artifact(s) against prefix $ARTIFACT_PREFIX"
 
 # ----- download artifacts -----
 
@@ -251,7 +352,7 @@ ssh "${DEST_USER}@${DEST_HOST}" "
 
 # ----- record state + success email -----
 
-echo "$RUN_ID" > "$STATE_FILE"
+write_state deployed "$RUN_ID" "$DUCKDB_VERSION"
 
 subject="[SUCCEED] miint publish on ${HOSTNAME_SHORT} — deployed $DUCKDB_VERSION run ${RUN_ID}"
 body=$(cat <<EOF
