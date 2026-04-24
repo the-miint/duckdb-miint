@@ -307,6 +307,38 @@ SELECT alignment_seq_identity(NULL, NULL, NULL, 'cigar') IS NULL;
 ----
 true
 
+# Degenerate CIGARs with no = or X ops should return NULL (no alignment columns
+# to divide by). Pins contract that cigar_sequence_identity will share.
+query I
+SELECT alignment_seq_identity('10I', NULL, NULL, 'cigar') IS NULL;
+----
+true
+
+query I
+SELECT alignment_seq_identity('10D', NULL, NULL, 'cigar') IS NULL;
+----
+true
+
+query I
+SELECT alignment_seq_identity('100S', NULL, NULL, 'cigar') IS NULL;
+----
+true
+
+query I
+SELECT alignment_seq_identity('100H', NULL, NULL, 'cigar') IS NULL;
+----
+true
+
+query I
+SELECT alignment_seq_identity('100N', NULL, NULL, 'cigar') IS NULL;
+----
+true
+
+query I
+SELECT alignment_seq_identity('100P', NULL, NULL, 'cigar') IS NULL;
+----
+true
+
 ###############################################################################
 # ERROR HANDLING
 ###############################################################################
