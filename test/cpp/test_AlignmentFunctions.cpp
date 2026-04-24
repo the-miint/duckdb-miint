@@ -587,3 +587,107 @@ TEST_CASE("ComputeQueryCoverage - Aligned vs Mapped comparison", "[alignment_fun
 		REQUIRE_THAT(aligned, WithinRel(mapped, 0.001));
 	}
 }
+
+TEST_CASE("ComputeCigarIdentity - Extended CIGAR ops", "[alignment_functions]") {
+	using Catch::Matchers::WithinRel;
+
+	SECTION("Perfect match (all =)") {
+		auto stats = miint::ParseCigar("10=");
+		auto result = miint::ComputeCigarIdentity(stats);
+		REQUIRE(result.has_value());
+		REQUIRE_THAT(*result, WithinRel(1.0, 0.001));
+	}
+
+	SECTION("Mixed =/X") {
+		auto stats = miint::ParseCigar("5=5X");
+		auto result = miint::ComputeCigarIdentity(stats);
+		REQUIRE(result.has_value());
+		REQUIRE_THAT(*result, WithinRel(0.5, 0.001));
+	}
+
+	SECTION("With insertions: gaps lower identity") {
+		auto stats = miint::ParseCigar("5=2I3=");
+		// match_ops=8, alignment_columns = 8 + 2 = 10 → 0.8
+		auto result = miint::ComputeCigarIdentity(stats);
+		REQUIRE(result.has_value());
+		REQUIRE_THAT(*result, WithinRel(0.8, 0.001));
+	}
+
+	SECTION("With deletions: gaps lower identity") {
+		auto stats = miint::ParseCigar("5=3D5=");
+		// match_ops=10, alignment_columns = 10 + 3 = 13 → 10/13
+		auto result = miint::ComputeCigarIdentity(stats);
+		REQUIRE(result.has_value());
+		REQUIRE_THAT(*result, WithinRel(10.0 / 13.0, 0.001));
+	}
+
+	SECTION("Soft clips excluded from identity") {
+		auto stats = miint::ParseCigar("3S5=2X3=3S");
+		// match_ops=8, mismatch_ops=2, alignment_columns=10 → 0.8
+		auto result = miint::ComputeCigarIdentity(stats);
+		REQUIRE(result.has_value());
+		REQUIRE_THAT(*result, WithinRel(0.8, 0.001));
+	}
+
+	SECTION("Hard clips excluded from identity") {
+		auto stats = miint::ParseCigar("5H5=5X5H");
+		auto result = miint::ComputeCigarIdentity(stats);
+		REQUIRE(result.has_value());
+		REQUIRE_THAT(*result, WithinRel(0.5, 0.001));
+	}
+
+	SECTION("N op (RNA skip) ignored") {
+		auto stats = miint::ParseCigar("5=100N5=");
+		// match_ops=10, alignment_columns=10 (N not counted)
+		auto result = miint::ComputeCigarIdentity(stats);
+		REQUIRE(result.has_value());
+		REQUIRE_THAT(*result, WithinRel(1.0, 0.001));
+	}
+}
+
+TEST_CASE("ComputeCigarIdentity - Degenerate and ambiguous cases", "[alignment_functions]") {
+	SECTION("Legacy M-only: no =/X, return no value") {
+		auto stats = miint::ParseCigar("10M");
+		REQUIRE(!miint::ComputeCigarIdentity(stats).has_value());
+	}
+
+	SECTION("Mixed M with =: inconsistent, return no value") {
+		auto stats = miint::ParseCigar("5M5=");
+		REQUIRE(!miint::ComputeCigarIdentity(stats).has_value());
+	}
+
+	SECTION("Mixed M with X: inconsistent, return no value") {
+		auto stats = miint::ParseCigar("5M5X");
+		REQUIRE(!miint::ComputeCigarIdentity(stats).has_value());
+	}
+
+	SECTION("Pure insertion: no =/X, return no value") {
+		auto stats = miint::ParseCigar("10I");
+		REQUIRE(!miint::ComputeCigarIdentity(stats).has_value());
+	}
+
+	SECTION("Pure deletion: no =/X, return no value") {
+		auto stats = miint::ParseCigar("10D");
+		REQUIRE(!miint::ComputeCigarIdentity(stats).has_value());
+	}
+
+	SECTION("Soft-clip only: no =/X, return no value") {
+		auto stats = miint::ParseCigar("100S");
+		REQUIRE(!miint::ComputeCigarIdentity(stats).has_value());
+	}
+
+	SECTION("Hard-clip only: no =/X, return no value") {
+		auto stats = miint::ParseCigar("100H");
+		REQUIRE(!miint::ComputeCigarIdentity(stats).has_value());
+	}
+
+	SECTION("Empty CIGAR: no =/X, return no value") {
+		auto stats = miint::ParseCigar("");
+		REQUIRE(!miint::ComputeCigarIdentity(stats).has_value());
+	}
+
+	SECTION("Unmapped (*): no =/X, return no value") {
+		auto stats = miint::ParseCigar("*");
+		REQUIRE(!miint::ComputeCigarIdentity(stats).has_value());
+	}
+}

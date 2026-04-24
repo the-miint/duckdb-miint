@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 #include <cctype>
@@ -275,6 +276,32 @@ static inline double ComputeQueryCoverage(const CigarStats &stats, const std::st
 	}
 
 	return static_cast<double>(covered_bases) / static_cast<double>(query_length);
+}
+
+// Compute sequence identity from extended-CIGAR operations (= and X) alone.
+//
+// Formula: match_ops / alignment_columns, where alignment_columns = M + I + D
+// (= and X count toward the M field in CigarStats).
+//
+// Returns std::nullopt when identity cannot be determined from the CIGAR:
+//   - Legacy CIGAR with only M ops (can't distinguish matches from mismatches)
+//   - Mixed M alongside = or X (inconsistent encoding)
+//   - Degenerate CIGARs with no =/X ops at all (pure I/D/S/H/N/P)
+// SQL wrappers materialize std::nullopt as NULL.
+static inline std::optional<double> ComputeCigarIdentity(const CigarStats &stats) {
+	if (stats.match_ops + stats.mismatch_ops == 0) {
+		// No = or X ops observed (M-only or degenerate)
+		return std::nullopt;
+	}
+
+	// If M ops are present alongside =/X, the CIGAR is inconsistent
+	int64_t m_only = stats.matches - stats.match_ops - stats.mismatch_ops;
+	if (m_only > 0) {
+		return std::nullopt;
+	}
+
+	// alignment_columns is guaranteed > 0 here because =/X ops exist
+	return static_cast<double>(stats.match_ops) / static_cast<double>(stats.alignment_columns);
 }
 
 } // namespace miint
