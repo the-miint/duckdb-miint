@@ -250,8 +250,8 @@ void CigarSequenceIdentityFunction::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetFunction());
 }
 
-// alignment_query_length implementation
-static void AlignmentQueryLengthScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+// cigar_query_length implementation
+static void CigarQueryLengthScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &cigar_vector = args.data[0];
 	auto &include_hard_clips_vector = args.data[1];
 
@@ -275,9 +275,9 @@ static void AlignmentQueryLengthScalarFunction(DataChunk &args, ExpressionState 
 	    });
 }
 
-ScalarFunction AlignmentQueryLengthFunction::GetFunction() {
-	ScalarFunction func("alignment_query_length", {LogicalType::VARCHAR, LogicalType::BOOLEAN}, LogicalType::BIGINT,
-	                    AlignmentQueryLengthScalarFunction);
+ScalarFunction CigarQueryLengthFunction::GetFunction() {
+	ScalarFunction func("cigar_query_length", {LogicalType::VARCHAR, LogicalType::BOOLEAN}, LogicalType::BIGINT,
+	                    CigarQueryLengthScalarFunction);
 
 	// Allow NULL CIGAR (returns NULL)
 	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
@@ -289,13 +289,13 @@ ScalarFunction AlignmentQueryLengthFunction::GetFunction() {
 	return func;
 }
 
-void AlignmentQueryLengthFunction::Register(ExtensionLoader &loader) {
+void CigarQueryLengthFunction::Register(ExtensionLoader &loader) {
 	// Register overload with both parameters
 	ScalarFunction func_two_params = GetFunction();
 
 	// Register overload with single parameter (include_hard_clips defaults to true)
 	ScalarFunction func_one_param(
-	    "alignment_query_length", {LogicalType::VARCHAR}, LogicalType::BIGINT,
+	    "cigar_query_length", {LogicalType::VARCHAR}, LogicalType::BIGINT,
 	    [](DataChunk &args, ExpressionState &state, Vector &result) {
 		    UnaryExecutor::Execute<string_t, int64_t>(args.data[0], result, args.size(), [&](string_t cigar) {
 			    // Handle NULL or unmapped CIGAR
@@ -319,7 +319,7 @@ void AlignmentQueryLengthFunction::Register(ExtensionLoader &loader) {
 	func_one_param.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 
 	// Register both overloads as a function set
-	ScalarFunctionSet function_set("alignment_query_length");
+	ScalarFunctionSet function_set("cigar_query_length");
 	function_set.AddFunction(func_one_param);
 	function_set.AddFunction(func_two_params);
 	loader.RegisterFunction(function_set);

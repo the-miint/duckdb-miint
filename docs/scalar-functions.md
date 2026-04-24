@@ -6,7 +6,7 @@ Scalar functions for alignment analysis and sequence processing.
 
 - [SAM Flag Functions](#sam-flag-functions) - Test individual SAM flag bits
 - [`alignment_seq_identity`](#alignment_seq_identitycigar-nm-md-type) - Sequence identity calculation
-- [`alignment_query_length`](#alignment_query_lengthcigar-include_hard_clipstrue) - Query length from CIGAR
+- [`cigar_query_length`](#cigar_query_lengthcigar-include_hard_clipstrue) - Query length from CIGAR
 - [`alignment_query_coverage`](#alignment_query_coveragecigar-typealigned) - Query coverage from CIGAR
 - [`mask_dust`](#mask_dustsequence-hardmaskfalse) - DUST low-complexity masking
 - [`merge_pairs_vsearch`](#merge_pairsfwd_seq-fwd_qual-rev_seq-rev_qual-options) - Paired-end read merging
@@ -108,7 +108,7 @@ FROM alignment_slice('my_alignments', 1000, 2000);
 
 **Reference:** [On the definition of sequence identity](https://lh3.github.io/2018/11/25/on-the-definition-of-sequence-identity) by Heng Li
 
-## `alignment_query_length(cigar, [include_hard_clips=true])`
+## `cigar_query_length(cigar, [include_hard_clips=true])`
 
 Calculate the total query length from a CIGAR string. This is useful for understanding read lengths and query coverage.
 
@@ -128,22 +128,22 @@ Calculate the total query length from a CIGAR string. This is useful for underst
 **Examples:**
 ```sql
 -- Get query length including hard clips (default)
-SELECT read_id, alignment_query_length(cigar) AS query_len
+SELECT read_id, cigar_query_length(cigar) AS query_len
 FROM read_alignments('alignments.sam');
 
 -- Get query length excluding hard clips (matches bam_cigar2qlen)
-SELECT read_id, alignment_query_length(cigar, false) AS query_len
+SELECT read_id, cigar_query_length(cigar, false) AS query_len
 FROM read_alignments('alignments.sam');
 
 -- Compare lengths with and without hard clips
 SELECT read_id, cigar,
-  alignment_query_length(cigar, true) AS len_with_hard,
-  alignment_query_length(cigar, false) AS len_without_hard
+  cigar_query_length(cigar, true) AS len_with_hard,
+  cigar_query_length(cigar, false) AS len_without_hard
 FROM read_alignments('alignments.sam')
 WHERE cigar LIKE '%H%';
 
 -- Calculate average query length per reference
-SELECT reference, AVG(alignment_query_length(cigar)) AS avg_query_len
+SELECT reference, AVG(cigar_query_length(cigar)) AS avg_query_len
 FROM read_alignments('alignments.bam')
 WHERE NOT alignment_is_unmapped(flags)
 GROUP BY reference;

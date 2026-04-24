@@ -17,7 +17,7 @@ public:
 	static ScalarFunction GetFunction();
 };
 
-class AlignmentQueryLengthFunction {
+class CigarQueryLengthFunction {
 public:
 	static void Register(ExtensionLoader &loader);
 	static ScalarFunction GetFunction();
