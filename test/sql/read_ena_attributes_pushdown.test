@@ -1,0 +1,92 @@
+# name: test/sql/read_ena_attributes_pushdown.test
+# description: Predicate pushdown for read_ena_attributes (WHERE tag=... / tag IN ...)
+# group: [sql]
+
+# NOTE: Requires network access to EBI/ENA. Gated via ENA_AVAILABLE.
+
+require httpfs
+
+require miint
+
+require-env ENA_AVAILABLE
+
+# ---- Output shape is unchanged whether or not pushdown fires ----
+
+query IIIIII
+DESCRIBE SELECT * FROM read_ena_attributes('ERR1074767') WHERE tag='collection_date';
+----
+sample_accession	VARCHAR	YES	NULL	NULL	NULL
+tag	VARCHAR	YES	NULL	NULL	NULL
+value	VARCHAR	YES	NULL	NULL	NULL
+
+# ---- Pushdown on a tag known to be present on this sample ----
+# ERR1074767 → sample SAMEA3610311, which has a `collection_date` attribute.
+# `collection_date` is in the search-field allowlist, so the structured path
+# fires. DuckDB re-applies the filter above the scan (plan decision #5), so
+# even if ENA's structured matcher disagreed with the XML path we'd still be
+# correct — the count here is a sanity check.
+
+query I
+SELECT COUNT(*) > 0
+FROM read_ena_attributes('ERR1074767') WHERE tag='collection_date';
+----
+true
+
+# ---- Pushdown equivalence: structured path must agree with XML fallback ----
+# For a tag present on the sample, the two paths should return the same row
+# count. We force XML by including an unknown tag in the IN list (per plan
+# decision #4, any unknown tag disables pushdown for the whole filter).
+
+query I
+SELECT (
+  SELECT COUNT(*) FROM read_ena_attributes('ERR1074767') WHERE tag='collection_date'
+) = (
+  SELECT COUNT(*) FROM read_ena_attributes('ERR1074767')
+  WHERE tag IN ('collection_date','some_custom_unknown_tag')
+);
+----
+true
+
+# ---- tag IN (...) with all fields in the allowlist ----
+
+query I
+SELECT COUNT(*) > 0
+FROM read_ena_attributes('ERR1074767')
+WHERE tag IN ('collection_date','scientific_name');
+----
+true
+
+# ---- Unknown tag alone falls back to XML path ----
+# The XML path sees zero matches for 'some_custom_unknown_tag' on this
+# sample; we only assert it runs without error.
+
+query I
+SELECT COUNT(*) >= 0
+FROM read_ena_attributes('ERR1074767') WHERE tag='some_custom_unknown_tag';
+----
+true
+
+# ---- Case-insensitive pushdown ----
+# User-typed uppercase must canonicalize through the registry and return the
+# same count as the lowercase form.
+
+query I
+SELECT (
+  SELECT COUNT(*) FROM read_ena_attributes('ERR1074767') WHERE tag='COLLECTION_DATE'
+) = (
+  SELECT COUNT(*) FROM read_ena_attributes('ERR1074767') WHERE tag='collection_date'
+);
+----
+true
+
+# ---- tag + value pinning (structured `field="value"` query) ----
+# Sanity: when the pinned value doesn't match, the structured path returns
+# zero, and DuckDB's re-applied filter on top would filter out any XML-path
+# mismatches too. Result: zero rows, no error.
+
+query I
+SELECT COUNT(*) = 0
+FROM read_ena_attributes('ERR1074767')
+WHERE tag='collection_date' AND value='this_value_does_not_exist_anywhere';
+----
+true

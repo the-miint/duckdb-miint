@@ -21,11 +21,16 @@ public:
 	static constexpr int MAX_RETRIES = 3;
 	static constexpr int INITIAL_RETRY_DELAY_MS = 1000;
 
-	ENAClient(duckdb::DatabaseInstance &db);
+	explicit ENAClient(duckdb::DatabaseInstance &db);
 
 	// HTTP methods — build URL via ENAParser, then fetch
 	std::string Search(const std::string &accession, const std::string &result_type, const std::string &fields);
 	std::string FetchXML(const std::vector<std::string> &accessions);
+
+	// Fetch an arbitrary URL with the same rate-limit + retry semantics as Search/FetchXML.
+	// Intended for callers that build URLs externally (e.g., ResolveRunsBatch with compound
+	// "accession IN (...)" queries).
+	std::string FetchURL(const std::string &url);
 
 private:
 	duckdb::DatabaseInstance &db;

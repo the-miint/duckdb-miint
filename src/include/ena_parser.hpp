@@ -34,6 +34,10 @@ public:
 	// URL construction
 	static std::string BuildSearchURL(const std::string &accession, const std::string &result_type,
 	                                  const std::string &fields);
+	// Compound-query URL: query=<col>%20IN%20(%22acc1%22,%22acc2%22,...). All accessions must share the
+	// same type (e.g., all RUN). Throws on empty input or UNKNOWN type.
+	static std::string BuildSearchURLBatch(const std::vector<std::string> &accessions, ENAAccessionType accession_type,
+	                                       const std::string &result_type, const std::string &fields);
 	static std::string BuildXMLURL(const std::vector<std::string> &accessions);
 
 	// Parsing

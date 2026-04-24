@@ -1,7 +1,159 @@
 #include "read_ena_attributes.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 
 namespace duckdb {
+
+namespace {
+
+// Walk a DuckDB bound filter expression into an ENAFilterNode. Unknown shapes
+// map to ENAFilterNode::Kind::UNSUPPORTED, which the extractor then rejects
+// (forcing XML fallback).
+//
+// Column-name resolution invariant (relied upon here):
+//   When DuckDB calls `pushdown_complex_filter`, every
+//   `BoundColumnRefExpression::binding.column_index` in the supplied filter
+//   tree is a LOCAL index into `LogicalGet::GetColumnIds()` — i.e. an index
+//   into the projected-columns subset, not into the full schema `names`.
+//   To recover a name we do: `names[GetColumnIds()[local_idx].GetPrimaryIndex()]`.
+//
+//   Source of truth: `duckdb/src/common/multi_file/multi_file_list.cpp:68-69`,
+//   where DuckDB itself constructs filter column-refs with exactly this
+//   binding shape (`ColumnBinding(table_index, entry.first)` where `entry.first`
+//   is the local index into column_ids). If a future DuckDB version breaks
+//   this invariant, the out-of-bounds checks below cause us to emit
+//   `MakeUnsupported` and silently fall back to the XML path — degraded but
+//   still correct.
+std::string ResolveColumnName(const BoundColumnRefExpression &ref, const LogicalGet &get) {
+	const auto &col_ids = get.GetColumnIds();
+	idx_t local_idx = ref.binding.column_index;
+	if (local_idx >= col_ids.size()) {
+		return "";
+	}
+	idx_t actual_col = col_ids[local_idx].GetPrimaryIndex();
+	if (actual_col >= get.names.size()) {
+		return "";
+	}
+	return get.names[actual_col];
+}
+
+std::unique_ptr<miint::ENAFilterNode> ExpressionToFilterNode(const Expression &expr, const LogicalGet &get);
+
+// Handle `col = const` or `const = col`. Only VARCHAR constants are mapped;
+// anything else (NULL, non-string) => unsupported.
+std::unique_ptr<miint::ENAFilterNode> TranslateEqual(const BoundComparisonExpression &cmp, const LogicalGet &get) {
+	const Expression *col_side = nullptr;
+	const Expression *const_side = nullptr;
+	if (cmp.left->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+	    cmp.right->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+		col_side = cmp.left.get();
+		const_side = cmp.right.get();
+	} else if (cmp.right->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+	           cmp.left->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+		col_side = cmp.right.get();
+		const_side = cmp.left.get();
+	} else {
+		return miint::ENAFilterNode::MakeUnsupported();
+	}
+
+	const auto &col_ref = col_side->Cast<BoundColumnRefExpression>();
+	const auto &const_expr = const_side->Cast<BoundConstantExpression>();
+	if (const_expr.value.IsNull()) {
+		return miint::ENAFilterNode::MakeUnsupported();
+	}
+	if (const_expr.return_type.id() != LogicalTypeId::VARCHAR) {
+		return miint::ENAFilterNode::MakeUnsupported();
+	}
+	auto col_name = ResolveColumnName(col_ref, get);
+	if (col_name.empty()) {
+		return miint::ENAFilterNode::MakeUnsupported();
+	}
+	return miint::ENAFilterNode::MakeEqual(col_name, const_expr.value.ToString());
+}
+
+// Handle `col IN (c1, c2, ...)`. Children[0] is the column ref; remaining
+// children are the values. Anything else in the IN list (NULL, non-string
+// constant, subexpression) => unsupported.
+std::unique_ptr<miint::ENAFilterNode> TranslateIn(const BoundOperatorExpression &op, const LogicalGet &get) {
+	if (op.children.size() < 2) {
+		return miint::ENAFilterNode::MakeUnsupported();
+	}
+	if (op.children[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+		return miint::ENAFilterNode::MakeUnsupported();
+	}
+	const auto &col_ref = op.children[0]->Cast<BoundColumnRefExpression>();
+	auto col_name = ResolveColumnName(col_ref, get);
+	if (col_name.empty()) {
+		return miint::ENAFilterNode::MakeUnsupported();
+	}
+	std::vector<std::string> values;
+	values.reserve(op.children.size() - 1);
+	for (idx_t i = 1; i < op.children.size(); i++) {
+		if (op.children[i]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+			return miint::ENAFilterNode::MakeUnsupported();
+		}
+		const auto &c = op.children[i]->Cast<BoundConstantExpression>();
+		if (c.value.IsNull() || c.return_type.id() != LogicalTypeId::VARCHAR) {
+			return miint::ENAFilterNode::MakeUnsupported();
+		}
+		values.push_back(c.value.ToString());
+	}
+	return miint::ENAFilterNode::MakeIn(col_name, values);
+}
+
+std::unique_ptr<miint::ENAFilterNode> TranslateConjunction(const BoundConjunctionExpression &conj,
+                                                           const LogicalGet &get, bool is_and) {
+	std::vector<std::unique_ptr<miint::ENAFilterNode>> children;
+	children.reserve(conj.children.size());
+	for (const auto &child : conj.children) {
+		children.push_back(ExpressionToFilterNode(*child, get));
+	}
+	return is_and ? miint::ENAFilterNode::MakeAnd(std::move(children))
+	              : miint::ENAFilterNode::MakeOr(std::move(children));
+}
+
+std::unique_ptr<miint::ENAFilterNode> ExpressionToFilterNode(const Expression &expr, const LogicalGet &get) {
+	switch (expr.GetExpressionClass()) {
+	case ExpressionClass::BOUND_COMPARISON: {
+		const auto &cmp = expr.Cast<BoundComparisonExpression>();
+		if (cmp.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
+			return miint::ENAFilterNode::MakeUnsupported();
+		}
+		return TranslateEqual(cmp, get);
+	}
+	case ExpressionClass::BOUND_OPERATOR: {
+		const auto &op = expr.Cast<BoundOperatorExpression>();
+		// COMPARE_NOT_IN is a distinct expression type and correctly lands
+		// here as UNSUPPORTED. BOUND_OPERATOR also covers other operators
+		// (IS NULL, IS NOT NULL, COALESCE, ...) that we reject uniformly.
+		if (op.GetExpressionType() != ExpressionType::COMPARE_IN) {
+			return miint::ENAFilterNode::MakeUnsupported();
+		}
+		// `COMPARE_IN` with a non-constant RHS (e.g., a correlated subquery
+		// that hasn't been decorrelated yet) is handled inside TranslateIn:
+		// any non-`BOUND_CONSTANT` child returns UNSUPPORTED.
+		return TranslateIn(op, get);
+	}
+	case ExpressionClass::BOUND_CONJUNCTION: {
+		const auto &conj = expr.Cast<BoundConjunctionExpression>();
+		if (conj.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
+			return TranslateConjunction(conj, get, /*is_and=*/true);
+		}
+		if (conj.GetExpressionType() == ExpressionType::CONJUNCTION_OR) {
+			return TranslateConjunction(conj, get, /*is_and=*/false);
+		}
+		return miint::ENAFilterNode::MakeUnsupported();
+	}
+	default:
+		return miint::ENAFilterNode::MakeUnsupported();
+	}
+}
+
+} // namespace
 
 // ---- Data ----
 
@@ -13,7 +165,7 @@ ReadENAAttributesTableFunction::Data::Data(std::vector<std::string> accessions)
 // ---- GlobalState ----
 
 ReadENAAttributesTableFunction::GlobalState::GlobalState(DatabaseInstance &db)
-    : client(make_uniq<miint::ENAClient>(db)), row_offset(0), fetched(false) {
+    : client(make_uniq<miint::ENAClient>(db)) {
 }
 
 std::vector<std::string>
@@ -59,32 +211,51 @@ ReadENAAttributesTableFunction::GlobalState::ResolveSampleAccessions(const std::
 	return sample_accs;
 }
 
-void ReadENAAttributesTableFunction::GlobalState::FetchAttributes(const std::vector<std::string> &accessions) {
-	// Mark as fetched immediately to avoid infinite retry loops on network errors
-	fetched = true;
+void ReadENAAttributesTableFunction::GlobalState::ResolveAccessions(const std::vector<std::string> &accessions) {
+	// Mark as resolved immediately so that a network error during the
+	// Search call below doesn't cause successive Execute callbacks to keep
+	// retrying the same failing request in a loop.
+	resolved = true;
+	pending_sample_accs = ResolveSampleAccessions(accessions);
+	total_samples_expected.store(pending_sample_accs.size(), std::memory_order_relaxed);
+	samples_fetched.store(0, std::memory_order_relaxed);
+}
 
-	auto sample_accs = ResolveSampleAccessions(accessions);
-
-	if (sample_accs.empty()) {
-		return;
+bool ReadENAAttributesTableFunction::GlobalState::FetchNextBatch() {
+	if (pending_sample_offset >= pending_sample_accs.size()) {
+		return false;
 	}
+	size_t remaining = pending_sample_accs.size() - pending_sample_offset;
+	size_t n = std::min<size_t>(BATCH_SIZE, remaining);
+	std::vector<std::string> batch(pending_sample_accs.begin() + pending_sample_offset,
+	                               pending_sample_accs.begin() + pending_sample_offset + n);
+	pending_sample_offset += n;
 
-	// NOTE: This materializes all attributes before returning any rows.
-	// For large studies (thousands of samples), this may use significant memory
-	// and block until all XML batches are fetched. A streaming approach would
-	// be better for very large studies.
-	static constexpr size_t BATCH_SIZE = 50;
-	for (size_t start = 0; start < sample_accs.size(); start += BATCH_SIZE) {
-		size_t end = std::min(start + BATCH_SIZE, sample_accs.size());
-		std::vector<std::string> batch(sample_accs.begin() + start, sample_accs.begin() + end);
+	auto xml = client->FetchXML(batch);
+	current_batch = miint::ENAParser::ParseSampleAttributesXML(xml);
+	current_batch_offset = 0;
+	samples_fetched.fetch_add(n, std::memory_order_relaxed);
+	return true;
+}
 
-		auto xml = client->FetchXML(batch);
-		auto batch_attrs = miint::ENAParser::ParseSampleAttributesXML(xml);
-
-		for (auto &attr : batch_attrs) {
-			attributes.push_back(std::move(attr));
-		}
+bool ReadENAAttributesTableFunction::GlobalState::FetchNextStructuredBatch(
+    const miint::ENAAttributePushdown &pushdown) {
+	if (pending_sample_offset >= pending_sample_accs.size()) {
+		return false;
 	}
+	size_t remaining = pending_sample_accs.size() - pending_sample_offset;
+	size_t n = std::min<size_t>(BATCH_SIZE, remaining);
+	std::vector<std::string> batch(pending_sample_accs.begin() + pending_sample_offset,
+	                               pending_sample_accs.begin() + pending_sample_offset + n);
+	pending_sample_offset += n;
+
+	auto url = miint::BuildStructuredSearchURL(batch, pushdown.tags, pushdown.tag_value_pairs);
+	auto tsv = client->FetchURL(url);
+	auto parsed = miint::ENAParser::ParseTSV(tsv);
+	current_batch = miint::UnpivotStructuredTSV(parsed, pushdown.tags);
+	current_batch_offset = 0;
+	samples_fetched.fetch_add(n, std::memory_order_relaxed);
+	return true;
 }
 
 // ---- Bind ----
@@ -154,21 +325,31 @@ void ReadENAAttributesTableFunction::Execute(ClientContext &context, TableFuncti
 
 	lock_guard<mutex> guard(global_state.lock);
 
-	// Fetch all attributes on first call
-	if (!global_state.fetched) {
-		global_state.FetchAttributes(bind_data.accessions);
+	// First call: resolve input accessions to a list of sample accessions.
+	// Subsequent fetches happen lazily one batch at a time below.
+	if (!global_state.resolved) {
+		global_state.ResolveAccessions(bind_data.accessions);
 	}
 
-	if (global_state.row_offset >= global_state.attributes.size()) {
-		output.SetCardinality(0);
-		return;
+	// Advance to the next fetched batch if we've drained the current one.
+	// Loop to skip empty batches (a 50-sample batch whose XML has no sample
+	// with any attributes would otherwise end the scan prematurely). When
+	// pushdown_complex_filter extracted a structured predicate, use the TSV
+	// search path; otherwise fall back to per-sample XML.
+	const bool use_structured = !bind_data.pushdown.tags.empty();
+	while (global_state.current_batch_offset >= global_state.current_batch.size()) {
+		bool ok =
+		    use_structured ? global_state.FetchNextStructuredBatch(bind_data.pushdown) : global_state.FetchNextBatch();
+		if (!ok) {
+			output.SetCardinality(0);
+			return;
+		}
 	}
 
-	idx_t remaining = global_state.attributes.size() - global_state.row_offset;
+	auto &attrs = global_state.current_batch;
+	size_t offset = global_state.current_batch_offset;
+	idx_t remaining = attrs.size() - offset;
 	idx_t count = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
-
-	auto &attrs = global_state.attributes;
-	size_t offset = global_state.row_offset;
 
 	// sample_accession (column 0)
 	auto acc_data = FlatVector::GetData<string_t>(output.data[0]);
@@ -194,14 +375,58 @@ void ReadENAAttributesTableFunction::Execute(ClientContext &context, TableFuncti
 		}
 	}
 
-	global_state.row_offset += count;
+	global_state.current_batch_offset += count;
 	output.SetCardinality(count);
+}
+
+// ---- Pushdown complex filter ----
+
+void ReadENAAttributesTableFunction::PushdownComplexFilter(ClientContext &context, LogicalGet &get,
+                                                           FunctionData *bind_data_p,
+                                                           vector<unique_ptr<Expression>> &filters) {
+	auto &bind_data = bind_data_p->Cast<Data>();
+
+	std::vector<std::unique_ptr<miint::ENAFilterNode>> ast;
+	ast.reserve(filters.size());
+	for (const auto &expr : filters) {
+		ast.push_back(ExpressionToFilterNode(*expr, get));
+	}
+	bind_data.pushdown = miint::ExtractPushdownPredicates(ast);
+
+	// Per plan decision #5 (localdocs/PLAN-ena-predicate-maxseqs.md): we do
+	// NOT erase any entries from `filters`. DuckDB re-applies the predicates
+	// as a LogicalFilter above the scan, so any semantic divergence between
+	// ENA's /search matcher and SQL equality degrades to a mild inefficiency,
+	// not a correctness bug.
+}
+
+// ---- Progress ----
+
+double ReadENAAttributesTableFunction::Progress(ClientContext &context, const FunctionData *bind_data,
+                                                const GlobalTableFunctionState *global_state) {
+	if (!global_state) {
+		return -1.0;
+	}
+	auto &state = global_state->Cast<GlobalState>();
+	// Before ResolveAccessions runs we don't know the scale of the work. Once
+	// resolved, report samples-fetched / total. This gives users visible
+	// progress for large studies like PRJEB11419 (33k+ samples) where a full
+	// scan is long-running by nature.
+	size_t total = state.total_samples_expected.load(std::memory_order_relaxed);
+	if (total == 0) {
+		return -1.0;
+	}
+	size_t fetched = state.samples_fetched.load(std::memory_order_relaxed);
+	double pct = 100.0 * static_cast<double>(fetched) / static_cast<double>(total);
+	return std::min(100.0, pct);
 }
 
 // ---- Registration ----
 
 TableFunction ReadENAAttributesTableFunction::GetFunction() {
 	auto tf = TableFunction("read_ena_attributes", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
+	tf.table_scan_progress = Progress;
+	tf.pushdown_complex_filter = PushdownComplexFilter;
 	return tf;
 }
 

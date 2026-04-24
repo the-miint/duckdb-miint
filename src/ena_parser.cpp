@@ -88,6 +88,36 @@ std::string ENAParser::BuildSearchURL(const std::string &accession, const std::s
 	return url.str();
 }
 
+std::string ENAParser::BuildSearchURLBatch(const std::vector<std::string> &accessions, ENAAccessionType accession_type,
+                                           const std::string &result_type, const std::string &fields) {
+	if (accessions.empty()) {
+		throw std::invalid_argument("BuildSearchURLBatch: accessions vector must not be empty");
+	}
+	if (accession_type == ENAAccessionType::UNKNOWN) {
+		throw std::invalid_argument("BuildSearchURLBatch: cannot build a batched query for UNKNOWN accession type");
+	}
+	for (const auto &acc : accessions) {
+		ValidateAccession(acc);
+	}
+	ValidateFields(fields);
+
+	auto query_param = QueryParamForAccessionType(accession_type);
+
+	// URL-encoded form of: <query_param> IN ("acc1","acc2",...)
+	//   space = %20   ( = %28   ) = %29   , = %2C   " = %22
+	std::ostringstream url;
+	url << PORTAL_BASE << "/search?"
+	    << "result=" << result_type << "&query=" << query_param << "%20IN%20%28";
+	for (size_t i = 0; i < accessions.size(); i++) {
+		if (i > 0) {
+			url << "%2C";
+		}
+		url << "%22" << accessions[i] << "%22";
+	}
+	url << "%29&fields=" << fields << "&limit=0&format=tsv";
+	return url.str();
+}
+
 std::string ENAParser::BuildXMLURL(const std::vector<std::string> &accessions) {
 	for (const auto &acc : accessions) {
 		ValidateAccession(acc);

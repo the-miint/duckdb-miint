@@ -1,0 +1,90 @@
+# name: test/sql/read_ena_sequences_lateral.test
+# description: Test read_ena_sequences with lateral joins / correlated args
+# group: [sql]
+
+# NOTE: This test requires network access to EBI/ENA servers.
+# ERR1074767 is a SINGLE-end run from the American Gut Project.
+
+require httpfs
+
+require miint
+
+# Skip when ENA Portal API is not reachable (offline CI, blocked network).
+# run_tests.sh probes and exports this; unset → skip the whole file.
+require-env ENA_AVAILABLE
+
+# ---- Basic lateral ----
+
+statement ok
+CREATE TEMP TABLE runs(run_accession VARCHAR);
+
+statement ok
+INSERT INTO runs VALUES ('ERR1074767');
+
+query I
+SELECT COUNT(*) > 0
+FROM runs AS r,
+     LATERAL (SELECT read_id FROM read_ena_sequences(r.run_accession) LIMIT 1) seq;
+----
+true
+
+# Column values correct
+query II
+SELECT r.run_accession, length(seq.sequence1) > 0
+FROM runs AS r,
+     LATERAL (SELECT sequence1 FROM read_ena_sequences(r.run_accession) LIMIT 1) seq;
+----
+ERR1074767	true
+
+# ---- Cache exercise: duplicate outer rows ----
+
+statement ok
+INSERT INTO runs VALUES ('ERR1074767');
+
+query I
+SELECT COUNT(*)
+FROM runs AS r,
+     LATERAL (SELECT sequence1 FROM read_ena_sequences(r.run_accession) LIMIT 1) seq;
+----
+2
+
+# ---- Subquery in place of literal also triggers in-out path ----
+
+query IIIIII
+DESCRIBE SELECT * FROM read_ena_sequences((SELECT 'ERR1074767'));
+----
+sequence_index	BIGINT	YES	NULL	NULL	NULL
+read_id	VARCHAR	YES	NULL	NULL	NULL
+comment	VARCHAR	YES	NULL	NULL	NULL
+sequence1	VARCHAR	YES	NULL	NULL	NULL
+sequence2	VARCHAR	YES	NULL	NULL	NULL
+qual1	UTINYINT[]	YES	NULL	NULL	NULL
+qual2	UTINYINT[]	YES	NULL	NULL	NULL
+run_accession	VARCHAR	YES	NULL	NULL	NULL
+sample_accession	VARCHAR	YES	NULL	NULL	NULL
+experiment_accession	VARCHAR	YES	NULL	NULL	NULL
+
+# ---- EXPLAIN shows the in-out physical operator for the lateral path ----
+
+statement ok
+PRAGMA explain_output = PHYSICAL_ONLY;
+
+query II
+EXPLAIN
+SELECT r.run_accession
+FROM runs AS r,
+     LATERAL (SELECT 1 FROM read_ena_sequences(r.run_accession) LIMIT 1) seq;
+----
+physical_plan	<REGEX>:.*INOUT_FUNCTION.*
+
+# ---- max_sequences respected per-run in lateral mode ----
+
+statement ok
+PRAGMA explain_output = DEFAULT;
+
+query I
+SELECT COUNT(*) <= 5
+FROM (VALUES ('ERR1074767')) AS r(run_accession),
+     LATERAL (SELECT 1 FROM read_ena_sequences(r.run_accession, max_sequences=5)) seq;
+----
+true

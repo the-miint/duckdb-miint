@@ -9,11 +9,14 @@ require httpfs
 
 require miint
 
-# ---- prefer_format='sff' returns data ----
+# Skip when ENA Portal API is not reachable (offline CI, blocked network).
+require-env ENA_AVAILABLE
+
+# ---- prefer_format => 'sff' returns data ----
 
 statement ok
 CREATE TEMP TABLE sff_reads AS
-SELECT * FROM read_ena_sequences('ERR215818', prefer_format='sff') LIMIT 50;
+SELECT * FROM read_ena_sequences('ERR215818', prefer_format => 'sff') LIMIT 50;
 
 query I
 SELECT COUNT(*) > 0 FROM sff_reads;
@@ -44,11 +47,11 @@ SELECT COUNT(*) = 0 FROM sff_reads WHERE qual1 IS NULL;
 ----
 true
 
-# ---- trim=false should work ----
+# ---- trim_sff=false should work ----
 
 statement ok
 CREATE TEMP TABLE sff_untrimmed AS
-SELECT * FROM read_ena_sequences('ERR215818', prefer_format='sff', trim=false) LIMIT 10;
+SELECT * FROM read_ena_sequences('ERR215818', prefer_format => 'sff', trim_sff => false) LIMIT 10;
 
 query I
 SELECT COUNT(*) > 0 FROM sff_untrimmed;
@@ -56,7 +59,7 @@ SELECT COUNT(*) > 0 FROM sff_untrimmed;
 true
 
 # ---- default (auto) prefers FASTQ ----
-# Note: prefer_format='sff' falls back to FASTQ when SFF is unavailable.
+# Note: prefer_format => 'sff' falls back to FASTQ when SFF is unavailable.
 # prefer_format='auto' (default) uses FASTQ when available, falls back to SFF.
 
 statement ok

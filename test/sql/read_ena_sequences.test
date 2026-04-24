@@ -9,6 +9,10 @@ require httpfs
 
 require miint
 
+# Skip when ENA Portal API is not reachable (offline CI, blocked network).
+# run_tests.sh probes and exports this; unset → skip the whole file.
+require-env ENA_AVAILABLE
+
 # ---- Error handling ----
 
 statement error
@@ -101,3 +105,61 @@ query I
 SELECT filepath LIKE '%ebi.ac.uk%' AS has_ebi FROM read_ena_sequences('ERR1074767', include_filepath=true) LIMIT 1;
 ----
 true
+
+# ---- Batched resolver: duplicate accession in list exercises the LRU cache ----
+
+# A list containing the same accession twice resolves via the batched path.
+# Dedup inside ResolveRunsBatch + negative cache prevents duplicate HTTP work.
+# Output should still reflect a single distinct run_accession.
+query I
+SELECT COUNT(DISTINCT run_accession) FROM read_ena_sequences(['ERR1074767','ERR1074767']) LIMIT 1;
+----
+1
+
+# ---- Literal-arg dispatch regression guard ----
+
+# Literal calls must stay on the standard (non-in-out) path to preserve
+# parallelism and byte-based progress. The physical plan must not include
+# INOUT_FUNCTION when args are constants.
+
+statement ok
+PRAGMA explain_output = PHYSICAL_ONLY;
+
+query II
+EXPLAIN SELECT * FROM read_ena_sequences('ERR1074767') LIMIT 1;
+----
+physical_plan	<!REGEX>:.*INOUT_FUNCTION.*
+
+# ---- max_sequences ----
+
+statement ok
+PRAGMA explain_output = DEFAULT;
+
+# max_sequences caps row count per run. ERR1074767 has thousands of reads,
+# so an exact-match assertion proves the cap actually fired (as opposed to
+# EOF returning fewer rows for some unrelated reason).
+query I
+SELECT COUNT(*) = 10 AS capped_exact
+FROM read_ena_sequences('ERR1074767', max_sequences=10);
+----
+true
+
+# Same run, default (uncapped) cardinality is much larger than 10.
+query I
+SELECT COUNT(*) > 10 AS uncapped
+FROM (SELECT * FROM read_ena_sequences('ERR1074767') LIMIT 20);
+----
+true
+
+# max_sequences=0 is the explicit sentinel for "unlimited".
+query I
+SELECT COUNT(*) > 10 AS uncapped
+FROM (SELECT * FROM read_ena_sequences('ERR1074767', max_sequences=0) LIMIT 20);
+----
+true
+
+# Negative max_sequences rejected at Bind time.
+statement error
+SELECT * FROM read_ena_sequences('ERR1074767', max_sequences=-5);
+----
+max_sequences must be >= 0

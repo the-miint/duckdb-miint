@@ -1,0 +1,77 @@
+# name: test/sql/read_ena_attributes_pushdown_translator.test
+# description: Exercise the DuckDB-Expression -> ENAFilterNode translator via EXPLAIN. EXPLAIN triggers Bind + optimizer (which calls PushdownComplexFilter) without executing the scan, so these tests run without network access.
+# group: [sql]
+
+require miint
+
+# ---- Pushable shapes ----
+# Translator must accept these without crashing. Correctness of the produced
+# AST is validated separately by the [pushdown]-tagged C++ tests over the
+# pure ExtractPushdownPredicates helper.
+
+statement ok
+EXPLAIN SELECT * FROM read_ena_attributes('ERR1074767') WHERE tag='host_body_site';
+
+statement ok
+EXPLAIN SELECT * FROM read_ena_attributes('ERR1074767') WHERE tag IN ('host_body_site','collection_date');
+
+statement ok
+EXPLAIN SELECT * FROM read_ena_attributes('ERR1074767') WHERE tag='HOST_BODY_SITE' AND value='UBERON:feces';
+
+statement ok
+EXPLAIN SELECT * FROM read_ena_attributes('ERR1074767') WHERE value='UBERON:feces' AND tag='host_body_site';
+
+# ---- Shapes that must map to UNSUPPORTED (fallback to XML) without crashing ----
+
+statement ok
+EXPLAIN SELECT * FROM read_ena_attributes('ERR1074767') WHERE tag LIKE 'host_%';
+
+statement ok
+EXPLAIN SELECT * FROM read_ena_attributes('ERR1074767') WHERE tag!='host_body_site';
+
+statement ok
+EXPLAIN SELECT * FROM read_ena_attributes('ERR1074767') WHERE tag IS NULL;
+
+statement ok
+EXPLAIN SELECT * FROM read_ena_attributes('ERR1074767') WHERE value='UBERON:feces';
+
+statement ok
+EXPLAIN SELECT * FROM read_ena_attributes('ERR1074767') WHERE sample_accession='SAMEA3610311';
+
+# ---- Conjunctions (top-level AND) with mixed accept/reject atoms ----
+
+statement ok
+EXPLAIN SELECT * FROM read_ena_attributes('ERR1074767') WHERE tag='host_body_site' AND tag LIKE 'host_%';
+
+statement ok
+EXPLAIN SELECT * FROM read_ena_attributes('ERR1074767') WHERE tag='host_body_site' AND sample_accession='SAMEA3610311';
+
+# ---- Disjunctions (OR) — whole-tree reject ----
+
+statement ok
+EXPLAIN SELECT * FROM read_ena_attributes('ERR1074767') WHERE tag='host_body_site' OR tag='scientific_name';
+
+statement ok
+EXPLAIN SELECT * FROM read_ena_attributes('ERR1074767') WHERE tag='host_body_site' OR sample_accession='SAMEA3610311';
+
+# ---- Multiple tag IN conjuncts (reject: semantic intersection, not union) ----
+
+statement ok
+EXPLAIN SELECT * FROM read_ena_attributes('ERR1074767')
+WHERE tag IN ('host_body_site','collection_date') AND tag IN ('collection_date','scientific_name');
+
+# ---- No WHERE — callback is never called; sanity baseline ----
+
+statement ok
+EXPLAIN SELECT * FROM read_ena_attributes('ERR1074767');
+
+# ---- IN with a NULL element (runtime NULL handling) ----
+# DuckDB may rewrite this; the translator must not crash regardless.
+
+statement ok
+EXPLAIN SELECT * FROM read_ena_attributes('ERR1074767') WHERE tag IN ('host_body_site', NULL);
+
+# ---- Non-constant side (column vs column) — must fall through to UNSUPPORTED ----
+
+statement ok
+EXPLAIN SELECT * FROM read_ena_attributes('ERR1074767') WHERE tag=value;

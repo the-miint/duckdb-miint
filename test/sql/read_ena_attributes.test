@@ -8,6 +8,9 @@ require httpfs
 
 require miint
 
+# Skip when ENA Portal API is not reachable (offline CI, blocked network).
+require-env ENA_AVAILABLE
+
 # ---- Error handling ----
 
 statement error

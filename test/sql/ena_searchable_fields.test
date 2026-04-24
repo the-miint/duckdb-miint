@@ -1,0 +1,57 @@
+# name: test/sql/ena_searchable_fields.test
+# description: Test ena_searchable_fields discovery table function
+# group: [sql]
+
+# NOTE: This test requires network access to EBI/ENA servers.
+
+require httpfs
+
+require miint
+
+require-env ENA_AVAILABLE
+
+# ---- Schema ----
+
+query III
+DESCRIBE SELECT * FROM ena_searchable_fields('sample');
+----
+field_name	VARCHAR	YES	NULL	NULL	NULL
+type	VARCHAR	YES	NULL	NULL	NULL
+description	VARCHAR	YES	NULL	NULL	NULL
+
+# ---- At least a reasonable number of sample fields are returned ----
+
+query I
+SELECT COUNT(*) > 20 AS has_many FROM ena_searchable_fields('sample');
+----
+true
+
+# ---- Core MIxS fields present for sample result type ----
+
+query I
+SELECT COUNT(*) = 2
+FROM ena_searchable_fields('sample')
+WHERE field_name IN ('host_body_site', 'collection_date');
+----
+true
+
+# ---- read_run is also a valid result type ----
+
+query I
+SELECT COUNT(*) > 0 FROM ena_searchable_fields('read_run');
+----
+true
+
+# ---- Invalid result_type: empty ----
+
+statement error
+SELECT * FROM ena_searchable_fields('');
+----
+result_type cannot be empty
+
+# ---- Invalid result_type: URL injection attempt rejected at bind ----
+
+statement error
+SELECT * FROM ena_searchable_fields('sample&query=evil');
+----
+result_type contains invalid characters

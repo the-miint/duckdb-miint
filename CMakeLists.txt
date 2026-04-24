@@ -758,8 +758,14 @@ set(EXTENSION_SOURCES
     src/read_ncbi_annotation.cpp
     src/ena_parser.cpp
     src/ena_client.cpp
+    src/ena_run_info_extractor.cpp
+    src/ena_resolver_cache.cpp
+    src/ena_search_field_registry.cpp
+    src/ena_attributes_filter.cpp
+    src/per_run_reader.cpp
     src/read_ena.cpp
     src/read_ena_attributes.cpp
+    src/read_ena_searchable_fields.cpp
     src/read_ena_sequences.cpp
     src/aspera_utils.cpp
     src/aspera_stream.cpp
@@ -1019,7 +1025,15 @@ set(TEST_SOURCES
     duckdb/third_party/miniz/miniz.cpp  # For ExtractFromZip tests
     test/cpp/test_ncbi_client.cpp
     src/ena_parser.cpp
+    src/ena_run_info_extractor.cpp
+    src/ena_resolver_cache.cpp
+    src/ena_search_field_registry.cpp
+    src/ena_attributes_filter.cpp
     test/cpp/test_ENAClient.cpp
+    test/cpp/test_ENAResolverCache.cpp
+    test/cpp/test_ena_search_field_registry.cpp
+    test/cpp/test_ena_attributes_filter.cpp
+    test/cpp/test_ena_attributes_pushdown.cpp
     src/aspera_utils.cpp
     test/cpp/test_AsperaUtils.cpp
     src/SFFReader.cpp

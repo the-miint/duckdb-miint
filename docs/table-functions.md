@@ -17,7 +17,8 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`read_ncbi_annotation`](#read_ncbi_annotationaccession-api_key-include_filepathfalse) - NCBI genome annotations
 - [`read_ena`](#read_enaaccession-resultread_run-fields) - EBI/ENA metadata queries
 - [`read_ena_attributes`](#read_ena_attributesaccession) - EBI/ENA custom sample attributes
-- [`read_ena_sequences`](#read_ena_sequencesaccession-include_filepathfalse-qual_offset33) - Stream FASTA/FASTQ from EBI/ENA with accession columns
+- [`ena_searchable_fields`](#ena_searchable_fieldsresult_type) - Enumerate ENA structured-search fields per result type
+- [`read_ena_sequences`](#read_ena_sequencesaccession-include_filepathfalse-qual_offset33-max_sequences0) - Stream FASTA/FASTQ from EBI/ENA with accession columns
 - [`read_jplace`](#read_jplacepath) - Phylogenetic placement files
 - [`read_jplace_newick`](#read_jplace_newickpath-include_filepathfalse) - Newick tree from jplace files
 - [`read_newick`](#read_newickfilename-include_filepathfalse) - Newick phylogenetic trees
@@ -944,6 +945,21 @@ Fetch custom sample attributes from EBI/ENA via the Browser XML API. Returns all
 - Parses `<SAMPLE_ATTRIBUTE>` `<TAG>`/`<VALUE>` pairs
 - Returns ALL attributes including custom/submitter-defined ones (e.g., primer sequences, custom identifiers) that are not available via `read_ena`
 
+**Predicate pushdown:**
+When the `WHERE` clause references `tag` (and optionally `value`) with equality-only operators, and every referenced tag is a known ENA sample-search field, the scan switches from per-sample XML fetches to a single `/search?result=sample` TSV request per batch. This converts an O(N)-per-sample XML scan into one HTTP call per 200 samples and can cut minutes off large studies (e.g., a 33 000-sample study drops from a ~3.7-minute rate-limit floor to a few seconds for `WHERE tag='host_body_site'`).
+
+Pushdown triggers when:
+- The filter is a conjunction (AND) of `tag = 'X'`, `tag IN ('X','Y',...)`, or `tag = 'X' AND value = 'Y'`
+- Every referenced tag passes `ena_searchable_fields('sample')` (see the curated allowlist under the hood; uppercase/mixed-case names are accepted)
+
+Pushdown is **declined** (falls back to the XML path, preserving correctness) when:
+- Any referenced tag is not in the searchable-field allowlist (including any single unknown tag inside an `IN` list)
+- Any `OR`, `LIKE`, `!=`, `NOT IN`, etc. appears anywhere in the filter tree
+- `value` is constrained without a single pinned `tag` (ambiguous)
+- Any predicate is on `sample_accession` or another non-`tag`/`value` column
+
+DuckDB always re-applies the original filter above the scan, so the output of the pushdown path is guaranteed to be a subset of what the XML path would have returned — a pushdown mistake degrades to extra work, never to wrong rows.
+
 **Examples:**
 ```sql
 -- Get all attributes for a run's sample
@@ -962,9 +978,46 @@ SELECT sample_accession,
        MAX(CASE WHEN tag = 'geographic location (country and/or sea)' THEN value END) AS country
 FROM read_ena_attributes('PRJEB11419')
 GROUP BY sample_accession;
+
+-- Pushdown-enabled: uses /search endpoint (single TSV per batch) instead of
+-- per-sample XML. Fast on large studies.
+SELECT sample_accession
+FROM read_ena_attributes('PRJEB11419')
+WHERE tag='host_body_site' AND value='UBERON:feces';
 ```
 
-## `read_ena_sequences(accession, [include_filepath=false], [qual_offset=33])`
+## `ena_searchable_fields(result_type)`
+
+Enumerate the fields that ENA's Portal API `/search?result=<result_type>` endpoint accepts as structured filters. Use this to discover what field names are available for a given result type (sample, read_run, study, experiment, etc.) before constructing a query — either a direct Portal API `/search` URL or a `WHERE tag='X'` filter on `read_ena_attributes` that can be pushed down to the structured search.
+
+**Requirements:**
+- Requires the `httpfs` extension (automatically loaded)
+- Network access to EBI servers (www.ebi.ac.uk)
+
+**Parameters:**
+- `result_type` (VARCHAR, required): An ENA Portal API result type (e.g., `'sample'`, `'read_run'`, `'study'`, `'experiment'`)
+
+**Output schema:**
+- `field_name` (VARCHAR): Canonical field identifier accepted by ENA's `/search?fields=...` query parameter
+- `type` (VARCHAR): ENA's declared type for the field (e.g., `text`, `number`, `date`, `controlled value`, `taxonomy`)
+- `description` (VARCHAR, nullable): ENA's human-readable description, when available
+
+**Behavior:**
+- Issues exactly one HTTP call to `/returnFields?result=<result_type>&format=tsv` on first use and caches the parsed result for the remainder of the scan
+- Validates `result_type` as alphanumeric + `_-.` to prevent URL injection
+
+**Examples:**
+```sql
+-- All searchable fields for the sample result type
+SELECT field_name, type FROM ena_searchable_fields('sample') ORDER BY field_name;
+
+-- Check whether a specific field exists before using it in a filter
+SELECT COUNT(*) > 0 AS exists
+FROM ena_searchable_fields('sample')
+WHERE field_name = 'host_body_site';
+```
+
+## `read_ena_sequences(accession, [include_filepath=false], [qual_offset=33], [max_sequences=0])`
 
 Stream FASTA/FASTQ sequence data from EBI/ENA with run, sample, and experiment accession columns. Returns data in the same schema as `read_fastx` plus accession metadata columns, enabling direct association of sequence data with project metadata. Supports mixed FASTA/FASTQ paired-end data (unlike `read_fastx` which rejects format mismatches).
 
@@ -976,6 +1029,10 @@ Stream FASTA/FASTQ sequence data from EBI/ENA with run, sample, and experiment a
 - `accession` (VARCHAR or VARCHAR[]): ENA/SRA accession(s). Supports study (bulk download all runs), sample, run, and experiment accessions.
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column with the HTTPS download URL(s). For paired-end runs, URLs are semicolon-separated.
 - `qual_offset` (BIGINT, optional, default 33): Quality score offset (33 for Phred+33/Sanger, 64 for Phred+64/Illumina 1.3+)
+- `max_sequences` (BIGINT, optional, default 0): If `> 0`, stop emitting from each run after this many sequences. `0` (or NULL / absent) means unlimited. For paired-end runs the cap counts **pairs** (one output row per pair), not underlying FASTQ records — `max_sequences=N` yields at most N rows and corresponds to 2N downloaded reads. When downloading via Aspera the cap tears down the `ascp` transfer early, saving real bandwidth. For SFF runs the cap applies but the full file is downloaded before any record is parsed; a loud warning is printed in that case.
+- `trim_sff` (BOOLEAN, optional, default true): For SFF runs, apply the quality and adapter clip positions from the SFF header to trim sequences and quality scores. Ignored for FASTQ runs. Named `trim_sff` rather than `trim` because `TRIM` is a SQL function keyword and this function is dual-path (supports both scalar and lateral invocation), which together prevent DuckDB's binder from accepting `trim=...`.
+
+Because `read_ena_sequences` supports lateral / correlated invocation, named parameters must be passed with arrow syntax (`name => value`), not `name = value`. For example: `read_ena_sequences('X', prefer_format => 'sff', trim_sff => false)`.
 
 **Output schema:**
 - `sequence_index` (BIGINT): 1-based sequence index (per run)
@@ -1024,6 +1081,38 @@ FROM read_ena_sequences('ERR1074767', include_filepath=true) LIMIT 5;
 - For large projects, the FASTQ download can take significant time and bandwidth
 - The `run_accession` column enables easy JOIN back to metadata from `read_ena`
 - Quality scores are converted to numeric values using the specified offset (default Phred+33)
+- **Failure handling**: on a transient open failure, the run is retried once. On
+  a mid-stream failure (connection dropped after some rows have been emitted),
+  the run is NOT retried — re-reading from scratch would emit the same reads
+  again with duplicate `sequence_index` values downstream. Instead, the run is
+  recorded as skipped, a loud warning reports the run accession and the
+  number of reads emitted before the failure, and the scan continues with
+  other runs. If you see such a warning, re-run the query (the metadata
+  lookup is cached) or use a smaller per-run selection to recover the
+  truncated data.
+
+**Lateral invocation (correlated arguments):**
+
+Accessions can come from a correlated column via `LATERAL`. Each outer row opens its
+own run; a `LIMIT` inside the lateral short-circuits that run's download (the reader
+and any HTTP connection are torn down as soon as the limit is reached). Metadata
+lookups share an in-memory LRU cache scoped to the query, so repeated outer-row
+values and within-query batches avoid redundant ENA Portal API calls.
+
+```sql
+-- Find runs containing a probe sequence, downloading only until each match is seen.
+SELECT r.run_accession
+FROM read_ena('PRJEB11419') AS r,
+     LATERAL (SELECT 1 FROM read_ena_sequences(r.run_accession)
+              WHERE sequence1.contains('AACGTAGGTCACAAGCGTTGTCCGGA')
+              LIMIT 1);
+```
+
+Limitations in lateral mode:
+- `download_method='aspera'` is not supported (use HTTP; the lateral use case is
+  short-circuit-driven, not throughput-driven).
+- `table_scan_progress` reports `-1.0` (indeterminate) because the total work is
+  driven by the outer side and not known at bind time.
 
 ## `read_jplace(path)`
 
