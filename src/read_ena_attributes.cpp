@@ -211,13 +211,49 @@ ReadENAAttributesTableFunction::GlobalState::ResolveSampleAccessions(const std::
 	return sample_accs;
 }
 
-void ReadENAAttributesTableFunction::GlobalState::ResolveAccessions(const std::vector<std::string> &accessions) {
+void ReadENAAttributesTableFunction::GlobalState::ResolveAccessions(const std::vector<std::string> &accessions,
+                                                                    bool has_pushdown) {
 	// Mark as resolved immediately so that a network error during the
 	// Search call below doesn't cause successive Execute callbacks to keep
 	// retrying the same failing request in a loop.
 	resolved = true;
-	pending_sample_accs = ResolveSampleAccessions(accessions);
-	total_samples_expected.store(pending_sample_accs.size(), std::memory_order_relaxed);
+	if (has_pushdown) {
+		// Split inputs by type. Studies stay as studies — the structured query
+		// runs directly against `study_accession="..."` and never enumerates
+		// the study's samples on the client side. Samples pass through unchanged.
+		// Runs / experiments still need one /search?result=read_run call each to
+		// resolve to sample_accession (same as the legacy resolver), because the
+		// structured search endpoint accepts only sample/study/run columns as
+		// top-level filters on `result=sample`.
+		for (const auto &acc : accessions) {
+			auto acc_type = miint::ENAParser::DetectAccessionType(acc);
+			if (acc_type == miint::ENAAccessionType::STUDY) {
+				pending_study_accs.push_back(acc);
+			} else if (acc_type == miint::ENAAccessionType::SAMPLE) {
+				pending_sample_accs.push_back(acc);
+			} else {
+				auto tsv = client->Search(acc, "read_run", "sample_accession");
+				auto parsed = miint::ENAParser::ParseTSV(tsv);
+				for (size_t i = 0; i < parsed.column_names.size(); i++) {
+					if (parsed.column_names[i] == "sample_accession") {
+						for (const auto &row : parsed.rows) {
+							if (i < row.size() && !row[i].empty()) {
+								pending_sample_accs.push_back(row[i]);
+							}
+						}
+						break;
+					}
+				}
+			}
+		}
+	} else {
+		pending_sample_accs = ResolveSampleAccessions(accessions);
+	}
+	// Progress denominator: studies count as 1 unit each (their batch is a
+	// single HTTP call returning the filtered set); samples contribute their
+	// raw count (advanced by BATCH_SIZE per HTTP call). This isn't perfectly
+	// linear but terminates at 100%.
+	total_samples_expected.store(pending_sample_accs.size() + pending_study_accs.size(), std::memory_order_relaxed);
 	samples_fetched.store(0, std::memory_order_relaxed);
 }
 
@@ -240,6 +276,26 @@ bool ReadENAAttributesTableFunction::GlobalState::FetchNextBatch() {
 
 bool ReadENAAttributesTableFunction::GlobalState::FetchNextStructuredBatch(
     const miint::ENAAttributePushdown &pushdown) {
+	// Drain study-direct batches first: each one runs
+	// `study_accession IN (...) AND <pushdown>` directly against the /search
+	// endpoint, returning only the matching samples without client-side
+	// enumeration. Batched so multiple study inputs share one request.
+	if (pending_study_offset < pending_study_accs.size()) {
+		size_t remaining = pending_study_accs.size() - pending_study_offset;
+		size_t n = std::min<size_t>(BATCH_SIZE, remaining);
+		std::vector<std::string> batch(pending_study_accs.begin() + pending_study_offset,
+		                               pending_study_accs.begin() + pending_study_offset + n);
+		pending_study_offset += n;
+
+		auto url = miint::BuildStudyDirectSearchURL(batch, pushdown.tags, pushdown.tag_value_pairs);
+		auto tsv = client->FetchURL(url);
+		auto parsed = miint::ENAParser::ParseTSV(tsv);
+		current_batch = miint::UnpivotStructuredTSV(parsed, pushdown.tags);
+		current_batch_offset = 0;
+		samples_fetched.fetch_add(n, std::memory_order_relaxed);
+		return true;
+	}
+
 	if (pending_sample_offset >= pending_sample_accs.size()) {
 		return false;
 	}
@@ -325,10 +381,14 @@ void ReadENAAttributesTableFunction::Execute(ClientContext &context, TableFuncti
 
 	lock_guard<mutex> guard(global_state.lock);
 
-	// First call: resolve input accessions to a list of sample accessions.
-	// Subsequent fetches happen lazily one batch at a time below.
+	// First call: resolve input accessions into the right pending queues.
+	// When pushdown is active, study inputs stay as studies (drained via the
+	// study-direct path in FetchNextStructuredBatch); otherwise studies get
+	// enumerated into sample accessions up front. Subsequent fetches happen
+	// lazily one batch at a time below.
+	const bool use_structured = !bind_data.pushdown.tags.empty();
 	if (!global_state.resolved) {
-		global_state.ResolveAccessions(bind_data.accessions);
+		global_state.ResolveAccessions(bind_data.accessions, use_structured);
 	}
 
 	// Advance to the next fetched batch if we've drained the current one.
@@ -336,7 +396,6 @@ void ReadENAAttributesTableFunction::Execute(ClientContext &context, TableFuncti
 	// with any attributes would otherwise end the scan prematurely). When
 	// pushdown_complex_filter extracted a structured predicate, use the TSV
 	// search path; otherwise fall back to per-sample XML.
-	const bool use_structured = !bind_data.pushdown.tags.empty();
 	while (global_state.current_batch_offset >= global_state.current_batch.size()) {
 		bool ok =
 		    use_structured ? global_state.FetchNextStructuredBatch(bind_data.pushdown) : global_state.FetchNextBatch();

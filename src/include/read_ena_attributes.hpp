@@ -56,6 +56,12 @@ public:
 		// (~3 req/s) is otherwise the wall-clock bottleneck.
 		static constexpr size_t BATCH_SIZE = 200;
 		bool resolved = false;
+		// When pushdown is active, study-type inputs stay here (drained first by
+		// FetchNextStructuredBatch as study-direct queries, one HTTP per study
+		// batch). Without pushdown this stays empty; studies get enumerated into
+		// `pending_sample_accs` via ResolveSampleAccessions as before.
+		std::vector<std::string> pending_study_accs;
+		size_t pending_study_offset = 0;
 		std::vector<std::string> pending_sample_accs;
 		size_t pending_sample_offset = 0;
 		std::vector<miint::SampleAttribute> current_batch;
@@ -73,8 +79,13 @@ public:
 
 		GlobalState(DatabaseInstance &db);
 
-		// One-time sample-accession resolution. Populates `pending_sample_accs`.
-		void ResolveAccessions(const std::vector<std::string> &accessions);
+		// One-time input-accession resolution. When `has_pushdown` is true, study-type
+		// inputs are routed to `pending_study_accs` (for study-direct HTTP calls);
+		// sample-type inputs stay as-is; run/experiment inputs resolve to their
+		// sample_accession. When false, all inputs flow through
+		// ResolveSampleAccessions and populate `pending_sample_accs` (unchanged
+		// legacy XML-path behavior).
+		void ResolveAccessions(const std::vector<std::string> &accessions, bool has_pushdown);
 
 		// Pop up to BATCH_SIZE sample accessions, fetch + parse their XML, and
 		// refill `current_batch`. Sets `current_batch_offset` to 0. Returns

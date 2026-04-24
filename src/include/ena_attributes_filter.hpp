@@ -78,6 +78,23 @@ std::string BuildStructuredSearchURL(const std::vector<std::string> &sample_acce
                                      const std::vector<std::string> &tags,
                                      const std::vector<std::pair<std::string, std::string>> &tag_value_pairs);
 
+// Study-direct variant: emits `study_accession IN (...)` instead of
+// `sample_accession IN (...)`. Used when the user supplies study accessions
+// plus a pushable predicate — the structured query runs directly against the
+// study's samples without first enumerating them (which for a 33k-sample study
+// would otherwise cost ~165 HTTP round-trips at the 3 req/s rate limit).
+//
+// Preconditions:
+//   - `study_accessions` non-empty; each entry passes ENAParser::ValidateAccession.
+//   - `tags` non-empty; each entry passes ENAParser::ValidateFields.
+//   - Every `tag_value_pairs[i].first` appears in `tags`. Violations throw
+//     `std::invalid_argument`.
+//
+// Pure (no HTTP).
+std::string BuildStudyDirectSearchURL(const std::vector<std::string> &study_accessions,
+                                      const std::vector<std::string> &tags,
+                                      const std::vector<std::pair<std::string, std::string>> &tag_value_pairs);
+
 // Unpivot a structured-search TSV response into `(sample_accession, tag,
 // value)` tuples — one row per (sample, non-empty requested tag). Expects
 // `parsed` to contain a `sample_accession` column plus one column per entry

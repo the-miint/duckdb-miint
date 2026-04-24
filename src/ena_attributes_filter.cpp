@@ -262,27 +262,30 @@ std::string PercentEncodeValue(const std::string &s) {
 	return out;
 }
 
-} // namespace
-
-std::string BuildStructuredSearchURL(const std::vector<std::string> &sample_accessions,
-                                     const std::vector<std::string> &tags,
-                                     const std::vector<std::pair<std::string, std::string>> &tag_value_pairs) {
-	if (sample_accessions.empty()) {
-		throw std::invalid_argument("BuildStructuredSearchURL: sample_accessions must not be empty");
+// Shared URL-encoder for the sample /search endpoint. Emits
+// `<in_column> IN ("acc1","acc2",...) [AND tag="v"]*` and returns columns
+// `sample_accession,<tags>`. Factored so the sample-batch path and the
+// study-direct path share a single implementation; the only moving part
+// is `in_column` ("sample_accession" vs "study_accession").
+std::string BuildAttributeSearchURL(const char *in_column, const std::vector<std::string> &accessions,
+                                    const std::vector<std::string> &tags,
+                                    const std::vector<std::pair<std::string, std::string>> &tag_value_pairs,
+                                    const char *error_label) {
+	if (accessions.empty()) {
+		throw std::invalid_argument(std::string(error_label) + ": accessions must not be empty");
 	}
 	if (tags.empty()) {
-		throw std::invalid_argument("BuildStructuredSearchURL: tags must not be empty");
+		throw std::invalid_argument(std::string(error_label) + ": tags must not be empty");
 	}
-	for (const auto &acc : sample_accessions) {
+	for (const auto &acc : accessions) {
 		ENAParser::ValidateAccession(acc);
 	}
 	for (const auto &t : tags) {
 		ENAParser::ValidateFields(t);
 	}
 
-	// Build `fields=sample_accession,<tag1>,<tag2>,...` (deduped, preserving
-	// caller order). `sample_accession` is always first so the row emitter
-	// can locate it unambiguously.
+	// `sample_accession` is always first in the column list so the row emitter
+	// can locate it unambiguously; remaining tags are deduped in caller order.
 	std::ostringstream fields;
 	fields << "sample_accession";
 	std::unordered_set<std::string> seen_fields = {"sample_accession"};
@@ -292,29 +295,25 @@ std::string BuildStructuredSearchURL(const std::vector<std::string> &sample_acce
 		}
 	}
 
-	// Build the query: `sample_accession IN ("a","b",...) [AND tag="v"]*`
-	// URL-encoded the same way ENAParser::BuildSearchURLBatch does, extended
-	// with tag=value conjuncts.
 	std::ostringstream query;
-	query << "sample_accession%20IN%20%28";
-	for (size_t i = 0; i < sample_accessions.size(); i++) {
+	query << in_column << "%20IN%20%28";
+	for (size_t i = 0; i < accessions.size(); i++) {
 		if (i > 0) {
 			query << "%2C";
 		}
-		query << "%22" << sample_accessions[i] << "%22";
+		query << "%22" << accessions[i] << "%22";
 	}
 	query << "%29";
 	for (const auto &kv : tag_value_pairs) {
-		// Precondition: every pinned tag must appear in `tags` so the
-		// response contains a column to un-pivot. Callers that hand-build
-		// a pushdown (rather than going through ExtractPushdownPredicates)
-		// can violate this; reject early so we never emit a query clause
-		// for a field we didn't ask ENA to return.
+		// Precondition: every pinned tag must appear in `tags` so the response
+		// contains a column to un-pivot. Callers that hand-build a pushdown
+		// (rather than going through ExtractPushdownPredicates) can violate
+		// this; reject early so we never emit a query clause for a field we
+		// didn't ask ENA to return.
 		if (seen_fields.count(kv.first) == 0) {
-			throw std::invalid_argument("BuildStructuredSearchURL: pinned tag '" + kv.first +
+			throw std::invalid_argument(std::string(error_label) + ": pinned tag '" + kv.first +
 			                            "' is not present in `tags`");
 		}
-		// Validated upstream (tag via ValidateFields; value via PercentEncodeValue).
 		ENAParser::ValidateFields(kv.first);
 		query << "%20AND%20" << kv.first << "%3D%22" << PercentEncodeValue(kv.second) << "%22";
 	}
@@ -323,6 +322,22 @@ std::string BuildStructuredSearchURL(const std::vector<std::string> &sample_acce
 	url << ENAParser::PORTAL_BASE << "/search?"
 	    << "result=sample&query=" << query.str() << "&fields=" << fields.str() << "&limit=0&format=tsv";
 	return url.str();
+}
+
+} // namespace
+
+std::string BuildStructuredSearchURL(const std::vector<std::string> &sample_accessions,
+                                     const std::vector<std::string> &tags,
+                                     const std::vector<std::pair<std::string, std::string>> &tag_value_pairs) {
+	return BuildAttributeSearchURL("sample_accession", sample_accessions, tags, tag_value_pairs,
+	                               "BuildStructuredSearchURL");
+}
+
+std::string BuildStudyDirectSearchURL(const std::vector<std::string> &study_accessions,
+                                      const std::vector<std::string> &tags,
+                                      const std::vector<std::pair<std::string, std::string>> &tag_value_pairs) {
+	return BuildAttributeSearchURL("study_accession", study_accessions, tags, tag_value_pairs,
+	                               "BuildStudyDirectSearchURL");
 }
 
 // ---- TSV unpivot ----

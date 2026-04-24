@@ -7,6 +7,7 @@
 #include <vector>
 
 using miint::BuildStructuredSearchURL;
+using miint::BuildStudyDirectSearchURL;
 using miint::ENAParser;
 using miint::ENATSVResult;
 using miint::SampleAttribute;
@@ -128,6 +129,59 @@ TEST_CASE("BuildStructuredSearchURL rejects injection via accession", "[ena][pus
 	std::vector<std::pair<std::string, std::string>> pairs;
 
 	CHECK_THROWS(BuildStructuredSearchURL(sample_accs, tags, pairs));
+}
+
+TEST_CASE("BuildStudyDirectSearchURL emits study_accession IN query with pinned value", "[ena][pushdown]") {
+	// Study-direct form is what lets a filter against e.g. PRJEB11419 (33k
+	// samples) run in one HTTP call instead of first enumerating and then
+	// batching-with-IN-clauses over ~165 requests.
+	std::vector<std::string> studies = {"PRJEB11419"};
+	std::vector<std::string> tags = {"host_body_site"};
+	std::vector<std::pair<std::string, std::string>> pairs = {{"host_body_site", "UBERON:feces"}};
+
+	auto url = BuildStudyDirectSearchURL(studies, tags, pairs);
+
+	CHECK(url.find("https://www.ebi.ac.uk/ena/portal/api/search?") == 0);
+	CHECK(url.find("result=sample") != std::string::npos);
+	CHECK(url.find("fields=sample_accession,host_body_site") != std::string::npos);
+	CHECK(url.find("study_accession%20IN%20%28%22PRJEB11419%22%29") != std::string::npos);
+	CHECK(url.find("%20AND%20host_body_site%3D%22UBERON%3Afeces%22") != std::string::npos);
+	CHECK(url.find("format=tsv") != std::string::npos);
+}
+
+TEST_CASE("BuildStudyDirectSearchURL batches multiple studies in one IN clause", "[ena][pushdown]") {
+	std::vector<std::string> studies = {"PRJEB11419", "PRJEB22222"};
+	std::vector<std::string> tags = {"host_body_site"};
+	std::vector<std::pair<std::string, std::string>> pairs;
+
+	auto url = BuildStudyDirectSearchURL(studies, tags, pairs);
+
+	CHECK(url.find("study_accession%20IN%20%28%22PRJEB11419%22%2C%22PRJEB22222%22%29") != std::string::npos);
+	CHECK(url.find("%20AND%20") == std::string::npos);
+}
+
+TEST_CASE("BuildStudyDirectSearchURL rejects empty studies and empty tags", "[ena][pushdown]") {
+	std::vector<std::string> tags = {"host_body_site"};
+	std::vector<std::pair<std::string, std::string>> pairs;
+
+	CHECK_THROWS(BuildStudyDirectSearchURL({}, tags, pairs));
+	CHECK_THROWS(BuildStudyDirectSearchURL({"PRJEB11419"}, {}, pairs));
+}
+
+TEST_CASE("BuildStudyDirectSearchURL rejects pinned tag not in tags", "[ena][pushdown]") {
+	std::vector<std::string> studies = {"PRJEB11419"};
+	std::vector<std::string> tags = {"host_body_site"};
+	std::vector<std::pair<std::string, std::string>> pairs = {{"collection_date", "2020-03-14"}};
+
+	CHECK_THROWS(BuildStudyDirectSearchURL(studies, tags, pairs));
+}
+
+TEST_CASE("BuildStudyDirectSearchURL rejects injection via study accession", "[ena][pushdown]") {
+	std::vector<std::string> studies = {"PRJEB\"; DROP TABLE"};
+	std::vector<std::string> tags = {"host_body_site"};
+	std::vector<std::pair<std::string, std::string>> pairs;
+
+	CHECK_THROWS(BuildStudyDirectSearchURL(studies, tags, pairs));
 }
 
 TEST_CASE("UnpivotStructuredTSV emits one row per non-empty tag column", "[ena][pushdown]") {
