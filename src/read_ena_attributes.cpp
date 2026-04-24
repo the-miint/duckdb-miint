@@ -13,7 +13,7 @@ ReadENAAttributesTableFunction::Data::Data(std::vector<std::string> accessions)
 // ---- GlobalState ----
 
 ReadENAAttributesTableFunction::GlobalState::GlobalState(DatabaseInstance &db)
-    : client(make_uniq<miint::ENAClient>(db)), row_offset(0), fetched(false) {
+    : client(make_uniq<miint::ENAClient>(db)) {
 }
 
 std::vector<std::string>
@@ -59,32 +59,29 @@ ReadENAAttributesTableFunction::GlobalState::ResolveSampleAccessions(const std::
 	return sample_accs;
 }
 
-void ReadENAAttributesTableFunction::GlobalState::FetchAttributes(const std::vector<std::string> &accessions) {
-	// Mark as fetched immediately to avoid infinite retry loops on network errors
-	fetched = true;
+void ReadENAAttributesTableFunction::GlobalState::ResolveAccessions(const std::vector<std::string> &accessions) {
+	// Mark as resolved immediately so that a network error during the
+	// Search call below doesn't cause successive Execute callbacks to keep
+	// retrying the same failing request in a loop.
+	resolved = true;
+	pending_sample_accs = ResolveSampleAccessions(accessions);
+	total_samples_expected.store(pending_sample_accs.size(), std::memory_order_relaxed);
+	samples_fetched.store(0, std::memory_order_relaxed);
+}
 
-	auto sample_accs = ResolveSampleAccessions(accessions);
-
-	if (sample_accs.empty()) {
-		return;
+bool ReadENAAttributesTableFunction::GlobalState::FetchNextBatch() {
+	if (pending_sample_accs.empty()) {
+		return false;
 	}
+	size_t n = std::min<size_t>(BATCH_SIZE, pending_sample_accs.size());
+	std::vector<std::string> batch(pending_sample_accs.begin(), pending_sample_accs.begin() + n);
+	pending_sample_accs.erase(pending_sample_accs.begin(), pending_sample_accs.begin() + n);
 
-	// NOTE: This materializes all attributes before returning any rows.
-	// For large studies (thousands of samples), this may use significant memory
-	// and block until all XML batches are fetched. A streaming approach would
-	// be better for very large studies.
-	static constexpr size_t BATCH_SIZE = 50;
-	for (size_t start = 0; start < sample_accs.size(); start += BATCH_SIZE) {
-		size_t end = std::min(start + BATCH_SIZE, sample_accs.size());
-		std::vector<std::string> batch(sample_accs.begin() + start, sample_accs.begin() + end);
-
-		auto xml = client->FetchXML(batch);
-		auto batch_attrs = miint::ENAParser::ParseSampleAttributesXML(xml);
-
-		for (auto &attr : batch_attrs) {
-			attributes.push_back(std::move(attr));
-		}
-	}
+	auto xml = client->FetchXML(batch);
+	current_batch = miint::ENAParser::ParseSampleAttributesXML(xml);
+	current_batch_offset = 0;
+	samples_fetched.fetch_add(n, std::memory_order_relaxed);
+	return true;
 }
 
 // ---- Bind ----
@@ -154,21 +151,26 @@ void ReadENAAttributesTableFunction::Execute(ClientContext &context, TableFuncti
 
 	lock_guard<mutex> guard(global_state.lock);
 
-	// Fetch all attributes on first call
-	if (!global_state.fetched) {
-		global_state.FetchAttributes(bind_data.accessions);
+	// First call: resolve input accessions to a list of sample accessions.
+	// Subsequent fetches happen lazily one batch at a time below.
+	if (!global_state.resolved) {
+		global_state.ResolveAccessions(bind_data.accessions);
 	}
 
-	if (global_state.row_offset >= global_state.attributes.size()) {
-		output.SetCardinality(0);
-		return;
+	// Advance to the next fetched batch if we've drained the current one.
+	// Loop to skip empty batches (a 50-sample batch whose XML has no sample
+	// with any attributes would otherwise end the scan prematurely).
+	while (global_state.current_batch_offset >= global_state.current_batch.size()) {
+		if (!global_state.FetchNextBatch()) {
+			output.SetCardinality(0);
+			return;
+		}
 	}
 
-	idx_t remaining = global_state.attributes.size() - global_state.row_offset;
+	auto &attrs = global_state.current_batch;
+	size_t offset = global_state.current_batch_offset;
+	idx_t remaining = attrs.size() - offset;
 	idx_t count = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
-
-	auto &attrs = global_state.attributes;
-	size_t offset = global_state.row_offset;
 
 	// sample_accession (column 0)
 	auto acc_data = FlatVector::GetData<string_t>(output.data[0]);
@@ -194,14 +196,36 @@ void ReadENAAttributesTableFunction::Execute(ClientContext &context, TableFuncti
 		}
 	}
 
-	global_state.row_offset += count;
+	global_state.current_batch_offset += count;
 	output.SetCardinality(count);
+}
+
+// ---- Progress ----
+
+double ReadENAAttributesTableFunction::Progress(ClientContext &context, const FunctionData *bind_data,
+                                                const GlobalTableFunctionState *global_state) {
+	if (!global_state) {
+		return -1.0;
+	}
+	auto &state = global_state->Cast<GlobalState>();
+	// Before ResolveAccessions runs we don't know the scale of the work. Once
+	// resolved, report samples-fetched / total. This gives users visible
+	// progress for large studies like PRJEB11419 (33k+ samples) where a full
+	// scan is long-running by nature.
+	size_t total = state.total_samples_expected.load(std::memory_order_relaxed);
+	if (total == 0) {
+		return -1.0;
+	}
+	size_t fetched = state.samples_fetched.load(std::memory_order_relaxed);
+	double pct = 100.0 * static_cast<double>(fetched) / static_cast<double>(total);
+	return std::min(100.0, pct);
 }
 
 // ---- Registration ----
 
 TableFunction ReadENAAttributesTableFunction::GetFunction() {
 	auto tf = TableFunction("read_ena_attributes", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
+	tf.table_scan_progress = Progress;
 	return tf;
 }
 
