@@ -455,14 +455,25 @@ void ReadBatchByIds(ClientContext &context, const std::string &query_table, cons
 
 QuerySequenceStream::QuerySequenceStream(ClientContext &context, const std::string &table_name,
                                          const SequenceTableSchema &schema, idx_t sub_batch_size)
-    : conn_(DatabaseInstance::GetDatabase(context)), schema_(schema), sub_batch_size_(sub_batch_size),
+    : owned_conn_(make_uniq<Connection>(DatabaseInstance::GetDatabase(context))), conn_ptr_(owned_conn_.get()),
+      schema_(schema), sub_batch_size_(sub_batch_size), partial_(schema.has_sequence2) {
+	InitStream(table_name);
+}
+
+QuerySequenceStream::QuerySequenceStream(Connection &conn, const std::string &table_name,
+                                         const SequenceTableSchema &schema, idx_t sub_batch_size)
+    : owned_conn_(nullptr), conn_ptr_(&conn), schema_(schema), sub_batch_size_(sub_batch_size),
       partial_(schema.has_sequence2) {
+	InitStream(table_name);
+}
+
+void QuerySequenceStream::InitStream(const std::string &table_name) {
 	partial_.reserve(sub_batch_size_);
 
 	std::string query =
 	    "SELECT " + BuildSequenceColumnList(schema_) + " FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
 
-	stream_ = conn_.SendQuery(query);
+	stream_ = conn_ptr_->SendQuery(query);
 	if (stream_->HasError()) {
 		throw InvalidInputException("Failed to read from query table '%s': %s", table_name, stream_->GetError());
 	}
@@ -506,11 +517,14 @@ miint::SequenceRecordBatch QuerySequenceStream::FetchSubBatch() {
 	return result;
 }
 
-LoadedSingleEndSequences LoadSingleEndSequences(ClientContext &context, const std::string &table_name,
-                                                const std::string &function_name, bool strict) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
-	auto result = conn.Query("SELECT read_id, sequence1 FROM " + KeywordHelper::WriteOptionallyQuoted(table_name));
+LoadedSingleEndSequences LoadSingleEndSequences(Connection &conn, const std::string &table_name,
+                                                const std::string &function_name, bool strict,
+                                                const std::string &where_sql) {
+	auto sql = "SELECT read_id, sequence1 FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+	if (!where_sql.empty()) {
+		sql += " WHERE " + where_sql;
+	}
+	auto result = conn.Query(sql);
 	if (result->HasError()) {
 		throw InvalidInputException("Failed to read table '%s': %s", table_name, result->GetError());
 	}
@@ -561,6 +575,13 @@ LoadedSingleEndSequences LoadSingleEndSequences(ClientContext &context, const st
 	}
 
 	return loaded;
+}
+
+LoadedSingleEndSequences LoadSingleEndSequences(ClientContext &context, const std::string &table_name,
+                                                const std::string &function_name, bool strict) {
+	auto &db = DatabaseInstance::GetDatabase(context);
+	Connection conn(db);
+	return LoadSingleEndSequences(conn, table_name, function_name, strict, /*where_sql=*/"");
 }
 
 } // namespace duckdb

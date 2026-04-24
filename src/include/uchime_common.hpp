@@ -46,9 +46,11 @@ namespace duckdb {
 std::vector<std::string> GetUchimeOutputNames();
 std::vector<LogicalType> GetUchimeOutputTypes();
 
-// Write a batch of UchimeResults into a DataChunk.
+// Write a batch of UchimeResults into a DataChunk starting at column `start_col`.
+// When start_col > 0 (per-sample callers), callers must populate columns [0, start_col)
+// before/after this call; this function sets the chunk cardinality itself.
 // Returns the number of rows written (min of count and remaining results).
-idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResult> &results, idx_t offset,
-                          idx_t count);
+idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResult> &results, idx_t offset, idx_t count,
+                          idx_t start_col = 0);
 
 } // namespace duckdb

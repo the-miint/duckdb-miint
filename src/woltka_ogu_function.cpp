@@ -3,9 +3,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/parallel/task_scheduler.hpp"
-
-#include <atomic>
+#include "per_sample_table_function.hpp"
 
 namespace duckdb {
 
@@ -26,26 +24,16 @@ struct WoltkaOguData : public TableFunctionData {
 	string seq_id_col;
 
 	bool has_sample_id = false;
-	string sample_id_col;
-	LogicalType sample_id_type;
-	vector<Value> sample_values;
+	PerSampleBindInfo sample_info;
 
 	// Non-sample path: pre-run at Bind; ownership moved to GlobalState at InitGlobal.
 	unique_ptr<MaterializedQueryResult> non_sample_result;
 };
 
-struct WoltkaOguGlobalState : public GlobalTableFunctionState {
-	// Per-sample mode: atomic index of the next sample to claim.
-	atomic<idx_t> next_sample_idx {0};
-	idx_t max_threads = 1;
-
+struct WoltkaOguGlobalState : public PerSampleGlobalState {
 	// Non-sample path: pre-run result transferred from bind data at InitGlobal.
 	// Single thread drains it from Execute; no synchronization needed.
 	unique_ptr<MaterializedQueryResult> non_sample_result;
-
-	idx_t MaxThreads() const override {
-		return max_threads;
-	}
 };
 
 struct WoltkaOguLocalState : public LocalTableFunctionState {
@@ -131,18 +119,7 @@ static unique_ptr<FunctionData> WoltkaOguBind(ClientContext &context, TableFunct
 
 	auto it = input.named_parameters.find("sample_id");
 	if (it != input.named_parameters.end()) {
-		data->sample_id_col = it->second.GetValue<string>();
-		if (data->sample_id_col.empty()) {
-			throw InvalidInputException("woltka_ogu: sample_id column name must not be empty");
-		}
-		// Reject column names that collide with the fixed output schema.
-		// DuckDB identifiers are case-insensitive.
-		auto col_lower = StringUtil::Lower(data->sample_id_col);
-		if (col_lower == "feature_id" || col_lower == "value") {
-			throw InvalidInputException("woltka_ogu: sample_id column name '%s' collides with an output column "
-			                            "(feature_id, value); rename the column or alias it in a view",
-			                            data->sample_id_col);
-		}
+		data->sample_info.sample_id_col = it->second.GetValue<string>();
 		data->has_sample_id = true;
 	}
 
@@ -163,37 +140,11 @@ static unique_ptr<FunctionData> WoltkaOguBind(ClientContext &context, TableFunct
 	}
 
 	if (data->has_sample_id) {
-		auto q_sample = KeywordHelper::WriteOptionallyQuoted(data->sample_id_col);
+		DiscoverSamples(conn, data->source, data->sample_info.sample_id_col, {"feature_id", "value"}, "woltka_ogu",
+		                data->sample_info);
 
-		auto sample_probe = conn.Query("SELECT " + q_sample + " FROM " + q_src + " LIMIT 0");
-		if (sample_probe->HasError()) {
-			throw InvalidInputException("woltka_ogu: sample_id column '%s' not found", data->sample_id_col);
-		}
-		data->sample_id_type = sample_probe->types[0];
-
-		// Single scan: distinct sample values, NULLs first so we can reject up-front.
-		auto distinct_result =
-		    conn.Query("SELECT DISTINCT " + q_sample + " FROM " + q_src + " ORDER BY " + q_sample + " NULLS FIRST");
-		if (distinct_result->HasError()) {
-			throw InvalidInputException("woltka_ogu: failed to query sample_id values: %s",
-			                            distinct_result->GetError());
-		}
-		auto &materialized = distinct_result->Cast<MaterializedQueryResult>();
-		while (auto chunk = materialized.Fetch()) {
-			for (idx_t i = 0; i < chunk->size(); i++) {
-				auto val = chunk->data[0].GetValue(i);
-				if (val.IsNull()) {
-					throw InvalidInputException("NULL values in sample_id column '%s'", data->sample_id_col);
-				}
-				data->sample_values.push_back(std::move(val));
-			}
-		}
-		if (data->sample_values.empty()) {
-			throw InvalidInputException("sample_id column '%s' has no non-NULL values", data->sample_id_col);
-		}
-
-		names.push_back(data->sample_id_col);
-		return_types.push_back(data->sample_id_type);
+		names.push_back(data->sample_info.sample_id_col);
+		return_types.push_back(data->sample_info.sample_id_type);
 	} else {
 		// Non-sample path: pre-run the aggregation once here. Ownership of the result
 		// transfers to GlobalState at InitGlobal, matching MassQLFunction's pattern.
@@ -214,8 +165,7 @@ static unique_ptr<GlobalTableFunctionState> WoltkaOguInitGlobal(ClientContext &c
 	auto &data = input.bind_data->CastNoConst<WoltkaOguData>();
 	auto gstate = make_uniq<WoltkaOguGlobalState>();
 	if (data.has_sample_id) {
-		idx_t db_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
-		gstate->max_threads = std::max<idx_t>(1, std::min<idx_t>(db_threads, data.sample_values.size()));
+		InitPerSampleGlobal(context, *gstate, data.sample_info.sample_values.size());
 	} else {
 		gstate->max_threads = 1;
 		gstate->non_sample_result = std::move(data.non_sample_result);
@@ -260,13 +210,13 @@ static void WoltkaOguExecute(ClientContext &context, TableFunctionInput &input, 
 			}
 			lstate.result.reset();
 		}
-		idx_t sample_idx = gstate.next_sample_idx.fetch_add(1, std::memory_order_relaxed);
-		if (sample_idx >= data.sample_values.size()) {
+		idx_t sample_idx;
+		if (!ClaimNextSample(gstate, data.sample_info.sample_values.size(), sample_idx)) {
 			output.SetCardinality(0);
 			return;
 		}
-		lstate.result = RunSampleAggregation(*lstate.conn, data.source, data.seq_id_col, data.sample_id_col,
-		                                     data.sample_values[sample_idx]);
+		lstate.result = RunSampleAggregation(*lstate.conn, data.source, data.seq_id_col, data.sample_info.sample_id_col,
+		                                     data.sample_info.sample_values[sample_idx]);
 	}
 }
 

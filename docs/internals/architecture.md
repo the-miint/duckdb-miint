@@ -8,6 +8,7 @@ Cross-cutting design patterns and implementation notes for duckdb-miint. This fi
 - How external libraries are embedded → `docs/internals/embedded-tools.md`
 - Reading from user-specified tables/views → `docs/internals/reading-tables-views.md`
 - Consuming Arrow C Data Interface streams → `docs/internals/arrow-zero-copy.md`
+- Adding `sample_id` support to a table function → `docs/internals/per-sample-pattern.md`
 
 ## Extension Entry Point
 
@@ -110,6 +111,7 @@ SAM alignments compute `stop_position` using HTSlib's `bam_endpos()`:
 3. Register in `LoadInternal()` in `miint_extension.cpp`
 4. Add to `EXTENSION_SOURCES` in `CMakeLists.txt`
 5. Create SQL test in `test/sql/`
+6. If the function should run per-sample (partitioning an input relation by a column), follow `docs/internals/per-sample-pattern.md`
 
 ### Adding a new COPY format
 1. Create `copy_<format>.cpp` and header
