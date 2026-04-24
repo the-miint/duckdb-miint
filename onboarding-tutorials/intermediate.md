@@ -230,7 +230,7 @@ homology with *E. coli* &mdash; not genuine *E. coli* reads.
 ## Step 6: Filter and count with `woltka_ogu`
 
 Now let's apply a proper filter and count with
-[`woltka_ogu`](../docs/analysis-functions.md#woltka_ogurelation-sequence_id_field),
+[`woltka_ogu`](../docs/analysis-functions.md#woltka_ogurelation-sequence_id_field-sample_id),
 a built-in table macro that implements the Woltka OGU (Operational Genomic
 Unit) counting method (Zhu et al., 2022). `woltka_ogu` is primarily designed
 for shotgun metagenomic data, where reads span the entire genome; however, its
@@ -256,10 +256,10 @@ Now compare unfiltered vs. filtered counts using
 
 ```sql
 SELECT 'unfiltered' AS source, *
-    FROM woltka_ogu(alignments, read_id)
+    FROM woltka_ogu('alignments', 'read_id')
 UNION ALL
 SELECT 'filtered' AS source, *
-    FROM woltka_ogu(filtered_alignments, read_id);
+    FROM woltka_ogu('filtered_alignments', 'read_id');
 ```
 
 | source | feature_id | value |
@@ -293,10 +293,10 @@ CREATE VIEW strict_99 AS
       AND alignment_seq_identity(cigar, tag_nm, tag_md, 'blast') >= 0.99;
 
 SELECT 'qcov >= 99%, id >= 97%' AS threshold, *
-    FROM woltka_ogu(strict_97, read_id)
+    FROM woltka_ogu('strict_97', 'read_id')
 UNION ALL
 SELECT 'qcov >= 99%, id >= 99%' AS threshold, *
-    FROM woltka_ogu(strict_99, read_id);
+    FROM woltka_ogu('strict_99', 'read_id');
 ```
 
 | threshold | feature_id | value |
@@ -316,37 +316,35 @@ present?" answer, 99% identity with full query coverage is hard to argue with.
 
 If you find yourself applying the same filter repeatedly, you can wrap it in a
 DuckDB [macro](https://duckdb.org/docs/current/sql/statements/create_macro). A
-macro is a parameterized query you can call like a function:
+table macro is a parameterized query you can call like a table:
 
 ```sql
-CREATE OR REPLACE MACRO filtered_ogu(
-    alignment_table,
-    seq_id_field,
+CREATE OR REPLACE MACRO quality_filtered(
     min_query_coverage := 0.99,
     min_seq_identity := 0.97
 ) AS TABLE
-    WITH passing AS (
-        SELECT *
-        FROM query_table(alignment_table)
-        WHERE alignment_is_primary(flags)
-          AND alignment_query_coverage(cigar) >= min_query_coverage
-          AND alignment_seq_identity(cigar, tag_nm, tag_md, 'blast')
-              >= min_seq_identity
-    )
     SELECT *
-    FROM woltka_ogu(passing, seq_id_field);
+    FROM alignments
+    WHERE alignment_is_primary(flags)
+      AND alignment_query_coverage(cigar) >= min_query_coverage
+      AND alignment_seq_identity(cigar, tag_nm, tag_md, 'blast')
+          >= min_seq_identity;
 ```
 
-Now you can count with quality filtering in a single call:
+`woltka_ogu` resolves its `relation` argument through the catalog, so wrap the
+macro call in a view before counting:
 
 ```sql
-SELECT * FROM filtered_ogu(alignments, read_id);
+CREATE OR REPLACE VIEW strict_filtered AS SELECT * FROM quality_filtered();
+SELECT * FROM woltka_ogu('strict_filtered', 'read_id');
 ```
 
 Or adjust the thresholds:
 
 ```sql
-SELECT * FROM filtered_ogu(alignments, read_id, 0.99, 0.99);
+CREATE OR REPLACE VIEW strictest_filtered AS
+    SELECT * FROM quality_filtered(min_seq_identity := 0.99);
+SELECT * FROM woltka_ogu('strictest_filtered', 'read_id');
 ```
 
 ## Step 9: Genome coverage

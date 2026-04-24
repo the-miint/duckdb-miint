@@ -465,16 +465,11 @@ if(MIINT_ENABLE_VSEARCH)
     ExternalProject_Add(
         vsearch_build
         SOURCE_DIR ${VSEARCH_SRC_DIR}
-        # Touch pre-generated autotools files so make doesn't try to regenerate
-        # them (git checkout gives all files the same timestamp, which can trigger
-        # autotools rebuild rules if make thinks sources are newer).
-        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E touch
-            ${VSEARCH_SRC_DIR}/aclocal.m4
-            ${VSEARCH_SRC_DIR}/configure
-            ${VSEARCH_SRC_DIR}/Makefile.in
-            ${VSEARCH_SRC_DIR}/src/Makefile.in
-            ${VSEARCH_SRC_DIR}/man/Makefile.in
-            ${VSEARCH_SRC_DIR}/config.h.in
+        # vsearch upstream gitignores `configure`, `Makefile.in`, etc. — they are
+        # generated on demand by autogen.sh (autoreconf --force --install). A
+        # fresh CI checkout has none of them, so we must regenerate here before
+        # invoking configure.
+        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E chdir ${VSEARCH_SRC_DIR} sh ./autogen.sh
             COMMAND ${CMAKE_COMMAND} -E env "CXXFLAGS=-fPIC ${VSEARCH_ARCH_CFLAGS}" "CFLAGS=-fPIC ${VSEARCH_ARCH_CFLAGS}"
             ${VSEARCH_SRC_DIR}/configure ${VSEARCH_HOST_FLAG}
         BUILD_COMMAND make -C src libvsearch.a
@@ -790,6 +785,7 @@ set(EXTENSION_SOURCES
     src/massql_parser.cpp
     src/massql_transpiler.cpp
     src/massql_function.cpp
+    src/woltka_ogu_function.cpp
     src/mzml_peak_pair_function.cpp
     src/mass_tables.cpp
     src/MzXMLReader.cpp
