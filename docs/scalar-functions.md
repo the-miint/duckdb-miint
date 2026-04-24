@@ -5,7 +5,8 @@ Scalar functions for alignment analysis and sequence processing.
 ## Table of Contents
 
 - [SAM Flag Functions](#sam-flag-functions) - Test individual SAM flag bits
-- [`alignment_seq_identity`](#alignment_seq_identitycigar-nm-md-type) - Sequence identity calculation
+- [`alignment_seq_identity`](#alignment_seq_identitycigar-nm-md-type) - Sequence identity calculation (multi-mode, requires NM/MD for legacy CIGAR)
+- [`cigar_sequence_identity`](#cigar_sequence_identitycigar) - Sequence identity from extended CIGAR alone
 - [`cigar_query_length`](#cigar_query_lengthcigar-include_hard_clipstrue) - Query length from CIGAR
 - [`cigar_query_coverage`](#cigar_query_coveragecigar-typealigned) - Query coverage from CIGAR
 - [`mask_dust`](#mask_dustsequence-hardmaskfalse) - DUST low-complexity masking
@@ -107,6 +108,39 @@ FROM alignment_slice('my_alignments', 1000, 2000);
 ```
 
 **Reference:** [On the definition of sequence identity](https://lh3.github.io/2018/11/25/on-the-definition-of-sequence-identity) by Heng Li
+
+## `cigar_sequence_identity(cigar)`
+
+One-arg convenience wrapper over `alignment_seq_identity(cigar, NULL, NULL, 'cigar')`. Use this when your CIGAR uses extended `=`/`X` ops and you don't need NM/MD-based identity flavors.
+
+**Parameters:**
+- `cigar` (VARCHAR): CIGAR string with extended ops (`=` for match, `X` for mismatch). Aligners must be invoked with `--xeq` (bowtie2) or `-eqx` (minimap2) for this to work; legacy `M`-only CIGAR cannot be used.
+
+**Formula:** `match_ops / alignment_columns` where `match_ops` is the count of `=` operations and `alignment_columns` is `M + I + D` (with `=`/`X` counting as `M`).
+
+**Returns:** DOUBLE in [0.0, 1.0], or NULL when identity can't be determined from CIGAR alone:
+- CIGAR is NULL, empty, or `*` (unmapped)
+- CIGAR uses only `M` (legacy — can't distinguish matches from mismatches; use `alignment_seq_identity` with NM or MD instead)
+- CIGAR mixes `M` with `=`/`X` (inconsistent encoding)
+- CIGAR has no `=`/`X` ops at all (e.g. pure `I`, `D`, `S`, `H`, `N`, `P`)
+
+**Example:**
+```sql
+-- Modern CIGAR (=/X), no NM/MD needed
+SELECT read_id, cigar_sequence_identity(cigar) AS identity
+FROM read_alignments('alignments.sam');
+
+-- Filter high-identity alignments
+SELECT COUNT(*)
+FROM read_alignments('alignments.bam')
+WHERE cigar_sequence_identity(cigar) > 0.95;
+
+-- Same as alignment_seq_identity(cigar, NULL, NULL, 'cigar') but shorter:
+SELECT read_id, cigar_sequence_identity(cigar) AS identity
+FROM alignment_slice('my_alignments', 1000, 2000);
+```
+
+**See also:** `alignment_seq_identity` for legacy `M`-only CIGAR or BLAST/gap-compressed/gap-excluded identity flavors.
 
 ## `cigar_query_length(cigar, [include_hard_clips=true])`
 
