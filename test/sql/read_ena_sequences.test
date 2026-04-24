@@ -129,3 +129,37 @@ query II
 EXPLAIN SELECT * FROM read_ena_sequences('ERR1074767') LIMIT 1;
 ----
 physical_plan	<!REGEX>:.*INOUT_FUNCTION.*
+
+# ---- max_sequences ----
+
+statement ok
+PRAGMA explain_output = DEFAULT;
+
+# max_sequences caps row count per run. ERR1074767 has thousands of reads,
+# so an exact-match assertion proves the cap actually fired (as opposed to
+# EOF returning fewer rows for some unrelated reason).
+query I
+SELECT COUNT(*) = 10 AS capped_exact
+FROM read_ena_sequences('ERR1074767', max_sequences=10);
+----
+true
+
+# Same run, default (uncapped) cardinality is much larger than 10.
+query I
+SELECT COUNT(*) > 10 AS uncapped
+FROM (SELECT * FROM read_ena_sequences('ERR1074767') LIMIT 20);
+----
+true
+
+# max_sequences=0 is the explicit sentinel for "unlimited".
+query I
+SELECT COUNT(*) > 10 AS uncapped
+FROM (SELECT * FROM read_ena_sequences('ERR1074767', max_sequences=0) LIMIT 20);
+----
+true
+
+# Negative max_sequences rejected at Bind time.
+statement error
+SELECT * FROM read_ena_sequences('ERR1074767', max_sequences=-5);
+----
+max_sequences must be >= 0

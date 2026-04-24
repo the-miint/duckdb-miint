@@ -3,6 +3,8 @@
 #include "table_function_common.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_open_flags.hpp"
+#include "duckdb/common/printer.hpp"
+#include "duckdb/common/string_util.hpp"
 
 #include <cerrno>
 #include <cstdio>
@@ -12,9 +14,9 @@
 namespace miint {
 
 PerRunReader::PerRunReader(duckdb::FileSystem &fs, ENARunInfo run, bool use_aspera, bool trim, std::mutex &open_mutex,
-                           const AsperaConfig *aspera_config)
+                           const AsperaConfig *aspera_config, uint64_t max_sequences)
     : fs_(fs), run_(std::move(run)), use_aspera_(use_aspera), trim_(trim), open_mutex_(open_mutex),
-      aspera_config_(aspera_config) {
+      aspera_config_(aspera_config), max_sequences_(max_sequences) {
 }
 
 PerRunReader::~PerRunReader() {
@@ -25,11 +27,8 @@ PerRunReader::~PerRunReader() {
 		sff_temp_path_.clear();
 	}
 #if MIINT_ASPERA_SUPPORTED
-	if (!aspera_temp_path_.empty()) {
-		std::remove(aspera_temp_path_.c_str());
-		aspera_temp_path_.clear();
-	}
-	// AsperaProcess destructor handles SIGTERM → SIGKILL → waitpid
+	// AsperaProcess destructor handles SIGTERM → SIGKILL → waitpid for both
+	// single-end (aspera_process_) and paired-end (aspera_process_paired_).
 #endif
 }
 
@@ -57,12 +56,26 @@ SequenceRecordBatch PerRunReader::ReadBatch(size_t max_size) {
 	if (exhausted_) {
 		return SequenceRecordBatch {};
 	}
+	if (max_sequences_ > 0) {
+		if (sequences_emitted_ >= max_sequences_) {
+			exhausted_ = true;
+			return SequenceRecordBatch {};
+		}
+		// Clamp this call so the cap fires on an exact boundary instead of
+		// spilling into the next batch. batch.size() counts pairs as 1, which
+		// matches the contract documented on the ctor.
+		uint64_t remaining = max_sequences_ - sequences_emitted_;
+		if (remaining < max_size) {
+			max_size = static_cast<size_t>(remaining);
+		}
+	}
 	SequenceRecordBatch batch;
 	if (run_.format == ENASequenceFormat::SFF) {
 		batch = sff_reader_->read(max_size);
 	} else {
 		batch = fastx_reader_->read(max_size);
 	}
+	sequences_emitted_ += batch.size();
 	if (batch.empty()) {
 		exhausted_ = true;
 	}
@@ -75,13 +88,35 @@ void PerRunReader::Finish() {
 	}
 	finished_ = true;
 #if MIINT_ASPERA_SUPPORTED
-	if (use_aspera_ && aspera_process_) {
-		int exit_code = aspera_process_->WaitForExit();
-		aspera_process_.reset();
-		if (exit_code != 0 && exit_code != -1) {
-			throw duckdb::IOException("read_ena_sequences: ascp exited with code %d for run '%s'", exit_code,
-			                          run_.run_accession);
+	if (!use_aspera_) {
+		return;
+	}
+	// Wait on both processes. If the first throws, still wait on the second to
+	// avoid leaving an orphan ascp around; re-throw after both are reaped.
+	auto wait_one = [this](std::unique_ptr<AsperaProcess> &proc, const char *tag) -> std::string {
+		if (!proc) {
+			return {};
 		}
+		int exit_code = proc->WaitForExit();
+		proc.reset();
+		if (exit_code != 0 && exit_code != -1) {
+			return duckdb::StringUtil::Format("read_ena_sequences: %s ascp exited with code %d for run '%s'", tag,
+			                                  exit_code, run_.run_accession);
+		}
+		return {};
+	};
+	std::string err_r1 = wait_one(aspera_process_, "R1");
+	std::string err_r2 = wait_one(aspera_process_paired_, "R2");
+	// When both processes errored we surface R1 via the thrown exception;
+	// log R2's message first so the user doesn't lose half the story.
+	if (!err_r1.empty() && !err_r2.empty()) {
+		duckdb::Printer::Print(err_r2);
+	}
+	if (!err_r1.empty()) {
+		throw duckdb::IOException(err_r1);
+	}
+	if (!err_r2.empty()) {
+		throw duckdb::IOException(err_r2);
 	}
 #endif
 }
@@ -142,6 +177,18 @@ void PerRunReader::OpenHTTP() {
 void PerRunReader::OpenSFF() {
 	if (run_.sff_url.empty()) {
 		throw duckdb::IOException("read_ena_sequences: no SFF URL available for run '%s'", run_.run_accession);
+	}
+
+	// SFF format requires the entire file on disk before any record can be
+	// parsed — we download-then-read rather than stream. `max_sequences` still
+	// caps emitted rows downstream, but the bandwidth has already been spent
+	// by the time ReadBatch() starts enforcing the cap. Warn loudly once per
+	// SFF run so users don't silently assume the cap saved them a download.
+	if (max_sequences_ > 0) {
+		duckdb::Printer::PrintF("read_ena_sequences: WARNING: max_sequences=%llu on SFF run '%s' — SFF requires "
+		                        "downloading the full file before any record can be parsed; the row cap applies "
+		                        "but bandwidth savings do not",
+		                        static_cast<unsigned long long>(max_sequences_), run_.run_accession);
 	}
 
 	auto temp_dir = GetTempDir();
@@ -209,38 +256,31 @@ void PerRunReader::OpenSFF() {
 #if MIINT_ASPERA_SUPPORTED
 
 void PerRunReader::OpenAspera() {
-	std::vector<std::string> remote_paths;
-	for (const auto &ap : run_.aspera_paths) {
-		remote_paths.push_back(ap.remote_path);
+	if (run_.aspera_paths.empty()) {
+		throw duckdb::IOException("read_ena_sequences: no Aspera paths available for run '%s'", run_.run_accession);
 	}
 
 	AsperaConfig config = aspera_config_ ? *aspera_config_ : AsperaConfig {};
-	if (!run_.aspera_paths.empty()) {
-		config.host = run_.aspera_paths[0].host;
-	}
+	config.host = run_.aspera_paths[0].host;
 
-	// Serialize ascp launches (fork/exec); pipe reads use thread-owned descriptors.
-	{
-		std::lock_guard<std::mutex> open_guard(open_mutex_);
-		aspera_process_ = std::make_unique<AsperaProcess>(config, remote_paths);
-	}
-	auto *proc = aspera_process_.get();
-
-	std::string filename;
-	size_t file_size;
-	if (!proc->NextFile(filename, file_size)) {
-		throw duckdb::IOException("read_ena_sequences: Aspera stream ended unexpectedly (expected files for run '%s')",
-		                          run_.run_accession);
-	}
-
-	std::string gz_hint = filename;
-	if (gz_hint.empty() && !run_.aspera_paths.empty()) {
-		gz_hint = run_.aspera_paths[0].remote_path;
-	}
-	bool is_gz = duckdb::IsGzipped(gz_hint);
-
+	// Single-end: one ascp process in stdio:// (single-file) mode.
 	if (!run_.is_paired) {
-		auto *s1 = CreateAsperaSeqStream(proc, is_gz);
+		{
+			std::lock_guard<std::mutex> open_guard(open_mutex_);
+			aspera_process_ =
+			    std::make_unique<AsperaProcess>(config, std::vector<std::string> {run_.aspera_paths[0].remote_path});
+		}
+		std::string filename;
+		size_t file_size;
+		if (!aspera_process_->NextFile(filename, file_size)) {
+			throw duckdb::IOException(
+			    "read_ena_sequences: Aspera stream ended unexpectedly (expected files for run '%s')",
+			    run_.run_accession);
+		}
+		std::string gz_hint = filename.empty() ? run_.aspera_paths[0].remote_path : filename;
+		bool is_gz = duckdb::IsGzipped(gz_hint);
+
+		auto *s1 = CreateAsperaSeqStream(aspera_process_.get(), is_gz);
 		try {
 			fastx_reader_ = std::make_unique<SequenceReader>(s1, static_cast<AsperaSeqStream *>(nullptr), true);
 		} catch (...) {
@@ -250,79 +290,48 @@ void PerRunReader::OpenAspera() {
 		return;
 	}
 
-	// Paired-end: stream R1 from pipe to temp file, then stream R2 live.
-	static constexpr size_t COPY_BUF_SIZE = 1024 * 1024; // 1 MB
-
-	std::string tmpl = GetTempDir() + "/miint_aspera_r1_XXXXXX";
-	std::vector<char> tmpl_buf(tmpl.begin(), tmpl.end());
-	tmpl_buf.push_back('\0');
-	int fd = mkstemp(tmpl_buf.data());
-	if (fd == -1) {
-		throw duckdb::IOException("read_ena_sequences: failed to create temp file for paired-end Aspera buffering");
-	}
-	aspera_temp_path_ = std::string(tmpl_buf.data());
-
-	std::vector<char> copy_buf(COPY_BUF_SIZE);
-	while (true) {
-		int n = proc->ReadBounded(copy_buf.data(), COPY_BUF_SIZE);
-		if (n == 0) {
-			break;
-		}
-		if (n < 0) {
-			close(fd);
-			std::remove(aspera_temp_path_.c_str());
-			aspera_temp_path_.clear();
-			throw duckdb::IOException("read_ena_sequences: pipe read error while buffering R1 for run '%s'",
-			                          run_.run_accession);
-		}
-		size_t written = 0;
-		while (written < static_cast<size_t>(n)) {
-			ssize_t w = write(fd, copy_buf.data() + written, static_cast<size_t>(n) - written);
-			if (w < 0) {
-				if (errno == EINTR) {
-					continue;
-				}
-				int err = errno;
-				close(fd);
-				std::remove(aspera_temp_path_.c_str());
-				aspera_temp_path_.clear();
-				throw duckdb::IOException(
-				    "read_ena_sequences: failed to write temp file for paired-end Aspera buffering "
-				    "(run '%s', errno=%d: %s)",
-				    run_.run_accession, err, strerror(err));
-			}
-			written += static_cast<size_t>(w);
-		}
-	}
-	close(fd);
-
-	std::string filename2;
-	size_t file_size2;
-	if (!proc->NextFile(filename2, file_size2)) {
-		std::remove(aspera_temp_path_.c_str());
-		aspera_temp_path_.clear();
-		throw duckdb::IOException("read_ena_sequences: Aspera stream ended unexpectedly (expected R2 for run '%s')",
+	// Paired-end: two ascp processes, one per remote path, each in stdio://
+	// mode. Both pipes feed the SequenceReader concurrently — no R1 temp file.
+	// Early termination (e.g., max_sequences, LIMIT-inside-LATERAL) tears both
+	// down via AsperaProcess destructors, so the cap saves real bandwidth.
+	if (run_.aspera_paths.size() < 2) {
+		throw duckdb::IOException("read_ena_sequences: paired-end run '%s' is missing its second Aspera path",
 		                          run_.run_accession);
 	}
-
-	std::string gz_hint2 = filename2;
-	if (gz_hint2.empty() && run_.aspera_paths.size() >= 2) {
-		gz_hint2 = run_.aspera_paths[1].remote_path;
+	{
+		std::lock_guard<std::mutex> open_guard(open_mutex_);
+		aspera_process_ =
+		    std::make_unique<AsperaProcess>(config, std::vector<std::string> {run_.aspera_paths[0].remote_path});
+		aspera_process_paired_ =
+		    std::make_unique<AsperaProcess>(config, std::vector<std::string> {run_.aspera_paths[1].remote_path});
 	}
-	bool is_gz2 = duckdb::IsGzipped(gz_hint2);
 
-	auto *s1 = duckdb::CreateDuckDBSeqStream(fs_, aspera_temp_path_, is_gz);
+	std::string f1;
+	size_t sz1;
+	std::string f2;
+	size_t sz2;
+	if (!aspera_process_->NextFile(f1, sz1)) {
+		throw duckdb::IOException(
+		    "read_ena_sequences: Aspera R1 stream ended unexpectedly (expected files for run '%s')",
+		    run_.run_accession);
+	}
+	if (!aspera_process_paired_->NextFile(f2, sz2)) {
+		throw duckdb::IOException(
+		    "read_ena_sequences: Aspera R2 stream ended unexpectedly (expected files for run '%s')",
+		    run_.run_accession);
+	}
+
+	bool is_gz1 = duckdb::IsGzipped(f1.empty() ? run_.aspera_paths[0].remote_path : f1);
+	bool is_gz2 = duckdb::IsGzipped(f2.empty() ? run_.aspera_paths[1].remote_path : f2);
+
+	auto *s1 = CreateAsperaSeqStream(aspera_process_.get(), is_gz1);
 	AsperaSeqStream *s2 = nullptr;
 	try {
-		s2 = CreateAsperaSeqStream(proc, is_gz2);
+		s2 = CreateAsperaSeqStream(aspera_process_paired_.get(), is_gz2);
 		fastx_reader_ = std::make_unique<SequenceReader>(s1, s2, true);
 	} catch (...) {
 		delete s2;
 		delete s1;
-		// On throw here the SequenceReader never took ownership of s1, so the
-		// R1 temp file we already wrote will be removed by the destructor via
-		// aspera_temp_path_. Clear it only after Unix-level `std::remove` runs
-		// from ~PerRunReader to keep the cleanup path in one place.
 		throw;
 	}
 }

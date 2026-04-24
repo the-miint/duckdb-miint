@@ -18,7 +18,7 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`read_ena`](#read_enaaccession-resultread_run-fields) - EBI/ENA metadata queries
 - [`read_ena_attributes`](#read_ena_attributesaccession) - EBI/ENA custom sample attributes
 - [`ena_searchable_fields`](#ena_searchable_fieldsresult_type) - Enumerate ENA structured-search fields per result type
-- [`read_ena_sequences`](#read_ena_sequencesaccession-include_filepathfalse-qual_offset33) - Stream FASTA/FASTQ from EBI/ENA with accession columns
+- [`read_ena_sequences`](#read_ena_sequencesaccession-include_filepathfalse-qual_offset33-max_sequences0) - Stream FASTA/FASTQ from EBI/ENA with accession columns
 - [`read_jplace`](#read_jplacepath) - Phylogenetic placement files
 - [`read_jplace_newick`](#read_jplace_newickpath-include_filepathfalse) - Newick tree from jplace files
 - [`read_newick`](#read_newickfilename-include_filepathfalse) - Newick phylogenetic trees
@@ -996,7 +996,7 @@ FROM ena_searchable_fields('sample')
 WHERE field_name = 'host_body_site';
 ```
 
-## `read_ena_sequences(accession, [include_filepath=false], [qual_offset=33])`
+## `read_ena_sequences(accession, [include_filepath=false], [qual_offset=33], [max_sequences=0])`
 
 Stream FASTA/FASTQ sequence data from EBI/ENA with run, sample, and experiment accession columns. Returns data in the same schema as `read_fastx` plus accession metadata columns, enabling direct association of sequence data with project metadata. Supports mixed FASTA/FASTQ paired-end data (unlike `read_fastx` which rejects format mismatches).
 
@@ -1008,6 +1008,7 @@ Stream FASTA/FASTQ sequence data from EBI/ENA with run, sample, and experiment a
 - `accession` (VARCHAR or VARCHAR[]): ENA/SRA accession(s). Supports study (bulk download all runs), sample, run, and experiment accessions.
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column with the HTTPS download URL(s). For paired-end runs, URLs are semicolon-separated.
 - `qual_offset` (BIGINT, optional, default 33): Quality score offset (33 for Phred+33/Sanger, 64 for Phred+64/Illumina 1.3+)
+- `max_sequences` (BIGINT, optional, default 0): If `> 0`, stop emitting from each run after this many sequences. `0` (or NULL / absent) means unlimited. For paired-end runs the cap counts **pairs** (one output row per pair), not underlying FASTQ records — `max_sequences=N` yields at most N rows and corresponds to 2N downloaded reads. When downloading via Aspera the cap tears down the `ascp` transfer early, saving real bandwidth. For SFF runs the cap applies but the full file is downloaded before any record is parsed; a loud warning is printed in that case.
 
 **Output schema:**
 - `sequence_index` (BIGINT): 1-based sequence index (per run)

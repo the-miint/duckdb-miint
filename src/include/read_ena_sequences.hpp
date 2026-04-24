@@ -37,6 +37,9 @@ public:
 		bool use_aspera;
 		bool trim;
 		std::string prefer_format;
+		// `max_sequences == 0` means unlimited. For paired-end runs this counts
+		// pairs (one batch row per pair), not underlying FASTQ records.
+		uint64_t max_sequences = 0;
 #if MIINT_ASPERA_SUPPORTED
 		miint::AsperaConfig aspera_config;
 #endif

@@ -34,8 +34,10 @@ namespace miint {
 // sequence counter between attempts — the counter is not owned here.
 class PerRunReader {
 public:
+	// `max_sequences == 0` means unlimited. For paired-end runs, `max_sequences`
+	// counts pairs (one batch row per pair), not underlying FASTQ records.
 	PerRunReader(duckdb::FileSystem &fs, ENARunInfo run, bool use_aspera, bool trim, std::mutex &open_mutex,
-	             const AsperaConfig *aspera_config);
+	             const AsperaConfig *aspera_config, uint64_t max_sequences = 0);
 	~PerRunReader();
 
 	PerRunReader(const PerRunReader &) = delete;
@@ -74,12 +76,17 @@ private:
 	std::unique_ptr<SFFReader> sff_reader_;
 	std::string sff_temp_path_;
 #if MIINT_ASPERA_SUPPORTED
+	// Single-end and paired-end Aspera both stream directly: one ascp process
+	// per remote file, each in stdio:// (single-file) mode. Paired-end uses
+	// both processes concurrently; R2 is nullptr for single-end.
 	std::unique_ptr<AsperaProcess> aspera_process_;
-	std::string aspera_temp_path_; // paired R1 buffered here (paired-end aspera only)
+	std::unique_ptr<AsperaProcess> aspera_process_paired_;
 #endif
 	bool exhausted_ = false;
 	bool opened_ = false;
 	bool finished_ = false;
+	uint64_t max_sequences_ = 0; // 0 = unlimited
+	uint64_t sequences_emitted_ = 0;
 
 	void OpenHTTP();
 	void OpenSFF();

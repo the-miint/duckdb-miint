@@ -154,6 +154,22 @@ unique_ptr<FunctionData> ReadENASequencesTableFunction::Bind(ClientContext &cont
 		trim = trim_param->second.GetValue<bool>();
 	}
 
+	// `max_sequences`: 0 / NULL / absent = unlimited. Negative values are a
+	// user error caught here rather than silently coerced, matching the
+	// one-named-parameter-rejects-garbage precedent of qual_offset /
+	// download_method / prefer_format above.
+	uint64_t max_sequences = 0;
+	auto ms_param = input.named_parameters.find("max_sequences");
+	if (ms_param != input.named_parameters.end() && !ms_param->second.IsNull()) {
+		int64_t raw = ms_param->second.GetValue<int64_t>();
+		if (raw < 0) {
+			throw InvalidInputException(
+			    "read_ena_sequences: max_sequences must be >= 0 (got %lld; use 0 for unlimited)",
+			    static_cast<long long>(raw));
+		}
+		max_sequences = static_cast<uint64_t>(raw);
+	}
+
 	auto &db = DatabaseInstance::GetDatabase(context);
 
 	std::vector<miint::ENARunInfo> runs;
@@ -170,6 +186,7 @@ unique_ptr<FunctionData> ReadENASequencesTableFunction::Bind(ClientContext &cont
 	auto data = make_uniq<Data>(std::move(runs), include_filepath, qual_offset, trim, prefer_format);
 	data->deferred_resolution = deferred;
 	data->db_ptr = &db;
+	data->max_sequences = max_sequences;
 	if (deferred) {
 		// Per-bind cache + ENAClient: metadata lookups across outer rows dedupe
 		// and the ENAClient's rate limiter (~3 req/sec) throttles globally.
@@ -286,7 +303,8 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 		}
 #endif
 		return std::make_unique<miint::PerRunReader>(global_state.fs, global_state.runs[idx], global_state.use_aspera,
-		                                             global_state.trim, global_state.open_mutex, cfg);
+		                                             global_state.trim, global_state.open_mutex, cfg,
+		                                             bind_data.max_sequences);
 	};
 
 	miint::SequenceRecordBatch batch;
@@ -544,9 +562,9 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 	// and for retry-after-failure. Lateral path always uses HTTP (Bind rejects
 	// download_method='aspera' in deferred mode).
 	auto make_reader_for = [&](const miint::ENARunInfo &run) {
-		return std::make_unique<miint::PerRunReader>(global.fs, run, /*use_aspera=*/false, bind_data.trim,
-		                                             global.open_mutex,
-		                                             static_cast<const miint::AsperaConfig *>(nullptr));
+		return std::make_unique<miint::PerRunReader>(
+		    global.fs, run, /*use_aspera=*/false, bind_data.trim, global.open_mutex,
+		    static_cast<const miint::AsperaConfig *>(nullptr), bind_data.max_sequences);
 	};
 
 	// Phase 1: need a fresh outer row → pull and resolve.
@@ -731,6 +749,7 @@ TableFunction ReadENASequencesTableFunction::GetFunction() {
 	tf.named_parameters["download_method"] = LogicalType::VARCHAR;
 	tf.named_parameters["prefer_format"] = LogicalType::VARCHAR;
 	tf.named_parameters["trim"] = LogicalType::BOOLEAN;
+	tf.named_parameters["max_sequences"] = LogicalType::BIGINT;
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	tf.table_scan_progress = Progress;
 	return tf;
