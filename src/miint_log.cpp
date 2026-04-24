@@ -50,8 +50,14 @@ void EmitWarning(duckdb::ClientContext &ctx, const std::string &msg) {
 	// keep getting the "continue after skipping" behavior the calling code
 	// was designed around.
 	try {
-		duckdb::LogManager::Get(ctx).GlobalLogger().WriteLog(MiintWarningLogType::NAME, MiintWarningLogType::LEVEL,
-		                                                     msg);
+		auto &logger = duckdb::LogManager::Get(ctx).GlobalLogger();
+		logger.WriteLog(MiintWarningLogType::NAME, MiintWarningLogType::LEVEL, msg);
+		// InMemoryLogStorage buffers writes up to STANDARD_VECTOR_SIZE entries
+		// before flushing to the ColumnDataCollection that duckdb_logs() scans.
+		// Our warnings are rare, so a single unflushed entry would sit invisible
+		// until the next 2047 warnings arrived. Flush on every emit so
+		// miint_warnings() sees the row immediately.
+		logger.Flush();
 	} catch (...) {
 		// Fall through to stderr only. miint_warnings() will not see this row
 		// under warnings_as_errors=true; that's acceptable because the
