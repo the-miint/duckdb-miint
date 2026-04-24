@@ -148,8 +148,14 @@ unique_ptr<FunctionData> ReadENASequencesTableFunction::Bind(ClientContext &cont
 		}
 	}
 
+	// Named as `trim_sff` rather than `trim` to avoid a parser/binder clash: TRIM
+	// is a SQL function keyword, and read_ena_sequences is a dual-path function
+	// (`function` + `in_out_function`) where DuckDB's binder routes any non-
+	// scalar argument — including `name=value` syntax — through the in-out path,
+	// which skips named-parameter extraction. `trim_sff => false` survives both
+	// issues. Internal identifiers keep the shorter `trim` name.
 	bool trim = true;
-	auto trim_param = input.named_parameters.find("trim");
+	auto trim_param = input.named_parameters.find("trim_sff");
 	if (trim_param != input.named_parameters.end() && !trim_param->second.IsNull()) {
 		trim = trim_param->second.GetValue<bool>();
 	}
@@ -748,7 +754,7 @@ TableFunction ReadENASequencesTableFunction::GetFunction() {
 	tf.named_parameters["qual_offset"] = LogicalType::BIGINT;
 	tf.named_parameters["download_method"] = LogicalType::VARCHAR;
 	tf.named_parameters["prefer_format"] = LogicalType::VARCHAR;
-	tf.named_parameters["trim"] = LogicalType::BOOLEAN;
+	tf.named_parameters["trim_sff"] = LogicalType::BOOLEAN;
 	tf.named_parameters["max_sequences"] = LogicalType::BIGINT;
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	tf.table_scan_progress = Progress;

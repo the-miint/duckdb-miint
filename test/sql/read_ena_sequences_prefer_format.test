@@ -8,16 +8,15 @@ require miint
 #   'auto'  (default) - use FASTQ when available, fall back to SFF
 #   'sff'   - prefer SFF, fall back to FASTQ when SFF is unavailable
 #   'fastq' - FASTQ only, skip runs that lack FASTQ
-# trim (BOOLEAN, default true) - applies SFF clip trimming (ignored for FASTQ)
+# trim_sff (BOOLEAN, default true) - applies SFF clip trimming (ignored for FASTQ)
 #
-# NOTE: the tests below use the arrow-syntax (`name => value`) rather than
+# NOTE: the tests below use arrow-syntax (`name => value`) rather than
 # `name=value` for named parameters. read_ena_sequences has both `function`
 # and `in_out_function` set on a single TableFunction (dual-path), and DuckDB's
 # binder routes any `name=value` to the in-out path where named-parameter
 # extraction is skipped, producing a spurious "Referenced column ... was not
 # found" error. Arrow syntax parses the value as a scalar-with-alias and
-# survives the in-out-path check. `"trim"` is additionally quoted because
-# `TRIM` is a SQL function keyword.
+# survives the in-out-path check.
 # TODO: upstream DuckDB fix — https://github.com/duckdb/duckdb-miint/issues
 # (tracking issue to be filed).
 
@@ -38,6 +37,6 @@ read_ena_sequences: prefer_format must be 'auto', 'fastq', or 'sff'
 # instead of the prefer_format error.
 
 statement error
-SELECT * FROM read_ena_sequences('ERR1074767', "trim" => true, prefer_format => 'bad');
+SELECT * FROM read_ena_sequences('ERR1074767', trim_sff => true, prefer_format => 'bad');
 ----
 read_ena_sequences: prefer_format must be 'auto', 'fastq', or 'sff'

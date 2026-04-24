@@ -22,14 +22,12 @@ PerRunReader::PerRunReader(duckdb::FileSystem &fs, ENARunInfo run, bool use_aspe
 PerRunReader::~PerRunReader() {
 	// Readers / processes are auto-released by their unique_ptrs.
 	// Temp files: best-effort cleanup on the way out.
+	// (Aspera: AsperaProcess dtor handles SIGTERM → SIGKILL → waitpid for
+	// both aspera_process_ and aspera_process_paired_, no explicit work here.)
 	if (!sff_temp_path_.empty()) {
 		std::remove(sff_temp_path_.c_str());
 		sff_temp_path_.clear();
 	}
-#if MIINT_ASPERA_SUPPORTED
-	// AsperaProcess destructor handles SIGTERM → SIGKILL → waitpid for both
-	// single-end (aspera_process_) and paired-end (aspera_process_paired_).
-#endif
 }
 
 void PerRunReader::Open() {
