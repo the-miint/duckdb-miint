@@ -44,6 +44,20 @@ For headerless SAM files and SAM writing:
 ### Dual-path Table Functions (standard + lateral)
 Functions like `read_ena_sequences` set both `function` (`Execute`) and `in_out_function` (`ExecuteInOut`) on the same `TableFunction`. DuckDB routes scalar-constant calls to the standard path (parallel, byte-based progress) and correlated-column or subquery calls to the in-out path (one outer row at a time, `LIMIT`-driven short-circuit via `LocalState` destruction). Shared per-run open/read/close logic lives in `miint::PerRunReader` so both paths use the same state machine and retry policy, and shared column-fill logic lives in a `FillOutputFromBatch` helper so both paths emit identical chunk layouts. The `Bind` function detects the in-out path by an empty `input.inputs` (DuckDB's table-in-out dispatcher passes no scalar constants) and sets `Data::deferred_resolution`; the per-query LRU `ENAResolverCache` on `Data` then dedupes metadata lookups across outer rows.
 
+### Filter pushdown via `pushdown_complex_filter`
+`read_ena_attributes` is the reference implementation for translating a DuckDB `WHERE` clause into a remote-API query shape. Pattern:
+
+1. **Abstract AST for the extractor.** `src/include/ena_attributes_filter.hpp` defines `miint::ENAFilterNode` (EQ / IN / AND / OR / UNSUPPORTED). `ExtractPushdownPredicates(vector<unique_ptr<ENAFilterNode>> conjuncts) → ENAAttributePushdown` is pure, has no DuckDB dependency, and is exhaustively unit-tested against the AST directly — no binder scaffolding required.
+2. **DuckDB → AST translator.** Lives in the table function's `.cpp` (see `read_ena_attributes.cpp`'s anonymous namespace). Handles `BoundComparisonExpression` (COMPARE_EQUAL), `BoundOperatorExpression` (COMPARE_IN), and `BoundConjunctionExpression` (AND / OR). Anything else maps to `ENAFilterNode::MakeUnsupported()`, and the extractor rejects any conjunct list containing an unsupported atom.
+3. **Column name resolution.** `BoundColumnRefExpression::binding.column_index` is a local index into `LogicalGet::GetColumnIds()`; `GetPrimaryIndex()` on that entry gives the position in `LogicalGet::names`. (Mirrors `multi_file_list.cpp:68-69`.)
+4. **Do not erase filters.** Record the predicate in `Data::pushdown`, but leave the `vector<unique_ptr<Expression>> &filters` unchanged. DuckDB re-applies the filter as a `LogicalFilter` above the scan, so any semantic mismatch between the remote matcher and SQL equality degrades to extra work, never to wrong rows. (See `read_ena_attributes.cpp`'s `PushdownComplexFilter`.)
+5. **Dual-path Execute.** `GlobalState` exposes both `FetchNextBatch` (default) and `FetchNextStructuredBatch` (pushdown). `Execute()` branches on `bind_data.pushdown.tags.empty()` at the refill site. Both paths write to the same `current_batch` member so the emission code is shared.
+6. **Allowlist-gated pushdown.** The extractor consults `ENASearchFieldRegistry::IsSearchableSampleField` and returns empty (XML fallback) if any referenced tag is unknown — even inside an `IN` list. No per-tag mixing of structured + XML.
+
+Registration: set `tf.pushdown_complex_filter = YourCallback;` in `GetFunction()`. The two filter-pushdown flags are independent:
+- `tf.pushdown_complex_filter` (callback) — arbitrary Expression trees, called once during optimization, scope decided by the callback.
+- `tf.filter_pushdown = true` (bool) — tells the optimizer to extract simple `col=const` / `LIKE` / `IN` predicates into `get.table_filters`. The scan then receives those via `TableFunctionInitInput::filters` and is expected to consume them at read time (e.g. parquet zonemap pruning). Setting this without implementing consumption does not drop filters for correctness (the optimizer still wraps remaining expressions in a `LogicalFilter` above the scan), but the populated `TableFilterSet` is dead weight. Leave `filter_pushdown = false` unless you actually consume `TableFilter` objects.
+
 ## Testing Strategy
 
 ### SQL Tests (`test/sql/`)

@@ -945,6 +945,21 @@ Fetch custom sample attributes from EBI/ENA via the Browser XML API. Returns all
 - Parses `<SAMPLE_ATTRIBUTE>` `<TAG>`/`<VALUE>` pairs
 - Returns ALL attributes including custom/submitter-defined ones (e.g., primer sequences, custom identifiers) that are not available via `read_ena`
 
+**Predicate pushdown:**
+When the `WHERE` clause references `tag` (and optionally `value`) with equality-only operators, and every referenced tag is a known ENA sample-search field, the scan switches from per-sample XML fetches to a single `/search?result=sample` TSV request per batch. This converts an O(N)-per-sample XML scan into one HTTP call per 200 samples and can cut minutes off large studies (e.g., a 33 000-sample study drops from a ~3.7-minute rate-limit floor to a few seconds for `WHERE tag='host_body_site'`).
+
+Pushdown triggers when:
+- The filter is a conjunction (AND) of `tag = 'X'`, `tag IN ('X','Y',...)`, or `tag = 'X' AND value = 'Y'`
+- Every referenced tag passes `ena_searchable_fields('sample')` (see the curated allowlist under the hood; uppercase/mixed-case names are accepted)
+
+Pushdown is **declined** (falls back to the XML path, preserving correctness) when:
+- Any referenced tag is not in the searchable-field allowlist (including any single unknown tag inside an `IN` list)
+- Any `OR`, `LIKE`, `!=`, `NOT IN`, etc. appears anywhere in the filter tree
+- `value` is constrained without a single pinned `tag` (ambiguous)
+- Any predicate is on `sample_accession` or another non-`tag`/`value` column
+
+DuckDB always re-applies the original filter above the scan, so the output of the pushdown path is guaranteed to be a subset of what the XML path would have returned — a pushdown mistake degrades to extra work, never to wrong rows.
+
 **Examples:**
 ```sql
 -- Get all attributes for a run's sample
@@ -963,6 +978,12 @@ SELECT sample_accession,
        MAX(CASE WHEN tag = 'geographic location (country and/or sea)' THEN value END) AS country
 FROM read_ena_attributes('PRJEB11419')
 GROUP BY sample_accession;
+
+-- Pushdown-enabled: uses /search endpoint (single TSV per batch) instead of
+-- per-sample XML. Fast on large studies.
+SELECT sample_accession
+FROM read_ena_attributes('PRJEB11419')
+WHERE tag='host_body_site' AND value='UBERON:feces';
 ```
 
 ## `ena_searchable_fields(result_type)`
