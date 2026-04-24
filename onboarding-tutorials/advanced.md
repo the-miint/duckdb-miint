@@ -118,7 +118,7 @@ for sample in "${OUTDIR}"/sample_a.parquet "${OUTDIR}"/sample_b.parquet "${OUTDI
     CREATE VIEW filtered AS
         SELECT * FROM alns
         WHERE alignment_is_primary(flags)
-          AND alignment_query_coverage(cigar) >= 0.99
+          AND cigar_query_coverage(cigar) >= 0.99
           AND alignment_seq_identity(cigar, tag_nm, tag_md, 'blast') >= 0.97;
     SELECT '${name}' AS sample, * FROM woltka_ogu('filtered', 'read_id');
     "
@@ -208,7 +208,7 @@ and
 the gene annotations to see which operons our reads hit:
 
 We filter to primary alignments with high
-[query coverage](../docs/scalar-functions.md#alignment_query_coveragecigar-typealigned)
+[query coverage](../docs/scalar-functions.md#cigar_query_coveragecigar-typealigned)
 (&ge; 99% of the read aligned) to exclude partial soft-clipped matches that
 inflate counts &mdash; see the
 [intermediate tutorial](intermediate.md#step-5-the-query-coverage-lesson) for
@@ -219,7 +219,7 @@ WITH good_alns AS (
     SELECT reference, position, stop_position
     FROM alignments
     WHERE alignment_is_primary(flags)
-      AND alignment_query_coverage(cigar) >= 0.99
+      AND cigar_query_coverage(cigar) >= 0.99
 ),
 compressed AS (
     SELECT reference,
@@ -339,7 +339,7 @@ WITH good_alns AS (
     SELECT reference, position, stop_position
     FROM alignments
     WHERE alignment_is_primary(flags)
-      AND alignment_query_coverage(cigar) >= 0.99
+      AND cigar_query_coverage(cigar) >= 0.99
 ),
 compressed AS (
     SELECT reference,
@@ -537,7 +537,7 @@ Every scalar function in miint follows the same pattern:
 3. **Register it** in `LoadInternal()` in
    `src/miint_extension.cpp`.
 
-For example, `alignment_query_coverage` is defined in
+For example, `cigar_query_coverage` is defined in
 `src/alignment_functions.cpp` and registered via a static `Register()` method.
 
 ### Getting started

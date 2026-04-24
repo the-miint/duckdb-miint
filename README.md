@@ -22,7 +22,7 @@ CREATE VIEW high_quality AS
     SELECT * FROM all_alignments
     WHERE alignment_is_primary(flags)
       AND mapq >= 30
-      AND alignment_query_coverage(cigar) > 0.9;
+      AND cigar_query_coverage(cigar) > 0.9;
 
 -- Compute OGU counts using Woltka algorithm
 CREATE VIEW ogu_counts AS
