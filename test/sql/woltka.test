@@ -20,24 +20,24 @@ TO '__TEST_DIR__/test_woltka_sam_data.sam' (FORMAT SAM, INCLUDE_HEADER false, RE
 # Test against woltka produced outputs
 # woltka classify ... --no-demux --digits 10
 query II
-SELECT * FROM woltka_ogu(test_sam_data, read_id) order by value;
+SELECT * FROM woltka_ogu('test_sam_data', 'read_id') order by value;
 ----
-H000003450	477.800                           
-H000000556	849.086                           
-G002234575	1302.833                           
+H000003450	477.800
+H000000556	849.086
+G002234575	1302.833
 H000003668	1468.333
-H000000425	2165.002                           
-H000000962	6509.969                           
-G012273055	6638.369                           
-H000001008	15743.819                           
-G025152275	17770.333                           
-G000156075	30911.302                           
-G016766915	58468.152                           
+H000000425	2165.002
+H000000962	6509.969
+G012273055	6638.369
+H000001008	15743.819
+G025152275	17770.333
+G000156075	30911.302
+G016766915	58468.152
 
 # Test against woltka produced outputs per sample
 # woltka classify ... --no-demux --digits 10
 query III
-SELECT * FROM woltka_ogu_per_sample(test_sam_data, common_sample_name, read_id) order by sample_id, value;
+SELECT * FROM woltka_ogu('test_sam_data', 'read_id', sample_id := 'common_sample_name') order by common_sample_name, value;
 ----
 bar	H000003450	477.800
 bar	H000000556	847.669
@@ -64,7 +64,7 @@ statement ok
 CREATE TABLE from_sam AS FROM read_sam('__TEST_DIR__/test_woltka_sam_data.sam', reference_lengths='mock_lengths');
 
 query II
-SELECT * FROM woltka_ogu(from_sam, read_id) order by value;
+SELECT * FROM woltka_ogu('from_sam', 'read_id') order by value;
 ----
 H000003450	477.800                           
 H000000556	849.086                           
@@ -77,6 +77,77 @@ H000001008	15743.819
 G025152275	17770.333                           
 G000156075	30911.302                           
 G016766915	58468.152                           
+
+# Reject sample_id column names that collide with the fixed output schema
+statement error
+SELECT * FROM woltka_ogu('test_sam_data', 'read_id', sample_id := 'feature_id')
+----
+collides with an output column
+
+statement error
+SELECT * FROM woltka_ogu('test_sam_data', 'read_id', sample_id := 'value')
+----
+collides with an output column
+
+# Collision check is case-insensitive (DuckDB identifiers are case-insensitive)
+statement error
+SELECT * FROM woltka_ogu('test_sam_data', 'read_id', sample_id := 'FEATURE_ID')
+----
+collides with an output column
+
+# Empty relation: global mode returns zero rows cleanly
+statement ok
+CREATE TABLE empty_alignments AS SELECT * FROM test_sam_data WHERE 1 = 0;
+
+query II
+SELECT * FROM woltka_ogu('empty_alignments', 'read_id');
+----
+
+# Empty relation in per-sample mode: bind-time error (no sample values to iterate)
+statement error
+SELECT * FROM woltka_ogu('empty_alignments', 'read_id', sample_id := 'common_sample_name')
+----
+has no non-NULL values
+
+statement ok
+DROP TABLE empty_alignments;
+
+# Single-sample relation in per-sample mode: one claim, full output
+statement ok
+CREATE TABLE single_sample AS SELECT * FROM test_sam_data WHERE common_sample_name = 'foo';
+
+query III
+SELECT * FROM woltka_ogu('single_sample', 'read_id', sample_id := 'common_sample_name') ORDER BY value;
+----
+foo	H000000556	1.417
+foo	H000000425	1.917
+foo	G025152275	2.000
+foo	H000000962	2.667
+foo	G012273055	4.750
+foo	G000156075	9.500
+foo	H000001008	13.250
+foo	G016766915	15.500
+
+statement ok
+DROP TABLE single_sample;
+
+# Bind-time error when a required column is missing from the source
+statement ok
+CREATE VIEW no_reference AS SELECT read_id, flags, common_sample_name FROM test_sam_data;
+
+statement error
+SELECT * FROM woltka_ogu('no_reference', 'read_id')
+----
+required columns
+
+statement ok
+DROP VIEW no_reference;
+
+# Bind-time error when the sample_id column does not exist
+statement error
+SELECT * FROM woltka_ogu('test_sam_data', 'read_id', sample_id := 'no_such_col')
+----
+not found
 
 # Cleanup
 statement ok

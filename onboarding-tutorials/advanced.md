@@ -120,7 +120,7 @@ for sample in "${OUTDIR}"/sample_a.parquet "${OUTDIR}"/sample_b.parquet "${OUTDI
         WHERE alignment_is_primary(flags)
           AND alignment_query_coverage(cigar) >= 0.99
           AND alignment_seq_identity(cigar, tag_nm, tag_md, 'blast') >= 0.97;
-    SELECT '${name}' AS sample, * FROM woltka_ogu(filtered, read_id);
+    SELECT '${name}' AS sample, * FROM woltka_ogu('filtered', 'read_id');
     "
 done
 ```
@@ -498,7 +498,7 @@ miint supports a much broader range of bioinformatics workflows:
   and
   [clustering](../docs/table-functions.md#cluster_sequences_vsearchinput_table-idthreshold-options).
 - **Community ecology** &mdash;
-  [OGU counting](../docs/analysis-functions.md#woltka_ogurelation-sequence_id_field)
+  [OGU counting](../docs/analysis-functions.md#woltka_ogurelation-sequence_id_field-sample_id)
   per sample,
   [genome coverage](../docs/analysis-functions.md#genome_coveragealignments-subject_total_length-subject_genome_id),
   reading phylogenetic

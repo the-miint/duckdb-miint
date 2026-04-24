@@ -4,8 +4,7 @@ Functions for higher-level genomic analysis, sequence manipulation, and pairwise
 
 ## Table of Contents
 
-- [`woltka_ogu_per_sample`](#woltka_ogu_per_samplerelation-sample_id_field-sequence_id_field) - Multi-sample OGU counts
-- [`woltka_ogu`](#woltka_ogurelation-sequence_id_field) - Single-sample OGU counts
+- [`woltka_ogu`](#woltka_ogurelation-sequence_id_field-sample_id) - OGU counts (global or per-sample)
 - [`sequence_dna_reverse_complement` / `sequence_rna_reverse_complement`](#sequence_dna_reverse_complementsequence-and-sequence_rna_reverse_complementsequence) - Reverse complement
 - [`sequence_dna_as_regexp` / `sequence_rna_as_regexp`](#sequence_dna_as_regexpsequence-and-sequence_rna_as_regexpsequence) - IUPAC to regex
 - [`compress_intervals`](#compress_intervalsstart-stop) - Merge overlapping intervals
@@ -15,140 +14,80 @@ Functions for higher-level genomic analysis, sequence manipulation, and pairwise
 - [`massql`](#massqlquery-source) - MassQL query language for mass spectrometry
 - [Utility Functions](#utility-functions) - `miint_version()` and others
 
-## `woltka_ogu_per_sample(relation, sample_id_field, sequence_id_field)`
+## `woltka_ogu(relation, sequence_id_field [, sample_id])`
 
-Compute [Woltka](https://github.com/qiyunzhu/woltka) OGU (Operational Genomic Unit) counts over SAM-like alignment data for multiple samples. This function implements Woltka's classification algorithm, which assigns reads to taxonomic units while accounting for multi-mapped reads.
-
-**IMPORTANT**: Function parameters should NOT be quoted. Pass table and column names directly as identifiers, not as string literals.
+Compute [Woltka](https://github.com/qiyunzhu/woltka) OGU (Operational Genomic Unit) counts over SAM-like alignment data. Implements Woltka's classification algorithm, assigning reads to taxonomic units while fractionally distributing multi-mapped reads. When the optional `sample_id` named parameter is supplied, the aggregation runs in parallel across distinct sample values — one DuckDB query per sample on a dedicated per-thread connection — which bounds memory to a single sample's footprint.
 
 **Parameters:**
-- `relation`: A table, view, or subquery containing SAM-like alignment data
-- `sample_id_field`: Column name containing sample identifiers
-- `sequence_id_field`: Column name containing sequence identifiers (can be `read_id` or a numeric index for better performance)
+- `relation` (VARCHAR): Name of a table or view containing SAM-like alignment data (must be a resolvable catalog name; pass as a string literal)
+- `sequence_id_field` (VARCHAR): Name of the column holding sequence identifiers — typically `read_id`, or a numeric index column for better hash performance
+- `sample_id` (VARCHAR, named, optional): Name of the column holding sample identifiers. When supplied, adds that column to the output and runs the aggregation per distinct sample value in parallel.
 
 **Required columns in relation:**
-- Column specified by `sample_id_field`: Sample identifier
-- Column specified by `sequence_id_field`: Read/sequence identifier
-- `reference` (VARCHAR): Reference sequence name (feature ID)
+- Column named by `sequence_id_field`: read/sequence identifier
+- `reference` (VARCHAR): reference sequence name (becomes `feature_id`)
 - `flags` (USMALLINT): SAM alignment flags
+- When `sample_id` is supplied: the named column (any comparable type) — NULLs are rejected at bind time
 
 **Returns:**
-- `sample_id`: Sample identifier
-- `feature_id`: Reference/feature identifier
-- `value`: OGU count (fractional, accounts for multi-mapping)
+- When `sample_id` is omitted: `(feature_id VARCHAR, value DOUBLE)`
+- When `sample_id` is supplied: `(<sample_id_column> <its_type>, feature_id VARCHAR, value DOUBLE)` — the first column's name matches the value you passed to `sample_id`.
 
 **Algorithm:**
-1. Orients reads using alignment flags (forward/reverse)
-2. For each read orientation, divides 1 by the number of unique features aligned to
-3. Aggregates fractional counts per sample and feature
+1. Orients reads using alignment flags (forward/reverse via `alignment_is_read1`).
+2. For each read orientation, divides 1 by the number of unique features aligned to.
+3. Aggregates fractional counts per feature (and per sample, when `sample_id` is used).
+
+**Correctness assumption for per-sample mode:** read IDs are unique across samples. The per-sample subset then yields the same distribution as the global aggregation.
 
 **Examples:**
 ```sql
--- Basic usage: count OGUs per sample from alignment table
-SELECT * FROM woltka_ogu_per_sample(
-    my_alignments,
-    sample_id,
-    read_id
+-- Global aggregation across the whole relation
+SELECT * FROM woltka_ogu('my_alignments', 'read_id');
+
+-- Per-sample aggregation — one aggregation per distinct sample value, in parallel
+SELECT * FROM woltka_ogu(
+    'my_alignments',
+    'read_id',
+    sample_id := 'sample_id'
 );
 
--- Using with a filtered view
-CREATE VIEW high_quality_alignments AS
-    SELECT *, 'sample1' AS sample_id
-    FROM read_alignments('alignments.bam')
-    WHERE mapq >= 30 AND alignment_is_primary(flags);
+-- Filter high-quality alignments via a view, then classify
+CREATE OR REPLACE VIEW primary_alignments AS
+    SELECT * FROM read_alignments('alignments.bam')
+    WHERE alignment_is_primary(flags) AND mapq >= 20;
 
-SELECT * FROM woltka_ogu_per_sample(
-    high_quality_alignments,
-    sample_id,
-    read_id
-);
+SELECT * FROM woltka_ogu('primary_alignments', 'read_id');
 
--- Process multiple samples with UNION
-CREATE VIEW all_samples AS
+-- Multi-sample: union sources under a sample_id column, then classify per sample
+CREATE OR REPLACE VIEW all_samples AS
     SELECT *, 'sample1' AS sample_id FROM read_alignments('sample1.bam')
     UNION ALL
     SELECT *, 'sample2' AS sample_id FROM read_alignments('sample2.bam')
     UNION ALL
     SELECT *, 'sample3' AS sample_id FROM read_alignments('sample3.bam');
 
-SELECT * FROM woltka_ogu_per_sample(
-    all_samples,
-    sample_id,
-    read_id
-) ORDER BY sample_id, feature_id;
+SELECT * FROM woltka_ogu('all_samples', 'read_id', sample_id := 'sample_id')
+ORDER BY sample_id, feature_id;
 
--- Export to BIOM format for downstream analysis
+-- Export per-sample results to BIOM for downstream analysis
 COPY (
-    SELECT * FROM woltka_ogu_per_sample(my_alignments, sample_id, read_id)
+    SELECT * FROM woltka_ogu('my_alignments', 'read_id', sample_id := 'sample_id')
 ) TO 'ogu_table.biom' (FORMAT BIOM, COMPRESSION 'gzip');
 
--- WRONG: Do not quote parameters (this will cause an error)
--- SELECT * FROM woltka_ogu_per_sample('my_alignments', 'sample_id', 'read_id');
-```
-
-## `woltka_ogu(relation, sequence_id_field)`
-
-Compute Woltka OGU counts over SAM-like alignment data for a single sample or aggregated across all samples.
-
-**IMPORTANT**: Function parameters should NOT be quoted. Pass table and column names directly as identifiers, not as string literals.
-
-**Parameters:**
-- `relation`: A table, view, or subquery containing SAM-like alignment data
-- `sequence_id_field`: Column name containing sequence identifiers (can be `read_id` or a numeric index for better performance)
-
-**Required columns in relation:**
-- Column specified by `sequence_id_field`: Read/sequence identifier
-- `reference` (VARCHAR): Reference sequence name (feature ID)
-- `flags` (USMALLINT): SAM alignment flags
-
-**Returns:**
-- `feature_id`: Reference/feature identifier
-- `value`: OGU count (fractional, accounts for multi-mapping)
-
-**Examples:**
-```sql
--- Basic usage: count OGUs from alignment table
-SELECT * FROM woltka_ogu(
-    my_alignments,
-    read_id
-);
-
--- Direct query from read_alignments
-SELECT * FROM woltka_ogu(
-    (SELECT * FROM read_alignments('alignments.bam')),
-    read_id
-) ORDER BY value DESC;
-
--- Filter high-quality primary alignments
-CREATE VIEW primary_alignments AS
-    SELECT * FROM read_alignments('alignments.bam')
-    WHERE alignment_is_primary(flags) AND mapq >= 20;
-
-SELECT * FROM woltka_ogu(primary_alignments, read_id);
-
--- Combine with filtering for specific references
-CREATE VIEW bacterial_alignments AS
-    SELECT * FROM read_alignments('metagenome.bam')
-    WHERE reference LIKE 'bacteria_%';
-
-SELECT feature_id, value
-FROM woltka_ogu(bacterial_alignments, read_id)
-WHERE value > 10
-ORDER BY value DESC;
-
--- Export to BIOM format (add sample_id column)
+-- Export global results to BIOM (add a sample_id column)
 COPY (
     SELECT feature_id, 'MySample' AS sample_id, value
-    FROM woltka_ogu(my_alignments, read_id)
+    FROM woltka_ogu('my_alignments', 'read_id')
 ) TO 'ogu_single.biom' (FORMAT BIOM);
 ```
 
 **Notes:**
-- Multi-mapped reads (reads aligning to multiple references) are fractionally assigned: each mapping receives weight 1/N where N is the number of unique references
-- Read orientation (forward/reverse) is considered separately using SAM flags
-- For better performance with large datasets, consider adding a numeric index column and using it as `sequence_id_field` instead of `read_id`
-- This function handles paired-end data by distinguishing R1 and R2 reads via the `alignment_is_read1()` flag
-- **Implementation note:** Implemented as a DuckDB macro (table-returning expression), so parameters are not quoted
+- Arguments `relation` and `sequence_id_field` (and `sample_id` if used) must be quoted string literals; they are catalog/column names resolved at bind time.
+- Multi-mapped reads are fractionally assigned: each mapping receives weight 1/N where N is the number of unique references the read maps to, within the same orientation.
+- Read orientation (forward/reverse) is considered separately via the `alignment_is_read1()` flag — paired-end reads are handled automatically.
+- For better performance on large datasets, add a numeric index column and pass it as `sequence_id_field` instead of `read_id`.
+- Output row order is non-deterministic when `sample_id` is used (parallel per-sample execution). Use an explicit `ORDER BY` if stable ordering is required.
 
 ## `sequence_dna_reverse_complement(sequence)` and `sequence_rna_reverse_complement(sequence)`
 
