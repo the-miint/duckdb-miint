@@ -1,0 +1,210 @@
+# name: test/sql/deblur_sample_id.test
+# description: test deblur sample_id named parameter
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+# Build the base input: two aligned sequences, same length, different abundances.
+statement ok
+CREATE TABLE deblur_base(read_id VARCHAR, sequence1 VARCHAR, abundance BIGINT);
+
+statement ok
+INSERT INTO deblur_base VALUES
+    ('E.Coli',
+     'TACGGAGGGTGCAAGCGTTAATCGGAATTACTGGGCGTAAAGCGCACGCAGGCGGTTTGTTAAGTCAGATGTGAAATCCCCGGGCTCAACCTGGGAACTGCATCTGATACTGGCAAGCTTGAGTCTCGTAGAGGGGGGCAGAATTCCAG',
+     1000),
+    ('Error',
+     'AACGGAGGGTGCAAGCGTTAATCGGAATTACTGGGCGTAAAGCGCACGCAGGCGGTTTGTTAAGTCAGATGTGAAATCCCCGGGCTCAACCTGGGAACTGCATCTGATACTGGCAAGCTTGAGTCTCGTAGAGGGGGGCAGAATTCCAG',
+     3);
+
+# ----- Cycle 1: Error on invalid sample_id -----
+
+statement ok
+CREATE VIEW v1 AS SELECT 'A' AS sample, * FROM deblur_base;
+
+# sample_id column doesn't exist
+statement error
+SELECT * FROM deblur('v1', sample_id := 'no_such_column')
+----
+sample_id column 'no_such_column' not found
+
+# sample_id must not be empty
+statement error
+SELECT * FROM deblur('v1', sample_id := '')
+----
+sample_id column name must not be empty
+
+# ----- Cycle 2: Output-column collision (case-insensitive) -----
+
+statement error
+SELECT * FROM deblur('deblur_base', sample_id := 'read_id')
+----
+collides with an output column
+
+statement error
+SELECT * FROM deblur('deblur_base', sample_id := 'abundance')
+----
+collides with an output column
+
+statement error
+SELECT * FROM deblur('deblur_base', sample_id := 'ABUNDANCE')
+----
+collides with an output column
+
+# Note: deblur's output column is named 'sequence' (not 'sequence1'). 'sequence1' is the
+# input column — it does NOT collide with any output column and is therefore permitted,
+# though picking it as sample_id produces one sample per unique sequence (silly but legal).
+
+# ----- Cycle 3: Per-sample isolation with two samples -----
+
+statement ok
+CREATE VIEW multi_sample AS
+  SELECT 'A' AS sample, * FROM deblur_base
+  UNION ALL
+  SELECT 'B' AS sample, * FROM deblur_base;
+
+# Each sample independently keeps E.Coli and drops Error
+query TTII
+SELECT sample, read_id, length(sequence), abundance
+  FROM deblur('multi_sample', sample_id := 'sample')
+  ORDER BY sample, abundance DESC
+----
+A	E.Coli	149	1000
+B	E.Coli	149	1000
+
+# Row count: one per sample
+query I
+SELECT COUNT(*) FROM deblur('multi_sample', sample_id := 'sample')
+----
+2
+
+# Output schema: sample column first, then deblur output columns
+query TTTT
+SELECT typeof(sample), typeof(read_id), typeof(sequence), typeof(abundance)
+  FROM deblur('multi_sample', sample_id := 'sample')
+  LIMIT 1
+----
+VARCHAR	VARCHAR	VARCHAR	BIGINT
+
+# ----- Cycle 4: Integer-typed sample_id preserves type -----
+
+statement ok
+CREATE VIEW int_sample AS
+  SELECT 1 AS sample_num, * FROM deblur_base
+  UNION ALL
+  SELECT 2 AS sample_num, * FROM deblur_base;
+
+query II
+SELECT sample_num, COUNT(*)
+  FROM deblur('int_sample', sample_id := 'sample_num')
+  GROUP BY sample_num ORDER BY sample_num
+----
+1	1
+2	1
+
+query T
+SELECT typeof(sample_num) FROM deblur('int_sample', sample_id := 'sample_num') LIMIT 1
+----
+INTEGER
+
+# ----- Cycle 5: NULL sample values rejected -----
+
+statement ok
+CREATE VIEW null_sample AS SELECT NULL::VARCHAR AS sid, * FROM deblur_base;
+
+statement error
+SELECT * FROM deblur('null_sample', sample_id := 'sid')
+----
+NULL values in sample_id column
+
+# ----- Cycle 6: Empty relation → no non-NULL values -----
+
+statement ok
+CREATE VIEW empty_samples AS
+  SELECT 'A' AS sample, * FROM deblur_base WHERE 1=0;
+
+statement error
+SELECT * FROM deblur('empty_samples', sample_id := 'sample')
+----
+has no non-NULL values
+
+# ----- Cycle 7: Single-sample equivalence -----
+# Running deblur with sample_id on a one-sample view produces the same rows as running
+# deblur without sample_id on the same data.
+
+statement ok
+CREATE VIEW single_sample AS SELECT 'only' AS sample, * FROM deblur_base;
+
+query TII
+SELECT read_id, length(sequence), abundance
+  FROM deblur('single_sample', sample_id := 'sample')
+  ORDER BY read_id
+----
+E.Coli	149	1000
+
+query TII
+SELECT read_id, length(sequence), abundance
+  FROM deblur('deblur_base')
+  ORDER BY read_id
+----
+E.Coli	149	1000
+
+# ----- Cycle 8: Non-sample_id path unchanged -----
+# The existing multi-row deblur_base (no sample_id param) still runs globally.
+
+query TII
+SELECT read_id, length(sequence), abundance
+  FROM deblur('deblur_base')
+  ORDER BY abundance DESC
+----
+E.Coli	149	1000
+
+# ----- Cycle 9: Cross-sample same read_id is allowed -----
+# Inside a sample, deblur requires unique read_ids (implicit from dereplication upstream).
+# Across samples, the same read_id may appear. Join-back uses (sample, read_id).
+
+query TTI
+SELECT sample, read_id, abundance
+  FROM deblur('multi_sample', sample_id := 'sample')
+  ORDER BY sample, read_id
+----
+A	E.Coli	1000
+B	E.Coli	1000
+
+# ----- Cycle 10: Parallel execution — atomic claim + per-thread Connection -----
+# Larger fan-out to actually exercise concurrent claim under multiple threads. Each
+# sample is independent; parallel threads must not double-claim or miss a sample.
+
+statement ok
+CREATE VIEW four_samples AS
+  SELECT 'A' AS sid, * FROM deblur_base UNION ALL
+  SELECT 'B' AS sid, * FROM deblur_base UNION ALL
+  SELECT 'C' AS sid, * FROM deblur_base UNION ALL
+  SELECT 'D' AS sid, * FROM deblur_base;
+
+statement ok
+PRAGMA threads=4;
+
+query TI
+SELECT sid, COUNT(*) FROM deblur('four_samples', sample_id := 'sid')
+  GROUP BY sid ORDER BY sid
+----
+A	1
+B	1
+C	1
+D	1
+
+statement ok
+PRAGMA threads=8;
+
+query TI
+SELECT sid, COUNT(*) FROM deblur('four_samples', sample_id := 'sid')
+  GROUP BY sid ORDER BY sid
+----
+A	1
+B	1
+C	1
+D	1

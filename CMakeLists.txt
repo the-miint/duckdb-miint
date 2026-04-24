@@ -788,7 +788,8 @@ set(EXTENSION_SOURCES
     src/duckdb_seq_stream.cpp
     src/hfile_duckdb.cpp
     src/deblur.cpp
-    src/deblur_table_function.cpp)
+    src/deblur_table_function.cpp
+    src/per_sample_table_function.cpp)
 
 if(MIINT_ENABLE_VSEARCH)
     list(APPEND EXTENSION_SOURCES

@@ -1,0 +1,172 @@
+# name: test/sql/uchime_ref_sample_id.test
+# description: test detect_chimera_uchime sample_id named parameter
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+statement ok
+CREATE TABLE uref_refs AS SELECT read_id, sequence1 FROM read_fastx('data/uchime/chimera_ref.fasta');
+
+statement ok
+CREATE TABLE uref_queries AS SELECT read_id, sequence1 FROM read_fastx('data/uchime/chimera_queries.fasta');
+
+# ----- Cycle 1: Error on invalid sample_id -----
+
+statement ok
+CREATE VIEW ur_v1 AS SELECT 'A' AS sample, * FROM uref_queries;
+
+statement error
+SELECT * FROM detect_chimera_uchime('ur_v1', db := 'uref_refs', sample_id := 'no_such_column')
+----
+sample_id column 'no_such_column' not found
+
+statement error
+SELECT * FROM detect_chimera_uchime('ur_v1', db := 'uref_refs', sample_id := '')
+----
+sample_id column name must not be empty
+
+# ----- Cycle 2: Output-column collision -----
+
+statement error
+SELECT * FROM detect_chimera_uchime('uref_queries', db := 'uref_refs', sample_id := 'query_id')
+----
+collides with an output column
+
+statement error
+SELECT * FROM detect_chimera_uchime('uref_queries', db := 'uref_refs', sample_id := 'flag')
+----
+collides with an output column
+
+# ----- Cycle 3: Per-sample isolation -----
+
+statement ok
+CREATE VIEW multi_uref AS
+  SELECT 'A' AS sample, * FROM uref_queries
+  UNION ALL
+  SELECT 'B' AS sample, * FROM uref_queries;
+
+query TI
+SELECT sample, COUNT(*)
+  FROM detect_chimera_uchime('multi_uref', db := 'uref_refs', sample_id := 'sample')
+  GROUP BY sample ORDER BY sample
+----
+A	8
+B	8
+
+query T
+SELECT typeof(sample)
+  FROM detect_chimera_uchime('multi_uref', db := 'uref_refs', sample_id := 'sample') LIMIT 1
+----
+VARCHAR
+
+# Both samples see the same flag distribution against the shared reference (identical
+# query content, same Y count per sample).
+query TI
+SELECT sample, COUNT(*) FILTER (WHERE flag = 'Y')
+  FROM detect_chimera_uchime('multi_uref', db := 'uref_refs', sample_id := 'sample')
+  GROUP BY sample ORDER BY sample
+----
+A	4
+B	4
+
+# ----- Cycle 4: Integer-typed sample_id round-trips -----
+
+statement ok
+CREATE VIEW int_uref AS
+  SELECT 1 AS sample_num, * FROM uref_queries
+  UNION ALL
+  SELECT 2 AS sample_num, * FROM uref_queries;
+
+query II
+SELECT sample_num, COUNT(*)
+  FROM detect_chimera_uchime('int_uref', db := 'uref_refs', sample_id := 'sample_num')
+  GROUP BY sample_num ORDER BY sample_num
+----
+1	8
+2	8
+
+query T
+SELECT typeof(sample_num)
+  FROM detect_chimera_uchime('int_uref', db := 'uref_refs', sample_id := 'sample_num') LIMIT 1
+----
+INTEGER
+
+# ----- Cycle 5: NULL sample values rejected at bind -----
+
+statement ok
+CREATE VIEW uref_null AS SELECT NULL::VARCHAR AS sid, * FROM uref_queries;
+
+statement error
+SELECT * FROM detect_chimera_uchime('uref_null', db := 'uref_refs', sample_id := 'sid')
+----
+NULL values in sample_id column
+
+# ----- Cycle 6: Empty relation → no non-NULL values -----
+
+statement ok
+CREATE VIEW uref_empty AS SELECT 'A' AS sample, * FROM uref_queries WHERE 1=0;
+
+statement error
+SELECT * FROM detect_chimera_uchime('uref_empty', db := 'uref_refs', sample_id := 'sample')
+----
+has no non-NULL values
+
+# ----- Cycle 7: Single-sample equivalence — query_id+flag set matches global mode -----
+
+statement ok
+CREATE VIEW uref_single AS SELECT 'only' AS sample, * FROM uref_queries;
+
+query TT
+SELECT query_id, flag
+  FROM detect_chimera_uchime('uref_single', db := 'uref_refs', sample_id := 'sample')
+  ORDER BY query_id
+----
+query_chimera1	Y
+query_chimera2	Y
+query_chimera3	Y
+query_clean1	N
+query_clean2	N
+query_divergent_chimera	Y
+query_noparent	N
+query_short	N
+
+query TT
+SELECT query_id, flag
+  FROM detect_chimera_uchime('uref_queries', db := 'uref_refs')
+  ORDER BY query_id
+----
+query_chimera1	Y
+query_chimera2	Y
+query_chimera3	Y
+query_clean1	N
+query_clean2	N
+query_divergent_chimera	Y
+query_noparent	N
+query_short	N
+
+# ----- Cycle 8: Parallelism — max_threads_hint=1 clamps actual parallelism to 1, but the atomic claim must still be correct -----
+
+statement ok
+CREATE VIEW four_uref_samples AS
+  SELECT 'A' AS sid, * FROM uref_queries UNION ALL
+  SELECT 'B' AS sid, * FROM uref_queries UNION ALL
+  SELECT 'C' AS sid, * FROM uref_queries UNION ALL
+  SELECT 'D' AS sid, * FROM uref_queries;
+
+statement ok
+PRAGMA threads=4;
+
+query TI
+SELECT sid, COUNT(*)
+  FROM detect_chimera_uchime('four_uref_samples', db := 'uref_refs', sample_id := 'sid')
+  GROUP BY sid ORDER BY sid
+----
+A	8
+B	8
+C	8
+D	8

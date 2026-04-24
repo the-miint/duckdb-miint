@@ -1,0 +1,180 @@
+# name: test/sql/uchime_denovo_sample_id.test
+# description: test detect_chimera_uchime_denovo sample_id named parameter
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+# Base fixture: parse ;size=N; from FASTA headers into a proper size column.
+statement ok
+CREATE TABLE denovo_base AS
+SELECT
+    regexp_extract(read_id, '^([^;]+)', 1) AS read_id,
+    sequence1,
+    CAST(regexp_extract(read_id, 'size=(\d+)', 1) AS INTEGER) AS size
+FROM read_fastx('data/uchime/denovo_input.fasta');
+
+# ----- Cycle 1: Error on invalid sample_id -----
+
+statement ok
+CREATE VIEW dn_v1 AS SELECT 'A' AS sample, * FROM denovo_base;
+
+statement error
+SELECT * FROM detect_chimera_uchime_denovo('dn_v1', sample_id := 'no_such_column')
+----
+sample_id column 'no_such_column' not found
+
+statement error
+SELECT * FROM detect_chimera_uchime_denovo('dn_v1', sample_id := '')
+----
+sample_id column name must not be empty
+
+# ----- Cycle 2: Output-column collision (18 uchime output columns) -----
+
+statement error
+SELECT * FROM detect_chimera_uchime_denovo('denovo_base', sample_id := 'query_id')
+----
+collides with an output column
+
+statement error
+SELECT * FROM detect_chimera_uchime_denovo('denovo_base', sample_id := 'flag')
+----
+collides with an output column
+
+statement error
+SELECT * FROM detect_chimera_uchime_denovo('denovo_base', sample_id := 'SCORE')
+----
+collides with an output column
+
+# ----- Cycle 3: Per-sample isolation — each sample scored independently -----
+
+statement ok
+CREATE VIEW multi_dn AS
+  SELECT 'A' AS sample, * FROM denovo_base
+  UNION ALL
+  SELECT 'B' AS sample, * FROM denovo_base;
+
+# Each sample produces the same row count (6 sequences per sample).
+query TI
+SELECT sample, COUNT(*) FROM detect_chimera_uchime_denovo('multi_dn', sample_id := 'sample')
+  GROUP BY sample ORDER BY sample
+----
+A	6
+B	6
+
+# Chimera calls are independent per sample: both samples should produce the
+# same set of Y/N flags since the input data is identical.
+query TTT
+SELECT sample, query_id, flag
+  FROM detect_chimera_uchime_denovo('multi_dn', sample_id := 'sample')
+  ORDER BY sample, query_id
+----
+A	seq1	N
+A	seq2	N
+A	seq3	N
+A	seq4	Y
+A	seq5	Y
+A	seq6	N
+B	seq1	N
+B	seq2	N
+B	seq3	N
+B	seq4	Y
+B	seq5	Y
+B	seq6	N
+
+# ----- Cycle 4: Integer-typed sample_id round-trips -----
+
+statement ok
+CREATE VIEW int_dn AS
+  SELECT 1 AS sample_num, * FROM denovo_base
+  UNION ALL
+  SELECT 2 AS sample_num, * FROM denovo_base;
+
+query II
+SELECT sample_num, COUNT(*)
+  FROM detect_chimera_uchime_denovo('int_dn', sample_id := 'sample_num')
+  GROUP BY sample_num ORDER BY sample_num
+----
+1	6
+2	6
+
+query T
+SELECT typeof(sample_num) FROM detect_chimera_uchime_denovo('int_dn', sample_id := 'sample_num') LIMIT 1
+----
+INTEGER
+
+# ----- Cycle 5: NULL sample values rejected at bind -----
+
+statement ok
+CREATE VIEW dn_null AS SELECT NULL::VARCHAR AS sid, * FROM denovo_base;
+
+statement error
+SELECT * FROM detect_chimera_uchime_denovo('dn_null', sample_id := 'sid')
+----
+NULL values in sample_id column
+
+# ----- Cycle 6: Empty relation → no non-NULL values -----
+
+statement ok
+CREATE VIEW dn_empty AS SELECT 'A' AS sample, * FROM denovo_base WHERE 1=0;
+
+statement error
+SELECT * FROM detect_chimera_uchime_denovo('dn_empty', sample_id := 'sample')
+----
+has no non-NULL values
+
+# ----- Cycle 7: Single-sample equivalence -----
+# Per-sample output for a one-sample view must match the global path's output for
+# the same rows (size-DESC ordering, same bootstrap, same chimera calls).
+
+statement ok
+CREATE VIEW dn_single AS SELECT 'only' AS sample, * FROM denovo_base;
+
+query TT
+SELECT query_id, flag
+  FROM detect_chimera_uchime_denovo('dn_single', sample_id := 'sample')
+  ORDER BY query_id
+----
+seq1	N
+seq2	N
+seq3	N
+seq4	Y
+seq5	Y
+seq6	N
+
+query TT
+SELECT query_id, flag
+  FROM detect_chimera_uchime_denovo('denovo_base')
+  ORDER BY query_id
+----
+seq1	N
+seq2	N
+seq3	N
+seq4	Y
+seq5	Y
+seq6	N
+
+# ----- Cycle 8: Parallelism — claim correctness under threads=4 (max_threads_hint=1 clamps actual parallelism to 1) -----
+
+statement ok
+CREATE VIEW four_dn_samples AS
+  SELECT 'A' AS sid, * FROM denovo_base UNION ALL
+  SELECT 'B' AS sid, * FROM denovo_base UNION ALL
+  SELECT 'C' AS sid, * FROM denovo_base UNION ALL
+  SELECT 'D' AS sid, * FROM denovo_base;
+
+statement ok
+PRAGMA threads=4;
+
+query TI
+SELECT sid, COUNT(*) FROM detect_chimera_uchime_denovo('four_dn_samples', sample_id := 'sid')
+  GROUP BY sid ORDER BY sid
+----
+A	6
+B	6
+C	6
+D	6

@@ -64,12 +64,27 @@ struct LoadedSingleEndSequences {
 LoadedSingleEndSequences LoadSingleEndSequences(ClientContext &context, const std::string &table_name,
                                                 const std::string &function_name, bool strict = false);
 
+// Overload that runs against a caller-owned connection with an optional WHERE clause.
+// Useful for per-sample callers: they already hold a per-thread Connection in LocalState
+// and want to filter by a sample predicate. Pass `where_sql` without the leading "WHERE".
+// An empty `where_sql` is equivalent to the context-based overload.
+LoadedSingleEndSequences LoadSingleEndSequences(Connection &conn, const std::string &table_name,
+                                                const std::string &function_name, bool strict,
+                                                const std::string &where_sql);
+
 // Streaming query sequence reader for lazy sub-batching.
 // Produces sub-batches on demand from a streaming query result.
 // Thread-safe: multiple threads can call FetchSubBatch() concurrently.
 class QuerySequenceStream {
 public:
+	// Owns an internal Connection — convenient for single-pipeline readers.
 	QuerySequenceStream(ClientContext &context, const std::string &table_name, const SequenceTableSchema &schema,
+	                    idx_t sub_batch_size = STANDARD_VECTOR_SIZE);
+
+	// Uses a caller-owned Connection. Required when the stream needs to see TEMP
+	// objects (e.g. views) created by the caller on the same connection — per-sample
+	// callers that do CREATE OR REPLACE TEMP VIEW … before streaming must use this.
+	QuerySequenceStream(Connection &conn, const std::string &table_name, const SequenceTableSchema &schema,
 	                    idx_t sub_batch_size = STANDARD_VECTOR_SIZE);
 
 	// Fetch the next sub-batch. Returns an empty batch when the stream is exhausted.
@@ -77,7 +92,11 @@ public:
 	miint::SequenceRecordBatch FetchSubBatch();
 
 private:
-	Connection conn_;
+	// Only one of these two is populated: owned_conn_ for the ClientContext&
+	// constructor, nullptr for the Connection& constructor. conn_ptr_ always
+	// points to the live connection.
+	unique_ptr<Connection> owned_conn_;
+	Connection *conn_ptr_;
 	unique_ptr<QueryResult> stream_;
 	SequenceTableSchema schema_;
 	idx_t sub_batch_size_;
@@ -88,6 +107,8 @@ private:
 	std::vector<std::string> temp_read_ids_;
 	std::vector<std::string> temp_seq1_;
 	std::vector<std::string> temp_seq2_;
+
+	void InitStream(const std::string &table_name);
 };
 
 } // namespace duckdb

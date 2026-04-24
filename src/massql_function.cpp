@@ -6,9 +6,7 @@
 #include "duckdb/common/vector_operations/binary_executor.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/parallel/task_scheduler.hpp"
-
-#include <atomic>
+#include "per_sample_table_function.hpp"
 
 namespace duckdb {
 
@@ -22,9 +20,7 @@ struct MassQLData : public TableFunctionData {
 
 	// Sample iteration state (sample_id path only)
 	bool has_sample_id = false;
-	string sample_id_col;
-	LogicalType sample_id_type;
-	vector<Value> sample_values;
+	PerSampleBindInfo sample_info;
 
 	// Sample_id: sample[0] pre-run for schema inference; moved to GlobalState at InitGlobal.
 	unique_ptr<MaterializedQueryResult> sample0_result;
@@ -34,11 +30,7 @@ struct MassQLData : public TableFunctionData {
 	string effective_source;
 };
 
-struct MassQLGlobalState : public GlobalTableFunctionState {
-	// Sample_id: atomic counter starts at 1 (sample[0] pre-run at Bind time).
-	atomic<idx_t> next_sample_idx {0};
-	idx_t max_threads = 1;
-
+struct MassQLGlobalState : public PerSampleGlobalState {
 	// Non-sample_id: pre-run result transferred from MassQLData at InitGlobal.
 	// Single thread drains it from Execute; no synchronization needed.
 	unique_ptr<MaterializedQueryResult> non_sample_result;
@@ -48,10 +40,6 @@ struct MassQLGlobalState : public GlobalTableFunctionState {
 	// __massql_ms1), so parallel threads never collide on those names despite the shared names.
 	unique_ptr<MaterializedQueryResult> sample0_result;
 	atomic<bool> sample0_claimed {false};
-
-	idx_t MaxThreads() const override {
-		return max_threads;
-	}
 };
 
 struct MassQLLocalState : public LocalTableFunctionState {
@@ -160,15 +148,12 @@ static unique_ptr<FunctionData> MassQLBind(ClientContext &context, TableFunction
 	auto query_str = input.inputs[0].GetValue<string>();
 	auto source_str = input.inputs[1].GetValue<string>();
 
-	// Read optional sample_id named parameter
+	// Read optional sample_id named parameter (validation deferred to DiscoverSamples)
 	string sample_id_col;
 	bool has_sample_id = false;
 	auto it = input.named_parameters.find("sample_id");
 	if (it != input.named_parameters.end()) {
 		sample_id_col = it->second.GetValue<string>();
-		if (sample_id_col.empty()) {
-			throw InvalidInputException("sample_id column name must not be empty");
-		}
 		has_sample_id = true;
 	}
 
@@ -194,51 +179,18 @@ static unique_ptr<FunctionData> MassQLBind(ClientContext &context, TableFunction
 		// ── sample_id path: use stack-local conn for bind-time validation only ──
 		Connection conn(db);
 
-		// Validate column exists and get its type
-		auto quoted_col = KeywordHelper::WriteOptionallyQuoted(sample_id_col);
-		auto quoted_source = KeywordHelper::WriteOptionallyQuoted(effective_source);
-		auto probe = conn.Query("SELECT " + quoted_col + " FROM " + quoted_source + " LIMIT 0");
-		if (probe->HasError()) {
-			throw InvalidInputException("sample_id column '%s' not found", sample_id_col);
-		}
-		data->sample_id_type = probe->types[0];
-
-		// Reject NULLs early before collecting distinct values
-		auto null_check = conn.Query("SELECT COUNT(*) FROM " + quoted_source + " WHERE " + quoted_col + " IS NULL");
-		if (null_check->HasError()) {
-			throw InvalidInputException("MassQL: failed to check for NULLs: %s", null_check->GetError());
-		}
-		auto null_count = null_check->GetValue(0, 0).GetValue<int64_t>();
-		if (null_count > 0) {
-			throw InvalidInputException("NULL values in sample_id column '%s'", sample_id_col);
-		}
-
-		// Collect distinct values
-		auto distinct_result =
-		    conn.Query("SELECT DISTINCT " + quoted_col + " FROM " + quoted_source + " ORDER BY " + quoted_col);
-		if (distinct_result->HasError()) {
-			throw InvalidInputException("MassQL: failed to query sample_id values: %s", distinct_result->GetError());
-		}
-		auto &materialized = distinct_result->Cast<MaterializedQueryResult>();
-		while (auto chunk = materialized.Fetch()) {
-			for (idx_t i = 0; i < chunk->size(); i++) {
-				data->sample_values.push_back(chunk->data[0].GetValue(i));
-			}
-		}
-
-		if (data->sample_values.empty()) {
-			throw InvalidInputException("sample_id column '%s' has no non-NULL values", sample_id_col);
-		}
+		data->sample_info.sample_id_col = sample_id_col;
+		DiscoverSamples(conn, effective_source, sample_id_col, {}, "massql", data->sample_info);
 
 		// Store state for deferred execution
 		data->has_sample_id = true;
-		data->sample_id_col = sample_id_col;
 		data->parsed = parsed;
 		data->effective_source = effective_source;
 
 		// Run sample[0] to determine the output schema. The result is stored here and
 		// moved to GlobalState at InitGlobal so it is not re-run in Execute.
-		data->sample0_result = RunSamplePipeline(conn, parsed, effective_source, sample_id_col, data->sample_values[0]);
+		data->sample0_result =
+		    RunSamplePipeline(conn, parsed, effective_source, sample_id_col, data->sample_info.sample_values[0]);
 		ExtractSchema(*data->sample0_result, return_types, names);
 	} else {
 		// ── non-sample_id path: existing behavior, conn is stack-local ──
@@ -269,8 +221,7 @@ static unique_ptr<GlobalTableFunctionState> MassQLInitGlobal(ClientContext &cont
 	auto &data = input.bind_data->CastNoConst<MassQLData>();
 	auto gstate = make_uniq<MassQLGlobalState>();
 	if (data.has_sample_id) {
-		idx_t db_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
-		gstate->max_threads = std::max<idx_t>(1, std::min<idx_t>(db_threads, data.sample_values.size()));
+		InitPerSampleGlobal(context, *gstate, data.sample_info.sample_values.size());
 		// Transfer sample[0]'s pre-run result; Execute threads start claiming from index 1.
 		gstate->sample0_result = std::move(data.sample0_result);
 		gstate->next_sample_idx = 1;
@@ -326,15 +277,13 @@ static void MassQLExecute(ClientContext &context, TableFunctionInput &input, Dat
 			lstate.result = std::move(gstate.sample0_result);
 			continue;
 		}
-		// Atomically claim the next sample index. relaxed: only atomicity needed, no
-		// ordering with respect to other memory operations.
-		idx_t sample_idx = gstate.next_sample_idx.fetch_add(1, std::memory_order_relaxed);
-		if (sample_idx >= data.sample_values.size()) {
+		idx_t sample_idx;
+		if (!ClaimNextSample(gstate, data.sample_info.sample_values.size(), sample_idx)) {
 			output.SetCardinality(0);
 			return;
 		}
-		lstate.result = RunSamplePipeline(*lstate.conn, data.parsed, data.effective_source, data.sample_id_col,
-		                                  data.sample_values[sample_idx]);
+		lstate.result = RunSamplePipeline(*lstate.conn, data.parsed, data.effective_source,
+		                                  data.sample_info.sample_id_col, data.sample_info.sample_values[sample_idx]);
 	}
 }
 

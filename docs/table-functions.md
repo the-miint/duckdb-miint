@@ -1900,7 +1900,7 @@ SELECT * FROM align_bowtie2_sharded('queries',
 | Parallelism | Single aligner thread(s) | One aligner per shard, concurrent |
 | Use case | Single reference database | Sharded reference databases (e.g., from prior classification) |
 
-## `align_mafft(table_name)`
+## `align_mafft(table_name, [sample_id='col'])`
 
 Multiple sequence alignment using MAFFT's PartTree algorithm. Reads all sequences from a sequence table/view, aligns them, and returns the aligned sequences with gap characters inserted.
 
@@ -1908,6 +1908,7 @@ MAFFT is embedded as a statically linked C library (no external binary required)
 
 **Parameters:**
 - `table_name` (VARCHAR): Name of a table or view containing sequences to align. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns. Minimum 2 sequences, each at least 6 characters. DNA and protein sequences are auto-detected. Paired-end tables (those with a `sequence2` column) are rejected at bind.
+- `sample_id` (VARCHAR, optional): Name of a column in `table_name` to partition by. When provided, `align_mafft` runs one MSA per distinct sample value and prepends the sample column to the output. The per-sample ≥2-sequences and ≥6-char validations apply within each sample; the whole query aborts if any sample violates them. `sequence_index` is per-sample (0..n-1 within each sample). Join back to the input on `(<sample_id>, read_id)`.
 
 **Output schema:**
 
@@ -1944,6 +1945,13 @@ CREATE TABLE filtered AS
   SELECT read_id, sequence1 FROM read_fastx('large_dataset.fasta')
   WHERE length(sequence1) >= 100;
 SELECT * FROM align_mafft('filtered');
+
+-- Align per-sample: one MSA per distinct sample value
+CREATE VIEW cohort AS
+  SELECT 'S1' AS sample, * FROM read_fastx('sample1.fasta')
+  UNION ALL
+  SELECT 'S2' AS sample, * FROM read_fastx('sample2.fasta');
+SELECT * FROM align_mafft('cohort', sample_id := 'sample') ORDER BY sample, sequence_index;
 
 -- Compute pairwise identity from aligned sequences
 CREATE TABLE seqs2 AS SELECT read_id, sequence1 FROM read_fastx('seqs.fasta');
@@ -2052,13 +2060,14 @@ GROUP BY ref_name ORDER BY hits DESC;
 
 ---
 
-## `detect_chimera_uchime(query_table, db='refs_table', [options])`
+## `detect_chimera_uchime(query_table, db='refs_table', [sample_id='col'], [options])`
 
 Reference-based chimera detection using the UCHIME algorithm (Edgar et al. 2011, Bioinformatics 27:2194-2200), powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Detects chimeric sequences by comparing queries against a trusted chimera-free reference database.
 
 **Parameters:**
 - `query_table` (VARCHAR): Name of a table or view containing query sequences. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns.
 - `db` (VARCHAR, required): Name of a table or view containing reference sequences. Same schema requirements as `query_table`.
+- `sample_id` (VARCHAR, optional): Name of a column in `query_table` to partition by. When provided, queries are scored per-sample against the (shared, load-once) reference database, and the sample column is prepended to the output. Execution is serialized (the vsearch wrapper is not thread-safe across concurrent calls).
 - `minh` (DOUBLE, default 0.28): Minimum h-score to flag as chimeric. Range [0, 1].
 - `xn` (DOUBLE, default 8.0): Weight of "no" votes in h-score computation. Must be >= 1.0.
 - `dn` (DOUBLE, default 1.4): Pseudo-count prior on "no" votes. Must be >= 0.
@@ -2132,12 +2141,13 @@ SELECT flag, count(*) FROM detect_chimera_uchime('queries', db:='refs') GROUP BY
 
 ---
 
-## `detect_chimera_uchime_denovo(input_table, [options])`
+## `detect_chimera_uchime_denovo(input_table, [sample_id='col'], [options])`
 
 De novo chimera detection using the UCHIME algorithm, powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Detects chimeric sequences without a reference database by using abundance information: more abundant sequences are assumed to be non-chimeric and serve as parents for less abundant sequences.
 
 **Parameters:**
 - `input_table` (VARCHAR): Name of a table or view containing sequences with abundance. Must have `read_id` (VARCHAR), `sequence1` (VARCHAR), and `size` (integer type) columns.
+- `sample_id` (VARCHAR, optional): Name of a column in `input_table` to partition by. Each sample gets its own k-mer index and bootstrap; a read_id that appears in multiple samples is therefore scored independently. The sample column is prepended to the output. Execution is serialized per the vsearch wrapper's thread-safety constraints.
 - `abskew` (DOUBLE, default 2.0): Abundance skew. Candidate parents must have abundance >= abskew * query abundance. Must be >= 1.0.
 - `minh`, `xn`, `dn`, `mindiv`, `mindiffs`: Same as `detect_chimera_uchime`.
 
@@ -2294,7 +2304,7 @@ GROUP BY centroid_id ORDER BY size DESC;
 - Error if table is empty or contains NULL read_ids, NULL sequences, or empty sequences
 - Error if any read_id exceeds 1023 characters
 
-## `deblur(input_table, [options])`
+## `deblur(input_table, [sample_id='col'], [options])`
 
 Deblur amplicon sequence denoising (Amir et al. 2017, mSystems 2:e00191-16). A greedy deconvolution algorithm that removes sequencing errors from amplicon data by iteratively subtracting expected error-derived reads from less-abundant sequences. Sequences whose corrected abundance rounds to zero are removed as errors; the remainder are denoised "sub-OTUs" (sOTUs).
 
@@ -2302,6 +2312,7 @@ Designed as a composable SQL building block. Dereplication is native SQL (`GROUP
 
 **Parameters:**
 - `input_table` (VARCHAR): Name of a table or view containing pre-aligned, pre-dereplicated sequences. Must have `read_id` (VARCHAR), `sequence1` (VARCHAR), and `abundance` (integer type) columns. All sequences in `sequence1` must have the same aligned length and the same unaligned length (number of non-gap characters).
+- `sample_id` (VARCHAR, optional): Name of a column in `input_table` to partition by. Deblur is applied independently per sample, and the sample column is prepended to the output. Unlike the two uchime functions, deblur's backend is re-entrant so samples run across DuckDB worker threads in parallel (bounded by `min(num_threads, num_samples)`).
 - `mean_error` (DOUBLE, default `0.005`): Per-base Illumina error rate. **This is the primary tuning knob.** The default 0.005 reflects MiSeq/HiSeq circa 2015. For modern NovaSeq or stitched reads (~250nt), use 0.001-0.002. Lowering `mean_error` makes denoising more conservative (fewer sequences removed). Must be > 0 and < 1.
 - `error_profile` (LIST(DOUBLE), optional): Override the default 12-element error probability profile. Each element represents the fraction of reads from a true sequence that land at exactly that Hamming distance. Default: `[1, 0.06, 0.02, 0.02, 0.01, 0.005, 0.005, 0.005, 0.001, 0.001, 0.001, 0.0005]`. All values must be non-negative.
 - `indel_prob` (DOUBLE, default `0.01`): Multiplicative penalty applied to corrections involving indels. A value of 0 disables indel-based corrections entirely.

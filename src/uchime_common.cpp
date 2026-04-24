@@ -18,15 +18,15 @@ std::vector<LogicalType> GetUchimeOutputTypes() {
 	        LogicalType::DOUBLE,  LogicalType::VARCHAR};
 }
 
-idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResult> &results, idx_t offset,
-                          idx_t count) {
+idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResult> &results, idx_t offset, idx_t count,
+                          idx_t start_col) {
 	idx_t actual = std::min(count, static_cast<idx_t>(results.size()) - offset);
 	if (actual == 0) {
 		output.SetCardinality(0);
 		return 0;
 	}
 
-	idx_t col = 0;
+	idx_t col = start_col;
 
 	// score — always populated
 	auto score_data = FlatVector::GetData<double>(output.data[col++]);
@@ -131,7 +131,11 @@ idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResu
 		FlatVector::GetData<string_t>(flag_vec)[i] = StringVector::AddString(flag_vec, results[offset + i].flag);
 	}
 
-	D_ASSERT(col == output.ColumnCount());
+	// Exactly 18 uchimeout columns should have been written, starting at start_col.
+	// (output.ColumnCount() equals start_col + 18 when the caller prepends columns,
+	// so the two forms are equivalent — but this form stays honest about what
+	// this function owns regardless of the caller's extra columns.)
+	D_ASSERT(col == start_col + 18);
 	output.SetCardinality(actual);
 	return actual;
 }
