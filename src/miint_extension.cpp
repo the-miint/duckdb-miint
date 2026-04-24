@@ -30,6 +30,7 @@
 #include <read_ena_attributes.hpp>
 #include <read_ena_searchable_fields.hpp>
 #include <read_ena_sequences.hpp>
+#include <miint_log.hpp>
 #include <miint_macros.hpp>
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/database.hpp"
@@ -169,6 +170,8 @@ static void MiintVersionsExecute(ClientContext &context, TableFunctionInput &dat
 static void LoadInternal(ExtensionLoader &loader) {
 	// TODO: use [[nodiscard]] throughout in headers
 	// TODO: //! comment on headers
+
+	miint::RegisterMiintLogType(loader.GetDatabaseInstance());
 
 	ScalarFunction version_func("miint_version", {}, LogicalType::VARCHAR, MiintVersionFunction);
 	loader.RegisterFunction(version_func);

@@ -7,6 +7,13 @@ namespace duckdb {
 
 // woltka_ogu is now a C++ table function — see src/woltka_ogu_function.cpp
 
+const std::string MIINT_WARNINGS = // NOLINT
+    "CREATE OR REPLACE MACRO miint_warnings() AS TABLE "
+    "SELECT timestamp, message "
+    "FROM duckdb_logs() "
+    "WHERE type = 'MiintWarning' "
+    "ORDER BY timestamp;";
+
 const std::string PARSE_GFF_ATTRIBUTES = // NOLINT
     "CREATE OR REPLACE MACRO parse_gff_attributes(kvp_string) AS ( "
     "  map_from_entries( "
@@ -718,6 +725,8 @@ public:
 				throw InternalException("Failed to register macro '%s': %s", name, result->GetError());
 			}
 		};
+
+		register_macro(MIINT_WARNINGS, "miint_warnings");
 
 		register_macro(PARSE_GFF_ATTRIBUTES, "parse_gff_attributes");
 		register_macro(READ_GFF, "read_gff");

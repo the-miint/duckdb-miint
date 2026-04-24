@@ -1,5 +1,6 @@
 #include "per_run_reader.hpp"
 #include "duckdb_seq_stream.hpp"
+#include "miint_log.hpp"
 #include "table_function_common.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_open_flags.hpp"
@@ -14,9 +15,10 @@
 namespace miint {
 
 PerRunReader::PerRunReader(duckdb::FileSystem &fs, ENARunInfo run, bool use_aspera, bool trim, std::mutex &open_mutex,
-                           const AsperaConfig *aspera_config, uint64_t max_sequences)
+                           const AsperaConfig *aspera_config, uint64_t max_sequences,
+                           duckdb::ClientContext *log_context)
     : fs_(fs), run_(std::move(run)), use_aspera_(use_aspera), trim_(trim), open_mutex_(open_mutex),
-      aspera_config_(aspera_config), max_sequences_(max_sequences) {
+      aspera_config_(aspera_config), max_sequences_(max_sequences), log_context_(log_context) {
 }
 
 PerRunReader::~PerRunReader() {
@@ -108,7 +110,11 @@ void PerRunReader::Finish() {
 	// When both processes errored we surface R1 via the thrown exception;
 	// log R2's message first so the user doesn't lose half the story.
 	if (!err_r1.empty() && !err_r2.empty()) {
-		duckdb::Printer::Print(err_r2);
+		if (log_context_) {
+			miint::EmitWarning(*log_context_, err_r2);
+		} else {
+			duckdb::Printer::Print(err_r2);
+		}
 	}
 	if (!err_r1.empty()) {
 		throw duckdb::IOException(err_r1);
@@ -183,10 +189,16 @@ void PerRunReader::OpenSFF() {
 	// by the time ReadBatch() starts enforcing the cap. Warn loudly once per
 	// SFF run so users don't silently assume the cap saved them a download.
 	if (max_sequences_ > 0) {
-		duckdb::Printer::PrintF("read_ena_sequences: WARNING: max_sequences=%llu on SFF run '%s' — SFF requires "
-		                        "downloading the full file before any record can be parsed; the row cap applies "
-		                        "but bandwidth savings do not",
-		                        static_cast<unsigned long long>(max_sequences_), run_.run_accession);
+		auto msg =
+		    duckdb::StringUtil::Format("read_ena_sequences: WARNING: max_sequences=%llu on SFF run '%s' — SFF requires "
+		                               "downloading the full file before any record can be parsed; the row cap applies "
+		                               "but bandwidth savings do not",
+		                               static_cast<unsigned long long>(max_sequences_), run_.run_accession);
+		if (log_context_) {
+			miint::EmitWarning(*log_context_, msg);
+		} else {
+			duckdb::Printer::Print(msg);
+		}
 	}
 
 	auto temp_dir = GetTempDir();

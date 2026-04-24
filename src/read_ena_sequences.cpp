@@ -1,7 +1,7 @@
 #include "read_ena_sequences.hpp"
 #include "SequenceRecord.hpp"
 #include "ena_resolver_cache.hpp"
-#include "duckdb/common/printer.hpp"
+#include "miint_log.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include <cerrno>
 #include <fstream>
@@ -310,7 +310,7 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 #endif
 		return std::make_unique<miint::PerRunReader>(global_state.fs, global_state.runs[idx], global_state.use_aspera,
 		                                             global_state.trim, global_state.open_mutex, cfg,
-		                                             bind_data.max_sequences);
+		                                             bind_data.max_sequences, &context);
 	};
 
 	miint::SequenceRecordBatch batch;
@@ -334,15 +334,23 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 			if (all_claimed) {
 				// Print skipped-runs warning exactly once across all threads
 				if (!global_state.skipped_warned.exchange(true, std::memory_order_acq_rel)) {
-					lock_guard<mutex> skip_guard(global_state.skipped_lock);
-					if (!global_state.skipped_runs.empty()) {
-						std::string msg =
-						    "read_ena_sequences: WARNING: " + std::to_string(global_state.skipped_runs.size()) +
-						    " run(s) skipped due to download errors:";
-						for (const auto &acc : global_state.skipped_runs) {
-							msg += " " + acc;
+					// Build the message under skipped_lock, then drop the lock
+					// before EmitWarning acquires LogManager::lock. Avoids
+					// establishing a skipped_lock → LogManager::lock ordering
+					// that future code could deadlock against.
+					std::string msg;
+					{
+						lock_guard<mutex> skip_guard(global_state.skipped_lock);
+						if (!global_state.skipped_runs.empty()) {
+							msg = "read_ena_sequences: WARNING: " + std::to_string(global_state.skipped_runs.size()) +
+							      " run(s) skipped due to download errors:";
+							for (const auto &acc : global_state.skipped_runs) {
+								msg += " " + acc;
+							}
 						}
-						Printer::Print(msg);
+					}
+					if (!msg.empty()) {
+						miint::EmitWarning(context, msg);
 					}
 				}
 				output.SetCardinality(0);
@@ -358,16 +366,16 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 				global_state.readers[local_state.current_run_idx]->Open();
 			} catch (const std::exception &e) {
 				auto &run = global_state.runs[local_state.current_run_idx];
-				Printer::PrintF("read_ena_sequences: warning: run '%s' failed to open (%s), retrying...",
-				                run.run_accession, e.what());
+				miint::EmitWarning(context, "read_ena_sequences: warning: run '%s' failed to open (%s), retrying...",
+				                   run.run_accession, e.what());
 				global_state.readers[local_state.current_run_idx].reset();
 				global_state.run_sequence_counters[local_state.current_run_idx] = 1;
 				try {
 					global_state.readers[local_state.current_run_idx] = make_reader(local_state.current_run_idx);
 					global_state.readers[local_state.current_run_idx]->Open();
 				} catch (const std::exception &e2) {
-					Printer::PrintF("read_ena_sequences: warning: run '%s' failed on retry (%s), skipping",
-					                run.run_accession, e2.what());
+					miint::EmitWarning(context, "read_ena_sequences: warning: run '%s' failed on retry (%s), skipping",
+					                   run.run_accession, e2.what());
 					global_state.readers[local_state.current_run_idx].reset();
 					{
 						lock_guard<mutex> skip_guard(global_state.skipped_lock);
@@ -403,9 +411,10 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 			uint64_t emitted = global_state.run_sequence_counters[current_run_idx] > 0
 			                       ? global_state.run_sequence_counters[current_run_idx] - 1
 			                       : 0;
-			Printer::PrintF("read_ena_sequences: WARNING: run '%s' failed mid-stream after emitting %llu read(s) "
-			                "(%s); skipping remainder — downstream sees partial data for this run",
-			                run.run_accession, static_cast<unsigned long long>(emitted), e.what());
+			miint::EmitWarning(context,
+			                   "read_ena_sequences: WARNING: run '%s' failed mid-stream after emitting %llu read(s) "
+			                   "(%s); skipping remainder — downstream sees partial data for this run",
+			                   run.run_accession, static_cast<unsigned long long>(emitted), e.what());
 			global_state.readers[current_run_idx].reset();
 			{
 				lock_guard<mutex> skip_guard(global_state.skipped_lock);
@@ -530,11 +539,12 @@ void ReadENASequencesTableFunction::FillOutputFromBatch(DataChunk &output, const
 // advances between callbacks — the dispatcher loops until state progresses to
 // a data-emitting call or a NEED_MORE_INPUT / terminal return.
 //
-// CRITICAL user-facing invariant: every skip path prints a loud Printer
-// warning via record_skip(). Silent skips in lateral mode are dangerous — the
-// outer query just sees zero rows for the failed accession, indistinguishable
-// from "no matches". The user depends on these warnings to notice lost
-// samples. Both per-attempt retry messages AND final skip notices are emitted.
+// CRITICAL user-facing invariant: every skip path emits a loud warning via
+// record_skip() (miint::EmitWarning → stderr + miint_warnings()). Silent skips
+// in lateral mode are dangerous — the outer query just sees zero rows for the
+// failed accession, indistinguishable from "no matches". The user depends on
+// these warnings to notice lost samples. Both per-attempt retry messages AND
+// final skip notices are emitted.
 //
 // `lateral_sequence_counter` is reset to 1 when a new outer row is consumed
 // (Phase 1) AND on open-retry / mid-stream retry (matching the literal path's
@@ -550,17 +560,19 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 	// Record a skipped accession and emit a loud warning. Both pieces are
 	// user-critical: the user must know which samples they did not get data
 	// for, so they can decide whether to retry manually or investigate.
-	auto record_skip = [&bind_data](const std::string &outer_accession, const std::string &run_accession,
-	                                const std::string &reason) {
+	auto record_skip = [&bind_data, &context](const std::string &outer_accession, const std::string &run_accession,
+	                                          const std::string &reason) {
 		{
 			std::lock_guard<std::mutex> guard(bind_data.lateral_skipped_lock);
 			bind_data.lateral_skipped_accessions.push_back(run_accession.empty() ? outer_accession : run_accession);
 		}
 		if (run_accession.empty()) {
-			Printer::PrintF("read_ena_sequences: WARNING: skipped outer accession '%s' — %s", outer_accession, reason);
+			miint::EmitWarning(context.client, "read_ena_sequences: WARNING: skipped outer accession '%s' — %s",
+			                   outer_accession, reason);
 		} else {
-			Printer::PrintF("read_ena_sequences: WARNING: skipped run '%s' (from outer accession '%s') — %s",
-			                run_accession, outer_accession, reason);
+			miint::EmitWarning(context.client,
+			                   "read_ena_sequences: WARNING: skipped run '%s' (from outer accession '%s') — %s",
+			                   run_accession, outer_accession, reason);
 		}
 	};
 
@@ -570,7 +582,7 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 	auto make_reader_for = [&](const miint::ENARunInfo &run) {
 		return std::make_unique<miint::PerRunReader>(
 		    global.fs, run, /*use_aspera=*/false, bind_data.trim, global.open_mutex,
-		    static_cast<const miint::AsperaConfig *>(nullptr), bind_data.max_sequences);
+		    static_cast<const miint::AsperaConfig *>(nullptr), bind_data.max_sequences, &context.client);
 	};
 
 	// Phase 1: need a fresh outer row → pull and resolve.
@@ -633,8 +645,8 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 		try {
 			local.current_reader->Open();
 		} catch (const std::exception &e) {
-			Printer::PrintF("read_ena_sequences: warning: run '%s' failed to open (%s), retrying...", run.run_accession,
-			                e.what());
+			miint::EmitWarning(context.client, "read_ena_sequences: warning: run '%s' failed to open (%s), retrying...",
+			                   run.run_accession, e.what());
 			local.current_reader.reset();
 			local.lateral_sequence_counter = 1; // No rows emitted yet; keep counter consistent.
 			local.current_reader = make_reader_for(run);

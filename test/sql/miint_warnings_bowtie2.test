@@ -1,0 +1,34 @@
+# name: test/sql/miint_warnings_bowtie2.test
+# description: Assert that align_bowtie2_sharded's threads!=1 warning surfaces via miint_warnings()
+# group: [sql]
+
+require miint
+
+require-env BOWTIE2_AVAILABLE
+
+# The threads-ignored warning fires in Bind() before Execute, so EXPLAIN is
+# enough to trigger EmitWarning without running bowtie2 on the test shards.
+
+statement ok
+CREATE TABLE queries AS SELECT * FROM (VALUES
+    ('query1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE read_to_shard AS SELECT * FROM (VALUES
+    ('query1', 'shard_a')
+) AS t(read_id, shard_name);
+
+statement ok
+EXPLAIN SELECT * FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    threads := 2);
+
+# Assert the warning landed in miint_warnings() — the round-trip that
+# miint_warnings.test's baseline can't prove on its own.
+query I
+SELECT COUNT(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%Parameter ''threads'' is ignored in sharded mode%';
+----
+true
