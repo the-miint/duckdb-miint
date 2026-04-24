@@ -765,9 +765,11 @@ set(EXTENSION_SOURCES
     src/ena_client.cpp
     src/ena_run_info_extractor.cpp
     src/ena_resolver_cache.cpp
+    src/ena_search_field_registry.cpp
     src/per_run_reader.cpp
     src/read_ena.cpp
     src/read_ena_attributes.cpp
+    src/read_ena_searchable_fields.cpp
     src/read_ena_sequences.cpp
     src/aspera_utils.cpp
     src/aspera_stream.cpp
@@ -1027,8 +1029,10 @@ set(TEST_SOURCES
     src/ena_parser.cpp
     src/ena_run_info_extractor.cpp
     src/ena_resolver_cache.cpp
+    src/ena_search_field_registry.cpp
     test/cpp/test_ENAClient.cpp
     test/cpp/test_ENAResolverCache.cpp
+    test/cpp/test_ena_search_field_registry.cpp
     src/aspera_utils.cpp
     test/cpp/test_AsperaUtils.cpp
     src/SFFReader.cpp

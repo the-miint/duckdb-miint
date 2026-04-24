@@ -28,6 +28,7 @@
 #include <read_ncbi_annotation.hpp>
 #include <read_ena.hpp>
 #include <read_ena_attributes.hpp>
+#include <read_ena_searchable_fields.hpp>
 #include <read_ena_sequences.hpp>
 #include <miint_macros.hpp>
 #include "duckdb/main/extension_helper.hpp"
@@ -203,6 +204,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadNCBIAnnotationTableFunction::Register(loader);
 	ReadENATableFunction::Register(loader);
 	ReadENAAttributesTableFunction::Register(loader);
+	ReadENASearchableFieldsTableFunction::Register(loader);
 	ReadENASequencesTableFunction::Register(loader);
 
 	AlignmentFlagFunctions::Register(loader);

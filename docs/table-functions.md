@@ -17,6 +17,7 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`read_ncbi_annotation`](#read_ncbi_annotationaccession-api_key-include_filepathfalse) - NCBI genome annotations
 - [`read_ena`](#read_enaaccession-resultread_run-fields) - EBI/ENA metadata queries
 - [`read_ena_attributes`](#read_ena_attributesaccession) - EBI/ENA custom sample attributes
+- [`ena_searchable_fields`](#ena_searchable_fieldsresult_type) - Enumerate ENA structured-search fields per result type
 - [`read_ena_sequences`](#read_ena_sequencesaccession-include_filepathfalse-qual_offset33) - Stream FASTA/FASTQ from EBI/ENA with accession columns
 - [`read_jplace`](#read_jplacepath) - Phylogenetic placement files
 - [`read_jplace_newick`](#read_jplace_newickpath-include_filepathfalse) - Newick tree from jplace files
@@ -962,6 +963,37 @@ SELECT sample_accession,
        MAX(CASE WHEN tag = 'geographic location (country and/or sea)' THEN value END) AS country
 FROM read_ena_attributes('PRJEB11419')
 GROUP BY sample_accession;
+```
+
+## `ena_searchable_fields(result_type)`
+
+Enumerate the fields that ENA's Portal API `/search?result=<result_type>` endpoint accepts as structured filters. Use this to discover what field names are available for a given result type (sample, read_run, study, experiment, etc.) before constructing a query — either a direct Portal API `/search` URL or a `WHERE tag='X'` filter on `read_ena_attributes` that can be pushed down to the structured search.
+
+**Requirements:**
+- Requires the `httpfs` extension (automatically loaded)
+- Network access to EBI servers (www.ebi.ac.uk)
+
+**Parameters:**
+- `result_type` (VARCHAR, required): An ENA Portal API result type (e.g., `'sample'`, `'read_run'`, `'study'`, `'experiment'`)
+
+**Output schema:**
+- `field_name` (VARCHAR): Canonical field identifier accepted by ENA's `/search?fields=...` query parameter
+- `type` (VARCHAR): ENA's declared type for the field (e.g., `text`, `number`, `date`, `controlled value`, `taxonomy`)
+- `description` (VARCHAR, nullable): ENA's human-readable description, when available
+
+**Behavior:**
+- Issues exactly one HTTP call to `/returnFields?result=<result_type>&format=tsv` on first use and caches the parsed result for the remainder of the scan
+- Validates `result_type` as alphanumeric + `_-.` to prevent URL injection
+
+**Examples:**
+```sql
+-- All searchable fields for the sample result type
+SELECT field_name, type FROM ena_searchable_fields('sample') ORDER BY field_name;
+
+-- Check whether a specific field exists before using it in a filter
+SELECT COUNT(*) > 0 AS exists
+FROM ena_searchable_fields('sample')
+WHERE field_name = 'host_body_site';
 ```
 
 ## `read_ena_sequences(accession, [include_filepath=false], [qual_offset=33])`
