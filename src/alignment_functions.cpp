@@ -194,6 +194,62 @@ void AlignmentSeqIdentityFunction::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetFunction());
 }
 
+// cigar_sequence_identity(cigar) — one-arg convenience over the type='cigar'
+// branch of alignment_seq_identity. Same math (via miint::ComputeCigarIdentity).
+// Returns NULL when identity can't be computed from CIGAR alone (M-only CIGAR,
+// mixed M+=/X, degenerate CIGARs with no =/X ops).
+static void CigarSequenceIdentityScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &cigar_vector = args.data[0];
+
+	UnifiedVectorFormat cigar_data;
+	cigar_vector.ToUnifiedFormat(args.size(), cigar_data);
+	auto cigar_ptr = UnifiedVectorFormat::GetData<string_t>(cigar_data);
+
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto result_data = FlatVector::GetData<double>(result);
+	auto &result_validity = FlatVector::Validity(result);
+
+	for (idx_t i = 0; i < args.size(); i++) {
+		auto cigar_idx = cigar_data.sel->get_index(i);
+
+		if (!cigar_data.validity.RowIsValid(cigar_idx)) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		auto cigar = cigar_ptr[cigar_idx];
+		if (cigar.GetSize() == 0 || (cigar.GetSize() == 1 && cigar.GetData()[0] == '*')) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		try {
+			std::string cigar_std(cigar.GetData(), cigar.GetSize());
+			miint::CigarStats cigar_stats = miint::ParseCigar(cigar_std);
+
+			auto maybe_identity = miint::ComputeCigarIdentity(cigar_stats);
+			if (!maybe_identity.has_value()) {
+				result_validity.SetInvalid(i);
+				continue;
+			}
+			result_data[i] = *maybe_identity;
+		} catch (const miint::InvalidInputException &e) {
+			throw InvalidInputException(e.what());
+		}
+	}
+}
+
+ScalarFunction CigarSequenceIdentityFunction::GetFunction() {
+	ScalarFunction func("cigar_sequence_identity", {LogicalType::VARCHAR}, LogicalType::DOUBLE,
+	                    CigarSequenceIdentityScalarFunction);
+	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	return func;
+}
+
+void CigarSequenceIdentityFunction::Register(ExtensionLoader &loader) {
+	loader.RegisterFunction(GetFunction());
+}
+
 // alignment_query_length implementation
 static void AlignmentQueryLengthScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &cigar_vector = args.data[0];

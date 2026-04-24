@@ -11,6 +11,12 @@ public:
 	static ScalarFunction GetFunction();
 };
 
+class CigarSequenceIdentityFunction {
+public:
+	static void Register(ExtensionLoader &loader);
+	static ScalarFunction GetFunction();
+};
+
 class AlignmentQueryLengthFunction {
 public:
 	static void Register(ExtensionLoader &loader);

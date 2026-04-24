@@ -391,6 +391,137 @@ SELECT alignment_seq_identity('5=2X3=', 2, '', 'gap_compressed')::FLOAT;
 0.8
 
 ###############################################################################
+# cigar_sequence_identity(cigar) — one-arg convenience over the type='cigar'
+# branch of alignment_seq_identity. Same math, simpler signature.
+# Both go through miint::ComputeCigarIdentity, so behavior must match.
+###############################################################################
+
+# Perfect match: 10=
+query R
+SELECT cigar_sequence_identity('10=')::FLOAT;
+----
+1.0
+
+# Half match: 5=5X
+query R
+SELECT cigar_sequence_identity('5=5X')::FLOAT;
+----
+0.5
+
+# With insertion: gaps drop identity. 5=2I3= → 8 matches / 10 alignment_columns
+query R
+SELECT cigar_sequence_identity('5=2I3=')::FLOAT;
+----
+0.8
+
+# With deletion: gaps drop identity. 5=3D5= → 10 matches / 13 alignment_columns
+query R
+SELECT cigar_sequence_identity('5=3D5=')::FLOAT;
+----
+0.76923
+
+# Mix of =/X plus soft clips (clips excluded from identity)
+query R
+SELECT cigar_sequence_identity('3S5=2X3=3S')::FLOAT;
+----
+0.8
+
+# Hard clips also excluded
+query R
+SELECT cigar_sequence_identity('5H5=5X5H')::FLOAT;
+----
+0.5
+
+# N (RNA skip) ignored
+query R
+SELECT cigar_sequence_identity('5=100N5=')::FLOAT;
+----
+1.0
+
+# Legacy M-only CIGAR → NULL (can't compute from CIGAR alone)
+query I
+SELECT cigar_sequence_identity('10M') IS NULL;
+----
+true
+
+# Mixed M with =/X → NULL (inconsistent)
+query I
+SELECT cigar_sequence_identity('5M5=') IS NULL;
+----
+true
+
+query I
+SELECT cigar_sequence_identity('5M5X') IS NULL;
+----
+true
+
+# Unmapped / empty / NULL → NULL
+query I
+SELECT cigar_sequence_identity('*') IS NULL;
+----
+true
+
+query I
+SELECT cigar_sequence_identity('') IS NULL;
+----
+true
+
+query I
+SELECT cigar_sequence_identity(NULL) IS NULL;
+----
+true
+
+# Degenerate CIGARs with no =/X ops → NULL (same contract as characterization
+# pins on alignment_seq_identity with type='cigar')
+query I
+SELECT cigar_sequence_identity('10I') IS NULL;
+----
+true
+
+query I
+SELECT cigar_sequence_identity('10D') IS NULL;
+----
+true
+
+query I
+SELECT cigar_sequence_identity('100S') IS NULL;
+----
+true
+
+query I
+SELECT cigar_sequence_identity('100H') IS NULL;
+----
+true
+
+query I
+SELECT cigar_sequence_identity('100N') IS NULL;
+----
+true
+
+query I
+SELECT cigar_sequence_identity('100P') IS NULL;
+----
+true
+
+# Parity with the legacy-spelling: same inputs must produce same results.
+# If this ever fails, either the wrapper has drifted or the shared helper
+# is being bypassed.
+query I
+SELECT cigar_sequence_identity('5=2I3=') = alignment_seq_identity('5=2I3=', NULL, NULL, 'cigar');
+----
+true
+
+query I
+SELECT cigar_sequence_identity('5=3D5=') = alignment_seq_identity('5=3D5=', NULL, NULL, 'cigar');
+----
+true
+
+query I
+SELECT cigar_sequence_identity('3S5=2X3=3S') = alignment_seq_identity('3S5=2X3=3S', NULL, NULL, 'cigar');
+----
+true
+
+###############################################################################
 # INTEGRATION WITH read_sam
 ###############################################################################
 

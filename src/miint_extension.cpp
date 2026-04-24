@@ -213,6 +213,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	AlignmentFlagFunctions::Register(loader);
 	AlignmentSeqIdentityFunction::Register(loader);
+	CigarSequenceIdentityFunction::Register(loader);
 	AlignmentQueryLengthFunction::Register(loader);
 	AlignmentQueryCoverageFunction::Register(loader);
 	CompressIntervalsFunction::Register(loader);
