@@ -16,7 +16,7 @@ jobs:
     name: Build extension binaries
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5-variegata
     with:
-      duckdb_version: v1.5-variegata
+      duckdb_version: v1.5.2
       ci_tools_version: v1.5-variegata
       extension_name: miint
       extra_toolchains: 'rust'
@@ -112,7 +112,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: miint-v1.5-variegata-extension-${{ matrix.wasm_arch }}
+          name: miint-v1.5.2-extension-${{ matrix.wasm_arch }}
 
       - name: Find WASM file
         id: find-wasm
@@ -202,7 +202,7 @@ jobs:
     name: Code Quality Check
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v1.5-variegata
     with:
-      duckdb_version: v1.5-variegata
+      duckdb_version: v1.5.2
       ci_tools_version: v1.5-variegata
       extension_name: miint
       format_checks: 'format;tidy'
