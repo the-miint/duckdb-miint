@@ -301,26 +301,41 @@ while IFS= read -r -d '' art; do
         continue
     fi
 
-    # Accept .duckdb_extension (CI default) or already-gzipped .duckdb_extension.gz
-    ext_path=$(find "$art" -type f -name '*.duckdb_extension' -print -quit)
-    if [[ -z "$ext_path" ]]; then
-        ext_path=$(find "$art" -type f -name '*.duckdb_extension.gz' -print -quit)
-    fi
-    [[ -n "$ext_path" ]] || fail "artifact $name contains no .duckdb_extension(.gz) file"
+    # Locate the payload. Three accepted shapes:
+    #   *.duckdb_extension       native, uncompressed (typical CI output) -> gzip
+    #   *.duckdb_extension.gz    native, already compressed               -> copy
+    #   *.duckdb_extension.wasm  wasm build (served as-is, no .gz)        -> copy
+    ext_path=""
+    for pat in '*.duckdb_extension' '*.duckdb_extension.gz' '*.duckdb_extension.wasm'; do
+        ext_path=$(find "$art" -type f -name "$pat" -print -quit)
+        [[ -n "$ext_path" ]] && break
+    done
+    [[ -n "$ext_path" ]] || fail "artifact $name contains no .duckdb_extension{,.gz,.wasm} file"
 
     out_dir="$RELEASE_DIR/$platform"
     mkdir -p "$out_dir"
-    out_file="$out_dir/miint.duckdb_extension.gz"
 
-    if [[ "$ext_path" == *.gz ]]; then
-        cp "$ext_path" "$out_file"
-    else
-        gzip -9 -c "$ext_path" > "$out_file"
-    fi
+    case "$ext_path" in
+        *.duckdb_extension.wasm)
+            out_file="$out_dir/miint.duckdb_extension.wasm"
+            cp "$ext_path" "$out_file"
+            kind=wasm
+            ;;
+        *.duckdb_extension.gz)
+            out_file="$out_dir/miint.duckdb_extension.gz"
+            cp "$ext_path" "$out_file"
+            kind=gz
+            ;;
+        *)
+            out_file="$out_dir/miint.duckdb_extension.gz"
+            gzip -9 -c "$ext_path" > "$out_file"
+            kind=gz
+            ;;
+    esac
 
     size=$(stat -c %s "$out_file")
-    deployed+=("$platform ($(numfmt --to=iec --suffix=B "$size"))")
-    log "  staged $platform <- $(basename "$ext_path") ($size bytes gz)"
+    deployed+=("$platform ($(numfmt --to=iec --suffix=B "$size") $kind)")
+    log "  staged $platform <- $(basename "$ext_path") ($size bytes $kind)"
 done < <(find "$ART_DIR" -mindepth 1 -maxdepth 1 -type d -print0)
 
 [[ ${#deployed[@]} -gt 0 ]] || fail "no artifacts matched prefix $ARTIFACT_PREFIX"
