@@ -1,5 +1,6 @@
 #include "align_bowtie2_sharded.hpp"
 #include "align_common.hpp"
+#include "miint_log.hpp"
 #include "shard_debug.hpp"
 #include "duckdb/common/file_system.hpp"
 
@@ -91,10 +92,10 @@ unique_ptr<FunctionData> AlignBowtie2ShardedTableFunction::Bind(ClientContext &c
 	if (threads_param != input.named_parameters.end() && !threads_param->second.IsNull()) {
 		int32_t threads_val = threads_param->second.GetValue<int32_t>();
 		if (threads_val != 1) {
-			Printer::Print("WARNING: Parameter 'threads' is ignored in sharded mode. "
-			               "In sharded mode, each bowtie2 process uses a single thread. "
-			               "Parallelism comes from running multiple processes per shard "
-			               "(max_threads_per_shard) across multiple shards.\n");
+			miint::EmitWarning(context, "WARNING: Parameter 'threads' is ignored in sharded mode. "
+			                            "In sharded mode, each bowtie2 process uses a single thread. "
+			                            "Parallelism comes from running multiple processes per shard "
+			                            "(max_threads_per_shard) across multiple shards.");
 		}
 	}
 	data->config.threads = 1;

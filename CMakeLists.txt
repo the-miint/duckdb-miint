@@ -762,6 +762,7 @@ set(EXTENSION_SOURCES
     src/ena_resolver_cache.cpp
     src/ena_search_field_registry.cpp
     src/ena_attributes_filter.cpp
+    src/miint_log.cpp
     src/per_run_reader.cpp
     src/read_ena.cpp
     src/read_ena_attributes.cpp

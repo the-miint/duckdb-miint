@@ -37,6 +37,7 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`cluster_sequences_vsearch`](#cluster_sequences_vsearchinput_table-idthreshold-options) - Greedy sequence clustering
 - [`deblur`](#deblurinput_table-options) - Deblur amplicon sequence denoising
 - [`alignment_slice`](#alignment_slicetable_name-start-stop-include_deletionsfalse) - Slice alignments to a genomic region
+- [`miint_warnings`](#miint_warnings) - Query miint's operational warnings as a table
 
 ## `read_alignments(filename, [reference_lengths='table_name'], [include_filepath=false], [include_seq_qual=false])`
 Read SAM/BAM alignment files.
@@ -2486,3 +2487,31 @@ SELECT * FROM deblur('aligned_seqs', error_profile := [1, 0.04, 0.01, 0.005]);
 - Error if `indel_max` is negative
 - Error if `error_profile` contains negative values or is empty
 - Error if sequences have different aligned lengths or different unaligned lengths
+
+---
+
+## `miint_warnings()`
+
+Returns miint's operational warnings as a queryable table. Populated by user-facing warning sites — skipped accessions in `read_ena_sequences`, the SFF `max_sequences` caveat, the `threads` parameter being ignored in `align_bowtie2_sharded`, mid-stream download failures, etc. Every entry is also printed to stderr (today's behavior), so interactive users see no change; pipeline and `COPY TO` users now have a way to inspect warnings after the fact.
+
+**Returns:**
+| Column | Type | Description |
+|---|---|---|
+| `timestamp` | `TIMESTAMP WITH TIME ZONE` | When the warning was emitted |
+| `message` | `VARCHAR` | Human-readable warning text |
+
+**Example:**
+```sql
+-- Scan a study, then see what got skipped
+SELECT COUNT(*) FROM read_ena_sequences('PRJEB1234');
+SELECT timestamp, message FROM miint_warnings();
+```
+
+**Behavior:**
+- The log is process-scoped and in-memory by default; entries accumulate across queries within a single DuckDB session.
+- Warnings are captured regardless of the `enable_logging` / `logging_level` settings — miint writes directly to DuckDB's global log sink so `miint_warnings()` works without any setup.
+- Under the hood, entries have type `'MiintWarning'` and live alongside DuckDB's own logs in `duckdb_logs()`; the macro just filters on type.
+
+**Interactions with DuckDB logging settings:**
+- `SET logging_storage='stderr'` — entries go straight to stderr instead of the in-memory sink, so `miint_warnings()` stops returning rows in that mode (the stderr output is the workaround). Default storage is in-memory; leave it alone unless you have reason to change it.
+- `SET warnings_as_errors=true` — miint suppresses the log-storage write for that query so a skip-warning doesn't abort the retry or the partial-data path it was designed to allow. The stderr message still fires, so nothing is silently dropped, but `miint_warnings()` will not see the row for that call.

@@ -1,0 +1,22 @@
+# name: test/sql/miint_warnings_ena.test
+# description: Assert that a skipped-accession warning from read_ena_sequences surfaces via miint_warnings()
+# group: [sql]
+
+require httpfs
+
+require miint
+
+# Requires the ENA Portal API; run_tests.sh probes and exports this.
+require-env ENA_AVAILABLE
+
+# A non-existent accession → record_skip() fires EmitWarning with the accession
+# substring in the message. miint_warnings() should then see that row.
+statement ok
+SELECT COUNT(*) FROM (VALUES ('NOT_A_REAL_ACCESSION_XYZ123')) AS t(acc),
+                LATERAL (SELECT 1 FROM read_ena_sequences(t.acc)) lt;
+
+query I
+SELECT COUNT(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%NOT_A_REAL_ACCESSION_XYZ123%';
+----
+true

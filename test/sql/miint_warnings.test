@@ -1,0 +1,20 @@
+# name: test/sql/miint_warnings.test
+# description: Test the miint_warnings() SQL macro surfaces miint warning log entries
+# group: [sql]
+
+require miint
+
+# ---- Macro is registered and has the documented schema ----
+
+query IIIIII
+DESCRIBE SELECT * FROM miint_warnings();
+----
+timestamp	TIMESTAMP WITH TIME ZONE	YES	NULL	NULL	NULL
+message	VARCHAR	YES	NULL	NULL	NULL
+
+# ---- Baseline: no miint warnings emitted in this fresh session ----
+
+query I
+SELECT COUNT(*) FROM miint_warnings();
+----
+0

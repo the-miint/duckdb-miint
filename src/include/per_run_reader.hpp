@@ -12,6 +12,10 @@
 #include <mutex>
 #include <string>
 
+namespace duckdb {
+class ClientContext;
+} // namespace duckdb
+
 namespace miint {
 
 // Per-run streaming reader for ENA FASTX / SFF / Aspera runs.
@@ -36,8 +40,13 @@ class PerRunReader {
 public:
 	// `max_sequences == 0` means unlimited. For paired-end runs, `max_sequences`
 	// counts pairs (one batch row per pair), not underlying FASTQ records.
+	// `log_context` is optional; when non-null, user-facing warnings (e.g. the
+	// SFF max_sequences caveat) route through miint_warnings() in addition to
+	// stderr. A null context falls back to stderr only, keeping the reader
+	// usable from non-DuckDB-linked C++ harnesses.
 	PerRunReader(duckdb::FileSystem &fs, ENARunInfo run, bool use_aspera, bool trim, std::mutex &open_mutex,
-	             const AsperaConfig *aspera_config, uint64_t max_sequences = 0);
+	             const AsperaConfig *aspera_config, uint64_t max_sequences = 0,
+	             duckdb::ClientContext *log_context = nullptr);
 	~PerRunReader();
 
 	PerRunReader(const PerRunReader &) = delete;
@@ -87,6 +96,7 @@ private:
 	bool finished_ = false;
 	uint64_t max_sequences_ = 0; // 0 = unlimited
 	uint64_t sequences_emitted_ = 0;
+	duckdb::ClientContext *log_context_ = nullptr;
 
 	void OpenHTTP();
 	void OpenSFF();
