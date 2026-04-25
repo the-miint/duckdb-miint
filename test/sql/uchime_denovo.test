@@ -66,7 +66,7 @@ SELECT count(*) FROM detect_chimera_uchime_denovo('denovo_seqs');
 
 # Verify all flags
 query TT
-SELECT query_id, flag FROM detect_chimera_uchime_denovo('denovo_seqs') ORDER BY query_id;
+SELECT read_id, flag FROM detect_chimera_uchime_denovo('denovo_seqs') ORDER BY read_id;
 ----
 seq1	N
 seq2	N
@@ -84,20 +84,20 @@ SELECT count(*) FROM detect_chimera_uchime_denovo('denovo_seqs') WHERE flag = 'Y
 # Verify seq4 (chimera of seq1+seq2) detailed results
 # vsearch: score=16.5019, LY=45, LN=0, LA=0, RY=46, RN=0, RA=0, div=15.0
 query IRTTIIIIIIRT
-SELECT round(score, 2), query_id, parent_a_id, parent_b_id,
+SELECT round(score, 2), read_id, parent_a_id, parent_b_id,
        left_yes, left_no, left_abstain,
        right_yes, right_no, right_abstain,
        round(divergence, 1), flag
 FROM detect_chimera_uchime_denovo('denovo_seqs')
-WHERE query_id = 'seq4';
+WHERE read_id = 'seq4';
 ----
 16.50	seq4	seq1	seq2	45	0	0	46	0	0	15.0	Y
 
 # Verify non-chimeric sequences have NULL parents
 query IIIII
-SELECT query_id, parent_a_id, parent_b_id, closest_parent_id, flag
+SELECT read_id, parent_a_id, parent_b_id, closest_parent_id, flag
 FROM detect_chimera_uchime_denovo('denovo_seqs')
-WHERE query_id = 'seq1';
+WHERE read_id = 'seq1';
 ----
 seq1	NULL	NULL	NULL	N
 

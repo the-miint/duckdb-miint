@@ -2168,7 +2168,7 @@ Reference-based chimera detection using the UCHIME algorithm (Edgar et al. 2011,
 | Column | Type | Description |
 |--------|------|-------------|
 | `score` | DOUBLE | Chimera h-score (higher = more likely chimeric) |
-| `query_id` | VARCHAR | Query sequence identifier |
+| `read_id` | VARCHAR | Query sequence identifier |
 | `parent_a_id` | VARCHAR | Parent A identifier (NULL if non-chimeric) |
 | `parent_b_id` | VARCHAR | Parent B identifier (NULL if non-chimeric) |
 | `closest_parent_id` | VARCHAR | Closest parent to query (NULL if non-chimeric) |
@@ -2198,7 +2198,7 @@ SELECT * FROM detect_chimera_uchime('queries', db:='refs');
 -- Filter chimeric sequences
 CREATE TABLE clean_seqs AS
 SELECT q.* FROM queries q
-JOIN detect_chimera_uchime('queries', db:='refs') u ON q.read_id = u.query_id
+JOIN detect_chimera_uchime('queries', db:='refs') u ON q.read_id = u.read_id
 WHERE u.flag = 'N';
 
 -- Count chimeras
@@ -2255,7 +2255,7 @@ SELECT * FROM detect_chimera_uchime_denovo('seqs');
 
 -- Filter out chimeras
 SELECT s.* FROM seqs s
-JOIN detect_chimera_uchime_denovo('seqs') u ON s.read_id = u.query_id
+JOIN detect_chimera_uchime_denovo('seqs') u ON s.read_id = u.read_id
 WHERE u.flag != 'Y';
 ```
 
@@ -2290,7 +2290,7 @@ Global pairwise sequence search, powered by the [vsearch](https://github.com/tor
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `query_id` | VARCHAR | Query sequence identifier |
+| `read_id` | VARCHAR | Query sequence identifier |
 | `target_id` | VARCHAR | Reference sequence identifier |
 | `identity` | DOUBLE | Percent identity (0-100) |
 | `matches` | INTEGER | Number of matching columns |
@@ -2313,7 +2313,7 @@ SELECT * FROM search_sequences_vsearch('queries', db:='refs', id:=0.97);
 SELECT * FROM search_sequences_vsearch('queries', db:='refs', id:=0.90, maxaccepts:=3);
 
 -- Count queries with hits
-SELECT count(DISTINCT query_id) FROM search_sequences_vsearch('queries', db:='refs', id:=0.97);
+SELECT count(DISTINCT read_id) FROM search_sequences_vsearch('queries', db:='refs', id:=0.97);
 ```
 
 **Behavior:**

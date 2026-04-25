@@ -97,19 +97,19 @@ CREATE TABLE syn_queries AS SELECT * FROM (VALUES
 ) t(read_id, sequence1);
 
 query TTRI
-SELECT query_id, target_id, identity, accepted
+SELECT read_id, target_id, identity, accepted
 FROM search_sequences_vsearch('syn_queries', db:='syn_refs', id:=0.97)
-ORDER BY query_id;
+ORDER BY read_id;
 ----
 qA	refA	100.0	true
 qB	refB	100.0	true
 
 # Verify all output columns exist and have correct types
 query TTRIIIIIII
-SELECT query_id, target_id, identity, matches, mismatches, gaps,
+SELECT read_id, target_id, identity, matches, mismatches, gaps,
        alignment_length, query_length, target_length, accepted::int
 FROM search_sequences_vsearch('syn_queries', db:='syn_refs', id:=0.97)
-WHERE query_id = 'qA';
+WHERE read_id = 'qA';
 ----
 qA	refA	100.0	24	0	0	24	24	24	1
 
@@ -127,9 +127,9 @@ statement ok
 CREATE VIEW syn_refs_view AS SELECT * FROM syn_refs;
 
 query TT
-SELECT query_id, target_id
+SELECT read_id, target_id
 FROM search_sequences_vsearch('syn_queries', db:='syn_refs_view', id:=0.97)
-ORDER BY query_id;
+ORDER BY read_id;
 ----
 qA	refA
 qB	refB

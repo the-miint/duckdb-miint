@@ -12,7 +12,7 @@ namespace duckdb {
 
 // Output column names and types for search results.
 static std::vector<std::string> GetSearchOutputNames() {
-	return {"query_id", "target_id",        "identity",     "matches",       "mismatches",
+	return {"read_id",  "target_id",        "identity",     "matches",       "mismatches",
 	        "gaps",     "alignment_length", "query_length", "target_length", "accepted"};
 }
 
@@ -36,9 +36,10 @@ static idx_t OutputSearchResults(DataChunk &output, const std::vector<miint::Sea
 
 	idx_t col = 0;
 
-	auto &query_vec = output.data[col++];
+	auto &read_id_vec = output.data[col++];
 	for (idx_t i = 0; i < actual; i++) {
-		FlatVector::GetData<string_t>(query_vec)[i] = StringVector::AddString(query_vec, results[offset + i].query_id);
+		FlatVector::GetData<string_t>(read_id_vec)[i] =
+		    StringVector::AddString(read_id_vec, results[offset + i].query_id);
 	}
 
 	auto &target_vec = output.data[col++];

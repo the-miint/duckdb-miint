@@ -44,7 +44,7 @@ SELECT count(*) FROM ltp_queries;
 # EU778281.1 = N (its actual parents MK567960/JAOQKB000000000 are NOT in the 500-ref subset)
 
 query TT
-SELECT query_id, flag FROM detect_chimera_uchime('ltp_queries', db:='ltp_refs') ORDER BY query_id;
+SELECT read_id, flag FROM detect_chimera_uchime('ltp_queries', db:='ltp_refs') ORDER BY read_id;
 ----
 EU778281.1	N
 chimera_10_100	Y
