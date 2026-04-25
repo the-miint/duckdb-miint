@@ -12,8 +12,8 @@ namespace duckdb {
 
 // Output column names and types for search results.
 static std::vector<std::string> GetSearchOutputNames() {
-	return {"read_id",  "target_id",        "identity",     "matches",       "mismatches",
-	        "gaps",     "alignment_length", "query_length", "target_length", "accepted"};
+	return {"read_id", "target_id",        "identity",     "matches",       "mismatches",
+	        "gaps",    "alignment_length", "query_length", "target_length", "accepted"};
 }
 
 static std::vector<LogicalType> GetSearchOutputTypes() {

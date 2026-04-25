@@ -90,8 +90,8 @@ static void LoadDenovoSequences(Connection &conn, const std::string &table_name,
 	auto q_id = KeywordHelper::WriteOptionallyQuoted(id_col);
 	auto q_seq = KeywordHelper::WriteOptionallyQuoted(sequence_col);
 	auto q_count = KeywordHelper::WriteOptionallyQuoted(count_col);
-	auto sql = "SELECT " + q_id + ", " + q_seq + ", " + q_count + " FROM " +
-	           KeywordHelper::WriteOptionallyQuoted(table_name);
+	auto sql =
+	    "SELECT " + q_id + ", " + q_seq + ", " + q_count + " FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
 	if (!where_sql.empty()) {
 		sql += " WHERE " + where_sql;
 	}
