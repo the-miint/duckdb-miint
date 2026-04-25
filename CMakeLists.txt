@@ -915,15 +915,11 @@ endif()
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     target_link_libraries(${EXTENSION_NAME}
                           hdf5::hdf5-static
-                          hdf5::hdf5_hl-static
                           hdf5::hdf5_cpp-static
-                          hdf5::hdf5_hl_cpp-static
     )
     target_link_libraries(${LOADABLE_EXTENSION_NAME}
                           hdf5::hdf5-static
-                          hdf5::hdf5_hl-static
                           hdf5::hdf5_cpp-static
-                          hdf5::hdf5_hl_cpp-static
     )
 endif()
 if(HAVE_LIBZSTD)
@@ -1110,9 +1106,7 @@ endif()
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     target_link_libraries(tests
                           hdf5::hdf5-static
-                          hdf5::hdf5_hl-static
-                          hdf5::hdf5_cpp-static
-                          hdf5::hdf5_hl_cpp-static)
+                          hdf5::hdf5_cpp-static)
 endif()
 if(HAVE_LIBZSTD)
     target_link_libraries(tests ${ZSTD_TARGET})
