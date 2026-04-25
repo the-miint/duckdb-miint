@@ -22,6 +22,13 @@ public:
 		std::string input_table;
 		miint::UchimeParams params;
 
+		// Column-name overrides for the input table. Defaults preserve historical
+		// names so chains like deblur(count_col := 'abundance') →
+		// detect_chimera_uchime_denovo(count_col := 'abundance') work without rename.
+		std::string id_col = "read_id";
+		std::string sequence_col = "sequence1";
+		std::string count_col = "size";
+
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 

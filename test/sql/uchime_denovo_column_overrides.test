@@ -1,0 +1,45 @@
+# name: test/sql/uchime_denovo_column_overrides.test
+# description: test detect_chimera_uchime_denovo id_col / sequence_col / count_col overrides
+# group: [sql]
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+# Fixture with non-default column names — simulates feeding deblur output
+# (which has 'abundance', not 'size') into uchime_denovo without rename.
+statement ok
+CREATE TABLE renamed_denovo AS
+SELECT
+    regexp_extract(read_id, '^([^;]+)', 1) AS feature_id,
+    sequence1 AS sequence,
+    CAST(regexp_extract(read_id, 'size=(\d+)', 1) AS INTEGER) AS abundance
+FROM read_fastx('data/uchime/denovo_input.fasta');
+
+# Override all three column names — should succeed and produce expected calls.
+query TT
+SELECT read_id, flag
+  FROM detect_chimera_uchime_denovo('renamed_denovo',
+                                    id_col := 'feature_id',
+                                    sequence_col := 'sequence',
+                                    count_col := 'abundance')
+  ORDER BY read_id;
+----
+seq1	N
+seq2	N
+seq3	N
+seq4	Y
+seq5	Y
+seq6	N
+
+# Default names with the renamed table fail.
+statement error
+SELECT * FROM detect_chimera_uchime_denovo('renamed_denovo');
+----
+missing required column 'read_id'
+
+# Empty override is rejected.
+statement error
+SELECT * FROM detect_chimera_uchime_denovo('renamed_denovo', count_col := '');
+----
+count_col must not be empty

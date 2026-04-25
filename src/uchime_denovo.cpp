@@ -14,8 +14,10 @@
 
 namespace duckdb {
 
-// Validate that a table has read_id (VARCHAR), sequence1 (VARCHAR), and size (integer type).
-static void ValidateDenovoTableSchema(ClientContext &context, const std::string &table_name) {
+// Validate that a table has the resolved id (VARCHAR), sequence (VARCHAR), and count
+// (integer type) columns. Names are resolved from named parameters at bind time.
+static void ValidateDenovoTableSchema(ClientContext &context, const std::string &table_name, const std::string &id_col,
+                                      const std::string &sequence_col, const std::string &count_col) {
 	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
 	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
 	if (!entry) {
@@ -47,25 +49,25 @@ static void ValidateDenovoTableSchema(ClientContext &context, const std::string 
 		name_to_idx[StringUtil::Lower(col_names[i])] = i;
 	}
 
-	auto it = name_to_idx.find("read_id");
+	auto it = name_to_idx.find(StringUtil::Lower(id_col));
 	if (it == name_to_idx.end()) {
-		throw BinderException("Table '%s' missing required column 'read_id' (VARCHAR)", table_name);
+		throw BinderException("Table '%s' missing required column '%s' (VARCHAR)", table_name, id_col);
 	}
 	if (col_types[it->second].id() != LogicalTypeId::VARCHAR) {
-		throw BinderException("Column 'read_id' in table '%s' must be VARCHAR", table_name);
+		throw BinderException("Column '%s' in table '%s' must be VARCHAR", id_col, table_name);
 	}
 
-	it = name_to_idx.find("sequence1");
+	it = name_to_idx.find(StringUtil::Lower(sequence_col));
 	if (it == name_to_idx.end()) {
-		throw BinderException("Table '%s' missing required column 'sequence1' (VARCHAR)", table_name);
+		throw BinderException("Table '%s' missing required column '%s' (VARCHAR)", table_name, sequence_col);
 	}
 	if (col_types[it->second].id() != LogicalTypeId::VARCHAR) {
-		throw BinderException("Column 'sequence1' in table '%s' must be VARCHAR", table_name);
+		throw BinderException("Column '%s' in table '%s' must be VARCHAR", sequence_col, table_name);
 	}
 
-	it = name_to_idx.find("size");
+	it = name_to_idx.find(StringUtil::Lower(count_col));
 	if (it == name_to_idx.end()) {
-		throw BinderException("Table '%s' missing required column 'size' (integer type)", table_name);
+		throw BinderException("Table '%s' missing required column '%s' (integer type)", table_name, count_col);
 	}
 	auto size_type = col_types[it->second].id();
 	if (size_type != LogicalTypeId::INTEGER && size_type != LogicalTypeId::BIGINT &&
@@ -73,22 +75,27 @@ static void ValidateDenovoTableSchema(ClientContext &context, const std::string 
 	    size_type != LogicalTypeId::HUGEINT && size_type != LogicalTypeId::UINTEGER &&
 	    size_type != LogicalTypeId::UBIGINT && size_type != LogicalTypeId::USMALLINT &&
 	    size_type != LogicalTypeId::UTINYINT && size_type != LogicalTypeId::UHUGEINT) {
-		throw BinderException("Column 'size' in table '%s' must be an integer type (got %s)", table_name,
+		throw BinderException("Column '%s' in table '%s' must be an integer type (got %s)", count_col, table_name,
 		                      col_types[it->second].ToString());
 	}
 }
 
-// Pull (read_id, sequence1, size) rows for a single sample (or the whole table when
-// where_sql is empty) via the given connection, ordered by size DESC, dropping
-// NULL/empty rows.
-static void LoadDenovoSequences(Connection &conn, const std::string &table_name, const std::string &where_sql,
-                                std::vector<std::string> &out_labels, std::vector<std::string> &out_sequences,
-                                std::vector<int64_t> &out_sizes) {
-	auto sql = "SELECT read_id, sequence1, size FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+// Pull (id, sequence, count) rows for a single sample (or the whole table when
+// where_sql is empty) via the given connection, ordered by count DESC, dropping
+// NULL/empty rows. Column names are caller-supplied to honor user overrides.
+static void LoadDenovoSequences(Connection &conn, const std::string &table_name, const std::string &id_col,
+                                const std::string &sequence_col, const std::string &count_col,
+                                const std::string &where_sql, std::vector<std::string> &out_labels,
+                                std::vector<std::string> &out_sequences, std::vector<int64_t> &out_sizes) {
+	auto q_id = KeywordHelper::WriteOptionallyQuoted(id_col);
+	auto q_seq = KeywordHelper::WriteOptionallyQuoted(sequence_col);
+	auto q_count = KeywordHelper::WriteOptionallyQuoted(count_col);
+	auto sql = "SELECT " + q_id + ", " + q_seq + ", " + q_count + " FROM " +
+	           KeywordHelper::WriteOptionallyQuoted(table_name);
 	if (!where_sql.empty()) {
 		sql += " WHERE " + where_sql;
 	}
-	sql += " ORDER BY size DESC";
+	sql += " ORDER BY " + q_count + " DESC";
 	auto result = conn.Query(sql);
 	if (result->HasError()) {
 		throw InvalidInputException("Failed to read table '%s': %s", table_name, result->GetError());
@@ -152,7 +159,22 @@ unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context,
 	auto data = make_uniq<Data>();
 
 	data->input_table = input.inputs[0].GetValue<std::string>();
-	ValidateDenovoTableSchema(context, data->input_table);
+
+	auto get_col_override = [&](const std::string &param_name, std::string &out) {
+		auto it = input.named_parameters.find(param_name);
+		if (it != input.named_parameters.end()) {
+			auto val = it->second.GetValue<std::string>();
+			if (val.empty()) {
+				throw InvalidInputException("detect_chimera_uchime_denovo: %s must not be empty", param_name);
+			}
+			out = std::move(val);
+		}
+	};
+	get_col_override("id_col", data->id_col);
+	get_col_override("sequence_col", data->sequence_col);
+	get_col_override("count_col", data->count_col);
+
+	ValidateDenovoTableSchema(context, data->input_table, data->id_col, data->sequence_col, data->count_col);
 
 	auto get_double = [&](const std::string &name, double &out, double min_val, const char *constraint) {
 		auto it = input.named_parameters.find(name);
@@ -228,7 +250,8 @@ unique_ptr<GlobalTableFunctionState> UchimeDenovoTableFunction::InitGlobal(Clien
 
 	auto &db = DatabaseInstance::GetDatabase(context);
 	Connection conn(db);
-	LoadDenovoSequences(conn, data.input_table, /*where_sql=*/"", gstate->labels, gstate->sequences, gstate->sizes);
+	LoadDenovoSequences(conn, data.input_table, data.id_col, data.sequence_col, data.count_col, /*where_sql=*/"",
+	                    gstate->labels, gstate->sequences, gstate->sizes);
 
 	if (gstate->labels.empty()) {
 		throw InvalidInputException("Table '%s' is empty (or contains only NULL/empty sequences)", data.input_table);
@@ -334,7 +357,8 @@ void UchimeDenovoTableFunction::Execute(ClientContext & /*context*/, TableFuncti
 
 		std::vector<std::string> labels, sequences;
 		std::vector<int64_t> sizes;
-		LoadDenovoSequences(*lstate.conn, data.input_table, where_sql, labels, sequences, sizes);
+		LoadDenovoSequences(*lstate.conn, data.input_table, data.id_col, data.sequence_col, data.count_col, where_sql,
+		                    labels, sequences, sizes);
 		lstate.results.clear();
 		lstate.result_offset = 0;
 		if (!labels.empty()) {
@@ -354,6 +378,9 @@ TableFunction UchimeDenovoTableFunction::GetFunction() {
 	tf.named_parameters["mindiffs"] = LogicalType::INTEGER;
 	tf.named_parameters["abskew"] = LogicalType::DOUBLE;
 	tf.named_parameters["sample_id"] = LogicalType::VARCHAR;
+	tf.named_parameters["id_col"] = LogicalType::VARCHAR;
+	tf.named_parameters["sequence_col"] = LogicalType::VARCHAR;
+	tf.named_parameters["count_col"] = LogicalType::VARCHAR;
 
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 
