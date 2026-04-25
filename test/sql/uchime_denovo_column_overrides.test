@@ -43,3 +43,33 @@ statement error
 SELECT * FROM detect_chimera_uchime_denovo('renamed_denovo', count_col := '');
 ----
 count_col must not be empty
+
+# Per-sample path with column overrides — exercises LoadDenovoSequences's
+# substitution of the overridden id/sequence/count names into the per-sample SQL.
+statement ok
+CREATE VIEW renamed_per_sample AS
+  SELECT 'A' AS sid, * FROM renamed_denovo
+  UNION ALL
+  SELECT 'B' AS sid, * FROM renamed_denovo;
+
+query TTT
+SELECT sid, read_id, flag
+  FROM detect_chimera_uchime_denovo('renamed_per_sample',
+                                    id_col := 'feature_id',
+                                    sequence_col := 'sequence',
+                                    count_col := 'abundance',
+                                    sample_id := 'sid')
+  ORDER BY sid, read_id;
+----
+A	seq1	N
+A	seq2	N
+A	seq3	N
+A	seq4	Y
+A	seq5	Y
+A	seq6	N
+B	seq1	N
+B	seq2	N
+B	seq3	N
+B	seq4	Y
+B	seq5	Y
+B	seq6	N

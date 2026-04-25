@@ -52,3 +52,22 @@ statement error
 SELECT * FROM deblur('renamed_input', id_col := '');
 ----
 id_col must not be empty
+
+# Per-sample path with column overrides — exercises RunDeblurForSample's
+# substitution of the overridden id/sequence/count names into the per-sample SQL.
+statement ok
+CREATE VIEW renamed_per_sample AS
+  SELECT 'A' AS sid, * FROM renamed_input
+  UNION ALL
+  SELECT 'B' AS sid, * FROM renamed_input;
+
+query TI
+SELECT sid, count(*) FROM deblur('renamed_per_sample',
+                                   id_col := 'feature_id',
+                                   sequence_col := 'aligned_sequence',
+                                   count_col := 'count',
+                                   sample_id := 'sid')
+  GROUP BY sid ORDER BY sid;
+----
+A	3
+B	3
