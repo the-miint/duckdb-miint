@@ -18,6 +18,13 @@ struct DeblurData : public TableFunctionData {
 	std::string input_table;
 	miint::DeblurParams params;
 
+	// Column-name overrides for the input table. Defaults preserve the historical
+	// names so existing call sites work unchanged. Allow chaining (e.g. align_mafft
+	// → deblur with sequence_col := 'aligned_sequence') without an intermediate rename.
+	std::string id_col = "read_id";
+	std::string sequence_col = "sequence1";
+	std::string count_col = "abundance";
+
 	bool has_sample_id = false;
 	PerSampleBindInfo sample_info;
 };
@@ -38,9 +45,11 @@ struct DeblurLocalState : public LocalTableFunctionState {
 	Value sample_value;
 };
 
-// Validate that the table/view has read_id (VARCHAR), sequence1 (VARCHAR),
-// and abundance (any integer type).
-static void ValidateDeblurTableSchema(ClientContext &context, const std::string &table_name) {
+// Validate that the table/view has the resolved id (VARCHAR), sequence (VARCHAR),
+// and count (any integer type) columns. Names are resolved from named parameters
+// at bind time.
+static void ValidateDeblurTableSchema(ClientContext &context, const std::string &table_name, const std::string &id_col,
+                                      const std::string &sequence_col, const std::string &count_col) {
 	auto cols = GetTableOrViewColumns(context, table_name, "Deblur input");
 
 	std::unordered_map<string, idx_t> name_to_idx;
@@ -48,33 +57,33 @@ static void ValidateDeblurTableSchema(ClientContext &context, const std::string 
 		name_to_idx[StringUtil::Lower(cols.names[i])] = i;
 	}
 
-	auto it = name_to_idx.find("read_id");
+	auto it = name_to_idx.find(StringUtil::Lower(id_col));
 	if (it == name_to_idx.end()) {
-		throw BinderException("deblur: table '%s' missing required column 'read_id' (VARCHAR)", table_name);
+		throw BinderException("deblur: table '%s' missing required column '%s' (VARCHAR)", table_name, id_col);
 	}
 	if (cols.types[it->second].id() != LogicalTypeId::VARCHAR) {
-		throw BinderException("deblur: column 'read_id' in table '%s' must be VARCHAR", table_name);
+		throw BinderException("deblur: column '%s' in table '%s' must be VARCHAR", id_col, table_name);
 	}
 
-	it = name_to_idx.find("sequence1");
+	it = name_to_idx.find(StringUtil::Lower(sequence_col));
 	if (it == name_to_idx.end()) {
-		throw BinderException("deblur: table '%s' missing required column 'sequence1' (VARCHAR)", table_name);
+		throw BinderException("deblur: table '%s' missing required column '%s' (VARCHAR)", table_name, sequence_col);
 	}
 	if (cols.types[it->second].id() != LogicalTypeId::VARCHAR) {
-		throw BinderException("deblur: column 'sequence1' in table '%s' must be VARCHAR", table_name);
+		throw BinderException("deblur: column '%s' in table '%s' must be VARCHAR", sequence_col, table_name);
 	}
 
-	it = name_to_idx.find("abundance");
+	it = name_to_idx.find(StringUtil::Lower(count_col));
 	if (it == name_to_idx.end()) {
-		throw BinderException("deblur: table '%s' missing required column 'abundance' (integer type)", table_name);
+		throw BinderException("deblur: table '%s' missing required column '%s' (integer type)", table_name, count_col);
 	}
 	auto atype = cols.types[it->second].id();
 	if (atype != LogicalTypeId::INTEGER && atype != LogicalTypeId::BIGINT && atype != LogicalTypeId::SMALLINT &&
 	    atype != LogicalTypeId::TINYINT && atype != LogicalTypeId::HUGEINT && atype != LogicalTypeId::UINTEGER &&
 	    atype != LogicalTypeId::UBIGINT && atype != LogicalTypeId::USMALLINT && atype != LogicalTypeId::UTINYINT &&
 	    atype != LogicalTypeId::UHUGEINT) {
-		throw BinderException("deblur: column 'abundance' in table '%s' must be an integer type (got %s)", table_name,
-		                      cols.types[it->second].ToString());
+		throw BinderException("deblur: column '%s' in table '%s' must be an integer type (got %s)", count_col,
+		                      table_name, cols.types[it->second].ToString());
 	}
 }
 
@@ -83,7 +92,21 @@ static unique_ptr<FunctionData> DeblurBind(ClientContext &context, TableFunction
 	auto data = make_uniq<DeblurData>();
 	data->input_table = input.inputs[0].GetValue<std::string>();
 
-	ValidateDeblurTableSchema(context, data->input_table);
+	auto get_col_override = [&](const std::string &param_name, std::string &out) {
+		auto it = input.named_parameters.find(param_name);
+		if (it != input.named_parameters.end()) {
+			auto val = it->second.GetValue<std::string>();
+			if (val.empty()) {
+				throw InvalidInputException("deblur: %s must not be empty", param_name);
+			}
+			out = std::move(val);
+		}
+	};
+	get_col_override("id_col", data->id_col);
+	get_col_override("sequence_col", data->sequence_col);
+	get_col_override("count_col", data->count_col);
+
+	ValidateDeblurTableSchema(context, data->input_table, data->id_col, data->sequence_col, data->count_col);
 
 	// Extract named parameters
 	{
@@ -181,8 +204,11 @@ static unique_ptr<GlobalTableFunctionState> DeblurInitGlobal(ClientContext &cont
 	// Non-sample path: load whole table once, deblur, hold for single-threaded drain.
 	auto &db = DatabaseInstance::GetDatabase(context);
 	Connection conn(db);
-	auto result = conn.Query("SELECT \"read_id\", \"sequence1\", CAST(\"abundance\" AS BIGINT) FROM " +
-	                         KeywordHelper::WriteOptionallyQuoted(data.input_table) + " ORDER BY \"abundance\" DESC");
+	auto q_id = KeywordHelper::WriteOptionallyQuoted(data.id_col);
+	auto q_seq = KeywordHelper::WriteOptionallyQuoted(data.sequence_col);
+	auto q_count = KeywordHelper::WriteOptionallyQuoted(data.count_col);
+	auto result = conn.Query("SELECT " + q_id + ", " + q_seq + ", CAST(" + q_count + " AS BIGINT) FROM " +
+	                         KeywordHelper::WriteOptionallyQuoted(data.input_table) + " ORDER BY " + q_count + " DESC");
 	if (result->HasError()) {
 		throw InvalidInputException("deblur: failed to read table '%s': %s", data.input_table, result->GetError());
 	}
@@ -239,10 +265,13 @@ static std::vector<miint::DeblurResult> RunDeblurForSample(Connection &conn, con
                                                            const Value &sample_value) {
 	auto q_src = KeywordHelper::WriteOptionallyQuoted(data.input_table);
 	auto q_col = KeywordHelper::WriteOptionallyQuoted(data.sample_info.sample_id_col);
+	auto q_id = KeywordHelper::WriteOptionallyQuoted(data.id_col);
+	auto q_seq = KeywordHelper::WriteOptionallyQuoted(data.sequence_col);
+	auto q_count = KeywordHelper::WriteOptionallyQuoted(data.count_col);
 	auto sample_literal = sample_value.ToSQLString();
 
-	auto sql = "SELECT \"read_id\", \"sequence1\", CAST(\"abundance\" AS BIGINT) FROM " + q_src + " WHERE CAST(" +
-	           q_col + " AS VARCHAR) = CAST(" + sample_literal + " AS VARCHAR) ORDER BY \"abundance\" DESC";
+	auto sql = "SELECT " + q_id + ", " + q_seq + ", CAST(" + q_count + " AS BIGINT) FROM " + q_src + " WHERE CAST(" +
+	           q_col + " AS VARCHAR) = CAST(" + sample_literal + " AS VARCHAR) ORDER BY " + q_count + " DESC";
 	auto result = conn.Query(sql);
 	if (result->HasError()) {
 		throw InvalidInputException("deblur: failed to read table '%s' for sample %s: %s", data.input_table,
@@ -346,6 +375,9 @@ TableFunction DeblurTableFunction::GetFunction() {
 	tf.named_parameters["indel_prob"] = LogicalType::DOUBLE;
 	tf.named_parameters["indel_max"] = LogicalType::INTEGER;
 	tf.named_parameters["sample_id"] = LogicalType::VARCHAR;
+	tf.named_parameters["id_col"] = LogicalType::VARCHAR;
+	tf.named_parameters["sequence_col"] = LogicalType::VARCHAR;
+	tf.named_parameters["count_col"] = LogicalType::VARCHAR;
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }

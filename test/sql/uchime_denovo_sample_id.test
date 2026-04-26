@@ -36,7 +36,7 @@ sample_id column name must not be empty
 # ----- Cycle 2: Output-column collision (18 uchime output columns) -----
 
 statement error
-SELECT * FROM detect_chimera_uchime_denovo('denovo_base', sample_id := 'query_id')
+SELECT * FROM detect_chimera_uchime_denovo('denovo_base', sample_id := 'read_id')
 ----
 collides with an output column
 
@@ -69,9 +69,9 @@ B	6
 # Chimera calls are independent per sample: both samples should produce the
 # same set of Y/N flags since the input data is identical.
 query TTT
-SELECT sample, query_id, flag
+SELECT sample, read_id, flag
   FROM detect_chimera_uchime_denovo('multi_dn', sample_id := 'sample')
-  ORDER BY sample, query_id
+  ORDER BY sample, read_id
 ----
 A	seq1	N
 A	seq2	N
@@ -135,9 +135,9 @@ statement ok
 CREATE VIEW dn_single AS SELECT 'only' AS sample, * FROM denovo_base;
 
 query TT
-SELECT query_id, flag
+SELECT read_id, flag
   FROM detect_chimera_uchime_denovo('dn_single', sample_id := 'sample')
-  ORDER BY query_id
+  ORDER BY read_id
 ----
 seq1	N
 seq2	N
@@ -147,9 +147,9 @@ seq5	Y
 seq6	N
 
 query TT
-SELECT query_id, flag
+SELECT read_id, flag
   FROM detect_chimera_uchime_denovo('denovo_base')
-  ORDER BY query_id
+  ORDER BY read_id
 ----
 seq1	N
 seq2	N

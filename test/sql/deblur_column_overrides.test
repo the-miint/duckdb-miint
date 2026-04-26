@@ -1,0 +1,73 @@
+# name: test/sql/deblur_column_overrides.test
+# description: test deblur() id_col / sequence_col / count_col overrides
+# group: [sql]
+
+require miint
+
+# Build a fixture using non-default column names — simulates a chain like
+# align_mafft → deblur where the upstream emits 'aligned_sequence' instead
+# of 'sequence1' and a join supplies 'count' instead of 'abundance'.
+statement ok
+CREATE TABLE renamed_input AS
+SELECT
+    'r' || (rownum) AS feature_id,
+    sequence1 AS aligned_sequence,
+    abundance::INTEGER AS count
+FROM (
+    SELECT row_number() OVER () AS rownum, sequence1,
+           CASE WHEN row_number() OVER () = 1 THEN 100
+                WHEN row_number() OVER () = 2 THEN 50
+                ELSE 10 END AS abundance
+    FROM (VALUES
+        ('AAAACCCCGGGGTTTTAAAACCCCGGGGTTTTAAAACCCCGGGGTTTT'),
+        ('AAAACCCCGGGGTTTTAAAACCCCGGGGTTTTAAAACCCCGGGGTTTC'),
+        ('AAAACCCCGGGGTTTTAAAACCCCGGGGTTTTAAAACCCCGGGGTTGT')
+    ) AS t(sequence1)
+);
+
+# Override all three column names — should succeed and produce results.
+query I
+SELECT count(*) FROM deblur('renamed_input',
+                             id_col := 'feature_id',
+                             sequence_col := 'aligned_sequence',
+                             count_col := 'count');
+----
+3
+
+# Default names with the renamed table — should fail with a clear message
+# naming the missing column.
+statement error
+SELECT * FROM deblur('renamed_input');
+----
+missing required column 'read_id'
+
+# Override only sequence_col — id_col and count_col still required at default names.
+statement error
+SELECT * FROM deblur('renamed_input', sequence_col := 'aligned_sequence');
+----
+missing required column 'read_id'
+
+# Empty override is rejected.
+statement error
+SELECT * FROM deblur('renamed_input', id_col := '');
+----
+id_col must not be empty
+
+# Per-sample path with column overrides — exercises RunDeblurForSample's
+# substitution of the overridden id/sequence/count names into the per-sample SQL.
+statement ok
+CREATE VIEW renamed_per_sample AS
+  SELECT 'A' AS sid, * FROM renamed_input
+  UNION ALL
+  SELECT 'B' AS sid, * FROM renamed_input;
+
+query TI
+SELECT sid, count(*) FROM deblur('renamed_per_sample',
+                                   id_col := 'feature_id',
+                                   sequence_col := 'aligned_sequence',
+                                   count_col := 'count',
+                                   sample_id := 'sid')
+  GROUP BY sid ORDER BY sid;
+----
+A	3
+B	3

@@ -52,7 +52,7 @@ WHERE accepted = true AND identity = 100.0;
 # Query and target should be the same (self-match)
 query I
 SELECT count(*) FROM search_sequences_vsearch('ltp_queries', db:='ltp_refs', id:=0.97)
-WHERE query_id = target_id;
+WHERE read_id = target_id;
 ----
 50
 
@@ -75,18 +75,18 @@ SELECT count(*) FROM search_sequences_vsearch('ltp_queries', db:='ltp_refs', id:
 # All first hits (highest identity) should be self-matches at 100%
 query I
 SELECT count(*) FROM (
-    SELECT query_id, target_id, identity,
-           ROW_NUMBER() OVER (PARTITION BY query_id ORDER BY identity DESC) AS rn
+    SELECT read_id, target_id, identity,
+           ROW_NUMBER() OVER (PARTITION BY read_id ORDER BY identity DESC) AS rn
     FROM search_sequences_vsearch('ltp_queries', db:='ltp_refs', id:=0.90, maxaccepts:=3)
-) WHERE rn = 1 AND identity = 100.0 AND query_id = target_id;
+) WHERE rn = 1 AND identity = 100.0 AND read_id = target_id;
 ----
 50
 
 # All secondary hits should be < 100% identity (different sequences)
 query I
 SELECT count(*) FROM (
-    SELECT query_id, target_id, identity,
-           ROW_NUMBER() OVER (PARTITION BY query_id ORDER BY identity DESC) AS rn
+    SELECT read_id, target_id, identity,
+           ROW_NUMBER() OVER (PARTITION BY read_id ORDER BY identity DESC) AS rn
     FROM search_sequences_vsearch('ltp_queries', db:='ltp_refs', id:=0.90, maxaccepts:=3)
 ) WHERE rn > 1 AND identity < 100.0;
 ----

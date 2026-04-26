@@ -2169,7 +2169,7 @@ Reference-based chimera detection using the UCHIME algorithm (Edgar et al. 2011,
 | Column | Type | Description |
 |--------|------|-------------|
 | `score` | DOUBLE | Chimera h-score (higher = more likely chimeric) |
-| `query_id` | VARCHAR | Query sequence identifier |
+| `read_id` | VARCHAR | Query sequence identifier |
 | `parent_a_id` | VARCHAR | Parent A identifier (NULL if non-chimeric) |
 | `parent_b_id` | VARCHAR | Parent B identifier (NULL if non-chimeric) |
 | `closest_parent_id` | VARCHAR | Closest parent to query (NULL if non-chimeric) |
@@ -2199,7 +2199,7 @@ SELECT * FROM detect_chimera_uchime('queries', db:='refs');
 -- Filter chimeric sequences
 CREATE TABLE clean_seqs AS
 SELECT q.* FROM queries q
-JOIN detect_chimera_uchime('queries', db:='refs') u ON q.read_id = u.query_id
+JOIN detect_chimera_uchime('queries', db:='refs') u ON q.read_id = u.read_id
 WHERE u.flag = 'N';
 
 -- Count chimeras
@@ -2236,8 +2236,11 @@ SELECT flag, count(*) FROM detect_chimera_uchime('queries', db:='refs') GROUP BY
 De novo chimera detection using the UCHIME algorithm, powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Detects chimeric sequences without a reference database by using abundance information: more abundant sequences are assumed to be non-chimeric and serve as parents for less abundant sequences.
 
 **Parameters:**
-- `input_table` (VARCHAR): Name of a table or view containing sequences with abundance. Must have `read_id` (VARCHAR), `sequence1` (VARCHAR), and `size` (integer type) columns.
+- `input_table` (VARCHAR): Name of a table or view containing sequences with abundance. By default must have `read_id` (VARCHAR), `sequence1` (VARCHAR), and `size` (integer type) columns; use `id_col`/`sequence_col`/`count_col` to override.
 - `sample_id` (VARCHAR, optional): Name of a column in `input_table` to partition by. Each sample gets its own k-mer index and bootstrap; a read_id that appears in multiple samples is therefore scored independently. The sample column is prepended to the output. Execution is serialized per the vsearch wrapper's thread-safety constraints.
+- `id_col` (VARCHAR, default `'read_id'`): Name of the read identifier column in `input_table`.
+- `sequence_col` (VARCHAR, default `'sequence1'`): Name of the sequence column.
+- `count_col` (VARCHAR, default `'size'`): Name of the per-sequence count column. Set to `'abundance'` to chain `deblur(...)` directly into this function.
 - `abskew` (DOUBLE, default 2.0): Abundance skew. Candidate parents must have abundance >= abskew * query abundance. Must be >= 1.0.
 - `minh`, `xn`, `dn`, `mindiv`, `mindiffs`: Same as `detect_chimera_uchime`.
 
@@ -2256,7 +2259,7 @@ SELECT * FROM detect_chimera_uchime_denovo('seqs');
 
 -- Filter out chimeras
 SELECT s.* FROM seqs s
-JOIN detect_chimera_uchime_denovo('seqs') u ON s.read_id = u.query_id
+JOIN detect_chimera_uchime_denovo('seqs') u ON s.read_id = u.read_id
 WHERE u.flag != 'Y';
 ```
 
@@ -2269,10 +2272,11 @@ WHERE u.flag != 'Y';
 - One output row per input sequence
 
 **Error handling:**
-- Error if table does not exist or lacks required columns (`read_id`, `sequence1`, `size`)
-- Error if `size` column is not an integer type
+- Error if table does not exist or lacks the resolved id/sequence/count columns
+- Error if the count column is not an integer type
 - Error if table is empty
 - Error if scoring parameters are out of valid range
+- Error if any of `id_col`/`sequence_col`/`count_col` is the empty string
 
 ---
 
@@ -2291,7 +2295,7 @@ Global pairwise sequence search, powered by the [vsearch](https://github.com/tor
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `query_id` | VARCHAR | Query sequence identifier |
+| `read_id` | VARCHAR | Query sequence identifier |
 | `target_id` | VARCHAR | Reference sequence identifier |
 | `identity` | DOUBLE | Percent identity (0-100) |
 | `matches` | INTEGER | Number of matching columns |
@@ -2314,7 +2318,7 @@ SELECT * FROM search_sequences_vsearch('queries', db:='refs', id:=0.97);
 SELECT * FROM search_sequences_vsearch('queries', db:='refs', id:=0.90, maxaccepts:=3);
 
 -- Count queries with hits
-SELECT count(DISTINCT query_id) FROM search_sequences_vsearch('queries', db:='refs', id:=0.97);
+SELECT count(DISTINCT read_id) FROM search_sequences_vsearch('queries', db:='refs', id:=0.97);
 ```
 
 **Behavior:**
@@ -2401,8 +2405,11 @@ Deblur amplicon sequence denoising (Amir et al. 2017, mSystems 2:e00191-16). A g
 Designed as a composable SQL building block. Dereplication is native SQL (`GROUP BY`), alignment is `align_mafft()`, and `deblur()` does the core denoising. See the full workflow example below.
 
 **Parameters:**
-- `input_table` (VARCHAR): Name of a table or view containing pre-aligned, pre-dereplicated sequences. Must have `read_id` (VARCHAR), `sequence1` (VARCHAR), and `abundance` (integer type) columns. All sequences in `sequence1` must have the same aligned length and the same unaligned length (number of non-gap characters).
+- `input_table` (VARCHAR): Name of a table or view containing pre-aligned, pre-dereplicated sequences. By default must have `read_id` (VARCHAR), `sequence1` (VARCHAR), and `abundance` (integer type) columns; use `id_col`/`sequence_col`/`count_col` to override. All sequences in the sequence column must have the same aligned length and the same unaligned length (number of non-gap characters).
 - `sample_id` (VARCHAR, optional): Name of a column in `input_table` to partition by. Deblur is applied independently per sample, and the sample column is prepended to the output. Unlike the two uchime functions, deblur's backend is re-entrant so samples run across DuckDB worker threads in parallel (bounded by `min(num_threads, num_samples)`).
+- `id_col` (VARCHAR, default `'read_id'`): Name of the read identifier column in `input_table`.
+- `sequence_col` (VARCHAR, default `'sequence1'`): Name of the sequence column. Set to `'aligned_sequence'` to chain `align_mafft(...)` directly into this function.
+- `count_col` (VARCHAR, default `'abundance'`): Name of the per-sequence count column.
 - `mean_error` (DOUBLE, default `0.005`): Per-base Illumina error rate. **This is the primary tuning knob.** The default 0.005 reflects MiSeq/HiSeq circa 2015. For modern NovaSeq or stitched reads (~250nt), use 0.001-0.002. Lowering `mean_error` makes denoising more conservative (fewer sequences removed). Must be > 0 and < 1.
 - `error_profile` (LIST(DOUBLE), optional): Override the default 12-element error probability profile. Each element represents the fraction of reads from a true sequence that land at exactly that Hamming distance. Default: `[1, 0.06, 0.02, 0.02, 0.01, 0.005, 0.005, 0.005, 0.001, 0.001, 0.001, 0.0005]`. All values must be non-negative.
 - `indel_prob` (DOUBLE, default `0.01`): Multiplicative penalty applied to corrections involving indels. A value of 0 disables indel-based corrections entirely.
@@ -2436,19 +2443,20 @@ CREATE TABLE dereplicated AS
 
 -- 3. Align (required when sequences may have indels relative to each other)
 -- For same-length amplicons without indels, this step can be skipped.
-CREATE TABLE aligned AS
-  SELECT a.read_id, a.aligned_sequence AS sequence1, d.abundance
+CREATE VIEW aligned AS
+  SELECT a.read_id, a.aligned_sequence, d.abundance
   FROM align_mafft('dereplicated') a
   JOIN dereplicated d ON a.read_id = d.read_id;
 
--- 4. Deblur
+-- 4. Deblur — point sequence_col at the MAFFT output column directly.
 CREATE TABLE denoised AS
-  SELECT * FROM deblur('aligned');
+  SELECT * FROM deblur('aligned', sequence_col := 'aligned_sequence');
 
--- 5. Optional: de novo chimera removal
-SELECT * FROM detect_chimera_uchime_denovo(
-  (SELECT read_id, sequence AS sequence1, abundance AS size FROM denoised)
-);
+-- 5. Optional: de novo chimera removal — overrides match deblur's output
+-- columns ('sequence' and 'abundance') so no aliasing subquery is needed.
+SELECT * FROM detect_chimera_uchime_denovo('denoised',
+                                            sequence_col := 'sequence',
+                                            count_col := 'abundance');
 ```
 
 **Minimal example (pre-aligned sequences of equal length):**
@@ -2481,7 +2489,8 @@ SELECT * FROM deblur('aligned_seqs', error_profile := [1, 0.04, 0.01, 0.005]);
 - Uses banker's rounding (round half to even) for the final abundance, matching Python 3's `round()`
 
 **Error handling:**
-- Error if table does not exist or lacks required columns (`read_id`, `sequence1`, `abundance`)
+- Error if table does not exist or lacks the resolved id/sequence/count columns
+- Error if any of `id_col`/`sequence_col`/`count_col` is the empty string
 - Error if `abundance` column is not an integer type
 - Error if `mean_error` is not in the open interval (0, 1)
 - Error if `indel_max` is negative

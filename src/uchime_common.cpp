@@ -5,7 +5,7 @@
 namespace duckdb {
 
 std::vector<std::string> GetUchimeOutputNames() {
-	return {"score",        "query_id",   "parent_a_id", "parent_b_id",   "closest_parent_id", "id_query_model",
+	return {"score",        "read_id",    "parent_a_id", "parent_b_id",   "closest_parent_id", "id_query_model",
 	        "id_query_a",   "id_query_b", "id_a_b",      "id_query_top",  "left_yes",          "left_no",
 	        "left_abstain", "right_yes",  "right_no",    "right_abstain", "divergence",        "flag"};
 }
@@ -34,11 +34,11 @@ idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResu
 		score_data[i] = results[offset + i].score;
 	}
 
-	// query_id — always populated
-	auto &query_vec = output.data[col++];
+	// read_id — always populated
+	auto &read_id_vec = output.data[col++];
 	for (idx_t i = 0; i < actual; i++) {
-		FlatVector::GetData<string_t>(query_vec)[i] =
-		    StringVector::AddString(query_vec, results[offset + i].query_label);
+		FlatVector::GetData<string_t>(read_id_vec)[i] =
+		    StringVector::AddString(read_id_vec, results[offset + i].query_label);
 	}
 
 	// parent_a_id, parent_b_id, closest_parent_id — NULL when non-chimeric (empty label)

@@ -80,7 +80,7 @@ SELECT count(*) FROM detect_chimera_uchime('queries', db:='refs_view');
 
 # Verify all flags match vsearch
 query TT
-SELECT query_id, flag FROM detect_chimera_uchime('queries', db:='refs') ORDER BY query_id;
+SELECT read_id, flag FROM detect_chimera_uchime('queries', db:='refs') ORDER BY read_id;
 ----
 query_chimera1	Y
 query_chimera2	Y
@@ -95,34 +95,34 @@ query_short	N
 # score=16.5019, parentA=ref1, parentB=ref2, QA=84.7, QB=85.0, AB=69.7, QM=100.0
 # LY=45, LN=0, LA=0, RY=46, RN=0, RA=0, div=15.0
 query IRTTRRRRRIIIIIIRT
-SELECT round(score, 2), query_id, parent_a_id, parent_b_id,
+SELECT round(score, 2), read_id, parent_a_id, parent_b_id,
        round(id_query_a, 1), round(id_query_b, 1), round(id_a_b, 1),
        round(id_query_model, 1), round(id_query_top, 1),
        left_yes, left_no, left_abstain,
        right_yes, right_no, right_abstain,
        round(divergence, 1), flag
 FROM detect_chimera_uchime('queries', db:='refs')
-WHERE query_id = 'query_chimera1';
+WHERE read_id = 'query_chimera1';
 ----
 16.50	query_chimera1	ref1	ref2	84.7	85.0	69.7	100.0	85.0	45	0	0	46	0	0	15.0	Y
 
 # Verify clean sequence (non-chimeric) has NULL parents and identities
 query IIIIIIIIIT
-SELECT round(score, 2), query_id, parent_a_id, parent_b_id, closest_parent_id,
+SELECT round(score, 2), read_id, parent_a_id, parent_b_id, closest_parent_id,
        left_yes, left_no, left_abstain,
        right_yes, flag
 FROM detect_chimera_uchime('queries', db:='refs')
-WHERE query_id = 'query_clean1';
+WHERE read_id = 'query_clean1';
 ----
 0.0	query_clean1	NULL	NULL	NULL	0	0	0	0	N
 
 # Verify noparent sequence also has NULL parents
 query IIIIIIIIIT
-SELECT round(score, 2), query_id, parent_a_id, parent_b_id, closest_parent_id,
+SELECT round(score, 2), read_id, parent_a_id, parent_b_id, closest_parent_id,
        left_yes, left_no, left_abstain,
        right_yes, flag
 FROM detect_chimera_uchime('queries', db:='refs')
-WHERE query_id = 'query_noparent';
+WHERE read_id = 'query_noparent';
 ----
 0.0	query_noparent	NULL	NULL	NULL	0	0	0	0	N
 
@@ -130,7 +130,7 @@ WHERE query_id = 'query_noparent';
 query II
 SELECT id_query_model IS NULL, divergence IS NULL
 FROM detect_chimera_uchime('queries', db:='refs')
-WHERE query_id = 'query_clean1';
+WHERE read_id = 'query_clean1';
 ----
 true	true
 
@@ -138,7 +138,7 @@ true	true
 query II
 SELECT id_query_model IS NOT NULL, divergence IS NOT NULL
 FROM detect_chimera_uchime('queries', db:='refs')
-WHERE query_id = 'query_chimera1';
+WHERE read_id = 'query_chimera1';
 ----
 true	true
 

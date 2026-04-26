@@ -33,7 +33,7 @@ sample_id column name must not be empty
 # ----- Cycle 2: Output-column collision -----
 
 statement error
-SELECT * FROM detect_chimera_uchime('uref_queries', db := 'uref_refs', sample_id := 'query_id')
+SELECT * FROM detect_chimera_uchime('uref_queries', db := 'uref_refs', sample_id := 'read_id')
 ----
 collides with an output column
 
@@ -116,15 +116,15 @@ SELECT * FROM detect_chimera_uchime('uref_empty', db := 'uref_refs', sample_id :
 ----
 has no non-NULL values
 
-# ----- Cycle 7: Single-sample equivalence — query_id+flag set matches global mode -----
+# ----- Cycle 7: Single-sample equivalence — read_id+flag set matches global mode -----
 
 statement ok
 CREATE VIEW uref_single AS SELECT 'only' AS sample, * FROM uref_queries;
 
 query TT
-SELECT query_id, flag
+SELECT read_id, flag
   FROM detect_chimera_uchime('uref_single', db := 'uref_refs', sample_id := 'sample')
-  ORDER BY query_id
+  ORDER BY read_id
 ----
 query_chimera1	Y
 query_chimera2	Y
@@ -136,9 +136,9 @@ query_noparent	N
 query_short	N
 
 query TT
-SELECT query_id, flag
+SELECT read_id, flag
   FROM detect_chimera_uchime('uref_queries', db := 'uref_refs')
-  ORDER BY query_id
+  ORDER BY read_id
 ----
 query_chimera1	Y
 query_chimera2	Y
