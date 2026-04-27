@@ -156,26 +156,14 @@ static void AlignmentSeqIdentityScalarFunction(DataChunk &args, ExpressionState 
 
 		} else if (type_str == "cigar") {
 			// cigar: identity from extended CIGAR ops (= and X) only.
-			// Requires CIGAR to use =/X (not M). Does not need NM or MD tags.
-			// Formula: match_ops / alignment_columns
-			// Returns NULL if:
-			//   - CIGAR uses only M (ambiguous — can't distinguish matches from mismatches)
-			//   - CIGAR mixes M with =/X (inconsistent)
-			if (cigar_stats.match_ops + cigar_stats.mismatch_ops == 0) {
-				// No = or X ops observed (M-only, or degenerate S/N/P-only CIGAR)
+			// Math lives in miint::ComputeCigarIdentity (internal helper); std::nullopt
+			// means "can't compute from CIGAR alone" (M-only, mixed M+=/X, or degenerate).
+			auto maybe_identity = miint::ComputeCigarIdentity(cigar_stats);
+			if (!maybe_identity.has_value()) {
 				result_validity.SetInvalid(i);
 				continue;
 			}
-
-			// If M ops are present alongside =/X, the CIGAR is inconsistent — return NULL
-			int64_t m_only = cigar_stats.matches - cigar_stats.match_ops - cigar_stats.mismatch_ops;
-			if (m_only > 0) {
-				result_validity.SetInvalid(i);
-				continue;
-			}
-
-			// alignment_columns is guaranteed > 0 here because =/X ops exist
-			identity = static_cast<double>(cigar_stats.match_ops) / static_cast<double>(cigar_stats.alignment_columns);
+			identity = *maybe_identity;
 
 		} else {
 			throw InvalidInputException("Invalid type parameter for alignment_seq_identity: '%s'. "
@@ -206,8 +194,64 @@ void AlignmentSeqIdentityFunction::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetFunction());
 }
 
-// alignment_query_length implementation
-static void AlignmentQueryLengthScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+// cigar_sequence_identity(cigar) — one-arg convenience over the type='cigar'
+// branch of alignment_seq_identity. Same math (via miint::ComputeCigarIdentity).
+// Returns NULL when identity can't be computed from CIGAR alone (M-only CIGAR,
+// mixed M+=/X, degenerate CIGARs with no =/X ops).
+static void CigarSequenceIdentityScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &cigar_vector = args.data[0];
+
+	UnifiedVectorFormat cigar_data;
+	cigar_vector.ToUnifiedFormat(args.size(), cigar_data);
+	auto cigar_ptr = UnifiedVectorFormat::GetData<string_t>(cigar_data);
+
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto result_data = FlatVector::GetData<double>(result);
+	auto &result_validity = FlatVector::Validity(result);
+
+	for (idx_t i = 0; i < args.size(); i++) {
+		auto cigar_idx = cigar_data.sel->get_index(i);
+
+		if (!cigar_data.validity.RowIsValid(cigar_idx)) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		auto cigar = cigar_ptr[cigar_idx];
+		if (cigar.GetSize() == 0 || (cigar.GetSize() == 1 && cigar.GetData()[0] == '*')) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		try {
+			std::string cigar_std(cigar.GetData(), cigar.GetSize());
+			miint::CigarStats cigar_stats = miint::ParseCigar(cigar_std);
+
+			auto maybe_identity = miint::ComputeCigarIdentity(cigar_stats);
+			if (!maybe_identity.has_value()) {
+				result_validity.SetInvalid(i);
+				continue;
+			}
+			result_data[i] = *maybe_identity;
+		} catch (const miint::InvalidInputException &e) {
+			throw InvalidInputException(e.what());
+		}
+	}
+}
+
+ScalarFunction CigarSequenceIdentityFunction::GetFunction() {
+	ScalarFunction func("cigar_sequence_identity", {LogicalType::VARCHAR}, LogicalType::DOUBLE,
+	                    CigarSequenceIdentityScalarFunction);
+	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	return func;
+}
+
+void CigarSequenceIdentityFunction::Register(ExtensionLoader &loader) {
+	loader.RegisterFunction(GetFunction());
+}
+
+// cigar_query_length implementation
+static void CigarQueryLengthScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &cigar_vector = args.data[0];
 	auto &include_hard_clips_vector = args.data[1];
 
@@ -231,9 +275,9 @@ static void AlignmentQueryLengthScalarFunction(DataChunk &args, ExpressionState 
 	    });
 }
 
-ScalarFunction AlignmentQueryLengthFunction::GetFunction() {
-	ScalarFunction func("alignment_query_length", {LogicalType::VARCHAR, LogicalType::BOOLEAN}, LogicalType::BIGINT,
-	                    AlignmentQueryLengthScalarFunction);
+ScalarFunction CigarQueryLengthFunction::GetFunction() {
+	ScalarFunction func("cigar_query_length", {LogicalType::VARCHAR, LogicalType::BOOLEAN}, LogicalType::BIGINT,
+	                    CigarQueryLengthScalarFunction);
 
 	// Allow NULL CIGAR (returns NULL)
 	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
@@ -245,13 +289,13 @@ ScalarFunction AlignmentQueryLengthFunction::GetFunction() {
 	return func;
 }
 
-void AlignmentQueryLengthFunction::Register(ExtensionLoader &loader) {
+void CigarQueryLengthFunction::Register(ExtensionLoader &loader) {
 	// Register overload with both parameters
 	ScalarFunction func_two_params = GetFunction();
 
 	// Register overload with single parameter (include_hard_clips defaults to true)
 	ScalarFunction func_one_param(
-	    "alignment_query_length", {LogicalType::VARCHAR}, LogicalType::BIGINT,
+	    "cigar_query_length", {LogicalType::VARCHAR}, LogicalType::BIGINT,
 	    [](DataChunk &args, ExpressionState &state, Vector &result) {
 		    UnaryExecutor::Execute<string_t, int64_t>(args.data[0], result, args.size(), [&](string_t cigar) {
 			    // Handle NULL or unmapped CIGAR
@@ -275,14 +319,14 @@ void AlignmentQueryLengthFunction::Register(ExtensionLoader &loader) {
 	func_one_param.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 
 	// Register both overloads as a function set
-	ScalarFunctionSet function_set("alignment_query_length");
+	ScalarFunctionSet function_set("cigar_query_length");
 	function_set.AddFunction(func_one_param);
 	function_set.AddFunction(func_two_params);
 	loader.RegisterFunction(function_set);
 }
 
-// alignment_query_coverage implementation
-static void AlignmentQueryCoverageScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+// cigar_query_coverage implementation
+static void CigarQueryCoverageScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &cigar_vector = args.data[0];
 	auto &type_vector = args.data[1];
 
@@ -310,9 +354,9 @@ static void AlignmentQueryCoverageScalarFunction(DataChunk &args, ExpressionStat
 	    });
 }
 
-ScalarFunction AlignmentQueryCoverageFunction::GetFunction() {
-	ScalarFunction func("alignment_query_coverage", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::DOUBLE,
-	                    AlignmentQueryCoverageScalarFunction);
+ScalarFunction CigarQueryCoverageFunction::GetFunction() {
+	ScalarFunction func("cigar_query_coverage", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::DOUBLE,
+	                    CigarQueryCoverageScalarFunction);
 
 	// Allow NULL values (returns NULL for NULL CIGAR, error for invalid type)
 	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
@@ -324,13 +368,13 @@ ScalarFunction AlignmentQueryCoverageFunction::GetFunction() {
 	return func;
 }
 
-void AlignmentQueryCoverageFunction::Register(ExtensionLoader &loader) {
+void CigarQueryCoverageFunction::Register(ExtensionLoader &loader) {
 	// Register overload with both parameters
 	ScalarFunction func_two_params = GetFunction();
 
 	// Register overload with single parameter (type defaults to 'aligned')
 	ScalarFunction func_one_param(
-	    "alignment_query_coverage", {LogicalType::VARCHAR}, LogicalType::DOUBLE,
+	    "cigar_query_coverage", {LogicalType::VARCHAR}, LogicalType::DOUBLE,
 	    [](DataChunk &args, ExpressionState &state, Vector &result) {
 		    UnaryExecutor::Execute<string_t, double>(args.data[0], result, args.size(), [&](string_t cigar) {
 			    // Handle NULL or unmapped CIGAR - return 0.0 for empty/unmapped
@@ -354,7 +398,7 @@ void AlignmentQueryCoverageFunction::Register(ExtensionLoader &loader) {
 	func_one_param.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 
 	// Register both overloads as a function set
-	ScalarFunctionSet function_set("alignment_query_coverage");
+	ScalarFunctionSet function_set("cigar_query_coverage");
 	function_set.AddFunction(func_one_param);
 	function_set.AddFunction(func_two_params);
 	loader.RegisterFunction(function_set);

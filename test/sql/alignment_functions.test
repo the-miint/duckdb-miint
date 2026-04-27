@@ -307,6 +307,38 @@ SELECT alignment_seq_identity(NULL, NULL, NULL, 'cigar') IS NULL;
 ----
 true
 
+# Degenerate CIGARs with no = or X ops should return NULL (no alignment columns
+# to divide by). Pins contract that cigar_sequence_identity will share.
+query I
+SELECT alignment_seq_identity('10I', NULL, NULL, 'cigar') IS NULL;
+----
+true
+
+query I
+SELECT alignment_seq_identity('10D', NULL, NULL, 'cigar') IS NULL;
+----
+true
+
+query I
+SELECT alignment_seq_identity('100S', NULL, NULL, 'cigar') IS NULL;
+----
+true
+
+query I
+SELECT alignment_seq_identity('100H', NULL, NULL, 'cigar') IS NULL;
+----
+true
+
+query I
+SELECT alignment_seq_identity('100N', NULL, NULL, 'cigar') IS NULL;
+----
+true
+
+query I
+SELECT alignment_seq_identity('100P', NULL, NULL, 'cigar') IS NULL;
+----
+true
+
 ###############################################################################
 # ERROR HANDLING
 ###############################################################################
@@ -357,6 +389,137 @@ query R
 SELECT alignment_seq_identity('5=2X3=', 2, '', 'gap_compressed')::FLOAT;
 ----
 0.8
+
+###############################################################################
+# cigar_sequence_identity(cigar) — one-arg convenience over the type='cigar'
+# branch of alignment_seq_identity. Same math, simpler signature.
+# Both go through miint::ComputeCigarIdentity, so behavior must match.
+###############################################################################
+
+# Perfect match: 10=
+query R
+SELECT cigar_sequence_identity('10=')::FLOAT;
+----
+1.0
+
+# Half match: 5=5X
+query R
+SELECT cigar_sequence_identity('5=5X')::FLOAT;
+----
+0.5
+
+# With insertion: gaps drop identity. 5=2I3= → 8 matches / 10 alignment_columns
+query R
+SELECT cigar_sequence_identity('5=2I3=')::FLOAT;
+----
+0.8
+
+# With deletion: gaps drop identity. 5=3D5= → 10 matches / 13 alignment_columns
+query R
+SELECT cigar_sequence_identity('5=3D5=')::FLOAT;
+----
+0.76923
+
+# Mix of =/X plus soft clips (clips excluded from identity)
+query R
+SELECT cigar_sequence_identity('3S5=2X3=3S')::FLOAT;
+----
+0.8
+
+# Hard clips also excluded
+query R
+SELECT cigar_sequence_identity('5H5=5X5H')::FLOAT;
+----
+0.5
+
+# N (RNA skip) ignored
+query R
+SELECT cigar_sequence_identity('5=100N5=')::FLOAT;
+----
+1.0
+
+# Legacy M-only CIGAR → NULL (can't compute from CIGAR alone)
+query I
+SELECT cigar_sequence_identity('10M') IS NULL;
+----
+true
+
+# Mixed M with =/X → NULL (inconsistent)
+query I
+SELECT cigar_sequence_identity('5M5=') IS NULL;
+----
+true
+
+query I
+SELECT cigar_sequence_identity('5M5X') IS NULL;
+----
+true
+
+# Unmapped / empty / NULL → NULL
+query I
+SELECT cigar_sequence_identity('*') IS NULL;
+----
+true
+
+query I
+SELECT cigar_sequence_identity('') IS NULL;
+----
+true
+
+query I
+SELECT cigar_sequence_identity(NULL) IS NULL;
+----
+true
+
+# Degenerate CIGARs with no =/X ops → NULL (same contract as characterization
+# pins on alignment_seq_identity with type='cigar')
+query I
+SELECT cigar_sequence_identity('10I') IS NULL;
+----
+true
+
+query I
+SELECT cigar_sequence_identity('10D') IS NULL;
+----
+true
+
+query I
+SELECT cigar_sequence_identity('100S') IS NULL;
+----
+true
+
+query I
+SELECT cigar_sequence_identity('100H') IS NULL;
+----
+true
+
+query I
+SELECT cigar_sequence_identity('100N') IS NULL;
+----
+true
+
+query I
+SELECT cigar_sequence_identity('100P') IS NULL;
+----
+true
+
+# Parity with the legacy-spelling: same inputs must produce same results.
+# If this ever fails, either the wrapper has drifted or the shared helper
+# is being bypassed.
+query I
+SELECT cigar_sequence_identity('5=2I3=') = alignment_seq_identity('5=2I3=', NULL, NULL, 'cigar');
+----
+true
+
+query I
+SELECT cigar_sequence_identity('5=3D5=') = alignment_seq_identity('5=3D5=', NULL, NULL, 'cigar');
+----
+true
+
+query I
+SELECT cigar_sequence_identity('3S5=2X3=3S') = alignment_seq_identity('3S5=2X3=3S', NULL, NULL, 'cigar');
+----
+true
 
 ###############################################################################
 # INTEGRATION WITH read_sam
@@ -421,67 +584,67 @@ SELECT cigar, alignment_seq_identity(cigar, tag_nm, tag_md, 'cigar')::FLOAT FROM
 
 # Simple match - no clipping
 query I
-SELECT alignment_query_length('10M', true);
+SELECT cigar_query_length('10M', true);
 ----
 10
 
 # Match with default parameter (include_hard_clips defaults to true)
 query I
-SELECT alignment_query_length('10M');
+SELECT cigar_query_length('10M');
 ----
 10
 
 # Match with insertions
 query I
-SELECT alignment_query_length('10M5I', true);
+SELECT cigar_query_length('10M5I', true);
 ----
 15
 
 # Match with deletions (deletions don't consume query)
 query I
-SELECT alignment_query_length('10M5D', true);
+SELECT cigar_query_length('10M5D', true);
 ----
 10
 
 # With soft clips only
 query I
-SELECT alignment_query_length('5S10M5S', true);
+SELECT cigar_query_length('5S10M5S', true);
 ----
 20
 
 # With hard clips - include them
 query I
-SELECT alignment_query_length('5H10M5H', true);
+SELECT cigar_query_length('5H10M5H', true);
 ----
 20
 
 # With hard clips - exclude them
 query I
-SELECT alignment_query_length('5H10M5H', false);
+SELECT cigar_query_length('5H10M5H', false);
 ----
 10
 
 # With both soft and hard clips - include hard clips
 query I
-SELECT alignment_query_length('5H5S10M5S5H', true);
+SELECT cigar_query_length('5H5S10M5S5H', true);
 ----
 30
 
 # With both soft and hard clips - exclude hard clips
 query I
-SELECT alignment_query_length('5H5S10M5S5H', false);
+SELECT cigar_query_length('5H5S10M5S5H', false);
 ----
 20
 
 # Complex CIGAR with all operations
 query I
-SELECT alignment_query_length('5H5S10M5I3D5M5S5H', true);
+SELECT cigar_query_length('5H5S10M5I3D5M5S5H', true);
 ----
 40
 
 # Complex CIGAR - exclude hard clips
 query I
-SELECT alignment_query_length('5H5S10M5I3D5M5S5H', false);
+SELECT cigar_query_length('5H5S10M5I3D5M5S5H', false);
 ----
 30
 
@@ -494,31 +657,31 @@ SELECT alignment_query_length('5H5S10M5I3D5M5S5H', false);
 
 # HTSlib example 1: 10M5I5S
 query I
-SELECT alignment_query_length('10M5I5S', false);
+SELECT cigar_query_length('10M5I5S', false);
 ----
 20
 
 # HTSlib example 2: 5S10M3D5M5S
 query I
-SELECT alignment_query_length('5S10M3D5M5S', false);
+SELECT cigar_query_length('5S10M3D5M5S', false);
 ----
 25
 
 # HTSlib example 3: 5H10M5H (hard clips excluded)
 query I
-SELECT alignment_query_length('5H10M5H', false);
+SELECT cigar_query_length('5H10M5H', false);
 ----
 10
 
 # HTSlib example 4: 5=2X3= (explicit match/mismatch)
 query I
-SELECT alignment_query_length('5=2X3=', false);
+SELECT cigar_query_length('5=2X3=', false);
 ----
 10
 
 # HTSlib example 5: 18M3D2M2D2M1I22M (complex with deletions)
 query I
-SELECT alignment_query_length('18M3D2M2D2M1I22M', false);
+SELECT cigar_query_length('18M3D2M2D2M1I22M', false);
 ----
 45
 
@@ -528,37 +691,37 @@ SELECT alignment_query_length('18M3D2M2D2M1I22M', false);
 
 # Empty string CIGAR
 query I
-SELECT alignment_query_length('', true);
+SELECT cigar_query_length('', true);
 ----
 0
 
 # Unmapped read (*)
 query I
-SELECT alignment_query_length('*', true);
+SELECT cigar_query_length('*', true);
 ----
 0
 
 # Only soft clipping
 query I
-SELECT alignment_query_length('100S', true);
+SELECT cigar_query_length('100S', true);
 ----
 100
 
 # Only hard clipping - included
 query I
-SELECT alignment_query_length('100H', true);
+SELECT cigar_query_length('100H', true);
 ----
 100
 
 # Only hard clipping - excluded
 query I
-SELECT alignment_query_length('100H', false);
+SELECT cigar_query_length('100H', false);
 ----
 0
 
 # Reference skip (N) doesn't consume query
 query I
-SELECT alignment_query_length('10M100N10M', true);
+SELECT cigar_query_length('10M100N10M', true);
 ----
 20
 
@@ -568,20 +731,20 @@ SELECT alignment_query_length('10M100N10M', true);
 
 # NULL CIGAR should return NULL
 query I
-SELECT alignment_query_length(NULL, true) IS NULL;
+SELECT cigar_query_length(NULL, true) IS NULL;
 ----
 true
 
 # NULL with default parameter
 query I
-SELECT alignment_query_length(NULL) IS NULL;
+SELECT cigar_query_length(NULL) IS NULL;
 ----
 true
 
 # NULL for include_hard_clips parameter returns NULL (not default)
 # Note: Explicitly passing NULL is different from omitting the parameter
 query I
-SELECT alignment_query_length('5H10M5H', NULL) IS NULL;
+SELECT cigar_query_length('5H10M5H', NULL) IS NULL;
 ----
 true
 
@@ -591,60 +754,60 @@ true
 
 # Perfect alignment - no clipping
 query R
-SELECT alignment_query_coverage('10M', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('10M', 'aligned')::FLOAT;
 ----
 1.0
 
 # Default parameter (type defaults to 'aligned')
 query R
-SELECT alignment_query_coverage('10M')::FLOAT;
+SELECT cigar_query_coverage('10M')::FLOAT;
 ----
 1.0
 
 # Alignment with insertions
 # 10 aligned / 15 total = 0.6667
 query R
-SELECT alignment_query_coverage('10M5I', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('10M5I', 'aligned')::FLOAT;
 ----
 0.667
 
 # Alignment with soft clips
 # 10 aligned / 20 total = 0.5
 query R
-SELECT alignment_query_coverage('5S10M5S', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('5S10M5S', 'aligned')::FLOAT;
 ----
 0.5
 
 # Alignment with hard clips
 # 10 aligned / 20 total = 0.5
 query R
-SELECT alignment_query_coverage('5H10M5H', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('5H10M5H', 'aligned')::FLOAT;
 ----
 0.5
 
 # Alignment with both soft and hard clips
 # 10 aligned / 30 total = 0.3333
 query R
-SELECT alignment_query_coverage('5H5S10M5S5H', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('5H5S10M5S5H', 'aligned')::FLOAT;
 ----
 0.333
 
 # Complex alignment with insertions and clips
 # 10 aligned / 35 total = 0.2857
 query R
-SELECT alignment_query_coverage('5H5S10M5I5S5H', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('5H5S10M5I5S5H', 'aligned')::FLOAT;
 ----
 0.286
 
 # Only soft clips - zero coverage
 query R
-SELECT alignment_query_coverage('100S', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('100S', 'aligned')::FLOAT;
 ----
 0.0
 
 # Only hard clips - zero coverage
 query R
-SELECT alignment_query_coverage('100H', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('100H', 'aligned')::FLOAT;
 ----
 0.0
 
@@ -654,54 +817,54 @@ SELECT alignment_query_coverage('100H', 'aligned')::FLOAT;
 
 # Perfect alignment - no clipping
 query R
-SELECT alignment_query_coverage('10M', 'mapped')::FLOAT;
+SELECT cigar_query_coverage('10M', 'mapped')::FLOAT;
 ----
 1.0
 
 # Alignment with insertions
 # 15 mapped (M+I) / 15 total = 1.0
 query R
-SELECT alignment_query_coverage('10M5I', 'mapped')::FLOAT;
+SELECT cigar_query_coverage('10M5I', 'mapped')::FLOAT;
 ----
 1.0
 
 # Alignment with soft clips
 # 10 mapped / 20 total = 0.5
 query R
-SELECT alignment_query_coverage('5S10M5S', 'mapped')::FLOAT;
+SELECT cigar_query_coverage('5S10M5S', 'mapped')::FLOAT;
 ----
 0.5
 
 # Alignment with hard clips
 # 10 mapped / 20 total = 0.5
 query R
-SELECT alignment_query_coverage('5H10M5H', 'mapped')::FLOAT;
+SELECT cigar_query_coverage('5H10M5H', 'mapped')::FLOAT;
 ----
 0.5
 
 # Alignment with insertions and soft clips
 # 15 mapped (M+I) / 25 total = 0.6
 query R
-SELECT alignment_query_coverage('5S10M5I5S', 'mapped')::FLOAT;
+SELECT cigar_query_coverage('5S10M5I5S', 'mapped')::FLOAT;
 ----
 0.6
 
 # Complex alignment with all operations
 # 15 mapped (M+I) / 35 total = 0.4286
 query R
-SELECT alignment_query_coverage('5H5S10M5I5S5H', 'mapped')::FLOAT;
+SELECT cigar_query_coverage('5H5S10M5I5S5H', 'mapped')::FLOAT;
 ----
 0.429
 
 # Only soft clips - zero coverage
 query R
-SELECT alignment_query_coverage('100S', 'mapped')::FLOAT;
+SELECT cigar_query_coverage('100S', 'mapped')::FLOAT;
 ----
 0.0
 
 # Only hard clips - zero coverage
 query R
-SELECT alignment_query_coverage('100H', 'mapped')::FLOAT;
+SELECT cigar_query_coverage('100H', 'mapped')::FLOAT;
 ----
 0.0
 
@@ -711,33 +874,33 @@ SELECT alignment_query_coverage('100H', 'mapped')::FLOAT;
 
 # Empty CIGAR - zero coverage (not NULL)
 query R
-SELECT alignment_query_coverage('', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('', 'aligned')::FLOAT;
 ----
 0.0
 
 # Unmapped read (*) - zero coverage
 query R
-SELECT alignment_query_coverage('*', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('*', 'aligned')::FLOAT;
 ----
 0.0
 
 # Deletions don't affect coverage calculation
 # 20 aligned / 20 total = 1.0
 query R
-SELECT alignment_query_coverage('10M5D10M', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('10M5D10M', 'aligned')::FLOAT;
 ----
 1.0
 
 # Reference skip (N) doesn't affect coverage
 # 20 aligned / 20 total = 1.0
 query R
-SELECT alignment_query_coverage('10M100N10M', 'aligned')::FLOAT;
+SELECT cigar_query_coverage('10M100N10M', 'aligned')::FLOAT;
 ----
 1.0
 
 # Verify deletions don't affect mapped coverage either
 query R
-SELECT alignment_query_coverage('10M5D10M', 'mapped')::FLOAT;
+SELECT cigar_query_coverage('10M5D10M', 'mapped')::FLOAT;
 ----
 1.0
 
@@ -747,25 +910,25 @@ SELECT alignment_query_coverage('10M5D10M', 'mapped')::FLOAT;
 
 # NULL CIGAR should return NULL
 query I
-SELECT alignment_query_coverage(NULL, 'aligned') IS NULL;
+SELECT cigar_query_coverage(NULL, 'aligned') IS NULL;
 ----
 true
 
 # NULL with default parameter
 query I
-SELECT alignment_query_coverage(NULL) IS NULL;
+SELECT cigar_query_coverage(NULL) IS NULL;
 ----
 true
 
 # NULL type parameter should return NULL
 query I
-SELECT alignment_query_coverage('10M', NULL) IS NULL;
+SELECT cigar_query_coverage('10M', NULL) IS NULL;
 ----
 true
 
 # Both NULL
 query I
-SELECT alignment_query_coverage(NULL, NULL) IS NULL;
+SELECT cigar_query_coverage(NULL, NULL) IS NULL;
 ----
 true
 
@@ -775,7 +938,7 @@ true
 
 # Invalid type parameter
 statement error
-SELECT alignment_query_coverage('10M', 'invalid_type');
+SELECT cigar_query_coverage('10M', 'invalid_type');
 ----
 Invalid Input Error: Invalid coverage type
 
@@ -788,16 +951,16 @@ Invalid Input Error: Invalid coverage type
 # mapped: 20 / 40 = 0.5
 query RR
 SELECT
-    alignment_query_coverage('10H10M10I10H', 'aligned')::FLOAT,
-    alignment_query_coverage('10H10M10I10H', 'mapped')::FLOAT;
+    cigar_query_coverage('10H10M10I10H', 'aligned')::FLOAT,
+    cigar_query_coverage('10H10M10I10H', 'mapped')::FLOAT;
 ----
 0.25	0.5
 
 # Without insertions, aligned == mapped
 query RR
 SELECT
-    alignment_query_coverage('5H5S10M5S5H', 'aligned')::FLOAT,
-    alignment_query_coverage('5H5S10M5S5H', 'mapped')::FLOAT;
+    cigar_query_coverage('5H5S10M5S5H', 'aligned')::FLOAT,
+    cigar_query_coverage('5H5S10M5S5H', 'mapped')::FLOAT;
 ----
 0.333	0.333
 
@@ -808,14 +971,14 @@ SELECT
 # Test with actual SAM data - verify functions work on real data
 query I
 SELECT COUNT(*) FROM read_sam('data/sam/foo_has_header.sam')
-WHERE alignment_query_length(cigar, true) > 0;
+WHERE cigar_query_length(cigar, true) > 0;
 ----
 4
 
 # Verify coverage function works with SAM data
 query I
 SELECT COUNT(*) FROM read_sam('data/sam/foo_has_header.sam')
-WHERE alignment_query_coverage(cigar, 'aligned') >= 0.0;
+WHERE cigar_query_coverage(cigar, 'aligned') >= 0.0;
 ----
 4
 
@@ -825,30 +988,30 @@ WHERE alignment_query_coverage(cigar, 'aligned') >= 0.0;
 
 # Invalid CIGAR - operation without length
 statement error
-SELECT alignment_query_length('M');
+SELECT cigar_query_length('M');
 ----
 Invalid CIGAR string: operation without length
 
 # Invalid CIGAR - unknown operation character
 statement error
-SELECT alignment_query_length('10Z');
+SELECT cigar_query_length('10Z');
 ----
 Invalid CIGAR operation: Z
 
 # Invalid CIGAR - incomplete (number without operation)
 statement error
-SELECT alignment_query_length('10M5');
+SELECT cigar_query_length('10M5');
 ----
 Invalid CIGAR string: incomplete operation (missing operation character)
 
-# Test same errors with alignment_query_coverage
+# Test same errors with cigar_query_coverage
 statement error
-SELECT alignment_query_coverage('M', 'aligned');
+SELECT cigar_query_coverage('M', 'aligned');
 ----
 Invalid CIGAR string: operation without length
 
 statement error
-SELECT alignment_query_coverage('10Z', 'aligned');
+SELECT cigar_query_coverage('10Z', 'aligned');
 ----
 Invalid CIGAR operation: Z
 
@@ -865,7 +1028,7 @@ true
 
 # CIGAR with huge number that would overflow int64
 statement error
-SELECT alignment_query_length('999999999999999999999M');
+SELECT cigar_query_length('999999999999999999999M');
 ----
 CIGAR operation length exceeds maximum
 

@@ -316,7 +316,7 @@ def cmd_transform_woltka_ogu(con, args):
     """Run WoLTKA OGU feature table generation with optional filters."""
     has_filters = (
         args.alignment_seq_identity is not None
-        or args.alignment_query_coverage is not None
+        or args.cigar_query_coverage is not None
     )
     has_genome_cov = args.genome_coverage is not None
 
@@ -329,9 +329,9 @@ def cmd_transform_woltka_ogu(con, args):
         where_parts.append(
             f"alignment_seq_identity(cigar, tag_nm, tag_md, 'blast') >= {float(args.alignment_seq_identity)}"
         )
-    if args.alignment_query_coverage is not None:
+    if args.cigar_query_coverage is not None:
         where_parts.append(
-            f"alignment_query_coverage(cigar) >= {float(args.alignment_query_coverage)}"
+            f"cigar_query_coverage(cigar) >= {float(args.cigar_query_coverage)}"
         )
     where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
@@ -529,7 +529,7 @@ def build_parser():
         help="Min sequence identity threshold (0-1)",
     )
     p.add_argument(
-        "--alignment-query-coverage",
+        "--cigar-query-coverage",
         type=float,
         help="Min query coverage threshold (0-1)",
     )

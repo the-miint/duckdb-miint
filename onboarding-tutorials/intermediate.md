@@ -140,7 +140,7 @@ provides flag-checking functions for all standard
 
 Even among primary alignments, not all are trustworthy. Two key metrics:
 
-- [`alignment_query_coverage(cigar)`](../docs/scalar-functions.md#alignment_query_coveragecigar-typealigned)
+- [`cigar_query_coverage(cigar)`](../docs/scalar-functions.md#cigar_query_coveragecigar-typealigned)
   &mdash; what fraction of the read actually aligned? A value of 1.0 means the
   entire read matched; 0.6 means 40% of the read was soft-clipped (ignored by
   the aligner).
@@ -151,13 +151,13 @@ Even among primary alignments, not all are trustworthy. Two key metrics:
 
 ```sql
 SELECT read_id,
-       round(alignment_query_coverage(cigar), 2) AS query_cov,
+       round(cigar_query_coverage(cigar), 2) AS query_cov,
        round(alignment_seq_identity(cigar, tag_nm, tag_md, 'blast'), 3)
            AS seq_identity,
        cigar
 FROM alignments
 WHERE alignment_is_primary(flags)
-ORDER BY alignment_query_coverage(cigar) ASC
+ORDER BY cigar_query_coverage(cigar) ASC
 LIMIT 10;
 ```
 
@@ -191,7 +191,7 @@ temporary named result you can query like a table:
 WITH quality AS (
     SELECT
         read_id,
-        alignment_query_coverage(cigar) AS qcov,
+        cigar_query_coverage(cigar) AS qcov,
         alignment_seq_identity(cigar, tag_nm, tag_md, 'blast') AS identity
     FROM alignments
     WHERE alignment_is_primary(flags)
@@ -248,7 +248,7 @@ CREATE VIEW filtered_alignments AS
     SELECT *
     FROM alignments
     WHERE alignment_is_primary(flags)
-      AND alignment_query_coverage(cigar) >= 0.8;
+      AND cigar_query_coverage(cigar) >= 0.8;
 ```
 
 Now compare unfiltered vs. filtered counts using
@@ -282,14 +282,14 @@ CREATE VIEW strict_97 AS
     SELECT *
     FROM alignments
     WHERE alignment_is_primary(flags)
-      AND alignment_query_coverage(cigar) >= 0.99
+      AND cigar_query_coverage(cigar) >= 0.99
       AND alignment_seq_identity(cigar, tag_nm, tag_md, 'blast') >= 0.97;
 
 CREATE VIEW strict_99 AS
     SELECT *
     FROM alignments
     WHERE alignment_is_primary(flags)
-      AND alignment_query_coverage(cigar) >= 0.99
+      AND cigar_query_coverage(cigar) >= 0.99
       AND alignment_seq_identity(cigar, tag_nm, tag_md, 'blast') >= 0.99;
 
 SELECT 'qcov >= 99%, id >= 97%' AS threshold, *
@@ -326,7 +326,7 @@ CREATE OR REPLACE MACRO quality_filtered(
     SELECT *
     FROM alignments
     WHERE alignment_is_primary(flags)
-      AND alignment_query_coverage(cigar) >= min_query_coverage
+      AND cigar_query_coverage(cigar) >= min_query_coverage
       AND alignment_seq_identity(cigar, tag_nm, tag_md, 'blast')
           >= min_seq_identity;
 ```

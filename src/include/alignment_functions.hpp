@@ -11,13 +11,19 @@ public:
 	static ScalarFunction GetFunction();
 };
 
-class AlignmentQueryLengthFunction {
+class CigarSequenceIdentityFunction {
 public:
 	static void Register(ExtensionLoader &loader);
 	static ScalarFunction GetFunction();
 };
 
-class AlignmentQueryCoverageFunction {
+class CigarQueryLengthFunction {
+public:
+	static void Register(ExtensionLoader &loader);
+	static ScalarFunction GetFunction();
+};
+
+class CigarQueryCoverageFunction {
 public:
 	static void Register(ExtensionLoader &loader);
 	static ScalarFunction GetFunction();
