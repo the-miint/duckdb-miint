@@ -1,4 +1,5 @@
 #include "alignment_flag_functions.hpp"
+#include "documented_function.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
@@ -83,89 +84,85 @@ static void AlignmentIsSupplementaryFunction(DataChunk &args, ExpressionState &s
 	                                       [&](uint16_t flags) { return (flags & 0x800) != 0; });
 }
 
+namespace {
+
+// Local convenience: every alignment-flag function has the same shape
+// (USMALLINT flags -> BOOLEAN), so wrap the helper with a one-liner.
+void RegisterFlag(ExtensionLoader &loader, const std::string &name, scalar_function_t fn,
+                  const std::string &description, const std::string &alias_of = "") {
+	const std::string filter_example =
+	    "-- Filter pattern: combine flag tests with boolean operators\n"
+	    "SELECT read_id, flags\n"
+	    "FROM read_alignments('alignments.sam')\n"
+	    "WHERE " + name + "(flags) AND NOT alignment_is_unmapped(flags);";
+	const std::string single_example =
+	    "SELECT read_id, flags, " + name + "(flags) AS flag\n"
+	    "FROM read_alignments('alignments.sam') LIMIT 10;";
+	RegisterDocumentedScalar(loader, ScalarFunction(name, {LogicalType::USMALLINT}, LogicalType::BOOLEAN, fn),
+	                         description, {"flags"}, {single_example, filter_example}, alias_of, {"sam-flags"});
+}
+
+} // namespace
+
 void AlignmentFlagFunctions::Register(ExtensionLoader &loader) {
-	ScalarFunction alignment_is_paired("alignment_is_paired", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                                   AlignmentIsPairedFunction);
-	loader.RegisterFunction(alignment_is_paired);
-	ScalarFunction is_paired("is_paired", {LogicalType::USMALLINT}, LogicalType::BOOLEAN, AlignmentIsPairedFunction);
-	loader.RegisterFunction(is_paired);
+	const std::string desc_paired = "Returns true if the alignment is part of a paired-end read (SAM flag 0x1).";
+	RegisterFlag(loader, "alignment_is_paired", AlignmentIsPairedFunction, desc_paired);
+	RegisterFlag(loader, "is_paired", AlignmentIsPairedFunction, desc_paired, "alignment_is_paired");
 
-	ScalarFunction alignment_is_proper_pair("alignment_is_proper_pair", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                                        AlignmentIsProperPairFunction);
-	loader.RegisterFunction(alignment_is_proper_pair);
-	ScalarFunction is_proper_pair("is_proper_pair", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                              AlignmentIsProperPairFunction);
-	loader.RegisterFunction(is_proper_pair);
+	const std::string desc_proper = "Returns true if both mates in a paired alignment are mapped in the expected "
+	                                "orientation and within the expected insert size (SAM flag 0x2).";
+	RegisterFlag(loader, "alignment_is_proper_pair", AlignmentIsProperPairFunction, desc_proper);
+	RegisterFlag(loader, "is_proper_pair", AlignmentIsProperPairFunction, desc_proper, "alignment_is_proper_pair");
 
-	ScalarFunction alignment_is_unmapped("alignment_is_unmapped", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                                     AlignmentIsUnmappedFunction);
-	loader.RegisterFunction(alignment_is_unmapped);
-	ScalarFunction is_unmapped("is_unmapped", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                           AlignmentIsUnmappedFunction);
-	loader.RegisterFunction(is_unmapped);
+	const std::string desc_unmapped = "Returns true if the read is unmapped (SAM flag 0x4).";
+	RegisterFlag(loader, "alignment_is_unmapped", AlignmentIsUnmappedFunction, desc_unmapped);
+	RegisterFlag(loader, "is_unmapped", AlignmentIsUnmappedFunction, desc_unmapped, "alignment_is_unmapped");
 
-	ScalarFunction alignment_is_mate_unmapped("alignment_is_mate_unmapped", {LogicalType::USMALLINT},
-	                                          LogicalType::BOOLEAN, AlignmentIsMateUnmappedFunction);
-	loader.RegisterFunction(alignment_is_mate_unmapped);
-	ScalarFunction is_munmap("is_munmap", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                         AlignmentIsMateUnmappedFunction);
-	loader.RegisterFunction(is_munmap);
+	const std::string desc_mate_unmapped = "Returns true if the mate of this read is unmapped (SAM flag 0x8).";
+	RegisterFlag(loader, "alignment_is_mate_unmapped", AlignmentIsMateUnmappedFunction, desc_mate_unmapped);
+	RegisterFlag(loader, "is_munmap", AlignmentIsMateUnmappedFunction, desc_mate_unmapped, "alignment_is_mate_unmapped");
 
-	ScalarFunction alignment_is_reverse("alignment_is_reverse", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                                    AlignmentIsReverseFunction);
-	loader.RegisterFunction(alignment_is_reverse);
-	ScalarFunction is_reverse("is_reverse", {LogicalType::USMALLINT}, LogicalType::BOOLEAN, AlignmentIsReverseFunction);
-	loader.RegisterFunction(is_reverse);
+	const std::string desc_reverse = "Returns true if the read is mapped to the reverse strand (SAM flag 0x10).";
+	RegisterFlag(loader, "alignment_is_reverse", AlignmentIsReverseFunction, desc_reverse);
+	RegisterFlag(loader, "is_reverse", AlignmentIsReverseFunction, desc_reverse, "alignment_is_reverse");
 
-	ScalarFunction alignment_is_mate_reverse("alignment_is_mate_reverse", {LogicalType::USMALLINT},
-	                                         LogicalType::BOOLEAN, AlignmentIsMateReverseFunction);
-	loader.RegisterFunction(alignment_is_mate_reverse);
-	ScalarFunction is_mreverse("is_mreverse", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                           AlignmentIsMateReverseFunction);
-	loader.RegisterFunction(is_mreverse);
+	const std::string desc_mate_reverse =
+	    "Returns true if the mate of this read is mapped to the reverse strand (SAM flag 0x20).";
+	RegisterFlag(loader, "alignment_is_mate_reverse", AlignmentIsMateReverseFunction, desc_mate_reverse);
+	RegisterFlag(loader, "is_mreverse", AlignmentIsMateReverseFunction, desc_mate_reverse, "alignment_is_mate_reverse");
 
-	ScalarFunction alignment_is_read1("alignment_is_read1", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                                  AlignmentIsRead1Function);
-	loader.RegisterFunction(alignment_is_read1);
-	ScalarFunction is_read1("is_read1", {LogicalType::USMALLINT}, LogicalType::BOOLEAN, AlignmentIsRead1Function);
-	loader.RegisterFunction(is_read1);
+	const std::string desc_read1 = "Returns true if this is the first read in a pair (SAM flag 0x40).";
+	RegisterFlag(loader, "alignment_is_read1", AlignmentIsRead1Function, desc_read1);
+	RegisterFlag(loader, "is_read1", AlignmentIsRead1Function, desc_read1, "alignment_is_read1");
 
-	ScalarFunction alignment_is_read2("alignment_is_read2", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                                  AlignmentIsRead2Function);
-	loader.RegisterFunction(alignment_is_read2);
-	ScalarFunction is_read2("is_read2", {LogicalType::USMALLINT}, LogicalType::BOOLEAN, AlignmentIsRead2Function);
-	loader.RegisterFunction(is_read2);
+	const std::string desc_read2 = "Returns true if this is the second read in a pair (SAM flag 0x80).";
+	RegisterFlag(loader, "alignment_is_read2", AlignmentIsRead2Function, desc_read2);
+	RegisterFlag(loader, "is_read2", AlignmentIsRead2Function, desc_read2, "alignment_is_read2");
 
-	ScalarFunction alignment_is_secondary("alignment_is_secondary", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                                      AlignmentIsSecondaryFunction);
-	loader.RegisterFunction(alignment_is_secondary);
+	const std::string desc_secondary =
+	    "Returns true if this alignment is a secondary alignment (SAM flag 0x100). A read with multiple possible "
+	    "mappings has one primary and zero or more secondary alignments.";
+	RegisterFlag(loader, "alignment_is_secondary", AlignmentIsSecondaryFunction, desc_secondary);
+	RegisterFlag(loader, "is_secondary", AlignmentIsSecondaryFunction, desc_secondary, "alignment_is_secondary");
 
-	ScalarFunction alignment_is_primary("alignment_is_primary", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                                    AlignmentIsPrimaryFunction);
-	loader.RegisterFunction(alignment_is_primary);
+	// Primary is the negation of secondary OR supplementary; no SAM flag of its own.
+	RegisterFlag(loader, "alignment_is_primary", AlignmentIsPrimaryFunction,
+	             "Returns true if this is the primary alignment for the read — i.e. neither secondary "
+	             "(SAM flag 0x100) nor supplementary (SAM flag 0x800).");
 
-	ScalarFunction is_secondary("is_secondary", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                            AlignmentIsSecondaryFunction);
-	loader.RegisterFunction(is_secondary);
+	const std::string desc_qc = "Returns true if the read failed quality checks (SAM flag 0x200).";
+	RegisterFlag(loader, "alignment_is_qc_failed", AlignmentIsQcFailedFunction, desc_qc);
+	RegisterFlag(loader, "is_qcfail", AlignmentIsQcFailedFunction, desc_qc, "alignment_is_qc_failed");
 
-	ScalarFunction alignment_is_qc_failed("alignment_is_qc_failed", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                                      AlignmentIsQcFailedFunction);
-	loader.RegisterFunction(alignment_is_qc_failed);
-	ScalarFunction is_qcfail("is_qcfail", {LogicalType::USMALLINT}, LogicalType::BOOLEAN, AlignmentIsQcFailedFunction);
-	loader.RegisterFunction(is_qcfail);
+	const std::string desc_dup =
+	    "Returns true if the read is a PCR or optical duplicate, as marked by an upstream tool (SAM flag 0x400).";
+	RegisterFlag(loader, "alignment_is_duplicate", AlignmentIsDuplicateFunction, desc_dup);
+	RegisterFlag(loader, "is_dup", AlignmentIsDuplicateFunction, desc_dup, "alignment_is_duplicate");
 
-	ScalarFunction alignment_is_duplicate("alignment_is_duplicate", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                                      AlignmentIsDuplicateFunction);
-	loader.RegisterFunction(alignment_is_duplicate);
-	ScalarFunction is_dup("is_dup", {LogicalType::USMALLINT}, LogicalType::BOOLEAN, AlignmentIsDuplicateFunction);
-	loader.RegisterFunction(is_dup);
-
-	ScalarFunction alignment_is_supplementary("alignment_is_supplementary", {LogicalType::USMALLINT},
-	                                          LogicalType::BOOLEAN, AlignmentIsSupplementaryFunction);
-	loader.RegisterFunction(alignment_is_supplementary);
-	ScalarFunction is_supplementary("is_supplementary", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
-	                                AlignmentIsSupplementaryFunction);
-	loader.RegisterFunction(is_supplementary);
+	const std::string desc_supp = "Returns true if this is a supplementary (chimeric) alignment (SAM flag 0x800). "
+	                              "Supplementary alignments are non-linear parts of a chimeric alignment.";
+	RegisterFlag(loader, "alignment_is_supplementary", AlignmentIsSupplementaryFunction, desc_supp);
+	RegisterFlag(loader, "is_supplementary", AlignmentIsSupplementaryFunction, desc_supp, "alignment_is_supplementary");
 }
 
 } // namespace duckdb

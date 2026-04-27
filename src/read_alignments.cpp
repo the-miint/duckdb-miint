@@ -1,4 +1,5 @@
 #include "read_alignments.hpp"
+#include "documented_function.hpp"
 #include "reference_table_reader.hpp"
 #include "remote_file_helper.hpp"
 #include "table_function_common.hpp"
@@ -265,15 +266,91 @@ TableFunction ReadAlignmentsTableFunction::GetFunction() {
 }
 
 void ReadAlignmentsTableFunction::Register(ExtensionLoader &loader) {
-	// Register the main function
-	loader.RegisterFunction(GetFunction());
+	static const std::string description = R"DOC(
+Read SAM/BAM alignment files as a DuckDB table.
 
-	// Register backward compatibility alias
+`filename` accepts a single path, an array of paths, a glob pattern, or `-` /
+`/dev/stdin` for standard input. When a single VARCHAR contains glob characters
+(`*`, `?`, `[`), files are expanded and sorted alphabetically. VARCHAR[]
+elements are treated as literal paths (no glob expansion).
+
+### Named parameters
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `reference_lengths` | VARCHAR (table/view name) | _none_ | Required for headerless SAM. Table or view with at least 2 columns: `(name VARCHAR, length INTEGER/BIGINT)`. Views with computed columns are supported. |
+| `include_filepath` | BOOLEAN | `false` | Add a `filepath` column to the output. |
+| `include_seq_qual` | BOOLEAN | `false` | Add `sequence` (VARCHAR) and `qual` (UTINYINT[]) columns. When enabled, primary alignments and unmapped reads must have SEQ/QUAL data or an error is raised. |
+
+### Output schema
+
+- `position` (BIGINT) — 1-based start position
+- `stop_position` (BIGINT) — 1-based stop position (computed from CIGAR via `bam_endpos`)
+- `cigar` (VARCHAR) — CIGAR string
+- `sequence` (VARCHAR, opt-in) — read sequence from SEQ field
+- `qual` (UTINYINT[], opt-in) — quality scores 0–93
+- Plus the standard SAM fields and optional tags.
+
+### Behavior
+
+- Auto-detects SAM (text) vs BAM (binary) from file content.
+- Supports gzip-compressed SAM.
+- Supports stdin via `-` or `/dev/stdin` (single file only, not in arrays).
+- Parallel: 4 threads for files, single-threaded for stdin.
+- For headerless SAM, supply `reference_lengths`.
+
+### Stdin limitations
+
+- Cannot be combined with other paths in an array.
+- Headered data works without `reference_lengths`; headerless data requires it.
+- The user must know whether their stdin contains a header.
+)DOC";
+	const std::vector<std::string> shared_examples = {
+	    "-- Read SAM file with header\n"
+	    "SELECT * FROM read_alignments('alignments.sam');",
+
+	    "-- Read BAM file\n"
+	    "SELECT * FROM read_alignments('alignments.bam');",
+
+	    "-- Read headerless SAM file (requires reference table)\n"
+	    "CREATE TABLE my_refs AS\n"
+	    "  SELECT 'chr1' AS name, 248956422 AS length\n"
+	    "  UNION ALL SELECT 'chr2', 242193529;\n"
+	    "SELECT * FROM read_alignments('headerless.sam', reference_lengths='my_refs');",
+
+	    "-- Read multiple files with filepath tracking\n"
+	    "SELECT * FROM read_alignments(['file1.sam', 'file2.bam'], include_filepath=true);",
+
+	    "-- Glob pattern (sorted alphabetically)\n"
+	    "SELECT * FROM read_alignments('samples/*.bam', include_filepath=true);",
+
+	    "-- Include sequence and quality scores\n"
+	    "SELECT read_id, sequence, qual\n"
+	    "FROM read_alignments('alignments.sam', include_seq_qual=true);",
+
+	    "-- Quality-filter using the qual array\n"
+	    "SELECT read_id, sequence, list_avg(qual) AS avg_qual\n"
+	    "FROM read_alignments('alignments.bam', include_seq_qual=true)\n"
+	    "WHERE list_avg(qual) >= 30;",
+
+	    "-- Read from stdin (headered)\n"
+	    "SELECT * FROM read_alignments('/dev/stdin');",
+
+	    "-- Backward-compatible alias\n"
+	    "SELECT * FROM read_sam('alignments.sam');",
+	};
+
+	RegisterDocumentedTableFunction(loader, GetFunction(), description, {"filename"}, shared_examples,
+	                                /*alias_of=*/"", /*categories=*/{"alignment-io"});
+
+	// Backward-compat alias. alias_of links the catalog entry to the canonical
+	// name in duckdb_functions().alias_of.
 	auto read_sam_alias = TableFunction("read_sam", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
 	read_sam_alias.named_parameters["reference_lengths"] = LogicalType::ANY;
 	read_sam_alias.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
 	read_sam_alias.named_parameters["include_seq_qual"] = LogicalType::BOOLEAN;
-	loader.RegisterFunction(read_sam_alias);
+	RegisterDocumentedTableFunction(loader, std::move(read_sam_alias), description, {"filename"}, shared_examples,
+	                                /*alias_of=*/"read_alignments", /*categories=*/{"alignment-io"});
 }
 
 }; // namespace duckdb
