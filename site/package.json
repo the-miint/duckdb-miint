@@ -1,0 +1,22 @@
+{
+  "name": "duckdb-miint-docs",
+  "type": "module",
+  "version": "0.0.1",
+  "scripts": {
+    "introspect": "node scripts/introspect-functions.mjs",
+    "generate": "node scripts/generate-reference.mjs",
+    "prebuild": "npm run introspect && npm run generate",
+    "predev": "npm run introspect && npm run generate",
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.38.4",
+    "astro": "^6.1.9",
+    "sharp": "^0.34.5",
+    "starlight-theme-nova": "^0.11.9"
+  }
+}

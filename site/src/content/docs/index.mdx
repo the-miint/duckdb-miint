@@ -1,0 +1,32 @@
+---
+title: MIINT
+description: Microbiome analytics for DuckDB.
+template: splash
+hero:
+  tagline: SQL over microbiome sequence, alignment, phylogeny, and mass-spectrometry data.
+  actions:
+    - text: Install
+      link: /getting-started/installation/
+      icon: right-arrow
+    - text: GitHub
+      link: https://github.com/the-miint/duckdb-miint
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid stagger>
+  <Card title="Read common formats" icon="document">
+    FASTA/FASTQ, SAM/BAM, mzML/mzXML, BIOM, Newick, jplace — all queryable as DuckDB tables.
+  </Card>
+  <Card title="Run aligners in-process" icon="rocket">
+    minimap2, bowtie2, MAFFT, SortMeRNA, vsearch — embedded as static libraries.
+  </Card>
+  <Card title="Composable SQL" icon="puzzle">
+    Coverage filtering, per-sample pipelines, mass-spec peak operations — all expressible as SQL queries.
+  </Card>
+  <Card title="Reference" icon="open-book">
+    Auto-generated from the registered function catalog — guaranteed in sync with the build.
+  </Card>
+</CardGrid>
