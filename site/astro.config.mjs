@@ -6,9 +6,15 @@ import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const sidebarManifestPath = fileURLToPath(new URL('./build/sidebar.json', import.meta.url));
-const referenceSidebar = existsSync(sidebarManifestPath)
-	? JSON.parse(readFileSync(sidebarManifestPath, 'utf8'))
-	: [];
+let referenceSidebar = [];
+if (existsSync(sidebarManifestPath)) {
+	referenceSidebar = JSON.parse(readFileSync(sidebarManifestPath, 'utf8'));
+} else {
+	console.warn(
+		`[astro.config] no build/sidebar.json — Reference sidebar will be empty. ` +
+		`Run \`npm run prebuild\` to generate it.`,
+	);
+}
 
 // https://astro.build/config
 export default defineConfig({

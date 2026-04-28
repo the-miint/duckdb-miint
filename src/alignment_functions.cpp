@@ -388,32 +388,13 @@ read lengths and computing query coverage manually.
 	    "GROUP BY reference;",
 	};
 
-	// Construct LogicalType from LogicalTypeId enum to avoid ODR-using the
-	// LogicalType::VARCHAR / BOOLEAN static-const class members; binding them to
-	// vector::emplace_back's forwarding reference emits a vague-linkage weak
-	// symbol that collides with libduckdb_static.a under the loadable
-	// extension's link settings.
-	FunctionDescription one_param_desc;
-	one_param_desc.description = description;
-	one_param_desc.parameter_names.emplace_back("cigar");
-	one_param_desc.parameter_types.emplace_back(LogicalTypeId::VARCHAR);
-	one_param_desc.categories.emplace_back("alignment-quality");
-	for (const auto &e : shared_examples) {
-		one_param_desc.examples.emplace_back(e);
-	}
-
-	FunctionDescription two_param_desc;
-	two_param_desc.description = description;
-	two_param_desc.parameter_names.emplace_back("cigar");
-	two_param_desc.parameter_names.emplace_back("include_hard_clips");
-	two_param_desc.parameter_types.emplace_back(LogicalTypeId::VARCHAR);
-	two_param_desc.parameter_types.emplace_back(LogicalTypeId::BOOLEAN);
-	two_param_desc.categories.emplace_back("alignment-quality");
-	for (const auto &e : shared_examples) {
-		two_param_desc.examples.emplace_back(e);
-	}
-
-	RegisterDocumentedScalarSet(loader, function_set, {one_param_desc, two_param_desc});
+	RegisterDocumentedScalarSet(loader, function_set, description,
+	                            {
+	                                {{"cigar"}, {LogicalTypeId::VARCHAR}},
+	                                {{"cigar", "include_hard_clips"}, {LogicalTypeId::VARCHAR, LogicalTypeId::BOOLEAN}},
+	                            },
+	                            shared_examples,
+	                            /*alias_of=*/"", /*categories=*/ {"alignment-quality"});
 }
 
 // alignment_query_coverage implementation
@@ -563,28 +544,13 @@ The `type` parameter selects which formula to apply (default `'aligned'`):
 	    "GROUP BY reference;",
 	};
 
-	// LogicalTypeId enum: see ODR comment in alignment_query_length above.
-	FunctionDescription one_param_desc;
-	one_param_desc.description = description;
-	one_param_desc.parameter_names.emplace_back("cigar");
-	one_param_desc.parameter_types.emplace_back(LogicalTypeId::VARCHAR);
-	one_param_desc.categories.emplace_back("alignment-quality");
-	for (const auto &e : shared_examples) {
-		one_param_desc.examples.emplace_back(e);
-	}
-
-	FunctionDescription two_param_desc;
-	two_param_desc.description = description;
-	two_param_desc.parameter_names.emplace_back("cigar");
-	two_param_desc.parameter_names.emplace_back("type");
-	two_param_desc.parameter_types.emplace_back(LogicalTypeId::VARCHAR);
-	two_param_desc.parameter_types.emplace_back(LogicalTypeId::VARCHAR);
-	two_param_desc.categories.emplace_back("alignment-quality");
-	for (const auto &e : shared_examples) {
-		two_param_desc.examples.emplace_back(e);
-	}
-
-	RegisterDocumentedScalarSet(loader, function_set, {one_param_desc, two_param_desc});
+	RegisterDocumentedScalarSet(loader, function_set, description,
+	                            {
+	                                {{"cigar"}, {LogicalTypeId::VARCHAR}},
+	                                {{"cigar", "type"}, {LogicalTypeId::VARCHAR, LogicalTypeId::VARCHAR}},
+	                            },
+	                            shared_examples,
+	                            /*alias_of=*/"", /*categories=*/ {"alignment-quality"});
 }
 
 } // namespace duckdb

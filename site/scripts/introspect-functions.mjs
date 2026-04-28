@@ -80,35 +80,39 @@ function runDuckDB(sql) {
   return JSON.parse(out);
 }
 
+// Fields generate-reference.mjs actually consumes. Don't add fields here
+// without a consumer — they bloat functions.json for no benefit.
 const FIELDS = [
   'function_name', 'function_type', 'alias_of', 'description',
-  'parameters', 'parameter_types', 'return_type', 'varargs',
-  'has_side_effects', 'examples', 'categories',
+  'parameters', 'parameter_types', 'return_type',
+  'examples', 'categories',
 ];
-
-function snapshot(load) {
-  const select = `SELECT ${FIELDS.join(', ')} FROM duckdb_functions();`;
-  return runDuckDB(load ? `${load}; ${select}` : select);
-}
-
-console.error(`introspect: baseline (no extension) via ${DUCKDB_BIN}`);
-const before = snapshot('');
-const beforeKey = new Set(
-  before.map((r) => `${r.function_name} ${r.function_type} ${(r.parameter_types ?? []).join(',')}`)
-);
 
 if (useLocalBuild) {
   const tag = process.env.MIINT_EXT ? 'local, MIINT_EXT explicit' : 'local, auto-detected';
-  console.error(`introspect: after LOAD '${MIINT_EXT}' (${tag})`);
+  console.error(`introspect: ${DUCKDB_BIN} + LOAD '${MIINT_EXT}' (${tag})`);
 } else {
   const tag = FORCE_RELEASED ? 'released, MIINT_FORCE_RELEASED' : 'released, no local build found';
-  console.error(`introspect: after INSTALL miint FROM '${MIINT_REPO}' (${tag})`);
+  console.error(`introspect: ${DUCKDB_BIN} + INSTALL miint FROM '${MIINT_REPO}' (${tag})`);
 }
-const after = snapshot(loadStmt);
 
-const newFns = after.filter(
-  (r) => !beforeKey.has(`${r.function_name} ${r.function_type} ${(r.parameter_types ?? []).join(',')}`)
+// Single-session diff via a temp table: snapshot the baseline catalog,
+// load miint, then return only the rows that weren't in the baseline.
+// One subprocess instead of two — saves a duckdb cold start (~150-400ms)
+// and the JSON serialize/parse round-trip for the unused baseline.
+const newFns = runDuckDB(`
+CREATE TEMP TABLE _miint_doc_baseline AS
+  SELECT function_name, function_type, parameter_types FROM duckdb_functions();
+${loadStmt};
+SELECT ${FIELDS.join(', ')}
+FROM duckdb_functions() f
+WHERE NOT EXISTS (
+  SELECT 1 FROM _miint_doc_baseline b
+  WHERE b.function_name = f.function_name
+    AND b.function_type = f.function_type
+    AND b.parameter_types IS NOT DISTINCT FROM f.parameter_types
 );
+`);
 
 // Group overloads under a single name so the generator emits one page per name.
 const grouped = new Map();
@@ -129,8 +133,6 @@ for (const fn of newFns) {
     description: fn.description ?? null,
     examples: fn.examples ?? [],
     categories: fn.categories ?? [],
-    varargs: fn.varargs ?? null,
-    has_side_effects: fn.has_side_effects ?? false,
   });
 }
 

@@ -10,43 +10,66 @@
 #include <string>
 #include <vector>
 
-namespace duckdb {
-
-// Register a scalar function whose description, parameter names, and examples
-// are exposed via duckdb_functions(). The doc-site generator queries
-// duckdb_functions() to build the reference pages, so registrations that go
-// through this helper appear in the docs automatically and stay in sync with
-// the C++ as a side effect of building the extension.
+// Helpers that wrap DuckDB's standard CreateXxxFunctionInfo registration
+// path so descriptions, parameter names, examples, aliases, and categories
+// flow into FunctionDescription and out through duckdb_functions(). The
+// docs site (site/) introspects duckdb_functions() to generate reference
+// pages, so registrations that go through these helpers appear in the docs
+// automatically with no sidecar files.
 //
-// alias_of, when non-empty, links this registration to its canonical name
+// alias_of, when non-empty, links a registration to its canonical name
 // (e.g. is_paired -> alignment_is_paired). The catalog surfaces it in the
 // duckdb_functions().alias_of column.
 //
-// Bodies live in src/documented_function.cpp; keeping them out of the header
-// avoids vague-linkage emission of duckdb static-const class members in every
-// translation unit that includes this file.
+// DuckDB also ships FunctionList::RegisterExtensionFunctions for bulk
+// registration of static metadata tables (used by core_functions). It is
+// scalar/aggregate-only and assumes a static StaticFunctionDefinition[]
+// driven by \1-delimited variant strings — wrong shape for one-off
+// extension code, hence these thin wrappers instead.
+//
+// Bodies live in src/documented_function.cpp; keeping them out of the
+// header avoids vague-linkage emission of duckdb static-const class
+// members in every TU that includes this file.
+namespace duckdb {
+
 void RegisterDocumentedScalar(ExtensionLoader &loader, ScalarFunction function, const std::string &description,
                               std::initializer_list<const char *> parameter_names,
                               const std::vector<std::string> &examples, const std::string &alias_of = "",
                               std::initializer_list<const char *> categories = {});
 
-// Variant for ScalarFunctionSet (multiple overloads under one name). Each
-// FunctionDescription in the descriptions vector matches one overload by
-// parameter_types; duckdb_functions() routes the right description to the
-// right variant via CalcDescriptionSpecificity.
+// Per-overload metadata for ScalarFunctionSet registrations. Pairs each
+// overload's positional parameter names with their LogicalTypeId. Using
+// LogicalTypeId (the plain enum) instead of LogicalType (the static-const
+// class members) avoids ODR-using the duckdb static members in every TU.
+struct DocumentedOverload {
+	std::initializer_list<const char *> parameter_names;
+	std::initializer_list<LogicalTypeId> parameter_types;
+};
+
+// Register a ScalarFunctionSet where every overload shares the same
+// description, examples, and categories — only parameter names/types
+// differ. Builds one FunctionDescription per overload internally.
+void RegisterDocumentedScalarSet(ExtensionLoader &loader, ScalarFunctionSet set, const std::string &description,
+                                 std::initializer_list<DocumentedOverload> overloads,
+                                 const std::vector<std::string> &examples, const std::string &alias_of = "",
+                                 std::initializer_list<const char *> categories = {});
+
+// Lower-level ScalarFunctionSet registration for when overloads need
+// genuinely different descriptions or examples. Caller builds each
+// FunctionDescription by hand.
 void RegisterDocumentedScalarSet(ExtensionLoader &loader, ScalarFunctionSet set,
                                  std::initializer_list<FunctionDescription> per_overload_descriptions,
                                  const std::string &alias_of = "");
 
-// Register a table function with documentation routed through duckdb_functions()
-// the same way scalar functions are. positional_parameter_names names the
-// positional arguments (the named-parameter map on the TableFunction is
-// surfaced separately by the catalog and is not covered by this list).
+// Register a table function. positional_parameter_names names the
+// positional arguments; the named-parameter map on TableFunction is
+// surfaced separately by the catalog.
 //
 // IMPORTANT: named-parameter defaults are not catalog-accessible via any
-// DuckDB API. They live inside each table function's Bind callback. Document
-// them in the description prose (e.g. "**Default:** `false`") until the
-// proposed miint_function_metadata() debug function lands.
+// DuckDB API. They live inside each table function's Bind callback.
+// Document them in the description prose (the field accepts full markdown,
+// so a `### Named parameters` table renders fine) until the proposed
+// miint_function_metadata() debug function lands.
 void RegisterDocumentedTableFunction(ExtensionLoader &loader, TableFunction function, const std::string &description,
                                      std::initializer_list<const char *> positional_parameter_names,
                                      const std::vector<std::string> &examples, const std::string &alias_of = "",
