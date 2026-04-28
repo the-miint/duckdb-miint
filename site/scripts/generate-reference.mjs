@@ -7,13 +7,25 @@
 // Functions outside this slice are skipped silently — they will be added once
 // the convention is approved and the rest of the codebase is migrated.
 
-import { mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const IN = resolve(__dirname, '..', 'build', 'functions.json');
 const OUT_ROOT = resolve(__dirname, '..', 'src', 'content', 'docs', 'reference');
+const OVERVIEW_CONTENT_ROOT = resolve(__dirname, '..', 'src', 'overview-content');
+
+// Load a hand-authored markdown fragment that prepends or appends to an
+// auto-generated overview page. Returns '' if no fragment file exists.
+//   kind: 'types' or 'categories'
+//   key:  type or category identifier (e.g. 'scalar', 'sam-flags')
+//   slot: 'intro' or 'notes'
+function loadOverviewFragment(kind, key, slot) {
+  const p = resolve(OVERVIEW_CONTENT_ROOT, kind, `${key}.${slot}.md`);
+  if (!existsSync(p)) return '';
+  return readFileSync(p, 'utf8').trim() + '\n\n';
+}
 
 // Functions whose C++ registrations have been converted to use the
 // RegisterDocumented* helper. Anything not in this set is silently skipped
@@ -215,15 +227,20 @@ function renderTypeIndex(type, catsMap) {
   const flatFns = catsMap.get(UNCATEGORIZED) ?? [];
   const totalFns = [...catsMap.values()].reduce((acc, fns) => acc + fns.filter((f) => !f.alias_of).length, 0);
 
+  const intro = loadOverviewFragment('types', type, 'intro');
+  const notes = loadOverviewFragment('types', type, 'notes');
+
   const lines = [
     '---',
     `title: ${title}`,
     `description: All ${totalFns} ${title.toLowerCase()} registered by miint (POC slice).`,
     '---',
     '',
-    `<!-- Auto-generated index for function type '${type}'. -->`,
+    `<!-- Auto-generated index for function type '${type}'. Hand-authored prose, if any, lives in site/src/overview-content/types/${type}.{intro,notes}.md -->`,
     '',
   ];
+
+  if (intro) lines.push(intro);
 
   if (realCats.length) {
     lines.push(`Functions are grouped by category. Each category has its own overview page; click any function name for full reference.`, '');
@@ -269,6 +286,8 @@ function renderTypeIndex(type, catsMap) {
   if (!realCats.length && !flatFns.length) {
     lines.push(`_No ${title.toLowerCase()} are documented yet._`);
   }
+
+  if (notes) lines.push(notes);
 
   return lines.join('\n');
 }
@@ -354,22 +373,26 @@ function renderCategoryIndex(category, fns) {
       return `| [\`${f.name}\`](./${f.name}/) | ${summary} | ${aliases} |`;
     });
 
-  const header = [
+  const intro = loadOverviewFragment('categories', category, 'intro');
+  const notes = loadOverviewFragment('categories', category, 'notes');
+
+  const lines = [
     '---',
     `title: ${title}`,
     `description: All ${fns.length} ${title.toLowerCase()} registered by miint.`,
     '---',
     '',
-    `<!-- Auto-generated index for category '${category}'. -->`,
-    '',
-    `Functions tagged \`${category}\`. Click any name for full reference.`,
-    '',
-    '| Function | Description | Aliases |',
-    '|---|---|---|',
-    ...rows,
+    `<!-- Auto-generated index for category '${category}'. Hand-authored prose, if any, lives in site/src/overview-content/categories/${category}.{intro,notes}.md -->`,
     '',
   ];
-  return header.join('\n');
+  if (intro) {
+    lines.push(intro);
+  } else {
+    lines.push(`Functions tagged \`${category}\`. Click any name for full reference.`, '');
+  }
+  lines.push('| Function | Description | Aliases |', '|---|---|---|', ...rows, '');
+  if (notes) lines.push(notes);
+  return lines.join('\n');
 }
 
 function humanizeCategory(cat) {

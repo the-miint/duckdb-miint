@@ -125,6 +125,39 @@ ssh -N -L 4321:localhost:4321 <remote-host>
    new page. Once the change ships in a release, the default build picks
    it up automatically.
 
+## Adding hand-authored prose to overview pages
+
+Type-level overviews (e.g. `/reference/scalar-functions/`) and category
+overviews (e.g. `/reference/scalar-functions/sam-flags/`) are
+auto-generated from the catalog: the table of functions/categories
+updates on every catalog change. To add conceptual context that doesn't
+belong in a single function's description — bit-table cheatsheets,
+links to specs, "when to use which" guidance — drop a markdown fragment
+under `site/src/overview-content/`:
+
+```
+site/src/overview-content/
+├── types/
+│   ├── table.intro.md        → prepended to /reference/table-functions/
+│   ├── table.notes.md        → appended to same
+│   ├── scalar.intro.md       → /reference/scalar-functions/
+│   └── scalar.notes.md
+└── categories/
+    ├── alignment-io.intro.md → /reference/table-functions/alignment-io/
+    ├── alignment-io.notes.md
+    ├── sam-flags.intro.md
+    └── ...
+```
+
+Each fragment is plain markdown (no frontmatter — the generator owns
+that). `intro` fragments slot in **before** the auto-generated table;
+`notes` fragments slot in **after**. Missing files are skipped silently
+(no error).
+
+The split keeps the generator authoritative for what changes (function
+tables, links, counts) while letting humans own what doesn't (concepts,
+cross-references, recipes).
+
 ## What the generator does NOT (yet) read from the catalog
 
 `duckdb_functions()` exposes description, parameter names, parameter
