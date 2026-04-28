@@ -11,28 +11,33 @@ lives in `site/src/content/docs/`.
 
 ## Two introspection modes
 
-By default, the docs build introspects the **released miint extension**
-served from the public repository at <https://ftp.microbio.me/pub/miint>.
-This means the generated reference reflects what users actually install,
-not whatever happens to be in your local `build/` directory. The build
-needs network access to that URL but no local C++ build.
+The introspector picks a source automatically:
 
-For active development on a registration (you've edited a `RegisterDocumented*`
-call and want to preview the new docs before releasing), set `MIINT_EXT`
-to the path of a locally-built extension. The introspector then loads
-that artifact directly and skips the released-repo path.
+1. **Local build (preferred when present).** If
+   `<repo>/build/release/extension/miint/miint.duckdb_extension` exists
+   the introspector loads it directly. This is what you almost always
+   want when iterating in the repo: descriptions, parameter names, and
+   examples reflect your in-progress C++ edits.
+2. **Released repository (fallback).** If no local build exists, the
+   introspector installs the released miint from
+   <https://ftp.microbio.me/pub/miint>. CI and clean checkouts hit this
+   path; the resulting docs reflect what users currently install.
 
 ```sh
-# Default: docs reflect the released extension.
+# Auto: local build if present, released otherwise.
 npm run prebuild
 
-# Local build: preview a registration you just edited.
-MIINT_EXT=/path/to/build/release/extension/miint/miint.duckdb_extension \
-  npm run prebuild
+# Force a specific local build (e.g. an alt-built extension):
+MIINT_EXT=/some/other/path/miint.duckdb_extension npm run prebuild
+
+# Force the released artifact even if a local build exists (useful
+# for previewing what shipping users will see):
+MIINT_FORCE_RELEASED=1 npm run prebuild
 ```
 
-The local-build path uses `duckdb -unsigned` because locally-built
-extensions aren't signed; the released path doesn't need it.
+`duckdb -unsigned` is used in both modes — the local build is unsigned
+by definition, and the dedicated miint repository is not yet signed by
+a key the stock DuckDB client recognizes for that URL.
 
 ## Prerequisites
 
@@ -54,37 +59,21 @@ DuckDB recognizes for that URL — only the canonical
 `community-extensions.duckdb.org` path is. Once miint releases are
 mirrored into a signed channel this can be dropped.
 
-## Steps (released-extension mode)
+## Steps
 
 ```sh
-# 1. Install site dependencies (once per package-lock.json change)
-cd site && npm install
-
-# 2. Generate reference + sidebar manifest from the released extension
-npm run prebuild
-
-# 3a. Static build to site/dist/
-npm run build
-
-# 3b. Or dev server with live reload (re-runs prebuild on each restart)
-npm run dev
-```
-
-## Steps (local-build mode)
-
-```sh
-# 1. Build the extension (once per C++ change)
+# (only if you want local-build mode — skip if you're fine with released)
 bash build.sh
 
-# 2. Install site dependencies (once per package-lock.json change)
+# Install site dependencies (once per package-lock.json change)
 cd site && npm install
 
-# 3. Generate against the local build
-MIINT_EXT=$(pwd)/../build/release/extension/miint/miint.duckdb_extension \
-  npm run prebuild
+# Generate reference + sidebar manifest. Picks local build if one exists,
+# else the released artifact. No env vars needed for the common case.
+npm run prebuild
 
-# 4. Build or serve as above
-npm run build   # or: npm run dev
+# Static build to site/dist/, or dev server with live reload.
+npm run build         # or: npm run dev
 ```
 
 `npm run prebuild` runs two scripts in sequence:
@@ -104,8 +93,9 @@ removing a function from the C++ removes its page on the next run.
 | Variable | Default | Purpose |
 |---|---|---|
 | `DUCKDB_BIN` | `duckdb` (PATH lookup) | Stock duckdb client of the matching version |
-| `MIINT_REPO` | `https://ftp.microbio.me/pub/miint` | Custom miint extension repository to install from |
-| `MIINT_EXT` | _unset_ (use `MIINT_REPO`) | Path to a local `.duckdb_extension`. When set, `MIINT_REPO` is ignored and `duckdb` is invoked with `-unsigned`. |
+| `MIINT_REPO` | `https://ftp.microbio.me/pub/miint` | Custom miint extension repository to install from in released mode |
+| `MIINT_EXT` | _auto_ (`<repo>/build/release/extension/miint/miint.duckdb_extension` if it exists, else released) | Explicit path to a `.duckdb_extension`. Overrides the auto-detection. |
+| `MIINT_FORCE_RELEASED` | _unset_ | Set to `1` to skip the local-build auto-detection and always use the released artifact (preview what shipping users will see). |
 
 ## Viewing the site over SSH
 

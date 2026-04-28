@@ -2,10 +2,13 @@
 // Introspect the miint extension by diffing duckdb_functions() before and
 // after the extension is loaded. Writes site/build/functions.json.
 //
-// By default the docs build introspects the *released* extension from the
-// public miint repository at https://ftp.microbio.me/pub/miint, so the docs
-// reflect what users actually install. To introspect a local development
-// build instead, set MIINT_EXT to the path of a built .duckdb_extension.
+// Default behaviour:
+//   - If a local extension build exists at
+//     <repo>/build/release/extension/miint/miint.duckdb_extension, introspect
+//     that. (Most likely what a developer working in the repo wants.)
+//   - Otherwise install the released extension from the public miint
+//     repository at https://ftp.microbio.me/pub/miint. (CI / clean checkouts
+//     without a build artifact.)
 //
 // Inputs (env vars override defaults):
 //   DUCKDB_BIN   stock duckdb client (NOT the repo's build/release/duckdb,
@@ -13,10 +16,11 @@
 //                baseline). Default: 'duckdb' (resolved via PATH).
 //   MIINT_REPO   Custom miint extension repository to install from.
 //                Default: 'https://ftp.microbio.me/pub/miint'.
-//   MIINT_EXT    Path to a local .duckdb_extension to introspect instead of
-//                the released artifact. When set, MIINT_REPO is ignored and
-//                duckdb is invoked with -unsigned. Useful for previewing docs
-//                while iterating on a registration locally.
+//   MIINT_EXT    Explicit path to a .duckdb_extension to introspect.
+//                Overrides the local-build auto-detection.
+//   MIINT_FORCE_RELEASED  When set to "1" or "true", skip the local-build
+//                auto-detection and always introspect the released artifact.
+//                Useful for testing what the docs will look like in CI.
 //
 // Output:
 //   site/build/functions.json
@@ -27,15 +31,24 @@
 // catalog entries miint adds.
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(__dirname, '..', '..');
+const DEFAULT_LOCAL_EXT = resolve(REPO_ROOT, 'build/release/extension/miint/miint.duckdb_extension');
 
 const DUCKDB_BIN = process.env.DUCKDB_BIN ?? 'duckdb';
 const MIINT_REPO = process.env.MIINT_REPO ?? 'https://ftp.microbio.me/pub/miint';
-const MIINT_EXT = process.env.MIINT_EXT ?? null; // null => use MIINT_REPO
+const FORCE_RELEASED = ['1', 'true', 'yes'].includes((process.env.MIINT_FORCE_RELEASED ?? '').toLowerCase());
+// Resolution order:
+//   1. MIINT_EXT explicit path (highest priority)
+//   2. MIINT_FORCE_RELEASED=1 -> released repo
+//   3. local build at REPO_ROOT/build/... if it exists -> local
+//   4. released repo (fallback)
+const MIINT_EXT = process.env.MIINT_EXT
+  ?? (!FORCE_RELEASED && existsSync(DEFAULT_LOCAL_EXT) ? DEFAULT_LOCAL_EXT : null);
 const OUT = resolve(__dirname, '..', 'build', 'functions.json');
 
 const useLocalBuild = MIINT_EXT !== null;
@@ -85,9 +98,11 @@ const beforeKey = new Set(
 );
 
 if (useLocalBuild) {
-  console.error(`introspect: after LOAD '${MIINT_EXT}' (local-build override)`);
+  const tag = process.env.MIINT_EXT ? 'local, MIINT_EXT explicit' : 'local, auto-detected';
+  console.error(`introspect: after LOAD '${MIINT_EXT}' (${tag})`);
 } else {
-  console.error(`introspect: after INSTALL miint FROM '${MIINT_REPO}' (released)`);
+  const tag = FORCE_RELEASED ? 'released, MIINT_FORCE_RELEASED' : 'released, no local build found';
+  console.error(`introspect: after INSTALL miint FROM '${MIINT_REPO}' (${tag})`);
 }
 const after = snapshot(loadStmt);
 
