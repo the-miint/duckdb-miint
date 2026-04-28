@@ -130,11 +130,15 @@ const TYPE_LABEL = {
   macro: 'Macros',
 };
 const sidebar = [];
+const UNCATEGORIZED = '_uncategorized';
 const fnsByTypeAndCategory = new Map(); // type -> category -> [fn]
 for (const fn of pocFunctions) {
   const primary = fn.variants.find((v) => v.description) ?? fn.variants[0];
-  const cat = (primary.categories ?? [])[0];
-  if (!cat) continue;
+  // Functions with no category still belong in the sidebar — bucket them
+  // under a synthetic UNCATEGORIZED group so released-mode introspection
+  // (where the registered functions don't yet expose categories) still
+  // produces a navigable sidebar instead of an empty Reference section.
+  const cat = (primary.categories ?? [])[0] ?? UNCATEGORIZED;
   if (!fnsByTypeAndCategory.has(fn.type)) fnsByTypeAndCategory.set(fn.type, new Map());
   const m = fnsByTypeAndCategory.get(fn.type);
   if (!m.has(cat)) m.set(cat, []);
@@ -149,21 +153,43 @@ for (const type of orderedTypes) {
   const subdir = CATEGORY_DIR[type];
   const groups = [];
   for (const [cat, fns] of cats.entries()) {
-    const indexSlug = `reference/${subdir}/${cat}`;
+    const isUncategorized = cat === UNCATEGORIZED;
+    // Per-function page paths must match what the page-write pass produced:
+    // categorized -> reference/<subdir>/<cat>/<name>; uncategorized -> reference/<subdir>/<name>
     const fnItems = fns
       .slice()
       .sort((a, b) => a.name.localeCompare(b.name))
-      .map((f) => ({ label: f.name, slug: `${indexSlug}/${f.name}` }));
-    // Starlight ManualSidebarGroupSchema is a strictObject — `link` on a group
-    // is rejected. To make the category index reachable from the sidebar we
-    // include an "Overview" item that points at it.
-    groups.push({
-      label: humanizeCategory(cat),
-      collapsed: true,
-      items: [{ label: 'Overview', slug: indexSlug }, ...fnItems],
-    });
+      .map((f) => ({
+        label: f.name,
+        slug: isUncategorized
+          ? `reference/${subdir}/${f.name}`
+          : `reference/${subdir}/${cat}/${f.name}`,
+      }));
+    if (isUncategorized) {
+      // Uncategorized functions go directly under the type-level group with no
+      // sub-collapse and no Overview link (no category index page exists).
+      groups.push({
+        label: 'All',
+        collapsed: false,
+        items: fnItems,
+      });
+    } else {
+      // Starlight ManualSidebarGroupSchema is a strictObject — `link` on a group
+      // is rejected. To make the category index reachable from the sidebar we
+      // include an "Overview" item that points at it.
+      groups.push({
+        label: humanizeCategory(cat),
+        collapsed: true,
+        items: [{ label: 'Overview', slug: `reference/${subdir}/${cat}` }, ...fnItems],
+      });
+    }
   }
-  groups.sort((a, b) => a.label.localeCompare(b.label));
+  // Sort but keep "All" (uncategorized) at the bottom.
+  groups.sort((a, b) => {
+    if (a.label === 'All') return 1;
+    if (b.label === 'All') return -1;
+    return a.label.localeCompare(b.label);
+  });
   sidebar.push({ label: TYPE_LABEL[type] ?? type, items: groups });
 }
 writeFileSync(resolve(__dirname, '..', 'build', 'sidebar.json'), JSON.stringify(sidebar, null, 2));
