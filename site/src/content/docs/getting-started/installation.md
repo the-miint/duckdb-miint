@@ -1,56 +1,41 @@
 ---
 title: Installation
-description: Building duckdb-miint from source and loading it into DuckDB.
+description: Installing the released MIINT extension into DuckDB; also covers building from source.
 ---
 
 ## Table of Contents
 
-- [Installing](#installing)
+- [Installing the released extension](#installing-the-released-extension)
 - [Python CLI](#python-cli)
-- [Building](#building)
-- [Running the extension](#running-the-extension)
+- [Building from source](#building-from-source)
+- [Running a from-source build](#running-a-from-source-build)
 
-## Installing
+## Installing the released extension
 
-MIINT is available in the [DuckDB Community Extensions](https://community-extensions.duckdb.org/) repository:
+MIINT is published in the [DuckDB Community Extensions](https://community-extensions.duckdb.org/)
+repository. From any standard DuckDB shell:
 
 ```sql
-INSTALL miint FROM community;
-LOAD miint;
+INSTALL httpfs; INSTALL miint FROM community;
+LOAD httpfs; LOAD miint;
 ```
 
-You can verify the installed version with:
+`httpfs` is loaded explicitly because some MIINT code paths fetch remote
+resources and `httpfs` does not always autoload. Verify the install:
+
 ```sql
 SELECT miint_version();
 ```
 
-### Installing from a local build
-
-If you are building MIINT from source (see [Building](#building)), launch DuckDB with the `allow_unsigned_extensions` option:
-
-CLI:
-```shell
-duckdb -unsigned
-```
-
-Python:
-```python
-con = duckdb.connect(':memory:', config={'allow_unsigned_extensions' : 'true'})
-```
-
-NodeJS:
-```js
-db = new duckdb.Database(':memory:', {"allow_unsigned_extensions": "true"});
-```
-
-Then load the extension binary directly:
-```sql
-LOAD '/path/to/miint.duckdb_extension';
-```
+That's all most users need. The rest of this page covers building from
+source for development.
 
 ## Python CLI
 
-A lightweight Python CLI (`miint`) wraps the DuckDB extension for common bioinformatics workflows: format conversion, sequence alignment, and feature table generation. All computation happens in SQL — Python handles argument parsing and query construction.
+A lightweight Python CLI (`miint`) wraps the DuckDB extension for common
+bioinformatics workflows: format conversion, sequence alignment, and feature
+table generation. All computation happens in SQL — Python handles argument
+parsing and query construction.
 
 ### Installing from a local checkout
 
@@ -59,7 +44,8 @@ cd python
 pip install -e .
 ```
 
-This requires the `duckdb` Python package (installed automatically as a dependency). The CLI is **not** published to PyPI at this time.
+This requires the `duckdb` Python package (installed automatically as a
+dependency). The CLI is **not** published to PyPI at this time.
 
 ### Usage
 
@@ -89,16 +75,23 @@ miint align minimap2-sharded      Sharded minimap2 alignment with RYpe classific
 
 Run `miint --help` or `miint <command> --help` for detailed usage.
 
-## Building
+## Building from source
+
+This is for contributors and for environments that need a custom build.
+End users should prefer the released-extension flow above.
 
 ### Managing dependencies
 
-**Rust toolchain (required):** The RYpe sequence classification library is written in Rust. Install Rust via [rustup](https://rustup.rs/):
+**Rust toolchain (required):** The RYpe sequence classification library is
+written in Rust. Install Rust via [rustup](https://rustup.rs/):
 ```shell
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-**VCPKG (required):** DuckDB extensions use VCPKG for dependency management. Enabling VCPKG is very simple: follow the [installation instructions](https://vcpkg.io/en/getting-started) or just run the following:
+**VCPKG (required):** DuckDB extensions use VCPKG for dependency
+management. Enabling VCPKG is very simple: follow the
+[installation instructions](https://vcpkg.io/en/getting-started) or just
+run the following:
 ```shell
 git clone https://github.com/Microsoft/vcpkg.git
 ./vcpkg/bootstrap-vcpkg.sh
@@ -106,7 +99,9 @@ export VCPKG_TOOLCHAIN_PATH=`pwd`/vcpkg/scripts/buildsystems/vcpkg.cmake
 ```
 
 ### Build system
-We use [Ninja](https://ninja-build.org) for quick builds. The easiest install is to use prebuilt [release](https://github.com/ninja-build/ninja/releases) binaries.
+We use [Ninja](https://ninja-build.org) for quick builds. The easiest
+install is to use prebuilt [release](https://github.com/ninja-build/ninja/releases)
+binaries.
 
 ### Build steps
 Now to build the extension, run:
@@ -129,10 +124,34 @@ The main binaries that will be built are:
 ./build/release/extension/miint/tests
 ```
 
-- `duckdb` is the binary for the DuckDB shell with the extension code automatically loaded.
-- `unittest` is the DuckDB test runner with the extension linked in (for SQL logic tests).
-- `miint.duckdb_extension` is the loadable binary as it would be distributed.
+- `duckdb` is the binary for the DuckDB shell with the extension code
+  automatically loaded — no further `LOAD` is needed.
+- `unittest` is the DuckDB test runner with the extension linked in (for
+  SQL logic tests).
+- `miint.duckdb_extension` is the loadable binary as it would be
+  distributed.
 - `tests` is the Catch2 C++ unit test runner.
 
-## Running the extension
-To run the extension code, simply start the shell with `./build/release/duckdb`.
+## Running a from-source build
+
+The simplest path is to use the bundled binary that already has miint
+linked in:
+
+```sh
+./build/release/duckdb
+```
+
+No `LOAD` and no `-unsigned` flag are needed — miint is already
+available.
+
+If you want to load the freshly-built `.duckdb_extension` into a stock
+DuckDB shell of the matching version (e.g. for testing the loadable
+artifact), launch with `-unsigned` since the local build is unsigned:
+
+```sh
+duckdb -unsigned -c "LOAD '$(pwd)/build/release/extension/miint/miint.duckdb_extension';"
+```
+
+The stock-shell + LOAD path is sometimes finicky depending on how DuckDB
+was packaged on your system; if you hit signature errors that `-unsigned`
+doesn't resolve, use `./build/release/duckdb` instead.
