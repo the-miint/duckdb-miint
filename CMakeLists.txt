@@ -723,6 +723,7 @@ set(EXTENSION_SOURCES
     src/SAMReader.cpp
     src/alignment_flag_functions.cpp
     src/alignment_functions.cpp
+    src/documented_function.cpp
     src/sequence_functions.cpp
     src/IntervalCompressor.cpp
     src/compress_intervals.cpp
