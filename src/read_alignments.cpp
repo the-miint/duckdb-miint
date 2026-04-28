@@ -341,7 +341,7 @@ elements are treated as literal paths (no glob expansion).
 	};
 
 	RegisterDocumentedTableFunction(loader, GetFunction(), description, {"filename"}, shared_examples,
-	                                /*alias_of=*/"", /*categories=*/{"alignment-io"});
+	                                /*alias_of=*/"", /*categories=*/ {"alignment-io"});
 
 	// Backward-compat alias. alias_of links the catalog entry to the canonical
 	// name in duckdb_functions().alias_of.
@@ -350,7 +350,7 @@ elements are treated as literal paths (no glob expansion).
 	read_sam_alias.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
 	read_sam_alias.named_parameters["include_seq_qual"] = LogicalType::BOOLEAN;
 	RegisterDocumentedTableFunction(loader, std::move(read_sam_alias), description, {"filename"}, shared_examples,
-	                                /*alias_of=*/"read_alignments", /*categories=*/{"alignment-io"});
+	                                /*alias_of=*/"read_alignments", /*categories=*/ {"alignment-io"});
 }
 
 }; // namespace duckdb

@@ -90,14 +90,14 @@ namespace {
 // (USMALLINT flags -> BOOLEAN), so wrap the helper with a one-liner.
 void RegisterFlag(ExtensionLoader &loader, const std::string &name, scalar_function_t fn,
                   const std::string &description, const std::string &alias_of = "") {
-	const std::string filter_example =
-	    "-- Filter pattern: combine flag tests with boolean operators\n"
-	    "SELECT read_id, flags\n"
-	    "FROM read_alignments('alignments.sam')\n"
-	    "WHERE " + name + "(flags) AND NOT alignment_is_unmapped(flags);";
-	const std::string single_example =
-	    "SELECT read_id, flags, " + name + "(flags) AS flag\n"
-	    "FROM read_alignments('alignments.sam') LIMIT 10;";
+	const std::string filter_example = "-- Filter pattern: combine flag tests with boolean operators\n"
+	                                   "SELECT read_id, flags\n"
+	                                   "FROM read_alignments('alignments.sam')\n"
+	                                   "WHERE " +
+	                                   name + "(flags) AND NOT alignment_is_unmapped(flags);";
+	const std::string single_example = "SELECT read_id, flags, " + name +
+	                                   "(flags) AS flag\n"
+	                                   "FROM read_alignments('alignments.sam') LIMIT 10;";
 	RegisterDocumentedScalar(loader, ScalarFunction(name, {LogicalType::USMALLINT}, LogicalType::BOOLEAN, fn),
 	                         description, {"flags"}, {single_example, filter_example}, alias_of, {"sam-flags"});
 }
@@ -120,7 +120,8 @@ void AlignmentFlagFunctions::Register(ExtensionLoader &loader) {
 
 	const std::string desc_mate_unmapped = "Returns true if the mate of this read is unmapped (SAM flag 0x8).";
 	RegisterFlag(loader, "alignment_is_mate_unmapped", AlignmentIsMateUnmappedFunction, desc_mate_unmapped);
-	RegisterFlag(loader, "is_munmap", AlignmentIsMateUnmappedFunction, desc_mate_unmapped, "alignment_is_mate_unmapped");
+	RegisterFlag(loader, "is_munmap", AlignmentIsMateUnmappedFunction, desc_mate_unmapped,
+	             "alignment_is_mate_unmapped");
 
 	const std::string desc_reverse = "Returns true if the read is mapped to the reverse strand (SAM flag 0x10).";
 	RegisterFlag(loader, "alignment_is_reverse", AlignmentIsReverseFunction, desc_reverse);

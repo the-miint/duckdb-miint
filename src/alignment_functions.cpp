@@ -247,7 +247,8 @@ required tags.
 )DOC";
 	RegisterDocumentedScalar(
 	    loader, GetFunction(), description, {"cigar", "nm", "md", "type"},
-	    {  // examples
+	    {
+	        // examples
 
 	        "-- Calculate gap-compressed identity (default)\n"
 	        "SELECT read_id, alignment_seq_identity(cigar, tag_nm, tag_md, 'gap_compressed') AS identity\n"
@@ -271,7 +272,7 @@ required tags.
 	        "SELECT read_id, alignment_seq_identity(cigar, tag_nm, tag_md, 'cigar') AS identity\n"
 	        "FROM alignment_slice('my_alignments', 1000, 2000);",
 	    },
-	    /*alias_of=*/"", /*categories=*/{"alignment-quality"});
+	    /*alias_of=*/"", /*categories=*/ {"alignment-quality"});
 }
 
 // alignment_query_length implementation
