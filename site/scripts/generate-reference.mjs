@@ -119,9 +119,9 @@ if (errors.length) {
   process.exit(1);
 }
 
-// Emit a sidebar manifest the Astro config consumes. Manual groups beat
-// autogenerate here because autogenerate produces a duplicate entry for any
-// folder that also contains an index.md (folder name + index title both show).
+// Bucket POC functions by type and category. Functions with no category fall
+// under a synthetic UNCATEGORIZED bucket so released-mode introspection (no
+// categories exposed yet) still produces a navigable sidebar.
 const TYPE_LABEL = {
   scalar: 'Scalar functions',
   aggregate: 'Aggregate functions',
@@ -129,74 +129,148 @@ const TYPE_LABEL = {
   table_macro: 'Table macros',
   macro: 'Macros',
 };
-const sidebar = [];
 const UNCATEGORIZED = '_uncategorized';
 const fnsByTypeAndCategory = new Map(); // type -> category -> [fn]
 for (const fn of pocFunctions) {
   const primary = fn.variants.find((v) => v.description) ?? fn.variants[0];
-  // Functions with no category still belong in the sidebar — bucket them
-  // under a synthetic UNCATEGORIZED group so released-mode introspection
-  // (where the registered functions don't yet expose categories) still
-  // produces a navigable sidebar instead of an empty Reference section.
   const cat = (primary.categories ?? [])[0] ?? UNCATEGORIZED;
   if (!fnsByTypeAndCategory.has(fn.type)) fnsByTypeAndCategory.set(fn.type, new Map());
   const m = fnsByTypeAndCategory.get(fn.type);
   if (!m.has(cat)) m.set(cat, []);
   m.get(cat).push(fn);
 }
-// Stable sidebar order: table functions, then scalar, then aggregates, etc.
-// Matches what users tend to want (table-shape APIs are the "front door").
+
+// Always emit a per-type overview page at <type-dir>/index.md so the sidebar
+// can link to a real "module landing" (scikit-bio style) regardless of
+// whether the underlying functions expose categories. The page lists either
+// categories (each with its own summary and link to the category's overview)
+// or, in flat mode, a single table of all functions.
+let typeIndexes = 0;
+for (const [type, cats] of fnsByTypeAndCategory.entries()) {
+  const subdir = CATEGORY_DIR[type];
+  if (!subdir) continue;
+  const outDir = resolve(OUT_ROOT, subdir);
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(resolve(outDir, 'index.md'), renderTypeIndex(type, cats));
+  typeIndexes++;
+}
+
+// Build the sidebar manifest. Each type group always has "Overview" first
+// (linking to the type index), then either per-category subgroups (rich mode)
+// or flat function items (released/flat mode). No "All" wrapper — flat
+// functions appear directly under the type group.
+const sidebar = [];
 const TYPE_ORDER = ['table', 'scalar', 'aggregate', 'table_macro', 'macro'];
 const orderedTypes = TYPE_ORDER.filter((t) => fnsByTypeAndCategory.has(t));
 for (const type of orderedTypes) {
   const cats = fnsByTypeAndCategory.get(type);
   const subdir = CATEGORY_DIR[type];
-  const groups = [];
-  for (const [cat, fns] of cats.entries()) {
-    const isUncategorized = cat === UNCATEGORIZED;
-    // Per-function page paths must match what the page-write pass produced:
-    // categorized -> reference/<subdir>/<cat>/<name>; uncategorized -> reference/<subdir>/<name>
+  const items = [{ label: 'Overview', slug: `reference/${subdir}` }];
+
+  const realCats = [...cats.keys()].filter((c) => c !== UNCATEGORIZED).sort();
+  for (const cat of realCats) {
+    const fns = cats.get(cat);
     const fnItems = fns
       .slice()
       .sort((a, b) => a.name.localeCompare(b.name))
       .map((f) => ({
         label: f.name,
-        slug: isUncategorized
-          ? `reference/${subdir}/${f.name}`
-          : `reference/${subdir}/${cat}/${f.name}`,
+        slug: `reference/${subdir}/${cat}/${f.name}`,
       }));
-    if (isUncategorized) {
-      // Uncategorized functions go directly under the type-level group with no
-      // sub-collapse and no Overview link (no category index page exists).
-      groups.push({
-        label: 'All',
-        collapsed: false,
-        items: fnItems,
-      });
-    } else {
-      // Starlight ManualSidebarGroupSchema is a strictObject — `link` on a group
-      // is rejected. To make the category index reachable from the sidebar we
-      // include an "Overview" item that points at it.
-      groups.push({
-        label: humanizeCategory(cat),
-        collapsed: true,
-        items: [{ label: 'Overview', slug: `reference/${subdir}/${cat}` }, ...fnItems],
-      });
-    }
+    items.push({
+      label: humanizeCategory(cat),
+      collapsed: true,
+      items: [{ label: 'Overview', slug: `reference/${subdir}/${cat}` }, ...fnItems],
+    });
   }
-  // Sort but keep "All" (uncategorized) at the bottom.
-  groups.sort((a, b) => {
-    if (a.label === 'All') return 1;
-    if (b.label === 'All') return -1;
-    return a.label.localeCompare(b.label);
-  });
-  sidebar.push({ label: TYPE_LABEL[type] ?? type, items: groups });
+
+  // Uncategorized functions: list directly under the type group, after any
+  // categorized subgroups. In released mode this is the only content.
+  const flatFns = cats.get(UNCATEGORIZED);
+  if (flatFns) {
+    const flatItems = flatFns
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((f) => ({ label: f.name, slug: `reference/${subdir}/${f.name}` }));
+    items.push(...flatItems);
+  }
+
+  sidebar.push({ label: TYPE_LABEL[type] ?? type, items });
 }
 writeFileSync(resolve(__dirname, '..', 'build', 'sidebar.json'), JSON.stringify(sidebar, null, 2));
 
-console.error(`generate: wrote ${written} pages + ${indexes} category indexes; skipped ${skipped} (outside POC slice)`);
+console.error(`generate: wrote ${written} pages + ${indexes} category indexes + ${typeIndexes} type indexes; skipped ${skipped} (outside POC slice)`);
 if (missingMeta) {
   console.error(`generate: WARNING ${missingMeta} POC functions still lack description in C++`);
+}
+
+// Type-level overview page: lists categories (with summaries + links to
+// each category's overview) and any uncategorized functions in a flat
+// table. Plays the role of scikit-bio's per-module API page —
+// https://scikit.bio/docs/latest/alignment.html.
+function renderTypeIndex(type, catsMap) {
+  const title = TYPE_LABEL[type] ?? type;
+  const subdir = CATEGORY_DIR[type];
+  const realCats = [...catsMap.keys()].filter((c) => c !== UNCATEGORIZED).sort();
+  const flatFns = catsMap.get(UNCATEGORIZED) ?? [];
+  const totalFns = [...catsMap.values()].reduce((acc, fns) => acc + fns.filter((f) => !f.alias_of).length, 0);
+
+  const lines = [
+    '---',
+    `title: ${title}`,
+    `description: All ${totalFns} ${title.toLowerCase()} registered by miint (POC slice).`,
+    '---',
+    '',
+    `<!-- Auto-generated index for function type '${type}'. -->`,
+    '',
+  ];
+
+  if (realCats.length) {
+    lines.push(`Functions are grouped by category. Each category has its own overview page; click any function name for full reference.`, '');
+    lines.push('| Category | Description | Functions |');
+    lines.push('|---|---|---|');
+    for (const cat of realCats) {
+      const fns = catsMap.get(cat);
+      const canonicalCount = fns.filter((f) => !f.alias_of).length;
+      const aliasCount = fns.length - canonicalCount;
+      const aliasNote = aliasCount ? ` (+${aliasCount} alias${aliasCount === 1 ? '' : 'es'})` : '';
+      // Lift category description from the first function's description prose.
+      // Fallback to a generic blurb.
+      const sample = fns[0]?.variants[0]?.description?.trim().split(/\n\s*\n/)[0].replace(/\s+/g, ' ') ?? '';
+      const summary = sample.length > 110 ? sample.slice(0, 107) + '…' : sample;
+      lines.push(`| [${humanizeCategory(cat)}](./${cat}/) | ${summary} | ${canonicalCount}${aliasNote} |`);
+    }
+    lines.push('');
+  }
+
+  if (flatFns.length) {
+    if (realCats.length) {
+      lines.push('## Other functions', '');
+    }
+    const canonical = flatFns.filter((f) => !f.alias_of);
+    const aliasesOf = new Map();
+    for (const f of flatFns) {
+      if (f.alias_of) {
+        if (!aliasesOf.has(f.alias_of)) aliasesOf.set(f.alias_of, []);
+        aliasesOf.get(f.alias_of).push(f.name);
+      }
+    }
+    lines.push('| Function | Description | Aliases |');
+    lines.push('|---|---|---|');
+    for (const f of canonical.sort((a, b) => a.name.localeCompare(b.name))) {
+      const desc = f.variants[0]?.description?.trim().split(/\n\s*\n/)[0].replace(/\s+/g, ' ') ?? '';
+      const summary = desc.length > 120 ? desc.slice(0, 117) + '…' : desc;
+      const aliases = (aliasesOf.get(f.name) ?? []).map((a) => `\`${a}\``).join(', ') || '—';
+      lines.push(`| [\`${f.name}\`](./${f.name}/) | ${summary} | ${aliases} |`);
+    }
+    lines.push('');
+  }
+
+  if (!realCats.length && !flatFns.length) {
+    lines.push(`_No ${title.toLowerCase()} are documented yet._`);
+  }
+
+  return lines.join('\n');
 }
 
 function renderPage(fn, primary, category) {
