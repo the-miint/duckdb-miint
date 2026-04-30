@@ -7,6 +7,7 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 #include <unordered_set>
 
 namespace duckdb {
@@ -25,6 +26,11 @@ struct AlignMafftGlobalState : public PerSampleGlobalState {
 	std::vector<std::string> sequences;
 	std::vector<int32_t> original_lengths;
 	int32_t aligned_length = 0;
+
+	// Forwarded to MAFFT's internal pthread pool (cfg.n_threads). Distinct
+	// from PerSampleGlobalState::max_threads, which controls duckdb-side
+	// concurrency over the process-wide MAFFT mutex.
+	int mafft_threads = 1;
 };
 
 struct AlignMafftLocalState : public LocalTableFunctionState {
@@ -46,7 +52,8 @@ struct AlignMafftLocalState : public LocalTableFunctionState {
 // only when present so single-sample users get clean diagnostics.
 static void ValidateAndAlignInto(const std::string &sample_literal, LoadedSingleEndSequences &loaded,
                                  std::vector<std::string> &out_names, std::vector<std::string> &out_sequences,
-                                 std::vector<int32_t> &out_original_lengths, int32_t &out_aligned_length) {
+                                 std::vector<int32_t> &out_original_lengths, int32_t &out_aligned_length,
+                                 int n_threads) {
 	bool is_sample = !sample_literal.empty();
 	auto sample_ctx = is_sample ? (" in sample " + sample_literal) : std::string();
 
@@ -72,7 +79,7 @@ static void ValidateAndAlignInto(const std::string &sample_literal, LoadedSingle
 
 	std::vector<std::string> comments(loaded.labels.size(), "");
 	miint::MafftAligner aligner;
-	auto result = aligner.align(loaded.labels, comments, loaded.sequences);
+	auto result = aligner.align(loaded.labels, comments, loaded.sequences, n_threads);
 
 	out_names = std::move(result.names);
 	out_sequences = std::move(result.sequences);
@@ -134,10 +141,17 @@ static unique_ptr<GlobalTableFunctionState> AlignMafftInitGlobal(ClientContext &
 	auto &data = input.bind_data->Cast<AlignMafftData>();
 	auto gstate = make_uniq<AlignMafftGlobalState>();
 
+	// Hand the duckdb-configured thread budget to MAFFT's internal pool.
+	// Independent of max_threads (which gates duckdb-side concurrency over
+	// the MAFFT mutex); MAFFT's own pthreads run inside a single align call.
+	auto db_threads = TaskScheduler::GetScheduler(context).NumberOfThreads();
+	gstate->mafft_threads = db_threads > 0 ? NumericCast<int>(db_threads) : 1;
+
 	if (data.has_sample_id) {
-		// MAFFT holds a process-wide mutex — running multiple threads would only
-		// queue them behind the same lock. Force serial to avoid the illusion of
-		// parallelism.
+		// MAFFT holds a process-wide mutex — running multiple duckdb threads
+		// would only queue them behind the same lock. Force serial to avoid
+		// the illusion of parallelism. (MAFFT itself still threads internally
+		// via gstate->mafft_threads.)
 		InitPerSampleGlobal(context, *gstate, data.sample_info.sample_values.size(), /*max_threads_hint=*/1);
 		return gstate;
 	}
@@ -146,7 +160,7 @@ static unique_ptr<GlobalTableFunctionState> AlignMafftInitGlobal(ClientContext &
 
 	auto loaded = LoadSingleEndSequences(context, data.table_name, "align_mafft", /*strict=*/true);
 	ValidateAndAlignInto(/*sample_literal=*/"", loaded, gstate->names, gstate->sequences, gstate->original_lengths,
-	                     gstate->aligned_length);
+	                     gstate->aligned_length, gstate->mafft_threads);
 
 	return gstate;
 }
@@ -230,7 +244,7 @@ static void AlignMafftExecute(ClientContext & /*context*/, TableFunctionInput &d
 		auto where_sql = "CAST(" + q_col + " AS VARCHAR) = CAST(" + sample_literal + " AS VARCHAR)";
 		auto loaded = LoadSingleEndSequences(*lstate.conn, data.table_name, "align_mafft", /*strict=*/true, where_sql);
 		ValidateAndAlignInto(sample_literal, loaded, lstate.names, lstate.sequences, lstate.original_lengths,
-		                     lstate.aligned_length);
+		                     lstate.aligned_length, gstate.mafft_threads);
 		lstate.current_row = 0;
 	}
 }
