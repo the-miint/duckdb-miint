@@ -1,23 +1,16 @@
 #include "include/MafftAligner.hpp"
+#include "mafft_api.h"
 #include <climits>
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
-
-extern "C" {
-extern int splittbfast_library(int ngui, int lgui, char **namegui, char **seqgui, int argc, char **argv,
-                               int (*callback)(int, int, char *));
-}
 
 namespace miint {
 
 // Process-wide mutex: MAFFT uses ~150 global variables and is not reentrant.
 static std::mutex g_mafft_mutex;
 
-struct MafftAligner::Impl {
-	Impl() {
-	}
-};
+struct MafftAligner::Impl {};
 
 MafftAligner::MafftAligner() {
 	impl_ = std::make_unique<Impl>();
@@ -61,7 +54,7 @@ static void restore_case(const std::string &original, std::string &aligned) {
 }
 
 MafftAlignResult MafftAligner::align(const std::vector<std::string> &names, const std::vector<std::string> &comments,
-                                     const std::vector<std::string> &sequences) {
+                                     const std::vector<std::string> &sequences, int n_threads) {
 	if (sequences.size() < 2) {
 		throw std::invalid_argument("MafftAligner: at least 2 sequences required");
 	}
@@ -83,101 +76,75 @@ MafftAlignResult MafftAligner::align(const std::vector<std::string> &names, cons
 
 	int n = static_cast<int>(sequences.size());
 
-	size_t max_len = 0;
-	for (const auto &s : sequences) {
-		if (s.size() > max_len) {
-			max_len = s.size();
-		}
-	}
-
-	// lgui = buffer size per sequence (must hold aligned result with gaps)
-	size_t lgui_sz = max_len * 3 + 1000;
-	if (lgui_sz > static_cast<size_t>(INT_MAX)) {
-		throw std::invalid_argument("MafftAligner: sequences too long (max aligned length would overflow)");
-	}
-	int lgui = static_cast<int>(lgui_sz);
-
-	char seqtype = detect_sequence_type(sequences);
-
-	// Allocate C arrays for MAFFT
-	char **seqgui = static_cast<char **>(calloc(n, sizeof(char *)));
-	char **namegui = static_cast<char **>(calloc(n, sizeof(char *)));
-	if (!seqgui || !namegui) {
-		free(seqgui);
-		free(namegui);
-		throw std::runtime_error("MafftAligner: allocation failed");
-	}
+	// Build C-array views over the input. The API copies these internally,
+	// so it is safe for the underlying std::strings to outlive only the call.
+	std::vector<std::string> full_names(n);
+	std::vector<const char *> name_ptrs(n);
+	std::vector<const char *> seq_ptrs(n);
 	for (int i = 0; i < n; i++) {
-		seqgui[i] = static_cast<char *>(calloc(lgui + 1, sizeof(char)));
-		namegui[i] = static_cast<char *>(calloc(1000, sizeof(char)));
-		strcpy(seqgui[i], sequences[i].c_str());
-		// copydatafromgui() expects plain name (it prepends '=')
-		std::string full_name = names[i];
+		full_names[i] = names[i];
 		if (!comments[i].empty()) {
-			full_name += " " + comments[i];
+			full_names[i] += " " + comments[i];
 		}
-		strncpy(namegui[i], full_name.c_str(), 999);
-		namegui[i][999] = '\0';
+		name_ptrs[i] = full_names[i].c_str();
+		seq_ptrs[i] = sequences[i].c_str();
 	}
 
-	// Construct argv for splittbfast --parttree mode
-	int argc_m = 12;
-	char **argv_m = static_cast<char **>(calloc(argc_m, sizeof(char *)));
-	for (int i = 0; i < argc_m; i++) {
-		argv_m[i] = static_cast<char *>(calloc(100, sizeof(char)));
-	}
-	strcpy(argv_m[0], "splittbfast");
-	strcpy(argv_m[1], seqtype == 'd' ? "-D" : "-P");
-	strcpy(argv_m[2], "-f");
-	strcpy(argv_m[3], "-1.53"); // gap open penalty
-	strcpy(argv_m[4], "-Q");
-	strcpy(argv_m[5], "100"); // spfactor
-	strcpy(argv_m[6], "-h");
-	strcpy(argv_m[7], "0"); // aof
-	strcpy(argv_m[8], "-p");
-	strcpy(argv_m[9], "50"); // partsize (PICKSIZE)
-	strcpy(argv_m[10], "-s");
-	strcpy(argv_m[11], "-1"); // groupsize = njob+1 (full alignment)
+	mafft_config_t cfg;
+	mafft_config_init(&cfg);
+	cfg.strategy = MAFFT_STRATEGY_AUTO;
+	cfg.seqtype = (detect_sequence_type(sequences) == 'd') ? MAFFT_SEQ_DNA : MAFFT_SEQ_PROTEIN;
+	cfg.n_threads = n_threads > 0 ? n_threads : 1;
 
-	// Call MAFFT (mutex-protected — MAFFT uses global state)
-	int result;
+	mafft_output_t *out = nullptr;
+	int rc;
+	std::string err_msg;
+	std::string mafft_log;
 	{
 		std::lock_guard<std::mutex> lock(g_mafft_mutex);
-		result = splittbfast_library(n, lgui, namegui, seqgui, argc_m, argv_m, nullptr);
-	}
-
-	// Build result before cleanup (seqgui holds aligned sequences)
-	MafftAlignResult align_result;
-	if (result == 0) {
-		align_result.names = names;
-		align_result.comments = comments;
-		align_result.aligned_length = static_cast<int>(strlen(seqgui[0]));
-
-		for (int i = 0; i < n; i++) {
-			std::string aligned(seqgui[i]);
-			restore_case(sequences[i], aligned);
-			align_result.sequences.push_back(std::move(aligned));
-			align_result.original_lengths.push_back(static_cast<int>(sequences[i].size()));
+		mafft_ctx_t *ctx = mafft_create(&cfg);
+		if (!ctx) {
+			throw std::runtime_error("MafftAligner: mafft_create failed");
 		}
+		rc = mafft_align(ctx, name_ptrs.data(), seq_ptrs.data(), n, &out, nullptr);
+		if (rc != MAFFT_OK) {
+			const char *e = mafft_last_error(ctx);
+			err_msg = e ? e : mafft_strerror(rc);
+			const char *log = mafft_ctx_log(ctx);
+			if (log && *log) {
+				mafft_log = log;
+			}
+		}
+		mafft_destroy(ctx);
 	}
 
-	// Cleanup C arrays
+	if (rc != MAFFT_OK) {
+		if (out) {
+			mafft_output_free(out);
+		}
+		std::string full = "MAFFT alignment failed: " + err_msg + " (code " + std::to_string(rc) + ")";
+		if (!mafft_log.empty()) {
+			full += "\n--- captured MAFFT log ---\n" + mafft_log + "--- end MAFFT log ---";
+		} else {
+			full += "\n(captured MAFFT log was empty)";
+		}
+		throw std::runtime_error(full);
+	}
+
+	MafftAlignResult result;
+	result.names = names;
+	result.comments = comments;
+	result.aligned_length = out->aligned_len;
+	result.sequences.reserve(n);
+	result.original_lengths.reserve(n);
 	for (int i = 0; i < n; i++) {
-		free(seqgui[i]);
-		free(namegui[i]);
+		std::string aligned(out->seqs[i]);
+		restore_case(sequences[i], aligned);
+		result.sequences.push_back(std::move(aligned));
+		result.original_lengths.push_back(static_cast<int>(sequences[i].size()));
 	}
-	free(seqgui);
-	free(namegui);
-	for (int i = 0; i < argc_m; i++) {
-		free(argv_m[i]);
-	}
-	free(argv_m);
-
-	if (result != 0) {
-		throw std::runtime_error("MAFFT alignment failed with error code " + std::to_string(result));
-	}
-
-	return align_result;
+	mafft_output_free(out);
+	return result;
 }
 
 } // namespace miint
