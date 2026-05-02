@@ -11,6 +11,7 @@ Scalar functions for alignment analysis and sequence processing.
 - [`mask_dust`](#mask_dustsequence-hardmaskfalse) - DUST low-complexity masking
 - [`merge_pairs_vsearch`](#merge_pairsfwd_seq-fwd_qual-rev_seq-rev_qual-options) - Paired-end read merging
 - [`phylogeny_fasttree_available`](#phylogeny_fasttree_available) - Probe for the gpl-boundary daemon at runtime
+- [`install_gpl_boundary`](#install_gpl_boundary) - Download and install the gpl-boundary binary into miint's cache
 
 ## SAM Flag Functions
 
@@ -329,3 +330,45 @@ SELECT
 SELECT * FROM phylogeny_fasttree('seqs')
 WHERE phylogeny_fasttree_available();   -- short-circuits to empty if not present
 ```
+
+## `install_gpl_boundary()`
+
+Download a prebuilt `gpl-boundary` binary from the upstream GitHub releases and install it into miint's cache so subsequent `phylogeny_fasttree(...)` calls find it without the user editing `PATH`.
+
+Drives the upstream `install.sh` (https://github.com/the-miint/GPL-boundary/releases/latest/download/install.sh), which detects the platform, downloads the matching tarball, verifies its SHA256 against the release's `SHA256SUMS`, and extracts the binary. Miint sets `INSTALL_DIR` to its cache (`$XDG_CACHE_HOME/miint/bin` or `$HOME/.cache/miint/bin`); `FindGplBoundary()` checks that location before falling through to `PATH`, so no user-side PATH editing is needed.
+
+**Returns:** `STRUCT(installed BOOLEAN, path VARCHAR, version VARCHAR, message VARCHAR)`
+
+| Field | Meaning |
+|---|---|
+| `installed` | `true` iff a working `gpl-boundary` is now reachable (either pre-existing or just installed). |
+| `path` | Absolute path to the binary that satisfies the request, or empty string on failure. |
+| `version` | Output of `gpl-boundary --version` — a JSON document containing `gpl_boundary` and the per-tool versions. Use `json_extract_string(...)` to pluck individual fields. |
+| `message` | Human-readable description of what happened ("already available", "Installed gpl-boundary 0.1.0 to ...", or a diagnostic on failure). |
+
+**Behavior:**
+- **Idempotent:** if `gpl-boundary` is already discoverable (via `MIINT_GPL_BOUNDARY_PATH`, miint's cache, or `PATH`), the function probes it with `--version` and returns `installed=true` without touching the network.
+- **Mutex-protected:** concurrent calls within a process serialize through a lock; both callers see the same final result.
+- **Network access required** for the download path (the idempotent fast path is offline-only). Trust chain: HTTPS to `github.com/the-miint/GPL-boundary/releases/latest/download/install.sh`, then the script verifies the tarball's SHA256.
+- **Supported prebuilt platforms:** Linux x86_64, macOS arm64. macOS Intel and other targets must build from source — install.sh prints a "build from source" message and the function returns `installed=false` with that diagnostic in `message`.
+- **Returns `installed=false`** (with a stub message) on builds where `MIINT_HAS_GPL_BOUNDARY` was off at compile time (Emscripten, Windows).
+
+**Examples:**
+
+```sql
+-- Bootstrap before using phylogeny_fasttree
+SELECT (install_gpl_boundary()).message;
+-- → "gpl-boundary 0.1.0 already available at /home/x/.cargo/bin/gpl-boundary; no install performed"
+-- or "Installed gpl-boundary 0.1.0 to /home/x/.cache/miint/bin/gpl-boundary"
+
+-- Just check whether it succeeded
+SELECT (install_gpl_boundary()).installed;
+
+-- Pluck the gpl-boundary semver out of the JSON version string
+SELECT json_extract_string((install_gpl_boundary()).version, '$.gpl_boundary') AS gpl_boundary_version;
+
+-- Inspect the per-tool versions advertised by the daemon
+SELECT json_extract((install_gpl_boundary()).version, '$.tools');
+```
+
+**Override the install location:** set `MIINT_GPL_BOUNDARY_PATH=<absolute path>` to point at a binary already on disk (e.g., a system package install). `FindGplBoundary()` honors that override before consulting the cache or `PATH`.

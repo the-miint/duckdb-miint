@@ -827,6 +827,7 @@ if(MIINT_ENABLE_GPL_BOUNDARY)
         src/gpl_boundary/session.cpp
         src/gpl_boundary/shm.cpp
         src/gpl_boundary/arrow_ipc.cpp
+        src/install_gpl_boundary.cpp
         src/phylogeny_fasttree.cpp)
 endif()
 

@@ -78,6 +78,7 @@
 #endif
 
 #ifdef MIINT_HAS_GPL_BOUNDARY
+#include <install_gpl_boundary.hpp>
 #include <phylogeny_fasttree.hpp>
 #endif
 
@@ -239,6 +240,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 #ifdef MIINT_HAS_GPL_BOUNDARY
 	PhylogenyFastTreeTableFunction::Register(loader);
 	PhylogenyFastTreeAvailableScalar::Register(loader);
+	InstallGplBoundaryScalar::Register(loader);
 #else
 	// Stub: phylogeny_fasttree_available() always returns false when gpl-boundary
 	// support is compiled out (e.g., on WASM/Windows).
@@ -246,6 +248,33 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "phylogeny_fasttree_available", {}, LogicalType::BOOLEAN,
 	    [](DataChunk &args, ExpressionState &state, Vector &result) { result.Reference(Value::BOOLEAN(false)); });
 	loader.RegisterFunction(phylogeny_fasttree_stub);
+
+	// Stub: install_gpl_boundary() reports the platform doesn't support
+	// gpl-boundary at all, so installing wouldn't help.
+	const auto install_struct = LogicalType::STRUCT({{"installed", LogicalType::BOOLEAN},
+	                                                 {"path", LogicalType::VARCHAR},
+	                                                 {"version", LogicalType::VARCHAR},
+	                                                 {"message", LogicalType::VARCHAR}});
+	ScalarFunction install_gpl_boundary_stub(
+	    "install_gpl_boundary", {}, install_struct, [](DataChunk &args, ExpressionState &state, Vector &result) {
+		    auto &entries = StructVector::GetEntries(result);
+		    auto installed_data = FlatVector::GetData<bool>(*entries[0]);
+		    auto &path_vec = *entries[1];
+		    auto &version_vec = *entries[2];
+		    auto &message_vec = *entries[3];
+		    const idx_t n = args.size();
+		    const string msg = "install_gpl_boundary: this miint build was compiled without "
+		                       "MIINT_ENABLE_GPL_BOUNDARY (typically WASM or Windows). gpl-boundary "
+		                       "is not supported on this platform.";
+		    for (idx_t i = 0; i < n; i++) {
+			    installed_data[i] = false;
+			    FlatVector::GetData<string_t>(path_vec)[i] = StringVector::AddString(path_vec, "");
+			    FlatVector::GetData<string_t>(version_vec)[i] = StringVector::AddString(version_vec, "");
+			    FlatVector::GetData<string_t>(message_vec)[i] = StringVector::AddString(message_vec, msg);
+		    }
+		    result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	    });
+	loader.RegisterFunction(install_gpl_boundary_stub);
 #endif
 	DeblurTableFunction::Register(loader);
 

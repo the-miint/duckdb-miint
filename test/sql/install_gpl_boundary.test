@@ -1,0 +1,69 @@
+# name: test/sql/install_gpl_boundary.test
+# description: install_gpl_boundary() scalar smoke + schema test
+# group: [sql]
+
+#
+# Schema-level coverage runs unconditionally (validates the function exists
+# and returns the right STRUCT shape on every build, including stub builds
+# where MIINT_HAS_GPL_BOUNDARY is off — the stub still registers a function
+# of the same shape returning installed=false).
+#
+# When gpl-boundary is on PATH (GPL_BOUNDARY_AVAILABLE=1), the function
+# short-circuits with installed=true without touching the network. The
+# actual download path (when no binary is present) is exercised manually via
+# `localdocs/cli-smoke-tests.md` — wiring that into SQL would require a
+# clean room without gpl-boundary on PATH and an outbound network, which
+# isn't available in the offline test harness.
+
+require miint
+
+# =============================================================================
+# Schema check (always runs)
+# =============================================================================
+
+# Function exists and registers with the expected 0-arg signature returning
+# a STRUCT with the four named fields. This works on builds where gpl-boundary
+# is fully present AND on stub builds where MIINT_HAS_GPL_BOUNDARY is off
+# (the stub uses an identical signature).
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'install_gpl_boundary';
+----
+1
+
+# Type signature is locked. STRUCT entry order matters for projection by index;
+# changing it is a backwards-incompatible break.
+query I
+SELECT typeof(install_gpl_boundary());
+----
+STRUCT(installed BOOLEAN, path VARCHAR, "version" VARCHAR, message VARCHAR)
+
+# =============================================================================
+# Behaviour when gpl-boundary is available (CI sets GPL_BOUNDARY_AVAILABLE=1
+# after running the upstream install.sh in the workflow)
+# =============================================================================
+
+require-env GPL_BOUNDARY_AVAILABLE
+
+# Idempotent fast path: gpl-boundary is already on PATH, so the function
+# detects it and reports installed=true without touching the network. Path
+# and version come back populated; message ends with the no-op marker so the
+# caller can distinguish "I just installed it" from "already present".
+query III
+SELECT (install_gpl_boundary()).installed,
+       length((install_gpl_boundary()).path) > 0 AS path_nonempty,
+       length((install_gpl_boundary()).message) > 0 AS message_nonempty;
+----
+true	true	true
+
+# Calling twice must produce the same result (no global state drift).
+query I
+SELECT (install_gpl_boundary()).installed
+       = (install_gpl_boundary()).installed;
+----
+true
+
+# Path must point at an absolute location.
+query I
+SELECT (install_gpl_boundary()).path LIKE '/%';
+----
+true
