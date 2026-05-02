@@ -5,6 +5,7 @@
 
 #include <cstdlib>
 #include <string>
+#include <unistd.h> // mkdtemp lives in <unistd.h> on macOS; <cstdlib>/<stdlib.h> is enough on glibc
 
 using namespace duckdb::miint::gpl_boundary;
 
