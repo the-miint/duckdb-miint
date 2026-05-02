@@ -941,6 +941,13 @@ elseif(WIN32)
         regex ws2_32 ntdll userenv bcrypt advapi32)
 elseif(UNIX)
     target_link_libraries(${EXTENSION_NAME} dl m)
+    if(MIINT_ENABLE_GPL_BOUNDARY AND NOT APPLE)
+        # gpl_boundary/shm.cpp uses shm_open/shm_unlink. On glibc these live in
+        # librt (older RHEL/CentOS toolchains require explicit linkage; newer
+        # glibc folded them into libc but we link defensively). macOS exposes
+        # them in libSystem so we skip the flag there.
+        target_link_libraries(${EXTENSION_NAME} rt)
+    endif()
 endif()
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     target_link_libraries(${EXTENSION_NAME}
@@ -1019,6 +1026,9 @@ elseif(WIN32)
         regex ws2_32 ntdll userenv bcrypt advapi32)
 elseif(UNIX)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} dl m)
+    if(MIINT_ENABLE_GPL_BOUNDARY AND NOT APPLE)
+        target_link_libraries(${LOADABLE_EXTENSION_NAME} rt)
+    endif()
 endif()
 if(HAVE_LIBZSTD)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} ${ZSTD_TARGET})
@@ -1165,6 +1175,10 @@ if(MIINT_ENABLE_GPL_BOUNDARY)
     target_sources(tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/duckdb/third_party/yyjson/yyjson.cpp)
     target_compile_definitions(tests PRIVATE MIINT_HAS_GPL_BOUNDARY)
+    if(UNIX AND NOT APPLE)
+        # shm_open/shm_unlink in glibc — see comment on the EXTENSION_NAME side.
+        target_link_libraries(tests rt)
+    endif()
 endif()
 if(WIN32)
     # Tests target only needs HTSlib deps (no Rust code linked here)

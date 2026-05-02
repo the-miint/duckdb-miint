@@ -75,7 +75,11 @@ jobs:
           # inside gpl-boundary is what miint actually drives at runtime;
           # this binary is what we compare against to verify they agree.
           conda install -y -c bioconda fasttree
-          FastTree 2>&1 | head -1
+          # FastTree has no `--version` flag — invoking it with no input prints
+          # the version banner to stderr and exits non-zero. We just want to
+          # confirm the binary is reachable; swallow the exit code.
+          FastTree 2>&1 | head -1 || true
+          which FastTree
 
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11.1

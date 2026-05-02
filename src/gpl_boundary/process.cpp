@@ -129,7 +129,7 @@ std::string FindGplBoundary() {
 		return std::string(override_path);
 	}
 	// 2. miint's install cache (where install_gpl_boundary() deposits).
-	const std::string cached = MiintGplBoundaryCacheBinary();
+	std::string cached = MiintGplBoundaryCacheBinary();
 	if (!cached.empty() && ::access(cached.c_str(), X_OK) == 0) {
 		return cached;
 	}

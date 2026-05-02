@@ -181,6 +181,11 @@ IpcStreamDecoder::IpcStreamDecoder(const void *bytes, std::size_t len) : impl_(s
 	// "free" path doesn't call free() on caller-owned bytes.
 	aliased_buffer.allocator =
 	    ArrowBufferDeallocator([](ArrowBufferAllocator *, uint8_t *, int64_t) { /* caller owns */ }, nullptr);
+	// nanoarrow's ArrowBuffer.data is non-const uint8_t* by API contract, but
+	// we never write through it: the deallocator above is a no-op and the
+	// downstream IpcInputStream only reads. The const_cast is the recognized
+	// way to alias caller-owned const bytes through nanoarrow's struct.
+	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
 	aliased_buffer.data = const_cast<uint8_t *>(static_cast<const uint8_t *>(bytes));
 	aliased_buffer.size_bytes = static_cast<int64_t>(len);
 	aliased_buffer.capacity_bytes = static_cast<int64_t>(len);
