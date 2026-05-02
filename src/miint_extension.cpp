@@ -77,6 +77,10 @@
 #include <align_bowtie2_sharded.hpp>
 #endif
 
+#ifdef MIINT_HAS_GPL_BOUNDARY
+#include <phylogeny_fasttree.hpp>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace duckdb {
@@ -231,6 +235,17 @@ static void LoadInternal(ExtensionLoader &loader) {
 #ifdef MIINT_HAS_SORTMERNA
 	AlignSortMeRNATableFunction::Register(loader);
 	AlignSortMeRNARRNATableFunction::Register(loader);
+#endif
+#ifdef MIINT_HAS_GPL_BOUNDARY
+	PhylogenyFastTreeTableFunction::Register(loader);
+	PhylogenyFastTreeAvailableScalar::Register(loader);
+#else
+	// Stub: phylogeny_fasttree_available() always returns false when gpl-boundary
+	// support is compiled out (e.g., on WASM/Windows).
+	ScalarFunction phylogeny_fasttree_stub(
+	    "phylogeny_fasttree_available", {}, LogicalType::BOOLEAN,
+	    [](DataChunk &args, ExpressionState &state, Vector &result) { result.Reference(Value::BOOLEAN(false)); });
+	loader.RegisterFunction(phylogeny_fasttree_stub);
 #endif
 	DeblurTableFunction::Register(loader);
 

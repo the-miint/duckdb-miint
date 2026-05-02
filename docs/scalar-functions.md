@@ -10,6 +10,7 @@ Scalar functions for alignment analysis and sequence processing.
 - [`alignment_query_coverage`](#alignment_query_coveragecigar-typealigned) - Query coverage from CIGAR
 - [`mask_dust`](#mask_dustsequence-hardmaskfalse) - DUST low-complexity masking
 - [`merge_pairs_vsearch`](#merge_pairsfwd_seq-fwd_qual-rev_seq-rev_qual-options) - Paired-end read merging
+- [`phylogeny_fasttree_available`](#phylogeny_fasttree_available) - Probe for the gpl-boundary daemon at runtime
 
 ## SAM Flag Functions
 
@@ -305,3 +306,26 @@ WHERE m.result.merged;
 - NULL inputs return a STRUCT with `merged=false` and NULL fields
 - Input length guard: throws if forward + reverse > 9,999 bases (vsearch fixed buffer)
 - Quality inputs and outputs use numeric Phred (LIST(UTINYINT)), matching `read_fastx` output
+
+## `phylogeny_fasttree_available()`
+
+Returns `BOOLEAN` indicating whether the `gpl-boundary` binary (which embeds FastTree) is installed and reachable on `PATH`. Used to gate calls to [`phylogeny_fasttree`](table-functions.md#phylogeny_fasttreetable_name-options) when the daemon may not be present (e.g., distributed builds, environments without the optional binary).
+
+**Behavior:**
+- Cached after the first call (uses `std::call_once`); subsequent calls are O(1).
+- The probe finds `gpl-boundary` on `PATH`, runs it with `--list-tools`, and checks whether the output advertises `fasttree`. Returns `false` if any of those steps fails.
+- Returns `false` (compile-time constant) on builds where gpl-boundary support was disabled at CMake time (`MIINT_ENABLE_GPL_BOUNDARY=OFF`, including Emscripten and Windows).
+
+**Example:**
+```sql
+-- Conditional fall-through: build a tree only when the daemon is available
+SELECT
+    CASE WHEN phylogeny_fasttree_available()
+         THEN 'tree available'
+         ELSE 'install gpl-boundary to enable tree-building'
+    END AS status;
+
+-- Use in a CHECK or guard
+SELECT * FROM phylogeny_fasttree('seqs')
+WHERE phylogeny_fasttree_available();   -- short-circuits to empty if not present
+```
