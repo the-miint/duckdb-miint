@@ -5,9 +5,14 @@
 #
 # These tests exercise Bind-time validation of phylogeny_fasttree's named
 # parameters. Bind never spawns the daemon, so they run on every CI shard
-# regardless of whether gpl-boundary is installed.
+# where the function is compiled in (Linux + macOS — gpl-boundary is
+# auto-disabled on Windows + WASM, where the table function isn't
+# registered at all). The PHYLOGENY_FASTTREE_AVAILABLE gate skips the
+# whole file on those builds.
 
 require miint
+
+require-env PHYLOGENY_FASTTREE_AVAILABLE
 
 # Helper: a tiny in-memory MSA. The actual values don't matter for Bind
 # checks — Bind validates parameter shape, not alignment content.

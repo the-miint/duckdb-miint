@@ -251,6 +251,12 @@ fi
 if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'align_sortmerna_rrna';" | ./build/release/duckdb -csv 2>/dev/null | grep -q 1; then
     export SORTMERNA_AVAILABLE=1
 fi
+# Compile-time gate (separate from runtime GPL_BOUNDARY_AVAILABLE which
+# tracks whether the binary is on PATH). Set when the table function is
+# registered — i.e., MIINT_HAS_GPL_BOUNDARY was on at build time.
+if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'phylogeny_fasttree' AND function_type = 'table';" | ./build/release/duckdb -csv 2>/dev/null | grep -q 1; then
+    export PHYLOGENY_FASTTREE_AVAILABLE=1
+fi
 
 # Phase 5: real-data regression oracle.
 #
