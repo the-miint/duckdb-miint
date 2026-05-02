@@ -97,12 +97,15 @@ void SetDependencyLogging() {
 }
 
 void SetupSignalHandling() {
-#if defined(MIINT_HAS_BOWTIE2) || MIINT_ASPERA_SUPPORTED
+#if defined(MIINT_HAS_BOWTIE2) || MIINT_ASPERA_SUPPORTED || defined(MIINT_HAS_GPL_BOUNDARY)
 	// Ignore SIGPIPE globally so that writes to closed pipes return EPIPE instead of
 	// killing the process. Needed for Bowtie2Aligner, AsperaProcess, and other subprocess
-	// management where pipes may close unexpectedly.
+	// management (incl. gpl-boundary's ChildProcess + Session) where pipes may close
+	// unexpectedly.
 	// Note: This is a PROCESS-WIDE setting that persists for the lifetime of the process.
 	// Setting it once at extension load is thread-safe (vs calling signal() from multiple threads).
+	// gpl_boundary::Session ALSO uses pthread_sigmask + sigtimedwait per-thread inside its
+	// hot loop — that's per-thread defense; this is the global no-kill backstop.
 	std::signal(SIGPIPE, SIG_IGN);
 #endif
 }

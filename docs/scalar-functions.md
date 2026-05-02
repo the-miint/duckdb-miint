@@ -348,10 +348,29 @@ Drives the upstream `install.sh` (https://github.com/the-miint/GPL-boundary/rele
 
 **Behavior:**
 - **Idempotent:** if `gpl-boundary` is already discoverable (via `MIINT_GPL_BOUNDARY_PATH`, miint's cache, or `PATH`), the function probes it with `--version` and returns `installed=true` without touching the network.
-- **Mutex-protected:** concurrent calls within a process serialize through a lock; both callers see the same final result.
-- **Network access required** for the download path (the idempotent fast path is offline-only). Trust chain: HTTPS to `github.com/the-miint/GPL-boundary/releases/latest/download/install.sh`, then the script verifies the tarball's SHA256.
+- **Mutex-protected within a process:** concurrent calls within ONE DuckDB process serialize through a lock. Two SEPARATE DuckDB processes calling `install_gpl_boundary()` concurrently are not coordinated — they will both run install.sh against the same cache dir; install.sh's final `mv` is atomic on the same filesystem so the on-disk binary is always one of the two valid downloads (bit-identical for the same `latest` release), but tmpdirs and download bandwidth are wasted.
+- **Network access required** for the download path (the idempotent fast path is offline-only).
 - **Supported prebuilt platforms:** Linux x86_64, macOS arm64. macOS Intel and other targets must build from source — install.sh prints a "build from source" message and the function returns `installed=false` with that diagnostic in `message`.
 - **Returns `installed=false`** (with a stub message) on builds where `MIINT_HAS_GPL_BOUNDARY` was off at compile time (Emscripten, Windows).
+
+**Security model (read this if you're in a regulated environment):**
+
+This function downloads and **executes an unverified shell script** (`install.sh`) from a GitHub releases URL, with the privileges of the DuckDB process. The shell script then downloads a tarball and verifies its SHA256 against a sibling `SHA256SUMS` file from the same release. Trust chain:
+
+| Step | What's verified | What's trusted |
+|---|---|---|
+| 1. Fetch `install.sh` over HTTPS | TLS cert (OS CA store) | github.com release CDN integrity |
+| 2. Fetch tarball + `SHA256SUMS` | TLS cert | install.sh's own logic |
+| 3. Verify tarball SHA256 | sha256sum match | the SHA256SUMS file (same release as install.sh) |
+| 4. Extract + place binary | nothing | tarball contents |
+
+The script itself is **not** integrity-verified by miint. If you require attested provenance (signed releases, SLSA, etc.), do NOT use this function — fetch the binary out-of-band and either drop it on `PATH`, place it at `~/.cache/miint/bin/gpl-boundary`, or set `MIINT_GPL_BOUNDARY_PATH=<absolute path>` before launching DuckDB.
+
+**Network timeouts:** miint applies `--max-time 60s` to its own `install.sh` fetch but cannot bound the script's internal curl call for the larger tarball (a few tens of MB). On a hung network, install.sh may take longer to fail than feels reasonable; if that bites you, kill the SQL session and retry.
+
+**Cache-vs-PATH staleness:** once `install_gpl_boundary()` has populated miint's cache, [`FindGplBoundary`](#) checks the cache **before** consulting `PATH`. That means a system-level upgrade of `gpl-boundary` (via package manager, conda, etc.) will be silently shadowed by the cached version forever. To pick up a system upgrade you must either:
+- delete the cached binary: `rm -rf ~/.cache/miint/bin/`
+- override the lookup explicitly: `export MIINT_GPL_BOUNDARY_PATH=/usr/local/bin/gpl-boundary`
 
 **Examples:**
 
