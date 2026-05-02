@@ -609,13 +609,20 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	const auto ipc_bytes = BuildInputIpcStream(loaded.names, loaded.sequences);
 
 	// 3. Spawn the gpl-boundary daemon. Fail loud (with a hint) when the
-	//    binary isn't on PATH.
+	//    binary isn't found in any of FindGplBoundary's lookup locations
+	//    (MIINT_GPL_BOUNDARY_PATH, miint's install cache, PATH).
 	const std::string gpl_path = gb::FindGplBoundary();
 	if (gpl_path.empty()) {
-		throw IOException("phylogeny_fasttree: gpl-boundary binary not found on PATH. "
-		                  "Install via bioconda (`conda install -c bioconda gpl-boundary`) or "
-		                  "build from source at https://github.com/the-miint/GPL-boundary, then "
-		                  "ensure it's on the runtime PATH of the DuckDB process.");
+		throw IOException("phylogeny_fasttree: gpl-boundary binary not found. To install:\n"
+		                  "  Easiest:  SELECT install_gpl_boundary();   "
+		                  "-- downloads a prebuilt binary into miint's cache dir\n"
+		                  "  Manual:   curl -fsSL "
+		                  "https://github.com/the-miint/GPL-boundary/releases/latest/download/install.sh | sh\n"
+		                  "  Source:   https://github.com/the-miint/GPL-boundary#building-from-source\n"
+		                  "Currently supported prebuilt platforms: Linux x86_64, macOS arm64. macOS Intel users "
+		                  "must build from source.\n"
+		                  "If gpl-boundary is installed at a non-standard location, set "
+		                  "MIINT_GPL_BOUNDARY_PATH=<absolute path>.");
 	}
 	std::vector<std::string> argv = {gpl_path}; // no args → daemon mode
 	gb::ChildProcess child(argv);

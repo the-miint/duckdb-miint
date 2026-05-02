@@ -105,7 +105,35 @@ std::string FindExecutableInPath(const std::string &name) {
 	return result;
 }
 
+std::string MiintGplBoundaryCacheDir() {
+	if (const char *xdg = ::getenv("XDG_CACHE_HOME"); xdg && xdg[0] != '\0') {
+		return std::string(xdg) + "/miint/bin";
+	}
+	if (const char *home = ::getenv("HOME"); home && home[0] != '\0') {
+		return std::string(home) + "/.cache/miint/bin";
+	}
+	return {};
+}
+
+std::string MiintGplBoundaryCacheBinary() {
+	const std::string dir = MiintGplBoundaryCacheDir();
+	if (dir.empty()) {
+		return {};
+	}
+	return dir + "/gpl-boundary";
+}
+
 std::string FindGplBoundary() {
+	// 1. Explicit override.
+	if (const char *override_path = ::getenv("MIINT_GPL_BOUNDARY_PATH"); override_path && override_path[0] != '\0') {
+		return std::string(override_path);
+	}
+	// 2. miint's install cache (where install_gpl_boundary() deposits).
+	const std::string cached = MiintGplBoundaryCacheBinary();
+	if (!cached.empty() && ::access(cached.c_str(), X_OK) == 0) {
+		return cached;
+	}
+	// 3. PATH.
 	return FindExecutableInPath("gpl-boundary");
 }
 

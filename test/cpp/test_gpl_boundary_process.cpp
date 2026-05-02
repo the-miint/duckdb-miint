@@ -69,6 +69,136 @@ TEST_CASE("FindExecutableInPath returns empty for a missing binary", "[gpl-bound
 }
 
 // =============================================================================
+// Cycle 1.1b — Cache-dir lookup + lookup priority for FindGplBoundary
+// =============================================================================
+//
+// `install_gpl_boundary()` deposits binaries into miint's cache dir
+// (`$XDG_CACHE_HOME/miint/bin` or `$HOME/.cache/miint/bin`). FindGplBoundary
+// has to find them there even when the user hasn't put the cache dir on PATH,
+// otherwise the install function is useless. Priority order:
+//   1. MIINT_GPL_BOUNDARY_PATH override (no validation)
+//   2. cache dir
+//   3. PATH (`which`)
+
+#include <sys/stat.h>
+
+namespace {
+// Save+restore an env var across a scope. `unsetenv("X")` if value is nullptr.
+struct ScopedEnv {
+	std::string name;
+	bool had_prior;
+	std::string prior;
+	ScopedEnv(const char *n, const char *value) : name(n) {
+		const char *p = ::getenv(n);
+		had_prior = p != nullptr;
+		if (had_prior) {
+			prior = p;
+		}
+		if (value) {
+			::setenv(n, value, 1);
+		} else {
+			::unsetenv(n);
+		}
+	}
+	~ScopedEnv() {
+		if (had_prior) {
+			::setenv(name.c_str(), prior.c_str(), 1);
+		} else {
+			::unsetenv(name.c_str());
+		}
+	}
+};
+
+std::string make_test_tmpdir() {
+	char tmpl[] = "/tmp/miint_test_gpl_XXXXXX";
+	const char *dir = ::mkdtemp(tmpl);
+	REQUIRE(dir != nullptr);
+	return std::string(dir);
+}
+
+void rm_rf(const std::string &path) {
+	// Cheap recursive remove via shell; tests own the path so the injection
+	// surface is nil. Failure is non-fatal — we just leak the tmpdir.
+	const std::string cmd = "rm -rf '" + path + "'";
+	(void)::system(cmd.c_str());
+}
+} // namespace
+
+TEST_CASE("MiintGplBoundaryCacheDir prefers XDG_CACHE_HOME", "[gpl-boundary][process]") {
+	ScopedEnv xdg("XDG_CACHE_HOME", "/tmp/xdg-test");
+	ScopedEnv home("HOME", "/tmp/home-test");
+	REQUIRE(MiintGplBoundaryCacheDir() == "/tmp/xdg-test/miint/bin");
+}
+
+TEST_CASE("MiintGplBoundaryCacheDir falls back to HOME when XDG unset", "[gpl-boundary][process]") {
+	ScopedEnv xdg("XDG_CACHE_HOME", nullptr);
+	ScopedEnv home("HOME", "/tmp/home-test");
+	REQUIRE(MiintGplBoundaryCacheDir() == "/tmp/home-test/.cache/miint/bin");
+}
+
+TEST_CASE("MiintGplBoundaryCacheDir returns empty when neither HOME nor XDG set", "[gpl-boundary][process]") {
+	ScopedEnv xdg("XDG_CACHE_HOME", nullptr);
+	ScopedEnv home("HOME", nullptr);
+	REQUIRE(MiintGplBoundaryCacheDir().empty());
+}
+
+TEST_CASE("MiintGplBoundaryCacheBinary appends /gpl-boundary", "[gpl-boundary][process]") {
+	ScopedEnv xdg("XDG_CACHE_HOME", "/tmp/xdg-test");
+	ScopedEnv home("HOME", "/tmp/home-test");
+	REQUIRE(MiintGplBoundaryCacheBinary() == "/tmp/xdg-test/miint/bin/gpl-boundary");
+}
+
+TEST_CASE("FindGplBoundary honors MIINT_GPL_BOUNDARY_PATH override", "[gpl-boundary][process]") {
+	// Override is intentionally NOT validated to exist — the caller surfaces
+	// a clearer error than "not found in any location" when it points at a
+	// dead path. Test verifies the literal value comes back regardless of
+	// what's in cache or PATH.
+	ScopedEnv override_env("MIINT_GPL_BOUNDARY_PATH", "/this/does/not/exist/gpl-boundary");
+	REQUIRE(FindGplBoundary() == "/this/does/not/exist/gpl-boundary");
+}
+
+TEST_CASE("FindGplBoundary finds binary in cache dir when not on PATH", "[gpl-boundary][process]") {
+	const std::string tmpdir = make_test_tmpdir();
+	const std::string bin_dir = tmpdir + "/miint/bin";
+	const std::string bin_path = bin_dir + "/gpl-boundary";
+
+	// Drop a fake +x file at the expected cache location.
+	const std::string mkdir_cmd = "mkdir -p '" + bin_dir + "'";
+	REQUIRE(::system(mkdir_cmd.c_str()) == 0);
+	const std::string write_cmd =
+	    "printf '#!/bin/sh\\necho fake\\n' > '" + bin_path + "' && chmod +x '" + bin_path + "'";
+	REQUIRE(::system(write_cmd.c_str()) == 0);
+
+	// Point cache-dir resolution at the tmpdir; clear the override path so
+	// rule (1) doesn't short-circuit. PATH stays whatever the host has —
+	// FindGplBoundary should return the cache hit BEFORE consulting PATH.
+	ScopedEnv override_env("MIINT_GPL_BOUNDARY_PATH", nullptr);
+	ScopedEnv xdg("XDG_CACHE_HOME", tmpdir.c_str());
+
+	const std::string result = FindGplBoundary();
+	INFO("Expected cache hit at " << bin_path << "; got '" << result << "'");
+	REQUIRE(result == bin_path);
+
+	rm_rf(tmpdir);
+}
+
+TEST_CASE("FindGplBoundary falls back to PATH when cache empty", "[gpl-boundary][process]") {
+	// Point cache resolution at a dir that doesn't contain gpl-boundary.
+	const std::string tmpdir = make_test_tmpdir();
+	ScopedEnv override_env("MIINT_GPL_BOUNDARY_PATH", nullptr);
+	ScopedEnv xdg("XDG_CACHE_HOME", tmpdir.c_str());
+
+	// Result depends on whether the host has gpl-boundary on PATH. We're
+	// only verifying the lookup falls through cleanly (doesn't crash, returns
+	// the same answer FindExecutableInPath("gpl-boundary") would).
+	const std::string result = FindGplBoundary();
+	const std::string path_only = FindExecutableInPath("gpl-boundary");
+	REQUIRE(result == path_only);
+
+	rm_rf(tmpdir);
+}
+
+// =============================================================================
 // Cycle 1.2 — Spawn child + bidirectional pipes
 // =============================================================================
 //

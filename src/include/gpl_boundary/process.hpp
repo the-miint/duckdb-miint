@@ -8,11 +8,28 @@ namespace duckdb {
 namespace miint {
 namespace gpl_boundary {
 
-/// Locate the `gpl-boundary` binary on PATH using `which`.
+/// Locate the `gpl-boundary` binary. Lookup order:
+///   1. `$MIINT_GPL_BOUNDARY_PATH` if set (explicit override; not validated to
+///      exist — the caller can probe and surface a clearer error than "not
+///      found in any location").
+///   2. miint's install cache (`MiintGplBoundaryCacheBinary()`), where
+///      `install_gpl_boundary()` deposits binaries.
+///   3. `which gpl-boundary` (whatever's on PATH).
 ///
 /// Returns the absolute path on success, or empty string if not found. Never
 /// throws. Used by `phylogeny_fasttree_available()` and lazy session creation.
 std::string FindGplBoundary();
+
+/// Returns the directory miint installs gpl-boundary into via
+/// `install_gpl_boundary()`. Resolves to (in order): `$XDG_CACHE_HOME/miint/bin`,
+/// `$HOME/.cache/miint/bin`. Returns empty string if neither HOME nor
+/// XDG_CACHE_HOME is set (extremely unlikely; signals "no install location"
+/// to callers).
+std::string MiintGplBoundaryCacheDir();
+
+/// Returns `MiintGplBoundaryCacheDir() + "/gpl-boundary"`. Empty if the dir
+/// itself is unresolvable.
+std::string MiintGplBoundaryCacheBinary();
 
 /// Generic helper: locate any executable on PATH using `which`. Returns the
 /// absolute path on success, empty string otherwise. Same fork/exec/pipe pattern
