@@ -56,32 +56,47 @@ YyjsonDocPtr make_doc(yj::yyjson_doc *p) {
 class ScopedBlockSigpipe {
 public:
 	ScopedBlockSigpipe() {
-		::sigemptyset(&pipeonly_);
-		::sigaddset(&pipeonly_, SIGPIPE);
+		// sigemptyset / sigaddset / sigismember are function-like macros on
+		// macOS (`#define sigemptyset(set) (*(set) = 0, 0)`), so we can't
+		// qualify them with `::` — the qualifier prevents macro expansion.
+		// glibc declares them as both functions and macros; both spellings
+		// resolve there. Drop the qualifier for portability.
+		sigemptyset(&pipeonly_);
+		sigaddset(&pipeonly_, SIGPIPE);
 		// Check whether SIGPIPE is already blocked on this thread. If yes,
 		// our restore won't change anything; if no, we need to block + drain.
 		sigset_t current;
-		::sigemptyset(&current);
+		sigemptyset(&current);
 		if (::pthread_sigmask(SIG_BLOCK, &pipeonly_, &current) != 0) {
 			active_ = false;
 			return;
 		}
 		active_ = true;
-		previously_blocked_ = ::sigismember(&current, SIGPIPE) == 1;
+		previously_blocked_ = sigismember(&current, SIGPIPE) == 1;
 	}
 	~ScopedBlockSigpipe() {
 		if (!active_) {
 			return;
 		}
+#if !defined(__APPLE__)
 		// Drain any SIGPIPE that landed on this thread while it was blocked.
 		// `sigtimedwait` with a zero timeout is the standard way to consume
 		// a single pending signal.
+		//
+		// macOS doesn't implement sigtimedwait (it's a POSIX-RT extension).
+		// Skipping the drain is safe there: SetupSignalHandling() registers a
+		// process-wide SIG_IGN for SIGPIPE on builds where MIINT_HAS_GPL_BOUNDARY
+		// is set, so a pending signal that lands at unblock time is harmlessly
+		// ignored rather than delivered to a default-disposition kill handler.
+		// The drain is a defense-in-depth optimization on Linux; on macOS it
+		// isn't load-bearing.
 		struct timespec zero {
 			0, 0
 		};
 		while (::sigtimedwait(&pipeonly_, nullptr, &zero) >= 0) {
 			// keep draining
 		}
+#endif
 		if (!previously_blocked_) {
 			::pthread_sigmask(SIG_UNBLOCK, &pipeonly_, nullptr);
 		}
