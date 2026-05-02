@@ -23,6 +23,8 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <sys/wait.h>
+#include <unistd.h> // read(2) on macOS isn't reachable via <cstdio>; need this for ::read
 #include <unordered_set>
 #include <vector>
 
