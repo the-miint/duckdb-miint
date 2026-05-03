@@ -30,6 +30,7 @@
 #include <read_ena_attributes.hpp>
 #include <read_ena_searchable_fields.hpp>
 #include <read_ena_sequences.hpp>
+#include <ena_secret.hpp>
 #include <miint_log.hpp>
 #include <miint_macros.hpp>
 #include "duckdb/main/extension_helper.hpp"
@@ -172,6 +173,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// TODO: //! comment on headers
 
 	miint::RegisterMiintLogType(loader.GetDatabaseInstance());
+	miint::RegisterENASecretType(loader);
 
 	ScalarFunction version_func("miint_version", {}, LogicalType::VARCHAR, MiintVersionFunction);
 	loader.RegisterFunction(version_func);

@@ -1038,6 +1038,7 @@ set(TEST_SOURCES
     test/cpp/test_ena_search_field_registry.cpp
     test/cpp/test_ena_attributes_filter.cpp
     test/cpp/test_ena_attributes_pushdown.cpp
+    test/cpp/test_ena_secret.cpp
     src/aspera_utils.cpp
     test/cpp/test_AsperaUtils.cpp
     src/SFFReader.cpp
