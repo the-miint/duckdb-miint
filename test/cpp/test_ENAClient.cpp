@@ -1,4 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
+#include "ena_client.hpp"
 #include "ena_parser.hpp"
 #include "ena_resolver_cache.hpp"
 #include "ena_run_info_extractor.hpp"
@@ -925,4 +927,91 @@ TEST_CASE("ResolveRunsBatch: UNKNOWN-type falls back to per-accession fetch", "[
 		CHECK(u.find("%3D%22") != std::string::npos);      // equality query
 		CHECK(u.find("%20IN%20%28") == std::string::npos); // NOT a batched query
 	}
+}
+
+// ---- HTTP Basic auth header construction (Phase 2) ----
+//
+// Round-trip POST testing (request body, response handling, retry on 5xx)
+// requires a real HTTP endpoint and lives in the Phase 4 mock-server tier.
+// Here we cover only the pure-function piece: RFC 7617 Base64 encoding.
+
+TEST_CASE("ENAClient BuildBasicAuthHeader: RFC 7617 canonical example", "[ena_basic_auth]") {
+	// RFC 7617 §2: "Aladdin:open sesame" -> "QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
+	auto header = miint::BuildBasicAuthHeader("Aladdin", "open sesame");
+	CHECK(header == "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==");
+}
+
+TEST_CASE("ENAClient BuildBasicAuthHeader: simple no-padding case", "[ena_basic_auth]") {
+	// "user:pass" is 9 bytes = 12 base64 chars exactly, no padding
+	auto header = miint::BuildBasicAuthHeader("user", "pass");
+	CHECK(header == "Basic dXNlcjpwYXNz");
+}
+
+TEST_CASE("ENAClient BuildBasicAuthHeader: padding cases", "[ena_basic_auth]") {
+	// 4-byte input -> 2 padding chars: "ab:c" -> "YWI6Yw=="
+	CHECK(miint::BuildBasicAuthHeader("ab", "c") == "Basic YWI6Yw==");
+	// 5-byte input -> 1 padding char: "abc:d" -> "YWJjOmQ="
+	CHECK(miint::BuildBasicAuthHeader("abc", "d") == "Basic YWJjOmQ=");
+	// 6-byte input -> 0 padding chars: "abc:de" -> "YWJjOmRl"
+	CHECK(miint::BuildBasicAuthHeader("abc", "de") == "Basic YWJjOmRl");
+}
+
+TEST_CASE("ENAClient BuildBasicAuthHeader: realistic Webin id", "[ena_basic_auth]") {
+	// Sanity: prefix is 'Basic ', payload is exactly the right length.
+	auto header = miint::BuildBasicAuthHeader("Webin-12345", "shh");
+	CHECK_THAT(header, Catch::Matchers::StartsWith("Basic "));
+	// "Webin-12345:shh" is 15 bytes -> ceil(15/3)*4 = 20 base64 chars, no padding
+	CHECK(header.size() == 6 + 20);
+	CHECK(header.find('=') == std::string::npos);
+}
+
+TEST_CASE("ENAClient BuildBasicAuthHeader: bytes outside printable ASCII",
+          "[ena_basic_auth]") {
+	// Webin passwords can contain any ASCII; the Base64 encoder MUST treat
+	// inputs as raw bytes, not text. Use \x80 (high bit set) to verify
+	// no UTF-8 / signed-char surprise.
+	auto header = miint::BuildBasicAuthHeader("u", std::string("\x80\x81\x82", 3));
+	// "u:\x80\x81\x82" = bytes 0x75 0x3A 0x80 0x81 0x82 (5 bytes)
+	// Expected base64: "dTqAgYI=" (1 padding char)
+	CHECK(header == "Basic dTqAgYI=");
+}
+
+TEST_CASE("ENAClient BuildBasicAuthHeader: empty user or password rejected",
+          "[ena_basic_auth]") {
+	CHECK_THROWS_WITH(miint::BuildBasicAuthHeader("", "pw"),
+	                  Catch::Matchers::ContainsSubstring("user"));
+	CHECK_THROWS_WITH(miint::BuildBasicAuthHeader("user", ""),
+	                  Catch::Matchers::ContainsSubstring("password"));
+}
+
+TEST_CASE("ENAClient BuildBasicAuthHeader: colon in user rejected (RFC 7617)",
+          "[ena_basic_auth]") {
+	// User containing ':' would split incorrectly server-side and silently
+	// authenticate as the wrong identity. RFC 7617 §2.1 forbids it.
+	CHECK_THROWS_WITH(miint::BuildBasicAuthHeader("us:er", "pw"),
+	                  Catch::Matchers::ContainsSubstring("':'"));
+	// Colons in passwords are fine.
+	CHECK_NOTHROW(miint::BuildBasicAuthHeader("user", "p:ass"));
+}
+
+TEST_CASE("ENAClient Base64Encode: empty input returns empty", "[ena_basic_auth]") {
+	CHECK(miint::Base64Encode("") == "");
+}
+
+TEST_CASE("ENAClient IsRetryableStatus: 4xx not retried, 5xx and 429 retried",
+          "[ena_retry]") {
+	CHECK(miint::ENAClient::IsRetryableStatus(429));
+	CHECK(miint::ENAClient::IsRetryableStatus(500));
+	CHECK(miint::ENAClient::IsRetryableStatus(502));
+	CHECK(miint::ENAClient::IsRetryableStatus(503));
+	CHECK(miint::ENAClient::IsRetryableStatus(504));
+
+	CHECK_FALSE(miint::ENAClient::IsRetryableStatus(200));
+	CHECK_FALSE(miint::ENAClient::IsRetryableStatus(201));
+	CHECK_FALSE(miint::ENAClient::IsRetryableStatus(400));
+	CHECK_FALSE(miint::ENAClient::IsRetryableStatus(401));
+	CHECK_FALSE(miint::ENAClient::IsRetryableStatus(403));
+	CHECK_FALSE(miint::ENAClient::IsRetryableStatus(404));
+	CHECK_FALSE(miint::ENAClient::IsRetryableStatus(415));
+	CHECK_FALSE(miint::ENAClient::IsRetryableStatus(505));
 }
