@@ -45,6 +45,21 @@ if curl -sSf --max-time 3 -o /dev/null \
     export ENA_AVAILABLE=1
 fi
 
+# ENA Webin V2 submission test endpoint. Live-integration tests for
+# INSERT INTO ena.{projects,samples,...} require a real Webin account
+# (free, registered at https://www.ebi.ac.uk/ena/submit/webin/). When the
+# user provides credentials AND the dev/test server responds, we export
+# ENA_WEBIN_TEST_AVAILABLE so guarded SQL tests can run.
+if [ -n "$ENA_WEBIN_TEST_USER" ] && [ -n "$ENA_WEBIN_TEST_PASSWORD" ]; then
+    export ENA_WEBIN_TEST_USER
+    export ENA_WEBIN_TEST_PASSWORD
+    if curl -sSf --max-time 3 -o /dev/null \
+            "https://wwwdev.ebi.ac.uk/ena/submit/webin-v2/swagger-ui/index.html" \
+            2>/dev/null; then
+        export ENA_WEBIN_TEST_AVAILABLE=1
+    fi
+fi
+
 if conda run -n massql python3 -c "from massql import msql_engine" 2>/dev/null; then
     export MASSQL_PYTHON_AVAILABLE=1
 fi
