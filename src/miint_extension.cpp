@@ -31,6 +31,7 @@
 #include <read_ena_searchable_fields.hpp>
 #include <read_ena_sequences.hpp>
 #include <ena_secret.hpp>
+#include <ena_storage.hpp>
 #include <miint_log.hpp>
 #include <miint_macros.hpp>
 #include "duckdb/main/extension_helper.hpp"
@@ -64,6 +65,8 @@
 #include <cluster_sequences.hpp>
 #endif
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
+#include <duckdb/main/config.hpp>
+#include <duckdb/storage/storage_extension.hpp>
 #include <htslib-1.22.1/htslib/hts.h>
 #include <kseq++/config.hpp>
 #include <zlib.h>
@@ -174,6 +177,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	miint::RegisterMiintLogType(loader.GetDatabaseInstance());
 	miint::RegisterENASecretType(loader);
+
+	auto &ena_db_config = DBConfig::GetConfig(loader.GetDatabaseInstance());
+	StorageExtension::Register(ena_db_config, "ena", make_shared_ptr<ENAStorageExtension>());
 
 	ScalarFunction version_func("miint_version", {}, LogicalType::VARCHAR, MiintVersionFunction);
 	loader.RegisterFunction(version_func);

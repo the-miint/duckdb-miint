@@ -45,14 +45,20 @@ duckdb::unique_ptr<duckdb::BaseSecret> CreateENASecret(duckdb::ClientContext &, 
 	if (endpoint.empty()) {
 		endpoint = "test";
 	} else if (endpoint != "test" && endpoint != "production") {
-		throw duckdb::InvalidInputException(
-		    "ENA secret: endpoint must be 'test' or 'production' (got '%s')", endpoint);
+		throw duckdb::InvalidInputException("ENA secret: endpoint must be 'test' or 'production' (got '%s')", endpoint);
 	}
+
+	// Optional override of the resolved base URL — primarily for the local
+	// mock server in tests, but also useful if EBI moves the V2 endpoint.
+	const auto endpoint_url = GetOption(input, "endpoint_url");
 
 	auto secret = duckdb::make_uniq<duckdb::KeyValueSecret>(input.scope, input.type, input.provider, input.name);
 	secret->secret_map["user"] = duckdb::Value(user);
 	secret->secret_map["password"] = duckdb::Value(password_resolved);
 	secret->secret_map["endpoint"] = duckdb::Value(endpoint);
+	if (!endpoint_url.empty()) {
+		secret->secret_map["endpoint_url"] = duckdb::Value(endpoint_url);
+	}
 	secret->redact_keys = {"password"};
 	return secret;
 }
@@ -75,6 +81,7 @@ void RegisterENASecretType(duckdb::ExtensionLoader &loader) {
 	fn.named_parameters["password_env"] = duckdb::LogicalType::VARCHAR;
 	fn.named_parameters["password_file"] = duckdb::LogicalType::VARCHAR;
 	fn.named_parameters["endpoint"] = duckdb::LogicalType::VARCHAR;
+	fn.named_parameters["endpoint_url"] = duckdb::LogicalType::VARCHAR;
 	// Bearer-token auth is not supported by Webin V2 (HTTP Basic only); see
 	// localdocs/ena-research-webin-v2-deep.md §3. Add `bearer_token` here
 	// only if/when that changes.

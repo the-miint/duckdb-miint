@@ -8,8 +8,7 @@
 
 #include <catch2/catch_all.hpp>
 
-TEST_CASE("ENA receipt: success XML with project, sample, experiment, run, submission",
-          "[ena_receipt]") {
+TEST_CASE("ENA receipt: success XML with project, sample, experiment, run, submission", "[ena_receipt]") {
 	const char *xml = R"(<?xml version="1.0" encoding="UTF-8"?>
 <RECEIPT receiptDate="2022-07-27T09:54:37.869+01:00"
          submissionFile="submission-EMBL-EBI_1658912077869.xml"
@@ -85,8 +84,7 @@ TEST_CASE("ENA receipt: success XML with project, sample, experiment, run, submi
 	CHECK(proj->ext_ids[0].type == "study");
 }
 
-TEST_CASE("ENA receipt: failure XML with success=false and ERROR messages",
-          "[ena_receipt]") {
+TEST_CASE("ENA receipt: failure XML with success=false and ERROR messages", "[ena_receipt]") {
 	const char *xml = R"(<?xml version="1.0" encoding="UTF-8"?>
 <RECEIPT receiptDate="2022-01-01T17:05:01.114+01:00"
          submissionFile="failed_submission.xml"
@@ -136,8 +134,7 @@ TEST_CASE("ENA receipt: VALIDATE action receipt has no accessions", "[ena_receip
 }
 
 TEST_CASE("ENA receipt: malformed XML throws", "[ena_receipt]") {
-	CHECK_THROWS_WITH(miint::ParseReceiptXML("<unclosed-tag"),
-	                  Catch::Matchers::ContainsSubstring("XML"));
+	CHECK_THROWS_WITH(miint::ParseReceiptXML("<unclosed-tag"), Catch::Matchers::ContainsSubstring("XML"));
 }
 
 TEST_CASE("ENA receipt: missing 'success' attribute defaults to false", "[ena_receipt]") {

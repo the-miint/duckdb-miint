@@ -965,8 +965,7 @@ TEST_CASE("ENAClient BuildBasicAuthHeader: realistic Webin id", "[ena_basic_auth
 	CHECK(header.find('=') == std::string::npos);
 }
 
-TEST_CASE("ENAClient BuildBasicAuthHeader: bytes outside printable ASCII",
-          "[ena_basic_auth]") {
+TEST_CASE("ENAClient BuildBasicAuthHeader: bytes outside printable ASCII", "[ena_basic_auth]") {
 	// Webin passwords can contain any ASCII; the Base64 encoder MUST treat
 	// inputs as raw bytes, not text. Use \x80 (high bit set) to verify
 	// no UTF-8 / signed-char surprise.
@@ -976,20 +975,15 @@ TEST_CASE("ENAClient BuildBasicAuthHeader: bytes outside printable ASCII",
 	CHECK(header == "Basic dTqAgYI=");
 }
 
-TEST_CASE("ENAClient BuildBasicAuthHeader: empty user or password rejected",
-          "[ena_basic_auth]") {
-	CHECK_THROWS_WITH(miint::BuildBasicAuthHeader("", "pw"),
-	                  Catch::Matchers::ContainsSubstring("user"));
-	CHECK_THROWS_WITH(miint::BuildBasicAuthHeader("user", ""),
-	                  Catch::Matchers::ContainsSubstring("password"));
+TEST_CASE("ENAClient BuildBasicAuthHeader: empty user or password rejected", "[ena_basic_auth]") {
+	CHECK_THROWS_WITH(miint::BuildBasicAuthHeader("", "pw"), Catch::Matchers::ContainsSubstring("user"));
+	CHECK_THROWS_WITH(miint::BuildBasicAuthHeader("user", ""), Catch::Matchers::ContainsSubstring("password"));
 }
 
-TEST_CASE("ENAClient BuildBasicAuthHeader: colon in user rejected (RFC 7617)",
-          "[ena_basic_auth]") {
+TEST_CASE("ENAClient BuildBasicAuthHeader: colon in user rejected (RFC 7617)", "[ena_basic_auth]") {
 	// User containing ':' would split incorrectly server-side and silently
 	// authenticate as the wrong identity. RFC 7617 §2.1 forbids it.
-	CHECK_THROWS_WITH(miint::BuildBasicAuthHeader("us:er", "pw"),
-	                  Catch::Matchers::ContainsSubstring("':'"));
+	CHECK_THROWS_WITH(miint::BuildBasicAuthHeader("us:er", "pw"), Catch::Matchers::ContainsSubstring("':'"));
 	// Colons in passwords are fine.
 	CHECK_NOTHROW(miint::BuildBasicAuthHeader("user", "p:ass"));
 }
@@ -998,8 +992,7 @@ TEST_CASE("ENAClient Base64Encode: empty input returns empty", "[ena_basic_auth]
 	CHECK(miint::Base64Encode("") == "");
 }
 
-TEST_CASE("ENAClient IsRetryableStatus: 4xx not retried, 5xx and 429 retried",
-          "[ena_retry]") {
+TEST_CASE("ENAClient IsRetryableStatus: 4xx not retried, 5xx and 429 retried", "[ena_retry]") {
 	CHECK(miint::ENAClient::IsRetryableStatus(429));
 	CHECK(miint::ENAClient::IsRetryableStatus(500));
 	CHECK(miint::ENAClient::IsRetryableStatus(502));

@@ -75,8 +75,7 @@ void AppendActions(std::string &out, const SubmissionSpec &env) {
 	// `action=HOLD` and `hold_until_date` would produce a double-HOLD, so
 	// reject it here.
 	if (env.action == ENAAction::HOLD && env.hold_until_date.empty()) {
-		throw std::runtime_error(
-		    "ENA envelope: HOLD action requires hold_until_date");
+		throw std::runtime_error("ENA envelope: HOLD action requires hold_until_date");
 	}
 	if (env.action == ENAAction::HOLD && !env.hold_until_date.empty()) {
 		throw std::runtime_error(
@@ -116,8 +115,8 @@ void AppendSample(std::string &out, const SampleSpec &s) {
 		throw std::runtime_error("ENA envelope: sample alias must be non-empty");
 	}
 	if (s.taxon_id <= 0) {
-		throw std::runtime_error("ENA envelope: sample.taxon_id must be > 0 (got " +
-		                         std::to_string(s.taxon_id) + " for alias '" + s.alias + "')");
+		throw std::runtime_error("ENA envelope: sample.taxon_id must be > 0 (got " + std::to_string(s.taxon_id) +
+		                         " for alias '" + s.alias + "')");
 	}
 	out.push_back('{');
 	out.append("\"alias\":");

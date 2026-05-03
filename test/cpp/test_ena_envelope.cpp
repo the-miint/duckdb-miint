@@ -30,8 +30,7 @@ TEST_CASE("ENA envelope: ADD with HOLD until a future date", "[ena_envelope]") {
 	env.action = miint::ENAAction::ADD;
 	env.hold_until_date = "2027-01-01";
 	auto json = miint::BuildEnvelopeJSON(env);
-	CheckEqual(json,
-	           R"X({"submission":{"actions":[{"type":"ADD"},{"type":"HOLD","holdUntilDate":"2027-01-01"}]}})X");
+	CheckEqual(json, R"X({"submission":{"actions":[{"type":"ADD"},{"type":"HOLD","holdUntilDate":"2027-01-01"}]}})X");
 }
 
 TEST_CASE("ENA envelope: single submission_project (PRJEB will be issued)", "[ena_envelope]") {
@@ -44,10 +43,9 @@ TEST_CASE("ENA envelope: single submission_project (PRJEB will be issued)", "[en
 	env.projects.push_back(p);
 
 	auto json = miint::BuildEnvelopeJSON(env);
-	CheckEqual(json,
-	           R"X({"submission":{"actions":[{"type":"ADD"}]},)X"
-	           R"X("projects":[{"alias":"gut-cohort-2026","title":"Adult gut microbiome cohort",)X"
-	           R"X("description":"Phase 1 collection","sequencingProject":{}}]})X");
+	CheckEqual(json, R"X({"submission":{"actions":[{"type":"ADD"}]},)X"
+	                 R"X("projects":[{"alias":"gut-cohort-2026","title":"Adult gut microbiome cohort",)X"
+	                 R"X("description":"Phase 1 collection","sequencingProject":{}}]})X");
 }
 
 TEST_CASE("ENA envelope: project with no description omits the field", "[ena_envelope]") {
@@ -147,8 +145,7 @@ TEST_CASE("ENA envelope: project + sample mixed bundle", "[ena_envelope]") {
 	CHECK(proj_pos < samp_pos);
 }
 
-TEST_CASE("ENA envelope: JSON string escaping (quote, backslash, control chars)",
-          "[ena_envelope]") {
+TEST_CASE("ENA envelope: JSON string escaping (quote, backslash, control chars)", "[ena_envelope]") {
 	miint::SubmissionSpec env;
 	miint::ProjectSpec p;
 	p.alias = "x";
@@ -162,15 +159,13 @@ TEST_CASE("ENA envelope: JSON string escaping (quote, backslash, control chars)"
 	CHECK(json.find(R"X("title":"Quoted \"thing\" \\ with\nnewline\tand tab")X") != std::string::npos);
 }
 
-TEST_CASE("ENA envelope: empty project alias is rejected at build time",
-          "[ena_envelope]") {
+TEST_CASE("ENA envelope: empty project alias is rejected at build time", "[ena_envelope]") {
 	miint::SubmissionSpec env;
 	miint::ProjectSpec p;
 	p.title = "x";
 	p.project_type = "METAGENOMIC";
 	env.projects.push_back(p);
-	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env),
-	                  Catch::Matchers::ContainsSubstring("alias"));
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("alias"));
 }
 
 TEST_CASE("ENA envelope: sample with taxon_id <= 0 rejected", "[ena_envelope]") {
@@ -179,8 +174,7 @@ TEST_CASE("ENA envelope: sample with taxon_id <= 0 rejected", "[ena_envelope]") 
 	s.alias = "s1";
 	s.taxon_id = 0;
 	env.samples.push_back(s);
-	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env),
-	                  Catch::Matchers::ContainsSubstring("taxon"));
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("taxon"));
 }
 
 TEST_CASE("ENA envelope: control characters escape as \\u00XX", "[ena_envelope]") {
@@ -189,8 +183,8 @@ TEST_CASE("ENA envelope: control characters escape as \\u00XX", "[ena_envelope]"
 	p.alias = "x";
 	// 0x01 (SOH) and 0x1F (US) — must escape as  /  per RFC 8259 §7.
 	p.title = std::string("a\x01"
-	                       "b\x1f"
-	                       "c");
+	                      "b\x1f"
+	                      "c");
 	p.project_type = "METAGENOMIC";
 	env.projects.push_back(p);
 
@@ -200,20 +194,16 @@ TEST_CASE("ENA envelope: control characters escape as \\u00XX", "[ena_envelope]"
 	CHECK(json.find("\\u001f") != std::string::npos);
 }
 
-TEST_CASE("ENA envelope: action=HOLD without hold_until_date is rejected",
-          "[ena_envelope]") {
+TEST_CASE("ENA envelope: action=HOLD without hold_until_date is rejected", "[ena_envelope]") {
 	miint::SubmissionSpec env;
 	env.action = miint::ENAAction::HOLD;
 	// hold_until_date deliberately empty
-	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env),
-	                  Catch::Matchers::ContainsSubstring("hold_until_date"));
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("hold_until_date"));
 }
 
-TEST_CASE("ENA envelope: action=HOLD AND hold_until_date is rejected (avoid double-HOLD)",
-          "[ena_envelope]") {
+TEST_CASE("ENA envelope: action=HOLD AND hold_until_date is rejected (avoid double-HOLD)", "[ena_envelope]") {
 	miint::SubmissionSpec env;
 	env.action = miint::ENAAction::HOLD;
 	env.hold_until_date = "2027-01-01";
-	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env),
-	                  Catch::Matchers::ContainsSubstring("automatically"));
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("automatically"));
 }

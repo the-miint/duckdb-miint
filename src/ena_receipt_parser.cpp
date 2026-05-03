@@ -16,9 +16,8 @@ namespace {
 // Object element names per SRA.receipt.xsd line 75–86. Membership test for
 // "is this element a (potentially accessioned) object container?".
 bool IsObjectElement(const char *name) {
-	static const char *kObjectElements[] = {"ANALYSIS", "EXPERIMENT", "RUN",     "SAMPLE",  "SAMPLEGROUP",
-	                                         "STUDY",    "DAC",        "POLICY",  "DATASET", "PROJECT",
-	                                         "CHECKLIST"};
+	static const char *kObjectElements[] = {"ANALYSIS", "EXPERIMENT", "RUN",     "SAMPLE",  "SAMPLEGROUP", "STUDY",
+	                                        "DAC",      "POLICY",     "DATASET", "PROJECT", "CHECKLIST"};
 	for (const auto *n : kObjectElements) {
 		if (std::strcmp(name, n) == 0) {
 			return true;
@@ -92,8 +91,7 @@ void XMLCALL StartElement(void *user_data, const XML_Char *name, const XML_Char 
 			}
 			st->receipt.objects.back().ext_ids.push_back(std::move(ext));
 		}
-	} else if (std::strcmp(name, "ERROR") == 0 || std::strcmp(name, "INFO") == 0 ||
-	           std::strcmp(name, "ACTIONS") == 0) {
+	} else if (std::strcmp(name, "ERROR") == 0 || std::strcmp(name, "INFO") == 0 || std::strcmp(name, "ACTIONS") == 0) {
 		st->capture_text = true;
 		st->text_buffer.clear();
 	}

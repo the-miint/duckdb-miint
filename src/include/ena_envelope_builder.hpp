@@ -21,7 +21,7 @@ enum class ENAAction { ADD, MODIFY, CANCEL, HOLD, RELEASE, VALIDATE };
 struct ProjectSpec {
 	std::string alias;
 	std::string title;
-	std::string description; // optional
+	std::string description;  // optional
 	std::string project_type; // METAGENOMIC, WGS, ... — currently informational
 	bool is_umbrella = false;
 };

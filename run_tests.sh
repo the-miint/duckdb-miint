@@ -60,6 +60,28 @@ if [ -n "$ENA_WEBIN_TEST_USER" ] && [ -n "$ENA_WEBIN_TEST_PASSWORD" ]; then
     fi
 fi
 
+# ENA Webin V2 mock server. Provides canned XML receipts for INSERT INTO
+# ena.{projects,samples,...} round-trip tests with no live credentials. The
+# helper python script is in test/scripts/ena_webin_mock.py.
+ENA_MOCK_PID=""
+if [ -z "$ENA_WEBIN_MOCK_URL" ] && python3 -c "import http.server" 2>/dev/null; then
+    python3 test/scripts/ena_webin_mock.py 0 > /tmp/ena_webin_mock.boot 2>&1 &
+    ENA_MOCK_PID=$!
+    # Inherit the existing trap (HTTP_SERVER_PID) and add the mock kill
+    trap "kill $HTTP_SERVER_PID $ENA_MOCK_PID 2>/dev/null || true" EXIT
+    for i in $(seq 1 25); do
+        if [ -s /tmp/ena_webin_mock.boot ] && grep -q ENA_WEBIN_MOCK_URL /tmp/ena_webin_mock.boot; then
+            export ENA_WEBIN_MOCK_URL="$(grep ENA_WEBIN_MOCK_URL /tmp/ena_webin_mock.boot | head -n1 | cut -d= -f2-)"
+            break
+        fi
+        sleep 0.1
+    done
+    if [ -z "$ENA_WEBIN_MOCK_URL" ]; then
+        echo "Warning: ENA Webin mock failed to start; submission round-trip tests will skip"
+        kill $ENA_MOCK_PID 2>/dev/null || true
+    fi
+fi
+
 if conda run -n massql python3 -c "from massql import msql_engine" 2>/dev/null; then
     export MASSQL_PYTHON_AVAILABLE=1
 fi

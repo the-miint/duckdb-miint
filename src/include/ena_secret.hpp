@@ -28,11 +28,9 @@ namespace miint {
 //
 // Inline so the test executable can call this without linking ena_secret.cpp,
 // which depends on DuckDB symbols not present in the unit-test target.
-inline std::string ResolvePasswordIndirection(const std::string &literal,
-                                               const std::string &env_var_name,
-                                               const std::string &file_path) {
-	const int set_count = (!literal.empty() ? 1 : 0) + (!env_var_name.empty() ? 1 : 0) +
-	                      (!file_path.empty() ? 1 : 0);
+inline std::string ResolvePasswordIndirection(const std::string &literal, const std::string &env_var_name,
+                                              const std::string &file_path) {
+	const int set_count = (!literal.empty() ? 1 : 0) + (!env_var_name.empty() ? 1 : 0) + (!file_path.empty() ? 1 : 0);
 	if (set_count == 0) {
 		throw std::runtime_error("ENA secret requires one of 'password', 'password_env', or 'password_file'");
 	}

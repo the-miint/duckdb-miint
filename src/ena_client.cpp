@@ -61,8 +61,7 @@ std::string ENAClient::MakeRequest(const std::string &url) {
 }
 
 std::string ENAClient::PostBody(const std::string &url, const std::string &body, const std::string &content_type,
-                                 const std::string &accept_type, const std::string &user,
-                                 const std::string &password) {
+                                const std::string &accept_type, const std::string &user, const std::string &password) {
 	RespectRateLimit();
 
 	duckdb::HTTPHeaders headers(db);
@@ -106,12 +105,12 @@ std::string ENAClient::PostBody(const std::string &url, const std::string &body,
 }
 
 std::string ENAClient::PostJSON(const std::string &url, const std::string &body, const std::string &user,
-                                 const std::string &password) {
+                                const std::string &password) {
 	return PostBody(url, body, "application/json", "application/json", user, password);
 }
 
 std::string ENAClient::PostXML(const std::string &url, const std::string &body, const std::string &user,
-                                const std::string &password) {
+                               const std::string &password) {
 	return PostBody(url, body, "application/xml", "application/xml", user, password);
 }
 

@@ -21,15 +21,15 @@ struct ENAExtId {
 
 struct ENAObjectReceipt {
 	std::string object_type; // "PROJECT", "SAMPLE", "EXPERIMENT", "RUN", "ANALYSIS", ...
-	std::string alias;        // required
-	std::string accession;    // empty if the object failed validation
-	std::string status;       // "PRIVATE", "DRAFT", "CANCELLED", "PUBLIC", ...
+	std::string alias;       // required
+	std::string accession;   // empty if the object failed validation
+	std::string status;      // "PRIVATE", "DRAFT", "CANCELLED", "PUBLIC", ...
 	std::string hold_until_date;
 	std::vector<ENAExtId> ext_ids;
 };
 
 struct ENAReceipt {
-	bool success = false;       // defaults to false; only set true on explicit success="true"
+	bool success = false; // defaults to false; only set true on explicit success="true"
 	std::string receipt_date;
 	std::string submission_file;
 	std::string submission_accession; // ERA... — from <SUBMISSION accession="...">

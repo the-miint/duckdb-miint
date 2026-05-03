@@ -12,8 +12,8 @@ namespace {
 // Helper: write a file with the given content, return its path.
 // Caller is responsible for cleanup via std::remove.
 std::string WriteTempPwFile(const std::string &content) {
-	std::string path = std::string("/tmp/miint_test_pwfile_") + std::to_string(::getpid()) + "_" +
-	                   std::to_string(rand());
+	std::string path =
+	    std::string("/tmp/miint_test_pwfile_") + std::to_string(::getpid()) + "_" + std::to_string(rand());
 	std::ofstream f(path);
 	f << content;
 	f.close();
@@ -96,14 +96,12 @@ TEST_CASE("ENA password indirection: missing file throws", "[ena_secret]") {
 
 TEST_CASE("ENA password indirection: empty file throws", "[ena_secret]") {
 	auto path = WriteTempPwFile("");
-	CHECK_THROWS_WITH(miint::ResolvePasswordIndirection("", "", path),
-	                  Catch::Matchers::ContainsSubstring(path));
+	CHECK_THROWS_WITH(miint::ResolvePasswordIndirection("", "", path), Catch::Matchers::ContainsSubstring(path));
 	std::remove(path.c_str());
 }
 
 TEST_CASE("ENA password indirection: none of the three throws", "[ena_secret]") {
-	CHECK_THROWS_WITH(miint::ResolvePasswordIndirection("", "", ""),
-	                  Catch::Matchers::ContainsSubstring("password"));
+	CHECK_THROWS_WITH(miint::ResolvePasswordIndirection("", "", ""), Catch::Matchers::ContainsSubstring("password"));
 }
 
 TEST_CASE("ENA password indirection: more than one throws", "[ena_secret]") {

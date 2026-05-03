@@ -1,0 +1,79 @@
+# name: test/sql/ena_storage_attach.test
+# description: ATTACH '...' AS ena (TYPE ENA) registers a fixed-schema virtual catalog
+# group: [sql]
+
+require miint
+
+# Bare attach with default endpoint (test). No secret needed for catalog setup.
+statement ok
+ATTACH '' AS ena (TYPE ENA);
+
+# The five submission tables must exist with the application-level schema
+# from ena-submission-design-v2.md §4. We assert column names rather than
+# DESCRIBE row counts so a future column addition doesn't silently break
+# this test.
+query II
+SELECT table_name, column_count
+FROM duckdb_tables()
+WHERE database_name='ena' AND schema_name='main'
+ORDER BY table_name;
+----
+analyses	4
+experiments	12
+projects	9
+runs	4
+samples	9
+submission_log	13
+
+# Project columns match design doc (ordered)
+query II
+SELECT column_name, data_type
+FROM duckdb_columns()
+WHERE database_name='ena' AND table_name='projects'
+ORDER BY column_index;
+----
+alias	VARCHAR
+title	VARCHAR
+description	VARCHAR
+project_type	VARCHAR
+umbrella_children	VARCHAR[]
+attributes	MAP(VARCHAR, VARCHAR)
+prjeb_accession	VARCHAR
+erp_accession	VARCHAR
+hold_until_date	DATE
+
+# submission_log columns
+query I
+SELECT column_name FROM duckdb_columns()
+WHERE database_name='ena' AND table_name='submission_log'
+ORDER BY column_index;
+----
+submission_id
+submitted_at
+endpoint
+secret_name
+action
+object_type
+n_objects
+success
+era_accession
+request_payload
+receipt
+error_messages
+duration_ms
+
+# CREATE TABLE inside the ENA catalog must error — schemas are fixed.
+statement error
+CREATE TABLE ena.main.foo(x INTEGER);
+----
+fixed schema
+
+# Non-existent table errors cleanly
+statement error
+SELECT * FROM ena.main.does_not_exist;
+----
+does_not_exist
+
+# Detach is clean (no leak)
+statement ok
+DETACH ena;
