@@ -1039,6 +1039,10 @@ set(TEST_SOURCES
     test/cpp/test_ena_attributes_filter.cpp
     test/cpp/test_ena_attributes_pushdown.cpp
     test/cpp/test_ena_secret.cpp
+    src/ena_envelope_builder.cpp
+    test/cpp/test_ena_envelope.cpp
+    src/ena_receipt_parser.cpp
+    test/cpp/test_ena_receipt.cpp
     src/aspera_utils.cpp
     test/cpp/test_AsperaUtils.cpp
     src/SFFReader.cpp
