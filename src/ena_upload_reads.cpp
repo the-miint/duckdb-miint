@@ -380,36 +380,50 @@ void GroupAndResolveLayout(const UploadInputRows &input, FastqLayoutMode request
 }
 
 // =====================================================================
-// Encoder → gzip → MD5 sink
+// Encoder → gzip → MD5 stream
 // =====================================================================
+//
+// Shared core for the file-sink (push, eager file write) and the libcurl
+// streaming producer (pull, in-memory buffering). Both run identical zlib +
+// MD5 plumbing — only the destination of the gzipped output differs. The
+// destination is supplied via a `ChunkSink` callback so consumers can route
+// bytes wherever they need.
+//
+// MD5 is computed over the bytes handed to the sink, which is exactly what
+// the consumer ultimately writes / uploads — the digest matches.
 
-class GzipMd5FileSink {
+class GzipMd5Stream {
 public:
-	GzipMd5FileSink(FileSystem &fs, const string &path) : fs(fs), path(path) {
-		file = fs.OpenFile(path, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE);
+	using ChunkSink = std::function<void(const uint8_t *data, std::size_t size)>;
+
+	explicit GzipMd5Stream(ChunkSink sink_fn) : sink(std::move(sink_fn)) {
 		std::memset(&zs, 0, sizeof(zs));
 		// 16 + MAX_WBITS selects gzip framing (vs raw deflate or zlib wrapper).
 		if (deflateInit2(&zs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 16 + MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-			throw IOException("ena_upload_reads: deflateInit2 failed for '%s'", path);
+			throw IOException("ena_upload_reads: deflateInit2 failed");
 		}
 		zs_initialized = true;
-		out_buf.resize(64 * 1024);
+		work_buf.resize(64 * 1024);
 	}
 
-	~GzipMd5FileSink() {
+	~GzipMd5Stream() {
 		if (zs_initialized) {
 			deflateEnd(&zs);
 		}
 	}
 
-	GzipMd5FileSink(const GzipMd5FileSink &) = delete;
-	GzipMd5FileSink &operator=(const GzipMd5FileSink &) = delete;
+	GzipMd5Stream(const GzipMd5Stream &) = delete;
+	GzipMd5Stream &operator=(const GzipMd5Stream &) = delete;
 
-	void Write(const char *data, std::size_t size) {
-		// zlib's avail_in is `uInt` (32-bit). Encoder calls feed bytes in
-		// per-field chunks well under UINT_MAX, but loop in case a future
-		// caller passes a larger buffer.
-		const auto *p = reinterpret_cast<const unsigned char *>(data);
+	// Feed `size` bytes of plain input. Gzipped output is forwarded to `sink`
+	// in 64 KB chunks as deflate produces it.
+	void Write(const uint8_t *data, std::size_t size) {
+		if (finished) {
+			throw IOException("ena_upload_reads: GzipMd5Stream::Write after Finish");
+		}
+		// zlib's avail_in is `uInt` (32-bit). Loop in case a caller passes a
+		// larger buffer than fits in one zlib call.
+		const uint8_t *p = data;
 		std::size_t remaining = size;
 		while (remaining > 0) {
 			const std::size_t step = std::min<std::size_t>(remaining, std::numeric_limits<uInt>::max());
@@ -423,62 +437,108 @@ public:
 		}
 	}
 
-	// Returns (md5_hex, bytes_written). Closes the file. Idempotent — calling
-	// twice throws.
+	// Flush remaining gzip state with Z_FINISH until deflate returns
+	// Z_STREAM_END. Returns (md5_hex, bytes_emitted_to_sink). Idempotent —
+	// calling twice throws.
 	std::pair<string, uint64_t> Finish() {
 		if (finished) {
-			throw IOException("ena_upload_reads: GzipMd5FileSink::Finish called twice");
+			throw IOException("ena_upload_reads: GzipMd5Stream::Finish called twice");
 		}
 		finished = true;
-		// Flush remaining gzip state with Z_FINISH until deflate returns Z_STREAM_END.
+		zs.next_in = nullptr;
+		zs.avail_in = 0;
 		while (true) {
-			zs.next_out = out_buf.data();
-			zs.avail_out = static_cast<uInt>(out_buf.size());
+			zs.next_out = work_buf.data();
+			zs.avail_out = static_cast<uInt>(work_buf.size());
 			int rc = deflate(&zs, Z_FINISH);
-			if (rc < 0) {
+			if (rc < 0 && rc != Z_BUF_ERROR) {
 				throw IOException("ena_upload_reads: deflate(Z_FINISH) failed: %s", zs.msg ? zs.msg : "<no msg>");
 			}
-			std::size_t produced = out_buf.size() - zs.avail_out;
+			const std::size_t produced = work_buf.size() - zs.avail_out;
 			if (produced > 0) {
-				FlushChunk(produced);
+				EmitChunk(produced);
 			}
 			if (rc == Z_STREAM_END) {
 				break;
 			}
+			if (produced == 0) {
+				// deflate(Z_FINISH) must either emit output or return
+				// Z_STREAM_END given a non-empty output buffer; otherwise
+				// we'd spin forever.
+				throw IOException("ena_upload_reads: deflate(Z_FINISH) made no progress");
+			}
 		}
-		file->Close();
-		return {md5_ctx.FinishHex(), bytes_written};
+		return {md5_ctx.FinishHex(), bytes_emitted};
+	}
+
+	bool Finished() const {
+		return finished;
 	}
 
 private:
 	void DrainOnce(int flush_mode) {
-		zs.next_out = out_buf.data();
-		zs.avail_out = static_cast<uInt>(out_buf.size());
+		zs.next_out = work_buf.data();
+		zs.avail_out = static_cast<uInt>(work_buf.size());
 		int rc = deflate(&zs, flush_mode);
 		if (rc < 0) {
 			throw IOException("ena_upload_reads: deflate failed: %s", zs.msg ? zs.msg : "<no msg>");
 		}
-		std::size_t produced = out_buf.size() - zs.avail_out;
+		const std::size_t produced = work_buf.size() - zs.avail_out;
 		if (produced > 0) {
-			FlushChunk(produced);
+			EmitChunk(produced);
 		}
 	}
 
-	void FlushChunk(std::size_t n) {
-		md5_ctx.Add(out_buf.data(), n);
-		fs.Write(*file, out_buf.data(), static_cast<int64_t>(n));
-		bytes_written += n;
+	void EmitChunk(std::size_t n) {
+		md5_ctx.Add(work_buf.data(), n);
+		sink(work_buf.data(), n);
+		bytes_emitted += n;
 	}
 
-	FileSystem &fs;
-	string path;
-	unique_ptr<FileHandle> file;
+	ChunkSink sink;
 	z_stream zs {};
 	bool zs_initialized = false;
 	bool finished = false;
-	vector<uint8_t> out_buf;
-	uint64_t bytes_written = 0;
+	vector<uint8_t> work_buf;
+	uint64_t bytes_emitted = 0;
 	MD5Context md5_ctx;
+};
+
+// File-backed wrapper. Sink callback writes each gzipped chunk straight to
+// the open FileHandle — no extra buffering between deflate and disk.
+class GzipMd5FileSink {
+public:
+	GzipMd5FileSink(FileSystem &fs, const string &path) : fs(fs), path(path) {
+		file = fs.OpenFile(path, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE);
+		// Lambda captures `this`; `stream` is destroyed before `file` (declared
+		// after it), so the lambda's `*this->file` access is always valid.
+		stream = make_uniq<GzipMd5Stream>([this](const uint8_t *p, std::size_t n) {
+			this->fs.Write(*this->file, const_cast<uint8_t *>(p), static_cast<int64_t>(n));
+		});
+	}
+
+	GzipMd5FileSink(const GzipMd5FileSink &) = delete;
+	GzipMd5FileSink &operator=(const GzipMd5FileSink &) = delete;
+
+	void Write(const char *data, std::size_t size) {
+		stream->Write(reinterpret_cast<const uint8_t *>(data), size);
+	}
+
+	// Returns (md5_hex, bytes_written). Closes the file.
+	std::pair<string, uint64_t> Finish() {
+		auto result = stream->Finish();
+		file->Close();
+		return result;
+	}
+
+private:
+	FileSystem &fs;
+	string path;
+	// Order matters: `file` is destroyed AFTER `stream`, so the sink lambda
+	// stored inside `stream` can safely reference `*file` for the lifetime of
+	// the stream.
+	unique_ptr<FileHandle> file;
+	unique_ptr<GzipMd5Stream> stream;
 };
 
 // =====================================================================
@@ -486,33 +546,26 @@ private:
 // =====================================================================
 //
 // libcurl pulls bytes via CURLOPT_READFUNCTION; this producer satisfies that
-// contract by encoding records on demand. State machine has three phases:
-//   1) Encoding: fetch next row, encode FASTQ → deflate(Z_NO_FLUSH) into
-//      `out_buf`. Drain `out_buf` to libcurl; loop until exhausted.
-//   2) Finishing: after all rows encoded, deflate(Z_FINISH) until
-//      Z_STREAM_END. Drain trailer.
-//   3) EOF: Read returns 0.
+// contract by encoding records on demand. Wraps a GzipMd5Stream whose sink
+// appends gzipped chunks into `out_buf`; `Read` drains `out_buf` to libcurl
+// and produces more on demand.
 //
-// MD5 is computed over the gzipped output as it lands in `out_buf` —
-// covers exactly the bytes libcurl ultimately receives. `Finish()` is
-// valid only after Read has returned 0.
+// State machine:
+//   1) Encoding: fetch next row, encode FASTQ via the encoder, feed the
+//      record bytes to `stream.Write` — gzip output lands in `out_buf`.
+//   2) Finishing: when no more rows, call `stream.Finish()` (Z_FINISH)
+//      which drains the trailer into `out_buf` and yields the final
+//      md5 + bytes_emitted, which we cache for `Finish()`.
+//   3) EOF: Read returns 0 once `out_buf` is drained AND `stream.Finished()`.
+//
+// `Finish()` is valid only after Read has returned 0.
 
 class StreamingGzipMd5Producer {
 public:
 	StreamingGzipMd5Producer(const UploadInputRows &input, const SampleGroup &group, FastqLayoutMode layout,
 	                         int which_file, uint8_t qual_offset)
-	    : input(input), group(group), layout(layout), which_file(which_file), encoder(qual_offset) {
-		std::memset(&zs, 0, sizeof(zs));
-		if (deflateInit2(&zs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 16 + MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-			throw std::runtime_error("ena_upload_reads: deflateInit2 failed for streaming producer");
-		}
-		zs_initialized = true;
-	}
-
-	~StreamingGzipMd5Producer() {
-		if (zs_initialized) {
-			deflateEnd(&zs);
-		}
+	    : input(input), group(group), layout(layout), which_file(which_file), encoder(qual_offset),
+	      stream([this](const uint8_t *p, std::size_t n) { out_buf.insert(out_buf.end(), p, p + n); }) {
 	}
 
 	StreamingGzipMd5Producer(const StreamingGzipMd5Producer &) = delete;
@@ -529,7 +582,7 @@ public:
 			}
 			out_buf.clear();
 			out_buf_pos = 0;
-			if (gzip_done) {
+			if (stream.Finished()) {
 				return 0;
 			}
 			ProduceMore();
@@ -537,28 +590,24 @@ public:
 	}
 
 	std::pair<string, uint64_t> Finish() {
-		if (!gzip_done) {
-			throw std::runtime_error("ena_upload_reads: StreamingGzipMd5Producer::Finish before EOF");
+		if (!stream.Finished()) {
+			throw IOException("ena_upload_reads: StreamingGzipMd5Producer::Finish before EOF");
 		}
-		return {md5_ctx.FinishHex(), bytes_total};
+		return cached_result;
 	}
 
 private:
 	void ProduceMore() {
-		if (!encoding_done) {
-			std::vector<uint8_t> record_buf;
-			auto sink = [&record_buf](const char *data, std::size_t size) {
-				record_buf.insert(record_buf.end(), data, data + size);
-			};
-			if (!EncodeOneRecord(sink)) {
-				encoding_done = true;
-				DeflateChunk(nullptr, 0, Z_FINISH);
-				return;
-			}
-			DeflateChunk(record_buf.data(), record_buf.size(), Z_NO_FLUSH);
-		} else {
-			DeflateChunk(nullptr, 0, Z_FINISH);
+		std::vector<uint8_t> record_buf;
+		auto record_sink = [&record_buf](const char *data, std::size_t size) {
+			record_buf.insert(record_buf.end(), reinterpret_cast<const uint8_t *>(data),
+			                  reinterpret_cast<const uint8_t *>(data) + size);
+		};
+		if (!EncodeOneRecord(record_sink)) {
+			cached_result = stream.Finish();
+			return;
 		}
+		stream.Write(record_buf.data(), record_buf.size());
 	}
 
 	bool EncodeOneRecord(const FastqEncoder::Sink &sink) {
@@ -592,65 +641,20 @@ private:
 		return true;
 	}
 
-	void DeflateChunk(const std::uint8_t *data, std::size_t size, int flush_mode) {
-		// Mirrors GzipMd5FileSink::Write but appends gzipped bytes to
-		// out_buf instead of writing to a file. Computes MD5 over each
-		// produced chunk so the digest covers exactly what libcurl gets.
-		const std::size_t kStep = 64 * 1024;
-		const std::uint8_t *p = data;
-		std::size_t remaining = size;
-		do {
-			const std::size_t step = std::min<std::size_t>(remaining, std::numeric_limits<uInt>::max());
-			zs.next_in = const_cast<unsigned char *>(p);
-			zs.avail_in = static_cast<uInt>(step);
-			while (zs.avail_in > 0 || flush_mode == Z_FINISH) {
-				const std::size_t old_size = out_buf.size();
-				out_buf.resize(old_size + kStep);
-				zs.next_out = out_buf.data() + old_size;
-				zs.avail_out = static_cast<uInt>(kStep);
-				const int rc = deflate(&zs, flush_mode);
-				if (rc < 0 && rc != Z_BUF_ERROR) {
-					throw std::runtime_error(std::string("ena_upload_reads: deflate failed: ") +
-					                         (zs.msg ? zs.msg : "<no msg>"));
-				}
-				const std::size_t produced = kStep - zs.avail_out;
-				out_buf.resize(old_size + produced);
-				if (produced > 0) {
-					md5_ctx.Add(out_buf.data() + old_size, produced);
-					bytes_total += produced;
-				}
-				if (rc == Z_STREAM_END) {
-					gzip_done = true;
-					return;
-				}
-				if (flush_mode == Z_FINISH && produced == 0) {
-					// Defensive — would loop forever otherwise.
-					break;
-				}
-				if (zs.avail_in == 0 && flush_mode != Z_FINISH) {
-					break;
-				}
-			}
-			p += step;
-			remaining -= step;
-		} while (remaining > 0);
-	}
-
 	const UploadInputRows &input;
 	const SampleGroup &group;
 	const FastqLayoutMode layout;
 	const int which_file;
 	FastqEncoder encoder;
 
-	z_stream zs {};
-	bool zs_initialized = false;
+	// `out_buf` MUST be declared before `stream` so that the sink lambda
+	// stored inside `stream` is destroyed (with `stream`) before `out_buf` —
+	// otherwise the lambda's last access could touch a destroyed vector.
 	std::vector<std::uint8_t> out_buf;
 	std::size_t out_buf_pos = 0;
 	std::size_t row_cursor = 0;
-	bool encoding_done = false;
-	bool gzip_done = false;
-	uint64_t bytes_total = 0;
-	MD5Context md5_ctx;
+	std::pair<string, uint64_t> cached_result;
+	GzipMd5Stream stream;
 };
 
 // =====================================================================
@@ -735,10 +739,9 @@ void RunUpload(ClientContext &context, const ENAUploadReadsBindData &bind, ENAUp
 				md5_hex = std::move(finished.first);
 				bytes_written = finished.second;
 #else
-				throw IOException(
-				    "ena_upload_reads: %s:// transport requires libcurl, which is disabled in this build "
-				    "(use aspera:// or file:// instead, or rebuild with -DMIINT_ENABLE_CURL=ON)",
-				    gs.target.scheme);
+				throw IOException("ena_upload_reads: %s:// transport requires libcurl, which is disabled in this build "
+				                  "(use aspera:// or file:// instead, or rebuild with -DMIINT_ENABLE_CURL=ON)",
+				                  gs.target.scheme);
 #endif
 			} else {
 				// Encode → gzip → MD5 → file. For Aspera we then ascp the
@@ -939,10 +942,9 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 		// to make `secret` optional for ftp:// targets.
 		ResolveUploadCredentials(context, "libcurl", bind.secret_name, gs->user, gs->password);
 #else
-		throw BinderException(
-		    "ena_upload_reads: %s:// transport requires libcurl, which is disabled in this build "
-		    "(use aspera:// or file:// instead, or rebuild with -DMIINT_ENABLE_CURL=ON)",
-		    gs->target.scheme);
+		throw BinderException("ena_upload_reads: %s:// transport requires libcurl, which is disabled in this build "
+		                      "(use aspera:// or file:// instead, or rebuild with -DMIINT_ENABLE_CURL=ON)",
+		                      gs->target.scheme);
 #endif
 	}
 
