@@ -4,7 +4,9 @@
 
 #include "ena_storage.hpp"
 
+#include "ena_experiments_insert_op.hpp"
 #include "ena_projects_insert_op.hpp"
+#include "ena_runs_insert_op.hpp"
 #include "ena_samples_insert_op.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -101,28 +103,36 @@ unique_ptr<CreateTableInfo> BuildENATableInfo(SchemaCatalogEntry &schema, ENATab
 		break;
 	case ENATableKind::EXPERIMENTS:
 		info->table = "experiments";
+		// Column order matters — BuildFromBuffer uses positional COL_*
+		// constants in src/ena_experiments_insert_op.cpp.
 		add("alias", LogicalType::VARCHAR);
 		add("title", LogicalType::VARCHAR);
 		add("study_ref", LogicalType::VARCHAR);
 		add("sample_descriptor", LogicalType::VARCHAR);
+		add("design_description", LogicalType::VARCHAR);
+		add("library_name", LogicalType::VARCHAR);
 		add("library_strategy", LogicalType::VARCHAR);
 		add("library_source", LogicalType::VARCHAR);
 		add("library_selection", LogicalType::VARCHAR);
-		add("library_layout", LogicalType::VARCHAR);
-		add("nominal_length", LogicalType::INTEGER);
-		add("nominal_sdev", LogicalType::DOUBLE);
+		add("library_layout", LogicalType::VARCHAR); // "SINGLE" or "PAIRED"
 		add("platform", LogicalType::VARCHAR);
 		add("instrument_model", LogicalType::VARCHAR);
+		add("erx_accession", LogicalType::VARCHAR);
 		break;
 	case ENATableKind::RUNS:
 		info->table = "runs";
+		// Column order matters — BuildFromBuffer uses positional COL_*
+		// constants in src/ena_runs_insert_op.cpp. The `files` LIST(STRUCT)
+		// shape matches the SRA.run.xsd <FILES> element: each entry carries
+		// filename + filetype + md5. Server re-computes MD5 after upload and
+		// compares against this value.
 		add("alias", LogicalType::VARCHAR);
 		add("experiment_ref", LogicalType::VARCHAR);
+		add("title", LogicalType::VARCHAR);
 		add("files", LogicalType::LIST(LogicalType::STRUCT({{"filename", LogicalType::VARCHAR},
 		                                                    {"filetype", LogicalType::VARCHAR},
-		                                                    {"md5", LogicalType::VARCHAR},
-		                                                    {"checksum_method", LogicalType::VARCHAR}})));
-		add("accession", LogicalType::VARCHAR);
+		                                                    {"md5", LogicalType::VARCHAR}})));
+		add("err_accession", LogicalType::VARCHAR);
 		break;
 	case ENATableKind::ANALYSES:
 		info->table = "analyses";
@@ -492,6 +502,16 @@ PhysicalOperator &ENACatalog::PlanInsert(ClientContext &context, PhysicalPlanGen
 	}
 	case ENATableKind::SAMPLES: {
 		auto &op_ref = planner.Make<ENASamplesInsert>(op, table_entry, op.column_index_map, op.return_chunk);
+		op_ref.children.push_back(*plan);
+		return op_ref;
+	}
+	case ENATableKind::EXPERIMENTS: {
+		auto &op_ref = planner.Make<ENAExperimentsInsert>(op, table_entry, op.column_index_map, op.return_chunk);
+		op_ref.children.push_back(*plan);
+		return op_ref;
+	}
+	case ENATableKind::RUNS: {
+		auto &op_ref = planner.Make<ENARunsInsert>(op, table_entry, op.column_index_map, op.return_chunk);
 		op_ref.children.push_back(*plan);
 		return op_ref;
 	}

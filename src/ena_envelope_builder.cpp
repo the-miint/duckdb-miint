@@ -1,13 +1,151 @@
 // Phase 3 GREEN: implemented inline. See ena_envelope_builder.hpp.
+// Phase 7 GREEN: extended with experiments + runs.
 
 #include "ena_envelope_builder.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <stdexcept>
+#include <string>
+#include <unordered_set>
 
 namespace miint {
 
 namespace {
+
+// Compile-time enum sets for client-side validation. Sourced from the SRA
+// XSDs in localdocs/ena-research-webin-v2-deep.md §4.4 and §6.1. Membership
+// is rough — the goal is to reject typos before the network round-trip, not
+// to be an exhaustive compatibility matrix. ENA's server is the authority.
+const std::unordered_set<std::string> &LibraryStrategies() {
+	static const std::unordered_set<std::string> kSet = {"WGS",
+	                                                     "WGA",
+	                                                     "WXS",
+	                                                     "RNA-Seq",
+	                                                     "ssRNA-seq",
+	                                                     "miRNA-Seq",
+	                                                     "ncRNA-Seq",
+	                                                     "FL-cDNA",
+	                                                     "EST",
+	                                                     "Hi-C",
+	                                                     "ATAC-seq",
+	                                                     "WCS",
+	                                                     "RAD-Seq",
+	                                                     "CLONE",
+	                                                     "POOLCLONE",
+	                                                     "AMPLICON",
+	                                                     "CLONEEND",
+	                                                     "FINISHING",
+	                                                     "ChIP-Seq",
+	                                                     "MNase-Seq",
+	                                                     "DNase-Hypersensitivity",
+	                                                     "Bisulfite-Seq",
+	                                                     "CTS",
+	                                                     "MRE-Seq",
+	                                                     "MeDIP-Seq",
+	                                                     "MBD-Seq",
+	                                                     "Tn-Seq",
+	                                                     "VALIDATION",
+	                                                     "FAIRE-seq",
+	                                                     "SELEX",
+	                                                     "RIP-Seq",
+	                                                     "ChIA-PET",
+	                                                     "Synthetic-Long-Read",
+	                                                     "Targeted-Capture",
+	                                                     "Tethered Chromatin Conformation Capture",
+	                                                     "NOMe-Seq",
+	                                                     "ChM-Seq",
+	                                                     "GBS",
+	                                                     "Ribo-Seq",
+	                                                     "OTHER"};
+	return kSet;
+}
+
+const std::unordered_set<std::string> &LibrarySources() {
+	static const std::unordered_set<std::string> kSet = {
+	    "GENOMIC",     "GENOMIC SINGLE CELL", "TRANSCRIPTOMIC", "TRANSCRIPTOMIC SINGLE CELL",
+	    "METAGENOMIC", "METATRANSCRIPTOMIC",  "SYNTHETIC",      "VIRAL RNA",
+	    "OTHER"};
+	return kSet;
+}
+
+const std::unordered_set<std::string> &LibrarySelections() {
+	static const std::unordered_set<std::string> kSet = {"RANDOM",
+	                                                     "PCR",
+	                                                     "RANDOM PCR",
+	                                                     "RT-PCR",
+	                                                     "HMPR",
+	                                                     "MF",
+	                                                     "repeat fractionation",
+	                                                     "size fractionation",
+	                                                     "MSLL",
+	                                                     "cDNA",
+	                                                     "cDNA_randomPriming",
+	                                                     "cDNA_oligo_dT",
+	                                                     "PolyA",
+	                                                     "Oligo-dT",
+	                                                     "Inverse rRNA",
+	                                                     "Inverse rRNA selection",
+	                                                     "ChIP",
+	                                                     "ChIP-Seq",
+	                                                     "MNase",
+	                                                     "DNase",
+	                                                     "Hybrid Selection",
+	                                                     "Reduced Representation",
+	                                                     "Restriction Digest",
+	                                                     "5-methylcytidine antibody",
+	                                                     "MBD2 protein methyl-CpG binding domain",
+	                                                     "CAGE",
+	                                                     "RACE",
+	                                                     "MDA",
+	                                                     "padlock probes capture method",
+	                                                     "other",
+	                                                     "unspecified"};
+	return kSet;
+}
+
+const std::unordered_set<std::string> &Platforms() {
+	static const std::unordered_set<std::string> kSet = {
+	    "LS454",     "ILLUMINA",          "OXFORD_NANOPORE", "PACBIO_SMRT", "ION_TORRENT", "BGISEQ",
+	    "ABI_SOLID", "COMPLETE_GENOMICS", "HELICOS",         "CAPILLARY",   "DNBSEQ"};
+	return kSet;
+}
+
+const std::unordered_set<std::string> &RunFiletypes() {
+	static const std::unordered_set<std::string> kSet = {"sra",
+	                                                     "srf",
+	                                                     "sff",
+	                                                     "fastq",
+	                                                     "fasta",
+	                                                     "tab",
+	                                                     "454_native",
+	                                                     "454_native_seq",
+	                                                     "454_native_qual",
+	                                                     "Helicos_native",
+	                                                     "Illumina_native",
+	                                                     "Illumina_native_seq",
+	                                                     "Illumina_native_prb",
+	                                                     "Illumina_native_int",
+	                                                     "Illumina_native_qseq",
+	                                                     "Illumina_native_scarf",
+	                                                     "SOLiD_native",
+	                                                     "SOLiD_native_csfasta",
+	                                                     "SOLiD_native_qual",
+	                                                     "PacBio_HDF5",
+	                                                     "bam",
+	                                                     "cram",
+	                                                     "CompleteGenomics_native",
+	                                                     "OxfordNanopore_native"};
+	return kSet;
+}
+
+void RequireMembership(const std::unordered_set<std::string> &set, const std::string &value, const char *field_name,
+                       const std::string &alias) {
+	if (set.find(value) == set.end()) {
+		throw std::runtime_error("ENA envelope: unknown " + std::string(field_name) + " '" + value + "' for alias '" +
+		                         alias + "'");
+	}
+}
 
 // JSON string escaping per RFC 8259 §7. Treats input as opaque bytes; multibyte
 // UTF-8 characters pass through unchanged. Control bytes (< 0x20) are escaped
@@ -163,6 +301,132 @@ void AppendSample(std::string &out, const SampleSpec &s) {
 	out.push_back('}');
 }
 
+// Emit a {"refname":"..."} or {"accession":"..."} cross-reference. accession
+// wins when both are set. `field_name` and `alias` are only used for the
+// "missing both" error message.
+void AppendRef(std::string &out, const RefDescriptor &ref, const char *field_name, const std::string &alias) {
+	if (ref.accession.empty() && ref.refname.empty()) {
+		throw std::runtime_error("ENA envelope: " + std::string(field_name) + " required for alias '" + alias + "'");
+	}
+	out.push_back('{');
+	if (!ref.accession.empty()) {
+		out.append("\"accession\":");
+		AppendJsonString(out, ref.accession);
+	} else {
+		out.append("\"refname\":");
+		AppendJsonString(out, ref.refname);
+	}
+	out.push_back('}');
+}
+
+void AppendExperiment(std::string &out, const ExperimentSpec &e) {
+	if (e.alias.empty()) {
+		throw std::runtime_error("ENA envelope: experiment alias must be non-empty");
+	}
+	RequireMembership(LibraryStrategies(), e.library_strategy, "library_strategy", e.alias);
+	RequireMembership(LibrarySources(), e.library_source, "library_source", e.alias);
+	RequireMembership(LibrarySelections(), e.library_selection, "library_selection", e.alias);
+	RequireMembership(Platforms(), e.platform, "platform", e.alias);
+	if (e.instrument_model.empty()) {
+		throw std::runtime_error("ENA envelope: experiment '" + e.alias + "' instrument_model must be non-empty");
+	}
+
+	out.push_back('{');
+	out.append("\"alias\":");
+	AppendJsonString(out, e.alias);
+	if (!e.title.empty()) {
+		out.append(",\"title\":");
+		AppendJsonString(out, e.title);
+	}
+	out.append(",\"studyRef\":");
+	AppendRef(out, e.study_ref, "study_ref", e.alias);
+	out.append(",\"design\":{");
+	if (!e.design_description.empty()) {
+		out.append("\"designDescription\":");
+		AppendJsonString(out, e.design_description);
+		out.push_back(',');
+	}
+	out.append("\"sampleDescriptor\":");
+	AppendRef(out, e.sample_ref, "sample_ref", e.alias);
+	out.append(",\"libraryDescriptor\":{");
+	if (!e.library_name.empty()) {
+		out.append("\"libraryName\":");
+		AppendJsonString(out, e.library_name);
+		out.push_back(',');
+	}
+	out.append("\"libraryStrategy\":");
+	AppendJsonString(out, e.library_strategy);
+	out.append(",\"librarySource\":");
+	AppendJsonString(out, e.library_source);
+	out.append(",\"librarySelection\":");
+	AppendJsonString(out, e.library_selection);
+	out.append(",\"libraryLayout\":");
+	out.append(e.library_layout == ENALibraryLayout::PAIRED ? "{\"paired\":{}}" : "{\"single\":{}}");
+	out.append("}}"); // close libraryDescriptor + design
+
+	out.append(",\"platform\":{");
+	AppendJsonString(out, e.platform);
+	out.append(":{\"instrumentModel\":");
+	AppendJsonString(out, e.instrument_model);
+	out.append("}}"); // close platform.<NAME> + platform
+
+	out.push_back('}');
+}
+
+void AppendRunFile(std::string &out, const RunFile &f, const std::string &run_alias) {
+	if (f.filename.empty()) {
+		throw std::runtime_error("ENA envelope: run '" + run_alias + "' file.filename must be non-empty");
+	}
+	if (f.checksum.empty()) {
+		throw std::runtime_error("ENA envelope: run '" + run_alias + "' file '" + f.filename +
+		                         "' checksum must be non-empty");
+	}
+	if (f.filetype.empty()) {
+		throw std::runtime_error("ENA envelope: run '" + run_alias + "' file '" + f.filename +
+		                         "' filetype must be non-empty (e.g. 'fastq', 'bam', 'cram')");
+	}
+	RequireMembership(RunFiletypes(), f.filetype, "run.file.filetype", run_alias);
+
+	out.push_back('{');
+	out.append("\"filename\":");
+	AppendJsonString(out, f.filename);
+	out.append(",\"filetype\":");
+	AppendJsonString(out, f.filetype);
+	out.append(",\"checksumMethod\":\"MD5\",\"checksum\":");
+	AppendJsonString(out, f.checksum);
+	out.push_back('}');
+}
+
+void AppendRun(std::string &out, const RunSpec &r) {
+	if (r.alias.empty()) {
+		throw std::runtime_error("ENA envelope: run alias must be non-empty");
+	}
+	if (r.files.empty()) {
+		throw std::runtime_error("ENA envelope: run '" + r.alias + "' must have at least one file");
+	}
+
+	out.push_back('{');
+	out.append("\"alias\":");
+	AppendJsonString(out, r.alias);
+	if (!r.title.empty()) {
+		out.append(",\"title\":");
+		AppendJsonString(out, r.title);
+	}
+	out.append(",\"experimentRef\":");
+	AppendRef(out, r.experiment_ref, "experiment_ref", r.alias);
+	out.append(",\"files\":[");
+	bool first = true;
+	for (const auto &f : r.files) {
+		if (!first) {
+			out.push_back(',');
+		}
+		AppendRunFile(out, f, r.alias);
+		first = false;
+	}
+	out.push_back(']');
+	out.push_back('}');
+}
+
 template <typename T, typename Appender>
 void AppendArray(std::string &out, bool &needs_comma, const char *key, const std::vector<T> &items, Appender appender) {
 	if (items.empty()) {
@@ -199,6 +463,8 @@ std::string BuildEnvelopeJSON(const SubmissionSpec &env) {
 	bool needs_comma = true;
 	AppendArray(out, needs_comma, "projects", env.projects, AppendProject);
 	AppendArray(out, needs_comma, "samples", env.samples, AppendSample);
+	AppendArray(out, needs_comma, "experiments", env.experiments, AppendExperiment);
+	AppendArray(out, needs_comma, "runs", env.runs, AppendRun);
 
 	out.push_back('}');
 	return out;

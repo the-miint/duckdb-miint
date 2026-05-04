@@ -1,0 +1,165 @@
+// Phase 7 RED then GREEN: unit tests for the pure-data layer of
+// INSERT INTO ena.experiments — assemble envelope, POST via injected
+// functor, parse receipt, return row-shaped result tuples (alias,
+// erx_accession, status).
+//
+// Mirrors the projects/samples insert tests (mock-fetcher pattern).
+
+#include "ena_envelope_builder.hpp"
+#include "ena_experiments_insert.hpp"
+#include "ena_receipt_parser.hpp"
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
+
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+using namespace miint;
+
+namespace {
+
+struct CapturedPost {
+	std::string url;
+	std::string body;
+	std::string user;
+	std::string password;
+	std::string content_type;
+};
+
+std::string MakeExperimentReceipt(const std::vector<std::pair<std::string, std::string>> &alias_to_erx,
+                                  bool success = true, const std::string &error = "") {
+	std::string out = "<?xml version=\"1.0\"?><RECEIPT receiptDate=\"2026-05-04T12:00:00Z\" "
+	                  "submissionFile=\"mock\" success=\"";
+	out += (success ? "true" : "false");
+	out += "\">";
+	for (auto &kv : alias_to_erx) {
+		out += "<EXPERIMENT accession=\"" + kv.second + "\" alias=\"" + kv.first + "\" status=\"PRIVATE\"/>";
+	}
+	out += "<SUBMISSION accession=\"ERA999\" alias=\"mock\"/><ACTIONS>ADD</ACTIONS>";
+	if (!success && !error.empty()) {
+		out += "<MESSAGES><ERROR>" + error + "</ERROR></MESSAGES>";
+	}
+	out += "</RECEIPT>";
+	return out;
+}
+
+ExperimentSpec MinimalExperiment(const std::string &alias) {
+	ExperimentSpec e;
+	e.alias = alias;
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "NovaSeq 6000";
+	return e;
+}
+
+} // namespace
+
+TEST_CASE("ENA experiments insert: single row builds envelope and parses receipt", "[ena_experiments_insert]") {
+	CapturedPost captured;
+	auto post_fn = [&captured](const std::string &url, const std::string &body, const std::string &user,
+	                           const std::string &password, const std::string &content_type) {
+		captured = {url, body, user, password, content_type};
+		return MakeExperimentReceipt({{"e1", "ERX42"}});
+	};
+
+	std::vector<ExperimentSpec> exps = {MinimalExperiment("e1")};
+	ENAExperimentInsertOptions opts;
+	opts.endpoint_url = "http://mock.example/submit";
+	opts.user = "Webin-1";
+	opts.password = "pw";
+
+	auto rows = SubmitExperimentInsert(exps, opts, post_fn);
+
+	REQUIRE(rows.size() == 1);
+	REQUIRE(rows[0].alias == "e1");
+	REQUIRE(rows[0].erx_accession == "ERX42");
+	REQUIRE(rows[0].status == "PRIVATE");
+
+	REQUIRE(captured.url == "http://mock.example/submit");
+	REQUIRE(captured.user == "Webin-1");
+	REQUIRE(captured.password == "pw");
+	REQUIRE(captured.content_type.find("json") != std::string::npos);
+	REQUIRE(captured.body.find("\"alias\":\"e1\"") != std::string::npos);
+	REQUIRE(captured.body.find("\"libraryStrategy\":\"WGS\"") != std::string::npos);
+	REQUIRE(captured.body.find("\"ILLUMINA\":{\"instrumentModel\":\"NovaSeq 6000\"}") != std::string::npos);
+}
+
+TEST_CASE("ENA experiments insert: multi-row preserves order", "[ena_experiments_insert]") {
+	auto post_fn = [](const std::string &, const std::string &body, const std::string &, const std::string &,
+	                  const std::string &) {
+		REQUIRE(body.find("\"alias\":\"a\"") != std::string::npos);
+		REQUIRE(body.find("\"alias\":\"b\"") != std::string::npos);
+		return MakeExperimentReceipt({{"a", "ERX10"}, {"b", "ERX11"}});
+	};
+
+	std::vector<ExperimentSpec> exps = {MinimalExperiment("a"), MinimalExperiment("b")};
+	ENAExperimentInsertOptions opts;
+	opts.endpoint_url = "http://mock.example/submit";
+	opts.user = "Webin-1";
+	opts.password = "pw";
+
+	auto rows = SubmitExperimentInsert(exps, opts, post_fn);
+	REQUIRE(rows.size() == 2);
+	REQUIRE(rows[0].alias == "a");
+	REQUIRE(rows[0].erx_accession == "ERX10");
+	REQUIRE(rows[1].alias == "b");
+	REQUIRE(rows[1].erx_accession == "ERX11");
+}
+
+TEST_CASE("ENA experiments insert: receipt success=false throws with messages", "[ena_experiments_insert]") {
+	auto post_fn = [](const std::string &, const std::string &, const std::string &, const std::string &,
+	                  const std::string &) {
+		return MakeExperimentReceipt({}, false, "study reference 'p-missing' not found");
+	};
+
+	std::vector<ExperimentSpec> exps = {MinimalExperiment("e1")};
+	ENAExperimentInsertOptions opts;
+	opts.endpoint_url = "http://mock.example/submit";
+	opts.user = "Webin-1";
+	opts.password = "pw";
+
+	REQUIRE_THROWS_WITH(SubmitExperimentInsert(exps, opts, post_fn),
+	                    Catch::Matchers::ContainsSubstring("study reference 'p-missing' not found"));
+}
+
+TEST_CASE("ENA experiments insert: empty input is a no-op (no POST issued)", "[ena_experiments_insert]") {
+	bool called = false;
+	auto post_fn = [&called](const std::string &, const std::string &, const std::string &, const std::string &,
+	                         const std::string &) {
+		called = true;
+		return std::string();
+	};
+
+	std::vector<ExperimentSpec> exps;
+	ENAExperimentInsertOptions opts;
+	opts.endpoint_url = "http://mock.example/submit";
+	opts.user = "Webin-1";
+	opts.password = "pw";
+
+	auto rows = SubmitExperimentInsert(exps, opts, post_fn);
+	REQUIRE(rows.empty());
+	REQUIRE_FALSE(called);
+}
+
+TEST_CASE("ENA experiments insert: receipt missing alias is reported clearly", "[ena_experiments_insert]") {
+	auto post_fn = [](const std::string &, const std::string &, const std::string &, const std::string &,
+	                  const std::string &) {
+		return MakeExperimentReceipt({}, true);
+	};
+
+	std::vector<ExperimentSpec> exps = {MinimalExperiment("orphan")};
+	ENAExperimentInsertOptions opts;
+	opts.endpoint_url = "http://mock.example/submit";
+	opts.user = "Webin-1";
+	opts.password = "pw";
+
+	REQUIRE_THROWS_WITH(SubmitExperimentInsert(exps, opts, post_fn), Catch::Matchers::ContainsSubstring("orphan"));
+}

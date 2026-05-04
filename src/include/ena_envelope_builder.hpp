@@ -37,12 +37,57 @@ struct SampleSpec {
 	std::vector<std::pair<std::string, std::string>> attributes;
 };
 
+// Cross-reference to a parent object (study / sample / experiment). V2 accepts
+// either an accession (the server-assigned ID, e.g. PRJEB123) or a refname
+// (the parent's alias, useful for first-time bulk submissions where parent and
+// children are POSTed together). `accession` wins when both are set.
+struct RefDescriptor {
+	std::string accession;
+	std::string refname;
+};
+
+enum class ENALibraryLayout { SINGLE, PAIRED };
+
+// One file referenced by a Run's <DATA_BLOCK><FILES>. The server re-computes
+// MD5 after upload and compares against `checksum`; mismatch → validation
+// error. `filetype` is one of the SRA.run.xsd enum (see
+// localdocs/ena-research-webin-v2-deep.md §6.1) — `fastq` is the common case.
+struct RunFile {
+	std::string filename;
+	std::string filetype; // "fastq", "bam", "cram", ...
+	std::string checksum; // MD5 hex (32 chars); SHA-256 also accepted by run XSD
+};
+
+struct ExperimentSpec {
+	std::string alias;
+	std::string title; // optional
+	RefDescriptor study_ref;
+	RefDescriptor sample_ref;
+	std::string design_description; // optional
+	std::string library_name;       // optional
+	std::string library_strategy;   // required, e.g. WGS, AMPLICON, RNA-Seq
+	std::string library_source;     // required, e.g. METAGENOMIC, GENOMIC
+	std::string library_selection;  // required, e.g. RANDOM, PCR
+	ENALibraryLayout library_layout = ENALibraryLayout::SINGLE;
+	std::string platform;         // required, e.g. ILLUMINA, OXFORD_NANOPORE
+	std::string instrument_model; // required, free-form (server validates)
+};
+
+struct RunSpec {
+	std::string alias;
+	std::string title; // optional
+	RefDescriptor experiment_ref;
+	std::vector<RunFile> files; // required, ≥ 1
+};
+
 struct SubmissionSpec {
 	ENAAction action = ENAAction::ADD;
 	std::string hold_until_date; // optional, "YYYY-MM-DD" or ISO-8601 with TZ
 	std::vector<ProjectSpec> projects;
 	std::vector<SampleSpec> samples;
-	// Future phases append: experiments, runs, analyses
+	std::vector<ExperimentSpec> experiments;
+	std::vector<RunSpec> runs;
+	// Future phase: analyses
 };
 
 // Build the V2 JSON envelope. Compact (no whitespace) for byte-stable output.

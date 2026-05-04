@@ -9,6 +9,8 @@
 
 #include <catch2/catch_all.hpp>
 
+#include <algorithm>
+
 namespace {
 
 // Convenience: compact-JSON byte-equal compare.
@@ -206,4 +208,291 @@ TEST_CASE("ENA envelope: action=HOLD AND hold_until_date is rejected (avoid doub
 	env.action = miint::ENAAction::HOLD;
 	env.hold_until_date = "2027-01-01";
 	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("automatically"));
+}
+
+// =====================================================================
+// Phase 7 — experiments + runs
+// =====================================================================
+//
+// Wire shape mirrors the SRA.experiment.xsd / SRA.run.xsd nesting documented
+// in localdocs/ena-research-webin-v2-deep.md §4.4 / §4.5, expressed with the
+// camelCase JSON keys used elsewhere in the V2 envelope. Cross-references
+// use refname (the parent's alias) — V2 also accepts accession, exposed via
+// `accession` on the ref struct.
+
+TEST_CASE("ENA envelope: minimal experiment with paired layout and ILLUMINA platform", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "exp-001";
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "Illumina HiSeq 4000";
+	env.experiments.push_back(e);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	CheckEqual(json, R"X({"submission":{"actions":[{"type":"ADD"}]},)X"
+	                 R"X("experiments":[{"alias":"exp-001",)X"
+	                 R"X("studyRef":{"refname":"p1"},)X"
+	                 R"X("design":{"sampleDescriptor":{"refname":"s1"},)X"
+	                 R"X("libraryDescriptor":{"libraryStrategy":"WGS","librarySource":"METAGENOMIC",)X"
+	                 R"X("librarySelection":"RANDOM","libraryLayout":{"paired":{}}}},)X"
+	                 R"X("platform":{"ILLUMINA":{"instrumentModel":"Illumina HiSeq 4000"}}}]})X");
+}
+
+TEST_CASE("ENA envelope: experiment with optional fields (title, design description, library_name, single layout)",
+          "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "exp-002";
+	e.title = "Stool 16S amplicon";
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.design_description = "16S V4 amplicon, 250 bp paired-end";
+	e.library_name = "lib-002";
+	e.library_strategy = "AMPLICON";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "PCR";
+	e.library_layout = miint::ENALibraryLayout::SINGLE;
+	e.platform = "OXFORD_NANOPORE";
+	e.instrument_model = "MinION";
+	env.experiments.push_back(e);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	CHECK(json.find(R"X("alias":"exp-002")X") != std::string::npos);
+	CHECK(json.find(R"X("title":"Stool 16S amplicon")X") != std::string::npos);
+	CHECK(json.find(R"X("designDescription":"16S V4 amplicon, 250 bp paired-end")X") != std::string::npos);
+	CHECK(json.find(R"X("libraryName":"lib-002")X") != std::string::npos);
+	CHECK(json.find(R"X("libraryLayout":{"single":{}})X") != std::string::npos);
+	CHECK(json.find(R"X("OXFORD_NANOPORE":{"instrumentModel":"MinION"})X") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope: experiment study_ref accepts accession or refname", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "exp-acc";
+	e.study_ref.accession = "PRJEB42";
+	e.sample_ref.accession = "SAMEA42";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "NovaSeq 6000";
+	env.experiments.push_back(e);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	// `accession` wins when set; refname not emitted.
+	CHECK(json.find(R"X("studyRef":{"accession":"PRJEB42"})X") != std::string::npos);
+	CHECK(json.find(R"X("sampleDescriptor":{"accession":"SAMEA42"})X") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope: experiment empty alias rejected", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "NovaSeq 6000";
+	env.experiments.push_back(e);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("alias"));
+}
+
+TEST_CASE("ENA envelope: experiment requires study_ref", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "exp-no-study";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "NovaSeq 6000";
+	env.experiments.push_back(e);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("study_ref"));
+}
+
+TEST_CASE("ENA envelope: experiment requires sample_ref", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "exp-no-sample";
+	e.study_ref.refname = "p1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "NovaSeq 6000";
+	env.experiments.push_back(e);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("sample_ref"));
+}
+
+TEST_CASE("ENA envelope: experiment unknown library_strategy rejected", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "exp-bad";
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "DEFINITELY_NOT_A_REAL_STRATEGY";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "NovaSeq 6000";
+	env.experiments.push_back(e);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("library_strategy"));
+}
+
+TEST_CASE("ENA envelope: experiment unknown platform rejected", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "exp-bad-platform";
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "MADE_UP_PLATFORM";
+	e.instrument_model = "NovaSeq 6000";
+	env.experiments.push_back(e);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("platform"));
+}
+
+TEST_CASE("ENA envelope: minimal run with two paired-fastq files", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.alias = "run-001";
+	r.experiment_ref.refname = "exp-001";
+	r.files.push_back({"sample-A_1.fastq.gz", "fastq", "9b8932f85caa54e687eba62fca3edce2"});
+	r.files.push_back({"sample-A_2.fastq.gz", "fastq", "183d6a24e0c3704e993bebe75bbbd989"});
+	env.runs.push_back(r);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	CheckEqual(json, R"X({"submission":{"actions":[{"type":"ADD"}]},)X"
+	                 R"X("runs":[{"alias":"run-001","experimentRef":{"refname":"exp-001"},)X"
+	                 R"X("files":[)X"
+	                 R"X({"filename":"sample-A_1.fastq.gz","filetype":"fastq","checksumMethod":"MD5",)X"
+	                 R"X("checksum":"9b8932f85caa54e687eba62fca3edce2"},)X"
+	                 R"X({"filename":"sample-A_2.fastq.gz","filetype":"fastq","checksumMethod":"MD5",)X"
+	                 R"X("checksum":"183d6a24e0c3704e993bebe75bbbd989"}]}]})X");
+}
+
+TEST_CASE("ENA envelope: single-end run emits one file", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.alias = "run-single";
+	r.experiment_ref.refname = "exp-single";
+	r.files.push_back({"sample-B.fastq.gz", "fastq", "abcdef0123456789abcdef0123456789"});
+	env.runs.push_back(r);
+	auto json = miint::BuildEnvelopeJSON(env);
+	CHECK(json.find(R"X("files":[{"filename":"sample-B.fastq.gz")X") != std::string::npos);
+	CHECK(std::count(json.begin(), json.end(), '{') > 0);
+	// Only one FILE entry — search for "filename" once.
+	auto first = json.find("\"filename\":");
+	REQUIRE(first != std::string::npos);
+	auto second = json.find("\"filename\":", first + 1);
+	CHECK(second == std::string::npos);
+}
+
+TEST_CASE("ENA envelope: run requires alias", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.experiment_ref.refname = "exp-001";
+	r.files.push_back({"a.fastq.gz", "fastq", "deadbeef"});
+	env.runs.push_back(r);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("alias"));
+}
+
+TEST_CASE("ENA envelope: run requires experiment_ref", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.alias = "run-no-exp";
+	r.files.push_back({"a.fastq.gz", "fastq", "deadbeef"});
+	env.runs.push_back(r);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("experiment_ref"));
+}
+
+TEST_CASE("ENA envelope: run requires at least one file", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.alias = "run-no-files";
+	r.experiment_ref.refname = "exp-001";
+	env.runs.push_back(r);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("file"));
+}
+
+TEST_CASE("ENA envelope: run rejects empty checksum", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.alias = "run-bad-checksum";
+	r.experiment_ref.refname = "exp-001";
+	r.files.push_back({"a.fastq.gz", "fastq", ""});
+	env.runs.push_back(r);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("checksum"));
+}
+
+TEST_CASE("ENA envelope: empty filetype rejected (no silent default)", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.alias = "run-empty-filetype";
+	r.experiment_ref.refname = "exp-001";
+	r.files.push_back({"a.fastq.gz", "", "abcd"});
+	env.runs.push_back(r);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("filetype"));
+}
+
+TEST_CASE("ENA envelope: full graph (project + sample + experiment + run) emits arrays in spec order",
+          "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ProjectSpec p;
+	p.alias = "p1";
+	p.title = "P1";
+	env.projects.push_back(p);
+	miint::SampleSpec s;
+	s.alias = "s1";
+	s.taxon_id = 408170;
+	env.samples.push_back(s);
+	miint::ExperimentSpec e;
+	e.alias = "e1";
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "NovaSeq 6000";
+	env.experiments.push_back(e);
+	miint::RunSpec r;
+	r.alias = "r1";
+	r.experiment_ref.refname = "e1";
+	r.files.push_back({"r1_1.fastq.gz", "fastq", "deadbeef"});
+	r.files.push_back({"r1_2.fastq.gz", "fastq", "cafebabe"});
+	env.runs.push_back(r);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	const auto sub_pos = json.find("\"submission\":");
+	const auto proj_pos = json.find("\"projects\":");
+	const auto samp_pos = json.find("\"samples\":");
+	const auto exp_pos = json.find("\"experiments\":");
+	const auto run_pos = json.find("\"runs\":");
+	REQUIRE(sub_pos != std::string::npos);
+	REQUIRE(proj_pos != std::string::npos);
+	REQUIRE(samp_pos != std::string::npos);
+	REQUIRE(exp_pos != std::string::npos);
+	REQUIRE(run_pos != std::string::npos);
+	CHECK(sub_pos < proj_pos);
+	CHECK(proj_pos < samp_pos);
+	CHECK(samp_pos < exp_pos);
+	CHECK(exp_pos < run_pos);
 }

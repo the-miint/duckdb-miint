@@ -5,7 +5,7 @@
 If you're picking this up in a fresh session:
 
 - **Repo**: `/home/dtmcdonald/dev/duckdb-miint-alt`. Branch: `feat/ena-submission` (cut from `v1.5-variegata`).
-- **Status as of 2026-05-03**: Phases 0–6 complete and committed (Phase 6 main pending commit). **Phase 7 (`ena.experiments` + `ena.runs`) is next.**
+- **Status as of 2026-05-04**: Phases 0–7 complete and committed. **MILESTONE 2 reached** (full submission pipeline). **Phase 8 (alias collision check + checklist registry) is next.**
   - `a8e8ec0` Phase 0 — branch + scaffolding (no behavior change)
   - `100a2c7` Phase 1 — `CREATE SECRET (TYPE ENA, ...)` with password redaction + literal/env/file indirection
   - `f88e756` Phase 2 — `ENAClient::PostJSON`/`PostXML` with HTTP Basic auth + retry on 429/5xx (incl. 504)
@@ -13,8 +13,12 @@ If you're picking this up in a fresh session:
   - `321045d` Phase 4 — `ena.projects` virtual table INSERT (StorageExtension scaffolding + projects insert operator + `ena.submission_log`)
   - `bb94ea4` Phase 5 — `ena.samples` virtual table INSERT — **MILESTONE 1 (BioSample-first workflow)**. Shared helpers in `ena_insert_common.{cpp,hpp}`.
   - `bb59c26` Phase 6 prep — `FastqEncoder` extracted from `copy_fastq.cpp` into a reusable class with a `void(const char *, size_t)` sink callback (DuckDB-free, unit-testable)
-  - (pending) Phase 6 main — `ena_upload_reads` table function + Aspera write-side helper.
-- **Test status**: 797 SQL cases / 6799 assertions / 0 failed; Catch2 binary 6698 assertions in 114 cases / 0 failed. Full `bash run_tests.sh` clean.
+  - `79d2fe7` Phase 6 main — `ena_upload_reads` table function + Aspera write-side helper. Hard caps (50M rows / 5GB seq bytes) on materialised input.
+  - `863bdff` Phase 6.5 — libcurl streaming-upload transport (`ftp/ftps/http/https://`). Auto-disabled on macOS (vsearch+OpenSSL symbol clash; see `localdocs/vsearch-feature-request.md`).
+  - `1ad9630` Phase 7 Step 7a — `ENAObjectInsertOperator` CRTP base in `src/include/ena_object_insert_op.hpp`. Per-table operator cost dropped ~395 → ~210 lines.
+  - `60f2596` Phase 7 Step 7b — `GzipMd5Stream` shared base in `src/ena_upload_reads.cpp`. ~150 lines of zlib + MD5 duplication removed.
+  - Phase 7 Steps 7d+7e — `ena.experiments` + `ena.runs` virtual tables INSERT (full project → samples → upload → experiments → runs pipeline). `SubmitENAObjectOutcome<Traits, ...>` template in `src/include/ena_submit_outcome.hpp` deduplicated the 4x submit-side files.
+- **Test status**: `bash run_tests.sh` clean — SQL 115 cases / 6699 assertions / 31 skipped / 0 failed; Catch2 831 cases / 6914 assertions / 33 skipped / 0 failed.
 - **Architecture-of-record**: `localdocs/ena-submission-design-v2.md`. Open decisions in §11 are resolved (default endpoint=test, naming=`ena.projects`, persistent `ena.submission_log`, error on overwrite, flat upload layout, system CA store).
 - **Research artifacts** in `localdocs/`:
   - `ena-research-webin-v2-deep.md` — Webin V2 endpoints, receipt structure, XSDs, auth (HTTP Basic only)
@@ -34,10 +38,19 @@ If you're picking this up in a fresh session:
   - At end of each phase, append a "Phase N done" subsection to this plan (`## Implementation log` section) with files touched, test deltas, deviations, follow-ups.
   - User asked previously to commit each phase before starting the next (matches the existing per-phase commit cadence; see Phases 0–5 plus Phase 6 prep).
 
-**Up next**: Phase 7 (`ena.experiments` + `ena.runs`). Phase 6 main is committed (see Implementation log). Pre-Linus plan additions, retained:
-- **Phase 5 review surfaced a Phase-7-prep ask**: template the per-table `Finalize` body and extract a CRTP Sink/Source base from `ena_projects_insert_op.cpp` + `ena_samples_insert_op.cpp` before the third concrete operator (experiments) lands. Plan this as the first refactor in Phase 7's Red phase, not the last.
-- **Reports API SELECT path** (`SELECT * FROM ena.{projects,samples}` via `/ena/submit/report/...`) was deferred from Phase 5. Pick this up after Phase 6 if no consumer surfaces sooner.
-- **Transport-for-uploads decision (2026-05-03)**: Phase 6 ships **Aspera-only**. FTP/FTPS is parked — add it later only if a real user environment can't run `ascp`. This swaps the original Phase 6 (FTPS) and the original Phase 8 (Aspera write-side) — Phase 8 now drops the Aspera write-side bullet and gains nothing else from Phase 6's deferral.
+**Up next**: **Phase 8 — alias collision check + checklist registry**. See the Phase 8 section below for the full task list.
+
+Other open follow-ups that are NOT Phase 8's job but should not be lost:
+- **Reports API SELECT path** (`SELECT * FROM ena.{projects,samples}` via `/ena/submit/report/...`) was deferred from Phase 5. Pick up whenever a consumer needs read-back; deferred indefinitely otherwise.
+- **pyftpdlib-backed SQL test for the libcurl CURL transport** — Phase 6.5 has no live SQL test for libcurl. The unit test against `file://` proves the wrapper; the SQL-level integration is exercised only via the file:// path. Land a mock when a real consumer of `ftps://` surfaces.
+- **vsearch upstream namespace fix** (see `localdocs/vsearch-feature-request.md`) — would let us remove the macOS `MIINT_ENABLE_CURL=OFF` gate and the `-Wl,--allow-multiple-definition` Linux workaround. Externally tracked.
+- **HTTPS-PUT receipt parsing** for Phase 6.5 — currently we only check the HTTP code; some servers return JSON receipts that downstream callers might want. No consumer yet.
+- **Templated `ENAObjectSubmissionOutcome<RowT>`** (Linus Phase 7 should-fix) — extract when analyses lands in Phase 8 to make the abstraction earn its keep.
+- **Real `LIST(STRUCT)` emission in RETURNING for `runs.files`** (Phase 7 nit) — currently emits NULL; user-supplied list preserved verbatim in `submission_log.request_payload`.
+- **V2 JSON wire format verification for experiments + runs** — the camelCase shape was XSD-derived rather than from a published OpenAPI schema. The live `ena_full_pipeline.test` against `wwwdev.ebi.ac.uk` will catch any actual mismatch; if it fails, adjust to whatever V2 actually expects.
+
+Pre-Linus plan additions, retained verbatim:
+- **Transport-for-uploads decision (2026-05-03)**: Phase 6 ships **Aspera + libcurl streaming**. FTP-via-subprocess-`curl` (the original parked design) is no longer needed — libcurl in-process replaces it. Phase 8 already had its "Aspera write-side" bullet absorbed into Phase 6.
 
 ---
 
@@ -302,23 +315,51 @@ INSERT INTO ena.samples (alias, taxon_id, checklist, attributes)
 
 ### Phase 7 — `ena.experiments` + `ena.runs` (full submission milestone)
 
-**Goal**: complete the project → samples → upload → experiments → runs pipeline end-to-end.
+**Goal**: complete the project → samples → upload → experiments → runs pipeline end-to-end. Two deferred refactors land first so experiments + runs ride on shared scaffolding instead of copying it again.
 
-**Red**:
-- `test/sql/ena_full_pipeline.test` — guarded by Webin test creds + `ENA_WEBIN_TEST_AVAILABLE`. Builds 2 projects × 4 samples × 4 runs in one test, asserts all server-assigned accessions are returned and stored in `ena.submission_log`.
-- Catch2 tests for envelope builder additions (experiments, runs).
+**Step 7a — DRY refactor: shared insert-operator base** (Phase 5 carry-over):
+- Read `src/ena_projects_insert_op.cpp` + `src/ena_samples_insert_op.cpp` side by side. Sink (`SinkResultType`, chunk buffering, `Combine` no-op) and Source (`GetData` for RETURNING) are nearly identical. Per-table differences live in: spec-builder, the submit functor, and the RETURNING column population.
+- Extract `src/include/ena_object_insert_op.hpp` + `src/ena_object_insert_op.cpp` as a CRTP base (or a function template parameterised on `SpecT`/`OutcomeT`/the submit functor + a build-from-buffer + an append-returning callback). Refactor projects + samples to derive from it. Tests (Catch2 + SQL mock) must stay green.
+- Commit as a separate refactor commit *before* experiments code lands. This is a load-bearing prerequisite — do not skip.
 
-**Green**:
-- `src/ena_experiments_insert.cpp`, `src/ena_runs_insert.cpp` — derive from phase 4's base. Library/platform/instrument enumerations validated client-side (compile-time constants from `enasequence/webin-xml`).
-- Wire `ena.experiments`, `ena.runs` tables.
+**Step 7b — DRY refactor: shared gzip+MD5 sink base** (Phase 6.5 carry-over):
+- `GzipMd5FileSink` (file-backed, push model) and `StreamingGzipMd5Producer` (memory-buffered, pull model) in `src/ena_upload_reads.cpp` share a near-identical `z_stream` setup, MD5 update path, and `kStep`-sized output buffer logic. Extract a base `GzipMd5Stream` that takes a `std::function<void(const uint8_t*, size_t)>` chunk sink. The "to file" wrapper writes via `FileHandle`; the "to memory" wrapper appends to `std::vector<uint8_t>`. ~150 lines of duplication eliminated.
+- Tests (`[curl_send]` + `test/sql/ena_upload_reads_local.test`) must stay green.
 
-**Refactor**: nothing major expected — base class should absorb most of it.
+**Step 7c — Red phase**:
+- `test/cpp/test_ena_envelope.cpp` additions — experiments + runs spec builders. Byte-equality fixtures sourced from `localdocs/ena-research-webin-v2-deep.md` §1 (or generated from a webin-cli example envelope).
+- `test/cpp/test_ena_experiments_insert.cpp` + `test/cpp/test_ena_runs_insert.cpp` — operator-level tests against the mock-fetcher pattern, mirroring `test/cpp/test_ena_projects_insert.cpp` and `test/cpp/test_ena_samples_insert.cpp`.
+- `test/sql/ena_experiments_insert_mock.test` + `test/sql/ena_runs_insert_mock.test` — SQL round-trip against the local mock (`ENA_WEBIN_MOCK_URL` from Phase 0/4). Skipped without httpfs (matches existing pattern).
+- `test/sql/ena_full_pipeline.test` — guarded by Webin test creds + `ENA_WEBIN_TEST_AVAILABLE`. Builds 2 projects × 4 samples × `ena_upload_reads(...)` over those samples × 2 experiments × 4 runs in one test. Asserts all server-assigned accessions are returned and that `ena.submission_log` captures every step.
 
-**Verification**: full-pipeline test passes against `wwwdev.ebi.ac.uk`.
+**Step 7d — Green**:
+- `src/include/ena_envelope_builder.hpp` extensions: `ExperimentSpec`, `RunSpec`, plus `BuildEnvelope` overloads.
+- `src/ena_envelope_builder.cpp` extensions to emit experiment + run blocks of the V2 envelope.
+- `src/ena_experiments_insert.{cpp,hpp}`, `src/ena_runs_insert.{cpp,hpp}` — derive from the Step 7a base. Per-table specifics: experiment requires (study/project ref, sample ref, design, library_strategy, library_source, library_selection, library_layout, instrument_model); run requires (experiment ref, file metadata for the previously-uploaded reads — sourcing this from `ena_upload_reads`'s output rows, plus md5/filetype).
+- Library/platform/instrument enumerations validated client-side (compile-time constants from `enasequence/webin-xml`); throw `BinderException` on unknown values.
+- Wire `ena.experiments` + `ena.runs` table-entries to their insert operators in `src/ena_storage.cpp::PlanInsert`.
+- Update `test/scripts/ena_webin_mock.py` to handle the new object types in incoming envelopes (`<EXPERIMENT_SET>`, `<RUN_SET>`) and respond with synthetic `ERX*`/`ERR*` accessions.
+- Update `miint_versions()` only if a new library is embedded (probably not — envelope/parser additions are pure C++).
 
-**Code review**: yes.
+**Step 7e — Refactor + Linus review**:
+- After green, look for additional duplication opportunities in `src/ena_envelope_builder.cpp` (study/sample/experiment/run all share a similar skeleton — JSON escaping, attribute MAP serialization).
+- Run `linus-code-reviewer` over the full Phase 7 diff. Address blocking issues.
+
+**Verification**:
+- `bash run_tests.sh` clean.
+- Manual round-trip via mock + duckdb shell: `INSERT INTO ena.projects ... RETURNING prjeb_accession` → `INSERT INTO ena.samples ... RETURNING samea_accession` → `SELECT * FROM ena_upload_reads(relation := ..., target_url := 'aspera://...')` → `INSERT INTO ena.experiments ... RETURNING erx_accession` → `INSERT INTO ena.runs ... RETURNING err_accession`. All five accession patterns server-assigned and present in `ena.submission_log`.
+- Live test against `wwwdev.ebi.ac.uk` (gated on `ENA_WEBIN_TEST_AVAILABLE`).
+
+**Code review**: yes — focus on the Step 7a/7b refactors for correctness across the existing operators (no regressions), and on experiments/runs for envelope correctness against the canonical XSDs.
 
 **Approval gate**: STOP. **MILESTONE 2 reached** (full submission pipeline).
+
+**Notes for fresh-session pickup**:
+- The `ena_webin_mock.py` server lives in `test/scripts/`. It's spawned by `run_tests.sh` and exports `ENA_WEBIN_MOCK_URL`. To extend, add new endpoint handlers inline; the canned receipts are inline strings.
+- When adding new SQL functions/tables, register in `src/miint_extension.cpp::LoadInternal()`.
+- Use the separate-connection pattern (`docs/internals/reading-tables-views.md`) when reading user-supplied relations from inside a table function bind/init. `MaterialiseInput` in `src/ena_upload_reads.cpp` is the most recent example.
+- For new operators, follow the per-row error reporting convention (global row index, not per-chunk) — Phase 6 review fixed this and the Phase 7 operators should match.
+- Do NOT use `git add -A` or `git add .` — stage explicit paths. Run `conda run -n duckdb-143 make format-fix` before each commit.
 
 ---
 
@@ -704,7 +745,69 @@ Follow-ups (deferred):
 - Upstream vsearch fix to namespace its vendored MD5/SHA1 (would re-enable libcurl on macOS).
 
 
-### Phase 7 — pending
+### Phase 7 — done
+
+**MILESTONE 2 reached** — full project → samples → upload → experiments → runs pipeline works end-to-end against the python mock (and is wired for live `wwwdev.ebi.ac.uk` via the gated `ena_full_pipeline.test`). Three commits in this phase: `1ad9630` (Step 7a CRTP base), `60f2596` (Step 7b GzipMd5Stream), and Step 7d+7e in one final commit.
+
+**Step 7a — done (commit `1ad9630`)**: extracted `ENAObjectInsertOperator<Derived, SpecT, OptsT, OutcomeT>` CRTP base in `src/include/ena_object_insert_op.hpp`. `ENAProjectsInsert` and `ENASamplesInsert` shrank from ~395 → ~210 lines each. New per-table operators (Phase 7d) ride on the same base instead of copying the Sink/Source/Finalize boilerplate.
+
+**Step 7b — done (commit `60f2596`)**: extracted `GzipMd5Stream` shared base from `GzipMd5FileSink` + `StreamingGzipMd5Producer` in `src/ena_upload_reads.cpp`. Sink-callback shape (`std::function<void(const uint8_t*, std::size_t)>`) lets the file sink push to a `FileHandle` and the libcurl producer push to an in-memory buffer. ~150 lines of zlib + MD5 duplication removed; both consumers now ~35 / ~100 lines.
+
+**Step 7c — RED**: wrote 14 new envelope-builder cases (`ExperimentSpec`, `RunSpec`, `RefDescriptor`, `ENALibraryLayout`, `RunFile`, full-graph), 5+5 operator-level cases for experiments/runs against the mock-fetcher pattern, 3 SQL files (`ena_experiments_insert_mock.test`, `ena_runs_insert_mock.test`, `ena_full_pipeline.test`), and confirmed RED via build failure (`ena_experiments_insert.hpp: No such file or directory`).
+
+**Step 7d — GREEN**:
+- Extended envelope builder (`src/ena_envelope_builder.{hpp,cpp}`) with `RefDescriptor`, `ENALibraryLayout`, `RunFile`, `ExperimentSpec`, `RunSpec`, `AppendExperiment`, `AppendRun`, `AppendRunFile`, `AppendRef`. Wire format mirrors the SRA XSD nesting (`localdocs/ena-research-webin-v2-deep.md` §4.4 / §4.5) in camelCase JSON. Compile-time enum sets validate `library_strategy`, `library_source`, `library_selection`, `platform`, `run.file.filetype` client-side; unknown values throw before any HTTP traffic.
+- New pure-data submit helpers: `src/include/ena_experiments_insert.{hpp}` + `src/ena_experiments_insert.cpp`, `src/include/ena_runs_insert.{hpp}` + `src/ena_runs_insert.cpp`. Per-table outcome types (`ENAExperimentSubmissionOutcome`, `ENARunSubmissionOutcome`) mirror the project/sample shape.
+- New operator subclasses: `src/include/ena_experiments_insert_op.hpp` + `src/ena_experiments_insert_op.cpp`, `src/include/ena_runs_insert_op.hpp` + `src/ena_runs_insert_op.cpp` — derive from the Step 7a CRTP base; only own the per-table data mapping (chunk row → spec, RETURNING projection, ObjectName/ThrowPrefix/OperatorName).
+- Catalog schema revisions in `src/ena_storage.cpp::BuildENATableInfo`: added `erx_accession` to `experiments` (was missing entirely!), added `design_description` and `library_name`, dropped unused `nominal_length` / `nominal_sdev`. For `runs`: renamed `accession` → `err_accession` to match the `*_accession` naming convention; added `title`. The `files` column kept its `LIST(STRUCT(filename,filetype,md5))` shape (matches XSD `<DATA_BLOCK><FILES>`). Updated `ena_storage_attach.test` row-count expectations (experiments 12→13, runs 4→5).
+- Wired the new operators into `ENACatalog::PlanInsert` dispatcher.
+- Mock test files use the catalog schema (`sample_descriptor` not `sample_ref`, `LIST(STRUCT)` literal for `files`).
+
+**Step 7e — refactor + Linus review**:
+
+DRY refactor: Extracted `SubmitENAObjectOutcome<Traits, SpecT, OptsT, OutcomeT>` in `src/include/ena_submit_outcome.hpp`. The four per-table submit `.cpp` files (projects, samples, experiments, runs) all delegated to it via a Traits struct providing `SetEnvelopeArray`, `ReceiptObjectType`, `BuildRow` static methods. Per-table files dropped from ~100 → ~55 lines each (~170 lines saved). `FlattenErrors` deduplicated as `FlattenENAErrors` in the shared header.
+
+Code review (linus-code-reviewer):
+- **Blocker — `ToRef` / `ToExperimentRef` prefix-only matching misclassified user aliases**: a refname literally `ERPmycoolstudy` would route to `ref.accession` and the server would reject the submission with "accession not found". Fixed: trailing characters after a recognized prefix must be all-digits to qualify as an accession. Real accessions are always `<PREFIX><NUMERIC>`. New SQL test cases pin both the refname-shaped-like-prefix path and the real-accession path in `ena_experiments_insert_mock.test`.
+- **Blocker — `ExtractFilesList` could deref a NULL `Value`** via `StructValue::GetChildren` when the user supplied `[NULL]` in the files list. Fixed: explicit `entry.IsNull()` check with a clear "list contains NULL at position N" error. New SQL test in `ena_runs_insert_mock.test`.
+- **Should-fix — required-column-index checks happened per-row** in `ENAExperimentsInsert::BuildFromBuffer`. Fixed: hoisted to per-statement, before the scan starts. Matches the `ENARunsInsert` pattern.
+- **Nit — `AppendRunFile` silently substituted `"fastq"` for an empty filetype**. Replaced with an explicit "filetype must be non-empty (e.g. 'fastq', 'bam', 'cram')" throw; new envelope-builder + SQL tests pin the rejection. Removes the silent-default footgun.
+- **Acknowledged — the `ENA*SubmissionOutcome` structs are structurally identical** (DRY violation; could be a single `ENAObjectSubmissionOutcome<RowT>` template). Deferred to Phase 8 when analyses lands and the savings double.
+- **Acknowledged — the V2 JSON wire format for experiments / runs is XSD-derived rather than from a published OpenAPI schema**. The live `ena_full_pipeline.test` will catch any actual mismatch when run against `wwwdev.ebi.ac.uk`. No code change.
+
+Files touched in 7d+7e:
+- New code (10): `src/include/ena_submit_outcome.hpp`, `src/include/ena_experiments_insert.hpp`, `src/ena_experiments_insert.cpp`, `src/include/ena_experiments_insert_op.hpp`, `src/ena_experiments_insert_op.cpp`, `src/include/ena_runs_insert.hpp`, `src/ena_runs_insert.cpp`, `src/include/ena_runs_insert_op.hpp`, `src/ena_runs_insert_op.cpp`, plus updates to `src/include/ena_envelope_builder.hpp` (+57 lines: new spec types) and `src/ena_envelope_builder.cpp` (+200 lines: enum sets + appenders).
+- Modified code (4): `src/ena_storage.cpp` (revised experiments + runs catalog shape; PlanInsert dispatcher), `src/ena_projects_insert.cpp` and `src/ena_samples_insert.cpp` (Traits-based dedupe via `SubmitENAObjectOutcome`).
+- New tests (5): `test/cpp/test_ena_experiments_insert.cpp` (~170 lines, 5 cases), `test/cpp/test_ena_runs_insert.cpp` (~160 lines, 6 cases), `test/sql/ena_experiments_insert_mock.test`, `test/sql/ena_runs_insert_mock.test`, `test/sql/ena_full_pipeline.test`.
+- Modified tests (2): `test/cpp/test_ena_envelope.cpp` (+15 cases for experiments / runs / full-graph / empty-filetype rejection), `test/sql/ena_storage_attach.test` (catalog row-count expectations updated).
+- CMakeLists.txt (EXTENSION_SOURCES + TEST_SOURCES updated).
+
+Tests delta (7d+7e net): SQL 115 cases / 6699 assertions / 31 skipped (was 28). The +3 skips are the new mock + full-pipeline tests skipping in the test harness without `httpfs` pre-installed (matches the existing projects/samples mock pattern). C++ Catch2: 831 cases (+26) / 6914 assertions (+77) / 33 skipped / **0 failed**. Manual end-to-end smoke through the python mock confirms experiments + runs INSERT round-trip correctly, prefix disambiguation routes refname-shaped-like-prefix to refname, NULL list entries throw clearly, FAIL-alias triggers the server failure path.
+
+Manual round-trip via mock + duckdb shell with `LOAD httpfs`:
+```sql
+CREATE SECRET (TYPE ENA, USER 'Webin-99999', PASSWORD 'pw', ENDPOINT_URL '$ENA_WEBIN_MOCK_URL');
+ATTACH '' AS ena (TYPE ENA, SECRET '...');
+INSERT INTO ena.projects (...) RETURNING prjeb_accession; -- PRJEBxxxx
+INSERT INTO ena.samples (...) RETURNING samea_accession; -- SAMEAxxxx
+INSERT INTO ena.experiments
+  (alias, study_ref, sample_descriptor, library_strategy, library_source,
+   library_selection, library_layout, platform, instrument_model)
+  VALUES (...) RETURNING erx_accession; -- ERXxxxx
+INSERT INTO ena.runs (alias, experiment_ref, files)
+  VALUES ('r1', 'e1',
+   [{'filename': 'a.fastq.gz', 'filetype': 'fastq', 'md5': '...'},
+    {'filename': 'b.fastq.gz', 'filetype': 'fastq', 'md5': '...'}])
+  RETURNING err_accession; -- ERRxxxx
+SELECT object_type, n_objects, success FROM ena.submission_log;
+```
+
+Follow-ups (deferred to later phases):
+- Templated `ENAObjectSubmissionOutcome<RowT>` — extract when analyses lands in Phase 8 (third concrete consumer makes the abstraction earn its keep).
+- Real `LIST(STRUCT)` emission in RETURNING for `runs.files` (currently emits NULL; user-supplied list preserved verbatim in `submission_log.request_payload`). Same trade-off as projects' `attributes` column.
+- pyftpdlib-backed live SQL test for libcurl transport (still owed from Phase 6.5).
+- Reports API `SELECT * FROM ena.{projects,samples}` (still owed from Phase 5).
+- Wire-format verification against the actual V2 OpenAPI spec when the live `ena_full_pipeline.test` runs against `wwwdev.ebi.ac.uk`. If the server rejects, the JSON shape needs adjusting to whatever V2 actually expects.
 ### Phase 8 — pending
 ### Phase 9 — pending
 ### Phase 10 — pending

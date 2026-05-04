@@ -19,9 +19,9 @@ WHERE database_name='ena' AND schema_name='main'
 ORDER BY table_name;
 ----
 analyses	4
-experiments	12
+experiments	13
 projects	9
-runs	4
+runs	5
 samples	9
 submission_log	13
 

@@ -1,0 +1,137 @@
+# name: test/sql/ena_full_pipeline.test
+# description: End-to-end project → samples → upload → experiments → runs against wwwdev
+# group: [sql]
+
+#
+# MILESTONE 2 smoke: register a project, register samples, upload reads via
+# Aspera, register experiments, register runs — all in one test, all in one
+# attached `ena` catalog. Skipped unless live Webin creds + ASPERA_AVAILABLE
+# are present (run_tests.sh probes everything).
+
+require miint
+
+require httpfs
+
+require-env ENA_WEBIN_TEST_USER
+
+require-env ENA_WEBIN_TEST_PASSWORD
+
+require-env ENA_WEBIN_TEST_AVAILABLE
+
+require-env ASPERA_AVAILABLE
+
+statement ok
+CREATE SECRET test_ena_full_pipeline (
+    TYPE ENA,
+    USER '${ENA_WEBIN_TEST_USER}',
+    PASSWORD_ENV 'ENA_WEBIN_TEST_PASSWORD',
+    ENDPOINT 'test'
+);
+
+statement ok
+ATTACH '' AS ena (TYPE ENA, SECRET 'test_ena_full_pipeline');
+
+# Per-test alias suffix so re-runs against the shared dev account don't collide.
+statement ok
+CREATE TEMP TABLE alias_run AS
+SELECT 'miint-ci-' || strftime(now(), '%Y%m%d-%H%M%S-') || (random()*1e9)::INTEGER::VARCHAR AS suffix;
+
+# 1) Project — use the suffix to keep aliases unique per CI run.
+query I
+INSERT INTO ena.projects (alias, title, project_type)
+SELECT 'p-' || suffix, 'duckdb-miint Phase 7 full-pipeline smoke', 'METAGENOMIC'
+FROM alias_run
+RETURNING regexp_matches(prjeb_accession, '^PRJEB[0-9]+$');
+----
+true
+
+# 2) Samples — two of them with the metagenomic checklist
+statement ok
+INSERT INTO ena.samples (alias, taxon_id, checklist, attributes)
+SELECT 's1-' || suffix, 408170, 'ERC000015',
+       MAP {'collection date': '2026-04-01',
+            'geographic location (country and/or sea)': 'United States',
+            'broad-scale environmental context': 'human-associated habitat [ENVO:00009003]',
+            'local environmental context': 'gastrointestinal tract [ENVO:00002041]',
+            'environmental medium': 'feces [UBERON:0001988]'}
+FROM alias_run
+UNION ALL
+SELECT 's2-' || suffix, 408170, 'ERC000015',
+       MAP {'collection date': '2026-04-02',
+            'geographic location (country and/or sea)': 'United States',
+            'broad-scale environmental context': 'human-associated habitat [ENVO:00009003]',
+            'local environmental context': 'gastrointestinal tract [ENVO:00002041]',
+            'environmental medium': 'feces [UBERON:0001988]'}
+FROM alias_run;
+
+# 3) Upload reads (small synthetic batch)
+statement ok
+CREATE TEMP TABLE reads AS
+SELECT * FROM (VALUES
+    ('s1-' || (SELECT suffix FROM alias_run), 'r1', 'ACGTACGT', [40,40,40,40,40,40,40,40]::UTINYINT[],
+     'TGCATGCA', [40,40,40,40,40,40,40,40]::UTINYINT[], 0::BIGINT),
+    ('s1-' || (SELECT suffix FROM alias_run), 'r2', 'GGGGGGGG', [40,40,40,40,40,40,40,40]::UTINYINT[],
+     'CCCCCCCC', [40,40,40,40,40,40,40,40]::UTINYINT[], 1::BIGINT),
+    ('s2-' || (SELECT suffix FROM alias_run), 'r1', 'AAAAAAAA', [40,40,40,40,40,40,40,40]::UTINYINT[],
+     'TTTTTTTT', [40,40,40,40,40,40,40,40]::UTINYINT[], 0::BIGINT),
+    ('s2-' || (SELECT suffix FROM alias_run), 'r2', 'CGCGCGCG', [40,40,40,40,40,40,40,40]::UTINYINT[],
+     'GCGCGCGC', [40,40,40,40,40,40,40,40]::UTINYINT[], 1::BIGINT))
+AS t(sample_ref, read_id, sequence1, qual1, sequence2, qual2, sequence_index);
+
+# Stash the upload outputs so the runs INSERT below can reference filenames
+# and md5s by sample_ref.
+statement ok
+CREATE TEMP TABLE uploads AS
+SELECT * FROM ena_upload_reads(
+    relation := 'reads',
+    secret := 'test_ena_full_pipeline',
+    target_url := 'aspera://webin2.ebi.ac.uk/');
+
+# Two samples × paired-split layout = 4 emitted files.
+query I
+SELECT count(*) FROM uploads;
+----
+4
+
+# 4) Experiments — one per sample.
+statement ok
+INSERT INTO ena.experiments
+    (alias, study_ref, sample_descriptor, library_strategy, library_source,
+     library_selection, library_layout, platform, instrument_model)
+SELECT 'e-s1-' || suffix, 'p-' || suffix, 's1-' || suffix,
+       'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'NovaSeq 6000'
+FROM alias_run
+UNION ALL
+SELECT 'e-s2-' || suffix, 'p-' || suffix, 's2-' || suffix,
+       'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'NovaSeq 6000'
+FROM alias_run;
+
+# 5) Runs — pair the upload outputs back to their samples + experiments.
+# Group the per-file upload output rows by sample_ref into a LIST(STRUCT) of
+# {filename, filetype, md5} for each run.
+statement ok
+INSERT INTO ena.runs (alias, experiment_ref, files)
+SELECT 'r-' || sample_ref,
+       'e-' || sample_ref,
+       LIST({'filename': filename, 'filetype': filetype, 'md5': md5} ORDER BY filename)
+FROM uploads
+GROUP BY sample_ref;
+
+# Final assertion: submission_log captured every step.
+query II
+SELECT object_type, sum(n_objects) AS total
+FROM ena.submission_log
+WHERE secret_name = 'test_ena_full_pipeline'
+GROUP BY object_type
+ORDER BY object_type;
+----
+experiments	2
+projects	1
+runs	2
+samples	2
+
+statement ok
+DETACH ena;
+
+statement ok
+DROP SECRET test_ena_full_pipeline;
