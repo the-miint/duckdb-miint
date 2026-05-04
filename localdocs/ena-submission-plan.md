@@ -5,7 +5,7 @@
 If you're picking this up in a fresh session:
 
 - **Repo**: `/home/dtmcdonald/dev/duckdb-miint-alt`. Branch: `feat/ena-submission` (cut from `v1.5-variegata`).
-- **Status as of 2026-05-04**: Phases 0–7 complete and committed. **MILESTONE 2 reached** (full submission pipeline). **Phase 8 (alias collision check + checklist registry) is next.**
+- **Status as of 2026-05-04**: Phases 0–7 complete and committed, plus a live-wwwdev validation pass that found and fixed four real bugs the mock couldn't catch. **MILESTONE 2 reached** (full submission pipeline) — verified end-to-end against the real `wwwdev.ebi.ac.uk` endpoint with PRJEB → ERS/SAMEA → ERX → ERR all server-assigned. **Phase 8 (alias collision check + checklist registry) is next.**
   - `a8e8ec0` Phase 0 — branch + scaffolding (no behavior change)
   - `100a2c7` Phase 1 — `CREATE SECRET (TYPE ENA, ...)` with password redaction + literal/env/file indirection
   - `f88e756` Phase 2 — `ENAClient::PostJSON`/`PostXML` with HTTP Basic auth + retry on 429/5xx (incl. 504)
@@ -17,8 +17,9 @@ If you're picking this up in a fresh session:
   - `863bdff` Phase 6.5 — libcurl streaming-upload transport (`ftp/ftps/http/https://`). Auto-disabled on macOS (vsearch+OpenSSL symbol clash; see `localdocs/vsearch-feature-request.md`).
   - `1ad9630` Phase 7 Step 7a — `ENAObjectInsertOperator` CRTP base in `src/include/ena_object_insert_op.hpp`. Per-table operator cost dropped ~395 → ~210 lines.
   - `60f2596` Phase 7 Step 7b — `GzipMd5Stream` shared base in `src/ena_upload_reads.cpp`. ~150 lines of zlib + MD5 duplication removed.
-  - Phase 7 Steps 7d+7e — `ena.experiments` + `ena.runs` virtual tables INSERT (full project → samples → upload → experiments → runs pipeline). `SubmitENAObjectOutcome<Traits, ...>` template in `src/include/ena_submit_outcome.hpp` deduplicated the 4x submit-side files.
-- **Test status**: `bash run_tests.sh` clean — SQL 115 cases / 6699 assertions / 31 skipped / 0 failed; Catch2 831 cases / 6914 assertions / 33 skipped / 0 failed.
+  - `952ebf7` Phase 7 Steps 7d+7e — `ena.experiments` + `ena.runs` virtual tables INSERT (mock-server validated). `SubmitENAObjectOutcome<Traits, ...>` template in `src/include/ena_submit_outcome.hpp` deduplicated the 4x submit-side files.
+  - `504f4c0` Phase 7 live wwwdev validation — XML envelope for SRA-side objects (V2's JSON dispatcher only handles project/sample), `Accept: application/xml` for receipts, `attribute_units MAP` column on `ena.samples` for checklist `unit` requirement (lat/lon → `DD`), libcurl `CURLOPT_CONNECTTIMEOUT`/`LOW_SPEED_*` defaults + `MIINT_CURL_VERBOSE=1` debug knob, mock server extended to handle XML POSTs.
+- **Test status**: `bash run_tests.sh` clean — SQL 115 cases / 6699 assertions / 31 skipped / 0 failed; Catch2 841 cases / 6914 assertions / 33 skipped / 0 failed. Live verification: `bash localdocs/ena-live-smoke.sh` (uncommitted; needs `ENA_WEBIN_TEST_USER`/`PASSWORD` env vars) completes the full graph against `wwwdev.ebi.ac.uk` in ~3s.
 - **Architecture-of-record**: `localdocs/ena-submission-design-v2.md`. Open decisions in §11 are resolved (default endpoint=test, naming=`ena.projects`, persistent `ena.submission_log`, error on overwrite, flat upload layout, system CA store).
 - **Research artifacts** in `localdocs/`:
   - `ena-research-webin-v2-deep.md` — Webin V2 endpoints, receipt structure, XSDs, auth (HTTP Basic only)
@@ -38,16 +39,18 @@ If you're picking this up in a fresh session:
   - At end of each phase, append a "Phase N done" subsection to this plan (`## Implementation log` section) with files touched, test deltas, deviations, follow-ups.
   - User asked previously to commit each phase before starting the next (matches the existing per-phase commit cadence; see Phases 0–5 plus Phase 6 prep).
 
-**Up next**: **Phase 8 — alias collision check + checklist registry**. See the Phase 8 section below for the full task list.
+**Up next**: **Phase 8 — alias collision check + checklist registry**. See the Phase 8 section below for the full task list. Phase 8's checklist registry is now load-bearing — it would have caught three of the four bugs the live wwwdev pass surfaced (missing `project name` on samples, missing `unit` on lat/lon, country-name-vs-enum `"United States"` → `"USA"`) before any HTTP traffic.
 
 Other open follow-ups that are NOT Phase 8's job but should not be lost:
 - **Reports API SELECT path** (`SELECT * FROM ena.{projects,samples}` via `/ena/submit/report/...`) was deferred from Phase 5. Pick up whenever a consumer needs read-back; deferred indefinitely otherwise.
-- **pyftpdlib-backed SQL test for the libcurl CURL transport** — Phase 6.5 has no live SQL test for libcurl. The unit test against `file://` proves the wrapper; the SQL-level integration is exercised only via the file:// path. Land a mock when a real consumer of `ftps://` surfaces.
+- **pyftpdlib-backed SQL test for the libcurl CURL transport** — Phase 6.5 has no live SQL test for libcurl. The wrapper's `file://` unit test proves the encode/gzip/MD5 pipeline; the live wwwdev pass on 2026-05-04 confirmed the FTP transport + auth + STOR sequence works against the real Webin upload area. Land a mock when CI needs a non-credentialed integration test.
 - **vsearch upstream namespace fix** (see `localdocs/vsearch-feature-request.md`) — would let us remove the macOS `MIINT_ENABLE_CURL=OFF` gate and the `-Wl,--allow-multiple-definition` Linux workaround. Externally tracked.
 - **HTTPS-PUT receipt parsing** for Phase 6.5 — currently we only check the HTTP code; some servers return JSON receipts that downstream callers might want. No consumer yet.
 - **Templated `ENAObjectSubmissionOutcome<RowT>`** (Linus Phase 7 should-fix) — extract when analyses lands in Phase 8 to make the abstraction earn its keep.
 - **Real `LIST(STRUCT)` emission in RETURNING for `runs.files`** (Phase 7 nit) — currently emits NULL; user-supplied list preserved verbatim in `submission_log.request_payload`.
-- **V2 JSON wire format verification for experiments + runs** — the camelCase shape was XSD-derived rather than from a published OpenAPI schema. The live `ena_full_pipeline.test` against `wwwdev.ebi.ac.uk` will catch any actual mismatch; if it fails, adjust to whatever V2 actually expects.
+- **JSON envelope path for experiments / runs** — V2 server today (2026-05-04) only supports JSON for project + sample; submitting JSON for experiment / run / analysis returns HTTP 500 from a generic NPE in the V2 dispatcher (`...WebinSubmissionServiceCallable.submissionException ... callable is null`). XML works. Re-test the JSON path in 6–12 months — if EBI ships a JSON handler for SRA objects we can simplify by dropping `BuildEnvelopeXML`. Documented in `~/.claude/projects/-home-dtmcdonald-dev-duckdb-miint-alt/memory/project_ena_v2_xml_for_sra_objects.md`.
+- **`localdocs/ena-live-smoke.sh`** (uncommitted, intentional) — maintainer-driven full-pipeline smoke against wwwdev. Needs `ENA_WEBIN_TEST_USER` / `ENA_WEBIN_TEST_PASSWORD`. `--no-uploads` skips the FTP phase. `MIINT_CURL_VERBOSE=1` enables libcurl wire trace. Bumps `PRJEB`/`ERS`/`SAMEA`/`ERX`/`ERR` accessions per run; data evicts in <24h on wwwdev.
+- **`localdocs/ena-experiment-shape-probe.sh`** (uncommitted) — diagnostic that POSTs 8 candidate JSON shapes for an experiment envelope, used during the 2026-05-04 V2-XML investigation. Keep for future re-probing if EBI ships JSON support for SRA objects.
 
 Pre-Linus plan additions, retained verbatim:
 - **Transport-for-uploads decision (2026-05-03)**: Phase 6 ships **Aspera + libcurl streaming**. FTP-via-subprocess-`curl` (the original parked design) is no longer needed — libcurl in-process replaces it. Phase 8 already had its "Aspera write-side" bullet absorbed into Phase 6.
@@ -807,7 +810,51 @@ Follow-ups (deferred to later phases):
 - Real `LIST(STRUCT)` emission in RETURNING for `runs.files` (currently emits NULL; user-supplied list preserved verbatim in `submission_log.request_payload`). Same trade-off as projects' `attributes` column.
 - pyftpdlib-backed live SQL test for libcurl transport (still owed from Phase 6.5).
 - Reports API `SELECT * FROM ena.{projects,samples}` (still owed from Phase 5).
-- Wire-format verification against the actual V2 OpenAPI spec when the live `ena_full_pipeline.test` runs against `wwwdev.ebi.ac.uk`. If the server rejects, the JSON shape needs adjusting to whatever V2 actually expects.
+
+### Phase 7.5 — Live wwwdev validation (commit `504f4c0`)
+
+Driving the Phase 7 mock-passing pipeline against the real wwwdev endpoint surfaced four real bugs no mock-server test would have caught. End-to-end run now succeeds against `wwwdev.ebi.ac.uk` with PRJEB → ERS/SAMEA → ERX → ERR and a libcurl FTP upload to `webin2.ebi.ac.uk` along the way. ~3 seconds for the full submission graph (per `submission_log.duration_ms`).
+
+**Bug 1 — Accept header**: `ENAClient::PostJSON` set `Accept: application/json`, so the server replied with a JSON receipt that `ParseReceiptXML` rejected as "not well-formed". Phase 3 design intent was XML receipts always (the JSON receipt parser was deferred). Fix: new `ENAClient::PostJSONReceiveXML` that keeps `Content-Type: application/json` but sets `Accept: application/xml`.
+
+**Bug 2 — `unit` (singular) for sample attributes**: Several ENA checklist attributes mandate a `<UNITS>` sibling (ERC000015 lat/lon → `DD`, depth → `m`, etc.). Our envelope didn't emit any. Fix:
+- New `attribute_units` field on `SampleSpec` (sparse `vector<pair<string,string>>`).
+- New `attribute_units MAP(VARCHAR, VARCHAR)` column on `ena.samples` (samples schema 9 → 10 columns; `ena_storage_attach.test` updated accordingly).
+- `BuildEnvelopeJSON` `AppendSample` looks up units per attribute and emits `{"tag":..., "value":..., "unit":...}` when present. JSON key is **singular `unit`** even though the SRA XML element is `<UNITS>` plural and the SQL column is `attribute_units` plural — V2's JSON validator rejects plural `units` with HTTP 500 NPE.
+- Operator extracts both maps via the new shared `ExtractKeyValueMap(value, column_label)`.
+
+**Bug 3 — V2 server has no JSON dispatcher for SRA-side objects (THE BIG ONE)**: Submitting `experiments` / `runs` / `analyses` as JSON returns HTTP 500 with a generic NPE (`Cannot invoke "...WebinSubmissionServiceCallable.submissionException(java.lang.Exception)" because "callable" is null`) — regardless of which JSON shape is tried. Probed 8 variants in `localdocs/ena-experiment-shape-probe.sh` (nested camelCase, snake_case, flat, uppercase XSD-element-name keys, `studyAccession` flat, etc.) — all NPE at the dispatcher stage. The same envelope as XML gets past the dispatcher into actual XSD validation.
+- New `BuildEnvelopeXML(SubmissionSpec)` in `src/ena_envelope_builder.cpp` emits the SRA-XSD shape: `<WEBIN><SUBMISSION>...</SUBMISSION><EXPERIMENT_SET>...</EXPERIMENT_SET><RUN_SET>...</RUN_SET></WEBIN>`. Compact, no whitespace; full XML escaping for attributes and element text.
+- `SubmitENAObjectOutcome<Traits, ...>` template now takes `Traits::BuildEnvelope(env)` and `Traits::ContentType()` per object type — project + sample stay on JSON, experiment + run move to XML.
+- The CRTP base's post_fn lambda dispatches by Content-Type: `client.PostXML(...)` for `application/xml`, `client.PostJSONReceiveXML(...)` otherwise.
+- Instrument names need the `Illumina` prefix per the SRA `typeIlluminaModel` enum (`"Illumina NovaSeq 6000"` not `"NovaSeq 6000"`); test data + script updated.
+- Mock server (`test/scripts/ena_webin_mock.py`) extended to handle XML POSTs (regex-extracts EXPERIMENT/RUN aliases) so the existing SQL mock tests continue to validate the round-trip.
+
+**Bug 4 — libcurl had no timeouts**: `RunCurlUpload` set neither `CURLOPT_CONNECTTIMEOUT` nor `CURLOPT_LOW_SPEED_*`, so a stalled FTPS handshake against `webin2.ebi.ac.uk:21` could spin CPU for >60s before the user killed it. (Also: `ftps://` was wrong — Webin's documented endpoint is plain `ftp://` on port 21, no implicit TLS.) Fixes:
+- New `connect_timeout_seconds` (default 60s), `low_speed_limit_bytes_per_sec` (1) + `low_speed_time_seconds` (60) on `CurlUploadOptions`. Catches both connect-stall and transfer-stall.
+- New `verbose` field on `CurlUploadOptions` toggles `CURLOPT_VERBOSE`. Wired through `ena_upload_reads.cpp` from `MIINT_CURL_VERBOSE=1` env var for live-server debugging.
+- `localdocs/ena-live-smoke.sh` defaults to `ftp://webin2.ebi.ac.uk/` (matches the documented Webin upload area), with auto-fallback to `aspera://` if `ascp` is on PATH.
+
+**Other fixes folded in**:
+- `localdocs/ena-live-smoke.sh` itself (uncommitted, intentional) — full-pipeline smoke against wwwdev. The `reads` temp table inside the script must NOT be `TEMP` because `ena_upload_reads` opens a separate DuckDB connection (per `docs/internals/reading-tables-views.md`) and `TEMP` tables are connection-private. Same fix in `test/sql/ena_full_pipeline.test`.
+- `test/sql/ena_full_pipeline.test` sample attributes updated to the now-known checklist-compliant set so the gated test will work when actually run.
+
+Files touched (22):
+- New behaviour (5): `src/ena_client.cpp` (+`PostJSONReceiveXML`), `src/include/ena_client.hpp`, `src/curl_send.cpp` (+timeouts + verbose), `src/include/curl_send.hpp`, `src/ena_upload_reads.cpp` (+env-var verbose toggle).
+- Envelope (3): `src/include/ena_envelope_builder.hpp` (+`SampleSpec.attribute_units`, +`BuildEnvelopeXML` decl), `src/ena_envelope_builder.cpp` (+~200 lines XML emit, +singular-`unit` fix), `src/include/ena_object_insert_op.hpp` (post_fn dispatches by Content-Type).
+- Per-table Traits (4): `src/ena_projects_insert.cpp`, `src/ena_samples_insert.cpp`, `src/ena_experiments_insert.cpp`, `src/ena_runs_insert.cpp` — each now provides `BuildEnvelope` + `ContentType`.
+- Operators / catalog (2): `src/ena_samples_insert_op.cpp` (read `attribute_units` MAP), `src/ena_storage.cpp` (samples schema +1 column).
+- Submit-side template (1): `src/include/ena_submit_outcome.hpp` (Traits-supplied envelope + content-type).
+- Tests (5): `test/cpp/test_ena_envelope.cpp` (+9 XML cases + 1 unit-field case), `test/cpp/test_ena_experiments_insert.cpp` + `test/cpp/test_ena_runs_insert.cpp` (assert XML body shape, `Illumina NovaSeq 6000`), `test/sql/ena_experiments_insert_mock.test` (XML payload assertions), `test/sql/ena_full_pipeline.test` (checklist-compliant samples + non-TEMP `reads`).
+- Test infrastructure (2): `test/scripts/ena_webin_mock.py` (XML POST handler), `test/sql/ena_storage_attach.test` (samples 9 → 10).
+
+Test deltas: Catch2 831 → 841 cases (+10), 6914 assertions unchanged. SQL 115 cases / 6699 assertions / 31 skipped — unchanged. **0 failures**. Live verification: full graph completes in ~3s against wwwdev.
+
+**Memory notes filed** (`~/.claude/projects/-home-dtmcdonald-dev-duckdb-miint-alt/memory/`):
+- `project_ena_v2_xml_for_sra_objects.md` — V2 only accepts JSON for project + sample; experiment / run / analysis must be XML. Don't waste cycles re-probing JSON for SRA objects unless EBI ships a fix. Re-test the JSON path in 6–12 months.
+
+**Phase 8 implication**: The checklist-registry phase is now load-bearing rather than nice-to-have. Three of the four bugs above (missing `project name`, missing `unit` on lat/lon, country-name-vs-enum `"United States"` → `"USA"`) would have been caught client-side if Phase 8's bundled `ERC000NN.xml` checklist parser were doing pre-INSERT validation. The fourth (XML-vs-JSON for SRA objects) is server-side and unrelated to checklists.
+
 ### Phase 8 — pending
 ### Phase 9 — pending
 ### Phase 10 — pending
