@@ -18,6 +18,23 @@ find_package(ZLIB REQUIRED)
 find_package(Threads REQUIRED)
 find_package(expat CONFIG REQUIRED)
 
+# libcurl powers the streaming HTTPS-PUT / FTP / FTPS transport in
+# `ena_upload_reads`. Disabled on Apple because vcpkg's libcurl pulls in
+# OpenSSL's libcrypto, which exports `MD5_*` / `SHA1_*` symbols that
+# vsearch's vendored copies also export. GNU ld supports
+# `--allow-multiple-definition` to resolve this; Apple's ld does not.
+# Since vsearch is first-class on macOS and not all users need the
+# streaming transport (Aspera + file:// still work), we drop libcurl on
+# Apple rather than drop vsearch.
+option(MIINT_ENABLE_CURL "Build with libcurl streaming-upload support" ON)
+if(APPLE)
+    set(MIINT_ENABLE_CURL OFF)
+    message(STATUS "Apple detected: disabling libcurl streaming transport (vsearch+OpenSSL symbol clash)")
+endif()
+if(MIINT_ENABLE_CURL)
+    find_package(CURL CONFIG REQUIRED)
+endif()
+
 # Optional feature flags for WASM-compatible builds
 option(MIINT_ENABLE_HDF5 "Build with HDF5/BIOM support" ON)
 option(MIINT_ENABLE_BOWTIE2 "Build with Bowtie2 alignment support" ON)
@@ -831,6 +848,9 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     list(APPEND EXTENSION_SOURCES src/SortMeRNAAligner.cpp src/align_sortmerna.cpp src/align_sortmerna_rrna.cpp)
 endif()
+if(MIINT_ENABLE_CURL)
+    list(APPEND EXTENSION_SOURCES src/curl_send.cpp)
+endif()
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 
@@ -896,6 +916,9 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_SORTMERNA)
 endif()
+if(MIINT_ENABLE_CURL)
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_CURL)
+endif()
 target_link_libraries(${EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
@@ -914,6 +937,9 @@ if(MIINT_ENABLE_VSEARCH)
 endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_link_libraries(${EXTENSION_NAME} sortmerna RocksDB::rocksdb)
+endif()
+if(MIINT_ENABLE_CURL)
+    target_link_libraries(${EXTENSION_NAME} CURL::libcurl)
 endif()
 if(APPLE)
     target_link_libraries(${EXTENSION_NAME} "-framework CoreFoundation")
@@ -964,6 +990,9 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_SORTMERNA)
 endif()
+if(MIINT_ENABLE_CURL)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_CURL)
+endif()
 target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
@@ -982,6 +1011,9 @@ if(MIINT_ENABLE_VSEARCH)
 endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} sortmerna RocksDB::rocksdb)
+endif()
+if(MIINT_ENABLE_CURL)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} CURL::libcurl)
 endif()
 if(APPLE)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework CoreFoundation")
@@ -1104,6 +1136,9 @@ if(MIINT_ENABLE_SORTMERNA)
         test/cpp/test_sortmerna_build.cpp
         test/cpp/test_SortMeRNAAligner.cpp)
 endif()
+if(MIINT_ENABLE_CURL)
+    list(APPEND TEST_SOURCES src/curl_send.cpp test/cpp/test_curl_send.cpp)
+endif()
 
 add_executable(tests ${TEST_SOURCES})
 
@@ -1117,6 +1152,10 @@ target_link_libraries(tests
   wfa2
   expat::expat
 )
+if(MIINT_ENABLE_CURL)
+    target_link_libraries(tests CURL::libcurl)
+    target_compile_definitions(tests PRIVATE MIINT_HAS_CURL)
+endif()
 if(MIINT_ENABLE_MAFFT)
     target_link_libraries(tests mafft_parttree)
 endif()
@@ -1135,6 +1174,28 @@ if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     target_link_libraries(tests
                           hdf5::hdf5-static
                           hdf5::hdf5_cpp-static)
+endif()
+# vsearch ships its own MD5/SHA1 symbols (libvsearch_core_a-md5.o,
+# libvsearch_core_a-sha1.o), and OpenSSL's libcrypto — pulled in transitively
+# when we link CURL::libcurl — exports the same names. GNU ld's
+# --allow-multiple-definition picks the first-defined symbol; since each
+# archive uses its own copy at compile time (intra-.o calls stay within the
+# archive), runtime behaviour is preserved. libcurl itself uses `EVP_Digest*`
+# rather than the colliding `MD5_*` C API, so the choice is benign.
+#
+# This workaround is only needed when both vsearch AND libcurl are linked.
+# Apple disables MIINT_ENABLE_CURL (see top of file) precisely because
+# Apple's ld lacks an equivalent flag and vsearch must remain first-class on
+# macOS; Windows auto-disables vsearch. So we only need this on Linux.
+if(MIINT_ENABLE_VSEARCH AND MIINT_ENABLE_CURL AND UNIX AND NOT APPLE)
+    target_link_options(tests PRIVATE "-Wl,--allow-multiple-definition")
+    # The static `${EXTENSION_NAME}` archive is consumed by DuckDB-built
+    # binaries (duckdb shell, unittest, plan_serializer) that we don't
+    # control. INTERFACE makes the link option propagate to whichever
+    # executable links against this archive, so the duplicate-symbol
+    # tolerance follows the static lib instead of being a per-target chore.
+    target_link_options(${EXTENSION_NAME} INTERFACE "-Wl,--allow-multiple-definition")
+    target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE "-Wl,--allow-multiple-definition")
 endif()
 if(HAVE_LIBZSTD)
     target_link_libraries(tests ${ZSTD_TARGET})

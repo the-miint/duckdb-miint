@@ -192,8 +192,26 @@ TEST_CASE("ParseUploadTargetURL: file:// with relative path is accepted", "[ena_
 	REQUIRE(target.remote_dir == "duckdb_unittest_tempdir/X/uploads/");
 }
 
+TEST_CASE("ParseUploadTargetURL: ftp/ftps/http/https route to CURL transport", "[ena_upload_reads]") {
+	for (const std::string scheme : {"ftp", "ftps", "http", "https"}) {
+		const auto target = ParseUploadTargetURL(scheme + "://webin2.ebi.ac.uk/uploads/");
+		REQUIRE(target.transport == UploadTransport::CURL);
+		REQUIRE(target.scheme == scheme);
+		REQUIRE(target.host == "webin2.ebi.ac.uk");
+		REQUIRE(target.remote_dir == "/uploads/");
+		REQUIRE(target.url_for_curl == scheme + "://webin2.ebi.ac.uk/uploads/");
+	}
+}
+
+TEST_CASE("ParseUploadTargetURL: CURL scheme with no trailing slash gets normalised", "[ena_upload_reads]") {
+	const auto target = ParseUploadTargetURL("https://example.org/run42");
+	REQUIRE(target.transport == UploadTransport::CURL);
+	REQUIRE(target.remote_dir == "/run42/");
+	REQUIRE(target.url_for_curl == "https://example.org/run42/");
+}
+
 TEST_CASE("ParseUploadTargetURL: unknown scheme is rejected", "[ena_upload_reads]") {
-	REQUIRE_THROWS_WITH(ParseUploadTargetURL("ftp://webin2.ebi.ac.uk/"), Catch::Matchers::ContainsSubstring("ftp"));
+	REQUIRE_THROWS_WITH(ParseUploadTargetURL("smb://server/share/"), Catch::Matchers::ContainsSubstring("smb"));
 	REQUIRE_THROWS(ParseUploadTargetURL(""));
 	REQUIRE_THROWS(ParseUploadTargetURL("aspera://"));
 }

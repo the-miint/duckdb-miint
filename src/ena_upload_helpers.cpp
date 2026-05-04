@@ -144,6 +144,41 @@ std::vector<std::string> OutputFilenames(const std::string &sample_ref, FastqLay
 	throw std::logic_error("OutputFilenames: unhandled FastqLayoutMode");
 }
 
+namespace {
+
+// Parse a `scheme://host[/path]` URL into its host and (trailing-slash-
+// normalised) path components. Throws when the host is empty.
+void ParseHostAndPath(const std::string &url, const std::string &scheme, const std::string &remainder,
+                      std::string &host_out, std::string &path_out) {
+	const auto slash = remainder.find('/');
+	std::string host;
+	std::string path;
+	if (slash == std::string::npos) {
+		host = remainder;
+		path = "/";
+	} else {
+		host = remainder.substr(0, slash);
+		path = remainder.substr(slash);
+	}
+	if (host.empty()) {
+		throw std::runtime_error("Upload target URL '" + url + "' is missing " + scheme + " host");
+	}
+	if (path.empty() || path.front() != '/') {
+		path = "/" + path;
+	}
+	if (path.back() != '/') {
+		path.push_back('/');
+	}
+	host_out = std::move(host);
+	path_out = std::move(path);
+}
+
+bool IsCurlScheme(const std::string &scheme) {
+	return scheme == "http" || scheme == "https" || scheme == "ftp" || scheme == "ftps";
+}
+
+} // namespace
+
 UploadTargetURL ParseUploadTargetURL(const std::string &url) {
 	if (url.empty()) {
 		throw std::runtime_error("Upload target URL is empty");
@@ -156,29 +191,11 @@ UploadTargetURL ParseUploadTargetURL(const std::string &url) {
 	const std::string remainder = url.substr(sep + 3);
 
 	UploadTargetURL out;
+	out.scheme = scheme;
+
 	if (scheme == "aspera") {
-		const auto slash = remainder.find('/');
-		std::string host;
-		std::string path;
-		if (slash == std::string::npos) {
-			host = remainder;
-			path = "/";
-		} else {
-			host = remainder.substr(0, slash);
-			path = remainder.substr(slash);
-		}
-		if (host.empty()) {
-			throw std::runtime_error("Upload target URL '" + url + "' is missing aspera host");
-		}
-		if (path.empty() || path.front() != '/') {
-			path = "/" + path;
-		}
-		if (path.back() != '/') {
-			path.push_back('/');
-		}
+		ParseHostAndPath(url, scheme, remainder, out.host, out.remote_dir);
 		out.transport = UploadTransport::ASPERA;
-		out.host = host;
-		out.remote_dir = path;
 		return out;
 	}
 	if (scheme == "file") {
@@ -199,8 +216,17 @@ UploadTargetURL ParseUploadTargetURL(const std::string &url) {
 		out.remote_dir = path;
 		return out;
 	}
-	throw std::runtime_error("Unsupported URL scheme '" + scheme +
-	                         "' for upload target — expected aspera:// or file://");
+	if (IsCurlScheme(scheme)) {
+		ParseHostAndPath(url, scheme, remainder, out.host, out.remote_dir);
+		out.transport = UploadTransport::CURL;
+		// libcurl wants the full URL; reconstruct it after normalisation
+		// so the trailing slash is consistent with our other transports.
+		out.url_for_curl = scheme + "://" + out.host + out.remote_dir;
+		return out;
+	}
+	throw std::runtime_error(
+	    "Unsupported URL scheme '" + scheme +
+	    "' for upload target — expected aspera://, file://, ftp://, ftps://, http://, or https://");
 }
 
 std::vector<std::string> BuildAscpSendArgv(const AsperaSendOptions &opts) {

@@ -30,6 +30,9 @@
 #include <read_ena_attributes.hpp>
 #include <read_ena_searchable_fields.hpp>
 #include <read_ena_sequences.hpp>
+#ifdef MIINT_HAS_CURL
+#include <curl_send.hpp>
+#endif
 #include <ena_secret.hpp>
 #include <ena_storage.hpp>
 #include <ena_upload_reads.hpp>
@@ -147,6 +150,9 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 #endif
 #endif
 	data->versions.emplace_back("zlib", zlibVersion());
+#ifdef MIINT_HAS_CURL
+	data->versions.emplace_back("libcurl", miint::GetCurlVersion());
+#endif
 	data->versions.emplace_back("rype", RYPE_GIT_VERSION);
 #ifdef MIINT_HAS_VSEARCH
 	data->versions.emplace_back("vsearch", VSEARCH_GIT_VERSION);

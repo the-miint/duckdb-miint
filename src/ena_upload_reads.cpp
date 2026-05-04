@@ -6,6 +6,9 @@
 
 #include "aspera_send.hpp"
 #include "aspera_utils.hpp"
+#ifdef MIINT_HAS_CURL
+#include "curl_send.hpp"
+#endif
 #include "ena_upload_helpers.hpp"
 #include "fastq_encoder.hpp"
 
@@ -87,9 +90,11 @@ struct ENAUploadReadsGlobalState : public GlobalTableFunctionState {
 	vector<SampleGroup> samples;
 	UploadTargetURL target;
 
-	// Aspera-only fields (left empty when transport=LOCAL_FILE).
-	string aspera_user;
-	string aspera_password;
+	// Authenticated-transport fields (left empty when transport=LOCAL_FILE).
+	// Both ASPERA and CURL paths consume `user` + `password`; the Aspera
+	// path additionally needs the binary + key.
+	string user;
+	string password;
 	string aspera_ascp_path;
 	string aspera_key_path;
 	string aspera_max_rate;
@@ -477,6 +482,178 @@ private:
 };
 
 // =====================================================================
+// Streaming encode → gzip → MD5 producer for libcurl
+// =====================================================================
+//
+// libcurl pulls bytes via CURLOPT_READFUNCTION; this producer satisfies that
+// contract by encoding records on demand. State machine has three phases:
+//   1) Encoding: fetch next row, encode FASTQ → deflate(Z_NO_FLUSH) into
+//      `out_buf`. Drain `out_buf` to libcurl; loop until exhausted.
+//   2) Finishing: after all rows encoded, deflate(Z_FINISH) until
+//      Z_STREAM_END. Drain trailer.
+//   3) EOF: Read returns 0.
+//
+// MD5 is computed over the gzipped output as it lands in `out_buf` —
+// covers exactly the bytes libcurl ultimately receives. `Finish()` is
+// valid only after Read has returned 0.
+
+class StreamingGzipMd5Producer {
+public:
+	StreamingGzipMd5Producer(const UploadInputRows &input, const SampleGroup &group, FastqLayoutMode layout,
+	                         int which_file, uint8_t qual_offset)
+	    : input(input), group(group), layout(layout), which_file(which_file), encoder(qual_offset) {
+		std::memset(&zs, 0, sizeof(zs));
+		if (deflateInit2(&zs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 16 + MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+			throw std::runtime_error("ena_upload_reads: deflateInit2 failed for streaming producer");
+		}
+		zs_initialized = true;
+	}
+
+	~StreamingGzipMd5Producer() {
+		if (zs_initialized) {
+			deflateEnd(&zs);
+		}
+	}
+
+	StreamingGzipMd5Producer(const StreamingGzipMd5Producer &) = delete;
+	StreamingGzipMd5Producer &operator=(const StreamingGzipMd5Producer &) = delete;
+
+	std::size_t Read(char *buf, std::size_t max_bytes) {
+		while (true) {
+			if (out_buf_pos < out_buf.size()) {
+				const std::size_t avail = out_buf.size() - out_buf_pos;
+				const std::size_t to_copy = std::min(avail, max_bytes);
+				std::memcpy(buf, out_buf.data() + out_buf_pos, to_copy);
+				out_buf_pos += to_copy;
+				return to_copy;
+			}
+			out_buf.clear();
+			out_buf_pos = 0;
+			if (gzip_done) {
+				return 0;
+			}
+			ProduceMore();
+		}
+	}
+
+	std::pair<string, uint64_t> Finish() {
+		if (!gzip_done) {
+			throw std::runtime_error("ena_upload_reads: StreamingGzipMd5Producer::Finish before EOF");
+		}
+		return {md5_ctx.FinishHex(), bytes_total};
+	}
+
+private:
+	void ProduceMore() {
+		if (!encoding_done) {
+			std::vector<uint8_t> record_buf;
+			auto sink = [&record_buf](const char *data, std::size_t size) {
+				record_buf.insert(record_buf.end(), data, data + size);
+			};
+			if (!EncodeOneRecord(sink)) {
+				encoding_done = true;
+				DeflateChunk(nullptr, 0, Z_FINISH);
+				return;
+			}
+			DeflateChunk(record_buf.data(), record_buf.size(), Z_NO_FLUSH);
+		} else {
+			DeflateChunk(nullptr, 0, Z_FINISH);
+		}
+	}
+
+	bool EncodeOneRecord(const FastqEncoder::Sink &sink) {
+		if (row_cursor >= group.row_indices.size()) {
+			return false;
+		}
+		const auto rid = group.row_indices[row_cursor++];
+		const char *id = input.read_id[rid].data();
+		const std::size_t id_len = input.read_id[rid].size();
+
+		if (layout == FastqLayoutMode::SINGLE || (layout == FastqLayoutMode::PAIRED && which_file == 0)) {
+			const auto &seq = input.sequence1[rid];
+			const auto &q = input.qual1[rid];
+			encoder.Encode(sink, id, id_len, nullptr, 0, seq.data(), seq.size(), q.data(), q.size());
+		} else if (layout == FastqLayoutMode::PAIRED && which_file == 1) {
+			const auto &seq = input.sequence2[rid];
+			const auto &q = input.qual2[rid];
+			encoder.Encode(sink, id, id_len, nullptr, 0, seq.data(), seq.size(), q.data(), q.size());
+		} else if (layout == FastqLayoutMode::PAIRED_INTERLEAVED) {
+			const auto &s1 = input.sequence1[rid];
+			const auto &q1 = input.qual1[rid];
+			encoder.Encode(sink, id, id_len, nullptr, 0, s1.data(), s1.size(), q1.data(), q1.size());
+			const auto &s2 = input.sequence2[rid];
+			const auto &q2 = input.qual2[rid];
+			encoder.Encode(sink, id, id_len, nullptr, 0, s2.data(), s2.size(), q2.data(), q2.size());
+		} else {
+			// AUTO must be resolved by ResolveLayout before this class is
+			// instantiated. A future enum addition would land here too.
+			throw std::logic_error("StreamingGzipMd5Producer::EncodeOneRecord: unhandled layout");
+		}
+		return true;
+	}
+
+	void DeflateChunk(const std::uint8_t *data, std::size_t size, int flush_mode) {
+		// Mirrors GzipMd5FileSink::Write but appends gzipped bytes to
+		// out_buf instead of writing to a file. Computes MD5 over each
+		// produced chunk so the digest covers exactly what libcurl gets.
+		const std::size_t kStep = 64 * 1024;
+		const std::uint8_t *p = data;
+		std::size_t remaining = size;
+		do {
+			const std::size_t step = std::min<std::size_t>(remaining, std::numeric_limits<uInt>::max());
+			zs.next_in = const_cast<unsigned char *>(p);
+			zs.avail_in = static_cast<uInt>(step);
+			while (zs.avail_in > 0 || flush_mode == Z_FINISH) {
+				const std::size_t old_size = out_buf.size();
+				out_buf.resize(old_size + kStep);
+				zs.next_out = out_buf.data() + old_size;
+				zs.avail_out = static_cast<uInt>(kStep);
+				const int rc = deflate(&zs, flush_mode);
+				if (rc < 0 && rc != Z_BUF_ERROR) {
+					throw std::runtime_error(std::string("ena_upload_reads: deflate failed: ") +
+					                         (zs.msg ? zs.msg : "<no msg>"));
+				}
+				const std::size_t produced = kStep - zs.avail_out;
+				out_buf.resize(old_size + produced);
+				if (produced > 0) {
+					md5_ctx.Add(out_buf.data() + old_size, produced);
+					bytes_total += produced;
+				}
+				if (rc == Z_STREAM_END) {
+					gzip_done = true;
+					return;
+				}
+				if (flush_mode == Z_FINISH && produced == 0) {
+					// Defensive — would loop forever otherwise.
+					break;
+				}
+				if (zs.avail_in == 0 && flush_mode != Z_FINISH) {
+					break;
+				}
+			}
+			p += step;
+			remaining -= step;
+		} while (remaining > 0);
+	}
+
+	const UploadInputRows &input;
+	const SampleGroup &group;
+	const FastqLayoutMode layout;
+	const int which_file;
+	FastqEncoder encoder;
+
+	z_stream zs {};
+	bool zs_initialized = false;
+	std::vector<std::uint8_t> out_buf;
+	std::size_t out_buf_pos = 0;
+	std::size_t row_cursor = 0;
+	bool encoding_done = false;
+	bool gzip_done = false;
+	uint64_t bytes_total = 0;
+	MD5Context md5_ctx;
+};
+
+// =====================================================================
 // Sample → file write
 // =====================================================================
 
@@ -511,6 +688,9 @@ void EncodeSampleRows(const UploadInputRows &in, const SampleGroup &group, Fastq
 			const auto &s2 = in.sequence2[rid];
 			const auto &q2 = in.qual2[rid];
 			encoder.Encode(sink_fn, id, id_len, nullptr, 0, s2.data(), s2.size(), q2.data(), q2.size());
+		} else {
+			// AUTO must be resolved before this point; see ResolveLayout.
+			throw std::logic_error("EncodeSampleRows: unhandled FastqLayoutMode");
 		}
 	}
 }
@@ -526,78 +706,110 @@ void RunUpload(ClientContext &context, const ENAUploadReadsBindData &bind, ENAUp
 		auto filenames = OutputFilenames(group.sample_ref, group.resolved_layout);
 		for (size_t f = 0; f < filenames.size(); f++) {
 			const auto &fname = filenames[f];
-
-			// Decide local write path.
-			string write_path;
-			string temp_dir;
-			if (gs.target.transport == UploadTransport::LOCAL_FILE) {
-				write_path = gs.target.remote_dir + fname;
-			} else {
-				// Aspera: write to a private temp directory so the basename
-				// matches the desired remote name. mkdtemp gives us a unique
-				// path; we unlink + rmdir after ascp finishes.
-				string tmpl = miint::GetTempDir() + "/ena-upload-XXXXXX";
-				vector<char> buf(tmpl.begin(), tmpl.end());
-				buf.push_back('\0');
-				if (mkdtemp(buf.data()) == nullptr) {
-					throw IOException("ena_upload_reads: mkdtemp failed: %s", std::strerror(errno));
-				}
-				temp_dir.assign(buf.data());
-				write_path = temp_dir + "/" + fname;
-			}
-
-			// Cleanup helper — runs whether the encode/gzip/transport block
-			// succeeds or throws. For local writes there is no temp dir; the
-			// destination file IS the user's output, so we leave it in place
-			// regardless of success (matches DuckDB COPY's behaviour).
-			auto cleanup_temp = [&]() noexcept {
-				if (!temp_dir.empty()) {
-					(void)unlink(write_path.c_str());
-					(void)rmdir(temp_dir.c_str());
-				}
-			};
+			const int which_file = (group.resolved_layout == FastqLayoutMode::PAIRED && f == 1) ? 1 : 0;
 
 			string md5_hex;
 			uint64_t bytes_written = 0;
-			try {
-				// Encode + gzip + md5 + write.
-				FastqEncoder encoder(bind.qual_offset);
-				GzipMd5FileSink sink(fs, write_path);
-				const int which_file = (group.resolved_layout == FastqLayoutMode::PAIRED && f == 1) ? 1 : 0;
-				EncodeSampleRows(gs.input, group, group.resolved_layout, which_file, encoder, sink);
-				auto finished = sink.Finish();
+
+			if (gs.target.transport == UploadTransport::CURL) {
+#ifdef MIINT_HAS_CURL
+				// Streaming path — no temp file. libcurl pulls bytes from
+				// the producer until EOF; the producer encodes records on
+				// demand and computes MD5 over the gzipped output as it
+				// flows through.
+				StreamingGzipMd5Producer producer(gs.input, group, group.resolved_layout, which_file, bind.qual_offset);
+				miint::CurlUploadOptions opts;
+				opts.url = gs.target.url_for_curl + fname;
+				opts.user = gs.user;
+				opts.password = gs.password;
+				opts.create_dirs = true;
+				auto curl_producer = [&producer](char *buf, std::size_t max_bytes) -> std::size_t {
+					return producer.Read(buf, max_bytes);
+				};
+				auto result = miint::RunCurlUpload(opts, curl_producer);
+				if (!result.error_message.empty()) {
+					throw IOException("ena_upload_reads: %s upload failed for sample '%s' file '%s': %s",
+					                  gs.target.scheme, group.sample_ref, fname, result.error_message);
+				}
+				auto finished = producer.Finish();
 				md5_hex = std::move(finished.first);
 				bytes_written = finished.second;
+#else
+				throw IOException(
+				    "ena_upload_reads: %s:// transport requires libcurl, which is disabled in this build "
+				    "(use aspera:// or file:// instead, or rebuild with -DMIINT_ENABLE_CURL=ON)",
+				    gs.target.scheme);
+#endif
+			} else {
+				// Encode → gzip → MD5 → file. For Aspera we then ascp the
+				// file. For LOCAL_FILE the destination IS the local path.
+				string write_path;
+				string temp_dir;
+				if (gs.target.transport == UploadTransport::LOCAL_FILE) {
+					write_path = gs.target.remote_dir + fname;
+				} else {
+					// Aspera: write to a private temp directory so the
+					// basename matches the desired remote name. mkdtemp
+					// gives us a unique path; we unlink + rmdir after
+					// ascp finishes.
+					string tmpl = miint::GetTempDir() + "/ena-upload-XXXXXX";
+					vector<char> buf(tmpl.begin(), tmpl.end());
+					buf.push_back('\0');
+					if (mkdtemp(buf.data()) == nullptr) {
+						throw IOException("ena_upload_reads: mkdtemp failed: %s", std::strerror(errno));
+					}
+					temp_dir.assign(buf.data());
+					write_path = temp_dir + "/" + fname;
+				}
+
+				// Cleanup helper — runs whether the encode/gzip/transport
+				// block succeeds or throws. For LOCAL_FILE we leave the
+				// destination in place regardless (matches COPY behaviour).
+				auto cleanup_temp = [&]() noexcept {
+					if (!temp_dir.empty()) {
+						(void)unlink(write_path.c_str());
+						(void)rmdir(temp_dir.c_str());
+					}
+				};
+
+				try {
+					FastqEncoder encoder(bind.qual_offset);
+					GzipMd5FileSink sink(fs, write_path);
+					EncodeSampleRows(gs.input, group, group.resolved_layout, which_file, encoder, sink);
+					auto finished = sink.Finish();
+					md5_hex = std::move(finished.first);
+					bytes_written = finished.second;
 
 #if MIINT_ASPERA_SUPPORTED && defined(MIINT_STATIC_BUILD)
-				if (gs.target.transport == UploadTransport::ASPERA) {
-					AsperaSendOptions opts;
-					opts.ascp_path = gs.aspera_ascp_path;
-					opts.key_path = gs.aspera_key_path;
-					opts.user = gs.aspera_user;
-					opts.host = gs.target.host;
-					opts.port = 33001;
-					opts.local_path = write_path;
-					opts.remote_dir = gs.target.remote_dir;
-					opts.max_rate = gs.aspera_max_rate;
-					auto argv = BuildAscpSendArgv(opts);
+					if (gs.target.transport == UploadTransport::ASPERA) {
+						AsperaSendOptions opts;
+						opts.ascp_path = gs.aspera_ascp_path;
+						opts.key_path = gs.aspera_key_path;
+						opts.user = gs.user;
+						opts.host = gs.target.host;
+						opts.port = 33001;
+						opts.local_path = write_path;
+						opts.remote_dir = gs.target.remote_dir;
+						opts.max_rate = gs.aspera_max_rate;
+						auto argv = BuildAscpSendArgv(opts);
 
-					auto result = miint::RunAsperaSend(argv, gs.aspera_password);
-					if (result.exit_code != 0) {
-						throw IOException("ena_upload_reads: ascp failed (exit %d) for sample '%s' file '%s': %s",
-						                  result.exit_code, group.sample_ref, fname, result.stderr_output);
+						auto result = miint::RunAsperaSend(argv, gs.password);
+						if (result.exit_code != 0) {
+							throw IOException("ena_upload_reads: ascp failed (exit %d) for sample '%s' file '%s': %s",
+							                  result.exit_code, group.sample_ref, fname, result.stderr_output);
+						}
 					}
-				}
 #else
-				if (gs.target.transport == UploadTransport::ASPERA) {
-					throw IOException("ena_upload_reads: Aspera transport is not supported on this build/platform");
-				}
+					if (gs.target.transport == UploadTransport::ASPERA) {
+						throw IOException("ena_upload_reads: Aspera transport is not supported on this build/platform");
+					}
 #endif
-			} catch (...) {
+				} catch (...) {
+					cleanup_temp();
+					throw;
+				}
 				cleanup_temp();
-				throw;
 			}
-			cleanup_temp();
 
 			EmittedFile e;
 			e.sample_ref = group.sample_ref;
@@ -612,13 +824,14 @@ void RunUpload(ClientContext &context, const ENAUploadReadsBindData &bind, ENAUp
 }
 
 // =====================================================================
-// Secret resolution (Aspera transport only)
+// Secret resolution (authenticated transports — Aspera, libcurl)
 // =====================================================================
 
-void ResolveAsperaCredentials(ClientContext &context, const string &secret_name, string &user_out,
-                              string &password_out) {
+void ResolveUploadCredentials(ClientContext &context, const string &transport_label, const string &secret_name,
+                              string &user_out, string &password_out) {
 	if (secret_name.empty()) {
-		throw BinderException("ena_upload_reads: Aspera transport requires a SECRET — pass `secret := 'name'`");
+		throw BinderException("ena_upload_reads: %s transport requires a SECRET — pass `secret := 'name'`",
+		                      transport_label);
 	}
 	auto &mgr = SecretManager::Get(context);
 	auto txn = CatalogTransaction::GetSystemCatalogTransaction(context);
@@ -710,7 +923,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	gs->aspera_max_rate = bind.aspera_max_rate;
 
 	if (gs->target.transport == UploadTransport::ASPERA) {
-		ResolveAsperaCredentials(context, bind.secret_name, gs->aspera_user, gs->aspera_password);
+		ResolveUploadCredentials(context, "Aspera", bind.secret_name, gs->user, gs->password);
 		auto &db = DatabaseInstance::GetDatabase(context);
 		gs->aspera_ascp_path = miint::AsperaUtils::FindAscp();
 		if (gs->aspera_ascp_path.empty()) {
@@ -718,6 +931,19 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 			                  "transport for local testing");
 		}
 		gs->aspera_key_path = miint::AsperaUtils::ResolveKey(db, gs->aspera_ascp_path, /*required=*/true);
+	} else if (gs->target.transport == UploadTransport::CURL) {
+#ifdef MIINT_HAS_CURL
+		// Plain user/password auth via Basic (HTTP) or USERPWD (FTP). Most
+		// hosts will require this; we always pass them through if a secret
+		// was supplied. A future "anonymous FTP" use case could relax this
+		// to make `secret` optional for ftp:// targets.
+		ResolveUploadCredentials(context, "libcurl", bind.secret_name, gs->user, gs->password);
+#else
+		throw BinderException(
+		    "ena_upload_reads: %s:// transport requires libcurl, which is disabled in this build "
+		    "(use aspera:// or file:// instead, or rebuild with -DMIINT_ENABLE_CURL=ON)",
+		    gs->target.scheme);
+#endif
 	}
 
 	MaterialiseInput(context, bind.relation_name, gs->input);

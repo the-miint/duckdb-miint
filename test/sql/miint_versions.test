@@ -26,7 +26,7 @@ WHERE library IN ('miint', 'htslib', 'minimap2', 'kseq++', 'WFA2-lib', 'zlib', '
 # Every row matches either a core or optional library name
 query I
 SELECT COUNT(*) FROM miint_versions()
-WHERE library NOT IN ('miint', 'htslib', 'minimap2', 'kseq++', 'WFA2-lib', 'HDF5', 'zlib', 'rype', 'vsearch', 'mafft');
+WHERE library NOT IN ('miint', 'htslib', 'minimap2', 'kseq++', 'WFA2-lib', 'HDF5', 'zlib', 'libcurl', 'rype', 'vsearch', 'mafft');
 ----
 0
 

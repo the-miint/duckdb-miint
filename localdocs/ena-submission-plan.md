@@ -658,12 +658,50 @@ Code review (linus-code-reviewer): five blockers + seven should-fixes + six nits
 - Nits not addressed: `aspera_send.hpp` API placement, `prctl` per-thread caveat, "uncompressed bytes" output column, BIGINT-vs-UTINYINT type for `qual_offset`, live-test round-trip read-back, additional `sample_ref` charset validation. None blocked review approval; defer if/when needed.
 
 Follow-ups (deferred):
-- libcurl-based streaming transport for FTPS/HTTPS-PUT (would drop temp files for those paths but not for Aspera).
+- ~~libcurl-based streaming transport for FTPS/HTTPS-PUT~~ — done in Phase 6.5 (commit pending).
 - Per-sample concurrency in the encode/upload loop (would need `MaxThreads()` > 1 + claim queue + per-sample workspace).
 - Round-trip md5 verification in the live Aspera test (download via `ascp --mode=recv` and compare).
 - Reports API `SELECT * FROM ena.{projects,samples}` (still owed from Phase 5).
 
 Phase 8 has been trimmed accordingly (the old "Aspera write-side" bullet moved here, now done).
+
+### Phase 6.5 — done (libcurl streaming transport, commit pending)
+
+**Out-of-band addition** between Phase 6 and Phase 7. The user requested adding libcurl now while context was warm; it unlocks `ftp://`, `ftps://`, `http://`, `https://` upload targets without writing temp files. Aspera still needs temp files (ascp doesn't reliably read stdin), so the temp-file cleanup logic from Phase 6 stays.
+
+**macOS note**: libcurl (vcpkg build) pulls in OpenSSL's libcrypto, which exports `MD5_*` / `SHA1_*` symbols that vsearch's vendored copies (in `ext/vsearch/src/{md5,sha1}.c`) also export. Linux's GNU ld accepts `-Wl,--allow-multiple-definition` to resolve this benignly (libcurl uses `EVP_Digest*` internally, not the C-style `MD5_*` API, so first-defined-wins is safe). Apple's ld lacks the equivalent, and vsearch is non-negotiable on macOS, so libcurl is auto-disabled on Apple builds. Aspera + file:// still work there. Tracked for upstream fix in `localdocs/vsearch-feature-request.md`.
+
+Files touched (5 new + 5 modified):
+- New code (3): `src/include/curl_send.hpp` (60 lines), `src/curl_send.cpp` (124 lines), `test/cpp/test_curl_send.cpp` (130 lines, 5 cases / 11 assertions).
+- Modified (5): `CMakeLists.txt` (add `find_package(CURL CONFIG REQUIRED)`, link `CURL::libcurl` to extension/loadable/tests, add `-Wl,--allow-multiple-definition` for vsearch+OpenSSL clash, source list updates), `src/include/ena_upload_helpers.hpp` (+`UploadTransport::CURL`, +`scheme`, +`url_for_curl` fields), `src/ena_upload_helpers.cpp` (+`ftp/ftps/http/https` URL parsing → CURL transport), `src/ena_upload_reads.cpp` (+`StreamingGzipMd5Producer` class for libcurl pull-model, +CURL branch in `RunUpload`, renamed `aspera_user`/`aspera_password` → `user`/`password` since both ASPERA and CURL share the secret), `src/miint_extension.cpp` (+`libcurl` row in `miint_versions()`), `test/sql/miint_versions.test` (+libcurl in expected library set).
+
+Tests delta: +5 C++ cases (804 total Catch2 cases / 6814 assertions / 0 failed), +1 SQL case (114 → 114 SQL cases via `make test`; +1 test case in miint_versions.test). 0 regressions.
+
+`miint_versions()` now reports e.g. `libcurl | libcurl/8.16.0-DEV OpenSSL/3.6.0 zlib/1.3.1`.
+
+Streaming pipeline: `StreamingGzipMd5Producer::Read(buf, max_bytes)` is the libcurl `CURLOPT_READFUNCTION`. Internally it iterates over `SampleGroup::row_indices`, encodes one record at a time via `FastqEncoder` into a per-record buffer, runs `deflate(Z_NO_FLUSH)` over that into an output buffer, drains the output buffer to libcurl, and finally calls `deflate(Z_FINISH)` after all rows. MD5 is accumulated over the gzipped output as it lands in the buffer (so it covers exactly the bytes libcurl receives). State machine: encoding → finishing → EOF. No temp file at any point.
+
+Build-system note: linking libcurl pulls in OpenSSL's libcrypto, which exports `MD5_*` and `SHA1_*` symbols that vsearch's vendored copies also export. Both archives are pulled into every binary that links both deps. Resolved with `-Wl,--allow-multiple-definition` on the tests + extension + loadable-extension targets — first-defined wins, and since each archive uses its own copy at compile time (intra-`.o` calls), runtime behaviour is unchanged. APPLE not affected (different linker rules).
+
+Code review (linus-code-reviewer): one mis-diagnosed "blocker" in `StreamingGzipMd5Producer` (after extensive trace, reviewer concluded the state machine is correct), three should-fixes (all addressed), six nits (two addressed). Specifically:
+- **Should-fix — `--allow-multiple-definition` doesn't work on macOS**: addressed by gating libcurl behind `MIINT_ENABLE_CURL`, auto-disabling on Apple. macOS users get Aspera + file:// only; Linux gets all three transports. Updated CMake comment is honest about the platform matrix; `-Wl,--allow-multiple-definition` set with `INTERFACE` on the static archive so DuckDB-built consumers (duckdb shell, unittest, plan_serializer) inherit the flag.
+- **Should-fix — `CURLOPT_FAILONERROR` discards server error body**: dropped the flag, added `CURLOPT_WRITEFUNCTION` capturing up to 4 KB of response body. HTTP 4xx/5xx now surfaces as `error_message = "HTTP {code} response body: {body}"` so ENA's actual XML/JSON diagnostic is preserved.
+- **Should-fix — colon-in-user not validated**: added validation in `RunCurlUpload` that returns a clear `error_message` mentioning RFC 7617. New Catch2 test pins the rejection.
+- Nit — `GetCurlVersion()` triggered `EnsureCurlGlobalInit()` unnecessarily: removed.
+- Nit — layout fallthrough silently produced empty stream: added `throw std::logic_error` in both `EncodeOneRecord` (StreamingGzipMd5Producer) and `EncodeSampleRows`.
+- Other nits (DRY of GzipMd5FileSink + StreamingGzipMd5Producer, file:// build-feature guard, curl_global_init coordination): acknowledged but deferred — the DRY refactor is real ~150-line tech debt and a fair Phase 7 task to extract a shared `GzipMd5Stream` base.
+
+Deviations from the side-quest plan:
+- **No live SQL test for libcurl transport**: would need a pyftpdlib-backed mock server in `run_tests.sh`. The `RunCurlUpload`-against-`file://` unit test proves the wrapper end-to-end; the integration into `ena_upload_reads` is straight-line glue. Defer the mock to whenever a real consumer of `ftps://` surfaces.
+- **`secret` is required for CURL transport** (matches Aspera). A future "anonymous FTP" use case could relax this to make `secret` optional for `ftp://` targets — flagged in the InitGlobal comment.
+- **Renamed `aspera_user`/`aspera_password` to `user`/`password`** in GlobalState: both authenticated transports share the same secret schema, no reason to silo by transport.
+- **libcurl auto-disabled on macOS**: see the macOS note above. Tracked at `localdocs/vsearch-feature-request.md` for the upstream namespace fix.
+
+Follow-ups (deferred):
+- pyftpdlib-backed SQL test for the CURL transport.
+- HTTPS-PUT receipt parsing (currently we just check the HTTP code; some servers return JSON receipts that downstream callers might want).
+- DRY: extract a templated `GzipMd5Stream` base shared between `GzipMd5FileSink` and `StreamingGzipMd5Producer` — flagged in the Linus review (~150 lines of duplication, sink-callback-shaped abstraction is the natural shape).
+- Upstream vsearch fix to namespace its vendored MD5/SHA1 (would re-enable libcurl on macOS).
 
 
 ### Phase 7 — pending

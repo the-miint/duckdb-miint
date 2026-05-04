@@ -57,19 +57,28 @@ std::vector<std::string> OutputFilenames(const std::string &sample_ref, FastqLay
 // ---- Upload target URL parsing -------------------------------------------
 
 enum class UploadTransport : uint8_t {
-	ASPERA,
-	LOCAL_FILE,
+	ASPERA,     // aspera://host/path/  → ascp --mode=send (temp file)
+	LOCAL_FILE, // file://path/         → direct write
+	CURL,       // ftp/ftps/http/https://host/path/ → libcurl streaming
 };
 
+// The libcurl transport spans four URL schemes. ScheamName() echoes the
+// original wire scheme so error messages can be specific.
 struct UploadTargetURL {
 	UploadTransport transport;
-	std::string host;       // empty for LOCAL_FILE
-	std::string remote_dir; // always ends with '/'; "/" if no path component
+	std::string scheme;       // lower-case original scheme ("ftp", "https", "aspera", "file", ...)
+	std::string host;         // empty for LOCAL_FILE
+	std::string remote_dir;   // always ends with '/'; "/" if no path component
+	std::string url_for_curl; // populated only for CURL transport: full URL with trailing slash
 };
 
-// Parse `aspera://host/path/` or `file:///path/`. The remote_dir is
-// normalised to always have a trailing '/'. Unsupported schemes or malformed
-// input throw std::runtime_error.
+// Parse one of:
+//   aspera://host[/path/]               → ASPERA
+//   file://[abs-or-relative-path]/      → LOCAL_FILE
+//   ftp://host[/path/]   ftps://...     → CURL
+//   http://host[/path/]  https://...    → CURL
+// The remote_dir is normalised to always have a trailing '/'. Unsupported
+// schemes or malformed input throw std::runtime_error.
 UploadTargetURL ParseUploadTargetURL(const std::string &url);
 
 // ---- ascp argv builder ---------------------------------------------------
