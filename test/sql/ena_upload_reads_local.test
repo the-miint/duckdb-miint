@@ -1,0 +1,149 @@
+# name: test/sql/ena_upload_reads_local.test
+# description: ena_upload_reads — encode→gzip→MD5 pipeline against a file:// target (no Aspera, no creds)
+# group: [sql]
+
+require miint
+
+# Build a 2-sample input by re-reading the canned single-end + paired-end
+# fixtures and tagging them with a sample_ref. file:// transport doesn't need
+# a SECRET, so this test runs unguarded everywhere.
+statement ok
+CREATE TABLE upload_input AS
+  SELECT 'sampleA' AS sample_ref, read_id, sequence1, qual1,
+         CAST(NULL AS VARCHAR) AS sequence2,
+         CAST(NULL AS UTINYINT[]) AS qual2,
+         sequence_index
+  FROM read_fastx('data/fastq/small_a.fq')
+  UNION ALL BY NAME
+  SELECT 'sampleB' AS sample_ref, read_id, sequence1, qual1,
+         sequence2, qual2, sequence_index
+  FROM read_fastx('data/fastq/small_a_r1.fq', sequence2='data/fastq/small_a_r2.fq');
+
+# Output schema is locked at bind time.
+query IIIIII
+DESCRIBE SELECT * FROM ena_upload_reads(relation := 'upload_input',
+                                        target_url := 'file://__TEST_DIR__/uploads/');
+----
+sample_ref	VARCHAR	YES	NULL	NULL	NULL
+filename	VARCHAR	YES	NULL	NULL	NULL
+filetype	VARCHAR	YES	NULL	NULL	NULL
+md5	VARCHAR	YES	NULL	NULL	NULL
+bytes_written	UBIGINT	YES	NULL	NULL	NULL
+layout	VARCHAR	YES	NULL	NULL	NULL
+
+# End-to-end: collect what the function emitted.
+statement ok
+CREATE TABLE upload_result AS
+  SELECT * FROM ena_upload_reads(relation := 'upload_input',
+                                 target_url := 'file://__TEST_DIR__/uploads/')
+  ORDER BY sample_ref, filename;
+
+# sampleA single-end → 1 file; sampleB paired-end → 2 files; 3 rows total.
+query I
+SELECT count(*) FROM upload_result;
+----
+3
+
+# Each row identifies its sample, layout, and filename. md5 must be 32 lowercase
+# hex chars; bytes_written must be > 0.
+query IIIIII
+SELECT sample_ref, filename, filetype, layout,
+       length(md5) = 32 AS md5_len_ok,
+       bytes_written > 0 AS has_bytes
+FROM upload_result;
+----
+sampleA	sampleA.fastq.gz	fastq	single	true	true
+sampleB	sampleB_1.fastq.gz	fastq	paired	true	true
+sampleB	sampleB_2.fastq.gz	fastq	paired	true	true
+
+# Files must actually exist on disk; glob the upload directory and join.
+query I
+SELECT count(*) FROM upload_result r
+LEFT JOIN (SELECT file FROM glob('__TEST_DIR__/uploads/*.fastq.gz')) g
+       ON g.file = '__TEST_DIR__/uploads/' || r.filename
+WHERE g.file IS NULL;
+----
+0
+
+# md5 column must equal the on-disk md5 (proves the encoder→gzip→md5 pipeline
+# is what actually wrote the file, not a parallel computation). read_blob is a
+# table function and doesn't support correlated args, so spell out one check
+# per known sample/file instead of a join.
+query I
+SELECT md5(content) = (SELECT md5 FROM upload_result WHERE filename = 'sampleA.fastq.gz')
+FROM read_blob('__TEST_DIR__/uploads/sampleA.fastq.gz');
+----
+true
+
+query I
+SELECT md5(content) = (SELECT md5 FROM upload_result WHERE filename = 'sampleB_1.fastq.gz')
+FROM read_blob('__TEST_DIR__/uploads/sampleB_1.fastq.gz');
+----
+true
+
+query I
+SELECT md5(content) = (SELECT md5 FROM upload_result WHERE filename = 'sampleB_2.fastq.gz')
+FROM read_blob('__TEST_DIR__/uploads/sampleB_2.fastq.gz');
+----
+true
+
+# Layout override: paired_interleaved emits ONE file per sample with R1 and R2
+# alternating.
+statement ok
+CREATE TABLE upload_input_paired AS
+  SELECT 'sampleC' AS sample_ref, read_id, sequence1, qual1,
+         sequence2, qual2, sequence_index
+  FROM read_fastx('data/fastq/small_a_r1.fq', sequence2='data/fastq/small_a_r2.fq');
+
+query IIII
+SELECT sample_ref, filename, layout, bytes_written > 0
+FROM ena_upload_reads(relation := 'upload_input_paired',
+                      target_url := 'file://__TEST_DIR__/uploads_paired/',
+                      layout := 'paired_interleaved');
+----
+sampleC	sampleC.fastq.gz	paired_interleaved	true
+
+# Layout error: explicit layout=single with paired-end input should fail clearly.
+statement error
+SELECT * FROM ena_upload_reads(relation := 'upload_input_paired',
+                               target_url := 'file://__TEST_DIR__/uploads_err/',
+                               layout := 'single');
+----
+sampleC
+
+# Layout error: unknown layout name surfaces at bind time.
+statement error
+SELECT * FROM ena_upload_reads(relation := 'upload_input',
+                               target_url := 'file://__TEST_DIR__/uploads_err/',
+                               layout := 'triple');
+----
+triple
+
+# Empty input is permitted — no rows emitted, no files written.
+statement ok
+CREATE TABLE upload_input_empty AS SELECT * FROM upload_input WHERE 1=0;
+
+query I
+SELECT count(*) FROM ena_upload_reads(relation := 'upload_input_empty',
+                                       target_url := 'file://__TEST_DIR__/uploads_empty/');
+----
+0
+
+# Mixed layout in one sample: rejected.
+statement ok
+CREATE TABLE upload_input_mixed AS
+  SELECT 'sampleM' AS sample_ref, read_id, sequence1, qual1,
+         sequence2, qual2, sequence_index
+  FROM read_fastx('data/fastq/small_a_r1.fq', sequence2='data/fastq/small_a_r2.fq')
+  UNION ALL BY NAME
+  SELECT 'sampleM' AS sample_ref, read_id, sequence1, qual1,
+         CAST(NULL AS VARCHAR) AS sequence2,
+         CAST(NULL AS UTINYINT[]) AS qual2,
+         sequence_index
+  FROM read_fastx('data/fastq/small_a.fq');
+
+statement error
+SELECT * FROM ena_upload_reads(relation := 'upload_input_mixed',
+                               target_url := 'file://__TEST_DIR__/uploads_err/');
+----
+sampleM

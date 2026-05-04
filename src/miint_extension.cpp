@@ -32,6 +32,7 @@
 #include <read_ena_sequences.hpp>
 #include <ena_secret.hpp>
 #include <ena_storage.hpp>
+#include <ena_upload_reads.hpp>
 #include <miint_log.hpp>
 #include <miint_macros.hpp>
 #include "duckdb/main/extension_helper.hpp"
@@ -218,6 +219,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadENAAttributesTableFunction::Register(loader);
 	ReadENASearchableFieldsTableFunction::Register(loader);
 	ReadENASequencesTableFunction::Register(loader);
+	ENAUploadReadsTableFunction::Register(loader);
 
 	AlignmentFlagFunctions::Register(loader);
 	AlignmentSeqIdentityFunction::Register(loader);

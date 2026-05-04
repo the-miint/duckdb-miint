@@ -773,6 +773,7 @@ set(EXTENSION_SOURCES
     src/ena_samples_insert.cpp
     src/ena_samples_insert_op.cpp
     src/fastq_encoder.cpp
+    src/ena_upload_helpers.cpp
     src/ena_upload_reads.cpp
     src/ena_lifecycle.cpp
     src/miint_log.cpp
@@ -783,6 +784,7 @@ set(EXTENSION_SOURCES
     src/read_ena_sequences.cpp
     src/aspera_utils.cpp
     src/aspera_stream.cpp
+    src/aspera_send.cpp
     src/SFFReader.cpp
     src/read_sequences_sff.cpp
     src/WFA2Aligner.cpp
@@ -1055,6 +1057,8 @@ set(TEST_SOURCES
     test/cpp/test_ena_samples_insert.cpp
     src/fastq_encoder.cpp
     test/cpp/test_fastq_encoder.cpp
+    src/ena_upload_helpers.cpp
+    test/cpp/test_ena_upload_reads.cpp
     src/aspera_utils.cpp
     test/cpp/test_AsperaUtils.cpp
     src/SFFReader.cpp
