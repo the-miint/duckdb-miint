@@ -5,6 +5,7 @@
 #include "ena_storage.hpp"
 
 #include "ena_projects_insert_op.hpp"
+#include "ena_samples_insert_op.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -61,7 +62,9 @@ void AddSubmissionLogColumns(ColumnList &columns) {
 	add("request_payload", LogicalType::VARCHAR);
 	add("receipt", LogicalType::VARCHAR);
 	add("error_messages", LogicalType::LIST(LogicalType::VARCHAR));
-	add("duration_ms", LogicalType::INTEGER);
+	// Duration is int64 ms — slow ENA submissions over a saturated wwwdev or a
+	// large multi-object batch can plausibly exceed the int32 ~35-minute cap.
+	add("duration_ms", LogicalType::BIGINT);
 }
 
 unique_ptr<CreateTableInfo> BuildENATableInfo(SchemaCatalogEntry &schema, ENATableKind kind) {
@@ -201,7 +204,7 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 	auto era_accession = FlatVector::GetData<string_t>(output.data[8]);
 	auto request_payload = FlatVector::GetData<string_t>(output.data[9]);
 	auto receipt = FlatVector::GetData<string_t>(output.data[10]);
-	auto duration_ms = FlatVector::GetData<int32_t>(output.data[12]);
+	auto duration_ms = FlatVector::GetData<int64_t>(output.data[12]);
 
 	auto &error_messages = output.data[11];
 	ListVector::SetListSize(error_messages, 0);
@@ -478,17 +481,23 @@ PhysicalOperator &ENACatalog::PlanInsert(ClientContext &context, PhysicalPlanGen
 		throw BinderException("ENA catalog: ON CONFLICT clause is not supported");
 	}
 	auto &table_entry = op.table.Cast<ENATableEntry>();
-	if (table_entry.GetKind() != ENATableKind::PROJECTS) {
-		throw BinderException("ENA catalog: INSERT INTO ena.%s is not implemented in this build "
-		                      "(only ena.projects supports INSERT in Phase 4)",
-		                      table_entry.name);
-	}
 	if (!plan) {
 		throw BinderException("ENA catalog: INSERT requires a child plan");
 	}
-	auto &op_ref = planner.Make<ENAProjectsInsert>(op, table_entry, op.column_index_map, op.return_chunk);
-	op_ref.children.push_back(*plan);
-	return op_ref;
+	switch (table_entry.GetKind()) {
+	case ENATableKind::PROJECTS: {
+		auto &op_ref = planner.Make<ENAProjectsInsert>(op, table_entry, op.column_index_map, op.return_chunk);
+		op_ref.children.push_back(*plan);
+		return op_ref;
+	}
+	case ENATableKind::SAMPLES: {
+		auto &op_ref = planner.Make<ENASamplesInsert>(op, table_entry, op.column_index_map, op.return_chunk);
+		op_ref.children.push_back(*plan);
+		return op_ref;
+	}
+	default:
+		throw BinderException("ENA catalog: INSERT INTO ena.%s is not implemented in this build", table_entry.name);
+	}
 }
 
 PhysicalOperator &ENACatalog::PlanDelete(ClientContext &, PhysicalPlanGenerator &, LogicalDelete &,

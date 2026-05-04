@@ -132,7 +132,7 @@ struct ENASubmissionLogRow {
 	string request_payload;
 	string receipt;
 	vector<string> error_messages;
-	int32_t duration_ms;
+	int64_t duration_ms;
 };
 
 class ENASubmissionLog {

@@ -9,10 +9,27 @@
 
 #pragma once
 
+#include <cctype>
 #include <string>
 #include <vector>
 
 namespace miint {
+
+// Case-insensitive ASCII equality, used for matching ENA EXT_ID/@type values
+// (the receipt XSD declares it as a free-form string and observed casings
+// include "biosample", "BioSample", "BIOSAMPLE"). Inline so the pure-data
+// layer doesn't have to link against the rest of the receipt parser.
+inline bool EqualsIgnoreCase(const std::string &a, const std::string &b) {
+	if (a.size() != b.size()) {
+		return false;
+	}
+	for (size_t i = 0; i < a.size(); ++i) {
+		if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) {
+			return false;
+		}
+	}
+	return true;
+}
 
 struct ENAExtId {
 	std::string accession;

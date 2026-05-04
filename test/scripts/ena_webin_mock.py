@@ -31,8 +31,12 @@ import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 ACCESSION_BASE = {
+    # (base_offset, primary_prefix_on_element, ext_id_prefix)
+    # Primary prefix is what ENA returns as the <ELEMENT accession="..."/>;
+    # ext_id_prefix is the EXT_ID accession (study ERP for projects,
+    # BioSample SAMEA for samples). See ena-research-webin-v2-deep.md §1.
     "PROJECT": (1000, "PRJEB", "ERP"),
-    "SAMPLE": (2000, "SAMEA", "ERS"),
+    "SAMPLE": (2000, "ERS", "SAMEA"),
     "EXPERIMENT": (3000, "ERX", "ERX"),
     "RUN": (4000, "ERR", "ERR"),
     "ANALYSIS": (5000, "ERZ", "ERZ"),

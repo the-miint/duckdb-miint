@@ -10,9 +10,9 @@
 #pragma once
 
 #include "ena_envelope_builder.hpp"
+#include "ena_post_fn.hpp"
 
 #include <cstdint>
-#include <functional>
 #include <string>
 #include <vector>
 
@@ -32,11 +32,6 @@ struct ENAProjectInsertResult {
 	std::string status;
 	std::string hold_until_date;
 };
-
-// Functor signature: (url, body, user, password, content_type) -> response_body.
-// Production wires this to ENAClient::PostJSON; tests inject a fake.
-using ENAPostFn = std::function<std::string(const std::string &url, const std::string &body, const std::string &user,
-                                            const std::string &password, const std::string &content_type)>;
 
 // Outcome-rich result: contains the per-row insert results plus the receipt
 // metadata needed to populate ena.submission_log.

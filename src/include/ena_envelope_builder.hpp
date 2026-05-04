@@ -28,9 +28,11 @@ struct ProjectSpec {
 
 struct SampleSpec {
 	std::string alias;
-	std::string title;     // optional
-	int64_t taxon_id = 0;  // required, > 0
-	std::string checklist; // optional, ERC000NN — emitted as ENA-CHECKLIST attribute
+	std::string title;           // optional
+	std::string description;     // optional, sample-level description
+	int64_t taxon_id = 0;        // required, > 0
+	std::string scientific_name; // optional, organism.scientificName
+	std::string checklist;       // optional, ERC000NN — emitted as ENA-CHECKLIST attribute
 	// Application-supplied attribute pairs (tag, value); preserves insertion order.
 	std::vector<std::pair<std::string, std::string>> attributes;
 };

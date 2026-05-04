@@ -767,8 +767,11 @@ set(EXTENSION_SOURCES
     src/ena_receipt_parser.cpp
     src/ena_submission_log.cpp
     src/ena_storage.cpp
+    src/ena_insert_common.cpp
     src/ena_projects_insert.cpp
     src/ena_projects_insert_op.cpp
+    src/ena_samples_insert.cpp
+    src/ena_samples_insert_op.cpp
     src/ena_upload_reads.cpp
     src/ena_lifecycle.cpp
     src/miint_log.cpp
@@ -1047,6 +1050,8 @@ set(TEST_SOURCES
     test/cpp/test_ena_receipt.cpp
     src/ena_projects_insert.cpp
     test/cpp/test_ena_projects_insert.cpp
+    src/ena_samples_insert.cpp
+    test/cpp/test_ena_samples_insert.cpp
     src/aspera_utils.cpp
     test/cpp/test_AsperaUtils.cpp
     src/SFFReader.cpp

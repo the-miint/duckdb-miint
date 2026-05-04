@@ -125,8 +125,16 @@ void AppendSample(std::string &out, const SampleSpec &s) {
 		out.append(",\"title\":");
 		AppendJsonString(out, s.title);
 	}
+	if (!s.description.empty()) {
+		out.append(",\"description\":");
+		AppendJsonString(out, s.description);
+	}
 	out.append(",\"organism\":{\"taxonId\":");
 	AppendJsonString(out, std::to_string(s.taxon_id));
+	if (!s.scientific_name.empty()) {
+		out.append(",\"scientificName\":");
+		AppendJsonString(out, s.scientific_name);
+	}
 	out.push_back('}');
 
 	const bool any_attrs = !s.checklist.empty() || !s.attributes.empty();
