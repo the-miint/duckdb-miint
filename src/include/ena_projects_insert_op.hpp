@@ -1,58 +1,47 @@
 // SPDX-License-Identifier: MIT
 //
-// PhysicalOperator subclass that implements `INSERT INTO ena.projects ... [RETURNING ...]`
-// by buffering rows in Sink, POSTing the resulting envelope in Finalize, and
-// scanning a per-statement ColumnDataCollection in GetData (for the RETURNING
-// projection).
+// PhysicalOperator for `INSERT INTO ena.projects ... [RETURNING ...]`.
+//
+// Sink/Source/Finalize machinery lives in ENAObjectInsertOperator (the CRTP
+// base in ena_object_insert_op.hpp). This subclass only owns the per-table
+// data mapping: chunk row → ProjectSpec, RETURNING column population, and the
+// per-table identifier strings.
 
 #pragma once
 
-#include "duckdb/common/index_vector.hpp"
-#include "duckdb/execution/physical_operator.hpp"
+#include "ena_envelope_builder.hpp"
+#include "ena_object_insert_op.hpp"
+#include "ena_projects_insert.hpp"
 
 namespace duckdb {
 
-class ENATableEntry;
-
-class ENAProjectsInsert : public PhysicalOperator {
+class ENAProjectsInsert : public ENAObjectInsertOperator<ENAProjectsInsert, miint::ProjectSpec,
+                                                         miint::ENAProjectInsertOptions, miint::ENASubmissionOutcome> {
 public:
-	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::EXTENSION;
+	using ENAObjectInsertOperator::ENAObjectInsertOperator;
 
-public:
-	ENAProjectsInsert(PhysicalPlan &physical_plan, LogicalOperator &op, ENATableEntry &table,
-	                  physical_index_vector_t<idx_t> column_index_map, bool return_chunk);
-
-	ENATableEntry &table;
-	physical_index_vector_t<idx_t> column_index_map;
-	bool return_chunk;
-
-public:
-	// Source
-	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
-	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
-	                                 OperatorSourceInput &input) const override;
-
-	bool IsSource() const override {
-		return true;
+	static const char *ObjectName() {
+		return "projects";
 	}
-
-	// Sink
-	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
-	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override;
-	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
-	                          OperatorSinkFinalizeInput &input) const override;
-
-	bool IsSink() const override {
-		return true;
+	static const char *ThrowPrefix() {
+		return "INSERT INTO ena.projects";
 	}
-
-	bool ParallelSink() const override {
-		return false;
-	}
-
-	string GetName() const override {
+	static string OperatorName() {
 		return "ENA_PROJECTS_INSERT";
 	}
+
+	static ENABuiltSpecs<miint::ProjectSpec> BuildFromBuffer(ColumnDataCollection &buffer,
+	                                                         const physical_index_vector_t<idx_t> &column_index_map);
+
+	static miint::ENASubmissionOutcome Submit(const std::vector<miint::ProjectSpec> &specs,
+	                                          const miint::ENAProjectInsertOptions &opts,
+	                                          const miint::ENAPostFn &post_fn) {
+		return miint::SubmitProjectInsertOutcome(specs, opts, post_fn);
+	}
+
+	static void AppendReturningRows(ColumnDataCollection &return_collection, const vector<LogicalType> &return_types,
+	                                const std::vector<miint::ProjectSpec> &specs,
+	                                const miint::ENASubmissionOutcome &outcome);
 };
 
 } // namespace duckdb
