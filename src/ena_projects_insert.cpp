@@ -20,6 +20,12 @@ struct ProjectSubmitTraits {
 	static const char *ReceiptObjectType() {
 		return "PROJECT";
 	}
+	static std::string BuildEnvelope(const SubmissionSpec &env) {
+		return BuildEnvelopeJSON(env);
+	}
+	static const char *ContentType() {
+		return "application/json";
+	}
 	static ENAProjectInsertResult BuildRow(const ProjectSpec &spec, const ENAObjectReceipt &obj) {
 		ENAProjectInsertResult row;
 		row.alias = spec.alias;

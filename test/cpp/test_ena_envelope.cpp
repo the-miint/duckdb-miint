@@ -107,6 +107,43 @@ TEST_CASE("ENA envelope: single sample with checklist and attributes", "[ena_env
 	CHECK(col_pos < geo_pos);
 }
 
+TEST_CASE("ENA envelope: sample attribute units emit alongside value", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::SampleSpec s;
+	s.alias = "gut-002";
+	s.taxon_id = 408170;
+	s.checklist = "ERC000015";
+	s.attributes.emplace_back("collection date", "2026-04-01");
+	s.attributes.emplace_back("geographic location (latitude)", "32.7157");
+	s.attributes.emplace_back("geographic location (longitude)", "-117.1611");
+	// Sparse units: lat/lon get DD; collection date has no units entry.
+	s.attribute_units.emplace_back("geographic location (latitude)", "DD");
+	s.attribute_units.emplace_back("geographic location (longitude)", "DD");
+	env.samples.push_back(s);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	// Lat/lon attribute objects carry the `unit` field. JSON key is singular
+	// (`unit`) even though the SQL column / spec field name is plural
+	// (`attribute_units`) — V2 validator rejects `units` plural with HTTP 500.
+	CHECK(json.find(R"X({"tag":"geographic location (latitude)","value":"32.7157","unit":"DD"})X") !=
+	      std::string::npos);
+	CHECK(json.find(R"X({"tag":"geographic location (longitude)","value":"-117.1611","unit":"DD"})X") !=
+	      std::string::npos);
+	// Date attribute does NOT carry units (no entry in attribute_units, no
+	// silent default).
+	CHECK(json.find(R"X({"tag":"collection date","value":"2026-04-01"})X") != std::string::npos);
+	// Empty units string for an entry omits the field entirely (caller can use
+	// this to suppress units even if the tag appears in the units map).
+	miint::SampleSpec s2 = s;
+	s2.alias = "gut-003";
+	s2.attribute_units.clear();
+	s2.attribute_units.emplace_back("geographic location (latitude)", "");
+	miint::SubmissionSpec env2;
+	env2.samples.push_back(s2);
+	auto json2 = miint::BuildEnvelopeJSON(env2);
+	CHECK(json2.find(R"X("unit":)X") == std::string::npos);
+}
+
 TEST_CASE("ENA envelope: multi-sample emits one element per sample", "[ena_envelope]") {
 	miint::SubmissionSpec env;
 	for (int i = 1; i <= 3; ++i) {
@@ -449,6 +486,191 @@ TEST_CASE("ENA envelope: empty filetype rejected (no silent default)", "[ena_env
 	r.files.push_back({"a.fastq.gz", "", "abcd"});
 	env.runs.push_back(r);
 	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("filetype"));
+}
+
+// =====================================================================
+// XML envelope (experiments + runs) — V2 server requires XML for SRA-side
+// objects; verified live 2026-05-04. See BuildEnvelopeXML in
+// src/ena_envelope_builder.cpp.
+// =====================================================================
+
+TEST_CASE("ENA envelope XML: minimal experiment with paired layout and ILLUMINA platform", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "exp-001";
+	e.study_ref.accession = "PRJEB42";
+	e.sample_ref.accession = "SAMEA42";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "Illumina NovaSeq 6000";
+	env.experiments.push_back(e);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CheckEqual(
+	    xml, R"X(<?xml version="1.0" encoding="UTF-8"?>)X"
+	         R"X(<WEBIN><SUBMISSION><ACTIONS><ACTION><ADD/></ACTION></ACTIONS></SUBMISSION>)X"
+	         R"X(<EXPERIMENT_SET>)X"
+	         R"X(<EXPERIMENT alias="exp-001">)X"
+	         R"X(<STUDY_REF accession="PRJEB42"/>)X"
+	         R"X(<DESIGN><DESIGN_DESCRIPTION></DESIGN_DESCRIPTION>)X"
+	         R"X(<SAMPLE_DESCRIPTOR accession="SAMEA42"/>)X"
+	         R"X(<LIBRARY_DESCRIPTOR><LIBRARY_STRATEGY>WGS</LIBRARY_STRATEGY>)X"
+	         R"X(<LIBRARY_SOURCE>METAGENOMIC</LIBRARY_SOURCE>)X"
+	         R"X(<LIBRARY_SELECTION>RANDOM</LIBRARY_SELECTION>)X"
+	         R"X(<LIBRARY_LAYOUT><PAIRED/></LIBRARY_LAYOUT>)X"
+	         R"X(</LIBRARY_DESCRIPTOR></DESIGN>)X"
+	         R"X(<PLATFORM><ILLUMINA><INSTRUMENT_MODEL>Illumina NovaSeq 6000</INSTRUMENT_MODEL></ILLUMINA></PLATFORM>)X"
+	         R"X(</EXPERIMENT></EXPERIMENT_SET></WEBIN>)X");
+}
+
+TEST_CASE("ENA envelope XML: experiment with refname-style cross-references and optional fields", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "exp-002";
+	e.title = "Stool 16S amplicon";
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.design_description = "16S V4 amplicon, 250 bp paired-end";
+	e.library_name = "lib-002";
+	e.library_strategy = "AMPLICON";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "PCR";
+	e.library_layout = miint::ENALibraryLayout::SINGLE;
+	e.platform = "OXFORD_NANOPORE";
+	e.instrument_model = "MinION";
+	env.experiments.push_back(e);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CHECK(xml.find(R"X(<EXPERIMENT alias="exp-002">)X") != std::string::npos);
+	CHECK(xml.find(R"X(<TITLE>Stool 16S amplicon</TITLE>)X") != std::string::npos);
+	CHECK(xml.find(R"X(<STUDY_REF refname="p1"/>)X") != std::string::npos);
+	CHECK(xml.find(R"X(<SAMPLE_DESCRIPTOR refname="s1"/>)X") != std::string::npos);
+	CHECK(xml.find(R"X(<DESIGN_DESCRIPTION>16S V4 amplicon, 250 bp paired-end</DESIGN_DESCRIPTION>)X") !=
+	      std::string::npos);
+	CHECK(xml.find(R"X(<LIBRARY_NAME>lib-002</LIBRARY_NAME>)X") != std::string::npos);
+	CHECK(xml.find(R"X(<LIBRARY_LAYOUT><SINGLE/></LIBRARY_LAYOUT>)X") != std::string::npos);
+	CHECK(xml.find(R"X(<OXFORD_NANOPORE><INSTRUMENT_MODEL>MinION</INSTRUMENT_MODEL></OXFORD_NANOPORE>)X") !=
+	      std::string::npos);
+}
+
+TEST_CASE("ENA envelope XML: minimal run with paired files", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.alias = "run-001";
+	r.experiment_ref.refname = "exp-001";
+	r.files.push_back({"sample-A_1.fastq.gz", "fastq", "9b8932f85caa54e687eba62fca3edce2"});
+	r.files.push_back({"sample-A_2.fastq.gz", "fastq", "183d6a24e0c3704e993bebe75bbbd989"});
+	env.runs.push_back(r);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CheckEqual(xml, R"X(<?xml version="1.0" encoding="UTF-8"?>)X"
+	                R"X(<WEBIN><SUBMISSION><ACTIONS><ACTION><ADD/></ACTION></ACTIONS></SUBMISSION>)X"
+	                R"X(<RUN_SET><RUN alias="run-001">)X"
+	                R"X(<EXPERIMENT_REF refname="exp-001"/>)X"
+	                R"X(<DATA_BLOCK><FILES>)X"
+	                R"X(<FILE filename="sample-A_1.fastq.gz" filetype="fastq" checksum_method="MD5" )X"
+	                R"X(checksum="9b8932f85caa54e687eba62fca3edce2"/>)X"
+	                R"X(<FILE filename="sample-A_2.fastq.gz" filetype="fastq" checksum_method="MD5" )X"
+	                R"X(checksum="183d6a24e0c3704e993bebe75bbbd989"/>)X"
+	                R"X(</FILES></DATA_BLOCK></RUN></RUN_SET></WEBIN>)X");
+}
+
+TEST_CASE("ENA envelope XML: combined experiments + runs in one envelope", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "e1";
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "Illumina NovaSeq 6000";
+	env.experiments.push_back(e);
+	miint::RunSpec r;
+	r.alias = "r1";
+	r.experiment_ref.refname = "e1";
+	r.files.push_back({"a.fastq.gz", "fastq", "deadbeef"});
+	env.runs.push_back(r);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	auto submission_pos = xml.find("<SUBMISSION>");
+	auto exp_set_pos = xml.find("<EXPERIMENT_SET>");
+	auto run_set_pos = xml.find("<RUN_SET>");
+	REQUIRE(submission_pos != std::string::npos);
+	REQUIRE(exp_set_pos != std::string::npos);
+	REQUIRE(run_set_pos != std::string::npos);
+	// Spec order: SUBMISSION, EXPERIMENT_SET, RUN_SET.
+	CHECK(submission_pos < exp_set_pos);
+	CHECK(exp_set_pos < run_set_pos);
+}
+
+TEST_CASE("ENA envelope XML: HOLD action emits HoldUntilDate sibling action", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::ADD;
+	env.hold_until_date = "2027-01-15";
+	miint::ExperimentSpec e;
+	e.alias = "e-hold";
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "Illumina NovaSeq 6000";
+	env.experiments.push_back(e);
+	auto xml = miint::BuildEnvelopeXML(env);
+	CHECK(xml.find(R"X(<ACTION><HOLD HoldUntilDate="2027-01-15"/></ACTION>)X") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope XML: XML escaping of attribute and text values", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.alias = "run<&\"'>";
+	r.experiment_ref.refname = "exp&1";
+	r.files.push_back({"a&b.fastq.gz", "fastq", "deadbeef"});
+	env.runs.push_back(r);
+	auto xml = miint::BuildEnvelopeXML(env);
+	// Alias attribute value is escaped (used inside double-quoted attr).
+	CHECK(xml.find(R"X(<RUN alias="run&lt;&amp;&quot;&apos;&gt;">)X") != std::string::npos);
+	CHECK(xml.find(R"X(<EXPERIMENT_REF refname="exp&amp;1"/>)X") != std::string::npos);
+	CHECK(xml.find(R"X(filename="a&amp;b.fastq.gz")X") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope XML: empty experiments + runs yields just the SUBMISSION block", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	auto xml = miint::BuildEnvelopeXML(env);
+	CheckEqual(xml, R"X(<?xml version="1.0" encoding="UTF-8"?>)X"
+	                R"X(<WEBIN><SUBMISSION><ACTIONS><ACTION><ADD/></ACTION></ACTIONS></SUBMISSION></WEBIN>)X");
+}
+
+TEST_CASE("ENA envelope XML: experiment empty alias rejected", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "Illumina NovaSeq 6000";
+	env.experiments.push_back(e);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("alias"));
+}
+
+TEST_CASE("ENA envelope XML: run with no files rejected", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.alias = "run-no-files";
+	r.experiment_ref.refname = "e1";
+	env.runs.push_back(r);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("file"));
 }
 
 TEST_CASE("ENA envelope: full graph (project + sample + experiment + run) emits arrays in spec order",

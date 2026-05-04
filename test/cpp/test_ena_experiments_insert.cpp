@@ -56,7 +56,9 @@ ExperimentSpec MinimalExperiment(const std::string &alias) {
 	e.library_selection = "RANDOM";
 	e.library_layout = ENALibraryLayout::PAIRED;
 	e.platform = "ILLUMINA";
-	e.instrument_model = "NovaSeq 6000";
+	// SRA `typeIlluminaModel` enum requires the `Illumina` prefix
+	// (verified live 2026-05-04 — bare "NovaSeq 6000" is rejected).
+	e.instrument_model = "Illumina NovaSeq 6000";
 	return e;
 }
 
@@ -86,17 +88,18 @@ TEST_CASE("ENA experiments insert: single row builds envelope and parses receipt
 	REQUIRE(captured.url == "http://mock.example/submit");
 	REQUIRE(captured.user == "Webin-1");
 	REQUIRE(captured.password == "pw");
-	REQUIRE(captured.content_type.find("json") != std::string::npos);
-	REQUIRE(captured.body.find("\"alias\":\"e1\"") != std::string::npos);
-	REQUIRE(captured.body.find("\"libraryStrategy\":\"WGS\"") != std::string::npos);
-	REQUIRE(captured.body.find("\"ILLUMINA\":{\"instrumentModel\":\"NovaSeq 6000\"}") != std::string::npos);
+	// V2 dispatch quirk: SRA-side objects (experiment / run) require XML.
+	REQUIRE(captured.content_type.find("xml") != std::string::npos);
+	REQUIRE(captured.body.find("<EXPERIMENT alias=\"e1\">") != std::string::npos);
+	REQUIRE(captured.body.find("<LIBRARY_STRATEGY>WGS</LIBRARY_STRATEGY>") != std::string::npos);
+	REQUIRE(captured.body.find("<INSTRUMENT_MODEL>Illumina NovaSeq 6000</INSTRUMENT_MODEL>") != std::string::npos);
 }
 
 TEST_CASE("ENA experiments insert: multi-row preserves order", "[ena_experiments_insert]") {
 	auto post_fn = [](const std::string &, const std::string &body, const std::string &, const std::string &,
 	                  const std::string &) {
-		REQUIRE(body.find("\"alias\":\"a\"") != std::string::npos);
-		REQUIRE(body.find("\"alias\":\"b\"") != std::string::npos);
+		REQUIRE(body.find("<EXPERIMENT alias=\"a\">") != std::string::npos);
+		REQUIRE(body.find("<EXPERIMENT alias=\"b\">") != std::string::npos);
 		return MakeExperimentReceipt({{"a", "ERX10"}, {"b", "ERX11"}});
 	};
 

@@ -21,6 +21,15 @@ struct ExperimentSubmitTraits {
 	static const char *ReceiptObjectType() {
 		return "EXPERIMENT";
 	}
+	// V2 server's JSON dispatcher NPEs for SRA-side objects — XML required.
+	// See `localdocs/ena-research-webin-v2-deep.md` and the live-probe
+	// findings recorded in 2026-05-04 user memory.
+	static std::string BuildEnvelope(const SubmissionSpec &env) {
+		return BuildEnvelopeXML(env);
+	}
+	static const char *ContentType() {
+		return "application/xml";
+	}
 	static ENAExperimentInsertResult BuildRow(const ExperimentSpec &spec, const ENAObjectReceipt &obj) {
 		ENAExperimentInsertResult row;
 		row.alias = spec.alias;

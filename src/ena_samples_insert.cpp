@@ -19,6 +19,12 @@ struct SampleSubmitTraits {
 	static const char *ReceiptObjectType() {
 		return "SAMPLE";
 	}
+	static std::string BuildEnvelope(const SubmissionSpec &env) {
+		return BuildEnvelopeJSON(env);
+	}
+	static const char *ContentType() {
+		return "application/json";
+	}
 	static ENASampleInsertResult BuildRow(const SampleSpec &spec, const ENAObjectReceipt &obj) {
 		ENASampleInsertResult row;
 		row.alias = spec.alias;

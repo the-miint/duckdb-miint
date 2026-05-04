@@ -27,6 +27,7 @@
 #include "duckdb/parser/keyword_helper.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -727,6 +728,12 @@ void RunUpload(ClientContext &context, const ENAUploadReadsBindData &bind, ENAUp
 				opts.user = gs.user;
 				opts.password = gs.password;
 				opts.create_dirs = true;
+				// `MIINT_CURL_VERBOSE=1` enables CURLOPT_VERBOSE wire trace on
+				// stderr — invaluable for diagnosing FTPS/HTTPS upload hangs
+				// against the live ENA endpoint.
+				if (const char *v = std::getenv("MIINT_CURL_VERBOSE"); v && std::string(v) == "1") {
+					opts.verbose = true;
+				}
 				auto curl_producer = [&producer](char *buf, std::size_t max_bytes) -> std::size_t {
 					return producer.Read(buf, max_bytes);
 				};

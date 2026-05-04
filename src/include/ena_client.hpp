@@ -111,14 +111,20 @@ public:
 	//
 	// `accept_type` is the response format we ask for. Webin V2 honours the
 	// Accept header to select XML vs JSON response shape regardless of the
-	// request body format, so callers can mix (e.g. POST XML body, get JSON
-	// receipt). PostJSON/PostXML default Accept to match Content-Type;
-	// override via the four-argument overload of `PostBody` if needed.
+	// request body format, so callers can mix (e.g. POST JSON body, get XML
+	// receipt). PostJSON/PostXML set Accept = Content-Type;
+	// PostJSONReceiveXML is the V2-Webin pairing (JSON envelope, XML receipt).
 	std::string PostJSON(const std::string &url, const std::string &body, const std::string &user,
 	                     const std::string &password);
 
 	std::string PostXML(const std::string &url, const std::string &body, const std::string &user,
 	                    const std::string &password);
+
+	// Webin V2 envelopes are JSON but the receipt parser only consumes the
+	// canonical XSD-governed XML form (JSON receipts intentionally not
+	// supported — see Phase 3 design). Use this for the INSERT operators.
+	std::string PostJSONReceiveXML(const std::string &url, const std::string &body, const std::string &user,
+	                               const std::string &password);
 
 private:
 	duckdb::DatabaseInstance &db;

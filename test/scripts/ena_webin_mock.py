@@ -27,6 +27,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -56,16 +57,46 @@ def _xml_escape(s: str) -> str:
     )
 
 
-def _build_receipt(envelope: dict) -> tuple[str, bool]:
-    actions = envelope.get("submission", {}).get("actions", [])
+def _parse_xml_envelope(body: str) -> tuple[dict, str, str]:
+    """Best-effort regex extraction of action / hold / object aliases from a
+    `<WEBIN>...</WEBIN>` document. Mirrors the JSON envelope shape so the
+    receipt builder doesn't care which form the request used. This mock
+    doesn't run a real XML parser — the duckdb-miint envelope format is
+    constrained and stable enough for a regex pass."""
+    envelope: dict = {}
     action_name = "ADD"
     hold_until = ""
-    for a in actions:
-        t = a.get("type", "")
-        if t == "HOLD":
-            hold_until = a.get("holdUntilDate", "")
-        elif t in ("ADD", "MODIFY", "CANCEL", "RELEASE", "VALIDATE"):
-            action_name = t
+    actions = re.findall(r"<ACTION>\s*<(\w+)(?:\s+HoldUntilDate=\"([^\"]*)\")?\s*/>\s*</ACTION>", body)
+    for tag, hold in actions:
+        if tag == "HOLD":
+            hold_until = hold or ""
+        elif tag in ("ADD", "MODIFY", "CANCEL", "RELEASE", "VALIDATE"):
+            action_name = tag
+    for kind_plural, set_tag, item_tag in (
+        ("experiments", "EXPERIMENT_SET", "EXPERIMENT"),
+        ("runs", "RUN_SET", "RUN"),
+        ("analyses", "ANALYSIS_SET", "ANALYSIS"),
+    ):
+        block = re.search(rf"<{set_tag}>(.*?)</{set_tag}>", body, re.DOTALL)
+        if not block:
+            continue
+        items = []
+        for m in re.finditer(rf"<{item_tag}\s+alias=\"([^\"]+)\"", block.group(1)):
+            items.append({"alias": m.group(1)})
+        envelope[kind_plural] = items
+    return envelope, action_name, hold_until
+
+
+def _build_receipt(envelope: dict, action_name: str = "ADD", hold_until: str = "") -> tuple[str, bool]:
+    if not action_name and not hold_until:
+        actions = envelope.get("submission", {}).get("actions", [])
+        action_name = "ADD"
+        for a in actions:
+            t = a.get("type", "")
+            if t == "HOLD":
+                hold_until = a.get("holdUntilDate", "")
+            elif t in ("ADD", "MODIFY", "CANCEL", "RELEASE", "VALIDATE"):
+                action_name = t
 
     objects: list[tuple[str, str]] = []
     for kind_plural, kind_singular in (
@@ -148,18 +179,23 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0") or "0")
         body = self.rfile.read(length) if length else b""
         ctype = self.headers.get("Content-Type", "")
-        if "json" not in ctype:
+        action_name = ""
+        hold_until = ""
+        if "json" in ctype:
+            try:
+                envelope = json.loads(body.decode("utf-8"))
+            except Exception:
+                self.send_response(400)
+                self.end_headers()
+                return
+        elif "xml" in ctype:
+            envelope, action_name, hold_until = _parse_xml_envelope(body.decode("utf-8", "replace"))
+        else:
             self.send_response(415)
             self.end_headers()
             return
-        try:
-            envelope = json.loads(body.decode("utf-8"))
-        except Exception:
-            self.send_response(400)
-            self.end_headers()
-            return
 
-        receipt, _ok = _build_receipt(envelope)
+        receipt, _ok = _build_receipt(envelope, action_name, hold_until)
         payload = receipt.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/xml; charset=utf-8")

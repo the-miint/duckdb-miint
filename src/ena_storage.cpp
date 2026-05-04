@@ -91,6 +91,8 @@ unique_ptr<CreateTableInfo> BuildENATableInfo(SchemaCatalogEntry &schema, ENATab
 		break;
 	case ENATableKind::SAMPLES:
 		info->table = "samples";
+		// Column order matters — BuildFromBuffer uses positional COL_*
+		// constants in src/ena_samples_insert_op.cpp.
 		add("alias", LogicalType::VARCHAR);
 		add("title", LogicalType::VARCHAR);
 		add("description", LogicalType::VARCHAR);
@@ -98,6 +100,11 @@ unique_ptr<CreateTableInfo> BuildENATableInfo(SchemaCatalogEntry &schema, ENATab
 		add("scientific_name", LogicalType::VARCHAR);
 		add("checklist", LogicalType::VARCHAR);
 		add("attributes", LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
+		// Sparse per-attribute units. Some checklist attributes (e.g.
+		// ERC000015 lat/lon → 'DD') are rejected by the server without
+		// units. Keys here are matched by tag against `attributes`; tags
+		// not present in this map emit no `units` JSON field.
+		add("attribute_units", LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
 		add("ers_accession", LogicalType::VARCHAR);
 		add("samea_accession", LogicalType::VARCHAR);
 		break;

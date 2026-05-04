@@ -32,7 +32,7 @@ INSERT INTO ena.experiments
      library_selection, library_layout, platform, instrument_model)
 VALUES
     ('mock-exp-alpha', 'mock-proj-alpha', 'mock-sample-alpha',
-     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'NovaSeq 6000')
+     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'Illumina NovaSeq 6000')
 RETURNING alias, erx_accession LIKE 'ERX%' AS has_erx;
 ----
 mock-exp-alpha	true
@@ -70,7 +70,7 @@ INSERT INTO ena.experiments
      library_selection, library_layout, platform, instrument_model)
 VALUES
     ('mock-exp-FAIL', 'mock-proj-alpha', 'mock-sample-alpha',
-     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'NovaSeq 6000');
+     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'Illumina NovaSeq 6000');
 ----
 mock validation failure
 
@@ -91,7 +91,7 @@ INSERT INTO ena.experiments
      library_selection, library_layout, platform, instrument_model)
 VALUES
     ('mock-exp-bad-strategy', 'mock-proj-alpha', 'mock-sample-alpha',
-     'NOT_A_REAL_STRATEGY', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'NovaSeq 6000');
+     'NOT_A_REAL_STRATEGY', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'Illumina NovaSeq 6000');
 ----
 library_strategy
 
@@ -102,7 +102,7 @@ INSERT INTO ena.experiments
      library_selection, library_layout, platform, instrument_model)
 VALUES
     ('mock-exp-bad-platform', 'mock-proj-alpha', 'mock-sample-alpha',
-     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'NOT_A_PLATFORM', 'NovaSeq 6000');
+     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'NOT_A_PLATFORM', 'Illumina NovaSeq 6000');
 ----
 platform
 
@@ -113,7 +113,7 @@ INSERT INTO ena.experiments
      library_selection, library_layout, platform, instrument_model)
 VALUES
     ('mock-exp-bad-layout', 'mock-proj-alpha', 'mock-sample-alpha',
-     'WGS', 'METAGENOMIC', 'RANDOM', 'TRIPLE', 'ILLUMINA', 'NovaSeq 6000');
+     'WGS', 'METAGENOMIC', 'RANDOM', 'TRIPLE', 'ILLUMINA', 'Illumina NovaSeq 6000');
 ----
 library_layout
 
@@ -124,7 +124,7 @@ INSERT INTO ena.experiments
      library_selection, library_layout, platform, instrument_model)
 VALUES
     ('', 'mock-proj-alpha', 'mock-sample-alpha',
-     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'NovaSeq 6000');
+     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'Illumina NovaSeq 6000');
 ----
 alias
 
@@ -135,7 +135,7 @@ INSERT INTO ena.experiments
      library_selection, library_layout, platform, instrument_model)
 VALUES
     ('mock-exp-no-study', 'mock-sample-alpha',
-     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'NovaSeq 6000');
+     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'Illumina NovaSeq 6000');
 ----
 study_ref
 
@@ -151,13 +151,13 @@ INSERT INTO ena.experiments
      library_selection, library_layout, platform, instrument_model)
 VALUES
     ('mock-exp-prefixrefname', 'ERPmycoolstudy', 'SAMEAmybiosample',
-     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'NovaSeq 6000');
+     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'Illumina NovaSeq 6000');
 
-# Verify that the refname routing actually reached the wire — the envelope in
-# request_payload should contain "refname" not "accession" for the study_ref
-# block of the most recent experiment.
+# Verify that the refname routing actually reached the wire — request_payload
+# is XML for experiments (V2 server's JSON dispatcher NPEs for SRA-side
+# objects), so we look for the XML attribute form.
 query I
-SELECT request_payload LIKE '%"studyRef":{"refname":"ERPmycoolstudy"}%'
+SELECT request_payload LIKE '%<STUDY_REF refname="ERPmycoolstudy"/>%'
 FROM ena.submission_log
 WHERE object_type = 'experiments' AND request_payload LIKE '%mock-exp-prefixrefname%'
 ORDER BY submitted_at DESC LIMIT 1;
@@ -171,10 +171,10 @@ INSERT INTO ena.experiments
      library_selection, library_layout, platform, instrument_model)
 VALUES
     ('mock-exp-realaccession', 'ERP123456', 'SAMEA987654',
-     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'NovaSeq 6000');
+     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'Illumina NovaSeq 6000');
 
 query I
-SELECT request_payload LIKE '%"studyRef":{"accession":"ERP123456"}%'
+SELECT request_payload LIKE '%<STUDY_REF accession="ERP123456"/>%'
 FROM ena.submission_log
 WHERE object_type = 'experiments' AND request_payload LIKE '%mock-exp-realaccession%'
 ORDER BY submitted_at DESC LIMIT 1;

@@ -114,6 +114,11 @@ std::string ENAClient::PostXML(const std::string &url, const std::string &body, 
 	return PostBody(url, body, "application/xml", "application/xml", user, password);
 }
 
+std::string ENAClient::PostJSONReceiveXML(const std::string &url, const std::string &body, const std::string &user,
+                                          const std::string &password) {
+	return PostBody(url, body, "application/json", "application/xml", user, password);
+}
+
 std::string ENAClient::Search(const std::string &accession, const std::string &result_type, const std::string &fields) {
 	auto url = ENAParser::BuildSearchURL(accession, result_type, fields);
 	return MakeRequest(url);

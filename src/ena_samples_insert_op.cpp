@@ -23,16 +23,18 @@ constexpr idx_t COL_TAXON_ID = 3;
 constexpr idx_t COL_SCIENTIFIC_NAME = 4;
 constexpr idx_t COL_CHECKLIST = 5;
 constexpr idx_t COL_ATTRIBUTES = 6;
-constexpr idx_t COL_ERS_ACCESSION = 7;
-constexpr idx_t COL_SAMEA_ACCESSION = 8;
-constexpr idx_t TABLE_COLUMN_COUNT = 9;
+constexpr idx_t COL_ATTRIBUTE_UNITS = 7;
+constexpr idx_t COL_ERS_ACCESSION = 8;
+constexpr idx_t COL_SAMEA_ACCESSION = 9;
+constexpr idx_t TABLE_COLUMN_COUNT = 10;
 
-// Pull a MAP(VARCHAR,VARCHAR) value into the (tag,value) attribute list that
-// SampleSpec expects. NULL maps and empty maps both yield no attributes.
-// Iteration order follows DuckDB's map-storage order, which matches the
-// caller's MAP-literal order in practice; this is the same guarantee the
-// envelope builder already documents for project attributes.
-std::vector<std::pair<std::string, std::string>> ExtractAttributesMap(const Value &v) {
+// Pull a MAP(VARCHAR,VARCHAR) value into a (tag,value) vector. NULL maps and
+// empty maps both yield no entries. Iteration order follows DuckDB's
+// map-storage order, which matches the caller's MAP-literal order in practice
+// — the same guarantee the envelope builder already documents for project
+// attributes. `column_label` shows up in error messages so users can tell
+// which MAP column the bad entry came from (`attributes` vs `attribute_units`).
+std::vector<std::pair<std::string, std::string>> ExtractKeyValueMap(const Value &v, const char *column_label) {
 	std::vector<std::pair<std::string, std::string>> out;
 	if (v.IsNull()) {
 		return out;
@@ -42,12 +44,13 @@ std::vector<std::pair<std::string, std::string>> ExtractAttributesMap(const Valu
 	for (const auto &entry : entries) {
 		const auto &kv_children = StructValue::GetChildren(entry);
 		if (kv_children.size() != 2) {
-			throw InvalidInputException("INSERT INTO ena.samples: 'attributes' MAP entries must have key+value pairs");
+			throw InvalidInputException("INSERT INTO ena.samples: '%s' MAP entries must have key+value pairs",
+			                            column_label);
 		}
 		const auto key = ValueToVarchar(kv_children[0]);
 		const auto value = ValueToVarchar(kv_children[1]);
 		if (key.empty()) {
-			throw InvalidInputException("INSERT INTO ena.samples: 'attributes' map keys must be non-empty");
+			throw InvalidInputException("INSERT INTO ena.samples: '%s' map keys must be non-empty", column_label);
 		}
 		out.emplace_back(key, value);
 	}
@@ -76,6 +79,7 @@ ENASamplesInsert::BuildFromBuffer(ColumnDataCollection &buffer,
 	const idx_t scientific_idx = ResolveInputColumn(column_index_map, input_columns, COL_SCIENTIFIC_NAME);
 	const idx_t checklist_idx = ResolveInputColumn(column_index_map, input_columns, COL_CHECKLIST);
 	const idx_t attrs_idx = ResolveInputColumn(column_index_map, input_columns, COL_ATTRIBUTES);
+	const idx_t units_idx = ResolveInputColumn(column_index_map, input_columns, COL_ATTRIBUTE_UNITS);
 
 	ColumnDataScanState scan_state;
 	buffer.InitializeScan(scan_state);
@@ -112,7 +116,10 @@ ENASamplesInsert::BuildFromBuffer(ColumnDataCollection &buffer,
 				spec.checklist = ValueToVarchar(chunk.data[checklist_idx].GetValue(row));
 			}
 			if (attrs_idx != DConstants::INVALID_INDEX) {
-				spec.attributes = ExtractAttributesMap(chunk.data[attrs_idx].GetValue(row));
+				spec.attributes = ExtractKeyValueMap(chunk.data[attrs_idx].GetValue(row), "attributes");
+			}
+			if (units_idx != DConstants::INVALID_INDEX) {
+				spec.attribute_units = ExtractKeyValueMap(chunk.data[units_idx].GetValue(row), "attribute_units");
 			}
 			// HOLD on samples is not exposed in Phase 5 (no hold_until_date
 			// column on ena.samples).
@@ -148,6 +155,8 @@ void ENASamplesInsert::AppendReturningRows(ColumnDataCollection &return_collecti
 		// in `submission_log.receipt`. Same trade-off as ena.projects in
 		// Phase 4. Real MAP-value emission is a future task.
 		chunk.data[COL_ATTRIBUTES].SetValue(idx, Value(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR)));
+		chunk.data[COL_ATTRIBUTE_UNITS].SetValue(idx,
+		                                         Value(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR)));
 		chunk.data[COL_ERS_ACCESSION].SetValue(idx, Value(row.ers_accession));
 		chunk.data[COL_SAMEA_ACCESSION].SetValue(idx, row.samea_accession.empty() ? Value(LogicalType::VARCHAR)
 		                                                                          : Value(row.samea_accession));

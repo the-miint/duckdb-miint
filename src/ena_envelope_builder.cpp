@@ -293,6 +293,23 @@ void AppendSample(std::string &out, const SampleSpec &s) {
 			AppendJsonString(out, kv.first);
 			out.append(",\"value\":");
 			AppendJsonString(out, kv.second);
+			// Optional `unit` from the sparse attribute_units vector — some
+			// checklist attributes (e.g. ERC000015 lat/lon → `DD`) are
+			// rejected by the server without it. JSON key is singular
+			// (`unit`) even though the SRA XML element is `<UNITS>` and the
+			// SQL column is plural (`attribute_units`); this is what the V2
+			// JSON validator expects. Linear lookup is fine; the vector is
+			// small per sample (typically 0–3 entries) and tag strings are
+			// short.
+			for (const auto &u : s.attribute_units) {
+				if (u.first == kv.first) {
+					if (!u.second.empty()) {
+						out.append(",\"unit\":");
+						AppendJsonString(out, u.second);
+					}
+					break;
+				}
+			}
 			out.push_back('}');
 			first = false;
 		}
@@ -451,6 +468,211 @@ void AppendArray(std::string &out, bool &needs_comma, const char *key, const std
 }
 
 } // namespace
+
+// =====================================================================
+// XML envelope (experiments + runs path)
+// =====================================================================
+//
+// The V2 server's JSON dispatcher is implemented for project + sample only;
+// SRA-side objects (experiment, run, analysis) require XML. We emit the
+// canonical SRA-XSD shape wrapped in a `<WEBIN>` document so a single POST
+// carries both `<SUBMISSION>` (action) and the requested object set.
+
+namespace {
+
+// XML attribute / element-text escaping per https://www.w3.org/TR/xml/#syntax
+// (single quote only needed when the surrounding attribute is single-quoted,
+// but we escape all five for safety regardless of context).
+void AppendXmlEscaped(std::string &out, const std::string &s) {
+	for (char c : s) {
+		switch (c) {
+		case '&':
+			out.append("&amp;");
+			break;
+		case '<':
+			out.append("&lt;");
+			break;
+		case '>':
+			out.append("&gt;");
+			break;
+		case '"':
+			out.append("&quot;");
+			break;
+		case '\'':
+			out.append("&apos;");
+			break;
+		default:
+			out.push_back(c);
+		}
+	}
+}
+
+void AppendXmlElement(std::string &out, const char *tag, const std::string &value) {
+	out.push_back('<');
+	out.append(tag);
+	out.push_back('>');
+	AppendXmlEscaped(out, value);
+	out.append("</");
+	out.append(tag);
+	out.push_back('>');
+}
+
+// Emit `<TAG attr="value"/>` for a study/sample/experiment cross-reference.
+// Uses `accession` when the descriptor has one, otherwise `refname`. Throws
+// when both are empty (matches the JSON path's invariant).
+void AppendXmlRef(std::string &out, const char *element, const RefDescriptor &ref, const char *field_name,
+                  const std::string &alias) {
+	if (ref.accession.empty() && ref.refname.empty()) {
+		throw std::runtime_error("ENA envelope: " + std::string(field_name) + " required for alias '" + alias + "'");
+	}
+	out.push_back('<');
+	out.append(element);
+	out.push_back(' ');
+	out.append(ref.accession.empty() ? "refname" : "accession");
+	out.append("=\"");
+	AppendXmlEscaped(out, ref.accession.empty() ? ref.refname : ref.accession);
+	out.append("\"/>");
+}
+
+void AppendXmlActions(std::string &out, const SubmissionSpec &env) {
+	if (env.action == ENAAction::HOLD && env.hold_until_date.empty()) {
+		throw std::runtime_error("ENA envelope: HOLD action requires hold_until_date");
+	}
+	if (env.action == ENAAction::HOLD && !env.hold_until_date.empty()) {
+		throw std::runtime_error(
+		    "ENA envelope: with hold_until_date, use action=ADD; the HOLD entry is added automatically");
+	}
+	out.append("<ACTIONS><ACTION><");
+	out.append(ActionName(env.action));
+	out.append("/></ACTION>");
+	if (!env.hold_until_date.empty()) {
+		out.append("<ACTION><HOLD HoldUntilDate=\"");
+		AppendXmlEscaped(out, env.hold_until_date);
+		out.append("\"/></ACTION>");
+	}
+	out.append("</ACTIONS>");
+}
+
+void AppendXmlExperiment(std::string &out, const ExperimentSpec &e) {
+	if (e.alias.empty()) {
+		throw std::runtime_error("ENA envelope: experiment alias must be non-empty");
+	}
+	RequireMembership(LibraryStrategies(), e.library_strategy, "library_strategy", e.alias);
+	RequireMembership(LibrarySources(), e.library_source, "library_source", e.alias);
+	RequireMembership(LibrarySelections(), e.library_selection, "library_selection", e.alias);
+	RequireMembership(Platforms(), e.platform, "platform", e.alias);
+	if (e.instrument_model.empty()) {
+		throw std::runtime_error("ENA envelope: experiment '" + e.alias + "' instrument_model must be non-empty");
+	}
+
+	out.append("<EXPERIMENT alias=\"");
+	AppendXmlEscaped(out, e.alias);
+	out.append("\">");
+	if (!e.title.empty()) {
+		AppendXmlElement(out, "TITLE", e.title);
+	}
+	AppendXmlRef(out, "STUDY_REF", e.study_ref, "study_ref", e.alias);
+	out.append("<DESIGN>");
+	// DESIGN_DESCRIPTION is XSD-mandatory but may be empty; emit empty when
+	// the user didn't provide one (matches webin-cli behaviour).
+	out.append("<DESIGN_DESCRIPTION>");
+	AppendXmlEscaped(out, e.design_description);
+	out.append("</DESIGN_DESCRIPTION>");
+	AppendXmlRef(out, "SAMPLE_DESCRIPTOR", e.sample_ref, "sample_ref", e.alias);
+	out.append("<LIBRARY_DESCRIPTOR>");
+	if (!e.library_name.empty()) {
+		AppendXmlElement(out, "LIBRARY_NAME", e.library_name);
+	}
+	AppendXmlElement(out, "LIBRARY_STRATEGY", e.library_strategy);
+	AppendXmlElement(out, "LIBRARY_SOURCE", e.library_source);
+	AppendXmlElement(out, "LIBRARY_SELECTION", e.library_selection);
+	out.append("<LIBRARY_LAYOUT>");
+	out.append(e.library_layout == ENALibraryLayout::PAIRED ? "<PAIRED/>" : "<SINGLE/>");
+	out.append("</LIBRARY_LAYOUT>");
+	out.append("</LIBRARY_DESCRIPTOR>");
+	out.append("</DESIGN>");
+	out.append("<PLATFORM><");
+	out.append(e.platform);
+	out.append("><INSTRUMENT_MODEL>");
+	AppendXmlEscaped(out, e.instrument_model);
+	out.append("</INSTRUMENT_MODEL></");
+	out.append(e.platform);
+	out.append("></PLATFORM>");
+	out.append("</EXPERIMENT>");
+}
+
+void AppendXmlRunFile(std::string &out, const RunFile &f, const std::string &run_alias) {
+	if (f.filename.empty()) {
+		throw std::runtime_error("ENA envelope: run '" + run_alias + "' file.filename must be non-empty");
+	}
+	if (f.checksum.empty()) {
+		throw std::runtime_error("ENA envelope: run '" + run_alias + "' file '" + f.filename +
+		                         "' checksum must be non-empty");
+	}
+	if (f.filetype.empty()) {
+		throw std::runtime_error("ENA envelope: run '" + run_alias + "' file '" + f.filename +
+		                         "' filetype must be non-empty (e.g. 'fastq', 'bam', 'cram')");
+	}
+	RequireMembership(RunFiletypes(), f.filetype, "run.file.filetype", run_alias);
+
+	out.append("<FILE filename=\"");
+	AppendXmlEscaped(out, f.filename);
+	out.append("\" filetype=\"");
+	AppendXmlEscaped(out, f.filetype);
+	out.append("\" checksum_method=\"MD5\" checksum=\"");
+	AppendXmlEscaped(out, f.checksum);
+	out.append("\"/>");
+}
+
+void AppendXmlRun(std::string &out, const RunSpec &r) {
+	if (r.alias.empty()) {
+		throw std::runtime_error("ENA envelope: run alias must be non-empty");
+	}
+	if (r.files.empty()) {
+		throw std::runtime_error("ENA envelope: run '" + r.alias + "' must have at least one file");
+	}
+	out.append("<RUN alias=\"");
+	AppendXmlEscaped(out, r.alias);
+	out.append("\">");
+	if (!r.title.empty()) {
+		AppendXmlElement(out, "TITLE", r.title);
+	}
+	AppendXmlRef(out, "EXPERIMENT_REF", r.experiment_ref, "experiment_ref", r.alias);
+	out.append("<DATA_BLOCK><FILES>");
+	for (const auto &f : r.files) {
+		AppendXmlRunFile(out, f, r.alias);
+	}
+	out.append("</FILES></DATA_BLOCK>");
+	out.append("</RUN>");
+}
+
+} // namespace
+
+std::string BuildEnvelopeXML(const SubmissionSpec &env) {
+	std::string out;
+	out.reserve(512);
+	out.append(R"(<?xml version="1.0" encoding="UTF-8"?>)");
+	out.append("<WEBIN>");
+	out.append("<SUBMISSION>");
+	AppendXmlActions(out, env);
+	out.append("</SUBMISSION>");
+	if (!env.experiments.empty()) {
+		out.append("<EXPERIMENT_SET>");
+		for (const auto &e : env.experiments) {
+			AppendXmlExperiment(out, e);
+		}
+		out.append("</EXPERIMENT_SET>");
+	}
+	if (!env.runs.empty()) {
+		out.append("<RUN_SET>");
+		for (const auto &r : env.runs) {
+			AppendXmlRun(out, r);
+		}
+		out.append("</RUN_SET>");
+	}
+	out.append("</WEBIN>");
+	return out;
+}
 
 std::string BuildEnvelopeJSON(const SubmissionSpec &env) {
 	std::string out;

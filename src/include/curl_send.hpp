@@ -42,9 +42,26 @@ struct CurlUploadOptions {
 	// 0 = no overall timeout. Positive value caps the request duration.
 	long timeout_seconds = 0;
 
+	// libcurl's default `CURLOPT_CONNECTTIMEOUT` is 300s (5min); we override
+	// to a shorter default so a stalled FTPS handshake or unreachable host
+	// fails fast instead of looking like the table function is hung.
+	long connect_timeout_seconds = 60;
+
+	// Abort the transfer if the rolling byte rate stays below
+	// `low_speed_limit_bytes_per_sec` for `low_speed_time_seconds`. Catches
+	// upload-side stalls (server stops ACKing) that wouldn't trip the
+	// overall timeout. 0 = disabled.
+	long low_speed_limit_bytes_per_sec = 1;
+	long low_speed_time_seconds = 60;
+
 	// 0 = unknown size (chunked transfer for HTTP, no SIZE preflight for
 	// FTP). Positive value lets libcurl set Content-Length / FTP SIZE.
 	long long expected_size = 0;
+
+	// Set to enable libcurl's CURLOPT_VERBOSE wire trace on stderr.
+	// Production paths leave this off; the table function flips it on when
+	// the env var `MIINT_CURL_VERBOSE=1` is set, for live-server debugging.
+	bool verbose = false;
 };
 
 struct CurlUploadResult {

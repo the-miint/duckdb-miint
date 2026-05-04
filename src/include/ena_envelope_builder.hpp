@@ -35,6 +35,12 @@ struct SampleSpec {
 	std::string checklist;       // optional, ERC000NN — emitted as ENA-CHECKLIST attribute
 	// Application-supplied attribute pairs (tag, value); preserves insertion order.
 	std::vector<std::pair<std::string, std::string>> attributes;
+	// Optional per-attribute units (sparse — only entries that need them).
+	// Some checklist attributes mandate a `<UNITS>` sibling — e.g. ERC000015
+	// rejects `geographic location (latitude)` without `unit: DD`. Lookup is
+	// by tag (matches against `attributes[].first`); tags not present here
+	// are emitted without a `units` JSON field.
+	std::vector<std::pair<std::string, std::string>> attribute_units;
 };
 
 // Cross-reference to a parent object (study / sample / experiment). V2 accepts
@@ -103,6 +109,22 @@ struct SubmissionSpec {
 // as JSON strings with RFC 8259 §7 escaping. Inputs are treated as opaque
 // bytes; valid UTF-8 is the caller's responsibility, since the function does
 // not validate or substitute U+FFFD.
+//
+// V2 server caveat: this JSON envelope is only accepted for `projects` and
+// `samples`. Submitting `experiments` / `runs` via JSON returns HTTP 500
+// from a generic NPE in the V2 dispatcher (verified live 2026-05-04). Use
+// `BuildEnvelopeXML` for those object types.
 std::string BuildEnvelopeJSON(const SubmissionSpec &env);
+
+// Build the V2 XML envelope. Currently scoped to experiments + runs (the
+// SRA-side objects whose JSON dispatch is broken on V2). Same `SubmissionSpec`
+// input shape as `BuildEnvelopeJSON`; populated `experiments` / `runs` arrays
+// are emitted under `<EXPERIMENT_SET>` / `<RUN_SET>`. `projects` / `samples`
+// in the spec are ignored here — submit them via `BuildEnvelopeJSON` instead.
+//
+// Compact, no whitespace, with the `<?xml ... ?>` declaration. String values
+// are XML-escaped (`< > & " '`). Invariant violations throw
+// std::runtime_error in the same shape as the JSON builder.
+std::string BuildEnvelopeXML(const SubmissionSpec &env);
 
 } // namespace miint

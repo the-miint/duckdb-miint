@@ -81,18 +81,19 @@ TEST_CASE("ENA runs insert: paired-fastq run builds envelope and parses receipt"
 	REQUIRE(captured.url == "http://mock.example/submit");
 	REQUIRE(captured.user == "Webin-1");
 	REQUIRE(captured.password == "pw");
-	REQUIRE(captured.content_type.find("json") != std::string::npos);
-	REQUIRE(captured.body.find("\"alias\":\"r1\"") != std::string::npos);
-	REQUIRE(captured.body.find("\"experimentRef\":{\"refname\":\"e1\"}") != std::string::npos);
-	REQUIRE(captured.body.find("\"checksum\":\"9b8932f85caa54e687eba62fca3edce2\"") != std::string::npos);
-	REQUIRE(captured.body.find("\"checksum\":\"183d6a24e0c3704e993bebe75bbbd989\"") != std::string::npos);
+	// V2 dispatch quirk: SRA-side objects (experiment / run) require XML.
+	REQUIRE(captured.content_type.find("xml") != std::string::npos);
+	REQUIRE(captured.body.find("<RUN alias=\"r1\">") != std::string::npos);
+	REQUIRE(captured.body.find("<EXPERIMENT_REF refname=\"e1\"/>") != std::string::npos);
+	REQUIRE(captured.body.find("checksum=\"9b8932f85caa54e687eba62fca3edce2\"") != std::string::npos);
+	REQUIRE(captured.body.find("checksum=\"183d6a24e0c3704e993bebe75bbbd989\"") != std::string::npos);
 }
 
 TEST_CASE("ENA runs insert: multi-run preserves order", "[ena_runs_insert]") {
 	auto post_fn = [](const std::string &, const std::string &body, const std::string &, const std::string &,
 	                  const std::string &) {
-		REQUIRE(body.find("\"alias\":\"a\"") != std::string::npos);
-		REQUIRE(body.find("\"alias\":\"b\"") != std::string::npos);
+		REQUIRE(body.find("<RUN alias=\"a\">") != std::string::npos);
+		REQUIRE(body.find("<RUN alias=\"b\">") != std::string::npos);
 		return MakeRunReceipt({{"a", "ERR10"}, {"b", "ERR11"}});
 	};
 

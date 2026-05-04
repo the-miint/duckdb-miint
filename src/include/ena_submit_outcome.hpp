@@ -43,6 +43,12 @@ inline std::string FlattenENAErrors(const std::vector<std::string> &errs) {
 //   static void SetEnvelopeArray(SubmissionSpec &env, const std::vector<SpecT> &specs);
 //   static const char *ReceiptObjectType();   // "PROJECT" / "SAMPLE" / "EXPERIMENT" / "RUN"
 //   static RowT BuildRow(const SpecT &spec, const ENAObjectReceipt &obj);
+//   static std::string BuildEnvelope(const SubmissionSpec &env);
+//   static const char *ContentType();         // "application/json" or "application/xml"
+//
+// V2 server caveat: project + sample go via JSON; experiment + run + analysis
+// must be XML (V2's JSON dispatcher returns NPE for SRA-side objects). The
+// per-table Traits chooses; the post functor dispatches by content type.
 //
 // `OutcomeT` must expose: success (bool), envelope_payload, raw_receipt,
 //   era_accession, error_messages (vector<string>), duration_ms (int64),
@@ -59,11 +65,11 @@ OutcomeT SubmitENAObjectOutcome(const std::vector<SpecT> &specs, const OptsT &op
 	env.action = ENAAction::ADD;
 	env.hold_until_date = opts.hold_until_date;
 	Traits::SetEnvelopeArray(env, specs);
-	outcome.envelope_payload = BuildEnvelopeJSON(env);
+	outcome.envelope_payload = Traits::BuildEnvelope(env);
 
 	const auto t_start = std::chrono::steady_clock::now();
 	outcome.raw_receipt =
-	    post_fn(opts.endpoint_url, outcome.envelope_payload, opts.user, opts.password, "application/json");
+	    post_fn(opts.endpoint_url, outcome.envelope_payload, opts.user, opts.password, Traits::ContentType());
 	const auto t_end = std::chrono::steady_clock::now();
 	outcome.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
 

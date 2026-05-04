@@ -132,6 +132,20 @@ CurlUploadResult RunCurlUpload(const CurlUploadOptions &opts, const BodyProducer
 	if (opts.timeout_seconds > 0) {
 		curl_easy_setopt(curl, CURLOPT_TIMEOUT, opts.timeout_seconds);
 	}
+	if (opts.connect_timeout_seconds > 0) {
+		curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, opts.connect_timeout_seconds);
+	}
+	if (opts.low_speed_limit_bytes_per_sec > 0 && opts.low_speed_time_seconds > 0) {
+		// Catches upload-side stalls (server stops ACKing). Without these,
+		// a half-open TCP connection can keep curl_easy_perform busy
+		// forever — and on some libcurl + TLS combos it's a CPU-bound spin
+		// rather than a polite I/O wait.
+		curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, opts.low_speed_limit_bytes_per_sec);
+		curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, opts.low_speed_time_seconds);
+	}
+	if (opts.verbose) {
+		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+	}
 	if (opts.create_dirs) {
 		// FTP-only option; libcurl ignores it for HTTP. Tells the server-
 		// side handling to MKD intermediate directories.

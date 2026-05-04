@@ -148,10 +148,16 @@ public:
 		FillCommonENAInsertOptions(opts, creds, built.hold_until_date);
 
 		miint::ENAClient client(*context.db);
+		// Dispatch by Content-Type. V2 accepts JSON only for project +
+		// sample; experiment + run + analysis must be XML (the JSON
+		// dispatcher NPEs for SRA-side objects). Both paths request an
+		// XML receipt — our parser only consumes the canonical XSD shape.
 		auto post_fn = [&client](const std::string &url, const std::string &body, const std::string &user,
 		                         const std::string &password, const std::string &content_type) {
-			(void)content_type; // PostJSON always sends application/json
-			return client.PostJSON(url, body, user, password);
+			if (content_type == "application/xml") {
+				return client.PostXML(url, body, user, password);
+			}
+			return client.PostJSONReceiveXML(url, body, user, password);
 		};
 
 		// Logical failures (server success=false, parse errors, missing aliases)

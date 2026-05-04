@@ -21,6 +21,13 @@ struct RunSubmitTraits {
 	static const char *ReceiptObjectType() {
 		return "RUN";
 	}
+	// V2 server's JSON dispatcher NPEs for SRA-side objects — XML required.
+	static std::string BuildEnvelope(const SubmissionSpec &env) {
+		return BuildEnvelopeXML(env);
+	}
+	static const char *ContentType() {
+		return "application/xml";
+	}
 	static ENARunInsertResult BuildRow(const RunSpec &spec, const ENAObjectReceipt &obj) {
 		ENARunInsertResult row;
 		row.alias = spec.alias;
