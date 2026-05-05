@@ -34,6 +34,7 @@
 #include "duckdb/common/types/column/column_data_scan_states.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/execution/physical_operator.hpp"
+#include "duckdb/execution/progress_data.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/parallel/event.hpp"
@@ -117,6 +118,23 @@ public:
 	}
 	string GetName() const override {
 		return Derived::OperatorName();
+	}
+
+	// Mark the sink progress invalid. Our Finalize blocks for several
+	// seconds across multiple synchronous HTTPS round-trips (checklist
+	// fetch on samples, alias collision check, envelope POST, receipt
+	// parse). DuckDB's progress-bar UKF
+	// (duckdb/src/common/progress_bar/unscented_kalman_filter.cpp) becomes
+	// unstable under sparse measurements like that — its innovation
+	// covariance `S[0][0]` can converge to 0, and `S_inv = 1.0 / S[0][0]`
+	// then produces NaN/Inf that surfaces as SIGFPE in the duckdb shell
+	// (observed during live wwwdev smoke). Reporting invalid progress
+	// short-circuits ProgressBar::Update before it feeds the UKF.
+	ProgressData GetSinkProgress(ClientContext & /*context*/, GlobalSinkState & /*gstate*/,
+	                             const ProgressData source_progress) const override {
+		ProgressData pd = source_progress;
+		pd.SetInvalid();
+		return pd;
 	}
 
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override {
@@ -279,7 +297,17 @@ public:
 private:
 	// Pre-INSERT alias collision check. Static so unit tests at the per-table
 	// layer can also reach it without instantiating a PhysicalOperator.
-	static void RunAliasCollisionCheck(const std::vector<SpecT> &specs, miint::ENAClient &client, const OptsT &opts) {
+	//
+	// Anonymous portal-API GET — the ENA portal only indexes public records,
+	// and adding Authorization: Basic to a portal query returns HTTP 500
+	// (the endpoint has no authenticated mode). Same approach as
+	// ena-upload-cli's `check_remote.py`. Caveat: collisions against the
+	// user's OWN HOLD/private records that haven't yet been published won't
+	// be caught here; those surface at envelope-POST time as a server error.
+	// The Reports API (`/ena/submit/report/...`) would close that gap; not
+	// wired yet.
+	static void RunAliasCollisionCheck(const std::vector<SpecT> &specs, miint::ENAClient &client,
+	                                   const OptsT & /*opts*/) {
 		if (specs.empty()) {
 			return;
 		}
@@ -290,8 +318,8 @@ private:
 		}
 		const auto kind = miint::AliasObjectKindFromTableName(Derived::ObjectName());
 		const auto portal_base = miint::ResolvePortalBaseFromEnv();
-		miint::URLFetcher fetcher = [&client, &opts](const std::string &url) {
-			return client.AuthenticatedGet(url, opts.user, opts.password);
+		miint::URLFetcher fetcher = [&client](const std::string &url) {
+			return client.FetchURL(url);
 		};
 		const auto hits = miint::CheckAliasCollisions(portal_base, kind, aliases, fetcher);
 		if (hits.empty()) {

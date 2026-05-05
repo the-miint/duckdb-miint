@@ -283,10 +283,16 @@ void AppendProject(std::string &out, const ProjectSpec &p) {
 	AppendJsonString(out, p.alias);
 	out.append(",\"title\":");
 	AppendJsonString(out, p.title);
-	if (!p.description.empty()) {
-		out.append(",\"description\":");
-		AppendJsonString(out, p.description);
-	}
+	// `description` is always emitted: wwwdev's XSD validator intermittently
+	// rejects PROJECT documents missing a populated <DESCRIPTION> element
+	// ("Expected element 'DESCRIPTION' before the end of the content in
+	// element PROJECT") even though SRA.project.xsd declares it minOccurs=0.
+	// Behaviour is non-deterministic across runs (one submission accepted,
+	// the next rejected, same alias shape), so we always send it. When the
+	// user didn't provide one we reuse `title` so the resulting element has
+	// non-empty content.
+	out.append(",\"description\":");
+	AppendJsonString(out, p.description.empty() ? p.title : p.description);
 	out.append(p.is_umbrella ? ",\"umbrellaProject\":{}" : ",\"sequencingProject\":{}");
 	out.push_back('}');
 }

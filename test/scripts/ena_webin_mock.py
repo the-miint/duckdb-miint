@@ -265,13 +265,11 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             return
-        # Portal API alias collision lookup (Phase 8 Step 8a). Authenticated.
+        # Portal API alias collision lookup. Anonymous — the real ENA
+        # portal at /ena/portal/api/search has no authenticated mode (Basic
+        # auth → HTTP 500), and ena-upload-cli's check_remote.py likewise
+        # queries it without credentials.
         if self.path.startswith("/portal/api/search"):
-            if not self._check_auth():
-                self.send_response(401)
-                self.send_header("WWW-Authenticate", 'Basic realm="webin"')
-                self.end_headers()
-                return
             tsv = self._handle_portal_search(self.path)
             if tsv is None:
                 self.send_response(400)

@@ -49,7 +49,7 @@ TEST_CASE("ENA envelope: single submission_project (PRJEB will be issued)", "[en
 	                 R"X("description":"Phase 1 collection","sequencingProject":{}}]})X");
 }
 
-TEST_CASE("ENA envelope: project with no description omits the field", "[ena_envelope]") {
+TEST_CASE("ENA envelope: project with no description falls back to the title", "[ena_envelope]") {
 	miint::SubmissionSpec env;
 	miint::ProjectSpec p;
 	p.alias = "x";
@@ -58,8 +58,11 @@ TEST_CASE("ENA envelope: project with no description omits the field", "[ena_env
 	env.projects.push_back(p);
 
 	auto json = miint::BuildEnvelopeJSON(env);
-	// Compact form — note no "description" key
-	CHECK(json.find("\"description\"") == std::string::npos);
+	// `description` is always emitted; when the user didn't provide one we
+	// reuse `title` so the XML <DESCRIPTION> element has non-empty content
+	// (wwwdev intermittently rejects PROJECT documents missing a populated
+	// DESCRIPTION even though the XSD says minOccurs=0).
+	CHECK(json.find("\"description\":\"y\"") != std::string::npos);
 	CHECK(json.find("\"sequencingProject\":{}") != std::string::npos);
 }
 

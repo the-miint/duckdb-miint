@@ -115,6 +115,25 @@ AliasObjectKind AliasObjectKindFromTableName(const std::string &table_name) {
 	throw std::invalid_argument("AliasObjectKindFromTableName: unknown table '" + table_name + "'");
 }
 
+// Portal API result types per kind. Not uniform: per the portal /search
+// supported list, `read_sample` is NOT valid — samples use bare `sample`
+// while studies / experiments / runs use the `read_*` variants. Confirmed
+// against https://www.ebi.ac.uk/ena/portal/api/search (HTTP 400 with the
+// supported-list message names the valid types).
+const char *PortalResultTypeForKind(AliasObjectKind kind) {
+	switch (kind) {
+	case AliasObjectKind::STUDY:
+		return "read_study";
+	case AliasObjectKind::SAMPLE:
+		return "sample";
+	case AliasObjectKind::EXPERIMENT:
+		return "read_experiment";
+	case AliasObjectKind::RUN:
+		return "read_run";
+	}
+	throw std::logic_error("unhandled AliasObjectKind in PortalResultTypeForKind");
+}
+
 std::string BuildAliasCollisionURL(const std::string &portal_base, AliasObjectKind kind,
                                    const std::vector<std::string> &aliases) {
 	if (aliases.empty()) {
@@ -126,7 +145,7 @@ std::string BuildAliasCollisionURL(const std::string &portal_base, AliasObjectKi
 	const std::string kind_name = AliasObjectKindName(kind);
 	std::ostringstream url;
 	url << TrimTrailingSlash(portal_base) << "/search?"
-	    << "result=read_" << kind_name << "&query=" << kind_name << "_alias" << BuildInList(aliases)
+	    << "result=" << PortalResultTypeForKind(kind) << "&query=" << kind_name << "_alias" << BuildInList(aliases)
 	    << "&fields=" << kind_name << "_alias&limit=0&format=tsv";
 	return url.str();
 }

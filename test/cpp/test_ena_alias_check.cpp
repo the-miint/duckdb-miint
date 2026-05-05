@@ -85,9 +85,12 @@ TEST_CASE("BuildAliasCollisionURL builds correctly for each kind", "[ena_alias_c
 		const char *result;
 		const char *field;
 	};
+	// Per portal /search supported-types list: read_sample is NOT a valid
+	// result type — samples must use bare `sample`. The other three use
+	// the `read_*` variants.
 	const std::vector<Case> cases = {
 	    {AliasObjectKind::STUDY, "result=read_study", "fields=study_alias"},
-	    {AliasObjectKind::SAMPLE, "result=read_sample", "fields=sample_alias"},
+	    {AliasObjectKind::SAMPLE, "result=sample", "fields=sample_alias"},
 	    {AliasObjectKind::EXPERIMENT, "result=read_experiment", "fields=experiment_alias"},
 	    {AliasObjectKind::RUN, "result=read_run", "fields=run_alias"},
 	};
