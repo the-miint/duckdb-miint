@@ -21,9 +21,16 @@ Behavior:
     `query=<kind>_alias IN ("a1","a2",...)` filter and returns a TSV with
     one row per alias starting with the literal prefix "EXISTS_". All other
     aliases are reported as not present.
+  - On GET to /browser/api/xml/<accession> (Phase 8 checklist registry):
+      * "TST000001" -> strict fixture (mandatory + units + CV) for the
+        Phase 8 Step 8b validation tests.
+      * Anything else -> permissive fixture (every label the existing
+        sample-insert tests use, all marked optional) so older mock tests
+        keep round-tripping without rewriting their attribute MAPs.
 
-Invoked by run_tests.sh on a free port; URL is exported as ENA_WEBIN_MOCK_URL
-and MIINT_ENA_PORTAL_URL_BASE = "$ENA_WEBIN_MOCK_URL/portal/api".
+Invoked by run_tests.sh on a free port; URL is exported as ENA_WEBIN_MOCK_URL,
+MIINT_ENA_PORTAL_URL_BASE = "$ENA_WEBIN_MOCK_URL/portal/api", and
+MIINT_ENA_CHECKLIST_URL_BASE = "$ENA_WEBIN_MOCK_URL/browser/api/xml".
 """
 
 from __future__ import annotations
@@ -35,6 +42,89 @@ import os
 import re
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+_CHECKLIST_TST000001 = """<?xml version="1.0" encoding="UTF-8"?>
+<CHECKLIST_SET>
+<CHECKLIST accession="TST000001" checklistType="Sample">
+  <IDENTIFIERS><PRIMARY_ID>TST000001</PRIMARY_ID></IDENTIFIERS>
+  <DESCRIPTOR>
+    <LABEL>miint Phase 8 test checklist</LABEL>
+    <NAME>miint_phase8_test</NAME>
+    <DESCRIPTION>Synthetic checklist used by ena_checklist_validation_mock.test.</DESCRIPTION>
+    <FIELD_GROUP restrictionType="Any number or none of the fields">
+      <FIELD>
+        <LABEL>project name</LABEL>
+        <NAME>project_name</NAME>
+        <FIELD_TYPE><TEXT_FIELD/></FIELD_TYPE>
+        <MANDATORY>mandatory</MANDATORY>
+      </FIELD>
+      <FIELD>
+        <LABEL>collection date</LABEL>
+        <NAME>collection_date</NAME>
+        <FIELD_TYPE><TEXT_FIELD/></FIELD_TYPE>
+        <MANDATORY>mandatory</MANDATORY>
+      </FIELD>
+      <FIELD>
+        <LABEL>geographic location (latitude)</LABEL>
+        <NAME>geographic_location_latitude</NAME>
+        <FIELD_TYPE><TEXT_FIELD/></FIELD_TYPE>
+        <UNITS><UNIT>DD</UNIT></UNITS>
+        <MANDATORY>mandatory</MANDATORY>
+      </FIELD>
+      <FIELD>
+        <LABEL>country</LABEL>
+        <NAME>country</NAME>
+        <FIELD_TYPE>
+          <TEXT_CHOICE_FIELD>
+            <TEXT_VALUE><VALUE>USA</VALUE></TEXT_VALUE>
+            <TEXT_VALUE><VALUE>Canada</VALUE></TEXT_VALUE>
+            <TEXT_VALUE><VALUE>Mexico</VALUE></TEXT_VALUE>
+          </TEXT_CHOICE_FIELD>
+        </FIELD_TYPE>
+        <MANDATORY>mandatory</MANDATORY>
+      </FIELD>
+      <FIELD>
+        <LABEL>ploidy</LABEL>
+        <NAME>ploidy</NAME>
+        <FIELD_TYPE><TEXT_FIELD/></FIELD_TYPE>
+        <MANDATORY>optional</MANDATORY>
+      </FIELD>
+    </FIELD_GROUP>
+  </DESCRIPTOR>
+</CHECKLIST>
+</CHECKLIST_SET>
+"""
+
+_PERMISSIVE_LABELS = (
+    "project name",
+    "collection date",
+    "geographic location (country and/or sea)",
+    "geographic location (latitude)",
+    "geographic location (longitude)",
+    "broad-scale environmental context",
+    "local environmental context",
+    "environmental medium",
+)
+_CHECKLIST_PERMISSIVE = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<CHECKLIST_SET>\n'
+    '<CHECKLIST accession="ERC000000-mock" checklistType="Sample">\n'
+    '  <IDENTIFIERS><PRIMARY_ID>ERC000000-mock</PRIMARY_ID></IDENTIFIERS>\n'
+    '  <DESCRIPTOR>\n'
+    '    <LABEL>miint mock permissive checklist</LABEL>\n'
+    '    <NAME>miint_mock_permissive</NAME>\n'
+    '    <FIELD_GROUP restrictionType="Any number or none of the fields">\n'
+    + "".join(
+        f"      <FIELD><LABEL>{label}</LABEL><NAME>{label.replace(' ', '_')}</NAME>"
+        f"<FIELD_TYPE><TEXT_FIELD/></FIELD_TYPE><MANDATORY>optional</MANDATORY></FIELD>\n"
+        for label in _PERMISSIVE_LABELS
+    )
+    + '    </FIELD_GROUP>\n'
+    '  </DESCRIPTOR>\n'
+    '</CHECKLIST>\n'
+    '</CHECKLIST_SET>\n'
+)
+
 
 ACCESSION_BASE = {
     # (base_offset, primary_prefix_on_element, ext_id_prefix)
@@ -164,6 +254,17 @@ class Handler(BaseHTTPRequestHandler):
         return user_pw.startswith("Webin-") and ":" in user_pw
 
     def do_GET(self):
+        # Checklist XML (Phase 8 Step 8b). Anonymous GET — public reference
+        # data on the real EBI browser API.
+        if self.path.startswith("/browser/api/xml/"):
+            xml = self._handle_checklist_fetch(self.path)
+            payload = xml.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/xml; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         # Portal API alias collision lookup (Phase 8 Step 8a). Authenticated.
         if self.path.startswith("/portal/api/search"):
             if not self._check_auth():
@@ -188,6 +289,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
         self.wfile.write(b"ena-webin-mock ok\n")
+
+    def _handle_checklist_fetch(self, path: str) -> str:
+        accession = path.rsplit("/", 1)[-1]
+        if accession == "TST000001":
+            return _CHECKLIST_TST000001
+        # Default permissive fixture: a synthetic checklist whose fields are
+        # the union of labels used by the legacy ena_samples_insert_mock.test
+        # and ena_full_pipeline.test, all marked optional with no units / no
+        # CV. Pre-Phase-8 mock tests don't carry exhaustive attribute sets;
+        # this lets the validator pass through those tests unchanged while
+        # still being strict for new tests that opt into TST000001.
+        return _CHECKLIST_PERMISSIVE
 
     def _handle_portal_search(self, path: str) -> str | None:
         """Parse `?query=<kind>_alias IN ("a1","a2")&fields=<kind>_alias&...`

@@ -150,6 +150,14 @@ public:
 
 		miint::ENAClient client(*context.db);
 
+		// Per-table client-side validation. ENASamplesInsert overrides this
+		// to validate user-supplied attributes against the chosen ENA
+		// checklist (mandatory fields, units, CV). Default no-op for other
+		// object types. Runs before the alias check so the user gets the
+		// most informative error first (validation issues say "fix your
+		// attributes"; alias collision says "this name is taken").
+		Derived::ValidateBuiltSpecs(built.specs, client);
+
 		// Pre-INSERT: ask the ENA portal API whether any of these aliases
 		// already exist in the submission account. Aliases are unique per
 		// (account, object_type) on the server side; reuse is a hard error
@@ -259,6 +267,13 @@ public:
 
 		gstate.return_collection.Scan(source_state.scan_state, chunk);
 		return chunk.size() == 0 ? SourceResultType::FINISHED : SourceResultType::HAVE_MORE_OUTPUT;
+	}
+
+public:
+	// Default no-op validation hook. Derived classes may override (static
+	// dispatch via Derived::ValidateBuiltSpecs in Finalize). Called between
+	// BuildFromBuffer and the alias collision check.
+	static void ValidateBuiltSpecs(const std::vector<SpecT> & /*specs*/, miint::ENAClient & /*client*/) {
 	}
 
 private:

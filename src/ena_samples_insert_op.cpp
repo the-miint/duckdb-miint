@@ -7,10 +7,13 @@
 
 #include "ena_samples_insert_op.hpp"
 
+#include "ena_checklist.hpp"
 #include "ena_insert_common.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/value.hpp"
+
+#include <iostream>
 
 namespace duckdb {
 
@@ -127,6 +130,65 @@ ENASamplesInsert::BuildFromBuffer(ColumnDataCollection &buffer,
 		}
 	}
 	return out;
+}
+
+void ENASamplesInsert::ValidateBuiltSpecs(const std::vector<miint::SampleSpec> &specs, miint::ENAClient &client) {
+	if (specs.empty()) {
+		return;
+	}
+
+	// Group specs by checklist accession; one HTTP fetch per unique
+	// checklist (cached afterwards for the process lifetime).
+	miint::ChecklistRegistry::Fetcher fetcher = [&client](const std::string &url) {
+		// Anonymous GET: ENA checklist XMLs are public reference data.
+		return client.FetchURL(url);
+	};
+
+	std::vector<std::string> aggregated_issues;
+	for (size_t i = 0; i < specs.size(); i++) {
+		const auto &spec = specs[i];
+		if (spec.checklist.empty()) {
+			continue; // user opted out
+		}
+
+		// Best-effort fetch: a typo'd checklist or an offline test harness
+		// shouldn't block an INSERT. The actual envelope POST still carries
+		// the user's checklist string. If the accession is wrong, the
+		// Webin server will reject the receipt; if it's right and we just
+		// can't reach the EBI browser API, the user has no client-side
+		// safety net but at least gets through.
+		const miint::ChecklistDef *cl = nullptr;
+		try {
+			cl = &miint::ChecklistRegistry::Instance().GetOrFetch(spec.checklist, fetcher);
+		} catch (const std::exception &e) {
+			std::cerr << "miint: warning: could not fetch checklist '" << spec.checklist
+			          << "' for client-side validation (" << e.what()
+			          << "); INSERT will proceed but may be rejected if the accession is unrecognised by ENA"
+			          << std::endl;
+			continue;
+		}
+
+		const auto issues = miint::ValidateAttributesAgainstChecklist(*cl, spec.attributes, spec.attribute_units);
+		for (const auto &issue : issues) {
+			aggregated_issues.push_back("sample alias '" + spec.alias + "': " + issue.message);
+		}
+	}
+
+	if (!aggregated_issues.empty()) {
+		// Newline-separated so a multi-issue failure (e.g. 10 samples × 4
+		// issues each) renders as 40 readable lines rather than a single
+		// run-on string. DuckDB exception messages preserve newlines.
+		std::string detail;
+		for (size_t i = 0; i < aggregated_issues.size(); i++) {
+			if (i > 0) {
+				detail += "\n  ";
+			} else {
+				detail += "\n  ";
+			}
+			detail += aggregated_issues[i];
+		}
+		throw InvalidInputException("INSERT INTO ena.samples: checklist validation failed:%s", detail);
+	}
 }
 
 void ENASamplesInsert::AppendReturningRows(ColumnDataCollection &return_collection,

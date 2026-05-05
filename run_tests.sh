@@ -85,6 +85,10 @@ if [ -z "$ENA_WEBIN_MOCK_URL" ] && python3 -c "import http.server" 2>/dev/null; 
         # Point that base at the same mock so existing INSERT tests don't
         # try to reach the real EBI portal.
         export MIINT_ENA_PORTAL_URL_BASE="${ENA_WEBIN_MOCK_URL}/portal/api"
+        # Phase 8 Step 8b checklist registry: the samples operator fetches
+        # checklist XMLs to validate user attributes client-side. Point at
+        # the mock for the same offline reasoning as the portal endpoint.
+        export MIINT_ENA_CHECKLIST_URL_BASE="${ENA_WEBIN_MOCK_URL}/browser/api/xml"
     fi
 fi
 
