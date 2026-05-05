@@ -40,6 +40,7 @@ option(MIINT_ENABLE_HDF5 "Build with HDF5/BIOM support" ON)
 option(MIINT_ENABLE_BOWTIE2 "Build with Bowtie2 alignment support" ON)
 option(MIINT_ENABLE_MAFFT "Build with MAFFT multiple sequence alignment support" ON)
 option(MIINT_ENABLE_SORTMERNA "Build with SortMeRNA rRNA alignment support" ON)
+option(MIINT_ENABLE_GPL_BOUNDARY "Build with gpl-boundary subsystem (process pipes + Arrow IPC over POSIX shm)" ON)
 
 # Auto-disable platform-incompatible features.
 # Bowtie2 requires POSIX fork/exec (unavailable on WASM and Windows).
@@ -56,15 +57,17 @@ if(EMSCRIPTEN)
     set(MIINT_ENABLE_BOWTIE2 OFF)
     set(MIINT_ENABLE_HDF5 OFF)
     set(MIINT_ENABLE_SORTMERNA OFF)
-    message(STATUS "Emscripten detected: disabling Bowtie2, HDF5, and SortMeRNA (WASM-incompatible)")
+    set(MIINT_ENABLE_GPL_BOUNDARY OFF)
+    message(STATUS "Emscripten detected: disabling Bowtie2, HDF5, SortMeRNA, and gpl-boundary (WASM-incompatible)")
 elseif(WIN32)
     set(MIINT_ENABLE_BOWTIE2 OFF)
     set(MIINT_ENABLE_MAFFT OFF)
+    set(MIINT_ENABLE_GPL_BOUNDARY OFF)
     if(MINGW)
         set(MIINT_ENABLE_SORTMERNA OFF)
-        message(STATUS "MinGW detected: disabling Bowtie2, MAFFT, and SortMeRNA (cmph relies on POSIX <sys/time.h>)")
+        message(STATUS "MinGW detected: disabling Bowtie2, MAFFT, SortMeRNA, and gpl-boundary (cmph + gpl-boundary rely on POSIX APIs)")
     else()
-        message(STATUS "Windows detected: disabling Bowtie2 and MAFFT (require POSIX APIs)")
+        message(STATUS "Windows detected: disabling Bowtie2, MAFFT, and gpl-boundary (require POSIX APIs)")
     endif()
 endif()
 
@@ -730,6 +733,9 @@ endif()
 if(MIINT_ENABLE_VSEARCH)
     include_directories(${VSEARCH_SRC_DIR}/src)
 endif()
+if(MIINT_ENABLE_GPL_BOUNDARY)
+    add_subdirectory(third_party/nanoarrow_ipc)
+endif()
 set(EXTENSION_SOURCES
     src/SequenceReader.cpp
     src/QualScore.cpp
@@ -857,6 +863,15 @@ endif()
 if(MIINT_ENABLE_CURL)
     list(APPEND EXTENSION_SOURCES src/curl_send.cpp)
 endif()
+if(MIINT_ENABLE_GPL_BOUNDARY)
+    list(APPEND EXTENSION_SOURCES
+        src/gpl_boundary/process.cpp
+        src/gpl_boundary/session.cpp
+        src/gpl_boundary/shm.cpp
+        src/gpl_boundary/arrow_ipc.cpp
+        src/install_gpl_boundary.cpp
+        src/phylogeny_fasttree.cpp)
+endif()
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 
@@ -925,6 +940,9 @@ endif()
 if(MIINT_ENABLE_CURL)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_CURL)
 endif()
+if(MIINT_ENABLE_GPL_BOUNDARY)
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_GPL_BOUNDARY)
+endif()
 target_link_libraries(${EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
@@ -947,6 +965,19 @@ endif()
 if(MIINT_ENABLE_CURL)
     target_link_libraries(${EXTENSION_NAME} CURL::libcurl)
 endif()
+if(MIINT_ENABLE_GPL_BOUNDARY)
+    # Object lib: feed its compiled .o's into the extension target without
+    # registering a link dependency (would require nanoarrow_ipc to also be
+    # in the DuckDB export set, which it has no business being in).
+    target_sources(${EXTENSION_NAME} PRIVATE $<TARGET_OBJECTS:miint_nanoarrow_ipc>)
+    target_include_directories(${EXTENSION_NAME} PRIVATE
+        $<TARGET_PROPERTY:miint_nanoarrow_ipc,INTERFACE_INCLUDE_DIRECTORIES>)
+    # yyjson — bundled in DuckDB as a static lib (target `duckdb_yyjson`) at
+    # `duckdb/third_party/yyjson/CMakeLists.txt`. We just consume its include
+    # directories; the symbols are linked transitively via the duckdb library.
+    target_include_directories(${EXTENSION_NAME} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/duckdb/third_party/yyjson/include)
+endif()
 if(APPLE)
     target_link_libraries(${EXTENSION_NAME} "-framework CoreFoundation")
 elseif(WIN32)
@@ -958,6 +989,13 @@ elseif(WIN32)
         regex ws2_32 ntdll userenv bcrypt advapi32)
 elseif(UNIX)
     target_link_libraries(${EXTENSION_NAME} dl m)
+    if(MIINT_ENABLE_GPL_BOUNDARY AND NOT APPLE)
+        # gpl_boundary/shm.cpp uses shm_open/shm_unlink. On glibc these live in
+        # librt (older RHEL/CentOS toolchains require explicit linkage; newer
+        # glibc folded them into libc but we link defensively). macOS exposes
+        # them in libSystem so we skip the flag there.
+        target_link_libraries(${EXTENSION_NAME} rt)
+    endif()
 endif()
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     target_link_libraries(${EXTENSION_NAME}
@@ -999,6 +1037,9 @@ endif()
 if(MIINT_ENABLE_CURL)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_CURL)
 endif()
+if(MIINT_ENABLE_GPL_BOUNDARY)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_GPL_BOUNDARY)
+endif()
 target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
@@ -1021,6 +1062,13 @@ endif()
 if(MIINT_ENABLE_CURL)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} CURL::libcurl)
 endif()
+if(MIINT_ENABLE_GPL_BOUNDARY)
+    target_sources(${LOADABLE_EXTENSION_NAME} PRIVATE $<TARGET_OBJECTS:miint_nanoarrow_ipc>)
+    target_include_directories(${LOADABLE_EXTENSION_NAME} PRIVATE
+        $<TARGET_PROPERTY:miint_nanoarrow_ipc,INTERFACE_INCLUDE_DIRECTORIES>)
+    target_include_directories(${LOADABLE_EXTENSION_NAME} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/duckdb/third_party/yyjson/include)
+endif()
 if(APPLE)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework CoreFoundation")
 elseif(WIN32)
@@ -1028,6 +1076,9 @@ elseif(WIN32)
         regex ws2_32 ntdll userenv bcrypt advapi32)
 elseif(UNIX)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} dl m)
+    if(MIINT_ENABLE_GPL_BOUNDARY AND NOT APPLE)
+        target_link_libraries(${LOADABLE_EXTENSION_NAME} rt)
+    endif()
 endif()
 if(HAVE_LIBZSTD)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} ${ZSTD_TARGET})
@@ -1153,6 +1204,17 @@ endif()
 if(MIINT_ENABLE_CURL)
     list(APPEND TEST_SOURCES src/curl_send.cpp test/cpp/test_curl_send.cpp)
 endif()
+if(MIINT_ENABLE_GPL_BOUNDARY)
+    list(APPEND TEST_SOURCES
+        src/gpl_boundary/process.cpp
+        src/gpl_boundary/session.cpp
+        src/gpl_boundary/shm.cpp
+        src/gpl_boundary/arrow_ipc.cpp
+        test/cpp/test_gpl_boundary_process.cpp
+        test/cpp/test_gpl_boundary_session.cpp
+        test/cpp/test_gpl_boundary_shm.cpp
+        test/cpp/test_gpl_boundary_arrow_ipc.cpp)
+endif()
 
 add_executable(tests ${TEST_SOURCES})
 
@@ -1179,6 +1241,22 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_link_libraries(tests sortmerna RocksDB::rocksdb)
     target_compile_definitions(tests PRIVATE MIINT_HAS_SORTMERNA)
+endif()
+if(MIINT_ENABLE_GPL_BOUNDARY)
+    target_sources(tests PRIVATE $<TARGET_OBJECTS:miint_nanoarrow_ipc>)
+    target_include_directories(tests PRIVATE
+        $<TARGET_PROPERTY:miint_nanoarrow_ipc,INTERFACE_INCLUDE_DIRECTORIES>)
+    target_include_directories(tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/duckdb/third_party/yyjson/include)
+    # The catch2 tests binary doesn't link against libduckdb (it's a
+    # standalone executable), so it needs its own copy of yyjson.cpp.
+    target_sources(tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/duckdb/third_party/yyjson/yyjson.cpp)
+    target_compile_definitions(tests PRIVATE MIINT_HAS_GPL_BOUNDARY)
+    if(UNIX AND NOT APPLE)
+        # shm_open/shm_unlink in glibc — see comment on the EXTENSION_NAME side.
+        target_link_libraries(tests rt)
+    endif()
 endif()
 if(WIN32)
     # Tests target only needs HTSlib deps (no Rust code linked here)

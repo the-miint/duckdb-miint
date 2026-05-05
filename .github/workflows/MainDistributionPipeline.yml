@@ -52,6 +52,35 @@ jobs:
           bowtie2 --version
           bowtie2-build --version
 
+      - name: Install gpl-boundary (FastTree process-isolation host)
+        shell: bash -el {0}
+        run: |
+          # Use the upstream installer; binary lands in $HOME/.local/bin.
+          # This is the same install ladder users hit when running
+          # `SELECT install_gpl_boundary()` interactively. We do it here so
+          # CI exercises miint's runtime path-finding (FindGplBoundary picks
+          # this up via PATH for the parity tests, and run_tests.sh detects
+          # it via `command -v gpl-boundary` and exports GPL_BOUNDARY_AVAILABLE).
+          # Pinned to "latest" per project policy; bump install.sh's release
+          # tag to lock to a specific upstream version.
+          curl -fsSL https://github.com/the-miint/GPL-boundary/releases/latest/download/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          "$HOME/.local/bin/gpl-boundary" --version | head -3
+
+      - name: Install FastTree (parity oracle)
+        shell: bash -el {0}
+        run: |
+          # bioconda's FastTree binary is the independent ML oracle for
+          # `phylogeny_fasttree_parity.test`. The vendored ext/fasttree library
+          # inside gpl-boundary is what miint actually drives at runtime;
+          # this binary is what we compare against to verify they agree.
+          conda install -y -c bioconda fasttree
+          # FastTree has no `--version` flag — invoking it with no input prints
+          # the version banner to stderr and exits non-zero. We just want to
+          # confirm the binary is reachable; swallow the exit code.
+          FastTree 2>&1 | head -1 || true
+          which FastTree
+
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11.1
         with:

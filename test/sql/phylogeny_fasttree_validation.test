@@ -1,0 +1,274 @@
+# name: test/sql/phylogeny_fasttree_validation.test
+# description: phylogeny_fasttree Bind-time parameter validation
+# group: [sql]
+
+#
+# These tests exercise Bind-time validation of phylogeny_fasttree's named
+# parameters. Bind never spawns the daemon, so they run on every CI shard
+# where the function is compiled in (Linux + macOS — gpl-boundary is
+# auto-disabled on Windows + WASM, where the table function isn't
+# registered at all). The PHYLOGENY_FASTTREE_AVAILABLE gate skips the
+# whole file on those builds.
+
+require miint
+
+require-env PHYLOGENY_FASTTREE_AVAILABLE
+
+# Helper: a tiny in-memory MSA. The actual values don't matter for Bind
+# checks — Bind validates parameter shape, not alignment content.
+statement ok
+CREATE TABLE tiny_msa AS
+  SELECT 's1' AS name, 'ACGT' AS sequence UNION ALL
+  SELECT 's2' AS name, 'ACGA' AS sequence UNION ALL
+  SELECT 's3' AS name, 'ACGC' AS sequence;
+
+# -----------------------------------------------------------------------------
+# Output schema (column names + types) — pulled via DESCRIBE on a SELECT that
+# never executes the function body (DuckDB resolves column metadata at Bind time).
+# -----------------------------------------------------------------------------
+query II
+SELECT column_name, column_type FROM (
+    DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa')
+) ORDER BY column_name;
+----
+branch_length	DOUBLE
+edge_id	BIGINT
+is_tip	BOOLEAN
+n_children	BIGINT
+name	VARCHAR
+node_index	BIGINT
+parent_index	BIGINT
+support	DOUBLE
+
+# -----------------------------------------------------------------------------
+# Unknown parameter is rejected at parse time. DuckDB enforces the
+# `named_parameters` table-function map before our Bind runs, so the message
+# comes from DuckDB's binder ("Invalid named parameter") rather than from
+# phylogeny_fasttree's own validation. Either is acceptable — the property
+# we care about is that typos fail loudly.
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', not_a_real_param := 42);
+----
+not_a_real_param
+
+# -----------------------------------------------------------------------------
+# fastest=true is rejected at Bind (gpl-boundary side rejects it too, but we
+# fail fast without spawning the daemon).
+# -----------------------------------------------------------------------------
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', fastest := true);
+----
+fastest=true is not yet supported
+
+# fastest=false is accepted as a no-op (Bind succeeds; we don't reach Execute).
+statement ok
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', fastest := false);
+
+# -----------------------------------------------------------------------------
+# bootstrap > 0 + nosupport=true → conflict
+# -----------------------------------------------------------------------------
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', bootstrap := 100, nosupport := true);
+----
+cannot be combined with nosupport=true
+
+# bootstrap=0 + nosupport=true is fine
+statement ok
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', bootstrap := 0, nosupport := true);
+
+# negative bootstrap → error
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', bootstrap := -1);
+----
+bootstrap must be >= 0
+
+# -----------------------------------------------------------------------------
+# pseudo / pseudo_weight gating
+# -----------------------------------------------------------------------------
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', pseudo_weight := 1.0);
+----
+pseudo_weight requires pseudo=true
+
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', pseudo := true, pseudo_weight := -0.5);
+----
+pseudo_weight must be >= 0
+
+statement ok
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', pseudo := true, pseudo_weight := 1.0);
+
+# -----------------------------------------------------------------------------
+# nni / spr / mlnni / mlacc / cat numeric range checks
+# -----------------------------------------------------------------------------
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', nni := -1);
+----
+nni must be >= 0
+
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', spr := -1);
+----
+spr must be >= 0
+
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', mlnni := -1);
+----
+mlnni must be >= 0
+
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', mlacc := 0);
+----
+mlacc must be >= 1
+
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', cat := 0);
+----
+cat must be >= 1
+
+# -----------------------------------------------------------------------------
+# mlnni > 0 + noml=true → conflict
+# -----------------------------------------------------------------------------
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', mlnni := 5, noml := true);
+----
+cannot be combined with noml=true
+
+# mlnni=0 + noml=true is fine
+statement ok
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', mlnni := 0, noml := true);
+
+# -----------------------------------------------------------------------------
+# threads numeric range
+# -----------------------------------------------------------------------------
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', threads := 0);
+----
+threads must be >= 1
+
+statement ok
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', threads := 4);
+
+# -----------------------------------------------------------------------------
+# model + seq_type cross-checks
+# -----------------------------------------------------------------------------
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', model := 'gtr', seq_type := 'protein');
+----
+nucleotide model
+
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', model := 'jc', seq_type := 'protein');
+----
+nucleotide model
+
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', model := 'jtt', seq_type := 'nucleotide');
+----
+protein model
+
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', model := 'lg', seq_type := 'nucleotide');
+----
+protein model
+
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', model := 'wag', seq_type := 'nucleotide');
+----
+protein model
+
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', model := 'made-up-model');
+----
+invalid model
+
+# Accepted: model='gtr' with nucleotide
+statement ok
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', model := 'gtr', seq_type := 'nucleotide');
+
+# -----------------------------------------------------------------------------
+# gtrrates / gtrfreq require model='gtr'
+# -----------------------------------------------------------------------------
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', gtrrates := [1.0,1.0,1.0,1.0,1.0,1.0]);
+----
+only valid with model='gtr'
+
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', gtrfreq := [0.25,0.25,0.25,0.25]);
+----
+only valid with model='gtr'
+
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', model := 'gtr', gtrrates := [1.0,1.0,1.0,1.0,1.0]);
+----
+must have exactly 6 entries
+
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', model := 'gtr', gtrfreq := [0.25,0.25,0.5]);
+----
+must have exactly 4 entries
+
+statement ok
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa',
+                            model := 'gtr',
+                            gtrrates := [1.0,2.0,1.0,1.0,2.0,1.0],
+                            gtrfreq := [0.25,0.25,0.25,0.25]);
+
+# -----------------------------------------------------------------------------
+# bionj / nj mutual exclusion
+# -----------------------------------------------------------------------------
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', bionj := true, nj := true);
+----
+mutually exclusive
+
+# -----------------------------------------------------------------------------
+# top / notop / topm / slow interactions
+# -----------------------------------------------------------------------------
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', top := true, notop := true);
+----
+mutually exclusive
+
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', slow := true, top := true);
+----
+slow=true disables top hits
+
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', notop := true, topm := 2.0);
+----
+topm is only meaningful
+
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', slow := true, topm := 2.0);
+----
+topm is only meaningful
+
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', topm := 0);
+----
+topm must be > 0
+
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', topm := -1);
+----
+topm must be > 0
+
+# -----------------------------------------------------------------------------
+# seq_type validation
+# -----------------------------------------------------------------------------
+statement error
+DESCRIBE SELECT * FROM phylogeny_fasttree('tiny_msa', seq_type := 'made-up');
+----
+invalid seq_type
+
+# -----------------------------------------------------------------------------
+# phylogeny_fasttree_available() — scalar should always be safe to call,
+# returns true only when gpl-boundary is on PATH.
+# -----------------------------------------------------------------------------
+query I
+SELECT typeof(phylogeny_fasttree_available());
+----
+BOOLEAN

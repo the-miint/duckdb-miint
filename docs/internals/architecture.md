@@ -59,6 +59,17 @@ Registration: set `tf.pushdown_complex_filter = YourCallback;` in `GetFunction()
 - `tf.pushdown_complex_filter` (callback) — arbitrary Expression trees, called once during optimization, scope decided by the callback.
 - `tf.filter_pushdown = true` (bool) — tells the optimizer to extract simple `col=const` / `LIKE` / `IN` predicates into `get.table_filters`. The scan then receives those via `TableFunctionInitInput::filters` and is expected to consume them at read time (e.g. parquet zonemap pruning). Setting this without implementing consumption does not drop filters for correctness (the optimizer still wraps remaining expressions in a `LogicalFilter` above the scan), but the populated `TableFilterSet` is dead weight. Leave `filter_pushdown = false` unless you actually consume `TableFilter` objects.
 
+### GPL/BSD License Boundary (gpl-boundary subsystem)
+
+Some upstream tools we want to expose are GPL-licensed and cannot be statically linked into miint without changing the extension's BSD licensing. The pattern: link the GPL code into a separate process (`gpl-boundary`), launch it as a child, and communicate via JSON-line control + POSIX shared memory + Arrow IPC bytes.
+
+`src/phylogeny_fasttree.cpp` (FastTree) is the first user. The wire format and process plumbing live in `src/gpl_boundary/` (`process`, `session`, `shm`, `arrow_ipc`); see [`docs/internals/embedded-tools.md`](embedded-tools.md) for the protocol invariants and lifetime rules. Two non-obvious constraints:
+
+1. **SIGPIPE handling is per-thread**, not process-wide. The session blocks SIGPIPE via `pthread_sigmask` and drains pending signals with `sigtimedwait` — never `sigaction(SIGPIPE, SIG_IGN)`, which would mask SIGPIPE for every other thread in the host process.
+2. **Output shm is unlinked by miint, not the daemon.** This is the gpl-boundary README's contract; if we ever both unlink, the second unlink races with a shm name reused by another query.
+
+Adding a second tool to the same daemon (or a second daemon for a different GPL library) requires defining a new `output_schema` on the daemon side, then registering a new table function on the miint side that mirrors `phylogeny_fasttree.cpp`. The session/shm/IPC plumbing is generic.
+
 ## Testing Strategy
 
 ### SQL Tests (`test/sql/`)

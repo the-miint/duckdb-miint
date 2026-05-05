@@ -1,0 +1,89 @@
+# name: test/sql/phylogeny_fasttree.test
+# description: phylogeny_fasttree end-to-end happy path against a real gpl-boundary daemon
+# group: [sql]
+
+require miint
+
+require-env GPL_BOUNDARY_AVAILABLE
+
+# -----------------------------------------------------------------------------
+# Tiny 3-tip alignment from data/mafft/tiny.fa: 3 leaves + 1 internal root = 4
+# nodes for an unrooted bifurcating tree on 3 tips. (FastTree returns the
+# unrooted topology — there's a single internal node connecting the three tips
+# in star-like fashion.)
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE tiny AS
+  SELECT 's1' AS name, 'ACGTACGT' AS sequence UNION ALL
+  SELECT 's2' AS name, 'ACGAACGT' AS sequence UNION ALL
+  SELECT 's3' AS name, 'ACGTACGA' AS sequence;
+
+# Run with a fixed seed for reproducibility, threads=1 to avoid any
+# topology non-determinism from FastTree's parallel sections.
+query III
+SELECT
+    count(*) AS n_nodes,
+    count(*) FILTER (WHERE is_tip) AS n_tips,
+    count(*) FILTER (WHERE NOT is_tip) AS n_internal
+FROM phylogeny_fasttree('tiny', seed := 42, threads := 1, seq_type := 'nucleotide');
+----
+4	3	1
+
+# Tip names are preserved.
+query I
+SELECT string_agg(name, ',' ORDER BY name)
+FROM phylogeny_fasttree('tiny', seed := 42, threads := 1, seq_type := 'nucleotide')
+WHERE is_tip;
+----
+s1,s2,s3
+
+# Branch lengths on the tip edges should be positive (>0). Internal edges may
+# be 0 in a 3-tip star.
+query I
+SELECT count(*) > 0
+FROM phylogeny_fasttree('tiny', seed := 42, threads := 1, seq_type := 'nucleotide')
+WHERE is_tip AND branch_length > 0.0;
+----
+true
+
+# n_children: tips have 0 children, the internal root has 3 (unrooted star).
+query I
+SELECT n_children FROM phylogeny_fasttree('tiny', seed := 42, threads := 1, seq_type := 'nucleotide')
+WHERE NOT is_tip
+ORDER BY node_index;
+----
+3
+
+# parent_index: every tip points at the internal node (which has parent_index = NULL or self).
+query I
+SELECT count(DISTINCT parent_index)
+FROM phylogeny_fasttree('tiny', seed := 42, threads := 1, seq_type := 'nucleotide')
+WHERE is_tip;
+----
+1
+
+# -----------------------------------------------------------------------------
+# phylogeny_fasttree_available() reports true when gpl-boundary is on PATH.
+# (We're inside `require-env GPL_BOUNDARY_AVAILABLE`, so it must be.)
+# -----------------------------------------------------------------------------
+query I
+SELECT phylogeny_fasttree_available();
+----
+true
+
+# -----------------------------------------------------------------------------
+# Round-trip the tree to Newick using miint's existing COPY ... (FORMAT 'newick'),
+# which accepts exactly the columns gpl-boundary produces. The output file must
+# be non-empty and start with `(`.
+# -----------------------------------------------------------------------------
+statement ok
+COPY (
+    SELECT node_index, parent_index, name, branch_length, edge_id
+    FROM phylogeny_fasttree('tiny', seed := 42, threads := 1, seq_type := 'nucleotide')
+) TO '__TEST_DIR__/phylogeny_fasttree_tiny.nwk' (FORMAT 'newick');
+
+query I
+SELECT length(content) > 0 AND content LIKE '(%'
+FROM (SELECT content FROM read_text('__TEST_DIR__/phylogeny_fasttree_tiny.nwk'));
+----
+true
