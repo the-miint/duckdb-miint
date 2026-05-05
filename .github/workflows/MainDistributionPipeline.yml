@@ -47,7 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
           submodules: 'true'
 
       - name: Install build dependencies
@@ -104,7 +104,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
           submodules: 'true'
 
       - name: Install build dependencies
@@ -205,7 +205,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
           submodules: 'true'
 
       - uses: mymindstorm/setup-emsdk@v13
