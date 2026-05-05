@@ -79,6 +79,12 @@ if [ -z "$ENA_WEBIN_MOCK_URL" ] && python3 -c "import http.server" 2>/dev/null; 
     if [ -z "$ENA_WEBIN_MOCK_URL" ]; then
         echo "Warning: ENA Webin mock failed to start; submission round-trip tests will skip"
         kill $ENA_MOCK_PID 2>/dev/null || true
+    else
+        # Phase 8 Step 8a alias collision check: the operator sends an
+        # authenticated GET to <portal_base>/search before each INSERT.
+        # Point that base at the same mock so existing INSERT tests don't
+        # try to reach the real EBI portal.
+        export MIINT_ENA_PORTAL_URL_BASE="${ENA_WEBIN_MOCK_URL}/portal/api"
     fi
 fi
 

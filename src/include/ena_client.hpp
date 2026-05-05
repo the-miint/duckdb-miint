@@ -126,12 +126,23 @@ public:
 	std::string PostJSONReceiveXML(const std::string &url, const std::string &body, const std::string &user,
 	                               const std::string &password);
 
+	// Authenticated GET. Used by the pre-INSERT alias collision check to
+	// search the user's submission account on the ENA portal API
+	// (anonymous portal search would not see HOLD/private records owned by
+	// the authenticated submission account). Same retry/backoff semantics
+	// as the unauthenticated GET path.
+	std::string AuthenticatedGet(const std::string &url, const std::string &user, const std::string &password);
+
 private:
 	duckdb::DatabaseInstance &db;
 	std::chrono::steady_clock::time_point last_request_time;
 	mutable std::mutex rate_limit_mutex;
 
 	std::string MakeRequest(const std::string &url);
+	// Shared GET retry loop. `headers` is built by the caller (empty for
+	// anonymous, Authorization-set for authenticated) so we share the
+	// rate-limit + retry + backoff semantics across both paths.
+	std::string ExecuteGet(const std::string &url, duckdb::HTTPHeaders &headers, const char *failure_label);
 	// content_type and accept_type are independent (mismatching is allowed,
 	// e.g. POST XML, ask for JSON receipt — Webin V2 supports this).
 	std::string PostBody(const std::string &url, const std::string &body, const std::string &content_type,

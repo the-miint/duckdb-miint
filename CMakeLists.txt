@@ -785,6 +785,7 @@ set(EXTENSION_SOURCES
     src/ena_submission_log.cpp
     src/ena_storage.cpp
     src/ena_insert_common.cpp
+    src/ena_alias_check.cpp
     src/ena_projects_insert.cpp
     src/ena_projects_insert_op.cpp
     src/ena_samples_insert.cpp
@@ -1095,6 +1096,8 @@ set(TEST_SOURCES
     test/cpp/test_ena_experiments_insert.cpp
     src/ena_runs_insert.cpp
     test/cpp/test_ena_runs_insert.cpp
+    src/ena_alias_check.cpp
+    test/cpp/test_ena_alias_check.cpp
     src/fastq_encoder.cpp
     test/cpp/test_fastq_encoder.cpp
     src/ena_upload_helpers.cpp

@@ -17,8 +17,13 @@ Behavior:
   - Every receipt declares success="true" unless the alias contains the
     literal substring "FAIL", in which case success="false" and an error
     message is emitted.
+  - On GET to /portal/api/search (Phase 8 alias collision check), parses the
+    `query=<kind>_alias IN ("a1","a2",...)` filter and returns a TSV with
+    one row per alias starting with the literal prefix "EXISTS_". All other
+    aliases are reported as not present.
 
-Invoked by run_tests.sh on a free port; URL is exported as ENA_WEBIN_MOCK_URL.
+Invoked by run_tests.sh on a free port; URL is exported as ENA_WEBIN_MOCK_URL
+and MIINT_ENA_PORTAL_URL_BASE = "$ENA_WEBIN_MOCK_URL/portal/api".
 """
 
 from __future__ import annotations
@@ -159,11 +164,66 @@ class Handler(BaseHTTPRequestHandler):
         return user_pw.startswith("Webin-") and ":" in user_pw
 
     def do_GET(self):
-        # health check
+        # Portal API alias collision lookup (Phase 8 Step 8a). Authenticated.
+        if self.path.startswith("/portal/api/search"):
+            if not self._check_auth():
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="webin"')
+                self.end_headers()
+                return
+            tsv = self._handle_portal_search(self.path)
+            if tsv is None:
+                self.send_response(400)
+                self.end_headers()
+                return
+            payload = tsv.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/tab-separated-values; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        # Default: health check.
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
         self.wfile.write(b"ena-webin-mock ok\n")
+
+    def _handle_portal_search(self, path: str) -> str | None:
+        """Parse `?query=<kind>_alias IN ("a1","a2")&fields=<kind>_alias&...`
+        out of the URL and return a TSV body. Returns None on a malformed
+        request so the caller can emit HTTP 400."""
+        from urllib.parse import urlparse, parse_qs, unquote
+
+        qs = parse_qs(urlparse(path).query)
+        fields = qs.get("fields", [""])[0]
+        query = unquote(qs.get("query", [""])[0])
+        if not fields or not query:
+            return None
+        # Accept both "<field> IN (\"a\",\"b\")" and the single
+        # "<field> = \"a\"" forms. Extract bare aliases.
+        aliases: list[str] = []
+        if " IN " in query:
+            inner = query.split(" IN ", 1)[1].strip()
+            if inner.startswith("(") and inner.endswith(")"):
+                inner = inner[1:-1]
+            for part in inner.split(","):
+                part = part.strip()
+                if part.startswith('"') and part.endswith('"'):
+                    aliases.append(part[1:-1])
+        elif "=" in query:
+            _, rhs = query.split("=", 1)
+            rhs = rhs.strip()
+            if rhs.startswith('"') and rhs.endswith('"'):
+                aliases.append(rhs[1:-1])
+        # Only aliases that start with the literal prefix "EXISTS_" are
+        # treated as already-present in the submission account. SQL tests
+        # use this convention to drive the collision path without a stateful
+        # mock. (Production users won't see this behaviour because the real
+        # ENA portal API replies with their actual submission history.)
+        present = [a for a in aliases if a.startswith("EXISTS_")]
+        lines = [fields] + present
+        return "\n".join(lines) + "\n"
 
     def do_POST(self):
         if not self._check_auth():

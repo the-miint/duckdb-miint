@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include "ena_alias_check.hpp"
 #include "ena_client.hpp"
 #include "ena_insert_common.hpp"
 #include "ena_post_fn.hpp"
@@ -148,6 +149,19 @@ public:
 		FillCommonENAInsertOptions(opts, creds, built.hold_until_date);
 
 		miint::ENAClient client(*context.db);
+
+		// Pre-INSERT: ask the ENA portal API whether any of these aliases
+		// already exist in the submission account. Aliases are unique per
+		// (account, object_type) on the server side; reuse is a hard error
+		// in the receipt. Catching it here lets us surface the offending
+		// aliases by name and saves the envelope POST + receipt parse.
+		//
+		// Throws InvalidInputException early on collision — intentionally
+		// before RecordSubmissionLog below, since this is a client-side
+		// validation failure (user error) and not a recorded submission
+		// attempt. Pinned by test/sql/ena_alias_collision_mock.test which
+		// asserts no submission_log row appears for a blocked alias.
+		RunAliasCollisionCheck(built.specs, client, opts);
 		// Dispatch by Content-Type. V2 accepts JSON only for project +
 		// sample; experiment + run + analysis must be XML (the JSON
 		// dispatcher NPEs for SRA-side objects). Both paths request an
@@ -245,6 +259,42 @@ public:
 
 		gstate.return_collection.Scan(source_state.scan_state, chunk);
 		return chunk.size() == 0 ? SourceResultType::FINISHED : SourceResultType::HAVE_MORE_OUTPUT;
+	}
+
+private:
+	// Pre-INSERT alias collision check. Static so unit tests at the per-table
+	// layer can also reach it without instantiating a PhysicalOperator.
+	static void RunAliasCollisionCheck(const std::vector<SpecT> &specs, miint::ENAClient &client, const OptsT &opts) {
+		if (specs.empty()) {
+			return;
+		}
+		std::vector<std::string> aliases;
+		aliases.reserve(specs.size());
+		for (const auto &s : specs) {
+			aliases.push_back(s.alias);
+		}
+		const auto kind = miint::AliasObjectKindFromTableName(Derived::ObjectName());
+		const auto portal_base = miint::ResolvePortalBaseFromEnv();
+		miint::URLFetcher fetcher = [&client, &opts](const std::string &url) {
+			return client.AuthenticatedGet(url, opts.user, opts.password);
+		};
+		const auto hits = miint::CheckAliasCollisions(portal_base, kind, aliases, fetcher);
+		if (hits.empty()) {
+			return;
+		}
+		std::string detail;
+		for (size_t i = 0; i < hits.size(); i++) {
+			if (i > 0) {
+				detail += ", ";
+			}
+			detail += "'";
+			detail += hits[i];
+			detail += "'";
+		}
+		const char *noun = hits.size() == 1 ? "alias" : "aliases";
+		const char *verb = hits.size() == 1 ? "exists" : "exist";
+		throw InvalidInputException("%s: %s already %s in submission account: %s", Derived::ThrowPrefix(), noun, verb,
+		                            detail);
 	}
 };
 

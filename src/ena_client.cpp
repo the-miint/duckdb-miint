@@ -26,10 +26,13 @@ void ENAClient::RespectRateLimit() {
 	}
 }
 
-std::string ENAClient::MakeRequest(const std::string &url) {
+// Shared GET retry loop. Caller supplies a pre-built HTTPHeaders (empty for
+// MakeRequest, with an Authorization: Basic header for GetWithBasicAuth).
+// Centralised so a future tweak to retry semantics, status handling, or
+// error formatting lands in one place.
+std::string ENAClient::ExecuteGet(const std::string &url, duckdb::HTTPHeaders &headers, const char *failure_label) {
 	RespectRateLimit();
 
-	duckdb::HTTPHeaders headers(db);
 	auto &http_util = duckdb::HTTPUtil::Get(db);
 	auto params = http_util.InitializeParameters(db, url);
 
@@ -52,12 +55,18 @@ std::string ENAClient::MakeRequest(const std::string &url) {
 		}
 
 		if (response->HasRequestError()) {
-			throw duckdb::IOException("ENA request failed: %s (URL: %s)", response->GetRequestError(), url);
+			throw duckdb::IOException("%s failed: %s (URL: %s)", failure_label, response->GetRequestError(), url);
 		}
-		throw duckdb::HTTPException(*response, "ENA request failed with HTTP %d (URL: %s)", int(response->status), url);
+		throw duckdb::HTTPException(*response, "%s failed with HTTP %d (URL: %s)", failure_label, int(response->status),
+		                            url);
 	}
 
-	throw duckdb::IOException("ENA request failed after %d retries (URL: %s)", MAX_RETRIES, url);
+	throw duckdb::IOException("%s failed after %d retries (URL: %s)", failure_label, MAX_RETRIES, url);
+}
+
+std::string ENAClient::MakeRequest(const std::string &url) {
+	duckdb::HTTPHeaders headers(db);
+	return ExecuteGet(url, headers, "ENA request");
 }
 
 std::string ENAClient::PostBody(const std::string &url, const std::string &body, const std::string &content_type,
@@ -131,6 +140,12 @@ std::string ENAClient::FetchXML(const std::vector<std::string> &accessions) {
 
 std::string ENAClient::FetchURL(const std::string &url) {
 	return MakeRequest(url);
+}
+
+std::string ENAClient::AuthenticatedGet(const std::string &url, const std::string &user, const std::string &password) {
+	duckdb::HTTPHeaders headers(db);
+	headers.Insert("Authorization", BuildBasicAuthHeader(user, password));
+	return ExecuteGet(url, headers, "ENA authenticated GET");
 }
 
 } // namespace miint
