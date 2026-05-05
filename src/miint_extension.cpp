@@ -78,6 +78,11 @@
 #include <align_bowtie2_sharded.hpp>
 #endif
 
+#ifdef MIINT_HAS_GPL_BOUNDARY
+#include <install_gpl_boundary.hpp>
+#include <phylogeny_fasttree.hpp>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace duckdb {
@@ -93,12 +98,15 @@ void SetDependencyLogging() {
 }
 
 void SetupSignalHandling() {
-#if defined(MIINT_HAS_BOWTIE2) || MIINT_ASPERA_SUPPORTED
+#if defined(MIINT_HAS_BOWTIE2) || MIINT_ASPERA_SUPPORTED || defined(MIINT_HAS_GPL_BOUNDARY)
 	// Ignore SIGPIPE globally so that writes to closed pipes return EPIPE instead of
 	// killing the process. Needed for Bowtie2Aligner, AsperaProcess, and other subprocess
-	// management where pipes may close unexpectedly.
+	// management (incl. gpl-boundary's ChildProcess + Session) where pipes may close
+	// unexpectedly.
 	// Note: This is a PROCESS-WIDE setting that persists for the lifetime of the process.
 	// Setting it once at extension load is thread-safe (vs calling signal() from multiple threads).
+	// gpl_boundary::Session ALSO uses pthread_sigmask + sigtimedwait per-thread inside its
+	// hot loop — that's per-thread defense; this is the global no-kill backstop.
 	std::signal(SIGPIPE, SIG_IGN);
 #endif
 }
@@ -235,6 +243,45 @@ static void LoadInternal(ExtensionLoader &loader) {
 #ifdef MIINT_HAS_SORTMERNA
 	AlignSortMeRNATableFunction::Register(loader);
 	AlignSortMeRNARRNATableFunction::Register(loader);
+#endif
+#ifdef MIINT_HAS_GPL_BOUNDARY
+	PhylogenyFastTreeTableFunction::Register(loader);
+	PhylogenyFastTreeAvailableScalar::Register(loader);
+	InstallGplBoundaryScalar::Register(loader);
+#else
+	// Stub: phylogeny_fasttree_available() always returns false when gpl-boundary
+	// support is compiled out (e.g., on WASM/Windows).
+	ScalarFunction phylogeny_fasttree_stub(
+	    "phylogeny_fasttree_available", {}, LogicalType::BOOLEAN,
+	    [](DataChunk &args, ExpressionState &state, Vector &result) { result.Reference(Value::BOOLEAN(false)); });
+	loader.RegisterFunction(phylogeny_fasttree_stub);
+
+	// Stub: install_gpl_boundary() reports the platform doesn't support
+	// gpl-boundary at all, so installing wouldn't help.
+	const auto install_struct = LogicalType::STRUCT({{"installed", LogicalType::BOOLEAN},
+	                                                 {"path", LogicalType::VARCHAR},
+	                                                 {"version", LogicalType::VARCHAR},
+	                                                 {"message", LogicalType::VARCHAR}});
+	ScalarFunction install_gpl_boundary_stub(
+	    "install_gpl_boundary", {}, install_struct, [](DataChunk &args, ExpressionState &state, Vector &result) {
+		    auto &entries = StructVector::GetEntries(result);
+		    auto installed_data = FlatVector::GetData<bool>(*entries[0]);
+		    auto &path_vec = *entries[1];
+		    auto &version_vec = *entries[2];
+		    auto &message_vec = *entries[3];
+		    const idx_t n = args.size();
+		    const string msg = "install_gpl_boundary: this miint build was compiled without "
+		                       "MIINT_ENABLE_GPL_BOUNDARY (typically WASM or Windows). gpl-boundary "
+		                       "is not supported on this platform.";
+		    for (idx_t i = 0; i < n; i++) {
+			    installed_data[i] = false;
+			    FlatVector::GetData<string_t>(path_vec)[i] = StringVector::AddString(path_vec, "");
+			    FlatVector::GetData<string_t>(version_vec)[i] = StringVector::AddString(version_vec, "");
+			    FlatVector::GetData<string_t>(message_vec)[i] = StringVector::AddString(message_vec, msg);
+		    }
+		    result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	    });
+	loader.RegisterFunction(install_gpl_boundary_stub);
 #endif
 	DeblurTableFunction::Register(loader);
 

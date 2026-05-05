@@ -1,0 +1,348 @@
+# name: test/sql/phylogeny_fasttree_parity.test
+# description: phylogeny_fasttree parity vs independent bioconda FastTree binary on committed alignments
+# group: [sql]
+
+#
+# Compares the trees produced by miint's phylogeny_fasttree (driven through
+# the gpl-boundary daemon's vendored ext/fasttree) against golden Newick trees
+# produced once by the standalone bioconda FastTree binary on the same input
+# with the same seed and options.
+#
+# Two fixtures, each gated by an independent env var so a stale fixture cannot
+# be silently masked by the other being fresh:
+#
+#   tiny.fa     — 6 tips, synthetic two-clade structure. SMOKE TEST. The
+#                 topology is so cleanly separated that any reasonable ML
+#                 algorithm recovers it; this fixture catches catastrophic
+#                 daemon-side failures (no tree returned, garbled IDs, schema
+#                 drift) but is too easy to catch subtle NNI/SPR/rate-model
+#                 bugs. Held cheap so dev-loop iteration stays fast.
+#
+#   moderate.fa — 24 tips, MAFFT-aligned NCBI 16S subset (sourced from
+#                 data/uchime/ltp_subset_500.fasta, first 24 records). STRESS
+#                 TEST. Sequences contain IUPAC ambiguity codes (R, Y, W, S, K)
+#                 — if miint's daemon ever normalizes these differently from
+#                 the bioconda binary, the parity test will catch it as a
+#                 branch-length divergence rather than failing silently.
+#
+# Comparison strategy (per fixture):
+#   1. Topology: canonical bipartition multisets must match. For each non-leaf
+#      node we compute the (subtree, complement) bipartition over the full
+#      tip set, canonicalize as the lex-smaller side first, and DISTINCT-dedup.
+#      This is rooting-invariant: two topologically-identical unrooted trees
+#      rooted differently produce the same bipartition set. DISTINCT also
+#      handles the binary-root duplication artifact (where one bipartition
+#      appears as both children of a degree-2 root).
+#   2. Branch lengths: hybrid tolerance |Δ| > max(1e-9, 1e-6 * max(|m|,|g|))
+#      catches a 10× drift on near-zero clamp values (FastTree clamps small
+#      branches to ~5e-9; absolute 1e-6 would mask a 200× error there) while
+#      tolerating IEEE rounding noise on normal branches.
+#   3. Threads forced to 1 for FastTree determinism — its parallel NJ/NNI/SPR
+#      paths produce non-deterministic floating-point output across thread counts.
+
+require miint
+
+require-env GPL_BOUNDARY_AVAILABLE
+
+require-env FASTTREE_AVAILABLE
+
+require-env MIINT_FASTTREE_TINY_PARITY_OK
+
+require-env MIINT_FASTTREE_MODERATE_PARITY_OK
+
+# Old single-arrow lambda syntax used in the bipartition CTE; without this
+# DuckDB 1.5 emits a deprecation warning. The lambda is structurally simple
+# enough that the older syntax remains the readable choice here.
+statement ok
+SET lambda_syntax='ENABLE_SINGLE_ARROW';
+
+# =============================================================================
+# Fixture 1: tiny (6 tips, synthetic two-clade structure)
+# =============================================================================
+
+statement ok
+CREATE TABLE tiny_input AS
+  SELECT read_id AS name, sequence1 AS sequence
+  FROM read_fastx('data/fasttree/tiny.fa');
+
+statement ok
+COPY (
+    SELECT node_index, parent_index, name, branch_length, edge_id
+    FROM phylogeny_fasttree('tiny_input', seed := 42, threads := 1, seq_type := 'nucleotide')
+) TO '__TEST_DIR__/tiny.miint.nwk' (FORMAT 'newick');
+
+statement ok
+CREATE TABLE tiny_miint AS SELECT * FROM read_newick('__TEST_DIR__/tiny.miint.nwk');
+
+# Path below is hardcoded rather than read from
+# $MIINT_FASTTREE_{TINY,MODERATE}_PARITY_OK because sqllogictest does not
+# interpolate env vars in `read_newick(...)` arguments. run_tests.sh sets each
+# *_PARITY_OK var to "1" only after the fixture-SHA-match check, so the
+# `require-env` guards above still gate staleness. If you relocate either
+# golden in run_tests.sh, update the corresponding read_newick path here in
+# the same commit.
+statement ok
+CREATE TABLE tiny_golden AS SELECT * FROM read_newick('data/fasttree/tiny.golden.nwk');
+
+# Sanity: same total node count, same tip count.
+query II
+SELECT
+    (SELECT count(*) FROM tiny_miint) = (SELECT count(*) FROM tiny_golden) AS nodes_match,
+    (SELECT count(*) FROM tiny_miint WHERE is_tip) =
+        (SELECT count(*) FROM tiny_golden WHERE is_tip) AS tips_match;
+----
+true	true
+
+# Same set of tip names.
+query I
+WITH
+  m AS (SELECT name FROM tiny_miint WHERE is_tip),
+  g AS (SELECT name FROM tiny_golden WHERE is_tip)
+SELECT (SELECT count(*) FROM (SELECT * FROM m EXCEPT SELECT * FROM g)) +
+       (SELECT count(*) FROM (SELECT * FROM g EXCEPT SELECT * FROM m));
+----
+0
+
+# Topology: canonical bipartition set equality (RF distance == 0).
+#
+# For each tree, recursively walk from each tip up via parent_index; for each
+# non-trivial subtree size compute the canonical bipartition (smaller side
+# lex-first vs the complement over the full tip set). DISTINCT collapses the
+# binary-root edge-duplication artifact. Two topologically-equal unrooted
+# trees produce the same set even when rooted differently in the Newick
+# serialization.
+statement ok
+CREATE TABLE tiny_miint_bipartitions AS
+WITH RECURSIVE walk AS (
+    SELECT node_index AS ancestor, name AS tip
+    FROM tiny_miint WHERE is_tip
+  UNION ALL
+    SELECT t.parent_index, w.tip
+    FROM walk w
+    JOIN tiny_miint t ON t.node_index = w.ancestor
+    WHERE t.parent_index IS NOT NULL
+),
+all_tips AS (
+    SELECT list_sort(array_agg(name)) AS tips, count(*) AS n
+    FROM tiny_miint WHERE is_tip
+),
+subtrees AS (
+    SELECT ancestor, list_sort(array_agg(tip)) AS subtree, count(*) AS k
+    FROM walk GROUP BY ancestor
+)
+SELECT DISTINCT
+    CASE WHEN array_to_string(subtree, ',') < array_to_string(complement, ',')
+         THEN array_to_string(subtree, ',') || '|' || array_to_string(complement, ',')
+         ELSE array_to_string(complement, ',') || '|' || array_to_string(subtree, ',')
+    END AS bipartition
+FROM (
+    SELECT s.subtree,
+           list_filter(t.tips, x -> NOT list_contains(s.subtree, x)) AS complement,
+           s.k, t.n
+    FROM subtrees s, all_tips t
+    WHERE s.k < t.n
+);
+
+statement ok
+CREATE TABLE tiny_golden_bipartitions AS
+WITH RECURSIVE walk AS (
+    SELECT node_index AS ancestor, name AS tip
+    FROM tiny_golden WHERE is_tip
+  UNION ALL
+    SELECT t.parent_index, w.tip
+    FROM walk w
+    JOIN tiny_golden t ON t.node_index = w.ancestor
+    WHERE t.parent_index IS NOT NULL
+),
+all_tips AS (
+    SELECT list_sort(array_agg(name)) AS tips, count(*) AS n
+    FROM tiny_golden WHERE is_tip
+),
+subtrees AS (
+    SELECT ancestor, list_sort(array_agg(tip)) AS subtree, count(*) AS k
+    FROM walk GROUP BY ancestor
+)
+SELECT DISTINCT
+    CASE WHEN array_to_string(subtree, ',') < array_to_string(complement, ',')
+         THEN array_to_string(subtree, ',') || '|' || array_to_string(complement, ',')
+         ELSE array_to_string(complement, ',') || '|' || array_to_string(subtree, ',')
+    END AS bipartition
+FROM (
+    SELECT s.subtree,
+           list_filter(t.tips, x -> NOT list_contains(s.subtree, x)) AS complement,
+           s.k, t.n
+    FROM subtrees s, all_tips t
+    WHERE s.k < t.n
+);
+
+query I
+SELECT (SELECT count(*) FROM (SELECT * FROM tiny_miint_bipartitions EXCEPT SELECT * FROM tiny_golden_bipartitions)) +
+       (SELECT count(*) FROM (SELECT * FROM tiny_golden_bipartitions EXCEPT SELECT * FROM tiny_miint_bipartitions));
+----
+0
+
+# Per-tip branch length match within hybrid tolerance.
+#   |m - g| > max(1e-9, 1e-6 * max(|m|, |g|))
+# - Absolute floor 1e-9 lets a 5e-9 near-zero clamp pair compare equal but
+#   would fail a 5e-9 vs 5e-8 (10×) drift, which an absolute 1e-6 would mask.
+# - Relative 1e-6 scales with the branch length on normal-range edges.
+query I
+WITH paired AS (
+    SELECT m.name, m.branch_length AS m_bl, g.branch_length AS g_bl
+    FROM tiny_miint m
+    JOIN tiny_golden g USING (name)
+    WHERE m.is_tip AND g.is_tip
+)
+SELECT count(*) FROM paired
+WHERE abs(m_bl - g_bl) > greatest(1e-9, 1e-6 * greatest(abs(m_bl), abs(g_bl)));
+----
+0
+
+# Internal branch length sum match within tolerance scaled to the sum.
+# (Internal nodes have no name so we can't pair by identity — but RF=0 plus
+# matching tip branch lengths plus matching internal-edge total is a strong
+# overall agreement check.)
+query I
+WITH sums AS (
+    SELECT
+        (SELECT coalesce(sum(branch_length), 0) FROM tiny_miint  WHERE NOT is_tip AND parent_index IS NOT NULL) AS m_sum,
+        (SELECT coalesce(sum(branch_length), 0) FROM tiny_golden WHERE NOT is_tip AND parent_index IS NOT NULL) AS g_sum
+)
+SELECT abs(m_sum - g_sum) <= greatest(1e-9, 1e-6 * greatest(abs(m_sum), abs(g_sum))) FROM sums;
+----
+true
+
+# =============================================================================
+# Fixture 2: moderate (24 tips, MAFFT-aligned NCBI 16S subset)
+# =============================================================================
+
+statement ok
+CREATE TABLE moderate_input AS
+  SELECT read_id AS name, sequence1 AS sequence
+  FROM read_fastx('data/fasttree/moderate.fa');
+
+statement ok
+COPY (
+    SELECT node_index, parent_index, name, branch_length, edge_id
+    FROM phylogeny_fasttree('moderate_input', seed := 42, threads := 1, seq_type := 'nucleotide')
+) TO '__TEST_DIR__/moderate.miint.nwk' (FORMAT 'newick');
+
+statement ok
+CREATE TABLE moderate_miint AS SELECT * FROM read_newick('__TEST_DIR__/moderate.miint.nwk');
+
+statement ok
+CREATE TABLE moderate_golden AS SELECT * FROM read_newick('data/fasttree/moderate.golden.nwk');
+
+# Sanity: same node + tip counts.
+query II
+SELECT
+    (SELECT count(*) FROM moderate_miint) = (SELECT count(*) FROM moderate_golden) AS nodes_match,
+    (SELECT count(*) FROM moderate_miint WHERE is_tip) =
+        (SELECT count(*) FROM moderate_golden WHERE is_tip) AS tips_match;
+----
+true	true
+
+# Same set of tip names.
+query I
+WITH
+  m AS (SELECT name FROM moderate_miint WHERE is_tip),
+  g AS (SELECT name FROM moderate_golden WHERE is_tip)
+SELECT (SELECT count(*) FROM (SELECT * FROM m EXCEPT SELECT * FROM g)) +
+       (SELECT count(*) FROM (SELECT * FROM g EXCEPT SELECT * FROM m));
+----
+0
+
+# Topology: canonical bipartition set equality (RF distance == 0).
+statement ok
+CREATE TABLE moderate_miint_bipartitions AS
+WITH RECURSIVE walk AS (
+    SELECT node_index AS ancestor, name AS tip
+    FROM moderate_miint WHERE is_tip
+  UNION ALL
+    SELECT t.parent_index, w.tip
+    FROM walk w
+    JOIN moderate_miint t ON t.node_index = w.ancestor
+    WHERE t.parent_index IS NOT NULL
+),
+all_tips AS (
+    SELECT list_sort(array_agg(name)) AS tips, count(*) AS n
+    FROM moderate_miint WHERE is_tip
+),
+subtrees AS (
+    SELECT ancestor, list_sort(array_agg(tip)) AS subtree, count(*) AS k
+    FROM walk GROUP BY ancestor
+)
+SELECT DISTINCT
+    CASE WHEN array_to_string(subtree, ',') < array_to_string(complement, ',')
+         THEN array_to_string(subtree, ',') || '|' || array_to_string(complement, ',')
+         ELSE array_to_string(complement, ',') || '|' || array_to_string(subtree, ',')
+    END AS bipartition
+FROM (
+    SELECT s.subtree,
+           list_filter(t.tips, x -> NOT list_contains(s.subtree, x)) AS complement,
+           s.k, t.n
+    FROM subtrees s, all_tips t
+    WHERE s.k < t.n
+);
+
+statement ok
+CREATE TABLE moderate_golden_bipartitions AS
+WITH RECURSIVE walk AS (
+    SELECT node_index AS ancestor, name AS tip
+    FROM moderate_golden WHERE is_tip
+  UNION ALL
+    SELECT t.parent_index, w.tip
+    FROM walk w
+    JOIN moderate_golden t ON t.node_index = w.ancestor
+    WHERE t.parent_index IS NOT NULL
+),
+all_tips AS (
+    SELECT list_sort(array_agg(name)) AS tips, count(*) AS n
+    FROM moderate_golden WHERE is_tip
+),
+subtrees AS (
+    SELECT ancestor, list_sort(array_agg(tip)) AS subtree, count(*) AS k
+    FROM walk GROUP BY ancestor
+)
+SELECT DISTINCT
+    CASE WHEN array_to_string(subtree, ',') < array_to_string(complement, ',')
+         THEN array_to_string(subtree, ',') || '|' || array_to_string(complement, ',')
+         ELSE array_to_string(complement, ',') || '|' || array_to_string(subtree, ',')
+    END AS bipartition
+FROM (
+    SELECT s.subtree,
+           list_filter(t.tips, x -> NOT list_contains(s.subtree, x)) AS complement,
+           s.k, t.n
+    FROM subtrees s, all_tips t
+    WHERE s.k < t.n
+);
+
+query I
+SELECT (SELECT count(*) FROM (SELECT * FROM moderate_miint_bipartitions EXCEPT SELECT * FROM moderate_golden_bipartitions)) +
+       (SELECT count(*) FROM (SELECT * FROM moderate_golden_bipartitions EXCEPT SELECT * FROM moderate_miint_bipartitions));
+----
+0
+
+# Per-tip branch length match within hybrid tolerance.
+query I
+WITH paired AS (
+    SELECT m.name, m.branch_length AS m_bl, g.branch_length AS g_bl
+    FROM moderate_miint m
+    JOIN moderate_golden g USING (name)
+    WHERE m.is_tip AND g.is_tip
+)
+SELECT count(*) FROM paired
+WHERE abs(m_bl - g_bl) > greatest(1e-9, 1e-6 * greatest(abs(m_bl), abs(g_bl)));
+----
+0
+
+# Internal branch length sum match within tolerance scaled to the sum.
+query I
+WITH sums AS (
+    SELECT
+        (SELECT coalesce(sum(branch_length), 0) FROM moderate_miint  WHERE NOT is_tip AND parent_index IS NOT NULL) AS m_sum,
+        (SELECT coalesce(sum(branch_length), 0) FROM moderate_golden WHERE NOT is_tip AND parent_index IS NOT NULL) AS g_sum
+)
+SELECT abs(m_sum - g_sum) <= greatest(1e-9, 1e-6 * greatest(abs(m_sum), abs(g_sum))) FROM sums;
+----
+true
