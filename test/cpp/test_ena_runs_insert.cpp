@@ -1,11 +1,10 @@
-// Phase 7 RED then GREEN: unit tests for the pure-data layer of
-// INSERT INTO ena.runs — assemble envelope, POST via injected functor,
-// parse receipt, return row-shaped result tuples (alias, err_accession,
-// status).
-//
-// Mirrors the projects/samples/experiments insert tests (mock-fetcher pattern).
+// Unit tests for the pure-data layer of INSERT INTO ena.runs: assemble
+// envelope, POST via injected functor, parse receipt, return row-shaped
+// result tuples (alias, err_accession, status). Mirrors the
+// projects/samples/experiments insert tests (mock-fetcher pattern).
 
 #include "ena_envelope_builder.hpp"
+#include "ena_insert_test_helpers.hpp"
 #include "ena_receipt_parser.hpp"
 #include "ena_runs_insert.hpp"
 
@@ -18,32 +17,18 @@
 #include <vector>
 
 using namespace miint;
+using miint_test::CapturedPost;
 
 namespace {
 
-struct CapturedPost {
-	std::string url;
-	std::string body;
-	std::string user;
-	std::string password;
-	std::string content_type;
-};
-
 std::string MakeRunReceipt(const std::vector<std::pair<std::string, std::string>> &alias_to_err, bool success = true,
                            const std::string &error = "") {
-	std::string out = "<?xml version=\"1.0\"?><RECEIPT receiptDate=\"2026-05-04T12:00:00Z\" "
-	                  "submissionFile=\"mock\" success=\"";
-	out += (success ? "true" : "false");
-	out += "\">";
-	for (auto &kv : alias_to_err) {
-		out += "<RUN accession=\"" + kv.second + "\" alias=\"" + kv.first + "\" status=\"PRIVATE\"/>";
+	std::vector<miint_test::ReceiptObjectFixture> objects;
+	objects.reserve(alias_to_err.size());
+	for (const auto &kv : alias_to_err) {
+		objects.push_back({"RUN", kv.first, kv.second, "", ""});
 	}
-	out += "<SUBMISSION accession=\"ERA999\" alias=\"mock\"/><ACTIONS>ADD</ACTIONS>";
-	if (!success && !error.empty()) {
-		out += "<MESSAGES><ERROR>" + error + "</ERROR></MESSAGES>";
-	}
-	out += "</RECEIPT>";
-	return out;
+	return miint_test::MakeReceiptXML(objects, success, error);
 }
 
 RunSpec PairedRun(const std::string &alias, const std::string &experiment_alias) {

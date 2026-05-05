@@ -18,6 +18,37 @@ namespace miint {
 
 enum class ENAAction { ADD, MODIFY, CANCEL, HOLD, RELEASE, VALIDATE };
 
+// Shared across all four per-table insert paths. Each `Submit*InsertOutcome`
+// takes this; per-table aliases (ENAProjectInsertOptions, ENASampleInsertOptions,
+// ...) are kept as type aliases for call-site readability.
+struct ENAInsertOptions {
+	std::string endpoint_url; // resolved base URL incl. /submit suffix
+	std::string user;         // Webin-XXXXX
+	std::string password;
+	std::string hold_until_date; // optional, "YYYY-MM-DD"
+};
+
+// Common shape of every Submit*Outcome. The four per-table outcomes
+// (ENASubmissionOutcome / ENASamplesSubmissionOutcome / ... ) are aliases of
+// this template specialised on the per-table Result row type. Fields:
+//   - rows: server-assigned per-row outputs (alias + accession + ext_ids)
+//   - envelope_payload: the request body we POSTed (passwords NOT embedded)
+//   - raw_receipt: the raw response body
+//   - era_accession: server-assigned <SUBMISSION accession>
+//   - success: false if logical failure (server success=false OR parse error)
+//   - error_messages: free-form server messages on failure
+//   - duration_ms: wall-clock time of the POST + parse round-trip
+template <class RowT>
+struct ENABaseSubmissionOutcome {
+	std::vector<RowT> rows;
+	std::string envelope_payload;
+	std::string raw_receipt;
+	std::string era_accession;
+	bool success = false;
+	std::vector<std::string> error_messages;
+	int64_t duration_ms = 0;
+};
+
 struct ProjectSpec {
 	std::string alias;
 	std::string title;

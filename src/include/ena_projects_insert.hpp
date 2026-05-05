@@ -18,12 +18,7 @@
 
 namespace miint {
 
-struct ENAProjectInsertOptions {
-	std::string endpoint_url; // resolved base URL incl. /submit suffix
-	std::string user;         // Webin-XXXXX
-	std::string password;
-	std::string hold_until_date; // optional, "YYYY-MM-DD"
-};
+using ENAProjectInsertOptions = ENAInsertOptions;
 
 struct ENAProjectInsertResult {
 	std::string alias;
@@ -35,15 +30,7 @@ struct ENAProjectInsertResult {
 
 // Outcome-rich result: contains the per-row insert results plus the receipt
 // metadata needed to populate ena.submission_log.
-struct ENASubmissionOutcome {
-	std::vector<ENAProjectInsertResult> rows;
-	std::string envelope_payload; // the JSON we POSTed (passwords not embedded)
-	std::string raw_receipt;      // the raw response body
-	std::string era_accession;    // server-assigned <SUBMISSION accession>
-	bool success = false;
-	std::vector<std::string> error_messages;
-	int64_t duration_ms = 0;
-};
+using ENASubmissionOutcome = ENABaseSubmissionOutcome<ENAProjectInsertResult>;
 
 // Build envelope, POST it, parse receipt, return per-row results paired with
 // the originating ProjectSpecs by alias. Empty `projects` is a no-op (no POST,

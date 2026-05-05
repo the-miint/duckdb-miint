@@ -83,8 +83,8 @@ ENAProjectsInsert::BuildFromBuffer(ColumnDataCollection &buffer,
 				}
 			}
 			// umbrella_children / attributes / prjeb_accession / erp_accession: not
-			// yet wired in Phase 4. Reject explicit non-null umbrella_children so
-			// users don't think it's silently honoured.
+			// yet wired. Reject explicit non-null umbrella_children so users don't
+			// think it's silently honoured.
 			if (umbrella_idx != DConstants::INVALID_INDEX) {
 				const auto v = chunk.data[umbrella_idx].GetValue(row);
 				if (!v.IsNull() && !ListValue::GetChildren(v).empty()) {

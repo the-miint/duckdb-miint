@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MIT
 //
-// Phase 3 RED -> GREEN tests for the ENA Webin V2 JSON submission envelope
-// builder. Fixtures derive from the canonical ENA tutorial format documented
-// in localdocs/ena-research-webin-v2-deep.md §1 and the V2 OpenAPI behaviour
-// (Accept-driven response shape; request body is opaque string).
+// Tests for the ENA Webin V2 JSON + XML submission envelope builders.
+// Fixtures derive from the canonical ENA tutorial format and the V2 OpenAPI
+// behaviour (Accept-driven response shape; request body is opaque string).
 
 #include "ena_envelope_builder.hpp"
 
@@ -248,7 +247,7 @@ TEST_CASE("ENA envelope: action=HOLD AND hold_until_date is rejected (avoid doub
 }
 
 // =====================================================================
-// Phase 7 — experiments + runs
+// Experiments + runs
 // =====================================================================
 //
 // Wire shape mirrors the SRA.experiment.xsd / SRA.run.xsd nesting documented

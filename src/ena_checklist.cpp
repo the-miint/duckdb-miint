@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: MIT
 //
-// ENA checklist parser + validator + registry (Phase 8 Step 8b).
+// ENA checklist parser + validator + registry.
 // Pure-data: no DuckDB linkage, so test/cpp/test_ena_checklist.cpp links the
 // .cpp directly into the unit-test binary.
 
 #include "ena_checklist.hpp"
 
-#include <expat.h>
+#include "expat_runner.hpp"
 
 #include <cstdlib>
 #include <cstring>
-#include <limits>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -18,15 +17,6 @@
 namespace miint {
 
 namespace {
-
-const char *AttrLookup(const char **attrs, const char *key) {
-	for (int i = 0; attrs[i]; i += 2) {
-		if (std::strcmp(attrs[i], key) == 0) {
-			return attrs[i + 1];
-		}
-	}
-	return nullptr;
-}
 
 // Parser state machine. The checklist XML has a fixed shape:
 //   CHECKLIST_SET > CHECKLIST > DESCRIPTOR > FIELD_GROUP > FIELD
@@ -167,35 +157,37 @@ std::string TrimTrailingSlashes(std::string s) {
 } // namespace
 
 ChecklistDef ParseChecklistXML(const std::string &xml) {
-	if (xml.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
-		throw std::runtime_error("ENA checklist: XML document too large for expat (>2 GB)");
-	}
-	XML_Parser parser = XML_ParserCreate(nullptr);
-	if (!parser) {
-		throw std::runtime_error("ENA checklist: failed to create XML parser");
-	}
-	struct ParserGuard {
-		XML_Parser p;
-		~ParserGuard() {
-			XML_ParserFree(p);
-		}
-	} guard {parser};
-
 	ParserState state;
-	XML_SetUserData(parser, &state);
-	XML_SetElementHandler(parser, StartElement, EndElement);
-	XML_SetCharacterDataHandler(parser, CharData);
-
-	if (XML_Parse(parser, xml.data(), static_cast<int>(xml.size()), XML_TRUE) == XML_STATUS_ERROR) {
-		auto err = std::string(XML_ErrorString(XML_GetErrorCode(parser)));
-		throw std::runtime_error("ENA checklist: XML parse error: " + err);
-	}
+	RunExpatParse(xml, state, StartElement, EndElement, CharData, "ENA checklist");
 
 	if (!state.saw_checklist) {
 		throw std::runtime_error("ENA checklist: no <CHECKLIST> element in document");
 	}
 
+	// Build the label-lookup index once; the validator reuses it across
+	// every spec instead of rebuilding per call.
+	state.checklist.field_index_by_label.reserve(state.checklist.fields.size());
+	for (std::size_t i = 0; i < state.checklist.fields.size(); i++) {
+		state.checklist.field_index_by_label.emplace(state.checklist.fields[i].label, i);
+	}
+
 	return std::move(state.checklist);
+}
+
+// Render a list of allowed values as comma-separated single-quoted entries.
+// Used by the validator twice: once in the missing-unit message, once in the
+// bad-unit-value message.
+static std::string JoinQuoted(const std::vector<std::string> &values) {
+	std::string out;
+	for (std::size_t i = 0; i < values.size(); i++) {
+		if (i > 0) {
+			out += ", ";
+		}
+		out += "'";
+		out += values[i];
+		out += "'";
+	}
+	return out;
 }
 
 std::vector<ChecklistValidationIssue>
@@ -203,13 +195,6 @@ ValidateAttributesAgainstChecklist(const ChecklistDef &checklist,
                                    const std::vector<std::pair<std::string, std::string>> &attributes,
                                    const std::vector<std::pair<std::string, std::string>> &units) {
 	std::vector<ChecklistValidationIssue> issues;
-
-	// Build label → FieldDef pointer for O(1) lookup in the user-attribute pass.
-	std::unordered_map<std::string, const ChecklistFieldDef *> by_label;
-	by_label.reserve(checklist.fields.size());
-	for (const auto &f : checklist.fields) {
-		by_label.emplace(f.label, &f);
-	}
 
 	// DuckDB MAP rejects duplicate keys at parse time, so the duplicate
 	// case shouldn't reach us from SQL. We still build a defensive presence
@@ -242,27 +227,20 @@ ValidateAttributesAgainstChecklist(const ChecklistDef &checklist,
 	for (const auto &kv : attributes) {
 		const auto &label = kv.first;
 		const auto &value = kv.second;
-		auto it = by_label.find(label);
-		if (it == by_label.end()) {
+		auto it = checklist.field_index_by_label.find(label);
+		if (it == checklist.field_index_by_label.end()) {
 			issues.push_back({label, "attribute '" + label + "' is not in checklist '" + checklist.accession + "'"});
 			continue;
 		}
-		const auto *field = it->second;
+		const auto *field = &checklist.fields[it->second];
 		// 2a: when a field declares units, the user must supply a unit value
 		// from the allowed set. Empty user value → no unit is required (the
 		// mandatory-presence pass above already flagged it if needed).
 		if (!field->allowed_units.empty() && !value.empty()) {
 			auto u_it = unit_values.find(label);
 			if (u_it == unit_values.end() || u_it->second.empty()) {
-				std::string allowed;
-				for (size_t i = 0; i < field->allowed_units.size(); i++) {
-					if (i > 0) {
-						allowed += ", ";
-					}
-					allowed += "'" + field->allowed_units[i] + "'";
-				}
-				issues.push_back({label, "field '" + label + "' requires a unit (one of " + allowed +
-				                             ") to be set in attribute_units"});
+				issues.push_back({label, "field '" + label + "' requires a unit (one of " +
+				                             JoinQuoted(field->allowed_units) + ") to be set in attribute_units"});
 			} else {
 				bool ok = false;
 				for (const auto &u : field->allowed_units) {
@@ -272,15 +250,8 @@ ValidateAttributesAgainstChecklist(const ChecklistDef &checklist,
 					}
 				}
 				if (!ok) {
-					std::string allowed;
-					for (size_t i = 0; i < field->allowed_units.size(); i++) {
-						if (i > 0) {
-							allowed += ", ";
-						}
-						allowed += "'" + field->allowed_units[i] + "'";
-					}
 					issues.push_back({label, "field '" + label + "' has unit '" + u_it->second +
-					                             "' which is not in allowed set " + allowed});
+					                             "' which is not in allowed set " + JoinQuoted(field->allowed_units)});
 				}
 			}
 		}

@@ -1,5 +1,6 @@
 #include "ena_attributes_filter.hpp"
 
+#include "ena_parser.hpp"
 #include "ena_search_field_registry.hpp"
 
 #include <algorithm>
@@ -241,27 +242,6 @@ ENAAttributePushdown ExtractPushdownPredicates(const std::vector<std::unique_ptr
 
 namespace {
 
-// Percent-encode a string for use in a `query=` value. The ENA search endpoint
-// is tolerant of unescaped values that match its validation regex, but any
-// user-supplied value may contain spaces, colons, commas, etc. We encode
-// conservatively: anything outside [A-Za-z0-9_.~-] becomes `%XX`.
-std::string PercentEncodeValue(const std::string &s) {
-	static const char *kHex = "0123456789ABCDEF";
-	std::string out;
-	out.reserve(s.size());
-	for (unsigned char c : s) {
-		if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '.' ||
-		    c == '~' || c == '-') {
-			out.push_back(static_cast<char>(c));
-		} else {
-			out.push_back('%');
-			out.push_back(kHex[c >> 4]);
-			out.push_back(kHex[c & 0xF]);
-		}
-	}
-	return out;
-}
-
 // Shared URL-encoder for the sample /search endpoint. Emits
 // `<in_column> IN ("acc1","acc2",...) [AND tag="v"]*` and returns columns
 // `sample_accession,<tags>`. Factored so the sample-batch path and the
@@ -315,7 +295,7 @@ std::string BuildAttributeSearchURL(const char *in_column, const std::vector<std
 			                            "' is not present in `tags`");
 		}
 		ENAParser::ValidateFields(kv.first);
-		query << "%20AND%20" << kv.first << "%3D%22" << PercentEncodeValue(kv.second) << "%22";
+		query << "%20AND%20" << kv.first << "%3D%22" << PercentEncodeQueryValue(kv.second) << "%22";
 	}
 
 	std::ostringstream url;

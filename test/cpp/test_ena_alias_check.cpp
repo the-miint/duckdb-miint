@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// Pre-INSERT alias collision check (Phase 8 Step 8a). Pure-data tests of the
+// Pre-INSERT alias collision check. Pure-data tests of the
 // portal-API URL builder and the chunked-fetch driver, with a mock fetcher
 // substituting for the live https://www.ebi.ac.uk/ena/portal/api/search
 // endpoint.

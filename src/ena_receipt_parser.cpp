@@ -1,11 +1,8 @@
-// Phase 3 GREEN: implemented inline. See ena_receipt_parser.hpp.
-
 #include "ena_receipt_parser.hpp"
 
-#include <expat.h>
+#include "expat_runner.hpp"
 
 #include <cstring>
-#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -24,15 +21,6 @@ bool IsObjectElement(const char *name) {
 		}
 	}
 	return false;
-}
-
-const char *AttrLookup(const char **attrs, const char *key) {
-	for (int i = 0; attrs[i]; i += 2) {
-		if (std::strcmp(attrs[i], key) == 0) {
-			return attrs[i + 1];
-		}
-	}
-	return nullptr;
 }
 
 struct ParserState {
@@ -123,30 +111,8 @@ void XMLCALL EndElement(void *user_data, const XML_Char *name) {
 } // namespace
 
 ENAReceipt ParseReceiptXML(const std::string &xml) {
-	if (xml.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
-		throw std::runtime_error("ENA receipt: XML document too large for expat (>2 GB)");
-	}
-	XML_Parser parser = XML_ParserCreate(nullptr);
-	if (!parser) {
-		throw std::runtime_error("ENA receipt: failed to create XML parser");
-	}
-	struct ParserGuard {
-		XML_Parser p;
-		~ParserGuard() {
-			XML_ParserFree(p);
-		}
-	} guard {parser};
-
 	ParserState state;
-	XML_SetUserData(parser, &state);
-	XML_SetElementHandler(parser, StartElement, EndElement);
-	XML_SetCharacterDataHandler(parser, CharData);
-
-	if (XML_Parse(parser, xml.data(), static_cast<int>(xml.size()), XML_TRUE) == XML_STATUS_ERROR) {
-		auto err = std::string(XML_ErrorString(XML_GetErrorCode(parser)));
-		throw std::runtime_error("ENA receipt: XML parse error: " + err);
-	}
-
+	RunExpatParse(xml, state, StartElement, EndElement, CharData, "ENA receipt");
 	return std::move(state.receipt);
 }
 

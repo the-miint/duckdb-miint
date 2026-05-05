@@ -1,12 +1,11 @@
-// Phase 7 RED then GREEN: unit tests for the pure-data layer of
-// INSERT INTO ena.experiments — assemble envelope, POST via injected
-// functor, parse receipt, return row-shaped result tuples (alias,
-// erx_accession, status).
-//
-// Mirrors the projects/samples insert tests (mock-fetcher pattern).
+// Unit tests for the pure-data layer of INSERT INTO ena.experiments: assemble
+// envelope, POST via injected functor, parse receipt, return row-shaped
+// result tuples (alias, erx_accession, status). Mirrors the projects/samples
+// insert tests (mock-fetcher pattern).
 
 #include "ena_envelope_builder.hpp"
 #include "ena_experiments_insert.hpp"
+#include "ena_insert_test_helpers.hpp"
 #include "ena_receipt_parser.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -18,32 +17,18 @@
 #include <vector>
 
 using namespace miint;
+using miint_test::CapturedPost;
 
 namespace {
 
-struct CapturedPost {
-	std::string url;
-	std::string body;
-	std::string user;
-	std::string password;
-	std::string content_type;
-};
-
 std::string MakeExperimentReceipt(const std::vector<std::pair<std::string, std::string>> &alias_to_erx,
                                   bool success = true, const std::string &error = "") {
-	std::string out = "<?xml version=\"1.0\"?><RECEIPT receiptDate=\"2026-05-04T12:00:00Z\" "
-	                  "submissionFile=\"mock\" success=\"";
-	out += (success ? "true" : "false");
-	out += "\">";
-	for (auto &kv : alias_to_erx) {
-		out += "<EXPERIMENT accession=\"" + kv.second + "\" alias=\"" + kv.first + "\" status=\"PRIVATE\"/>";
+	std::vector<miint_test::ReceiptObjectFixture> objects;
+	objects.reserve(alias_to_erx.size());
+	for (const auto &kv : alias_to_erx) {
+		objects.push_back({"EXPERIMENT", kv.first, kv.second, "", ""});
 	}
-	out += "<SUBMISSION accession=\"ERA999\" alias=\"mock\"/><ACTIONS>ADD</ACTIONS>";
-	if (!success && !error.empty()) {
-		out += "<MESSAGES><ERROR>" + error + "</ERROR></MESSAGES>";
-	}
-	out += "</RECEIPT>";
-	return out;
+	return miint_test::MakeReceiptXML(objects, success, error);
 }
 
 ExperimentSpec MinimalExperiment(const std::string &alias) {

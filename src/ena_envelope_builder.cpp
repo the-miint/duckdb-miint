@@ -1,5 +1,4 @@
-// Phase 3 GREEN: implemented inline. See ena_envelope_builder.hpp.
-// Phase 7 GREEN: extended with experiments + runs.
+// ENA Webin envelope builder. See ena_envelope_builder.hpp.
 
 #include "ena_envelope_builder.hpp"
 
@@ -207,7 +206,10 @@ const char *ActionName(ENAAction a) {
 	throw std::logic_error("ENA envelope: unhandled ENAAction value");
 }
 
-void AppendActions(std::string &out, const SubmissionSpec &env) {
+// Pure-data validators shared by the JSON and XML emitters. Each Append*
+// pair (Append<X> for JSON, AppendXml<X> for XML) calls the matching
+// ValidateXxx at the top so the precondition string lives in one place.
+void ValidateActions(const SubmissionSpec &env) {
 	// Invariant: HOLD action requires a date; date is set by adding a separate
 	// HOLD entry alongside the user-chosen action (typically ADD). Setting both
 	// `action=HOLD` and `hold_until_date` would produce a double-HOLD, so
@@ -219,6 +221,47 @@ void AppendActions(std::string &out, const SubmissionSpec &env) {
 		throw std::runtime_error(
 		    "ENA envelope: with hold_until_date, use action=ADD; the HOLD entry is added automatically");
 	}
+}
+
+void ValidateExperimentSpec(const ExperimentSpec &e) {
+	if (e.alias.empty()) {
+		throw std::runtime_error("ENA envelope: experiment alias must be non-empty");
+	}
+	RequireMembership(LibraryStrategies(), e.library_strategy, "library_strategy", e.alias);
+	RequireMembership(LibrarySources(), e.library_source, "library_source", e.alias);
+	RequireMembership(LibrarySelections(), e.library_selection, "library_selection", e.alias);
+	RequireMembership(Platforms(), e.platform, "platform", e.alias);
+	if (e.instrument_model.empty()) {
+		throw std::runtime_error("ENA envelope: experiment '" + e.alias + "' instrument_model must be non-empty");
+	}
+}
+
+void ValidateRunFile(const RunFile &f, const std::string &run_alias) {
+	if (f.filename.empty()) {
+		throw std::runtime_error("ENA envelope: run '" + run_alias + "' file.filename must be non-empty");
+	}
+	if (f.checksum.empty()) {
+		throw std::runtime_error("ENA envelope: run '" + run_alias + "' file '" + f.filename +
+		                         "' checksum must be non-empty");
+	}
+	if (f.filetype.empty()) {
+		throw std::runtime_error("ENA envelope: run '" + run_alias + "' file '" + f.filename +
+		                         "' filetype must be non-empty (e.g. 'fastq', 'bam', 'cram')");
+	}
+	RequireMembership(RunFiletypes(), f.filetype, "run.file.filetype", run_alias);
+}
+
+void ValidateRunSpec(const RunSpec &r) {
+	if (r.alias.empty()) {
+		throw std::runtime_error("ENA envelope: run alias must be non-empty");
+	}
+	if (r.files.empty()) {
+		throw std::runtime_error("ENA envelope: run '" + r.alias + "' must have at least one file");
+	}
+}
+
+void AppendActions(std::string &out, const SubmissionSpec &env) {
+	ValidateActions(env);
 	out.append("\"actions\":[");
 	out.append("{\"type\":");
 	AppendJsonString(out, ActionName(env.action));
@@ -337,16 +380,7 @@ void AppendRef(std::string &out, const RefDescriptor &ref, const char *field_nam
 }
 
 void AppendExperiment(std::string &out, const ExperimentSpec &e) {
-	if (e.alias.empty()) {
-		throw std::runtime_error("ENA envelope: experiment alias must be non-empty");
-	}
-	RequireMembership(LibraryStrategies(), e.library_strategy, "library_strategy", e.alias);
-	RequireMembership(LibrarySources(), e.library_source, "library_source", e.alias);
-	RequireMembership(LibrarySelections(), e.library_selection, "library_selection", e.alias);
-	RequireMembership(Platforms(), e.platform, "platform", e.alias);
-	if (e.instrument_model.empty()) {
-		throw std::runtime_error("ENA envelope: experiment '" + e.alias + "' instrument_model must be non-empty");
-	}
+	ValidateExperimentSpec(e);
 
 	out.push_back('{');
 	out.append("\"alias\":");
@@ -391,18 +425,7 @@ void AppendExperiment(std::string &out, const ExperimentSpec &e) {
 }
 
 void AppendRunFile(std::string &out, const RunFile &f, const std::string &run_alias) {
-	if (f.filename.empty()) {
-		throw std::runtime_error("ENA envelope: run '" + run_alias + "' file.filename must be non-empty");
-	}
-	if (f.checksum.empty()) {
-		throw std::runtime_error("ENA envelope: run '" + run_alias + "' file '" + f.filename +
-		                         "' checksum must be non-empty");
-	}
-	if (f.filetype.empty()) {
-		throw std::runtime_error("ENA envelope: run '" + run_alias + "' file '" + f.filename +
-		                         "' filetype must be non-empty (e.g. 'fastq', 'bam', 'cram')");
-	}
-	RequireMembership(RunFiletypes(), f.filetype, "run.file.filetype", run_alias);
+	ValidateRunFile(f, run_alias);
 
 	out.push_back('{');
 	out.append("\"filename\":");
@@ -415,12 +438,7 @@ void AppendRunFile(std::string &out, const RunFile &f, const std::string &run_al
 }
 
 void AppendRun(std::string &out, const RunSpec &r) {
-	if (r.alias.empty()) {
-		throw std::runtime_error("ENA envelope: run alias must be non-empty");
-	}
-	if (r.files.empty()) {
-		throw std::runtime_error("ENA envelope: run '" + r.alias + "' must have at least one file");
-	}
+	ValidateRunSpec(r);
 
 	out.push_back('{');
 	out.append("\"alias\":");
@@ -535,13 +553,7 @@ void AppendXmlRef(std::string &out, const char *element, const RefDescriptor &re
 }
 
 void AppendXmlActions(std::string &out, const SubmissionSpec &env) {
-	if (env.action == ENAAction::HOLD && env.hold_until_date.empty()) {
-		throw std::runtime_error("ENA envelope: HOLD action requires hold_until_date");
-	}
-	if (env.action == ENAAction::HOLD && !env.hold_until_date.empty()) {
-		throw std::runtime_error(
-		    "ENA envelope: with hold_until_date, use action=ADD; the HOLD entry is added automatically");
-	}
+	ValidateActions(env);
 	out.append("<ACTIONS><ACTION><");
 	out.append(ActionName(env.action));
 	out.append("/></ACTION>");
@@ -554,16 +566,7 @@ void AppendXmlActions(std::string &out, const SubmissionSpec &env) {
 }
 
 void AppendXmlExperiment(std::string &out, const ExperimentSpec &e) {
-	if (e.alias.empty()) {
-		throw std::runtime_error("ENA envelope: experiment alias must be non-empty");
-	}
-	RequireMembership(LibraryStrategies(), e.library_strategy, "library_strategy", e.alias);
-	RequireMembership(LibrarySources(), e.library_source, "library_source", e.alias);
-	RequireMembership(LibrarySelections(), e.library_selection, "library_selection", e.alias);
-	RequireMembership(Platforms(), e.platform, "platform", e.alias);
-	if (e.instrument_model.empty()) {
-		throw std::runtime_error("ENA envelope: experiment '" + e.alias + "' instrument_model must be non-empty");
-	}
+	ValidateExperimentSpec(e);
 
 	out.append("<EXPERIMENT alias=\"");
 	AppendXmlEscaped(out, e.alias);
@@ -602,18 +605,7 @@ void AppendXmlExperiment(std::string &out, const ExperimentSpec &e) {
 }
 
 void AppendXmlRunFile(std::string &out, const RunFile &f, const std::string &run_alias) {
-	if (f.filename.empty()) {
-		throw std::runtime_error("ENA envelope: run '" + run_alias + "' file.filename must be non-empty");
-	}
-	if (f.checksum.empty()) {
-		throw std::runtime_error("ENA envelope: run '" + run_alias + "' file '" + f.filename +
-		                         "' checksum must be non-empty");
-	}
-	if (f.filetype.empty()) {
-		throw std::runtime_error("ENA envelope: run '" + run_alias + "' file '" + f.filename +
-		                         "' filetype must be non-empty (e.g. 'fastq', 'bam', 'cram')");
-	}
-	RequireMembership(RunFiletypes(), f.filetype, "run.file.filetype", run_alias);
+	ValidateRunFile(f, run_alias);
 
 	out.append("<FILE filename=\"");
 	AppendXmlEscaped(out, f.filename);
@@ -625,12 +617,7 @@ void AppendXmlRunFile(std::string &out, const RunFile &f, const std::string &run
 }
 
 void AppendXmlRun(std::string &out, const RunSpec &r) {
-	if (r.alias.empty()) {
-		throw std::runtime_error("ENA envelope: run alias must be non-empty");
-	}
-	if (r.files.empty()) {
-		throw std::runtime_error("ENA envelope: run '" + r.alias + "' must have at least one file");
-	}
+	ValidateRunSpec(r);
 	out.append("<RUN alias=\"");
 	AppendXmlEscaped(out, r.alias);
 	out.append("\">");

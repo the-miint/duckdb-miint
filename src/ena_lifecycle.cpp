@@ -1,1 +1,2 @@
-// stub: implemented in Phase 9 (see localdocs/ena-submission-design-v2.md).
+// Stub: ena_validate / ena_hold / ena_release / ena_modify_* / ena_cancel
+// scalar functions are not yet implemented.

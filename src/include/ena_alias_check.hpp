@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// Pre-INSERT alias collision check (Phase 8 Step 8a).
+// Pre-INSERT alias collision check.
 //
 // Aliases are unique per (submission_account, object_type) on the ENA side.
 // Reusing an alias for the same object type is a hard server error. Catching

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// ENA checklist registry + sample-attribute validator (Phase 8 Step 8b).
+// ENA checklist registry + sample-attribute validator.
 // Pure-data tests of the XML parser, the validator, and the lazy-fetch
 // registry, with a mock fetcher substituting for the live
 // https://www.ebi.ac.uk/ena/browser/api/xml/ERC000NN endpoint.

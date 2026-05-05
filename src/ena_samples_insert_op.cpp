@@ -13,8 +13,6 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/value.hpp"
 
-#include <iostream>
-
 namespace duckdb {
 
 namespace {
@@ -124,7 +122,7 @@ ENASamplesInsert::BuildFromBuffer(ColumnDataCollection &buffer,
 			if (units_idx != DConstants::INVALID_INDEX) {
 				spec.attribute_units = ExtractKeyValueMap(chunk.data[units_idx].GetValue(row), "attribute_units");
 			}
-			// HOLD on samples is not exposed in Phase 5 (no hold_until_date
+			// HOLD on samples is not exposed (no hold_until_date
 			// column on ena.samples).
 			out.specs.push_back(std::move(spec));
 		}
@@ -151,20 +149,15 @@ void ENASamplesInsert::ValidateBuiltSpecs(const std::vector<miint::SampleSpec> &
 			continue; // user opted out
 		}
 
-		// Best-effort fetch: a typo'd checklist or an offline test harness
-		// shouldn't block an INSERT. The actual envelope POST still carries
-		// the user's checklist string. If the accession is wrong, the
-		// Webin server will reject the receipt; if it's right and we just
-		// can't reach the EBI browser API, the user has no client-side
-		// safety net but at least gets through.
+		// Best-effort fetch. If we can't reach the EBI browser API or the
+		// accession is unrecognised, fall through silently — the envelope
+		// POST still carries the user's checklist string and the Webin
+		// server applies its own validation. Extensions don't own stderr,
+		// so we don't surface a warning here.
 		const miint::ChecklistDef *cl = nullptr;
 		try {
 			cl = &miint::ChecklistRegistry::Instance().GetOrFetch(spec.checklist, fetcher);
-		} catch (const std::exception &e) {
-			std::cerr << "miint: warning: could not fetch checklist '" << spec.checklist
-			          << "' for client-side validation (" << e.what()
-			          << "); INSERT will proceed but may be rejected if the accession is unrecognised by ENA"
-			          << std::endl;
+		} catch (const std::exception &) {
 			continue;
 		}
 
@@ -210,12 +203,12 @@ void ENASamplesInsert::AppendReturningRows(ColumnDataCollection &return_collecti
 		chunk.data[COL_TAXON_ID].SetValue(idx, Value::INTEGER(NumericCast<int32_t>(spec.taxon_id)));
 		chunk.data[COL_SCIENTIFIC_NAME].SetValue(idx, Value(spec.scientific_name));
 		chunk.data[COL_CHECKLIST].SetValue(idx, Value(spec.checklist));
-		// attributes column emits NULL on RETURNING in Phase 5 — the user-
+		// attributes column emits NULL on RETURNING — the user-
 		// supplied attribute list is preserved verbatim in
 		// `ena.submission_log.request_payload`, and the server's echo (which
 		// may include system-injected attributes the user did not write) is
 		// in `submission_log.receipt`. Same trade-off as ena.projects in
-		// Phase 4. Real MAP-value emission is a future task.
+		// projects table. Real MAP-value emission is a future task.
 		chunk.data[COL_ATTRIBUTES].SetValue(idx, Value(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR)));
 		chunk.data[COL_ATTRIBUTE_UNITS].SetValue(idx,
 		                                         Value(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR)));

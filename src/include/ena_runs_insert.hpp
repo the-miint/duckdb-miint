@@ -15,12 +15,7 @@
 
 namespace miint {
 
-struct ENARunInsertOptions {
-	std::string endpoint_url; // resolved base URL incl. /submit suffix
-	std::string user;         // Webin-XXXXX
-	std::string password;
-	std::string hold_until_date; // optional, "YYYY-MM-DD"
-};
+using ENARunInsertOptions = ENAInsertOptions;
 
 struct ENARunInsertResult {
 	std::string alias;
@@ -29,15 +24,7 @@ struct ENARunInsertResult {
 	std::string hold_until_date;
 };
 
-struct ENARunSubmissionOutcome {
-	std::vector<ENARunInsertResult> rows;
-	std::string envelope_payload;
-	std::string raw_receipt;
-	std::string era_accession;
-	bool success = false;
-	std::vector<std::string> error_messages;
-	int64_t duration_ms = 0;
-};
+using ENARunSubmissionOutcome = ENABaseSubmissionOutcome<ENARunInsertResult>;
 
 ENARunSubmissionOutcome SubmitRunInsertOutcome(const std::vector<RunSpec> &runs, const ENARunInsertOptions &opts,
                                                const ENAPostFn &post_fn);

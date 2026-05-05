@@ -118,6 +118,8 @@ void RecordSubmissionLog(ENACatalog &catalog, const ResolvedENACredentials &cred
 	row.era_accession = payload.era_accession;
 	row.request_payload = payload.envelope_payload;
 	row.receipt = payload.raw_receipt;
+	// payload.error_messages is std::vector; row.error_messages is duckdb::vector
+	// (DuckDB's own type) — no implicit conversion, so copy element-wise.
 	row.error_messages.clear();
 	row.error_messages.reserve(payload.error_messages.size());
 	for (const auto &m : payload.error_messages) {

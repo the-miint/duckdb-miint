@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: MIT
 //
-// ENA checklist registry + sample-attribute validator (Phase 8 Step 8b).
+// ENA checklist registry + sample-attribute validator.
 //
 // ENA samples target a checklist (ERC000015 = "GSC MIxS human gut", etc.),
 // which lists the field definitions with mandatory/recommended/optional
 // status, allowed units, and controlled vocabularies. Validating
 // user-supplied attributes against the checklist client-side surfaces
 // missing mandatory fields, missing units, and out-of-CV values BEFORE
-// the envelope POST. Three of the four bugs caught during the Phase 7.5
-// live-wwwdev pass would have been blocked here.
+// the envelope POST.
 //
 // The XML schema (https://www.ebi.ac.uk/ena/browser/api/xml/ERC000NN) keys
 // fields by `<LABEL>` (human-readable, e.g. "project name") which is what
@@ -44,6 +43,10 @@ struct ChecklistDef {
 	std::string accession; // e.g. "ERC000015"
 	std::string label;     // descriptor LABEL, e.g. "GSC MIxS human gut"
 	std::vector<ChecklistFieldDef> fields;
+	// Label → index into `fields`. Populated once by ParseChecklistXML so the
+	// validator does O(1) lookups without rebuilding a map per spec. Indices
+	// (not pointers) survive vector move/copy.
+	std::unordered_map<std::string, std::size_t> field_index_by_label;
 };
 
 // Parse a full <CHECKLIST_SET><CHECKLIST/></CHECKLIST_SET> XML body. Throws
@@ -58,11 +61,10 @@ struct ChecklistValidationIssue {
 
 // Validate user-supplied attributes (label → value) and units (label → unit)
 // against the parsed checklist. Returns a list of issues; empty vector means
-// the input is valid by Phase 8b's bare-minimum rules:
+// the input passed every check:
 //   1. Every MANDATORY field must be present in `attributes` with a non-empty
 //      value.
-//   2. Any user attribute key not in the checklist is flagged ("not in
-//      checklist"). Reject unknown keys per Phase 8 scope decision.
+//   2. Any user attribute key not in the checklist is flagged as unknown.
 //   3. Any user attribute whose field declares <UNITS> must have a
 //      corresponding `units` entry whose value is in `allowed_units`.
 //   4. Any user attribute whose field declares <TEXT_CHOICE_FIELD> must

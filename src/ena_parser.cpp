@@ -1,4 +1,5 @@
 #include "ena_parser.hpp"
+#include "expat_runner.hpp"
 #include <expat.h>
 #include <sstream>
 #include <stdexcept>
@@ -134,6 +135,25 @@ std::string ENAParser::BuildXMLURL(const std::vector<std::string> &accessions) {
 	return url.str();
 }
 
+// ---- Shared URL helpers ----
+
+std::string PercentEncodeQueryValue(const std::string &s) {
+	static const char *kHex = "0123456789ABCDEF";
+	std::string out;
+	out.reserve(s.size());
+	for (unsigned char c : s) {
+		if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '.' ||
+		    c == '~' || c == '-') {
+			out.push_back(static_cast<char>(c));
+		} else {
+			out.push_back('%');
+			out.push_back(kHex[c >> 4]);
+			out.push_back(kHex[c & 0xF]);
+		}
+	}
+	return out;
+}
+
 // ---- TSV parsing ----
 
 static std::vector<std::string> SplitTabs(const std::string &line) {
@@ -244,29 +264,7 @@ static void XMLCALL xml_char_data(void *user_data, const char *s, int len) {
 
 std::vector<SampleAttribute> ENAParser::ParseSampleAttributesXML(const std::string &xml) {
 	XMLParserState state;
-
-	XML_Parser parser = XML_ParserCreate(nullptr);
-	if (!parser) {
-		throw std::runtime_error("Failed to create XML parser");
-	}
-
-	// RAII guard ensures XML_ParserFree on all exit paths (including exceptions from callbacks)
-	struct ParserGuard {
-		XML_Parser p;
-		~ParserGuard() {
-			XML_ParserFree(p);
-		}
-	} guard {parser};
-
-	XML_SetUserData(parser, &state);
-	XML_SetElementHandler(parser, xml_start_element, xml_end_element);
-	XML_SetCharacterDataHandler(parser, xml_char_data);
-
-	if (XML_Parse(parser, xml.data(), static_cast<int>(xml.size()), XML_TRUE) == XML_STATUS_ERROR) {
-		auto error_msg = std::string(XML_ErrorString(XML_GetErrorCode(parser)));
-		throw std::runtime_error("XML parse error: " + error_msg);
-	}
-
+	RunExpatParse(xml, state, xml_start_element, xml_end_element, xml_char_data, "ENA sample attributes");
 	return state.attributes;
 }
 

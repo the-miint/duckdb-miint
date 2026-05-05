@@ -16,12 +16,7 @@
 
 namespace miint {
 
-struct ENASampleInsertOptions {
-	std::string endpoint_url; // resolved base URL incl. /submit suffix
-	std::string user;         // Webin-XXXXX
-	std::string password;
-	std::string hold_until_date; // optional, "YYYY-MM-DD"
-};
+using ENASampleInsertOptions = ENAInsertOptions;
 
 struct ENASampleInsertResult {
 	std::string alias;
@@ -35,15 +30,7 @@ struct ENASampleInsertResult {
 // receipt path. Reuses the same envelope/raw-receipt/error_messages fields
 // since submission_log doesn't distinguish object types beyond the row's
 // `object_type` column.
-struct ENASamplesSubmissionOutcome {
-	std::vector<ENASampleInsertResult> rows;
-	std::string envelope_payload;
-	std::string raw_receipt;
-	std::string era_accession;
-	bool success = false;
-	std::vector<std::string> error_messages;
-	int64_t duration_ms = 0;
-};
+using ENASamplesSubmissionOutcome = ENABaseSubmissionOutcome<ENASampleInsertResult>;
 
 // Build envelope, POST, parse receipt, return per-row results paired with
 // the originating SampleSpecs by alias. Empty `samples` is a no-op (no POST,

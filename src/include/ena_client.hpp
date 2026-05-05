@@ -122,7 +122,7 @@ public:
 
 	// Webin V2 envelopes are JSON but the receipt parser only consumes the
 	// canonical XSD-governed XML form (JSON receipts intentionally not
-	// supported — see Phase 3 design). Use this for the INSERT operators.
+	// supported). Use this for the INSERT operators.
 	std::string PostJSONReceiveXML(const std::string &url, const std::string &body, const std::string &user,
 	                               const std::string &password);
 

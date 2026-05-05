@@ -48,7 +48,7 @@ namespace duckdb {
 class ENATableEntry;
 
 // Build-from-buffer return shape. `hold_until_date` is empty for object types
-// that don't expose a per-row HOLD column (e.g. samples in Phase 5).
+// that don't expose a per-row HOLD column (e.g. samples).
 template <class SpecT>
 struct ENABuiltSpecs {
 	std::vector<SpecT> specs;

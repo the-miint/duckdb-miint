@@ -1216,6 +1216,7 @@ if(HAVE_LIBZSTD)
 endif()
 target_include_directories(tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/include  # Catch2 helper headers
     ${CMAKE_CURRENT_BINARY_DIR}/htslib/include
     ${CMAKE_CURRENT_SOURCE_DIR}/duckdb/third_party/miniz  # For ExtractFromZip tests
 )

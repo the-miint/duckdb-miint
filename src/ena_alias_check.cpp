@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MIT
 //
-// Pre-INSERT alias collision check (Phase 8 Step 8a).
+// Pre-INSERT alias collision check.
 // Pure-data implementation: URL build + chunked fetch + TSV parse. No DuckDB
 // linkage, so test/cpp/test_ena_alias_check.cpp can substitute a mock fetcher.
 
 #include "ena_alias_check.hpp"
+
+#include "ena_parser.hpp"
 
 #include <cstdlib>
 #include <sstream>
@@ -37,29 +39,6 @@ void ValidateAlias(const std::string &alias) {
 	}
 }
 
-// Percent-encode a value to be safe inside a URL query parameter. Encodes
-// every byte except the RFC 3986 unreserved set (alnum + `-._~`). Aliases
-// commonly contain `_`, `-`, `.` and digits, so the typical alias passes
-// through verbatim. Anything else, including `%`, `&`, `=`, `+`, `?`, `#`,
-// `/`, and any non-ASCII byte, is %HH-encoded.
-std::string PercentEncodeQueryValue(const std::string &value) {
-	static const char HEX[] = "0123456789ABCDEF";
-	std::string out;
-	out.reserve(value.size() + 8);
-	for (unsigned char c : value) {
-		const bool unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-		                        c == '-' || c == '_' || c == '.' || c == '~';
-		if (unreserved) {
-			out.push_back(static_cast<char>(c));
-		} else {
-			out.push_back('%');
-			out.push_back(HEX[c >> 4]);
-			out.push_back(HEX[c & 0x0F]);
-		}
-	}
-	return out;
-}
-
 // URL-encoded literals used by the IN-list query, mirroring the
 // `<field> IN (<csv>)` shape that ENAParser::BuildSearchURLBatch produces:
 //   space = %20   ( = %28   ) = %29   , = %2C   " = %22
@@ -79,31 +58,18 @@ std::string BuildInList(const std::vector<std::string> &aliases) {
 	return buf.str();
 }
 
-// Inline TSV parser: first row is column names; subsequent non-empty rows are
-// data. Tolerant of CRLF and trailing blank lines. Alias rows have a single
-// column, so we just take field[0] of each row. Same shape as
-// ENAParser::ParseTSV (src/ena_parser.cpp:154) but kept local so this file
-// has no extra link dependencies.
+// Extract column 0 of every data row from a TSV body. The portal API search
+// response always carries a single-column TSV (`<kind>_alias`), so we delegate
+// the parse to ENAParser::ParseTSV (CRLF-tolerant, blank-line-skipping) and
+// take field[0] of each row.
 std::vector<std::string> ParseAliasTSV(const std::string &tsv) {
+	const auto parsed = ENAParser::ParseTSV(tsv);
 	std::vector<std::string> aliases;
-	if (tsv.empty()) {
-		return aliases;
-	}
-	std::istringstream stream(tsv);
-	std::string line;
-	if (!std::getline(stream, line)) {
-		return aliases;
-	}
-	// Skip the header line.
-	while (std::getline(stream, line)) {
-		if (!line.empty() && line.back() == '\r') {
-			line.pop_back();
+	aliases.reserve(parsed.rows.size());
+	for (const auto &row : parsed.rows) {
+		if (!row.empty()) {
+			aliases.push_back(row[0]);
 		}
-		if (line.empty()) {
-			continue;
-		}
-		const auto tab = line.find('\t');
-		aliases.push_back(tab == std::string::npos ? line : line.substr(0, tab));
 	}
 	return aliases;
 }

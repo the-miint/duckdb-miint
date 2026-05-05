@@ -16,12 +16,7 @@
 
 namespace miint {
 
-struct ENAExperimentInsertOptions {
-	std::string endpoint_url; // resolved base URL incl. /submit suffix
-	std::string user;         // Webin-XXXXX
-	std::string password;
-	std::string hold_until_date; // optional, "YYYY-MM-DD"
-};
+using ENAExperimentInsertOptions = ENAInsertOptions;
 
 struct ENAExperimentInsertResult {
 	std::string alias;
@@ -34,15 +29,7 @@ struct ENAExperimentInsertResult {
 // receipt path. Reuses the same envelope/raw-receipt/error_messages fields
 // since submission_log doesn't distinguish object types beyond the row's
 // `object_type` column.
-struct ENAExperimentSubmissionOutcome {
-	std::vector<ENAExperimentInsertResult> rows;
-	std::string envelope_payload;
-	std::string raw_receipt;
-	std::string era_accession;
-	bool success = false;
-	std::vector<std::string> error_messages;
-	int64_t duration_ms = 0;
-};
+using ENAExperimentSubmissionOutcome = ENABaseSubmissionOutcome<ENAExperimentInsertResult>;
 
 // Build envelope, POST, parse receipt, return per-row results paired with the
 // originating ExperimentSpecs by alias. Empty `experiments` is a no-op.

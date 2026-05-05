@@ -1,11 +1,11 @@
-// Phase 5 RED then GREEN: unit tests for the pure-data layer of
-// INSERT INTO ena.samples — assemble envelope, POST via injected functor,
-// parse receipt, return row-shaped result tuples (alias, ers_accession,
-// samea_accession, status, hold_until_date).
-//
-// Mirrors test_ena_projects_insert.cpp's mock-fetcher pattern.
+// Unit tests for the pure-data layer of INSERT INTO ena.samples: assemble
+// envelope, POST via injected functor, parse receipt, return row-shaped
+// result tuples (alias, ers_accession, samea_accession, status,
+// hold_until_date). Mirrors test_ena_projects_insert.cpp's mock-fetcher
+// pattern.
 
 #include "ena_envelope_builder.hpp"
+#include "ena_insert_test_helpers.hpp"
 #include "ena_receipt_parser.hpp"
 #include "ena_samples_insert.hpp"
 
@@ -18,34 +18,18 @@
 #include <vector>
 
 using namespace miint;
+using miint_test::CapturedPost;
 
 namespace {
 
-struct CapturedPost {
-	std::string url;
-	std::string body;
-	std::string user;
-	std::string password;
-	std::string content_type;
-};
-
 std::string MakeSampleReceipt(const std::vector<std::tuple<std::string, std::string, std::string>> &alias_ers_samea,
                               bool success = true, const std::string &error = "") {
-	std::string out = "<?xml version=\"1.0\"?><RECEIPT receiptDate=\"2026-05-03T12:00:00Z\" "
-	                  "submissionFile=\"mock\" success=\"";
-	out += (success ? "true" : "false");
-	out += "\">";
+	std::vector<miint_test::ReceiptObjectFixture> objects;
+	objects.reserve(alias_ers_samea.size());
 	for (const auto &t : alias_ers_samea) {
-		out += "<SAMPLE accession=\"" + std::get<1>(t) + "\" alias=\"" + std::get<0>(t) + "\" status=\"PRIVATE\">";
-		out += "<EXT_ID accession=\"" + std::get<2>(t) + "\" type=\"biosample\"/>";
-		out += "</SAMPLE>";
+		objects.push_back({"SAMPLE", std::get<0>(t), std::get<1>(t), "biosample", std::get<2>(t)});
 	}
-	out += "<SUBMISSION accession=\"ERA999\" alias=\"mock\"/><ACTIONS>ADD</ACTIONS>";
-	if (!success && !error.empty()) {
-		out += "<MESSAGES><ERROR>" + error + "</ERROR></MESSAGES>";
-	}
-	out += "</RECEIPT>";
-	return out;
+	return miint_test::MakeReceiptXML(objects, success, error);
 }
 
 SampleSpec MinimalSample(const std::string &alias, int64_t taxon_id = 408170) {

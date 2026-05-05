@@ -27,12 +27,11 @@ void ENAClient::RespectRateLimit() {
 }
 
 // Shared GET retry loop. Caller supplies a pre-built HTTPHeaders (empty for
-// MakeRequest, with an Authorization: Basic header for GetWithBasicAuth).
-// Centralised so a future tweak to retry semantics, status handling, or
-// error formatting lands in one place.
+// the unauthenticated path, with an Authorization: Basic header for the
+// authenticated path). Caller also handles rate-limiting — the public read
+// path needs the global 3 req/s cap, but the authenticated submission path
+// is bursty and runs against the user's own account, so it bypasses.
 std::string ENAClient::ExecuteGet(const std::string &url, duckdb::HTTPHeaders &headers, const char *failure_label) {
-	RespectRateLimit();
-
 	auto &http_util = duckdb::HTTPUtil::Get(db);
 	auto params = http_util.InitializeParameters(db, url);
 
@@ -65,14 +64,16 @@ std::string ENAClient::ExecuteGet(const std::string &url, duckdb::HTTPHeaders &h
 }
 
 std::string ENAClient::MakeRequest(const std::string &url) {
+	RespectRateLimit();
 	duckdb::HTTPHeaders headers(db);
 	return ExecuteGet(url, headers, "ENA request");
 }
 
+// PostBody intentionally does NOT call RespectRateLimit(): the submission
+// endpoints are authenticated and run against the user's own Webin account,
+// where the public 3 req/s cap is overly conservative.
 std::string ENAClient::PostBody(const std::string &url, const std::string &body, const std::string &content_type,
                                 const std::string &accept_type, const std::string &user, const std::string &password) {
-	RespectRateLimit();
-
 	duckdb::HTTPHeaders headers(db);
 	headers.Insert("Authorization", BuildBasicAuthHeader(user, password));
 	headers.Insert("Content-Type", content_type);

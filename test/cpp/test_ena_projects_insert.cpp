@@ -1,11 +1,11 @@
-// Phase 4 RED then GREEN: unit tests for the pure-data layer of
-// INSERT INTO ena.projects — assemble envelope, POST via injected functor,
-// parse receipt, return row-shaped result tuples.
-//
-// Mirrors the test_ENAClient mock-fetcher pattern (string -> string functor)
-// so we can drive end-to-end submit logic without TCP, threads, or DuckDB.
+// Unit tests for the pure-data layer of INSERT INTO ena.projects: assemble
+// envelope, POST via injected functor, parse receipt, return row-shaped
+// result tuples. Mirrors the test_ENAClient mock-fetcher pattern (string ->
+// string functor) so we can drive end-to-end submit logic without TCP,
+// threads, or DuckDB.
 
 #include "ena_envelope_builder.hpp"
+#include "ena_insert_test_helpers.hpp"
 #include "ena_projects_insert.hpp"
 #include "ena_receipt_parser.hpp"
 
@@ -18,36 +18,18 @@
 #include <vector>
 
 using namespace miint;
+using miint_test::CapturedPost;
 
 namespace {
 
-// Captures the last POST so tests can inspect it.
-struct CapturedPost {
-	std::string url;
-	std::string body;
-	std::string user;
-	std::string password;
-	std::string content_type;
-};
-
-// Build a minimal canned XML receipt that resembles the mock server's output.
 std::string MakeReceipt(const std::vector<std::pair<std::string, std::string>> &alias_to_accession, bool success = true,
                         const std::string &error = "") {
-	std::string out = "<?xml version=\"1.0\"?><RECEIPT receiptDate=\"2026-05-03T12:00:00Z\" "
-	                  "submissionFile=\"mock\" success=\"";
-	out += (success ? "true" : "false");
-	out += "\">";
-	for (auto &kv : alias_to_accession) {
-		out += "<PROJECT accession=\"" + kv.second + "\" alias=\"" + kv.first + "\" status=\"PRIVATE\">";
-		out += "<EXT_ID accession=\"ERP" + kv.second.substr(5) + "\" type=\"study\"/>";
-		out += "</PROJECT>";
+	std::vector<miint_test::ReceiptObjectFixture> objects;
+	objects.reserve(alias_to_accession.size());
+	for (const auto &kv : alias_to_accession) {
+		objects.push_back({"PROJECT", kv.first, kv.second, "study", "ERP" + kv.second.substr(5)});
 	}
-	out += "<SUBMISSION accession=\"ERA999\" alias=\"mock\"/><ACTIONS>ADD</ACTIONS>";
-	if (!success && !error.empty()) {
-		out += "<MESSAGES><ERROR>" + error + "</ERROR></MESSAGES>";
-	}
-	out += "</RECEIPT>";
-	return out;
+	return miint_test::MakeReceiptXML(objects, success, error);
 }
 
 } // namespace

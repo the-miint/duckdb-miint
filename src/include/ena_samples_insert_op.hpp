@@ -40,12 +40,12 @@ public:
 		return miint::SubmitSampleInsertOutcome(specs, opts, post_fn);
 	}
 
-	// Phase 8 Step 8b: validate user-supplied attribute MAPs against the
-	// declared ENA checklist (mandatory fields, units, controlled
-	// vocabularies). Fetches the checklist XML from the ENA browser API
-	// (or the MIINT_ENA_CHECKLIST_URL_BASE override) and caches it for the
-	// process lifetime. Specs with empty `checklist` are skipped — the
-	// user has opted out of client-side validation.
+	// Validate user-supplied attribute MAPs against the declared ENA
+	// checklist (mandatory fields, units, controlled vocabularies). Fetches
+	// the checklist XML from the ENA browser API (or the
+	// MIINT_ENA_CHECKLIST_URL_BASE override) and caches it for the process
+	// lifetime. Specs with empty `checklist` are skipped — the user has
+	// opted out of client-side validation.
 	static void ValidateBuiltSpecs(const std::vector<miint::SampleSpec> &specs, miint::ENAClient &client);
 
 	static void AppendReturningRows(ColumnDataCollection &return_collection, const vector<LogicalType> &return_types,

@@ -5,12 +5,12 @@
 // schema "main" with five hard-coded submission tables (projects, samples,
 // experiments, runs, analyses) plus the bookkeeping table submission_log.
 //
-// INSERT INTO ena.projects (Phase 4) builds an envelope, POSTs it through
-// ENAClient, parses the receipt, returns the server-assigned columns via
-// RETURNING, and appends a row to submission_log.
+// INSERT INTO ena.<table> builds an envelope, POSTs it through ENAClient,
+// parses the receipt, returns the server-assigned columns via RETURNING,
+// and appends a row to submission_log.
 //
-// SELECT against the submission tables is not supported in Phase 4 (deferred
-// to Phase 5 via the Reports API). SELECT against submission_log returns the
+// SELECT against the submission tables is not yet supported (deferred to a
+// future Reports API integration). SELECT against submission_log returns the
 // in-memory append log.
 
 #pragma once

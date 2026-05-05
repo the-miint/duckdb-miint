@@ -4,7 +4,7 @@
 //
 // Parses RECEIPT documents per SRA.receipt.xsd into a structured ENAReceipt.
 // XML is the canonical form (XSD-governed); JSON receipt mirrors lowercase
-// plurals and is intentionally not handled here — Phase 4+ will POST with
+// plurals and is intentionally not handled here — the operator path POSTs with
 // Accept: application/xml so receipts always arrive as XML.
 
 #pragma once
