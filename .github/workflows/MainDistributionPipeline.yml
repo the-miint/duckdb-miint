@@ -19,6 +19,12 @@ on:
       - '*.md'
   workflow_dispatch:
 
+# Opt JavaScript actions into Node.js 24 ahead of the June 2026 forced cutover.
+# Silences "Node.js 20 actions are deprecated" runner warnings without
+# requiring an action-by-action version bump.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

@@ -30,6 +30,12 @@
 #include <read_ena_attributes.hpp>
 #include <read_ena_searchable_fields.hpp>
 #include <read_ena_sequences.hpp>
+#ifdef MIINT_HAS_CURL
+#include <curl_send.hpp>
+#endif
+#include <ena_secret.hpp>
+#include <ena_storage.hpp>
+#include <ena_upload_reads.hpp>
 #include <miint_log.hpp>
 #include <miint_macros.hpp>
 #include "duckdb/main/extension_helper.hpp"
@@ -63,6 +69,8 @@
 #include <cluster_sequences.hpp>
 #endif
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
+#include <duckdb/main/config.hpp>
+#include <duckdb/storage/storage_extension.hpp>
 #include <htslib-1.22.1/htslib/hts.h>
 #include <kseq++/config.hpp>
 #include <zlib.h>
@@ -150,6 +158,9 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 #endif
 #endif
 	data->versions.emplace_back("zlib", zlibVersion());
+#ifdef MIINT_HAS_CURL
+	data->versions.emplace_back("libcurl", miint::GetCurlVersion());
+#endif
 	data->versions.emplace_back("rype", RYPE_GIT_VERSION);
 #ifdef MIINT_HAS_VSEARCH
 	data->versions.emplace_back("vsearch", VSEARCH_GIT_VERSION);
@@ -180,6 +191,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// TODO: //! comment on headers
 
 	miint::RegisterMiintLogType(loader.GetDatabaseInstance());
+	miint::RegisterENASecretType(loader);
+
+	auto &ena_db_config = DBConfig::GetConfig(loader.GetDatabaseInstance());
+	StorageExtension::Register(ena_db_config, "ena", make_shared_ptr<ENAStorageExtension>());
 
 	ScalarFunction version_func("miint_version", {}, LogicalType::VARCHAR, MiintVersionFunction);
 	loader.RegisterFunction(version_func);
@@ -218,6 +233,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadENAAttributesTableFunction::Register(loader);
 	ReadENASearchableFieldsTableFunction::Register(loader);
 	ReadENASequencesTableFunction::Register(loader);
+	ENAUploadReadsTableFunction::Register(loader);
 
 	AlignmentFlagFunctions::Register(loader);
 	AlignmentSeqIdentityFunction::Register(loader);

@@ -1,0 +1,14 @@
+# name: test/sql/miint_versions_libcurl.test
+# description: libcurl version row is present and well-formed (skipped when libcurl is disabled — e.g. on macOS where vsearch+OpenSSL conflict)
+# group: [sql]
+
+require miint
+
+require-env MIINT_HAS_CURL
+
+# When libcurl is built in, exactly one row exists and the version starts
+# with the canonical libcurl/X.Y.Z string.
+query I
+SELECT version LIKE 'libcurl/%' FROM miint_versions() WHERE library = 'libcurl';
+----
+true

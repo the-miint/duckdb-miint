@@ -1,0 +1,722 @@
+// SPDX-License-Identifier: MIT
+//
+// Tests for the ENA Webin V2 JSON + XML submission envelope builders.
+// Fixtures derive from the canonical ENA tutorial format and the V2 OpenAPI
+// behaviour (Accept-driven response shape; request body is opaque string).
+
+#include "ena_envelope_builder.hpp"
+
+#include <catch2/catch_all.hpp>
+
+#include <algorithm>
+
+namespace {
+
+// Convenience: compact-JSON byte-equal compare.
+void CheckEqual(const std::string &actual, const std::string &expected) {
+	CHECK(actual == expected);
+}
+
+} // namespace
+
+TEST_CASE("ENA envelope: VALIDATE action only, no objects", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::VALIDATE;
+	auto json = miint::BuildEnvelopeJSON(env);
+	CheckEqual(json, R"X({"submission":{"actions":[{"type":"VALIDATE"}]}})X");
+}
+
+TEST_CASE("ENA envelope: ADD with HOLD until a future date", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::ADD;
+	env.hold_until_date = "2027-01-01";
+	auto json = miint::BuildEnvelopeJSON(env);
+	CheckEqual(json, R"X({"submission":{"actions":[{"type":"ADD"},{"type":"HOLD","holdUntilDate":"2027-01-01"}]}})X");
+}
+
+TEST_CASE("ENA envelope: single submission_project (PRJEB will be issued)", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ProjectSpec p;
+	p.alias = "gut-cohort-2026";
+	p.title = "Adult gut microbiome cohort";
+	p.description = "Phase 1 collection";
+	p.project_type = "METAGENOMIC";
+	env.projects.push_back(p);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	CheckEqual(json, R"X({"submission":{"actions":[{"type":"ADD"}]},)X"
+	                 R"X("projects":[{"alias":"gut-cohort-2026","title":"Adult gut microbiome cohort",)X"
+	                 R"X("description":"Phase 1 collection","sequencingProject":{}}]})X");
+}
+
+TEST_CASE("ENA envelope: project with no description falls back to the title", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ProjectSpec p;
+	p.alias = "x";
+	p.title = "y";
+	p.project_type = "METAGENOMIC";
+	env.projects.push_back(p);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	// `description` is always emitted; when the user didn't provide one we
+	// reuse `title` so the XML <DESCRIPTION> element has non-empty content
+	// (wwwdev intermittently rejects PROJECT documents missing a populated
+	// DESCRIPTION even though the XSD says minOccurs=0).
+	CHECK(json.find("\"description\":\"y\"") != std::string::npos);
+	CHECK(json.find("\"sequencingProject\":{}") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope: umbrella project uses umbrellaProject marker", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ProjectSpec p;
+	p.alias = "consortium-2026";
+	p.title = "Consortium umbrella";
+	p.is_umbrella = true;
+	env.projects.push_back(p);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	CHECK(json.find("\"umbrellaProject\":{}") != std::string::npos);
+	CHECK(json.find("sequencingProject") == std::string::npos);
+}
+
+TEST_CASE("ENA envelope: single sample with checklist and attributes", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::SampleSpec s;
+	s.alias = "gut-001";
+	s.title = "Adult subject 001 stool";
+	s.taxon_id = 408170;
+	s.checklist = "ERC000015";
+	// Stable, deterministic order — builder emits attributes in caller's order.
+	s.attributes.emplace_back("collection date", "2024-06-15");
+	s.attributes.emplace_back("geographic location (country and/or sea)", "United States");
+	env.samples.push_back(s);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	// Sanity: contains the right top-level keys
+	CHECK(json.find(R"X("submission":{"actions":[{"type":"ADD"}]})X") != std::string::npos);
+	CHECK(json.find(R"X("samples":)X") != std::string::npos);
+	// Sample shape: alias, title, organism.taxonId (string per V2 convention)
+	CHECK(json.find(R"X("alias":"gut-001")X") != std::string::npos);
+	CHECK(json.find(R"X("title":"Adult subject 001 stool")X") != std::string::npos);
+	CHECK(json.find(R"X("organism":{"taxonId":"408170"})X") != std::string::npos);
+	// Checklist becomes an attribute with tag="ENA-CHECKLIST"
+	CHECK(json.find(R"X({"tag":"ENA-CHECKLIST","value":"ERC000015"})X") != std::string::npos);
+	// User attributes preserve order
+	auto col_pos = json.find(R"X({"tag":"collection date","value":"2024-06-15"})X");
+	auto geo_pos = json.find(R"X({"tag":"geographic location (country and/or sea)","value":"United States"})X");
+	REQUIRE(col_pos != std::string::npos);
+	REQUIRE(geo_pos != std::string::npos);
+	CHECK(col_pos < geo_pos);
+}
+
+TEST_CASE("ENA envelope: sample attribute units emit alongside value", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::SampleSpec s;
+	s.alias = "gut-002";
+	s.taxon_id = 408170;
+	s.checklist = "ERC000015";
+	s.attributes.emplace_back("collection date", "2026-04-01");
+	s.attributes.emplace_back("geographic location (latitude)", "32.7157");
+	s.attributes.emplace_back("geographic location (longitude)", "-117.1611");
+	// Sparse units: lat/lon get DD; collection date has no units entry.
+	s.attribute_units.emplace_back("geographic location (latitude)", "DD");
+	s.attribute_units.emplace_back("geographic location (longitude)", "DD");
+	env.samples.push_back(s);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	// Lat/lon attribute objects carry the `unit` field. JSON key is singular
+	// (`unit`) even though the SQL column / spec field name is plural
+	// (`attribute_units`) — V2 validator rejects `units` plural with HTTP 500.
+	CHECK(json.find(R"X({"tag":"geographic location (latitude)","value":"32.7157","unit":"DD"})X") !=
+	      std::string::npos);
+	CHECK(json.find(R"X({"tag":"geographic location (longitude)","value":"-117.1611","unit":"DD"})X") !=
+	      std::string::npos);
+	// Date attribute does NOT carry units (no entry in attribute_units, no
+	// silent default).
+	CHECK(json.find(R"X({"tag":"collection date","value":"2026-04-01"})X") != std::string::npos);
+	// Empty units string for an entry omits the field entirely (caller can use
+	// this to suppress units even if the tag appears in the units map).
+	miint::SampleSpec s2 = s;
+	s2.alias = "gut-003";
+	s2.attribute_units.clear();
+	s2.attribute_units.emplace_back("geographic location (latitude)", "");
+	miint::SubmissionSpec env2;
+	env2.samples.push_back(s2);
+	auto json2 = miint::BuildEnvelopeJSON(env2);
+	CHECK(json2.find(R"X("unit":)X") == std::string::npos);
+}
+
+TEST_CASE("ENA envelope: multi-sample emits one element per sample", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	for (int i = 1; i <= 3; ++i) {
+		miint::SampleSpec s;
+		s.alias = "sample-" + std::to_string(i);
+		s.taxon_id = 408170;
+		s.checklist = "ERC000015";
+		env.samples.push_back(s);
+	}
+	auto json = miint::BuildEnvelopeJSON(env);
+	// Three sample objects, each with a unique alias
+	CHECK(json.find(R"X("alias":"sample-1")X") != std::string::npos);
+	CHECK(json.find(R"X("alias":"sample-2")X") != std::string::npos);
+	CHECK(json.find(R"X("alias":"sample-3")X") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope: project + sample mixed bundle", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ProjectSpec p;
+	p.alias = "p1";
+	p.title = "P1";
+	p.project_type = "METAGENOMIC";
+	env.projects.push_back(p);
+	miint::SampleSpec s;
+	s.alias = "s1";
+	s.taxon_id = 408170;
+	env.samples.push_back(s);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	// Both arrays present, in spec'd order: submission, projects, samples
+	auto sub_pos = json.find(R"X("submission":)X");
+	auto proj_pos = json.find(R"X("projects":)X");
+	auto samp_pos = json.find(R"X("samples":)X");
+	REQUIRE(sub_pos != std::string::npos);
+	REQUIRE(proj_pos != std::string::npos);
+	REQUIRE(samp_pos != std::string::npos);
+	CHECK(sub_pos < proj_pos);
+	CHECK(proj_pos < samp_pos);
+}
+
+TEST_CASE("ENA envelope: JSON string escaping (quote, backslash, control chars)", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ProjectSpec p;
+	p.alias = "x";
+	// Deliberately nasty: contains " \ \n \t and a high-bit byte (passes through as UTF-8 byte).
+	p.title = std::string("Quoted \"thing\" \\ with\nnewline\tand tab");
+	p.project_type = "METAGENOMIC";
+	env.projects.push_back(p);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	// Each forbidden character must be escaped per RFC 8259 §7.
+	CHECK(json.find(R"X("title":"Quoted \"thing\" \\ with\nnewline\tand tab")X") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope: empty project alias is rejected at build time", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ProjectSpec p;
+	p.title = "x";
+	p.project_type = "METAGENOMIC";
+	env.projects.push_back(p);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("alias"));
+}
+
+TEST_CASE("ENA envelope: sample with taxon_id <= 0 rejected", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::SampleSpec s;
+	s.alias = "s1";
+	s.taxon_id = 0;
+	env.samples.push_back(s);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("taxon"));
+}
+
+TEST_CASE("ENA envelope: control characters escape as \\u00XX", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ProjectSpec p;
+	p.alias = "x";
+	// 0x01 (SOH) and 0x1F (US) — must escape as  /  per RFC 8259 §7.
+	p.title = std::string("a\x01"
+	                      "b\x1f"
+	                      "c");
+	p.project_type = "METAGENOMIC";
+	env.projects.push_back(p);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	// Look for the literal six-char escape sequence in the produced JSON.
+	CHECK(json.find("\\u0001") != std::string::npos);
+	CHECK(json.find("\\u001f") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope: action=HOLD without hold_until_date is rejected", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::HOLD;
+	// hold_until_date deliberately empty
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("hold_until_date"));
+}
+
+TEST_CASE("ENA envelope: action=HOLD AND hold_until_date is rejected (avoid double-HOLD)", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::HOLD;
+	env.hold_until_date = "2027-01-01";
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("automatically"));
+}
+
+// =====================================================================
+// Experiments + runs
+// =====================================================================
+//
+// Wire shape mirrors the SRA.experiment.xsd / SRA.run.xsd nesting documented
+// in localdocs/ena-research-webin-v2-deep.md §4.4 / §4.5, expressed with the
+// camelCase JSON keys used elsewhere in the V2 envelope. Cross-references
+// use refname (the parent's alias) — V2 also accepts accession, exposed via
+// `accession` on the ref struct.
+
+TEST_CASE("ENA envelope: minimal experiment with paired layout and ILLUMINA platform", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "exp-001";
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "Illumina HiSeq 4000";
+	env.experiments.push_back(e);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	CheckEqual(json, R"X({"submission":{"actions":[{"type":"ADD"}]},)X"
+	                 R"X("experiments":[{"alias":"exp-001",)X"
+	                 R"X("studyRef":{"refname":"p1"},)X"
+	                 R"X("design":{"sampleDescriptor":{"refname":"s1"},)X"
+	                 R"X("libraryDescriptor":{"libraryStrategy":"WGS","librarySource":"METAGENOMIC",)X"
+	                 R"X("librarySelection":"RANDOM","libraryLayout":{"paired":{}}}},)X"
+	                 R"X("platform":{"ILLUMINA":{"instrumentModel":"Illumina HiSeq 4000"}}}]})X");
+}
+
+TEST_CASE("ENA envelope: experiment with optional fields (title, design description, library_name, single layout)",
+          "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "exp-002";
+	e.title = "Stool 16S amplicon";
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.design_description = "16S V4 amplicon, 250 bp paired-end";
+	e.library_name = "lib-002";
+	e.library_strategy = "AMPLICON";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "PCR";
+	e.library_layout = miint::ENALibraryLayout::SINGLE;
+	e.platform = "OXFORD_NANOPORE";
+	e.instrument_model = "MinION";
+	env.experiments.push_back(e);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	CHECK(json.find(R"X("alias":"exp-002")X") != std::string::npos);
+	CHECK(json.find(R"X("title":"Stool 16S amplicon")X") != std::string::npos);
+	CHECK(json.find(R"X("designDescription":"16S V4 amplicon, 250 bp paired-end")X") != std::string::npos);
+	CHECK(json.find(R"X("libraryName":"lib-002")X") != std::string::npos);
+	CHECK(json.find(R"X("libraryLayout":{"single":{}})X") != std::string::npos);
+	CHECK(json.find(R"X("OXFORD_NANOPORE":{"instrumentModel":"MinION"})X") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope: experiment study_ref accepts accession or refname", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "exp-acc";
+	e.study_ref.accession = "PRJEB42";
+	e.sample_ref.accession = "SAMEA42";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "NovaSeq 6000";
+	env.experiments.push_back(e);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	// `accession` wins when set; refname not emitted.
+	CHECK(json.find(R"X("studyRef":{"accession":"PRJEB42"})X") != std::string::npos);
+	CHECK(json.find(R"X("sampleDescriptor":{"accession":"SAMEA42"})X") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope: experiment empty alias rejected", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "NovaSeq 6000";
+	env.experiments.push_back(e);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("alias"));
+}
+
+TEST_CASE("ENA envelope: experiment requires study_ref", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "exp-no-study";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "NovaSeq 6000";
+	env.experiments.push_back(e);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("study_ref"));
+}
+
+TEST_CASE("ENA envelope: experiment requires sample_ref", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "exp-no-sample";
+	e.study_ref.refname = "p1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "NovaSeq 6000";
+	env.experiments.push_back(e);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("sample_ref"));
+}
+
+TEST_CASE("ENA envelope: experiment unknown library_strategy rejected", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "exp-bad";
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "DEFINITELY_NOT_A_REAL_STRATEGY";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "NovaSeq 6000";
+	env.experiments.push_back(e);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("library_strategy"));
+}
+
+TEST_CASE("ENA envelope: experiment unknown platform rejected", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "exp-bad-platform";
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "MADE_UP_PLATFORM";
+	e.instrument_model = "NovaSeq 6000";
+	env.experiments.push_back(e);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("platform"));
+}
+
+TEST_CASE("ENA envelope: minimal run with two paired-fastq files", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.alias = "run-001";
+	r.experiment_ref.refname = "exp-001";
+	r.files.push_back({"sample-A_1.fastq.gz", "fastq", "9b8932f85caa54e687eba62fca3edce2"});
+	r.files.push_back({"sample-A_2.fastq.gz", "fastq", "183d6a24e0c3704e993bebe75bbbd989"});
+	env.runs.push_back(r);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	CheckEqual(json, R"X({"submission":{"actions":[{"type":"ADD"}]},)X"
+	                 R"X("runs":[{"alias":"run-001","experimentRef":{"refname":"exp-001"},)X"
+	                 R"X("files":[)X"
+	                 R"X({"filename":"sample-A_1.fastq.gz","filetype":"fastq","checksumMethod":"MD5",)X"
+	                 R"X("checksum":"9b8932f85caa54e687eba62fca3edce2"},)X"
+	                 R"X({"filename":"sample-A_2.fastq.gz","filetype":"fastq","checksumMethod":"MD5",)X"
+	                 R"X("checksum":"183d6a24e0c3704e993bebe75bbbd989"}]}]})X");
+}
+
+TEST_CASE("ENA envelope: single-end run emits one file", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.alias = "run-single";
+	r.experiment_ref.refname = "exp-single";
+	r.files.push_back({"sample-B.fastq.gz", "fastq", "abcdef0123456789abcdef0123456789"});
+	env.runs.push_back(r);
+	auto json = miint::BuildEnvelopeJSON(env);
+	CHECK(json.find(R"X("files":[{"filename":"sample-B.fastq.gz")X") != std::string::npos);
+	CHECK(std::count(json.begin(), json.end(), '{') > 0);
+	// Only one FILE entry — search for "filename" once.
+	auto first = json.find("\"filename\":");
+	REQUIRE(first != std::string::npos);
+	auto second = json.find("\"filename\":", first + 1);
+	CHECK(second == std::string::npos);
+}
+
+TEST_CASE("ENA envelope: run requires alias", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.experiment_ref.refname = "exp-001";
+	r.files.push_back({"a.fastq.gz", "fastq", "deadbeef"});
+	env.runs.push_back(r);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("alias"));
+}
+
+TEST_CASE("ENA envelope: run requires experiment_ref", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.alias = "run-no-exp";
+	r.files.push_back({"a.fastq.gz", "fastq", "deadbeef"});
+	env.runs.push_back(r);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("experiment_ref"));
+}
+
+TEST_CASE("ENA envelope: run requires at least one file", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.alias = "run-no-files";
+	r.experiment_ref.refname = "exp-001";
+	env.runs.push_back(r);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("file"));
+}
+
+TEST_CASE("ENA envelope: run rejects empty checksum", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.alias = "run-bad-checksum";
+	r.experiment_ref.refname = "exp-001";
+	r.files.push_back({"a.fastq.gz", "fastq", ""});
+	env.runs.push_back(r);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("checksum"));
+}
+
+TEST_CASE("ENA envelope: empty filetype rejected (no silent default)", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.alias = "run-empty-filetype";
+	r.experiment_ref.refname = "exp-001";
+	r.files.push_back({"a.fastq.gz", "", "abcd"});
+	env.runs.push_back(r);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("filetype"));
+}
+
+// =====================================================================
+// XML envelope (experiments + runs) — V2 server requires XML for SRA-side
+// objects; verified live 2026-05-04. See BuildEnvelopeXML in
+// src/ena_envelope_builder.cpp.
+// =====================================================================
+
+TEST_CASE("ENA envelope XML: minimal experiment with paired layout and ILLUMINA platform", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "exp-001";
+	e.study_ref.accession = "PRJEB42";
+	e.sample_ref.accession = "SAMEA42";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "Illumina NovaSeq 6000";
+	env.experiments.push_back(e);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CheckEqual(
+	    xml, R"X(<?xml version="1.0" encoding="UTF-8"?>)X"
+	         R"X(<WEBIN><SUBMISSION><ACTIONS><ACTION><ADD/></ACTION></ACTIONS></SUBMISSION>)X"
+	         R"X(<EXPERIMENT_SET>)X"
+	         R"X(<EXPERIMENT alias="exp-001">)X"
+	         R"X(<STUDY_REF accession="PRJEB42"/>)X"
+	         R"X(<DESIGN><DESIGN_DESCRIPTION></DESIGN_DESCRIPTION>)X"
+	         R"X(<SAMPLE_DESCRIPTOR accession="SAMEA42"/>)X"
+	         R"X(<LIBRARY_DESCRIPTOR><LIBRARY_STRATEGY>WGS</LIBRARY_STRATEGY>)X"
+	         R"X(<LIBRARY_SOURCE>METAGENOMIC</LIBRARY_SOURCE>)X"
+	         R"X(<LIBRARY_SELECTION>RANDOM</LIBRARY_SELECTION>)X"
+	         R"X(<LIBRARY_LAYOUT><PAIRED/></LIBRARY_LAYOUT>)X"
+	         R"X(</LIBRARY_DESCRIPTOR></DESIGN>)X"
+	         R"X(<PLATFORM><ILLUMINA><INSTRUMENT_MODEL>Illumina NovaSeq 6000</INSTRUMENT_MODEL></ILLUMINA></PLATFORM>)X"
+	         R"X(</EXPERIMENT></EXPERIMENT_SET></WEBIN>)X");
+}
+
+TEST_CASE("ENA envelope XML: experiment with refname-style cross-references and optional fields", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "exp-002";
+	e.title = "Stool 16S amplicon";
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.design_description = "16S V4 amplicon, 250 bp paired-end";
+	e.library_name = "lib-002";
+	e.library_strategy = "AMPLICON";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "PCR";
+	e.library_layout = miint::ENALibraryLayout::SINGLE;
+	e.platform = "OXFORD_NANOPORE";
+	e.instrument_model = "MinION";
+	env.experiments.push_back(e);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CHECK(xml.find(R"X(<EXPERIMENT alias="exp-002">)X") != std::string::npos);
+	CHECK(xml.find(R"X(<TITLE>Stool 16S amplicon</TITLE>)X") != std::string::npos);
+	CHECK(xml.find(R"X(<STUDY_REF refname="p1"/>)X") != std::string::npos);
+	CHECK(xml.find(R"X(<SAMPLE_DESCRIPTOR refname="s1"/>)X") != std::string::npos);
+	CHECK(xml.find(R"X(<DESIGN_DESCRIPTION>16S V4 amplicon, 250 bp paired-end</DESIGN_DESCRIPTION>)X") !=
+	      std::string::npos);
+	CHECK(xml.find(R"X(<LIBRARY_NAME>lib-002</LIBRARY_NAME>)X") != std::string::npos);
+	CHECK(xml.find(R"X(<LIBRARY_LAYOUT><SINGLE/></LIBRARY_LAYOUT>)X") != std::string::npos);
+	CHECK(xml.find(R"X(<OXFORD_NANOPORE><INSTRUMENT_MODEL>MinION</INSTRUMENT_MODEL></OXFORD_NANOPORE>)X") !=
+	      std::string::npos);
+}
+
+TEST_CASE("ENA envelope XML: minimal run with paired files", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.alias = "run-001";
+	r.experiment_ref.refname = "exp-001";
+	r.files.push_back({"sample-A_1.fastq.gz", "fastq", "9b8932f85caa54e687eba62fca3edce2"});
+	r.files.push_back({"sample-A_2.fastq.gz", "fastq", "183d6a24e0c3704e993bebe75bbbd989"});
+	env.runs.push_back(r);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CheckEqual(xml, R"X(<?xml version="1.0" encoding="UTF-8"?>)X"
+	                R"X(<WEBIN><SUBMISSION><ACTIONS><ACTION><ADD/></ACTION></ACTIONS></SUBMISSION>)X"
+	                R"X(<RUN_SET><RUN alias="run-001">)X"
+	                R"X(<EXPERIMENT_REF refname="exp-001"/>)X"
+	                R"X(<DATA_BLOCK><FILES>)X"
+	                R"X(<FILE filename="sample-A_1.fastq.gz" filetype="fastq" checksum_method="MD5" )X"
+	                R"X(checksum="9b8932f85caa54e687eba62fca3edce2"/>)X"
+	                R"X(<FILE filename="sample-A_2.fastq.gz" filetype="fastq" checksum_method="MD5" )X"
+	                R"X(checksum="183d6a24e0c3704e993bebe75bbbd989"/>)X"
+	                R"X(</FILES></DATA_BLOCK></RUN></RUN_SET></WEBIN>)X");
+}
+
+TEST_CASE("ENA envelope XML: combined experiments + runs in one envelope", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.alias = "e1";
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "Illumina NovaSeq 6000";
+	env.experiments.push_back(e);
+	miint::RunSpec r;
+	r.alias = "r1";
+	r.experiment_ref.refname = "e1";
+	r.files.push_back({"a.fastq.gz", "fastq", "deadbeef"});
+	env.runs.push_back(r);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	auto submission_pos = xml.find("<SUBMISSION>");
+	auto exp_set_pos = xml.find("<EXPERIMENT_SET>");
+	auto run_set_pos = xml.find("<RUN_SET>");
+	REQUIRE(submission_pos != std::string::npos);
+	REQUIRE(exp_set_pos != std::string::npos);
+	REQUIRE(run_set_pos != std::string::npos);
+	// Spec order: SUBMISSION, EXPERIMENT_SET, RUN_SET.
+	CHECK(submission_pos < exp_set_pos);
+	CHECK(exp_set_pos < run_set_pos);
+}
+
+TEST_CASE("ENA envelope XML: HOLD action emits HoldUntilDate sibling action", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::ADD;
+	env.hold_until_date = "2027-01-15";
+	miint::ExperimentSpec e;
+	e.alias = "e-hold";
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "Illumina NovaSeq 6000";
+	env.experiments.push_back(e);
+	auto xml = miint::BuildEnvelopeXML(env);
+	CHECK(xml.find(R"X(<ACTION><HOLD HoldUntilDate="2027-01-15"/></ACTION>)X") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope XML: XML escaping of attribute and text values", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.alias = "run<&\"'>";
+	r.experiment_ref.refname = "exp&1";
+	r.files.push_back({"a&b.fastq.gz", "fastq", "deadbeef"});
+	env.runs.push_back(r);
+	auto xml = miint::BuildEnvelopeXML(env);
+	// Alias attribute value is escaped (used inside double-quoted attr).
+	CHECK(xml.find(R"X(<RUN alias="run&lt;&amp;&quot;&apos;&gt;">)X") != std::string::npos);
+	CHECK(xml.find(R"X(<EXPERIMENT_REF refname="exp&amp;1"/>)X") != std::string::npos);
+	CHECK(xml.find(R"X(filename="a&amp;b.fastq.gz")X") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope XML: empty experiments + runs yields just the SUBMISSION block", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	auto xml = miint::BuildEnvelopeXML(env);
+	CheckEqual(xml, R"X(<?xml version="1.0" encoding="UTF-8"?>)X"
+	                R"X(<WEBIN><SUBMISSION><ACTIONS><ACTION><ADD/></ACTION></ACTIONS></SUBMISSION></WEBIN>)X");
+}
+
+TEST_CASE("ENA envelope XML: experiment empty alias rejected", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ExperimentSpec e;
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "Illumina NovaSeq 6000";
+	env.experiments.push_back(e);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("alias"));
+}
+
+TEST_CASE("ENA envelope XML: run with no files rejected", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::RunSpec r;
+	r.alias = "run-no-files";
+	r.experiment_ref.refname = "e1";
+	env.runs.push_back(r);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("file"));
+}
+
+TEST_CASE("ENA envelope: full graph (project + sample + experiment + run) emits arrays in spec order",
+          "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::ProjectSpec p;
+	p.alias = "p1";
+	p.title = "P1";
+	env.projects.push_back(p);
+	miint::SampleSpec s;
+	s.alias = "s1";
+	s.taxon_id = 408170;
+	env.samples.push_back(s);
+	miint::ExperimentSpec e;
+	e.alias = "e1";
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "NovaSeq 6000";
+	env.experiments.push_back(e);
+	miint::RunSpec r;
+	r.alias = "r1";
+	r.experiment_ref.refname = "e1";
+	r.files.push_back({"r1_1.fastq.gz", "fastq", "deadbeef"});
+	r.files.push_back({"r1_2.fastq.gz", "fastq", "cafebabe"});
+	env.runs.push_back(r);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	const auto sub_pos = json.find("\"submission\":");
+	const auto proj_pos = json.find("\"projects\":");
+	const auto samp_pos = json.find("\"samples\":");
+	const auto exp_pos = json.find("\"experiments\":");
+	const auto run_pos = json.find("\"runs\":");
+	REQUIRE(sub_pos != std::string::npos);
+	REQUIRE(proj_pos != std::string::npos);
+	REQUIRE(samp_pos != std::string::npos);
+	REQUIRE(exp_pos != std::string::npos);
+	REQUIRE(run_pos != std::string::npos);
+	CHECK(sub_pos < proj_pos);
+	CHECK(proj_pos < samp_pos);
+	CHECK(samp_pos < exp_pos);
+	CHECK(exp_pos < run_pos);
+}

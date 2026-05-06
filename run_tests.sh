@@ -190,6 +190,53 @@ if curl -sSf --max-time 3 -o /dev/null \
     export ENA_AVAILABLE=1
 fi
 
+# ENA Webin V2 submission test endpoint. Live-integration tests for
+# INSERT INTO ena.{projects,samples,...} require a real Webin account
+# (free, registered at https://www.ebi.ac.uk/ena/submit/webin/). When the
+# user provides credentials AND the dev/test server responds, we export
+# ENA_WEBIN_TEST_AVAILABLE so guarded SQL tests can run.
+if [ -n "$ENA_WEBIN_TEST_USER" ] && [ -n "$ENA_WEBIN_TEST_PASSWORD" ]; then
+    export ENA_WEBIN_TEST_USER
+    export ENA_WEBIN_TEST_PASSWORD
+    if curl -sSf --max-time 3 -o /dev/null \
+            "https://wwwdev.ebi.ac.uk/ena/submit/webin-v2/swagger-ui/index.html" \
+            2>/dev/null; then
+        export ENA_WEBIN_TEST_AVAILABLE=1
+    fi
+fi
+
+# ENA Webin V2 mock server. Provides canned XML receipts for INSERT INTO
+# ena.{projects,samples,...} round-trip tests with no live credentials. The
+# helper python script is in test/scripts/ena_webin_mock.py.
+ENA_MOCK_PID=""
+if [ -z "$ENA_WEBIN_MOCK_URL" ] && python3 -c "import http.server" 2>/dev/null; then
+    python3 test/scripts/ena_webin_mock.py 0 > /tmp/ena_webin_mock.boot 2>&1 &
+    ENA_MOCK_PID=$!
+    # Inherit the existing trap (HTTP_SERVER_PID) and add the mock kill
+    trap "kill $HTTP_SERVER_PID $ENA_MOCK_PID 2>/dev/null || true" EXIT
+    for i in $(seq 1 25); do
+        if [ -s /tmp/ena_webin_mock.boot ] && grep -q ENA_WEBIN_MOCK_URL /tmp/ena_webin_mock.boot; then
+            export ENA_WEBIN_MOCK_URL="$(grep ENA_WEBIN_MOCK_URL /tmp/ena_webin_mock.boot | head -n1 | cut -d= -f2-)"
+            break
+        fi
+        sleep 0.1
+    done
+    if [ -z "$ENA_WEBIN_MOCK_URL" ]; then
+        echo "Warning: ENA Webin mock failed to start; submission round-trip tests will skip"
+        kill $ENA_MOCK_PID 2>/dev/null || true
+    else
+        # Phase 8 Step 8a alias collision check: the operator sends an
+        # authenticated GET to <portal_base>/search before each INSERT.
+        # Point that base at the same mock so existing INSERT tests don't
+        # try to reach the real EBI portal.
+        export MIINT_ENA_PORTAL_URL_BASE="${ENA_WEBIN_MOCK_URL}/portal/api"
+        # Phase 8 Step 8b checklist registry: the samples operator fetches
+        # checklist XMLs to validate user attributes client-side. Point at
+        # the mock for the same offline reasoning as the portal endpoint.
+        export MIINT_ENA_CHECKLIST_URL_BASE="${ENA_WEBIN_MOCK_URL}/browser/api/xml"
+    fi
+fi
+
 if conda run -n massql python3 -c "from massql import msql_engine" 2>/dev/null; then
     export MASSQL_PYTHON_AVAILABLE=1
 fi
@@ -250,6 +297,10 @@ if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'align_mafft';" 
 fi
 if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'align_sortmerna_rrna';" | ./build/release/duckdb -csv 2>/dev/null | grep -q 1; then
     export SORTMERNA_AVAILABLE=1
+fi
+# libcurl streaming-upload transport (off on macOS — vsearch/OpenSSL symbol clash).
+if echo "SELECT 1 FROM miint_versions() WHERE library = 'libcurl';" | ./build/release/duckdb -csv 2>/dev/null | grep -q 1; then
+    export MIINT_HAS_CURL=1
 fi
 # Compile-time gate (separate from runtime GPL_BOUNDARY_AVAILABLE which
 # tracks whether the binary is on PATH). Set when the table function is

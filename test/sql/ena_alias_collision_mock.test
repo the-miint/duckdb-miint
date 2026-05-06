@@ -1,0 +1,104 @@
+# name: test/sql/ena_alias_collision_mock.test
+# description: Pre-INSERT alias collision check fails fast for known aliases (Phase 8 Step 8a)
+# group: [sql]
+
+require miint
+
+require-env ENA_WEBIN_MOCK_URL
+
+require-env MIINT_ENA_PORTAL_URL_BASE
+
+# httpfs implements POST in DuckDB; the built-in HTTP client is GET-only.
+# `require httpfs` skips silently when the extension isn't pre-installed
+# (matches the existing miint pattern in read_ncbi.test).
+require httpfs
+
+statement ok
+CREATE SECRET test_ena_alias_mock (
+    TYPE ENA,
+    USER 'Webin-99999',
+    PASSWORD 'mock-password',
+    ENDPOINT 'test',
+    ENDPOINT_URL '${ENA_WEBIN_MOCK_URL}'
+);
+
+statement ok
+ATTACH '' AS ena (TYPE ENA, SECRET 'test_ena_alias_mock');
+
+# A "fresh" alias proceeds through the full pipeline and gets accessions back.
+# Confirms the alias-check round-trip happens but doesn't block on
+# non-colliding aliases.
+query II
+INSERT INTO ena.projects (alias, title, project_type)
+VALUES ('alias-mock-fresh-' || (random()*1e9)::INTEGER::VARCHAR,
+        'fresh project', 'METAGENOMIC')
+RETURNING prjeb_accession LIKE 'PRJEB%' AS has_prjeb,
+          erp_accession   LIKE 'ERP%'   AS has_erp;
+----
+true	true
+
+# Mock convention: any alias starting with "EXISTS_" is treated by the mock
+# portal API as already present. The pre-INSERT check must surface this and
+# throw without ever POSTing the envelope.
+statement error
+INSERT INTO ena.projects (alias, title, project_type)
+VALUES ('EXISTS_my_study', 'colliding project', 'METAGENOMIC');
+----
+alias
+
+# The thrown error should name the offending alias so the user can fix it.
+statement error
+INSERT INTO ena.projects (alias, title, project_type)
+VALUES ('EXISTS_my_study', 'colliding project', 'METAGENOMIC');
+----
+EXISTS_my_study
+
+# Multi-row insert where one alias collides: the whole INSERT fails (atomic),
+# and the error names the colliding alias.
+statement error
+INSERT INTO ena.projects (alias, title, project_type) VALUES
+    ('alias-mock-fresh-a', 'fresh A', 'METAGENOMIC'),
+    ('EXISTS_other_study', 'colliding', 'METAGENOMIC'),
+    ('alias-mock-fresh-c', 'fresh C', 'METAGENOMIC');
+----
+EXISTS_other_study
+
+# Samples follow the same path. Includes a checklist + minimal attributes so
+# the envelope builder is happy in case we ever drop the early-throw and
+# reach the POST.
+statement error
+INSERT INTO ena.samples (alias, taxon_id, checklist, attributes)
+VALUES ('EXISTS_sample_dupe', 408170, 'ERC000015',
+        MAP {'collection date': '2026-04-01'});
+----
+EXISTS_sample_dupe
+
+# A blocked INSERT must NOT leave a row in submission_log — alias collision
+# is a client-side validation error, not a recorded submission attempt.
+query I
+SELECT count(*) FROM ena.submission_log
+WHERE request_payload LIKE '%EXISTS_my_study%';
+----
+0
+
+# Multiple colliding aliases are all surfaced together so the user can fix
+# them in a single edit pass.
+statement error
+INSERT INTO ena.samples (alias, taxon_id, checklist) VALUES
+    ('EXISTS_sample_alpha', 408170, 'ERC000015'),
+    ('EXISTS_sample_beta',  408170, 'ERC000015');
+----
+EXISTS_sample_alpha
+
+statement error
+INSERT INTO ena.samples (alias, taxon_id, checklist) VALUES
+    ('EXISTS_sample_alpha', 408170, 'ERC000015'),
+    ('EXISTS_sample_beta',  408170, 'ERC000015');
+----
+EXISTS_sample_beta
+
+statement ok
+DETACH ena;
+
+statement ok
+DROP SECRET test_ena_alias_mock;

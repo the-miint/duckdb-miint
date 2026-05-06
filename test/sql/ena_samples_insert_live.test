@@ -1,0 +1,53 @@
+# name: test/sql/ena_samples_insert_live.test
+# description: INSERT INTO ena.samples against the live wwwdev.ebi.ac.uk endpoint.
+# group: [sql]
+
+#
+# Skipped unless the maintainer has set ENA_WEBIN_TEST_USER /
+# ENA_WEBIN_TEST_PASSWORD and the dev server is reachable (run_tests.sh
+# probes both, exporting ENA_WEBIN_TEST_AVAILABLE on success).
+
+require miint
+
+require httpfs
+
+require-env ENA_WEBIN_TEST_USER
+
+require-env ENA_WEBIN_TEST_PASSWORD
+
+require-env ENA_WEBIN_TEST_AVAILABLE
+
+statement ok
+CREATE SECRET test_ena_samples_live (
+    TYPE ENA,
+    USER '${ENA_WEBIN_TEST_USER}',
+    PASSWORD_ENV 'ENA_WEBIN_TEST_PASSWORD',
+    ENDPOINT 'test'
+);
+
+statement ok
+ATTACH '' AS ena (TYPE ENA, SECRET 'test_ena_samples_live');
+
+# Use a timestamp+random alias so re-runs against the shared wwwdev account
+# don't collide. taxon_id 408170 = "human gut metagenome", checklist
+# ERC000015 = GSC MIxS human-gut.
+query II
+INSERT INTO ena.samples (alias, taxon_id, checklist, attributes)
+SELECT 'miint-ci-sample-' || strftime(now(), '%Y%m%d-%H%M%S-') || (random()*1e9)::INTEGER::VARCHAR,
+       408170,
+       'ERC000015',
+       MAP {'collection date': '2026-04-01',
+            'geographic location (country and/or sea)': 'United States',
+            'broad-scale environmental context': 'human-associated habitat [ENVO:00009003]',
+            'local environmental context': 'gastrointestinal tract [ENVO:00002041]',
+            'environmental medium': 'feces [UBERON:0001988]'}
+RETURNING regexp_matches(ers_accession, '^ERS[0-9]+$') AS ers_ok,
+          regexp_matches(samea_accession, '^SAMEA[0-9]+$') AS samea_ok;
+----
+true	true
+
+statement ok
+DETACH ena;
+
+statement ok
+DROP SECRET test_ena_samples_live;

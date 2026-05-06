@@ -1,0 +1,188 @@
+# name: test/sql/ena_experiments_insert_mock.test
+# description: INSERT INTO ena.experiments ... RETURNING against a local mock receipt server
+# group: [sql]
+
+require miint
+
+require-env ENA_WEBIN_MOCK_URL
+
+# httpfs implements POST in DuckDB; the built-in HTTP client supports only GET.
+# `require httpfs` skips silently when the extension isn't pre-installed in the
+# test harness (matches the existing read_ncbi.test pattern).
+require httpfs
+
+statement ok
+CREATE SECRET test_ena_experiments_mock (
+    TYPE ENA,
+    USER 'Webin-99999',
+    PASSWORD 'mock-password',
+    ENDPOINT 'test',
+    ENDPOINT_URL '${ENA_WEBIN_MOCK_URL}'
+);
+
+statement ok
+ATTACH '' AS ena (TYPE ENA, SECRET 'test_ena_experiments_mock');
+
+# Single-experiment INSERT with the typical metagenomic-WGS shape. RETURNING
+# surfaces the ERX accession assigned by the mock server (deterministic from
+# the alias).
+query II
+INSERT INTO ena.experiments
+    (alias, study_ref, sample_descriptor, library_strategy, library_source,
+     library_selection, library_layout, platform, instrument_model)
+VALUES
+    ('mock-exp-alpha', 'mock-proj-alpha', 'mock-sample-alpha',
+     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'Illumina NovaSeq 6000')
+RETURNING alias, erx_accession LIKE 'ERX%' AS has_erx;
+----
+mock-exp-alpha	true
+
+# submission_log captured the request
+query III
+SELECT object_type, action, success
+FROM ena.submission_log
+WHERE object_type = 'experiments' AND n_objects = 1
+ORDER BY submitted_at DESC LIMIT 1;
+----
+experiments	ADD	true
+
+# Multi-experiment INSERT in one statement: both get distinct accessions.
+statement ok
+INSERT INTO ena.experiments
+    (alias, study_ref, sample_descriptor, library_strategy, library_source,
+     library_selection, library_layout, platform, instrument_model)
+VALUES
+    ('mock-exp-beta', 'mock-proj-alpha', 'mock-sample-beta',
+     'AMPLICON', 'METAGENOMIC', 'PCR', 'PAIRED', 'ILLUMINA', 'MiSeq'),
+    ('mock-exp-gamma', 'mock-proj-alpha', 'mock-sample-gamma',
+     'WGS', 'GENOMIC', 'RANDOM', 'SINGLE', 'OXFORD_NANOPORE', 'MinION');
+
+query I
+SELECT count(*) FROM ena.submission_log
+WHERE object_type = 'experiments' AND n_objects = 2;
+----
+1
+
+# Failure path: alias containing FAIL triggers mock to emit success="false"
+statement error
+INSERT INTO ena.experiments
+    (alias, study_ref, sample_descriptor, library_strategy, library_source,
+     library_selection, library_layout, platform, instrument_model)
+VALUES
+    ('mock-exp-FAIL', 'mock-proj-alpha', 'mock-sample-alpha',
+     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'Illumina NovaSeq 6000');
+----
+mock validation failure
+
+# A failed submission appears in the log with success=false.
+query II
+SELECT object_type, success
+FROM ena.submission_log
+WHERE object_type = 'experiments' AND NOT success
+ORDER BY submitted_at DESC LIMIT 1;
+----
+experiments	false
+
+# Client-side enum validation: unknown library_strategy rejected before any
+# HTTP traffic.
+statement error
+INSERT INTO ena.experiments
+    (alias, study_ref, sample_descriptor, library_strategy, library_source,
+     library_selection, library_layout, platform, instrument_model)
+VALUES
+    ('mock-exp-bad-strategy', 'mock-proj-alpha', 'mock-sample-alpha',
+     'NOT_A_REAL_STRATEGY', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'Illumina NovaSeq 6000');
+----
+library_strategy
+
+# Client-side enum validation: unknown platform rejected before any HTTP traffic.
+statement error
+INSERT INTO ena.experiments
+    (alias, study_ref, sample_descriptor, library_strategy, library_source,
+     library_selection, library_layout, platform, instrument_model)
+VALUES
+    ('mock-exp-bad-platform', 'mock-proj-alpha', 'mock-sample-alpha',
+     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'NOT_A_PLATFORM', 'Illumina NovaSeq 6000');
+----
+platform
+
+# library_layout must be SINGLE or PAIRED.
+statement error
+INSERT INTO ena.experiments
+    (alias, study_ref, sample_descriptor, library_strategy, library_source,
+     library_selection, library_layout, platform, instrument_model)
+VALUES
+    ('mock-exp-bad-layout', 'mock-proj-alpha', 'mock-sample-alpha',
+     'WGS', 'METAGENOMIC', 'RANDOM', 'TRIPLE', 'ILLUMINA', 'Illumina NovaSeq 6000');
+----
+library_layout
+
+# Empty alias rejected
+statement error
+INSERT INTO ena.experiments
+    (alias, study_ref, sample_descriptor, library_strategy, library_source,
+     library_selection, library_layout, platform, instrument_model)
+VALUES
+    ('', 'mock-proj-alpha', 'mock-sample-alpha',
+     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'Illumina NovaSeq 6000');
+----
+alias
+
+# Missing study_ref rejected
+statement error
+INSERT INTO ena.experiments
+    (alias, sample_descriptor, library_strategy, library_source,
+     library_selection, library_layout, platform, instrument_model)
+VALUES
+    ('mock-exp-no-study', 'mock-sample-alpha',
+     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'Illumina NovaSeq 6000');
+----
+study_ref
+
+# Accession-vs-refname disambiguation: a refname literally named like an
+# accession-prefix-with-letters (`ERPmycoolproject`) must be routed as a
+# refname, not silently treated as an accession the server can't find.
+# Receipt has alias `mock-exp-prefixrefname`; if the server FAILed because
+# the study lookup got the wrong type, the receipt would be success=false
+# (not what we want).
+statement ok
+INSERT INTO ena.experiments
+    (alias, study_ref, sample_descriptor, library_strategy, library_source,
+     library_selection, library_layout, platform, instrument_model)
+VALUES
+    ('mock-exp-prefixrefname', 'ERPmycoolstudy', 'SAMEAmybiosample',
+     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'Illumina NovaSeq 6000');
+
+# Verify that the refname routing actually reached the wire — request_payload
+# is XML for experiments (V2 server's JSON dispatcher NPEs for SRA-side
+# objects), so we look for the XML attribute form.
+query I
+SELECT request_payload LIKE '%<STUDY_REF refname="ERPmycoolstudy"/>%'
+FROM ena.submission_log
+WHERE object_type = 'experiments' AND request_payload LIKE '%mock-exp-prefixrefname%'
+ORDER BY submitted_at DESC LIMIT 1;
+----
+true
+
+# A real-shaped accession (ERP followed by digits only) routes to accession.
+statement ok
+INSERT INTO ena.experiments
+    (alias, study_ref, sample_descriptor, library_strategy, library_source,
+     library_selection, library_layout, platform, instrument_model)
+VALUES
+    ('mock-exp-realaccession', 'ERP123456', 'SAMEA987654',
+     'WGS', 'METAGENOMIC', 'RANDOM', 'PAIRED', 'ILLUMINA', 'Illumina NovaSeq 6000');
+
+query I
+SELECT request_payload LIKE '%<STUDY_REF accession="ERP123456"/>%'
+FROM ena.submission_log
+WHERE object_type = 'experiments' AND request_payload LIKE '%mock-exp-realaccession%'
+ORDER BY submitted_at DESC LIMIT 1;
+----
+true
+
+statement ok
+DETACH ena;
+
+statement ok
+DROP SECRET test_ena_experiments_mock;

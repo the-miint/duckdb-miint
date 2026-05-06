@@ -1,0 +1,48 @@
+# name: test/sql/ena_projects_insert_live.test
+# description: INSERT INTO ena.projects against the live wwwdev.ebi.ac.uk endpoint
+# group: [sql]
+
+#
+# Skipped unless the maintainer has set ENA_WEBIN_TEST_USER /
+# ENA_WEBIN_TEST_PASSWORD and the dev server is reachable (run_tests.sh
+# probes both, exporting ENA_WEBIN_TEST_AVAILABLE on success).
+
+require miint
+
+require httpfs
+
+require-env ENA_WEBIN_TEST_USER
+
+require-env ENA_WEBIN_TEST_PASSWORD
+
+require-env ENA_WEBIN_TEST_AVAILABLE
+
+statement ok
+CREATE SECRET test_ena_live (
+    TYPE ENA,
+    USER '${ENA_WEBIN_TEST_USER}',
+    PASSWORD_ENV 'ENA_WEBIN_TEST_PASSWORD',
+    ENDPOINT 'test'
+);
+
+statement ok
+ATTACH '' AS ena (TYPE ENA, SECRET 'test_ena_live');
+
+# Use a timestamp-derived alias so re-runs don't collide. The wwwdev account is
+# multi-tenant; we keep the title generic and let HOLD apply the default
+# privacy window.
+query II
+INSERT INTO ena.projects (alias, title, project_type)
+SELECT 'miint-ci-' || strftime(now(), '%Y%m%d-%H%M%S-') || (random()*1e9)::INTEGER::VARCHAR,
+       'duckdb-miint Phase 4 CI smoke test',
+       'METAGENOMIC'
+RETURNING regexp_matches(prjeb_accession, '^PRJEB[0-9]+$') AS prjeb_ok,
+          regexp_matches(erp_accession,   '^ERP[0-9]+$')   AS erp_ok;
+----
+true	true
+
+statement ok
+DETACH ena;
+
+statement ok
+DROP SECRET test_ena_live;

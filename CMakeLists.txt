@@ -18,6 +18,45 @@ find_package(ZLIB REQUIRED)
 find_package(Threads REQUIRED)
 find_package(expat CONFIG REQUIRED)
 
+# libcurl powers the streaming HTTPS-PUT / FTP / FTPS transport in
+# `ena_upload_reads`. Disabled on Apple because vcpkg's libcurl pulls in
+# OpenSSL's libcrypto, which exports `MD5_*` / `SHA1_*` symbols that
+# vsearch's vendored copies also export. GNU ld supports
+# `--allow-multiple-definition` to resolve this; Apple's ld does not.
+# Since vsearch is first-class on macOS and not all users need the
+# streaming transport (Aspera + file:// still work), we drop libcurl on
+# Apple rather than drop vsearch.
+option(MIINT_ENABLE_CURL "Build with libcurl streaming-upload support" ON)
+if(APPLE)
+    set(MIINT_ENABLE_CURL OFF)
+    message(STATUS "Apple detected: disabling libcurl streaming transport (vsearch+OpenSSL symbol clash)")
+endif()
+# vcpkg's libcurl port for wasm32-emscripten is not built with -pthread,
+# so its object files lack atomics/bulk-memory features. wasm_threads links
+# with --shared-memory which requires those features, so wasm-ld rejects the
+# port. wasm_eh / wasm_mvp don't use shared memory and link fine. Rebuilding
+# vcpkg libcurl with pthread is a port-level change; cheaper to drop the
+# streaming transport on wasm_threads (file:// + Aspera paths still work).
+if(EMSCRIPTEN AND (CMAKE_CXX_FLAGS MATCHES "-pthread" OR DUCKDB_EXPLICIT_PLATFORM STREQUAL "wasm_threads"))
+    set(MIINT_ENABLE_CURL OFF)
+    message(STATUS "Emscripten wasm_threads detected: disabling libcurl (vcpkg port not built with -pthread)")
+endif()
+if(MIINT_ENABLE_CURL)
+    # Try VCPKG-style CONFIG package first (production builds), fall back
+    # to the system FindCURL Module (apt-installed libcurl4-openssl-dev,
+    # macOS Homebrew, etc.). Soft-disable if neither is available so the
+    # tidy / no-vcpkg CI lanes don't fail at configure time before tidy
+    # has a chance to run.
+    find_package(CURL CONFIG QUIET)
+    if(NOT CURL_FOUND)
+        find_package(CURL QUIET)
+    endif()
+    if(NOT CURL_FOUND)
+        message(STATUS "libcurl not found (no VCPKG package, no system FindCURL); disabling MIINT_ENABLE_CURL")
+        set(MIINT_ENABLE_CURL OFF)
+    endif()
+endif()
+
 # Optional feature flags for WASM-compatible builds
 option(MIINT_ENABLE_HDF5 "Build with HDF5/BIOM support" ON)
 option(MIINT_ENABLE_BOWTIE2 "Build with Bowtie2 alignment support" ON)
@@ -530,6 +569,11 @@ if(MIINT_ENABLE_SORTMERNA)
 
     # alp's sources use the deprecated `register` keyword, which is a hard
     # error on Clang 16+. Suppress it so the library still compiles.
+    # The other -Wno-* flags silence cosmetic warnings from upstream
+    # sortmerna/cmph/alp code (type-punned pointer casts, intentional
+    # switch fall-through without [[fallthrough]], unchecked fread
+    # return values). All would require upstream patches to fix properly.
+    set(SORTMERNA_WARNING_SUPPRESSIONS "-Wno-register -Wno-strict-aliasing -Wno-implicit-fallthrough -Wno-unused-result")
     ExternalProject_Add(
         sortmerna_build
         SOURCE_DIR ${SORTMERNA_SRC_DIR}
@@ -537,7 +581,8 @@ if(MIINT_ENABLE_SORTMERNA)
         CMAKE_ARGS
             -DCMAKE_BUILD_TYPE=Release
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-            -DCMAKE_CXX_FLAGS=-Wno-register
+            -DCMAKE_CXX_FLAGS=${SORTMERNA_WARNING_SUPPRESSIONS}
+            -DCMAKE_C_FLAGS=${SORTMERNA_WARNING_SUPPRESSIONS}
             -DWITH_TESTS=OFF
             -DCONCURRENTQUEUE_HOME=${CONCURRENTQUEUE_HOME}
             -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
@@ -768,6 +813,26 @@ set(EXTENSION_SOURCES
     src/ena_resolver_cache.cpp
     src/ena_search_field_registry.cpp
     src/ena_attributes_filter.cpp
+    src/ena_secret.cpp
+    src/ena_envelope_builder.cpp
+    src/ena_receipt_parser.cpp
+    src/ena_submission_log.cpp
+    src/ena_storage.cpp
+    src/ena_insert_common.cpp
+    src/ena_alias_check.cpp
+    src/ena_checklist.cpp
+    src/ena_projects_insert.cpp
+    src/ena_projects_insert_op.cpp
+    src/ena_samples_insert.cpp
+    src/ena_samples_insert_op.cpp
+    src/ena_experiments_insert.cpp
+    src/ena_experiments_insert_op.cpp
+    src/ena_runs_insert.cpp
+    src/ena_runs_insert_op.cpp
+    src/fastq_encoder.cpp
+    src/ena_upload_helpers.cpp
+    src/ena_upload_reads.cpp
+    src/ena_lifecycle.cpp
     src/miint_log.cpp
     src/per_run_reader.cpp
     src/read_ena.cpp
@@ -776,6 +841,7 @@ set(EXTENSION_SOURCES
     src/read_ena_sequences.cpp
     src/aspera_utils.cpp
     src/aspera_stream.cpp
+    src/aspera_send.cpp
     src/SFFReader.cpp
     src/read_sequences_sff.cpp
     src/WFA2Aligner.cpp
@@ -821,6 +887,9 @@ if(MIINT_ENABLE_MAFFT)
 endif()
 if(MIINT_ENABLE_SORTMERNA)
     list(APPEND EXTENSION_SOURCES src/SortMeRNAAligner.cpp src/align_sortmerna.cpp src/align_sortmerna_rrna.cpp)
+endif()
+if(MIINT_ENABLE_CURL)
+    list(APPEND EXTENSION_SOURCES src/curl_send.cpp)
 endif()
 if(MIINT_ENABLE_GPL_BOUNDARY)
     list(APPEND EXTENSION_SOURCES
@@ -896,6 +965,9 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_SORTMERNA)
 endif()
+if(MIINT_ENABLE_CURL)
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_CURL)
+endif()
 if(MIINT_ENABLE_GPL_BOUNDARY)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_GPL_BOUNDARY)
 endif()
@@ -917,6 +989,9 @@ if(MIINT_ENABLE_VSEARCH)
 endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_link_libraries(${EXTENSION_NAME} sortmerna RocksDB::rocksdb)
+endif()
+if(MIINT_ENABLE_CURL)
+    target_link_libraries(${EXTENSION_NAME} CURL::libcurl)
 endif()
 if(MIINT_ENABLE_GPL_BOUNDARY)
     # Object lib: feed its compiled .o's into the extension target without
@@ -987,6 +1062,9 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_SORTMERNA)
 endif()
+if(MIINT_ENABLE_CURL)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_CURL)
+endif()
 if(MIINT_ENABLE_GPL_BOUNDARY)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_GPL_BOUNDARY)
 endif()
@@ -1008,6 +1086,9 @@ if(MIINT_ENABLE_VSEARCH)
 endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} sortmerna RocksDB::rocksdb)
+endif()
+if(MIINT_ENABLE_CURL)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} CURL::libcurl)
 endif()
 if(MIINT_ENABLE_GPL_BOUNDARY)
     target_sources(${LOADABLE_EXTENSION_NAME} PRIVATE $<TARGET_OBJECTS:miint_nanoarrow_ipc>)
@@ -1082,6 +1163,27 @@ set(TEST_SOURCES
     test/cpp/test_ena_search_field_registry.cpp
     test/cpp/test_ena_attributes_filter.cpp
     test/cpp/test_ena_attributes_pushdown.cpp
+    test/cpp/test_ena_secret.cpp
+    src/ena_envelope_builder.cpp
+    test/cpp/test_ena_envelope.cpp
+    src/ena_receipt_parser.cpp
+    test/cpp/test_ena_receipt.cpp
+    src/ena_projects_insert.cpp
+    test/cpp/test_ena_projects_insert.cpp
+    src/ena_samples_insert.cpp
+    test/cpp/test_ena_samples_insert.cpp
+    src/ena_experiments_insert.cpp
+    test/cpp/test_ena_experiments_insert.cpp
+    src/ena_runs_insert.cpp
+    test/cpp/test_ena_runs_insert.cpp
+    src/ena_alias_check.cpp
+    test/cpp/test_ena_alias_check.cpp
+    src/ena_checklist.cpp
+    test/cpp/test_ena_checklist.cpp
+    src/fastq_encoder.cpp
+    test/cpp/test_fastq_encoder.cpp
+    src/ena_upload_helpers.cpp
+    test/cpp/test_ena_upload_reads.cpp
     src/aspera_utils.cpp
     test/cpp/test_AsperaUtils.cpp
     src/SFFReader.cpp
@@ -1127,6 +1229,9 @@ if(MIINT_ENABLE_SORTMERNA)
         test/cpp/test_sortmerna_build.cpp
         test/cpp/test_SortMeRNAAligner.cpp)
 endif()
+if(MIINT_ENABLE_CURL)
+    list(APPEND TEST_SOURCES src/curl_send.cpp test/cpp/test_curl_send.cpp)
+endif()
 if(MIINT_ENABLE_GPL_BOUNDARY)
     list(APPEND TEST_SOURCES
         src/gpl_boundary/process.cpp
@@ -1151,6 +1256,10 @@ target_link_libraries(tests
   wfa2
   expat::expat
 )
+if(MIINT_ENABLE_CURL)
+    target_link_libraries(tests CURL::libcurl)
+    target_compile_definitions(tests PRIVATE MIINT_HAS_CURL)
+endif()
 if(MIINT_ENABLE_MAFFT)
     target_link_libraries(tests mafft_parttree)
 endif()
@@ -1186,11 +1295,34 @@ if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
                           hdf5::hdf5-static
                           hdf5::hdf5_cpp-static)
 endif()
+# vsearch ships its own MD5/SHA1 symbols (libvsearch_core_a-md5.o,
+# libvsearch_core_a-sha1.o), and OpenSSL's libcrypto — pulled in transitively
+# when we link CURL::libcurl — exports the same names. GNU ld's
+# --allow-multiple-definition picks the first-defined symbol; since each
+# archive uses its own copy at compile time (intra-.o calls stay within the
+# archive), runtime behaviour is preserved. libcurl itself uses `EVP_Digest*`
+# rather than the colliding `MD5_*` C API, so the choice is benign.
+#
+# This workaround is only needed when both vsearch AND libcurl are linked.
+# Apple disables MIINT_ENABLE_CURL (see top of file) precisely because
+# Apple's ld lacks an equivalent flag and vsearch must remain first-class on
+# macOS; Windows auto-disables vsearch. So we only need this on Linux.
+if(MIINT_ENABLE_VSEARCH AND MIINT_ENABLE_CURL AND UNIX AND NOT APPLE)
+    target_link_options(tests PRIVATE "-Wl,--allow-multiple-definition")
+    # The static `${EXTENSION_NAME}` archive is consumed by DuckDB-built
+    # binaries (duckdb shell, unittest, plan_serializer) that we don't
+    # control. INTERFACE makes the link option propagate to whichever
+    # executable links against this archive, so the duplicate-symbol
+    # tolerance follows the static lib instead of being a per-target chore.
+    target_link_options(${EXTENSION_NAME} INTERFACE "-Wl,--allow-multiple-definition")
+    target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE "-Wl,--allow-multiple-definition")
+endif()
 if(HAVE_LIBZSTD)
     target_link_libraries(tests ${ZSTD_TARGET})
 endif()
 target_include_directories(tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/test/cpp/include  # Catch2 helper headers
     ${CMAKE_CURRENT_BINARY_DIR}/htslib/include
     ${CMAKE_CURRENT_SOURCE_DIR}/duckdb/third_party/miniz  # For ExtractFromZip tests
 )

@@ -1,0 +1,77 @@
+# name: test/sql/ena_projects_insert_mock.test
+# description: INSERT INTO ena.projects ... RETURNING against a local mock receipt server
+# group: [sql]
+
+require miint
+
+require-env ENA_WEBIN_MOCK_URL
+
+# httpfs implements POST in DuckDB; the built-in HTTP client supports only GET.
+# `require httpfs` skips silently when the extension isn't pre-installed in the
+# test harness. CI builds with extension auto-install enabled run this; local
+# runs without httpfs cached are skipped (the Catch2 + attach tests still cover
+# the pure-data and StorageExtension code paths).
+require httpfs
+
+statement ok
+CREATE SECRET test_ena_mock (
+    TYPE ENA,
+    USER 'Webin-99999',
+    PASSWORD 'mock-password',
+    ENDPOINT 'test',
+    ENDPOINT_URL '${ENA_WEBIN_MOCK_URL}'
+);
+
+statement ok
+ATTACH '' AS ena (TYPE ENA, SECRET 'test_ena_mock');
+
+# Single-project INSERT with RETURNING
+query III
+INSERT INTO ena.projects (alias, title, project_type)
+VALUES ('mock-proj-alpha', 'Alpha demo project', 'METAGENOMIC')
+RETURNING alias, prjeb_accession LIKE 'PRJEB%' AS has_prjeb,
+          erp_accession LIKE 'ERP%' AS has_erp;
+----
+mock-proj-alpha	true	true
+
+# submission_log captured the request
+query III
+SELECT object_type, action, success
+FROM ena.submission_log
+WHERE n_objects = 1 AND object_type = 'projects'
+ORDER BY submitted_at DESC LIMIT 1;
+----
+projects	ADD	true
+
+# Multi-project INSERT in one statement: both get distinct accessions
+statement ok
+INSERT INTO ena.projects (alias, title, project_type) VALUES
+    ('mock-proj-beta', 'Beta', 'WGS'),
+    ('mock-proj-gamma', 'Gamma', 'METAGENOMIC');
+
+query I
+SELECT count(*) FROM ena.submission_log WHERE n_objects = 2 AND object_type = 'projects';
+----
+1
+
+# Failure path: alias containing FAIL triggers mock to emit success="false"
+statement error
+INSERT INTO ena.projects (alias, title, project_type)
+VALUES ('mock-proj-FAIL', 'should fail', 'METAGENOMIC');
+----
+mock validation failure
+
+# A failed submission still appears in the log with success=false
+query II
+SELECT object_type, success
+FROM ena.submission_log
+WHERE NOT success
+ORDER BY submitted_at DESC LIMIT 1;
+----
+projects	false
+
+statement ok
+DETACH ena;
+
+statement ok
+DROP SECRET test_ena_mock;

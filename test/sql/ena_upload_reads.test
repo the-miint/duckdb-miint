@@ -1,0 +1,44 @@
+# name: test/sql/ena_upload_reads.test
+# description: ena_upload_reads — live Aspera upload to ENA Webin (gated on credentials + ascp)
+# group: [sql]
+
+require miint
+
+# Need ascp on PATH (run_tests.sh detects and exports this).
+require-env ASPERA_AVAILABLE
+
+# Need a real Webin account — register at https://www.ebi.ac.uk/ena/submit/webin/.
+require-env ENA_WEBIN_TEST_USER
+require-env ENA_WEBIN_TEST_PASSWORD
+
+# Build a tiny single-end input. Use a timestamped sample alias so re-runs
+# against the shared test account don't collide on existing files.
+statement ok
+CREATE TABLE upload_input AS
+  SELECT 'miint-' || strftime(now(), '%Y%m%d-%H%M%S') AS sample_ref,
+         read_id, sequence1, qual1,
+         CAST(NULL AS VARCHAR) AS sequence2,
+         CAST(NULL AS UTINYINT[]) AS qual2,
+         sequence_index
+  FROM read_fastx('data/fastq/small_a.fq');
+
+statement ok
+CREATE SECRET ena_live (
+    TYPE ENA,
+    USER '${ENA_WEBIN_TEST_USER}',
+    PASSWORD_ENV 'ENA_WEBIN_TEST_PASSWORD',
+    ENDPOINT 'test'
+);
+
+# Upload to webin2.ebi.ac.uk over Aspera. The default target_url points there,
+# but we make it explicit so this test fails loudly if the default is changed.
+query III
+SELECT layout, length(md5) = 32 AS md5_len_ok, bytes_written > 0 AS has_bytes
+FROM ena_upload_reads(relation := 'upload_input',
+                      secret := 'ena_live',
+                      target_url := 'aspera://webin2.ebi.ac.uk/');
+----
+single	true	true
+
+statement ok
+DROP SECRET ena_live;

@@ -1,5 +1,6 @@
 #include "copy_fastq.hpp"
 #include "copy_format_common.hpp"
+#include "fastq_encoder.hpp"
 #include "QualScore.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
@@ -136,37 +137,6 @@ static unique_ptr<LocalFunctionData> FastqCopyInitializeLocal(ExecutionContext &
 //===--------------------------------------------------------------------===//
 // Sink
 //===--------------------------------------------------------------------===//
-// Write a FASTQ record directly to the stream without a per-record intermediate string.
-// `qual_encoded_buf` is a caller-owned scratch buffer reused across records -- we resize
-// it to qual_length and fill in place, amortizing quality-encoding allocation across the
-// DataChunk instead of allocating fresh per row. Saves several large copies per record
-// on long-read FASTQ (sequence + quality can each be multi-kB).
-static void WriteFastqRecordToBuffer(MemoryStream &stream, const char *id, idx_t id_size, const char *seq,
-                                     idx_t seq_size, const uint8_t *qual_data, idx_t qual_length, uint8_t qual_offset,
-                                     const char *comment, idx_t comment_size, string &qual_encoded_buf) {
-	qual_encoded_buf.resize(qual_length);
-	for (idx_t k = 0; k < qual_length; k++) {
-		int encoded = static_cast<int>(qual_data[k]) + qual_offset;
-		if (encoded > 126) {
-			throw InvalidInputException("Quality score overflow: " + std::to_string(qual_data[k]) + " + " +
-			                            std::to_string(qual_offset) + " = " + std::to_string(encoded) +
-			                            " exceeds valid ASCII range (max 126)");
-		}
-		qual_encoded_buf[k] = static_cast<char>(encoded);
-	}
-
-	stream.WriteData(const_data_ptr_cast("@"), 1);
-	stream.WriteData(const_data_ptr_cast(id), id_size);
-	if (comment_size > 0) {
-		stream.WriteData(const_data_ptr_cast(" "), 1);
-		stream.WriteData(const_data_ptr_cast(comment), comment_size);
-	}
-	stream.WriteData(const_data_ptr_cast("\n"), 1);
-	stream.WriteData(const_data_ptr_cast(seq), seq_size);
-	stream.WriteData(const_data_ptr_cast("\n+\n"), 3);
-	stream.WriteData(const_data_ptr_cast(qual_encoded_buf.data()), qual_length);
-	stream.WriteData(const_data_ptr_cast("\n"), 1);
-}
 
 static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p,
                           LocalFunctionData &lstate_p, DataChunk &input) {
@@ -213,10 +183,10 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 	// Build all records into local buffer(s) - NO LOCK.
 	// Hot-path rule: never call string_t::GetString() on sequence/quality fields -- it
 	// makes a heap copy per record. Use GetData()/GetSize() and write directly to the
-	// MemoryStream. The quality-encoding buffer is reused across rows so ASCII-offset
-	// encoding doesn't allocate per record either.
-	string id_buf;           // reused when id_as_sequence_index is true
-	string qual_encoded_buf; // reused across all rows and both mates
+	// MemoryStream. The encoder reuses an internal quality-encoding buffer across
+	// records so the ASCII-offset encoding doesn't allocate per row.
+	string id_buf; // reused when id_as_sequence_index is true
+	FastqEncoder encoder(fdata.qual_offset);
 	for (idx_t row = 0; row < input.size(); row++) {
 		auto row_idx = read_id_data.sel->get_index(row);
 
@@ -276,9 +246,14 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 			    seq1_size, row);
 		}
 
-		// Write R1 record to local buffer
-		WriteFastqRecordToBuffer(stream_r1, id_ptr, id_size, seq1_ptr, seq1_size, qual1_ptr, qual1_length,
-		                         fdata.qual_offset, comment_ptr, comment_size, qual_encoded_buf);
+		// Write R1 record to local buffer. The sink wraps WriteData so the
+		// encoder remains DuckDB-free (its unit tests link against the
+		// header alone).
+		auto sink_r1 = [&stream_r1](const char *data, std::size_t size) {
+			stream_r1.WriteData(const_data_ptr_cast(data), size);
+		};
+		encoder.Encode(sink_r1, id_ptr, id_size, comment_ptr, comment_size, seq1_ptr, seq1_size, qual1_ptr,
+		               qual1_length);
 		lstate.writer_state_r1->written_anything = true;
 
 		// Handle R2 for paired-end
@@ -310,12 +285,15 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 
 			if (fdata.interleave) {
 				// Write R2 to same buffer
-				WriteFastqRecordToBuffer(stream_r1, id_ptr, id_size, seq2_ptr, seq2_size, qual2_ptr, qual2_length,
-				                         fdata.qual_offset, comment_ptr, comment_size, qual_encoded_buf);
+				encoder.Encode(sink_r1, id_ptr, id_size, comment_ptr, comment_size, seq2_ptr, seq2_size, qual2_ptr,
+				               qual2_length);
 			} else {
 				// Write R2 to separate buffer
-				WriteFastqRecordToBuffer(*stream_r2, id_ptr, id_size, seq2_ptr, seq2_size, qual2_ptr, qual2_length,
-				                         fdata.qual_offset, comment_ptr, comment_size, qual_encoded_buf);
+				auto sink_r2 = [stream_r2](const char *data, std::size_t size) {
+					stream_r2->WriteData(const_data_ptr_cast(data), size);
+				};
+				encoder.Encode(sink_r2, id_ptr, id_size, comment_ptr, comment_size, seq2_ptr, seq2_size, qual2_ptr,
+				               qual2_length);
 				lstate.writer_state_r2->written_anything = true;
 			}
 		}

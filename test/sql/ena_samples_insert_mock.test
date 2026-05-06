@@ -1,0 +1,97 @@
+# name: test/sql/ena_samples_insert_mock.test
+# description: INSERT INTO ena.samples ... RETURNING against a local mock receipt server
+# group: [sql]
+
+require miint
+
+require-env ENA_WEBIN_MOCK_URL
+
+# httpfs implements POST in DuckDB; the built-in HTTP client supports only GET.
+# `require httpfs` skips silently when the extension isn't pre-installed in the
+# test harness (matches the existing miint pattern in read_ncbi.test).
+require httpfs
+
+statement ok
+CREATE SECRET test_ena_samples_mock (
+    TYPE ENA,
+    USER 'Webin-99999',
+    PASSWORD 'mock-password',
+    ENDPOINT 'test',
+    ENDPOINT_URL '${ENA_WEBIN_MOCK_URL}'
+);
+
+statement ok
+ATTACH '' AS ena (TYPE ENA, SECRET 'test_ena_samples_mock');
+
+# Single-sample INSERT with checklist ERC000015 + the canonical microbiome
+# attributes. RETURNING surfaces both the ERS (primary) and SAMEA (BioSample
+# EXT_ID) accessions.
+query III
+INSERT INTO ena.samples (alias, taxon_id, checklist, attributes)
+VALUES ('mock-sample-alpha', 408170, 'ERC000015',
+        MAP {'collection date': '2026-04-01',
+             'geographic location (country and/or sea)': 'United States',
+             'broad-scale environmental context': 'human-associated habitat [ENVO:00009003]',
+             'local environmental context': 'gastrointestinal tract [ENVO:00002041]',
+             'environmental medium': 'feces [UBERON:0001988]'})
+RETURNING alias, ers_accession LIKE 'ERS%' AS has_ers,
+          samea_accession LIKE 'SAMEA%' AS has_samea;
+----
+mock-sample-alpha	true	true
+
+# submission_log captured the request
+query III
+SELECT object_type, action, success
+FROM ena.submission_log
+WHERE object_type = 'samples' AND n_objects = 1
+ORDER BY submitted_at DESC LIMIT 1;
+----
+samples	ADD	true
+
+# Multi-sample INSERT in one statement: both get distinct accessions.
+statement ok
+INSERT INTO ena.samples (alias, taxon_id, checklist, attributes) VALUES
+    ('mock-sample-beta', 408170, 'ERC000015', MAP {'collection date': '2026-04-02'}),
+    ('mock-sample-gamma', 9606, 'ERC000011', MAP {'collection date': '2026-04-03'});
+
+query I
+SELECT count(*) FROM ena.submission_log
+WHERE object_type = 'samples' AND n_objects = 2;
+----
+1
+
+# Failure path: alias containing FAIL triggers mock to emit success="false"
+statement error
+INSERT INTO ena.samples (alias, taxon_id, checklist)
+VALUES ('mock-sample-FAIL', 408170, 'ERC000015');
+----
+mock validation failure
+
+# A failed submission still appears in the log with success=false
+query II
+SELECT object_type, success
+FROM ena.submission_log
+WHERE object_type = 'samples' AND NOT success
+ORDER BY submitted_at DESC LIMIT 1;
+----
+samples	false
+
+# taxon_id <= 0 must be rejected client-side (the envelope builder enforces
+# this invariant; surface it as a clean error rather than letting the server
+# reject it after the network round-trip).
+statement error
+INSERT INTO ena.samples (alias, taxon_id) VALUES ('mock-sample-bad-taxon', 0);
+----
+taxon_id
+
+# alias must be non-empty
+statement error
+INSERT INTO ena.samples (alias, taxon_id) VALUES ('', 408170);
+----
+alias
+
+statement ok
+DETACH ena;
+
+statement ok
+DROP SECRET test_ena_samples_mock;

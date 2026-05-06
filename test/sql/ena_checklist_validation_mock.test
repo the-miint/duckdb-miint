@@ -1,0 +1,149 @@
+# name: test/sql/ena_checklist_validation_mock.test
+# description: Pre-INSERT checklist validation rejects malformed samples client-side (Phase 8 Step 8b)
+# group: [sql]
+
+require miint
+
+require-env ENA_WEBIN_MOCK_URL
+
+require-env MIINT_ENA_PORTAL_URL_BASE
+
+require-env MIINT_ENA_CHECKLIST_URL_BASE
+
+# httpfs implements POST in DuckDB; the built-in HTTP client supports only GET.
+# `require httpfs` skips silently when the extension isn't pre-installed in the
+# test harness (matches the pattern used by every other ena_*_mock test).
+require httpfs
+
+statement ok
+CREATE SECRET test_ena_checklist_mock (
+    TYPE ENA,
+    USER 'Webin-99999',
+    PASSWORD 'mock-password',
+    ENDPOINT 'test',
+    ENDPOINT_URL '${ENA_WEBIN_MOCK_URL}'
+);
+
+statement ok
+ATTACH '' AS ena (TYPE ENA, SECRET 'test_ena_checklist_mock');
+
+# Compliant sample against the synthetic TST000001 checklist (mandatory
+# project name + collection date + geographic location (latitude) with DD
+# unit + country in CV). Round-trip succeeds and emits ERS / SAMEA.
+query III
+INSERT INTO ena.samples (alias, taxon_id, checklist, attributes, attribute_units)
+VALUES ('chk-ok-' || (random()*1e9)::INTEGER::VARCHAR, 408170, 'TST000001',
+        MAP {'project name': 'demo project',
+             'collection date': '2026-04-01',
+             'geographic location (latitude)': '32.7',
+             'country': 'USA'},
+        MAP {'geographic location (latitude)': 'DD'})
+RETURNING checklist,
+          ers_accession LIKE 'ERS%' AS has_ers,
+          samea_accession LIKE 'SAMEA%' AS has_samea;
+----
+TST000001	true	true
+
+# Missing-mandatory: project name absent → throws client-side, error names the field.
+statement error
+INSERT INTO ena.samples (alias, taxon_id, checklist, attributes, attribute_units)
+VALUES ('chk-missing-mand', 408170, 'TST000001',
+        MAP {'collection date': '2026-04-01',
+             'geographic location (latitude)': '32.7',
+             'country': 'USA'},
+        MAP {'geographic location (latitude)': 'DD'});
+----
+project name
+
+# Empty-string mandatory value counts as missing.
+statement error
+INSERT INTO ena.samples (alias, taxon_id, checklist, attributes, attribute_units)
+VALUES ('chk-empty-mand', 408170, 'TST000001',
+        MAP {'project name': '',
+             'collection date': '2026-04-01',
+             'geographic location (latitude)': '32.7',
+             'country': 'USA'},
+        MAP {'geographic location (latitude)': 'DD'});
+----
+project name
+
+# Missing required unit on a unit-bearing field.
+statement error
+INSERT INTO ena.samples (alias, taxon_id, checklist, attributes)
+VALUES ('chk-missing-unit', 408170, 'TST000001',
+        MAP {'project name': 'demo',
+             'collection date': '2026-04-01',
+             'geographic location (latitude)': '32.7',
+             'country': 'USA'});
+----
+unit
+
+# CV mismatch: 'France' is not in {USA, Canada, Mexico}.
+statement error
+INSERT INTO ena.samples (alias, taxon_id, checklist, attributes, attribute_units)
+VALUES ('chk-bad-cv', 408170, 'TST000001',
+        MAP {'project name': 'demo',
+             'collection date': '2026-04-01',
+             'geographic location (latitude)': '32.7',
+             'country': 'France'},
+        MAP {'geographic location (latitude)': 'DD'});
+----
+France
+
+# Unknown attribute key.
+statement error
+INSERT INTO ena.samples (alias, taxon_id, checklist, attributes, attribute_units)
+VALUES ('chk-unknown-key', 408170, 'TST000001',
+        MAP {'project name': 'demo',
+             'collection date': '2026-04-01',
+             'geographic location (latitude)': '32.7',
+             'country': 'USA',
+             'made up attribute': 'v'},
+        MAP {'geographic location (latitude)': 'DD'});
+----
+not in checklist
+
+# Multi-issue case: aggregated error names every offending field.
+statement error
+INSERT INTO ena.samples (alias, taxon_id, checklist, attributes)
+VALUES ('chk-multi-bad', 408170, 'TST000001',
+        MAP {'collection date': '2026-04-01',
+             'country': 'Atlantis'});
+----
+project name
+
+statement error
+INSERT INTO ena.samples (alias, taxon_id, checklist, attributes)
+VALUES ('chk-multi-bad', 408170, 'TST000001',
+        MAP {'collection date': '2026-04-01',
+             'country': 'Atlantis'});
+----
+Atlantis
+
+# A blocked INSERT must NOT log a submission_log row — validation is a
+# client-side error, not a recorded submission attempt.
+query I
+SELECT count(*) FROM ena.submission_log
+WHERE request_payload LIKE '%chk-missing-mand%';
+----
+0
+
+# Empty checklist column → user opted out of validation. INSERT proceeds.
+statement ok
+INSERT INTO ena.samples (alias, taxon_id) VALUES ('chk-noop', 408170);
+
+# Unrecognized checklist accession at the mock → server returns the
+# permissive fallback fixture, validation passes through. (In production,
+# an unrecognized accession would yield an HTTP 404 from the EBI browser
+# API; the operator falls back to server-side validation with a stderr
+# warning — not exercised by this offline test.)
+statement ok
+INSERT INTO ena.samples (alias, taxon_id, checklist, attributes)
+VALUES ('chk-permissive', 408170, 'ERC000015',
+        MAP {'collection date': '2026-04-01'});
+
+statement ok
+DETACH ena;
+
+statement ok
+DROP SECRET test_ena_checklist_mock;

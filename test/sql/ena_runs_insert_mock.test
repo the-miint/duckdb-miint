@@ -1,0 +1,143 @@
+# name: test/sql/ena_runs_insert_mock.test
+# description: INSERT INTO ena.runs ... RETURNING against a local mock receipt server
+# group: [sql]
+
+require miint
+
+require-env ENA_WEBIN_MOCK_URL
+
+require httpfs
+
+statement ok
+CREATE SECRET test_ena_runs_mock (
+    TYPE ENA,
+    USER 'Webin-99999',
+    PASSWORD 'mock-password',
+    ENDPOINT 'test',
+    ENDPOINT_URL '${ENA_WEBIN_MOCK_URL}'
+);
+
+statement ok
+ATTACH '' AS ena (TYPE ENA, SECRET 'test_ena_runs_mock');
+
+# Single paired-fastq run with RETURNING. Mock generates a deterministic ERR
+# accession from the alias.
+query II
+INSERT INTO ena.runs (alias, experiment_ref, files)
+VALUES
+    ('mock-run-alpha', 'mock-exp-alpha',
+     [{'filename': 'mock-run-alpha_1.fastq.gz', 'filetype': 'fastq', 'md5': '9b8932f85caa54e687eba62fca3edce2'},
+      {'filename': 'mock-run-alpha_2.fastq.gz', 'filetype': 'fastq', 'md5': '183d6a24e0c3704e993bebe75bbbd989'}])
+RETURNING alias, err_accession LIKE 'ERR%' AS has_err;
+----
+mock-run-alpha	true
+
+# submission_log captured the request
+query III
+SELECT object_type, action, success
+FROM ena.submission_log
+WHERE object_type = 'runs' AND n_objects = 1
+ORDER BY submitted_at DESC LIMIT 1;
+----
+runs	ADD	true
+
+# Single-end run: only one file in the LIST.
+statement ok
+INSERT INTO ena.runs (alias, experiment_ref, files)
+VALUES
+    ('mock-run-single', 'mock-exp-alpha',
+     [{'filename': 'mock-run-single.fastq.gz', 'filetype': 'fastq', 'md5': 'cafebabecafebabecafebabecafebabe'}]);
+
+# Multi-run INSERT in one statement
+statement ok
+INSERT INTO ena.runs (alias, experiment_ref, files)
+VALUES
+    ('mock-run-beta', 'mock-exp-beta',
+     [{'filename': 'mock-run-beta_1.fastq.gz', 'filetype': 'fastq', 'md5': 'b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1'},
+      {'filename': 'mock-run-beta_2.fastq.gz', 'filetype': 'fastq', 'md5': 'b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2'}]),
+    ('mock-run-gamma', 'mock-exp-gamma',
+     [{'filename': 'mock-run-gamma.fastq.gz', 'filetype': 'fastq', 'md5': 'c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1'}]);
+
+query I
+SELECT count(*) FROM ena.submission_log
+WHERE object_type = 'runs' AND n_objects = 2;
+----
+1
+
+# Failure path: alias containing FAIL triggers mock to emit success="false"
+statement error
+INSERT INTO ena.runs (alias, experiment_ref, files)
+VALUES
+    ('mock-run-FAIL', 'mock-exp-alpha',
+     [{'filename': 'fail.fastq.gz', 'filetype': 'fastq', 'md5': '00000000000000000000000000000000'}]);
+----
+mock validation failure
+
+query II
+SELECT object_type, success
+FROM ena.submission_log
+WHERE object_type = 'runs' AND NOT success
+ORDER BY submitted_at DESC LIMIT 1;
+----
+runs	false
+
+# Empty alias rejected
+statement error
+INSERT INTO ena.runs (alias, experiment_ref, files)
+VALUES
+    ('', 'mock-exp-alpha',
+     [{'filename': 'a.fastq.gz', 'filetype': 'fastq', 'md5': '00000000000000000000000000000000'}]);
+----
+alias
+
+# Missing experiment_ref rejected
+statement error
+INSERT INTO ena.runs (alias, files)
+VALUES
+    ('mock-run-no-exp',
+     [{'filename': 'a.fastq.gz', 'filetype': 'fastq', 'md5': '00000000000000000000000000000000'}]);
+----
+experiment_ref
+
+# Empty files list rejected (every run needs at least one file)
+statement error
+INSERT INTO ena.runs (alias, experiment_ref, files)
+VALUES
+    ('mock-run-no-files', 'mock-exp-alpha',
+     CAST([] AS STRUCT(filename VARCHAR, filetype VARCHAR, md5 VARCHAR)[]));
+----
+file
+
+# Empty md5 in a file struct rejected (server would reject after upload anyway)
+statement error
+INSERT INTO ena.runs (alias, experiment_ref, files)
+VALUES
+    ('mock-run-no-md5', 'mock-exp-alpha',
+     [{'filename': 'a.fastq.gz', 'filetype': 'fastq', 'md5': ''}]);
+----
+md5
+
+# NULL struct entry inside the files list rejected with a clear position
+# pointer (would otherwise dereference a null Value via StructValue::GetChildren).
+statement error
+INSERT INTO ena.runs (alias, experiment_ref, files)
+VALUES
+    ('mock-run-null-entry', 'mock-exp-alpha',
+     CAST([NULL] AS STRUCT(filename VARCHAR, filetype VARCHAR, md5 VARCHAR)[]));
+----
+NULL
+
+# Empty filetype rejected (no silent "fastq" default — see Linus Phase 7 review).
+statement error
+INSERT INTO ena.runs (alias, experiment_ref, files)
+VALUES
+    ('mock-run-empty-filetype', 'mock-exp-alpha',
+     [{'filename': 'a.fastq.gz', 'filetype': '', 'md5': '00000000000000000000000000000000'}]);
+----
+filetype
+
+statement ok
+DETACH ena;
+
+statement ok
+DROP SECRET test_ena_runs_mock;
