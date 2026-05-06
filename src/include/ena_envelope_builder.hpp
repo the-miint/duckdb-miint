@@ -120,6 +120,14 @@ struct RunSpec {
 struct SubmissionSpec {
 	ENAAction action = ENAAction::ADD;
 	std::string hold_until_date; // optional, "YYYY-MM-DD" or ISO-8601 with TZ
+	// Targeted lifecycle actions (CANCEL, RELEASE, HOLD-with-date) reference an
+	// already-registered object via `target=` on the action element. Body sets
+	// (PROJECT_SET / SAMPLE_SET / ...) are not emitted when a target is set —
+	// the action itself is the entire payload. `target_accession` wins when
+	// both are populated, mirroring `RefDescriptor`. Setting either on
+	// ADD/MODIFY/VALIDATE is rejected at validate time.
+	std::string target_accession;
+	std::string target_refname;
 	std::vector<ProjectSpec> projects;
 	std::vector<SampleSpec> samples;
 	std::vector<ExperimentSpec> experiments;

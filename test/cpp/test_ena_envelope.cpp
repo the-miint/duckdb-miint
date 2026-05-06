@@ -720,3 +720,173 @@ TEST_CASE("ENA envelope: full graph (project + sample + experiment + run) emits 
 	CHECK(samp_pos < exp_pos);
 	CHECK(exp_pos < run_pos);
 }
+
+// =====================================================================
+// Lifecycle (targeted) actions: CANCEL / HOLD / RELEASE on existing accessions
+// =====================================================================
+//
+// These actions reference an already-registered object via `target=` on the
+// action element. Body sets (PROJECT_SET / SAMPLE_SET / EXPERIMENT_SET /
+// RUN_SET) are not emitted — the action itself is the entire payload.
+// MODIFY also uses `action=MODIFY` but with a body identifying the object
+// (covered separately under the existing per-object envelope tests).
+
+TEST_CASE("ENA envelope: CANCEL targets an accession (XML)", "[ena_envelope][lifecycle]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::CANCEL;
+	env.target_accession = "ERS123456";
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CheckEqual(xml, R"X(<?xml version="1.0" encoding="UTF-8"?>)X"
+	                R"X(<WEBIN><SUBMISSION>)X"
+	                R"X(<ACTIONS><ACTION><CANCEL target="ERS123456"/></ACTION></ACTIONS>)X"
+	                R"X(</SUBMISSION></WEBIN>)X");
+}
+
+TEST_CASE("ENA envelope: RELEASE targets an accession (XML)", "[ena_envelope][lifecycle]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::RELEASE;
+	env.target_accession = "ERS123456";
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CheckEqual(xml, R"X(<?xml version="1.0" encoding="UTF-8"?>)X"
+	                R"X(<WEBIN><SUBMISSION>)X"
+	                R"X(<ACTIONS><ACTION><RELEASE target="ERS123456"/></ACTION></ACTIONS>)X"
+	                R"X(</SUBMISSION></WEBIN>)X");
+}
+
+TEST_CASE("ENA envelope: HOLD targets an accession with HoldUntilDate (XML)", "[ena_envelope][lifecycle]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::HOLD;
+	env.target_accession = "ERS123456";
+	env.hold_until_date = "2027-01-01";
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CheckEqual(xml, R"X(<?xml version="1.0" encoding="UTF-8"?>)X"
+	                R"X(<WEBIN><SUBMISSION>)X"
+	                R"X(<ACTIONS><ACTION><HOLD target="ERS123456" HoldUntilDate="2027-01-01"/></ACTION></ACTIONS>)X"
+	                R"X(</SUBMISSION></WEBIN>)X");
+}
+
+TEST_CASE("ENA envelope: CANCEL accepts target_refname when target_accession is empty", "[ena_envelope][lifecycle]") {
+	// Allow alias-targeting for objects whose accession isn't yet known
+	// to the caller (rare, but the V2 schema accepts it).
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::CANCEL;
+	env.target_refname = "my-sample-alias";
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CHECK(xml.find(R"(<CANCEL target="my-sample-alias"/>)") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope: CANCEL without target is rejected", "[ena_envelope][lifecycle]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::CANCEL;
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("CANCEL"));
+}
+
+TEST_CASE("ENA envelope: RELEASE without target is rejected", "[ena_envelope][lifecycle]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::RELEASE;
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("RELEASE"));
+}
+
+TEST_CASE("ENA envelope: HOLD with target requires hold_until_date", "[ena_envelope][lifecycle]") {
+	// action=HOLD with a target is the post-hoc embargo path; the date is
+	// required (server uses it as the new hold-until-date).
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::HOLD;
+	env.target_accession = "ERS123456";
+	// hold_until_date deliberately empty
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("hold_until_date"));
+}
+
+TEST_CASE("ENA envelope: ADD with target_accession is rejected (ADD doesn't target)", "[ena_envelope][lifecycle]") {
+	// target_accession is exclusive to lifecycle actions. Setting it on an
+	// ADD/MODIFY/VALIDATE catches a category-of-mistake at envelope-build time.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::ADD;
+	env.target_accession = "ERS123456";
+	miint::ProjectSpec p;
+	p.alias = "p1";
+	p.title = "t";
+	env.projects.push_back(p);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("target"));
+}
+
+TEST_CASE("ENA envelope: CANCEL with both accession and refname prefers accession", "[ena_envelope][lifecycle]") {
+	// Mirrors the existing RefDescriptor convention: accession wins when both
+	// are set. Lets a caller provide a fallback refname without hand-coding
+	// a precedence check.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::CANCEL;
+	env.target_accession = "ERS123456";
+	env.target_refname = "my-alias";
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CHECK(xml.find(R"(target="ERS123456")") != std::string::npos);
+	CHECK(xml.find("my-alias") == std::string::npos);
+}
+
+TEST_CASE("ENA envelope: CANCEL with body content is rejected (no silent drop)", "[ena_envelope][lifecycle]") {
+	// A targeted CANCEL is the entire payload; if a caller accidentally also
+	// fills in projects/samples (e.g. reusing a SubmissionSpec across calls),
+	// silently dropping the body would look like a successful submit-then-cancel.
+	// Reject loudly instead so the caller fixes their spec construction.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::CANCEL;
+	env.target_accession = "ERS123456";
+	miint::ProjectSpec p;
+	p.alias = "stray";
+	p.title = "should-not-appear";
+	env.projects.push_back(p);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("body content"));
+}
+
+TEST_CASE("ENA envelope: HOLD-with-target with body content is rejected", "[ena_envelope][lifecycle]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::HOLD;
+	env.target_accession = "ERS123456";
+	env.hold_until_date = "2027-01-01";
+	miint::SampleSpec s;
+	s.alias = "stray";
+	s.taxon_id = 408170;
+	env.samples.push_back(s);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("body content"));
+}
+
+TEST_CASE("ENA envelope: MODIFY with target_accession is rejected", "[ena_envelope][lifecycle]") {
+	// MODIFY identifies its object via the body, not via target=. A target
+	// here would be a programming mistake.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	env.target_accession = "ERS123456";
+	miint::SampleSpec s;
+	s.alias = "s1";
+	s.taxon_id = 408170;
+	env.samples.push_back(s);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("target"));
+}
+
+TEST_CASE("ENA envelope: VALIDATE with target_refname is rejected", "[ena_envelope][lifecycle]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::VALIDATE;
+	env.target_refname = "my-alias";
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("target"));
+}
+
+TEST_CASE("ENA envelope: whitespace-only target_accession is rejected", "[ena_envelope][lifecycle]") {
+	// "   " has non-zero length but is meaningless to the server. Catch it
+	// at envelope-build time rather than letting the round-trip discover it.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::CANCEL;
+	env.target_accession = "   ";
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("target_accession"));
+}
+
+TEST_CASE("ENA envelope: whitespace-only target_refname is rejected", "[ena_envelope][lifecycle]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::RELEASE;
+	env.target_refname = "\t\n";
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("target_refname"));
+}

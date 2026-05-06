@@ -206,20 +206,88 @@ const char *ActionName(ENAAction a) {
 	throw std::logic_error("ENA envelope: unhandled ENAAction value");
 }
 
+// True iff `s` contains at least one non-whitespace byte. Used to reject
+// targets like "   " that would otherwise pass an `.empty()` check and emit
+// `<CANCEL target="   "/>` to the server.
+bool HasNonWhitespace(const std::string &s) {
+	for (char c : s) {
+		if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Single source of truth for "does this spec carry a target accession or
+// refname?". Empty / whitespace-only fields don't count as targets.
+bool IsTargetedAction(const SubmissionSpec &env) {
+	return HasNonWhitespace(env.target_accession) || HasNonWhitespace(env.target_refname);
+}
+
+// True iff the spec carries any object-body content.
+bool HasBodyContent(const SubmissionSpec &env) {
+	return !env.projects.empty() || !env.samples.empty() || !env.experiments.empty() || !env.runs.empty();
+}
+
 // Pure-data validators shared by the JSON and XML emitters. Each Append*
 // pair (Append<X> for JSON, AppendXml<X> for XML) calls the matching
 // ValidateXxx at the top so the precondition string lives in one place.
 void ValidateActions(const SubmissionSpec &env) {
-	// Invariant: HOLD action requires a date; date is set by adding a separate
-	// HOLD entry alongside the user-chosen action (typically ADD). Setting both
-	// `action=HOLD` and `hold_until_date` would produce a double-HOLD, so
-	// reject it here.
-	if (env.action == ENAAction::HOLD && env.hold_until_date.empty()) {
-		throw std::runtime_error("ENA envelope: HOLD action requires hold_until_date");
+	const bool has_target = IsTargetedAction(env);
+
+	// Reject whitespace-only targets that pass the `.empty()` check but would
+	// emit garbage to the server. Caught here rather than at the call site so
+	// callers get a clear message instead of an opaque server-side rejection.
+	if (!env.target_accession.empty() && !HasNonWhitespace(env.target_accession)) {
+		throw std::runtime_error("ENA envelope: target_accession must contain non-whitespace characters");
 	}
-	if (env.action == ENAAction::HOLD && !env.hold_until_date.empty()) {
-		throw std::runtime_error(
-		    "ENA envelope: with hold_until_date, use action=ADD; the HOLD entry is added automatically");
+	if (!env.target_refname.empty() && !HasNonWhitespace(env.target_refname)) {
+		throw std::runtime_error("ENA envelope: target_refname must contain non-whitespace characters");
+	}
+
+	// Lifecycle actions that operate on an existing accession need a target.
+	if ((env.action == ENAAction::CANCEL || env.action == ENAAction::RELEASE) && !has_target) {
+		throw std::runtime_error(std::string("ENA envelope: ") + ActionName(env.action) +
+		                         " requires target_accession or target_refname");
+	}
+
+	// HOLD has two distinct shapes:
+	//   1. Body-pattern (forward-dated submission): action=ADD with
+	//      hold_until_date set; the emitter pairs ADD with a sibling
+	//      <HOLD HoldUntilDate=.../> action automatically.
+	//   2. Targeted-pattern (post-hoc embargo extension): action=HOLD with a
+	//      target accession plus hold_until_date.
+	if (env.action == ENAAction::HOLD) {
+		if (!has_target && env.hold_until_date.empty()) {
+			throw std::runtime_error("ENA envelope: HOLD action requires hold_until_date");
+		}
+		if (!has_target && !env.hold_until_date.empty()) {
+			throw std::runtime_error(
+			    "ENA envelope: with hold_until_date, use action=ADD; the HOLD entry is added automatically");
+		}
+		if (has_target && env.hold_until_date.empty()) {
+			throw std::runtime_error("ENA envelope: HOLD with a target requires hold_until_date "
+			                         "(the new embargo end date, e.g. '2027-12-31')");
+		}
+	}
+
+	// ADD/MODIFY/VALIDATE identify objects via the body sets, not via the
+	// action element. A target on these is almost certainly a programming
+	// mistake; reject it loudly.
+	if ((env.action == ENAAction::ADD || env.action == ENAAction::MODIFY || env.action == ENAAction::VALIDATE) &&
+	    has_target) {
+		throw std::runtime_error(std::string("ENA envelope: ") + ActionName(env.action) +
+		                         " action does not take a target accession or refname");
+	}
+
+	// Targeted lifecycle actions carry no body — the target is the entire
+	// payload. Reject body content rather than silently dropping it: a caller
+	// reusing a populated SubmissionSpec for a CANCEL would otherwise look
+	// like a successful submit-then-cancel, when really the body was discarded.
+	if (has_target && HasBodyContent(env)) {
+		throw std::runtime_error(std::string("ENA envelope: ") + ActionName(env.action) +
+		                         " with target_accession/target_refname must not carry body content "
+		                         "(projects/samples/experiments/runs); the target is the entire payload");
 	}
 }
 
@@ -262,6 +330,14 @@ void ValidateRunSpec(const RunSpec &r) {
 
 void AppendActions(std::string &out, const SubmissionSpec &env) {
 	ValidateActions(env);
+	// Targeted lifecycle actions are XML-only in the current build. The V2
+	// JSON dispatcher's behaviour for submission-level actions with `target=`
+	// hasn't been verified live, and we don't want a silently-malformed
+	// envelope (no `target` field) to slip out via the JSON path.
+	if (IsTargetedAction(env)) {
+		throw std::runtime_error("ENA envelope: targeted lifecycle actions (CANCEL, RELEASE, "
+		                         "targeted HOLD) must be built via BuildEnvelopeXML, not JSON");
+	}
 	out.append("\"actions\":[");
 	out.append("{\"type\":");
 	AppendJsonString(out, ActionName(env.action));
@@ -560,6 +636,22 @@ void AppendXmlRef(std::string &out, const char *element, const RefDescriptor &re
 
 void AppendXmlActions(std::string &out, const SubmissionSpec &env) {
 	ValidateActions(env);
+	if (IsTargetedAction(env)) {
+		// Targeted lifecycle action — accession wins over refname when both
+		// are set, matching the RefDescriptor convention used elsewhere.
+		const std::string &target = HasNonWhitespace(env.target_accession) ? env.target_accession : env.target_refname;
+		out.append("<ACTIONS><ACTION><");
+		out.append(ActionName(env.action));
+		out.append(" target=\"");
+		AppendXmlEscaped(out, target);
+		if (env.action == ENAAction::HOLD) {
+			out.append("\" HoldUntilDate=\"");
+			AppendXmlEscaped(out, env.hold_until_date);
+		}
+		out.append("\"/></ACTION></ACTIONS>");
+		return;
+	}
+
 	out.append("<ACTIONS><ACTION><");
 	out.append(ActionName(env.action));
 	out.append("/></ACTION>");
@@ -649,6 +741,9 @@ std::string BuildEnvelopeXML(const SubmissionSpec &env) {
 	out.append("<SUBMISSION>");
 	AppendXmlActions(out, env);
 	out.append("</SUBMISSION>");
+	// ValidateActions (called from AppendXmlActions above) rejects the
+	// targeted-action + body-content combination, so reaching here with body
+	// content implies an untargeted action.
 	if (!env.experiments.empty()) {
 		out.append("<EXPERIMENT_SET>");
 		for (const auto &e : env.experiments) {
