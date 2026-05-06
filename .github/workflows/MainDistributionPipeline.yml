@@ -4,12 +4,24 @@
 name: Main Extension Distribution Pipeline
 on:
   push:
+    branches: [main, v1.5-variegata]
+    tags: ['v[0-9]+*']
+    paths-ignore:
+      - 'docs/**'
+      - 'localdocs/**'
+      - 'README.md'
+      - '*.md'
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - 'localdocs/**'
+      - 'README.md'
+      - '*.md'
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' && github.sha || '' }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   duckdb-stable-build:
@@ -20,7 +32,10 @@ jobs:
       ci_tools_version: v1.5-variegata
       extension_name: miint
       extra_toolchains: 'rust'
-      exclude_archs: 'windows_amd64_rtools;windows_amd64'
+      # Always exclude: windows MSVC (broken), windows_amd64_rtools, osx_amd64 (Intel mac, sunsetting).
+      # Additionally exclude windows_amd64_mingw on pull_request — mingw runs on push to
+      # main/v1.5-variegata/tags so release candidates still cover it.
+      exclude_archs: ${{ github.event_name == 'pull_request' && 'windows_amd64_rtools;windows_amd64;osx_amd64;windows_amd64_mingw' || 'windows_amd64_rtools;windows_amd64;osx_amd64' }}
 
   test-with-bowtie2:
     name: Test with Bowtie2
@@ -86,6 +101,13 @@ jobs:
         with:
           vcpkgGitCommitId: ce613c41372b23b1f51333815feb3edd87ef8a8b
 
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        continue-on-error: true
+        with:
+          key: ccache-test-with-bowtie2
+          max-size: 1G
+
       - name: Build extension
         run: make release
 
@@ -121,6 +143,13 @@ jobs:
         uses: lukka/run-vcpkg@v11.1
         with:
           vcpkgGitCommitId: ce613c41372b23b1f51333815feb3edd87ef8a8b
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        continue-on-error: true
+        with:
+          key: ccache-test-wasm-compatible
+          max-size: 1G
 
       - name: Build extension (HDF5=OFF, Bowtie2=OFF)
         run: EXT_FLAGS="-DMIINT_ENABLE_HDF5=OFF -DMIINT_ENABLE_BOWTIE2=OFF" make release
@@ -220,6 +249,13 @@ jobs:
         uses: lukka/run-vcpkg@v11.1
         with:
           vcpkgGitCommitId: 84bab45d415d22042bd0b9081aea57f362da3f35
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        continue-on-error: true
+        with:
+          key: ccache-test-wasm-load
+          max-size: 2G
 
       - name: Build WASM extension
         run: ./scripts/build_wasm.sh --build-only
