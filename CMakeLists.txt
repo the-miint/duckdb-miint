@@ -31,6 +31,16 @@ if(APPLE)
     set(MIINT_ENABLE_CURL OFF)
     message(STATUS "Apple detected: disabling libcurl streaming transport (vsearch+OpenSSL symbol clash)")
 endif()
+# vcpkg's libcurl port for wasm32-emscripten is not built with -pthread,
+# so its object files lack atomics/bulk-memory features. wasm_threads links
+# with --shared-memory which requires those features, so wasm-ld rejects the
+# port. wasm_eh / wasm_mvp don't use shared memory and link fine. Rebuilding
+# vcpkg libcurl with pthread is a port-level change; cheaper to drop the
+# streaming transport on wasm_threads (file:// + Aspera paths still work).
+if(EMSCRIPTEN AND (CMAKE_CXX_FLAGS MATCHES "-pthread" OR DUCKDB_EXPLICIT_PLATFORM STREQUAL "wasm_threads"))
+    set(MIINT_ENABLE_CURL OFF)
+    message(STATUS "Emscripten wasm_threads detected: disabling libcurl (vcpkg port not built with -pthread)")
+endif()
 if(MIINT_ENABLE_CURL)
     # Try VCPKG-style CONFIG package first (production builds), fall back
     # to the system FindCURL Module (apt-installed libcurl4-openssl-dev,
