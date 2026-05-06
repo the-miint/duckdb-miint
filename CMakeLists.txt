@@ -569,6 +569,11 @@ if(MIINT_ENABLE_SORTMERNA)
 
     # alp's sources use the deprecated `register` keyword, which is a hard
     # error on Clang 16+. Suppress it so the library still compiles.
+    # The other -Wno-* flags silence cosmetic warnings from upstream
+    # sortmerna/cmph/alp code (type-punned pointer casts, intentional
+    # switch fall-through without [[fallthrough]], unchecked fread
+    # return values). All would require upstream patches to fix properly.
+    set(SORTMERNA_WARNING_SUPPRESSIONS "-Wno-register -Wno-strict-aliasing -Wno-implicit-fallthrough -Wno-unused-result")
     ExternalProject_Add(
         sortmerna_build
         SOURCE_DIR ${SORTMERNA_SRC_DIR}
@@ -576,7 +581,8 @@ if(MIINT_ENABLE_SORTMERNA)
         CMAKE_ARGS
             -DCMAKE_BUILD_TYPE=Release
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-            -DCMAKE_CXX_FLAGS=-Wno-register
+            -DCMAKE_CXX_FLAGS=${SORTMERNA_WARNING_SUPPRESSIONS}
+            -DCMAKE_C_FLAGS=${SORTMERNA_WARNING_SUPPRESSIONS}
             -DWITH_TESTS=OFF
             -DCONCURRENTQUEUE_HOME=${CONCURRENTQUEUE_HOME}
             -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
