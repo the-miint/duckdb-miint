@@ -289,6 +289,17 @@ void ValidateActions(const SubmissionSpec &env) {
 		                         " with target_accession/target_refname must not carry body content "
 		                         "(projects/samples/experiments/runs); the target is the entire payload");
 	}
+
+	// hold_until_date is only meaningful with ADD (forward-dated submission)
+	// or HOLD (post-hoc embargo). Setting it on CANCEL/RELEASE/MODIFY/VALIDATE
+	// is silently ignored by the wire format, which would otherwise let a
+	// caller mistakenly populate `outcome.hold_until_date` and then write
+	// it to submission_log even though it had no effect on the server.
+	if (!env.hold_until_date.empty() && env.action != ENAAction::ADD && env.action != ENAAction::HOLD) {
+		throw std::runtime_error(std::string("ENA envelope: ") + ActionName(env.action) +
+		                         " action does not take a hold_until_date "
+		                         "(only ADD and HOLD do)");
+	}
 }
 
 void ValidateExperimentSpec(const ExperimentSpec &e) {

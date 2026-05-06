@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include "ena_post_fn.hpp"
+
 #include <string>
 #include <vector>
 
@@ -20,6 +22,19 @@ struct CapturedPost {
 	std::string password;
 	std::string content_type;
 };
+
+// Build a post functor that captures the request into `captured` and
+// returns a fixed `response`. Tests inspect `captured` after the call.
+// Use this for tests where the response body is fixed independent of
+// request shape; the existing per-table tests build their response inline
+// because they want it to depend on the captured aliases.
+inline miint::ENAPostFn StubPost(CapturedPost &captured, const std::string &response) {
+	return [&captured, response](const std::string &url, const std::string &body, const std::string &user,
+	                             const std::string &password, const std::string &content_type) {
+		captured = {url, body, user, password, content_type};
+		return response;
+	};
+}
 
 struct ReceiptObjectFixture {
 	std::string element; // PROJECT / SAMPLE / EXPERIMENT / RUN
