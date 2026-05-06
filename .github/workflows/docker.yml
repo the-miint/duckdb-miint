@@ -65,6 +65,7 @@ jobs:
           build-args: |
             DUCKDB_VERSION=${{ steps.duckdb.outputs.version }}
           cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Smoke test
         run: |
