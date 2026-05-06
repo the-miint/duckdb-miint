@@ -32,7 +32,19 @@ if(APPLE)
     message(STATUS "Apple detected: disabling libcurl streaming transport (vsearch+OpenSSL symbol clash)")
 endif()
 if(MIINT_ENABLE_CURL)
-    find_package(CURL CONFIG REQUIRED)
+    # Try VCPKG-style CONFIG package first (production builds), fall back
+    # to the system FindCURL Module (apt-installed libcurl4-openssl-dev,
+    # macOS Homebrew, etc.). Soft-disable if neither is available so the
+    # tidy / no-vcpkg CI lanes don't fail at configure time before tidy
+    # has a chance to run.
+    find_package(CURL CONFIG QUIET)
+    if(NOT CURL_FOUND)
+        find_package(CURL QUIET)
+    endif()
+    if(NOT CURL_FOUND)
+        message(STATUS "libcurl not found (no VCPKG package, no system FindCURL); disabling MIINT_ENABLE_CURL")
+        set(MIINT_ENABLE_CURL OFF)
+    endif()
 endif()
 
 # Optional feature flags for WASM-compatible builds
