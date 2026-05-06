@@ -2,6 +2,7 @@
 
 #include <catch2/catch_all.hpp>
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -12,8 +13,12 @@ namespace {
 // Helper: write a file with the given content, return its path.
 // Caller is responsible for cleanup via std::remove.
 std::string WriteTempPwFile(const std::string &content) {
-	std::string path =
-	    std::string("/tmp/miint_test_pwfile_") + std::to_string(::getpid()) + "_" + std::to_string(rand());
+	// Use an atomic counter for uniqueness instead of getpid() — getpid() is
+	// not portably available under Emscripten/WASM, and process-level uniqueness
+	// is unnecessary for in-process unit tests.
+	static std::atomic<unsigned long> counter {0};
+	std::string path = std::string("/tmp/miint_test_pwfile_") + std::to_string(counter.fetch_add(1)) + "_" +
+	                   std::to_string(rand());
 	std::ofstream f(path);
 	f << content;
 	f.close();
