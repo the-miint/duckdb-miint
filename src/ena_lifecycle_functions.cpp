@@ -26,28 +26,16 @@ namespace miint {
 
 namespace {
 
-using duckdb::AttachedDatabase;
 using duckdb::BinderException;
-using duckdb::CatalogTransaction;
 using duckdb::ClientContext;
-using duckdb::DatabaseManager;
 using duckdb::DataChunk;
 using duckdb::ExtensionLoader;
-using duckdb::FlatVector;
 using duckdb::FunctionData;
 using duckdb::GlobalTableFunctionState;
 using duckdb::InvalidInputException;
-using duckdb::KeyValueSecret;
-using duckdb::ListVector;
 using duckdb::LogicalType;
 using duckdb::make_uniq;
-using duckdb::OperatorResultType;
-using duckdb::optional_ptr;
-using duckdb::SecretManager;
-using duckdb::SourceResultType;
 using duckdb::string;
-using duckdb::string_t;
-using duckdb::StringVector;
 using duckdb::TableFunction;
 using duckdb::TableFunctionBindInput;
 using duckdb::TableFunctionData;
@@ -56,46 +44,6 @@ using duckdb::TableFunctionInput;
 using duckdb::unique_ptr;
 using duckdb::Value;
 using duckdb::vector;
-
-// Look up the named ATTACHed database and return it iff its catalog is an
-// ENACatalog. Behaviour depends on whether the catalog name was the
-// (silent) default "ena" or explicitly requested by the user:
-//   - default + missing       → nullptr (one-shot CANCEL without ATTACH)
-//   - default + wrong type    → nullptr (something else named "ena" — silent)
-//   - explicit + missing      → throw (user expected logging; missing audit gap is invisible if silent)
-//   - explicit + wrong type   → throw (same reason)
-duckdb::ENACatalog *FindAttachedENACatalog(ClientContext &context, const string &caller, const string &catalog_name,
-                                           bool explicit_name) {
-	if (catalog_name.empty()) {
-		return nullptr;
-	}
-	auto &db_manager = DatabaseManager::Get(context);
-	auto db = db_manager.GetDatabase(context, catalog_name);
-	if (!db) {
-		if (explicit_name) {
-			throw InvalidInputException("%s: catalog '%s' is not attached", caller, catalog_name);
-		}
-		return nullptr;
-	}
-	auto &catalog = db->GetCatalog();
-	if (catalog.GetCatalogType() != "ena") {
-		if (explicit_name) {
-			throw InvalidInputException("%s: catalog '%s' is type '%s', not 'ena'", caller, catalog_name,
-			                            catalog.GetCatalogType());
-		}
-		return nullptr;
-	}
-	return &catalog.Cast<duckdb::ENACatalog>();
-}
-
-bool IsWhitespaceOnly(const string &s) {
-	for (char c : s) {
-		if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
-			return false;
-		}
-	}
-	return true;
-}
 
 struct LifecycleBindData : public TableFunctionData {
 	ENAAction action;
@@ -149,7 +97,7 @@ unique_ptr<FunctionData> BindLifecycle(ClientContext &, TableFunctionBindInput &
 	// already resolved the secret and built up Init state — failing in Bind
 	// gives the cleanest user feedback. Empty (`""`) is already caught by
 	// the required-parameter check above.
-	if (IsWhitespaceOnly(bd->accession)) {
+	if (duckdb::IsENAStringWhitespaceOnly(bd->accession)) {
 		throw BinderException("%s: 'accession' must not be whitespace-only", fn_name);
 	}
 
@@ -237,7 +185,7 @@ void ExecuteLifecycle(ClientContext &context, TableFunctionInput &data, DataChun
 	// when not attached (one-shot CANCEL from a no-ATTACH session). An
 	// explicitly-named catalog that's missing or wrong-typed throws so the
 	// audit gap can't go unnoticed.
-	if (auto *catalog = FindAttachedENACatalog(context, bd.fn_name, bd.catalog_name, bd.catalog_explicit)) {
+	if (auto *catalog = duckdb::FindAttachedENACatalog(context, bd.fn_name, bd.catalog_name, bd.catalog_explicit)) {
 		duckdb::ResolvedENACredentials log_creds = creds;
 		duckdb::SubmissionLogPayload payload;
 		payload.object_type = ""; // lifecycle ops aren't bound to a single object_type

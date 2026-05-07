@@ -86,4 +86,23 @@ struct SubmissionLogPayload {
 
 void RecordSubmissionLog(ENACatalog &catalog, const ResolvedENACredentials &creds, const SubmissionLogPayload &payload);
 
+// Look up the named ATTACHed database and return it iff its catalog is an
+// ENACatalog. Behaviour depends on whether the catalog name was the
+// (silent) default 'ena' or explicitly requested by the user via `catalog =>`:
+//   - default name + missing/wrong-type → nullptr (silent skip; matches the
+//     one-shot CANCEL/MODIFY UX where the user has no full ENA catalog
+//     attached).
+//   - explicit name + missing/wrong-type → throw InvalidInputException (the
+//     user asked for audit logging; failing silently would create an
+//     invisible audit gap).
+// `caller` is the user-facing function name — embedded in error messages
+// (e.g. "ena_modify_project: catalog 'foo' is not attached").
+ENACatalog *FindAttachedENACatalog(ClientContext &context, const string &caller, const string &catalog_name,
+                                   bool explicit_name);
+
+// True iff `s` contains only ASCII whitespace (or is empty). Used by the
+// table functions to bind-time-reject inputs like `accession => '   '`
+// which pass non-empty but would emit garbage to the server.
+bool IsENAStringWhitespaceOnly(const string &s);
+
 } // namespace duckdb

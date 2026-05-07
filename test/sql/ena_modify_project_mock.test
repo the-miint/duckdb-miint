@@ -1,0 +1,174 @@
+# name: test/sql/ena_modify_project_mock.test
+# description: ena_modify_project(...) table function — Webin V2 MODIFY action against a local mock
+# group: [sql]
+
+require miint
+
+require-env ENA_WEBIN_MOCK_URL
+
+require-env MIINT_ENA_PORTAL_URL_BASE
+
+require httpfs
+
+statement ok
+CREATE SECRET test_ena_modify_mock (
+    TYPE ENA,
+    USER 'Webin-99999',
+    PASSWORD 'mock-password',
+    ENDPOINT 'test',
+    ENDPOINT_URL '${ENA_WEBIN_MOCK_URL}'
+);
+
+statement ok
+ATTACH '' AS ena (TYPE ENA, SECRET 'test_ena_modify_mock');
+
+# Happy path: MODIFY round-trips the user's accession. era_accession is
+# expected EMPTY — wwwdev returns <SUBMISSION accession=""/> on MODIFY (and
+# on lifecycle ops); confirmed live 2026-05-07. The mock mirrors that
+# behaviour so the test pins the real wire shape.
+query IIIII
+SELECT action, target, success, alias, era_accession
+FROM ena_modify_project(
+    secret => 'test_ena_modify_mock',
+    accession => 'PRJEB777001',
+    alias => 'modify-proj-alpha',
+    title => 'Updated title alpha',
+    description => 'Revised abstract',
+    project_type => 'METAGENOMIC');
+----
+MODIFY	PRJEB777001	true	modify-proj-alpha	(empty)
+
+# submission_log captures the request with action=MODIFY, target=accession,
+# object_aliases / object_accessions populated from the receipt.
+query IIIII
+SELECT object_type, action, target, object_aliases, object_accessions
+FROM ena.submission_log
+WHERE action = 'MODIFY' AND target = 'PRJEB777001'
+ORDER BY submitted_at DESC LIMIT 1;
+----
+projects	MODIFY	PRJEB777001	[modify-proj-alpha]	[PRJEB777001]
+
+# Alias-collision check is NOT run on MODIFY — the alias belongs to the user
+# already (that's the whole point of MODIFY). EXISTS_ aliases that the
+# collision-check mock would block on ADD must pass through.
+query III
+SELECT action, target, success
+FROM ena_modify_project(
+    secret => 'test_ena_modify_mock',
+    accession => 'PRJEB777002',
+    alias => 'EXISTS_already_yours',
+    title => 'still mine',
+    project_type => 'METAGENOMIC');
+----
+MODIFY	PRJEB777002	true
+
+# Required parameters: accession is non-optional.
+statement error
+SELECT * FROM ena_modify_project(
+    secret => 'test_ena_modify_mock',
+    alias => 'no-accession',
+    title => 't',
+    project_type => 'METAGENOMIC');
+----
+accession
+
+# Required parameters: alias is non-optional (the project_set still needs the
+# alias label even on MODIFY — Webin V2 wants both).
+statement error
+SELECT * FROM ena_modify_project(
+    secret => 'test_ena_modify_mock',
+    accession => 'PRJEB777003',
+    title => 't',
+    project_type => 'METAGENOMIC');
+----
+alias
+
+# Whitespace-only accession is rejected at bind time (consistent with the
+# lifecycle table functions' contract).
+statement error
+SELECT * FROM ena_modify_project(
+    secret => 'test_ena_modify_mock',
+    accession => '   ',
+    alias => 'a',
+    title => 't',
+    project_type => 'METAGENOMIC');
+----
+accession
+
+# title is required on MODIFY: AppendProject emits "title": unconditionally,
+# so omitting it would silently overwrite the existing title with empty.
+# Bind-time rejection makes the omission obvious to the user.
+statement error
+SELECT * FROM ena_modify_project(
+    secret => 'test_ena_modify_mock',
+    accession => 'PRJEB777099',
+    alias => 'a',
+    project_type => 'METAGENOMIC');
+----
+title
+
+# Empty-string title is also rejected (same reason — the bind-time check
+# catches both "user forgot title" and "user explicitly passed ''").
+statement error
+SELECT * FROM ena_modify_project(
+    secret => 'test_ena_modify_mock',
+    accession => 'PRJEB777099',
+    alias => 'a',
+    title => '',
+    project_type => 'METAGENOMIC');
+----
+title
+
+# Failure path: alias containing FAIL triggers the mock's success="false" trigger.
+# A failed MODIFY still records to submission_log with success=false.
+statement error
+SELECT * FROM ena_modify_project(
+    secret => 'test_ena_modify_mock',
+    accession => 'PRJEB777004',
+    alias => 'modify-FAIL-alias',
+    title => 't',
+    project_type => 'METAGENOMIC');
+----
+mock validation failure
+
+query III
+SELECT action, target, success
+FROM ena.submission_log
+WHERE NOT success AND action = 'MODIFY'
+ORDER BY submitted_at DESC LIMIT 1;
+----
+MODIFY	PRJEB777004	false
+
+# Default catalog 'ena' is used for the audit log (same convention as the
+# lifecycle table functions). Explicit catalog must point at an attached
+# ENACatalog or throw — we exercise the explicit-correct case here.
+query III
+SELECT action, target, success
+FROM ena_modify_project(
+    secret => 'test_ena_modify_mock',
+    accession => 'PRJEB777005',
+    alias => 'modify-explicit-catalog',
+    title => 't',
+    project_type => 'METAGENOMIC',
+    catalog => 'ena');
+----
+MODIFY	PRJEB777005	true
+
+# Explicit catalog name that isn't attached must throw — the user asked for
+# audit logging and a silent skip would leave an invisible gap.
+statement error
+SELECT * FROM ena_modify_project(
+    secret => 'test_ena_modify_mock',
+    accession => 'PRJEB777006',
+    alias => 'modify-bad-catalog',
+    title => 't',
+    project_type => 'METAGENOMIC',
+    catalog => 'nonexistent_catalog');
+----
+nonexistent_catalog
+
+statement ok
+DETACH ena;
+
+statement ok
+DROP SECRET test_ena_modify_mock;

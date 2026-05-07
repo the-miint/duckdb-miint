@@ -322,6 +322,40 @@ void ValidateActions(const SubmissionSpec &env) {
 		                         " action does not take a hold_until_date "
 		                         "(only ADD and HOLD do)");
 	}
+
+	// Per-object accessions are required on MODIFY (Webin V2 needs both
+	// alias and accession on the project/sample/... element to identify the
+	// already-registered object) and meaningless on ADD (the server
+	// assigns the accession). Setting an accession on ADD is almost
+	// certainly a programmer error — the server would emit a confusing
+	// "alias exists with accession X" message; surface it here instead.
+	// VALIDATE is allowed either way: it's a dry-run for whatever real
+	// action the caller is preparing. CANCEL/RELEASE/HOLD don't carry
+	// body objects so the loops are no-ops.
+	//
+	// L4a scope: only `ProjectSpec` carries an `accession` field today.
+	// When L4b/c/d add `accession` to SampleSpec / ExperimentSpec / RunSpec
+	// (one phase per object kind), extend the loops below to iterate
+	// env.samples / env.experiments / env.runs the same way. The asymmetry
+	// is intentional and tracked here so a missing extension can't let an
+	// ADD-with-accession sample slip through silently and surface as a
+	// confusing server error.
+	if (env.action == ENAAction::ADD) {
+		for (const auto &p : env.projects) {
+			if (!p.accession.empty()) {
+				throw std::runtime_error("ENA envelope: ADD must not set an accession on a project (alias '" + p.alias +
+				                         "'); the server assigns the accession on ADD");
+			}
+		}
+	}
+	if (env.action == ENAAction::MODIFY) {
+		for (const auto &p : env.projects) {
+			if (p.accession.empty()) {
+				throw std::runtime_error("ENA envelope: MODIFY requires accession on project '" + p.alias +
+				                         "'; the server uses it to identify which already-registered object to update");
+			}
+		}
+	}
 }
 
 void ValidateExperimentSpec(const ExperimentSpec &e) {
@@ -390,6 +424,13 @@ void AppendProject(std::string &out, const ProjectSpec &p) {
 	out.push_back('{');
 	out.append("\"alias\":");
 	AppendJsonString(out, p.alias);
+	// MODIFY identifies the existing object by accession; ADD has no
+	// accession. Emit only when populated so the JSON shape stays minimal
+	// for the common ADD path.
+	if (!p.accession.empty()) {
+		out.append(",\"accession\":");
+		AppendJsonString(out, p.accession);
+	}
 	out.append(",\"title\":");
 	AppendJsonString(out, p.title);
 	// `description` is always emitted: wwwdev's XSD validator intermittently

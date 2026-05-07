@@ -13,11 +13,47 @@
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/uuid.hpp"
+#include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/database.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 
 namespace duckdb {
+
+ENACatalog *FindAttachedENACatalog(ClientContext &context, const string &caller, const string &catalog_name,
+                                   bool explicit_name) {
+	if (catalog_name.empty()) {
+		return nullptr;
+	}
+	auto &db_manager = DatabaseManager::Get(context);
+	auto db = db_manager.GetDatabase(context, catalog_name);
+	if (!db) {
+		if (explicit_name) {
+			throw InvalidInputException("%s: catalog '%s' is not attached", caller, catalog_name);
+		}
+		return nullptr;
+	}
+	auto &catalog = db->GetCatalog();
+	if (catalog.GetCatalogType() != "ena") {
+		if (explicit_name) {
+			throw InvalidInputException("%s: catalog '%s' is type '%s', not 'ena'", caller, catalog_name,
+			                            catalog.GetCatalogType());
+		}
+		return nullptr;
+	}
+	return &catalog.Cast<ENACatalog>();
+}
+
+bool IsENAStringWhitespaceOnly(const string &s) {
+	for (char c : s) {
+		if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+			return false;
+		}
+	}
+	return true;
+}
 
 bool IsENAValidateOnlyEnabled(ClientContext &context) {
 	// Threading: ClientContext access is not thread-safe across pipeline

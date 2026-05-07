@@ -819,6 +819,7 @@ set(EXTENSION_SOURCES
     src/ena_lifecycle_submit.cpp
     src/ena_lifecycle_functions.cpp
     src/ena_lifecycle_delete.cpp
+    src/ena_modify_functions.cpp
     src/ena_submission_log.cpp
     src/ena_storage.cpp
     src/ena_insert_common.cpp

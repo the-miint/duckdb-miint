@@ -66,6 +66,68 @@ TEST_CASE("ENA envelope: project with no description falls back to the title", "
 	CHECK(json.find("\"sequencingProject\":{}") != std::string::npos);
 }
 
+TEST_CASE("ENA envelope: MODIFY project emits the existing accession on the project element",
+          "[ena_envelope][modify]") {
+	// MODIFY in Webin V2 is "re-submit the full updated XML with the
+	// existing accession" (`<PROJECT alias="..." accession="PRJEB...">`).
+	// The accession identifies which already-registered object to update;
+	// without it the server has no way to disambiguate against the alias's
+	// possible reuse.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::ProjectSpec p;
+	p.alias = "gut-cohort-2026";
+	p.accession = "PRJEB123456";
+	p.title = "Adult gut microbiome cohort (revised)";
+	p.description = "Phase 1 collection — updated abstract";
+	p.project_type = "METAGENOMIC";
+	env.projects.push_back(p);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	CHECK(json.find("\"type\":\"MODIFY\"") != std::string::npos);
+	// Accession must appear right next to the alias (same JSON object) so
+	// the per-element binding is unambiguous to any reasonable parser.
+	CHECK(json.find("\"alias\":\"gut-cohort-2026\",\"accession\":\"PRJEB123456\"") != std::string::npos);
+	CHECK(json.find("\"title\":\"Adult gut microbiome cohort (revised)\"") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope: ADD with accession on a project is rejected at build time", "[ena_envelope][modify]") {
+	// On ADD the server assigns the accession; setting one on the spec is
+	// almost certainly a programmer error (mistakenly reusing a MODIFY-shaped
+	// spec on the ADD path). The server-side rejection would be confusing
+	// ("alias exists with accession X"); throw here so the diagnostic names
+	// the offending alias and the cause directly.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::ADD;
+	miint::ProjectSpec p;
+	p.alias = "fresh-project";
+	p.accession = "PRJEB999"; // bogus pre-fill
+	p.title = "t";
+	p.project_type = "METAGENOMIC";
+	env.projects.push_back(p);
+
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env),
+	                  Catch::Matchers::ContainsSubstring("ADD must not set an accession") &&
+	                      Catch::Matchers::ContainsSubstring("fresh-project"));
+}
+
+TEST_CASE("ENA envelope: MODIFY without accession on a project is rejected at build time", "[ena_envelope][modify]") {
+	// MODIFY needs the accession to identify the object — without it Webin V2
+	// can't disambiguate against a re-used alias. Catch missing accession at
+	// build time so the user gets a useful "you forgot the accession" message
+	// instead of a server-side "alias not found" half a round-trip later.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::ProjectSpec p;
+	p.alias = "needs-accession";
+	p.title = "t";
+	p.project_type = "METAGENOMIC";
+	env.projects.push_back(p);
+
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("MODIFY requires accession") &&
+	                                                     Catch::Matchers::ContainsSubstring("needs-accession"));
+}
+
 TEST_CASE("ENA envelope: umbrella project uses umbrellaProject marker", "[ena_envelope]") {
 	miint::SubmissionSpec env;
 	miint::ProjectSpec p;

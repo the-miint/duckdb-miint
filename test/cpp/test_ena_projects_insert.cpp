@@ -224,6 +224,56 @@ TEST_CASE("ENA projects insert: VALIDATE failure path surfaces error_messages an
 	REQUIRE(outcome.error_messages[0] == "missing required field 'taxon_id'");
 }
 
+TEST_CASE("ENA projects insert: MODIFY round-trips the user-supplied accession back into the row",
+          "[ena_projects_insert][modify]") {
+	// MODIFY: user provides the existing PRJEB on the spec, the envelope
+	// carries it on the project element, the receipt echoes it back.
+	// `outcome.rows[0].prjeb_accession` must reflect the user's input (no
+	// fabrication, no derivation from alias as the mock does for ADD).
+	CapturedPost captured;
+	auto post_fn = [&captured](const std::string &url, const std::string &body, const std::string &user,
+	                           const std::string &password, const std::string &content_type) {
+		captured = {url, body, user, password, content_type};
+		return MakeReceipt({{"p1", "PRJEB55555"}});
+	};
+
+	std::vector<ProjectSpec> projects = {{"p1", "Updated title", "Updated abstract", "METAGENOMIC", false}};
+	projects[0].accession = "PRJEB55555";
+	ENAProjectInsertOptions opts;
+	opts.endpoint_url = "http://mock.example/submit";
+	opts.user = "Webin-1";
+	opts.password = "pw";
+	opts.action = ENAAction::MODIFY;
+
+	auto outcome = SubmitProjectInsertOutcome(projects, opts, post_fn);
+	REQUIRE(outcome.success);
+	REQUIRE(outcome.rows.size() == 1);
+	REQUIRE(outcome.rows[0].alias == "p1");
+	REQUIRE(outcome.rows[0].prjeb_accession == "PRJEB55555");
+	REQUIRE(captured.body.find("\"type\":\"MODIFY\"") != std::string::npos);
+	REQUIRE(captured.body.find("\"accession\":\"PRJEB55555\"") != std::string::npos);
+}
+
+TEST_CASE("ENA projects insert: MODIFY failure receipt surfaces the server error", "[ena_projects_insert][modify]") {
+	auto post_fn = [](const std::string &, const std::string &, const std::string &, const std::string &,
+	                  const std::string &) {
+		return MakeReceipt({}, false, "PRJEB00000 not found in submission account");
+	};
+	std::vector<ProjectSpec> projects = {{"p1", "T", "D", "METAGENOMIC", false}};
+	projects[0].accession = "PRJEB00000";
+	ENAProjectInsertOptions opts;
+	opts.endpoint_url = "http://mock.example/submit";
+	opts.user = "Webin-1";
+	opts.password = "pw";
+	opts.action = ENAAction::MODIFY;
+
+	auto outcome = SubmitProjectInsertOutcome(projects, opts, post_fn);
+	REQUIRE_FALSE(outcome.success);
+	REQUIRE(outcome.rows.empty());
+	REQUIRE(outcome.error_messages.size() == 1);
+	REQUIRE_THAT(outcome.error_messages[0], Catch::Matchers::ContainsSubstring("PRJEB00000 not found"));
+}
+
 TEST_CASE("ENA projects insert: hold_until_date round-trips into the row", "[ena_projects_insert]") {
 	auto post_fn = [](const std::string &, const std::string &body, const std::string &, const std::string &,
 	                  const std::string &) {

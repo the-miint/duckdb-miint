@@ -67,6 +67,12 @@ struct ProjectSpec {
 	std::string description;  // optional
 	std::string project_type; // METAGENOMIC, WGS, ... — currently informational
 	bool is_umbrella = false;
+	// Existing PRJEB accession — required on MODIFY (Webin V2 needs both
+	// `alias` and `accession` on the project element to identify the
+	// already-registered object), ignored on ADD. The envelope builder emits
+	// `"accession":"…"` only when this is non-empty; an ADD with this set is
+	// silently passed through (server rejects the contradiction).
+	std::string accession;
 };
 
 struct SampleSpec {

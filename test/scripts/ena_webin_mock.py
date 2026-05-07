@@ -217,7 +217,12 @@ def _build_receipt(
             elif t in ("ADD", "MODIFY", "CANCEL", "RELEASE", "VALIDATE"):
                 action_name = t
 
-    objects: list[tuple[str, str]] = []
+    # Each tuple is (element, alias, user_accession). user_accession is the
+    # one the caller put on the body — present on MODIFY (Webin V2 wants
+    # both alias and accession on the project/sample/... element to identify
+    # the existing object). Empty on ADD; the mock then derives a deterministic
+    # accession from alias via _accession_for.
+    objects: list[tuple[str, str, str]] = []
     for kind_plural, kind_singular in (
         ("projects", "PROJECT"),
         ("samples", "SAMPLE"),
@@ -226,7 +231,7 @@ def _build_receipt(
         ("analyses", "ANALYSIS"),
     ):
         for obj in envelope.get(kind_plural, []) or []:
-            objects.append((kind_singular, obj.get("alias", "")))
+            objects.append((kind_singular, obj.get("alias", ""), obj.get("accession", "")))
 
     # Target-based failure trigger for lifecycle ops (which have no body
     # objects to encode FAIL into): a target containing "FAIL" produces a
@@ -235,7 +240,8 @@ def _build_receipt(
     target_fail = "FAIL" in target if target else False
     is_lifecycle = bool(target)
     is_validate = action_name == "VALIDATE"
-    body_fail = any("FAIL" in alias for _, alias in objects)
+    is_modify = action_name == "MODIFY"
+    body_fail = any("FAIL" in alias for _, alias, _ in objects)
     # `success` here is the boolean returned to callers as the round-trip
     # verdict (and matches `outcome.success` in the C++ lifecycle code:
     # success iff no <ERROR> elements were emitted). The XML attribute on
@@ -260,10 +266,19 @@ def _build_receipt(
     # alias trigger continues to work. ADD/MODIFY/lifecycle paths still emit
     # the per-object children as before.
     if not is_validate:
-        for kind_singular, alias in objects:
+        for kind_singular, alias, user_accession in objects:
             if not alias:
                 continue
-            primary, ext = _accession_for(alias, kind_singular)
+            # On MODIFY we echo the user-supplied accession verbatim — the
+            # whole point of MODIFY is "update the object at THIS accession".
+            # On ADD we fall back to the deterministic alias-derived
+            # accession so callers can assert specific values without
+            # parsing.
+            if is_modify and user_accession:
+                primary = user_accession
+                _, ext = _accession_for(alias, kind_singular)
+            else:
+                primary, ext = _accession_for(alias, kind_singular)
             parts.append(
                 f'<{kind_singular} accession="{_xml_escape(primary)}" '
                 f'alias="{_xml_escape(alias)}" status="PRIVATE"'
@@ -276,12 +291,20 @@ def _build_receipt(
             )
             parts.append(f'<EXT_ID accession="{_xml_escape(ext)}" type="{ext_type}"/>')
             parts.append(f'</{kind_singular}>')
-    parts.append('<SUBMISSION accession="ERA1234567" alias="mock"/>')
+    # wwwdev empirically emits an EMPTY <SUBMISSION accession=""/> on
+    # cross-submission no-new-accession actions: lifecycle (CANCEL / RELEASE /
+    # HOLD), MODIFY, and confirmed live on 2026-05-07 for both. Mirror that so
+    # tests pin the real wire shape rather than a fabricated ERA stamp. ADD
+    # and VALIDATE still produce a SUBMISSION accession — mock keeps a stable
+    # ERA value for those so callers can assert it round-trips.
+    submission_empty = is_lifecycle or is_modify
+    submission_acc = "" if submission_empty else "ERA1234567"
+    parts.append(f'<SUBMISSION accession="{submission_acc}" alias="mock"/>')
     parts.append(f'<ACTIONS>{action_name}</ACTIONS>')
     # Failure-path messages (always <ERROR>, mirrors ENA).
     if not success:
         parts.append('<MESSAGES>')
-        for _, alias in objects:
+        for _, alias, _ in objects:
             if "FAIL" in alias:
                 parts.append(f'<ERROR>mock validation failure for alias ' f'{_xml_escape(alias)}</ERROR>')
         if target_fail:
