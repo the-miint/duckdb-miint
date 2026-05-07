@@ -48,7 +48,26 @@ LifecycleOutcome SubmitLifecycle(ENAAction action, const LifecycleSubmitOptions 
 		outcome.error_messages.push_back(std::string("ENA receipt parse failure: ") + e.what());
 		return outcome;
 	}
-	outcome.success = receipt.success;
+	// ENA wwwdev sets `success="false"` on EVERY cross-submission lifecycle
+	// receipt — verified live on 2026-05-07 against PRJEB112641 where a
+	// successful CANCEL returned:
+	//     <RECEIPT success="false">
+	//       <MESSAGES>
+	//         <INFO>STUDY accession "ERP…" is set to cancelled status.</INFO>
+	//         <INFO>PROJECT accession "PRJEB…" is set to cancelled status.</INFO>
+	//       </MESSAGES>
+	//     </RECEIPT>
+	// The receipt's `success` attribute means "did this submission produce
+	// new accessions", not "did the action take effect". Lifecycle ops never
+	// produce accessions, so `success` is always false. The actual outcome
+	// is signalled by which sibling element is present:
+	//     <ERROR>  → real failure (e.g., refname targeting an alias that
+	//                doesn't appear in this submission)
+	//     <INFO>   → real success ("set to cancelled / released / etc.")
+	// Treat the action as successful iff no <ERROR> elements were emitted.
+	// receipt.info_messages stays available on `outcome.raw_receipt` for any
+	// caller that wants the full text — submission_log preserves it.
+	outcome.success = receipt.errors.empty();
 	outcome.era_accession = receipt.submission_accession;
 	outcome.error_messages = receipt.errors;
 	return outcome;

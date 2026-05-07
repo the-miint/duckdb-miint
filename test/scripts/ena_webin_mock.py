@@ -229,15 +229,29 @@ def _build_receipt(
             objects.append((kind_singular, obj.get("alias", "")))
 
     # Target-based failure trigger for lifecycle ops (which have no body
-    # objects to encode FAIL into): a target containing "FAIL" produces
-    # success=false. Mirrors the alias-based trigger for ADD-style submissions.
+    # objects to encode FAIL into): a target containing "FAIL" produces a
+    # failure receipt. Mirrors the alias-based trigger for ADD-style
+    # submissions.
     target_fail = "FAIL" in target if target else False
-    success = (not target_fail) and not any("FAIL" in alias for _, alias in objects)
+    is_lifecycle = bool(target)
+    body_fail = any("FAIL" in alias for _, alias in objects)
+    # `success` here is the boolean returned to callers as the round-trip
+    # verdict (and matches `outcome.success` in the C++ lifecycle code:
+    # success iff no <ERROR> elements were emitted). The XML attribute on
+    # <RECEIPT> follows real ENA semantics — see comments below.
+    success = not target_fail and not body_fail
+    # On wwwdev cross-submission lifecycle responses (CANCEL / RELEASE /
+    # HOLD on an existing accession), ENA sets RECEIPT @success="false"
+    # even when the action took effect — the attribute means "did this
+    # submission produce new accessions", which is always false for
+    # lifecycle ops. The actual outcome is in <INFO>/<ERROR> children.
+    # Match that behaviour here so SubmitLifecycle's
+    # `success = errors.empty()` interpretation gets exercised by tests.
+    receipt_success_attr = "false" if is_lifecycle else ("true" if success else "false")
     parts: list[str] = []
     parts.append('<?xml version="1.0" encoding="UTF-8"?>')
     parts.append(
-        f'<RECEIPT receiptDate="2026-05-03T12:00:00.000Z" '
-        f'submissionFile="mock" success="{"true" if success else "false"}">'
+        f'<RECEIPT receiptDate="2026-05-03T12:00:00.000Z" ' f'submissionFile="mock" success="{receipt_success_attr}">'
     )
     for kind_singular, alias in objects:
         if not alias:
@@ -257,6 +271,7 @@ def _build_receipt(
         parts.append(f'</{kind_singular}>')
     parts.append('<SUBMISSION accession="ERA1234567" alias="mock"/>')
     parts.append(f'<ACTIONS>{action_name}</ACTIONS>')
+    # Failure-path messages (always <ERROR>, mirrors ENA).
     if not success:
         parts.append('<MESSAGES>')
         for _, alias in objects:
@@ -264,6 +279,14 @@ def _build_receipt(
                 parts.append(f'<ERROR>mock validation failure for alias ' f'{_xml_escape(alias)}</ERROR>')
         if target_fail:
             parts.append(f'<ERROR>mock validation failure for target {_xml_escape(target)}</ERROR>')
+        parts.append('</MESSAGES>')
+    elif is_lifecycle:
+        # Success-path lifecycle: emit <INFO> mirroring ENA's wwwdev format
+        # ("...is set to cancelled/released/private status."). SubmitLifecycle
+        # treats this as success because errors.empty() is true.
+        status_word = {"CANCEL": "cancelled", "RELEASE": "public", "HOLD": "private"}.get(action_name, "updated")
+        parts.append('<MESSAGES>')
+        parts.append(f'<INFO>accession "{_xml_escape(target)}" is set to {status_word} status.</INFO>')
         parts.append('</MESSAGES>')
     parts.append('</RECEIPT>')
     return "".join(parts), success

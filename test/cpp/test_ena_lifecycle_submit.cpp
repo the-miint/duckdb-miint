@@ -13,18 +13,29 @@
 
 #include <catch2/catch_all.hpp>
 
+#include <cstring>
+
 using miint_test::CapturedPost;
 using miint_test::StubPost;
 
 namespace {
 
-// Build a targeted-action success receipt (no per-object children — CANCEL
-// and RELEASE both use this shape; HOLD adds a SAMPLE entry separately).
+// Build a targeted-action success receipt that mirrors what wwwdev actually
+// returns (verified live 2026-05-07 against PRJEB112641): RECEIPT
+// @success="false" because no new accessions are assigned, with an <INFO>
+// child confirming the action took effect. SubmitLifecycle classifies this
+// as success because there are no <ERROR> elements. No <SUBMISSION> child
+// — lifecycle ops on existing objects don't carry a submission accession.
 std::string LifecycleSuccessReceipt(const char *action) {
+	const char *status_word = std::strcmp(action, "CANCEL") == 0    ? "cancelled"
+	                          : std::strcmp(action, "RELEASE") == 0 ? "public"
+	                          : std::strcmp(action, "HOLD") == 0    ? "private"
+	                                                                : "updated";
 	std::string out = R"(<?xml version="1.0" encoding="UTF-8"?>
-<RECEIPT receiptDate="2026-05-06T12:00:00.000Z" submissionFile="mock.xml" success="true">
-    <SUBMISSION accession="ERA99999"/>
-    <ACTIONS>)";
+<RECEIPT receiptDate="2026-05-06T12:00:00.000Z" submissionFile="mock.xml" success="false">
+    <MESSAGES><INFO>accession is set to )";
+	out += status_word;
+	out += " status.</INFO></MESSAGES>\n    <ACTIONS>";
 	out += action;
 	out += "</ACTIONS></RECEIPT>";
 	return out;
@@ -46,7 +57,9 @@ TEST_CASE("SubmitLifecycle: CANCEL success emits target= and parses ERA accessio
 	CHECK(outcome.success == true);
 	CHECK(outcome.action == miint::ENAAction::CANCEL);
 	CHECK(outcome.target == "ERS123456");
-	CHECK(outcome.era_accession == "ERA99999");
+	// Lifecycle receipts on existing objects don't carry a submission
+	// accession — the receipt has no <SUBMISSION> child.
+	CHECK(outcome.era_accession.empty());
 	CHECK(outcome.error_messages.empty());
 	// Wire-form sanity: XML payload includes the right <CANCEL target=…/>
 	CHECK(captured.content_type == "application/xml");
@@ -138,6 +151,40 @@ TEST_CASE("SubmitLifecycle: refname is used when accession is empty", "[ena_life
 	CHECK(outcome.success == true);
 	CHECK(outcome.target == "my-sample-alias");
 	CHECK(captured.body.find(R"(<CANCEL target="my-sample-alias"/>)") != std::string::npos);
+}
+
+TEST_CASE("SubmitLifecycle: wwwdev returns success=\"false\" with <INFO> on a successful CANCEL",
+          "[ena_lifecycle_submit][cancel]") {
+	// Real wwwdev shape verified live on 2026-05-07 against PRJEB112641:
+	// the RECEIPT @success attribute is always "false" for cross-submission
+	// lifecycle (no new accessions assigned). The actual outcome is in
+	// <INFO> children. SubmitLifecycle treats the action as successful iff
+	// the receipt has no <ERROR> elements.
+	miint::LifecycleSubmitOptions opts;
+	opts.endpoint_url = "https://wwwdev.ebi.ac.uk/ena/submit/webin-v2/submit";
+	opts.user = "Webin-1";
+	opts.password = "pw";
+	opts.target.accession = "PRJEB112641";
+
+	const std::string response = R"(<?xml version="1.0" encoding="UTF-8"?>
+<RECEIPT receiptDate="2026-05-07T16:42:55.855+01:00" success="false">
+    <MESSAGES>
+        <INFO>STUDY accession "ERP193165" is set to cancelled status.</INFO>
+        <INFO>PROJECT accession "PRJEB112641" is set to cancelled status.</INFO>
+    </MESSAGES>
+    <ACTIONS>CANCEL</ACTIONS>
+</RECEIPT>)";
+
+	CapturedPost captured;
+	auto outcome = miint::SubmitLifecycle(miint::ENAAction::CANCEL, opts, StubPost(captured, response));
+
+	CHECK(outcome.success == true);
+	CHECK(outcome.error_messages.empty());
+	CHECK(outcome.target == "PRJEB112641");
+	// Lifecycle receipts on existing objects carry no <SUBMISSION> child;
+	// pin this so a future change that started forwarding era_accession
+	// from somewhere else would surface here.
+	CHECK(outcome.era_accession.empty());
 }
 
 TEST_CASE("SubmitLifecycle: malformed receipt yields outcome.success=false with parse error",
