@@ -11,6 +11,10 @@ namespace miint {
 struct ClusterParams {
 	double id = 0.0; // minimum identity threshold (0.0-1.0)
 	int strand = 1;  // 1 = plus only, 2 = both strands
+	// vsearch's internal thread pool for cluster_assign_batch. 0 = vsearch
+	// auto-detect (= all physical cores). Callers normally pass DuckDB's
+	// configured thread count so `SET threads=N` is honored.
+	int threads = 0;
 };
 
 // Single clustering assignment result.

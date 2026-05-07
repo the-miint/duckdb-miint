@@ -12,6 +12,10 @@ struct SearchParams {
 	double id = 0.0;     // minimum identity threshold (0.0-1.0)
 	int maxaccepts = 1;  // max accepted hits per query
 	int maxrejects = 32; // max rejected targets before stopping
+	// vsearch's internal thread pool for search_batch. 0 means "use vsearch's
+	// auto-detect" (= all physical cores). Callers normally pass DuckDB's
+	// configured thread count so that `SET threads=N` is honored.
+	int threads = 0;
 };
 
 // Single search hit result.

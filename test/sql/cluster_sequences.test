@@ -40,6 +40,22 @@ SELECT * FROM cluster_sequences_vsearch('dummy_seqs', id:=0.97, strand:='invalid
 ----
 'plus' or 'both'
 
+# Invalid threads (zero / negative / above vsearch's 1024 ceiling)
+statement error
+SELECT * FROM cluster_sequences_vsearch('dummy_seqs', id:=0.97, threads:=0);
+----
+>= 1 and <= 1024
+
+statement error
+SELECT * FROM cluster_sequences_vsearch('dummy_seqs', id:=0.97, threads:=-1);
+----
+>= 1 and <= 1024
+
+statement error
+SELECT * FROM cluster_sequences_vsearch('dummy_seqs', id:=0.97, threads:=2048);
+----
+>= 1 and <= 1024
+
 # Empty table
 statement ok
 CREATE TABLE empty_seqs AS SELECT read_id, sequence1 FROM dummy_seqs WHERE 1=0;
@@ -92,6 +108,60 @@ FROM cluster_sequences_vsearch('ident_seqs', id:=0.97)
 WHERE read_id = 's1';
 ----
 s1	1	0	s1	100.0	(empty)	0
+
+# Explicit threads:=N produces identical results.
+query TII
+SELECT read_id, is_centroid::int, cluster_id
+FROM cluster_sequences_vsearch('div_seqs', id:=0.97, threads:=1)
+ORDER BY read_id;
+----
+a	1	0
+b	1	1
+c	1	2
+
+query TII
+SELECT read_id, is_centroid::int, cluster_id
+FROM cluster_sequences_vsearch('div_seqs', id:=0.97, threads:=4)
+ORDER BY read_id;
+----
+a	1	0
+b	1	1
+c	1	2
+
+# threads:=1024 (vsearch's hard ceiling) is accepted at bind time. Clustering
+# is sequential by design (each centroid must be indexed before the next
+# query); only the per-query candidate scan is parallelizable internally.
+query TII
+SELECT read_id, is_centroid::int, cluster_id
+FROM cluster_sequences_vsearch('div_seqs', id:=0.97, threads:=1024)
+ORDER BY read_id;
+----
+a	1	0
+b	1	1
+c	1	2
+
+# Larger input set (>4 sequences) with threads:=4 — exercises vsearch's
+# parallel candidate scan during the assign phase.
+statement ok
+CREATE TABLE many_seqs AS
+SELECT 's' || (i + 1)::VARCHAR AS read_id,
+       CASE WHEN i % 3 = 0 THEN 'ATCGATCGATCGATCGATCGATCG'
+            WHEN i % 3 = 1 THEN 'GGCCTTAAGGCCTTAAGGCCTTAA'
+            ELSE 'AAAAAAAACCCCCCCCGGGGGGGG' END AS sequence1
+FROM range(0, 12) t(i);
+
+query I
+SELECT count(DISTINCT cluster_id)
+FROM cluster_sequences_vsearch('many_seqs', id:=0.97, threads:=4);
+----
+3
+
+# Default-threads path (no explicit threads:=N) returns identical results.
+query I
+SELECT count(DISTINCT cluster_id)
+FROM cluster_sequences_vsearch('many_seqs', id:=0.97);
+----
+3
 
 # Non-centroids have a CIGAR string
 query T
@@ -238,6 +308,9 @@ DROP TABLE ident_seqs;
 
 statement ok
 DROP TABLE div_seqs;
+
+statement ok
+DROP TABLE many_seqs;
 
 statement ok
 DROP VIEW div_view;

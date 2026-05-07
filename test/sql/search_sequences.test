@@ -61,6 +61,22 @@ SELECT * FROM search_sequences_vsearch('dummy_queries', db:='dummy_refs', id:=0.
 ----
 >= 1
 
+# Invalid threads (zero / negative / above vsearch's 1024 ceiling)
+statement error
+SELECT * FROM search_sequences_vsearch('dummy_queries', db:='dummy_refs', id:=0.97, threads:=0);
+----
+>= 1 and <= 1024
+
+statement error
+SELECT * FROM search_sequences_vsearch('dummy_queries', db:='dummy_refs', id:=0.97, threads:=-2);
+----
+>= 1 and <= 1024
+
+statement error
+SELECT * FROM search_sequences_vsearch('dummy_queries', db:='dummy_refs', id:=0.97, threads:=1025);
+----
+>= 1 and <= 1024
+
 # Empty ref table
 statement ok
 CREATE TABLE empty_refs AS SELECT read_id, sequence1 FROM dummy_refs WHERE 1=0;
@@ -103,6 +119,63 @@ ORDER BY read_id;
 ----
 qA	refA	100.0	true
 qB	refB	100.0	true
+
+# Explicit threads:=N produces identical results (smoke test for the parameter
+# being plumbed through; we don't assert vsearch's actual thread count since
+# that's internal — but the query must succeed and return the same rows).
+query TTRI
+SELECT read_id, target_id, identity, accepted
+FROM search_sequences_vsearch('syn_queries', db:='syn_refs', id:=0.97, threads:=1)
+ORDER BY read_id;
+----
+qA	refA	100.0	true
+qB	refB	100.0	true
+
+query TTRI
+SELECT read_id, target_id, identity, accepted
+FROM search_sequences_vsearch('syn_queries', db:='syn_refs', id:=0.97, threads:=4)
+ORDER BY read_id;
+----
+qA	refA	100.0	true
+qB	refB	100.0	true
+
+# threads:=1024 (vsearch's hard ceiling) is accepted at bind time. We don't
+# actually verify 1024 OS threads are spawned — vsearch clamps active threads
+# to min(queries, opt_threads), so with 2 queries this only spawns 2 anyway.
+query TTRI
+SELECT read_id, target_id, identity, accepted
+FROM search_sequences_vsearch('syn_queries', db:='syn_refs', id:=0.97, threads:=1024)
+ORDER BY read_id;
+----
+qA	refA	100.0	true
+qB	refB	100.0	true
+
+# Larger query set so threads:=4 has > 4 queries to dispatch — exercises the
+# parallel path (vsearch's thread pool only activates when queries > 1).
+statement ok
+CREATE TABLE many_queries AS
+SELECT 'q' || (i + 1)::VARCHAR AS read_id,
+       CASE WHEN i % 3 = 0 THEN 'ATCGATCGATCGATCGATCGATCG'
+            WHEN i % 3 = 1 THEN 'GGCCTTAAGGCCTTAAGGCCTTAA'
+            ELSE 'AAAAAAAACCCCCCCCGGGGGGGG' END AS sequence1
+FROM range(0, 16) t(i);
+
+# All 16 queries should hit one of the 3 references.
+query I
+SELECT count(*)
+FROM search_sequences_vsearch('many_queries', db:='syn_refs', id:=0.97, threads:=4)
+WHERE accepted = true;
+----
+16
+
+# Default-threads path (no explicit threads:=N) returns identical results.
+# This validates the TaskScheduler::NumberOfThreads() default plumbing.
+query I
+SELECT count(*)
+FROM search_sequences_vsearch('many_queries', db:='syn_refs', id:=0.97)
+WHERE accepted = true;
+----
+16
 
 # Verify all output columns exist and have correct types
 query TTRIIIIIII
@@ -152,6 +225,9 @@ DROP TABLE syn_refs;
 
 statement ok
 DROP TABLE syn_queries;
+
+statement ok
+DROP TABLE many_queries;
 
 statement ok
 DROP TABLE div_queries;

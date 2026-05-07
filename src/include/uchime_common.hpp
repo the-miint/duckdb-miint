@@ -17,6 +17,12 @@ struct UchimeParams {
 	double mindiv = 0.8;
 	int mindiffs = 3;
 	double abskew = 2.0; // only used in de novo mode
+	// vsearch's internal thread pool for chimera_detect_batch (uchime_ref).
+	// 0 = vsearch auto-detect (= all physical cores). Callers normally pass
+	// DuckDB's configured thread count so `SET threads=N` is honored. Ignored
+	// in de novo mode, which is sequential by construction (one query per call,
+	// then index_sequence) — denovo always runs with opt_threads=1.
+	int threads = 0;
 };
 
 // Full UCHIME result for a single query (mirrors vsearch --uchimeout 18 columns).
