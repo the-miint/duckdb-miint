@@ -5,6 +5,7 @@
 #include "ena_storage.hpp"
 
 #include "ena_experiments_insert_op.hpp"
+#include "ena_lifecycle_delete.hpp"
 #include "ena_projects_insert_op.hpp"
 #include "ena_runs_insert_op.hpp"
 #include "ena_samples_insert_op.hpp"
@@ -282,6 +283,22 @@ void NotImplementedScanFn(ClientContext &, TableFunctionInput &, DataChunk &) {
 	throw NotImplementedException("ENA virtual table scan invoked unexpectedly");
 }
 
+// Carries a back-reference to the TableCatalogEntry so LogicalGet::GetTable()
+// can resolve. Required for DELETE binding (bind_delete.cpp checks GetTable()
+// and throws "Can only delete from base table" when it returns null).
+struct ENAVirtualScanBindData : public TableFunctionData {
+	explicit ENAVirtualScanBindData(TableCatalogEntry &table_p) : table(table_p) {
+	}
+	TableCatalogEntry &table;
+};
+
+BindInfo ENAVirtualScanGetBindInfo(const optional_ptr<FunctionData> bind_data) {
+	if (!bind_data) {
+		return BindInfo(ScanType::TABLE);
+	}
+	return BindInfo(bind_data->Cast<ENAVirtualScanBindData>().table);
+}
+
 } // namespace
 
 //===--------------------------------------------------------------------===//
@@ -304,9 +321,14 @@ TableFunction ENATableEntry::GetScanFunction(ClientContext &, unique_ptr<Functio
 		fn.projection_pushdown = false;
 		return fn;
 	}
-	bind_data = nullptr;
+	// Populate bind_data with a table back-reference and wire `get_bind_info`
+	// so LogicalGet::GetTable() resolves; the DELETE binder relies on this
+	// (otherwise it throws "Can only delete from base table" before our
+	// PlanDelete override gets a chance to surface a real diagnostic).
+	bind_data = make_uniq<ENAVirtualScanBindData>(*this);
 	TableFunction fn("ena_virtual_scan", {}, NotImplementedScanFn);
 	fn.bind = NotImplementedBind;
+	fn.get_bind_info = ENAVirtualScanGetBindInfo;
 	return fn;
 }
 
@@ -535,7 +557,15 @@ PhysicalOperator &ENACatalog::PlanInsert(ClientContext &context, PhysicalPlanGen
 
 PhysicalOperator &ENACatalog::PlanDelete(ClientContext &, PhysicalPlanGenerator &, LogicalDelete &,
                                          PhysicalOperator &) {
-	throw BinderException("ENA catalog: DELETE is not supported");
+	// Unreachable in practice: the 3-arg override below is what the planner
+	// actually calls. Kept as the pure-virtual implementation so the catalog
+	// type remains concrete; surfaces a loud signal if a future DuckDB
+	// refactor reroutes through the 4-arg path.
+	throw InternalException("ENACatalog::PlanDelete(4-arg) reached — should be handled by the 3-arg override");
+}
+
+PhysicalOperator &ENACatalog::PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op) {
+	return miint::PlanENALifecycleDelete(context, planner, *this, op);
 }
 
 PhysicalOperator &ENACatalog::PlanUpdate(ClientContext &, PhysicalPlanGenerator &, LogicalUpdate &,

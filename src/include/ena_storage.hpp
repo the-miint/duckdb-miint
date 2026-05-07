@@ -66,6 +66,19 @@ public:
 	unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, column_t column_id) override;
 	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override;
 	TableStorageInfo GetStorageInfo(ClientContext &context) override;
+	// Submittable ENA tables (the four object kinds + analyses) expose no
+	// row identifier — DELETE dispatches through PlanDelete by inspecting
+	// the WHERE predicate directly. The default `[ROW_ID]` would project
+	// ROW_ID into the scan, which requires projection pushdown and breaks
+	// bind for our virtual scans. `submission_log` keeps the default so
+	// any future DML-on-log path gets the standard "Can only delete from
+	// base table" diagnostic instead of being routed through PlanDelete.
+	vector<column_t> GetRowIdColumns() const override {
+		if (kind == ENATableKind::SUBMISSION_LOG) {
+			return TableCatalogEntry::GetRowIdColumns();
+		}
+		return {};
+	}
 
 	ENATableKind GetKind() const {
 		return kind;
@@ -195,6 +208,10 @@ public:
 	                             optional_ptr<PhysicalOperator> plan) override;
 	PhysicalOperator &PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op,
 	                             PhysicalOperator &plan) override;
+	// 3-arg override: intercept BEFORE the (unsupported) child scan is lowered
+	// to physical. Routes the delete into the ENA lifecycle CANCEL path
+	// without ever materialising the LogicalGet child.
+	PhysicalOperator &PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op) override;
 	PhysicalOperator &PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner, LogicalUpdate &op,
 	                             PhysicalOperator &plan) override;
 
