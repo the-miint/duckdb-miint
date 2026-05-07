@@ -1,0 +1,77 @@
+# name: test/sql/sylph_profile_sample_id.test
+# description: per-sample partitioning of sylph_profile (Phase 4.1)
+# group: [sql]
+
+require miint
+
+require-env SYLPH_AVAILABLE
+
+# Build a multi-sample input by tagging the same reads with two different
+# sample_id values. Both partitions should converge on K12-only since the
+# underlying reads are K12.
+statement ok
+CREATE TABLE multi_sample_reads AS
+  SELECT 'sample_a' AS sample_id, * FROM read_fastx(
+    'data/sylph/tiny_reads_R1.fq.gz',
+    sequence2 := 'data/sylph/tiny_reads_R2.fq.gz')
+  UNION ALL
+  SELECT 'sample_b', * FROM read_fastx(
+    'data/sylph/tiny_reads_R1.fq.gz',
+    sequence2 := 'data/sylph/tiny_reads_R2.fq.gz');
+
+# Sanity: 5000 rows total (2500 per sample).
+query I
+SELECT count(*) FROM multi_sample_reads;
+----
+5000
+
+# --- Per-sample partitioning ----------------------------------------------
+
+# With sample_id := 'sample_id', output prepends a sample_id column. Each
+# sample profiles independently and recovers K12.
+query I
+SELECT count(*)
+  FROM sylph_profile('multi_sample_reads', 'data/sylph/tiny.syldb', sample_id := 'sample_id');
+----
+2
+
+query TT
+SELECT sample_id, regexp_extract(genome_name, 'K12')
+  FROM sylph_profile('multi_sample_reads', 'data/sylph/tiny.syldb', sample_id := 'sample_id')
+  ORDER BY sample_id;
+----
+sample_a	K12
+sample_b	K12
+
+# Both samples should report ~100% taxonomic abundance for K12.
+query II
+SELECT sample_id, round(taxonomic_abundance, 2)
+  FROM sylph_profile('multi_sample_reads', 'data/sylph/tiny.syldb', sample_id := 'sample_id')
+  ORDER BY sample_id;
+----
+sample_a	100.00
+sample_b	100.00
+
+# --- Error paths ----------------------------------------------------------
+
+# Nonexistent sample_id column.
+statement error
+SELECT * FROM sylph_profile('multi_sample_reads', 'data/sylph/tiny.syldb', sample_id := 'no_such_col');
+----
+sylph_profile
+
+# sample_id collides with an output column name (e.g. 'genome_index').
+statement error
+SELECT * FROM sylph_profile('multi_sample_reads', 'data/sylph/tiny.syldb', sample_id := 'genome_index');
+----
+collides
+
+# --- Empty string disables per-sample mode (single-sample path) ----------
+
+# Setting sample_id to '' explicitly disables partitioning, so the same
+# multi-sample table is treated as one big sample. Still recovers K12 (single row).
+query I
+SELECT count(*)
+  FROM sylph_profile('multi_sample_reads', 'data/sylph/tiny.syldb', sample_id := '');
+----
+1

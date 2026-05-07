@@ -4,7 +4,16 @@
 # as errors when the extension's static lib and DuckDB's static lib are linked into the
 # same binary. This is set here (not in the extension's CMakeLists.txt) because this file
 # runs in DuckDB's CMake scope before libduckdb.dll/duckdb.exe targets are configured.
-if(MINGW)
+#
+# Additionally: rype and sylph are both Rust staticlibs that statically embed the Rust
+# standard library, so each archive carries its own copy of rust_eh_personality,
+# ARGV_INIT_ARRAY, EMPTY_PANIC, ... When both archives land in the same final binary
+# (libduckdb.so, the extension, the test binary), ld errors out on duplicate definitions.
+# The duplicates are bit-identical (both built with the same rustc) so picking the first
+# is safe. Apply the flag unconditionally on Linux/macOS — when only one Rust archive is
+# present (e.g. sylph disabled), the flag is a no-op since there are no duplicates to
+# resolve. Same Linux/macOS scope as the rype build itself.
+if(MINGW OR (NOT WIN32 AND NOT EMSCRIPTEN))
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--allow-multiple-definition")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--allow-multiple-definition")
 endif()

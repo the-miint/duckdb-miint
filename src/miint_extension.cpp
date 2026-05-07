@@ -87,6 +87,9 @@
 #ifdef MIINT_HAS_UNIFRAC
 #include <unifrac_table_functions.hpp>
 #endif
+#ifdef MIINT_HAS_SYLPH
+#include <sylph_profile.hpp>
+#endif
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include <duckdb/main/config.hpp>
 #include <duckdb/storage/storage_extension.hpp>
@@ -333,6 +336,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 #ifdef MIINT_HAS_SORTMERNA
 	AlignSortMeRNATableFunction::Register(loader);
 	AlignSortMeRNARRNATableFunction::Register(loader);
+#endif
+#ifdef MIINT_HAS_SYLPH
+	SylphProfileTableFunction::Register(loader);
 #endif
 #ifdef MIINT_HAS_GPL_BOUNDARY
 	PhylogenyFastTreeTableFunction::Register(loader);

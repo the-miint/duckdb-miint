@@ -62,6 +62,7 @@ option(MIINT_ENABLE_HDF5 "Build with HDF5/BIOM support" ON)
 option(MIINT_ENABLE_MAFFT "Build with MAFFT multiple sequence alignment support" ON)
 option(MIINT_ENABLE_ABPOA "Build with abPOA partial-order alignment support" ON)
 option(MIINT_ENABLE_SORTMERNA "Build with SortMeRNA rRNA alignment support" ON)
+option(MIINT_ENABLE_SYLPH "Build with sylph FracMinHash relative-abundance profiling" ON)
 option(MIINT_ENABLE_GPL_BOUNDARY "Build with gpl-boundary subsystem (process pipes + Arrow IPC over POSIX shm)" ON)
 option(MIINT_ENABLE_UNIFRAC "Build with UniFrac (PCoA / PERMANOVA / Faith PD) support" ON)
 
@@ -160,18 +161,20 @@ endif()
 if(EMSCRIPTEN)
     set(MIINT_ENABLE_HDF5 OFF)
     set(MIINT_ENABLE_SORTMERNA OFF)
+    set(MIINT_ENABLE_SYLPH OFF)
     set(MIINT_ENABLE_GPL_BOUNDARY OFF)
-    message(STATUS "Emscripten detected: disabling HDF5, SortMeRNA, and gpl-boundary (WASM-incompatible)")
+    message(STATUS "Emscripten detected: disabling HDF5, SortMeRNA, sylph, and gpl-boundary (WASM-incompatible)")
 elseif(WIN32)
     set(MIINT_ENABLE_MAFFT OFF)
     set(MIINT_ENABLE_ABPOA OFF)
+    set(MIINT_ENABLE_SYLPH OFF)
     set(MIINT_ENABLE_GPL_BOUNDARY OFF)
     set(MIINT_ENABLE_UNIFRAC OFF)
     if(MINGW)
         set(MIINT_ENABLE_SORTMERNA OFF)
-        message(STATUS "MinGW detected: disabling MAFFT, SortMeRNA, gpl-boundary, and UniFrac (cmph + gpl-boundary rely on POSIX APIs; libssu inmem assumes POSIX)")
+        message(STATUS "MinGW detected: disabling MAFFT, SortMeRNA, sylph, gpl-boundary, and UniFrac (cmph + gpl-boundary rely on POSIX APIs; libssu inmem assumes POSIX)")
     else()
-        message(STATUS "Windows detected: disabling MAFFT, gpl-boundary, and UniFrac (require POSIX APIs)")
+        message(STATUS "Windows detected: disabling MAFFT, sylph, gpl-boundary, and UniFrac (require POSIX APIs)")
     endif()
 endif()
 
@@ -861,6 +864,58 @@ if(MIINT_ENABLE_SORTMERNA)
     add_dependencies(sortmerna sortmerna_bundle)
 endif()
 
+# Build sylph (Rust) into a staticlib for FFI integration. Multi-Rust-staticlib
+# --allow-multiple-definition handling lives in extension_config.cmake (must
+# run BEFORE libduckdb.so's targets are configured).
+if(MIINT_ENABLE_SYLPH)
+    set(SYLPH_LIB_NAME "libsylph.a")
+    set(SYLPH_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/sylph_target)
+
+    set(SYLPH_CARGO_TARGET_FLAG "")
+    set(SYLPH_LIB_SUBDIR "release")
+    set(SYLPH_CONFIGURE_CMD "")
+    if(APPLE AND OSX_BUILD_ARCH)
+        find_program(RUSTUP rustup)
+        if(OSX_BUILD_ARCH STREQUAL "x86_64")
+            set(SYLPH_CARGO_TARGET_FLAG "--target" "x86_64-apple-darwin")
+            set(SYLPH_LIB_SUBDIR "x86_64-apple-darwin/release")
+            if(RUSTUP)
+                set(SYLPH_CONFIGURE_CMD ${RUSTUP} target add x86_64-apple-darwin)
+            endif()
+        elseif(OSX_BUILD_ARCH STREQUAL "arm64")
+            set(SYLPH_CARGO_TARGET_FLAG "--target" "aarch64-apple-darwin")
+            set(SYLPH_LIB_SUBDIR "aarch64-apple-darwin/release")
+            if(RUSTUP)
+                set(SYLPH_CONFIGURE_CMD ${RUSTUP} target add aarch64-apple-darwin)
+            endif()
+        endif()
+    endif()
+
+    set(SYLPH_LIB_PATH ${SYLPH_TARGET_DIR}/${SYLPH_LIB_SUBDIR}/${SYLPH_LIB_NAME})
+
+    # Build with --no-default-features so neither the `cli` (clap+simple_logger)
+    # nor `fastx` (needletail) feature is enabled. Enable `arrow-ffi` to get
+    # sylph_profile (the Arrow C Data Interface entry point used by the
+    # extension's sylph_profile() table function).
+    ExternalProject_Add(
+        sylph_build
+        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/sylph
+        CONFIGURE_COMMAND "${SYLPH_CONFIGURE_CMD}"
+        BUILD_COMMAND ${CARGO} rustc --release --no-default-features --features arrow-ffi
+            --lib --crate-type=staticlib
+            --target-dir ${SYLPH_TARGET_DIR}
+            --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/ext/sylph/Cargo.toml
+            ${SYLPH_CARGO_TARGET_FLAG}
+        INSTALL_COMMAND ""
+        BUILD_IN_SOURCE 0
+        BUILD_BYPRODUCTS ${SYLPH_LIB_PATH}
+    )
+
+    add_library(sylph STATIC IMPORTED GLOBAL)
+    set_target_properties(sylph PROPERTIES IMPORTED_LOCATION ${SYLPH_LIB_PATH})
+    add_dependencies(sylph sylph_build)
+endif()
+
 # Build MAFFT PartTree static library for multiple sequence alignment
 if(MIINT_ENABLE_MAFFT)
     # Handle cross-compilation arch flags for MAFFT (same pattern as WFA2/minimap2)
@@ -1007,6 +1062,9 @@ add_dependencies(rype rype_build)
 
 # adapted kseq++ include use from strobealign
 include_directories(src/include ext ext/WFA2-lib ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype)
+if(MIINT_ENABLE_SYLPH)
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/ext/sylph)
+endif()
 if(MIINT_ENABLE_MAFFT)
     include_directories(ext/mafft/core)
 endif()
@@ -1165,6 +1223,9 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     list(APPEND EXTENSION_SOURCES src/SortMeRNAAligner.cpp src/align_sortmerna.cpp src/align_sortmerna_rrna.cpp)
 endif()
+if(MIINT_ENABLE_SYLPH)
+    list(APPEND EXTENSION_SOURCES src/SylphDatabase.cpp src/sylph_profile.cpp)
+endif()
 if(MIINT_ENABLE_CURL)
     list(APPEND EXTENSION_SOURCES src/curl_send.cpp)
 endif()
@@ -1271,6 +1332,9 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_SORTMERNA)
 endif()
+if(MIINT_ENABLE_SYLPH)
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_SYLPH)
+endif()
 if(MIINT_ENABLE_CURL)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_CURL)
 endif()
@@ -1307,6 +1371,9 @@ if(MIINT_ENABLE_VSEARCH)
 endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_link_libraries(${EXTENSION_NAME} sortmerna RocksDB::rocksdb)
+endif()
+if(MIINT_ENABLE_SYLPH)
+    target_link_libraries(${EXTENSION_NAME} sylph)
 endif()
 if(MIINT_ENABLE_CURL)
     target_link_libraries(${EXTENSION_NAME} CURL::libcurl)
@@ -1401,6 +1468,9 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_SORTMERNA)
 endif()
+if(MIINT_ENABLE_SYLPH)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_SYLPH)
+endif()
 if(MIINT_ENABLE_CURL)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_CURL)
 endif()
@@ -1437,6 +1507,9 @@ if(MIINT_ENABLE_VSEARCH)
 endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} sortmerna RocksDB::rocksdb)
+endif()
+if(MIINT_ENABLE_SYLPH)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} sylph)
 endif()
 if(MIINT_ENABLE_CURL)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} CURL::libcurl)
@@ -1607,6 +1680,17 @@ if(MIINT_ENABLE_SORTMERNA)
         test/cpp/test_sortmerna_build.cpp
         test/cpp/test_SortMeRNAAligner.cpp)
 endif()
+if(MIINT_ENABLE_SYLPH)
+    # Tests only exercise SylphDatabaseHandle + the FFI default getters from
+    # libsylph.a; sylph_profile.cpp itself isn't linked into the tests binary
+    # because it pulls in DuckDB-internal symbols (ArrowArrayWrapper) +
+    # miint's PerSampleGlobalState that the tests target doesn't otherwise
+    # depend on. The behavioral coverage for sylph_profile lives in the SQL
+    # tests, which run against the full extension binary.
+    list(APPEND TEST_SOURCES
+        src/SylphDatabase.cpp
+        test/cpp/test_SylphDatabase.cpp)
+endif()
 if(MIINT_ENABLE_CURL)
     list(APPEND TEST_SOURCES src/curl_send.cpp test/cpp/test_curl_send.cpp)
 endif()
@@ -1668,6 +1752,10 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_link_libraries(tests sortmerna RocksDB::rocksdb)
     target_compile_definitions(tests PRIVATE MIINT_HAS_SORTMERNA)
+endif()
+if(MIINT_ENABLE_SYLPH)
+    target_link_libraries(tests sylph)
+    target_compile_definitions(tests PRIVATE MIINT_HAS_SYLPH)
 endif()
 if(MIINT_ENABLE_GPL_BOUNDARY)
     target_sources(tests PRIVATE $<TARGET_OBJECTS:miint_nanoarrow_ipc>)
