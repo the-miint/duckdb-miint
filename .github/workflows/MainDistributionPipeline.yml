@@ -38,10 +38,13 @@ jobs:
       ci_tools_version: v1.5-variegata
       extension_name: miint
       extra_toolchains: 'rust'
-      # Always exclude: windows MSVC (broken), windows_amd64_rtools, osx_amd64 (Intel mac, sunsetting).
-      # Additionally exclude windows_amd64_mingw on pull_request — mingw runs on push to
-      # main/v1.5-variegata/tags so release candidates still cover it.
-      exclude_archs: ${{ github.event_name == 'pull_request' && 'windows_amd64_rtools;windows_amd64;osx_amd64;windows_amd64_mingw' || 'windows_amd64_rtools;windows_amd64;osx_amd64' }}
+      # Always exclude: windows MSVC (broken), windows_amd64_rtools (broken),
+      # osx_amd64 (Intel mac, sunsetting), wasm_mvp + wasm_threads (we only
+      # ship wasm_eh).
+      # On pull_request also exclude windows_amd64_mingw and wasm_eh — Windows
+      # and WASM build/verify only on push to main/v1.5-variegata/tags so
+      # release candidates still cover them, while PRs only pay for Linux + macOS.
+      exclude_archs: ${{ github.event_name == 'pull_request' && 'windows_amd64_rtools;windows_amd64;windows_amd64_mingw;osx_amd64;wasm_eh;wasm_mvp;wasm_threads' || 'windows_amd64_rtools;windows_amd64;osx_amd64;wasm_mvp;wasm_threads' }}
 
   test-with-bowtie2:
     name: Test with Bowtie2
@@ -131,6 +134,10 @@ jobs:
 
   test-wasm-compatible-build:
     name: Test WASM-compatible build (no HDF5/Bowtie2)
+    # Push-only: this is a Linux build but its purpose is WASM-compat
+    # regression detection, which is deferred to merge along with the actual
+    # WASM build/verify jobs to keep PR CI cost down.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     env:
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
@@ -168,11 +175,13 @@ jobs:
 
   verify-wasm:
     name: Verify WASM extension imports
+    # Push-only: WASM build artifacts only exist on push (see exclude_archs above).
+    if: github.event_name != 'pull_request'
     needs: duckdb-stable-build
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        wasm_arch: [wasm_eh, wasm_mvp, wasm_threads]
+        wasm_arch: [wasm_eh]
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -234,6 +243,9 @@ jobs:
 
   test-wasm-load:
     name: Test WASM extension loads
+    # Push-only: builds WASM via emsdk and runs a load test. Deferred to merge
+    # along with the rest of the WASM pipeline.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     env:
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
