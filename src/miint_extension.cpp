@@ -33,6 +33,7 @@
 #ifdef MIINT_HAS_CURL
 #include <curl_send.hpp>
 #endif
+#include <ena_lifecycle_functions.hpp>
 #include <ena_secret.hpp>
 #include <ena_storage.hpp>
 #include <ena_upload_reads.hpp>
@@ -234,6 +235,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadENASearchableFieldsTableFunction::Register(loader);
 	ReadENASequencesTableFunction::Register(loader);
 	ENAUploadReadsTableFunction::Register(loader);
+	miint::RegisterENALifecycleTableFunctions(loader);
 
 	AlignmentFlagFunctions::Register(loader);
 	AlignmentSeqIdentityFunction::Register(loader);

@@ -67,6 +67,10 @@ void AddSubmissionLogColumns(ColumnList &columns) {
 	// Duration is int64 ms — slow ENA submissions over a saturated wwwdev or a
 	// large multi-object batch can plausibly exceed the int32 ~35-minute cap.
 	add("duration_ms", LogicalType::BIGINT);
+	// Lifecycle target accession or refname. Empty for ADD / MODIFY / VALIDATE
+	// (those identify their objects via the body); populated for CANCEL /
+	// RELEASE / HOLD with the value sent on `target=`.
+	add("target", LogicalType::VARCHAR);
 }
 
 unique_ptr<CreateTableInfo> BuildENATableInfo(SchemaCatalogEntry &schema, ENATableKind kind) {
@@ -222,6 +226,7 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 	auto request_payload = FlatVector::GetData<string_t>(output.data[9]);
 	auto receipt = FlatVector::GetData<string_t>(output.data[10]);
 	auto duration_ms = FlatVector::GetData<int64_t>(output.data[12]);
+	auto target = FlatVector::GetData<string_t>(output.data[13]);
 
 	auto &error_messages = output.data[11];
 	ListVector::SetListSize(error_messages, 0);
@@ -240,6 +245,7 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 		request_payload[i] = StringVector::AddString(output.data[9], row.request_payload);
 		receipt[i] = StringVector::AddString(output.data[10], row.receipt);
 		duration_ms[i] = row.duration_ms;
+		target[i] = StringVector::AddString(output.data[13], row.target);
 	}
 
 	auto child_offset = ListVector::GetListSize(error_messages);
@@ -546,14 +552,14 @@ DatabaseSize ENACatalog::GetDatabaseSize(ClientContext &) {
 //===--------------------------------------------------------------------===//
 // ENAStorageExtension
 //===--------------------------------------------------------------------===//
-namespace {
-
-string ResolveDefaultEndpointURL(const string &endpoint) {
+string ResolveDefaultENAEndpointURL(const string &endpoint) {
 	if (endpoint == "production") {
 		return "https://www.ebi.ac.uk/ena/submit/webin-v2";
 	}
 	return "https://wwwdev.ebi.ac.uk/ena/submit/webin-v2";
 }
+
+namespace {
 
 unique_ptr<Catalog> ENAAttach(optional_ptr<StorageExtensionInfo>, ClientContext &, AttachedDatabase &db, const string &,
                               AttachInfo &info, AttachOptions &options) {
@@ -594,7 +600,7 @@ unique_ptr<Catalog> ENAAttach(optional_ptr<StorageExtensionInfo>, ClientContext 
 		throw BinderException("ENA attach: endpoint must be 'test' or 'production' (got '%s')", endpoint);
 	}
 	const string endpoint_url =
-	    endpoint_url_override.empty() ? ResolveDefaultEndpointURL(endpoint) : endpoint_url_override;
+	    endpoint_url_override.empty() ? ResolveDefaultENAEndpointURL(endpoint) : endpoint_url_override;
 
 	return make_uniq<ENACatalog>(db, std::move(secret_name), std::move(endpoint), endpoint_url);
 }

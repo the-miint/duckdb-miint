@@ -36,6 +36,14 @@ struct ResolvedENACredentials {
 
 ResolvedENACredentials ResolveENACredentials(ClientContext &context, ENACatalog &catalog);
 
+// Look up a Webin secret by name and resolve its user/password/endpoint
+// fields. Used by code paths that don't have an ENACatalog handle
+// (notably the lifecycle table functions). `caller` is the user-facing
+// function name, embedded in error messages so the user sees
+// "ena_cancel: ..." rather than a generic "ENA secret: ...".
+ResolvedENACredentials ResolveENACredentialsByName(ClientContext &context, const string &caller,
+                                                   const string &secret_name);
+
 // Translate a logical (table) column index into a position in the input
 // chunk, honouring `LogicalInsert::column_index_map` semantics. Returns
 // `DConstants::INVALID_INDEX` when the column was not provided.
@@ -57,7 +65,7 @@ string GenerateSubmissionId();
 // dispatcher (e.g. "projects" / "samples") is filled in by the caller.
 struct SubmissionLogPayload {
 	string object_type;
-	string action; // "ADD", "MODIFY", ...
+	string action; // "ADD", "MODIFY", "CANCEL", "HOLD", "RELEASE", "VALIDATE"
 	int32_t n_objects;
 	bool success;
 	int64_t duration_ms;
@@ -65,6 +73,9 @@ struct SubmissionLogPayload {
 	string raw_receipt;
 	string era_accession;
 	std::vector<std::string> error_messages;
+	// Lifecycle target accession or refname; empty for body-style actions
+	// (ADD / MODIFY / VALIDATE).
+	string target;
 };
 
 void RecordSubmissionLog(ENACatalog &catalog, const ResolvedENACredentials &creds, const SubmissionLogPayload &payload);

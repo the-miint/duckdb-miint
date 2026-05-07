@@ -188,6 +188,8 @@ void AppendJsonString(std::string &out, const std::string &s) {
 	out.push_back('"');
 }
 
+} // namespace
+
 const char *ActionName(ENAAction a) {
 	switch (a) {
 	case ENAAction::ADD:
@@ -205,6 +207,8 @@ const char *ActionName(ENAAction a) {
 	}
 	throw std::logic_error("ENA envelope: unhandled ENAAction value");
 }
+
+namespace {
 
 // True iff `s` contains at least one non-whitespace byte. Used to reject
 // targets like "   " that would otherwise pass an `.empty()` check and emit

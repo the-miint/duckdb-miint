@@ -817,6 +817,7 @@ set(EXTENSION_SOURCES
     src/ena_envelope_builder.cpp
     src/ena_receipt_parser.cpp
     src/ena_lifecycle_submit.cpp
+    src/ena_lifecycle_functions.cpp
     src/ena_submission_log.cpp
     src/ena_storage.cpp
     src/ena_insert_common.cpp

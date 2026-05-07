@@ -18,6 +18,12 @@ namespace miint {
 
 enum class ENAAction { ADD, MODIFY, CANCEL, HOLD, RELEASE, VALIDATE };
 
+// Wire-format action name ("ADD" / "MODIFY" / ...). Lifted out of the
+// envelope builder's anonymous namespace so submission_log writers can
+// stringify the same way the wire format does, without duplicating the
+// switch.
+const char *ActionName(ENAAction a);
+
 // Shared across all four per-table insert paths. Each `Submit*InsertOutcome`
 // takes this; per-table aliases (ENAProjectInsertOptions, ENASampleInsertOptions,
 // ...) are kept as type aliases for call-site readability.

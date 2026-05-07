@@ -152,21 +152,43 @@ def _xml_escape(s: str) -> str:
     )
 
 
-def _parse_xml_envelope(body: str) -> tuple[dict, str, str]:
-    """Best-effort regex extraction of action / hold / object aliases from a
-    `<WEBIN>...</WEBIN>` document. Mirrors the JSON envelope shape so the
-    receipt builder doesn't care which form the request used. This mock
+def _parse_xml_envelope(body: str) -> tuple[dict, str, str, str]:
+    """Best-effort regex extraction of action / hold / target / object aliases
+    from a `<WEBIN>...</WEBIN>` document. Mirrors the JSON envelope shape so
+    the receipt builder doesn't care which form the request used. This mock
     doesn't run a real XML parser — the duckdb-miint envelope format is
-    constrained and stable enough for a regex pass."""
+    constrained and stable enough for a regex pass.
+
+    Returns (envelope, action_name, hold_until, target). `target` is set when
+    the action element carries `target="..."` (CANCEL / RELEASE / targeted HOLD)."""
     envelope: dict = {}
     action_name = "ADD"
     hold_until = ""
-    actions = re.findall(r"<ACTION>\s*<(\w+)(?:\s+HoldUntilDate=\"([^\"]*)\")?\s*/>\s*</ACTION>", body)
-    for tag, hold in actions:
+    target = ""
+    # Action element can be:
+    #   <CANCEL/>                                       (untargeted)
+    #   <CANCEL target="ERS123"/>                       (targeted CANCEL/RELEASE)
+    #   <HOLD HoldUntilDate="2027-01-01"/>              (body-pattern HOLD)
+    #   <HOLD target="ERS123" HoldUntilDate="2027-..."/> (targeted HOLD)
+    # Capture target= and HoldUntilDate= attributes in any order.
+    actions = re.findall(
+        r'<ACTION>\s*<(\w+)((?:\s+\w+="[^"]*")*)\s*/>\s*</ACTION>',
+        body,
+    )
+    for tag, attrs in actions:
+        attr_dict = dict(re.findall(r'(\w+)="([^"]*)"', attrs))
+        hold_attr = attr_dict.get("HoldUntilDate", "")
+        target_attr = attr_dict.get("target", "")
         if tag == "HOLD":
-            hold_until = hold or ""
+            if hold_attr:
+                hold_until = hold_attr
+            if target_attr:
+                target = target_attr
+                action_name = "HOLD"
         elif tag in ("ADD", "MODIFY", "CANCEL", "RELEASE", "VALIDATE"):
             action_name = tag
+            if target_attr:
+                target = target_attr
     for kind_plural, set_tag, item_tag in (
         ("experiments", "EXPERIMENT_SET", "EXPERIMENT"),
         ("runs", "RUN_SET", "RUN"),
@@ -179,10 +201,12 @@ def _parse_xml_envelope(body: str) -> tuple[dict, str, str]:
         for m in re.finditer(rf"<{item_tag}\s+alias=\"([^\"]+)\"", block.group(1)):
             items.append({"alias": m.group(1)})
         envelope[kind_plural] = items
-    return envelope, action_name, hold_until
+    return envelope, action_name, hold_until, target
 
 
-def _build_receipt(envelope: dict, action_name: str = "ADD", hold_until: str = "") -> tuple[str, bool]:
+def _build_receipt(
+    envelope: dict, action_name: str = "ADD", hold_until: str = "", target: str = ""
+) -> tuple[str, bool]:
     if not action_name and not hold_until:
         actions = envelope.get("submission", {}).get("actions", [])
         action_name = "ADD"
@@ -204,7 +228,11 @@ def _build_receipt(envelope: dict, action_name: str = "ADD", hold_until: str = "
         for obj in envelope.get(kind_plural, []) or []:
             objects.append((kind_singular, obj.get("alias", "")))
 
-    success = not any("FAIL" in alias for _, alias in objects)
+    # Target-based failure trigger for lifecycle ops (which have no body
+    # objects to encode FAIL into): a target containing "FAIL" produces
+    # success=false. Mirrors the alias-based trigger for ADD-style submissions.
+    target_fail = "FAIL" in target if target else False
+    success = (not target_fail) and not any("FAIL" in alias for _, alias in objects)
     parts: list[str] = []
     parts.append('<?xml version="1.0" encoding="UTF-8"?>')
     parts.append(
@@ -234,6 +262,8 @@ def _build_receipt(envelope: dict, action_name: str = "ADD", hold_until: str = "
         for _, alias in objects:
             if "FAIL" in alias:
                 parts.append(f'<ERROR>mock validation failure for alias ' f'{_xml_escape(alias)}</ERROR>')
+        if target_fail:
+            parts.append(f'<ERROR>mock validation failure for target {_xml_escape(target)}</ERROR>')
         parts.append('</MESSAGES>')
     parts.append('</RECEIPT>')
     return "".join(parts), success
@@ -352,6 +382,7 @@ class Handler(BaseHTTPRequestHandler):
         ctype = self.headers.get("Content-Type", "")
         action_name = ""
         hold_until = ""
+        target = ""
         if "json" in ctype:
             try:
                 envelope = json.loads(body.decode("utf-8"))
@@ -360,13 +391,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
         elif "xml" in ctype:
-            envelope, action_name, hold_until = _parse_xml_envelope(body.decode("utf-8", "replace"))
+            envelope, action_name, hold_until, target = _parse_xml_envelope(body.decode("utf-8", "replace"))
         else:
             self.send_response(415)
             self.end_headers()
             return
 
-        receipt, _ok = _build_receipt(envelope, action_name, hold_until)
+        receipt, _ok = _build_receipt(envelope, action_name, hold_until, target)
         payload = receipt.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/xml; charset=utf-8")

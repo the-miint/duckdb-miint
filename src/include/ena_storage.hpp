@@ -51,6 +51,13 @@ const vector<ENATableSchema> &ENATables();
 // Build a CreateTableInfo with the predefined columns for a given ENA table.
 unique_ptr<CreateTableInfo> BuildENATableInfo(SchemaCatalogEntry &schema, ENATableKind kind);
 
+// Resolve the default Webin V2 base URL from an endpoint label
+// ("test" → wwwdev, "production" → www). Used by ATTACH (when no
+// ENDPOINT_URL is given) and by the lifecycle table functions (when the
+// secret carries no `endpoint_url` override). Single source of truth so a
+// future EBI URL move lands in one place.
+string ResolveDefaultENAEndpointURL(const string &endpoint);
+
 class ENATableEntry : public TableCatalogEntry {
 public:
 	ENATableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info, ENATableKind kind);
@@ -133,6 +140,10 @@ struct ENASubmissionLogRow {
 	string receipt;
 	vector<string> error_messages;
 	int64_t duration_ms;
+	// Lifecycle target: the accession (or refname) on which a
+	// CANCEL / RELEASE / HOLD acted. Empty for ADD / MODIFY / VALIDATE
+	// (those identify their objects via the body, not via target=).
+	string target;
 };
 
 class ENASubmissionLog {
