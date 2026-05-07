@@ -5,6 +5,7 @@
 
 #include "ena_insert_common.hpp"
 
+#include "ena_object_insert_op.hpp"
 #include "ena_storage.hpp"
 
 #include "duckdb/catalog/catalog_transaction.hpp"
@@ -17,6 +18,30 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 
 namespace duckdb {
+
+bool IsENAValidateOnlyEnabled(ClientContext &context) {
+	// Threading: ClientContext access is not thread-safe across pipeline
+	// threads, but every caller is the ENA insert operator's `Finalize`,
+	// which runs single-threaded because `ParallelSink()` returns false on
+	// `ENAObjectInsertOperator`. Same constraint as `ResolveENACredentials`
+	// and `RunAliasCollisionCheck` already in that operator; if a future
+	// change flips `ParallelSink` to true the context reads here and there
+	// must move to the operator's bind/init phase.
+	Value v;
+	// `miint_ena_validate_only` is registered as a BOOLEAN extension option
+	// at extension load (see `LoadInternal` in src/miint_extension.cpp).
+	// Missing → option not registered, which is a load-order programmer
+	// error (someone removed the registration or the operator is being
+	// invoked without the extension fully loaded). InternalException is the
+	// right type: it's the user-visible "internal error" path, but the
+	// detail string says exactly which fix is needed so a developer can
+	// triage from the message alone.
+	if (!context.TryGetCurrentSetting("miint_ena_validate_only", v)) {
+		throw InternalException(
+		    "miint extension option 'miint_ena_validate_only' is not registered — was LoadInternal completed?");
+	}
+	return !v.IsNull() && v.GetValue<bool>();
+}
 
 namespace {
 

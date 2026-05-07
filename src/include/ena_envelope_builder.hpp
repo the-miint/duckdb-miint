@@ -32,6 +32,12 @@ struct ENAInsertOptions {
 	std::string user;         // Webin-XXXXX
 	std::string password;
 	std::string hold_until_date; // optional, "YYYY-MM-DD"
+	// Wire-format action. ADD is the registration path (assigns accessions);
+	// VALIDATE is a server-side dry-run that returns a receipt with no
+	// per-object children. MODIFY will follow the same envelope shape as ADD
+	// once L4 ships. Lifecycle ops (CANCEL/RELEASE/HOLD) go through
+	// SubmitLifecycle and never touch this struct.
+	ENAAction action = ENAAction::ADD;
 };
 
 // Common shape of every Submit*Outcome. The four per-table outcomes

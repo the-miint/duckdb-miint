@@ -62,7 +62,7 @@ OutcomeT SubmitENAObjectOutcome(const std::vector<SpecT> &specs, const OptsT &op
 	}
 
 	SubmissionSpec env;
-	env.action = ENAAction::ADD;
+	env.action = opts.action;
 	env.hold_until_date = opts.hold_until_date;
 	Traits::SetEnvelopeArray(env, specs);
 	outcome.envelope_payload = Traits::BuildEnvelope(env);
@@ -89,6 +89,19 @@ OutcomeT SubmitENAObjectOutcome(const std::vector<SpecT> &specs, const OptsT &op
 		return outcome;
 	}
 
+	// VALIDATE is a server-side dry-run: ENA's wwwdev returns no per-object
+	// accessions on validation receipts (just <SUBMISSION/> + <ACTIONS>VALIDATE
+	// </ACTIONS>). Always return empty `outcome.rows` under VALIDATE, regardless
+	// of what the receipt carries. Rationale: the contract for the caller is
+	// "VALIDATE doesn't yield row data"; partially populating rows from a
+	// future server change would silently disagree with `specs.size()` and
+	// surface as an `AppendReturningRows` debug-assert (release builds get
+	// silent row-count mismatch), so we keep the contract strict here. If
+	// server behaviour ever changes we'll opt in deliberately, with new tests.
+	if (opts.action == ENAAction::VALIDATE) {
+		return outcome;
+	}
+
 	std::unordered_map<std::string, const ENAObjectReceipt *> by_alias;
 	by_alias.reserve(receipt.objects.size());
 	const std::string target_type = Traits::ReceiptObjectType();
@@ -105,6 +118,10 @@ OutcomeT SubmitENAObjectOutcome(const std::vector<SpecT> &specs, const OptsT &op
 			outcome.success = false;
 			outcome.error_messages.push_back("ENA submission: receipt missing " + std::string(target_type) +
 			                                 " entry for alias '" + spec.alias + "'");
+			// Drop any partially-populated rows so callers checking
+			// `outcome.rows` after `outcome.success == false` see a
+			// consistent empty vector rather than the prefix that succeeded.
+			outcome.rows.clear();
 			return outcome;
 		}
 		outcome.rows.push_back(Traits::BuildRow(spec, *it->second));

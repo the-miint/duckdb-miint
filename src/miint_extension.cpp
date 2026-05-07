@@ -197,6 +197,19 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto &ena_db_config = DBConfig::GetConfig(loader.GetDatabaseInstance());
 	StorageExtension::Register(ena_db_config, "ena", make_shared_ptr<ENAStorageExtension>());
 
+	// Session-scoped flag that flips ena.* INSERT from ADD to VALIDATE
+	// (server-side dry-run). When true, the next INSERT INTO ena.X builds a
+	// VALIDATE envelope instead of ADD: no accessions are assigned, the
+	// alias-collision check is skipped (the user may legitimately validate
+	// against an alias they've already registered), and the
+	// ena.submission_log row records action='VALIDATE' with empty
+	// object_aliases / object_accessions. Default false → existing ADD path.
+	ena_db_config.AddExtensionOption("miint_ena_validate_only",
+	                                 "When true, the next INSERT INTO ena.* is sent as a Webin V2 VALIDATE "
+	                                 "(server-side dry-run) instead of ADD. No accessions are returned. "
+	                                 "Default false.",
+	                                 LogicalType::BOOLEAN, Value::BOOLEAN(false));
+
 	ScalarFunction version_func("miint_version", {}, LogicalType::VARCHAR, MiintVersionFunction);
 	loader.RegisterFunction(version_func);
 

@@ -234,6 +234,7 @@ def _build_receipt(
     # submissions.
     target_fail = "FAIL" in target if target else False
     is_lifecycle = bool(target)
+    is_validate = action_name == "VALIDATE"
     body_fail = any("FAIL" in alias for _, alias in objects)
     # `success` here is the boolean returned to callers as the round-trip
     # verdict (and matches `outcome.success` in the C++ lifecycle code:
@@ -253,22 +254,28 @@ def _build_receipt(
     parts.append(
         f'<RECEIPT receiptDate="2026-05-03T12:00:00.000Z" ' f'submissionFile="mock" success="{receipt_success_attr}">'
     )
-    for kind_singular, alias in objects:
-        if not alias:
-            continue
-        primary, ext = _accession_for(alias, kind_singular)
-        parts.append(
-            f'<{kind_singular} accession="{_xml_escape(primary)}" '
-            f'alias="{_xml_escape(alias)}" status="PRIVATE"'
-            f'{" holdUntilDate=" + chr(34) + _xml_escape(hold_until) + chr(34) if hold_until else ""}>'
-        )
-        ext_type = (
-            "study"
-            if kind_singular == "PROJECT"
-            else ("biosample" if kind_singular == "SAMPLE" else kind_singular.lower())
-        )
-        parts.append(f'<EXT_ID accession="{_xml_escape(ext)}" type="{ext_type}"/>')
-        parts.append(f'</{kind_singular}>')
+    # VALIDATE is a server-side dry-run: no accessions are assigned, so the
+    # receipt has no per-object PROJECT/SAMPLE/... children. The mock mirrors
+    # that — body_fail above still drives <ERROR> emission below, so the FAIL
+    # alias trigger continues to work. ADD/MODIFY/lifecycle paths still emit
+    # the per-object children as before.
+    if not is_validate:
+        for kind_singular, alias in objects:
+            if not alias:
+                continue
+            primary, ext = _accession_for(alias, kind_singular)
+            parts.append(
+                f'<{kind_singular} accession="{_xml_escape(primary)}" '
+                f'alias="{_xml_escape(alias)}" status="PRIVATE"'
+                f'{" holdUntilDate=" + chr(34) + _xml_escape(hold_until) + chr(34) if hold_until else ""}>'
+            )
+            ext_type = (
+                "study"
+                if kind_singular == "PROJECT"
+                else ("biosample" if kind_singular == "SAMPLE" else kind_singular.lower())
+            )
+            parts.append(f'<EXT_ID accession="{_xml_escape(ext)}" type="{ext_type}"/>')
+            parts.append(f'</{kind_singular}>')
     parts.append('<SUBMISSION accession="ERA1234567" alias="mock"/>')
     parts.append(f'<ACTIONS>{action_name}</ACTIONS>')
     # Failure-path messages (always <ERROR>, mirrors ENA).

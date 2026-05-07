@@ -874,10 +874,19 @@ TEST_CASE("ENA envelope: MODIFY with target_accession is rejected", "[ena_envelo
 }
 
 TEST_CASE("ENA envelope: VALIDATE with target_refname is rejected", "[ena_envelope][lifecycle]") {
+	// Two distinct ValidateActions checks could throw here:
+	//   (a) L1d refname-rejection: "...VALIDATE by refname/alias is not
+	//       supported by Webin V2 for cross-submission lifecycle ops..."
+	//   (b) Older "ADD/MODIFY/VALIDATE with target": "...VALIDATE action does
+	//       not take a target accession or refname"
+	// (a) currently fires first because `HasNonWhitespace(target_refname)` is
+	// checked before the action-vs-target compatibility check. Match on the
+	// substring "refname" — present in both messages — so this test stays
+	// green if the rejection order ever swaps back.
 	miint::SubmissionSpec env;
 	env.action = miint::ENAAction::VALIDATE;
 	env.target_refname = "my-alias";
-	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("target"));
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("refname"));
 }
 
 TEST_CASE("ENA envelope: whitespace-only target_accession is rejected", "[ena_envelope][lifecycle]") {
