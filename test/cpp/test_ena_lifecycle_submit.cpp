@@ -137,7 +137,11 @@ TEST_CASE("SubmitLifecycle: HOLD emits target= and HoldUntilDate", "[ena_lifecyc
 	CHECK(captured.body.find(R"(HoldUntilDate="2027-12-31")") != std::string::npos);
 }
 
-TEST_CASE("SubmitLifecycle: refname is used when accession is empty", "[ena_lifecycle_submit][cancel]") {
+TEST_CASE("SubmitLifecycle: refname-only target is rejected at envelope-build time", "[ena_lifecycle_submit][cancel]") {
+	// Webin V2 does not resolve refname/alias on action elements when the
+	// alias isn't also defined inside the same submission. Verified live
+	// 2026-05-07. Reject at envelope-build so the user sees a clear
+	// diagnostic before any HTTP activity.
 	miint::LifecycleSubmitOptions opts;
 	opts.endpoint_url = "https://test/submit";
 	opts.user = "Webin-1";
@@ -145,12 +149,11 @@ TEST_CASE("SubmitLifecycle: refname is used when accession is empty", "[ena_life
 	opts.target.refname = "my-sample-alias";
 
 	CapturedPost captured;
-	auto outcome =
-	    miint::SubmitLifecycle(miint::ENAAction::CANCEL, opts, StubPost(captured, LifecycleSuccessReceipt("CANCEL")));
-
-	CHECK(outcome.success == true);
-	CHECK(outcome.target == "my-sample-alias");
-	CHECK(captured.body.find(R"(<CANCEL target="my-sample-alias"/>)") != std::string::npos);
+	REQUIRE_THROWS_WITH(
+	    miint::SubmitLifecycle(miint::ENAAction::CANCEL, opts, StubPost(captured, LifecycleSuccessReceipt("CANCEL"))),
+	    Catch::Matchers::ContainsSubstring("by refname/alias is not supported"));
+	// No HTTP round-trip should have happened.
+	CHECK(captured.body.empty());
 }
 
 TEST_CASE("SubmitLifecycle: wwwdev returns success=\"false\" with <INFO> on a successful CANCEL",

@@ -102,7 +102,6 @@ struct LifecycleBindData : public TableFunctionData {
 	string fn_name; // for error messages — owned string so plan-cache serialization is safe
 	string secret_name;
 	string accession;
-	string refname;
 	string until_date;             // HOLD only; ignored for CANCEL/RELEASE
 	string catalog_name;           // resolved name; "ena" by default
 	bool catalog_explicit = false; // user passed `catalog =>` vs defaulted
@@ -136,8 +135,7 @@ unique_ptr<FunctionData> BindLifecycle(ClientContext &, TableFunctionBindInput &
 	};
 
 	get_str("secret", bd->secret_name, /*required=*/true);
-	get_str("accession", bd->accession, /*required=*/false);
-	get_str("refname", bd->refname, /*required=*/false);
+	get_str("accession", bd->accession, /*required=*/true);
 	get_str("catalog", bd->catalog_name, /*required=*/false, &bd->catalog_explicit);
 	if (bd->catalog_name.empty()) {
 		bd->catalog_name = "ena";
@@ -146,18 +144,13 @@ unique_ptr<FunctionData> BindLifecycle(ClientContext &, TableFunctionBindInput &
 		get_str("until", bd->until_date, /*required=*/true);
 	}
 
-	if (bd->accession.empty() && bd->refname.empty()) {
-		throw BinderException("%s: must provide one of 'accession' or 'refname'", fn_name);
-	}
-	// Reject whitespace-only targets at bind time. The envelope builder
-	// also rejects them, but its error surfaces at execute time after we've
+	// Reject whitespace-only accession at bind time. The envelope builder
+	// also rejects, but its error surfaces at execute time after we've
 	// already resolved the secret and built up Init state — failing in Bind
-	// gives the cleanest user feedback. Empty (`""`) is already caught above.
-	if (!bd->accession.empty() && IsWhitespaceOnly(bd->accession)) {
+	// gives the cleanest user feedback. Empty (`""`) is already caught by
+	// the required-parameter check above.
+	if (IsWhitespaceOnly(bd->accession)) {
 		throw BinderException("%s: 'accession' must not be whitespace-only", fn_name);
-	}
-	if (!bd->refname.empty() && IsWhitespaceOnly(bd->refname)) {
-		throw BinderException("%s: 'refname' must not be whitespace-only", fn_name);
 	}
 
 	names = {"action", "target", "success", "era_accession", "hold_until_date", "error_messages", "duration_ms"};
@@ -201,7 +194,6 @@ void ExecuteLifecycle(ClientContext &context, TableFunctionInput &data, DataChun
 	opts.user = creds.user;
 	opts.password = creds.password;
 	opts.target.accession = bd.accession;
-	opts.target.refname = bd.refname;
 	opts.hold_until_date = bd.until_date;
 
 	ENAClient client(*context.db);
@@ -227,7 +219,7 @@ void ExecuteLifecycle(ClientContext &context, TableFunctionInput &data, DataChun
 		// `gs.outcome` default-initialized — fill in the fields we know the
 		// log row needs so the audit trail still identifies the action+target.
 		gs.outcome.action = bd.action;
-		gs.outcome.target = !bd.accession.empty() ? bd.accession : bd.refname;
+		gs.outcome.target = bd.accession;
 		gs.outcome.hold_until_date = bd.until_date;
 	}
 
@@ -315,7 +307,6 @@ unique_ptr<FunctionData> BindHold(ClientContext &ctx, TableFunctionBindInput &in
 void AddLifecycleNamedParameters(TableFunction &tf, bool include_until) {
 	tf.named_parameters["secret"] = LogicalType::VARCHAR;
 	tf.named_parameters["accession"] = LogicalType::VARCHAR;
-	tf.named_parameters["refname"] = LogicalType::VARCHAR;
 	tf.named_parameters["catalog"] = LogicalType::VARCHAR;
 	if (include_until) {
 		tf.named_parameters["until"] = LogicalType::VARCHAR;

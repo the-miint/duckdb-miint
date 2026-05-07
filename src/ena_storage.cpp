@@ -72,6 +72,11 @@ void AddSubmissionLogColumns(ColumnList &columns) {
 	// (those identify their objects via the body); populated for CANCEL /
 	// RELEASE / HOLD with the value sent on `target=`.
 	add("target", LogicalType::VARCHAR);
+	// Per-object alias / primary-accession parallel arrays from the ADD
+	// path. Empty on lifecycle ops. See docs/ena.md for the recommended
+	// `list_position` / `list_contains` lookup pattern.
+	add("object_aliases", LogicalType::LIST(LogicalType::VARCHAR));
+	add("object_accessions", LogicalType::LIST(LogicalType::VARCHAR));
 }
 
 unique_ptr<CreateTableInfo> BuildENATableInfo(SchemaCatalogEntry &schema, ENATableKind kind) {
@@ -231,6 +236,10 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 
 	auto &error_messages = output.data[11];
 	ListVector::SetListSize(error_messages, 0);
+	auto &object_aliases_vec = output.data[14];
+	ListVector::SetListSize(object_aliases_vec, 0);
+	auto &object_accessions_vec = output.data[15];
+	ListVector::SetListSize(object_accessions_vec, 0);
 
 	for (idx_t i = 0; i < produce; i++) {
 		const auto &row = state.snapshot[state.cursor + i];
@@ -266,6 +275,40 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 	}
 	ListVector::SetListSize(error_messages, child_offset);
 
+	// object_aliases + object_accessions follow the error_messages pattern.
+	// They're parallel-indexed: for row i, object_accessions[k] is the
+	// primary accession for object_aliases[k]. Parallel-by-construction on
+	// the ADD path (the CRTP base in ena_object_insert_op.hpp pushes both
+	// in the same loop over `outcome.rows`); both empty on lifecycle paths
+	// (lifecycle receipts have no per-object children).
+	//
+	// The lambda reads `produce` and `state.cursor` from the outer scope —
+	// `state.cursor += produce` below MUST stay after both invocations
+	// because the lambda re-indexes `state.snapshot[state.cursor + i]`.
+	auto emit_string_list = [&](Vector &list_vec, const vector<string> ENASubmissionLogRow::*field) {
+		auto offset = ListVector::GetListSize(list_vec);
+		for (idx_t i = 0; i < produce; i++) {
+			const auto &row = state.snapshot[state.cursor + i];
+			const auto &src = row.*field;
+			const auto count = static_cast<idx_t>(src.size());
+			ListVector::Reserve(list_vec, offset + count);
+			auto &child_vec = ListVector::GetEntry(list_vec);
+			auto child_data = FlatVector::GetData<string_t>(child_vec);
+			for (idx_t j = 0; j < count; j++) {
+				child_data[offset + j] = StringVector::AddString(child_vec, src[j]);
+			}
+			auto entries = ListVector::GetData(list_vec);
+			entries[i].offset = offset;
+			entries[i].length = count;
+			offset += count;
+		}
+		ListVector::SetListSize(list_vec, offset);
+	};
+	emit_string_list(object_aliases_vec, &ENASubmissionLogRow::object_aliases);
+	emit_string_list(object_accessions_vec, &ENASubmissionLogRow::object_accessions);
+
+	// Cursor advance MUST stay after the two emit_string_list calls above —
+	// the lambda indexes state.snapshot[state.cursor + i].
 	state.cursor += produce;
 }
 

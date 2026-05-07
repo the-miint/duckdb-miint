@@ -23,7 +23,7 @@ experiments	13
 projects	9
 runs	5
 samples	10
-submission_log	14
+submission_log	16
 
 # Project columns match design doc (ordered)
 query II
@@ -62,6 +62,8 @@ receipt
 error_messages
 duration_ms
 target
+object_aliases
+object_accessions
 
 # CREATE TABLE inside the ENA catalog must error — schemas are fixed.
 statement error

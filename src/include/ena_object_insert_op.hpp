@@ -231,6 +231,17 @@ public:
 		log_payload.raw_receipt = outcome.raw_receipt;
 		log_payload.era_accession = outcome.era_accession;
 		log_payload.error_messages = error_messages;
+		// Capture per-object alias / primary accession into the audit log so
+		// users can recover an accession from an alias within the session
+		// (cross-submission lifecycle ops on Webin V2 require accession
+		// targeting — see docs/ena.md). On a parse failure or partial
+		// receipt `outcome.rows` is empty, so the lists stay empty too.
+		log_payload.object_aliases.reserve(outcome.rows.size());
+		log_payload.object_accessions.reserve(outcome.rows.size());
+		for (const auto &row : outcome.rows) {
+			log_payload.object_aliases.push_back(row.alias);
+			log_payload.object_accessions.push_back(Derived::PrimaryAccession(row));
+		}
 		RecordSubmissionLog(catalog, creds, log_payload);
 
 		if (transport_failure) {

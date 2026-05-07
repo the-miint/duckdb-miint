@@ -768,15 +768,17 @@ TEST_CASE("ENA envelope: HOLD targets an accession with HoldUntilDate (XML)", "[
 	                R"X(</SUBMISSION></WEBIN>)X");
 }
 
-TEST_CASE("ENA envelope: CANCEL accepts target_refname when target_accession is empty", "[ena_envelope][lifecycle]") {
-	// Allow alias-targeting for objects whose accession isn't yet known
-	// to the caller (rare, but the V2 schema accepts it).
+TEST_CASE("ENA envelope: target_refname on a lifecycle action is rejected", "[ena_envelope][lifecycle]") {
+	// Webin V2 only resolves refname/alias on `<*_REF>` children inside an
+	// ADD body where the alias is also defined locally; for cross-submission
+	// lifecycle ops on already-registered objects it requires the server-
+	// assigned accession. Verified live 2026-05-07.
 	miint::SubmissionSpec env;
 	env.action = miint::ENAAction::CANCEL;
 	env.target_refname = "my-sample-alias";
 
-	auto xml = miint::BuildEnvelopeXML(env);
-	CHECK(xml.find(R"(<CANCEL target="my-sample-alias"/>)") != std::string::npos);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env),
+	                  Catch::Matchers::ContainsSubstring("by refname/alias is not supported"));
 }
 
 TEST_CASE("ENA envelope: CANCEL without target is rejected", "[ena_envelope][lifecycle]") {
@@ -814,18 +816,21 @@ TEST_CASE("ENA envelope: ADD with target_accession is rejected (ADD doesn't targ
 	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("target"));
 }
 
-TEST_CASE("ENA envelope: CANCEL with both accession and refname prefers accession", "[ena_envelope][lifecycle]") {
-	// Mirrors the existing RefDescriptor convention: accession wins when both
-	// are set. Lets a caller provide a fallback refname without hand-coding
-	// a precedence check.
+TEST_CASE("ENA envelope: CANCEL with target_refname set is rejected even when accession is also set",
+          "[ena_envelope][lifecycle]") {
+	// Pre-tighten this verified an "accession wins" precedence for callers
+	// that supplied both. After 2026-05-07, target_refname is rejected
+	// outright on lifecycle actions because it has no usable wire-form
+	// (Webin V2 cannot resolve refname cross-submission). Carrying both
+	// is now a programming mistake — fail loudly so the caller drops the
+	// refname rather than relying on silent precedence.
 	miint::SubmissionSpec env;
 	env.action = miint::ENAAction::CANCEL;
 	env.target_accession = "ERS123456";
 	env.target_refname = "my-alias";
 
-	auto xml = miint::BuildEnvelopeXML(env);
-	CHECK(xml.find(R"(target="ERS123456")") != std::string::npos);
-	CHECK(xml.find("my-alias") == std::string::npos);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env),
+	                  Catch::Matchers::ContainsSubstring("by refname/alias is not supported"));
 }
 
 TEST_CASE("ENA envelope: CANCEL with body content is rejected (no silent drop)", "[ena_envelope][lifecycle]") {

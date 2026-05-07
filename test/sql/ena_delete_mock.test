@@ -31,16 +31,16 @@ WHERE action = 'CANCEL' AND target = 'ERS-mock-D1';
 ----
 CANCEL	ERS-mock-D1	true	samples
 
-# 2. DELETE on samples by alias routes to CANCEL with target=alias (refname path)
+# 2. DELETE on samples by ers_accession (alternate accession column).
 statement ok
-DELETE FROM ena.samples WHERE alias = 'mock-alias-D2';
+DELETE FROM ena.samples WHERE ers_accession = 'ERS-mock-D2';
 
 query IIII
 SELECT action, target, success, object_type
 FROM ena.submission_log
-WHERE action = 'CANCEL' AND target = 'mock-alias-D2';
+WHERE action = 'CANCEL' AND target = 'ERS-mock-D2';
 ----
-CANCEL	mock-alias-D2	true	samples
+CANCEL	ERS-mock-D2	true	samples
 
 # 3. DELETE on projects by prjeb_accession
 statement ok
@@ -94,13 +94,13 @@ must filter by alias or accession
 
 # 7. Negative: non-equality predicate → rejected
 statement error
-DELETE FROM ena.samples WHERE alias LIKE 'mock-%';
+DELETE FROM ena.samples WHERE samea_accession LIKE 'mock-%';
 ----
 must be equality on alias or accession
 
 # 8. Negative: compound AND predicate → rejected
 statement error
-DELETE FROM ena.samples WHERE alias = 'a' AND title = 'b';
+DELETE FROM ena.samples WHERE samea_accession = 'a' AND title = 'b';
 ----
 must be equality on alias or accession
 
@@ -108,7 +108,15 @@ must be equality on alias or accession
 statement error
 DELETE FROM ena.samples WHERE title = 'a-title';
 ----
-must be equality on alias or accession
+cannot DELETE on column 'title'
+
+# 9b. Negative: DELETE by alias is no longer accepted (Webin V2 limitation
+#     — refname targeting cross-submission isn't resolvable). Error message
+#     points at the in-session lookup pattern.
+statement error
+DELETE FROM ena.samples WHERE alias = 'some-alias';
+----
+DELETE by alias is not supported
 
 # 10. Negative: failed CANCEL still logs and surfaces error
 statement error

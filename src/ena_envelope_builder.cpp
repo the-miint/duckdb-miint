@@ -251,8 +251,26 @@ void ValidateActions(const SubmissionSpec &env) {
 
 	// Lifecycle actions that operate on an existing accession need a target.
 	if ((env.action == ENAAction::CANCEL || env.action == ENAAction::RELEASE) && !has_target) {
+		throw std::runtime_error(std::string("ENA envelope: ") + ActionName(env.action) + " requires target_accession");
+	}
+
+	// `target_refname` on a targeted lifecycle action is rejected at envelope-
+	// build time. Webin V2 only resolves refname/alias on `<*_REF>` cross-
+	// references inside an ADD body where the alias is also defined in the
+	// same submission; for cross-submission lifecycle ops on already-
+	// registered objects, ENA's wwwdev rejects with "Invalid accession or
+	// unsupported target type". Verified live on 2026-05-07. The user must
+	// pass the server-assigned accession (PRJEB / ERS / ERX / ERR / ERZ);
+	// within a session it can be recovered from `ena.submission_log` via
+	// `object_accessions[list_position(object_aliases, '<alias>')]`.
+	// `IsTargetedAction` ORs target_accession and target_refname, so a
+	// non-whitespace refname is sufficient to imply has_target — just guard
+	// on the refname being populated.
+	if (HasNonWhitespace(env.target_refname)) {
 		throw std::runtime_error(std::string("ENA envelope: ") + ActionName(env.action) +
-		                         " requires target_accession or target_refname");
+		                         " by refname/alias is not supported by Webin V2 for cross-submission lifecycle ops; "
+		                         "use the server-assigned accession (look up via "
+		                         "ena.submission_log.object_aliases / object_accessions if needed)");
 	}
 
 	// HOLD has two distinct shapes:
@@ -652,9 +670,11 @@ void AppendXmlRef(std::string &out, const char *element, const RefDescriptor &re
 void AppendXmlActions(std::string &out, const SubmissionSpec &env) {
 	ValidateActions(env);
 	if (IsTargetedAction(env)) {
-		// Targeted lifecycle action — accession wins over refname when both
-		// are set, matching the RefDescriptor convention used elsewhere.
-		const std::string &target = HasNonWhitespace(env.target_accession) ? env.target_accession : env.target_refname;
+		// Targeted lifecycle action. ValidateActions has already rejected any
+		// target_refname above (Webin V2 doesn't resolve refname/alias on
+		// action targets cross-submission), so target_accession is the only
+		// populated target field by the time we get here.
+		const std::string &target = env.target_accession;
 		out.append("<ACTIONS><ACTION><");
 		out.append(ActionName(env.action));
 		out.append(" target=\"");

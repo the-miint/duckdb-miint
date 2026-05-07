@@ -87,7 +87,7 @@ This registers a fixed-schema virtual catalog with one schema (`main`) and six t
 | `ena.experiments` | Library / platform metadata (`ERX`). | `alias`, `title`, `study_ref`, `sample_descriptor`, `design_description`, `library_name`, `library_strategy`, `library_source`, `library_selection`, `library_layout`, `platform`, `instrument_model`, `erx_accession` |
 | `ena.runs` | Sequence-file registration (`ERR`). | `alias`, `experiment_ref`, `title`, `files` (`LIST<STRUCT(filename, filetype, md5)>`), `err_accession` |
 | `ena.analyses` | Derived results (`ERZ`). INSERT not yet implemented. | `alias`, `study_ref`, `analysis_type`, `accession` |
-| `ena.submission_log` | Append-only in-memory bookkeeping. | `submission_id`, `submitted_at`, `endpoint`, `secret_name`, `action`, `object_type`, `n_objects`, `success`, `era_accession`, `request_payload`, `receipt`, `error_messages`, `duration_ms` |
+| `ena.submission_log` | Append-only in-memory bookkeeping. | `submission_id`, `submitted_at`, `endpoint`, `secret_name`, `action`, `object_type`, `n_objects`, `success`, `era_accession`, `request_payload`, `receipt`, `error_messages`, `duration_ms`, `target`, `object_aliases`, `object_accessions` |
 
 The `submission_log` is the only table you `SELECT` from. The other five are write-only — `SELECT` against them is reserved for a future Reports-API integration. `INSERT INTO ena.analyses` is reserved for a future build and currently raises a binder exception.
 
@@ -202,6 +202,80 @@ LIMIT 20;
 ```
 
 Failed submissions are also logged (`success = false`, `error_messages` populated), and the `INSERT` itself raises so the surrounding transaction sees the failure.
+
+## Lifecycle: cancel, release, embargo
+
+Webin V2 supports four lifecycle actions on already-registered objects. The miint extension exposes them as either table functions or, for CANCEL, a SQL `DELETE`:
+
+| Action | Surface |
+|---|---|
+| Cancel | `ena_cancel(secret, accession, catalog?)` &nbsp;or&nbsp; `DELETE FROM ena.<table> WHERE <accession_col> = '…'` |
+| Release | `ena_release(secret, accession, catalog?)` |
+| Hold (embargo until a date) | `ena_hold(secret, accession, until, catalog?)` |
+| Modify | not yet implemented (planned: `ena_modify_<X>(…)` per object type) |
+
+All three table functions return a single row with `action`, `target`, `success`, `era_accession`, `hold_until_date`, `error_messages`, `duration_ms` and append a row to `ena.submission_log`.
+
+```sql
+-- Cancel a previously-registered project by accession.
+SELECT * FROM ena_cancel(secret => 'my_ena', accession => 'PRJEB12345');
+-- Equivalent SQL DELETE:
+DELETE FROM ena.projects WHERE prjeb_accession = 'PRJEB12345';
+
+-- Release a held sample.
+SELECT * FROM ena_release(secret => 'my_ena', accession => 'ERS999999');
+
+-- Embargo a sample until a future date.
+SELECT * FROM ena_hold(secret => 'my_ena', accession => 'ERS999999', until => '2027-12-31');
+```
+
+### Lifecycle ops require the **accession**, not an alias
+
+This is the most important constraint. Webin V2 only resolves alias-style references (`refname=…`) inside the same submission XML where the alias is also defined. For follow-up actions on already-registered objects, you must use the server-assigned accession (`PRJEB…`, `ERS…`, `ERX…`, `ERR…`, `ERZ…`) returned by the original `INSERT`. Trying to cancel by alias on the wire fails with `Invalid accession or unsupported target type`; the extension catches the obvious cases at bind time:
+
+```sql
+-- These are rejected at bind time with an actionable error:
+SELECT * FROM ena_cancel(secret => 'my_ena', refname => 'my-cohort-2026');
+DELETE FROM ena.projects WHERE alias = 'my-cohort-2026';
+```
+
+### Looking up an accession from an alias (within a session)
+
+`ena.submission_log` retains every alias and its server-assigned accession from the `INSERT` receipt in two parallel `LIST(VARCHAR)` columns: `object_aliases` and `object_accessions`. Within the same session you can recover an accession this way:
+
+```sql
+-- Cancel by alias, in two steps:
+SELECT object_accessions[list_position(object_aliases, 'my-cohort-2026')] AS prjeb
+FROM ena.submission_log
+WHERE list_contains(object_aliases, 'my-cohort-2026')
+  AND object_type = 'projects'
+  AND success
+ORDER BY submitted_at DESC LIMIT 1;
+-- → 'PRJEB12345'
+
+DELETE FROM ena.projects WHERE prjeb_accession = 'PRJEB12345';
+```
+
+`submission_log` is **in-memory per attached catalog** — `DETACH ena` empties it. Cross-session alias→accession recovery currently requires the [Reports API](https://www.ebi.ac.uk/ena/submit/report) (planned: built-in client that does the lookup transparently for `refname =>` arguments). For now, persist your accessions yourself: dump `submission_log` to Parquet between sessions, or capture `RETURNING` values when registering.
+
+```sql
+-- Persist the alias↔accession map across sessions:
+COPY (
+    SELECT submitted_at, object_type, object_aliases, object_accessions
+    FROM ena.submission_log WHERE success
+) TO 'ena_objects.parquet' (FORMAT PARQUET);
+```
+
+### Audit-log shape for lifecycle rows
+
+Lifecycle calls log the action plus the `target` accession, and leave `object_aliases` / `object_accessions` empty (no per-object children in the receipt). `era_accession` is also empty — Webin V2 does not assign a submission accession for cross-submission lifecycle ops. The `success` column reflects whether the action took effect (the receipt's RECEIPT @success attribute is unreliable for lifecycle and is parsed semantically here):
+
+```sql
+SELECT submitted_at, action, target, success, duration_ms
+FROM ena.submission_log
+WHERE action IN ('CANCEL', 'RELEASE', 'HOLD')
+ORDER BY submitted_at DESC LIMIT 20;
+```
 
 ## End-to-end example
 

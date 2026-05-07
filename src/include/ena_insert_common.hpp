@@ -76,6 +76,12 @@ struct SubmissionLogPayload {
 	// Lifecycle target accession or refname; empty for body-style actions
 	// (ADD / MODIFY / VALIDATE).
 	string target;
+	// Per-object alias / primary-accession parallel arrays. Populated by
+	// the ADD path so users can later recover an accession from an alias
+	// (lifecycle ops on already-registered objects need the accession;
+	// see docs/ena.md). Empty on lifecycle ops.
+	std::vector<std::string> object_aliases;
+	std::vector<std::string> object_accessions;
 };
 
 void RecordSubmissionLog(ENACatalog &catalog, const ResolvedENACredentials &creds, const SubmissionLogPayload &payload);

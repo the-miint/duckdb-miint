@@ -157,6 +157,14 @@ struct ENASubmissionLogRow {
 	// CANCEL / RELEASE / HOLD acted. Empty for ADD / MODIFY / VALIDATE
 	// (those identify their objects via the body, not via target=).
 	string target;
+	// Per-object alias / primary-accession parallel arrays from the
+	// receipt. Populated by the ADD path (`INSERT INTO ena.X`) so users
+	// can recover an accession from an alias within the session via
+	// `object_accessions[list_position(object_aliases, '<alias>')]`.
+	// Empty on lifecycle ops (CANCEL / RELEASE / HOLD) — those don't
+	// register new objects and the receipt has no per-object children.
+	vector<string> object_aliases;
+	vector<string> object_accessions;
 };
 
 class ENASubmissionLog {

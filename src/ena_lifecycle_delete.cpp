@@ -31,19 +31,22 @@ string DeleteCallerName(ENATableEntry &table) {
 	return "DELETE FROM ena." + table.name;
 }
 
-// Map the WHERE column name to a target slot on RefDescriptor: alias is the
-// "refname" path, table-specific accession columns become the "accession"
-// path. Anything else is a bind-time error. Kept in lock-step with the
-// columns declared in BuildENATableInfo (ena_storage.cpp); when adding new
-// per-object accession columns there, mirror them here.
+// Map the WHERE column name to a target accession on RefDescriptor.
+// Alias-based DELETE is intentionally not supported: Webin V2 only
+// resolves refname/alias on `<*_REF>` cross-references inside an ADD
+// body; for cross-submission lifecycle ops on already-registered
+// objects, ENA requires the server-assigned accession (verified live
+// 2026-05-07). Within a session, an accession can be recovered from
+// an alias via `ena.submission_log.object_aliases` /
+// `object_accessions` (see docs/ena.md).
+//
+// Kept in lock-step with the per-table accession columns declared in
+// BuildENATableInfo (ena_storage.cpp); when adding new accession
+// columns there, mirror them here.
 //
 // Returns true and fills `target` if the column maps to a valid CANCEL key.
 bool ResolveDeleteTarget(ENATableKind kind, const string &column_name, const string &value,
                          miint::RefDescriptor &target) {
-	if (column_name == "alias") {
-		target.refname = value;
-		return true;
-	}
 	switch (kind) {
 	case ENATableKind::PROJECTS:
 		if (column_name == "prjeb_accession" || column_name == "erp_accession") {
@@ -359,7 +362,18 @@ duckdb::PhysicalOperator &PlanENALifecycleDelete(duckdb::ClientContext &, duckdb
 
 	RefDescriptor target;
 	if (!duckdb::ResolveDeleteTarget(kind, pred.column_name, pred.value, target)) {
-		throw duckdb::BinderException("%s: cannot DELETE on column '%s' (use alias or an accession column)", caller,
+		// `alias` is the obvious mistake here — flag it explicitly so the
+		// user gets the lookup recipe rather than a generic "unsupported
+		// column" message. Other non-accession columns get the short form.
+		if (pred.column_name == "alias") {
+			throw duckdb::BinderException(
+			    "%s: DELETE by alias is not supported by Webin V2 for cross-submission lifecycle ops. "
+			    "Use the server-assigned accession column (e.g. samea_accession, prjeb_accession, "
+			    "erx_accession, err_accession). Within a session, look up the accession via "
+			    "object_accessions[list_position(object_aliases, '<alias>')] FROM ena.submission_log",
+			    caller);
+		}
+		throw duckdb::BinderException("%s: cannot DELETE on column '%s' (use a per-table accession column)", caller,
 		                              pred.column_name);
 	}
 

@@ -30,6 +30,12 @@ public:
 	static string OperatorName() {
 		return "ENA_SAMPLES_INSERT";
 	}
+	// Primary accession for submission_log.object_accessions: the ERS id
+	// (the one users target in lifecycle ops). The BioSample SAMEA ext_id
+	// is on the RETURNING projection but isn't the lifecycle key.
+	static const std::string &PrimaryAccession(const miint::ENASampleInsertResult &row) {
+		return row.ers_accession;
+	}
 
 	static ENABuiltSpecs<miint::SampleSpec> BuildFromBuffer(ColumnDataCollection &buffer,
 	                                                        const physical_index_vector_t<idx_t> &column_index_map);

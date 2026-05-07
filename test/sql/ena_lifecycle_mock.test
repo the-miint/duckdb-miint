@@ -75,12 +75,12 @@ ORDER BY submitted_at DESC LIMIT 1;
 ----
 HOLD	ERS-mock-003	true
 
-# 4. refname-only target works (no accession provided)
-query II
-SELECT action, target
-FROM ena_cancel(secret => 'test_ena_lifecycle_mock', refname => 'my-alias-001');
+# 4. refname is no longer a recognized parameter — Webin V2 rejects refname
+#    targeting on cross-submission lifecycle. Verified live 2026-05-07.
+statement error
+SELECT * FROM ena_cancel(secret => 'test_ena_lifecycle_mock', refname => 'my-alias-001');
 ----
-CANCEL	my-alias-001
+Invalid named parameter "refname"
 
 # 5. Failure path: target containing FAIL triggers mock success=false
 statement error
@@ -97,11 +97,11 @@ ORDER BY submitted_at DESC LIMIT 1;
 ----
 CANCEL	ERS-FAIL-001	false
 
-# 6. Validation: missing accession AND refname is rejected at bind time
+# 6. Validation: missing accession is rejected at bind time
 statement error
 SELECT * FROM ena_cancel(secret => 'test_ena_lifecycle_mock');
 ----
-must provide one of 'accession' or 'refname'
+required named parameter 'accession'
 
 # 7. Validation: missing secret is rejected at bind time
 statement error
@@ -129,14 +129,15 @@ SELECT * FROM ena_cancel(secret => 'test_ena_lifecycle_mock',
 ----
 not attached
 
-# 11. accession + refname both provided: accession wins (matches RefDescriptor)
-query II
-SELECT action, target
-FROM ena_cancel(secret => 'test_ena_lifecycle_mock',
-                accession => 'ERS-mock-501',
-                refname => 'should-not-be-target');
+# 11. (was: accession + refname precedence) — refname is no longer accepted.
+#     Pre-tighten this verified accession-wins; post-tighten the parameter
+#     itself is rejected by the binder.
+statement error
+SELECT * FROM ena_cancel(secret => 'test_ena_lifecycle_mock',
+                         accession => 'ERS-mock-501',
+                         refname => 'should-not-be-target');
 ----
-CANCEL	ERS-mock-501
+Invalid named parameter "refname"
 
 # 12. LIMIT 0 must NOT trigger the POST (lifecycle ops are side-effectful)
 statement ok

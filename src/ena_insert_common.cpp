@@ -146,6 +146,16 @@ void RecordSubmissionLog(ENACatalog &catalog, const ResolvedENACredentials &cred
 	}
 	row.duration_ms = payload.duration_ms;
 	row.target = payload.target;
+	row.object_aliases.clear();
+	row.object_aliases.reserve(payload.object_aliases.size());
+	for (const auto &a : payload.object_aliases) {
+		row.object_aliases.push_back(a);
+	}
+	row.object_accessions.clear();
+	row.object_accessions.reserve(payload.object_accessions.size());
+	for (const auto &a : payload.object_accessions) {
+		row.object_accessions.push_back(a);
+	}
 	catalog.GetSubmissionLog().Append(row);
 }
 

@@ -29,6 +29,12 @@ public:
 	static string OperatorName() {
 		return "ENA_PROJECTS_INSERT";
 	}
+	// Primary accession for submission_log.object_accessions: the PRJEB id
+	// (the one users target in lifecycle ops). The ext_id ERP/study lives
+	// alongside on the RETURNING projection but isn't the lifecycle key.
+	static const std::string &PrimaryAccession(const miint::ENAProjectInsertResult &row) {
+		return row.prjeb_accession;
+	}
 
 	static ENABuiltSpecs<miint::ProjectSpec> BuildFromBuffer(ColumnDataCollection &buffer,
 	                                                         const physical_index_vector_t<idx_t> &column_index_map);

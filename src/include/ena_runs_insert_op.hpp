@@ -29,6 +29,9 @@ public:
 	static string OperatorName() {
 		return "ENA_RUNS_INSERT";
 	}
+	static const std::string &PrimaryAccession(const miint::ENARunInsertResult &row) {
+		return row.err_accession;
+	}
 
 	static ENABuiltSpecs<miint::RunSpec> BuildFromBuffer(ColumnDataCollection &buffer,
 	                                                     const physical_index_vector_t<idx_t> &column_index_map);
