@@ -169,7 +169,22 @@ void VsearchChimeraWrapper::init_common(bool denovo) {
 	opt_mindiv = params_.mindiv;
 	opt_mindiffs = params_.mindiffs;
 	// abskew: set explicitly in both modes to avoid depending on vsearch defaults.
-	opt_abskew = denovo ? params_.abskew : 0.0;
+	// Ref mode: 1.0 (not 0.0) because chimera_detect_batch's chimera_session_init
+	// runs the denovo branch (opt_uchime_ref is null in the library API path) and
+	// computes opt_maxsizeratio = 1.0/opt_abskew. With opt_abskew=0.0 that's +inf
+	// (UB-adjacent IEEE math); with 1.0 it's 1.0, and our query/target abundances
+	// are hardcoded to 1 in VsearchBatchArgs/db_add so the skew filter passes.
+	opt_abskew = denovo ? params_.abskew : 1.0;
+	// opt_threads must be set before fixups: fixups resolve 0 → arch_get_cores().
+	// De novo is sequential by construction in our caller (one detect_denovo
+	// per query, then index_sequence) — clamp to 1 so vsearch internals don't
+	// over-allocate. Reference mode passes the user/DuckDB thread count through
+	// to chimera_detect_batch's internal pool.
+	if (denovo) {
+		opt_threads = 1;
+	} else if (params_.threads > 0) {
+		opt_threads = params_.threads;
+	}
 	vsearch_apply_defaults_fixups();
 
 	// Step 4-5: load DB (caller finishes index setup after this)

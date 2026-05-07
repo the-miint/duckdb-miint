@@ -3,6 +3,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 
 #include <algorithm>
 
@@ -104,6 +105,23 @@ unique_ptr<FunctionData> ClusterSequencesTableFunction::Bind(ClientContext &cont
 		}
 	}
 
+	auto get_int = [&](const std::string &name, int &out, int min_val, int max_val, const char *constraint) {
+		auto it = input.named_parameters.find(name);
+		if (it != input.named_parameters.end()) {
+			out = it->second.GetValue<int>();
+			if (out < min_val || out > max_val) {
+				throw InvalidInputException("cluster_sequences_vsearch: %s must be %s (got %d)", name, constraint, out);
+			}
+		}
+	};
+
+	// Default to DuckDB's configured thread count so `SET threads=N` is honored.
+	// Explicit `threads:=N` overrides. Capped at vsearch's CLI ceiling (n_threads_max
+	// = 1024 in ext/vsearch/src/vsearch.cc) so we fail with a clear message rather
+	// than blowing up inside pthread_create.
+	data->params.threads = NumericCast<int>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+	get_int("threads", data->params.threads, 1, 1024, ">= 1 and <= 1024");
+
 	data->names = GetClusterOutputNames();
 	data->types = GetClusterOutputTypes();
 	for (auto &n : data->names) {
@@ -153,6 +171,7 @@ TableFunction ClusterSequencesTableFunction::GetFunction() {
 
 	tf.named_parameters["id"] = LogicalType::DOUBLE;
 	tf.named_parameters["strand"] = LogicalType::VARCHAR;
+	tf.named_parameters["threads"] = LogicalType::INTEGER;
 
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 

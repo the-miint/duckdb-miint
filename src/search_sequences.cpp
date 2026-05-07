@@ -5,6 +5,7 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 
 #include <algorithm>
 
@@ -122,18 +123,24 @@ unique_ptr<FunctionData> SearchSequencesTableFunction::Bind(ClientContext &conte
 	// Validate ref table exists and has required columns
 	ValidateSequenceTableSchema(context, data->ref_table);
 
-	auto get_int = [&](const std::string &name, int &out, int min_val, const char *constraint) {
+	auto get_int = [&](const std::string &name, int &out, int min_val, int max_val, const char *constraint) {
 		auto it = input.named_parameters.find(name);
 		if (it != input.named_parameters.end()) {
 			out = it->second.GetValue<int>();
-			if (out < min_val) {
+			if (out < min_val || out > max_val) {
 				throw InvalidInputException("search_sequences_vsearch: %s must be %s (got %d)", name, constraint, out);
 			}
 		}
 	};
 
-	get_int("maxaccepts", data->params.maxaccepts, 1, ">= 1");
-	get_int("maxrejects", data->params.maxrejects, 1, ">= 1");
+	get_int("maxaccepts", data->params.maxaccepts, 1, INT32_MAX, ">= 1");
+	get_int("maxrejects", data->params.maxrejects, 1, INT32_MAX, ">= 1");
+	// Default to DuckDB's configured thread count so `SET threads=N` is honored.
+	// Explicit `threads:=N` overrides. Capped at vsearch's CLI ceiling (n_threads_max
+	// = 1024 in ext/vsearch/src/vsearch.cc) so we fail with a clear message rather
+	// than blowing up inside pthread_create.
+	data->params.threads = NumericCast<int>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+	get_int("threads", data->params.threads, 1, 1024, ">= 1 and <= 1024");
 
 	data->names = GetSearchOutputNames();
 	data->types = GetSearchOutputTypes();
@@ -199,6 +206,7 @@ TableFunction SearchSequencesTableFunction::GetFunction() {
 	tf.named_parameters["id"] = LogicalType::DOUBLE;
 	tf.named_parameters["maxaccepts"] = LogicalType::INTEGER;
 	tf.named_parameters["maxrejects"] = LogicalType::INTEGER;
+	tf.named_parameters["threads"] = LogicalType::INTEGER;
 
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 

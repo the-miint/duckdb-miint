@@ -2323,6 +2323,7 @@ Reference-based chimera detection using the UCHIME algorithm (Edgar et al. 2011,
 - `dn` (DOUBLE, default 1.4): Pseudo-count prior on "no" votes. Must be >= 0.
 - `mindiv` (DOUBLE, default 0.8): Minimum divergence (percentage points) from closest parent. Must be >= 0.
 - `mindiffs` (INTEGER, default 3): Minimum number of diffs in each segment (left and right). Must be >= 1.
+- `threads` (INTEGER, optional): Number of threads vsearch uses for the internal `chimera_detect_batch` parallel scan. Defaults to DuckDB's configured thread count (`SET threads=N`) at bind time; pass an explicit value to override. Must be 1–1024 (matching vsearch's CLI ceiling).
 
 **Output schema (18 columns, compatible with vsearch `--uchimeout`):**
 
@@ -2370,7 +2371,7 @@ SELECT flag, count(*) FROM detect_chimera_uchime('queries', db:='refs') GROUP BY
 - One output row per query sequence (all queries are reported, not just chimeras)
 - Non-chimeric sequences (flag=`N`) have NULL for parent and identity columns, and 0 for vote columns
 - `id_a_b` (parent A vs parent B identity) is only computed for chimeric (`Y`) and borderline (`?`) results. Non-chimeric results report `id_a_b=0.0`. This avoids an extra pairwise alignment per query that is not needed for classification. Note: vsearch computes `id_a_b` for all queries unconditionally.
-- Multi-threaded: queries are processed in parallel with per-thread WFA2 aligners
+- Multi-threaded: vsearch's internal `chimera_detect_batch` parallelizes across the `threads` parameter (defaults to DuckDB's configured thread count; override per-call with `threads:=N`)
 - The reference database is fully materialized in memory at init time
 - Tables and views are both supported for query and reference inputs
 
@@ -2402,7 +2403,7 @@ De novo chimera detection using the UCHIME algorithm, powered by the [vsearch](h
 - `sequence_col` (VARCHAR, default `'sequence1'`): Name of the sequence column.
 - `count_col` (VARCHAR, default `'size'`): Name of the per-sequence count column. Set to `'abundance'` to chain `deblur(...)` directly into this function.
 - `abskew` (DOUBLE, default 2.0): Abundance skew. Candidate parents must have abundance >= abskew * query abundance. Must be >= 1.0.
-- `minh`, `xn`, `dn`, `mindiv`, `mindiffs`: Same as `detect_chimera_uchime`.
+- `minh`, `xn`, `dn`, `mindiv`, `mindiffs`: Same as `detect_chimera_uchime`. (No `threads` parameter — de novo detection is sequential by construction; vsearch is run with `opt_threads=1`.)
 
 **Output schema:** Same 18 columns as `detect_chimera_uchime`.
 
@@ -2450,6 +2451,7 @@ Global pairwise sequence search, powered by the [vsearch](https://github.com/tor
 - `id` (DOUBLE, required): Minimum identity threshold (0.0-1.0). No silent default — must be specified explicitly.
 - `maxaccepts` (INTEGER, default 1): Maximum number of accepted hits per query. Must be >= 1.
 - `maxrejects` (INTEGER, default 32): Maximum rejected targets before stopping search. Must be >= 1.
+- `threads` (INTEGER, optional): Number of threads vsearch uses for its internal `search_batch` parallel scan. Defaults to DuckDB's configured thread count (`SET threads=N`) at bind time; pass an explicit value to override. Must be 1–1024 (matching vsearch's CLI ceiling).
 
 **Output schema:**
 
@@ -2485,7 +2487,7 @@ SELECT count(DISTINCT read_id) FROM search_sequences_vsearch('queries', db:='ref
 - Each query produces 0 to `maxaccepts` output rows
 - Results include both accepted (above threshold) and weak (near-miss) hits; use the `accepted` column to filter
 - Plus-strand only (no reverse complement search)
-- Multi-threaded: up to 8 threads for parallel query searching
+- Multi-threaded: vsearch's internal `search_batch` parallelizes across the `threads` parameter (defaults to DuckDB's configured thread count; override per-call with `threads:=N`)
 - Reference database is fully materialized in memory at init time
 - RNA sequences (U) are automatically converted to DNA (T)
 
@@ -2505,6 +2507,7 @@ Greedy sequence clustering, powered by the [vsearch](https://github.com/torognes
 - `input_table` (VARCHAR): Name of a table or view containing sequences. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns.
 - `id` (DOUBLE, required): Minimum identity threshold (0.0-1.0). No silent default — must be specified explicitly.
 - `strand` (VARCHAR, default `'plus'`): `'plus'` for plus-strand only, `'both'` to also search reverse complements.
+- `threads` (INTEGER, optional): Number of threads vsearch uses for its internal `cluster_assign_batch` parallel scan. Defaults to DuckDB's configured thread count (`SET threads=N`) at bind time; pass an explicit value to override. Must be 1–1024 (matching vsearch's CLI ceiling).
 
 **Output schema:**
 

@@ -6,6 +6,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 
 #include <algorithm>
 
@@ -55,11 +56,11 @@ unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, Ta
 			}
 		}
 	};
-	auto get_int = [&](const std::string &name, int &out, int min_val, const char *constraint) {
+	auto get_int = [&](const std::string &name, int &out, int min_val, int max_val, const char *constraint) {
 		auto it = input.named_parameters.find(name);
 		if (it != input.named_parameters.end()) {
 			out = it->second.GetValue<int>();
-			if (out < min_val) {
+			if (out < min_val || out > max_val) {
 				throw InvalidInputException("detect_chimera_uchime: %s must be %s (got %d)", name, constraint, out);
 			}
 		}
@@ -69,7 +70,13 @@ unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, Ta
 	get_double("xn", data->params.xn, 1.0, ">= 1.0");
 	get_double("dn", data->params.dn, 0.0, ">= 0");
 	get_double("mindiv", data->params.mindiv, 0.0, ">= 0");
-	get_int("mindiffs", data->params.mindiffs, 1, ">= 1");
+	get_int("mindiffs", data->params.mindiffs, 1, INT32_MAX, ">= 1");
+	// Default to DuckDB's configured thread count so `SET threads=N` is honored.
+	// Explicit `threads:=N` overrides. Capped at vsearch's CLI ceiling (n_threads_max
+	// = 1024 in ext/vsearch/src/vsearch.cc) so we fail with a clear message rather
+	// than blowing up inside pthread_create.
+	data->params.threads = NumericCast<int>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+	get_int("threads", data->params.threads, 1, 1024, ">= 1 and <= 1024");
 
 	auto sample_it = input.named_parameters.find("sample_id");
 	if (sample_it != input.named_parameters.end()) {
@@ -212,6 +219,7 @@ TableFunction UchimeRefTableFunction::GetFunction() {
 	tf.named_parameters["mindiv"] = LogicalType::DOUBLE;
 	tf.named_parameters["mindiffs"] = LogicalType::INTEGER;
 	tf.named_parameters["sample_id"] = LogicalType::VARCHAR;
+	tf.named_parameters["threads"] = LogicalType::INTEGER;
 
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 

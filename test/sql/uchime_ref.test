@@ -58,6 +58,21 @@ SELECT * FROM detect_chimera_uchime('queries', db:='refs', xn:=0.5);
 ----
 must be >= 1.0
 
+statement error
+SELECT * FROM detect_chimera_uchime('queries', db:='refs', threads:=0);
+----
+>= 1 and <= 1024
+
+statement error
+SELECT * FROM detect_chimera_uchime('queries', db:='refs', threads:=-3);
+----
+>= 1 and <= 1024
+
+statement error
+SELECT * FROM detect_chimera_uchime('queries', db:='refs', threads:=1500);
+----
+>= 1 and <= 1024
+
 # --- Basic functionality ---
 
 # Row count should equal number of query sequences (8)
@@ -143,6 +158,35 @@ WHERE read_id = 'query_chimera1';
 true	true
 
 # Count chimeras
+query I
+SELECT count(*) FROM detect_chimera_uchime('queries', db:='refs') WHERE flag = 'Y';
+----
+4
+
+# Explicit threads:=N produces identical results. The 8-query fixture has
+# enough rows that threads:=4 actually exercises the parallel chimera_detect_batch
+# path (vsearch dispatches min(queries, opt_threads) workers).
+query I
+SELECT count(*) FROM detect_chimera_uchime('queries', db:='refs', threads:=1) WHERE flag = 'Y';
+----
+4
+
+query I
+SELECT count(*) FROM detect_chimera_uchime('queries', db:='refs', threads:=4) WHERE flag = 'Y';
+----
+4
+
+# threads:=1024 (vsearch's hard ceiling) is accepted at bind time. vsearch
+# clamps active threads to min(queries, opt_threads), so this only spawns 8.
+query I
+SELECT count(*) FROM detect_chimera_uchime('queries', db:='refs', threads:=1024) WHERE flag = 'Y';
+----
+4
+
+# Default-threads path (no explicit threads:=N) returns identical results.
+# This validates the TaskScheduler::NumberOfThreads() default plumbing — the
+# basic "Row count should equal number of query sequences" assertion above
+# already exercises this implicitly, but call it out explicitly here.
 query I
 SELECT count(*) FROM detect_chimera_uchime('queries', db:='refs') WHERE flag = 'Y';
 ----

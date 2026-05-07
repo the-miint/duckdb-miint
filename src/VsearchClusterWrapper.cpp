@@ -107,6 +107,10 @@ void VsearchClusterWrapper::set_sequences(const std::vector<std::string> &labels
 	opt_strand = params_.strand;
 	opt_maxaccepts = 1;
 	opt_maxrejects = 32;
+	// opt_threads must be set before fixups: fixups resolve 0 → arch_get_cores().
+	if (params_.threads > 0) {
+		opt_threads = params_.threads;
+	}
 	vsearch_apply_defaults_fixups();
 
 	// Step 4: load DB
