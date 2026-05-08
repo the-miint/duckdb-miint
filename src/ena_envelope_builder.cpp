@@ -333,12 +333,11 @@ void ValidateActions(const SubmissionSpec &env) {
 	// action the caller is preparing. CANCEL/RELEASE/HOLD don't carry
 	// body objects so the loops are no-ops.
 	//
-	// L4a (projects) + L4b (samples) covered. L4c (experiments) + L4d
-	// (runs) will each extend the loops to env.experiments / env.runs once
-	// those specs grow accession fields. The asymmetry is intentional and
-	// tracked here so a missing extension can't let an ADD-with-accession
-	// experiment slip through silently and surface as a confusing server
-	// error.
+	// L4a (projects) + L4b (samples) + L4c (experiments) covered. L4d
+	// (runs) will extend the loop to env.runs once `RunSpec` grows an
+	// `accession` field. The asymmetry is intentional and tracked here so a
+	// missing extension can't let an ADD-with-accession run slip through
+	// silently and surface as a confusing server error.
 	if (env.action == ENAAction::ADD) {
 		for (const auto &p : env.projects) {
 			if (!p.accession.empty()) {
@@ -352,6 +351,12 @@ void ValidateActions(const SubmissionSpec &env) {
 				                         "'); the server assigns the accession on ADD");
 			}
 		}
+		for (const auto &e : env.experiments) {
+			if (!e.accession.empty()) {
+				throw std::runtime_error("ENA envelope: ADD must not set an accession on an experiment (alias '" +
+				                         e.alias + "'); the server assigns the accession on ADD");
+			}
+		}
 	}
 	if (env.action == ENAAction::MODIFY) {
 		for (const auto &p : env.projects) {
@@ -363,6 +368,12 @@ void ValidateActions(const SubmissionSpec &env) {
 		for (const auto &s : env.samples) {
 			if (s.accession.empty()) {
 				throw std::runtime_error("ENA envelope: MODIFY requires accession on sample '" + s.alias +
+				                         "'; the server uses it to identify which already-registered object to update");
+			}
+		}
+		for (const auto &e : env.experiments) {
+			if (e.accession.empty()) {
+				throw std::runtime_error("ENA envelope: MODIFY requires accession on experiment '" + e.alias +
 				                         "'; the server uses it to identify which already-registered object to update");
 			}
 		}
@@ -840,6 +851,12 @@ void AppendXmlExperiment(std::string &out, const ExperimentSpec &e) {
 
 	out.append("<EXPERIMENT alias=\"");
 	AppendXmlEscaped(out, e.alias);
+	// MODIFY identifies the existing object by accession; ADD has no
+	// accession. Emit only when populated. Mirrors AppendXmlSample.
+	if (!e.accession.empty()) {
+		out.append("\" accession=\"");
+		AppendXmlEscaped(out, e.accession);
+	}
 	out.append("\">");
 	if (!e.title.empty()) {
 		AppendXmlElement(out, "TITLE", e.title);

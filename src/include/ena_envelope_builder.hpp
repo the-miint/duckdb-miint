@@ -132,6 +132,12 @@ struct ExperimentSpec {
 	ENALibraryLayout library_layout = ENALibraryLayout::SINGLE;
 	std::string platform;         // required, e.g. ILLUMINA, OXFORD_NANOPORE
 	std::string instrument_model; // required, free-form (server validates)
+	// Existing ERX accession — required on MODIFY (Webin V2 needs both
+	// `alias` and `accession` on the experiment element to identify the
+	// already-registered object), ignored on ADD. The XML emitter adds
+	// `accession="…"` on `<EXPERIMENT alias="…">` only when this is
+	// non-empty. Mirrors `ProjectSpec::accession` and `SampleSpec::accession`.
+	std::string accession;
 };
 
 struct RunSpec {

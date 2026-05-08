@@ -6,7 +6,15 @@
 //   - ena_modify_sample(secret, accession, alias, taxon_id, scientific_name?,
 //                        title?, description?, checklist?, attributes?,
 //                        attribute_units?, catalog?)
-//   - ena_modify_experiment / ena_modify_run — future phases (L4c, L4d).
+//   - ena_modify_experiment(secret, accession, alias, study_ref,
+//                            sample_descriptor, library_strategy,
+//                            library_source, library_selection, platform,
+//                            instrument_model, library_layout?,
+//                            library_name?, title?, design_description?,
+//                            catalog?). study_ref + sample_descriptor each
+//                            accept either an ENA accession or the parent's
+//                            alias — same disambiguation as the INSERT path.
+//   - ena_modify_run — future phase (L4d).
 //
 // MODIFY semantics: re-submit the full updated body for an already-registered
 // object, identified by its server-assigned `accession` (PRJEB / ERS / ERX /
@@ -34,8 +42,8 @@ class ExtensionLoader;
 namespace miint {
 
 // Register every shipped ena_modify_* table function with the loader.
-// Today wires ena_modify_project + ena_modify_sample; experiments and runs
-// land in subsequent phases. The registration site is one function so
+// Today wires ena_modify_project + ena_modify_sample + ena_modify_experiment;
+// runs land in L4d. The registration site is one function so
 // miint_extension.cpp doesn't grow a new line per object kind.
 void RegisterENAModifyTableFunctions(duckdb::ExtensionLoader &loader);
 

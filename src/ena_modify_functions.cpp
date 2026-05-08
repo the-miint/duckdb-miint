@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 //
-// SQL surface for ENA Webin V2 MODIFY actions. Currently wires
-// ena_modify_project (L4a) + ena_modify_sample (L4b);
-// experiments/runs follow in L4c/L4d. See ena_modify_functions.hpp
-// for the contract.
+// SQL surface for ENA Webin V2 MODIFY actions. Wires ena_modify_project
+// (L4a) + ena_modify_sample (L4b) + ena_modify_experiment (L4c); runs
+// follow in L4d. See ena_modify_functions.hpp for the contract.
 
 #include "ena_modify_functions.hpp"
 
 #include "ena_client.hpp"
 #include "ena_envelope_builder.hpp"
+#include "ena_experiments_insert.hpp"
 #include "ena_insert_common.hpp"
 #include "ena_post_fn.hpp"
 #include "ena_projects_insert.hpp"
@@ -519,6 +519,315 @@ void AddModifySampleNamedParameters(TableFunction &tf) {
 	tf.named_parameters["catalog"] = LogicalType::VARCHAR;
 }
 
+// ===========================================================================
+// ena_modify_experiment
+// ===========================================================================
+//
+// MODIFY semantics for experiments: re-submit the full updated experiment XML
+// identified by ERX accession. The L4a/L4b template applies — bind-time
+// require everything `ValidateExperimentSpec` and `AppendXmlExperiment` would
+// otherwise surface mid-Execute. Cross-references (`study_ref`,
+// `sample_descriptor`) are XSD-mandatory; each is a single VARCHAR that
+// accepts either an ENA accession or a parent's alias. The naming and
+// disambiguation matches the INSERT path (`INSERT INTO ena.experiments`):
+// strings shaped like `<PREFIX><NUMERIC>` (e.g. PRJEB123, SAMEA456) route to
+// `RefDescriptor::accession`; everything else is treated as a refname.
+// Sharing the disambiguator (`duckdb::ResolveENARefDescriptor`) keeps the
+// INSERT/MODIFY user surface symmetric so a user pulling refs from
+// `ena.submission_log` doesn't have to think about which form to pass.
+
+struct ModifyExperimentBindData : public TableFunctionData {
+	string secret_name;
+	string accession;
+	string alias;
+	string title;
+	// Cross-references — single VARCHAR each, matching the INSERT-path column
+	// names. Disambiguated to RefDescriptor at Execute time via
+	// duckdb::ResolveENARefDescriptor.
+	string study_ref;
+	string sample_descriptor;
+	string design_description;
+	string library_name;
+	string library_strategy;
+	string library_source;
+	string library_selection;
+	bool library_layout_paired = false;
+	bool library_layout_was_set = false;
+	string platform;
+	string instrument_model;
+	string catalog_name;
+	bool catalog_explicit = false;
+};
+
+unique_ptr<FunctionData> BindModifyExperiment(ClientContext &, TableFunctionBindInput &input,
+                                              vector<LogicalType> &return_types, vector<string> &names) {
+	auto bd = make_uniq<ModifyExperimentBindData>();
+
+	auto get_str = [&](const char *key, string &out, bool required, bool *was_set = nullptr) {
+		auto it = input.named_parameters.find(key);
+		if (it == input.named_parameters.end() || it->second.IsNull()) {
+			if (required) {
+				throw BinderException("ena_modify_experiment: required named parameter '%s' is missing", key);
+			}
+			return;
+		}
+		out = it->second.ToString();
+		if (was_set) {
+			*was_set = true;
+		}
+	};
+
+	get_str("secret", bd->secret_name, /*required=*/true);
+	get_str("accession", bd->accession, /*required=*/true);
+	get_str("alias", bd->alias, /*required=*/true);
+	get_str("title", bd->title, /*required=*/false);
+	get_str("study_ref", bd->study_ref, /*required=*/true);
+	get_str("sample_descriptor", bd->sample_descriptor, /*required=*/true);
+	get_str("design_description", bd->design_description, /*required=*/false);
+	get_str("library_name", bd->library_name, /*required=*/false);
+	get_str("library_strategy", bd->library_strategy, /*required=*/true);
+	get_str("library_source", bd->library_source, /*required=*/true);
+	get_str("library_selection", bd->library_selection, /*required=*/true);
+	get_str("platform", bd->platform, /*required=*/true);
+	get_str("instrument_model", bd->instrument_model, /*required=*/true);
+
+	// library_layout: optional, defaults to SINGLE. Accept "SINGLE" or "PAIRED"
+	// (case-insensitive) — that's the SRA.experiment.xsd vocabulary.
+	{
+		auto it = input.named_parameters.find("library_layout");
+		if (it != input.named_parameters.end() && !it->second.IsNull()) {
+			bd->library_layout_was_set = true;
+			string layout = it->second.ToString();
+			std::string upper;
+			upper.reserve(layout.size());
+			for (char c : layout) {
+				upper.push_back(static_cast<char>(c >= 'a' && c <= 'z' ? c - ('a' - 'A') : c));
+			}
+			if (upper == "PAIRED") {
+				bd->library_layout_paired = true;
+			} else if (upper == "SINGLE") {
+				bd->library_layout_paired = false;
+			} else {
+				throw BinderException("ena_modify_experiment: 'library_layout' must be 'SINGLE' or 'PAIRED' (got '%s')",
+				                      layout.c_str());
+			}
+		}
+	}
+
+	get_str("catalog", bd->catalog_name, /*required=*/false, &bd->catalog_explicit);
+	if (bd->catalog_name.empty()) {
+		bd->catalog_name = "ena";
+	}
+
+	// Bind-time guards — same pattern as ena_modify_sample. Catch the obvious
+	// errors here so the diagnostic doesn't surface mid-Execute after the
+	// secret has been resolved and the envelope half-built.
+	if (duckdb::IsENAStringWhitespaceOnly(bd->accession)) {
+		throw BinderException("ena_modify_experiment: 'accession' must not be whitespace-only");
+	}
+	if (duckdb::IsENAStringWhitespaceOnly(bd->alias)) {
+		throw BinderException("ena_modify_experiment: 'alias' must not be whitespace-only");
+	}
+
+	// Whitespace-only ref values would route through ResolveENARefDescriptor
+	// as a refname (since whitespace-only doesn't match any accession prefix)
+	// and emit `<STUDY_REF refname="   "/>` to the server — a round-trip
+	// rejection at best, garbage stored at worst.
+	if (duckdb::IsENAStringWhitespaceOnly(bd->study_ref)) {
+		throw BinderException("ena_modify_experiment: 'study_ref' must not be whitespace-only");
+	}
+	if (duckdb::IsENAStringWhitespaceOnly(bd->sample_descriptor)) {
+		throw BinderException("ena_modify_experiment: 'sample_descriptor' must not be whitespace-only");
+	}
+
+	// Required free-form fields cannot be whitespace-only — AppendXmlElement
+	// would emit them verbatim and the server would reject after a round-trip
+	// (or worse, accept them and store garbage).
+	if (duckdb::IsENAStringWhitespaceOnly(bd->library_strategy)) {
+		throw BinderException("ena_modify_experiment: 'library_strategy' must not be whitespace-only");
+	}
+	if (duckdb::IsENAStringWhitespaceOnly(bd->library_source)) {
+		throw BinderException("ena_modify_experiment: 'library_source' must not be whitespace-only");
+	}
+	if (duckdb::IsENAStringWhitespaceOnly(bd->library_selection)) {
+		throw BinderException("ena_modify_experiment: 'library_selection' must not be whitespace-only");
+	}
+	if (duckdb::IsENAStringWhitespaceOnly(bd->platform)) {
+		throw BinderException("ena_modify_experiment: 'platform' must not be whitespace-only");
+	}
+	if (duckdb::IsENAStringWhitespaceOnly(bd->instrument_model)) {
+		throw BinderException("ena_modify_experiment: 'instrument_model' must not be whitespace-only");
+	}
+
+	names = {"action", "target", "success", "alias", "era_accession", "error_messages", "duration_ms"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BOOLEAN,
+	                LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::LIST(LogicalType::VARCHAR),
+	                LogicalType::BIGINT};
+	return std::move(bd);
+}
+
+struct ModifyExperimentGlobalState : public GlobalTableFunctionState {
+	bool emitted = false;
+	miint::ENAExperimentSubmissionOutcome outcome;
+};
+
+unique_ptr<GlobalTableFunctionState> InitModifyExperimentGlobal(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<ModifyExperimentGlobalState>();
+}
+
+void ExecuteModifyExperiment(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &gs = data.global_state->Cast<ModifyExperimentGlobalState>();
+	if (gs.emitted) {
+		output.SetCardinality(0);
+		return;
+	}
+	auto &bd = data.bind_data->Cast<ModifyExperimentBindData>();
+
+	auto creds = duckdb::ResolveENACredentialsByName(context, "ena_modify_experiment", bd.secret_name);
+	if (creds.endpoint_url.empty()) {
+		creds.endpoint_url = duckdb::ResolveDefaultENAEndpointURL(creds.endpoint);
+	}
+
+	miint::ExperimentSpec spec;
+	spec.alias = bd.alias;
+	spec.accession = bd.accession;
+	spec.title = bd.title;
+	// Disambiguate `study_ref` / `sample_descriptor` strings into
+	// accession-vs-refname using the same logic the INSERT path uses (shared
+	// helper in `ena_insert_common`). Strings shaped like `<PREFIX><NUMERIC>`
+	// route to RefDescriptor::accession; anything else routes to refname.
+	spec.study_ref = duckdb::ResolveENARefDescriptor(bd.study_ref, {"PRJEB", "PRJNA", "PRJDB", "ERP"});
+	spec.sample_ref = duckdb::ResolveENARefDescriptor(bd.sample_descriptor, {"ERS", "SAMEA", "SAMN", "SAMD"});
+	spec.design_description = bd.design_description;
+	spec.library_name = bd.library_name;
+	spec.library_strategy = bd.library_strategy;
+	spec.library_source = bd.library_source;
+	spec.library_selection = bd.library_selection;
+	spec.library_layout = bd.library_layout_paired ? miint::ENALibraryLayout::PAIRED : miint::ENALibraryLayout::SINGLE;
+	spec.platform = bd.platform;
+	spec.instrument_model = bd.instrument_model;
+
+	miint::ENAExperimentInsertOptions opts;
+	opts.endpoint_url = creds.endpoint_url + "/submit";
+	opts.user = creds.user;
+	opts.password = creds.password;
+	opts.action = miint::ENAAction::MODIFY;
+
+	miint::ENAClient client(*context.db);
+	miint::ENAPostFn post_fn = [&client](const string &url, const string &body, const string &user,
+	                                     const string &password, const string &content_type) {
+		// Experiments are XML-only — V2's JSON dispatcher NPEs for SRA-side
+		// objects. `ExperimentSubmitTraits::ContentType()` always returns
+		// "application/xml", so a non-XML content_type here is a programmer
+		// error (a future trait/dispatch refactor that broke the
+		// round-trip). Throw an InternalException rather than fall through
+		// to a JSON path that would itself fail server-side, so the
+		// diagnostic surfaces at the layer where the contract was violated.
+		if (content_type != "application/xml") {
+			throw duckdb::InternalException(
+			    "ena_modify_experiment: post_fn received content_type='%s'; experiments are XML-only", content_type);
+		}
+		return client.PostXML(url, body, user, password);
+	};
+
+	std::vector<miint::ExperimentSpec> specs = {spec};
+
+	bool transport_failure = false;
+	string transport_error;
+	try {
+		gs.outcome = miint::SubmitExperimentInsertOutcome(specs, opts, post_fn);
+	} catch (const std::exception &e) {
+		transport_failure = true;
+		transport_error = e.what();
+	}
+
+	const bool success = !transport_failure && gs.outcome.success;
+	auto error_messages = gs.outcome.error_messages;
+	if (transport_failure && error_messages.empty()) {
+		error_messages.push_back(transport_error);
+	}
+	gs.outcome.error_messages = error_messages;
+
+	if (auto *catalog =
+	        duckdb::FindAttachedENACatalog(context, "ena_modify_experiment", bd.catalog_name, bd.catalog_explicit)) {
+		duckdb::SubmissionLogPayload payload;
+		payload.object_type = "experiments";
+		payload.action = miint::ActionName(miint::ENAAction::MODIFY);
+		payload.n_objects = 1;
+		payload.success = success;
+		payload.duration_ms = gs.outcome.duration_ms;
+		payload.envelope_payload = gs.outcome.envelope_payload;
+		payload.raw_receipt = gs.outcome.raw_receipt;
+		payload.era_accession = gs.outcome.era_accession;
+		payload.error_messages = error_messages;
+		// `target` is the user-supplied accession (audit ground truth,
+		// decision #23 — same convention as L4a/L4b).
+		payload.target = bd.accession;
+		payload.object_aliases.reserve(gs.outcome.rows.size());
+		payload.object_accessions.reserve(gs.outcome.rows.size());
+		for (const auto &row : gs.outcome.rows) {
+			payload.object_aliases.push_back(row.alias);
+			payload.object_accessions.push_back(row.erx_accession);
+		}
+		duckdb::RecordSubmissionLog(*catalog, creds, payload);
+	}
+
+	if (transport_failure) {
+		throw InvalidInputException("ena_modify_experiment: %s", transport_error);
+	}
+	if (!success) {
+		string detail;
+		for (const auto &m : error_messages) {
+			if (!detail.empty()) {
+				detail += "; ";
+			}
+			detail += m;
+		}
+		if (detail.empty()) {
+			detail = "no error detail";
+		}
+		throw InvalidInputException("ena_modify_experiment: %s", detail);
+	}
+
+	output.SetCardinality(1);
+	output.data[0].SetValue(0, Value(string(miint::ActionName(miint::ENAAction::MODIFY))));
+	output.data[1].SetValue(0, Value(bd.accession));
+	output.data[2].SetValue(0, Value::BOOLEAN(success));
+	output.data[3].SetValue(0, Value(bd.alias));
+	output.data[4].SetValue(0, Value(gs.outcome.era_accession));
+
+	vector<Value> errs;
+	errs.reserve(error_messages.size());
+	for (const auto &m : error_messages) {
+		errs.emplace_back(m);
+	}
+	output.data[5].SetValue(0, Value::LIST(LogicalType::VARCHAR, errs));
+	output.data[6].SetValue(0, Value::BIGINT(gs.outcome.duration_ms));
+
+	gs.emitted = true;
+}
+
+void AddModifyExperimentNamedParameters(TableFunction &tf) {
+	tf.named_parameters["secret"] = LogicalType::VARCHAR;
+	tf.named_parameters["accession"] = LogicalType::VARCHAR;
+	tf.named_parameters["alias"] = LogicalType::VARCHAR;
+	tf.named_parameters["title"] = LogicalType::VARCHAR;
+	// Cross-references: matches the `INSERT INTO ena.experiments` column
+	// names. Single VARCHAR each; accession-vs-refname disambiguated at
+	// Execute by `ResolveENARefDescriptor`.
+	tf.named_parameters["study_ref"] = LogicalType::VARCHAR;
+	tf.named_parameters["sample_descriptor"] = LogicalType::VARCHAR;
+	tf.named_parameters["design_description"] = LogicalType::VARCHAR;
+	tf.named_parameters["library_name"] = LogicalType::VARCHAR;
+	tf.named_parameters["library_strategy"] = LogicalType::VARCHAR;
+	tf.named_parameters["library_source"] = LogicalType::VARCHAR;
+	tf.named_parameters["library_selection"] = LogicalType::VARCHAR;
+	tf.named_parameters["library_layout"] = LogicalType::VARCHAR;
+	tf.named_parameters["platform"] = LogicalType::VARCHAR;
+	tf.named_parameters["instrument_model"] = LogicalType::VARCHAR;
+	tf.named_parameters["catalog"] = LogicalType::VARCHAR;
+}
+
 } // namespace
 
 void RegisterENAModifyTableFunctions(ExtensionLoader &loader) {
@@ -530,6 +839,12 @@ void RegisterENAModifyTableFunctions(ExtensionLoader &loader) {
 	{
 		TableFunction tf("ena_modify_sample", {}, ExecuteModifySample, BindModifySample, InitModifySampleGlobal);
 		AddModifySampleNamedParameters(tf);
+		loader.RegisterFunction(tf);
+	}
+	{
+		TableFunction tf("ena_modify_experiment", {}, ExecuteModifyExperiment, BindModifyExperiment,
+		                 InitModifyExperimentGlobal);
+		AddModifyExperimentNamedParameters(tf);
 		loader.RegisterFunction(tf);
 	}
 }

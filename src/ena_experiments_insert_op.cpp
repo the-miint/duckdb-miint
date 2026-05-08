@@ -37,36 +37,6 @@ constexpr idx_t COL_INSTRUMENT_MODEL = 11;
 constexpr idx_t COL_ERX_ACCESSION = 12;
 constexpr idx_t TABLE_COLUMN_COUNT = 13;
 
-// study_ref / sample_descriptor strings whose shape matches an ENA accession
-// (one of the canonical prefixes followed by digits only) route to
-// RefDescriptor::accession; everything else is treated as refname (the
-// parent's alias). The "digits only" suffix check matters: a user alias like
-// `ERPmycoolstudy` would otherwise be silently misclassified as an accession,
-// which the server would then fail to find. Real accessions are always
-// `<PREFIX><NUMERIC>` (see localdocs/ena-research-webin-v2-deep.md §1.1).
-miint::RefDescriptor ToRef(const std::string &value, std::initializer_list<const char *> accession_prefixes) {
-	miint::RefDescriptor ref;
-	for (const auto *p : accession_prefixes) {
-		const std::string prefix(p);
-		if (value.size() <= prefix.size() || value.compare(0, prefix.size(), prefix) != 0) {
-			continue;
-		}
-		bool all_digits = true;
-		for (size_t i = prefix.size(); i < value.size(); ++i) {
-			if (!std::isdigit(static_cast<unsigned char>(value[i]))) {
-				all_digits = false;
-				break;
-			}
-		}
-		if (all_digits) {
-			ref.accession = value;
-			return ref;
-		}
-	}
-	ref.refname = value;
-	return ref;
-}
-
 miint::ENALibraryLayout ParseLayout(const std::string &alias, const std::string &v) {
 	if (StringUtil::CIEquals(v, "PAIRED")) {
 		return miint::ENALibraryLayout::PAIRED;
@@ -141,13 +111,13 @@ ENAExperimentsInsert::BuildFromBuffer(ColumnDataCollection &buffer,
 				throw InvalidInputException("INSERT INTO ena.experiments: 'study_ref' must be non-empty (alias '%s')",
 				                            spec.alias);
 			}
-			spec.study_ref = ToRef(study_val, {"PRJEB", "PRJNA", "PRJDB", "ERP"});
+			spec.study_ref = ResolveENARefDescriptor(study_val, {"PRJEB", "PRJNA", "PRJDB", "ERP"});
 			const auto sample_val = ValueToVarchar(chunk.data[sample_idx].GetValue(row));
 			if (sample_val.empty()) {
 				throw InvalidInputException(
 				    "INSERT INTO ena.experiments: 'sample_descriptor' must be non-empty (alias '%s')", spec.alias);
 			}
-			spec.sample_ref = ToRef(sample_val, {"ERS", "SAMEA", "SAMN", "SAMD"});
+			spec.sample_ref = ResolveENARefDescriptor(sample_val, {"ERS", "SAMEA", "SAMN", "SAMD"});
 			if (design_idx != DConstants::INVALID_INDEX) {
 				spec.design_description = ValueToVarchar(chunk.data[design_idx].GetValue(row));
 			}

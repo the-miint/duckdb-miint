@@ -1,0 +1,352 @@
+# name: test/sql/ena_modify_experiment_mock.test
+# description: ena_modify_experiment(...) table function — Webin V2 MODIFY for experiments
+# group: [sql]
+
+require miint
+
+require-env ENA_WEBIN_MOCK_URL
+
+require-env MIINT_ENA_PORTAL_URL_BASE
+
+require httpfs
+
+statement ok
+CREATE SECRET test_ena_modify_experiment_mock (
+    TYPE ENA,
+    USER 'Webin-99999',
+    PASSWORD 'mock-password',
+    ENDPOINT 'test',
+    ENDPOINT_URL '${ENA_WEBIN_MOCK_URL}'
+);
+
+statement ok
+ATTACH '' AS ena (TYPE ENA, SECRET 'test_ena_modify_experiment_mock');
+
+# Happy path: MODIFY round-trips the user's ERX. era_accession is empty —
+# wwwdev returns <SUBMISSION accession=""/> on MODIFY (matches L4a/L4b finding).
+# study_ref + sample_descriptor each accept either an accession or a refname;
+# this case uses accessions. The disambiguation is the same as the INSERT
+# path's column shape.
+query IIIII
+SELECT action, target, success, alias, era_accession
+FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    accession => 'ERX9000001',
+    alias => 'modify-experiment-alpha',
+    study_ref => 'PRJEB42',
+    sample_descriptor => 'SAMEA42',
+    library_strategy => 'WGS',
+    library_source => 'METAGENOMIC',
+    library_selection => 'RANDOM',
+    library_layout => 'PAIRED',
+    platform => 'ILLUMINA',
+    instrument_model => 'Illumina NovaSeq 6000',
+    title => 'Updated experiment title');
+----
+MODIFY	ERX9000001	true	modify-experiment-alpha	(empty)
+
+# submission_log captures the request with action=MODIFY, target=ERX, and the
+# per-object alias/accession lists populated from the receipt.
+query IIIII
+SELECT object_type, action, target, object_aliases, object_accessions
+FROM ena.submission_log
+WHERE action = 'MODIFY' AND target = 'ERX9000001'
+ORDER BY submitted_at DESC LIMIT 1;
+----
+experiments	MODIFY	ERX9000001	[modify-experiment-alpha]	[ERX9000001]
+
+# Refname-style cross-references work too. Strings that don't match any
+# accession prefix-then-digits pattern route to RefDescriptor::refname (matches
+# the INSERT path).
+query III
+SELECT action, target, success
+FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    accession => 'ERX9000002',
+    alias => 'modify-experiment-refname',
+    study_ref => 'p1',
+    sample_descriptor => 's1',
+    library_strategy => 'WGS',
+    library_source => 'METAGENOMIC',
+    library_selection => 'RANDOM',
+    platform => 'ILLUMINA',
+    instrument_model => 'Illumina NovaSeq 6000');
+----
+MODIFY	ERX9000002	true
+
+# Required parameters: accession is non-optional.
+statement error
+SELECT * FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    alias => 'no-accession',
+    study_ref => 'PRJEB42',
+    sample_descriptor => 'SAMEA42',
+    library_strategy => 'WGS',
+    library_source => 'METAGENOMIC',
+    library_selection => 'RANDOM',
+    platform => 'ILLUMINA',
+    instrument_model => 'Illumina NovaSeq 6000');
+----
+accession
+
+# Required parameters: alias is non-optional.
+statement error
+SELECT * FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    accession => 'ERX9000099',
+    study_ref => 'PRJEB42',
+    sample_descriptor => 'SAMEA42',
+    library_strategy => 'WGS',
+    library_source => 'METAGENOMIC',
+    library_selection => 'RANDOM',
+    platform => 'ILLUMINA',
+    instrument_model => 'Illumina NovaSeq 6000');
+----
+alias
+
+# Required parameters: study_ref is non-optional.
+statement error
+SELECT * FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    accession => 'ERX9000099',
+    alias => 'a',
+    sample_descriptor => 'SAMEA42',
+    library_strategy => 'WGS',
+    library_source => 'METAGENOMIC',
+    library_selection => 'RANDOM',
+    platform => 'ILLUMINA',
+    instrument_model => 'Illumina NovaSeq 6000');
+----
+study_ref
+
+# Required parameters: sample_descriptor is non-optional.
+statement error
+SELECT * FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    accession => 'ERX9000099',
+    alias => 'a',
+    study_ref => 'PRJEB42',
+    library_strategy => 'WGS',
+    library_source => 'METAGENOMIC',
+    library_selection => 'RANDOM',
+    platform => 'ILLUMINA',
+    instrument_model => 'Illumina NovaSeq 6000');
+----
+sample_descriptor
+
+# library_strategy is required (each of the five SRA enum-valued fields is).
+statement error
+SELECT * FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    accession => 'ERX9000099',
+    alias => 'a',
+    study_ref => 'PRJEB42',
+    sample_descriptor => 'SAMEA42',
+    library_source => 'METAGENOMIC',
+    library_selection => 'RANDOM',
+    platform => 'ILLUMINA',
+    instrument_model => 'Illumina NovaSeq 6000');
+----
+library_strategy
+
+statement error
+SELECT * FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    accession => 'ERX9000099',
+    alias => 'a',
+    study_ref => 'PRJEB42',
+    sample_descriptor => 'SAMEA42',
+    library_strategy => 'WGS',
+    library_selection => 'RANDOM',
+    platform => 'ILLUMINA',
+    instrument_model => 'Illumina NovaSeq 6000');
+----
+library_source
+
+statement error
+SELECT * FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    accession => 'ERX9000099',
+    alias => 'a',
+    study_ref => 'PRJEB42',
+    sample_descriptor => 'SAMEA42',
+    library_strategy => 'WGS',
+    library_source => 'METAGENOMIC',
+    platform => 'ILLUMINA',
+    instrument_model => 'Illumina NovaSeq 6000');
+----
+library_selection
+
+statement error
+SELECT * FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    accession => 'ERX9000099',
+    alias => 'a',
+    study_ref => 'PRJEB42',
+    sample_descriptor => 'SAMEA42',
+    library_strategy => 'WGS',
+    library_source => 'METAGENOMIC',
+    library_selection => 'RANDOM',
+    instrument_model => 'Illumina NovaSeq 6000');
+----
+platform
+
+statement error
+SELECT * FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    accession => 'ERX9000099',
+    alias => 'a',
+    study_ref => 'PRJEB42',
+    sample_descriptor => 'SAMEA42',
+    library_strategy => 'WGS',
+    library_source => 'METAGENOMIC',
+    library_selection => 'RANDOM',
+    platform => 'ILLUMINA');
+----
+instrument_model
+
+# Bad library_layout vocabulary rejected at bind.
+statement error
+SELECT * FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    accession => 'ERX9000099',
+    alias => 'a',
+    study_ref => 'PRJEB42',
+    sample_descriptor => 'SAMEA42',
+    library_strategy => 'WGS',
+    library_source => 'METAGENOMIC',
+    library_selection => 'RANDOM',
+    library_layout => 'TRIPLE',
+    platform => 'ILLUMINA',
+    instrument_model => 'Illumina NovaSeq 6000');
+----
+library_layout
+
+# Whitespace-only accession / alias rejected at bind.
+statement error
+SELECT * FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    accession => '   ',
+    alias => 'a',
+    study_ref => 'PRJEB42',
+    sample_descriptor => 'SAMEA42',
+    library_strategy => 'WGS',
+    library_source => 'METAGENOMIC',
+    library_selection => 'RANDOM',
+    platform => 'ILLUMINA',
+    instrument_model => 'Illumina NovaSeq 6000');
+----
+accession
+
+statement error
+SELECT * FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    accession => 'ERX9000099',
+    alias => '  ',
+    study_ref => 'PRJEB42',
+    sample_descriptor => 'SAMEA42',
+    library_strategy => 'WGS',
+    library_source => 'METAGENOMIC',
+    library_selection => 'RANDOM',
+    platform => 'ILLUMINA',
+    instrument_model => 'Illumina NovaSeq 6000');
+----
+alias
+
+# Whitespace-only cross-references rejected at bind. Otherwise they'd route
+# through ResolveENARefDescriptor as a refname (whitespace doesn't match any
+# accession prefix) and emit `<STUDY_REF refname="   "/>` to the server.
+statement error
+SELECT * FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    accession => 'ERX9000099',
+    alias => 'a',
+    study_ref => '   ',
+    sample_descriptor => 'SAMEA42',
+    library_strategy => 'WGS',
+    library_source => 'METAGENOMIC',
+    library_selection => 'RANDOM',
+    platform => 'ILLUMINA',
+    instrument_model => 'Illumina NovaSeq 6000');
+----
+study_ref
+
+statement error
+SELECT * FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    accession => 'ERX9000099',
+    alias => 'a',
+    study_ref => 'PRJEB42',
+    sample_descriptor => '  ',
+    library_strategy => 'WGS',
+    library_source => 'METAGENOMIC',
+    library_selection => 'RANDOM',
+    platform => 'ILLUMINA',
+    instrument_model => 'Illumina NovaSeq 6000');
+----
+sample_descriptor
+
+# Failure path: alias containing FAIL triggers the mock's success="false".
+statement error
+SELECT * FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    accession => 'ERX9000004',
+    alias => 'modify-experiment-FAIL',
+    study_ref => 'PRJEB42',
+    sample_descriptor => 'SAMEA42',
+    library_strategy => 'WGS',
+    library_source => 'METAGENOMIC',
+    library_selection => 'RANDOM',
+    platform => 'ILLUMINA',
+    instrument_model => 'Illumina NovaSeq 6000');
+----
+mock validation failure
+
+query III
+SELECT action, target, success
+FROM ena.submission_log
+WHERE NOT success AND action = 'MODIFY' AND object_type = 'experiments'
+ORDER BY submitted_at DESC LIMIT 1;
+----
+MODIFY	ERX9000004	false
+
+# Explicit catalog correct.
+query III
+SELECT action, target, success
+FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    accession => 'ERX9000005',
+    alias => 'modify-experiment-explicit-catalog',
+    study_ref => 'PRJEB42',
+    sample_descriptor => 'SAMEA42',
+    library_strategy => 'WGS',
+    library_source => 'METAGENOMIC',
+    library_selection => 'RANDOM',
+    platform => 'ILLUMINA',
+    instrument_model => 'Illumina NovaSeq 6000',
+    catalog => 'ena');
+----
+MODIFY	ERX9000005	true
+
+# Explicit catalog missing → throw.
+statement error
+SELECT * FROM ena_modify_experiment(
+    secret => 'test_ena_modify_experiment_mock',
+    accession => 'ERX9000006',
+    alias => 'modify-experiment-bad-catalog',
+    study_ref => 'PRJEB42',
+    sample_descriptor => 'SAMEA42',
+    library_strategy => 'WGS',
+    library_source => 'METAGENOMIC',
+    library_selection => 'RANDOM',
+    platform => 'ILLUMINA',
+    instrument_model => 'Illumina NovaSeq 6000',
+    catalog => 'nonexistent_catalog');
+----
+nonexistent_catalog
+
+statement ok
+DETACH ena;
+
+statement ok
+DROP SECRET test_ena_modify_experiment_mock;

@@ -761,6 +761,73 @@ TEST_CASE("ENA envelope XML: empty experiments + runs yields just the SUBMISSION
 	                R"X(<WEBIN><SUBMISSION><ACTIONS><ACTION><ADD/></ACTION></ACTIONS></SUBMISSION></WEBIN>)X");
 }
 
+TEST_CASE("ENA envelope XML: MODIFY experiment emits the existing accession on the experiment element",
+          "[ena_envelope][modify]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::ExperimentSpec e;
+	e.alias = "exp-2026";
+	e.accession = "ERX9999001";
+	e.title = "Updated experiment title";
+	e.study_ref.accession = "PRJEB42";
+	e.sample_ref.accession = "SAMEA42";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "Illumina NovaSeq 6000";
+	env.experiments.push_back(e);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CHECK(xml.find("<MODIFY/>") != std::string::npos);
+	CHECK(xml.find(R"X(<EXPERIMENT alias="exp-2026" accession="ERX9999001">)X") != std::string::npos);
+	CHECK(xml.find("<TITLE>Updated experiment title</TITLE>") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope XML: ADD with accession on an experiment is rejected at build time", "[ena_envelope][modify]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::ADD;
+	miint::ExperimentSpec e;
+	e.alias = "fresh-experiment";
+	e.accession = "ERX999"; // bogus pre-fill
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "Illumina NovaSeq 6000";
+	env.experiments.push_back(e);
+
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env),
+	                  Catch::Matchers::ContainsSubstring("ADD must not set an accession") &&
+	                      Catch::Matchers::ContainsSubstring("fresh-experiment"));
+}
+
+TEST_CASE("ENA envelope XML: MODIFY without accession on an experiment is rejected at build time",
+          "[ena_envelope][modify]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::ExperimentSpec e;
+	e.alias = "needs-accession-experiment";
+	// e.accession deliberately empty
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "Illumina NovaSeq 6000";
+	env.experiments.push_back(e);
+
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env),
+	                  Catch::Matchers::ContainsSubstring("MODIFY requires accession") &&
+	                      Catch::Matchers::ContainsSubstring("needs-accession-experiment"));
+}
+
 TEST_CASE("ENA envelope XML: experiment empty alias rejected", "[ena_envelope]") {
 	miint::SubmissionSpec env;
 	miint::ExperimentSpec e;
