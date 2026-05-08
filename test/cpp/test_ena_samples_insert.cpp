@@ -157,6 +157,64 @@ TEST_CASE("ENA samples insert: receipt missing alias is reported clearly", "[ena
 	REQUIRE_THROWS_WITH(SubmitSampleInsert(samples, opts, post_fn), Catch::Matchers::ContainsSubstring("orphan"));
 }
 
+TEST_CASE("ENA samples insert: MODIFY round-trips the user-supplied accession back into the row",
+          "[ena_samples_insert][modify]") {
+	CapturedPost captured;
+	auto post_fn = [&captured](const std::string &url, const std::string &body, const std::string &user,
+	                           const std::string &password, const std::string &content_type) {
+		captured = {url, body, user, password, content_type};
+		// Real wwwdev MODIFY echoes the user-supplied ERS verbatim; the EXT_ID
+		// SAMEA accession remains stable across MODIFY (BioSample is the
+		// permanent identifier; ENA's ERS is a re-versioning of the same
+		// biosample). Mirror that here for fidelity.
+		return MakeSampleReceipt({{"s1", "ERS9999100", "SAMEA9999100"}});
+	};
+
+	auto sample = MinimalSample("s1");
+	sample.accession = "ERS9999100";
+	sample.title = "Updated sample title";
+	sample.checklist = "ERC000015";
+	sample.attributes = {{"collection date", "2026-05-07"}};
+	std::vector<SampleSpec> samples = {sample};
+
+	ENASampleInsertOptions opts;
+	opts.endpoint_url = "http://mock.example/submit";
+	opts.user = "Webin-1";
+	opts.password = "pw";
+	opts.action = ENAAction::MODIFY;
+
+	auto outcome = SubmitSampleInsertOutcome(samples, opts, post_fn);
+	REQUIRE(outcome.success);
+	REQUIRE(outcome.rows.size() == 1);
+	REQUIRE(outcome.rows[0].alias == "s1");
+	REQUIRE(outcome.rows[0].ers_accession == "ERS9999100");
+	REQUIRE(outcome.rows[0].samea_accession == "SAMEA9999100");
+	REQUIRE(captured.body.find("\"type\":\"MODIFY\"") != std::string::npos);
+	REQUIRE(captured.body.find("\"accession\":\"ERS9999100\"") != std::string::npos);
+}
+
+TEST_CASE("ENA samples insert: MODIFY failure receipt surfaces the server error", "[ena_samples_insert][modify]") {
+	auto post_fn = [](const std::string &, const std::string &, const std::string &, const std::string &,
+	                  const std::string &) {
+		return MakeSampleReceipt({}, false, "ERS00000 not found in submission account");
+	};
+	auto sample = MinimalSample("s1");
+	sample.accession = "ERS00000";
+	std::vector<SampleSpec> samples = {sample};
+
+	ENASampleInsertOptions opts;
+	opts.endpoint_url = "http://mock.example/submit";
+	opts.user = "Webin-1";
+	opts.password = "pw";
+	opts.action = ENAAction::MODIFY;
+
+	auto outcome = SubmitSampleInsertOutcome(samples, opts, post_fn);
+	REQUIRE_FALSE(outcome.success);
+	REQUIRE(outcome.rows.empty());
+	REQUIRE(outcome.error_messages.size() == 1);
+	REQUIRE_THAT(outcome.error_messages[0], Catch::Matchers::ContainsSubstring("ERS00000 not found"));
+}
+
 TEST_CASE("ENA samples insert: hold_until_date round-trips via the submission action", "[ena_samples_insert]") {
 	auto post_fn = [](const std::string &, const std::string &body, const std::string &, const std::string &,
 	                  const std::string &) {

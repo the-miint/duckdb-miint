@@ -128,6 +128,50 @@ TEST_CASE("ENA envelope: MODIFY without accession on a project is rejected at bu
 	                                                     Catch::Matchers::ContainsSubstring("needs-accession"));
 }
 
+TEST_CASE("ENA envelope: MODIFY sample emits the existing accession on the sample element", "[ena_envelope][modify]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::SampleSpec s;
+	s.alias = "s-2026";
+	s.accession = "ERS9999001";
+	s.taxon_id = 408170;
+	s.title = "Updated sample title";
+	s.checklist = "ERC000015";
+	s.attributes = {{"collection date", "2026-05-07"}};
+	env.samples.push_back(s);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	CHECK(json.find("\"type\":\"MODIFY\"") != std::string::npos);
+	CHECK(json.find("\"alias\":\"s-2026\",\"accession\":\"ERS9999001\"") != std::string::npos);
+	CHECK(json.find("\"taxonId\":\"408170\"") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope: ADD with accession on a sample is rejected at build time", "[ena_envelope][modify]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::ADD;
+	miint::SampleSpec s;
+	s.alias = "fresh-sample";
+	s.accession = "ERS999"; // bogus pre-fill
+	s.taxon_id = 408170;
+	env.samples.push_back(s);
+
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env),
+	                  Catch::Matchers::ContainsSubstring("ADD must not set an accession") &&
+	                      Catch::Matchers::ContainsSubstring("fresh-sample"));
+}
+
+TEST_CASE("ENA envelope: MODIFY without accession on a sample is rejected at build time", "[ena_envelope][modify]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::SampleSpec s;
+	s.alias = "needs-accession-sample";
+	s.taxon_id = 408170;
+	env.samples.push_back(s);
+
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("MODIFY requires accession") &&
+	                                                     Catch::Matchers::ContainsSubstring("needs-accession-sample"));
+}
+
 TEST_CASE("ENA envelope: umbrella project uses umbrellaProject marker", "[ena_envelope]") {
 	miint::SubmissionSpec env;
 	miint::ProjectSpec p;

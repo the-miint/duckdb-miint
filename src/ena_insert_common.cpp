@@ -55,6 +55,29 @@ bool IsENAStringWhitespaceOnly(const string &s) {
 	return true;
 }
 
+std::vector<std::pair<std::string, std::string>> ExtractENAKeyValueMap(const Value &v, const char *caller,
+                                                                       const char *column_label) {
+	std::vector<std::pair<std::string, std::string>> out;
+	if (v.IsNull()) {
+		return out;
+	}
+	const auto &entries = ListValue::GetChildren(v);
+	out.reserve(entries.size());
+	for (const auto &entry : entries) {
+		const auto &kv_children = StructValue::GetChildren(entry);
+		if (kv_children.size() != 2) {
+			throw InvalidInputException("%s: '%s' MAP entries must have key+value pairs", caller, column_label);
+		}
+		const auto key = ValueToVarchar(kv_children[0]);
+		const auto value = ValueToVarchar(kv_children[1]);
+		if (key.empty()) {
+			throw InvalidInputException("%s: '%s' map keys must be non-empty", caller, column_label);
+		}
+		out.emplace_back(key, value);
+	}
+	return out;
+}
+
 bool IsENAValidateOnlyEnabled(ClientContext &context) {
 	// Threading: ClientContext access is not thread-safe across pipeline
 	// threads, but every caller is the ENA insert operator's `Finalize`,

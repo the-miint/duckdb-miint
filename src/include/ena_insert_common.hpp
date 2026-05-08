@@ -105,4 +105,12 @@ ENACatalog *FindAttachedENACatalog(ClientContext &context, const string &caller,
 // which pass non-empty but would emit garbage to the server.
 bool IsENAStringWhitespaceOnly(const string &s);
 
+// Pull a MAP(VARCHAR, VARCHAR) Value into a (tag, value) vector preserving
+// insertion order. NULL maps and empty maps both yield no entries.
+// `caller` shows up in error messages (e.g. "ena_modify_sample") so users
+// can tell which call surfaced a malformed entry. `column_label` distinguishes
+// `attributes` from `attribute_units`.
+std::vector<std::pair<std::string, std::string>> ExtractENAKeyValueMap(const Value &v, const char *caller,
+                                                                       const char *column_label);
+
 } // namespace duckdb

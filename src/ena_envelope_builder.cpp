@@ -333,17 +333,22 @@ void ValidateActions(const SubmissionSpec &env) {
 	// action the caller is preparing. CANCEL/RELEASE/HOLD don't carry
 	// body objects so the loops are no-ops.
 	//
-	// L4a scope: only `ProjectSpec` carries an `accession` field today.
-	// When L4b/c/d add `accession` to SampleSpec / ExperimentSpec / RunSpec
-	// (one phase per object kind), extend the loops below to iterate
-	// env.samples / env.experiments / env.runs the same way. The asymmetry
-	// is intentional and tracked here so a missing extension can't let an
-	// ADD-with-accession sample slip through silently and surface as a
-	// confusing server error.
+	// L4a (projects) + L4b (samples) covered. L4c (experiments) + L4d
+	// (runs) will each extend the loops to env.experiments / env.runs once
+	// those specs grow accession fields. The asymmetry is intentional and
+	// tracked here so a missing extension can't let an ADD-with-accession
+	// experiment slip through silently and surface as a confusing server
+	// error.
 	if (env.action == ENAAction::ADD) {
 		for (const auto &p : env.projects) {
 			if (!p.accession.empty()) {
 				throw std::runtime_error("ENA envelope: ADD must not set an accession on a project (alias '" + p.alias +
+				                         "'); the server assigns the accession on ADD");
+			}
+		}
+		for (const auto &s : env.samples) {
+			if (!s.accession.empty()) {
+				throw std::runtime_error("ENA envelope: ADD must not set an accession on a sample (alias '" + s.alias +
 				                         "'); the server assigns the accession on ADD");
 			}
 		}
@@ -352,6 +357,12 @@ void ValidateActions(const SubmissionSpec &env) {
 		for (const auto &p : env.projects) {
 			if (p.accession.empty()) {
 				throw std::runtime_error("ENA envelope: MODIFY requires accession on project '" + p.alias +
+				                         "'; the server uses it to identify which already-registered object to update");
+			}
+		}
+		for (const auto &s : env.samples) {
+			if (s.accession.empty()) {
+				throw std::runtime_error("ENA envelope: MODIFY requires accession on sample '" + s.alias +
 				                         "'; the server uses it to identify which already-registered object to update");
 			}
 		}
@@ -458,6 +469,13 @@ void AppendSample(std::string &out, const SampleSpec &s) {
 	out.push_back('{');
 	out.append("\"alias\":");
 	AppendJsonString(out, s.alias);
+	// MODIFY identifies the existing object by accession; ADD has no
+	// accession. Emit only when populated so the JSON shape stays minimal
+	// for the common ADD path (mirrors AppendProject).
+	if (!s.accession.empty()) {
+		out.append(",\"accession\":");
+		AppendJsonString(out, s.accession);
+	}
 	if (!s.title.empty()) {
 		out.append(",\"title\":");
 		AppendJsonString(out, s.title);

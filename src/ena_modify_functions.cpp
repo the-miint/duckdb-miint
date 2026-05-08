@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 //
-// SQL surface for ENA Webin V2 MODIFY actions. Currently scoped to
-// projects (L4a); samples/experiments/runs follow in subsequent phases.
-// See ena_modify_functions.hpp for the contract.
+// SQL surface for ENA Webin V2 MODIFY actions. Currently wires
+// ena_modify_project (L4a) + ena_modify_sample (L4b);
+// experiments/runs follow in L4c/L4d. See ena_modify_functions.hpp
+// for the contract.
 
 #include "ena_modify_functions.hpp"
 
@@ -11,6 +12,7 @@
 #include "ena_insert_common.hpp"
 #include "ena_post_fn.hpp"
 #include "ena_projects_insert.hpp"
+#include "ena_samples_insert.hpp"
 #include "ena_storage.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -163,7 +165,7 @@ void ExecuteModifyProject(ClientContext &context, TableFunctionInput &data, Data
 	miint::ENAPostFn post_fn = [&client](const string &url, const string &body, const string &user,
 	                                     const string &password, const string &content_type) {
 		// Projects use JSON (V2's JSON dispatcher works for project + sample;
-		// experiment/run/analysis must be XML, deferred to L4b/c/d). The
+		// experiment/run/analysis must be XML, deferred to L4c/L4d). The
 		// content-type dispatch matches the INSERT-path post functor so any
 		// future routing change lands in one place.
 		if (content_type == "application/xml") {
@@ -264,12 +266,269 @@ void AddModifyProjectNamedParameters(TableFunction &tf) {
 	tf.named_parameters["catalog"] = LogicalType::VARCHAR;
 }
 
+// ===========================================================================
+// ena_modify_sample
+// ===========================================================================
+
+struct ModifySampleBindData : public TableFunctionData {
+	string secret_name;
+	string accession;
+	string alias;
+	int64_t taxon_id = 0;
+	string scientific_name;
+	string title;
+	string description;
+	string checklist;
+	std::vector<std::pair<std::string, std::string>> attributes;
+	std::vector<std::pair<std::string, std::string>> attribute_units;
+	string catalog_name;
+	bool catalog_explicit = false;
+};
+
+unique_ptr<FunctionData> BindModifySample(ClientContext &, TableFunctionBindInput &input,
+                                          vector<LogicalType> &return_types, vector<string> &names) {
+	auto bd = make_uniq<ModifySampleBindData>();
+
+	auto get_str = [&](const char *key, string &out, bool required, bool *was_set = nullptr) {
+		auto it = input.named_parameters.find(key);
+		if (it == input.named_parameters.end() || it->second.IsNull()) {
+			if (required) {
+				throw BinderException("ena_modify_sample: required named parameter '%s' is missing", key);
+			}
+			return;
+		}
+		out = it->second.ToString();
+		if (was_set) {
+			*was_set = true;
+		}
+	};
+
+	get_str("secret", bd->secret_name, /*required=*/true);
+	get_str("accession", bd->accession, /*required=*/true);
+	get_str("alias", bd->alias, /*required=*/true);
+
+	// taxon_id is required: AppendSample emits "taxonId":"<value>"
+	// unconditionally and ValidateSampleSpec rejects taxon_id <= 0. Both an
+	// unset (default 0) and an explicit non-positive value would surface as
+	// the same envelope-build error mid-Execute; bind-time rejection is
+	// faster and clearer.
+	{
+		auto it = input.named_parameters.find("taxon_id");
+		if (it == input.named_parameters.end() || it->second.IsNull()) {
+			throw BinderException("ena_modify_sample: required named parameter 'taxon_id' is missing");
+		}
+		bd->taxon_id = it->second.GetValue<int64_t>();
+		if (bd->taxon_id <= 0) {
+			// Format the int64_t into a temporary so the message is stable
+			// across LP64 / LLP64 platforms (no `%lld` + `long long` cast
+			// dance, no `<cinttypes>` PRId64 macro).
+			throw BinderException("ena_modify_sample: 'taxon_id' must be > 0 (got " + std::to_string(bd->taxon_id) +
+			                      ")");
+		}
+	}
+
+	get_str("scientific_name", bd->scientific_name, /*required=*/false);
+	get_str("title", bd->title, /*required=*/false);
+	get_str("description", bd->description, /*required=*/false);
+	bool checklist_was_set = false;
+	get_str("checklist", bd->checklist, /*required=*/false, &checklist_was_set);
+	// Extract MAPs at bind so a malformed entry surfaces as a `BinderException`
+	// before secret resolution / network. The named-parameter LogicalType is
+	// MAP(VARCHAR, VARCHAR), so DuckDB has already validated the outer shape;
+	// `ExtractENAKeyValueMap` catches the per-entry guarantees (struct shape,
+	// non-empty key).
+	{
+		auto it = input.named_parameters.find("attributes");
+		if (it != input.named_parameters.end()) {
+			bd->attributes = duckdb::ExtractENAKeyValueMap(it->second, "ena_modify_sample", "attributes");
+		}
+	}
+	{
+		auto it = input.named_parameters.find("attribute_units");
+		if (it != input.named_parameters.end()) {
+			bd->attribute_units = duckdb::ExtractENAKeyValueMap(it->second, "ena_modify_sample", "attribute_units");
+		}
+	}
+
+	get_str("catalog", bd->catalog_name, /*required=*/false, &bd->catalog_explicit);
+	if (bd->catalog_name.empty()) {
+		bd->catalog_name = "ena";
+	}
+
+	if (duckdb::IsENAStringWhitespaceOnly(bd->accession)) {
+		throw BinderException("ena_modify_sample: 'accession' must not be whitespace-only");
+	}
+	if (duckdb::IsENAStringWhitespaceOnly(bd->alias)) {
+		throw BinderException("ena_modify_sample: 'alias' must not be whitespace-only");
+	}
+	// `checklist` only when the user explicitly set it (passing nothing keeps
+	// `bd->checklist` empty, which `AppendSample` correctly omits). Whitespace-
+	// only is a different failure mode — it WOULD be emitted as the
+	// ENA-CHECKLIST attribute value verbatim, and the server's confusing
+	// "checklist '   ' not found" surfaces only after a round-trip.
+	if (checklist_was_set && duckdb::IsENAStringWhitespaceOnly(bd->checklist)) {
+		throw BinderException("ena_modify_sample: 'checklist' must not be whitespace-only");
+	}
+
+	names = {"action", "target", "success", "alias", "era_accession", "error_messages", "duration_ms"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BOOLEAN,
+	                LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::LIST(LogicalType::VARCHAR),
+	                LogicalType::BIGINT};
+	return std::move(bd);
+}
+
+struct ModifySampleGlobalState : public GlobalTableFunctionState {
+	bool emitted = false;
+	miint::ENASamplesSubmissionOutcome outcome;
+};
+
+unique_ptr<GlobalTableFunctionState> InitModifySampleGlobal(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<ModifySampleGlobalState>();
+}
+
+void ExecuteModifySample(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &gs = data.global_state->Cast<ModifySampleGlobalState>();
+	if (gs.emitted) {
+		output.SetCardinality(0);
+		return;
+	}
+	auto &bd = data.bind_data->Cast<ModifySampleBindData>();
+
+	auto creds = duckdb::ResolveENACredentialsByName(context, "ena_modify_sample", bd.secret_name);
+	if (creds.endpoint_url.empty()) {
+		creds.endpoint_url = duckdb::ResolveDefaultENAEndpointURL(creds.endpoint);
+	}
+
+	miint::SampleSpec spec;
+	spec.alias = bd.alias;
+	spec.accession = bd.accession;
+	spec.taxon_id = bd.taxon_id;
+	spec.scientific_name = bd.scientific_name;
+	spec.title = bd.title;
+	spec.description = bd.description;
+	spec.checklist = bd.checklist;
+	spec.attributes = bd.attributes;
+	spec.attribute_units = bd.attribute_units;
+
+	miint::ENASampleInsertOptions opts;
+	opts.endpoint_url = creds.endpoint_url + "/submit";
+	opts.user = creds.user;
+	opts.password = creds.password;
+	opts.action = miint::ENAAction::MODIFY;
+
+	miint::ENAClient client(*context.db);
+	miint::ENAPostFn post_fn = [&client](const string &url, const string &body, const string &user,
+	                                     const string &password, const string &content_type) {
+		if (content_type == "application/xml") {
+			return client.PostXML(url, body, user, password);
+		}
+		return client.PostJSONReceiveXML(url, body, user, password);
+	};
+
+	std::vector<miint::SampleSpec> specs = {spec};
+
+	bool transport_failure = false;
+	string transport_error;
+	try {
+		gs.outcome = miint::SubmitSampleInsertOutcome(specs, opts, post_fn);
+	} catch (const std::exception &e) {
+		transport_failure = true;
+		transport_error = e.what();
+	}
+
+	const bool success = !transport_failure && gs.outcome.success;
+	auto error_messages = gs.outcome.error_messages;
+	if (transport_failure && error_messages.empty()) {
+		error_messages.push_back(transport_error);
+	}
+	gs.outcome.error_messages = error_messages;
+
+	if (auto *catalog =
+	        duckdb::FindAttachedENACatalog(context, "ena_modify_sample", bd.catalog_name, bd.catalog_explicit)) {
+		duckdb::SubmissionLogPayload payload;
+		payload.object_type = "samples";
+		payload.action = miint::ActionName(miint::ENAAction::MODIFY);
+		payload.n_objects = 1;
+		payload.success = success;
+		payload.duration_ms = gs.outcome.duration_ms;
+		payload.envelope_payload = gs.outcome.envelope_payload;
+		payload.raw_receipt = gs.outcome.raw_receipt;
+		payload.era_accession = gs.outcome.era_accession;
+		payload.error_messages = error_messages;
+		// `target` is the user-supplied accession (audit ground truth),
+		// matching the L4a ena_modify_project convention (decision #23).
+		payload.target = bd.accession;
+		payload.object_aliases.reserve(gs.outcome.rows.size());
+		payload.object_accessions.reserve(gs.outcome.rows.size());
+		for (const auto &row : gs.outcome.rows) {
+			payload.object_aliases.push_back(row.alias);
+			payload.object_accessions.push_back(row.ers_accession);
+		}
+		duckdb::RecordSubmissionLog(*catalog, creds, payload);
+	}
+
+	if (transport_failure) {
+		throw InvalidInputException("ena_modify_sample: %s", transport_error);
+	}
+	if (!success) {
+		string detail;
+		for (const auto &m : error_messages) {
+			if (!detail.empty()) {
+				detail += "; ";
+			}
+			detail += m;
+		}
+		if (detail.empty()) {
+			detail = "no error detail";
+		}
+		throw InvalidInputException("ena_modify_sample: %s", detail);
+	}
+
+	output.SetCardinality(1);
+	output.data[0].SetValue(0, Value(string(miint::ActionName(miint::ENAAction::MODIFY))));
+	output.data[1].SetValue(0, Value(bd.accession));
+	output.data[2].SetValue(0, Value::BOOLEAN(success));
+	output.data[3].SetValue(0, Value(bd.alias));
+	output.data[4].SetValue(0, Value(gs.outcome.era_accession));
+
+	vector<Value> errs;
+	errs.reserve(error_messages.size());
+	for (const auto &m : error_messages) {
+		errs.emplace_back(m);
+	}
+	output.data[5].SetValue(0, Value::LIST(LogicalType::VARCHAR, errs));
+	output.data[6].SetValue(0, Value::BIGINT(gs.outcome.duration_ms));
+
+	gs.emitted = true;
+}
+
+void AddModifySampleNamedParameters(TableFunction &tf) {
+	tf.named_parameters["secret"] = LogicalType::VARCHAR;
+	tf.named_parameters["accession"] = LogicalType::VARCHAR;
+	tf.named_parameters["alias"] = LogicalType::VARCHAR;
+	tf.named_parameters["taxon_id"] = LogicalType::BIGINT;
+	tf.named_parameters["scientific_name"] = LogicalType::VARCHAR;
+	tf.named_parameters["title"] = LogicalType::VARCHAR;
+	tf.named_parameters["description"] = LogicalType::VARCHAR;
+	tf.named_parameters["checklist"] = LogicalType::VARCHAR;
+	tf.named_parameters["attributes"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
+	tf.named_parameters["attribute_units"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
+	tf.named_parameters["catalog"] = LogicalType::VARCHAR;
+}
+
 } // namespace
 
 void RegisterENAModifyTableFunctions(ExtensionLoader &loader) {
-	TableFunction tf("ena_modify_project", {}, ExecuteModifyProject, BindModifyProject, InitModifyProjectGlobal);
-	AddModifyProjectNamedParameters(tf);
-	loader.RegisterFunction(tf);
+	{
+		TableFunction tf("ena_modify_project", {}, ExecuteModifyProject, BindModifyProject, InitModifyProjectGlobal);
+		AddModifyProjectNamedParameters(tf);
+		loader.RegisterFunction(tf);
+	}
+	{
+		TableFunction tf("ena_modify_sample", {}, ExecuteModifySample, BindModifySample, InitModifySampleGlobal);
+		AddModifySampleNamedParameters(tf);
+		loader.RegisterFunction(tf);
+	}
 }
 
 } // namespace miint

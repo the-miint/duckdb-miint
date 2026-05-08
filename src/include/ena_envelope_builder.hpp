@@ -90,6 +90,12 @@ struct SampleSpec {
 	// by tag (matches against `attributes[].first`); tags not present here
 	// are emitted without a `units` JSON field.
 	std::vector<std::pair<std::string, std::string>> attribute_units;
+	// Existing ERS accession — required on MODIFY (Webin V2 needs both
+	// `alias` and `accession` on the sample element to identify the
+	// already-registered object), ignored on ADD. Same wire-format role as
+	// `ProjectSpec::accession`. The envelope builder emits
+	// `"accession":"…"` only when this is non-empty.
+	std::string accession;
 };
 
 // Cross-reference to a parent object (study / sample / experiment). V2 accepts
