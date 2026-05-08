@@ -164,10 +164,13 @@ void ExecuteModifyProject(ClientContext &context, TableFunctionInput &data, Data
 	miint::ENAClient client(*context.db);
 	miint::ENAPostFn post_fn = [&client](const string &url, const string &body, const string &user,
 	                                     const string &password, const string &content_type) {
-		// Projects use JSON (V2's JSON dispatcher works for project + sample;
-		// experiment/run/analysis must be XML, deferred to L4c/L4d). The
-		// content-type dispatch matches the INSERT-path post functor so any
-		// future routing change lands in one place.
+		// Projects use JSON (V2's JSON dispatcher handles projects correctly).
+		// Samples (post L4b-fix), experiments, and runs go through XML —
+		// samples because V2's JSON-to-XML dispatcher misorders DESCRIPTION
+		// vs. SAMPLE_NAME (XSD violation), the SRA-side objects because the
+		// JSON dispatcher NPEs on them. The content-type dispatch matches
+		// the INSERT-path post functor so any future routing change lands
+		// in one place.
 		if (content_type == "application/xml") {
 			return client.PostXML(url, body, user, password);
 		}

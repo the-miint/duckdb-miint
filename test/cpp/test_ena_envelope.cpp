@@ -128,7 +128,10 @@ TEST_CASE("ENA envelope: MODIFY without accession on a project is rejected at bu
 	                                                     Catch::Matchers::ContainsSubstring("needs-accession"));
 }
 
-TEST_CASE("ENA envelope: MODIFY sample emits the existing accession on the sample element", "[ena_envelope][modify]") {
+TEST_CASE("ENA envelope XML: MODIFY sample emits the existing accession on the sample element",
+          "[ena_envelope][modify]") {
+	// Production sample envelopes flipped to XML in L4b-fix to bypass the V2
+	// JSON dispatcher's <DESCRIPTION>-before-<SAMPLE_NAME> ordering bug.
 	miint::SubmissionSpec env;
 	env.action = miint::ENAAction::MODIFY;
 	miint::SampleSpec s;
@@ -140,13 +143,13 @@ TEST_CASE("ENA envelope: MODIFY sample emits the existing accession on the sampl
 	s.attributes = {{"collection date", "2026-05-07"}};
 	env.samples.push_back(s);
 
-	auto json = miint::BuildEnvelopeJSON(env);
-	CHECK(json.find("\"type\":\"MODIFY\"") != std::string::npos);
-	CHECK(json.find("\"alias\":\"s-2026\",\"accession\":\"ERS9999001\"") != std::string::npos);
-	CHECK(json.find("\"taxonId\":\"408170\"") != std::string::npos);
+	auto xml = miint::BuildEnvelopeXML(env);
+	CHECK(xml.find("<MODIFY/>") != std::string::npos);
+	CHECK(xml.find(R"X(<SAMPLE alias="s-2026" accession="ERS9999001">)X") != std::string::npos);
+	CHECK(xml.find("<TAXON_ID>408170</TAXON_ID>") != std::string::npos);
 }
 
-TEST_CASE("ENA envelope: ADD with accession on a sample is rejected at build time", "[ena_envelope][modify]") {
+TEST_CASE("ENA envelope XML: ADD with accession on a sample is rejected at build time", "[ena_envelope][modify]") {
 	miint::SubmissionSpec env;
 	env.action = miint::ENAAction::ADD;
 	miint::SampleSpec s;
@@ -155,12 +158,13 @@ TEST_CASE("ENA envelope: ADD with accession on a sample is rejected at build tim
 	s.taxon_id = 408170;
 	env.samples.push_back(s);
 
-	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env),
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env),
 	                  Catch::Matchers::ContainsSubstring("ADD must not set an accession") &&
 	                      Catch::Matchers::ContainsSubstring("fresh-sample"));
 }
 
-TEST_CASE("ENA envelope: MODIFY without accession on a sample is rejected at build time", "[ena_envelope][modify]") {
+TEST_CASE("ENA envelope XML: MODIFY without accession on a sample is rejected at build time",
+          "[ena_envelope][modify]") {
 	miint::SubmissionSpec env;
 	env.action = miint::ENAAction::MODIFY;
 	miint::SampleSpec s;
@@ -168,8 +172,8 @@ TEST_CASE("ENA envelope: MODIFY without accession on a sample is rejected at bui
 	s.taxon_id = 408170;
 	env.samples.push_back(s);
 
-	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("MODIFY requires accession") &&
-	                                                     Catch::Matchers::ContainsSubstring("needs-accession-sample"));
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("MODIFY requires accession") &&
+	                                                    Catch::Matchers::ContainsSubstring("needs-accession-sample"));
 }
 
 TEST_CASE("ENA envelope: umbrella project uses umbrellaProject marker", "[ena_envelope]") {
@@ -779,6 +783,206 @@ TEST_CASE("ENA envelope XML: run with no files rejected", "[ena_envelope]") {
 	r.experiment_ref.refname = "e1";
 	env.runs.push_back(r);
 	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("file"));
+}
+
+// =====================================================================
+// XML envelope: samples — flipped from JSON to XML in L4b-fix to bypass the
+// V2 JSON dispatcher's element-ordering bug where <DESCRIPTION> is emitted
+// before <SAMPLE_NAME> regardless of JSON-key order, violating
+// SRA.sample.xsd. Verified live on wwwdev 2026-05-07.
+// =====================================================================
+
+TEST_CASE("ENA envelope XML: minimal sample with checklist and attributes", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::SampleSpec s;
+	s.alias = "gut-001";
+	s.title = "Adult subject 001 stool";
+	s.taxon_id = 408170;
+	s.checklist = "ERC000015";
+	s.attributes.emplace_back("collection date", "2024-06-15");
+	s.attributes.emplace_back("geographic location (country and/or sea)", "United States");
+	env.samples.push_back(s);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CheckEqual(xml, R"X(<?xml version="1.0" encoding="UTF-8"?>)X"
+	                R"X(<WEBIN><SUBMISSION><ACTIONS><ACTION><ADD/></ACTION></ACTIONS></SUBMISSION>)X"
+	                R"X(<SAMPLE_SET>)X"
+	                R"X(<SAMPLE alias="gut-001">)X"
+	                R"X(<TITLE>Adult subject 001 stool</TITLE>)X"
+	                R"X(<SAMPLE_NAME><TAXON_ID>408170</TAXON_ID></SAMPLE_NAME>)X"
+	                R"X(<SAMPLE_ATTRIBUTES>)X"
+	                R"X(<SAMPLE_ATTRIBUTE><TAG>ENA-CHECKLIST</TAG><VALUE>ERC000015</VALUE></SAMPLE_ATTRIBUTE>)X"
+	                R"X(<SAMPLE_ATTRIBUTE><TAG>collection date</TAG><VALUE>2024-06-15</VALUE></SAMPLE_ATTRIBUTE>)X"
+	                R"X(<SAMPLE_ATTRIBUTE><TAG>geographic location (country and/or sea)</TAG>)X"
+	                R"X(<VALUE>United States</VALUE></SAMPLE_ATTRIBUTE>)X"
+	                R"X(</SAMPLE_ATTRIBUTES>)X"
+	                R"X(</SAMPLE></SAMPLE_SET></WEBIN>)X");
+}
+
+TEST_CASE("ENA envelope XML: minimal MODIFY shape with no optional fields set", "[ena_envelope][modify]") {
+	// The smallest legal MODIFY a caller could send: alias + accession +
+	// taxon_id, no title, no description, no scientific_name, no checklist,
+	// no attributes. Confirms the optional-field gating in AppendXmlSample
+	// produces a clean envelope rather than empty <TITLE/>, <DESCRIPTION/>,
+	// or <SAMPLE_ATTRIBUTES/> elements (each of which would be rejected by
+	// SRA.sample.xsd's content-model on those children).
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::SampleSpec s;
+	s.alias = "minimal-mod";
+	s.accession = "ERS9999777";
+	s.taxon_id = 408170;
+	env.samples.push_back(s);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CheckEqual(xml, R"X(<?xml version="1.0" encoding="UTF-8"?>)X"
+	                R"X(<WEBIN><SUBMISSION><ACTIONS><ACTION><MODIFY/></ACTION></ACTIONS></SUBMISSION>)X"
+	                R"X(<SAMPLE_SET>)X"
+	                R"X(<SAMPLE alias="minimal-mod" accession="ERS9999777">)X"
+	                R"X(<SAMPLE_NAME><TAXON_ID>408170</TAXON_ID></SAMPLE_NAME>)X"
+	                R"X(</SAMPLE></SAMPLE_SET></WEBIN>)X");
+}
+
+TEST_CASE("ENA envelope XML: SAMPLE_NAME precedes DESCRIPTION (SRA.sample.xsd ordering)", "[ena_envelope]") {
+	// The bug that drove this phase: V2's JSON dispatcher emitted <DESCRIPTION>
+	// BEFORE <SAMPLE_NAME>, violating SRA.sample.xsd. Going through XML gives
+	// us direct control over element order — pin that here so a future
+	// reordering of AppendXmlSample doesn't silently regress the XSD ordering.
+	miint::SubmissionSpec env;
+	miint::SampleSpec s;
+	s.alias = "with-description";
+	s.taxon_id = 408170;
+	s.scientific_name = "human gut metagenome";
+	s.description = "clinical isolate from a healthy donor";
+	env.samples.push_back(s);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	const auto sample_name_pos = xml.find("<SAMPLE_NAME>");
+	const auto description_pos = xml.find("<DESCRIPTION>");
+	REQUIRE(sample_name_pos != std::string::npos);
+	REQUIRE(description_pos != std::string::npos);
+	CHECK(sample_name_pos < description_pos);
+	CHECK(xml.find("<SCIENTIFIC_NAME>human gut metagenome</SCIENTIFIC_NAME>") != std::string::npos);
+	CHECK(xml.find("<DESCRIPTION>clinical isolate from a healthy donor</DESCRIPTION>") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope XML: sample attribute units emit a <UNITS> child sibling", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::SampleSpec s;
+	s.alias = "gut-002";
+	s.taxon_id = 408170;
+	s.checklist = "ERC000015";
+	s.attributes.emplace_back("collection date", "2026-04-01");
+	s.attributes.emplace_back("geographic location (latitude)", "32.7157");
+	s.attributes.emplace_back("geographic location (longitude)", "-117.1611");
+	s.attribute_units.emplace_back("geographic location (latitude)", "DD");
+	s.attribute_units.emplace_back("geographic location (longitude)", "DD");
+	env.samples.push_back(s);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CHECK(xml.find(R"X(<SAMPLE_ATTRIBUTE><TAG>geographic location (latitude)</TAG>)X"
+	               R"X(<VALUE>32.7157</VALUE><UNITS>DD</UNITS></SAMPLE_ATTRIBUTE>)X") != std::string::npos);
+	CHECK(xml.find(R"X(<SAMPLE_ATTRIBUTE><TAG>geographic location (longitude)</TAG>)X"
+	               R"X(<VALUE>-117.1611</VALUE><UNITS>DD</UNITS></SAMPLE_ATTRIBUTE>)X") != std::string::npos);
+	CHECK(xml.find(R"X(<SAMPLE_ATTRIBUTE><TAG>collection date</TAG>)X"
+	               R"X(<VALUE>2026-04-01</VALUE></SAMPLE_ATTRIBUTE>)X") != std::string::npos);
+
+	// Empty units string for an entry suppresses the <UNITS> sibling entirely
+	// (caller can use this to opt out without removing the tag from
+	// attribute_units).
+	miint::SampleSpec s2 = s;
+	s2.alias = "gut-003";
+	s2.attribute_units.clear();
+	s2.attribute_units.emplace_back("geographic location (latitude)", "");
+	miint::SubmissionSpec env2;
+	env2.samples.push_back(s2);
+	auto xml2 = miint::BuildEnvelopeXML(env2);
+	CHECK(xml2.find("<UNITS>") == std::string::npos);
+}
+
+TEST_CASE("ENA envelope XML: multi-sample emits one element per sample", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	for (int i = 1; i <= 3; ++i) {
+		miint::SampleSpec s;
+		s.alias = "sample-" + std::to_string(i);
+		s.taxon_id = 408170;
+		s.checklist = "ERC000015";
+		env.samples.push_back(s);
+	}
+	auto xml = miint::BuildEnvelopeXML(env);
+	CHECK(xml.find(R"X(<SAMPLE alias="sample-1">)X") != std::string::npos);
+	CHECK(xml.find(R"X(<SAMPLE alias="sample-2">)X") != std::string::npos);
+	CHECK(xml.find(R"X(<SAMPLE alias="sample-3">)X") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope XML: SAMPLE_SET precedes EXPERIMENT_SET and RUN_SET", "[ena_envelope]") {
+	// Spec order per SRA.submission.xsd: SAMPLE_SET → EXPERIMENT_SET → RUN_SET.
+	miint::SubmissionSpec env;
+	miint::SampleSpec s;
+	s.alias = "s1";
+	s.taxon_id = 408170;
+	env.samples.push_back(s);
+	miint::ExperimentSpec e;
+	e.alias = "e1";
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "NovaSeq 6000";
+	env.experiments.push_back(e);
+	miint::RunSpec r;
+	r.alias = "r1";
+	r.experiment_ref.refname = "e1";
+	r.files.push_back({"r1_1.fastq.gz", "fastq", "deadbeef"});
+	env.runs.push_back(r);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	const auto submission_pos = xml.find("<SUBMISSION>");
+	const auto sample_pos = xml.find("<SAMPLE_SET>");
+	const auto exp_pos = xml.find("<EXPERIMENT_SET>");
+	const auto run_pos = xml.find("<RUN_SET>");
+	REQUIRE(submission_pos != std::string::npos);
+	REQUIRE(sample_pos != std::string::npos);
+	REQUIRE(exp_pos != std::string::npos);
+	REQUIRE(run_pos != std::string::npos);
+	CHECK(submission_pos < sample_pos);
+	CHECK(sample_pos < exp_pos);
+	CHECK(exp_pos < run_pos);
+}
+
+TEST_CASE("ENA envelope XML: sample with taxon_id <= 0 rejected", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::SampleSpec s;
+	s.alias = "s1";
+	s.taxon_id = 0;
+	env.samples.push_back(s);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("taxon"));
+}
+
+TEST_CASE("ENA envelope XML: sample empty alias rejected", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::SampleSpec s;
+	s.taxon_id = 408170;
+	env.samples.push_back(s);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("alias"));
+}
+
+TEST_CASE("ENA envelope XML: sample XML escaping of alias, attribute tag/value, and text", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::SampleSpec s;
+	s.alias = R"X(s<&"'>1)X";
+	s.taxon_id = 408170;
+	s.title = R"X(<unsafe & "title")X";
+	s.attributes.emplace_back(R"X(tag<&)X", R"X(value>")X");
+	env.samples.push_back(s);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CHECK(xml.find(R"X(<SAMPLE alias="s&lt;&amp;&quot;&apos;&gt;1">)X") != std::string::npos);
+	CHECK(xml.find(R"X(<TITLE>&lt;unsafe &amp; &quot;title&quot;</TITLE>)X") != std::string::npos);
+	CHECK(xml.find(R"X(<TAG>tag&lt;&amp;</TAG><VALUE>value&gt;&quot;</VALUE>)X") != std::string::npos);
 }
 
 TEST_CASE("ENA envelope: full graph (project + sample + experiment + run) emits arrays in spec order",

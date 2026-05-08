@@ -369,6 +369,16 @@ void ValidateActions(const SubmissionSpec &env) {
 	}
 }
 
+void ValidateSampleSpec(const SampleSpec &s) {
+	if (s.alias.empty()) {
+		throw std::runtime_error("ENA envelope: sample alias must be non-empty");
+	}
+	if (s.taxon_id <= 0) {
+		throw std::runtime_error("ENA envelope: sample.taxon_id must be > 0 (got " + std::to_string(s.taxon_id) +
+		                         " for alias '" + s.alias + "')");
+	}
+}
+
 void ValidateExperimentSpec(const ExperimentSpec &e) {
 	if (e.alias.empty()) {
 		throw std::runtime_error("ENA envelope: experiment alias must be non-empty");
@@ -459,13 +469,7 @@ void AppendProject(std::string &out, const ProjectSpec &p) {
 }
 
 void AppendSample(std::string &out, const SampleSpec &s) {
-	if (s.alias.empty()) {
-		throw std::runtime_error("ENA envelope: sample alias must be non-empty");
-	}
-	if (s.taxon_id <= 0) {
-		throw std::runtime_error("ENA envelope: sample.taxon_id must be > 0 (got " + std::to_string(s.taxon_id) +
-		                         " for alias '" + s.alias + "')");
-	}
+	ValidateSampleSpec(s);
 	out.push_back('{');
 	out.append("\"alias\":");
 	AppendJsonString(out, s.alias);
@@ -757,6 +761,80 @@ void AppendXmlActions(std::string &out, const SubmissionSpec &env) {
 	out.append("</ACTIONS>");
 }
 
+void AppendXmlSample(std::string &out, const SampleSpec &s) {
+	// SRA.sample.xsd shape — element ordering is XSD-strict:
+	//   <SAMPLE alias="…" [accession="…"]>
+	//     <TITLE>…</TITLE>?            (optional)
+	//     <SAMPLE_NAME>
+	//       <TAXON_ID>…</TAXON_ID>
+	//       <SCIENTIFIC_NAME>…</SCIENTIFIC_NAME>?  (optional)
+	//     </SAMPLE_NAME>
+	//     <DESCRIPTION>…</DESCRIPTION>?  (optional)
+	//     <SAMPLE_ATTRIBUTES>           (only when checklist or attributes set)
+	//       <SAMPLE_ATTRIBUTE>
+	//         <TAG>…</TAG><VALUE>…</VALUE><UNITS>…</UNITS>?
+	//       </SAMPLE_ATTRIBUTE>+
+	//     </SAMPLE_ATTRIBUTES>
+	//   </SAMPLE>
+	//
+	// L4b-fix exists because V2's JSON dispatcher emitted <DESCRIPTION> BEFORE
+	// <SAMPLE_NAME> regardless of JSON-key order, violating the XSD; emitting
+	// XML directly lets us control element order.
+	ValidateSampleSpec(s);
+
+	out.append("<SAMPLE alias=\"");
+	AppendXmlEscaped(out, s.alias);
+	if (!s.accession.empty()) {
+		out.append("\" accession=\"");
+		AppendXmlEscaped(out, s.accession);
+	}
+	out.append("\">");
+	if (!s.title.empty()) {
+		AppendXmlElement(out, "TITLE", s.title);
+	}
+	out.append("<SAMPLE_NAME><TAXON_ID>");
+	AppendXmlEscaped(out, std::to_string(s.taxon_id));
+	out.append("</TAXON_ID>");
+	if (!s.scientific_name.empty()) {
+		AppendXmlElement(out, "SCIENTIFIC_NAME", s.scientific_name);
+	}
+	out.append("</SAMPLE_NAME>");
+	if (!s.description.empty()) {
+		AppendXmlElement(out, "DESCRIPTION", s.description);
+	}
+
+	const bool any_attrs = !s.checklist.empty() || !s.attributes.empty();
+	if (any_attrs) {
+		out.append("<SAMPLE_ATTRIBUTES>");
+		if (!s.checklist.empty()) {
+			out.append("<SAMPLE_ATTRIBUTE><TAG>ENA-CHECKLIST</TAG><VALUE>");
+			AppendXmlEscaped(out, s.checklist);
+			out.append("</VALUE></SAMPLE_ATTRIBUTE>");
+		}
+		for (const auto &kv : s.attributes) {
+			out.append("<SAMPLE_ATTRIBUTE><TAG>");
+			AppendXmlEscaped(out, kv.first);
+			out.append("</TAG><VALUE>");
+			AppendXmlEscaped(out, kv.second);
+			out.append("</VALUE>");
+			// Sparse units: emit <UNITS> only when present AND non-empty so
+			// callers can opt out by setting an empty string. Linear lookup is
+			// fine — attribute_units is small per sample (typically 0-3 entries).
+			for (const auto &u : s.attribute_units) {
+				if (u.first == kv.first) {
+					if (!u.second.empty()) {
+						AppendXmlElement(out, "UNITS", u.second);
+					}
+					break;
+				}
+			}
+			out.append("</SAMPLE_ATTRIBUTE>");
+		}
+		out.append("</SAMPLE_ATTRIBUTES>");
+	}
+	out.append("</SAMPLE>");
+}
+
 void AppendXmlExperiment(std::string &out, const ExperimentSpec &e) {
 	ValidateExperimentSpec(e);
 
@@ -838,6 +916,13 @@ std::string BuildEnvelopeXML(const SubmissionSpec &env) {
 	// ValidateActions (called from AppendXmlActions above) rejects the
 	// targeted-action + body-content combination, so reaching here with body
 	// content implies an untargeted action.
+	if (!env.samples.empty()) {
+		out.append("<SAMPLE_SET>");
+		for (const auto &s : env.samples) {
+			AppendXmlSample(out, s);
+		}
+		out.append("</SAMPLE_SET>");
+	}
 	if (!env.experiments.empty()) {
 		out.append("<EXPERIMENT_SET>");
 		for (const auto &e : env.experiments) {

@@ -190,6 +190,7 @@ def _parse_xml_envelope(body: str) -> tuple[dict, str, str, str]:
             if target_attr:
                 target = target_attr
     for kind_plural, set_tag, item_tag in (
+        ("samples", "SAMPLE_SET", "SAMPLE"),
         ("experiments", "EXPERIMENT_SET", "EXPERIMENT"),
         ("runs", "RUN_SET", "RUN"),
         ("analyses", "ANALYSIS_SET", "ANALYSIS"),
@@ -198,8 +199,21 @@ def _parse_xml_envelope(body: str) -> tuple[dict, str, str, str]:
         if not block:
             continue
         items = []
-        for m in re.finditer(rf"<{item_tag}\s+alias=\"([^\"]+)\"", block.group(1)):
-            items.append({"alias": m.group(1)})
+        # Per-element alias is mandatory; accession is optional and only set
+        # on MODIFY (Webin V2 needs both alias and accession on the element to
+        # identify the existing object). Both attributes are emitted in any
+        # order in principle — capture as a small attribute dict via
+        # finditer over a tag-prefix regex, then read out by name.
+        for m in re.finditer(rf"<{item_tag}((?:\s+\w+=\"[^\"]*\")+)\s*>", block.group(1)):
+            attrs = dict(re.findall(r'(\w+)="([^"]*)"', m.group(1)))
+            alias = attrs.get("alias", "")
+            if not alias:
+                continue
+            item: dict = {"alias": alias}
+            accession = attrs.get("accession", "")
+            if accession:
+                item["accession"] = accession
+            items.append(item)
         envelope[kind_plural] = items
     return envelope, action_name, hold_until, target
 

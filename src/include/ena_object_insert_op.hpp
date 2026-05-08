@@ -213,10 +213,14 @@ public:
 		if (!validate_only) {
 			RunAliasCollisionCheck(built.specs, client, opts);
 		}
-		// Dispatch by Content-Type. V2 accepts JSON only for project +
-		// sample; experiment + run + analysis must be XML (the JSON
-		// dispatcher NPEs for SRA-side objects). Both paths request an
-		// XML receipt — our parser only consumes the canonical XSD shape.
+		// Dispatch by Content-Type. Post L4b-fix (2026-05-07), V2 JSON is
+		// used only for projects; samples + experiment + run + analysis go
+		// through XML. Samples were on JSON until live wwwdev surfaced an
+		// XSD-ordering bug in V2's JSON-to-XML dispatcher (DESCRIPTION
+		// emitted before SAMPLE_NAME); experiment/run/analysis already
+		// required XML because the JSON dispatcher NPEs for SRA-side
+		// objects. Both paths request an XML receipt — our parser only
+		// consumes the canonical XSD shape.
 		auto post_fn = [&client](const std::string &url, const std::string &body, const std::string &user,
 		                         const std::string &password, const std::string &content_type) {
 			if (content_type == "application/xml") {

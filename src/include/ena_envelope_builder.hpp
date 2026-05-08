@@ -173,17 +173,23 @@ struct SubmissionSpec {
 // bytes; valid UTF-8 is the caller's responsibility, since the function does
 // not validate or substitute U+FFFD.
 //
-// V2 server caveat: this JSON envelope is only accepted for `projects` and
-// `samples`. Submitting `experiments` / `runs` via JSON returns HTTP 500
-// from a generic NPE in the V2 dispatcher (verified live 2026-05-04). Use
-// `BuildEnvelopeXML` for those object types.
+// V2 server caveat: in production this JSON envelope is now used only for
+// `projects`. Samples were on the JSON path until 2026-05-07, when a live
+// wwwdev probe surfaced an XSD-ordering bug in V2's JSON-to-XML dispatcher
+// (`<DESCRIPTION>` was emitted before `<SAMPLE_NAME>`, violating
+// `SRA.sample.xsd`). L4b-fix flipped samples to `BuildEnvelopeXML`. The
+// `samples` / `experiments` / `runs` array emitters remain here and are still
+// exercised by unit tests, but no production caller routes those object kinds
+// through this path.
 std::string BuildEnvelopeJSON(const SubmissionSpec &env);
 
-// Build the V2 XML envelope. Currently scoped to experiments + runs (the
-// SRA-side objects whose JSON dispatch is broken on V2). Same `SubmissionSpec`
-// input shape as `BuildEnvelopeJSON`; populated `experiments` / `runs` arrays
-// are emitted under `<EXPERIMENT_SET>` / `<RUN_SET>`. `projects` / `samples`
-// in the spec are ignored here — submit them via `BuildEnvelopeJSON` instead.
+// Build the V2 XML envelope. Production wire format for samples (post
+// L4b-fix) + experiments + runs. Same `SubmissionSpec` input shape as
+// `BuildEnvelopeJSON`; populated `samples` / `experiments` / `runs` arrays
+// are emitted under `<SAMPLE_SET>` / `<EXPERIMENT_SET>` / `<RUN_SET>` in
+// SRA.submission.xsd order. `projects` in the spec are ignored here — submit
+// them via `BuildEnvelopeJSON` (V2's JSON dispatcher handles projects
+// correctly; only the sample-side ordering bug forced the XML migration).
 //
 // Compact, no whitespace, with the `<?xml ... ?>` declaration. String values
 // are XML-escaped (`< > & " '`). Invariant violations throw
