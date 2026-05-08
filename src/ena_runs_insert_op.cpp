@@ -27,30 +27,6 @@ constexpr idx_t COL_FILES = 3;
 constexpr idx_t COL_ERR_ACCESSION = 4;
 constexpr idx_t TABLE_COLUMN_COUNT = 5;
 
-// experiment_ref strings shaped like an ENA accession (`ERX<digits>`) route to
-// RefDescriptor::accession; everything else is treated as refname (the
-// experiment's alias). The "trailing digits only" check matters: a user alias
-// like `ERXperiment-1` would otherwise be silently misclassified as an
-// accession the server can't find.
-miint::RefDescriptor ToExperimentRef(const std::string &value) {
-	miint::RefDescriptor ref;
-	if (value.size() > 3 && value.compare(0, 3, "ERX") == 0) {
-		bool all_digits = true;
-		for (size_t i = 3; i < value.size(); ++i) {
-			if (!std::isdigit(static_cast<unsigned char>(value[i]))) {
-				all_digits = false;
-				break;
-			}
-		}
-		if (all_digits) {
-			ref.accession = value;
-			return ref;
-		}
-	}
-	ref.refname = value;
-	return ref;
-}
-
 // Pull a LIST(STRUCT(filename,filetype,md5)) value into the RunFile vector.
 // NULL or empty list → empty vector (the envelope builder rejects empty
 // `files` with a clear "must have at least one file" error).
@@ -130,7 +106,7 @@ ENABuiltSpecs<miint::RunSpec> ENARunsInsert::BuildFromBuffer(ColumnDataCollectio
 				throw InvalidInputException("INSERT INTO ena.runs: 'experiment_ref' must be non-empty (alias '%s')",
 				                            spec.alias);
 			}
-			spec.experiment_ref = ToExperimentRef(exp_val);
+			spec.experiment_ref = miint::ResolveENAExperimentRef(exp_val);
 			if (title_idx != DConstants::INVALID_INDEX) {
 				spec.title = ValueToVarchar(chunk.data[title_idx].GetValue(row));
 			}

@@ -227,6 +227,10 @@ RefDescriptor ResolveENASampleRef(const std::string &value) {
 	return ResolveENARefDescriptor(value, {"ERS", "SAMEA", "SAMN", "SAMD"});
 }
 
+RefDescriptor ResolveENAExperimentRef(const std::string &value) {
+	return ResolveENARefDescriptor(value, {"ERX"});
+}
+
 const char *ActionName(ENAAction a) {
 	switch (a) {
 	case ENAAction::ADD:
@@ -370,11 +374,9 @@ void ValidateActions(const SubmissionSpec &env) {
 	// action the caller is preparing. CANCEL/RELEASE/HOLD don't carry
 	// body objects so the loops are no-ops.
 	//
-	// L4a (projects) + L4b (samples) + L4c (experiments) covered. L4d
-	// (runs) will extend the loop to env.runs once `RunSpec` grows an
-	// `accession` field. The asymmetry is intentional and tracked here so a
-	// missing extension can't let an ADD-with-accession run slip through
-	// silently and surface as a confusing server error.
+	// All four submittable object kinds (projects, samples, experiments,
+	// runs) carry an `accession` field. ADD must reject any pre-filled
+	// accession; MODIFY requires it. Symmetric per-kind loops below.
 	if (env.action == ENAAction::ADD) {
 		for (const auto &p : env.projects) {
 			if (!p.accession.empty()) {
@@ -394,6 +396,12 @@ void ValidateActions(const SubmissionSpec &env) {
 				                         e.alias + "'); the server assigns the accession on ADD");
 			}
 		}
+		for (const auto &r : env.runs) {
+			if (!r.accession.empty()) {
+				throw std::runtime_error("ENA envelope: ADD must not set an accession on a run (alias '" + r.alias +
+				                         "'); the server assigns the accession on ADD");
+			}
+		}
 	}
 	if (env.action == ENAAction::MODIFY) {
 		for (const auto &p : env.projects) {
@@ -411,6 +419,12 @@ void ValidateActions(const SubmissionSpec &env) {
 		for (const auto &e : env.experiments) {
 			if (e.accession.empty()) {
 				throw std::runtime_error("ENA envelope: MODIFY requires accession on experiment '" + e.alias +
+				                         "'; the server uses it to identify which already-registered object to update");
+			}
+		}
+		for (const auto &r : env.runs) {
+			if (r.accession.empty()) {
+				throw std::runtime_error("ENA envelope: MODIFY requires accession on run '" + r.alias +
 				                         "'; the server uses it to identify which already-registered object to update");
 			}
 		}
@@ -669,6 +683,14 @@ void AppendRun(std::string &out, const RunSpec &r) {
 	out.push_back('{');
 	out.append("\"alias\":");
 	AppendJsonString(out, r.alias);
+	// MODIFY identifies the existing run by accession; ADD has no accession.
+	// Mirrors `AppendProject` / `AppendSample` — keeping the JSON appenders
+	// symmetric so a JSON-path caller that ever needs MODIFY runs gets the
+	// same wire shape as the XML path.
+	if (!r.accession.empty()) {
+		out.append(",\"accession\":");
+		AppendJsonString(out, r.accession);
+	}
 	if (!r.title.empty()) {
 		out.append(",\"title\":");
 		AppendJsonString(out, r.title);
@@ -944,6 +966,12 @@ void AppendXmlRun(std::string &out, const RunSpec &r) {
 	ValidateRunSpec(r);
 	out.append("<RUN alias=\"");
 	AppendXmlEscaped(out, r.alias);
+	// MODIFY identifies the existing run by accession; ADD has no accession.
+	// Emit only when populated. Mirrors AppendXmlSample / AppendXmlExperiment.
+	if (!r.accession.empty()) {
+		out.append("\" accession=\"");
+		AppendXmlEscaped(out, r.accession);
+	}
 	out.append("\">");
 	if (!r.title.empty()) {
 		AppendXmlElement(out, "TITLE", r.title);

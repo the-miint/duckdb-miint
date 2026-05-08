@@ -78,6 +78,46 @@ std::vector<std::pair<std::string, std::string>> ExtractENAKeyValueMap(const Val
 	return out;
 }
 
+std::vector<miint::RunFile> ExtractENARunFilesList(const Value &v, const char *caller) {
+	std::vector<miint::RunFile> out;
+	if (v.IsNull()) {
+		return out;
+	}
+	const auto &entries = ListValue::GetChildren(v);
+	out.reserve(entries.size());
+	for (idx_t i = 0; i < entries.size(); i++) {
+		const auto &entry = entries[i];
+		// A NULL entry (e.g. `[NULL]` or `[{...}, NULL]`) would otherwise reach
+		// StructValue::GetChildren on a null Value, which is undefined behaviour.
+		if (entry.IsNull()) {
+			throw InvalidInputException("%s: 'files' list contains NULL at position %llu", caller,
+			                            static_cast<unsigned long long>(i));
+		}
+		const auto &fields = StructValue::GetChildren(entry);
+		if (fields.size() != 3) {
+			throw InvalidInputException("%s: 'files' STRUCT must have (filename, filetype, md5)", caller);
+		}
+		miint::RunFile f;
+		f.filename = ValueToVarchar(fields[0]);
+		f.filetype = ValueToVarchar(fields[1]);
+		f.checksum = ValueToVarchar(fields[2]);
+		if (f.filename.empty()) {
+			throw InvalidInputException("%s: 'files.filename' must be non-empty", caller);
+		}
+		if (f.filetype.empty()) {
+			throw InvalidInputException("%s: 'files.filetype' must be non-empty (filename '%s')", caller, f.filename);
+		}
+		// User-facing field name is `md5` (matches the INSERT-path storage
+		// column). Internal struct member is `checksum` because that's the
+		// SRA.run.xsd attribute name on `<FILE>`.
+		if (f.checksum.empty()) {
+			throw InvalidInputException("%s: 'files.md5' must be non-empty (filename '%s')", caller, f.filename);
+		}
+		out.push_back(std::move(f));
+	}
+	return out;
+}
+
 bool IsENAValidateOnlyEnabled(ClientContext &context) {
 	// Threading: ClientContext access is not thread-safe across pipeline
 	// threads, but every caller is the ENA insert operator's `Finalize`,

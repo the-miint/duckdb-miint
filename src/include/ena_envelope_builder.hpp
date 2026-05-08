@@ -135,6 +135,10 @@ RefDescriptor ResolveENAStudyRef(const std::string &value);
 // SAMD (DDBJ).
 RefDescriptor ResolveENASampleRef(const std::string &value);
 
+// Disambiguate an `experiment_ref` value (experiment-side accession or
+// alias). Real experiment accessions are always `ERX<digits>`.
+RefDescriptor ResolveENAExperimentRef(const std::string &value);
+
 enum class ENALibraryLayout { SINGLE, PAIRED };
 
 // One file referenced by a Run's <DATA_BLOCK><FILES>. The server re-computes
@@ -173,6 +177,13 @@ struct RunSpec {
 	std::string title; // optional
 	RefDescriptor experiment_ref;
 	std::vector<RunFile> files; // required, ≥ 1
+	// Existing ERR accession — required on MODIFY (Webin V2 needs both
+	// `alias` and `accession` on the run element to identify the
+	// already-registered object), ignored on ADD. The XML emitter adds
+	// `accession="…"` on `<RUN alias="…">` only when this is non-empty.
+	// Mirrors `ProjectSpec::accession` / `SampleSpec::accession` /
+	// `ExperimentSpec::accession`.
+	std::string accession;
 };
 
 struct SubmissionSpec {

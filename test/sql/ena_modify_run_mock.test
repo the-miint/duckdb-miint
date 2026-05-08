@@ -1,0 +1,232 @@
+# name: test/sql/ena_modify_run_mock.test
+# description: ena_modify_run(...) table function — Webin V2 MODIFY for runs
+# group: [sql]
+
+require miint
+
+require-env ENA_WEBIN_MOCK_URL
+
+require-env MIINT_ENA_PORTAL_URL_BASE
+
+require httpfs
+
+statement ok
+CREATE SECRET test_ena_modify_run_mock (
+    TYPE ENA,
+    USER 'Webin-99999',
+    PASSWORD 'mock-password',
+    ENDPOINT 'test',
+    ENDPOINT_URL '${ENA_WEBIN_MOCK_URL}'
+);
+
+statement ok
+ATTACH '' AS ena (TYPE ENA, SECRET 'test_ena_modify_run_mock');
+
+# Happy path: MODIFY round-trips the user's ERR. era_accession is empty —
+# wwwdev returns <SUBMISSION accession=""/> on MODIFY (matches L4a/L4b/L4c).
+query IIIII
+SELECT action, target, success, alias, era_accession
+FROM ena_modify_run(
+    secret => 'test_ena_modify_run_mock',
+    accession => 'ERR9000001',
+    alias => 'modify-run-alpha',
+    experiment_ref => 'ERX42',
+    files => [{'filename': 'r1_1.fastq.gz',
+               'filetype': 'fastq',
+               'md5': '9b8932f85caa54e687eba62fca3edce2'},
+              {'filename': 'r1_2.fastq.gz',
+               'filetype': 'fastq',
+               'md5': '183d6a24e0c3704e993bebe75bbbd989'}],
+    title => 'Updated run title');
+----
+MODIFY	ERR9000001	true	modify-run-alpha	(empty)
+
+# submission_log captures the request with action=MODIFY, target=ERR, and the
+# per-object alias/accession lists populated from the receipt.
+query IIIII
+SELECT object_type, action, target, object_aliases, object_accessions
+FROM ena.submission_log
+WHERE action = 'MODIFY' AND target = 'ERR9000001'
+ORDER BY submitted_at DESC LIMIT 1;
+----
+runs	MODIFY	ERR9000001	[modify-run-alpha]	[ERR9000001]
+
+# Refname-style experiment_ref works (matches INSERT path).
+query III
+SELECT action, target, success
+FROM ena_modify_run(
+    secret => 'test_ena_modify_run_mock',
+    accession => 'ERR9000002',
+    alias => 'modify-run-refname',
+    experiment_ref => 'e1',
+    files => [{'filename': 'r2_1.fastq.gz',
+               'filetype': 'fastq',
+               'md5': 'deadbeef'}]);
+----
+MODIFY	ERR9000002	true
+
+# Required parameters: accession is non-optional.
+statement error
+SELECT * FROM ena_modify_run(
+    secret => 'test_ena_modify_run_mock',
+    alias => 'no-accession',
+    experiment_ref => 'ERX42',
+    files => [{'filename': 'a.fastq.gz', 'filetype': 'fastq', 'md5': 'd'}]);
+----
+accession
+
+# Required parameters: alias is non-optional.
+statement error
+SELECT * FROM ena_modify_run(
+    secret => 'test_ena_modify_run_mock',
+    accession => 'ERR9000099',
+    experiment_ref => 'ERX42',
+    files => [{'filename': 'a.fastq.gz', 'filetype': 'fastq', 'md5': 'd'}]);
+----
+alias
+
+# Required parameters: experiment_ref is non-optional.
+statement error
+SELECT * FROM ena_modify_run(
+    secret => 'test_ena_modify_run_mock',
+    accession => 'ERR9000099',
+    alias => 'a',
+    files => [{'filename': 'a.fastq.gz', 'filetype': 'fastq', 'md5': 'd'}]);
+----
+experiment_ref
+
+# Required parameters: files is non-optional.
+statement error
+SELECT * FROM ena_modify_run(
+    secret => 'test_ena_modify_run_mock',
+    accession => 'ERR9000099',
+    alias => 'a',
+    experiment_ref => 'ERX42');
+----
+files
+
+# Empty files list rejected at bind. AppendXmlRun + ValidateRunSpec would
+# reject anyway but bind-time rejection is faster + cleaner message.
+statement error
+SELECT * FROM ena_modify_run(
+    secret => 'test_ena_modify_run_mock',
+    accession => 'ERR9000099',
+    alias => 'a',
+    experiment_ref => 'ERX42',
+    files => CAST([] AS STRUCT(filename VARCHAR, filetype VARCHAR, md5 VARCHAR)[]));
+----
+files
+
+# Files entry with empty filename rejected at bind.
+statement error
+SELECT * FROM ena_modify_run(
+    secret => 'test_ena_modify_run_mock',
+    accession => 'ERR9000099',
+    alias => 'a',
+    experiment_ref => 'ERX42',
+    files => [{'filename': '', 'filetype': 'fastq', 'md5': 'd'}]);
+----
+filename
+
+# Files entry with empty filetype rejected at bind.
+statement error
+SELECT * FROM ena_modify_run(
+    secret => 'test_ena_modify_run_mock',
+    accession => 'ERR9000099',
+    alias => 'a',
+    experiment_ref => 'ERX42',
+    files => [{'filename': 'a.fastq.gz', 'filetype': '', 'md5': 'd'}]);
+----
+filetype
+
+# Files entry with empty md5 rejected at bind.
+statement error
+SELECT * FROM ena_modify_run(
+    secret => 'test_ena_modify_run_mock',
+    accession => 'ERR9000099',
+    alias => 'a',
+    experiment_ref => 'ERX42',
+    files => [{'filename': 'a.fastq.gz', 'filetype': 'fastq', 'md5': ''}]);
+----
+md5
+
+# Whitespace-only accession / alias / experiment_ref rejected at bind.
+statement error
+SELECT * FROM ena_modify_run(
+    secret => 'test_ena_modify_run_mock',
+    accession => '   ',
+    alias => 'a',
+    experiment_ref => 'ERX42',
+    files => [{'filename': 'a.fastq.gz', 'filetype': 'fastq', 'md5': 'd'}]);
+----
+accession
+
+statement error
+SELECT * FROM ena_modify_run(
+    secret => 'test_ena_modify_run_mock',
+    accession => 'ERR9000099',
+    alias => '  ',
+    experiment_ref => 'ERX42',
+    files => [{'filename': 'a.fastq.gz', 'filetype': 'fastq', 'md5': 'd'}]);
+----
+alias
+
+statement error
+SELECT * FROM ena_modify_run(
+    secret => 'test_ena_modify_run_mock',
+    accession => 'ERR9000099',
+    alias => 'a',
+    experiment_ref => '  ',
+    files => [{'filename': 'a.fastq.gz', 'filetype': 'fastq', 'md5': 'd'}]);
+----
+experiment_ref
+
+# Failure path: alias containing FAIL triggers the mock's success="false".
+statement error
+SELECT * FROM ena_modify_run(
+    secret => 'test_ena_modify_run_mock',
+    accession => 'ERR9000004',
+    alias => 'modify-run-FAIL',
+    experiment_ref => 'ERX42',
+    files => [{'filename': 'a.fastq.gz', 'filetype': 'fastq', 'md5': 'd'}]);
+----
+mock validation failure
+
+query III
+SELECT action, target, success
+FROM ena.submission_log
+WHERE NOT success AND action = 'MODIFY' AND object_type = 'runs'
+ORDER BY submitted_at DESC LIMIT 1;
+----
+MODIFY	ERR9000004	false
+
+# Explicit catalog correct.
+query III
+SELECT action, target, success
+FROM ena_modify_run(
+    secret => 'test_ena_modify_run_mock',
+    accession => 'ERR9000005',
+    alias => 'modify-run-explicit-catalog',
+    experiment_ref => 'ERX42',
+    files => [{'filename': 'a.fastq.gz', 'filetype': 'fastq', 'md5': 'd'}],
+    catalog => 'ena');
+----
+MODIFY	ERR9000005	true
+
+# Explicit catalog missing → throw.
+statement error
+SELECT * FROM ena_modify_run(
+    secret => 'test_ena_modify_run_mock',
+    accession => 'ERR9000006',
+    alias => 'modify-run-bad-catalog',
+    experiment_ref => 'ERX42',
+    files => [{'filename': 'a.fastq.gz', 'filetype': 'fastq', 'md5': 'd'}],
+    catalog => 'nonexistent_catalog');
+----
+nonexistent_catalog
+
+statement ok
+DETACH ena;
+
+statement ok
+DROP SECRET test_ena_modify_run_mock;

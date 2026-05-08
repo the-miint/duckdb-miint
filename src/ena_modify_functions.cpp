@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 //
-// SQL surface for ENA Webin V2 MODIFY actions. Wires ena_modify_project
-// (L4a) + ena_modify_sample (L4b) + ena_modify_experiment (L4c); runs
-// follow in L4d. See ena_modify_functions.hpp for the contract.
+// SQL surface for ENA Webin V2 MODIFY actions. Wires the four MODIFY family
+// members: ena_modify_project (L4a) + ena_modify_sample (L4b) +
+// ena_modify_experiment (L4c) + ena_modify_run (L4d). See
+// ena_modify_functions.hpp for the contract.
 
 #include "ena_modify_functions.hpp"
 
@@ -12,6 +13,7 @@
 #include "ena_insert_common.hpp"
 #include "ena_post_fn.hpp"
 #include "ena_projects_insert.hpp"
+#include "ena_runs_insert.hpp"
 #include "ena_samples_insert.hpp"
 #include "ena_storage.hpp"
 
@@ -827,6 +829,240 @@ void AddModifyExperimentNamedParameters(TableFunction &tf) {
 	tf.named_parameters["catalog"] = LogicalType::VARCHAR;
 }
 
+// ===========================================================================
+// ena_modify_run
+// ===========================================================================
+//
+// MODIFY semantics for runs: re-submit the full updated run XML identified by
+// ERR accession. The L4a/L4b/L4c template applies. `files` is
+// `LIST<STRUCT<filename VARCHAR, filetype VARCHAR, md5 VARCHAR>>`,
+// extracted at bind via `duckdb::ExtractENARunFilesList` so the per-entry
+// invariants (non-empty filename/filetype/checksum, no NULL entries) surface
+// as `BinderException`s before secret resolution. `experiment_ref` matches the
+// INSERT-path column name; single VARCHAR each, accession-vs-refname
+// disambiguated at Execute via `miint::ResolveENAExperimentRef` (decision #36).
+
+struct ModifyRunBindData : public TableFunctionData {
+	string secret_name;
+	string accession;
+	string alias;
+	string title;
+	string experiment_ref;
+	std::vector<miint::RunFile> files;
+	string catalog_name;
+	bool catalog_explicit = false;
+};
+
+unique_ptr<FunctionData> BindModifyRun(ClientContext &, TableFunctionBindInput &input,
+                                       vector<LogicalType> &return_types, vector<string> &names) {
+	auto bd = make_uniq<ModifyRunBindData>();
+
+	auto get_str = [&](const char *key, string &out, bool required, bool *was_set = nullptr) {
+		auto it = input.named_parameters.find(key);
+		if (it == input.named_parameters.end() || it->second.IsNull()) {
+			if (required) {
+				throw BinderException("ena_modify_run: required named parameter '%s' is missing", key);
+			}
+			return;
+		}
+		out = it->second.ToString();
+		if (was_set) {
+			*was_set = true;
+		}
+	};
+
+	get_str("secret", bd->secret_name, /*required=*/true);
+	get_str("accession", bd->accession, /*required=*/true);
+	get_str("alias", bd->alias, /*required=*/true);
+	get_str("title", bd->title, /*required=*/false);
+	get_str("experiment_ref", bd->experiment_ref, /*required=*/true);
+
+	// `files` is required: AppendXmlRun emits at least one <FILE/> child and
+	// ValidateRunSpec rejects an empty list. Catch the omission at bind so
+	// the diagnostic doesn't surface mid-Execute after secret resolution.
+	{
+		auto it = input.named_parameters.find("files");
+		if (it == input.named_parameters.end() || it->second.IsNull()) {
+			throw BinderException("ena_modify_run: required named parameter 'files' is missing");
+		}
+		bd->files = duckdb::ExtractENARunFilesList(it->second, "ena_modify_run");
+		if (bd->files.empty()) {
+			throw BinderException("ena_modify_run: 'files' must contain at least one entry");
+		}
+	}
+
+	get_str("catalog", bd->catalog_name, /*required=*/false, &bd->catalog_explicit);
+	if (bd->catalog_name.empty()) {
+		bd->catalog_name = "ena";
+	}
+
+	if (duckdb::IsENAStringWhitespaceOnly(bd->accession)) {
+		throw BinderException("ena_modify_run: 'accession' must not be whitespace-only");
+	}
+	if (duckdb::IsENAStringWhitespaceOnly(bd->alias)) {
+		throw BinderException("ena_modify_run: 'alias' must not be whitespace-only");
+	}
+	// Whitespace-only experiment_ref would route through ResolveENAExperimentRef
+	// as a refname (whitespace doesn't match `ERX<digits>`) and emit
+	// `<EXPERIMENT_REF refname="   "/>` to the server.
+	if (duckdb::IsENAStringWhitespaceOnly(bd->experiment_ref)) {
+		throw BinderException("ena_modify_run: 'experiment_ref' must not be whitespace-only");
+	}
+
+	names = {"action", "target", "success", "alias", "era_accession", "error_messages", "duration_ms"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BOOLEAN,
+	                LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::LIST(LogicalType::VARCHAR),
+	                LogicalType::BIGINT};
+	return std::move(bd);
+}
+
+struct ModifyRunGlobalState : public GlobalTableFunctionState {
+	bool emitted = false;
+	miint::ENARunSubmissionOutcome outcome;
+};
+
+unique_ptr<GlobalTableFunctionState> InitModifyRunGlobal(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<ModifyRunGlobalState>();
+}
+
+void ExecuteModifyRun(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &gs = data.global_state->Cast<ModifyRunGlobalState>();
+	if (gs.emitted) {
+		output.SetCardinality(0);
+		return;
+	}
+	auto &bd = data.bind_data->Cast<ModifyRunBindData>();
+
+	auto creds = duckdb::ResolveENACredentialsByName(context, "ena_modify_run", bd.secret_name);
+	if (creds.endpoint_url.empty()) {
+		creds.endpoint_url = duckdb::ResolveDefaultENAEndpointURL(creds.endpoint);
+	}
+
+	miint::RunSpec spec;
+	spec.alias = bd.alias;
+	spec.accession = bd.accession;
+	spec.title = bd.title;
+	spec.experiment_ref = miint::ResolveENAExperimentRef(bd.experiment_ref);
+	spec.files = bd.files;
+
+	miint::ENARunInsertOptions opts;
+	opts.endpoint_url = creds.endpoint_url + "/submit";
+	opts.user = creds.user;
+	opts.password = creds.password;
+	opts.action = miint::ENAAction::MODIFY;
+
+	miint::ENAClient client(*context.db);
+	miint::ENAPostFn post_fn = [&client](const string &url, const string &body, const string &user,
+	                                     const string &password, const string &content_type) {
+		// Runs are XML-only — V2's JSON dispatcher NPEs for SRA-side objects.
+		// `RunSubmitTraits::ContentType()` always returns "application/xml",
+		// so a non-XML content_type here indicates a future trait/dispatch
+		// refactor that broke the contract; throw at the violation point
+		// rather than route to a JSON path that itself fails server-side.
+		// Mirrors decision #37 (ena_modify_experiment).
+		if (content_type != "application/xml") {
+			throw duckdb::InternalException("ena_modify_run: post_fn received content_type='%s'; runs are XML-only",
+			                                content_type);
+		}
+		return client.PostXML(url, body, user, password);
+	};
+
+	std::vector<miint::RunSpec> specs = {spec};
+
+	bool transport_failure = false;
+	string transport_error;
+	try {
+		gs.outcome = miint::SubmitRunInsertOutcome(specs, opts, post_fn);
+	} catch (const std::exception &e) {
+		transport_failure = true;
+		transport_error = e.what();
+	}
+
+	const bool success = !transport_failure && gs.outcome.success;
+	auto error_messages = gs.outcome.error_messages;
+	if (transport_failure && error_messages.empty()) {
+		error_messages.push_back(transport_error);
+	}
+	gs.outcome.error_messages = error_messages;
+
+	if (auto *catalog =
+	        duckdb::FindAttachedENACatalog(context, "ena_modify_run", bd.catalog_name, bd.catalog_explicit)) {
+		duckdb::SubmissionLogPayload payload;
+		payload.object_type = "runs";
+		payload.action = miint::ActionName(miint::ENAAction::MODIFY);
+		payload.n_objects = 1;
+		payload.success = success;
+		payload.duration_ms = gs.outcome.duration_ms;
+		payload.envelope_payload = gs.outcome.envelope_payload;
+		payload.raw_receipt = gs.outcome.raw_receipt;
+		payload.era_accession = gs.outcome.era_accession;
+		payload.error_messages = error_messages;
+		// `target` is the user-supplied accession (audit ground truth, decision #23).
+		payload.target = bd.accession;
+		payload.object_aliases.reserve(gs.outcome.rows.size());
+		payload.object_accessions.reserve(gs.outcome.rows.size());
+		for (const auto &row : gs.outcome.rows) {
+			payload.object_aliases.push_back(row.alias);
+			payload.object_accessions.push_back(row.err_accession);
+		}
+		duckdb::RecordSubmissionLog(*catalog, creds, payload);
+	}
+
+	if (transport_failure) {
+		throw InvalidInputException("ena_modify_run: %s", transport_error);
+	}
+	if (!success) {
+		string detail;
+		for (const auto &m : error_messages) {
+			if (!detail.empty()) {
+				detail += "; ";
+			}
+			detail += m;
+		}
+		if (detail.empty()) {
+			detail = "no error detail";
+		}
+		throw InvalidInputException("ena_modify_run: %s", detail);
+	}
+
+	output.SetCardinality(1);
+	output.data[0].SetValue(0, Value(string(miint::ActionName(miint::ENAAction::MODIFY))));
+	output.data[1].SetValue(0, Value(bd.accession));
+	output.data[2].SetValue(0, Value::BOOLEAN(success));
+	output.data[3].SetValue(0, Value(bd.alias));
+	output.data[4].SetValue(0, Value(gs.outcome.era_accession));
+
+	vector<Value> errs;
+	errs.reserve(error_messages.size());
+	for (const auto &m : error_messages) {
+		errs.emplace_back(m);
+	}
+	output.data[5].SetValue(0, Value::LIST(LogicalType::VARCHAR, errs));
+	output.data[6].SetValue(0, Value::BIGINT(gs.outcome.duration_ms));
+
+	gs.emitted = true;
+}
+
+void AddModifyRunNamedParameters(TableFunction &tf) {
+	tf.named_parameters["secret"] = LogicalType::VARCHAR;
+	tf.named_parameters["accession"] = LogicalType::VARCHAR;
+	tf.named_parameters["alias"] = LogicalType::VARCHAR;
+	tf.named_parameters["title"] = LogicalType::VARCHAR;
+	// Cross-reference: matches the `INSERT INTO ena.runs` column name. Single
+	// VARCHAR; accession-vs-refname disambiguated at Execute by
+	// `ResolveENAExperimentRef`.
+	tf.named_parameters["experiment_ref"] = LogicalType::VARCHAR;
+	// `files` is LIST<STRUCT<filename, filetype, md5>>. Field names match the
+	// `INSERT INTO ena.runs.files` column shape so users can reuse the
+	// `ena_upload_reads` RETURNING projection (or anything else built from
+	// the INSERT-path schema) in `ena_modify_run` calls verbatim. DuckDB
+	// validates the outer LogicalType at bind; per-entry invariants
+	// (non-empty fields, no NULL entries) caught by ExtractENARunFilesList.
+	tf.named_parameters["files"] = LogicalType::LIST(LogicalType::STRUCT(
+	    {{"filename", LogicalType::VARCHAR}, {"filetype", LogicalType::VARCHAR}, {"md5", LogicalType::VARCHAR}}));
+	tf.named_parameters["catalog"] = LogicalType::VARCHAR;
+}
+
 } // namespace
 
 void RegisterENAModifyTableFunctions(ExtensionLoader &loader) {
@@ -844,6 +1080,11 @@ void RegisterENAModifyTableFunctions(ExtensionLoader &loader) {
 		TableFunction tf("ena_modify_experiment", {}, ExecuteModifyExperiment, BindModifyExperiment,
 		                 InitModifyExperimentGlobal);
 		AddModifyExperimentNamedParameters(tf);
+		loader.RegisterFunction(tf);
+	}
+	{
+		TableFunction tf("ena_modify_run", {}, ExecuteModifyRun, BindModifyRun, InitModifyRunGlobal);
+		AddModifyRunNamedParameters(tf);
 		loader.RegisterFunction(tf);
 	}
 }

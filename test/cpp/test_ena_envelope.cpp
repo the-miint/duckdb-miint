@@ -536,6 +536,28 @@ TEST_CASE("ENA envelope: minimal run with two paired-fastq files", "[ena_envelop
 	                 R"X("checksum":"183d6a24e0c3704e993bebe75bbbd989"}]}]})X");
 }
 
+TEST_CASE("ENA envelope: MODIFY run emits accession on the JSON run element too", "[ena_envelope][modify]") {
+	// Production routes runs through XML, but `AppendRun` (JSON) is still
+	// compiled in and tested. Per-kind symmetry: AppendProject and
+	// AppendSample emit `"accession":` between alias and title on MODIFY;
+	// AppendRun must do the same so a future caller that ever routes a
+	// MODIFY run through JSON gets the same wire shape as the XML path.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::RunSpec r;
+	r.alias = "run-2026";
+	r.accession = "ERR9999001";
+	r.experiment_ref.accession = "ERX42";
+	r.files.push_back({"r_1.fastq.gz", "fastq", "deadbeef"});
+	env.runs.push_back(r);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	CHECK(json.find("\"type\":\"MODIFY\"") != std::string::npos);
+	CHECK(json.find("\"alias\":\"run-2026\",\"accession\":\"ERR9999001\"") != std::string::npos);
+	// experiment_ref carries the accession form; pin the wire shape.
+	CHECK(json.find(R"X("experimentRef":{"accession":"ERX42"})X") != std::string::npos);
+}
+
 TEST_CASE("ENA envelope: single-end run emits one file", "[ena_envelope]") {
 	miint::SubmissionSpec env;
 	miint::RunSpec r;
@@ -696,14 +718,37 @@ TEST_CASE("ENA RefDescriptor: every canonical sample prefix is recognised", "[en
 
 TEST_CASE("ENA RefDescriptor: generic primitive accepts arbitrary prefix lists", "[ena_envelope]") {
 	// Named wrappers cover the L4c-shipped kinds; the generic primitive stays
-	// exposed so future kinds (analyses, runs) can supply their own prefix
-	// lists without creating a wrapper that's later abandoned.
+	// exposed so future kinds (analyses) can supply their own prefix lists
+	// without creating a wrapper that's later abandoned.
 	auto a = miint::ResolveENARefDescriptor("ERX42", {"ERX"});
 	CHECK(a.accession == "ERX42");
 
 	auto b = miint::ResolveENARefDescriptor("not-an-accession", {"ERX"});
 	CHECK(b.accession.empty());
 	CHECK(b.refname == "not-an-accession");
+}
+
+TEST_CASE("ENA RefDescriptor: experiment wrapper recognises ERX accession", "[ena_envelope]") {
+	// L4d wrapper: experiment_ref disambiguation. Single canonical prefix
+	// (ERX) — runs reference experiments only.
+	auto a = miint::ResolveENAExperimentRef("ERX42");
+	CHECK(a.accession == "ERX42");
+	CHECK(a.refname.empty());
+
+	// Bare prefix → refname (boundary same as study/sample wrappers).
+	auto b = miint::ResolveENAExperimentRef("ERX");
+	CHECK(b.accession.empty());
+	CHECK(b.refname == "ERX");
+
+	// Alias-shaped string → refname.
+	auto c = miint::ResolveENAExperimentRef("my-experiment-alias");
+	CHECK(c.accession.empty());
+	CHECK(c.refname == "my-experiment-alias");
+
+	// ERX prefix + non-digits → refname (would otherwise misclassify).
+	auto d = miint::ResolveENAExperimentRef("ERX-not-an-accession");
+	CHECK(d.accession.empty());
+	CHECK(d.refname == "ERX-not-an-accession");
 }
 
 TEST_CASE("ENA envelope XML: minimal experiment with paired layout and ILLUMINA platform", "[ena_envelope]") {
@@ -950,6 +995,52 @@ TEST_CASE("ENA envelope XML: run with no files rejected", "[ena_envelope]") {
 	r.experiment_ref.refname = "e1";
 	env.runs.push_back(r);
 	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("file"));
+}
+
+TEST_CASE("ENA envelope XML: MODIFY run emits the existing accession on the run element", "[ena_envelope][modify]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::RunSpec r;
+	r.alias = "run-2026";
+	r.accession = "ERR9999001";
+	r.title = "Updated run title";
+	r.experiment_ref.accession = "ERX42";
+	r.files.push_back({"run-2026_1.fastq.gz", "fastq", "9b8932f85caa54e687eba62fca3edce2"});
+	env.runs.push_back(r);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CHECK(xml.find("<MODIFY/>") != std::string::npos);
+	CHECK(xml.find(R"X(<RUN alias="run-2026" accession="ERR9999001">)X") != std::string::npos);
+	CHECK(xml.find("<TITLE>Updated run title</TITLE>") != std::string::npos);
+	CHECK(xml.find(R"X(<EXPERIMENT_REF accession="ERX42"/>)X") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope XML: ADD with accession on a run is rejected at build time", "[ena_envelope][modify]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::ADD;
+	miint::RunSpec r;
+	r.alias = "fresh-run";
+	r.accession = "ERR999"; // bogus pre-fill
+	r.experiment_ref.refname = "e1";
+	r.files.push_back({"fresh-run_1.fastq.gz", "fastq", "deadbeef"});
+	env.runs.push_back(r);
+
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env),
+	                  Catch::Matchers::ContainsSubstring("ADD must not set an accession") &&
+	                      Catch::Matchers::ContainsSubstring("fresh-run"));
+}
+
+TEST_CASE("ENA envelope XML: MODIFY without accession on a run is rejected at build time", "[ena_envelope][modify]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::RunSpec r;
+	r.alias = "needs-accession-run";
+	r.experiment_ref.refname = "e1";
+	r.files.push_back({"r_1.fastq.gz", "fastq", "deadbeef"});
+	env.runs.push_back(r);
+
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("MODIFY requires accession") &&
+	                                                    Catch::Matchers::ContainsSubstring("needs-accession-run"));
 }
 
 // =====================================================================

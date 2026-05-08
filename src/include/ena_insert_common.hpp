@@ -10,6 +10,8 @@
 
 #pragma once
 
+#include "ena_envelope_builder.hpp"
+
 #include "duckdb/common/index_vector.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -112,5 +114,20 @@ bool IsENAStringWhitespaceOnly(const string &s);
 // `attributes` from `attribute_units`.
 std::vector<std::pair<std::string, std::string>> ExtractENAKeyValueMap(const Value &v, const char *caller,
                                                                        const char *column_label);
+
+// Pull a LIST(STRUCT(filename VARCHAR, filetype VARCHAR, md5 VARCHAR)) Value
+// into a `vector<RunFile>` preserving insertion order. NULL list and empty
+// list both yield no entries; the caller can distinguish those via
+// `vector::empty()` and reject empty lists if its contract requires at least
+// one file (the wire-spec ValidateRunSpec will reject anyway, but bind-time
+// rejection is faster and gives a cleaner message). NULL entries inside the
+// list throw `InvalidInputException`; a struct missing one of the three
+// fields throws; non-empty filename/filetype/md5 required per entry. `caller`
+// shows up in error messages so users can tell which call surfaced a
+// malformed entry. The struct field name `md5` matches the INSERT-path
+// storage column shape; internally `RunFile::checksum` is named after the
+// SRA.run.xsd `<FILE checksum="…"/>` attribute. Mirrors
+// `ExtractENAKeyValueMap`'s shape.
+std::vector<miint::RunFile> ExtractENARunFilesList(const Value &v, const char *caller);
 
 } // namespace duckdb

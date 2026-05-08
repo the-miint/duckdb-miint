@@ -14,7 +14,14 @@
 //                            catalog?). study_ref + sample_descriptor each
 //                            accept either an ENA accession or the parent's
 //                            alias — same disambiguation as the INSERT path.
-//   - ena_modify_run — future phase (L4d).
+//   - ena_modify_run(secret, accession, alias, experiment_ref, files,
+//                     title?, catalog?). `experiment_ref` accepts either an
+//                     ERX accession or the parent's alias. `files` is
+//                     LIST<STRUCT<filename, filetype, md5>>; must be
+//                     non-empty (each entry needs all three fields
+//                     populated). The struct shape matches the INSERT-path
+//                     `ena.runs.files` column so users can pipe the upload
+//                     RETURNING projection into `ena_modify_run` directly.
 //
 // MODIFY semantics: re-submit the full updated body for an already-registered
 // object, identified by its server-assigned `accession` (PRJEB / ERS / ERX /
@@ -41,9 +48,9 @@ class ExtensionLoader;
 
 namespace miint {
 
-// Register every shipped ena_modify_* table function with the loader.
-// Today wires ena_modify_project + ena_modify_sample + ena_modify_experiment;
-// runs land in L4d. The registration site is one function so
+// Register every shipped ena_modify_* table function with the loader. Wires
+// the four MODIFY family members: project (L4a), sample (L4b), experiment
+// (L4c), run (L4d). The registration site is one function so
 // miint_extension.cpp doesn't grow a new line per object kind.
 void RegisterENAModifyTableFunctions(duckdb::ExtensionLoader &loader);
 
