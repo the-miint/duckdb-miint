@@ -243,29 +243,4 @@ void RecordSubmissionLog(ENACatalog &catalog, const ResolvedENACredentials &cred
 	catalog.GetSubmissionLog().Append(row);
 }
 
-miint::RefDescriptor ResolveENARefDescriptor(const string &value,
-                                             std::initializer_list<const char *> accession_prefixes) {
-	miint::RefDescriptor ref;
-	for (const auto *p : accession_prefixes) {
-		const std::string prefix(p);
-		if (value.size() <= prefix.size() || value.compare(0, prefix.size(), prefix) != 0) {
-			continue;
-		}
-		bool all_digits = true;
-		for (size_t i = prefix.size(); i < value.size(); ++i) {
-			unsigned char c = static_cast<unsigned char>(value[i]);
-			if (c < '0' || c > '9') {
-				all_digits = false;
-				break;
-			}
-		}
-		if (all_digits) {
-			ref.accession = value;
-			return ref;
-		}
-	}
-	ref.refname = value;
-	return ref;
-}
-
 } // namespace duckdb

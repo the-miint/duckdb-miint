@@ -10,14 +10,11 @@
 
 #pragma once
 
-#include "ena_envelope_builder.hpp"
-
 #include "duckdb/common/index_vector.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/value.hpp"
 
 #include <cstdint>
-#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -115,17 +112,5 @@ bool IsENAStringWhitespaceOnly(const string &s);
 // `attributes` from `attribute_units`.
 std::vector<std::pair<std::string, std::string>> ExtractENAKeyValueMap(const Value &v, const char *caller,
                                                                        const char *column_label);
-
-// Disambiguate a user-supplied cross-reference string into accession-vs-refname.
-// Routes the string to `RefDescriptor::accession` iff it matches one of the
-// canonical accession prefixes (e.g. "PRJEB", "ERP", "SAMEA", "ERS") followed
-// by digits only; everything else (including aliases shaped like
-// "ERPmycoolstudy") routes to `RefDescriptor::refname`. Real ENA accessions
-// are always `<PREFIX><NUMERIC>`; the digits-only suffix check matters so
-// alias-shaped strings aren't silently misclassified as accessions the
-// server then can't find. Mirrors the INSERT-path `ToRef` shared by
-// ena_experiments_insert_op and ena_runs_insert_op.
-miint::RefDescriptor ResolveENARefDescriptor(const string &value,
-                                             std::initializer_list<const char *> accession_prefixes);
 
 } // namespace duckdb

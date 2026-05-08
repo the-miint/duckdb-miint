@@ -693,11 +693,10 @@ void ExecuteModifyExperiment(ClientContext &context, TableFunctionInput &data, D
 	spec.accession = bd.accession;
 	spec.title = bd.title;
 	// Disambiguate `study_ref` / `sample_descriptor` strings into
-	// accession-vs-refname using the same logic the INSERT path uses (shared
-	// helper in `ena_insert_common`). Strings shaped like `<PREFIX><NUMERIC>`
-	// route to RefDescriptor::accession; anything else routes to refname.
-	spec.study_ref = duckdb::ResolveENARefDescriptor(bd.study_ref, {"PRJEB", "PRJNA", "PRJDB", "ERP"});
-	spec.sample_ref = duckdb::ResolveENARefDescriptor(bd.sample_descriptor, {"ERS", "SAMEA", "SAMN", "SAMD"});
+	// accession-vs-refname via the per-kind wrappers in ena_envelope_builder.
+	// Same logic the INSERT path uses, so the prefix lists live in one place.
+	spec.study_ref = miint::ResolveENAStudyRef(bd.study_ref);
+	spec.sample_ref = miint::ResolveENASampleRef(bd.sample_descriptor);
 	spec.design_description = bd.design_description;
 	spec.library_name = bd.library_name;
 	spec.library_strategy = bd.library_strategy;

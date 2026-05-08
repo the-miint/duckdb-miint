@@ -107,6 +107,34 @@ struct RefDescriptor {
 	std::string refname;
 };
 
+// Disambiguate a user-supplied cross-reference string into accession-vs-refname.
+// Routes the string to `RefDescriptor::accession` iff it matches one of the
+// canonical accession prefixes followed by digits only; everything else
+// (including aliases shaped like `ERPmycoolstudy`) routes to
+// `RefDescriptor::refname`. The "digits only" suffix matters: real ENA
+// accessions are always `<PREFIX><NUMERIC>` (see
+// localdocs/ena-research-webin-v2-deep.md §1.1), and a user alias that
+// happens to start with an accession prefix would otherwise be silently
+// misclassified — the server then can't find it.
+//
+// The named wrappers below (`ResolveENAStudyRef`, `ResolveENASampleRef`,
+// future `ResolveENAExperimentRef` for L4d) carry the canonical prefix lists
+// per object kind so callers don't repeat them. Use the wrappers; expose the
+// generic primitive only for tests + future kinds where the wrapper hasn't
+// landed yet.
+RefDescriptor ResolveENARefDescriptor(const std::string &value, std::initializer_list<const char *> accession_prefixes);
+
+// Disambiguate a `study_ref` value (project-side accession or alias). Real
+// project accessions: PRJEB / PRJNA / PRJDB; pre-ENA-namespace study
+// accession: ERP. Used by both INSERT INTO ena.experiments and
+// ena_modify_experiment so the user surface is symmetric.
+RefDescriptor ResolveENAStudyRef(const std::string &value);
+
+// Disambiguate a `sample_descriptor` value (sample-side accession or alias).
+// Real sample accessions: ERS (ENA), SAMEA (BioSamples-EBI), SAMN (NCBI),
+// SAMD (DDBJ).
+RefDescriptor ResolveENASampleRef(const std::string &value);
+
 enum class ENALibraryLayout { SINGLE, PAIRED };
 
 // One file referenced by a Run's <DATA_BLOCK><FILES>. The server re-computes

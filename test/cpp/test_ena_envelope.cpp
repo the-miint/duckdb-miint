@@ -606,6 +606,106 @@ TEST_CASE("ENA envelope: empty filetype rejected (no silent default)", "[ena_env
 // src/ena_envelope_builder.cpp.
 // =====================================================================
 
+// =====================================================================
+// ResolveENARefDescriptor + per-kind wrappers — accession-vs-refname
+// disambiguation shared by the INSERT and MODIFY paths.
+// =====================================================================
+
+TEST_CASE("ENA RefDescriptor: accession prefix + digits routes to accession", "[ena_envelope]") {
+	auto study = miint::ResolveENAStudyRef("PRJEB123456");
+	CHECK(study.accession == "PRJEB123456");
+	CHECK(study.refname.empty());
+
+	auto sample = miint::ResolveENASampleRef("SAMEA42");
+	CHECK(sample.accession == "SAMEA42");
+	CHECK(sample.refname.empty());
+}
+
+TEST_CASE("ENA RefDescriptor: exact prefix with no digits routes to refname", "[ena_envelope]") {
+	// A bare prefix ("PRJEB" with nothing after) is not a valid accession — at
+	// least one digit must follow. The `<= prefix.size()` guard in
+	// ResolveENARefDescriptor pins this; without it a user alias literally
+	// equal to a prefix would be silently misclassified.
+	auto study = miint::ResolveENAStudyRef("PRJEB");
+	CHECK(study.accession.empty());
+	CHECK(study.refname == "PRJEB");
+
+	auto sample = miint::ResolveENASampleRef("ERS");
+	CHECK(sample.accession.empty());
+	CHECK(sample.refname == "ERS");
+}
+
+TEST_CASE("ENA RefDescriptor: prefix followed by non-digits routes to refname", "[ena_envelope]") {
+	// A user alias like "ERPmycoolstudy" or "PRJEB-2026-cohort" must NOT be
+	// silently classified as an accession the server can't find. The
+	// "digits only after prefix" check is what protects against this.
+	auto a = miint::ResolveENAStudyRef("ERPmycoolstudy");
+	CHECK(a.accession.empty());
+	CHECK(a.refname == "ERPmycoolstudy");
+
+	auto b = miint::ResolveENAStudyRef("PRJEB-2026-cohort");
+	CHECK(b.accession.empty());
+	CHECK(b.refname == "PRJEB-2026-cohort");
+
+	auto c = miint::ResolveENASampleRef("SAMEA_with_underscore");
+	CHECK(c.accession.empty());
+	CHECK(c.refname == "SAMEA_with_underscore");
+}
+
+TEST_CASE("ENA RefDescriptor: non-matching prefix routes to refname", "[ena_envelope]") {
+	auto a = miint::ResolveENAStudyRef("my-study-alias");
+	CHECK(a.accession.empty());
+	CHECK(a.refname == "my-study-alias");
+
+	auto b = miint::ResolveENASampleRef("alpha");
+	CHECK(b.accession.empty());
+	CHECK(b.refname == "alpha");
+
+	// Empty string also routes to refname (caller's responsibility to reject
+	// empties before calling — the helper itself doesn't validate non-emptiness).
+	auto c = miint::ResolveENAStudyRef("");
+	CHECK(c.accession.empty());
+	CHECK(c.refname.empty());
+}
+
+TEST_CASE("ENA RefDescriptor: study and sample prefix lists are disjoint", "[ena_envelope]") {
+	auto a = miint::ResolveENAStudyRef("SAMEA42");
+	CHECK(a.accession.empty());
+	CHECK(a.refname == "SAMEA42");
+
+	auto b = miint::ResolveENASampleRef("PRJEB123456");
+	CHECK(b.accession.empty());
+	CHECK(b.refname == "PRJEB123456");
+}
+
+TEST_CASE("ENA RefDescriptor: every canonical study prefix is recognised", "[ena_envelope]") {
+	for (const char *p : {"PRJEB", "PRJNA", "PRJDB", "ERP"}) {
+		auto ref = miint::ResolveENAStudyRef(std::string(p) + "1");
+		CHECK(ref.accession == std::string(p) + "1");
+		CHECK(ref.refname.empty());
+	}
+}
+
+TEST_CASE("ENA RefDescriptor: every canonical sample prefix is recognised", "[ena_envelope]") {
+	for (const char *p : {"ERS", "SAMEA", "SAMN", "SAMD"}) {
+		auto ref = miint::ResolveENASampleRef(std::string(p) + "1");
+		CHECK(ref.accession == std::string(p) + "1");
+		CHECK(ref.refname.empty());
+	}
+}
+
+TEST_CASE("ENA RefDescriptor: generic primitive accepts arbitrary prefix lists", "[ena_envelope]") {
+	// Named wrappers cover the L4c-shipped kinds; the generic primitive stays
+	// exposed so future kinds (analyses, runs) can supply their own prefix
+	// lists without creating a wrapper that's later abandoned.
+	auto a = miint::ResolveENARefDescriptor("ERX42", {"ERX"});
+	CHECK(a.accession == "ERX42");
+
+	auto b = miint::ResolveENARefDescriptor("not-an-accession", {"ERX"});
+	CHECK(b.accession.empty());
+	CHECK(b.refname == "not-an-accession");
+}
+
 TEST_CASE("ENA envelope XML: minimal experiment with paired layout and ILLUMINA platform", "[ena_envelope]") {
 	miint::SubmissionSpec env;
 	miint::ExperimentSpec e;

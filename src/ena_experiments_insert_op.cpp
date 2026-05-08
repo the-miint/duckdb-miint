@@ -111,13 +111,13 @@ ENAExperimentsInsert::BuildFromBuffer(ColumnDataCollection &buffer,
 				throw InvalidInputException("INSERT INTO ena.experiments: 'study_ref' must be non-empty (alias '%s')",
 				                            spec.alias);
 			}
-			spec.study_ref = ResolveENARefDescriptor(study_val, {"PRJEB", "PRJNA", "PRJDB", "ERP"});
+			spec.study_ref = miint::ResolveENAStudyRef(study_val);
 			const auto sample_val = ValueToVarchar(chunk.data[sample_idx].GetValue(row));
 			if (sample_val.empty()) {
 				throw InvalidInputException(
 				    "INSERT INTO ena.experiments: 'sample_descriptor' must be non-empty (alias '%s')", spec.alias);
 			}
-			spec.sample_ref = ResolveENARefDescriptor(sample_val, {"ERS", "SAMEA", "SAMN", "SAMD"});
+			spec.sample_ref = miint::ResolveENASampleRef(sample_val);
 			if (design_idx != DConstants::INVALID_INDEX) {
 				spec.design_description = ValueToVarchar(chunk.data[design_idx].GetValue(row));
 			}

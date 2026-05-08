@@ -190,6 +190,43 @@ void AppendJsonString(std::string &out, const std::string &s) {
 
 } // namespace
 
+RefDescriptor ResolveENARefDescriptor(const std::string &value,
+                                      std::initializer_list<const char *> accession_prefixes) {
+	RefDescriptor ref;
+	for (const auto *p : accession_prefixes) {
+		const std::string prefix(p);
+		// `value.size() <= prefix.size()` is intentional: a bare prefix with
+		// no digits following ("PRJEB" alone) is not a valid accession; treat
+		// it as a refname. Real accessions always have at least one digit
+		// after the prefix.
+		if (value.size() <= prefix.size() || value.compare(0, prefix.size(), prefix) != 0) {
+			continue;
+		}
+		bool all_digits = true;
+		for (size_t i = prefix.size(); i < value.size(); ++i) {
+			unsigned char c = static_cast<unsigned char>(value[i]);
+			if (c < '0' || c > '9') {
+				all_digits = false;
+				break;
+			}
+		}
+		if (all_digits) {
+			ref.accession = value;
+			return ref;
+		}
+	}
+	ref.refname = value;
+	return ref;
+}
+
+RefDescriptor ResolveENAStudyRef(const std::string &value) {
+	return ResolveENARefDescriptor(value, {"PRJEB", "PRJNA", "PRJDB", "ERP"});
+}
+
+RefDescriptor ResolveENASampleRef(const std::string &value) {
+	return ResolveENARefDescriptor(value, {"ERS", "SAMEA", "SAMN", "SAMD"});
+}
+
 const char *ActionName(ENAAction a) {
 	switch (a) {
 	case ENAAction::ADD:
