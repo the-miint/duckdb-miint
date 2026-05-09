@@ -234,6 +234,10 @@ if [ -z "$ENA_WEBIN_MOCK_URL" ] && python3 -c "import http.server" 2>/dev/null; 
         # checklist XMLs to validate user attributes client-side. Point at
         # the mock for the same offline reasoning as the portal endpoint.
         export MIINT_ENA_CHECKLIST_URL_BASE="${ENA_WEBIN_MOCK_URL}/browser/api/xml"
+        # L5 Reports API: the lifecycle table fns and DELETE-by-alias path
+        # translate refname → accession via this base. Point at the mock so
+        # SQL tests don't reach wwwdev.ebi.ac.uk.
+        export MIINT_ENA_REPORTS_URL_BASE="${ENA_WEBIN_MOCK_URL}/submit/report"
     fi
 fi
 

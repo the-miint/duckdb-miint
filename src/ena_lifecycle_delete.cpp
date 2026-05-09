@@ -5,10 +5,12 @@
 
 #include "ena_lifecycle_delete.hpp"
 
+#include "ena_alias_check.hpp" // AliasObjectKindFromTableName
 #include "ena_client.hpp"
 #include "ena_envelope_builder.hpp"
 #include "ena_insert_common.hpp"
 #include "ena_lifecycle_submit.hpp"
+#include "ena_reports_client.hpp"
 #include "ena_storage.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -31,14 +33,12 @@ string DeleteCallerName(ENATableEntry &table) {
 	return "DELETE FROM ena." + table.name;
 }
 
-// Map the WHERE column name to a target accession on RefDescriptor.
-// Alias-based DELETE is intentionally not supported: Webin V2 only
-// resolves refname/alias on `<*_REF>` cross-references inside an ADD
-// body; for cross-submission lifecycle ops on already-registered
-// objects, ENA requires the server-assigned accession (verified live
-// 2026-05-07). Within a session, an accession can be recovered from
-// an alias via `ena.submission_log.object_aliases` /
-// `object_accessions` (see docs/ena.md).
+// Map the WHERE column name to a target on RefDescriptor.
+// - `<accession_col> = '...'` → target.accession (no Reports lookup needed).
+// - `alias = '...'`           → target.refname  (translated to accession at
+//                                                execute via the Webin Reports
+//                                                API; the kind is implicit
+//                                                from the LogicalDelete table).
 //
 // Kept in lock-step with the per-table accession columns declared in
 // BuildENATableInfo (ena_storage.cpp); when adding new accession
@@ -47,6 +47,10 @@ string DeleteCallerName(ENATableEntry &table) {
 // Returns true and fills `target` if the column maps to a valid CANCEL key.
 bool ResolveDeleteTarget(ENATableKind kind, const string &column_name, const string &value,
                          miint::RefDescriptor &target) {
+	if (column_name == "alias") {
+		target.refname = value;
+		return true;
+	}
 	switch (kind) {
 	case ENATableKind::PROJECTS:
 		if (column_name == "prjeb_accession" || column_name == "erp_accession") {
@@ -241,14 +245,55 @@ protected:
 		auto &client_context = context.client;
 		auto creds = ResolveENACredentials(client_context, catalog);
 
+		miint::ENAClient client(*client_context.db);
+
+		// L5: alias-targeted DELETE — translate refname → accession via the
+		// Webin Reports API before envelope build. The envelope-builder
+		// rejection of `target_refname` (decision #12) stays as defense-in-
+		// depth; by the time we hand the spec over, target.accession is set
+		// and target.refname is empty. The kind is implicit from the table
+		// being DELETEd from (vs. the lifecycle table fns where the kind is
+		// an explicit named param because those fns are kind-agnostic).
+		miint::RefDescriptor resolved_target = target;
+		if (!resolved_target.refname.empty() && resolved_target.accession.empty()) {
+			const auto kind = miint::AliasObjectKindFromTableName(object_type);
+			// Reports base must match the endpoint the lifecycle POST will hit
+			// (each server only sees its own account's records); see decision
+			// notes in ena_reports_client.hpp.
+			const auto reports_base = miint::ResolveReportsBaseForEndpoint(creds.endpoint);
+			// Lifetime contract for the fetcher closure: `client` lives on
+			// this stack frame and the fetcher is invoked synchronously by
+			// LookupAccessionByAlias before this scope exits — the URLFetcher
+			// type-erases through std::function but we never store / copy /
+			// defer the closure beyond this call. Mirrors the comment in
+			// ena_lifecycle_functions.cpp::ExecuteLifecycle.
+			miint::ENAClient *client_ptr = &client;
+			const auto user = creds.user;
+			const auto password = creds.password;
+			miint::URLFetcher fetcher = [client_ptr, user, password](const string &url) {
+				return client_ptr->AuthenticatedGet(url, user, password);
+			};
+			std::string accession;
+			try {
+				accession = miint::LookupAccessionByAlias(reports_base, kind, resolved_target.refname, fetcher);
+			} catch (const std::exception &e) {
+				throw InvalidInputException("DELETE FROM ena.%s: Reports API lookup for alias '%s' failed: %s",
+				                            object_type, resolved_target.refname, e.what());
+			}
+			if (accession.empty()) {
+				throw InvalidInputException("DELETE FROM ena.%s: alias '%s' not found in this submission account",
+				                            object_type, resolved_target.refname);
+			}
+			resolved_target.accession = accession;
+			resolved_target.refname.clear();
+		}
+
 		miint::LifecycleSubmitOptions opts;
 		opts.endpoint_url = creds.endpoint_url + "/submit";
 		opts.user = creds.user;
 		opts.password = creds.password;
-		opts.target = target;
+		opts.target = resolved_target;
 		// CANCEL takes no date — leave hold_until_date empty.
-
-		miint::ENAClient client(*client_context.db);
 		miint::ENAPostFn post_fn = [&client](const std::string &url, const std::string &body, const std::string &user,
 		                                     const std::string &password, const std::string &content_type) {
 			if (content_type == "application/xml") {
@@ -266,7 +311,14 @@ protected:
 			transport_failure = true;
 			transport_error = e.what();
 			outcome.action = miint::ENAAction::CANCEL;
-			outcome.target = !target.accession.empty() ? target.accession : target.refname;
+			// `resolved_target.accession` is the post-Reports-translation
+			// value on the alias path and the user-supplied accession on the
+			// direct-accession path. Either way, by this point .refname is
+			// empty (cleared after Reports translation; never set on the
+			// direct path) and .accession is non-empty — the Reports lookup
+			// throws on miss before SubmitLifecycle is reached, so we only
+			// land here with a known accession in hand.
+			outcome.target = resolved_target.accession;
 		}
 
 		const bool success = !transport_failure && outcome.success;
@@ -362,19 +414,8 @@ duckdb::PhysicalOperator &PlanENALifecycleDelete(duckdb::ClientContext &, duckdb
 
 	RefDescriptor target;
 	if (!duckdb::ResolveDeleteTarget(kind, pred.column_name, pred.value, target)) {
-		// `alias` is the obvious mistake here — flag it explicitly so the
-		// user gets the lookup recipe rather than a generic "unsupported
-		// column" message. Other non-accession columns get the short form.
-		if (pred.column_name == "alias") {
-			throw duckdb::BinderException(
-			    "%s: DELETE by alias is not supported by Webin V2 for cross-submission lifecycle ops. "
-			    "Use the server-assigned accession column (e.g. samea_accession, prjeb_accession, "
-			    "erx_accession, err_accession). Within a session, look up the accession via "
-			    "object_accessions[list_position(object_aliases, '<alias>')] FROM ena.submission_log",
-			    caller);
-		}
-		throw duckdb::BinderException("%s: cannot DELETE on column '%s' (use a per-table accession column)", caller,
-		                              pred.column_name);
+		throw duckdb::BinderException("%s: cannot DELETE on column '%s' (use 'alias' or a per-table accession column)",
+		                              caller, pred.column_name);
 	}
 
 	return planner.Make<duckdb::ENALifecycleDelete>(catalog, std::string(object_type), std::move(target));

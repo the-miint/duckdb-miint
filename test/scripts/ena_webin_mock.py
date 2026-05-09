@@ -379,6 +379,30 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             return
+        # Reports API: GET /submit/report/<kind>/{id}?format=json
+        # Required-Basic-auth (the real Webin Reports API rejects anonymous
+        # GETs with 401). Resolves alias-or-accession to a single-row JSON
+        # array deterministically via _accession_for. Aliases starting with
+        # the literal prefix "MISS_" return `[]` (the wwwdev not-found shape)
+        # so SQL tests can exercise the alias-not-found branch without a
+        # stateful mock.
+        if self.path.startswith("/submit/report/"):
+            if not self._check_auth():
+                self.send_response(401)
+                self.end_headers()
+                return
+            body = self._handle_reports_lookup(self.path)
+            if body is None:
+                self.send_response(400)
+                self.end_headers()
+                return
+            payload = body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         # Default: health check.
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
@@ -432,6 +456,52 @@ class Handler(BaseHTTPRequestHandler):
         present = [a for a in aliases if a.startswith("EXISTS_")]
         lines = [fields] + present
         return "\n".join(lines) + "\n"
+
+    def _handle_reports_lookup(self, path: str) -> str | None:
+        """Mock the Webin Reports `/submit/report/<kind>/{id}` endpoint.
+        Returns a JSON array string on success, None on a malformed path.
+        Wire shape pinned by localdocs/ena-live-reports-probe.sh:
+          hit  → [{"report":{"id":"<primary>","alias":"<id>", …}}]
+          miss → []
+        """
+        from urllib.parse import urlparse, unquote
+
+        parsed = urlparse(path)
+        # Expect: /submit/report/<kind>/<id>
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) != 4 or parts[0] != "submit" or parts[1] != "report":
+            return None
+        kind_path = parts[2]
+        identifier = unquote(parts[3])
+        # Map URL path → ACCESSION_BASE key (PROJECT/SAMPLE/EXPERIMENT/RUN).
+        # See decision in ena_reports_client.hpp: STUDY → /projects (returns
+        # PRJEB, the primary accession lifecycle ops target). The other three
+        # are 1:1.
+        kind_to_internal = {
+            "projects": "PROJECT",
+            "samples": "SAMPLE",
+            "experiments": "EXPERIMENT",
+            "runs": "RUN",
+        }
+        internal = kind_to_internal.get(kind_path)
+        if internal is None:
+            return None
+        # MISS_-prefixed identifiers exercise the not-found path.
+        if identifier.startswith("MISS_"):
+            return "[]"
+        primary, secondary = _accession_for(identifier, internal)
+        # Real wwwdev shape carries firstCreated / releaseStatus /
+        # submissionAccountId / secondaryId; we mirror only the fields the
+        # L5 client actually reads (id) plus a couple of bonus fields so
+        # tests inspecting the body via a regex match can pin them too.
+        report = {
+            "id": primary,
+            "alias": identifier,
+            "secondaryId": secondary,
+            "releaseStatus": "PRIVATE",
+            "submissionAccountId": "Webin-mock",
+        }
+        return json.dumps([{"report": report, "links": []}])
 
     def do_POST(self):
         if not self._check_auth():

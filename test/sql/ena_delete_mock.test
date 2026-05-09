@@ -110,13 +110,30 @@ DELETE FROM ena.samples WHERE title = 'a-title';
 ----
 cannot DELETE on column 'title'
 
-# 9b. Negative: DELETE by alias is no longer accepted (Webin V2 limitation
-#     — refname targeting cross-submission isn't resolvable). Error message
-#     points at the in-session lookup pattern.
-statement error
-DELETE FROM ena.samples WHERE alias = 'some-alias';
+# 9b. DELETE by alias: L5 restored this via Webin Reports API translation.
+#     Mock derives the same accession from alias as the receipt builder, so
+#     the resolved CANCEL target lands on the mock-derived ERS for samples /
+#     PRJEB for projects / etc. The kind is implicit from the table.
+statement ok
+DELETE FROM ena.samples WHERE alias = 'reports-delete-alias-001';
+
+# Audit log captures the post-translation accession on the target column.
+query II
+SELECT action, target LIKE 'ERS%' AS resolved_to_ers
+FROM ena.submission_log
+WHERE action = 'CANCEL'
+  AND object_type = 'samples'
+  AND target NOT LIKE 'ERS-mock-%'  -- exclude prior tests' literal accessions
+ORDER BY submitted_at DESC LIMIT 1;
 ----
-DELETE by alias is not supported
+CANCEL	true
+
+# 9c. DELETE by alias: not-found surfaces as a friendly diagnostic citing
+#     the alias and table — no opaque "envelope build failed".
+statement error
+DELETE FROM ena.samples WHERE alias = 'MISS_no-such-delete-alias';
+----
+not found in this submission account
 
 # 10. Negative: failed CANCEL still logs and surfaces error
 statement error
