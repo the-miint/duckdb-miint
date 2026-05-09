@@ -72,12 +72,17 @@ public:
 		// 1. current_chunk (shared_ptr — may outlive gstate via Vector ArrowAuxiliaryData)
 		// 2. arrow_table - holds pointers INTO output_schema, clear before releasing schema
 		// 3. output_schema - obtained via get_schema(), separately owned copy, release on destruction
-		// 4. output_stream - returned by rype_classify_arrow(), release on destruction
-		// 5. tmp_table  - DROPPED via input_connection while it's still alive; the DROP must
-		//                 follow output_stream release so RYpe is no longer consuming the
-		//                 stream-backed QueryResult that references the temp table's catalog state.
-		// 6. input_connection - must outlive output_stream (RYpe holds ref to input Arrow stream)
-		//                       and the DROP TABLE step above.
+		// 4. output_stream - returned by rype_classify_arrow(), release on destruction.
+		//                    Until released, RYpe may still pull from the input Arrow stream
+		//                    wrapper, which holds a non-owning ClientContext pointer into
+		//                    input_connection — so this must be released before the DROP and
+		//                    before input_connection.reset().
+		// 4a. negative_set / index - rype_negative_set_free / rype_index_free; safe any time
+		//                    after output_stream.release returns (RYpe is done with them).
+		// 5. tmp_table - DROPPED on input_connection (which owns the per-call TEMP). Must run
+		//                while input_connection is alive AND after step 4 returns, since
+		//                step 4 can re-enter the connection through RYpe's stream callbacks.
+		// 6. input_connection - reset last; outlives steps 4 and 5.
 		ArrowArrayStream output_stream;
 		ArrowSchema output_schema;
 		ArrowTableSchema arrow_table;
