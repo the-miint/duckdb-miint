@@ -1,6 +1,5 @@
 #include "rype_classify.hpp"
 #include "rype_common.hpp"
-#include "duckdb/common/arrow/result_arrow_wrapper.hpp"
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/main/config.hpp"
@@ -40,6 +39,14 @@ RypeClassifyTableFunction::GlobalState::~GlobalState() {
 	// Free RYpe index
 	if (index) {
 		rype_index_free(index);
+	}
+
+	// Drop the materialized temp table BEFORE releasing the connection that owns
+	// it. The temp table is per-connection so teardown would clean it up
+	// implicitly, but the explicit drop releases memory sooner. DropRypeTempTable
+	// is a no-op if either is unset (e.g., bind failure).
+	if (input_connection) {
+		DropRypeTempTable(*input_connection, tmp_table_name);
 	}
 
 	// Release sub-connection LAST — RYpe's input stream (released above via
@@ -155,62 +162,29 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
 	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);
 
-	// First, collect all read_ids in order. We use row indices (0-based) as query_id for RYpe,
-	// so read_ids[i] gives the original identifier for query_id=i.
-	std::string id_query = "SELECT " + id_col_quoted + " FROM " + table_quoted;
-	auto id_result = conn.Query(id_query);
-	if (id_result->HasError()) {
-		throw InvalidInputException("Failed to read from sequence table '%s': %s", bind_data.sequence_table,
-		                            id_result->GetError());
-	}
+	// Materialize the user's sequence_table into a per-call TEMP table with an
+	// explicit id column, then read read_ids and the sequence stream from it.
+	// See rype_common.hpp for the design rationale (row-index ↔ read_id fix).
+	size_t avg_read_length = 0;
+	gstate->tmp_table_name =
+	    MaterializeRypeInputTempTable(conn, table_quoted, id_col_quoted, bind_data.sequence_table,
+	                                  bind_data.has_sequence2, "_rype_classify_", gstate->read_ids, avg_read_length);
 
-	gstate->read_ids.reserve(id_result->RowCount());
-	auto &id_materialized = id_result->Cast<MaterializedQueryResult>();
-	while (auto chunk = id_materialized.Fetch()) {
-		for (idx_t i = 0; i < chunk->size(); i++) {
-			gstate->read_ids.push_back(chunk->data[0].GetValue(i).ToString());
-		}
-	}
-
-	// Step 4: Estimate batch size before the main sequence query.
-	// RYpe processes one batch at a time; using STANDARD_VECTOR_SIZE (2048) causes
-	// shard I/O to dominate. Sample actual average read length for accurate estimation.
-	size_t avg_read_length = SampleAvgReadLength(conn, table_quoted);
+	// Estimate batch size. RYpe processes one batch at a time; using
+	// STANDARD_VECTOR_SIZE (2048) causes shard I/O to dominate.
 	int is_paired = bind_data.has_sequence2 ? 1 : 0;
 	// is_large_binary=1: sub-connection uses arrow_large_buffer_size=true, so DuckDB
 	// exports BLOB as Arrow LargeBinary (i64 offsets) — no 2 GiB per-array limit.
 	size_t batch_size = rype_recommend_batch_size(gstate->index, avg_read_length, is_paired, 0, 1);
 	if (batch_size == 0) {
-		// rype_recommend_batch_size returns 0 on error — log but use safe fallback
 		const char *err = rype_get_last_error();
 		Printer::Print(StringUtil::Format("Warning: rype_recommend_batch_size failed (%s), using default",
 		                                  err ? err : "unknown error"));
 		batch_size = STANDARD_VECTOR_SIZE;
 	}
 
-	// Query sequence data for RYpe with row indices as id
-	// RYpe expects: id (Int64), sequence (Binary), pair_sequence (Binary nullable)
-	std::string query;
-	if (bind_data.has_sequence2) {
-		query = "SELECT (row_number() OVER () - 1)::BIGINT as id, sequence1::BLOB as sequence, "
-		        "sequence2::BLOB as pair_sequence FROM " +
-		        table_quoted;
-	} else {
-		query = "SELECT (row_number() OVER () - 1)::BIGINT as id, sequence1::BLOB as sequence, "
-		        "NULL::BLOB as pair_sequence FROM " +
-		        table_quoted;
-	}
-
-	auto query_result = conn.Query(query);
-	if (query_result->HasError()) {
-		throw InvalidInputException("Failed to read from sequence table '%s': %s", bind_data.sequence_table,
-		                            query_result->GetError());
-	}
-
-	// NOTE: ResultArrowArrayStreamWrapper's release callback (MyStreamRelease) deletes
-	// the wrapper when the stream is released. We create it with make_uniq but then
-	// release ownership after passing to RYpe, so there's no double-free.
-	auto input_wrapper = make_uniq<ResultArrowArrayStreamWrapper>(std::move(query_result), batch_size);
+	// Build the Arrow input stream from the same temp table, ordered by id.
+	auto input_wrapper = BuildRypeArrowInput(conn, gstate->tmp_table_name, /*include_pair_column=*/true, batch_size);
 	ArrowArrayStream *input_stream = &input_wrapper->stream;
 
 	// Step 5: Call RYpe classify
