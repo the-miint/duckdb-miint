@@ -25,6 +25,19 @@ std::string WriteTempPwFile(const std::string &content) {
 	return path;
 }
 
+// MinGW/Windows lacks POSIX setenv/unsetenv; _putenv_s with "" unsets.
+static inline void SetEnvPortable(const char *name, const char *value) {
+#ifdef _WIN32
+	_putenv_s(name, value ? value : "");
+#else
+	if (value) {
+		::setenv(name, value, 1);
+	} else {
+		::unsetenv(name);
+	}
+#endif
+}
+
 // RAII guard to set/restore an env var.
 class EnvGuard {
 public:
@@ -34,18 +47,10 @@ public:
 			prior_ = prior;
 			had_prior_ = true;
 		}
-		if (value) {
-			::setenv(name_.c_str(), value, 1);
-		} else {
-			::unsetenv(name_.c_str());
-		}
+		SetEnvPortable(name_.c_str(), value);
 	}
 	~EnvGuard() {
-		if (had_prior_) {
-			::setenv(name_.c_str(), prior_.c_str(), 1);
-		} else {
-			::unsetenv(name_.c_str());
-		}
+		SetEnvPortable(name_.c_str(), had_prior_ ? prior_.c_str() : nullptr);
 	}
 
 private:
