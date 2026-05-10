@@ -97,6 +97,18 @@ FROM ena_cancel(secret => 'test_ena_lifecycle_mock',
 ----
 CANCEL	true	true
 
+# 4b-audit. The L5-targeted call's audit row carries the user-supplied kind
+#           in object_type, matching the per-table convention used by the
+#           DELETE-by-alias path. Pre-polish this was empty (only the kind-
+#           agnostic accession path leaves it empty now).
+query III
+SELECT object_type, action, success
+FROM ena.submission_log
+WHERE action = 'CANCEL' AND target LIKE 'ERS%'
+ORDER BY submitted_at DESC LIMIT 1;
+----
+samples	CANCEL	true
+
 # 4c. refname + kind happy path on each of the four kinds.
 query II
 SELECT target LIKE 'PRJEB%' AS prjeb, success FROM ena_cancel(

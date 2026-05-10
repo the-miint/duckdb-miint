@@ -274,7 +274,14 @@ void ExecuteLifecycle(ClientContext &context, TableFunctionInput &data, DataChun
 	if (auto *catalog = duckdb::FindAttachedENACatalog(context, bd.fn_name, bd.catalog_name, bd.catalog_explicit)) {
 		duckdb::ResolvedENACredentials log_creds = creds;
 		duckdb::SubmissionLogPayload payload;
-		payload.object_type = ""; // lifecycle ops aren't bound to a single object_type
+		// Audit-log object_type: when the user supplied `kind => '…'` (the L5
+		// alias-targeted path), use the explicit kind so the audit row matches
+		// the per-table convention used by the DELETE-by-alias path. The
+		// accession-targeted path leaves it empty — the lifecycle table fns
+		// don't know the kind from the accession alone (the prefix encodes it,
+		// but we'd be re-implementing prefix→kind here for an audit-only field
+		// when the user could have used DELETE FROM ena.X for the same effect).
+		payload.object_type = bd.refname_kind;
 		payload.action = ActionName(gs.outcome.action);
 		payload.n_objects = 1;
 		payload.success = success;
