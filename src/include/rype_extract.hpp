@@ -50,13 +50,24 @@ struct RypeExtractGlobalState : public GlobalTableFunctionState {
 	// in the destructor AFTER releasing RYpe streams.
 	unique_ptr<Connection> input_connection;
 
+	// Name of the per-call TEMP table that materializes (id, read_id, sequence1)
+	// once on input_connection. Populated by BuildExtractionInputStream; the
+	// destructor drops the table before tearing down input_connection.
+	std::string tmp_table_name;
+
 	// Arrow output stream from RYpe extraction.
 	// OWNERSHIP HIERARCHY (destruction must be in reverse order):
 	// 1. current_chunk (shared_ptr — may outlive gstate via Vector ArrowAuxiliaryData)
 	// 2. arrow_table (holds pointers into output_schema)
 	// 3. output_schema
-	// 4. output_stream
-	// 5. input_connection - must outlive output_stream (RYpe holds ref to input Arrow stream)
+	// 4. output_stream - until released, RYpe may still pull from the input Arrow stream
+	//                    wrapper, which holds a non-owning ClientContext pointer into
+	//                    input_connection — so this must be released before the DROP and
+	//                    before input_connection.reset().
+	// 5. tmp_table - DROPPED on input_connection (which owns the per-call TEMP). Must run
+	//                while input_connection is alive AND after step 4 returns, since
+	//                step 4 can re-enter the connection through RYpe's stream callbacks.
+	// 6. input_connection - reset last; outlives steps 4 and 5.
 	ArrowArrayStream output_stream;
 	ArrowSchema output_schema;
 	ArrowTableSchema arrow_table;

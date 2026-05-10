@@ -6,11 +6,14 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
+#include "duckdb/common/arrow/result_arrow_wrapper.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/parser/keyword_helper.hpp"
 
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
@@ -115,6 +118,116 @@ inline bool ValidateSequenceTable(ClientContext &context, const std::string &tab
 	}
 
 	return has_seq2;
+}
+
+// ============================================================================
+// Shared input pipeline for RYpe table functions (the row-index ↔ read_id fix).
+// ============================================================================
+//
+// Background: rype_classify, rype_extract_*, and rype_log_ratio all need to
+// build (a) a vector of read_ids indexed by a synthetic id and (b) an Arrow
+// stream of (id, sequence, [pair_sequence]) for RYpe to consume. The naive
+// approach of issuing two independent SELECTs against the user's
+// sequence_table corrupts the correspondence whenever the two scans see rows
+// in different orders (multi-threaded scans, views, parquet sources,
+// preserve_insertion_order=false). The helpers below materialize the source
+// once into a per-call TEMP table with an explicit id column, then read
+// read_ids and stream sequences from that same table ORDER BY id — the id
+// column is now a stable attribute of the data, not an emergent property of
+// independent scans.
+//
+// Usage pattern (in InitGlobal, on a per-GlobalState sub-Connection):
+//
+//   gstate->tmp_table_name = MaterializeRypeInputTempTable(
+//       conn, table_quoted, id_col_quoted, source_name_for_errors,
+//       has_sequence2, "_rype_classify_", gstate->read_ids,
+//       avg_read_length);
+//   // ... compute batch_size from avg_read_length ...
+//   auto wrapper = BuildRypeArrowInput(conn, gstate->tmp_table_name,
+//                                      /*include_pair_column=*/true,
+//                                      batch_size);
+//   ArrowArrayStream *input_stream = &wrapper->stream;
+//   // hand input_stream to rype_*_arrow(); on success, wrapper.release().
+//
+// The destructor must call DropRypeTempTable(*input_connection,
+// gstate->tmp_table_name) AFTER releasing the RYpe output stream and BEFORE
+// resetting input_connection.
+
+//! Materialize the user's sequence_table into a per-call TEMP table on `conn`,
+//! populate `out_read_ids` from it ordered by the synthetic id, and sample the
+//! average read length for batch-size estimation. Returns the name of the
+//! created TEMP table; the caller must store this and drop it later via
+//! DropRypeTempTable.
+//!
+//! `source_name_for_errors` is the user-facing source-table name (unquoted);
+//! used only in error messages.
+//! `name_prefix` is the per-function debug prefix (e.g. "_rype_classify_").
+inline std::string MaterializeRypeInputTempTable(Connection &conn, const std::string &table_quoted,
+                                                 const std::string &id_col_quoted,
+                                                 const std::string &source_name_for_errors, bool has_sequence2,
+                                                 const std::string &name_prefix, std::vector<std::string> &out_read_ids,
+                                                 size_t &out_avg_read_length) {
+	std::string tmp_table_name = name_prefix + StringUtil::Replace(UUID::ToString(UUID::GenerateRandomUUID()), "-", "");
+	std::string tmp_quoted = KeywordHelper::WriteOptionallyQuoted(tmp_table_name);
+	std::string seq2_proj = has_sequence2 ? "sequence2" : "NULL::BLOB AS sequence2";
+	std::string create_sql = "CREATE TEMP TABLE " + tmp_quoted +
+	                         " AS SELECT (row_number() OVER () - 1)::BIGINT AS id, " + id_col_quoted +
+	                         " AS read_id, sequence1, " + seq2_proj + " FROM " + table_quoted;
+	auto create_result = conn.Query(create_sql);
+	if (create_result->HasError()) {
+		throw InvalidInputException("Failed to materialize sequence table '%s': %s", source_name_for_errors,
+		                            create_result->GetError());
+	}
+
+	std::string id_query = "SELECT read_id FROM " + tmp_quoted + " ORDER BY id";
+	auto id_result = conn.Query(id_query);
+	if (id_result->HasError()) {
+		throw InvalidInputException("Failed to read read_ids from temp table: %s", id_result->GetError());
+	}
+
+	out_read_ids.reserve(id_result->RowCount());
+	auto &id_materialized = id_result->Cast<MaterializedQueryResult>();
+	while (auto chunk = id_materialized.Fetch()) {
+		for (idx_t i = 0; i < chunk->size(); i++) {
+			out_read_ids.push_back(chunk->data[0].GetValue(i).ToString());
+		}
+	}
+
+	out_avg_read_length = SampleAvgReadLength(conn, tmp_quoted);
+	return tmp_table_name;
+}
+
+//! Build the Arrow input stream RYpe will consume. Reads (id, sequence1, [sequence2])
+//! from the named TEMP table ordered by id. `include_pair_column` exposes a
+//! pair_sequence column (true for classify/log_ratio, false for extract).
+//!
+//! Caller transfers ownership of the returned wrapper to RYpe by calling
+//! .release() AFTER rype_*_arrow() succeeds; on failure, the unique_ptr's
+//! destructor cleans up the wrapper.
+inline unique_ptr<ResultArrowArrayStreamWrapper>
+BuildRypeArrowInput(Connection &conn, const std::string &tmp_table_name, bool include_pair_column, size_t batch_size) {
+	std::string tmp_quoted = KeywordHelper::WriteOptionallyQuoted(tmp_table_name);
+	std::string select_cols = include_pair_column
+	                              ? std::string("id, sequence1::BLOB AS sequence, sequence2::BLOB AS pair_sequence")
+	                              : std::string("id, sequence1::BLOB AS sequence");
+	std::string query = "SELECT " + select_cols + " FROM " + tmp_quoted + " ORDER BY id";
+	auto query_result = conn.Query(query);
+	if (query_result->HasError()) {
+		throw InvalidInputException("Failed to read from temp table: %s", query_result->GetError());
+	}
+	return make_uniq<ResultArrowArrayStreamWrapper>(std::move(query_result), batch_size);
+}
+
+//! Drop the per-call TEMP table on `conn`. Safe with empty name (no-op) and
+//! with a name that doesn't exist (uses IF EXISTS). Errors are silently
+//! ignored — this runs in destructors where we cannot usefully propagate
+//! failures, and the connection's catalog cleanup will reap the table on
+//! teardown anyway.
+inline void DropRypeTempTable(Connection &conn, const std::string &tmp_table_name) {
+	if (tmp_table_name.empty()) {
+		return;
+	}
+	conn.Query("DROP TABLE IF EXISTS " + KeywordHelper::WriteOptionallyQuoted(tmp_table_name));
 }
 
 } // namespace duckdb

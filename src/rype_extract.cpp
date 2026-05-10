@@ -1,6 +1,5 @@
 #include "rype_extract.hpp"
 #include "rype_common.hpp"
-#include "duckdb/common/arrow/result_arrow_wrapper.hpp"
 #include "duckdb/common/helper.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/connection.hpp"
@@ -24,6 +23,12 @@ RypeExtractGlobalState::~RypeExtractGlobalState() {
 	}
 	if (output_stream.release) {
 		output_stream.release(&output_stream);
+	}
+
+	// Drop the materialized temp table BEFORE releasing input_connection — see
+	// rype_classify.cpp destructor for rationale.
+	if (input_connection) {
+		DropRypeTempTable(*input_connection, tmp_table_name);
 	}
 
 	// Release sub-connection LAST — see rype_classify.cpp destructor for rationale.
@@ -89,25 +94,18 @@ BuildExtractionInputStream(ClientContext &context, const RypeExtractData &bind_d
 	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
 	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);
 
-	// Collect read_ids
-	std::string id_query = "SELECT " + id_col_quoted + " FROM " + table_quoted;
-	auto id_result = conn.Query(id_query);
-	if (id_result->HasError()) {
-		throw InvalidInputException("Failed to read from sequence table '%s': %s", bind_data.sequence_table,
-		                            id_result->GetError());
-	}
+	// Materialize the user's sequence_table into a per-call TEMP table with an
+	// explicit id column, then read read_ids and the sequence stream from it.
+	// See rype_common.hpp for the design rationale (row-index ↔ read_id fix).
+	// Extraction is single-sequence; pass has_sequence2=false to keep the temp
+	// table's sequence2 slot NULL, and include_pair_column=false on the stream.
+	size_t avg_read_length = 0;
+	gstate->tmp_table_name =
+	    MaterializeRypeInputTempTable(conn, table_quoted, id_col_quoted, bind_data.sequence_table,
+	                                  /*has_sequence2=*/false, "_rype_extract_", gstate->read_ids, avg_read_length);
 
-	gstate->read_ids.reserve(id_result->RowCount());
-	auto &id_materialized = id_result->Cast<MaterializedQueryResult>();
-	while (auto chunk = id_materialized.Fetch()) {
-		for (idx_t i = 0; i < chunk->size(); i++) {
-			gstate->read_ids.push_back(chunk->data[0].GetValue(i).ToString());
-		}
-	}
-
-	// Estimate batch size before the main sequence query.
-	// Extraction has no index overhead — just sequence data + minimizer lists.
-	size_t avg_read_length = SampleAvgReadLength(conn, table_quoted);
+	// Estimate batch size — extraction has no index overhead, just sequence data
+	// + minimizer lists.
 	size_t minimizers_per_read = (bind_data.w > 0 && avg_read_length > bind_data.k)
 	                                 ? ((avg_read_length - bind_data.k + 1) / bind_data.w + 1)
 	                                 : 1;
@@ -124,18 +122,9 @@ BuildExtractionInputStream(ClientContext &context, const RypeExtractData &bind_d
 		batch_size = STANDARD_VECTOR_SIZE;
 	}
 
-	// Query sequence data — extraction only uses single sequence (no pair_sequence).
-	// RYpe extraction expects: id (Int64), sequence (Binary)
-	std::string query =
-	    "SELECT (row_number() OVER () - 1)::BIGINT as id, sequence1::BLOB as sequence FROM " + table_quoted;
-
-	auto query_result = conn.Query(query);
-	if (query_result->HasError()) {
-		throw InvalidInputException("Failed to read from sequence table '%s': %s", bind_data.sequence_table,
-		                            query_result->GetError());
-	}
-
-	out_wrapper = make_uniq<ResultArrowArrayStreamWrapper>(std::move(query_result), batch_size);
+	// Build the Arrow input stream from the same temp table, ordered by id.
+	// Extraction does not consume pair_sequence.
+	out_wrapper = BuildRypeArrowInput(conn, gstate->tmp_table_name, /*include_pair_column=*/false, batch_size);
 	*out_input_stream = &out_wrapper->stream;
 
 	return gstate;

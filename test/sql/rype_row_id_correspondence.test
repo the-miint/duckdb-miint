@@ -1,0 +1,279 @@
+# name: test/sql/rype_row_id_correspondence.test
+# description: Regression test for read_id <-> sequence correspondence in RYpe table functions
+# group: [sql]
+
+#
+# BUG: rype_classify, rype_extract_minimizer_set, rype_extract_strand_minimizers,
+# and rype_log_ratio each issue two independent SQL queries against the user's
+# sequence_table and stitch results together by row index (row_number() OVER ()).
+# DuckDB does not guarantee that two independent scans return rows in the same
+# order, so under multi-threaded scans, view sources, or preserve_insertion_order=false,
+# read_ids can be paired with the wrong sequence's classification.
+#
+# This test pins the invariant that EACH read_id is paired with the classification
+# of ITS OWN sequence content, regardless of scan ordering. The fixture is sized
+# (50K rows, multi-row-group parquet view) and configured
+# (preserve_insertion_order=false) to make the bug fire reliably pre-fix.
+#
+# Note: SET threads = N on this test session does NOT propagate to the
+# sub-connections that the rype functions create internally — those inherit the
+# DatabaseInstance default thread count, which is hardware-dependent. The bug
+# fires anyway because the parquet view + multi-row-group source + independent
+# sub-connection queries are independently sufficient to scramble row order
+# between the two queries the rype helper issues.
+#
+# Sequence content is engineered using the RY-space (purine/pyrimidine) collapse
+# of test.ryxdi:
+#   - ACGT-content matches {alpha, beta, gamma} at threshold 0.05  -> "three_*" reads
+#   - GGGG-content matches {alpha, gamma}        at threshold 0.05  -> "two_*" reads
+# So no "two_*" read may legitimately appear paired with bucket_beta.
+
+require miint
+
+require parquet
+
+# =============================================================================
+# Hostile execution mode for the entire test
+# =============================================================================
+statement ok
+SET preserve_insertion_order = false;
+
+# =============================================================================
+# Adversarial fixture: 50K rows in one parquet file with 10 row groups, view source
+# =============================================================================
+# read_id encodes expected behavior:
+#   "two_NNNNN"   carries GGGGCCCC content -> must classify to exactly {alpha, gamma}
+#   "three_NNNNN" carries ACGTACGT content -> must classify to exactly {alpha, beta, gamma}
+
+statement ok
+COPY (
+    SELECT
+        'two_'   || lpad((i::INTEGER)::VARCHAR, 6, '0') AS read_id,
+        repeat('GGGGCCCC', 7) AS sequence1
+    FROM range(0, 25000) t(i)
+    UNION ALL
+    SELECT
+        'three_' || lpad((i::INTEGER)::VARCHAR, 6, '0') AS read_id,
+        repeat('ACGTACGT', 7) AS sequence1
+    FROM range(0, 25000) t(i)
+) TO '__TEST_DIR__/rype_adv.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 5000);
+
+statement ok
+CREATE OR REPLACE VIEW seqs_view AS SELECT * FROM read_parquet('__TEST_DIR__/rype_adv.parquet');
+
+# Sanity: fixture has the expected row counts
+query II
+SELECT
+    SUM(CASE WHEN read_id LIKE 'two_%'   THEN 1 ELSE 0 END),
+    SUM(CASE WHEN read_id LIKE 'three_%' THEN 1 ELSE 0 END)
+FROM seqs_view;
+----
+25000	25000
+
+# =============================================================================
+# rype_classify: invariant — read_id prefix must match its sequence's bucket set
+# =============================================================================
+# Every "two_*" read must have exactly {alpha, gamma}
+# Every "three_*" read must have exactly {alpha, beta, gamma}
+# Pre-fix: scrambling causes "two_*" reads to inherit "three_*" classifications,
+#          producing rows where read_id LIKE 'two_%' AND bucket_name = 'bucket_beta'.
+
+statement ok
+CREATE TEMP TABLE classify_run AS
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seqs_view', threshold := 0.05);
+
+# Hard invariant: no "two_*" read may carry bucket_beta
+query I
+SELECT count(*) FROM classify_run WHERE read_id LIKE 'two_%' AND bucket_name = 'bucket_beta';
+----
+0
+
+# Hard invariant: every "two_*" read has exactly {alpha, gamma}
+query I
+SELECT count(*) FROM (
+    SELECT read_id, list_sort(list(bucket_name)) AS buckets
+    FROM classify_run WHERE read_id LIKE 'two_%' GROUP BY read_id
+) WHERE buckets != ['bucket_alpha', 'bucket_gamma'];
+----
+0
+
+# Hard invariant: every "three_*" read has exactly {alpha, beta, gamma}
+query I
+SELECT count(*) FROM (
+    SELECT read_id, list_sort(list(bucket_name)) AS buckets
+    FROM classify_run WHERE read_id LIKE 'three_%' GROUP BY read_id
+) WHERE buckets != ['bucket_alpha', 'bucket_beta', 'bucket_gamma'];
+----
+0
+
+# Output cardinality sanity: 25000*2 + 25000*3 = 125000
+query I
+SELECT count(*) FROM classify_run;
+----
+125000
+
+# Distinct read_id count: a buggy fix that deduplicated or dropped reads would pass
+# the bucket-shape invariants but fail this one.
+query I
+SELECT count(DISTINCT read_id) FROM classify_run;
+----
+50000
+
+statement ok
+DROP TABLE classify_run;
+
+# =============================================================================
+# rype_classify: determinism across 3 independent runs
+# =============================================================================
+statement ok
+CREATE TEMP TABLE classify_run1 AS
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seqs_view', threshold := 0.05);
+
+statement ok
+CREATE TEMP TABLE classify_run2 AS
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seqs_view', threshold := 0.05);
+
+statement ok
+CREATE TEMP TABLE classify_run3 AS
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seqs_view', threshold := 0.05);
+
+# Symmetric difference across all three runs must be empty.
+# Checking run1<->run2 and run1<->run3 is sufficient: for set equality,
+# (run1 == run2) AND (run1 == run3) implies (run2 == run3) by transitivity,
+# so the run2<->run3 comparison is redundant.
+query I
+SELECT (
+    (SELECT count(*) FROM (SELECT * FROM classify_run1 EXCEPT SELECT * FROM classify_run2)) +
+    (SELECT count(*) FROM (SELECT * FROM classify_run2 EXCEPT SELECT * FROM classify_run1)) +
+    (SELECT count(*) FROM (SELECT * FROM classify_run1 EXCEPT SELECT * FROM classify_run3)) +
+    (SELECT count(*) FROM (SELECT * FROM classify_run3 EXCEPT SELECT * FROM classify_run1))
+);
+----
+0
+
+statement ok
+DROP TABLE classify_run1;
+
+statement ok
+DROP TABLE classify_run2;
+
+statement ok
+DROP TABLE classify_run3;
+
+# =============================================================================
+# rype_extract_minimizer_set: same content -> same minimizer set
+# =============================================================================
+# Within each prefix group, all reads share content, so the minimizer set must
+# be identical across all reads in the group. Pre-fix: scrambling produces
+# different minimizer lists for reads that should be identical.
+
+statement ok
+CREATE TEMP TABLE extract_set_run AS
+SELECT * FROM rype_extract_minimizer_set('seqs_view', 32, 10);
+
+query I
+SELECT count(DISTINCT (fwd_set, rc_set)) FROM extract_set_run WHERE read_id LIKE 'two_%';
+----
+1
+
+query I
+SELECT count(DISTINCT (fwd_set, rc_set)) FROM extract_set_run WHERE read_id LIKE 'three_%';
+----
+1
+
+# The two groups must have DIFFERENT minimizer sets
+query I
+SELECT count(DISTINCT (fwd_set, rc_set)) FROM extract_set_run;
+----
+2
+
+statement ok
+DROP TABLE extract_set_run;
+
+# =============================================================================
+# rype_extract_strand_minimizers: same content -> same hashes/positions
+# =============================================================================
+statement ok
+CREATE TEMP TABLE extract_strand_run AS
+SELECT * FROM rype_extract_strand_minimizers('seqs_view', 32, 10);
+
+query I
+SELECT count(DISTINCT (fwd_hashes, fwd_positions, rc_hashes, rc_positions))
+FROM extract_strand_run WHERE read_id LIKE 'two_%';
+----
+1
+
+query I
+SELECT count(DISTINCT (fwd_hashes, fwd_positions, rc_hashes, rc_positions))
+FROM extract_strand_run WHERE read_id LIKE 'three_%';
+----
+1
+
+statement ok
+DROP TABLE extract_strand_run;
+
+# =============================================================================
+# rype_log_ratio: read_id prefix must match its sequence's score sign
+# =============================================================================
+# Build a separate parquet fixture for log_ratio, since the indices distinguish
+# different content patterns:
+#   "pos_NNNNN" carries GGCCTTAA content -> matches numerator only -> log_ratio > 0
+#   "neg_NNNNN" carries AATTAATT content -> matches denominator only -> log_ratio < 0
+# Pre-fix: scrambling causes "pos_*" reads to inherit "neg_*" log_ratio (and vice versa).
+
+statement ok
+COPY (
+    SELECT
+        'pos_' || lpad((i::INTEGER)::VARCHAR, 6, '0') AS read_id,
+        repeat('GGCCTTAA', 7) AS sequence1
+    FROM range(0, 25000) t(i)
+    UNION ALL
+    SELECT
+        'neg_' || lpad((i::INTEGER)::VARCHAR, 6, '0') AS read_id,
+        repeat('AATTAATT', 7) AS sequence1
+    FROM range(0, 25000) t(i)
+) TO '__TEST_DIR__/rype_adv_lr.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 5000);
+
+statement ok
+CREATE OR REPLACE VIEW lr_view AS SELECT * FROM read_parquet('__TEST_DIR__/rype_adv_lr.parquet');
+
+statement ok
+CREATE TEMP TABLE lr_run AS
+SELECT * FROM rype_log_ratio(
+    'data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi',
+    'lr_view', skip_threshold := 0.0);
+
+# All "pos_*" must have log_ratio > 0 (or +inf), none NaN, none <= 0.
+# `NOT (log_ratio > 0)` evaluates to NULL on NaN, so add an explicit isnan() guard
+# to ensure NaN counts as a violation.
+query I
+SELECT count(*) FROM lr_run
+WHERE read_id LIKE 'pos_%' AND (isnan(log_ratio) OR NOT (log_ratio > 0));
+----
+0
+
+# All "neg_*" must have log_ratio < 0 (or -inf), none NaN, none >= 0.
+query I
+SELECT count(*) FROM lr_run
+WHERE read_id LIKE 'neg_%' AND (isnan(log_ratio) OR NOT (log_ratio < 0));
+----
+0
+
+# Output cardinality: one row per input
+query I
+SELECT count(*) FROM lr_run;
+----
+50000
+
+statement ok
+DROP TABLE lr_run;
+
+# =============================================================================
+# Cleanup — IF EXISTS so a partial-failure rerun on the same DB instance
+# doesn't trip "view already exists".
+# =============================================================================
+statement ok
+DROP VIEW IF EXISTS seqs_view;
+
+statement ok
+DROP VIEW IF EXISTS lr_view;

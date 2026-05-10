@@ -59,13 +59,27 @@ public:
 		// in the destructor AFTER releasing RYpe streams.
 		unique_ptr<Connection> input_connection;
 
+		// Name of the per-call TEMP table that materializes (id, read_id, sequence1,
+		// sequence2?) once on input_connection. Populated by InitGlobal; the
+		// destructor drops the table before tearing down input_connection.
+		std::string tmp_table_name;
+
 		// Arrow output stream from RYpe.
 		// OWNERSHIP HIERARCHY (destruction must be in reverse order):
 		// 1. current_chunk (shared_ptr — may outlive gstate via Vector ArrowAuxiliaryData)
 		// 2. arrow_table - holds pointers INTO output_schema, clear before releasing schema
 		// 3. output_schema - obtained via get_schema(), separately owned copy, release on destruction
-		// 4. output_stream - returned by rype_classify_arrow_log_ratio(), release on destruction
-		// 5. input_connection - must outlive output_stream (RYpe holds ref to input Arrow stream)
+		// 4. output_stream - returned by rype_classify_arrow_log_ratio(), release on destruction.
+		//                    Until released, RYpe may still pull from the input Arrow stream
+		//                    wrapper, which holds a non-owning ClientContext pointer into
+		//                    input_connection — so this must be released before the DROP and
+		//                    before input_connection.reset().
+		// 4a. numerator_index / denominator_index - rype_index_free; safe any time after
+		//                    output_stream.release returns (RYpe is done with them).
+		// 5. tmp_table - DROPPED on input_connection (which owns the per-call TEMP). Must run
+		//                while input_connection is alive AND after step 4 returns, since
+		//                step 4 can re-enter the connection through RYpe's stream callbacks.
+		// 6. input_connection - reset last; outlives steps 4 and 5.
 		ArrowArrayStream output_stream;
 		ArrowSchema output_schema;
 		ArrowTableSchema arrow_table;

@@ -1,6 +1,5 @@
 #include "rype_log_ratio.hpp"
 #include "rype_common.hpp"
-#include "duckdb/common/arrow/result_arrow_wrapper.hpp"
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/main/config.hpp"
@@ -38,6 +37,12 @@ RypeLogRatioTableFunction::GlobalState::~GlobalState() {
 	}
 	if (numerator_index) {
 		rype_index_free(numerator_index);
+	}
+
+	// Drop the materialized temp table BEFORE releasing input_connection — see
+	// rype_classify.cpp destructor for rationale.
+	if (input_connection) {
+		DropRypeTempTable(*input_connection, tmp_table_name);
 	}
 
 	// Release sub-connection LAST — see rype_classify.cpp destructor for rationale.
@@ -147,27 +152,18 @@ unique_ptr<GlobalTableFunctionState> RypeLogRatioTableFunction::InitGlobal(Clien
 	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
 	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);
 
-	// Collect all read_ids in order
-	std::string id_query = "SELECT " + id_col_quoted + " FROM " + table_quoted;
-	auto id_result = conn.Query(id_query);
-	if (id_result->HasError()) {
-		throw InvalidInputException("Failed to read from sequence table '%s': %s", bind_data.sequence_table,
-		                            id_result->GetError());
-	}
-
-	gstate->read_ids.reserve(id_result->RowCount());
-	auto &id_materialized = id_result->Cast<MaterializedQueryResult>();
-	while (auto chunk = id_materialized.Fetch()) {
-		for (idx_t i = 0; i < chunk->size(); i++) {
-			gstate->read_ids.push_back(chunk->data[0].GetValue(i).ToString());
-		}
-	}
+	// Materialize the user's sequence_table into a per-call TEMP table with an
+	// explicit id column, then read read_ids and the sequence stream from it.
+	// See rype_common.hpp for the design rationale (row-index ↔ read_id fix).
+	size_t avg_read_length = 0;
+	gstate->tmp_table_name =
+	    MaterializeRypeInputTempTable(conn, table_quoted, id_col_quoted, bind_data.sequence_table,
+	                                  bind_data.has_sequence2, "_rype_log_ratio_", gstate->read_ids, avg_read_length);
 
 	// Step 5: Estimate batch size.
 	// Log-ratio loads shards from BOTH indices per batch, so use whichever index has larger
 	// shards for a conservative memory estimate. rype_recommend_batch_size accounts for shard
 	// size in its memory budget, so the index with larger shards yields a smaller batch size.
-	size_t avg_read_length = SampleAvgReadLength(conn, table_quoted);
 	int is_paired = bind_data.has_sequence2 ? 1 : 0;
 
 	size_t num_shard_bytes = rype_index_largest_shard_bytes(gstate->numerator_index);
@@ -186,25 +182,8 @@ unique_ptr<GlobalTableFunctionState> RypeLogRatioTableFunction::InitGlobal(Clien
 		batch_size = STANDARD_VECTOR_SIZE;
 	}
 
-	// Step 6: Query sequence data for RYpe
-	std::string query;
-	if (bind_data.has_sequence2) {
-		query = "SELECT (row_number() OVER () - 1)::BIGINT as id, sequence1::BLOB as sequence, "
-		        "sequence2::BLOB as pair_sequence FROM " +
-		        table_quoted;
-	} else {
-		query = "SELECT (row_number() OVER () - 1)::BIGINT as id, sequence1::BLOB as sequence, "
-		        "NULL::BLOB as pair_sequence FROM " +
-		        table_quoted;
-	}
-
-	auto query_result = conn.Query(query);
-	if (query_result->HasError()) {
-		throw InvalidInputException("Failed to read from sequence table '%s': %s", bind_data.sequence_table,
-		                            query_result->GetError());
-	}
-
-	auto input_wrapper = make_uniq<ResultArrowArrayStreamWrapper>(std::move(query_result), batch_size);
+	// Step 6: Build the Arrow input stream from the same temp table, ordered by id.
+	auto input_wrapper = BuildRypeArrowInput(conn, gstate->tmp_table_name, /*include_pair_column=*/true, batch_size);
 	ArrowArrayStream *input_stream = &input_wrapper->stream;
 
 	// Step 7: Call RYpe log-ratio classification
