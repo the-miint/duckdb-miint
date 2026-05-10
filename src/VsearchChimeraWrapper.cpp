@@ -75,7 +75,7 @@ UchimeResult VsearchChimeraWrapper::DetectHandle::detect(const std::string &quer
 	                      1, // abundance = 1 for uchime_ref
 	                      &vsearch_result);
 
-	return convert_result(&vsearch_result);
+	return convert_result(&vsearch_result, query_label);
 }
 
 // ============================================================================
@@ -278,15 +278,25 @@ void VsearchChimeraWrapper::index_sequence(uint64_t seqno) {
 	dbindex_addsequence(static_cast<unsigned int>(seqno), opt_dbmask);
 }
 
-UchimeResult VsearchChimeraWrapper::convert_result(const void *vsearch_result_ptr) {
+UchimeResult VsearchChimeraWrapper::convert_result(const void *vsearch_result_ptr, const std::string &fallback_label) {
 	const auto *r = static_cast<const chimera_result_s *>(vsearch_result_ptr);
+
+	// STOPGAP for upstream vsearch bug: chimera_detect_single only writes the
+	// result struct on Status::no_parents / low_score / suspicious / chimeric.
+	// On Status::no_alignment (eval_parents finds best_h < 0) it leaves the
+	// memset(0) state intact, so flag is '\0' and query_label is empty. Treat
+	// that case as a non-chimeric ('N') row using the input label. Remove this
+	// fallback once vsearch fixes chimera_detect_single — see
+	// localdocs/BUG-vsearch-chimera-detect-single-no-alignment.md.
+	const bool unfilled = (r->flag == '\0');
+	const char effective_flag = unfilled ? 'N' : r->flag;
 
 	UchimeResult result;
 	result.score = r->score;
-	result.query_label = r->query_label;
-	result.flag = std::string(1, r->flag);
+	result.query_label = unfilled ? fallback_label : std::string(r->query_label);
+	result.flag = std::string(1, effective_flag);
 
-	if (r->flag == 'N') {
+	if (effective_flag == 'N') {
 		return result;
 	}
 
@@ -327,7 +337,7 @@ void VsearchChimeraWrapper::detect_batch(const std::vector<std::string> &query_l
 	                     raw_results.data());
 
 	for (int i = 0; i < args.count; i++) {
-		output.push_back(convert_result(&raw_results[i]));
+		output.push_back(convert_result(&raw_results[i], query_labels[i]));
 	}
 }
 
@@ -345,7 +355,7 @@ UchimeResult VsearchChimeraWrapper::detect_denovo(const std::string &query_label
 	chimera_detect_single(state_->ci, seq.c_str(), query_label.c_str(), static_cast<int>(seq.size()),
 	                      static_cast<int>(query_abundance), &vsearch_result);
 
-	return convert_result(&vsearch_result);
+	return convert_result(&vsearch_result, query_label);
 }
 
 } // namespace miint

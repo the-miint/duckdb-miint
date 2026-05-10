@@ -110,7 +110,10 @@ private:
 	static void load_sequences_into_db(const std::vector<std::string> &labels,
 	                                   const std::vector<std::string> &sequences,
 	                                   const std::vector<int64_t> &abundances);
-	static UchimeResult convert_result(const void *vsearch_result);
+	// fallback_label is used when the upstream vsearch library leaves the
+	// result struct memset-zero (Status::no_alignment path in
+	// chimera_detect_single — see localdocs/BUG-vsearch-chimera-detect-single-no-alignment.md).
+	static UchimeResult convert_result(const void *vsearch_result, const std::string &fallback_label);
 };
 
 } // namespace miint
