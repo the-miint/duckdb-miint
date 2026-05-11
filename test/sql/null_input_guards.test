@@ -1,8 +1,5 @@
 # name: test/sql/null_input_guards.test
-# description: Regression: every table function that accepts VARCHAR or VARCHAR[]
-#              for its primary positional input must reject NULL with a clean
-#              InvalidInputException, NOT crash with an INTERNAL Error from
-#              ListValue::GetChildren on a NULL value.
+# description: Regression: table functions taking VARCHAR/VARCHAR[] must reject NULL cleanly (not crash on ListValue::GetChildren)
 # group: [sql]
 
 require miint
