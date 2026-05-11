@@ -15,12 +15,18 @@ unique_ptr<FunctionData> ReadMzXMLTableFunction::Bind(ClientContext &context, Ta
 
 	std::vector<std::string> file_paths;
 
+	if (input.inputs[0].IsNull()) {
+		throw InvalidInputException("read_mzxml: first argument cannot be NULL");
+	}
 	if (input.inputs[0].type().id() == LogicalTypeId::VARCHAR) {
 		auto result = ExpandGlobPatternWithInfo(fs, context, input.inputs[0].ToString());
 		file_paths = std::move(result.paths);
 	} else if (input.inputs[0].type().id() == LogicalTypeId::LIST) {
 		auto &list_children = ListValue::GetChildren(input.inputs[0]);
 		for (const auto &child : list_children) {
+			if (child.IsNull()) {
+				throw InvalidInputException("read_mzxml: file path list cannot contain NULL");
+			}
 			file_paths.push_back(child.ToString());
 		}
 		if (file_paths.empty()) {

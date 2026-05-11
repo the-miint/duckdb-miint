@@ -58,11 +58,17 @@ unique_ptr<FunctionData> ReadNCBITableFunction::Bind(ClientContext &context, Tab
 	// Parse accession(s) - can be VARCHAR or VARCHAR[]
 	std::vector<std::string> accessions;
 
+	if (input.inputs[0].IsNull()) {
+		throw InvalidInputException("read_ncbi: accession cannot be NULL");
+	}
 	if (input.inputs[0].type().id() == LogicalTypeId::VARCHAR) {
 		accessions.push_back(input.inputs[0].ToString());
 	} else if (input.inputs[0].type().id() == LogicalTypeId::LIST) {
 		auto &list_children = ListValue::GetChildren(input.inputs[0]);
 		for (const auto &child : list_children) {
+			if (child.IsNull()) {
+				throw InvalidInputException("read_ncbi: accession list cannot contain NULL");
+			}
 			accessions.push_back(child.ToString());
 		}
 	} else {

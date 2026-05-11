@@ -320,11 +320,17 @@ unique_ptr<FunctionData> ReadENAAttributesTableFunction::Bind(ClientContext &con
                                                               vector<LogicalType> &return_types,
                                                               vector<std::string> &names) {
 	std::vector<std::string> accessions;
+	if (input.inputs[0].IsNull()) {
+		throw InvalidInputException("read_ena_attributes: accession cannot be NULL");
+	}
 	if (input.inputs[0].type().id() == LogicalTypeId::VARCHAR) {
 		accessions.push_back(input.inputs[0].ToString());
 	} else if (input.inputs[0].type().id() == LogicalTypeId::LIST) {
 		auto &list_children = ListValue::GetChildren(input.inputs[0]);
 		for (const auto &child : list_children) {
+			if (child.IsNull()) {
+				throw InvalidInputException("read_ena_attributes: accession list cannot contain NULL");
+			}
 			accessions.push_back(child.ToString());
 		}
 	} else {
