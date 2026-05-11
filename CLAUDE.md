@@ -21,6 +21,51 @@ The extension provides:
 3. Maintainable code, using Don't Repeat Yourself (DRY) and Keep It Simple Stupid (KISS)
 4. Performance
 
+## Rules
+
+These rules apply to every task in this project unless explicitly overridden.
+
+### Rule 1 — Think Before Coding
+Bias: caution over speed on non-trivial work.
+State assumptions explicitly. Ask rather than guess.
+Push back when a simpler approach exists. Stop when confused.
+
+### Rule 2 — Simplicity First
+Minimum code that solves the problem. Nothing speculative.
+No abstractions for single-use code.
+
+### Rule 3 — Surgical Changes
+Touch only what you must. Don't improve adjacent code.
+Match existing style. Don't refactor what isn't broken.
+
+### Rule 4 — Goal-Driven Execution
+Define success criteria. Loop until verified.
+
+### Rule 5 — Surface conflicts, don't average them
+If two patterns contradict, pick one (more recent / more tested).
+Explain why. Flag the other for cleanup.
+
+### Rule 6 — Read before you write
+Before adding code, read exports, immediate callers, shared utilities.
+If unsure why existing code is structured a certain way, ask.
+
+### Rule 7 — Tests verify intent, not just behavior
+Tests must encode WHY behavior matters, not just WHAT it does.
+A test that can't fail when business logic changes is wrong.
+
+### Rule 8 — Checkpoint after every significant step
+Summarize what was done, what's verified, what's left.
+Don't continue from a state you can't describe back.
+
+### Rule 9 — Match the codebase's conventions, even if you disagree
+Conformance > taste inside the codebase.
+If you think a convention is harmful, surface it. Don't fork silently.
+
+### Rule 10 — Fail loud
+"Completed" is wrong if anything was skipped silently.
+Don't silently skip tests you caused to be skipped (commented out, xfail'd, missed) — existing `require-env` skips for optional deps/oracles are legitimate and expected.
+Default to surfacing uncertainty, not hiding it.
+
 ## Build Commands
 
 ### Initial Setup (VCPKG for dependencies)
@@ -96,11 +141,5 @@ Developer-facing deep dives live under `docs/internals/`:
 - **[`docs/internals/reading-tables-views.md`](docs/internals/reading-tables-views.md)** — the separate-connection recipe for reading user-specified tables/views from extension code (avoids the `context.Query()` deadlock). Covers both data reads and schema validation.
 - **[`docs/internals/arrow-zero-copy.md`](docs/internals/arrow-zero-copy.md)** — zero-copy Arrow C Data Interface → DuckDB Vector conversion, with lifetime management and reference implementations.
 
-User-facing API reference (parameters, return types, examples): `docs/table-functions.md`, `docs/scalar-functions.md`, `docs/copy-formats.md`, `docs/analysis-functions.md`.
+User-facing API reference (parameters, return types, examples): `docs/table-functions.md`, `docs/scalar-functions.md`, `docs/copy-formats.md`, `docs/analysis-functions.md`, `docs/ena.md`.
 
-## Common Runtime Issues
-
-- **"File lacks a header"**: SAM file is headerless — provide the `reference_lengths` parameter
-- **"Inconsistent headers across files"**: all SAM files must be either headered or headerless, not mixed
-- **Unknown reference**: reference in SAM data is not in the header or `reference_lengths` table
-- **Quality offset errors**: specify `qual_offset` if auto-detection fails
