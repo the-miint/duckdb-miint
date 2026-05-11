@@ -15,7 +15,15 @@
 #
 # Idempotent: re-running without a new passing build is a no-op deploy,
 # but always emails a status. Concurrent runs are prevented via flock.
-# A FAIL email is sent if anything in the pipeline errors out.
+#
+# Email subject prefixes:
+#   [SUCCEED]  a new build was successfully deployed
+#   [OK]       script ran, no action needed (no new build, or latest run
+#              is still in progress upstream)
+#   [FAIL]     this script itself errored, or the latest passing build's
+#              artifacts don't match $DUCKDB_VERSION (rejected)
+#   [FAIL-CI]  the latest workflow run on $BRANCH did not succeed
+#              (failure, cancelled, timed_out, ...); no deploy attempted
 #
 # Prereqs on the cron host (none scripted — all assumed ready):
 #   - `gh` authenticated (check with: gh auth status)
@@ -165,6 +173,43 @@ EOF
     exit 0
 }
 
+# Latest workflow run on $BRANCH ended with a non-success conclusion (or is
+# still in progress / queued and we want to alert anyway). Email once per
+# cron tick — no state dedupe, so a stuck-broken branch will re-alert daily
+# until someone fixes it or a newer run completes successfully.
+fail_ci() {
+    trap - ERR
+    local msg="$1"
+    log "FAIL-CI: $msg"
+    local subject="[FAIL-CI] miint publish on ${HOSTNAME_SHORT} — $msg"
+    local body
+    body=$(cat <<EOF
+Host:          $HOSTNAME_SHORT
+Repo:          $REPO @ $BRANCH
+Workflow:      $WORKFLOW
+DuckDB ver:    $DUCKDB_VERSION
+
+The latest workflow run on $BRANCH did not succeed; no deploy attempted.
+
+Latest run:
+  id:         $RUN_ID
+  sha:        $RUN_SHA
+  title:      $RUN_TITLE
+  time:       $RUN_TIME
+  url:        $RUN_URL
+  status:     $RUN_STATUS
+  conclusion: $RUN_CONCLUSION
+
+Last handled run:   ${LAST_RUN_ID:-<none>} (status=${LAST_STATUS:-<none>}, version=${LAST_DUCKDB_VERSION:-<none>})
+
+This alert will recur on every cron tick until a newer run on $BRANCH
+completes successfully.
+EOF
+)
+    send_mail "$subject" "$body" || true
+    exit 0
+}
+
 trap 'fail "unexpected error at line $LINENO"' ERR
 
 # ----- lock -----
@@ -188,24 +233,31 @@ STAGE_DIR="$WORK_DIR/stage"
 reset_dir "$ART_DIR"
 reset_dir "$STAGE_DIR"
 
-# ----- query latest passing run -----
+# ----- query latest run on the branch (any conclusion) -----
+#
+# Intentionally NOT filtering by --status success: doing so would hide
+# failed/cancelled latest runs behind the previous green run, and the
+# script would send a misleading [SUCCEED]/[OK] heartbeat for a branch
+# that is actually broken in CI. We fetch the most recent run regardless
+# of conclusion and gate on its status/conclusion below.
 
-log "Querying latest passing run of $WORKFLOW on $REPO@$BRANCH"
+log "Querying latest run of $WORKFLOW on $REPO@$BRANCH"
 RUN_JSON=$(gh run list \
     --repo "$REPO" \
     --workflow "$WORKFLOW" \
     --branch "$BRANCH" \
-    --status success \
     --limit 1 \
-    --json databaseId,headSha,displayTitle,createdAt,url)
+    --json databaseId,headSha,displayTitle,createdAt,url,status,conclusion)
 
 RUN_ID=$(jq -r '.[0].databaseId // empty' <<<"$RUN_JSON")
 RUN_SHA=$(jq -r '.[0].headSha // empty' <<<"$RUN_JSON")
 RUN_TITLE=$(jq -r '.[0].displayTitle // empty' <<<"$RUN_JSON")
 RUN_TIME=$(jq -r '.[0].createdAt // empty' <<<"$RUN_JSON")
 RUN_URL=$(jq -r '.[0].url // empty' <<<"$RUN_JSON")
+RUN_STATUS=$(jq -r '.[0].status // empty' <<<"$RUN_JSON")
+RUN_CONCLUSION=$(jq -r '.[0].conclusion // empty' <<<"$RUN_JSON")
 
-[[ -n "$RUN_ID" ]] || fail "no passing run found for $WORKFLOW on $BRANCH"
+[[ -n "$RUN_ID" ]] || fail "no runs found for $WORKFLOW on $BRANCH"
 
 LAST_STATUS=""
 LAST_RUN_ID=""
@@ -215,21 +267,63 @@ if [[ -n "$LAST_STATE" ]]; then
     IFS=$'\t' read -r LAST_STATUS LAST_RUN_ID LAST_DUCKDB_VERSION <<<"$LAST_STATE"
 fi
 
-log "Latest passing run: $RUN_ID ($RUN_SHA)"
-log "Last handled run:   ${LAST_RUN_ID:-<none>} (status=${LAST_STATUS:-<none>}, version=${LAST_DUCKDB_VERSION:-<none>})"
+log "Latest run: $RUN_ID ($RUN_SHA) status=$RUN_STATUS conclusion=$RUN_CONCLUSION"
+log "Last handled run: ${LAST_RUN_ID:-<none>} (status=${LAST_STATUS:-<none>}, version=${LAST_DUCKDB_VERSION:-<none>})"
 
-# ----- no-op path: heartbeat SUCCEED -----
+# ----- gate: latest run not yet completed -----
 #
-# Same run id AND same duckdb version as what we handled last time: nothing
-# to do. If the last disposition was "rejected", say so in the email body
-# so the user isn't misled into thinking it's deployed.
+# Run is queued / in_progress / waiting / ... — no artifacts to fetch yet.
+# Heartbeat [OK] and exit; next cron tick will recheck.
+
+if [[ "$RUN_STATUS" != "completed" ]]; then
+    subject="[OK] miint publish on ${HOSTNAME_SHORT} — run ${RUN_ID} is ${RUN_STATUS}"
+    body=$(cat <<EOF
+Host:          $HOSTNAME_SHORT
+Repo:          $REPO @ $BRANCH
+Workflow:      $WORKFLOW
+DuckDB ver:    $DUCKDB_VERSION
+
+Latest run on $BRANCH has not completed yet (status=$RUN_STATUS); skipping
+this tick. Will recheck on the next cron run.
+
+Latest run:
+  id:    $RUN_ID
+  sha:   $RUN_SHA
+  title: $RUN_TITLE
+  time:  $RUN_TIME
+  url:   $RUN_URL
+
+Last handled run:  ${LAST_RUN_ID:-<none>} (status=${LAST_STATUS:-<none>}, version=${LAST_DUCKDB_VERSION:-<none>})
+EOF
+)
+    send_mail "$subject" "$body"
+    log "Latest run not yet completed; exit."
+    exit 0
+fi
+
+# ----- gate: latest completed run did not succeed -----
+#
+# failure / cancelled / timed_out / startup_failure / action_required / ...
+# Do NOT fall through to a successful older run — that's the bug we used to
+# have. Alert via [FAIL-CI] and exit.
+
+if [[ "$RUN_CONCLUSION" != "success" ]]; then
+    fail_ci "latest run on $BRANCH ended with conclusion=$RUN_CONCLUSION"
+fi
+
+# ----- no-op path: heartbeat -----
+#
+# Latest run is success and matches what we already handled. Subject prefix
+# reflects the prior disposition: [OK] for a clean deployed state, [FAIL]
+# if the artifacts on that run were rejected (so the user isn't misled into
+# thinking the rejection resolved itself).
 
 if [[ "$RUN_ID" == "$LAST_RUN_ID" && "$DUCKDB_VERSION" == "$LAST_DUCKDB_VERSION" ]]; then
     if [[ "$LAST_STATUS" == "rejected" ]]; then
-        subject="[SUCCEED] miint publish on ${HOSTNAME_SHORT} — awaiting new run (run ${RUN_ID} was rejected)"
+        subject="[FAIL] miint publish on ${HOSTNAME_SHORT} — awaiting new run (run ${RUN_ID} was rejected)"
         state_note="Last run was REJECTED (artifact naming mismatch); still waiting for a newer passing run."
     else
-        subject="[SUCCEED] miint publish on ${HOSTNAME_SHORT} — no new build (run ${RUN_ID})"
+        subject="[OK] miint publish on ${HOSTNAME_SHORT} — no new build (run ${RUN_ID})"
         state_note="No new passing build since last deploy."
     fi
     body=$(cat <<EOF
