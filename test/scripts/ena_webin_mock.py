@@ -152,22 +152,45 @@ def _xml_escape(s: str) -> str:
     )
 
 
-def _parse_xml_envelope(body: str) -> tuple[dict, str, str]:
-    """Best-effort regex extraction of action / hold / object aliases from a
-    `<WEBIN>...</WEBIN>` document. Mirrors the JSON envelope shape so the
-    receipt builder doesn't care which form the request used. This mock
+def _parse_xml_envelope(body: str) -> tuple[dict, str, str, str]:
+    """Best-effort regex extraction of action / hold / target / object aliases
+    from a `<WEBIN>...</WEBIN>` document. Mirrors the JSON envelope shape so
+    the receipt builder doesn't care which form the request used. This mock
     doesn't run a real XML parser — the duckdb-miint envelope format is
-    constrained and stable enough for a regex pass."""
+    constrained and stable enough for a regex pass.
+
+    Returns (envelope, action_name, hold_until, target). `target` is set when
+    the action element carries `target="..."` (CANCEL / RELEASE / targeted HOLD)."""
     envelope: dict = {}
     action_name = "ADD"
     hold_until = ""
-    actions = re.findall(r"<ACTION>\s*<(\w+)(?:\s+HoldUntilDate=\"([^\"]*)\")?\s*/>\s*</ACTION>", body)
-    for tag, hold in actions:
+    target = ""
+    # Action element can be:
+    #   <CANCEL/>                                       (untargeted)
+    #   <CANCEL target="ERS123"/>                       (targeted CANCEL/RELEASE)
+    #   <HOLD HoldUntilDate="2027-01-01"/>              (body-pattern HOLD)
+    #   <HOLD target="ERS123" HoldUntilDate="2027-..."/> (targeted HOLD)
+    # Capture target= and HoldUntilDate= attributes in any order.
+    actions = re.findall(
+        r'<ACTION>\s*<(\w+)((?:\s+\w+="[^"]*")*)\s*/>\s*</ACTION>',
+        body,
+    )
+    for tag, attrs in actions:
+        attr_dict = dict(re.findall(r'(\w+)="([^"]*)"', attrs))
+        hold_attr = attr_dict.get("HoldUntilDate", "")
+        target_attr = attr_dict.get("target", "")
         if tag == "HOLD":
-            hold_until = hold or ""
+            if hold_attr:
+                hold_until = hold_attr
+            if target_attr:
+                target = target_attr
+                action_name = "HOLD"
         elif tag in ("ADD", "MODIFY", "CANCEL", "RELEASE", "VALIDATE"):
             action_name = tag
+            if target_attr:
+                target = target_attr
     for kind_plural, set_tag, item_tag in (
+        ("samples", "SAMPLE_SET", "SAMPLE"),
         ("experiments", "EXPERIMENT_SET", "EXPERIMENT"),
         ("runs", "RUN_SET", "RUN"),
         ("analyses", "ANALYSIS_SET", "ANALYSIS"),
@@ -176,13 +199,28 @@ def _parse_xml_envelope(body: str) -> tuple[dict, str, str]:
         if not block:
             continue
         items = []
-        for m in re.finditer(rf"<{item_tag}\s+alias=\"([^\"]+)\"", block.group(1)):
-            items.append({"alias": m.group(1)})
+        # Per-element alias is mandatory; accession is optional and only set
+        # on MODIFY (Webin V2 needs both alias and accession on the element to
+        # identify the existing object). Both attributes are emitted in any
+        # order in principle — capture as a small attribute dict via
+        # finditer over a tag-prefix regex, then read out by name.
+        for m in re.finditer(rf"<{item_tag}((?:\s+\w+=\"[^\"]*\")+)\s*>", block.group(1)):
+            attrs = dict(re.findall(r'(\w+)="([^"]*)"', m.group(1)))
+            alias = attrs.get("alias", "")
+            if not alias:
+                continue
+            item: dict = {"alias": alias}
+            accession = attrs.get("accession", "")
+            if accession:
+                item["accession"] = accession
+            items.append(item)
         envelope[kind_plural] = items
-    return envelope, action_name, hold_until
+    return envelope, action_name, hold_until, target
 
 
-def _build_receipt(envelope: dict, action_name: str = "ADD", hold_until: str = "") -> tuple[str, bool]:
+def _build_receipt(
+    envelope: dict, action_name: str = "ADD", hold_until: str = "", target: str = ""
+) -> tuple[str, bool]:
     if not action_name and not hold_until:
         actions = envelope.get("submission", {}).get("actions", [])
         action_name = "ADD"
@@ -193,7 +231,12 @@ def _build_receipt(envelope: dict, action_name: str = "ADD", hold_until: str = "
             elif t in ("ADD", "MODIFY", "CANCEL", "RELEASE", "VALIDATE"):
                 action_name = t
 
-    objects: list[tuple[str, str]] = []
+    # Each tuple is (element, alias, user_accession). user_accession is the
+    # one the caller put on the body — present on MODIFY (Webin V2 wants
+    # both alias and accession on the project/sample/... element to identify
+    # the existing object). Empty on ADD; the mock then derives a deterministic
+    # accession from alias via _accession_for.
+    objects: list[tuple[str, str, str]] = []
     for kind_plural, kind_singular in (
         ("projects", "PROJECT"),
         ("samples", "SAMPLE"),
@@ -202,38 +245,92 @@ def _build_receipt(envelope: dict, action_name: str = "ADD", hold_until: str = "
         ("analyses", "ANALYSIS"),
     ):
         for obj in envelope.get(kind_plural, []) or []:
-            objects.append((kind_singular, obj.get("alias", "")))
+            objects.append((kind_singular, obj.get("alias", ""), obj.get("accession", "")))
 
-    success = not any("FAIL" in alias for _, alias in objects)
+    # Target-based failure trigger for lifecycle ops (which have no body
+    # objects to encode FAIL into): a target containing "FAIL" produces a
+    # failure receipt. Mirrors the alias-based trigger for ADD-style
+    # submissions.
+    target_fail = "FAIL" in target if target else False
+    is_lifecycle = bool(target)
+    is_validate = action_name == "VALIDATE"
+    is_modify = action_name == "MODIFY"
+    body_fail = any("FAIL" in alias for _, alias, _ in objects)
+    # `success` here is the boolean returned to callers as the round-trip
+    # verdict (and matches `outcome.success` in the C++ lifecycle code:
+    # success iff no <ERROR> elements were emitted). The XML attribute on
+    # <RECEIPT> follows real ENA semantics — see comments below.
+    success = not target_fail and not body_fail
+    # On wwwdev cross-submission lifecycle responses (CANCEL / RELEASE /
+    # HOLD on an existing accession), ENA sets RECEIPT @success="false"
+    # even when the action took effect — the attribute means "did this
+    # submission produce new accessions", which is always false for
+    # lifecycle ops. The actual outcome is in <INFO>/<ERROR> children.
+    # Match that behaviour here so SubmitLifecycle's
+    # `success = errors.empty()` interpretation gets exercised by tests.
+    receipt_success_attr = "false" if is_lifecycle else ("true" if success else "false")
     parts: list[str] = []
     parts.append('<?xml version="1.0" encoding="UTF-8"?>')
     parts.append(
-        f'<RECEIPT receiptDate="2026-05-03T12:00:00.000Z" '
-        f'submissionFile="mock" success="{"true" if success else "false"}">'
+        f'<RECEIPT receiptDate="2026-05-03T12:00:00.000Z" ' f'submissionFile="mock" success="{receipt_success_attr}">'
     )
-    for kind_singular, alias in objects:
-        if not alias:
-            continue
-        primary, ext = _accession_for(alias, kind_singular)
-        parts.append(
-            f'<{kind_singular} accession="{_xml_escape(primary)}" '
-            f'alias="{_xml_escape(alias)}" status="PRIVATE"'
-            f'{" holdUntilDate=" + chr(34) + _xml_escape(hold_until) + chr(34) if hold_until else ""}>'
-        )
-        ext_type = (
-            "study"
-            if kind_singular == "PROJECT"
-            else ("biosample" if kind_singular == "SAMPLE" else kind_singular.lower())
-        )
-        parts.append(f'<EXT_ID accession="{_xml_escape(ext)}" type="{ext_type}"/>')
-        parts.append(f'</{kind_singular}>')
-    parts.append('<SUBMISSION accession="ERA1234567" alias="mock"/>')
+    # VALIDATE is a server-side dry-run: no accessions are assigned, so the
+    # receipt has no per-object PROJECT/SAMPLE/... children. The mock mirrors
+    # that — body_fail above still drives <ERROR> emission below, so the FAIL
+    # alias trigger continues to work. ADD/MODIFY/lifecycle paths still emit
+    # the per-object children as before.
+    if not is_validate:
+        for kind_singular, alias, user_accession in objects:
+            if not alias:
+                continue
+            # On MODIFY we echo the user-supplied accession verbatim — the
+            # whole point of MODIFY is "update the object at THIS accession".
+            # On ADD we fall back to the deterministic alias-derived
+            # accession so callers can assert specific values without
+            # parsing.
+            if is_modify and user_accession:
+                primary = user_accession
+                _, ext = _accession_for(alias, kind_singular)
+            else:
+                primary, ext = _accession_for(alias, kind_singular)
+            parts.append(
+                f'<{kind_singular} accession="{_xml_escape(primary)}" '
+                f'alias="{_xml_escape(alias)}" status="PRIVATE"'
+                f'{" holdUntilDate=" + chr(34) + _xml_escape(hold_until) + chr(34) if hold_until else ""}>'
+            )
+            ext_type = (
+                "study"
+                if kind_singular == "PROJECT"
+                else ("biosample" if kind_singular == "SAMPLE" else kind_singular.lower())
+            )
+            parts.append(f'<EXT_ID accession="{_xml_escape(ext)}" type="{ext_type}"/>')
+            parts.append(f'</{kind_singular}>')
+    # wwwdev empirically emits an EMPTY <SUBMISSION accession=""/> on
+    # cross-submission no-new-accession actions: lifecycle (CANCEL / RELEASE /
+    # HOLD), MODIFY, and confirmed live on 2026-05-07 for both. Mirror that so
+    # tests pin the real wire shape rather than a fabricated ERA stamp. ADD
+    # and VALIDATE still produce a SUBMISSION accession — mock keeps a stable
+    # ERA value for those so callers can assert it round-trips.
+    submission_empty = is_lifecycle or is_modify
+    submission_acc = "" if submission_empty else "ERA1234567"
+    parts.append(f'<SUBMISSION accession="{submission_acc}" alias="mock"/>')
     parts.append(f'<ACTIONS>{action_name}</ACTIONS>')
+    # Failure-path messages (always <ERROR>, mirrors ENA).
     if not success:
         parts.append('<MESSAGES>')
-        for _, alias in objects:
+        for _, alias, _ in objects:
             if "FAIL" in alias:
                 parts.append(f'<ERROR>mock validation failure for alias ' f'{_xml_escape(alias)}</ERROR>')
+        if target_fail:
+            parts.append(f'<ERROR>mock validation failure for target {_xml_escape(target)}</ERROR>')
+        parts.append('</MESSAGES>')
+    elif is_lifecycle:
+        # Success-path lifecycle: emit <INFO> mirroring ENA's wwwdev format
+        # ("...is set to cancelled/released/private status."). SubmitLifecycle
+        # treats this as success because errors.empty() is true.
+        status_word = {"CANCEL": "cancelled", "RELEASE": "public", "HOLD": "private"}.get(action_name, "updated")
+        parts.append('<MESSAGES>')
+        parts.append(f'<INFO>accession "{_xml_escape(target)}" is set to {status_word} status.</INFO>')
         parts.append('</MESSAGES>')
     parts.append('</RECEIPT>')
     return "".join(parts), success
@@ -278,6 +375,30 @@ class Handler(BaseHTTPRequestHandler):
             payload = tsv.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/tab-separated-values; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        # Reports API: GET /submit/report/<kind>/{id}?format=json
+        # Required-Basic-auth (the real Webin Reports API rejects anonymous
+        # GETs with 401). Resolves alias-or-accession to a single-row JSON
+        # array deterministically via _accession_for. Aliases starting with
+        # the literal prefix "MISS_" return `[]` (the wwwdev not-found shape)
+        # so SQL tests can exercise the alias-not-found branch without a
+        # stateful mock.
+        if self.path.startswith("/submit/report/"):
+            if not self._check_auth():
+                self.send_response(401)
+                self.end_headers()
+                return
+            body = self._handle_reports_lookup(self.path)
+            if body is None:
+                self.send_response(400)
+                self.end_headers()
+                return
+            payload = body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
@@ -336,6 +457,52 @@ class Handler(BaseHTTPRequestHandler):
         lines = [fields] + present
         return "\n".join(lines) + "\n"
 
+    def _handle_reports_lookup(self, path: str) -> str | None:
+        """Mock the Webin Reports `/submit/report/<kind>/{id}` endpoint.
+        Returns a JSON array string on success, None on a malformed path.
+        Wire shape pinned by localdocs/ena-live-reports-probe.sh:
+          hit  → [{"report":{"id":"<primary>","alias":"<id>", …}}]
+          miss → []
+        """
+        from urllib.parse import urlparse, unquote
+
+        parsed = urlparse(path)
+        # Expect: /submit/report/<kind>/<id>
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) != 4 or parts[0] != "submit" or parts[1] != "report":
+            return None
+        kind_path = parts[2]
+        identifier = unquote(parts[3])
+        # Map URL path → ACCESSION_BASE key (PROJECT/SAMPLE/EXPERIMENT/RUN).
+        # See decision in ena_reports_client.hpp: STUDY → /projects (returns
+        # PRJEB, the primary accession lifecycle ops target). The other three
+        # are 1:1.
+        kind_to_internal = {
+            "projects": "PROJECT",
+            "samples": "SAMPLE",
+            "experiments": "EXPERIMENT",
+            "runs": "RUN",
+        }
+        internal = kind_to_internal.get(kind_path)
+        if internal is None:
+            return None
+        # MISS_-prefixed identifiers exercise the not-found path.
+        if identifier.startswith("MISS_"):
+            return "[]"
+        primary, secondary = _accession_for(identifier, internal)
+        # Real wwwdev shape carries firstCreated / releaseStatus /
+        # submissionAccountId / secondaryId; we mirror only the fields the
+        # L5 client actually reads (id) plus a couple of bonus fields so
+        # tests inspecting the body via a regex match can pin them too.
+        report = {
+            "id": primary,
+            "alias": identifier,
+            "secondaryId": secondary,
+            "releaseStatus": "PRIVATE",
+            "submissionAccountId": "Webin-mock",
+        }
+        return json.dumps([{"report": report, "links": []}])
+
     def do_POST(self):
         if not self._check_auth():
             self.send_response(401)
@@ -352,6 +519,7 @@ class Handler(BaseHTTPRequestHandler):
         ctype = self.headers.get("Content-Type", "")
         action_name = ""
         hold_until = ""
+        target = ""
         if "json" in ctype:
             try:
                 envelope = json.loads(body.decode("utf-8"))
@@ -360,13 +528,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
         elif "xml" in ctype:
-            envelope, action_name, hold_until = _parse_xml_envelope(body.decode("utf-8", "replace"))
+            envelope, action_name, hold_until, target = _parse_xml_envelope(body.decode("utf-8", "replace"))
         else:
             self.send_response(415)
             self.end_headers()
             return
 
-        receipt, _ok = _build_receipt(envelope, action_name, hold_until)
+        receipt, _ok = _build_receipt(envelope, action_name, hold_until, target)
         payload = receipt.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/xml; charset=utf-8")

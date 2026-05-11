@@ -5,6 +5,7 @@
 
 #include "ena_insert_common.hpp"
 
+#include "ena_object_insert_op.hpp"
 #include "ena_storage.hpp"
 
 #include "duckdb/catalog/catalog_transaction.hpp"
@@ -12,11 +13,134 @@
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/uuid.hpp"
+#include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/database.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 
 namespace duckdb {
+
+ENACatalog *FindAttachedENACatalog(ClientContext &context, const string &caller, const string &catalog_name,
+                                   bool explicit_name) {
+	if (catalog_name.empty()) {
+		return nullptr;
+	}
+	auto &db_manager = DatabaseManager::Get(context);
+	auto db = db_manager.GetDatabase(context, catalog_name);
+	if (!db) {
+		if (explicit_name) {
+			throw InvalidInputException("%s: catalog '%s' is not attached", caller, catalog_name);
+		}
+		return nullptr;
+	}
+	auto &catalog = db->GetCatalog();
+	if (catalog.GetCatalogType() != "ena") {
+		if (explicit_name) {
+			throw InvalidInputException("%s: catalog '%s' is type '%s', not 'ena'", caller, catalog_name,
+			                            catalog.GetCatalogType());
+		}
+		return nullptr;
+	}
+	return &catalog.Cast<ENACatalog>();
+}
+
+bool IsENAStringWhitespaceOnly(const string &s) {
+	for (char c : s) {
+		if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+			return false;
+		}
+	}
+	return true;
+}
+
+std::vector<std::pair<std::string, std::string>> ExtractENAKeyValueMap(const Value &v, const char *caller,
+                                                                       const char *column_label) {
+	std::vector<std::pair<std::string, std::string>> out;
+	if (v.IsNull()) {
+		return out;
+	}
+	const auto &entries = ListValue::GetChildren(v);
+	out.reserve(entries.size());
+	for (const auto &entry : entries) {
+		const auto &kv_children = StructValue::GetChildren(entry);
+		if (kv_children.size() != 2) {
+			throw InvalidInputException("%s: '%s' MAP entries must have key+value pairs", caller, column_label);
+		}
+		const auto key = ValueToVarchar(kv_children[0]);
+		const auto value = ValueToVarchar(kv_children[1]);
+		if (key.empty()) {
+			throw InvalidInputException("%s: '%s' map keys must be non-empty", caller, column_label);
+		}
+		out.emplace_back(key, value);
+	}
+	return out;
+}
+
+std::vector<miint::RunFile> ExtractENARunFilesList(const Value &v, const char *caller) {
+	std::vector<miint::RunFile> out;
+	if (v.IsNull()) {
+		return out;
+	}
+	const auto &entries = ListValue::GetChildren(v);
+	out.reserve(entries.size());
+	for (idx_t i = 0; i < entries.size(); i++) {
+		const auto &entry = entries[i];
+		// A NULL entry (e.g. `[NULL]` or `[{...}, NULL]`) would otherwise reach
+		// StructValue::GetChildren on a null Value, which is undefined behaviour.
+		if (entry.IsNull()) {
+			throw InvalidInputException("%s: 'files' list contains NULL at position %llu", caller,
+			                            static_cast<unsigned long long>(i));
+		}
+		const auto &fields = StructValue::GetChildren(entry);
+		if (fields.size() != 3) {
+			throw InvalidInputException("%s: 'files' STRUCT must have (filename, filetype, md5)", caller);
+		}
+		miint::RunFile f;
+		f.filename = ValueToVarchar(fields[0]);
+		f.filetype = ValueToVarchar(fields[1]);
+		f.checksum = ValueToVarchar(fields[2]);
+		if (f.filename.empty()) {
+			throw InvalidInputException("%s: 'files.filename' must be non-empty", caller);
+		}
+		if (f.filetype.empty()) {
+			throw InvalidInputException("%s: 'files.filetype' must be non-empty (filename '%s')", caller, f.filename);
+		}
+		// User-facing field name is `md5` (matches the INSERT-path storage
+		// column). Internal struct member is `checksum` because that's the
+		// SRA.run.xsd attribute name on `<FILE>`.
+		if (f.checksum.empty()) {
+			throw InvalidInputException("%s: 'files.md5' must be non-empty (filename '%s')", caller, f.filename);
+		}
+		out.push_back(std::move(f));
+	}
+	return out;
+}
+
+bool IsENAValidateOnlyEnabled(ClientContext &context) {
+	// Threading: ClientContext access is not thread-safe across pipeline
+	// threads, but every caller is the ENA insert operator's `Finalize`,
+	// which runs single-threaded because `ParallelSink()` returns false on
+	// `ENAObjectInsertOperator`. Same constraint as `ResolveENACredentials`
+	// and `RunAliasCollisionCheck` already in that operator; if a future
+	// change flips `ParallelSink` to true the context reads here and there
+	// must move to the operator's bind/init phase.
+	Value v;
+	// `miint_ena_validate_only` is registered as a BOOLEAN extension option
+	// at extension load (see `LoadInternal` in src/miint_extension.cpp).
+	// Missing → option not registered, which is a load-order programmer
+	// error (someone removed the registration or the operator is being
+	// invoked without the extension fully loaded). InternalException is the
+	// right type: it's the user-visible "internal error" path, but the
+	// detail string says exactly which fix is needed so a developer can
+	// triage from the message alone.
+	if (!context.TryGetCurrentSetting("miint_ena_validate_only", v)) {
+		throw InternalException(
+		    "miint extension option 'miint_ena_validate_only' is not registered — was LoadInternal completed?");
+	}
+	return !v.IsNull() && v.GetValue<bool>();
+}
 
 namespace {
 
@@ -33,33 +157,52 @@ unique_ptr<SecretEntry> LookupENASecret(ClientContext &context, const string &se
 
 } // namespace
 
-ResolvedENACredentials ResolveENACredentials(ClientContext &context, ENACatalog &catalog) {
-	ResolvedENACredentials creds;
-	creds.endpoint = catalog.GetEndpoint();
-	creds.endpoint_url = catalog.GetEndpointURL();
-	creds.secret_name = catalog.GetSecretName();
-	if (creds.secret_name.empty()) {
-		throw BinderException("ENA INSERT requires a SECRET — re-attach with (TYPE ENA, SECRET 'name')");
+ResolvedENACredentials ResolveENACredentialsByName(ClientContext &context, const string &caller,
+                                                   const string &secret_name) {
+	if (secret_name.empty()) {
+		throw BinderException("%s: required parameter 'secret' is missing", caller);
 	}
-	auto entry = LookupENASecret(context, creds.secret_name);
+	auto entry = LookupENASecret(context, secret_name);
 	if (!entry) {
-		throw BinderException("ENA secret '%s' not found", creds.secret_name);
+		throw BinderException("%s: secret '%s' not found", caller, secret_name);
 	}
 	auto kv = dynamic_cast<const KeyValueSecret *>(entry->secret.get());
 	if (!kv) {
-		throw InvalidInputException("ENA secret '%s' is not a KeyValueSecret — was it created with TYPE ENA?",
-		                            creds.secret_name);
+		throw InvalidInputException("%s: secret '%s' is not a KeyValueSecret — was it created with TYPE ENA?", caller,
+		                            secret_name);
 	}
 	auto user_val = kv->TryGetValue("user");
 	auto password_val = kv->TryGetValue("password");
 	if (user_val.IsNull() || password_val.IsNull()) {
-		throw BinderException("ENA secret '%s' is missing user or password", creds.secret_name);
+		throw BinderException("%s: secret '%s' is missing user or password", caller, secret_name);
 	}
+	ResolvedENACredentials creds;
+	creds.secret_name = secret_name;
 	creds.user = user_val.ToString();
 	creds.password = password_val.ToString();
+	auto endpoint_val = kv->TryGetValue("endpoint");
+	creds.endpoint = endpoint_val.IsNull() ? "test" : endpoint_val.ToString();
 	auto endpoint_url_val = kv->TryGetValue("endpoint_url");
-	if (!endpoint_url_val.IsNull()) {
-		creds.endpoint_url = endpoint_url_val.ToString();
+	creds.endpoint_url = endpoint_url_val.IsNull() ? string() : endpoint_url_val.ToString();
+	return creds;
+}
+
+ResolvedENACredentials ResolveENACredentials(ClientContext &context, ENACatalog &catalog) {
+	if (catalog.GetSecretName().empty()) {
+		throw BinderException("ENA INSERT requires a SECRET — re-attach with (TYPE ENA, SECRET 'name')");
+	}
+	auto creds = ResolveENACredentialsByName(context, "ENA secret", catalog.GetSecretName());
+	// Catalog endpoint label always overrides — it's the user's ATTACH choice.
+	creds.endpoint = catalog.GetEndpoint();
+	// endpoint_url precedence: secret's explicit URL > catalog's URL >
+	// derived-from-endpoint default. The catalog's URL is always populated
+	// (ATTACH defaults it from the endpoint label), so we only fall back to
+	// it when the secret didn't provide one. This preserves the convention
+	// where a CREATE SECRET (..., ENDPOINT_URL '...') overrides the ATTACH
+	// default — relied on by mock tests that point a single secret at a
+	// local server while ATTACH-ing without an endpoint_url override.
+	if (creds.endpoint_url.empty()) {
+		creds.endpoint_url = catalog.GetEndpointURL();
 	}
 	return creds;
 }
@@ -126,6 +269,17 @@ void RecordSubmissionLog(ENACatalog &catalog, const ResolvedENACredentials &cred
 		row.error_messages.push_back(m);
 	}
 	row.duration_ms = payload.duration_ms;
+	row.target = payload.target;
+	row.object_aliases.clear();
+	row.object_aliases.reserve(payload.object_aliases.size());
+	for (const auto &a : payload.object_aliases) {
+		row.object_aliases.push_back(a);
+	}
+	row.object_accessions.clear();
+	row.object_accessions.reserve(payload.object_accessions.size());
+	for (const auto &a : payload.object_accessions) {
+		row.object_accessions.push_back(a);
+	}
 	catalog.GetSubmissionLog().Append(row);
 }
 

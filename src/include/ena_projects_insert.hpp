@@ -34,14 +34,24 @@ using ENASubmissionOutcome = ENABaseSubmissionOutcome<ENAProjectInsertResult>;
 
 // Build envelope, POST it, parse receipt, return per-row results paired with
 // the originating ProjectSpecs by alias. Empty `projects` is a no-op (no POST,
-// empty result). Throws std::runtime_error if the receipt reports
-// success=false (the message text includes any server-side error messages),
-// or if the receipt is missing accessions for one or more requested aliases.
+// empty result). On logical failure (server success=false, parse error, or a
+// missing per-spec receipt entry under ADD), returns an outcome with
+// `success=false`, populated `error_messages`, and `rows` cleared — does NOT
+// throw. Transport failures (e.g. an exception from the post functor)
+// propagate through unchanged.
+//
+// VALIDATE behavior (`opts.action == ENAAction::VALIDATE`): the envelope
+// carries `<ACTION><VALIDATE/></ACTION>`, no accessions are assigned by the
+// server, and `outcome.rows` is always empty regardless of the receipt body.
+// `outcome.success` and `outcome.era_accession` still reflect the receipt;
+// callers that need the submission ID or duration must use this Outcome
+// variant rather than the throwing wrapper below.
 ENASubmissionOutcome SubmitProjectInsertOutcome(const std::vector<ProjectSpec> &projects,
                                                 const ENAProjectInsertOptions &opts, const ENAPostFn &post_fn);
 
 // Convenience wrapper used by the Catch2 unit tests — discards the outcome
-// envelope and returns just the row vector. Throws on receipt failure.
+// envelope and returns just the row vector. Throws std::runtime_error on
+// logical failure (the message includes any server-side error messages).
 std::vector<ENAProjectInsertResult> SubmitProjectInsert(const std::vector<ProjectSpec> &projects,
                                                         const ENAProjectInsertOptions &opts, const ENAPostFn &post_fn);
 

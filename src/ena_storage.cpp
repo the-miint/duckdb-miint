@@ -5,6 +5,7 @@
 #include "ena_storage.hpp"
 
 #include "ena_experiments_insert_op.hpp"
+#include "ena_lifecycle_delete.hpp"
 #include "ena_projects_insert_op.hpp"
 #include "ena_runs_insert_op.hpp"
 #include "ena_samples_insert_op.hpp"
@@ -67,6 +68,15 @@ void AddSubmissionLogColumns(ColumnList &columns) {
 	// Duration is int64 ms — slow ENA submissions over a saturated wwwdev or a
 	// large multi-object batch can plausibly exceed the int32 ~35-minute cap.
 	add("duration_ms", LogicalType::BIGINT);
+	// Lifecycle target accession or refname. Empty for ADD / MODIFY / VALIDATE
+	// (those identify their objects via the body); populated for CANCEL /
+	// RELEASE / HOLD with the value sent on `target=`.
+	add("target", LogicalType::VARCHAR);
+	// Per-object alias / primary-accession parallel arrays from the ADD
+	// path. Empty on lifecycle ops. See docs/ena.md for the recommended
+	// `list_position` / `list_contains` lookup pattern.
+	add("object_aliases", LogicalType::LIST(LogicalType::VARCHAR));
+	add("object_accessions", LogicalType::LIST(LogicalType::VARCHAR));
 }
 
 unique_ptr<CreateTableInfo> BuildENATableInfo(SchemaCatalogEntry &schema, ENATableKind kind) {
@@ -222,9 +232,14 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 	auto request_payload = FlatVector::GetData<string_t>(output.data[9]);
 	auto receipt = FlatVector::GetData<string_t>(output.data[10]);
 	auto duration_ms = FlatVector::GetData<int64_t>(output.data[12]);
+	auto target = FlatVector::GetData<string_t>(output.data[13]);
 
 	auto &error_messages = output.data[11];
 	ListVector::SetListSize(error_messages, 0);
+	auto &object_aliases_vec = output.data[14];
+	ListVector::SetListSize(object_aliases_vec, 0);
+	auto &object_accessions_vec = output.data[15];
+	ListVector::SetListSize(object_accessions_vec, 0);
 
 	for (idx_t i = 0; i < produce; i++) {
 		const auto &row = state.snapshot[state.cursor + i];
@@ -240,6 +255,7 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 		request_payload[i] = StringVector::AddString(output.data[9], row.request_payload);
 		receipt[i] = StringVector::AddString(output.data[10], row.receipt);
 		duration_ms[i] = row.duration_ms;
+		target[i] = StringVector::AddString(output.data[13], row.target);
 	}
 
 	auto child_offset = ListVector::GetListSize(error_messages);
@@ -259,6 +275,40 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 	}
 	ListVector::SetListSize(error_messages, child_offset);
 
+	// object_aliases + object_accessions follow the error_messages pattern.
+	// They're parallel-indexed: for row i, object_accessions[k] is the
+	// primary accession for object_aliases[k]. Parallel-by-construction on
+	// the ADD path (the CRTP base in ena_object_insert_op.hpp pushes both
+	// in the same loop over `outcome.rows`); both empty on lifecycle paths
+	// (lifecycle receipts have no per-object children).
+	//
+	// The lambda reads `produce` and `state.cursor` from the outer scope —
+	// `state.cursor += produce` below MUST stay after both invocations
+	// because the lambda re-indexes `state.snapshot[state.cursor + i]`.
+	auto emit_string_list = [&](Vector &list_vec, const vector<string> ENASubmissionLogRow::*field) {
+		auto offset = ListVector::GetListSize(list_vec);
+		for (idx_t i = 0; i < produce; i++) {
+			const auto &row = state.snapshot[state.cursor + i];
+			const auto &src = row.*field;
+			const auto count = static_cast<idx_t>(src.size());
+			ListVector::Reserve(list_vec, offset + count);
+			auto &child_vec = ListVector::GetEntry(list_vec);
+			auto child_data = FlatVector::GetData<string_t>(child_vec);
+			for (idx_t j = 0; j < count; j++) {
+				child_data[offset + j] = StringVector::AddString(child_vec, src[j]);
+			}
+			auto entries = ListVector::GetData(list_vec);
+			entries[i].offset = offset;
+			entries[i].length = count;
+			offset += count;
+		}
+		ListVector::SetListSize(list_vec, offset);
+	};
+	emit_string_list(object_aliases_vec, &ENASubmissionLogRow::object_aliases);
+	emit_string_list(object_accessions_vec, &ENASubmissionLogRow::object_accessions);
+
+	// Cursor advance MUST stay after the two emit_string_list calls above —
+	// the lambda indexes state.snapshot[state.cursor + i].
 	state.cursor += produce;
 }
 
@@ -274,6 +324,22 @@ unique_ptr<FunctionData> NotImplementedBind(ClientContext &, TableFunctionBindIn
 void NotImplementedScanFn(ClientContext &, TableFunctionInput &, DataChunk &) {
 	// Unreachable: NotImplementedBind throws before this is invoked.
 	throw NotImplementedException("ENA virtual table scan invoked unexpectedly");
+}
+
+// Carries a back-reference to the TableCatalogEntry so LogicalGet::GetTable()
+// can resolve. Required for DELETE binding (bind_delete.cpp checks GetTable()
+// and throws "Can only delete from base table" when it returns null).
+struct ENAVirtualScanBindData : public TableFunctionData {
+	explicit ENAVirtualScanBindData(TableCatalogEntry &table_p) : table(table_p) {
+	}
+	TableCatalogEntry &table;
+};
+
+BindInfo ENAVirtualScanGetBindInfo(const optional_ptr<FunctionData> bind_data) {
+	if (!bind_data) {
+		return BindInfo(ScanType::TABLE);
+	}
+	return BindInfo(bind_data->Cast<ENAVirtualScanBindData>().table);
 }
 
 } // namespace
@@ -298,9 +364,14 @@ TableFunction ENATableEntry::GetScanFunction(ClientContext &, unique_ptr<Functio
 		fn.projection_pushdown = false;
 		return fn;
 	}
-	bind_data = nullptr;
+	// Populate bind_data with a table back-reference and wire `get_bind_info`
+	// so LogicalGet::GetTable() resolves; the DELETE binder relies on this
+	// (otherwise it throws "Can only delete from base table" before our
+	// PlanDelete override gets a chance to surface a real diagnostic).
+	bind_data = make_uniq<ENAVirtualScanBindData>(*this);
 	TableFunction fn("ena_virtual_scan", {}, NotImplementedScanFn);
 	fn.bind = NotImplementedBind;
+	fn.get_bind_info = ENAVirtualScanGetBindInfo;
 	return fn;
 }
 
@@ -529,7 +600,15 @@ PhysicalOperator &ENACatalog::PlanInsert(ClientContext &context, PhysicalPlanGen
 
 PhysicalOperator &ENACatalog::PlanDelete(ClientContext &, PhysicalPlanGenerator &, LogicalDelete &,
                                          PhysicalOperator &) {
-	throw BinderException("ENA catalog: DELETE is not supported");
+	// Unreachable in practice: the 3-arg override below is what the planner
+	// actually calls. Kept as the pure-virtual implementation so the catalog
+	// type remains concrete; surfaces a loud signal if a future DuckDB
+	// refactor reroutes through the 4-arg path.
+	throw InternalException("ENACatalog::PlanDelete(4-arg) reached — should be handled by the 3-arg override");
+}
+
+PhysicalOperator &ENACatalog::PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op) {
+	return miint::PlanENALifecycleDelete(context, planner, *this, op);
 }
 
 PhysicalOperator &ENACatalog::PlanUpdate(ClientContext &, PhysicalPlanGenerator &, LogicalUpdate &,
@@ -546,14 +625,14 @@ DatabaseSize ENACatalog::GetDatabaseSize(ClientContext &) {
 //===--------------------------------------------------------------------===//
 // ENAStorageExtension
 //===--------------------------------------------------------------------===//
-namespace {
-
-string ResolveDefaultEndpointURL(const string &endpoint) {
+string ResolveDefaultENAEndpointURL(const string &endpoint) {
 	if (endpoint == "production") {
 		return "https://www.ebi.ac.uk/ena/submit/webin-v2";
 	}
 	return "https://wwwdev.ebi.ac.uk/ena/submit/webin-v2";
 }
+
+namespace {
 
 unique_ptr<Catalog> ENAAttach(optional_ptr<StorageExtensionInfo>, ClientContext &, AttachedDatabase &db, const string &,
                               AttachInfo &info, AttachOptions &options) {
@@ -594,7 +673,7 @@ unique_ptr<Catalog> ENAAttach(optional_ptr<StorageExtensionInfo>, ClientContext 
 		throw BinderException("ENA attach: endpoint must be 'test' or 'production' (got '%s')", endpoint);
 	}
 	const string endpoint_url =
-	    endpoint_url_override.empty() ? ResolveDefaultEndpointURL(endpoint) : endpoint_url_override;
+	    endpoint_url_override.empty() ? ResolveDefaultENAEndpointURL(endpoint) : endpoint_url_override;
 
 	return make_uniq<ENACatalog>(db, std::move(secret_name), std::move(endpoint), endpoint_url);
 }

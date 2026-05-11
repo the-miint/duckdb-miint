@@ -51,6 +51,13 @@ const vector<ENATableSchema> &ENATables();
 // Build a CreateTableInfo with the predefined columns for a given ENA table.
 unique_ptr<CreateTableInfo> BuildENATableInfo(SchemaCatalogEntry &schema, ENATableKind kind);
 
+// Resolve the default Webin V2 base URL from an endpoint label
+// ("test" → wwwdev, "production" → www). Used by ATTACH (when no
+// ENDPOINT_URL is given) and by the lifecycle table functions (when the
+// secret carries no `endpoint_url` override). Single source of truth so a
+// future EBI URL move lands in one place.
+string ResolveDefaultENAEndpointURL(const string &endpoint);
+
 class ENATableEntry : public TableCatalogEntry {
 public:
 	ENATableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info, ENATableKind kind);
@@ -59,6 +66,19 @@ public:
 	unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, column_t column_id) override;
 	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override;
 	TableStorageInfo GetStorageInfo(ClientContext &context) override;
+	// Submittable ENA tables (the four object kinds + analyses) expose no
+	// row identifier — DELETE dispatches through PlanDelete by inspecting
+	// the WHERE predicate directly. The default `[ROW_ID]` would project
+	// ROW_ID into the scan, which requires projection pushdown and breaks
+	// bind for our virtual scans. `submission_log` keeps the default so
+	// any future DML-on-log path gets the standard "Can only delete from
+	// base table" diagnostic instead of being routed through PlanDelete.
+	vector<column_t> GetRowIdColumns() const override {
+		if (kind == ENATableKind::SUBMISSION_LOG) {
+			return TableCatalogEntry::GetRowIdColumns();
+		}
+		return {};
+	}
 
 	ENATableKind GetKind() const {
 		return kind;
@@ -133,6 +153,18 @@ struct ENASubmissionLogRow {
 	string receipt;
 	vector<string> error_messages;
 	int64_t duration_ms;
+	// Lifecycle target: the accession (or refname) on which a
+	// CANCEL / RELEASE / HOLD acted. Empty for ADD / MODIFY / VALIDATE
+	// (those identify their objects via the body, not via target=).
+	string target;
+	// Per-object alias / primary-accession parallel arrays from the
+	// receipt. Populated by the ADD path (`INSERT INTO ena.X`) so users
+	// can recover an accession from an alias within the session via
+	// `object_accessions[list_position(object_aliases, '<alias>')]`.
+	// Empty on lifecycle ops (CANCEL / RELEASE / HOLD) — those don't
+	// register new objects and the receipt has no per-object children.
+	vector<string> object_aliases;
+	vector<string> object_accessions;
 };
 
 class ENASubmissionLog {
@@ -184,6 +216,10 @@ public:
 	                             optional_ptr<PhysicalOperator> plan) override;
 	PhysicalOperator &PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op,
 	                             PhysicalOperator &plan) override;
+	// 3-arg override: intercept BEFORE the (unsupported) child scan is lowered
+	// to physical. Routes the delete into the ENA lifecycle CANCEL path
+	// without ever materialising the LogicalGet child.
+	PhysicalOperator &PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op) override;
 	PhysicalOperator &PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner, LogicalUpdate &op,
 	                             PhysicalOperator &plan) override;
 

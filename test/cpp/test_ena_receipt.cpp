@@ -147,6 +147,67 @@ TEST_CASE("ENA receipt: missing 'success' attribute defaults to false", "[ena_re
 	CHECK(receipt.success == false);
 }
 
+TEST_CASE("ENA receipt: CANCEL receipt has no objects, success=true", "[ena_receipt][lifecycle]") {
+	// Targeted CANCEL receipts come back without per-object children — there
+	// is no <SAMPLE>/<PROJECT>/etc. block, only the SUBMISSION + ACTIONS marker.
+	const char *xml = R"(<?xml version="1.0" encoding="UTF-8"?>
+<RECEIPT receiptDate="2026-05-06T12:00:00.000Z" submissionFile="cancel.xml" success="true">
+    <SUBMISSION accession="ERA99999"/>
+    <ACTIONS>CANCEL</ACTIONS>
+</RECEIPT>)";
+	auto receipt = miint::ParseReceiptXML(xml);
+	CHECK(receipt.success == true);
+	CHECK(receipt.submission_accession == "ERA99999");
+	REQUIRE(receipt.actions.size() == 1);
+	CHECK(receipt.actions[0] == "CANCEL");
+	CHECK(receipt.objects.empty());
+}
+
+TEST_CASE("ENA receipt: RELEASE receipt parses success and action", "[ena_receipt][lifecycle]") {
+	const char *xml = R"(<?xml version="1.0" encoding="UTF-8"?>
+<RECEIPT receiptDate="2026-05-06T12:00:00.000Z" submissionFile="release.xml" success="true">
+    <SUBMISSION accession="ERA88888"/>
+    <ACTIONS>RELEASE</ACTIONS>
+</RECEIPT>)";
+	auto receipt = miint::ParseReceiptXML(xml);
+	CHECK(receipt.success == true);
+	REQUIRE(receipt.actions.size() == 1);
+	CHECK(receipt.actions[0] == "RELEASE");
+}
+
+TEST_CASE("ENA receipt: targeted HOLD receipt parses action and date", "[ena_receipt][lifecycle]") {
+	// Webin echoes the new HoldUntilDate back on the targeted SAMPLE entry
+	// when a post-hoc HOLD succeeds.
+	const char *xml = R"(<?xml version="1.0" encoding="UTF-8"?>
+<RECEIPT receiptDate="2026-05-06T12:00:00.000Z" submissionFile="hold.xml" success="true">
+    <SAMPLE accession="ERS27605861" alias="stomach_microbiota" status="PRIVATE"
+            holdUntilDate="2027-12-31Z"/>
+    <SUBMISSION accession="ERA77777"/>
+    <ACTIONS>HOLD</ACTIONS>
+</RECEIPT>)";
+	auto receipt = miint::ParseReceiptXML(xml);
+	CHECK(receipt.success == true);
+	REQUIRE(receipt.actions.size() == 1);
+	CHECK(receipt.actions[0] == "HOLD");
+	REQUIRE(receipt.objects.size() == 1);
+	CHECK(receipt.objects[0].accession == "ERS27605861");
+	CHECK(receipt.objects[0].hold_until_date == "2027-12-31Z");
+}
+
+TEST_CASE("ENA receipt: CANCEL of a non-existent target reports failure", "[ena_receipt][lifecycle]") {
+	const char *xml = R"(<?xml version="1.0" encoding="UTF-8"?>
+<RECEIPT receiptDate="2026-05-06T12:00:00.000Z" submissionFile="cancel.xml" success="false">
+    <MESSAGES><ERROR>Object 'ERS-doesnotexist' not found in submission account</ERROR></MESSAGES>
+    <ACTIONS>CANCEL</ACTIONS>
+</RECEIPT>)";
+	auto receipt = miint::ParseReceiptXML(xml);
+	CHECK(receipt.success == false);
+	REQUIRE(receipt.actions.size() == 1);
+	CHECK(receipt.actions[0] == "CANCEL");
+	REQUIRE(receipt.errors.size() == 1);
+	CHECK(receipt.errors[0].find("not found") != std::string::npos);
+}
+
 TEST_CASE("ENA receipt: extracts SAMEA from a single sample", "[ena_receipt]") {
 	// Most common consumer path: I just want SAMEA out of the receipt.
 	const char *xml = R"(<RECEIPT receiptDate="2022-01-01T00:00:00.000Z"

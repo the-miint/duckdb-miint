@@ -66,6 +66,116 @@ TEST_CASE("ENA envelope: project with no description falls back to the title", "
 	CHECK(json.find("\"sequencingProject\":{}") != std::string::npos);
 }
 
+TEST_CASE("ENA envelope: MODIFY project emits the existing accession on the project element",
+          "[ena_envelope][modify]") {
+	// MODIFY in Webin V2 is "re-submit the full updated XML with the
+	// existing accession" (`<PROJECT alias="..." accession="PRJEB...">`).
+	// The accession identifies which already-registered object to update;
+	// without it the server has no way to disambiguate against the alias's
+	// possible reuse.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::ProjectSpec p;
+	p.alias = "gut-cohort-2026";
+	p.accession = "PRJEB123456";
+	p.title = "Adult gut microbiome cohort (revised)";
+	p.description = "Phase 1 collection — updated abstract";
+	p.project_type = "METAGENOMIC";
+	env.projects.push_back(p);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	CHECK(json.find("\"type\":\"MODIFY\"") != std::string::npos);
+	// Accession must appear right next to the alias (same JSON object) so
+	// the per-element binding is unambiguous to any reasonable parser.
+	CHECK(json.find("\"alias\":\"gut-cohort-2026\",\"accession\":\"PRJEB123456\"") != std::string::npos);
+	CHECK(json.find("\"title\":\"Adult gut microbiome cohort (revised)\"") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope: ADD with accession on a project is rejected at build time", "[ena_envelope][modify]") {
+	// On ADD the server assigns the accession; setting one on the spec is
+	// almost certainly a programmer error (mistakenly reusing a MODIFY-shaped
+	// spec on the ADD path). The server-side rejection would be confusing
+	// ("alias exists with accession X"); throw here so the diagnostic names
+	// the offending alias and the cause directly.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::ADD;
+	miint::ProjectSpec p;
+	p.alias = "fresh-project";
+	p.accession = "PRJEB999"; // bogus pre-fill
+	p.title = "t";
+	p.project_type = "METAGENOMIC";
+	env.projects.push_back(p);
+
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env),
+	                  Catch::Matchers::ContainsSubstring("ADD must not set an accession") &&
+	                      Catch::Matchers::ContainsSubstring("fresh-project"));
+}
+
+TEST_CASE("ENA envelope: MODIFY without accession on a project is rejected at build time", "[ena_envelope][modify]") {
+	// MODIFY needs the accession to identify the object — without it Webin V2
+	// can't disambiguate against a re-used alias. Catch missing accession at
+	// build time so the user gets a useful "you forgot the accession" message
+	// instead of a server-side "alias not found" half a round-trip later.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::ProjectSpec p;
+	p.alias = "needs-accession";
+	p.title = "t";
+	p.project_type = "METAGENOMIC";
+	env.projects.push_back(p);
+
+	CHECK_THROWS_WITH(miint::BuildEnvelopeJSON(env), Catch::Matchers::ContainsSubstring("MODIFY requires accession") &&
+	                                                     Catch::Matchers::ContainsSubstring("needs-accession"));
+}
+
+TEST_CASE("ENA envelope XML: MODIFY sample emits the existing accession on the sample element",
+          "[ena_envelope][modify]") {
+	// Production sample envelopes flipped to XML in L4b-fix to bypass the V2
+	// JSON dispatcher's <DESCRIPTION>-before-<SAMPLE_NAME> ordering bug.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::SampleSpec s;
+	s.alias = "s-2026";
+	s.accession = "ERS9999001";
+	s.taxon_id = 408170;
+	s.title = "Updated sample title";
+	s.checklist = "ERC000015";
+	s.attributes = {{"collection date", "2026-05-07"}};
+	env.samples.push_back(s);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CHECK(xml.find("<MODIFY/>") != std::string::npos);
+	CHECK(xml.find(R"X(<SAMPLE alias="s-2026" accession="ERS9999001">)X") != std::string::npos);
+	CHECK(xml.find("<TAXON_ID>408170</TAXON_ID>") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope XML: ADD with accession on a sample is rejected at build time", "[ena_envelope][modify]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::ADD;
+	miint::SampleSpec s;
+	s.alias = "fresh-sample";
+	s.accession = "ERS999"; // bogus pre-fill
+	s.taxon_id = 408170;
+	env.samples.push_back(s);
+
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env),
+	                  Catch::Matchers::ContainsSubstring("ADD must not set an accession") &&
+	                      Catch::Matchers::ContainsSubstring("fresh-sample"));
+}
+
+TEST_CASE("ENA envelope XML: MODIFY without accession on a sample is rejected at build time",
+          "[ena_envelope][modify]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::SampleSpec s;
+	s.alias = "needs-accession-sample";
+	s.taxon_id = 408170;
+	env.samples.push_back(s);
+
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("MODIFY requires accession") &&
+	                                                    Catch::Matchers::ContainsSubstring("needs-accession-sample"));
+}
+
 TEST_CASE("ENA envelope: umbrella project uses umbrellaProject marker", "[ena_envelope]") {
 	miint::SubmissionSpec env;
 	miint::ProjectSpec p;
@@ -426,6 +536,28 @@ TEST_CASE("ENA envelope: minimal run with two paired-fastq files", "[ena_envelop
 	                 R"X("checksum":"183d6a24e0c3704e993bebe75bbbd989"}]}]})X");
 }
 
+TEST_CASE("ENA envelope: MODIFY run emits accession on the JSON run element too", "[ena_envelope][modify]") {
+	// Production routes runs through XML, but `AppendRun` (JSON) is still
+	// compiled in and tested. Per-kind symmetry: AppendProject and
+	// AppendSample emit `"accession":` between alias and title on MODIFY;
+	// AppendRun must do the same so a future caller that ever routes a
+	// MODIFY run through JSON gets the same wire shape as the XML path.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::RunSpec r;
+	r.alias = "run-2026";
+	r.accession = "ERR9999001";
+	r.experiment_ref.accession = "ERX42";
+	r.files.push_back({"r_1.fastq.gz", "fastq", "deadbeef"});
+	env.runs.push_back(r);
+
+	auto json = miint::BuildEnvelopeJSON(env);
+	CHECK(json.find("\"type\":\"MODIFY\"") != std::string::npos);
+	CHECK(json.find("\"alias\":\"run-2026\",\"accession\":\"ERR9999001\"") != std::string::npos);
+	// experiment_ref carries the accession form; pin the wire shape.
+	CHECK(json.find(R"X("experimentRef":{"accession":"ERX42"})X") != std::string::npos);
+}
+
 TEST_CASE("ENA envelope: single-end run emits one file", "[ena_envelope]") {
 	miint::SubmissionSpec env;
 	miint::RunSpec r;
@@ -495,6 +627,129 @@ TEST_CASE("ENA envelope: empty filetype rejected (no silent default)", "[ena_env
 // objects; verified live 2026-05-04. See BuildEnvelopeXML in
 // src/ena_envelope_builder.cpp.
 // =====================================================================
+
+// =====================================================================
+// ResolveENARefDescriptor + per-kind wrappers — accession-vs-refname
+// disambiguation shared by the INSERT and MODIFY paths.
+// =====================================================================
+
+TEST_CASE("ENA RefDescriptor: accession prefix + digits routes to accession", "[ena_envelope]") {
+	auto study = miint::ResolveENAStudyRef("PRJEB123456");
+	CHECK(study.accession == "PRJEB123456");
+	CHECK(study.refname.empty());
+
+	auto sample = miint::ResolveENASampleRef("SAMEA42");
+	CHECK(sample.accession == "SAMEA42");
+	CHECK(sample.refname.empty());
+}
+
+TEST_CASE("ENA RefDescriptor: exact prefix with no digits routes to refname", "[ena_envelope]") {
+	// A bare prefix ("PRJEB" with nothing after) is not a valid accession — at
+	// least one digit must follow. The `<= prefix.size()` guard in
+	// ResolveENARefDescriptor pins this; without it a user alias literally
+	// equal to a prefix would be silently misclassified.
+	auto study = miint::ResolveENAStudyRef("PRJEB");
+	CHECK(study.accession.empty());
+	CHECK(study.refname == "PRJEB");
+
+	auto sample = miint::ResolveENASampleRef("ERS");
+	CHECK(sample.accession.empty());
+	CHECK(sample.refname == "ERS");
+}
+
+TEST_CASE("ENA RefDescriptor: prefix followed by non-digits routes to refname", "[ena_envelope]") {
+	// A user alias like "ERPmycoolstudy" or "PRJEB-2026-cohort" must NOT be
+	// silently classified as an accession the server can't find. The
+	// "digits only after prefix" check is what protects against this.
+	auto a = miint::ResolveENAStudyRef("ERPmycoolstudy");
+	CHECK(a.accession.empty());
+	CHECK(a.refname == "ERPmycoolstudy");
+
+	auto b = miint::ResolveENAStudyRef("PRJEB-2026-cohort");
+	CHECK(b.accession.empty());
+	CHECK(b.refname == "PRJEB-2026-cohort");
+
+	auto c = miint::ResolveENASampleRef("SAMEA_with_underscore");
+	CHECK(c.accession.empty());
+	CHECK(c.refname == "SAMEA_with_underscore");
+}
+
+TEST_CASE("ENA RefDescriptor: non-matching prefix routes to refname", "[ena_envelope]") {
+	auto a = miint::ResolveENAStudyRef("my-study-alias");
+	CHECK(a.accession.empty());
+	CHECK(a.refname == "my-study-alias");
+
+	auto b = miint::ResolveENASampleRef("alpha");
+	CHECK(b.accession.empty());
+	CHECK(b.refname == "alpha");
+
+	// Empty string also routes to refname (caller's responsibility to reject
+	// empties before calling — the helper itself doesn't validate non-emptiness).
+	auto c = miint::ResolveENAStudyRef("");
+	CHECK(c.accession.empty());
+	CHECK(c.refname.empty());
+}
+
+TEST_CASE("ENA RefDescriptor: study and sample prefix lists are disjoint", "[ena_envelope]") {
+	auto a = miint::ResolveENAStudyRef("SAMEA42");
+	CHECK(a.accession.empty());
+	CHECK(a.refname == "SAMEA42");
+
+	auto b = miint::ResolveENASampleRef("PRJEB123456");
+	CHECK(b.accession.empty());
+	CHECK(b.refname == "PRJEB123456");
+}
+
+TEST_CASE("ENA RefDescriptor: every canonical study prefix is recognised", "[ena_envelope]") {
+	for (const char *p : {"PRJEB", "PRJNA", "PRJDB", "ERP"}) {
+		auto ref = miint::ResolveENAStudyRef(std::string(p) + "1");
+		CHECK(ref.accession == std::string(p) + "1");
+		CHECK(ref.refname.empty());
+	}
+}
+
+TEST_CASE("ENA RefDescriptor: every canonical sample prefix is recognised", "[ena_envelope]") {
+	for (const char *p : {"ERS", "SAMEA", "SAMN", "SAMD"}) {
+		auto ref = miint::ResolveENASampleRef(std::string(p) + "1");
+		CHECK(ref.accession == std::string(p) + "1");
+		CHECK(ref.refname.empty());
+	}
+}
+
+TEST_CASE("ENA RefDescriptor: generic primitive accepts arbitrary prefix lists", "[ena_envelope]") {
+	// Named wrappers cover the L4c-shipped kinds; the generic primitive stays
+	// exposed so future kinds (analyses) can supply their own prefix lists
+	// without creating a wrapper that's later abandoned.
+	auto a = miint::ResolveENARefDescriptor("ERX42", {"ERX"});
+	CHECK(a.accession == "ERX42");
+
+	auto b = miint::ResolveENARefDescriptor("not-an-accession", {"ERX"});
+	CHECK(b.accession.empty());
+	CHECK(b.refname == "not-an-accession");
+}
+
+TEST_CASE("ENA RefDescriptor: experiment wrapper recognises ERX accession", "[ena_envelope]") {
+	// L4d wrapper: experiment_ref disambiguation. Single canonical prefix
+	// (ERX) — runs reference experiments only.
+	auto a = miint::ResolveENAExperimentRef("ERX42");
+	CHECK(a.accession == "ERX42");
+	CHECK(a.refname.empty());
+
+	// Bare prefix → refname (boundary same as study/sample wrappers).
+	auto b = miint::ResolveENAExperimentRef("ERX");
+	CHECK(b.accession.empty());
+	CHECK(b.refname == "ERX");
+
+	// Alias-shaped string → refname.
+	auto c = miint::ResolveENAExperimentRef("my-experiment-alias");
+	CHECK(c.accession.empty());
+	CHECK(c.refname == "my-experiment-alias");
+
+	// ERX prefix + non-digits → refname (would otherwise misclassify).
+	auto d = miint::ResolveENAExperimentRef("ERX-not-an-accession");
+	CHECK(d.accession.empty());
+	CHECK(d.refname == "ERX-not-an-accession");
+}
 
 TEST_CASE("ENA envelope XML: minimal experiment with paired layout and ILLUMINA platform", "[ena_envelope]") {
 	miint::SubmissionSpec env;
@@ -651,6 +906,73 @@ TEST_CASE("ENA envelope XML: empty experiments + runs yields just the SUBMISSION
 	                R"X(<WEBIN><SUBMISSION><ACTIONS><ACTION><ADD/></ACTION></ACTIONS></SUBMISSION></WEBIN>)X");
 }
 
+TEST_CASE("ENA envelope XML: MODIFY experiment emits the existing accession on the experiment element",
+          "[ena_envelope][modify]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::ExperimentSpec e;
+	e.alias = "exp-2026";
+	e.accession = "ERX9999001";
+	e.title = "Updated experiment title";
+	e.study_ref.accession = "PRJEB42";
+	e.sample_ref.accession = "SAMEA42";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "Illumina NovaSeq 6000";
+	env.experiments.push_back(e);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CHECK(xml.find("<MODIFY/>") != std::string::npos);
+	CHECK(xml.find(R"X(<EXPERIMENT alias="exp-2026" accession="ERX9999001">)X") != std::string::npos);
+	CHECK(xml.find("<TITLE>Updated experiment title</TITLE>") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope XML: ADD with accession on an experiment is rejected at build time", "[ena_envelope][modify]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::ADD;
+	miint::ExperimentSpec e;
+	e.alias = "fresh-experiment";
+	e.accession = "ERX999"; // bogus pre-fill
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "Illumina NovaSeq 6000";
+	env.experiments.push_back(e);
+
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env),
+	                  Catch::Matchers::ContainsSubstring("ADD must not set an accession") &&
+	                      Catch::Matchers::ContainsSubstring("fresh-experiment"));
+}
+
+TEST_CASE("ENA envelope XML: MODIFY without accession on an experiment is rejected at build time",
+          "[ena_envelope][modify]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::ExperimentSpec e;
+	e.alias = "needs-accession-experiment";
+	// e.accession deliberately empty
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "Illumina NovaSeq 6000";
+	env.experiments.push_back(e);
+
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env),
+	                  Catch::Matchers::ContainsSubstring("MODIFY requires accession") &&
+	                      Catch::Matchers::ContainsSubstring("needs-accession-experiment"));
+}
+
 TEST_CASE("ENA envelope XML: experiment empty alias rejected", "[ena_envelope]") {
 	miint::SubmissionSpec env;
 	miint::ExperimentSpec e;
@@ -673,6 +995,252 @@ TEST_CASE("ENA envelope XML: run with no files rejected", "[ena_envelope]") {
 	r.experiment_ref.refname = "e1";
 	env.runs.push_back(r);
 	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("file"));
+}
+
+TEST_CASE("ENA envelope XML: MODIFY run emits the existing accession on the run element", "[ena_envelope][modify]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::RunSpec r;
+	r.alias = "run-2026";
+	r.accession = "ERR9999001";
+	r.title = "Updated run title";
+	r.experiment_ref.accession = "ERX42";
+	r.files.push_back({"run-2026_1.fastq.gz", "fastq", "9b8932f85caa54e687eba62fca3edce2"});
+	env.runs.push_back(r);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CHECK(xml.find("<MODIFY/>") != std::string::npos);
+	CHECK(xml.find(R"X(<RUN alias="run-2026" accession="ERR9999001">)X") != std::string::npos);
+	CHECK(xml.find("<TITLE>Updated run title</TITLE>") != std::string::npos);
+	CHECK(xml.find(R"X(<EXPERIMENT_REF accession="ERX42"/>)X") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope XML: ADD with accession on a run is rejected at build time", "[ena_envelope][modify]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::ADD;
+	miint::RunSpec r;
+	r.alias = "fresh-run";
+	r.accession = "ERR999"; // bogus pre-fill
+	r.experiment_ref.refname = "e1";
+	r.files.push_back({"fresh-run_1.fastq.gz", "fastq", "deadbeef"});
+	env.runs.push_back(r);
+
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env),
+	                  Catch::Matchers::ContainsSubstring("ADD must not set an accession") &&
+	                      Catch::Matchers::ContainsSubstring("fresh-run"));
+}
+
+TEST_CASE("ENA envelope XML: MODIFY without accession on a run is rejected at build time", "[ena_envelope][modify]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::RunSpec r;
+	r.alias = "needs-accession-run";
+	r.experiment_ref.refname = "e1";
+	r.files.push_back({"r_1.fastq.gz", "fastq", "deadbeef"});
+	env.runs.push_back(r);
+
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("MODIFY requires accession") &&
+	                                                    Catch::Matchers::ContainsSubstring("needs-accession-run"));
+}
+
+// =====================================================================
+// XML envelope: samples — flipped from JSON to XML in L4b-fix to bypass the
+// V2 JSON dispatcher's element-ordering bug where <DESCRIPTION> is emitted
+// before <SAMPLE_NAME> regardless of JSON-key order, violating
+// SRA.sample.xsd. Verified live on wwwdev 2026-05-07.
+// =====================================================================
+
+TEST_CASE("ENA envelope XML: minimal sample with checklist and attributes", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::SampleSpec s;
+	s.alias = "gut-001";
+	s.title = "Adult subject 001 stool";
+	s.taxon_id = 408170;
+	s.checklist = "ERC000015";
+	s.attributes.emplace_back("collection date", "2024-06-15");
+	s.attributes.emplace_back("geographic location (country and/or sea)", "United States");
+	env.samples.push_back(s);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CheckEqual(xml, R"X(<?xml version="1.0" encoding="UTF-8"?>)X"
+	                R"X(<WEBIN><SUBMISSION><ACTIONS><ACTION><ADD/></ACTION></ACTIONS></SUBMISSION>)X"
+	                R"X(<SAMPLE_SET>)X"
+	                R"X(<SAMPLE alias="gut-001">)X"
+	                R"X(<TITLE>Adult subject 001 stool</TITLE>)X"
+	                R"X(<SAMPLE_NAME><TAXON_ID>408170</TAXON_ID></SAMPLE_NAME>)X"
+	                R"X(<SAMPLE_ATTRIBUTES>)X"
+	                R"X(<SAMPLE_ATTRIBUTE><TAG>ENA-CHECKLIST</TAG><VALUE>ERC000015</VALUE></SAMPLE_ATTRIBUTE>)X"
+	                R"X(<SAMPLE_ATTRIBUTE><TAG>collection date</TAG><VALUE>2024-06-15</VALUE></SAMPLE_ATTRIBUTE>)X"
+	                R"X(<SAMPLE_ATTRIBUTE><TAG>geographic location (country and/or sea)</TAG>)X"
+	                R"X(<VALUE>United States</VALUE></SAMPLE_ATTRIBUTE>)X"
+	                R"X(</SAMPLE_ATTRIBUTES>)X"
+	                R"X(</SAMPLE></SAMPLE_SET></WEBIN>)X");
+}
+
+TEST_CASE("ENA envelope XML: minimal MODIFY shape with no optional fields set", "[ena_envelope][modify]") {
+	// The smallest legal MODIFY a caller could send: alias + accession +
+	// taxon_id, no title, no description, no scientific_name, no checklist,
+	// no attributes. Confirms the optional-field gating in AppendXmlSample
+	// produces a clean envelope rather than empty <TITLE/>, <DESCRIPTION/>,
+	// or <SAMPLE_ATTRIBUTES/> elements (each of which would be rejected by
+	// SRA.sample.xsd's content-model on those children).
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	miint::SampleSpec s;
+	s.alias = "minimal-mod";
+	s.accession = "ERS9999777";
+	s.taxon_id = 408170;
+	env.samples.push_back(s);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CheckEqual(xml, R"X(<?xml version="1.0" encoding="UTF-8"?>)X"
+	                R"X(<WEBIN><SUBMISSION><ACTIONS><ACTION><MODIFY/></ACTION></ACTIONS></SUBMISSION>)X"
+	                R"X(<SAMPLE_SET>)X"
+	                R"X(<SAMPLE alias="minimal-mod" accession="ERS9999777">)X"
+	                R"X(<SAMPLE_NAME><TAXON_ID>408170</TAXON_ID></SAMPLE_NAME>)X"
+	                R"X(</SAMPLE></SAMPLE_SET></WEBIN>)X");
+}
+
+TEST_CASE("ENA envelope XML: SAMPLE_NAME precedes DESCRIPTION (SRA.sample.xsd ordering)", "[ena_envelope]") {
+	// The bug that drove this phase: V2's JSON dispatcher emitted <DESCRIPTION>
+	// BEFORE <SAMPLE_NAME>, violating SRA.sample.xsd. Going through XML gives
+	// us direct control over element order — pin that here so a future
+	// reordering of AppendXmlSample doesn't silently regress the XSD ordering.
+	miint::SubmissionSpec env;
+	miint::SampleSpec s;
+	s.alias = "with-description";
+	s.taxon_id = 408170;
+	s.scientific_name = "human gut metagenome";
+	s.description = "clinical isolate from a healthy donor";
+	env.samples.push_back(s);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	const auto sample_name_pos = xml.find("<SAMPLE_NAME>");
+	const auto description_pos = xml.find("<DESCRIPTION>");
+	REQUIRE(sample_name_pos != std::string::npos);
+	REQUIRE(description_pos != std::string::npos);
+	CHECK(sample_name_pos < description_pos);
+	CHECK(xml.find("<SCIENTIFIC_NAME>human gut metagenome</SCIENTIFIC_NAME>") != std::string::npos);
+	CHECK(xml.find("<DESCRIPTION>clinical isolate from a healthy donor</DESCRIPTION>") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope XML: sample attribute units emit a <UNITS> child sibling", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::SampleSpec s;
+	s.alias = "gut-002";
+	s.taxon_id = 408170;
+	s.checklist = "ERC000015";
+	s.attributes.emplace_back("collection date", "2026-04-01");
+	s.attributes.emplace_back("geographic location (latitude)", "32.7157");
+	s.attributes.emplace_back("geographic location (longitude)", "-117.1611");
+	s.attribute_units.emplace_back("geographic location (latitude)", "DD");
+	s.attribute_units.emplace_back("geographic location (longitude)", "DD");
+	env.samples.push_back(s);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CHECK(xml.find(R"X(<SAMPLE_ATTRIBUTE><TAG>geographic location (latitude)</TAG>)X"
+	               R"X(<VALUE>32.7157</VALUE><UNITS>DD</UNITS></SAMPLE_ATTRIBUTE>)X") != std::string::npos);
+	CHECK(xml.find(R"X(<SAMPLE_ATTRIBUTE><TAG>geographic location (longitude)</TAG>)X"
+	               R"X(<VALUE>-117.1611</VALUE><UNITS>DD</UNITS></SAMPLE_ATTRIBUTE>)X") != std::string::npos);
+	CHECK(xml.find(R"X(<SAMPLE_ATTRIBUTE><TAG>collection date</TAG>)X"
+	               R"X(<VALUE>2026-04-01</VALUE></SAMPLE_ATTRIBUTE>)X") != std::string::npos);
+
+	// Empty units string for an entry suppresses the <UNITS> sibling entirely
+	// (caller can use this to opt out without removing the tag from
+	// attribute_units).
+	miint::SampleSpec s2 = s;
+	s2.alias = "gut-003";
+	s2.attribute_units.clear();
+	s2.attribute_units.emplace_back("geographic location (latitude)", "");
+	miint::SubmissionSpec env2;
+	env2.samples.push_back(s2);
+	auto xml2 = miint::BuildEnvelopeXML(env2);
+	CHECK(xml2.find("<UNITS>") == std::string::npos);
+}
+
+TEST_CASE("ENA envelope XML: multi-sample emits one element per sample", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	for (int i = 1; i <= 3; ++i) {
+		miint::SampleSpec s;
+		s.alias = "sample-" + std::to_string(i);
+		s.taxon_id = 408170;
+		s.checklist = "ERC000015";
+		env.samples.push_back(s);
+	}
+	auto xml = miint::BuildEnvelopeXML(env);
+	CHECK(xml.find(R"X(<SAMPLE alias="sample-1">)X") != std::string::npos);
+	CHECK(xml.find(R"X(<SAMPLE alias="sample-2">)X") != std::string::npos);
+	CHECK(xml.find(R"X(<SAMPLE alias="sample-3">)X") != std::string::npos);
+}
+
+TEST_CASE("ENA envelope XML: SAMPLE_SET precedes EXPERIMENT_SET and RUN_SET", "[ena_envelope]") {
+	// Spec order per SRA.submission.xsd: SAMPLE_SET → EXPERIMENT_SET → RUN_SET.
+	miint::SubmissionSpec env;
+	miint::SampleSpec s;
+	s.alias = "s1";
+	s.taxon_id = 408170;
+	env.samples.push_back(s);
+	miint::ExperimentSpec e;
+	e.alias = "e1";
+	e.study_ref.refname = "p1";
+	e.sample_ref.refname = "s1";
+	e.library_strategy = "WGS";
+	e.library_source = "METAGENOMIC";
+	e.library_selection = "RANDOM";
+	e.library_layout = miint::ENALibraryLayout::PAIRED;
+	e.platform = "ILLUMINA";
+	e.instrument_model = "NovaSeq 6000";
+	env.experiments.push_back(e);
+	miint::RunSpec r;
+	r.alias = "r1";
+	r.experiment_ref.refname = "e1";
+	r.files.push_back({"r1_1.fastq.gz", "fastq", "deadbeef"});
+	env.runs.push_back(r);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	const auto submission_pos = xml.find("<SUBMISSION>");
+	const auto sample_pos = xml.find("<SAMPLE_SET>");
+	const auto exp_pos = xml.find("<EXPERIMENT_SET>");
+	const auto run_pos = xml.find("<RUN_SET>");
+	REQUIRE(submission_pos != std::string::npos);
+	REQUIRE(sample_pos != std::string::npos);
+	REQUIRE(exp_pos != std::string::npos);
+	REQUIRE(run_pos != std::string::npos);
+	CHECK(submission_pos < sample_pos);
+	CHECK(sample_pos < exp_pos);
+	CHECK(exp_pos < run_pos);
+}
+
+TEST_CASE("ENA envelope XML: sample with taxon_id <= 0 rejected", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::SampleSpec s;
+	s.alias = "s1";
+	s.taxon_id = 0;
+	env.samples.push_back(s);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("taxon"));
+}
+
+TEST_CASE("ENA envelope XML: sample empty alias rejected", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::SampleSpec s;
+	s.taxon_id = 408170;
+	env.samples.push_back(s);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("alias"));
+}
+
+TEST_CASE("ENA envelope XML: sample XML escaping of alias, attribute tag/value, and text", "[ena_envelope]") {
+	miint::SubmissionSpec env;
+	miint::SampleSpec s;
+	s.alias = R"X(s<&"'>1)X";
+	s.taxon_id = 408170;
+	s.title = R"X(<unsafe & "title")X";
+	s.attributes.emplace_back(R"X(tag<&)X", R"X(value>")X");
+	env.samples.push_back(s);
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CHECK(xml.find(R"X(<SAMPLE alias="s&lt;&amp;&quot;&apos;&gt;1">)X") != std::string::npos);
+	CHECK(xml.find(R"X(<TITLE>&lt;unsafe &amp; &quot;title&quot;</TITLE>)X") != std::string::npos);
+	CHECK(xml.find(R"X(<TAG>tag&lt;&amp;</TAG><VALUE>value&gt;&quot;</VALUE>)X") != std::string::npos);
 }
 
 TEST_CASE("ENA envelope: full graph (project + sample + experiment + run) emits arrays in spec order",
@@ -719,4 +1287,188 @@ TEST_CASE("ENA envelope: full graph (project + sample + experiment + run) emits 
 	CHECK(proj_pos < samp_pos);
 	CHECK(samp_pos < exp_pos);
 	CHECK(exp_pos < run_pos);
+}
+
+// =====================================================================
+// Lifecycle (targeted) actions: CANCEL / HOLD / RELEASE on existing accessions
+// =====================================================================
+//
+// These actions reference an already-registered object via `target=` on the
+// action element. Body sets (PROJECT_SET / SAMPLE_SET / EXPERIMENT_SET /
+// RUN_SET) are not emitted — the action itself is the entire payload.
+// MODIFY also uses `action=MODIFY` but with a body identifying the object
+// (covered separately under the existing per-object envelope tests).
+
+TEST_CASE("ENA envelope: CANCEL targets an accession (XML)", "[ena_envelope][lifecycle]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::CANCEL;
+	env.target_accession = "ERS123456";
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CheckEqual(xml, R"X(<?xml version="1.0" encoding="UTF-8"?>)X"
+	                R"X(<WEBIN><SUBMISSION>)X"
+	                R"X(<ACTIONS><ACTION><CANCEL target="ERS123456"/></ACTION></ACTIONS>)X"
+	                R"X(</SUBMISSION></WEBIN>)X");
+}
+
+TEST_CASE("ENA envelope: RELEASE targets an accession (XML)", "[ena_envelope][lifecycle]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::RELEASE;
+	env.target_accession = "ERS123456";
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CheckEqual(xml, R"X(<?xml version="1.0" encoding="UTF-8"?>)X"
+	                R"X(<WEBIN><SUBMISSION>)X"
+	                R"X(<ACTIONS><ACTION><RELEASE target="ERS123456"/></ACTION></ACTIONS>)X"
+	                R"X(</SUBMISSION></WEBIN>)X");
+}
+
+TEST_CASE("ENA envelope: HOLD targets an accession with HoldUntilDate (XML)", "[ena_envelope][lifecycle]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::HOLD;
+	env.target_accession = "ERS123456";
+	env.hold_until_date = "2027-01-01";
+
+	auto xml = miint::BuildEnvelopeXML(env);
+	CheckEqual(xml, R"X(<?xml version="1.0" encoding="UTF-8"?>)X"
+	                R"X(<WEBIN><SUBMISSION>)X"
+	                R"X(<ACTIONS><ACTION><HOLD target="ERS123456" HoldUntilDate="2027-01-01"/></ACTION></ACTIONS>)X"
+	                R"X(</SUBMISSION></WEBIN>)X");
+}
+
+TEST_CASE("ENA envelope: target_refname on a lifecycle action is rejected", "[ena_envelope][lifecycle]") {
+	// Webin V2 only resolves refname/alias on `<*_REF>` children inside an
+	// ADD body where the alias is also defined locally; for cross-submission
+	// lifecycle ops on already-registered objects it requires the server-
+	// assigned accession. Verified live 2026-05-07.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::CANCEL;
+	env.target_refname = "my-sample-alias";
+
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env),
+	                  Catch::Matchers::ContainsSubstring("by refname/alias is not supported"));
+}
+
+TEST_CASE("ENA envelope: CANCEL without target is rejected", "[ena_envelope][lifecycle]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::CANCEL;
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("CANCEL"));
+}
+
+TEST_CASE("ENA envelope: RELEASE without target is rejected", "[ena_envelope][lifecycle]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::RELEASE;
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("RELEASE"));
+}
+
+TEST_CASE("ENA envelope: HOLD with target requires hold_until_date", "[ena_envelope][lifecycle]") {
+	// action=HOLD with a target is the post-hoc embargo path; the date is
+	// required (server uses it as the new hold-until-date).
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::HOLD;
+	env.target_accession = "ERS123456";
+	// hold_until_date deliberately empty
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("hold_until_date"));
+}
+
+TEST_CASE("ENA envelope: ADD with target_accession is rejected (ADD doesn't target)", "[ena_envelope][lifecycle]") {
+	// target_accession is exclusive to lifecycle actions. Setting it on an
+	// ADD/MODIFY/VALIDATE catches a category-of-mistake at envelope-build time.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::ADD;
+	env.target_accession = "ERS123456";
+	miint::ProjectSpec p;
+	p.alias = "p1";
+	p.title = "t";
+	env.projects.push_back(p);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("target"));
+}
+
+TEST_CASE("ENA envelope: CANCEL with target_refname set is rejected even when accession is also set",
+          "[ena_envelope][lifecycle]") {
+	// Pre-tighten this verified an "accession wins" precedence for callers
+	// that supplied both. After 2026-05-07, target_refname is rejected
+	// outright on lifecycle actions because it has no usable wire-form
+	// (Webin V2 cannot resolve refname cross-submission). Carrying both
+	// is now a programming mistake — fail loudly so the caller drops the
+	// refname rather than relying on silent precedence.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::CANCEL;
+	env.target_accession = "ERS123456";
+	env.target_refname = "my-alias";
+
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env),
+	                  Catch::Matchers::ContainsSubstring("by refname/alias is not supported"));
+}
+
+TEST_CASE("ENA envelope: CANCEL with body content is rejected (no silent drop)", "[ena_envelope][lifecycle]") {
+	// A targeted CANCEL is the entire payload; if a caller accidentally also
+	// fills in projects/samples (e.g. reusing a SubmissionSpec across calls),
+	// silently dropping the body would look like a successful submit-then-cancel.
+	// Reject loudly instead so the caller fixes their spec construction.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::CANCEL;
+	env.target_accession = "ERS123456";
+	miint::ProjectSpec p;
+	p.alias = "stray";
+	p.title = "should-not-appear";
+	env.projects.push_back(p);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("body content"));
+}
+
+TEST_CASE("ENA envelope: HOLD-with-target with body content is rejected", "[ena_envelope][lifecycle]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::HOLD;
+	env.target_accession = "ERS123456";
+	env.hold_until_date = "2027-01-01";
+	miint::SampleSpec s;
+	s.alias = "stray";
+	s.taxon_id = 408170;
+	env.samples.push_back(s);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("body content"));
+}
+
+TEST_CASE("ENA envelope: MODIFY with target_accession is rejected", "[ena_envelope][lifecycle]") {
+	// MODIFY identifies its object via the body, not via target=. A target
+	// here would be a programming mistake.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::MODIFY;
+	env.target_accession = "ERS123456";
+	miint::SampleSpec s;
+	s.alias = "s1";
+	s.taxon_id = 408170;
+	env.samples.push_back(s);
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("target"));
+}
+
+TEST_CASE("ENA envelope: VALIDATE with target_refname is rejected", "[ena_envelope][lifecycle]") {
+	// Two distinct ValidateActions checks could throw here:
+	//   (a) L1d refname-rejection: "...VALIDATE by refname/alias is not
+	//       supported by Webin V2 for cross-submission lifecycle ops..."
+	//   (b) Older "ADD/MODIFY/VALIDATE with target": "...VALIDATE action does
+	//       not take a target accession or refname"
+	// (a) currently fires first because `HasNonWhitespace(target_refname)` is
+	// checked before the action-vs-target compatibility check. Match on the
+	// substring "refname" — present in both messages — so this test stays
+	// green if the rejection order ever swaps back.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::VALIDATE;
+	env.target_refname = "my-alias";
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("refname"));
+}
+
+TEST_CASE("ENA envelope: whitespace-only target_accession is rejected", "[ena_envelope][lifecycle]") {
+	// "   " has non-zero length but is meaningless to the server. Catch it
+	// at envelope-build time rather than letting the round-trip discover it.
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::CANCEL;
+	env.target_accession = "   ";
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("target_accession"));
+}
+
+TEST_CASE("ENA envelope: whitespace-only target_refname is rejected", "[ena_envelope][lifecycle]") {
+	miint::SubmissionSpec env;
+	env.action = miint::ENAAction::RELEASE;
+	env.target_refname = "\t\n";
+	CHECK_THROWS_WITH(miint::BuildEnvelopeXML(env), Catch::Matchers::ContainsSubstring("target_refname"));
 }

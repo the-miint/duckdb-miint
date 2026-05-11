@@ -87,9 +87,9 @@ This registers a fixed-schema virtual catalog with one schema (`main`) and six t
 | `ena.experiments` | Library / platform metadata (`ERX`). | `alias`, `title`, `study_ref`, `sample_descriptor`, `design_description`, `library_name`, `library_strategy`, `library_source`, `library_selection`, `library_layout`, `platform`, `instrument_model`, `erx_accession` |
 | `ena.runs` | Sequence-file registration (`ERR`). | `alias`, `experiment_ref`, `title`, `files` (`LIST<STRUCT(filename, filetype, md5)>`), `err_accession` |
 | `ena.analyses` | Derived results (`ERZ`). INSERT not yet implemented. | `alias`, `study_ref`, `analysis_type`, `accession` |
-| `ena.submission_log` | Append-only in-memory bookkeeping. | `submission_id`, `submitted_at`, `endpoint`, `secret_name`, `action`, `object_type`, `n_objects`, `success`, `era_accession`, `request_payload`, `receipt`, `error_messages`, `duration_ms` |
+| `ena.submission_log` | Append-only in-memory bookkeeping. | `submission_id`, `submitted_at`, `endpoint`, `secret_name`, `action`, `object_type`, `n_objects`, `success`, `era_accession`, `request_payload`, `receipt`, `error_messages`, `duration_ms`, `target`, `object_aliases`, `object_accessions` |
 
-The `submission_log` is the only table you `SELECT` from. The other five are write-only — `SELECT` against them is reserved for a future Reports-API integration. `INSERT INTO ena.analyses` is reserved for a future build and currently raises a binder exception.
+The `submission_log` is the only table you `SELECT` from directly. The other five are submit-only — `SELECT` against them is not implemented (the Reports API powers the alias→accession lookup behind the lifecycle table fns, but doesn't surface a `SELECT *` view of the user's submission account; see Caveats). `INSERT INTO ena.analyses` is reserved for a future build and currently raises a binder exception. `DELETE FROM ena.<projects/samples/experiments/runs>` issues a `CANCEL` against Webin V2 (see Lifecycle).
 
 ### 3. Register the project
 
@@ -192,7 +192,7 @@ The `files` column expects a `LIST<STRUCT(filename, filetype, md5)>` — exactly
 
 ### Audit log
 
-Every INSERT appends a row to `ena.submission_log`, including the request payload, the raw receipt XML, and a stable `submission_id`. This is the source of truth for what was sent and when:
+Every `INSERT` (and every lifecycle action — see below) appends a row to `ena.submission_log`, including the request payload, the raw receipt XML, and a stable `submission_id`. This is the source of truth for what was sent and when:
 
 ```sql
 SELECT submitted_at, object_type, n_objects, success, era_accession, duration_ms
@@ -202,6 +202,114 @@ LIMIT 20;
 ```
 
 Failed submissions are also logged (`success = false`, `error_messages` populated), and the `INSERT` itself raises so the surrounding transaction sees the failure.
+
+`ena_upload_reads` is **not** logged — it's a transport-only operation (encode + gzip + ship FASTQ to webin2.ebi.ac.uk) and doesn't hit the Webin V2 submission endpoint. The server-side audit for uploads lives in your Webin account dashboard. The subsequent `INSERT INTO ena.runs` that references the uploaded files IS logged.
+
+## Lifecycle: cancel, release, embargo, modify
+
+Webin V2 supports five lifecycle actions on already-registered objects. The miint extension exposes them as table functions, plus a SQL `DELETE` shortcut for CANCEL:
+
+| Action | Surface |
+|---|---|
+| Cancel | `ena_cancel(secret, accession \| (refname, kind), catalog?)` &nbsp;or&nbsp; `DELETE FROM ena.<table> WHERE <accession_col> \| alias = '…'` |
+| Release | `ena_release(secret, accession \| (refname, kind), catalog?)` |
+| Hold (embargo until a date) | `ena_hold(secret, accession \| (refname, kind), until, catalog?)` |
+| Modify (project) | `ena_modify_project(secret, accession, alias, title, …)` |
+| Modify (sample) | `ena_modify_sample(secret, accession, alias, taxon_id, attributes, …)` |
+| Modify (experiment) | `ena_modify_experiment(secret, accession, alias, study_ref, sample_descriptor, …)` |
+| Modify (run) | `ena_modify_run(secret, accession, alias, experiment_ref, files, …)` |
+| Validate (dry-run) | `SET miint_ena_validate_only = true;` (any `INSERT INTO ena.X (…)`) |
+
+All four lifecycle table functions return a single row with `action`, `target`, `success`, `era_accession`, `hold_until_date`, `error_messages`, `duration_ms` and append a row to `ena.submission_log`. The MODIFY family returns the same row shape as the corresponding `INSERT`'s `RETURNING`.
+
+```sql
+-- Cancel a previously-registered project by accession.
+SELECT * FROM ena_cancel(secret => 'my_ena', accession => 'PRJEB12345');
+-- Equivalent SQL DELETE:
+DELETE FROM ena.projects WHERE prjeb_accession = 'PRJEB12345';
+
+-- Release a held sample by accession.
+SELECT * FROM ena_release(secret => 'my_ena', accession => 'ERS999999');
+
+-- Embargo a sample until a future date.
+SELECT * FROM ena_hold(secret => 'my_ena', accession => 'ERS999999', until => '2027-12-31');
+```
+
+### Targeting by alias (`refname` + `kind`)
+
+The lifecycle table functions also accept the alias the object was originally registered with. The extension translates the alias to its server-assigned accession via the Webin Reports API automatically before issuing the lifecycle action — one HTTP GET to resolve, then the lifecycle POST. Pass exactly one of `accession` or `refname` (both at once is rejected at bind time).
+
+When `refname` is set, the sibling `kind` named parameter is **required**. Aliases are unique per-account-per-kind on Webin; the kind disambiguates a reused alias. `kind` is one of `'projects'` / `'samples'` / `'experiments'` / `'runs'` (matches the `ena.<table>` names). The accession-targeted path is kind-agnostic (the prefix encodes it).
+
+```sql
+-- Cancel by alias — Reports API resolves to PRJEB12345 transparently.
+SELECT * FROM ena_cancel(secret => 'my_ena',
+                         refname => 'my-cohort-2026',
+                         kind => 'projects');
+
+-- DELETE-by-alias works the same way; kind comes from the table.
+DELETE FROM ena.projects WHERE alias = 'my-cohort-2026';
+
+-- Hold a sample by alias.
+SELECT * FROM ena_hold(secret => 'my_ena',
+                       refname => 's-pilot-001',
+                       kind => 'samples',
+                       until => '2027-12-31');
+```
+
+If the alias isn't registered in the submission account, the call surfaces a friendly `refname '…' not found in this submission account (kind=…)` error from the Reports lookup before any lifecycle POST is attempted. Verify the kind first — a wrong-kind lookup also returns "not found".
+
+### Looking up an accession from an alias (in-session, no Reports round-trip)
+
+`ena.submission_log` retains every alias and its server-assigned accession from the `INSERT` receipt in two parallel `LIST(VARCHAR)` columns: `object_aliases` and `object_accessions`. Within the same session you can recover an accession without hitting the Reports API:
+
+```sql
+-- Inspect first, then act — useful when you want to confirm the accession
+-- (e.g. log it, sanity-check the kind) before the lifecycle call.
+SELECT object_accessions[list_position(object_aliases, 'my-cohort-2026')] AS prjeb
+FROM ena.submission_log
+WHERE list_contains(object_aliases, 'my-cohort-2026')
+  AND object_type = 'projects'
+  AND success
+ORDER BY submitted_at DESC LIMIT 1;
+-- → 'PRJEB12345'
+
+DELETE FROM ena.projects WHERE prjeb_accession = 'PRJEB12345';
+```
+
+`submission_log` is **in-memory per attached catalog** — `DETACH ena` empties it. For the common alias-targeted lifecycle case, the table-function `refname` + `kind` form (above) handles cross-session lookup automatically. For long-term audit / forensic use, persist the log:
+
+```sql
+-- Persist the alias↔accession map across sessions (audit only — the
+-- refname+kind form already handles cross-session lookup transparently):
+COPY (
+    SELECT submitted_at, object_type, object_aliases, object_accessions
+    FROM ena.submission_log WHERE success
+) TO 'ena_objects.parquet' (FORMAT PARQUET);
+```
+
+### Audit-log shape for lifecycle rows
+
+Lifecycle calls log the action plus the `target` accession (post-translation if the call was alias-targeted). `object_aliases` / `object_accessions` are empty for lifecycle rows — those parallel arrays only carry per-object children of an `INSERT` receipt, and lifecycle ops don't register new objects. `era_accession` is also empty: Webin V2 doesn't assign a submission accession for cross-submission lifecycle ops. The `success` column reflects whether the action took effect (the receipt's `<RECEIPT @success>` attribute is unreliable for lifecycle and is parsed semantically here from `<INFO>` vs `<ERROR>` children).
+
+`object_type` is populated from the `kind` named parameter on alias-targeted lifecycle calls, and from the table name on `DELETE FROM ena.X` calls. Accession-targeted lifecycle calls (where the user passes only `accession`, no `kind` to disambiguate) leave `object_type` empty — the function is kind-agnostic on that path.
+
+```sql
+SELECT submitted_at, object_type, action, target, success, duration_ms
+FROM ena.submission_log
+WHERE action IN ('CANCEL', 'RELEASE', 'HOLD')
+ORDER BY submitted_at DESC LIMIT 20;
+```
+
+### Status-transition rules (Webin V2 semantics)
+
+ENA's submission status machine forbids certain transitions. The most common surprise is **PUBLIC → CANCELLED** — once an object has been `RELEASE`d (made public), it cannot subsequently be cancelled. The lifecycle table functions surface this as a server-side error message when you try, with no client-side gate (every other rule that the extension knows about gates at bind time). Plan accordingly: if you want to clean an object up, don't `RELEASE` it first.
+
+Other transitions to be aware of:
+
+- `HOLD → CANCEL`: works (held objects can be withdrawn).
+- `CANCEL` is terminal — cancelled objects can't be revived.
+- `RELEASE` is one-way for the submitter (the object goes PUBLIC and can be browsed by anyone; only ENA staff can suppress).
 
 ## End-to-end example
 
@@ -247,7 +355,7 @@ DETACH ena;
 
 ## Caveats and limits
 
-- `SELECT * FROM ena.<submission table>` is **not** supported (other than `submission_log`). The Webin V2 API doesn't expose registered objects through the same endpoint they were submitted to; round-tripping requires the [Reports API](https://www.ebi.ac.uk/ena/submit/report) (future work).
+- `SELECT * FROM ena.<submission table>` is **not** supported (other than `submission_log`). The Webin V2 API doesn't expose registered objects through the same endpoint they were submitted to. The extension uses the [Reports API](https://www.ebi.ac.uk/ena/submit/report) for the alias→accession lookup that powers `refname` + `kind` lifecycle calls and `DELETE WHERE alias = '…'`, but doesn't surface a `SELECT *` view of the user's submission account through the catalog.
 - The `test` endpoint (`wwwdev.ebi.ac.uk`) is a sandbox: receipts come back with valid-looking accessions, but those accessions are not addressable through the public Browser. Use it for dry runs and CI; switch to `production` for real submissions.
 - File uploads require either `ascp` (Aspera) on `PATH` or libcurl-backed streaming. Aspera is faster for large files but requires the IBM Aspera client; HTTPS/FTP works without extra dependencies. The local `file://` transport is for testing the encode pipeline only — it does not push anything to ENA.
 - WASM builds: ENA *reading* works in all WASM variants. ENA *submission* requires an upload transport — Aspera is unavailable on any WASM (no `fork`/`exec`) and libcurl is gated off on `wasm_threads` (vcpkg port lacks `-pthread`); only `wasm_eh` and `wasm_mvp` can submit, and only via curl-based HTTPS/FTP transports.

@@ -18,6 +18,12 @@ namespace miint {
 
 enum class ENAAction { ADD, MODIFY, CANCEL, HOLD, RELEASE, VALIDATE };
 
+// Wire-format action name ("ADD" / "MODIFY" / ...). Lifted out of the
+// envelope builder's anonymous namespace so submission_log writers can
+// stringify the same way the wire format does, without duplicating the
+// switch.
+const char *ActionName(ENAAction a);
+
 // Shared across all four per-table insert paths. Each `Submit*InsertOutcome`
 // takes this; per-table aliases (ENAProjectInsertOptions, ENASampleInsertOptions,
 // ...) are kept as type aliases for call-site readability.
@@ -26,6 +32,12 @@ struct ENAInsertOptions {
 	std::string user;         // Webin-XXXXX
 	std::string password;
 	std::string hold_until_date; // optional, "YYYY-MM-DD"
+	// Wire-format action. ADD is the registration path (assigns accessions);
+	// VALIDATE is a server-side dry-run that returns a receipt with no
+	// per-object children. MODIFY will follow the same envelope shape as ADD
+	// once L4 ships. Lifecycle ops (CANCEL/RELEASE/HOLD) go through
+	// SubmitLifecycle and never touch this struct.
+	ENAAction action = ENAAction::ADD;
 };
 
 // Common shape of every Submit*Outcome. The four per-table outcomes
@@ -55,6 +67,12 @@ struct ProjectSpec {
 	std::string description;  // optional
 	std::string project_type; // METAGENOMIC, WGS, ... — currently informational
 	bool is_umbrella = false;
+	// Existing PRJEB accession — required on MODIFY (Webin V2 needs both
+	// `alias` and `accession` on the project element to identify the
+	// already-registered object), ignored on ADD. The envelope builder emits
+	// `"accession":"…"` only when this is non-empty; an ADD with this set is
+	// silently passed through (server rejects the contradiction).
+	std::string accession;
 };
 
 struct SampleSpec {
@@ -72,6 +90,12 @@ struct SampleSpec {
 	// by tag (matches against `attributes[].first`); tags not present here
 	// are emitted without a `units` JSON field.
 	std::vector<std::pair<std::string, std::string>> attribute_units;
+	// Existing ERS accession — required on MODIFY (Webin V2 needs both
+	// `alias` and `accession` on the sample element to identify the
+	// already-registered object), ignored on ADD. Same wire-format role as
+	// `ProjectSpec::accession`. The envelope builder emits
+	// `"accession":"…"` only when this is non-empty.
+	std::string accession;
 };
 
 // Cross-reference to a parent object (study / sample / experiment). V2 accepts
@@ -82,6 +106,38 @@ struct RefDescriptor {
 	std::string accession;
 	std::string refname;
 };
+
+// Disambiguate a user-supplied cross-reference string into accession-vs-refname.
+// Routes the string to `RefDescriptor::accession` iff it matches one of the
+// canonical accession prefixes followed by digits only; everything else
+// (including aliases shaped like `ERPmycoolstudy`) routes to
+// `RefDescriptor::refname`. The "digits only" suffix matters: real ENA
+// accessions are always `<PREFIX><NUMERIC>` (see
+// localdocs/ena-research-webin-v2-deep.md §1.1), and a user alias that
+// happens to start with an accession prefix would otherwise be silently
+// misclassified — the server then can't find it.
+//
+// The named wrappers below (`ResolveENAStudyRef`, `ResolveENASampleRef`,
+// future `ResolveENAExperimentRef` for L4d) carry the canonical prefix lists
+// per object kind so callers don't repeat them. Use the wrappers; expose the
+// generic primitive only for tests + future kinds where the wrapper hasn't
+// landed yet.
+RefDescriptor ResolveENARefDescriptor(const std::string &value, std::initializer_list<const char *> accession_prefixes);
+
+// Disambiguate a `study_ref` value (project-side accession or alias). Real
+// project accessions: PRJEB / PRJNA / PRJDB; pre-ENA-namespace study
+// accession: ERP. Used by both INSERT INTO ena.experiments and
+// ena_modify_experiment so the user surface is symmetric.
+RefDescriptor ResolveENAStudyRef(const std::string &value);
+
+// Disambiguate a `sample_descriptor` value (sample-side accession or alias).
+// Real sample accessions: ERS (ENA), SAMEA (BioSamples-EBI), SAMN (NCBI),
+// SAMD (DDBJ).
+RefDescriptor ResolveENASampleRef(const std::string &value);
+
+// Disambiguate an `experiment_ref` value (experiment-side accession or
+// alias). Real experiment accessions are always `ERX<digits>`.
+RefDescriptor ResolveENAExperimentRef(const std::string &value);
 
 enum class ENALibraryLayout { SINGLE, PAIRED };
 
@@ -108,6 +164,12 @@ struct ExperimentSpec {
 	ENALibraryLayout library_layout = ENALibraryLayout::SINGLE;
 	std::string platform;         // required, e.g. ILLUMINA, OXFORD_NANOPORE
 	std::string instrument_model; // required, free-form (server validates)
+	// Existing ERX accession — required on MODIFY (Webin V2 needs both
+	// `alias` and `accession` on the experiment element to identify the
+	// already-registered object), ignored on ADD. The XML emitter adds
+	// `accession="…"` on `<EXPERIMENT alias="…">` only when this is
+	// non-empty. Mirrors `ProjectSpec::accession` and `SampleSpec::accession`.
+	std::string accession;
 };
 
 struct RunSpec {
@@ -115,11 +177,26 @@ struct RunSpec {
 	std::string title; // optional
 	RefDescriptor experiment_ref;
 	std::vector<RunFile> files; // required, ≥ 1
+	// Existing ERR accession — required on MODIFY (Webin V2 needs both
+	// `alias` and `accession` on the run element to identify the
+	// already-registered object), ignored on ADD. The XML emitter adds
+	// `accession="…"` on `<RUN alias="…">` only when this is non-empty.
+	// Mirrors `ProjectSpec::accession` / `SampleSpec::accession` /
+	// `ExperimentSpec::accession`.
+	std::string accession;
 };
 
 struct SubmissionSpec {
 	ENAAction action = ENAAction::ADD;
 	std::string hold_until_date; // optional, "YYYY-MM-DD" or ISO-8601 with TZ
+	// Targeted lifecycle actions (CANCEL, RELEASE, HOLD-with-date) reference an
+	// already-registered object via `target=` on the action element. Body sets
+	// (PROJECT_SET / SAMPLE_SET / ...) are not emitted when a target is set —
+	// the action itself is the entire payload. `target_accession` wins when
+	// both are populated, mirroring `RefDescriptor`. Setting either on
+	// ADD/MODIFY/VALIDATE is rejected at validate time.
+	std::string target_accession;
+	std::string target_refname;
 	std::vector<ProjectSpec> projects;
 	std::vector<SampleSpec> samples;
 	std::vector<ExperimentSpec> experiments;
@@ -141,17 +218,23 @@ struct SubmissionSpec {
 // bytes; valid UTF-8 is the caller's responsibility, since the function does
 // not validate or substitute U+FFFD.
 //
-// V2 server caveat: this JSON envelope is only accepted for `projects` and
-// `samples`. Submitting `experiments` / `runs` via JSON returns HTTP 500
-// from a generic NPE in the V2 dispatcher (verified live 2026-05-04). Use
-// `BuildEnvelopeXML` for those object types.
+// V2 server caveat: in production this JSON envelope is now used only for
+// `projects`. Samples were on the JSON path until 2026-05-07, when a live
+// wwwdev probe surfaced an XSD-ordering bug in V2's JSON-to-XML dispatcher
+// (`<DESCRIPTION>` was emitted before `<SAMPLE_NAME>`, violating
+// `SRA.sample.xsd`). L4b-fix flipped samples to `BuildEnvelopeXML`. The
+// `samples` / `experiments` / `runs` array emitters remain here and are still
+// exercised by unit tests, but no production caller routes those object kinds
+// through this path.
 std::string BuildEnvelopeJSON(const SubmissionSpec &env);
 
-// Build the V2 XML envelope. Currently scoped to experiments + runs (the
-// SRA-side objects whose JSON dispatch is broken on V2). Same `SubmissionSpec`
-// input shape as `BuildEnvelopeJSON`; populated `experiments` / `runs` arrays
-// are emitted under `<EXPERIMENT_SET>` / `<RUN_SET>`. `projects` / `samples`
-// in the spec are ignored here — submit them via `BuildEnvelopeJSON` instead.
+// Build the V2 XML envelope. Production wire format for samples (post
+// L4b-fix) + experiments + runs. Same `SubmissionSpec` input shape as
+// `BuildEnvelopeJSON`; populated `samples` / `experiments` / `runs` arrays
+// are emitted under `<SAMPLE_SET>` / `<EXPERIMENT_SET>` / `<RUN_SET>` in
+// SRA.submission.xsd order. `projects` in the spec are ignored here — submit
+// them via `BuildEnvelopeJSON` (V2's JSON dispatcher handles projects
+// correctly; only the sample-side ordering bug forced the XML migration).
 //
 // Compact, no whitespace, with the `<?xml ... ?>` declaration. String values
 // are XML-escaped (`< > & " '`). Invariant violations throw

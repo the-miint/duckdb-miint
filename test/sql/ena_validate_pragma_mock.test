@@ -1,0 +1,160 @@
+# name: test/sql/ena_validate_pragma_mock.test
+# description: SET miint_ena_validate_only flips ADD -> VALIDATE on ena.* INSERTs
+# group: [sql]
+
+require miint
+
+require-env ENA_WEBIN_MOCK_URL
+
+require-env MIINT_ENA_PORTAL_URL_BASE
+
+# httpfs implements POST in DuckDB; the built-in HTTP client supports only GET.
+require httpfs
+
+statement ok
+CREATE SECRET test_ena_validate_mock (
+    TYPE ENA,
+    USER 'Webin-99999',
+    PASSWORD 'mock-password',
+    ENDPOINT 'test',
+    ENDPOINT_URL '${ENA_WEBIN_MOCK_URL}'
+);
+
+statement ok
+ATTACH '' AS ena (TYPE ENA, SECRET 'test_ena_validate_mock');
+
+# Default: pragma off; INSERT acts as ADD (baseline sanity for the test catalog)
+statement ok
+INSERT INTO ena.projects (alias, title, project_type)
+VALUES ('validate-baseline', 'baseline ADD', 'METAGENOMIC');
+
+query I
+SELECT action FROM ena.submission_log
+WHERE object_type = 'projects' AND n_objects = 1
+ORDER BY submitted_at DESC LIMIT 1;
+----
+ADD
+
+# Flip to VALIDATE-only mode.
+statement ok
+SET miint_ena_validate_only = true;
+
+# Under VALIDATE, RETURNING produces zero rows: the receipt has no per-object
+# accessions because nothing was actually registered.
+query III
+INSERT INTO ena.projects (alias, title, project_type)
+VALUES ('validate-dryrun-1', 'dry run', 'METAGENOMIC')
+RETURNING alias, prjeb_accession, erp_accession;
+----
+
+# submission_log captured the dry-run as VALIDATE; success=true.
+query IIII
+SELECT object_type, action, success, n_objects
+FROM ena.submission_log
+WHERE object_type = 'projects' AND n_objects = 1
+ORDER BY submitted_at DESC LIMIT 1;
+----
+projects	VALIDATE	true	1
+
+# era_accession (the submission ID) is still populated by VALIDATE.
+query I
+SELECT era_accession <> ''
+FROM ena.submission_log
+WHERE action = 'VALIDATE' AND object_type = 'projects'
+ORDER BY submitted_at DESC LIMIT 1;
+----
+true
+
+# No per-object children → object_aliases / object_accessions are empty lists.
+query II
+SELECT len(object_aliases), len(object_accessions)
+FROM ena.submission_log
+WHERE action = 'VALIDATE' AND object_type = 'projects'
+ORDER BY submitted_at DESC LIMIT 1;
+----
+0	0
+
+# Alias collision check is skipped under VALIDATE — the user is dry-running and
+# may legitimately want to validate against an alias they've already registered
+# (e.g. before issuing a MODIFY in a later phase).
+statement ok
+INSERT INTO ena.projects (alias, title, project_type)
+VALUES ('EXISTS_my_validate', 'colliding alias under VALIDATE', 'METAGENOMIC');
+
+# Multi-row VALIDATE: still records action=VALIDATE; n_objects matches input.
+statement ok
+INSERT INTO ena.projects (alias, title, project_type) VALUES
+    ('validate-multi-a', 'multi a', 'METAGENOMIC'),
+    ('validate-multi-b', 'multi b', 'WGS');
+
+query I
+SELECT count(*) FROM ena.submission_log
+WHERE action = 'VALIDATE' AND object_type = 'projects' AND n_objects = 2;
+----
+1
+
+# Samples too: VALIDATE skips collision and records action=VALIDATE.
+statement ok
+INSERT INTO ena.samples (alias, taxon_id, checklist, attributes)
+VALUES ('validate-sample-alpha', 408170, 'ERC000015',
+        MAP {'collection date': '2026-04-07'});
+
+query II
+SELECT object_type, action FROM ena.submission_log
+WHERE object_type = 'samples'
+ORDER BY submitted_at DESC LIMIT 1;
+----
+samples	VALIDATE
+
+# Failure path under VALIDATE: a FAIL alias still surfaces as <ERROR>, the
+# INSERT throws, and the submission_log row is recorded with action=VALIDATE
+# and success=false (matches the ADD failure-recording contract).
+statement error
+INSERT INTO ena.projects (alias, title, project_type)
+VALUES ('mock-FAIL-validate', 'should fail in validate', 'METAGENOMIC');
+----
+mock validation failure
+
+query III
+SELECT object_type, action, success FROM ena.submission_log
+WHERE object_type = 'projects' AND NOT success
+ORDER BY submitted_at DESC LIMIT 1;
+----
+projects	VALIDATE	false
+
+# A failed VALIDATE row carries no per-object accessions either — the receipt
+# emitted only <ERROR>, so object_aliases / object_accessions stay empty.
+query II
+SELECT len(object_aliases), len(object_accessions)
+FROM ena.submission_log
+WHERE object_type = 'projects' AND NOT success
+ORDER BY submitted_at DESC LIMIT 1;
+----
+0	0
+
+# Disable the pragma; INSERT goes back to ADD and collision check is active.
+statement ok
+SET miint_ena_validate_only = false;
+
+statement ok
+INSERT INTO ena.projects (alias, title, project_type)
+VALUES ('validate-after-reset', 'after reset', 'METAGENOMIC');
+
+query I
+SELECT action FROM ena.submission_log
+WHERE object_type = 'projects' AND n_objects = 1
+ORDER BY submitted_at DESC LIMIT 1;
+----
+ADD
+
+statement error
+INSERT INTO ena.projects (alias, title, project_type)
+VALUES ('EXISTS_after_reset', 'should fail', 'METAGENOMIC');
+----
+EXISTS_after_reset
+
+statement ok
+DETACH ena;
+
+statement ok
+DROP SECRET test_ena_validate_mock;

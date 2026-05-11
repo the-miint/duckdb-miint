@@ -10,6 +10,8 @@
 
 #pragma once
 
+#include "ena_envelope_builder.hpp"
+
 #include "duckdb/common/index_vector.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -36,6 +38,14 @@ struct ResolvedENACredentials {
 
 ResolvedENACredentials ResolveENACredentials(ClientContext &context, ENACatalog &catalog);
 
+// Look up a Webin secret by name and resolve its user/password/endpoint
+// fields. Used by code paths that don't have an ENACatalog handle
+// (notably the lifecycle table functions). `caller` is the user-facing
+// function name, embedded in error messages so the user sees
+// "ena_cancel: ..." rather than a generic "ENA secret: ...".
+ResolvedENACredentials ResolveENACredentialsByName(ClientContext &context, const string &caller,
+                                                   const string &secret_name);
+
 // Translate a logical (table) column index into a position in the input
 // chunk, honouring `LogicalInsert::column_index_map` semantics. Returns
 // `DConstants::INVALID_INDEX` when the column was not provided.
@@ -57,7 +67,7 @@ string GenerateSubmissionId();
 // dispatcher (e.g. "projects" / "samples") is filled in by the caller.
 struct SubmissionLogPayload {
 	string object_type;
-	string action; // "ADD", "MODIFY", ...
+	string action; // "ADD", "MODIFY", "CANCEL", "HOLD", "RELEASE", "VALIDATE"
 	int32_t n_objects;
 	bool success;
 	int64_t duration_ms;
@@ -65,8 +75,59 @@ struct SubmissionLogPayload {
 	string raw_receipt;
 	string era_accession;
 	std::vector<std::string> error_messages;
+	// Lifecycle target accession or refname; empty for body-style actions
+	// (ADD / MODIFY / VALIDATE).
+	string target;
+	// Per-object alias / primary-accession parallel arrays. Populated by
+	// the ADD path so users can later recover an accession from an alias
+	// (lifecycle ops on already-registered objects need the accession;
+	// see docs/ena.md). Empty on lifecycle ops.
+	std::vector<std::string> object_aliases;
+	std::vector<std::string> object_accessions;
 };
 
 void RecordSubmissionLog(ENACatalog &catalog, const ResolvedENACredentials &creds, const SubmissionLogPayload &payload);
+
+// Look up the named ATTACHed database and return it iff its catalog is an
+// ENACatalog. Behaviour depends on whether the catalog name was the
+// (silent) default 'ena' or explicitly requested by the user via `catalog =>`:
+//   - default name + missing/wrong-type → nullptr (silent skip; matches the
+//     one-shot CANCEL/MODIFY UX where the user has no full ENA catalog
+//     attached).
+//   - explicit name + missing/wrong-type → throw InvalidInputException (the
+//     user asked for audit logging; failing silently would create an
+//     invisible audit gap).
+// `caller` is the user-facing function name — embedded in error messages
+// (e.g. "ena_modify_project: catalog 'foo' is not attached").
+ENACatalog *FindAttachedENACatalog(ClientContext &context, const string &caller, const string &catalog_name,
+                                   bool explicit_name);
+
+// True iff `s` contains only ASCII whitespace (or is empty). Used by the
+// table functions to bind-time-reject inputs like `accession => '   '`
+// which pass non-empty but would emit garbage to the server.
+bool IsENAStringWhitespaceOnly(const string &s);
+
+// Pull a MAP(VARCHAR, VARCHAR) Value into a (tag, value) vector preserving
+// insertion order. NULL maps and empty maps both yield no entries.
+// `caller` shows up in error messages (e.g. "ena_modify_sample") so users
+// can tell which call surfaced a malformed entry. `column_label` distinguishes
+// `attributes` from `attribute_units`.
+std::vector<std::pair<std::string, std::string>> ExtractENAKeyValueMap(const Value &v, const char *caller,
+                                                                       const char *column_label);
+
+// Pull a LIST(STRUCT(filename VARCHAR, filetype VARCHAR, md5 VARCHAR)) Value
+// into a `vector<RunFile>` preserving insertion order. NULL list and empty
+// list both yield no entries; the caller can distinguish those via
+// `vector::empty()` and reject empty lists if its contract requires at least
+// one file (the wire-spec ValidateRunSpec will reject anyway, but bind-time
+// rejection is faster and gives a cleaner message). NULL entries inside the
+// list throw `InvalidInputException`; a struct missing one of the three
+// fields throws; non-empty filename/filetype/md5 required per entry. `caller`
+// shows up in error messages so users can tell which call surfaced a
+// malformed entry. The struct field name `md5` matches the INSERT-path
+// storage column shape; internally `RunFile::checksum` is named after the
+// SRA.run.xsd `<FILE checksum="…"/>` attribute. Mirrors
+// `ExtractENAKeyValueMap`'s shape.
+std::vector<miint::RunFile> ExtractENARunFilesList(const Value &v, const char *caller);
 
 } // namespace duckdb

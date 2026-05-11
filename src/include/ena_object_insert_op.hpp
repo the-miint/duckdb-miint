@@ -23,6 +23,7 @@
 
 #include "ena_alias_check.hpp"
 #include "ena_client.hpp"
+#include "ena_envelope_builder.hpp" // miint::ENAAction, miint::ActionName
 #include "ena_insert_common.hpp"
 #include "ena_post_fn.hpp"
 #include "ena_storage.hpp"
@@ -80,16 +81,28 @@ public:
 	bool finished = false;
 };
 
-// Fill the user/password/endpoint/hold fields shared by every per-table
+// Fill the user/password/endpoint/hold/action fields shared by every per-table
 // OptsT (`ENAProjectInsertOptions`, `ENASampleInsertOptions`, ...). Centralised
-// so a future field addition lands in one place.
+// so a future field addition lands in one place. `action` is required: the
+// CRTP base picks ADD or VALIDATE based on the session pragma, and a future
+// MODIFY phase will pass MODIFY here too.
 template <class OptsT>
-void FillCommonENAInsertOptions(OptsT &opts, const ResolvedENACredentials &creds, const std::string &hold) {
+void FillCommonENAInsertOptions(OptsT &opts, const ResolvedENACredentials &creds, const std::string &hold,
+                                miint::ENAAction action) {
 	opts.endpoint_url = creds.endpoint_url + "/submit";
 	opts.user = creds.user;
 	opts.password = creds.password;
 	opts.hold_until_date = hold;
+	opts.action = action;
 }
+
+// Read the session-scoped `miint_ena_validate_only` flag. Registered as a
+// BOOLEAN extension option in `LoadInternal` (see src/miint_extension.cpp).
+// True → flip the next ena.* INSERT to VALIDATE (server-side dry-run, no
+// accessions returned). Default false. Reads via TryGetCurrentSetting so a
+// missing-option fallback would surface as a programmer error rather than
+// silently disabling the feature.
+bool IsENAValidateOnlyEnabled(ClientContext &context);
 
 template <class Derived, class SpecT, class OptsT, class OutcomeT>
 class ENAObjectInsertOperator : public PhysicalOperator {
@@ -163,8 +176,11 @@ public:
 
 		auto built = Derived::BuildFromBuffer(state.buffered, column_index_map);
 
+		const bool validate_only = IsENAValidateOnlyEnabled(context);
+		const auto action = validate_only ? miint::ENAAction::VALIDATE : miint::ENAAction::ADD;
+
 		OptsT opts;
-		FillCommonENAInsertOptions(opts, creds, built.hold_until_date);
+		FillCommonENAInsertOptions(opts, creds, built.hold_until_date, action);
 
 		miint::ENAClient client(*context.db);
 
@@ -187,11 +203,24 @@ public:
 		// validation failure (user error) and not a recorded submission
 		// attempt. Pinned by test/sql/ena_alias_collision_mock.test which
 		// asserts no submission_log row appears for a blocked alias.
-		RunAliasCollisionCheck(built.specs, client, opts);
-		// Dispatch by Content-Type. V2 accepts JSON only for project +
-		// sample; experiment + run + analysis must be XML (the JSON
-		// dispatcher NPEs for SRA-side objects). Both paths request an
-		// XML receipt — our parser only consumes the canonical XSD shape.
+		//
+		// Skipped under VALIDATE: dry-run validation against an alias the
+		// user has already registered (e.g. before a future MODIFY) is a
+		// legitimate workflow — the collision check would otherwise block
+		// the very thing the user is trying to dry-run. The server-side
+		// receipt still surfaces any genuine alias issue if the validation
+		// itself rejects it.
+		if (!validate_only) {
+			RunAliasCollisionCheck(built.specs, client, opts);
+		}
+		// Dispatch by Content-Type. Post L4b-fix (2026-05-07), V2 JSON is
+		// used only for projects; samples + experiment + run + analysis go
+		// through XML. Samples were on JSON until live wwwdev surfaced an
+		// XSD-ordering bug in V2's JSON-to-XML dispatcher (DESCRIPTION
+		// emitted before SAMPLE_NAME); experiment/run/analysis already
+		// required XML because the JSON dispatcher NPEs for SRA-side
+		// objects. Both paths request an XML receipt — our parser only
+		// consumes the canonical XSD shape.
 		auto post_fn = [&client](const std::string &url, const std::string &body, const std::string &user,
 		                         const std::string &password, const std::string &content_type) {
 			if (content_type == "application/xml") {
@@ -223,7 +252,7 @@ public:
 
 		SubmissionLogPayload log_payload;
 		log_payload.object_type = Derived::ObjectName();
-		log_payload.action = "ADD";
+		log_payload.action = miint::ActionName(opts.action);
 		log_payload.n_objects = static_cast<int32_t>(built.specs.size());
 		log_payload.success = success;
 		log_payload.duration_ms = outcome.duration_ms;
@@ -231,6 +260,17 @@ public:
 		log_payload.raw_receipt = outcome.raw_receipt;
 		log_payload.era_accession = outcome.era_accession;
 		log_payload.error_messages = error_messages;
+		// Capture per-object alias / primary accession into the audit log so
+		// users can recover an accession from an alias within the session
+		// (cross-submission lifecycle ops on Webin V2 require accession
+		// targeting — see docs/ena.md). On a parse failure or partial
+		// receipt `outcome.rows` is empty, so the lists stay empty too.
+		log_payload.object_aliases.reserve(outcome.rows.size());
+		log_payload.object_accessions.reserve(outcome.rows.size());
+		for (const auto &row : outcome.rows) {
+			log_payload.object_aliases.push_back(row.alias);
+			log_payload.object_accessions.push_back(Derived::PrimaryAccession(row));
+		}
 		RecordSubmissionLog(catalog, creds, log_payload);
 
 		if (transport_failure) {
@@ -251,7 +291,11 @@ public:
 			throw InvalidInputException("%s failed: %s", Derived::ThrowPrefix(), detail);
 		}
 
-		if (return_chunk) {
+		// VALIDATE leaves outcome.rows empty (no per-object accessions in the
+		// receipt). AppendReturningRows asserts rows.size() == specs.size() in
+		// debug builds, so guard the call rather than weaken that invariant —
+		// it's load-bearing for the ADD path.
+		if (return_chunk && !outcome.rows.empty()) {
 			Derived::AppendReturningRows(state.return_collection, state.return_types, built.specs, outcome);
 		}
 		return SinkFinalizeType::READY;

@@ -151,3 +151,59 @@ TEST_CASE("ENA experiments insert: receipt missing alias is reported clearly", "
 
 	REQUIRE_THROWS_WITH(SubmitExperimentInsert(exps, opts, post_fn), Catch::Matchers::ContainsSubstring("orphan"));
 }
+
+TEST_CASE("ENA experiments insert: MODIFY round-trips the user-supplied accession back into the row",
+          "[ena_experiments_insert][modify]") {
+	CapturedPost captured;
+	auto post_fn = [&captured](const std::string &url, const std::string &body, const std::string &user,
+	                           const std::string &password, const std::string &content_type) {
+		captured = {url, body, user, password, content_type};
+		// Real wwwdev MODIFY echoes the user-supplied ERX verbatim. Mirror.
+		return MakeExperimentReceipt({{"e1", "ERX9999100"}});
+	};
+
+	auto exp = MinimalExperiment("e1");
+	exp.accession = "ERX9999100";
+	exp.title = "Updated experiment title";
+	std::vector<ExperimentSpec> exps = {exp};
+
+	ENAExperimentInsertOptions opts;
+	opts.endpoint_url = "http://mock.example/submit";
+	opts.user = "Webin-1";
+	opts.password = "pw";
+	opts.action = ENAAction::MODIFY;
+
+	auto outcome = SubmitExperimentInsertOutcome(exps, opts, post_fn);
+	REQUIRE(outcome.success);
+	REQUIRE(outcome.rows.size() == 1);
+	REQUIRE(outcome.rows[0].alias == "e1");
+	REQUIRE(outcome.rows[0].erx_accession == "ERX9999100");
+	REQUIRE(captured.body.find("<MODIFY/>") != std::string::npos);
+	REQUIRE(captured.body.find(R"X(<EXPERIMENT alias="e1" accession="ERX9999100">)X") != std::string::npos);
+	// Pin TITLE emission so a future AppendXmlExperiment regression that drops
+	// the optional element doesn't slip past the envelope-only test layer.
+	REQUIRE(captured.body.find("<TITLE>Updated experiment title</TITLE>") != std::string::npos);
+}
+
+TEST_CASE("ENA experiments insert: MODIFY failure receipt surfaces the server error",
+          "[ena_experiments_insert][modify]") {
+	auto post_fn = [](const std::string &, const std::string &, const std::string &, const std::string &,
+	                  const std::string &) {
+		return MakeExperimentReceipt({}, false, "ERX00000 not found in submission account");
+	};
+	auto exp = MinimalExperiment("e1");
+	exp.accession = "ERX00000";
+	std::vector<ExperimentSpec> exps = {exp};
+
+	ENAExperimentInsertOptions opts;
+	opts.endpoint_url = "http://mock.example/submit";
+	opts.user = "Webin-1";
+	opts.password = "pw";
+	opts.action = ENAAction::MODIFY;
+
+	auto outcome = SubmitExperimentInsertOutcome(exps, opts, post_fn);
+	REQUIRE_FALSE(outcome.success);
+	REQUIRE(outcome.rows.empty());
+	REQUIRE(outcome.error_messages.size() == 1);
+	REQUIRE_THAT(outcome.error_messages[0], Catch::Matchers::ContainsSubstring("ERX00000 not found"));
+}

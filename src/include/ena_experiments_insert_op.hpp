@@ -30,6 +30,9 @@ public:
 	static string OperatorName() {
 		return "ENA_EXPERIMENTS_INSERT";
 	}
+	static const std::string &PrimaryAccession(const miint::ENAExperimentInsertResult &row) {
+		return row.erx_accession;
+	}
 
 	static ENABuiltSpecs<miint::ExperimentSpec> BuildFromBuffer(ColumnDataCollection &buffer,
 	                                                            const physical_index_vector_t<idx_t> &column_index_map);

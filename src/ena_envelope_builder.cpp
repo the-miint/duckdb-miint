@@ -188,6 +188,49 @@ void AppendJsonString(std::string &out, const std::string &s) {
 	out.push_back('"');
 }
 
+} // namespace
+
+RefDescriptor ResolveENARefDescriptor(const std::string &value,
+                                      std::initializer_list<const char *> accession_prefixes) {
+	RefDescriptor ref;
+	for (const auto *p : accession_prefixes) {
+		const std::string prefix(p);
+		// `value.size() <= prefix.size()` is intentional: a bare prefix with
+		// no digits following ("PRJEB" alone) is not a valid accession; treat
+		// it as a refname. Real accessions always have at least one digit
+		// after the prefix.
+		if (value.size() <= prefix.size() || value.compare(0, prefix.size(), prefix) != 0) {
+			continue;
+		}
+		bool all_digits = true;
+		for (size_t i = prefix.size(); i < value.size(); ++i) {
+			unsigned char c = static_cast<unsigned char>(value[i]);
+			if (c < '0' || c > '9') {
+				all_digits = false;
+				break;
+			}
+		}
+		if (all_digits) {
+			ref.accession = value;
+			return ref;
+		}
+	}
+	ref.refname = value;
+	return ref;
+}
+
+RefDescriptor ResolveENAStudyRef(const std::string &value) {
+	return ResolveENARefDescriptor(value, {"PRJEB", "PRJNA", "PRJDB", "ERP"});
+}
+
+RefDescriptor ResolveENASampleRef(const std::string &value) {
+	return ResolveENARefDescriptor(value, {"ERS", "SAMEA", "SAMN", "SAMD"});
+}
+
+RefDescriptor ResolveENAExperimentRef(const std::string &value) {
+	return ResolveENARefDescriptor(value, {"ERX"});
+}
+
 const char *ActionName(ENAAction a) {
 	switch (a) {
 	case ENAAction::ADD:
@@ -206,20 +249,195 @@ const char *ActionName(ENAAction a) {
 	throw std::logic_error("ENA envelope: unhandled ENAAction value");
 }
 
+namespace {
+
+// True iff `s` contains at least one non-whitespace byte. Used to reject
+// targets like "   " that would otherwise pass an `.empty()` check and emit
+// `<CANCEL target="   "/>` to the server.
+bool HasNonWhitespace(const std::string &s) {
+	for (char c : s) {
+		if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Single source of truth for "does this spec carry a target accession or
+// refname?". Empty / whitespace-only fields don't count as targets.
+bool IsTargetedAction(const SubmissionSpec &env) {
+	return HasNonWhitespace(env.target_accession) || HasNonWhitespace(env.target_refname);
+}
+
+// True iff the spec carries any object-body content.
+bool HasBodyContent(const SubmissionSpec &env) {
+	return !env.projects.empty() || !env.samples.empty() || !env.experiments.empty() || !env.runs.empty();
+}
+
 // Pure-data validators shared by the JSON and XML emitters. Each Append*
 // pair (Append<X> for JSON, AppendXml<X> for XML) calls the matching
 // ValidateXxx at the top so the precondition string lives in one place.
 void ValidateActions(const SubmissionSpec &env) {
-	// Invariant: HOLD action requires a date; date is set by adding a separate
-	// HOLD entry alongside the user-chosen action (typically ADD). Setting both
-	// `action=HOLD` and `hold_until_date` would produce a double-HOLD, so
-	// reject it here.
-	if (env.action == ENAAction::HOLD && env.hold_until_date.empty()) {
-		throw std::runtime_error("ENA envelope: HOLD action requires hold_until_date");
+	const bool has_target = IsTargetedAction(env);
+
+	// Reject whitespace-only targets that pass the `.empty()` check but would
+	// emit garbage to the server. Caught here rather than at the call site so
+	// callers get a clear message instead of an opaque server-side rejection.
+	if (!env.target_accession.empty() && !HasNonWhitespace(env.target_accession)) {
+		throw std::runtime_error("ENA envelope: target_accession must contain non-whitespace characters");
 	}
-	if (env.action == ENAAction::HOLD && !env.hold_until_date.empty()) {
-		throw std::runtime_error(
-		    "ENA envelope: with hold_until_date, use action=ADD; the HOLD entry is added automatically");
+	if (!env.target_refname.empty() && !HasNonWhitespace(env.target_refname)) {
+		throw std::runtime_error("ENA envelope: target_refname must contain non-whitespace characters");
+	}
+
+	// Lifecycle actions that operate on an existing accession need a target.
+	if ((env.action == ENAAction::CANCEL || env.action == ENAAction::RELEASE) && !has_target) {
+		throw std::runtime_error(std::string("ENA envelope: ") + ActionName(env.action) + " requires target_accession");
+	}
+
+	// `target_refname` on a targeted lifecycle action is rejected at envelope-
+	// build time. Webin V2 only resolves refname/alias on `<*_REF>` cross-
+	// references inside an ADD body where the alias is also defined in the
+	// same submission; for cross-submission lifecycle ops on already-
+	// registered objects, ENA's wwwdev rejects with "Invalid accession or
+	// unsupported target type". Verified live on 2026-05-07. The user must
+	// pass the server-assigned accession (PRJEB / ERS / ERX / ERR / ERZ);
+	// within a session it can be recovered from `ena.submission_log` via
+	// `object_accessions[list_position(object_aliases, '<alias>')]`.
+	// `IsTargetedAction` ORs target_accession and target_refname, so a
+	// non-whitespace refname is sufficient to imply has_target — just guard
+	// on the refname being populated.
+	if (HasNonWhitespace(env.target_refname)) {
+		throw std::runtime_error(std::string("ENA envelope: ") + ActionName(env.action) +
+		                         " by refname/alias is not supported by Webin V2 for cross-submission lifecycle ops; "
+		                         "use the server-assigned accession (look up via "
+		                         "ena.submission_log.object_aliases / object_accessions if needed)");
+	}
+
+	// HOLD has two distinct shapes:
+	//   1. Body-pattern (forward-dated submission): action=ADD with
+	//      hold_until_date set; the emitter pairs ADD with a sibling
+	//      <HOLD HoldUntilDate=.../> action automatically.
+	//   2. Targeted-pattern (post-hoc embargo extension): action=HOLD with a
+	//      target accession plus hold_until_date.
+	if (env.action == ENAAction::HOLD) {
+		if (!has_target && env.hold_until_date.empty()) {
+			throw std::runtime_error("ENA envelope: HOLD action requires hold_until_date");
+		}
+		if (!has_target && !env.hold_until_date.empty()) {
+			throw std::runtime_error(
+			    "ENA envelope: with hold_until_date, use action=ADD; the HOLD entry is added automatically");
+		}
+		if (has_target && env.hold_until_date.empty()) {
+			throw std::runtime_error("ENA envelope: HOLD with a target requires hold_until_date "
+			                         "(the new embargo end date, e.g. '2027-12-31')");
+		}
+	}
+
+	// ADD/MODIFY/VALIDATE identify objects via the body sets, not via the
+	// action element. A target on these is almost certainly a programming
+	// mistake; reject it loudly.
+	if ((env.action == ENAAction::ADD || env.action == ENAAction::MODIFY || env.action == ENAAction::VALIDATE) &&
+	    has_target) {
+		throw std::runtime_error(std::string("ENA envelope: ") + ActionName(env.action) +
+		                         " action does not take a target accession or refname");
+	}
+
+	// Targeted lifecycle actions carry no body — the target is the entire
+	// payload. Reject body content rather than silently dropping it: a caller
+	// reusing a populated SubmissionSpec for a CANCEL would otherwise look
+	// like a successful submit-then-cancel, when really the body was discarded.
+	if (has_target && HasBodyContent(env)) {
+		throw std::runtime_error(std::string("ENA envelope: ") + ActionName(env.action) +
+		                         " with target_accession/target_refname must not carry body content "
+		                         "(projects/samples/experiments/runs); the target is the entire payload");
+	}
+
+	// hold_until_date is only meaningful with ADD (forward-dated submission)
+	// or HOLD (post-hoc embargo). Setting it on CANCEL/RELEASE/MODIFY/VALIDATE
+	// is silently ignored by the wire format, which would otherwise let a
+	// caller mistakenly populate `outcome.hold_until_date` and then write
+	// it to submission_log even though it had no effect on the server.
+	if (!env.hold_until_date.empty() && env.action != ENAAction::ADD && env.action != ENAAction::HOLD) {
+		throw std::runtime_error(std::string("ENA envelope: ") + ActionName(env.action) +
+		                         " action does not take a hold_until_date "
+		                         "(only ADD and HOLD do)");
+	}
+
+	// Per-object accessions are required on MODIFY (Webin V2 needs both
+	// alias and accession on the project/sample/... element to identify the
+	// already-registered object) and meaningless on ADD (the server
+	// assigns the accession). Setting an accession on ADD is almost
+	// certainly a programmer error — the server would emit a confusing
+	// "alias exists with accession X" message; surface it here instead.
+	// VALIDATE is allowed either way: it's a dry-run for whatever real
+	// action the caller is preparing. CANCEL/RELEASE/HOLD don't carry
+	// body objects so the loops are no-ops.
+	//
+	// All four submittable object kinds (projects, samples, experiments,
+	// runs) carry an `accession` field. ADD must reject any pre-filled
+	// accession; MODIFY requires it. Symmetric per-kind loops below.
+	if (env.action == ENAAction::ADD) {
+		for (const auto &p : env.projects) {
+			if (!p.accession.empty()) {
+				throw std::runtime_error("ENA envelope: ADD must not set an accession on a project (alias '" + p.alias +
+				                         "'); the server assigns the accession on ADD");
+			}
+		}
+		for (const auto &s : env.samples) {
+			if (!s.accession.empty()) {
+				throw std::runtime_error("ENA envelope: ADD must not set an accession on a sample (alias '" + s.alias +
+				                         "'); the server assigns the accession on ADD");
+			}
+		}
+		for (const auto &e : env.experiments) {
+			if (!e.accession.empty()) {
+				throw std::runtime_error("ENA envelope: ADD must not set an accession on an experiment (alias '" +
+				                         e.alias + "'); the server assigns the accession on ADD");
+			}
+		}
+		for (const auto &r : env.runs) {
+			if (!r.accession.empty()) {
+				throw std::runtime_error("ENA envelope: ADD must not set an accession on a run (alias '" + r.alias +
+				                         "'); the server assigns the accession on ADD");
+			}
+		}
+	}
+	if (env.action == ENAAction::MODIFY) {
+		for (const auto &p : env.projects) {
+			if (p.accession.empty()) {
+				throw std::runtime_error("ENA envelope: MODIFY requires accession on project '" + p.alias +
+				                         "'; the server uses it to identify which already-registered object to update");
+			}
+		}
+		for (const auto &s : env.samples) {
+			if (s.accession.empty()) {
+				throw std::runtime_error("ENA envelope: MODIFY requires accession on sample '" + s.alias +
+				                         "'; the server uses it to identify which already-registered object to update");
+			}
+		}
+		for (const auto &e : env.experiments) {
+			if (e.accession.empty()) {
+				throw std::runtime_error("ENA envelope: MODIFY requires accession on experiment '" + e.alias +
+				                         "'; the server uses it to identify which already-registered object to update");
+			}
+		}
+		for (const auto &r : env.runs) {
+			if (r.accession.empty()) {
+				throw std::runtime_error("ENA envelope: MODIFY requires accession on run '" + r.alias +
+				                         "'; the server uses it to identify which already-registered object to update");
+			}
+		}
+	}
+}
+
+void ValidateSampleSpec(const SampleSpec &s) {
+	if (s.alias.empty()) {
+		throw std::runtime_error("ENA envelope: sample alias must be non-empty");
+	}
+	if (s.taxon_id <= 0) {
+		throw std::runtime_error("ENA envelope: sample.taxon_id must be > 0 (got " + std::to_string(s.taxon_id) +
+		                         " for alias '" + s.alias + "')");
 	}
 }
 
@@ -262,6 +480,14 @@ void ValidateRunSpec(const RunSpec &r) {
 
 void AppendActions(std::string &out, const SubmissionSpec &env) {
 	ValidateActions(env);
+	// Targeted lifecycle actions are XML-only in the current build. The V2
+	// JSON dispatcher's behaviour for submission-level actions with `target=`
+	// hasn't been verified live, and we don't want a silently-malformed
+	// envelope (no `target` field) to slip out via the JSON path.
+	if (IsTargetedAction(env)) {
+		throw std::runtime_error("ENA envelope: targeted lifecycle actions (CANCEL, RELEASE, "
+		                         "targeted HOLD) must be built via BuildEnvelopeXML, not JSON");
+	}
 	out.append("\"actions\":[");
 	out.append("{\"type\":");
 	AppendJsonString(out, ActionName(env.action));
@@ -281,6 +507,13 @@ void AppendProject(std::string &out, const ProjectSpec &p) {
 	out.push_back('{');
 	out.append("\"alias\":");
 	AppendJsonString(out, p.alias);
+	// MODIFY identifies the existing object by accession; ADD has no
+	// accession. Emit only when populated so the JSON shape stays minimal
+	// for the common ADD path.
+	if (!p.accession.empty()) {
+		out.append(",\"accession\":");
+		AppendJsonString(out, p.accession);
+	}
 	out.append(",\"title\":");
 	AppendJsonString(out, p.title);
 	// `description` is always emitted: wwwdev's XSD validator intermittently
@@ -298,16 +531,17 @@ void AppendProject(std::string &out, const ProjectSpec &p) {
 }
 
 void AppendSample(std::string &out, const SampleSpec &s) {
-	if (s.alias.empty()) {
-		throw std::runtime_error("ENA envelope: sample alias must be non-empty");
-	}
-	if (s.taxon_id <= 0) {
-		throw std::runtime_error("ENA envelope: sample.taxon_id must be > 0 (got " + std::to_string(s.taxon_id) +
-		                         " for alias '" + s.alias + "')");
-	}
+	ValidateSampleSpec(s);
 	out.push_back('{');
 	out.append("\"alias\":");
 	AppendJsonString(out, s.alias);
+	// MODIFY identifies the existing object by accession; ADD has no
+	// accession. Emit only when populated so the JSON shape stays minimal
+	// for the common ADD path (mirrors AppendProject).
+	if (!s.accession.empty()) {
+		out.append(",\"accession\":");
+		AppendJsonString(out, s.accession);
+	}
 	if (!s.title.empty()) {
 		out.append(",\"title\":");
 		AppendJsonString(out, s.title);
@@ -449,6 +683,14 @@ void AppendRun(std::string &out, const RunSpec &r) {
 	out.push_back('{');
 	out.append("\"alias\":");
 	AppendJsonString(out, r.alias);
+	// MODIFY identifies the existing run by accession; ADD has no accession.
+	// Mirrors `AppendProject` / `AppendSample` — keeping the JSON appenders
+	// symmetric so a JSON-path caller that ever needs MODIFY runs gets the
+	// same wire shape as the XML path.
+	if (!r.accession.empty()) {
+		out.append(",\"accession\":");
+		AppendJsonString(out, r.accession);
+	}
 	if (!r.title.empty()) {
 		out.append(",\"title\":");
 		AppendJsonString(out, r.title);
@@ -560,6 +802,24 @@ void AppendXmlRef(std::string &out, const char *element, const RefDescriptor &re
 
 void AppendXmlActions(std::string &out, const SubmissionSpec &env) {
 	ValidateActions(env);
+	if (IsTargetedAction(env)) {
+		// Targeted lifecycle action. ValidateActions has already rejected any
+		// target_refname above (Webin V2 doesn't resolve refname/alias on
+		// action targets cross-submission), so target_accession is the only
+		// populated target field by the time we get here.
+		const std::string &target = env.target_accession;
+		out.append("<ACTIONS><ACTION><");
+		out.append(ActionName(env.action));
+		out.append(" target=\"");
+		AppendXmlEscaped(out, target);
+		if (env.action == ENAAction::HOLD) {
+			out.append("\" HoldUntilDate=\"");
+			AppendXmlEscaped(out, env.hold_until_date);
+		}
+		out.append("\"/></ACTION></ACTIONS>");
+		return;
+	}
+
 	out.append("<ACTIONS><ACTION><");
 	out.append(ActionName(env.action));
 	out.append("/></ACTION>");
@@ -571,11 +831,91 @@ void AppendXmlActions(std::string &out, const SubmissionSpec &env) {
 	out.append("</ACTIONS>");
 }
 
+void AppendXmlSample(std::string &out, const SampleSpec &s) {
+	// SRA.sample.xsd shape — element ordering is XSD-strict:
+	//   <SAMPLE alias="…" [accession="…"]>
+	//     <TITLE>…</TITLE>?            (optional)
+	//     <SAMPLE_NAME>
+	//       <TAXON_ID>…</TAXON_ID>
+	//       <SCIENTIFIC_NAME>…</SCIENTIFIC_NAME>?  (optional)
+	//     </SAMPLE_NAME>
+	//     <DESCRIPTION>…</DESCRIPTION>?  (optional)
+	//     <SAMPLE_ATTRIBUTES>           (only when checklist or attributes set)
+	//       <SAMPLE_ATTRIBUTE>
+	//         <TAG>…</TAG><VALUE>…</VALUE><UNITS>…</UNITS>?
+	//       </SAMPLE_ATTRIBUTE>+
+	//     </SAMPLE_ATTRIBUTES>
+	//   </SAMPLE>
+	//
+	// L4b-fix exists because V2's JSON dispatcher emitted <DESCRIPTION> BEFORE
+	// <SAMPLE_NAME> regardless of JSON-key order, violating the XSD; emitting
+	// XML directly lets us control element order.
+	ValidateSampleSpec(s);
+
+	out.append("<SAMPLE alias=\"");
+	AppendXmlEscaped(out, s.alias);
+	if (!s.accession.empty()) {
+		out.append("\" accession=\"");
+		AppendXmlEscaped(out, s.accession);
+	}
+	out.append("\">");
+	if (!s.title.empty()) {
+		AppendXmlElement(out, "TITLE", s.title);
+	}
+	out.append("<SAMPLE_NAME><TAXON_ID>");
+	AppendXmlEscaped(out, std::to_string(s.taxon_id));
+	out.append("</TAXON_ID>");
+	if (!s.scientific_name.empty()) {
+		AppendXmlElement(out, "SCIENTIFIC_NAME", s.scientific_name);
+	}
+	out.append("</SAMPLE_NAME>");
+	if (!s.description.empty()) {
+		AppendXmlElement(out, "DESCRIPTION", s.description);
+	}
+
+	const bool any_attrs = !s.checklist.empty() || !s.attributes.empty();
+	if (any_attrs) {
+		out.append("<SAMPLE_ATTRIBUTES>");
+		if (!s.checklist.empty()) {
+			out.append("<SAMPLE_ATTRIBUTE><TAG>ENA-CHECKLIST</TAG><VALUE>");
+			AppendXmlEscaped(out, s.checklist);
+			out.append("</VALUE></SAMPLE_ATTRIBUTE>");
+		}
+		for (const auto &kv : s.attributes) {
+			out.append("<SAMPLE_ATTRIBUTE><TAG>");
+			AppendXmlEscaped(out, kv.first);
+			out.append("</TAG><VALUE>");
+			AppendXmlEscaped(out, kv.second);
+			out.append("</VALUE>");
+			// Sparse units: emit <UNITS> only when present AND non-empty so
+			// callers can opt out by setting an empty string. Linear lookup is
+			// fine — attribute_units is small per sample (typically 0-3 entries).
+			for (const auto &u : s.attribute_units) {
+				if (u.first == kv.first) {
+					if (!u.second.empty()) {
+						AppendXmlElement(out, "UNITS", u.second);
+					}
+					break;
+				}
+			}
+			out.append("</SAMPLE_ATTRIBUTE>");
+		}
+		out.append("</SAMPLE_ATTRIBUTES>");
+	}
+	out.append("</SAMPLE>");
+}
+
 void AppendXmlExperiment(std::string &out, const ExperimentSpec &e) {
 	ValidateExperimentSpec(e);
 
 	out.append("<EXPERIMENT alias=\"");
 	AppendXmlEscaped(out, e.alias);
+	// MODIFY identifies the existing object by accession; ADD has no
+	// accession. Emit only when populated. Mirrors AppendXmlSample.
+	if (!e.accession.empty()) {
+		out.append("\" accession=\"");
+		AppendXmlEscaped(out, e.accession);
+	}
 	out.append("\">");
 	if (!e.title.empty()) {
 		AppendXmlElement(out, "TITLE", e.title);
@@ -626,6 +966,12 @@ void AppendXmlRun(std::string &out, const RunSpec &r) {
 	ValidateRunSpec(r);
 	out.append("<RUN alias=\"");
 	AppendXmlEscaped(out, r.alias);
+	// MODIFY identifies the existing run by accession; ADD has no accession.
+	// Emit only when populated. Mirrors AppendXmlSample / AppendXmlExperiment.
+	if (!r.accession.empty()) {
+		out.append("\" accession=\"");
+		AppendXmlEscaped(out, r.accession);
+	}
 	out.append("\">");
 	if (!r.title.empty()) {
 		AppendXmlElement(out, "TITLE", r.title);
@@ -649,6 +995,16 @@ std::string BuildEnvelopeXML(const SubmissionSpec &env) {
 	out.append("<SUBMISSION>");
 	AppendXmlActions(out, env);
 	out.append("</SUBMISSION>");
+	// ValidateActions (called from AppendXmlActions above) rejects the
+	// targeted-action + body-content combination, so reaching here with body
+	// content implies an untargeted action.
+	if (!env.samples.empty()) {
+		out.append("<SAMPLE_SET>");
+		for (const auto &s : env.samples) {
+			AppendXmlSample(out, s);
+		}
+		out.append("</SAMPLE_SET>");
+	}
 	if (!env.experiments.empty()) {
 		out.append("<EXPERIMENT_SET>");
 		for (const auto &e : env.experiments) {

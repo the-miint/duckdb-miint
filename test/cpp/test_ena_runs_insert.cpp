@@ -145,3 +145,91 @@ TEST_CASE("ENA runs insert: receipt missing alias is reported clearly", "[ena_ru
 
 	REQUIRE_THROWS_WITH(SubmitRunInsert(runs, opts, post_fn), Catch::Matchers::ContainsSubstring("orphan"));
 }
+
+TEST_CASE("ENA runs insert: MODIFY round-trips the user-supplied accession back into the row",
+          "[ena_runs_insert][modify]") {
+	CapturedPost captured;
+	auto post_fn = [&captured](const std::string &url, const std::string &body, const std::string &user,
+	                           const std::string &password, const std::string &content_type) {
+		captured = {url, body, user, password, content_type};
+		// Real wwwdev MODIFY echoes the user-supplied ERR verbatim. Mirror.
+		return MakeRunReceipt({{"r1", "ERR9999100"}});
+	};
+
+	auto run = PairedRun("r1", "e1");
+	run.accession = "ERR9999100";
+	run.title = "Updated run title";
+	std::vector<RunSpec> runs = {run};
+
+	ENARunInsertOptions opts;
+	opts.endpoint_url = "http://mock.example/submit";
+	opts.user = "Webin-1";
+	opts.password = "pw";
+	opts.action = ENAAction::MODIFY;
+
+	auto outcome = SubmitRunInsertOutcome(runs, opts, post_fn);
+	REQUIRE(outcome.success);
+	REQUIRE(outcome.rows.size() == 1);
+	REQUIRE(outcome.rows[0].alias == "r1");
+	REQUIRE(outcome.rows[0].err_accession == "ERR9999100");
+	REQUIRE(captured.body.find("<MODIFY/>") != std::string::npos);
+	REQUIRE(captured.body.find(R"X(<RUN alias="r1" accession="ERR9999100">)X") != std::string::npos);
+	// Pin TITLE emission so a future AppendXmlRun regression that drops the
+	// optional element doesn't slip past the envelope-only test layer.
+	REQUIRE(captured.body.find("<TITLE>Updated run title</TITLE>") != std::string::npos);
+}
+
+TEST_CASE("ENA runs insert: MODIFY with accession-form experiment_ref emits accession on EXPERIMENT_REF",
+          "[ena_runs_insert][modify]") {
+	// Production users will typically pull `experiment_ref` from
+	// `ena.submission_log` after the experiment ADD round-trip; that's an
+	// ERX accession, not a refname. The refname-form path is covered by
+	// the basic happy path; this case pins the accession-form wire.
+	CapturedPost captured;
+	auto post_fn = [&captured](const std::string &url, const std::string &body, const std::string &user,
+	                           const std::string &password, const std::string &content_type) {
+		captured = {url, body, user, password, content_type};
+		return MakeRunReceipt({{"r1", "ERR9999100"}});
+	};
+
+	auto run = PairedRun("r1", "e1");
+	run.experiment_ref.accession = "ERX42";
+	run.experiment_ref.refname.clear();
+	run.accession = "ERR9999100";
+	std::vector<RunSpec> runs = {run};
+
+	ENARunInsertOptions opts;
+	opts.endpoint_url = "http://mock.example/submit";
+	opts.user = "Webin-1";
+	opts.password = "pw";
+	opts.action = ENAAction::MODIFY;
+
+	auto outcome = SubmitRunInsertOutcome(runs, opts, post_fn);
+	REQUIRE(outcome.success);
+	REQUIRE(captured.body.find(R"X(<EXPERIMENT_REF accession="ERX42"/>)X") != std::string::npos);
+	// Refname must NOT appear when accession is set (RefDescriptor's
+	// accession-wins precedence).
+	REQUIRE(captured.body.find("refname=") == std::string::npos);
+}
+
+TEST_CASE("ENA runs insert: MODIFY failure receipt surfaces the server error", "[ena_runs_insert][modify]") {
+	auto post_fn = [](const std::string &, const std::string &, const std::string &, const std::string &,
+	                  const std::string &) {
+		return MakeRunReceipt({}, false, "ERR00000 not found in submission account");
+	};
+	auto run = PairedRun("r1", "e1");
+	run.accession = "ERR00000";
+	std::vector<RunSpec> runs = {run};
+
+	ENARunInsertOptions opts;
+	opts.endpoint_url = "http://mock.example/submit";
+	opts.user = "Webin-1";
+	opts.password = "pw";
+	opts.action = ENAAction::MODIFY;
+
+	auto outcome = SubmitRunInsertOutcome(runs, opts, post_fn);
+	REQUIRE_FALSE(outcome.success);
+	REQUIRE(outcome.rows.empty());
+	REQUIRE(outcome.error_messages.size() == 1);
+	REQUIRE_THAT(outcome.error_messages[0], Catch::Matchers::ContainsSubstring("ERR00000 not found"));
+}

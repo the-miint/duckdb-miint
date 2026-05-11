@@ -1,0 +1,175 @@
+# name: test/sql/ena_delete_mock.test
+# description: DELETE FROM ena.X WHERE col=val dispatches to SubmitLifecycle CANCEL
+# group: [sql]
+
+require miint
+
+require-env ENA_WEBIN_MOCK_URL
+
+require httpfs
+
+statement ok
+CREATE SECRET test_ena_delete_mock (
+    TYPE ENA,
+    USER 'Webin-99999',
+    PASSWORD 'mock-password',
+    ENDPOINT 'test',
+    ENDPOINT_URL '${ENA_WEBIN_MOCK_URL}'
+);
+
+statement ok
+ATTACH '' AS ena (TYPE ENA, SECRET 'test_ena_delete_mock');
+
+# 1. DELETE on samples by samea_accession routes to CANCEL with target=accession
+statement ok
+DELETE FROM ena.samples WHERE samea_accession = 'ERS-mock-D1';
+
+query IIII
+SELECT action, target, success, object_type
+FROM ena.submission_log
+WHERE action = 'CANCEL' AND target = 'ERS-mock-D1';
+----
+CANCEL	ERS-mock-D1	true	samples
+
+# 2. DELETE on samples by ers_accession (alternate accession column).
+statement ok
+DELETE FROM ena.samples WHERE ers_accession = 'ERS-mock-D2';
+
+query IIII
+SELECT action, target, success, object_type
+FROM ena.submission_log
+WHERE action = 'CANCEL' AND target = 'ERS-mock-D2';
+----
+CANCEL	ERS-mock-D2	true	samples
+
+# 3. DELETE on projects by prjeb_accession
+statement ok
+DELETE FROM ena.projects WHERE prjeb_accession = 'PRJEB-mock-D3';
+
+query III
+SELECT action, target, object_type
+FROM ena.submission_log
+WHERE target = 'PRJEB-mock-D3';
+----
+CANCEL	PRJEB-mock-D3	projects
+
+# 3b. DELETE on projects by erp_accession (the alternate accession column)
+statement ok
+DELETE FROM ena.projects WHERE erp_accession = 'ERP-mock-D3b';
+
+query III
+SELECT action, target, object_type
+FROM ena.submission_log
+WHERE target = 'ERP-mock-D3b';
+----
+CANCEL	ERP-mock-D3b	projects
+
+# 4. DELETE on runs by err_accession
+statement ok
+DELETE FROM ena.runs WHERE err_accession = 'ERR-mock-D4';
+
+query III
+SELECT action, target, object_type
+FROM ena.submission_log
+WHERE target = 'ERR-mock-D4';
+----
+CANCEL	ERR-mock-D4	runs
+
+# 5. DELETE on experiments by erx_accession
+statement ok
+DELETE FROM ena.experiments WHERE erx_accession = 'ERX-mock-D5';
+
+query III
+SELECT action, target, object_type
+FROM ena.submission_log
+WHERE target = 'ERX-mock-D5';
+----
+CANCEL	ERX-mock-D5	experiments
+
+# 6. Negative: DELETE without WHERE → rejected
+statement error
+DELETE FROM ena.samples;
+----
+must filter by alias or accession
+
+# 7. Negative: non-equality predicate → rejected
+statement error
+DELETE FROM ena.samples WHERE samea_accession LIKE 'mock-%';
+----
+must be equality on alias or accession
+
+# 8. Negative: compound AND predicate → rejected
+statement error
+DELETE FROM ena.samples WHERE samea_accession = 'a' AND title = 'b';
+----
+must be equality on alias or accession
+
+# 9. Negative: predicate on a non-target column → rejected
+statement error
+DELETE FROM ena.samples WHERE title = 'a-title';
+----
+cannot DELETE on column 'title'
+
+# 9b. DELETE by alias: L5 restored this via Webin Reports API translation.
+#     Mock derives the same accession from alias as the receipt builder, so
+#     the resolved CANCEL target lands on the mock-derived ERS for samples /
+#     PRJEB for projects / etc. The kind is implicit from the table.
+statement ok
+DELETE FROM ena.samples WHERE alias = 'reports-delete-alias-001';
+
+# Audit log captures the post-translation accession on the target column.
+query II
+SELECT action, target LIKE 'ERS%' AS resolved_to_ers
+FROM ena.submission_log
+WHERE action = 'CANCEL'
+  AND object_type = 'samples'
+  AND target NOT LIKE 'ERS-mock-%'  -- exclude prior tests' literal accessions
+ORDER BY submitted_at DESC LIMIT 1;
+----
+CANCEL	true
+
+# 9c. DELETE by alias: not-found surfaces as a friendly diagnostic citing
+#     the alias and table — no opaque "envelope build failed".
+statement error
+DELETE FROM ena.samples WHERE alias = 'MISS_no-such-delete-alias';
+----
+not found in this submission account
+
+# 10. Negative: failed CANCEL still logs and surfaces error
+statement error
+DELETE FROM ena.samples WHERE samea_accession = 'ERS-FAIL-D10';
+----
+mock validation failure
+
+query II
+SELECT success, target
+FROM ena.submission_log
+WHERE target = 'ERS-FAIL-D10' AND action = 'CANCEL';
+----
+false	ERS-FAIL-D10
+
+# 11. RETURNING is not supported (match the full message — generic "RETURNING"
+#     would silently pass if a future DuckDB error from elsewhere happened to
+#     contain that word).
+statement error
+DELETE FROM ena.samples WHERE samea_accession = 'ERS-mock-D11' RETURNING *;
+----
+DELETE FROM ena.samples: RETURNING is not supported
+
+# 12. ATTACH without SECRET → DELETE rejected at plan time with a clean message.
+statement ok
+DETACH ena;
+
+statement ok
+ATTACH '' AS ena (TYPE ENA);
+
+statement error
+DELETE FROM ena.samples WHERE samea_accession = 'ERS-mock-D12';
+----
+ENA catalog has no SECRET
+
+statement ok
+DETACH ena;
+
+statement ok
+DROP SECRET test_ena_delete_mock;

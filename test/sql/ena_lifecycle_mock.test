@@ -1,0 +1,255 @@
+# name: test/sql/ena_lifecycle_mock.test
+# description: ena_cancel / ena_release / ena_hold against a local mock receipt server
+# group: [sql]
+
+require miint
+
+require-env ENA_WEBIN_MOCK_URL
+
+require httpfs
+
+statement ok
+CREATE SECRET test_ena_lifecycle_mock (
+    TYPE ENA,
+    USER 'Webin-99999',
+    PASSWORD 'mock-password',
+    ENDPOINT 'test',
+    ENDPOINT_URL '${ENA_WEBIN_MOCK_URL}'
+);
+
+statement ok
+ATTACH '' AS ena (TYPE ENA, SECRET 'test_ena_lifecycle_mock');
+
+# 1. ena_cancel: success path. era_accession is empty on lifecycle —
+# wwwdev returns <SUBMISSION accession=""/> on cross-submission no-new-
+# accession actions; confirmed live 2026-05-07. The mock mirrors that.
+query IIIIIIII
+SELECT action, target, success,
+       era_accession = '' AS empty_era,
+       hold_until_date,
+       error_messages = []::VARCHAR[] AS no_errors,
+       duration_ms >= 0 AS dur_ok,
+       duration_ms < 60000 AS dur_sane
+FROM ena_cancel(secret => 'test_ena_lifecycle_mock', accession => 'ERS-mock-001');
+----
+CANCEL	ERS-mock-001	true	true		true	true	true
+
+# submission_log row appended for the CANCEL
+query IIII
+SELECT action, target, success, n_objects
+FROM ena.submission_log
+WHERE action = 'CANCEL'
+ORDER BY submitted_at DESC LIMIT 1;
+----
+CANCEL	ERS-mock-001	true	1
+
+# 2. ena_release: success path
+query III
+SELECT action, target, success
+FROM ena_release(secret => 'test_ena_lifecycle_mock', accession => 'ERS-mock-002');
+----
+RELEASE	ERS-mock-002	true
+
+# submission_log row for the RELEASE
+query III
+SELECT action, target, success
+FROM ena.submission_log
+WHERE action = 'RELEASE'
+ORDER BY submitted_at DESC LIMIT 1;
+----
+RELEASE	ERS-mock-002	true
+
+# 3. ena_hold: target + until → emits HoldUntilDate
+query IIII
+SELECT action, target, success, hold_until_date
+FROM ena_hold(secret => 'test_ena_lifecycle_mock',
+              accession => 'ERS-mock-003',
+              until => '2027-12-31');
+----
+HOLD	ERS-mock-003	true	2027-12-31
+
+# submission_log row for the HOLD
+query III
+SELECT action, target, success
+FROM ena.submission_log
+WHERE action = 'HOLD'
+ORDER BY submitted_at DESC LIMIT 1;
+----
+HOLD	ERS-mock-003	true
+
+# 4. refname requires kind — the Reports API URL is kind-tagged and aliases
+#    are unique per-account-per-kind. Bare refname (without kind) is rejected
+#    at bind so the user can't accidentally probe across kinds.
+statement error
+SELECT * FROM ena_cancel(secret => 'test_ena_lifecycle_mock', refname => 'my-alias-001');
+----
+'kind' is required when 'refname' is set
+
+# 4b. refname + kind: lifecycle table fns translate alias → accession at
+#     execute via the mock Reports endpoint. Mock derives the same accession
+#     from alias as the receipt builder, so the resolved target lands on the
+#     mock-derived ERS for samples / PRJEB for projects / etc.
+query III
+SELECT action, target LIKE 'ERS%' AS resolved_to_ers, success
+FROM ena_cancel(secret => 'test_ena_lifecycle_mock',
+                refname => 'reports-alias-001',
+                kind => 'samples');
+----
+CANCEL	true	true
+
+# 4b-audit. The L5-targeted call's audit row carries the user-supplied kind
+#           in object_type, matching the per-table convention used by the
+#           DELETE-by-alias path. Pre-polish this was empty (only the kind-
+#           agnostic accession path leaves it empty now).
+query III
+SELECT object_type, action, success
+FROM ena.submission_log
+WHERE action = 'CANCEL' AND target LIKE 'ERS%'
+ORDER BY submitted_at DESC LIMIT 1;
+----
+samples	CANCEL	true
+
+# 4c. refname + kind happy path on each of the four kinds.
+query II
+SELECT target LIKE 'PRJEB%' AS prjeb, success FROM ena_cancel(
+    secret => 'test_ena_lifecycle_mock', refname => 'rp-001', kind => 'projects');
+----
+true	true
+
+query II
+SELECT target LIKE 'ERX%' AS erx, success FROM ena_cancel(
+    secret => 'test_ena_lifecycle_mock', refname => 'rx-001', kind => 'experiments');
+----
+true	true
+
+query II
+SELECT target LIKE 'ERR%' AS err, success FROM ena_cancel(
+    secret => 'test_ena_lifecycle_mock', refname => 'rr-001', kind => 'runs');
+----
+true	true
+
+# 4d. refname not found (mock returns []) surfaces as a friendly error
+#     pointing at the lookup, not an opaque "envelope build failed".
+statement error
+SELECT * FROM ena_cancel(secret => 'test_ena_lifecycle_mock',
+                         refname => 'MISS_no-such-alias',
+                         kind => 'samples');
+----
+not found in this submission account
+
+# 4e. kind without refname is rejected (kind only meaningful with refname)
+statement error
+SELECT * FROM ena_cancel(secret => 'test_ena_lifecycle_mock',
+                         accession => 'ERS-mock-099',
+                         kind => 'samples');
+----
+'kind' is only meaningful with 'refname'
+
+# 4f. invalid kind value rejected at bind (must be one of the four)
+statement error
+SELECT * FROM ena_cancel(secret => 'test_ena_lifecycle_mock',
+                         refname => 'rs-001',
+                         kind => 'analyses');
+----
+invalid 'kind'
+
+# 5. Failure path: target containing FAIL triggers mock success=false
+statement error
+SELECT * FROM ena_cancel(secret => 'test_ena_lifecycle_mock', accession => 'ERS-FAIL-001');
+----
+mock validation failure
+
+# Failed submission still appears in submission_log with success=false
+query III
+SELECT action, target, success
+FROM ena.submission_log
+WHERE NOT success AND action = 'CANCEL'
+ORDER BY submitted_at DESC LIMIT 1;
+----
+CANCEL	ERS-FAIL-001	false
+
+# 6. Validation: missing accession AND refname is rejected at bind time
+statement error
+SELECT * FROM ena_cancel(secret => 'test_ena_lifecycle_mock');
+----
+required named parameter 'accession' or 'refname' is missing
+
+# 7. Validation: missing secret is rejected at bind time
+statement error
+SELECT * FROM ena_cancel(accession => 'ERS-mock-099');
+----
+required named parameter 'secret'
+
+# 8. Validation: ena_hold requires until
+statement error
+SELECT * FROM ena_hold(secret => 'test_ena_lifecycle_mock', accession => 'ERS-mock-099');
+----
+required named parameter 'until'
+
+# 9. Validation: whitespace-only accession is rejected at bind time
+statement error
+SELECT * FROM ena_cancel(secret => 'test_ena_lifecycle_mock', accession => '   ');
+----
+must not be whitespace-only
+
+# 10. Validation: explicit wrong-name catalog throws (audit gap should not be silent)
+statement error
+SELECT * FROM ena_cancel(secret => 'test_ena_lifecycle_mock',
+                         accession => 'ERS-mock-401',
+                         catalog => 'definitely_not_attached');
+----
+not attached
+
+# 11. accession + refname is rejected at bind time (xor — exactly one).
+#     L5 design: rather than re-introduce the pre-L1d "accession wins"
+#     precedence, fail fast on user confusion. If both are present, that's
+#     usually a bug in the caller's templated query.
+statement error
+SELECT * FROM ena_cancel(secret => 'test_ena_lifecycle_mock',
+                         accession => 'ERS-mock-501',
+                         refname => 'should-not-be-target',
+                         kind => 'samples');
+----
+pass exactly one of 'accession' or 'refname'
+
+# 12. LIMIT 0 must NOT trigger the POST (lifecycle ops are side-effectful).
+#     Verify the audit log has neither target — #11 errored at bind (no entry)
+#     and #12's LIMIT 0 elides the POST entirely. (Pre-L1d this test pinned
+#     got_501=1 from #11's accession-wins precedence; the precedence was
+#     removed in L1d and the assertion stale-faulted silently in CI until L5.)
+statement ok
+SELECT * FROM ena_cancel(secret => 'test_ena_lifecycle_mock', accession => 'ERS-mock-601') LIMIT 0;
+
+query II
+SELECT count(*) FILTER (WHERE target = 'ERS-mock-501') AS got_501,
+       count(*) FILTER (WHERE target = 'ERS-mock-601') AS got_601
+FROM ena.submission_log
+WHERE action = 'CANCEL';
+----
+0	0
+
+# 13. Failed CANCEL still logs duration_ms (audit must capture timing of failures too)
+statement error
+SELECT * FROM ena_cancel(secret => 'test_ena_lifecycle_mock', accession => 'ERS-FAIL-DUR');
+----
+mock validation failure
+
+query II
+SELECT success, duration_ms >= 0 AS dur_recorded
+FROM ena.submission_log
+WHERE target = 'ERS-FAIL-DUR' AND action = 'CANCEL';
+----
+false	true
+
+# 14. ena_cancel without an attached ena catalog still works (no log written)
+statement ok
+DETACH ena;
+
+query II
+SELECT action, success
+FROM ena_cancel(secret => 'test_ena_lifecycle_mock', accession => 'ERS-mock-099');
+----
+CANCEL	true
+
+statement ok
+DROP SECRET test_ena_lifecycle_mock;

@@ -73,20 +73,22 @@ TEST_CASE("ENA samples insert: single row builds envelope and parses receipt", "
 	REQUIRE(captured.url == "http://mock.example/submit");
 	REQUIRE(captured.user == "Webin-1");
 	REQUIRE(captured.password == "pw");
-	REQUIRE(captured.content_type.find("json") != std::string::npos);
-	// Envelope contains the sample alias, the taxonId-as-string, and the
-	// ENA-CHECKLIST attribute prepended to the user's attribute list.
-	REQUIRE(captured.body.find("\"alias\":\"s1\"") != std::string::npos);
-	REQUIRE(captured.body.find("\"taxonId\":\"408170\"") != std::string::npos);
-	REQUIRE(captured.body.find("\"tag\":\"ENA-CHECKLIST\",\"value\":\"ERC000015\"") != std::string::npos);
-	REQUIRE(captured.body.find("\"tag\":\"collection date\"") != std::string::npos);
+	// Sample envelopes flipped to XML in L4b-fix to bypass the V2 JSON
+	// dispatcher's <DESCRIPTION>-before-<SAMPLE_NAME> ordering bug.
+	REQUIRE(captured.content_type.find("xml") != std::string::npos);
+	// Envelope contains the sample alias, the TAXON_ID, and the ENA-CHECKLIST
+	// attribute prepended to the user's attribute list.
+	REQUIRE(captured.body.find(R"X(<SAMPLE alias="s1">)X") != std::string::npos);
+	REQUIRE(captured.body.find("<TAXON_ID>408170</TAXON_ID>") != std::string::npos);
+	REQUIRE(captured.body.find("<TAG>ENA-CHECKLIST</TAG><VALUE>ERC000015</VALUE>") != std::string::npos);
+	REQUIRE(captured.body.find("<TAG>collection date</TAG>") != std::string::npos);
 }
 
 TEST_CASE("ENA samples insert: multi-sample envelope and order preservation", "[ena_samples_insert]") {
 	auto post_fn = [](const std::string &, const std::string &body, const std::string &, const std::string &,
 	                  const std::string &) {
-		REQUIRE(body.find("\"alias\":\"a\"") != std::string::npos);
-		REQUIRE(body.find("\"alias\":\"b\"") != std::string::npos);
+		REQUIRE(body.find(R"X(<SAMPLE alias="a">)X") != std::string::npos);
+		REQUIRE(body.find(R"X(<SAMPLE alias="b">)X") != std::string::npos);
 		return MakeSampleReceipt({{"a", "ERS10", "SAMEA10"}, {"b", "ERS11", "SAMEA11"}});
 	};
 
@@ -157,10 +159,68 @@ TEST_CASE("ENA samples insert: receipt missing alias is reported clearly", "[ena
 	REQUIRE_THROWS_WITH(SubmitSampleInsert(samples, opts, post_fn), Catch::Matchers::ContainsSubstring("orphan"));
 }
 
+TEST_CASE("ENA samples insert: MODIFY round-trips the user-supplied accession back into the row",
+          "[ena_samples_insert][modify]") {
+	CapturedPost captured;
+	auto post_fn = [&captured](const std::string &url, const std::string &body, const std::string &user,
+	                           const std::string &password, const std::string &content_type) {
+		captured = {url, body, user, password, content_type};
+		// Real wwwdev MODIFY echoes the user-supplied ERS verbatim; the EXT_ID
+		// SAMEA accession remains stable across MODIFY (BioSample is the
+		// permanent identifier; ENA's ERS is a re-versioning of the same
+		// biosample). Mirror that here for fidelity.
+		return MakeSampleReceipt({{"s1", "ERS9999100", "SAMEA9999100"}});
+	};
+
+	auto sample = MinimalSample("s1");
+	sample.accession = "ERS9999100";
+	sample.title = "Updated sample title";
+	sample.checklist = "ERC000015";
+	sample.attributes = {{"collection date", "2026-05-07"}};
+	std::vector<SampleSpec> samples = {sample};
+
+	ENASampleInsertOptions opts;
+	opts.endpoint_url = "http://mock.example/submit";
+	opts.user = "Webin-1";
+	opts.password = "pw";
+	opts.action = ENAAction::MODIFY;
+
+	auto outcome = SubmitSampleInsertOutcome(samples, opts, post_fn);
+	REQUIRE(outcome.success);
+	REQUIRE(outcome.rows.size() == 1);
+	REQUIRE(outcome.rows[0].alias == "s1");
+	REQUIRE(outcome.rows[0].ers_accession == "ERS9999100");
+	REQUIRE(outcome.rows[0].samea_accession == "SAMEA9999100");
+	REQUIRE(captured.body.find("<MODIFY/>") != std::string::npos);
+	REQUIRE(captured.body.find(R"X(<SAMPLE alias="s1" accession="ERS9999100">)X") != std::string::npos);
+}
+
+TEST_CASE("ENA samples insert: MODIFY failure receipt surfaces the server error", "[ena_samples_insert][modify]") {
+	auto post_fn = [](const std::string &, const std::string &, const std::string &, const std::string &,
+	                  const std::string &) {
+		return MakeSampleReceipt({}, false, "ERS00000 not found in submission account");
+	};
+	auto sample = MinimalSample("s1");
+	sample.accession = "ERS00000";
+	std::vector<SampleSpec> samples = {sample};
+
+	ENASampleInsertOptions opts;
+	opts.endpoint_url = "http://mock.example/submit";
+	opts.user = "Webin-1";
+	opts.password = "pw";
+	opts.action = ENAAction::MODIFY;
+
+	auto outcome = SubmitSampleInsertOutcome(samples, opts, post_fn);
+	REQUIRE_FALSE(outcome.success);
+	REQUIRE(outcome.rows.empty());
+	REQUIRE(outcome.error_messages.size() == 1);
+	REQUIRE_THAT(outcome.error_messages[0], Catch::Matchers::ContainsSubstring("ERS00000 not found"));
+}
+
 TEST_CASE("ENA samples insert: hold_until_date round-trips via the submission action", "[ena_samples_insert]") {
 	auto post_fn = [](const std::string &, const std::string &body, const std::string &, const std::string &,
 	                  const std::string &) {
-		REQUIRE(body.find("\"holdUntilDate\":\"2027-01-15\"") != std::string::npos);
+		REQUIRE(body.find(R"X(<HOLD HoldUntilDate="2027-01-15"/>)X") != std::string::npos);
 		std::string receipt = "<RECEIPT success=\"true\">";
 		receipt += "<SAMPLE accession=\"ERS7\" alias=\"h\" status=\"PRIVATE\" holdUntilDate=\"2027-01-15\">";
 		receipt += "<EXT_ID accession=\"SAMEA7\" type=\"biosample\"/></SAMPLE>";
@@ -184,9 +244,19 @@ TEST_CASE("ENA samples insert: SampleSpec exposes scientific_name and descriptio
           "[ena_samples_insert]") {
 	auto post_fn = [](const std::string &, const std::string &body, const std::string &, const std::string &,
 	                  const std::string &) {
-		// SCIENTIFIC_NAME goes into organism, DESCRIPTION at the sample level.
-		REQUIRE(body.find("\"scientificName\":\"human gut metagenome\"") != std::string::npos);
-		REQUIRE(body.find("\"description\":\"clinical isolate from a healthy donor\"") != std::string::npos);
+		// SCIENTIFIC_NAME nests inside SAMPLE_NAME; DESCRIPTION is a sibling
+		// AFTER SAMPLE_NAME (SRA.sample.xsd ordering — the bug L4b-fix exists
+		// to enforce). Pin the relative position so a future reorder of
+		// AppendXmlSample regresses loudly.
+		REQUIRE(body.find("<SAMPLE_NAME><TAXON_ID>408170</TAXON_ID>"
+		                  "<SCIENTIFIC_NAME>human gut metagenome</SCIENTIFIC_NAME></SAMPLE_NAME>") !=
+		        std::string::npos);
+		REQUIRE(body.find("<DESCRIPTION>clinical isolate from a healthy donor</DESCRIPTION>") != std::string::npos);
+		const auto sn_pos = body.find("<SAMPLE_NAME>");
+		const auto desc_pos = body.find("<DESCRIPTION>");
+		REQUIRE(sn_pos != std::string::npos);
+		REQUIRE(desc_pos != std::string::npos);
+		REQUIRE(sn_pos < desc_pos);
 		return MakeSampleReceipt({{"sn", "ERS9", "SAMEA9"}});
 	};
 

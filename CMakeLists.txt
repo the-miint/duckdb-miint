@@ -816,10 +816,15 @@ set(EXTENSION_SOURCES
     src/ena_secret.cpp
     src/ena_envelope_builder.cpp
     src/ena_receipt_parser.cpp
+    src/ena_lifecycle_submit.cpp
+    src/ena_lifecycle_functions.cpp
+    src/ena_lifecycle_delete.cpp
+    src/ena_modify_functions.cpp
     src/ena_submission_log.cpp
     src/ena_storage.cpp
     src/ena_insert_common.cpp
     src/ena_alias_check.cpp
+    src/ena_reports_client.cpp
     src/ena_checklist.cpp
     src/ena_projects_insert.cpp
     src/ena_projects_insert_op.cpp
@@ -1168,6 +1173,8 @@ set(TEST_SOURCES
     test/cpp/test_ena_envelope.cpp
     src/ena_receipt_parser.cpp
     test/cpp/test_ena_receipt.cpp
+    src/ena_lifecycle_submit.cpp
+    test/cpp/test_ena_lifecycle_submit.cpp
     src/ena_projects_insert.cpp
     test/cpp/test_ena_projects_insert.cpp
     src/ena_samples_insert.cpp
@@ -1178,6 +1185,8 @@ set(TEST_SOURCES
     test/cpp/test_ena_runs_insert.cpp
     src/ena_alias_check.cpp
     test/cpp/test_ena_alias_check.cpp
+    src/ena_reports_client.cpp
+    test/cpp/test_ena_reports_client.cpp
     src/ena_checklist.cpp
     test/cpp/test_ena_checklist.cpp
     src/fastq_encoder.cpp
