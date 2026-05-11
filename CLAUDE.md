@@ -48,11 +48,28 @@ bash build.sh         # always use build.sh, not make directly
 ```
 
 ### Formatting
-Pre-commit hook runs `make format-check`. Auto-fix:
+Pre-commit hook (and CI's "Code Quality Check / Format Check" job) runs `make format-check`. CI pins specific versions — match them locally or newer `black` will reformat files differently than CI expects and the check will fail on files you never touched.
+
+Required versions (from `extension-ci-tools/.github/workflows/_extension_code_quality.yml`):
+- `black==24.*`
+- `clang_format==11.0.1`
+- `cmake-format` (any recent version)
+
+One-time setup of a dedicated conda env:
 ```bash
-conda run -n duckdb-143 make format-fix
+conda create -n duckdb-format -c conda-forge python=3.12 pip -y
+conda activate duckdb-format
+pip install 'black==24.*' 'clang_format==11.0.1' cmake-format
 ```
-The `duckdb-143` conda env has the required `clang-format` and `black` tools.
+
+Then to check / auto-fix:
+```bash
+conda activate duckdb-format
+make format-check                  # verify (CI runs this)
+make format-fix                    # auto-fix differences
+```
+
+Note: black ships breaking style changes between major versions — pinning to `24.*` is required, not optional.
 
 ## Testing
 
