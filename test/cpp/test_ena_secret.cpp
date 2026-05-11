@@ -1,4 +1,5 @@
 #include "ena_secret.hpp"
+#include "env_test_helpers.hpp"
 
 #include <catch2/catch_all.hpp>
 
@@ -9,6 +10,8 @@
 #include <string>
 
 namespace {
+
+using miint_test::EnvGuard;
 
 // Helper: write a file with the given content, return its path.
 // Caller is responsible for cleanup via std::remove.
@@ -24,40 +27,6 @@ std::string WriteTempPwFile(const std::string &content) {
 	f.close();
 	return path;
 }
-
-// MinGW/Windows lacks POSIX setenv/unsetenv; _putenv_s with "" unsets.
-static inline void SetEnvPortable(const char *name, const char *value) {
-#ifdef _WIN32
-	_putenv_s(name, value ? value : "");
-#else
-	if (value) {
-		::setenv(name, value, 1);
-	} else {
-		::unsetenv(name);
-	}
-#endif
-}
-
-// RAII guard to set/restore an env var.
-class EnvGuard {
-public:
-	EnvGuard(std::string name, const char *value) : name_(std::move(name)) {
-		const char *prior = std::getenv(name_.c_str());
-		if (prior) {
-			prior_ = prior;
-			had_prior_ = true;
-		}
-		SetEnvPortable(name_.c_str(), value);
-	}
-	~EnvGuard() {
-		SetEnvPortable(name_.c_str(), had_prior_ ? prior_.c_str() : nullptr);
-	}
-
-private:
-	std::string name_;
-	std::string prior_;
-	bool had_prior_ {false};
-};
 
 } // namespace
 
