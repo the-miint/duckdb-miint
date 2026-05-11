@@ -33,7 +33,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
-#include <unistd.h> // unlink, rmdir, mkdtemp
+#include <unistd.h> // unlink, rmdir; mkdtemp on POSIX only (Aspera path is compiled out on MinGW)
 #include <vector>
 #include <zlib.h>
 
@@ -753,11 +753,23 @@ void RunUpload(ClientContext &context, const ENAUploadReadsBindData &bind, ENAUp
 			} else {
 				// Encode → gzip → MD5 → file. For Aspera we then ascp the
 				// file. For LOCAL_FILE the destination IS the local path.
+				//
+				// On platforms without Aspera support (Windows/MinGW, Emscripten)
+				// fail-fast *before* the temp-dir staging code — mkdtemp is POSIX-only
+				// and MinGW's libc doesn't provide it, so guarding here also keeps
+				// the file compilable on Windows.
+#if !(MIINT_ASPERA_SUPPORTED && defined(MIINT_STATIC_BUILD))
+				if (gs.target.transport == UploadTransport::ASPERA) {
+					throw IOException("ena_upload_reads: Aspera transport is not supported on this build/platform");
+				}
+#endif
 				string write_path;
 				string temp_dir;
 				if (gs.target.transport == UploadTransport::LOCAL_FILE) {
 					write_path = gs.target.remote_dir + fname;
-				} else {
+				}
+#if MIINT_ASPERA_SUPPORTED && defined(MIINT_STATIC_BUILD)
+				else {
 					// Aspera: write to a private temp directory so the
 					// basename matches the desired remote name. mkdtemp
 					// gives us a unique path; we unlink + rmdir after
@@ -771,6 +783,7 @@ void RunUpload(ClientContext &context, const ENAUploadReadsBindData &bind, ENAUp
 					temp_dir.assign(buf.data());
 					write_path = temp_dir + "/" + fname;
 				}
+#endif
 
 				// Cleanup helper — runs whether the encode/gzip/transport
 				// block succeeds or throws. For LOCAL_FILE we leave the
@@ -808,10 +821,6 @@ void RunUpload(ClientContext &context, const ENAUploadReadsBindData &bind, ENAUp
 							throw IOException("ena_upload_reads: ascp failed (exit %d) for sample '%s' file '%s': %s",
 							                  result.exit_code, group.sample_ref, fname, result.stderr_output);
 						}
-					}
-#else
-					if (gs.target.transport == UploadTransport::ASPERA) {
-						throw IOException("ena_upload_reads: Aspera transport is not supported on this build/platform");
 					}
 #endif
 				} catch (...) {
