@@ -57,10 +57,13 @@ sampleB	sampleB_1.fastq.gz	fastq	paired	true	true
 sampleB	sampleB_2.fastq.gz	fastq	paired	true	true
 
 # Files must actually exist on disk; glob the upload directory and join.
+# Compare basenames so the test is portable: on Windows glob() returns paths
+# with backslash separators, but __TEST_DIR__ expands to a mixed-separator
+# prefix, which broke a literal-string join. parse_filename() handles both.
 query I
 SELECT count(*) FROM upload_result r
 LEFT JOIN (SELECT file FROM glob('__TEST_DIR__/uploads/*.fastq.gz')) g
-       ON g.file = '__TEST_DIR__/uploads/' || r.filename
+       ON parse_filename(g.file) = r.filename
 WHERE g.file IS NULL;
 ----
 0
