@@ -16,6 +16,9 @@ unique_ptr<FunctionData> ReadSequencesSamTableFunction::Bind(ClientContext &cont
 
 	std::vector<std::string> file_paths;
 
+	if (input.inputs[0].IsNull()) {
+		throw InvalidInputException("read_sequences_sam: first argument cannot be NULL");
+	}
 	// Handle VARCHAR (single path, potentially a glob) or VARCHAR[] (array of literal paths)
 	if (input.inputs[0].type().id() == LogicalTypeId::VARCHAR) {
 		auto result = ExpandGlobPatternWithInfo(fs, context, input.inputs[0].ToString());
@@ -23,6 +26,9 @@ unique_ptr<FunctionData> ReadSequencesSamTableFunction::Bind(ClientContext &cont
 	} else if (input.inputs[0].type().id() == LogicalTypeId::LIST) {
 		auto &list_children = ListValue::GetChildren(input.inputs[0]);
 		for (const auto &child : list_children) {
+			if (child.IsNull()) {
+				throw InvalidInputException("read_sequences_sam: file path list cannot contain NULL");
+			}
 			file_paths.push_back(child.ToString());
 		}
 		if (file_paths.empty()) {

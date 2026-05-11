@@ -1,0 +1,237 @@
+# name: test/sql/null_input_guards.test
+# description: Regression: table functions taking VARCHAR/VARCHAR[] must reject NULL cleanly (not crash on ListValue::GetChildren)
+# group: [sql]
+
+require miint
+
+# --- read_fastx ---
+statement error
+SELECT * FROM read_fastx(NULL::VARCHAR);
+----
+read_fastx: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_fastx(NULL::VARCHAR[]);
+----
+read_fastx: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_fastx(['/tmp/a.fa', NULL]);
+----
+read_fastx: file path list cannot contain NULL
+
+# --- read_alignments ---
+statement error
+SELECT * FROM read_alignments(NULL::VARCHAR);
+----
+read_alignments: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_alignments(NULL::VARCHAR[]);
+----
+read_alignments: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_alignments(['/tmp/a.sam', NULL]);
+----
+read_alignments: file path list cannot contain NULL
+
+# --- read_sequences_sam ---
+statement error
+SELECT * FROM read_sequences_sam(NULL::VARCHAR);
+----
+read_sequences_sam: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_sequences_sam(NULL::VARCHAR[]);
+----
+read_sequences_sam: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_sequences_sam(['/tmp/a.sam', NULL]);
+----
+read_sequences_sam: file path list cannot contain NULL
+
+# --- read_sequences_sff ---
+statement error
+SELECT * FROM read_sequences_sff(NULL::VARCHAR);
+----
+read_sequences_sff: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_sequences_sff(NULL::VARCHAR[]);
+----
+read_sequences_sff: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_sequences_sff(['/tmp/a.sff', NULL]);
+----
+read_sequences_sff: file path list cannot contain NULL
+
+# --- read_biom ---
+statement error
+SELECT * FROM read_biom(NULL::VARCHAR);
+----
+read_biom: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_biom(NULL::VARCHAR[]);
+----
+read_biom: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_biom(['/tmp/a.biom', NULL]);
+----
+read_biom: file path list cannot contain NULL
+
+# --- read_newick ---
+statement error
+SELECT * FROM read_newick(NULL::VARCHAR);
+----
+read_newick: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_newick(NULL::VARCHAR[]);
+----
+read_newick: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_newick(['/tmp/a.nwk', NULL]);
+----
+read_newick: file path list cannot contain NULL
+
+# --- read_jplace_newick ---
+statement error
+SELECT * FROM read_jplace_newick(NULL::VARCHAR);
+----
+read_jplace_newick: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_jplace_newick(NULL::VARCHAR[]);
+----
+read_jplace_newick: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_jplace_newick(['/tmp/a.jplace', NULL]);
+----
+read_jplace_newick: file path list cannot contain NULL
+
+# --- read_mzml ---
+statement error
+SELECT * FROM read_mzml(NULL::VARCHAR);
+----
+read_mzml: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_mzml(NULL::VARCHAR[]);
+----
+read_mzml: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_mzml(['/tmp/a.mzML', NULL]);
+----
+read_mzml: file path list cannot contain NULL
+
+# --- read_mzxml ---
+statement error
+SELECT * FROM read_mzxml(NULL::VARCHAR);
+----
+read_mzxml: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_mzxml(NULL::VARCHAR[]);
+----
+read_mzxml: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_mzxml(['/tmp/a.mzXML', NULL]);
+----
+read_mzxml: file path list cannot contain NULL
+
+# --- read_mzml_chromatograms ---
+statement error
+SELECT * FROM read_mzml_chromatograms(NULL::VARCHAR);
+----
+read_mzml_chromatograms: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_mzml_chromatograms(NULL::VARCHAR[]);
+----
+read_mzml_chromatograms: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_mzml_chromatograms(['/tmp/a.mzML', NULL]);
+----
+read_mzml_chromatograms: file path list cannot contain NULL
+
+# --- read_ncbi ---
+statement error
+SELECT * FROM read_ncbi(NULL::VARCHAR);
+----
+read_ncbi: accession cannot be NULL
+
+statement error
+SELECT * FROM read_ncbi(NULL::VARCHAR[]);
+----
+read_ncbi: accession cannot be NULL
+
+statement error
+SELECT * FROM read_ncbi(['NC_001416.1', NULL]);
+----
+read_ncbi: accession list cannot contain NULL
+
+# --- read_ncbi_annotation ---
+statement error
+SELECT * FROM read_ncbi_annotation(NULL::VARCHAR);
+----
+read_ncbi_annotation: accession cannot be NULL
+
+statement error
+SELECT * FROM read_ncbi_annotation(NULL::VARCHAR[]);
+----
+read_ncbi_annotation: accession cannot be NULL
+
+statement error
+SELECT * FROM read_ncbi_annotation(['NC_001416.1', NULL]);
+----
+read_ncbi_annotation: accession list cannot contain NULL
+
+# --- read_ena ---
+statement error
+SELECT * FROM read_ena(NULL::VARCHAR);
+----
+read_ena: accession cannot be NULL
+
+statement error
+SELECT * FROM read_ena(NULL::VARCHAR[]);
+----
+read_ena: accession cannot be NULL
+
+statement error
+SELECT * FROM read_ena(['ERR1234567', NULL]);
+----
+read_ena: accession list cannot contain NULL
+
+# --- read_ena_attributes ---
+statement error
+SELECT * FROM read_ena_attributes(NULL::VARCHAR);
+----
+read_ena_attributes: accession cannot be NULL
+
+statement error
+SELECT * FROM read_ena_attributes(NULL::VARCHAR[]);
+----
+read_ena_attributes: accession cannot be NULL
+
+statement error
+SELECT * FROM read_ena_attributes(['ERR1234567', NULL]);
+----
+read_ena_attributes: accession list cannot contain NULL
+
+# --- read_fastx sequence2 named-parameter NULL element ---
+# Use a real sequence1 file so we exercise the sequence2 list parsing path
+# rather than failing on sequence1 file-existence.
+statement error
+SELECT * FROM read_fastx('data/fastq/foo.r1.fastq.gz', sequence2=>['data/fastq/foo.r2.fastq.gz', NULL]);
+----
+read_fastx: sequence2 list cannot contain NULL
