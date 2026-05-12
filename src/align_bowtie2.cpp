@@ -1,6 +1,7 @@
 #include "align_bowtie2.hpp"
 #include "align_result_utils.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include "gpl_boundary/process.hpp"
 
 #include <fcntl.h>
 #include <mutex>
@@ -80,7 +81,7 @@ unique_ptr<GlobalTableFunctionState> AlignBowtie2TableFunction::InitGlobal(Clien
 	auto gstate = make_uniq<GlobalState>();
 
 	// Create aligner with config
-	gstate->aligner = std::make_unique<miint::Bowtie2Aligner>(data.config);
+	gstate->aligner = std::make_unique<::miint::Bowtie2Aligner>(data.config);
 
 	// Build index from all subjects
 	gstate->aligner->build_index(data.subjects);
@@ -123,7 +124,7 @@ void AlignBowtie2TableFunction::Execute(ClientContext &context, TableFunctionInp
 		}
 
 		// Read next batch of queries
-		miint::SequenceRecordBatch query_batch;
+		::miint::SequenceRecordBatch query_batch;
 		bool has_more = ReadQueryBatch(context, bind_data.query_table, bind_data.query_schema, QUERY_BATCH_SIZE,
 		                               global_state.current_query_offset, query_batch);
 
@@ -201,57 +202,56 @@ void AlignBowtie2TableFunction::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetFunction());
 }
 
-// Scalar function to check if bowtie2 is available in PATH
+// Scalar function: returns true when the gpl-boundary daemon advertises the
+// `bowtie2-align` and `bowtie2-build` tools. Mirrors
+// `PhylogenyFastTreeAvailableImpl` (src/phylogeny_fasttree.cpp:882-914) —
+// cached once per process to keep the cost out of hot SQL paths. We probe via
+// `gpl-boundary --list-tools` rather than opening a Session because the
+// scalar must remain cheap (no shm setup) and stateless.
 static void Bowtie2AvailableFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	(void)args;
+	(void)state;
 	static std::once_flag flag;
 	static bool available = false;
 
 	std::call_once(flag, []() {
-		auto check_executable = [](const char *name) -> bool {
-			int pipefd[2];
-			if (pipe(pipefd) == -1) {
-				return false;
+		// Fully qualified `::duckdb::miint::gpl_boundary::` because the
+		// existing direct-subprocess code in this file references
+		// `::miint::Bowtie2Aligner` (top-level miint), and a `namespace
+		// gb = ...` alias inside `namespace duckdb` would put
+		// `duckdb::miint` in scope, hiding it. Phase 7 deletes the
+		// direct-subprocess code and this nesting concern goes with it.
+		const std::string path = ::duckdb::miint::gpl_boundary::FindGplBoundary();
+		if (path.empty()) {
+			available = false;
+			return;
+		}
+		try {
+			std::vector<std::string> argv = {path, "--list-tools"};
+			::duckdb::miint::gpl_boundary::ChildProcess child(argv);
+			std::string out;
+			char buf[256];
+			ssize_t n;
+			while ((n = ::read(child.stdout_fd(), buf, sizeof(buf))) > 0) {
+				out.append(buf, static_cast<size_t>(n));
 			}
-
-			pid_t pid = fork();
-			if (pid == -1) {
-				close(pipefd[0]);
-				close(pipefd[1]);
-				return false;
-			}
-
-			if (pid == 0) {
-				// Child process
-				close(pipefd[0]);
-				dup2(pipefd[1], STDOUT_FILENO);
-				close(pipefd[1]);
-				// Redirect stderr to /dev/null
-				int devnull = open("/dev/null", O_WRONLY);
-				if (devnull != -1) {
-					dup2(devnull, STDERR_FILENO);
-					close(devnull);
-				}
-				execlp("which", "which", name, nullptr);
-				_exit(1);
-			}
-
-			// Parent process
-			close(pipefd[1]);
-			char buffer[256];
-			ssize_t n = read(pipefd[0], buffer, sizeof(buffer) - 1);
-			close(pipefd[0]);
-
-			int status;
-			waitpid(pid, &status, 0);
-
-			return WIFEXITED(status) && WEXITSTATUS(status) == 0 && n > 0;
-		};
-
-		available = check_executable("bowtie2") && check_executable("bowtie2-build");
+			const int status = child.Wait();
+			// Both bowtie2-align (alignment) and bowtie2-build (index build)
+			// are required; we use both downstream. Require both in the
+			// registry rather than just `bowtie2-align` so a stripped-down
+			// daemon doesn't pass this check then fail at bind time.
+			available = WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+			            out.find("bowtie2-align") != std::string::npos &&
+			            out.find("bowtie2-build") != std::string::npos;
+		} catch (...) {
+			available = false;
+		}
 	});
 
 	result.SetVectorType(VectorType::CONSTANT_VECTOR);
-	ConstantVector::GetData<bool>(result)[0] = available;
+	auto &constant_validity = ConstantVector::Validity(result);
+	constant_validity.SetAllValid(1);
+	*ConstantVector::GetData<bool>(result) = available;
 }
 
 void RegisterBowtie2AvailableFunction(ExtensionLoader &loader) {

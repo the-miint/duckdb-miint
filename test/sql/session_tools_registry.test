@@ -13,12 +13,11 @@ SELECT phylogeny_fasttree_available();
 ----
 true
 
-# bowtie2_available() is still the legacy `which bowtie2` check in Phase 1.
-# Phase 2 tightens this to mirror phylogeny_fasttree_available()'s daemon
-# probe; for now just assert it returns a valid boolean so this test runs
-# regardless of whether bowtie2 is installed on PATH (it usually isn't on
-# CI / dev boxes after the migration).
+# bowtie2_available() also routes through the daemon's tool registry: with
+# GPL_BOUNDARY_AVAILABLE set, the v0.2.0+ daemon advertises bowtie2-align,
+# so the scalar must report true regardless of whether the standalone
+# bowtie2 binary is on PATH.
 query I
-SELECT bowtie2_available() IN (true, false);
+SELECT bowtie2_available();
 ----
 true
