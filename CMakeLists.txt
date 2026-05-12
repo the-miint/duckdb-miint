@@ -885,7 +885,11 @@ if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND EXTENSION_SOURCES src/copy_biom.cpp src/BIOMTable.cpp src/BIOMReader.cpp src/read_biom.cpp)
 endif()
 if(MIINT_ENABLE_BOWTIE2)
-    list(APPEND EXTENSION_SOURCES src/Bowtie2Aligner.cpp src/align_bowtie2.cpp src/align_bowtie2_sharded.cpp)
+    # align_bowtie2.cpp moved to MIINT_ENABLE_GPL_BOUNDARY in Phase 3 of
+    # the bowtie2 → gpl-boundary migration. Bowtie2Aligner.cpp and
+    # align_bowtie2_sharded.cpp still use the direct-subprocess path
+    # until Phase 5 (sharded migration) and Phase 7 (final deletion).
+    list(APPEND EXTENSION_SOURCES src/Bowtie2Aligner.cpp src/align_bowtie2_sharded.cpp)
 endif()
 if(MIINT_ENABLE_MAFFT)
     list(APPEND EXTENSION_SOURCES src/MafftAligner.cpp src/align_mafft.cpp)
@@ -903,7 +907,8 @@ if(MIINT_ENABLE_GPL_BOUNDARY)
         src/gpl_boundary/shm.cpp
         src/gpl_boundary/arrow_ipc.cpp
         src/install_gpl_boundary.cpp
-        src/phylogeny_fasttree.cpp)
+        src/phylogeny_fasttree.cpp
+        src/align_bowtie2.cpp)
 endif()
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})

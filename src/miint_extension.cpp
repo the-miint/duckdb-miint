@@ -84,11 +84,11 @@
 #endif
 
 #ifdef MIINT_HAS_BOWTIE2
-#include <align_bowtie2.hpp>
 #include <align_bowtie2_sharded.hpp>
 #endif
 
 #ifdef MIINT_HAS_GPL_BOUNDARY
+#include <align_bowtie2.hpp>
 #include <install_gpl_boundary.hpp>
 #include <phylogeny_fasttree.hpp>
 #endif
@@ -230,16 +230,23 @@ static void LoadInternal(ExtensionLoader &loader) {
 	AlignMinimap2TableFunction::Register(loader);
 	AlignMinimap2ShardedTableFunction::Register(loader);
 	SaveMinimap2IndexTableFunction::Register(loader);
-#ifdef MIINT_HAS_BOWTIE2
+#ifdef MIINT_HAS_GPL_BOUNDARY
 	AlignBowtie2TableFunction::Register(loader);
-	AlignBowtie2ShardedTableFunction::Register(loader);
 	RegisterBowtie2AvailableFunction(loader);
 #else
-	// Stub: bowtie2_available() always returns false when Bowtie2 support is compiled out
+	// Stub: bowtie2_available() always returns false when the gpl-boundary
+	// subsystem is compiled out (e.g., on WASM/Windows). The table function
+	// itself is also unavailable in that case — the daemon is the only path.
 	ScalarFunction bowtie2_stub(
 	    "bowtie2_available", {}, LogicalType::BOOLEAN,
 	    [](DataChunk &args, ExpressionState &state, Vector &result) { result.Reference(Value::BOOLEAN(false)); });
 	loader.RegisterFunction(bowtie2_stub);
+#endif
+#ifdef MIINT_HAS_BOWTIE2
+	// align_bowtie2_sharded still on the direct-subprocess path; Phase 5
+	// of the gpl-boundary migration moves this registration to the
+	// MIINT_HAS_GPL_BOUNDARY block.
+	AlignBowtie2ShardedTableFunction::Register(loader);
 #endif
 	ReadNCBIFastaTableFunction::Register(loader);
 	ReadNCBITableFunction::Register(loader);

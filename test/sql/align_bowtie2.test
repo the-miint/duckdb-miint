@@ -4,7 +4,13 @@
 
 require miint
 
-require-env BOWTIE2_AVAILABLE
+# Phase 3 of the bowtie2 → gpl-boundary migration: gate is intentionally a
+# sentinel that run_tests.sh does NOT export. The full test suite is
+# brought back online in Phase 4 (gate flips to require-env
+# GPL_BOUNDARY_AVAILABLE). Visible diff per CLAUDE.md Rule 10 — no silent
+# skip. align_bowtie2_gpl_boundary_smoke.test exercises the daemon path
+# in the meantime.
+require-env MIINT_BOWTIE2_PHASE4_GATE
 
 # Setup: Create test tables with sequence data
 # Using 100bp sequences to satisfy bowtie2's minimum reference length requirements

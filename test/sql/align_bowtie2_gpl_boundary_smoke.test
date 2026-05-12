@@ -1,0 +1,63 @@
+# name: test/sql/align_bowtie2_gpl_boundary_smoke.test
+# description: Phase 3 smoke test for align_bowtie2 over the gpl-boundary daemon. Pins the 21-column schema and the always-NULL tag_sa parity stub. Deleted at end of Phase 4 once the full align_bowtie2.test re-engages.
+# group: [sql]
+
+require miint
+
+require-env GPL_BOUNDARY_AVAILABLE
+
+# A 100bp reference satisfies bowtie2's minimum index length requirement.
+statement ok
+CREATE TABLE subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE queries AS SELECT * FROM (VALUES
+    ('q1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT')
+) AS t(read_id, sequence1);
+
+# Basic alignment lands on ref1 with stop_position computed from CIGAR.
+query III
+SELECT read_id, reference, stop_position >= position AS stop_after_start
+FROM align_bowtie2('queries', 'subjects')
+ORDER BY read_id;
+----
+q1	ref1	true
+
+# 21-column schema — every column from the daemon's bowtie2-align v2 output
+# must be selectable. If any column is missing, this fails.
+query I
+SELECT count(*) FROM (
+  SELECT read_id, flags, reference, position, stop_position, mapq, cigar,
+         mate_reference, mate_position, template_length,
+         tag_as, tag_xs, tag_ys, tag_xn, tag_xm, tag_xo, tag_xg, tag_nm,
+         tag_yt, tag_md, tag_sa
+  FROM align_bowtie2('queries', 'subjects')
+);
+----
+1
+
+# tag_sa is always NULL (parity stub — bowtie2 doesn't emit SA, the column
+# is emitted by the daemon only so the schema matches what miint's
+# direct-subprocess path used to return).
+query I
+SELECT count(*) FROM align_bowtie2('queries', 'subjects') WHERE tag_sa IS NOT NULL;
+----
+0
+
+# stop_position derives from POS + reference-length(CIGAR) - 1. For a
+# perfect-match 52bp query against ref1, the CIGAR is 52M and
+# stop_position = 1 + 52 - 1 = 52.
+query II
+SELECT position, stop_position
+FROM align_bowtie2('queries', 'subjects')
+ORDER BY read_id;
+----
+1	52
+
+statement ok
+DROP TABLE subjects;
+
+statement ok
+DROP TABLE queries;
