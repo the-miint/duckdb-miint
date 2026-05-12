@@ -3,7 +3,8 @@
 
 require miint
 
-require-env BOWTIE2_AVAILABLE
+# Phase 5 sentinel — Phase 6 flips this back to require-env GPL_BOUNDARY_AVAILABLE.
+require-env MIINT_BOWTIE2_SHARDED_PHASE6_GATE
 
 # NOTE: Set threads=1 because sqllogictest framework runs in a constrained mode
 # that doesn't handle parallel table function execution well.
