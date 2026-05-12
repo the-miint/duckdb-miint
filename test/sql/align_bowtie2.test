@@ -4,13 +4,7 @@
 
 require miint
 
-# Phase 3 of the bowtie2 → gpl-boundary migration: gate is intentionally a
-# sentinel that run_tests.sh does NOT export. The full test suite is
-# brought back online in Phase 4 (gate flips to require-env
-# GPL_BOUNDARY_AVAILABLE). Visible diff per CLAUDE.md Rule 10 — no silent
-# skip. align_bowtie2_gpl_boundary_smoke.test exercises the daemon path
-# in the meantime.
-require-env MIINT_BOWTIE2_PHASE4_GATE
+require-env GPL_BOUNDARY_AVAILABLE
 
 # Setup: Create test tables with sequence data
 # Using 100bp sequences to satisfy bowtie2's minimum reference length requirements
@@ -159,9 +153,12 @@ ORDER BY read_id;
 query1	ref1
 query2	ref2
 
-# Test command injection prevention - malicious reference names should be treated as literal strings
-# The aligner uses fork/exec with explicit arguments, so shell metacharacters have no effect
-# Note: Reference names cannot contain spaces (FASTA header limitation)
+# Test command injection prevention - malicious reference names are treated as literal strings.
+# Historical: the direct-subprocess implementation used fork/exec with an explicit argv (no
+# shell), so shell metacharacters had no effect. The gpl-boundary daemon path makes this even
+# safer — reference names cross the boundary as Arrow string data inside POSIX shared memory,
+# never as command-line arguments. Note: reference names cannot contain spaces (FASTA header
+# limitation).
 statement ok
 CREATE TABLE injection_subjects AS SELECT * FROM (VALUES
     ('ref;echo_INJECTED', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
