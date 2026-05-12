@@ -229,12 +229,28 @@ static void Bowtie2AvailableFunction(DataChunk &args, ExpressionState &state, Ve
 		try {
 			std::vector<std::string> argv = {path, "--list-tools"};
 			::duckdb::miint::gpl_boundary::ChildProcess child(argv);
+			// Drain stdout fully. `--list-tools` writes a small JSON array
+			// (a few hundred bytes for the v0.2.0 registry) and exits — well
+			// below the pipe-buffer limit, so no risk of the child blocking
+			// here. Then drain stderr to keep the child from blocking on a
+			// stderr write before exit. `gpl-boundary --list-tools` doesn't
+			// write stderr in the success path (see GPL-boundary
+			// `src/main.rs:88-94`), but error paths do; the second drain is
+			// defensive and bounded.
+			auto drain = [](int fd, std::string &out) {
+				if (fd < 0) {
+					return;
+				}
+				char buf[256];
+				ssize_t n;
+				while ((n = ::read(fd, buf, sizeof(buf))) > 0) {
+					out.append(buf, static_cast<size_t>(n));
+				}
+			};
 			std::string out;
-			char buf[256];
-			ssize_t n;
-			while ((n = ::read(child.stdout_fd(), buf, sizeof(buf))) > 0) {
-				out.append(buf, static_cast<size_t>(n));
-			}
+			std::string err;
+			drain(child.stdout_fd(), out);
+			drain(child.stderr_fd(), err);
 			const int status = child.Wait();
 			// Both bowtie2-align (alignment) and bowtie2-build (index build)
 			// are required; we use both downstream. Require both in the
