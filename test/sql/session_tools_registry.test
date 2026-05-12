@@ -1,0 +1,24 @@
+# name: test/sql/session_tools_registry.test
+# description: Round-trip the gpl-boundary v0.2.0+ tool registry through miint's availability scalars
+# group: [sql]
+
+require miint
+
+require-env GPL_BOUNDARY_AVAILABLE
+
+# phylogeny_fasttree_available() probes the daemon's tool registry via
+# `gpl-boundary --list-tools`. With v0.2.0 installed it must report true.
+query I
+SELECT phylogeny_fasttree_available();
+----
+true
+
+# bowtie2_available() is still the legacy `which bowtie2` check in Phase 1.
+# Phase 2 tightens this to mirror phylogeny_fasttree_available()'s daemon
+# probe; for now just assert it returns a valid boolean so this test runs
+# regardless of whether bowtie2 is installed on PATH (it usually isn't on
+# CI / dev boxes after the migration).
+query I
+SELECT bowtie2_available() IN (true, false);
+----
+true

@@ -18,10 +18,11 @@ namespace gpl_boundary {
 namespace yj = duckdb_yyjson;
 
 namespace {
-// gpl-boundary's protocol version at HEAD (commit 19306f6, 2026-05-01).
-// Bumped 1→2 in that commit when shm_input_size was made required.
-// If the daemon reports a different value, fail fast at session boot.
-constexpr int kRequiredProtocolVersion = 2;
+// gpl-boundary's protocol version at v0.2.0 (commit 6b11337).
+// Bumped 2→3 in that commit when the init reply began advertising the
+// registered `tools` array. If the daemon reports a different value, fail
+// fast at session boot.
+constexpr int kRequiredProtocolVersion = 3;
 
 constexpr const char *kInitLine = R"({"init":{}})";
 constexpr const char *kShutdownLine = R"({"shutdown":true})";
@@ -128,8 +129,8 @@ Session::~Session() {
 }
 
 Session::Session(Session &&other) noexcept
-    : child_(std::move(other.child_)), reader_(std::move(other.reader_)), initialized_(other.initialized_),
-      shut_down_(other.shut_down_) {
+    : child_(std::move(other.child_)), reader_(std::move(other.reader_)), tools_(std::move(other.tools_)),
+      initialized_(other.initialized_), shut_down_(other.shut_down_) {
 	other.initialized_ = false;
 	other.shut_down_ = true;
 }
@@ -177,7 +178,56 @@ void Session::Initialize() {
 		                         ", miint requires " + std::to_string(kRequiredProtocolVersion) +
 		                         ". Update the gpl-boundary binary to a compatible release.");
 	}
+
+	// Parse the `tools` array (protocol v3+). Each entry is `{"name": str,
+	// "schema_version": int}`. Missing/malformed entries are skipped rather
+	// than throwing — the version check above already guarantees we're
+	// talking to a v3 daemon, so this is robustness against future
+	// additive changes to per-entry fields, not a backward-compat hatch.
+	yj::yyjson_val *tools_arr = yj::yyjson_obj_get(root, "tools");
+	if (tools_arr && yj::yyjson_is_arr(tools_arr)) {
+		const size_t n = yj::yyjson_arr_size(tools_arr);
+		tools_.reserve(n);
+		for (size_t i = 0; i < n; ++i) {
+			yj::yyjson_val *item = yj::yyjson_arr_get(tools_arr, i);
+			if (!yj::yyjson_is_obj(item)) {
+				continue;
+			}
+			const std::string name = get_str(item, "name");
+			if (name.empty()) {
+				continue;
+			}
+			yj::yyjson_val *sv = yj::yyjson_obj_get(item, "schema_version");
+			uint32_t schema_version = 0;
+			if (sv && yj::yyjson_is_int(sv)) {
+				const int64_t v = yj::yyjson_get_int(sv);
+				if (v > 0) {
+					schema_version = static_cast<uint32_t>(v);
+				}
+			}
+			tools_.push_back(ToolEntry {name, schema_version});
+		}
+	}
+
 	initialized_ = true;
+}
+
+bool Session::has_tool(const std::string &name) const {
+	for (const auto &t : tools_) {
+		if (t.name == name) {
+			return true;
+		}
+	}
+	return false;
+}
+
+uint32_t Session::tool_schema_version(const std::string &name) const {
+	for (const auto &t : tools_) {
+		if (t.name == name) {
+			return t.schema_version;
+		}
+	}
+	return 0;
 }
 
 namespace {
