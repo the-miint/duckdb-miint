@@ -269,6 +269,22 @@ struct AlignBowtie2ShardedGlobalState : public GlobalTableFunctionState {
 	idx_t MaxThreads() const override {
 		return 1; // sequential per shard for Phase 5
 	}
+
+	~AlignBowtie2ShardedGlobalState() override {
+		// `gb::Session::~Session()` already calls Shutdown() best-effort if
+		// not yet shut down, so the implicit destructor would be sufficient.
+		// We do it explicitly here to match the explicit-Shutdown pattern in
+		// AlignBowtie2GlobalState and to make the daemon-exit point obvious
+		// when reading the code. The decoded batches / SHM regions live in
+		// later-declared members and are torn down before this runs.
+		if (session) {
+			try {
+				session->Shutdown();
+			} catch (...) {
+				// Destructor must not throw; child reaped by ~ChildProcess.
+			}
+		}
+	}
 };
 
 struct AlignBowtie2ShardedLocalState : public LocalTableFunctionState {};
@@ -502,7 +518,13 @@ void OpenCurrentShardStream(AlignBowtie2ShardedGlobalState &gs, const AlignBowti
 	select += " FROM " + KeywordHelper::WriteOptionallyQuoted(bd.query_table) + " q";
 	select += " JOIN " + KeywordHelper::WriteOptionallyQuoted(bd.read_to_shard_table) + " rts";
 	select += " ON q.read_id = rts.read_id";
-	select += " WHERE rts.shard_name = '" + shard.name + "'";
+	// shard.name is a user-supplied row value from `read_to_shard`. Direct
+	// concatenation into the WHERE clause would be a SQL-injection vector
+	// (e.g. shard names containing a single quote could rewrite the predicate
+	// and silently send reads to the wrong index). WriteQuoted wraps the
+	// value in single quotes and doubles any embedded single quote, matching
+	// the convention already used in sequence_table_reader.cpp:377.
+	select += " WHERE rts.shard_name = " + KeywordHelper::WriteQuoted(shard.name, '\'');
 
 	gs.input_stream = gs.input_conn->SendQuery(select);
 	if (gs.input_stream->HasError()) {

@@ -42,14 +42,17 @@ void PopulateOutputSchema(std::vector<std::string> &names, std::vector<LogicalTy
 }
 
 void ValidateOutputSchema(const ArrowSchema &schema) {
+	// Generic "bowtie2-align" rather than "align_bowtie2:" because both
+	// align_bowtie2 and align_bowtie2_sharded reach this code; surfacing the
+	// daemon tool name keeps the diagnostic accurate regardless of caller.
 	if (schema.n_children != kNumOutputColumns) {
-		throw IOException("align_bowtie2: daemon returned unexpected schema (%lld columns, expected %d)",
+		throw IOException("bowtie2-align: daemon returned unexpected schema (%lld columns, expected %d)",
 		                  static_cast<long long>(schema.n_children), kNumOutputColumns);
 	}
 	for (int c = 0; c < kNumOutputColumns; ++c) {
 		const auto *child = schema.children[c];
 		if (!child || !child->name || std::strcmp(child->name, kOutputColumnNames[c]) != 0) {
-			throw IOException("align_bowtie2: schema drift at column %d — expected '%s', got '%s'", c,
+			throw IOException("bowtie2-align: schema drift at column %d — expected '%s', got '%s'", c,
 			                  kOutputColumnNames[c], (child && child->name) ? child->name : "(null)");
 		}
 	}
