@@ -4,12 +4,7 @@
 
 require miint
 
-# Phase 5 of the bowtie2 → gpl-boundary migration: gate is intentionally a
-# sentinel that run_tests.sh does NOT export. Phase 6 flips this to
-# require-env GPL_BOUNDARY_AVAILABLE. Visible diff per CLAUDE.md Rule 10.
-# align_bowtie2_sharded_gpl_boundary_smoke.test exercises the daemon path
-# in the interim.
-require-env MIINT_BOWTIE2_SHARDED_PHASE6_GATE
+require-env GPL_BOUNDARY_AVAILABLE
 
 # NOTE: Set threads=1 because sqllogictest framework runs in a constrained mode
 # that doesn't handle parallel table function execution well. Parallel execution

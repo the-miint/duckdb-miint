@@ -4,8 +4,7 @@
 
 require miint
 
-# Phase 5 sentinel — Phase 6 flips this back to require-env GPL_BOUNDARY_AVAILABLE.
-require-env MIINT_BOWTIE2_SHARDED_PHASE6_GATE
+require-env GPL_BOUNDARY_AVAILABLE
 
 # The threads-ignored warning fires in Bind() before Execute, so EXPLAIN is
 # enough to trigger EmitWarning without running bowtie2 on the test shards.

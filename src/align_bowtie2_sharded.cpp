@@ -359,6 +359,11 @@ std::string BuildAlignConfigJson(const named_parameter_map_t &named_params, cons
 	}
 	cfg.append_bool("verbose", !quiet);
 
+	// Sharded contract: emit only mapped reads. The pre-migration direct-subprocess
+	// path called FilterMappedOnly on every batch; on the daemon path we delegate
+	// to bowtie2's own --no-unal so unaligned records never cross the boundary.
+	cfg.append_bool("no_unal", true);
+
 	return cfg.build();
 }
 
