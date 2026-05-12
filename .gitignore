@@ -19,3 +19,6 @@ scripts/test_wasm_harness.js
 scripts/test_wasm_harness.wasm
 scripts/test_wasm_harness.data
 
+# Local planning / scratch docs — keep individual files out of git
+localdocs/
+

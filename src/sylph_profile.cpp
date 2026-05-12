@@ -67,14 +67,12 @@ namespace duckdb {
 // column. Adding columns at the end is non-breaking; reordering is.
 static void SetupBaseOutputSchema(vector<LogicalType> &types, vector<std::string> &names) {
 	names = {
-	    "genome_index",        "genome_name",         "contig_name",        "sequence_abundance",
-	    "taxonomic_abundance", "adjusted_ani",        "eff_cov",            "naive_ani",
-	    "kmers_reassigned",
+	    "genome_index", "genome_name", "contig_name", "sequence_abundance", "taxonomic_abundance",
+	    "adjusted_ani", "eff_cov",     "naive_ani",   "kmers_reassigned",
 	};
 	types = {
-	    LogicalType::UINTEGER, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE,
-	    LogicalType::DOUBLE,   LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE,
-	    LogicalType::UBIGINT,
+	    LogicalType::UINTEGER, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE,  LogicalType::DOUBLE,
+	    LogicalType::DOUBLE,   LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::UBIGINT,
 	};
 }
 
@@ -120,7 +118,8 @@ unique_ptr<FunctionData> SylphProfileTableFunction::Bind(ClientContext &context,
 	// the caller explicitly asked to change.
 	auto get_double = [&](const std::string &param, double lo, double hi) -> std::optional<double> {
 		auto it = input.named_parameters.find(param);
-		if (it == input.named_parameters.end()) return std::nullopt;
+		if (it == input.named_parameters.end())
+			return std::nullopt;
 		double v = it->second.GetValue<double>();
 		if (v < lo || v > hi) {
 			throw InvalidInputException("sylph_profile: %s must be in [%g, %g] (got %g)", param.c_str(), lo, hi, v);
@@ -129,7 +128,8 @@ unique_ptr<FunctionData> SylphProfileTableFunction::Bind(ClientContext &context,
 	};
 	auto get_uint = [&](const std::string &param) -> std::optional<uint32_t> {
 		auto it = input.named_parameters.find(param);
-		if (it == input.named_parameters.end()) return std::nullopt;
+		if (it == input.named_parameters.end())
+			return std::nullopt;
 		auto v = it->second.GetValue<int64_t>();
 		if (v < 0) {
 			throw InvalidInputException("sylph_profile: %s must be >= 0 (got %lld)", param.c_str(), (long long)v);
@@ -138,18 +138,26 @@ unique_ptr<FunctionData> SylphProfileTableFunction::Bind(ClientContext &context,
 	};
 	auto get_bool = [&](const std::string &param) -> std::optional<bool> {
 		auto it = input.named_parameters.find(param);
-		if (it == input.named_parameters.end()) return std::nullopt;
+		if (it == input.named_parameters.end())
+			return std::nullopt;
 		return it->second.GetValue<bool>();
 	};
 
 	// min_ani: user passes a fraction [0,1]; FFI takes percent [0,100].
-	if (auto v = get_double("min_ani", 0.0, 1.0))           data->profile_params.minimum_ani       = *v * 100.0;
-	if (auto v = get_uint("min_number_kmers"))              data->profile_params.min_number_kmers  = static_cast<double>(*v);
-	if (auto v = get_double("min_count_correct", 0.0, 1e9)) data->profile_params.min_count_correct = *v;
-	if (auto v = get_bool("estimate_unknown"))              data->profile_params.estimate_unknown  = *v ? 1 : 0;
-	if (auto v = get_bool("dedup_paired_reads"))            data->sketch_params.dedup              = *v ? 1 : 0;
-	if (auto v = get_double("dedup_fpr", 0.0, 1.0))         data->sketch_params.dedup_fpr          = *v;
-	if (auto v = get_uint("threads"))                       data->user_threads                     = *v;
+	if (auto v = get_double("min_ani", 0.0, 1.0))
+		data->profile_params.minimum_ani = *v * 100.0;
+	if (auto v = get_uint("min_number_kmers"))
+		data->profile_params.min_number_kmers = static_cast<double>(*v);
+	if (auto v = get_double("min_count_correct", 0.0, 1e9))
+		data->profile_params.min_count_correct = *v;
+	if (auto v = get_bool("estimate_unknown"))
+		data->profile_params.estimate_unknown = *v ? 1 : 0;
+	if (auto v = get_bool("dedup_paired_reads"))
+		data->sketch_params.dedup = *v ? 1 : 0;
+	if (auto v = get_double("dedup_fpr", 0.0, 1.0))
+		data->sketch_params.dedup_fpr = *v;
+	if (auto v = get_uint("threads"))
+		data->user_threads = *v;
 
 	// Per-sample mode: explicit sample_id parameter wins; empty string disables.
 	auto sample_it = input.named_parameters.find("sample_id");
@@ -192,7 +200,7 @@ unique_ptr<FunctionData> SylphProfileTableFunction::Bind(ClientContext &context,
 // InitGlobal
 // =============================================================================
 unique_ptr<GlobalTableFunctionState> SylphProfileTableFunction::InitGlobal(ClientContext &context,
-                                                                            TableFunctionInitInput &input) {
+                                                                           TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 
@@ -233,8 +241,8 @@ unique_ptr<GlobalTableFunctionState> SylphProfileTableFunction::InitGlobal(Clien
 // InitLocal — per-sample mode only allocates per-thread state.
 // =============================================================================
 unique_ptr<LocalTableFunctionState> SylphProfileTableFunction::InitLocal(ExecutionContext &context,
-                                                                          TableFunctionInitInput &input,
-                                                                          GlobalTableFunctionState *) {
+                                                                         TableFunctionInitInput &input,
+                                                                         GlobalTableFunctionState *) {
 	auto &data = input.bind_data->Cast<Data>();
 	auto lstate = make_uniq<LocalState>();
 	if (data.has_sample_id) {
@@ -371,7 +379,7 @@ static void RunProfile(QuerySequenceStream &stream, ::SylphSketch *&sketch, cons
 // conversion: zero-copy for fixed-width columns, copy for the two strings.
 // Returns 0 when the chunk is fully drained.
 static idx_t EmitFromArrow(SylphProfileTableFunction::ArrowOutputState &arrow, DataChunk &output, idx_t start_col,
-                            ClientContext &context) {
+                           ClientContext &context) {
 	if (!arrow.current_chunk) {
 		return 0;
 	}
@@ -391,9 +399,9 @@ static idx_t EmitFromArrow(SylphProfileTableFunction::ArrowOutputState &arrow, D
 		// output Vector outlive this Execute() call.
 		array_state.owned_data = arrow.current_chunk;
 		ArrowToDuckDBConversion::SetValidityMask(output.data[start_col + c], array, arrow.batch_offset, to_emit,
-		                                          batch.offset, -1);
+		                                         batch.offset, -1);
 		ArrowToDuckDBConversion::ColumnArrowToDuckDB(output.data[start_col + c], array, arrow.batch_offset, array_state,
-		                                              to_emit, arrow_type);
+		                                             to_emit, arrow_type);
 	}
 	arrow.batch_offset += to_emit;
 	return to_emit;

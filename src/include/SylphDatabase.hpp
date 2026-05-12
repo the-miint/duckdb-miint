@@ -56,6 +56,6 @@ private:
 	::SylphDatabase *db_;
 };
 
-}  // namespace miint
+} // namespace miint
 
-#endif  // MIINT_HAS_SYLPH
+#endif // MIINT_HAS_SYLPH

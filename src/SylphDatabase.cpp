@@ -45,6 +45,6 @@ size_t SylphDatabaseHandle::num_genomes() const {
 	return sylph_database_num_genomes(db_);
 }
 
-}  // namespace miint
+} // namespace miint
 
-#endif  // MIINT_HAS_SYLPH
+#endif // MIINT_HAS_SYLPH

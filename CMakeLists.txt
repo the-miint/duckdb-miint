@@ -864,6 +864,13 @@ if(MIINT_ENABLE_SORTMERNA)
     add_dependencies(sortmerna sortmerna_bundle)
 endif()
 
+# Cargo is required by both sylph (below) and rype (further down). Resolve
+# it once here so `${CARGO}` is non-empty when ExternalProject_Add captures
+# the BUILD_COMMAND below — otherwise the recorded command is `<empty>
+# rustc --release ...` which rustc itself doesn't understand.
+find_program(CARGO cargo REQUIRED)
+message(STATUS "Found cargo: ${CARGO}")
+
 # Build sylph (Rust) into a staticlib for FFI integration. Multi-Rust-staticlib
 # --allow-multiple-definition handling lives in extension_config.cmake (must
 # run BEFORE libduckdb.so's targets are configured).
@@ -967,9 +974,8 @@ if(MIINT_ENABLE_ABPOA)
     endif()
 endif()
 
-# Build RYpe from Rust source with Arrow support
-find_program(CARGO cargo REQUIRED)
-message(STATUS "Found cargo: ${CARGO}")
+# Build RYpe from Rust source with Arrow support. CARGO was located up top
+# alongside the sylph cargo wiring; no need to find_program again here.
 
 # Determine the static library name based on platform.
 # On Windows/MinGW, cargo with --target x86_64-pc-windows-gnu produces librype.a (not .lib).
