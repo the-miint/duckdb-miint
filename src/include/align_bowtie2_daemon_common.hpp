@@ -77,6 +77,23 @@ struct QueryBatch {
 // bowtie2-align input schema. Throws InternalException on encoder failure.
 std::vector<uint8_t> BuildQueryIpc(const QueryBatch &qb, const QueryArrowSchema &schema_flags);
 
+// Decode one UTINYINT[] cell (DuckDB `Value` of type LIST(UTINYINT)) into a
+// Phred+33 ASCII quality string suitable for the daemon's bowtie2-align
+// `qual1` / `qual2` columns. `out` is overwritten; `scratch` is a caller-
+// owned reusable buffer (reused across rows to amortize allocations in the
+// hot loop).
+//
+// Throws InvalidInputException if any element inside the list is NULL —
+// quality arrays must be fully populated (mirroring the FASTQ writer's
+// invariant; bowtie2 requires len(qual) == len(seq) and silent gaps would
+// misalign the parser).
+//
+// Centralized here so align_bowtie2 and align_bowtie2_sharded share one
+// canonical decoder + error message — and so this stays in lockstep with
+// `EncodePhred33Quality` (the byte-level conversion) from fastq_encoder.hpp.
+void DecodeListQualToPhred33(const Value &v, const char *col_name, const std::string &query_table, std::string &out,
+                             std::vector<uint8_t> &scratch);
+
 // Drain `to_emit` rows starting at `row_start` from a decoded daemon Arrow
 // batch into a DuckDB DataChunk. Assumes `output` has 21 columns matching
 // PopulateOutputSchema's types. Caller is responsible for SetCardinality

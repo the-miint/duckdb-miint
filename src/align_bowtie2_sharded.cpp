@@ -248,11 +248,18 @@ struct AlignBowtie2ShardedGlobalState : public GlobalTableFunctionState {
 
 struct AlignBowtie2ShardedLocalState : public LocalTableFunctionState {};
 
-// Detect optional sequence2/qual1/qual2 columns on the query table.
+// Detect optional sequence2/qual1/qual2 columns on the query table. Validates
+// types here so a wrong-type column fails at bind time rather than later via a
+// cryptic worker crash (see ../docs/internals/embedded-tools.md: the daemon
+// receives qual1/qual2 as Phred+33 Utf8 strings; the canonical miint
+// representation produced by `read_fastx` is `UTINYINT[]` raw Phred values,
+// and `FetchShardBatch` converts on the fly. Any other column shape is an
+// error — we never want users to be in the business of pre-encoding ASCII
+// quality strings themselves).
 void DetectQueryColumns(ClientContext &context, AlignBowtie2ShardedBindData &bd) {
 	auto &db = DatabaseInstance::GetDatabase(context);
 	Connection conn(db);
-	const std::string sql = "SELECT column_name FROM (DESCRIBE " +
+	const std::string sql = "SELECT column_name, column_type FROM (DESCRIBE " +
 	                        KeywordHelper::WriteOptionallyQuoted(bd.query_table) +
 	                        ") WHERE column_name IN ('sequence2','qual1','qual2')";
 	auto result = conn.Query(sql);
@@ -264,12 +271,23 @@ void DetectQueryColumns(ClientContext &context, AlignBowtie2ShardedBindData &bd)
 	while (auto chunk = materialized.Fetch()) {
 		for (idx_t i = 0; i < chunk->size(); ++i) {
 			const auto col = chunk->GetValue(0, i).ToString();
+			const auto typ = chunk->GetValue(1, i).ToString();
 			if (col == "sequence2") {
 				bd.query_has_sequence2 = true;
 			} else if (col == "qual1") {
 				bd.query_has_qual1 = true;
+				if (typ != "UTINYINT[]") {
+					throw BinderException("align_bowtie2_sharded: column 'qual1' in '%s' must be UTINYINT[] (raw Phred "
+					                      "values, as produced by read_fastx); got %s",
+					                      bd.query_table, typ);
+				}
 			} else if (col == "qual2") {
 				bd.query_has_qual2 = true;
+				if (typ != "UTINYINT[]") {
+					throw BinderException("align_bowtie2_sharded: column 'qual2' in '%s' must be UTINYINT[] (raw Phred "
+					                      "values, as produced by read_fastx); got %s",
+					                      bd.query_table, typ);
+				}
 			}
 		}
 	}
@@ -511,6 +529,9 @@ void OpenCurrentShardStream(AlignBowtie2ShardedGlobalState &gs, const AlignBowti
 	gs.current_shard_open = true;
 }
 
+// Quality decoding lives in align_bowtie2_daemon_common — see
+// bt2_daemon::DecodeListQualToPhred33. Shared with align_bowtie2.
+
 // Pull one DuckDB chunk worth of reads from the current shard's stream.
 bool FetchShardBatch(AlignBowtie2ShardedGlobalState &gs, const AlignBowtie2ShardedBindData &bd,
                      bt2_daemon::QueryBatch &out) {
@@ -535,6 +556,8 @@ bool FetchShardBatch(AlignBowtie2ShardedGlobalState &gs, const AlignBowtie2Shard
 	const int col_sequence2 = bd.query_has_sequence2 ? col++ : -1;
 	const int col_qual1 = bd.query_has_qual1 ? col++ : -1;
 	const int col_qual2 = bd.query_has_qual2 ? col++ : -1;
+	std::vector<uint8_t> qual_scratch; // reused across rows to amortize allocs
+	std::string qual_encoded;
 	for (idx_t i = 0; i < n; ++i) {
 		auto rid = chunk->GetValue(col_read_id, i);
 		auto s1 = chunk->GetValue(col_sequence1, i);
@@ -560,7 +583,8 @@ bool FetchShardBatch(AlignBowtie2ShardedGlobalState &gs, const AlignBowtie2Shard
 				out.qual1.emplace_back();
 				out.qual1_valid.push_back(0);
 			} else {
-				out.qual1.push_back(v.GetValue<std::string>());
+				bt2_daemon::DecodeListQualToPhred33(v, "qual1", bd.query_table, qual_encoded, qual_scratch);
+				out.qual1.push_back(qual_encoded);
 				out.qual1_valid.push_back(1);
 			}
 		}
@@ -570,7 +594,8 @@ bool FetchShardBatch(AlignBowtie2ShardedGlobalState &gs, const AlignBowtie2Shard
 				out.qual2.emplace_back();
 				out.qual2_valid.push_back(0);
 			} else {
-				out.qual2.push_back(v.GetValue<std::string>());
+				bt2_daemon::DecodeListQualToPhred33(v, "qual2", bd.query_table, qual_encoded, qual_scratch);
+				out.qual2.push_back(qual_encoded);
 				out.qual2_valid.push_back(1);
 			}
 		}

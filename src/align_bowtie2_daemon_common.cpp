@@ -1,5 +1,6 @@
 #include "align_bowtie2_daemon_common.hpp"
 
+#include "fastq_encoder.hpp"
 #include "gpl_boundary/arrow_ipc.hpp"
 
 #include "nanoarrow/nanoarrow.h"
@@ -68,6 +69,22 @@ void PopulateOutputSchema(std::vector<std::string> &names, std::vector<LogicalTy
 	         LogicalType::VARCHAR,   // tag_yt
 	         LogicalType::VARCHAR,   // tag_md
 	         LogicalType::VARCHAR};  // tag_sa
+}
+
+void DecodeListQualToPhred33(const Value &v, const char *col_name, const std::string &query_table, std::string &out,
+                             std::vector<uint8_t> &scratch) {
+	const auto &children = ListValue::GetChildren(v);
+	scratch.clear();
+	scratch.reserve(children.size());
+	for (auto &c : children) {
+		if (c.IsNull()) {
+			throw InvalidInputException("align_bowtie2: NULL element inside '%s' array in query table '%s' (per-base "
+			                            "quality must be fully populated)",
+			                            col_name, query_table);
+		}
+		scratch.push_back(c.GetValue<uint8_t>());
+	}
+	EncodePhred33Quality(scratch.data(), scratch.size(), 33, out);
 }
 
 void ValidateOutputSchema(const ArrowSchema &schema) {

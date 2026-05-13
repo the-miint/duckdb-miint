@@ -239,3 +239,90 @@ DROP TABLE paired_queries;
 
 statement ok
 DROP TABLE paired_subjects;
+
+# ============================================================================
+# UTINYINT[] qual1 regression (the qual-format bug from the daemon migration)
+# ----------------------------------------------------------------------------
+# Prior to the read_fastx-shape fix, `align_bowtie2` and `align_bowtie2_sharded`
+# called `Value::GetValue<std::string>()` on UTINYINT[] qual columns. That
+# silently returned the LIST's debug string ("[37, 37, ...]") which we then
+# shipped to bowtie2-align's `qual1` Utf8 input. bowtie2 saw a quality string
+# of the wrong length vs sequence and its FASTQ parser crashed mid-batch.
+# The fix routes the column through the FASTQ writer's Phred+33 encoder
+# (bt2_daemon::DecodeListQualToPhred33 → fastq_encoder::EncodePhred33Quality).
+#
+# These tests would have caught the bug because they exercise the same
+# UTINYINT[] qual shape that read_fastx produces — the gap in the original
+# test suite (it only used inline VALUES with no qual columns at all).
+# ============================================================================
+
+statement ok
+CREATE TABLE qual_subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC')
+) AS t(read_id, sequence1);
+
+# Build a query table with qual1 as UTINYINT[] (the shape read_fastx produces).
+# Phred 37 for every base — typical Illumina Q-score.
+statement ok
+CREATE TABLE qual_queries AS SELECT
+    'query1' AS read_id,
+    'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT' AS sequence1,
+    list_transform(range(LENGTH('ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT')),
+                   x -> 37::UTINYINT) AS qual1;
+
+# With qual1 in canonical UTINYINT[] form the alignment runs cleanly and
+# query1 maps to ref1 — same outcome as the no-qual case earlier in this file.
+query II
+SELECT read_id, reference
+FROM align_bowtie2('qual_queries', 'qual_subjects')
+WHERE (flags & 4) = 0;
+----
+query1	ref1
+
+# Bind-time guard: a VARCHAR qual1 column is rejected with a message that
+# names the offending column and points at UTINYINT[] / read_fastx so the
+# user knows the canonical form. This is the fail-loud half of the fix —
+# we never silently coerce pre-encoded ASCII strings.
+statement ok
+CREATE TABLE qual_queries_bad AS SELECT
+    'query1' AS read_id,
+    'ACGT' AS sequence1,
+    'IIII' AS qual1;
+
+statement error
+SELECT * FROM align_bowtie2('qual_queries_bad', 'qual_subjects');
+----
+qual1
+
+# Same coverage for the sharded variant: build a tiny shard-routing table
+# pointing query1 at shard_a, run align_bowtie2_sharded, expect one hit.
+statement ok
+CREATE TABLE qual_assoc AS SELECT 'query1' AS read_id, 'shard_a' AS shard_name;
+
+query II
+SELECT read_id, reference
+FROM align_bowtie2_sharded('qual_queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'qual_assoc')
+ORDER BY read_id;
+----
+query1	ref1
+
+statement error
+SELECT * FROM align_bowtie2_sharded('qual_queries_bad',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'qual_assoc');
+----
+qual1
+
+statement ok
+DROP TABLE qual_queries;
+
+statement ok
+DROP TABLE qual_queries_bad;
+
+statement ok
+DROP TABLE qual_subjects;
+
+statement ok
+DROP TABLE qual_assoc;
