@@ -1,0 +1,39 @@
+# name: test/sql/unifrac_available.test
+# description: UniFrac table functions are registered and their libraries appear in miint_versions()
+# group: [sql]
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+# Each unifrac table function is registered exactly once.
+query I
+SELECT COUNT(*) FROM duckdb_functions()
+WHERE function_name = 'unifrac_pcoa' AND function_type = 'table';
+----
+1
+
+query I
+SELECT COUNT(*) FROM duckdb_functions()
+WHERE function_name = 'unifrac_permanova' AND function_type = 'table';
+----
+1
+
+query I
+SELECT COUNT(*) FROM duckdb_functions()
+WHERE function_name = 'unifrac_faith_pd' AND function_type = 'table';
+----
+1
+
+# Both embedded libraries report a version string (git describe output).
+query I
+SELECT COUNT(*) FROM miint_versions()
+WHERE library = 'unifrac' AND version <> '' AND version IS NOT NULL;
+----
+1
+
+query I
+SELECT COUNT(*) FROM miint_versions()
+WHERE library = 'scikit-bio-binaries' AND version <> '' AND version IS NOT NULL;
+----
+1

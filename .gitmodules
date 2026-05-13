@@ -28,3 +28,11 @@
 	path = ext/sortmerna
 	url = https://github.com/the-miint/sortmerna.git
 	branch = v4.4.0-miint
+[submodule "ext/unifrac-binaries"]
+	path = ext/unifrac-binaries
+	url = https://github.com/biocore/unifrac-binaries.git
+	branch = main
+[submodule "ext/scikit-bio-binaries"]
+	path = ext/scikit-bio-binaries
+	url = https://github.com/scikit-bio/scikit-bio-binaries.git
+	branch = main
