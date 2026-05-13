@@ -365,11 +365,14 @@ SELECT * FROM phylogeny_fasttree('seqs')
 WHERE phylogeny_fasttree_available();   -- short-circuits to empty if not present
 ```
 
-## `install_gpl_boundary()`
+## `install_gpl_boundary([force])`
 
-Download a prebuilt `gpl-boundary` binary from the upstream GitHub releases and install it into miint's cache so subsequent `phylogeny_fasttree(...)` calls find it without the user editing `PATH`.
+Download a prebuilt `gpl-boundary` binary from the upstream GitHub releases and install it into miint's cache so subsequent `phylogeny_fasttree(...)`, `align_bowtie2(...)`, and `align_bowtie2_sharded(...)` calls find it without the user editing `PATH`.
 
 Drives the upstream `install.sh` (https://github.com/the-miint/GPL-boundary/releases/latest/download/install.sh), which detects the platform, downloads the matching tarball, verifies its SHA256 against the release's `SHA256SUMS`, and extracts the binary. Miint sets `INSTALL_DIR` to its cache (`$XDG_CACHE_HOME/miint/bin` or `$HOME/.cache/miint/bin`); `FindGplBoundary()` checks that location before falling through to `PATH`, so no user-side PATH editing is needed.
+
+**Parameters:**
+- `force` (BOOLEAN, optional, default `false`): when `true`, bypass the existing-binary probe and re-download latest into the miint cache unconditionally. Use this to escape a stale binary on `PATH` (for example `~/.cargo/bin/gpl-boundary` left behind by an old `cargo install`) that the probe considers good enough but predates a protocol bump. The cache install does NOT shadow `MIINT_GPL_BOUNDARY_PATH`; if that env var is set, unset it after a forced install or `FindGplBoundary()` will keep returning the override.
 
 **Returns:** `STRUCT(installed BOOLEAN, path VARCHAR, version VARCHAR, message VARCHAR)`
 
@@ -381,7 +384,7 @@ Drives the upstream `install.sh` (https://github.com/the-miint/GPL-boundary/rele
 | `message` | Human-readable description of what happened ("already available", "Installed gpl-boundary 0.1.0 to ...", or a diagnostic on failure). |
 
 **Behavior:**
-- **Idempotent:** if `gpl-boundary` is already discoverable (via `MIINT_GPL_BOUNDARY_PATH`, miint's cache, or `PATH`), the function probes it with `--version` and returns `installed=true` without touching the network.
+- **Idempotent (default):** if `gpl-boundary` is already discoverable (via `MIINT_GPL_BOUNDARY_PATH`, miint's cache, or `PATH`), the function probes it with `--version` and returns `installed=true` without touching the network. Pass `force=true` to skip this probe and re-download regardless.
 - **Mutex-protected within a process:** concurrent calls within ONE DuckDB process serialize through a lock. Two SEPARATE DuckDB processes calling `install_gpl_boundary()` concurrently are not coordinated — they will both run install.sh against the same cache dir; install.sh's final `mv` is atomic on the same filesystem so the on-disk binary is always one of the two valid downloads (bit-identical for the same `latest` release), but tmpdirs and download bandwidth are wasted.
 - **Network access required** for the download path (the idempotent fast path is offline-only).
 - **Supported prebuilt platforms:** Linux x86_64, macOS arm64. macOS Intel and other targets must build from source — install.sh prints a "build from source" message and the function returns `installed=false` with that diagnostic in `message`.
@@ -422,6 +425,10 @@ SELECT json_extract_string((install_gpl_boundary()).version, '$.gpl_boundary') A
 
 -- Inspect the per-tool versions advertised by the daemon
 SELECT json_extract((install_gpl_boundary()).version, '$.tools');
+
+-- Force a re-download even though a (possibly stale) binary is already on PATH.
+SELECT (install_gpl_boundary(true)).message;
+-- → "Installed gpl-boundary 0.2.0 to /home/x/.cache/miint/bin/gpl-boundary"
 ```
 
 **Override the install location:** set `MIINT_GPL_BOUNDARY_PATH=<absolute path>` to point at a binary already on disk (e.g., a system package install). `FindGplBoundary()` honors that override before consulting the cache or `PATH`.

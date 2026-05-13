@@ -294,26 +294,32 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                                 {"path", LogicalType::VARCHAR},
 	                                                 {"version", LogicalType::VARCHAR},
 	                                                 {"message", LogicalType::VARCHAR}});
-	ScalarFunction install_gpl_boundary_stub(
-	    "install_gpl_boundary", {}, install_struct, [](DataChunk &args, ExpressionState &state, Vector &result) {
-		    auto &entries = StructVector::GetEntries(result);
-		    auto installed_data = FlatVector::GetData<bool>(*entries[0]);
-		    auto &path_vec = *entries[1];
-		    auto &version_vec = *entries[2];
-		    auto &message_vec = *entries[3];
-		    const idx_t n = args.size();
-		    const string msg = "install_gpl_boundary: this miint build was compiled without "
-		                       "MIINT_ENABLE_GPL_BOUNDARY (typically WASM or Windows). gpl-boundary "
-		                       "is not supported on this platform.";
-		    for (idx_t i = 0; i < n; i++) {
-			    installed_data[i] = false;
-			    FlatVector::GetData<string_t>(path_vec)[i] = StringVector::AddString(path_vec, "");
-			    FlatVector::GetData<string_t>(version_vec)[i] = StringVector::AddString(version_vec, "");
-			    FlatVector::GetData<string_t>(message_vec)[i] = StringVector::AddString(message_vec, msg);
-		    }
-		    result.SetVectorType(VectorType::CONSTANT_VECTOR);
-	    });
-	loader.RegisterFunction(install_gpl_boundary_stub);
+	const auto install_stub_exec = [](DataChunk &args, ExpressionState &state, Vector &result) {
+		auto &entries = StructVector::GetEntries(result);
+		auto installed_data = FlatVector::GetData<bool>(*entries[0]);
+		auto &path_vec = *entries[1];
+		auto &version_vec = *entries[2];
+		auto &message_vec = *entries[3];
+		const idx_t n = args.size();
+		const string msg = "install_gpl_boundary: this miint build was compiled without "
+		                   "MIINT_ENABLE_GPL_BOUNDARY (typically WASM or Windows). gpl-boundary "
+		                   "is not supported on this platform.";
+		for (idx_t i = 0; i < n; i++) {
+			installed_data[i] = false;
+			FlatVector::GetData<string_t>(path_vec)[i] = StringVector::AddString(path_vec, "");
+			FlatVector::GetData<string_t>(version_vec)[i] = StringVector::AddString(version_vec, "");
+			FlatVector::GetData<string_t>(message_vec)[i] = StringVector::AddString(message_vec, msg);
+		}
+		result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	};
+	// Mirror the real path's 0-arg + 1-arg(BOOLEAN) overload set so SQL that
+	// passes `force` still type-checks on stub builds (returns the same
+	// "unsupported platform" payload regardless of the flag).
+	ScalarFunctionSet install_gpl_boundary_stub_set("install_gpl_boundary");
+	install_gpl_boundary_stub_set.AddFunction(ScalarFunction({}, install_struct, install_stub_exec));
+	install_gpl_boundary_stub_set.AddFunction(
+	    ScalarFunction({LogicalType::BOOLEAN}, install_struct, install_stub_exec));
+	loader.RegisterFunction(install_gpl_boundary_stub_set);
 #endif
 	DeblurTableFunction::Register(loader);
 

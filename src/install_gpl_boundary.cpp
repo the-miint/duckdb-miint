@@ -202,7 +202,7 @@ std::mutex &install_mutex() {
 	return m;
 }
 
-InstallReport install_impl() {
+InstallReport install_impl(bool force) {
 	InstallReport r;
 
 	// Double-checked-locking: probe once outside the lock to short-circuit
@@ -211,14 +211,18 @@ InstallReport install_impl() {
 	// idempotent and cheap. We re-probe inside the lock to close the race
 	// where an in-flight install completed between our outer check and lock
 	// acquisition.
-	if (probe_existing(r)) {
+	//
+	// `force=true` skips the probe and goes straight to download. Useful
+	// when a stale binary on PATH (e.g. an old ~/.cargo/bin/gpl-boundary
+	// from `cargo install`) is shadowing the latest release.
+	if (!force && probe_existing(r)) {
 		return r;
 	}
 
 	std::lock_guard<std::mutex> lock(install_mutex());
 
 	// 1. Re-probe inside the lock; another thread may have just installed.
-	if (probe_existing(r)) {
+	if (!force && probe_existing(r)) {
 		return r;
 	}
 
@@ -318,14 +322,30 @@ LogicalType InstallReturnType() {
 	                            {"message", LogicalType::VARCHAR}});
 }
 
+// Resolve the `force` argument from the call site. The 0-arg overload defaults
+// to false; the 1-arg overload reads a BOOLEAN. A NULL input is treated as
+// false rather than throwing — same convention as `mask_dust(seq, NULL)`.
+bool ResolveForceArg(DataChunk &args) {
+	if (args.ColumnCount() == 0) {
+		return false;
+	}
+	UnifiedVectorFormat fmt;
+	args.data[0].ToUnifiedFormat(args.size(), fmt);
+	const auto idx = fmt.sel->get_index(0);
+	if (!fmt.validity.RowIsValid(idx)) {
+		return false;
+	}
+	return UnifiedVectorFormat::GetData<bool>(fmt)[idx];
+}
+
 void InstallGplBoundaryExecute(DataChunk &args, ExpressionState &state, Vector &result) {
-	(void)args;
 	(void)state;
 	// Run the install once and emit a constant vector; even if the query
 	// surface is `SELECT install_gpl_boundary() FROM range(N)`, we don't
 	// re-probe N times. We only have to write index 0 because subsequent
 	// rows are aliased through CONSTANT_VECTOR semantics.
-	InstallReport report = install_impl();
+	const bool force = ResolveForceArg(args);
+	InstallReport report = install_impl(force);
 
 	auto &entries = StructVector::GetEntries(result);
 	FlatVector::GetData<bool>(*entries[0])[0] = report.installed;
@@ -342,7 +362,15 @@ ScalarFunction InstallGplBoundaryScalar::GetFunction() {
 }
 
 void InstallGplBoundaryScalar::Register(ExtensionLoader &loader) {
-	loader.RegisterFunction(GetFunction());
+	ScalarFunctionSet set("install_gpl_boundary");
+	// 0-arg: idempotent find-or-install. Short-circuits on any binary found
+	// at the override path, miint cache, or PATH.
+	set.AddFunction(ScalarFunction({}, InstallReturnType(), InstallGplBoundaryExecute));
+	// 1-arg: force=true bypasses the probe and re-downloads latest into the
+	// miint cache. Used to escape a stale binary on PATH that the probe
+	// considers "good enough".
+	set.AddFunction(ScalarFunction({LogicalType::BOOLEAN}, InstallReturnType(), InstallGplBoundaryExecute));
+	loader.RegisterFunction(set);
 }
 
 } // namespace duckdb

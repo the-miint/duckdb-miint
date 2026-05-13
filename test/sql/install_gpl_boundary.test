@@ -21,19 +21,26 @@ require miint
 # Schema check (always runs)
 # =============================================================================
 
-# Function exists and registers with the expected 0-arg signature returning
-# a STRUCT with the four named fields. This works on builds where gpl-boundary
-# is fully present AND on stub builds where MIINT_HAS_GPL_BOUNDARY is off
-# (the stub uses an identical signature).
+# Function exists and registers as an overload set: one 0-arg signature plus
+# one 1-arg BOOLEAN signature (the `force` flag). Both return the same
+# 4-field STRUCT. Holds on builds where gpl-boundary is fully present AND
+# on stub builds where MIINT_HAS_GPL_BOUNDARY is off — the stub mirrors the
+# same overload set.
 query I
 SELECT count(*) FROM duckdb_functions() WHERE function_name = 'install_gpl_boundary';
 ----
-1
+2
 
 # Type signature is locked. STRUCT entry order matters for projection by index;
-# changing it is a backwards-incompatible break.
+# changing it is a backwards-incompatible break. Both overloads return the
+# same shape.
 query I
 SELECT typeof(install_gpl_boundary());
+----
+STRUCT(installed BOOLEAN, path VARCHAR, "version" VARCHAR, message VARCHAR)
+
+query I
+SELECT typeof(install_gpl_boundary(false));
 ----
 STRUCT(installed BOOLEAN, path VARCHAR, "version" VARCHAR, message VARCHAR)
 
@@ -67,3 +74,16 @@ query I
 SELECT (install_gpl_boundary()).path LIKE '/%';
 ----
 true
+
+# force=false is identical to the 0-arg form: probe-based, no network.
+query III
+SELECT (install_gpl_boundary(false)).installed,
+       length((install_gpl_boundary(false)).path) > 0 AS path_nonempty,
+       length((install_gpl_boundary(false)).message) > 0 AS message_nonempty;
+----
+true	true	true
+
+# force=true bypasses the probe and re-downloads latest. We do NOT exercise
+# this in CI: the test harness has gpl-boundary on PATH and assumes no
+# outbound network access, while force=true would unconditionally trigger
+# both. Coverage is manual via localdocs/cli-smoke-tests.md.
