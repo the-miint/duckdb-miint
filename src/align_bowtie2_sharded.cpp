@@ -98,9 +98,8 @@ std::string ValueAsStr(const std::string &name, const Value &v) {
 }
 
 // =============================================================================
-// Shard index discovery — replaces the dependency on
-// Bowtie2Aligner::is_index_prefix. Bowtie2 emits 4 mandatory files per index
-// in either small (.bt2) or large (.bt2l) format.
+// Shard index discovery. Bowtie2 emits 4 mandatory files per index in either
+// small (.bt2) or large (.bt2l) format.
 // =============================================================================
 
 bool HasShardIndex(const std::string &prefix) {
@@ -128,8 +127,8 @@ bool HasShardIndex(const std::string &prefix) {
 // =============================================================================
 // read_to_shard schema validation — preserves the existing test contract
 // ("read_to_shard table missing required column 'read_id'" / 'shard_name').
-// We re-implement here rather than pull align_common.hpp's helper because
-// the latter is wedded to the direct-subprocess Bowtie2Aligner namespace.
+// Mirrors align_common.hpp::ValidateReadToShardSchema; the duplication is
+// minor enough that consolidation can wait for the third caller.
 // =============================================================================
 
 struct ShardInfo {

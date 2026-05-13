@@ -29,7 +29,7 @@ std::string GetTempDir() {
 namespace miint {
 
 // ---------------------------------------------------------------------------
-// Binary discovery (fork/exec pattern from Bowtie2Aligner)
+// Binary discovery (fork/exec/pipe of `which`, no shell)
 // ---------------------------------------------------------------------------
 
 std::string AsperaUtils::FindAscp() {
