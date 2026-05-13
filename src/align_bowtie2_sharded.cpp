@@ -12,7 +12,10 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/materialized_query_result.hpp"
 #include "duckdb/main/query_result.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
+
+#include <atomic>
 
 #include "gpl_boundary/arrow_ipc.hpp"
 #include "gpl_boundary/process.hpp"
@@ -138,44 +141,29 @@ struct ShardInfo {
 	idx_t read_count;
 };
 
-// Per-shard read counts, ordered largest-first. Drives the per-shard
-// processing order and lets us skip empty shards quickly.
+// Enrich align_common.hpp's name+count rows with the bowtie2 index path. The
+// underlying GROUP BY / NULL-guard / largest-first ordering is shared with
+// align_minimap2_sharded via `ReadShardNameCounts`; only the
+// `<dir>/<name>/index` path layout is bowtie2-specific (minimap2 uses a
+// single per-shard file, not a 4-file prefix). Per-shard filesystem checks
+// (`HasShardIndex`) are intentionally deferred to InitGlobal — hitting the
+// filesystem from Bind scales poorly over NFS / hundreds of shards, and the
+// check is racy regardless (a shard can be deleted between bind and execute).
 std::vector<ShardInfo> EnumerateShards(ClientContext &context, const std::string &read_to_shard_table,
                                        const std::string &shard_directory) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
-	const std::string sql = "SELECT shard_name, COUNT(*) AS cnt FROM " +
-	                        KeywordHelper::WriteOptionallyQuoted(read_to_shard_table) +
-	                        " GROUP BY shard_name ORDER BY cnt DESC";
-	auto result = conn.Query(sql);
-	if (result->HasError()) {
-		throw InvalidInputException("align_bowtie2_sharded: failed to read shard counts from '%s': %s",
-		                            read_to_shard_table, result->GetError());
-	}
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	const auto counts = ReadShardNameCounts(context, read_to_shard_table);
 	std::vector<ShardInfo> out;
-	while (auto chunk = materialized.Fetch()) {
-		for (idx_t i = 0; i < chunk->size(); ++i) {
-			auto name_val = chunk->GetValue(0, i);
-			auto count_val = chunk->GetValue(1, i);
-			if (name_val.IsNull()) {
-				throw InvalidInputException("align_bowtie2_sharded: read_to_shard '%s' contains NULL shard_name",
-				                            read_to_shard_table);
-			}
-			ShardInfo info;
-			info.name = name_val.GetValue<std::string>();
-			info.read_count = static_cast<idx_t>(count_val.GetValue<int64_t>());
-			info.index_prefix = shard_directory;
-			if (!info.index_prefix.empty() && info.index_prefix.back() != '/') {
-				info.index_prefix += '/';
-			}
-			info.index_prefix += info.name + "/index";
-			// Per-shard `HasShardIndex(...)` FS check intentionally deferred
-			// to InitGlobal: hitting the filesystem from Bind scales poorly
-			// over NFS / hundreds of shards, and the check is racy regardless
-			// (a shard can be deleted between bind and execute).
-			out.push_back(std::move(info));
+	out.reserve(counts.size());
+	for (const auto &c : counts) {
+		ShardInfo info;
+		info.name = c.name;
+		info.read_count = c.count;
+		info.index_prefix = shard_directory;
+		if (!info.index_prefix.empty() && info.index_prefix.back() != '/') {
+			info.index_prefix += '/';
 		}
+		info.index_prefix += info.name + "/index";
+		out.push_back(std::move(info));
 	}
 	return out;
 }
@@ -203,20 +191,63 @@ struct AlignBowtie2ShardedBindData : public TableFunctionData {
 };
 
 struct AlignBowtie2ShardedGlobalState : public GlobalTableFunctionState {
+	// Shared shard-claim counter. Each Execute thread atomically increments
+	// to grab the next unclaimed shard; when this exceeds shards.size() the
+	// scan is done. No per-shard mutex needed — the counter is the only
+	// shared state across worker threads.
+	std::atomic<idx_t> next_shard_idx {0};
+
+	// Per-shard worker concurrency. Derived from DuckDB's thread pool and
+	// `max_threads_per_shard`: ceil(db_threads / max_threads_per_shard),
+	// clamped to the number of shards. Each miint worker thread orchestrates
+	// one shard at a time; the daemon's per-fingerprint worker pool fans out
+	// internally on `nthreads` = max_threads_per_shard, so total CPU usage
+	// is roughly max_active_shards × max_threads_per_shard ≈ db_threads.
+	idx_t max_active_shards = 1;
+
+	idx_t MaxThreads() const override {
+		// DuckDB clamps to its own scheduler concurrency anyway, but
+		// returning the per-shard ceiling here keeps the planner honest
+		// when the thread pool is larger than the work supports.
+		return max_active_shards;
+	}
+};
+
+// Per-thread state — each miint worker thread owns its own gpl-boundary
+// daemon process (spawned eagerly in InitLocal), its own DuckDB connection
+// for the streaming input cursor, and its own decode buffers. This keeps
+// daemon I/O lock-free: Session::Submit is request-response synchronous on
+// a single pipe pair, so two threads sharing one Session would race on
+// stdin writes and stdout reads. One Session per thread sidesteps that
+// entirely.
+//
+// Member-declaration order is load-bearing for clean teardown. C++ destroys
+// members in reverse declaration order, so:
+//   1. `current_batches` (Arrow arrays referencing SubmitResult SHM regions)
+//      destroys first.
+//   2. `current_decoder` (which can still write to its source bytes) next.
+//   3. `current_result` (owner of the SHM regions) last among the decode set.
+//   4. `input_stream` (holds an open cursor on `input_conn`) destroys before
+//      `input_conn`. Reordering these two would leave a dangling cursor on
+//      a dead connection during teardown.
+//   5. `session` destroys last so any I/O races during shutdown are bounded
+//      to a per-thread daemon that's already in its own process.
+// DO NOT reorder these fields without re-reading the above; the silence on
+// failure makes the bug class very expensive to find.
+struct AlignBowtie2ShardedLocalState : public LocalTableFunctionState {
 	std::unique_ptr<gb::Session> session;
-
-	// Iteration cursor over shards. We process one shard at a time
-	// (Phase 5); Phase 6 may add cross-shard parallelism.
-	idx_t shard_index = 0;
-
-	// Streaming cursor over the current shard's matched reads.
 	std::unique_ptr<Connection> input_conn;
-	std::unique_ptr<QueryResult> input_stream;
-	bool current_shard_open = false; // true while input_stream is live for shard_index
-	std::string current_shard_name;  // copied for `include_shard_name`
 
-	// Latest Submit response. Same shape as AlignBowtie2GlobalState's;
-	// owned via unique_ptr so the ArrowArrayWrapper batches stay valid.
+	// Current shard claim. Sentinel value DConstants::INVALID_INDEX means
+	// "no shard claimed yet"; Execute will claim next on the next iteration.
+	idx_t current_shard_idx = DConstants::INVALID_INDEX;
+	std::unique_ptr<QueryResult> input_stream;
+	std::string current_shard_name; // copied for `include_shard_name`
+
+	// Latest Submit response + its decoder. The ArrowArrayWrapper batches
+	// inside `current_batches` hold pointers into SubmitResult's SHM regions,
+	// so we keep both alive via unique_ptr ordering — see member-order note
+	// above the struct.
 	std::unique_ptr<gb::SubmitResult> current_result;
 	std::unique_ptr<gb::IpcStreamDecoder> current_decoder;
 	ArrowSchemaWrapper current_schema;
@@ -225,17 +256,7 @@ struct AlignBowtie2ShardedGlobalState : public GlobalTableFunctionState {
 	idx_t row_in_batch = 0;
 	bool schema_validated = false;
 
-	idx_t MaxThreads() const override {
-		return 1; // sequential per shard for Phase 5
-	}
-
-	~AlignBowtie2ShardedGlobalState() override {
-		// `gb::Session::~Session()` already calls Shutdown() best-effort if
-		// not yet shut down, so the implicit destructor would be sufficient.
-		// We do it explicitly here to match the explicit-Shutdown pattern in
-		// AlignBowtie2GlobalState and to make the daemon-exit point obvious
-		// when reading the code. The decoded batches / SHM regions live in
-		// later-declared members and are torn down before this runs.
+	~AlignBowtie2ShardedLocalState() override {
 		if (session) {
 			try {
 				session->Shutdown();
@@ -245,8 +266,6 @@ struct AlignBowtie2ShardedGlobalState : public GlobalTableFunctionState {
 		}
 	}
 };
-
-struct AlignBowtie2ShardedLocalState : public LocalTableFunctionState {};
 
 // Detect optional sequence2/qual1/qual2 columns on the query table. Validates
 // types here so a wrong-type column fails at bind time rather than later via a
@@ -294,8 +313,10 @@ void DetectQueryColumns(ClientContext &context, AlignBowtie2ShardedBindData &bd)
 }
 
 // Build the bowtie2-align config_json for one shard. Each shard has a
-// distinct `index_path` → distinct daemon worker fingerprint, which is
-// how Phase 6 will get cross-shard parallelism for free.
+// distinct `index_path` → distinct daemon worker fingerprint, so concurrent
+// Submits from different miint worker threads fan out to independent
+// per-fingerprint workers in the daemon — that's how cross-shard
+// parallelism falls out for free.
 std::string BuildAlignConfigJson(const named_parameter_map_t &named_params, const std::string &index_prefix,
                                  idx_t max_threads_per_shard) {
 	ConfigJsonBuilder cfg;
@@ -394,17 +415,20 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	}
 	bd->named_params = input.named_parameters;
 
-	// `threads` is ignored at the table-function level — each daemon
-	// worker uses bowtie2's internal threading via `nthreads`
-	// (max_threads_per_shard). Preserve the existing warning.
+	// `threads` is ignored at the table-function level: with the Phase 6
+	// fan-out, cross-shard parallelism is driven by DuckDB's own scheduler
+	// (`SET threads=N`), and per-shard bowtie2 internal threading is driven
+	// by `max_threads_per_shard` (the daemon's `nthreads`).
+	// Preserved the "Parameter 'threads' is ignored in sharded mode" prefix
+	// because miint_warnings_bowtie2.test asserts on that substring.
 	auto threads_param = input.named_parameters.find("threads");
 	if (threads_param != input.named_parameters.end() && !threads_param->second.IsNull()) {
 		const int64_t threads_val = ValueAsInt("threads", threads_param->second);
 		if (threads_val != 1) {
-			::miint::EmitWarning(context, "WARNING: Parameter 'threads' is ignored in sharded mode. "
-			                              "In sharded mode, each bowtie2 process uses a single thread. "
-			                              "Parallelism comes from running multiple processes per shard "
-			                              "(max_threads_per_shard) across multiple shards.");
+			::miint::EmitWarning(
+			    context, "WARNING: Parameter 'threads' is ignored in sharded mode. "
+			             "Use `SET threads=N` to control cross-shard parallelism (one worker thread per shard); "
+			             "use `max_threads_per_shard` to control bowtie2's internal threads per shard.");
 		}
 	}
 
@@ -482,14 +506,35 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	}
 
 	auto gs = make_uniq<AlignBowtie2ShardedGlobalState>();
-	gs->session = SpawnAndCheckSession();
-	gs->input_conn = std::make_unique<Connection>(DatabaseInstance::GetDatabase(context));
+	// Each miint worker thread orchestrates one shard at a time; the daemon's
+	// per-fingerprint pool fans out internally on `nthreads`
+	// (= max_threads_per_shard). So our slice of the DuckDB thread pool is
+	// `ceil(db_threads / max_threads_per_shard)`, clamped by the shard count
+	// (no point asking for more workers than shards). Mirrors the formula
+	// `align_minimap2_sharded` uses to honor `SET threads` without a separate
+	// knob.
+	const idx_t db_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+	const idx_t derived = (db_threads + bd.max_threads_per_shard - 1) / bd.max_threads_per_shard;
+	gs->max_active_shards = std::max<idx_t>(1, std::min(derived, bd.shards.size()));
 	return std::move(gs);
 }
 
-unique_ptr<LocalTableFunctionState> InitLocal(ExecutionContext &, TableFunctionInitInput &,
+unique_ptr<LocalTableFunctionState> InitLocal(ExecutionContext &context, TableFunctionInitInput &,
                                               GlobalTableFunctionState *) {
-	return make_uniq<AlignBowtie2ShardedLocalState>();
+	auto ls = make_uniq<AlignBowtie2ShardedLocalState>();
+	// One DuckDB connection per worker thread — `QueryResult::Fetch` isn't
+	// thread-safe across a shared connection, and each shard needs its own
+	// streaming cursor.
+	ls->input_conn = std::make_unique<Connection>(DatabaseInstance::GetDatabase(context.client));
+	// Spawn the per-thread daemon eagerly: if gpl-boundary is missing /
+	// wrong-version, we want that error to surface before any row flows.
+	// Lazy-spawning inside Execute() would let some threads stream rows
+	// while another thread fails its first Spawn, which would leave the
+	// user with partial Parquet output plus a confusing mid-scan abort.
+	// The ~50ms fork+Initialize cost is paid up front per worker; this is
+	// dominated by per-shard index-load latency in any real workload.
+	ls->session = SpawnAndCheckSession();
+	return std::move(ls);
 }
 
 // =============================================================================
@@ -497,8 +542,8 @@ unique_ptr<LocalTableFunctionState> InitLocal(ExecutionContext &, TableFunctionI
 // =============================================================================
 
 // Open a streaming cursor on the reads matched to the current shard.
-void OpenCurrentShardStream(AlignBowtie2ShardedGlobalState &gs, const AlignBowtie2ShardedBindData &bd) {
-	const auto &shard = bd.shards[gs.shard_index];
+void OpenCurrentShardStream(AlignBowtie2ShardedLocalState &local, const AlignBowtie2ShardedBindData &bd) {
+	const auto &shard = bd.shards[local.current_shard_idx];
 	std::string select = "SELECT q.read_id, q.sequence1";
 	if (bd.query_has_sequence2) {
 		select += ", q.sequence2";
@@ -520,22 +565,21 @@ void OpenCurrentShardStream(AlignBowtie2ShardedGlobalState &gs, const AlignBowti
 	// the convention already used in sequence_table_reader.cpp:377.
 	select += " WHERE rts.shard_name = " + KeywordHelper::WriteQuoted(shard.name, '\'');
 
-	gs.input_stream = gs.input_conn->SendQuery(select);
-	if (gs.input_stream->HasError()) {
+	local.input_stream = local.input_conn->SendQuery(select);
+	if (local.input_stream->HasError()) {
 		throw InvalidInputException("align_bowtie2_sharded: failed to open cursor for shard '%s': %s", shard.name,
-		                            gs.input_stream->GetError());
+		                            local.input_stream->GetError());
 	}
-	gs.current_shard_name = shard.name;
-	gs.current_shard_open = true;
+	local.current_shard_name = shard.name;
 }
 
 // Quality decoding lives in align_bowtie2_daemon_common — see
 // bt2_daemon::DecodeListQualToPhred33. Shared with align_bowtie2.
 
 // Pull one DuckDB chunk worth of reads from the current shard's stream.
-bool FetchShardBatch(AlignBowtie2ShardedGlobalState &gs, const AlignBowtie2ShardedBindData &bd,
+bool FetchShardBatch(AlignBowtie2ShardedLocalState &local, const AlignBowtie2ShardedBindData &bd,
                      bt2_daemon::QueryBatch &out) {
-	auto chunk = gs.input_stream->Fetch();
+	auto chunk = local.input_stream->Fetch();
 	if (!chunk || chunk->size() == 0) {
 		return false;
 	}
@@ -603,13 +647,13 @@ bool FetchShardBatch(AlignBowtie2ShardedGlobalState &gs, const AlignBowtie2Shard
 	return true;
 }
 
-void SubmitAndDecode(AlignBowtie2ShardedGlobalState &gs, const AlignBowtie2ShardedBindData &bd,
+void SubmitAndDecode(AlignBowtie2ShardedLocalState &local, const AlignBowtie2ShardedBindData &bd,
                      const bt2_daemon::QueryBatch &qb) {
-	const auto &shard = bd.shards[gs.shard_index];
+	const auto &shard = bd.shards[local.current_shard_idx];
 	const std::string config_json = BuildAlignConfigJson(bd.named_params, shard.index_prefix, bd.max_threads_per_shard);
 	bt2_daemon::QueryArrowSchema schema_flags {bd.query_has_sequence2, bd.query_has_qual1, bd.query_has_qual2};
 	const auto ipc = bt2_daemon::BuildQueryIpc(qb, schema_flags);
-	auto submit_result = gs.session->Submit("bowtie2-align", config_json, ipc.data(), ipc.size());
+	auto submit_result = local.session->Submit("bowtie2-align", config_json, ipc.data(), ipc.size());
 	if (submit_result.outputs.empty()) {
 		throw IOException("align_bowtie2_sharded: daemon returned zero shm_outputs for shard '%s'", shard.name);
 	}
@@ -618,31 +662,31 @@ void SubmitAndDecode(AlignBowtie2ShardedGlobalState &gs, const AlignBowtie2Shard
 		                  submit_result.schema_version, bt2_daemon::kAlignSchemaVersion);
 	}
 
-	gs.current_batches.clear();
-	if (gs.current_schema.arrow_schema.release) {
-		gs.current_schema.arrow_schema.release(&gs.current_schema.arrow_schema);
+	local.current_batches.clear();
+	if (local.current_schema.arrow_schema.release) {
+		local.current_schema.arrow_schema.release(&local.current_schema.arrow_schema);
 	}
-	gs.current_decoder.reset();
-	gs.current_result.reset();
-	gs.batch_index = 0;
-	gs.row_in_batch = 0;
+	local.current_decoder.reset();
+	local.current_result.reset();
+	local.batch_index = 0;
+	local.row_in_batch = 0;
 
-	gs.current_result = std::make_unique<gb::SubmitResult>(std::move(submit_result));
-	const auto &out0 = gs.current_result->outputs[0];
-	gs.current_decoder = std::make_unique<gb::IpcStreamDecoder>(out0.bytes(), out0.size_bytes());
-	gs.current_decoder->GetSchema(&gs.current_schema.arrow_schema);
+	local.current_result = std::make_unique<gb::SubmitResult>(std::move(submit_result));
+	const auto &out0 = local.current_result->outputs[0];
+	local.current_decoder = std::make_unique<gb::IpcStreamDecoder>(out0.bytes(), out0.size_bytes());
+	local.current_decoder->GetSchema(&local.current_schema.arrow_schema);
 
-	if (!gs.schema_validated) {
-		bt2_daemon::ValidateOutputSchema(gs.current_schema.arrow_schema);
-		gs.schema_validated = true;
+	if (!local.schema_validated) {
+		bt2_daemon::ValidateOutputSchema(local.current_schema.arrow_schema);
+		local.schema_validated = true;
 	}
 
 	for (;;) {
 		ArrowArrayWrapper w;
-		if (!gs.current_decoder->NextBatch(&w.arrow_array)) {
+		if (!local.current_decoder->NextBatch(&w.arrow_array)) {
 			break;
 		}
-		gs.current_batches.push_back(std::move(w));
+		local.current_batches.push_back(std::move(w));
 	}
 }
 
@@ -661,55 +705,67 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 	(void)context;
 	auto &bd = data.bind_data->Cast<AlignBowtie2ShardedBindData>();
 	auto &gs = data.global_state->Cast<AlignBowtie2ShardedGlobalState>();
+	auto &local = data.local_state->Cast<AlignBowtie2ShardedLocalState>();
 
 	while (true) {
 		// 1. Drain any decoded rows from the current Submit response.
-		while (gs.batch_index < gs.current_batches.size()) {
-			auto &batch = gs.current_batches[gs.batch_index].arrow_array;
+		while (local.batch_index < local.current_batches.size()) {
+			auto &batch = local.current_batches[local.batch_index].arrow_array;
 			if (batch.offset != 0) {
 				throw IOException(
 				    "align_bowtie2_sharded: decoded batch has non-zero parent offset (%lld); not yet handled",
 				    static_cast<long long>(batch.offset));
 			}
 			const idx_t total = static_cast<idx_t>(batch.length);
-			const idx_t remaining = total - gs.row_in_batch;
+			const idx_t remaining = total - local.row_in_batch;
 			if (remaining == 0) {
-				gs.batch_index += 1;
-				gs.row_in_batch = 0;
+				local.batch_index += 1;
+				local.row_in_batch = 0;
 				continue;
 			}
 			const idx_t to_emit = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
 			output.SetCardinality(to_emit);
-			bt2_daemon::EmitChunkRows(output, to_emit, gs.row_in_batch, batch);
+			bt2_daemon::EmitChunkRows(output, to_emit, local.row_in_batch, batch);
 			if (bd.include_shard_name) {
-				FillShardNameColumn(output, to_emit, gs.current_shard_name);
+				FillShardNameColumn(output, to_emit, local.current_shard_name);
 			}
-			gs.row_in_batch += to_emit;
+			local.row_in_batch += to_emit;
 			return;
 		}
 
-		// 2. Current Submit is drained. Either pull next chunk for current
-		//    shard, or advance to next shard.
-		if (!gs.current_shard_open) {
-			if (gs.shard_index >= bd.shards.size()) {
-				output.SetCardinality(0);
-				return;
+		// 2. Current Submit is drained. Pull next batch from the shard this
+		//    thread is currently working on (if any). `FetchShardBatch`
+		//    returns false iff the stream is fully exhausted; a successful
+		//    fetch always populates at least one row (the NULL guard inside
+		//    the loop throws rather than returning an empty batch), so there
+		//    is no need for an "empty but non-exhausted" code path.
+		if (local.current_shard_idx != DConstants::INVALID_INDEX) {
+			bt2_daemon::QueryBatch qb;
+			if (FetchShardBatch(local, bd, qb)) {
+				SubmitAndDecode(local, bd, qb);
+				continue; // loop back to drain decoded rows
 			}
-			OpenCurrentShardStream(gs, bd);
+			// Shard exhausted — release for re-claim attempt.
+			local.input_stream.reset();
+			local.current_shard_idx = DConstants::INVALID_INDEX;
 		}
 
-		bt2_daemon::QueryBatch qb;
-		if (FetchShardBatch(gs, bd, qb)) {
-			if (!qb.read_ids.empty()) {
-				SubmitAndDecode(gs, bd, qb);
-				continue; // loop back to drain
-			}
-			continue;
+		// 3. Claim the next shard atomically. fetch_add is the entire
+		//    coordination — no mutex needed. When the counter exceeds the
+		//    shard count this thread is done.
+		//    `memory_order_relaxed` is sufficient because the only shared
+		//    state we read after claiming is `bd.shards[shard_idx]`, and
+		//    `bd.shards` is built once in Bind() and never mutated
+		//    afterwards — there is no store that any thread needs to
+		//    observe via this atomic. Don't "upgrade" this to acq_rel
+		//    without re-checking that invariant.
+		const idx_t shard_idx = gs.next_shard_idx.fetch_add(1, std::memory_order_relaxed);
+		if (shard_idx >= bd.shards.size()) {
+			output.SetCardinality(0);
+			return;
 		}
-		// Current shard exhausted. Advance.
-		gs.input_stream.reset();
-		gs.current_shard_open = false;
-		gs.shard_index += 1;
+		local.current_shard_idx = shard_idx;
+		OpenCurrentShardStream(local, bd);
 	}
 }
 
