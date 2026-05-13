@@ -1,8 +1,7 @@
 #include "unifrac_table_functions.hpp"
 
 #include <algorithm>
-#include <array>
-#include <cmath>
+#include <climits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -13,6 +12,7 @@
 #include "tree_table_reader.hpp"
 #include "unifrac_bptree.hpp"
 #include "unifrac_distance.hpp"
+#include "unifrac_function_common.hpp"
 #include "unifrac_metadata.hpp"
 #include "unifrac_support_biom.hpp"
 
@@ -33,28 +33,9 @@
 namespace duckdb {
 namespace {
 
-constexpr std::array<const char *, 5> kAcceptedVariants = {"unweighted", "weighted_normalized", "weighted_unnormalized",
-                                                           "unweighted_unnormalized", "generalized"};
-
-bool IsValidVariant(const std::string &v) {
-	for (const auto *name : kAcceptedVariants) {
-		if (v == name) {
-			return true;
-		}
-	}
-	return false;
-}
-
-std::string AcceptedVariantList() {
-	std::string out;
-	for (size_t i = 0; i < kAcceptedVariants.size(); ++i) {
-		if (i != 0) {
-			out += ", ";
-		}
-		out += kAcceptedVariants[i];
-	}
-	return out;
-}
+using unifrac_internal::AcceptedVariantList;
+using unifrac_internal::IsValidVariant;
+using unifrac_internal::ReadFeatureTable;
 
 struct PermanovaRow {
 	int32_t iteration;
@@ -76,59 +57,6 @@ struct UnifracPermanovaGlobalState : public GlobalTableFunctionState {
 		return 1;
 	}
 };
-
-// Mirror of unifrac_pcoa_function.cpp:ReadFeatureTable — duplicates exist
-// today because Phase 5 is the second consumer; if Phase 6 (Faith PD) adds a
-// third, lift this into a shared helper. Long-form (sample_id, feature_id,
-// value) matches read_biom's output schema.
-std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, const std::string &table_name) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
-
-	auto probe = conn.Query("SELECT sample_id::VARCHAR, feature_id::VARCHAR, value::DOUBLE FROM " + qname + " LIMIT 0");
-	if (probe->HasError()) {
-		throw InvalidInputException("unifrac_permanova: feature-table '%s' must expose (sample_id VARCHAR, feature_id "
-		                            "VARCHAR, value DOUBLE): %s",
-		                            table_name, probe->GetError());
-	}
-
-	auto result = conn.Query("SELECT sample_id::VARCHAR, feature_id::VARCHAR, value::DOUBLE FROM " + qname);
-	if (result->HasError()) {
-		throw InvalidInputException("unifrac_permanova: failed to read feature-table '%s': %s", table_name,
-		                            result->GetError());
-	}
-
-	std::vector<miint::unifrac::CooRow> rows;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
-	while (auto chunk = materialized.Fetch()) {
-		const idx_t n = chunk->size();
-		if (n == 0) {
-			break;
-		}
-		UnifiedVectorFormat sid_u, fid_u, val_u;
-		chunk->data[0].ToUnifiedFormat(n, sid_u);
-		chunk->data[1].ToUnifiedFormat(n, fid_u);
-		chunk->data[2].ToUnifiedFormat(n, val_u);
-		auto sid_data = UnifiedVectorFormat::GetData<string_t>(sid_u);
-		auto fid_data = UnifiedVectorFormat::GetData<string_t>(fid_u);
-		auto val_data = UnifiedVectorFormat::GetData<double>(val_u);
-		for (idx_t i = 0; i < n; ++i) {
-			const auto si = sid_u.sel->get_index(i);
-			const auto fi = fid_u.sel->get_index(i);
-			const auto vi = val_u.sel->get_index(i);
-			if (!sid_u.validity.RowIsValid(si) || !fid_u.validity.RowIsValid(fi) || !val_u.validity.RowIsValid(vi)) {
-				continue;
-			}
-			const double v = val_data[vi];
-			if (v == 0.0 || std::isnan(v)) {
-				continue;
-			}
-			rows.push_back({sid_data[si].GetString(), fid_data[fi].GetString(), v});
-		}
-	}
-	return rows;
-}
 
 struct WideMetadata {
 	std::vector<std::string> column_names;         // chosen variables, in canonical order
@@ -178,9 +106,15 @@ WideMetadata ReadWideMetadata(ClientContext &context, const std::string &table_n
 		chosen_variables = non_sample_cols;
 		chosen_indices = non_sample_indices;
 	} else {
+		// Lookup is case-insensitive on the table's column names, but the
+		// stored canonical name is the actual column name from the relation —
+		// not the user-supplied spelling. The user-supplied spelling would
+		// drift into both the emitted `variable` column and the
+		// MetadataRow.variable field, surprising downstream consumers who
+		// expect the column name they see in the metadata table.
 		std::unordered_map<std::string, idx_t> lookup;
 		for (size_t k = 0; k < non_sample_cols.size(); ++k) {
-			lookup[StringUtil::Lower(non_sample_cols[k])] = non_sample_indices[k];
+			lookup[StringUtil::Lower(non_sample_cols[k])] = k;
 		}
 		for (const auto &v : requested_variables) {
 			auto it = lookup.find(StringUtil::Lower(v));
@@ -189,8 +123,8 @@ WideMetadata ReadWideMetadata(ClientContext &context, const std::string &table_n
 				    "unifrac_permanova: variable '%s' not found in metadata '%s' (sample_id column is reserved)", v,
 				    table_name);
 			}
-			chosen_variables.push_back(v);
-			chosen_indices.push_back(it->second);
+			chosen_variables.push_back(non_sample_cols[it->second]);
+			chosen_indices.push_back(non_sample_indices[it->second]);
 		}
 	}
 
@@ -252,6 +186,10 @@ void ComputeOneIteration(const miint::unifrac::UnifracSupportBiomView &biom_view
                          const std::vector<miint::unifrac::MetadataRow> &metadata_rows,
                          const std::vector<std::string> &requested_variables, int seed_iter, uint32_t n_permutations,
                          int32_t iteration_index, std::vector<PermanovaRow> &out_rows) {
+	// UnifracDistanceMatrix::Compute throws std::runtime_error on libssu
+	// errors. The tree/feature mismatch case is already caught upstream by
+	// ValidateTreeCoversFeatures, so anything reaching here is a libssu
+	// internal failure we surface as InvalidInputException.
 	miint::unifrac::UnifracDistanceMatrix dist = [&]() {
 		try {
 			return miint::unifrac::UnifracDistanceMatrix::Compute(
@@ -300,23 +238,26 @@ unique_ptr<FunctionData> UnifracPermanovaBind(ClientContext &context, TableFunct
 		                      "must be non-empty");
 	}
 
+	// All INTEGER-typed named parameters are read as int32_t to match
+	// LogicalType::INTEGER (see align_common.hpp:75 for the project
+	// convention).
 	std::string variant = "weighted_normalized";
-	int64_t n_permutations = 999;
+	int32_t n_permutations = 999;
 	std::vector<std::string> requested_variables;
 	bool variance_adjust = false;
 	double alpha = 1.0;
 	bool bypass_tips = false;
 	bool normalize_sample_counts = true;
-	int64_t subsample_depth = 0;
+	int32_t subsample_depth = 0;
 	bool subsample_with_replacement = false;
-	int64_t n_subsamples = 1;
-	int64_t seed = -1;
+	int32_t n_subsamples = 1;
+	int32_t seed = -1;
 	for (const auto &kv : input.named_parameters) {
 		const auto key = StringUtil::Lower(kv.first);
 		if (key == "variant") {
 			variant = kv.second.GetValue<string>();
 		} else if (key == "n_permutations") {
-			n_permutations = kv.second.GetValue<int64_t>();
+			n_permutations = kv.second.GetValue<int32_t>();
 		} else if (key == "variables") {
 			auto &list_children = ListValue::GetChildren(kv.second);
 			requested_variables.reserve(list_children.size());
@@ -332,13 +273,13 @@ unique_ptr<FunctionData> UnifracPermanovaBind(ClientContext &context, TableFunct
 		} else if (key == "normalize_sample_counts") {
 			normalize_sample_counts = kv.second.GetValue<bool>();
 		} else if (key == "subsample_depth") {
-			subsample_depth = kv.second.GetValue<int64_t>();
+			subsample_depth = kv.second.GetValue<int32_t>();
 		} else if (key == "subsample_with_replacement") {
 			subsample_with_replacement = kv.second.GetValue<bool>();
 		} else if (key == "n_subsamples") {
-			n_subsamples = kv.second.GetValue<int64_t>();
+			n_subsamples = kv.second.GetValue<int32_t>();
 		} else if (key == "seed") {
-			seed = kv.second.GetValue<int64_t>();
+			seed = kv.second.GetValue<int32_t>();
 		}
 	}
 
@@ -347,23 +288,27 @@ unique_ptr<FunctionData> UnifracPermanovaBind(ClientContext &context, TableFunct
 		                      AcceptedVariantList());
 	}
 	if (n_permutations < 1) {
-		throw BinderException("unifrac_permanova: n_permutations must be >= 1 (got %lld)",
-		                      static_cast<long long>(n_permutations));
+		throw BinderException("unifrac_permanova: n_permutations must be >= 1 (got %d)", n_permutations);
 	}
 	if (n_subsamples < 1) {
-		throw BinderException("unifrac_permanova: n_subsamples must be >= 1 (got %lld)",
-		                      static_cast<long long>(n_subsamples));
+		throw BinderException("unifrac_permanova: n_subsamples must be >= 1 (got %d)", n_subsamples);
 	}
 	if (subsample_depth < 0) {
-		throw BinderException("unifrac_permanova: subsample_depth must be >= 0 (got %lld)",
-		                      static_cast<long long>(subsample_depth));
+		throw BinderException("unifrac_permanova: subsample_depth must be >= 0 (got %d)", subsample_depth);
 	}
 	if (n_subsamples > 1 && subsample_depth == 0) {
 		throw BinderException("unifrac_permanova: n_subsamples > 1 requires subsample_depth > 0 (iterations would "
 		                      "otherwise be identical)");
 	}
+	// Guard the seed_iter = seed + i arithmetic against signed int32 overflow.
+	if (seed >= 0 &&
+	    static_cast<int64_t>(seed) + static_cast<int64_t>(n_subsamples) - 1 > static_cast<int64_t>(INT_MAX)) {
+		throw BinderException("unifrac_permanova: seed (%d) + n_subsamples (%d) - 1 exceeds INT_MAX; "
+		                      "pick a smaller seed or fewer subsamples",
+		                      seed, n_subsamples);
+	}
 
-	auto coo_rows = ReadFeatureTable(context, table_name);
+	auto coo_rows = ReadFeatureTable(context, table_name, "unifrac_permanova");
 	if (coo_rows.empty()) {
 		throw InvalidInputException("unifrac_permanova: feature-table '%s' is empty after dropping NULL/zero rows",
 		                            table_name);
@@ -407,8 +352,9 @@ unique_ptr<FunctionData> UnifracPermanovaBind(ClientContext &context, TableFunct
 
 	auto data = make_uniq<UnifracPermanovaData>();
 	data->rows.reserve(static_cast<size_t>(n_subsamples) * metadata.column_names.size());
-	for (int32_t i = 0; i < static_cast<int32_t>(n_subsamples); ++i) {
-		const int seed_iter = (seed >= 0) ? static_cast<int>(seed + i) : -1;
+	for (int32_t i = 0; i < n_subsamples; ++i) {
+		// seed + i overflow is prevented by the bind-time check above.
+		const int seed_iter = (seed >= 0) ? (seed + i) : -1;
 		ComputeOneIteration(biom_view, bptree_view, variant_fp32, variance_adjust, alpha, bypass_tips,
 		                    normalize_sample_counts, static_cast<uint32_t>(subsample_depth), subsample_with_replacement,
 		                    metadata.rows, metadata.column_names, seed_iter, static_cast<uint32_t>(n_permutations), i,

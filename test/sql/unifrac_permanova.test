@@ -64,6 +64,20 @@ body_site	2
 single_group	1
 treatment	2
 
+# single_group is a degenerate PERMANOVA (no between-group variance) so the
+# F-stat is undefined. skbb_permanova_fp32 emits -inf for the degenerate
+# case; verify the row is produced with a non-finite f_stat rather than
+# crashing or returning silent garbage. The schema-only `f_stat IS NOT NULL`
+# test above does NOT catch NaN/inf (they compare as not-NULL in SQL), so
+# we need a dedicated finiteness check.
+query I
+SELECT COUNT(*) FROM unifrac_permanova('observations', 'tree', 'metadata',
+    variant := 'weighted_normalized', n_permutations := 99,
+    variables := ['single_group'], seed := 42)
+WHERE n_groups = 1 AND NOT isfinite(f_stat);
+----
+1
+
 # ── Default variables: empty list selects every non-sample_id column ───────
 # metadata has 4 non-sample_id columns → 4 rows.
 query I
