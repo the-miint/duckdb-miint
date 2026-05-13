@@ -993,6 +993,7 @@ if(MIINT_ENABLE_UNIFRAC)
         src/unifrac_support_biom.cpp
         src/unifrac_bptree.cpp
         src/unifrac_metadata.cpp
+        src/unifrac_distance.cpp
         src/unifrac_pcoa_function.cpp
         src/unifrac_permanova_function.cpp
         src/unifrac_faith_pd_function.cpp)
@@ -1389,6 +1390,7 @@ if(MIINT_ENABLE_UNIFRAC)
         src/unifrac_support_biom.cpp
         src/unifrac_bptree.cpp
         src/unifrac_metadata.cpp
+        src/unifrac_distance.cpp
         test/cpp/test_UnifracSupportBiom.cpp
         test/cpp/test_UnifracBptree.cpp
         test/cpp/test_UnifracMetadata.cpp)

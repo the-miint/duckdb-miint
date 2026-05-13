@@ -4,7 +4,6 @@
 #include <array>
 #include <cmath>
 #include <memory>
-#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -12,7 +11,7 @@
 #include "NewickTree.hpp"
 #include "tree_table_reader.hpp"
 #include "unifrac_bptree.hpp"
-#include "unifrac_libssu.hpp"
+#include "unifrac_distance.hpp"
 #include "unifrac_support_biom.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -32,18 +31,6 @@
 namespace duckdb {
 
 namespace {
-
-// libssu's global skbb RNG is set by ssu_set_random_seed and consumed by
-// one_off_matrix_inmem_fp32_v3 when subsample_depth > 0. Multiple DuckDB
-// connections / threads could each invoke unifrac_pcoa concurrently, so we
-// serialize the seed-set + compute pair across the whole process. We always
-// hold the mutex around the libssu call even when subsample_depth == 0 — it
-// keeps the call site uniform and the contention cost is negligible compared
-// to the distance computation itself.
-std::mutex &LibssuGlobalMutex() {
-	static std::mutex m;
-	return m;
-}
 
 constexpr std::array<const char *, 5> kAcceptedVariants = {"unweighted", "weighted_normalized", "weighted_unnormalized",
                                                            "unweighted_unnormalized", "generalized"};
@@ -157,52 +144,41 @@ void ComputeOneIteration(const miint::unifrac::UnifracSupportBiomView &biom_view
                          bool variance_adjust, double alpha, bool bypass_tips, bool normalize_sample_counts,
                          uint32_t subsample_depth, bool subsample_with_replacement, int seed_iter, uint32_t n_dims,
                          int32_t iteration_index, std::vector<PcoaRow> &out_rows) {
-	mat_full_fp32_t *mat = nullptr;
-	{
-		std::lock_guard<std::mutex> lock(LibssuGlobalMutex());
-		if (seed_iter >= 0) {
-			ssu_set_random_seed(static_cast<unsigned int>(seed_iter));
+	miint::unifrac::UnifracDistanceMatrix dist = [&]() {
+		try {
+			return miint::unifrac::UnifracDistanceMatrix::Compute(
+			    biom_view, bptree_view, variant_fp32, variance_adjust, alpha, bypass_tips, normalize_sample_counts,
+			    subsample_depth, subsample_with_replacement, seed_iter);
+		} catch (const std::runtime_error &e) {
+			throw InvalidInputException("unifrac_pcoa: %s", e.what());
 		}
-		ComputeStatus s = one_off_matrix_inmem_fp32_v3(
-		    biom_view.support_biom(), bptree_view.support_bptree(), variant_fp32.c_str(), variance_adjust, alpha,
-		    bypass_tips, normalize_sample_counts, /*n_substeps*/ 1, subsample_depth, subsample_with_replacement,
-		    /*mmap_dir*/ nullptr, &mat);
-		if (s != okay) {
-			throw InvalidInputException("unifrac_pcoa: libssu one_off_matrix_inmem_fp32_v3 returned status %d",
-			                            static_cast<int>(s));
-		}
-	}
+	}();
 
 	// Subsampling can drop samples whose total counts fall below
-	// subsample_depth, so use mat->n_samples and mat->sample_ids as the
-	// authoritative post-compute view rather than the pre-compute size.
-	const uint32_t actual_n_samples = mat->n_samples;
+	// subsample_depth, so the distance matrix's n_samples may be smaller
+	// than the input feature-table's n_samples; n_dims must still fit.
+	const uint32_t actual_n_samples = dist.n_samples();
 	if (actual_n_samples < n_dims + 1) {
-		destroy_mat_full_fp32(&mat);
 		throw InvalidInputException(
 		    "unifrac_pcoa: after subsampling iteration %d only %u sample(s) survive "
 		    "(samples whose total count falls below subsample_depth=%u are dropped); n_dims=%u requires >= %u samples",
 		    iteration_index, actual_n_samples, subsample_depth, n_dims, n_dims + 1);
-	}
-	std::vector<std::string> sample_ids(actual_n_samples);
-	for (uint32_t i = 0; i < actual_n_samples; ++i) {
-		sample_ids[i] = mat->sample_ids[i];
 	}
 
 	std::vector<float> eigvals(n_dims);
 	std::vector<float> samples(static_cast<size_t>(actual_n_samples) * n_dims);
 	std::vector<float> prop(n_dims);
 
-	// skbb_pcoa_fsvd_fp32 uses its own per-call seed; safe to run outside the
-	// libssu mutex.
-	skbb_pcoa_fsvd_fp32(actual_n_samples, mat->matrix, n_dims, seed_iter, eigvals.data(), samples.data(), prop.data());
-	destroy_mat_full_fp32(&mat);
+	// skbb_pcoa_fsvd_fp32 uses its own per-call seed; no libssu mutex needed.
+	skbb_pcoa_fsvd_fp32(actual_n_samples, dist.matrix(), n_dims, seed_iter, eigvals.data(), samples.data(),
+	                    prop.data());
 
 	// samples is laid out (actual_n_samples × n_dims), sample-major. The header
 	// comment in ordination.h reads "(n_eighs × n_dims)" but the actual
 	// implementation (principal_coordinate_analysis.cpp:574-578 and the
 	// preceding transpose_T(n_dims, n_eighs, ...)) writes `samples + row *
 	// n_eighs` with row iterating over samples, i.e. sample-major.
+	const auto &sample_ids = dist.sample_ids();
 	for (uint32_t s = 0; s < actual_n_samples; ++s) {
 		for (uint32_t axis = 0; axis < n_dims; ++axis) {
 			PcoaRow row;
