@@ -578,11 +578,39 @@ if(MIINT_ENABLE_UNIFRAC)
     # .wasm-cache/eigen/include/. fetch_eigen.sh is idempotent — cache hit
     # returns immediately. Requires network on first configure (mirrors
     # the upstream WASM build's expectation).
+    #
+    # WASM PIC patch: both libskbb_wasm.a and libssu_wasm.a are linked
+    # into the duckdb-miint extension as a WASM side module
+    # (-sSIDE_MODULE=2), which requires every translation unit to be
+    # position-independent. Upstream's wasm/emscripten_build.mk does NOT
+    # include -fPIC in WASM_CXXFLAGS (the inmem path does, but the WASM
+    # path was authored standalone and never linked into a side module
+    # before). Patch -fPIC in idempotently before the WASM build. File
+    # an upstream PR to land this in skbb / unifrac-binaries' WASM build
+    # rules and drop these patches when both submodules ship the fix.
+    #
+    # Gated on EMSCRIPTEN to keep native builds from dirtying the
+    # submodule worktree (the patch is a no-op on native, but the
+    # touched-by-sed file still shows up in `git status` of the
+    # submodule).
+    if(EMSCRIPTEN)
+        set(SKBB_WASM_PATCH
+            sh -c "grep -q '^WASM_CXXFLAGS := -fPIC' \"$0\" || sed -i 's|^WASM_CXXFLAGS := |WASM_CXXFLAGS := -fPIC |' \"$0\""
+            ${SKBB_SRC_DIR}/src/wasm/emscripten_build.mk)
+        set(UNIFRAC_WASM_PATCH
+            sh -c "grep -q '^WASM_CXXFLAGS := -fPIC' \"$0\" || sed -i 's|^WASM_CXXFLAGS := |WASM_CXXFLAGS := -fPIC |' \"$0\""
+            ${UNIFRAC_SRC_DIR}/src/wasm/emscripten_build.mk)
+    else()
+        set(SKBB_WASM_PATCH ${CMAKE_COMMAND} -E true)
+        set(UNIFRAC_WASM_PATCH ${CMAKE_COMMAND} -E true)
+    endif()
+
     ExternalProject_Add(
         skbb_build
         SOURCE_DIR ${SKBB_SRC_DIR}
         CONFIGURE_COMMAND bash ${SKBB_SRC_DIR}/scripts/fetch_eigen.sh
-        BUILD_COMMAND make -C ${SKBB_SRC_DIR}/src ${SKBB_MAKE_TARGET}
+        BUILD_COMMAND ${SKBB_WASM_PATCH}
+        COMMAND make -C ${SKBB_SRC_DIR}/src ${SKBB_MAKE_TARGET}
         INSTALL_COMMAND ""
         BUILD_IN_SOURCE 1
         BUILD_BYPRODUCTS ${SKBB_LIB_PATH}
@@ -595,7 +623,8 @@ if(MIINT_ENABLE_UNIFRAC)
         unifrac_build
         SOURCE_DIR ${UNIFRAC_SRC_DIR}
         CONFIGURE_COMMAND ""
-        BUILD_COMMAND make -C ${UNIFRAC_SRC_DIR}/src ${UNIFRAC_MAKE_TARGET} SKBB_DIR=${SKBB_SRC_DIR}
+        BUILD_COMMAND ${UNIFRAC_WASM_PATCH}
+        COMMAND make -C ${UNIFRAC_SRC_DIR}/src ${UNIFRAC_MAKE_TARGET} SKBB_DIR=${SKBB_SRC_DIR}
         INSTALL_COMMAND ""
         BUILD_IN_SOURCE 1
         BUILD_BYPRODUCTS ${UNIFRAC_LIB_PATH}
