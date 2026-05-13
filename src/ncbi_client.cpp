@@ -32,9 +32,12 @@ void NCBIClient::RespectRateLimit() {
 }
 
 bool NCBIClient::IsRetryableStatus(int status) {
-	// Retry on rate limiting (429) and service unavailable (503)
-	// Also retry on 500 (internal server error) and 502 (bad gateway)
-	return status == 429 || status == 500 || status == 502 || status == 503;
+	// Retry on rate limiting (429) and service unavailable (503).
+	// Also retry on 500 (internal server error), 502 (bad gateway), 504 (gateway timeout).
+	// NCBI E-utilities occasionally emits transient 400/408 under load — the same URL
+	// succeeds on retry, so treat these as retryable too rather than aborting a long scan.
+	return status == 400 || status == 408 || status == 429 || status == 500 || status == 502 || status == 503 ||
+	       status == 504;
 }
 
 std::string NCBIClient::MakeRequest(const std::string &url, bool use_api_key_header) {

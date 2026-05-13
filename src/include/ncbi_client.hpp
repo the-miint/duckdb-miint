@@ -20,9 +20,11 @@ namespace miint {
 // - Thread-safe: Multiple threads can share a single client instance
 //
 // Retry Behavior:
-// - Retries on HTTP 429 (Too Many Requests) and 503 (Service Unavailable)
-// - Uses exponential backoff: 1s, 2s, 4s (max 3 retries)
-// - Non-retryable errors (4xx except 429) fail immediately
+// - Retries on HTTP 400, 408, 429, 500, 502, 503, 504. NCBI E-utilities occasionally
+//   emits transient 400/408 under load — same URL succeeds on retry — so treat these
+//   as retryable rather than aborting a long scan.
+// - Uses exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s (max 6 retries, ~63s total)
+// - Other 4xx (e.g. 404 for an invalid accession) fail immediately
 class NCBIClient {
 public:
 	// Base URLs
@@ -34,7 +36,11 @@ public:
 	static constexpr double RATE_LIMIT_WITH_KEY = 10.0;
 
 	// Retry configuration
-	static constexpr int MAX_RETRIES = 3;
+	// 6 retries with exponential backoff (1s, 2s, 4s, 8s, 16s, 32s) gives ~63s of
+	// total backoff before giving up — enough headroom for transient NCBI hiccups
+	// during long scans (e.g. 10k accessions) without making a genuinely broken
+	// request hang forever.
+	static constexpr int MAX_RETRIES = 6;
 	static constexpr int INITIAL_RETRY_DELAY_MS = 1000;
 
 	NCBIClient(duckdb::DatabaseInstance &db, const std::string &api_key = "");
