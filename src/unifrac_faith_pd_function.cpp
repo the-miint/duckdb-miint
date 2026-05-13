@@ -55,29 +55,57 @@ std::vector<std::string> CollectIds(char **ids, int n) {
 	return out;
 }
 
+// RAII wrapper around libssu's r_vec*. The faith_pd_inmem path is
+// straight-line (no early return on success), but out_rows.push_back may
+// throw std::bad_alloc under memory pressure; without RAII the r_vec
+// (its values/sample_ids arrays plus the struct) would leak per iteration
+// and compound across the n_subsamples loop.
+class ResultsVecHandle {
+public:
+	~ResultsVecHandle() {
+		if (ptr_ != nullptr) {
+			destroy_results_vec(&ptr_);
+		}
+	}
+	r_vec **out() {
+		return &ptr_;
+	}
+	r_vec *get() const {
+		return ptr_;
+	}
+
+	ResultsVecHandle() = default;
+	ResultsVecHandle(const ResultsVecHandle &) = delete;
+	ResultsVecHandle &operator=(const ResultsVecHandle &) = delete;
+
+private:
+	r_vec *ptr_ = nullptr;
+};
+
 // Run faith_pd_inmem against a support_biom view and emit one row per
 // sample. The view may be the original biom (subsample_depth == 0) or a
-// bridged subsample (subsample_depth > 0).
+// bridged subsample (subsample_depth > 0). Note: sample order in the output
+// is libssu's order (result->sample_ids), which for our use case is the
+// lexicographic order established by UnifracSupportBiomView::FromCoo —
+// downstream SQL queries should ORDER BY sample_id regardless rather than
+// rely on this implementation detail.
 void RunFaithPd(const miint::unifrac::UnifracSupportBiomView &biom_view,
                 const miint::unifrac::UnifracBptreeView &bptree_view, int32_t iteration_index,
                 std::vector<FaithPdRow> &out_rows) {
-	r_vec *result = nullptr;
-	ComputeStatus status = faith_pd_inmem(biom_view.support_biom(), bptree_view.support_bptree(), &result);
+	ResultsVecHandle result;
+	ComputeStatus status = faith_pd_inmem(biom_view.support_biom(), bptree_view.support_bptree(), result.out());
 	if (status != okay) {
-		if (result != nullptr) {
-			destroy_results_vec(&result);
-		}
 		throw InvalidInputException("unifrac_faith_pd: libssu faith_pd_inmem returned status %d",
 		                            static_cast<int>(status));
 	}
-	for (unsigned int i = 0; i < result->n_samples; ++i) {
+	const r_vec *r = result.get();
+	for (unsigned int i = 0; i < r->n_samples; ++i) {
 		FaithPdRow row;
 		row.iteration = iteration_index;
-		row.sample_id = result->sample_ids[i];
-		row.faith_pd = result->values[i];
+		row.sample_id = r->sample_ids[i];
+		row.faith_pd = r->values[i];
 		out_rows.push_back(std::move(row));
 	}
-	destroy_results_vec(&result);
 }
 
 unique_ptr<FunctionData> UnifracFaithPdBind(ClientContext &context, TableFunctionBindInput &input,

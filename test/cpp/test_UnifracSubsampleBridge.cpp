@@ -98,6 +98,55 @@ TEST_CASE("BridgeSubsample is reproducible under the same seed", "[unifrac][subs
 	}
 }
 
+TEST_CASE("BridgeSubsample with different seeds produces different output", "[unifrac][subsample_bridge]") {
+	// Guard against a no-op bridge passing the same-seed test: two different
+	// seeds at the same depth must produce CSR data that differs in at least
+	// one cell. With depth=4 and 4–8 source counts per sample, the multinomial
+	// draw has plenty of room for variation across seeds.
+	auto biom = UnifracSupportBiomView::FromCoo(MakeRichRows());
+	auto sub_a = BridgeSubsample(biom, /*subsample_depth*/ 4, /*with_replacement*/ false, /*seed*/ 42);
+	auto sub_b = BridgeSubsample(biom, /*subsample_depth*/ 4, /*with_replacement*/ false, /*seed*/ 1337);
+	const auto *a = sub_a.support_biom();
+	const auto *b = sub_b.support_biom();
+
+	REQUIRE(a->n_samples == b->n_samples);
+	REQUIRE(a->n_obs == b->n_obs);
+
+	bool differs = false;
+	if (a->nnz != b->nnz) {
+		differs = true;
+	} else {
+		for (int i = 0; i < a->nnz && !differs; ++i) {
+			if (a->indices[i] != b->indices[i] || a->data[i] != b->data[i]) {
+				differs = true;
+			}
+		}
+	}
+	REQUIRE(differs);
+}
+
+TEST_CASE("BridgeSubsample with_replacement=true: per-sample totals still equal depth", "[unifrac][subsample_bridge]") {
+	// Multinomial sampling (with_replacement=true) draws exactly `depth` reads
+	// per sample, so the column-sum invariant holds for the with-replacement
+	// path too. This exercises biom_subsampled's WeightedSampleWithReplacement
+	// branch, which the no-replacement test never reaches.
+	auto biom = UnifracSupportBiomView::FromCoo(MakeRichRows());
+	const uint32_t depth = 4;
+	auto sub = BridgeSubsample(biom, depth, /*with_replacement*/ true, /*seed*/ 42);
+
+	const auto *b = sub.support_biom();
+	REQUIRE(b->n_samples == 4);
+	std::unordered_map<int, double> column_sums;
+	for (int o = 0; o < b->n_obs; ++o) {
+		for (uint32_t k = b->indptr[o]; k < b->indptr[o + 1]; ++k) {
+			column_sums[static_cast<int>(b->indices[k])] += b->data[k];
+		}
+	}
+	for (int s = 0; s < b->n_samples; ++s) {
+		REQUIRE(column_sums[s] == Catch::Approx(static_cast<double>(depth)));
+	}
+}
+
 TEST_CASE("BridgeSubsample output is consumable by faith_pd_inmem", "[unifrac][subsample_bridge][libssu]") {
 	// End-to-end smoke: the whole point of the bridge is that downstream
 	// libssu APIs can consume the reconstructed support_biom_t. If the

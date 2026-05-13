@@ -87,6 +87,17 @@ WHERE sub_pd > full_pd;
 ----
 0
 
+# subsample_with_replacement := true uses libssu's multinomial draw path
+# (vs. permutation without replacement). Same row cardinality, same shape;
+# this asserts the with-replacement parameter actually wires through to
+# libssu's biom_subsampled.cpp branch (uncovered by the default tests).
+query I
+SELECT COUNT(*) FROM unifrac_faith_pd('observations', 'tree',
+    subsample_depth := 3, n_subsamples := 5,
+    subsample_with_replacement := true, seed := 11);
+----
+30
+
 # ── Bind-time errors ───────────────────────────────────────────────────────
 
 # Tree missing a feature → IO error naming the missing tip.

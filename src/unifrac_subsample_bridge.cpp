@@ -74,7 +74,10 @@ UnifracSupportBiomView BridgeSubsample(const UnifracSupportBiomView &biom_view, 
 	const unsigned int n_samples = subsampled_n_samples(opaque);
 	const unsigned int n_obs = subsampled_n_obs(opaque);
 	if (n_samples == 0 || n_obs == 0) {
-		throw std::invalid_argument("BridgeSubsample: subsampled table is empty (all samples below subsample_depth)");
+		throw std::invalid_argument(
+		    "BridgeSubsample: subsampled table is empty at subsample_depth=" + std::to_string(subsample_depth) +
+		    " (every sample's total count fell below the depth, or every OTU is zero after "
+		    "rarefaction); pick a smaller depth");
 	}
 
 	// subsampled_get_obs_data fills a dense per-OTU vector indexed by
@@ -89,8 +92,13 @@ UnifracSupportBiomView BridgeSubsample(const UnifracSupportBiomView &biom_view, 
 			                         std::to_string(o));
 		}
 		const std::string obs_id = obs_id_cstr;
+		// Invariant assertion: `obs_id` came from the same hash-indexed obs
+		// map that get_obs_data looks up against. A `false` return here would
+		// mean the opaque table is internally inconsistent (libssu bug) — we
+		// throw rather than silently mis-emit zero counts.
 		if (!subsampled_get_obs_data(opaque, obs_id_cstr, obs_buf.data())) {
-			throw std::runtime_error("BridgeSubsample: subsampled_get_obs_data lookup failed for obs '" + obs_id + "'");
+			throw std::runtime_error("BridgeSubsample: subsampled_get_obs_data lookup failed for obs '" + obs_id +
+			                         "' (opaque table internal inconsistency)");
 		}
 		for (unsigned int s = 0; s < n_samples; ++s) {
 			const double v = obs_buf[s];
