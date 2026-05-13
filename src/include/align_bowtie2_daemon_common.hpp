@@ -34,6 +34,12 @@ constexpr int kNumOutputColumns = 21;
 // schema so wire column i → output column i.
 extern const char *const kOutputColumnNames[kNumOutputColumns];
 
+// Arrow C Data Interface format string per column; matches the daemon's
+// bowtie2-align v2 wire schema. Validated structurally so a type drift on the
+// daemon side fails loud rather than reinterpreting bytes through
+// `read_fixed<T>` with the wrong width.
+extern const char *const kOutputColumnFormats[kNumOutputColumns];
+
 // Populate the 21-column output schema (matching the daemon's wire schema).
 void PopulateOutputSchema(std::vector<std::string> &names, std::vector<LogicalType> &types);
 

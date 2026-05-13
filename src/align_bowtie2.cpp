@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -62,7 +63,11 @@ struct ConfigJsonBuilder {
 		os << "\"" << key << "\":" << raw_value;
 	}
 	void append_str(const std::string &key, const std::string &value) {
-		append_raw(key, "\"" + value + "\"");
+		// Route through gb::JsonEscape: today the only string values are
+		// validated presets and a mkdtemp-built index path, but the builder
+		// is shared infrastructure and a future user-controlled string is
+		// one parameter away. Cheap defense over an audit each time.
+		append_raw(key, "\"" + gb::JsonEscape(value) + "\"");
 	}
 	void append_int(const std::string &key, int64_t value) {
 		append_raw(key, std::to_string(value));
@@ -449,11 +454,21 @@ struct AlignBowtie2GlobalState : public GlobalTableFunctionState {
 			}
 			session.reset();
 		}
-		for (const auto &f : index_files) {
-			::unlink(f.c_str());
-		}
 		if (!temp_dir.empty()) {
-			::rmdir(temp_dir.c_str());
+			// Sweep every entry under the temp dir rather than relying on the
+			// `index_files` list. Covers the daemon-crash-mid-build case
+			// where partial `.bt2` files were written before the result JSON
+			// came back: without this, `rmdir` would silently fail and leak
+			// the directory + files.
+			try {
+				std::error_code ec;
+				std::filesystem::remove_all(temp_dir, ec);
+				// `ec` is ignored on purpose — destructor can't propagate it
+				// and there's no useful action on cleanup failure beyond
+				// letting the OS reclaim on reboot.
+			} catch (...) {
+				// Destructor must not throw.
+			}
 		}
 	}
 };

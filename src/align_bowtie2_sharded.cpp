@@ -1,5 +1,6 @@
 #include "align_bowtie2_sharded.hpp"
 #include "align_bowtie2_daemon_common.hpp"
+#include "align_common.hpp"
 #include "miint_log.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -51,7 +52,10 @@ struct ConfigJsonBuilder {
 		os << "\"" << key << "\":" << raw_value;
 	}
 	void append_str(const std::string &key, const std::string &value) {
-		append_raw(key, "\"" + value + "\"");
+		// See align_bowtie2.cpp: route through the canonical escaper even
+		// when current callers are trusted, so the helper stays a safe
+		// pattern for future additions.
+		append_raw(key, "\"" + gb::JsonEscape(value) + "\"");
 	}
 	void append_int(const std::string &key, int64_t value) {
 		append_raw(key, std::to_string(value));
@@ -65,8 +69,8 @@ struct ConfigJsonBuilder {
 };
 
 const std::unordered_set<std::string> kKnownShardedParams = {
-    "shard_directory", "read_to_shard",         "preset", "local", "threads",
-    "max_secondary",   "max_threads_per_shard", "quiet",  "debug", "include_shard_name"};
+    "shard_directory",       "read_to_shard",     "preset", "local", "threads", "max_secondary", "quiet",
+    "max_threads_per_shard", "include_shard_name"};
 
 const std::unordered_set<std::string> kKnownPresets = {"very-fast", "fast", "sensitive", "very-sensitive"};
 
@@ -124,58 +128,15 @@ bool HasShardIndex(const std::string &prefix) {
 	return true;
 }
 
-// =============================================================================
-// read_to_shard schema validation — preserves the existing test contract
-// ("read_to_shard table missing required column 'read_id'" / 'shard_name').
-// Mirrors align_common.hpp::ValidateReadToShardSchema; the duplication is
-// minor enough that consolidation can wait for the third caller.
-// =============================================================================
+// read_to_shard schema validation is handled by align_common.hpp's catalog-
+// backed `ValidateReadToShardSchema` (case-insensitive column names, shared
+// with align_minimap2_sharded). Direct call below in Bind().
 
 struct ShardInfo {
 	std::string name;
 	std::string index_prefix; // <shard_directory>/<shard_name>/index
 	idx_t read_count;
 };
-
-void ValidateReadToShardSchema(ClientContext &context, const std::string &table_name) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
-	const std::string sql = "DESCRIBE " + KeywordHelper::WriteOptionallyQuoted(table_name);
-	auto result = conn.Query(sql);
-	if (result->HasError()) {
-		throw BinderException("Table or view '%s' does not exist", table_name);
-	}
-	auto &materialized = result->Cast<MaterializedQueryResult>();
-	bool has_read_id = false;
-	bool has_shard_name = false;
-	bool read_id_is_varchar = false;
-	bool shard_name_is_varchar = false;
-	while (auto chunk = materialized.Fetch()) {
-		for (idx_t i = 0; i < chunk->size(); ++i) {
-			const auto col = chunk->GetValue(0, i).ToString();
-			const auto typ = chunk->GetValue(1, i).ToString();
-			if (col == "read_id") {
-				has_read_id = true;
-				read_id_is_varchar = typ == "VARCHAR";
-			} else if (col == "shard_name") {
-				has_shard_name = true;
-				shard_name_is_varchar = typ == "VARCHAR";
-			}
-		}
-	}
-	if (!has_read_id) {
-		throw BinderException("read_to_shard table '%s' missing required column 'read_id'", table_name);
-	}
-	if (!read_id_is_varchar) {
-		throw BinderException("Column 'read_id' in read_to_shard table '%s' must be VARCHAR", table_name);
-	}
-	if (!has_shard_name) {
-		throw BinderException("read_to_shard table '%s' missing required column 'shard_name'", table_name);
-	}
-	if (!shard_name_is_varchar) {
-		throw BinderException("Column 'shard_name' in read_to_shard table '%s' must be VARCHAR", table_name);
-	}
-}
 
 // Per-shard read counts, ordered largest-first. Drives the per-shard
 // processing order and lets us skip empty shards quickly.
@@ -209,11 +170,10 @@ std::vector<ShardInfo> EnumerateShards(ClientContext &context, const std::string
 				info.index_prefix += '/';
 			}
 			info.index_prefix += info.name + "/index";
-			if (!HasShardIndex(info.index_prefix)) {
-				throw BinderException("No valid bowtie2 index found at prefix: %s. "
-				                      "Expected files like %s.1.bt2, %s.rev.1.bt2, etc.",
-				                      info.index_prefix, info.index_prefix, info.index_prefix);
-			}
+			// Per-shard `HasShardIndex(...)` FS check intentionally deferred
+			// to InitGlobal: hitting the filesystem from Bind scales poorly
+			// over NFS / hundreds of shards, and the check is racy regardless
+			// (a shard can be deleted between bind and execute).
 			out.push_back(std::move(info));
 		}
 	}
@@ -490,10 +450,22 @@ std::unique_ptr<gb::Session> SpawnAndCheckSession() {
 
 unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bd = input.bind_data->Cast<AlignBowtie2ShardedBindData>();
+
+	// Verify each shard's bowtie2 index files exist on disk. Done here rather
+	// than in Bind because filesystem stats from the planner cost real time
+	// on NFS / very wide shard sets, and the check is best-effort anyway
+	// (the daemon will fail at Submit if a shard disappears mid-query).
+	for (const auto &shard : bd.shards) {
+		if (!HasShardIndex(shard.index_prefix)) {
+			throw IOException("No valid bowtie2 index found at prefix: %s. "
+			                  "Expected files like %s.1.bt2, %s.rev.1.bt2, etc.",
+			                  shard.index_prefix, shard.index_prefix, shard.index_prefix);
+		}
+	}
+
 	auto gs = make_uniq<AlignBowtie2ShardedGlobalState>();
 	gs->session = SpawnAndCheckSession();
 	gs->input_conn = std::make_unique<Connection>(DatabaseInstance::GetDatabase(context));
-	(void)bd;
 	return std::move(gs);
 }
 
@@ -732,7 +704,6 @@ TableFunction AlignBowtie2ShardedTableFunction::GetFunction() {
 	tf.named_parameters["max_secondary"] = LogicalType::INTEGER;
 	tf.named_parameters["max_threads_per_shard"] = LogicalType::INTEGER;
 	tf.named_parameters["quiet"] = LogicalType::BOOLEAN;
-	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
 	tf.named_parameters["include_shard_name"] = LogicalType::BOOLEAN;
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;

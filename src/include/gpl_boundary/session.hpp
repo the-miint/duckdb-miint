@@ -12,6 +12,18 @@ namespace duckdb {
 namespace miint {
 namespace gpl_boundary {
 
+/// Minimal RFC 8259 escape of a string for embedding inside a JSON string
+/// literal. Escapes `"`, `\`, control characters (0x00–0x1F) using the
+/// short forms (`\n` / `\r` / `\t`) where available and `\u00xx` otherwise.
+/// The output does NOT include surrounding double quotes — caller emits those.
+///
+/// Use this any time a free-form string crosses into a hand-built JSON
+/// message (e.g. `Session::Submit`'s batch envelope, the per-tool
+/// `config_json` builders). Validated callers (e.g. `kKnownPresets`) don't
+/// need it, but routing everything through this is cheaper than auditing
+/// each builder for "is the source trusted today?".
+std::string JsonEscape(const std::string &in);
+
 /// One entry in the daemon's tool registry, as advertised on the init reply.
 /// Populated by `Session::Initialize()` from the protocol-v3 `tools` field
 /// (gpl-boundary commit 6b11337). Bind-time validators in table functions

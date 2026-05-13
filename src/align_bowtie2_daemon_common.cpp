@@ -16,6 +16,35 @@ const char *const kOutputColumnNames[kNumOutputColumns] = {
     "mate_reference", "mate_position", "template_length", "tag_as",   "tag_xs",        "tag_ys", "tag_xn",
     "tag_xm",         "tag_xo",        "tag_xg",          "tag_nm",   "tag_yt",        "tag_md", "tag_sa"};
 
+// Arrow C Data Interface format codes:
+//   "u" = Utf8, "S" = uint16, "C" = uint8, "l" = int64, "i" = int32.
+// EmitChunkRows reads fixed-width columns as the listed type — a daemon-side
+// type drift without a schema_version bump would corrupt output if we trusted
+// the name alone.
+const char *const kOutputColumnFormats[kNumOutputColumns] = {
+    "u", // read_id          — Utf8
+    "S", // flags            — uint16
+    "u", // reference        — Utf8
+    "l", // position         — int64
+    "l", // stop_position    — int64
+    "C", // mapq             — uint8
+    "u", // cigar            — Utf8
+    "u", // mate_reference   — Utf8
+    "l", // mate_position    — int64
+    "l", // template_length  — int64
+    "i", // tag_as           — int32 (widened to BIGINT in EmitChunkRows)
+    "i", // tag_xs           — int32 (widened)
+    "i", // tag_ys           — int32 (widened)
+    "i", // tag_xn           — int32 (widened)
+    "i", // tag_xm           — int32 (widened)
+    "i", // tag_xo           — int32 (widened)
+    "i", // tag_xg           — int32 (widened)
+    "i", // tag_nm           — int32 (widened)
+    "u", // tag_yt           — Utf8
+    "u", // tag_md           — Utf8
+    "u", // tag_sa           — Utf8
+};
+
 void PopulateOutputSchema(std::vector<std::string> &names, std::vector<LogicalType> &types) {
 	names = {kOutputColumnNames, kOutputColumnNames + kNumOutputColumns};
 	types = {LogicalType::VARCHAR,   // read_id
@@ -52,8 +81,17 @@ void ValidateOutputSchema(const ArrowSchema &schema) {
 	for (int c = 0; c < kNumOutputColumns; ++c) {
 		const auto *child = schema.children[c];
 		if (!child || !child->name || std::strcmp(child->name, kOutputColumnNames[c]) != 0) {
-			throw IOException("bowtie2-align: schema drift at column %d — expected '%s', got '%s'", c,
+			throw IOException("bowtie2-align: schema drift at column %d — expected name '%s', got '%s'", c,
 			                  kOutputColumnNames[c], (child && child->name) ? child->name : "(null)");
+		}
+		if (!child->format || std::strcmp(child->format, kOutputColumnFormats[c]) != 0) {
+			// Type drift is worse than name drift: name-only checks miss a
+			// silent int64→int32 swap that `read_fixed<int64_t>` would
+			// reinterpret as 4 bytes of garbage from the next column.
+			throw IOException("bowtie2-align: schema drift at column '%s' (idx %d) — expected Arrow format '%s', "
+			                  "got '%s'",
+			                  kOutputColumnNames[c], c, kOutputColumnFormats[c],
+			                  child->format ? child->format : "(null)");
 		}
 	}
 }
