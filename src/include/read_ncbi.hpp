@@ -3,6 +3,7 @@
 #include "ncbi_client.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include <atomic>
 
 namespace duckdb {
 
@@ -10,14 +11,17 @@ class ReadNCBITableFunction {
 public:
 	// Bind-time data: stores accessions and parameters
 	struct Data : public TableFunctionData {
-		std::vector<std::string> accessions;
+		std::vector<std::string> accessions;           // Original, in input order.
+		std::vector<std::vector<std::string>> batches; // Pre-chunked at Bind time.
 		std::string api_key;
+		int64_t batch_size;
 
 		// Schema
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
-		Data(std::vector<std::string> accessions, const std::string &api_key);
+		Data(std::vector<std::string> accessions, std::vector<std::vector<std::string>> batches,
+		     const std::string &api_key, int64_t batch_size);
 	};
 
 	// Execution-wide state: manages fetched data
@@ -25,20 +29,27 @@ public:
 		mutex lock;
 		std::unique_ptr<miint::NCBIClient> client;
 		std::vector<miint::GenBankMetadata> metadata_results;
-		size_t next_accession_idx;
-		size_t result_offset;
+		size_t batch_cursor;  // Index of the next batch to fetch.
+		size_t result_offset; // Read cursor inside metadata_results.
 
-		GlobalState(DatabaseInstance &db, const std::string &api_key, const std::vector<std::string> &accessions);
+		// Missing-accession bookkeeping for the end-of-scan summary.
+		std::vector<std::string> missing_accessions;
+		std::atomic<bool> summary_emitted {false};
+
+		// Note: batches is held by VALUE for the same reason as
+		// ReadNCBIFastaTableFunction::GlobalState::work_units (bind/global
+		// teardown order is not contractually fixed).
+		std::vector<std::vector<std::string>> batches;
+
+		GlobalState(DatabaseInstance &db, const std::string &api_key, std::vector<std::vector<std::string>> batches);
 
 		idx_t MaxThreads() const override {
 			return 1; // Single-threaded for rate limiting
 		}
 
-		// Fetch next accession's metadata
-		bool FetchNextAccession();
-
-	private:
-		const std::vector<std::string> &accessions;
+		// Fetch the next batch; parse + diff missing; emit per-batch warning.
+		// Returns false when no more batches remain.
+		bool FetchNextBatch(ClientContext &context);
 	};
 
 	// Per-thread state (minimal for single-threaded)

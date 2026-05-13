@@ -104,6 +104,221 @@ TEST_CASE("NCBIParser FASTA parsing", "[ncbi]") {
 	}
 }
 
+TEST_CASE("NCBIParser StripAccessionVersion", "[ncbi]") {
+	// WHY: NCBI accepts unversioned accessions but its responses include version
+	// suffixes. Missing-accession detection must compare base IDs or every
+	// unversioned request would be falsely reported as missing.
+	SECTION("Versioned accession loses the .N suffix") {
+		CHECK(NCBIParser::StripAccessionVersion("NC_000913.3") == "NC_000913");
+		CHECK(NCBIParser::StripAccessionVersion("GCF_000001405.40") == "GCF_000001405");
+		CHECK(NCBIParser::StripAccessionVersion("NM_001101.5") == "NM_001101");
+	}
+
+	SECTION("Unversioned accession round-trips unchanged") {
+		CHECK(NCBIParser::StripAccessionVersion("NC_000913") == "NC_000913");
+		CHECK(NCBIParser::StripAccessionVersion("GCA_000001635") == "GCA_000001635");
+	}
+
+	SECTION("Empty input returns empty") {
+		CHECK(NCBIParser::StripAccessionVersion("").empty());
+	}
+
+	SECTION("Trailing dot edge case") {
+		// Pathological NCBI would never return this, but defensive parsing matters.
+		CHECK(NCBIParser::StripAccessionVersion("NC_000913.") == "NC_000913");
+	}
+
+	SECTION("Non-numeric suffix is not a version") {
+		// Embedded dots in non-NCBI accessions must not be stripped — only an
+		// all-digit trailing component is treated as a version separator.
+		CHECK(NCBIParser::StripAccessionVersion("AB.CD") == "AB.CD");
+		CHECK(NCBIParser::StripAccessionVersion("foo.bar.baz") == "foo.bar.baz");
+		// Mixed-character suffix also not a version.
+		CHECK(NCBIParser::StripAccessionVersion("NC_000913.3a") == "NC_000913.3a");
+	}
+}
+
+TEST_CASE("NCBIParser DiffMissingAccessions", "[ncbi]") {
+	// WHY: NCBI's efetch silently omits invalid IDs from batch responses. Without
+	// this diff the caller has no way to surface lost data and the user gets
+	// fewer rows than expected with no error (violates Rule 10, fail loud).
+	SECTION("Reports IDs that NCBI omitted") {
+		std::vector<std::string> requested = {"NC_001416.1", "BOGUS_ID", "NC_001422.1"};
+		std::vector<std::string> returned = {"NC_001416.1", "NC_001422.1"};
+		auto missing = NCBIParser::DiffMissingAccessions(requested, returned);
+		REQUIRE(missing.size() == 1);
+		CHECK(missing[0] == "BOGUS_ID");
+	}
+
+	SECTION("Version differences between request and response are not missing") {
+		// Caller asks for unversioned IDs; NCBI returns versioned ones. This is
+		// the common case and must not produce false-positive missing reports.
+		std::vector<std::string> requested = {"NC_000913", "NC_001422"};
+		std::vector<std::string> returned = {"NC_000913.3", "NC_001422.1"};
+		CHECK(NCBIParser::DiffMissingAccessions(requested, returned).empty());
+	}
+
+	SECTION("Caller-side duplicates do not inflate missing list") {
+		// If the user passes the same ID twice and it's missing, we report it once,
+		// not twice — duplicates are caller bugs, not "extra" missing data.
+		std::vector<std::string> requested = {"BOGUS", "BOGUS", "NC_001416.1"};
+		std::vector<std::string> returned = {"NC_001416.1"};
+		auto missing = NCBIParser::DiffMissingAccessions(requested, returned);
+		REQUIRE(missing.size() == 1);
+		CHECK(missing[0] == "BOGUS");
+	}
+
+	SECTION("Case insensitive matching") {
+		// NCBI is case-tolerant on input; matching must be too or lowercase
+		// callers would see every accession as missing.
+		std::vector<std::string> requested = {"nc_001416.1"};
+		std::vector<std::string> returned = {"NC_001416.1"};
+		CHECK(NCBIParser::DiffMissingAccessions(requested, returned).empty());
+	}
+
+	SECTION("Empty inputs") {
+		CHECK(NCBIParser::DiffMissingAccessions({}, {}).empty());
+		auto all_missing = NCBIParser::DiffMissingAccessions({"A", "B"}, {});
+		CHECK(all_missing.size() == 2);
+	}
+}
+
+TEST_CASE("NCBIParser ParseGenBankXMLBatch", "[ncbi]") {
+	// WHY: batched efetch returns a <GBSet> wrapping multiple <GBSeq> records.
+	// The single-record ParseGenBankXML silently returns only the first record
+	// when given a batch response — this regression guard exercises the multi-
+	// record path explicitly.
+	SECTION("Two records returned in submission order") {
+		std::string xml = R"(<?xml version="1.0" encoding="UTF-8"?>
+<GBSet>
+  <GBSeq>
+    <GBSeq_primary-accession>NC_001416</GBSeq_primary-accession>
+    <GBSeq_accession-version>NC_001416.1</GBSeq_accession-version>
+    <GBSeq_length>48502</GBSeq_length>
+    <GBSeq_definition>Lambda</GBSeq_definition>
+  </GBSeq>
+  <GBSeq>
+    <GBSeq_primary-accession>NC_001422</GBSeq_primary-accession>
+    <GBSeq_accession-version>NC_001422.1</GBSeq_accession-version>
+    <GBSeq_length>5386</GBSeq_length>
+    <GBSeq_definition>PhiX174</GBSeq_definition>
+  </GBSeq>
+</GBSet>)";
+		auto batch = NCBIParser::ParseGenBankXMLBatch(xml);
+		REQUIRE(batch.size() == 2);
+		CHECK(batch[0].accession == "NC_001416.1");
+		CHECK(batch[0].length == 48502);
+		CHECK(batch[1].accession == "NC_001422.1");
+		CHECK(batch[1].length == 5386);
+	}
+
+	SECTION("Single-record GBSet still works") {
+		std::string xml =
+		    R"(<GBSet><GBSeq><GBSeq_primary-accession>NC_001416</GBSeq_primary-accession><GBSeq_accession-version>NC_001416.1</GBSeq_accession-version></GBSeq></GBSet>)";
+		auto batch = NCBIParser::ParseGenBankXMLBatch(xml);
+		REQUIRE(batch.size() == 1);
+		CHECK(batch[0].accession == "NC_001416.1");
+	}
+
+	SECTION("Empty input returns empty batch") {
+		CHECK(NCBIParser::ParseGenBankXMLBatch("").empty());
+	}
+
+	SECTION("Malformed (unclosed GBSeq) does not crash") {
+		// Bail rather than silently truncating: if the XML is malformed we'd
+		// rather surface zero records than half-parse and silently drop data.
+		std::string xml = "<GBSet><GBSeq><GBSeq_primary-accession>NC_X</GBSeq_primary-accession>";
+		auto batch = NCBIParser::ParseGenBankXMLBatch(xml);
+		CHECK(batch.empty());
+	}
+}
+
+TEST_CASE("NCBIParser JoinStrings", "[ncbi]") {
+	// Tiny utility but used by multiple call sites to format warning text and
+	// efetch URLs. A regression here would shred warning readability — pin the
+	// contract so a future "optimization" doesn't change separator behavior.
+	SECTION("Basic join") {
+		CHECK(NCBIParser::JoinStrings({"a", "b", "c"}, ",") == "a,b,c");
+	}
+	SECTION("Single element has no separator") {
+		CHECK(NCBIParser::JoinStrings({"only"}, ",") == "only");
+	}
+	SECTION("Empty vector returns empty") {
+		CHECK(NCBIParser::JoinStrings({}, ",").empty());
+	}
+	SECTION("Multi-char separator") {
+		CHECK(NCBIParser::JoinStrings({"a", "b"}, " | ") == "a | b");
+	}
+}
+
+TEST_CASE("NCBIParser ParseEPostResponse", "[ncbi]") {
+	// WHY: ParseEPostResponse is the gateway for every batched fetch. If NCBI
+	// changes the response shape, the parser silently returning empty fields is
+	// what NCBIClient::EPostIds detects and turns into a loud IOException. This
+	// test pins both the success contract and the empty-on-failure contract.
+	SECTION("Extracts WebEnv and QueryKey from a typical response") {
+		std::string xml =
+		    R"(<?xml version="1.0"?>
+<ePostResult>
+  <QueryKey>1</QueryKey>
+  <WebEnv>MCID_abc123xyz</WebEnv>
+</ePostResult>)";
+		auto result = NCBIParser::ParseEPostResponse(xml);
+		CHECK(result.query_key == "1");
+		CHECK(result.webenv == "MCID_abc123xyz");
+	}
+
+	SECTION("ERROR-only response returns empty fields") {
+		// NCBIClient::EPostIds notices both fields empty + re-extracts <ERROR>
+		// to embed the server's message. The parser itself just reports absence.
+		std::string xml = R"(<ePostResult><ERROR>Invalid db value</ERROR></ePostResult>)";
+		auto result = NCBIParser::ParseEPostResponse(xml);
+		CHECK(result.webenv.empty());
+		CHECK(result.query_key.empty());
+	}
+
+	SECTION("HTML error page returns empty fields") {
+		// NCBI sometimes returns an HTML 200 page during outages. The parser
+		// must not pretend success — empty fields force the client to surface
+		// the failure rather than proceeding with garbage handles.
+		std::string xml = "<html><body>Service temporarily unavailable</body></html>";
+		auto result = NCBIParser::ParseEPostResponse(xml);
+		CHECK(result.webenv.empty());
+		CHECK(result.query_key.empty());
+	}
+}
+
+TEST_CASE("NCBIParser ExtractXMLTagValue exposed for client reuse", "[ncbi]") {
+	// WHY: the epost handshake parser depends on this helper. Promoting it from
+	// a file-static to a public static means it now has callers outside this
+	// file; an explicit test pins the contract.
+	SECTION("Simple tag content") {
+		CHECK(NCBIParser::ExtractXMLTagValue("<WebEnv>abc123</WebEnv>", "WebEnv") == "abc123");
+		CHECK(NCBIParser::ExtractXMLTagValue("<QueryKey>42</QueryKey>", "QueryKey") == "42");
+	}
+
+	SECTION("Tag with attributes") {
+		CHECK(NCBIParser::ExtractXMLTagValue(R"(<WebEnv key="x">abc</WebEnv>)", "WebEnv") == "abc");
+	}
+
+	SECTION("Tag not present") {
+		CHECK(NCBIParser::ExtractXMLTagValue("<WebEnv>abc</WebEnv>", "QueryKey").empty());
+	}
+
+	SECTION("Tag-prefix collision does not confuse depth tracking") {
+		// WHY: scanning for "<foo" inside the depth counter would match "<foobar"
+		// and inflate depth, never reaching the real closing tag. The matcher
+		// must require '>' or whitespace immediately after the tag name.
+		std::string xml = "<foobar>x</foobar><foo>real</foo>";
+		CHECK(NCBIParser::ExtractXMLTagValue(xml, "foo") == "real");
+
+		// Nested same-name children must still increment depth so a wrapper
+		// tag's content includes the children's open/close markers verbatim.
+		std::string nested = "<wrap><a>1</a><a>2</a></wrap>";
+		CHECK(NCBIParser::ExtractXMLTagValue(nested, "wrap") == "<a>1</a><a>2</a>");
+	}
+}
+
 TEST_CASE("NCBIParser GenBank XML parsing", "[ncbi]") {
 	SECTION("Basic GenBank XML") {
 		// Simplified GenBank XML structure

@@ -53,10 +53,23 @@ public:
 		return NCBIParser::IsAssemblyAccession(accession);
 	}
 
-	// E-utilities methods (primary) - return raw response strings
-	std::string FetchGenBankXML(const std::string &accession);
-	std::string FetchFasta(const std::string &accession);
+	// E-utilities single-accession methods. read_ncbi_fasta and read_ncbi route
+	// through the batched epost+efetch path below; only read_ncbi_annotation
+	// still uses the single-fetch endpoint because feature-table batching is
+	// a separate code path (different rettype, different parser).
 	std::string FetchFeatureTable(const std::string &accession);
+
+	// E-utilities batched methods. epost stages the ID list on NCBI's server and
+	// returns a WebEnv+QueryKey handle; efetch then reads all records in one call.
+	// This collapses an N-call sequence into 2 calls per batch and is the NCBI-
+	// recommended path for >1 accession.
+	EPostResult EPostIds(const std::vector<std::string> &accessions);
+
+	// Batched fetch of FASTA / GenBank XML. Empty input is a no-op (returns "") so
+	// callers can pass already-partitioned lists (e.g. sequences vs. assemblies)
+	// without guarding the empty case.
+	std::string FetchFastaBatch(const std::vector<std::string> &accessions);
+	std::string FetchGenBankXMLBatch(const std::vector<std::string> &accessions);
 
 	// Datasets API methods
 	std::string FetchAssemblyReport(const std::string &accession); // JSON metadata
@@ -78,6 +91,12 @@ private:
 
 	// HTTP request helper with retry logic
 	std::string MakeRequest(const std::string &url, bool use_api_key_header = false);
+
+	// POST counterpart of MakeRequest. PostRequestInfo carries response state in
+	// its buffer_out field (DuckDB issue #19062), so the request struct must be
+	// rebuilt inside the retry loop rather than reused — see ena_client.cpp for
+	// the precedent this mirrors.
+	std::string MakeRequestPOST(const std::string &url, const std::string &body, const std::string &content_type);
 
 	// Check if HTTP status code is retryable
 	static bool IsRetryableStatus(int status);

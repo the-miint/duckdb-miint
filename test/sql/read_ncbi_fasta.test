@@ -159,3 +159,60 @@ ORDER BY read_id
 NC_002252.1
 NC_002253.1
 NC_002528.1
+
+# Batching invariance: same accessions with batch_size=1 vs default (500) must
+# return the same count and the same per-accession lengths. Original incident:
+# a 10k-accession query was lost when one sub-fetch failed — this guards the
+# batched path's row-level equivalence with the per-accession path.
+statement ok
+CREATE TEMP TABLE batched_one AS
+SELECT * FROM read_ncbi_fasta(['NC_001416.1', 'NC_001422.1'], batch_size := 1);
+
+query II
+SELECT read_id, LENGTH(sequence1) AS seq_len
+FROM batched_one
+ORDER BY sequence_index;
+----
+NC_001416.1	48502
+NC_001422.1	5386
+
+# batch_size invalid values must fail loud at Bind, not silently no-op.
+statement error
+SELECT * FROM read_ncbi_fasta(['NC_001422.1'], batch_size := 0);
+----
+batch_size must be > 0
+
+statement error
+SELECT * FROM read_ncbi_fasta(['NC_001422.1'], batch_size := -5);
+----
+batch_size must be > 0
+
+# Upper bound: NCBI's epost POST body has practical limits; reject silly sizes
+# loudly instead of building a one-shot request that NCBI may truncate or 5xx.
+statement error
+SELECT * FROM read_ncbi_fasta(['NC_001422.1'], batch_size := 1000000);
+----
+exceeds max
+
+# Missing-accession behavior. WHY: NCBI silently omits invalid IDs from batched
+# responses. One bad accession in a batch must NOT abort the run (the original
+# incident). It must (a) produce no row for the bogus ID, (b) still return rows
+# for valid IDs, (c) leave a record in miint_warnings() so the loss is visible.
+statement ok
+SET enable_logging = true;
+
+statement ok
+CREATE TEMP TABLE mixed_missing AS
+SELECT * FROM read_ncbi_fasta(['NC_001422.1', 'XX_INVALID_BOGUS_ACC.999']);
+
+query II
+SELECT read_id, LENGTH(sequence1) AS seq_len FROM mixed_missing;
+----
+NC_001422.1	5386
+
+query I
+SELECT COUNT(*) >= 1
+FROM miint_warnings()
+WHERE message LIKE '%XX_INVALID_BOGUS_ACC%';
+----
+true
