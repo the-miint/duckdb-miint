@@ -1,6 +1,8 @@
 #include "gpl_boundary/session.hpp"
 
+#include <array>
 #include <cstring>
+#include <fcntl.h>
 #include <memory>
 #include <pthread.h>
 #include <signal.h>
@@ -44,6 +46,52 @@ std::string get_str(yj::yyjson_val *obj, const char *key) {
 using YyjsonDocPtr = std::unique_ptr<yj::yyjson_doc, decltype(&yj::yyjson_doc_free)>;
 YyjsonDocPtr make_doc(yj::yyjson_doc *p) {
 	return YyjsonDocPtr(p, &yj::yyjson_doc_free);
+}
+
+// Cap on how much daemon stderr we splice into a thrown exception. Big enough
+// to carry a typical bowtie2 assertion or stack trace, small enough not to
+// pollute SQL error displays. Excess is truncated from the front (we want the
+// tail — that's where the failing-batch output lives).
+constexpr std::size_t kStderrTailCap = 4096;
+
+// Non-blocking drain of an fd. Used on the failure path to grab whatever the
+// daemon (and its worker subprocesses, if the daemon forwards their stderr)
+// has written so far. MUST be non-blocking — the daemon is typically still
+// alive at this point, so the pipe has no EOF and a blocking read would hang.
+//
+// Restores the original O_NONBLOCK state on exit so other readers (none today,
+// but defensive) aren't surprised.
+std::string DrainStderrNonblocking(int fd) {
+	if (fd < 0) {
+		return {};
+	}
+	const int orig_flags = ::fcntl(fd, F_GETFL, 0);
+	if (orig_flags < 0) {
+		return {};
+	}
+	if (!(orig_flags & O_NONBLOCK)) {
+		if (::fcntl(fd, F_SETFL, orig_flags | O_NONBLOCK) < 0) {
+			return {};
+		}
+	}
+	std::string out;
+	std::array<char, 4096> buf {};
+	for (;;) {
+		ssize_t n = ::read(fd, buf.data(), buf.size());
+		if (n > 0) {
+			out.append(buf.data(), static_cast<size_t>(n));
+			continue;
+		}
+		// n == 0 (EOF) or -1 (EAGAIN/EWOULDBLOCK/other): stop draining.
+		break;
+	}
+	if (!(orig_flags & O_NONBLOCK)) {
+		(void)::fcntl(fd, F_SETFL, orig_flags); // best effort restore
+	}
+	if (out.size() > kStderrTailCap) {
+		out = "...(truncated head)...\n" + out.substr(out.size() - kStderrTailCap);
+	}
+	return out;
 }
 
 // RAII guard that blocks SIGPIPE on the calling thread only. `Session::Shutdown`
@@ -342,8 +390,20 @@ SubmitResult Session::Submit(const std::string &tool, const std::string &config_
 	yj::yyjson_val *success = yj::yyjson_obj_get(root, "success");
 	if (!success || !yj::yyjson_is_true(success)) {
 		const std::string err = get_str(root, "error");
-		throw std::runtime_error("gpl_boundary: batch failed (batch_id=" + std::to_string(batch_id) +
-		                         "): " + (err.empty() ? std::string("(no error message): ") + reply : err));
+		// Drain whatever the daemon (and forwarded worker output) printed to
+		// stderr before / during the failure. Non-blocking so we don't hang
+		// when the daemon is still alive (the pipe will never EOF). The
+		// daemon's own error JSON often says only "subprocess exited
+		// unexpectedly"; the actual segfault / assertion / OOM message is in
+		// the stderr stream we'd otherwise discard.
+		const std::string stderr_tail = DrainStderrNonblocking(child_.stderr_fd());
+		std::string msg = "gpl_boundary: batch failed (batch_id=" + std::to_string(batch_id) + "): ";
+		msg += (err.empty() ? std::string("(no error message): ") + reply : err);
+		if (!stderr_tail.empty()) {
+			msg += "\n--- daemon stderr ---\n";
+			msg += stderr_tail;
+		}
+		throw std::runtime_error(msg);
 	}
 
 	// MVP correlation: at most one Submit is outstanding at a time (caller
