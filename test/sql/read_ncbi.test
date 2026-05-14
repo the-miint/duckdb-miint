@@ -29,6 +29,24 @@ SELECT * FROM read_ncbi('GCF_000005845.2');
 ----
 Assembly accession
 
+# Test error: NULL VARCHAR accession
+statement error
+SELECT * FROM read_ncbi(NULL::VARCHAR);
+----
+accession cannot be NULL
+
+# Test error: NULL VARCHAR[] accession
+statement error
+SELECT * FROM read_ncbi(NULL::VARCHAR[]);
+----
+accession cannot be NULL
+
+# Test error: VARCHAR[] containing a NULL element
+statement error
+SELECT * FROM read_ncbi(['NC_001416.1', NULL]);
+----
+accession list cannot contain NULL
+
 # Test schema
 query IIIIII
 DESCRIBE SELECT * FROM read_ncbi('NC_001416.1');
@@ -102,3 +120,55 @@ FROM multi_meta
 WHERE accession = 'NC_001422.1';
 ----
 NC_001422.1	DNA
+
+# Batching invariance: per-record fetch vs. default batch must agree on count
+# and per-accession length. Guards the new batched epost+efetch path.
+statement ok
+CREATE TEMP TABLE batched_one_meta AS
+SELECT * FROM read_ncbi(['NC_001416.1', 'NC_001422.1'], batch_size := 1);
+
+query II
+SELECT accession, length
+FROM batched_one_meta
+ORDER BY accession;
+----
+NC_001416.1	48502
+NC_001422.1	5386
+
+# batch_size invalid values fail loud at Bind.
+statement error
+SELECT * FROM read_ncbi(['NC_001422.1'], batch_size := 0);
+----
+batch_size must be > 0
+
+statement error
+SELECT * FROM read_ncbi(['NC_001422.1'], batch_size := -1);
+----
+batch_size must be > 0
+
+statement error
+SELECT * FROM read_ncbi(['NC_001422.1'], batch_size := 1000000);
+----
+exceeds max
+
+# Missing-accession warning behavior — mirror read_ncbi_fasta. A bogus ID in a
+# batch must (a) not throw, (b) leave valid rows intact, (c) record the loss in
+# miint_warnings().
+statement ok
+SET enable_logging = true;
+
+statement ok
+CREATE TEMP TABLE mixed_missing_meta AS
+SELECT * FROM read_ncbi(['NC_001422.1', 'XX_INVALID_BOGUS_ACC.999']);
+
+query I
+SELECT accession FROM mixed_missing_meta WHERE accession LIKE 'NC_%';
+----
+NC_001422.1
+
+query I
+SELECT COUNT(*) >= 1
+FROM miint_warnings()
+WHERE message LIKE '%XX_INVALID_BOGUS_ACC%';
+----
+true

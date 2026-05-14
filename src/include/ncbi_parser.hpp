@@ -20,6 +20,14 @@ enum class AccessionType {
 	UNKNOWN
 };
 
+// epost handshake result: server-issued tokens that authorize a follow-up efetch.
+// Empty fields signal a parse failure; callers (NCBIClient::EPostIds) wrap that
+// into an IOException with the raw server response embedded for debuggability.
+struct EPostResult {
+	std::string webenv;
+	std::string query_key;
+};
+
 // Parsed GenBank metadata for read_ncbi
 struct GenBankMetadata {
 	std::string accession;
@@ -86,6 +94,43 @@ public:
 	// Helper to extract accession from various FASTA ID formats
 	// Handles: "NC_001416.1", "ref|NC_001416.1|", "gi|123|ref|NC_001416.1|description"
 	static std::string ExtractAccessionFromFastaId(const std::string &fasta_id, std::string &remainder);
+
+	// Strip trailing ".N" version suffix from an accession, returning the base accession.
+	// NCBI accepts unversioned IDs (e.g. "NC_000913") but its FASTA/XML responses include
+	// versioned headers (e.g. ">NC_000913.3 ..."). Missing-accession detection has to
+	// compare base IDs or it will report every unversioned request as missing.
+	static std::string StripAccessionVersion(const std::string &accession);
+
+	// Parse a multi-record GenBank XML response (<GBSet> wrapping multiple <GBSeq>) into
+	// one GenBankMetadata per record, in submission order. The single-record ParseGenBankXML
+	// silently returns only the first record when fed a batch response, so callers handling
+	// batched efetch must use this entrypoint.
+	static std::vector<GenBankMetadata> ParseGenBankXMLBatch(const std::string &xml);
+
+	// Diff requested vs. returned accessions, comparing base IDs (after StripAccessionVersion).
+	// Returns the subset of `requested` not present in `returned`, in original requested order.
+	// NCBI silently omits invalid IDs from batch responses — without this diff the caller
+	// has no way to surface lost data (Rule 10: fail loud).
+	static std::vector<std::string> DiffMissingAccessions(const std::vector<std::string> &requested,
+	                                                      const std::vector<std::string> &returned);
+
+	// Extract content of a single XML tag (first occurrence). Handles attribute-bearing
+	// open tags and nested same-name tags via depth counting. Exposed publicly so the
+	// EPostIds handshake parser can reuse it for <WebEnv> and <QueryKey>.
+	static std::string ExtractXMLTagValue(const std::string &xml, const std::string &tag);
+
+	// Parse <WebEnv> and <QueryKey> from an NCBI epost response. Returns an
+	// EPostResult with empty fields if either tag is absent — caller (NCBIClient::EPostIds)
+	// is responsible for surfacing the failure with the raw response embedded.
+	// Kept here, separate from NCBIClient, so the unit-test binary (which doesn't
+	// link the DuckDB HTTP stack) can exercise the parsing in isolation.
+	static EPostResult ParseEPostResponse(const std::string &xml);
+
+	// Join a vector of strings with `sep`. Tiny utility, but the alternative
+	// (ostringstream + i==0 guard) was duplicated half a dozen times across
+	// the batched-fetch code paths; collapse to one site so a future format
+	// change happens in one place.
+	static std::string JoinStrings(const std::vector<std::string> &parts, const std::string &sep);
 };
 
 } // namespace miint

@@ -12,8 +12,8 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`read_mzml_chromatograms`](#read_mzml_chromatogramsfilename-include_filepathfalse) - mzML chromatogram data
 - [`read_biom`](#read_biomfilename-include_filepathfalse) - BIOM observation matrix files
 - [`read_gff`](#read_gffpath) - GFF3 genome annotation files
-- [`read_ncbi`](#read_ncbiaccession-api_key) - NCBI accession metadata
-- [`read_ncbi_fasta`](#read_ncbi_fastaaccession-api_key-include_filepathfalse) - NCBI FASTA sequences
+- [`read_ncbi`](#read_ncbiaccession-api_key-batch_size500) - NCBI accession metadata
+- [`read_ncbi_fasta`](#read_ncbi_fastaaccession-api_key-include_filepathfalse-batch_size500) - NCBI FASTA sequences
 - [`read_ncbi_annotation`](#read_ncbi_annotationaccession-api_key-include_filepathfalse) - NCBI genome annotations
 - [`read_ena`](#read_enaaccession-resultread_run-fields) - EBI/ENA metadata queries
 - [`read_ena_attributes`](#read_ena_attributesaccession) - EBI/ENA custom sample attributes
@@ -684,7 +684,7 @@ The `attributes` column is automatically parsed from GFF format (semicolon-separ
 
 **Implementation note:** Implemented as a DuckDB macro using `read_csv` with GFF-specific parsing.
 
-## `read_ncbi(accession, [api_key])`
+## `read_ncbi(accession, [api_key], [batch_size=500])`
 
 Fetch GenBank metadata from NCBI by accession number. This function queries NCBI's E-utilities API to retrieve sequence metadata without downloading the full sequence.
 
@@ -695,6 +695,7 @@ Fetch GenBank metadata from NCBI by accession number. This function queries NCBI
 **Parameters:**
 - `accession` (VARCHAR or VARCHAR[]): NCBI accession number(s) (e.g., 'NC_001416.1', 'NM_001101.5')
 - `api_key` (VARCHAR, optional): NCBI API key for higher rate limits (10 req/s vs 3 req/s)
+- `batch_size` (BIGINT, optional, default 500): Number of accessions per epost+efetch round-trip. Larger batches reduce per-accession HTTP overhead; the default matches NCBI's practical guidance for POST.
 
 **Output schema:**
 - `accession` (VARCHAR): Accession with version (e.g., 'NC_001416.1')
@@ -707,10 +708,11 @@ Fetch GenBank metadata from NCBI by accession number. This function queries NCBI
 - `update_date` (DATE): Last modification date
 
 **Behavior:**
-- Fetches GenBank XML format from E-utilities
+- Fetches GenBank XML format from E-utilities using the batched `epost` + `efetch` handshake (one POST + one GET per `batch_size` accessions)
 - Automatically detects accession type (RefSeq NC_/NM_/NP_, GenBank, etc.)
 - Rate-limited to respect NCBI guidelines (3 req/s without key, 10 req/s with key)
-- Retry logic for transient failures (429, 500, 502, 503) with exponential backoff
+- Retry logic for transient failures (400, 408, 429, 500, 502, 503, 504) with exponential backoff up to 6 retries
+- Accessions silently omitted by NCBI (e.g. invalid IDs) are reported via `miint_warnings()` and a stderr `WARNING`; the function does **not** throw, so one bad accession in a batch never aborts the rest of the query
 
 **Examples:**
 ```sql
@@ -734,11 +736,11 @@ WHERE molecule_type = 'DNA';
 ```
 
 **Notes:**
-- Empty accessions will raise an error
-- Invalid accessions will raise an error with the specific accession that failed
-- For bulk downloads, consider using the API key to avoid rate limiting
+- Empty accessions raise `InvalidInputException` at bind time
+- Invalid accessions that NCBI silently drops appear in `miint_warnings()` (filter with `SELECT * FROM miint_warnings() WHERE message LIKE '%read_ncbi%'`) — they do not raise
+- For bulk downloads, set `api_key` for the higher 10 req/s rate; with the default `batch_size=500` a 10,000-accession query is bound by ~20 round-trips, not by the per-accession rate cap
 
-## `read_ncbi_fasta(accession, [api_key], [include_filepath=false])`
+## `read_ncbi_fasta(accession, [api_key], [include_filepath=false], [batch_size=500])`
 
 Fetch FASTA sequences from NCBI by accession number. Returns data in the same schema as `read_fastx`, making it easy to combine NCBI sequences with local files.
 
@@ -750,6 +752,7 @@ Fetch FASTA sequences from NCBI by accession number. Returns data in the same sc
 - `accession` (VARCHAR or VARCHAR[]): NCBI accession number(s) (e.g., 'NC_001416.1')
 - `api_key` (VARCHAR, optional): NCBI API key for higher rate limits
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column showing NCBI URL
+- `batch_size` (BIGINT, optional, default 500): Number of sequence accessions per epost+efetch round-trip. Assembly accessions (GCF_/GCA_) are always fetched one at a time via the Datasets API, so this parameter only affects the sequence (NC_/NM_/...) path.
 
 **Output schema (matches `read_fastx`):**
 - `sequence_index` (BIGINT): 0-based sequential index
@@ -762,10 +765,11 @@ Fetch FASTA sequences from NCBI by accession number. Returns data in the same sc
 - `filepath` (VARCHAR, optional): NCBI E-utilities URL when include_filepath=true
 
 **Behavior:**
-- Fetches FASTA format from E-utilities
+- Fetches FASTA via the batched `epost` + `efetch` handshake (sequence accessions); assemblies route through the Datasets API one at a time
 - Parses pipe-delimited FASTA headers (e.g., `gi|123|ref|NC_001416.1|description`)
 - Extracts accession as `read_id`, remainder as `comment`
-- Rate-limited with retry logic for robustness
+- Rate-limited and retried on transient failures (400, 408, 429, 5xx) with exponential backoff up to 6 retries
+- Accessions silently omitted by NCBI are reported via `miint_warnings()` and stderr `WARNING`; the function does not throw on missing accessions, so one bad ID in a 10,000-accession query never aborts the rest
 
 **Examples:**
 ```sql
@@ -798,7 +802,8 @@ SELECT * FROM align_minimap2('reads', 'reference');
 **Notes:**
 - Large sequences (e.g., complete chromosomes) may take time to download
 - Output is compatible with all functions expecting `read_fastx` schema
-- Empty accessions will raise an error
+- Empty accessions raise `InvalidInputException` at bind time
+- Missing/invalid accessions appear in `miint_warnings()` rather than raising — query that table to see what NCBI dropped after a large batched fetch
 
 ## `read_ncbi_annotation(accession, [api_key], [include_filepath=false])`
 

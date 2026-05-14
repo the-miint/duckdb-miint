@@ -1,9 +1,11 @@
 #include "ncbi_parser.hpp"
 #include <algorithm>
+#include <cctype>
 #include <iostream>
 #include <map>
 #include <regex>
 #include <sstream>
+#include <unordered_set>
 
 namespace miint {
 
@@ -157,13 +159,13 @@ SequenceRecordBatch NCBIParser::ParseFasta(const std::string &fasta_text) {
 	return batch;
 }
 
-// Helper to extract text between XML tags (improved robustness)
-// Finds the first occurrence of <tag>...</tag> at the top level
-static std::string ExtractXMLValue(const std::string &xml, const std::string &tag) {
+// Extract first occurrence of <tag>...</tag>, handling attribute-bearing open tags
+// and nested same-name tags via depth counting. Public so the epost-handshake parser
+// (NCBIClient) can reuse it for <WebEnv> / <QueryKey> without duplicating logic.
+std::string NCBIParser::ExtractXMLTagValue(const std::string &xml, const std::string &tag) {
 	std::string open_tag = "<" + tag + ">";
 	std::string close_tag = "</" + tag + ">";
 
-	// Find first opening tag
 	size_t start = xml.find(open_tag);
 	if (start == std::string::npos) {
 		// Try with attributes: <tag attr="value">
@@ -172,7 +174,6 @@ static std::string ExtractXMLValue(const std::string &xml, const std::string &ta
 		if (start == std::string::npos) {
 			return "";
 		}
-		// Find the end of the opening tag
 		size_t tag_end = xml.find('>', start);
 		if (tag_end == std::string::npos) {
 			return "";
@@ -182,23 +183,45 @@ static std::string ExtractXMLValue(const std::string &xml, const std::string &ta
 		start += open_tag.length();
 	}
 
-	// Find matching closing tag (handle nested tags by counting)
+	// Nested-tag depth tracking: only count a tag as "opening" if the prefix
+	// match is followed by '>' or whitespace, otherwise <GBSeq_feature-table>
+	// would inflate the depth when scanning for tag = "GBSeq" and we'd never
+	// hit depth==0 at the real closing tag.
+	auto is_real_open = [&](size_t open_pos) {
+		size_t terminator = open_pos + 1 + tag.length(); // skip '<' + tag
+		if (terminator >= xml.length()) {
+			return false;
+		}
+		char c = xml[terminator];
+		return c == '>' || c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '/';
+	};
+
 	int depth = 1;
 	size_t pos = start;
 	while (depth > 0 && pos < xml.length()) {
-		size_t next_open = xml.find("<" + tag, pos);
 		size_t next_close = xml.find(close_tag, pos);
-
 		if (next_close == std::string::npos) {
 			return ""; // Malformed XML
 		}
 
+		// Find the next real opening of THIS tag (skip prefix collisions).
+		size_t next_open = pos;
+		while (true) {
+			next_open = xml.find("<" + tag, next_open);
+			if (next_open == std::string::npos || next_open >= next_close) {
+				next_open = std::string::npos;
+				break;
+			}
+			if (is_real_open(next_open)) {
+				break;
+			}
+			next_open++;
+		}
+
 		if (next_open != std::string::npos && next_open < next_close) {
-			// Nested opening tag
 			depth++;
 			pos = next_open + 1;
 		} else {
-			// Closing tag
 			depth--;
 			if (depth == 0) {
 				return xml.substr(start, next_close - start);
@@ -208,6 +231,47 @@ static std::string ExtractXMLValue(const std::string &xml, const std::string &ta
 	}
 
 	return "";
+}
+
+std::string NCBIParser::JoinStrings(const std::vector<std::string> &parts, const std::string &sep) {
+	std::string out;
+	for (size_t i = 0; i < parts.size(); i++) {
+		if (i > 0) {
+			out += sep;
+		}
+		out += parts[i];
+	}
+	return out;
+}
+
+EPostResult NCBIParser::ParseEPostResponse(const std::string &xml) {
+	EPostResult result;
+	result.webenv = ExtractXMLTagValue(xml, "WebEnv");
+	result.query_key = ExtractXMLTagValue(xml, "QueryKey");
+	return result;
+}
+
+std::string NCBIParser::StripAccessionVersion(const std::string &accession) {
+	// Strip ONLY a trailing all-digit suffix preceded by '.'. NCBI's version
+	// suffix is always numeric (e.g. ".3"); if the trailing component is
+	// non-numeric we leave the accession untouched. This guards against
+	// future non-NCBI inputs with embedded dots and also against the
+	// pathological "NC_000913." trailing-dot case (length-zero numeric suffix
+	// is still treated as the trailing-dot pattern users have seen NCBI emit).
+	size_t dot = accession.rfind('.');
+	if (dot == std::string::npos) {
+		return accession;
+	}
+	// Empty suffix (trailing dot) is treated as a stripable version separator.
+	if (dot + 1 == accession.length()) {
+		return accession.substr(0, dot);
+	}
+	for (size_t i = dot + 1; i < accession.length(); i++) {
+		if (!std::isdigit(static_cast<unsigned char>(accession[i]))) {
+			return accession; // Non-numeric suffix; not a version.
+		}
+	}
+	return accession.substr(0, dot);
 }
 
 // Extract taxonomy ID from db_xref qualifier
@@ -262,18 +326,18 @@ GenBankMetadata NCBIParser::ParseGenBankXML(const std::string &xml) {
 	}
 
 	// Extract fields from GenBank XML format
-	metadata.accession = ExtractXMLValue(xml, "GBSeq_accession-version");
+	metadata.accession = NCBIParser::ExtractXMLTagValue(xml, "GBSeq_accession-version");
 	if (metadata.accession.empty()) {
-		metadata.accession = ExtractXMLValue(xml, "GBSeq_primary-accession");
+		metadata.accession = NCBIParser::ExtractXMLTagValue(xml, "GBSeq_primary-accession");
 	}
 
 	metadata.version = ExtractVersion(metadata.accession);
-	metadata.description = ExtractXMLValue(xml, "GBSeq_definition");
-	metadata.organism = ExtractXMLValue(xml, "GBSeq_organism");
-	metadata.molecule_type = ExtractXMLValue(xml, "GBSeq_moltype");
+	metadata.description = NCBIParser::ExtractXMLTagValue(xml, "GBSeq_definition");
+	metadata.organism = NCBIParser::ExtractXMLTagValue(xml, "GBSeq_organism");
+	metadata.molecule_type = NCBIParser::ExtractXMLTagValue(xml, "GBSeq_moltype");
 
 	// Parse length
-	std::string length_str = ExtractXMLValue(xml, "GBSeq_length");
+	std::string length_str = NCBIParser::ExtractXMLTagValue(xml, "GBSeq_length");
 	if (!length_str.empty()) {
 		try {
 			metadata.length = std::stoll(length_str);
@@ -286,7 +350,7 @@ GenBankMetadata NCBIParser::ParseGenBankXML(const std::string &xml) {
 	metadata.taxonomy_id = ExtractTaxonomyId(xml);
 
 	// Parse update date (format: DD-MON-YYYY -> YYYY-MM-DD)
-	std::string update_date = ExtractXMLValue(xml, "GBSeq_update-date");
+	std::string update_date = NCBIParser::ExtractXMLTagValue(xml, "GBSeq_update-date");
 	if (!update_date.empty()) {
 		static const std::map<std::string, int> months = {{"JAN", 1}, {"FEB", 2},  {"MAR", 3},  {"APR", 4},
 		                                                  {"MAY", 5}, {"JUN", 6},  {"JUL", 7},  {"AUG", 8},
@@ -314,6 +378,62 @@ GenBankMetadata NCBIParser::ParseGenBankXML(const std::string &xml) {
 	}
 
 	return metadata;
+}
+
+std::vector<GenBankMetadata> NCBIParser::ParseGenBankXMLBatch(const std::string &xml) {
+	std::vector<GenBankMetadata> results;
+	if (xml.empty()) {
+		return results;
+	}
+
+	// Walk <GBSeq> ... </GBSeq> slices and hand each to the single-record parser.
+	// Depth counting is unnecessary here because GBSeq elements do not nest in
+	// NCBI's GBSet schema — they are sibling children of GBSet.
+	const std::string open_tag = "<GBSeq>";
+	const std::string close_tag = "</GBSeq>";
+
+	size_t pos = 0;
+	while (true) {
+		size_t open_pos = xml.find(open_tag, pos);
+		if (open_pos == std::string::npos) {
+			break;
+		}
+		size_t close_pos = xml.find(close_tag, open_pos);
+		if (close_pos == std::string::npos) {
+			break; // Malformed; bail rather than silently truncating.
+		}
+		size_t slice_end = close_pos + close_tag.length();
+		results.push_back(ParseGenBankXML(xml.substr(open_pos, slice_end - open_pos)));
+		pos = slice_end;
+	}
+
+	return results;
+}
+
+std::vector<std::string> NCBIParser::DiffMissingAccessions(const std::vector<std::string> &requested,
+                                                           const std::vector<std::string> &returned) {
+	// Build a set of base IDs that came back. Case-insensitive: NCBI accessions are
+	// canonically uppercase but case-tolerant on input.
+	auto to_upper = [](std::string s) {
+		std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::toupper(c); });
+		return s;
+	};
+
+	std::unordered_set<std::string> returned_set;
+	returned_set.reserve(returned.size());
+	for (const auto &acc : returned) {
+		returned_set.insert(to_upper(StripAccessionVersion(acc)));
+	}
+
+	std::vector<std::string> missing;
+	std::unordered_set<std::string> already_missing; // Avoid duplicate reports if caller passed dupes.
+	for (const auto &acc : requested) {
+		auto base = to_upper(StripAccessionVersion(acc));
+		if (returned_set.find(base) == returned_set.end() && already_missing.insert(base).second) {
+			missing.push_back(acc); // Preserve original (caller's) form in the report.
+		}
+	}
+	return missing;
 }
 
 // Detect source type from feature table header or accession
