@@ -43,7 +43,6 @@ void make_pipe(int fds[2]) {
 } // namespace
 
 std::string FindExecutableInPath(const std::string &name) {
-	// Mirrors `Bowtie2Aligner::find_executable` (`src/Bowtie2Aligner.cpp:26-81`).
 	int pipefd[2];
 	if (::pipe(pipefd) == -1) {
 		return "";

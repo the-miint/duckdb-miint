@@ -13,8 +13,8 @@ using namespace duckdb::miint::gpl_boundary;
 // Cycle 1.1 — Find gpl-boundary on PATH
 // =============================================================================
 //
-// Mirrors Bowtie2Aligner::find_executable's contract: returns the absolute path
-// when the named binary is found on PATH, empty string otherwise. We run on
+// Contract: returns the absolute path when the named binary is found on PATH,
+// empty string otherwise. We run on
 // a dev machine that may or may not have gpl-boundary installed, so this test
 // branches on the runtime environment rather than mocking `which`.
 //

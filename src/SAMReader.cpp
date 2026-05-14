@@ -166,7 +166,7 @@ SAMReader::SAMReader(hFILE *hf, const std::string &name, const std::unordered_ma
 
 #ifndef _WIN32
 // Constructor for reading SAM from a file descriptor (e.g., pipe from subprocess).
-// Only available on POSIX — used by Bowtie2Aligner for subprocess piping.
+// POSIX-only path for subprocess pipe input. No in-tree consumers today.
 SAMReader::SAMReader(int fd, const std::string &name, bool include_seq_qual)
     : aln(bam_init1()), include_seq_qual(include_seq_qual) {
 	// Wrap fd in HTSlib's hFILE

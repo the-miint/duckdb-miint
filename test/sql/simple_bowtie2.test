@@ -3,7 +3,7 @@
 
 require miint
 
-require-env BOWTIE2_AVAILABLE
+require-env GPL_BOUNDARY_AVAILABLE
 
 # NOTE: Set threads=1 because sqllogictest framework runs in a constrained mode
 # that doesn't handle parallel table function execution well.
