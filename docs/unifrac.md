@@ -198,7 +198,7 @@ SELECT * FROM unifrac_permanova('observations', 'tree', 'metadata',
 - **Identical groupings produce identical f_stat:** factorization is value-driven and order-stable (encoded by first-appearance in canonical sample order). Two variables that partition samples identically under different labels — e.g. `treatment = {A, B, A, B, ...}` and `condition = {0, 1, 0, 1, ...}` — get the same `labels[]` array and therefore the same `f_stat` for a given seed.
 - **Single-group variables** (`n_groups = 1`) produce a row with non-finite `f_stat` (libskbb returns `-inf` for the degenerate case) and `p_value = 1.0`. Filter those out at the SQL layer if undesired.
 - **Missing metadata fails loud:** a sample present in the feature-table but absent for a requested variable throws a bind-time error naming both the sample and the variable.
-- **Seed reproducibility** is exact for PERMANOVA — `skbb_permanova_fp32` reconstructs its RNG from `seed` at every call. Same seed across iterations or across invocations produces byte-identical `f_stat` for the same grouping. (The fp32 tolerance noted for PCoA does not apply here.)
+- **Seed reproducibility:** `skbb_permanova_fp32` reconstructs its RNG from `seed` at every call, so the permutation sequence is deterministic. `p_value`, `n_groups`, and `n_permutations` are byte-identical across invocations under the same seed. **`f_stat` is not** — it's computed on the same fp32 UniFrac distance matrix that PCoA uses, so the cblas/LAPACKE reduction-ordering noise (~1e-7) carries through. Use a `abs(f_stat_a - f_stat_b) < 1e-5` tolerance when comparing across invocations.
 
 ### Examples
 
@@ -252,8 +252,14 @@ SELECT * FROM unifrac_faith_pd('observations', 'tree',
 -- Per-sample Faith PD on the full table
 SELECT * FROM unifrac_faith_pd('observations', 'tree') ORDER BY sample_id;
 
--- Rarefied Faith PD: mean across 100 iterations at depth 3
-SELECT sample_id, avg(faith_pd) AS mean_pd, stddev_samp(faith_pd) AS sd_pd
+-- Rarefied Faith PD: mean across 100 iterations at depth 3.
+-- Samples whose total count falls below subsample_depth are silently
+-- dropped from individual iterations, so `count(*)` over the grouping
+-- below tells you how many iterations actually contributed per sample.
+-- Add `HAVING count(*) = 100` (or similar) to filter out samples that
+-- weren't deep enough to be rarefied to depth 3.
+SELECT sample_id, count(*) AS n_iter, avg(faith_pd) AS mean_pd,
+       stddev_samp(faith_pd) AS sd_pd
 FROM unifrac_faith_pd('observations', 'tree',
     subsample_depth := 3, n_subsamples := 100, seed := 42)
 GROUP BY sample_id;

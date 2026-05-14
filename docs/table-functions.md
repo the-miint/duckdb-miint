@@ -2667,6 +2667,8 @@ SELECT * FROM deblur('aligned_seqs', error_profile := [1, 0.04, 0.01, 0.005]);
 
 ## `unifrac_pcoa(observations, tree, [options])`
 
+The three `unifrac_*` functions share enough context (input schemas, accepted variant strings, subsampling semantics) that they have their own reference at **[`docs/unifrac.md`](unifrac.md)**. The entries here are short signatures for discoverability; the linked doc is authoritative.
+
 Compute UniFrac distances and reduce to PCoA coordinates via randomized FSVD (fp32). Operates on a long-form feature-table relation (matching the [`read_biom`](#read_biomfilename-include_filepathfalse) schema) and a tree relation (matching the [`read_newick`](#read_newickfilename-include_filepathfalse) schema).
 
 ```sql
