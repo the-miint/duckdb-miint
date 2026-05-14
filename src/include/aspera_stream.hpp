@@ -79,6 +79,7 @@ struct AsperaSeqStream {
 	int compressed_avail;
 	char *compressed_next;
 	bool input_eof;
+	bool stream_end; // Z_STREAM_END observed → subsequent reads are legitimately EOF
 
 	AsperaSeqStream();
 	~AsperaSeqStream();
