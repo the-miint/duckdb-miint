@@ -674,10 +674,13 @@ fi
     endif()
 
     # ext/{scikit-bio-binaries,unifrac-binaries}/src/inmem_build.mk default
-    # INMEM_MPFLAG=-fopenmp. Apple Clang's -fopenmp doesn't search Homebrew
-    # paths, so omp.h won't resolve. Override on Apple to add libomp's include.
+    # INMEM_MPFLAG=-fopenmp. Apple Clang rejects bare -fopenmp outright
+    # ("unsupported option '-fopenmp'"); it requires -Xpreprocessor -fopenmp
+    # to enable the pragmas at preprocess time, then libomp gets linked
+    # separately. Also needs -I for libomp's headers since Apple's clang
+    # doesn't auto-search Homebrew paths. Mirrors GPL-boundary build.rs.
     if(APPLE)
-        set(MIINT_INMEM_MPFLAG_ARG "INMEM_MPFLAG=-fopenmp -I${MIINT_LIBOMP_INCLUDE_DIR}")
+        set(MIINT_INMEM_MPFLAG_ARG "INMEM_MPFLAG=-Xpreprocessor -fopenmp -I${MIINT_LIBOMP_INCLUDE_DIR}")
     else()
         set(MIINT_INMEM_MPFLAG_ARG "")
     endif()
