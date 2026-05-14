@@ -13,14 +13,13 @@ Four embedding categories:
 | Flag | Default | Auto-disabled when |
 |---|---|---|
 | `MIINT_ENABLE_HDF5` | ON | Emscripten (C++ static class members become unresolvable GOT.mem imports in WASM) |
-| `MIINT_ENABLE_BOWTIE2` | ON | Emscripten, Windows (requires POSIX fork/exec) |
 | `MIINT_ENABLE_MAFFT` | ON | Windows (uses `mkdtemp` and other POSIX APIs; segfaults on MinGW) |
 | `MIINT_ENABLE_VSEARCH` | ON | Emscripten, Windows (autotools build not supported) |
 | `MIINT_ENABLE_SORTMERNA` | ON | Emscripten (RocksDB vcpkg port not built for wasm32), Windows/MinGW (cmph assumes POSIX `<sys/time.h>`; MSVC-on-Windows would work if anyone wires it up) |
 | `MIINT_ENABLE_GPL_BOUNDARY` | ON | Emscripten, Windows (subsystem uses POSIX shm + fork/exec) |
 | `MIINT_ENABLE_UNIFRAC` | ON | Windows (libssu's inmem build assumes POSIX; first-class on Emscripten via the WASM target) |
 
-Corresponding preprocessor macros: `MIINT_HAS_HDF5`, `MIINT_HAS_BOWTIE2`, `MIINT_HAS_MAFFT`, `MIINT_HAS_VSEARCH`, `MIINT_HAS_SORTMERNA`, `MIINT_HAS_GPL_BOUNDARY`, `MIINT_HAS_UNIFRAC`. Also `MIINT_ASPERA_SUPPORTED=0` on Windows/WASM (POSIX-only runtime).
+Corresponding preprocessor macros: `MIINT_HAS_HDF5`, `MIINT_HAS_MAFFT`, `MIINT_HAS_VSEARCH`, `MIINT_HAS_SORTMERNA`, `MIINT_HAS_GPL_BOUNDARY`, `MIINT_HAS_UNIFRAC`. Also `MIINT_ASPERA_SUPPORTED=0` on Windows/WASM (POSIX-only runtime).
 
 Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is linked (not on musl/macOS/Windows).
 
@@ -150,26 +149,24 @@ Two coupled submodules implementing the UniFrac distance + Faith's PD + PERMANOV
 
 These are invoked via `fork`/`exec` at runtime; the extension links no code for them. Tests that exercise them are guarded in `run_tests.sh` by `command -v` detection.
 
-### bowtie2 / bowtie2-build
-- **Gated by:** `MIINT_ENABLE_BOWTIE2` (controls whether the wrapper sources `Bowtie2Aligner.cpp`, `align_bowtie2.cpp`, `align_bowtie2_sharded.cpp` are compiled)
-- **Wrapper:** `src/Bowtie2Aligner.cpp` — locates binaries on `PATH` via `fork`/`exec` of `which`; manages a per-process temp directory; calls `bowtie2-build` for indexing and `bowtie2` for alignment.
-- **Platform:** POSIX only (auto-disabled on Windows/WASM)
-
-### gpl-boundary (FastTree process-isolation host)
-- **Gated by:** `MIINT_ENABLE_GPL_BOUNDARY` (controls whether `src/gpl_boundary/{process,session,shm,arrow_ipc}.cpp`, `src/phylogeny_fasttree.cpp`, and the vendored `third_party/nanoarrow_ipc/` object library are compiled). Auto-off on Emscripten and Windows.
-- **Why a separate process?** FastTree is GPL-licensed; miint is BSD. Statically linking FastTree into the extension would cross the license boundary. Instead, FastTree is statically linked into [`gpl-boundary`](https://github.com/the-miint/GPL-boundary), an independent GPL-licensed binary that miint launches as a child process and communicates with over a JSON-line control channel and POSIX shared memory.
+### gpl-boundary (process-isolation host for GPL tools)
+- **Gated by:** `MIINT_ENABLE_GPL_BOUNDARY` (controls whether `src/gpl_boundary/{process,session,shm,arrow_ipc}.cpp`, `src/phylogeny_fasttree.cpp`, `src/align_bowtie2.cpp`, `src/align_bowtie2_sharded.cpp`, `src/align_bowtie2_daemon_common.cpp`, and the vendored `third_party/nanoarrow_ipc/` object library are compiled). Auto-off on Emscripten and Windows.
+- **Why a separate process?** FastTree and bowtie2 are GPL-licensed; miint is BSD. Statically linking either into the extension would cross the license boundary. Instead, they're statically linked into [`gpl-boundary`](https://github.com/the-miint/GPL-boundary), an independent GPL-licensed binary that miint launches as a child process and communicates with over a JSON-line control channel and POSIX shared memory.
+- **Tools advertised by the daemon (v0.2.0):** `fasttree` (schema_version 2), `bowtie2-align` (schema_version 2), `bowtie2-build` (schema_version 1), `sortmerna`, `prodigal`. miint's per-tool wrappers fail loud at session boot if a required tool is missing or its schema_version doesn't match.
 - **Wrapper:** `src/gpl_boundary/`
   - `process.{cpp,hpp}` — `FindGplBoundary` (PATH lookup), `ChildProcess` (fork/exec/wait with SIGTERM-then-SIGKILL graceful shutdown), `LineReader`/`WriteLine` (newline-framed JSON I/O over pipes).
   - `session.{cpp,hpp}` — `Session::Initialize` (handshake on `protocol_version=2`), `Session::Submit` (per-batch round trip with mandatory `shm_input_size` field), `Session::Shutdown`.
   - `shm.{cpp,hpp}` — `InputShmRegion` (created by miint, written by miint, **unlinked by miint**), `OutputShmRegion` (created by gpl-boundary, read by miint, **unlinked by miint** per gpl-boundary's README convention). Size is authoritative on both sides — neither side calls `fstat`.
   - `arrow_ipc.{cpp,hpp}` — `EncodeIpcStream` (DuckDB DataChunk → Arrow IPC stream bytes via vendored `nanoarrow_ipc`), `IpcStreamDecoder` (response bytes → `ArrowArrayWrapper`s).
-- **Wire protocol invariants** (gpl-boundary commit `19306f6`+):
-  - `protocol_version: 2` — the Init handshake hard-fails on mismatch so daemon-side bumps surface immediately at session boot rather than silently producing wrong data.
+- **Wire protocol invariants** (gpl-boundary v0.2.0+):
+  - `protocol_version: 3` — the Init handshake hard-fails on mismatch so daemon-side bumps surface immediately at session boot rather than silently producing wrong data. The Init reply also returns the full tools registry (name + schema_version) so each wrapper can validate its expected schema upfront.
   - Every batch request includes `shm_input_size` (the exact byte count miint passed to `ftruncate`). Daemon does not `fstat` shm fds; explicit size is authoritative.
   - Output schema for `fasttree`: 8 columns (`node_index Int64 not-null`, `parent_index Int64 nullable`, `edge_id Int64 nullable`, `branch_length Float64 nullable`, `support Float64 nullable`, `n_children Int32 not-null`, `is_tip Boolean not-null`, `name Utf8 nullable`). Wire `n_children` is Int32; miint widens to Int64 and reorders to `is_tip, name, n_children` for SQL ergonomics. Schema-drift detection in `InitGlobal` checks each column name at every position — silent reorders fail loudly.
+  - Output schema for `bowtie2-align`: 21 columns matching the `read_alignments` shape (`read_id`, `flags`, `reference`, `position`, `stop_position`, `mapq`, `cigar`, `mate_reference`, `mate_position`, `template_length`, then the optional SAM tags). `tag_sa` is always-NULL on this path (parity stub). Validated against `bt2_daemon::kOutputColumnNames` in `src/include/align_bowtie2_daemon_common.hpp`.
 - **Lifecycle:**
-  - One daemon spawned per `phylogeny_fasttree(...)` table-function call (no cross-query caching yet — connection-scoped reuse via `ClientContext::registered_state` is a planned follow-up).
-  - Daemon shutdown via `~PhylogenyFastTreeGlobalState` → `Session::Shutdown` → `~ChildProcess`: SIGTERM, then 30 × 10ms grace, then SIGKILL.
+  - One daemon spawned per table-function call (e.g. `phylogeny_fasttree(...)`, `align_bowtie2(...)`, `align_bowtie2_sharded(...)`); no cross-query caching yet — connection-scoped reuse via `ClientContext::registered_state` is a planned follow-up.
+  - For `align_bowtie2`: `Bind` first submits the subjects to the daemon's `bowtie2-build` tool, writing index files into a per-call `mkdtemp("miint-bt2-XXXXXX")` directory under `$TMPDIR`. `Execute` streams the query batches to `bowtie2-align`. The `GlobalState` destructor calls `Session::Shutdown`, unlinks the `.bt2` files, and removes the temp directory.
+  - Daemon shutdown via `~GlobalState` → `Session::Shutdown` → `~ChildProcess`: SIGTERM, then 30 × 10ms grace, then SIGKILL.
   - SIGPIPE is **blocked per-thread** via `pthread_sigmask` + drained with `sigtimedwait` — never `sigaction(SIGPIPE, SIG_IGN)` (would leak to other threads in the host process).
 - **Vendored nanoarrow_ipc** (`third_party/nanoarrow_ipc/`):
   - DuckDB has no Arrow IPC byte-serialization at the C++ level (only the C Data Interface). gpl-boundary's wire format is FlatBuffers-framed Arrow IPC stream bytes, so we ship the official `nanoarrow_ipc` (~3k LOC, Apache 2.0) plus the `nanoarrow` C runtime and `flatcc` runtime it depends on.

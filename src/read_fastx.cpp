@@ -25,6 +25,9 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 		return path == "-" || path == "/dev/stdin" || path == "/dev/fd/0" || path == "/proc/self/fd/0";
 	};
 
+	if (input.inputs[0].IsNull()) {
+		throw InvalidInputException("read_fastx: first argument cannot be NULL");
+	}
 	// Handle VARCHAR (single path, potentially a glob) or VARCHAR[] (array of literal paths)
 	if (input.inputs[0].type().id() == LogicalTypeId::VARCHAR) {
 		// Single string - could be a glob pattern
@@ -35,6 +38,9 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 		// Array of strings - literal paths only (no glob expansion)
 		auto &list_children = ListValue::GetChildren(input.inputs[0]);
 		for (const auto &child : list_children) {
+			if (child.IsNull()) {
+				throw InvalidInputException("read_fastx: file path list cannot contain NULL");
+			}
 			sequence1_paths.push_back(child.ToString());
 		}
 		if (sequence1_paths.empty()) {
@@ -96,6 +102,9 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 			// Array of strings - literal paths only
 			auto &list_children = ListValue::GetChildren(path2_value);
 			for (const auto &child : list_children) {
+				if (child.IsNull()) {
+					throw InvalidInputException("read_fastx: sequence2 list cannot contain NULL");
+				}
 				seq2_paths.push_back(child.ToString());
 			}
 		} else {

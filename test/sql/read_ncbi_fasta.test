@@ -23,6 +23,24 @@ SELECT * FROM read_ncbi_fasta([]);
 ----
 at least one accession must be provided
 
+# Test error: NULL VARCHAR accession
+statement error
+SELECT * FROM read_ncbi_fasta(NULL::VARCHAR);
+----
+accession cannot be NULL
+
+# Test error: NULL VARCHAR[] accession
+statement error
+SELECT * FROM read_ncbi_fasta(NULL::VARCHAR[]);
+----
+accession cannot be NULL
+
+# Test error: VARCHAR[] containing a NULL element
+statement error
+SELECT * FROM read_ncbi_fasta(['NC_001416.1', NULL]);
+----
+accession list cannot contain NULL
+
 # Test schema - fetch Lambda phage genome (small, stable)
 # NC_001416.1 is Enterobacteria phage lambda, complete genome (48502 bp)
 query IIIIII

@@ -20,6 +20,21 @@
 
 namespace duckdb {
 
+// Convert a raw Phred quality buffer (the `LIST(UTINYINT)` representation used
+// throughout miint after `read_fastx`) into a Phred-offset-encoded ASCII string.
+// Each input byte `q` becomes `static_cast<char>(q + qual_offset)`; the encoder
+// throws `std::runtime_error` if any resulting byte exceeds 126 (printable-
+// ASCII upper bound).
+//
+// Shared between the FASTQ writer (`FastqEncoder::Encode`) and the
+// `align_bowtie2[_sharded]` daemon path, both of which need the same
+// raw-Phred → Phred+33 conversion. Pulling it out into one place avoids
+// duplicating the overflow check (and the bug class where the bowtie2
+// daemon path forgot to encode at all — silently passing the LIST's
+// debug-string representation to bowtie2's FASTQ parser).
+void EncodePhred33Quality(const std::uint8_t *quality_data, std::size_t quality_length, std::uint8_t qual_offset,
+                          std::string &out);
+
 class FastqEncoder {
 public:
 	// Bytes written are streamed to the caller via this signature. The encoder

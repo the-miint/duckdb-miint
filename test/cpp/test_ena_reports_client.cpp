@@ -22,6 +22,7 @@
 // (NOT /studies — that returns id = ERP, the secondary accession.)
 
 #include "ena_reports_client.hpp"
+#include "env_test_helpers.hpp"
 
 #include <catch2/catch_all.hpp>
 
@@ -250,13 +251,12 @@ TEST_CASE("LookupAccessionByAlias: empty alias is a programming error", "[ena_re
 
 // -----------------------------------------------------------------------------
 // ResolveReportsBaseForEndpoint — env-var override and endpoint-aware default
-// (POSIX setenv/unsetenv: gate on non-WASM since Emscripten's libc doesn't
-// expose them; matches the project-wide WASM-first-class build constraint).
+// Env-var mutation routes through miint_test::SetEnvPortable (test_env_helpers)
+// because MinGW's libc doesn't declare POSIX setenv/unsetenv.
 // -----------------------------------------------------------------------------
 
-#ifndef __EMSCRIPTEN__
 TEST_CASE("ResolveReportsBaseForEndpoint defaults to wwwdev for non-production endpoints", "[ena_reports_client]") {
-	::unsetenv("MIINT_ENA_REPORTS_URL_BASE");
+	miint_test::SetEnvPortable("MIINT_ENA_REPORTS_URL_BASE", nullptr);
 	// Mirrors ResolveDefaultENAEndpointURL: only "production" routes to
 	// the prod base; everything else (including "test", empty, or any
 	// unrecognised label) defaults to wwwdev.
@@ -270,12 +270,11 @@ TEST_CASE("ResolveReportsBaseForEndpoint honours MIINT_ENA_REPORTS_URL_BASE over
 	// Env var wins regardless of endpoint label — the override is the test
 	// fixture mechanism (mock server / private wwwdev mirror) and must
 	// short-circuit the per-endpoint default.
-	::setenv("MIINT_ENA_REPORTS_URL_BASE", "https://example.test/report", /*overwrite=*/1);
+	miint_test::SetEnvPortable("MIINT_ENA_REPORTS_URL_BASE", "https://example.test/report");
 	CHECK(ResolveReportsBaseForEndpoint("production") == "https://example.test/report");
 	CHECK(ResolveReportsBaseForEndpoint("test") == "https://example.test/report");
 	// Trailing slash stripped — same convention as the portal base.
-	::setenv("MIINT_ENA_REPORTS_URL_BASE", "https://example.test/report/", /*overwrite=*/1);
+	miint_test::SetEnvPortable("MIINT_ENA_REPORTS_URL_BASE", "https://example.test/report/");
 	CHECK(ResolveReportsBaseForEndpoint("test") == "https://example.test/report");
-	::unsetenv("MIINT_ENA_REPORTS_URL_BASE");
+	miint_test::SetEnvPortable("MIINT_ENA_REPORTS_URL_BASE", nullptr);
 }
-#endif

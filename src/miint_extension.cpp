@@ -86,12 +86,9 @@
 #include <hdf5.h>
 #endif
 
-#ifdef MIINT_HAS_BOWTIE2
+#ifdef MIINT_HAS_GPL_BOUNDARY
 #include <align_bowtie2.hpp>
 #include <align_bowtie2_sharded.hpp>
-#endif
-
-#ifdef MIINT_HAS_GPL_BOUNDARY
 #include <install_gpl_boundary.hpp>
 #include <phylogeny_fasttree.hpp>
 #endif
@@ -111,11 +108,10 @@ void SetDependencyLogging() {
 }
 
 void SetupSignalHandling() {
-#if defined(MIINT_HAS_BOWTIE2) || MIINT_ASPERA_SUPPORTED || defined(MIINT_HAS_GPL_BOUNDARY)
+#if MIINT_ASPERA_SUPPORTED || defined(MIINT_HAS_GPL_BOUNDARY)
 	// Ignore SIGPIPE globally so that writes to closed pipes return EPIPE instead of
-	// killing the process. Needed for Bowtie2Aligner, AsperaProcess, and other subprocess
-	// management (incl. gpl-boundary's ChildProcess + Session) where pipes may close
-	// unexpectedly.
+	// killing the process. Needed for AsperaProcess and gpl-boundary's ChildProcess +
+	// Session, where pipes may close unexpectedly.
 	// Note: This is a PROCESS-WIDE setting that persists for the lifetime of the process.
 	// Setting it once at extension load is thread-safe (vs calling signal() from multiple threads).
 	// gpl_boundary::Session ALSO uses pthread_sigmask + sigtimedwait per-thread inside its
@@ -237,12 +233,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 	AlignMinimap2TableFunction::Register(loader);
 	AlignMinimap2ShardedTableFunction::Register(loader);
 	SaveMinimap2IndexTableFunction::Register(loader);
-#ifdef MIINT_HAS_BOWTIE2
+#ifdef MIINT_HAS_GPL_BOUNDARY
 	AlignBowtie2TableFunction::Register(loader);
 	AlignBowtie2ShardedTableFunction::Register(loader);
 	RegisterBowtie2AvailableFunction(loader);
 #else
-	// Stub: bowtie2_available() always returns false when Bowtie2 support is compiled out
+	// Stub: bowtie2_available() always returns false when the gpl-boundary
+	// subsystem is compiled out (e.g., on WASM/Windows). The table functions
+	// (align_bowtie2 / align_bowtie2_sharded) are also unavailable in that
+	// case — the daemon is the only path.
 	ScalarFunction bowtie2_stub(
 	    "bowtie2_available", {}, LogicalType::BOOLEAN,
 	    [](DataChunk &args, ExpressionState &state, Vector &result) { result.Reference(Value::BOOLEAN(false)); });
@@ -307,26 +306,32 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                                 {"path", LogicalType::VARCHAR},
 	                                                 {"version", LogicalType::VARCHAR},
 	                                                 {"message", LogicalType::VARCHAR}});
-	ScalarFunction install_gpl_boundary_stub(
-	    "install_gpl_boundary", {}, install_struct, [](DataChunk &args, ExpressionState &state, Vector &result) {
-		    auto &entries = StructVector::GetEntries(result);
-		    auto installed_data = FlatVector::GetData<bool>(*entries[0]);
-		    auto &path_vec = *entries[1];
-		    auto &version_vec = *entries[2];
-		    auto &message_vec = *entries[3];
-		    const idx_t n = args.size();
-		    const string msg = "install_gpl_boundary: this miint build was compiled without "
-		                       "MIINT_ENABLE_GPL_BOUNDARY (typically WASM or Windows). gpl-boundary "
-		                       "is not supported on this platform.";
-		    for (idx_t i = 0; i < n; i++) {
-			    installed_data[i] = false;
-			    FlatVector::GetData<string_t>(path_vec)[i] = StringVector::AddString(path_vec, "");
-			    FlatVector::GetData<string_t>(version_vec)[i] = StringVector::AddString(version_vec, "");
-			    FlatVector::GetData<string_t>(message_vec)[i] = StringVector::AddString(message_vec, msg);
-		    }
-		    result.SetVectorType(VectorType::CONSTANT_VECTOR);
-	    });
-	loader.RegisterFunction(install_gpl_boundary_stub);
+	const auto install_stub_exec = [](DataChunk &args, ExpressionState &state, Vector &result) {
+		auto &entries = StructVector::GetEntries(result);
+		auto installed_data = FlatVector::GetData<bool>(*entries[0]);
+		auto &path_vec = *entries[1];
+		auto &version_vec = *entries[2];
+		auto &message_vec = *entries[3];
+		const idx_t n = args.size();
+		const string msg = "install_gpl_boundary: this miint build was compiled without "
+		                   "MIINT_ENABLE_GPL_BOUNDARY (typically WASM or Windows). gpl-boundary "
+		                   "is not supported on this platform.";
+		for (idx_t i = 0; i < n; i++) {
+			installed_data[i] = false;
+			FlatVector::GetData<string_t>(path_vec)[i] = StringVector::AddString(path_vec, "");
+			FlatVector::GetData<string_t>(version_vec)[i] = StringVector::AddString(version_vec, "");
+			FlatVector::GetData<string_t>(message_vec)[i] = StringVector::AddString(message_vec, msg);
+		}
+		result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	};
+	// Mirror the real path's 0-arg + 1-arg(BOOLEAN) overload set so SQL that
+	// passes `force` still type-checks on stub builds (returns the same
+	// "unsupported platform" payload regardless of the flag).
+	ScalarFunctionSet install_gpl_boundary_stub_set("install_gpl_boundary");
+	install_gpl_boundary_stub_set.AddFunction(ScalarFunction({}, install_struct, install_stub_exec));
+	install_gpl_boundary_stub_set.AddFunction(
+	    ScalarFunction({LogicalType::BOOLEAN}, install_struct, install_stub_exec));
+	loader.RegisterFunction(install_gpl_boundary_stub_set);
 #endif
 	DeblurTableFunction::Register(loader);
 

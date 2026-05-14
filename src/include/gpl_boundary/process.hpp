@@ -32,10 +32,10 @@ std::string MiintGplBoundaryCacheDir();
 std::string MiintGplBoundaryCacheBinary();
 
 /// Generic helper: locate any executable on PATH using `which`. Returns the
-/// absolute path on success, empty string otherwise. Same fork/exec/pipe pattern
-/// as `Bowtie2Aligner::find_executable` (`src/Bowtie2Aligner.cpp:26-81`); shares
-/// the no-shell-injection guarantee. Mostly here so unit tests can exercise the
-/// path-discovery plumbing against a known-present binary like `bash`.
+/// absolute path on success, empty string otherwise. Uses a fork/exec/pipe
+/// pattern with no-shell-injection guarantees. Mostly here so unit tests can
+/// exercise the path-discovery plumbing against a known-present binary like
+/// `bash`.
 std::string FindExecutableInPath(const std::string &name);
 
 /// Long-lived child process with bidirectional pipes on stdin/stdout/stderr.
@@ -53,10 +53,9 @@ std::string FindExecutableInPath(const std::string &name);
 /// On destruction:
 ///   - any remaining pipe fds are closed,
 ///   - if the child is still running, SIGTERM is sent and the process is
-///     reaped (with a short SIGKILL fallback after a grace period — mirrors
-///     `Bowtie2Aligner` (`src/Bowtie2Aligner.cpp:701-775`) but tighter
-///     since the gpl-boundary daemon has its own graceful-shutdown protocol
-///     that should already have run before destruction).
+///     reaped (with a short SIGKILL fallback after a grace period). The
+///     gpl-boundary daemon has its own graceful-shutdown protocol that
+///     should already have run before destruction.
 ///
 /// Move-only.
 class ChildProcess {

@@ -1,0 +1,22 @@
+# name: test/sql/null_input_guards_biom.test
+# description: Regression: read_biom must reject NULL cleanly (split from null_input_guards.test because read_biom requires HDF5)
+# group: [sql]
+
+require miint
+
+require-env HDF5_AVAILABLE
+
+statement error
+SELECT * FROM read_biom(NULL::VARCHAR);
+----
+read_biom: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_biom(NULL::VARCHAR[]);
+----
+read_biom: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_biom(['/tmp/a.biom', NULL]);
+----
+read_biom: file path list cannot contain NULL

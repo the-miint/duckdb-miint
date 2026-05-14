@@ -1,14 +1,12 @@
 #pragma once
 /*
- * Shared utilities for alignment table functions:
- *   - align_minimap2, align_minimap2_sharded
- *   - align_bowtie2, align_bowtie2_sharded
- *
- * Provides common config parsing, output schema, and result output logic.
+ * Shared utilities for the minimap2 alignment table functions
+ * (align_minimap2, align_minimap2_sharded). The bowtie2 table functions
+ * route through the gpl-boundary daemon and live in
+ * `align_bowtie2_daemon_common.{hpp,cpp}`.
  */
 
 #include "Minimap2Aligner.hpp"
-#include "Bowtie2Aligner.hpp"
 #include "SAMRecord.hpp"
 #include "align_result_utils.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -104,39 +102,6 @@ inline void ParseMinimap2ConfigParams(const named_parameter_map_t &params, miint
 		if (config.min_chain_coverage < 0.0f || config.min_chain_coverage > 1.0f) {
 			throw InvalidInputException("min_chain_coverage must be between 0.0 and 1.0");
 		}
-	}
-}
-
-// Parse bowtie2 config parameters from named_parameters map
-inline void ParseBowtie2ConfigParams(const named_parameter_map_t &params, miint::Bowtie2Config &config) {
-	auto preset_param = params.find("preset");
-	if (preset_param != params.end() && !preset_param->second.IsNull()) {
-		config.preset = preset_param->second.ToString();
-	}
-
-	auto local_param = params.find("local");
-	if (local_param != params.end() && !local_param->second.IsNull()) {
-		config.local = local_param->second.GetValue<bool>();
-	}
-
-	auto threads_param = params.find("threads");
-	if (threads_param != params.end() && !threads_param->second.IsNull()) {
-		config.threads = threads_param->second.GetValue<int32_t>();
-	}
-
-	auto max_secondary_param = params.find("max_secondary");
-	if (max_secondary_param != params.end() && !max_secondary_param->second.IsNull()) {
-		config.max_secondary = max_secondary_param->second.GetValue<int32_t>();
-	}
-
-	auto extra_args_param = params.find("extra_args");
-	if (extra_args_param != params.end() && !extra_args_param->second.IsNull()) {
-		config.extra_args = extra_args_param->second.ToString();
-	}
-
-	auto quiet_param = params.find("quiet");
-	if (quiet_param != params.end() && !quiet_param->second.IsNull()) {
-		config.quiet = quiet_param->second.GetValue<bool>();
 	}
 }
 

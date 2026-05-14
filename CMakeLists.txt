@@ -59,7 +59,6 @@ endif()
 
 # Optional feature flags for WASM-compatible builds
 option(MIINT_ENABLE_HDF5 "Build with HDF5/BIOM support" ON)
-option(MIINT_ENABLE_BOWTIE2 "Build with Bowtie2 alignment support" ON)
 option(MIINT_ENABLE_MAFFT "Build with MAFFT multiple sequence alignment support" ON)
 option(MIINT_ENABLE_SORTMERNA "Build with SortMeRNA rRNA alignment support" ON)
 option(MIINT_ENABLE_GPL_BOUNDARY "Build with gpl-boundary subsystem (process pipes + Arrow IPC over POSIX shm)" ON)
@@ -124,7 +123,6 @@ if(MIINT_ENABLE_UNIFRAC AND NOT EMSCRIPTEN)
 endif()
 
 # Auto-disable platform-incompatible features.
-# Bowtie2 requires POSIX fork/exec (unavailable on WASM and Windows).
 # MAFFT uses mkdtemp and other POSIX APIs (unavailable on Windows; segfaults on MinGW).
 # HDF5 C++ static class members (e.g. LinkCreatPropList::DEFAULT) become
 # unresolvable GOT.mem imports in WASM, causing "bad export type: undefined"
@@ -135,21 +133,19 @@ endif()
 # sortmerna CI tests MSVC, not MinGW; we disable it here rather than patching
 # cmph. Still enabled on Linux/macOS/MSVC.
 if(EMSCRIPTEN)
-    set(MIINT_ENABLE_BOWTIE2 OFF)
     set(MIINT_ENABLE_HDF5 OFF)
     set(MIINT_ENABLE_SORTMERNA OFF)
     set(MIINT_ENABLE_GPL_BOUNDARY OFF)
-    message(STATUS "Emscripten detected: disabling Bowtie2, HDF5, SortMeRNA, and gpl-boundary (WASM-incompatible)")
+    message(STATUS "Emscripten detected: disabling HDF5, SortMeRNA, and gpl-boundary (WASM-incompatible)")
 elseif(WIN32)
-    set(MIINT_ENABLE_BOWTIE2 OFF)
     set(MIINT_ENABLE_MAFFT OFF)
     set(MIINT_ENABLE_GPL_BOUNDARY OFF)
     set(MIINT_ENABLE_UNIFRAC OFF)
     if(MINGW)
         set(MIINT_ENABLE_SORTMERNA OFF)
-        message(STATUS "MinGW detected: disabling Bowtie2, MAFFT, SortMeRNA, gpl-boundary, and UniFrac")
+        message(STATUS "MinGW detected: disabling MAFFT, SortMeRNA, gpl-boundary, and UniFrac (cmph + gpl-boundary rely on POSIX APIs; libssu inmem assumes POSIX)")
     else()
-        message(STATUS "Windows detected: disabling Bowtie2, MAFFT, gpl-boundary, and UniFrac")
+        message(STATUS "Windows detected: disabling MAFFT, gpl-boundary, and UniFrac (require POSIX APIs)")
     endif()
 endif()
 
@@ -1077,9 +1073,6 @@ endif()
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND EXTENSION_SOURCES src/copy_biom.cpp src/BIOMTable.cpp src/BIOMReader.cpp src/read_biom.cpp)
 endif()
-if(MIINT_ENABLE_BOWTIE2)
-    list(APPEND EXTENSION_SOURCES src/Bowtie2Aligner.cpp src/align_bowtie2.cpp src/align_bowtie2_sharded.cpp)
-endif()
 if(MIINT_ENABLE_MAFFT)
     list(APPEND EXTENSION_SOURCES src/MafftAligner.cpp src/align_mafft.cpp)
 endif()
@@ -1096,7 +1089,10 @@ if(MIINT_ENABLE_GPL_BOUNDARY)
         src/gpl_boundary/shm.cpp
         src/gpl_boundary/arrow_ipc.cpp
         src/install_gpl_boundary.cpp
-        src/phylogeny_fasttree.cpp)
+        src/phylogeny_fasttree.cpp
+        src/align_bowtie2_daemon_common.cpp
+        src/align_bowtie2.cpp
+        src/align_bowtie2_sharded.cpp)
 endif()
 if(MIINT_ENABLE_UNIFRAC)
     list(APPEND EXTENSION_SOURCES
@@ -1166,9 +1162,6 @@ target_compile_definitions(${EXTENSION_NAME} PRIVATE RYPE_ARROW
 if(MIINT_ENABLE_VSEARCH)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_VSEARCH
         VSEARCH_GIT_VERSION="${VSEARCH_GIT_VERSION}")
-endif()
-if(MIINT_ENABLE_BOWTIE2)
-    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_BOWTIE2)
 endif()
 if(MIINT_ENABLE_MAFFT)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_MAFFT)
@@ -1283,9 +1276,6 @@ target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE RYPE_ARROW
 if(MIINT_ENABLE_VSEARCH)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_VSEARCH
         VSEARCH_GIT_VERSION="${VSEARCH_GIT_VERSION}")
-endif()
-if(MIINT_ENABLE_BOWTIE2)
-    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_BOWTIE2)
 endif()
 if(MIINT_ENABLE_MAFFT)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_MAFFT)
@@ -1468,9 +1458,6 @@ if(MIINT_ENABLE_VSEARCH)
         src/VsearchChimeraWrapper.cpp test/cpp/test_VsearchChimeraWrapper.cpp
         src/VsearchSearchWrapper.cpp test/cpp/test_VsearchSearchWrapper.cpp
         src/VsearchClusterWrapper.cpp test/cpp/test_VsearchClusterWrapper.cpp)
-endif()
-if(MIINT_ENABLE_BOWTIE2)
-    list(APPEND TEST_SOURCES src/Bowtie2Aligner.cpp test/cpp/test_Bowtie2Aligner.cpp)
 endif()
 if(MIINT_ENABLE_MAFFT)
     list(APPEND TEST_SOURCES src/MafftAligner.cpp test/cpp/test_MafftAligner.cpp)
