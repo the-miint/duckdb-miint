@@ -68,7 +68,7 @@ public:
 #ifndef _WIN32
 	// Constructor for reading SAM from a file descriptor (e.g., pipe from subprocess)
 	// Takes ownership of the file descriptor - it will be closed when the reader is destroyed
-	// The SAM stream must include a header (POSIX only — used by Bowtie2Aligner)
+	// The SAM stream must include a header (POSIX only).
 	explicit SAMReader(int fd, const std::string &name, bool include_seq_qual = false);
 #endif
 

@@ -9,10 +9,9 @@
 
 namespace duckdb {
 
-void FastqEncoder::Encode(const Sink &sink, const char *id, std::size_t id_size, const char *comment,
-                          std::size_t comment_size, const char *seq, std::size_t seq_size,
-                          const std::uint8_t *quality_data, std::size_t quality_length) {
-	qual_encoded_buf.resize(quality_length);
+void EncodePhred33Quality(const std::uint8_t *quality_data, std::size_t quality_length, std::uint8_t qual_offset,
+                          std::string &out) {
+	out.resize(quality_length);
 	for (std::size_t k = 0; k < quality_length; k++) {
 		const int encoded = static_cast<int>(quality_data[k]) + qual_offset;
 		if (encoded > 126) {
@@ -20,8 +19,14 @@ void FastqEncoder::Encode(const Sink &sink, const char *id, std::size_t id_size,
 			                         std::to_string(qual_offset) + " = " + std::to_string(encoded) +
 			                         " exceeds valid ASCII range (max 126)");
 		}
-		qual_encoded_buf[k] = static_cast<char>(encoded);
+		out[k] = static_cast<char>(encoded);
 	}
+}
+
+void FastqEncoder::Encode(const Sink &sink, const char *id, std::size_t id_size, const char *comment,
+                          std::size_t comment_size, const char *seq, std::size_t seq_size,
+                          const std::uint8_t *quality_data, std::size_t quality_length) {
+	EncodePhred33Quality(quality_data, quality_length, qual_offset, qual_encoded_buf);
 
 	sink("@", 1);
 	sink(id, id_size);

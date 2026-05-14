@@ -27,18 +27,19 @@ using Catch::Matchers::ContainsSubstring;
 // Session orchestrates the gpl-boundary daemon's session lifecycle:
 //
 //   parent ---> {init: {...}}                   stdin
-//   parent <--- {success:true, protocol_version:2}   stdout
+//   parent <--- {success:true, protocol_version:3, tools:[...]}   stdout
 //   parent ---> {shutdown: true}                stdin
 //   child  exits 0
 //
 // We don't have gpl-boundary on every dev box, so we test against tiny bash
 // shims that mimic the protocol exactly.
 //
-// Cycles 1.4 invariants:
-//  - Initialize() succeeds when child responds with protocol_version=2.
-//  - Initialize() throws clearly when protocol_version != 2.
+// Invariants:
+//  - Initialize() succeeds when child responds with protocol_version=3.
+//  - Initialize() throws clearly when protocol_version != 3.
 //  - Initialize() throws clearly when child responds with success=false.
 //  - Initialize() throws clearly when child closes stdin without responding.
+//  - Initialize() populates `tools()` from the init reply's `tools` array.
 //  - Shutdown() sends {shutdown:true} and waits for the child to exit cleanly.
 
 namespace {
@@ -51,12 +52,12 @@ ChildProcess spawn_shim(const std::string &script) {
 }
 } // namespace
 
-TEST_CASE("Session::Initialize succeeds on protocol_version 2", "[gpl-boundary][session]") {
+TEST_CASE("Session::Initialize succeeds on protocol_version 3", "[gpl-boundary][session]") {
 	// Read one line (the init), echo a successful reply, then read another
 	// (the shutdown) and exit.
 	const std::string script =
 	    R"(read -r init_line
-echo '{"success":true,"protocol_version":2}'
+echo '{"success":true,"protocol_version":3,"tools":[{"name":"bowtie2-align","schema_version":2},{"name":"bowtie2-build","schema_version":1},{"name":"fasttree","schema_version":2}]}'
 read -r shutdown_line
 exit 0)";
 	auto child = spawn_shim(script);
@@ -65,14 +66,16 @@ exit 0)";
 	REQUIRE_NOTHROW(session.Shutdown());
 }
 
-TEST_CASE("Session::Initialize throws on protocol_version != 2", "[gpl-boundary][session]") {
+TEST_CASE("Session::Initialize throws on protocol_version != 3", "[gpl-boundary][session]") {
+	// Use v2 (the previous required version) so the rejection message
+	// makes sense to a reader debugging a stale-daemon scenario.
 	const std::string script =
 	    R"(read -r init_line
-echo '{"success":true,"protocol_version":1}'
+echo '{"success":true,"protocol_version":2}'
 exit 0)";
 	auto child = spawn_shim(script);
 	Session session(std::move(child));
-	REQUIRE_THROWS_WITH(session.Initialize(), ContainsSubstring("protocol_version") && ContainsSubstring("2"));
+	REQUIRE_THROWS_WITH(session.Initialize(), ContainsSubstring("protocol_version") && ContainsSubstring("3"));
 }
 
 TEST_CASE("Session::Initialize throws on explicit error response", "[gpl-boundary][session]") {
@@ -100,7 +103,7 @@ TEST_CASE("Session::Initialize is idempotent (second call is a no-op)", "[gpl-bo
 	// only handshakes once, then waits for shutdown.
 	const std::string script =
 	    R"(read -r init_line
-echo '{"success":true,"protocol_version":2}'
+echo '{"success":true,"protocol_version":3,"tools":[{"name":"bowtie2-align","schema_version":2},{"name":"bowtie2-build","schema_version":1},{"name":"fasttree","schema_version":2}]}'
 read -r shutdown_line
 exit 0)";
 	auto child = spawn_shim(script);
@@ -111,12 +114,55 @@ exit 0)";
 	REQUIRE_NOTHROW(session.Shutdown());
 }
 
+TEST_CASE("Session::tools is populated from init reply", "[gpl-boundary][session]") {
+	const std::string script =
+	    R"(read -r init_line
+echo '{"success":true,"protocol_version":3,"tools":[{"name":"bowtie2-align","schema_version":2},{"name":"bowtie2-build","schema_version":1},{"name":"fasttree","schema_version":2}]}'
+read -r shutdown_line
+exit 0)";
+	auto child = spawn_shim(script);
+	Session session(std::move(child));
+	REQUIRE_NOTHROW(session.Initialize());
+
+	// All three tools the bowtie2 migration depends on land in the registry.
+	REQUIRE(session.has_tool("bowtie2-align"));
+	REQUIRE(session.has_tool("bowtie2-build"));
+	REQUIRE(session.has_tool("fasttree"));
+	// Schema version round-trips so Bind validators can compare against
+	// the version their code was written for.
+	REQUIRE(session.tool_schema_version("bowtie2-align") == 2);
+	REQUIRE(session.tool_schema_version("fasttree") == 2);
+	// Absent tools and absent versions both map to false/0, not throws.
+	REQUIRE_FALSE(session.has_tool("nonexistent-tool"));
+	REQUIRE(session.tool_schema_version("nonexistent-tool") == 0);
+	REQUIRE(session.tools().size() == 3);
+
+	REQUIRE_NOTHROW(session.Shutdown());
+}
+
+TEST_CASE("Session::tools is empty when init reply omits the field", "[gpl-boundary][session]") {
+	// Defensive: a v3 daemon ought to send `tools`, but a malformed reply
+	// should not crash Initialize() — empty registry is the right
+	// behavior, and downstream `has_tool()` returns false.
+	const std::string script =
+	    R"(read -r init_line
+echo '{"success":true,"protocol_version":3}'
+read -r shutdown_line
+exit 0)";
+	auto child = spawn_shim(script);
+	Session session(std::move(child));
+	REQUIRE_NOTHROW(session.Initialize());
+	REQUIRE(session.tools().empty());
+	REQUIRE_FALSE(session.has_tool("bowtie2-align"));
+	REQUIRE_NOTHROW(session.Shutdown());
+}
+
 TEST_CASE("Session::Shutdown is idempotent and survives early child exit", "[gpl-boundary][session]") {
 	// Mock a daemon that handshakes correctly, then exits before we send
 	// shutdown. Shutdown() must not throw on a missing pipe.
 	const std::string script =
 	    R"(read -r init_line
-echo '{"success":true,"protocol_version":2}'
+echo '{"success":true,"protocol_version":3,"tools":[{"name":"bowtie2-align","schema_version":2},{"name":"bowtie2-build","schema_version":1},{"name":"fasttree","schema_version":2}]}'
 exit 0)";
 	auto child = spawn_shim(script);
 	Session session(std::move(child));
@@ -221,7 +267,8 @@ TEST_CASE("Session::Submit happy path: batch JSON and shm round trip", "[gpl-bou
 	                                      R"(}],"result":{"n_nodes":7}})";
 	std::string script;
 	script += "read -r init_line\n";
-	script += R"(echo '{"success":true,"protocol_version":2}')";
+	script +=
+	    R"(echo '{"success":true,"protocol_version":3,"tools":[{"name":"bowtie2-align","schema_version":2},{"name":"bowtie2-build","schema_version":1},{"name":"fasttree","schema_version":2}]}')";
 	script += "\n";
 	script += "read -r batch_line\n";
 	script += "printf '%s\\n' \"$batch_line\" > '" + capture_path + "'\n";
@@ -271,7 +318,7 @@ TEST_CASE("Session::Submit happy path: batch JSON and shm round trip", "[gpl-bou
 TEST_CASE("Session::Submit propagates daemon error responses", "[gpl-boundary][session]") {
 	const std::string script =
 	    R"(read -r init_line
-echo '{"success":true,"protocol_version":2}'
+echo '{"success":true,"protocol_version":3,"tools":[{"name":"bowtie2-align","schema_version":2},{"name":"bowtie2-build","schema_version":1},{"name":"fasttree","schema_version":2}]}'
 read -r batch_line
 echo '{"success":false,"error":"tool blew up","batch_id":1}'
 read -r shutdown_line
@@ -294,7 +341,7 @@ TEST_CASE("Session::Submit rejects malformed config_json", "[gpl-boundary][sessi
 	// Mock that handshakes correctly but is never expected to receive a batch.
 	const std::string script =
 	    R"(read -r init_line
-echo '{"success":true,"protocol_version":2}'
+echo '{"success":true,"protocol_version":3,"tools":[{"name":"bowtie2-align","schema_version":2},{"name":"bowtie2-build","schema_version":1},{"name":"fasttree","schema_version":2}]}'
 sleep 5
 exit 0)";
 	auto child = spawn_shim(script);
@@ -326,7 +373,8 @@ TEST_CASE("Session::Submit increments batch_id across consecutive calls "
 	                          out_name2 + R"(","label":"tree","size":)" + std::to_string(stub2.size) + R"(}]})";
 	std::string script;
 	script += "read -r init_line\n";
-	script += R"(echo '{"success":true,"protocol_version":2}')";
+	script +=
+	    R"(echo '{"success":true,"protocol_version":3,"tools":[{"name":"bowtie2-align","schema_version":2},{"name":"bowtie2-build","schema_version":1},{"name":"fasttree","schema_version":2}]}')";
 	script += "\n";
 	script += "read -r batch1\n";
 	script += "echo '" + resp1 + "'\n";

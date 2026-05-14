@@ -69,20 +69,7 @@ SELECT * FROM read_sequences_sff(['/tmp/a.sff', NULL]);
 read_sequences_sff: file path list cannot contain NULL
 
 # --- read_biom ---
-statement error
-SELECT * FROM read_biom(NULL::VARCHAR);
-----
-read_biom: first argument cannot be NULL
-
-statement error
-SELECT * FROM read_biom(NULL::VARCHAR[]);
-----
-read_biom: first argument cannot be NULL
-
-statement error
-SELECT * FROM read_biom(['/tmp/a.biom', NULL]);
-----
-read_biom: file path list cannot contain NULL
+# read_biom requires HDF5; null-input guards for it live in null_input_guards_biom.test
 
 # --- read_newick ---
 statement error

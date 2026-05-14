@@ -4,7 +4,7 @@
 
 require miint
 
-require-env BOWTIE2_AVAILABLE
+require-env GPL_BOUNDARY_AVAILABLE
 
 # The threads-ignored warning fires in Bind() before Execute, so EXPLAIN is
 # enough to trigger EmitWarning without running bowtie2 on the test shards.

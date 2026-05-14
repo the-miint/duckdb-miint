@@ -28,10 +28,6 @@ if [ -z "$MIINT_HTTPS_TEST_URL" ]; then
 fi
 
 # Detect optional external tools
-if command -v bowtie2 &> /dev/null; then
-    export BOWTIE2_AVAILABLE=1
-fi
-
 if command -v ascp &> /dev/null; then
     export ASPERA_AVAILABLE=1
 fi

@@ -1,6 +1,8 @@
 #include "gpl_boundary/session.hpp"
 
+#include <array>
 #include <cstring>
+#include <fcntl.h>
 #include <memory>
 #include <pthread.h>
 #include <signal.h>
@@ -18,10 +20,11 @@ namespace gpl_boundary {
 namespace yj = duckdb_yyjson;
 
 namespace {
-// gpl-boundary's protocol version at HEAD (commit 19306f6, 2026-05-01).
-// Bumped 1→2 in that commit when shm_input_size was made required.
-// If the daemon reports a different value, fail fast at session boot.
-constexpr int kRequiredProtocolVersion = 2;
+// gpl-boundary's protocol version at v0.2.0 (commit 6b11337).
+// Bumped 2→3 in that commit when the init reply began advertising the
+// registered `tools` array. If the daemon reports a different value, fail
+// fast at session boot.
+constexpr int kRequiredProtocolVersion = 3;
 
 constexpr const char *kInitLine = R"({"init":{}})";
 constexpr const char *kShutdownLine = R"({"shutdown":true})";
@@ -43,6 +46,52 @@ std::string get_str(yj::yyjson_val *obj, const char *key) {
 using YyjsonDocPtr = std::unique_ptr<yj::yyjson_doc, decltype(&yj::yyjson_doc_free)>;
 YyjsonDocPtr make_doc(yj::yyjson_doc *p) {
 	return YyjsonDocPtr(p, &yj::yyjson_doc_free);
+}
+
+// Cap on how much daemon stderr we splice into a thrown exception. Big enough
+// to carry a typical bowtie2 assertion or stack trace, small enough not to
+// pollute SQL error displays. Excess is truncated from the front (we want the
+// tail — that's where the failing-batch output lives).
+constexpr std::size_t kStderrTailCap = 4096;
+
+// Non-blocking drain of an fd. Used on the failure path to grab whatever the
+// daemon (and its worker subprocesses, if the daemon forwards their stderr)
+// has written so far. MUST be non-blocking — the daemon is typically still
+// alive at this point, so the pipe has no EOF and a blocking read would hang.
+//
+// Restores the original O_NONBLOCK state on exit so other readers (none today,
+// but defensive) aren't surprised.
+std::string DrainStderrNonblocking(int fd) {
+	if (fd < 0) {
+		return {};
+	}
+	const int orig_flags = ::fcntl(fd, F_GETFL, 0);
+	if (orig_flags < 0) {
+		return {};
+	}
+	if (!(orig_flags & O_NONBLOCK)) {
+		if (::fcntl(fd, F_SETFL, orig_flags | O_NONBLOCK) < 0) {
+			return {};
+		}
+	}
+	std::string out;
+	std::array<char, 4096> buf {};
+	for (;;) {
+		ssize_t n = ::read(fd, buf.data(), buf.size());
+		if (n > 0) {
+			out.append(buf.data(), static_cast<size_t>(n));
+			continue;
+		}
+		// n == 0 (EOF) or -1 (EAGAIN/EWOULDBLOCK/other): stop draining.
+		break;
+	}
+	if (!(orig_flags & O_NONBLOCK)) {
+		(void)::fcntl(fd, F_SETFL, orig_flags); // best effort restore
+	}
+	if (out.size() > kStderrTailCap) {
+		out = "...(truncated head)...\n" + out.substr(out.size() - kStderrTailCap);
+	}
+	return out;
 }
 
 // RAII guard that blocks SIGPIPE on the calling thread only. `Session::Shutdown`
@@ -128,8 +177,8 @@ Session::~Session() {
 }
 
 Session::Session(Session &&other) noexcept
-    : child_(std::move(other.child_)), reader_(std::move(other.reader_)), initialized_(other.initialized_),
-      shut_down_(other.shut_down_) {
+    : child_(std::move(other.child_)), reader_(std::move(other.reader_)), tools_(std::move(other.tools_)),
+      initialized_(other.initialized_), shut_down_(other.shut_down_) {
 	other.initialized_ = false;
 	other.shut_down_ = true;
 }
@@ -177,21 +226,63 @@ void Session::Initialize() {
 		                         ", miint requires " + std::to_string(kRequiredProtocolVersion) +
 		                         ". Update the gpl-boundary binary to a compatible release.");
 	}
+
+	// Parse the `tools` array (protocol v3+). Each entry is `{"name": str,
+	// "schema_version": int}`. Missing/malformed entries are skipped rather
+	// than throwing — the version check above already guarantees we're
+	// talking to a v3 daemon, so this is robustness against future
+	// additive changes to per-entry fields, not a backward-compat hatch.
+	yj::yyjson_val *tools_arr = yj::yyjson_obj_get(root, "tools");
+	if (tools_arr && yj::yyjson_is_arr(tools_arr)) {
+		const size_t n = yj::yyjson_arr_size(tools_arr);
+		tools_.reserve(n);
+		for (size_t i = 0; i < n; ++i) {
+			yj::yyjson_val *item = yj::yyjson_arr_get(tools_arr, i);
+			if (!yj::yyjson_is_obj(item)) {
+				continue;
+			}
+			const std::string name = get_str(item, "name");
+			if (name.empty()) {
+				continue;
+			}
+			yj::yyjson_val *sv = yj::yyjson_obj_get(item, "schema_version");
+			uint32_t schema_version = 0;
+			if (sv && yj::yyjson_is_int(sv)) {
+				const int64_t v = yj::yyjson_get_int(sv);
+				if (v > 0) {
+					schema_version = static_cast<uint32_t>(v);
+				}
+			}
+			tools_.push_back(ToolEntry {name, schema_version});
+		}
+	}
+
 	initialized_ = true;
 }
 
-namespace {
-// Build the BatchRequest JSON line. Fields ordered to match gpl-boundary's
-// `README.md` "Batch request fields" section. We hand-format rather than
-// going through yyjson's writer because the schema is fixed and the cost of
-// pulling in a full JSON builder for one writer-side message isn't justified.
-//
-// Important: every string field needs JSON-escape handling. The shm name is
-// generated by us (always safe, no special chars) and tool/config_json
-// callers are trusted (Phase 5's Bind validates the config string before it
-// reaches here). Still, we route the shm name through a minimal escaper for
-// safety against future changes.
-std::string json_escape(const std::string &in) {
+bool Session::has_tool(const std::string &name) const {
+	for (const auto &t : tools_) {
+		if (t.name == name) {
+			return true;
+		}
+	}
+	return false;
+}
+
+uint32_t Session::tool_schema_version(const std::string &name) const {
+	for (const auto &t : tools_) {
+		if (t.name == name) {
+			return t.schema_version;
+		}
+	}
+	return 0;
+}
+
+// Minimal RFC 8259 escape for embedding strings inside hand-built JSON. Exposed
+// in the public header (session.hpp) so per-tool `config_json` builders share
+// one canonical escaper rather than each defining their own. Output does NOT
+// include surrounding quotes.
+std::string JsonEscape(const std::string &in) {
 	std::string out;
 	out.reserve(in.size() + 2);
 	for (char c : in) {
@@ -224,12 +315,17 @@ std::string json_escape(const std::string &in) {
 	return out;
 }
 
+namespace {
+// Build the BatchRequest JSON line. Fields ordered to match gpl-boundary's
+// `README.md` "Batch request fields" section. We hand-format rather than
+// going through yyjson's writer because the schema is fixed and the cost of
+// pulling in a full JSON builder for one writer-side message isn't justified.
 std::string build_batch_line(const std::string &tool, const std::string &config_json, const std::string &shm_input_name,
                              std::size_t shm_input_size, int64_t batch_id) {
 	std::ostringstream os;
-	os << R"({"tool":")" << json_escape(tool) << R"(",)"
+	os << R"({"tool":")" << JsonEscape(tool) << R"(",)"
 	   << R"("config":)" << config_json << ","
-	   << R"("shm_input":")" << json_escape(shm_input_name) << R"(",)"
+	   << R"("shm_input":")" << JsonEscape(shm_input_name) << R"(",)"
 	   << R"("shm_input_size":)" << shm_input_size << ","
 	   << R"("batch_id":)" << batch_id << "}";
 	return os.str();
@@ -294,8 +390,20 @@ SubmitResult Session::Submit(const std::string &tool, const std::string &config_
 	yj::yyjson_val *success = yj::yyjson_obj_get(root, "success");
 	if (!success || !yj::yyjson_is_true(success)) {
 		const std::string err = get_str(root, "error");
-		throw std::runtime_error("gpl_boundary: batch failed (batch_id=" + std::to_string(batch_id) +
-		                         "): " + (err.empty() ? std::string("(no error message): ") + reply : err));
+		// Drain whatever the daemon (and forwarded worker output) printed to
+		// stderr before / during the failure. Non-blocking so we don't hang
+		// when the daemon is still alive (the pipe will never EOF). The
+		// daemon's own error JSON often says only "subprocess exited
+		// unexpectedly"; the actual segfault / assertion / OOM message is in
+		// the stderr stream we'd otherwise discard.
+		const std::string stderr_tail = DrainStderrNonblocking(child_.stderr_fd());
+		std::string msg = "gpl_boundary: batch failed (batch_id=" + std::to_string(batch_id) + "): ";
+		msg += (err.empty() ? std::string("(no error message): ") + reply : err);
+		if (!stderr_tail.empty()) {
+			msg += "\n--- daemon stderr ---\n";
+			msg += stderr_tail;
+		}
+		throw std::runtime_error(msg);
 	}
 
 	// MVP correlation: at most one Submit is outstanding at a time (caller

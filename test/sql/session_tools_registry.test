@@ -1,0 +1,23 @@
+# name: test/sql/session_tools_registry.test
+# description: Round-trip the gpl-boundary v0.2.0+ tool registry through miint's availability scalars
+# group: [sql]
+
+require miint
+
+require-env GPL_BOUNDARY_AVAILABLE
+
+# phylogeny_fasttree_available() probes the daemon's tool registry via
+# `gpl-boundary --list-tools`. With v0.2.0 installed it must report true.
+query I
+SELECT phylogeny_fasttree_available();
+----
+true
+
+# bowtie2_available() also routes through the daemon's tool registry: with
+# GPL_BOUNDARY_AVAILABLE set, the v0.2.0+ daemon advertises bowtie2-align,
+# so the scalar must report true regardless of whether the standalone
+# bowtie2 binary is on PATH.
+query I
+SELECT bowtie2_available();
+----
+true
