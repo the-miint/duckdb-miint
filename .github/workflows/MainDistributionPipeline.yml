@@ -37,7 +37,7 @@ jobs:
       duckdb_version: v1.5.2
       ci_tools_version: v1.5-variegata
       extension_name: miint
-      extra_toolchains: 'rust'
+      extra_toolchains: 'rust;omp'
       # Always exclude: windows MSVC (broken), windows_amd64_rtools (broken),
       # osx_amd64 (Intel mac, sunsetting), wasm_mvp + wasm_threads (we only
       # ship wasm_eh).

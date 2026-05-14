@@ -65,10 +65,62 @@ option(MIINT_ENABLE_SORTMERNA "Build with SortMeRNA rRNA alignment support" ON)
 option(MIINT_ENABLE_GPL_BOUNDARY "Build with gpl-boundary subsystem (process pipes + Arrow IPC over POSIX shm)" ON)
 option(MIINT_ENABLE_UNIFRAC "Build with UniFrac (PCoA / PERMANOVA / Faith PD) support" ON)
 
-# libssu_inmem.a is compiled with -fopenmp (see ext/unifrac-binaries/src/inmem_build.mk).
-# Linking it requires libgomp. find_package(OpenMP) sets up OpenMP::OpenMP_CXX.
+# libssu_inmem.a / libskbb_inmem.a are compiled with -fopenmp; the final
+# extension must resolve their OpenMP runtime symbols (__kmpc_*, omp_*).
+#
+# Linux: find_package(OpenMP) discovers libgomp via system paths.
+# macOS: Apple Clang doesn't ship libomp. Probe Homebrew's libomp (set up
+#   via the `omp` extra_toolchain hook in our workflow) and link libomp.a
+#   *statically* (positional arg, not -lomp) so the released
+#   .duckdb_extension doesn't carry an RPATH to /opt/homebrew/opt/libomp.
+#   Mirrors GPL-boundary's build.rs locate_macos_libomp().
+#
+# Exposes a single INTERFACE target `miint_openmp` so link sites below
+# don't need to know which platform-specific dance produced it.
 if(MIINT_ENABLE_UNIFRAC AND NOT EMSCRIPTEN)
-    find_package(OpenMP REQUIRED COMPONENTS CXX)
+    if(APPLE)
+        execute_process(
+            COMMAND brew --prefix libomp
+            OUTPUT_VARIABLE BREW_LIBOMP_PREFIX
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        set(MIINT_LIBOMP_PREFIX "")
+        foreach(candidate
+                "${BREW_LIBOMP_PREFIX}"
+                "/opt/homebrew/opt/libomp"
+                "/usr/local/opt/libomp")
+            if(candidate AND
+               EXISTS "${candidate}/include/omp.h" AND
+               EXISTS "${candidate}/lib/libomp.a")
+                set(MIINT_LIBOMP_PREFIX "${candidate}")
+                break()
+            endif()
+        endforeach()
+        if(NOT MIINT_LIBOMP_PREFIX)
+            message(FATAL_ERROR
+                "OpenMP static archive (libomp.a) not found on macOS.\n"
+                "  Install with: brew install libomp\n"
+                "  Required when MIINT_ENABLE_UNIFRAC=ON.")
+        endif()
+        message(STATUS "Found Homebrew libomp at: ${MIINT_LIBOMP_PREFIX}")
+        set(MIINT_LIBOMP_INCLUDE_DIR "${MIINT_LIBOMP_PREFIX}/include")
+        # IMPORTED INTERFACE (not a regular INTERFACE library): exempts it
+        # from install(EXPORT)'s "all linked targets must be in the export
+        # set" check, mirroring how OpenMP::OpenMP_CXX itself behaves.
+        add_library(miint_openmp INTERFACE IMPORTED GLOBAL)
+        set_property(TARGET miint_openmp PROPERTY
+            INTERFACE_INCLUDE_DIRECTORIES "${MIINT_LIBOMP_INCLUDE_DIR}")
+        # Positional .a (not -lomp): Homebrew ships both libomp.a and
+        # libomp.dylib; -lomp prefers the dylib, baking a Homebrew path
+        # into the extension's RPATH.
+        set_property(TARGET miint_openmp PROPERTY
+            INTERFACE_LINK_LIBRARIES "${MIINT_LIBOMP_PREFIX}/lib/libomp.a")
+    else()
+        find_package(OpenMP REQUIRED COMPONENTS CXX)
+        add_library(miint_openmp INTERFACE IMPORTED GLOBAL)
+        set_property(TARGET miint_openmp PROPERTY
+            INTERFACE_LINK_LIBRARIES OpenMP::OpenMP_CXX)
+    endif()
 endif()
 
 # Auto-disable platform-incompatible features.
@@ -625,12 +677,21 @@ fi
         set(UNIFRAC_WASM_PATCH ${CMAKE_COMMAND} -E true)
     endif()
 
+    # ext/{scikit-bio-binaries,unifrac-binaries}/src/inmem_build.mk default
+    # INMEM_MPFLAG=-fopenmp. Apple Clang's -fopenmp doesn't search Homebrew
+    # paths, so omp.h won't resolve. Override on Apple to add libomp's include.
+    if(APPLE)
+        set(MIINT_INMEM_MPFLAG_ARG "INMEM_MPFLAG=-fopenmp -I${MIINT_LIBOMP_INCLUDE_DIR}")
+    else()
+        set(MIINT_INMEM_MPFLAG_ARG "")
+    endif()
+
     ExternalProject_Add(
         skbb_build
         SOURCE_DIR ${SKBB_SRC_DIR}
         CONFIGURE_COMMAND bash ${SKBB_SRC_DIR}/scripts/fetch_eigen.sh
         BUILD_COMMAND ${SKBB_WASM_PATCH}
-        COMMAND make -C ${SKBB_SRC_DIR}/src ${SKBB_MAKE_TARGET}
+        COMMAND make -C ${SKBB_SRC_DIR}/src ${SKBB_MAKE_TARGET} ${MIINT_INMEM_MPFLAG_ARG}
         INSTALL_COMMAND ""
         BUILD_IN_SOURCE 1
         BUILD_BYPRODUCTS ${SKBB_LIB_PATH}
@@ -644,7 +705,7 @@ fi
         SOURCE_DIR ${UNIFRAC_SRC_DIR}
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ${UNIFRAC_WASM_PATCH}
-        COMMAND make -C ${UNIFRAC_SRC_DIR}/src ${UNIFRAC_MAKE_TARGET} SKBB_DIR=${SKBB_SRC_DIR}
+        COMMAND make -C ${UNIFRAC_SRC_DIR}/src ${UNIFRAC_MAKE_TARGET} SKBB_DIR=${SKBB_SRC_DIR} ${MIINT_INMEM_MPFLAG_ARG}
         INSTALL_COMMAND ""
         BUILD_IN_SOURCE 1
         BUILD_BYPRODUCTS ${UNIFRAC_LIB_PATH}
@@ -1163,7 +1224,7 @@ if(MIINT_ENABLE_UNIFRAC)
     # libgomp on non-EMSCRIPTEN.
     target_link_libraries(${EXTENSION_NAME} libssu libskbb)
     if(NOT EMSCRIPTEN)
-        target_link_libraries(${EXTENSION_NAME} OpenMP::OpenMP_CXX)
+        target_link_libraries(${EXTENSION_NAME} miint_openmp)
     endif()
 endif()
 if(MIINT_ENABLE_GPL_BOUNDARY)
@@ -1274,7 +1335,7 @@ endif()
 if(MIINT_ENABLE_UNIFRAC)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} libssu libskbb)
     if(NOT EMSCRIPTEN)
-        target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenMP::OpenMP_CXX)
+        target_link_libraries(${LOADABLE_EXTENSION_NAME} miint_openmp)
     endif()
 endif()
 if(MIINT_ENABLE_GPL_BOUNDARY)
@@ -1536,7 +1597,7 @@ if(MIINT_ENABLE_UNIFRAC)
     # libssu depends on libskbb symbols, and the native archive uses OpenMP.
     target_link_libraries(tests libssu libskbb)
     if(NOT EMSCRIPTEN)
-        target_link_libraries(tests OpenMP::OpenMP_CXX)
+        target_link_libraries(tests miint_openmp)
     endif()
 endif()
 target_include_directories(tests PRIVATE
