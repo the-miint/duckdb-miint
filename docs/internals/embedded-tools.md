@@ -17,8 +17,9 @@ Four embedding categories:
 | `MIINT_ENABLE_VSEARCH` | ON | Emscripten, Windows (autotools build not supported) |
 | `MIINT_ENABLE_SORTMERNA` | ON | Emscripten (RocksDB vcpkg port not built for wasm32), Windows/MinGW (cmph assumes POSIX `<sys/time.h>`; MSVC-on-Windows would work if anyone wires it up) |
 | `MIINT_ENABLE_GPL_BOUNDARY` | ON | Emscripten, Windows (subsystem uses POSIX shm + fork/exec) |
+| `MIINT_ENABLE_UNIFRAC` | ON | Windows (libssu's inmem build assumes POSIX; first-class on Emscripten via the WASM target) |
 
-Corresponding preprocessor macros: `MIINT_HAS_HDF5`, `MIINT_HAS_MAFFT`, `MIINT_HAS_VSEARCH`, `MIINT_HAS_SORTMERNA`, `MIINT_HAS_GPL_BOUNDARY`. Also `MIINT_ASPERA_SUPPORTED=0` on Windows/WASM (POSIX-only runtime).
+Corresponding preprocessor macros: `MIINT_HAS_HDF5`, `MIINT_HAS_MAFFT`, `MIINT_HAS_VSEARCH`, `MIINT_HAS_SORTMERNA`, `MIINT_HAS_GPL_BOUNDARY`, `MIINT_HAS_UNIFRAC`. Also `MIINT_ASPERA_SUPPORTED=0` on Windows/WASM (POSIX-only runtime).
 
 Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is linked (not on musl/macOS/Windows).
 
@@ -83,6 +84,31 @@ Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is li
 - **Synthetic read IDs:** `SortMeRNAAligner::align` generates sequential CString IDs `"0".."N-1"` for each call and maps sortmerna's per-alignment output back to caller read IDs by position. Avoids upstream's per-batch ID-uniqueness contract and keeps sortmerna's in-memory CString table small.
 - **Real-data oracle:** `data/sortmerna/real_oracle.blast.gz` is a gzipped native-CLI BLAST run used by `test/sql/align_sortmerna_realworld.test`. `data/sortmerna/real_oracle.submodule.sha` records the submodule HEAD that produced it; `run_tests.sh` refuses to run the regression test against a stale oracle. Regenerate with `MIINT_SORTMERNA_REAL_DATA=1 bash run_tests.sh`.
 - **Known library/CLI divergence:** the streaming library path does not apply the CLI's internal minimum-score filter; our output is a documented strict superset of the CLI's. E-values also differ — library uses per-query Karlin-Altschul; CLI sums/corrects across the DB. Identity / coverage / score / CIGAR / edit_distance are bit-identical.
+
+### unifrac-binaries + scikit-bio-binaries (UniFrac analytics)
+
+Two coupled submodules implementing the UniFrac distance + Faith's PD + PERMANOVA + PCoA stack consumed by `unifrac_pcoa`, `unifrac_permanova`, and `unifrac_faith_pd`.
+
+- **Locations:**
+  - `ext/unifrac-binaries/` — libssu (the UniFrac and Faith PD engine). Version captured via `git describe` → `UNIFRAC_GIT_VERSION`.
+  - `ext/scikit-bio-binaries/` — libskbb (PCoA via randomized FSVD and PERMANOVA pseudo-F). Version captured via `git describe` → `SKBB_GIT_VERSION`.
+  - libskbb depends on libssu's `support_biom_t` / `support_bptree_t` types but the two compile independently. Both versions are reported in `miint_versions()` (rows `unifrac` and `scikit-bio-binaries`).
+- **Build:**
+  - `ExternalProject_Add(skbb_build)`: native → `make -C src inmem_static` (after `scripts/fetch_eigen.sh`); WASM → `make -C src wasm`. Produces `libskbb_inmem.a` or `libskbb_wasm.a`.
+  - `ExternalProject_Add(unifrac_build)`: depends on `skbb_build`; receives `SKBB_DIR=${SKBB_SRC_DIR}` make-arg. Same target split as skbb; produces `libssu_inmem.a` or `libssu_wasm.a`.
+  - **WASM `-fPIC` patch:** upstream's `wasm/emscripten_build.mk` (in both submodules) omits `-fPIC` from `WASM_CXXFLAGS`. DuckDB WASM extensions are side modules (`-sSIDE_MODULE=2`) so every TU must be position-independent — without the patch, `wasm-ld` fails with `R_WASM_MEMORY_ADDR_SLEB cannot be used against symbol ...; recompile with -fPIC`. Idempotent `sed` patches are applied as part of `skbb_build` / `unifrac_build`'s configure step; remove them once upstream lands the fix.
+- **Native vs WASM divergence:**
+  - **Native (inmem path):** uses cblas + LAPACKE for QR/SVD inside skbb's FSVD; OpenMP enabled via `INMEM_MPFLAG := -fopenmp` (see `ext/unifrac-binaries/src/inmem_build.mk`). `find_package(OpenMP REQUIRED COMPONENTS CXX)` is gated `MIINT_ENABLE_UNIFRAC AND NOT EMSCRIPTEN`; `OpenMP::OpenMP_CXX` is linked into extension/loadable_extension/tests.
+  - **WASM:** uses Eigen for QR/SVD (`linalg_backend_eigen.cpp`); no OpenMP, no LAPACKE. Eigen is fetched on demand by `scripts/fetch_eigen.sh` at configure time. WASM-linked archives are added to `DUCKDB_EXTENSION_MIINT_LINKED_LIBS`.
+- **Header inclusion contract:** libssu's `api.hpp` ships **without** include guards (only `task_parameters.hpp` and `status_enum.hpp` are properly guarded). All translation units include `src/include/unifrac_libssu.hpp` — a `#pragma once`-wrapped shim — never `api.hpp` directly.
+- **`support_biom_t` orientation:** documented in `api.hpp:223` as "CSR-encoded input table" and consumed obs-major by `biom_inmem.cpp:144-156`. Layout: `indptr` length `n_obs+1`; `indices` stores **sample column indices** within each obs row; `data` holds count values. Misreading this as CSC corrupts every downstream call (the live `faith_pd_inmem` test in `test_UnifracSupportBiom.cpp` exists to keep this invariant honest).
+- **Process-wide global skbb RNG:**
+  - `one_off_matrix_inmem_fp32_v3` consumes libssu's global skbb RNG when `subsample_depth > 0` (via `ssu_set_random_seed(seed) → skbb_set_random_seed(new_seed_skbb)`).
+  - `miint::unifrac::UnifracDistanceMatrix::Compute` serializes `ssu_set_random_seed + one_off_matrix_inmem_fp32_v3` behind a process-wide `std::mutex` so concurrent DuckDB connections invoking PCoA/PERMANOVA cannot interleave seed updates.
+  - The Faith PD path uses `subsample_table_inmem_seeded` (takes a per-call seed; sidesteps the global RNG entirely) and `faith_pd_inmem` (no RNG); the mutex is not taken on that path. Confirmed by the `BridgeSubsample is reproducible under the same seed` C++ test running without coordination.
+- **fp32 reproducibility quirk:** `skbb_pcoa_fsvd_fp32` on identical seeded inputs produces ~1e-7-magnitude bit-level differences across consecutive invocations even with `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1`. Almost certainly cblas/LAPACKE reduction ordering inside QR/SVD. PCoA SQL seed-reproducibility tests use a `< 1e-5` tolerance. A future fp64 path (not in v1) would give byte equality. Faith PD and PERMANOVA are deterministic (no FSVD in either, and skbb_permanova reconstructs its `RandomGeneratorArray` from the seed every call).
+- **`skbb_pcoa_fsvd_fp32` output layout:** the API header comment says "Matrix of size (n_eighs × n_dims)", but the implementation in `principal_coordinate_analysis.cpp:574-578` writes `samples + row*n_eighs` with `row` iterating over **samples** — so the buffer is `(n_samples × n_dims)` sample-major. Index as `samples[sample_idx * n_dims + axis]`. The header comment is misleading; the implementation is canonical.
+- **Subsampling drops samples:** when `subsample_depth > 0`, libssu drops samples whose total counts fall below the depth. `mat->n_samples` and `mat->sample_ids` reflect the **post-subsample** view; always trust them over the input feature-table's size. `UnifracDistanceMatrix::sample_ids()` exposes the post-subsample list as a `std::vector<std::string>` for downstream consumers.
 
 ### rype (Rust, Arrow FFI)
 - **Location:** `ext/rype/` (git submodule; version captured via `git describe` → `RYPE_GIT_VERSION`)

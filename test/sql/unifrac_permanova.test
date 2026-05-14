@@ -1,0 +1,188 @@
+# name: test/sql/unifrac_permanova.test
+# description: unifrac_permanova table function — PERMANOVA pseudo-F + p-value on a UniFrac distance matrix.
+# group: [sql]
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+statement ok
+CREATE TABLE observations AS SELECT * FROM read_biom('data/biom/test.biom');
+
+statement ok
+CREATE TABLE tree AS SELECT * FROM read_newick('data/unifrac/gg_otu_tree.nwk');
+
+# Wide-form metadata fixture: 6 samples × 4 variables. body_site_alt has the
+# SAME partition as body_site (factorizes to the same grouping array, even
+# though label strings differ) — drives the Rule-7 invariant test below.
+statement ok
+CREATE TABLE metadata AS SELECT * FROM (VALUES
+    ('Sample1', 'gut',  'A', 'X', 0),
+    ('Sample2', 'gut',  'B', 'X', 0),
+    ('Sample3', 'gut',  'A', 'X', 0),
+    ('Sample4', 'skin', 'B', 'X', 1),
+    ('Sample5', 'skin', 'A', 'X', 1),
+    ('Sample6', 'skin', 'B', 'X', 1)
+) AS t(sample_id, body_site, treatment, single_group, body_site_alt);
+
+# ── Single-iteration happy path ────────────────────────────────────────────
+# variables := ['body_site', 'treatment'] → 2 rows.
+query I
+SELECT COUNT(*) FROM unifrac_permanova('observations', 'tree', 'metadata',
+    variant := 'weighted_normalized', n_permutations := 99,
+    variables := ['body_site', 'treatment'], seed := 42);
+----
+2
+
+# Output schema: iteration, variable, n_groups, f_stat, p_value, n_permutations.
+query IIIIII
+SELECT iteration, variable, n_groups,
+       f_stat IS NOT NULL, p_value IS NOT NULL, n_permutations
+FROM unifrac_permanova('observations', 'tree', 'metadata',
+    variant := 'weighted_normalized', n_permutations := 99,
+    variables := ['body_site'], seed := 42);
+----
+0	body_site	2	true	true	99
+
+# p_value in [0, 1].
+query I
+SELECT COUNT(*) FROM unifrac_permanova('observations', 'tree', 'metadata',
+    variant := 'weighted_normalized', n_permutations := 99,
+    variables := ['body_site', 'treatment'], seed := 42)
+WHERE p_value < 0 OR p_value > 1;
+----
+0
+
+# n_groups matches the count of distinct values in the requested variable.
+query II
+SELECT variable, n_groups FROM unifrac_permanova('observations', 'tree', 'metadata',
+    variant := 'weighted_normalized', n_permutations := 99,
+    variables := ['body_site', 'treatment', 'single_group'], seed := 42)
+ORDER BY variable;
+----
+body_site	2
+single_group	1
+treatment	2
+
+# single_group is a degenerate PERMANOVA (no between-group variance) so the
+# F-stat is undefined. skbb_permanova_fp32 emits -inf for the degenerate
+# case; verify the row is produced with a non-finite f_stat rather than
+# crashing or returning silent garbage. The schema-only `f_stat IS NOT NULL`
+# test above does NOT catch NaN/inf (they compare as not-NULL in SQL), so
+# we need a dedicated finiteness check.
+query I
+SELECT COUNT(*) FROM unifrac_permanova('observations', 'tree', 'metadata',
+    variant := 'weighted_normalized', n_permutations := 99,
+    variables := ['single_group'], seed := 42)
+WHERE n_groups = 1 AND NOT isfinite(f_stat);
+----
+1
+
+# ── Default variables: empty list selects every non-sample_id column ───────
+# metadata has 4 non-sample_id columns → 4 rows.
+query I
+SELECT COUNT(*) FROM unifrac_permanova('observations', 'tree', 'metadata',
+    variant := 'weighted_normalized', n_permutations := 99, seed := 42);
+----
+4
+
+# ── Rule-7 invariant: identical partitions ⇒ identical f_stat ─────────────
+# body_site and body_site_alt partition samples the same way (1,2,3 | 4,5,6)
+# under value-driven factorization. With the same seed and distance matrix,
+# skbb_permanova_fp32 must produce identical pseudo-F.
+query I
+WITH r AS (
+    SELECT * FROM unifrac_permanova('observations', 'tree', 'metadata',
+        variant := 'weighted_normalized', n_permutations := 99,
+        variables := ['body_site', 'body_site_alt'], seed := 42)
+)
+SELECT COUNT(DISTINCT f_stat) FROM r;
+----
+1
+
+# ── Seed reproducibility (tolerance-based; see PCoA fp32 note) ────────────
+query I
+WITH a AS (SELECT * FROM unifrac_permanova('observations', 'tree', 'metadata',
+              variant := 'weighted_normalized', n_permutations := 99,
+              variables := ['body_site', 'treatment'], seed := 42)),
+     b AS (SELECT * FROM unifrac_permanova('observations', 'tree', 'metadata',
+              variant := 'weighted_normalized', n_permutations := 99,
+              variables := ['body_site', 'treatment'], seed := 42))
+SELECT COUNT(*) FROM a
+JOIN b USING (iteration, variable)
+WHERE abs(a.f_stat - b.f_stat) < 1e-5
+  AND a.p_value = b.p_value
+  AND a.n_groups = b.n_groups;
+----
+2
+
+# ── Multi-iteration with subsampling ───────────────────────────────────────
+# 5 iterations × 2 variables = 10 rows; iteration populated 0..4.
+query I
+SELECT COUNT(*) FROM unifrac_permanova('observations', 'tree', 'metadata',
+    variant := 'weighted_normalized', n_permutations := 99,
+    variables := ['body_site', 'treatment'],
+    subsample_depth := 3, n_subsamples := 5, seed := 7);
+----
+10
+
+query I
+SELECT COUNT(DISTINCT iteration) FROM unifrac_permanova('observations', 'tree', 'metadata',
+    variant := 'weighted_normalized', n_permutations := 99,
+    variables := ['body_site', 'treatment'],
+    subsample_depth := 3, n_subsamples := 5, seed := 7);
+----
+5
+
+# ── Bind-time errors ───────────────────────────────────────────────────────
+
+# Missing metadata for one sample → error naming the sample and variable.
+statement ok
+CREATE TABLE metadata_missing AS
+    SELECT sample_id, body_site FROM metadata WHERE sample_id <> 'Sample3';
+
+statement error
+SELECT * FROM unifrac_permanova('observations', 'tree', 'metadata_missing',
+    variant := 'weighted_normalized', variables := ['body_site']);
+----
+Sample3
+
+# Unknown variable → Binder error naming the variable.
+statement error
+SELECT * FROM unifrac_permanova('observations', 'tree', 'metadata',
+    variant := 'weighted_normalized',
+    variables := ['nonexistent_column']);
+----
+nonexistent_column
+
+# Bad variant → Binder error.
+statement error
+SELECT * FROM unifrac_permanova('observations', 'tree', 'metadata',
+    variant := 'made_up_metric');
+----
+variant
+
+# n_permutations must be >= 1.
+statement error
+SELECT * FROM unifrac_permanova('observations', 'tree', 'metadata',
+    variant := 'weighted_normalized', n_permutations := 0);
+----
+n_permutations
+
+# n_subsamples > 1 with subsample_depth = 0 → Binder error.
+statement error
+SELECT * FROM unifrac_permanova('observations', 'tree', 'metadata',
+    variant := 'weighted_normalized', n_subsamples := 5);
+----
+subsample_depth
+
+# Metadata table without a sample_id column → Binder error.
+statement ok
+CREATE TABLE metadata_no_sample_id AS
+    SELECT body_site, treatment FROM metadata;
+
+statement error
+SELECT * FROM unifrac_permanova('observations', 'tree', 'metadata_no_sample_id',
+    variant := 'weighted_normalized');
+----
+sample_id

@@ -70,6 +70,9 @@
 #include <search_sequences.hpp>
 #include <cluster_sequences.hpp>
 #endif
+#ifdef MIINT_HAS_UNIFRAC
+#include <unifrac_table_functions.hpp>
+#endif
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include <duckdb/main/config.hpp>
 #include <duckdb/storage/storage_extension.hpp>
@@ -164,6 +167,10 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 	data->versions.emplace_back("vsearch", VSEARCH_GIT_VERSION);
 #endif
 	data->versions.emplace_back("mafft", MAFFT_GIT_VERSION);
+#ifdef MIINT_HAS_UNIFRAC
+	data->versions.emplace_back("unifrac", UNIFRAC_GIT_VERSION);
+	data->versions.emplace_back("scikit-bio-binaries", SKBB_GIT_VERSION);
+#endif
 	return data;
 }
 
@@ -264,6 +271,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	MassQLFunction::Register(loader);
 	WoltkaOguFunction::Register(loader);
 	MzmlPeakPairFunction::Register(loader);
+#ifdef MIINT_HAS_UNIFRAC
+	RegisterUnifracPcoa(loader);
+	RegisterUnifracPermanova(loader);
+	RegisterUnifracFaithPD(loader);
+#endif
 
 	AlignPairwiseScoreFunction::Register(loader);
 	AlignPairwiseCigarFunction::Register(loader);

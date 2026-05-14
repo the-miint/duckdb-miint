@@ -1,0 +1,130 @@
+# name: test/sql/unifrac_faith_pd.test
+# description: unifrac_faith_pd table function — Faith's phylogenetic diversity per sample.
+# group: [sql]
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+statement ok
+CREATE TABLE observations AS SELECT * FROM read_biom('data/biom/test.biom');
+
+statement ok
+CREATE TABLE tree AS SELECT * FROM read_newick('data/unifrac/gg_otu_tree.nwk');
+
+# ── Single-iteration happy path with hand-checked values ───────────────────
+# Tree: ((GG_OTU_1:0.1, GG_OTU_2:0.2) Int1:0.3, (GG_OTU_3:0.4, (GG_OTU_4:0.5, GG_OTU_5:0.6) Int2:0.7) Int3:0.8);
+# Faith PD = sum of branch lengths on the minimal subtree spanning all
+# present (non-zero-count) tips, including the path to root.
+#
+# Sample1: {GG_OTU_2, GG_OTU_4}
+#   = 0.2 + 0.3 + 0.5 + 0.7 + 0.8 = 2.5
+# Sample2: {GG_OTU_2, GG_OTU_4, GG_OTU_5}
+#   = 0.2 + 0.3 + 0.5 + 0.6 + 0.7 + 0.8 = 3.1
+# Sample3: {GG_OTU_1, GG_OTU_3, GG_OTU_4, GG_OTU_5}
+#   = 0.1 + 0.3 + 0.4 + 0.5 + 0.6 + 0.7 + 0.8 = 3.4
+# Sample4: {GG_OTU_2, GG_OTU_3}
+#   = 0.2 + 0.3 + 0.4 + 0.8 = 1.7
+# Sample5: {GG_OTU_2}
+#   = 0.2 + 0.3 = 0.5
+# Sample6: {GG_OTU_2, GG_OTU_3, GG_OTU_4}
+#   = 0.2 + 0.3 + 0.4 + 0.5 + 0.7 + 0.8 = 2.9
+query III
+SELECT iteration, sample_id, faith_pd FROM unifrac_faith_pd('observations', 'tree')
+ORDER BY sample_id;
+----
+0	Sample1	2.5
+0	Sample2	3.1
+0	Sample3	3.4
+0	Sample4	1.7
+0	Sample5	0.5
+0	Sample6	2.9
+
+# Output schema sanity.
+query I
+SELECT COUNT(*) FROM unifrac_faith_pd('observations', 'tree');
+----
+6
+
+# ── Multi-iteration with subsampling ───────────────────────────────────────
+# Same fixture, subsample_depth=3 keeps all 6 samples (all totals >= 3).
+# 5 iterations × 6 samples = 30 rows; iteration column populated 0..4.
+query I
+SELECT COUNT(*) FROM unifrac_faith_pd('observations', 'tree',
+    subsample_depth := 3, n_subsamples := 5, seed := 7);
+----
+30
+
+query I
+SELECT COUNT(DISTINCT iteration) FROM unifrac_faith_pd('observations', 'tree',
+    subsample_depth := 3, n_subsamples := 5, seed := 7);
+----
+5
+
+# Seed reproducibility: subsample_table_inmem_seeded takes a per-call seed
+# (sidesteps libssu's global RNG); faith_pd_inmem is fully deterministic
+# once given the subsampled table. Same seed must produce byte-identical
+# output across two invocations.
+query I
+WITH a AS (SELECT * FROM unifrac_faith_pd('observations', 'tree',
+              subsample_depth := 3, n_subsamples := 5, seed := 7)),
+     b AS (SELECT * FROM unifrac_faith_pd('observations', 'tree',
+              subsample_depth := 3, n_subsamples := 5, seed := 7))
+SELECT COUNT(*) FROM a
+JOIN b USING (iteration, sample_id)
+WHERE a.faith_pd = b.faith_pd;
+----
+30
+
+# Faith PD on any subsample is bounded above by the full-sample Faith PD
+# (subsampling can only drop tips, never add new branches).
+query I
+WITH full_sample AS (SELECT sample_id, faith_pd AS full_pd FROM unifrac_faith_pd('observations', 'tree')),
+     sub AS (SELECT sample_id, faith_pd AS sub_pd FROM unifrac_faith_pd('observations', 'tree',
+                subsample_depth := 3, n_subsamples := 1, seed := 7))
+SELECT COUNT(*) FROM full_sample JOIN sub USING (sample_id)
+WHERE sub_pd > full_pd;
+----
+0
+
+# subsample_with_replacement := true uses libssu's multinomial draw path
+# (vs. permutation without replacement). Same row cardinality, same shape;
+# this asserts the with-replacement parameter actually wires through to
+# libssu's biom_subsampled.cpp branch (uncovered by the default tests).
+query I
+SELECT COUNT(*) FROM unifrac_faith_pd('observations', 'tree',
+    subsample_depth := 3, n_subsamples := 5,
+    subsample_with_replacement := true, seed := 11);
+----
+30
+
+# ── Bind-time errors ───────────────────────────────────────────────────────
+
+# Tree missing a feature → IO error naming the missing tip.
+statement ok
+CREATE TABLE observations_extra_feature AS
+    SELECT * FROM observations
+    UNION ALL SELECT 'Sample1' AS sample_id, 'MISSING_OTU' AS feature_id, 1.0::DOUBLE AS value;
+
+statement error
+SELECT * FROM unifrac_faith_pd('observations_extra_feature', 'tree');
+----
+MISSING_OTU
+
+# n_subsamples > 1 with subsample_depth = 0 → Binder error.
+statement error
+SELECT * FROM unifrac_faith_pd('observations', 'tree', n_subsamples := 5);
+----
+subsample_depth
+
+# n_subsamples must be >= 1.
+statement error
+SELECT * FROM unifrac_faith_pd('observations', 'tree', n_subsamples := 0);
+----
+n_subsamples
+
+# subsample_depth must be >= 0.
+statement error
+SELECT * FROM unifrac_faith_pd('observations', 'tree', subsample_depth := -1);
+----
+subsample_depth

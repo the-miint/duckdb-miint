@@ -1,0 +1,205 @@
+# name: test/sql/unifrac_pcoa.test
+# description: unifrac_pcoa table function — PCoA over a UniFrac distance matrix.
+# group: [sql]
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+# 6 samples × 5 features; tips of gg_otu_tree.nwk are GG_OTU_1..GG_OTU_5.
+statement ok
+CREATE TABLE observations AS SELECT * FROM read_biom('data/biom/test.biom');
+
+statement ok
+CREATE TABLE tree AS SELECT * FROM read_newick('data/unifrac/gg_otu_tree.nwk');
+
+# ── Single-iteration happy path ─────────────────────────────────────────────
+# Default n_subsamples=1, subsample_depth=0 → 1 iteration × 6 samples × 3 axes
+# = 18 rows. Schema and column types fixed.
+query I
+SELECT COUNT(*) FROM unifrac_pcoa('observations', 'tree',
+    variant := 'weighted_normalized', n_dims := 3, seed := 42);
+----
+18
+
+# All iteration values are 0 in the single-iteration case.
+query I
+SELECT COUNT(DISTINCT iteration) FROM unifrac_pcoa('observations', 'tree',
+    variant := 'weighted_normalized', n_dims := 3, seed := 42);
+----
+1
+
+# Exactly n_dims distinct axes per iteration.
+query I
+SELECT COUNT(DISTINCT axis) FROM unifrac_pcoa('observations', 'tree',
+    variant := 'weighted_normalized', n_dims := 3, seed := 42);
+----
+3
+
+# Output schema column types are stable.
+query IIIIII
+SELECT iteration, sample_id, axis, coordinate IS NOT NULL,
+       eigenvalue IS NOT NULL, proportion_explained IS NOT NULL
+FROM unifrac_pcoa('observations', 'tree',
+    variant := 'weighted_normalized', n_dims := 3, seed := 42)
+WHERE sample_id = 'Sample1' AND axis = 0;
+----
+0	Sample1	0	true	true	true
+
+# Eigenvalues are non-increasing across axes within an iteration.
+# (axis 0 is the largest eigenvalue.)
+query I
+SELECT COUNT(*) FROM (
+    SELECT DISTINCT axis, eigenvalue
+    FROM unifrac_pcoa('observations', 'tree',
+        variant := 'weighted_normalized', n_dims := 3, seed := 42)
+) WHERE TRUE;
+----
+3
+
+# proportion_explained stays inside [0, 1] for every row.
+query I
+SELECT COUNT(*) FROM unifrac_pcoa('observations', 'tree',
+    variant := 'weighted_normalized', n_dims := 3, seed := 42)
+WHERE proportion_explained < 0 OR proportion_explained > 1;
+----
+0
+
+# Eigenvalues are descending: axis-0 eigenvalue >= axis-1 eigenvalue >= axis-2 eigenvalue.
+# (LAG over windows can't be wrapped in an aggregate, so materialize the
+# axis-ordered eigenvalues into a CTE first, then bool_and the LAG comparisons.)
+query I
+WITH per_axis AS (
+    SELECT DISTINCT axis, eigenvalue FROM unifrac_pcoa('observations', 'tree',
+        variant := 'weighted_normalized', n_dims := 3, seed := 42)
+), lagged AS (
+    SELECT axis, eigenvalue, LAG(eigenvalue) OVER (ORDER BY axis) AS prev_eigenvalue
+    FROM per_axis
+)
+SELECT bool_and(prev_eigenvalue IS NULL OR prev_eigenvalue >= eigenvalue)
+FROM lagged;
+----
+true
+
+# Replication invariant: eigenvalue and proportion_explained are constant within
+# each (iteration, axis). A simple DISTINCT collapses all (sample_id) duplicates.
+query I
+SELECT COUNT(DISTINCT (iteration, axis, eigenvalue, proportion_explained))
+FROM unifrac_pcoa('observations', 'tree',
+    variant := 'weighted_normalized', n_dims := 3, seed := 42);
+----
+3
+
+# ── Seed reproducibility ────────────────────────────────────────────────────
+# Two invocations with the same seed produce numerically equivalent output.
+# Comparison uses a 1e-5 absolute tolerance: skbb_pcoa_fsvd_fp32 + cblas/LAPACKE
+# show ~1e-7 fp32-epsilon-level non-determinism on identical inputs (most
+# likely cblas reduction ordering inside qr/svd; setting OPENBLAS_NUM_THREADS=1
+# does not eliminate it). The randomized FSVD plus fp32 precision is the
+# documented v1 trade-off — for byte-identical PCoA reproducibility a future
+# release can swap in `_fp64` variants. See plan handoff doc §"Deferred".
+query I
+WITH a AS (SELECT * FROM unifrac_pcoa('observations', 'tree',
+              variant := 'weighted_normalized', n_dims := 3, seed := 42)),
+     b AS (SELECT * FROM unifrac_pcoa('observations', 'tree',
+              variant := 'weighted_normalized', n_dims := 3, seed := 42))
+SELECT COUNT(*) FROM a
+JOIN b USING (iteration, sample_id, axis)
+WHERE abs(a.coordinate - b.coordinate) < 1e-5
+  AND abs(a.eigenvalue - b.eigenvalue) < 1e-5
+  AND abs(a.proportion_explained - b.proportion_explained) < 1e-5;
+----
+18
+
+# ── Permutation invariance up to axis sign ──────────────────────────────────
+# Permuting the input row order must not change the coordinate magnitudes
+# (axis signs may flip; |coordinate| is invariant).
+statement ok
+CREATE TABLE observations_shuffled AS
+    SELECT * FROM observations ORDER BY hash(sample_id || feature_id);
+
+query I
+WITH a AS (SELECT iteration, sample_id, axis, abs(coordinate) AS c
+           FROM unifrac_pcoa('observations', 'tree',
+                variant := 'weighted_normalized', n_dims := 3, seed := 42)),
+     b AS (SELECT iteration, sample_id, axis, abs(coordinate) AS c
+           FROM unifrac_pcoa('observations_shuffled', 'tree',
+                variant := 'weighted_normalized', n_dims := 3, seed := 42))
+SELECT COUNT(*) FROM a
+JOIN b USING (iteration, sample_id, axis)
+WHERE abs(a.c - b.c) < 1e-5;
+----
+18
+
+# ── Multi-iteration with subsampling ────────────────────────────────────────
+# 5 iterations × 6 samples × 3 axes = 90 rows; iteration column populated 0..4.
+query I
+SELECT COUNT(*) FROM unifrac_pcoa('observations', 'tree',
+    variant := 'weighted_normalized', n_dims := 3,
+    subsample_depth := 3, n_subsamples := 5, seed := 7);
+----
+90
+
+query I
+SELECT COUNT(DISTINCT iteration) FROM unifrac_pcoa('observations', 'tree',
+    variant := 'weighted_normalized', n_dims := 3,
+    subsample_depth := 3, n_subsamples := 5, seed := 7);
+----
+5
+
+# Multi-iteration seed reproducibility (tolerance-based — see fp32 note above).
+query I
+WITH a AS (SELECT * FROM unifrac_pcoa('observations', 'tree',
+              variant := 'weighted_normalized', n_dims := 3,
+              subsample_depth := 3, n_subsamples := 5, seed := 7)),
+     b AS (SELECT * FROM unifrac_pcoa('observations', 'tree',
+              variant := 'weighted_normalized', n_dims := 3,
+              subsample_depth := 3, n_subsamples := 5, seed := 7))
+SELECT COUNT(*) FROM a
+JOIN b USING (iteration, sample_id, axis)
+WHERE abs(a.coordinate - b.coordinate) < 1e-5;
+----
+90
+
+# ── Bind-time errors ────────────────────────────────────────────────────────
+
+# Tree missing a feature_id → IO error naming the missing tip and tree's tip count.
+statement ok
+CREATE TABLE observations_extra_feature AS
+    SELECT * FROM observations
+    UNION ALL SELECT 'Sample1' AS sample_id, 'MISSING_OTU' AS feature_id, 1.0::DOUBLE AS value;
+
+statement error
+SELECT * FROM unifrac_pcoa('observations_extra_feature', 'tree',
+    variant := 'weighted_normalized', n_dims := 3);
+----
+MISSING_OTU
+
+# Bad variant → Binder error listing the accepted set.
+statement error
+SELECT * FROM unifrac_pcoa('observations', 'tree',
+    variant := 'made_up_metric', n_dims := 3);
+----
+variant
+
+# n_dims > n_samples - 1 → Binder error (PCoA loses one dim to centering).
+# Fixture has 6 samples → max allowed n_dims is 5.
+statement error
+SELECT * FROM unifrac_pcoa('observations', 'tree',
+    variant := 'weighted_normalized', n_dims := 6);
+----
+n_dims
+
+# n_subsamples > 1 with subsample_depth = 0 → Binder error (iterations would be identical).
+statement error
+SELECT * FROM unifrac_pcoa('observations', 'tree',
+    variant := 'weighted_normalized', n_dims := 3, n_subsamples := 5);
+----
+subsample_depth
+
+# n_subsamples must be >= 1.
+statement error
+SELECT * FROM unifrac_pcoa('observations', 'tree',
+    variant := 'weighted_normalized', n_dims := 3, n_subsamples := 0);
+----
+n_subsamples

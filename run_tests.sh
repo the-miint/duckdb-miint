@@ -298,6 +298,9 @@ fi
 if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'align_sortmerna_rrna';" | ./build/release/duckdb -csv 2>/dev/null | grep -q 1; then
     export SORTMERNA_AVAILABLE=1
 fi
+if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'unifrac_pcoa' AND function_type = 'table';" | ./build/release/duckdb -csv 2>/dev/null | grep -q 1; then
+    export UNIFRAC_AVAILABLE=1
+fi
 # libcurl streaming-upload transport (off on macOS — vsearch/OpenSSL symbol clash).
 if echo "SELECT 1 FROM miint_versions() WHERE library = 'libcurl';" | ./build/release/duckdb -csv 2>/dev/null | grep -q 1; then
     export MIINT_HAS_CURL=1

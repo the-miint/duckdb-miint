@@ -62,6 +62,65 @@ option(MIINT_ENABLE_HDF5 "Build with HDF5/BIOM support" ON)
 option(MIINT_ENABLE_MAFFT "Build with MAFFT multiple sequence alignment support" ON)
 option(MIINT_ENABLE_SORTMERNA "Build with SortMeRNA rRNA alignment support" ON)
 option(MIINT_ENABLE_GPL_BOUNDARY "Build with gpl-boundary subsystem (process pipes + Arrow IPC over POSIX shm)" ON)
+option(MIINT_ENABLE_UNIFRAC "Build with UniFrac (PCoA / PERMANOVA / Faith PD) support" ON)
+
+# libssu_inmem.a / libskbb_inmem.a are compiled with -fopenmp; the final
+# extension must resolve their OpenMP runtime symbols (__kmpc_*, omp_*).
+#
+# Linux: find_package(OpenMP) discovers libgomp via system paths.
+# macOS: Apple Clang doesn't ship libomp. Probe Homebrew's libomp (set up
+#   via the `omp` extra_toolchain hook in our workflow) and link libomp.a
+#   *statically* (positional arg, not -lomp) so the released
+#   .duckdb_extension doesn't carry an RPATH to /opt/homebrew/opt/libomp.
+#   Mirrors GPL-boundary's build.rs locate_macos_libomp().
+#
+# Exposes a single INTERFACE target `miint_openmp` so link sites below
+# don't need to know which platform-specific dance produced it.
+if(MIINT_ENABLE_UNIFRAC AND NOT EMSCRIPTEN)
+    if(APPLE)
+        execute_process(
+            COMMAND brew --prefix libomp
+            OUTPUT_VARIABLE BREW_LIBOMP_PREFIX
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        set(MIINT_LIBOMP_PREFIX "")
+        foreach(candidate
+                "${BREW_LIBOMP_PREFIX}"
+                "/opt/homebrew/opt/libomp"
+                "/usr/local/opt/libomp")
+            if(candidate AND
+               EXISTS "${candidate}/include/omp.h" AND
+               EXISTS "${candidate}/lib/libomp.a")
+                set(MIINT_LIBOMP_PREFIX "${candidate}")
+                break()
+            endif()
+        endforeach()
+        if(NOT MIINT_LIBOMP_PREFIX)
+            message(FATAL_ERROR
+                "OpenMP static archive (libomp.a) not found on macOS.\n"
+                "  Install with: brew install libomp\n"
+                "  Required when MIINT_ENABLE_UNIFRAC=ON.")
+        endif()
+        message(STATUS "Found Homebrew libomp at: ${MIINT_LIBOMP_PREFIX}")
+        set(MIINT_LIBOMP_INCLUDE_DIR "${MIINT_LIBOMP_PREFIX}/include")
+        # IMPORTED INTERFACE (not a regular INTERFACE library): exempts it
+        # from install(EXPORT)'s "all linked targets must be in the export
+        # set" check, mirroring how OpenMP::OpenMP_CXX itself behaves.
+        add_library(miint_openmp INTERFACE IMPORTED GLOBAL)
+        set_property(TARGET miint_openmp PROPERTY
+            INTERFACE_INCLUDE_DIRECTORIES "${MIINT_LIBOMP_INCLUDE_DIR}")
+        # Positional .a (not -lomp): Homebrew ships both libomp.a and
+        # libomp.dylib; -lomp prefers the dylib, baking a Homebrew path
+        # into the extension's RPATH.
+        set_property(TARGET miint_openmp PROPERTY
+            INTERFACE_LINK_LIBRARIES "${MIINT_LIBOMP_PREFIX}/lib/libomp.a")
+    else()
+        find_package(OpenMP REQUIRED COMPONENTS CXX)
+        add_library(miint_openmp INTERFACE IMPORTED GLOBAL)
+        set_property(TARGET miint_openmp PROPERTY
+            INTERFACE_LINK_LIBRARIES OpenMP::OpenMP_CXX)
+    endif()
+endif()
 
 # Auto-disable platform-incompatible features.
 # MAFFT uses mkdtemp and other POSIX APIs (unavailable on Windows; segfaults on MinGW).
@@ -81,11 +140,12 @@ if(EMSCRIPTEN)
 elseif(WIN32)
     set(MIINT_ENABLE_MAFFT OFF)
     set(MIINT_ENABLE_GPL_BOUNDARY OFF)
+    set(MIINT_ENABLE_UNIFRAC OFF)
     if(MINGW)
         set(MIINT_ENABLE_SORTMERNA OFF)
-        message(STATUS "MinGW detected: disabling MAFFT, SortMeRNA, and gpl-boundary (cmph + gpl-boundary rely on POSIX APIs)")
+        message(STATUS "MinGW detected: disabling MAFFT, SortMeRNA, gpl-boundary, and UniFrac (cmph + gpl-boundary rely on POSIX APIs; libssu inmem assumes POSIX)")
     else()
-        message(STATUS "Windows detected: disabling MAFFT and gpl-boundary (require POSIX APIs)")
+        message(STATUS "Windows detected: disabling MAFFT, gpl-boundary, and UniFrac (require POSIX APIs)")
     endif()
 endif()
 
@@ -192,7 +252,21 @@ if(NOT MAFFT_GIT_VERSION)
     set(MAFFT_GIT_VERSION "unknown")
 endif()
 
-message(STATUS "Submodule versions: minimap2=${MINIMAP2_GIT_VERSION} WFA2=${WFA2_GIT_VERSION} rype=${RYPE_GIT_VERSION} vsearch=${VSEARCH_GIT_VERSION} mafft=${MAFFT_GIT_VERSION}")
+execute_process(COMMAND git describe --tags --dirty --always
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ext/unifrac-binaries
+    OUTPUT_VARIABLE UNIFRAC_GIT_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT UNIFRAC_GIT_VERSION)
+    set(UNIFRAC_GIT_VERSION "unknown")
+endif()
+
+execute_process(COMMAND git describe --tags --dirty --always
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ext/scikit-bio-binaries
+    OUTPUT_VARIABLE SKBB_GIT_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT SKBB_GIT_VERSION)
+    set(SKBB_GIT_VERSION "unknown")
+endif()
+
+message(STATUS "Submodule versions: minimap2=${MINIMAP2_GIT_VERSION} WFA2=${WFA2_GIT_VERSION} rype=${RYPE_GIT_VERSION} vsearch=${VSEARCH_GIT_VERSION} mafft=${MAFFT_GIT_VERSION} unifrac=${UNIFRAC_GIT_VERSION} skbb=${SKBB_GIT_VERSION}")
 
 # Build htslib from release tarball
 # Configure with zstd support if available (htslib autodetects via pkg-config)
@@ -522,6 +596,128 @@ if(MIINT_ENABLE_VSEARCH)
         IMPORTED_LOCATION ${VSEARCH_SRC_DIR}/src/libvsearch.a
     )
     add_dependencies(vsearch vsearch_build)
+endif()
+
+# unifrac-binaries + scikit-bio-binaries: in-memory static archives for
+# UniFrac (PCoA / PERMANOVA / Faith PD). Native uses `make inmem_static`
+# (libssu_inmem.a / libskbb_inmem.a — Eigen-backed, no HDF5/lz4/BLAS),
+# emscripten uses `make wasm` (libssu_wasm.a / libskbb_wasm.a — same
+# subset, compiled with em++). Disabled on Windows.
+if(MIINT_ENABLE_UNIFRAC)
+    set(SKBB_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/scikit-bio-binaries)
+    set(UNIFRAC_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/unifrac-binaries)
+
+    if(EMSCRIPTEN)
+        set(SKBB_LIB_NAME libskbb_wasm.a)
+        set(UNIFRAC_LIB_NAME libssu_wasm.a)
+        set(SKBB_MAKE_TARGET wasm)
+        set(UNIFRAC_MAKE_TARGET wasm)
+    else()
+        set(SKBB_LIB_NAME libskbb_inmem.a)
+        set(UNIFRAC_LIB_NAME libssu_inmem.a)
+        set(SKBB_MAKE_TARGET inmem_static)
+        set(UNIFRAC_MAKE_TARGET inmem_static)
+    endif()
+
+    set(SKBB_LIB_PATH ${SKBB_SRC_DIR}/src/${SKBB_LIB_NAME})
+    set(UNIFRAC_LIB_PATH ${UNIFRAC_SRC_DIR}/src/${UNIFRAC_LIB_NAME})
+
+    # skbb's inmem and wasm builds both depend on Eigen 3.4.0 in
+    # .wasm-cache/eigen/include/. fetch_eigen.sh is idempotent — cache hit
+    # returns immediately. Requires network on first configure (mirrors
+    # the upstream WASM build's expectation).
+    #
+    # WASM PIC patch: both libskbb_wasm.a and libssu_wasm.a are linked
+    # into the duckdb-miint extension as a WASM side module
+    # (-sSIDE_MODULE=2), which requires every translation unit to be
+    # position-independent. Upstream's wasm/emscripten_build.mk does NOT
+    # include -fPIC in WASM_CXXFLAGS (the inmem path does, but the WASM
+    # path was authored standalone and never linked into a side module
+    # before). Patch -fPIC in idempotently before the WASM build. File
+    # an upstream PR to land this in skbb / unifrac-binaries' WASM build
+    # rules and drop these patches when both submodules ship the fix.
+    #
+    # Gated on EMSCRIPTEN to keep native builds from dirtying the
+    # submodule worktree (the patch is a no-op on native, but the
+    # touched-by-sed file still shows up in `git status` of the
+    # submodule).
+    # The patch script grep-guards the sed, then re-greps to fail loud if
+    # the sed didn't actually match — sed -i exits 0 whether or not it
+    # substituted, so a submodule advance that renames the assignment
+    # would otherwise produce a cryptic R_WASM_MEMORY_ADDR_SLEB link
+    # error downstream instead of a clear "patch didn't take" message.
+    #
+    # Written to a file rather than passed inline because CMake splits
+    # `set(VAR "a;b;c")`-style strings on `;` when expanding them into a
+    # command list, and shell flow control here needs semicolons.
+    if(EMSCRIPTEN)
+        set(WASM_PIC_PATCH_SH ${CMAKE_CURRENT_BINARY_DIR}/wasm_pic_patch.sh)
+        file(WRITE ${WASM_PIC_PATCH_SH}
+"#!/bin/sh
+# Idempotent -fPIC patch for libssu/libskbb's WASM emscripten_build.mk.
+# Generated by CMakeLists.txt; do not edit.
+set -e
+if grep -q '^WASM_CXXFLAGS := -fPIC' \"$1\"; then
+    exit 0
+fi
+sed -i 's|^WASM_CXXFLAGS := |WASM_CXXFLAGS := -fPIC |' \"$1\"
+if ! grep -q '^WASM_CXXFLAGS := -fPIC' \"$1\"; then
+    echo \"ERROR: WASM -fPIC patch did not take in $1 — submodule advanced past the patch's assumptions; update CMakeLists.txt or land the fix upstream\" >&2
+    exit 1
+fi
+")
+        set(SKBB_WASM_PATCH sh ${WASM_PIC_PATCH_SH} ${SKBB_SRC_DIR}/src/wasm/emscripten_build.mk)
+        set(UNIFRAC_WASM_PATCH sh ${WASM_PIC_PATCH_SH} ${UNIFRAC_SRC_DIR}/src/wasm/emscripten_build.mk)
+    else()
+        set(SKBB_WASM_PATCH ${CMAKE_COMMAND} -E true)
+        set(UNIFRAC_WASM_PATCH ${CMAKE_COMMAND} -E true)
+    endif()
+
+    # ext/{scikit-bio-binaries,unifrac-binaries}/src/inmem_build.mk default
+    # INMEM_MPFLAG=-fopenmp. Apple Clang rejects bare -fopenmp outright
+    # ("unsupported option '-fopenmp'"); it requires -Xpreprocessor -fopenmp
+    # to enable the pragmas at preprocess time, then libomp gets linked
+    # separately. Also needs -I for libomp's headers since Apple's clang
+    # doesn't auto-search Homebrew paths. Mirrors GPL-boundary build.rs.
+    if(APPLE)
+        set(MIINT_INMEM_MPFLAG_ARG "INMEM_MPFLAG=-Xpreprocessor -fopenmp -I${MIINT_LIBOMP_INCLUDE_DIR}")
+    else()
+        set(MIINT_INMEM_MPFLAG_ARG "")
+    endif()
+
+    ExternalProject_Add(
+        skbb_build
+        SOURCE_DIR ${SKBB_SRC_DIR}
+        CONFIGURE_COMMAND bash ${SKBB_SRC_DIR}/scripts/fetch_eigen.sh
+        BUILD_COMMAND ${SKBB_WASM_PATCH}
+        COMMAND make -C ${SKBB_SRC_DIR}/src ${SKBB_MAKE_TARGET} ${MIINT_INMEM_MPFLAG_ARG}
+        INSTALL_COMMAND ""
+        BUILD_IN_SOURCE 1
+        BUILD_BYPRODUCTS ${SKBB_LIB_PATH}
+    )
+
+    # unifrac's inmem build expects SKBB_DIR pointing at the skbb source
+    # tree (defaults to ../../scikit-bio-binaries which is wrong for our
+    # layout). The wasm path uses the same variable.
+    ExternalProject_Add(
+        unifrac_build
+        SOURCE_DIR ${UNIFRAC_SRC_DIR}
+        CONFIGURE_COMMAND ""
+        BUILD_COMMAND ${UNIFRAC_WASM_PATCH}
+        COMMAND make -C ${UNIFRAC_SRC_DIR}/src ${UNIFRAC_MAKE_TARGET} SKBB_DIR=${SKBB_SRC_DIR} ${MIINT_INMEM_MPFLAG_ARG}
+        INSTALL_COMMAND ""
+        BUILD_IN_SOURCE 1
+        BUILD_BYPRODUCTS ${UNIFRAC_LIB_PATH}
+        DEPENDS skbb_build
+    )
+
+    add_library(libskbb STATIC IMPORTED GLOBAL)
+    set_target_properties(libskbb PROPERTIES IMPORTED_LOCATION ${SKBB_LIB_PATH})
+    add_dependencies(libskbb skbb_build)
+
+    add_library(libssu STATIC IMPORTED GLOBAL)
+    set_target_properties(libssu PROPERTIES IMPORTED_LOCATION ${UNIFRAC_LIB_PATH})
+    add_dependencies(libssu unifrac_build)
 endif()
 
 # SortMeRNA: embedded library for rRNA filtering and alignment.
@@ -901,6 +1097,18 @@ if(MIINT_ENABLE_GPL_BOUNDARY)
         src/align_bowtie2.cpp
         src/align_bowtie2_sharded.cpp)
 endif()
+if(MIINT_ENABLE_UNIFRAC)
+    list(APPEND EXTENSION_SOURCES
+        src/unifrac_support_biom.cpp
+        src/unifrac_bptree.cpp
+        src/unifrac_metadata.cpp
+        src/unifrac_distance.cpp
+        src/unifrac_subsample_bridge.cpp
+        src/unifrac_function_common.cpp
+        src/unifrac_pcoa_function.cpp
+        src/unifrac_permanova_function.cpp
+        src/unifrac_faith_pd_function.cpp)
+endif()
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 
@@ -927,6 +1135,10 @@ if(EMSCRIPTEN)
     endif()
     if(MIINT_ENABLE_MAFFT)
         string(APPEND WASM_LIBS " ${CMAKE_CURRENT_BINARY_DIR}/mafft/lib/libmafft_parttree.a")
+    endif()
+    if(MIINT_ENABLE_UNIFRAC)
+        string(APPEND WASM_LIBS " ${UNIFRAC_LIB_PATH}")
+        string(APPEND WASM_LIBS " ${SKBB_LIB_PATH}")
     endif()
     set(DUCKDB_EXTENSION_MIINT_LINKED_LIBS "${WASM_LIBS}")
     message(STATUS "WASM linked libs: ${DUCKDB_EXTENSION_MIINT_LINKED_LIBS}")
@@ -969,6 +1181,14 @@ endif()
 if(MIINT_ENABLE_GPL_BOUNDARY)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_GPL_BOUNDARY)
 endif()
+if(MIINT_ENABLE_UNIFRAC)
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_UNIFRAC
+        UNIFRAC_GIT_VERSION="${UNIFRAC_GIT_VERSION}"
+        SKBB_GIT_VERSION="${SKBB_GIT_VERSION}")
+    target_include_directories(${EXTENSION_NAME} PRIVATE
+        ${UNIFRAC_SRC_DIR}/src
+        ${SKBB_SRC_DIR}/src/extern)
+endif()
 target_link_libraries(${EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
@@ -990,6 +1210,18 @@ if(MIINT_ENABLE_SORTMERNA)
 endif()
 if(MIINT_ENABLE_CURL)
     target_link_libraries(${EXTENSION_NAME} CURL::libcurl)
+endif()
+if(MIINT_ENABLE_UNIFRAC)
+    # libssu (unifrac-binaries) references libskbb (skbio) symbols, so libssu
+    # must precede libskbb in link order for static-archive resolution.
+    # Native libssu_inmem.a is compiled with -fopenmp (see ext/unifrac-binaries/
+    # src/inmem_build.mk INMEM_MPFLAG); libssu_wasm.a is OpenMP-free per
+    # ext/unifrac-binaries/src/wasm/emscripten_build.mk header. Only link
+    # libgomp on non-EMSCRIPTEN.
+    target_link_libraries(${EXTENSION_NAME} libssu libskbb)
+    if(NOT EMSCRIPTEN)
+        target_link_libraries(${EXTENSION_NAME} miint_openmp)
+    endif()
 endif()
 if(MIINT_ENABLE_GPL_BOUNDARY)
     # Object lib: feed its compiled .o's into the extension target without
@@ -1063,6 +1295,14 @@ endif()
 if(MIINT_ENABLE_GPL_BOUNDARY)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_GPL_BOUNDARY)
 endif()
+if(MIINT_ENABLE_UNIFRAC)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_UNIFRAC
+        UNIFRAC_GIT_VERSION="${UNIFRAC_GIT_VERSION}"
+        SKBB_GIT_VERSION="${SKBB_GIT_VERSION}")
+    target_include_directories(${LOADABLE_EXTENSION_NAME} PRIVATE
+        ${UNIFRAC_SRC_DIR}/src
+        ${SKBB_SRC_DIR}/src/extern)
+endif()
 target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       Threads::Threads
                       ZLIB::ZLIB
@@ -1084,6 +1324,12 @@ if(MIINT_ENABLE_SORTMERNA)
 endif()
 if(MIINT_ENABLE_CURL)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} CURL::libcurl)
+endif()
+if(MIINT_ENABLE_UNIFRAC)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} libssu libskbb)
+    if(NOT EMSCRIPTEN)
+        target_link_libraries(${LOADABLE_EXTENSION_NAME} miint_openmp)
+    endif()
 endif()
 if(MIINT_ENABLE_GPL_BOUNDARY)
     target_sources(${LOADABLE_EXTENSION_NAME} PRIVATE $<TARGET_OBJECTS:miint_nanoarrow_ipc>)
@@ -1239,6 +1485,21 @@ if(MIINT_ENABLE_GPL_BOUNDARY)
         test/cpp/test_gpl_boundary_shm.cpp
         test/cpp/test_gpl_boundary_arrow_ipc.cpp)
 endif()
+if(MIINT_ENABLE_UNIFRAC)
+    # NewickTree.cpp already in TEST_SOURCES (line 1265) for the existing
+    # NewickParser tests; don't duplicate.
+    list(APPEND TEST_SOURCES
+        src/unifrac_support_biom.cpp
+        src/unifrac_bptree.cpp
+        src/unifrac_metadata.cpp
+        src/unifrac_distance.cpp
+        src/unifrac_subsample_bridge.cpp
+        test/cpp/test_UnifracSupportBiom.cpp
+        test/cpp/test_UnifracBptree.cpp
+        test/cpp/test_UnifracMetadata.cpp
+        test/cpp/test_UnifracDistance.cpp
+        test/cpp/test_UnifracSubsampleBridge.cpp)
+endif()
 
 add_executable(tests ${TEST_SOURCES})
 
@@ -1315,6 +1576,19 @@ if(MIINT_ENABLE_VSEARCH AND MIINT_ENABLE_CURL AND UNIX AND NOT APPLE)
 endif()
 if(HAVE_LIBZSTD)
     target_link_libraries(tests ${ZSTD_TARGET})
+endif()
+if(MIINT_ENABLE_UNIFRAC)
+    target_include_directories(tests PRIVATE
+        ${UNIFRAC_SRC_DIR}/src
+        ${SKBB_SRC_DIR}/src/extern)
+    target_compile_definitions(tests PRIVATE MIINT_HAS_UNIFRAC)
+    # Tests call into libssu directly for the BP round-trip check
+    # (load_bptree_opaque, convert_bptree_opaque, get_bptree_opaque_els).
+    # libssu depends on libskbb symbols, and the native archive uses OpenMP.
+    target_link_libraries(tests libssu libskbb)
+    if(NOT EMSCRIPTEN)
+        target_link_libraries(tests miint_openmp)
+    endif()
 endif()
 target_include_directories(tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include

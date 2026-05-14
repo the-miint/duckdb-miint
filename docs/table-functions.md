@@ -38,6 +38,9 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`cluster_sequences_vsearch`](#cluster_sequences_vsearchinput_table-idthreshold-options) - Greedy sequence clustering
 - [`deblur`](#deblurinput_table-options) - Deblur amplicon sequence denoising
 - [`alignment_slice`](#alignment_slicetable_name-start-stop-include_deletionsfalse) - Slice alignments to a genomic region
+- [`unifrac_pcoa`](#unifrac_pcoaobservations-tree-options) - UniFrac distance + Principal Coordinates Analysis
+- [`unifrac_permanova`](#unifrac_permanovaobservations-tree-metadata-options) - UniFrac distance + PERMANOVA pseudo-F + p-value
+- [`unifrac_faith_pd`](#unifrac_faith_pdobservations-tree-options) - Faith's phylogenetic diversity per sample
 - [`miint_warnings`](#miint_warnings) - Query miint's operational warnings as a table
 
 ## `read_alignments(filename, [reference_lengths='table_name'], [include_filepath=false], [include_seq_qual=false])`
@@ -2689,6 +2692,53 @@ SELECT * FROM deblur('aligned_seqs', error_profile := [1, 0.04, 0.01, 0.005]);
 - Error if `indel_max` is negative
 - Error if `error_profile` contains negative values or is empty
 - Error if sequences have different aligned lengths or different unaligned lengths
+
+---
+
+## `unifrac_pcoa(observations, tree, [options])`
+
+The three `unifrac_*` functions share enough context (input schemas, accepted variant strings, subsampling semantics) that they have their own reference at **[`docs/unifrac.md`](unifrac.md)**. The entries here are short signatures for discoverability; the linked doc is authoritative.
+
+Compute UniFrac distances and reduce to PCoA coordinates via randomized FSVD (fp32). Operates on a long-form feature-table relation (matching the [`read_biom`](#read_biomfilename-include_filepathfalse) schema) and a tree relation (matching the [`read_newick`](#read_newickfilename-include_filepathfalse) schema).
+
+```sql
+SELECT * FROM unifrac_pcoa('observations', 'tree',
+    variant := 'weighted_normalized', n_dims := 3, seed := 42);
+```
+
+Output: `(iteration INTEGER, sample_id VARCHAR, axis INTEGER, coordinate DOUBLE, eigenvalue DOUBLE, proportion_explained DOUBLE)`. The `eigenvalue` and `proportion_explained` columns repeat across samples within each `(iteration, axis)` pair — extract per-axis summaries with `SELECT DISTINCT`.
+
+Full parameter reference, replication semantics, fp32 reproducibility note, and worked examples: see **[`docs/unifrac.md`](unifrac.md#unifrac_pcoa)**.
+
+---
+
+## `unifrac_permanova(observations, tree, metadata, [options])`
+
+PERMANOVA pseudo-F + p-value on a UniFrac distance matrix, against a wide-form metadata relation (one row per sample, one column per variable; `sample_id` column is required).
+
+```sql
+SELECT * FROM unifrac_permanova('observations', 'tree', 'metadata',
+    variables := ['body_site', 'treatment'], n_permutations := 999, seed := 42);
+```
+
+Output: `(iteration INTEGER, variable VARCHAR, n_groups INTEGER, f_stat DOUBLE, p_value DOUBLE, n_permutations INTEGER)`. Identical groupings under the same seed produce identical `f_stat` (Rule-7 invariant — value-driven, order-stable factorization).
+
+Full parameter reference, variant strings, and worked examples: see **[`docs/unifrac.md`](unifrac.md#unifrac_permanova)**.
+
+---
+
+## `unifrac_faith_pd(observations, tree, [options])`
+
+Faith's phylogenetic diversity per sample (sum of branch lengths on the spanning subtree). Optionally rarefies via `subsample_depth` and `n_subsamples` to produce a multi-iteration distribution.
+
+```sql
+SELECT * FROM unifrac_faith_pd('observations', 'tree',
+    subsample_depth := 3, n_subsamples := 100, seed := 42);
+```
+
+Output: `(iteration INTEGER, sample_id VARCHAR, faith_pd DOUBLE)`. Deterministic — same seed produces byte-identical output (no fp32 tolerance needed).
+
+Full parameter reference and worked examples: see **[`docs/unifrac.md`](unifrac.md#unifrac_faith_pd)**.
 
 ---
 
