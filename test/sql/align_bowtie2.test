@@ -326,3 +326,98 @@ DROP TABLE qual_subjects;
 
 statement ok
 DROP TABLE qual_assoc;
+
+# ============================================================================
+# Typed bowtie2-align parameters surface (the ~30 daemon knobs)
+# ----------------------------------------------------------------------------
+# The migration dropped `extra_args`. Instead miint exposes every bowtie2
+# parameter the daemon's `--describe` advertises as a typed SQL named
+# parameter, validated at bind time. Bind-time rejection (rather than a
+# silent daemon error mid-batch) is the whole point of the typed surface;
+# these tests pin the validation contract.
+# ============================================================================
+
+statement ok
+CREATE TABLE typed_subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE typed_queries AS SELECT * FROM (VALUES
+    ('q1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT')
+) AS t(read_id, sequence1);
+
+# Smoke: a few representative typed params at once accepted and forwarded
+# to the daemon. Returning >=1 row proves the daemon parsed config_json
+# without erroring on the new fields.
+query I
+SELECT COUNT(*) FROM align_bowtie2('typed_queries', 'typed_subjects',
+    seed := 42,
+    score_min := 'L,-0.6,-0.6',
+    seed_length := 22,
+    seed_mismatches := 0,
+    nofw := false,
+    norc := false,
+    ignore_quals := true);
+----
+1
+
+# Bind-time validation: seed_length out of [1, 32] is rejected.
+statement error
+SELECT * FROM align_bowtie2('typed_queries', 'typed_subjects', seed_length := 100);
+----
+seed_length must be 1-32
+
+# Bind-time validation: seed_mismatches out of [0, 1] is rejected.
+statement error
+SELECT * FROM align_bowtie2('typed_queries', 'typed_subjects', seed_mismatches := 2);
+----
+seed_mismatches must be 0 or 1
+
+# Bind-time validation: mate_orientation enum rejection.
+statement error
+SELECT * FROM align_bowtie2('typed_queries', 'typed_subjects', mate_orientation := 'xy');
+----
+invalid mate_orientation
+
+# Unknown parameter still rejected (defends against typos like `presset`).
+# DuckDB's binder rejects this before our Bind() runs since the parameter
+# isn't in `RegisterBowtie2AlignNamedParameterTypes`'s map, so the error
+# message is DuckDB's "Invalid named parameter" rather than miint's
+# "unknown named parameter" — either form is acceptable; both fail fast.
+statement error
+SELECT * FROM align_bowtie2('typed_queries', 'typed_subjects', presset := 'fast');
+----
+Invalid named parameter "presset"
+
+# Same surface available for the sharded variant — typed params accepted,
+# bind-time validation enforced.
+statement ok
+CREATE TABLE typed_assoc AS SELECT 'q1' AS read_id, 'shard_a' AS shard_name;
+
+query I
+SELECT COUNT(*) FROM align_bowtie2_sharded('typed_queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'typed_assoc',
+    seed := 42,
+    score_min := 'L,-0.6,-0.6',
+    rg_id := 'sample1');
+----
+1
+
+statement error
+SELECT * FROM align_bowtie2_sharded('typed_queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'typed_assoc',
+    seed_length := 100);
+----
+seed_length must be 1-32
+
+statement ok
+DROP TABLE typed_queries;
+
+statement ok
+DROP TABLE typed_subjects;
+
+statement ok
+DROP TABLE typed_assoc;

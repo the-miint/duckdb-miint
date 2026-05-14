@@ -37,71 +37,22 @@ namespace {
 namespace gb = ::duckdb::miint::gpl_boundary;
 
 // =============================================================================
-// Config builders. Duplicated from align_bowtie2.cpp's analogous helpers
-// because the validators throw with table-function-specific error messages
-// ("align_bowtie2_sharded:" vs "align_bowtie2:"). The amount of duplication
-// is small enough that a shared parameter-mapper hasn't earned its keep
-// yet (KISS — extract on the third caller).
+// Per-caller known-parameter set. Common bowtie2-align knobs live in
+// `bt2_daemon::kCommonAlignParams`; we union those with the sharded-specific
+// miint-side knobs (`shard_directory`, `read_to_shard`, `threads`,
+// `max_threads_per_shard`, `include_shard_name`). Anything outside this set
+// is rejected at bind time so typos surface at SQL-compile rather than
+// running silently with default semantics.
 // =============================================================================
 
-struct ConfigJsonBuilder {
-	std::ostringstream os;
-	bool first = true;
-	void append_raw(const std::string &key, const std::string &raw_value) {
-		if (!first) {
-			os << ",";
-		}
-		first = false;
-		os << "\"" << key << "\":" << raw_value;
-	}
-	void append_str(const std::string &key, const std::string &value) {
-		// See align_bowtie2.cpp: route through the canonical escaper even
-		// when current callers are trusted, so the helper stays a safe
-		// pattern for future additions.
-		append_raw(key, "\"" + gb::JsonEscape(value) + "\"");
-	}
-	void append_int(const std::string &key, int64_t value) {
-		append_raw(key, std::to_string(value));
-	}
-	void append_bool(const std::string &key, bool value) {
-		append_raw(key, value ? "true" : "false");
-	}
-	std::string build() const {
-		return "{" + os.str() + "}";
-	}
-};
-
-const std::unordered_set<std::string> kKnownShardedParams = {
-    "shard_directory",       "read_to_shard",     "preset", "local", "threads", "max_secondary", "quiet",
-    "max_threads_per_shard", "include_shard_name"};
-
-const std::unordered_set<std::string> kKnownPresets = {"very-fast", "fast", "sensitive", "very-sensitive"};
-
-bool ValueAsBool(const std::string &name, const Value &v) {
-	if (v.type().id() != LogicalTypeId::BOOLEAN) {
-		throw InvalidInputException("align_bowtie2_sharded: parameter '%s' expects a boolean, got %s", name,
-		                            v.type().ToString());
-	}
-	return v.GetValue<bool>();
-}
-
-int64_t ValueAsInt(const std::string &name, const Value &v) {
-	auto t = v.type().id();
-	if (t == LogicalTypeId::INTEGER || t == LogicalTypeId::BIGINT || t == LogicalTypeId::SMALLINT ||
-	    t == LogicalTypeId::TINYINT || t == LogicalTypeId::HUGEINT || t == LogicalTypeId::UINTEGER ||
-	    t == LogicalTypeId::UBIGINT || t == LogicalTypeId::USMALLINT || t == LogicalTypeId::UTINYINT) {
-		return v.GetValue<int64_t>();
-	}
-	throw InvalidInputException("align_bowtie2_sharded: parameter '%s' expects an integer, got %s", name,
-	                            v.type().ToString());
-}
-
-std::string ValueAsStr(const std::string &name, const Value &v) {
-	if (v.type().id() != LogicalTypeId::VARCHAR) {
-		throw InvalidInputException("align_bowtie2_sharded: parameter '%s' expects a string, got %s", name,
-		                            v.type().ToString());
-	}
-	return v.GetValue<std::string>();
+std::unordered_set<std::string> MakeKnownShardedParams() {
+	auto s = bt2_daemon::kCommonAlignParams;
+	s.insert("shard_directory");
+	s.insert("read_to_shard");
+	s.insert("threads"); // sharded-mode warning; not forwarded to daemon
+	s.insert("max_threads_per_shard");
+	s.insert("include_shard_name");
+	return s;
 }
 
 // =============================================================================
@@ -319,47 +270,17 @@ void DetectQueryColumns(ClientContext &context, AlignBowtie2ShardedBindData &bd)
 // parallelism falls out for free.
 std::string BuildAlignConfigJson(const named_parameter_map_t &named_params, const std::string &index_prefix,
                                  idx_t max_threads_per_shard) {
-	ConfigJsonBuilder cfg;
+	bt2_daemon::ConfigJsonBuilder cfg;
 	cfg.append_str("index_path", index_prefix);
 	cfg.append_int("nthreads", static_cast<int64_t>(max_threads_per_shard));
 
-	auto get = [&](const std::string &k) -> const Value * {
-		auto it = named_params.find(k);
-		return (it == named_params.end() || it->second.IsNull()) ? nullptr : &it->second;
-	};
-
-	bool local = false;
-	if (auto *v = get("local")) {
-		local = ValueAsBool("local", *v);
-		cfg.append_bool("local_align", local);
-	}
-	if (auto *v = get("preset")) {
-		const std::string p = ValueAsStr("preset", *v);
-		if (kKnownPresets.find(p) == kKnownPresets.end()) {
-			throw InvalidInputException("align_bowtie2_sharded: invalid preset '%s' "
-			                            "(expected one of very-fast/fast/sensitive/very-sensitive)",
-			                            p);
-		}
-		const std::string preset_value = local ? (p + "-local") : p;
-		cfg.append_str("preset", preset_value);
-	}
-	if (auto *v = get("max_secondary")) {
-		const int64_t n = ValueAsInt("max_secondary", *v);
-		if (n < 0) {
-			throw InvalidInputException("align_bowtie2_sharded: max_secondary must be >= 0 (got %lld)",
-			                            static_cast<long long>(n));
-		}
-		cfg.append_int("k", n);
-	}
-	bool quiet = true;
-	if (auto *v = get("quiet")) {
-		quiet = ValueAsBool("quiet", *v);
-	}
-	cfg.append_bool("verbose", !quiet);
+	bt2_daemon::AppendBowtie2AlignParams(cfg, named_params, "align_bowtie2_sharded");
 
 	// Sharded contract: emit only mapped reads. The pre-migration direct-subprocess
 	// path called FilterMappedOnly on every batch; on the daemon path we delegate
 	// to bowtie2's own --no-unal so unaligned records never cross the boundary.
+	// `no_unal` is intentionally excluded from kCommonAlignParams so users can't
+	// override this here.
 	cfg.append_bool("no_unal", true);
 
 	return cfg.build();
@@ -409,7 +330,8 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 
 	// Reject unknown params at bind time.
 	for (const auto &kv : input.named_parameters) {
-		if (kKnownShardedParams.find(kv.first) == kKnownShardedParams.end()) {
+		static const auto kKnown = MakeKnownShardedParams();
+		if (kKnown.find(kv.first) == kKnown.end()) {
 			throw InvalidInputException("align_bowtie2_sharded: unknown named parameter '%s'", kv.first);
 		}
 	}
@@ -423,7 +345,7 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	// because miint_warnings_bowtie2.test asserts on that substring.
 	auto threads_param = input.named_parameters.find("threads");
 	if (threads_param != input.named_parameters.end() && !threads_param->second.IsNull()) {
-		const int64_t threads_val = ValueAsInt("threads", threads_param->second);
+		const int64_t threads_val = bt2_daemon::ValueAsInt("align_bowtie2_sharded", "threads", threads_param->second);
 		if (threads_val != 1) {
 			::miint::EmitWarning(
 			    context, "WARNING: Parameter 'threads' is ignored in sharded mode. "
@@ -434,7 +356,8 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 
 	auto max_tps_param = input.named_parameters.find("max_threads_per_shard");
 	if (max_tps_param != input.named_parameters.end() && !max_tps_param->second.IsNull()) {
-		const int64_t val = ValueAsInt("max_threads_per_shard", max_tps_param->second);
+		const int64_t val =
+		    bt2_daemon::ValueAsInt("align_bowtie2_sharded", "max_threads_per_shard", max_tps_param->second);
 		if (val < 1 || val > 64) {
 			throw BinderException("max_threads_per_shard must be between 1 and 64 (got %lld)",
 			                      static_cast<long long>(val));
@@ -444,7 +367,8 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 
 	auto include_shard_param = input.named_parameters.find("include_shard_name");
 	if (include_shard_param != input.named_parameters.end() && !include_shard_param->second.IsNull()) {
-		bd->include_shard_name = ValueAsBool("include_shard_name", include_shard_param->second);
+		bd->include_shard_name =
+		    bt2_daemon::ValueAsBool("align_bowtie2_sharded", "include_shard_name", include_shard_param->second);
 	}
 
 	DetectQueryColumns(context, *bd);
@@ -777,14 +701,11 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 
 TableFunction AlignBowtie2ShardedTableFunction::GetFunction() {
 	auto tf = TableFunction("align_bowtie2_sharded", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
+	bt2_daemon::RegisterBowtie2AlignNamedParameterTypes(tf);
 	tf.named_parameters["shard_directory"] = LogicalType::VARCHAR;
 	tf.named_parameters["read_to_shard"] = LogicalType::VARCHAR;
-	tf.named_parameters["preset"] = LogicalType::VARCHAR;
-	tf.named_parameters["local"] = LogicalType::BOOLEAN;
-	tf.named_parameters["threads"] = LogicalType::INTEGER;
-	tf.named_parameters["max_secondary"] = LogicalType::INTEGER;
+	tf.named_parameters["threads"] = LogicalType::INTEGER; // ignored in sharded mode; warning at bind
 	tf.named_parameters["max_threads_per_shard"] = LogicalType::INTEGER;
-	tf.named_parameters["quiet"] = LogicalType::BOOLEAN;
 	tf.named_parameters["include_shard_name"] = LogicalType::BOOLEAN;
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;

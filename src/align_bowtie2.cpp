@@ -41,150 +41,55 @@ namespace {
 namespace gb = ::duckdb::miint::gpl_boundary;
 namespace yj = duckdb_yyjson;
 
-// Schema/output helpers live in align_bowtie2_daemon_common.{hpp,cpp} so
-// align_bowtie2_sharded reuses the same wire-schema-validation,
-// EmitChunkRows decoder, and BuildQueryIpc encoder.
+// Schema/output helpers, ConfigJsonBuilder, ValueAs* coercers, and the
+// shared bowtie2-align param mapper all live in
+// align_bowtie2_daemon_common.{hpp,cpp}. This file only keeps the
+// align_bowtie2-specific glue: subject loading, bowtie2-build invocation,
+// query streaming, and the wrapper that decides which params are valid for
+// the non-sharded SQL surface.
 
-// -----------------------------------------------------------------------------
-// JSON config builder — mirrors phylogeny_fasttree's ConfigJsonBuilder. Shared
-// pattern intentional: a third tool eventually justifies extracting into a
-// gpl_boundary helper, but two does not (KISS).
-// -----------------------------------------------------------------------------
-
-struct ConfigJsonBuilder {
-	std::ostringstream os;
-	bool first = true;
-
-	void append_raw(const std::string &key, const std::string &raw_value) {
-		if (!first) {
-			os << ",";
-		}
-		first = false;
-		os << "\"" << key << "\":" << raw_value;
-	}
-	void append_str(const std::string &key, const std::string &value) {
-		// Route through gb::JsonEscape: today the only string values are
-		// validated presets and a mkdtemp-built index path, but the builder
-		// is shared infrastructure and a future user-controlled string is
-		// one parameter away. Cheap defense over an audit each time.
-		append_raw(key, "\"" + gb::JsonEscape(value) + "\"");
-	}
-	void append_int(const std::string &key, int64_t value) {
-		append_raw(key, std::to_string(value));
-	}
-	void append_bool(const std::string &key, bool value) {
-		append_raw(key, value ? "true" : "false");
-	}
-	std::string build() const {
-		return "{" + os.str() + "}";
-	}
-};
-
-// User-facing parameter set for align_bowtie2. Anything outside this set is
-// rejected at bind time so typos surface at SQL-compile rather than running
-// silently with default semantics.
-const std::unordered_set<std::string> kKnownAlignParams = {"preset", "local", "threads", "max_secondary", "quiet"};
-
-// Allowed values for the `preset` parameter; preserved from the direct-
-// subprocess interface. The daemon accepts the same set (plus *-local
-// variants we trigger via local=true).
-const std::unordered_set<std::string> kKnownPresets = {"very-fast", "fast", "sensitive", "very-sensitive"};
-
-bool ValueAsBool(const std::string &name, const Value &v) {
-	if (v.type().id() != LogicalTypeId::BOOLEAN) {
-		throw InvalidInputException("align_bowtie2: parameter '%s' expects a boolean, got %s", name,
-		                            v.type().ToString());
-	}
-	return v.GetValue<bool>();
+// User-facing parameter set for align_bowtie2: the common bowtie2-align
+// knobs (preset, local, max_secondary, quiet, plus the typed daemon knobs
+// added via the migration — see bt2_daemon::kCommonAlignParams) plus the
+// miint-side `threads` knob (mapped to nthreads). Anything outside this
+// set is rejected at bind time so typos surface at SQL-compile rather than
+// running silently with default semantics.
+std::unordered_set<std::string> MakeKnownAlignParams() {
+	auto s = bt2_daemon::kCommonAlignParams;
+	s.insert("threads"); // miint-side; mapped to daemon nthreads below.
+	return s;
 }
 
-int64_t ValueAsInt(const std::string &name, const Value &v) {
-	auto t = v.type().id();
-	if (t == LogicalTypeId::INTEGER || t == LogicalTypeId::BIGINT || t == LogicalTypeId::SMALLINT ||
-	    t == LogicalTypeId::TINYINT || t == LogicalTypeId::HUGEINT || t == LogicalTypeId::UINTEGER ||
-	    t == LogicalTypeId::UBIGINT || t == LogicalTypeId::USMALLINT || t == LogicalTypeId::UTINYINT) {
-		return v.GetValue<int64_t>();
-	}
-	throw InvalidInputException("align_bowtie2: parameter '%s' expects an integer, got %s", name, v.type().ToString());
-}
-
-std::string ValueAsStr(const std::string &name, const Value &v) {
-	if (v.type().id() != LogicalTypeId::VARCHAR) {
-		throw InvalidInputException("align_bowtie2: parameter '%s' expects a string, got %s", name,
-		                            v.type().ToString());
-	}
-	return v.GetValue<std::string>();
-}
-
-// Build the bowtie2-align config_json. The daemon's typed schema is
-// comprehensive (~36 knobs); we expose the small subset miint's SQL surface
-// used in the direct-subprocess era. `extra_args` is intentionally dropped
-// (no test or doc used it).
+// Build the bowtie2-align config_json. Common bowtie2 knobs flow through
+// `bt2_daemon::AppendBowtie2AlignParams`; the non-sharded path additionally
+// handles `threads` (its own knob, since the sharded variant warns about it
+// instead).
 std::string BuildAlignConfigJson(const named_parameter_map_t &named_params, const std::string &index_basename) {
-	ConfigJsonBuilder cfg;
+	static const auto kKnown = MakeKnownAlignParams();
+	for (const auto &kv : named_params) {
+		if (kKnown.find(kv.first) == kKnown.end()) {
+			throw InvalidInputException("align_bowtie2: unknown named parameter '%s'.", kv.first);
+		}
+	}
+
+	bt2_daemon::ConfigJsonBuilder cfg;
 	cfg.append_str("index_path", index_basename);
 
-	for (const auto &kv : named_params) {
-		if (kKnownAlignParams.find(kv.first) == kKnownAlignParams.end()) {
-			throw InvalidInputException("align_bowtie2: unknown named parameter '%s'. "
-			                            "Supported: preset, local, threads, max_secondary, quiet.",
-			                            kv.first);
-		}
-	}
-
-	auto get = [&](const std::string &k) -> const Value * {
-		auto it = named_params.find(k);
-		return (it == named_params.end() || it->second.IsNull()) ? nullptr : &it->second;
-	};
-
-	bool local = false;
-	if (auto *v = get("local")) {
-		local = ValueAsBool("local", *v);
-		cfg.append_bool("local_align", local);
-	}
-	if (auto *v = get("preset")) {
-		const std::string p = ValueAsStr("preset", *v);
-		if (kKnownPresets.find(p) == kKnownPresets.end()) {
-			throw InvalidInputException("align_bowtie2: invalid preset '%s' "
-			                            "(expected one of very-fast/fast/sensitive/very-sensitive)",
-			                            p);
-		}
-		// Daemon understands `*-local` preset variants; compose if user
-		// asked for both. If only `local=true` (no preset), the daemon's
-		// local_align field is enough.
-		const std::string preset_value = local ? (p + "-local") : p;
-		cfg.append_str("preset", preset_value);
-	}
-	if (auto *v = get("threads")) {
-		const int64_t n = ValueAsInt("threads", *v);
+	auto threads_it = named_params.find("threads");
+	if (threads_it != named_params.end() && !threads_it->second.IsNull()) {
+		const int64_t n = bt2_daemon::ValueAsInt("align_bowtie2", "threads", threads_it->second);
 		if (n < 1) {
 			throw InvalidInputException("align_bowtie2: threads must be >= 1 (got %lld)", static_cast<long long>(n));
 		}
 		cfg.append_int("nthreads", n);
 	}
-	if (auto *v = get("max_secondary")) {
-		const int64_t n = ValueAsInt("max_secondary", *v);
-		if (n < 0) {
-			throw InvalidInputException("align_bowtie2: max_secondary must be >= 0 (got %lld)",
-			                            static_cast<long long>(n));
-		}
-		// Daemon's `k` field: number of alignments to report.
-		// Direct-subprocess parity: max_secondary=0 ⇒ default single
-		// alignment per read; max_secondary=N ⇒ report up to N.
-		cfg.append_int("k", n);
-	}
-	// quiet=true (default) ⇒ verbose=false on the daemon. quiet=false flips.
-	bool quiet = true;
-	if (auto *v = get("quiet")) {
-		quiet = ValueAsBool("quiet", *v);
-	}
-	cfg.append_bool("verbose", !quiet);
 
+	bt2_daemon::AppendBowtie2AlignParams(cfg, named_params, "align_bowtie2");
 	return cfg.build();
 }
 
 std::string BuildBuildConfigJson(const std::string &index_basename, int64_t nthreads) {
-	ConfigJsonBuilder cfg;
+	bt2_daemon::ConfigJsonBuilder cfg;
 	cfg.append_str("index_path", index_basename);
 	if (nthreads > 1) {
 		cfg.append_int("nthreads", nthreads);
@@ -553,11 +458,10 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	// Reject unknown named parameters at bind time (BuildAlignConfigJson
 	// duplicates this check, but doing it here too keeps the failure mode
 	// at SQL-compile rather than at execution).
+	static const auto kKnown = MakeKnownAlignParams();
 	for (const auto &kv : bd->named_params) {
-		if (kKnownAlignParams.find(kv.first) == kKnownAlignParams.end()) {
-			throw InvalidInputException("align_bowtie2: unknown named parameter '%s'. "
-			                            "Supported: preset, local, threads, max_secondary, quiet.",
-			                            kv.first);
+		if (kKnown.find(kv.first) == kKnown.end()) {
+			throw InvalidInputException("align_bowtie2: unknown named parameter '%s'.", kv.first);
 		}
 	}
 
@@ -621,7 +525,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	{
 		auto it = bd.named_params.find("threads");
 		if (it != bd.named_params.end() && !it->second.IsNull()) {
-			threads = ValueAsInt("threads", it->second);
+			threads = bt2_daemon::ValueAsInt("align_bowtie2", "threads", it->second);
 			if (threads < 1) {
 				throw InvalidInputException("align_bowtie2: threads must be >= 1 (got %lld)",
 				                            static_cast<long long>(threads));
@@ -872,11 +776,8 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 TableFunction AlignBowtie2TableFunction::GetFunction() {
 	auto tf = TableFunction("align_bowtie2", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal,
 	                        InitLocal);
-	tf.named_parameters["preset"] = LogicalType::VARCHAR;
-	tf.named_parameters["local"] = LogicalType::BOOLEAN;
-	tf.named_parameters["threads"] = LogicalType::INTEGER;
-	tf.named_parameters["max_secondary"] = LogicalType::INTEGER;
-	tf.named_parameters["quiet"] = LogicalType::BOOLEAN;
+	bt2_daemon::RegisterBowtie2AlignNamedParameterTypes(tf);
+	tf.named_parameters["threads"] = LogicalType::INTEGER; // miint-side; maps to daemon nthreads
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }

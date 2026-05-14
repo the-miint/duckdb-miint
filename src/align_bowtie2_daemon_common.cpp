@@ -2,6 +2,7 @@
 
 #include "fastq_encoder.hpp"
 #include "gpl_boundary/arrow_ipc.hpp"
+#include "gpl_boundary/session.hpp"
 
 #include "nanoarrow/nanoarrow.h"
 
@@ -11,6 +12,285 @@ namespace duckdb {
 namespace bt2_daemon {
 
 namespace gb = ::duckdb::miint::gpl_boundary;
+
+// =============================================================================
+// Config builder + param mapping (used by both align_bowtie2 callers)
+// =============================================================================
+
+void ConfigJsonBuilder::append_raw(const std::string &key, const std::string &raw_value) {
+	if (!first) {
+		os << ",";
+	}
+	first = false;
+	os << "\"" << key << "\":" << raw_value;
+}
+
+void ConfigJsonBuilder::append_str(const std::string &key, const std::string &value) {
+	// Route every string through gb::JsonEscape so the builder is safe for
+	// user-controlled values (rg_id, score_min, ...) — no caller has to
+	// remember whether their input is trusted.
+	append_raw(key, "\"" + gb::JsonEscape(value) + "\"");
+}
+
+void ConfigJsonBuilder::append_int(const std::string &key, int64_t value) {
+	append_raw(key, std::to_string(value));
+}
+
+void ConfigJsonBuilder::append_bool(const std::string &key, bool value) {
+	append_raw(key, value ? "true" : "false");
+}
+
+std::string ConfigJsonBuilder::build() const {
+	return "{" + os.str() + "}";
+}
+
+bool ValueAsBool(const char *caller, const std::string &name, const Value &v) {
+	if (v.type().id() != LogicalTypeId::BOOLEAN) {
+		throw InvalidInputException("%s: parameter '%s' expects a boolean, got %s", caller, name, v.type().ToString());
+	}
+	return v.GetValue<bool>();
+}
+
+int64_t ValueAsInt(const char *caller, const std::string &name, const Value &v) {
+	auto t = v.type().id();
+	if (t == LogicalTypeId::INTEGER || t == LogicalTypeId::BIGINT || t == LogicalTypeId::SMALLINT ||
+	    t == LogicalTypeId::TINYINT || t == LogicalTypeId::HUGEINT || t == LogicalTypeId::UINTEGER ||
+	    t == LogicalTypeId::UBIGINT || t == LogicalTypeId::USMALLINT || t == LogicalTypeId::UTINYINT) {
+		return v.GetValue<int64_t>();
+	}
+	throw InvalidInputException("%s: parameter '%s' expects an integer, got %s", caller, name, v.type().ToString());
+}
+
+std::string ValueAsStr(const char *caller, const std::string &name, const Value &v) {
+	if (v.type().id() != LogicalTypeId::VARCHAR) {
+		throw InvalidInputException("%s: parameter '%s' expects a string, got %s", caller, name, v.type().ToString());
+	}
+	return v.GetValue<std::string>();
+}
+
+const std::unordered_set<std::string> kKnownPresets = {"very-fast", "fast", "sensitive", "very-sensitive"};
+const std::unordered_set<std::string> kKnownMateOrientations = {"fr", "rf", "ff"};
+
+// Every bowtie2-align knob the daemon's `--describe` v0.2.0 advertises EXCEPT
+// the per-call internals (`index_path`, `nthreads`) and the caller-owned
+// miint-side knobs (`threads`, `shard_directory`, `read_to_shard`,
+// `max_threads_per_shard`, `include_shard_name`).
+//
+// `no_unal` is intentionally not exposed: the sharded path hard-codes it to
+// true (matches the pre-migration FilterMappedOnly contract) and the
+// non-sharded path leaves it at the daemon default (false) so users can see
+// unaligned rows when they want them. If someone needs explicit no_unal
+// control, expose it then.
+const std::unordered_set<std::string> kCommonAlignParams = {
+    "preset",
+    "local",
+    "max_secondary",
+    "quiet",
+    "seed",
+    "trim5",
+    "trim3",
+    "match_bonus",
+    "mismatch_penalty",
+    "n_penalty",
+    "read_gap_open",
+    "read_gap_extend",
+    "ref_gap_open",
+    "ref_gap_extend",
+    "score_min",
+    "min_insert",
+    "max_insert",
+    "mate_orientation",
+    "no_mixed",
+    "no_discordant",
+    "dovetail",
+    "no_contain",
+    "no_overlap",
+    "nofw",
+    "norc",
+    "seed_mismatches",
+    "seed_length",
+    "max_dp_failures",
+    "max_seed_rounds",
+    "report_all",
+    "xeq",
+    "rg_id",
+    "ignore_quals",
+    "reorder",
+};
+
+void AppendBowtie2AlignParams(ConfigJsonBuilder &cfg, const named_parameter_map_t &named_params, const char *caller) {
+	auto get = [&](const std::string &k) -> const Value * {
+		auto it = named_params.find(k);
+		return (it == named_params.end() || it->second.IsNull()) ? nullptr : &it->second;
+	};
+
+	// 1. Composed preset+local handling — must run before plain preset is
+	//    appended because we may need to compose `<preset>-local`.
+	bool local = false;
+	if (auto *v = get("local")) {
+		local = ValueAsBool(caller, "local", *v);
+		cfg.append_bool("local_align", local);
+	}
+	if (auto *v = get("preset")) {
+		const std::string p = ValueAsStr(caller, "preset", *v);
+		if (kKnownPresets.find(p) == kKnownPresets.end()) {
+			throw InvalidInputException("%s: invalid preset '%s' "
+			                            "(expected one of very-fast/fast/sensitive/very-sensitive)",
+			                            caller, p);
+		}
+		const std::string preset_value = local ? (p + "-local") : p;
+		cfg.append_str("preset", preset_value);
+	}
+
+	// 2. miint-renamed knobs — `max_secondary` → daemon `k`.
+	if (auto *v = get("max_secondary")) {
+		const int64_t n = ValueAsInt(caller, "max_secondary", *v);
+		if (n < 0) {
+			throw InvalidInputException("%s: max_secondary must be >= 0 (got %lld)", caller, static_cast<long long>(n));
+		}
+		cfg.append_int("k", n);
+	}
+
+	// 3. quiet (miint default true) inverts to daemon verbose=false.
+	bool quiet = true;
+	if (auto *v = get("quiet")) {
+		quiet = ValueAsBool(caller, "quiet", *v);
+	}
+	cfg.append_bool("verbose", !quiet);
+
+	// 4. Pass-through integer knobs that are nullable on the daemon side
+	//    (omitting them yields the daemon's mode-dependent defaults; only
+	//    write when the user supplies a value).
+	auto append_nullable_int = [&](const char *param_name, idx_t min_value = 0) {
+		if (auto *v = get(param_name)) {
+			const int64_t n = ValueAsInt(caller, param_name, *v);
+			if (n < static_cast<int64_t>(min_value)) {
+				throw InvalidInputException("%s: %s must be >= %lld (got %lld)", caller, param_name,
+				                            static_cast<long long>(min_value), static_cast<long long>(n));
+			}
+			cfg.append_int(param_name, n);
+		}
+	};
+	append_nullable_int("seed");
+	append_nullable_int("trim5");
+	append_nullable_int("trim3");
+	append_nullable_int("match_bonus");
+	// match_bonus / mismatch_penalty / n_penalty / gap penalties can in
+	// principle be negative on the daemon side (the daemon documents them
+	// as nullable integers, no range constraint). We don't reject negatives
+	// — bowtie2 itself validates the score function makes sense.
+	if (auto *v = get("mismatch_penalty")) {
+		cfg.append_int("mismatch_penalty", ValueAsInt(caller, "mismatch_penalty", *v));
+	}
+	if (auto *v = get("n_penalty")) {
+		cfg.append_int("n_penalty", ValueAsInt(caller, "n_penalty", *v));
+	}
+	if (auto *v = get("read_gap_open")) {
+		cfg.append_int("read_gap_open", ValueAsInt(caller, "read_gap_open", *v));
+	}
+	if (auto *v = get("read_gap_extend")) {
+		cfg.append_int("read_gap_extend", ValueAsInt(caller, "read_gap_extend", *v));
+	}
+	if (auto *v = get("ref_gap_open")) {
+		cfg.append_int("ref_gap_open", ValueAsInt(caller, "ref_gap_open", *v));
+	}
+	if (auto *v = get("ref_gap_extend")) {
+		cfg.append_int("ref_gap_extend", ValueAsInt(caller, "ref_gap_extend", *v));
+	}
+	if (auto *v = get("score_min")) {
+		// String form like "L,-0.6,-0.6"; daemon validates the format.
+		cfg.append_str("score_min", ValueAsStr(caller, "score_min", *v));
+	}
+	append_nullable_int("min_insert");
+	append_nullable_int("max_insert");
+	if (auto *v = get("mate_orientation")) {
+		const std::string mo = ValueAsStr(caller, "mate_orientation", *v);
+		if (kKnownMateOrientations.find(mo) == kKnownMateOrientations.end()) {
+			throw InvalidInputException("%s: invalid mate_orientation '%s' (expected one of fr/rf/ff)", caller, mo);
+		}
+		cfg.append_str("mate_orientation", mo);
+	}
+
+	// 5. Pass-through bools, daemon defaults all false.
+	auto pass_bool = [&](const char *param_name) {
+		if (auto *v = get(param_name)) {
+			cfg.append_bool(param_name, ValueAsBool(caller, param_name, *v));
+		}
+	};
+	pass_bool("no_mixed");
+	pass_bool("no_discordant");
+	pass_bool("dovetail");
+	pass_bool("no_contain");
+	pass_bool("no_overlap");
+	pass_bool("nofw");
+	pass_bool("norc");
+
+	// 6. Seed/DP tuning — nullable integers per the daemon schema.
+	if (auto *v = get("seed_mismatches")) {
+		const int64_t n = ValueAsInt(caller, "seed_mismatches", *v);
+		if (n < 0 || n > 1) {
+			throw InvalidInputException("%s: seed_mismatches must be 0 or 1 (got %lld)", caller,
+			                            static_cast<long long>(n));
+		}
+		cfg.append_int("seed_mismatches", n);
+	}
+	if (auto *v = get("seed_length")) {
+		const int64_t n = ValueAsInt(caller, "seed_length", *v);
+		if (n < 1 || n > 32) {
+			throw InvalidInputException("%s: seed_length must be 1-32 (got %lld)", caller, static_cast<long long>(n));
+		}
+		cfg.append_int("seed_length", n);
+	}
+	append_nullable_int("max_dp_failures", 1);
+	append_nullable_int("max_seed_rounds", 1);
+
+	// 7. Output formatting / misc.
+	pass_bool("report_all");
+	pass_bool("xeq");
+	if (auto *v = get("rg_id")) {
+		cfg.append_str("rg_id", ValueAsStr(caller, "rg_id", *v));
+	}
+	pass_bool("ignore_quals");
+	pass_bool("reorder");
+}
+
+void RegisterBowtie2AlignNamedParameterTypes(TableFunction &tf) {
+	tf.named_parameters["preset"] = LogicalType::VARCHAR;
+	tf.named_parameters["local"] = LogicalType::BOOLEAN;
+	tf.named_parameters["max_secondary"] = LogicalType::INTEGER;
+	tf.named_parameters["quiet"] = LogicalType::BOOLEAN;
+
+	tf.named_parameters["seed"] = LogicalType::INTEGER;
+	tf.named_parameters["trim5"] = LogicalType::INTEGER;
+	tf.named_parameters["trim3"] = LogicalType::INTEGER;
+	tf.named_parameters["match_bonus"] = LogicalType::INTEGER;
+	tf.named_parameters["mismatch_penalty"] = LogicalType::INTEGER;
+	tf.named_parameters["n_penalty"] = LogicalType::INTEGER;
+	tf.named_parameters["read_gap_open"] = LogicalType::INTEGER;
+	tf.named_parameters["read_gap_extend"] = LogicalType::INTEGER;
+	tf.named_parameters["ref_gap_open"] = LogicalType::INTEGER;
+	tf.named_parameters["ref_gap_extend"] = LogicalType::INTEGER;
+	tf.named_parameters["score_min"] = LogicalType::VARCHAR;
+	tf.named_parameters["min_insert"] = LogicalType::INTEGER;
+	tf.named_parameters["max_insert"] = LogicalType::INTEGER;
+	tf.named_parameters["mate_orientation"] = LogicalType::VARCHAR;
+	tf.named_parameters["no_mixed"] = LogicalType::BOOLEAN;
+	tf.named_parameters["no_discordant"] = LogicalType::BOOLEAN;
+	tf.named_parameters["dovetail"] = LogicalType::BOOLEAN;
+	tf.named_parameters["no_contain"] = LogicalType::BOOLEAN;
+	tf.named_parameters["no_overlap"] = LogicalType::BOOLEAN;
+	tf.named_parameters["nofw"] = LogicalType::BOOLEAN;
+	tf.named_parameters["norc"] = LogicalType::BOOLEAN;
+	tf.named_parameters["seed_mismatches"] = LogicalType::INTEGER;
+	tf.named_parameters["seed_length"] = LogicalType::INTEGER;
+	tf.named_parameters["max_dp_failures"] = LogicalType::INTEGER;
+	tf.named_parameters["max_seed_rounds"] = LogicalType::INTEGER;
+	tf.named_parameters["report_all"] = LogicalType::BOOLEAN;
+	tf.named_parameters["xeq"] = LogicalType::BOOLEAN;
+	tf.named_parameters["rg_id"] = LogicalType::VARCHAR;
+	tf.named_parameters["ignore_quals"] = LogicalType::BOOLEAN;
+	tf.named_parameters["reorder"] = LogicalType::BOOLEAN;
+}
 
 const char *const kOutputColumnNames[kNumOutputColumns] = {
     "read_id",        "flags",         "reference",       "position", "stop_position", "mapq",   "cigar",

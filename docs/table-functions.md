@@ -1951,6 +1951,34 @@ Bowtie2 runs out of process via the `gpl-boundary` daemon (an Apache-licensed pr
 - `max_secondary` (INTEGER, default: 1): Maximum alignments to report per query (`-k`)
 - `quiet` (BOOLEAN, default: true): Suppress Bowtie2 stderr output (alignment statistics)
 
+The full bowtie2-align typed parameter set is also exposed (one-to-one with the daemon's `--describe`; integer ranges enforced at bind time):
+
+| Parameter | Type | Notes |
+|---|---|---|
+| `seed` | INTEGER | Random seed for reproducibility |
+| `trim5`, `trim3` | INTEGER | Trim N bases from each end of the read |
+| `match_bonus` | INTEGER | `--ma` |
+| `mismatch_penalty` | INTEGER | `--mp` |
+| `n_penalty` | INTEGER | `--np` (ambiguous base penalty) |
+| `read_gap_open`, `read_gap_extend` | INTEGER | `--rdg arg1,arg2` |
+| `ref_gap_open`, `ref_gap_extend` | INTEGER | `--rfg arg1,arg2` |
+| `score_min` | VARCHAR | Min-score function, e.g. `'L,-0.6,-0.6'` |
+| `min_insert`, `max_insert` | INTEGER | Paired-end fragment-length bounds (`--minins`, `--maxins`) |
+| `mate_orientation` | VARCHAR | One of `'fr'`, `'rf'`, `'ff'` |
+| `no_mixed`, `no_discordant`, `dovetail`, `no_contain`, `no_overlap` | BOOLEAN | Paired-end behavior knobs |
+| `nofw`, `norc` | BOOLEAN | Suppress forward / reverse-complement alignment |
+| `seed_mismatches` | INTEGER | `-N`, must be 0 or 1 |
+| `seed_length` | INTEGER | `-L`, must be 1–32 |
+| `max_dp_failures` | INTEGER | `-D` |
+| `max_seed_rounds` | INTEGER | `-R` |
+| `report_all` | BOOLEAN | `-a`, report all alignments |
+| `xeq` | BOOLEAN | Use `=`/`X` in CIGAR instead of `M` |
+| `rg_id` | VARCHAR | `--rg-id` read group ID |
+| `ignore_quals` | BOOLEAN | Treat all qualities as Phred 30 |
+| `reorder` | BOOLEAN | Preserve input read order in output |
+
+Unknown parameters are rejected at bind time by DuckDB's binder (e.g. `presset := 'fast'` → `Invalid named parameter "presset"`).
+
 **Output schema:**
 Returns the same schema as `read_alignments` (21 columns):
 - `read_id` (VARCHAR): Query sequence identifier
@@ -2067,14 +2095,18 @@ The sharded path emits only mapped reads (the daemon is invoked with `--no-unal`
 - `max_threads_per_shard` (INTEGER, default: 4, range 1–64): bowtie2's internal `nthreads` for each per-shard daemon worker
 - `include_shard_name` (BOOLEAN, default: false): When true, append a `shard_name` column to the output
 - `quiet` (BOOLEAN, default: true): Suppress Bowtie2 stderr output
-- `threads` (INTEGER): Ignored in sharded mode. A warning is printed if set to a value other than 1 — use `max_threads_per_shard` instead
+- `threads` (INTEGER): Ignored in sharded mode. Use DuckDB's `SET threads=N` to control cross-shard parallelism and `max_threads_per_shard` for per-shard bowtie2 threading. A warning is printed at bind if `threads != 1` is passed directly to this function.
+
+The full bowtie2-align typed parameter set listed under [`align_bowtie2`](#align_bowtie2query_table-subject_table-options) above is also available here (same names, same bind-time validation): `seed`, `trim5`, `trim3`, `match_bonus`, `mismatch_penalty`, `n_penalty`, `read_gap_open`, `read_gap_extend`, `ref_gap_open`, `ref_gap_extend`, `score_min`, `min_insert`, `max_insert`, `mate_orientation`, `no_mixed`, `no_discordant`, `dovetail`, `no_contain`, `no_overlap`, `nofw`, `norc`, `seed_mismatches`, `seed_length`, `max_dp_failures`, `max_seed_rounds`, `report_all`, `xeq`, `rg_id`, `ignore_quals`, `reorder`.
+
+The `no_unal` knob is intentionally not exposed: the sharded path always emits only mapped reads (matches the pre-migration `FilterMappedOnly` contract). Use `align_bowtie2` directly if you need to inspect unaligned records.
 
 **Output schema:**
 Returns the same 21-column schema as `align_bowtie2` and `read_alignments`.
 
 **Behavior:**
-- At bind time, reads the `read_to_shard` table to discover shards and validate that each Bowtie2 index exists at `<shard_directory>/<shard_name>/index`
-- Shards are processed sequentially; bowtie2's own threading (`max_threads_per_shard`) provides per-shard parallelism
+- At bind time, reads the `read_to_shard` table to discover shards; per-shard index existence is verified at InitGlobal (not Bind) so the planner doesn't pay filesystem-stat cost on wide shard sets.
+- Cross-shard parallelism is driven by `SET threads`: each DuckDB worker thread owns its own gpl-boundary daemon and claims shards atomically. Per-shard bowtie2 internal threading is driven by `max_threads_per_shard`.
 - For each shard, only the reads assigned to that shard (via the `read_to_shard` mapping) are streamed across the gpl-boundary as Arrow IPC
 - A read can appear in multiple shards and will be aligned against each
 - Unmapped reads (flag 0x4) are filtered out of results (daemon `--no-unal`)

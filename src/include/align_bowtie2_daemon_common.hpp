@@ -14,7 +14,9 @@
 #include "duckdb/function/table_function.hpp"
 
 #include <cstdint>
+#include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 // nanoarrow C ABI is opaque here; the source file pulls in the full header.
@@ -102,6 +104,77 @@ void DecodeListQualToPhred33(const Value &v, const char *col_name, const std::st
 // Tag widening (Int32 → BIGINT) and nullable-Utf8 decoding match the
 // daemon's wire schema.
 void EmitChunkRows(DataChunk &output, idx_t to_emit, idx_t row_start, const ArrowArray &batch);
+
+// =============================================================================
+// Config-JSON builder + parameter validation/mapping for the daemon's
+// bowtie2-align tool.
+//
+// Both align_bowtie2 and align_bowtie2_sharded build the same shape of
+// `config_json` per Submit. The user-facing parameter set is identical
+// modulo three caller-owned knobs:
+//   - align_bowtie2 owns `threads` (maps to `nthreads`); the sharded variant
+//     warns about it instead.
+//   - align_bowtie2_sharded owns `shard_directory`, `read_to_shard`,
+//     `max_threads_per_shard`, `include_shard_name`.
+// Everything else (preset, local, max_secondary, plus the ~30 tunables we
+// added from the daemon's `--describe`) flows through `AppendBowtie2AlignParams`
+// so there's one place to validate / map them.
+// =============================================================================
+
+// Minimal manual JSON object builder. We hand-format rather than yyjson-build
+// because the schema is fixed and the cost of pulling in a full JSON writer
+// for one per-batch message isn't justified. All string values are routed
+// through gb::JsonEscape so the builder is safe for user-controlled strings.
+struct ConfigJsonBuilder {
+	std::ostringstream os;
+	bool first = true;
+
+	void append_raw(const std::string &key, const std::string &raw_value);
+	void append_str(const std::string &key, const std::string &value);
+	void append_int(const std::string &key, int64_t value);
+	void append_bool(const std::string &key, bool value);
+	std::string build() const;
+};
+
+// Param-coercion helpers. Caller name is spliced into the error message so
+// users see `align_bowtie2_sharded: parameter 'preset' expects a string`
+// rather than a generic miint diagnostic.
+bool ValueAsBool(const char *caller, const std::string &name, const Value &v);
+int64_t ValueAsInt(const char *caller, const std::string &name, const Value &v);
+std::string ValueAsStr(const char *caller, const std::string &name, const Value &v);
+
+// Allowed values for the `preset` parameter — short-form names; the
+// daemon's `*-local` variants are composed by `AppendBowtie2AlignParams`
+// from `preset` + `local`.
+extern const std::unordered_set<std::string> kKnownPresets;
+
+// Allowed values for the `mate_orientation` parameter.
+extern const std::unordered_set<std::string> kKnownMateOrientations;
+
+// The universe of bowtie2-align user-facing parameter names that flow to the
+// daemon, minus the per-caller miint-side knobs (threads, shard_directory,
+// read_to_shard, max_threads_per_shard, include_shard_name). Each caller
+// validates a param is in `kCommonAlignParams ∪ <caller-specific>`.
+extern const std::unordered_set<std::string> kCommonAlignParams;
+
+// Walk `named_params` and append every recognized bowtie2-align knob to
+// `cfg` with the daemon's wire-name. Caller is responsible for setting
+// `index_path` and `nthreads` (per-call internals derived from the table
+// function's own state, not the user's params). `caller` is spliced into
+// validation error messages.
+//
+// Composition rules preserved from the direct-subprocess era:
+//   - `local=true` + `preset=X` → daemon `preset=X-local`.
+//   - `quiet=true` (miint default) → daemon `verbose=false`.
+//   - `max_secondary` → daemon `k`.
+//   - `local` → daemon `local_align`.
+// Everything else uses the daemon's wire-name verbatim.
+void AppendBowtie2AlignParams(ConfigJsonBuilder &cfg, const named_parameter_map_t &named_params, const char *caller);
+
+// Apply LogicalType declarations for the bowtie2-align typed parameters to a
+// `TableFunction::named_parameters` map. Both align_bowtie2 and
+// align_bowtie2_sharded call this so the SQL surface stays in lockstep.
+void RegisterBowtie2AlignNamedParameterTypes(TableFunction &tf);
 
 } // namespace bt2_daemon
 } // namespace duckdb
