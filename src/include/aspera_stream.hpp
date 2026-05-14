@@ -94,6 +94,10 @@ int aspera_seq_close(AsperaSeqStream *stream);
 // kseq++ KStreamIn instantiation for Aspera streams
 using AsperaSeqStreamIn = klibpp::KStreamIn<AsperaSeqStream *, int (*)(AsperaSeqStream *, void *, unsigned int)>;
 
+// Owning handle for a raw AsperaSeqStream until it is transferred into a kseq++
+// KStreamIn (see DuckDBSeqStreamHandle for rationale).
+using AsperaSeqStreamHandle = std::unique_ptr<AsperaSeqStream, int (*)(AsperaSeqStream *)>;
+
 // Factory: create an AsperaSeqStream wrapping the current file segment of an AsperaProcess.
 // is_gzipped should be determined from the filename (e.g., ends with .gz).
 // Caller takes ownership (kseq++ close callback deletes it).

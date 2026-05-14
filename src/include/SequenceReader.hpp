@@ -21,17 +21,17 @@ public:
 	                        bool allow_format_mismatch = false);
 
 #ifdef MIINT_STATIC_BUILD
-	// Streaming constructor for remote files via DuckDB FileHandle.
-	// Takes ownership of stream pointers (freed by kseq++ close callback).
-	SequenceReader(DuckDBSeqStream *stream1, DuckDBSeqStream *stream2_or_null, bool allow_format_mismatch = false);
+	// Streaming constructor for remote files via DuckDB FileHandle. Ownership of
+	// the streams is transferred via DuckDBSeqStreamHandle: pass a nullptr-valued
+	// handle (still constructed with the duckdb_seq_close deleter) for the
+	// second slot when the run is single-end.
+	SequenceReader(DuckDBSeqStreamHandle stream1, DuckDBSeqStreamHandle stream2_or_null,
+	               bool allow_format_mismatch = false);
 
 #if MIINT_ASPERA_SUPPORTED
 	// Streaming constructor for Aspera pipe-backed streams.
-	SequenceReader(AsperaSeqStream *stream1, AsperaSeqStream *stream2_or_null, bool allow_format_mismatch = false);
-
-	// Mixed constructor: DuckDB stream for s1 (e.g., temp file), Aspera stream for s2 (live pipe).
-	// Used for paired-end Aspera downloads where R1 is buffered to temp file.
-	SequenceReader(DuckDBSeqStream *stream1, AsperaSeqStream *stream2, bool allow_format_mismatch = false);
+	SequenceReader(AsperaSeqStreamHandle stream1, AsperaSeqStreamHandle stream2_or_null,
+	               bool allow_format_mismatch = false);
 #endif // MIINT_ASPERA_SUPPORTED
 #endif // MIINT_STATIC_BUILD
 

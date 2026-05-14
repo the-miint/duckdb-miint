@@ -134,48 +134,33 @@ void PerRunReader::OpenHTTP() {
 	// HTTP HEAD requests. Reads still proceed in parallel.
 	std::lock_guard<std::mutex> open_guard(open_mutex_);
 
-	// CreateDuckDBSeqStream returns a raw `new`'d pointer. Ownership transfers
-	// to SequenceReader only on successful construction. Until that call
-	// succeeds, we own the streams and MUST clean them up on any throw path —
-	// SequenceReader's constructor does not deallocate on failure, so without
-	// these RAII guards any exception (not just std::runtime_error) leaks.
-	auto stream_deleter = [](DuckDBSeqStream *p) {
-		if (p) {
-			duckdb_seq_close(p);
-		}
-	};
-	std::unique_ptr<DuckDBSeqStream, decltype(stream_deleter)> s1(
-	    duckdb::CreateDuckDBSeqStream(fs_, run_.fastq_urls[0]), stream_deleter);
-	std::unique_ptr<DuckDBSeqStream, decltype(stream_deleter)> s2(nullptr, stream_deleter);
-	if (run_.is_paired && run_.fastq_urls.size() >= 2) {
-		s2.reset(duckdb::CreateDuckDBSeqStream(fs_, run_.fastq_urls[1]));
-	}
+	// DuckDBSeqStreamHandle owns the raw stream until SequenceReader's ctor
+	// transfers ownership into its kseq++ wrapper via .release(). If
+	// SequenceReader throws, the handles passed by value are destructed during
+	// stack unwind; if the kstream wrapper had already taken over, its
+	// destructor frees the stream — no double-free.
+	const bool is_paired_open = run_.is_paired && run_.fastq_urls.size() >= 2;
+	DuckDBSeqStreamHandle s1(duckdb::CreateDuckDBSeqStream(fs_, run_.fastq_urls[0]), duckdb_seq_close);
+	DuckDBSeqStreamHandle s2(is_paired_open ? duckdb::CreateDuckDBSeqStream(fs_, run_.fastq_urls[1]) : nullptr,
+	                         duckdb_seq_close);
 
 	try {
-		fastx_reader_ = std::make_unique<SequenceReader>(s1.get(), s2.get(), true);
-		// SequenceReader took ownership — stop tracking here.
-		s1.release();
-		s2.release();
+		fastx_reader_ = std::make_unique<SequenceReader>(std::move(s1), std::move(s2), true);
 	} catch (const std::runtime_error &e) {
-		if (s2 && std::string(e.what()) == "Empty stream (sequence2)") {
+		if (is_paired_open && std::string(e.what()) == "Empty stream (sequence2)") {
 			// ENA metadata may report PAIRED layout but the second FASTQ file
 			// is actually empty (single-end deposited with PAIRED metadata).
-			// The failed constructor may have consumed the streams; regardless,
-			// our RAII guards will release whichever ones aren't owned by it.
-			// Reopen just the first file and retry as single-end.
-			s1.reset();
-			s2.reset();
-			std::unique_ptr<DuckDBSeqStream, decltype(stream_deleter)> s1_retry(
-			    duckdb::CreateDuckDBSeqStream(fs_, run_.fastq_urls[0]), stream_deleter);
-			fastx_reader_ =
-			    std::make_unique<SequenceReader>(s1_retry.get(), static_cast<DuckDBSeqStream *>(nullptr), true);
-			s1_retry.release();
+			// The previous SequenceReader took (and freed) the original streams
+			// on throw; reopen R1 fresh and retry as single-end.
+			DuckDBSeqStreamHandle s1_retry(duckdb::CreateDuckDBSeqStream(fs_, run_.fastq_urls[0]), duckdb_seq_close);
+			fastx_reader_ = std::make_unique<SequenceReader>(std::move(s1_retry),
+			                                                 DuckDBSeqStreamHandle(nullptr, duckdb_seq_close), true);
 		} else {
-			// s1 / s2 guards clean up automatically on the rethrow.
 			throw;
 		}
 	}
-	// Any other exception type (e.g., IOException) propagates and RAII cleans up.
+	// Other exception types (e.g., IOException) propagate; the handles still
+	// own anything not yet released and clean up on stack unwind.
 }
 
 void PerRunReader::OpenSFF() {
@@ -290,13 +275,9 @@ void PerRunReader::OpenAspera() {
 		std::string gz_hint = filename.empty() ? run_.aspera_paths[0].remote_path : filename;
 		bool is_gz = duckdb::IsGzipped(gz_hint);
 
-		auto *s1 = CreateAsperaSeqStream(aspera_process_.get(), is_gz);
-		try {
-			fastx_reader_ = std::make_unique<SequenceReader>(s1, static_cast<AsperaSeqStream *>(nullptr), true);
-		} catch (...) {
-			delete s1;
-			throw;
-		}
+		AsperaSeqStreamHandle s1(CreateAsperaSeqStream(aspera_process_.get(), is_gz), aspera_seq_close);
+		fastx_reader_ =
+		    std::make_unique<SequenceReader>(std::move(s1), AsperaSeqStreamHandle(nullptr, aspera_seq_close), true);
 		return;
 	}
 
@@ -334,16 +315,9 @@ void PerRunReader::OpenAspera() {
 	bool is_gz1 = duckdb::IsGzipped(f1.empty() ? run_.aspera_paths[0].remote_path : f1);
 	bool is_gz2 = duckdb::IsGzipped(f2.empty() ? run_.aspera_paths[1].remote_path : f2);
 
-	auto *s1 = CreateAsperaSeqStream(aspera_process_.get(), is_gz1);
-	AsperaSeqStream *s2 = nullptr;
-	try {
-		s2 = CreateAsperaSeqStream(aspera_process_paired_.get(), is_gz2);
-		fastx_reader_ = std::make_unique<SequenceReader>(s1, s2, true);
-	} catch (...) {
-		delete s2;
-		delete s1;
-		throw;
-	}
+	AsperaSeqStreamHandle s1(CreateAsperaSeqStream(aspera_process_.get(), is_gz1), aspera_seq_close);
+	AsperaSeqStreamHandle s2(CreateAsperaSeqStream(aspera_process_paired_.get(), is_gz2), aspera_seq_close);
+	fastx_reader_ = std::make_unique<SequenceReader>(std::move(s1), std::move(s2), true);
 }
 
 #endif // MIINT_ASPERA_SUPPORTED

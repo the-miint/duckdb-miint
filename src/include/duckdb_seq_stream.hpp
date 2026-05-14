@@ -1,5 +1,6 @@
 #pragma once
 #include <zlib.h>
+#include <memory>
 #include <kseq++/kseq++.hpp>
 
 #ifdef MIINT_STATIC_BUILD
@@ -84,6 +85,14 @@ int duckdb_seq_close(DuckDBSeqStream *stream);
 
 // kseq++ KStreamIn instantiation for DuckDB streams
 using DuckDBSeqStreamIn = klibpp::KStreamIn<DuckDBSeqStream *, int (*)(DuckDBSeqStream *, void *, unsigned int)>;
+
+// Owning handle for a raw DuckDBSeqStream until it is transferred into a kseq++
+// KStreamIn (i.e., into a SequenceReader). The deleter is duckdb_seq_close,
+// which does `delete stream` — the same operation kseq++'s close callback
+// performs, so handing the handle off to the SequenceReader by value (which
+// .release()s once the kstream wrapper has taken ownership) prevents the
+// double-free that arose from raw-pointer + try/catch ownership dancing.
+using DuckDBSeqStreamHandle = std::unique_ptr<DuckDBSeqStream, int (*)(DuckDBSeqStream *)>;
 
 #endif // MIINT_STATIC_BUILD
 

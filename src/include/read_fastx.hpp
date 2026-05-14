@@ -93,13 +93,12 @@ public:
 			    !sequence2_filepaths.empty() && miint::RemoteFileHelper::IsRemotePath(sequence2_filepaths[file_idx]);
 
 			if (r1_remote || r2_remote) {
-				auto *s1 = CreateDuckDBSeqStream(fs, sequence1_filepaths[file_idx]);
-				miint::DuckDBSeqStream *s2 = nullptr;
-				if (!sequence2_filepaths.empty()) {
-					s2 = CreateDuckDBSeqStream(fs, sequence2_filepaths[file_idx]);
-				}
-				readers[file_idx] =
-				    std::make_unique<miint::SequenceReader>(s1, static_cast<miint::DuckDBSeqStream *>(s2));
+				miint::DuckDBSeqStreamHandle s1(CreateDuckDBSeqStream(fs, sequence1_filepaths[file_idx]),
+				                                miint::duckdb_seq_close);
+				miint::DuckDBSeqStreamHandle s2(
+				    !sequence2_filepaths.empty() ? CreateDuckDBSeqStream(fs, sequence2_filepaths[file_idx]) : nullptr,
+				    miint::duckdb_seq_close);
+				readers[file_idx] = std::make_unique<miint::SequenceReader>(std::move(s1), std::move(s2));
 			} else if (!sequence2_filepaths.empty()) {
 				readers[file_idx] = std::make_unique<miint::SequenceReader>(sequence1_filepaths[file_idx],
 				                                                            sequence2_filepaths[file_idx]);
