@@ -1,24 +1,13 @@
 #include "unifrac_distance.hpp"
 
-#include <mutex>
 #include <stdexcept>
 #include <string>
+
+#include "unifrac_omp_scope.hpp"
 
 namespace miint::unifrac {
 
 namespace {
-
-// Process-wide serialization for libssu calls that touch the global skbb
-// RNG. one_off_matrix_inmem_fp32_v3 with subsample_depth > 0 reads the
-// RNG state set by ssu_set_random_seed; concurrent invocations from
-// multiple DuckDB connections would otherwise interleave seed updates.
-// We always hold the mutex around the libssu call even when
-// subsample_depth == 0 — uniform call site, negligible cost relative to
-// the distance computation itself.
-std::mutex &GlobalRngMutex() {
-	static std::mutex m;
-	return m;
-}
 
 const char *ComputeStatusName(ComputeStatus s) {
 	switch (s) {
@@ -51,10 +40,14 @@ UnifracDistanceMatrix UnifracDistanceMatrix::Compute(const UnifracSupportBiomVie
                                                      const std::string &variant_fp32, bool variance_adjust,
                                                      double alpha, bool bypass_tips, bool normalize_sample_counts,
                                                      uint32_t subsample_depth, bool subsample_with_replacement,
-                                                     int seed) {
+                                                     int seed, int n_threads) {
 	mat_full_fp32_t *mat = nullptr;
 	{
-		std::lock_guard<std::mutex> lock(GlobalRngMutex());
+		// OmpThreadScope holds the process-wide libssu/OpenMP mutex for its
+		// lifetime, so it also covers ssu_set_random_seed's global RNG state
+		// (concurrent invocations from multiple DuckDB connections would
+		// otherwise interleave seed updates).
+		OmpThreadScope omp_scope(n_threads);
 		if (seed >= 0) {
 			ssu_set_random_seed(static_cast<unsigned int>(seed));
 		}

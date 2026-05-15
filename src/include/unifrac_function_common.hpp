@@ -51,4 +51,21 @@ inline std::string AcceptedVariantList() {
 std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, const std::string &table_name,
                                                      const std::string &caller_name);
 
+// Resolve the user-supplied `threads` named parameter into a concrete count
+// that the libssu / scikit-bio-binaries OpenMP regions will run with.
+//
+// Convention:
+//   * `user_value == 0` (unset or explicit 0) → fall back to DuckDB's
+//     TaskScheduler::NumberOfThreads(). We never fall back to OpenMP's
+//     default (all cores) — duckdb-miint always pins thread count to
+//     DuckDB's understanding of the system.
+//   * `user_value > 0`                        → use as-is.
+//   * `user_value < 0`                        → BinderException via caller_name.
+//
+// `caller_name` is the SQL function name used in the error message
+// (e.g., "unifrac_pcoa").
+//
+// Returns a positive int suitable for OmpThreadScope.
+int ResolveThreadsParameter(ClientContext &context, int32_t user_value, const std::string &caller_name);
+
 } // namespace duckdb::unifrac_internal

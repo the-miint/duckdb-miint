@@ -1103,6 +1103,7 @@ if(MIINT_ENABLE_UNIFRAC)
         src/unifrac_bptree.cpp
         src/unifrac_metadata.cpp
         src/unifrac_distance.cpp
+        src/unifrac_omp_scope.cpp
         src/unifrac_subsample_bridge.cpp
         src/unifrac_function_common.cpp
         src/unifrac_pcoa_function.cpp
@@ -1493,6 +1494,7 @@ if(MIINT_ENABLE_UNIFRAC)
         src/unifrac_bptree.cpp
         src/unifrac_metadata.cpp
         src/unifrac_distance.cpp
+        src/unifrac_omp_scope.cpp
         src/unifrac_subsample_bridge.cpp
         test/cpp/test_UnifracSupportBiom.cpp
         test/cpp/test_UnifracBptree.cpp
