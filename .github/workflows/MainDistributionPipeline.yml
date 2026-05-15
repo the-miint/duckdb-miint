@@ -126,7 +126,14 @@ jobs:
 
       - name: Install tutorial test dependencies
         shell: bash -el {0}
-        run: pip install duckdb==$(./build/release/duckdb -csv -noheader -c "SELECT ltrim(version(), 'v');") pyarrow pandas matplotlib
+        # `python3 -m pip` (not bare `pip`) guarantees the install targets the
+        # same interpreter `run_tutorial_tests.sh` invokes below — `pip` on the
+        # runner resolves to system pip (Python 3.12, falls back to user
+        # site-packages because system site is read-only), while `python3`
+        # under `bash -el` resolves to conda base's python3 and would miss
+        # those user-site installs. Keeping pip and the runtime locked to the
+        # same interpreter is what makes `import duckdb` find the package.
+        run: python3 -m pip install duckdb==$(./build/release/duckdb -csv -noheader -c "SELECT ltrim(version(), 'v');") pyarrow pandas matplotlib
 
       - name: Run tutorial tests
         shell: bash -el {0}
