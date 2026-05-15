@@ -1,6 +1,10 @@
 #include <SequenceReader.hpp>
 #include <algorithm>
 
+#ifdef MIINT_STATIC_BUILD
+#include "duckdb/common/exception.hpp"
+#endif
+
 namespace miint {
 // Helper function to extract base read ID by stripping /[1-9] suffix and comments
 static std::string base_read_id(const std::string &id) {
@@ -43,10 +47,28 @@ static void validate_format_consistency(bool is_fasta1, bool is_fasta2, bool all
 	}
 }
 
-// Read from whichever stream variant is active
+// Read from whichever stream variant is active.
+//
+// Errors that originate in our kseq++ read callbacks (duckdb_seq_read /
+// aspera_seq_read) are reported via the thread-local g_seq_read_error
+// channel: the callback writes a message and returns -1, kseq++ surfaces -1
+// as err()/empty-result, and we raise IOException from here. This keeps the
+// throw out of kseq++'s template-instantiated frames, which previously caused
+// a recursive-terminate abort on the aspera path under some failure modes.
 std::vector<klibpp::KSeq> SequenceReader::read_stream(StreamVar &var, int n) {
-	return std::visit([n](auto &reader) { return reader->read(static_cast<std::vector<klibpp::KSeq>::size_type>(n)); },
-	                  var);
+#ifdef MIINT_STATIC_BUILD
+	g_seq_read_error.clear();
+#endif
+	auto result = std::visit(
+	    [n](auto &reader) { return reader->read(static_cast<std::vector<klibpp::KSeq>::size_type>(n)); }, var);
+#ifdef MIINT_STATIC_BUILD
+	if (!g_seq_read_error.empty()) {
+		std::string msg = std::move(g_seq_read_error);
+		g_seq_read_error.clear();
+		throw duckdb::IOException(msg);
+	}
+#endif
+	return result;
 }
 
 SequenceReader::SequenceReader(const std::string &path1, const std::optional<std::string> &path2,

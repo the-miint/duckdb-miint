@@ -369,32 +369,40 @@ AsperaSeqStream::~AsperaSeqStream() {
 }
 
 int aspera_seq_read(AsperaSeqStream *stream, void *dst, unsigned int len) {
-	if (!stream->is_gzipped) {
-		int n = stream->process->ReadBounded(dst, len);
-		if (n < 0) {
-			// ascp pipe returned a hard error (not EOF). Throw so the
-			// read_ena_sequences mid-stream catch records the run as truncated
-			// rather than silently treating the empty batch as completion.
-			throw duckdb::IOException("aspera_seq_read: ascp pipe read failed");
+	// On error: set the thread-local error channel and return -1; SequenceReader
+	// picks it up after kseq++ returns and raises IOException. See
+	// g_seq_read_error docs in duckdb_seq_stream.hpp.
+	try {
+		if (!stream->is_gzipped) {
+			int n = stream->process->ReadBounded(dst, len);
+			if (n < 0) {
+				g_seq_read_error = "aspera_seq_read: ascp pipe read failed";
+				return -1;
+			}
+			return n;
 		}
-		return n;
-	}
 
-	auto read_raw = [stream](void *buf, size_t sz) -> int {
-		// ReadBounded already returns -1 on error; propagate so
-		// InflateFromSource can surface it.
-		return stream->process->ReadBounded(buf, sz);
-	};
+		auto read_raw = [stream](void *buf, size_t sz) -> int {
+			return stream->process->ReadBounded(buf, sz);
+		};
 
-	int result = InflateFromSource(stream->zs, stream->compressed_buf, AsperaSeqStream::COMPRESSED_BUF_SIZE,
-	                               stream->compressed_avail, stream->compressed_next, stream->input_eof,
-	                               stream->stream_end, read_raw, dst, len);
-	if (result < 0) {
-		throw duckdb::IOException(stream->stream_end ? "aspera_seq_read: gzip decompression error"
-		                                             : "aspera_seq_read: gzip stream truncated before end marker "
-		                                               "(ascp transfer likely incomplete)");
+		int result = InflateFromSource(stream->zs, stream->compressed_buf, AsperaSeqStream::COMPRESSED_BUF_SIZE,
+		                               stream->compressed_avail, stream->compressed_next, stream->input_eof,
+		                               stream->stream_end, read_raw, dst, len);
+		if (result < 0) {
+			g_seq_read_error = stream->stream_end ? "aspera_seq_read: gzip decompression error"
+			                                      : "aspera_seq_read: gzip stream truncated before end marker "
+			                                        "(ascp transfer likely incomplete)";
+			return -1;
+		}
+		return result;
+	} catch (const std::exception &e) {
+		g_seq_read_error = std::string("aspera_seq_read: ") + e.what();
+		return -1;
+	} catch (...) {
+		g_seq_read_error = "aspera_seq_read: unknown error";
+		return -1;
 	}
-	return result;
 }
 
 int aspera_seq_close(AsperaSeqStream *stream) {
