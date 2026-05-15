@@ -85,11 +85,21 @@ SequenceReader::SequenceReader(const std::string &path1, const std::optional<std
 }
 
 #ifdef MIINT_STATIC_BUILD
-SequenceReader::SequenceReader(DuckDBSeqStream *stream1, DuckDBSeqStream *stream2_or_null, bool allow_format_mismatch)
+SequenceReader::SequenceReader(DuckDBSeqStreamHandle stream1, DuckDBSeqStreamHandle stream2_or_null,
+                               bool allow_format_mismatch)
     : first_read_(true) {
-	sequence1_reader_ = std::make_unique<DuckDBSeqStreamIn>(stream1, duckdb_seq_read, duckdb_seq_close);
+	// Ownership protocol: each input handle owns its raw pointer until the
+	// matching make_unique<KStreamIn>() succeeds. Holding the kstream in a
+	// local before `release()` and the variant move-assign closes any window
+	// where two owners could exist: if make_unique throws, the input handle
+	// still owns the stream and frees it on unwind; if make_unique succeeds,
+	// `release()` runs before any variant op, and the variant move-assign
+	// from rvalue unique_ptr is noexcept. On any later peek throwing, the
+	// kstream wrapper (now inside the variant) is the sole owner.
+	auto kstream1 = std::make_unique<DuckDBSeqStreamIn>(stream1.get(), duckdb_seq_read, duckdb_seq_close);
+	stream1.release();
+	sequence1_reader_ = std::move(kstream1);
 
-	// Check if first stream is empty by attempting to peek at first record
 	buffered_read1_ = read_stream(sequence1_reader_, 1);
 	bool is_empty1 = buffered_read1_.empty();
 	bool is_fasta1 = !is_empty1 && buffered_read1_[0].qual.empty();
@@ -98,10 +108,11 @@ SequenceReader::SequenceReader(DuckDBSeqStream *stream1, DuckDBSeqStream *stream
 		throw std::runtime_error("Empty stream");
 	}
 
-	paired_ = (stream2_or_null != nullptr);
+	paired_ = (stream2_or_null.get() != nullptr);
 	if (paired_) {
-		sequence2_reader_.emplace(
-		    std::make_unique<DuckDBSeqStreamIn>(stream2_or_null, duckdb_seq_read, duckdb_seq_close));
+		auto kstream2 = std::make_unique<DuckDBSeqStreamIn>(stream2_or_null.get(), duckdb_seq_read, duckdb_seq_close);
+		stream2_or_null.release();
+		sequence2_reader_.emplace(std::move(kstream2));
 
 		buffered_read2_ = read_stream(sequence2_reader_.value(), 1);
 		bool is_empty2 = buffered_read2_.empty();
@@ -116,14 +127,23 @@ SequenceReader::SequenceReader(DuckDBSeqStream *stream1, DuckDBSeqStream *stream
 }
 
 #if MIINT_ASPERA_SUPPORTED
-SequenceReader::SequenceReader(AsperaSeqStream *stream1, AsperaSeqStream *stream2_or_null, bool allow_format_mismatch)
+SequenceReader::SequenceReader(AsperaSeqStreamHandle stream1, AsperaSeqStreamHandle stream2_or_null,
+                               bool allow_format_mismatch)
     : first_read_(true) {
-	// Take ownership of both pointers immediately so they are cleaned up on throw
-	sequence1_reader_ = std::make_unique<AsperaSeqStreamIn>(stream1, aspera_seq_read, aspera_seq_close);
-	paired_ = (stream2_or_null != nullptr);
+	// See ownership protocol on the DuckDB+DuckDB ctor above. Unlike that
+	// ctor, both kstream wrappers are constructed up front before either
+	// peek: Aspera streams are backed by live ascp pipes, and ordering the
+	// transfers/peeks per-stream would interleave reads from the two
+	// processes in ways the original (pre-handle) code took care to avoid.
+	auto kstream1 = std::make_unique<AsperaSeqStreamIn>(stream1.get(), aspera_seq_read, aspera_seq_close);
+	stream1.release();
+	sequence1_reader_ = std::move(kstream1);
+
+	paired_ = (stream2_or_null.get() != nullptr);
 	if (paired_) {
-		sequence2_reader_.emplace(
-		    std::make_unique<AsperaSeqStreamIn>(stream2_or_null, aspera_seq_read, aspera_seq_close));
+		auto kstream2 = std::make_unique<AsperaSeqStreamIn>(stream2_or_null.get(), aspera_seq_read, aspera_seq_close);
+		stream2_or_null.release();
+		sequence2_reader_.emplace(std::move(kstream2));
 	}
 
 	buffered_read1_ = read_stream(sequence1_reader_, 1);
@@ -141,28 +161,6 @@ SequenceReader::SequenceReader(AsperaSeqStream *stream1, AsperaSeqStream *stream
 
 		validate_format_consistency(is_fasta1, is_fasta2, allow_format_mismatch);
 	}
-}
-
-SequenceReader::SequenceReader(DuckDBSeqStream *stream1, AsperaSeqStream *stream2, bool allow_format_mismatch)
-    : first_read_(true) {
-	// Take ownership of both pointers immediately so they are cleaned up on throw
-	sequence1_reader_ = std::make_unique<DuckDBSeqStreamIn>(stream1, duckdb_seq_read, duckdb_seq_close);
-	paired_ = true;
-	sequence2_reader_.emplace(std::make_unique<AsperaSeqStreamIn>(stream2, aspera_seq_read, aspera_seq_close));
-
-	buffered_read1_ = read_stream(sequence1_reader_, 1);
-	if (buffered_read1_.empty()) {
-		throw std::runtime_error("Empty stream");
-	}
-	bool is_fasta1 = buffered_read1_[0].qual.empty();
-
-	buffered_read2_ = read_stream(sequence2_reader_.value(), 1);
-	if (buffered_read2_.empty()) {
-		throw std::runtime_error("Empty stream (sequence2)");
-	}
-	bool is_fasta2 = buffered_read2_[0].qual.empty();
-
-	validate_format_consistency(is_fasta1, is_fasta2, allow_format_mismatch);
 }
 #endif // MIINT_ASPERA_SUPPORTED
 #endif // MIINT_STATIC_BUILD
