@@ -12,6 +12,7 @@
 #include "unifrac_bptree.hpp"
 #include "unifrac_function_common.hpp"
 #include "unifrac_libssu.hpp"
+#include "unifrac_omp_scope.hpp"
 #include "unifrac_subsample_bridge.hpp"
 #include "unifrac_support_biom.hpp"
 
@@ -27,6 +28,7 @@ namespace duckdb {
 namespace {
 
 using unifrac_internal::ReadFeatureTable;
+using unifrac_internal::ResolveThreadsParameter;
 
 struct FaithPdRow {
 	int32_t iteration;
@@ -90,10 +92,17 @@ private:
 // downstream SQL queries should ORDER BY sample_id regardless rather than
 // rely on this implementation detail.
 void RunFaithPd(const miint::unifrac::UnifracSupportBiomView &biom_view,
-                const miint::unifrac::UnifracBptreeView &bptree_view, int32_t iteration_index,
+                const miint::unifrac::UnifracBptreeView &bptree_view, int n_threads, int32_t iteration_index,
                 std::vector<FaithPdRow> &out_rows) {
 	ResultsVecHandle result;
-	ComputeStatus status = faith_pd_inmem(biom_view.support_biom(), bptree_view.support_bptree(), result.out());
+	ComputeStatus status;
+	{
+		// faith_pd_inmem internally uses libssu's OpenMP-parallel tree
+		// traversal; pin its fan-out to n_threads under the process-wide
+		// libssu/OpenMP mutex so concurrent queries can't race.
+		miint::unifrac::OmpThreadScope omp_scope(n_threads);
+		status = faith_pd_inmem(biom_view.support_biom(), bptree_view.support_bptree(), result.out());
+	}
 	if (status != okay) {
 		throw InvalidInputException("unifrac_faith_pd: libssu faith_pd_inmem returned status %d",
 		                            static_cast<int>(status));
@@ -124,6 +133,7 @@ unique_ptr<FunctionData> UnifracFaithPdBind(ClientContext &context, TableFunctio
 	bool subsample_with_replacement = false;
 	int32_t n_subsamples = 1;
 	int32_t seed = -1;
+	int32_t threads = 0; // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
 	for (const auto &kv : input.named_parameters) {
 		const auto key = StringUtil::Lower(kv.first);
 		if (key == "subsample_depth") {
@@ -134,8 +144,11 @@ unique_ptr<FunctionData> UnifracFaithPdBind(ClientContext &context, TableFunctio
 			n_subsamples = kv.second.GetValue<int32_t>();
 		} else if (key == "seed") {
 			seed = kv.second.GetValue<int32_t>();
+		} else if (key == "threads") {
+			threads = kv.second.GetValue<int32_t>();
 		}
 	}
+	const int n_threads = ResolveThreadsParameter(context, threads, "unifrac_faith_pd");
 
 	if (n_subsamples < 1) {
 		throw BinderException("unifrac_faith_pd: n_subsamples must be >= 1 (got %d)", n_subsamples);
@@ -188,7 +201,7 @@ unique_ptr<FunctionData> UnifracFaithPdBind(ClientContext &context, TableFunctio
 	if (subsample_depth == 0) {
 		// No subsampling: n_subsamples > 1 is already rejected above, so this
 		// branch always runs exactly once with iteration_index=0.
-		RunFaithPd(biom_view, bptree_view, /*iteration_index*/ 0, data->rows);
+		RunFaithPd(biom_view, bptree_view, n_threads, /*iteration_index*/ 0, data->rows);
 	} else {
 		const auto depth = static_cast<uint32_t>(subsample_depth);
 		for (int32_t i = 0; i < n_subsamples; ++i) {
@@ -203,7 +216,7 @@ unique_ptr<FunctionData> UnifracFaithPdBind(ClientContext &context, TableFunctio
 					throw InvalidInputException("unifrac_faith_pd: %s", e.what());
 				}
 			}();
-			RunFaithPd(sub, bptree_view, i, data->rows);
+			RunFaithPd(sub, bptree_view, n_threads, i, data->rows);
 		}
 	}
 
@@ -258,6 +271,7 @@ void RegisterUnifracFaithPD(ExtensionLoader &loader) {
 	fn.named_parameters["subsample_with_replacement"] = LogicalType::BOOLEAN;
 	fn.named_parameters["n_subsamples"] = LogicalType::INTEGER;
 	fn.named_parameters["seed"] = LogicalType::INTEGER;
+	fn.named_parameters["threads"] = LogicalType::INTEGER;
 	loader.RegisterFunction(fn);
 }
 

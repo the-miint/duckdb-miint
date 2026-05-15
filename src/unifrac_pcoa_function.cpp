@@ -12,6 +12,7 @@
 #include "unifrac_bptree.hpp"
 #include "unifrac_distance.hpp"
 #include "unifrac_function_common.hpp"
+#include "unifrac_omp_scope.hpp"
 #include "unifrac_support_biom.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -31,6 +32,7 @@ namespace {
 using unifrac_internal::AcceptedVariantList;
 using unifrac_internal::IsValidVariant;
 using unifrac_internal::ReadFeatureTable;
+using unifrac_internal::ResolveThreadsParameter;
 
 struct PcoaRow {
 	int32_t iteration;
@@ -66,7 +68,7 @@ void ComputeOneIteration(const miint::unifrac::UnifracSupportBiomView &biom_view
                          const miint::unifrac::UnifracBptreeView &bptree_view, const std::string &variant_fp32,
                          bool variance_adjust, double alpha, bool bypass_tips, bool normalize_sample_counts,
                          uint32_t subsample_depth, bool subsample_with_replacement, int seed_iter, uint32_t n_dims,
-                         int32_t iteration_index, std::vector<PcoaRow> &out_rows) {
+                         int n_threads, int32_t iteration_index, std::vector<PcoaRow> &out_rows) {
 	// UnifracDistanceMatrix::Compute throws std::runtime_error on libssu
 	// errors (unknown_method, table_empty, table_and_tree_do_not_overlap,
 	// output_error). The tree/feature mismatch case is already caught
@@ -76,7 +78,7 @@ void ComputeOneIteration(const miint::unifrac::UnifracSupportBiomView &biom_view
 		try {
 			return miint::unifrac::UnifracDistanceMatrix::Compute(
 			    biom_view, bptree_view, variant_fp32, variance_adjust, alpha, bypass_tips, normalize_sample_counts,
-			    subsample_depth, subsample_with_replacement, seed_iter);
+			    subsample_depth, subsample_with_replacement, seed_iter, n_threads);
 		} catch (const std::runtime_error &e) {
 			throw InvalidInputException("unifrac_pcoa: %s", e.what());
 		}
@@ -97,9 +99,15 @@ void ComputeOneIteration(const miint::unifrac::UnifracSupportBiomView &biom_view
 	std::vector<float> samples(static_cast<size_t>(actual_n_samples) * n_dims);
 	std::vector<float> prop(n_dims);
 
-	// skbb_pcoa_fsvd_fp32 uses its own per-call seed; no libssu mutex needed.
-	skbb_pcoa_fsvd_fp32(actual_n_samples, dist.matrix(), n_dims, seed_iter, eigvals.data(), samples.data(),
-	                    prop.data());
+	// skbb_pcoa_fsvd_fp32 uses its own per-call seed for randomization, but its
+	// `#pragma omp parallel for` regions (principal_coordinate_analysis.cpp)
+	// still need the process-wide OpenMP serialization so concurrent queries
+	// don't race on omp_set_num_threads.
+	{
+		miint::unifrac::OmpThreadScope omp_scope(n_threads);
+		skbb_pcoa_fsvd_fp32(actual_n_samples, dist.matrix(), n_dims, seed_iter, eigvals.data(), samples.data(),
+		                    prop.data());
+	}
 
 	// samples is laid out (actual_n_samples × n_dims), sample-major. The header
 	// comment in ordination.h reads "(n_eighs × n_dims)" but the actual
@@ -145,6 +153,7 @@ unique_ptr<FunctionData> UnifracPcoaBind(ClientContext &context, TableFunctionBi
 	bool subsample_with_replacement = false;
 	int32_t n_subsamples = 1;
 	int32_t seed = -1;
+	int32_t threads = 0; // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
 	for (const auto &kv : input.named_parameters) {
 		const auto key = StringUtil::Lower(kv.first);
 		if (key == "variant") {
@@ -167,8 +176,11 @@ unique_ptr<FunctionData> UnifracPcoaBind(ClientContext &context, TableFunctionBi
 			n_subsamples = kv.second.GetValue<int32_t>();
 		} else if (key == "seed") {
 			seed = kv.second.GetValue<int32_t>();
+		} else if (key == "threads") {
+			threads = kv.second.GetValue<int32_t>();
 		}
 	}
+	const int n_threads = ResolveThreadsParameter(context, threads, "unifrac_pcoa");
 
 	if (!IsValidVariant(variant)) {
 		throw BinderException("unifrac_pcoa: variant '%s' is not valid. Accepted variants: %s", variant,
@@ -249,7 +261,7 @@ unique_ptr<FunctionData> UnifracPcoaBind(ClientContext &context, TableFunctionBi
 		const int seed_iter = (seed >= 0) ? (seed + i) : -1;
 		ComputeOneIteration(biom_view, bptree_view, variant_fp32, variance_adjust, alpha, bypass_tips,
 		                    normalize_sample_counts, static_cast<uint32_t>(subsample_depth), subsample_with_replacement,
-		                    seed_iter, static_cast<uint32_t>(n_dims), i, data->rows);
+		                    seed_iter, static_cast<uint32_t>(n_dims), n_threads, i, data->rows);
 	}
 
 	names.emplace_back("iteration");
@@ -322,6 +334,7 @@ void RegisterUnifracPcoa(ExtensionLoader &loader) {
 	fn.named_parameters["subsample_with_replacement"] = LogicalType::BOOLEAN;
 	fn.named_parameters["n_subsamples"] = LogicalType::INTEGER;
 	fn.named_parameters["seed"] = LogicalType::INTEGER;
+	fn.named_parameters["threads"] = LogicalType::INTEGER;
 	loader.RegisterFunction(fn);
 }
 

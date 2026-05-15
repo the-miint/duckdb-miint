@@ -14,6 +14,7 @@
 #include "unifrac_distance.hpp"
 #include "unifrac_function_common.hpp"
 #include "unifrac_metadata.hpp"
+#include "unifrac_omp_scope.hpp"
 #include "unifrac_support_biom.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -36,6 +37,7 @@ namespace {
 using unifrac_internal::AcceptedVariantList;
 using unifrac_internal::IsValidVariant;
 using unifrac_internal::ReadFeatureTable;
+using unifrac_internal::ResolveThreadsParameter;
 
 struct PermanovaRow {
 	int32_t iteration;
@@ -185,7 +187,7 @@ void ComputeOneIteration(const miint::unifrac::UnifracSupportBiomView &biom_view
                          uint32_t subsample_depth, bool subsample_with_replacement,
                          const std::vector<miint::unifrac::MetadataRow> &metadata_rows,
                          const std::vector<std::string> &requested_variables, int seed_iter, uint32_t n_permutations,
-                         int32_t iteration_index, std::vector<PermanovaRow> &out_rows) {
+                         int n_threads, int32_t iteration_index, std::vector<PermanovaRow> &out_rows) {
 	// UnifracDistanceMatrix::Compute throws std::runtime_error on libssu
 	// errors. The tree/feature mismatch case is already caught upstream by
 	// ValidateTreeCoversFeatures, so anything reaching here is a libssu
@@ -194,7 +196,7 @@ void ComputeOneIteration(const miint::unifrac::UnifracSupportBiomView &biom_view
 		try {
 			return miint::unifrac::UnifracDistanceMatrix::Compute(
 			    biom_view, bptree_view, variant_fp32, variance_adjust, alpha, bypass_tips, normalize_sample_counts,
-			    subsample_depth, subsample_with_replacement, seed_iter);
+			    subsample_depth, subsample_with_replacement, seed_iter, n_threads);
 		} catch (const std::runtime_error &e) {
 			throw InvalidInputException("unifrac_permanova: %s", e.what());
 		}
@@ -209,14 +211,20 @@ void ComputeOneIteration(const miint::unifrac::UnifracSupportBiomView &biom_view
 
 	const uint32_t n_samples = dist.n_samples();
 	for (const auto &grouping : groupings) {
-		// skbb_permanova_fp32 takes its own per-call seed (no libssu mutex
-		// needed). Using seed_iter across all variables in an iteration
-		// guarantees the Rule-7 invariant: identical groupings under the
-		// same distance matrix produce identical pseudo-F.
+		// skbb_permanova_fp32 takes its own per-call seed for randomization,
+		// but its `#pragma omp parallel for` regions (permanova.cpp) still
+		// need the process-wide OpenMP serialization so concurrent queries
+		// don't race on omp_set_num_threads. Using seed_iter across all
+		// variables in an iteration guarantees the Rule-7 invariant:
+		// identical groupings under the same distance matrix produce
+		// identical pseudo-F.
 		float f_stat = 0.0f;
 		float p_value = 0.0f;
-		skbb_permanova_fp32(n_samples, dist.matrix(), grouping.labels.data(), n_permutations, seed_iter, &f_stat,
-		                    &p_value);
+		{
+			miint::unifrac::OmpThreadScope omp_scope(n_threads);
+			skbb_permanova_fp32(n_samples, dist.matrix(), grouping.labels.data(), n_permutations, seed_iter, &f_stat,
+			                    &p_value);
+		}
 		PermanovaRow row;
 		row.iteration = iteration_index;
 		row.variable = grouping.variable;
@@ -252,6 +260,7 @@ unique_ptr<FunctionData> UnifracPermanovaBind(ClientContext &context, TableFunct
 	bool subsample_with_replacement = false;
 	int32_t n_subsamples = 1;
 	int32_t seed = -1;
+	int32_t threads = 0; // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
 	for (const auto &kv : input.named_parameters) {
 		const auto key = StringUtil::Lower(kv.first);
 		if (key == "variant") {
@@ -280,8 +289,11 @@ unique_ptr<FunctionData> UnifracPermanovaBind(ClientContext &context, TableFunct
 			n_subsamples = kv.second.GetValue<int32_t>();
 		} else if (key == "seed") {
 			seed = kv.second.GetValue<int32_t>();
+		} else if (key == "threads") {
+			threads = kv.second.GetValue<int32_t>();
 		}
 	}
+	const int n_threads = ResolveThreadsParameter(context, threads, "unifrac_permanova");
 
 	if (!IsValidVariant(variant)) {
 		throw BinderException("unifrac_permanova: variant '%s' is not valid. Accepted variants: %s", variant,
@@ -357,8 +369,8 @@ unique_ptr<FunctionData> UnifracPermanovaBind(ClientContext &context, TableFunct
 		const int seed_iter = (seed >= 0) ? (seed + i) : -1;
 		ComputeOneIteration(biom_view, bptree_view, variant_fp32, variance_adjust, alpha, bypass_tips,
 		                    normalize_sample_counts, static_cast<uint32_t>(subsample_depth), subsample_with_replacement,
-		                    metadata.rows, metadata.column_names, seed_iter, static_cast<uint32_t>(n_permutations), i,
-		                    data->rows);
+		                    metadata.rows, metadata.column_names, seed_iter, static_cast<uint32_t>(n_permutations),
+		                    n_threads, i, data->rows);
 	}
 
 	names.emplace_back("iteration");
@@ -431,6 +443,7 @@ void RegisterUnifracPermanova(ExtensionLoader &loader) {
 	fn.named_parameters["subsample_with_replacement"] = LogicalType::BOOLEAN;
 	fn.named_parameters["n_subsamples"] = LogicalType::INTEGER;
 	fn.named_parameters["seed"] = LogicalType::INTEGER;
+	fn.named_parameters["threads"] = LogicalType::INTEGER;
 	loader.RegisterFunction(fn);
 }
 

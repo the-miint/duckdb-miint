@@ -3,11 +3,13 @@
 #include <cmath>
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 
 namespace duckdb::unifrac_internal {
 
@@ -61,6 +63,19 @@ std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, con
 		}
 	}
 	return rows;
+}
+
+int ResolveThreadsParameter(ClientContext &context, int32_t user_value, const std::string &caller_name) {
+	if (user_value < 0) {
+		throw BinderException("%s: threads must be >= 0 (got %d; use 0 to follow DuckDB's thread count)", caller_name,
+		                      user_value);
+	}
+	if (user_value > 0) {
+		return static_cast<int>(user_value);
+	}
+	// user_value == 0 → follow DuckDB. NumberOfThreads() is always >= 1.
+	const auto db_threads = TaskScheduler::GetScheduler(context).NumberOfThreads();
+	return NumericCast<int>(db_threads);
 }
 
 } // namespace duckdb::unifrac_internal

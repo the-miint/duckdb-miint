@@ -26,16 +26,21 @@ namespace miint::unifrac {
 // size. Always trust these values, never the pre-subsample
 // `ordered_sample_ids` from the input biom view.
 //
-// Thread safety: Compute() takes the process-wide libssu RNG mutex
-// internally — callers don't need to. The mutex is held only across
-// ssu_set_random_seed + one_off_matrix_inmem_fp32_v3, not for the
-// caller's downstream work on the returned matrix.
+// Thread safety: Compute() takes the process-wide libssu/OpenMP mutex
+// (via OmpThreadScope) internally — callers don't need to. The mutex is
+// held only across ssu_set_random_seed + one_off_matrix_inmem_fp32_v3,
+// not for the caller's downstream work on the returned matrix.
+//
+// `n_threads` pins the libssu OpenMP fan-out (must be >= 1). Callers
+// should resolve from DuckDB's TaskScheduler::NumberOfThreads() via
+// ResolveThreadsParameter; unit tests pass 1 to keep test wall time
+// independent of host core count.
 class UnifracDistanceMatrix {
 public:
 	static UnifracDistanceMatrix Compute(const UnifracSupportBiomView &biom_view, const UnifracBptreeView &bptree_view,
 	                                     const std::string &variant_fp32, bool variance_adjust, double alpha,
 	                                     bool bypass_tips, bool normalize_sample_counts, uint32_t subsample_depth,
-	                                     bool subsample_with_replacement, int seed);
+	                                     bool subsample_with_replacement, int seed, int n_threads);
 
 	~UnifracDistanceMatrix();
 	UnifracDistanceMatrix(UnifracDistanceMatrix &&other) noexcept;

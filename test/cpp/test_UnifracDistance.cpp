@@ -50,7 +50,7 @@ TEST_CASE("UnifracDistanceMatrix computes a symmetric matrix with zero diagonal"
 	                                           /*variance_adjust*/ false, /*alpha*/ 1.0,
 	                                           /*bypass_tips*/ false, /*normalize_sample_counts*/ true,
 	                                           /*subsample_depth*/ 0, /*subsample_with_replacement*/ false,
-	                                           /*seed*/ 42);
+	                                           /*seed*/ 42, /*n_threads*/ 1);
 
 	REQUIRE(dist.n_samples() == 4);
 	REQUIRE(dist.sample_ids().size() == 4);
@@ -86,7 +86,7 @@ TEST_CASE("UnifracDistanceMatrix subsample_depth drops samples whose total count
 	                                           /*variance_adjust*/ false, /*alpha*/ 1.0,
 	                                           /*bypass_tips*/ false, /*normalize_sample_counts*/ true,
 	                                           /*subsample_depth*/ 2, /*subsample_with_replacement*/ false,
-	                                           /*seed*/ 42);
+	                                           /*seed*/ 42, /*n_threads*/ 1);
 
 	REQUIRE(dist.n_samples() == 3);
 	REQUIRE(dist.sample_ids().size() == 3);
@@ -101,7 +101,7 @@ TEST_CASE("UnifracDistanceMatrix is move-only and transfers ownership cleanly", 
 	// to be airtight so that destroy_mat_full_fp32 is called exactly once.
 	auto fixture = MakeLiveFixture();
 	auto dist = UnifracDistanceMatrix::Compute(fixture.biom, fixture.bptree, "weighted_normalized_fp32", false, 1.0,
-	                                           false, true, 0, false, 42);
+	                                           false, true, 0, false, 42, /*n_threads*/ 1);
 	const float *original_matrix = dist.matrix();
 	const uint32_t original_n = dist.n_samples();
 	REQUIRE(original_n == 4);
@@ -116,8 +116,9 @@ TEST_CASE("UnifracDistanceMatrix is move-only and transfers ownership cleanly", 
 
 	// Move assignment: a second target steals from the first; destructor
 	// of the first must NOT double-free the libssu pointer.
-	UnifracDistanceMatrix second = UnifracDistanceMatrix::Compute(
-	    fixture.biom, fixture.bptree, "weighted_normalized_fp32", false, 1.0, false, true, 0, false, 42);
+	UnifracDistanceMatrix second =
+	    UnifracDistanceMatrix::Compute(fixture.biom, fixture.bptree, "weighted_normalized_fp32", false, 1.0, false,
+	                                   true, 0, false, 42, /*n_threads*/ 1);
 	REQUIRE(second.matrix() != nullptr);
 	second = std::move(moved);
 	REQUIRE(second.n_samples() == 4);
@@ -134,6 +135,7 @@ TEST_CASE("UnifracDistanceMatrix surfaces libssu errors via std::runtime_error",
 	                                                 /*variance_adjust*/ false, /*alpha*/ 1.0,
 	                                                 /*bypass_tips*/ false, /*normalize_sample_counts*/ true,
 	                                                 /*subsample_depth*/ 0,
-	                                                 /*subsample_with_replacement*/ false, /*seed*/ -1),
+	                                                 /*subsample_with_replacement*/ false, /*seed*/ -1,
+	                                                 /*n_threads*/ 1),
 	                  std::runtime_error);
 }
