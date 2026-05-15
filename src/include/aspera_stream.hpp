@@ -88,7 +88,9 @@ struct AsperaSeqStream {
 	AsperaSeqStream &operator=(const AsperaSeqStream &) = delete;
 };
 
-// kseq++ callbacks
+// kseq++ callbacks. aspera_seq_read never throws — on error it writes a
+// message to miint::g_seq_read_error and returns -1; SequenceReader inspects
+// the channel after kseq++ returns and raises IOException.
 int aspera_seq_read(AsperaSeqStream *stream, void *dst, unsigned int len);
 int aspera_seq_close(AsperaSeqStream *stream);
 

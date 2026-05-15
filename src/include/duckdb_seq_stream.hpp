@@ -1,6 +1,7 @@
 #pragma once
 #include <zlib.h>
 #include <memory>
+#include <string>
 #include <kseq++/kseq++.hpp>
 
 #ifdef MIINT_STATIC_BUILD
@@ -8,6 +9,20 @@
 #endif
 
 namespace miint {
+
+// Per-thread error channel for the kseq++ read callbacks (`duckdb_seq_read`,
+// `aspera_seq_read`). We deliberately avoid throwing from inside those
+// callbacks: they're invoked deep inside kseq++'s template machinery, and
+// throwing across that boundary risked a recursive-terminate abort observed in
+// the field. Instead, on error the callback writes a human-readable message
+// here and returns -1 (which kseq++ tolerates cleanly via its err() flag), and
+// `SequenceReader::read_stream` checks this string after kseq++ returns and
+// raises `duckdb::IOException` from a frame we control.
+//
+// Lifetime: thread_local, so concurrent reads on different threads don't
+// stomp each other. `read_stream` clears it before each kseq call and consumes
+// it afterward.
+extern thread_local std::string g_seq_read_error;
 
 // Shared zlib inflate helper used by both DuckDBSeqStream and AsperaSeqStream.
 // ReadRawFn signature: int(void *dst, size_t len) — returns bytes read (>0), 0=EOF, <0=error.
