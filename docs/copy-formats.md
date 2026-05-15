@@ -94,15 +94,21 @@ TO 'output.fasta.gz' (FORMAT FASTA, INCLUDE_COMMENT true);
 Write query results to SAM or BAM format files. Requires all mandatory SAM columns from `read_alignments` output.
 
 **Required columns:**
-- `read_id` (VARCHAR): Query template name
+- `read_id` (VARCHAR or BIGINT): Query template name
 - `flags` (USMALLINT): Bitwise flags
-- `reference` (VARCHAR): Reference sequence name
+- `reference` (VARCHAR or BIGINT): Reference sequence name
 - `position` (BIGINT): 1-based leftmost mapping position
 - `mapq` (UTINYINT): Mapping quality
 - `cigar` (VARCHAR): CIGAR string
-- `mate_reference` (VARCHAR): Reference name of mate/next read
+- `mate_reference` (VARCHAR or BIGINT): Reference name of mate/next read
 - `mate_position` (BIGINT): Position of mate/next read
 - `template_length` (BIGINT): Observed template length
+
+**Identifier-column types (`read_id`, `reference`, `mate_reference`):**
+- Each column is independently `VARCHAR` or `BIGINT`. The three need not match. Other numeric types are rejected at bind time with the message `Column '<name>' must be VARCHAR or BIGINT`.
+- `BIGINT` values are stringified to decimal on write — the on-disk SAM/BAM record always carries text. NULL `BIGINT` values are written as the SAM `*` sentinel.
+- Round-trip through `read_alignments` / `read_sam` returns these columns as `VARCHAR` regardless of how they were written; the BIGINT type is not preserved on disk.
+- HTSlib normalises `RNEXT` to `=` when it equals `RNAME` at the reference-tid level. This applies to both VARCHAR and BIGINT writes — a `BIGINT` mate_reference that matches `reference` still appears as `=` when the file is read back.
 
 **Optional columns:**
 - `tag_as`, `tag_xs`, `tag_ys`, `tag_xn`, `tag_xm`, `tag_xo`, `tag_xg`, `tag_nm` (BIGINT): Optional integer tags

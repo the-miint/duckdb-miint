@@ -9,6 +9,7 @@
 #include "Minimap2Aligner.hpp"
 #include "SAMRecord.hpp"
 #include "align_result_utils.hpp"
+#include "id_column_utils.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
@@ -34,16 +35,20 @@ inline std::vector<std::string> GetAlignmentOutputNames() {
 	        "tag_xm",         "tag_xo",        "tag_xg",          "tag_nm",   "tag_yt",        "tag_md", "tag_sa"};
 }
 
-// Get the standard alignment output column types
-inline std::vector<LogicalType> GetAlignmentOutputTypes() {
-	return {LogicalType::VARCHAR,   // read_id
+// Get the standard alignment output column types.
+// `query_id_type` drives `read_id`; `subject_id_type` drives `reference` and
+// `mate_reference`. Both must be VARCHAR or BIGINT. No default arguments —
+// every caller must make the choice explicit so the audit can't slip.
+inline std::vector<LogicalType> GetAlignmentOutputTypes(const LogicalType &query_id_type,
+                                                        const LogicalType &subject_id_type) {
+	return {query_id_type,          // read_id (mirrors query)
 	        LogicalType::USMALLINT, // flags
-	        LogicalType::VARCHAR,   // reference
+	        subject_id_type,        // reference (mirrors subject)
 	        LogicalType::BIGINT,    // position
 	        LogicalType::BIGINT,    // stop_position
 	        LogicalType::UTINYINT,  // mapq
 	        LogicalType::VARCHAR,   // cigar
-	        LogicalType::VARCHAR,   // mate_reference
+	        subject_id_type,        // mate_reference (mirrors subject)
 	        LogicalType::BIGINT,    // mate_position
 	        LogicalType::BIGINT,    // template_length
 	        LogicalType::BIGINT,    // tag_as
@@ -105,18 +110,41 @@ inline void ParseMinimap2ConfigParams(const named_parameter_map_t &params, miint
 	}
 }
 
-// Output SAMRecordBatch to DataChunk using standard alignment schema
-// Returns the number of records output
-inline idx_t OutputSAMRecordBatch(DataChunk &output, const miint::SAMRecordBatch &batch, idx_t offset, idx_t count) {
+// Output SAMRecordBatch to DataChunk using the standard alignment schema.
+// `query_id_type` and `subject_id_type` drive the three id columns
+// (read_id / reference / mate_reference). Both must be VARCHAR or BIGINT.
+// For BIGINT subject output, the SAM "=" sentinel in mate_reference is
+// resolved to the row's `reference` value before emit (the literal "="
+// has no BIGINT encoding). VARCHAR output preserves "=" as-is, matching
+// pre-existing user-observable behavior.
+// Returns the number of records output.
+inline idx_t OutputSAMRecordBatch(DataChunk &output, const miint::SAMRecordBatch &batch, idx_t offset, idx_t count,
+                                  const LogicalType &query_id_type, const LogicalType &subject_id_type) {
 	idx_t field_idx = 0;
-	SetAlignResultString(output.data[field_idx++], batch.read_ids, offset, count);
+	EmitIdColumnFromStrings(output.data[field_idx++], batch.read_ids, offset, count, query_id_type);
 	SetAlignResultUInt16(output.data[field_idx++], batch.flags, offset, count);
-	SetAlignResultString(output.data[field_idx++], batch.references, offset, count);
+	EmitIdColumnFromStrings(output.data[field_idx++], batch.references, offset, count, subject_id_type);
 	SetAlignResultInt64(output.data[field_idx++], batch.positions, offset, count);
 	SetAlignResultInt64(output.data[field_idx++], batch.stop_positions, offset, count);
 	SetAlignResultUInt8(output.data[field_idx++], batch.mapqs, offset, count);
 	SetAlignResultString(output.data[field_idx++], batch.cigars, offset, count);
-	SetAlignResultString(output.data[field_idx++], batch.mate_references, offset, count);
+
+	// Emit mate_reference. For BIGINT subjects, resolve any "=" sentinel
+	// (mate maps to same reference as primary) into the row's reference
+	// value via a local copy — the codec rejects "=" for BIGINT and there
+	// is no in-band way to encode it.
+	if (subject_id_type.id() == LogicalTypeId::BIGINT) {
+		std::vector<std::string> resolved_mate_refs;
+		resolved_mate_refs.reserve(count);
+		for (idx_t j = 0; j < count; j++) {
+			const auto &mr = batch.mate_references[offset + j];
+			resolved_mate_refs.push_back(mr == "=" ? batch.references[offset + j] : mr);
+		}
+		EmitIdColumnFromStrings(output.data[field_idx++], resolved_mate_refs, 0, count, subject_id_type);
+	} else {
+		EmitIdColumnFromStrings(output.data[field_idx++], batch.mate_references, offset, count, subject_id_type);
+	}
+
 	SetAlignResultInt64(output.data[field_idx++], batch.mate_positions, offset, count);
 	SetAlignResultInt64(output.data[field_idx++], batch.template_lengths, offset, count);
 	SetAlignResultInt64Nullable(output.data[field_idx++], batch.tag_as_values, offset, count);

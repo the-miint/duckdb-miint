@@ -123,6 +123,20 @@ SAM alignments compute `stop_position` using HTSlib's `bam_endpos()`:
 - Coverage length = `stop_position - position` (no `+1`)
 - Critical for interval operations and coverage analysis
 
+### Identifier-column Codec (`id_column_codec` / `id_column_utils`)
+Functions that accept user-supplied identifier columns (`read_id`, `reference`, `mate_reference`) may opt in to BIGINT in addition to VARCHAR. The pattern is split across two layers:
+
+- `src/include/id_column_codec.hpp` / `src/id_column_codec.cpp` — pure C++ (`miint::ParseIdAsInt64`, `miint::FormatIdFromInt64`). No DuckDB types, so the `tests` C++ binary can link it directly without pulling in DuckDB.
+- `src/include/id_column_utils.hpp` — DuckDB-aware inline header (`duckdb::IsAllowedIdType`, `ExtractIdColumnAsStrings`, `EmitIdColumnFromStrings`). Wraps the codec and handles `Vector` / `DataChunk` / `LogicalType` plumbing.
+
+In-memory carriers (e.g. `SequenceRecordBatch::read_ids`, `SAMRecordBatch::read_ids`/`references`/`mate_references`) always store `std::vector<std::string>` — BIGINT inputs are stringified at the ingress boundary and parsed back at the egress boundary. This keeps the alignment hot loop type-agnostic.
+
+Dispatch is opt-in. Schema validators take an `allow_bigint` flag (default `false`); a caller that doesn't pass `true` keeps the historical VARCHAR-only contract. The captured `LogicalType` is threaded through the bind data so the emit side knows which output type to materialise. Default-constructed `LogicalType` is `INVALID`, so any path that forgets to capture the type fails loud at the helper dispatch rather than silently producing garbage.
+
+Sentinel rules (BIGINT egress): empty string and the SAM `*` sentinel both decode to NULL. The SAM `=` mate-reference sentinel has no BIGINT encoding and is the caller's responsibility to resolve to a real reference value before invoking the codec — `ParseIdAsInt64` throws on `=` to surface that contract. VARCHAR sentinels pass through unchanged.
+
+Currently used by `align_minimap2` + `save_minimap2_index` (both sides) and `copy_sam` (write side, decimal stringification only). The sharded paths (`align_minimap2_sharded`, `align_bowtie2_sharded`) are deliberately VARCHAR-only; the `read_to_shard` mapping table and the per-shard temp tables both assume VARCHAR. Other VARCHAR-only callers — sortmerna, bowtie2, search, cluster, uchime, mafft — pass `allow_bigint=false` for the same reason. Future extensions that want BIGINT support (e.g. `search_sequences`) should reuse these helpers rather than re-implementing dispatch.
+
 ## Code Style and Conventions
 
 - **C++ Standard**: C++20 (required for kseq++)

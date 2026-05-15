@@ -1,0 +1,123 @@
+# name: test/sql/align_minimap2_bigint_edge.test
+# description: Edge case matrix for BIGINT read_id in align_minimap2 (PR 1, Cycle 5).
+# group: [sql]
+
+#   Companion to align_minimap2_bigint.test — covers paths that aren't the
+#   happy-path of the BIGINT bind/emit machinery:
+#     1. Empty BIGINT subject table  -> existing "is empty" error unchanged
+#     2. HUGEINT read_id / subject   -> rejected with VARCHAR-or-BIGINT error
+#     3. per_subject_database=true   -> output types and values correct
+#     4. Prebuilt index asymmetry    -> BIGINT queries, VARCHAR refs in output
+#                                       (subject names in .mmi are opaque)
+
+require miint
+
+# ---------------------------------------------------------------------------
+# Reusable fixtures: 1-row BIGINT query and 1-row BIGINT subject. The subject
+# contains a stretch that the query maps into, so the happy paths produce a
+# single mapped row.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE bq_queries AS SELECT
+    1001::BIGINT AS read_id,
+    'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT' AS sequence1;
+
+statement ok
+CREATE TABLE bq_subjects AS SELECT
+    2001::BIGINT AS read_id,
+    'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC' AS sequence1;
+
+# VARCHAR projection of the subject table — for the prebuilt-index asymmetry
+# test (build index from VARCHAR subjects, query with BIGINT).
+statement ok
+CREATE TABLE bq_subjects_varchar AS
+SELECT CAST(read_id AS VARCHAR) AS read_id, sequence1 FROM bq_subjects;
+
+# ---------------------------------------------------------------------------
+# 1. Empty BIGINT subject table — pre-existing "is empty" error path
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE empty_subjects_bigint AS
+SELECT 0::BIGINT AS read_id, 'A' AS sequence1 WHERE FALSE;
+
+statement error
+SELECT * FROM align_minimap2('bq_queries', subject_table='empty_subjects_bigint');
+----
+empty_subjects_bigint
+
+# ---------------------------------------------------------------------------
+# 2. HUGEINT for either side is rejected with the named-types error
+#    (existing align_minimap2_bigint.test covers INTEGER, DOUBLE, UBIGINT;
+#    HUGEINT specifically rounds out the unsigned/wider-int matrix.)
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE queries_hugeint AS SELECT 1::HUGEINT AS read_id, 'ACGT' AS sequence1;
+
+statement error
+SELECT * FROM align_minimap2('queries_hugeint', subject_table='bq_subjects');
+----
+must be VARCHAR or BIGINT
+
+statement ok
+CREATE TABLE subjects_hugeint AS SELECT 1::HUGEINT AS read_id, 'ACGT' AS sequence1;
+
+statement error
+SELECT * FROM align_minimap2('bq_queries', subject_table='subjects_hugeint');
+----
+must be VARCHAR or BIGINT
+
+# ---------------------------------------------------------------------------
+# 3. per_subject_database=true with BIGINT — exercises ExecutePerSubject,
+#    which threads bind_data id types into OutputSAMRecordBatch identically
+#    to the standard path. This is the first end-to-end SQL test for
+#    per_subject_database mode in either type regime.
+# ---------------------------------------------------------------------------
+
+query III
+SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
+FROM align_minimap2('bq_queries', subject_table='bq_subjects', per_subject_database=true, max_secondary=0)
+LIMIT 1;
+----
+BIGINT	BIGINT	BIGINT
+
+query II
+SELECT read_id, reference
+FROM align_minimap2('bq_queries', subject_table='bq_subjects', per_subject_database=true, max_secondary=0)
+ORDER BY read_id;
+----
+1001	2001
+
+# ---------------------------------------------------------------------------
+# 4. Prebuilt index asymmetry: queries are BIGINT, the index was built from a
+#    VARCHAR subject table. Subject names in the .mmi file are opaque bytes
+#    that miint defaults to VARCHAR on the output side (see
+#    align_minimap2.cpp ~line 87), so the output schema is asymmetric:
+#      read_id        BIGINT  (from query column)
+#      reference      VARCHAR (from prebuilt-index default)
+#      mate_reference VARCHAR (from prebuilt-index default)
+# ---------------------------------------------------------------------------
+
+# Build the index. save_minimap2_index also accepts BIGINT but here we use
+# VARCHAR specifically to make the asymmetry visible.
+query III
+SELECT success, num_subjects > 0, index_path LIKE '%bigint_edge_index.mmi%'
+FROM save_minimap2_index('bq_subjects_varchar', 'bigint_edge_index.mmi', k := 5);
+----
+true	true	true
+
+query III
+SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
+FROM align_minimap2('bq_queries', index_path='bigint_edge_index.mmi', max_secondary=0)
+LIMIT 1;
+----
+BIGINT	VARCHAR	VARCHAR
+
+query II
+SELECT read_id, reference
+FROM align_minimap2('bq_queries', index_path='bigint_edge_index.mmi', max_secondary=0)
+ORDER BY read_id;
+----
+1001	2001

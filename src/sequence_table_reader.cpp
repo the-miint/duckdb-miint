@@ -1,5 +1,6 @@
 #include "sequence_table_reader.hpp"
 #include "catalog_utils.hpp"
+#include "id_column_utils.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/appender.hpp"
 #include "duckdb/main/connection.hpp"
@@ -9,7 +10,8 @@
 
 namespace duckdb {
 
-SequenceTableSchema ValidateSequenceTableSchema(ClientContext &context, const std::string &table_name) {
+SequenceTableSchema ValidateSequenceTableSchema(ClientContext &context, const std::string &table_name,
+                                                bool allow_bigint) {
 	auto info = GetTableOrViewColumns(context, table_name, "Sequence table");
 	auto &col_names = info.names;
 	auto &col_types = info.types;
@@ -48,9 +50,20 @@ SequenceTableSchema ValidateSequenceTableSchema(ClientContext &context, const st
 		return true;
 	};
 
-	// Required columns: read_id, sequence1
-	check_column("read_id", {LogicalTypeId::VARCHAR}, "VARCHAR", true);
+	// Required columns: read_id (VARCHAR; or BIGINT if allow_bigint), sequence1 (VARCHAR)
+	if (allow_bigint) {
+		check_column("read_id", {LogicalTypeId::VARCHAR, LogicalTypeId::BIGINT}, "VARCHAR or BIGINT", true);
+	} else {
+		check_column("read_id", {LogicalTypeId::VARCHAR}, "VARCHAR", true);
+	}
 	check_column("sequence1", {LogicalTypeId::VARCHAR}, "VARCHAR", true);
+
+	// Record the read_id column's storage type so downstream readers can
+	// stringify on ingress and the bind layer can mirror the type on output.
+	{
+		auto it = name_to_idx.find("read_id");
+		schema.id_type = col_types[it->second];
+	}
 
 	// Optional columns: sequence2, qual1, qual2
 	schema.has_sequence2 = check_column("sequence2", {LogicalTypeId::VARCHAR}, "VARCHAR", false);
@@ -60,7 +73,8 @@ SequenceTableSchema ValidateSequenceTableSchema(ClientContext &context, const st
 	return schema;
 }
 
-std::vector<miint::AlignmentSubject> ReadSubjectTable(ClientContext &context, const std::string &table_name) {
+std::vector<miint::AlignmentSubject> ReadSubjectTable(ClientContext &context, const std::string &table_name,
+                                                      const SequenceTableSchema &schema) {
 	std::vector<miint::AlignmentSubject> result;
 
 	// Create a new connection to avoid deadlocking
@@ -85,33 +99,35 @@ std::vector<miint::AlignmentSubject> ReadSubjectTable(ClientContext &context, co
 	auto &materialized = query_result->Cast<MaterializedQueryResult>();
 	idx_t row_number = 0;
 
+	// Reusable buffers across chunks — populated by ExtractIdColumnAsStrings.
+	std::vector<std::string> id_strings;
+	std::vector<bool> id_nulls;
+
 	while (true) {
 		auto chunk = materialized.Fetch();
 		if (!chunk || chunk->size() == 0) {
 			break;
 		}
 
-		auto &read_id_vec = chunk->data[0];
+		ExtractIdColumnAsStrings(*chunk, /*col_idx=*/0, schema.id_type, id_strings, id_nulls);
+
 		auto &seq1_vec = chunk->data[1];
 		auto &seq2_vec = chunk->data[2];
 
-		UnifiedVectorFormat read_id_data, seq1_data, seq2_data;
-		read_id_vec.ToUnifiedFormat(chunk->size(), read_id_data);
+		UnifiedVectorFormat seq1_data, seq2_data;
 		seq1_vec.ToUnifiedFormat(chunk->size(), seq1_data);
 		seq2_vec.ToUnifiedFormat(chunk->size(), seq2_data);
 
-		auto read_ids = UnifiedVectorFormat::GetData<string_t>(read_id_data);
 		auto sequences1 = UnifiedVectorFormat::GetData<string_t>(seq1_data);
 
 		for (idx_t i = 0; i < chunk->size(); i++) {
 			row_number++;
 
-			auto rid_idx = read_id_data.sel->get_index(i);
 			auto seq1_idx = seq1_data.sel->get_index(i);
 			auto seq2_idx = seq2_data.sel->get_index(i);
 
 			// Skip rows with NULL read_id or sequence1
-			if (!read_id_data.validity.RowIsValid(rid_idx)) {
+			if (id_nulls[i]) {
 				continue;
 			}
 			if (!seq1_data.validity.RowIsValid(seq1_idx)) {
@@ -126,7 +142,7 @@ std::vector<miint::AlignmentSubject> ReadSubjectTable(ClientContext &context, co
 			}
 
 			miint::AlignmentSubject subject;
-			subject.read_id = read_ids[rid_idx].GetString();
+			subject.read_id = std::move(id_strings[i]);
 			subject.sequence = sequences1[seq1_idx].GetString();
 
 			result.push_back(std::move(subject));
@@ -202,12 +218,17 @@ static void ProcessSingleChunk(DataChunk &chunk, const SequenceTableSchema &sche
 		qual2_col = next_col++;
 	}
 
-	// Prepare unified formats
-	UnifiedVectorFormat read_id_data, seq1_data;
-	chunk.data[read_id_col].ToUnifiedFormat(chunk.size(), read_id_data);
+	// Pre-extract column 0 (read_id) as strings, dispatching on the captured
+	// id_type. This is the single point where VARCHAR-vs-BIGINT ingress
+	// branching lives — every downstream consumer sees a uniform string id.
+	std::vector<std::string> chunk_id_strings;
+	std::vector<bool> chunk_id_nulls;
+	ExtractIdColumnAsStrings(chunk, read_id_col, schema.id_type, chunk_id_strings, chunk_id_nulls);
+
+	// Prepare unified formats for the remaining columns
+	UnifiedVectorFormat seq1_data;
 	chunk.data[seq1_col].ToUnifiedFormat(chunk.size(), seq1_data);
 
-	auto read_ids = UnifiedVectorFormat::GetData<string_t>(read_id_data);
 	auto sequences1 = UnifiedVectorFormat::GetData<string_t>(seq1_data);
 
 	UnifiedVectorFormat seq2_data, qual1_data, qual2_data;
@@ -231,17 +252,16 @@ static void ProcessSingleChunk(DataChunk &chunk, const SequenceTableSchema &sche
 	temp_seq2.clear();
 
 	for (idx_t i = 0; i < chunk.size(); i++) {
-		auto rid_idx = read_id_data.sel->get_index(i);
 		auto seq1_idx = seq1_data.sel->get_index(i);
 
-		if (!read_id_data.validity.RowIsValid(rid_idx)) {
+		if (chunk_id_nulls[i]) {
 			continue;
 		}
 		if (!seq1_data.validity.RowIsValid(seq1_idx)) {
 			continue;
 		}
 
-		temp_read_ids.push_back(read_ids[rid_idx].GetString());
+		temp_read_ids.push_back(std::move(chunk_id_strings[i]));
 		temp_seq1.push_back(sequences1[seq1_idx].GetString());
 
 		if (output.is_paired && schema.has_sequence2 && sequences2) {
@@ -259,10 +279,9 @@ static void ProcessSingleChunk(DataChunk &chunk, const SequenceTableSchema &sche
 	// Now process the extracted strings and quality scores
 	idx_t batch_idx = 0;
 	for (idx_t i = 0; i < chunk.size(); i++) {
-		auto rid_idx = read_id_data.sel->get_index(i);
 		auto seq1_idx = seq1_data.sel->get_index(i);
 
-		if (!read_id_data.validity.RowIsValid(rid_idx)) {
+		if (chunk_id_nulls[i]) {
 			continue;
 		}
 		if (!seq1_data.validity.RowIsValid(seq1_idx)) {

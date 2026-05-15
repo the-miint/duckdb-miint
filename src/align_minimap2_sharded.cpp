@@ -74,7 +74,10 @@ unique_ptr<FunctionData> AlignMinimap2ShardedTableFunction::Bind(ClientContext &
 		throw BinderException("Shard directory does not exist: %s", data->shard_directory);
 	}
 
-	// Validate query table/view exists
+	// Validate query table/view exists. BIGINT read_id is NOT supported in
+	// sharded mode (PR 1): ReadShardIds + ReadBatchByIds + the read_to_shard
+	// temp table still assume VARCHAR. Leaving allow_bigint=false rejects
+	// BIGINT at bind with a clear "must be VARCHAR" error.
 	data->query_schema = ValidateSequenceTableSchema(context, data->query_table);
 
 	// Validate read_to_shard table schema
@@ -364,9 +367,11 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 		idx_t available = local_state.result_buffer.size() - local_state.buffer_offset;
 
 		if (available > 0) {
-			// Output up to STANDARD_VECTOR_SIZE results
+			// Output up to STANDARD_VECTOR_SIZE results.
+			// Sharded mode is VARCHAR-only in PR 1 — see Data() ctor comment.
 			idx_t output_count = std::min(available, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
-			OutputSAMRecordBatch(output, local_state.result_buffer, local_state.buffer_offset, output_count);
+			OutputSAMRecordBatch(output, local_state.result_buffer, local_state.buffer_offset, output_count,
+			                     LogicalType::VARCHAR, LogicalType::VARCHAR);
 			if (bind_data.include_shard_name) {
 				auto shard_col_idx = output.ColumnCount() - 1;
 				auto &shard_vec = output.data[shard_col_idx];

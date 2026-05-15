@@ -1,0 +1,209 @@
+# name: test/sql/align_minimap2_bigint.test
+# description: align_minimap2 accepts BIGINT read_id columns.
+# group: [sql]
+
+#   The output read_id mirrors the query input type and the output reference /
+#   mate_reference mirror the subject input type. VARCHAR remains the default
+#   for any caller that does not pass a BIGINT-typed column. Edge cases
+#   (HUGEINT reject, empty subjects, per_subject_database, prebuilt-index
+#   asymmetry) live in align_minimap2_bigint_edge.test.
+
+require miint
+
+# ---------------------------------------------------------------------------
+# Setup: tables with both VARCHAR and BIGINT read_id storage
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE queries_bigint (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO queries_bigint VALUES
+    (1001, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    (1002, 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA');
+
+statement ok
+CREATE TABLE subjects_bigint (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO subjects_bigint VALUES
+    (2001, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    (2002, 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCAAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAA');
+
+# Mixed sides — stringified projections from the BIGINT tables
+statement ok
+CREATE TABLE queries_varchar AS SELECT CAST(read_id AS VARCHAR) AS read_id, sequence1 FROM queries_bigint;
+
+statement ok
+CREATE TABLE subjects_varchar AS SELECT CAST(read_id AS VARCHAR) AS read_id, sequence1 FROM subjects_bigint;
+
+# ---------------------------------------------------------------------------
+# Happy path: BIGINT/BIGINT — both ids round-trip with output types matching
+# the corresponding input table's read_id type.
+# ---------------------------------------------------------------------------
+
+query II
+SELECT read_id, reference
+FROM align_minimap2('queries_bigint', subject_table='subjects_bigint', max_secondary=0)
+ORDER BY read_id;
+----
+1001	2001
+1002	2002
+
+# Output column types mirror input: query read_id → output read_id (BIGINT),
+# subject read_id → output reference + mate_reference (BIGINT).
+query III
+SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
+FROM align_minimap2('queries_bigint', subject_table='subjects_bigint', max_secondary=0)
+LIMIT 1;
+----
+BIGINT	BIGINT	BIGINT
+
+# Single-end queries: mate_reference is always NULL for BIGINT subjects
+# (minimap2 emits "*" which the codec maps to NULL).
+query I
+SELECT COUNT(*) FILTER (WHERE mate_reference IS NOT NULL)
+FROM align_minimap2('queries_bigint', subject_table='subjects_bigint', max_secondary=0);
+----
+0
+
+# ---------------------------------------------------------------------------
+# Paired-end: mate_reference "=" sentinel must be resolved for BIGINT subjects
+# (the literal "=" has no BIGINT encoding). VARCHAR subjects preserve "="
+# verbatim — that's tested via the existing align_minimap2.test surface.
+# ---------------------------------------------------------------------------
+
+# A longer subject so paired reads have somewhere to land.
+statement ok
+CREATE TABLE paired_subjects_bigint (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO paired_subjects_bigint VALUES
+    (4001, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT');
+
+statement ok
+CREATE TABLE paired_queries_bigint (read_id BIGINT, sequence1 VARCHAR, sequence2 VARCHAR);
+
+# R1 maps to the start of subject 4001; R2 is the reverse complement of a
+# region further along — both should align to the same reference.
+statement ok
+INSERT INTO paired_queries_bigint VALUES
+    (6001, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT');
+
+# For BIGINT subjects with paired reads to the same reference, the "="
+# sentinel must be resolved at emit — mate_reference should equal reference,
+# never literally "=". A SUM over `mate_reference = reference` confirms the
+# resolution; if "=" leaked through, the BIGINT parse would have thrown.
+query II
+SELECT
+    SUM(CASE WHEN mate_reference IS NOT NULL AND mate_reference = reference THEN 1 ELSE 0 END) > 0 AS any_resolved,
+    SUM(CASE WHEN mate_reference IS NOT NULL AND mate_reference != reference THEN 1 ELSE 0 END) AS unexpected_diff
+FROM align_minimap2('paired_queries_bigint', subject_table='paired_subjects_bigint', max_secondary=0);
+----
+true	0
+
+# ---------------------------------------------------------------------------
+# Mixed: BIGINT queries, VARCHAR subjects — output is asymmetric
+# (read_id BIGINT, reference/mate_reference VARCHAR)
+# ---------------------------------------------------------------------------
+
+query II
+SELECT read_id, reference
+FROM align_minimap2('queries_bigint', subject_table='subjects_varchar', max_secondary=0)
+ORDER BY read_id;
+----
+1001	2001
+1002	2002
+
+query III
+SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
+FROM align_minimap2('queries_bigint', subject_table='subjects_varchar', max_secondary=0)
+LIMIT 1;
+----
+BIGINT	VARCHAR	VARCHAR
+
+# ---------------------------------------------------------------------------
+# Mixed: VARCHAR queries, BIGINT subjects — other direction asymmetry
+# ---------------------------------------------------------------------------
+
+query II
+SELECT read_id, reference
+FROM align_minimap2('queries_varchar', subject_table='subjects_bigint', max_secondary=0)
+ORDER BY read_id;
+----
+1001	2001
+1002	2002
+
+query III
+SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
+FROM align_minimap2('queries_varchar', subject_table='subjects_bigint', max_secondary=0)
+LIMIT 1;
+----
+VARCHAR	BIGINT	BIGINT
+
+# ---------------------------------------------------------------------------
+# NULL read_id rows are skipped (existing convention for VARCHAR carries
+# through to BIGINT — the reader's null-aware path handles both)
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE queries_with_null_bigint (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO queries_with_null_bigint VALUES
+    (3001, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    (NULL, 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA'),
+    (3003, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT');
+
+# Only the two non-NULL rows reach the aligner; output is a subset
+query II
+SELECT read_id, reference
+FROM align_minimap2('queries_with_null_bigint', subject_table='subjects_bigint', max_secondary=0)
+ORDER BY read_id;
+----
+3001	2001
+3003	2001
+
+# ---------------------------------------------------------------------------
+# Rejected types — INTEGER, DOUBLE, UBIGINT must all fail with a clear
+# bind-time error that names both accepted types
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE queries_int (read_id INTEGER, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO queries_int VALUES (1, 'ACGT');
+
+statement error
+SELECT * FROM align_minimap2('queries_int', subject_table='subjects_bigint');
+----
+must be VARCHAR or BIGINT
+
+statement ok
+CREATE TABLE queries_double (read_id DOUBLE, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO queries_double VALUES (1.5, 'ACGT');
+
+statement error
+SELECT * FROM align_minimap2('queries_double', subject_table='subjects_bigint');
+----
+must be VARCHAR or BIGINT
+
+statement ok
+CREATE TABLE queries_ubigint (read_id UBIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO queries_ubigint VALUES (1, 'ACGT');
+
+statement error
+SELECT * FROM align_minimap2('queries_ubigint', subject_table='subjects_bigint');
+----
+must be VARCHAR or BIGINT
+
+# Rejected subject-side too
+statement error
+SELECT * FROM align_minimap2('queries_bigint', subject_table='queries_int');
+----
+must be VARCHAR or BIGINT

@@ -18,8 +18,9 @@ unique_ptr<FunctionData> SaveMinimap2IndexTableFunction::Bind(ClientContext &con
 	data->subject_table = input.inputs[0].ToString();
 	data->output_path = input.inputs[1].ToString();
 
-	// Validate subject table exists and has correct schema
-	ValidateSequenceTableSchema(context, data->subject_table);
+	// Validate subject table exists and has correct schema; capture for the
+	// reader (subject id_type drives VARCHAR/BIGINT dispatch).
+	auto subject_schema = ValidateSequenceTableSchema(context, data->subject_table, /*allow_bigint=*/true);
 
 	// Parse optional named parameters (same as align_minimap2)
 	auto preset_param = input.named_parameters.find("preset");
@@ -43,7 +44,7 @@ unique_ptr<FunctionData> SaveMinimap2IndexTableFunction::Bind(ClientContext &con
 	}
 
 	// Load subjects at bind time
-	data->subjects = ReadSubjectTable(context, data->subject_table);
+	data->subjects = ReadSubjectTable(context, data->subject_table, subject_schema);
 
 	if (data->subjects.empty()) {
 		throw BinderException("Subject table '%s' is empty. Cannot save index for empty subject set.",

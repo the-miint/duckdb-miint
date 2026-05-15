@@ -1601,8 +1601,8 @@ Align query sequences to subject sequences using minimap2. This function enables
 **Performance:** For large reference databases (e.g., human genome), use pre-built indexes via `index_path` for 10-30x faster alignment. Build indexes once with `save_minimap2_index`, then reuse them across multiple queries.
 
 **Parameters:**
-- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2)
-- `subject_table` (VARCHAR, optional): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent). **Either `subject_table` OR `index_path` must be provided, but not both.**
+- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2). The `read_id` column may be `VARCHAR` or `BIGINT` (see *Identifier-column types* below).
+- `subject_table` (VARCHAR, optional): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent). The `read_id` column may be `VARCHAR` or `BIGINT`. **Either `subject_table` OR `index_path` must be provided, but not both.**
 - `index_path` (VARCHAR, optional): Path to pre-built minimap2 index file (.mmi). Use `save_minimap2_index()` to create index files. **Either `subject_table` OR `index_path` must be provided, but not both.**
 - `per_subject_database` (BOOLEAN, default: false): Build separate index for each subject sequence (only valid with `subject_table`, not with `index_path`)
   - `false` (default): Build single index from all subjects, align all queries once (efficient for many subjects)
@@ -1619,14 +1619,14 @@ Align query sequences to subject sequences using minimap2. This function enables
 
 **Output schema:**
 Returns the same schema as `read_alignments` (21 columns):
-- `read_id` (VARCHAR): Query sequence identifier
+- `read_id` (VARCHAR or BIGINT — mirrors `query_table.read_id`): Query sequence identifier
 - `flags` (USMALLINT): SAM alignment flags
-- `reference` (VARCHAR): Subject sequence identifier
+- `reference` (VARCHAR or BIGINT — mirrors `subject_table.read_id`; always VARCHAR when using `index_path`): Subject sequence identifier
 - `position` (BIGINT): 1-based start position on reference
 - `stop_position` (BIGINT): 1-based stop position on reference
 - `mapq` (UTINYINT): Mapping quality
 - `cigar` (VARCHAR): CIGAR string (with =/X by default)
-- `mate_reference` (VARCHAR): Mate reference (for paired-end)
+- `mate_reference` (VARCHAR or BIGINT — same type as `reference`): Mate reference (for paired-end)
 - `mate_position` (BIGINT): Mate position (for paired-end)
 - `template_length` (BIGINT): Template length (for paired-end)
 - `tag_as` (BIGINT): Alignment score
@@ -1640,6 +1640,12 @@ Returns the same schema as `read_alignments` (21 columns):
 - `tag_yt` (VARCHAR): Pair type (UU/CP/DP/UP)
 - `tag_md` (VARCHAR): MD tag string
 - `tag_sa` (VARCHAR): Supplementary alignment info
+
+**Identifier-column types (`read_id`, `reference`, `mate_reference`):**
+- The input columns may be `VARCHAR` or `BIGINT`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column '<name>' in table '<table>' must be VARCHAR or BIGINT`.
+- The output `read_id` column type mirrors the query side. The output `reference` and `mate_reference` types mirror the subject side, **except when using `index_path`** — subject names stored in a `.mmi` file are opaque bytes, so both default to `VARCHAR` regardless of what the source table looked like when the index was built.
+- For `BIGINT` subjects, the SAM `=` mate-reference sentinel (which has no BIGINT encoding) is resolved to the primary reference value before being emitted; downstream consumers see the resolved numeric id, never `'='`.
+- For `BIGINT` columns, NULL input values and the SAM `'*'` unmapped sentinel are both surfaced as SQL NULL in the output. VARCHAR sentinels (`'*'`, `'='`) pass through verbatim, preserving pre-existing behaviour.
 
 **Behavior:**
 - Subject sequences are loaded into memory at bind time (must fit in RAM)
@@ -1753,7 +1759,7 @@ Build and save a minimap2 index to disk for reuse. This provides 10-30x performa
 **Use case:** Build indexes once for large reference databases (e.g., WoLr2 phylogenetic markers, RefSeq genomes, custom OGU databases), then use them repeatedly with `align_minimap2(..., index_path='file.mmi')` instead of rebuilding the index each time.
 
 **Parameters:**
-- `subject_table` (VARCHAR): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent)
+- `subject_table` (VARCHAR): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent). The `read_id` column may be `VARCHAR` or `BIGINT`; `BIGINT` ids are stringified to decimal before being written into the index. When the index is later loaded via `align_minimap2(..., index_path=...)`, the recovered subject names are always `VARCHAR` (see *Identifier-column types* in `align_minimap2`).
 - `output_path` (VARCHAR): Path where the index file (.mmi) will be saved
 - `preset` (VARCHAR, default: 'sr'): Minimap2 preset (same options as `align_minimap2`)
 - `k` (INTEGER, optional): K-mer size (overrides preset default if specified)
@@ -1850,7 +1856,7 @@ SELECT * FROM save_minimap2_index('marker_genes', 'markers.mmi');
 Align query sequences against multiple pre-built minimap2 index shards in parallel. Each shard is a separate `.mmi` index file, and a mapping table specifies which reads should be aligned against which shard. This is designed for large-scale metagenomic workflows where the reference database is split across multiple shards and reads have been pre-assigned to shards (e.g., by a prior classification step).
 
 **Parameters:**
-- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2)
+- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2). The `read_id` column **must be VARCHAR** in sharded mode — BIGINT `read_id` is supported by `align_minimap2` but not by the sharded variant.
 - `shard_directory` (VARCHAR, required): Path to directory containing pre-built minimap2 index files. Each shard's index is expected at `<shard_directory>/<shard_name>.mmi`
 - `read_to_shard` (VARCHAR, required): Name of table or view that maps reads to shards. Must have columns:
   - `read_id` (VARCHAR): Read identifier (must match read_id in query_table)
