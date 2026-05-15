@@ -126,18 +126,21 @@ jobs:
 
       - name: Install tutorial test dependencies
         shell: bash -el {0}
-        # `python3 -m pip` (not bare `pip`) guarantees the install targets the
-        # same interpreter `run_tutorial_tests.sh` invokes below — `pip` on the
-        # runner resolves to system pip (Python 3.12, falls back to user
-        # site-packages because system site is read-only), while `python3`
-        # under `bash -el` resolves to conda base's python3 and would miss
-        # those user-site installs. Keeping pip and the runtime locked to the
-        # same interpreter is what makes `import duckdb` find the package.
-        run: python3 -m pip install duckdb==$(./build/release/duckdb -csv -noheader -c "SELECT ltrim(version(), 'v');") pyarrow pandas matplotlib
+        # Pin BOTH install and runtime to `/usr/bin/python3` (system Python
+        # 3.12). Under `shell: bash -el {0}`, conda-incubator/setup-miniconda
+        # auto-activates a "test" env whose python3 has no pip module
+        # ("No module named pip"), so `python3 -m pip` fails. Meanwhile bare
+        # `pip` resolves to system pip (Python 3.12) and falls back to user
+        # site-packages ("Defaulting to user installation"), but the next
+        # step's `python3` would resolve to conda's and miss those installs.
+        # Using the absolute path `/usr/bin/python3` for both steps sidesteps
+        # the conda env entirely for this Python concern while leaving
+        # bowtie2 / FastTree (conda-installed binaries) untouched on PATH.
+        run: /usr/bin/python3 -m pip install --user duckdb==$(./build/release/duckdb -csv -noheader -c "SELECT ltrim(version(), 'v');") pyarrow pandas matplotlib
 
       - name: Run tutorial tests
         shell: bash -el {0}
-        run: PYTHON=python3 bash onboarding-tutorials/run_tutorial_tests.sh ./build/release/duckdb
+        run: PYTHON=/usr/bin/python3 bash onboarding-tutorials/run_tutorial_tests.sh ./build/release/duckdb
 
   test-wasm-compatible-build:
     name: Test WASM-compatible build (no HDF5/Bowtie2)
