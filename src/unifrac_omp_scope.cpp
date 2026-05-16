@@ -2,7 +2,9 @@
 
 #include <stdexcept>
 
+#ifndef __EMSCRIPTEN__
 #include <omp.h>
+#endif
 
 namespace miint::unifrac {
 
@@ -15,6 +17,18 @@ std::mutex &GlobalLibssuMutex() {
 
 } // namespace
 
+#ifdef __EMSCRIPTEN__
+// WASM builds skip find_package(OpenMP); libssu_wasm.a / libskbb_wasm.a are
+// compiled single-threaded with no OpenMP runtime to mutate. Preserve the
+// mutex so the libssu/skbb global-state serialization contract still holds.
+OmpThreadScope::OmpThreadScope(int n_threads) : lock_(GlobalLibssuMutex()), prev_threads_(1) {
+	if (n_threads < 1) {
+		throw std::invalid_argument("OmpThreadScope: n_threads must be >= 1");
+	}
+}
+
+OmpThreadScope::~OmpThreadScope() = default;
+#else
 OmpThreadScope::OmpThreadScope(int n_threads) : lock_(GlobalLibssuMutex()), prev_threads_(omp_get_max_threads()) {
 	if (n_threads < 1) {
 		throw std::invalid_argument("OmpThreadScope: n_threads must be >= 1");
@@ -25,5 +39,6 @@ OmpThreadScope::OmpThreadScope(int n_threads) : lock_(GlobalLibssuMutex()), prev
 OmpThreadScope::~OmpThreadScope() {
 	omp_set_num_threads(prev_threads_);
 }
+#endif
 
 } // namespace miint::unifrac
