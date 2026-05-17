@@ -16,7 +16,8 @@ namespace duckdb {
 // directly into output at col 0 when not. Returns true if a chunk was emitted (and
 // output.cardinality is set); false if the buffer is drained.
 static bool EmitFromBuffer(const std::vector<miint::UchimeResult> &buffer, idx_t &result_offset, DataChunk &output,
-                           bool has_sample_id, const Value &sample_value) {
+                           bool has_sample_id, const Value &sample_value, const LogicalType &query_id_type,
+                           const LogicalType &ref_id_type) {
 	if (result_offset >= buffer.size()) {
 		return false;
 	}
@@ -24,9 +25,9 @@ static bool EmitFromBuffer(const std::vector<miint::UchimeResult> &buffer, idx_t
 	idx_t count = std::min(remaining, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
 	if (has_sample_id) {
 		output.data[0].Reference(sample_value);
-		OutputUchimeResults(output, buffer, result_offset, count, /*start_col=*/1);
+		OutputUchimeResults(output, buffer, result_offset, count, query_id_type, ref_id_type, /*start_col=*/1);
 	} else {
-		OutputUchimeResults(output, buffer, result_offset, count);
+		OutputUchimeResults(output, buffer, result_offset, count, query_id_type, ref_id_type);
 	}
 	result_offset += count;
 	return true;
@@ -44,8 +45,10 @@ unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, Ta
 	}
 	data->ref_table = db_it->second.GetValue<std::string>();
 
-	data->query_schema = ValidateSequenceTableSchema(context, data->query_table);
-	data->ref_schema = ValidateSequenceTableSchema(context, data->ref_table);
+	// BIGINT read_id is supported on both sides — output read_id mirrors the
+	// query input type, output parent ids mirror the reference input type.
+	data->query_schema = ValidateSequenceTableSchema(context, data->query_table, /*allow_bigint=*/true);
+	data->ref_schema = ValidateSequenceTableSchema(context, data->ref_table, /*allow_bigint=*/true);
 
 	auto get_double = [&](const std::string &name, double &out, double min_val, const char *constraint) {
 		auto it = input.named_parameters.find(name);
@@ -85,7 +88,7 @@ unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, Ta
 	}
 
 	data->names = GetUchimeOutputNames();
-	data->types = GetUchimeOutputTypes();
+	data->types = GetUchimeOutputTypes(data->query_schema.id_type, data->ref_schema.id_type);
 
 	if (data->has_sample_id) {
 		auto &db = DatabaseInstance::GetDatabase(context);
@@ -116,7 +119,7 @@ unique_ptr<GlobalTableFunctionState> UchimeRefTableFunction::InitGlobal(ClientCo
 	gstate->wrapper = miint::VsearchChimeraWrapper(data.params);
 
 	// Reference load is always global — shared read-only by every sample's detect_batch.
-	auto ref = LoadSingleEndSequences(context, data.ref_table, "detect_chimera_uchime");
+	auto ref = LoadSingleEndSequences(context, data.ref_table, "detect_chimera_uchime", data.ref_schema);
 	gstate->wrapper.set_reference(ref.labels, ref.sequences);
 
 	if (data.has_sample_id) {
@@ -150,7 +153,8 @@ void UchimeRefTableFunction::Execute(ClientContext & /*context*/, TableFunctionI
 
 	if (!data.has_sample_id) {
 		while (true) {
-			if (EmitFromBuffer(gstate.result_buffer, gstate.result_offset, output, /*has_sample_id=*/false, Value())) {
+			if (EmitFromBuffer(gstate.result_buffer, gstate.result_offset, output, /*has_sample_id=*/false, Value(),
+			                   data.query_schema.id_type, data.ref_schema.id_type)) {
 				return;
 			}
 			gstate.result_buffer.clear();
@@ -167,7 +171,7 @@ void UchimeRefTableFunction::Execute(ClientContext & /*context*/, TableFunctionI
 
 	while (true) {
 		if (EmitFromBuffer(lstate.result_buffer, lstate.result_offset, output, /*has_sample_id=*/true,
-		                   lstate.sample_value)) {
+		                   lstate.sample_value, data.query_schema.id_type, data.ref_schema.id_type)) {
 			return;
 		}
 		lstate.result_buffer.clear();

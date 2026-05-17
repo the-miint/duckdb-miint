@@ -1,0 +1,99 @@
+# name: test/sql/cluster_sequences_vsearch_bigint.test
+# description: cluster_sequences_vsearch accepts BIGINT read_id columns.
+# group: [sql]
+
+#   Single input table -> two output id slots (read_id, centroid_id), both
+#   mirroring the SAME input type because centroid_id is a back-reference into
+#   one of the input table's read_id values. Cross-function edge cases
+#   (HUGEINT reject, empty tables) live in vsearch_bigint_edge.test.
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+# ---------------------------------------------------------------------------
+# Happy path: three identical BIGINT-id sequences -> one cluster, centroid is
+# the lowest-numbered input id (vsearch picks the first sequence as centroid).
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE bq_cluster_seqs AS SELECT * FROM (VALUES
+    (1001::BIGINT, 'ATCGATCGATCGATCGATCGATCG'),
+    (1002::BIGINT, 'ATCGATCGATCGATCGATCGATCG'),
+    (1003::BIGINT, 'ATCGATCGATCGATCGATCGATCG')
+) t(read_id, sequence1);
+
+query II
+SELECT read_id, centroid_id
+FROM cluster_sequences_vsearch('bq_cluster_seqs', id:=0.97)
+ORDER BY read_id;
+----
+1001	1001
+1002	1001
+1003	1001
+
+# Both id columns mirror the input read_id type.
+query II
+SELECT typeof(read_id), typeof(centroid_id)
+FROM cluster_sequences_vsearch('bq_cluster_seqs', id:=0.97)
+LIMIT 1;
+----
+BIGINT	BIGINT
+
+# ---------------------------------------------------------------------------
+# Three divergent BIGINT ids -> three singleton clusters, each its own
+# centroid. Validates that the centroid back-reference round-trips for the
+# self-centroid case in BIGINT form.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE bq_div_seqs AS SELECT * FROM (VALUES
+    (2001::BIGINT, 'ATCGATCGATCGATCGATCGATCG'),
+    (2002::BIGINT, 'GGCCTTAAGGCCTTAAGGCCTTAA'),
+    (2003::BIGINT, 'AAAAAAAACCCCCCCCGGGGGGGG')
+) t(read_id, sequence1);
+
+query III
+SELECT read_id, is_centroid::int, centroid_id
+FROM cluster_sequences_vsearch('bq_div_seqs', id:=0.97)
+ORDER BY read_id;
+----
+2001	1	2001
+2002	1	2002
+2003	1	2003
+
+# ---------------------------------------------------------------------------
+# Type rejects
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE cluster_seqs_int AS SELECT 1::INTEGER AS read_id, 'ATCG' AS sequence1;
+
+statement error
+SELECT * FROM cluster_sequences_vsearch('cluster_seqs_int', id:=0.97);
+----
+must be VARCHAR or BIGINT
+
+statement ok
+CREATE TABLE cluster_seqs_double AS SELECT 1.5::DOUBLE AS read_id, 'ATCG' AS sequence1;
+
+statement error
+SELECT * FROM cluster_sequences_vsearch('cluster_seqs_double', id:=0.97);
+----
+must be VARCHAR or BIGINT
+
+# ---------------------------------------------------------------------------
+# VARCHAR side regression: existing VARCHAR-id workflow must keep working.
+# (Cluster takes a table name, not a subquery, so project to a VARCHAR table.)
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE cluster_seqs_varchar AS
+SELECT CAST(read_id AS VARCHAR) AS read_id, sequence1 FROM bq_div_seqs;
+
+query II
+SELECT typeof(read_id), typeof(centroid_id)
+FROM cluster_sequences_vsearch('cluster_seqs_varchar', id:=0.97)
+LIMIT 1;
+----
+VARCHAR	VARCHAR

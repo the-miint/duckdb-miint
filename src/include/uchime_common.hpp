@@ -49,14 +49,20 @@ namespace duckdb {
 
 // Output column names and types for the 18-column uchimeout format.
 // Shared between uchime_ref and uchime_denovo.
+// `query_id_type` drives the `read_id` column; `ref_id_type` drives the three
+// parent id columns (parent_a_id, parent_b_id, closest_parent_id). For denovo,
+// where parents are back-references into the input ids, callers pass the same
+// type for both args. Each may be VARCHAR or BIGINT.
 std::vector<std::string> GetUchimeOutputNames();
-std::vector<LogicalType> GetUchimeOutputTypes();
+std::vector<LogicalType> GetUchimeOutputTypes(const LogicalType &query_id_type, const LogicalType &ref_id_type);
 
 // Write a batch of UchimeResults into a DataChunk starting at column `start_col`.
 // When start_col > 0 (per-sample callers), callers must populate columns [0, start_col)
 // before/after this call; this function sets the chunk cardinality itself.
+// `query_id_type` and `ref_id_type` drive emit-side dispatch for the read_id
+// column and the parent trio respectively.
 // Returns the number of rows written (min of count and remaining results).
 idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResult> &results, idx_t offset, idx_t count,
-                          idx_t start_col = 0);
+                          const LogicalType &query_id_type, const LogicalType &ref_id_type, idx_t start_col = 0);
 
 } // namespace duckdb

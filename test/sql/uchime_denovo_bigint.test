@@ -1,0 +1,141 @@
+# name: test/sql/uchime_denovo_bigint.test
+# description: detect_chimera_uchime_denovo accepts BIGINT id column.
+# group: [sql]
+
+#   read_id, parent_a_id, parent_b_id, and closest_parent_id all mirror the
+#   single input id type (parents are back-references to one of the input ids
+#   when the input set is its own reference). Non-chimeric rows yield NULL
+#   parents regardless of type. Per-sample mode threads the id type through.
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+# ---------------------------------------------------------------------------
+# Fixture: deterministic BIGINT mapping of the canonical denovo test data.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE bq_denovo_seqs AS
+SELECT
+    CASE regexp_extract(read_id, '^([^;]+)', 1)
+        WHEN 'seq1' THEN 1001::BIGINT
+        WHEN 'seq2' THEN 1002::BIGINT
+        WHEN 'seq3' THEN 1003::BIGINT
+        WHEN 'seq4' THEN 1004::BIGINT
+        WHEN 'seq5' THEN 1005::BIGINT
+        WHEN 'seq6' THEN 1006::BIGINT
+    END AS read_id,
+    sequence1,
+    CAST(regexp_extract(read_id, 'size=(\d+)', 1) AS INTEGER) AS size
+FROM read_fastx('data/uchime/denovo_input.fasta');
+
+# ---------------------------------------------------------------------------
+# Happy path: all 4 id columns mirror the input BIGINT type.
+# ---------------------------------------------------------------------------
+
+query IIII
+SELECT typeof(read_id), typeof(parent_a_id), typeof(parent_b_id), typeof(closest_parent_id)
+FROM detect_chimera_uchime_denovo('bq_denovo_seqs')
+LIMIT 1;
+----
+BIGINT	BIGINT	BIGINT	BIGINT
+
+# Flags match the VARCHAR ground truth (seq4, seq5 are chimeras).
+query II
+SELECT read_id, flag
+FROM detect_chimera_uchime_denovo('bq_denovo_seqs')
+ORDER BY read_id;
+----
+1001	N
+1002	N
+1003	N
+1004	Y
+1005	Y
+1006	N
+
+# Chimera seq4 (was 'seq4' = 1004) has parents seq1+seq2 -> 1001+1002.
+query III
+SELECT read_id, parent_a_id, parent_b_id
+FROM detect_chimera_uchime_denovo('bq_denovo_seqs')
+WHERE read_id = 1004;
+----
+1004	1001	1002
+
+# Non-chimeric rows: NULL parents in BIGINT (atomic trio).
+query IIII
+SELECT read_id, parent_a_id, parent_b_id, closest_parent_id
+FROM detect_chimera_uchime_denovo('bq_denovo_seqs')
+WHERE read_id = 1001;
+----
+1001	NULL	NULL	NULL
+
+# ---------------------------------------------------------------------------
+# Type rejects: INTEGER, DOUBLE on the id column.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE denovo_seqs_int AS
+SELECT 1::INTEGER AS read_id, 'ATCG' AS sequence1, 1::INTEGER AS size;
+
+statement error
+SELECT * FROM detect_chimera_uchime_denovo('denovo_seqs_int');
+----
+must be VARCHAR or BIGINT
+
+statement ok
+CREATE TABLE denovo_seqs_double AS
+SELECT 1.5::DOUBLE AS read_id, 'ATCG' AS sequence1, 1::INTEGER AS size;
+
+statement error
+SELECT * FROM detect_chimera_uchime_denovo('denovo_seqs_double');
+----
+must be VARCHAR or BIGINT
+
+# ---------------------------------------------------------------------------
+# Per-sample mode: BIGINT ids round-trip per sample.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE bq_denovo_per_sample AS
+SELECT 'sampleA' AS sample_id, read_id, sequence1, size FROM bq_denovo_seqs
+UNION ALL
+SELECT 'sampleB' AS sample_id, read_id + 10000 AS read_id, sequence1, size FROM bq_denovo_seqs;
+
+query IIII
+SELECT typeof(sample_id), typeof(read_id), typeof(parent_a_id), typeof(parent_b_id)
+FROM detect_chimera_uchime_denovo('bq_denovo_per_sample', sample_id := 'sample_id')
+LIMIT 1;
+----
+VARCHAR	BIGINT	BIGINT	BIGINT
+
+# Both samples find the same chimeras with their own BIGINT id space.
+query III
+SELECT sample_id, read_id, flag
+FROM detect_chimera_uchime_denovo('bq_denovo_per_sample', sample_id := 'sample_id')
+WHERE flag = 'Y'
+ORDER BY sample_id, read_id;
+----
+sampleA	1004	Y
+sampleA	1005	Y
+sampleB	11004	Y
+sampleB	11005	Y
+
+# ---------------------------------------------------------------------------
+# VARCHAR regression: existing VARCHAR-id workflow still works.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE denovo_seqs_varchar AS
+SELECT
+    regexp_extract(read_id, '^([^;]+)', 1) AS read_id,
+    sequence1,
+    CAST(regexp_extract(read_id, 'size=(\d+)', 1) AS INTEGER) AS size
+FROM read_fastx('data/uchime/denovo_input.fasta');
+
+query II
+SELECT typeof(read_id), typeof(parent_a_id)
+FROM detect_chimera_uchime_denovo('denovo_seqs_varchar')
+LIMIT 1;
+----
+VARCHAR	VARCHAR

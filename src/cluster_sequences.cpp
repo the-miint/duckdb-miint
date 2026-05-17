@@ -1,4 +1,5 @@
 #include "cluster_sequences.hpp"
+#include "id_column_utils.hpp"
 #include "sequence_table_reader.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -13,13 +14,21 @@ static std::vector<std::string> GetClusterOutputNames() {
 	return {"read_id", "is_centroid", "cluster_id", "centroid_id", "identity", "cigar", "cigar_truncated"};
 }
 
-static std::vector<LogicalType> GetClusterOutputTypes() {
-	return {LogicalType::VARCHAR, LogicalType::BOOLEAN, LogicalType::INTEGER, LogicalType::VARCHAR,
-	        LogicalType::DOUBLE,  LogicalType::VARCHAR, LogicalType::BOOLEAN};
+// Both `read_id` and `centroid_id` mirror the input read_id type. centroid_id
+// is a back-reference into one of the input table's read_id values, so it is
+// the same type by construction. Other columns are fixed.
+static std::vector<LogicalType> GetClusterOutputTypes(const LogicalType &id_type) {
+	return {id_type,
+	        LogicalType::BOOLEAN,
+	        LogicalType::INTEGER,
+	        id_type,
+	        LogicalType::DOUBLE,
+	        LogicalType::VARCHAR,
+	        LogicalType::BOOLEAN};
 }
 
 static idx_t OutputClusterResults(DataChunk &output, const std::vector<miint::ClusterResult> &results, idx_t offset,
-                                  idx_t count) {
+                                  idx_t count, const LogicalType &id_type) {
 	idx_t actual = std::min(count, static_cast<idx_t>(results.size()) - offset);
 	if (actual == 0) {
 		output.SetCardinality(0);
@@ -28,11 +37,14 @@ static idx_t OutputClusterResults(DataChunk &output, const std::vector<miint::Cl
 
 	idx_t col = 0;
 
-	auto &read_id_vec = output.data[col++];
+	// Build the two id-string projections once; emit via the codec dispatch.
+	std::vector<std::string> read_ids(actual);
+	std::vector<std::string> centroid_ids(actual);
 	for (idx_t i = 0; i < actual; i++) {
-		FlatVector::GetData<string_t>(read_id_vec)[i] =
-		    StringVector::AddString(read_id_vec, results[offset + i].read_id);
+		read_ids[i] = results[offset + i].read_id;
+		centroid_ids[i] = results[offset + i].centroid_id;
 	}
+	EmitIdColumnFromStrings(output.data[col++], read_ids, /*offset=*/0, actual, id_type);
 
 	auto is_centroid_data = FlatVector::GetData<bool>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
@@ -44,11 +56,7 @@ static idx_t OutputClusterResults(DataChunk &output, const std::vector<miint::Cl
 		cluster_id_data[i] = results[offset + i].cluster_id;
 	}
 
-	auto &centroid_id_vec = output.data[col++];
-	for (idx_t i = 0; i < actual; i++) {
-		FlatVector::GetData<string_t>(centroid_id_vec)[i] =
-		    StringVector::AddString(centroid_id_vec, results[offset + i].centroid_id);
-	}
+	EmitIdColumnFromStrings(output.data[col++], centroid_ids, /*offset=*/0, actual, id_type);
 
 	auto identity_data = FlatVector::GetData<double>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
@@ -77,8 +85,9 @@ unique_ptr<FunctionData> ClusterSequencesTableFunction::Bind(ClientContext &cont
 
 	data->input_table = input.inputs[0].GetValue<std::string>();
 
-	// Validate table has read_id (VARCHAR) and sequence1 (VARCHAR)
-	ValidateSequenceTableSchema(context, data->input_table);
+	// BIGINT read_id is supported — output read_id and centroid_id both mirror
+	// the input type (centroid is a back-reference to one of the input ids).
+	data->input_schema = ValidateSequenceTableSchema(context, data->input_table, /*allow_bigint=*/true);
 
 	// id is required — no silent default.
 	auto id_it = input.named_parameters.find("id");
@@ -123,7 +132,7 @@ unique_ptr<FunctionData> ClusterSequencesTableFunction::Bind(ClientContext &cont
 	get_int("threads", data->params.threads, 1, 1024, ">= 1 and <= 1024");
 
 	data->names = GetClusterOutputNames();
-	data->types = GetClusterOutputTypes();
+	data->types = GetClusterOutputTypes(data->input_schema.id_type);
 	for (auto &n : data->names) {
 		names.push_back(n);
 	}
@@ -145,7 +154,8 @@ unique_ptr<GlobalTableFunctionState> ClusterSequencesTableFunction::InitGlobal(C
 	// releasing the vsearch mutex. Execute() paginates the results.
 	miint::VsearchClusterWrapper wrapper(data.params);
 
-	auto loaded = LoadSingleEndSequences(context, data.input_table, "cluster_sequences_vsearch", /*strict=*/true);
+	auto loaded = LoadSingleEndSequences(context, data.input_table, "cluster_sequences_vsearch", data.input_schema,
+	                                     /*strict=*/true);
 	wrapper.set_sequences(loaded.labels, loaded.sequences);
 	gstate->results = wrapper.cluster_all();
 
@@ -153,6 +163,7 @@ unique_ptr<GlobalTableFunctionState> ClusterSequencesTableFunction::InitGlobal(C
 }
 
 void ClusterSequencesTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &data = data_p.bind_data->Cast<Data>();
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
 	if (gstate.result_offset >= gstate.results.size()) {
@@ -162,7 +173,7 @@ void ClusterSequencesTableFunction::Execute(ClientContext &context, TableFunctio
 
 	idx_t remaining = gstate.results.size() - gstate.result_offset;
 	idx_t count = std::min(remaining, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
-	OutputClusterResults(output, gstate.results, gstate.result_offset, count);
+	OutputClusterResults(output, gstate.results, gstate.result_offset, count, data.input_schema.id_type);
 	gstate.result_offset += count;
 }
 

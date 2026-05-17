@@ -70,22 +70,27 @@ struct LoadedSingleEndSequences {
 };
 
 // Load all (read_id, sequence1) pairs from a table via a separate connection.
-// Used by vsearch-backed table functions (search, chimera, cluster) that operate
-// on single-end sequences only.
+// Used by vsearch-backed table functions (search, chimera, cluster) and
+// align_mafft for single-end sequence loading.
+// `schema` governs how the read_id column is extracted — VARCHAR rows pass
+// through as strings; BIGINT rows are stringified into the carrier. Callers
+// that haven't opted in to BIGINT should pass a schema captured via
+// ValidateSequenceTableSchema (without allow_bigint), so id_type is VARCHAR.
 // If strict=true: throws on NULL read_id, NULL sequence1, or empty sequence1.
 // If strict=false: silently skips those rows.
 // Always throws if the result set is empty after filtering.
 // function_name is used in error messages (e.g. "cluster_sequences").
 LoadedSingleEndSequences LoadSingleEndSequences(ClientContext &context, const std::string &table_name,
-                                                const std::string &function_name, bool strict = false);
+                                                const std::string &function_name, const SequenceTableSchema &schema,
+                                                bool strict = false);
 
 // Overload that runs against a caller-owned connection with an optional WHERE clause.
 // Useful for per-sample callers: they already hold a per-thread Connection in LocalState
 // and want to filter by a sample predicate. Pass `where_sql` without the leading "WHERE".
 // An empty `where_sql` is equivalent to the context-based overload.
 LoadedSingleEndSequences LoadSingleEndSequences(Connection &conn, const std::string &table_name,
-                                                const std::string &function_name, bool strict,
-                                                const std::string &where_sql);
+                                                const std::string &function_name, const SequenceTableSchema &schema,
+                                                bool strict, const std::string &where_sql);
 
 // Streaming query sequence reader for lazy sub-batching.
 // Produces sub-batches on demand from a streaming query result.

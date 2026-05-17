@@ -29,6 +29,12 @@ public:
 		std::string sequence_col = "sequence1";
 		std::string count_col = "size";
 
+		// Captured at bind from ValidateDenovoTableSchema (allow_bigint=true).
+		// Drives both the loader's ingress dispatch and the output schema for
+		// read_id + parent trio. Defaults to INVALID so any path that forgets
+		// to set it fails loud at the helper dispatch.
+		LogicalType id_type;
+
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 

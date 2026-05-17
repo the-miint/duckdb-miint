@@ -1,0 +1,105 @@
+# name: test/sql/search_sequences_vsearch_bigint.test
+# description: search_sequences_vsearch accepts BIGINT read_id / target_id columns.
+# group: [sql]
+
+#   read_id mirrors the query input type and target_id mirrors the reference
+#   (db) input type. VARCHAR remains the default for any caller that does not
+#   pass BIGINT-typed columns. Cross-function edge cases (HUGEINT reject,
+#   empty tables) live in vsearch_bigint_edge.test.
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE bq_search_refs AS SELECT * FROM (VALUES
+    (2001::BIGINT, 'ATCGATCGATCGATCGATCGATCG'),
+    (2002::BIGINT, 'GGCCTTAAGGCCTTAAGGCCTTAA')
+) t(read_id, sequence1);
+
+statement ok
+CREATE TABLE bq_search_queries AS SELECT * FROM (VALUES
+    (1001::BIGINT, 'ATCGATCGATCGATCGATCGATCG'),
+    (1002::BIGINT, 'GGCCTTAAGGCCTTAAGGCCTTAA')
+) t(read_id, sequence1);
+
+# ---------------------------------------------------------------------------
+# Happy path BIGINT/BIGINT — values flow through, output types are BIGINT
+# ---------------------------------------------------------------------------
+
+query II
+SELECT read_id, target_id
+FROM search_sequences_vsearch('bq_search_queries', db:='bq_search_refs', id:=0.97)
+ORDER BY read_id;
+----
+1001	2001
+1002	2002
+
+query II
+SELECT typeof(read_id), typeof(target_id)
+FROM search_sequences_vsearch('bq_search_queries', db:='bq_search_refs', id:=0.97)
+LIMIT 1;
+----
+BIGINT	BIGINT
+
+# ---------------------------------------------------------------------------
+# Mixed: BIGINT query + VARCHAR ref — output read_id BIGINT, target_id VARCHAR
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE search_refs_varchar AS
+SELECT CAST(read_id AS VARCHAR) AS read_id, sequence1 FROM bq_search_refs;
+
+query II
+SELECT read_id, target_id
+FROM search_sequences_vsearch('bq_search_queries', db:='search_refs_varchar', id:=0.97)
+ORDER BY read_id;
+----
+1001	2001
+1002	2002
+
+query II
+SELECT typeof(read_id), typeof(target_id)
+FROM search_sequences_vsearch('bq_search_queries', db:='search_refs_varchar', id:=0.97)
+LIMIT 1;
+----
+BIGINT	VARCHAR
+
+# ---------------------------------------------------------------------------
+# Mixed: VARCHAR query + BIGINT ref — other-direction asymmetry
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE search_queries_varchar AS
+SELECT CAST(read_id AS VARCHAR) AS read_id, sequence1 FROM bq_search_queries;
+
+query II
+SELECT typeof(read_id), typeof(target_id)
+FROM search_sequences_vsearch('search_queries_varchar', db:='bq_search_refs', id:=0.97)
+LIMIT 1;
+----
+VARCHAR	BIGINT
+
+# ---------------------------------------------------------------------------
+# Type rejects: INTEGER / DOUBLE / UBIGINT on either side
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE search_queries_int AS SELECT 1::INTEGER AS read_id, 'ATCG' AS sequence1;
+
+statement error
+SELECT * FROM search_sequences_vsearch('search_queries_int', db:='bq_search_refs', id:=0.97);
+----
+must be VARCHAR or BIGINT
+
+statement ok
+CREATE TABLE search_refs_double AS SELECT 1.5::DOUBLE AS read_id, 'ATCG' AS sequence1;
+
+statement error
+SELECT * FROM search_sequences_vsearch('bq_search_queries', db:='search_refs_double', id:=0.97);
+----
+must be VARCHAR or BIGINT

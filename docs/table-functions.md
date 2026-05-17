@@ -2354,8 +2354,8 @@ GROUP BY ref_name ORDER BY hits DESC;
 Reference-based chimera detection using the UCHIME algorithm (Edgar et al. 2011, Bioinformatics 27:2194-2200), powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Detects chimeric sequences by comparing queries against a trusted chimera-free reference database.
 
 **Parameters:**
-- `query_table` (VARCHAR): Name of a table or view containing query sequences. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns.
-- `db` (VARCHAR, required): Name of a table or view containing reference sequences. Same schema requirements as `query_table`.
+- `query_table` (VARCHAR): Name of a table or view containing query sequences. Must have `read_id` (VARCHAR or BIGINT) and `sequence1` (VARCHAR) columns.
+- `db` (VARCHAR, required): Name of a table or view containing reference sequences. Same schema requirements as `query_table`. Its `read_id` column may independently be VARCHAR or BIGINT.
 - `sample_id` (VARCHAR, optional): Name of a column in `query_table` to partition by. When provided, queries are scored per-sample against the (shared, load-once) reference database, and the sample column is prepended to the output. Execution is serialized (the vsearch wrapper is not thread-safe across concurrent calls).
 - `minh` (DOUBLE, default 0.28): Minimum h-score to flag as chimeric. Range [0, 1].
 - `xn` (DOUBLE, default 8.0): Weight of "no" votes in h-score computation. Must be >= 1.0.
@@ -2369,10 +2369,10 @@ Reference-based chimera detection using the UCHIME algorithm (Edgar et al. 2011,
 | Column | Type | Description |
 |--------|------|-------------|
 | `score` | DOUBLE | Chimera h-score (higher = more likely chimeric) |
-| `read_id` | VARCHAR | Query sequence identifier |
-| `parent_a_id` | VARCHAR | Parent A identifier (NULL if non-chimeric) |
-| `parent_b_id` | VARCHAR | Parent B identifier (NULL if non-chimeric) |
-| `closest_parent_id` | VARCHAR | Closest parent to query (NULL if non-chimeric) |
+| `read_id` | VARCHAR or BIGINT — mirrors `query_table.read_id` | Query sequence identifier |
+| `parent_a_id` | VARCHAR or BIGINT — mirrors `db.read_id` | Parent A identifier (NULL if non-chimeric) |
+| `parent_b_id` | VARCHAR or BIGINT — mirrors `db.read_id` | Parent B identifier (NULL if non-chimeric) |
+| `closest_parent_id` | VARCHAR or BIGINT — mirrors `db.read_id` | Closest parent to query (NULL if non-chimeric) |
 | `id_query_model` | DOUBLE | Query-to-chimeric-model identity % |
 | `id_query_a` | DOUBLE | Query-to-parent-A identity % |
 | `id_query_b` | DOUBLE | Query-to-parent-B identity % |
@@ -2421,6 +2421,10 @@ SELECT flag, count(*) FROM detect_chimera_uchime('queries', db:='refs') GROUP BY
 - Error if query table contains NULL `read_id` values
 - Error if scoring parameters are out of valid range
 
+**Identifier-column types (`read_id`, parent ids):**
+- The query and reference tables' `read_id` columns may independently be `VARCHAR` or `BIGINT`. Other numeric types are rejected at bind time with `Column '<name>' in table '<table>' must be VARCHAR or BIGINT`.
+- Output `read_id` mirrors the query side; `parent_a_id` / `parent_b_id` / `closest_parent_id` all mirror the reference side. Non-chimeric rows yield NULL for the parent trio regardless of type.
+
 **Algorithm:**
 1. For each query, partition into 4 chunks and search the reference DB using an 8-mer index for candidate parents (up to 16)
 2. Align query to each candidate using WFA2 global alignment
@@ -2436,7 +2440,7 @@ SELECT flag, count(*) FROM detect_chimera_uchime('queries', db:='refs') GROUP BY
 De novo chimera detection using the UCHIME algorithm, powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Detects chimeric sequences without a reference database by using abundance information: more abundant sequences are assumed to be non-chimeric and serve as parents for less abundant sequences.
 
 **Parameters:**
-- `input_table` (VARCHAR): Name of a table or view containing sequences with abundance. By default must have `read_id` (VARCHAR), `sequence1` (VARCHAR), and `size` (integer type) columns; use `id_col`/`sequence_col`/`count_col` to override.
+- `input_table` (VARCHAR): Name of a table or view containing sequences with abundance. By default must have `read_id` (VARCHAR or BIGINT), `sequence1` (VARCHAR), and `size` (integer type) columns; use `id_col`/`sequence_col`/`count_col` to override.
 - `sample_id` (VARCHAR, optional): Name of a column in `input_table` to partition by. Each sample gets its own k-mer index and bootstrap; a read_id that appears in multiple samples is therefore scored independently. The sample column is prepended to the output. Execution is serialized per the vsearch wrapper's thread-safety constraints.
 - `id_col` (VARCHAR, default `'read_id'`): Name of the read identifier column in `input_table`.
 - `sequence_col` (VARCHAR, default `'sequence1'`): Name of the sequence column.
@@ -2444,7 +2448,7 @@ De novo chimera detection using the UCHIME algorithm, powered by the [vsearch](h
 - `abskew` (DOUBLE, default 2.0): Abundance skew. Candidate parents must have abundance >= abskew * query abundance. Must be >= 1.0.
 - `minh`, `xn`, `dn`, `mindiv`, `mindiffs`: Same as `detect_chimera_uchime`. (No `threads` parameter — de novo detection is sequential by construction; vsearch is run with `opt_threads=1`.)
 
-**Output schema:** Same 18 columns as `detect_chimera_uchime`.
+**Output schema:** Same 18 columns as `detect_chimera_uchime`. Output `read_id` and the parent trio (`parent_a_id`, `parent_b_id`, `closest_parent_id`) all mirror the input `id_col` type — parents are back-references into the input ids by construction.
 
 **Example:**
 ```sql
@@ -2474,6 +2478,7 @@ WHERE u.flag != 'Y';
 **Error handling:**
 - Error if table does not exist or lacks the resolved id/sequence/count columns
 - Error if the count column is not an integer type
+- Error if the id column is not VARCHAR or BIGINT (`Column '<name>' in table '<table>' must be VARCHAR or BIGINT`)
 - Error if table is empty
 - Error if scoring parameters are out of valid range
 - Error if any of `id_col`/`sequence_col`/`count_col` is the empty string
@@ -2485,8 +2490,8 @@ WHERE u.flag != 'Y';
 Global pairwise sequence search, powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Finds the best matching sequences in a reference database for each query sequence using SIMD-optimized Needleman-Wunsch alignment with k-mer candidate filtering.
 
 **Parameters:**
-- `query_table` (VARCHAR): Name of a table or view containing query sequences. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns.
-- `db` (VARCHAR, required): Name of a table or view containing reference sequences. Same schema requirements as `query_table`.
+- `query_table` (VARCHAR): Name of a table or view containing query sequences. Must have `read_id` (VARCHAR or BIGINT) and `sequence1` (VARCHAR) columns.
+- `db` (VARCHAR, required): Name of a table or view containing reference sequences. Same schema requirements as `query_table`. Its `read_id` column may independently be VARCHAR or BIGINT.
 - `id` (DOUBLE, required): Minimum identity threshold (0.0-1.0). No silent default — must be specified explicitly.
 - `maxaccepts` (INTEGER, default 1): Maximum number of accepted hits per query. Must be >= 1.
 - `maxrejects` (INTEGER, default 32): Maximum rejected targets before stopping search. Must be >= 1.
@@ -2496,8 +2501,8 @@ Global pairwise sequence search, powered by the [vsearch](https://github.com/tor
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `read_id` | VARCHAR | Query sequence identifier |
-| `target_id` | VARCHAR | Reference sequence identifier |
+| `read_id` | VARCHAR or BIGINT — mirrors `query_table.read_id` | Query sequence identifier |
+| `target_id` | VARCHAR or BIGINT — mirrors `db.read_id` | Reference sequence identifier |
 | `identity` | DOUBLE | Percent identity (0-100) |
 | `matches` | INTEGER | Number of matching columns |
 | `mismatches` | INTEGER | Number of mismatching columns |
@@ -2506,6 +2511,10 @@ Global pairwise sequence search, powered by the [vsearch](https://github.com/tor
 | `query_length` | INTEGER | Query sequence length |
 | `target_length` | INTEGER | Target sequence length |
 | `accepted` | BOOLEAN | True if hit passes identity threshold |
+
+**Identifier-column types (`read_id`, `target_id`):**
+- The query and reference tables' `read_id` columns may independently be `VARCHAR` or `BIGINT`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with `Column '<name>' in table '<table>' must be VARCHAR or BIGINT`.
+- The output `read_id` mirrors the query side; `target_id` mirrors the reference side. Mixed schemas (e.g. BIGINT queries against VARCHAR references) produce mixed output.
 
 **Example:**
 ```sql
@@ -2543,7 +2552,7 @@ SELECT count(DISTINCT read_id) FROM search_sequences_vsearch('queries', db:='ref
 Greedy sequence clustering, powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Clusters sequences by iterating in input order: each sequence is compared against existing centroids, and either joins the best matching cluster (if above the identity threshold) or becomes a new centroid.
 
 **Parameters:**
-- `input_table` (VARCHAR): Name of a table or view containing sequences. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns.
+- `input_table` (VARCHAR): Name of a table or view containing sequences. Must have `read_id` (VARCHAR or BIGINT) and `sequence1` (VARCHAR) columns.
 - `id` (DOUBLE, required): Minimum identity threshold (0.0-1.0). No silent default — must be specified explicitly.
 - `strand` (VARCHAR, default `'plus'`): `'plus'` for plus-strand only, `'both'` to also search reverse complements.
 - `threads` (INTEGER, optional): Number of threads vsearch uses for its internal `cluster_assign_batch` parallel scan. Defaults to DuckDB's configured thread count (`SET threads=N`) at bind time; pass an explicit value to override. Must be 1–1024 (matching vsearch's CLI ceiling).
@@ -2552,13 +2561,17 @@ Greedy sequence clustering, powered by the [vsearch](https://github.com/torognes
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `read_id` | VARCHAR | Input sequence identifier |
+| `read_id` | VARCHAR or BIGINT — mirrors `input_table.read_id` | Input sequence identifier |
 | `is_centroid` | BOOLEAN | True if this sequence started a new cluster |
 | `cluster_id` | INTEGER | Cluster number (0-based) |
-| `centroid_id` | VARCHAR | Identifier of the cluster's centroid |
+| `centroid_id` | VARCHAR or BIGINT — same type as `read_id` | Identifier of the cluster's centroid |
 | `identity` | DOUBLE | Percent identity to centroid (100.0 if centroid) |
 | `cigar` | VARCHAR | CIGAR alignment to centroid (empty if centroid) |
 | `cigar_truncated` | BOOLEAN | True if CIGAR was truncated (>4096 chars) |
+
+**Identifier-column types (`read_id`, `centroid_id`):**
+- The input `read_id` column may be `VARCHAR` or `BIGINT`. Other numeric types are rejected at bind time with `Column 'read_id' in table '<table>' must be VARCHAR or BIGINT`.
+- Output `read_id` and `centroid_id` share the same type as the input by construction: `centroid_id` is a back-reference into one of the input table's `read_id` values.
 
 **Sort order is the caller's responsibility.** The function clusters sequences in the order they appear in the input table. For `cluster_fast`-equivalent behavior (longest first), sort by length descending. For `cluster_size`-equivalent behavior (most abundant first), sort by abundance descending:
 

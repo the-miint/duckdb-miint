@@ -1,0 +1,145 @@
+# name: test/sql/vsearch_bigint_edge.test
+# description: Edge case matrix for BIGINT read_id across the four vsearch-backed table functions.
+# group: [sql]
+
+#   Companion to the per-function bigint tests. Covers paths that aren't the
+#   happy path of any single adopter:
+#     1. HUGEINT reject across all four functions
+#     2. Empty BIGINT input/reference tables -> existing "is empty" error path
+#        unchanged
+#     3. All-singletons cluster (every read is its own centroid)
+#     4. All-non-chimeric uchime (entire batch has NULL parents)
+#     5. uchime_ref: type-reject independently on query vs ref side
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+# ---------------------------------------------------------------------------
+# 1. HUGEINT reject across all four
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE hugeint_seqs AS SELECT 1::HUGEINT AS read_id, 'ATCG' AS sequence1;
+
+statement ok
+CREATE TABLE hugeint_seqs_sized AS
+SELECT 1::HUGEINT AS read_id, 'ATCG' AS sequence1, 1::INTEGER AS size;
+
+statement ok
+CREATE TABLE varchar_seqs AS SELECT 'r1' AS read_id, 'ATCG' AS sequence1;
+
+statement error
+SELECT * FROM search_sequences_vsearch('hugeint_seqs', db:='varchar_seqs', id:=0.97);
+----
+must be VARCHAR or BIGINT
+
+statement error
+SELECT * FROM cluster_sequences_vsearch('hugeint_seqs', id:=0.97);
+----
+must be VARCHAR or BIGINT
+
+statement error
+SELECT * FROM detect_chimera_uchime('hugeint_seqs', db:='varchar_seqs');
+----
+must be VARCHAR or BIGINT
+
+statement error
+SELECT * FROM detect_chimera_uchime_denovo('hugeint_seqs_sized');
+----
+must be VARCHAR or BIGINT
+
+# ---------------------------------------------------------------------------
+# 2. Empty BIGINT input/reference tables — pre-existing "is empty" error
+#    path is type-agnostic.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE bq_empty AS SELECT 0::BIGINT AS read_id, 'A' AS sequence1 WHERE FALSE;
+
+statement ok
+CREATE TABLE bq_nonempty AS SELECT 1::BIGINT AS read_id, 'ATCGATCGATCGATCG' AS sequence1;
+
+statement error
+SELECT * FROM search_sequences_vsearch('bq_nonempty', db:='bq_empty', id:=0.97);
+----
+is empty
+
+statement error
+SELECT * FROM cluster_sequences_vsearch('bq_empty', id:=0.97);
+----
+is empty
+
+statement error
+SELECT * FROM detect_chimera_uchime('bq_nonempty', db:='bq_empty');
+----
+is empty
+
+statement ok
+CREATE TABLE bq_empty_sized AS
+SELECT 0::BIGINT AS read_id, 'A' AS sequence1, 1::INTEGER AS size WHERE FALSE;
+
+statement error
+SELECT * FROM detect_chimera_uchime_denovo('bq_empty_sized');
+----
+is empty
+
+# ---------------------------------------------------------------------------
+# 3. All-singletons cluster: each BIGINT input is its own centroid; output
+#    centroid_id equals read_id for every row.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE bq_singletons AS SELECT * FROM (VALUES
+    (5001::BIGINT, 'ATCGATCGATCGATCGATCGATCG'),
+    (5002::BIGINT, 'GGCCTTAAGGCCTTAAGGCCTTAA'),
+    (5003::BIGINT, 'AAAAAAAACCCCCCCCGGGGGGGG')
+) t(read_id, sequence1);
+
+query I
+SELECT count(*)
+FROM cluster_sequences_vsearch('bq_singletons', id:=0.97)
+WHERE read_id = centroid_id AND is_centroid = true;
+----
+3
+
+# ---------------------------------------------------------------------------
+# 4. All-non-chimeric uchime: BIGINT input where no rows match the chimera
+#    pattern -> every parent_a_id / parent_b_id / closest_parent_id is NULL.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE bq_uchime_clean_only AS SELECT * FROM (VALUES
+    (7001::BIGINT, 'ATCGATCGATCGATCGATCGATCGATCGATCGATCG'),
+    (7002::BIGINT, 'GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC')
+) t(read_id, sequence1);
+
+# Use bq_uchime_clean_only as both query and ref — no chimeric structure
+# possible. All flags 'N', all parent ids NULL across the BIGINT output.
+query II
+SELECT
+    SUM(CASE WHEN parent_a_id IS NULL AND parent_b_id IS NULL
+              AND closest_parent_id IS NULL THEN 1 ELSE 0 END) AS all_null,
+    SUM(CASE WHEN flag = 'Y' THEN 1 ELSE 0 END) AS chimeric
+FROM detect_chimera_uchime('bq_uchime_clean_only', db:='bq_uchime_clean_only');
+----
+2	0
+
+# ---------------------------------------------------------------------------
+# 5. uchime_ref: independent type rejection on query vs ref side. The error
+#    must reference the offending side's table by name (validated by
+#    ValidateSequenceTableSchema's exact format).
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE bq_uchime_q AS SELECT 1::BIGINT AS read_id, 'ATCG' AS sequence1;
+
+statement error
+SELECT * FROM detect_chimera_uchime('hugeint_seqs', db:='bq_uchime_q');
+----
+Column 'read_id' in table 'hugeint_seqs' must be VARCHAR or BIGINT
+
+statement error
+SELECT * FROM detect_chimera_uchime('bq_uchime_q', db:='hugeint_seqs');
+----
+Column 'read_id' in table 'hugeint_seqs' must be VARCHAR or BIGINT

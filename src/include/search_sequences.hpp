@@ -26,6 +26,7 @@ public:
 		miint::SearchParams params;
 
 		SequenceTableSchema query_schema;
+		SequenceTableSchema ref_schema;
 
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;

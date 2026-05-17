@@ -1,4 +1,5 @@
 #include "uchime_denovo.hpp"
+#include "id_column_codec.hpp"
 #include "table_function_common.hpp"
 #include "uchime_common.hpp"
 
@@ -14,10 +15,13 @@
 
 namespace duckdb {
 
-// Validate that a table has the resolved id (VARCHAR), sequence (VARCHAR), and count
-// (integer type) columns. Names are resolved from named parameters at bind time.
-static void ValidateDenovoTableSchema(ClientContext &context, const std::string &table_name, const std::string &id_col,
-                                      const std::string &sequence_col, const std::string &count_col) {
+// Validate that a table has the resolved id (VARCHAR or BIGINT), sequence
+// (VARCHAR), and count (integer type) columns. Names are resolved from named
+// parameters at bind time. Returns the captured LogicalType of the id column
+// so the loader and the output schema can mirror it.
+static LogicalType ValidateDenovoTableSchema(ClientContext &context, const std::string &table_name,
+                                             const std::string &id_col, const std::string &sequence_col,
+                                             const std::string &count_col) {
 	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
 	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
 	if (!entry) {
@@ -51,10 +55,11 @@ static void ValidateDenovoTableSchema(ClientContext &context, const std::string 
 
 	auto it = name_to_idx.find(StringUtil::Lower(id_col));
 	if (it == name_to_idx.end()) {
-		throw BinderException("Table '%s' missing required column '%s' (VARCHAR)", table_name, id_col);
+		throw BinderException("Table '%s' missing required column '%s' (VARCHAR or BIGINT)", table_name, id_col);
 	}
-	if (col_types[it->second].id() != LogicalTypeId::VARCHAR) {
-		throw BinderException("Column '%s' in table '%s' must be VARCHAR", id_col, table_name);
+	auto id_logical_type = col_types[it->second];
+	if (id_logical_type.id() != LogicalTypeId::VARCHAR && id_logical_type.id() != LogicalTypeId::BIGINT) {
+		throw BinderException("Column '%s' in table '%s' must be VARCHAR or BIGINT", id_col, table_name);
 	}
 
 	it = name_to_idx.find(StringUtil::Lower(sequence_col));
@@ -78,15 +83,18 @@ static void ValidateDenovoTableSchema(ClientContext &context, const std::string 
 		throw BinderException("Column '%s' in table '%s' must be an integer type (got %s)", count_col, table_name,
 		                      col_types[it->second].ToString());
 	}
+	return id_logical_type;
 }
 
 // Pull (id, sequence, count) rows for a single sample (or the whole table when
 // where_sql is empty) via the given connection, ordered by count DESC, dropping
 // NULL/empty rows. Column names are caller-supplied to honor user overrides.
+// `id_type` drives id-column extraction (VARCHAR passthrough or BIGINT codec).
 static void LoadDenovoSequences(Connection &conn, const std::string &table_name, const std::string &id_col,
                                 const std::string &sequence_col, const std::string &count_col,
-                                const std::string &where_sql, std::vector<std::string> &out_labels,
-                                std::vector<std::string> &out_sequences, std::vector<int64_t> &out_sizes) {
+                                const LogicalType &id_type, const std::string &where_sql,
+                                std::vector<std::string> &out_labels, std::vector<std::string> &out_sequences,
+                                std::vector<int64_t> &out_sizes) {
 	auto q_id = KeywordHelper::WriteOptionallyQuoted(id_col);
 	auto q_seq = KeywordHelper::WriteOptionallyQuoted(sequence_col);
 	auto q_count = KeywordHelper::WriteOptionallyQuoted(count_col);
@@ -114,7 +122,11 @@ static void LoadDenovoSequences(Connection &conn, const std::string &table_name,
 			if (seq_str.empty()) {
 				continue;
 			}
-			out_labels.push_back(read_id_val.GetValue<std::string>());
+			if (id_type.id() == LogicalTypeId::BIGINT) {
+				out_labels.push_back(miint::FormatIdFromInt64(read_id_val.GetValue<int64_t>()));
+			} else {
+				out_labels.push_back(read_id_val.GetValue<std::string>());
+			}
 			out_sequences.push_back(std::move(seq_str));
 			out_sizes.push_back(size_val.GetValue<int64_t>());
 		}
@@ -174,7 +186,8 @@ unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context,
 	get_col_override("sequence_col", data->sequence_col);
 	get_col_override("count_col", data->count_col);
 
-	ValidateDenovoTableSchema(context, data->input_table, data->id_col, data->sequence_col, data->count_col);
+	data->id_type =
+	    ValidateDenovoTableSchema(context, data->input_table, data->id_col, data->sequence_col, data->count_col);
 
 	auto get_double = [&](const std::string &name, double &out, double min_val, const char *constraint) {
 		auto it = input.named_parameters.find(name);
@@ -211,7 +224,9 @@ unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context,
 	}
 
 	data->names = GetUchimeOutputNames();
-	data->types = GetUchimeOutputTypes();
+	// read_id mirrors input id_type; parent trio mirrors the same id type
+	// because parents are back-references into one of the input ids.
+	data->types = GetUchimeOutputTypes(data->id_type, data->id_type);
 
 	if (data->has_sample_id) {
 		auto &db = DatabaseInstance::GetDatabase(context);
@@ -250,8 +265,8 @@ unique_ptr<GlobalTableFunctionState> UchimeDenovoTableFunction::InitGlobal(Clien
 
 	auto &db = DatabaseInstance::GetDatabase(context);
 	Connection conn(db);
-	LoadDenovoSequences(conn, data.input_table, data.id_col, data.sequence_col, data.count_col, /*where_sql=*/"",
-	                    gstate->labels, gstate->sequences, gstate->sizes);
+	LoadDenovoSequences(conn, data.input_table, data.id_col, data.sequence_col, data.count_col, data.id_type,
+	                    /*where_sql=*/"", gstate->labels, gstate->sequences, gstate->sizes);
 
 	if (gstate->labels.empty()) {
 		throw InvalidInputException("Table '%s' is empty (or contains only NULL/empty sequences)", data.input_table);
@@ -289,7 +304,9 @@ void UchimeDenovoTableFunction::Execute(ClientContext & /*context*/, TableFuncti
 		if (gstate.result_offset < gstate.results.size()) {
 			idx_t remaining = gstate.results.size() - gstate.result_offset;
 			idx_t count = std::min(remaining, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
-			OutputUchimeResults(output, gstate.results, gstate.result_offset, count);
+			// Same id type for both args: parents are back-references into the
+			// input ids, so the parent trio mirrors read_id.
+			OutputUchimeResults(output, gstate.results, gstate.result_offset, count, data.id_type, data.id_type);
 			gstate.result_offset += count;
 			return;
 		}
@@ -327,7 +344,7 @@ void UchimeDenovoTableFunction::Execute(ClientContext & /*context*/, TableFuncti
 		}
 
 		idx_t count = std::min(static_cast<idx_t>(gstate.results.size()), static_cast<idx_t>(STANDARD_VECTOR_SIZE));
-		OutputUchimeResults(output, gstate.results, 0, count);
+		OutputUchimeResults(output, gstate.results, 0, count, data.id_type, data.id_type);
 		gstate.result_offset = count;
 		return;
 	}
@@ -339,7 +356,8 @@ void UchimeDenovoTableFunction::Execute(ClientContext & /*context*/, TableFuncti
 			idx_t remaining = lstate.results.size() - lstate.result_offset;
 			idx_t count = std::min(remaining, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
 			output.data[0].Reference(lstate.sample_value);
-			OutputUchimeResults(output, lstate.results, lstate.result_offset, count, /*start_col=*/1);
+			OutputUchimeResults(output, lstate.results, lstate.result_offset, count, data.id_type, data.id_type,
+			                    /*start_col=*/1);
 			lstate.result_offset += count;
 			return;
 		}
@@ -357,8 +375,8 @@ void UchimeDenovoTableFunction::Execute(ClientContext & /*context*/, TableFuncti
 
 		std::vector<std::string> labels, sequences;
 		std::vector<int64_t> sizes;
-		LoadDenovoSequences(*lstate.conn, data.input_table, data.id_col, data.sequence_col, data.count_col, where_sql,
-		                    labels, sequences, sizes);
+		LoadDenovoSequences(*lstate.conn, data.input_table, data.id_col, data.sequence_col, data.count_col,
+		                    data.id_type, where_sql, labels, sequences, sizes);
 		lstate.results.clear();
 		lstate.result_offset = 0;
 		if (!labels.empty()) {

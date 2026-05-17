@@ -536,9 +536,25 @@ miint::SequenceRecordBatch QuerySequenceStream::FetchSubBatch() {
 	return result;
 }
 
+// Extract an id Value as a string, dispatching on the bind-captured id type.
+// VARCHAR: pass through via Value::GetValue<std::string>().
+// BIGINT:  fetch as int64_t, stringify via the codec.
+// Other id types are rejected at bind by ValidateSequenceTableSchema, so any
+// other type here is an internal-invariant violation — fail loud.
+static inline std::string ExtractIdValueAsString(const Value &v, const LogicalType &id_type) {
+	if (id_type.id() == LogicalTypeId::BIGINT) {
+		return miint::FormatIdFromInt64(v.GetValue<int64_t>());
+	}
+	if (id_type.id() == LogicalTypeId::VARCHAR) {
+		return v.GetValue<std::string>();
+	}
+	throw InternalException("LoadSingleEndSequences: unsupported id type '%s' (must be VARCHAR or BIGINT)",
+	                        id_type.ToString());
+}
+
 LoadedSingleEndSequences LoadSingleEndSequences(Connection &conn, const std::string &table_name,
-                                                const std::string &function_name, bool strict,
-                                                const std::string &where_sql) {
+                                                const std::string &function_name, const SequenceTableSchema &schema,
+                                                bool strict, const std::string &where_sql) {
 	auto sql = "SELECT read_id, sequence1 FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
 	if (!where_sql.empty()) {
 		sql += " WHERE " + where_sql;
@@ -566,14 +582,16 @@ LoadedSingleEndSequences LoadSingleEndSequences(Connection &conn, const std::str
 				}
 				if (seq_val.IsNull()) {
 					throw InvalidInputException("%s: NULL sequence1 found for read_id '%s' in table '%s'",
-					                            function_name, read_id_val.GetValue<std::string>(), table_name);
+					                            function_name, ExtractIdValueAsString(read_id_val, schema.id_type),
+					                            table_name);
 				}
 				auto seq_str = seq_val.GetValue<std::string>();
 				if (seq_str.empty()) {
 					throw InvalidInputException("%s: empty sequence1 found for read_id '%s' in table '%s'",
-					                            function_name, read_id_val.GetValue<std::string>(), table_name);
+					                            function_name, ExtractIdValueAsString(read_id_val, schema.id_type),
+					                            table_name);
 				}
-				loaded.labels.push_back(read_id_val.GetValue<std::string>());
+				loaded.labels.push_back(ExtractIdValueAsString(read_id_val, schema.id_type));
 				loaded.sequences.push_back(std::move(seq_str));
 			} else {
 				if (read_id_val.IsNull() || seq_val.IsNull()) {
@@ -583,7 +601,7 @@ LoadedSingleEndSequences LoadSingleEndSequences(Connection &conn, const std::str
 				if (seq_str.empty()) {
 					continue;
 				}
-				loaded.labels.push_back(read_id_val.GetValue<std::string>());
+				loaded.labels.push_back(ExtractIdValueAsString(read_id_val, schema.id_type));
 				loaded.sequences.push_back(std::move(seq_str));
 			}
 		}
@@ -597,10 +615,11 @@ LoadedSingleEndSequences LoadSingleEndSequences(Connection &conn, const std::str
 }
 
 LoadedSingleEndSequences LoadSingleEndSequences(ClientContext &context, const std::string &table_name,
-                                                const std::string &function_name, bool strict) {
+                                                const std::string &function_name, const SequenceTableSchema &schema,
+                                                bool strict) {
 	auto &db = DatabaseInstance::GetDatabase(context);
 	Connection conn(db);
-	return LoadSingleEndSequences(conn, table_name, function_name, strict, /*where_sql=*/"");
+	return LoadSingleEndSequences(conn, table_name, function_name, schema, strict, /*where_sql=*/"");
 }
 
 } // namespace duckdb

@@ -1,4 +1,5 @@
 #include "uchime_common.hpp"
+#include "id_column_utils.hpp"
 
 #include <algorithm>
 
@@ -10,16 +11,18 @@ std::vector<std::string> GetUchimeOutputNames() {
 	        "left_abstain", "right_yes",  "right_no",    "right_abstain", "divergence",        "flag"};
 }
 
-std::vector<LogicalType> GetUchimeOutputTypes() {
-	return {LogicalType::DOUBLE,  LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	        LogicalType::VARCHAR, LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE,
+std::vector<LogicalType> GetUchimeOutputTypes(const LogicalType &query_id_type, const LogicalType &ref_id_type) {
+	// read_id mirrors the query input type; parent_a_id / parent_b_id /
+	// closest_parent_id mirror the reference input type.
+	return {LogicalType::DOUBLE,  query_id_type,        ref_id_type,          ref_id_type,
+	        ref_id_type,          LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE,
 	        LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::INTEGER, LogicalType::INTEGER,
 	        LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::INTEGER,
 	        LogicalType::DOUBLE,  LogicalType::VARCHAR};
 }
 
 idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResult> &results, idx_t offset, idx_t count,
-                          idx_t start_col) {
+                          const LogicalType &query_id_type, const LogicalType &ref_id_type, idx_t start_col) {
 	idx_t actual = std::min(count, static_cast<idx_t>(results.size()) - offset);
 	if (actual == 0) {
 		output.SetCardinality(0);
@@ -34,31 +37,40 @@ idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResu
 		score_data[i] = results[offset + i].score;
 	}
 
-	// read_id — always populated
-	auto &read_id_vec = output.data[col++];
+	// read_id — always populated. Build a string projection, then dispatch
+	// to EmitIdColumnFromStrings (VARCHAR passthrough or BIGINT decimal parse).
+	std::vector<std::string> read_ids(actual);
 	for (idx_t i = 0; i < actual; i++) {
-		FlatVector::GetData<string_t>(read_id_vec)[i] =
-		    StringVector::AddString(read_id_vec, results[offset + i].query_label);
+		read_ids[i] = results[offset + i].query_label;
 	}
+	EmitIdColumnFromStrings(output.data[col++], read_ids, /*offset=*/0, actual, query_id_type);
 
-	// parent_a_id, parent_b_id, closest_parent_id — NULL when non-chimeric (empty label)
+	// parent_a_id, parent_b_id, closest_parent_id — NULL when non-chimeric
+	// (empty label). Build all three string projections (empty string for
+	// non-chimeric), dispatch via the codec, then uniformly invalidate the
+	// non-chimeric rows. Preserves the pre-PR-2 VARCHAR semantics (NULL parents
+	// for non-chimeric) for both type regimes.
+	std::vector<std::string> parent_a(actual), parent_b(actual), closest(actual);
+	for (idx_t i = 0; i < actual; i++) {
+		const auto &r = results[offset + i];
+		parent_a[i] = r.parent_a_label;
+		parent_b[i] = r.parent_b_label;
+		closest[i] = r.closest_parent_label;
+	}
 	auto &parent_a_vec = output.data[col++];
 	auto &parent_b_vec = output.data[col++];
 	auto &closest_parent_vec = output.data[col++];
+	EmitIdColumnFromStrings(parent_a_vec, parent_a, /*offset=*/0, actual, ref_id_type);
+	EmitIdColumnFromStrings(parent_b_vec, parent_b, /*offset=*/0, actual, ref_id_type);
+	EmitIdColumnFromStrings(closest_parent_vec, closest, /*offset=*/0, actual, ref_id_type);
 	auto &pa_validity = FlatVector::Validity(parent_a_vec);
 	auto &pb_validity = FlatVector::Validity(parent_b_vec);
 	auto &cp_validity = FlatVector::Validity(closest_parent_vec);
 	for (idx_t i = 0; i < actual; i++) {
-		auto &r = results[offset + i];
-		if (r.parent_a_label.empty()) {
+		if (results[offset + i].parent_a_label.empty()) {
 			pa_validity.SetInvalid(i);
 			pb_validity.SetInvalid(i);
 			cp_validity.SetInvalid(i);
-		} else {
-			FlatVector::GetData<string_t>(parent_a_vec)[i] = StringVector::AddString(parent_a_vec, r.parent_a_label);
-			FlatVector::GetData<string_t>(parent_b_vec)[i] = StringVector::AddString(parent_b_vec, r.parent_b_label);
-			FlatVector::GetData<string_t>(closest_parent_vec)[i] =
-			    StringVector::AddString(closest_parent_vec, r.closest_parent_label);
 		}
 	}
 

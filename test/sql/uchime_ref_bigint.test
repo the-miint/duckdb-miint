@@ -1,0 +1,159 @@
+# name: test/sql/uchime_ref_bigint.test
+# description: detect_chimera_uchime accepts BIGINT read_id columns.
+# group: [sql]
+
+#   read_id mirrors the query input type; parent_a_id, parent_b_id, and
+#   closest_parent_id all mirror the reference (db) input type. Non-chimeric
+#   rows yield NULL for the parent trio regardless of type. Cross-function
+#   edge cases (HUGEINT reject, empty tables) live in vsearch_bigint_edge.test.
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+# ---------------------------------------------------------------------------
+# Reuse the canonical uchime test data via numeric id-projections. Each
+# source row gets a deterministic BIGINT id so we can assert exact decimals.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE bq_uchime_refs AS
+SELECT
+    CASE read_id
+        WHEN 'ref1' THEN 101::BIGINT
+        WHEN 'ref2' THEN 102::BIGINT
+        WHEN 'ref3' THEN 103::BIGINT
+        WHEN 'ref4' THEN 104::BIGINT
+        WHEN 'ref5' THEN 105::BIGINT
+        WHEN 'ref6' THEN 106::BIGINT
+    END AS read_id,
+    sequence1
+FROM read_fastx('data/uchime/chimera_ref.fasta');
+
+statement ok
+CREATE TABLE bq_uchime_queries AS
+SELECT
+    CASE read_id
+        WHEN 'query_chimera1' THEN 1001::BIGINT
+        WHEN 'query_chimera2' THEN 1002::BIGINT
+        WHEN 'query_chimera3' THEN 1003::BIGINT
+        WHEN 'query_clean1' THEN 1011::BIGINT
+        WHEN 'query_clean2' THEN 1012::BIGINT
+        WHEN 'query_divergent_chimera' THEN 1004::BIGINT
+        WHEN 'query_noparent' THEN 1021::BIGINT
+        WHEN 'query_short' THEN 1031::BIGINT
+    END AS read_id,
+    sequence1
+FROM read_fastx('data/uchime/chimera_queries.fasta');
+
+# ---------------------------------------------------------------------------
+# Happy path BIGINT/BIGINT: types mirror inputs; values round-trip; non-chimeric
+# parents are NULL.
+# ---------------------------------------------------------------------------
+
+query IIII
+SELECT typeof(read_id), typeof(parent_a_id), typeof(parent_b_id), typeof(closest_parent_id)
+FROM detect_chimera_uchime('bq_uchime_queries', db:='bq_uchime_refs')
+LIMIT 1;
+----
+BIGINT	BIGINT	BIGINT	BIGINT
+
+query II
+SELECT read_id, flag
+FROM detect_chimera_uchime('bq_uchime_queries', db:='bq_uchime_refs')
+ORDER BY read_id;
+----
+1001	Y
+1002	Y
+1003	Y
+1004	Y
+1011	N
+1012	N
+1021	N
+1031	N
+
+# Chimera1: parent_a_id=101 (was ref1), parent_b_id=102 (was ref2). Decimal
+# stringification round-trips through vsearch. (closest_parent is whichever of
+# A/B vsearch picks; not asserted here.)
+query III
+SELECT read_id, parent_a_id, parent_b_id
+FROM detect_chimera_uchime('bq_uchime_queries', db:='bq_uchime_refs')
+WHERE read_id = 1001;
+----
+1001	101	102
+
+# Non-chimeric rows: all three parent ids are NULL (BIGINT NULL preserved).
+query IIIIT
+SELECT read_id, parent_a_id, parent_b_id, closest_parent_id, flag
+FROM detect_chimera_uchime('bq_uchime_queries', db:='bq_uchime_refs')
+WHERE read_id IN (1011, 1012, 1021, 1031)
+ORDER BY read_id;
+----
+1011	NULL	NULL	NULL	N
+1012	NULL	NULL	NULL	N
+1021	NULL	NULL	NULL	N
+1031	NULL	NULL	NULL	N
+
+# ---------------------------------------------------------------------------
+# Mixed: BIGINT query + VARCHAR ref -> read_id BIGINT, parents VARCHAR
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE uchime_refs_varchar AS
+SELECT read_id, sequence1 FROM read_fastx('data/uchime/chimera_ref.fasta');
+
+query IIII
+SELECT typeof(read_id), typeof(parent_a_id), typeof(parent_b_id), typeof(closest_parent_id)
+FROM detect_chimera_uchime('bq_uchime_queries', db:='uchime_refs_varchar')
+LIMIT 1;
+----
+BIGINT	VARCHAR	VARCHAR	VARCHAR
+
+query III
+SELECT read_id, parent_a_id, parent_b_id
+FROM detect_chimera_uchime('bq_uchime_queries', db:='uchime_refs_varchar')
+WHERE read_id = 1001;
+----
+1001	ref1	ref2
+
+# ---------------------------------------------------------------------------
+# Mixed: VARCHAR query + BIGINT ref -> read_id VARCHAR, parents BIGINT
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE uchime_queries_varchar AS
+SELECT read_id, sequence1 FROM read_fastx('data/uchime/chimera_queries.fasta');
+
+query IIII
+SELECT typeof(read_id), typeof(parent_a_id), typeof(parent_b_id), typeof(closest_parent_id)
+FROM detect_chimera_uchime('uchime_queries_varchar', db:='bq_uchime_refs')
+LIMIT 1;
+----
+VARCHAR	BIGINT	BIGINT	BIGINT
+
+query III
+SELECT read_id, parent_a_id, parent_b_id
+FROM detect_chimera_uchime('uchime_queries_varchar', db:='bq_uchime_refs')
+WHERE read_id = 'query_chimera1';
+----
+query_chimera1	101	102
+
+# ---------------------------------------------------------------------------
+# Type rejects (each side independently)
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE uchime_queries_int AS SELECT 1::INTEGER AS read_id, 'ATCG' AS sequence1;
+
+statement error
+SELECT * FROM detect_chimera_uchime('uchime_queries_int', db:='bq_uchime_refs');
+----
+must be VARCHAR or BIGINT
+
+statement ok
+CREATE TABLE uchime_refs_double AS SELECT 1.5::DOUBLE AS read_id, 'ATCG' AS sequence1;
+
+statement error
+SELECT * FROM detect_chimera_uchime('bq_uchime_queries', db:='uchime_refs_double');
+----
+must be VARCHAR or BIGINT

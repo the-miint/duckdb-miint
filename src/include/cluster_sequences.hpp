@@ -1,6 +1,7 @@
 #pragma once
 
 #include "VsearchClusterWrapper.hpp"
+#include "sequence_table_reader.hpp"
 
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/types.hpp"
@@ -20,6 +21,8 @@ public:
 	struct Data : public TableFunctionData {
 		std::string input_table;
 		miint::ClusterParams params;
+
+		SequenceTableSchema input_schema;
 
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;

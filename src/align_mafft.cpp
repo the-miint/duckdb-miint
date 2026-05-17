@@ -14,6 +14,7 @@ namespace duckdb {
 
 struct AlignMafftData : public TableFunctionData {
 	std::string table_name;
+	SequenceTableSchema schema;
 
 	bool has_sample_id = false;
 	PerSampleBindInfo sample_info;
@@ -105,6 +106,7 @@ static unique_ptr<FunctionData> AlignMafftBind(ClientContext &context, TableFunc
 
 	auto data = make_uniq<AlignMafftData>();
 	data->table_name = std::move(table_name);
+	data->schema = std::move(schema);
 
 	auto sample_it = input.named_parameters.find("sample_id");
 	if (sample_it != input.named_parameters.end()) {
@@ -158,7 +160,7 @@ static unique_ptr<GlobalTableFunctionState> AlignMafftInitGlobal(ClientContext &
 
 	gstate->max_threads = 1;
 
-	auto loaded = LoadSingleEndSequences(context, data.table_name, "align_mafft", /*strict=*/true);
+	auto loaded = LoadSingleEndSequences(context, data.table_name, "align_mafft", data.schema, /*strict=*/true);
 	ValidateAndAlignInto(/*sample_literal=*/"", loaded, gstate->names, gstate->sequences, gstate->original_lengths,
 	                     gstate->aligned_length, gstate->mafft_threads);
 
@@ -242,7 +244,8 @@ static void AlignMafftExecute(ClientContext & /*context*/, TableFunctionInput &d
 		// Same CAST-as-VARCHAR equality as the other per-sample call sites; see the note
 		// in deblur_table_function.cpp for the DECIMAL caveat.
 		auto where_sql = "CAST(" + q_col + " AS VARCHAR) = CAST(" + sample_literal + " AS VARCHAR)";
-		auto loaded = LoadSingleEndSequences(*lstate.conn, data.table_name, "align_mafft", /*strict=*/true, where_sql);
+		auto loaded = LoadSingleEndSequences(*lstate.conn, data.table_name, "align_mafft", data.schema, /*strict=*/true,
+		                                     where_sql);
 		ValidateAndAlignInto(sample_literal, loaded, lstate.names, lstate.sequences, lstate.original_lengths,
 		                     lstate.aligned_length, gstate.mafft_threads);
 		lstate.current_row = 0;
