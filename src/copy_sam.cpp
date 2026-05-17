@@ -1,4 +1,6 @@
 #include "copy_sam.hpp"
+#include "id_column_codec.hpp"
+#include "id_column_utils.hpp"
 #include "reference_table_reader.hpp"
 #include "sequence_data_reader.hpp"
 #include "sequence_utils.hpp"
@@ -141,6 +143,13 @@ struct SAMCopyBindData : public FunctionData {
 	std::optional<string> sequence_data_table;
 	SAMColumnIndices indices; // Cached column indices
 
+	// Captured types of the three identifier columns. Each may be VARCHAR or
+	// BIGINT (validated at bind). Default-constructed LogicalType is INVALID so
+	// any path that forgets to set them fails loud at the Sink dispatch.
+	LogicalType read_id_type;
+	LogicalType reference_type;
+	LogicalType mate_reference_type;
+
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<SAMCopyBindData>();
 		result->include_header = include_header;
@@ -152,6 +161,9 @@ struct SAMCopyBindData : public FunctionData {
 		result->reference_lengths_table = reference_lengths_table;
 		result->sequence_data_table = sequence_data_table;
 		result->indices = indices;
+		result->read_id_type = read_id_type;
+		result->reference_type = reference_type;
+		result->mate_reference_type = mate_reference_type;
 		return std::move(result);
 	}
 
@@ -209,14 +221,14 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 	}
 
 	// Validate column types
-	if (sql_types[indices.read_id_idx].id() != LogicalTypeId::VARCHAR) {
-		throw BinderException("Column 'read_id' must be VARCHAR");
+	if (!IsAllowedIdType(sql_types[indices.read_id_idx])) {
+		throw BinderException("Column 'read_id' must be VARCHAR or BIGINT");
 	}
 	if (sql_types[indices.flags_idx].id() != LogicalTypeId::USMALLINT) {
 		throw BinderException("Column 'flags' must be USMALLINT");
 	}
-	if (sql_types[indices.reference_idx].id() != LogicalTypeId::VARCHAR) {
-		throw BinderException("Column 'reference' must be VARCHAR");
+	if (!IsAllowedIdType(sql_types[indices.reference_idx])) {
+		throw BinderException("Column 'reference' must be VARCHAR or BIGINT");
 	}
 	if (sql_types[indices.position_idx].id() != LogicalTypeId::BIGINT) {
 		throw BinderException("Column 'position' must be BIGINT");
@@ -227,9 +239,14 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 	if (sql_types[indices.cigar_idx].id() != LogicalTypeId::VARCHAR) {
 		throw BinderException("Column 'cigar' must be VARCHAR");
 	}
-	if (sql_types[indices.mate_reference_idx].id() != LogicalTypeId::VARCHAR) {
-		throw BinderException("Column 'mate_reference' must be VARCHAR");
+	if (!IsAllowedIdType(sql_types[indices.mate_reference_idx])) {
+		throw BinderException("Column 'mate_reference' must be VARCHAR or BIGINT");
 	}
+
+	// Capture id-column types for the Sink's per-row dispatch.
+	result->read_id_type = sql_types[indices.read_id_idx];
+	result->reference_type = sql_types[indices.reference_idx];
+	result->mate_reference_type = sql_types[indices.mate_reference_idx];
 	if (sql_types[indices.mate_position_idx].id() != LogicalTypeId::BIGINT) {
 		throw BinderException("Column 'mate_position' must be BIGINT");
 	}
@@ -612,6 +629,28 @@ static void PrepareSeqQual(const SequenceDataMap &seq_data, const std::string &r
 }
 
 //===--------------------------------------------------------------------===//
+// Identifier-column dispatch (read_id, reference, mate_reference)
+//===--------------------------------------------------------------------===//
+// Returns the SAM textual representation of an identifier-column cell.
+// - VARCHAR: bytes verbatim. Validity is intentionally not consulted: NULL
+//   VARCHAR slots pass through as whatever string_t::GetString() yields, not
+//   as SAM '*'. Callers producing nullable VARCHAR identifier columns are
+//   responsible for pre-filtering.
+// - BIGINT:  decimal stringification; NULL → SAM '*' sentinel.
+static inline string ExtractSamIdField(const UnifiedVectorFormat &fmt, idx_t row_idx, const LogicalType &id_type) {
+	auto idx = fmt.sel->get_index(row_idx);
+	if (id_type.id() == LogicalTypeId::BIGINT) {
+		if (!fmt.validity.RowIsValid(idx)) {
+			return "*";
+		}
+		auto data = UnifiedVectorFormat::GetData<int64_t>(fmt);
+		return miint::FormatIdFromInt64(data[idx]);
+	}
+	auto data = UnifiedVectorFormat::GetData<string_t>(fmt);
+	return data[idx].GetString();
+}
+
+//===--------------------------------------------------------------------===//
 // Sink
 //===--------------------------------------------------------------------===//
 static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p,
@@ -674,13 +713,12 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 		input.data[indices.tag_sa_idx].ToUnifiedFormat(input.size(), tag_sa_data);
 	}
 
-	auto read_id_ptr = UnifiedVectorFormat::GetData<string_t>(read_id_data);
+	// read_id, reference, mate_reference dispatch on bind-captured types
+	// (VARCHAR or BIGINT) via ExtractSamIdField; no top-level pointer needed.
 	auto flags_ptr = UnifiedVectorFormat::GetData<uint16_t>(flags_data);
-	auto reference_ptr = UnifiedVectorFormat::GetData<string_t>(reference_data);
 	auto position_ptr = UnifiedVectorFormat::GetData<int64_t>(position_data);
 	auto mapq_ptr = UnifiedVectorFormat::GetData<uint8_t>(mapq_data);
 	auto cigar_ptr = UnifiedVectorFormat::GetData<string_t>(cigar_data);
-	auto mate_reference_ptr = UnifiedVectorFormat::GetData<string_t>(mate_reference_data);
 	auto mate_position_ptr = UnifiedVectorFormat::GetData<int64_t>(mate_position_data);
 	auto template_length_ptr = UnifiedVectorFormat::GetData<int64_t>(template_length_data);
 
@@ -722,23 +760,20 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 
 	// Process each row
 	for (idx_t i = 0; i < input.size(); i++) {
-		auto read_id_idx = read_id_data.sel->get_index(i);
 		auto flags_idx = flags_data.sel->get_index(i);
-		auto reference_idx = reference_data.sel->get_index(i);
 		auto position_idx = position_data.sel->get_index(i);
 		auto mapq_idx = mapq_data.sel->get_index(i);
 		auto cigar_idx = cigar_data.sel->get_index(i);
-		auto mate_reference_idx = mate_reference_data.sel->get_index(i);
 		auto mate_position_idx = mate_position_data.sel->get_index(i);
 		auto template_length_idx = template_length_data.sel->get_index(i);
 
-		string read_id = read_id_ptr[read_id_idx].GetString();
+		string read_id = ExtractSamIdField(read_id_data, i, fdata.read_id_type);
 		uint16_t flags = flags_ptr[flags_idx];
-		string reference = reference_ptr[reference_idx].GetString();
+		string reference = ExtractSamIdField(reference_data, i, fdata.reference_type);
 		int64_t position = position_ptr[position_idx];
 		uint8_t mapq = mapq_ptr[mapq_idx];
 		string cigar_str = cigar_ptr[cigar_idx].GetString();
-		string mate_reference = mate_reference_ptr[mate_reference_idx].GetString();
+		string mate_reference = ExtractSamIdField(mate_reference_data, i, fdata.mate_reference_type);
 		int64_t mate_position = mate_position_ptr[mate_position_idx];
 		int64_t template_length = template_length_ptr[template_length_idx];
 

@@ -1,0 +1,205 @@
+# name: test/sql/copy_sam_bigint.test
+# description: COPY FORMAT SAM/BAM accepts BIGINT for read_id, reference, mate_reference (PR 1, Cycle 4).
+# group: [sql]
+
+#   COPY FORMAT SAM previously required VARCHAR for the three identifier columns
+#   (read_id, reference, mate_reference). Cycle 4 of the BIGINT-id work relaxes
+#   that to accept either VARCHAR or BIGINT, with BIGINT values stringified to
+#   decimal on write and NULL → SAM '*' sentinel. Round-trip via read_sam
+#   produces VARCHAR (type loss is documented).
+
+require miint
+
+# ---------------------------------------------------------------------------
+# Common setup: a reference-lengths table addressable by the BIGINT decimal
+# stringification of subject identifiers (2001, 2002).
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE ref_bigint_lengths AS
+SELECT '2001' AS name, 10000 AS length
+UNION ALL SELECT '2002', 10000;
+
+# ---------------------------------------------------------------------------
+# Test 1: All three id columns BIGINT — happy path. Use distinct reference and
+# mate_reference values so the BIGINT decimal stringification of mate_reference
+# is observable in the round-trip. (HTSlib normalises RNEXT to '=' when it
+# matches RNAME at the tid level — that's identical for VARCHAR and BIGINT
+# inputs and is covered separately below.)
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE result_all_bigint AS SELECT
+    1001::BIGINT AS read_id,
+    0::USMALLINT AS flags,
+    2001::BIGINT AS reference,
+    1::BIGINT AS position,
+    51::BIGINT AS stop_position,
+    60::UTINYINT AS mapq,
+    '50M' AS cigar,
+    2002::BIGINT AS mate_reference,
+    150::BIGINT AS mate_position,
+    200::BIGINT AS template_length,
+    NULL::BIGINT AS tag_as, NULL::BIGINT AS tag_xs, NULL::BIGINT AS tag_ys,
+    NULL::BIGINT AS tag_xn, NULL::BIGINT AS tag_xm, NULL::BIGINT AS tag_xo,
+    NULL::BIGINT AS tag_xg, NULL::BIGINT AS tag_nm,
+    NULL::VARCHAR AS tag_yt, NULL::VARCHAR AS tag_md, NULL::VARCHAR AS tag_sa;
+
+statement ok
+COPY result_all_bigint TO '__TEST_DIR__/all_bigint.sam'
+(FORMAT SAM, REFERENCE_LENGTHS 'ref_bigint_lengths');
+
+# Decimal stringification on write, VARCHAR on read-back.
+query III
+SELECT read_id, reference, mate_reference
+FROM read_sam('__TEST_DIR__/all_bigint.sam');
+----
+1001	2001	2002
+
+query III
+SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
+FROM read_sam('__TEST_DIR__/all_bigint.sam')
+LIMIT 1;
+----
+VARCHAR	VARCHAR	VARCHAR
+
+# ---------------------------------------------------------------------------
+# Test 1b: HTSlib '=' normalisation for BIGINT inputs when mate_reference
+# equals reference — parity with the VARCHAR path (see copy_sam.test test 9).
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE result_bigint_eq AS SELECT
+    1002::BIGINT AS read_id,
+    0::USMALLINT AS flags,
+    2001::BIGINT AS reference,
+    1::BIGINT AS position,
+    51::BIGINT AS stop_position,
+    60::UTINYINT AS mapq,
+    '50M' AS cigar,
+    2001::BIGINT AS mate_reference,
+    150::BIGINT AS mate_position,
+    200::BIGINT AS template_length,
+    NULL::BIGINT AS tag_as, NULL::BIGINT AS tag_xs, NULL::BIGINT AS tag_ys,
+    NULL::BIGINT AS tag_xn, NULL::BIGINT AS tag_xm, NULL::BIGINT AS tag_xo,
+    NULL::BIGINT AS tag_xg, NULL::BIGINT AS tag_nm,
+    NULL::VARCHAR AS tag_yt, NULL::VARCHAR AS tag_md, NULL::VARCHAR AS tag_sa;
+
+statement ok
+COPY result_bigint_eq TO '__TEST_DIR__/bigint_eq.sam'
+(FORMAT SAM, REFERENCE_LENGTHS 'ref_bigint_lengths');
+
+query III
+SELECT read_id, reference, mate_reference
+FROM read_sam('__TEST_DIR__/bigint_eq.sam');
+----
+1002	2001	=
+
+# ---------------------------------------------------------------------------
+# Test 2: NULL BIGINT id values → SAM '*' on disk
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE result_null_ids AS SELECT
+    NULL::BIGINT AS read_id,
+    4::USMALLINT AS flags,
+    NULL::BIGINT AS reference,
+    0::BIGINT AS position,
+    0::BIGINT AS stop_position,
+    0::UTINYINT AS mapq,
+    '*' AS cigar,
+    NULL::BIGINT AS mate_reference,
+    0::BIGINT AS mate_position,
+    0::BIGINT AS template_length,
+    NULL::BIGINT AS tag_as, NULL::BIGINT AS tag_xs, NULL::BIGINT AS tag_ys,
+    NULL::BIGINT AS tag_xn, NULL::BIGINT AS tag_xm, NULL::BIGINT AS tag_xo,
+    NULL::BIGINT AS tag_xg, NULL::BIGINT AS tag_nm,
+    NULL::VARCHAR AS tag_yt, NULL::VARCHAR AS tag_md, NULL::VARCHAR AS tag_sa;
+
+statement ok
+CREATE TABLE ref_dummy AS SELECT 'dummy' AS name, 1000 AS length;
+
+statement ok
+COPY result_null_ids TO '__TEST_DIR__/null_bigint_ids.sam'
+(FORMAT SAM, INCLUDE_HEADER false, REFERENCE_LENGTHS 'ref_dummy');
+
+query III
+SELECT read_id, reference, mate_reference
+FROM read_sam('__TEST_DIR__/null_bigint_ids.sam', reference_lengths='ref_dummy');
+----
+*	*	*
+
+# ---------------------------------------------------------------------------
+# Test 3: Mixed — read_id VARCHAR, reference/mate_reference BIGINT
+# (independent type acceptance per column)
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE result_mixed AS SELECT
+    'read-mixed-1' AS read_id,
+    0::USMALLINT AS flags,
+    2002::BIGINT AS reference,
+    1::BIGINT AS position,
+    51::BIGINT AS stop_position,
+    60::UTINYINT AS mapq,
+    '50M' AS cigar,
+    2001::BIGINT AS mate_reference,
+    150::BIGINT AS mate_position,
+    200::BIGINT AS template_length,
+    NULL::BIGINT AS tag_as, NULL::BIGINT AS tag_xs, NULL::BIGINT AS tag_ys,
+    NULL::BIGINT AS tag_xn, NULL::BIGINT AS tag_xm, NULL::BIGINT AS tag_xo,
+    NULL::BIGINT AS tag_xg, NULL::BIGINT AS tag_nm,
+    NULL::VARCHAR AS tag_yt, NULL::VARCHAR AS tag_md, NULL::VARCHAR AS tag_sa;
+
+statement ok
+COPY result_mixed TO '__TEST_DIR__/mixed.sam'
+(FORMAT SAM, REFERENCE_LENGTHS 'ref_bigint_lengths');
+
+query III
+SELECT read_id, reference, mate_reference FROM read_sam('__TEST_DIR__/mixed.sam');
+----
+read-mixed-1	2002	2001
+
+# ---------------------------------------------------------------------------
+# Test 4: BAM output with BIGINT ids — same write path, binary container
+# ---------------------------------------------------------------------------
+
+statement ok
+COPY result_all_bigint TO '__TEST_DIR__/all_bigint.bam'
+(FORMAT BAM, REFERENCE_LENGTHS 'ref_bigint_lengths');
+
+query III
+SELECT read_id, reference, mate_reference FROM read_sam('__TEST_DIR__/all_bigint.bam');
+----
+1001	2001	2002
+
+# ---------------------------------------------------------------------------
+# Test 5: Unsupported id types still rejected with a clear error
+# ---------------------------------------------------------------------------
+
+statement error
+COPY (SELECT
+    1::INTEGER AS read_id, 0::USMALLINT AS flags, 'r' AS reference, 1::BIGINT AS position,
+    1::BIGINT AS stop_position, 0::UTINYINT AS mapq, '*' AS cigar, '*' AS mate_reference,
+    0::BIGINT AS mate_position, 0::BIGINT AS template_length
+) TO '__TEST_DIR__/bad_read_id.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_dummy');
+----
+Column 'read_id' must be VARCHAR or BIGINT
+
+statement error
+COPY (SELECT
+    'r' AS read_id, 0::USMALLINT AS flags, 1::INTEGER AS reference, 1::BIGINT AS position,
+    1::BIGINT AS stop_position, 0::UTINYINT AS mapq, '*' AS cigar, '*' AS mate_reference,
+    0::BIGINT AS mate_position, 0::BIGINT AS template_length
+) TO '__TEST_DIR__/bad_reference.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_dummy');
+----
+Column 'reference' must be VARCHAR or BIGINT
+
+statement error
+COPY (SELECT
+    'r' AS read_id, 0::USMALLINT AS flags, 'r' AS reference, 1::BIGINT AS position,
+    1::BIGINT AS stop_position, 0::UTINYINT AS mapq, '*' AS cigar, 1::DOUBLE AS mate_reference,
+    0::BIGINT AS mate_position, 0::BIGINT AS template_length
+) TO '__TEST_DIR__/bad_mate.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_dummy');
+----
+Column 'mate_reference' must be VARCHAR or BIGINT

@@ -44,8 +44,8 @@ unique_ptr<FunctionData> AlignMinimap2TableFunction::Bind(ClientContext &context
 		    "Use subject_table to build index from sequences, or index_path to load pre-built index.");
 	}
 
-	// Validate query table/view exists
-	data->query_schema = ValidateSequenceTableSchema(context, data->query_table);
+	// Validate query table/view exists (BIGINT read_id is opt-in for PR 1).
+	data->query_schema = ValidateSequenceTableSchema(context, data->query_table, /*allow_bigint=*/true);
 
 	// Parse optional named parameters
 	auto per_subject_param = input.named_parameters.find("per_subject_database");
@@ -83,12 +83,22 @@ unique_ptr<FunctionData> AlignMinimap2TableFunction::Bind(ClientContext &context
 		}
 
 		// Note: subjects vector remains empty in this mode
+		// Subject names in the .mmi file are opaque bytes — default to VARCHAR.
+		data->subject_id_type = LogicalType::VARCHAR;
 	} else {
-		// Traditional mode: load subjects (ReadSubjectTable validates internally)
-		data->subjects = ReadSubjectTable(context, data->subject_table);
+		// Traditional mode: validate subject schema, then load subjects.
+		// The subject schema's id_type drives the subject-side BIGINT/VARCHAR
+		// dispatch in ReadSubjectTable AND the output `reference` /
+		// `mate_reference` column types.
+		auto subject_schema = ValidateSequenceTableSchema(context, data->subject_table, /*allow_bigint=*/true);
+		data->subject_id_type = subject_schema.id_type;
+		data->subjects = ReadSubjectTable(context, data->subject_table, subject_schema);
 	}
 
-	// Set output schema
+	// Output schema: read_id mirrors the query column type; reference and
+	// mate_reference mirror the subject side.
+	data->types = GetAlignmentOutputTypes(data->query_schema.id_type, data->subject_id_type);
+
 	for (const auto &name : data->names) {
 		names.emplace_back(name);
 	}
@@ -223,7 +233,8 @@ static void ExecutePerSubject(ClientContext &context, const AlignMinimap2TableFu
 	}
 
 	idx_t output_count = std::min(available, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
-	OutputSAMRecordBatch(output, ps.result_buffer, ps.buffer_offset, output_count);
+	OutputSAMRecordBatch(output, ps.result_buffer, ps.buffer_offset, output_count, bind_data.query_schema.id_type,
+	                     bind_data.subject_id_type);
 	ps.buffer_offset += output_count;
 }
 
@@ -238,7 +249,8 @@ static void ExecuteStandard(ClientContext &context, const AlignMinimap2TableFunc
 		idx_t available = lstate.result_buffer.size() - lstate.buffer_offset;
 		if (available > 0) {
 			idx_t output_count = std::min(available, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
-			OutputSAMRecordBatch(output, lstate.result_buffer, lstate.buffer_offset, output_count);
+			OutputSAMRecordBatch(output, lstate.result_buffer, lstate.buffer_offset, output_count,
+			                     bind_data.query_schema.id_type, bind_data.subject_id_type);
 			lstate.buffer_offset += output_count;
 			return;
 		}

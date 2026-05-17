@@ -2,6 +2,7 @@
 
 #include "Minimap2Aligner.hpp"
 #include "SequenceRecord.hpp"
+#include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
@@ -18,17 +19,31 @@ struct SequenceTableSchema {
 	bool has_qual1 = false;        // True if quality scores present
 	bool has_qual2 = false;        // True if quality scores present for second read
 	bool is_physical_table = true; // True if physical table (has rowid), false if view
+	// Storage type of the read_id column (VARCHAR or BIGINT). Defaults to
+	// INVALID so any code path that constructs SequenceTableSchema without
+	// going through ValidateSequenceTableSchema fails loud at the helper
+	// dispatch in id_column_utils.hpp rather than silently misreading data.
+	LogicalType id_type = LogicalType(LogicalTypeId::INVALID);
 };
 
 // Validate that a table/view has required columns for sequence data.
 // Returns schema information about what optional columns are present.
 // Throws BinderException if required columns are missing or have wrong types.
-SequenceTableSchema ValidateSequenceTableSchema(ClientContext &context, const std::string &table_name);
+// `allow_bigint`: if true, accepts both VARCHAR and BIGINT for `read_id` and
+// records the discovered type on `schema.id_type`. If false (default), only
+// VARCHAR is accepted — preserves backward-compatible behavior for callers
+// that haven't yet been audited for BIGINT support.
+SequenceTableSchema ValidateSequenceTableSchema(ClientContext &context, const std::string &table_name,
+                                                bool allow_bigint = false);
 
 // Read all subjects from a table/view into memory.
 // Subjects cannot be paired-end (sequence2 must be NULL for all rows).
 // Throws InvalidInputException if sequence2 contains non-NULL values.
-std::vector<miint::AlignmentSubject> ReadSubjectTable(ClientContext &context, const std::string &table_name);
+// The schema (in particular `id_type`) governs how the read_id column is
+// extracted — VARCHAR rows pass through as strings; BIGINT rows are
+// stringified into the carrier so the aligner sees a uniform string contract.
+std::vector<miint::AlignmentSubject> ReadSubjectTable(ClientContext &context, const std::string &table_name,
+                                                      const SequenceTableSchema &schema);
 
 // Read a batch of query sequences from a table/view.
 // Returns true if there are more rows to read, false if done.

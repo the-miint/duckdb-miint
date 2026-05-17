@@ -27,7 +27,12 @@ public:
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
-		Data() : names(GetAlignmentOutputNames()), types(GetAlignmentOutputTypes()) {
+		// SortMeRNA is VARCHAR-only for read_id / reference / mate_reference
+		// in PR 1. BIGINT support requires updating the sortmerna emit helper
+		// (out of scope here); see findings doc.
+		Data()
+		    : names(GetAlignmentOutputNames()),
+		      types(GetAlignmentOutputTypes(LogicalType::VARCHAR, LogicalType::VARCHAR)) {
 		}
 	};
 

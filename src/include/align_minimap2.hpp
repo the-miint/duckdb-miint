@@ -29,18 +29,31 @@ public:
 		SequenceTableSchema query_schema;
 		std::vector<miint::AlignmentSubject> subjects; // Pre-loaded at bind time (empty if using index_path)
 
+		// Subject-side id type. Drives output `reference` + `mate_reference`.
+		// Defaults to INVALID so a Bind path that forgets to set it fails loud
+		// at the helper dispatch in id_column_utils.hpp rather than silently
+		// producing wrong-typed output. Bind sets it explicitly: subject_table
+		// mode pulls from the subject schema's id_type; index_path mode sets
+		// VARCHAR (the .mmi file stores subject names as opaque bytes).
+		LogicalType subject_id_type = LogicalType(LogicalTypeId::INVALID);
+
 		// Helper to check if using pre-built index
 		bool using_prebuilt_index() const {
 			return !index_path.empty();
 		}
 
-		// Output schema (shared with align_minimap2_sharded)
+		// Output schema. Names are constant; types are mutated by Bind once
+		// the query and subject id types are known.
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
 		bool debug = false;
 
-		Data() : per_subject_database(false), names(GetAlignmentOutputNames()), types(GetAlignmentOutputTypes()) {
+		// types is rebuilt by Bind once the actual query/subject id types are
+		// known; the placeholder VARCHAR/VARCHAR here is never observed.
+		Data()
+		    : per_subject_database(false), names(GetAlignmentOutputNames()),
+		      types(GetAlignmentOutputTypes(LogicalType::VARCHAR, LogicalType::VARCHAR)) {
 		}
 	};
 

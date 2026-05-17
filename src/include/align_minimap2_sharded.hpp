@@ -60,7 +60,12 @@ public:
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
-		Data() : names(GetAlignmentOutputNames()), types(GetAlignmentOutputTypes()) {
+		// Sharded mode is VARCHAR-only for read_id / reference / mate_reference
+		// in PR 1. BIGINT support requires the helpers to reach ReadShardIds
+		// and ReadBatchByIds (out of scope here); see findings doc.
+		Data()
+		    : names(GetAlignmentOutputNames()),
+		      types(GetAlignmentOutputTypes(LogicalType::VARCHAR, LogicalType::VARCHAR)) {
 		}
 	};
 

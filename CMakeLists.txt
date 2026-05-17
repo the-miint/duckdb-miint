@@ -1065,7 +1065,8 @@ set(EXTENSION_SOURCES
     src/hfile_duckdb.cpp
     src/deblur.cpp
     src/deblur_table_function.cpp
-    src/per_sample_table_function.cpp)
+    src/per_sample_table_function.cpp
+    src/id_column_codec.cpp)
 
 if(MIINT_ENABLE_VSEARCH)
     list(APPEND EXTENSION_SOURCES
@@ -1452,6 +1453,8 @@ set(TEST_SOURCES
     test/cpp/test_hfile_duckdb.cpp
     src/deblur.cpp
     test/cpp/test_deblur.cpp
+    src/id_column_codec.cpp
+    test/cpp/test_id_column_codec.cpp
 )
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND TEST_SOURCES src/BIOMTable.cpp src/BIOMReader.cpp
