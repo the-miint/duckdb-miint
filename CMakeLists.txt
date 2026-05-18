@@ -864,63 +864,112 @@ if(MIINT_ENABLE_SORTMERNA)
     add_dependencies(sortmerna sortmerna_bundle)
 endif()
 
-# Cargo is required by both sylph (below) and rype (further down). Resolve
-# it once here so `${CARGO}` is non-empty when ExternalProject_Add captures
-# the BUILD_COMMAND below — otherwise the recorded command is `<empty>
-# rustc --release ...` which rustc itself doesn't understand.
+# rype + sylph are independent Rust crates; each emits a staticlib that
+# statically embeds its own copy of the Rust std runtime (rust_eh_personality,
+# EMPTY_PANIC, ...). Linking both as separate .a archives produces
+# duplicate-symbol errors on every supported linker (GNU ld, Apple ld-prime,
+# Mach-O classic, lld) — see the Rust Reference (Linkage chapter).
+#
+# Fix: an umbrella `miint_rust_glue` crate (ext/miint-rust-glue/) lists both
+# as path dependencies, cargo compiles them through a shared std, and the
+# resulting libmiint_rust_glue.a contains a single deduplicated copy of std
+# plus the #[no_mangle] C ABI surface from both crates. This is the canonical
+# pattern (Mozilla's "rul" super-crate for Firefox/Gecko).
 find_program(CARGO cargo REQUIRED)
 message(STATUS "Found cargo: ${CARGO}")
 
-# Build sylph (Rust) into a staticlib for FFI integration. Multi-Rust-staticlib
-# --allow-multiple-definition handling lives in extension_config.cmake (must
-# run BEFORE libduckdb.so's targets are configured).
-if(MIINT_ENABLE_SYLPH)
-    set(SYLPH_LIB_NAME "libsylph.a")
-    set(SYLPH_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/sylph_target)
+set(GLUE_LIB_NAME "libmiint_rust_glue.a")
+set(GLUE_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/miint_rust_glue_target)
 
-    set(SYLPH_CARGO_TARGET_FLAG "")
-    set(SYLPH_LIB_SUBDIR "release")
-    set(SYLPH_CONFIGURE_CMD "")
-    if(APPLE AND OSX_BUILD_ARCH)
-        find_program(RUSTUP rustup)
-        if(OSX_BUILD_ARCH STREQUAL "x86_64")
-            set(SYLPH_CARGO_TARGET_FLAG "--target" "x86_64-apple-darwin")
-            set(SYLPH_LIB_SUBDIR "x86_64-apple-darwin/release")
-            if(RUSTUP)
-                set(SYLPH_CONFIGURE_CMD ${RUSTUP} target add x86_64-apple-darwin)
-            endif()
-        elseif(OSX_BUILD_ARCH STREQUAL "arm64")
-            set(SYLPH_CARGO_TARGET_FLAG "--target" "aarch64-apple-darwin")
-            set(SYLPH_LIB_SUBDIR "aarch64-apple-darwin/release")
-            if(RUSTUP)
-                set(SYLPH_CONFIGURE_CMD ${RUSTUP} target add aarch64-apple-darwin)
-            endif()
+# Cross-compile flags mirror the original per-crate logic.
+set(GLUE_CARGO_TARGET_FLAG "")
+set(GLUE_LIB_SUBDIR "release")
+set(GLUE_CONFIGURE_CMD "")
+if(EMSCRIPTEN)
+    find_program(RUSTUP rustup)
+    set(GLUE_CARGO_TARGET_FLAG "--target" "wasm32-unknown-emscripten")
+    set(GLUE_LIB_SUBDIR "wasm32-unknown-emscripten/release")
+    if(RUSTUP)
+        set(GLUE_CONFIGURE_CMD ${RUSTUP} target add wasm32-unknown-emscripten)
+    endif()
+    message(STATUS "Rust glue cross-compiling for wasm32-unknown-emscripten")
+elseif(WIN32)
+    find_program(RUSTUP rustup)
+    set(GLUE_CARGO_TARGET_FLAG "--target" "x86_64-pc-windows-gnu")
+    set(GLUE_LIB_SUBDIR "x86_64-pc-windows-gnu/release")
+    if(RUSTUP)
+        set(GLUE_CONFIGURE_CMD ${RUSTUP} target add x86_64-pc-windows-gnu)
+    endif()
+    message(STATUS "Rust glue targeting x86_64-pc-windows-gnu for MinGW compatibility")
+elseif(APPLE AND OSX_BUILD_ARCH)
+    find_program(RUSTUP rustup)
+    if(OSX_BUILD_ARCH STREQUAL "x86_64")
+        set(GLUE_CARGO_TARGET_FLAG "--target" "x86_64-apple-darwin")
+        set(GLUE_LIB_SUBDIR "x86_64-apple-darwin/release")
+        if(RUSTUP)
+            set(GLUE_CONFIGURE_CMD ${RUSTUP} target add x86_64-apple-darwin)
+        endif()
+    elseif(OSX_BUILD_ARCH STREQUAL "arm64")
+        set(GLUE_CARGO_TARGET_FLAG "--target" "aarch64-apple-darwin")
+        set(GLUE_LIB_SUBDIR "aarch64-apple-darwin/release")
+        if(RUSTUP)
+            set(GLUE_CONFIGURE_CMD ${RUSTUP} target add aarch64-apple-darwin)
         endif()
     endif()
+endif()
 
-    set(SYLPH_LIB_PATH ${SYLPH_TARGET_DIR}/${SYLPH_LIB_SUBDIR}/${SYLPH_LIB_NAME})
+# Feature selection: rype's fastx (needletail) is off on WASM and Windows
+# (matches the original rype_build wiring). sylph is off on WASM/Windows
+# (matches MIINT_ENABLE_SYLPH gating).
+set(GLUE_FEATURES "")
+if(NOT EMSCRIPTEN AND NOT WIN32)
+    list(APPEND GLUE_FEATURES "rype-fastx")
+endif()
+if(MIINT_ENABLE_SYLPH)
+    list(APPEND GLUE_FEATURES "with-sylph")
+endif()
+string(REPLACE ";" "," GLUE_FEATURES_CSV "${GLUE_FEATURES}")
+if(GLUE_FEATURES_CSV)
+    set(GLUE_FEATURES_ARGS "--features" "${GLUE_FEATURES_CSV}")
+else()
+    set(GLUE_FEATURES_ARGS "")
+endif()
 
-    # Build with --no-default-features so neither the `cli` (clap+simple_logger)
-    # nor `fastx` (needletail) feature is enabled. Enable `arrow-ffi` to get
-    # sylph_profile (the Arrow C Data Interface entry point used by the
-    # extension's sylph_profile() table function).
-    ExternalProject_Add(
-        sylph_build
-        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/sylph
-        CONFIGURE_COMMAND "${SYLPH_CONFIGURE_CMD}"
-        BUILD_COMMAND ${CARGO} rustc --release --no-default-features --features arrow-ffi
-            --lib --crate-type=staticlib
-            --target-dir ${SYLPH_TARGET_DIR}
-            --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/ext/sylph/Cargo.toml
-            ${SYLPH_CARGO_TARGET_FLAG}
-        INSTALL_COMMAND ""
-        BUILD_IN_SOURCE 0
-        BUILD_BYPRODUCTS ${SYLPH_LIB_PATH}
-    )
+# WASM side modules (-sSIDE_MODULE=2) need PIC across the board.
+if(EMSCRIPTEN)
+    set(GLUE_BUILD_ENV ${CMAKE_COMMAND} -E env "RUSTFLAGS=-C relocation-model=pic")
+else()
+    set(GLUE_BUILD_ENV)
+endif()
 
+set(GLUE_LIB_PATH ${GLUE_TARGET_DIR}/${GLUE_LIB_SUBDIR}/${GLUE_LIB_NAME})
+
+ExternalProject_Add(
+    miint_rust_glue_build
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/miint-rust-glue
+    CONFIGURE_COMMAND "${GLUE_CONFIGURE_CMD}"
+    BUILD_COMMAND ${GLUE_BUILD_ENV} ${CARGO} build --release
+        ${GLUE_FEATURES_ARGS}
+        --target-dir ${GLUE_TARGET_DIR}
+        --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/ext/miint-rust-glue/Cargo.toml
+        ${GLUE_CARGO_TARGET_FLAG}
+    INSTALL_COMMAND ""
+    BUILD_IN_SOURCE 0
+    BUILD_BYPRODUCTS ${GLUE_LIB_PATH}
+)
+
+# Both `rype` and (optionally) `sylph` are IMPORTED targets pointing at the
+# same merged archive. Existing target_link_libraries(... rype) /
+# (... sylph) calls work unchanged; listing the archive twice on the link
+# line is harmless (the second pass finds no new undefined symbols).
+add_library(rype STATIC IMPORTED GLOBAL)
+set_target_properties(rype PROPERTIES IMPORTED_LOCATION ${GLUE_LIB_PATH})
+add_dependencies(rype miint_rust_glue_build)
+
+if(MIINT_ENABLE_SYLPH)
     add_library(sylph STATIC IMPORTED GLOBAL)
-    set_target_properties(sylph PROPERTIES IMPORTED_LOCATION ${SYLPH_LIB_PATH})
-    add_dependencies(sylph sylph_build)
+    set_target_properties(sylph PROPERTIES IMPORTED_LOCATION ${GLUE_LIB_PATH})
+    add_dependencies(sylph miint_rust_glue_build)
 endif()
 
 # Build MAFFT PartTree static library for multiple sequence alignment
@@ -974,97 +1023,9 @@ if(MIINT_ENABLE_ABPOA)
     endif()
 endif()
 
-# Build RYpe from Rust source with Arrow support. CARGO was located up top
-# alongside the sylph cargo wiring; no need to find_program again here.
-
-# Determine the static library name based on platform.
-# On Windows/MinGW, cargo with --target x86_64-pc-windows-gnu produces librype.a (not .lib).
-set(RYPE_LIB_NAME "librype.a")
-
-set(RYPE_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/rype_target)
-
-# Handle cross-compilation for Rust via --target flag.
-# When cross-compiling, cargo places output in <target-dir>/<triple>/release/
-# instead of <target-dir>/release/.
-# Also ensure the Rust target is installed via `rustup target add`.
-set(RYPE_CARGO_TARGET_FLAG "")
-set(RYPE_LIB_SUBDIR "release")
-set(RYPE_CONFIGURE_CMD "")
-if(EMSCRIPTEN)
-    find_program(RUSTUP rustup)
-    set(RYPE_CARGO_TARGET_FLAG "--target" "wasm32-unknown-emscripten")
-    set(RYPE_LIB_SUBDIR "wasm32-unknown-emscripten/release")
-    if(RUSTUP)
-        set(RYPE_CONFIGURE_CMD ${RUSTUP} target add wasm32-unknown-emscripten)
-    endif()
-    message(STATUS "RYpe cross-compiling for wasm32-unknown-emscripten")
-elseif(WIN32)
-    # Windows/MinGW: Rust defaults to MSVC target but we link with MinGW ld.exe.
-    # Must target x86_64-pc-windows-gnu to produce compatible object files.
-    find_program(RUSTUP rustup)
-    set(RYPE_CARGO_TARGET_FLAG "--target" "x86_64-pc-windows-gnu")
-    set(RYPE_LIB_SUBDIR "x86_64-pc-windows-gnu/release")
-    if(RUSTUP)
-        set(RYPE_CONFIGURE_CMD ${RUSTUP} target add x86_64-pc-windows-gnu)
-    endif()
-    message(STATUS "RYpe targeting x86_64-pc-windows-gnu for MinGW compatibility")
-elseif(APPLE AND OSX_BUILD_ARCH)
-    find_program(RUSTUP rustup)
-    if(OSX_BUILD_ARCH STREQUAL "x86_64")
-        set(RYPE_CARGO_TARGET_FLAG "--target" "x86_64-apple-darwin")
-        set(RYPE_LIB_SUBDIR "x86_64-apple-darwin/release")
-        if(RUSTUP)
-            set(RYPE_CONFIGURE_CMD ${RUSTUP} target add x86_64-apple-darwin)
-        endif()
-        message(STATUS "RYpe cross-compiling for x86_64 on Apple Silicon")
-    elseif(OSX_BUILD_ARCH STREQUAL "arm64")
-        set(RYPE_CARGO_TARGET_FLAG "--target" "aarch64-apple-darwin")
-        set(RYPE_LIB_SUBDIR "aarch64-apple-darwin/release")
-        if(RUSTUP)
-            set(RYPE_CONFIGURE_CMD ${RUSTUP} target add aarch64-apple-darwin)
-        endif()
-        message(STATUS "RYpe cross-compiling for arm64")
-    endif()
-endif()
-
-set(RYPE_LIB_PATH ${RYPE_TARGET_DIR}/${RYPE_LIB_SUBDIR}/${RYPE_LIB_NAME})
-
-# Build RYpe with Arrow FFI support for zero-copy data exchange.
-# On Emscripten and Windows: --no-default-features disables the "fastx" feature
-# (needletail), whose cdylib crate-type triggers linker errors (emcc standalone
-# linking on WASM, unresolved ___chkstk_ms on MSVC).
-if(EMSCRIPTEN OR WIN32)
-    set(RYPE_CARGO_FEATURES "--no-default-features" "--features" "arrow-ffi")
-else()
-    set(RYPE_CARGO_FEATURES "--features" "arrow-ffi")
-endif()
-# For WASM side modules (-sSIDE_MODULE=2), all objects need PIC relocations.
-# Rust's default for wasm32-unknown-emscripten is static; override to PIC.
-if(EMSCRIPTEN)
-    set(RYPE_BUILD_ENV ${CMAKE_COMMAND} -E env "RUSTFLAGS=-C relocation-model=pic")
-else()
-    # Unset (not empty string "") so it expands to zero arguments in BUILD_COMMAND
-    set(RYPE_BUILD_ENV)
-endif()
-ExternalProject_Add(
-    rype_build
-    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype
-    CONFIGURE_COMMAND "${RYPE_CONFIGURE_CMD}"
-    BUILD_COMMAND ${RYPE_BUILD_ENV} ${CARGO} rustc --release ${RYPE_CARGO_FEATURES} --lib --crate-type=staticlib
-        --target-dir ${RYPE_TARGET_DIR}
-        --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype/Cargo.toml
-        ${RYPE_CARGO_TARGET_FLAG}
-    INSTALL_COMMAND ""
-    BUILD_IN_SOURCE 0
-    BUILD_BYPRODUCTS ${RYPE_LIB_PATH}
-)
-
-# Create imported library for rype
-add_library(rype STATIC IMPORTED GLOBAL)
-set_target_properties(rype PROPERTIES
-    IMPORTED_LOCATION ${RYPE_LIB_PATH}
-)
-add_dependencies(rype rype_build)
+# Backward-compat alias: the WASM linked-libs block below still references
+# RYPE_LIB_PATH. rype now lives inside libmiint_rust_glue.a (built above).
+set(RYPE_LIB_PATH ${GLUE_LIB_PATH})
 
 # adapted kseq++ include use from strobealign
 include_directories(src/include ext ext/WFA2-lib ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype)
@@ -1782,6 +1743,13 @@ endif()
 if(WIN32)
     # Tests target only needs HTSlib deps (no Rust code linked here)
     target_link_libraries(tests regex ws2_32)
+endif()
+if(APPLE)
+    # libmiint_rust_glue.a transitively pulls rype's chrono → iana_time_zone,
+    # which calls CoreFoundation symbols (CFRelease, CFTimeZoneCopySystem, ...).
+    # The extension targets already link CoreFoundation; the tests target
+    # historically didn't, because pre-glue it only linked libsylph.a.
+    target_link_libraries(tests "-framework CoreFoundation")
 endif()
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     target_link_libraries(tests
