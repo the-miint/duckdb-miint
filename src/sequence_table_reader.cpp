@@ -388,7 +388,7 @@ bool ReadQueryBatch(ClientContext &context, const std::string &table_name, const
 }
 
 std::vector<std::string> ReadShardIds(ClientContext &context, const std::string &read_to_shard_table,
-                                      const std::string &shard_name) {
+                                      const std::string &shard_name, const LogicalType &id_type) {
 	auto &db = DatabaseInstance::GetDatabase(context);
 	Connection conn(db);
 
@@ -403,6 +403,11 @@ std::vector<std::string> ReadShardIds(ClientContext &context, const std::string 
 	std::vector<std::string> ids;
 	auto &materialized = query_result->Cast<MaterializedQueryResult>();
 
+	if (!IsAllowedIdType(id_type)) {
+		throw InternalException("ReadShardIds: id_type must be VARCHAR or BIGINT, got '%s'", id_type.ToString());
+	}
+	const bool is_bigint = id_type.id() == LogicalTypeId::BIGINT;
+
 	while (true) {
 		auto chunk = materialized.Fetch();
 		if (!chunk || chunk->size() == 0) {
@@ -411,12 +416,22 @@ std::vector<std::string> ReadShardIds(ClientContext &context, const std::string 
 
 		UnifiedVectorFormat id_data;
 		chunk->data[0].ToUnifiedFormat(chunk->size(), id_data);
-		auto id_strings = UnifiedVectorFormat::GetData<string_t>(id_data);
 
-		for (idx_t i = 0; i < chunk->size(); i++) {
-			auto idx = id_data.sel->get_index(i);
-			if (id_data.validity.RowIsValid(idx)) {
-				ids.push_back(id_strings[idx].GetString());
+		if (is_bigint) {
+			auto id_ints = UnifiedVectorFormat::GetData<int64_t>(id_data);
+			for (idx_t i = 0; i < chunk->size(); i++) {
+				auto idx = id_data.sel->get_index(i);
+				if (id_data.validity.RowIsValid(idx)) {
+					ids.push_back(miint::FormatIdFromInt64(id_ints[idx]));
+				}
+			}
+		} else {
+			auto id_strings = UnifiedVectorFormat::GetData<string_t>(id_data);
+			for (idx_t i = 0; i < chunk->size(); i++) {
+				auto idx = id_data.sel->get_index(i);
+				if (id_data.validity.RowIsValid(idx)) {
+					ids.push_back(id_strings[idx].GetString());
+				}
 			}
 		}
 	}
@@ -439,8 +454,19 @@ void ReadBatchByIds(ClientContext &context, const std::string &query_table, cons
 	auto &db = DatabaseInstance::GetDatabase(context);
 	Connection conn(db);
 
-	// Create temp table and load the ID slice via Appender
-	auto create_result = conn.Query("CREATE TEMPORARY TABLE _batch_ids (read_id VARCHAR)");
+	// Declare the temp table with the same id_type as the query table so the
+	// downstream JOIN type-checks naturally. The `ids` vector holds stringified
+	// ids regardless of source type; for BIGINT we parse back through the codec
+	// before appending. INVALID is rejected here — the project convention is
+	// that any SequenceTableSchema reaching this layer has been through
+	// ValidateSequenceTableSchema, which always resolves to VARCHAR or BIGINT.
+	if (!IsAllowedIdType(schema.id_type)) {
+		throw InternalException("ReadBatchByIds: schema.id_type must be VARCHAR or BIGINT, got '%s'",
+		                        schema.id_type.ToString());
+	}
+	const LogicalType &id_type = schema.id_type;
+	const std::string create_sql = "CREATE TEMPORARY TABLE _batch_ids (read_id " + id_type.ToString() + ")";
+	auto create_result = conn.Query(create_sql);
 	if (create_result->HasError()) {
 		throw InvalidInputException("Failed to create temp table for batch IDs: %s", create_result->GetError());
 	}
@@ -448,7 +474,16 @@ void ReadBatchByIds(ClientContext &context, const std::string &query_table, cons
 	{
 		Appender appender(conn, "_batch_ids");
 		for (idx_t i = offset; i < offset + count; i++) {
-			appender.AppendRow(Value(ids[i]));
+			if (id_type.id() == LogicalTypeId::BIGINT) {
+				auto parsed = miint::ParseIdAsInt64(ids[i]);
+				if (parsed.has_value()) {
+					appender.AppendRow(Value::BIGINT(*parsed));
+				} else {
+					appender.AppendRow(Value(LogicalType::BIGINT));
+				}
+			} else {
+				appender.AppendRow(Value(ids[i]));
+			}
 		}
 		appender.Close();
 	}

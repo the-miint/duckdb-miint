@@ -56,13 +56,21 @@ public:
 		bool debug = false;
 		bool include_shard_name = false;
 
-		// Output schema (shared with align_minimap2)
+		// Subject-side id type. Sharded mode always loads prebuilt .mmi indexes
+		// whose subject names are opaque bytes — same contract as align_minimap2
+		// `index_path` mode — so this defaults to VARCHAR once Bind runs. The
+		// INVALID sentinel here mirrors align_minimap2.hpp's fail-loud default:
+		// any path that forgets to set this triggers a clear error at the helper
+		// dispatch in id_column_utils.hpp.
+		LogicalType subject_id_type = LogicalType(LogicalTypeId::INVALID);
+
+		// Output schema (shared with align_minimap2). `names` are constant;
+		// `types` is rebuilt by Bind once query_schema.id_type is known.
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
-		// Sharded mode is VARCHAR-only for read_id / reference / mate_reference
-		// in PR 1. BIGINT support requires the helpers to reach ReadShardIds
-		// and ReadBatchByIds (out of scope here); see findings doc.
+		// types is rebuilt by Bind once the actual query/subject id types are
+		// known; the placeholder VARCHAR/VARCHAR here is never observed.
 		Data()
 		    : names(GetAlignmentOutputNames()),
 		      types(GetAlignmentOutputTypes(LogicalType::VARCHAR, LogicalType::VARCHAR)) {

@@ -1856,10 +1856,10 @@ SELECT * FROM save_minimap2_index('marker_genes', 'markers.mmi');
 Align query sequences against multiple pre-built minimap2 index shards in parallel. Each shard is a separate `.mmi` index file, and a mapping table specifies which reads should be aligned against which shard. This is designed for large-scale metagenomic workflows where the reference database is split across multiple shards and reads have been pre-assigned to shards (e.g., by a prior classification step).
 
 **Parameters:**
-- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2). The `read_id` column **must be VARCHAR** in sharded mode — BIGINT `read_id` is supported by `align_minimap2` but not by the sharded variant.
+- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2). The `read_id` column may be `VARCHAR` or `BIGINT` (see *Identifier-column types* below).
 - `shard_directory` (VARCHAR, required): Path to directory containing pre-built minimap2 index files. Each shard's index is expected at `<shard_directory>/<shard_name>.mmi`
 - `read_to_shard` (VARCHAR, required): Name of table or view that maps reads to shards. Must have columns:
-  - `read_id` (VARCHAR): Read identifier (must match read_id in query_table)
+  - `read_id`: Read identifier. Must match the storage type of `query_table.read_id` exactly — VARCHAR with VARCHAR, BIGINT with BIGINT. Mismatched types are rejected at bind time.
   - `shard_name` (VARCHAR): Name of the shard this read should be aligned against
 - `preset` (VARCHAR, default: 'sr'): Minimap2 preset ('sr', 'map-ont', 'map-pb', etc.)
 - `max_secondary` (INTEGER, default: 5): Maximum secondary alignments per query. Set to 0 for primary only
@@ -1867,6 +1867,12 @@ Align query sequences against multiple pre-built minimap2 index shards in parall
 
 **Output schema:**
 Returns the same 21-column schema as `align_minimap2` and `read_alignments`.
+
+**Identifier-column types (`read_id`, `reference`, `mate_reference`):**
+- The query side (`query_table.read_id` and `read_to_shard.read_id`) may be `VARCHAR` or `BIGINT`. Both must share the same type — `ValidateReadToShardSchema` enforces strict equality so the underlying JOIN never relies on implicit casts. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR or BIGINT`.
+- The output `read_id` column mirrors the query side.
+- The output `reference` and `mate_reference` columns are **always VARCHAR** in sharded mode. Sharded alignment always loads prebuilt `.mmi` indexes, and subject names inside an `.mmi` are opaque bytes — the same contract as `align_minimap2(index_path=...)`. If the index was built from a `BIGINT` subject table via `save_minimap2_index`, the values come back as their decimal string form (e.g. `'2001'`); cast in SQL if you need integer semantics downstream.
+- For `BIGINT` `read_id`, NULL input rows that have no entry in `read_to_shard` are silently skipped (the pipeline never sees them). The SAM `'='` mate-reference sentinel is irrelevant here because the subject side is VARCHAR — `'='` passes through verbatim, matching the existing VARCHAR contract.
 
 **Behavior:**
 - At bind time, reads the `read_to_shard` table to discover shards and validate that each `<shard_name>.mmi` file exists in `shard_directory`
