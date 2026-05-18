@@ -1,0 +1,166 @@
+# name: test/sql/align_sortmerna_bigint.test
+# description: align_sortmerna accepts BIGINT read_id columns (PR C).
+# group: [sql]
+
+#
+# SortMeRNA's subject side comes from FASTA files on disk (ref_paths),
+# never a user-provided table — so subject_id_type is always VARCHAR.
+# The output read_id mirrors the query column type. PR C wires BIGINT
+# through the OutputSortMeRNASamBatch emit helper without touching the
+# aligner core or the ref-loading path.
+
+require miint
+
+require-env SORTMERNA_AVAILABLE
+
+# ---------------------------------------------------------------------------
+# BIGINT query table seeded with the AB271211 16S rRNA sequence used by
+# align_sortmerna.test. Same sequence → known-good alignment against
+# ext/sortmerna/data/test_ref.fasta.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE smr_q_bigint (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO smr_q_bigint VALUES (
+  271211,
+  'TCCAACGCGTTGGGAGCTCTCCCATATGGTCGACCTGCAGGCGGCCGCACTAGTGATTAGAGTTTGATCCTGGCTCAGGATGAACGCTGGCGGCGTGCCTAACACATGCAAGTCGAACGGGAATCTTCGGATTCTAGTGGCGGACGGGTGAGTAACGCGTAAGAATCTAACTTCAGGACGGGGACAACAGTGGGAAACGACTGCTAATACCCGATGTGCCGCGAGGTGAAACCTAATTGGCCTGAAGAGGAGCTTGCGTCTGATTAGCTAGTTGGTGGGGTAAGAGCCTACCAAGGCGACGATCAGTAGCTGGTCTGAGAGGATGAGCAGCCACACTGGGACTGAGACACGGCCCAGACTCCTACGGGAGGCAGCAGTGGGGAATTTTCCGCAATGGGCGAAAGCCTGACGGAGCAACGCCGCGTGAGGGAGGAAGGTCTTTGGATTGTAAACCTCTTTTCTCAAGGAAGAAGTTCTGACGGTACTTGAGGAATCAGCCTCGGCTAACTCCGTGCCAGCAGCCGCGGTAATACGGGGGAGGCAAGCGTTATCCGGAATTATTGGGCGTAAAGCGTCCGCAGGTGGTCAGCCAAGTCTGCCGTCAAATCAGGTTGCTTAACGACCTAAAGGCGGTGGAAACTGGCAGACTAGAGAGCAGTAGGGGTAGCAGGAATTCCCAGTGTAGCGGTGAAATGCGTAGAGATTGGGAAGAACATCGGTGGCGAAAGCGTGCTACTGGGCTGTATCTGACACTCAGGGACGAAAGCTAGGGGAGCGAAAGGGATTAGATACCCCTGTAGTCCTAGCCGTAAACGATGGATACTAGGCGTGGCTTGTATCGACCCGAGCCGTGCCGAAGCTAACGCGTTAAGTATCCCGCCTGGGGAGTACGCACGCAAGTGTGAAACTCAAAGGAATTGACGGGGGCCCGCACAAGCGGTGGAGTATGTGGTTTAATTCGATGCAACGCGAAGAACCTTACCAAGACTTGACATGTCGCGAACCCTGGTGAAAGCTGGGGGTGCCTTCGGGAGCGCGAACACAGGTGGTGCATGGCTGTCGTCAGCTCGTGTCGTGAGATGTTGGGTTAAGTCCCGCAACGAGCGCAACCCTCGTTCTTAGTTGCCAGCATTAAGTTGGGGACTCTAAGGAGACTGCCGGTGACAAACCGGAGGAAGGTGGGGATGACGTCAAGTCAGCATGCCCCTTACGTCTTGGGCGACACACGTACTACAATGGTCGGGACAAAGGGCAGCGAACTTGCGAGAGCCAGCGAATCCCAGCAAACCCGGCCTCAGTTCAGATTGCAGGCTGCAACTCGCCTGCATGAAGGAGGAATCGCTAGTAATCGCCGGTCAGCATACGGCGGTGAATTCGTTCCCGGGCCTTGTACACACCGCCCGTCACACCATGGAAGCTGGTCACGCCCGAAGTCATTACCTCAACCGCAAGGAGGGGGATGCCTAAGGCAGGGCTAGTGACTGGGG'
+);
+
+# ---------------------------------------------------------------------------
+# Output column types: read_id mirrors the BIGINT query side. Subject side
+# (reference, mate_reference) is always VARCHAR — sortmerna refs come from
+# FASTA files on disk.
+# ---------------------------------------------------------------------------
+
+query III
+SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
+FROM align_sortmerna(
+    'smr_q_bigint', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1)
+LIMIT 1;
+----
+BIGINT	VARCHAR	VARCHAR
+
+# Happy path: BIGINT read_id round-trips through the emit helper. The
+# alignment values themselves must match the VARCHAR baseline in
+# align_sortmerna.test (same sequence + reference).
+query IIIIIIIIII
+SELECT read_id, flags, reference, position, stop_position, mapq, cigar,
+       mate_reference, mate_position, template_length
+FROM align_sortmerna(
+    'smr_q_bigint', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+----
+271211	0	Unc49508	1	1447	255	57S57M2I12M2D4M2I29M1D11M2I3M2D11M1I7M1D13M5D4M3D9M2D3M7D1260M	*	0	0
+
+# ---------------------------------------------------------------------------
+# Unsupported numeric types rejected at bind. Validation is shared with
+# the other A1 alignment functions via ValidateSequenceTableSchema.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE smr_q_integer (read_id INTEGER, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM align_sortmerna(
+    'smr_q_integer', ref_paths := ['ext/sortmerna/data/test_ref.fasta']);
+----
+must be VARCHAR or BIGINT
+
+statement ok
+CREATE TABLE smr_q_hugeint (read_id HUGEINT, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM align_sortmerna(
+    'smr_q_hugeint', ref_paths := ['ext/sortmerna/data/test_ref.fasta']);
+----
+must be VARCHAR or BIGINT
+
+statement ok
+CREATE TABLE smr_q_double (read_id DOUBLE, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM align_sortmerna(
+    'smr_q_double', ref_paths := ['ext/sortmerna/data/test_ref.fasta']);
+----
+must be VARCHAR or BIGINT
+
+# ---------------------------------------------------------------------------
+# Empty BIGINT input → zero rows, no crash.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE smr_q_bigint_empty (read_id BIGINT, sequence1 VARCHAR);
+
+query I
+SELECT COUNT(*) FROM align_sortmerna(
+    'smr_q_bigint_empty', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+----
+0
+
+# ---------------------------------------------------------------------------
+# NULL BIGINT read_id rows are skipped — same row-skip convention as
+# ProcessSingleChunk (src/sequence_table_reader.cpp). The aligner never sees
+# NULL identifiers.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE smr_q_bigint_with_null (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO smr_q_bigint_with_null
+SELECT read_id, sequence1 FROM smr_q_bigint
+UNION ALL SELECT NULL, sequence1 FROM smr_q_bigint;
+
+query II
+SELECT COUNT(*), COUNT(DISTINCT read_id)
+FROM align_sortmerna(
+    'smr_q_bigint_with_null', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+----
+1	1
+
+# ---------------------------------------------------------------------------
+# Paired-end BIGINT — BIGINT read_id round-trips correctly across paired
+# output. Subject side stays VARCHAR for sortmerna (refs come from FASTA on
+# disk), so mate_reference retains the SAM `=` sentinel verbatim when the
+# mate aligns to the same reference (no resolution needed — VARCHAR has an
+# in-band encoding for `=`).
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE smr_pe_bigint AS
+SELECT read_id, sequence1, sequence1 AS sequence2 FROM smr_q_bigint;
+
+query IIIII
+SELECT flags, typeof(read_id), read_id, mate_reference, typeof(mate_reference)
+FROM align_sortmerna(
+    'smr_pe_bigint', ref_paths := ['ext/sortmerna/data/test_ref.fasta'],
+    num_threads := 1, paired := true)
+ORDER BY flags;
+----
+67	BIGINT	271211	=	VARCHAR
+131	BIGINT	271211	=	VARCHAR
+
+# ---------------------------------------------------------------------------
+# Round-trip via COPY ... FORMAT SAM. BIGINT read_id stringifies to decimal
+# on write; read_sam returns VARCHAR on read-back (documented type loss —
+# SAM is a string-only format with no native BIGINT encoding). The reference
+# 'Unc49508' is the sortmerna test_ref.fasta entry, length is well above
+# the alignment span 1..1447.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE smr_ref_lengths AS SELECT 'Unc49508' AS name, 2000 AS length;
+
+statement ok
+COPY (
+    SELECT * FROM align_sortmerna(
+        'smr_q_bigint', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1)
+) TO '__TEST_DIR__/sortmerna_bigint.sam'
+(FORMAT SAM, REFERENCE_LENGTHS 'smr_ref_lengths');
+
+query III
+SELECT read_id, typeof(read_id), reference
+FROM read_sam('__TEST_DIR__/sortmerna_bigint.sam');
+----
+271211	VARCHAR	Unc49508

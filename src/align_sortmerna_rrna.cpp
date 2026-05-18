@@ -19,13 +19,17 @@ unique_ptr<FunctionData> AlignSortMeRNARRNATableFunction::Bind(ClientContext &co
 	data->ref_paths = ParseSortMeRNARefPaths(input.named_parameters, "align_sortmerna_rrna");
 	ParseSortMeRNAConfigParams(input.named_parameters, data->config);
 
-	data->query_schema = ValidateSequenceTableSchema(context, data->query_table);
+	data->query_schema = ValidateSequenceTableSchema(context, data->query_table, /*allow_bigint=*/true);
 	if (data->query_schema.has_sequence2 != data->config.paired) {
 		throw BinderException("align_sortmerna_rrna: query table paired-ness (sequence2 %s) does not match "
 		                      "paired=%s; set the paired parameter to match or reshape the query",
 		                      data->query_schema.has_sequence2 ? "present" : "absent",
 		                      data->config.paired ? "true" : "false");
 	}
+
+	// Output schema: read_id mirrors the query column type; the other 12
+	// columns have fixed types (ref_name is free-form FASTA header text).
+	data->types = GetSortMeRNARRNAOutputTypes(data->query_schema.id_type);
 
 	for (const auto &n : data->names)
 		names.emplace_back(n);
@@ -74,7 +78,8 @@ void AlignSortMeRNARRNATableFunction::Execute(ClientContext &, TableFunctionInpu
 		idx_t available = gstate.result_buffer.size() - gstate.buffer_offset;
 		if (available > 0) {
 			idx_t count = std::min(available, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
-			OutputSortMeRNARRNABatch(output, gstate.result_buffer, gstate.buffer_offset, count);
+			OutputSortMeRNARRNABatch(output, gstate.result_buffer, gstate.buffer_offset, count,
+			                         bind_data.query_schema.id_type);
 			gstate.buffer_offset += count;
 			return;
 		}

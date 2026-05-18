@@ -2293,7 +2293,7 @@ rRNA filtering / alignment against one or more rRNA reference databases using [S
 Emits the standard 21-column SAM schema shared with `align_minimap2` / `align_bowtie2`. For a schema preserving SortMeRNA's native identity / coverage / e-value / edit-distance fields, use [`align_sortmerna_rrna`](#align_sortmerna_rrnaquery_table-ref_pathspaths-options) below.
 
 **Parameters:**
-- `query_table` (VARCHAR, positional): Name of a table or view with columns `read_id` (VARCHAR), `sequence1` (VARCHAR), and optionally `sequence2` (VARCHAR) when `paired := true`.
+- `query_table` (VARCHAR, positional): Name of a table or view with columns `read_id` (VARCHAR or BIGINT — see *Identifier-column types* below), `sequence1` (VARCHAR), and optionally `sequence2` (VARCHAR) when `paired := true`.
 - `ref_paths` (VARCHAR[], required): List of FASTA paths for the reference database(s). The index is built once per query in-memory — re-using references across queries rebuilds the index each time.
 - `num_threads` (INTEGER, default = DuckDB's thread count): Number of threads SortMeRNA's internal pool uses. The DuckDB function runs on a single DuckDB thread; parallelism is inside SortMeRNA.
 - `match`, `mismatch`, `gap_open`, `gap_ext`, `score_N` (INTEGER): SW scoring. Defaults `2 / -3 / 5 / 2 / 0`.
@@ -2310,6 +2310,12 @@ Emits the standard 21-column SAM schema shared with `align_minimap2` / `align_bo
 - `tag_xs`, `tag_ys`, `tag_xn`, `tag_xm`, `tag_xo`, `tag_xg`, `tag_yt`, `tag_md`, `tag_sa` are always NULL — SortMeRNA does not produce these.
 - `stop_position` = `ref_end + 1` (1-based half-open), matching the convention used by `align_minimap2` and `align_bowtie2`.
 - Paired-end: `flags & 0x2` (proper pair) is set when both mates aligned, regardless of reference. This is weaker than SAM's standard "concordant orientation within insert size" meaning — SortMeRNA is an rRNA classifier with no notion of insert size or orientation. When both mates aligned but to different references, `mate_reference` reports the actual partner reference name (rather than `=`), so cross-reference pairs remain distinguishable.
+
+**Identifier-column types (`read_id`):**
+- The input `read_id` column may be `VARCHAR` or `BIGINT`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR or BIGINT`.
+- The output `read_id` column type mirrors the query side. `reference` and `mate_reference` are always `VARCHAR` — SortMeRNA references come from FASTA files on disk (`ref_paths`), never a user-provided table.
+- Because the subject side is always VARCHAR, the SAM `=` mate-reference sentinel is preserved verbatim for paired-end output when both mates map to the same reference (no resolution needed — VARCHAR carries `=` directly, unlike the BIGINT-subject path in `align_minimap2` / `align_bowtie2`).
+- For `BIGINT` `read_id`, rows with NULL `read_id` are skipped at ingress (matching the existing `ProcessSingleChunk` row-skip convention used by VARCHAR query tables).
 
 **Caveats:**
 - **No minimum-score filter:** the embedded library returns every positive Smith-Waterman hit. The `sortmerna` CLI applies an internal minimum-score threshold that our streaming API path bypasses; to reproduce CLI output row-for-row, filter on `score` (`tag_as`) or on `e_value` in SQL. Be aware that e-values are not directly comparable between the library and the CLI (see below), so a library-side e-value threshold is not guaranteed to reproduce the exact CLI row set.
@@ -2340,7 +2346,7 @@ Same aligner as `align_sortmerna` but emits SortMeRNA's native output schema, wh
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `read_id` | VARCHAR | Query read identifier from the input table |
+| `read_id` | VARCHAR or BIGINT | Query read identifier from the input table (mirrors the query column type — see *Identifier-column types* below) |
 | `aligned` | INTEGER | `1` if the read aligned, `0` otherwise |
 | `strand` | INTEGER | `1` for forward, `0` for reverse-complement. `0` for unaligned rows has no meaning. |
 | `ref_name` | VARCHAR | Reference sequence ID (empty for unaligned rows) |
@@ -2355,6 +2361,11 @@ Same aligner as `align_sortmerna` but emits SortMeRNA's native output schema, wh
 | `segment_idx` | INTEGER | `0` for single-end or the forward mate; `1` for the reverse mate in paired-end output |
 
 Paired-end mode produces two rows per input row with `segment_idx` 0 (forward) and 1 (reverse), even when one or both mates failed to align.
+
+**Identifier-column types (`read_id`):**
+- The input `read_id` column may be `VARCHAR` or `BIGINT`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR or BIGINT`.
+- The output `read_id` column type mirrors the query side. `ref_name` is always `VARCHAR` — it carries the free-form FASTA header text from `ref_paths`, not an identifier column.
+- For `BIGINT` `read_id`, rows with NULL `read_id` are skipped at ingress (matching the existing `ProcessSingleChunk` row-skip convention used by VARCHAR query tables).
 
 **Example:**
 
