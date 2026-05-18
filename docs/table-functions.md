@@ -1957,8 +1957,8 @@ Bowtie2 runs out of process via the `gpl-boundary` daemon (an Apache-licensed pr
 - The `gpl-boundary` daemon must be installed. Easiest path: `SELECT install_gpl_boundary();`. The miint extension itself does not link bowtie2.
 
 **Parameters:**
-- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2)
-- `subject_table` (VARCHAR): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent)
+- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2). The `read_id` column may be `VARCHAR` or `BIGINT` (see *Identifier-column types* below).
+- `subject_table` (VARCHAR): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent). The `read_id` column may be `VARCHAR` or `BIGINT`.
 - `preset` (VARCHAR, optional): Bowtie2 preset for alignment sensitivity
   - `'very-fast'`: Fastest, least sensitive
   - `'fast'`: Fast alignment
@@ -2001,14 +2001,14 @@ Unknown parameters are rejected at bind time by DuckDB's binder (e.g. `presset :
 
 **Output schema:**
 Returns the same schema as `read_alignments` (21 columns):
-- `read_id` (VARCHAR): Query sequence identifier
+- `read_id` (VARCHAR or BIGINT — mirrors the query side): Query sequence identifier
 - `flags` (USMALLINT): SAM alignment flags
-- `reference` (VARCHAR): Subject sequence identifier
+- `reference` (VARCHAR or BIGINT — mirrors the subject side): Subject sequence identifier
 - `position` (BIGINT): 1-based start position on reference
 - `stop_position` (BIGINT): 1-based stop position on reference
 - `mapq` (UTINYINT): Mapping quality
 - `cigar` (VARCHAR): CIGAR string
-- `mate_reference` (VARCHAR): Mate reference (for paired-end)
+- `mate_reference` (VARCHAR or BIGINT — mirrors the subject side): Mate reference (for paired-end)
 - `mate_position` (BIGINT): Mate position (for paired-end)
 - `template_length` (BIGINT): Template length (for paired-end)
 - `tag_as` (BIGINT): Alignment score
@@ -2022,6 +2022,14 @@ Returns the same schema as `read_alignments` (21 columns):
 - `tag_yt` (VARCHAR): Pair type (UU/CP/DP/UP)
 - `tag_md` (VARCHAR): MD tag string
 - `tag_sa` (VARCHAR): Supplementary alignment info
+
+**Identifier-column types (`read_id`, `reference`, `mate_reference`):**
+- The input columns may be `VARCHAR` or `BIGINT`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column '<name>' in table '<table>' must be VARCHAR or BIGINT`.
+- The output `read_id` column type mirrors the query side; `reference` and `mate_reference` mirror the subject side. Query and subject id types are independent (mixed BIGINT/VARCHAR is allowed).
+- The daemon wire schema is always strings — BIGINT support is C++/DuckDB-only. On egress, the codec parses decimal strings back to `int64_t`; on ingress, `BIGINT` values are stringified by DuckDB's implicit `Value::GetValue<std::string>()` cast before crossing the Arrow IPC boundary.
+- For `BIGINT` subjects, the SAM `=` mate-reference sentinel is resolved to the row's `reference` value before being emitted (the literal `=` has no BIGINT encoding); VARCHAR output preserves `=` verbatim, matching pre-existing behavior.
+- For `BIGINT` columns, the SAM `*` unmapped sentinel surfaces as SQL NULL. VARCHAR sentinels pass through verbatim.
+- NULL `read_id` rows are rejected at row time with `NULL read_id or sequence1 in query table` — same contract as VARCHAR. The daemon's input schema requires both columns non-null.
 
 **Behavior:**
 - Subject sequences are loaded at bind time and indexed via the daemon's `bowtie2-build` tool (index must fit in RAM)
@@ -2104,10 +2112,10 @@ The sharded path emits only mapped reads (the daemon is invoked with `--no-unal`
 - The `gpl-boundary` daemon must be installed (see `SELECT install_gpl_boundary();`).
 
 **Parameters:**
-- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2)
+- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2). The `read_id` column may be `VARCHAR` or `BIGINT` (see *Identifier-column types* below).
 - `shard_directory` (VARCHAR, required): Path to directory containing shard subdirectories. Each shard's Bowtie2 index is expected at `<shard_directory>/<shard_name>/index` (i.e., files like `<shard_name>/index.1.bt2`, `<shard_name>/index.rev.1.bt2`, etc.)
 - `read_to_shard` (VARCHAR, required): Name of table or view that maps reads to shards. Must have columns:
-  - `read_id` (VARCHAR): Read identifier (must match read_id in query_table)
+  - `read_id`: Read identifier. Must match the storage type of `query_table.read_id` exactly — VARCHAR with VARCHAR, BIGINT with BIGINT. Mismatched types are rejected at bind time.
   - `shard_name` (VARCHAR): Name of the shard this read should be aligned against
 - `preset` (VARCHAR, optional): Bowtie2 sensitivity preset ('very-fast', 'fast', 'sensitive', 'very-sensitive')
 - `local` (BOOLEAN, default: false): Use local alignment mode instead of end-to-end
@@ -2123,6 +2131,12 @@ The `no_unal` knob is intentionally not exposed: the sharded path always emits o
 
 **Output schema:**
 Returns the same 21-column schema as `align_bowtie2` and `read_alignments`.
+
+**Identifier-column types (`read_id`, `reference`, `mate_reference`):**
+- The query side (`query_table.read_id` and `read_to_shard.read_id`) may be `VARCHAR` or `BIGINT`. Both must share the same type — `ValidateReadToShardSchema` enforces strict equality so the underlying JOIN never relies on implicit casts. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time.
+- The output `read_id` column mirrors the query side.
+- The output `reference` and `mate_reference` columns are **always VARCHAR** in sharded mode. Sharded alignment always loads prebuilt Bowtie2 indexes, and reference names inside those indexes are opaque bytes — the same contract as `align_minimap2_sharded`. Cast in SQL (`CAST(reference AS BIGINT)`) if you need integer semantics downstream.
+- For `BIGINT` `read_id`, NULL input rows that have no entry in `read_to_shard` are silently skipped (the JOIN filters them out before they reach the daemon).
 
 **Behavior:**
 - At bind time, reads the `read_to_shard` table to discover shards; per-shard index existence is verified at InitGlobal (not Bind) so the planner doesn't pay filesystem-stat cost on wide shard sets.

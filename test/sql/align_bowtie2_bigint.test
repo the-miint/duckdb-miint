@@ -1,0 +1,170 @@
+# name: test/sql/align_bowtie2_bigint.test
+# description: align_bowtie2 accepts BIGINT read_id columns (PR B).
+# group: [sql]
+
+#   Bowtie2 routes through the gpl-boundary daemon and stays string-on-the-wire
+#   end-to-end — BIGINT support is purely at the C++/DuckDB boundary. The
+#   output read_id mirrors the query side; reference and mate_reference mirror
+#   the subject side. The SAM `=` mate-reference sentinel has no BIGINT
+#   encoding, so for BIGINT subjects it's resolved to the row's reference
+#   before emit; VARCHAR keeps `=` verbatim.
+
+require miint
+
+require-env GPL_BOUNDARY_AVAILABLE
+
+# ---------------------------------------------------------------------------
+# Setup: BIGINT-keyed query + subject tables with sequences long enough for
+# bowtie2 to seed (~50bp queries against ~100bp subjects, similar to the
+# existing align_bowtie2.test fixtures).
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE subjects_bigint AS SELECT * FROM (VALUES
+    (2001::BIGINT, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    (2002::BIGINT, 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCAAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAA')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE queries_bigint AS SELECT * FROM (VALUES
+    (1001::BIGINT, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    (1002::BIGINT, 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(read_id, sequence1);
+
+# VARCHAR projections for mixed-type tests.
+statement ok
+CREATE TABLE subjects_varchar AS SELECT CAST(read_id AS VARCHAR) AS read_id, sequence1 FROM subjects_bigint;
+
+statement ok
+CREATE TABLE queries_varchar AS SELECT CAST(read_id AS VARCHAR) AS read_id, sequence1 FROM queries_bigint;
+
+# ---------------------------------------------------------------------------
+# Happy path: BIGINT/BIGINT — output read_id and reference both BIGINT.
+# ---------------------------------------------------------------------------
+
+query II
+SELECT read_id, reference
+FROM align_bowtie2('queries_bigint', 'subjects_bigint')
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+1001	2001
+1002	2002
+
+# Output column types mirror input: query → read_id, subject → reference
+# and mate_reference.
+query III
+SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
+FROM align_bowtie2('queries_bigint', 'subjects_bigint')
+LIMIT 1;
+----
+BIGINT	BIGINT	BIGINT
+
+# ---------------------------------------------------------------------------
+# Mixed: BIGINT query / VARCHAR subject. read_id is BIGINT, reference and
+# mate_reference are VARCHAR.
+# ---------------------------------------------------------------------------
+
+query III
+SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
+FROM align_bowtie2('queries_bigint', 'subjects_varchar')
+LIMIT 1;
+----
+BIGINT	VARCHAR	VARCHAR
+
+# And the reverse: VARCHAR query / BIGINT subject.
+query III
+SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
+FROM align_bowtie2('queries_varchar', 'subjects_bigint')
+LIMIT 1;
+----
+VARCHAR	BIGINT	BIGINT
+
+# ---------------------------------------------------------------------------
+# Unsupported numeric types rejected at bind. Covers query side and subject
+# side (both validated by ValidateSequenceTableSchema).
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE queries_integer (read_id INTEGER, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM align_bowtie2('queries_integer', 'subjects_bigint');
+----
+must be VARCHAR or BIGINT
+
+statement ok
+CREATE TABLE queries_hugeint (read_id HUGEINT, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM align_bowtie2('queries_hugeint', 'subjects_bigint');
+----
+must be VARCHAR or BIGINT
+
+statement ok
+CREATE TABLE subjects_double (read_id DOUBLE, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM align_bowtie2('queries_bigint', 'subjects_double');
+----
+must be VARCHAR or BIGINT
+
+# ---------------------------------------------------------------------------
+# Paired-end BIGINT with `=` mate_reference resolution. For BIGINT subjects
+# the SAM `=` sentinel has no in-band encoding, so EmitChunkRows resolves
+# it to the row's reference value before the codec dispatch. The pair below
+# has both mates landing on the same reference (R1 against the start of the
+# subject, R2 against the GGCC… tail), so bowtie2 emits `=` on the mate and
+# we must see the resolved BIGINT instead.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE paired_queries_bigint AS SELECT * FROM (VALUES
+    (3001::BIGINT,
+     'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT',
+     'GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAA')
+) AS t(read_id, sequence1, sequence2);
+
+# All emitted mate_reference values for BIGINT subjects must be either the
+# resolved reference (= sentinel replaced) or NULL (*) — never the literal
+# "=", because the codec rejects it. Counts how many rows have a non-NULL
+# mate_reference equal to the row's reference; the test passes if at least
+# one such row exists (paired mates resolved) and no rows have a non-NULL
+# mate_reference different from reference (would mean cross-reference
+# mapping, which our fixture doesn't allow).
+query II
+SELECT
+    SUM(CASE WHEN mate_reference IS NOT NULL AND mate_reference = reference THEN 1 ELSE 0 END) > 0 AS any_resolved,
+    SUM(CASE WHEN mate_reference IS NOT NULL AND mate_reference != reference THEN 1 ELSE 0 END) AS unexpected_diff
+FROM align_bowtie2('paired_queries_bigint', 'subjects_bigint')
+WHERE flags & 4 = 0;
+----
+true	0
+
+# Output types for paired-end are unchanged: read_id BIGINT, reference and
+# mate_reference BIGINT (subject side is BIGINT).
+query III
+SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
+FROM align_bowtie2('paired_queries_bigint', 'subjects_bigint')
+LIMIT 1;
+----
+BIGINT	BIGINT	BIGINT
+
+# ---------------------------------------------------------------------------
+# NULL read_id: bowtie2's existing contract throws because the daemon needs
+# both read_id and sequence1 non-null. BIGINT inherits the same behavior —
+# the IsNull check fires before any codec dispatch.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE queries_bigint_with_null (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO queries_bigint_with_null VALUES
+    (1001, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    (NULL, 'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG');
+
+statement error
+SELECT * FROM align_bowtie2('queries_bigint_with_null', 'subjects_bigint');
+----
+NULL read_id or sequence1

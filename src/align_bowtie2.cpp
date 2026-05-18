@@ -1,5 +1,6 @@
 #include "align_bowtie2.hpp"
 #include "align_bowtie2_daemon_common.hpp"
+#include "sequence_table_reader.hpp"
 
 #include "duckdb/common/arrow/arrow.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
@@ -132,18 +133,12 @@ struct LoadedSubjects {
 LoadedSubjects LoadSubjects(ClientContext &context, const std::string &table_name) {
 	auto &db = DatabaseInstance::GetDatabase(context);
 	Connection conn(db);
-	// Pull sequence2 too — we have to validate it's all-NULL to match the
-	// direct-subprocess contract (test/sql/align_bowtie2.test:191-200 expects
-	// "non-NULL sequence2" error for paired subjects). Use COLUMNS to
-	// gracefully handle missing sequence2 column.
-	const std::string sql =
-	    "SELECT read_id, sequence1, "
-	    "       COALESCE(CAST(NULL AS VARCHAR), NULL) AS sequence2_unused FROM " // placeholder, replaced below
-	    + KeywordHelper::WriteOptionallyQuoted(table_name);
-	(void)sql; // not used — we use the two-query approach below
-
-	// Two-query approach: first probe column presence with information_schema,
-	// then issue the actual SELECT. Simpler than COLUMNS hacks.
+	// Two-query approach: first probe column presence to detect optional
+	// sequence2 (which we need to validate is all-NULL — paired subjects are
+	// rejected per test/sql/align_bowtie2.test:191-200), then issue the
+	// actual SELECT. The schema validator in Bind already accepted read_id
+	// as VARCHAR or BIGINT; the implicit Value::GetValue<std::string>() cast
+	// below handles either type uniformly into the carrier vector.
 	const std::string columns_sql = "SELECT column_name FROM (DESCRIBE " +
 	                                KeywordHelper::WriteOptionallyQuoted(table_name) +
 	                                ") WHERE column_name IN ('sequence2')";
@@ -163,7 +158,7 @@ LoadedSubjects LoadSubjects(ClientContext &context, const std::string &table_nam
 	auto result = conn.Query(select_sql);
 	if (result->HasError()) {
 		throw InvalidInputException("align_bowtie2: failed to read subject table '%s' "
-		                            "(must have columns read_id VARCHAR, sequence1 VARCHAR): %s",
+		                            "(must have columns read_id VARCHAR or BIGINT, sequence1 VARCHAR): %s",
 		                            table_name, result->GetError());
 	}
 
@@ -315,6 +310,14 @@ struct AlignBowtie2BindData : public TableFunctionData {
 	bool query_has_sequence2 = false;
 	bool query_has_qual1 = false;
 	bool query_has_qual2 = false;
+
+	// Id-column types captured by ValidateSequenceTableSchema in Bind. The
+	// daemon's wire schema is always strings — these types drive only the
+	// C++/DuckDB output schema and the egress codec dispatch in EmitChunkRows.
+	// Default INVALID per the fail-loud convention: any Execute path that
+	// runs before Bind populated these throws at the codec dispatch.
+	LogicalType query_id_type = LogicalType(LogicalTypeId::INVALID);
+	LogicalType subject_id_type = LogicalType(LogicalTypeId::INVALID);
 };
 
 struct AlignBowtie2GlobalState : public GlobalTableFunctionState {
@@ -432,25 +435,15 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	bd->query_table = input.inputs[0].ToString();
 	bd->subject_table = input.inputs[1].ToString();
 
-	// Validate table existence at bind time by checking columns are
-	// describable. Defers heavy reads to InitGlobal.
-	auto &db = DatabaseInstance::GetDatabase(context);
-	{
-		Connection conn(db);
-		auto probe = conn.Query("DESCRIBE " + KeywordHelper::WriteOptionallyQuoted(bd->query_table));
-		if (probe->HasError()) {
-			throw InvalidInputException("align_bowtie2: query table '%s' does not exist or is not readable: %s",
-			                            bd->query_table, probe->GetError());
-		}
-	}
-	{
-		Connection conn(db);
-		auto probe = conn.Query("DESCRIBE " + KeywordHelper::WriteOptionallyQuoted(bd->subject_table));
-		if (probe->HasError()) {
-			throw InvalidInputException("align_bowtie2: subject table '%s' does not exist or is not readable: %s",
-			                            bd->subject_table, probe->GetError());
-		}
-	}
+	// Validate query + subject tables (existence + read_id type). Both may
+	// be VARCHAR or BIGINT; the captured types drive the output schema and
+	// the egress codec dispatch in EmitChunkRows. Replaces the earlier
+	// DESCRIBE-only existence probes — ValidateSequenceTableSchema does
+	// existence + column-type validation in one pass.
+	auto query_schema = ValidateSequenceTableSchema(context, bd->query_table, /*allow_bigint=*/true);
+	auto subject_schema = ValidateSequenceTableSchema(context, bd->subject_table, /*allow_bigint=*/true);
+	bd->query_id_type = query_schema.id_type;
+	bd->subject_id_type = subject_schema.id_type;
 
 	DetectQueryColumns(context, *bd);
 	bd->named_params = input.named_parameters;
@@ -465,7 +458,7 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 		}
 	}
 
-	bt2_daemon::PopulateOutputSchema(names, return_types);
+	bt2_daemon::PopulateOutputSchema(names, return_types, bd->query_id_type, bd->subject_id_type);
 	return std::move(bd);
 }
 
@@ -730,7 +723,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 		}
 		const idx_t to_emit = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
 		output.SetCardinality(to_emit);
-		bt2_daemon::EmitChunkRows(output, to_emit, gs.row_in_batch, batch);
+		bt2_daemon::EmitChunkRows(output, to_emit, gs.row_in_batch, batch, bd.query_id_type, bd.subject_id_type);
 		gs.row_in_batch += to_emit;
 		return;
 	}
@@ -763,7 +756,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 	const idx_t total = static_cast<idx_t>(batch.length);
 	const idx_t to_emit = MinValue<idx_t>(total, STANDARD_VECTOR_SIZE);
 	output.SetCardinality(to_emit);
-	bt2_daemon::EmitChunkRows(output, to_emit, 0, batch);
+	bt2_daemon::EmitChunkRows(output, to_emit, 0, batch, bd.query_id_type, bd.subject_id_type);
 	gs.row_in_batch = to_emit;
 }
 

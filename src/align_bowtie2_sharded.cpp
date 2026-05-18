@@ -2,6 +2,7 @@
 #include "align_bowtie2_daemon_common.hpp"
 #include "align_common.hpp"
 #include "miint_log.hpp"
+#include "sequence_table_reader.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
@@ -133,6 +134,15 @@ struct AlignBowtie2ShardedBindData : public TableFunctionData {
 	bool query_has_sequence2 = false;
 	bool query_has_qual1 = false;
 	bool query_has_qual2 = false;
+
+	// Id-column types captured by ValidateSequenceTableSchema. The query side
+	// may be VARCHAR or BIGINT; the read_to_shard table's read_id must match
+	// (enforced by ValidateReadToShardSchema with expected_read_id_type). The
+	// subject side is always VARCHAR because sharded mode loads prebuilt
+	// bowtie2 indexes whose reference names are opaque bytes — same contract
+	// as align_minimap2_sharded.
+	LogicalType query_id_type = LogicalType(LogicalTypeId::INVALID);
+	LogicalType subject_id_type = LogicalType(LogicalTypeId::INVALID);
 
 	// Ordered shards (largest first) with index path resolved + verified.
 	std::vector<ShardInfo> shards;
@@ -315,18 +325,23 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 		throw BinderException("Shard directory does not exist: %s", bd->shard_directory);
 	}
 
-	// Validate query_table exists.
-	{
-		auto &db = DatabaseInstance::GetDatabase(context);
-		Connection conn(db);
-		auto probe = conn.Query("DESCRIBE " + KeywordHelper::WriteOptionallyQuoted(bd->query_table));
-		if (probe->HasError()) {
-			throw InvalidInputException("align_bowtie2_sharded: query table '%s' does not exist or is not readable: %s",
-			                            bd->query_table, probe->GetError());
-		}
-	}
+	// Validate query_table (existence + read_id type). Captures VARCHAR or
+	// BIGINT into bd->query_id_type for the output schema and the egress
+	// codec dispatch in EmitChunkRows. Replaces the earlier DESCRIBE-only
+	// existence probe.
+	auto query_schema = ValidateSequenceTableSchema(context, bd->query_table, /*allow_bigint=*/true);
+	bd->query_id_type = query_schema.id_type;
 
-	ValidateReadToShardSchema(context, bd->read_to_shard_table);
+	// Subject side is always VARCHAR — sharded mode loads prebuilt bowtie2
+	// indexes whose reference names are opaque bytes (same contract as
+	// align_minimap2_sharded). Captured here so the emit path and output
+	// schema use the same value the bind committed to.
+	bd->subject_id_type = LogicalType::VARCHAR;
+
+	// read_to_shard.read_id must match the query table's read_id type. The
+	// strict equality check prevents the downstream JOIN inside
+	// OpenCurrentShardStream from relying on implicit casts.
+	ValidateReadToShardSchema(context, bd->read_to_shard_table, bd->query_id_type);
 
 	// Reject unknown params at bind time.
 	for (const auto &kv : input.named_parameters) {
@@ -375,7 +390,10 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 
 	bd->shards = EnumerateShards(context, bd->read_to_shard_table, bd->shard_directory);
 
-	bt2_daemon::PopulateOutputSchema(names, return_types);
+	// Output schema reflects captured id types: read_id mirrors the query
+	// side; reference and mate_reference are always VARCHAR (subject side
+	// is opaque bytes in the prebuilt bowtie2 index).
+	bt2_daemon::PopulateOutputSchema(names, return_types, bd->query_id_type, bd->subject_id_type);
 	if (bd->include_shard_name) {
 		names.emplace_back("shard_name");
 		return_types.emplace_back(LogicalType::VARCHAR);
@@ -649,7 +667,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 			}
 			const idx_t to_emit = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
 			output.SetCardinality(to_emit);
-			bt2_daemon::EmitChunkRows(output, to_emit, local.row_in_batch, batch);
+			bt2_daemon::EmitChunkRows(output, to_emit, local.row_in_batch, batch, bd.query_id_type, bd.subject_id_type);
 			if (bd.include_shard_name) {
 				FillShardNameColumn(output, to_emit, local.current_shard_name);
 			}
