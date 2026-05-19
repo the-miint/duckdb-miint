@@ -1,0 +1,135 @@
+# name: test/sql/align_sortmerna_rrna_bigint.test
+# description: align_sortmerna_rrna accepts BIGINT read_id columns (PR C).
+# group: [sql]
+
+#
+# align_sortmerna_rrna's schema has a single id-typed column (read_id) —
+# `ref_name` is a free-form string carrying FASTA header text, not an id
+# column, so it stays VARCHAR. Output read_id mirrors the query column type.
+
+require miint
+
+require parquet
+
+require-env SORTMERNA_AVAILABLE
+
+# ---------------------------------------------------------------------------
+# BIGINT query table seeded with the AB271211 16S rRNA sequence from
+# align_sortmerna_rrna.test. Same sequence → same expected alignment values.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE smr_q_bigint (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO smr_q_bigint VALUES (
+  271211,
+  'TCCAACGCGTTGGGAGCTCTCCCATATGGTCGACCTGCAGGCGGCCGCACTAGTGATTAGAGTTTGATCCTGGCTCAGGATGAACGCTGGCGGCGTGCCTAACACATGCAAGTCGAACGGGAATCTTCGGATTCTAGTGGCGGACGGGTGAGTAACGCGTAAGAATCTAACTTCAGGACGGGGACAACAGTGGGAAACGACTGCTAATACCCGATGTGCCGCGAGGTGAAACCTAATTGGCCTGAAGAGGAGCTTGCGTCTGATTAGCTAGTTGGTGGGGTAAGAGCCTACCAAGGCGACGATCAGTAGCTGGTCTGAGAGGATGAGCAGCCACACTGGGACTGAGACACGGCCCAGACTCCTACGGGAGGCAGCAGTGGGGAATTTTCCGCAATGGGCGAAAGCCTGACGGAGCAACGCCGCGTGAGGGAGGAAGGTCTTTGGATTGTAAACCTCTTTTCTCAAGGAAGAAGTTCTGACGGTACTTGAGGAATCAGCCTCGGCTAACTCCGTGCCAGCAGCCGCGGTAATACGGGGGAGGCAAGCGTTATCCGGAATTATTGGGCGTAAAGCGTCCGCAGGTGGTCAGCCAAGTCTGCCGTCAAATCAGGTTGCTTAACGACCTAAAGGCGGTGGAAACTGGCAGACTAGAGAGCAGTAGGGGTAGCAGGAATTCCCAGTGTAGCGGTGAAATGCGTAGAGATTGGGAAGAACATCGGTGGCGAAAGCGTGCTACTGGGCTGTATCTGACACTCAGGGACGAAAGCTAGGGGAGCGAAAGGGATTAGATACCCCTGTAGTCCTAGCCGTAAACGATGGATACTAGGCGTGGCTTGTATCGACCCGAGCCGTGCCGAAGCTAACGCGTTAAGTATCCCGCCTGGGGAGTACGCACGCAAGTGTGAAACTCAAAGGAATTGACGGGGGCCCGCACAAGCGGTGGAGTATGTGGTTTAATTCGATGCAACGCGAAGAACCTTACCAAGACTTGACATGTCGCGAACCCTGGTGAAAGCTGGGGGTGCCTTCGGGAGCGCGAACACAGGTGGTGCATGGCTGTCGTCAGCTCGTGTCGTGAGATGTTGGGTTAAGTCCCGCAACGAGCGCAACCCTCGTTCTTAGTTGCCAGCATTAAGTTGGGGACTCTAAGGAGACTGCCGGTGACAAACCGGAGGAAGGTGGGGATGACGTCAAGTCAGCATGCCCCTTACGTCTTGGGCGACACACGTACTACAATGGTCGGGACAAAGGGCAGCGAACTTGCGAGAGCCAGCGAATCCCAGCAAACCCGGCCTCAGTTCAGATTGCAGGCTGCAACTCGCCTGCATGAAGGAGGAATCGCTAGTAATCGCCGGTCAGCATACGGCGGTGAATTCGTTCCCGGGCCTTGTACACACCGCCCGTCACACCATGGAAGCTGGTCACGCCCGAAGTCATTACCTCAACCGCAAGGAGGGGGATGCCTAAGGCAGGGCTAGTGACTGGGG'
+);
+
+# ---------------------------------------------------------------------------
+# Output read_id type mirrors the BIGINT query column. ref_name stays VARCHAR
+# (free-form FASTA header, not an id column).
+# ---------------------------------------------------------------------------
+
+query II
+SELECT typeof(read_id), typeof(ref_name)
+FROM align_sortmerna_rrna(
+    'smr_q_bigint', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1)
+LIMIT 1;
+----
+BIGINT	VARCHAR
+
+# Happy path: BIGINT read_id round-trips through the emit helper. The
+# alignment values themselves must match the VARCHAR baseline in
+# align_sortmerna_rrna.test (same sequence + reference).
+query IIIIIIIIIII
+SELECT read_id, aligned, strand, ref_name, ref_start, ref_end, cigar, score,
+       edit_distance,
+       round(identity, 1) AS identity_1dp,
+       round(coverage, 1) AS coverage_1dp
+FROM align_sortmerna_rrna(
+    'smr_q_bigint', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+----
+271211	1	1	Unc49508	1	1446	57S57M2I12M2D4M2I29M1D11M2I3M2D11M1I7M1D13M5D4M3D9M2D3M7D1260M	2430	94	93.5	96.2
+
+# ---------------------------------------------------------------------------
+# Unsupported numeric types rejected at bind.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE smr_q_integer (read_id INTEGER, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM align_sortmerna_rrna(
+    'smr_q_integer', ref_paths := ['ext/sortmerna/data/test_ref.fasta']);
+----
+must be VARCHAR or BIGINT
+
+statement ok
+CREATE TABLE smr_q_hugeint (read_id HUGEINT, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM align_sortmerna_rrna(
+    'smr_q_hugeint', ref_paths := ['ext/sortmerna/data/test_ref.fasta']);
+----
+must be VARCHAR or BIGINT
+
+statement ok
+CREATE TABLE smr_q_double (read_id DOUBLE, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM align_sortmerna_rrna(
+    'smr_q_double', ref_paths := ['ext/sortmerna/data/test_ref.fasta']);
+----
+must be VARCHAR or BIGINT
+
+# ---------------------------------------------------------------------------
+# Empty BIGINT input → zero rows, no crash.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE smr_q_bigint_empty (read_id BIGINT, sequence1 VARCHAR);
+
+query I
+SELECT COUNT(*) FROM align_sortmerna_rrna(
+    'smr_q_bigint_empty', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+----
+0
+
+# ---------------------------------------------------------------------------
+# NULL BIGINT read_id rows skipped (ProcessSingleChunk convention).
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE smr_q_bigint_with_null (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO smr_q_bigint_with_null
+SELECT read_id, sequence1 FROM smr_q_bigint
+UNION ALL SELECT NULL, sequence1 FROM smr_q_bigint;
+
+query II
+SELECT COUNT(*), COUNT(DISTINCT read_id)
+FROM align_sortmerna_rrna(
+    'smr_q_bigint_with_null', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+----
+1	1
+
+# ---------------------------------------------------------------------------
+# Round-trip via parquet (preserves BIGINT). The rRNA schema is not SAM-
+# shaped, so COPY FORMAT SAM does not apply; parquet is the natural format
+# to verify the BIGINT read_id flows end-to-end without coercion.
+# ---------------------------------------------------------------------------
+
+statement ok
+COPY (
+    SELECT * FROM align_sortmerna_rrna(
+        'smr_q_bigint', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1)
+) TO '__TEST_DIR__/sortmerna_rrna_bigint.parquet' (FORMAT PARQUET);
+
+query III
+SELECT read_id, typeof(read_id), aligned
+FROM read_parquet('__TEST_DIR__/sortmerna_rrna_bigint.parquet');
+----
+271211	BIGINT	1

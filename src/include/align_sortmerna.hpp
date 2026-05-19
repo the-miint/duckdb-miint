@@ -24,12 +24,13 @@ public:
 		SequenceTableSchema query_schema;
 		miint::SortMeRNAConfig config;
 
+		// Output schema. Names are constant; types are rebuilt by Bind once
+		// the query id type is known. SortMeRNA's subject side is always
+		// VARCHAR — reference and mate_reference come from FASTA files on disk
+		// (ref_paths), never from a user-provided table.
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
-		// SortMeRNA is VARCHAR-only for read_id / reference / mate_reference
-		// in PR 1. BIGINT support requires updating the sortmerna emit helper
-		// (out of scope here); see findings doc.
 		Data()
 		    : names(GetAlignmentOutputNames()),
 		      types(GetAlignmentOutputTypes(LogicalType::VARCHAR, LogicalType::VARCHAR)) {

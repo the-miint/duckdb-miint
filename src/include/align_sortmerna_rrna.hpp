@@ -21,10 +21,13 @@ public:
 		SequenceTableSchema query_schema;
 		miint::SortMeRNAConfig config;
 
+		// Output schema. Names are constant; types are rebuilt by Bind once
+		// the query id type is known. The VARCHAR placeholder here is never
+		// observed by Execute.
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
-		Data() : names(GetSortMeRNARRNAOutputNames()), types(GetSortMeRNARRNAOutputTypes()) {
+		Data() : names(GetSortMeRNARRNAOutputNames()), types(GetSortMeRNARRNAOutputTypes(LogicalType::VARCHAR)) {
 		}
 	};
 

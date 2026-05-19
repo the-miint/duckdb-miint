@@ -19,18 +19,25 @@ inline std::vector<std::string> GetSortMeRNARRNAOutputNames() {
 	        "score",   "e_value", "identity", "coverage", "edit_distance", "segment_idx"};
 }
 
-inline std::vector<LogicalType> GetSortMeRNARRNAOutputTypes() {
-	return {LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::VARCHAR,
+// `query_id_type` drives `read_id`. Must be VARCHAR or BIGINT. No default —
+// every caller must commit to a type so the audit can't slip. The other 12
+// columns have fixed types (ref_name is free-form FASTA header text, never
+// an id column).
+inline std::vector<LogicalType> GetSortMeRNARRNAOutputTypes(const LogicalType &query_id_type) {
+	return {query_id_type,        LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::VARCHAR,
 	        LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::VARCHAR, LogicalType::INTEGER,
 	        LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::INTEGER,
 	        LogicalType::INTEGER};
 }
 
 // Emit [offset, offset+count) rows of `batch` into the output DataChunk.
+// `query_id_type` (VARCHAR or BIGINT) drives the read_id column; the other
+// 12 columns have fixed types matching GetSortMeRNARRNAOutputTypes.
 inline void OutputSortMeRNARRNABatch(DataChunk &output, const miint::SortMeRNAResultBatch &batch, idx_t offset,
-                                     idx_t count) {
+                                     idx_t count, const LogicalType &query_id_type) {
+	D_ASSERT(IsAllowedIdType(query_id_type));
 	idx_t col = 0;
-	SetAlignResultString(output.data[col++], batch.read_ids, offset, count);
+	EmitIdColumnFromStrings(output.data[col++], batch.read_ids, offset, count, query_id_type);
 	SetAlignResultInt32(output.data[col++], batch.aligned, offset, count);
 	SetAlignResultInt32(output.data[col++], batch.strands, offset, count);
 	SetAlignResultString(output.data[col++], batch.ref_names, offset, count);
@@ -52,15 +59,30 @@ inline void OutputSortMeRNARRNABatch(DataChunk &output, const miint::SortMeRNARe
 // (mapq=255 "unavailable"). Paired rows arrive consecutively from
 // SortMeRNAAligner::align() as (segment=0, segment=1), so the mate fields for
 // row j can be read from batch[j ^ 1] without cross-chunk lookups.
+//
+// `query_id_type` drives `read_id`; `subject_id_type` drives `reference` and
+// `mate_reference`. Both must be VARCHAR or BIGINT. The parameter mirrors the
+// shape of OutputSAMRecordBatch (align_common.hpp) and lets the entry-point
+// asserts catch a forgetful caller, but for sortmerna `subject_id_type` is
+// always VARCHAR — subject names come from FASTA files on disk via
+// `ref_paths`, never a user-provided table. The body therefore emits the SAM
+// `=` mate-reference sentinel verbatim (VARCHAR carries `=` in-band); there
+// is no BIGINT-subject resolution path because there is no BIGINT subject.
 inline void OutputSortMeRNASamBatch(DataChunk &output, const miint::SortMeRNAResultBatch &batch, idx_t offset,
-                                    idx_t count, bool is_paired) {
+                                    idx_t count, bool is_paired, const LogicalType &query_id_type,
+                                    const LogicalType &subject_id_type) {
+	D_ASSERT(IsAllowedIdType(query_id_type));
+	D_ASSERT(IsAllowedIdType(subject_id_type));
+
 	// Pair-consecutive invariant: SortMeRNAAligner::align() emits segments as
 	// (seg=0, seg=1, seg=0, seg=1, ...). Mate lookup below uses `j ^ 1`, which
-	// requires the offset to be even so no pair straddles a chunk boundary.
-	// Execute's count = min(available, STANDARD_VECTOR_SIZE) advances offset
-	// by even values as long as the total is even, which is guaranteed for
-	// paired-end input. Assert here rather than relying on the caller alone.
+	// requires both `offset` and `count` to be even so no pair straddles a
+	// chunk boundary or runs off the end of the batch. Execute's
+	// count = min(available, STANDARD_VECTOR_SIZE) preserves both invariants
+	// as long as the total result-buffer size is even, which is guaranteed
+	// for paired-end input. Assert here rather than relying on the caller alone.
 	D_ASSERT(!is_paired || (offset % 2 == 0));
+	D_ASSERT(!is_paired || (count % 2 == 0));
 
 	idx_t col = 0;
 	auto &read_id_vec = output.data[col++];
@@ -85,14 +107,11 @@ inline void OutputSortMeRNASamBatch(DataChunk &output, const miint::SortMeRNARes
 	auto &tag_md_vec = output.data[col++];
 	auto &tag_sa_vec = output.data[col++];
 
-	auto read_id_data = FlatVector::GetData<string_t>(read_id_vec);
 	auto flags_data = FlatVector::GetData<uint16_t>(flags_vec);
-	auto reference_data = FlatVector::GetData<string_t>(reference_vec);
 	auto position_data = FlatVector::GetData<int64_t>(position_vec);
 	auto stop_position_data = FlatVector::GetData<int64_t>(stop_position_vec);
 	auto mapq_data = FlatVector::GetData<uint8_t>(mapq_vec);
 	auto cigar_data = FlatVector::GetData<string_t>(cigar_vec);
-	auto mate_reference_data = FlatVector::GetData<string_t>(mate_reference_vec);
 	auto mate_position_data = FlatVector::GetData<int64_t>(mate_position_vec);
 	auto template_length_data = FlatVector::GetData<int64_t>(template_length_vec);
 	auto tag_as_data = FlatVector::GetData<int64_t>(tag_as_vec);
@@ -116,12 +135,20 @@ inline void OutputSortMeRNASamBatch(DataChunk &output, const miint::SortMeRNARes
 	FlatVector::Validity(tag_md_vec).SetAllInvalid(count);
 	FlatVector::Validity(tag_sa_vec).SetAllInvalid(count);
 
+	// Stage id-typed columns into vector<string> slices and bulk-emit via
+	// EmitIdColumnFromStrings after the row loop — supports VARCHAR and BIGINT
+	// uniformly. The "*" sentinel for unaligned rows encodes NULL through the
+	// BIGINT codec (read_id only — subject side is always VARCHAR here).
+	std::vector<std::string> emit_read_ids(count);
+	std::vector<std::string> emit_references(count);
+	std::vector<std::string> emit_mate_references(count);
+
 	for (idx_t i = 0; i < count; ++i) {
 		const idx_t j = offset + i;
 		const bool aligned = batch.aligned[j] != 0;
 		const bool reverse_strand = batch.strands[j] == 0;
 
-		read_id_data[i] = StringVector::AddString(read_id_vec, batch.read_ids[j]);
+		emit_read_ids[i] = batch.read_ids[j];
 
 		uint16_t flags = 0;
 		if (is_paired) {
@@ -161,7 +188,7 @@ inline void OutputSortMeRNASamBatch(DataChunk &output, const miint::SortMeRNARes
 		flags_data[i] = flags;
 
 		if (aligned) {
-			reference_data[i] = StringVector::AddString(reference_vec, batch.ref_names[j]);
+			emit_references[i] = batch.ref_names[j];
 			position_data[i] = batch.ref_starts[j];
 			// sortmerna's ref_end is 1-based inclusive; the SAM schema uses
 			// 1-based half-open stop_position (matches bowtie2/minimap2
@@ -169,7 +196,7 @@ inline void OutputSortMeRNASamBatch(DataChunk &output, const miint::SortMeRNARes
 			stop_position_data[i] = batch.ref_ends[j] + 1;
 			cigar_data[i] = StringVector::AddString(cigar_vec, batch.cigars[j]);
 		} else {
-			reference_data[i] = StringVector::AddString(reference_vec, "*");
+			emit_references[i] = "*";
 			position_data[i] = 0;
 			stop_position_data[i] = 0;
 			cigar_data[i] = StringVector::AddString(cigar_vec, "*");
@@ -183,17 +210,19 @@ inline void OutputSortMeRNASamBatch(DataChunk &output, const miint::SortMeRNARes
 			const idx_t mate_j = j ^ 1;
 			const bool mate_aligned = batch.aligned[mate_j] != 0;
 			if (aligned && mate_aligned && batch.ref_names[j] == batch.ref_names[mate_j]) {
-				mate_reference_data[i] = StringVector::AddString(mate_reference_vec, "=");
+				// VARCHAR-only subject side (see helper docstring), so `=`
+				// passes through verbatim — no BIGINT resolution needed.
+				emit_mate_references[i] = "=";
 				mate_position_data[i] = batch.ref_starts[mate_j];
 			} else if (mate_aligned) {
-				mate_reference_data[i] = StringVector::AddString(mate_reference_vec, batch.ref_names[mate_j]);
+				emit_mate_references[i] = batch.ref_names[mate_j];
 				mate_position_data[i] = batch.ref_starts[mate_j];
 			} else {
-				mate_reference_data[i] = StringVector::AddString(mate_reference_vec, "*");
+				emit_mate_references[i] = "*";
 				mate_position_data[i] = 0;
 			}
 		} else {
-			mate_reference_data[i] = StringVector::AddString(mate_reference_vec, "*");
+			emit_mate_references[i] = "*";
 			mate_position_data[i] = 0;
 		}
 		template_length_data[i] = 0;
@@ -208,6 +237,11 @@ inline void OutputSortMeRNASamBatch(DataChunk &output, const miint::SortMeRNARes
 		// XS/XN/XM/XO/XG/YT/MD tags nor minimap2's SA chain; they were marked
 		// NULL via SetAllInvalid(count) above.
 	}
+
+	EmitIdColumnFromStrings(read_id_vec, emit_read_ids, 0, count, query_id_type);
+	EmitIdColumnFromStrings(reference_vec, emit_references, 0, count, subject_id_type);
+	EmitIdColumnFromStrings(mate_reference_vec, emit_mate_references, 0, count, subject_id_type);
+
 	output.SetCardinality(count);
 }
 
