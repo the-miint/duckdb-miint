@@ -332,8 +332,20 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 			} // Lock released before I/O or warning output
 
 			if (all_claimed) {
-				// Print skipped-runs warning exactly once across all threads
-				if (!global_state.skipped_warned.exchange(true, std::memory_order_acq_rel)) {
+				// Only emit the summary once every claimed run has been finalized.
+				// "next_run_idx exhausted" alone is not sufficient: other workers
+				// may still be processing runs they claimed earlier, and a failure
+				// on one of those would append to skipped_runs *after* this thread
+				// snapshotted the list — producing a stale summary followed by an
+				// orphan per-run warning. The acquire load pairs with the release
+				// fetch_add on runs_completed in the failure paths below; once we
+				// observe total_runs, all skipped_runs.push_back's are visible.
+				//
+				// Workers that lose this check just return empty; the worker that
+				// posts the final fetch_add will be the one to come back through
+				// here, pass the gate, and emit the (now complete) summary.
+				if (global_state.runs_completed.load(std::memory_order_acquire) == global_state.total_runs &&
+				    !global_state.skipped_warned.exchange(true, std::memory_order_acq_rel)) {
 					// Build the message under skipped_lock, then drop the lock
 					// before EmitWarning acquires LogManager::lock. Avoids
 					// establishing a skipped_lock → LogManager::lock ordering
@@ -382,7 +394,9 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 						global_state.skipped_runs.push_back(run.run_accession);
 					}
 					global_state.bytes_completed.fetch_add(run.total_bytes, std::memory_order_relaxed);
-					global_state.runs_completed.fetch_add(1, std::memory_order_relaxed);
+					// release: publishes skipped_runs.push_back above to the summary
+					// thread's acquire load on runs_completed (see all_claimed branch).
+					global_state.runs_completed.fetch_add(1, std::memory_order_release);
 					local_state.has_run = false;
 					continue;
 				}
@@ -421,7 +435,9 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 				global_state.skipped_runs.push_back(run.run_accession);
 			}
 			global_state.bytes_completed.fetch_add(run.total_bytes, std::memory_order_relaxed);
-			global_state.runs_completed.fetch_add(1, std::memory_order_relaxed);
+			// release: publishes skipped_runs.push_back above to the summary
+			// thread's acquire load on runs_completed (see all_claimed branch).
+			global_state.runs_completed.fetch_add(1, std::memory_order_release);
 			local_state.has_run = false;
 			continue;
 		}
