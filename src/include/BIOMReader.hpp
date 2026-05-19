@@ -24,7 +24,6 @@ namespace miint {
 //! closed under the lock.
 extern std::mutex g_hdf5_mutex;
 
-
 /* datasets defined by the BIOM 2.x spec */
 static constexpr const char *OBS_INDPTR = "/observation/matrix/indptr";
 static constexpr const char *OBS_INDICES = "/observation/matrix/indices";

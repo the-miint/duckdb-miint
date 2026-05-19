@@ -36,7 +36,7 @@ public:
 	};
 
 	struct GlobalState : public GlobalTableFunctionState {
-		mutex lock;                            // Guards current_file_idx for the work-claim cursor
+		mutex lock; // Guards current_file_idx for the work-claim cursor
 		// HDF5 serialization lives in miint::g_hdf5_mutex (BIOMReader.hpp) so it
 		// covers cross-query races; a per-state mutex only serialized within
 		// one read_biom() instance and missed the segfault path from issue #72.
