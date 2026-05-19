@@ -66,7 +66,12 @@ inline void ExtractIdColumnAsStrings(DataChunk &chunk, idx_t col_idx, const Logi
 				out_nulls[i] = true;
 				continue;
 			}
-			out_values[i] = miint::FormatIdFromInt64(data[idx]);
+			// Absolute `::miint::` rather than `miint::` — this header is included
+			// from translation units that also reference duckdb::miint (e.g.
+			// gpl_boundary callers like align_bowtie2_daemon_common.cpp). Without
+			// the absolute qualifier, the unqualified lookup resolves to
+			// duckdb::miint first and fails to find the codec functions there.
+			out_values[i] = ::miint::FormatIdFromInt64(data[idx]);
 		}
 	} else {
 		throw InternalException("ExtractIdColumnAsStrings: unsupported id type '%s' (must be VARCHAR or BIGINT)",
@@ -101,7 +106,7 @@ inline void EmitIdColumnFromStrings(Vector &out, const std::vector<std::string> 
 		for (idx_t j = 0; j < count; j++) {
 			const auto &s = ids[offset + j];
 			try {
-				auto parsed = miint::ParseIdAsInt64(s);
+				auto parsed = ::miint::ParseIdAsInt64(s);
 				if (parsed.has_value()) {
 					out_data[j] = *parsed;
 					validity.SetValid(j);

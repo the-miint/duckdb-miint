@@ -1,8 +1,14 @@
 #include "align_bowtie2_daemon_common.hpp"
 
+#include "align_common.hpp"
 #include "fastq_encoder.hpp"
 #include "gpl_boundary/arrow_ipc.hpp"
 #include "gpl_boundary/session.hpp"
+// This translation unit references both `::miint::` (codec, pulled in via
+// align_common.hpp → id_column_utils.hpp → id_column_codec.hpp) and
+// `duckdb::miint::gpl_boundary` (via the `gb` alias below). Direct codec
+// calls inside the `duckdb` namespace must use the absolute `::miint::`
+// qualifier to avoid resolving to duckdb::miint first.
 
 #include "nanoarrow/nanoarrow.h"
 
@@ -326,29 +332,15 @@ const char *const kOutputColumnFormats[kNumOutputColumns] = {
     "u", // tag_sa           — Utf8
 };
 
-void PopulateOutputSchema(std::vector<std::string> &names, std::vector<LogicalType> &types) {
-	names = {kOutputColumnNames, kOutputColumnNames + kNumOutputColumns};
-	types = {LogicalType::VARCHAR,   // read_id
-	         LogicalType::USMALLINT, // flags
-	         LogicalType::VARCHAR,   // reference
-	         LogicalType::BIGINT,    // position
-	         LogicalType::BIGINT,    // stop_position
-	         LogicalType::UTINYINT,  // mapq
-	         LogicalType::VARCHAR,   // cigar
-	         LogicalType::VARCHAR,   // mate_reference
-	         LogicalType::BIGINT,    // mate_position
-	         LogicalType::BIGINT,    // template_length
-	         LogicalType::BIGINT,    // tag_as   — Int32 on wire, widened
-	         LogicalType::BIGINT,    // tag_xs   — Int32 on wire, widened
-	         LogicalType::BIGINT,    // tag_ys   — Int32 on wire, widened
-	         LogicalType::BIGINT,    // tag_xn   — Int32 on wire, widened
-	         LogicalType::BIGINT,    // tag_xm   — Int32 on wire, widened
-	         LogicalType::BIGINT,    // tag_xo   — Int32 on wire, widened
-	         LogicalType::BIGINT,    // tag_xg   — Int32 on wire, widened
-	         LogicalType::BIGINT,    // tag_nm   — Int32 on wire, widened
-	         LogicalType::VARCHAR,   // tag_yt
-	         LogicalType::VARCHAR,   // tag_md
-	         LogicalType::VARCHAR};  // tag_sa
+void PopulateOutputSchema(std::vector<std::string> &names, std::vector<LogicalType> &types,
+                          const LogicalType &query_id_type, const LogicalType &subject_id_type) {
+	// Delegate to the canonical helpers in align_common.hpp so the bowtie2
+	// daemon path doesn't carry a second copy of the alignment schema. The
+	// names match `kOutputColumnNames` (which stays as the wire-validation
+	// truth source for ValidateOutputSchema); GetAlignmentOutputNames returns
+	// the same 21 names in the same order.
+	names = GetAlignmentOutputNames();
+	types = GetAlignmentOutputTypes(query_id_type, subject_id_type);
 }
 
 void DecodeListQualToPhred33(const Value &v, const char *col_name, const std::string &query_table, std::string &out,
@@ -579,9 +571,61 @@ void emit_string(Vector &out, idx_t out_row, const ArrowArray &col, idx_t logica
 	FlatVector::GetData<string_t>(out)[out_row] = StringVector::AddString(out, data + start, static_cast<idx_t>(len));
 }
 
+// Read an Arrow utf8 cell into an owned std::string. Used by the BIGINT id-
+// column path where the value also needs to be passed to the codec parser
+// (which takes `const std::string&`) and, for mate_reference, possibly
+// substituted in place during "=" resolution.
+std::string read_arrow_string_owned(const ArrowArray &col, idx_t logical_index) {
+	const auto *offsets = static_cast<const int32_t *>(col.buffers[1]);
+	const auto *data = static_cast<const char *>(col.buffers[2]);
+	const idx_t a = static_cast<idx_t>(col.offset) + logical_index;
+	const int32_t start = offsets[a];
+	const int32_t end = offsets[a + 1];
+	const int32_t len = end - start;
+	if (len < 0) {
+		throw IOException("align_bowtie2: corrupt utf8 offsets at row %lld (start=%d end=%d)",
+		                  static_cast<long long>(a), start, end);
+	}
+	return std::string(data + start, static_cast<size_t>(len));
+}
+
+// Emit one id-column cell into a flat output Vector. Branches on id_type:
+// VARCHAR writes the string verbatim; BIGINT parses via the codec. Caller
+// is responsible for SAM `=` resolution before invoking (substitute the
+// reference value into `s` for mate_reference rows where s == "=" and the
+// subject is BIGINT).
+void emit_id_cell(Vector &v, idx_t out_row, const std::string &s, const LogicalType &id_type) {
+	if (id_type.id() == LogicalTypeId::BIGINT) {
+		try {
+			auto parsed = ::miint::ParseIdAsInt64(s);
+			auto out_data = FlatVector::GetData<int64_t>(v);
+			auto &validity = FlatVector::Validity(v);
+			if (parsed.has_value()) {
+				out_data[out_row] = *parsed;
+				validity.SetValid(out_row);
+			} else {
+				validity.SetInvalid(out_row);
+			}
+		} catch (const std::exception &e) {
+			throw InvalidInputException("align_bowtie2: cannot parse id value '%s' as BIGINT: %s", s, e.what());
+		}
+		return;
+	}
+	// VARCHAR
+	FlatVector::GetData<string_t>(v)[out_row] = StringVector::AddString(v, s);
+}
+
 } // namespace
 
-void EmitChunkRows(DataChunk &output, idx_t to_emit, idx_t row_start, const ArrowArray &batch) {
+void EmitChunkRows(DataChunk &output, idx_t to_emit, idx_t row_start, const ArrowArray &batch,
+                   const LogicalType &query_id_type, const LogicalType &subject_id_type) {
+	if (!IsAllowedIdType(query_id_type) || !IsAllowedIdType(subject_id_type)) {
+		throw InternalException("align_bowtie2 EmitChunkRows: id types must be VARCHAR or BIGINT (got query=%s, "
+		                        "subject=%s)",
+		                        query_id_type.ToString(), subject_id_type.ToString());
+	}
+	const bool query_is_bigint = query_id_type.id() == LogicalTypeId::BIGINT;
+	const bool subject_is_bigint = subject_id_type.id() == LogicalTypeId::BIGINT;
 	auto &v_read_id = output.data[0];
 	auto *out_flags = FlatVector::GetData<uint16_t>(output.data[1]);
 	auto &v_reference = output.data[2];
@@ -641,14 +685,36 @@ void EmitChunkRows(DataChunk &output, idx_t to_emit, idx_t row_start, const Arro
 	for (idx_t i = 0; i < to_emit; ++i) {
 		const idx_t li = row_start + i;
 
-		emit_string(v_read_id, i, col_read_id, li);
+		// read_id: dispatch on query id type.
+		if (query_is_bigint) {
+			emit_id_cell(v_read_id, i, read_arrow_string_owned(col_read_id, li), query_id_type);
+		} else {
+			emit_string(v_read_id, i, col_read_id, li);
+		}
 		out_flags[i] = read_fixed<uint16_t>(col_flags, li);
-		emit_string(v_reference, i, col_reference, li);
+
+		// reference + mate_reference: dispatch on subject id type. For BIGINT
+		// subjects, cache the reference string so mate_reference "=" can
+		// resolve into it without re-reading the Arrow cell.
+		if (subject_is_bigint) {
+			const std::string ref_str = read_arrow_string_owned(col_reference, li);
+			emit_id_cell(v_reference, i, ref_str, subject_id_type);
+			std::string mr_str = read_arrow_string_owned(col_mate_ref, li);
+			if (mr_str == "=") {
+				// SAM "=" sentinel: mate maps to the same reference as the
+				// primary alignment. The literal "=" has no BIGINT encoding,
+				// so substitute the row's reference value before parsing.
+				mr_str = ref_str;
+			}
+			emit_id_cell(v_mate_ref, i, mr_str, subject_id_type);
+		} else {
+			emit_string(v_reference, i, col_reference, li);
+			emit_string(v_mate_ref, i, col_mate_ref, li);
+		}
 		out_position[i] = read_fixed<int64_t>(col_position, li);
 		out_stop[i] = read_fixed<int64_t>(col_stop, li);
 		out_mapq[i] = read_fixed<uint8_t>(col_mapq, li);
 		emit_string(v_cigar, i, col_cigar, li);
-		emit_string(v_mate_ref, i, col_mate_ref, li);
 		out_mate_pos[i] = read_fixed<int64_t>(col_mate_pos, li);
 		out_tlen[i] = read_fixed<int64_t>(col_tlen, li);
 

@@ -42,8 +42,13 @@ extern const char *const kOutputColumnNames[kNumOutputColumns];
 // `read_fixed<T>` with the wrong width.
 extern const char *const kOutputColumnFormats[kNumOutputColumns];
 
-// Populate the 21-column output schema (matching the daemon's wire schema).
-void PopulateOutputSchema(std::vector<std::string> &names, std::vector<LogicalType> &types);
+// Populate the 21-column output schema. `query_id_type` drives `read_id`;
+// `subject_id_type` drives `reference` and `mate_reference`. Both must be
+// VARCHAR or BIGINT — no defaults so every caller (align_bowtie2 +
+// align_bowtie2_sharded) explicitly commits to a type, matching the
+// no-default convention from PR 1 of the id-codec work.
+void PopulateOutputSchema(std::vector<std::string> &names, std::vector<LogicalType> &types,
+                          const LogicalType &query_id_type, const LogicalType &subject_id_type);
 
 // Validate that an Arrow IPC schema returned by the daemon matches the
 // expected 21 named columns. Throws IOException on drift.
@@ -103,7 +108,16 @@ void DecodeListQualToPhred33(const Value &v, const char *col_name, const std::st
 //
 // Tag widening (Int32 → BIGINT) and nullable-Utf8 decoding match the
 // daemon's wire schema.
-void EmitChunkRows(DataChunk &output, idx_t to_emit, idx_t row_start, const ArrowArray &batch);
+// Emit one DuckDB chunk's worth of rows from a decoded Arrow batch into
+// `output`. `query_id_type` drives `read_id`; `subject_id_type` drives
+// `reference` and `mate_reference`. Both must be VARCHAR or BIGINT. For
+// BIGINT subjects, the SAM "=" mate-reference sentinel is resolved to the
+// row's reference value before invoking the codec (the literal "=" has no
+// BIGINT encoding); VARCHAR output preserves "=" verbatim, matching
+// pre-existing user-observable behavior. No defaults — every caller must
+// explicitly commit to id types.
+void EmitChunkRows(DataChunk &output, idx_t to_emit, idx_t row_start, const ArrowArray &batch,
+                   const LogicalType &query_id_type, const LogicalType &subject_id_type);
 
 // =============================================================================
 // Config-JSON builder + parameter validation/mapping for the daemon's
