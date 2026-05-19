@@ -39,12 +39,15 @@ unique_ptr<FunctionData> ReadBIOMTableFunction::Bind(ClientContext &context, Tab
 		throw InvalidInputException("read_biom: first argument must be VARCHAR or VARCHAR[]");
 	}
 
-	// Validate all files exist and are BIOM (skip remote paths - validated at read time)
+	// Validate all files exist and are BIOM (skip remote paths - validated at read time).
+	// IsBIOM is a HDF5 entry point — serialize against the process-wide HDF5 mutex
+	// since Bind can run concurrently when multiple queries reach the planner at once.
 	for (const auto &path : biom_paths) {
 		if (!miint::RemoteFileHelper::IsRemotePath(path)) {
 			if (!fs.FileExists(path)) {
 				throw IOException("File not found: " + path);
 			}
+			std::lock_guard<std::mutex> hdf5_guard(miint::g_hdf5_mutex);
 			if (!miint::BIOMReader::IsBIOM(path)) {
 				throw IOException("File is not a BIOM file: " + path);
 			}

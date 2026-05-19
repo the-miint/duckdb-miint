@@ -181,3 +181,23 @@ S3	7.0
 S4	6.0
 S5	10.0
 S6	14.0
+
+# Regression test for issue #72: read_biom must not segfault when two
+# concurrent reads target the same BIOM file. Two views over the same file,
+# UNION'd, force the planner to schedule both scans before consuming either.
+# Without the process-wide g_hdf5_mutex (see BIOMReader.hpp) the two scans
+# race on HDF5's global library state and segfault. UNION (not UNION ALL)
+# also dedups, so the count over file1's 5 rows is 5.
+statement ok
+SET preserve_insertion_order = false;
+
+statement ok
+CREATE OR REPLACE VIEW view_a AS FROM read_biom('data/biom/file1.biom');
+
+statement ok
+CREATE OR REPLACE VIEW view_b AS FROM read_biom('data/biom/file1.biom');
+
+query I
+SELECT count(*) FROM (SELECT * FROM view_a UNION SELECT * FROM view_b);
+----
+5

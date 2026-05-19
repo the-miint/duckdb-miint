@@ -4,6 +4,10 @@
 
 namespace miint {
 
+// Storage for the process-wide HDF5 mutex declared in BIOMReader.hpp.
+// See the header for the contract and rationale.
+std::mutex g_hdf5_mutex;
+
 BIOMReader::BIOMReader(const std::string &path) {
 	// Check if file exists and get size
 	struct stat st;

@@ -3,10 +3,26 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <mutex>
 #include "BIOMTable.hpp"
 #include <hdf5.h>
 
 namespace miint {
+
+//! Process-wide mutex serializing every HDF5 call from miint.
+//!
+//! HDF5 (vcpkg build: features cpp/zlib/szip, no `threadsafe`) has global
+//! library state — initialization, type system, error stack, dataset caches
+//! — that races under concurrent access. Two read_biom() table-function
+//! instances each have their own GlobalState, so a per-state mutex does
+//! NOT serialize cross-instance calls. Mirrors `g_mafft_mutex` in
+//! MafftAligner.cpp.
+//!
+//! Acquire around every HDF5 entry point: H5Fopen, H5Dopen2, H5Dread,
+//! H5Fclose, H5Dclose, plus the BIOMReader / BIOMTable scope that drives
+//! them — including the BIOMReader destructor so file/dataset handles are
+//! closed under the lock.
+extern std::mutex g_hdf5_mutex;
 
 /* datasets defined by the BIOM 2.x spec */
 static constexpr const char *OBS_INDPTR = "/observation/matrix/indptr";
