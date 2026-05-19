@@ -1,0 +1,211 @@
+# name: test/sql/align_minimap2_sharded_bigint.test
+# description: align_minimap2_sharded accepts BIGINT read_id columns (PR A).
+# group: [sql]
+
+#   Sharded alignment requires prebuilt .mmi indexes; subject names in those
+#   indexes are opaque bytes (same as the standard-path index_path mode), so
+#   the output `reference` and `mate_reference` columns stay VARCHAR. Only the
+#   query side (read_id and read_to_shard.read_id) participates in BIGINT
+#   type mirroring.
+
+require miint
+
+# ---------------------------------------------------------------------------
+# Setup: BIGINT-keyed subject tables, one per shard. save_minimap2_index
+# accepts BIGINT (since PR #90) and stringifies subject names into the .mmi.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE shard_a_subjects_bigint AS SELECT * FROM (VALUES
+    (2001::BIGINT, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE shard_b_subjects_bigint AS SELECT * FROM (VALUES
+    (2002::BIGINT, 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCAAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAA')
+) AS t(read_id, sequence1);
+
+query I
+SELECT success FROM save_minimap2_index('shard_a_subjects_bigint', 'data/shards/shard_a_bigint.mmi', k := 5);
+----
+true
+
+query I
+SELECT success FROM save_minimap2_index('shard_b_subjects_bigint', 'data/shards/shard_b_bigint.mmi', k := 5);
+----
+true
+
+# ---------------------------------------------------------------------------
+# BIGINT query + BIGINT read_to_shard. Both share the type so the JOIN inside
+# ReadBatchByIds type-checks naturally.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE queries_bigint AS SELECT * FROM (VALUES
+    (1001::BIGINT, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    (1002::BIGINT, 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE read_to_shard_bigint AS SELECT * FROM (VALUES
+    (1001::BIGINT, 'shard_a_bigint'),
+    (1002::BIGINT, 'shard_b_bigint')
+) AS t(read_id, shard_name);
+
+# Happy path: BIGINT read_id propagates through ReadShardIds, ReadBatchByIds,
+# and the sharded emit path. Reference stays VARCHAR (prebuilt .mmi).
+query II
+SELECT read_id, reference
+FROM align_minimap2_sharded('queries_bigint',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard_bigint',
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+1001	2001
+1002	2002
+
+# Output type contract: read_id mirrors the query column, reference and
+# mate_reference stay VARCHAR (prebuilt-index opaque-bytes default).
+query III
+SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
+FROM align_minimap2_sharded('queries_bigint',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard_bigint',
+    max_secondary := 0)
+LIMIT 1;
+----
+BIGINT	VARCHAR	VARCHAR
+
+# Unmapped reads are still filtered out as in the VARCHAR path.
+query I
+SELECT COUNT(*) FROM align_minimap2_sharded('queries_bigint',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard_bigint',
+    max_secondary := 0)
+WHERE flags & 4 != 0;
+----
+0
+
+# ---------------------------------------------------------------------------
+# Mixed-type rejection: read_to_shard.read_id must match query.read_id type.
+# ValidateReadToShardSchema enforces strict equality so the downstream JOIN
+# inside ReadBatchByIds doesn't rely on implicit casts.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE read_to_shard_varchar AS
+SELECT CAST(read_id AS VARCHAR) AS read_id, shard_name FROM read_to_shard_bigint;
+
+statement error
+SELECT * FROM align_minimap2_sharded('queries_bigint',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard_varchar');
+----
+must match the query table's read_id type
+
+# And the reverse: VARCHAR query + BIGINT read_to_shard.
+statement ok
+CREATE TABLE queries_varchar AS
+SELECT CAST(read_id AS VARCHAR) AS read_id, sequence1 FROM queries_bigint;
+
+statement error
+SELECT * FROM align_minimap2_sharded('queries_varchar',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard_bigint');
+----
+must match the query table's read_id type
+
+# ---------------------------------------------------------------------------
+# Unsupported numeric types: INTEGER, HUGEINT, DOUBLE rejected at bind.
+# Covers both the query-side (ValidateSequenceTableSchema) and the
+# read_to_shard-side (ValidateReadToShardSchema) error paths.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE queries_integer (read_id INTEGER, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM align_minimap2_sharded('queries_integer',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard_bigint');
+----
+must be VARCHAR or BIGINT
+
+statement ok
+CREATE TABLE queries_hugeint (read_id HUGEINT, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM align_minimap2_sharded('queries_hugeint',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard_bigint');
+----
+must be VARCHAR or BIGINT
+
+statement ok
+CREATE TABLE queries_double (read_id DOUBLE, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM align_minimap2_sharded('queries_double',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard_bigint');
+----
+must be VARCHAR or BIGINT
+
+# A HUGEINT read_to_shard against a BIGINT query is rejected at the
+# read_to_shard validator with the VARCHAR-or-BIGINT message.
+statement ok
+CREATE TABLE read_to_shard_hugeint (read_id HUGEINT, shard_name VARCHAR);
+
+statement error
+SELECT * FROM align_minimap2_sharded('queries_bigint',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard_hugeint');
+----
+must be VARCHAR or BIGINT
+
+# ---------------------------------------------------------------------------
+# NULL read_id rows skipped — same convention as VARCHAR sharded mode.
+# A read with no shard mapping never enters the pipeline; a read with a NULL
+# shard_name is rejected at the shard-counts step (pre-existing behavior).
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE queries_bigint_with_null (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO queries_bigint_with_null VALUES
+    (1001, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    (NULL, 'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG');
+
+# The NULL-keyed read has no shard mapping, so it never reaches the aligner.
+# The mapped read still produces output.
+query II
+SELECT read_id, reference
+FROM align_minimap2_sharded('queries_bigint_with_null',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard_bigint',
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+1001	2001
+
+# ---------------------------------------------------------------------------
+# Empty BIGINT query table — no rows, no crash. Sharded mode walks the
+# read_to_shard table for shard names, so empty-query just yields zero output
+# without bind error.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE queries_bigint_empty AS
+SELECT 0::BIGINT AS read_id, 'A' AS sequence1 WHERE FALSE;
+
+query I
+SELECT COUNT(*) FROM align_minimap2_sharded('queries_bigint_empty',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'read_to_shard_bigint',
+    max_secondary := 0);
+----
+0

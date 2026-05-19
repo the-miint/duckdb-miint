@@ -233,8 +233,15 @@ inline void FilterMappedOnly(miint::SAMRecordBatch &batch) {
 // Sharded alignment utilities
 // =============================================================================
 
-// Validate that read_to_shard table has required columns (read_id VARCHAR, shard_name VARCHAR)
-inline void ValidateReadToShardSchema(ClientContext &context, const std::string &table_name) {
+// Validate that the read_to_shard table has the required columns.
+//   - `shard_name` is always VARCHAR.
+//   - `read_id` defaults to VARCHAR (back-compat). When `expected_read_id_type`
+//     is non-INVALID, the column must match it exactly — supports BIGINT once
+//     the caller has captured the query table's id type. The strict equality
+//     check keeps the downstream JOIN inside ReadBatchByIds well-typed without
+//     relying on implicit casts.
+inline void ValidateReadToShardSchema(ClientContext &context, const std::string &table_name,
+                                      const LogicalType &expected_read_id_type = LogicalType(LogicalTypeId::INVALID)) {
 	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
 	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
 
@@ -274,8 +281,20 @@ inline void ValidateReadToShardSchema(ClientContext &context, const std::string 
 	if (it_read_id == name_to_idx.end()) {
 		throw BinderException("read_to_shard table '%s' missing required column 'read_id'", table_name);
 	}
-	if (col_types[it_read_id->second].id() != LogicalTypeId::VARCHAR) {
-		throw BinderException("Column 'read_id' in read_to_shard table '%s' must be VARCHAR", table_name);
+	const auto &actual_id_type = col_types[it_read_id->second];
+	if (expected_read_id_type.id() == LogicalTypeId::INVALID) {
+		if (actual_id_type.id() != LogicalTypeId::VARCHAR) {
+			throw BinderException("Column 'read_id' in read_to_shard table '%s' must be VARCHAR", table_name);
+		}
+	} else {
+		if (actual_id_type.id() != LogicalTypeId::VARCHAR && actual_id_type.id() != LogicalTypeId::BIGINT) {
+			throw BinderException("Column 'read_id' in read_to_shard table '%s' must be VARCHAR or BIGINT", table_name);
+		}
+		if (actual_id_type.id() != expected_read_id_type.id()) {
+			throw BinderException("Column 'read_id' in read_to_shard table '%s' is %s but must match the query "
+			                      "table's read_id type (%s)",
+			                      table_name, actual_id_type.ToString(), expected_read_id_type.ToString());
+		}
 	}
 
 	auto it_shard = name_to_idx.find("shard_name");

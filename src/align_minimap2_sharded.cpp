@@ -74,14 +74,29 @@ unique_ptr<FunctionData> AlignMinimap2ShardedTableFunction::Bind(ClientContext &
 		throw BinderException("Shard directory does not exist: %s", data->shard_directory);
 	}
 
-	// Validate query table/view exists. BIGINT read_id is NOT supported in
-	// sharded mode (PR 1): ReadShardIds + ReadBatchByIds + the read_to_shard
-	// temp table still assume VARCHAR. Leaving allow_bigint=false rejects
-	// BIGINT at bind with a clear "must be VARCHAR" error.
-	data->query_schema = ValidateSequenceTableSchema(context, data->query_table);
+	// Validate query table/view exists. Sharded mode accepts VARCHAR or BIGINT
+	// for the query side; the captured id_type drives the output `read_id`
+	// column type and propagates through ReadShardIds / ReadBatchByIds.
+	data->query_schema = ValidateSequenceTableSchema(context, data->query_table, /*allow_bigint=*/true);
 
-	// Validate read_to_shard table schema
-	ValidateReadToShardSchema(context, data->read_to_shard_table);
+	// Validate read_to_shard table schema. Its `read_id` column must share the
+	// query table's id type — the strict equality check prevents the
+	// downstream JOIN inside ReadBatchByIds from relying on implicit casts.
+	ValidateReadToShardSchema(context, data->read_to_shard_table, data->query_schema.id_type);
+
+	// Subject side: sharded mode always uses prebuilt .mmi indexes whose
+	// subject names are opaque bytes. Output `reference` and `mate_reference`
+	// default to VARCHAR — same contract as align_minimap2(index_path:=...).
+	data->subject_id_type = LogicalType::VARCHAR;
+
+	// Rebuild output column types with the captured id types. `read_id`
+	// mirrors the query side; `reference` / `mate_reference` mirror the
+	// subject side (always VARCHAR for prebuilt indexes). The Data() ctor's
+	// VARCHAR/VARCHAR placeholder is overwritten here before any caller
+	// observes data->types. Must precede the optional shard_name append
+	// below — GetAlignmentOutputTypes returns only the 21 alignment columns,
+	// so moving this call after the shard_name emplace would clobber it.
+	data->types = GetAlignmentOutputTypes(data->query_schema.id_type, data->subject_id_type);
 
 	// Parse minimap2 config parameters (preset, max_secondary, eqx)
 	// Always warn about k/w since we use pre-built indexes
@@ -271,7 +286,8 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 		SHARD_DBG(gstate, "ClaimWork: MATERIALIZING IDs for shard %zu '%s'", static_cast<size_t>(shard_idx),
 		          shard_info.name.c_str());
 		auto ids_start = std::chrono::steady_clock::now();
-		auto shard_read_ids = ReadShardIds(context, bind_data.read_to_shard_table, shard_info.name);
+		auto shard_read_ids =
+		    ReadShardIds(context, bind_data.read_to_shard_table, shard_info.name, bind_data.query_schema.id_type);
 		auto ids_ms =
 		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - ids_start).count();
 		idx_t id_count = shard_read_ids.size();
@@ -367,11 +383,13 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 		idx_t available = local_state.result_buffer.size() - local_state.buffer_offset;
 
 		if (available > 0) {
-			// Output up to STANDARD_VECTOR_SIZE results.
-			// Sharded mode is VARCHAR-only in PR 1 — see Data() ctor comment.
+			// Output up to STANDARD_VECTOR_SIZE results. Id-column types come
+			// from the bind data: query side may be VARCHAR or BIGINT; subject
+			// side is always VARCHAR for sharded mode (prebuilt .mmi indexes
+			// store subject names as opaque bytes).
 			idx_t output_count = std::min(available, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
 			OutputSAMRecordBatch(output, local_state.result_buffer, local_state.buffer_offset, output_count,
-			                     LogicalType::VARCHAR, LogicalType::VARCHAR);
+			                     bind_data.query_schema.id_type, bind_data.subject_id_type);
 			if (bind_data.include_shard_name) {
 				auto shard_col_idx = output.ColumnCount() - 1;
 				auto &shard_vec = output.data[shard_col_idx];

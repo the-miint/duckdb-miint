@@ -54,8 +54,13 @@ bool ReadQueryBatch(ClientContext &context, const std::string &table_name, const
 
 // Read all read_ids for a shard from the read_to_shard table, ordered.
 // Returns the IDs as a vector of strings for use with ReadBatchByIds.
+// `id_type` is the storage type of the read_to_shard table's `read_id` column
+// (VARCHAR or BIGINT). For BIGINT, integer ids are stringified via the codec
+// so the carrier contract (vector<string>) remains uniform downstream.
+// No default — every callsite must commit to a type so a future BIGINT-
+// extending caller can't slip past type capture by relying on a default.
 std::vector<std::string> ReadShardIds(ClientContext &context, const std::string &read_to_shard_table,
-                                      const std::string &shard_name);
+                                      const std::string &shard_name, const LogicalType &id_type);
 
 // Read sequences for a known set of IDs by creating a temp table and joining.
 // Reads ids[offset..offset+count] from the pre-materialized ID list,
