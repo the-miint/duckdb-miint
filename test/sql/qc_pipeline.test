@@ -1,0 +1,155 @@
+# name: test/sql/qc_pipeline.test
+# description: End-to-end QC pipeline on a synthetic FASTQ with planted contamination
+# group: [sql]
+
+require miint
+
+# -----------------------------------------------------------------------------
+# Test fixture: data/fastq/qc_synthetic.fq — 30 reads in 6 categories of 5:
+#
+#   clean_*    30bp ACGT pattern, Q40 throughout            → 5 pass, 0 trimmed
+#   adapter_*  17bp prefix + AGATCGGAAGAGC, Q40             → 5 pass, 13bp trimmed each
+#   polyg_*    20bp prefix + 10×G, 20×Q40 + 10×Q2           → 5 pass, 10bp trimmed each
+#   lowq_*     25×Q40 + 5×Q5 tail                           → 5 pass, 3bp trimmed each
+#   short_*    4bp prefix + AGATCGGAAGAGC (17bp total), Q40 → 5 FAIL length, 13bp trimmed each
+#   n_*        4bp + 12×N + 14bp (12 N's > max_n=5), Q40   → 5 FAIL n_base, 0 trimmed
+#
+# Expected after canonical pipeline (adapter → polyG → quality_3p → filter):
+#   30 total, 20 passed, 10 failed
+#   bases_trimmed = 13*5 (adapter) + 10*5 (polyG) + 3*5 (lowq) + 13*5 (short) = 195
+# -----------------------------------------------------------------------------
+
+# Per-row trim accounting — verifies each contamination type is handled
+query II
+WITH p AS (
+    SELECT
+        read_id,
+        trim_adapters(sequence1, qual1, 'AGATCGGAAGAGC')        AS t1,
+        trim_polyg((t1).sequence, (t1).quality)                 AS t2,
+        trim_quality_3p((t2).sequence, (t2).quality)            AS t3
+    FROM read_fastx('data/fastq/qc_synthetic.fq')
+)
+SELECT
+    CASE
+        WHEN read_id LIKE 'clean%'   THEN 'clean'
+        WHEN read_id LIKE 'adapter%' THEN 'adapter'
+        WHEN read_id LIKE 'polyg%'   THEN 'polyg'
+        WHEN read_id LIKE 'lowq%'    THEN 'lowq'
+        WHEN read_id LIKE 'short%'   THEN 'short'
+        WHEN read_id LIKE 'n_%'      THEN 'n_heavy'
+    END AS category,
+    SUM((t1).trimmed_3p + (t2).trimmed_3p + (t3).trimmed_3p) AS bases_trimmed
+FROM p
+GROUP BY category
+ORDER BY category;
+----
+adapter	65
+clean	0
+lowq	15
+n_heavy	0
+polyg	50
+short	65
+
+# Pass/fail counts by category — verifies filter behavior on each contamination
+query III
+WITH p AS (
+    SELECT
+        read_id,
+        trim_adapters(sequence1, qual1, 'AGATCGGAAGAGC')        AS t1,
+        trim_polyg((t1).sequence, (t1).quality)                 AS t2,
+        trim_quality_3p((t2).sequence, (t2).quality)            AS t3,
+        filter_read((t3).sequence, (t3).quality)                AS f
+    FROM read_fastx('data/fastq/qc_synthetic.fq')
+)
+SELECT
+    CASE
+        WHEN read_id LIKE 'clean%'   THEN 'clean'
+        WHEN read_id LIKE 'adapter%' THEN 'adapter'
+        WHEN read_id LIKE 'polyg%'   THEN 'polyg'
+        WHEN read_id LIKE 'lowq%'    THEN 'lowq'
+        WHEN read_id LIKE 'short%'   THEN 'short'
+        WHEN read_id LIKE 'n_%'      THEN 'n_heavy'
+    END AS category,
+    COUNT(*) FILTER (WHERE (f).passed) AS passed,
+    COUNT(*) FILTER (WHERE NOT (f).passed) AS failed
+FROM p
+GROUP BY category
+ORDER BY category;
+----
+adapter	5	0
+clean	5	0
+lowq	5	0
+n_heavy	0	5
+polyg	5	0
+short	0	5
+
+# Failure reasons — short reads fail "length", n-heavy reads fail "n_base"
+query II
+WITH p AS (
+    SELECT
+        read_id,
+        trim_adapters(sequence1, qual1, 'AGATCGGAAGAGC')        AS t1,
+        trim_polyg((t1).sequence, (t1).quality)                 AS t2,
+        trim_quality_3p((t2).sequence, (t2).quality)            AS t3,
+        filter_read((t3).sequence, (t3).quality)                AS f
+    FROM read_fastx('data/fastq/qc_synthetic.fq')
+)
+SELECT (f).fail_reason, COUNT(*)
+FROM p
+WHERE NOT (f).passed
+GROUP BY (f).fail_reason
+ORDER BY (f).fail_reason;
+----
+length	5
+n_base	5
+
+# Aggregate sanity: 30 total, 20 passed, 195 bases trimmed
+query III
+WITH p AS (
+    SELECT
+        trim_adapters(sequence1, qual1, 'AGATCGGAAGAGC')        AS t1,
+        trim_polyg((t1).sequence, (t1).quality)                 AS t2,
+        trim_quality_3p((t2).sequence, (t2).quality)            AS t3,
+        filter_read((t3).sequence, (t3).quality)                AS f
+    FROM read_fastx('data/fastq/qc_synthetic.fq')
+)
+SELECT
+    COUNT(*) AS total,
+    COUNT(*) FILTER (WHERE (f).passed) AS passed,
+    SUM((t1).trimmed_3p + (t2).trimmed_3p + (t3).trimmed_3p) AS bases_trimmed
+FROM p;
+----
+30	20	195
+
+# No surviving read contains the adapter as a substring — verifies adapter
+# is fully removed from passed reads
+query I
+WITH p AS (
+    SELECT
+        trim_adapters(sequence1, qual1, 'AGATCGGAAGAGC')        AS t1,
+        trim_polyg((t1).sequence, (t1).quality)                 AS t2,
+        trim_quality_3p((t2).sequence, (t2).quality)            AS t3,
+        filter_read((t3).sequence, (t3).quality)                AS f
+    FROM read_fastx('data/fastq/qc_synthetic.fq')
+)
+SELECT COUNT(*)
+FROM p
+WHERE (f).passed AND (t3).sequence LIKE '%AGATCGGAAGAGC%';
+----
+0
+
+# No surviving read has a 10-G run at its 3' end — verifies polyG removal
+query I
+WITH p AS (
+    SELECT
+        trim_adapters(sequence1, qual1, 'AGATCGGAAGAGC')        AS t1,
+        trim_polyg((t1).sequence, (t1).quality)                 AS t2,
+        trim_quality_3p((t2).sequence, (t2).quality)            AS t3,
+        filter_read((t3).sequence, (t3).quality)                AS f
+    FROM read_fastx('data/fastq/qc_synthetic.fq')
+)
+SELECT COUNT(*)
+FROM p
+WHERE (f).passed AND (t3).sequence LIKE '%GGGGGGGGGG';
+----
+0
