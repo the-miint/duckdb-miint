@@ -1,0 +1,138 @@
+# name: test/sql/qc_trim_poly.test
+# description: Tests for polyG/polyX 3'-end trimming scalars
+# group: [sql]
+
+require miint
+
+# -----------------------------------------------------------------------------
+# trim_polyg — 3' G-run trim, quality-aware by default
+# Defaults: min_len=10, max_mismatch=5, max_window_mean_q=5 (quality-aware on)
+# -----------------------------------------------------------------------------
+
+# Clean 10bp polyG tail with Q2 (typical NextSeq dark cycle) — trimmed
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_polyg('AAGGGGGGGGGG', [2,2,2,2,2,2,2,2,2,2,2,2]::UTINYINT[]) AS t)
+----
+AA	0	10
+
+# High-quality G run — NOT trimmed (quality-aware default protects gene starts)
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_polyg('AAGGGGGGGGGG', [40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[]) AS t)
+----
+AAGGGGGGGGGG	0	0
+
+# Explicit max_window_mean_q=93 disables quality-aware mode
+# (any mean Phred <= 93, so check always passes)
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_polyg('AAGGGGGGGGGG', [40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[], 10, 5, 93) AS t)
+----
+AA	0	10
+
+# Short polyG (<min_len) — no trim
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_polyg('AAGGGGGGGGG', [2,2,2,2,2,2,2,2,2,2,2]::UTINYINT[]) AS t)
+----
+AAGGGGGGGGG	0	0
+
+# Custom min_len=4 trims short polyG
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_polyg('ACGTGGGG', [2,2,2,2,2,2,2,2]::UTINYINT[], 4, 5, 93) AS t)
+----
+ACGT	0	4
+
+# No polyG present — no trim
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_polyg('ACGTACGTACGTACGT', [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[]) AS t)
+----
+ACGTACGTACGTACGT	0	0
+
+# Quality preserved in lockstep when trimming
+query I
+SELECT (t).quality
+FROM (SELECT trim_polyg('AAGGGGGGGGGG', [2,2,2,2,2,2,2,2,2,2,2,2]::UTINYINT[]) AS t)
+----
+[2, 2]
+
+# Mismatched seq/qual length throws
+statement error
+SELECT trim_polyg('AAGGGGGGGGGG', [2,2,2,2,2]::UTINYINT[])
+----
+length
+
+# NULL propagation
+query I
+SELECT trim_polyg(NULL, [2,2,2,2,2,2,2,2,2,2,2,2]::UTINYINT[]) IS NULL
+----
+true
+
+# -----------------------------------------------------------------------------
+# trim_polyx — 3' homopolymer trim, deterministic ACGT tie-break
+# Defaults: min_len=10, max_mismatch=5
+# -----------------------------------------------------------------------------
+
+# polyA tail
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_polyx('CCAAAAAAAAAA', [40,40,2,2,2,2,2,2,2,2,2,2]::UTINYINT[]) AS t)
+----
+CC	0	10
+
+# polyT tail
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_polyx('CCTTTTTTTTTT', [40,40,2,2,2,2,2,2,2,2,2,2]::UTINYINT[]) AS t)
+----
+CC	0	10
+
+# polyC tail
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_polyx('AACCCCCCCCCC', [40,40,2,2,2,2,2,2,2,2,2,2]::UTINYINT[]) AS t)
+----
+AA	0	10
+
+# polyG via polyx (subsumes polyG, no quality gate)
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_polyx('AAGGGGGGGGGG', [40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[]) AS t)
+----
+AA	0	10
+
+# No homopolymer — no trim
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_polyx('ACGTACGTACGTACGT', [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[]) AS t)
+----
+ACGTACGTACGTACGT	0	0
+
+# Custom min_len=4 trims short polyA
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_polyx('CCGTAAAA', [40,40,40,40,2,2,2,2]::UTINYINT[], 4, 5) AS t)
+----
+CCGT	0	4
+
+# Quality preserved in lockstep
+query I
+SELECT (t).quality
+FROM (SELECT trim_polyx('CCAAAAAAAAAA', [40,40,2,2,2,2,2,2,2,2,2,2]::UTINYINT[]) AS t)
+----
+[40, 40]
+
+# Mismatched seq/qual length throws
+statement error
+SELECT trim_polyx('CCAAAAAAAAAA', [40,40]::UTINYINT[])
+----
+length
+
+# NULL propagation
+query I
+SELECT trim_polyx(NULL, [40,40,2,2,2,2,2,2,2,2,2,2]::UTINYINT[]) IS NULL
+----
+true

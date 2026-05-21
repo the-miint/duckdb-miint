@@ -42,4 +42,27 @@ public:
 	                               std::uint8_t mean_quality);
 };
 
+class PolyXScanner {
+public:
+	// scan_polyg: identify a polyG run at the 3' end and return the trim point.
+	// Ported from fastp's polyG logic with one improvement: a quality-aware
+	// gate. After identifying a candidate trim region, the mean Phred of that
+	// region must be <= max_window_mean_q or the trim is refused. Pass
+	// max_window_mean_q = 255 to disable the quality check (any Phred 0..93
+	// will be <= 255).
+	//
+	// `qual` must point to a buffer of `len` bytes parallel to `seq`.
+	static TrimResult scan_polyg(const std::uint8_t *seq, const std::uint8_t *qual, std::size_t len,
+	                             std::size_t min_len, std::uint32_t max_mismatch, std::uint8_t max_window_mean_q);
+
+	// scan_polyx: identify the dominant base in the 3' tail and trim from its
+	// leftmost position within the scanned region. Ports fastp's polyX scan
+	// with one improvement: deterministic ACGT tie-break (earliest in ACGT
+	// wins ties) so the result is reproducible across runs and platforms.
+	// No quality gate — polyA/T/C runs are not platform artifacts the way
+	// NextSeq polyG is.
+	static TrimResult scan_polyx(const std::uint8_t *seq, std::size_t len, std::size_t min_len,
+	                             std::uint32_t max_mismatch);
+};
+
 } // namespace miint::qc
