@@ -64,6 +64,19 @@ FROM (SELECT trim_adapters(
 ----
 [10, 11, 12, 13, 14, 15, 16, 17]
 
+# Non-uniform quality across the trim boundary: verifies that the quality
+# slice aligns exactly with trim_start (kept = quality[0..trim_start)).
+# If the slice were off by one, the boundary value (33) would shift in/out.
+query III
+SELECT (t).sequence, (t).quality, (t).trimmed_3p
+FROM (SELECT trim_adapters(
+    'ACGTACGTAGATCGGAAGAGC',
+    [1,2,3,4,5,6,7,8,99,99,99,99,99,99,99,99,99,99,99,99,99]::UTINYINT[],
+    'AGATCGGAAGAGC'
+) AS t)
+----
+ACGTACGT	[1, 2, 3, 4, 5, 6, 7, 8]	13
+
 # -----------------------------------------------------------------------------
 # LIST(VARCHAR) adapter overload — multiple adapters; leftmost match across
 # all adapters wins (most aggressive trim).
@@ -101,6 +114,30 @@ FROM (SELECT trim_adapters(
 ) AS t)
 ----
 ACGTACGT	0	13
+
+# Adapter list materialized from a subquery — exercises whatever LIST(VARCHAR)
+# vector encoding DuckDB produces (potentially dictionary-encoded child),
+# verifying that ExtractAdapters handles non-flat child vectors correctly.
+statement ok
+CREATE TABLE _qc_adapters (s VARCHAR);
+
+statement ok
+INSERT INTO _qc_adapters VALUES ('AGATCGGAAGAGC'), ('CTGTCTCTTATA');
+
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (
+  SELECT trim_adapters(
+    'ACGTACGTAGATCGGAAGAGC',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    (SELECT array_agg(s) FROM _qc_adapters)
+  ) AS t
+);
+----
+ACGTACGT	0	13
+
+statement ok
+DROP TABLE _qc_adapters;
 
 # -----------------------------------------------------------------------------
 # 6-arg full-control form

@@ -363,18 +363,15 @@ static std::size_t default_min_match(std::size_t n_adapters) {
 	return 4;
 }
 
-// Reverse-complement a DNA string using the shared complement table. Rejects
-// any byte that isn't a valid IUPAC code (table maps it to 0).
-static std::string dna_revcomp(const std::string &s) {
-	std::string rc(s.size(), '\0');
-	for (std::size_t i = 0; i < s.size(); i++) {
-		const char c = miint::DNA_COMPLEMENT_TABLE[static_cast<unsigned char>(s[i])];
-		if (c == 0) {
-			throw InvalidInputException("trim_adapters: invalid DNA base '%c' in adapter sequence", s[i]);
-		}
-		rc[s.size() - 1 - i] = c;
+// Reverse-complement a DNA adapter, translating the underlying utility's
+// std::runtime_error to InvalidInputException so it surfaces cleanly through
+// SQL.
+static std::string dna_revcomp_adapter(const std::string &s) {
+	try {
+		return miint::dna_reverse_complement(s);
+	} catch (const std::runtime_error &e) {
+		throw InvalidInputException("trim_adapters: invalid DNA base in adapter sequence (%s)", e.what());
 	}
-	return rc;
 }
 
 // Extract adapter strings from one row of the adapter argument. Handles both
@@ -496,10 +493,11 @@ static void TrimAdaptersExecuteImpl(DataChunk &args, Vector &result, bool adapte
 			throw InvalidInputException("trim_adapters: min_match must be >= 0 (got %d; 0 means use default)",
 			                            min_match_param);
 		}
-		const std::size_t min_match =
-		    min_match_param > 0 ? static_cast<std::size_t>(min_match_param) : default_min_match(adapters.size());
 
-		// Build full candidate list with optional RCs.
+		// Build full candidate list with optional RCs first, then scale
+		// min_match against the total candidate count so RC-enabled searches
+		// get the same stringency as if the user had passed adapters+RCs by
+		// hand.
 		std::vector<std::string> candidates;
 		candidates.reserve(adapters.size() * (match_revcomp ? 2 : 1));
 		for (const auto &a : adapters) {
@@ -507,9 +505,11 @@ static void TrimAdaptersExecuteImpl(DataChunk &args, Vector &result, bool adapte
 		}
 		if (match_revcomp) {
 			for (const auto &a : adapters) {
-				candidates.push_back(dna_revcomp(a));
+				candidates.push_back(dna_revcomp_adapter(a));
 			}
 		}
+		const std::size_t min_match =
+		    min_match_param > 0 ? static_cast<std::size_t>(min_match_param) : default_min_match(candidates.size());
 
 		// Run all candidates; take the leftmost trim_start across all matches.
 		miint::qc::TrimResult tr {0, seq.GetSize()};

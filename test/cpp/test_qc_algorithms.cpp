@@ -442,6 +442,21 @@ TEST_CASE("AdapterMatcher::find phase 2 (insertion in seq)", "[qc][adapter]") {
 		CHECK(m.indels == 1);
 		CHECK(m.mismatches == 1);
 	}
+
+	SECTION("substitution BEFORE true insertion site — exhaustive search required") {
+		// Adapter (13): "AGATCGGAAGAGC"
+		// Seq region (14): "TGATCXGGAAGAGC" — substitution T@0 + insertion X@5
+		// A greedy commit-on-first-mismatch algorithm wastes the indel slot
+		// on position 0 (the T-vs-A substitution) and then runs out of
+		// mismatch budget. Exhaustive search across indel positions finds
+		// k=5 with 1 mismatch (the T at position 0) and matches.
+		const std::string seq = std::string("ACGT") + "TGATCXGGAAGAGC";
+		auto m = AdapterMatcher::find(bp(seq), seq.size(), bp(adapter), adapter.size(), 4, false);
+		REQUIRE(m.matched);
+		CHECK(m.trim_start == 4);
+		CHECK(m.indels == 1);
+		CHECK(m.mismatches == 1);
+	}
 }
 
 TEST_CASE("AdapterMatcher::find phase 3 (deletion in seq)", "[qc][adapter]") {
