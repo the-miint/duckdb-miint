@@ -37,8 +37,8 @@ static constexpr int32_t MAX_QUAL_WINDOW = 1000;
 static constexpr int32_t DEFAULT_POLY_MIN_LEN = 10;
 static constexpr int32_t DEFAULT_POLY_MAX_MISMATCH = 5;
 // Default quality-aware gate for polyG: trim region's mean Phred must be <=
-// this threshold. Pass max_window_mean_q=93 (the max valid Phred) to make the
-// gate a no-op since any real Phred score will satisfy <= 93.
+// this threshold. Pass max_window_mean_q=QUAL_GATE_DISABLED (the max valid
+// Phred) to make the gate a no-op since any real Phred score satisfies <= 93.
 static constexpr int32_t DEFAULT_POLYG_MAX_WINDOW_MEAN_Q = 5;
 static constexpr int32_t QUAL_GATE_DISABLED = 93;
 
@@ -258,8 +258,9 @@ static void TrimPolygExecute(DataChunk &args, ExpressionState &state, Vector &re
 		if (max_mismatch < 0) {
 			throw InvalidInputException("trim_polyg: max_mismatch must be >= 0 (got %d)", max_mismatch);
 		}
-		if (max_window_q < 0 || max_window_q > 255) {
-			throw InvalidInputException("trim_polyg: max_window_mean_q must be 0..255 (got %d)", max_window_q);
+		if (max_window_q < 0 || max_window_q > QUAL_GATE_DISABLED) {
+			throw InvalidInputException("trim_polyg: max_window_mean_q must be 0..%d (got %d); pass %d to disable",
+			                            QUAL_GATE_DISABLED, max_window_q, QUAL_GATE_DISABLED);
 		}
 
 		auto tr = miint::qc::PolyXScanner::scan_polyg(

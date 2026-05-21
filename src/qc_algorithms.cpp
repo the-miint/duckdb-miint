@@ -182,8 +182,8 @@ TrimResult PolyXScanner::scan_polyg(const std::uint8_t *seq, const std::uint8_t 
 		return {0, len};
 	}
 
-	// Quality-aware gate. With max_window_mean_q==255 the check is a no-op
-	// since any Phred 0..93 satisfies <= 255.
+	// Quality-aware gate. Pass max_window_mean_q=93 (the max valid Phred) to
+	// make the check a no-op since any real Phred 0..93 satisfies <= 93.
 	if (mean_phred(qual, first_g_pos, len) > max_window_mean_q) {
 		return {0, len};
 	}

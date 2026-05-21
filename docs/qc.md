@@ -37,6 +37,13 @@ Every trim function returns a `STRUCT` with these fields:
 | `trimmed_5p` | `UINTEGER` | Number of bases removed from the 5' end |
 | `trimmed_3p` | `UINTEGER` | Number of bases removed from the 3' end |
 
+`trimmed_5p` is meaningful only for `trim_quality_5p` (and rarely
+`trim_quality_sliding` when invoked at a position that drops the leading
+bases). All other trimmers operate at the 3' end only, so `trimmed_5p` is
+always `0` for `trim_quality_3p`, `trim_polyg`, `trim_polyx`, and
+`trim_adapters`. Don't `SUM((t).trimmed_5p)` across a 3'-only pipeline
+expecting non-zero — it's structurally zero.
+
 `filter_read` returns:
 
 | Field | Type | Meaning |
@@ -204,7 +211,7 @@ Defaults: `min_length=15`, `max_length=0` (off), `qualified_q=15`,
 |---|---|---|
 | `trim_polyg` | Optional quality gate (default Q5) | Prevents over-trimming legit GC-rich gene starts; NextSeq dark-cycle polyG is uniformly Q≤2 |
 | `trim_polyx` | Deterministic ACGT tie-break | Reproducibility across runs and platforms |
-| `trim_adapters` | Best-match-wins reverted; leftmost-wins (fastp) is kept | Leftmost match is biologically the true adapter start; later matches are typically genomic chatter |
+| `trim_adapters` | Leftmost match wins (not highest-scoring) | The leftmost candidate is the most likely true adapter start; later high-scoring matches are typically genomic chatter that happens to align well by chance |
 | `trim_adapters` | `allow_pre_start` opt-in default off | fastp's always-on negative-offset can over-trim non-Illumina reads |
 | `trim_adapters` | `min_match` exposed | fastp's silent auto-scale is unintuitive when tuning |
 | `trim_adapters` | Exhaustive indel-position search | fastp's greedy commit produces false negatives when a sequencing error precedes the true indel site |
@@ -235,3 +242,7 @@ maintain bit-for-bit parity in the common case:
   before optimizing).
 - Aho-Corasick multi-adapter matcher for very large adapter lists
   (50+ adapters) — current implementation is O(adapters × read_len × adapter_len).
+- Integration test on a real-world FASTQ at ≥1M reads to verify end-to-end
+  throughput and numerical stability. The current `qc_pipeline.test`
+  fixture (30 reads) gives bit-for-bit ground-truth verification at toy
+  scale; scale-validation is a separate concern.

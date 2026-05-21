@@ -163,3 +163,26 @@ query I
 SELECT filter_read('ACGT', NULL::UTINYINT[]) IS NULL
 ----
 true
+
+# Quality LIST(UTINYINT) materialized from a non-trivial query plan
+# (CTE → JOIN → CTAS). Verifies GetQualListSlice handles whatever vector
+# encoding DuckDB delivers for the qual list, parallel to the adapter-list
+# subquery test in qc_trim_adapters.test.
+statement ok
+CREATE TABLE _qc_reads AS
+SELECT 'r1' AS read_id, 'ACGTACGTACGTACGTACGT' AS seq,
+       [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[] AS qual
+UNION ALL
+SELECT 'r2', 'ACGTNNNNNNNNNNNNACGT',
+       [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[];
+
+query III
+SELECT read_id, (f).passed, (f).fail_reason
+FROM (SELECT read_id, filter_read(seq, qual) AS f FROM _qc_reads)
+ORDER BY read_id;
+----
+r1	true	NULL
+r2	false	n_base
+
+statement ok
+DROP TABLE _qc_reads;
