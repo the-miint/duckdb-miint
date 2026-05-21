@@ -29,13 +29,9 @@ static void QcVersionFunction(DataChunk &args, ExpressionState &state, Vector &r
 static constexpr int32_t DEFAULT_QUAL_WINDOW = 4;
 static constexpr int32_t DEFAULT_QUAL_MEAN = 20;
 
-static LogicalType QualListType() {
-	return LogicalType::LIST(LogicalType::UTINYINT);
-}
-
 static LogicalType TrimResultStructType() {
 	return LogicalType::STRUCT({{"sequence", LogicalType::VARCHAR},
-	                            {"quality", QualListType()},
+	                            {"quality", LogicalType::LIST(LogicalType::UTINYINT)},
 	                            {"trimmed_5p", LogicalType::UINTEGER},
 	                            {"trimmed_3p", LogicalType::UINTEGER}});
 }
@@ -367,12 +363,15 @@ static void TrimPolyxExecute(DataChunk &args, ExpressionState &state, Vector &re
 static void RegisterTrimQualityFamily(ExtensionLoader &loader, const std::string &name, scalar_function_t fn) {
 	ScalarFunctionSet set(name);
 
-	ScalarFunction two_arg(name, {LogicalType::VARCHAR, QualListType()}, TrimResultStructType(), fn);
+	ScalarFunction two_arg(name, {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT)},
+	                       TrimResultStructType(), fn);
 	two_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 	set.AddFunction(two_arg);
 
-	ScalarFunction four_arg(name, {LogicalType::VARCHAR, QualListType(), LogicalType::INTEGER, LogicalType::INTEGER},
-	                        TrimResultStructType(), fn);
+	ScalarFunction four_arg(
+	    name,
+	    {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT), LogicalType::INTEGER, LogicalType::INTEGER},
+	    TrimResultStructType(), fn);
 	four_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 	set.AddFunction(four_arg);
 
@@ -393,15 +392,15 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 	// trim_polyg: 2-arg (defaults) + 5-arg (min_len, max_mismatch, max_window_mean_q).
 	{
 		ScalarFunctionSet set("trim_polyg");
-		ScalarFunction two_arg("trim_polyg", {LogicalType::VARCHAR, QualListType()}, TrimResultStructType(),
-		                       TrimPolygExecute);
+		ScalarFunction two_arg("trim_polyg", {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT)},
+		                       TrimResultStructType(), TrimPolygExecute);
 		two_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 		set.AddFunction(two_arg);
 
-		ScalarFunction five_arg(
-		    "trim_polyg",
-		    {LogicalType::VARCHAR, QualListType(), LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::INTEGER},
-		    TrimResultStructType(), TrimPolygExecute);
+		ScalarFunction five_arg("trim_polyg",
+		                        {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT), LogicalType::INTEGER,
+		                         LogicalType::INTEGER, LogicalType::INTEGER},
+		                        TrimResultStructType(), TrimPolygExecute);
 		five_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 		set.AddFunction(five_arg);
 		loader.RegisterFunction(set);
@@ -410,13 +409,14 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 	// trim_polyx: 2-arg (defaults) + 4-arg (min_len, max_mismatch).
 	{
 		ScalarFunctionSet set("trim_polyx");
-		ScalarFunction two_arg("trim_polyx", {LogicalType::VARCHAR, QualListType()}, TrimResultStructType(),
-		                       TrimPolyxExecute);
+		ScalarFunction two_arg("trim_polyx", {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT)},
+		                       TrimResultStructType(), TrimPolyxExecute);
 		two_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 		set.AddFunction(two_arg);
 
 		ScalarFunction four_arg("trim_polyx",
-		                        {LogicalType::VARCHAR, QualListType(), LogicalType::INTEGER, LogicalType::INTEGER},
+		                        {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT), LogicalType::INTEGER,
+		                         LogicalType::INTEGER},
 		                        TrimResultStructType(), TrimPolyxExecute);
 		four_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 		set.AddFunction(four_arg);
