@@ -1380,6 +1380,8 @@ set(TEST_SOURCES
     test/cpp/test_SequenceReader.cpp
     src/QualScore.cpp
     test/cpp/test_QualScore.cpp
+    src/qc_algorithms.cpp
+    test/cpp/test_qc_algorithms.cpp
     src/SAMReader.cpp
     test/cpp/test_SAMReader.cpp
     test/cpp/test_AlignmentFunctions.cpp
