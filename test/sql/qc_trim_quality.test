@@ -53,7 +53,11 @@ length
 # trim_quality_5p: trim low-quality bases from 5' end via sliding window
 # -----------------------------------------------------------------------------
 
-# Basic 5' head trim
+# Basic 5' head trim. Note: trim_quality_5p anchors at the LEFT edge of the
+# first passing window. The window itself is kept whole — its leading bases
+# (here Q5 at positions 2,3) survive in the output even though they are
+# individually low-quality. This is fastp's cut_front semantics; per-base
+# trimming would be a different algorithm.
 query III
 SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
 FROM (SELECT trim_quality_5p('ACGTACGT', [5,5,5,5,40,40,40,40]::UTINYINT[]) AS t)
@@ -67,7 +71,8 @@ FROM (SELECT trim_quality_5p('ACGT', [40,40,40,40]::UTINYINT[]) AS t)
 ----
 ACGT	0	0
 
-# Quality preserved in lockstep
+# Quality preserved in lockstep — the [5,5] prefix below is the leading half
+# of the passing window (see fastp cut_front semantics note above).
 query I
 SELECT (t).quality
 FROM (SELECT trim_quality_5p('ACGTACGT', [5,5,5,5,40,40,40,40]::UTINYINT[]) AS t)

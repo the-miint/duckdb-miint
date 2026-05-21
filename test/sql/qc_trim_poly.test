@@ -136,3 +136,13 @@ query I
 SELECT trim_polyx(NULL, [40,40,2,2,2,2,2,2,2,2,2,2]::UTINYINT[]) IS NULL
 ----
 true
+
+# Deterministic ACGT tie-break: tail "AACC" has equal A and C counts; we pick
+# A (earliest in ACGT) so the trim point is the leftmost A. fastp's tie
+# behavior depends on input scan order — our deterministic pick is one of the
+# documented improvements.
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_polyx('NNNNNNNNNNAACC', [40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[], 4, 5) AS t)
+----
+NNNNNNNNNN	0	4

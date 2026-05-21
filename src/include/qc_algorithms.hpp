@@ -48,8 +48,8 @@ public:
 	// Ported from fastp's polyG logic with one improvement: a quality-aware
 	// gate. After identifying a candidate trim region, the mean Phred of that
 	// region must be <= max_window_mean_q or the trim is refused. Pass
-	// max_window_mean_q = 255 to disable the quality check (any Phred 0..93
-	// will be <= 255).
+	// max_window_mean_q = 93 (the maximum valid Phred score) to make the gate
+	// a no-op — every real Phred value satisfies <= 93.
 	//
 	// `qual` must point to a buffer of `len` bytes parallel to `seq`.
 	static TrimResult scan_polyg(const std::uint8_t *seq, const std::uint8_t *qual, std::size_t len,

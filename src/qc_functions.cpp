@@ -23,11 +23,22 @@ static void QcVersionFunction(DataChunk &args, ExpressionState &state, Vector &r
 }
 
 // ---------------------------------------------------------------------------
-// Shared types and helpers for the trim_quality_* scalars
+// Shared types and helpers for all trim_* scalars
 // ---------------------------------------------------------------------------
 
 static constexpr int32_t DEFAULT_QUAL_WINDOW = 4;
 static constexpr int32_t DEFAULT_QUAL_MEAN = 20;
+// fastp's documented window-size range is 1..1000. The upper bound also keeps
+// threshold_sum (mean_quality * window_size) safely within uint32_t.
+static constexpr int32_t MAX_QUAL_WINDOW = 1000;
+
+static constexpr int32_t DEFAULT_POLY_MIN_LEN = 10;
+static constexpr int32_t DEFAULT_POLY_MAX_MISMATCH = 5;
+// Default quality-aware gate for polyG: trim region's mean Phred must be <=
+// this threshold. Pass max_window_mean_q=93 (the max valid Phred) to make the
+// gate a no-op since any real Phred score will satisfy <= 93.
+static constexpr int32_t DEFAULT_POLYG_MAX_WINDOW_MEAN_Q = 5;
+static constexpr int32_t QUAL_GATE_DISABLED = 93;
 
 static LogicalType TrimResultStructType() {
 	return LogicalType::STRUCT({{"sequence", LogicalType::VARCHAR},
@@ -48,6 +59,31 @@ static void GetQualListSlice(Vector &list_vec, UnifiedVectorFormat &list_data, i
 
 	out_data = child_data + entry.offset;
 	out_length = entry.length;
+}
+
+// Write one row of the trim_result struct: trimmed sequence, trimmed quality
+// (as a sliced LIST(UTINYINT)), and the trimmed_5p/trimmed_3p counts. Shared
+// by every trim_* scalar.
+static void WriteTrimRow(idx_t i, const string_t &seq, const uint8_t *qptr, idx_t qlen, miint::qc::TrimResult tr,
+                         Vector &seq_out_vec, Vector &qual_out_vec, list_entry_t *qual_out_entries,
+                         idx_t &qual_child_offset, uint32_t *trimmed_5p_data, uint32_t *trimmed_3p_data) {
+	const idx_t kept_len = tr.end - tr.start;
+	FlatVector::GetData<string_t>(seq_out_vec)[i] =
+	    StringVector::AddString(seq_out_vec, seq.GetData() + tr.start, kept_len);
+
+	ListVector::Reserve(qual_out_vec, qual_child_offset + kept_len);
+	auto &qual_child = ListVector::GetEntry(qual_out_vec);
+	auto qual_child_data = FlatVector::GetData<uint8_t>(qual_child);
+	for (idx_t k = 0; k < kept_len; k++) {
+		qual_child_data[qual_child_offset + k] = qptr[tr.start + k];
+	}
+	qual_out_entries[i].offset = qual_child_offset;
+	qual_out_entries[i].length = kept_len;
+	qual_child_offset += kept_len;
+	ListVector::SetListSize(qual_out_vec, qual_child_offset);
+
+	trimmed_5p_data[i] = static_cast<uint32_t>(tr.start);
+	trimmed_3p_data[i] = static_cast<uint32_t>(qlen - tr.end);
 }
 
 using TrimAlgorithm = miint::qc::TrimResult (*)(const std::uint8_t *, std::size_t, std::size_t, std::uint8_t);
@@ -118,8 +154,8 @@ static void TrimQualityExecuteImpl(DataChunk &args, Vector &result, TrimAlgorith
 			window = window_ptr[window_data.sel->get_index(i)];
 			mean = mean_ptr[mean_data.sel->get_index(i)];
 		}
-		if (window <= 0) {
-			throw InvalidInputException("%s: window_size must be > 0 (got %d)", fn_name, window);
+		if (window <= 0 || window > MAX_QUAL_WINDOW) {
+			throw InvalidInputException("%s: window_size must be in 1..%d (got %d)", fn_name, MAX_QUAL_WINDOW, window);
 		}
 		if (mean < 0 || mean > 93) {
 			throw InvalidInputException("%s: mean_quality must be in 0..93 (got %d)", fn_name, mean);
@@ -132,25 +168,8 @@ static void TrimQualityExecuteImpl(DataChunk &args, Vector &result, TrimAlgorith
 			throw InvalidInputException("%s: %s", fn_name, e.what());
 		}
 
-		// Trimmed sequence
-		const idx_t kept_len = tr.end - tr.start;
-		FlatVector::GetData<string_t>(seq_out_vec)[i] =
-		    StringVector::AddString(seq_out_vec, seq.GetData() + tr.start, kept_len);
-
-		// Trimmed quality (slice of input)
-		ListVector::Reserve(qual_out_vec, qual_child_offset + kept_len);
-		auto &qual_child = ListVector::GetEntry(qual_out_vec);
-		auto qual_child_data = FlatVector::GetData<uint8_t>(qual_child);
-		for (idx_t k = 0; k < kept_len; k++) {
-			qual_child_data[qual_child_offset + k] = qptr[tr.start + k];
-		}
-		qual_out_entries[i].offset = qual_child_offset;
-		qual_out_entries[i].length = kept_len;
-		qual_child_offset += kept_len;
-		ListVector::SetListSize(qual_out_vec, qual_child_offset);
-
-		trimmed_5p_data[i] = static_cast<uint32_t>(tr.start);
-		trimmed_3p_data[i] = static_cast<uint32_t>(qlen - tr.end);
+		WriteTrimRow(i, seq, qptr, qlen, tr, seq_out_vec, qual_out_vec, qual_out_entries, qual_child_offset,
+		             trimmed_5p_data, trimmed_3p_data);
 	}
 }
 
@@ -164,38 +183,6 @@ static void TrimQuality5pFunction(DataChunk &args, ExpressionState &state, Vecto
 
 static void TrimQualitySlidingFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	TrimQualityExecuteImpl(args, result, &miint::qc::SlidingWindowTrimmer::trim_sliding, "trim_quality_sliding");
-}
-
-// ---------------------------------------------------------------------------
-// Shared helpers for the trim_poly* scalars
-// ---------------------------------------------------------------------------
-
-static constexpr int32_t DEFAULT_POLY_MIN_LEN = 10;
-static constexpr int32_t DEFAULT_POLY_MAX_MISMATCH = 5;
-static constexpr int32_t DEFAULT_POLYG_MAX_WINDOW_MEAN_Q = 5;
-
-// Write the trim_result struct fields and copy the kept slice of seq+qual.
-// Reused by trim_polyg and trim_polyx scalar implementations.
-static void WriteTrimRow(idx_t i, const string_t &seq, const uint8_t *qptr, idx_t qlen, miint::qc::TrimResult tr,
-                         Vector &seq_out_vec, Vector &qual_out_vec, list_entry_t *qual_out_entries,
-                         idx_t &qual_child_offset, uint32_t *trimmed_5p_data, uint32_t *trimmed_3p_data) {
-	const idx_t kept_len = tr.end - tr.start;
-	FlatVector::GetData<string_t>(seq_out_vec)[i] =
-	    StringVector::AddString(seq_out_vec, seq.GetData() + tr.start, kept_len);
-
-	ListVector::Reserve(qual_out_vec, qual_child_offset + kept_len);
-	auto &qual_child = ListVector::GetEntry(qual_out_vec);
-	auto qual_child_data = FlatVector::GetData<uint8_t>(qual_child);
-	for (idx_t k = 0; k < kept_len; k++) {
-		qual_child_data[qual_child_offset + k] = qptr[tr.start + k];
-	}
-	qual_out_entries[i].offset = qual_child_offset;
-	qual_out_entries[i].length = kept_len;
-	qual_child_offset += kept_len;
-	ListVector::SetListSize(qual_out_vec, qual_child_offset);
-
-	trimmed_5p_data[i] = static_cast<uint32_t>(tr.start);
-	trimmed_3p_data[i] = static_cast<uint32_t>(qlen - tr.end);
 }
 
 // ---------------------------------------------------------------------------
@@ -349,8 +336,8 @@ static void TrimPolyxExecute(DataChunk &args, ExpressionState &state, Vector &re
 			throw InvalidInputException("trim_polyx: max_mismatch must be >= 0 (got %d)", max_mismatch);
 		}
 
-		auto tr = miint::qc::PolyXScanner::scan_polyx(reinterpret_cast<const std::uint8_t *>(seq.GetData()), qlen,
-		                                              static_cast<std::size_t>(min_len),
+		auto tr = miint::qc::PolyXScanner::scan_polyx(reinterpret_cast<const std::uint8_t *>(seq.GetData()),
+		                                              seq.GetSize(), static_cast<std::size_t>(min_len),
 		                                              static_cast<std::uint32_t>(max_mismatch));
 
 		WriteTrimRow(i, seq, qptr, qlen, tr, seq_out_vec, qual_out_vec, qual_out_entries, qual_child_offset,

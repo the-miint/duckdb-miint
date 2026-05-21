@@ -85,6 +85,10 @@ TEST_CASE("SlidingWindowTrimmer::trim_3p", "[qc][sliding]") {
 // ---------------------------------------------------------------------------
 TEST_CASE("SlidingWindowTrimmer::trim_5p", "[qc][sliding]") {
 	SECTION("basic 5' head trim (first 2 bases removed)") {
+		// The first passing window is [2,6) with quals [5,5,40,40], mean 22.5.
+		// Anchoring at the window's LEFT edge means index 2 is kept — even
+		// though q[2]=5 is below the per-base threshold. This is fastp's
+		// cut_front semantics: window-mean passes => keep the whole window.
 		std::vector<uint8_t> q = {5, 5, 5, 5, 40, 40, 40, 40};
 		auto r = SlidingWindowTrimmer::trim_5p(q.data(), q.size(), 4, 20);
 		CHECK(r.start == 2);
@@ -176,9 +180,9 @@ TEST_CASE("SlidingWindowTrimmer::trim_sliding", "[qc][sliding]") {
 // ---------------------------------------------------------------------------
 // PolyXScanner::scan_polyg
 // ---------------------------------------------------------------------------
-// Sentinel quality value that disables the quality-aware check
-// (any mean Phred <= 93 will satisfy <= 255).
-static constexpr std::uint8_t QUAL_AWARE_DISABLED = 255;
+// Sentinel quality value that disables the quality-aware check: the max
+// valid Phred score is 93, so any real mean satisfies <= 93.
+static constexpr std::uint8_t QUAL_AWARE_DISABLED = 93;
 
 TEST_CASE("PolyXScanner::scan_polyg", "[qc][poly]") {
 	SECTION("clean 10bp polyG tail — trimmed") {
