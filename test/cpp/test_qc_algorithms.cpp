@@ -249,7 +249,7 @@ TEST_CASE("PolyXScanner::scan_polyg", "[qc][poly]") {
 		CHECK(r.end == 2);
 	}
 
-	SECTION("quality-aware disabled (sentinel 255) trims high-quality G run") {
+	SECTION("quality-aware disabled (sentinel = max valid Phred 93) trims high-quality G run") {
 		auto s = seq_bytes("AAGGGGGGGGGG");
 		std::vector<std::uint8_t> q(12, 40);
 		auto r = PolyXScanner::scan_polyg(s.data(), q.data(), s.size(), 10, 5, QUAL_AWARE_DISABLED);

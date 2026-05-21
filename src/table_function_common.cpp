@@ -337,4 +337,17 @@ void PopulateSpectrumBatchOutput(DataChunk &output, const miint::MzMLSpectrumBat
 	output.SetCardinality(batch.size());
 }
 
+void GetListUInt8Slice(Vector &list_vec, UnifiedVectorFormat &list_data, idx_t row_idx, const uint8_t *&out_data,
+                       idx_t &out_length) {
+	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
+	auto mapped_idx = list_data.sel->get_index(row_idx);
+	auto &entry = list_entries[mapped_idx];
+
+	auto &child = ListVector::GetEntry(list_vec);
+	auto child_data = FlatVector::GetData<uint8_t>(child);
+
+	out_data = child_data + entry.offset;
+	out_length = entry.length;
+}
+
 } // namespace duckdb

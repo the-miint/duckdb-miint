@@ -9,6 +9,7 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 
+#include "table_function_common.hpp"
 #include "vsearch_api.h"
 #include "fastq_mergepairs.h"
 
@@ -191,22 +192,6 @@ static LogicalType MergePairsReturnType() {
 }
 
 // ---------------------------------------------------------------------------
-// Extract LIST(UTINYINT) child data pointer and length for a given row
-// ---------------------------------------------------------------------------
-static void GetQualListEntry(Vector &list_vec, UnifiedVectorFormat &list_data, idx_t row_idx, const uint8_t *&out_data,
-                             idx_t &out_length) {
-	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
-	auto mapped_idx = list_data.sel->get_index(row_idx);
-	auto &entry = list_entries[mapped_idx];
-
-	auto &child = ListVector::GetEntry(list_vec);
-	auto child_data = FlatVector::GetData<uint8_t>(child);
-
-	out_data = child_data + entry.offset;
-	out_length = entry.length;
-}
-
-// ---------------------------------------------------------------------------
 // Execute (shared by both overloads — first 4 args are the same)
 // ---------------------------------------------------------------------------
 static void MergePairsExecute(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -273,8 +258,8 @@ static void MergePairsExecute(DataChunk &args, ExpressionState &state, Vector &r
 		const uint8_t *fwd_qual_ptr;
 		const uint8_t *rev_qual_ptr;
 		idx_t fwd_qual_len, rev_qual_len;
-		GetQualListEntry(args.data[1], fwd_qual_data, i, fwd_qual_ptr, fwd_qual_len);
-		GetQualListEntry(args.data[3], rev_qual_data, i, rev_qual_ptr, rev_qual_len);
+		GetListUInt8Slice(args.data[1], fwd_qual_data, i, fwd_qual_ptr, fwd_qual_len);
+		GetListUInt8Slice(args.data[3], rev_qual_data, i, rev_qual_ptr, rev_qual_len);
 
 		lstate.fwd_qual_ascii = miint::encode_quality_ascii(fwd_qual_ptr, fwd_qual_len);
 		lstate.rev_qual_ascii = miint::encode_quality_ascii(rev_qual_ptr, rev_qual_len);

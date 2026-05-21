@@ -56,6 +56,13 @@ void SetResultVectorInt64(Vector &result_vector, const std::vector<int64_t> &val
 void SetResultVectorInt64Nullable(Vector &result_vector, const std::vector<int64_t> &values,
                                   const std::vector<bool> &valid);
 void SetResultVectorListUInt8(Vector &result_vector, const std::vector<miint::QualScore> &values, uint8_t qual_offset);
+
+// Locate the child slice for one row of a LIST(UTINYINT) input: writes the
+// pointer to the row's first byte and the row's length. The pointer is valid
+// for the lifetime of the underlying ListVector child buffer; the caller must
+// not free it.
+void GetListUInt8Slice(Vector &list_vec, UnifiedVectorFormat &list_data, idx_t row_idx, const uint8_t *&out_data,
+                       idx_t &out_length);
 void SetResultVectorInt32(Vector &result_vector, const std::vector<int32_t> &values);
 void SetResultVectorInt32Nullable(Vector &result_vector, const std::vector<int32_t> &values,
                                   const std::vector<bool> &valid);

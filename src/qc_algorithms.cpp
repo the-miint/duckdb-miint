@@ -124,9 +124,10 @@ TrimResult SlidingWindowTrimmer::trim_sliding(const std::uint8_t *q, std::size_t
 
 namespace {
 
-constexpr std::uint32_t POLY_ONE_PER_8 = 8;
+// fastp's adapter / poly tolerance: one mismatch budget per 8 scanned bases,
+// used by both the polyG/polyX scanners and the adapter matcher's phase loops.
+constexpr std::uint32_t MISMATCH_PER_8_BASES = 8;
 
-// ACGT lookup (case-insensitive). Returns -1 for N or unknown bases.
 inline int base_to_acgt_index(std::uint8_t c) {
 	switch (c) {
 	case 'A':
@@ -172,7 +173,8 @@ TrimResult PolyXScanner::scan_polyg(const std::uint8_t *seq, const std::uint8_t 
 		} else {
 			mismatch++;
 		}
-		const std::uint32_t allowed = std::min(max_mismatch, static_cast<std::uint32_t>((i + 1) / POLY_ONE_PER_8));
+		const std::uint32_t allowed =
+		    std::min(max_mismatch, static_cast<std::uint32_t>((i + 1) / MISMATCH_PER_8_BASES));
 		if (mismatch > max_mismatch || (mismatch > allowed && i + 1 >= min_len)) {
 			break;
 		}
@@ -206,7 +208,8 @@ TrimResult PolyXScanner::scan_polyx(const std::uint8_t *seq, std::size_t len, st
 		}
 		scanned = i + 1;
 
-		const std::uint32_t allowed = std::min(max_mismatch, static_cast<std::uint32_t>(scanned / POLY_ONE_PER_8));
+		const std::uint32_t allowed =
+		    std::min(max_mismatch, static_cast<std::uint32_t>(scanned / MISMATCH_PER_8_BASES));
 		bool any_base_survives = false;
 		for (int b = 0; b < 4; b++) {
 			if (scanned - counts[b] <= allowed) {
@@ -214,7 +217,7 @@ TrimResult PolyXScanner::scan_polyx(const std::uint8_t *seq, std::size_t len, st
 				break;
 			}
 		}
-		if (!any_base_survives && (i + 1 >= POLY_ONE_PER_8 || i + 1 >= min_len)) {
+		if (!any_base_survives && (i + 1 >= MISMATCH_PER_8_BASES || i + 1 >= min_len)) {
 			break;
 		}
 	}
@@ -269,8 +272,6 @@ TrimResult PolyXScanner::scan_polyx(const std::uint8_t *seq, std::size_t len, st
 
 namespace {
 
-constexpr std::uint32_t ADAPTER_ONE_PER_8 = 8;
-
 // fastp's pre-start offset: -min(4, max(2, adapter_len/2)). For short
 // adapters use a smaller offset; cap at -4 for typical 13bp adapters.
 inline int pre_start_offset(std::size_t adapter_len) {
@@ -299,7 +300,7 @@ AdapterMatch phase1_hamming(const std::uint8_t *seq, std::size_t seq_len, const 
 			continue;
 		}
 
-		const std::uint32_t allowed = static_cast<std::uint32_t>(cmplen / ADAPTER_ONE_PER_8);
+		const std::uint32_t allowed = static_cast<std::uint32_t>(cmplen / MISMATCH_PER_8_BASES);
 		std::uint32_t mismatches = 0;
 		bool ok = true;
 		for (int i = 0; i < cmplen; i++) {
@@ -356,7 +357,7 @@ AdapterMatch phase_indel(const std::uint8_t *seq, std::size_t seq_len, const std
 			continue;
 		}
 
-		const std::uint32_t allowed = static_cast<std::uint32_t>(adapter_remain / ADAPTER_ONE_PER_8);
+		const std::uint32_t allowed = static_cast<std::uint32_t>(adapter_remain / MISMATCH_PER_8_BASES);
 		// max_k:
 		//   insertion: k can be any "gap" in adapter from 0 to adapter_remain inclusive
 		//              (inserted base at seq index k means adapter[j] maps to seq[j+1] for j>=k)
