@@ -1,0 +1,165 @@
+# name: test/sql/qc_filter.test
+# description: Tests for filter_read scalar (per-read length/quality/N filtering)
+# group: [sql]
+
+require miint
+
+# -----------------------------------------------------------------------------
+# 2-arg defaults: min_length=15, max_length=0 (off), qualified_q=15,
+# max_unqualified_pct=40, max_n=5, min_avg_q=0 (off)
+# -----------------------------------------------------------------------------
+
+# A passing read — all-Q40, length 20, 0 N's
+query IIIIII
+SELECT (f).passed, (f).fail_reason, (f).length, (f).n_bases, (f).low_qual_bases, (f).mean_quality
+FROM (SELECT filter_read(
+    'ACGTACGTACGTACGTACGT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[]
+) AS f)
+----
+true	NULL	20	0	0	40.0
+
+# Too short (length 10 < default min 15) — fail reason "length"
+query IIIII
+SELECT (f).passed, (f).fail_reason, (f).length, (f).n_bases, (f).low_qual_bases
+FROM (SELECT filter_read(
+    'ACGTACGTAC',
+    [40,40,40,40,40,40,40,40,40,40]::UTINYINT[]
+) AS f)
+----
+false	length	10	0	0
+
+# Empty sequence — fail reason "length"
+query II
+SELECT (f).passed, (f).fail_reason
+FROM (SELECT filter_read('', []::UTINYINT[]) AS f)
+----
+false	length
+
+# Too many N's (>5 default max)
+query III
+SELECT (f).passed, (f).fail_reason, (f).n_bases
+FROM (SELECT filter_read(
+    'ACGTNNNNNNNNNNNACGT',  -- 19 bases, 11 N's
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[]
+) AS f)
+----
+false	n_base	11
+
+# Too many low-quality bases (>40% default at Q15 threshold)
+# 20 bases, 10 are Q5 (below Q15) = 50% > 40%
+query IIII
+SELECT (f).passed, (f).fail_reason, (f).low_qual_bases, (f).length
+FROM (SELECT filter_read(
+    'ACGTACGTACGTACGTACGT',
+    [5,5,5,5,5,5,5,5,5,5,40,40,40,40,40,40,40,40,40,40]::UTINYINT[]
+) AS f)
+----
+false	quality	10	20
+
+# Exactly at unqualified threshold (40% = 8/20) — passes (strict >)
+query II
+SELECT (f).passed, (f).low_qual_bases
+FROM (SELECT filter_read(
+    'ACGTACGTACGTACGTACGT',
+    [5,5,5,5,5,5,5,5,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[]
+) AS f)
+----
+true	8
+
+# -----------------------------------------------------------------------------
+# 8-arg full control
+# -----------------------------------------------------------------------------
+
+# Explicit min/max length range
+query II
+SELECT (f).passed, (f).fail_reason
+FROM (SELECT filter_read(
+    'ACGTACGTACGTACGTACGT',  -- 20bp
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    25, 0, 15, 40, 5, 0  -- min_length=25 (too short!)
+) AS f)
+----
+false	length
+
+# max_length enforced when >0
+query II
+SELECT (f).passed, (f).fail_reason
+FROM (SELECT filter_read(
+    'ACGTACGTACGTACGTACGT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    15, 18, 15, 40, 5, 0  -- max_length=18 (too long!)
+) AS f)
+----
+false	too_long
+
+# min_avg_q enforced
+query IIII
+SELECT (f).passed, (f).fail_reason, (f).mean_quality, (f).length
+FROM (SELECT filter_read(
+    'ACGTACGTACGTACGTACGT',
+    [15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15]::UTINYINT[],
+    15, 0, 10, 100, 1000, 20  -- min_avg_q=20, all Q15 mean=15
+) AS f)
+----
+false	quality	15.0	20
+
+# -----------------------------------------------------------------------------
+# fastp fail-reason precedence: low_qual% > avg_qual > n_base > length_min > length_max
+# A read failing multiple checks reports the FIRST in the chain.
+# -----------------------------------------------------------------------------
+
+# Read fails low_qual% AND n_base AND length_min — reports "quality" (low_qual checked first)
+query II
+SELECT (f).passed, (f).fail_reason
+FROM (SELECT filter_read(
+    'NNNNNACGT',  -- 9 bases (< min 15), 5 N's (== max_n, NOT fail), all Q5 (below Q15)
+    [5,5,5,5,5,5,5,5,5]::UTINYINT[]
+) AS f)
+----
+false	quality
+
+# Read fails n_base AND length_min — reports "n_base"
+# 12 bases, 6 N's (> 5 max), all Q40 (passes quality)
+query II
+SELECT (f).passed, (f).fail_reason
+FROM (SELECT filter_read(
+    'NNNNNNACGTAC',
+    [40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[]
+) AS f)
+----
+false	n_base
+
+# -----------------------------------------------------------------------------
+# Metrics struct: populated even when the read passes.
+# qual = [10,20,30,40] × 5 → mean = 25, low_qual = 5 (the 10s, all < Q15).
+# -----------------------------------------------------------------------------
+query IIIIII
+SELECT (f).passed, (f).fail_reason, (f).length, (f).n_bases, (f).low_qual_bases, (f).mean_quality
+FROM (SELECT filter_read(
+    'ACGTACGTACGTACGTACGN',  -- 20bp, 1 N
+    [10,20,30,40,10,20,30,40,10,20,30,40,10,20,30,40,10,20,30,40]::UTINYINT[]
+) AS f)
+----
+true	NULL	20	1	5	25.0
+
+# -----------------------------------------------------------------------------
+# Error / edge cases
+# -----------------------------------------------------------------------------
+
+# Mismatched seq/qual length throws
+statement error
+SELECT filter_read('ACGT', [40,40]::UTINYINT[])
+----
+length
+
+# NULL inputs propagate
+query I
+SELECT filter_read(NULL, [40,40]::UTINYINT[]) IS NULL
+----
+true
+
+query I
+SELECT filter_read('ACGT', NULL::UTINYINT[]) IS NULL
+----
+true

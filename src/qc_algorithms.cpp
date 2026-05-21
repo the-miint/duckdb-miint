@@ -424,4 +424,28 @@ AdapterMatch AdapterMatcher::find(const std::uint8_t *seq, std::size_t seq_len, 
 	return phase_indel(seq, seq_len, adapter, adapter_len, min_match, start_pos, /*insertion_in_seq=*/false);
 }
 
+// ---------------------------------------------------------------------------
+// ReadFilter — single-pass per-read metric computation
+// ---------------------------------------------------------------------------
+
+FilterMetrics ReadFilter::measure(const std::uint8_t *seq, const std::uint8_t *qual, std::size_t len,
+                                  std::uint8_t qualified_q) {
+	FilterMetrics m {};
+	m.length = static_cast<std::uint32_t>(len);
+	for (std::size_t i = 0; i < len; i++) {
+		const std::uint8_t s = seq[i];
+		// Case-insensitive N detection: 'N' (0x4E) and 'n' (0x6E) differ only
+		// in bit 5, so masking it off lets one comparison match both.
+		if ((s & 0xDF) == 'N') {
+			m.n_bases++;
+		}
+		const std::uint8_t q = qual[i];
+		if (q < qualified_q) {
+			m.low_qual_bases++;
+		}
+		m.qual_sum += q;
+	}
+	return m;
+}
+
 } // namespace miint::qc

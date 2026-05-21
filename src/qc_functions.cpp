@@ -543,6 +543,154 @@ static void TrimAdaptersListExecute(DataChunk &args, ExpressionState &state, Vec
 	TrimAdaptersExecuteImpl(args, result, /*adapter_is_list=*/true);
 }
 
+// ---------------------------------------------------------------------------
+// filter_read
+// ---------------------------------------------------------------------------
+
+static constexpr int32_t DEFAULT_FILTER_MIN_LENGTH = 15;
+static constexpr int32_t DEFAULT_FILTER_MAX_LENGTH = 0; // 0 means "off"
+static constexpr int32_t DEFAULT_FILTER_QUALIFIED_Q = 15;
+static constexpr int32_t DEFAULT_FILTER_MAX_UNQUAL_PCT = 40;
+static constexpr int32_t DEFAULT_FILTER_MAX_N = 5;
+static constexpr int32_t DEFAULT_FILTER_MIN_AVG_Q = 0; // 0 means "off"
+
+static LogicalType FilterResultStructType() {
+	return LogicalType::STRUCT({{"passed", LogicalType::BOOLEAN},
+	                            {"fail_reason", LogicalType::VARCHAR},
+	                            {"length", LogicalType::UINTEGER},
+	                            {"n_bases", LogicalType::UINTEGER},
+	                            {"low_qual_bases", LogicalType::UINTEGER},
+	                            {"mean_quality", LogicalType::FLOAT}});
+}
+
+static void FilterReadExecute(DataChunk &args, ExpressionState &state, Vector &result) {
+	const idx_t row_count = args.size();
+	const bool has_explicit_params = args.ColumnCount() == 8;
+
+	UnifiedVectorFormat seq_data, qual_data, p1_data, p2_data, p3_data, p4_data, p5_data, p6_data;
+	args.data[0].ToUnifiedFormat(row_count, seq_data);
+	args.data[1].ToUnifiedFormat(row_count, qual_data);
+	if (has_explicit_params) {
+		args.data[2].ToUnifiedFormat(row_count, p1_data);
+		args.data[3].ToUnifiedFormat(row_count, p2_data);
+		args.data[4].ToUnifiedFormat(row_count, p3_data);
+		args.data[5].ToUnifiedFormat(row_count, p4_data);
+		args.data[6].ToUnifiedFormat(row_count, p5_data);
+		args.data[7].ToUnifiedFormat(row_count, p6_data);
+	}
+
+	auto seq_ptr = UnifiedVectorFormat::GetData<string_t>(seq_data);
+	auto p1_ptr = has_explicit_params ? UnifiedVectorFormat::GetData<int32_t>(p1_data) : nullptr;
+	auto p2_ptr = has_explicit_params ? UnifiedVectorFormat::GetData<int32_t>(p2_data) : nullptr;
+	auto p3_ptr = has_explicit_params ? UnifiedVectorFormat::GetData<int32_t>(p3_data) : nullptr;
+	auto p4_ptr = has_explicit_params ? UnifiedVectorFormat::GetData<int32_t>(p4_data) : nullptr;
+	auto p5_ptr = has_explicit_params ? UnifiedVectorFormat::GetData<int32_t>(p5_data) : nullptr;
+	auto p6_ptr = has_explicit_params ? UnifiedVectorFormat::GetData<int32_t>(p6_data) : nullptr;
+
+	auto &entries = StructVector::GetEntries(result);
+	auto passed_data = FlatVector::GetData<bool>(*entries[0]);
+	auto &fail_reason_vec = *entries[1];
+	auto length_data = FlatVector::GetData<uint32_t>(*entries[2]);
+	auto n_bases_data = FlatVector::GetData<uint32_t>(*entries[3]);
+	auto low_qual_data = FlatVector::GetData<uint32_t>(*entries[4]);
+	auto mean_q_data = FlatVector::GetData<float>(*entries[5]);
+	auto &result_validity = FlatVector::Validity(result);
+	auto &fail_reason_validity = FlatVector::Validity(fail_reason_vec);
+
+	for (idx_t i = 0; i < row_count; i++) {
+		auto si = seq_data.sel->get_index(i);
+		auto qi = qual_data.sel->get_index(i);
+
+		bool all_valid = seq_data.validity.RowIsValid(si) && qual_data.validity.RowIsValid(qi);
+		if (has_explicit_params) {
+			all_valid = all_valid && p1_data.validity.RowIsValid(p1_data.sel->get_index(i)) &&
+			            p2_data.validity.RowIsValid(p2_data.sel->get_index(i)) &&
+			            p3_data.validity.RowIsValid(p3_data.sel->get_index(i)) &&
+			            p4_data.validity.RowIsValid(p4_data.sel->get_index(i)) &&
+			            p5_data.validity.RowIsValid(p5_data.sel->get_index(i)) &&
+			            p6_data.validity.RowIsValid(p6_data.sel->get_index(i));
+		}
+		if (!all_valid) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		const auto &seq = seq_ptr[si];
+		const uint8_t *qptr;
+		idx_t qlen;
+		GetQualListSlice(args.data[1], qual_data, i, qptr, qlen);
+		if (seq.GetSize() != qlen) {
+			throw InvalidInputException("filter_read: sequence length (%llu) does not match quality length (%llu)",
+			                            (unsigned long long)seq.GetSize(), (unsigned long long)qlen);
+		}
+
+		int32_t min_length = DEFAULT_FILTER_MIN_LENGTH;
+		int32_t max_length = DEFAULT_FILTER_MAX_LENGTH;
+		int32_t qualified_q = DEFAULT_FILTER_QUALIFIED_Q;
+		int32_t max_unqual_pct = DEFAULT_FILTER_MAX_UNQUAL_PCT;
+		int32_t max_n = DEFAULT_FILTER_MAX_N;
+		int32_t min_avg_q = DEFAULT_FILTER_MIN_AVG_Q;
+		if (has_explicit_params) {
+			min_length = p1_ptr[p1_data.sel->get_index(i)];
+			max_length = p2_ptr[p2_data.sel->get_index(i)];
+			qualified_q = p3_ptr[p3_data.sel->get_index(i)];
+			max_unqual_pct = p4_ptr[p4_data.sel->get_index(i)];
+			max_n = p5_ptr[p5_data.sel->get_index(i)];
+			min_avg_q = p6_ptr[p6_data.sel->get_index(i)];
+		}
+		if (min_length < 0 || max_length < 0 || qualified_q < 0 || qualified_q > 93 || max_unqual_pct < 0 ||
+		    max_unqual_pct > 100 || max_n < 0 || min_avg_q < 0 || min_avg_q > 93) {
+			throw InvalidInputException(
+			    "filter_read: parameter out of range (min_length>=0, max_length>=0, qualified_q in 0..93, "
+			    "max_unqualified_pct in 0..100, max_n>=0, min_avg_q in 0..93)");
+		}
+
+		// Empty seq is an immediate length failure — skip the metric pass.
+		if (seq.GetSize() == 0) {
+			passed_data[i] = false;
+			FlatVector::GetData<string_t>(fail_reason_vec)[i] = StringVector::AddString(fail_reason_vec, "length");
+			length_data[i] = 0;
+			n_bases_data[i] = 0;
+			low_qual_data[i] = 0;
+			mean_q_data[i] = 0.0f;
+			continue;
+		}
+
+		const auto seq_bytes = reinterpret_cast<const std::uint8_t *>(seq.GetData());
+		const auto m =
+		    miint::qc::ReadFilter::measure(seq_bytes, qptr, seq.GetSize(), static_cast<std::uint8_t>(qualified_q));
+		const float mean_q = static_cast<float>(m.qual_sum) / static_cast<float>(m.length);
+
+		// Apply fastp's fail-reason precedence: low_qual% → avg_qual →
+		// n_base → length_min → length_max. First failing check wins.
+		const char *fail_reason = nullptr;
+		// low_qual %: strictly > limit fails (matches fastp's `>` comparison)
+		if (static_cast<double>(m.low_qual_bases) * 100.0 >
+		    static_cast<double>(max_unqual_pct) * static_cast<double>(m.length)) {
+			fail_reason = "quality";
+		} else if (min_avg_q > 0 && mean_q < static_cast<float>(min_avg_q)) {
+			fail_reason = "quality";
+		} else if (static_cast<int32_t>(m.n_bases) > max_n) {
+			fail_reason = "n_base";
+		} else if (static_cast<int32_t>(m.length) < min_length) {
+			fail_reason = "length";
+		} else if (max_length > 0 && static_cast<int32_t>(m.length) > max_length) {
+			fail_reason = "too_long";
+		}
+
+		passed_data[i] = (fail_reason == nullptr);
+		if (fail_reason != nullptr) {
+			FlatVector::GetData<string_t>(fail_reason_vec)[i] = StringVector::AddString(fail_reason_vec, fail_reason);
+		} else {
+			fail_reason_validity.SetInvalid(i);
+		}
+		length_data[i] = m.length;
+		n_bases_data[i] = m.n_bases;
+		low_qual_data[i] = m.low_qual_bases;
+		mean_q_data[i] = mean_q;
+	}
+}
+
 // Register a trim_quality_* function with both the 2-arg (defaults) and 4-arg
 // (explicit window_size + mean_quality) overloads.
 static void RegisterTrimQualityFamily(ExtensionLoader &loader, const std::string &name, scalar_function_t fn) {
@@ -605,6 +753,26 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 		                        TrimResultStructType(), TrimPolyxExecute);
 		four_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 		set.AddFunction(four_arg);
+		loader.RegisterFunction(set);
+	}
+
+	// filter_read: 2-arg (defaults) + 8-arg (min_length, max_length, qualified_q,
+	// max_unqualified_pct, max_n, min_avg_q).
+	{
+		ScalarFunctionSet set("filter_read");
+		const auto qual_t = LogicalType::LIST(LogicalType::UTINYINT);
+		const auto i = LogicalType::INTEGER;
+
+		ScalarFunction two_arg("filter_read", {LogicalType::VARCHAR, qual_t}, FilterResultStructType(),
+		                       FilterReadExecute);
+		two_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		set.AddFunction(two_arg);
+
+		ScalarFunction eight_arg("filter_read", {LogicalType::VARCHAR, qual_t, i, i, i, i, i, i},
+		                         FilterResultStructType(), FilterReadExecute);
+		eight_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		set.AddFunction(eight_arg);
+
 		loader.RegisterFunction(set);
 	}
 

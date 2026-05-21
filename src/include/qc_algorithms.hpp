@@ -79,6 +79,28 @@ public:
 	                         std::size_t adapter_len, std::size_t min_match, bool allow_pre_start);
 };
 
+// Per-read filter metrics — computed once in a single pass over seq+qual.
+// All four threshold checks (low-qual %, avg quality, N count, length) are
+// derived from these fields, so the user can audit failure modes via the
+// scalar's STRUCT return without re-walking the bases.
+struct FilterMetrics {
+	std::uint32_t length;
+	std::uint32_t n_bases;        // count of seq bases == 'N' (case-insensitive)
+	std::uint32_t low_qual_bases; // count of qual bytes strictly < qualified_q
+	std::uint64_t qual_sum;       // sum of Phred values (uint64 keeps headroom even for huge inputs)
+};
+
+class ReadFilter {
+public:
+	// Single pass over seq+qual computing all metrics. Threshold application
+	// happens at the scalar layer so the metric struct can be reused for
+	// auditing and for fastp-style precedence ordering.
+	//
+	// `seq` may be nullptr iff `len == 0`. Likewise for `qual`.
+	static FilterMetrics measure(const std::uint8_t *seq, const std::uint8_t *qual, std::size_t len,
+	                             std::uint8_t qualified_q);
+};
+
 class PolyXScanner {
 public:
 	// scan_polyg: identify a polyG run at the 3' end and return the trim point.

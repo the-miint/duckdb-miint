@@ -8,7 +8,9 @@
 
 using miint::qc::AdapterMatch;
 using miint::qc::AdapterMatcher;
+using miint::qc::FilterMetrics;
 using miint::qc::PolyXScanner;
+using miint::qc::ReadFilter;
 using miint::qc::SlidingWindowTrimmer;
 using miint::qc::TrimResult;
 
@@ -505,5 +507,67 @@ TEST_CASE("AdapterMatcher::find pre-start behavior", "[qc][adapter]") {
 		const std::string read_visible = adapter.substr(3) + "ACGT";
 		auto m = AdapterMatcher::find(bp(read_visible), read_visible.size(), bp(adapter), adapter.size(), 4, false);
 		CHECK_FALSE(m.matched);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ReadFilter::measure — single-pass metric computation
+// ---------------------------------------------------------------------------
+TEST_CASE("ReadFilter::measure", "[qc][filter]") {
+	SECTION("mixed quality buffer counts low-qual, N, and sums correctly") {
+		// Seq:  A C G T N A C G T N (10 bases, 2 N's)
+		// Qual: 5 5 5 5 5 40 40 40 40 40 (5 low-qual, 5 high-qual; qualified_q=15)
+		// Sum = 25 + 200 = 225
+		auto s = seq_bytes("ACGTNACGTN");
+		std::vector<std::uint8_t> q = {5, 5, 5, 5, 5, 40, 40, 40, 40, 40};
+		auto m = ReadFilter::measure(s.data(), q.data(), 10, 15);
+		CHECK(m.length == 10);
+		CHECK(m.n_bases == 2);
+		CHECK(m.low_qual_bases == 5);
+		CHECK(m.qual_sum == 225);
+	}
+
+	SECTION("all-N sequence sets n_bases == length") {
+		auto s = seq_bytes("NNNNN");
+		std::vector<std::uint8_t> q(5, 40);
+		auto m = ReadFilter::measure(s.data(), q.data(), 5, 15);
+		CHECK(m.n_bases == 5);
+		CHECK(m.low_qual_bases == 0);
+	}
+
+	SECTION("all high quality: low_qual_bases == 0") {
+		auto s = seq_bytes("ACGT");
+		std::vector<std::uint8_t> q = {40, 40, 40, 40};
+		auto m = ReadFilter::measure(s.data(), q.data(), 4, 15);
+		CHECK(m.low_qual_bases == 0);
+		CHECK(m.qual_sum == 160);
+	}
+
+	SECTION("quality exactly at threshold is NOT low-quality (>= passes)") {
+		// qualified_q = 15 means qual < 15 is low-quality. Q15 is qualified.
+		std::vector<std::uint8_t> q = {15, 15, 15};
+		auto m = ReadFilter::measure(nullptr, q.data(), 0, 15);
+		CHECK(m.length == 0); // empty seq path
+		// Use a real seq for the actual threshold test:
+		auto s = seq_bytes("ACG");
+		auto m2 = ReadFilter::measure(s.data(), q.data(), 3, 15);
+		CHECK(m2.low_qual_bases == 0);
+		auto m3 = ReadFilter::measure(s.data(), q.data(), 3, 16);
+		CHECK(m3.low_qual_bases == 3);
+	}
+
+	SECTION("case-insensitive N detection (n counts too)") {
+		auto s = seq_bytes("AnNg");
+		std::vector<std::uint8_t> q = {40, 40, 40, 40};
+		auto m = ReadFilter::measure(s.data(), q.data(), 4, 15);
+		CHECK(m.n_bases == 2);
+	}
+
+	SECTION("empty input — all zeros") {
+		auto m = ReadFilter::measure(nullptr, nullptr, 0, 15);
+		CHECK(m.length == 0);
+		CHECK(m.n_bases == 0);
+		CHECK(m.low_qual_bases == 0);
+		CHECK(m.qual_sum == 0);
 	}
 }
