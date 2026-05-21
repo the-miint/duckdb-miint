@@ -251,4 +251,166 @@ TrimResult PolyXScanner::scan_polyx(const std::uint8_t *seq, std::size_t len, st
 	return {0, first_x_pos};
 }
 
+// ---------------------------------------------------------------------------
+// AdapterMatcher — 3-phase port of fastp's adapter trimming
+// ---------------------------------------------------------------------------
+//
+// Phase 1: scan candidate positions left-to-right. At each position, compare
+// adapter vs seq with a tolerance of cmplen/8 mismatches. Return first match.
+//
+// Phase 2: same scan but allow exactly one insertion in seq (seq has one
+// extra base relative to adapter). Two-pointer walk; on first mismatch, skip
+// a seq base and continue. Mismatches AFTER the indel still count.
+//
+// Phase 3: same as phase 2 but the indel is a deletion in seq (seq missing
+// one base). On first mismatch, skip an adapter base.
+//
+// Phases are tried in order; first to find a match wins.
+
+namespace {
+
+constexpr std::uint32_t ADAPTER_ONE_PER_8 = 8;
+
+// fastp's pre-start offset: -min(4, max(2, adapter_len/2)). For short
+// adapters use a smaller offset; cap at -4 for typical 13bp adapters.
+inline int pre_start_offset(std::size_t adapter_len) {
+	int half = static_cast<int>(adapter_len / 2);
+	if (half > 4) {
+		half = 4;
+	}
+	if (half < 2) {
+		half = 2;
+	}
+	return -half;
+}
+
+// Phase 1: scan and return first match by exact-Hamming-with-tolerance.
+AdapterMatch phase1_hamming(const std::uint8_t *seq, std::size_t seq_len, const std::uint8_t *adapter,
+                            std::size_t adapter_len, std::size_t min_match, int start_pos) {
+	const int seq_len_i = static_cast<int>(seq_len);
+	const int adapter_len_i = static_cast<int>(adapter_len);
+	const int min_match_i = static_cast<int>(min_match);
+
+	for (int pos = start_pos; pos + min_match_i <= seq_len_i; pos++) {
+		const int adapter_off = pos < 0 ? -pos : 0;
+		const int seq_off = pos < 0 ? 0 : pos;
+		const int cmplen = std::min(seq_len_i - seq_off, adapter_len_i - adapter_off);
+		if (cmplen < min_match_i) {
+			continue;
+		}
+
+		const std::uint32_t allowed = static_cast<std::uint32_t>(cmplen / ADAPTER_ONE_PER_8);
+		std::uint32_t mismatches = 0;
+		bool ok = true;
+		for (int i = 0; i < cmplen; i++) {
+			if (adapter[adapter_off + i] != seq[seq_off + i]) {
+				mismatches++;
+				if (mismatches > allowed) {
+					ok = false;
+					break;
+				}
+			}
+		}
+		if (ok) {
+			AdapterMatch m;
+			m.matched = true;
+			m.trim_start = static_cast<std::size_t>(seq_off);
+			m.match_len = static_cast<std::size_t>(cmplen);
+			m.mismatches = mismatches;
+			m.indels = 0;
+			return m;
+		}
+	}
+	return {};
+}
+
+// Phase 2/3 shared body. `insertion_in_seq` selects direction:
+//   true  → seq has one extra base (skip seq on first mismatch)
+//   false → seq is missing one base (skip adapter on first mismatch)
+AdapterMatch phase_indel(const std::uint8_t *seq, std::size_t seq_len, const std::uint8_t *adapter,
+                         std::size_t adapter_len, std::size_t min_match, int start_pos, bool insertion_in_seq) {
+	const int seq_len_i = static_cast<int>(seq_len);
+	const int adapter_len_i = static_cast<int>(adapter_len);
+	const int min_match_i = static_cast<int>(min_match);
+
+	for (int pos = start_pos; pos + min_match_i <= seq_len_i; pos++) {
+		const int adapter_off = pos < 0 ? -pos : 0;
+		const int seq_off = pos < 0 ? 0 : pos;
+		const int adapter_remain = adapter_len_i - adapter_off;
+		const int seq_remain = seq_len_i - seq_off;
+		if (adapter_remain < min_match_i) {
+			continue;
+		}
+
+		const int seq_region_len = insertion_in_seq ? adapter_remain + 1 : adapter_remain - 1;
+		if (seq_region_len < min_match_i) {
+			continue;
+		}
+		if (seq_remain < seq_region_len) {
+			continue;
+		}
+
+		const std::uint32_t allowed = static_cast<std::uint32_t>(adapter_remain / ADAPTER_ONE_PER_8);
+		std::uint32_t mismatches = 0;
+		bool indel_used = false;
+		int ai = 0;
+		int si = 0;
+		bool ok = true;
+		while (ai < adapter_remain && si < seq_region_len) {
+			if (adapter[adapter_off + ai] == seq[seq_off + si]) {
+				ai++;
+				si++;
+				continue;
+			}
+			if (!indel_used) {
+				indel_used = true;
+				if (insertion_in_seq) {
+					si++;
+				} else {
+					ai++;
+				}
+				continue;
+			}
+			mismatches++;
+			if (mismatches > allowed) {
+				ok = false;
+				break;
+			}
+			ai++;
+			si++;
+		}
+		if (ok && indel_used) {
+			AdapterMatch m;
+			m.matched = true;
+			m.trim_start = static_cast<std::size_t>(seq_off);
+			m.match_len = static_cast<std::size_t>(seq_region_len);
+			m.mismatches = mismatches;
+			m.indels = 1;
+			return m;
+		}
+	}
+	return {};
+}
+
+} // namespace
+
+AdapterMatch AdapterMatcher::find(const std::uint8_t *seq, std::size_t seq_len, const std::uint8_t *adapter,
+                                  std::size_t adapter_len, std::size_t min_match, bool allow_pre_start) {
+	if (min_match == 0 || adapter_len == 0 || seq_len == 0 || seq_len < min_match) {
+		return {};
+	}
+
+	const int start_pos = allow_pre_start ? pre_start_offset(adapter_len) : 0;
+
+	auto m = phase1_hamming(seq, seq_len, adapter, adapter_len, min_match, start_pos);
+	if (m.matched) {
+		return m;
+	}
+	m = phase_indel(seq, seq_len, adapter, adapter_len, min_match, start_pos, /*insertion_in_seq=*/true);
+	if (m.matched) {
+		return m;
+	}
+	return phase_indel(seq, seq_len, adapter, adapter_len, min_match, start_pos, /*insertion_in_seq=*/false);
+}
+
 } // namespace miint::qc

@@ -6,9 +6,16 @@
 
 #include <qc_algorithms.hpp>
 
+using miint::qc::AdapterMatch;
+using miint::qc::AdapterMatcher;
 using miint::qc::PolyXScanner;
 using miint::qc::SlidingWindowTrimmer;
 using miint::qc::TrimResult;
+
+// Helper: byte view over a string literal.
+static const std::uint8_t *bp(const std::string &s) {
+	return reinterpret_cast<const std::uint8_t *>(s.data());
+}
 
 // Helper: convert ASCII sequence string to uint8 buffer (no quality).
 static std::vector<std::uint8_t> seq_bytes(const std::string &s) {
@@ -338,5 +345,150 @@ TEST_CASE("PolyXScanner::scan_polyx", "[qc][poly]") {
 		auto r = PolyXScanner::scan_polyx(s.data(), s.size(), 4, 5);
 		CHECK(r.start == 0);
 		CHECK(r.end == 4);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AdapterMatcher::find — 3-phase fastp port (exact Hamming, +1 insert, +1 delete)
+// ---------------------------------------------------------------------------
+TEST_CASE("AdapterMatcher::find phase 1 (exact Hamming)", "[qc][adapter]") {
+	const std::string adapter = "AGATCGGAAGAGC"; // 13bp, TruSeq R1
+
+	SECTION("exact match at 3' end") {
+		const std::string seq = "ACGTACGT" + adapter; // 21bp; adapter starts at 8
+		auto m = AdapterMatcher::find(bp(seq), seq.size(), bp(adapter), adapter.size(), 4, false);
+		REQUIRE(m.matched);
+		CHECK(m.trim_start == 8);
+		CHECK(m.match_len == 13);
+		CHECK(m.mismatches == 0);
+		CHECK(m.indels == 0);
+	}
+
+	SECTION("exact match at 3' end with one allowed mismatch") {
+		// Adapter at pos 8 with one mismatch in middle. cmplen=13, allowed=1.
+		std::string seq = "ACGTACGTAGATCGGAAGAGC";
+		seq[14] = 'T'; // was 'G' — one mismatch
+		auto m = AdapterMatcher::find(bp(seq), seq.size(), bp(adapter), adapter.size(), 4, false);
+		REQUIRE(m.matched);
+		CHECK(m.trim_start == 8);
+		CHECK(m.match_len == 13);
+		CHECK(m.mismatches == 1);
+	}
+
+	SECTION("too many mismatches — no match") {
+		// cmplen=13, allowed=1, but 3 mismatches.
+		std::string seq = "ACGTACGTAGATCGGAAGAGC";
+		seq[14] = 'T';
+		seq[15] = 'T';
+		seq[16] = 'T';
+		auto m = AdapterMatcher::find(bp(seq), seq.size(), bp(adapter), adapter.size(), 4, false);
+		CHECK_FALSE(m.matched);
+	}
+
+	SECTION("partial match at very end — at least min_match bases") {
+		// Only the first 5 bases of the adapter present at the read end.
+		const std::string seq = "ACGTACGTACGTAGATC";
+		auto m = AdapterMatcher::find(bp(seq), seq.size(), bp(adapter), adapter.size(), 4, false);
+		REQUIRE(m.matched);
+		CHECK(m.trim_start == 12);
+		CHECK(m.match_len == 5);
+		CHECK(m.mismatches == 0);
+	}
+
+	SECTION("partial match below min_match — no match") {
+		// Only 3 bases visible; min_match=4 — should NOT match.
+		const std::string seq = "ACGTACGTACGTACAGA";
+		auto m = AdapterMatcher::find(bp(seq), seq.size(), bp(adapter), adapter.size(), 4, false);
+		CHECK_FALSE(m.matched);
+	}
+
+	SECTION("leftmost match wins when multiple possible positions") {
+		// Plant the adapter twice; leftmost (most 5') wins — that's the
+		// biologically correct adapter start.
+		const std::string seq = "AAAAAAAAAGATCGGAAGAGCAAAGATCGGAAGAGC";
+		auto m = AdapterMatcher::find(bp(seq), seq.size(), bp(adapter), adapter.size(), 4, false);
+		REQUIRE(m.matched);
+		CHECK(m.trim_start == 8); // earlier of the two matches
+	}
+
+	SECTION("no match found") {
+		const std::string seq = "ACGTACGTACGTACGTACGT";
+		auto m = AdapterMatcher::find(bp(seq), seq.size(), bp(adapter), adapter.size(), 4, false);
+		CHECK_FALSE(m.matched);
+	}
+}
+
+TEST_CASE("AdapterMatcher::find phase 2 (insertion in seq)", "[qc][adapter]") {
+	const std::string adapter = "AGATCGGAAGAGC"; // 13bp
+
+	SECTION("seq has one inserted base in the middle of the adapter") {
+		// "AGATC" + 'X' + "GGAAGAGC" — adapter with extra X at position 5
+		const std::string seq = "ACGTACGTAGATCXGGAAGAGC"; // 22bp; adapter region starts at 8
+		auto m = AdapterMatcher::find(bp(seq), seq.size(), bp(adapter), adapter.size(), 4, false);
+		REQUIRE(m.matched);
+		CHECK(m.trim_start == 8);
+		CHECK(m.indels == 1);
+		CHECK(m.match_len == 14); // adapter_len + 1
+	}
+
+	SECTION("insertion + 1 mismatch within tolerance") {
+		// Insert + one substitution; cmplen=14 (adapter+1), allowed=14/8=1.
+		// Wait: allowed is based on adapter_len for indel phases. allowed=13/8=1.
+		std::string seq = "ACGTACGTAGATCXGGAAGAGC";
+		seq[16] = 'T'; // was 'G' — one mismatch after the insertion
+		auto m = AdapterMatcher::find(bp(seq), seq.size(), bp(adapter), adapter.size(), 4, false);
+		REQUIRE(m.matched);
+		CHECK(m.trim_start == 8);
+		CHECK(m.indels == 1);
+		CHECK(m.mismatches == 1);
+	}
+}
+
+TEST_CASE("AdapterMatcher::find phase 3 (deletion in seq)", "[qc][adapter]") {
+	const std::string adapter = "AGATCGGAAGAGC"; // 13bp
+
+	SECTION("seq is missing one base from the adapter") {
+		// Adapter minus the 'C' at position 5 → "AGATCGAAGAGC" (12bp)
+		const std::string seq = "ACGTACGTAGATCGAAGAGC"; // 20bp; adapter region at 8
+		auto m = AdapterMatcher::find(bp(seq), seq.size(), bp(adapter), adapter.size(), 4, false);
+		REQUIRE(m.matched);
+		CHECK(m.trim_start == 8);
+		CHECK(m.indels == 1);
+		CHECK(m.match_len == 12); // adapter_len - 1
+	}
+}
+
+TEST_CASE("AdapterMatcher::find pre-start behavior", "[qc][adapter]") {
+	const std::string adapter = "AGATCGGAAGAGC"; // 13bp
+
+	SECTION("adapter starting exactly at seq[0] matches without pre-start") {
+		// Adapter literally starts at the read's first base. This is a normal
+		// phase-1 match at pos=0 (not a pre-start case), so allow_pre_start has
+		// no effect here. trim_start=0 means the whole read is trimmed.
+		const std::string seq = adapter + "ACGTACGT";
+		auto m = AdapterMatcher::find(bp(seq), seq.size(), bp(adapter), adapter.size(), 4, false);
+		REQUIRE(m.matched);
+		CHECK(m.trim_start == 0);
+	}
+
+	SECTION("pre-start adapter overlap with allow_pre_start=true drops whole read") {
+		// Adapter overlaps seq[0] by being partially in the seq: the first ~3 bases
+		// of the adapter are missing (they conceptually live to the LEFT of seq[0]).
+		// Read = adapter[3..] + tail
+		const std::string read_visible = adapter.substr(3) + "ACGT"; // 10+4=14bp
+		auto m = AdapterMatcher::find(bp(read_visible), read_visible.size(), bp(adapter), adapter.size(), 4, true);
+		REQUIRE(m.matched);
+		// Pre-start matches anchor at seq position 0 — whole read gets trimmed.
+		CHECK(m.trim_start == 0);
+	}
+
+	SECTION("pre-start adapter overlap with allow_pre_start=false — no match") {
+		// Same seq but without the flag. The visible adapter region (10bp) is
+		// shorter than the full adapter, but pos=0 + cmplen=10 with adapter[0..10)
+		// would need to match seq[0..10) which it doesn't (seq has adapter[3..]).
+		// So no match found.
+		const std::string read_visible = adapter.substr(3) + "ACGT";
+		auto m = AdapterMatcher::find(bp(read_visible), read_visible.size(), bp(adapter), adapter.size(), 4, false);
+		CHECK_FALSE(m.matched);
 	}
 }

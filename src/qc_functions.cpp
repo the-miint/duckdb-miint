@@ -4,10 +4,12 @@
 #include "duckdb/function/scalar_function.hpp"
 
 #include "qc_algorithms.hpp"
+#include "sequence_utils.hpp"
 
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace duckdb {
 
@@ -345,6 +347,202 @@ static void TrimPolyxExecute(DataChunk &args, ExpressionState &state, Vector &re
 	}
 }
 
+// ---------------------------------------------------------------------------
+// trim_adapters
+// ---------------------------------------------------------------------------
+
+// fastp's auto-scaling: shorter adapter lists get a more lenient min_match.
+// Exposed so the caller can override by passing min_match >= 1.
+static std::size_t default_min_match(std::size_t n_adapters) {
+	if (n_adapters >= 4) {
+		return 6;
+	}
+	if (n_adapters >= 2) {
+		return 5;
+	}
+	return 4;
+}
+
+// Reverse-complement a DNA string using the shared complement table. Rejects
+// any byte that isn't a valid IUPAC code (table maps it to 0).
+static std::string dna_revcomp(const std::string &s) {
+	std::string rc(s.size(), '\0');
+	for (std::size_t i = 0; i < s.size(); i++) {
+		const char c = miint::DNA_COMPLEMENT_TABLE[static_cast<unsigned char>(s[i])];
+		if (c == 0) {
+			throw InvalidInputException("trim_adapters: invalid DNA base '%c' in adapter sequence", s[i]);
+		}
+		rc[s.size() - 1 - i] = c;
+	}
+	return rc;
+}
+
+// Extract adapter strings from one row of the adapter argument. Handles both
+// the VARCHAR overload (single adapter, never NULL — caller already guarded)
+// and the LIST(VARCHAR) overload (multiple adapters; NULL or empty elements
+// are silently skipped).
+//
+// Returns adapters as owned strings since we may also need to extend with
+// reverse complements.
+static std::vector<std::string> ExtractAdapters(Vector &arg_vec, UnifiedVectorFormat &arg_data, idx_t row_idx,
+                                                bool is_list) {
+	std::vector<std::string> out;
+	if (is_list) {
+		auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(arg_data);
+		auto mapped = arg_data.sel->get_index(row_idx);
+		const auto &entry = list_entries[mapped];
+
+		auto &child = ListVector::GetEntry(arg_vec);
+		UnifiedVectorFormat child_data;
+		child.ToUnifiedFormat(ListVector::GetListSize(arg_vec), child_data);
+		auto child_strings = UnifiedVectorFormat::GetData<string_t>(child_data);
+
+		out.reserve(entry.length);
+		for (idx_t k = 0; k < entry.length; k++) {
+			auto child_idx = child_data.sel->get_index(entry.offset + k);
+			if (!child_data.validity.RowIsValid(child_idx)) {
+				continue;
+			}
+			const auto &s = child_strings[child_idx];
+			if (s.GetSize() == 0) {
+				continue;
+			}
+			out.emplace_back(s.GetData(), s.GetSize());
+		}
+	} else {
+		auto strings = UnifiedVectorFormat::GetData<string_t>(arg_data);
+		auto mapped = arg_data.sel->get_index(row_idx);
+		const auto &s = strings[mapped];
+		if (s.GetSize() > 0) {
+			out.emplace_back(s.GetData(), s.GetSize());
+		}
+	}
+	return out;
+}
+
+// Shared trim_adapters execution. arg layout (the function set picks):
+//   args[0] seq VARCHAR
+//   args[1] qual LIST(UTINYINT)
+//   args[2] adapter VARCHAR or LIST(VARCHAR)
+//   args[3..5] (optional 6-arg form): match_revcomp BOOLEAN, min_match INTEGER, allow_pre_start BOOLEAN
+static void TrimAdaptersExecuteImpl(DataChunk &args, Vector &result, bool adapter_is_list) {
+	const idx_t row_count = args.size();
+	const bool has_explicit_params = args.ColumnCount() == 6;
+
+	UnifiedVectorFormat seq_data, qual_data, adapter_data, revcomp_data, minmatch_data, prestart_data;
+	args.data[0].ToUnifiedFormat(row_count, seq_data);
+	args.data[1].ToUnifiedFormat(row_count, qual_data);
+	args.data[2].ToUnifiedFormat(row_count, adapter_data);
+	if (has_explicit_params) {
+		args.data[3].ToUnifiedFormat(row_count, revcomp_data);
+		args.data[4].ToUnifiedFormat(row_count, minmatch_data);
+		args.data[5].ToUnifiedFormat(row_count, prestart_data);
+	}
+
+	auto seq_ptr = UnifiedVectorFormat::GetData<string_t>(seq_data);
+	auto revcomp_ptr = has_explicit_params ? UnifiedVectorFormat::GetData<bool>(revcomp_data) : nullptr;
+	auto minmatch_ptr = has_explicit_params ? UnifiedVectorFormat::GetData<int32_t>(minmatch_data) : nullptr;
+	auto prestart_ptr = has_explicit_params ? UnifiedVectorFormat::GetData<bool>(prestart_data) : nullptr;
+
+	auto &entries = StructVector::GetEntries(result);
+	auto &seq_out_vec = *entries[0];
+	auto &qual_out_vec = *entries[1];
+	auto trimmed_5p_data = FlatVector::GetData<uint32_t>(*entries[2]);
+	auto trimmed_3p_data = FlatVector::GetData<uint32_t>(*entries[3]);
+	auto &result_validity = FlatVector::Validity(result);
+
+	auto qual_out_entries = FlatVector::GetData<list_entry_t>(qual_out_vec);
+	idx_t qual_child_offset = ListVector::GetListSize(qual_out_vec);
+
+	for (idx_t i = 0; i < row_count; i++) {
+		auto si = seq_data.sel->get_index(i);
+		auto qi = qual_data.sel->get_index(i);
+		auto ai = adapter_data.sel->get_index(i);
+
+		bool all_valid = seq_data.validity.RowIsValid(si) && qual_data.validity.RowIsValid(qi) &&
+		                 adapter_data.validity.RowIsValid(ai);
+		if (has_explicit_params) {
+			all_valid = all_valid && revcomp_data.validity.RowIsValid(revcomp_data.sel->get_index(i)) &&
+			            minmatch_data.validity.RowIsValid(minmatch_data.sel->get_index(i)) &&
+			            prestart_data.validity.RowIsValid(prestart_data.sel->get_index(i));
+		}
+		if (!all_valid) {
+			result_validity.SetInvalid(i);
+			qual_out_entries[i].offset = qual_child_offset;
+			qual_out_entries[i].length = 0;
+			continue;
+		}
+
+		const auto &seq = seq_ptr[si];
+		const uint8_t *qptr;
+		idx_t qlen;
+		GetQualListSlice(args.data[1], qual_data, i, qptr, qlen);
+		if (seq.GetSize() != qlen) {
+			throw InvalidInputException("trim_adapters: sequence length (%llu) does not match quality length (%llu)",
+			                            (unsigned long long)seq.GetSize(), (unsigned long long)qlen);
+		}
+
+		auto adapters = ExtractAdapters(args.data[2], adapter_data, i, adapter_is_list);
+
+		bool match_revcomp = false;
+		int32_t min_match_param = 0;
+		bool allow_pre_start = false;
+		if (has_explicit_params) {
+			match_revcomp = revcomp_ptr[revcomp_data.sel->get_index(i)];
+			min_match_param = minmatch_ptr[minmatch_data.sel->get_index(i)];
+			allow_pre_start = prestart_ptr[prestart_data.sel->get_index(i)];
+		}
+		if (min_match_param < 0) {
+			throw InvalidInputException("trim_adapters: min_match must be >= 0 (got %d; 0 means use default)",
+			                            min_match_param);
+		}
+		const std::size_t min_match =
+		    min_match_param > 0 ? static_cast<std::size_t>(min_match_param) : default_min_match(adapters.size());
+
+		// Build full candidate list with optional RCs.
+		std::vector<std::string> candidates;
+		candidates.reserve(adapters.size() * (match_revcomp ? 2 : 1));
+		for (const auto &a : adapters) {
+			candidates.push_back(a);
+		}
+		if (match_revcomp) {
+			for (const auto &a : adapters) {
+				candidates.push_back(dna_revcomp(a));
+			}
+		}
+
+		// Run all candidates; take the leftmost trim_start across all matches.
+		miint::qc::TrimResult tr {0, seq.GetSize()};
+		const auto seq_bytes = reinterpret_cast<const std::uint8_t *>(seq.GetData());
+		std::size_t best_trim_start = seq.GetSize();
+		for (const auto &cand : candidates) {
+			if (cand.size() < min_match) {
+				continue;
+			}
+			auto m = miint::qc::AdapterMatcher::find(seq_bytes, seq.GetSize(),
+			                                         reinterpret_cast<const std::uint8_t *>(cand.data()), cand.size(),
+			                                         min_match, allow_pre_start);
+			if (m.matched && m.trim_start < best_trim_start) {
+				best_trim_start = m.trim_start;
+			}
+		}
+		if (best_trim_start < seq.GetSize()) {
+			tr.end = best_trim_start;
+		}
+
+		WriteTrimRow(i, seq, qptr, qlen, tr, seq_out_vec, qual_out_vec, qual_out_entries, qual_child_offset,
+		             trimmed_5p_data, trimmed_3p_data);
+	}
+}
+
+static void TrimAdaptersVarcharExecute(DataChunk &args, ExpressionState &state, Vector &result) {
+	TrimAdaptersExecuteImpl(args, result, /*adapter_is_list=*/false);
+}
+
+static void TrimAdaptersListExecute(DataChunk &args, ExpressionState &state, Vector &result) {
+	TrimAdaptersExecuteImpl(args, result, /*adapter_is_list=*/true);
+}
+
 // Register a trim_quality_* function with both the 2-arg (defaults) and 4-arg
 // (explicit window_size + mean_quality) overloads.
 static void RegisterTrimQualityFamily(ExtensionLoader &loader, const std::string &name, scalar_function_t fn) {
@@ -407,6 +605,40 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 		                        TrimResultStructType(), TrimPolyxExecute);
 		four_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 		set.AddFunction(four_arg);
+		loader.RegisterFunction(set);
+	}
+
+	// trim_adapters: 4 overloads — {VARCHAR, LIST(VARCHAR)} adapter × {3-arg defaults,
+	// 6-arg full (match_revcomp, min_match, allow_pre_start)}.
+	{
+		ScalarFunctionSet set("trim_adapters");
+		const auto qual_t = LogicalType::LIST(LogicalType::UTINYINT);
+		const auto adapter_list_t = LogicalType::LIST(LogicalType::VARCHAR);
+
+		ScalarFunction varchar_3arg("trim_adapters", {LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR},
+		                            TrimResultStructType(), TrimAdaptersVarcharExecute);
+		varchar_3arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		set.AddFunction(varchar_3arg);
+
+		ScalarFunction list_3arg("trim_adapters", {LogicalType::VARCHAR, qual_t, adapter_list_t},
+		                         TrimResultStructType(), TrimAdaptersListExecute);
+		list_3arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		set.AddFunction(list_3arg);
+
+		ScalarFunction varchar_6arg("trim_adapters",
+		                            {LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR, LogicalType::BOOLEAN,
+		                             LogicalType::INTEGER, LogicalType::BOOLEAN},
+		                            TrimResultStructType(), TrimAdaptersVarcharExecute);
+		varchar_6arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		set.AddFunction(varchar_6arg);
+
+		ScalarFunction list_6arg("trim_adapters",
+		                         {LogicalType::VARCHAR, qual_t, adapter_list_t, LogicalType::BOOLEAN,
+		                          LogicalType::INTEGER, LogicalType::BOOLEAN},
+		                         TrimResultStructType(), TrimAdaptersListExecute);
+		list_6arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		set.AddFunction(list_6arg);
+
 		loader.RegisterFunction(set);
 	}
 }

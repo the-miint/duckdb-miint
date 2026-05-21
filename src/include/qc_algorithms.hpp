@@ -42,6 +42,43 @@ public:
 	                               std::uint8_t mean_quality);
 };
 
+// Adapter match record. `trim_start` is the leftmost seq index removed
+// (kept range is [0, trim_start)); `match_len` is the number of seq bases
+// matched (which differs from adapter_len when an indel is used). For a
+// pre-start match (adapter overlaps seq[0] from the left), `trim_start` is
+// 0 and the entire read should be dropped.
+struct AdapterMatch {
+	bool matched = false;
+	std::size_t trim_start = 0;
+	std::size_t match_len = 0;
+	std::uint32_t mismatches = 0;
+	std::uint32_t indels = 0;
+};
+
+class AdapterMatcher {
+public:
+	// 3-phase adapter search ported from fastp:
+	//   phase 1: exact Hamming with 1 mismatch per 8 compared bases
+	//   phase 2: phase 1 + one insertion in seq (seq has one extra base)
+	//   phase 3: phase 1 + one deletion in seq (seq missing one base)
+	// Phases are tried in order; the first phase that finds a match wins.
+	// Within a phase, the LEFTMOST match wins (fastp's behavior — the leftmost
+	// hit is the most likely true adapter start; "best match" ranking would
+	// over-trim on genomic chatter that happens to match late in the read).
+	//
+	// `min_match` is the minimum length of compared region required for a
+	// match. fastp auto-scales this 4..6 based on adapter list size; here we
+	// expose it explicitly so the caller can pass an appropriate value.
+	//
+	// If `allow_pre_start`, the scan starts at a small negative offset so an
+	// adapter that begins before seq[0] can still match. A pre-start match
+	// returns `trim_start = 0`, indicating the entire read should be dropped.
+	// Default off — fastp turns this on unconditionally for A-tailing, but
+	// most non-Illumina protocols don't need it and it can over-trim.
+	static AdapterMatch find(const std::uint8_t *seq, std::size_t seq_len, const std::uint8_t *adapter,
+	                         std::size_t adapter_len, std::size_t min_match, bool allow_pre_start);
+};
+
 class PolyXScanner {
 public:
 	// scan_polyg: identify a polyG run at the 3' end and return the trim point.

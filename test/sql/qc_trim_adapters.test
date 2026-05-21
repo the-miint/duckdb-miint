@@ -1,0 +1,205 @@
+# name: test/sql/qc_trim_adapters.test
+# description: Tests for trim_adapters scalar (3-phase fastp port)
+# group: [sql]
+
+require miint
+
+# -----------------------------------------------------------------------------
+# VARCHAR adapter overload — 3-arg form (defaults: no RC, no pre-start,
+# min_match auto-scales to 4 for a single adapter)
+# -----------------------------------------------------------------------------
+
+# Exact match at 3' end — trim
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_adapters(
+    'ACGTACGTAGATCGGAAGAGC',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'AGATCGGAAGAGC'
+) AS t)
+----
+ACGTACGT	0	13
+
+# No adapter present — no trim
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_adapters(
+    'ACGTACGTACGTACGTACGT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'AGATCGGAAGAGC'
+) AS t)
+----
+ACGTACGTACGTACGTACGT	0	0
+
+# Match with 1 mismatch within 1/8 tolerance (cmplen=13, allowed=1)
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_adapters(
+    'ACGTACGTAGATCTGAAGAGC',  -- one mismatch at position 13 (T instead of G)
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'AGATCGGAAGAGC'
+) AS t)
+----
+ACGTACGT	0	13
+
+# Partial adapter at end (5bp visible, min_match auto=4)
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_adapters(
+    'ACGTACGTACGTAGATC',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'AGATCGGAAGAGC'
+) AS t)
+----
+ACGTACGTACGT	0	5
+
+# Quality preserved in lockstep with trimmed sequence
+query I
+SELECT (t).quality
+FROM (SELECT trim_adapters(
+    'ACGTACGTAGATCGGAAGAGC',
+    [10,11,12,13,14,15,16,17,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'AGATCGGAAGAGC'
+) AS t)
+----
+[10, 11, 12, 13, 14, 15, 16, 17]
+
+# -----------------------------------------------------------------------------
+# LIST(VARCHAR) adapter overload — multiple adapters; leftmost match across
+# all adapters wins (most aggressive trim).
+# -----------------------------------------------------------------------------
+
+# Two adapters; first one matches earlier
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_adapters(
+    'ACGTACGTAGATCGGAAGAGCTTACTGGAATTCTCGG',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    ['AGATCGGAAGAGC', 'CTGGAATTCTCGG']
+) AS t)
+----
+ACGTACGT	0	29
+
+# Empty list — no trim
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_adapters(
+    'ACGTACGTAGATCGGAAGAGC',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    []::VARCHAR[]
+) AS t)
+----
+ACGTACGTAGATCGGAAGAGC	0	0
+
+# NULL elements in adapter list are silently skipped
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_adapters(
+    'ACGTACGTAGATCGGAAGAGC',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    [NULL, 'AGATCGGAAGAGC']::VARCHAR[]
+) AS t)
+----
+ACGTACGT	0	13
+
+# -----------------------------------------------------------------------------
+# 6-arg full-control form
+# -----------------------------------------------------------------------------
+
+# match_revcomp=true finds the RC of the adapter
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_adapters(
+    'ACGTACGTGCTCTTCCGATCT',  -- RC of AGATCGGAAGAGC = GCTCTTCCGATCT
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'AGATCGGAAGAGC',
+    true,  -- match_revcomp
+    0,     -- min_match = 0 means auto
+    false  -- allow_pre_start
+) AS t)
+----
+ACGTACGT	0	13
+
+# match_revcomp=false — RC of adapter NOT matched
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_adapters(
+    'ACGTACGTGCTCTTCCGATCT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'AGATCGGAAGAGC',
+    false, 0, false
+) AS t)
+----
+ACGTACGTGCTCTTCCGATCT	0	0
+
+# Custom min_match — too aggressive (15bp) finds no match
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_adapters(
+    'ACGTACGTAGATCGGAAGAGC',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'AGATCGGAAGAGC',
+    false, 15, false
+) AS t)
+----
+ACGTACGTAGATCGGAAGAGC	0	0
+
+# allow_pre_start=true drops the whole read when adapter pre-overlaps seq[0]
+# Read = adapter[3..] + tail; the adapter conceptually starts 3 bases before seq[0]
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_adapters(
+    'TCGGAAGAGCACGT',  -- = 'AGATCGGAAGAGC'[3:] + 'ACGT'
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'AGATCGGAAGAGC',
+    false, 4, true  -- allow_pre_start = true
+) AS t)
+----
+(empty)	0	14
+
+# -----------------------------------------------------------------------------
+# Error / edge cases
+# -----------------------------------------------------------------------------
+
+# Mismatched seq/qual length throws
+statement error
+SELECT trim_adapters('ACGT', [40,40]::UTINYINT[], 'AGATC')
+----
+length
+
+# Invalid DNA base in adapter throws
+statement error
+SELECT trim_adapters(
+    'ACGTACGTAGATCGGAAGAGC',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'INVALID0BASE',  -- '0' is not a valid DNA base
+    true, 0, false  -- match_revcomp triggers RC which validates bases
+)
+----
+invalid DNA base
+
+# Negative min_match throws
+statement error
+SELECT trim_adapters(
+    'ACGT', [40,40,40,40]::UTINYINT[],
+    'AGATC',
+    false, -1, false
+)
+----
+min_match
+
+# NULL inputs propagate to NULL output
+query I
+SELECT trim_adapters(NULL, [40,40]::UTINYINT[], 'AGATC') IS NULL
+----
+true
+
+query I
+SELECT trim_adapters('ACGT', NULL::UTINYINT[], 'AGATC') IS NULL
+----
+true
+
+query I
+SELECT trim_adapters('ACGT', [40,40,40,40]::UTINYINT[], NULL::VARCHAR) IS NULL
+----
+true
