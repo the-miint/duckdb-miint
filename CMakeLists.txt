@@ -967,6 +967,8 @@ set(EXTENSION_SOURCES
     src/alignment_flag_functions.cpp
     src/alignment_functions.cpp
     src/sequence_functions.cpp
+    src/qc_functions.cpp
+    src/qc_algorithms.cpp
     src/IntervalCompressor.cpp
     src/compress_intervals.cpp
     src/CoverageDepthCalculator.cpp

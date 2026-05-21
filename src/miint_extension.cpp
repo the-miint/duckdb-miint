@@ -43,6 +43,7 @@
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/database.hpp"
 #include <sequence_functions.hpp>
+#include <qc_functions.hpp>
 #include <formula_function.hpp>
 #include <massql_function.hpp>
 #include <woltka_ogu_function.hpp>
@@ -267,6 +268,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ComputeCoverageDepthFunction::Register(loader);
 	AlignmentSliceTableFunction::Register(loader);
 	SequenceFunctions::Register(loader);
+	QcFunctions::Register(loader);
 	FormulaFunction::Register(loader);
 	MassQLFunction::Register(loader);
 	WoltkaOguFunction::Register(loader);
