@@ -1072,6 +1072,7 @@ set(EXTENSION_SOURCES
     src/extract_linked_amplicon.cpp
     src/match_short_barcodes.cpp
     src/compute_pileup.cpp
+    src/PileupWalker.cpp
     src/compute_msa_consensus.cpp)
 
 if(MIINT_ENABLE_VSEARCH)
@@ -1463,6 +1464,8 @@ set(TEST_SOURCES
     test/cpp/test_deblur.cpp
     src/id_column_codec.cpp
     test/cpp/test_id_column_codec.cpp
+    src/PileupWalker.cpp
+    test/cpp/test_compute_pileup.cpp
 )
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     list(APPEND TEST_SOURCES src/BIOMTable.cpp src/BIOMReader.cpp
