@@ -1,0 +1,11 @@
+# name: test/sql/qc_basic.test
+# description: Smoke test for the QC function scaffold (qc_version)
+# group: [sql]
+
+require miint
+
+# qc_version() exists and returns the expected scaffold string
+query I
+SELECT qc_version()
+----
+qc 0.1.0 (port of fastp algorithms)

@@ -10,6 +10,7 @@ Scalar functions for alignment analysis and sequence processing.
 - [`cigar_query_length`](#cigar_query_lengthcigar-include_hard_clipstrue) - Query length from CIGAR
 - [`cigar_query_coverage`](#cigar_query_coveragecigar-typealigned) - Query coverage from CIGAR
 - [`mask_dust`](#mask_dustsequence-hardmaskfalse) - DUST low-complexity masking
+- [QC functions](qc.md) - Adapter / polyG / polyX / quality trimming and per-read filtering (fastp port)
 - [`merge_pairs_vsearch`](#merge_pairsfwd_seq-fwd_qual-rev_seq-rev_qual-options) - Paired-end read merging
 - [`phylogeny_fasttree_available`](#phylogeny_fasttree_available) - Probe for the gpl-boundary daemon at runtime
 - [`install_gpl_boundary`](#install_gpl_boundary) - Download and install the gpl-boundary binary into miint's cache

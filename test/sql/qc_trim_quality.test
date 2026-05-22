@@ -1,0 +1,128 @@
+# name: test/sql/qc_trim_quality.test
+# description: Tests for sliding-window quality trimming scalars
+# group: [sql]
+
+require miint
+
+# -----------------------------------------------------------------------------
+# trim_quality_3p: trim low-quality bases from 3' end via sliding window
+# -----------------------------------------------------------------------------
+
+# Basic 3' tail trim (last 2 bases removed). Default window=4, mean_q=20.
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_quality_3p('ACGTACGT', [40,40,40,40,5,5,5,5]::UTINYINT[]) AS t)
+----
+ACGTAC	0	2
+
+# No trim when everything passes
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_quality_3p('ACGT', [40,40,40,40]::UTINYINT[]) AS t)
+----
+ACGT	0	0
+
+# Entire read trimmed when nothing passes
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_quality_3p('ACGT', [5,5,5,5]::UTINYINT[]) AS t)
+----
+(empty)	0	4
+
+# Explicit window/threshold params
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_quality_3p('ACGTACGT', [40,40,40,40,5,5,5,5]::UTINYINT[], 4, 20) AS t)
+----
+ACGTAC	0	2
+
+# Quality output preserved in lockstep
+query I
+SELECT (t).quality
+FROM (SELECT trim_quality_3p('ACGTACGT', [40,40,40,40,5,5,5,5]::UTINYINT[]) AS t)
+----
+[40, 40, 40, 40, 5, 5]
+
+# Mismatched seq/qual length throws
+statement error
+SELECT trim_quality_3p('ACGT', [40,40,40,40,40]::UTINYINT[])
+----
+length
+
+# -----------------------------------------------------------------------------
+# trim_quality_5p: trim low-quality bases from 5' end via sliding window
+# -----------------------------------------------------------------------------
+
+# Basic 5' head trim. Note: trim_quality_5p anchors at the LEFT edge of the
+# first passing window. The window itself is kept whole — its leading bases
+# (here Q5 at positions 2,3) survive in the output even though they are
+# individually low-quality. This is fastp's cut_front semantics; per-base
+# trimming would be a different algorithm.
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_quality_5p('ACGTACGT', [5,5,5,5,40,40,40,40]::UTINYINT[]) AS t)
+----
+GTACGT	2	0
+
+# No trim
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_quality_5p('ACGT', [40,40,40,40]::UTINYINT[]) AS t)
+----
+ACGT	0	0
+
+# Quality preserved in lockstep — the [5,5] prefix below is the leading half
+# of the passing window (see fastp cut_front semantics note above).
+query I
+SELECT (t).quality
+FROM (SELECT trim_quality_5p('ACGTACGT', [5,5,5,5,40,40,40,40]::UTINYINT[]) AS t)
+----
+[5, 5, 40, 40, 40, 40]
+
+# -----------------------------------------------------------------------------
+# trim_quality_sliding (cut_right): at first bad window, drop window + right
+# -----------------------------------------------------------------------------
+
+# Drops everything from first failing window onward
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_quality_sliding('ACGTACGT', [40,40,40,40,5,5,5,5]::UTINYINT[]) AS t)
+----
+ACG	0	5
+
+# No trim when every window passes
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_quality_sliding('ACGT', [40,40,40,40]::UTINYINT[]) AS t)
+----
+ACGT	0	0
+
+# Low-quality middle region drops everything from that point
+query III
+SELECT (t).sequence, (t).trimmed_5p, (t).trimmed_3p
+FROM (SELECT trim_quality_sliding('ACGTACGT', [40,40,5,5,5,40,40,40]::UTINYINT[]) AS t)
+----
+A	0	7
+
+# -----------------------------------------------------------------------------
+# NULL handling — NULL inputs propagate to NULL output
+# -----------------------------------------------------------------------------
+
+query I
+SELECT trim_quality_3p(NULL, [40,40,40,40]::UTINYINT[]) IS NULL
+----
+true
+
+query I
+SELECT trim_quality_3p('ACGT', NULL::UTINYINT[]) IS NULL
+----
+true
+
+# -----------------------------------------------------------------------------
+# window_size = 0 is rejected
+# -----------------------------------------------------------------------------
+
+statement error
+SELECT trim_quality_3p('ACGT', [40,40,40,40]::UTINYINT[], 0, 20)
+----
+window_size

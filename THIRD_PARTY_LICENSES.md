@@ -505,6 +505,51 @@ fitness for any particular purpose.
 
 ---
 
+## fastp
+
+Read-level QC algorithms (adapter trimming, polyG/polyX tail trimming,
+sliding-window quality trimming, per-read quality/length/N-base
+filtering) used by the `qc_*` scalar function family
+(`trim_adapters`, `trim_polyg`, `trim_polyx`, `trim_quality_3p`,
+`trim_quality_5p`, `trim_quality_sliding`, `filter_read`). fastp is
+**not** a build dependency; specific algorithms have been ported into
+`src/qc_algorithms.cpp` with per-file SPDX attribution. Adapter
+auto-detection is **not** ported — adapters are user-supplied.
+
+- Repository: https://github.com/OpenGene/fastp
+- License: MIT
+
+### Citation
+
+Chen S, Zhou Y, Chen Y, Gu J.
+"fastp: an ultra-fast all-in-one FASTQ preprocessor."
+*Bioinformatics*, 2018; 34(17):i884–i890.
+doi: [10.1093/bioinformatics/bty560](https://doi.org/10.1093/bioinformatics/bty560)
+
+### MIT License
+
+Copyright (c) 2016 OpenGene - Open Source Genetics Toolbox
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
 ## concurrentqueue
 
 Lock-free concurrent queue used by SortMeRNA's producer/consumer
