@@ -1068,7 +1068,11 @@ set(EXTENSION_SOURCES
     src/deblur.cpp
     src/deblur_table_function.cpp
     src/per_sample_table_function.cpp
-    src/id_column_codec.cpp)
+    src/id_column_codec.cpp
+    src/extract_linked_amplicon.cpp
+    src/match_short_barcodes.cpp
+    src/compute_pileup.cpp
+    src/compute_msa_consensus.cpp)
 
 if(MIINT_ENABLE_VSEARCH)
     list(APPEND EXTENSION_SOURCES
