@@ -58,6 +58,7 @@
 #include <deblur_table_function.hpp>
 #include <align_pairwise_functions.hpp>
 #include <extract_linked_amplicon.hpp>
+#include <match_short_barcodes.hpp>
 #include <read_mzml.hpp>
 #include <read_mzml_chromatograms.hpp>
 #include <read_mzxml.hpp>
@@ -284,6 +285,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	AlignPairwiseCigarFunction::Register(loader);
 	AlignPairwiseFullFunction::Register(loader);
 	ExtractLinkedAmpliconFunction::Register(loader);
+	MatchShortBarcodesTableFunction::Register(loader);
 
 #ifdef MIINT_HAS_MAFFT
 	AlignMafftTableFunction::Register(loader);

@@ -1,0 +1,277 @@
+# name: test/sql/match_short_barcodes.test
+# description: Hamming-distance matcher for short fixed-length barcodes (UMI binning, sample demux)
+# group: [sql]
+
+require miint
+
+# -----------------------------------------------------------------------------
+# Setup: fixture tables. queries and refs share an 8-bp length.
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _barcode_refs AS SELECT * FROM (VALUES
+    ('r1', 'ACGTACGT'),
+    ('r2', 'ACGTACGA'),  -- 1 mismatch from r1 (pos 7)
+    ('r3', 'TTTTTTTT'),
+    ('r4', 'AAAAAAAA')
+) t(id, sequence);
+
+statement ok
+CREATE TABLE _barcode_queries AS SELECT * FROM (VALUES
+    ('q1', 'ACGTACGT'),  -- exact match to r1
+    ('q2', 'ACGTACGG'),  -- 1 mismatch from r1; 1 mismatch from r2
+    ('q3', 'GGGGGGGG')   -- far from everything
+) t(id, sequence);
+
+# -----------------------------------------------------------------------------
+# Exact match (NM=0) — q1 should hit r1
+# -----------------------------------------------------------------------------
+query III
+SELECT query_id, ref_id, nm
+FROM match_short_barcodes('_barcode_queries', '_barcode_refs', max_nm := 0)
+ORDER BY query_id, ref_id;
+----
+q1	r1	0
+
+# -----------------------------------------------------------------------------
+# max_nm=1: q1 hits r1 (NM=0) and r2 (NM=1). q2 hits r1 (NM=1) and r2 (NM=1).
+# -----------------------------------------------------------------------------
+query III
+SELECT query_id, ref_id, nm
+FROM match_short_barcodes('_barcode_queries', '_barcode_refs', max_nm := 1)
+ORDER BY query_id, ref_id;
+----
+q1	r1	0
+q1	r2	1
+q2	r1	1
+q2	r2	1
+
+# -----------------------------------------------------------------------------
+# report_all := false: one best (lowest nm) hit per query; tie-break by ref_id ASC
+# -----------------------------------------------------------------------------
+query III
+SELECT query_id, ref_id, nm
+FROM match_short_barcodes('_barcode_queries', '_barcode_refs', max_nm := 2, report_all := false)
+ORDER BY query_id;
+----
+q1	r1	0
+q2	r1	1
+
+# -----------------------------------------------------------------------------
+# report_all default is true — confirm explicit and default agree
+# -----------------------------------------------------------------------------
+query III
+SELECT query_id, ref_id, nm
+FROM match_short_barcodes('_barcode_queries', '_barcode_refs', max_nm := 1, report_all := true)
+ORDER BY query_id, ref_id;
+----
+q1	r1	0
+q1	r2	1
+q2	r1	1
+q2	r2	1
+
+# -----------------------------------------------------------------------------
+# Empty query table → empty result
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _empty_queries AS SELECT * FROM _barcode_queries WHERE 1=0;
+
+query III
+SELECT query_id, ref_id, nm
+FROM match_short_barcodes('_empty_queries', '_barcode_refs', max_nm := 0);
+----
+
+# -----------------------------------------------------------------------------
+# All-mismatch query — no hits
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _all_miss AS SELECT * FROM (VALUES ('q', 'GGGGGGGG')) t(id, sequence);
+
+query III
+SELECT query_id, ref_id, nm
+FROM match_short_barcodes('_all_miss', '_barcode_refs', max_nm := 2);
+----
+
+# -----------------------------------------------------------------------------
+# 18-bp UMI shape (Karst protocol)
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _umi_refs AS SELECT * FROM (VALUES
+    ('umi_A', 'ACGTACGTACGTACGTAC'),
+    ('umi_B', 'GTACGTACGTACGTACGT')
+) t(id, sequence);
+
+statement ok
+CREATE TABLE _umi_queries AS SELECT * FROM (VALUES
+    ('readA',  'ACGTACGTACGTACGTAC'),  -- exact umi_A
+    ('readA1', 'ACGTACGTTCGTACGTAC'),  -- 1 mismatch from umi_A
+    ('readA2', 'AAGTACGTACGTACGTAC'),  -- 1 mismatch from umi_A (pos 1: C→A)
+    ('readB',  'GTACGTACGTACGTACGT')   -- exact umi_B
+) t(id, sequence);
+
+query III
+SELECT query_id, ref_id, nm
+FROM match_short_barcodes('_umi_queries', '_umi_refs', max_nm := 2)
+ORDER BY query_id, ref_id;
+----
+readA	umi_A	0
+readA1	umi_A	1
+readA2	umi_A	1
+readB	umi_B	0
+
+# -----------------------------------------------------------------------------
+# Explicit tie-break test — refs share identical sequence so the query hits
+# both at the same nm. Tie-break must be ref_id ASC; if direction were ever
+# flipped to DESC, the expected ref would change. The ref IDs are picked so
+# the "wrong" answer would be visibly different (z_ref vs a_ref).
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _tie_refs AS SELECT * FROM (VALUES
+    ('z_ref', 'ACGTACGT'),
+    ('a_ref', 'ACGTACGT')   -- identical sequence to z_ref
+) t(id, sequence);
+
+statement ok
+CREATE TABLE _tie_query AS SELECT * FROM (VALUES ('q', 'ACGTACGT')) t(id, sequence);
+
+# report_all := false picks the lex-min ref_id on a tie → a_ref, not z_ref.
+query III
+SELECT query_id, ref_id, nm
+FROM match_short_barcodes('_tie_query', '_tie_refs', max_nm := 0, report_all := false);
+----
+q	a_ref	0
+
+statement ok
+DROP TABLE _tie_refs;
+
+statement ok
+DROP TABLE _tie_query;
+
+# -----------------------------------------------------------------------------
+# Stress test — 1000 self-matches at NM=0. Each int 1..1000 deterministically
+# maps to a unique 18-bp ACGT sequence via base-4 encoding; the per-row
+# CASE selects the base for each of 18 positions and string_agg orders them.
+# Self-match at NM=0 yields exactly 1000 hits (no other pair can be NM=0
+# since the integer→sequence map is injective in [1, 1000]).
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _stress AS
+SELECT
+    'seq_' || lpad(i::VARCHAR, 4, '0') AS id,
+    string_agg(
+        CASE ((i >> (k * 2)) & 3)
+            WHEN 0 THEN 'A' WHEN 1 THEN 'C' WHEN 2 THEN 'G' ELSE 'T'
+        END, '' ORDER BY k
+    ) AS sequence
+FROM generate_series(1, 1000) AS t(i),
+     generate_series(0, 17) AS u(k)
+GROUP BY i;
+
+# Sanity: 1000 unique 18-bp sequences
+query II
+SELECT COUNT(*), COUNT(DISTINCT sequence) FROM _stress;
+----
+1000	1000
+
+# Self-match at NM=0: exactly 1000 hits
+query I
+SELECT COUNT(*) FROM match_short_barcodes('_stress', '_stress', max_nm := 0);
+----
+1000
+
+# Spot-check: a known self-match (seq_0001 must match seq_0001 at NM=0)
+query III
+SELECT query_id, ref_id, nm
+FROM match_short_barcodes('_stress', '_stress', max_nm := 0)
+WHERE query_id = 'seq_0001';
+----
+seq_0001	seq_0001	0
+
+statement ok
+DROP TABLE _stress;
+
+# -----------------------------------------------------------------------------
+# Error: max_nm negative
+# -----------------------------------------------------------------------------
+statement error
+SELECT * FROM match_short_barcodes('_barcode_queries', '_barcode_refs', max_nm := -1);
+----
+max_nm
+
+# -----------------------------------------------------------------------------
+# Error: nonexistent table
+# -----------------------------------------------------------------------------
+statement error
+SELECT * FROM match_short_barcodes('no_such_table', '_barcode_refs', max_nm := 1);
+----
+no_such_table
+
+statement error
+SELECT * FROM match_short_barcodes('_barcode_queries', 'no_such_table', max_nm := 1);
+----
+no_such_table
+
+# -----------------------------------------------------------------------------
+# Error: length mismatch between query and ref
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _short_refs AS SELECT * FROM (VALUES ('r', 'ACGT')) t(id, sequence);
+
+statement error
+SELECT * FROM match_short_barcodes('_barcode_queries', '_short_refs', max_nm := 1);
+----
+length
+
+# -----------------------------------------------------------------------------
+# Error: inconsistent lengths WITHIN a table
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _mixed_len AS SELECT * FROM (VALUES
+    ('a', 'ACGTACGT'),
+    ('b', 'ACGT')
+) t(id, sequence);
+
+statement error
+SELECT * FROM match_short_barcodes('_mixed_len', '_barcode_refs', max_nm := 1);
+----
+length
+
+# -----------------------------------------------------------------------------
+# Error: non-ACGT base
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _has_n AS SELECT * FROM (VALUES ('x', 'ACGTACGN')) t(id, sequence);
+
+statement error
+SELECT * FROM match_short_barcodes('_has_n', '_barcode_refs', max_nm := 1);
+----
+invalid
+
+# -----------------------------------------------------------------------------
+# Cleanup
+# -----------------------------------------------------------------------------
+statement ok
+DROP TABLE _barcode_refs;
+
+statement ok
+DROP TABLE _barcode_queries;
+
+statement ok
+DROP TABLE _empty_queries;
+
+statement ok
+DROP TABLE _all_miss;
+
+statement ok
+DROP TABLE _umi_refs;
+
+statement ok
+DROP TABLE _umi_queries;
+
+statement ok
+DROP TABLE _short_refs;
+
+statement ok
+DROP TABLE _mixed_len;
+
+statement ok
+DROP TABLE _has_n;
