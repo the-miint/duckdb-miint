@@ -471,7 +471,7 @@ static void TrimAdaptersExecuteImpl(DataChunk &args, Vector &result, bool adapte
 		}
 
 		// Leftmost trim_start across all candidates wins.
-		miint::qc::TrimResult tr {0, seq.GetSize()};
+		miint::qc::TrimResult tr {0, static_cast<std::size_t>(seq.GetSize())};
 		const auto seq_bytes = reinterpret_cast<const std::uint8_t *>(seq.GetData());
 		std::size_t best_trim_start = seq.GetSize();
 		for (const auto &cand : *candidates_ptr) {
