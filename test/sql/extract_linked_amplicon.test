@@ -1,0 +1,284 @@
+# name: test/sql/extract_linked_amplicon.test
+# description: Linked-adapter extraction (cutadapt -g X...Y equivalent on WFA2 semi-global)
+# group: [sql]
+
+require miint
+
+# -----------------------------------------------------------------------------
+# Exact match — both anchors found, interior extracted with quality lockstep
+# -----------------------------------------------------------------------------
+# Layout (36 bp): "AAAAA" + "GACTCATTGC" + "ACACAC" + "TAGCTAGCTA" + "TTTTT"
+#                   0–4      5–14            15–20    21–30           31–35
+# Expected: sequence="ACACAC", start=15, stop=21, qual=positions 15..20
+
+query IIII
+SELECT (t).sequence, (t).start, (t).stop, (t).qual
+FROM (SELECT extract_linked_amplicon(
+    'AAAAAGACTCATTGCACACACTAGCTAGCTATTTTT',
+    [10,10,10,10,10,
+     20,20,20,20,20,20,20,20,20,20,
+     30,31,32,33,34,35,
+     20,20,20,20,20,20,20,20,20,20,
+     10,10,10,10,10]::UTINYINT[],
+    'GACTCATTGC',
+    'TAGCTAGCTA'
+) AS t)
+----
+ACACAC	15	21	[30, 31, 32, 33, 34, 35]
+
+# -----------------------------------------------------------------------------
+# Anchors at sequence boundaries — anchor5 at position 0, anchor3 ends at len
+# (covers both edge cases in one input: no leading or trailing flanking bases)
+# -----------------------------------------------------------------------------
+query III
+SELECT (t).sequence, (t).start, (t).stop
+FROM (SELECT extract_linked_amplicon(
+    'GACTCATTGCACACACTAGCTAGCTA',
+    [40,40,40,40,40,40,40,40,40,40, 40,40,40,40,40,40, 40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GACTCATTGC',
+    'TAGCTAGCTA'
+) AS t)
+----
+ACACAC	10	16
+
+# -----------------------------------------------------------------------------
+# 1-mismatch in anchor5 within default error budget (0.10 × 10 = 1)
+# -----------------------------------------------------------------------------
+# anchor5 "GACTCATTGC" → seq has "GACTGATTGC" (position-4 C→G)
+query I
+SELECT (t).sequence
+FROM (SELECT extract_linked_amplicon(
+    'AAAAAGACTGATTGCACACACTAGCTAGCTATTTTT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GACTCATTGC',
+    'TAGCTAGCTA'
+) AS t)
+----
+ACACAC
+
+# -----------------------------------------------------------------------------
+# 2-mismatches in anchor5 exceeds default budget — NULL
+# -----------------------------------------------------------------------------
+query I
+SELECT extract_linked_amplicon(
+    'AAAAAGACTGATTACACACACTAGCTAGCTATTTTT',  -- anchor5 has 2 mismatches
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GACTCATTGC',
+    'TAGCTAGCTA'
+) IS NULL
+----
+true
+
+# -----------------------------------------------------------------------------
+# Anchor5 absent — NULL
+# -----------------------------------------------------------------------------
+query I
+SELECT extract_linked_amplicon(
+    'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GACTCATTGC',
+    'TAGCTAGCTA'
+) IS NULL
+----
+true
+
+# -----------------------------------------------------------------------------
+# Anchor3 absent (5' OK, 3' missing) — NULL
+# -----------------------------------------------------------------------------
+query I
+SELECT extract_linked_amplicon(
+    'AAAAAGACTCATTGCACACACAAAAAAAAAAAAAA',  -- has anchor5 but no anchor3
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GACTCATTGC',
+    'TAGCTAGCTA'
+) IS NULL
+----
+true
+
+# -----------------------------------------------------------------------------
+# Higher error_rate accepts an otherwise-rejected match
+# -----------------------------------------------------------------------------
+# 2 mismatches in 10bp anchor: budget(rate=0.10)=1 (fail), budget(rate=0.25)=2 (pass)
+query I
+SELECT (t).sequence
+FROM (SELECT extract_linked_amplicon(
+    'AAAAAGACTGATTACACACACTAGCTAGCTATTTTT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GACTCATTGC',
+    'TAGCTAGCTA',
+    0::BIGINT,         -- min_len
+    1000::BIGINT,      -- max_len
+    0.25::DOUBLE       -- error_rate
+) AS t)
+----
+ACACAC
+
+# -----------------------------------------------------------------------------
+# min_len bound — extracted too short → NULL
+# -----------------------------------------------------------------------------
+# Interior here is "AC" (2 bp); requiring min_len=6 rejects.
+query I
+SELECT extract_linked_amplicon(
+    'AAAAAGACTCATTGCACTAGCTAGCTATTTTT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GACTCATTGC',
+    'TAGCTAGCTA',
+    6::BIGINT,         -- min_len = 6
+    1000::BIGINT,
+    0.10::DOUBLE
+) IS NULL
+----
+true
+
+# -----------------------------------------------------------------------------
+# max_len bound — extracted too long → NULL
+# -----------------------------------------------------------------------------
+# Interior is "ACACAC" (6 bp); requiring max_len=4 rejects.
+query I
+SELECT extract_linked_amplicon(
+    'AAAAAGACTCATTGCACACACTAGCTAGCTATTTTT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GACTCATTGC',
+    'TAGCTAGCTA',
+    0::BIGINT,
+    4::BIGINT,         -- max_len = 4
+    0.10::DOUBLE
+) IS NULL
+----
+true
+
+# -----------------------------------------------------------------------------
+# Length exactly at min_len bound — passes
+# -----------------------------------------------------------------------------
+query I
+SELECT (t).sequence
+FROM (SELECT extract_linked_amplicon(
+    'AAAAAGACTCATTGCACACACTAGCTAGCTATTTTT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GACTCATTGC',
+    'TAGCTAGCTA',
+    6::BIGINT,         -- min_len = 6 (== extracted length)
+    6::BIGINT,         -- max_len = 6 (== extracted length)
+    0.10::DOUBLE
+) AS t)
+----
+ACACAC
+
+# -----------------------------------------------------------------------------
+# Zero-length amplicon — anchor5 immediately followed by anchor3, min_len=0
+# allows the empty interior; output sequence is empty, qual list is empty,
+# start == stop.
+# -----------------------------------------------------------------------------
+# Layout (30 bp): "AAAAA" + "GACTCATTGC" + "TAGCTAGCTA" + "TTTTT"
+#                  0–4      5–14            15–24          25–29
+# Expected: sequence="", start=15, stop=15, qual=[]
+query IIII
+SELECT (t).sequence, (t).start, (t).stop, (t).qual
+FROM (SELECT extract_linked_amplicon(
+    'AAAAAGACTCATTGCTAGCTAGCTATTTTT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GACTCATTGC',
+    'TAGCTAGCTA'
+) AS t)
+----
+(empty)	15	15	[]
+
+# Same input but min_len=1 rejects the empty extraction.
+query I
+SELECT extract_linked_amplicon(
+    'AAAAAGACTCATTGCTAGCTAGCTATTTTT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GACTCATTGC',
+    'TAGCTAGCTA',
+    1::BIGINT, 1000::BIGINT, 0.10::DOUBLE
+) IS NULL
+----
+true
+
+# -----------------------------------------------------------------------------
+# NULL inputs propagate to NULL output
+# -----------------------------------------------------------------------------
+query I
+SELECT extract_linked_amplicon(
+    NULL,
+    [40,40,40,40]::UTINYINT[],
+    'GACTCATTGC',
+    'TAGCTAGCTA'
+) IS NULL
+----
+true
+
+query I
+SELECT extract_linked_amplicon(
+    'ACGTACGT',
+    NULL::UTINYINT[],
+    'GACTCATTGC',
+    'TAGCTAGCTA'
+) IS NULL
+----
+true
+
+query I
+SELECT extract_linked_amplicon(
+    'ACGTACGT',
+    [40,40,40,40,40,40,40,40]::UTINYINT[],
+    NULL::VARCHAR,
+    'TAGCTAGCTA'
+) IS NULL
+----
+true
+
+query I
+SELECT extract_linked_amplicon(
+    'ACGTACGT',
+    [40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GACTCATTGC',
+    NULL::VARCHAR
+) IS NULL
+----
+true
+
+# -----------------------------------------------------------------------------
+# Error cases
+# -----------------------------------------------------------------------------
+
+# Mismatched seq/qual length throws
+statement error
+SELECT extract_linked_amplicon('ACGTACGT', [40,40]::UTINYINT[], 'GACTCATTGC', 'TAGCTAGCTA')
+----
+length
+
+# error_rate out of range
+statement error
+SELECT extract_linked_amplicon(
+    'AAAAAGACTCATTGCACACACTAGCTAGCTATTTTT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GACTCATTGC',
+    'TAGCTAGCTA',
+    0::BIGINT, 1000::BIGINT, 1.5::DOUBLE
+)
+----
+error_rate
+
+# min_len > max_len throws at bind time
+statement error
+SELECT extract_linked_amplicon(
+    'AAAAAGACTCATTGCACACACTAGCTAGCTATTTTT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GACTCATTGC',
+    'TAGCTAGCTA',
+    100::BIGINT, 5::BIGINT, 0.10::DOUBLE
+)
+----
+min_len
+
+# Empty anchor throws
+statement error
+SELECT extract_linked_amplicon(
+    'ACGTACGT',
+    [40,40,40,40,40,40,40,40]::UTINYINT[],
+    '',
+    'TAGCTAGCTA'
+)
+----
+anchor
