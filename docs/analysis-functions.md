@@ -8,6 +8,8 @@ Functions for higher-level genomic analysis, sequence manipulation, and pairwise
 - [`sequence_dna_reverse_complement` / `sequence_rna_reverse_complement`](#sequence_dna_reverse_complementsequence-and-sequence_rna_reverse_complementsequence) - Reverse complement
 - [`sequence_dna_as_regexp` / `sequence_rna_as_regexp`](#sequence_dna_as_regexpsequence-and-sequence_rna_as_regexpsequence) - IUPAC to regex
 - [`compress_intervals`](#compress_intervalsstart-stop) - Merge overlapping intervals
+- [`compute_coverage_depth`](#compute_coverage_depthposition-stop_position-cigar-reference_length-mode) - Per-position depth aggregate
+- [`compute_msa_consensus`](#compute_msa_consensusaligned_seq-qual) - Q-aware MSA column consensus with HP post-correction
 - [`genome_coverage`](#genome_coveragealignments-subject_total_length-subject_genome_id) - Compute genome coverage from alignments
 - [Pairwise Alignment Functions](#pairwise-alignment-functions) - WFA2-based pairwise alignment
 - [`formula`](#formulaformula_string) - Chemical formula to monoisotopic mass
@@ -379,6 +381,88 @@ WHERE depth >= 10;
 - Multi-threaded aggregation: each thread maintains independent state, merged at finalization
 - Fast path: reads with only M/=/X operations (no N or excluded D) skip CIGAR walking
 - Maximum reference_length is 2,000,000,000; use `compress_intervals` for larger references
+
+## `compute_msa_consensus(aligned_seq, qual)`
+
+Aggregate function that computes a quality-aware column consensus from a
+multiple sequence alignment (MSA). Designed as the consensus-building
+step for long-read amplicon UMI pipelines (Karst-protocol consensus on
+Revio HiFi), replacing Racon polishing for HiFi-grade per-base quality.
+General enough to be useful anywhere you have a per-bin MSA + per-read
+quality.
+
+Algorithm (full design rationale: HP-indel-dominated residual error model
+on modern HiFi makes column voting alone insufficient):
+
+1. **Per-column 5-state log-likelihood vote** over `{A, C, G, T, '-'}`.
+   Each base observation uses `p_err = 10^(-q/10)`; gap observations use
+   a fixed `p_err = 0.05`. The argmax base is emitted; columns where gap
+   wins are suppressed from the output.
+2. **Posterior Q** derived from `log(sum_{k≠best} exp(ll[k]) / sum_all)`,
+   clamped to `[0, 60]` and emitted as UTINYINT alongside the base.
+3. **HP-aware post-correction**: each homopolymer run (length ≥ 2) in the
+   column-voted consensus is replaced by `median(per-read HP length at the
+   corresponding ungapped locus)`. Critical: MAFFT places HP gaps
+   inconsistently and naive column voting biases HP length short.
+4. **Bin of size 1** bypasses the MSA pipeline entirely and emits the
+   lone read's gap-stripped sequence + unchanged qual (the MSA is
+   degenerate at n=1).
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `aligned_seq` | VARCHAR | MSA row for one read (gaps encoded as `-`), as produced by [`align_mafft`](table-functions.md#align_maffttable_name-sample_idcol) |
+| `qual` | LIST(UTINYINT) | The read's original *ungapped* per-base Phred qual (no ASCII offset; matches `read_fastx`) |
+
+The deliberate type asymmetry means callers join the MAFFT row back to
+the original quality list by `read_id`; Q never enters MAFFT, so it
+never has to be reassembled across gap insertions.
+
+**Returns:** STRUCT with fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `seq` | VARCHAR | Consensus sequence (no gaps; HP-corrected) |
+| `qual` | LIST(UTINYINT) | Posterior per-base Q list (parallel to `seq`, capped at 60) |
+
+**Behavior:**
+- NULL rows are ignored (`IgnoreNull() = true`). Groups where every row
+  is NULL return NULL.
+- All rows within a group must share the same MSA width; throws on a
+  width mismatch.
+- Each row's `qual` length must equal its sequence's ungapped count;
+  throws on mismatch.
+- Tie-break is deterministic: log-likelihood difference < 1e-9 falls back
+  to per-candidate Q-sum, then alphabetical (`A < C < G < T < -`).
+- Lower-median is used for even HP-length samples (a length some read
+  actually observed).
+- Eager materialization: all `(aligned_seq, qual)` rows are held in the
+  aggregate state. Memory is `O(rows × MSA_width)` per group, which is
+  comfortable for typical UMI bin sizes (5–30 reads × ~5 kb amplicons).
+
+**Example:**
+```sql
+-- Per-bin consensus via the standard MAFFT → consensus chain.
+-- See test/sql/umi_pipeline_integration.test for an end-to-end example.
+
+-- 1. Per-bin MSA
+CREATE TABLE mafft_out AS
+SELECT * FROM align_mafft('amplicons_with_bin', sample_id := 'bin_id');
+
+-- 2. Join MAFFT's gapped seq back to the original qual list
+CREATE VIEW consensus_input AS
+SELECT m.bin_id, m.read_id, m.aligned_sequence, a.qual
+FROM mafft_out m
+JOIN read_amplicons a USING (read_id);
+
+-- 3. Aggregate per bin
+SELECT bin_id, (compute_msa_consensus(aligned_sequence, qual)).seq AS consensus
+FROM consensus_input
+GROUP BY bin_id;
+```
+
+**See also:** [`extract_linked_amplicon`](scalar-functions.md#extract_linked_ampliconseq-qual-anchor5-anchor3-min_len-max_len-error_rate), [`match_short_barcodes`](table-functions.md#match_short_barcodesquery_table-ref_table-max_nmn-report_alltrue), [`compute_pileup`](table-functions.md#compute_pileupalignments_table-reference_table), [`align_mafft`](table-functions.md#align_maffttable_name-sample_idcol) — together these four primitives compose into a long-read UMI consensus pipeline.
 
 ## `genome_coverage(alignments, subject_total_length, subject_genome_id)`
 

@@ -12,6 +12,7 @@ Scalar functions for alignment analysis and sequence processing.
 - [`mask_dust`](#mask_dustsequence-hardmaskfalse) - DUST low-complexity masking
 - [QC functions](qc.md) - Adapter / polyG / polyX / quality trimming and per-read filtering (fastp port)
 - [`merge_pairs_vsearch`](#merge_pairsfwd_seq-fwd_qual-rev_seq-rev_qual-options) - Paired-end read merging
+- [`extract_linked_amplicon`](#extract_linked_ampliconseq-qual-anchor5-anchor3-min_len-max_len-error_rate) - Cut out the interior between two flanking adapters (cutadapt `-g X...Y` equivalent)
 - [`phylogeny_fasttree_available`](#phylogeny_fasttree_available) - Probe for the gpl-boundary daemon at runtime
 - [`install_gpl_boundary`](#install_gpl_boundary) - Download and install the gpl-boundary binary into miint's cache
 
@@ -342,6 +343,74 @@ WHERE m.result.merged;
 - NULL inputs return a STRUCT with `merged=false` and NULL fields
 - Input length guard: throws if forward + reverse > 9,999 bases (vsearch fixed buffer)
 - Quality inputs and outputs use numeric Phred (LIST(UTINYINT)), matching `read_fastx` output
+
+## `extract_linked_amplicon(seq, qual, anchor5, anchor3, [min_len, max_len, error_rate])`
+
+Cut out the interior of a sequence located between two flanking adapter
+anchors. Equivalent to cutadapt's `-g ANCHOR5...ANCHOR3` mode but as a SQL
+scalar: each row independently locates the 5' anchor, then the 3' anchor
+in the remainder, and returns the slice between them along with its qual
+substring. Powered by the WFA2 semi-global aligner (ends-free), so each
+anchor allows up to `ceil(len(anchor) * error_rate)` errors (mismatch or
+indel) — substitutions and 1-bp indels at the boundary are tolerated.
+
+Designed for amplicon prep workflows: UMI / index extraction, primer
+trimming, locus extraction from long-read FASTQ.
+
+**Parameters (4-arg form, default tuning):**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `seq` | VARCHAR | The full read sequence |
+| `qual` | LIST(UTINYINT) | Per-base Phred qual (no ASCII offset; matches `read_fastx`) |
+| `anchor5` | VARCHAR | 5' flanking adapter |
+| `anchor3` | VARCHAR | 3' flanking adapter (found in the remainder *after* anchor5) |
+
+**Parameters (7-arg form, with tuning):**
+
+Same first 4 plus:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `min_len` | BIGINT | 0 | Minimum interior length (rejected as NULL if shorter) |
+| `max_len` | BIGINT | 2³¹−1 | Maximum interior length (rejected as NULL if longer) |
+| `error_rate` | DOUBLE | 0.10 | Per-anchor error budget — used as `ceil(len(anchor) * error_rate)` |
+
+**Returns:** STRUCT with fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `sequence` | VARCHAR | The extracted interior (between the two anchors) |
+| `qual` | LIST(UTINYINT) | Per-base qual slice over the same range |
+| `start` | INTEGER | 0-based start position of the interior in `seq` |
+| `stop` | INTEGER | 0-based exclusive end position of the interior in `seq` |
+
+Returns `NULL` if either anchor cannot be located within its error budget,
+or if the interior length falls outside `[min_len, max_len]`.
+
+**Example:**
+```sql
+-- UMI extraction: pull out the 18-bp UMI between fixed flanking primers
+SELECT read_id,
+       (e).sequence AS umi,
+       (e).qual AS umi_qual
+FROM (
+    SELECT read_id,
+           extract_linked_amplicon(sequence1, qual1, 'GTAATACG', 'AGAGCACAC',
+                                   min_len := 18, max_len := 18) AS e
+    FROM read_fastx('reads.fq')
+) WHERE umi IS NOT NULL;
+```
+
+**Behavior:**
+- NULL `seq` or `qual` returns NULL.
+- Anchors are searched in order: 5' first across the full sequence, then 3'
+  in `seq[stop5:]`. The 3' search will not find anchors that overlap the
+  5' anchor.
+- Each row's qual list must have the same length as its sequence; otherwise
+  the row throws.
+- A per-thread `WFA2Aligner` is reused across rows via `FunctionLocalState`
+  so the DP engine is allocated once per scan, not per row.
 
 ## `phylogeny_fasttree_available()`
 

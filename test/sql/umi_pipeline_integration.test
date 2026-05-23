@@ -1,0 +1,175 @@
+# name: test/sql/umi_pipeline_integration.test
+# description: End-to-end UMI long-read pipeline (extract_linked_amplicon → match_short_barcodes → align_mafft → compute_msa_consensus + compute_pileup slice)
+# group: [sql]
+
+require miint
+
+require-env MAFFT_AVAILABLE
+
+# -----------------------------------------------------------------------------
+# Synthetic input (data/fastq/umi_pipeline_tiny.fq):
+#   5 reads, 36 bp each, all Q=40. Layout per read:
+#     anchor5 (10 bp = ATCGATCGAT)
+#       + UMI (8 bp)
+#       + amplicon (8 bp)
+#       + anchor3 (10 bp = GCATTGCATA)
+#
+#   Bin A (UMI = AACCAACC, amplicon truth = ACGTACGT):
+#     r1   amplicon = ACGTACGT (perfect)
+#     r2   amplicon = ACGTACGA (1 SNP at pos 8)
+#     r3   amplicon = ACGTACGT (perfect)
+#
+#   Bin B (UMI = TTGGTTGG, amplicon truth = TTACCAGG):
+#     r4   amplicon = TTACCAGG (perfect)
+#     r5   amplicon = TTACCAGG (perfect)
+#
+# Expected end-to-end results, hand-derived:
+#   - 5 reads bin perfectly (NM=0): 3→binA, 2→binB.
+#   - Bin A MSA consensus = ACGTACGT (2 reads vote T at pos 8 vs 1 vote A
+#     at Q=40 → T wins by log-likelihood).
+#   - Bin B MSA consensus = TTACCAGG (perfect agreement).
+#   - compute_pileup on bin-A reads vs bin-A consensus surfaces the SNP at
+#     ref_pos 8: r1='T', r2='A', r3='T'.
+# -----------------------------------------------------------------------------
+
+# Stage 1 — ingest reads from the FASTQ.
+statement ok
+CREATE TABLE umi_reads AS
+SELECT read_id, sequence1 AS sequence, qual1 AS qual
+FROM read_fastx('data/fastq/umi_pipeline_tiny.fq');
+
+query II
+SELECT count(*), MIN(length(sequence)) FROM umi_reads;
+----
+5	36
+
+# Stage 2 — extract the UMI + amplicon between the flanking anchors.
+statement ok
+CREATE TABLE umi_extracted AS
+SELECT read_id, (e).sequence AS extracted, (e).qual AS extracted_qual
+FROM (
+    SELECT read_id,
+           extract_linked_amplicon(sequence, qual, 'ATCGATCGAT', 'GCATTGCATA') AS e
+    FROM umi_reads
+)
+WHERE extracted IS NOT NULL;
+
+query II
+SELECT count(*), MIN(length(extracted)) FROM umi_extracted;
+----
+5	16
+
+# Stage 3 — split the extracted block into UMI (first 8 bp) and amplicon
+# (last 8 bp + the parallel qual slice). match_short_barcodes expects input
+# tables with columns named (id, sequence).
+statement ok
+CREATE TABLE read_umis AS
+SELECT read_id AS id, substr(extracted, 1, 8) AS sequence FROM umi_extracted;
+
+statement ok
+CREATE TABLE read_amplicons AS
+SELECT read_id, substr(extracted, 9, 8) AS sequence1, extracted_qual[9:16] AS qual
+FROM umi_extracted;
+
+# Stage 4 — barcode-match each read's UMI against the two canonical bins.
+statement ok
+CREATE TABLE umi_refs AS SELECT * FROM (VALUES
+    ('binA', 'AACCAACC'),
+    ('binB', 'TTGGTTGG')
+) t(id, sequence);
+
+statement ok
+CREATE TABLE read_bins AS
+SELECT query_id AS read_id, ref_id AS bin_id, nm
+FROM match_short_barcodes('read_umis', 'umi_refs', max_nm := 0, report_all := false);
+
+# All 5 reads bin at NM=0; 3→binA, 2→binB.
+query TI
+SELECT bin_id, count(*) FROM read_bins GROUP BY bin_id ORDER BY bin_id;
+----
+binA	3
+binB	2
+
+query I
+SELECT count(*) FROM read_bins WHERE nm = 0;
+----
+5
+
+# Per-read assignment must be correct (not just the aggregate counts):
+# bin-A UMI (AACCAACC) → r1/r2/r3, bin-B UMI (TTGGTTGG) → r4/r5.
+# Catches the failure mode where the right number of reads land in each bin
+# but the wrong ones do.
+query TT
+SELECT read_id, bin_id FROM read_bins ORDER BY read_id;
+----
+r1	binA
+r2	binA
+r3	binA
+r4	binB
+r5	binB
+
+# Stage 5 — per-bin MSA via align_mafft with sample_id := 'bin_id'.
+statement ok
+CREATE VIEW amplicons_with_bin AS
+SELECT b.bin_id, a.read_id, a.sequence1
+FROM read_amplicons a
+JOIN read_bins b USING (read_id);
+
+statement ok
+CREATE TABLE mafft_out AS
+SELECT * FROM align_mafft('amplicons_with_bin', sample_id := 'bin_id');
+
+# 5 aligned rows total (one per input read).
+query I
+SELECT count(*) FROM mafft_out;
+----
+5
+
+# Stage 6 — per-bin consensus. Join aligned_sequence back to the read's
+# original ungapped qual list (the type asymmetry the consensus aggregate
+# requires — qual stays in its native LIST(UTINYINT) form throughout).
+statement ok
+CREATE VIEW consensus_input AS
+SELECT m.bin_id, m.read_id, m.aligned_sequence, a.qual
+FROM mafft_out m
+JOIN read_amplicons a USING (read_id);
+
+query TT
+SELECT bin_id, (compute_msa_consensus(aligned_sequence, qual)).seq AS consensus_seq
+FROM consensus_input GROUP BY bin_id ORDER BY bin_id;
+----
+binA	ACGTACGT
+binB	TTACCAGG
+
+# Stage 7 — variant-call slice: pile up the bin-A reads against the bin-A
+# consensus and check that the SNP at ref_pos 8 is visible per-read.
+statement ok
+CREATE TABLE pileup_ref AS SELECT * FROM (VALUES
+    ('binA_cons', 'ACGTACGT')
+) t(ref_id, sequence);
+
+statement ok
+CREATE TABLE pileup_aln AS SELECT * FROM (VALUES
+    ('r1', 'binA_cons', 1::BIGINT, '8=',   'ACGTACGT',
+     [40,40,40,40,40,40,40,40]::UTINYINT[]),
+    ('r2', 'binA_cons', 1::BIGINT, '7=1X', 'ACGTACGA',
+     [40,40,40,40,40,40,40,40]::UTINYINT[]),
+    ('r3', 'binA_cons', 1::BIGINT, '8=',   'ACGTACGT',
+     [40,40,40,40,40,40,40,40]::UTINYINT[])
+) t(read_id, reference, position, cigar, sequence, qual);
+
+# 24 rows total: 3 reads × 8 positions.
+query I
+SELECT count(*) FROM compute_pileup('pileup_aln', 'pileup_ref');
+----
+24
+
+# SNP at ref_pos 8: r2 reads 'A' against the consensus 'T'; r1 and r3 match.
+query TTT
+SELECT read_id, ref_base, query_base
+FROM compute_pileup('pileup_aln', 'pileup_ref')
+WHERE ref_pos = 8 ORDER BY read_id;
+----
+r1	T	T
+r2	T	A
+r3	T	T
