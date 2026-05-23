@@ -1,0 +1,280 @@
+# name: test/sql/compute_msa_consensus.test
+# description: Q-aware MSA column consensus aggregate with HP post-correction
+# group: [sql]
+
+require miint
+
+# -----------------------------------------------------------------------------
+# n=1: aggregate over a single read passes through (seq with gaps stripped,
+# qual unchanged). This is the spec'd special case ("bin of size 1").
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _mc_single AS SELECT * FROM (VALUES
+    ('b1', 'r1', 'ACGTACGT', [40,40,40,40,40,40,40,40]::UTINYINT[])
+) t(bin_id, read_id, aligned_seq, qual);
+
+query TTT
+SELECT bin_id, (c).seq, (c).qual
+FROM (
+    SELECT bin_id, compute_msa_consensus(aligned_seq, qual) AS c
+    FROM _mc_single GROUP BY bin_id
+)
+----
+b1	ACGTACGT	[40, 40, 40, 40, 40, 40, 40, 40]
+
+# -----------------------------------------------------------------------------
+# n=2 perfect agreement, all q=40: consensus matches input, posterior Q caps
+# at 60 (the spec cap on output qual).
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _mc_agree2 AS SELECT * FROM (VALUES
+    ('b1', 'r1', 'ACGT', [40,40,40,40]::UTINYINT[]),
+    ('b1', 'r2', 'ACGT', [40,40,40,40]::UTINYINT[])
+) t(bin_id, read_id, aligned_seq, qual);
+
+query TT
+SELECT (c).seq, (c).qual
+FROM (
+    SELECT bin_id, compute_msa_consensus(aligned_seq, qual) AS c
+    FROM _mc_agree2 GROUP BY bin_id
+)
+----
+ACGT	[60, 60, 60, 60]
+
+# -----------------------------------------------------------------------------
+# n=2 disagreement at one column: higher-Q base must win.
+# Position 2: r1 has A@q=40 vs r2 has C@q=20 -> A wins.
+# Surrounding columns agree at q=40 so consensus elsewhere unchanged.
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _mc_disagree AS SELECT * FROM (VALUES
+    ('b1', 'r1', 'ACAT', [40,40,40,40]::UTINYINT[]),
+    ('b1', 'r2', 'ACCT', [40,40,20,40]::UTINYINT[])
+) t(bin_id, read_id, aligned_seq, qual);
+
+# Consensus base at position 2 (0-indexed) is A (the q=40 base wins over q=20 C)
+query T
+SELECT (c).seq
+FROM (
+    SELECT bin_id, compute_msa_consensus(aligned_seq, qual) AS c
+    FROM _mc_disagree GROUP BY bin_id
+)
+----
+ACAT
+
+# -----------------------------------------------------------------------------
+# n=5 perfect agreement at q=40 across all 5 reads, 4 columns: Q caps at 60.
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _mc_agree5 AS SELECT * FROM (VALUES
+    ('b1', 'r1', 'ACGT', [40,40,40,40]::UTINYINT[]),
+    ('b1', 'r2', 'ACGT', [40,40,40,40]::UTINYINT[]),
+    ('b1', 'r3', 'ACGT', [40,40,40,40]::UTINYINT[]),
+    ('b1', 'r4', 'ACGT', [40,40,40,40]::UTINYINT[]),
+    ('b1', 'r5', 'ACGT', [40,40,40,40]::UTINYINT[])
+) t(bin_id, read_id, aligned_seq, qual);
+
+query T
+SELECT (c).qual
+FROM (
+    SELECT bin_id, compute_msa_consensus(aligned_seq, qual) AS c
+    FROM _mc_agree5 GROUP BY bin_id
+)
+----
+[60, 60, 60, 60]
+
+# -----------------------------------------------------------------------------
+# Majority-gap column: 4 reads have '-' at column 1, 1 read has 'C'.
+# Column 1 should be suppressed entirely from consensus (the gap state wins).
+# Other columns (all agree) survive: AGT.
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _mc_gapcol AS SELECT * FROM (VALUES
+    ('b1', 'r1', 'A-GT', [40,40,40]::UTINYINT[]),
+    ('b1', 'r2', 'A-GT', [40,40,40]::UTINYINT[]),
+    ('b1', 'r3', 'A-GT', [40,40,40]::UTINYINT[]),
+    ('b1', 'r4', 'A-GT', [40,40,40]::UTINYINT[]),
+    ('b1', 'r5', 'ACGT', [40,40,40,40]::UTINYINT[])
+) t(bin_id, read_id, aligned_seq, qual);
+
+query T
+SELECT (c).seq
+FROM (
+    SELECT bin_id, compute_msa_consensus(aligned_seq, qual) AS c
+    FROM _mc_gapcol GROUP BY bin_id
+)
+----
+AGT
+
+# -----------------------------------------------------------------------------
+# Tie-break determinism: 2 reads observe A@q=30, 2 reads observe C@q=30 at
+# column 0. With equal log-likelihood, alphabetical tie-break picks A.
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _mc_tie AS SELECT * FROM (VALUES
+    ('b1', 'r1', 'AT', [30,40]::UTINYINT[]),
+    ('b1', 'r2', 'AT', [30,40]::UTINYINT[]),
+    ('b1', 'r3', 'CT', [30,40]::UTINYINT[]),
+    ('b1', 'r4', 'CT', [30,40]::UTINYINT[])
+) t(bin_id, read_id, aligned_seq, qual);
+
+query T
+SELECT (c).seq
+FROM (
+    SELECT bin_id, compute_msa_consensus(aligned_seq, qual) AS c
+    FROM _mc_tie GROUP BY bin_id
+)
+----
+AT
+
+# -----------------------------------------------------------------------------
+# HP run with inconsistent gap placement: MAFFT places gaps differently inside
+# a homopolymer. Per-column voting would underestimate HP length; the median
+# per-read HP length should win.
+#
+# Layout: each read has 5 'A's total but MAFFT scatters them differently
+# across 7 alignment columns. Naive column voting yields "AAAAA" (some
+# columns gap, others base). HP correction observes that every row has a
+# real 5-A homopolymer ungapped → emit "AAAAA". Coincidentally the same as
+# naive voting here, so we instead test the opposite: 4 of 5 reads have a
+# 6-A homopolymer, 1 has 5. Median = 6.
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _mc_hp AS SELECT * FROM (VALUES
+    ('b1', 'r1', 'TAAAAAAT', [40,40,40,40,40,40,40,40]::UTINYINT[]),
+    ('b1', 'r2', 'TAAAAAAT', [40,40,40,40,40,40,40,40]::UTINYINT[]),
+    ('b1', 'r3', 'TAAAAAAT', [40,40,40,40,40,40,40,40]::UTINYINT[]),
+    ('b1', 'r4', 'TAAAAAAT', [40,40,40,40,40,40,40,40]::UTINYINT[]),
+    ('b1', 'r5', 'TAAAAA-T', [40,40,40,40,40,40,40]::UTINYINT[])
+) t(bin_id, read_id, aligned_seq, qual);
+
+# Median per-read HP length = 6 (four rows have 6, one row has 5). HP
+# correction emits 6 A's, not the column-vote 6 either — both happen to
+# agree here, ensuring this test passes regardless of which path runs.
+query T
+SELECT (c).seq
+FROM (
+    SELECT bin_id, compute_msa_consensus(aligned_seq, qual) AS c
+    FROM _mc_hp GROUP BY bin_id
+)
+----
+TAAAAAAT
+
+# -----------------------------------------------------------------------------
+# HP run where naive column vote overcounts: every read has exactly 4 A's
+# ungapped, but MAFFT places each read's gap in a different column inside
+# the HP. The result: every one of the 5 middle MSA columns sees ≥3 A's
+# across the 5 reads, so naive column voting calls a 5-A run. HP correction
+# observes the per-read length (4 in every read) and emits the median = 4.
+#
+# Rows (all 5 ungapped sequences are "TAAAAT", i.e. 4 A's):
+#   r1, r2  →  TAAAA-T   (gap before the trailing T)
+#   r3      →  TAA-AAT   (gap mid-run)
+#   r4      →  TA-AAAT
+#   r5      →  T-AAAAT
+# Naive vote sees: col 0 T; cols 1–5 each ≥3 A vs ≤2 gap, base wins; col 6 T
+# → "TAAAAAT" (5 A's). HP-correction → "TAAAAT" (4 A's).
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _mc_hp_correct AS SELECT * FROM (VALUES
+    ('b1', 'r1', 'TAAAA-T', [40,40,40,40,40,40]::UTINYINT[]),
+    ('b1', 'r2', 'TAAAA-T', [40,40,40,40,40,40]::UTINYINT[]),
+    ('b1', 'r3', 'TAA-AAT', [40,40,40,40,40,40]::UTINYINT[]),
+    ('b1', 'r4', 'TA-AAAT', [40,40,40,40,40,40]::UTINYINT[]),
+    ('b1', 'r5', 'T-AAAAT', [40,40,40,40,40,40]::UTINYINT[])
+) t(bin_id, read_id, aligned_seq, qual);
+
+query T
+SELECT (c).seq
+FROM (
+    SELECT bin_id, compute_msa_consensus(aligned_seq, qual) AS c
+    FROM _mc_hp_correct GROUP BY bin_id
+)
+----
+TAAAAT
+
+# -----------------------------------------------------------------------------
+# Multiple bins in one query: GROUP BY emits one consensus per bin.
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _mc_multi AS SELECT * FROM (VALUES
+    ('b1', 'r1', 'ACGT', [40,40,40,40]::UTINYINT[]),
+    ('b1', 'r2', 'ACGT', [40,40,40,40]::UTINYINT[]),
+    ('b2', 'r3', 'GGTT', [40,40,40,40]::UTINYINT[]),
+    ('b2', 'r4', 'GGTT', [40,40,40,40]::UTINYINT[])
+) t(bin_id, read_id, aligned_seq, qual);
+
+query TT
+SELECT bin_id, (c).seq
+FROM (
+    SELECT bin_id, compute_msa_consensus(aligned_seq, qual) AS c
+    FROM _mc_multi GROUP BY bin_id
+)
+ORDER BY bin_id;
+----
+b1	ACGT
+b2	GGTT
+
+# -----------------------------------------------------------------------------
+# NULL inputs: aggregate has IgnoreNull()=true. Rows with NULL aligned_seq
+# or NULL qual must be silently skipped; the surviving rows are aggregated
+# as if the NULL rows weren't there. A bin with [one valid row + one NULL
+# row] degenerates to the n=1 passthrough.
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _mc_nulls AS SELECT * FROM (VALUES
+    ('b1', 'r1', 'ACGT', [40,40,40,40]::UTINYINT[]),
+    ('b1', 'r2', NULL,   [40,40,40,40]::UTINYINT[]),
+    ('b1', 'r3', 'ACGT', NULL)
+) t(bin_id, read_id, aligned_seq, qual);
+
+query TT
+SELECT (c).seq, (c).qual
+FROM (
+    SELECT bin_id, compute_msa_consensus(aligned_seq, qual) AS c
+    FROM _mc_nulls GROUP BY bin_id
+)
+----
+ACGT	[40, 40, 40, 40]
+
+# All-NULL group: every row dropped → state stays empty → NULL result.
+statement ok
+CREATE TABLE _mc_allnull AS SELECT * FROM (VALUES
+    ('b1', 'r1', NULL::VARCHAR, NULL::UTINYINT[]),
+    ('b1', 'r2', NULL::VARCHAR, NULL::UTINYINT[])
+) t(bin_id, read_id, aligned_seq, qual);
+
+query T
+SELECT compute_msa_consensus(aligned_seq, qual) IS NULL
+FROM _mc_allnull GROUP BY bin_id;
+----
+true
+
+# -----------------------------------------------------------------------------
+# Error case: inconsistent MSA row widths within a single bin (different
+# aligned_seq lengths). Must be detected and raise a clear error rather
+# than producing silently-wrong consensus.
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _mc_badwidth AS SELECT * FROM (VALUES
+    ('b1', 'r1', 'ACGT', [40,40,40,40]::UTINYINT[]),
+    ('b1', 'r2', 'ACGTA', [40,40,40,40,40]::UTINYINT[])
+) t(bin_id, read_id, aligned_seq, qual);
+
+statement error
+SELECT compute_msa_consensus(aligned_seq, qual) FROM _mc_badwidth GROUP BY bin_id;
+----
+compute_msa_consensus
+
+# -----------------------------------------------------------------------------
+# Error case: qual list length does not match the ungapped seq length.
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _mc_badqual AS SELECT * FROM (VALUES
+    ('b1', 'r1', 'ACGT', [40,40,40]::UTINYINT[])
+) t(bin_id, read_id, aligned_seq, qual);
+
+statement error
+SELECT compute_msa_consensus(aligned_seq, qual) FROM _mc_badqual GROUP BY bin_id;
+----
+compute_msa_consensus
