@@ -58,6 +58,8 @@ void PileupWalker::Walk(const std::string &cigar, const std::string &ref_id, con
 			r.ref_pos = ref_pos + k;
 			r.read_id = read_id;
 			r.ref_base = ref_seq[ref_pos + k - 1];
+			r.ref_base_is_null = false;
+			r.insert_pos = 0;
 			if (query_present) {
 				r.query_base = seq[query_pos + k];
 				r.query_qual = qual_is_null ? 0 : qual_data[query_pos + k];
@@ -82,10 +84,25 @@ void PileupWalker::Walk(const std::string &cigar, const std::string &ref_id, con
 			ref_pos += op.length;
 			query_pos += op.length;
 			break;
-		case 'I':
-			// Insertion in query; v1 drops these bases from the output.
+		case 'I': {
+			std::int64_t ins_ref_pos = ref_pos - 1;
+			for (std::int64_t k = 0; k < op.length; ++k) {
+				PileupRow r;
+				r.ref_id = ref_id;
+				r.ref_pos = ins_ref_pos;
+				r.read_id = read_id;
+				r.ref_base = 0;
+				r.ref_base_is_null = true;
+				r.insert_pos = static_cast<std::int32_t>(k + 1);
+				r.query_base = seq[query_pos + k];
+				r.query_qual = qual_is_null ? 0 : qual_data[query_pos + k];
+				r.query_is_null = false;
+				r.qual_is_null = qual_is_null;
+				out.push_back(std::move(r));
+			}
 			query_pos += op.length;
 			break;
+		}
 		case 'D':
 		case 'N':
 			emit_row(op.length, /*query_present=*/false);

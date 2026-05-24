@@ -131,7 +131,7 @@ static std::optional<AnchorMatch> FindAnchor(miint::WFA2Aligner &aligner, const 
 	if (anchor.size() > window.size()) {
 		return std::nullopt;
 	}
-	auto aln = aligner.align_full_semiglobal(/*query=*/anchor, /*subject=*/window);
+	auto aln = aligner.align_cigar_semiglobal_iupac(/*query=*/anchor, /*subject=*/window);
 	if (!aln.has_value()) {
 		return std::nullopt;
 	}

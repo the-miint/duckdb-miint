@@ -194,9 +194,9 @@ static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindIn
 	                    "alignments");
 	ValidateTableSchema(context, data->reference_table, "ref_id, sequence", "reference");
 
-	names = {"ref_id", "ref_pos", "read_id", "ref_base", "query_base", "query_qual"};
-	return_types = {LogicalType::VARCHAR, LogicalType::BIGINT,  LogicalType::VARCHAR,
-	                LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::UTINYINT};
+	names = {"ref_id", "ref_pos", "read_id", "ref_base", "query_base", "query_qual", "insert_pos"};
+	return_types = {LogicalType::VARCHAR, LogicalType::BIGINT,   LogicalType::VARCHAR, LogicalType::VARCHAR,
+	                LogicalType::VARCHAR, LogicalType::UTINYINT, LogicalType::INTEGER};
 	return data;
 }
 
@@ -235,15 +235,26 @@ static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChun
 	auto &ref_base_vec = output.data[3];
 	auto &query_base_vec = output.data[4];
 	auto query_qual_data = FlatVector::GetData<uint8_t>(output.data[5]);
+	auto insert_pos_data = FlatVector::GetData<int32_t>(output.data[6]);
+	auto &ref_base_validity = FlatVector::Validity(output.data[3]);
 	auto &query_base_validity = FlatVector::Validity(output.data[4]);
 	auto &query_qual_validity = FlatVector::Validity(output.data[5]);
+
+	ref_base_validity.SetAllValid(count);
+	query_base_validity.SetAllValid(count);
+	query_qual_validity.SetAllValid(count);
 
 	for (idx_t i = 0; i < count; ++i) {
 		const auto &r = gstate.rows[gstate.row_offset + i];
 		FlatVector::GetData<string_t>(ref_id_vec)[i] = StringVector::AddString(ref_id_vec, r.ref_id);
 		ref_pos_data[i] = r.ref_pos;
 		FlatVector::GetData<string_t>(read_id_vec)[i] = StringVector::AddString(read_id_vec, r.read_id);
-		FlatVector::GetData<string_t>(ref_base_vec)[i] = StringVector::AddString(ref_base_vec, &r.ref_base, 1);
+		insert_pos_data[i] = r.insert_pos;
+		if (r.ref_base_is_null) {
+			ref_base_validity.SetInvalid(i);
+		} else {
+			FlatVector::GetData<string_t>(ref_base_vec)[i] = StringVector::AddString(ref_base_vec, &r.ref_base, 1);
+		}
 		if (r.query_is_null) {
 			query_base_validity.SetInvalid(i);
 		} else {

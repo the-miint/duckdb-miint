@@ -284,6 +284,85 @@ SELECT extract_linked_amplicon(
 anchor
 
 # -----------------------------------------------------------------------------
+# IUPAC degenerate bases in anchors: N, R, Y etc. should match their
+# compatible bases at zero cost (same as cutadapt adapter matching).
+# -----------------------------------------------------------------------------
+
+# N at position 5 of anchor5 (read has 'A' there) — should match at zero cost
+query I
+SELECT (t).sequence
+FROM (SELECT extract_linked_amplicon(
+    'AAAAAGACTCATTGCACACACTAGCTAGCTATTTTT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GACTCNTTGC',
+    'TAGCTAGCTA'
+) AS t)
+----
+ACACAC
+
+# R (A|G) at position where read has 'A' — matches
+query I
+SELECT (t).sequence
+FROM (SELECT extract_linked_amplicon(
+    'AAAAAGACTCATTGCACACACTAGCTAGCTATTTTT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GRCTCATTGC',
+    'TAGCTAGCTA'
+) AS t)
+----
+ACACAC
+
+# Y (C|T) at position where read has 'A' — does NOT match Y, consumes 1 error.
+# Budget = ceil(10 * 0.10) = 1. One Y-mismatch = 1 error, just within budget.
+query I
+SELECT (t).sequence
+FROM (SELECT extract_linked_amplicon(
+    'AAAAAGACTCATTGCACACACTAGCTAGCTATTTTT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GYCTCATTGC',
+    'TAGCTAGCTA'
+) AS t)
+----
+ACACAC
+
+# Two IUPAC mismatches exceed budget — NULL
+# Y at pos 1 (A not in C|T) + Y at pos 5 (A not in C|T) = 2 errors, budget = 1
+query I
+SELECT extract_linked_amplicon(
+    'AAAAAGACTCATTGCACACACTAGCTAGCTATTTTT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GYCTCYTTGC',
+    'TAGCTAGCTA'
+) IS NULL
+----
+true
+
+# Degenerate in anchor3 also works: N in anchor3
+query I
+SELECT (t).sequence
+FROM (SELECT extract_linked_amplicon(
+    'AAAAAGACTCATTGCACACACTAGCTAGCTATTTTT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GACTCATTGC',
+    'TAGNTAGNTA'
+) AS t)
+----
+ACACAC
+
+# Two N's in anchor5 — budget=1, literal matching gives 2 errors (NULL).
+# IUPAC matching: both N's match at zero cost → 0 errors → extracts.
+query I
+SELECT (t).sequence
+FROM (SELECT extract_linked_amplicon(
+    'AAAAAGACTCATTGCACACACTAGCTAGCTATTTTT',
+    [40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40]::UTINYINT[],
+    'GNCTCNTTGC',
+    'TAGCTAGCTA'
+) AS t)
+----
+ACACAC
+
+# -----------------------------------------------------------------------------
 # Regression: non-matching rows via read_fastx must return NULL, not garbage.
 # Prior to the fix, uninitialized child-vector data leaked through for NULL
 # struct entries, causing segfaults during CTAS materialization.

@@ -23,21 +23,21 @@ CREATE TABLE _pile_aln_match AS SELECT * FROM (VALUES
      [40,40,40,40,40,40,40,40,40,40]::UTINYINT[])
 ) t(read_id, reference, position, cigar, sequence, qual);
 
-query IIITTI
-SELECT ref_id, ref_pos, read_id, ref_base, query_base, query_qual
+query IIITTII
+SELECT ref_id, ref_pos, read_id, ref_base, query_base, query_qual, insert_pos
 FROM compute_pileup('_pile_aln_match', '_pile_ref')
 ORDER BY ref_pos;
 ----
-chr1	1	rA	A	A	40
-chr1	2	rA	C	C	40
-chr1	3	rA	G	G	40
-chr1	4	rA	T	T	40
-chr1	5	rA	A	A	40
-chr1	6	rA	C	C	40
-chr1	7	rA	G	G	40
-chr1	8	rA	T	T	40
-chr1	9	rA	A	A	40
-chr1	10	rA	C	C	40
+chr1	1	rA	A	A	40	0
+chr1	2	rA	C	C	40	0
+chr1	3	rA	G	G	40	0
+chr1	4	rA	T	T	40	0
+chr1	5	rA	A	A	40	0
+chr1	6	rA	C	C	40	0
+chr1	7	rA	G	G	40	0
+chr1	8	rA	T	T	40	0
+chr1	9	rA	A	A	40	0
+chr1	10	rA	C	C	40	0
 
 # -----------------------------------------------------------------------------
 # Substitution: 3=1X6= — one mismatch at ref_pos 4 (T→G in query)
@@ -136,8 +136,8 @@ ORDER BY ref_pos;
 
 # -----------------------------------------------------------------------------
 # Insertion: 3=2I5= — query has 2 extra bases not in ref. Insertion rows are
-# NOT emitted in v1 (Karst recipe needs SNP positions only). 8 ref-aligned
-# rows emitted.
+# emitted with ref_pos = preceding ref position, ref_base = NULL,
+# insert_pos = 1-based within the insertion event.
 # -----------------------------------------------------------------------------
 # ref = "ACGTACGT" (8 bp), query "ACGNNTACGT" (10 bp: 3 match, 2 inserted, 5 match)
 statement ok
@@ -151,27 +151,35 @@ CREATE TABLE _pile_aln_ins AS SELECT * FROM (VALUES
      [40,40,40,5,5,40,40,40,40,40]::UTINYINT[])
 ) t(read_id, reference, position, cigar, sequence, qual);
 
-# 8 ref-aligned rows emitted (insertion bases dropped from v1 output)
+# 10 rows: 8 ref-aligned + 2 insertion
 query I
 SELECT count(*) FROM compute_pileup('_pile_aln_ins', '_pile_ref8');
 ----
-8
+10
 
-# Quality of post-insertion bases should come from the correct query positions
-# (5 through 9, NOT 3 through 7 — i.e., query advanced past the insertion)
-query IIT
-SELECT ref_pos, query_qual, query_base
+query IITTII
+SELECT ref_pos, query_qual, query_base, ref_base, insert_pos,
+       CASE WHEN ref_base IS NULL THEN 1 ELSE 0 END AS ref_null
 FROM compute_pileup('_pile_aln_ins', '_pile_ref8')
-ORDER BY ref_pos;
+ORDER BY ref_pos, insert_pos;
 ----
-1	40	A
-2	40	C
-3	40	G
-4	40	T
-5	40	A
-6	40	C
-7	40	G
-8	40	T
+1	40	A	A	0	0
+2	40	C	C	0	0
+3	40	G	G	0	0
+3	5	N	NULL	1	1
+3	5	N	NULL	2	1
+4	40	T	T	0	0
+5	40	A	A	0	0
+6	40	C	C	0	0
+7	40	G	G	0	0
+8	40	T	T	0	0
+
+# WHERE insert_pos = 0 recovers v1 behavior (8 ref-aligned rows only)
+query I
+SELECT count(*) FROM compute_pileup('_pile_aln_ins', '_pile_ref8')
+WHERE insert_pos = 0;
+----
+8
 
 # -----------------------------------------------------------------------------
 # Unmapped alignment (CIGAR = '*') emits no rows

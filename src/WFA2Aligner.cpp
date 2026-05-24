@@ -1,37 +1,17 @@
 #include "WFA2Aligner.hpp"
+#include "sequence_utils.hpp"
 
 #include <WFA2-lib/bindings/cpp/WFAligner.hpp>
 #include <stdexcept>
 
 namespace miint {
 
-// Threshold below which the BiWFA alignment-scope score bug can trigger.
-// The bug affects sequences <= WF_BIALIGN_FALLBACK_MIN_LENGTH (100bp) or
-// alignment scores <= WF_BIALIGN_FALLBACK_MIN_SCORE (250). For sequences
-// above this threshold, the alignment-scope aligner's getAlignmentScore()
-// is correct, and we don't need the separate score-scope aligner.
-// See ext/WFA2-lib/bialign_score_bug.c for a standalone reproduction.
-static constexpr size_t BIWFA_SCORE_BUG_LENGTH_THRESHOLD = 100;
-
 struct WFA2Aligner::Impl {
-	// Score-scope aligner: used ONLY for align_score() calls AND as a fallback
-	// for short sequences (<=100bp) where the BiWFA alignment-scope score bug
-	// can trigger.
-	//
-	// For sequences >100bp, the alignment-scope aligner's score is reliable
-	// (set via wavefront_bialign.c:651 breakpoint.score propagation), so we
-	// skip the redundant score-scope alignment. This halves WFA2 computation
-	// for typical UCHIME workloads (~1500bp sequences).
+	// Score-scope aligner: faster path for align_score() when CIGAR is not needed.
 	std::unique_ptr<wfa::WFAlignerGapAffine> score_aligner;
 
-	// Alignment-scope aligner: computes CIGAR traceback. Uses MemoryMed
-	// (piggyback backtrace) instead of MemoryUltralow (BiWFA recursive).
-	//
-	// MemoryUltralow (BiWFA) is designed for ultra-long sequences (>30Kbp)
-	// where O(s^2) memory is prohibitive. For 1500bp 16S sequences, BiWFA's
-	// recursive forward+reverse wavefront expansion adds 1.25-2x overhead
-	// with no memory benefit. MemoryMed gives near-MemoryHigh speed with
-	// bounded memory via piggyback wavefront offloading.
+	// Alignment-scope aligner: computes CIGAR traceback + score. Uses MemoryMed
+	// (piggyback backtrace) — near-MemoryHigh speed with bounded memory.
 	std::unique_ptr<wfa::WFAlignerGapAffine> alignment_aligner;
 
 	Impl(int mismatch, int gap_open, int gap_extend) {
@@ -85,19 +65,7 @@ std::optional<WFA2CigarResult> WFA2Aligner::align_cigar(const std::string &query
 
 	WFA2CigarResult result;
 	result.cigar = impl_->alignment_aligner->getCIGAR(true);
-
-	// For short sequences, the alignment-scope score may be unreliable (BiWFA bug).
-	// Fall back to the score-scope aligner for sequences <= 100bp.
-	if (query.size() <= BIWFA_SCORE_BUG_LENGTH_THRESHOLD || subject.size() <= BIWFA_SCORE_BUG_LENGTH_THRESHOLD) {
-		auto score_status = impl_->score_aligner->alignEnd2End(subject, query);
-		if (score_status != wfa::WFAligner::StatusAlgCompleted) {
-			return std::nullopt;
-		}
-		result.score = -(impl_->score_aligner->getAlignmentScore());
-	} else {
-		result.score = -(impl_->alignment_aligner->getAlignmentScore());
-	}
-
+	result.score = -(impl_->alignment_aligner->getAlignmentScore());
 	return result;
 }
 
@@ -113,19 +81,7 @@ std::optional<WFA2FullResult> WFA2Aligner::align_full(const std::string &query, 
 
 	WFA2FullResult result;
 	result.cigar = impl_->alignment_aligner->getCIGAR(true);
-
-	// For short sequences, the alignment-scope score may be unreliable (BiWFA bug).
-	// Fall back to the score-scope aligner for sequences <= 100bp.
-	if (query.size() <= BIWFA_SCORE_BUG_LENGTH_THRESHOLD || subject.size() <= BIWFA_SCORE_BUG_LENGTH_THRESHOLD) {
-		auto score_status = impl_->score_aligner->alignEnd2End(subject, query);
-		if (score_status != wfa::WFAligner::StatusAlgCompleted) {
-			return std::nullopt;
-		}
-		result.score = -(impl_->score_aligner->getAlignmentScore());
-	} else {
-		result.score = -(impl_->alignment_aligner->getAlignmentScore());
-	}
-
+	result.score = -(impl_->alignment_aligner->getAlignmentScore());
 	reconstruct_aligned(query, subject, result.cigar, result.query_aligned, result.subject_aligned);
 	return result;
 }
@@ -147,19 +103,49 @@ std::optional<WFA2FullResult> WFA2Aligner::align_full_semiglobal(const std::stri
 
 	WFA2FullResult result;
 	result.cigar = impl_->alignment_aligner->getCIGAR(true);
+	result.score = -(impl_->alignment_aligner->getAlignmentScore());
+	reconstruct_aligned(query, subject, result.cigar, result.query_aligned, result.subject_aligned);
+	return result;
+}
 
-	if (query.size() <= BIWFA_SCORE_BUG_LENGTH_THRESHOLD || subject.size() <= BIWFA_SCORE_BUG_LENGTH_THRESHOLD) {
-		auto score_status = impl_->score_aligner->alignEndsFree(subject, static_cast<int>(subject.size()),
-		                                                        static_cast<int>(subject.size()), query, 0, 0);
-		if (score_status != wfa::WFAligner::StatusAlgCompleted) {
-			return std::nullopt;
-		}
-		result.score = -(impl_->score_aligner->getAlignmentScore());
-	} else {
-		result.score = -(impl_->alignment_aligner->getAlignmentScore());
+namespace {
+struct IupacMatchArgs {
+	const char *pattern_data; // WFA2 pattern = subject
+	int pattern_len;
+	const char *text_data; // WFA2 text = query
+	int text_len;
+};
+
+// Defensive OOB guard per WFA2 documentation (wavefront_sequences.h:46-52).
+// WFA2 should never pass OOB indices for valid inputs, so this is a safety
+// net — returning 0 (mismatch) is conservative and avoids UB on a library bug.
+int iupac_match_callback(int pattern_pos, int text_pos, void *args) {
+	auto *ctx = static_cast<IupacMatchArgs *>(args);
+	if (pattern_pos >= ctx->pattern_len || text_pos >= ctx->text_len) {
+		return 0;
+	}
+	return IupacMatch(ctx->pattern_data[pattern_pos], ctx->text_data[text_pos]) ? 1 : 0;
+}
+} // namespace
+
+std::optional<WFA2CigarResult> WFA2Aligner::align_cigar_semiglobal_iupac(const std::string &query,
+                                                                         const std::string &subject) {
+	if (query.empty() && subject.empty()) {
+		return WFA2CigarResult {0, ""};
 	}
 
-	reconstruct_aligned(query, subject, result.cigar, result.query_aligned, result.subject_aligned);
+	IupacMatchArgs args {subject.data(), static_cast<int>(subject.size()), query.data(),
+	                     static_cast<int>(query.size())};
+	auto align_status = impl_->alignment_aligner->alignEndsFree(
+	    iupac_match_callback, &args, static_cast<int>(subject.size()), static_cast<int>(subject.size()),
+	    static_cast<int>(subject.size()), static_cast<int>(query.size()), 0, 0);
+	if (align_status != wfa::WFAligner::StatusAlgCompleted) {
+		return std::nullopt;
+	}
+
+	WFA2CigarResult result;
+	result.cigar = impl_->alignment_aligner->getCIGAR(true);
+	result.score = -(impl_->alignment_aligner->getAlignmentScore());
 	return result;
 }
 

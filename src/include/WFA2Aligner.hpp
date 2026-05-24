@@ -46,6 +46,11 @@ public:
 	// detection alignment where terminal gaps on the target are penalized less.
 	std::optional<WFA2FullResult> align_full_semiglobal(const std::string &query, const std::string &subject);
 
+	// Semi-global with IUPAC-aware matching. Uses WFA2's lambda callback so
+	// degenerate bases (N, R, Y, ...) match their compatible bases at zero cost.
+	// Returns CIGAR+score only (no reconstructed aligned sequences).
+	std::optional<WFA2CigarResult> align_cigar_semiglobal_iupac(const std::string &query, const std::string &subject);
+
 private:
 	struct Impl;
 	std::unique_ptr<Impl> impl_;

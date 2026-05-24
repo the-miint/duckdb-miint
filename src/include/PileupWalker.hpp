@@ -7,9 +7,12 @@
 namespace miint {
 
 // One per-base row emitted by PileupWalker::Walk. `ref_pos` is 1-based
-// (matches SAM POS). `query_is_null` flags D/N positions where the read
-// has no base; `qual_is_null` is true on D/N positions OR when the input
-// qual list for the alignment is NULL.
+// (matches SAM POS). For insertion rows, `ref_pos` is the preceding
+// reference position (SAM convention) and `insert_pos` is 1-based within
+// the insertion event (0 for reference-aligned rows). For a leading
+// insertion (before any ref-consuming op), `ref_pos` = align_start - 1,
+// which can be 0. This does not collide with the SAM unmapped sentinel
+// because unmapped alignments (CIGAR '*') produce zero rows.
 struct PileupRow {
 	std::string ref_id;
 	std::int64_t ref_pos;
@@ -19,25 +22,19 @@ struct PileupRow {
 	std::uint8_t query_qual;
 	bool query_is_null;
 	bool qual_is_null;
+	bool ref_base_is_null;
+	std::int32_t insert_pos;
 };
 
 // Walks a single alignment's CIGAR against a reference sequence and emits
 // per-base PileupRow entries by appending to `out`.
 //
-// V1 op handling (Karst-protocol UMI use case — SNP positions only):
-//   M/=/X : emit one row per ref pos; advance both ref and query cursors
-//   D/N   : emit one row per ref pos with query_base/query_qual NULL;
-//           advance ref only
-//   I     : advance query only — insertion rows NOT emitted (deferred to v2;
-//           insertions matter for indel-aware callers but not for the
-//           Karst variant pipeline that only needs SNP positions)
+//   M/=/X : emit one row per ref pos; advance both cursors
+//   D/N   : emit one row per ref pos with query_base/query_qual NULL
+//   I     : emit one row per inserted base with ref_base NULL,
+//           ref_pos = preceding ref position, insert_pos = 1..N
 //   S     : advance query only (clip drops from output)
 //   H/P   : no-op
-//
-// Note on N: the SAM spec defines N as a reference skip (intron). V1 treats
-// N identically to D for the UMI use case, which produces NULL query_base
-// rows across intron spans. Downstream RNA-seq callers may want to filter
-// these out or request a future N-aware mode.
 class PileupWalker {
 public:
 	static void Walk(const std::string &cigar, const std::string &ref_id, const std::string &ref_seq,

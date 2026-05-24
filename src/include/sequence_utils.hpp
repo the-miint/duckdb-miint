@@ -93,6 +93,38 @@ static constexpr std::array<char, 256> CreateRnaComplementTable() {
 static constexpr auto DNA_COMPLEMENT_TABLE = CreateDnaComplementTable();
 static constexpr auto RNA_COMPLEMENT_TABLE = CreateRnaComplementTable();
 
+// IUPAC DNA bitmask: A=1, C=2, G=4, T=8. Degenerate codes are OR of components.
+static constexpr std::array<uint8_t, 256> CreateIupacBitmaskTable() {
+	std::array<uint8_t, 256> table = {};
+	for (size_t i = 0; i < 256; i++) {
+		table[i] = 0;
+	}
+	table['A'] = table['a'] = 1;
+	table['C'] = table['c'] = 2;
+	table['G'] = table['g'] = 4;
+	table['T'] = table['t'] = 8;
+	table['U'] = table['u'] = 8;
+	table['R'] = table['r'] = 1 | 4;     // A|G
+	table['Y'] = table['y'] = 2 | 8;     // C|T
+	table['S'] = table['s'] = 2 | 4;     // C|G
+	table['W'] = table['w'] = 1 | 8;     // A|T
+	table['K'] = table['k'] = 4 | 8;     // G|T
+	table['M'] = table['m'] = 1 | 2;     // A|C
+	table['B'] = table['b'] = 2 | 4 | 8; // C|G|T
+	table['D'] = table['d'] = 1 | 4 | 8; // A|G|T
+	table['H'] = table['h'] = 1 | 2 | 8; // A|C|T
+	table['V'] = table['v'] = 1 | 2 | 4; // A|C|G
+	table['N'] = table['n'] = 1 | 2 | 4 | 8;
+	return table;
+}
+
+static constexpr auto IUPAC_BITMASK_TABLE = CreateIupacBitmaskTable();
+
+inline bool IupacMatch(char a, char b) {
+	return (IUPAC_BITMASK_TABLE[static_cast<unsigned char>(a)] & IUPAC_BITMASK_TABLE[static_cast<unsigned char>(b)]) !=
+	       0;
+}
+
 // Reverse complement using a given complement table
 template <const std::array<char, 256> &COMPLEMENT_TABLE>
 inline std::string reverse_complement(const std::string &seq) {

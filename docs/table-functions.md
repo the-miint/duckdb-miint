@@ -2458,11 +2458,12 @@ position covered, with the reference base, the query base, and the per-
 base query quality. Replaces `samtools view | bcftools mpileup` for
 single-sample variant-call positions inside SQL pipelines.
 
-V1 op handling (sufficient for SNP positions; insertion rows are deferred):
+CIGAR op handling:
 - `M` / `=` / `X` — emit one row per ref position; advance both cursors.
 - `D` / `N` — emit one row per ref position with `query_base = NULL` and
   `query_qual = NULL`; advance ref only.
-- `I` — advance query only (insertion bases are dropped from v1 output).
+- `I` — emit one row per inserted base with `ref_base = NULL`,
+  `ref_pos` = preceding reference position, `insert_pos` = 1..N.
 - `S` — soft-clipped bases are dropped (advance query only).
 - `H` / `P` — no-op.
 
@@ -2485,11 +2486,12 @@ that should appear as `ref_id` in the reference table.
 | Column | Type | Description |
 |--------|------|-------------|
 | `ref_id` | VARCHAR | Reference contig name |
-| `ref_pos` | BIGINT | 1-based reference position |
+| `ref_pos` | BIGINT | 1-based reference position (for insertion rows: preceding ref position) |
 | `read_id` | VARCHAR | The originating read |
-| `ref_base` | VARCHAR | Reference base at this position |
+| `ref_base` | VARCHAR | Reference base at this position (NULL on insertion rows) |
 | `query_base` | VARCHAR | Read base at this position (NULL on D/N) |
 | `query_qual` | UTINYINT | Read qual at this position (NULL on D/N or when input qual is NULL) |
+| `insert_pos` | INTEGER | 0 for reference-aligned rows; 1-based position within an insertion event |
 
 **Behavior:**
 - Throws if an alignment references a contig missing from
@@ -2497,10 +2499,14 @@ that should appear as `ref_id` in the reference table.
   the reference.
 - Throws on CIGAR / seq length mismatches.
 - Empty / `*` CIGAR rows produce zero output rows (silently skipped).
-- The whole pileup is materialised in `InitGlobal` (v1 constraint —
-  acceptable for the Karst UMI use case at typical bin sizes). For very
-  large alignment tables, materialise upstream into a temp table and call
-  `compute_pileup` against that.
+- Insertion rows use `ref_pos` = the preceding reference-consuming position
+  (SAM convention). For leading insertions (before any ref-consuming op),
+  `ref_pos` = `position - 1`. Use `WHERE insert_pos = 0` to filter out
+  insertion rows and recover reference-aligned-only output.
+- The whole pileup is materialised in `InitGlobal` — acceptable for the
+  Karst UMI use case at typical bin sizes. For very large alignment tables,
+  materialise upstream into a temp table and call `compute_pileup` against
+  that.
 
 **Example:**
 ```sql

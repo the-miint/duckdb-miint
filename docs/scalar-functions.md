@@ -354,6 +354,12 @@ substring. Powered by the WFA2 semi-global aligner (ends-free), so each
 anchor allows up to `ceil(len(anchor) * error_rate)` errors (mismatch or
 indel) — substitutions and 1-bp indels at the boundary are tolerated.
 
+Anchors support **IUPAC degenerate bases** (N, R, Y, S, W, K, M, B, D, H, V).
+A degenerate position matches its compatible bases at zero cost — it does not
+consume from the error budget. For example, an `N` in the anchor matches any
+base, and `R` matches A or G. This matches cutadapt's adapter-matching
+behavior and is essential for real primer sets with degenerate positions.
+
 Designed for amplicon prep workflows: UMI / index extraction, primer
 trimming, locus extraction from long-read FASTQ.
 

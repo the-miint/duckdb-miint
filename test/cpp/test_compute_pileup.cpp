@@ -32,6 +32,8 @@ TEST_CASE("PileupWalker emits one row per ref pos on all-match", "[pileup][cigar
 		REQUIRE(rows[i].query_qual == 40);
 		REQUIRE_FALSE(rows[i].query_is_null);
 		REQUIRE_FALSE(rows[i].qual_is_null);
+		REQUIRE(rows[i].insert_pos == 0);
+		REQUIRE_FALSE(rows[i].ref_base_is_null);
 	}
 }
 
@@ -71,6 +73,10 @@ TEST_CASE("PileupWalker emits NULL query_base on D positions", "[pileup][cigar]"
 	REQUIRE(rows[4].qual_is_null);
 	REQUIRE(rows[3].ref_base == 'T');
 	REQUIRE(rows[4].ref_base == 'A');
+	for (const auto &r : rows) {
+		REQUIRE(r.insert_pos == 0);
+		REQUIRE_FALSE(r.ref_base_is_null);
+	}
 }
 
 TEST_CASE("PileupWalker treats N like D (skipped reference span)", "[pileup][cigar]") {
@@ -81,18 +87,86 @@ TEST_CASE("PileupWalker treats N like D (skipped reference span)", "[pileup][cig
 	REQUIRE(rows[4].query_is_null);
 }
 
-TEST_CASE("PileupWalker skips I ops without emitting rows", "[pileup][cigar]") {
-	// ref8 = ACGTACGT (8 bp); we override the test fixture's REF_10
+TEST_CASE("PileupWalker emits insertion rows for I ops", "[pileup][cigar]") {
 	std::vector<PileupRow> rows;
 	const std::string ref8 = "ACGTACGT";
 	const std::string query = "ACGNNTACGT"; // 3 match + 2 insert + 5 match
 	const std::vector<std::uint8_t> qual = {40, 40, 40, 5, 5, 40, 40, 40, 40, 40};
 	PileupWalker::Walk("3=2I5=", REF_ID, ref8, 1, READ_ID, query, qual.data(), qual.size(), false, rows);
-	REQUIRE(rows.size() == 8);
-	// Quality for post-insertion bases must come from query positions 5..9
-	for (std::size_t i = 3; i < 8; ++i) {
-		REQUIRE(rows[i].query_qual == 40);
+	REQUIRE(rows.size() == 10);
+
+	// First 3 rows: ref-aligned match
+	for (std::size_t i = 0; i < 3; ++i) {
+		REQUIRE(rows[i].insert_pos == 0);
+		REQUIRE_FALSE(rows[i].ref_base_is_null);
 	}
+
+	// Rows 3-4: insertion rows
+	REQUIRE(rows[3].ref_pos == 3); // preceding ref position (SAM convention)
+	REQUIRE(rows[3].insert_pos == 1);
+	REQUIRE(rows[3].query_base == 'N');
+	REQUIRE(rows[3].query_qual == 5);
+	REQUIRE(rows[3].ref_base_is_null);
+	REQUIRE_FALSE(rows[3].query_is_null);
+
+	REQUIRE(rows[4].ref_pos == 3);
+	REQUIRE(rows[4].insert_pos == 2);
+	REQUIRE(rows[4].query_base == 'N');
+	REQUIRE(rows[4].query_qual == 5);
+	REQUIRE(rows[4].ref_base_is_null);
+
+	// Rows 5-9: ref-aligned match (post-insertion)
+	for (std::size_t i = 5; i < 10; ++i) {
+		REQUIRE(rows[i].insert_pos == 0);
+		REQUIRE(rows[i].query_qual == 40);
+		REQUIRE_FALSE(rows[i].ref_base_is_null);
+	}
+}
+
+TEST_CASE("PileupWalker emits insertion rows for leading insertion", "[pileup][cigar]") {
+	std::vector<PileupRow> rows;
+	const std::string ref8 = "ACGTACGT";
+	const std::string query = "NNACGTACGT"; // 2 insert + 8 match
+	const std::vector<std::uint8_t> qual = {5, 5, 40, 40, 40, 40, 40, 40, 40, 40};
+	PileupWalker::Walk("2I8=", REF_ID, ref8, 1, READ_ID, query, qual.data(), qual.size(), false, rows);
+	REQUIRE(rows.size() == 10);
+
+	// First 2 rows: insertion at ref_pos 0 (before align_start=1)
+	REQUIRE(rows[0].ref_pos == 0);
+	REQUIRE(rows[0].insert_pos == 1);
+	REQUIRE(rows[0].query_base == 'N');
+	REQUIRE(rows[0].ref_base_is_null);
+	REQUIRE(rows[1].ref_pos == 0);
+	REQUIRE(rows[1].insert_pos == 2);
+
+	// Remaining 8 rows: ref-aligned
+	for (std::size_t i = 2; i < 10; ++i) {
+		REQUIRE(rows[i].insert_pos == 0);
+		REQUIRE(rows[i].ref_pos == static_cast<std::int64_t>(i - 1));
+	}
+}
+
+TEST_CASE("PileupWalker emits insertion rows for trailing insertion", "[pileup][cigar]") {
+	std::vector<PileupRow> rows;
+	const std::string ref8 = "ACGTACGT";
+	const std::string query = "ACGTACGTNN"; // 8 match + 2 insert
+	const std::vector<std::uint8_t> qual = {40, 40, 40, 40, 40, 40, 40, 40, 5, 5};
+	PileupWalker::Walk("8=2I", REF_ID, ref8, 1, READ_ID, query, qual.data(), qual.size(), false, rows);
+	REQUIRE(rows.size() == 10);
+
+	// First 8 rows: ref-aligned
+	for (std::size_t i = 0; i < 8; ++i) {
+		REQUIRE(rows[i].insert_pos == 0);
+	}
+
+	// Last 2 rows: insertion at ref_pos 8 (last consumed ref position)
+	REQUIRE(rows[8].ref_pos == 8);
+	REQUIRE(rows[8].insert_pos == 1);
+	REQUIRE(rows[8].query_base == 'N');
+	REQUIRE(rows[8].query_qual == 5);
+	REQUIRE(rows[8].ref_base_is_null);
+	REQUIRE(rows[9].ref_pos == 8);
+	REQUIRE(rows[9].insert_pos == 2);
 }
 
 TEST_CASE("PileupWalker handles 1-based ref position correctly mid-reference", "[pileup][cigar]") {
