@@ -282,3 +282,89 @@ SELECT extract_linked_amplicon(
 )
 ----
 anchor
+
+# -----------------------------------------------------------------------------
+# Regression: non-matching rows via read_fastx must return NULL, not garbage.
+# Prior to the fix, uninitialized child-vector data leaked through for NULL
+# struct entries, causing segfaults during CTAS materialization.
+# The fixture has 5 reads: fw_match_{1,2,3} contain the fw anchors,
+# rv_only_{1,2} do not — those must produce NULL.
+# -----------------------------------------------------------------------------
+
+# Step 1: load from read_fastx (the bug only manifested with this path)
+statement ok
+CREATE TABLE ela_reads AS
+  SELECT read_id, sequence1 AS seq, qual1 AS qual
+  FROM read_fastx('data/fastq/ela_mixed_anchors.fq');
+
+statement ok
+CREATE TABLE ela_re AS
+  SELECT read_id, substr(seq, 1, 200) AS s, qual[1:200] AS q
+  FROM ela_reads;
+
+# Step 2: CTAS with anchors that match only 3 of 5 reads (used to segfault)
+statement ok
+CREATE TABLE ela_result AS
+  SELECT read_id,
+         (extract_linked_amplicon(s, q,
+             'CAAGCAGAAGACGGCATACGAGAT', 'AGAGTTTGATCATGGCTCAG',
+             18, 18, 0.10)).sequence AS u
+  FROM ela_re;
+
+# Matching rows extract the correct amplicon; non-matching rows are NULL
+query II
+SELECT read_id, u FROM ela_result ORDER BY read_id
+----
+fw_match_1	AATCAGCTCAGATCAACT
+fw_match_2	AATCAGCTCAGATCAACT
+fw_match_3	TTTCAGCCCAAGTCAGGT
+rv_only_1	NULL
+rv_only_2	NULL
+
+# Step 3: second CTAS with different anchors (matching only rv reads)
+statement ok
+CREATE TABLE ela_result2 AS
+  SELECT read_id,
+         (extract_linked_amplicon(s, q,
+             'AATGATACGGCGACCACCGAGATC', 'CGACATCGAGGTGCCAAAC',
+             18, 18, 0.10)).sequence AS u
+  FROM ela_re;
+
+query II
+SELECT read_id, u FROM ela_result2 ORDER BY read_id
+----
+fw_match_1	NULL
+fw_match_2	NULL
+fw_match_3	NULL
+rv_only_1	GGTCAAATCGCCTCAACC
+rv_only_2	AAACAAATCGCCTCAGCC
+
+# Step 4: both anchor pairs in one SELECT (concurrent column eval)
+query III
+SELECT read_id,
+       (extract_linked_amplicon(s, q,
+           'CAAGCAGAAGACGGCATACGAGAT', 'AGAGTTTGATCATGGCTCAG',
+           18, 18, 0.10)).sequence AS fw,
+       (extract_linked_amplicon(s, q,
+           'AATGATACGGCGACCACCGAGATC', 'CGACATCGAGGTGCCAAAC',
+           18, 18, 0.10)).sequence AS rv
+FROM ela_re
+ORDER BY read_id
+----
+fw_match_1	AATCAGCTCAGATCAACT	NULL
+fw_match_2	AATCAGCTCAGATCAACT	NULL
+fw_match_3	TTTCAGCCCAAGTCAGGT	NULL
+rv_only_1	NULL	GGTCAAATCGCCTCAACC
+rv_only_2	NULL	AAACAAATCGCCTCAGCC
+
+statement ok
+DROP TABLE ela_reads;
+
+statement ok
+DROP TABLE ela_re;
+
+statement ok
+DROP TABLE ela_result;
+
+statement ok
+DROP TABLE ela_result2;
