@@ -162,6 +162,88 @@ SELECT aligned_length > MAX(original_length) FROM align_mafft('sample_tbl') GROU
 ----
 true
 
+# --- Dereplication: duplicate sequences aligned once, expanded back ---
+
+# 4 reads where r1 and r4 have the same sequence. MAFFT should only align
+# 3 unique sequences; output must still have 4 rows with r1 and r4 sharing
+# the same aligned_sequence.
+statement ok
+CREATE TABLE derep_basic AS SELECT * FROM (VALUES
+    ('r1', 'ACGTACGT'), ('r2', 'ACGAACGT'),
+    ('r3', 'ACGTACGA'), ('r4', 'ACGTACGT')
+) t(read_id, sequence1);
+
+query I
+SELECT COUNT(*) FROM align_mafft('derep_basic');
+----
+4
+
+# r1 and r4 must have identical aligned output and original_length
+query I
+SELECT COUNT(DISTINCT aligned_sequence) FROM align_mafft('derep_basic')
+WHERE read_id IN ('r1', 'r4');
+----
+1
+
+query I
+SELECT COUNT(DISTINCT original_length) FROM align_mafft('derep_basic')
+WHERE read_id IN ('r1', 'r4');
+----
+1
+
+# All 4 read_ids present
+query I
+SELECT COUNT(DISTINCT read_id) FROM align_mafft('derep_basic');
+----
+4
+
+# sequence_index is 0-based sequential
+query I
+SELECT list_sort(list(sequence_index)) FROM align_mafft('derep_basic');
+----
+[0, 1, 2, 3]
+
+# Ungapped content matches original for every row
+query I
+SELECT COUNT(*) FROM align_mafft('derep_basic')
+WHERE replace(aligned_sequence, '-', '') NOT IN (SELECT sequence1 FROM derep_basic);
+----
+0
+
+# --- Dereplication: all identical sequences (single-unique short-circuit) ---
+
+# When all sequences are identical, MAFFT can't run (needs ≥2 unique).
+# Short-circuit: aligned_sequence = original (no gaps), aligned_length = original_length.
+statement ok
+CREATE TABLE derep_all_same AS SELECT * FROM (VALUES
+    ('r1', 'ACGTACGT'), ('r2', 'ACGTACGT'), ('r3', 'ACGTACGT')
+) t(read_id, sequence1);
+
+query I
+SELECT COUNT(*) FROM align_mafft('derep_all_same');
+----
+3
+
+query III
+SELECT read_id, aligned_sequence, original_length
+FROM align_mafft('derep_all_same') ORDER BY read_id;
+----
+r1	ACGTACGT	8
+r2	ACGTACGT	8
+r3	ACGTACGT	8
+
+# aligned_length equals original_length (no gaps inserted)
+query I
+SELECT DISTINCT aligned_length FROM align_mafft('derep_all_same');
+----
+8
+
+statement ok
+DROP TABLE derep_basic;
+
+statement ok
+DROP TABLE derep_all_same;
+
 # --- Sequential calls (global state cleanup) ---
 
 query I

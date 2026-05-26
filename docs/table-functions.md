@@ -45,6 +45,38 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`unifrac_faith_pd`](#unifrac_faith_pdobservations-tree-options) - Faith's phylogenetic diversity per sample
 - [`miint_warnings`](#miint_warnings) - Query miint's operational warnings as a table
 
+## Limitation: Session Variables in Views
+
+Many table functions accept a table or view name as a string parameter. These
+tables/views are read using a **separate internal connection** (necessary to
+avoid query-pipeline deadlocks). This separate connection does **not** inherit
+session variables set via `SET VARIABLE`.
+
+If a view definition uses `getvariable()`, the function will receive `NULL`
+instead of the expected value, leading to empty results or cryptic errors.
+
+**Workaround:** Materialize filtered results into a table before passing the
+table name to the function:
+
+```sql
+-- Won't work (getvariable returns NULL in the internal connection):
+SET VARIABLE my_threshold = 30;
+CREATE VIEW filtered AS SELECT * FROM seqs WHERE quality >= getvariable('my_threshold');
+SELECT * FROM align_mafft('filtered');  -- empty or wrong results
+
+-- Workaround (materialize first):
+SET VARIABLE my_threshold = 30;
+CREATE TABLE filtered AS SELECT * FROM seqs WHERE quality >= getvariable('my_threshold');
+SELECT * FROM align_mafft('filtered');  -- works correctly
+```
+
+This applies to all table functions that accept table/view name parameters,
+including `align_minimap2`, `align_mafft`, `align_sortmerna`, `compute_pileup`,
+`match_short_barcodes`, `detect_chimera_uchime`, `deblur`, `unifrac_pcoa`, and
+others.
+
+---
+
 ## `read_alignments(filename, [reference_lengths='table_name'], [include_filepath=false], [include_seq_qual=false])`
 Read SAM/BAM alignment files.
 
@@ -2503,10 +2535,8 @@ that should appear as `ref_id` in the reference table.
   (SAM convention). For leading insertions (before any ref-consuming op),
   `ref_pos` = `position - 1`. Use `WHERE insert_pos = 0` to filter out
   insertion rows and recover reference-aligned-only output.
-- The whole pileup is materialised in `InitGlobal` — acceptable for the
-  Karst UMI use case at typical bin sizes. For very large alignment tables,
-  materialise upstream into a temp table and call `compute_pileup` against
-  that.
+- Alignments are streamed (not fully materialized). Memory usage scales with
+  the pileup rows per alignment chunk, not the total number of alignments.
 
 **Example:**
 ```sql

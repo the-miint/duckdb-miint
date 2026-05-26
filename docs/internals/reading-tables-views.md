@@ -55,6 +55,7 @@ if (entry->type == CatalogType::TABLE_ENTRY) {
 
 ## Important Notes
 - The separate connection runs in its own transaction, so uncommitted changes from the original context may not be visible
+- **Session variables (`SET VARIABLE`, `getvariable()`) are not visible in the separate connection.** Views that use `getvariable()` will see NULL values. This is a fundamental limitation — each connection has its own session state. Document this in user-facing docs when relevant.
 - For most use cases (reading from persistent tables/views), this is fine
 - Read placements/references at bind time if possible, storing results in bind data to avoid issues during finalize
 - See `src/placement_table_reader.cpp` for a complete example
