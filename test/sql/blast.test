@@ -1,0 +1,143 @@
+# name: test/sql/blast.test
+# description: Test blast table function
+# group: [sql]
+
+require miint
+
+# --- Bind-time validation (no network needed) ---
+
+# TEMP tables work for bind-time validation (DESCRIBE, error checks) because
+# Bind uses the caller's context. They do NOT work for actual blast() queries
+# because InitGlobal's LoadSingleEndSequences uses a separate connection that
+# cannot see session TEMP objects. Live tests in blast_live.test use persistent tables.
+statement ok
+CREATE TEMP TABLE test_seqs (read_id VARCHAR, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO test_seqs VALUES ('seq1', 'ACGTACGTACGTACGTACGT');
+
+# Test error: NULL table name
+statement error
+SELECT * FROM blast(NULL);
+----
+table name cannot be NULL
+
+# Test error: empty table name
+statement error
+SELECT * FROM blast('');
+----
+table name cannot be empty
+
+# Test error: invalid program name
+statement error
+SELECT * FROM blast('test_seqs', program := 'megablast');
+----
+Invalid BLAST program
+
+# Test error: negative evalue
+statement error
+SELECT * FROM blast('test_seqs', evalue := -1.0);
+----
+evalue must be positive
+
+# Test error: zero evalue
+statement error
+SELECT * FROM blast('test_seqs', evalue := 0.0);
+----
+evalue must be positive
+
+# Test error: megablast with non-blastn program
+statement error
+SELECT * FROM blast('test_seqs', program := 'blastp', megablast := true);
+----
+megablast is only valid with program='blastn'
+
+# Test error: max_targets <= 0
+statement error
+SELECT * FROM blast('test_seqs', max_targets := 0);
+----
+max_targets must be positive
+
+# Test error: non-existent table
+statement error
+SELECT * FROM blast('no_such_table_xyz');
+----
+no_such_table_xyz
+
+# Test error: table missing sequence1 column
+statement ok
+CREATE TEMP TABLE bad_schema (read_id VARCHAR, some_col INTEGER);
+
+statement error
+SELECT * FROM blast('bad_schema');
+----
+sequence1
+
+# Test output schema (12 columns matching outfmt 6)
+query IIIIII
+DESCRIBE SELECT * FROM blast('test_seqs');
+----
+query_id	VARCHAR	YES	NULL	NULL	NULL
+subject_id	VARCHAR	YES	NULL	NULL	NULL
+pct_identity	DOUBLE	YES	NULL	NULL	NULL
+alignment_length	INTEGER	YES	NULL	NULL	NULL
+mismatches	INTEGER	YES	NULL	NULL	NULL
+gap_opens	INTEGER	YES	NULL	NULL	NULL
+query_start	BIGINT	YES	NULL	NULL	NULL
+query_end	BIGINT	YES	NULL	NULL	NULL
+subject_start	BIGINT	YES	NULL	NULL	NULL
+subject_end	BIGINT	YES	NULL	NULL	NULL
+evalue	DOUBLE	YES	NULL	NULL	NULL
+bit_score	DOUBLE	YES	NULL	NULL	NULL
+
+# --- Edge case: default parameters ---
+
+# Default program is blastn, database is nt — should bind without errors
+query IIIIII
+DESCRIBE SELECT * FROM blast('test_seqs');
+----
+query_id	VARCHAR	YES	NULL	NULL	NULL
+subject_id	VARCHAR	YES	NULL	NULL	NULL
+pct_identity	DOUBLE	YES	NULL	NULL	NULL
+alignment_length	INTEGER	YES	NULL	NULL	NULL
+mismatches	INTEGER	YES	NULL	NULL	NULL
+gap_opens	INTEGER	YES	NULL	NULL	NULL
+query_start	BIGINT	YES	NULL	NULL	NULL
+query_end	BIGINT	YES	NULL	NULL	NULL
+subject_start	BIGINT	YES	NULL	NULL	NULL
+subject_end	BIGINT	YES	NULL	NULL	NULL
+evalue	DOUBLE	YES	NULL	NULL	NULL
+bit_score	DOUBLE	YES	NULL	NULL	NULL
+
+# All valid programs bind successfully (megablast=false for non-blastn)
+query IIIIII
+DESCRIBE SELECT * FROM blast('test_seqs', program := 'blastp', megablast := false);
+----
+query_id	VARCHAR	YES	NULL	NULL	NULL
+subject_id	VARCHAR	YES	NULL	NULL	NULL
+pct_identity	DOUBLE	YES	NULL	NULL	NULL
+alignment_length	INTEGER	YES	NULL	NULL	NULL
+mismatches	INTEGER	YES	NULL	NULL	NULL
+gap_opens	INTEGER	YES	NULL	NULL	NULL
+query_start	BIGINT	YES	NULL	NULL	NULL
+query_end	BIGINT	YES	NULL	NULL	NULL
+subject_start	BIGINT	YES	NULL	NULL	NULL
+subject_end	BIGINT	YES	NULL	NULL	NULL
+evalue	DOUBLE	YES	NULL	NULL	NULL
+bit_score	DOUBLE	YES	NULL	NULL	NULL
+
+query IIIIII
+DESCRIBE SELECT * FROM blast('test_seqs', program := 'tblastx', megablast := false);
+----
+query_id	VARCHAR	YES	NULL	NULL	NULL
+subject_id	VARCHAR	YES	NULL	NULL	NULL
+pct_identity	DOUBLE	YES	NULL	NULL	NULL
+alignment_length	INTEGER	YES	NULL	NULL	NULL
+mismatches	INTEGER	YES	NULL	NULL	NULL
+gap_opens	INTEGER	YES	NULL	NULL	NULL
+query_start	BIGINT	YES	NULL	NULL	NULL
+query_end	BIGINT	YES	NULL	NULL	NULL
+subject_start	BIGINT	YES	NULL	NULL	NULL
+subject_end	BIGINT	YES	NULL	NULL	NULL
+evalue	DOUBLE	YES	NULL	NULL	NULL
+bit_score	DOUBLE	YES	NULL	NULL	NULL

@@ -177,6 +177,13 @@ else
     echo "Warning: moderate FastTree oracle: $ft_moderate_status; rerun with MIINT_FASTTREE_REGENERATE=1 to refresh"
 fi
 
+# NCBI BLAST network reachability. Probes the BLAST CGI endpoint so
+# live blast tests can skip gracefully in offline CI.
+if curl -sSf --max-time 5 -o /dev/null \
+        "https://blast.ncbi.nlm.nih.gov/blast/Blast.cgi" 2>/dev/null; then
+    export BLAST_LIVE_AVAILABLE=1
+fi
+
 # ENA network reachability. Probes the Portal API with a cheap HEAD-ish call
 # so tests that need live ENA access can skip gracefully in offline CI.
 # Timeout is tight (3s) to avoid slowing down the common case.

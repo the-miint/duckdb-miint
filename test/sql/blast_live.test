@@ -1,0 +1,112 @@
+# name: test/sql/blast_live.test
+# description: Live integration tests for blast table function (requires network)
+# group: [sql]
+
+# These tests make real HTTP requests to NCBI BLAST. Each test submission
+# takes 30-120 seconds. Tables are persistent (not TEMP) because
+# LoadSingleEndSequences uses a separate connection that cannot see TEMP objects.
+
+require httpfs
+
+require miint
+
+require-env BLAST_LIVE_AVAILABLE
+
+# --- Setup: create query tables once, reuse across tests ---
+
+# Lambda phage 100bp fragment — should match near-perfectly in nt
+statement ok
+CREATE TABLE blast_nuc_queries AS SELECT * FROM (VALUES
+    ('lambda_100bp', 'GGGCGGCGACCTCGCGGGTTTTCGCTATTTATGAAAATTTTCCGGTTTAAGGCGTTTCCGTTCTTCTTCGTCATAACTTAATGTTTTTATTTAAAATACCT')
+) AS t(read_id, sequence1);
+
+# Fetch blastn results once, reuse for multiple assertions
+statement ok
+CREATE TABLE blast_nuc_results AS
+SELECT * FROM blast('blast_nuc_queries', program := 'blastn', database := 'nt', max_targets := 5, megablast := true);
+
+# --- blastn tests ---
+
+# At least one hit returned
+query I
+SELECT COUNT(*) > 0 FROM blast_nuc_results;
+----
+true
+
+# Query ID matches input read_id
+query I
+SELECT COUNT(DISTINCT query_id) FROM blast_nuc_results;
+----
+1
+
+query I
+SELECT query_id FROM blast_nuc_results LIMIT 1;
+----
+lambda_100bp
+
+# High identity expected for a perfect Lambda phage match
+query I
+SELECT MAX(pct_identity) >= 99.0 FROM blast_nuc_results;
+----
+true
+
+# Low evalue expected for significant match
+query I
+SELECT MIN(evalue) < 1e-10 FROM blast_nuc_results;
+----
+true
+
+# All columns non-NULL
+query I
+SELECT COUNT(*) FROM blast_nuc_results
+WHERE query_id IS NULL OR subject_id IS NULL OR pct_identity IS NULL
+   OR alignment_length IS NULL OR mismatches IS NULL OR gap_opens IS NULL
+   OR query_start IS NULL OR query_end IS NULL
+   OR subject_start IS NULL OR subject_end IS NULL
+   OR evalue IS NULL OR bit_score IS NULL;
+----
+0
+
+# max_targets bounded the result set (used max_targets := 5)
+query I
+SELECT COUNT(DISTINCT subject_id) <= 5 FROM blast_nuc_results;
+----
+true
+
+# --- blastp test ---
+
+# Human insulin B chain — highly conserved, reliably returns hits
+statement ok
+CREATE TABLE blast_prot_queries AS SELECT * FROM (VALUES
+    ('insulin_b', 'FVNQHLCGSHLVEALYLVCGERGFFYTPKT')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE blast_prot_results AS
+SELECT * FROM blast('blast_prot_queries', program := 'blastp', database := 'nr', max_targets := 3, megablast := false);
+
+# At least one protein hit returned
+query I
+SELECT COUNT(*) > 0 FROM blast_prot_results;
+----
+true
+
+# Query ID matches
+query I
+SELECT query_id FROM blast_prot_results LIMIT 1;
+----
+insulin_b
+
+# --- Cleanup ---
+
+statement ok
+DROP TABLE IF EXISTS blast_nuc_queries;
+
+statement ok
+DROP TABLE IF EXISTS blast_nuc_results;
+
+statement ok
+DROP TABLE IF EXISTS blast_prot_queries;
+
+statement ok
+DROP TABLE IF EXISTS blast_prot_results;
