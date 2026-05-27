@@ -36,3 +36,7 @@
 	path = ext/scikit-bio-binaries
 	url = https://github.com/scikit-bio/scikit-bio-binaries.git
 	branch = main
+[submodule "ext/abpoa"]
+	path = ext/abpoa
+	url = https://github.com/the-miint/abPOA.git
+	branch = embed-friction-fixes
