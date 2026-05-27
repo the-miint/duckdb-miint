@@ -57,7 +57,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: 'true'
+          submodules: 'recursive'
 
       - name: Install build dependencies
         run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
@@ -157,7 +157,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: 'true'
+          submodules: 'recursive'
 
       - name: Install build dependencies
         run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
@@ -263,7 +263,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: 'true'
+          submodules: 'recursive'
 
       - uses: mymindstorm/setup-emsdk@v13
         with:

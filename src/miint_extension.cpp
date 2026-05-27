@@ -52,6 +52,10 @@
 #ifdef MIINT_HAS_MAFFT
 #include <align_mafft.hpp>
 #endif
+#ifdef MIINT_HAS_ABPOA
+#include <align_abpoa.hpp>
+#include <consensus_abpoa.hpp>
+#endif
 #ifdef MIINT_HAS_SORTMERNA
 #include <align_sortmerna.hpp>
 #include <align_sortmerna_rrna.hpp>
@@ -173,6 +177,9 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 	data->versions.emplace_back("vsearch", VSEARCH_GIT_VERSION);
 #endif
 	data->versions.emplace_back("mafft", MAFFT_GIT_VERSION);
+#ifdef MIINT_HAS_ABPOA
+	data->versions.emplace_back("abpoa", ABPOA_GIT_VERSION);
+#endif
 #ifdef MIINT_HAS_UNIFRAC
 	data->versions.emplace_back("unifrac", UNIFRAC_GIT_VERSION);
 	data->versions.emplace_back("scikit-bio-binaries", SKBB_GIT_VERSION);
@@ -295,6 +302,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 #ifdef MIINT_HAS_MAFFT
 	AlignMafftTableFunction::Register(loader);
+#endif
+#ifdef MIINT_HAS_ABPOA
+	AlignAbpoaTableFunction::Register(loader);
+	ConsensusAbpoaTableFunction::Register(loader);
 #endif
 #ifdef MIINT_HAS_SORTMERNA
 	AlignSortMeRNATableFunction::Register(loader);

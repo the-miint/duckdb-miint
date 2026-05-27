@@ -1,0 +1,143 @@
+# name: test/sql/consensus_abpoa.test
+# group: [sql]
+
+#
+# Reference consensus produced by the native abpoa binary from the
+# the-miint/abPOA fork (embed-friction-fixes branch):
+#
+#   Single:      abpoa <input>
+#   Multi:       abpoa <input> -d2
+#
+# Ground truth for tiny.fa: ACGTACGT (single consensus, 3 reads)
+
+require miint
+
+require-env ABPOA_AVAILABLE
+
+# --- Build sequence tables ---
+
+statement ok
+CREATE TABLE tiny AS SELECT read_id, sequence1 FROM read_fastx('data/mafft/tiny.fa');
+
+# --- Error handling ---
+
+# Missing table
+statement error
+SELECT * FROM consensus_abpoa('no_such_table');
+----
+Binder Error
+
+# Paired-end data is rejected at bind
+statement ok
+CREATE TABLE paired AS
+  SELECT 'a' AS read_id, 'ACGTACGT' AS sequence1, 'TGCAACGT' AS sequence2
+  UNION ALL
+  SELECT 'b', 'ACGAACGT', 'TGCAAACG';
+
+statement error
+SELECT * FROM consensus_abpoa('paired');
+----
+Binder Error
+
+# Single sequence (need at least 2)
+statement ok
+CREATE TABLE single AS SELECT 'a' AS read_id, 'ACGTACGT' AS sequence1;
+
+statement error
+SELECT * FROM consensus_abpoa('single');
+----
+Invalid Input Error
+
+# Duplicate read_id
+statement ok
+CREATE TABLE dupe_ids AS
+  SELECT 'a' AS read_id, 'ACGTACGT' AS sequence1
+  UNION ALL SELECT 'a', 'ACGAACGT'
+  UNION ALL SELECT 'b', 'ACGTACGA';
+
+statement error
+SELECT * FROM consensus_abpoa('dupe_ids');
+----
+duplicate read_id 'a'
+
+# --- Basic consensus on tiny.fa ---
+# Ground truth: abpoa data/mafft/tiny.fa -> ACGTACGT
+
+query ITII
+SELECT consensus_id, consensus_sequence, consensus_length, num_reads
+FROM consensus_abpoa('tiny');
+----
+0	ACGTACGT	8	3
+
+# --- Column types ---
+
+query TTTT
+SELECT typeof(consensus_id), typeof(consensus_sequence), typeof(consensus_length), typeof(num_reads)
+FROM consensus_abpoa('tiny');
+----
+INTEGER	VARCHAR	INTEGER	INTEGER
+
+# --- Consensus contains only valid nucleotides ---
+
+query I
+SELECT COUNT(*) FROM consensus_abpoa('tiny')
+WHERE consensus_sequence ~ '[^ACGTN]';
+----
+0
+
+# --- Algorithm parameter ---
+
+query I
+SELECT COUNT(*) FROM consensus_abpoa('tiny', algorithm := 'majority_voting');
+----
+1
+
+query I
+SELECT COUNT(*) FROM consensus_abpoa('tiny', algorithm := 'heaviest_bundling');
+----
+1
+
+# --- Multi-consensus ---
+
+statement ok
+CREATE TABLE divergent AS
+  SELECT * FROM (VALUES
+    ('a', 'ACGTACGTACGT'),
+    ('b', 'ACGTTTTTACGT'),
+    ('c', 'ACGAACGAACGA'),
+    ('d', 'ACGATTTTACGA'),
+    ('e', 'ACGTACGTACGT'),
+    ('f', 'ACGTTTTTACGT')
+  ) AS t(read_id, sequence1);
+
+# Ground truth: abpoa divergent.fa -d2 produces 2 consensus sequences
+query I
+SELECT COUNT(*) FROM consensus_abpoa('divergent', max_num_cons := 2);
+----
+2
+
+# Each consensus has reads assigned
+query I
+SELECT MIN(num_reads) > 0 FROM consensus_abpoa('divergent', max_num_cons := 2);
+----
+true
+
+# --- Sequential calls ---
+
+query I
+SELECT (SELECT COUNT(*) FROM consensus_abpoa('tiny'))
+     + (SELECT COUNT(*) FROM consensus_abpoa('tiny'));
+----
+2
+
+# --- Parameters accepted ---
+
+query I
+SELECT COUNT(*) FROM consensus_abpoa('tiny', match := 1, mismatch := 2);
+----
+1
+
+query I
+SELECT COUNT(*) FROM consensus_abpoa('tiny', progressive := true);
+----
+1

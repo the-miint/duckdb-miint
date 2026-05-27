@@ -1,0 +1,119 @@
+# name: test/sql/align_abpoa.test
+# group: [sql]
+
+#
+# Reference alignments produced by the native abpoa binary from the
+# the-miint/abPOA fork (embed-friction-fixes branch):
+#
+#   MSA:       abpoa <input> -r1
+#   Consensus: abpoa <input>
+#
+# abPOA preserves input order and does not alter case.
+
+require miint
+
+require-env ABPOA_AVAILABLE
+
+# --- Build sequence tables ---
+
+statement ok
+CREATE TABLE tiny AS SELECT read_id, sequence1 FROM read_fastx('data/mafft/tiny.fa');
+
+# --- Error handling ---
+
+# Missing table
+statement error
+SELECT * FROM align_abpoa('no_such_table');
+----
+Binder Error
+
+# Paired-end data is rejected at bind
+statement ok
+CREATE TABLE paired AS
+  SELECT 'a' AS read_id, 'ACGTACGT' AS sequence1, 'TGCAACGT' AS sequence2
+  UNION ALL
+  SELECT 'b', 'ACGAACGT', 'TGCAAACG';
+
+statement error
+SELECT * FROM align_abpoa('paired');
+----
+Binder Error
+
+# Single sequence (need at least 2)
+statement ok
+CREATE TABLE single AS SELECT 'a' AS read_id, 'ACGTACGT' AS sequence1;
+
+statement error
+SELECT * FROM align_abpoa('single');
+----
+Invalid Input Error
+
+# Duplicate read_id
+statement ok
+CREATE TABLE dupe_ids AS
+  SELECT 'a' AS read_id, 'ACGTACGT' AS sequence1
+  UNION ALL SELECT 'a', 'ACGAACGT'
+  UNION ALL SELECT 'b', 'ACGTACGA';
+
+statement error
+SELECT * FROM align_abpoa('dupe_ids');
+----
+duplicate read_id 'a'
+
+# --- tiny: exact expected output ---
+# Input: s1=ACGTACGT, s2=ACGAACGT, s3=ACGTACGA (3 DNA, 8bp each)
+# Ground truth from: abpoa data/mafft/tiny.fa -r1
+# Expected: no gaps (same length, high similarity)
+
+query ITTII
+SELECT sequence_index, read_id, aligned_sequence, original_length, aligned_length
+FROM align_abpoa('tiny') ORDER BY sequence_index;
+----
+0	s1	ACGTACGT	8	8
+1	s2	ACGAACGT	8	8
+2	s3	ACGTACGA	8	8
+
+# --- Column types ---
+
+query I
+SELECT typeof(sequence_index) FROM align_abpoa('tiny') LIMIT 1;
+----
+BIGINT
+
+# --- Ungapped content matches original input ---
+
+query I
+SELECT COUNT(*) FROM align_abpoa('tiny')
+WHERE replace(aligned_sequence, '-', '') NOT IN (SELECT sequence1 FROM tiny);
+----
+0
+
+# --- Parameters accepted ---
+
+query I
+SELECT COUNT(*) FROM align_abpoa('tiny', match := 1, mismatch := 2);
+----
+3
+
+query I
+SELECT COUNT(*) FROM align_abpoa('tiny', progressive := true);
+----
+3
+
+query I
+SELECT COUNT(*) FROM align_abpoa('tiny', progressive := false);
+----
+3
+
+query I
+SELECT COUNT(*) FROM align_abpoa('tiny', align_mode := 'global');
+----
+3
+
+# --- Sequential calls (global state cleanup) ---
+
+query I
+SELECT (SELECT COUNT(*) FROM align_abpoa('tiny'))
+     + (SELECT COUNT(*) FROM align_abpoa('tiny'));
+----
+6

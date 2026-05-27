@@ -14,12 +14,13 @@ Four embedding categories:
 |---|---|---|
 | `MIINT_ENABLE_HDF5` | ON | Emscripten (C++ static class members become unresolvable GOT.mem imports in WASM) |
 | `MIINT_ENABLE_MAFFT` | ON | Windows (uses `mkdtemp` and other POSIX APIs; segfaults on MinGW) |
+| `MIINT_ENABLE_ABPOA` | ON | Windows (POSIX APIs) |
 | `MIINT_ENABLE_VSEARCH` | ON | Emscripten, Windows (autotools build not supported) |
 | `MIINT_ENABLE_SORTMERNA` | ON | Emscripten (RocksDB vcpkg port not built for wasm32), Windows/MinGW (cmph assumes POSIX `<sys/time.h>`; MSVC-on-Windows would work if anyone wires it up) |
 | `MIINT_ENABLE_GPL_BOUNDARY` | ON | Emscripten, Windows (subsystem uses POSIX shm + fork/exec) |
 | `MIINT_ENABLE_UNIFRAC` | ON | Windows (libssu's inmem build assumes POSIX; first-class on Emscripten via the WASM target) |
 
-Corresponding preprocessor macros: `MIINT_HAS_HDF5`, `MIINT_HAS_MAFFT`, `MIINT_HAS_VSEARCH`, `MIINT_HAS_SORTMERNA`, `MIINT_HAS_GPL_BOUNDARY`, `MIINT_HAS_UNIFRAC`. Also `MIINT_ASPERA_SUPPORTED=0` on Windows/WASM (POSIX-only runtime).
+Corresponding preprocessor macros: `MIINT_HAS_HDF5`, `MIINT_HAS_MAFFT`, `MIINT_HAS_ABPOA`, `MIINT_HAS_VSEARCH`, `MIINT_HAS_SORTMERNA`, `MIINT_HAS_GPL_BOUNDARY`, `MIINT_HAS_UNIFRAC`. Also `MIINT_ASPERA_SUPPORTED=0` on Windows/WASM (POSIX-only runtime).
 
 Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is linked (not on musl/macOS/Windows).
 
@@ -67,6 +68,21 @@ Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is li
 - **Purpose:** Multiple sequence alignment (PartTree algorithm)
 - **Build:** Makefile; produces `libmafft_parttree.a` with `ENABLE_MULTITHREAD=-Denablemultithread`
 - **Platform:** POSIX only (uses `mkdtemp`); auto-disabled on Windows
+
+### abPOA (the-miint fork)
+- **Location:** `ext/abpoa/` (git submodule at `embed-friction-fixes` on the `the-miint/abPOA` fork; version captured via `git describe` → `ABPOA_GIT_VERSION`)
+- **Purpose:** Adaptive banded partial order alignment for MSA and consensus generation (`align_abpoa`, `consensus_abpoa`)
+- **Gated by:** `MIINT_ENABLE_ABPOA` (defaults on; auto-disabled on Windows — POSIX APIs). `MIINT_HAS_ABPOA` compile define.
+- **Build:** `add_subdirectory(ext/abpoa EXCLUDE_FROM_ALL)`. Unlike minimap2/MAFFT which use `ExternalProject_Add` with Makefiles, abPOA's fork CMakeLists.txt is fully subdirectory-friendly (no global flag pollution, gated install targets, proper multi-ISA SIMD dispatch including WASM SIMD128).
+- **Linking:** `$<TARGET_FILE:abpoa>` + `add_dependencies` (not direct target linking) to avoid DuckDB export-set conflicts.
+- **SIMD dispatch (x86_64):** CMake compiles `abpoa_align_simd.c` four times (SSE2, SSE4.1, AVX2, AVX512BW) as OBJECT libraries with per-ISA flags, plus a single CPUID dispatcher. The base library uses native `<immintrin.h>` at SSE2 level (no SIMDE on x86_64 dispatch mode).
+- **ARM64:** single compile with SIMDE translating AVX2 intrinsics to NEON.
+- **WASM:** SIMDE with `-msimd128` (128-bit SIMD, maps to SSE2 path).
+- **Symbol namespacing:** the fork prefixes all externally-visible klib symbols (`km_init` → `abpoa_km_init`, `ks_resize` → `abpoa_ks_resize`, etc.) and minimap2-derived symbols (`mm_sketch` → `abpoa_mm_sketch`) to prevent collisions with minimap2 and htslib when statically linked into the same binary.
+- **Nested submodule:** SIMDE is a submodule within `ext/abpoa/include/simde/`. Must be initialized (`git submodule update --init --recursive` in `ext/abpoa`).
+- **Thread safety:** instance-based — each thread creates its own `abpoa_t`/`abpoa_para_t`. No global mutex needed. `max_threads_hint=0` in per-sample mode allows true parallel execution.
+- **Known limitation:** abPOA's internal error handlers (`err_fatal_core` in `src/utils.c`) call `abort()` on OOM. Same class of issue as minimap2's embedded allocator — a very large or malformed input could kill the DuckDB server process.
+- **macOS cross-compile:** `CMAKE_OSX_ARCHITECTURES` is set from `OSX_BUILD_ARCH` before `add_subdirectory` and unset after.
 
 ### SortMeRNA 4.4.0 (fork)
 - **Location:** `ext/sortmerna/` (git submodule at `v4.4.0-miint` on the `the-miint/sortmerna` fork)
