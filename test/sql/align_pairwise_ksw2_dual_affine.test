@@ -1,0 +1,157 @@
+# name: test/sql/align_pairwise_ksw2_dual_affine.test
+# group: [sql]
+
+require miint
+
+###############################################################################
+# align_pairwise_ksw2_dual_affine_score — error handling
+###############################################################################
+
+# Missing args
+statement error
+SELECT align_pairwise_ksw2_dual_affine_score('ACGT');
+----
+
+# Invalid penalty: match=0
+statement error
+SELECT align_pairwise_ksw2_dual_affine_score('ACGT', 'ACGT', 0, 4, 6, 2, 24, 1);
+----
+Invalid Input Error
+
+# Invalid penalty: gap_extend2=0
+statement error
+SELECT align_pairwise_ksw2_dual_affine_score('ACGT', 'ACGT', 2, 4, 6, 2, 24, 0);
+----
+Invalid Input Error
+
+# Invalid penalty: negative gap_open2
+statement error
+SELECT align_pairwise_ksw2_dual_affine_score('ACGT', 'ACGT', 2, 4, 6, 2, -1, 1);
+----
+Invalid Input Error
+
+###############################################################################
+# align_pairwise_ksw2_dual_affine_score — basic behavior (short gaps == extz)
+###############################################################################
+
+# Identical -> 4 * match(2) = 8
+query I
+SELECT align_pairwise_ksw2_dual_affine_score('ACGT', 'ACGT');
+----
+8
+
+# Single mismatch -> 3*match(2) - mismatch(4) = 2
+query I
+SELECT align_pairwise_ksw2_dual_affine_score('ACGT', 'ACAT');
+----
+2
+
+# NULL -> NULL
+query I
+SELECT align_pairwise_ksw2_dual_affine_score(NULL, 'ACGT') IS NULL;
+----
+true
+
+# Empty/empty -> 0
+query I
+SELECT align_pairwise_ksw2_dual_affine_score('', '');
+----
+0
+
+# All-insertion of length 4: first affine wins (6 + 4*2 = 14 < 24 + 4*1 = 28). Score = -14.
+query I
+SELECT align_pairwise_ksw2_dual_affine_score('ACGT', '');
+----
+-14
+
+# 8-arg explicit defaults
+query I
+SELECT align_pairwise_ksw2_dual_affine_score('ACGT', 'ACGT', 2, 4, 6, 2, 24, 1);
+----
+8
+
+# 10-arg advanced (w=-1, zdrop=-1 matches default)
+query I
+SELECT align_pairwise_ksw2_dual_affine_score('ACGT', 'ACGT', 2, 4, 6, 2, 24, 1, -1, -1);
+----
+8
+
+###############################################################################
+# Long-gap test: second affine is cheaper, dual_affine score should beat extz
+###############################################################################
+
+# 20-base query A's vs 50-base subject A's: 30-bp deletion.
+# 20 matches * 2 = 40. Gap of 30: first affine 6 + 30*2 = 66; second 24 + 30*1 = 54. Second wins.
+# Dual-affine score: 40 - 54 = -14. Extz score on same params: 40 - 66 = -26.
+query I
+SELECT align_pairwise_ksw2_dual_affine_score(repeat('A', 20), repeat('A', 50));
+----
+-14
+
+query I
+SELECT align_pairwise_ksw2_score(repeat('A', 20), repeat('A', 50));
+----
+-26
+
+# Confirm: dual-affine score is strictly greater than extz on the same input.
+query I
+SELECT align_pairwise_ksw2_dual_affine_score(repeat('A', 20), repeat('A', 50)) >
+       align_pairwise_ksw2_score(repeat('A', 20), repeat('A', 50));
+----
+true
+
+# Table usage
+statement ok
+CREATE TABLE seqs AS SELECT * FROM (VALUES
+    ('s1', 'ACGT', 'ACGT'),
+    ('s2', 'ACGT', 'ACAT')
+) AS t(name, query, subject);
+
+query IT
+SELECT name, align_pairwise_ksw2_dual_affine_score(query, subject) FROM seqs ORDER BY name;
+----
+s1	8
+s2	2
+
+###############################################################################
+# align_pairwise_ksw2_dual_affine_cigar
+###############################################################################
+
+query IT
+SELECT (align_pairwise_ksw2_dual_affine_cigar('ACGT', 'ACGT')).score,
+       (align_pairwise_ksw2_dual_affine_cigar('ACGT', 'ACGT')).cigar;
+----
+8	4M
+
+query IT
+SELECT (align_pairwise_ksw2_dual_affine_cigar('ACGT', 'ACAT')).score,
+       (align_pairwise_ksw2_dual_affine_cigar('ACGT', 'ACAT')).cigar;
+----
+2	4M
+
+query I
+SELECT align_pairwise_ksw2_dual_affine_cigar(NULL, 'ACGT') IS NULL;
+----
+true
+
+###############################################################################
+# align_pairwise_ksw2_dual_affine_full
+###############################################################################
+
+query ITTT
+SELECT (align_pairwise_ksw2_dual_affine_full('ACGT', 'ACGT')).score,
+       (align_pairwise_ksw2_dual_affine_full('ACGT', 'ACGT')).cigar,
+       (align_pairwise_ksw2_dual_affine_full('ACGT', 'ACGT')).query_aligned,
+       (align_pairwise_ksw2_dual_affine_full('ACGT', 'ACGT')).subject_aligned;
+----
+8	4M	ACGT	ACGT
+
+query I
+SELECT (align_pairwise_ksw2_dual_affine_full('ACGGT', 'ACGT')).subject_aligned LIKE '%-%';
+----
+true
+
+query I
+SELECT align_pairwise_ksw2_dual_affine_full(NULL, 'ACGT') IS NULL;
+----
+true

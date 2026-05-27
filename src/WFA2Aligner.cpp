@@ -1,4 +1,6 @@
 #include "WFA2Aligner.hpp"
+
+#include "cigar_reconstruction.hpp"
 #include "sequence_utils.hpp"
 
 #include <WFA2-lib/bindings/cpp/WFAligner.hpp>
@@ -82,7 +84,7 @@ std::optional<WFA2FullResult> WFA2Aligner::align_full(const std::string &query, 
 	WFA2FullResult result;
 	result.cigar = impl_->alignment_aligner->getCIGAR(true);
 	result.score = -(impl_->alignment_aligner->getAlignmentScore());
-	reconstruct_aligned(query, subject, result.cigar, result.query_aligned, result.subject_aligned);
+	reconstruct_aligned_from_cigar(query, subject, result.cigar, result.query_aligned, result.subject_aligned);
 	return result;
 }
 
@@ -104,7 +106,7 @@ std::optional<WFA2FullResult> WFA2Aligner::align_full_semiglobal(const std::stri
 	WFA2FullResult result;
 	result.cigar = impl_->alignment_aligner->getCIGAR(true);
 	result.score = -(impl_->alignment_aligner->getAlignmentScore());
-	reconstruct_aligned(query, subject, result.cigar, result.query_aligned, result.subject_aligned);
+	reconstruct_aligned_from_cigar(query, subject, result.cigar, result.query_aligned, result.subject_aligned);
 	return result;
 }
 
@@ -147,81 +149,6 @@ std::optional<WFA2CigarResult> WFA2Aligner::align_cigar_semiglobal_iupac(const s
 	result.cigar = impl_->alignment_aligner->getCIGAR(true);
 	result.score = -(impl_->alignment_aligner->getAlignmentScore());
 	return result;
-}
-
-// Reconstruct gapped alignment strings from an extended CIGAR and the original sequences.
-void WFA2Aligner::reconstruct_aligned(const std::string &query, const std::string &subject, const std::string &cigar,
-                                      std::string &query_aligned, std::string &subject_aligned) {
-	query_aligned.clear();
-	subject_aligned.clear();
-	query_aligned.reserve(query.size() + subject.size());
-	subject_aligned.reserve(query.size() + subject.size());
-
-	size_t qi = 0; // query position
-	size_t si = 0; // subject position
-	size_t ci = 0; // cigar string position
-
-	while (ci < cigar.size()) {
-		// Parse run length prefix (e.g. "3" in "3=")
-		size_t num_start = ci;
-		while (ci < cigar.size() && cigar[ci] >= '0' && cigar[ci] <= '9') {
-			ci++;
-		}
-		if (ci >= cigar.size()) {
-			throw std::runtime_error("CIGAR string ends with digits but no operation character");
-		}
-		int count = 1;
-		if (ci > num_start) {
-			try {
-				count = std::stoi(cigar.substr(num_start, ci - num_start));
-			} catch (const std::out_of_range &) {
-				throw std::runtime_error("CIGAR operation length overflows integer");
-			}
-			if (count <= 0) {
-				throw std::runtime_error("CIGAR operation length must be positive");
-			}
-		}
-
-		char op = cigar[ci++];
-		for (int k = 0; k < count; k++) {
-			switch (op) {
-			case '=': // sequence match
-			case 'X': // sequence mismatch
-			case 'M': // match or mismatch
-				if (qi >= query.size() || si >= subject.size()) {
-					throw std::runtime_error("CIGAR consumes more bases than available in sequences");
-				}
-				query_aligned += query[qi++];
-				subject_aligned += subject[si++];
-				break;
-			case 'I': // insertion in query (query has extra bases vs subject)
-				if (qi >= query.size()) {
-					throw std::runtime_error("CIGAR consumes more query bases than available");
-				}
-				query_aligned += query[qi++];
-				subject_aligned += '-';
-				break;
-			case 'D': // deletion from query (subject has extra bases vs query)
-				if (si >= subject.size()) {
-					throw std::runtime_error("CIGAR consumes more subject bases than available");
-				}
-				query_aligned += '-';
-				subject_aligned += subject[si++];
-				break;
-			default:
-				throw std::runtime_error(std::string("Unknown CIGAR operation: ") + op);
-			}
-		}
-	}
-
-	if (qi != query.size()) {
-		throw std::runtime_error("CIGAR did not consume all query bases: consumed " + std::to_string(qi) + " of " +
-		                         std::to_string(query.size()));
-	}
-	if (si != subject.size()) {
-		throw std::runtime_error("CIGAR did not consume all subject bases: consumed " + std::to_string(si) + " of " +
-		                         std::to_string(subject.size()));
-	}
 }
 
 } // namespace miint

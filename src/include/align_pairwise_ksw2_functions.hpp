@@ -5,17 +5,17 @@
 
 namespace duckdb {
 
-class AlignPairwiseScoreFunction {
+class AlignPairwiseKsw2ScoreFunction {
 public:
 	static void Register(ExtensionLoader &loader);
 };
 
-class AlignPairwiseCigarFunction {
+class AlignPairwiseKsw2CigarFunction {
 public:
 	static void Register(ExtensionLoader &loader);
 };
 
-class AlignPairwiseFullFunction {
+class AlignPairwiseKsw2FullFunction {
 public:
 	static void Register(ExtensionLoader &loader);
 };

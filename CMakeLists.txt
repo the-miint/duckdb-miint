@@ -1072,7 +1072,11 @@ set(EXTENSION_SOURCES
     src/SFFReader.cpp
     src/read_sequences_sff.cpp
     src/WFA2Aligner.cpp
-    src/align_pairwise_functions.cpp
+    src/align_pairwise_wfa2_functions.cpp
+    src/KSW2Aligner.cpp
+    src/align_pairwise_ksw2_functions.cpp
+    src/align_pairwise_ksw2_dual_affine_functions.cpp
+    src/align_pairwise_ksw2_splice_functions.cpp
     src/rype_classify.cpp
     src/rype_extract.cpp
     src/MsBinaryDecoder.cpp
@@ -1499,6 +1503,8 @@ set(TEST_SOURCES
     test/cpp/test_SFFReader.cpp
     src/WFA2Aligner.cpp
     test/cpp/test_WFA2Aligner.cpp
+    src/KSW2Aligner.cpp
+    test/cpp/test_KSW2Aligner.cpp
     src/MsBinaryDecoder.cpp
     test/cpp/test_MsBinaryDecoder.cpp
     src/MzMLReader.cpp
