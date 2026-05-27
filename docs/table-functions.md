@@ -31,6 +31,8 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`align_bowtie2`](#align_bowtie2query_table-subject_table-options) - Bowtie2 alignment
 - [`align_bowtie2_sharded`](#align_bowtie2_shardedquery_table-shard_directory-read_to_shard-options) - Sharded bowtie2 alignment
 - [`align_mafft`](#align_maffttable_name) - MAFFT multiple sequence alignment (PartTree)
+- [`align_abpoa`](#align_abpoatable_name-options) - abPOA partial order multiple sequence alignment
+- [`consensus_abpoa`](#consensus_abpoatable_name-options) - abPOA consensus sequence generation
 - [`align_sortmerna`](#align_sortmernaquery_table-ref_pathspaths-options) - SortMeRNA rRNA alignment (SAM schema)
 - [`align_sortmerna_rrna`](#align_sortmerna_rrnaquery_table-ref_pathspaths-options) - SortMeRNA rRNA alignment (rRNA schema with identity/coverage/e-value)
 - [`match_short_barcodes`](#match_short_barcodesquery_table-ref_table-max_nmn-report_alltrue) - Hamming-distance matcher for short fixed-length barcodes (UMIs, sample indices)
@@ -2412,6 +2414,109 @@ GROUP BY a.read_id, b.read_id;
 - All sequences are materialized in memory (required by the MSA algorithm)
 - Sequences must be at least 6 characters (MAFFT internal requirement)
 - Single-threaded alignment (process-wide mutex)
+
+---
+
+## `align_abpoa(table_name, [options])`
+
+Multiple sequence alignment using [abPOA](https://github.com/yangao07/abPOA) (adaptive banded Partial Order Alignment). Reads all sequences from a sequence table/view, aligns them via a partial order graph, and returns the aligned sequences with gap characters inserted.
+
+abPOA is embedded as a statically linked C library (no external binary required). It supports adaptive banding for 3-10x speedup over full-DP POA, minimizer-based progressive guide tree construction, and convex gap penalties.
+
+**Parameters:**
+- `table_name` (VARCHAR): Name of a table or view containing sequences to align. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns. Minimum 2 sequences. DNA only. Paired-end tables (those with a `sequence2` column) are rejected at bind.
+- `sample_id` (VARCHAR, optional): Name of a column in `table_name` to partition by. When provided, `align_abpoa` runs one MSA per distinct sample value and prepends the sample column to the output. `sequence_index` is per-sample (0..n-1 within each sample). Unlike `align_mafft`, per-sample alignments run in parallel (abPOA is thread-safe).
+- `match` (INTEGER, default 2): Match score.
+- `mismatch` (INTEGER, default 4): Mismatch penalty.
+- `gap_open1` (INTEGER, default 4): First-layer gap opening penalty (affine/convex).
+- `gap_open2` (INTEGER, default 24): Second-layer gap opening penalty (convex gap mode).
+- `gap_ext1` (INTEGER, default 2): First-layer gap extension penalty.
+- `gap_ext2` (INTEGER, default 1): Second-layer gap extension penalty.
+- `align_mode` (VARCHAR, default `'global'`): Alignment mode — `'global'`, `'local'`, or `'extension'`.
+- `progressive` (BOOLEAN, default `true`): Use minimizer-based guide tree for progressive alignment order. Improves quality by aligning most-similar sequences first.
+- `disable_seeding` (BOOLEAN, default `false`): Disable minimizer seeding (forces full-length alignment).
+- `amb_strand` (BOOLEAN, default `false`): Try reverse complement if alignment score is too low.
+- `k` (INTEGER, default 19): Minimizer k-mer size.
+- `w` (INTEGER, default 10): Minimizer window size.
+- `min_w` (INTEGER, default 500): Minimum window size for POA between anchors.
+- `bandwidth` (INTEGER, default 10): Adaptive banding base width.
+- `bandwidth_frac` (FLOAT, default 0.01): Adaptive banding fraction of query length.
+
+**Output schema:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `sequence_index` | BIGINT | 0-based position matching input order |
+| `read_id` | VARCHAR | Sequence identifier from the input `read_id` column |
+| `aligned_sequence` | VARCHAR | Aligned sequence with `-` gap characters |
+| `original_length` | INTEGER | Length of the input sequence (no gaps) |
+| `aligned_length` | INTEGER | Length of aligned sequences (same for all rows) |
+
+**Thread safety:** Each alignment creates its own abPOA instance. No process-wide mutex — per-sample alignments run in true parallel.
+
+**Examples:**
+
+```sql
+-- Basic multiple sequence alignment
+CREATE TABLE seqs AS SELECT read_id, sequence1 FROM read_fastx('amplicons.fasta');
+SELECT * FROM align_abpoa('seqs');
+
+-- With progressive guide tree (default) and custom scoring
+SELECT * FROM align_abpoa('seqs', match := 1, mismatch := 3, progressive := true);
+
+-- Per-sample alignment (parallel across samples)
+CREATE VIEW cohort AS
+  SELECT 'S1' AS sample, * FROM read_fastx('sample1.fasta')
+  UNION ALL
+  SELECT 'S2' AS sample, * FROM read_fastx('sample2.fasta');
+SELECT * FROM align_abpoa('cohort', sample_id := 'sample') ORDER BY sample, sequence_index;
+```
+
+**Limitations:**
+- All sequences are materialized in memory (required by the POA algorithm)
+- DNA only (nucleotide mode)
+
+---
+
+## `consensus_abpoa(table_name, [options])`
+
+Consensus sequence generation using [abPOA](https://github.com/yangao07/abPOA). Reads all sequences from a sequence table/view, builds a partial order alignment graph, and extracts one or more consensus sequences using heaviest bundling or majority voting.
+
+Particularly useful for amplicon denoising, strain-level variant calling, and long-read error correction where multiple consensus sequences from heterogeneous samples are needed.
+
+**Parameters:**
+
+Same alignment parameters as `align_abpoa`, plus:
+- `max_num_cons` (INTEGER, default 1): Maximum number of consensus sequences to generate. When > 1, abPOA clusters reads and produces one consensus per cluster (up to `max_num_cons`).
+- `min_freq` (FLOAT, default 0.25): Minimum cluster frequency for multi-consensus mode. Clusters below this threshold are merged.
+- `algorithm` (VARCHAR, default `'heaviest_bundling'`): Consensus algorithm — `'heaviest_bundling'` (highest weight path through the graph) or `'majority_voting'` (most frequent base per position).
+
+**Output schema:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `consensus_id` | INTEGER | 0-based identifier for each consensus sequence |
+| `consensus_sequence` | VARCHAR | The consensus nucleotide sequence |
+| `consensus_length` | INTEGER | Length of the consensus sequence |
+| `num_reads` | INTEGER | Number of input reads assigned to this consensus cluster |
+
+**Examples:**
+
+```sql
+-- Single consensus from amplicon reads
+CREATE TABLE amplicons AS SELECT read_id, sequence1 FROM read_fastx('amplicons.fasta');
+SELECT * FROM consensus_abpoa('amplicons');
+
+-- Multi-consensus for strain detection
+SELECT * FROM consensus_abpoa('amplicons', max_num_cons := 3, min_freq := 0.1);
+
+-- Per-sample consensus (parallel)
+SELECT * FROM consensus_abpoa('cohort', sample_id := 'sample', max_num_cons := 2)
+  ORDER BY sample, consensus_id;
+
+-- Majority voting instead of heaviest bundling
+SELECT * FROM consensus_abpoa('amplicons', algorithm := 'majority_voting');
+```
 
 ---
 

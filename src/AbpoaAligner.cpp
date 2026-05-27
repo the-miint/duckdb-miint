@@ -138,7 +138,7 @@ static void PrepareSequences(AbpoaGuard &guard, const std::vector<std::string> &
 }
 
 AbpoaMsaResult AbpoaAligner::align(const std::vector<std::string> &names, const std::vector<std::string> &sequences,
-                                    const AbpoaAlignParams &params) {
+                                   const AbpoaAlignParams &params) {
 	ValidateInputs(names, sequences);
 
 	AbpoaGuard guard;
@@ -176,8 +176,8 @@ AbpoaMsaResult AbpoaAligner::align(const std::vector<std::string> &names, const 
 }
 
 AbpoaConsensusResult AbpoaAligner::consensus(const std::vector<std::string> &names,
-                                              const std::vector<std::string> &sequences,
-                                              const AbpoaAlignParams &params) {
+                                             const std::vector<std::string> &sequences,
+                                             const AbpoaAlignParams &params) {
 	ValidateInputs(names, sequences);
 
 	AbpoaGuard guard;

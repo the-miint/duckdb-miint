@@ -52,10 +52,9 @@ public:
 	AbpoaAligner &operator=(const AbpoaAligner &) = delete;
 
 	AbpoaMsaResult align(const std::vector<std::string> &names, const std::vector<std::string> &sequences,
-	                      const AbpoaAlignParams &params = {});
+	                     const AbpoaAlignParams &params = {});
 
-	AbpoaConsensusResult consensus(const std::vector<std::string> &names,
-	                               const std::vector<std::string> &sequences,
+	AbpoaConsensusResult consensus(const std::vector<std::string> &names, const std::vector<std::string> &sequences,
 	                               const AbpoaAlignParams &params = {});
 };
 

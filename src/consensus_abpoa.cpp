@@ -82,8 +82,8 @@ static unique_ptr<FunctionData> ConsensusAbpoaBind(ClientContext &context, Table
 		auto &db = DatabaseInstance::GetDatabase(context);
 		Connection conn(db);
 		DiscoverSamples(conn, data->table_name, data->sample_info.sample_id_col,
-		                {"consensus_id", "consensus_sequence", "consensus_length", "num_reads"},
-		                "consensus_abpoa", data->sample_info);
+		                {"consensus_id", "consensus_sequence", "consensus_length", "num_reads"}, "consensus_abpoa",
+		                data->sample_info);
 		names.push_back(data->sample_info.sample_id_col);
 		return_types.push_back(data->sample_info.sample_id_type);
 	}

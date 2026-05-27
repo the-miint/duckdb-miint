@@ -127,7 +127,7 @@ TEST_CASE("AbpoaAligner - Multi-consensus", "[AbpoaAligner]") {
 	miint::AbpoaAligner aligner;
 	std::vector<std::string> names = {"a", "b", "c", "d", "e", "f"};
 	std::vector<std::string> seqs = {"ACGTACGTACGT", "ACGTTTTTACGT", "ACGAACGAACGA",
-	                                  "ACGATTTTACGA", "ACGTACGTACGT", "ACGTTTTTACGT"};
+	                                 "ACGATTTTACGA", "ACGTACGTACGT", "ACGTTTTTACGT"};
 
 	miint::AbpoaAlignParams params;
 	params.max_num_cons = 2;
