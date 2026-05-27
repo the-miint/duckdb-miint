@@ -1,4 +1,5 @@
 #include "../../src/include/WFA2Aligner.hpp"
+#include "../../src/include/sequence_utils.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <string>
@@ -292,4 +293,109 @@ TEST_CASE("WFA2Aligner - Edge cases", "[WFA2Aligner]") {
 		REQUIRE(result.has_value());
 		REQUIRE(result.value() == 0);
 	}
+}
+
+// ---------------------------------------------------------------------------
+// IUPAC bitmask utilities
+// ---------------------------------------------------------------------------
+
+TEST_CASE("IupacMatch - concrete bases", "[WFA2Aligner][iupac]") {
+	REQUIRE(miint::IupacMatch('A', 'A'));
+	REQUIRE(miint::IupacMatch('C', 'C'));
+	REQUIRE(miint::IupacMatch('G', 'G'));
+	REQUIRE(miint::IupacMatch('T', 'T'));
+	REQUIRE_FALSE(miint::IupacMatch('A', 'C'));
+	REQUIRE_FALSE(miint::IupacMatch('A', 'G'));
+	REQUIRE_FALSE(miint::IupacMatch('A', 'T'));
+}
+
+TEST_CASE("IupacMatch - N matches everything", "[WFA2Aligner][iupac]") {
+	REQUIRE(miint::IupacMatch('N', 'A'));
+	REQUIRE(miint::IupacMatch('N', 'C'));
+	REQUIRE(miint::IupacMatch('N', 'G'));
+	REQUIRE(miint::IupacMatch('N', 'T'));
+	REQUIRE(miint::IupacMatch('A', 'N'));
+	REQUIRE(miint::IupacMatch('N', 'N'));
+}
+
+TEST_CASE("IupacMatch - two-base codes", "[WFA2Aligner][iupac]") {
+	// R = A|G
+	REQUIRE(miint::IupacMatch('R', 'A'));
+	REQUIRE(miint::IupacMatch('R', 'G'));
+	REQUIRE_FALSE(miint::IupacMatch('R', 'C'));
+	REQUIRE_FALSE(miint::IupacMatch('R', 'T'));
+	// Y = C|T
+	REQUIRE(miint::IupacMatch('Y', 'C'));
+	REQUIRE(miint::IupacMatch('Y', 'T'));
+	REQUIRE_FALSE(miint::IupacMatch('Y', 'A'));
+	REQUIRE_FALSE(miint::IupacMatch('Y', 'G'));
+	// Symmetry
+	REQUIRE(miint::IupacMatch('A', 'R'));
+	REQUIRE(miint::IupacMatch('G', 'R'));
+	// Two degenerate codes that overlap
+	REQUIRE(miint::IupacMatch('R', 'M'));       // R=A|G, M=A|C → share A
+	REQUIRE_FALSE(miint::IupacMatch('R', 'Y')); // R=A|G, Y=C|T → no overlap
+}
+
+TEST_CASE("IupacMatch - three-base codes", "[WFA2Aligner][iupac]") {
+	// B = C|G|T (not A)
+	REQUIRE_FALSE(miint::IupacMatch('B', 'A'));
+	REQUIRE(miint::IupacMatch('B', 'C'));
+	REQUIRE(miint::IupacMatch('B', 'G'));
+	REQUIRE(miint::IupacMatch('B', 'T'));
+}
+
+TEST_CASE("IupacMatch - case insensitive", "[WFA2Aligner][iupac]") {
+	REQUIRE(miint::IupacMatch('a', 'A'));
+	REQUIRE(miint::IupacMatch('n', 'T'));
+	REQUIRE(miint::IupacMatch('r', 'a'));
+}
+
+TEST_CASE("IupacMatch - invalid returns false", "[WFA2Aligner][iupac]") {
+	REQUIRE_FALSE(miint::IupacMatch('Z', 'A'));
+	REQUIRE_FALSE(miint::IupacMatch('A', '!'));
+}
+
+// ---------------------------------------------------------------------------
+// IUPAC-aware semi-global alignment
+// ---------------------------------------------------------------------------
+
+TEST_CASE("align_cigar_semiglobal_iupac - ACGT-only matches literal", "[WFA2Aligner][iupac]") {
+	WFA2Aligner aligner;
+	// anchor = "ACGT", window = "XXACGTXX" — should find anchor in window
+	auto literal = aligner.align_full_semiglobal("ACGT", "XXACGTXX");
+	auto iupac = aligner.align_cigar_semiglobal_iupac("ACGT", "XXACGTXX");
+	REQUIRE(literal.has_value());
+	REQUIRE(iupac.has_value());
+	REQUIRE(literal->cigar == iupac->cigar);
+}
+
+TEST_CASE("align_cigar_semiglobal_iupac - N in query matches any base", "[WFA2Aligner][iupac]") {
+	WFA2Aligner aligner;
+	// anchor = "ACNT" (N at pos 2), window = "ACGT"
+	// N should match G at zero cost → pure match CIGAR
+	auto result = aligner.align_cigar_semiglobal_iupac("ACNT", "ACGT");
+	REQUIRE(result.has_value());
+	REQUIRE(result->cigar == "4=");
+}
+
+TEST_CASE("align_cigar_semiglobal_iupac - R in query matches A or G", "[WFA2Aligner][iupac]") {
+	WFA2Aligner aligner;
+	// R = A|G → R vs A should match
+	auto match = aligner.align_cigar_semiglobal_iupac("ACRT", "ACAT");
+	REQUIRE(match.has_value());
+	REQUIRE(match->cigar == "4=");
+
+	// R vs C should mismatch
+	auto mismatch = aligner.align_cigar_semiglobal_iupac("ACRT", "ACCT");
+	REQUIRE(mismatch.has_value());
+	REQUIRE(mismatch->cigar == "2=1X1=");
+}
+
+TEST_CASE("align_cigar_semiglobal_iupac - degenerate in subject too", "[WFA2Aligner][iupac]") {
+	WFA2Aligner aligner;
+	// Both sides degenerate: R vs M → R=A|G, M=A|C → share A → match
+	auto result = aligner.align_cigar_semiglobal_iupac("R", "M");
+	REQUIRE(result.has_value());
+	REQUIRE(result->cigar == "1=");
 }

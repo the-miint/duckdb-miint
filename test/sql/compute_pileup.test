@@ -1,0 +1,357 @@
+# name: test/sql/compute_pileup.test
+# description: Per-base alignment expansion (CIGAR + reference walker)
+# group: [sql]
+
+require miint
+
+# -----------------------------------------------------------------------------
+# Setup: reference table (id + sequence) and alignments table with the columns
+# produced by read_alignments(include_seq_qual=true): (read_id, reference,
+# position, cigar, sequence, qual). The 'reference' column is the ref_id name.
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _pile_ref AS SELECT * FROM (VALUES
+    ('chr1', 'ACGTACGTAC')   -- 10 bp reference
+) t(ref_id, sequence);
+
+# -----------------------------------------------------------------------------
+# All-match: 10= CIGAR, position 1, query identical to ref
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _pile_aln_match AS SELECT * FROM (VALUES
+    ('rA', 'chr1', 1::BIGINT, '10=', 'ACGTACGTAC',
+     [40,40,40,40,40,40,40,40,40,40]::UTINYINT[])
+) t(read_id, reference, position, cigar, sequence, qual);
+
+query IIITTII
+SELECT ref_id, ref_pos, read_id, ref_base, query_base, query_qual, insert_pos
+FROM compute_pileup('_pile_aln_match', '_pile_ref')
+ORDER BY ref_pos;
+----
+chr1	1	rA	A	A	40	0
+chr1	2	rA	C	C	40	0
+chr1	3	rA	G	G	40	0
+chr1	4	rA	T	T	40	0
+chr1	5	rA	A	A	40	0
+chr1	6	rA	C	C	40	0
+chr1	7	rA	G	G	40	0
+chr1	8	rA	T	T	40	0
+chr1	9	rA	A	A	40	0
+chr1	10	rA	C	C	40	0
+
+# -----------------------------------------------------------------------------
+# Substitution: 3=1X6= — one mismatch at ref_pos 4 (T→G in query)
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _pile_aln_sub AS SELECT * FROM (VALUES
+    ('rB', 'chr1', 1::BIGINT, '3=1X6=', 'ACGGACGTAC',
+     [40,40,40,30,40,40,40,40,40,40]::UTINYINT[])
+) t(read_id, reference, position, cigar, sequence, qual);
+
+# Mismatch row carries the read's actual base + actual qual; ref_base from ref
+query TTI
+SELECT ref_base, query_base, query_qual
+FROM compute_pileup('_pile_aln_sub', '_pile_ref')
+WHERE ref_pos = 4;
+----
+T	G	30
+
+# Surrounding ref-pos rows agree with ref
+query I
+SELECT count(*)
+FROM compute_pileup('_pile_aln_sub', '_pile_ref')
+WHERE query_base = ref_base;
+----
+9
+
+# -----------------------------------------------------------------------------
+# Soft-clip prefix: 3S7= at position 1 — clipped bases dropped, ref_pos still
+# starts at the alignment position (CIGAR clip does not change position).
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _pile_aln_softclip AS SELECT * FROM (VALUES
+    ('rC', 'chr1', 1::BIGINT, '3S7=', 'NNNACGTACG',
+     [10,10,10,40,40,40,40,40,40,40]::UTINYINT[])
+) t(read_id, reference, position, cigar, sequence, qual);
+
+# 7 rows emitted, qual values are the post-clip ones
+query III
+SELECT ref_pos, query_base, query_qual
+FROM compute_pileup('_pile_aln_softclip', '_pile_ref')
+ORDER BY ref_pos;
+----
+1	A	40
+2	C	40
+3	G	40
+4	T	40
+5	A	40
+6	C	40
+7	G	40
+
+# -----------------------------------------------------------------------------
+# Hard-clip prefix: 3H7= — H consumes neither query nor ref. The SAM seq is
+# already pre-trimmed (only the post-clip portion present).
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _pile_aln_hardclip AS SELECT * FROM (VALUES
+    ('rD', 'chr1', 1::BIGINT, '3H7=', 'ACGTACG',
+     [40,40,40,40,40,40,40]::UTINYINT[])
+) t(read_id, reference, position, cigar, sequence, qual);
+
+query I
+SELECT count(*) FROM compute_pileup('_pile_aln_hardclip', '_pile_ref');
+----
+7
+
+# -----------------------------------------------------------------------------
+# Deletion: 3=2D5= — 10 ref bases consumed but only 8 query bases. The 2 D
+# positions emit rows with query_base = NULL and query_qual = NULL.
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _pile_aln_del AS SELECT * FROM (VALUES
+    ('rE', 'chr1', 1::BIGINT, '3=2D5=', 'ACGCGTAC',
+     [40,40,40,40,40,40,40,40]::UTINYINT[])
+) t(read_id, reference, position, cigar, sequence, qual);
+
+# 10 total rows (ref_pos 1..10); 2 of them (ref_pos 4..5) have NULL query
+query I
+SELECT count(*) FROM compute_pileup('_pile_aln_del', '_pile_ref');
+----
+10
+
+query I
+SELECT count(*) FROM compute_pileup('_pile_aln_del', '_pile_ref')
+WHERE query_base IS NULL;
+----
+2
+
+query II
+SELECT ref_pos, ref_base
+FROM compute_pileup('_pile_aln_del', '_pile_ref')
+WHERE query_base IS NULL
+ORDER BY ref_pos;
+----
+4	T
+5	A
+
+# -----------------------------------------------------------------------------
+# Insertion: 3=2I5= — query has 2 extra bases not in ref. Insertion rows are
+# emitted with ref_pos = preceding ref position, ref_base = NULL,
+# insert_pos = 1-based within the insertion event.
+# -----------------------------------------------------------------------------
+# ref = "ACGTACGT" (8 bp), query "ACGNNTACGT" (10 bp: 3 match, 2 inserted, 5 match)
+statement ok
+CREATE TABLE _pile_ref8 AS SELECT * FROM (VALUES
+    ('chrI', 'ACGTACGT')
+) t(ref_id, sequence);
+
+statement ok
+CREATE TABLE _pile_aln_ins AS SELECT * FROM (VALUES
+    ('rF', 'chrI', 1::BIGINT, '3=2I5=', 'ACGNNTACGT',
+     [40,40,40,5,5,40,40,40,40,40]::UTINYINT[])
+) t(read_id, reference, position, cigar, sequence, qual);
+
+# 10 rows: 8 ref-aligned + 2 insertion
+query I
+SELECT count(*) FROM compute_pileup('_pile_aln_ins', '_pile_ref8');
+----
+10
+
+query IITTII
+SELECT ref_pos, query_qual, query_base, ref_base, insert_pos,
+       CASE WHEN ref_base IS NULL THEN 1 ELSE 0 END AS ref_null
+FROM compute_pileup('_pile_aln_ins', '_pile_ref8')
+ORDER BY ref_pos, insert_pos;
+----
+1	40	A	A	0	0
+2	40	C	C	0	0
+3	40	G	G	0	0
+3	5	N	NULL	1	1
+3	5	N	NULL	2	1
+4	40	T	T	0	0
+5	40	A	A	0	0
+6	40	C	C	0	0
+7	40	G	G	0	0
+8	40	T	T	0	0
+
+# WHERE insert_pos = 0 recovers v1 behavior (8 ref-aligned rows only)
+query I
+SELECT count(*) FROM compute_pileup('_pile_aln_ins', '_pile_ref8')
+WHERE insert_pos = 0;
+----
+8
+
+# -----------------------------------------------------------------------------
+# Unmapped alignment (CIGAR = '*') emits no rows
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _pile_aln_unmapped AS SELECT * FROM (VALUES
+    ('rG', 'chr1', 0::BIGINT, '*', '',
+     []::UTINYINT[])
+) t(read_id, reference, position, cigar, sequence, qual);
+
+query I
+SELECT count(*) FROM compute_pileup('_pile_aln_unmapped', '_pile_ref');
+----
+0
+
+# -----------------------------------------------------------------------------
+# NULL qual list — every emitted row should have query_qual = NULL.
+# Distinct from the empty-list case (`[]::UTINYINT[]`).
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _pile_aln_null_qual AS SELECT * FROM (VALUES
+    ('rNQ', 'chr1', 1::BIGINT, '5=', 'ACGTA', NULL::UTINYINT[])
+) t(read_id, reference, position, cigar, sequence, qual);
+
+query III
+SELECT ref_pos, query_base, query_qual
+FROM compute_pileup('_pile_aln_null_qual', '_pile_ref')
+ORDER BY ref_pos;
+----
+1	A	NULL
+2	C	NULL
+3	G	NULL
+4	T	NULL
+5	A	NULL
+
+query I
+SELECT count(*) FROM compute_pileup('_pile_aln_null_qual', '_pile_ref')
+WHERE query_qual IS NULL;
+----
+5
+
+# query_base is still populated even when qual is NULL
+query I
+SELECT count(*) FROM compute_pileup('_pile_aln_null_qual', '_pile_ref')
+WHERE query_base IS NOT NULL;
+----
+5
+
+# -----------------------------------------------------------------------------
+# Mid-reference alignment: position=3, cigar='5='. ref_pos starts at 3.
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _pile_aln_mid AS SELECT * FROM (VALUES
+    ('rH', 'chr1', 3::BIGINT, '5=', 'GTACG',
+     [40,40,40,40,40]::UTINYINT[])
+) t(read_id, reference, position, cigar, sequence, qual);
+
+query III
+SELECT ref_pos, ref_base, query_base
+FROM compute_pileup('_pile_aln_mid', '_pile_ref')
+ORDER BY ref_pos;
+----
+3	G	G
+4	T	T
+5	A	A
+6	C	C
+7	G	G
+
+# -----------------------------------------------------------------------------
+# Multiple alignments in one table — all expanded; ordering is by alignment
+# row then ref_pos (function does NOT promise inter-alignment ordering).
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _pile_aln_multi AS SELECT * FROM (VALUES
+    ('rX', 'chr1', 1::BIGINT, '3=', 'ACG', [40,40,40]::UTINYINT[]),
+    ('rY', 'chr1', 5::BIGINT, '3=', 'ACG', [30,30,30]::UTINYINT[])
+) t(read_id, reference, position, cigar, sequence, qual);
+
+# 6 rows total (3 per alignment)
+query I
+SELECT count(*) FROM compute_pileup('_pile_aln_multi', '_pile_ref');
+----
+6
+
+# Per-read counts
+query II
+SELECT read_id, count(*) FROM compute_pileup('_pile_aln_multi', '_pile_ref')
+GROUP BY read_id ORDER BY read_id;
+----
+rX	3
+rY	3
+
+# -----------------------------------------------------------------------------
+# Error: reference not found in reference table
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _pile_aln_badref AS SELECT * FROM (VALUES
+    ('rZ', 'no_such_ref', 1::BIGINT, '3=', 'ACG', [40,40,40]::UTINYINT[])
+) t(read_id, reference, position, cigar, sequence, qual);
+
+statement error
+SELECT * FROM compute_pileup('_pile_aln_badref', '_pile_ref');
+----
+no_such_ref
+
+# -----------------------------------------------------------------------------
+# Error: nonexistent table
+# -----------------------------------------------------------------------------
+statement error
+SELECT * FROM compute_pileup('no_alignments_table', '_pile_ref');
+----
+no_alignments_table
+
+statement error
+SELECT * FROM compute_pileup('_pile_aln_match', 'no_ref_table');
+----
+no_ref_table
+
+# -----------------------------------------------------------------------------
+# Error: alignment extends past reference length
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE _pile_aln_overshoot AS SELECT * FROM (VALUES
+    ('rOv', 'chr1', 8::BIGINT, '5=', 'ACGTA', [40,40,40,40,40]::UTINYINT[])
+) t(read_id, reference, position, cigar, sequence, qual);
+
+statement error
+SELECT * FROM compute_pileup('_pile_aln_overshoot', '_pile_ref');
+----
+beyond reference
+
+# -----------------------------------------------------------------------------
+# Cleanup
+# -----------------------------------------------------------------------------
+statement ok
+DROP TABLE _pile_ref;
+
+statement ok
+DROP TABLE _pile_ref8;
+
+statement ok
+DROP TABLE _pile_aln_match;
+
+statement ok
+DROP TABLE _pile_aln_sub;
+
+statement ok
+DROP TABLE _pile_aln_softclip;
+
+statement ok
+DROP TABLE _pile_aln_hardclip;
+
+statement ok
+DROP TABLE _pile_aln_del;
+
+statement ok
+DROP TABLE _pile_aln_ins;
+
+statement ok
+DROP TABLE _pile_aln_unmapped;
+
+statement ok
+DROP TABLE _pile_aln_null_qual;
+
+statement ok
+DROP TABLE _pile_aln_mid;
+
+statement ok
+DROP TABLE _pile_aln_multi;
+
+statement ok
+DROP TABLE _pile_aln_badref;
+
+statement ok
+DROP TABLE _pile_aln_overshoot;
