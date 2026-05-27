@@ -52,6 +52,9 @@
 #ifdef MIINT_HAS_MAFFT
 #include <align_mafft.hpp>
 #endif
+#ifdef MIINT_HAS_ABPOA
+#include <align_abpoa.hpp>
+#endif
 #ifdef MIINT_HAS_SORTMERNA
 #include <align_sortmerna.hpp>
 #include <align_sortmerna_rrna.hpp>
@@ -288,6 +291,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 #ifdef MIINT_HAS_MAFFT
 	AlignMafftTableFunction::Register(loader);
+#endif
+#ifdef MIINT_HAS_ABPOA
+	AlignAbpoaTableFunction::Register(loader);
 #endif
 #ifdef MIINT_HAS_SORTMERNA
 	AlignSortMeRNATableFunction::Register(loader);
