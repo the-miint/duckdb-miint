@@ -77,17 +77,56 @@ static void ValidateAndAlignInto(const std::string &sample_literal, LoadedSingle
 		}
 	}
 
-	std::vector<std::string> comments(loaded.labels.size(), "");
-	miint::MafftAligner aligner;
-	auto result = aligner.align(loaded.labels, comments, loaded.sequences, n_threads);
+	// Dereplicate: group by sequence identity, align only unique sequences.
+	std::unordered_map<std::string, std::vector<size_t>> seq_to_indices;
+	for (size_t i = 0; i < loaded.sequences.size(); i++) {
+		seq_to_indices[loaded.sequences[i]].push_back(i);
+	}
 
-	out_names = std::move(result.names);
-	out_sequences = std::move(result.sequences);
+	size_t n_input = loaded.labels.size();
+	out_names.resize(n_input);
+	out_sequences.resize(n_input);
+	out_original_lengths.resize(n_input);
+
+	if (seq_to_indices.size() == 1) {
+		// All sequences identical — no alignment needed.
+		auto &seq = loaded.sequences[0];
+		out_aligned_length = static_cast<int32_t>(seq.size());
+		for (size_t i = 0; i < n_input; i++) {
+			out_names[i] = loaded.labels[i];
+			out_sequences[i] = seq;
+			out_original_lengths[i] = static_cast<int32_t>(seq.size());
+		}
+		return;
+	}
+
+	// Build unique-only inputs for MAFFT, preserving first-occurrence order.
+	std::vector<std::string> unique_labels;
+	std::vector<std::string> unique_seqs;
+	std::vector<std::vector<size_t>> unique_to_original;
+	unique_labels.reserve(seq_to_indices.size());
+	unique_seqs.reserve(seq_to_indices.size());
+	unique_to_original.reserve(seq_to_indices.size());
+	std::unordered_set<std::string> added;
+	for (size_t i = 0; i < loaded.sequences.size(); i++) {
+		if (added.insert(loaded.sequences[i]).second) {
+			unique_labels.push_back(loaded.labels[i]);
+			unique_seqs.push_back(loaded.sequences[i]);
+			unique_to_original.push_back(seq_to_indices[loaded.sequences[i]]);
+		}
+	}
+
+	std::vector<std::string> comments(unique_labels.size(), "");
+	miint::MafftAligner aligner;
+	auto result = aligner.align(unique_labels, comments, unique_seqs, n_threads);
+
 	out_aligned_length = static_cast<int32_t>(result.aligned_length);
-	out_original_lengths.clear();
-	out_original_lengths.reserve(result.original_lengths.size());
-	for (auto len : result.original_lengths) {
-		out_original_lengths.push_back(static_cast<int32_t>(len));
+	for (size_t ui = 0; ui < unique_to_original.size(); ui++) {
+		for (size_t orig_idx : unique_to_original[ui]) {
+			out_names[orig_idx] = loaded.labels[orig_idx];
+			out_sequences[orig_idx] = result.sequences[ui];
+			out_original_lengths[orig_idx] = static_cast<int32_t>(loaded.sequences[orig_idx].size());
+		}
 	}
 }
 

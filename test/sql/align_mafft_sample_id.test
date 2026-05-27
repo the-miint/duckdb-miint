@@ -180,7 +180,46 @@ SELECT sequence_index, read_id, aligned_sequence, original_length, aligned_lengt
 1	s2	ACGAACGT	8	8
 2	s3	ACGTACGA	8	8
 
-# ----- Cycle 9: Parallelism sanity (MAFFT is mutex-serialized; atomic claim must still be correct) -----
+# ----- Cycle 9: Dereplication with sample_id -----
+
+# Each sample has duplicates independently. Verify per-sample dereplication.
+statement ok
+CREATE TABLE derep_samples AS SELECT * FROM (VALUES
+    ('A', 'a1', 'ACGTACGT'), ('A', 'a2', 'ACGAACGT'), ('A', 'a3', 'ACGTACGT'),
+    ('B', 'b1', 'GGCCGGCC'), ('B', 'b2', 'GGCCGGCC'), ('B', 'b3', 'GGCCGGCC')
+) t(sid, read_id, sequence1);
+
+# Sample A: 3 reads, 2 unique → 3 output rows
+# Sample B: 3 reads, 1 unique → short-circuit, 3 rows
+query TI
+SELECT sid, COUNT(*) FROM align_mafft('derep_samples', sample_id := 'sid')
+GROUP BY sid ORDER BY sid;
+----
+A	3
+B	3
+
+# Sample B (all identical): aligned_sequence = original, no gaps
+query TT
+SELECT read_id, aligned_sequence
+FROM align_mafft('derep_samples', sample_id := 'sid')
+WHERE sid = 'B' ORDER BY read_id;
+----
+b1	GGCCGGCC
+b2	GGCCGGCC
+b3	GGCCGGCC
+
+# Sample A: a1 and a3 share aligned_sequence (same input sequence)
+query I
+SELECT COUNT(DISTINCT aligned_sequence)
+FROM align_mafft('derep_samples', sample_id := 'sid')
+WHERE sid = 'A' AND read_id IN ('a1', 'a3');
+----
+1
+
+statement ok
+DROP TABLE derep_samples;
+
+# ----- Cycle 10: Parallelism sanity (MAFFT is mutex-serialized; atomic claim must still be correct) -----
 
 statement ok
 CREATE VIEW four_mafft_samples AS

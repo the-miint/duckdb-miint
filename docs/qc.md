@@ -232,6 +232,22 @@ maintain bit-for-bit parity in the common case:
   trim when the read prefix is itself mostly non-G. fastp v0.23+ behaves
   the same way.
 
+## Related — long-read amplicon / UMI primitives
+
+The QC trimmers above target short-read fastp-style cleanup. For
+long-read amplicon work (UMI binning, MSA consensus, per-base variant
+positions) miint exposes a complementary set of primitives that compose
+into a Karst-protocol UMI consensus pipeline:
+
+- [`extract_linked_amplicon`](scalar-functions.md#extract_linked_ampliconseq-qual-anchor5-anchor3-min_len-max_len-error_rate) — cut out the interior between two
+  flanking adapters (cutadapt `-g X...Y` equivalent), WFA2-powered.
+- [`match_short_barcodes`](table-functions.md#match_short_barcodesquery_table-ref_table-max_nmn-report_alltrue) — Hamming-distance matcher for
+  fixed-length barcodes (UMIs, sample indices).
+- [`compute_pileup`](table-functions.md#compute_pileupalignments_table-reference_table) — per-base CIGAR walker that emits
+  `(read_id, ref_pos, ref_base, query_base, query_qual)` rows.
+- [`compute_msa_consensus`](analysis-functions.md#compute_msa_consensusaligned_seq-qual) — Q-aware MSA column consensus
+  with HP post-correction (replaces Racon polishing for HiFi).
+
 ## Backlog (deferred from v1)
 
 - DuckDB named-parameter overloads to avoid the positional `(seq, qual, X,

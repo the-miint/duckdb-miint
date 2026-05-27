@@ -46,13 +46,13 @@ Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is li
   - Emscripten → `sse2only=1` with SIMDe via `-msimd128 -msse -msse2` (avoids SSE4.1 runtime CPU dispatch)
 - **Jemalloc integration:** when `DUCKDB_EXTENSION_JEMALLOC_SHOULD_LINK` is set, minimap2 is built with `-DMIINT_USE_JEMALLOC -include src/include/mm_alloc.h` so its allocations route through DuckDB's jemalloc. On loadable-extension builds, `src/mm_alloc_stubs.c` forwards to system malloc because the host DuckDB loaded via Python uses `RTLD_LOCAL` and doesn't expose `duckdb_je_*` symbols.
 
-### WFA2-lib v2.3.5
-- **Location:** `ext/WFA2-lib/` (git submodule pinned to v2.3.5)
+### WFA2-lib v2.3.6
+- **Location:** `ext/WFA2-lib/` (git submodule pinned to v2.3.6)
 - **Purpose:** Wavefront Alignment Algorithm for pairwise alignment
 - **Build:** Makefile (not CMake — WFA2's primary build is Makefile); `BUILD_TOOLS=0 BUILD_EXAMPLES=0 BUILD_WFA_PARALLEL=0`; produces `libwfa.a` (C core) + `libwfacpp.a` (C++ bindings)
 - **Link order:** `wfa2cpp` **before** `wfa2` — C++ depends on C
 - **Flag convention:** WFA2 uses `CC_FLAGS` (not `CFLAGS`/`CXXFLAGS`)
-- **Known bug:** BiWFA alignment-scope score returns `INT32_MIN` for short sequences (see `ext/WFA2-lib/bialign_score_bug.c`)
+- **IUPAC matching:** `WFA2Aligner::align_cigar_semiglobal_iupac` uses the lambda-match callback API (`alignEndsFree(matchFunct, args, ...)`) for degenerate base matching in `extract_linked_amplicon`
 
 ### vsearch (v2.30.5-miint fork)
 - **Location:** `ext/vsearch/` (fork)

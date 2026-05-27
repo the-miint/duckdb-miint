@@ -33,6 +33,8 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`align_mafft`](#align_maffttable_name) - MAFFT multiple sequence alignment (PartTree)
 - [`align_sortmerna`](#align_sortmernaquery_table-ref_pathspaths-options) - SortMeRNA rRNA alignment (SAM schema)
 - [`align_sortmerna_rrna`](#align_sortmerna_rrnaquery_table-ref_pathspaths-options) - SortMeRNA rRNA alignment (rRNA schema with identity/coverage/e-value)
+- [`match_short_barcodes`](#match_short_barcodesquery_table-ref_table-max_nmn-report_alltrue) - Hamming-distance matcher for short fixed-length barcodes (UMIs, sample indices)
+- [`compute_pileup`](#compute_pileupalignments_table-reference_table) - Per-base CIGAR walker producing one row per (read, ref_pos)
 - [`detect_chimera_uchime`](#detect_chimera_uchimequery_table-dbrefs_table-options) - Reference-based chimera detection (UCHIME)
 - [`detect_chimera_uchime_denovo`](#detect_chimera_uchime_denovoinput_table-options) - De novo chimera detection (UCHIME)
 - [`search_sequences_vsearch`](#search_sequences_vsearchquery_table-dbref_table-idthreshold-options) - Global sequence search
@@ -43,6 +45,38 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`unifrac_permanova`](#unifrac_permanovaobservations-tree-metadata-options) - UniFrac distance + PERMANOVA pseudo-F + p-value
 - [`unifrac_faith_pd`](#unifrac_faith_pdobservations-tree-options) - Faith's phylogenetic diversity per sample
 - [`miint_warnings`](#miint_warnings) - Query miint's operational warnings as a table
+
+## Limitation: Session Variables in Views
+
+Many table functions accept a table or view name as a string parameter. These
+tables/views are read using a **separate internal connection** (necessary to
+avoid query-pipeline deadlocks). This separate connection does **not** inherit
+session variables set via `SET VARIABLE`.
+
+If a view definition uses `getvariable()`, the function will receive `NULL`
+instead of the expected value, leading to empty results or cryptic errors.
+
+**Workaround:** Materialize filtered results into a table before passing the
+table name to the function:
+
+```sql
+-- Won't work (getvariable returns NULL in the internal connection):
+SET VARIABLE my_threshold = 30;
+CREATE VIEW filtered AS SELECT * FROM seqs WHERE quality >= getvariable('my_threshold');
+SELECT * FROM align_mafft('filtered');  -- empty or wrong results
+
+-- Workaround (materialize first):
+SET VARIABLE my_threshold = 30;
+CREATE TABLE filtered AS SELECT * FROM seqs WHERE quality >= getvariable('my_threshold');
+SELECT * FROM align_mafft('filtered');  -- works correctly
+```
+
+This applies to all table functions that accept table/view name parameters,
+including `align_minimap2`, `align_mafft`, `align_sortmerna`, `compute_pileup`,
+`match_short_barcodes`, `detect_chimera_uchime`, `deblur`, `unifrac_pcoa`, and
+others.
+
+---
 
 ## `read_alignments(filename, [reference_lengths='table_name'], [include_filepath=false], [include_seq_qual=false])`
 Read SAM/BAM alignment files.
@@ -2471,6 +2505,148 @@ FROM align_sortmerna_rrna('reads',
        ref_paths := ['gg_13_8.fasta'])
 WHERE aligned = 1 AND e_value <= 1e-5 AND coverage >= 80.0
 GROUP BY ref_name ORDER BY hits DESC;
+```
+
+---
+
+## `match_short_barcodes(query_table, ref_table, max_nm:=N, [report_all:=true])`
+
+Hamming-distance matcher for short fixed-length barcodes. Each query
+sequence is compared to every reference sequence at the same length; pairs
+within `max_nm` Hamming distance are emitted. The implementation packs
+each barcode into one or two `uint64_t` (covers up to 32 bp) and uses
+`__builtin_popcountll` over even/odd nibble masks to count per-nucleotide
+differences in 1–2 word ops; brute-force O(N×M) is fast enough for the
+typical input scale (thousands of queries × thousands of references at
+8–36 bp).
+
+Intended for UMI binning, sample-index demultiplexing, and any
+length-uniform barcode lookup. Not appropriate for variable-length adapter
+matching (use [`extract_linked_amplicon`](scalar-functions.md#extract_linked_ampliconseq-qual-anchor5-anchor3-min_len-max_len-error_rate)) or for similarity search
+over longer sequences (use [`search_sequences_vsearch`](#search_sequences_vsearchquery_table-dbref_table-idthreshold-options)).
+
+**Positional parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `query_table` | VARCHAR | Table or view with `(id VARCHAR, sequence VARCHAR)` columns |
+| `ref_table` | VARCHAR | Table or view with `(id VARCHAR, sequence VARCHAR)` columns |
+
+**Named parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `max_nm` | INTEGER | yes | Max allowed Hamming distance (≥ 0); pairs above this are not emitted |
+| `report_all` | BOOLEAN | no (default `true`) | If `false`, keep only the best hit per query (lowest `nm`; tie-broken by `ref_id` ASC) |
+
+Both input tables must use the column names `id` and `sequence` exactly.
+`max_nm` is mandatory and must be passed by name (`max_nm := N`); there is
+no positional form.
+
+**Returns:** TABLE with columns:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `query_id` | VARCHAR | The query row's `id` |
+| `ref_id` | VARCHAR | The reference row's `id` |
+| `nm` | INTEGER | Hamming distance between the two sequences |
+
+**Behavior:**
+- Throws if a query and a candidate reference have different lengths
+  (sequences must be length-uniform within a comparison).
+- Empty query or ref tables produce zero rows.
+- Empty sequences are rejected at the row level.
+- `report_all := false` collapses ties deterministically by `ref_id`.
+
+**Example:**
+```sql
+-- Bin reads by their 8-bp UMI against a set of canonical UMIs
+CREATE TABLE read_umis AS
+SELECT read_id AS id, substr(extracted_umi, 1, 8) AS sequence
+FROM extracted;
+
+CREATE TABLE umi_refs AS SELECT * FROM (VALUES
+    ('binA', 'AACCAACC'),
+    ('binB', 'TTGGTTGG')
+) t(id, sequence);
+
+-- One best hit per read, allowing 1 mismatch
+SELECT query_id AS read_id, ref_id AS bin_id, nm
+FROM match_short_barcodes('read_umis', 'umi_refs',
+                          max_nm := 1, report_all := false);
+```
+
+---
+
+## `compute_pileup(alignments_table, reference_table)`
+
+Per-base CIGAR walker. Expands each alignment into one row per reference
+position covered, with the reference base, the query base, and the per-
+base query quality. Replaces `samtools view | bcftools mpileup` for
+single-sample variant-call positions inside SQL pipelines.
+
+CIGAR op handling:
+- `M` / `=` / `X` — emit one row per ref position; advance both cursors.
+- `D` / `N` — emit one row per ref position with `query_base = NULL` and
+  `query_qual = NULL`; advance ref only.
+- `I` — emit one row per inserted base with `ref_base = NULL`,
+  `ref_pos` = preceding reference position, `insert_pos` = 1..N.
+- `S` — soft-clipped bases are dropped (advance query only).
+- `H` / `P` — no-op.
+
+Reuses miint's existing CIGAR parser, not htslib. The reference base at
+each position is looked up from the supplied `reference_table` — no MD-tag
+input is required.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `alignments_table` | VARCHAR | Table with `(read_id, reference, position, cigar, sequence, qual)` columns. Compatible with the schema produced by `read_alignments(include_seq_qual := true)`. |
+| `reference_table` | VARCHAR | Table with `(ref_id, sequence)` columns. Provides the reference sequence per contig. |
+
+`position` is 1-based (matches SAM POS). `reference` is the contig name
+that should appear as `ref_id` in the reference table.
+
+**Returns:** TABLE with columns:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `ref_id` | VARCHAR | Reference contig name |
+| `ref_pos` | BIGINT | 1-based reference position (for insertion rows: preceding ref position) |
+| `read_id` | VARCHAR | The originating read |
+| `ref_base` | VARCHAR | Reference base at this position (NULL on insertion rows) |
+| `query_base` | VARCHAR | Read base at this position (NULL on D/N) |
+| `query_qual` | UTINYINT | Read qual at this position (NULL on D/N or when input qual is NULL) |
+| `insert_pos` | INTEGER | 0 for reference-aligned rows; 1-based position within an insertion event |
+
+**Behavior:**
+- Throws if an alignment references a contig missing from
+  `reference_table`, or if a CIGAR's reference span runs past the end of
+  the reference.
+- Throws on CIGAR / seq length mismatches.
+- Empty / `*` CIGAR rows produce zero output rows (silently skipped).
+- Insertion rows use `ref_pos` = the preceding reference-consuming position
+  (SAM convention). For leading insertions (before any ref-consuming op),
+  `ref_pos` = `position - 1`. Use `WHERE insert_pos = 0` to filter out
+  insertion rows and recover reference-aligned-only output.
+- Alignments are streamed (not fully materialized). Memory usage scales with
+  the pileup rows per alignment chunk, not the total number of alignments.
+
+**Example:**
+```sql
+-- Per-position pileup vs. the bin-A consensus from a UMI pipeline
+SELECT ref_pos, query_base, query_qual
+FROM compute_pileup('bin_a_alignments', 'bin_a_reference')
+WHERE ref_id = 'binA_cons'
+ORDER BY ref_pos, read_id;
+
+-- Allele counts per position (filter out NULL query bases from deletions)
+SELECT ref_pos, query_base, COUNT(*) AS n
+FROM compute_pileup('alignments', 'reference')
+WHERE query_base IS NOT NULL
+GROUP BY ref_pos, query_base
+ORDER BY ref_pos, query_base;
 ```
 
 ---

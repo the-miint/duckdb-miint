@@ -62,6 +62,10 @@
 #endif
 #include <deblur_table_function.hpp>
 #include <align_pairwise_functions.hpp>
+#include <extract_linked_amplicon.hpp>
+#include <match_short_barcodes.hpp>
+#include <compute_pileup.hpp>
+#include <compute_msa_consensus.hpp>
 #include <read_mzml.hpp>
 #include <read_mzml_chromatograms.hpp>
 #include <read_mzxml.hpp>
@@ -291,6 +295,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	AlignPairwiseScoreFunction::Register(loader);
 	AlignPairwiseCigarFunction::Register(loader);
 	AlignPairwiseFullFunction::Register(loader);
+	ExtractLinkedAmpliconFunction::Register(loader);
+	MatchShortBarcodesTableFunction::Register(loader);
+	ComputePileupTableFunction::Register(loader);
+	ComputeMsaConsensusFunction::Register(loader);
 
 #ifdef MIINT_HAS_MAFFT
 	AlignMafftTableFunction::Register(loader);
