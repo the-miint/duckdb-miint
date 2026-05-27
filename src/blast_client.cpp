@@ -84,8 +84,7 @@ std::string BlastClient::MakePostRequest(const std::string &url, const std::stri
 		if (response->HasRequestError()) {
 			throw duckdb::IOException("blast: POST failed: %s (URL: %s)", response->GetRequestError(), url);
 		}
-		throw duckdb::HTTPException(*response, "blast: POST failed with HTTP %d (URL: %s)", int(response->status),
-		                            url);
+		throw duckdb::HTTPException(*response, "blast: POST failed with HTTP %d (URL: %s)", int(response->status), url);
 	}
 	throw duckdb::IOException("blast: POST failed after %d retries (URL: %s)", MAX_RETRIES, url);
 }
@@ -158,7 +157,8 @@ void BlastClient::WaitForCompletion(const std::string &rid, int rtoe_hint) {
 
 	throw duckdb::IOException("blast: timed out after %d poll attempts (~%d minutes) for RID %s. "
 	                          "Check status at: %s?CMD=Get&RID=%s",
-	                          MAX_POLL_ATTEMPTS, (MAX_POLL_ATTEMPTS * POLL_INTERVAL_SECONDS) / 60, rid, BLAST_BASE, rid);
+	                          MAX_POLL_ATTEMPTS, (MAX_POLL_ATTEMPTS * POLL_INTERVAL_SECONDS) / 60, rid, BLAST_BASE,
+	                          rid);
 }
 
 std::string BlastClient::RetrieveResults(const std::string &rid, int max_targets) {

@@ -8,14 +8,14 @@
 namespace duckdb {
 
 static std::vector<std::string> GetBlastOutputNames() {
-	return {"query_id",   "subject_id",       "pct_identity", "alignment_length", "mismatches", "gap_opens",
-	        "query_start", "query_end",        "subject_start", "subject_end",     "evalue",     "bit_score"};
+	return {"query_id",    "subject_id", "pct_identity",  "alignment_length", "mismatches", "gap_opens",
+	        "query_start", "query_end",  "subject_start", "subject_end",      "evalue",     "bit_score"};
 }
 
 static std::vector<LogicalType> GetBlastOutputTypes() {
-	return {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE,  LogicalType::INTEGER,
-	        LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::BIGINT,  LogicalType::BIGINT,
-	        LogicalType::BIGINT,  LogicalType::BIGINT,  LogicalType::DOUBLE,  LogicalType::DOUBLE};
+	return {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE, LogicalType::INTEGER,
+	        LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::BIGINT, LogicalType::BIGINT,
+	        LogicalType::BIGINT,  LogicalType::BIGINT,  LogicalType::DOUBLE, LogicalType::DOUBLE};
 }
 
 unique_ptr<FunctionData> BlastSearchTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
@@ -63,8 +63,9 @@ unique_ptr<FunctionData> BlastSearchTableFunction::Bind(ClientContext &context, 
 	get_string("api_key", data->api_key);
 
 	if (!miint::BlastParser::ValidateProgram(data->program)) {
-		throw BinderException("blast: Invalid BLAST program '%s'. Must be one of: blastn, blastp, blastx, tblastn, tblastx",
-		                      data->program);
+		throw BinderException(
+		    "blast: Invalid BLAST program '%s'. Must be one of: blastn, blastp, blastx, tblastn, tblastx",
+		    data->program);
 	}
 	if (data->evalue <= 0) {
 		throw BinderException("blast: evalue must be positive (got %g)", data->evalue);

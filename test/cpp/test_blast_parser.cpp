@@ -140,10 +140,9 @@ TEST_CASE("BlastParser tabular results parsing", "[blast]") {
 		//           qstart qend sstart send evalue bitscore
 		// Each field must map to the correct struct member — column
 		// misalignment silently corrupts downstream analysis.
-		std::string tabular =
-		    "query1\tNC_001416.1\t99.5\t200\t1\t0\t1\t200\t1000\t1199\t1.5e-10\t350.2\n"
-		    "query1\tNC_001422.1\t85.3\t150\t22\t1\t10\t159\t500\t649\t0.001\t120.0\n"
-		    "query2\tNC_001416.1\t97.0\t100\t3\t0\t1\t100\t2000\t2099\t5e-50\t500.0\n";
+		std::string tabular = "query1\tNC_001416.1\t99.5\t200\t1\t0\t1\t200\t1000\t1199\t1.5e-10\t350.2\n"
+		                      "query1\tNC_001422.1\t85.3\t150\t22\t1\t10\t159\t500\t649\t0.001\t120.0\n"
+		                      "query2\tNC_001416.1\t97.0\t100\t3\t0\t1\t100\t2000\t2099\t5e-50\t500.0\n";
 
 		auto hits = BlastParser::ParseTabularResults(tabular);
 		REQUIRE(hits.size() == 3);
@@ -177,29 +176,26 @@ TEST_CASE("BlastParser tabular results parsing", "[blast]") {
 	SECTION("Comment lines are skipped") {
 		// BLAST tabular output may include comment headers starting with #.
 		// These must not be parsed as data rows.
-		std::string tabular =
-		    "# BLASTN 2.14.0+\n"
-		    "# Query: query1\n"
-		    "# Database: nt\n"
-		    "# 1 hits found\n"
-		    "query1\tNC_001416.1\t99.0\t100\t1\t0\t1\t100\t1\t100\t1e-40\t200.0\n";
+		std::string tabular = "# BLASTN 2.14.0+\n"
+		                      "# Query: query1\n"
+		                      "# Database: nt\n"
+		                      "# 1 hits found\n"
+		                      "query1\tNC_001416.1\t99.0\t100\t1\t0\t1\t100\t1\t100\t1e-40\t200.0\n";
 		auto hits = BlastParser::ParseTabularResults(tabular);
 		REQUIRE(hits.size() == 1);
 		CHECK(hits[0].query_id == "query1");
 	}
 
 	SECTION("Trailing newline does not produce extra record") {
-		std::string tabular =
-		    "query1\tNC_001416.1\t99.0\t100\t1\t0\t1\t100\t1\t100\t1e-40\t200.0\n";
+		std::string tabular = "query1\tNC_001416.1\t99.0\t100\t1\t0\t1\t100\t1\t100\t1e-40\t200.0\n";
 		auto hits = BlastParser::ParseTabularResults(tabular);
 		CHECK(hits.size() == 1);
 	}
 
 	SECTION("Multiple hits for same query") {
-		std::string tabular =
-		    "seq1\thitA\t95.0\t50\t2\t1\t1\t50\t1\t50\t1e-5\t100.0\n"
-		    "seq1\thitB\t90.0\t50\t5\t0\t1\t50\t100\t149\t1e-3\t80.0\n"
-		    "seq1\thitC\t80.0\t40\t8\t0\t5\t44\t200\t239\t0.5\t50.0\n";
+		std::string tabular = "seq1\thitA\t95.0\t50\t2\t1\t1\t50\t1\t50\t1e-5\t100.0\n"
+		                      "seq1\thitB\t90.0\t50\t5\t0\t1\t50\t100\t149\t1e-3\t80.0\n"
+		                      "seq1\thitC\t80.0\t40\t8\t0\t5\t44\t200\t239\t0.5\t50.0\n";
 		auto hits = BlastParser::ParseTabularResults(tabular);
 		REQUIRE(hits.size() == 3);
 		CHECK(hits[0].subject_id == "hitA");
@@ -208,8 +204,7 @@ TEST_CASE("BlastParser tabular results parsing", "[blast]") {
 	}
 
 	SECTION("Scientific notation evalue with positive exponent") {
-		std::string tabular =
-		    "q1\ts1\t50.0\t30\t15\t0\t1\t30\t1\t30\t2.5e+02\t20.0\n";
+		std::string tabular = "q1\ts1\t50.0\t30\t15\t0\t1\t30\t1\t30\t2.5e+02\t20.0\n";
 		auto hits = BlastParser::ParseTabularResults(tabular);
 		REQUIRE(hits.size() == 1);
 		CHECK(hits[0].evalue == Approx(250.0));
@@ -218,8 +213,7 @@ TEST_CASE("BlastParser tabular results parsing", "[blast]") {
 	SECTION("Evalue of zero") {
 		// Extremely significant hits emit evalue=0 (not 1e-300).
 		// Must parse as 0.0, not error.
-		std::string tabular =
-		    "q1\ts1\t100.0\t500\t0\t0\t1\t500\t1\t500\t0\t1000.0\n";
+		std::string tabular = "q1\ts1\t100.0\t500\t0\t0\t1\t500\t1\t500\t0\t1000.0\n";
 		auto hits = BlastParser::ParseTabularResults(tabular);
 		REQUIRE(hits.size() == 1);
 		CHECK(hits[0].evalue == 0.0);
@@ -228,9 +222,8 @@ TEST_CASE("BlastParser tabular results parsing", "[blast]") {
 	SECTION("Windows line endings (CRLF)") {
 		// NCBI web API can return \r\n; trailing \r must not corrupt
 		// the last field (bitscore) and cause a parse failure.
-		std::string tabular =
-		    "q1\ts1\t99.0\t100\t1\t0\t1\t100\t1\t100\t1e-40\t200.0\r\n"
-		    "q2\ts2\t95.0\t80\t4\t0\t1\t80\t1\t80\t1e-20\t150.0\r\n";
+		std::string tabular = "q1\ts1\t99.0\t100\t1\t0\t1\t100\t1\t100\t1e-40\t200.0\r\n"
+		                      "q2\ts2\t95.0\t80\t4\t0\t1\t80\t1\t80\t1e-20\t150.0\r\n";
 		auto hits = BlastParser::ParseTabularResults(tabular);
 		REQUIRE(hits.size() == 2);
 		CHECK(hits[0].bit_score == Approx(200.0));
@@ -242,9 +235,8 @@ TEST_CASE("BlastParser tabular results parsing", "[blast]") {
 		// blastp adds "% positives" as field 13). We use the first 12
 		// and ignore the rest — dropping these rows would silently lose
 		// all blastp results.
-		std::string tabular =
-		    "q1\ts1\t99.0\t100\t1\t0\t1\t100\t1\t100\t1e-40\t200.0\t95.0\n"
-		    "q2\ts2\t90.0\t60\t6\t0\t1\t60\t1\t60\t1e-10\t100.0\n";
+		std::string tabular = "q1\ts1\t99.0\t100\t1\t0\t1\t100\t1\t100\t1e-40\t200.0\t95.0\n"
+		                      "q2\ts2\t90.0\t60\t6\t0\t1\t60\t1\t60\t1e-10\t100.0\n";
 		auto hits = BlastParser::ParseTabularResults(tabular);
 		REQUIRE(hits.size() == 2);
 		CHECK(hits[0].query_id == "q1");
@@ -253,9 +245,8 @@ TEST_CASE("BlastParser tabular results parsing", "[blast]") {
 	}
 
 	SECTION("Lines with fewer than 12 fields are skipped") {
-		std::string tabular =
-		    "q1\ts1\t95.0\t80\t4\t0\t1\t80\t1\t80\t1e-20\n"
-		    "q2\ts2\t90.0\t60\t6\t0\t1\t60\t1\t60\t1e-10\t100.0\n";
+		std::string tabular = "q1\ts1\t95.0\t80\t4\t0\t1\t80\t1\t80\t1e-20\n"
+		                      "q2\ts2\t90.0\t60\t6\t0\t1\t60\t1\t60\t1e-10\t100.0\n";
 		auto hits = BlastParser::ParseTabularResults(tabular);
 		REQUIRE(hits.size() == 1);
 		CHECK(hits[0].query_id == "q2");
@@ -264,9 +255,8 @@ TEST_CASE("BlastParser tabular results parsing", "[blast]") {
 	SECTION("Malformed numeric field does not crash") {
 		// A corrupted line must be skipped, not crash the caller
 		// with an unhandled std::invalid_argument from stod/stoi.
-		std::string tabular =
-		    "q1\ts1\tNOTANUMBER\t100\t1\t0\t1\t100\t1\t100\t1e-40\t200.0\n"
-		    "q2\ts2\t95.0\t80\t4\t0\t1\t80\t1\t80\t1e-20\t150.0\n";
+		std::string tabular = "q1\ts1\tNOTANUMBER\t100\t1\t0\t1\t100\t1\t100\t1e-40\t200.0\n"
+		                      "q2\ts2\t95.0\t80\t4\t0\t1\t80\t1\t80\t1e-20\t150.0\n";
 		auto hits = BlastParser::ParseTabularResults(tabular);
 		REQUIRE(hits.size() == 1);
 		CHECK(hits[0].query_id == "q2");
@@ -304,9 +294,7 @@ TEST_CASE("BlastParser FASTA payload construction", "[blast]") {
 	}
 
 	SECTION("Multiple sequences") {
-		auto fasta = BlastParser::BuildFastaPayload(
-		    {"seq1", "seq2", "seq3"},
-		    {"ACGT", "TGCA", "AAAA"});
+		auto fasta = BlastParser::BuildFastaPayload({"seq1", "seq2", "seq3"}, {"ACGT", "TGCA", "AAAA"});
 		CHECK(fasta == ">seq1\nACGT\n>seq2\nTGCA\n>seq3\nAAAA\n");
 	}
 
@@ -330,8 +318,7 @@ TEST_CASE("BlastParser submit body construction", "[blast]") {
 		// The POST body is application/x-www-form-urlencoded. Each parameter
 		// must be present and correctly formatted — a missing CMD=Put means
 		// NCBI interprets the request as a status check, not a submission.
-		auto body = BlastParser::BuildSubmitBody(
-		    "blastn", "nt", ">q1\nACGT\n", 10.0, 500, true);
+		auto body = BlastParser::BuildSubmitBody("blastn", "nt", ">q1\nACGT\n", 10.0, 500, true);
 		CHECK(body.find("CMD=Put") != std::string::npos);
 		CHECK(body.find("PROGRAM=blastn") != std::string::npos);
 		CHECK(body.find("DATABASE=nt") != std::string::npos);
@@ -346,8 +333,7 @@ TEST_CASE("BlastParser submit body construction", "[blast]") {
 		// MEGABLAST param must be absent for non-blastn programs —
 		// NCBI ignores it but including it is misleading and may
 		// cause validation errors in the future.
-		auto body = BlastParser::BuildSubmitBody(
-		    "blastp", "nr", ">q1\nMKWV\n", 0.001, 10, false);
+		auto body = BlastParser::BuildSubmitBody("blastp", "nr", ">q1\nMKWV\n", 0.001, 10, false);
 		CHECK(body.find("PROGRAM=blastp") != std::string::npos);
 		CHECK(body.find("DATABASE=nr") != std::string::npos);
 		CHECK(body.find("EXPECT=0.001") != std::string::npos);
@@ -357,8 +343,7 @@ TEST_CASE("BlastParser submit body construction", "[blast]") {
 
 	SECTION("Small evalue formatting") {
 		// Scientific notation in the EXPECT param must be parseable by NCBI.
-		auto body = BlastParser::BuildSubmitBody(
-		    "blastn", "nt", ">q1\nACGT\n", 1e-50, 100, false);
+		auto body = BlastParser::BuildSubmitBody("blastn", "nt", ">q1\nACGT\n", 1e-50, 100, false);
 		CHECK(body.find("EXPECT=") != std::string::npos);
 		// Must not be "EXPECT=0" (which std::to_string would produce for tiny doubles)
 		CHECK(body.find("EXPECT=0&") == std::string::npos);
@@ -368,8 +353,7 @@ TEST_CASE("BlastParser submit body construction", "[blast]") {
 		// The FASTA payload contains newlines. In application/x-www-form-urlencoded,
 		// newlines should be URL-encoded as %0A (or left raw and handled by the
 		// server). We encode them so the body is valid.
-		auto body = BlastParser::BuildSubmitBody(
-		    "blastn", "nt", ">q1\nACGT\n", 10.0, 500, false);
+		auto body = BlastParser::BuildSubmitBody("blastn", "nt", ">q1\nACGT\n", 10.0, 500, false);
 		// The QUERY value must contain the FASTA content
 		auto query_pos = body.find("QUERY=");
 		REQUIRE(query_pos != std::string::npos);
@@ -389,10 +373,7 @@ TEST_CASE("BlastParser submit body construction", "[blast]") {
 TEST_CASE("BlastParser batch splitting", "[blast]") {
 	SECTION("All sequences fit in one batch") {
 		// Small sequences well under the limit should produce exactly one batch.
-		auto batches = BlastParser::SplitIntoBatches(
-		    {"s1", "s2", "s3"},
-		    {"ACGT", "TGCA", "AAAA"},
-		    1000000);
+		auto batches = BlastParser::SplitIntoBatches({"s1", "s2", "s3"}, {"ACGT", "TGCA", "AAAA"}, 1000000);
 		REQUIRE(batches.size() == 1);
 		CHECK(batches[0].ids.size() == 3);
 		CHECK(batches[0].sequences.size() == 3);
@@ -405,10 +386,7 @@ TEST_CASE("BlastParser batch splitting", "[blast]") {
 		// With max_bytes=30, two 10-byte sequences fit but three don't.
 		// ">s1\nACGTACGTAC\n" = 16 bytes, ">s2\nTGCATGCATG\n" = 16 bytes
 		// 16+16 = 32 > 30, so they split into separate batches.
-		auto batches = BlastParser::SplitIntoBatches(
-		    {"s1", "s2"},
-		    {"ACGTACGTAC", "TGCATGCATG"},
-		    20);
+		auto batches = BlastParser::SplitIntoBatches({"s1", "s2"}, {"ACGTACGTAC", "TGCATGCATG"}, 20);
 		REQUIRE(batches.size() == 2);
 		CHECK(batches[0].ids.size() == 1);
 		CHECK(batches[0].ids[0] == "s1");
@@ -420,10 +398,7 @@ TEST_CASE("BlastParser batch splitting", "[blast]") {
 		// A sequence larger than max_bytes must not be dropped — it gets
 		// its own batch even though it exceeds the limit. Dropping data
 		// silently is unacceptable.
-		auto batches = BlastParser::SplitIntoBatches(
-		    {"big", "small"},
-		    {std::string(5000, 'A'), "ACGT"},
-		    1000);
+		auto batches = BlastParser::SplitIntoBatches({"big", "small"}, {std::string(5000, 'A'), "ACGT"}, 1000);
 		REQUIRE(batches.size() == 2);
 		CHECK(batches[0].ids[0] == "big");
 		CHECK(batches[0].ids.size() == 1);

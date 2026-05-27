@@ -109,8 +109,8 @@ std::vector<BlastHit> BlastParser::ParseTabularResults(const std::string &tabula
 }
 
 bool BlastParser::ValidateProgram(const std::string &program) {
-	return program == "blastn" || program == "blastp" || program == "blastx" ||
-	       program == "tblastn" || program == "tblastx";
+	return program == "blastn" || program == "blastp" || program == "blastx" || program == "tblastn" ||
+	       program == "tblastx";
 }
 
 std::string BlastParser::BuildFastaPayload(const std::vector<std::string> &ids,
@@ -171,8 +171,8 @@ std::string BlastParser::BuildSubmitBody(const std::string &program, const std::
 }
 
 std::vector<BlastParser::SequenceBatch> BlastParser::SplitIntoBatches(const std::vector<std::string> &ids,
-                                                                     const std::vector<std::string> &sequences,
-                                                                     size_t max_bytes) {
+                                                                      const std::vector<std::string> &sequences,
+                                                                      size_t max_bytes) {
 	std::vector<SequenceBatch> batches;
 	if (ids.empty()) {
 		return batches;

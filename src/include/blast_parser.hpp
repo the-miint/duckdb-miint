@@ -35,7 +35,8 @@ public:
 	static BlastStatus ParseStatusResponse(const std::string &text);
 	static std::vector<BlastHit> ParseTabularResults(const std::string &tabular);
 	static bool ValidateProgram(const std::string &program);
-	static std::string BuildFastaPayload(const std::vector<std::string> &ids, const std::vector<std::string> &sequences);
+	static std::string BuildFastaPayload(const std::vector<std::string> &ids,
+	                                     const std::vector<std::string> &sequences);
 	static std::string UrlEncode(const std::string &value);
 	static std::string BuildSubmitBody(const std::string &program, const std::string &database,
 	                                   const std::string &fasta_query, double evalue, int max_targets, bool megablast);
