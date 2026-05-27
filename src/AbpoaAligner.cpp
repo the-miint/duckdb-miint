@@ -80,7 +80,9 @@ struct AbpoaGuard {
 			}
 			free(seqs);
 		}
-		free(seq_lens);
+		if (seq_lens) {
+			free(seq_lens);
+		}
 		if (seq_names) {
 			for (int i = 0; i < n_seq; i++) {
 				free(seq_names[i]);
@@ -113,15 +115,21 @@ static void ValidateInputs(const std::vector<std::string> &names, const std::vec
 static void PrepareSequences(AbpoaGuard &guard, const std::vector<std::string> &names,
                              const std::vector<std::string> &sequences) {
 	int n = static_cast<int>(sequences.size());
-	guard.n_seq = n;
-	guard.seqs = (uint8_t **)malloc(n * sizeof(uint8_t *));
-	guard.seq_lens = (int *)malloc(n * sizeof(int));
-	guard.seq_names = (char **)malloc(n * sizeof(char *));
+	guard.seqs = (uint8_t **)calloc(n, sizeof(uint8_t *));
+	guard.seq_lens = (int *)calloc(n, sizeof(int));
+	guard.seq_names = (char **)calloc(n, sizeof(char *));
+	if (!guard.seqs || !guard.seq_lens || !guard.seq_names) {
+		throw std::runtime_error("failed to allocate sequence arrays");
+	}
 
 	for (int i = 0; i < n; i++) {
+		guard.n_seq = i + 1;
 		int len = static_cast<int>(sequences[i].size());
 		guard.seq_lens[i] = len;
 		guard.seqs[i] = (uint8_t *)malloc(len * sizeof(uint8_t));
+		if (!guard.seqs[i]) {
+			throw std::runtime_error("failed to allocate sequence buffer");
+		}
 		for (int j = 0; j < len; j++) {
 			guard.seqs[i][j] = ab_nt4_table[(unsigned char)sequences[i][j]];
 		}
@@ -139,7 +147,7 @@ AbpoaMsaResult AbpoaAligner::align(const std::vector<std::string> &names, const 
 	guard.ab = abpoa_init();
 	PrepareSequences(guard, names, sequences);
 
-	abpoa_msa(guard.ab, guard.abpt, guard.n_seq, guard.seq_names, guard.seq_lens, guard.seqs, nullptr, nullptr);
+	(void)abpoa_msa(guard.ab, guard.abpt, guard.n_seq, guard.seq_names, guard.seq_lens, guard.seqs, nullptr, nullptr);
 
 	abpoa_cons_t *abc = guard.ab->abc;
 	if (!abc || abc->msa_len <= 0) {
@@ -178,7 +186,7 @@ AbpoaConsensusResult AbpoaAligner::consensus(const std::vector<std::string> &nam
 	guard.ab = abpoa_init();
 	PrepareSequences(guard, names, sequences);
 
-	abpoa_msa(guard.ab, guard.abpt, guard.n_seq, guard.seq_names, guard.seq_lens, guard.seqs, nullptr, nullptr);
+	(void)abpoa_msa(guard.ab, guard.abpt, guard.n_seq, guard.seq_names, guard.seq_lens, guard.seqs, nullptr, nullptr);
 
 	abpoa_cons_t *abc = guard.ab->abc;
 	if (!abc || abc->n_cons <= 0) {
