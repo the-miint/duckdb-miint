@@ -54,6 +54,7 @@
 #endif
 #ifdef MIINT_HAS_ABPOA
 #include <align_abpoa.hpp>
+#include <consensus_abpoa.hpp>
 #endif
 #ifdef MIINT_HAS_SORTMERNA
 #include <align_sortmerna.hpp>
@@ -294,6 +295,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 #endif
 #ifdef MIINT_HAS_ABPOA
 	AlignAbpoaTableFunction::Register(loader);
+	ConsensusAbpoaTableFunction::Register(loader);
 #endif
 #ifdef MIINT_HAS_SORTMERNA
 	AlignSortMeRNATableFunction::Register(loader);

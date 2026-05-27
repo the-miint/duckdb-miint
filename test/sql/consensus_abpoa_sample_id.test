@@ -1,0 +1,164 @@
+# name: test/sql/consensus_abpoa_sample_id.test
+# description: test consensus_abpoa sample_id named parameter
+# group: [sql]
+
+statement ok
+PRAGMA enable_verification;
+
+require miint
+
+require-env ABPOA_AVAILABLE
+
+# Build the base input: three 8bp DNA sequences with high similarity.
+statement ok
+CREATE TABLE cons_base AS
+  SELECT read_id, sequence1 FROM read_fastx('data/mafft/tiny.fa');
+
+# ----- Cycle 1: Error on invalid sample_id -----
+
+statement ok
+CREATE VIEW one_sample AS SELECT 'A' AS sample, * FROM cons_base;
+
+statement error
+SELECT * FROM consensus_abpoa('one_sample', sample_id := 'no_such_column')
+----
+sample_id column 'no_such_column' not found
+
+statement error
+SELECT * FROM consensus_abpoa('one_sample', sample_id := '')
+----
+sample_id column name must not be empty
+
+# ----- Cycle 2: Output-column collision (case-insensitive) -----
+
+statement error
+SELECT * FROM consensus_abpoa('cons_base', sample_id := 'consensus_id')
+----
+collides with an output column
+
+statement error
+SELECT * FROM consensus_abpoa('cons_base', sample_id := 'consensus_sequence')
+----
+collides with an output column
+
+statement error
+SELECT * FROM consensus_abpoa('cons_base', sample_id := 'CONSENSUS_LENGTH')
+----
+collides with an output column
+
+statement error
+SELECT * FROM consensus_abpoa('cons_base', sample_id := 'num_reads')
+----
+collides with an output column
+
+# ----- Cycle 3: Per-sample consensus isolation -----
+
+statement ok
+CREATE VIEW multi_sample AS
+  SELECT 'A' AS sample, * FROM cons_base
+  UNION ALL
+  SELECT 'B' AS sample, * FROM cons_base;
+
+query TITII
+SELECT sample, consensus_id, consensus_sequence, consensus_length, num_reads
+  FROM consensus_abpoa('multi_sample', sample_id := 'sample')
+  ORDER BY sample, consensus_id
+----
+A	0	ACGTACGT	8	3
+B	0	ACGTACGT	8	3
+
+# ----- Cycle 4: Integer-typed sample_id round-trips -----
+
+statement ok
+CREATE VIEW int_sample AS
+  SELECT 1 AS sample_num, * FROM cons_base
+  UNION ALL
+  SELECT 2 AS sample_num, * FROM cons_base;
+
+query II
+SELECT sample_num, COUNT(*)
+  FROM consensus_abpoa('int_sample', sample_id := 'sample_num')
+  GROUP BY sample_num ORDER BY sample_num
+----
+1	1
+2	1
+
+query T
+SELECT typeof(sample_num) FROM consensus_abpoa('int_sample', sample_id := 'sample_num') LIMIT 1
+----
+INTEGER
+
+# ----- Cycle 5: NULL sample values rejected at bind -----
+
+statement ok
+CREATE VIEW null_sample AS SELECT NULL::VARCHAR AS sid, * FROM cons_base;
+
+statement error
+SELECT * FROM consensus_abpoa('null_sample', sample_id := 'sid')
+----
+NULL values in sample_id column
+
+# ----- Cycle 6: Empty relation -----
+
+statement ok
+CREATE VIEW empty_samples AS
+  SELECT 'A' AS sample, * FROM cons_base WHERE 1=0;
+
+statement error
+SELECT * FROM consensus_abpoa('empty_samples', sample_id := 'sample')
+----
+has no non-NULL values
+
+# ----- Cycle 7: Per-sample validation -----
+
+statement ok
+CREATE VIEW one_seq_sample AS
+  SELECT 'A' AS sample, read_id, sequence1 FROM cons_base
+  UNION ALL
+  SELECT 'B' AS sample, 'solo' AS read_id, 'ACGTACGT' AS sequence1;
+
+statement error
+SELECT * FROM consensus_abpoa('one_seq_sample', sample_id := 'sample')
+----
+consensus_abpoa requires at least 2 sequences
+
+# Duplicate read_id WITHIN a sample
+statement ok
+CREATE VIEW dup_within_sample AS
+  SELECT 'A' AS sample, read_id, sequence1 FROM cons_base
+  UNION ALL
+  SELECT 'A', 's1', 'ACGTACGT';
+
+statement error
+SELECT * FROM consensus_abpoa('dup_within_sample', sample_id := 'sample')
+----
+duplicate read_id 's1'
+
+# ----- Cycle 8: Single-sample equivalence -----
+
+query ITII
+SELECT consensus_id, consensus_sequence, consensus_length, num_reads
+  FROM consensus_abpoa('one_sample', sample_id := 'sample')
+----
+0	ACGTACGT	8	3
+
+# ----- Cycle 9: Parallelism (abPOA is thread-safe) -----
+
+statement ok
+CREATE VIEW four_cons_samples AS
+  SELECT 'A' AS sid, * FROM cons_base UNION ALL
+  SELECT 'B' AS sid, * FROM cons_base UNION ALL
+  SELECT 'C' AS sid, * FROM cons_base UNION ALL
+  SELECT 'D' AS sid, * FROM cons_base;
+
+statement ok
+PRAGMA threads=4;
+
+query TI
+SELECT sid, COUNT(*) FROM consensus_abpoa('four_cons_samples', sample_id := 'sid')
+  GROUP BY sid ORDER BY sid
+----
+A	1
+B	1
+C	1
+D	1
