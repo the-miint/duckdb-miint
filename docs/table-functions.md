@@ -15,6 +15,7 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`read_ncbi`](#read_ncbiaccession-api_key-batch_size500) - NCBI accession metadata
 - [`read_ncbi_fasta`](#read_ncbi_fastaaccession-api_key-include_filepathfalse-batch_size500) - NCBI FASTA sequences
 - [`read_ncbi_annotation`](#read_ncbi_annotationaccession-api_key-include_filepathfalse) - NCBI genome annotations
+- [`blast`](#blastquery_table-options) - Remote NCBI BLAST sequence search
 - [`read_ena`](#read_enaaccession-resultread_run-fields) - EBI/ENA metadata queries
 - [`read_ena_attributes`](#read_ena_attributesaccession) - EBI/ENA custom sample attributes
 - [`ena_searchable_fields`](#ena_searchable_fieldsresult_type) - Enumerate ENA structured-search fields per result type
@@ -888,6 +889,100 @@ COPY (
 - Complex feature locations (join, complement) emit a warning and use outer bounds only
 - The `phase` column is set from the `codon_start` qualifier for CDS features
 - Source is detected from accession prefix: NC_/NM_/NP_ -> 'RefSeq', others -> 'GenBank' or 'NCBI'
+
+## `blast(query_table, [options])`
+
+Search sequences against NCBI's remote BLAST databases. Sends query sequences to the NCBI BLAST web API and returns tabular hit results (equivalent to outfmt 6). Supports all BLAST programs: `blastn`, `blastp`, `blastx`, `tblastn`, `tblastx`.
+
+**Requirements:**
+- Requires the `httpfs` extension (automatically loaded)
+- Network access to NCBI BLAST servers (blast.ncbi.nlm.nih.gov)
+
+**Parameters:**
+- `query_table` (VARCHAR): Name of a table or view containing query sequences. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns. TEMP tables are not supported — use persistent tables.
+- `program` (VARCHAR, optional, default `'blastn'`): BLAST program. One of: `blastn`, `blastp`, `blastx`, `tblastn`, `tblastx`.
+- `database` (VARCHAR, optional, default `'nt'`): Target database (e.g., `'nt'`, `'nr'`, `'refseq_rna'`, `'swissprot'`).
+- `evalue` (DOUBLE, optional, default 10.0): E-value threshold. Only hits with e-value at or below this threshold are returned.
+- `max_targets` (INTEGER, optional, default 500): Maximum number of target sequences to report per query (HITLIST_SIZE).
+- `megablast` (BOOLEAN, optional, default true): Enable megablast mode for faster nucleotide searches. Only valid with `program='blastn'`.
+- `api_key` (VARCHAR, optional): NCBI API key for higher rate limits (10 req/s vs 3 req/s).
+
+**Output schema:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `query_id` | VARCHAR | Query sequence identifier (from `read_id` column) |
+| `subject_id` | VARCHAR | Subject (hit) accession |
+| `pct_identity` | DOUBLE | Percentage of identical matches |
+| `alignment_length` | INTEGER | Alignment length |
+| `mismatches` | INTEGER | Number of mismatches |
+| `gap_opens` | INTEGER | Number of gap openings |
+| `query_start` | BIGINT | Start of alignment in query (1-based) |
+| `query_end` | BIGINT | End of alignment in query |
+| `subject_start` | BIGINT | Start of alignment in subject |
+| `subject_end` | BIGINT | End of alignment in subject |
+| `evalue` | DOUBLE | Expect value |
+| `bit_score` | DOUBLE | Bit score |
+
+**Behavior:**
+- Loads all sequences from the query table into memory, then submits them to NCBI BLAST as FASTA
+- Large query sets (> 4 MB of FASTA data) are automatically split into multiple submissions
+- Each submission is a blocking operation: the function submits, polls until completion, and retrieves results before processing the next batch
+- Poll interval is 15 seconds; maximum wait time per submission is 60 minutes
+- Rate-limited to respect NCBI guidelines (3 req/s without key, 10 req/s with key)
+- Retry logic for transient failures (408, 429, 500, 502, 503, 504) with exponential backoff up to 6 retries
+- NCBI BLAST jobs that return `UNKNOWN` status are retried up to 3 times before failing
+- Progress messages are printed to stderr during polling
+- Returns zero rows (not an error) if no significant hits are found
+
+**Examples:**
+```sql
+-- Create a table with sequences to search
+CREATE TABLE my_sequences (read_id VARCHAR, sequence1 VARCHAR);
+INSERT INTO my_sequences VALUES
+    ('seq1', 'GGGCGGCGACCTCGCGGGTTTTCGCTATTTATGAAAATTTTCCGGTTTAAGGCGTTTCCG'),
+    ('seq2', 'ATGAAAGCAATTTTCGTACTGAAACATCTTAATCATGCTAAGGAGGTTTTCTAATG');
+
+-- Basic blastn search against nt
+SELECT * FROM blast('my_sequences');
+
+-- Search with custom parameters
+SELECT query_id, subject_id, pct_identity, evalue
+FROM blast('my_sequences',
+           program := 'blastn',
+           database := 'nt',
+           evalue := 1e-10,
+           max_targets := 10);
+
+-- Protein BLAST search
+CREATE TABLE my_proteins (read_id VARCHAR, sequence1 VARCHAR);
+INSERT INTO my_proteins VALUES
+    ('insulin_b', 'FVNQHLCGSHLVEALYLVCGERGFFYTPKT');
+
+SELECT query_id, subject_id, pct_identity, evalue, bit_score
+FROM blast('my_proteins', program := 'blastp', database := 'nr', megablast := false);
+
+-- Find top hit per query
+SELECT DISTINCT ON (query_id) query_id, subject_id, pct_identity, evalue
+FROM blast('my_sequences', max_targets := 50)
+ORDER BY query_id, evalue ASC;
+
+-- Filter for high-confidence hits
+SELECT * FROM blast('my_sequences')
+WHERE pct_identity >= 95.0 AND evalue < 1e-20;
+
+-- Use API key for higher rate limits on large queries
+SELECT * FROM blast('my_sequences', api_key := 'your_ncbi_api_key');
+```
+
+**Notes:**
+- TEMP tables are not supported because the function loads sequences through a separate database connection. Use persistent tables or views.
+- The `megablast` parameter is only valid with `program='blastn'`. Specifying it with other programs raises a bind error.
+- For large-scale searches, use `api_key` to increase the rate limit from 3 to 10 requests per second.
+- BLAST queries can take 30 seconds to several minutes depending on database size and query count. The function blocks until results are ready.
+- Batch splitting (for queries exceeding 4 MB FASTA) is reported via `miint_warnings()`.
+
+---
 
 ## `read_ena(accession, [result='read_run'], [fields])`
 

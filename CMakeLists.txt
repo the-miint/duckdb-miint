@@ -997,6 +997,9 @@ set(EXTENSION_SOURCES
     src/save_minimap2_index.cpp
     src/ncbi_parser.cpp
     src/ncbi_client.cpp
+    src/blast_parser.cpp
+    src/blast_client.cpp
+    src/blast_search.cpp
     src/zip_utils.cpp
     src/read_ncbi_fasta.cpp
     src/read_ncbi.cpp
@@ -1400,6 +1403,8 @@ set(TEST_SOURCES
     src/zip_utils.cpp
     duckdb/third_party/miniz/miniz.cpp  # For ExtractFromZip tests
     test/cpp/test_ncbi_client.cpp
+    src/blast_parser.cpp
+    test/cpp/test_blast_parser.cpp
     src/ena_parser.cpp
     src/ena_run_info_extractor.cpp
     src/ena_resolver_cache.cpp

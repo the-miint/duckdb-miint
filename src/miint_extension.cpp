@@ -26,6 +26,7 @@
 #include <read_ncbi_fasta.hpp>
 #include <read_ncbi.hpp>
 #include <read_ncbi_annotation.hpp>
+#include <blast_search.hpp>
 #include <read_ena.hpp>
 #include <read_ena_attributes.hpp>
 #include <read_ena_searchable_fields.hpp>
@@ -251,6 +252,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadNCBIFastaTableFunction::Register(loader);
 	ReadNCBITableFunction::Register(loader);
 	ReadNCBIAnnotationTableFunction::Register(loader);
+	BlastSearchTableFunction::Register(loader);
 	ReadENATableFunction::Register(loader);
 	ReadENAAttributesTableFunction::Register(loader);
 	ReadENASearchableFieldsTableFunction::Register(loader);
