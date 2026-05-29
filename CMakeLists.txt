@@ -1079,6 +1079,7 @@ set(EXTENSION_SOURCES
     src/align_pairwise_ksw2_splice_functions.cpp
     src/rype_classify.cpp
     src/rype_extract.cpp
+    src/rype_index_create.cpp
     src/MsBinaryDecoder.cpp
     src/MzMLReader.cpp
     src/read_mzml.cpp

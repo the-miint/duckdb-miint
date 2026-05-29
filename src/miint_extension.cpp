@@ -74,6 +74,7 @@
 #include <read_mzxml.hpp>
 #include <rype_classify.hpp>
 #include <rype_extract.hpp>
+#include <rype_index_create.hpp>
 #include <rype_log_ratio.hpp>
 #ifdef MIINT_HAS_VSEARCH
 #include <uchime_ref.hpp>
@@ -409,6 +410,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RypeExtractMinimizerSetTableFunction::Register(loader);
 	RypeExtractStrandMinimizersTableFunction::Register(loader);
 	RypeLogRatioTableFunction::Register(loader);
+	RypeIndexCreateTableFunction::Register(loader);
 #ifdef MIINT_HAS_VSEARCH
 	UchimeRefTableFunction::Register(loader);
 	UchimeDenovoTableFunction::Register(loader);
