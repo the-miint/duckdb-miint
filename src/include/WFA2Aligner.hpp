@@ -54,10 +54,6 @@ public:
 private:
 	struct Impl;
 	std::unique_ptr<Impl> impl_;
-
-	// Reconstruct aligned sequences from CIGAR ops
-	static void reconstruct_aligned(const std::string &query, const std::string &subject, const std::string &cigar,
-	                                std::string &query_aligned, std::string &subject_aligned);
 };
 
 } // namespace miint

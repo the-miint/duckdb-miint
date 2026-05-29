@@ -514,67 +514,139 @@ WHERE proportion_covered > 0.5;
 
 ## Pairwise Alignment Functions
 
-Gap-affine pairwise sequence alignment powered by [WFA2-lib](https://github.com/smarco/WFA2-lib) (Wavefront Alignment Algorithm). Three functions at increasing detail levels:
+Pairwise sequence alignment is exposed through four function families, each backed by a different algorithm or KSW2 mode. All families share three detail levels with consistent return shapes:
 
-- `align_pairwise_score` -- alignment score only (fastest)
-- `align_pairwise_cigar` -- score + extended CIGAR string
-- `align_pairwise_full` -- score + CIGAR + aligned sequences with gap characters
+- `*_score` -- alignment score only (fastest)
+- `*_cigar` -- score + CIGAR string, as `STRUCT(score INTEGER, cigar VARCHAR)`
+- `*_full` -- score + CIGAR + aligned sequences with `-` gap characters, as `STRUCT(score INTEGER, cigar VARCHAR, query_aligned VARCHAR, subject_aligned VARCHAR)`
 
-Each function has a 2-argument form (uses defaults) and a 6-argument form (explicit penalties):
+NULL inputs produce NULL output. Alignment failure (e.g., z-drop early termination, excessive divergence) also produces NULL. Penalty parameters must be constant values, not column references.
+
+### Choosing a family
+
+| Family | Backend | Score semantic | CIGAR ops | Pick when |
+|---|---|---|---|---|
+| `align_pairwise_wfa2_*` | WFA2-lib (Wavefront) | Penalty: `0` = identical, larger = more divergent | Extended (`=` / `X`) | Short to long DNA; want match/mismatch distinguished in CIGAR |
+| `align_pairwise_ksw2_*` | KSW2 `ksw_extz2_sse` (SIMD banded DP) | Native positive: identical = `qlen * match` | Standard (`M` lumps match and mismatch) | General DNA alignment; optional bandwidth / z-drop tuning |
+| `align_pairwise_ksw2_dual_affine_*` | KSW2 `ksw_extd2_sse` | Native positive | `M`, `I`, `D` | Long-read alignment; long indels amortize over a second affine pair |
+| `align_pairwise_ksw2_splice_*` | KSW2 `ksw_exts2_sse` | Native positive | `M`, `I`, `D`, `N` (intron skip) | Splice-aware (RNA-seq); intron-open penalty + non-canonical-boundary penalty |
+
+WFA2 scores and KSW2 scores are on different scales -- WFA2 is penalty-style (lower is better, identical = 0), KSW2 is additive (higher is better, positive contributions from matches). Do not compare scores across families.
+
+### `align_pairwise_wfa2_*` -- WFA2 (Wavefront)
+
+Gap-affine pairwise sequence alignment powered by [WFA2-lib](https://github.com/smarco/WFA2-lib).
 
 ```sql
--- 2-arg: uses default penalties (mismatch=4, gap_open=6, gap_extend=2)
-SELECT align_pairwise_score(query, subject);
+-- 2-arg: default penalties (mismatch=4, gap_open=6, gap_extend=2)
+SELECT align_pairwise_wfa2_score(query, subject);
 
--- 6-arg: custom penalties
-SELECT align_pairwise_score(query, subject, 'wfa2', 2, 6, 2);
+-- 5-arg: custom penalties
+SELECT align_pairwise_wfa2_score(query, subject, 2, 6, 2);
 ```
 
-**Parameters (6-arg form):**
-- `query` (VARCHAR): Query sequence
-- `subject` (VARCHAR): Subject sequence
-- `method` (VARCHAR): Alignment method, currently only `'wfa2'`
-- `mismatch` (INTEGER): Mismatch penalty (must be > 0)
-- `gap_open` (INTEGER): Gap opening penalty (must be >= 0)
-- `gap_extend` (INTEGER): Gap extension penalty (must be > 0)
-
-Penalty parameters must be constant values, not column references.
-
-**Returns:**
-- `align_pairwise_score` -> `INTEGER` -- alignment score (0 = identical, higher = more divergent)
-- `align_pairwise_cigar` -> `STRUCT(score INTEGER, cigar VARCHAR)` -- score and extended CIGAR (`=`/`X` ops, not `M`)
-- `align_pairwise_full` -> `STRUCT(score INTEGER, cigar VARCHAR, query_aligned VARCHAR, subject_aligned VARCHAR)` -- score, CIGAR, and aligned sequences with `-` gap characters
-
-NULL inputs produce NULL output. Alignment failure (e.g., excessive divergence) also produces NULL.
+**Parameters (5-arg form):**
+- `query` (VARCHAR), `subject` (VARCHAR): the two sequences to align
+- `mismatch` (INTEGER): mismatch penalty (must be > 0)
+- `gap_open` (INTEGER): gap-opening penalty (must be >= 0)
+- `gap_extend` (INTEGER): gap-extension penalty (must be > 0)
 
 **Examples:**
 ```sql
--- Score identical sequences
-SELECT align_pairwise_score('ACGT', 'ACGT');
--- 0
+SELECT align_pairwise_wfa2_score('ACGT', 'ACGT');           -- 0  (identical)
+SELECT align_pairwise_wfa2_score('ACGT', 'ACAT');           -- 4  (one mismatch)
+SELECT (align_pairwise_wfa2_cigar('ACGT', 'ACAT')).cigar;   -- 2=1X1=
+SELECT (align_pairwise_wfa2_full('ACGT', 'AGT')).query_aligned,
+       (align_pairwise_wfa2_full('ACGT', 'AGT')).subject_aligned;
+-- aligned sequences with '-' for the indel
+```
 
--- Score with single mismatch (default mismatch penalty = 4)
-SELECT align_pairwise_score('ACGT', 'ACAT');
--- 4
+### `align_pairwise_ksw2_*` -- KSW2 extz (standard affine)
 
--- Get CIGAR string
-SELECT (align_pairwise_cigar('ACGT', 'ACAT')).cigar;
--- 2=1X1=
+Standard affine extension alignment via `ksw_extz2_sse` (bundled inside [minimap2](https://github.com/lh3/minimap2)).
 
--- Get full alignment with gap characters
-SELECT (align_pairwise_full('ACGT', 'AGT')).query_aligned,
-       (align_pairwise_full('ACGT', 'AGT')).subject_aligned;
--- Shows aligned sequences with '-' for gaps
+```sql
+-- 2-arg: defaults (match=2, mismatch=4, gap_open=6, gap_extend=2; w=-1, zdrop=-1)
+SELECT align_pairwise_ksw2_score(query, subject);
 
--- Use with table data
-SELECT name,
-       align_pairwise_score(query_seq, ref_seq) AS score,
-       (align_pairwise_cigar(query_seq, ref_seq)).cigar AS cigar
-FROM sequence_pairs;
+-- 6-arg: custom penalties (bandwidth + z-drop default to -1, disabled)
+SELECT align_pairwise_ksw2_score(query, subject, 2, 4, 6, 2);
 
--- Custom penalties for more sensitive alignment
-SELECT (align_pairwise_full(seq_a, seq_b, 'wfa2', 2, 4, 1)).query_aligned
-FROM amplicon_pairs;
+-- 8-arg: advanced (explicit bandwidth and z-drop)
+SELECT align_pairwise_ksw2_score(query, subject, 2, 4, 6, 2, 100, 400);
+```
+
+**Parameters (6-/8-arg forms):**
+- `match` (INTEGER): match score (must be > 0); positive contribution per matched base
+- `mismatch` (INTEGER): mismatch penalty (must be > 0); subtracted per mismatched base
+- `gap_open` (INTEGER): gap-opening penalty (must be >= 0)
+- `gap_extend` (INTEGER): gap-extension penalty (must be > 0)
+- `w` (INTEGER, 8-arg only): bandwidth; negative disables banding (full DP)
+- `zdrop` (INTEGER, 8-arg only): z-drop threshold for early termination; negative disables
+
+**Examples:**
+```sql
+SELECT align_pairwise_ksw2_score('ACGT', 'ACGT');           -- 8  (4 * match=2)
+SELECT align_pairwise_ksw2_score('ACGT', 'ACAT');           -- 2  (3*2 - 4)
+SELECT (align_pairwise_ksw2_cigar('ACGT', 'ACAT')).cigar;   -- 4M (KSW2 lumps match/mismatch)
+```
+
+### `align_pairwise_ksw2_dual_affine_*` -- KSW2 extd (dual affine)
+
+Dual affine gap penalties via `ksw_extd2_sse`. For each gap of length `L`, KSW2 picks the cheaper of `gap_open + L*gap_extend` and `gap_open2 + L*gap_extend2`. Typical configuration: first pair has cheap open + moderate extend (short indels), second pair has expensive open + cheap extend (long indels / structural variants).
+
+```sql
+-- 2-arg: defaults (match=2, mismatch=4, gap_open=6, gap_extend=2, gap_open2=24, gap_extend2=1)
+SELECT align_pairwise_ksw2_dual_affine_score(query, subject);
+
+-- 8-arg: custom penalties
+SELECT align_pairwise_ksw2_dual_affine_score(query, subject, 2, 4, 6, 2, 24, 1);
+
+-- 10-arg: advanced (with bandwidth and z-drop)
+SELECT align_pairwise_ksw2_dual_affine_score(query, subject, 2, 4, 6, 2, 24, 1, -1, -1);
+```
+
+**Parameters (8-/10-arg forms):** same first four as the extz family, plus:
+- `gap_open2` (INTEGER): second-pair gap-opening penalty (must be >= 0); typically larger than `gap_open`
+- `gap_extend2` (INTEGER): second-pair gap-extension penalty (must be > 0); typically smaller than `gap_extend`
+- `w`, `zdrop` (10-arg only): bandwidth and z-drop as in the extz family
+
+**Example -- long gap uses the second affine:**
+```sql
+-- 20 matched bases + 30-bp insertion
+-- First-affine gap cost: 6 + 30*2 = 66.  Second-affine: 24 + 30*1 = 54.  Dual picks the cheaper.
+SELECT align_pairwise_ksw2_dual_affine_score(repeat('A', 50), repeat('A', 20));
+-- -14   (vs. -26 from align_pairwise_ksw2_score with the same penalties)
+```
+
+### `align_pairwise_ksw2_splice_*` -- KSW2 exts (splice-aware)
+
+Splice-aware extension alignment via `ksw_exts2_sse`. Intended for RNA-seq alignment where introns are large gaps and canonical (GT-AG) splice sites are preferred. Junction guidance (`junc` array) is not exposed in v1; alignment relies on the score model alone. Forward-strand splice flag (`KSW_EZ_SPLICE_FOR`) is fixed in v1.
+
+> ⚠️ **v1 status: experimental.** Without junction guidance (`junc` array), splice-site detection relies entirely on the score model and is unreliable for real RNA-seq workloads — short test inputs will not exercise intron skipping at all, and long inputs may produce plausible-looking but incorrect intron boundaries. Use this family today for verifying the score model and integrating with custom splice-aware pipelines that supply external junction calls; **do not use it as a drop-in replacement for a real splice-aware aligner** until a future version exposes the `junc` array and per-strand control.
+
+```sql
+-- 2-arg: defaults (minimap2 --splice preset shape: match=2, mismatch=4, gap_open=6,
+--                  gap_extend=2, gap_open2=24, noncan=9)
+SELECT align_pairwise_ksw2_splice_score(query, subject);
+
+-- 8-arg: custom penalties
+SELECT align_pairwise_ksw2_splice_score(query, subject, 2, 4, 6, 2, 24, 9);
+
+-- 9-arg: advanced (with z-drop; no bandwidth parameter -- ksw_exts2_sse has none)
+SELECT align_pairwise_ksw2_splice_score(query, subject, 2, 4, 6, 2, 24, 9, -1);
+```
+
+**Parameters (8-/9-arg forms):** same first four as the extz family, plus:
+- `gap_open2` (INTEGER): intron-open penalty (must be >= 0); introns extend at the `gap_extend` rate
+- `noncan` (INTEGER): penalty added when the chosen intron boundary is non-canonical (must be >= 0)
+- `zdrop` (9-arg only): z-drop threshold
+
+The `_full` aligned-sequence output renders `N` (intron-skip) the same as `D` -- the intron appears as gap characters in `query_aligned`, with the corresponding subject bases in `subject_aligned`. The CIGAR string preserves the `M` vs `N` distinction for downstream consumers.
+
+**Example -- splice mode behaves like extz for short input without intron-boundary patterns:**
+```sql
+SELECT align_pairwise_ksw2_splice_score('ACGT', 'ACAT');   -- 2  (3*match - mismatch)
 ```
 
 ## Utility Functions

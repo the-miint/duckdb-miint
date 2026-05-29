@@ -1,0 +1,180 @@
+# name: test/sql/align_pairwise_ksw2_splice.test
+# group: [sql]
+
+require miint
+
+###############################################################################
+# align_pairwise_ksw2_splice_score — error handling
+###############################################################################
+
+# Missing args
+statement error
+SELECT align_pairwise_ksw2_splice_score('ACGT');
+----
+
+# Invalid: match=0
+statement error
+SELECT align_pairwise_ksw2_splice_score('ACGT', 'ACGT', 0, 4, 6, 2, 24, 9);
+----
+Invalid Input Error
+
+# Invalid: noncan negative
+statement error
+SELECT align_pairwise_ksw2_splice_score('ACGT', 'ACGT', 2, 4, 6, 2, 24, -1);
+----
+Invalid Input Error
+
+# Invalid: gap_open2 negative
+statement error
+SELECT align_pairwise_ksw2_splice_score('ACGT', 'ACGT', 2, 4, 6, 2, -1, 9);
+----
+Invalid Input Error
+
+###############################################################################
+# align_pairwise_ksw2_splice_score — basic functionality
+###############################################################################
+
+# Identical -> 4 * match(2) = 8
+query I
+SELECT align_pairwise_ksw2_splice_score('ACGT', 'ACGT');
+----
+8
+
+# Single mismatch -> 3*match - mismatch = 2
+query I
+SELECT align_pairwise_ksw2_splice_score('ACGT', 'ACAT');
+----
+2
+
+# NULL -> NULL
+query I
+SELECT align_pairwise_ksw2_splice_score(NULL, 'ACGT') IS NULL;
+----
+true
+
+# Empty/empty -> 0
+query I
+SELECT align_pairwise_ksw2_splice_score('', '');
+----
+0
+
+# All-deletion of length 4: first affine penalty = -(6 + 4*2) = -14
+query I
+SELECT align_pairwise_ksw2_splice_score('', 'ACGT');
+----
+-14
+
+# 8-arg explicit defaults
+query I
+SELECT align_pairwise_ksw2_splice_score('ACGT', 'ACGT', 2, 4, 6, 2, 24, 9);
+----
+8
+
+# 9-arg with explicit zdrop
+query I
+SELECT align_pairwise_ksw2_splice_score('ACGT', 'ACGT', 2, 4, 6, 2, 24, 9, -1);
+----
+8
+
+# Table usage
+statement ok
+CREATE TABLE seqs AS SELECT * FROM (VALUES
+    ('s1', 'ACGT', 'ACGT'),
+    ('s2', 'ACGT', 'ACAT')
+) AS t(name, query, subject);
+
+query IT
+SELECT name, align_pairwise_ksw2_splice_score(query, subject) FROM seqs ORDER BY name;
+----
+s1	8
+s2	2
+
+###############################################################################
+# align_pairwise_ksw2_splice_cigar
+###############################################################################
+
+query IT
+SELECT (align_pairwise_ksw2_splice_cigar('ACGT', 'ACGT')).score,
+       (align_pairwise_ksw2_splice_cigar('ACGT', 'ACGT')).cigar;
+----
+8	4M
+
+query IT
+SELECT (align_pairwise_ksw2_splice_cigar('ACGT', 'ACAT')).score,
+       (align_pairwise_ksw2_splice_cigar('ACGT', 'ACAT')).cigar;
+----
+2	4M
+
+query I
+SELECT align_pairwise_ksw2_splice_cigar(NULL, 'ACGT') IS NULL;
+----
+true
+
+###############################################################################
+# align_pairwise_ksw2_splice_full
+###############################################################################
+
+query ITTT
+SELECT (align_pairwise_ksw2_splice_full('ACGT', 'ACGT')).score,
+       (align_pairwise_ksw2_splice_full('ACGT', 'ACGT')).cigar,
+       (align_pairwise_ksw2_splice_full('ACGT', 'ACGT')).query_aligned,
+       (align_pairwise_ksw2_splice_full('ACGT', 'ACGT')).subject_aligned;
+----
+8	4M	ACGT	ACGT
+
+query I
+SELECT align_pairwise_ksw2_splice_full(NULL, 'ACGT') IS NULL;
+----
+true
+
+###############################################################################
+# Intron-skipping (N op) end-to-end
+#
+# Construct a query of two contiguous 12bp "exons" and a subject where those exons
+# are separated by a 104bp canonical-splice intron (GT…AG with 100 Cs between).
+# With default splice penalties (gap_open=6, gap_extend=2 vs. gap_open2=24, noncan=0
+# for canonical), the kernel prefers a single intron skip over a 104bp deletion:
+#   intron-open cost           = gap_open2 + noncan = 24 + 0 = 24
+#   pure-deletion cost (104bp) = gap_open + 104*gap_extend = 6 + 208 = 214
+# Expected CIGAR is "12M104N12M" and score = 24 matches * 2 - 24 = 24.
+###############################################################################
+
+query IT
+WITH t AS (
+    SELECT 'ACGTACGTACGT' || 'TTTTCCCCAAAA' AS q,
+           'ACGTACGTACGT' || 'GT' || repeat('C', 100) || 'AG' || 'TTTTCCCCAAAA' AS s
+)
+SELECT (align_pairwise_ksw2_splice_cigar(q, s)).score,
+       (align_pairwise_ksw2_splice_cigar(q, s)).cigar
+FROM t;
+----
+24	12M104N12M
+
+# Reconstructed aligned-subject must contain dashes for every position skipped by
+# the N op (104 of them), preserving alignment length = subject length.
+query II
+WITH t AS (
+    SELECT 'ACGTACGTACGT' || 'TTTTCCCCAAAA' AS q,
+           'ACGTACGTACGT' || 'GT' || repeat('C', 100) || 'AG' || 'TTTTCCCCAAAA' AS s,
+           (align_pairwise_ksw2_splice_full(
+               'ACGTACGTACGT' || 'TTTTCCCCAAAA',
+               'ACGTACGTACGT' || 'GT' || repeat('C', 100) || 'AG' || 'TTTTCCCCAAAA'
+           )).query_aligned AS qa
+)
+SELECT length(qa), length(qa) - length(replace(qa, '-', ''))
+FROM t;
+----
+128	104
+
+# Counter-test: same inputs under the extz (non-splice) backend collapse to a
+# straight deletion (no N op possible) and score much worse — confirms the N op
+# we saw above comes specifically from splice-aware decoding, not coincidence.
+query I
+WITH t AS (
+    SELECT 'ACGTACGTACGT' || 'TTTTCCCCAAAA' AS q,
+           'ACGTACGTACGT' || 'GT' || repeat('C', 100) || 'AG' || 'TTTTCCCCAAAA' AS s
+)
+SELECT strpos((align_pairwise_ksw2_cigar(q, s)).cigar, 'N') > 0
+FROM t;
+----
+false

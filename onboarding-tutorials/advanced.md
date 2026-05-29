@@ -452,7 +452,7 @@ et al., 2023):
 
 ```sql
 SELECT
-    align_pairwise_full(
+    align_pairwise_wfa2_full(
         substring(sequence1, 1565200 - 533, 1541),
         substring(sequence1, 3941808, 1541)
     ).score AS wfa2_penalty

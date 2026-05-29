@@ -61,7 +61,10 @@
 #include <align_sortmerna_rrna.hpp>
 #endif
 #include <deblur_table_function.hpp>
-#include <align_pairwise_functions.hpp>
+#include <align_pairwise_wfa2_functions.hpp>
+#include <align_pairwise_ksw2_functions.hpp>
+#include <align_pairwise_ksw2_dual_affine_functions.hpp>
+#include <align_pairwise_ksw2_splice_functions.hpp>
 #include <extract_linked_amplicon.hpp>
 #include <match_short_barcodes.hpp>
 #include <compute_pileup.hpp>
@@ -292,9 +295,22 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterUnifracFaithPD(loader);
 #endif
 
-	AlignPairwiseScoreFunction::Register(loader);
-	AlignPairwiseCigarFunction::Register(loader);
-	AlignPairwiseFullFunction::Register(loader);
+	AlignPairwiseWfa2ScoreFunction::Register(loader);
+	AlignPairwiseWfa2CigarFunction::Register(loader);
+	AlignPairwiseWfa2FullFunction::Register(loader);
+
+	AlignPairwiseKsw2ScoreFunction::Register(loader);
+	AlignPairwiseKsw2CigarFunction::Register(loader);
+	AlignPairwiseKsw2FullFunction::Register(loader);
+
+	AlignPairwiseKsw2DualAffineScoreFunction::Register(loader);
+	AlignPairwiseKsw2DualAffineCigarFunction::Register(loader);
+	AlignPairwiseKsw2DualAffineFullFunction::Register(loader);
+
+	AlignPairwiseKsw2SpliceScoreFunction::Register(loader);
+	AlignPairwiseKsw2SpliceCigarFunction::Register(loader);
+	AlignPairwiseKsw2SpliceFullFunction::Register(loader);
+
 	ExtractLinkedAmpliconFunction::Register(loader);
 	MatchShortBarcodesTableFunction::Register(loader);
 	ComputePileupTableFunction::Register(loader);

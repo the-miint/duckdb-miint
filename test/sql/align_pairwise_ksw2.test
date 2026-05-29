@@ -1,0 +1,182 @@
+# name: test/sql/align_pairwise_ksw2.test
+# group: [sql]
+
+require miint
+
+###############################################################################
+# align_pairwise_ksw2_score — error handling
+###############################################################################
+
+# Missing args
+statement error
+SELECT align_pairwise_ksw2_score('ACGT');
+----
+
+# Invalid penalties: match=0
+statement error
+SELECT align_pairwise_ksw2_score('ACGT', 'ACGT', 0, 4, 6, 2);
+----
+Invalid Input Error
+
+# Invalid penalties: mismatch=0
+statement error
+SELECT align_pairwise_ksw2_score('ACGT', 'ACGT', 2, 0, 6, 2);
+----
+Invalid Input Error
+
+# Invalid penalties: negative gap_extend
+statement error
+SELECT align_pairwise_ksw2_score('ACGT', 'ACGT', 2, 4, 6, -1);
+----
+Invalid Input Error
+
+###############################################################################
+# align_pairwise_ksw2_score — basic functionality (positive-score semantics)
+###############################################################################
+
+# Identical sequences -> 4 * match(2) = 8
+query I
+SELECT align_pairwise_ksw2_score('ACGT', 'ACGT');
+----
+8
+
+# Single mismatch -> 3*match(2) - mismatch(4) = 6 - 4 = 2
+query I
+SELECT align_pairwise_ksw2_score('ACGT', 'ACAT');
+----
+2
+
+# NULL input -> NULL
+query I
+SELECT align_pairwise_ksw2_score(NULL, 'ACGT') IS NULL;
+----
+true
+
+query I
+SELECT align_pairwise_ksw2_score('ACGT', NULL) IS NULL;
+----
+true
+
+# Empty sequences -> 0
+query I
+SELECT align_pairwise_ksw2_score('', '');
+----
+0
+
+# All-insertion: -(gap_open + 4*gap_extend) = -(6 + 8) = -14
+query I
+SELECT align_pairwise_ksw2_score('ACGT', '');
+----
+-14
+
+query I
+SELECT align_pairwise_ksw2_score('', 'ACGT');
+----
+-14
+
+# Custom penalties (6-arg): match=1
+query I
+SELECT align_pairwise_ksw2_score('ACGT', 'ACGT', 1, 4, 6, 2);
+----
+4
+
+# Advanced (8-arg) with bandwidth=-1, zdrop=-1 matches the default behavior
+query I
+SELECT align_pairwise_ksw2_score('ACGT', 'ACGT', 2, 4, 6, 2, -1, -1);
+----
+8
+
+# Table usage
+statement ok
+CREATE TABLE seqs AS SELECT * FROM (VALUES
+    ('s1', 'ACGT', 'ACGT'),
+    ('s2', 'ACGT', 'ACAT')
+) AS t(name, query, subject);
+
+query IT
+SELECT name, align_pairwise_ksw2_score(query, subject) FROM seqs ORDER BY name;
+----
+s1	8
+s2	2
+
+###############################################################################
+# align_pairwise_ksw2_cigar
+###############################################################################
+
+# Identical -> 4M (KSW2 does not distinguish = from X)
+query IT
+SELECT (align_pairwise_ksw2_cigar('ACGT', 'ACGT')).score,
+       (align_pairwise_ksw2_cigar('ACGT', 'ACGT')).cigar;
+----
+8	4M
+
+# Single mismatch -> still 4M, score 2
+query IT
+SELECT (align_pairwise_ksw2_cigar('ACGT', 'ACAT')).score,
+       (align_pairwise_ksw2_cigar('ACGT', 'ACAT')).cigar;
+----
+2	4M
+
+# NULL -> NULL
+query I
+SELECT align_pairwise_ksw2_cigar(NULL, 'ACGT') IS NULL;
+----
+true
+
+# Custom penalties (6-arg)
+query IT
+SELECT (align_pairwise_ksw2_cigar('ACGT', 'ACAT', 1, 4, 6, 2)).score,
+       (align_pairwise_ksw2_cigar('ACGT', 'ACAT', 1, 4, 6, 2)).cigar;
+----
+-1	4M
+
+###############################################################################
+# align_pairwise_ksw2_full
+###############################################################################
+
+# Identical
+query ITTT
+SELECT (align_pairwise_ksw2_full('ACGT', 'ACGT')).score,
+       (align_pairwise_ksw2_full('ACGT', 'ACGT')).cigar,
+       (align_pairwise_ksw2_full('ACGT', 'ACGT')).query_aligned,
+       (align_pairwise_ksw2_full('ACGT', 'ACGT')).subject_aligned;
+----
+8	4M	ACGT	ACGT
+
+# Single mismatch -> aligned seqs match originals (no gaps)
+query TT
+SELECT (align_pairwise_ksw2_full('ACGT', 'ACAT')).query_aligned,
+       (align_pairwise_ksw2_full('ACGT', 'ACAT')).subject_aligned;
+----
+ACGT	ACAT
+
+# NULL -> NULL
+query I
+SELECT align_pairwise_ksw2_full(NULL, 'ACGT') IS NULL;
+----
+true
+
+# Insertion -> '-' appears in subject_aligned
+query I
+SELECT (align_pairwise_ksw2_full('ACGGT', 'ACGT')).subject_aligned LIKE '%-%';
+----
+true
+
+# Deletion -> '-' appears in query_aligned
+query I
+SELECT (align_pairwise_ksw2_full('ACGT', 'ACGGT')).query_aligned LIKE '%-%';
+----
+true
+
+# Indel -> aligned lengths equal
+query I
+SELECT length((align_pairwise_ksw2_full('ACGT', 'AGT')).query_aligned) =
+       length((align_pairwise_ksw2_full('ACGT', 'AGT')).subject_aligned);
+----
+true
+
+# Custom penalties (6-arg) round-trip via _full
+query I
+SELECT (align_pairwise_ksw2_full('ACGT', 'ACGT', 3, 4, 6, 2)).score;
+----
+12

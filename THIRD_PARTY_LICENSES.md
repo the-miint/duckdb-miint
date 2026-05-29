@@ -91,7 +91,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## minimap2
 
 Sequence-to-reference alignment. Used by `align_minimap2`,
-`align_minimap2_sharded`, and `save_minimap2_index`.
+`align_minimap2_sharded`, and `save_minimap2_index`. The bundled KSW2 alignment
+library (`ksw2_*` sources, MIT-licensed) is the backend for `align_pairwise_ksw2_*`,
+`align_pairwise_ksw2_dual_affine_*`, and `align_pairwise_ksw2_splice_*`.
 
 - Repository: https://github.com/lh3/minimap2
 - License: MIT
@@ -132,7 +134,7 @@ SOFTWARE.
 ## WFA2-lib
 
 Pairwise sequence alignment using the Wavefront Alignment Algorithm (WFA).
-Used by `align_pairwise_score`, `align_pairwise_cigar`, `align_pairwise_full`,
+Used by `align_pairwise_wfa2_score`, `align_pairwise_wfa2_cigar`, `align_pairwise_wfa2_full`,
 `uchime_ref`, and `uchime_denovo`.
 
 - Repository: https://github.com/smarco/WFA2-lib

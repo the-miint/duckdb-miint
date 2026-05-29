@@ -1072,7 +1072,11 @@ set(EXTENSION_SOURCES
     src/SFFReader.cpp
     src/read_sequences_sff.cpp
     src/WFA2Aligner.cpp
-    src/align_pairwise_functions.cpp
+    src/align_pairwise_wfa2_functions.cpp
+    src/KSW2Aligner.cpp
+    src/align_pairwise_ksw2_functions.cpp
+    src/align_pairwise_ksw2_dual_affine_functions.cpp
+    src/align_pairwise_ksw2_splice_functions.cpp
     src/rype_classify.cpp
     src/rype_extract.cpp
     src/MsBinaryDecoder.cpp
@@ -1206,7 +1210,8 @@ target_compile_definitions(${EXTENSION_NAME} PRIVATE RYPE_ARROW
     RYPE_GIT_VERSION="${RYPE_GIT_VERSION}"
     MAFFT_GIT_VERSION="${MAFFT_GIT_VERSION}"
     ABPOA_GIT_VERSION="${ABPOA_GIT_VERSION}"
-    $<$<BOOL:${MIINT_HAS_JEMALLOC}>:MIINT_USE_JEMALLOC>)
+    $<$<BOOL:${MIINT_HAS_JEMALLOC}>:MIINT_USE_JEMALLOC>
+    HAVE_KALLOC)
 if(MIINT_ENABLE_VSEARCH)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_VSEARCH
         VSEARCH_GIT_VERSION="${VSEARCH_GIT_VERSION}")
@@ -1328,7 +1333,8 @@ target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE RYPE_ARROW
     RYPE_GIT_VERSION="${RYPE_GIT_VERSION}"
     MAFFT_GIT_VERSION="${MAFFT_GIT_VERSION}"
     ABPOA_GIT_VERSION="${ABPOA_GIT_VERSION}"
-    $<$<BOOL:${MIINT_HAS_JEMALLOC}>:MIINT_USE_JEMALLOC>)
+    $<$<BOOL:${MIINT_HAS_JEMALLOC}>:MIINT_USE_JEMALLOC>
+    HAVE_KALLOC)
 if(MIINT_ENABLE_VSEARCH)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_VSEARCH
         VSEARCH_GIT_VERSION="${VSEARCH_GIT_VERSION}")
@@ -1499,6 +1505,8 @@ set(TEST_SOURCES
     test/cpp/test_SFFReader.cpp
     src/WFA2Aligner.cpp
     test/cpp/test_WFA2Aligner.cpp
+    src/KSW2Aligner.cpp
+    test/cpp/test_KSW2Aligner.cpp
     src/MsBinaryDecoder.cpp
     test/cpp/test_MsBinaryDecoder.cpp
     src/MzMLReader.cpp
@@ -1679,3 +1687,4 @@ if(MIINT_HAS_JEMALLOC)
     target_sources(tests PRIVATE src/mm_alloc_stubs.c)
     target_compile_definitions(tests PRIVATE MIINT_USE_JEMALLOC)
 endif()
+target_compile_definitions(tests PRIVATE HAVE_KALLOC)

@@ -9,7 +9,7 @@
     { "name": "rocksdb", "platform": "!emscripten" }
   ],
   "vcpkg-configuration": {
-    "overlay-ports": ["./extension-ci-tools/vcpkg_ports"],
+    "overlay-ports": ["./ports", "./extension-ci-tools/vcpkg_ports"],
     "overlay-triplets": ["./custom-triplets", "./extension-ci-tools/toolchains"]
   }
 }
