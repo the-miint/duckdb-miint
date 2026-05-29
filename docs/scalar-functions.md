@@ -12,7 +12,7 @@ Scalar functions for alignment analysis and sequence processing.
 - [`mask_dust`](#mask_dustsequence-hardmaskfalse) - DUST low-complexity masking
 - [QC functions](qc.md) - Adapter / polyG / polyX / quality trimming and per-read filtering (fastp port)
 - [`merge_pairs_vsearch`](#merge_pairsfwd_seq-fwd_qual-rev_seq-rev_qual-options) - Paired-end read merging
-- [`extract_linked_amplicon`](#extract_linked_ampliconseq-qual-anchor5-anchor3-min_len-max_len-error_rate) - Cut out the interior between two flanking adapters (cutadapt `-g X...Y` equivalent)
+- [`extract_linked_amplicon`](#extract_linked_ampliconseq-qual-anchor5-anchor3-min_len-max_len-error_rate-min_overlap) - Cut out the interior between two flanking adapters (cutadapt `-g X...Y` equivalent; `^`/`$` sigils select anchored mode)
 - [`phylogeny_fasttree_available`](#phylogeny_fasttree_available) - Probe for the gpl-boundary daemon at runtime
 - [`install_gpl_boundary`](#install_gpl_boundary) - Download and install the gpl-boundary binary into miint's cache
 
@@ -344,7 +344,7 @@ WHERE m.result.merged;
 - Input length guard: throws if forward + reverse > 9,999 bases (vsearch fixed buffer)
 - Quality inputs and outputs use numeric Phred (LIST(UTINYINT)), matching `read_fastx` output
 
-## `extract_linked_amplicon(seq, qual, anchor5, anchor3, [min_len, max_len, error_rate])`
+## `extract_linked_amplicon(seq, qual, anchor5, anchor3, [min_len, max_len, error_rate, [min_overlap]])`
 
 Cut out the interior of a sequence located between two flanking adapter
 anchors. Equivalent to cutadapt's `-g ANCHOR5...ANCHOR3` mode but as a SQL
@@ -363,14 +363,61 @@ behavior and is essential for real primer sets with degenerate positions.
 Designed for amplicon prep workflows: UMI / index extraction, primer
 trimming, locus extraction from long-read FASTQ.
 
+### Anchored vs non-anchored mode (cutadapt sigils)
+
+By default the function uses cutadapt's **non-anchored** semantics: each
+anchor may match anywhere within its search window, and additionally the
+5' anchor's 5' end may hang off the read's 5' edge (and the 3' anchor's 3'
+end may hang off the read's 3' edge) — the partial overlap requires at
+least `min_overlap` anchor bases to align. This is essential for long-read
+amplicon protocols where edge clipping (e.g., PacBio CCS) leaves primers
+truncated at the read termini.
+
+Prefix `anchor5` with `^` and/or suffix `anchor3` with `$` to switch the
+respective end to **anchored** mode, matching cutadapt's anchored-adapter
+syntax. The sigil is stripped per-row before the anchor sequence is used,
+so the anchor itself remains pure IUPAC bases.
+
+| Sigil pattern | Cutadapt equivalent | Meaning |
+|---|---|---|
+| `extract_linked_amplicon(..., 'X', 'Y', ...)` | `-g X...Y` | Both non-anchored (default) — partial overlap allowed at the read's outer edges |
+| `extract_linked_amplicon(..., '^X', 'Y', ...)` | `-g ^X...Y` | 5' anchored: `X` must match end-to-end inside the window |
+| `extract_linked_amplicon(..., 'X', 'Y$', ...)` | `-g X...Y$` | 3' anchored: `Y` must match end-to-end inside the remainder |
+| `extract_linked_amplicon(..., '^X', 'Y$', ...)` | `-g ^X...Y$` | Both anchored: no edge-overlap recovery |
+
+Within each call, anchored matching is tried first; the partial-overlap
+fallback runs only when no in-window match is found. This deterministically
+prefers full anchor matches over partial-overlap matches (cutadapt's
+default behavior) and avoids WFA2 tie-breaks that would otherwise pull
+the alignment toward maximal free trim.
+
+Only the first `^` on `anchor5` and the last `$` on `anchor3` are recognized
+as sigils — they are stripped exactly once. Repeated sigils (e.g., `'^^X'`)
+leave the second character in place and the result is searched literally.
+Post-strip anchor characters must be IUPAC bases (`[ACGTURYSWKMBDHVN]` plus
+DNA/RNA case-insensitive); other characters will simply never match and the
+row will return NULL. If you are driving anchors from a column whose values
+may include a literal `^` or `$` as part of the base sequence (non-standard
+but possible in dirty data), strip such characters at the call site before
+passing them in.
+
+> **Migration note (changed in this release).** Before this release the
+> function silently behaved like cutadapt's anchored-both `-g ^X...Y$` mode
+> regardless of input — reads with primers partially clipped off the read
+> edges returned NULL. With this release the default is cutadapt's
+> non-anchored `-g X...Y` mode (matching the docs as written), so calls
+> with no sigil will now match a class of reads they previously rejected.
+> If you were relying on the old NULL-as-quality-signal behavior, restore
+> it by switching to `'^X', 'Y$'` (a one-line per-call-site change).
+
 **Parameters (4-arg form, default tuning):**
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `seq` | VARCHAR | The full read sequence |
 | `qual` | LIST(UTINYINT) | Per-base Phred qual (no ASCII offset; matches `read_fastx`) |
-| `anchor5` | VARCHAR | 5' flanking adapter |
-| `anchor3` | VARCHAR | 3' flanking adapter (found in the remainder *after* anchor5) |
+| `anchor5` | VARCHAR | 5' flanking adapter; prefix with `^` to anchor it to the read 5' (cutadapt `-g ^X...`) |
+| `anchor3` | VARCHAR | 3' flanking adapter (found in the remainder *after* anchor5); suffix with `$` to anchor it to the read 3' (cutadapt `-g X...Y$`) |
 
 **Parameters (7-arg form, with tuning):**
 
@@ -381,6 +428,14 @@ Same first 4 plus:
 | `min_len` | BIGINT | 0 | Minimum interior length (rejected as NULL if shorter) |
 | `max_len` | BIGINT | 2³¹−1 | Maximum interior length (rejected as NULL if longer) |
 | `error_rate` | DOUBLE | 0.10 | Per-anchor error budget — used as `ceil(len(anchor) * error_rate)` |
+
+**Parameters (8-arg form, with min_overlap tuning):**
+
+Same first 7 plus:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `min_overlap` | BIGINT | 3 | Minimum anchor bases required to align in non-anchored mode. Matches cutadapt's `-O`. Floors how short a partial-overlap-at-edge match may be; lower values increase recovery of edge-clipped reads at the cost of more false positives on long-read data. Must be `>= 1`; `0` is rejected at bind time because it would let the entire anchor be trimmed for free. Ignored on the side(s) anchored via `^` / `$`. If `min_overlap >= len(anchor)` the partial path silently degenerates to anchored on that side (e.g., a 4-bp degenerate anchor with `min_overlap=10` behaves as `^X`). |
 
 **Returns:** STRUCT with fields:
 
@@ -406,6 +461,25 @@ FROM (
                                    min_len := 18, max_len := 18) AS e
     FROM read_fastx('reads.fq')
 ) WHERE umi IS NOT NULL;
+
+-- Long-read amplicon primer trimming with edge-clip recovery: PacBio CCS
+-- reads often have 4-15 bp clipped off the primer at the read termini.
+-- The default non-anchored mode recovers these reads via partial overlap.
+SELECT read_id,
+       extract_linked_amplicon(sequence1, qual1,
+                               'CCRAMCTGTCTCACGACG',
+                               'CTGAGCCADRATCAAACYCT',
+                               0, 1000, 0.10) AS amp
+FROM read_fastx('reads.fq');
+
+-- Strict mode: require the primer to be fully present at both ends
+-- (replicates cutadapt's `-g ^X...Y$`).
+SELECT read_id,
+       extract_linked_amplicon(sequence1, qual1,
+                               '^CCRAMCTGTCTCACGACG',
+                               'CTGAGCCADRATCAAACYCT$',
+                               0, 1000, 0.10) AS amp
+FROM read_fastx('reads.fq');
 ```
 
 **Behavior:**
@@ -417,6 +491,9 @@ FROM (
   the row throws.
 - A per-thread `WFA2Aligner` is reused across rows via `FunctionLocalState`
   so the DP engine is allocated once per scan, not per row.
+- In non-anchored mode the function makes up to two WFA2 calls per anchor
+  per row (anchored first, partial fallback). Anchored mode (`^X` or `Y$`)
+  and rows whose anchor matches internally use only one call.
 
 ## `phylogeny_fasttree_available()`
 
