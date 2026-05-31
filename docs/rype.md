@@ -2,14 +2,66 @@
 
 [RYpe](https://github.com/biocore/rype) is a minimizer-based sequence classification tool that uses RY-space encoding (purine/pyrimidine) for robust sequence matching. These functions require a RYpe index directory (`.ryxdi`), which contains a Parquet-based inverted index built from reference sequences.
 
-All RYpe functions take a `sequence_table` parameter that references a DuckDB table or view containing sequence data. The table must have a `sequence1` column and an identifier column (default `read_id`).
+Most RYpe functions take a `sequence_table` parameter that references a DuckDB table or view containing sequence data. The table must have a `sequence1` column and an identifier column (default `read_id`). The exception is `rype_index_create`, which *builds* a `.ryxdi` index from a chunked reference table.
 
 ## Table of Contents
 
+- [`rype_index_create`](#rype_index_createchunk_table-output_path-mapping_table-k64-w50-salt6148914691236517205-orienttrue-max_memory0) - Build a `.ryxdi` index from a chunked sequence table
 - [`rype_classify`](#rype_classifyindex_path-sequence_table-id_columnread_id-threshold01-negative_indexpath) - Classify sequences against an index
 - [`rype_log_ratio`](#rype_log_rationumerator_path-denominator_path-sequence_table-id_columnread_id-skip_threshold05) - Log-ratio classification between two single-bucket indices
 - [`rype_extract_minimizer_set`](#rype_extract_minimizer_setsequence_table-k-w-salt6148914691236517205-id_columnread_id) - Extract deduplicated minimizer hash sets
 - [`rype_extract_strand_minimizers`](#rype_extract_strand_minimizerssequence_table-k-w-salt6148914691236517205-id_columnread_id) - Extract minimizers with positions
+
+## `rype_index_create(chunk_table, output_path, [mapping_table], [k=64], [w=50], [salt=6148914691236517205], [orient=true], [max_memory=0])`
+
+Build a RYpe `.ryxdi` index directly from a DuckDB table of chunked reference sequences, without going through the `rype` CLI. The references are supplied in an at-rest *chunked* layout (one row per fixed-size block of a sequence) — the same shape microbiome reference data is stored in for efficient columnar storage. Chunks belonging to a feature are reassembled, in order, before minimizers are extracted, so minimizers spanning chunk boundaries are computed correctly.
+
+**Parameters:**
+- `chunk_table` (VARCHAR): Name of a DuckDB table or view of chunked sequences. Must have columns:
+  - `feature_idx` (BIGINT): identifier of the reference sequence a chunk belongs to
+  - `chunk_index` (INTEGER): 0-based block order within the feature
+  - `chunk_data` (VARCHAR or BLOB): the sequence bytes for the block
+- `output_path` (VARCHAR): Path of the `.ryxdi` index directory to create
+- `mapping_table` (VARCHAR, optional): Name of a table or view mapping each feature to a bucket. Must have columns `feature_idx` (BIGINT) and `bucket_name` (VARCHAR), with each `feature_idx` appearing at most once. If omitted, every feature is placed into a single bucket named `unnamed-bucket`
+- `k` (INTEGER, optional, default 64): K-mer size. Must be 16, 32, or 64 (constrained by RY-space 1-bit encoding fitting in uint64)
+- `w` (INTEGER, optional, default 50): Minimizer window size. Must be >= 1
+- `salt` (UBIGINT, optional, default 6148914691236517205): Hash salt. An index can only be classified against with matching `k`, `w`, and `salt`
+- `orient` (BOOLEAN, optional, default true): Orient sequences within each bucket for better overlap before extraction
+- `max_memory` (BIGINT, optional, default 0): Approximate memory budget in bytes for the build; 0 auto-detects available memory
+
+**Output schema:** a single status row.
+- `output_path` (VARCHAR): The path of the index that was created (echoes the input)
+- `k` (INTEGER): The k-mer size used
+- `w` (INTEGER): The window size used
+- `status` (VARCHAR): `ok` on success
+
+**Behavior:**
+- A feature's chunks must be contiguous and form an ascending, 0-based, gap-free `chunk_index` sequence; the function reads them ordered by `(feature_idx, chunk_index)`.
+- The large sequence/chunk data is streamed (never fully materialized); the small bucket mapping is read into memory.
+- Inputs are validated at bind time: a missing table, a missing required column, `k` not in {16, 32, 64}, or `w < 1` all raise an error before any build work begins.
+- A duplicate `feature_idx` in `mapping_table` is rejected.
+- The index directory is written **non-atomically**: if the build fails partway, a partial, unusable directory may remain at `output_path` and should be discarded. Build to a temporary path and move it into place if atomicity is required.
+- The resulting `.ryxdi` is usable by `rype_classify`, `rype_log_ratio`, and the other RYpe functions.
+
+**Examples:**
+```sql
+-- Chunked reference table (e.g. genomes stored as 64 KB blocks)
+--   chunks(feature_idx BIGINT, chunk_index INTEGER, chunk_data VARCHAR)
+-- and a feature -> bucket mapping
+--   refmap(feature_idx BIGINT, bucket_name VARCHAR)
+SELECT * FROM rype_index_create('chunks', 'bacteria.ryxdi', mapping_table := 'refmap');
+
+-- Build with a larger k-mer and custom window
+SELECT * FROM rype_index_create('chunks', 'bacteria.ryxdi', mapping_table := 'refmap', k := 64, w := 50);
+
+-- No mapping: all features go into a single 'unnamed-bucket'
+SELECT * FROM rype_index_create('chunks', 'wholeset.ryxdi');
+
+-- Build, then immediately classify reads against the new index
+SELECT * FROM rype_index_create('chunks', 'bacteria.ryxdi', mapping_table := 'refmap');
+CREATE TABLE reads AS SELECT * FROM read_fastx('reads.fastq');
+SELECT * FROM rype_classify('bacteria.ryxdi', 'reads');
+```
 
 ## `rype_classify(index_path, sequence_table, [id_column='read_id'], [threshold=0.1], [negative_index=path])`
 

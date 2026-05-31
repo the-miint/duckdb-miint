@@ -76,15 +76,17 @@ inline size_t SampleAvgReadLength(Connection &conn, const std::string &table_quo
 	return fallback;
 }
 
-//! Validate that a table/view exists and has the required columns for RYpe functions.
-//! Returns true if the optional "sequence2" column is present (used by rype_classify
-//! for paired-end reads). All RYpe functions require id_column and "sequence1".
-inline bool ValidateSequenceTable(ClientContext &context, const std::string &table_name, const std::string &id_column) {
+//! Look up a table or view by name and return its column names, lowercased.
+//! Throws BinderException if the entry does not exist or is not a table/view.
+//! `role` names the entry in the "does not exist" message (e.g. "Table or view",
+//! "chunk table"), so callers can produce role-specific diagnostics.
+inline vector<string> GetTableColumnNamesLower(ClientContext &context, const std::string &table_name,
+                                               const std::string &role = "Table or view") {
 	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
 	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
 
 	if (!entry) {
-		throw BinderException("Table or view '%s' does not exist", table_name);
+		throw BinderException("%s '%s' does not exist", role, table_name);
 	}
 
 	vector<string> col_names;
@@ -104,6 +106,14 @@ inline bool ValidateSequenceTable(ClientContext &context, const std::string &tab
 	} else {
 		throw BinderException("'%s' is not a table or view", table_name);
 	}
+	return col_names;
+}
+
+//! Validate that a table/view exists and has the required columns for RYpe functions.
+//! Returns true if the optional "sequence2" column is present (used by rype_classify
+//! for paired-end reads). All RYpe functions require id_column and "sequence1".
+inline bool ValidateSequenceTable(ClientContext &context, const std::string &table_name, const std::string &id_column) {
+	auto col_names = GetTableColumnNamesLower(context, table_name);
 
 	auto id_col_lower = StringUtil::Lower(id_column);
 	bool has_id = std::find(col_names.begin(), col_names.end(), id_col_lower) != col_names.end();
@@ -118,6 +128,20 @@ inline bool ValidateSequenceTable(ClientContext &context, const std::string &tab
 	}
 
 	return has_seq2;
+}
+
+//! Validate that a table/view exists and contains every column in
+//! `required_columns` (case-insensitive). `role` names the table in error
+//! messages (e.g. "chunk table", "mapping table"). Throws BinderException on a
+//! missing table or a missing required column.
+inline void ValidateTableHasColumns(ClientContext &context, const std::string &table_name,
+                                    const std::vector<std::string> &required_columns, const std::string &role) {
+	auto col_names = GetTableColumnNamesLower(context, table_name, role);
+	for (const auto &req : required_columns) {
+		if (std::find(col_names.begin(), col_names.end(), StringUtil::Lower(req)) == col_names.end()) {
+			throw BinderException("%s '%s' is missing required column '%s'", role, table_name, req);
+		}
+	}
 }
 
 // ============================================================================

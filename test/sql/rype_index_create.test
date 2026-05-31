@@ -1,0 +1,216 @@
+# name: test/sql/rype_index_create.test
+# description: Test rype_index_create table function (build a .ryxdi index from a chunked sequence table)
+# group: [sql]
+
+#
+# rype_index_create builds a RYpe .ryxdi index from an at-rest chunked sequence
+# table (Qiita reference_sequence_chunks schema: feature_idx BIGINT,
+# chunk_index INTEGER, chunk_data VARCHAR) plus an optional feature->bucket
+# mapping. It wraps the rype FFI rype_index_build_from_arrow.
+#
+# k=16, w=8 mirror the known-good config used by data/rype/test.ryxdi.
+
+require miint
+
+# =============================================================================
+# Setup: a chunked sequence table with DISTINCT, non-repetitive chunks.
+#  - feature 1 (bucket_alpha): two DIFFERENT 64 bp chunks (chunk 0 then chunk 1)
+#  - feature 2 (bucket_beta):  one 64 bp chunk
+# The two chunks of feature 1 are intentionally different sequences so that
+# concatenation order is observable: minimizers spanning the chunk-0/chunk-1
+# boundary exist only for the correct ordering.
+# =============================================================================
+
+statement ok
+CREATE TABLE chunks AS SELECT * FROM (VALUES
+    (1::BIGINT, 0::INTEGER, 'TTGCACGATCAGGTACCGATTACAGCATTGGCCAAGTCATGCATGGATCCGATCGTTAACGGAT'),
+    (1::BIGINT, 1::INTEGER, 'AACCGGTTAGGCTACGATCGTACGATTCAGGCTAACGTACCGATTGCATGCATTACGGATCCGA'),
+    (2::BIGINT, 0::INTEGER, 'GATTACAGGCATCAGTCAGTGGCCAATTGGCCAATTACGCGCGATATCGCGTATATGCATGCAT')
+) AS t(feature_idx, chunk_index, chunk_data);
+
+statement ok
+CREATE TABLE mapping AS SELECT * FROM (VALUES
+    (1::BIGINT, 'bucket_alpha'),
+    (2::BIGINT, 'bucket_beta')
+) AS t(feature_idx, bucket_name);
+
+# Query sequences:
+#  - q_alpha_correct: feature 1's chunks concatenated in order (0 then 1)
+#  - q_alpha_swapped: feature 1's chunks concatenated in the WRONG order (1 then 0)
+#  - q_beta:          feature 2's sequence
+#  - q_unrelated:     a low-complexity sequence sharing no minimizers with either
+statement ok
+CREATE TABLE queries AS SELECT * FROM (VALUES
+    ('q_alpha_correct', 'TTGCACGATCAGGTACCGATTACAGCATTGGCCAAGTCATGCATGGATCCGATCGTTAACGGATAACCGGTTAGGCTACGATCGTACGATTCAGGCTAACGTACCGATTGCATGCATTACGGATCCGA'),
+    ('q_alpha_swapped', 'AACCGGTTAGGCTACGATCGTACGATTCAGGCTAACGTACCGATTGCATGCATTACGGATCCGATTGCACGATCAGGTACCGATTACAGCATTGGCCAAGTCATGCATGGATCCGATCGTTAACGGAT'),
+    ('q_beta',          'GATTACAGGCATCAGTCAGTGGCCAATTGGCCAATTACGCGCGATATCGCGTATATGCATGCAT'),
+    ('q_unrelated',     'CCCCCCCCCCCCCCCCAAAAAAAAAAAAAAAAGGGGGGGGGGGGGGGGTTTTTTTTTTTTTTTTCCCCCCCCCCCCCCCC')
+) AS t(read_id, sequence1);
+
+# =============================================================================
+# Build the index — returns one status row (output_path, k, w, status).
+# =============================================================================
+
+query IIT
+SELECT k, w, status
+FROM rype_index_create('chunks', '__TEST_DIR__/built.ryxdi', mapping_table := 'mapping', k := 16, w := 8);
+----
+16	8	ok
+
+# =============================================================================
+# Round-trip correctness: classify the references against the freshly built index.
+# =============================================================================
+
+# A query equal to feature 1's chunks concatenated IN ORDER perfectly self-matches
+# (score 1.0). feature 1 is a TWO-chunk feature, so this can only happen if the
+# build reassembled chunk 0 then chunk 1 before minimizer extraction.
+query I
+SELECT score = 1.0 AS alpha_perfect
+FROM rype_classify('__TEST_DIR__/built.ryxdi', 'queries', threshold := 0.05)
+WHERE read_id = 'q_alpha_correct' AND bucket_name = 'bucket_alpha';
+----
+true
+
+# The SAME chunks concatenated in the WRONG order score STRICTLY LESS than 1.0:
+# the boundary-spanning minimizers differ. This is the negative control proving
+# the 1.0 assertion above is meaningful — order matters, so a build that
+# concatenated chunks out of order would NOT have produced a 1.0 self-match.
+query I
+SELECT score < 1.0 AS swap_imperfect
+FROM rype_classify('__TEST_DIR__/built.ryxdi', 'queries', threshold := 0.05)
+WHERE read_id = 'q_alpha_swapped' AND bucket_name = 'bucket_alpha';
+----
+true
+
+# Single-chunk feature self-matches perfectly.
+query I
+SELECT score = 1.0 AS beta_perfect
+FROM rype_classify('__TEST_DIR__/built.ryxdi', 'queries', threshold := 0.05)
+WHERE read_id = 'q_beta' AND bucket_name = 'bucket_beta';
+----
+true
+
+# Discrimination: an unrelated sequence matches NOTHING in the built index
+# (proves the index is not degenerate / matching everything).
+query I
+SELECT COUNT(*) AS unrelated_hits
+FROM rype_classify('__TEST_DIR__/built.ryxdi', 'queries', threshold := 0.0)
+WHERE read_id = 'q_unrelated';
+----
+0
+
+# Both buckets from the mapping are present in the built index.
+query T
+SELECT DISTINCT bucket_name
+FROM rype_classify('__TEST_DIR__/built.ryxdi', 'queries', threshold := 0.05)
+ORDER BY bucket_name;
+----
+bucket_alpha
+bucket_beta
+
+# =============================================================================
+# Optional mapping: omitting mapping_table puts ALL features into a single
+# bucket named 'unnamed-bucket'.
+# =============================================================================
+
+query IIT
+SELECT k, w, status
+FROM rype_index_create('chunks', '__TEST_DIR__/built_nomap.ryxdi', k := 16, w := 8);
+----
+16	8	ok
+
+# Every classified hit lands in the one synthesized bucket.
+query T
+SELECT DISTINCT bucket_name
+FROM rype_classify('__TEST_DIR__/built_nomap.ryxdi', 'queries', threshold := 0.05)
+ORDER BY bucket_name;
+----
+unnamed-bucket
+
+# Both reference features remain reachable: each self-matches perfectly (1.0)
+# within the single bucket (the bucket holds the union of all features' minimizers).
+query I
+SELECT COUNT(*) AS perfect_selfmatches
+FROM rype_classify('__TEST_DIR__/built_nomap.ryxdi', 'queries', threshold := 0.05)
+WHERE read_id IN ('q_alpha_correct', 'q_beta') AND bucket_name = 'unnamed-bucket' AND score = 1.0;
+----
+2
+
+# Discrimination: an unrelated sequence still matches NOTHING — the single-bucket
+# index is not degenerate (does not collapse into matching everything).
+query I
+SELECT COUNT(*) AS unrelated_hits
+FROM rype_classify('__TEST_DIR__/built_nomap.ryxdi', 'queries', threshold := 0.0)
+WHERE read_id = 'q_unrelated';
+----
+0
+
+# =============================================================================
+# Validation & error handling (fail fast at bind time, before any build work)
+# =============================================================================
+
+# Non-existent chunk table -> clear bind error attributed to the CHUNK table
+# (previously misattributed to "mapping table" because the synthesized mapping
+# query, derived from the chunk table, ran first).
+statement error
+SELECT * FROM rype_index_create('does_not_exist_tbl', '__TEST_DIR__/err.ryxdi');
+----
+chunk table 'does_not_exist_tbl' does not exist
+
+# Chunk table missing a required column.
+statement ok
+CREATE TABLE bad_chunks AS SELECT 1::BIGINT AS feature_idx, 0::INTEGER AS chunk_index;
+
+statement error
+SELECT * FROM rype_index_create('bad_chunks', '__TEST_DIR__/err.ryxdi');
+----
+missing required column 'chunk_data'
+
+statement ok
+DROP TABLE bad_chunks;
+
+# Supplied mapping table missing a required column.
+statement ok
+CREATE TABLE bad_mapping AS SELECT 1::BIGINT AS feature_idx;
+
+statement error
+SELECT * FROM rype_index_create('chunks', '__TEST_DIR__/err.ryxdi', mapping_table := 'bad_mapping');
+----
+missing required column 'bucket_name'
+
+statement ok
+DROP TABLE bad_mapping;
+
+# Invalid k (must be 16, 32, or 64) -> bind error before any build is attempted.
+statement error
+SELECT * FROM rype_index_create('chunks', '__TEST_DIR__/err.ryxdi', mapping_table := 'mapping', k := 17);
+----
+rype_index_create: k must be 16, 32, or 64
+
+# Invalid w (must be >= 1) -> bind error. RYpe itself does NOT reject w <= 0; it
+# would silently build a minimizer-free index that reports success.
+statement error
+SELECT * FROM rype_index_create('chunks', '__TEST_DIR__/err.ryxdi', mapping_table := 'mapping', w := 0);
+----
+rype_index_create: w must be >= 1
+
+# Duplicate feature_idx in a supplied mapping -> runtime error surfaced from rype.
+statement ok
+CREATE TABLE dup_mapping AS SELECT * FROM (VALUES (1::BIGINT, 'a'), (1::BIGINT, 'b')) AS t(feature_idx, bucket_name);
+
+statement error
+SELECT * FROM rype_index_create('chunks', '__TEST_DIR__/err.ryxdi', mapping_table := 'dup_mapping');
+----
+appears multiple times
+
+statement ok
+DROP TABLE dup_mapping;
+
+statement ok
+DROP TABLE queries;
+
+statement ok
+DROP TABLE mapping;
+
+statement ok
+DROP TABLE chunks;
