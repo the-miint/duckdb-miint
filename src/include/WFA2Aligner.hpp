@@ -49,7 +49,15 @@ public:
 	// Semi-global with IUPAC-aware matching. Uses WFA2's lambda callback so
 	// degenerate bases (N, R, Y, ...) match their compatible bases at zero cost.
 	// Returns CIGAR+score only (no reconstructed aligned sequences).
-	std::optional<WFA2CigarResult> align_cigar_semiglobal_iupac(const std::string &query, const std::string &subject);
+	//
+	// text_begin_free / text_end_free cap how many bases of the query (text) may
+	// be trimmed at no cost from each end. Default 0 keeps the query anchored
+	// end-to-end (legacy behavior). Pattern (subject) ends are always free up to
+	// subject.size(); these knobs add free trim on the query side, enabling
+	// cutadapt-style partial-overlap matches where the query's prefix/suffix
+	// hangs off the subject's edge.
+	std::optional<WFA2CigarResult> align_cigar_semiglobal_iupac(const std::string &query, const std::string &subject,
+	                                                            int text_begin_free = 0, int text_end_free = 0);
 
 private:
 	struct Impl;

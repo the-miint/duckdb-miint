@@ -131,7 +131,13 @@ int iupac_match_callback(int pattern_pos, int text_pos, void *args) {
 } // namespace
 
 std::optional<WFA2CigarResult> WFA2Aligner::align_cigar_semiglobal_iupac(const std::string &query,
-                                                                         const std::string &subject) {
+                                                                         const std::string &subject,
+                                                                         int text_begin_free, int text_end_free) {
+	// WFA2 resets its wavefront state on each alignEndsFree call (the library
+	// re-initializes the wavefront allocator internally), so successive calls
+	// on the same aligner instance with different free-gap caps are safe.
+	// extract_linked_amplicon's two-pass anchored-then-partial strategy relies
+	// on this — do not introduce a stateful guard or require per-pass instances.
 	if (query.empty() && subject.empty()) {
 		return WFA2CigarResult {0, ""};
 	}
@@ -140,7 +146,7 @@ std::optional<WFA2CigarResult> WFA2Aligner::align_cigar_semiglobal_iupac(const s
 	                     static_cast<int>(query.size())};
 	auto align_status = impl_->alignment_aligner->alignEndsFree(
 	    iupac_match_callback, &args, static_cast<int>(subject.size()), static_cast<int>(subject.size()),
-	    static_cast<int>(subject.size()), static_cast<int>(query.size()), 0, 0);
+	    static_cast<int>(subject.size()), static_cast<int>(query.size()), text_begin_free, text_end_free);
 	if (align_status != wfa::WFAligner::StatusAlgCompleted) {
 		return std::nullopt;
 	}
