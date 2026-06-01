@@ -435,8 +435,7 @@ static unique_ptr<FunctionData> Bind4Arg(ClientContext &ctx, ScalarFunction &fn,
 	(void)fn;
 	(void)args;
 	LinkedAmpliconBindData::Validate(DEFAULT_MIN_LEN, DEFAULT_MAX_LEN, DEFAULT_ERROR_RATE, DEFAULT_MIN_OVERLAP);
-	return make_uniq<LinkedAmpliconBindData>(DEFAULT_MIN_LEN, DEFAULT_MAX_LEN, DEFAULT_ERROR_RATE,
-	                                         DEFAULT_MIN_OVERLAP);
+	return make_uniq<LinkedAmpliconBindData>(DEFAULT_MIN_LEN, DEFAULT_MAX_LEN, DEFAULT_ERROR_RATE, DEFAULT_MIN_OVERLAP);
 }
 
 static unique_ptr<FunctionData> Bind7Arg(ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
