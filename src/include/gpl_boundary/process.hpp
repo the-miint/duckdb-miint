@@ -96,6 +96,19 @@ public:
 	/// the cached status.
 	int Wait();
 
+	/// Reap the child with a bounded grace period and return a human-readable,
+	/// signal-decoded description of how it terminated:
+	///   - "killed by signal 15 (Terminated)"  — e.g. PR_SET_PDEATHSIG SIGTERM
+	///     firing, or the OOM killer's SIGKILL (9), or a crash (SIGSEGV/SIGABRT)
+	///   - "exited with code 7"
+	///   - "still running after 200ms (no exit yet)" — closed a pipe yet alive
+	///   - "already reaped or unwaitable (...)" — ECHILD: something else waited
+	/// Non-throwing. Idempotent with Wait(): when the child is reaped here the
+	/// status is cached, so the destructor and Wait() won't block again. Used on
+	/// the daemon-death diagnostic paths in Session::Submit so a bare EPIPE
+	/// ("Broken pipe") or stdout-EOF gains the actual cause.
+	std::string ReapAndDescribe(int grace_ms = 200);
+
 private:
 	pid_t pid_ = -1;
 	int stdin_fd_ = -1;

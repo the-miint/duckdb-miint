@@ -325,6 +325,54 @@ TEST_CASE("ChildProcess fails clearly when the binary does not exist", "[gpl-bou
 }
 
 // =============================================================================
+// Cycle 1.2b — ReapAndDescribe: signal-decoded termination diagnostics
+// =============================================================================
+//
+// Session::Submit's EPIPE/EOF paths use ReapAndDescribe to turn a bare "Broken
+// pipe" into "the daemon was killed by signal 15". These pin the decoding so a
+// SIGTERM (the suspected PR_SET_PDEATHSIG cause) reports distinctly from a
+// SIGKILL (OOM) or a normal exit — that distinction is the whole point.
+
+TEST_CASE("ReapAndDescribe decodes a SIGTERM kill", "[gpl-boundary][process]") {
+	const std::string bash_path = FindExecutableInPath("bash");
+	REQUIRE_FALSE(bash_path.empty());
+	std::vector<std::string> argv = {bash_path, "-c", "sleep 60"};
+	ChildProcess child(argv);
+	REQUIRE(child.pid() > 0);
+	// Let the child reach `sleep` so the signal lands on a running process, not
+	// a racing execve (which could surface as a different status).
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	REQUIRE(::kill(child.pid(), SIGTERM) == 0);
+	const std::string desc = child.ReapAndDescribe();
+	INFO("ReapAndDescribe: " << desc);
+	REQUIRE_THAT(desc, Catch::Matchers::ContainsSubstring("signal 15"));
+}
+
+TEST_CASE("ReapAndDescribe decodes a normal exit code", "[gpl-boundary][process]") {
+	const std::string bash_path = FindExecutableInPath("bash");
+	REQUIRE_FALSE(bash_path.empty());
+	std::vector<std::string> argv = {bash_path, "-c", "exit 7"};
+	ChildProcess child(argv);
+	const std::string desc = child.ReapAndDescribe(); // grace window covers the quick exit
+	INFO("ReapAndDescribe: " << desc);
+	REQUIRE_THAT(desc, Catch::Matchers::ContainsSubstring("exited with code 7"));
+}
+
+TEST_CASE("ReapAndDescribe is idempotent and leaves Wait consistent", "[gpl-boundary][process]") {
+	const std::string bash_path = FindExecutableInPath("bash");
+	REQUIRE_FALSE(bash_path.empty());
+	std::vector<std::string> argv = {bash_path, "-c", "exit 3"};
+	ChildProcess child(argv);
+	const std::string first = child.ReapAndDescribe();
+	REQUIRE_THAT(first, Catch::Matchers::ContainsSubstring("exited with code 3"));
+	// Second call returns the cached description; Wait() must not block or differ.
+	REQUIRE(child.ReapAndDescribe() == first);
+	const int status = child.Wait();
+	REQUIRE(WIFEXITED(status));
+	REQUIRE(WEXITSTATUS(status) == 3);
+}
+
+// =============================================================================
 // Cycle 1.2 — gpl-boundary --version (skip if absent)
 // =============================================================================
 

@@ -40,6 +40,20 @@ void make_pipe(int fds[2]) {
 		throw std::runtime_error("gpl_boundary: pipe() failed: " + std::string(::strerror(errno)));
 	}
 }
+
+// Decode a raw waitpid status into a human-readable, signal-named string.
+// Kept next to make_pipe so the process-control vocabulary lives in one place.
+std::string DescribeWaitStatus(int status) {
+	if (WIFSIGNALED(status)) {
+		const int sig = WTERMSIG(status);
+		const char *name = ::strsignal(sig);
+		return "killed by signal " + std::to_string(sig) + " (" + (name ? name : "unknown") + ")";
+	}
+	if (WIFEXITED(status)) {
+		return "exited with code " + std::to_string(WEXITSTATUS(status));
+	}
+	return "terminated with raw wait status " + std::to_string(status);
+}
 } // namespace
 
 std::string FindExecutableInPath(const std::string &name) {
@@ -368,6 +382,41 @@ int ChildProcess::Wait() {
 	wait_status_ = status;
 	waited_ = true;
 	return status;
+}
+
+std::string ChildProcess::ReapAndDescribe(int grace_ms) {
+	if (waited_) {
+		return DescribeWaitStatus(wait_status_);
+	}
+	if (pid_ <= 0) {
+		return "no child process";
+	}
+	// Poll WNOHANG up to grace_ms. On the daemon-death paths the child is a
+	// zombie already (the pipe EOF/EPIPE that brought us here implies it exited),
+	// so the first poll usually succeeds; the grace window only covers the rare
+	// race where the kernel hasn't transitioned it yet.
+	for (int elapsed = 0;; elapsed += 10) {
+		int status = 0;
+		const pid_t r = ::waitpid(pid_, &status, WNOHANG);
+		if (r == pid_) {
+			wait_status_ = status;
+			waited_ = true;
+			return DescribeWaitStatus(status);
+		}
+		if (r == -1) {
+			// ECHILD: someone else already reaped it (e.g. a process-wide
+			// SIGCHLD handler) — itself a useful tell. Mark waited_ so the
+			// destructor and Wait() don't block on a pid that's gone.
+			const std::string err = ::strerror(errno);
+			waited_ = true;
+			return "already reaped or unwaitable (" + err + ")";
+		}
+		// r == 0: still running.
+		if (elapsed >= grace_ms) {
+			return "still running after " + std::to_string(grace_ms) + "ms (no exit yet)";
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
 }
 
 // =============================================================================

@@ -94,6 +94,23 @@ std::string DrainStderrNonblocking(int fd) {
 	return out;
 }
 
+// Compose a "why did the daemon vanish" suffix for Submit's failure paths.
+// Reaps the child to decode its termination — a SIGTERM (e.g. PR_SET_PDEATHSIG
+// firing when the DuckDB worker thread that forked the daemon unwinds) reads
+// very differently from a SIGKILL (OOM killer) or a SIGSEGV (crash) — and
+// splices the daemon's stderr tail. Without this the EPIPE path throws a bare
+// "Broken pipe" and the EOF path a bare "closed stdout", neither of which tells
+// the operator what actually happened. Reap first so the stderr pipe has hit
+// EOF and DrainStderrNonblocking captures everything the daemon last wrote.
+std::string DaemonDeathSuffix(ChildProcess &child) {
+	std::string suffix = " [daemon " + child.ReapAndDescribe() + "]";
+	const std::string stderr_tail = DrainStderrNonblocking(child.stderr_fd());
+	if (!stderr_tail.empty()) {
+		suffix += "\n--- daemon stderr ---\n" + stderr_tail;
+	}
+	return suffix;
+}
+
 // RAII guard that blocks SIGPIPE on the calling thread only. `Session::Shutdown`
 // uses this to write to a possibly-broken pipe without disturbing other threads
 // (DuckDB's scheduler, other sessions) that might rely on the process-wide
@@ -368,14 +385,24 @@ SubmitResult Session::Submit(const std::string &tool, const std::string &config_
 	//    never saw this batch_id and we shouldn't burn it for the next call.
 	const int64_t batch_id = next_batch_id_;
 	const std::string batch_line = build_batch_line(tool, config_json, in_shm.name(), in_shm.size_bytes(), batch_id);
-	WriteLine(child_.stdin_fd(), batch_line);
+	try {
+		WriteLine(child_.stdin_fd(), batch_line);
+	} catch (const std::runtime_error &e) {
+		// EPIPE here means the daemon's stdin read-end is gone — it died before
+		// we finished handing off this batch. Enrich the bare "Broken pipe" with
+		// how it died + its stderr so the cause is actionable.
+		throw std::runtime_error(std::string(e.what()) + DaemonDeathSuffix(child_));
+	}
 	++next_batch_id_;
 
 	// 3. Read response.
 	std::string reply;
 	if (!reader_->ReadLine(reply)) {
+		// The daemon consumed our batch line but closed stdout without replying:
+		// it died between read and write. Same enrichment as the EPIPE path.
 		throw std::runtime_error("gpl_boundary: daemon closed stdout while waiting "
-		                         "for batch response");
+		                         "for batch response" +
+		                         DaemonDeathSuffix(child_));
 	}
 
 	// 4. Parse response.
