@@ -25,7 +25,8 @@ struct FastqCopyBindData : public SequenceCopyBindData {
 		result->compression = compression;
 		result->flush_size = flush_size;
 		result->file_path = file_path;
-		result->is_paired = is_paired;
+		result->has_r2_columns = has_r2_columns;
+		result->split_output = split_output;
 		result->names = names;
 		result->indices = indices;
 		// Copy FASTQ-specific field
@@ -37,7 +38,8 @@ struct FastqCopyBindData : public SequenceCopyBindData {
 		auto &other = other_p.Cast<FastqCopyBindData>();
 		return interleave == other.interleave && id_as_sequence_index == other.id_as_sequence_index &&
 		       include_comment == other.include_comment && qual_offset == other.qual_offset &&
-		       compression == other.compression && file_path == other.file_path && is_paired == other.is_paired &&
+		       compression == other.compression && file_path == other.file_path &&
+		       has_r2_columns == other.has_r2_columns && split_output == other.split_output &&
 		       flush_size == other.flush_size && names == other.names;
 	}
 };
@@ -67,20 +69,20 @@ static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFuncti
 		throw BinderException("COPY FORMAT FASTQ requires 'qual1' column");
 	}
 
-	result->is_paired = has_sequence2 && has_qual2;
+	// Column presence only; whether each record is actually paired is decided per-row at write
+	// time from R2 NULL-ness (read_fastx always emits sequence2/qual2, NULL for single-end).
+	result->has_r2_columns = has_sequence2 && has_qual2;
 
 	// Parse common parameters
 	CommonCopyParameters common_params;
 
 	Value qual_offset_param;
-	bool has_interleave_param = false;
 
 	for (auto &option : input.info.options) {
-		if (StringUtil::CIEquals(option.first, "interleave")) {
-			has_interleave_param = true;
-		} else if (StringUtil::CIEquals(option.first, "qual_offset")) {
+		if (StringUtil::CIEquals(option.first, "qual_offset")) {
 			qual_offset_param = option.second[0];
-		} else if (!StringUtil::CIEquals(option.first, "id_as_sequence_index") &&
+		} else if (!StringUtil::CIEquals(option.first, "interleave") &&
+		           !StringUtil::CIEquals(option.first, "id_as_sequence_index") &&
 		           !StringUtil::CIEquals(option.first, "include_comment") &&
 		           !StringUtil::CIEquals(option.first, "compression")) {
 			throw BinderException("Unknown option for COPY FORMAT FASTQ: %s", option.first);
@@ -95,8 +97,8 @@ static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFuncti
 	result->compression = common_params.compression;
 	result->flush_size = common_params.flush_size;
 
-	// Validate paired-end parameters
-	ValidatePairedEndParameters(result->is_paired, has_interleave_param, result->interleave, result->file_path);
+	// {ORIENTATION} in the path => split R1/R2 files; otherwise a single (optionally interleaved) file.
+	ResolveOutputMode(result->file_path, result->interleave, result->split_output);
 
 	// Validate sequence_index parameter
 	ValidateSequenceIndexParameter(result->id_as_sequence_index, has_sequence_index);
@@ -167,18 +169,17 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 
 	input.data[indices.qual1_idx].ToUnifiedFormat(input.size(), qual1_data);
 
-	bool is_paired = fdata.is_paired;
-	if (is_paired) {
+	// The schema may carry R2 columns even for single-end data (read_fastx always emits them as
+	// NULL). Whether a given row is paired is decided per-row below from R2 NULL-ness.
+	bool has_r2 = fdata.has_r2_columns;
+	if (has_r2) {
 		input.data[indices.sequence2_idx].ToUnifiedFormat(input.size(), seq2_data);
 		input.data[indices.qual2_idx].ToUnifiedFormat(input.size(), qual2_data);
 	}
 
 	// Get references to local buffers
 	auto &stream_r1 = *lstate.writer_state_r1->stream;
-	MemoryStream *stream_r2 = nullptr;
-	if (is_paired && !fdata.interleave) {
-		stream_r2 = lstate.writer_state_r2->stream.get();
-	}
+	MemoryStream *stream_r2 = fdata.split_output ? lstate.writer_state_r2->stream.get() : nullptr;
 
 	// Build all records into local buffer(s) - NO LOCK.
 	// Hot-path rule: never call string_t::GetString() on sequence/quality fields -- it
@@ -256,45 +257,61 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 		               qual1_length);
 		lstate.writer_state_r1->written_anything = true;
 
-		// Handle R2 for paired-end
-		if (is_paired) {
-			auto seq2_strings = UnifiedVectorFormat::GetData<string_t>(seq2_data);
+		// Handle R2. A record is paired iff sequence2 AND qual2 are both non-NULL; both NULL means
+		// a single-end record. Exactly one NULL is a malformed FASTQ record.
+		if (has_r2) {
 			auto seq2_row = seq2_data.sel->get_index(row);
-			if (!seq2_data.validity.RowIsValid(seq2_row)) {
-				throw InvalidInputException("NULL value in sequence2 column (row %llu)", row);
-			}
-			const char *seq2_ptr = seq2_strings[seq2_row].GetData();
-			idx_t seq2_size = seq2_strings[seq2_row].GetSize();
-
 			auto qual2_row = qual2_data.sel->get_index(row);
-			if (!qual2_data.validity.RowIsValid(qual2_row)) {
-				throw InvalidInputException("NULL value in qual2 column (row %llu)", row);
-			}
-			auto qual2_list = ListVector::GetEntry(input.data[indices.qual2_idx]);
-			auto qual2_list_data = FlatVector::GetData<uint8_t>(qual2_list);
-			auto qual2_entries = UnifiedVectorFormat::GetData<list_entry_t>(qual2_data);
-			idx_t qual2_length = qual2_entries[qual2_row].length;
-			const uint8_t *qual2_ptr = qual2_list_data + qual2_entries[qual2_row].offset;
+			bool seq2_valid = seq2_data.validity.RowIsValid(seq2_row);
+			bool qual2_valid = qual2_data.validity.RowIsValid(qual2_row);
 
-			// Validate quality score length matches sequence length
-			if (qual2_length != seq2_size) {
+			if (seq2_valid != qual2_valid) {
 				throw InvalidInputException(
-				    "Quality score length (%llu) does not match sequence length (%llu) for row %llu (R2)", qual2_length,
-				    seq2_size, row);
+				    "Row %llu: sequence2 and qual2 must both be set (paired-end) or both be NULL (single-end)", row);
 			}
 
-			if (fdata.interleave) {
-				// Write R2 to same buffer
-				encoder.Encode(sink_r1, id_ptr, id_size, comment_ptr, comment_size, seq2_ptr, seq2_size, qual2_ptr,
-				               qual2_length);
+			if (seq2_valid) {
+				lstate.saw_paired = true;
+
+				auto seq2_strings = UnifiedVectorFormat::GetData<string_t>(seq2_data);
+				const char *seq2_ptr = seq2_strings[seq2_row].GetData();
+				idx_t seq2_size = seq2_strings[seq2_row].GetSize();
+
+				auto qual2_list = ListVector::GetEntry(input.data[indices.qual2_idx]);
+				auto qual2_list_data = FlatVector::GetData<uint8_t>(qual2_list);
+				auto qual2_entries = UnifiedVectorFormat::GetData<list_entry_t>(qual2_data);
+				idx_t qual2_length = qual2_entries[qual2_row].length;
+				const uint8_t *qual2_ptr = qual2_list_data + qual2_entries[qual2_row].offset;
+
+				// Validate quality score length matches sequence length
+				if (qual2_length != seq2_size) {
+					throw InvalidInputException(
+					    "Quality score length (%llu) does not match sequence length (%llu) for row %llu (R2)",
+					    qual2_length, seq2_size, row);
+				}
+
+				if (fdata.split_output) {
+					// Write R2 to the separate R2 buffer (file created lazily on first flush).
+					auto sink_r2 = [stream_r2](const char *data, std::size_t size) {
+						stream_r2->WriteData(const_data_ptr_cast(data), size);
+					};
+					encoder.Encode(sink_r2, id_ptr, id_size, comment_ptr, comment_size, seq2_ptr, seq2_size, qual2_ptr,
+					               qual2_length);
+					lstate.writer_state_r2->written_anything = true;
+				} else if (fdata.interleave) {
+					// Write R2 interleaved into the same buffer as R1.
+					encoder.Encode(sink_r1, id_ptr, id_size, comment_ptr, comment_size, seq2_ptr, seq2_size, qual2_ptr,
+					               qual2_length);
+				} else {
+					// Single-file output but this record is paired and there is nowhere to put R2.
+					throw InvalidInputException(
+					    "Row %llu has paired-end data (sequence2 is set) but the output is a single file. Use the "
+					    "{ORIENTATION} placeholder in the output path to write split R1/R2 files, or set "
+					    "INTERLEAVE=true to interleave R1/R2 into one file.",
+					    row);
+				}
 			} else {
-				// Write R2 to separate buffer
-				auto sink_r2 = [stream_r2](const char *data, std::size_t size) {
-					stream_r2->WriteData(const_data_ptr_cast(data), size);
-				};
-				encoder.Encode(sink_r2, id_ptr, id_size, comment_ptr, comment_size, seq2_ptr, seq2_size, qual2_ptr,
-				               qual2_length);
-				lstate.writer_state_r2->written_anything = true;
+				lstate.saw_single = true;
 			}
 		}
 
@@ -305,7 +322,7 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 			FlushFormatBuffer(*lstate.writer_state_r1, *gstate.file_r1, gstate.lock);
 		}
 		if (stream_r2 && lstate.writer_state_r2->stream->GetPosition() >= lstate.writer_state_r2->flush_size) {
-			FlushFormatBuffer(*lstate.writer_state_r2, *gstate.file_r2, gstate.lock);
+			FlushR2Buffer(*lstate.writer_state_r2, gstate);
 		}
 	}
 }

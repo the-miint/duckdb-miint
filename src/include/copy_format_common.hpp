@@ -88,7 +88,11 @@ struct CommonCopyParameters {
 // Common Validation Functions
 //===--------------------------------------------------------------------===//
 void ValidateRequiredColumns(bool has_read_id, bool has_sequence1, const string &format_name);
-void ValidatePairedEndParameters(bool is_paired, bool has_interleave_param, bool interleave, const string &file_path);
+// Resolves the output structure from the path + INTERLEAVE option. The presence of the
+// {ORIENTATION} placeholder is the split-vs-single switch: when present, R1/R2 are written to
+// separate files; when absent, output is a single file (interleaved iff INTERLEAVE=true).
+// Sets out_split_output. Throws on the one contradictory combination ({ORIENTATION}+INTERLEAVE=true).
+void ResolveOutputMode(const string &file_path, bool interleave, bool &out_split_output);
 void ValidateSequenceIndexParameter(bool id_as_sequence_index, bool has_sequence_index);
 
 //===--------------------------------------------------------------------===//
@@ -97,13 +101,18 @@ void ValidateSequenceIndexParameter(bool id_as_sequence_index, bool has_sequence
 
 // Base bind data for sequence formats (FASTA/FASTQ)
 struct SequenceCopyBindData : public FunctionData {
-	bool interleave = false;
+	bool interleave = false; // INTERLEAVE=true: write R1/R2 records alternating into one file
 	bool id_as_sequence_index = false;
 	bool include_comment = false;
 	FileCompressionType compression = FileCompressionType::UNCOMPRESSED;
 	idx_t flush_size = DEFAULT_COPY_FLUSH_SIZE;
 	string file_path;
-	bool is_paired = false;
+	// Whether the input *schema* carries R2 columns (sequence2 [+ qual2 for FASTQ]). This does
+	// NOT mean the data is paired -- read_fastx always emits these columns (NULL for single-end).
+	// Whether a given record is paired is decided per-row at write time from R2 NULL-ness.
+	bool has_r2_columns = false;
+	// Whether the output path contains the {ORIENTATION} placeholder, i.e. split R1/R2 files.
+	bool split_output = false;
 	vector<string> names;
 	ColumnIndices indices; // Pre-computed column indices
 
@@ -114,15 +123,25 @@ struct SequenceCopyBindData : public FunctionData {
 struct SequenceCopyGlobalState : public GlobalFunctionData {
 	mutex lock;
 	unique_ptr<CopyFileHandle> file_r1;
-	unique_ptr<CopyFileHandle> file_r2;
-	bool is_paired = false;
-	bool interleave = false;
+	unique_ptr<CopyFileHandle> file_r2; // split mode only; created lazily on first R2 write
+	// Deferred R2-file creation parameters (split mode). The R2 file is only created once a
+	// non-NULL R2 record is actually written, so an all-single-end dataset never produces an
+	// empty R2 file even when {ORIENTATION} is used.
+	FileSystem *fs = nullptr;
+	string r2_path;
+	FileCompressionType compression = FileCompressionType::UNCOMPRESSED;
+	// Consistency tracking across all threads: a single COPY must be either all single-end or
+	// all paired-end. Both set true -> inconsistent input (checked at finalize).
+	bool saw_paired = false;
+	bool saw_single = false;
 };
 
 // Shared local state for sequence formats (100% identical for FASTA/FASTQ)
 struct SequenceCopyLocalState : public LocalFunctionData {
 	unique_ptr<FormatWriterState> writer_state_r1;
 	unique_ptr<FormatWriterState> writer_state_r2; // For split paired-end
+	bool saw_paired = false;                       // this thread wrote >=1 paired record
+	bool saw_single = false;                       // this thread wrote >=1 single-end record
 };
 
 //===--------------------------------------------------------------------===//
@@ -135,6 +154,9 @@ unique_ptr<GlobalFunctionData> SequenceCopyInitializeGlobal(ClientContext &conte
 
 // Initialize local state for sequence formats
 unique_ptr<LocalFunctionData> SequenceCopyInitializeLocal(ExecutionContext &context, const SequenceCopyBindData &fdata);
+
+// Flush a local R2 buffer in split mode, lazily creating the R2 file on first non-empty flush.
+void FlushR2Buffer(FormatWriterState &local_state, SequenceCopyGlobalState &gstate);
 
 // Combine (flush) local buffers for sequence formats
 void SequenceCopyCombine(const SequenceCopyBindData &fdata, SequenceCopyGlobalState &gstate,

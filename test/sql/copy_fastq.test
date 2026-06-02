@@ -109,23 +109,29 @@ COPY (SELECT read_id, sequence1 FROM test_single) TO '__TEST_DIR__/error3.fq' (F
 ----
 COPY FORMAT FASTQ requires 'qual1' column
 
-# Test 12: Error - paired data without INTERLEAVE parameter
+# Test 12: Error - genuinely paired data sent to a single-file path
+# (no {ORIENTATION} to split into, INTERLEAVE not requested) -> fail loud with guidance
 statement error
 COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired) TO '__TEST_DIR__/error4.fq' (FORMAT FASTQ);
 ----
-INTERLEAVE parameter required for paired-end data
+Use the {ORIENTATION} placeholder
 
-# Test 13: Error - paired data with INTERLEAVE=false but no {ORIENTATION}
+# Test 13: Error - explicit INTERLEAVE=false but no {ORIENTATION} for genuinely paired data.
+# INTERLEAVE=false is the default (single file); split output needs an {ORIENTATION} target.
 statement error
 COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired) TO '__TEST_DIR__/error5.fq' (FORMAT FASTQ, INTERLEAVE false);
 ----
-{ORIENTATION} in file path
+Use the {ORIENTATION} placeholder
 
-# Test 14: Error - single-end data with {ORIENTATION}
-statement error
-COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single) TO '__TEST_DIR__/error6.{ORIENTATION}.fq' (FORMAT FASTQ);
+# Test 14: Single-end data (no sequence2/qual2 columns) + {ORIENTATION} now writes the R1 file only.
+statement ok
+COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single ORDER BY sequence_index) TO '__TEST_DIR__/output14.{ORIENTATION}.fq' (FORMAT FASTQ);
+
+query III
+SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/output14.R1.fq') ORDER BY sequence_index;
 ----
-Single-end data cannot use {ORIENTATION}
+read_a1	AAAA	[40, 40, 40, 40]
+read_a2	TTTT	[39, 39, 39, 39]
 
 # Test 15: Error - ID_AS_SEQUENCE_INDEX without sequence_index column
 statement error
@@ -159,6 +165,67 @@ read_a1	AAAA	[40, 40, 40, 40]
 read_a2	TTTT	[39, 39, 39, 39]
 read_b1	GGGG	[38, 38, 38, 38]
 read_b2	CCCC	[37, 37, 37, 37]
+
+# Test 18: Problem #1 - SELECT * from single-end read_fastx carries sequence2/qual2 columns
+# (filled with NULL). Writing to a plain path must produce a single-end file, not error.
+statement ok
+COPY (SELECT * FROM test_single ORDER BY sequence_index) TO '__TEST_DIR__/p1_single.fastq' (FORMAT FASTQ);
+
+query III
+SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/p1_single.fastq') ORDER BY sequence_index;
+----
+read_a1	AAAA	[40, 40, 40, 40]
+read_a2	TTTT	[39, 39, 39, 39]
+
+# Test 19: Problem #2 - paired data + {ORIENTATION} with NO INTERLEAVE parameter -> split R1/R2.
+statement ok
+COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired ORDER BY sequence_index) TO '__TEST_DIR__/p2.{ORIENTATION}.fq' (FORMAT FASTQ);
+
+query IIIIII
+SELECT sequence_index, read_id, sequence1, sequence2, qual1, qual2 FROM read_fastx('__TEST_DIR__/p2.R1.fq', sequence2='__TEST_DIR__/p2.R2.fq') ORDER BY sequence_index;
+----
+1	pair_a1	AAAA	TTTT	[40, 40, 40, 40]	[39, 39, 39, 39]
+
+# Test 20: Headline example - SELECT * from single-end (NULL sequence2/qual2) + {ORIENTATION} + gzip.
+# Must write a single R1 file and NOT create an R2 file.
+statement ok
+COPY (SELECT * FROM test_single ORDER BY sequence_index) TO '__TEST_DIR__/headline.{ORIENTATION}.fastq.gz' (FORMAT FASTQ, COMPRESSION gzip);
+
+query III
+SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/headline.R1.fastq.gz') ORDER BY sequence_index;
+----
+read_a1	AAAA	[40, 40, 40, 40]
+read_a2	TTTT	[39, 39, 39, 39]
+
+# The R2 file must not have been created (single-end data).
+statement error
+SELECT * FROM read_fastx('__TEST_DIR__/headline.R2.fastq.gz');
+----
+
+# Test 21: Contradiction - {ORIENTATION} placeholder combined with INTERLEAVE=true.
+statement error
+COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired) TO '__TEST_DIR__/contradiction.{ORIENTATION}.fq' (FORMAT FASTQ, INTERLEAVE true);
+----
+Cannot combine the {ORIENTATION} placeholder with INTERLEAVE=true
+
+# Test 22: Mixed single-end and paired-end records in one COPY -> fail loud (inconsistent).
+statement error
+COPY (
+  SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired
+  UNION ALL
+  SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_single
+) TO '__TEST_DIR__/mixed.{ORIENTATION}.fq' (FORMAT FASTQ);
+----
+Inconsistent paired-end data
+
+# Test 23: Malformed FASTQ record - sequence2 set but qual2 NULL.
+statement error
+COPY (
+  SELECT read_id, comment, sequence1, 'TTTT'::VARCHAR AS sequence2, qual1, NULL::UTINYINT[] AS qual2
+  FROM test_single WHERE sequence_index = 1
+) TO '__TEST_DIR__/xor.{ORIENTATION}.fq' (FORMAT FASTQ);
+----
+must both be set
 
 # Cleanup
 statement ok

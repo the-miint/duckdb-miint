@@ -29,22 +29,41 @@ Write query results to FASTQ format files. Requires `read_id`, `sequence1`, and 
 - `QUAL_OFFSET` (default: 33): Quality score encoding offset (33 or 64)
 - `INCLUDE_COMMENT` (default: false): Include comment field in output
 - `ID_AS_SEQUENCE_INDEX` (default: false): Use `sequence_index` as identifier instead of `read_id`
-- `INTERLEAVE` (default: false): Write paired reads interleaved in single file
+- `INTERLEAVE` (default: false): When the data is paired-end, write R1/R2 interleaved into a single file. Optional — see "Single-end vs paired-end output" below. Cannot be combined with the `{ORIENTATION}` placeholder.
 - `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension)
+
+**Single-end vs paired-end output:**
+
+You do not need to project away `sequence2`/`qual2` or pre-declare whether the data is paired. `read_fastx` always emits `sequence2`/`qual2` (NULL for single-end), and the writer decides per record from whether those values are NULL:
+
+- **`{ORIENTATION}` in the path** selects **split** output: R1 → the `R1` file, R2 → the `R2` file. If the data turns out to be entirely single-end, only the R1 file is written (no empty R2 file is created).
+- **No `{ORIENTATION}`** selects a **single file**. Single-end data is written as-is. Paired-end data is interleaved only if `INTERLEAVE=true`.
+- A record is **paired** when both `sequence2` and `qual2` are non-NULL, and **single-end** when both are NULL. A single COPY must be all one or all the other.
+
+The writer fails loud (rather than guessing or silently dropping data) when:
+- paired data is sent to a single-file path without `INTERLEAVE=true` (add `{ORIENTATION}` to split, or `INTERLEAVE=true` to interleave),
+- `{ORIENTATION}` is combined with `INTERLEAVE=true` (contradictory),
+- `sequence2` and `qual2` disagree on NULL-ness within a record, or
+- the input mixes single-end and paired-end records.
 
 **Examples:**
 ```sql
--- Basic single-end FASTQ output
+-- Basic single-end FASTQ output. SELECT * carries NULL sequence2/qual2 columns;
+-- they are recognized as single-end and a single file is written.
 COPY (SELECT * FROM read_fastx('input.fastq'))
 TO 'output.fastq' (FORMAT FASTQ);
 
--- Paired-end interleaved output
+-- Paired-end interleaved output (single file)
 COPY (SELECT * FROM read_fastx('R1.fastq', 'R2.fastq'))
 TO 'output.fastq' (FORMAT FASTQ, INTERLEAVE true);
 
--- Paired-end split files (use {ORIENTATION} placeholder)
+-- Paired-end split files (the {ORIENTATION} placeholder selects split output)
 COPY (SELECT * FROM read_fastx('R1.fastq', 'R2.fastq'))
 TO 'output_{ORIENTATION}.fastq' (FORMAT FASTQ);
+
+-- Single-end data with {ORIENTATION} simply writes the R1 file (output_R1.fastq.gz)
+COPY (SELECT * FROM read_fastx('input.fastq'))
+TO 'output_{ORIENTATION}.fastq.gz' (FORMAT FASTQ, COMPRESSION gzip);
 
 -- Compressed output with custom quality offset
 COPY (SELECT * FROM read_fastx('input.fastq'))
@@ -71,16 +90,24 @@ Write query results to FASTA format files. Requires `read_id` and `sequence1` co
 **Parameters:**
 - `INCLUDE_COMMENT` (default: false): Include comment field in output
 - `ID_AS_SEQUENCE_INDEX` (default: false): Use `sequence_index` as identifier instead of `read_id`
-- `INTERLEAVE` (default: false): Write paired reads interleaved in single file
+- `INTERLEAVE` (default: false): When the data is paired-end, write R1/R2 interleaved into a single file. Optional — see "Single-end vs paired-end output" below. Cannot be combined with the `{ORIENTATION}` placeholder.
 - `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension)
+
+**Single-end vs paired-end output:**
+
+FASTA paired-end output works the same way as FASTQ (a record is paired when `sequence2` is non-NULL), without the quality columns:
+
+- **`{ORIENTATION}` in the path** writes split R1/R2 files; an entirely single-end dataset writes only the R1 file.
+- **No `{ORIENTATION}`** writes a single file; paired data is interleaved only if `INTERLEAVE=true`.
+- The writer fails loud when paired data is sent to a single-file path without `INTERLEAVE=true`, when `{ORIENTATION}` is combined with `INTERLEAVE=true`, or when the input mixes single-end and paired-end records.
 
 **Examples:**
 ```sql
--- Basic FASTA output
+-- Basic FASTA output (single-end; NULL sequence2 columns are recognized as single-end)
 COPY (SELECT * FROM read_fastx('input.fasta'))
 TO 'output.fasta' (FORMAT FASTA);
 
--- Paired-end split files
+-- Paired-end split files (the {ORIENTATION} placeholder selects split output)
 COPY (SELECT * FROM read_fastx('R1.fasta', 'R2.fasta'))
 TO 'output_{ORIENTATION}.fasta' (FORMAT FASTA);
 
