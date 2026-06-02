@@ -2109,7 +2109,8 @@ The full bowtie2-align typed parameter set is also exposed (one-to-one with the 
 | `seed` | INTEGER | Random seed for reproducibility |
 | `trim5`, `trim3` | INTEGER | Trim N bases from each end of the read |
 | `match_bonus` | INTEGER | `--ma` |
-| `mismatch_penalty` | INTEGER | `--mp` |
+| `mismatch_penalty` | INTEGER | `--mp` MAX (arg1). Pairs with `mismatch_penalty_min` |
+| `mismatch_penalty_min` | INTEGER | `--mp` MIN (arg2). Set both equal for a symmetric penalty (e.g. `1,1`). Unset side defaults to bowtie2's compiled-in value (MAX=6, MIN=2); `MIN > MAX` is rejected |
 | `n_penalty` | INTEGER | `--np` (ambiguous base penalty) |
 | `read_gap_open`, `read_gap_extend` | INTEGER | `--rdg arg1,arg2` |
 | `ref_gap_open`, `ref_gap_extend` | INTEGER | `--rfg arg1,arg2` |
@@ -2256,7 +2257,7 @@ The sharded path emits only mapped reads (the daemon is invoked with `--no-unal`
 - `quiet` (BOOLEAN, default: true): Suppress Bowtie2 stderr output
 - `threads` (INTEGER): Ignored in sharded mode. Use DuckDB's `SET threads=N` to control cross-shard parallelism and `max_threads_per_shard` for per-shard bowtie2 threading. A warning is printed at bind if `threads != 1` is passed directly to this function.
 
-The full bowtie2-align typed parameter set listed under [`align_bowtie2`](#align_bowtie2query_table-subject_table-options) above is also available here (same names, same bind-time validation): `seed`, `trim5`, `trim3`, `match_bonus`, `mismatch_penalty`, `n_penalty`, `read_gap_open`, `read_gap_extend`, `ref_gap_open`, `ref_gap_extend`, `score_min`, `min_insert`, `max_insert`, `mate_orientation`, `no_mixed`, `no_discordant`, `dovetail`, `no_contain`, `no_overlap`, `nofw`, `norc`, `seed_mismatches`, `seed_length`, `max_dp_failures`, `max_seed_rounds`, `report_all`, `xeq`, `rg_id`, `ignore_quals`, `reorder`.
+The full bowtie2-align typed parameter set listed under [`align_bowtie2`](#align_bowtie2query_table-subject_table-options) above is also available here (same names, same bind-time validation): `seed`, `trim5`, `trim3`, `match_bonus`, `mismatch_penalty`, `mismatch_penalty_min`, `n_penalty`, `read_gap_open`, `read_gap_extend`, `ref_gap_open`, `ref_gap_extend`, `score_min`, `min_insert`, `max_insert`, `mate_orientation`, `no_mixed`, `no_discordant`, `dovetail`, `no_contain`, `no_overlap`, `nofw`, `norc`, `seed_mismatches`, `seed_length`, `max_dp_failures`, `max_seed_rounds`, `report_all`, `xeq`, `rg_id`, `ignore_quals`, `reorder`.
 
 The `no_unal` knob is intentionally not exposed: the sharded path always emits only mapped reads (matches the pre-migration `FilterMappedOnly` contract). Use `align_bowtie2` directly if you need to inspect unaligned records.
 
