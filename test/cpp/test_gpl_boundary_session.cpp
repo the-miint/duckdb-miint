@@ -329,6 +329,25 @@ exit 0)";
 	REQUIRE_THROWS_WITH(session.Submit("fasttree", "{}", "x", 1), Catch::Matchers::ContainsSubstring("tool blew up"));
 }
 
+TEST_CASE("Session::Submit reports the daemon's death signal when it is killed mid-batch", "[gpl-boundary][session]") {
+	// Field repro: the daemon handshakes, consumes our batch line, then dies by
+	// signal (mimicking PR_SET_PDEATHSIG's SIGTERM firing when the DuckDB worker
+	// thread that forked it unwinds) WITHOUT replying. The pre-fix error was a
+	// bare "daemon closed stdout while waiting for batch response", which says
+	// nothing about *why* the daemon vanished. Submit must now splice in the
+	// signal so the cause is visible in the surfaced SQL error.
+	const std::string script =
+	    R"(read -r init_line
+echo '{"success":true,"protocol_version":3,"tools":[{"name":"bowtie2-align","schema_version":2}]}'
+read -r batch_line
+kill -TERM $$
+sleep 5)";
+	auto child = spawn_shim(script);
+	Session session(std::move(child));
+	REQUIRE_NOTHROW(session.Initialize());
+	REQUIRE_THROWS_WITH(session.Submit("bowtie2-align", "{}", "x", 1), ContainsSubstring("signal 15"));
+}
+
 TEST_CASE("Session::Submit rejects calls before Initialize", "[gpl-boundary][session]") {
 	const std::string script = R"(sleep 5
 exit 0)"; // shim that never responds
