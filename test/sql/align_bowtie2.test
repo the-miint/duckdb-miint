@@ -413,6 +413,44 @@ SELECT * FROM align_bowtie2_sharded('typed_queries',
 ----
 seed_length must be 1-32
 
+# ----------------------------------------------------------------------------
+# Two-value --mp MAX,MIN: mismatch_penalty (MAX) + mismatch_penalty_min (MIN)
+# ----------------------------------------------------------------------------
+# bowtie2's `--mp` is a MAX,MIN pair (default 6,2). miint exposes MAX as
+# `mismatch_penalty` and MIN as `mismatch_penalty_min`; both are typed named
+# parameters forwarded into the daemon config JSON. The woltka-style symmetric
+# `1,1` is the motivating case — before mismatch_penalty_min existed, any value
+# < 2 was inexpressible because MIN defaulted to 2.
+
+# The symmetric pair is accepted and forwarded. A perfect-match query still
+# aligns, so we get exactly one hit — proving the daemon parsed config_json
+# with the new field rather than erroring on an unknown key.
+query I
+SELECT COUNT(*) FROM align_bowtie2('typed_queries', 'typed_subjects',
+    mismatch_penalty := 1, mismatch_penalty_min := 1);
+----
+1
+
+# The foot-gun: `mismatch_penalty := 1` alone leaves MIN at its default of 2,
+# so MIN (2) > MAX (1) and bowtie2's MAX,MIN contract is violated. gpl-boundary
+# pre-checks this and returns a clean, knob-named error (no worker crash). The
+# fix is to set mismatch_penalty_min := 1 too, as the test above does.
+statement error
+SELECT * FROM align_bowtie2('typed_queries', 'typed_subjects',
+    mismatch_penalty := 1);
+----
+exceeds MAX
+
+# Same surface for the sharded variant — the MAX,MIN pair is accepted and
+# forwarded, and the perfect-match query still aligns.
+query I
+SELECT COUNT(*) FROM align_bowtie2_sharded('typed_queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'typed_assoc',
+    mismatch_penalty := 1, mismatch_penalty_min := 1);
+----
+1
+
 statement ok
 DROP TABLE typed_queries;
 

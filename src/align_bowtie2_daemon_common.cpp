@@ -97,6 +97,7 @@ const std::unordered_set<std::string> kCommonAlignParams = {
     "trim3",
     "match_bonus",
     "mismatch_penalty",
+    "mismatch_penalty_min",
     "n_penalty",
     "read_gap_open",
     "read_gap_extend",
@@ -188,6 +189,9 @@ void AppendBowtie2AlignParams(ConfigJsonBuilder &cfg, const named_parameter_map_
 	if (auto *v = get("mismatch_penalty")) {
 		cfg.append_int("mismatch_penalty", ValueAsInt(caller, "mismatch_penalty", *v));
 	}
+	if (auto *v = get("mismatch_penalty_min")) {
+		cfg.append_int("mismatch_penalty_min", ValueAsInt(caller, "mismatch_penalty_min", *v));
+	}
 	if (auto *v = get("n_penalty")) {
 		cfg.append_int("n_penalty", ValueAsInt(caller, "n_penalty", *v));
 	}
@@ -271,6 +275,7 @@ void RegisterBowtie2AlignNamedParameterTypes(TableFunction &tf) {
 	tf.named_parameters["trim3"] = LogicalType::INTEGER;
 	tf.named_parameters["match_bonus"] = LogicalType::INTEGER;
 	tf.named_parameters["mismatch_penalty"] = LogicalType::INTEGER;
+	tf.named_parameters["mismatch_penalty_min"] = LogicalType::INTEGER;
 	tf.named_parameters["n_penalty"] = LogicalType::INTEGER;
 	tf.named_parameters["read_gap_open"] = LogicalType::INTEGER;
 	tf.named_parameters["read_gap_extend"] = LogicalType::INTEGER;
