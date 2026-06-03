@@ -1,0 +1,143 @@
+# name: test/sql/copy_gzip_bgzf.test
+# description: gzip FASTQ/FASTA COPY round-trips losslessly across many bgzf blocks, preserving order and R1/R2 pairing
+# group: [sql]
+
+require miint
+
+# ~200k records of small reads -> a few MB uncompressed -> dozens of bgzf blocks,
+# so this exercises multi-block compression, block ordering, and the EOF marker
+# (not just a single-block file). read_id is made unique per row so the EXCEPT
+# checks below verify per-record content, not just a collapsed set.
+
+statement ok
+CREATE TABLE big_se AS
+SELECT (row_number() OVER ())::BIGINT AS sequence_index,
+       read_id || '_' || i AS read_id,
+       sequence1, qual1
+FROM read_fastx('data/fastq/small_a.fq') CROSS JOIN generate_series(1, 100000) t(i);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM big_se ORDER BY sequence_index)
+TO '__TEST_DIR__/bgzf_se.fq.gz' (FORMAT FASTQ);
+
+# Count preserved (no truncation / no duplication across blocks).
+query I
+SELECT (SELECT count(*) FROM read_fastx('__TEST_DIR__/bgzf_se.fq.gz')) - (SELECT count(*) FROM big_se);
+----
+0
+
+# Content lossless, both directions (corruption in any record -> nonzero).
+query I
+SELECT count(*) FROM (
+  SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/bgzf_se.fq.gz')
+  EXCEPT
+  SELECT read_id, sequence1, qual1 FROM big_se
+);
+----
+0
+
+query I
+SELECT count(*) FROM (
+  SELECT read_id, sequence1, qual1 FROM big_se
+  EXCEPT
+  SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/bgzf_se.fq.gz')
+);
+----
+0
+
+# Order preserved across blocks: file-order (read-back sequence_index) must match
+# the written order (original sequence_index).
+query I
+SELECT count(*) FROM (
+  SELECT row_number() OVER (ORDER BY sequence_index) AS rn, read_id
+  FROM read_fastx('__TEST_DIR__/bgzf_se.fq.gz')
+) rb
+JOIN big_se b ON b.sequence_index = rb.rn
+WHERE b.read_id <> rb.read_id;
+----
+0
+
+# --- Paired-end split ({ORIENTATION}) gzip: pairing must survive the two-file write ---
+statement ok
+CREATE TABLE big_pe AS
+SELECT (row_number() OVER ())::BIGINT AS sequence_index,
+       read_id || '_' || i AS read_id,
+       sequence1, sequence2, qual1, qual2
+FROM read_fastx('data/fastq/small_a_r1.fq', sequence2='data/fastq/small_a_r2.fq')
+CROSS JOIN generate_series(1, 100000) t(i);
+
+statement ok
+COPY (SELECT read_id, sequence1, sequence2, qual1, qual2 FROM big_pe ORDER BY sequence_index)
+TO '__TEST_DIR__/bgzf_pe.{ORIENTATION}.fq.gz' (FORMAT FASTQ);
+
+# Reading R1+R2 as a pair must reproduce each original (read_id, R1, R2) tuple.
+# If R1/R2 desynchronized across blocks/threads, seq2 would attach to the wrong
+# read_id and this would be nonzero.
+query I
+SELECT count(*) FROM (
+  SELECT read_id, sequence1, sequence2, qual1, qual2
+  FROM read_fastx('__TEST_DIR__/bgzf_pe.R1.fq.gz', sequence2='__TEST_DIR__/bgzf_pe.R2.fq.gz')
+  EXCEPT
+  SELECT read_id, sequence1, sequence2, qual1, qual2 FROM big_pe
+);
+----
+0
+
+query I
+SELECT count(*) FROM (
+  SELECT read_id, sequence1, sequence2, qual1, qual2 FROM big_pe
+  EXCEPT
+  SELECT read_id, sequence1, sequence2, qual1, qual2
+  FROM read_fastx('__TEST_DIR__/bgzf_pe.R1.fq.gz', sequence2='__TEST_DIR__/bgzf_pe.R2.fq.gz')
+);
+----
+0
+
+# Each split file must have exactly the full record count (catches truncation/duplication on
+# either file independently of the set-based EXCEPT checks above).
+query I
+SELECT (SELECT count(*) FROM read_fastx('__TEST_DIR__/bgzf_pe.R1.fq.gz')) - (SELECT count(*) FROM big_pe);
+----
+0
+
+query I
+SELECT (SELECT count(*) FROM read_fastx('__TEST_DIR__/bgzf_pe.R2.fq.gz')) - (SELECT count(*) FROM big_pe);
+----
+0
+
+# --- FASTA gzip multi-block round-trip ---
+statement ok
+COPY (SELECT read_id, sequence1 FROM big_se ORDER BY sequence_index)
+TO '__TEST_DIR__/bgzf.fa.gz' (FORMAT FASTA);
+
+query I
+SELECT count(*) FROM (
+  SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/bgzf.fa.gz')
+  EXCEPT
+  SELECT read_id, sequence1 FROM big_se
+);
+----
+0
+
+# Re-writing an existing gzip target overwrites it (standard COPY temp-file + rename semantics; the
+# bgzf path opens the temp file with O_EXCL, matching the uncompressed path's FILE_CREATE_NEW). The
+# second write must succeed and fully replace the file -- here a 1-record write over a many-record
+# file, so a read-back of 1 proves replacement (not append) and a valid bgzf file.
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM big_se ORDER BY sequence_index)
+TO '__TEST_DIR__/bgzf_exists.fq.gz' (FORMAT FASTQ);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM big_se ORDER BY sequence_index LIMIT 1)
+TO '__TEST_DIR__/bgzf_exists.fq.gz' (FORMAT FASTQ);
+
+query I
+SELECT count(*) FROM read_fastx('__TEST_DIR__/bgzf_exists.fq.gz');
+----
+1
+
+statement ok
+DROP TABLE big_se;
+
+statement ok
+DROP TABLE big_pe;

@@ -1,6 +1,12 @@
 #include "copy_format_common.hpp"
+#include "remote_file_helper.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
+
+#include <htslib-1.22.1/htslib/bgzf.h>
+#include <cerrno>
 
 namespace duckdb {
 
@@ -25,10 +31,11 @@ void FormatWriterState::Reset() {
 // Format Writer Helper Functions
 //===--------------------------------------------------------------------===//
 // Write the accumulated local buffer to the file in <= 1 GiB slices, then reset the buffer.
-// Caller must hold the global lock. DuckDB's MiniZStreamWrapper (the gzip path) casts the write
-// size to unsigned int internally, so a single write larger than 4 GiB throws "Information loss
-// on integer cast". Chunking keeps every underlying compressor call within 32-bit bounds
-// regardless of how much the local MemoryStream accumulated.
+// Caller must hold the global lock. This guards every CopyFileHandle::Write backend, not just one:
+// the remote-gzip fallback goes through DuckDB's MiniZStreamWrapper, which casts the write size to
+// unsigned int and throws "Information loss on integer cast" on a single >4 GiB write; chunking
+// keeps that (and any 32-bit limit in the bgzf/BufferedFileWriter backends) safe regardless of how
+// much the local MemoryStream accumulated.
 static void WriteBufferToFile(CopyFileHandle &file, FormatWriterState &local_state) {
 	constexpr idx_t MAX_WRITE_CHUNK = 1ULL * 1024 * 1024 * 1024; // 1 GiB
 	const_data_ptr_t data = local_state.stream->GetData();
@@ -63,7 +70,8 @@ void FlushR2Buffer(FormatWriterState &local_state, SequenceCopyGlobalState &gsta
 	if (!gstate.file_r2) {
 		// First non-NULL R2 record across all threads -> create the R2 file now. This is what
 		// keeps an all-single-end dataset from producing an empty R2 file in split mode.
-		gstate.file_r2 = make_uniq<CopyFileHandle>(*gstate.fs, gstate.r2_path, gstate.compression);
+		gstate.file_r2 =
+		    make_uniq<CopyFileHandle>(*gstate.fs, gstate.r2_path, gstate.compression, gstate.compression_threads);
 	}
 	WriteBufferToFile(*gstate.file_r2, local_state);
 }
@@ -71,20 +79,60 @@ void FlushR2Buffer(FormatWriterState &local_state, SequenceCopyGlobalState &gsta
 //===--------------------------------------------------------------------===//
 // CopyFileHandle Implementation
 //===--------------------------------------------------------------------===//
-CopyFileHandle::CopyFileHandle(FileSystem &fs, const string &path, FileCompressionType compression_p)
-    : compression(compression_p) {
+CopyFileHandle::CopyFileHandle(FileSystem &fs, const string &path, FileCompressionType compression_p,
+                               int compression_threads) {
+	// Local gzip output goes through htslib bgzf: it is gzip-compatible (reads back through any gzip
+	// reader, including read_fastx) and bgzf_mt parallelizes deflate while emitting blocks in order,
+	// so a single-threaded in-order feed still produces a deterministically-ordered file. DuckDB's
+	// own gzip writer is single-threaded, which is the bottleneck this avoids. Remote targets keep
+	// the BufferedFileWriter path: htslib's hFILE cannot open DuckDB's virtual filesystem, and we use
+	// the same RemoteFileHelper::IsRemotePath test the reader (read_fastx) uses so writer and reader
+	// agree on what counts as local.
+	if (compression_p == FileCompressionType::GZIP && !miint::RemoteFileHelper::IsRemotePath(path)) {
+		// "wx6" = write, exclusive-create (O_EXCL), gzip level 6. The 'x' makes the create atomic and
+		// fail loudly if the file exists, preserving the FILE_CREATE_NEW contract of the
+		// BufferedFileWriter path without a TOCTOU; '6' matches DuckDB's MZ_DEFAULT_LEVEL.
+		errno = 0;
+		bgzf_file = bgzf_open(path.c_str(), "wx6");
+		if (!bgzf_file) {
+			if (errno == EEXIST) {
+				throw IOException("Failed to open \"%s\" for writing: file already exists", path);
+			}
+			throw IOException("Failed to open \"%s\" for bgzf writing", path);
+		}
+		if (compression_threads > 1) {
+			// 256 sub-blocks per thread batch is htslib's typical default. Best-effort: on failure
+			// bgzf transparently falls back to single-threaded compression.
+			bgzf_mt(bgzf_file, compression_threads, 256);
+		}
+		return;
+	}
+
 	auto flags =
-	    FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW | FileLockType::WRITE_LOCK | compression;
+	    FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW | FileLockType::WRITE_LOCK | compression_p;
 
 	// BufferedFileWriter handles both file opening and buffering
 	file_writer = make_uniq<BufferedFileWriter>(fs, path, flags);
 }
 
 CopyFileHandle::~CopyFileHandle() {
-	Close();
+	// Never let a flush error escape a destructor; Finalize calls Close() explicitly
+	// for the error-reporting path.
+	try {
+		Close();
+	} catch (...) { // NOLINT: destructor must not throw
+	}
 }
 
 void CopyFileHandle::Write(const_data_ptr_t data, idx_t size) {
+	if (bgzf_file) {
+		auto written = bgzf_write(bgzf_file, data, size);
+		if (written < 0 || static_cast<idx_t>(written) != size) {
+			throw IOException("bgzf_write failed (wrote %lld of %llu bytes)", static_cast<long long>(written),
+			                  static_cast<unsigned long long>(size));
+		}
+		return;
+	}
 	if (file_writer) {
 		file_writer->WriteData(data, size);
 	}
@@ -95,6 +143,14 @@ void CopyFileHandle::WriteString(const string &data) {
 }
 
 void CopyFileHandle::Close() {
+	if (bgzf_file) {
+		auto ret = bgzf_close(bgzf_file); // flushes pending blocks + writes BGZF EOF
+		bgzf_file = nullptr;
+		if (ret < 0) {
+			throw IOException("bgzf_close failed");
+		}
+		return;
+	}
 	if (file_writer) {
 		file_writer->Close();
 		file_writer.reset();
@@ -253,11 +309,16 @@ unique_ptr<GlobalFunctionData> SequenceCopyInitializeGlobal(ClientContext &conte
 	auto gstate = make_uniq<SequenceCopyGlobalState>();
 	gstate->fs = &fs;
 	gstate->compression = fdata.compression;
+	// Follow DuckDB's configured thread count for bgzf compression workers (only matters for the
+	// gzip path; ignored for uncompressed output). Split output opens two bgzf pools (R1 + R2), so
+	// halve the budget to avoid running ~2N deflate workers on an N-core host.
+	int db_threads = NumericCast<int>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+	gstate->compression_threads = (fdata.split_output && db_threads > 1) ? db_threads / 2 : db_threads;
 
 	// R1 is always written. SubstituteOrientation is a no-op when {ORIENTATION} is absent, so this
 	// resolves to the raw path for single-file/interleaved output and to the R1 file in split mode.
 	string path_r1 = SubstituteOrientation(file_path, "R1");
-	gstate->file_r1 = make_uniq<CopyFileHandle>(fs, path_r1, fdata.compression);
+	gstate->file_r1 = make_uniq<CopyFileHandle>(fs, path_r1, fdata.compression, gstate->compression_threads);
 
 	if (fdata.split_output) {
 		// R2 file is created lazily on the first non-NULL R2 record (see FlushR2Buffer), so a

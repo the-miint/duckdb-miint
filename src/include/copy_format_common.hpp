@@ -6,6 +6,9 @@
 #include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/common/enums/file_compression_type.hpp"
 
+// htslib's BGZF handle; defined in <htslib/bgzf.h>, only included in the .cpp.
+struct BGZF;
+
 namespace duckdb {
 
 //===--------------------------------------------------------------------===//
@@ -18,7 +21,11 @@ constexpr idx_t DEFAULT_COPY_FLUSH_SIZE = 1024 * 1024; // 1MB default buffer siz
 //===--------------------------------------------------------------------===//
 class CopyFileHandle {
 public:
-	CopyFileHandle(FileSystem &fs, const string &path, FileCompressionType compression);
+	// compression_threads > 1 enables htslib bgzf multithreaded compression for
+	// LOCAL gzip output (bgzf is gzip-compatible and bgzf_mt preserves block
+	// order). Uncompressed output and remote (scheme://) gzip targets keep the
+	// BufferedFileWriter path.
+	CopyFileHandle(FileSystem &fs, const string &path, FileCompressionType compression, int compression_threads = 1);
 	~CopyFileHandle();
 
 	void Write(const_data_ptr_t data, idx_t size);
@@ -26,8 +33,10 @@ public:
 	void Close();
 
 private:
+	// Exactly one is active for the handle's lifetime: bgzf_file for local gzip (htslib bgzf),
+	// file_writer for uncompressed output and the remote-gzip fallback.
 	unique_ptr<BufferedFileWriter> file_writer;
-	FileCompressionType compression;
+	struct ::BGZF *bgzf_file = nullptr;
 };
 
 //===--------------------------------------------------------------------===//
@@ -130,6 +139,9 @@ struct SequenceCopyGlobalState : public GlobalFunctionData {
 	FileSystem *fs = nullptr;
 	string r2_path;
 	FileCompressionType compression = FileCompressionType::UNCOMPRESSED;
+	// Worker threads for bgzf gzip compression (follows DuckDB's thread count);
+	// captured at global-init so the lazily-created R2 file uses the same value.
+	int compression_threads = 1;
 	// Consistency tracking across all threads: a single COPY must be either all single-end or
 	// all paired-end. Both set true -> inconsistent input (checked at finalize).
 	bool saw_paired = false;

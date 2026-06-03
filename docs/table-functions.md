@@ -5,7 +5,7 @@ Table functions allow querying bioinformatics files as SQL tables.
 ## Table of Contents
 
 - [`read_alignments`](#read_alignmentsfilename-reference_lengthstable_name-include_filepathfalse-include_seq_qualfalse) - SAM/BAM alignment files
-- [`read_fastx`](#read_fastxfilename-sequence2filename-include_filepathfalse-qual_offset33) - FASTA/FASTQ sequence files
+- [`read_fastx`](#read_fastxfilename-sequence2filename-include_filepathfalse-qual_offset33-max_batch_bytes512mib) - FASTA/FASTQ sequence files
 - [`read_sequences_sff`](#read_sequences_sfffilename-include_filepathfalse-trimtrue) - SFF (454/Roche) sequence files
 - [`read_mzml`](#read_mzmlfilename-include_filepathfalse) - mzML mass spectrometry files
 - [`read_mzxml`](#read_mzxmlfilename-include_filepathfalse) - mzXML mass spectrometry files
@@ -213,7 +213,7 @@ FROM alignment_slice('chr1_alns', 1000, 2000);
 - Multi-region slicing (different regions per reference) is not yet supported; use separate queries per region
 - `alignment_seq_identity` with the `'cigar'` method works on sliced output because it reads identity directly from `=`/`X` CIGAR ops without needing tags. Other methods (`gap_compressed`, `blast`, `gap_excluded`) require NM or MD tags which are NULLed after trimming.
 
-## `read_fastx(filename, [sequence2=filename], [include_filepath=false], [qual_offset=33])`
+## `read_fastx(filename, [sequence2=filename], [include_filepath=false], [qual_offset=33], [max_batch_bytes='512MiB'])`
 Read FASTA/FASTQ sequence files.
 
 **Parameters:**
@@ -224,6 +224,7 @@ Read FASTA/FASTQ sequence files.
   - **Paired-end with globs**: When `filename` is a glob pattern, `sequence2` must also be a glob pattern. Both are expanded and sorted independently, then paired by position. The expanded file counts must match.
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
 - `qual_offset` (INTEGER, optional, default 33): Quality score offset (33 for Phred+33, 64 for Phred+64)
+- `max_batch_bytes` (VARCHAR, optional, default `'512MiB'`): Soft cap on the uncompressed sequence+quality bytes buffered per output chunk, given as a formatted byte size (e.g. `'256MiB'`, `'2GB'`). The reader stops adding records to a chunk once their combined bytes reach this budget, which bounds memory when individual records are very large (e.g. assembled genomes at multiple MB each). Short-read data is unaffected — a chunk fills to the standard vector size long before the cap. Must be greater than 0.
 
 **Output schema:**
 - `sequence_index` (BIGINT): 1-based sequential index per file (resets to 1 for each file when reading multiple files)

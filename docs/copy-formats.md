@@ -30,7 +30,7 @@ Write query results to FASTQ format files. Requires `read_id`, `sequence1`, and 
 - `INCLUDE_COMMENT` (default: false): Include comment field in output
 - `ID_AS_SEQUENCE_INDEX` (default: false): Use `sequence_index` as identifier instead of `read_id`
 - `INTERLEAVE` (default: false): When the data is paired-end, write R1/R2 interleaved into a single file. Optional — see "Single-end vs paired-end output" below. Cannot be combined with the `{ORIENTATION}` placeholder.
-- `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension)
+- `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension). Local `.gz` output is written as **BGZF** (block-gzip via htslib): a fully standard gzip file readable by any gzip tool, but compressed in parallel — it follows DuckDB's thread count (`PRAGMA threads`) and runs ~10x faster than single-threaded gzip on multi-core hosts, while staying block-indexable. Output order is preserved. (Remote `scheme://` targets fall back to single-threaded gzip.)
 
 **Single-end vs paired-end output:**
 
@@ -91,7 +91,7 @@ Write query results to FASTA format files. Requires `read_id` and `sequence1` co
 - `INCLUDE_COMMENT` (default: false): Include comment field in output
 - `ID_AS_SEQUENCE_INDEX` (default: false): Use `sequence_index` as identifier instead of `read_id`
 - `INTERLEAVE` (default: false): When the data is paired-end, write R1/R2 interleaved into a single file. Optional — see "Single-end vs paired-end output" below. Cannot be combined with the `{ORIENTATION}` placeholder.
-- `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension)
+- `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension). Local `.gz` output is written as **BGZF** (block-gzip via htslib): a fully standard gzip file readable by any gzip tool, but compressed in parallel — it follows DuckDB's thread count (`PRAGMA threads`) and runs ~10x faster than single-threaded gzip on multi-core hosts, while staying block-indexable. Output order is preserved. (Remote `scheme://` targets fall back to single-threaded gzip.)
 
 **Single-end vs paired-end output:**
 
@@ -148,6 +148,7 @@ Write query results to SAM or BAM format files. Requires all mandatory SAM colum
 - `SEQUENCE_DATA` (VARCHAR, optional): Table or view name containing original read sequences from `read_fastx`. When provided, writes actual SEQ and QUAL fields into the output instead of `*`. See [Sequence Data](#sequence-data) below.
 - `COMPRESSION` (default: auto, SAM only): Enable gzip compression (auto-detected from `.gz` extension)
 - `COMPRESSION_LEVEL` (BAM only): BGZF compression level 0-9 (default: 6). Higher = better compression, slower speed.
+- **Multithreaded compression:** BAM and gzip-SAM output compress in parallel, following DuckDB's thread count (`PRAGMA threads`). Record order is preserved and the output is byte-identical to single-threaded writing. (The speedup is smaller than for FASTQ/FASTA because per-record marshalling is serialized; only the BGZF compression is parallelized.)
 
 **SAM Format Examples:**
 ```sql
