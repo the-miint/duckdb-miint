@@ -93,23 +93,28 @@ COPY (SELECT read_id FROM test_fasta_single) TO '__TEST_DIR__/error2.fa' (FORMAT
 ----
 COPY FORMAT FASTA requires 'sequence1' column
 
-# Test 10: Error - paired data without INTERLEAVE parameter
+# Test 10: Error - genuinely paired data sent to a single-file path
+# (no {ORIENTATION} to split into, INTERLEAVE not requested) -> fail loud with guidance
 statement error
 COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired) TO '__TEST_DIR__/error3.fa' (FORMAT FASTA);
 ----
-INTERLEAVE parameter required for paired-end data
+Use the {ORIENTATION} placeholder
 
-# Test 11: Error - paired data with INTERLEAVE=false but no {ORIENTATION}
+# Test 11: Error - explicit INTERLEAVE=false but no {ORIENTATION} for genuinely paired data.
 statement error
 COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired) TO '__TEST_DIR__/error4.fa' (FORMAT FASTA, INTERLEAVE false);
 ----
-{ORIENTATION} in file path
+Use the {ORIENTATION} placeholder
 
-# Test 12: Error - single-end data with {ORIENTATION}
-statement error
-COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single) TO '__TEST_DIR__/error5.{ORIENTATION}.fa' (FORMAT FASTA);
+# Test 12: Single-end data (no sequence2 column) + {ORIENTATION} now writes the R1 file only.
+statement ok
+COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) TO '__TEST_DIR__/output12.{ORIENTATION}.fa' (FORMAT FASTA);
+
+query II
+SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/output12.R1.fa') ORDER BY sequence_index;
 ----
-Single-end data cannot use {ORIENTATION}
+seq1	ATGCATGCATGC
+seq2	GGCCGGCCGGCC
 
 # Test 13: Error - ID_AS_SEQUENCE_INDEX without sequence_index column
 statement error
@@ -141,6 +146,56 @@ SELECT read_id, sequence1, comment FROM read_fastx('__TEST_DIR__/output_nulls.fa
 ----
 seq1	ATGCATGCATGC	NULL
 seq2	GGCCGGCCGGCC	NULL
+
+# Test 16: Problem #1 - selecting sequence2 from a single-end source yields a NULL sequence2
+# column. Writing to a plain path must produce a single-end file, not error.
+statement ok
+COPY (SELECT read_id, comment, sequence1, sequence2 FROM read_fastx('data/fastq/test.fa') ORDER BY sequence_index) TO '__TEST_DIR__/fa_p1.fa' (FORMAT FASTA);
+
+query III
+SELECT read_id, sequence1, comment FROM read_fastx('__TEST_DIR__/fa_p1.fa') ORDER BY sequence_index;
+----
+seq1	ATGCATGCATGC	NULL
+seq2	GGCCGGCCGGCC	NULL
+
+# Test 17: Problem #2 - paired data + {ORIENTATION} with NO INTERLEAVE parameter -> split R1/R2.
+statement ok
+COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired ORDER BY sequence_index) TO '__TEST_DIR__/fa_p2.{ORIENTATION}.fa' (FORMAT FASTA);
+
+query IIII
+SELECT sequence_index, read_id, sequence1, sequence2 FROM read_fastx('__TEST_DIR__/fa_p2.R1.fa', sequence2='__TEST_DIR__/fa_p2.R2.fa') ORDER BY sequence_index;
+----
+1	pair_a1	AAAA	TTTT
+
+# Test 18: Headline - NULL sequence2 column + {ORIENTATION} writes a single R1 file, no R2 file.
+statement ok
+COPY (SELECT read_id, comment, sequence1, sequence2 FROM read_fastx('data/fastq/test.fa') ORDER BY sequence_index) TO '__TEST_DIR__/fa_headline.{ORIENTATION}.fa' (FORMAT FASTA);
+
+query II
+SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/fa_headline.R1.fa') ORDER BY sequence_index;
+----
+seq1	ATGCATGCATGC
+seq2	GGCCGGCCGGCC
+
+statement error
+SELECT * FROM read_fastx('__TEST_DIR__/fa_headline.R2.fa');
+----
+
+# Test 19: Contradiction - {ORIENTATION} placeholder combined with INTERLEAVE=true.
+statement error
+COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired) TO '__TEST_DIR__/fa_contradiction.{ORIENTATION}.fa' (FORMAT FASTA, INTERLEAVE true);
+----
+Cannot combine the {ORIENTATION} placeholder with INTERLEAVE=true
+
+# Test 20: Mixed single-end and paired-end records in one COPY -> fail loud (inconsistent).
+statement error
+COPY (
+  SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired
+  UNION ALL
+  SELECT read_id, comment, sequence1, sequence2 FROM read_fastx('data/fastq/test.fa')
+) TO '__TEST_DIR__/fa_mixed.{ORIENTATION}.fa' (FORMAT FASTA);
+----
+Inconsistent paired-end data
 
 # Cleanup
 statement ok

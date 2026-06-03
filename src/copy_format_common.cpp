@@ -24,18 +24,12 @@ void FormatWriterState::Reset() {
 //===--------------------------------------------------------------------===//
 // Format Writer Helper Functions
 //===--------------------------------------------------------------------===//
-void FlushFormatBuffer(FormatWriterState &local_state, CopyFileHandle &file, mutex &lock) {
-	if (!local_state.written_anything) {
-		return;
-	}
-
-	lock_guard<mutex> glock(lock);
-
-	// Write accumulated buffer to file in <= 1 GiB slices. DuckDB's MiniZStreamWrapper
-	// (the gzip path) casts the write size to unsigned int internally, so a single write
-	// larger than 4 GiB throws "Information loss on integer cast". Chunking keeps every
-	// underlying compressor call within 32-bit bounds regardless of how much the local
-	// MemoryStream accumulated.
+// Write the accumulated local buffer to the file in <= 1 GiB slices, then reset the buffer.
+// Caller must hold the global lock. DuckDB's MiniZStreamWrapper (the gzip path) casts the write
+// size to unsigned int internally, so a single write larger than 4 GiB throws "Information loss
+// on integer cast". Chunking keeps every underlying compressor call within 32-bit bounds
+// regardless of how much the local MemoryStream accumulated.
+static void WriteBufferToFile(CopyFileHandle &file, FormatWriterState &local_state) {
 	constexpr idx_t MAX_WRITE_CHUNK = 1ULL * 1024 * 1024 * 1024; // 1 GiB
 	const_data_ptr_t data = local_state.stream->GetData();
 	idx_t remaining = local_state.stream->GetPosition();
@@ -49,6 +43,29 @@ void FlushFormatBuffer(FormatWriterState &local_state, CopyFileHandle &file, mut
 
 	// Reset local buffer
 	local_state.Reset();
+}
+
+void FlushFormatBuffer(FormatWriterState &local_state, CopyFileHandle &file, mutex &lock) {
+	if (!local_state.written_anything) {
+		return;
+	}
+
+	lock_guard<mutex> glock(lock);
+	WriteBufferToFile(file, local_state);
+}
+
+void FlushR2Buffer(FormatWriterState &local_state, SequenceCopyGlobalState &gstate) {
+	if (!local_state.written_anything) {
+		return;
+	}
+
+	lock_guard<mutex> glock(gstate.lock);
+	if (!gstate.file_r2) {
+		// First non-NULL R2 record across all threads -> create the R2 file now. This is what
+		// keeps an all-single-end dataset from producing an empty R2 file in split mode.
+		gstate.file_r2 = make_uniq<CopyFileHandle>(*gstate.fs, gstate.r2_path, gstate.compression);
+	}
+	WriteBufferToFile(*gstate.file_r2, local_state);
 }
 
 //===--------------------------------------------------------------------===//
@@ -206,20 +223,17 @@ void ValidateRequiredColumns(bool has_read_id, bool has_sequence1, const string 
 	}
 }
 
-void ValidatePairedEndParameters(bool is_paired, bool has_interleave_param, bool interleave, const string &file_path) {
-	// INTERLEAVE parameter required for paired-end data
-	if (is_paired && !has_interleave_param) {
-		throw BinderException("INTERLEAVE parameter required for paired-end data");
-	}
-
-	// Validate {ORIENTATION} usage
+void ResolveOutputMode(const string &file_path, bool interleave, bool &out_split_output) {
+	// The {ORIENTATION} placeholder is the split-vs-single switch. INTERLEAVE=true means "one file
+	// with R1/R2 alternating", which is the opposite of split output -- so the two are contradictory.
 	bool has_orientation = HasOrientationPlaceholder(file_path);
-	if (is_paired && !interleave && !has_orientation) {
-		throw BinderException("Paired-end data with INTERLEAVE=false requires {ORIENTATION} in file path");
+	if (has_orientation && interleave) {
+		throw BinderException(
+		    "Cannot combine the {ORIENTATION} placeholder with INTERLEAVE=true: use {ORIENTATION} in the path "
+		    "to write split R1/R2 files, or INTERLEAVE=true (without {ORIENTATION}) to interleave R1/R2 into a "
+		    "single file");
 	}
-	if (!is_paired && has_orientation) {
-		throw BinderException("Single-end data cannot use {ORIENTATION} in file path");
-	}
+	out_split_output = has_orientation;
 }
 
 void ValidateSequenceIndexParameter(bool id_as_sequence_index, bool has_sequence_index) {
@@ -237,19 +251,18 @@ unique_ptr<GlobalFunctionData> SequenceCopyInitializeGlobal(ClientContext &conte
 	auto &fs = FileSystem::GetFileSystem(context);
 
 	auto gstate = make_uniq<SequenceCopyGlobalState>();
-	gstate->is_paired = fdata.is_paired;
-	gstate->interleave = fdata.interleave;
+	gstate->fs = &fs;
+	gstate->compression = fdata.compression;
 
-	if (fdata.is_paired && !fdata.interleave) {
-		// Split mode: open two files
-		string path_r1 = SubstituteOrientation(file_path, "R1");
-		string path_r2 = SubstituteOrientation(file_path, "R2");
+	// R1 is always written. SubstituteOrientation is a no-op when {ORIENTATION} is absent, so this
+	// resolves to the raw path for single-file/interleaved output and to the R1 file in split mode.
+	string path_r1 = SubstituteOrientation(file_path, "R1");
+	gstate->file_r1 = make_uniq<CopyFileHandle>(fs, path_r1, fdata.compression);
 
-		gstate->file_r1 = make_uniq<CopyFileHandle>(fs, path_r1, fdata.compression);
-		gstate->file_r2 = make_uniq<CopyFileHandle>(fs, path_r2, fdata.compression);
-	} else {
-		// Interleaved or single-end: open one file
-		gstate->file_r1 = make_uniq<CopyFileHandle>(fs, file_path, fdata.compression);
+	if (fdata.split_output) {
+		// R2 file is created lazily on the first non-NULL R2 record (see FlushR2Buffer), so a
+		// single-end dataset written with {ORIENTATION} never produces an empty R2 file.
+		gstate->r2_path = SubstituteOrientation(file_path, "R2");
 	}
 
 	return gstate;
@@ -261,7 +274,7 @@ unique_ptr<LocalFunctionData> SequenceCopyInitializeLocal(ExecutionContext &cont
 
 	lstate->writer_state_r1 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
 
-	if (fdata.is_paired && !fdata.interleave) {
+	if (fdata.split_output) {
 		lstate->writer_state_r2 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
 	}
 
@@ -273,13 +286,26 @@ void SequenceCopyCombine(const SequenceCopyBindData &fdata, SequenceCopyGlobalSt
 	// Flush any remaining data in local buffers
 	FlushFormatBuffer(*lstate.writer_state_r1, *gstate.file_r1, gstate.lock);
 
-	if (fdata.is_paired && !fdata.interleave) {
-		FlushFormatBuffer(*lstate.writer_state_r2, *gstate.file_r2, gstate.lock);
+	if (fdata.split_output) {
+		FlushR2Buffer(*lstate.writer_state_r2, gstate);
 	}
+
+	// Publish this thread's single/paired observations for the cross-thread consistency check.
+	lock_guard<mutex> glock(gstate.lock);
+	gstate.saw_paired |= lstate.saw_paired;
+	gstate.saw_single |= lstate.saw_single;
 }
 
 void SequenceCopyFinalize(SequenceCopyGlobalState &gstate) {
 	lock_guard<mutex> glock(gstate.lock);
+
+	// A single COPY must be either all single-end or all paired-end. Seeing both means the input
+	// mixed paired and unpaired records, which would silently misalign split/interleaved output.
+	if (gstate.saw_paired && gstate.saw_single) {
+		throw InvalidInputException(
+		    "Inconsistent paired-end data: some records have sequence2 set and others do not. A single COPY must "
+		    "be either all single-end or all paired-end.");
+	}
 
 	if (gstate.file_r1) {
 		gstate.file_r1->Close();

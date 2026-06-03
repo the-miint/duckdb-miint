@@ -23,7 +23,8 @@ struct FastaCopyBindData : public SequenceCopyBindData {
 		result->compression = compression;
 		result->flush_size = flush_size;
 		result->file_path = file_path;
-		result->is_paired = is_paired;
+		result->has_r2_columns = has_r2_columns;
+		result->split_output = split_output;
 		result->names = names;
 		result->indices = indices;
 		// No FASTA-specific fields to copy
@@ -34,8 +35,8 @@ struct FastaCopyBindData : public SequenceCopyBindData {
 		auto &other = other_p.Cast<FastaCopyBindData>();
 		return interleave == other.interleave && id_as_sequence_index == other.id_as_sequence_index &&
 		       include_comment == other.include_comment && compression == other.compression &&
-		       file_path == other.file_path && is_paired == other.is_paired && flush_size == other.flush_size &&
-		       names == other.names;
+		       file_path == other.file_path && has_r2_columns == other.has_r2_columns &&
+		       split_output == other.split_output && flush_size == other.flush_size && names == other.names;
 	}
 };
 
@@ -59,18 +60,18 @@ static unique_ptr<FunctionData> FastaCopyBind(ClientContext &context, CopyFuncti
 	// Validate required columns
 	ValidateRequiredColumns(has_read_id, has_sequence1, "FASTA");
 
-	result->is_paired = has_sequence2;
+	// Column presence only; whether each record is actually paired is decided per-row at write
+	// time from sequence2 NULL-ness (read_fastx always emits sequence2, NULL for single-end).
+	result->has_r2_columns = has_sequence2;
 
 	// Parse common parameters
 	CommonCopyParameters common_params;
-	bool has_interleave_param = false;
 
 	for (auto &option : input.info.options) {
-		if (StringUtil::CIEquals(option.first, "interleave")) {
-			has_interleave_param = true;
-		} else if (!StringUtil::CIEquals(option.first, "id_as_sequence_index") &&
-		           !StringUtil::CIEquals(option.first, "include_comment") &&
-		           !StringUtil::CIEquals(option.first, "compression")) {
+		if (!StringUtil::CIEquals(option.first, "interleave") &&
+		    !StringUtil::CIEquals(option.first, "id_as_sequence_index") &&
+		    !StringUtil::CIEquals(option.first, "include_comment") &&
+		    !StringUtil::CIEquals(option.first, "compression")) {
 			throw BinderException("Unknown option for COPY FORMAT FASTA: %s", option.first);
 		}
 	}
@@ -83,8 +84,8 @@ static unique_ptr<FunctionData> FastaCopyBind(ClientContext &context, CopyFuncti
 	result->compression = common_params.compression;
 	result->flush_size = common_params.flush_size;
 
-	// Validate paired-end parameters
-	ValidatePairedEndParameters(result->is_paired, has_interleave_param, result->interleave, result->file_path);
+	// {ORIENTATION} in the path => split R1/R2 files; otherwise a single (optionally interleaved) file.
+	ResolveOutputMode(result->file_path, result->interleave, result->split_output);
 
 	// Validate sequence_index parameter
 	ValidateSequenceIndexParameter(result->id_as_sequence_index, has_sequence_index);
@@ -161,17 +162,16 @@ static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 	input.data[indices.sequence1_idx].ToUnifiedFormat(input.size(), seq1_data);
 	auto seq1_strings = UnifiedVectorFormat::GetData<string_t>(seq1_data);
 
-	bool is_paired = fdata.is_paired;
-	if (is_paired) {
+	// The schema may carry a sequence2 column even for single-end data (read_fastx always emits it
+	// as NULL). Whether a given row is paired is decided per-row below from sequence2 NULL-ness.
+	bool has_r2 = fdata.has_r2_columns;
+	if (has_r2) {
 		input.data[indices.sequence2_idx].ToUnifiedFormat(input.size(), seq2_data);
 	}
 
 	// Get references to local buffers
 	auto &stream_r1 = *lstate.writer_state_r1->stream;
-	MemoryStream *stream_r2 = nullptr;
-	if (is_paired && !fdata.interleave) {
-		stream_r2 = lstate.writer_state_r2->stream.get();
-	}
+	MemoryStream *stream_r2 = fdata.split_output ? lstate.writer_state_r2->stream.get() : nullptr;
 
 	// Build all records into local buffer(s) - NO LOCK.
 	// Hot-path rule: never call string_t::GetString() on the sequence -- it makes a heap
@@ -224,23 +224,36 @@ static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 		WriteFastaRecordToBuffer(stream_r1, id_ptr, id_size, seq1_ptr, seq1_size, comment_ptr, comment_size);
 		lstate.writer_state_r1->written_anything = true;
 
-		// Handle R2 for paired-end
-		if (is_paired) {
-			auto seq2_strings = UnifiedVectorFormat::GetData<string_t>(seq2_data);
+		// Handle R2. A record is paired iff sequence2 is non-NULL; a NULL sequence2 means a
+		// single-end record.
+		if (has_r2) {
 			auto seq2_row = seq2_data.sel->get_index(row);
-			if (!seq2_data.validity.RowIsValid(seq2_row)) {
-				throw InvalidInputException("NULL value in sequence2 column (row %llu)", row);
-			}
-			const char *seq2_ptr = seq2_strings[seq2_row].GetData();
-			idx_t seq2_size = seq2_strings[seq2_row].GetSize();
+			if (seq2_data.validity.RowIsValid(seq2_row)) {
+				lstate.saw_paired = true;
 
-			if (fdata.interleave) {
-				// Write R2 to same buffer
-				WriteFastaRecordToBuffer(stream_r1, id_ptr, id_size, seq2_ptr, seq2_size, comment_ptr, comment_size);
+				auto seq2_strings = UnifiedVectorFormat::GetData<string_t>(seq2_data);
+				const char *seq2_ptr = seq2_strings[seq2_row].GetData();
+				idx_t seq2_size = seq2_strings[seq2_row].GetSize();
+
+				if (fdata.split_output) {
+					// Write R2 to the separate R2 buffer (file created lazily on first flush).
+					WriteFastaRecordToBuffer(*stream_r2, id_ptr, id_size, seq2_ptr, seq2_size, comment_ptr,
+					                         comment_size);
+					lstate.writer_state_r2->written_anything = true;
+				} else if (fdata.interleave) {
+					// Write R2 interleaved into the same buffer as R1.
+					WriteFastaRecordToBuffer(stream_r1, id_ptr, id_size, seq2_ptr, seq2_size, comment_ptr,
+					                         comment_size);
+				} else {
+					// Single-file output but this record is paired and there is nowhere to put R2.
+					throw InvalidInputException(
+					    "Row %llu has paired-end data (sequence2 is set) but the output is a single file. Use the "
+					    "{ORIENTATION} placeholder in the output path to write split R1/R2 files, or set "
+					    "INTERLEAVE=true to interleave R1/R2 into one file.",
+					    row);
+				}
 			} else {
-				// Write R2 to separate buffer
-				WriteFastaRecordToBuffer(*stream_r2, id_ptr, id_size, seq2_ptr, seq2_size, comment_ptr, comment_size);
-				lstate.writer_state_r2->written_anything = true;
+				lstate.saw_single = true;
 			}
 		}
 
@@ -252,7 +265,7 @@ static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 			FlushFormatBuffer(*lstate.writer_state_r1, *gstate.file_r1, gstate.lock);
 		}
 		if (stream_r2 && lstate.writer_state_r2->stream->GetPosition() >= lstate.writer_state_r2->flush_size) {
-			FlushFormatBuffer(*lstate.writer_state_r2, *gstate.file_r2, gstate.lock);
+			FlushR2Buffer(*lstate.writer_state_r2, gstate);
 		}
 	}
 }
