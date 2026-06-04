@@ -65,12 +65,14 @@ option(MIINT_ENABLE_SORTMERNA "Build with SortMeRNA rRNA alignment support" ON)
 option(MIINT_ENABLE_GPL_BOUNDARY "Build with gpl-boundary subsystem (process pipes + Arrow IPC over POSIX shm)" ON)
 option(MIINT_ENABLE_UNIFRAC "Build with UniFrac (PCoA / PERMANOVA / Faith PD) support" ON)
 
-# libdeflate: opt-in, Linux-only accelerator for htslib bgzf gzip (FASTQ/FASTA/BAM COPY).
-# Default OFF — new static dependency (see feedback_prefer_embedded_libs); the parallel-bgzf
-# win only matters on multi-core hosts. Hard-gated to Linux: the Windows htslib build is a
-# hand-written config.h/config.mk (no autotools autodetect) and wasm_eh is single-threaded
-# in-browser, so neither benefits. Flip default to ON later to ship it in the Linux distro.
-option(MIINT_ENABLE_LIBDEFLATE "Build htslib bgzf with libdeflate (Linux only)" OFF)
+# libdeflate: Linux-only accelerator for htslib bgzf gzip (FASTQ/FASTA/BAM COPY).
+# Default ON so the shipped Linux binary actually gets the win (~3x over zlib-parallel bgzf,
+# ~37x over the original single-threaded gzip writer; measured 2026-06-03). Hard-gated to
+# Linux below: the Windows htslib build is a hand-written config.h/config.mk (no autotools
+# autodetect) and wasm_eh is single-threaded in-browser, so neither benefits — the gate
+# force-disables them. A missing vcpkg port also soft-disables (find_package below), so
+# default-ON degrades gracefully everywhere it can't apply.
+option(MIINT_ENABLE_LIBDEFLATE "Build htslib bgzf with libdeflate (Linux only)" ON)
 if(MIINT_ENABLE_LIBDEFLATE AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(STATUS "MIINT_ENABLE_LIBDEFLATE only supported on Linux; disabling here")
     set(MIINT_ENABLE_LIBDEFLATE OFF)
