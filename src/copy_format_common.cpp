@@ -1,5 +1,6 @@
 #include "copy_format_common.hpp"
 #include "remote_file_helper.hpp"
+#include "bgzf_write_mode.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/numeric_utils.hpp"
@@ -89,11 +90,11 @@ CopyFileHandle::CopyFileHandle(FileSystem &fs, const string &path, FileCompressi
 	// the same RemoteFileHelper::IsRemotePath test the reader (read_fastx) uses so writer and reader
 	// agree on what counts as local.
 	if (compression_p == FileCompressionType::GZIP && !miint::RemoteFileHelper::IsRemotePath(path)) {
-		// "wx6" = write, exclusive-create (O_EXCL), gzip level 6. The 'x' makes the create atomic and
-		// fail loudly if the file exists, preserving the FILE_CREATE_NEW contract of the
-		// BufferedFileWriter path without a TOCTOU; '6' matches DuckDB's MZ_DEFAULT_LEVEL.
+		// BgzfWriteMode picks "wx6" for regular files (atomic no-clobber/no-TOCTOU, the
+		// FILE_CREATE_NEW contract) and "w6" for stdout / pipes / devices, which always exist and
+		// would otherwise fail O_EXCL with EEXIST. bgzf_open maps "-" (and /dev/stdout) to stdout.
 		errno = 0;
-		bgzf_file = bgzf_open(path.c_str(), "wx6");
+		bgzf_file = bgzf_open(path.c_str(), miint::BgzfWriteMode(path));
 		if (!bgzf_file) {
 			if (errno == EEXIST) {
 				throw IOException("Failed to open \"%s\" for writing: file already exists", path);

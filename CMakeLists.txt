@@ -1494,6 +1494,7 @@ set(TEST_SOURCES
     src/SequenceReader.cpp
     test/cpp/test_SequenceReader.cpp
     test/cpp/test_DuckDBSeqStream.cpp
+    test/cpp/test_CopyFileHandlePipe.cpp
     src/QualScore.cpp
     test/cpp/test_QualScore.cpp
     src/qc_algorithms.cpp
