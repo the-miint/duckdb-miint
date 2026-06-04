@@ -1,0 +1,3 @@
+# Benchmark inputs/outputs are large and machine-specific; keep them local.
+data/
+results/

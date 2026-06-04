@@ -30,9 +30,13 @@ extern thread_local std::string g_seq_read_error;
 // read error, or — critically — EOF reached before Z_STREAM_END, which means the gzip
 // stream was truncated).
 //
-// `stream_end` tracks whether Z_STREAM_END has been observed across calls. Once set, the
-// function returns 0 cleanly on subsequent invocations rather than treating the trailing
-// "no input, no output" state as truncation. Caller initializes to false.
+// `stream_end` tracks whether the FINAL gzip member has ended. gzip is a concatenation of
+// members (BGZF/block-gzip emits one member per ~64 KiB block, and tools like `cat a.gz b.gz`
+// produce multi-member files), so a single Z_STREAM_END is a member boundary, not necessarily
+// end-of-file: this helper resets and continues into the next member, matching zlib's gzread.
+// Only once no further gzip member follows is `stream_end` set; subsequent calls then return 0
+// cleanly rather than treating the trailing "no input, no output" state as truncation. Caller
+// initializes to false.
 template <typename ReadRawFn>
 int InflateFromSource(z_stream &zs, char *compressed_buf, size_t buf_size, int &compressed_avail,
                       char *&compressed_next, bool &input_eof, bool &stream_end, ReadRawFn read_raw, void *dst,
@@ -72,6 +76,39 @@ int InflateFromSource(z_stream &zs, char *compressed_buf, size_t buf_size, int &
 		compressed_next += consumed;
 
 		if (ret == Z_STREAM_END) {
+			// Member boundary, not necessarily EOF. gzip is concatenated members and BGZF emits
+			// one per block, so continue into the next member instead of stopping at the first
+			// boundary (the bug that silently truncated bgzf .gz to its first ~64 KiB block when
+			// read through this path). A new member starts with the gzip magic 0x1f 0x8b; anything
+			// else (or no more input) is the true end -- and trailing non-gzip padding is tolerated,
+			// not treated as corruption, matching zlib's gzread.
+			// The 2 magic bytes can straddle a read (and a read may return fewer bytes than asked),
+			// so keep compacting the leftover to the front and topping up until we have both bytes
+			// or hit EOF.
+			while (compressed_avail < 2 && !input_eof) {
+				for (int k = 0; k < compressed_avail; k++) {
+					compressed_buf[k] = compressed_next[k];
+				}
+				compressed_next = compressed_buf;
+				auto n = read_raw(compressed_buf + compressed_avail, buf_size - static_cast<size_t>(compressed_avail));
+				if (n < 0) {
+					return -1;
+				}
+				if (n == 0) {
+					input_eof = true;
+				} else {
+					compressed_avail += static_cast<int>(n);
+				}
+			}
+			bool next_is_gzip_member = compressed_avail >= 2 &&
+			                           static_cast<unsigned char>(compressed_next[0]) == 0x1f &&
+			                           static_cast<unsigned char>(compressed_next[1]) == 0x8b;
+			if (next_is_gzip_member) {
+				if (inflateReset(&zs) != Z_OK) {
+					return -1;
+				}
+				continue; // decode the next member into the same output buffer
+			}
 			stream_end = true;
 			break;
 		}

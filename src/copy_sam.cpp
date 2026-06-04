@@ -9,8 +9,10 @@
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
 #include "duckdb/function/copy_function.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 #include <htslib-1.22.1/htslib/sam.h>
 #include <htslib-1.22.1/htslib/hts.h>
 #include <unordered_map>
@@ -402,6 +404,18 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 	gstate->sam_file = SAMFilePtr(sam_open(file_path.c_str(), mode.c_str()));
 	if (!gstate->sam_file) {
 		throw IOException("Failed to open file for writing: " + file_path);
+	}
+
+	// Offload bgzf compression to a worker pool for BAM / gzip-SAM output. htslib
+	// writes the compressed blocks in record order regardless of pool size, so the
+	// output is byte-identical to the single-threaded path -- just faster.
+	// Uncompressed SAM ("w") has nothing to compress, so threads add no value.
+	bool compressed_output = fdata.format == SAMOutputFormat::BAM || fdata.use_gzip;
+	if (compressed_output) {
+		auto n_threads = NumericCast<int>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+		if (n_threads > 1) {
+			hts_set_threads(gstate->sam_file.get(), n_threads);
+		}
 	}
 
 	// Create header from reference_lengths if provided, otherwise create empty header
