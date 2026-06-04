@@ -65,6 +65,28 @@ option(MIINT_ENABLE_SORTMERNA "Build with SortMeRNA rRNA alignment support" ON)
 option(MIINT_ENABLE_GPL_BOUNDARY "Build with gpl-boundary subsystem (process pipes + Arrow IPC over POSIX shm)" ON)
 option(MIINT_ENABLE_UNIFRAC "Build with UniFrac (PCoA / PERMANOVA / Faith PD) support" ON)
 
+# libdeflate: opt-in, Linux-only accelerator for htslib bgzf gzip (FASTQ/FASTA/BAM COPY).
+# Default OFF — new static dependency (see feedback_prefer_embedded_libs); the parallel-bgzf
+# win only matters on multi-core hosts. Hard-gated to Linux: the Windows htslib build is a
+# hand-written config.h/config.mk (no autotools autodetect) and wasm_eh is single-threaded
+# in-browser, so neither benefits. Flip default to ON later to ship it in the Linux distro.
+option(MIINT_ENABLE_LIBDEFLATE "Build htslib bgzf with libdeflate (Linux only)" OFF)
+if(MIINT_ENABLE_LIBDEFLATE AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(STATUS "MIINT_ENABLE_LIBDEFLATE only supported on Linux; disabling here")
+    set(MIINT_ENABLE_LIBDEFLATE OFF)
+endif()
+if(MIINT_ENABLE_LIBDEFLATE)
+    find_package(libdeflate CONFIG QUIET)
+    if(TARGET libdeflate::libdeflate_static)
+        set(LIBDEFLATE_TARGET libdeflate::libdeflate_static)
+    elseif(TARGET libdeflate::libdeflate_shared)
+        set(LIBDEFLATE_TARGET libdeflate::libdeflate_shared)
+    else()
+        message(WARNING "MIINT_ENABLE_LIBDEFLATE=ON but no libdeflate package found; disabling")
+        set(MIINT_ENABLE_LIBDEFLATE OFF)
+    endif()
+endif()
+
 # libssu_inmem.a / libskbb_inmem.a are compiled with -fopenmp; the final
 # extension must resolve their OpenMP runtime symbols (__kmpc_*, omp_*).
 #
@@ -279,8 +301,8 @@ message(STATUS "Submodule versions: minimap2=${MINIMAP2_GIT_VERSION} WFA2=${WFA2
 
 # Build htslib from release tarball
 # Configure with zstd support if available (htslib autodetects via pkg-config)
-if(HAVE_LIBZSTD)
-    # Set PKG_CONFIG_PATH so htslib configure can find zstd
+if(HAVE_LIBZSTD OR MIINT_ENABLE_LIBDEFLATE)
+    # Set PKG_CONFIG_PATH so htslib configure can find zstd / libdeflate
     set(HTSLIB_PKG_CONFIG_PATH "PKG_CONFIG_PATH=${CMAKE_CURRENT_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib/pkgconfig")
 else()
     set(HTSLIB_PKG_CONFIG_PATH "")
@@ -365,6 +387,20 @@ else()
     message(WARNING "Could not determine explicit ZLIB library file for HTSlib")
 endif()
 
+# libdeflate (Linux opt-in): point htslib's configure at the vcpkg-installed headers
+# and lib. htslib probes libdeflate via AC_CHECK_HEADER/AC_CHECK_LIB (not pkg-config),
+# so feed -I/-L directly rather than trusting libdeflate.pc. --with-libdeflate makes it
+# mandatory: configure errors loudly if not found (Rule 10) instead of silently using zlib.
+if(MIINT_ENABLE_LIBDEFLATE)
+    set(HTSLIB_VCPKG_ROOT ${CMAKE_CURRENT_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET})
+    set(HTSLIB_CFLAGS  "${HTSLIB_CFLAGS} -I${HTSLIB_VCPKG_ROOT}/include")
+    set(HTSLIB_LDFLAGS "${HTSLIB_LDFLAGS} -L${HTSLIB_VCPKG_ROOT}/lib")
+    set(HTSLIB_LIBDEFLATE_FLAG --with-libdeflate)
+    message(STATUS "HTSlib will build WITH libdeflate from ${HTSLIB_VCPKG_ROOT}")
+else()
+    set(HTSLIB_LIBDEFLATE_FLAG --without-libdeflate)
+endif()
+
 if(WIN32)
     # Windows/MinGW: skip autotools configure (requires full MSYS2 shell which is
     # not available in DuckDB's rtools42 CI environment). Instead, generate config.h
@@ -429,7 +465,7 @@ else()
             --disable-libcurl
             --disable-bz2
             --disable-lzma
-            --without-libdeflate
+            ${HTSLIB_LIBDEFLATE_FLAG}
         BUILD_COMMAND ${HTSLIB_BUILD_COMMAND}
         INSTALL_COMMAND ${HTSLIB_INSTALL_COMMAND}
         BUILD_IN_SOURCE 0
@@ -1226,6 +1262,10 @@ endif()
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_HDF5)
 endif()
+if(MIINT_ENABLE_LIBDEFLATE)
+    # Include dirs propagate from the linked imported target's interface.
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_LIBDEFLATE)
+endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_SORTMERNA)
 endif()
@@ -1326,6 +1366,10 @@ endif()
 if(HAVE_LIBZSTD)
     target_link_libraries(${EXTENSION_NAME} ${ZSTD_TARGET})
 endif()
+# libdeflate appended AFTER the hts-containing block above, so -ldeflate follows -lhts.
+if(MIINT_ENABLE_LIBDEFLATE)
+    target_link_libraries(${EXTENSION_NAME} ${LIBDEFLATE_TARGET})
+endif()
 
 target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE RYPE_ARROW
     MIINT_STATIC_BUILD
@@ -1348,6 +1392,9 @@ if(MIINT_ENABLE_ABPOA)
 endif()
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_HDF5)
+endif()
+if(MIINT_ENABLE_LIBDEFLATE)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_LIBDEFLATE)
 endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_SORTMERNA)
@@ -1418,6 +1465,9 @@ elseif(UNIX)
 endif()
 if(HAVE_LIBZSTD)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} ${ZSTD_TARGET})
+endif()
+if(MIINT_ENABLE_LIBDEFLATE)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} ${LIBDEFLATE_TARGET})
 endif()
 # The loadable extension is dlopen'd at runtime. When the host DuckDB is loaded
 # via Python (RTLD_LOCAL), duckdb_je_* symbols from the host are not visible.
@@ -1665,6 +1715,9 @@ if(MIINT_ENABLE_VSEARCH AND MIINT_ENABLE_CURL AND UNIX AND NOT APPLE)
 endif()
 if(HAVE_LIBZSTD)
     target_link_libraries(tests ${ZSTD_TARGET})
+endif()
+if(MIINT_ENABLE_LIBDEFLATE)
+    target_link_libraries(tests ${LIBDEFLATE_TARGET})
 endif()
 if(MIINT_ENABLE_UNIFRAC)
     target_include_directories(tests PRIVATE

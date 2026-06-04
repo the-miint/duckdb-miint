@@ -2,6 +2,7 @@
   "dependencies": [
     "zlib",
     "zstd",
+    { "name": "libdeflate", "platform": "linux" },
     "expat",
     "openssl",
     "curl",

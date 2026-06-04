@@ -93,6 +93,9 @@
 #include <htslib-1.22.1/htslib/hts.h>
 #include <kseq++/config.hpp>
 #include <zlib.h>
+#ifdef MIINT_HAS_LIBDEFLATE
+#include <libdeflate.h>
+#endif
 
 #ifdef MIINT_HAS_HDF5
 #include <copy_biom.hpp>
@@ -173,6 +176,9 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 #endif
 #endif
 	data->versions.emplace_back("zlib", zlibVersion());
+#ifdef MIINT_HAS_LIBDEFLATE
+	data->versions.emplace_back("libdeflate", LIBDEFLATE_VERSION_STRING);
+#endif
 #ifdef MIINT_HAS_CURL
 	data->versions.emplace_back("libcurl", miint::GetCurlVersion());
 #endif
