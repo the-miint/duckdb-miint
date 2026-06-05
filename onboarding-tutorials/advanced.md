@@ -18,9 +18,7 @@ duckdb -c "
 INSTALL httpfs; LOAD httpfs;
 INSTALL miint FROM community; LOAD miint;
 SELECT count(*) AS n_reads
-FROM read_fastx(
-    'https://ftp.sra.ebi.ac.uk/vol1/run/ERR107/ERR1074767/10317.000004216.fastq.gz'
-);
+FROM read_ena_sequences('ERR1074767');
 "
 ```
 
@@ -43,21 +41,15 @@ INSTALL httpfs; LOAD httpfs;
 INSTALL miint FROM community; LOAD miint;
 
 COPY (
-    SELECT * FROM read_fastx(
-        'https://ftp.sra.ebi.ac.uk/vol1/run/ERR107/ERR1074767/10317.000004216.fastq.gz'
-    ) WHERE sequence_index % 3 = 0
+    SELECT * FROM read_ena_sequences('ERR1074767') WHERE sequence_index % 3 = 0
 ) TO '${OUTDIR}/sample_a.parquet' (FORMAT parquet);
 
 COPY (
-    SELECT * FROM read_fastx(
-        'https://ftp.sra.ebi.ac.uk/vol1/run/ERR107/ERR1074767/10317.000004216.fastq.gz'
-    ) WHERE sequence_index % 3 = 1
+    SELECT * FROM read_ena_sequences('ERR1074767') WHERE sequence_index % 3 = 1
 ) TO '${OUTDIR}/sample_b.parquet' (FORMAT parquet);
 
 COPY (
-    SELECT * FROM read_fastx(
-        'https://ftp.sra.ebi.ac.uk/vol1/run/ERR107/ERR1074767/10317.000004216.fastq.gz'
-    ) WHERE sequence_index % 3 = 2
+    SELECT * FROM read_ena_sequences('ERR1074767') WHERE sequence_index % 3 = 2
 ) TO '${OUTDIR}/sample_c.parquet' (FORMAT parquet);
 "
 ```
@@ -159,9 +151,7 @@ CREATE TABLE ref_genome AS
 
 CREATE TABLE reads AS
     SELECT *
-    FROM read_fastx(
-        'https://ftp.sra.ebi.ac.uk/vol1/run/ERR107/ERR1074767/10317.000004216.fastq.gz'
-    );
+    FROM read_ena_sequences('ERR1074767');
 
 CREATE TABLE alignments AS
     SELECT *
@@ -269,7 +259,7 @@ FROM alignments a
 LEFT JOIN rrna_16s r
   ON a.position >= r.gene_start
  AND a.stop_position <= r.gene_end
-WHERE a.read_id = '10317.000004216_6975'
+WHERE a.read_id = 'ERR1074767.6976'
 ORDER BY alignment_is_primary(a.flags) DESC, a.position;
 ```
 
@@ -389,7 +379,7 @@ WHERE alignment_is_primary(flags)
 
 | read_id | position | cigar |
 |---|---|---|
-| 10317.000004216_6599 | 1565200 | 151= |
+| ERR1074767.6600 | 1565200 | 151= |
 
 Unlike the 16S reads, which have multiple secondary alignments across operons,
 this read has **no secondary alignments** &mdash; the DosP location is its
@@ -402,7 +392,7 @@ SELECT alignment_is_primary(flags) AS is_primary,
        round(alignment_seq_identity(cigar, tag_nm, tag_md, 'blast'), 3)
            AS identity
 FROM alignments
-WHERE read_id = '10317.000004216_6599'
+WHERE read_id = 'ERR1074767.6600'
 ORDER BY position;
 ```
 

@@ -66,13 +66,12 @@ K-12 MG1655 complete genome (4,641,652 bp).
 ```sql
 CREATE TABLE reads AS
     SELECT *
-    FROM read_fastx(
-        'https://ftp.sra.ebi.ac.uk/vol1/run/ERR107/ERR1074767/10317.000004216.fastq.gz'
-    );
+    FROM read_ena_sequences('ERR1074767');
 ```
 
-This loads all 20,939 reads into memory. For larger files you could query the
-file directly, but loading into a table avoids re-downloading on every query.
+This loads all 20,939 reads into memory. For larger runs you could query
+`read_ena_sequences` directly, but loading into a table avoids re-downloading on
+every query.
 
 ## Step 2: Align reads to the reference
 
