@@ -71,22 +71,22 @@ SQL it uses. For a broader introduction, see DuckDB's
 ## Reading a FASTQ file
 
 The
-[`read_fastx`](../docs/table-functions.md#read_fastxfilename-sequence2filename-include_filepathfalse-qual_offset33)
-table function reads FASTA and FASTQ files. It works with local paths, glob
-patterns, and HTTPS URLs. Let's read an amplicon sequencing run from the
-[American Gut Project](https://americangut.org/) (McDonald et al., 2018):
+[`read_ena_sequences`](../docs/table-functions.md#read_ena_sequencesaccession-include_filepathfalse-qual_offset33-max_sequences0)
+table function streams FASTA/FASTQ data straight from the European Nucleotide
+Archive (ENA) given a run, sample, study, or experiment accession &mdash; it
+looks up the download URLs for you, so you never have to hardcode a file path.
+Let's read an amplicon sequencing run from the
+[American Gut Project](https://americangut.org/) (McDonald et al., 2018), ENA
+run [`ERR1074767`](https://www.ebi.ac.uk/ena/browser/view/ERR1074767):
 
 ```python
-FASTQ_URL = (
-    "https://ftp.sra.ebi.ac.uk/vol1/run/ERR107/"
-    "ERR1074767/10317.000004216.fastq.gz"
-)
+ACCESSION = "ERR1074767"
 
 df = con.sql(f"""
     SELECT read_id,
            comment,
            sequence1
-    FROM read_fastx('{FASTQ_URL}')
+    FROM read_ena_sequences('{ACCESSION}')
     LIMIT 5
 """).df()
 
@@ -97,8 +97,9 @@ Let's break this query down:
 
 - **`SELECT read_id, comment, sequence1`** &mdash; we want three columns from
   each sequencing read.
-- **`FROM read_fastx(...)`** &mdash; the data comes from a FASTQ file. `read_fastx`
-  is a miint function that opens the file and presents each read as a row.
+- **`FROM read_ena_sequences(...)`** &mdash; the data comes from an ENA run.
+  `read_ena_sequences` resolves the accession to its FASTQ download(s) and
+  presents each read as a row.
 - **`LIMIT 5`** &mdash; only return the first five reads (useful for a quick peek).
 
 The columns are:
@@ -106,12 +107,13 @@ The columns are:
 | Column | Description |
 |---|---|
 | `read_id` | Unique identifier for the read |
-| `comment` | Header metadata (here, barcode information) |
+| `comment` | Header metadata (here, the original submission read name) |
 | `sequence1` | The nucleotide sequence (A, C, G, T) |
 
-There are additional columns such as `qual1` (per-base quality scores) and
-`sequence_index` (0-based read number) &mdash; see the
-[`read_fastx` reference](../docs/table-functions.md#read_fastxfilename-sequence2filename-include_filepathfalse-qual_offset33)
+There are additional columns such as `qual1` (per-base quality scores),
+`sequence_index` (1-based read number), and the `run_accession` /
+`sample_accession` / `experiment_accession` provenance columns &mdash; see the
+[`read_ena_sequences` reference](../docs/table-functions.md#read_ena_sequencesaccession-include_filepathfalse-qual_offset33-max_sequences0)
 for the full schema.
 
 ## How many reads are there?
@@ -126,7 +128,7 @@ counts = con.sql(f"""
     SELECT count(*) AS n_reads,
            min(len(sequence1)) AS min_length,
            max(len(sequence1)) AS max_length
-    FROM read_fastx('{FASTQ_URL}')
+    FROM read_ena_sequences('{ACCESSION}')
 """).df()
 
 print(counts)
@@ -146,16 +148,16 @@ Every base call in a FASTQ file has an associated
 score of 30 means a 1-in-1,000 chance the base call is wrong; 40 means
 1-in-10,000.
 
-`read_fastx` returns quality scores as a list of integers in the `qual1`
-column. We can compute the mean quality per read and bring the result into
-pandas:
+`read_ena_sequences` returns quality scores as a list of integers in the
+`qual1` column. We can compute the mean quality per read and bring the result
+into pandas:
 
 ```python
 quality = con.sql(f"""
     SELECT read_id,
            round(list_aggregate(qual1, 'avg'), 1)
                AS mean_quality
-    FROM read_fastx('{FASTQ_URL}')
+    FROM read_ena_sequences('{ACCESSION}')
 """).df()
 
 print(quality.describe())
@@ -203,7 +205,7 @@ gc = con.sql(f"""
                len(replace(replace(upper(sequence1), 'A', ''), 'T', ''))
                * 100.0 / len(sequence1),
            1) AS gc_pct
-    FROM read_fastx('{FASTQ_URL}')
+    FROM read_ena_sequences('{ACCESSION}')
 """).df()
 
 fig, ax = plt.subplots(figsize=(8, 4))
@@ -241,7 +243,7 @@ con.sql(f"""
                sequence1,
                round(list_aggregate(qual1, 'avg'), 1)
                    AS mean_quality
-        FROM read_fastx('{FASTQ_URL}')
+        FROM read_ena_sequences('{ACCESSION}')
     ) TO '{parquet_path}' (FORMAT parquet)
 """)
 
@@ -265,7 +267,7 @@ print(df.head())
 ## What's next?
 
 You've learned how to:
-- Read a remote FASTQ file into a pandas DataFrame
+- Read a sequencing run directly from ENA into a pandas DataFrame
 - Compute per-read quality and GC content
 - Save processed data to Parquet
 
