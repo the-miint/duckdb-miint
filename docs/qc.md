@@ -19,6 +19,7 @@ over any source of sequence + quality data — typically [`read_fastx`](table-fu
 | `trim_polyg(seq, qual [, min_len, max_mm, max_window_mean_q])` | trim struct | 3' polyG run trim (NextSeq dark-cycle cleanup), optionally quality-gated |
 | `trim_polyx(seq, qual [, min_len, max_mm])` | trim struct | 3' generic homopolymer trim (any most-frequent base) |
 | `trim_adapters(seq, qual, adapter [, match_revcomp, min_match, allow_pre_start])` | trim struct | 3-phase adapter match (Hamming + 1-insert + 1-delete); `adapter` is `VARCHAR` or `LIST(VARCHAR)` |
+| `trim_adapters_pe(seq1, qual1, seq2, qual2 [, adapters, overlap_require, overlap_diff_limit, overlap_diff_percent_limit, match_revcomp, min_match, allow_pre_start])` | PE trim struct | fastp paired-end overlap adapter trim: infer the insert from the R1/revcomp(R2) overlap; 11-arg form adds an adapter-by-sequence fallback |
 | `filter_read(seq, qual [, min_length, max_length, qualified_q, max_unqualified_pct, max_n, min_avg_q])` | filter struct | Per-read pass/fail with metrics |
 | `qc_version()` | `VARCHAR` | Version string |
 
@@ -44,6 +45,11 @@ always `0` for `trim_quality_3p`, `trim_polyg`, `trim_polyx`, and
 `trim_adapters`. Don't `SUM((t).trimmed_5p)` across a 3'-only pipeline
 expecting non-zero — it's structurally zero.
 
+`trim_adapters_pe` is the exception to this layout: it operates on a read
+*pair* and returns a wider paired struct (`sequence1`/`quality1`/`sequence2`/
+`quality2` plus `overlap_len`, `adapter_trimmed`, `trimmed1_3p`, `trimmed2_3p`).
+See [its reference](#trim_adapters_peseq1-qual1-seq2-qual2--adapters-overlap_require-overlap_diff_limit-overlap_diff_percent_limit-match_revcomp-min_match-allow_pre_start) below.
+
 `filter_read` returns:
 
 | Field | Type | Meaning |
@@ -60,19 +66,27 @@ in SQL by any combination of fields without re-walking the bases.
 
 ## Canonical pipeline
 
-The fastp-recommended order is: adapter trim → polyG → quality trim → filter.
-In SQL, chain the scalars through aliases in a single `WITH` and access
-struct fields via `(alias).field`:
+fastp applies its per-read steps in a fixed internal order: **sliding-window
+quality cut → polyG → adapter → polyX → per-read filter**. Of these, only
+adapter trimming and the per-read filter are **on by default**. polyG
+auto-enables for two-color instruments (NextSeq / NovaSeq) and is otherwise
+off; the sliding-window quality cuts (`cut_front` / `cut_tail` / `cut_right`)
+and polyX are **opt-in**. So the default fastp pipeline effectively reduces to
+**polyG (two-color only) → adapter → filter**.
+
+In SQL, chain the scalars through aliases in a single `WITH` and access struct
+fields via `(alias).field`. The example follows fastp's order and includes the
+opt-in quality cut for illustration:
 
 ```sql
 WITH pipeline AS (
     SELECT
         sequence_index,
         read_id,
-        trim_adapters(sequence1, qual1, 'AGATCGGAAGAGC')        AS t1,
-        trim_polyg((t1).sequence, (t1).quality)                 AS t2,
-        trim_quality_3p((t2).sequence, (t2).quality, 4, 20)     AS t3,
-        filter_read((t3).sequence, (t3).quality)                AS f
+        trim_quality_3p(sequence1, qual1, 4, 20)                    AS t1,  -- opt-in (cut_tail); off in fastp default
+        trim_polyg((t1).sequence, (t1).quality)                     AS t2,  -- auto-on for two-color instruments only
+        trim_adapters((t2).sequence, (t2).quality, 'AGATCGGAAGAGC')  AS t3,
+        filter_read((t3).sequence, (t3).quality)                    AS f
     FROM read_fastx('reads.fastq.gz')
 )
 SELECT
@@ -85,10 +99,14 @@ FROM pipeline
 WHERE (f).passed;
 ```
 
+For paired-end reads, prefer `trim_adapters_pe` (reference below) in place of a
+per-mate `trim_adapters`: it infers the adapter boundary from the R1 / R2
+overlap, which is fastp's primary and most accurate PE adapter mechanism.
+
 Each scalar is invoked exactly once per row. DuckDB's CSE optimizer
 deduplicates repeated struct extractions automatically, so accessing
 `(t1).sequence` and `(t1).quality` and `(t1).trimmed_3p` does not
-re-evaluate `trim_adapters`.
+re-evaluate `trim_quality_3p`.
 
 ### Stats and summaries
 
@@ -175,19 +193,75 @@ that finds a match (and within a phase, the leftmost match):
 `adapter` is either a single `VARCHAR` or a `LIST(VARCHAR)`. When a list,
 all adapters (and their reverse complements if `match_revcomp=true`) are
 tried; the **leftmost** trim point across all candidate matches wins —
-i.e. the most aggressive trim.
+i.e. the most aggressive trim. Exact-duplicate candidates (including RC pairs
+that collapse to the same string) are deduplicated *after* `min_match` is
+fixed — a matching-cost saving that never changes the result — and the search
+stops early once a candidate matches at position 0 (the leftmost possible
+trim, so no remaining candidate can beat it).
 
 Defaults:
 - `match_revcomp=false`. fastp expects `--adapter_sequence_r2` to be the
   pre-RC'd adapter; we offer the convenience flag instead.
 - `min_match=0` → auto-scale (4 for 1 candidate, 5 for 2–3, 6 for ≥4).
-  Pass `min_match >= 1` to override. fastp auto-scales silently; we expose
-  it.
+  The count is taken **after** reverse-complement expansion but **before**
+  dedup, so with `match_revcomp=true` the candidate set is doubled before the
+  tier is chosen and enabling RC matching can bump `min_match` up a tier (e.g.
+  2 adapters → 4 candidates → 6). Pass `min_match >= 1` to override. fastp
+  auto-scales silently; we expose it.
 - `allow_pre_start=false`. fastp's negative-offset start handling is on
   unconditionally to accommodate Illumina A-tailing; we made it opt-in
   because non-Illumina protocols don't need it and it can over-trim.
   When enabled and a pre-start match is found, `trim_start=0` is returned —
   the entire read should be dropped.
+
+### `trim_adapters_pe(seq1, qual1, seq2, qual2 [, adapters, overlap_require, overlap_diff_limit, overlap_diff_percent_limit, match_revcomp, min_match, allow_pre_start])`
+
+Paired-end adapter trimming by insert-size inference — fastp's primary PE
+adapter mechanism (`OverlapAnalysis`). Reverse-complements R2, scans for the
+offset that aligns it against R1, and — when the inferred insert is *shorter*
+than the read length, so each mate reads through into adapter past the overlap
+— trims both mates back to the insert.
+
+Two overloads:
+
+- **4-arg** `(seq1, qual1, seq2, qual2)` — overlap-only, fastp defaults
+  (`overlap_len_require=30`, `overlap_diff_limit=5`,
+  `overlap_diff_percent_limit=20`). No adapter-by-sequence fallback.
+- **11-arg** `(…, adapters, overlap_require, overlap_diff_limit,
+  overlap_diff_percent_limit, match_revcomp, min_match, allow_pre_start)` —
+  overlap analysis first; if it does **not** trim and `adapters` (a
+  `LIST(VARCHAR)`) is non-empty, fall back to per-mate adapter-by-sequence
+  using the same matcher as `trim_adapters` (leftmost match wins, same
+  `match_revcomp` / `min_match` / `allow_pre_start` semantics). This mirrors
+  fastp's overlap step → by-sequence fallback. The adapter list and all tuning
+  params must be **constant** expressions — they are resolved once at bind time;
+  a column reference throws.
+
+Returns a `STRUCT`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `sequence1` | `VARCHAR` | Trimmed R1 sequence |
+| `quality1` | `LIST(UTINYINT)` | Trimmed R1 quality, in lockstep with `sequence1` |
+| `sequence2` | `VARCHAR` | Trimmed R2 sequence |
+| `quality2` | `LIST(UTINYINT)` | Trimmed R2 quality, in lockstep with `sequence2` |
+| `overlap_len` | `INTEGER` | Width of the detected overlap (`0` if none) |
+| `adapter_trimmed` | `BOOLEAN` | Whether any adapter was trimmed (by overlap or by fallback) |
+| `trimmed1_3p` | `UINTEGER` | Bases removed from the R1 3' end |
+| `trimmed2_3p` | `UINTEGER` | Bases removed from the R2 3' end |
+
+`overlap_len` is the overlap-analysis result and is **independent of the trim
+source**: it is non-zero for a full-insert overlap at offset ≥ 0 (where
+`adapter_trimmed` is `false`, because neither mate reads into adapter), and a
+row trimmed by the 11-arg adapter-by-sequence fallback still reports whatever
+overlap width analysis found. Overlap trimming is 3'-only on both mates, so
+there is no `trimmed_5p`.
+
+The overlap path is **byte-for-byte parity** with native fastp 1.3.3
+(`test/sql/qc_trim_adapters_pe_parity.test`, a committed frozen golden — fastp
+need not be installed to run it). See the divergence notes below for the
+no-gap and `complete_compare_require=50` caveats, and for the fallback's
+matcher-divergence on ambiguous cases.
 
 ### `filter_read(seq, qual [, min_length, max_length, qualified_q, max_unqualified_pct, max_n, min_avg_q])`
 
@@ -215,6 +289,8 @@ Defaults: `min_length=15`, `max_length=0` (off), `qualified_q=15`,
 | `trim_adapters` | `allow_pre_start` opt-in default off | fastp's always-on negative-offset can over-trim non-Illumina reads |
 | `trim_adapters` | `min_match` exposed | fastp's silent auto-scale is unintuitive when tuning |
 | `trim_adapters` | Exhaustive indel-position search | fastp's greedy commit produces false negatives when a sequencing error precedes the true indel site |
+| `trim_adapters_pe` | Overlap analysis is **no-gap only** | fastp's one-gap overlap path is deferred (backlogged); the no-gap path covers the overwhelming majority of real overlaps |
+| `trim_adapters_pe` | 11-arg fallback uses miint's adapter matcher | The overlap path is byte-for-byte fastp parity; the by-sequence fallback matches fastp on clean exact-adapter cases but inherits `trim_adapters`' leftmost/exhaustive-indel behavior, so it can diverge on ambiguous mismatch/indel cases |
 | `filter_read` | All metrics in return struct, single fail reason | Richer audit than fastp's enum return; `WHERE` clause can filter on individual metrics |
 | All | Input validation at scalar boundary | fastp accepts whatever C-string lengths it's handed; we throw on `seq.length() != qual.length()` and on invalid IUPAC bases |
 | All | `window_size` capped at 1..1000 | Matches fastp's documented range; prevents integer overflow in window-sum math |
@@ -231,6 +307,12 @@ maintain bit-for-bit parity in the common case:
   rarely produces visible defects, but it can cause spurious refusals to
   trim when the read prefix is itself mostly non-G. fastp v0.23+ behaves
   the same way.
+
+- **`trim_adapters_pe` overlap acceptance is decided on only the first 50
+  overlapping bases** (fastp's `complete_compare_require=50`), but for an
+  accepted overlap longer than 50 the reported `diff` (mismatch count) is the
+  *full* count over the whole overlap, which can exceed `overlap_diff_limit`.
+  This is a fastp quirk, ported faithfully to keep byte-for-byte parity.
 
 ## Related — long-read amplicon / UMI primitives
 
@@ -257,7 +339,12 @@ into a Karst-protocol UMI consensus pipeline:
 - SIMD-vectorized `filter_read` metric pass (currently scalar; profile
   before optimizing).
 - Aho-Corasick multi-adapter matcher for very large adapter lists
-  (50+ adapters) — current implementation is O(adapters × read_len × adapter_len).
+  (50+ adapters) — current implementation is O(candidates × read_len ×
+  adapter_len) after exact-duplicate dedup and the position-0 early-exit.
+  Collapsing prefix/substring-redundant candidates is also still backlogged:
+  it is unsafe under the per-length mismatch budget (a shorter candidate can
+  match where its longer superstring would not), so only *exact* duplicates
+  are removed.
 - Integration test on a real-world FASTQ at ≥1M reads to verify end-to-end
   throughput and numerical stability. The current `qc_pipeline.test`
   fixture (30 reads) gives bit-for-bit ground-truth verification at toy

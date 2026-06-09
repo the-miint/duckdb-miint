@@ -10,7 +10,7 @@ Scalar functions for alignment analysis and sequence processing.
 - [`cigar_query_length`](#cigar_query_lengthcigar-include_hard_clipstrue) - Query length from CIGAR
 - [`cigar_query_coverage`](#cigar_query_coveragecigar-typealigned) - Query coverage from CIGAR
 - [`mask_dust`](#mask_dustsequence-hardmaskfalse) - DUST low-complexity masking
-- [QC functions](qc.md) - Adapter / polyG / polyX / quality trimming and per-read filtering (fastp port)
+- [QC functions](qc.md) - Adapter (single + paired-end) / polyG / polyX / quality trimming and per-read filtering (fastp port)
 - [`merge_pairs_vsearch`](#merge_pairsfwd_seq-fwd_qual-rev_seq-rev_qual-options) - Paired-end read merging
 - [`extract_linked_amplicon`](#extract_linked_ampliconseq-qual-anchor5-anchor3-min_len-max_len-error_rate-min_overlap) - Cut out the interior between two flanking adapters (cutadapt `-g X...Y` equivalent; `^`/`$` sigils select anchored mode)
 - [`phylogeny_fasttree_available`](#phylogeny_fasttree_available) - Probe for the gpl-boundary daemon at runtime
