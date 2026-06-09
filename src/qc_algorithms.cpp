@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
+#include <string>
 
 namespace miint::qc {
 
@@ -423,6 +425,133 @@ AdapterMatch AdapterMatcher::find(const std::uint8_t *seq, std::size_t seq_len, 
 		return m;
 	}
 	return phase_indel(seq, seq_len, adapter, adapter_len, min_match, start_pos, /*insertion_in_seq=*/false);
+}
+
+// ---------------------------------------------------------------------------
+// OverlapAnalyzer — paired-end overlap analysis (fastp port)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// fastp's complement: A<->T, C<->G; any other byte (incl. 'N', lowercase, IUPAC
+// ambiguity codes) maps to 'N'. Overlap comparison is raw byte equality, so two
+// 'N's match but 'N' vs a base does not — exactly fastp's behavior.
+inline char overlap_complement(char b) {
+	switch (b) {
+	case 'A':
+		return 'T';
+	case 'T':
+		return 'A';
+	case 'C':
+		return 'G';
+	case 'G':
+		return 'C';
+	default:
+		return 'N';
+	}
+}
+
+// Mismatch count over [0, len), early-exiting once it exceeds `limit` (callers
+// only test `> limit`, so the exact value past that point is irrelevant).
+inline int count_mismatches_bounded(const char *a, const char *b, int len, int limit) {
+	int mm = 0;
+	for (int i = 0; i < len; i++) {
+		if (a[i] != b[i] && ++mm > limit) {
+			break;
+		}
+	}
+	return mm;
+}
+
+inline int count_mismatches(const char *a, const char *b, int len) {
+	int mm = 0;
+	for (int i = 0; i < len; i++) {
+		if (a[i] != b[i]) {
+			mm++;
+		}
+	}
+	return mm;
+}
+
+// fastp's complete_compare_require: acceptance is judged on at most this many
+// leading bases of the overlap.
+constexpr int kCompleteCompareRequire = 50;
+
+// Accept the [a, a+len) vs [b, b+len) overlap iff its mismatch count within the
+// first min(len, 50) bases does not exceed `diff_limit`, writing the mismatch
+// count to `mm`. For an accepted overlap longer than 50 bases `mm` is updated to
+// the FULL count (fastp judges acceptance on only the first 50 — see header).
+inline bool accept_no_gap(const char *a, const char *b, int len, int diff_limit, int &mm) {
+	const int prefix = std::min(len, kCompleteCompareRequire);
+	mm = count_mismatches_bounded(a, b, prefix, diff_limit);
+	if (mm > diff_limit) {
+		return false;
+	}
+	if (len > kCompleteCompareRequire) {
+		mm = count_mismatches(a, b, len);
+	}
+	return true;
+}
+
+} // namespace
+
+OverlapResult OverlapAnalyzer::analyze(const char *seq1, std::size_t len1_sz, const char *seq2, std::size_t len2_sz,
+                                       int diff_limit, int overlap_require, int diff_percent_limit) {
+	OverlapResult ov;
+
+	// Degenerate / out-of-range inputs have no meaningful overlap. The scalar
+	// layer also validates user-supplied params, but guarding here keeps the
+	// pure function safe: avoids signed overflow from the size_t->int casts and
+	// the nonsense zero-length "overlap" a non-positive overlap_require would
+	// otherwise accept in the reverse scan.
+	if (overlap_require <= 0 || diff_limit < 0 || len1_sz > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+	    len2_sz > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+		return ov;
+	}
+
+	const int len1 = static_cast<int>(len1_sz);
+	const int len2 = static_cast<int>(len2_sz);
+
+	// fastp aligns R1 against the reverse complement of R2.
+	std::string rc(static_cast<std::size_t>(len2), 'N');
+	for (int i = 0; i < len2; i++) {
+		rc[static_cast<std::size_t>(i)] = overlap_complement(seq2[len2 - 1 - i]);
+	}
+	const char *str1 = seq1;
+	const char *str2 = rc.c_str();
+
+	const double diff_percent = static_cast<double>(diff_percent_limit) / 100.0;
+
+	// Forward: revcomp(R2) shifted right by `offset` along R1 (offset >= 0).
+	for (int offset = 0; offset < len1 - overlap_require; offset++) {
+		const int overlap_len = std::min(len1 - offset, len2);
+		const int limit = std::min(diff_limit, static_cast<int>(overlap_len * diff_percent));
+		int mm = 0;
+		if (accept_no_gap(str1 + offset, str2, overlap_len, limit, mm)) {
+			ov.overlapped = true;
+			ov.offset = offset;
+			ov.overlap_len = overlap_len;
+			ov.diff = mm;
+			return ov;
+		}
+	}
+
+	// Reverse: revcomp(R2) shifted left (offset < 0) — the insert is shorter than
+	// the read, so each mate reads through into adapter past the overlap.
+	for (int offset = 0; offset > -(len2 - overlap_require); offset--) {
+		const int overlap_len = std::min(len1, len2 + offset); // offset < 0: len2 - |offset|
+		const int limit = std::min(diff_limit, static_cast<int>(overlap_len * diff_percent));
+		int mm = 0;
+		if (accept_no_gap(str1, str2 - offset, overlap_len, limit, mm)) { // str2 + |offset|
+			ov.overlapped = true;
+			ov.offset = offset;
+			ov.overlap_len = overlap_len;
+			ov.diff = mm;
+			return ov;
+		}
+	}
+
+	return ov;
 }
 
 // ---------------------------------------------------------------------------
