@@ -7,6 +7,7 @@
 #include "sequence_utils.hpp"
 #include "table_function_common.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -503,6 +504,146 @@ static void TrimAdaptersListExecute(DataChunk &args, ExpressionState &state, Vec
 }
 
 // ---------------------------------------------------------------------------
+// trim_adapters_pe
+// ---------------------------------------------------------------------------
+
+// fastp's default paired-end overlap-analysis parameters
+// (--overlap_len_require / --overlap_diff_limit / --overlap_diff_percent_limit).
+static constexpr int32_t DEFAULT_PE_OVERLAP_REQUIRE = 30;
+static constexpr int32_t DEFAULT_PE_OVERLAP_DIFF_LIMIT = 5;
+static constexpr int32_t DEFAULT_PE_OVERLAP_DIFF_PERCENT = 20;
+
+static LogicalType TrimAdaptersPeResultStructType() {
+	return LogicalType::STRUCT({{"sequence1", LogicalType::VARCHAR},
+	                            {"quality1", LogicalType::LIST(LogicalType::UTINYINT)},
+	                            {"sequence2", LogicalType::VARCHAR},
+	                            {"quality2", LogicalType::LIST(LogicalType::UTINYINT)},
+	                            // overlap_len is the detected overlap width; it is nonzero even when
+	                            // adapter_trimmed is false (a full-insert overlap at offset >= 0).
+	                            {"overlap_len", LogicalType::INTEGER},
+	                            {"adapter_trimmed", LogicalType::BOOLEAN},
+	                            {"trimmed1_3p", LogicalType::UINTEGER},
+	                            {"trimmed2_3p", LogicalType::UINTEGER}});
+}
+
+// Write one trimmed mate into its (sequence, quality) output pair. The kept
+// range is [0, keep_len) of both seq and qual (overlap trimming is 3'-only).
+// The caller must have reserved enough quality child-buffer capacity up front.
+static void WritePeMate(idx_t i, const string_t &seq, const uint8_t *qptr, idx_t keep_len, Vector &seq_out_vec,
+                        Vector &qual_out_vec, list_entry_t *qual_entries, uint8_t *qual_child,
+                        idx_t &qual_child_offset) {
+	FlatVector::GetData<string_t>(seq_out_vec)[i] = StringVector::AddString(seq_out_vec, seq.GetData(), keep_len);
+	std::memcpy(qual_child + qual_child_offset, qptr, keep_len);
+	qual_entries[i].offset = qual_child_offset;
+	qual_entries[i].length = keep_len;
+	qual_child_offset += keep_len;
+	ListVector::SetListSize(qual_out_vec, qual_child_offset);
+}
+
+// trim_adapters_pe(seq1, qual1, seq2, qual2): infer the insert boundary from the
+// R1 / revcomp(R2) overlap (fastp's primary PE adapter mechanism) and trim both
+// mates to the insert when each read through into adapter. Uses fastp's default
+// overlap parameters.
+static void TrimAdaptersPeExecute(DataChunk &args, ExpressionState &state, Vector &result) {
+	const idx_t row_count = args.size();
+
+	UnifiedVectorFormat seq1_data, qual1_data, seq2_data, qual2_data;
+	args.data[0].ToUnifiedFormat(row_count, seq1_data);
+	args.data[1].ToUnifiedFormat(row_count, qual1_data);
+	args.data[2].ToUnifiedFormat(row_count, seq2_data);
+	args.data[3].ToUnifiedFormat(row_count, qual2_data);
+
+	auto seq1_ptr = UnifiedVectorFormat::GetData<string_t>(seq1_data);
+	auto seq2_ptr = UnifiedVectorFormat::GetData<string_t>(seq2_data);
+
+	auto &entries = StructVector::GetEntries(result);
+	auto &seq1_out = *entries[0];
+	auto &qual1_out = *entries[1];
+	auto &seq2_out = *entries[2];
+	auto &qual2_out = *entries[3];
+	auto overlap_len_data = FlatVector::GetData<int32_t>(*entries[4]);
+	auto adapter_trimmed_data = FlatVector::GetData<bool>(*entries[5]);
+	auto trimmed1_data = FlatVector::GetData<uint32_t>(*entries[6]);
+	auto trimmed2_data = FlatVector::GetData<uint32_t>(*entries[7]);
+	auto &result_validity = FlatVector::Validity(result);
+
+	auto qual1_entries = FlatVector::GetData<list_entry_t>(qual1_out);
+	auto qual2_entries = FlatVector::GetData<list_entry_t>(qual2_out);
+	idx_t qual1_off = ListVector::GetListSize(qual1_out);
+	idx_t qual2_off = ListVector::GetListSize(qual2_out);
+	// Trimmed output is at most as long as the input quality, so one reserve per
+	// mate before the row loop eliminates per-row reallocations.
+	ListVector::Reserve(qual1_out, qual1_off + ListVector::GetListSize(args.data[1]));
+	ListVector::Reserve(qual2_out, qual2_off + ListVector::GetListSize(args.data[3]));
+	// Both Reserves happen before either child pointer is taken, and no Reserve
+	// runs inside the row loop (WritePeMate only SetListSize, which never
+	// reallocates), so these cached child pointers stay valid for the whole chunk.
+	auto qual1_child = FlatVector::GetData<uint8_t>(ListVector::GetEntry(qual1_out));
+	auto qual2_child = FlatVector::GetData<uint8_t>(ListVector::GetEntry(qual2_out));
+
+	for (idx_t i = 0; i < row_count; i++) {
+		auto s1i = seq1_data.sel->get_index(i);
+		auto q1i = qual1_data.sel->get_index(i);
+		auto s2i = seq2_data.sel->get_index(i);
+		auto q2i = qual2_data.sel->get_index(i);
+
+		if (!seq1_data.validity.RowIsValid(s1i) || !qual1_data.validity.RowIsValid(q1i) ||
+		    !seq2_data.validity.RowIsValid(s2i) || !qual2_data.validity.RowIsValid(q2i)) {
+			result_validity.SetInvalid(i);
+			qual1_entries[i].offset = qual1_off;
+			qual1_entries[i].length = 0;
+			qual2_entries[i].offset = qual2_off;
+			qual2_entries[i].length = 0;
+			continue;
+		}
+
+		const auto &seq1 = seq1_ptr[s1i];
+		const auto &seq2 = seq2_ptr[s2i];
+		const uint8_t *q1ptr;
+		const uint8_t *q2ptr;
+		idx_t q1len, q2len;
+		GetListUInt8Slice(args.data[1], qual1_data, i, q1ptr, q1len);
+		GetListUInt8Slice(args.data[3], qual2_data, i, q2ptr, q2len);
+		if (seq1.GetSize() != q1len) {
+			throw InvalidInputException(
+			    "trim_adapters_pe: read 1 sequence length (%llu) does not match quality length (%llu)",
+			    (unsigned long long)seq1.GetSize(), (unsigned long long)q1len);
+		}
+		if (seq2.GetSize() != q2len) {
+			throw InvalidInputException(
+			    "trim_adapters_pe: read 2 sequence length (%llu) does not match quality length (%llu)",
+			    (unsigned long long)seq2.GetSize(), (unsigned long long)q2len);
+		}
+
+		const auto ov = miint::qc::OverlapAnalyzer::analyze(
+		    seq1.GetData(), seq1.GetSize(), seq2.GetData(), seq2.GetSize(), DEFAULT_PE_OVERLAP_DIFF_LIMIT,
+		    DEFAULT_PE_OVERLAP_REQUIRE, DEFAULT_PE_OVERLAP_DIFF_PERCENT);
+
+		idx_t keep1 = seq1.GetSize();
+		idx_t keep2 = seq2.GetSize();
+		bool adapter_trimmed = false;
+		// offset < 0 means the insert is shorter than the read: each mate reads
+		// through into adapter past the overlap, so trim both to the insert.
+		// (overlap_len > 0 holds for any offset<0 result from OverlapAnalyzer; the
+		// explicit check guards the unsigned cast against a degenerate result.)
+		if (ov.overlapped && ov.offset < 0 && ov.overlap_len > 0) {
+			const idx_t ol = static_cast<idx_t>(ov.overlap_len);
+			keep1 = std::min(keep1, ol);
+			keep2 = std::min(keep2, ol);
+			adapter_trimmed = true;
+		}
+
+		overlap_len_data[i] = ov.overlapped ? ov.overlap_len : 0;
+		adapter_trimmed_data[i] = adapter_trimmed;
+		trimmed1_data[i] = static_cast<uint32_t>(seq1.GetSize() - keep1);
+		trimmed2_data[i] = static_cast<uint32_t>(seq2.GetSize() - keep2);
+
+		WritePeMate(i, seq1, q1ptr, keep1, seq1_out, qual1_out, qual1_entries, qual1_child, qual1_off);
+		WritePeMate(i, seq2, q2ptr, keep2, seq2_out, qual2_out, qual2_entries, qual2_child, qual2_off);
+	}
+}
+
+// ---------------------------------------------------------------------------
 // filter_read
 // ---------------------------------------------------------------------------
 
@@ -778,6 +919,19 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 		                         TrimResultStructType(), TrimAdaptersListExecute);
 		list_6arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 		set.AddFunction(list_6arg);
+
+		loader.RegisterFunction(set);
+	}
+
+	// trim_adapters_pe: 4-arg overlap-only form (fastp PE defaults).
+	{
+		ScalarFunctionSet set("trim_adapters_pe");
+		const auto qual_t = LogicalType::LIST(LogicalType::UTINYINT);
+
+		ScalarFunction four_arg("trim_adapters_pe", {LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR, qual_t},
+		                        TrimAdaptersPeResultStructType(), TrimAdaptersPeExecute);
+		four_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		set.AddFunction(four_arg);
 
 		loader.RegisterFunction(set);
 	}

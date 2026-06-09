@@ -1,0 +1,31 @@
+# name: test/sql/qc_trim_adapters_pe_parity.test
+# description: trim_adapters_pe reproduces native fastp 1.3.3 overlap-based PE adapter trimming
+# group: [sql]
+
+require miint
+
+# Compares trim_adapters_pe against the FROZEN native-fastp golden committed in
+# data/qc (produced once with fastp 1.3.3 using only overlap-based PE adapter
+# trimming — see test/scripts/generate_qc_pe_fixtures.py for the exact command).
+# Runs unconditionally: the golden is committed, so fastp need not be installed.
+#
+# read_fastx(r1, sequence2 := r2) pairs the mates and strips the /1,/2 suffix
+# from read_id, so the input and golden join directly on read_id.
+query TT
+WITH inp AS (
+    SELECT read_id, trim_adapters_pe(sequence1, qual1, sequence2, qual2) AS t
+    FROM read_fastx('data/qc/pe_overlap.r1.fq', sequence2 := 'data/qc/pe_overlap.r2.fq')
+),
+gold AS (
+    SELECT read_id, sequence1 AS gs1, qual1 AS gq1, sequence2 AS gs2, qual2 AS gq2
+    FROM read_fastx('data/qc/pe_overlap.golden.r1.fq', sequence2 := 'data/qc/pe_overlap.golden.r2.fq')
+)
+SELECT inp.read_id,
+       ((inp.t).sequence1 = gs1 AND (inp.t).quality1 = gq1
+        AND (inp.t).sequence2 = gs2 AND (inp.t).quality2 = gq2)::VARCHAR AS matches_fastp
+FROM inp JOIN gold USING (read_id)
+ORDER BY inp.read_id
+----
+pair1_readthrough36	true
+pair2_fullinsert60	true
+pair3_readthrough45	true
