@@ -1,0 +1,63 @@
+# name: test/sql/uchime_denovo_uuid.test
+# description: detect_chimera_uchime_denovo accepts a UUID id_col; all id columns mirror it.
+# group: [sql]
+
+#   UUID round-trips through the int128 carrier like BIGINT through decimal.
+#   Mirrors uchime_denovo_bigint: single id source, read_id and all three parent
+#   columns mirror the UUID type, the non-chimeric NULL parent mask survives the
+#   typed egress, and the resolved parents round-trip to the UUID seq ids.
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+# Map seq1 .. seq6 to distinct UUIDs (...0001 .. ...0006); seq4 is the chimera.
+statement ok
+CREATE TABLE denovo_uuid AS
+SELECT
+    (CASE regexp_extract(read_id, '^([^;]+)', 1)
+       WHEN 'seq1' THEN '00000000-0000-0000-0000-000000000001'
+       WHEN 'seq2' THEN '00000000-0000-0000-0000-000000000002'
+       WHEN 'seq3' THEN '00000000-0000-0000-0000-000000000003'
+       WHEN 'seq4' THEN '00000000-0000-0000-0000-000000000004'
+       WHEN 'seq5' THEN '00000000-0000-0000-0000-000000000005'
+       WHEN 'seq6' THEN '00000000-0000-0000-0000-000000000006' END)::UUID AS read_id,
+    sequence1,
+    CAST(regexp_extract(read_id, 'size=(\d+)', 1) AS INTEGER) AS size
+FROM read_fastx('data/uchime/denovo_input.fasta');
+
+# read_id and all three parent columns mirror the UUID id_col type.
+query TTTT
+SELECT typeof(read_id), typeof(parent_a_id), typeof(parent_b_id), typeof(closest_parent_id)
+FROM detect_chimera_uchime_denovo('denovo_uuid')
+LIMIT 1;
+----
+UUID	UUID	UUID	UUID
+
+# Detection unchanged: 6 rows, 2 chimeras.
+query II
+SELECT count(*), count(*) FILTER (WHERE flag = 'Y')
+FROM detect_chimera_uchime_denovo('denovo_uuid');
+----
+6	2
+
+# Chimeric seq (...0004): read_id round-trips and parents resolve to the UUID
+# ids of seq1/seq2; closest_parent is populated.
+query TTTT
+SELECT read_id, parent_a_id, parent_b_id, closest_parent_id IS NOT NULL
+FROM detect_chimera_uchime_denovo('denovo_uuid')
+WHERE read_id = '00000000-0000-0000-0000-000000000004';
+----
+00000000-0000-0000-0000-000000000004	00000000-0000-0000-0000-000000000001	00000000-0000-0000-0000-000000000002	true
+
+# Non-chimeric seq (...0001): NULL parent mask preserved under UUID egress.
+query TTTT
+SELECT read_id, parent_a_id, parent_b_id, closest_parent_id
+FROM detect_chimera_uchime_denovo('denovo_uuid')
+WHERE read_id = '00000000-0000-0000-0000-000000000001';
+----
+00000000-0000-0000-0000-000000000001	NULL	NULL	NULL
+
+# --- Cleanup ---
+statement ok
+DROP TABLE denovo_uuid;

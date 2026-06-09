@@ -110,12 +110,12 @@ void DecodeListQualToPhred33(const Value &v, const char *col_name, const std::st
 // daemon's wire schema.
 // Emit one DuckDB chunk's worth of rows from a decoded Arrow batch into
 // `output`. `query_id_type` drives `read_id`; `subject_id_type` drives
-// `reference` and `mate_reference`. Both must be VARCHAR or BIGINT. For
-// BIGINT subjects, the SAM "=" mate-reference sentinel is resolved to the
-// row's reference value before invoking the codec (the literal "=" has no
-// BIGINT encoding); VARCHAR output preserves "=" verbatim, matching
-// pre-existing user-observable behavior. No defaults — every caller must
-// explicitly commit to id types.
+// `reference` and `mate_reference`. Both must be VARCHAR, BIGINT, or UUID. For
+// non-VARCHAR (BIGINT/UUID) subjects, the SAM "=" mate-reference sentinel is
+// resolved to the row's reference value before invoking the codec (the literal
+// "=" has no BIGINT/UUID encoding); VARCHAR output preserves "=" verbatim,
+// matching pre-existing user-observable behavior. No defaults — every caller
+// must explicitly commit to id types.
 void EmitChunkRows(DataChunk &output, idx_t to_emit, idx_t row_start, const ArrowArray &batch,
                    const LogicalType &query_id_type, const LogicalType &subject_id_type);
 

@@ -65,7 +65,7 @@ statement error
 SELECT * FROM align_sortmerna(
     'smr_q_integer', ref_paths := ['ext/sortmerna/data/test_ref.fasta']);
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID
 
 statement ok
 CREATE TABLE smr_q_hugeint (read_id HUGEINT, sequence1 VARCHAR);
@@ -74,7 +74,7 @@ statement error
 SELECT * FROM align_sortmerna(
     'smr_q_hugeint', ref_paths := ['ext/sortmerna/data/test_ref.fasta']);
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID
 
 statement ok
 CREATE TABLE smr_q_double (read_id DOUBLE, sequence1 VARCHAR);
@@ -83,7 +83,7 @@ statement error
 SELECT * FROM align_sortmerna(
     'smr_q_double', ref_paths := ['ext/sortmerna/data/test_ref.fasta']);
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID
 
 # ---------------------------------------------------------------------------
 # Empty BIGINT input → zero rows, no crash.

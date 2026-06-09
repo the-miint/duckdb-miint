@@ -1,0 +1,77 @@
+# name: test/sql/uchime_denovo_bigint.test
+# description: detect_chimera_uchime_denovo accepts a BIGINT id_col; all id columns mirror it.
+# group: [sql]
+
+#   denovo has a single id source (id_col), so read_id and the three parent
+#   columns all mirror that one type. Detection is label-agnostic, so the flags
+#   and resolved parents match the VARCHAR fixture; only the id type changes. The
+#   non-chimeric NULL parent mask must survive the typed egress, and the abundance
+#   (;size=) handling must not collide with a numeric id (count comes from a
+#   separate column).
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+# Map seq1->1 ... seq6->6; size parsed from the original ;size= header into a
+# separate column. seq4 is a chimera of seq1+seq2 (vsearch v2.30.5 ground truth).
+statement ok
+CREATE TABLE denovo_bigint AS
+SELECT
+    (CASE regexp_extract(read_id, '^([^;]+)', 1)
+       WHEN 'seq1' THEN 1 WHEN 'seq2' THEN 2 WHEN 'seq3' THEN 3
+       WHEN 'seq4' THEN 4 WHEN 'seq5' THEN 5 WHEN 'seq6' THEN 6 END)::BIGINT AS read_id,
+    sequence1,
+    CAST(regexp_extract(read_id, 'size=(\d+)', 1) AS INTEGER) AS size
+FROM read_fastx('data/uchime/denovo_input.fasta');
+
+# read_id and all three parent columns mirror the BIGINT id_col type.
+query TTTT
+SELECT typeof(read_id), typeof(parent_a_id), typeof(parent_b_id), typeof(closest_parent_id)
+FROM detect_chimera_uchime_denovo('denovo_bigint')
+LIMIT 1;
+----
+BIGINT	BIGINT	BIGINT	BIGINT
+
+# Detection unchanged: 6 rows, 2 chimeras.
+query II
+SELECT count(*), count(*) FILTER (WHERE flag = 'Y')
+FROM detect_chimera_uchime_denovo('denovo_bigint');
+----
+6	2
+
+# Chimeric seq (id 4): read_id round-trips and parents resolve to the BIGINT ids
+# of seq1/seq2 (1/2); closest_parent is populated (not the empty-label edge).
+query IIIT
+SELECT read_id, parent_a_id, parent_b_id, closest_parent_id IS NOT NULL
+FROM detect_chimera_uchime_denovo('denovo_bigint')
+WHERE read_id = 4;
+----
+4	1	2	true
+
+# Non-chimeric seq (id 1): NULL parent mask preserved under BIGINT egress.
+query IIII
+SELECT read_id, parent_a_id, parent_b_id, closest_parent_id
+FROM detect_chimera_uchime_denovo('denovo_bigint')
+WHERE read_id = 1;
+----
+1	NULL	NULL	NULL
+
+# Raw HUGEINT id_col stays rejected.
+statement ok
+CREATE TABLE denovo_hugeint (read_id HUGEINT, sequence1 VARCHAR, size INTEGER);
+
+statement ok
+INSERT INTO denovo_hugeint VALUES (1, 'ATCGATCGATCGATCGATCGATCG', 5);
+
+statement error
+SELECT * FROM detect_chimera_uchime_denovo('denovo_hugeint');
+----
+must be VARCHAR, BIGINT, or UUID
+
+# --- Cleanup ---
+statement ok
+DROP TABLE denovo_bigint;
+
+statement ok
+DROP TABLE denovo_hugeint;

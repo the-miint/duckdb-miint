@@ -936,7 +936,7 @@ Search sequences against NCBI's remote BLAST databases. Sends query sequences to
 - Network access to NCBI BLAST servers (blast.ncbi.nlm.nih.gov)
 
 **Parameters:**
-- `query_table` (VARCHAR): Name of a table or view containing query sequences. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns. TEMP tables are not supported — use persistent tables.
+- `query_table` (VARCHAR): Name of a table or view containing query sequences. Must have `read_id` (VARCHAR, BIGINT, or UUID — see *Identifier-column types* below) and `sequence1` (VARCHAR) columns. TEMP tables are not supported — use persistent tables.
 - `program` (VARCHAR, optional, default `'blastn'`): BLAST program. One of: `blastn`, `blastp`, `blastx`, `tblastn`, `tblastx`.
 - `database` (VARCHAR, optional, default `'nt'`): Target database (e.g., `'nt'`, `'nr'`, `'refseq_rna'`, `'swissprot'`).
 - `evalue` (DOUBLE, optional, default 10.0): E-value threshold. Only hits with e-value at or below this threshold are returned.
@@ -948,8 +948,8 @@ Search sequences against NCBI's remote BLAST databases. Sends query sequences to
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `query_id` | VARCHAR | Query sequence identifier (from `read_id` column) |
-| `subject_id` | VARCHAR | Subject (hit) accession |
+| `query_id` | VARCHAR, BIGINT, or UUID | Query sequence identifier (mirrors the query table's `read_id` type) |
+| `subject_id` | VARCHAR | Subject (hit) accession (always VARCHAR — an NCBI accession) |
 | `pct_identity` | DOUBLE | Percentage of identical matches |
 | `alignment_length` | INTEGER | Alignment length |
 | `mismatches` | INTEGER | Number of mismatches |
@@ -960,6 +960,10 @@ Search sequences against NCBI's remote BLAST databases. Sends query sequences to
 | `subject_end` | BIGINT | End of alignment in subject |
 | `evalue` | DOUBLE | Expect value |
 | `bit_score` | DOUBLE | Bit score |
+
+**Identifier-column types (`query_id`):**
+- The query table's `read_id` may be `VARCHAR`, `BIGINT`, or `UUID` (other numeric types — INTEGER, UBIGINT, HUGEINT, DOUBLE — are rejected at bind time with `Column 'read_id' in table '<table>' must be VARCHAR, BIGINT, or UUID`). The output `query_id` mirrors that type. `subject_id` is always `VARCHAR` — it is an NCBI accession, not a user-table id.
+- `BIGINT`/`UUID` query ids are sent to NCBI as the FASTA defline (decimal / canonical-lowercase) and parsed back to the original type on output. The round-trip therefore depends on NCBI echoing the submitted query id verbatim.
 
 **Behavior:**
 - Loads all sequences from the query table into memory, then submits them to NCBI BLAST as FASTA
@@ -1733,8 +1737,8 @@ Align query sequences to subject sequences using minimap2. This function enables
 **Performance:** For large reference databases (e.g., human genome), use pre-built indexes via `index_path` for 10-30x faster alignment. Build indexes once with `save_minimap2_index`, then reuse them across multiple queries.
 
 **Parameters:**
-- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2). The `read_id` column may be `VARCHAR` or `BIGINT` (see *Identifier-column types* below).
-- `subject_table` (VARCHAR, optional): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent). The `read_id` column may be `VARCHAR` or `BIGINT`. **Either `subject_table` OR `index_path` must be provided, but not both.**
+- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2). The `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID` (see *Identifier-column types* below).
+- `subject_table` (VARCHAR, optional): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent). The `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID`. **Either `subject_table` OR `index_path` must be provided, but not both.**
 - `index_path` (VARCHAR, optional): Path to pre-built minimap2 index file (.mmi). Use `save_minimap2_index()` to create index files. **Either `subject_table` OR `index_path` must be provided, but not both.**
 - `per_subject_database` (BOOLEAN, default: false): Build separate index for each subject sequence (only valid with `subject_table`, not with `index_path`)
   - `false` (default): Build single index from all subjects, align all queries once (efficient for many subjects)
@@ -1751,14 +1755,14 @@ Align query sequences to subject sequences using minimap2. This function enables
 
 **Output schema:**
 Returns the same schema as `read_alignments` (21 columns):
-- `read_id` (VARCHAR or BIGINT — mirrors `query_table.read_id`): Query sequence identifier
+- `read_id` (VARCHAR, BIGINT, or UUID — mirrors `query_table.read_id`): Query sequence identifier
 - `flags` (USMALLINT): SAM alignment flags
-- `reference` (VARCHAR or BIGINT — mirrors `subject_table.read_id`; always VARCHAR when using `index_path`): Subject sequence identifier
+- `reference` (VARCHAR, BIGINT, or UUID — mirrors `subject_table.read_id`; always VARCHAR when using `index_path`): Subject sequence identifier
 - `position` (BIGINT): 1-based start position on reference
 - `stop_position` (BIGINT): 1-based stop position on reference
 - `mapq` (UTINYINT): Mapping quality
 - `cigar` (VARCHAR): CIGAR string (with =/X by default)
-- `mate_reference` (VARCHAR or BIGINT — same type as `reference`): Mate reference (for paired-end)
+- `mate_reference` (VARCHAR, BIGINT, or UUID — same type as `reference`): Mate reference (for paired-end)
 - `mate_position` (BIGINT): Mate position (for paired-end)
 - `template_length` (BIGINT): Template length (for paired-end)
 - `tag_as` (BIGINT): Alignment score
@@ -1774,10 +1778,11 @@ Returns the same schema as `read_alignments` (21 columns):
 - `tag_sa` (VARCHAR): Supplementary alignment info
 
 **Identifier-column types (`read_id`, `reference`, `mate_reference`):**
-- The input columns may be `VARCHAR` or `BIGINT`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column '<name>' in table '<table>' must be VARCHAR or BIGINT`.
+- The input columns may be `VARCHAR`, `BIGINT`, or `UUID`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column '<name>' in table '<table>' must be VARCHAR, BIGINT, or UUID`.
 - The output `read_id` column type mirrors the query side. The output `reference` and `mate_reference` types mirror the subject side, **except when using `index_path`** — subject names stored in a `.mmi` file are opaque bytes, so both default to `VARCHAR` regardless of what the source table looked like when the index was built.
-- For `BIGINT` subjects, the SAM `=` mate-reference sentinel (which has no BIGINT encoding) is resolved to the primary reference value before being emitted; downstream consumers see the resolved numeric id, never `'='`.
-- For `BIGINT` columns, NULL input values and the SAM `'*'` unmapped sentinel are both surfaced as SQL NULL in the output. VARCHAR sentinels (`'*'`, `'='`) pass through verbatim, preserving pre-existing behaviour.
+- `BIGINT` ids are stringified to decimal on the wire; `UUID` ids are stringified to their canonical 36-char lowercase form. Both are parsed back to the original storage type on output (a `UUID` round-trips case-insensitively — uppercase input comes back canonical lowercase).
+- For non-VARCHAR subjects (`BIGINT`/`UUID`), the SAM `=` mate-reference sentinel (which has no `BIGINT`/`UUID` encoding) is resolved to the primary reference value before being emitted; downstream consumers see the resolved id, never `'='`.
+- For `BIGINT`/`UUID` columns, NULL input values and the SAM `'*'` unmapped sentinel are both surfaced as SQL NULL in the output. VARCHAR sentinels (`'*'`, `'='`) pass through verbatim, preserving pre-existing behaviour.
 
 **Behavior:**
 - Subject sequences are loaded into memory at bind time (must fit in RAM)
@@ -1891,7 +1896,7 @@ Build and save a minimap2 index to disk for reuse. This provides 10-30x performa
 **Use case:** Build indexes once for large reference databases (e.g., WoLr2 phylogenetic markers, RefSeq genomes, custom OGU databases), then use them repeatedly with `align_minimap2(..., index_path='file.mmi')` instead of rebuilding the index each time.
 
 **Parameters:**
-- `subject_table` (VARCHAR): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent). The `read_id` column may be `VARCHAR` or `BIGINT`; `BIGINT` ids are stringified to decimal before being written into the index. When the index is later loaded via `align_minimap2(..., index_path=...)`, the recovered subject names are always `VARCHAR` (see *Identifier-column types* in `align_minimap2`).
+- `subject_table` (VARCHAR): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent). The `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID`; `BIGINT` ids are stringified to decimal before being written into the index. When the index is later loaded via `align_minimap2(..., index_path=...)`, the recovered subject names are always `VARCHAR` (see *Identifier-column types* in `align_minimap2`).
 - `output_path` (VARCHAR): Path where the index file (.mmi) will be saved
 - `preset` (VARCHAR, default: 'sr'): Minimap2 preset (same options as `align_minimap2`)
 - `k` (INTEGER, optional): K-mer size (overrides preset default if specified)
@@ -1988,7 +1993,7 @@ SELECT * FROM save_minimap2_index('marker_genes', 'markers.mmi');
 Align query sequences against multiple pre-built minimap2 index shards in parallel. Each shard is a separate `.mmi` index file, and a mapping table specifies which reads should be aligned against which shard. This is designed for large-scale metagenomic workflows where the reference database is split across multiple shards and reads have been pre-assigned to shards (e.g., by a prior classification step).
 
 **Parameters:**
-- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2). The `read_id` column may be `VARCHAR` or `BIGINT` (see *Identifier-column types* below).
+- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2). The `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID` (see *Identifier-column types* below).
 - `shard_directory` (VARCHAR, required): Path to directory containing pre-built minimap2 index files. Each shard's index is expected at `<shard_directory>/<shard_name>.mmi`
 - `read_to_shard` (VARCHAR, required): Name of table or view that maps reads to shards. Must have columns:
   - `read_id`: Read identifier. Must match the storage type of `query_table.read_id` exactly — VARCHAR with VARCHAR, BIGINT with BIGINT. Mismatched types are rejected at bind time.
@@ -2001,10 +2006,10 @@ Align query sequences against multiple pre-built minimap2 index shards in parall
 Returns the same 21-column schema as `align_minimap2` and `read_alignments`.
 
 **Identifier-column types (`read_id`, `reference`, `mate_reference`):**
-- The query side (`query_table.read_id` and `read_to_shard.read_id`) may be `VARCHAR` or `BIGINT`. Both must share the same type — `ValidateReadToShardSchema` enforces strict equality so the underlying JOIN never relies on implicit casts. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR or BIGINT`.
+- The query side (`query_table.read_id` and `read_to_shard.read_id`) may be `VARCHAR`, `BIGINT`, or `UUID`. Both must share the same type — `ValidateReadToShardSchema` enforces strict equality so the underlying JOIN never relies on implicit casts. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR, BIGINT, or UUID`.
 - The output `read_id` column mirrors the query side.
 - The output `reference` and `mate_reference` columns are **always VARCHAR** in sharded mode. Sharded alignment always loads prebuilt `.mmi` indexes, and subject names inside an `.mmi` are opaque bytes — the same contract as `align_minimap2(index_path=...)`. If the index was built from a `BIGINT` subject table via `save_minimap2_index`, the values come back as their decimal string form (e.g. `'2001'`); cast in SQL if you need integer semantics downstream.
-- For `BIGINT` `read_id`, NULL input rows that have no entry in `read_to_shard` are silently skipped (the pipeline never sees them). The SAM `'='` mate-reference sentinel is irrelevant here because the subject side is VARCHAR — `'='` passes through verbatim, matching the existing VARCHAR contract.
+- For `BIGINT`/`UUID` `read_id`, NULL input rows that have no entry in `read_to_shard` are silently skipped (the pipeline never sees them). The SAM `'='` mate-reference sentinel is irrelevant here because the subject side is VARCHAR — `'='` passes through verbatim, matching the existing VARCHAR contract.
 
 **Behavior:**
 - At bind time, reads the `read_to_shard` table to discover shards and validate that each `<shard_name>.mmi` file exists in `shard_directory`
@@ -2089,8 +2094,8 @@ Bowtie2 runs out of process via the `gpl-boundary` daemon (an Apache-licensed pr
 - The `gpl-boundary` daemon must be installed. Easiest path: `SELECT install_gpl_boundary();`. The miint extension itself does not link bowtie2.
 
 **Parameters:**
-- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2). The `read_id` column may be `VARCHAR` or `BIGINT` (see *Identifier-column types* below).
-- `subject_table` (VARCHAR): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent). The `read_id` column may be `VARCHAR` or `BIGINT`.
+- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2). The `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID` (see *Identifier-column types* below).
+- `subject_table` (VARCHAR): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent). The `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID`.
 - `preset` (VARCHAR, optional): Bowtie2 preset for alignment sensitivity
   - `'very-fast'`: Fastest, least sensitive
   - `'fast'`: Fast alignment
@@ -2134,14 +2139,14 @@ Unknown parameters are rejected at bind time by DuckDB's binder (e.g. `presset :
 
 **Output schema:**
 Returns the same schema as `read_alignments` (21 columns):
-- `read_id` (VARCHAR or BIGINT — mirrors the query side): Query sequence identifier
+- `read_id` (VARCHAR, BIGINT, or UUID — mirrors the query side): Query sequence identifier
 - `flags` (USMALLINT): SAM alignment flags
-- `reference` (VARCHAR or BIGINT — mirrors the subject side): Subject sequence identifier
+- `reference` (VARCHAR, BIGINT, or UUID — mirrors the subject side): Subject sequence identifier
 - `position` (BIGINT): 1-based start position on reference
 - `stop_position` (BIGINT): 1-based stop position on reference
 - `mapq` (UTINYINT): Mapping quality
 - `cigar` (VARCHAR): CIGAR string
-- `mate_reference` (VARCHAR or BIGINT — mirrors the subject side): Mate reference (for paired-end)
+- `mate_reference` (VARCHAR, BIGINT, or UUID — mirrors the subject side): Mate reference (for paired-end)
 - `mate_position` (BIGINT): Mate position (for paired-end)
 - `template_length` (BIGINT): Template length (for paired-end)
 - `tag_as` (BIGINT): Alignment score
@@ -2157,11 +2162,11 @@ Returns the same schema as `read_alignments` (21 columns):
 - `tag_sa` (VARCHAR): Supplementary alignment info
 
 **Identifier-column types (`read_id`, `reference`, `mate_reference`):**
-- The input columns may be `VARCHAR` or `BIGINT`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column '<name>' in table '<table>' must be VARCHAR or BIGINT`.
+- The input columns may be `VARCHAR`, `BIGINT`, or `UUID`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column '<name>' in table '<table>' must be VARCHAR, BIGINT, or UUID`.
 - The output `read_id` column type mirrors the query side; `reference` and `mate_reference` mirror the subject side. Query and subject id types are independent (mixed BIGINT/VARCHAR is allowed).
 - The daemon wire schema is always strings — BIGINT support is C++/DuckDB-only. On egress, the codec parses decimal strings back to `int64_t`; on ingress, `BIGINT` values are stringified by DuckDB's implicit `Value::GetValue<std::string>()` cast before crossing the Arrow IPC boundary.
-- For `BIGINT` subjects, the SAM `=` mate-reference sentinel is resolved to the row's `reference` value before being emitted (the literal `=` has no BIGINT encoding); VARCHAR output preserves `=` verbatim, matching pre-existing behavior.
-- For `BIGINT` columns, the SAM `*` unmapped sentinel surfaces as SQL NULL. VARCHAR sentinels pass through verbatim.
+- For `BIGINT`/`UUID` subjects, the SAM `=` mate-reference sentinel is resolved to the row's `reference` value before being emitted (the literal `=` has no BIGINT/UUID encoding); VARCHAR output preserves `=` verbatim, matching pre-existing behavior.
+- For `BIGINT`/`UUID` columns, the SAM `*` unmapped sentinel surfaces as SQL NULL. VARCHAR sentinels pass through verbatim.
 - NULL `read_id` rows are rejected at row time with `NULL read_id or sequence1 in query table` — same contract as VARCHAR. The daemon's input schema requires both columns non-null.
 
 **Behavior:**
@@ -2245,7 +2250,7 @@ The sharded path emits only mapped reads (the daemon is invoked with `--no-unal`
 - The `gpl-boundary` daemon must be installed (see `SELECT install_gpl_boundary();`).
 
 **Parameters:**
-- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2). The `read_id` column may be `VARCHAR` or `BIGINT` (see *Identifier-column types* below).
+- `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2). The `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID` (see *Identifier-column types* below).
 - `shard_directory` (VARCHAR, required): Path to directory containing shard subdirectories. Each shard's Bowtie2 index is expected at `<shard_directory>/<shard_name>/index` (i.e., files like `<shard_name>/index.1.bt2`, `<shard_name>/index.rev.1.bt2`, etc.)
 - `read_to_shard` (VARCHAR, required): Name of table or view that maps reads to shards. Must have columns:
   - `read_id`: Read identifier. Must match the storage type of `query_table.read_id` exactly — VARCHAR with VARCHAR, BIGINT with BIGINT. Mismatched types are rejected at bind time.
@@ -2266,10 +2271,10 @@ The `no_unal` knob is intentionally not exposed: the sharded path always emits o
 Returns the same 21-column schema as `align_bowtie2` and `read_alignments`.
 
 **Identifier-column types (`read_id`, `reference`, `mate_reference`):**
-- The query side (`query_table.read_id` and `read_to_shard.read_id`) may be `VARCHAR` or `BIGINT`. Both must share the same type — `ValidateReadToShardSchema` enforces strict equality so the underlying JOIN never relies on implicit casts. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time.
+- The query side (`query_table.read_id` and `read_to_shard.read_id`) may be `VARCHAR`, `BIGINT`, or `UUID`. Both must share the same type — `ValidateReadToShardSchema` enforces strict equality so the underlying JOIN never relies on implicit casts. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time.
 - The output `read_id` column mirrors the query side.
 - The output `reference` and `mate_reference` columns are **always VARCHAR** in sharded mode. Sharded alignment always loads prebuilt Bowtie2 indexes, and reference names inside those indexes are opaque bytes — the same contract as `align_minimap2_sharded`. Cast in SQL (`CAST(reference AS BIGINT)`) if you need integer semantics downstream.
-- For `BIGINT` `read_id`, NULL input rows that have no entry in `read_to_shard` are silently skipped (the JOIN filters them out before they reach the daemon).
+- For `BIGINT`/`UUID` `read_id`, NULL input rows that have no entry in `read_to_shard` are silently skipped (the JOIN filters them out before they reach the daemon).
 
 **Behavior:**
 - At bind time, reads the `read_to_shard` table to discover shards; per-shard index existence is verified at InitGlobal (not Bind) so the planner doesn't pay filesystem-stat cost on wide shard sets.
@@ -2529,7 +2534,7 @@ rRNA filtering / alignment against one or more rRNA reference databases using [S
 Emits the standard 21-column SAM schema shared with `align_minimap2` / `align_bowtie2`. For a schema preserving SortMeRNA's native identity / coverage / e-value / edit-distance fields, use [`align_sortmerna_rrna`](#align_sortmerna_rrnaquery_table-ref_pathspaths-options) below.
 
 **Parameters:**
-- `query_table` (VARCHAR, positional): Name of a table or view with columns `read_id` (VARCHAR or BIGINT — see *Identifier-column types* below), `sequence1` (VARCHAR), and optionally `sequence2` (VARCHAR) when `paired := true`.
+- `query_table` (VARCHAR, positional): Name of a table or view with columns `read_id` (VARCHAR, BIGINT, or UUID — see *Identifier-column types* below), `sequence1` (VARCHAR), and optionally `sequence2` (VARCHAR) when `paired := true`.
 - `ref_paths` (VARCHAR[], required): List of FASTA paths for the reference database(s). The index is built once per query in-memory — re-using references across queries rebuilds the index each time.
 - `num_threads` (INTEGER, default = DuckDB's thread count): Number of threads SortMeRNA's internal pool uses. The DuckDB function runs on a single DuckDB thread; parallelism is inside SortMeRNA.
 - `match`, `mismatch`, `gap_open`, `gap_ext`, `score_N` (INTEGER): SW scoring. Defaults `2 / -3 / 5 / 2 / 0`.
@@ -2548,10 +2553,10 @@ Emits the standard 21-column SAM schema shared with `align_minimap2` / `align_bo
 - Paired-end: `flags & 0x2` (proper pair) is set when both mates aligned, regardless of reference. This is weaker than SAM's standard "concordant orientation within insert size" meaning — SortMeRNA is an rRNA classifier with no notion of insert size or orientation. When both mates aligned but to different references, `mate_reference` reports the actual partner reference name (rather than `=`), so cross-reference pairs remain distinguishable.
 
 **Identifier-column types (`read_id`):**
-- The input `read_id` column may be `VARCHAR` or `BIGINT`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR or BIGINT`.
+- The input `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR, BIGINT, or UUID`.
 - The output `read_id` column type mirrors the query side. `reference` and `mate_reference` are always `VARCHAR` — SortMeRNA references come from FASTA files on disk (`ref_paths`), never a user-provided table.
 - Because the subject side is always VARCHAR, the SAM `=` mate-reference sentinel is preserved verbatim for paired-end output when both mates map to the same reference (no resolution needed — VARCHAR carries `=` directly, unlike the BIGINT-subject path in `align_minimap2` / `align_bowtie2`).
-- For `BIGINT` `read_id`, rows with NULL `read_id` are skipped at ingress (matching the existing `ProcessSingleChunk` row-skip convention used by VARCHAR query tables).
+- For `BIGINT`/`UUID` `read_id`, rows with NULL `read_id` are skipped at ingress (matching the existing `ProcessSingleChunk` row-skip convention used by VARCHAR query tables).
 
 **Caveats:**
 - **No minimum-score filter:** the embedded library returns every positive Smith-Waterman hit. The `sortmerna` CLI applies an internal minimum-score threshold that our streaming API path bypasses; to reproduce CLI output row-for-row, filter on `score` (`tag_as`) or on `e_value` in SQL. Be aware that e-values are not directly comparable between the library and the CLI (see below), so a library-side e-value threshold is not guaranteed to reproduce the exact CLI row set.
@@ -2582,7 +2587,7 @@ Same aligner as `align_sortmerna` but emits SortMeRNA's native output schema, wh
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `read_id` | VARCHAR or BIGINT | Query read identifier from the input table (mirrors the query column type — see *Identifier-column types* below) |
+| `read_id` | VARCHAR, BIGINT, or UUID | Query read identifier from the input table (mirrors the query column type — see *Identifier-column types* below) |
 | `aligned` | INTEGER | `1` if the read aligned, `0` otherwise |
 | `strand` | INTEGER | `1` for forward, `0` for reverse-complement. `0` for unaligned rows has no meaning. |
 | `ref_name` | VARCHAR | Reference sequence ID (empty for unaligned rows) |
@@ -2599,9 +2604,9 @@ Same aligner as `align_sortmerna` but emits SortMeRNA's native output schema, wh
 Paired-end mode produces two rows per input row with `segment_idx` 0 (forward) and 1 (reverse), even when one or both mates failed to align.
 
 **Identifier-column types (`read_id`):**
-- The input `read_id` column may be `VARCHAR` or `BIGINT`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR or BIGINT`.
+- The input `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR, BIGINT, or UUID`.
 - The output `read_id` column type mirrors the query side. `ref_name` is always `VARCHAR` — it carries the free-form FASTA header text from `ref_paths`, not an identifier column.
-- For `BIGINT` `read_id`, rows with NULL `read_id` are skipped at ingress (matching the existing `ProcessSingleChunk` row-skip convention used by VARCHAR query tables).
+- For `BIGINT`/`UUID` `read_id`, rows with NULL `read_id` are skipped at ingress (matching the existing `ProcessSingleChunk` row-skip convention used by VARCHAR query tables).
 
 **Example:**
 
@@ -2763,8 +2768,8 @@ ORDER BY ref_pos, query_base;
 Reference-based chimera detection using the UCHIME algorithm (Edgar et al. 2011, Bioinformatics 27:2194-2200), powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Detects chimeric sequences by comparing queries against a trusted chimera-free reference database.
 
 **Parameters:**
-- `query_table` (VARCHAR): Name of a table or view containing query sequences. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns.
-- `db` (VARCHAR, required): Name of a table or view containing reference sequences. Same schema requirements as `query_table`.
+- `query_table` (VARCHAR): Name of a table or view containing query sequences. Must have `read_id` (VARCHAR, BIGINT, or UUID — see *Identifier-column types* below) and `sequence1` (VARCHAR) columns.
+- `db` (VARCHAR, required): Name of a table or view containing reference sequences. Same schema requirements as `query_table` (its `read_id` type is independent of the query's).
 - `sample_id` (VARCHAR, optional): Name of a column in `query_table` to partition by. When provided, queries are scored per-sample against the (shared, load-once) reference database, and the sample column is prepended to the output. Execution is serialized (the vsearch wrapper is not thread-safe across concurrent calls).
 - `minh` (DOUBLE, default 0.28): Minimum h-score to flag as chimeric. Range [0, 1].
 - `xn` (DOUBLE, default 8.0): Weight of "no" votes in h-score computation. Must be >= 1.0.
@@ -2778,10 +2783,10 @@ Reference-based chimera detection using the UCHIME algorithm (Edgar et al. 2011,
 | Column | Type | Description |
 |--------|------|-------------|
 | `score` | DOUBLE | Chimera h-score (higher = more likely chimeric) |
-| `read_id` | VARCHAR | Query sequence identifier |
-| `parent_a_id` | VARCHAR | Parent A identifier (NULL if non-chimeric) |
-| `parent_b_id` | VARCHAR | Parent B identifier (NULL if non-chimeric) |
-| `closest_parent_id` | VARCHAR | Closest parent to query (NULL if non-chimeric) |
+| `read_id` | VARCHAR, BIGINT, or UUID | Query sequence identifier (mirrors `query_table.read_id`) |
+| `parent_a_id` | VARCHAR, BIGINT, or UUID | Parent A identifier (mirrors `db.read_id`; NULL if non-chimeric) |
+| `parent_b_id` | VARCHAR, BIGINT, or UUID | Parent B identifier (mirrors `db.read_id`; NULL if non-chimeric) |
+| `closest_parent_id` | VARCHAR, BIGINT, or UUID | Closest parent to query (mirrors `db.read_id`; NULL if non-chimeric) |
 | `id_query_model` | DOUBLE | Query-to-chimeric-model identity % |
 | `id_query_a` | DOUBLE | Query-to-parent-A identity % |
 | `id_query_b` | DOUBLE | Query-to-parent-B identity % |
@@ -2795,6 +2800,10 @@ Reference-based chimera detection using the UCHIME algorithm (Edgar et al. 2011,
 | `right_abstain` | INTEGER | Right segment abstain votes |
 | `divergence` | DOUBLE | Model divergence (id_query_model - id_query_top) |
 | `flag` | VARCHAR | Classification: `Y` (chimera), `N` (non-chimera), `?` (borderline) |
+
+**Identifier-column types (`read_id`, `parent_a_id`, `parent_b_id`, `closest_parent_id`):**
+- The query and reference `read_id` columns may each be `VARCHAR`, `BIGINT`, or `UUID`, independently. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR, BIGINT, or UUID`.
+- The output `read_id` mirrors the query table's type; the three parent columns (reference labels) mirror the reference table's type, and they can differ (e.g. a `UUID` query against a `BIGINT` reference). `BIGINT`/`UUID` ids round-trip through their decimal / canonical-lowercase forms. The parent columns stay SQL NULL for non-chimeric rows regardless of id type.
 
 **Example:**
 ```sql
@@ -2845,7 +2854,7 @@ SELECT flag, count(*) FROM detect_chimera_uchime('queries', db:='refs') GROUP BY
 De novo chimera detection using the UCHIME algorithm, powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Detects chimeric sequences without a reference database by using abundance information: more abundant sequences are assumed to be non-chimeric and serve as parents for less abundant sequences.
 
 **Parameters:**
-- `input_table` (VARCHAR): Name of a table or view containing sequences with abundance. By default must have `read_id` (VARCHAR), `sequence1` (VARCHAR), and `size` (integer type) columns; use `id_col`/`sequence_col`/`count_col` to override.
+- `input_table` (VARCHAR): Name of a table or view containing sequences with abundance. By default must have `read_id` (VARCHAR, BIGINT, or UUID — see *Identifier-column types* below), `sequence1` (VARCHAR), and `size` (integer type) columns; use `id_col`/`sequence_col`/`count_col` to override.
 - `sample_id` (VARCHAR, optional): Name of a column in `input_table` to partition by. Each sample gets its own k-mer index and bootstrap; a read_id that appears in multiple samples is therefore scored independently. The sample column is prepended to the output. Execution is serialized per the vsearch wrapper's thread-safety constraints.
 - `id_col` (VARCHAR, default `'read_id'`): Name of the read identifier column in `input_table`.
 - `sequence_col` (VARCHAR, default `'sequence1'`): Name of the sequence column.
@@ -2854,6 +2863,8 @@ De novo chimera detection using the UCHIME algorithm, powered by the [vsearch](h
 - `minh`, `xn`, `dn`, `mindiv`, `mindiffs`: Same as `detect_chimera_uchime`. (No `threads` parameter — de novo detection is sequential by construction; vsearch is run with `opt_threads=1`.)
 
 **Output schema:** Same 18 columns as `detect_chimera_uchime`.
+
+**Identifier-column types:** The `id_col` column may be `VARCHAR`, `BIGINT`, or `UUID` (other numeric types — INTEGER, UBIGINT, HUGEINT, DOUBLE — are rejected at bind time with `Column '<id_col>' in table '<table>' must be VARCHAR, BIGINT, or UUID`). De novo detection has a single id source, so `read_id` and all three parent columns share that one type; the parent columns stay NULL for non-chimeric rows. `BIGINT`/`UUID` ids round-trip through their decimal / canonical-lowercase forms. The `;size=` abundance annotation is never embedded in the id — the count comes from `count_col`, so a numeric id never collides with abundance.
 
 **Example:**
 ```sql
@@ -2894,8 +2905,8 @@ WHERE u.flag != 'Y';
 Global pairwise sequence search, powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Finds the best matching sequences in a reference database for each query sequence using SIMD-optimized Needleman-Wunsch alignment with k-mer candidate filtering.
 
 **Parameters:**
-- `query_table` (VARCHAR): Name of a table or view containing query sequences. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns.
-- `db` (VARCHAR, required): Name of a table or view containing reference sequences. Same schema requirements as `query_table`.
+- `query_table` (VARCHAR): Name of a table or view containing query sequences. Must have `read_id` (VARCHAR, BIGINT, or UUID — see *Identifier-column types* below) and `sequence1` (VARCHAR) columns.
+- `db` (VARCHAR, required): Name of a table or view containing reference sequences. Same schema requirements as `query_table` (its `read_id` type is independent of the query's).
 - `id` (DOUBLE, required): Minimum identity threshold (0.0-1.0). No silent default — must be specified explicitly.
 - `maxaccepts` (INTEGER, default 1): Maximum number of accepted hits per query. Must be >= 1.
 - `maxrejects` (INTEGER, default 32): Maximum rejected targets before stopping search. Must be >= 1.
@@ -2905,8 +2916,8 @@ Global pairwise sequence search, powered by the [vsearch](https://github.com/tor
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `read_id` | VARCHAR | Query sequence identifier |
-| `target_id` | VARCHAR | Reference sequence identifier |
+| `read_id` | VARCHAR, BIGINT, or UUID | Query sequence identifier (mirrors `query_table.read_id`) |
+| `target_id` | VARCHAR, BIGINT, or UUID | Reference sequence identifier (mirrors `db.read_id`) |
 | `identity` | DOUBLE | Percent identity (0-100) |
 | `matches` | INTEGER | Number of matching columns |
 | `mismatches` | INTEGER | Number of mismatching columns |
@@ -2915,6 +2926,10 @@ Global pairwise sequence search, powered by the [vsearch](https://github.com/tor
 | `query_length` | INTEGER | Query sequence length |
 | `target_length` | INTEGER | Target sequence length |
 | `accepted` | BOOLEAN | True if hit passes identity threshold |
+
+**Identifier-column types (`read_id`, `target_id`):**
+- The query and reference `read_id` columns may each be `VARCHAR`, `BIGINT`, or `UUID`, independently. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR, BIGINT, or UUID`.
+- The output `read_id` mirrors the query table's type; `target_id` (a reference label) mirrors the reference table's type. They can differ (e.g. a `UUID` query against a `BIGINT` reference). `BIGINT`/`UUID` ids round-trip through their decimal / canonical-lowercase forms. Search emits one row per hit, so neither id is ever NULL.
 
 **Example:**
 ```sql
@@ -2952,7 +2967,7 @@ SELECT count(DISTINCT read_id) FROM search_sequences_vsearch('queries', db:='ref
 Greedy sequence clustering, powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Clusters sequences by iterating in input order: each sequence is compared against existing centroids, and either joins the best matching cluster (if above the identity threshold) or becomes a new centroid.
 
 **Parameters:**
-- `input_table` (VARCHAR): Name of a table or view containing sequences. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns.
+- `input_table` (VARCHAR): Name of a table or view containing sequences. Must have `read_id` (VARCHAR, BIGINT, or UUID — see *Identifier-column types* below) and `sequence1` (VARCHAR) columns.
 - `id` (DOUBLE, required): Minimum identity threshold (0.0-1.0). No silent default — must be specified explicitly.
 - `strand` (VARCHAR, default `'plus'`): `'plus'` for plus-strand only, `'both'` to also search reverse complements.
 - `threads` (INTEGER, optional): Number of threads vsearch uses for its internal `cluster_assign_batch` parallel scan. Defaults to DuckDB's configured thread count (`SET threads=N`) at bind time; pass an explicit value to override. Must be 1–1024 (matching vsearch's CLI ceiling).
@@ -2961,13 +2976,17 @@ Greedy sequence clustering, powered by the [vsearch](https://github.com/torognes
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `read_id` | VARCHAR | Input sequence identifier |
+| `read_id` | VARCHAR, BIGINT, or UUID | Input sequence identifier (mirrors the input `read_id` type) |
 | `is_centroid` | BOOLEAN | True if this sequence started a new cluster |
 | `cluster_id` | INTEGER | Cluster number (0-based) |
-| `centroid_id` | VARCHAR | Identifier of the cluster's centroid |
+| `centroid_id` | VARCHAR, BIGINT, or UUID | Identifier of the cluster's centroid (mirrors the input `read_id` type) |
 | `identity` | DOUBLE | Percent identity to centroid (100.0 if centroid) |
 | `cigar` | VARCHAR | CIGAR alignment to centroid (empty if centroid) |
 | `cigar_truncated` | BOOLEAN | True if CIGAR was truncated (>4096 chars) |
+
+**Identifier-column types (`read_id`, `centroid_id`):**
+- The input `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR, BIGINT, or UUID`.
+- Both output id columns mirror the input type. `centroid_id` is itself one of the input `read_id`s, so it always shares `read_id`'s type. `BIGINT` ids round-trip through their decimal form; `UUID` ids round-trip through their canonical 36-char lowercase form (uppercase input comes back lowercase).
 
 **Sort order is the caller's responsibility.** The function clusters sequences in the order they appear in the input table. For `cluster_fast`-equivalent behavior (longest first), sort by length descending. For `cluster_size`-equivalent behavior (most abundant first), sort by abundance descending:
 

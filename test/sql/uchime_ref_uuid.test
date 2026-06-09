@@ -1,0 +1,104 @@
+# name: test/sql/uchime_ref_uuid.test
+# description: detect_chimera_uchime accepts UUID ids; read_id mirrors query, parents mirror ref.
+# group: [sql]
+
+#   UUID round-trips through the int128 carrier like BIGINT through decimal.
+#   Mirrors uchime_ref_bigint: read_id mirrors the query type, the three parent
+#   columns mirror the reference type, and the non-chimeric NULL parent mask
+#   survives the typed egress. Also covers the UUID-query / BIGINT-ref pairing,
+#   which drives two distinct non-VARCHAR codecs in one chunk.
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+statement ok
+CREATE TABLE refs_uuid AS
+SELECT (CASE read_id
+          WHEN 'ref1' THEN '00000000-0000-0000-0000-000000000001'
+          WHEN 'ref2' THEN '00000000-0000-0000-0000-000000000002'
+          WHEN 'ref3' THEN '00000000-0000-0000-0000-000000000003'
+          WHEN 'ref4' THEN '00000000-0000-0000-0000-000000000004'
+          WHEN 'ref5' THEN '00000000-0000-0000-0000-000000000005'
+          WHEN 'ref6' THEN '00000000-0000-0000-0000-000000000006' END)::UUID AS read_id,
+       sequence1
+FROM read_fastx('data/uchime/chimera_ref.fasta');
+
+statement ok
+CREATE TABLE refs_bigint AS
+SELECT (CASE read_id
+          WHEN 'ref1' THEN 1 WHEN 'ref2' THEN 2 WHEN 'ref3' THEN 3
+          WHEN 'ref4' THEN 4 WHEN 'ref5' THEN 5 WHEN 'ref6' THEN 6 END)::BIGINT AS read_id,
+       sequence1
+FROM read_fastx('data/uchime/chimera_ref.fasta');
+
+statement ok
+CREATE TABLE queries_uuid AS
+SELECT (CASE read_id
+          WHEN 'query_clean1' THEN '00000000-0000-0000-0000-000000001001'
+          WHEN 'query_clean2' THEN '00000000-0000-0000-0000-000000001002'
+          WHEN 'query_chimera1' THEN '00000000-0000-0000-0000-000000001101'
+          WHEN 'query_chimera2' THEN '00000000-0000-0000-0000-000000001102'
+          WHEN 'query_chimera3' THEN '00000000-0000-0000-0000-000000001103'
+          WHEN 'query_noparent' THEN '00000000-0000-0000-0000-000000001201'
+          WHEN 'query_divergent_chimera' THEN '00000000-0000-0000-0000-000000001301'
+          WHEN 'query_short' THEN '00000000-0000-0000-0000-000000001401' END)::UUID AS read_id,
+       sequence1
+FROM read_fastx('data/uchime/chimera_queries.fasta');
+
+# read_id and all three parent columns mirror the UUID input type.
+query TTTT
+SELECT typeof(read_id), typeof(parent_a_id), typeof(parent_b_id), typeof(closest_parent_id)
+FROM detect_chimera_uchime('queries_uuid', db:='refs_uuid')
+LIMIT 1;
+----
+UUID	UUID	UUID	UUID
+
+# Detection unchanged: 8 rows, 4 chimeras.
+query II
+SELECT count(*), count(*) FILTER (WHERE flag = 'Y')
+FROM detect_chimera_uchime('queries_uuid', db:='refs_uuid');
+----
+8	4
+
+# Chimeric query: read_id round-trips and parents resolve to the UUID ref ids.
+query TTTT
+SELECT read_id, parent_a_id, parent_b_id, closest_parent_id IS NOT NULL
+FROM detect_chimera_uchime('queries_uuid', db:='refs_uuid')
+WHERE read_id = '00000000-0000-0000-0000-000000001101';
+----
+00000000-0000-0000-0000-000000001101	00000000-0000-0000-0000-000000000001	00000000-0000-0000-0000-000000000002	true
+
+# Non-chimeric query: NULL parent mask preserved under UUID egress.
+query TTTT
+SELECT read_id, parent_a_id, parent_b_id, closest_parent_id
+FROM detect_chimera_uchime('queries_uuid', db:='refs_uuid')
+WHERE read_id = '00000000-0000-0000-0000-000000001001';
+----
+00000000-0000-0000-0000-000000001001	NULL	NULL	NULL
+
+# Mixed: UUID query, BIGINT ref — read_id UUID, parents BIGINT (two non-VARCHAR
+# codecs in one chunk).
+query TII
+SELECT read_id, parent_a_id, parent_b_id
+FROM detect_chimera_uchime('queries_uuid', db:='refs_bigint')
+WHERE read_id = '00000000-0000-0000-0000-000000001101';
+----
+00000000-0000-0000-0000-000000001101	1	2
+
+query TTT
+SELECT typeof(read_id), typeof(parent_a_id), typeof(closest_parent_id)
+FROM detect_chimera_uchime('queries_uuid', db:='refs_bigint')
+LIMIT 1;
+----
+UUID	BIGINT	BIGINT
+
+# --- Cleanup ---
+statement ok
+DROP TABLE refs_uuid;
+
+statement ok
+DROP TABLE refs_bigint;
+
+statement ok
+DROP TABLE queries_uuid;

@@ -16,6 +16,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
+#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 
@@ -27,7 +28,29 @@ namespace duckdb {
 
 // True for the set of column types accepted as an identifier column.
 inline bool IsAllowedIdType(const LogicalType &t) {
-	return t.id() == LogicalTypeId::VARCHAR || t.id() == LogicalTypeId::BIGINT;
+	return t.id() == LogicalTypeId::VARCHAR || t.id() == LogicalTypeId::BIGINT || t.id() == LogicalTypeId::UUID;
+}
+
+// Human-readable description of the accepted identifier-column types, kept in
+// lockstep with IsAllowedIdType so error messages never drift from the actual
+// accepted set. Used as the `%s` / type-desc in every "must be ..." id-type
+// rejection across the codebase (single source of truth).
+inline const char *AllowedIdTypeList() {
+	return "VARCHAR, BIGINT, or UUID";
+}
+
+// Parse a canonical UUID string back to its INT128 storage value. duckdb's
+// UUID::FromString returns false (it does NOT throw) on malformed input, and the
+// argument-less convenience overload silently swallows that — so we check the
+// bool here and fail loud, mirroring the BIGINT codec's throw-on-unparseable
+// contract. The SAM sentinels ("", "*", "=") are not valid UUIDs and must be
+// handled by the caller before reaching here; passing one (correctly) throws.
+inline hugeint_t ParseUuidOrThrow(const std::string &s) {
+	hugeint_t result;
+	if (!UUID::FromString(s, result)) {
+		throw InvalidInputException("cannot parse value '%s' as UUID", s);
+	}
+	return result;
 }
 
 // Extract `chunk.data[col_idx]` as strings, dispatching on `id_type`.
@@ -73,56 +96,83 @@ inline void ExtractIdColumnAsStrings(DataChunk &chunk, idx_t col_idx, const Logi
 			// duckdb::miint first and fails to find the codec functions there.
 			out_values[i] = ::miint::FormatIdFromInt64(data[idx]);
 		}
+	} else if (id_type.id() == LogicalTypeId::UUID) {
+		// UUID is stored physically as INT128; stringify to the canonical 36-char
+		// form so the carrier holds the same lexical id the user sees.
+		auto data = UnifiedVectorFormat::GetData<hugeint_t>(fmt);
+		for (idx_t i = 0; i < n; i++) {
+			auto idx = fmt.sel->get_index(i);
+			if (!fmt.validity.RowIsValid(idx)) {
+				out_nulls[i] = true;
+				continue;
+			}
+			out_values[i] = UUID::ToString(data[idx]);
+		}
 	} else {
-		throw InternalException("ExtractIdColumnAsStrings: unsupported id type '%s' (must be VARCHAR or BIGINT)",
-		                        id_type.ToString());
+		throw InternalException("ExtractIdColumnAsStrings: unsupported id type '%s' (must be %s)", id_type.ToString(),
+		                        AllowedIdTypeList());
 	}
 }
 
-// Emit `ids[offset..offset+count)` into `out`, dispatching on `id_type`.
-// VARCHAR: emits bytes verbatim (empty string passes through; validity is
-//          reset to all-valid since VARCHAR ingress doesn't carry a NULL
-//          encoding here).
-// BIGINT:  parses each string via ParseIdAsInt64; empty string and "*" become
-//          NULL; any other unparseable value throws InvalidInputException.
+// Emit one id cell at `row` into flat vector `out`, dispatching on `id_type`.
+// This is the single per-row egress primitive shared by EmitIdColumnFromStrings
+// (minimap2/sortmerna output) and the bowtie2 Arrow emit path — keeping the
+// VARCHAR/BIGINT dispatch in one place so adding an id type touches one function
+// rather than several divergent codecs.
+// VARCHAR: writes the bytes verbatim, row marked valid (empty string passes
+//          through since VARCHAR ingress carries no NULL encoding here).
+// BIGINT:  parses via ParseIdAsInt64; empty string and "*" become NULL; any
+//          other unparseable value throws InvalidInputException.
 // The caller must resolve SAM sentinels (e.g. "=" for mate_reference) before
 // invoking — the codec deliberately fails loud on "=" to surface that contract.
-// Precondition: `out` is a FlatVector sized for at least `count` rows. Both
-// branches set the validity mask explicitly so reusing the vector is safe.
-inline void EmitIdColumnFromStrings(Vector &out, const std::vector<std::string> &ids, idx_t offset, idx_t count,
-                                    const LogicalType &id_type) {
+// Validity is always set explicitly (valid or invalid) so reusing the vector is
+// safe. Precondition: `out` is a FlatVector sized for at least `row + 1` rows.
+inline void EmitIdCell(Vector &out, idx_t row, const std::string &s, const LogicalType &id_type) {
+	auto &validity = FlatVector::Validity(out);
 	if (id_type.id() == LogicalTypeId::VARCHAR) {
-		auto out_data = FlatVector::GetData<string_t>(out);
-		FlatVector::Validity(out).SetAllValid(count);
-		for (idx_t j = 0; j < count; j++) {
-			out_data[j] = StringVector::AddString(out, ids[offset + j]);
-		}
+		FlatVector::GetData<string_t>(out)[row] = StringVector::AddString(out, s);
+		validity.SetValid(row);
 		return;
 	}
 	if (id_type.id() == LogicalTypeId::BIGINT) {
 		auto out_data = FlatVector::GetData<int64_t>(out);
-		auto &validity = FlatVector::Validity(out);
-		validity.SetAllInvalid(count);
-		for (idx_t j = 0; j < count; j++) {
-			const auto &s = ids[offset + j];
-			try {
-				auto parsed = ::miint::ParseIdAsInt64(s);
-				if (parsed.has_value()) {
-					out_data[j] = *parsed;
-					validity.SetValid(j);
-				} else {
-					out_data[j] = 0;
-				}
-			} catch (const std::exception &e) {
-				throw InvalidInputException(
-				    "EmitIdColumnFromStrings: cannot parse value '%s' at row %llu as BIGINT: %s", s,
-				    static_cast<unsigned long long>(offset + j), e.what());
+		try {
+			auto parsed = ::miint::ParseIdAsInt64(s);
+			if (parsed.has_value()) {
+				out_data[row] = *parsed;
+				validity.SetValid(row);
+			} else {
+				out_data[row] = 0;
+				validity.SetInvalid(row);
 			}
+		} catch (const std::exception &e) {
+			throw InvalidInputException("EmitIdCell: cannot parse value '%s' as BIGINT: %s", s, e.what());
 		}
 		return;
 	}
-	throw InternalException("EmitIdColumnFromStrings: unsupported id type '%s' (must be VARCHAR or BIGINT)",
-	                        id_type.ToString());
+	if (id_type.id() == LogicalTypeId::UUID) {
+		auto out_data = FlatVector::GetData<hugeint_t>(out);
+		if (s.empty() || s == "*") {
+			out_data[row] = 0;
+			validity.SetInvalid(row);
+		} else {
+			out_data[row] = ParseUuidOrThrow(s);
+			validity.SetValid(row);
+		}
+		return;
+	}
+	throw InternalException("EmitIdCell: unsupported id type '%s' (must be %s)", id_type.ToString(),
+	                        AllowedIdTypeList());
+}
+
+// Emit `ids[offset..offset+count)` into `out` via EmitIdCell. See EmitIdCell for
+// the per-type contract and the SAM-sentinel caveat.
+// Precondition: `out` is a FlatVector sized for at least `count` rows.
+inline void EmitIdColumnFromStrings(Vector &out, const std::vector<std::string> &ids, idx_t offset, idx_t count,
+                                    const LogicalType &id_type) {
+	for (idx_t j = 0; j < count; j++) {
+		EmitIdCell(out, j, ids[offset + j], id_type);
+	}
 }
 
 } // namespace duckdb

@@ -1,4 +1,5 @@
 #include "uchime_denovo.hpp"
+#include "id_column_utils.hpp"
 #include "table_function_common.hpp"
 #include "uchime_common.hpp"
 
@@ -14,10 +15,15 @@
 
 namespace duckdb {
 
-// Validate that a table has the resolved id (VARCHAR), sequence (VARCHAR), and count
-// (integer type) columns. Names are resolved from named parameters at bind time.
-static void ValidateDenovoTableSchema(ClientContext &context, const std::string &table_name, const std::string &id_col,
-                                      const std::string &sequence_col, const std::string &count_col) {
+// Validate that a table has the resolved id (VARCHAR/BIGINT/UUID), sequence
+// (VARCHAR), and count (integer type) columns. Names are resolved from named
+// parameters at bind time. Returns the id column's storage type so the caller can
+// mirror it on every output id column. The id-type check + message reuse the
+// shared IsAllowedIdType/AllowedIdTypeList helpers so this validator never drifts
+// from ValidateSequenceTableSchema's accepted set.
+static LogicalType ValidateDenovoTableSchema(ClientContext &context, const std::string &table_name,
+                                             const std::string &id_col, const std::string &sequence_col,
+                                             const std::string &count_col) {
 	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
 	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
 	if (!entry) {
@@ -51,10 +57,11 @@ static void ValidateDenovoTableSchema(ClientContext &context, const std::string 
 
 	auto it = name_to_idx.find(StringUtil::Lower(id_col));
 	if (it == name_to_idx.end()) {
-		throw BinderException("Table '%s' missing required column '%s' (VARCHAR)", table_name, id_col);
+		throw BinderException("Table '%s' missing required column '%s' (%s)", table_name, id_col, AllowedIdTypeList());
 	}
-	if (col_types[it->second].id() != LogicalTypeId::VARCHAR) {
-		throw BinderException("Column '%s' in table '%s' must be VARCHAR", id_col, table_name);
+	auto id_logical_type = col_types[it->second];
+	if (!IsAllowedIdType(id_logical_type)) {
+		throw BinderException("Column '%s' in table '%s' must be %s", id_col, table_name, AllowedIdTypeList());
 	}
 
 	it = name_to_idx.find(StringUtil::Lower(sequence_col));
@@ -78,6 +85,8 @@ static void ValidateDenovoTableSchema(ClientContext &context, const std::string 
 		throw BinderException("Column '%s' in table '%s' must be an integer type (got %s)", count_col, table_name,
 		                      col_types[it->second].ToString());
 	}
+
+	return id_logical_type;
 }
 
 // Pull (id, sequence, count) rows for a single sample (or the whole table when
@@ -174,7 +183,8 @@ unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context,
 	get_col_override("sequence_col", data->sequence_col);
 	get_col_override("count_col", data->count_col);
 
-	ValidateDenovoTableSchema(context, data->input_table, data->id_col, data->sequence_col, data->count_col);
+	data->id_type =
+	    ValidateDenovoTableSchema(context, data->input_table, data->id_col, data->sequence_col, data->count_col);
 
 	auto get_double = [&](const std::string &name, double &out, double min_val, const char *constraint) {
 		auto it = input.named_parameters.find(name);
@@ -211,7 +221,9 @@ unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context,
 	}
 
 	data->names = GetUchimeOutputNames();
-	data->types = GetUchimeOutputTypes();
+	// denovo has a single id source, so read_id and all three parent columns mirror
+	// the one captured id_col type.
+	data->types = GetUchimeOutputTypes(data->id_type, data->id_type);
 
 	if (data->has_sample_id) {
 		auto &db = DatabaseInstance::GetDatabase(context);
@@ -289,7 +301,7 @@ void UchimeDenovoTableFunction::Execute(ClientContext & /*context*/, TableFuncti
 		if (gstate.result_offset < gstate.results.size()) {
 			idx_t remaining = gstate.results.size() - gstate.result_offset;
 			idx_t count = std::min(remaining, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
-			OutputUchimeResults(output, gstate.results, gstate.result_offset, count);
+			OutputUchimeResults(output, gstate.results, gstate.result_offset, count, data.id_type, data.id_type);
 			gstate.result_offset += count;
 			return;
 		}
@@ -327,7 +339,7 @@ void UchimeDenovoTableFunction::Execute(ClientContext & /*context*/, TableFuncti
 		}
 
 		idx_t count = std::min(static_cast<idx_t>(gstate.results.size()), static_cast<idx_t>(STANDARD_VECTOR_SIZE));
-		OutputUchimeResults(output, gstate.results, 0, count);
+		OutputUchimeResults(output, gstate.results, 0, count, data.id_type, data.id_type);
 		gstate.result_offset = count;
 		return;
 	}
@@ -339,7 +351,8 @@ void UchimeDenovoTableFunction::Execute(ClientContext & /*context*/, TableFuncti
 			idx_t remaining = lstate.results.size() - lstate.result_offset;
 			idx_t count = std::min(remaining, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
 			output.data[0].Reference(lstate.sample_value);
-			OutputUchimeResults(output, lstate.results, lstate.result_offset, count, /*start_col=*/1);
+			OutputUchimeResults(output, lstate.results, lstate.result_offset, count, data.id_type, data.id_type,
+			                    /*start_col=*/1);
 			lstate.result_offset += count;
 			return;
 		}

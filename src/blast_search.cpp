@@ -1,4 +1,5 @@
 #include "blast_search.hpp"
+#include "id_column_utils.hpp"
 #include "miint_log.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -12,8 +13,10 @@ static std::vector<std::string> GetBlastOutputNames() {
 	        "query_start", "query_end",  "subject_start", "subject_end",      "evalue",     "bit_score"};
 }
 
-static std::vector<LogicalType> GetBlastOutputTypes() {
-	return {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE, LogicalType::INTEGER,
+// query_id (col 0) mirrors the query table's read_id type. subject_id (col 1)
+// stays VARCHAR — it is an NCBI accession, not an id drawn from a user table.
+static std::vector<LogicalType> GetBlastOutputTypes(const LogicalType &query_id_type) {
+	return {query_id_type,        LogicalType::VARCHAR, LogicalType::DOUBLE, LogicalType::INTEGER,
 	        LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::BIGINT, LogicalType::BIGINT,
 	        LogicalType::BIGINT,  LogicalType::BIGINT,  LogicalType::DOUBLE, LogicalType::DOUBLE};
 }
@@ -77,10 +80,13 @@ unique_ptr<FunctionData> BlastSearchTableFunction::Bind(ClientContext &context, 
 		throw BinderException("blast: megablast is only valid with program='blastn' (got program='%s')", data->program);
 	}
 
-	ValidateSequenceTableSchema(context, data->query_table);
+	// Capture the query read_id type (VARCHAR/BIGINT/UUID) so the output query_id
+	// mirrors it; subject_id stays VARCHAR.
+	auto query_schema = ValidateSequenceTableSchema(context, data->query_table, /*allow_bigint=*/true);
+	data->query_id_type = query_schema.id_type;
 
 	data->names = GetBlastOutputNames();
-	data->types = GetBlastOutputTypes();
+	data->types = GetBlastOutputTypes(data->query_id_type);
 	for (auto &n : data->names) {
 		names.emplace_back(n);
 	}
@@ -141,10 +147,12 @@ bool BlastSearchTableFunction::GlobalState::FetchNextBatch(ClientContext &contex
 	return false;
 }
 
-static void OutputBlastHits(DataChunk &output, const std::vector<miint::BlastHit> &hits, idx_t offset, idx_t count) {
+static void OutputBlastHits(DataChunk &output, const std::vector<miint::BlastHit> &hits, idx_t offset, idx_t count,
+                            const LogicalType &query_id_type) {
 	for (idx_t i = 0; i < count; i++) {
 		const auto &hit = hits[offset + i];
-		FlatVector::GetData<string_t>(output.data[0])[i] = StringVector::AddString(output.data[0], hit.query_id);
+		// query_id mirrors the query table's id type; subject_id is always VARCHAR.
+		EmitIdCell(output.data[0], i, hit.query_id, query_id_type);
 		FlatVector::GetData<string_t>(output.data[1])[i] = StringVector::AddString(output.data[1], hit.subject_id);
 		FlatVector::GetData<double>(output.data[2])[i] = hit.pct_identity;
 		FlatVector::GetData<int32_t>(output.data[3])[i] = hit.alignment_length;
@@ -161,6 +169,7 @@ static void OutputBlastHits(DataChunk &output, const std::vector<miint::BlastHit
 }
 
 void BlastSearchTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &data = data_p.bind_data->Cast<Data>();
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 	// Lock held during FetchNextBatch (which blocks on HTTP). Safe because
 	// MaxThreads()=1 guarantees a single caller. Same pattern as read_ncbi.cpp.
@@ -177,7 +186,7 @@ void BlastSearchTableFunction::Execute(ClientContext &context, TableFunctionInpu
 
 	idx_t remaining = gstate.result_buffer.size() - gstate.result_offset;
 	idx_t count = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
-	OutputBlastHits(output, gstate.result_buffer, gstate.result_offset, count);
+	OutputBlastHits(output, gstate.result_buffer, gstate.result_offset, count, data.query_id_type);
 	gstate.result_offset += count;
 }
 

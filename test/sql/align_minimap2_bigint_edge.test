@@ -59,7 +59,7 @@ CREATE TABLE queries_hugeint AS SELECT 1::HUGEINT AS read_id, 'ACGT' AS sequence
 statement error
 SELECT * FROM align_minimap2('queries_hugeint', subject_table='bq_subjects');
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID
 
 statement ok
 CREATE TABLE subjects_hugeint AS SELECT 1::HUGEINT AS read_id, 'ACGT' AS sequence1;
@@ -67,7 +67,7 @@ CREATE TABLE subjects_hugeint AS SELECT 1::HUGEINT AS read_id, 'ACGT' AS sequenc
 statement error
 SELECT * FROM align_minimap2('bq_queries', subject_table='subjects_hugeint');
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID
 
 # ---------------------------------------------------------------------------
 # 3. per_subject_database=true with BIGINT — exercises ExecutePerSubject,

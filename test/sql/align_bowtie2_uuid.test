@@ -1,0 +1,158 @@
+# name: test/sql/align_bowtie2_uuid.test
+# description: align_bowtie2 accepts UUID read_id columns.
+# group: [sql]
+
+#   Bowtie2 routes through the gpl-boundary daemon and stays string-on-the-wire
+#   end-to-end — UUID support is purely at the C++/DuckDB boundary (the same
+#   EmitChunkRows codec dispatch as BIGINT). The output read_id mirrors the
+#   query side; reference and mate_reference mirror the subject side. The SAM `=`
+#   mate-reference sentinel has no UUID encoding, so for UUID subjects it's
+#   resolved to the row's reference before emit; VARCHAR keeps `=` verbatim.
+
+require miint
+
+require-env GPL_BOUNDARY_AVAILABLE
+
+# ---------------------------------------------------------------------------
+# Setup: UUID-keyed query + subject tables (same sequences as
+# align_bowtie2_bigint.test, so mappings are identical).
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE subjects_uuid AS SELECT * FROM (VALUES
+    ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'::UUID, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'::UUID, 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCAAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAA')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE queries_uuid AS SELECT * FROM (VALUES
+    ('11111111-1111-1111-1111-111111111111'::UUID, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('22222222-2222-2222-2222-222222222222'::UUID, 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE subjects_varchar AS SELECT CAST(read_id AS VARCHAR) AS read_id, sequence1 FROM subjects_uuid;
+
+statement ok
+CREATE TABLE queries_varchar AS SELECT CAST(read_id AS VARCHAR) AS read_id, sequence1 FROM queries_uuid;
+
+# ---------------------------------------------------------------------------
+# Happy path: UUID/UUID — output read_id and reference both UUID.
+# ---------------------------------------------------------------------------
+
+query II
+SELECT read_id, reference
+FROM align_bowtie2('queries_uuid', 'subjects_uuid')
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+11111111-1111-1111-1111-111111111111	aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+22222222-2222-2222-2222-222222222222	bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+
+query III
+SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
+FROM align_bowtie2('queries_uuid', 'subjects_uuid')
+LIMIT 1;
+----
+UUID	UUID	UUID
+
+# ---------------------------------------------------------------------------
+# Mixed: UUID query / VARCHAR subject, and the reverse.
+# ---------------------------------------------------------------------------
+
+query III
+SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
+FROM align_bowtie2('queries_uuid', 'subjects_varchar')
+LIMIT 1;
+----
+UUID	VARCHAR	VARCHAR
+
+query III
+SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
+FROM align_bowtie2('queries_varchar', 'subjects_uuid')
+LIMIT 1;
+----
+VARCHAR	UUID	UUID
+
+# Mixed UUID query / BIGINT subject exercises two distinct non-VARCHAR codecs.
+statement ok
+CREATE TABLE subjects_bigint AS SELECT * FROM (VALUES
+    (2001::BIGINT, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    (2002::BIGINT, 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCAAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAA')
+) AS t(read_id, sequence1);
+
+query III
+SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
+FROM align_bowtie2('queries_uuid', 'subjects_bigint')
+LIMIT 1;
+----
+UUID	BIGINT	BIGINT
+
+# ---------------------------------------------------------------------------
+# Unsupported types rejected at bind (query side and subject side). HUGEINT is
+# rejected despite sharing UUID's INT128 physical layout.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE queries_hugeint (read_id HUGEINT, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM align_bowtie2('queries_hugeint', 'subjects_uuid');
+----
+must be VARCHAR, BIGINT, or UUID
+
+statement ok
+CREATE TABLE subjects_double (read_id DOUBLE, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM align_bowtie2('queries_uuid', 'subjects_double');
+----
+must be VARCHAR, BIGINT, or UUID
+
+# ---------------------------------------------------------------------------
+# Paired-end UUID with `=` mate_reference resolution. For UUID subjects the SAM
+# `=` sentinel has no in-band encoding, so EmitChunkRows resolves it to the
+# row's reference value before the codec dispatch (a leaked `=` would throw at
+# the UUID parse).
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE paired_queries_uuid AS SELECT * FROM (VALUES
+    ('33333333-3333-3333-3333-333333333333'::UUID,
+     'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT',
+     'GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAA')
+) AS t(read_id, sequence1, sequence2);
+
+query II
+SELECT
+    SUM(CASE WHEN mate_reference IS NOT NULL AND mate_reference = reference THEN 1 ELSE 0 END) > 0 AS any_resolved,
+    SUM(CASE WHEN mate_reference IS NOT NULL AND mate_reference != reference THEN 1 ELSE 0 END) AS unexpected_diff
+FROM align_bowtie2('paired_queries_uuid', 'subjects_uuid')
+WHERE flags & 4 = 0;
+----
+true	0
+
+query III
+SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
+FROM align_bowtie2('paired_queries_uuid', 'subjects_uuid')
+LIMIT 1;
+----
+UUID	UUID	UUID
+
+# ---------------------------------------------------------------------------
+# NULL read_id: the daemon requires read_id + sequence1 non-null; UUID inherits
+# the same throw (IsNull check fires before any codec dispatch).
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE queries_uuid_with_null (read_id UUID, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO queries_uuid_with_null VALUES
+    ('11111111-1111-1111-1111-111111111111', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    (NULL, 'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG');
+
+statement error
+SELECT * FROM align_bowtie2('queries_uuid_with_null', 'subjects_uuid');
+----
+NULL read_id or sequence1

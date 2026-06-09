@@ -1,0 +1,79 @@
+# name: test/sql/search_sequences_uuid.test
+# description: search_sequences_vsearch accepts UUID read_id; read_id mirrors query, target_id mirrors ref.
+# group: [sql]
+
+#   UUID round-trips through the int128 carrier like BIGINT does through decimal.
+#   This covers UUID/UUID and the UUID-query/BIGINT-ref case, which exercises two
+#   distinct non-VARCHAR egress codecs in a single output chunk.
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+statement ok
+CREATE TABLE refs_uuid (read_id UUID, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO refs_uuid VALUES
+    ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'ATCGATCGATCGATCGATCGATCG'),
+    ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'GGCCTTAAGGCCTTAAGGCCTTAA'),
+    ('cccccccc-cccc-cccc-cccc-cccccccccccc', 'AAAAAAAACCCCCCCCGGGGGGGG');
+
+statement ok
+CREATE TABLE queries_uuid (read_id UUID, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO queries_uuid VALUES
+    ('11111111-1111-1111-1111-111111111111', 'ATCGATCGATCGATCGATCGATCG'),
+    ('22222222-2222-2222-2222-222222222222', 'GGCCTTAAGGCCTTAAGGCCTTAA');
+
+statement ok
+CREATE TABLE refs_bigint (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO refs_bigint VALUES
+    (100, 'ATCGATCGATCGATCGATCGATCG'),
+    (200, 'GGCCTTAAGGCCTTAAGGCCTTAA'),
+    (300, 'AAAAAAAACCCCCCCCGGGGGGGG');
+
+# Both ids round-trip; output types mirror their respective inputs.
+query TTRI
+SELECT read_id, target_id, identity, accepted
+FROM search_sequences_vsearch('queries_uuid', db:='refs_uuid', id:=0.97)
+ORDER BY read_id;
+----
+11111111-1111-1111-1111-111111111111	aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa	100.0	true
+22222222-2222-2222-2222-222222222222	bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb	100.0	true
+
+query TT
+SELECT typeof(read_id), typeof(target_id)
+FROM search_sequences_vsearch('queries_uuid', db:='refs_uuid', id:=0.97)
+LIMIT 1;
+----
+UUID	UUID
+
+# Mixed: UUID query, BIGINT ref — two distinct non-VARCHAR codecs in one chunk.
+query TI
+SELECT read_id, target_id
+FROM search_sequences_vsearch('queries_uuid', db:='refs_bigint', id:=0.97)
+ORDER BY read_id;
+----
+11111111-1111-1111-1111-111111111111	100
+22222222-2222-2222-2222-222222222222	200
+
+query TT
+SELECT typeof(read_id), typeof(target_id)
+FROM search_sequences_vsearch('queries_uuid', db:='refs_bigint', id:=0.97)
+LIMIT 1;
+----
+UUID	BIGINT
+
+# --- Cleanup ---
+statement ok
+DROP TABLE refs_uuid;
+
+statement ok
+DROP TABLE queries_uuid;
+
+statement ok
+DROP TABLE refs_bigint;

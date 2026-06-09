@@ -594,43 +594,19 @@ std::string read_arrow_string_owned(const ArrowArray &col, idx_t logical_index) 
 	return std::string(data + start, static_cast<size_t>(len));
 }
 
-// Emit one id-column cell into a flat output Vector. Branches on id_type:
-// VARCHAR writes the string verbatim; BIGINT parses via the codec. Caller
-// is responsible for SAM `=` resolution before invoking (substitute the
-// reference value into `s` for mate_reference rows where s == "=" and the
-// subject is BIGINT).
-void emit_id_cell(Vector &v, idx_t out_row, const std::string &s, const LogicalType &id_type) {
-	if (id_type.id() == LogicalTypeId::BIGINT) {
-		try {
-			auto parsed = ::miint::ParseIdAsInt64(s);
-			auto out_data = FlatVector::GetData<int64_t>(v);
-			auto &validity = FlatVector::Validity(v);
-			if (parsed.has_value()) {
-				out_data[out_row] = *parsed;
-				validity.SetValid(out_row);
-			} else {
-				validity.SetInvalid(out_row);
-			}
-		} catch (const std::exception &e) {
-			throw InvalidInputException("align_bowtie2: cannot parse id value '%s' as BIGINT: %s", s, e.what());
-		}
-		return;
-	}
-	// VARCHAR
-	FlatVector::GetData<string_t>(v)[out_row] = StringVector::AddString(v, s);
-}
-
 } // namespace
 
 void EmitChunkRows(DataChunk &output, idx_t to_emit, idx_t row_start, const ArrowArray &batch,
                    const LogicalType &query_id_type, const LogicalType &subject_id_type) {
 	if (!IsAllowedIdType(query_id_type) || !IsAllowedIdType(subject_id_type)) {
-		throw InternalException("align_bowtie2 EmitChunkRows: id types must be VARCHAR or BIGINT (got query=%s, "
-		                        "subject=%s)",
-		                        query_id_type.ToString(), subject_id_type.ToString());
+		throw InternalException("align_bowtie2 EmitChunkRows: id types must be %s (got query=%s, subject=%s)",
+		                        AllowedIdTypeList(), query_id_type.ToString(), subject_id_type.ToString());
 	}
-	const bool query_is_bigint = query_id_type.id() == LogicalTypeId::BIGINT;
-	const bool subject_is_bigint = subject_id_type.id() == LogicalTypeId::BIGINT;
+	// Non-VARCHAR ids (BIGINT, UUID) round-trip through the codec: read the
+	// Arrow string and let EmitIdCell parse it back to the storage type. VARCHAR
+	// ids copy straight from Arrow via emit_string.
+	const bool query_needs_codec = query_id_type.id() != LogicalTypeId::VARCHAR;
+	const bool subject_needs_codec = subject_id_type.id() != LogicalTypeId::VARCHAR;
 	auto &v_read_id = output.data[0];
 	auto *out_flags = FlatVector::GetData<uint16_t>(output.data[1]);
 	auto &v_reference = output.data[2];
@@ -691,27 +667,27 @@ void EmitChunkRows(DataChunk &output, idx_t to_emit, idx_t row_start, const Arro
 		const idx_t li = row_start + i;
 
 		// read_id: dispatch on query id type.
-		if (query_is_bigint) {
-			emit_id_cell(v_read_id, i, read_arrow_string_owned(col_read_id, li), query_id_type);
+		if (query_needs_codec) {
+			EmitIdCell(v_read_id, i, read_arrow_string_owned(col_read_id, li), query_id_type);
 		} else {
 			emit_string(v_read_id, i, col_read_id, li);
 		}
 		out_flags[i] = read_fixed<uint16_t>(col_flags, li);
 
-		// reference + mate_reference: dispatch on subject id type. For BIGINT
-		// subjects, cache the reference string so mate_reference "=" can
-		// resolve into it without re-reading the Arrow cell.
-		if (subject_is_bigint) {
+		// reference + mate_reference: dispatch on subject id type. For non-VARCHAR
+		// subjects, cache the reference string so mate_reference "=" can resolve
+		// into it without re-reading the Arrow cell.
+		if (subject_needs_codec) {
 			const std::string ref_str = read_arrow_string_owned(col_reference, li);
-			emit_id_cell(v_reference, i, ref_str, subject_id_type);
+			EmitIdCell(v_reference, i, ref_str, subject_id_type);
 			std::string mr_str = read_arrow_string_owned(col_mate_ref, li);
 			if (mr_str == "=") {
 				// SAM "=" sentinel: mate maps to the same reference as the
-				// primary alignment. The literal "=" has no BIGINT encoding,
+				// primary alignment. The literal "=" has no BIGINT/UUID encoding,
 				// so substitute the row's reference value before parsing.
 				mr_str = ref_str;
 			}
-			emit_id_cell(v_mate_ref, i, mr_str, subject_id_type);
+			EmitIdCell(v_mate_ref, i, mr_str, subject_id_type);
 		} else {
 			emit_string(v_reference, i, col_reference, li);
 			emit_string(v_mate_ref, i, col_mate_ref, li);

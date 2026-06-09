@@ -1,0 +1,42 @@
+# name: test/sql/blast_bigint.test
+# description: blast output query_id mirrors a BIGINT query read_id; subject_id stays VARCHAR.
+# group: [sql]
+
+#   blast has a single user id column: the query read_id, echoed back as query_id,
+#   which mirrors the query table's read_id type. subject_id is an NCBI accession
+#   and is always VARCHAR. This is a bind-time (DESCRIBE) check — the live id value
+#   round-trip needs network and is covered by blast_live.test.
+
+require miint
+
+statement ok
+CREATE TEMP TABLE seqs_bigint (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO seqs_bigint VALUES (42, 'ACGTACGTACGTACGTACGT');
+
+# query_id mirrors BIGINT; subject_id stays VARCHAR; all other columns unchanged.
+query IIIIII
+DESCRIBE SELECT * FROM blast('seqs_bigint');
+----
+query_id	BIGINT	YES	NULL	NULL	NULL
+subject_id	VARCHAR	YES	NULL	NULL	NULL
+pct_identity	DOUBLE	YES	NULL	NULL	NULL
+alignment_length	INTEGER	YES	NULL	NULL	NULL
+mismatches	INTEGER	YES	NULL	NULL	NULL
+gap_opens	INTEGER	YES	NULL	NULL	NULL
+query_start	BIGINT	YES	NULL	NULL	NULL
+query_end	BIGINT	YES	NULL	NULL	NULL
+subject_start	BIGINT	YES	NULL	NULL	NULL
+subject_end	BIGINT	YES	NULL	NULL	NULL
+evalue	DOUBLE	YES	NULL	NULL	NULL
+bit_score	DOUBLE	YES	NULL	NULL	NULL
+
+# Raw HUGEINT read_id stays rejected at bind.
+statement ok
+CREATE TEMP TABLE seqs_hugeint (read_id HUGEINT, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM blast('seqs_hugeint');
+----
+must be VARCHAR, BIGINT, or UUID

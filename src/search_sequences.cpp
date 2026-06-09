@@ -1,4 +1,5 @@
 #include "search_sequences.hpp"
+#include "id_column_utils.hpp"
 #include "table_function_common.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -17,18 +18,24 @@ static std::vector<std::string> GetSearchOutputNames() {
 	        "gaps",    "alignment_length", "query_length", "target_length", "accepted"};
 }
 
-static std::vector<LogicalType> GetSearchOutputTypes() {
+// read_id (col 0) mirrors the query table's read_id type; target_id (col 1)
+// mirrors the reference table's read_id type (target_id values are reference
+// labels). All other columns are fixed.
+static std::vector<LogicalType> GetSearchOutputTypes(const LogicalType &query_id_type,
+                                                     const LogicalType &target_id_type) {
 	// accepted: true for strong hits passing the identity threshold,
 	// false for "weak" hits (vsearch returns both accepted and weak hits
 	// from search_single; weak hits are near-misses that didn't pass).
-	return {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE,  LogicalType::INTEGER,
+	return {query_id_type,        target_id_type,       LogicalType::DOUBLE,  LogicalType::INTEGER,
 	        LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::INTEGER,
 	        LogicalType::INTEGER, LogicalType::BOOLEAN};
 }
 
-// Write a batch of SearchResults into a DataChunk.
+// Write a batch of SearchResults into a DataChunk. read_id and target_id are
+// emitted through the shared id codec so they mirror their respective input
+// types; search emits one row per real hit, so neither id is ever empty.
 static idx_t OutputSearchResults(DataChunk &output, const std::vector<miint::SearchResult> &results, idx_t offset,
-                                 idx_t count) {
+                                 idx_t count, const LogicalType &query_id_type, const LogicalType &target_id_type) {
 	idx_t actual = std::min(count, static_cast<idx_t>(results.size()) - offset);
 	if (actual == 0) {
 		output.SetCardinality(0);
@@ -39,14 +46,12 @@ static idx_t OutputSearchResults(DataChunk &output, const std::vector<miint::Sea
 
 	auto &read_id_vec = output.data[col++];
 	for (idx_t i = 0; i < actual; i++) {
-		FlatVector::GetData<string_t>(read_id_vec)[i] =
-		    StringVector::AddString(read_id_vec, results[offset + i].query_id);
+		EmitIdCell(read_id_vec, i, results[offset + i].query_id, query_id_type);
 	}
 
 	auto &target_vec = output.data[col++];
 	for (idx_t i = 0; i < actual; i++) {
-		FlatVector::GetData<string_t>(target_vec)[i] =
-		    StringVector::AddString(target_vec, results[offset + i].target_id);
+		EmitIdCell(target_vec, i, results[offset + i].target_id, target_id_type);
 	}
 
 	auto identity_data = FlatVector::GetData<double>(output.data[col++]);
@@ -118,10 +123,10 @@ unique_ptr<FunctionData> SearchSequencesTableFunction::Bind(ClientContext &conte
 		                            data->params.id);
 	}
 
-	data->query_schema = ValidateSequenceTableSchema(context, data->query_table);
-
-	// Validate ref table exists and has required columns
-	ValidateSequenceTableSchema(context, data->ref_table);
+	// Capture both schemas (accepting VARCHAR/BIGINT/UUID) so the output read_id
+	// mirrors the query type and target_id mirrors the reference type.
+	data->query_schema = ValidateSequenceTableSchema(context, data->query_table, /*allow_bigint=*/true);
+	data->ref_schema = ValidateSequenceTableSchema(context, data->ref_table, /*allow_bigint=*/true);
 
 	auto get_int = [&](const std::string &name, int &out, int min_val, int max_val, const char *constraint) {
 		auto it = input.named_parameters.find(name);
@@ -143,7 +148,7 @@ unique_ptr<FunctionData> SearchSequencesTableFunction::Bind(ClientContext &conte
 	get_int("threads", data->params.threads, 1, 1024, ">= 1 and <= 1024");
 
 	data->names = GetSearchOutputNames();
-	data->types = GetSearchOutputTypes();
+	data->types = GetSearchOutputTypes(data->query_schema.id_type, data->ref_schema.id_type);
 	for (auto &n : data->names) {
 		names.push_back(n);
 	}
@@ -172,6 +177,7 @@ unique_ptr<GlobalTableFunctionState> SearchSequencesTableFunction::InitGlobal(Cl
 }
 
 void SearchSequencesTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &data = data_p.bind_data->Cast<Data>();
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
 	while (true) {
@@ -179,7 +185,8 @@ void SearchSequencesTableFunction::Execute(ClientContext &context, TableFunction
 		if (gstate.result_offset < gstate.result_buffer.size()) {
 			idx_t remaining = gstate.result_buffer.size() - gstate.result_offset;
 			idx_t count = std::min(remaining, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
-			OutputSearchResults(output, gstate.result_buffer, gstate.result_offset, count);
+			OutputSearchResults(output, gstate.result_buffer, gstate.result_offset, count, data.query_schema.id_type,
+			                    data.ref_schema.id_type);
 			gstate.result_offset += count;
 			return;
 		}

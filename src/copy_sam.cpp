@@ -224,13 +224,13 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 
 	// Validate column types
 	if (!IsAllowedIdType(sql_types[indices.read_id_idx])) {
-		throw BinderException("Column 'read_id' must be VARCHAR or BIGINT");
+		throw BinderException("Column 'read_id' must be %s", AllowedIdTypeList());
 	}
 	if (sql_types[indices.flags_idx].id() != LogicalTypeId::USMALLINT) {
 		throw BinderException("Column 'flags' must be USMALLINT");
 	}
 	if (!IsAllowedIdType(sql_types[indices.reference_idx])) {
-		throw BinderException("Column 'reference' must be VARCHAR or BIGINT");
+		throw BinderException("Column 'reference' must be %s", AllowedIdTypeList());
 	}
 	if (sql_types[indices.position_idx].id() != LogicalTypeId::BIGINT) {
 		throw BinderException("Column 'position' must be BIGINT");
@@ -242,7 +242,7 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 		throw BinderException("Column 'cigar' must be VARCHAR");
 	}
 	if (!IsAllowedIdType(sql_types[indices.mate_reference_idx])) {
-		throw BinderException("Column 'mate_reference' must be VARCHAR or BIGINT");
+		throw BinderException("Column 'mate_reference' must be %s", AllowedIdTypeList());
 	}
 
 	// Capture id-column types for the Sink's per-row dispatch.
@@ -659,6 +659,13 @@ static inline string ExtractSamIdField(const UnifiedVectorFormat &fmt, idx_t row
 		}
 		auto data = UnifiedVectorFormat::GetData<int64_t>(fmt);
 		return miint::FormatIdFromInt64(data[idx]);
+	}
+	if (id_type.id() == LogicalTypeId::UUID) {
+		if (!fmt.validity.RowIsValid(idx)) {
+			return "*";
+		}
+		auto data = UnifiedVectorFormat::GetData<hugeint_t>(fmt);
+		return UUID::ToString(data[idx]);
 	}
 	auto data = UnifiedVectorFormat::GetData<string_t>(fmt);
 	return data[idx].GetString();

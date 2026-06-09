@@ -1,4 +1,5 @@
 #include "uchime_common.hpp"
+#include "id_column_utils.hpp"
 
 #include <algorithm>
 
@@ -10,16 +11,16 @@ std::vector<std::string> GetUchimeOutputNames() {
 	        "left_abstain", "right_yes",  "right_no",    "right_abstain", "divergence",        "flag"};
 }
 
-std::vector<LogicalType> GetUchimeOutputTypes() {
-	return {LogicalType::DOUBLE,  LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	        LogicalType::VARCHAR, LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE,
+std::vector<LogicalType> GetUchimeOutputTypes(const LogicalType &read_id_type, const LogicalType &parent_type) {
+	return {LogicalType::DOUBLE,  read_id_type,         parent_type,          parent_type,
+	        parent_type,          LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE,
 	        LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::INTEGER, LogicalType::INTEGER,
 	        LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::INTEGER,
 	        LogicalType::DOUBLE,  LogicalType::VARCHAR};
 }
 
 idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResult> &results, idx_t offset, idx_t count,
-                          idx_t start_col) {
+                          const LogicalType &read_id_type, const LogicalType &parent_type, idx_t start_col) {
 	idx_t actual = std::min(count, static_cast<idx_t>(results.size()) - offset);
 	if (actual == 0) {
 		output.SetCardinality(0);
@@ -34,14 +35,19 @@ idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResu
 		score_data[i] = results[offset + i].score;
 	}
 
-	// read_id — always populated
+	// read_id — always populated, mirrors the query table's id type.
 	auto &read_id_vec = output.data[col++];
 	for (idx_t i = 0; i < actual; i++) {
-		FlatVector::GetData<string_t>(read_id_vec)[i] =
-		    StringVector::AddString(read_id_vec, results[offset + i].query_label);
+		EmitIdCell(read_id_vec, i, results[offset + i].query_label, read_id_type);
 	}
 
-	// parent_a_id, parent_b_id, closest_parent_id — NULL when non-chimeric (empty label)
+	// parent_a_id, parent_b_id, closest_parent_id — reference labels, mirror the
+	// reference id type; NULL for non-chimeric rows. Explicit SetInvalid (not
+	// EmitIdCell) on the empty branch keeps NULL-ness type-independent — EmitIdCell
+	// maps "" to NULL for BIGINT/UUID but to a non-NULL empty cell for VARCHAR.
+	// Gating on parent_a_label alone is sufficient: vsearch's convert_result writes
+	// all three labels together for non-'N' rows and leaves all three empty for 'N',
+	// so the populated branch never sees an empty parent label.
 	auto &parent_a_vec = output.data[col++];
 	auto &parent_b_vec = output.data[col++];
 	auto &closest_parent_vec = output.data[col++];
@@ -55,10 +61,9 @@ idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResu
 			pb_validity.SetInvalid(i);
 			cp_validity.SetInvalid(i);
 		} else {
-			FlatVector::GetData<string_t>(parent_a_vec)[i] = StringVector::AddString(parent_a_vec, r.parent_a_label);
-			FlatVector::GetData<string_t>(parent_b_vec)[i] = StringVector::AddString(parent_b_vec, r.parent_b_label);
-			FlatVector::GetData<string_t>(closest_parent_vec)[i] =
-			    StringVector::AddString(closest_parent_vec, r.closest_parent_label);
+			EmitIdCell(parent_a_vec, i, r.parent_a_label, parent_type);
+			EmitIdCell(parent_b_vec, i, r.parent_b_label, parent_type);
+			EmitIdCell(closest_parent_vec, i, r.closest_parent_label, parent_type);
 		}
 	}
 

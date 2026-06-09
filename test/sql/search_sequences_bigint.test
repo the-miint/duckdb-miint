@@ -1,0 +1,95 @@
+# name: test/sql/search_sequences_bigint.test
+# description: search_sequences_vsearch accepts BIGINT read_id; read_id mirrors query, target_id mirrors ref.
+# group: [sql]
+
+#   search has two independent id columns: read_id (the query label) mirrors the
+#   query table's read_id type, and target_id (a reference label) mirrors the
+#   reference table's read_id type. The two tables may differ in type — this test
+#   covers BIGINT/BIGINT and the asymmetric BIGINT-query/VARCHAR-ref case.
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+statement ok
+CREATE TABLE refs_bigint (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO refs_bigint VALUES
+    (100, 'ATCGATCGATCGATCGATCGATCG'),
+    (200, 'GGCCTTAAGGCCTTAAGGCCTTAA'),
+    (300, 'AAAAAAAACCCCCCCCGGGGGGGG');
+
+statement ok
+CREATE TABLE queries_bigint (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO queries_bigint VALUES
+    (1, 'ATCGATCGATCGATCGATCGATCG'),
+    (2, 'GGCCTTAAGGCCTTAAGGCCTTAA');
+
+statement ok
+CREATE TABLE refs_varchar AS SELECT CAST(read_id AS VARCHAR) AS read_id, sequence1 FROM refs_bigint;
+
+# Both ids round-trip; output types mirror their respective inputs.
+query IIRI
+SELECT read_id, target_id, identity, accepted
+FROM search_sequences_vsearch('queries_bigint', db:='refs_bigint', id:=0.97)
+ORDER BY read_id;
+----
+1	100	100.0	true
+2	200	100.0	true
+
+query TT
+SELECT typeof(read_id), typeof(target_id)
+FROM search_sequences_vsearch('queries_bigint', db:='refs_bigint', id:=0.97)
+LIMIT 1;
+----
+BIGINT	BIGINT
+
+# Mixed: BIGINT query, VARCHAR ref — output is asymmetric (read_id BIGINT,
+# target_id VARCHAR).
+query IT
+SELECT read_id, target_id
+FROM search_sequences_vsearch('queries_bigint', db:='refs_varchar', id:=0.97)
+ORDER BY read_id;
+----
+1	100
+2	200
+
+query TT
+SELECT typeof(read_id), typeof(target_id)
+FROM search_sequences_vsearch('queries_bigint', db:='refs_varchar', id:=0.97)
+LIMIT 1;
+----
+BIGINT	VARCHAR
+
+# Raw HUGEINT stays rejected on both the query and ref side.
+statement ok
+CREATE TABLE refs_hugeint (read_id HUGEINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO refs_hugeint VALUES (1, 'ATCGATCGATCGATCGATCGATCG');
+
+statement error
+SELECT * FROM search_sequences_vsearch('queries_bigint', db:='refs_hugeint', id:=0.97);
+----
+must be VARCHAR, BIGINT, or UUID
+
+statement error
+SELECT * FROM search_sequences_vsearch('refs_hugeint', db:='refs_bigint', id:=0.97);
+----
+must be VARCHAR, BIGINT, or UUID
+
+# --- Cleanup ---
+statement ok
+DROP TABLE refs_bigint;
+
+statement ok
+DROP TABLE queries_bigint;
+
+statement ok
+DROP TABLE refs_varchar;
+
+statement ok
+DROP TABLE refs_hugeint;

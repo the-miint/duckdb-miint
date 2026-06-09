@@ -1,0 +1,117 @@
+# name: test/sql/uchime_ref_bigint.test
+# description: detect_chimera_uchime accepts BIGINT ids; read_id mirrors query, parents mirror ref.
+# group: [sql]
+
+#   detect_chimera_uchime has two id sources: read_id (the query label) mirrors
+#   the query table's id type, and the three parent columns (parent_a_id,
+#   parent_b_id, closest_parent_id — all reference labels) mirror the reference
+#   table's id type. Detection itself is label-agnostic, so the chimera flags and
+#   the resolved parents are identical to the VARCHAR fixture; only the id type
+#   changes. Crucially the non-chimeric NULL parent mask must survive the typed
+#   egress codec.
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+# Deterministic label->id maps so resolved parents round-trip to known values:
+# ref1->1, ref2->2, ...; query_chimera1->1101 (parents ref1/ref2 per the
+# vsearch v2.30.5 ground truth), query_clean1->1001 (non-chimeric).
+
+statement ok
+CREATE TABLE refs_varchar AS SELECT read_id, sequence1 FROM read_fastx('data/uchime/chimera_ref.fasta');
+
+statement ok
+CREATE TABLE refs_bigint AS
+SELECT (CASE read_id
+          WHEN 'ref1' THEN 1 WHEN 'ref2' THEN 2 WHEN 'ref3' THEN 3
+          WHEN 'ref4' THEN 4 WHEN 'ref5' THEN 5 WHEN 'ref6' THEN 6 END)::BIGINT AS read_id,
+       sequence1
+FROM refs_varchar;
+
+statement ok
+CREATE TABLE queries_bigint AS
+SELECT (CASE read_id
+          WHEN 'query_clean1' THEN 1001 WHEN 'query_clean2' THEN 1002
+          WHEN 'query_chimera1' THEN 1101 WHEN 'query_chimera2' THEN 1102
+          WHEN 'query_chimera3' THEN 1103 WHEN 'query_noparent' THEN 1201
+          WHEN 'query_divergent_chimera' THEN 1301 WHEN 'query_short' THEN 1401 END)::BIGINT AS read_id,
+       sequence1
+FROM read_fastx('data/uchime/chimera_queries.fasta');
+
+# read_id and all three parent columns mirror the BIGINT input type.
+query TTTT
+SELECT typeof(read_id), typeof(parent_a_id), typeof(parent_b_id), typeof(closest_parent_id)
+FROM detect_chimera_uchime('queries_bigint', db:='refs_bigint')
+LIMIT 1;
+----
+BIGINT	BIGINT	BIGINT	BIGINT
+
+# Detection is unchanged: 8 rows, 4 chimeras.
+query II
+SELECT count(*), count(*) FILTER (WHERE flag = 'Y')
+FROM detect_chimera_uchime('queries_bigint', db:='refs_bigint');
+----
+8	4
+
+# Chimeric query: read_id round-trips and parents resolve to the BIGINT ref ids
+# (ref1->1, ref2->2); closest_parent is populated.
+query IIIT
+SELECT read_id, parent_a_id, parent_b_id, closest_parent_id IS NOT NULL
+FROM detect_chimera_uchime('queries_bigint', db:='refs_bigint')
+WHERE read_id = 1101;
+----
+1101	1	2	true
+
+# Non-chimeric query: NULL parent mask preserved under BIGINT egress.
+query IIII
+SELECT read_id, parent_a_id, parent_b_id, closest_parent_id
+FROM detect_chimera_uchime('queries_bigint', db:='refs_bigint')
+WHERE read_id = 1001;
+----
+1001	NULL	NULL	NULL
+
+# Mixed: BIGINT query, VARCHAR ref — read_id BIGINT, parents VARCHAR.
+query ITT
+SELECT read_id, parent_a_id, parent_b_id
+FROM detect_chimera_uchime('queries_bigint', db:='refs_varchar')
+WHERE read_id = 1101;
+----
+1101	ref1	ref2
+
+query TTT
+SELECT typeof(read_id), typeof(parent_a_id), typeof(closest_parent_id)
+FROM detect_chimera_uchime('queries_bigint', db:='refs_varchar')
+LIMIT 1;
+----
+BIGINT	VARCHAR	VARCHAR
+
+# Raw HUGEINT stays rejected on both sides.
+statement ok
+CREATE TABLE refs_hugeint (read_id HUGEINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO refs_hugeint VALUES (1, 'ATCGATCGATCGATCGATCGATCG');
+
+statement error
+SELECT * FROM detect_chimera_uchime('queries_bigint', db:='refs_hugeint');
+----
+must be VARCHAR, BIGINT, or UUID
+
+statement error
+SELECT * FROM detect_chimera_uchime('refs_hugeint', db:='refs_bigint');
+----
+must be VARCHAR, BIGINT, or UUID
+
+# --- Cleanup ---
+statement ok
+DROP TABLE refs_varchar;
+
+statement ok
+DROP TABLE refs_bigint;
+
+statement ok
+DROP TABLE queries_bigint;
+
+statement ok
+DROP TABLE refs_hugeint;

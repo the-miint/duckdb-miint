@@ -131,7 +131,7 @@ SELECT * FROM align_minimap2_sharded('queries_integer',
     shard_directory := 'data/shards/',
     read_to_shard := 'read_to_shard_bigint');
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID
 
 statement ok
 CREATE TABLE queries_hugeint (read_id HUGEINT, sequence1 VARCHAR);
@@ -141,7 +141,7 @@ SELECT * FROM align_minimap2_sharded('queries_hugeint',
     shard_directory := 'data/shards/',
     read_to_shard := 'read_to_shard_bigint');
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID
 
 statement ok
 CREATE TABLE queries_double (read_id DOUBLE, sequence1 VARCHAR);
@@ -151,7 +151,7 @@ SELECT * FROM align_minimap2_sharded('queries_double',
     shard_directory := 'data/shards/',
     read_to_shard := 'read_to_shard_bigint');
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID
 
 # A HUGEINT read_to_shard against a BIGINT query is rejected at the
 # read_to_shard validator with the VARCHAR-or-BIGINT message.
@@ -163,7 +163,7 @@ SELECT * FROM align_minimap2_sharded('queries_bigint',
     shard_directory := 'data/shards/',
     read_to_shard := 'read_to_shard_hugeint');
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID
 
 # ---------------------------------------------------------------------------
 # NULL read_id rows skipped — same convention as VARCHAR sharded mode.

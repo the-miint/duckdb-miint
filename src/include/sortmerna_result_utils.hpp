@@ -61,7 +61,7 @@ inline void OutputSortMeRNARRNABatch(DataChunk &output, const miint::SortMeRNARe
 // row j can be read from batch[j ^ 1] without cross-chunk lookups.
 //
 // `query_id_type` drives `read_id`; `subject_id_type` drives `reference` and
-// `mate_reference`. Both must be VARCHAR or BIGINT. The parameter mirrors the
+// `mate_reference`. Both must be VARCHAR, BIGINT, or UUID. The parameter mirrors the
 // shape of OutputSAMRecordBatch (align_common.hpp) and lets the entry-point
 // asserts catch a forgetful caller, but for sortmerna `subject_id_type` is
 // always VARCHAR — subject names come from FASTA files on disk via
