@@ -207,6 +207,13 @@ void SAMReader::set_threads(int n) {
 	}
 }
 
+const bam1_t *SAMReader::read_raw() {
+	if (sam_read1(fp.get(), hdr.get(), aln.get()) >= 0) {
+		return aln.get();
+	}
+	return nullptr;
+}
+
 SAMRecordBatch SAMReader::read(const int n) {
 	SAMRecordBatch batch;
 	batch.reserve(n);

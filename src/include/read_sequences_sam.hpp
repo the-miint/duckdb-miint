@@ -96,6 +96,9 @@ public:
 	struct LocalState : public LocalTableFunctionState {
 		size_t current_file_idx;
 		bool has_file;
+		// Reused across Execute calls to accumulate one chunk's raw quality bytes before a
+		// single bulk copy into the qual1 LIST child (avoids per-record heap allocation).
+		std::vector<uint8_t> qual_scratch;
 
 		LocalState() : current_file_idx(0), has_file(false) {
 		}
