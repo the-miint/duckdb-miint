@@ -3,6 +3,7 @@
 #include <string>
 #include <sstream>
 #include <vector>
+#include <utility>
 #include <htslib-1.22.1/htslib/sam.h>
 #include "QualScore.hpp"
 
@@ -387,8 +388,8 @@ inline void parse_record_to_batch(const bam1_t *aln, const sam_hdr_t *hdr, SAMRe
 			}
 		}
 
-		batch.sequences.emplace_back(sequence);
-		batch.quals.emplace_back(QualScore(qual_str));
+		batch.sequences.emplace_back(std::move(sequence));
+		batch.quals.emplace_back(QualScore(std::move(qual_str)));
 	}
 }
 } // namespace sam_utils

@@ -77,6 +77,19 @@ public:
 				}
 				file_sequence_counters.emplace_back(1);
 			}
+
+			// Multi-threaded BGZF decompression, but ONLY for a single input file.
+			// With one file, MaxThreads() == 1 so the scan runs on one core while the
+			// rest sit idle; an HTSlib worker pool decompresses blocks ahead of the parser
+			// (blocks stay in order, so output is identical). With multiple files we rely
+			// on file-level parallelism instead -- giving every reader its own pool would
+			// oversubscribe (up to min(files, 8) readers run concurrently, each spawning a
+			// pool), so we deliberately leave the multi-file path single-threaded per file.
+			if (readers.size() == 1 && !uses_stdin) {
+				auto hw = std::thread::hardware_concurrency();
+				int decompress_threads = (hw > 1) ? std::min<int>(static_cast<int>(hw) - 1, 4) : 1;
+				readers[0]->set_threads(decompress_threads);
+			}
 		}
 	};
 

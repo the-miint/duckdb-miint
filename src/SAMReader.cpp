@@ -198,6 +198,15 @@ SAMReader::SAMReader(int fd, const std::string &name, bool include_seq_qual)
 }
 #endif
 
+void SAMReader::set_threads(int n) {
+	if (n > 1 && fp) {
+		// Adds an HTSlib worker pool that decompresses BGZF blocks ahead of the parser.
+		// Blocks are still delivered in order, so read() output is unchanged. No-op for
+		// uncompressed SAM (nothing to decompress).
+		hts_set_threads(fp.get(), n);
+	}
+}
+
 SAMRecordBatch SAMReader::read(const int n) {
 	SAMRecordBatch batch;
 	batch.reserve(n);

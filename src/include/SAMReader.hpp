@@ -75,6 +75,12 @@ public:
 	// Read up to n records into a batch
 	SAMRecordBatch read(const int n);
 
+	// Enable multi-threaded BGZF block decompression for this reader (n worker threads).
+	// Must be called before the first read(). No-op if n <= 1 or on uncompressed input.
+	// HTSlib decodes blocks in order, so results are identical to the single-threaded
+	// path -- just faster on BGZF-compressed (BAM / bgzipped SAM) input.
+	void set_threads(int n);
+
 	// Number of reference sequences in the header (@SQ lines).
 	// Returns 0 if no references (headerless/uBAM without synthetic header).
 	int n_targets() const {
