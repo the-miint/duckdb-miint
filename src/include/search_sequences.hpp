@@ -25,7 +25,12 @@ public:
 		std::string ref_table;
 		miint::SearchParams params;
 
+		// Schemas captured at bind. The output read_id mirrors the query table's
+		// read_id type; the output target_id mirrors the reference table's read_id
+		// type (target_id values are reference labels). Carried separately because
+		// the two tables may have different id types.
 		SequenceTableSchema query_schema;
+		SequenceTableSchema ref_schema;
 
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;

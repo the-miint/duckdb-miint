@@ -1,43 +1,40 @@
-# name: test/sql/copy_sam_bigint.test
-# description: COPY FORMAT SAM/BAM accepts BIGINT for read_id, reference, mate_reference (PR 1, Cycle 4).
+# name: test/sql/copy_sam_uuid.test
+# description: COPY FORMAT SAM/BAM accepts UUID for read_id, reference, mate_reference.
 # group: [sql]
 
-#   COPY FORMAT SAM previously required VARCHAR for the three identifier columns
-#   (read_id, reference, mate_reference). Cycle 4 of the BIGINT-id work relaxes
-#   that to accept either VARCHAR or BIGINT, with BIGINT values stringified to
-#   decimal on write and NULL → SAM '*' sentinel. Round-trip via read_sam
-#   produces VARCHAR (type loss is documented).
+#   COPY FORMAT SAM accepts VARCHAR, BIGINT, or UUID for the three identifier
+#   columns. UUID values are stringified to their canonical 36-char form on
+#   write (NULL -> SAM '*'); round-trip via read_sam produces VARCHAR (type loss
+#   is documented). BAM coverage lives here too (same ExtractSamIdField path,
+#   mirroring copy_sam_bigint.test which has no separate copy_bam_bigint.test).
 
 require miint
 
 # ---------------------------------------------------------------------------
-# Common setup: a reference-lengths table addressable by the BIGINT decimal
-# stringification of subject identifiers (2001, 2002).
+# Reference-lengths table addressable by the canonical UUID stringification of
+# the subject identifiers used as `reference` / `mate_reference`.
 # ---------------------------------------------------------------------------
 
 statement ok
-CREATE TABLE ref_bigint_lengths AS
-SELECT '2001' AS name, 10000 AS length
-UNION ALL SELECT '2002', 10000;
+CREATE TABLE ref_uuid_lengths AS
+SELECT 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' AS name, 10000 AS length
+UNION ALL SELECT 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 10000;
 
 # ---------------------------------------------------------------------------
-# Test 1: All three id columns BIGINT — happy path. Use distinct reference and
-# mate_reference values so the BIGINT decimal stringification of mate_reference
-# is observable in the round-trip. (HTSlib normalises RNEXT to '=' when it
-# matches RNAME at the tid level — that's identical for VARCHAR and BIGINT
-# inputs and is covered separately below.)
+# Test 1: All three id columns UUID — happy path. Distinct reference and
+# mate_reference so the canonical stringification of mate_reference is visible.
 # ---------------------------------------------------------------------------
 
 statement ok
-CREATE TABLE result_all_bigint AS SELECT
-    1001::BIGINT AS read_id,
+CREATE TABLE result_all_uuid AS SELECT
+    '11111111-1111-1111-1111-111111111111'::UUID AS read_id,
     0::USMALLINT AS flags,
-    2001::BIGINT AS reference,
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'::UUID AS reference,
     1::BIGINT AS position,
     51::BIGINT AS stop_position,
     60::UTINYINT AS mapq,
     '50M' AS cigar,
-    2002::BIGINT AS mate_reference,
+    'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'::UUID AS mate_reference,
     150::BIGINT AS mate_position,
     200::BIGINT AS template_length,
     NULL::BIGINT AS tag_as, NULL::BIGINT AS tag_xs, NULL::BIGINT AS tag_ys,
@@ -46,38 +43,38 @@ CREATE TABLE result_all_bigint AS SELECT
     NULL::VARCHAR AS tag_yt, NULL::VARCHAR AS tag_md, NULL::VARCHAR AS tag_sa;
 
 statement ok
-COPY result_all_bigint TO '__TEST_DIR__/all_bigint.sam'
-(FORMAT SAM, REFERENCE_LENGTHS 'ref_bigint_lengths');
+COPY result_all_uuid TO '__TEST_DIR__/all_uuid.sam'
+(FORMAT SAM, REFERENCE_LENGTHS 'ref_uuid_lengths');
 
-# Decimal stringification on write, VARCHAR on read-back.
+# Canonical stringification on write, VARCHAR on read-back.
 query III
 SELECT read_id, reference, mate_reference
-FROM read_sam('__TEST_DIR__/all_bigint.sam');
+FROM read_sam('__TEST_DIR__/all_uuid.sam');
 ----
-1001	2001	2002
+11111111-1111-1111-1111-111111111111	aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa	bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
 
 query III
 SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
-FROM read_sam('__TEST_DIR__/all_bigint.sam')
+FROM read_sam('__TEST_DIR__/all_uuid.sam')
 LIMIT 1;
 ----
 VARCHAR	VARCHAR	VARCHAR
 
 # ---------------------------------------------------------------------------
-# Test 1b: HTSlib '=' normalisation for BIGINT inputs when mate_reference
-# equals reference — parity with the VARCHAR path (see copy_sam.test test 9).
+# Test 1b: HTSlib '=' normalisation when mate_reference equals reference —
+# parity with the VARCHAR/BIGINT paths.
 # ---------------------------------------------------------------------------
 
 statement ok
-CREATE TABLE result_bigint_eq AS SELECT
-    1002::BIGINT AS read_id,
+CREATE TABLE result_uuid_eq AS SELECT
+    '22222222-2222-2222-2222-222222222222'::UUID AS read_id,
     0::USMALLINT AS flags,
-    2001::BIGINT AS reference,
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'::UUID AS reference,
     1::BIGINT AS position,
     51::BIGINT AS stop_position,
     60::UTINYINT AS mapq,
     '50M' AS cigar,
-    2001::BIGINT AS mate_reference,
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'::UUID AS mate_reference,
     150::BIGINT AS mate_position,
     200::BIGINT AS template_length,
     NULL::BIGINT AS tag_as, NULL::BIGINT AS tag_xs, NULL::BIGINT AS tag_ys,
@@ -86,29 +83,29 @@ CREATE TABLE result_bigint_eq AS SELECT
     NULL::VARCHAR AS tag_yt, NULL::VARCHAR AS tag_md, NULL::VARCHAR AS tag_sa;
 
 statement ok
-COPY result_bigint_eq TO '__TEST_DIR__/bigint_eq.sam'
-(FORMAT SAM, REFERENCE_LENGTHS 'ref_bigint_lengths');
+COPY result_uuid_eq TO '__TEST_DIR__/uuid_eq.sam'
+(FORMAT SAM, REFERENCE_LENGTHS 'ref_uuid_lengths');
 
 query III
 SELECT read_id, reference, mate_reference
-FROM read_sam('__TEST_DIR__/bigint_eq.sam');
+FROM read_sam('__TEST_DIR__/uuid_eq.sam');
 ----
-1002	2001	=
+22222222-2222-2222-2222-222222222222	aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa	=
 
 # ---------------------------------------------------------------------------
-# Test 2: NULL BIGINT id values → SAM '*' on disk
+# Test 2: NULL UUID id values → SAM '*' on disk.
 # ---------------------------------------------------------------------------
 
 statement ok
-CREATE TABLE result_null_ids AS SELECT
-    NULL::BIGINT AS read_id,
+CREATE TABLE result_null_uuid AS SELECT
+    NULL::UUID AS read_id,
     4::USMALLINT AS flags,
-    NULL::BIGINT AS reference,
+    NULL::UUID AS reference,
     0::BIGINT AS position,
     0::BIGINT AS stop_position,
     0::UTINYINT AS mapq,
     '*' AS cigar,
-    NULL::BIGINT AS mate_reference,
+    NULL::UUID AS mate_reference,
     0::BIGINT AS mate_position,
     0::BIGINT AS template_length,
     NULL::BIGINT AS tag_as, NULL::BIGINT AS tag_xs, NULL::BIGINT AS tag_ys,
@@ -120,30 +117,30 @@ statement ok
 CREATE TABLE ref_dummy AS SELECT 'dummy' AS name, 1000 AS length;
 
 statement ok
-COPY result_null_ids TO '__TEST_DIR__/null_bigint_ids.sam'
+COPY result_null_uuid TO '__TEST_DIR__/null_uuid_ids.sam'
 (FORMAT SAM, INCLUDE_HEADER false, REFERENCE_LENGTHS 'ref_dummy');
 
 query III
 SELECT read_id, reference, mate_reference
-FROM read_sam('__TEST_DIR__/null_bigint_ids.sam', reference_lengths='ref_dummy');
+FROM read_sam('__TEST_DIR__/null_uuid_ids.sam', reference_lengths='ref_dummy');
 ----
 *	*	*
 
 # ---------------------------------------------------------------------------
-# Test 3: Mixed — read_id VARCHAR, reference/mate_reference BIGINT
-# (independent type acceptance per column)
+# Test 3: Mixed — read_id VARCHAR, reference/mate_reference UUID
+# (independent type acceptance per column).
 # ---------------------------------------------------------------------------
 
 statement ok
-CREATE TABLE result_mixed AS SELECT
+CREATE TABLE result_mixed_uuid AS SELECT
     'read-mixed-1' AS read_id,
     0::USMALLINT AS flags,
-    2002::BIGINT AS reference,
+    'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'::UUID AS reference,
     1::BIGINT AS position,
     51::BIGINT AS stop_position,
     60::UTINYINT AS mapq,
     '50M' AS cigar,
-    2001::BIGINT AS mate_reference,
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'::UUID AS mate_reference,
     150::BIGINT AS mate_position,
     200::BIGINT AS template_length,
     NULL::BIGINT AS tag_as, NULL::BIGINT AS tag_xs, NULL::BIGINT AS tag_ys,
@@ -152,29 +149,30 @@ CREATE TABLE result_mixed AS SELECT
     NULL::VARCHAR AS tag_yt, NULL::VARCHAR AS tag_md, NULL::VARCHAR AS tag_sa;
 
 statement ok
-COPY result_mixed TO '__TEST_DIR__/mixed.sam'
-(FORMAT SAM, REFERENCE_LENGTHS 'ref_bigint_lengths');
+COPY result_mixed_uuid TO '__TEST_DIR__/mixed_uuid.sam'
+(FORMAT SAM, REFERENCE_LENGTHS 'ref_uuid_lengths');
 
 query III
-SELECT read_id, reference, mate_reference FROM read_sam('__TEST_DIR__/mixed.sam');
+SELECT read_id, reference, mate_reference FROM read_sam('__TEST_DIR__/mixed_uuid.sam');
 ----
-read-mixed-1	2002	2001
+read-mixed-1	bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb	aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
 
 # ---------------------------------------------------------------------------
-# Test 4: BAM output with BIGINT ids — same write path, binary container
+# Test 4: BAM output with UUID ids — same ExtractSamIdField write path, binary
+# container (covers the copy_bam path for UUID).
 # ---------------------------------------------------------------------------
 
 statement ok
-COPY result_all_bigint TO '__TEST_DIR__/all_bigint.bam'
-(FORMAT BAM, REFERENCE_LENGTHS 'ref_bigint_lengths');
+COPY result_all_uuid TO '__TEST_DIR__/all_uuid.bam'
+(FORMAT BAM, REFERENCE_LENGTHS 'ref_uuid_lengths');
 
 query III
-SELECT read_id, reference, mate_reference FROM read_sam('__TEST_DIR__/all_bigint.bam');
+SELECT read_id, reference, mate_reference FROM read_sam('__TEST_DIR__/all_uuid.bam');
 ----
-1001	2001	2002
+11111111-1111-1111-1111-111111111111	aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa	bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
 
 # ---------------------------------------------------------------------------
-# Test 5: Unsupported id types still rejected with a clear error
+# Test 5: Unsupported id types still rejected with a clear error.
 # ---------------------------------------------------------------------------
 
 statement error
@@ -182,24 +180,6 @@ COPY (SELECT
     1::INTEGER AS read_id, 0::USMALLINT AS flags, 'r' AS reference, 1::BIGINT AS position,
     1::BIGINT AS stop_position, 0::UTINYINT AS mapq, '*' AS cigar, '*' AS mate_reference,
     0::BIGINT AS mate_position, 0::BIGINT AS template_length
-) TO '__TEST_DIR__/bad_read_id.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_dummy');
+) TO '__TEST_DIR__/bad_read_id_uuid.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_dummy');
 ----
 Column 'read_id' must be VARCHAR, BIGINT, or UUID
-
-statement error
-COPY (SELECT
-    'r' AS read_id, 0::USMALLINT AS flags, 1::INTEGER AS reference, 1::BIGINT AS position,
-    1::BIGINT AS stop_position, 0::UTINYINT AS mapq, '*' AS cigar, '*' AS mate_reference,
-    0::BIGINT AS mate_position, 0::BIGINT AS template_length
-) TO '__TEST_DIR__/bad_reference.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_dummy');
-----
-Column 'reference' must be VARCHAR, BIGINT, or UUID
-
-statement error
-COPY (SELECT
-    'r' AS read_id, 0::USMALLINT AS flags, 'r' AS reference, 1::BIGINT AS position,
-    1::BIGINT AS stop_position, 0::UTINYINT AS mapq, '*' AS cigar, 1::DOUBLE AS mate_reference,
-    0::BIGINT AS mate_position, 0::BIGINT AS template_length
-) TO '__TEST_DIR__/bad_mate.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_dummy');
-----
-Column 'mate_reference' must be VARCHAR, BIGINT, or UUID

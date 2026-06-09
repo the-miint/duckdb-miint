@@ -48,15 +48,22 @@ struct UchimeResult {
 namespace duckdb {
 
 // Output column names and types for the 18-column uchimeout format.
-// Shared between uchime_ref and uchime_denovo.
+// Shared between uchime_ref and uchime_denovo. `read_id_type` is the SQL type of
+// the read_id column (mirrors the query table); `parent_type` is the type of the
+// three parent id columns (parent_a_id, parent_b_id, closest_parent_id — they are
+// reference labels, so they mirror the reference table). For uchime_denovo there
+// is a single id source, so both arguments are the same type.
 std::vector<std::string> GetUchimeOutputNames();
-std::vector<LogicalType> GetUchimeOutputTypes();
+std::vector<LogicalType> GetUchimeOutputTypes(const LogicalType &read_id_type, const LogicalType &parent_type);
 
 // Write a batch of UchimeResults into a DataChunk starting at column `start_col`.
 // When start_col > 0 (per-sample callers), callers must populate columns [0, start_col)
 // before/after this call; this function sets the chunk cardinality itself.
+// `read_id_type` / `parent_type` govern how the id columns are emitted (must match
+// the types from GetUchimeOutputTypes). The three parent id columns stay NULL for
+// non-chimeric rows (empty parent label) regardless of id type.
 // Returns the number of rows written (min of count and remaining results).
 idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResult> &results, idx_t offset, idx_t count,
-                          idx_t start_col = 0);
+                          const LogicalType &read_id_type, const LogicalType &parent_type, idx_t start_col = 0);
 
 } // namespace duckdb

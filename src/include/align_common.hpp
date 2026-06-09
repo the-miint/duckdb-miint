@@ -37,7 +37,7 @@ inline std::vector<std::string> GetAlignmentOutputNames() {
 
 // Get the standard alignment output column types.
 // `query_id_type` drives `read_id`; `subject_id_type` drives `reference` and
-// `mate_reference`. Both must be VARCHAR or BIGINT. No default arguments —
+// `mate_reference`. Both must be VARCHAR, BIGINT, or UUID. No default arguments —
 // every caller must make the choice explicit so the audit can't slip.
 inline std::vector<LogicalType> GetAlignmentOutputTypes(const LogicalType &query_id_type,
                                                         const LogicalType &subject_id_type) {
@@ -112,10 +112,10 @@ inline void ParseMinimap2ConfigParams(const named_parameter_map_t &params, miint
 
 // Output SAMRecordBatch to DataChunk using the standard alignment schema.
 // `query_id_type` and `subject_id_type` drive the three id columns
-// (read_id / reference / mate_reference). Both must be VARCHAR or BIGINT.
-// For BIGINT subject output, the SAM "=" sentinel in mate_reference is
-// resolved to the row's `reference` value before emit (the literal "="
-// has no BIGINT encoding). VARCHAR output preserves "=" as-is, matching
+// (read_id / reference / mate_reference). Both must be VARCHAR, BIGINT, or UUID.
+// For non-VARCHAR subject output, the SAM "=" sentinel in mate_reference is
+// resolved to the row's `reference` value before emit (the literal "=" has no
+// BIGINT/UUID encoding). VARCHAR output preserves "=" as-is, matching
 // pre-existing user-observable behavior.
 // Returns the number of records output.
 inline idx_t OutputSAMRecordBatch(DataChunk &output, const miint::SAMRecordBatch &batch, idx_t offset, idx_t count,
@@ -129,11 +129,11 @@ inline idx_t OutputSAMRecordBatch(DataChunk &output, const miint::SAMRecordBatch
 	SetAlignResultUInt8(output.data[field_idx++], batch.mapqs, offset, count);
 	SetAlignResultString(output.data[field_idx++], batch.cigars, offset, count);
 
-	// Emit mate_reference. For BIGINT subjects, resolve any "=" sentinel
-	// (mate maps to same reference as primary) into the row's reference
-	// value via a local copy — the codec rejects "=" for BIGINT and there
-	// is no in-band way to encode it.
-	if (subject_id_type.id() == LogicalTypeId::BIGINT) {
+	// Emit mate_reference. For non-VARCHAR subjects, resolve any "=" sentinel
+	// (mate maps to same reference as primary) into the row's reference value
+	// via a local copy — the codec rejects "=" for BIGINT/UUID and there is no
+	// in-band way to encode it.
+	if (subject_id_type.id() != LogicalTypeId::VARCHAR) {
 		std::vector<std::string> resolved_mate_refs;
 		resolved_mate_refs.reserve(count);
 		for (idx_t j = 0; j < count; j++) {
@@ -287,8 +287,9 @@ inline void ValidateReadToShardSchema(ClientContext &context, const std::string 
 			throw BinderException("Column 'read_id' in read_to_shard table '%s' must be VARCHAR", table_name);
 		}
 	} else {
-		if (actual_id_type.id() != LogicalTypeId::VARCHAR && actual_id_type.id() != LogicalTypeId::BIGINT) {
-			throw BinderException("Column 'read_id' in read_to_shard table '%s' must be VARCHAR or BIGINT", table_name);
+		if (!IsAllowedIdType(actual_id_type)) {
+			throw BinderException("Column 'read_id' in read_to_shard table '%s' must be %s", table_name,
+			                      AllowedIdTypeList());
 		}
 		if (actual_id_type.id() != expected_read_id_type.id()) {
 			throw BinderException("Column 'read_id' in read_to_shard table '%s' is %s but must match the query "

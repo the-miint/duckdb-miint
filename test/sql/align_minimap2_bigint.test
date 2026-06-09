@@ -178,7 +178,7 @@ INSERT INTO queries_int VALUES (1, 'ACGT');
 statement error
 SELECT * FROM align_minimap2('queries_int', subject_table='subjects_bigint');
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID
 
 statement ok
 CREATE TABLE queries_double (read_id DOUBLE, sequence1 VARCHAR);
@@ -189,7 +189,7 @@ INSERT INTO queries_double VALUES (1.5, 'ACGT');
 statement error
 SELECT * FROM align_minimap2('queries_double', subject_table='subjects_bigint');
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID
 
 statement ok
 CREATE TABLE queries_ubigint (read_id UBIGINT, sequence1 VARCHAR);
@@ -200,10 +200,10 @@ INSERT INTO queries_ubigint VALUES (1, 'ACGT');
 statement error
 SELECT * FROM align_minimap2('queries_ubigint', subject_table='subjects_bigint');
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID
 
 # Rejected subject-side too
 statement error
 SELECT * FROM align_minimap2('queries_bigint', subject_table='queries_int');
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID

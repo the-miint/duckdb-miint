@@ -22,6 +22,12 @@ public:
 		bool megablast = true;
 		std::string api_key;
 
+		// Storage type of the query table's read_id column (VARCHAR, BIGINT, or
+		// UUID), captured at bind. Only the output query_id mirrors this; subject_id
+		// is always VARCHAR (it is an NCBI accession, not a user-table id). INVALID
+		// until Bind sets it (fails loud at the egress dispatcher otherwise).
+		LogicalType query_id_type = LogicalType(LogicalTypeId::INVALID);
+
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 	};

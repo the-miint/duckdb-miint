@@ -29,6 +29,11 @@ public:
 		std::string sequence_col = "sequence1";
 		std::string count_col = "size";
 
+		// Storage type of the id_col (VARCHAR, BIGINT, or UUID), captured at bind.
+		// denovo has a single id source, so read_id and all three parent columns
+		// mirror this one type. INVALID until Bind sets it (fails loud otherwise).
+		LogicalType id_type = LogicalType(LogicalTypeId::INVALID);
+
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 

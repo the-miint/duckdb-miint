@@ -21,6 +21,13 @@ public:
 		std::string input_table;
 		miint::ClusterParams params;
 
+		// Storage type of the input read_id column (VARCHAR, BIGINT, or UUID),
+		// captured at bind. Both output id columns (read_id and centroid_id, which
+		// is itself one of the input read_ids) mirror this type. Defaults to
+		// INVALID so any path that reaches the egress dispatcher without Bind
+		// having set it fails loud rather than misreading the carrier.
+		LogicalType id_type = LogicalType(LogicalTypeId::INVALID);
+
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 	};

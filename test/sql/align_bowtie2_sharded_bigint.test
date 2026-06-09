@@ -96,7 +96,7 @@ SELECT * FROM align_bowtie2_sharded('queries_integer',
     shard_directory := 'data/bowtie2_shards/',
     read_to_shard := 'read_to_shard_bigint');
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID
 
 statement ok
 CREATE TABLE queries_hugeint (read_id HUGEINT, sequence1 VARCHAR);
@@ -106,7 +106,7 @@ SELECT * FROM align_bowtie2_sharded('queries_hugeint',
     shard_directory := 'data/bowtie2_shards/',
     read_to_shard := 'read_to_shard_bigint');
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID
 
 statement ok
 CREATE TABLE read_to_shard_hugeint (read_id HUGEINT, shard_name VARCHAR);
@@ -116,7 +116,7 @@ SELECT * FROM align_bowtie2_sharded('queries_bigint',
     shard_directory := 'data/bowtie2_shards/',
     read_to_shard := 'read_to_shard_hugeint');
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID
 
 # ---------------------------------------------------------------------------
 # NULL read_id: bowtie2_sharded inherits align_bowtie2's contract — both

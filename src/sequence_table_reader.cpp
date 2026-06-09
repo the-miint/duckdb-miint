@@ -50,9 +50,10 @@ SequenceTableSchema ValidateSequenceTableSchema(ClientContext &context, const st
 		return true;
 	};
 
-	// Required columns: read_id (VARCHAR; or BIGINT if allow_bigint), sequence1 (VARCHAR)
+	// Required columns: read_id (VARCHAR; or BIGINT/UUID if allow_bigint), sequence1 (VARCHAR)
 	if (allow_bigint) {
-		check_column("read_id", {LogicalTypeId::VARCHAR, LogicalTypeId::BIGINT}, "VARCHAR or BIGINT", true);
+		check_column("read_id", {LogicalTypeId::VARCHAR, LogicalTypeId::BIGINT, LogicalTypeId::UUID},
+		             AllowedIdTypeList(), true);
 	} else {
 		check_column("read_id", {LogicalTypeId::VARCHAR}, "VARCHAR", true);
 	}
@@ -404,34 +405,22 @@ std::vector<std::string> ReadShardIds(ClientContext &context, const std::string 
 	auto &materialized = query_result->Cast<MaterializedQueryResult>();
 
 	if (!IsAllowedIdType(id_type)) {
-		throw InternalException("ReadShardIds: id_type must be VARCHAR or BIGINT, got '%s'", id_type.ToString());
+		throw InternalException("ReadShardIds: id_type must be %s, got '%s'", AllowedIdTypeList(), id_type.ToString());
 	}
-	const bool is_bigint = id_type.id() == LogicalTypeId::BIGINT;
 
+	// Stringify each chunk through the shared id ingress dispatcher (VARCHAR /
+	// BIGINT / UUID) and keep only the non-NULL ids, in order.
+	std::vector<std::string> chunk_vals;
+	std::vector<bool> chunk_nulls;
 	while (true) {
 		auto chunk = materialized.Fetch();
 		if (!chunk || chunk->size() == 0) {
 			break;
 		}
-
-		UnifiedVectorFormat id_data;
-		chunk->data[0].ToUnifiedFormat(chunk->size(), id_data);
-
-		if (is_bigint) {
-			auto id_ints = UnifiedVectorFormat::GetData<int64_t>(id_data);
-			for (idx_t i = 0; i < chunk->size(); i++) {
-				auto idx = id_data.sel->get_index(i);
-				if (id_data.validity.RowIsValid(idx)) {
-					ids.push_back(miint::FormatIdFromInt64(id_ints[idx]));
-				}
-			}
-		} else {
-			auto id_strings = UnifiedVectorFormat::GetData<string_t>(id_data);
-			for (idx_t i = 0; i < chunk->size(); i++) {
-				auto idx = id_data.sel->get_index(i);
-				if (id_data.validity.RowIsValid(idx)) {
-					ids.push_back(id_strings[idx].GetString());
-				}
+		ExtractIdColumnAsStrings(*chunk, 0, id_type, chunk_vals, chunk_nulls);
+		for (idx_t i = 0; i < chunk_vals.size(); i++) {
+			if (!chunk_nulls[i]) {
+				ids.push_back(std::move(chunk_vals[i]));
 			}
 		}
 	}
@@ -461,7 +450,7 @@ void ReadBatchByIds(ClientContext &context, const std::string &query_table, cons
 	// that any SequenceTableSchema reaching this layer has been through
 	// ValidateSequenceTableSchema, which always resolves to VARCHAR or BIGINT.
 	if (!IsAllowedIdType(schema.id_type)) {
-		throw InternalException("ReadBatchByIds: schema.id_type must be VARCHAR or BIGINT, got '%s'",
+		throw InternalException("ReadBatchByIds: schema.id_type must be %s, got '%s'", AllowedIdTypeList(),
 		                        schema.id_type.ToString());
 	}
 	const LogicalType &id_type = schema.id_type;
@@ -481,6 +470,12 @@ void ReadBatchByIds(ClientContext &context, const std::string &query_table, cons
 				} else {
 					appender.AppendRow(Value(LogicalType::BIGINT));
 				}
+			} else if (id_type.id() == LogicalTypeId::UUID) {
+				// ids[i] is a canonical UUID string produced by ReadShardIds. Parse
+				// via the bool-checked helper and pass the INT128 to the hugeint
+				// overload — Value::UUID(string) silently swallows parse failures,
+				// so this fails loud on a malformed id, mirroring the BIGINT branch.
+				appender.AppendRow(Value::UUID(ParseUuidOrThrow(ids[i])));
 			} else {
 				appender.AppendRow(Value(ids[i]));
 			}

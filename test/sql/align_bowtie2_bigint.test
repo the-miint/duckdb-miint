@@ -91,7 +91,7 @@ CREATE TABLE queries_integer (read_id INTEGER, sequence1 VARCHAR);
 statement error
 SELECT * FROM align_bowtie2('queries_integer', 'subjects_bigint');
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID
 
 statement ok
 CREATE TABLE queries_hugeint (read_id HUGEINT, sequence1 VARCHAR);
@@ -99,7 +99,7 @@ CREATE TABLE queries_hugeint (read_id HUGEINT, sequence1 VARCHAR);
 statement error
 SELECT * FROM align_bowtie2('queries_hugeint', 'subjects_bigint');
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID
 
 statement ok
 CREATE TABLE subjects_double (read_id DOUBLE, sequence1 VARCHAR);
@@ -107,7 +107,7 @@ CREATE TABLE subjects_double (read_id DOUBLE, sequence1 VARCHAR);
 statement error
 SELECT * FROM align_bowtie2('queries_bigint', 'subjects_double');
 ----
-must be VARCHAR or BIGINT
+must be VARCHAR, BIGINT, or UUID
 
 # ---------------------------------------------------------------------------
 # Paired-end BIGINT with `=` mate_reference resolution. For BIGINT subjects

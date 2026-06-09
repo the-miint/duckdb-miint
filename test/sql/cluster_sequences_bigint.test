@@ -1,0 +1,91 @@
+# name: test/sql/cluster_sequences_bigint.test
+# description: cluster_sequences_vsearch accepts BIGINT read_id; read_id and centroid_id round-trip.
+# group: [sql]
+
+#   read_id is carried internally as a string regardless of SQL type. A BIGINT
+#   read_id is stringified to decimal on ingress and parsed back on egress, so
+#   both the output read_id and centroid_id (which is one of the input read_ids)
+#   must mirror the BIGINT input type and round-trip losslessly — including the
+#   int64 extremes. A raw HUGEINT column stays rejected: only logical BIGINT/UUID
+#   widen the historically VARCHAR-only id contract.
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+# ---------------------------------------------------------------------------
+# Happy path: BIGINT read_id round-trips; output types mirror input.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE ident_bigint (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO ident_bigint VALUES
+    (10, 'ATCGATCGATCGATCGATCGATCG'),
+    (20, 'ATCGATCGATCGATCGATCGATCG'),
+    (30, 'ATCGATCGATCGATCGATCGATCG');
+
+# read_id and centroid_id mirror the BIGINT input type.
+query TT
+SELECT typeof(read_id), typeof(centroid_id)
+FROM cluster_sequences_vsearch('ident_bigint', id:=0.97)
+LIMIT 1;
+----
+BIGINT	BIGINT
+
+# Three identical sequences → one cluster; centroid is the first fed (id 10),
+# and every centroid_id round-trips back to that exact BIGINT.
+query ITII
+SELECT read_id, is_centroid, cluster_id, centroid_id
+FROM cluster_sequences_vsearch('ident_bigint', id:=0.97)
+ORDER BY read_id;
+----
+10	true	0	10
+20	false	0	10
+30	false	0	10
+
+# ---------------------------------------------------------------------------
+# int64 extremes round-trip through the decimal codec without overflow.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE extreme_bigint (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO extreme_bigint VALUES
+    (-9223372036854775808, 'ATCGATCGATCGATCGATCGATCG'),
+    (9223372036854775807, 'ATCGATCGATCGATCGATCGATCG');
+
+query II
+SELECT read_id, centroid_id
+FROM cluster_sequences_vsearch('extreme_bigint', id:=0.97)
+ORDER BY read_id;
+----
+-9223372036854775808	-9223372036854775808
+9223372036854775807	-9223372036854775808
+
+# ---------------------------------------------------------------------------
+# Raw HUGEINT stays rejected — only logical BIGINT/UUID widen the id contract.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE hugeint_ids (read_id HUGEINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO hugeint_ids VALUES (1, 'ATCGATCGATCGATCGATCGATCG');
+
+statement error
+SELECT * FROM cluster_sequences_vsearch('hugeint_ids', id:=0.97);
+----
+must be VARCHAR, BIGINT, or UUID
+
+# --- Cleanup ---
+statement ok
+DROP TABLE ident_bigint;
+
+statement ok
+DROP TABLE extreme_bigint;
+
+statement ok
+DROP TABLE hugeint_ids;

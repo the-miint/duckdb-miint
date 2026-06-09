@@ -1,4 +1,5 @@
 #include "cluster_sequences.hpp"
+#include "id_column_utils.hpp"
 #include "sequence_table_reader.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -13,13 +14,21 @@ static std::vector<std::string> GetClusterOutputNames() {
 	return {"read_id", "is_centroid", "cluster_id", "centroid_id", "identity", "cigar", "cigar_truncated"};
 }
 
-static std::vector<LogicalType> GetClusterOutputTypes() {
-	return {LogicalType::VARCHAR, LogicalType::BOOLEAN, LogicalType::INTEGER, LogicalType::VARCHAR,
-	        LogicalType::DOUBLE,  LogicalType::VARCHAR, LogicalType::BOOLEAN};
+// read_id (col 0) and centroid_id (col 3) mirror the input read_id type; the
+// centroid_id values are themselves drawn from the input read_ids, so the two
+// id columns always share one type.
+static std::vector<LogicalType> GetClusterOutputTypes(const LogicalType &id_type) {
+	return {id_type,
+	        LogicalType::BOOLEAN,
+	        LogicalType::INTEGER,
+	        id_type,
+	        LogicalType::DOUBLE,
+	        LogicalType::VARCHAR,
+	        LogicalType::BOOLEAN};
 }
 
 static idx_t OutputClusterResults(DataChunk &output, const std::vector<miint::ClusterResult> &results, idx_t offset,
-                                  idx_t count) {
+                                  idx_t count, const LogicalType &id_type) {
 	idx_t actual = std::min(count, static_cast<idx_t>(results.size()) - offset);
 	if (actual == 0) {
 		output.SetCardinality(0);
@@ -30,8 +39,7 @@ static idx_t OutputClusterResults(DataChunk &output, const std::vector<miint::Cl
 
 	auto &read_id_vec = output.data[col++];
 	for (idx_t i = 0; i < actual; i++) {
-		FlatVector::GetData<string_t>(read_id_vec)[i] =
-		    StringVector::AddString(read_id_vec, results[offset + i].read_id);
+		EmitIdCell(read_id_vec, i, results[offset + i].read_id, id_type);
 	}
 
 	auto is_centroid_data = FlatVector::GetData<bool>(output.data[col++]);
@@ -46,8 +54,7 @@ static idx_t OutputClusterResults(DataChunk &output, const std::vector<miint::Cl
 
 	auto &centroid_id_vec = output.data[col++];
 	for (idx_t i = 0; i < actual; i++) {
-		FlatVector::GetData<string_t>(centroid_id_vec)[i] =
-		    StringVector::AddString(centroid_id_vec, results[offset + i].centroid_id);
+		EmitIdCell(centroid_id_vec, i, results[offset + i].centroid_id, id_type);
 	}
 
 	auto identity_data = FlatVector::GetData<double>(output.data[col++]);
@@ -77,8 +84,10 @@ unique_ptr<FunctionData> ClusterSequencesTableFunction::Bind(ClientContext &cont
 
 	data->input_table = input.inputs[0].GetValue<std::string>();
 
-	// Validate table has read_id (VARCHAR) and sequence1 (VARCHAR)
-	ValidateSequenceTableSchema(context, data->input_table);
+	// Validate table has read_id (VARCHAR, BIGINT, or UUID) and sequence1
+	// (VARCHAR). Capture the read_id type so the output id columns mirror it.
+	auto schema = ValidateSequenceTableSchema(context, data->input_table, /*allow_bigint=*/true);
+	data->id_type = schema.id_type;
 
 	// id is required — no silent default.
 	auto id_it = input.named_parameters.find("id");
@@ -123,7 +132,7 @@ unique_ptr<FunctionData> ClusterSequencesTableFunction::Bind(ClientContext &cont
 	get_int("threads", data->params.threads, 1, 1024, ">= 1 and <= 1024");
 
 	data->names = GetClusterOutputNames();
-	data->types = GetClusterOutputTypes();
+	data->types = GetClusterOutputTypes(data->id_type);
 	for (auto &n : data->names) {
 		names.push_back(n);
 	}
@@ -153,6 +162,7 @@ unique_ptr<GlobalTableFunctionState> ClusterSequencesTableFunction::InitGlobal(C
 }
 
 void ClusterSequencesTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &data = data_p.bind_data->Cast<Data>();
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
 	if (gstate.result_offset >= gstate.results.size()) {
@@ -162,7 +172,7 @@ void ClusterSequencesTableFunction::Execute(ClientContext &context, TableFunctio
 
 	idx_t remaining = gstate.results.size() - gstate.result_offset;
 	idx_t count = std::min(remaining, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
-	OutputClusterResults(output, gstate.results, gstate.result_offset, count);
+	OutputClusterResults(output, gstate.results, gstate.result_offset, count, data.id_type);
 	gstate.result_offset += count;
 }
 
