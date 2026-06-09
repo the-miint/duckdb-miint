@@ -5,6 +5,7 @@
 #include <span>
 #include <stdexcept>
 #include <cstdint>
+#include <utility>
 
 namespace miint {
 //! Object to represent Qual store data independent of offset
@@ -16,6 +17,10 @@ private:
 public:
 	//! Constructor from string: store as-is
 	explicit QualScore(const std::string &qual_str) noexcept : qual_(qual_str) {
+	}
+
+	//! Constructor from string rvalue: take ownership without copying
+	explicit QualScore(std::string &&qual_str) noexcept : qual_(std::move(qual_str)) {
 	}
 
 	//! Constructor from uint8 vector: interpret as quality scores, convert to characters

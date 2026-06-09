@@ -6,6 +6,8 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include <read_sequences_sam.hpp>
+#include <cstring>
+#include <stdexcept>
 
 namespace duckdb {
 
@@ -87,56 +89,25 @@ unique_ptr<LocalTableFunctionState> ReadSequencesSamTableFunction::InitLocal(Exe
 	return duckdb::make_uniq<LocalState>();
 }
 
-// Per-record nullable quality scores: BAM records may individually have or lack quality
-static void SetResultVectorListUInt8PerRecordNullable(Vector &result_vector,
-                                                      const std::vector<miint::QualScore> &values) {
-	constexpr uint8_t PHRED33_OFFSET = 33;
-
-	auto &validity = FlatVector::Validity(result_vector);
-	auto list_entries = FlatVector::GetData<list_entry_t>(result_vector);
-
-	idx_t total_child_elements = 0;
-	for (auto &qual : values) {
-		total_child_elements += qual.size();
-	}
-
-	ListVector::Reserve(result_vector, total_child_elements);
-	ListVector::SetListSize(result_vector, total_child_elements);
-
-	auto &child_vector = ListVector::GetEntry(result_vector);
-	auto child_data = FlatVector::GetData<uint8_t>(child_vector);
-
-	const auto output_count = values.size();
-	validity.SetAllValid(output_count);
-	idx_t value_offset = 0;
-	for (idx_t row_offset = 0; row_offset < output_count; row_offset++) {
-		auto len = values[row_offset].size();
-		if (len == 0) {
-			list_entries[row_offset].offset = value_offset;
-			list_entries[row_offset].length = 0;
-			validity.SetInvalid(row_offset);
-		} else {
-			list_entries[row_offset].offset = value_offset;
-			list_entries[row_offset].length = len;
-
-			values[row_offset].write_decoded(child_data + value_offset, PHRED33_OFFSET);
-			value_offset += len;
-		}
-	}
-
-	auto &child_validity = FlatVector::Validity(child_vector);
-	child_validity.SetAllValid(total_child_elements);
-}
-
 void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &bind_data = data_p.bind_data->Cast<Data>();
 	auto &global_state = data_p.global_state->Cast<GlobalState>();
 	auto &local_state = data_p.local_state->Cast<LocalState>();
 
-	miint::SAMRecordBatch batch;
-	std::string current_filepath;
+	// Output schema (fixed): 0=sequence_index 1=read_id 2=comment 3=sequence1 4=sequence2
+	// 5=qual1 6=qual2 [7=filepath]. read_id / sequence1 / qual1 are decoded straight from
+	// the raw bam1_t into these vectors -- no intermediate std::string, no SAMRecordBatch
+	// SOA, and none of the alignment metadata read_sequences_sam discards.
+	auto read_id_data = FlatVector::GetData<string_t>(output.data[1]);
+	auto sequence1_data = FlatVector::GetData<string_t>(output.data[3]);
+	auto &qual1_vector = output.data[5];
+	auto qual1_entries = FlatVector::GetData<list_entry_t>(qual1_vector);
+	auto &qual_scratch = local_state.qual_scratch;
 
-	// Loop until we get data or run out of files
+	std::string current_filepath;
+	idx_t count = 0;
+
+	// Loop until we decode at least one record or run out of files.
 	while (true) {
 		// If this thread doesn't have a file, claim one
 		if (!local_state.has_file) {
@@ -152,53 +123,99 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 			local_state.has_file = true;
 		}
 
-		batch = global_state.readers[local_state.current_file_idx]->read(STANDARD_VECTOR_SIZE);
+		auto &reader = *global_state.readers[local_state.current_file_idx];
 		current_filepath = global_state.filepaths[local_state.current_file_idx];
 
-		if (batch.empty()) {
+		qual_scratch.clear();
+		count = 0;
+		while (count < STANDARD_VECTOR_SIZE) {
+			const bam1_t *aln = reader.read_raw();
+			if (!aln) {
+				break; // end of this file
+			}
+
+			const int seq_len = aln->core.l_qseq;
+
+			// Primary/unmapped reads must carry sequence (matches parse_record_to_batch).
+			const bool is_unmapped = (aln->core.flag & 0x4) != 0;
+			const bool is_secondary = (aln->core.flag & 0x100) != 0;
+			const bool is_supplementary = (aln->core.flag & 0x800) != 0;
+			if (seq_len == 0 && (is_unmapped || (!is_secondary && !is_supplementary))) {
+				throw std::runtime_error("Primary/unmapped read missing sequence (SEQ='*'): " +
+				                         std::string(reinterpret_cast<const char *>(aln->data)));
+			}
+
+			// read_id: copy QNAME once into the vector's string heap.
+			read_id_data[count] = StringVector::AddString(output.data[1], reinterpret_cast<const char *>(aln->data));
+
+			// sequence1: decode 4-bit nucleotides straight into the vector buffer (one pass).
+			string_t seq_str = StringVector::EmptyString(output.data[3], seq_len);
+			char *seq_dest = seq_str.GetDataWriteable();
+			const uint8_t *seq = bam_get_seq(aln);
+			for (int i = 0; i < seq_len; i++) {
+				seq_dest[i] = seq_nt16_str[bam_seqi(seq, i)];
+			}
+			seq_str.Finalize();
+			sequence1_data[count] = seq_str;
+
+			// qual1: raw Phred scores copied straight across (no +33/-33 round trip).
+			// Absent quality (first byte 0xFF) or empty sequence -> NULL list.
+			const uint8_t *qual = bam_get_qual(aln);
+			qual1_entries[count].offset = qual_scratch.size();
+			if (seq_len > 0 && qual[0] != 0xFF) {
+				qual_scratch.insert(qual_scratch.end(), qual, qual + seq_len);
+				qual1_entries[count].length = static_cast<uint64_t>(seq_len);
+			} else {
+				qual1_entries[count].length = 0;
+			}
+
+			count++;
+		}
+
+		if (count == 0) {
+			// File exhausted before producing any record; release and try the next.
 			local_state.has_file = false;
 			continue;
 		}
-
 		break;
 	}
 
-	// Get sequence indices for this chunk
-	uint64_t start_sequence_index = global_state.file_sequence_counters[local_state.current_file_idx];
-	global_state.file_sequence_counters[local_state.current_file_idx] += batch.size();
+	// Finalize qual1 child with a single bulk copy of the accumulated raw Phred bytes.
+	ListVector::Reserve(qual1_vector, qual_scratch.size());
+	ListVector::SetListSize(qual1_vector, qual_scratch.size());
+	if (!qual_scratch.empty()) {
+		auto &qual_child = ListVector::GetEntry(qual1_vector);
+		auto qual_child_data = FlatVector::GetData<uint8_t>(qual_child);
+		std::memcpy(qual_child_data, qual_scratch.data(), qual_scratch.size());
+		FlatVector::Validity(qual_child).SetAllValid(qual_scratch.size());
+	}
+	// Per-row qual1 nullability: zero-length entries (absent quality) are NULL.
+	auto &qual1_validity = FlatVector::Validity(qual1_vector);
+	qual1_validity.SetAllValid(count);
+	for (idx_t j = 0; j < count; j++) {
+		if (qual1_entries[j].length == 0) {
+			qual1_validity.SetInvalid(j);
+		}
+	}
 
-	// Set sequence_index column
-	auto &sequence_index_vector = output.data[0];
-	auto sequence_index_data = FlatVector::GetData<int64_t>(sequence_index_vector);
-	for (idx_t j = 0; j < batch.size(); j++) {
+	// sequence_index: per-file monotonic counter.
+	uint64_t start_sequence_index = global_state.file_sequence_counters[local_state.current_file_idx];
+	global_state.file_sequence_counters[local_state.current_file_idx] += count;
+	auto sequence_index_data = FlatVector::GetData<int64_t>(output.data[0]);
+	for (idx_t j = 0; j < count; j++) {
 		sequence_index_data[j] = static_cast<int64_t>(start_sequence_index + j);
 	}
 
-	size_t field_idx = 1;
-
-	// read_id from BAM QNAME
-	SetResultVectorString(output.data[field_idx++], batch.read_ids);
-
-	// comment: always NULL (BAM has no comment field)
-	SetResultVectorNull(output.data[field_idx++]);
-
-	// sequence1 from BAM SEQ
-	SetResultVectorString(output.data[field_idx++], batch.sequences);
-
-	// sequence2: always NULL (single-end)
-	SetResultVectorNull(output.data[field_idx++]);
-
-	// qual1 from BAM QUAL (per-record nullability)
-	SetResultVectorListUInt8PerRecordNullable(output.data[field_idx++], batch.quals);
-
-	// qual2: always NULL
-	SetResultVectorNull(output.data[field_idx++]);
+	// Constant-NULL columns: comment, sequence2, qual2 (single-end BAM, no comment field).
+	SetResultVectorNull(output.data[2]);
+	SetResultVectorNull(output.data[4]);
+	SetResultVectorNull(output.data[6]);
 
 	if (bind_data.include_filepath) {
-		SetResultVectorFilepath(output.data[field_idx++], current_filepath);
+		SetResultVectorFilepath(output.data[7], current_filepath);
 	}
 
-	output.SetCardinality(batch.size());
+	output.SetCardinality(count);
 }
 
 TableFunction ReadSequencesSamTableFunction::GetFunction() {

@@ -77,12 +77,28 @@ public:
 				}
 				file_sequence_counters.emplace_back(1);
 			}
+
+			// Multi-threaded BGZF decompression, but ONLY for a single input file.
+			// With one file, MaxThreads() == 1 so the scan runs on one core while the
+			// rest sit idle; an HTSlib worker pool decompresses blocks ahead of the parser
+			// (blocks stay in order, so output is identical). With multiple files we rely
+			// on file-level parallelism instead -- giving every reader its own pool would
+			// oversubscribe (up to min(files, 8) readers run concurrently, each spawning a
+			// pool), so we deliberately leave the multi-file path single-threaded per file.
+			if (readers.size() == 1 && !uses_stdin) {
+				auto hw = std::thread::hardware_concurrency();
+				int decompress_threads = (hw > 1) ? std::min<int>(static_cast<int>(hw) - 1, 4) : 1;
+				readers[0]->set_threads(decompress_threads);
+			}
 		}
 	};
 
 	struct LocalState : public LocalTableFunctionState {
 		size_t current_file_idx;
 		bool has_file;
+		// Reused across Execute calls to accumulate one chunk's raw quality bytes before a
+		// single bulk copy into the qual1 LIST child (avoids per-record heap allocation).
+		std::vector<uint8_t> qual_scratch;
 
 		LocalState() : current_file_idx(0), has_file(false) {
 		}
