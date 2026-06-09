@@ -12,6 +12,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace duckdb {
@@ -315,6 +316,26 @@ static std::vector<std::string> ExtractAdapters(Vector &arg_vec, UnifiedVectorFo
 	return out;
 }
 
+// Remove exact-duplicate candidates in place, preserving first-occurrence order.
+// Production adapter sets are highly redundant (exact dups, and reverse-complement
+// pairs once RC expansion runs), so collapsing them cuts matching cost without
+// changing the leftmost-match result. Must run AFTER min_match is fixed (see
+// BuildAdapterCandidates) so that list size still drives sensitivity.
+static void DedupAdapterCandidates(std::vector<std::string> &candidates) {
+	std::unordered_set<std::string> seen;
+	seen.reserve(candidates.size());
+	std::size_t write = 0;
+	for (std::size_t read = 0; read < candidates.size(); read++) {
+		if (seen.insert(candidates[read]).second) {
+			if (write != read) {
+				candidates[write] = std::move(candidates[read]);
+			}
+			write++;
+		}
+	}
+	candidates.resize(write);
+}
+
 // Build the full candidate list (with optional RC extension) and resolve the
 // effective min_match. min_match scales against the total candidate count so
 // RC-enabled searches match the stringency the user would get by passing
@@ -334,6 +355,9 @@ static void BuildAdapterCandidates(std::vector<std::string> adapters, bool match
 	}
 	out_min_match =
 	    min_match_param > 0 ? static_cast<std::size_t>(min_match_param) : default_min_match(out_candidates.size());
+	// Collapse redundant candidates AFTER fixing min_match: dedup then only
+	// removes wasted matching work, never changes the auto-scaled sensitivity.
+	DedupAdapterCandidates(out_candidates);
 }
 
 // Shared trim_adapters execution. arg layout (the function set picks):
@@ -471,24 +495,13 @@ static void TrimAdaptersExecuteImpl(DataChunk &args, Vector &result, bool adapte
 			candidates_ptr = &row_candidates;
 		}
 
-		// Leftmost trim_start across all candidates wins.
-		miint::qc::TrimResult tr {0, static_cast<std::size_t>(seq.GetSize())};
+		// Leftmost trim_start across all candidates wins. find_leftmost applies
+		// the position-0 early-exit and returns the kept end directly (= seq size
+		// when nothing matches).
 		const auto seq_bytes = reinterpret_cast<const std::uint8_t *>(seq.GetData());
-		std::size_t best_trim_start = seq.GetSize();
-		for (const auto &cand : *candidates_ptr) {
-			if (cand.size() < min_match) {
-				continue;
-			}
-			auto m = miint::qc::AdapterMatcher::find(seq_bytes, seq.GetSize(),
-			                                         reinterpret_cast<const std::uint8_t *>(cand.data()), cand.size(),
-			                                         min_match, allow_pre_start);
-			if (m.matched && m.trim_start < best_trim_start) {
-				best_trim_start = m.trim_start;
-			}
-		}
-		if (best_trim_start < seq.GetSize()) {
-			tr.end = best_trim_start;
-		}
+		const std::size_t kept_end = miint::qc::AdapterMatcher::find_leftmost(seq_bytes, seq.GetSize(), *candidates_ptr,
+		                                                                      min_match, allow_pre_start);
+		const miint::qc::TrimResult tr {0, kept_end};
 
 		WriteTrimRow(i, seq, qptr, qlen, tr, seq_out_vec, qual_out_vec, qual_out_entries, qual_child_offset,
 		             trimmed_5p_data, trimmed_3p_data);

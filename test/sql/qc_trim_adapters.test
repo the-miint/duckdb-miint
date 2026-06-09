@@ -240,3 +240,53 @@ query I
 SELECT trim_adapters('ACGT', [40,40,40,40]::UTINYINT[], NULL::VARCHAR) IS NULL
 ----
 true
+
+# -----------------------------------------------------------------------------
+# Characterization: min_match auto-scale uses the PRE-dedup candidate count.
+# The matcher internally drops exact-duplicate / reverse-complement-redundant
+# candidates so list size stops driving matching cost, but min_match must still
+# scale off the count the user supplied (4 adapters -> min_match 6), otherwise
+# collapsing redundancy would silently change sensitivity. These cases pin that:
+# they would break if dedup happened BEFORE min_match was fixed.
+# -----------------------------------------------------------------------------
+
+# 4-element list (two entries identical -> 3 distinct) => min_match=6. A 5bp
+# partial adapter at the 3' end is shorter than 6, so it must NOT trim. (If
+# min_match were computed from the 3 distinct candidates it would be 5 and this
+# would wrongly trim.)
+query I
+SELECT (t).trimmed_3p
+FROM (SELECT trim_adapters(
+    'ACGTACGTACGTAGATC',
+    [40::UTINYINT for x in range(17)],
+    ['AGATCGGAAGAGC', 'AGATCGGAAGAGC', 'CTGTCTCTTATA', 'GGGGGGGGGGGG']
+) AS t)
+----
+0
+
+# Same 4-element list, 6bp partial 'AGATCG' at the 3' end: 6 >= min_match 6, so
+# it trims exactly 6 bases.
+query I
+SELECT (t).trimmed_3p
+FROM (SELECT trim_adapters(
+    'ACGTACGTACGTAGATCG',
+    [40::UTINYINT for x in range(18)],
+    ['AGATCGGAAGAGC', 'AGATCGGAAGAGC', 'CTGTCTCTTATA', 'GGGGGGGGGGGG']
+) AS t)
+----
+6
+
+# match_revcomp where one adapter's reverse complement equals the other adapter
+# (GCTCTTCCGATCT = revcomp(AGATCGGAAGAGC)). The RC expansion produces duplicate
+# candidates that are deduped internally; the result is unchanged — a full 13bp
+# adapter match still trims.
+query I
+SELECT (t).trimmed_3p
+FROM (SELECT trim_adapters(
+    'ACGTACGTAGATCGGAAGAGC',
+    [40::UTINYINT for x in range(21)],
+    ['AGATCGGAAGAGC', 'GCTCTTCCGATCT'],
+    true, 0, false
+) AS t)
+----
+13

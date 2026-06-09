@@ -477,6 +477,52 @@ TEST_CASE("AdapterMatcher::find phase 3 (deletion in seq)", "[qc][adapter]") {
 	}
 }
 
+TEST_CASE("AdapterMatcher::find_leftmost", "[qc][adapter]") {
+	// Returns the leftmost trim_start across candidates, or seq_len if none match.
+	// Used by trim_adapters / trim_adapters_pe so the result is independent of
+	// candidate order or duplication (only the leftmost hit matters).
+	SECTION("leftmost match across two candidates wins") {
+		// AGATCGGAAGAGC starts at index 8, CTGGAATTCTCGG at index 24 — the
+		// leftmost (8) is returned.
+		const std::string seq = "ACGTACGTAGATCGGAAGAGCTTACTGGAATTCTCGG";
+		std::vector<std::string> cands = {"AGATCGGAAGAGC", "CTGGAATTCTCGG"};
+		CHECK(AdapterMatcher::find_leftmost(bp(seq), seq.size(), cands, 4, false) == 8);
+	}
+
+	SECTION("candidate matching at position 0 returns 0") {
+		const std::string seq = "AGATCGGAAGAGCACGT";
+		std::vector<std::string> cands = {"AGATCGGAAGAGC"};
+		CHECK(AdapterMatcher::find_leftmost(bp(seq), seq.size(), cands, 4, false) == 0);
+	}
+
+	SECTION("no candidate matches returns seq_len (no trim)") {
+		const std::string seq = "ACGTACGTACGTACGTACGT";
+		std::vector<std::string> cands = {"AGATCGGAAGAGC"};
+		CHECK(AdapterMatcher::find_leftmost(bp(seq), seq.size(), cands, 4, false) == seq.size());
+	}
+
+	SECTION("candidates shorter than min_match are skipped") {
+		// 'AGA' is present at index 4 but is shorter than min_match, so skipped.
+		const std::string seq = "ACGTAGA";
+		std::vector<std::string> cands = {"AGA"};
+		CHECK(AdapterMatcher::find_leftmost(bp(seq), seq.size(), cands, 4, false) == seq.size());
+	}
+
+	SECTION("duplicate candidates give the same result as one") {
+		const std::string seq = "ACGTACGTAGATCGGAAGAGCTTACTGGAATTCTCGG";
+		std::vector<std::string> one = {"AGATCGGAAGAGC"};
+		std::vector<std::string> dup = {"AGATCGGAAGAGC", "AGATCGGAAGAGC", "AGATCGGAAGAGC"};
+		CHECK(AdapterMatcher::find_leftmost(bp(seq), seq.size(), dup, 4, false) ==
+		      AdapterMatcher::find_leftmost(bp(seq), seq.size(), one, 4, false));
+	}
+
+	SECTION("empty candidate list returns seq_len") {
+		const std::string seq = "ACGTACGTAC";
+		std::vector<std::string> cands;
+		CHECK(AdapterMatcher::find_leftmost(bp(seq), seq.size(), cands, 4, false) == seq.size());
+	}
+}
+
 TEST_CASE("AdapterMatcher::find pre-start behavior", "[qc][adapter]") {
 	const std::string adapter = "AGATCGGAAGAGC"; // 13bp
 

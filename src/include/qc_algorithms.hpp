@@ -2,6 +2,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 // Pure C++ implementations of the QC algorithms (adapter trimming, polyG/polyX
 // trimming, sliding-window quality trimming, per-read filtering). Kept free of
@@ -77,6 +79,18 @@ public:
 	// most non-Illumina protocols don't need it and it can over-trim.
 	static AdapterMatch find(const std::uint8_t *seq, std::size_t seq_len, const std::uint8_t *adapter,
 	                         std::size_t adapter_len, std::size_t min_match, bool allow_pre_start);
+
+	// Leftmost trim point across a candidate adapter list: runs find() for each
+	// candidate and returns the smallest matched trim_start, or `seq_len` if none
+	// match (i.e. the kept end of the read). Candidates shorter than `min_match`
+	// are skipped. Stops as soon as a candidate matches at position 0 — that is
+	// the floor, so no remaining candidate can trim further left. The caller is
+	// responsible for choosing `min_match` (e.g. fastp's list-size auto-scale)
+	// BEFORE any deduplication, so that collapsing redundant candidates does not
+	// change sensitivity.
+	static std::size_t find_leftmost(const std::uint8_t *seq, std::size_t seq_len,
+	                                 const std::vector<std::string> &candidates, std::size_t min_match,
+	                                 bool allow_pre_start);
 };
 
 // Result of paired-end overlap analysis (ported from fastp's OverlapAnalysis).

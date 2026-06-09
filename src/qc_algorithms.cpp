@@ -427,6 +427,26 @@ AdapterMatch AdapterMatcher::find(const std::uint8_t *seq, std::size_t seq_len, 
 	return phase_indel(seq, seq_len, adapter, adapter_len, min_match, start_pos, /*insertion_in_seq=*/false);
 }
 
+std::size_t AdapterMatcher::find_leftmost(const std::uint8_t *seq, std::size_t seq_len,
+                                          const std::vector<std::string> &candidates, std::size_t min_match,
+                                          bool allow_pre_start) {
+	std::size_t best = seq_len; // no match yet -> kept end is the whole read
+	for (const auto &cand : candidates) {
+		if (cand.size() < min_match) {
+			continue;
+		}
+		const auto m = find(seq, seq_len, reinterpret_cast<const std::uint8_t *>(cand.data()), cand.size(), min_match,
+		                    allow_pre_start);
+		if (m.matched && m.trim_start < best) {
+			best = m.trim_start;
+			if (best == 0) {
+				break; // 0 is the floor; no other candidate can trim further left
+			}
+		}
+	}
+	return best;
+}
+
 // ---------------------------------------------------------------------------
 // OverlapAnalyzer — paired-end overlap analysis (fastp port)
 // ---------------------------------------------------------------------------
