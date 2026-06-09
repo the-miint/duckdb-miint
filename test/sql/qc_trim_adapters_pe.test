@@ -1,0 +1,220 @@
+# name: test/sql/qc_trim_adapters_pe.test
+# description: Tests for trim_adapters_pe scalar (fastp PE overlap adapter trimming, 4-arg form)
+# group: [sql]
+
+require miint
+
+# -----------------------------------------------------------------------------
+# 4-arg form: trim_adapters_pe(seq1, qual1, seq2, qual2) — fastp defaults
+# (overlap_require=30, overlap_diff_limit=5, overlap_diff_percent_limit=20).
+# Quality lists are built with list comprehensions so they stay length-matched
+# to the sequence. The companion parity test pins exact quality bytes against
+# native fastp; here uniform Q40 keeps the focus on the trim mechanics.
+# -----------------------------------------------------------------------------
+
+# Adapter read-through: 36bp insert sequenced by 50bp reads, so each mate reads
+# 14bp into adapter. Overlap analysis infers the insert boundary and trims BOTH
+# mates to the 36bp insert (offset<0 -> adapter_trimmed).
+query TTIIII
+SELECT (t).sequence1, (t).sequence2, (t).overlap_len, (t).adapter_trimmed::INT, (t).trimmed1_3p, (t).trimmed2_3p
+FROM (SELECT trim_adapters_pe(
+    'GATTACACCGGTATTACGCATGCAGTCAGTCAGTCAAGATCGGAAGAGCA',
+    [40::UTINYINT for x in range(50)],
+    'TGACTGACTGACTGCATGCGTAATACCGGTGTAATCAGATCGGAAGAGCG',
+    [40::UTINYINT for x in range(50)]
+) AS t)
+----
+GATTACACCGGTATTACGCATGCAGTCAGTCAGTCA	TGACTGACTGACTGCATGCGTAATACCGGTGTAATC	36	1	14	14
+
+# Quality is sliced in lockstep with the sequence (both mates kept to 36).
+query II
+SELECT len((t).quality1), len((t).quality2)
+FROM (SELECT trim_adapters_pe(
+    'GATTACACCGGTATTACGCATGCAGTCAGTCAGTCAAGATCGGAAGAGCA',
+    [40::UTINYINT for x in range(50)],
+    'TGACTGACTGACTGCATGCGTAATACCGGTGTAATCAGATCGGAAGAGCG',
+    [40::UTINYINT for x in range(50)]
+) AS t)
+----
+36	36
+
+# Full insert (60bp >= 50bp read): the mates overlap with a non-negative offset,
+# so neither reads into adapter. overlap_len is reported (41) but adapter_trimmed
+# is false and nothing is trimmed.
+query TIII
+SELECT (t).sequence1, (t).overlap_len, (t).adapter_trimmed::INT, (t).trimmed1_3p
+FROM (SELECT trim_adapters_pe(
+    'GATTACACCGGTATTACGCATGCAGTCAGTCAGTCATTGGAACCGGTTAC',
+    [40::UTINYINT for x in range(50)],
+    'CGATCGATCGTAACCGGTTCCAATGACTGACTGACTGCATGCGTAATACC',
+    [40::UTINYINT for x in range(50)]
+) AS t)
+----
+GATTACACCGGTATTACGCATGCAGTCAGTCAGTCATTGGAACCGGTTAC	41	0	0
+
+# No overlap (unrelated mates): nothing is detected, nothing is trimmed.
+query TIII
+SELECT (t).sequence1, (t).overlap_len, (t).adapter_trimmed::INT, (t).trimmed1_3p + (t).trimmed2_3p
+FROM (SELECT trim_adapters_pe(
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    [40::UTINYINT for x in range(40)],
+    'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC',
+    [40::UTINYINT for x in range(40)]
+) AS t)
+----
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA	0	0	0
+
+# -----------------------------------------------------------------------------
+# NULL propagation — any NULL input yields a NULL row.
+# -----------------------------------------------------------------------------
+
+query I
+SELECT trim_adapters_pe(NULL, [40::UTINYINT for x in range(4)], 'ACGT', [40::UTINYINT for x in range(4)]) IS NULL
+----
+true
+
+query I
+SELECT trim_adapters_pe('ACGT', [40::UTINYINT for x in range(4)], NULL, [40::UTINYINT for x in range(4)]) IS NULL
+----
+true
+
+query I
+SELECT trim_adapters_pe('ACGT', NULL::UTINYINT[], 'ACGT', [40::UTINYINT for x in range(4)]) IS NULL
+----
+true
+
+# -----------------------------------------------------------------------------
+# Per-mate seq/qual length-mismatch throws.
+# -----------------------------------------------------------------------------
+
+statement error
+SELECT trim_adapters_pe('ACGT', [40, 40]::UTINYINT[], 'ACGT', [40, 40, 40, 40]::UTINYINT[])
+----
+length
+
+statement error
+SELECT trim_adapters_pe('ACGT', [40, 40, 40, 40]::UTINYINT[], 'ACGTACGT', [40, 40, 40, 40]::UTINYINT[])
+----
+length
+
+# -----------------------------------------------------------------------------
+# 11-arg form: overlap analysis first, then an adapter-by-sequence FALLBACK on
+# each mate when overlap found no adapter (fastp step 8 -> step 9). Args:
+#   (seq1, qual1, seq2, qual2, adapters, overlap_require, overlap_diff_limit,
+#    overlap_diff_percent_limit, match_revcomp, min_match, allow_pre_start)
+# -----------------------------------------------------------------------------
+
+# Overlap succeeds (36bp read-through): the overlap result wins and the fallback
+# adapter list is NOT consulted.
+query TIII
+SELECT (t).sequence1, (t).overlap_len, (t).adapter_trimmed::INT, (t).trimmed1_3p
+FROM (SELECT trim_adapters_pe(
+    'GATTACACCGGTATTACGCATGCAGTCAGTCAGTCAAGATCGGAAGAGCA', [40::UTINYINT for x in range(50)],
+    'TGACTGACTGACTGCATGCGTAATACCGGTGTAATCAGATCGGAAGAGCG', [40::UTINYINT for x in range(50)],
+    ['AGATCGGAAGAGC'], 30, 5, 20, false, 0, false
+) AS t)
+----
+GATTACACCGGTATTACGCATGCAGTCAGTCAGTCA	36	1	14
+
+# Overlap fails (unrelated mates) but each carries a 3' adapter -> fallback trims
+# each mate independently at its adapter (leftmost match). overlap_len=0.
+query TTIIII
+SELECT (t).sequence1, (t).sequence2, (t).overlap_len, (t).adapter_trimmed::INT, (t).trimmed1_3p, (t).trimmed2_3p
+FROM (SELECT trim_adapters_pe(
+    'GATTACAGCATTGCATGGAACCTTACGATCGAGATCGGAAGAGC', [40::UTINYINT for x in range(44)],
+    'TTGGCCAATTGGCCAATTACGTACGTACGTAAGATCGGAAGAGC', [40::UTINYINT for x in range(44)],
+    ['AGATCGGAAGAGC'], 30, 5, 20, false, 0, false
+) AS t)
+----
+GATTACAGCATTGCATGGAACCTTACGATCG	TTGGCCAATTGGCCAATTACGTACGTACGTA	0	1	13	13
+
+# Empty adapter list (11-arg) is overlap-only: the non-overlapping pair is not
+# trimmed (no fallback).
+query TII
+SELECT (t).sequence1, (t).adapter_trimmed::INT, (t).trimmed1_3p
+FROM (SELECT trim_adapters_pe(
+    'GATTACAGCATTGCATGGAACCTTACGATCGAGATCGGAAGAGC', [40::UTINYINT for x in range(44)],
+    'TTGGCCAATTGGCCAATTACGTACGTACGTAAGATCGGAAGAGC', [40::UTINYINT for x in range(44)],
+    []::VARCHAR[], 30, 5, 20, false, 0, false
+) AS t)
+----
+GATTACAGCATTGCATGGAACCTTACGATCGAGATCGGAAGAGC	0	0
+
+# Custom overlap_require: a 20bp insert read-through is missed at require=30...
+query TII
+SELECT (t).sequence1, (t).adapter_trimmed::INT, (t).trimmed1_3p
+FROM (SELECT trim_adapters_pe(
+    'GATTACAGCATTGCATGGAAAGATCGGAAG', [40::UTINYINT for x in range(30)],
+    'TTCCATGCAATGCTGTAATCAGATCGGAAG', [40::UTINYINT for x in range(30)],
+    []::VARCHAR[], 30, 5, 20, false, 0, false
+) AS t)
+----
+GATTACAGCATTGCATGGAAAGATCGGAAG	0	0
+
+# ...but detected at require=15 -> both mates trim to the 20bp insert.
+query TIII
+SELECT (t).sequence1, (t).overlap_len, (t).adapter_trimmed::INT, (t).trimmed1_3p
+FROM (SELECT trim_adapters_pe(
+    'GATTACAGCATTGCATGGAAAGATCGGAAG', [40::UTINYINT for x in range(30)],
+    'TTCCATGCAATGCTGTAATCAGATCGGAAG', [40::UTINYINT for x in range(30)],
+    []::VARCHAR[], 15, 5, 20, false, 0, false
+) AS t)
+----
+GATTACAGCATTGCATGGAA	20	1	10
+
+# match_revcomp plumbed through to the fallback: a read carrying RC(adapter) at
+# the 3' end is only trimmed when match_revcomp=true.
+query TI
+SELECT (t).sequence1, (t).trimmed1_3p
+FROM (SELECT trim_adapters_pe(
+    'GATTACAGCATTGCATGGAACCTTACGATCGGCTCTTCCGATCT', [40::UTINYINT for x in range(44)],
+    'TTGGCCAATTGGCCAATTACGTACGTACGTAGCTCTTCCGATCT', [40::UTINYINT for x in range(44)],
+    ['AGATCGGAAGAGC'], 30, 5, 20, false, 0, false
+) AS t)
+----
+GATTACAGCATTGCATGGAACCTTACGATCGGCTCTTCCGATCT	0
+
+query TI
+SELECT (t).sequence1, (t).trimmed1_3p
+FROM (SELECT trim_adapters_pe(
+    'GATTACAGCATTGCATGGAACCTTACGATCGGCTCTTCCGATCT', [40::UTINYINT for x in range(44)],
+    'TTGGCCAATTGGCCAATTACGTACGTACGTAGCTCTTCCGATCT', [40::UTINYINT for x in range(44)],
+    ['AGATCGGAAGAGC'], 30, 5, 20, true, 0, false
+) AS t)
+----
+GATTACAGCATTGCATGGAACCTTACGATCG	13
+
+# min_match plumbed through: min_match=15 exceeds the 13bp adapter, so the
+# fallback candidate is skipped and nothing is trimmed.
+query TI
+SELECT (t).sequence1, (t).trimmed1_3p
+FROM (SELECT trim_adapters_pe(
+    'GATTACAGCATTGCATGGAACCTTACGATCGAGATCGGAAGAGC', [40::UTINYINT for x in range(44)],
+    'TTGGCCAATTGGCCAATTACGTACGTACGTAAGATCGGAAGAGC', [40::UTINYINT for x in range(44)],
+    ['AGATCGGAAGAGC'], 30, 5, 20, false, 15, false
+) AS t)
+----
+GATTACAGCATTGCATGGAACCTTACGATCGAGATCGGAAGAGC	0
+
+# Non-constant tuning parameter (a column reference) is rejected at bind time.
+statement error
+SELECT trim_adapters_pe('ACGT', [40, 40, 40, 40]::UTINYINT[], 'ACGT', [40, 40, 40, 40]::UTINYINT[],
+    []::VARCHAR[], req, 5, 20, false, 0, false)
+FROM (VALUES (15), (30)) AS t(req)
+----
+constant
+
+# Invalid DNA base in a fallback adapter throws at bind time (RC validation).
+statement error
+SELECT trim_adapters_pe('ACGT', [40, 40, 40, 40]::UTINYINT[], 'ACGT', [40, 40, 40, 40]::UTINYINT[],
+    ['INVALID0BASE'], 30, 5, 20, true, 0, false)
+----
+invalid DNA base
+
+# A NULL constant tuning parameter is rejected with a clean error (not an opaque
+# internal error from reading a NULL value).
+statement error
+SELECT trim_adapters_pe('ACGT', [40, 40, 40, 40]::UTINYINT[], 'ACGT', [40, 40, 40, 40]::UTINYINT[],
+    ['AGATCGGAAGAGC'], NULL, 5, 20, false, 0, false)
+----
+must not be NULL

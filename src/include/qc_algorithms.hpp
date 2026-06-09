@@ -2,6 +2,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 // Pure C++ implementations of the QC algorithms (adapter trimming, polyG/polyX
 // trimming, sliding-window quality trimming, per-read filtering). Kept free of
@@ -77,6 +79,58 @@ public:
 	// most non-Illumina protocols don't need it and it can over-trim.
 	static AdapterMatch find(const std::uint8_t *seq, std::size_t seq_len, const std::uint8_t *adapter,
 	                         std::size_t adapter_len, std::size_t min_match, bool allow_pre_start);
+
+	// Leftmost trim point across a candidate adapter list: runs find() for each
+	// candidate and returns the smallest matched trim_start, or `seq_len` if none
+	// match (i.e. the kept end of the read). Candidates shorter than `min_match`
+	// are skipped. Stops as soon as a candidate matches at position 0 — that is
+	// the floor, so no remaining candidate can trim further left. The caller is
+	// responsible for choosing `min_match` (e.g. fastp's list-size auto-scale)
+	// BEFORE any deduplication, so that collapsing redundant candidates does not
+	// change sensitivity.
+	static std::size_t find_leftmost(const std::uint8_t *seq, std::size_t seq_len,
+	                                 const std::vector<std::string> &candidates, std::size_t min_match,
+	                                 bool allow_pre_start);
+};
+
+// Result of paired-end overlap analysis (ported from fastp's OverlapAnalysis).
+// `offset` is the shift of reverse-complement(R2) relative to R1:
+//   offset > 0  — R1 has bases 5' of the overlap; the insert is at least as long
+//                 as the read, so neither mate reads into adapter.
+//   offset < 0  — revcomp(R2) extends 5' of R1: the insert is SHORTER than the
+//                 read length, so each mate reads through into adapter past
+//                 `overlap_len`. This is the case fastp trims.
+//   offset == 0 — the reads align with no shift.
+// `overlap_len` is the length of the aligned region; `diff` the mismatch count
+// in it (see OverlapAnalyzer::analyze for the >50bp reporting caveat).
+struct OverlapResult {
+	bool overlapped = false;
+	int offset = 0;
+	int overlap_len = 0;
+	int diff = 0;
+};
+
+class OverlapAnalyzer {
+public:
+	// 3-parameter no-gap overlap analysis ported from fastp's
+	// OverlapAnalysis::analyze. `seq2` is reverse-complemented internally using
+	// fastp's complement (A<->T, C<->G; any other byte -> 'N'), so reads may
+	// contain 'N'. Scans forward offsets [0, len1 - overlap_require) then reverse
+	// offsets down to -(len2 - overlap_require) + 1, and returns the FIRST offset
+	// whose mismatch count within the first min(overlap_len, 50) bases does not
+	// exceed the per-offset limit min(diff_limit, overlap_len * diff_percent_limit / 100).
+	//
+	// Faithfully ported quirk: acceptance is decided on only the first 50 bases,
+	// but for an accepted overlap longer than 50 the reported `diff` is the FULL
+	// mismatch count (which may exceed the limit). fastp's one-gap path is not
+	// ported (no-gap only).
+	//
+	// diff_limit / overlap_require / diff_percent_limit mirror fastp's
+	// --overlap_diff_limit (default 5), --overlap_len_require (30),
+	// --overlap_diff_percent_limit (20). Returns overlapped=false when no offset
+	// qualifies (including when either read is shorter than overlap_require).
+	static OverlapResult analyze(const char *seq1, std::size_t len1, const char *seq2, std::size_t len2, int diff_limit,
+	                             int overlap_require, int diff_percent_limit);
 };
 
 // Per-read filter metrics — computed once in a single pass over seq+qual.

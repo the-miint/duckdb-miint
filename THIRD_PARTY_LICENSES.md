@@ -552,14 +552,16 @@ fitness for any particular purpose.
 
 ## fastp
 
-Read-level QC algorithms (adapter trimming, polyG/polyX tail trimming,
-sliding-window quality trimming, per-read quality/length/N-base
-filtering) used by the `qc_*` scalar function family
-(`trim_adapters`, `trim_polyg`, `trim_polyx`, `trim_quality_3p`,
-`trim_quality_5p`, `trim_quality_sliding`, `filter_read`). fastp is
-**not** a build dependency; specific algorithms have been ported into
-`src/qc_algorithms.cpp` with per-file SPDX attribution. Adapter
-auto-detection is **not** ported — adapters are user-supplied.
+Read-level QC algorithms (adapter trimming, paired-end overlap analysis,
+polyG/polyX tail trimming, sliding-window quality trimming, per-read
+quality/length/N-base filtering) used by the `qc_*` scalar function family
+(`trim_adapters`, `trim_adapters_pe`, `trim_polyg`, `trim_polyx`,
+`trim_quality_3p`, `trim_quality_5p`, `trim_quality_sliding`, `filter_read`).
+The ported routines include fastp's `OverlapAnalysis` (the paired-end
+overlap-based adapter trimming behind `trim_adapters_pe`). fastp is **not** a
+build dependency; specific algorithms have been ported into
+`src/qc_algorithms.cpp` with per-file SPDX attribution. Adapter auto-detection
+is **not** ported — adapters are user-supplied.
 
 - Repository: https://github.com/OpenGene/fastp
 - License: MIT

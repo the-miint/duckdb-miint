@@ -9,6 +9,8 @@
 using miint::qc::AdapterMatch;
 using miint::qc::AdapterMatcher;
 using miint::qc::FilterMetrics;
+using miint::qc::OverlapAnalyzer;
+using miint::qc::OverlapResult;
 using miint::qc::PolyXScanner;
 using miint::qc::ReadFilter;
 using miint::qc::SlidingWindowTrimmer;
@@ -475,6 +477,52 @@ TEST_CASE("AdapterMatcher::find phase 3 (deletion in seq)", "[qc][adapter]") {
 	}
 }
 
+TEST_CASE("AdapterMatcher::find_leftmost", "[qc][adapter]") {
+	// Returns the leftmost trim_start across candidates, or seq_len if none match.
+	// Used by trim_adapters / trim_adapters_pe so the result is independent of
+	// candidate order or duplication (only the leftmost hit matters).
+	SECTION("leftmost match across two candidates wins") {
+		// AGATCGGAAGAGC starts at index 8, CTGGAATTCTCGG at index 24 — the
+		// leftmost (8) is returned.
+		const std::string seq = "ACGTACGTAGATCGGAAGAGCTTACTGGAATTCTCGG";
+		std::vector<std::string> cands = {"AGATCGGAAGAGC", "CTGGAATTCTCGG"};
+		CHECK(AdapterMatcher::find_leftmost(bp(seq), seq.size(), cands, 4, false) == 8);
+	}
+
+	SECTION("candidate matching at position 0 returns 0") {
+		const std::string seq = "AGATCGGAAGAGCACGT";
+		std::vector<std::string> cands = {"AGATCGGAAGAGC"};
+		CHECK(AdapterMatcher::find_leftmost(bp(seq), seq.size(), cands, 4, false) == 0);
+	}
+
+	SECTION("no candidate matches returns seq_len (no trim)") {
+		const std::string seq = "ACGTACGTACGTACGTACGT";
+		std::vector<std::string> cands = {"AGATCGGAAGAGC"};
+		CHECK(AdapterMatcher::find_leftmost(bp(seq), seq.size(), cands, 4, false) == seq.size());
+	}
+
+	SECTION("candidates shorter than min_match are skipped") {
+		// 'AGA' is present at index 4 but is shorter than min_match, so skipped.
+		const std::string seq = "ACGTAGA";
+		std::vector<std::string> cands = {"AGA"};
+		CHECK(AdapterMatcher::find_leftmost(bp(seq), seq.size(), cands, 4, false) == seq.size());
+	}
+
+	SECTION("duplicate candidates give the same result as one") {
+		const std::string seq = "ACGTACGTAGATCGGAAGAGCTTACTGGAATTCTCGG";
+		std::vector<std::string> one = {"AGATCGGAAGAGC"};
+		std::vector<std::string> dup = {"AGATCGGAAGAGC", "AGATCGGAAGAGC", "AGATCGGAAGAGC"};
+		CHECK(AdapterMatcher::find_leftmost(bp(seq), seq.size(), dup, 4, false) ==
+		      AdapterMatcher::find_leftmost(bp(seq), seq.size(), one, 4, false));
+	}
+
+	SECTION("empty candidate list returns seq_len") {
+		const std::string seq = "ACGTACGTAC";
+		std::vector<std::string> cands;
+		CHECK(AdapterMatcher::find_leftmost(bp(seq), seq.size(), cands, 4, false) == seq.size());
+	}
+}
+
 TEST_CASE("AdapterMatcher::find pre-start behavior", "[qc][adapter]") {
 	const std::string adapter = "AGATCGGAAGAGC"; // 13bp
 
@@ -569,5 +617,133 @@ TEST_CASE("ReadFilter::measure", "[qc][filter]") {
 		CHECK(m.n_bases == 0);
 		CHECK(m.low_qual_bases == 0);
 		CHECK(m.qual_sum == 0);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// OverlapAnalyzer::analyze — paired-end overlap analysis (fastp port).
+//
+// Expected values are derived from an independent Python re-implementation of
+// fastp's OverlapAnalysis::analyze, which was cross-checked against the native
+// fastp 1.3.3 binary on data/qc/pe_overlap.* (it predicts the exact reads fastp
+// trims). seq2 is reverse-complemented internally; offset<0 means the insert is
+// shorter than the read (adapter read-through) and both mates should trim to
+// overlap_len. Toy cases pass overlap_require=10 so 20bp reads exercise the scan.
+// ---------------------------------------------------------------------------
+static OverlapResult ov_analyze(const std::string &s1, const std::string &s2, int diff_limit, int overlap_require,
+                                int diff_percent_limit) {
+	return OverlapAnalyzer::analyze(s1.data(), s1.size(), s2.data(), s2.size(), diff_limit, overlap_require,
+	                                diff_percent_limit);
+}
+
+TEST_CASE("OverlapAnalyzer::analyze", "[qc][overlap]") {
+	SECTION("reverse overlap — adapter read-through (insert shorter than read)") {
+		// R1 = insert(16) + adapterA(4); R2 = revcomp(insert) + adapterB(4). The
+		// 16bp insert is the true overlap; offset<0 flags the read-through.
+		auto r = ov_analyze("GATTACAGCATTGCATTTTT", "ATGCAATGCTGTAATCGGGG", 5, 10, 20);
+		CHECK(r.overlapped);
+		CHECK(r.offset == -4); // = -len(adapterB): revcomp(R2) extends 4bp 5' of R1
+		CHECK(r.overlap_len == 16);
+		CHECK(r.diff == 0);
+	}
+
+	SECTION("forward overlap — full insert, no adapter (offset >= 0)") {
+		// insert(26) longer than read(20): each mate is a clean prefix, no
+		// read-through. The reads overlap by 14 at offset +6; offset>=0 means
+		// trim_adapters_pe must NOT trim.
+		auto r = ov_analyze("GATTACAGCATTGCATGGAA", "GTAAGGTTCCATGCAATGCT", 5, 10, 20);
+		CHECK(r.overlapped);
+		CHECK(r.offset == 6);
+		CHECK(r.overlap_len == 14);
+		CHECK(r.diff == 0);
+	}
+
+	SECTION("no overlap — unrelated reads") {
+		auto r = ov_analyze("GATTACAGCATTGCATTTTT", "AAAAAAAAAAAAAAAAAAAA", 5, 10, 20);
+		CHECK_FALSE(r.overlapped);
+		CHECK(r.overlap_len == 0);
+	}
+
+	SECTION("reverse overlap tolerates one mismatch within the diff limit") {
+		// Same as the read-through case but R1[0] G->A: one mismatch in the
+		// 16bp overlap (limit = min(5, 16*0.2=3) = 3), still accepted.
+		auto r = ov_analyze("AATTACAGCATTGCATTTTT", "ATGCAATGCTGTAATCGGGG", 5, 10, 20);
+		CHECK(r.overlapped);
+		CHECK(r.offset == -4);
+		CHECK(r.overlap_len == 16);
+		CHECK(r.diff == 1);
+	}
+
+	SECTION("too many mismatches — no overlap") {
+		// R1[0..5] corrupted: > 3 mismatches at the true offset and no other
+		// offset qualifies, so the pair is reported as not overlapped.
+		auto r = ov_analyze("CCCCCCAGCATTGCATTTTT", "ATGCAATGCTGTAATCGGGG", 5, 10, 20);
+		CHECK_FALSE(r.overlapped);
+	}
+
+	SECTION("overlap shorter than overlap_require is not found") {
+		// Same read-through pair, but overlap_require=17 > the 16bp overlap. The
+		// reverse scan never reaches the qualifying offset.
+		auto r = ov_analyze("GATTACAGCATTGCATTTTT", "ATGCAATGCTGTAATCGGGG", 5, 17, 20);
+		CHECK_FALSE(r.overlapped);
+	}
+
+	SECTION("prefix-50 quirk: acceptance uses first 50bp, diff reports the full count") {
+		// 56bp overlap with 0 mismatches in the first 50 and 6 in [50,56). fastp
+		// accepts on the clean 50bp prefix (mismatchCount 0 <= limit 5) but then
+		// reports diff = full count = 6, which exceeds the limit. A full-overlap
+		// acceptance check would instead REJECT — this pins the ported quirk.
+		const std::string r1 = "GATTACAGCATTGCATGGAACCTTACGATCGATTACGGCATGCATTGACATCGGATAAAAAAAAAA";
+		const std::string r2 = "TAGGCTTGTCAATGCATGCCGTAATCGATCGTAAGGTTCCATGCAATGCTGTAATCGGGGGGGGGG";
+		auto r = ov_analyze(r1, r2, 5, 30, 20);
+		CHECK(r.overlapped);
+		CHECK(r.offset == -10);
+		CHECK(r.overlap_len == 56);
+		CHECK(r.diff == 6); // full count, > diff_limit, but accepted via the 50bp prefix
+	}
+
+	SECTION("N matches N (byte equality) but mismatches a base") {
+		// fastp compares raw bytes, so 'N' vs a base is a mismatch but 'N' vs 'N'
+		// is a match (complement('N') == 'N').
+		// R1[0]=N vs the aligned base 'G' -> one mismatch.
+		auto a = ov_analyze("NATTACAGCATTGCATTTTT", "ATGCAATGCTGTAATCGGGG", 5, 10, 20);
+		CHECK(a.overlapped);
+		CHECK(a.offset == -4);
+		CHECK(a.diff == 1);
+		// R1[0]=N and R2 mutated so the aligned base of revcomp(R2) is also N -> match.
+		auto b = ov_analyze("NATTACAGCATTGCATTTTT", "ATGCAATGCTGTAATNGGGG", 5, 10, 20);
+		CHECK(b.overlapped);
+		CHECK(b.offset == -4);
+		CHECK(b.diff == 0);
+	}
+
+	SECTION("read shorter than overlap_require — no overlap") {
+		auto r = ov_analyze("ACGTACGT", "ACGTACGT", 5, 10, 20);
+		CHECK_FALSE(r.overlapped);
+	}
+
+	SECTION("overlap_require <= 0 is guarded — no overlap (not a zero-length match)") {
+		// A non-positive overlap_require would otherwise let the reverse scan
+		// accept a nonsense zero-length overlap; the entry guard rejects it.
+		auto r = ov_analyze("GATTACAGCATTGCATTTTT", "ATGCAATGCTGTAATCGGGG", 5, 0, 20);
+		CHECK_FALSE(r.overlapped);
+	}
+
+	SECTION("diff_percent_limit=0 rejects any mismatch but still accepts a perfect overlap") {
+		// limit = min(diff_limit, overlap_len*0) = 0. The 1-mismatch pair now
+		// fails at every offset; the perfect pair still matches with diff 0.
+		auto mm = ov_analyze("AATTACAGCATTGCATTTTT", "ATGCAATGCTGTAATCGGGG", 5, 10, 0);
+		CHECK_FALSE(mm.overlapped);
+		auto clean = ov_analyze("GATTACAGCATTGCATTTTT", "ATGCAATGCTGTAATCGGGG", 5, 10, 0);
+		CHECK(clean.overlapped);
+		CHECK(clean.offset == -4);
+		CHECK(clean.diff == 0);
+	}
+
+	SECTION("lowercase seq2 is promoted to N by the complement — no overlap") {
+		// fastp's complement maps any non-uppercase-ACGT byte to 'N', so a
+		// lowercase R2 reverse-complements to all-N and matches nothing.
+		auto r = ov_analyze("GATTACAGCATTGCATTTTT", "atgcaatgctgtaatcgggg", 5, 10, 20);
+		CHECK_FALSE(r.overlapped);
 	}
 }

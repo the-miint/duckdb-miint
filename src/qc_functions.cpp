@@ -1,16 +1,19 @@
 #include "qc_functions.hpp"
 
 #include "duckdb/common/vector_operations/vector_operations.hpp"
+#include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/scalar_function.hpp"
 
 #include "qc_algorithms.hpp"
 #include "sequence_utils.hpp"
 #include "table_function_common.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace duckdb {
@@ -314,6 +317,26 @@ static std::vector<std::string> ExtractAdapters(Vector &arg_vec, UnifiedVectorFo
 	return out;
 }
 
+// Remove exact-duplicate candidates in place, preserving first-occurrence order.
+// Production adapter sets are highly redundant (exact dups, and reverse-complement
+// pairs once RC expansion runs), so collapsing them cuts matching cost without
+// changing the leftmost-match result. Must run AFTER min_match is fixed (see
+// BuildAdapterCandidates) so that list size still drives sensitivity.
+static void DedupAdapterCandidates(std::vector<std::string> &candidates) {
+	std::unordered_set<std::string> seen;
+	seen.reserve(candidates.size());
+	std::size_t write = 0;
+	for (std::size_t read = 0; read < candidates.size(); read++) {
+		if (seen.insert(candidates[read]).second) {
+			if (write != read) {
+				candidates[write] = std::move(candidates[read]);
+			}
+			write++;
+		}
+	}
+	candidates.resize(write);
+}
+
 // Build the full candidate list (with optional RC extension) and resolve the
 // effective min_match. min_match scales against the total candidate count so
 // RC-enabled searches match the stringency the user would get by passing
@@ -333,6 +356,9 @@ static void BuildAdapterCandidates(std::vector<std::string> adapters, bool match
 	}
 	out_min_match =
 	    min_match_param > 0 ? static_cast<std::size_t>(min_match_param) : default_min_match(out_candidates.size());
+	// Collapse redundant candidates AFTER fixing min_match: dedup then only
+	// removes wasted matching work, never changes the auto-scaled sensitivity.
+	DedupAdapterCandidates(out_candidates);
 }
 
 // Shared trim_adapters execution. arg layout (the function set picks):
@@ -470,24 +496,13 @@ static void TrimAdaptersExecuteImpl(DataChunk &args, Vector &result, bool adapte
 			candidates_ptr = &row_candidates;
 		}
 
-		// Leftmost trim_start across all candidates wins.
-		miint::qc::TrimResult tr {0, static_cast<std::size_t>(seq.GetSize())};
+		// Leftmost trim_start across all candidates wins. find_leftmost applies
+		// the position-0 early-exit and returns the kept end directly (= seq size
+		// when nothing matches).
 		const auto seq_bytes = reinterpret_cast<const std::uint8_t *>(seq.GetData());
-		std::size_t best_trim_start = seq.GetSize();
-		for (const auto &cand : *candidates_ptr) {
-			if (cand.size() < min_match) {
-				continue;
-			}
-			auto m = miint::qc::AdapterMatcher::find(seq_bytes, seq.GetSize(),
-			                                         reinterpret_cast<const std::uint8_t *>(cand.data()), cand.size(),
-			                                         min_match, allow_pre_start);
-			if (m.matched && m.trim_start < best_trim_start) {
-				best_trim_start = m.trim_start;
-			}
-		}
-		if (best_trim_start < seq.GetSize()) {
-			tr.end = best_trim_start;
-		}
+		const std::size_t kept_end = miint::qc::AdapterMatcher::find_leftmost(seq_bytes, seq.GetSize(), *candidates_ptr,
+		                                                                      min_match, allow_pre_start);
+		const miint::qc::TrimResult tr {0, kept_end};
 
 		WriteTrimRow(i, seq, qptr, qlen, tr, seq_out_vec, qual_out_vec, qual_out_entries, qual_child_offset,
 		             trimmed_5p_data, trimmed_3p_data);
@@ -500,6 +515,305 @@ static void TrimAdaptersVarcharExecute(DataChunk &args, ExpressionState &state, 
 
 static void TrimAdaptersListExecute(DataChunk &args, ExpressionState &state, Vector &result) {
 	TrimAdaptersExecuteImpl(args, result, /*adapter_is_list=*/true);
+}
+
+// ---------------------------------------------------------------------------
+// trim_adapters_pe
+// ---------------------------------------------------------------------------
+
+// fastp's default paired-end overlap-analysis parameters
+// (--overlap_len_require / --overlap_diff_limit / --overlap_diff_percent_limit).
+static constexpr int32_t DEFAULT_PE_OVERLAP_REQUIRE = 30;
+static constexpr int32_t DEFAULT_PE_OVERLAP_DIFF_LIMIT = 5;
+static constexpr int32_t DEFAULT_PE_OVERLAP_DIFF_PERCENT = 20;
+
+// Bind-time configuration: the overlap parameters and the (RC-expanded, deduped)
+// adapter-by-sequence fallback candidate list. The 4-arg form leaves `candidates`
+// empty (overlap-only); the 11-arg form populates it (fastp step 8 -> step 9).
+struct TrimAdaptersPeBindData : public FunctionData {
+	int32_t overlap_require = DEFAULT_PE_OVERLAP_REQUIRE;
+	int32_t overlap_diff_limit = DEFAULT_PE_OVERLAP_DIFF_LIMIT;
+	int32_t overlap_diff_percent = DEFAULT_PE_OVERLAP_DIFF_PERCENT;
+	std::vector<std::string> candidates; // empty => no adapter-by-sequence fallback
+	std::size_t min_match = 0;
+	bool allow_pre_start = false;
+
+	unique_ptr<FunctionData> Copy() const override {
+		auto c = make_uniq<TrimAdaptersPeBindData>();
+		c->overlap_require = overlap_require;
+		c->overlap_diff_limit = overlap_diff_limit;
+		c->overlap_diff_percent = overlap_diff_percent;
+		c->candidates = candidates;
+		c->min_match = min_match;
+		c->allow_pre_start = allow_pre_start;
+		return std::move(c);
+	}
+
+	bool Equals(const FunctionData &other_p) const override {
+		auto &o = other_p.Cast<TrimAdaptersPeBindData>();
+		return overlap_require == o.overlap_require && overlap_diff_limit == o.overlap_diff_limit &&
+		       overlap_diff_percent == o.overlap_diff_percent && min_match == o.min_match &&
+		       allow_pre_start == o.allow_pre_start && candidates == o.candidates;
+	}
+};
+
+// Per-thread copy of the bind-time config so Execute reads plain members without
+// touching bind_info. The candidate list is small (protocol adapter set) and
+// copied once per thread in InitLocalState, not per row.
+struct TrimAdaptersPeLocalState : public FunctionLocalState {
+	int32_t overlap_require;
+	int32_t overlap_diff_limit;
+	int32_t overlap_diff_percent;
+	std::vector<std::string> candidates;
+	std::size_t min_match;
+	bool allow_pre_start;
+
+	explicit TrimAdaptersPeLocalState(const TrimAdaptersPeBindData &bd)
+	    : overlap_require(bd.overlap_require), overlap_diff_limit(bd.overlap_diff_limit),
+	      overlap_diff_percent(bd.overlap_diff_percent), candidates(bd.candidates), min_match(bd.min_match),
+	      allow_pre_start(bd.allow_pre_start) {
+	}
+};
+
+static unique_ptr<FunctionLocalState>
+TrimAdaptersPeInitLocalState(ExpressionState &state, const BoundFunctionExpression &expr, FunctionData *bind_data) {
+	(void)state;
+	(void)expr;
+	return make_uniq<TrimAdaptersPeLocalState>(bind_data->Cast<TrimAdaptersPeBindData>());
+}
+
+static LogicalType TrimAdaptersPeResultStructType() {
+	return LogicalType::STRUCT({{"sequence1", LogicalType::VARCHAR},
+	                            {"quality1", LogicalType::LIST(LogicalType::UTINYINT)},
+	                            {"sequence2", LogicalType::VARCHAR},
+	                            {"quality2", LogicalType::LIST(LogicalType::UTINYINT)},
+	                            // overlap_len is the overlap-analysis result (detected overlap width,
+	                            // 0 if none), independent of adapter_trimmed and of the trim source: it
+	                            // is nonzero for a full-insert overlap at offset >= 0 (adapter_trimmed
+	                            // false), and in the 11-arg form a row trimmed by the adapter-by-sequence
+	                            // fallback still reports the overlap width found by analysis.
+	                            {"overlap_len", LogicalType::INTEGER},
+	                            {"adapter_trimmed", LogicalType::BOOLEAN},
+	                            {"trimmed1_3p", LogicalType::UINTEGER},
+	                            {"trimmed2_3p", LogicalType::UINTEGER}});
+}
+
+// Write one trimmed mate into its (sequence, quality) output pair. The kept
+// range is [0, keep_len) of both seq and qual (overlap trimming is 3'-only).
+// The caller must have reserved enough quality child-buffer capacity up front.
+static void WritePeMate(idx_t i, const string_t &seq, const uint8_t *qptr, idx_t keep_len, Vector &seq_out_vec,
+                        Vector &qual_out_vec, list_entry_t *qual_entries, uint8_t *qual_child,
+                        idx_t &qual_child_offset) {
+	FlatVector::GetData<string_t>(seq_out_vec)[i] = StringVector::AddString(seq_out_vec, seq.GetData(), keep_len);
+	std::memcpy(qual_child + qual_child_offset, qptr, keep_len);
+	qual_entries[i].offset = qual_child_offset;
+	qual_entries[i].length = keep_len;
+	qual_child_offset += keep_len;
+	ListVector::SetListSize(qual_out_vec, qual_child_offset);
+}
+
+// 4-arg form: overlap-only with fastp defaults; no adapter-by-sequence fallback.
+static unique_ptr<FunctionData> TrimAdaptersPeBind4(ClientContext &ctx, ScalarFunction &fn,
+                                                    vector<unique_ptr<Expression>> &arguments) {
+	(void)ctx;
+	(void)fn;
+	(void)arguments;
+	return make_uniq<TrimAdaptersPeBindData>(); // all defaults; candidates empty
+}
+
+// 11-arg form: trim_adapters_pe(seq1, qual1, seq2, qual2, adapters, overlap_require,
+// overlap_diff_limit, overlap_diff_percent_limit, match_revcomp, min_match,
+// allow_pre_start). The adapter list + tuning params must be constant; they are
+// evaluated once here and the fallback candidate set (RC-expanded, deduped) is
+// built with min_match fixed from the pre-dedup count.
+static unique_ptr<FunctionData> TrimAdaptersPeBind11(ClientContext &ctx, ScalarFunction &fn,
+                                                     vector<unique_ptr<Expression>> &arguments) {
+	(void)fn;
+	for (idx_t k = 4; k < 11; k++) {
+		if (!arguments[k]->IsFoldable()) {
+			throw InvalidInputException("trim_adapters_pe: the adapter list and tuning parameters must be constant "
+			                            "values, not column references");
+		}
+	}
+	// Evaluate each constant param, rejecting NULL with a clean error (GetValue on
+	// a NULL Value would otherwise throw an opaque InternalException).
+	auto eval_int = [&](idx_t idx, const char *name) {
+		const Value v = ExpressionExecutor::EvaluateScalar(ctx, *arguments[idx]);
+		if (v.IsNull()) {
+			throw InvalidInputException("trim_adapters_pe: %s must not be NULL", name);
+		}
+		return v.GetValue<int32_t>();
+	};
+	auto eval_bool = [&](idx_t idx, const char *name) {
+		const Value v = ExpressionExecutor::EvaluateScalar(ctx, *arguments[idx]);
+		if (v.IsNull()) {
+			throw InvalidInputException("trim_adapters_pe: %s must not be NULL", name);
+		}
+		return v.GetValue<bool>();
+	};
+	const int32_t overlap_require = eval_int(5, "overlap_require");
+	const int32_t overlap_diff_limit = eval_int(6, "overlap_diff_limit");
+	const int32_t overlap_diff_percent = eval_int(7, "overlap_diff_percent_limit");
+	const bool match_revcomp = eval_bool(8, "match_revcomp");
+	const int32_t min_match_param = eval_int(9, "min_match");
+	const bool allow_pre_start = eval_bool(10, "allow_pre_start");
+
+	if (overlap_require < 1) {
+		throw InvalidInputException("trim_adapters_pe: overlap_require must be >= 1 (got %d)", overlap_require);
+	}
+	if (overlap_diff_limit < 0) {
+		throw InvalidInputException("trim_adapters_pe: overlap_diff_limit must be >= 0 (got %d)", overlap_diff_limit);
+	}
+	if (overlap_diff_percent < 0 || overlap_diff_percent > 100) {
+		throw InvalidInputException("trim_adapters_pe: overlap_diff_percent_limit must be 0..100 (got %d)",
+		                            overlap_diff_percent);
+	}
+	if (min_match_param < 0) {
+		throw InvalidInputException("trim_adapters_pe: min_match must be >= 0 (got %d; 0 means use default)",
+		                            min_match_param);
+	}
+
+	// Extract the adapter list (LIST(VARCHAR); NULL list or NULL/empty elements
+	// are skipped, mirroring trim_adapters).
+	std::vector<std::string> adapters;
+	const Value adapters_val = ExpressionExecutor::EvaluateScalar(ctx, *arguments[4]);
+	if (!adapters_val.IsNull()) {
+		for (const auto &child : ListValue::GetChildren(adapters_val)) {
+			if (child.IsNull()) {
+				continue;
+			}
+			auto s = child.GetValue<std::string>();
+			if (!s.empty()) {
+				adapters.push_back(std::move(s));
+			}
+		}
+	}
+
+	auto bd = make_uniq<TrimAdaptersPeBindData>();
+	bd->overlap_require = overlap_require;
+	bd->overlap_diff_limit = overlap_diff_limit;
+	bd->overlap_diff_percent = overlap_diff_percent;
+	bd->allow_pre_start = allow_pre_start;
+	// Reuse trim_adapters' candidate builder (RC expansion, min_match auto-scale
+	// from the pre-dedup count, then exact-duplicate dedup). Invalid DNA bases in
+	// an adapter throw here at bind time.
+	BuildAdapterCandidates(std::move(adapters), match_revcomp, min_match_param, bd->candidates, bd->min_match);
+	return std::move(bd);
+}
+
+// trim_adapters_pe: infer the insert boundary from the R1 / revcomp(R2) overlap
+// (fastp's primary PE adapter mechanism) and trim both mates to the insert when
+// each reads through into adapter. When overlap analysis finds no adapter and a
+// fallback adapter list was supplied (11-arg form), fall back to adapter-by-
+// sequence on each mate independently (fastp step 8 -> step 9).
+static void TrimAdaptersPeExecute(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &lstate = ExecuteFunctionState::GetFunctionState(state)->Cast<TrimAdaptersPeLocalState>();
+	const idx_t row_count = args.size();
+
+	UnifiedVectorFormat seq1_data, qual1_data, seq2_data, qual2_data;
+	args.data[0].ToUnifiedFormat(row_count, seq1_data);
+	args.data[1].ToUnifiedFormat(row_count, qual1_data);
+	args.data[2].ToUnifiedFormat(row_count, seq2_data);
+	args.data[3].ToUnifiedFormat(row_count, qual2_data);
+
+	auto seq1_ptr = UnifiedVectorFormat::GetData<string_t>(seq1_data);
+	auto seq2_ptr = UnifiedVectorFormat::GetData<string_t>(seq2_data);
+
+	auto &entries = StructVector::GetEntries(result);
+	auto &seq1_out = *entries[0];
+	auto &qual1_out = *entries[1];
+	auto &seq2_out = *entries[2];
+	auto &qual2_out = *entries[3];
+	auto overlap_len_data = FlatVector::GetData<int32_t>(*entries[4]);
+	auto adapter_trimmed_data = FlatVector::GetData<bool>(*entries[5]);
+	auto trimmed1_data = FlatVector::GetData<uint32_t>(*entries[6]);
+	auto trimmed2_data = FlatVector::GetData<uint32_t>(*entries[7]);
+	auto &result_validity = FlatVector::Validity(result);
+
+	auto qual1_entries = FlatVector::GetData<list_entry_t>(qual1_out);
+	auto qual2_entries = FlatVector::GetData<list_entry_t>(qual2_out);
+	idx_t qual1_off = ListVector::GetListSize(qual1_out);
+	idx_t qual2_off = ListVector::GetListSize(qual2_out);
+	// Trimmed output is at most as long as the input quality, so one reserve per
+	// mate before the row loop eliminates per-row reallocations.
+	ListVector::Reserve(qual1_out, qual1_off + ListVector::GetListSize(args.data[1]));
+	ListVector::Reserve(qual2_out, qual2_off + ListVector::GetListSize(args.data[3]));
+	// Both Reserves happen before either child pointer is taken, and no Reserve
+	// runs inside the row loop (WritePeMate only SetListSize, which never
+	// reallocates), so these cached child pointers stay valid for the whole chunk.
+	auto qual1_child = FlatVector::GetData<uint8_t>(ListVector::GetEntry(qual1_out));
+	auto qual2_child = FlatVector::GetData<uint8_t>(ListVector::GetEntry(qual2_out));
+
+	for (idx_t i = 0; i < row_count; i++) {
+		auto s1i = seq1_data.sel->get_index(i);
+		auto q1i = qual1_data.sel->get_index(i);
+		auto s2i = seq2_data.sel->get_index(i);
+		auto q2i = qual2_data.sel->get_index(i);
+
+		if (!seq1_data.validity.RowIsValid(s1i) || !qual1_data.validity.RowIsValid(q1i) ||
+		    !seq2_data.validity.RowIsValid(s2i) || !qual2_data.validity.RowIsValid(q2i)) {
+			result_validity.SetInvalid(i);
+			qual1_entries[i].offset = qual1_off;
+			qual1_entries[i].length = 0;
+			qual2_entries[i].offset = qual2_off;
+			qual2_entries[i].length = 0;
+			continue;
+		}
+
+		const auto &seq1 = seq1_ptr[s1i];
+		const auto &seq2 = seq2_ptr[s2i];
+		const uint8_t *q1ptr;
+		const uint8_t *q2ptr;
+		idx_t q1len, q2len;
+		GetListUInt8Slice(args.data[1], qual1_data, i, q1ptr, q1len);
+		GetListUInt8Slice(args.data[3], qual2_data, i, q2ptr, q2len);
+		if (seq1.GetSize() != q1len) {
+			throw InvalidInputException(
+			    "trim_adapters_pe: read 1 sequence length (%llu) does not match quality length (%llu)",
+			    (unsigned long long)seq1.GetSize(), (unsigned long long)q1len);
+		}
+		if (seq2.GetSize() != q2len) {
+			throw InvalidInputException(
+			    "trim_adapters_pe: read 2 sequence length (%llu) does not match quality length (%llu)",
+			    (unsigned long long)seq2.GetSize(), (unsigned long long)q2len);
+		}
+
+		const auto ov = miint::qc::OverlapAnalyzer::analyze(seq1.GetData(), seq1.GetSize(), seq2.GetData(),
+		                                                    seq2.GetSize(), lstate.overlap_diff_limit,
+		                                                    lstate.overlap_require, lstate.overlap_diff_percent);
+
+		idx_t keep1 = seq1.GetSize();
+		idx_t keep2 = seq2.GetSize();
+		bool adapter_trimmed = false;
+		// offset < 0 means the insert is shorter than the read: each mate reads
+		// through into adapter past the overlap, so trim both to the insert.
+		// (overlap_len > 0 holds for any offset<0 result from OverlapAnalyzer; the
+		// explicit check guards the unsigned cast against a degenerate result.)
+		if (ov.overlapped && ov.offset < 0 && ov.overlap_len > 0) {
+			const idx_t ol = static_cast<idx_t>(ov.overlap_len);
+			keep1 = std::min(keep1, ol);
+			keep2 = std::min(keep2, ol);
+			adapter_trimmed = true;
+		} else if (!lstate.candidates.empty()) {
+			// fastp step 9: overlap analysis found no adapter, so fall back to
+			// adapter-by-sequence on each mate independently (leftmost match wins).
+			keep1 = miint::qc::AdapterMatcher::find_leftmost(reinterpret_cast<const uint8_t *>(seq1.GetData()),
+			                                                 seq1.GetSize(), lstate.candidates, lstate.min_match,
+			                                                 lstate.allow_pre_start);
+			keep2 = miint::qc::AdapterMatcher::find_leftmost(reinterpret_cast<const uint8_t *>(seq2.GetData()),
+			                                                 seq2.GetSize(), lstate.candidates, lstate.min_match,
+			                                                 lstate.allow_pre_start);
+			adapter_trimmed = keep1 < seq1.GetSize() || keep2 < seq2.GetSize();
+		}
+
+		overlap_len_data[i] = ov.overlapped ? ov.overlap_len : 0;
+		adapter_trimmed_data[i] = adapter_trimmed;
+		trimmed1_data[i] = static_cast<uint32_t>(seq1.GetSize() - keep1);
+		trimmed2_data[i] = static_cast<uint32_t>(seq2.GetSize() - keep2);
+
+		WritePeMate(i, seq1, q1ptr, keep1, seq1_out, qual1_out, qual1_entries, qual1_child, qual1_off);
+		WritePeMate(i, seq2, q2ptr, keep2, seq2_out, qual2_out, qual2_entries, qual2_child, qual2_off);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -778,6 +1092,33 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 		                         TrimResultStructType(), TrimAdaptersListExecute);
 		list_6arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 		set.AddFunction(list_6arg);
+
+		loader.RegisterFunction(set);
+	}
+
+	// trim_adapters_pe: 4-arg overlap-only (fastp PE defaults) + 11-arg full form
+	// (custom overlap params + adapter-by-sequence fallback). The bind captures
+	// tuning params; init_local_state caches them per thread.
+	{
+		ScalarFunctionSet set("trim_adapters_pe");
+		const auto qual_t = LogicalType::LIST(LogicalType::UTINYINT);
+		const auto adapter_list_t = LogicalType::LIST(LogicalType::VARCHAR);
+		const auto i = LogicalType::INTEGER;
+		const auto b = LogicalType::BOOLEAN;
+
+		ScalarFunction four_arg("trim_adapters_pe", {LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR, qual_t},
+		                        TrimAdaptersPeResultStructType(), TrimAdaptersPeExecute, TrimAdaptersPeBind4);
+		four_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		four_arg.init_local_state = TrimAdaptersPeInitLocalState;
+		set.AddFunction(four_arg);
+
+		ScalarFunction eleven_arg(
+		    "trim_adapters_pe",
+		    {LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR, qual_t, adapter_list_t, i, i, i, b, i, b},
+		    TrimAdaptersPeResultStructType(), TrimAdaptersPeExecute, TrimAdaptersPeBind11);
+		eleven_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		eleven_arg.init_local_state = TrimAdaptersPeInitLocalState;
+		set.AddFunction(eleven_arg);
 
 		loader.RegisterFunction(set);
 	}
