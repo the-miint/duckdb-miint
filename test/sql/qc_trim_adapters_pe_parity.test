@@ -29,3 +29,28 @@ ORDER BY inp.read_id
 pair1_readthrough36	true
 pair2_fullinsert60	true
 pair3_readthrough45	true
+
+# 11-arg overlap+fallback form against the pe_fallback golden, generated with the
+# same isolation flags PLUS --adapter_sequence AGATCGGAAGAGC --adapter_sequence_r2
+# AGATCGGAAGAGC (so fastp's sequence-based step 9 runs). ovwin_* is a read-through
+# pair where overlap (step 8) wins; fb_* is an unrelated pair trimmed by the
+# fallback. The fallback uses miint's adapter matcher, which matches fastp on these
+# clean exact-adapter cases (it can diverge on ambiguous mismatch/indel cases).
+query TT
+WITH inp AS (
+    SELECT read_id,
+           trim_adapters_pe(sequence1, qual1, sequence2, qual2, ['AGATCGGAAGAGC'], 30, 5, 20, false, 0, false) AS t
+    FROM read_fastx('data/qc/pe_fallback.r1.fq', sequence2 := 'data/qc/pe_fallback.r2.fq')
+),
+gold AS (
+    SELECT read_id, sequence1 AS gs1, qual1 AS gq1, sequence2 AS gs2, qual2 AS gq2
+    FROM read_fastx('data/qc/pe_fallback.golden.r1.fq', sequence2 := 'data/qc/pe_fallback.golden.r2.fq')
+)
+SELECT inp.read_id,
+       ((inp.t).sequence1 = gs1 AND (inp.t).quality1 = gq1
+        AND (inp.t).sequence2 = gs2 AND (inp.t).quality2 = gq2)::VARCHAR AS matches_fastp
+FROM inp JOIN gold USING (read_id)
+ORDER BY inp.read_id
+----
+fb_unrelated	true
+ovwin_readthrough36	true

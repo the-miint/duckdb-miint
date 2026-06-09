@@ -19,9 +19,23 @@ Frozen oracle provenance — golden produced with **fastp 1.3.3** via:
           --disable_quality_filtering --disable_length_filtering \\
           --disable_trim_poly_g --thread 1 --dont_eval_duplication
 
-Those isolation flags make fastp run ONLY overlap-based PE adapter trimming. If a
-fixture is ever changed, rerun this script and re-run the command above by hand
-to refresh the golden (and update the version noted here if fastp changed).
+Those isolation flags make fastp run ONLY overlap-based PE adapter trimming.
+
+The pe_fallback.* golden additionally engages fastp's sequence-based adapter
+trimming (step 9), so it adds explicit adapter sequences:
+
+    fastp -i data/qc/pe_fallback.r1.fq -I data/qc/pe_fallback.r2.fq \\
+          -o data/qc/pe_fallback.golden.r1.fq -O data/qc/pe_fallback.golden.r2.fq \\
+          --disable_quality_filtering --disable_length_filtering \\
+          --disable_trim_poly_g --thread 1 --dont_eval_duplication \\
+          --adapter_sequence AGATCGGAAGAGC --adapter_sequence_r2 AGATCGGAAGAGC
+
+Note: the overlap path is byte-for-byte fastp parity; the fallback matches fastp
+on clean exact-adapter cases (as here) but uses miint's adapter matcher, which
+diverges from fastp on ambiguous mismatch/indel cases (see docs/qc.md).
+
+If a fixture is ever changed, rerun this script and re-run the matching command
+by hand to refresh the golden (and update the version noted here if fastp changed).
 
 Run from the repo root:  python3 test/scripts/generate_qc_pe_fixtures.py
 """
@@ -80,6 +94,26 @@ RECORDS = [
 ]
 
 
+# Fallback fixture (data/qc/pe_fallback.*): exercises the 11-arg trim_adapters_pe
+# adapter-by-sequence FALLBACK (fastp step 9), engaged when overlap analysis finds
+# no adapter. Reads are given explicitly as (read_id, r1, r2):
+#   ovwin_*  — a read-through pair: overlap (step 8) still wins; fastp + miint both
+#              trim to the insert and never reach the fallback.
+#   fb_*     — unrelated mates each carrying a clean 3' adapter: overlap fails, so
+#              each mate is trimmed by adapter sequence.
+# The common adapter AGATCGGAAGAGC is passed to fastp as both --adapter_sequence
+# and --adapter_sequence_r2, and to trim_adapters_pe as the single-element list.
+FALLBACK_ADAPTER = "AGATCGGAAGAGC"
+FALLBACK_RECORDS = [
+    ("ovwin_readthrough36",) + make_pair("GATTACACCGGTATTACGCATGCAGTCAGTCAGTCA"),
+    (
+        "fb_unrelated",
+        "GATTACAGCATTGCATGGAACCTTACGATCG" + FALLBACK_ADAPTER,
+        "TTGGCCAATTGGCCAATTACGTACGTACGTA" + FALLBACK_ADAPTER,
+    ),
+]
+
+
 def main():
     out_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "qc")
     out_dir = os.path.normpath(out_dir)
@@ -97,6 +131,16 @@ def main():
 
     print(f"wrote {r1_path}")
     print(f"wrote {r2_path}")
+
+    fb1_path = os.path.join(out_dir, "pe_fallback.r1.fq")
+    fb2_path = os.path.join(out_dir, "pe_fallback.r2.fq")
+    with open(fb1_path, "w") as f1, open(fb2_path, "w") as f2:
+        for rid, r1, r2 in FALLBACK_RECORDS:
+            f1.write(f"@{rid}/1\n{r1}\n+\n{quals(len(r1))}\n")
+            f2.write(f"@{rid}/2\n{r2}\n+\n{quals(len(r2))}\n")
+
+    print(f"wrote {fb1_path}")
+    print(f"wrote {fb2_path}")
 
 
 if __name__ == "__main__":
