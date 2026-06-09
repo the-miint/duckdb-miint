@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
@@ -346,6 +347,77 @@ sleep 5)";
 	Session session(std::move(child));
 	REQUIRE_NOTHROW(session.Initialize());
 	REQUIRE_THROWS_WITH(session.Submit("bowtie2-align", "{}", "x", 1), ContainsSubstring("signal 15"));
+}
+
+TEST_CASE("Session::Submit drains daemon stderr each batch so a verbose daemon can't deadlock",
+          "[gpl-boundary][session]") {
+	// Field repro for the align_bowtie2_sharded hang: with quiet=false, bowtie2
+	// prints a ~20-line alignment summary to stderr on every batch. The daemon's
+	// stderr is a pipe back to miint that was only ever read on the failure
+	// paths — never during normal Submit traffic. After enough batches the
+	// daemon's writes crossed the ~64 KB OS pipe buffer, the daemon blocked in
+	// write(2) before it could answer, and Submit hung forever in ReadLine (CPU
+	// flatlined; no crash). Submit now drains stderr after every response so the
+	// pipe can never back up.
+	//
+	// This shim writes 48 KB to stderr per batch across 8 batches (384 KB, far
+	// past 64 KB). Each single batch's 48 KB fits an empty pipe, so the fix
+	// (drain-per-batch) keeps every write unblocked; without it the pipe fills
+	// by batch ~2 and the shim wedges. A watchdog bounds the wait and SIGKILLs
+	// the shim on timeout so a regression fails loudly instead of hanging CI.
+	const int kBatches = 8;
+	std::string script =
+	    R"SHIM(read -r init_line
+echo '{"success":true,"protocol_version":3,"tools":[{"name":"bowtie2-align","schema_version":2}]}'
+bid=1
+while [ $bid -le )SHIM" +
+	    std::to_string(kBatches) + R"SHIM( ]; do
+  read -r batch_line || break
+  head -c 49152 /dev/zero | tr '\0' 'x' >&2
+  echo "{\"success\":true,\"schema_version\":2,\"batch_id\":$bid}"
+  bid=$((bid+1))
+done
+read -r shutdown_line
+exit 0
+)SHIM";
+
+	auto child = spawn_shim(script);
+	Session session(std::move(child));
+	REQUIRE_NOTHROW(session.Initialize());
+	const pid_t shim_pid = session.daemon_pid();
+
+	std::atomic<bool> done {false};
+	std::atomic<int> completed {0};
+	std::thread worker([&]() {
+		try {
+			for (int i = 0; i < kBatches; ++i) {
+				session.Submit("bowtie2-align", "{}", "x", 1);
+				completed.fetch_add(1, std::memory_order_relaxed);
+			}
+		} catch (...) {
+			// Watchdog SIGKILL (or any error) surfaces here as a thrown
+			// exception once ReadLine sees the closed pipe. `completed` already
+			// records how far we got; let the assertions below judge.
+		}
+		done.store(true, std::memory_order_release);
+	});
+
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+	while (!done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	}
+	const bool finished_in_time = done.load(std::memory_order_acquire);
+	if (!finished_in_time) {
+		// Pre-fix: the worker is blocked in ReadLine because the shim is blocked
+		// in write(2,stderr). Killing the shim closes its stdout so ReadLine
+		// returns and the worker can be joined cleanly.
+		::kill(shim_pid, SIGKILL);
+	}
+	worker.join();
+
+	REQUIRE(finished_in_time); // false on the pre-fix deadlock
+	REQUIRE(completed.load() == kBatches);
+	REQUIRE_NOTHROW(session.Shutdown());
 }
 
 TEST_CASE("Session::Submit rejects calls before Initialize", "[gpl-boundary][session]") {

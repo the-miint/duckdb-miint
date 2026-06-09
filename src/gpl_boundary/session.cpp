@@ -48,38 +48,40 @@ YyjsonDocPtr make_doc(yj::yyjson_doc *p) {
 	return YyjsonDocPtr(p, &yj::yyjson_doc_free);
 }
 
-// Cap on how much daemon stderr we splice into a thrown exception. Big enough
-// to carry a typical bowtie2 assertion or stack trace, small enough not to
-// pollute SQL error displays. Excess is truncated from the front (we want the
-// tail — that's where the failing-batch output lives).
+// Cap on how much daemon stderr we retain (and splice into a thrown
+// exception). Big enough to carry a typical bowtie2 assertion or stack trace,
+// small enough not to pollute SQL error displays. Excess is truncated from the
+// front (we want the tail — that's where the failing-batch output lives).
 constexpr std::size_t kStderrTailCap = 4096;
 
-// Non-blocking drain of an fd. Used on the failure path to grab whatever the
-// daemon (and its worker subprocesses, if the daemon forwards their stderr)
-// has written so far. MUST be non-blocking — the daemon is typically still
-// alive at this point, so the pipe has no EOF and a blocking read would hang.
+// Non-blocking drain of an fd, appending everything currently available to
+// `sink`. Used per-batch (Session::PumpStderr — keeps the daemon's stderr pipe
+// from filling, which would wedge the daemon on a blocked write while we wait
+// for its batch response) and on the failure paths (to grab the daemon's last
+// words). MUST be non-blocking — the daemon is typically still alive, so the
+// pipe has no EOF and a blocking read would hang.
 //
 // Restores the original O_NONBLOCK state on exit so other readers (none today,
-// but defensive) aren't surprised.
-std::string DrainStderrNonblocking(int fd) {
+// but defensive) aren't surprised. Truncation is the caller's job (see
+// TruncateHead) so the rolling buffer is only trimmed once after appending.
+void AppendAvailableStderr(int fd, std::string &sink) {
 	if (fd < 0) {
-		return {};
+		return;
 	}
 	const int orig_flags = ::fcntl(fd, F_GETFL, 0);
 	if (orig_flags < 0) {
-		return {};
+		return;
 	}
 	if (!(orig_flags & O_NONBLOCK)) {
 		if (::fcntl(fd, F_SETFL, orig_flags | O_NONBLOCK) < 0) {
-			return {};
+			return;
 		}
 	}
-	std::string out;
 	std::array<char, 4096> buf {};
 	for (;;) {
 		ssize_t n = ::read(fd, buf.data(), buf.size());
 		if (n > 0) {
-			out.append(buf.data(), static_cast<size_t>(n));
+			sink.append(buf.data(), static_cast<size_t>(n));
 			continue;
 		}
 		// n == 0 (EOF) or -1 (EAGAIN/EWOULDBLOCK/other): stop draining.
@@ -88,10 +90,15 @@ std::string DrainStderrNonblocking(int fd) {
 	if (!(orig_flags & O_NONBLOCK)) {
 		(void)::fcntl(fd, F_SETFL, orig_flags); // best effort restore
 	}
-	if (out.size() > kStderrTailCap) {
-		out = "...(truncated head)...\n" + out.substr(out.size() - kStderrTailCap);
+}
+
+// Trim `s` from the front to at most `cap` bytes, prefixing a marker so the
+// reader knows output was dropped. Keeps the tail — that's where the
+// failing-batch output lives.
+void TruncateHead(std::string &s, std::size_t cap) {
+	if (s.size() > cap) {
+		s = "...(truncated head)...\n" + s.substr(s.size() - cap);
 	}
-	return out;
 }
 
 // Compose a "why did the daemon vanish" suffix for Submit's failure paths.
@@ -101,10 +108,13 @@ std::string DrainStderrNonblocking(int fd) {
 // splices the daemon's stderr tail. Without this the EPIPE path throws a bare
 // "Broken pipe" and the EOF path a bare "closed stdout", neither of which tells
 // the operator what actually happened. Reap first so the stderr pipe has hit
-// EOF and DrainStderrNonblocking captures everything the daemon last wrote.
-std::string DaemonDeathSuffix(ChildProcess &child) {
+// EOF and AppendAvailableStderr captures everything the daemon last wrote;
+// `stderr_tail` is the session's rolling buffer (already holding the prior
+// batches' output) so the dropped-head marker is applied once after appending.
+std::string DaemonDeathSuffix(ChildProcess &child, std::string &stderr_tail) {
 	std::string suffix = " [daemon " + child.ReapAndDescribe() + "]";
-	const std::string stderr_tail = DrainStderrNonblocking(child.stderr_fd());
+	AppendAvailableStderr(child.stderr_fd(), stderr_tail);
+	TruncateHead(stderr_tail, kStderrTailCap);
 	if (!stderr_tail.empty()) {
 		suffix += "\n--- daemon stderr ---\n" + stderr_tail;
 	}
@@ -195,7 +205,7 @@ Session::~Session() {
 
 Session::Session(Session &&other) noexcept
     : child_(std::move(other.child_)), reader_(std::move(other.reader_)), tools_(std::move(other.tools_)),
-      initialized_(other.initialized_), shut_down_(other.shut_down_) {
+      initialized_(other.initialized_), shut_down_(other.shut_down_), stderr_tail_(std::move(other.stderr_tail_)) {
 	other.initialized_ = false;
 	other.shut_down_ = true;
 }
@@ -206,6 +216,11 @@ Session &Session::operator=(Session &&other) noexcept {
 		new (this) Session(std::move(other));
 	}
 	return *this;
+}
+
+void Session::PumpStderr() {
+	AppendAvailableStderr(child_.stderr_fd(), stderr_tail_);
+	TruncateHead(stderr_tail_, kStderrTailCap);
 }
 
 void Session::Initialize() {
@@ -391,7 +406,7 @@ SubmitResult Session::Submit(const std::string &tool, const std::string &config_
 		// EPIPE here means the daemon's stdin read-end is gone — it died before
 		// we finished handing off this batch. Enrich the bare "Broken pipe" with
 		// how it died + its stderr so the cause is actionable.
-		throw std::runtime_error(std::string(e.what()) + DaemonDeathSuffix(child_));
+		throw std::runtime_error(std::string(e.what()) + DaemonDeathSuffix(child_, stderr_tail_));
 	}
 	++next_batch_id_;
 
@@ -402,8 +417,16 @@ SubmitResult Session::Submit(const std::string &tool, const std::string &config_
 		// it died between read and write. Same enrichment as the EPIPE path.
 		throw std::runtime_error("gpl_boundary: daemon closed stdout while waiting "
 		                         "for batch response" +
-		                         DaemonDeathSuffix(child_));
+		                         DaemonDeathSuffix(child_, stderr_tail_));
 	}
+
+	// Drain the daemon's stderr now that this batch is answered. Verbose tools
+	// (e.g. bowtie2 with quiet=false) print a per-invocation summary to stderr;
+	// undrained across many batches that fills the OS pipe buffer and wedges the
+	// daemon on a blocked write while we block in the ReadLine above. Draining
+	// every batch keeps the pipe near-empty so it can never back up. Cheap
+	// no-op when the tool is quiet.
+	PumpStderr();
 
 	// 4. Parse response.
 	auto doc = make_doc(yj::yyjson_read(reply.data(), reply.size(), 0));
@@ -417,18 +440,18 @@ SubmitResult Session::Submit(const std::string &tool, const std::string &config_
 	yj::yyjson_val *success = yj::yyjson_obj_get(root, "success");
 	if (!success || !yj::yyjson_is_true(success)) {
 		const std::string err = get_str(root, "error");
-		// Drain whatever the daemon (and forwarded worker output) printed to
-		// stderr before / during the failure. Non-blocking so we don't hang
-		// when the daemon is still alive (the pipe will never EOF). The
-		// daemon's own error JSON often says only "subprocess exited
-		// unexpectedly"; the actual segfault / assertion / OOM message is in
-		// the stderr stream we'd otherwise discard.
-		const std::string stderr_tail = DrainStderrNonblocking(child_.stderr_fd());
+		// Fold any final stderr into the rolling tail. The per-batch PumpStderr
+		// above already captured this batch's output; this catches bytes the
+		// daemon wrote between that drain and the failure. The daemon's own
+		// error JSON often says only "subprocess exited unexpectedly"; the
+		// actual segfault / assertion / OOM message is in the stderr stream we'd
+		// otherwise discard.
+		PumpStderr();
 		std::string msg = "gpl_boundary: batch failed (batch_id=" + std::to_string(batch_id) + "): ";
 		msg += (err.empty() ? std::string("(no error message): ") + reply : err);
-		if (!stderr_tail.empty()) {
+		if (!stderr_tail_.empty()) {
 			msg += "\n--- daemon stderr ---\n";
-			msg += stderr_tail;
+			msg += stderr_tail_;
 		}
 		throw std::runtime_error(msg);
 	}

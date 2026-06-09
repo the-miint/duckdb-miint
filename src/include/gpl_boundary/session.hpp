@@ -148,12 +148,26 @@ public:
 	}
 
 private:
+	/// Non-blocking drain of the daemon's stderr fd into `stderr_tail_`,
+	/// truncating the front to the byte cap. Cheap no-op when nothing is
+	/// pending. Called once per `Submit` (so the OS pipe buffer can't fill and
+	/// wedge a verbose daemon on a blocked write) and again on the failure paths.
+	void PumpStderr();
+
 	ChildProcess child_;
 	std::unique_ptr<LineReader> reader_;
 	std::vector<ToolEntry> tools_;
 	bool initialized_ = false;
 	bool shut_down_ = false;
 	int64_t next_batch_id_ = 1;
+
+	/// Rolling tail of the daemon's stderr, accumulated across the session.
+	/// Drained once per batch by `Submit` so a chatty tool (e.g. bowtie2 with
+	/// quiet=false) can't fill the OS pipe buffer and deadlock the daemon on a
+	/// blocked stderr write while we block waiting for its response. Capped to
+	/// the last `kStderrTailCap` bytes; spliced into the exception message on
+	/// the daemon-death / batch-failure paths.
+	std::string stderr_tail_;
 };
 
 } // namespace gpl_boundary
