@@ -2106,7 +2106,7 @@ Bowtie2 runs out of process via the `gpl-boundary` daemon (an Apache-licensed pr
   - `true`: Local alignment (soft-clipping allowed at ends)
 - `threads` (INTEGER, default: 1): Number of threads for Bowtie2 alignment (daemon `nthreads`)
 - `max_secondary` (INTEGER, default: 1): Maximum alignments to report per query (`-k`)
-- `quiet` (BOOLEAN, default: true): Suppress Bowtie2 stderr output (alignment statistics)
+- `quiet` (BOOLEAN, default: true): Runs Bowtie2 with `--quiet`. Keep the default. miint never surfaces Bowtie2's stderr alignment statistics to SQL, so `quiet := false` has **no user-visible effect** — it only makes the daemon emit per-batch summaries that miint immediately drains and discards, adding overhead for no benefit.
 
 The full bowtie2-align typed parameter set is also exposed (one-to-one with the daemon's `--describe`; integer ranges enforced at bind time):
 
@@ -2260,7 +2260,7 @@ The sharded path emits only mapped reads (the daemon is invoked with `--no-unal`
 - `max_secondary` (INTEGER, default: 1): Maximum alignments to report per query (`-k`)
 - `max_threads_per_shard` (INTEGER, default: 4, range 1–64): bowtie2's internal `nthreads` for each per-shard daemon worker
 - `include_shard_name` (BOOLEAN, default: false): When true, append a `shard_name` column to the output
-- `quiet` (BOOLEAN, default: true): Suppress Bowtie2 stderr output
+- `quiet` (BOOLEAN, default: true): Runs Bowtie2 with `--quiet`. Keep the default — miint never surfaces Bowtie2's stderr statistics to SQL, so `quiet := false` has no user-visible effect and only adds overhead (per-batch summaries that miint drains and discards).
 - `threads` (INTEGER): Ignored in sharded mode. Use DuckDB's `SET threads=N` to control cross-shard parallelism and `max_threads_per_shard` for per-shard bowtie2 threading. A warning is printed at bind if `threads != 1` is passed directly to this function.
 
 The full bowtie2-align typed parameter set listed under [`align_bowtie2`](#align_bowtie2query_table-subject_table-options) above is also available here (same names, same bind-time validation): `seed`, `trim5`, `trim3`, `match_bonus`, `mismatch_penalty`, `mismatch_penalty_min`, `n_penalty`, `read_gap_open`, `read_gap_extend`, `ref_gap_open`, `ref_gap_extend`, `score_min`, `min_insert`, `max_insert`, `mate_orientation`, `no_mixed`, `no_discordant`, `dovetail`, `no_contain`, `no_overlap`, `nofw`, `norc`, `seed_mismatches`, `seed_length`, `max_dp_failures`, `max_seed_rounds`, `report_all`, `xeq`, `rg_id`, `ignore_quals`, `reorder`.

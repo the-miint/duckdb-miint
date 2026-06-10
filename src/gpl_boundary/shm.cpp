@@ -1,6 +1,7 @@
 #include "gpl_boundary/shm.hpp"
 
 #include <atomic>
+#include <cerrno>
 #include <cstring>
 #include <fcntl.h>
 #include <stdexcept>
@@ -32,6 +33,15 @@ std::string make_input_name() {
 	return name;
 }
 
+// Actionable suffix for shm-allocation failures that smell like a full or
+// cluttered /dev/shm. Segments leak when a miint or gpl-boundary process is
+// SIGKILL'd (no destructor runs) and pile up as /dev/shm/miint-* files; on a
+// shared HPC node that surfaces here as ENOSPC or as exhausted EEXIST retries.
+std::string ShmCleanupHint() {
+	return " /dev/shm may be full or holding stale segments from a previously killed miint process. If no other "
+	       "miint query is running, clear them with:  rm -f /dev/shm/miint-*";
+}
+
 } // namespace
 
 // =============================================================================
@@ -59,20 +69,28 @@ InputShmRegion InputShmRegion::Create(std::size_t size_bytes) {
 		if (fd >= 0) {
 			break;
 		}
-		if (errno != EEXIST) {
-			throw std::runtime_error("gpl_boundary: shm_open(" + name + ") failed: " + std::string(::strerror(errno)));
+		const int e = errno;
+		if (e != EEXIST) {
+			std::string msg = "gpl_boundary: shm_open(" + name + ") failed: " + std::string(::strerror(e));
+			if (e == ENOSPC) {
+				msg += ShmCleanupHint();
+			}
+			throw std::runtime_error(msg);
 		}
 		// EEXIST: a stale segment is squatting on this name. Re-roll.
 	}
 	if (fd < 0) {
-		throw std::runtime_error("gpl_boundary: shm_open exhausted retries on EEXIST — /dev/shm/ may "
-		                         "be full of stale miint segments. Manual cleanup required.");
+		throw std::runtime_error("gpl_boundary: shm_open exhausted 64 EEXIST retries." + ShmCleanupHint());
 	}
 	if (::ftruncate(fd, static_cast<off_t>(size_bytes)) != 0) {
 		const int err = errno;
 		::close(fd);
 		::shm_unlink(name.c_str());
-		throw std::runtime_error("gpl_boundary: ftruncate(" + name + ") failed: " + std::string(::strerror(err)));
+		std::string msg = "gpl_boundary: ftruncate(" + name + ") failed: " + std::string(::strerror(err));
+		if (err == ENOSPC) {
+			msg += ShmCleanupHint();
+		}
+		throw std::runtime_error(msg);
 	}
 	void *p = ::mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	::close(fd); // mmap holds its own reference; the fd is no longer needed
@@ -139,6 +157,12 @@ OutputShmRegion OutputShmRegion::Open(const std::string &name, std::size_t size_
 	::close(fd);
 	if (p == MAP_FAILED) {
 		const int err = errno;
+		// Symmetric with InputShmRegion::Create: a segment we opened but cannot
+		// map is ours to clean up — the daemon has already handed it off, and
+		// OutputShmRegion's destructor (which normally unlinks) never runs
+		// because construction failed here. Unlink so it doesn't leak in
+		// /dev/shm.
+		::shm_unlink(name.c_str());
 		throw std::runtime_error("gpl_boundary: mmap(" + name + ") failed: " + std::string(::strerror(err)));
 	}
 	return OutputShmRegion(name, size_bytes, p);
