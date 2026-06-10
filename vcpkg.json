@@ -1,4 +1,5 @@
 {
+  "builtin-baseline": "fef715db0cad13d7db3a29797969a57b44e73531",
   "dependencies": [
     "zlib",
     "zstd",
