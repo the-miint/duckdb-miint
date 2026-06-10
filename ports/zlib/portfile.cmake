@@ -17,15 +17,35 @@ vcpkg_from_github(
     HEAD_REF develop
 )
 
+# WASM (emscripten) has no zlib-ng SIMD path: zlib-ng ships no wasm arch, so it
+# falls back to generic C and gains zero speed from the optimized build anyway.
+# But on wasm the runtime-CPU-detection functable + optimized codegen produces a
+# binary that binaryen's wasm-emscripten-finalize cannot parse once the full
+# DuckDB core is statically linked into one ~41 MB MAIN_MODULE with
+# -fwasm-exceptions (the WASM load-test harness in scripts/test_wasm_load.sh):
+#   [parse exception: attempted pop from empty stack / beyond block start ...]
+# Build a plain single-implementation generic zlib-ng for emscripten so finalize
+# succeeds; native keeps the SIMD-accelerated inflate that motivated zlib-ng.
+if(VCPKG_TARGET_IS_EMSCRIPTEN)
+    set(_miint_new_strategies OFF)
+    set(_miint_extra_options -DWITH_RUNTIME_CPU_DETECTION=OFF -DWITH_OPTIM=OFF)
+    set(_miint_release_options)
+else()
+    set(_miint_new_strategies ON)
+    set(_miint_extra_options)
+    set(_miint_release_options -DWITH_OPTIM=ON)
+endif()
+
 vcpkg_cmake_configure(
     SOURCE_PATH "${SOURCE_PATH}"
     OPTIONS
         "-DZLIB_FULL_VERSION=1.3.1"
         -DZLIB_ENABLE_TESTS=OFF
-        -DWITH_NEW_STRATEGIES=ON
+        "-DWITH_NEW_STRATEGIES=${_miint_new_strategies}"
         -DZLIB_COMPAT=ON
+        ${_miint_extra_options}
     OPTIONS_RELEASE
-        -DWITH_OPTIM=ON
+        ${_miint_release_options}
 )
 vcpkg_cmake_install()
 vcpkg_copy_pdbs()
