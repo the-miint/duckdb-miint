@@ -451,6 +451,52 @@ SELECT COUNT(*) FROM align_bowtie2_sharded('typed_queries',
 ----
 1
 
+# ----------------------------------------------------------------------------
+# v0.4 seed-behavior knobs: deterministic_seeds, no_exact_upfront,
+# no_1mm_upfront, lowseeds
+# ----------------------------------------------------------------------------
+# `deterministic_seeds` (-d) gives reproducible seed selection. bowtie2 couples
+# it: it requires report_all AND both upfront-disable flags, and is incompatible
+# with max_secondary (-k). miint forwards the knobs verbatim; the daemon enforces
+# the coupling with a clear knob-named error (same contract as --mp MAX,MIN).
+
+# Full valid combo accepted + forwarded; the perfect-match query still aligns.
+query I
+SELECT COUNT(*) >= 1 FROM align_bowtie2('typed_queries', 'typed_subjects',
+    report_all := true,
+    no_exact_upfront := true,
+    no_1mm_upfront := true,
+    deterministic_seeds := true);
+----
+true
+
+# lowseeds accepted + forwarded (passed verbatim to bowtie2's -l/--lowseeds).
+query I
+SELECT COUNT(*) >= 1 FROM align_bowtie2('typed_queries', 'typed_subjects',
+    lowseeds := '100');
+----
+true
+
+# Coupling enforced by the daemon: deterministic_seeds without the
+# upfront-disable flags is rejected with a knob-named error (no worker crash).
+statement error
+SELECT * FROM align_bowtie2('typed_queries', 'typed_subjects',
+    report_all := true, deterministic_seeds := true);
+----
+deterministic_seeds
+
+# Same surface for the sharded variant — valid combo accepted + forwarded.
+query I
+SELECT COUNT(*) >= 1 FROM align_bowtie2_sharded('typed_queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'typed_assoc',
+    report_all := true,
+    no_exact_upfront := true,
+    no_1mm_upfront := true,
+    deterministic_seeds := true);
+----
+true
+
 statement ok
 DROP TABLE typed_queries;
 

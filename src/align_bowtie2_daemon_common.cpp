@@ -123,6 +123,10 @@ const std::unordered_set<std::string> kCommonAlignParams = {
     "rg_id",
     "ignore_quals",
     "reorder",
+    "no_exact_upfront",
+    "no_1mm_upfront",
+    "deterministic_seeds",
+    "lowseeds",
 };
 
 void AppendBowtie2AlignParams(ConfigJsonBuilder &cfg, const named_parameter_map_t &named_params, const char *caller) {
@@ -265,6 +269,20 @@ void AppendBowtie2AlignParams(ConfigJsonBuilder &cfg, const named_parameter_map_
 	}
 	pass_bool("ignore_quals");
 	pass_bool("reorder");
+
+	// 8. v0.4 seed-behavior knobs (bowtie2 -d / --no-exact-upfront /
+	//    --no-1mm-upfront / -l). `deterministic_seeds` gives reproducible seed
+	//    selection but bowtie2 couples it: it requires report_all AND both
+	//    upfront-disable flags set, and is incompatible with -k. We forward the
+	//    values verbatim and let the daemon's config parser enforce the coupling
+	//    (it returns a clear "deterministic_seeds requires ..." error) rather
+	//    than duplicate that interdependency here.
+	pass_bool("no_exact_upfront");
+	pass_bool("no_1mm_upfront");
+	pass_bool("deterministic_seeds");
+	if (auto *v = get("lowseeds")) {
+		cfg.append_str("lowseeds", ValueAsStr(caller, "lowseeds", *v));
+	}
 }
 
 void RegisterBowtie2AlignNamedParameterTypes(TableFunction &tf) {
@@ -304,6 +322,10 @@ void RegisterBowtie2AlignNamedParameterTypes(TableFunction &tf) {
 	tf.named_parameters["rg_id"] = LogicalType::VARCHAR;
 	tf.named_parameters["ignore_quals"] = LogicalType::BOOLEAN;
 	tf.named_parameters["reorder"] = LogicalType::BOOLEAN;
+	tf.named_parameters["no_exact_upfront"] = LogicalType::BOOLEAN;
+	tf.named_parameters["no_1mm_upfront"] = LogicalType::BOOLEAN;
+	tf.named_parameters["deterministic_seeds"] = LogicalType::BOOLEAN;
+	tf.named_parameters["lowseeds"] = LogicalType::VARCHAR;
 }
 
 const char *const kOutputColumnNames[kNumOutputColumns] = {
