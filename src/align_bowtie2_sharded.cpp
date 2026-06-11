@@ -176,6 +176,17 @@ struct AlignBowtie2ShardedGlobalState : public GlobalTableFunctionState {
 	// is roughly max_active_shards × max_threads_per_shard ≈ db_threads.
 	idx_t max_active_shards = 1;
 
+	// Live count of worker threads currently holding a shard (++ on claim, -- on
+	// release in Execute). Read at submit time to redistribute idle cores to
+	// survivors via `EffectiveShardThreads` once `next_shard_idx` shows all
+	// shards are claimed. Advisory only (never affects alignment results), so
+	// relaxed ordering is sufficient.
+	std::atomic<idx_t> active_workers {0};
+
+	// DuckDB thread-pool size, captured in InitGlobal. The ceiling for a
+	// survivor's bowtie2 `-p` when it grows to fill freed cores.
+	idx_t db_threads = 1;
+
 	idx_t MaxThreads() const override {
 		// DuckDB clamps to its own scheduler concurrency anyway, but
 		// returning the per-shard ceiling here keeps the planner honest
@@ -485,6 +496,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	const idx_t db_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
 	const idx_t derived = (db_threads + bd.max_threads_per_shard - 1) / bd.max_threads_per_shard;
 	gs->max_active_shards = std::max<idx_t>(1, std::min<idx_t>(derived, bd.shards.size()));
+	gs->db_threads = db_threads;
 	return std::move(gs);
 }
 
@@ -645,9 +657,16 @@ bool FetchShardBatch(AlignBowtie2ShardedLocalState &local, const AlignBowtie2Sha
 }
 
 void SubmitAndDecode(AlignBowtie2ShardedLocalState &local, const AlignBowtie2ShardedBindData &bd,
-                     const bt2_daemon::QueryBatch &qb) {
+                     const AlignBowtie2ShardedGlobalState &gs, const bt2_daemon::QueryBatch &qb) {
 	const auto &shard = bd.shards[local.current_shard_idx];
-	const std::string config_json = BuildAlignConfigJson(bd.named_params, shard.index_prefix, bd.max_threads_per_shard);
+	// Once every shard has been handed out, surviving workers grow their `-p` to
+	// reclaim the cores that finished workers freed (see EffectiveShardThreads).
+	// Changing nthreads re-fingerprints this shard in the daemon (one warm
+	// ~60ms index reload), but it only steps up a bounded number of times.
+	const bool all_shards_claimed = gs.next_shard_idx.load(std::memory_order_relaxed) >= bd.shards.size();
+	const idx_t nthreads = EffectiveShardThreads(bd.max_threads_per_shard, gs.db_threads,
+	                                             gs.active_workers.load(std::memory_order_relaxed), all_shards_claimed);
+	const std::string config_json = BuildAlignConfigJson(bd.named_params, shard.index_prefix, nthreads);
 	bt2_daemon::QueryArrowSchema schema_flags {bd.query_has_sequence2, bd.query_has_qual1, bd.query_has_qual2};
 	const auto ipc = bt2_daemon::BuildQueryIpc(qb, schema_flags);
 	auto submit_result = local.session->Submit("bowtie2-align", config_json, ipc.data(), ipc.size());
@@ -739,12 +758,14 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 		if (local.current_shard_idx != DConstants::INVALID_INDEX) {
 			bt2_daemon::QueryBatch qb;
 			if (FetchShardBatch(local, bd, qb)) {
-				SubmitAndDecode(local, bd, qb);
+				SubmitAndDecode(local, bd, gs, qb);
 				continue; // loop back to drain decoded rows
 			}
-			// Shard exhausted — release for re-claim attempt.
+			// Shard exhausted — release for re-claim attempt. Drop this worker
+			// from the active count so a surviving worker can grow its `-p`.
 			local.input_stream.reset();
 			local.current_shard_idx = DConstants::INVALID_INDEX;
+			gs.active_workers.fetch_sub(1, std::memory_order_relaxed);
 		}
 
 		// 3. Claim the next shard atomically. fetch_add is the entire
@@ -762,6 +783,10 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 			return;
 		}
 		local.current_shard_idx = shard_idx;
+		// Count this worker as active for the duration of the shard (balanced by
+		// the fetch_sub on exhaustion above). Done only after a valid claim, so
+		// the failed-claim path that ends the worker never touches the count.
+		gs.active_workers.fetch_add(1, std::memory_order_relaxed);
 		OpenCurrentShardStream(local, bd);
 	}
 }

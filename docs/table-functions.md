@@ -2262,7 +2262,7 @@ The sharded path emits only mapped reads (the daemon is invoked with `--no-unal`
 - `preset` (VARCHAR, optional): Bowtie2 sensitivity preset ('very-fast', 'fast', 'sensitive', 'very-sensitive')
 - `local` (BOOLEAN, default: false): Use local alignment mode instead of end-to-end
 - `max_secondary` (INTEGER, default: 1): Maximum alignments to report per query (`-k`)
-- `max_threads_per_shard` (INTEGER, default: 4, range 1–64): bowtie2's internal `nthreads` for each per-shard daemon worker
+- `max_threads_per_shard` (INTEGER, default: 4, range 1–64): bowtie2's internal `nthreads` *floor* for each per-shard daemon worker. This is the baseline per-shard thread count while shards are still being distributed across DuckDB workers. Once every shard has been claimed, a surviving worker grows its `nthreads` to reclaim cores freed by finished workers (up to `SET threads`), so a lone large shard at the end of a run isn't pinned to this value while the rest of the box sits idle. Total CPU stays bounded by `SET threads`; alignments are unaffected (bowtie2 `-p` only partitions reads across threads).
 - `include_shard_name` (BOOLEAN, default: false): When true, append a `shard_name` column to the output
 - `quiet` (BOOLEAN, default: true): Runs Bowtie2 with `--quiet`. Keep the default — miint never surfaces Bowtie2's stderr statistics to SQL, so `quiet := false` has no user-visible effect and only adds overhead (per-batch summaries that miint drains and discards).
 - `threads` (INTEGER): Ignored in sharded mode. Use DuckDB's `SET threads=N` to control cross-shard parallelism and `max_threads_per_shard` for per-shard bowtie2 threading. A warning is printed at bind if `threads != 1` is passed directly to this function.
@@ -2282,7 +2282,7 @@ Returns the same 21-column schema as `align_bowtie2` and `read_alignments`.
 
 **Behavior:**
 - At bind time, reads the `read_to_shard` table to discover shards; per-shard index existence is verified at InitGlobal (not Bind) so the planner doesn't pay filesystem-stat cost on wide shard sets.
-- Cross-shard parallelism is driven by `SET threads`: each DuckDB worker thread owns its own gpl-boundary daemon and claims shards atomically. Per-shard bowtie2 internal threading is driven by `max_threads_per_shard`.
+- Cross-shard parallelism is driven by `SET threads`: each DuckDB worker thread owns its own gpl-boundary daemon and claims shards atomically. Per-shard bowtie2 internal threading starts at `max_threads_per_shard` and ramps up for surviving shards once all shards are claimed (see `max_threads_per_shard` above) — this keeps the box saturated when a skewed shard-size distribution would otherwise leave a large shard running alone at the end of a run.
 - For each shard, only the reads assigned to that shard (via the `read_to_shard` mapping) are streamed across the gpl-boundary as Arrow IPC
 - A read can appear in multiple shards and will be aligned against each
 - Unmapped reads (flag 0x4) are filtered out of results (daemon `--no-unal`)
