@@ -26,7 +26,17 @@ namespace {
 // fast at session boot.
 constexpr int kRequiredProtocolVersion = 3;
 
-constexpr const char *kInitLine = R"({"init":{}})";
+// Pin the daemon's idle (stdin-silence) auto-shutdown to 60 minutes. Without
+// an explicit value the daemon defaults to 60s (GPL-boundary main.rs:
+// DEFAULT_IDLE_TIMEOUT_MS), which kills a live session whenever miint takes
+// >60s to hand off the next batch — e.g. the per-shard reads⋈read_to_shard
+// join blocking on its first chunk, or a slow per-shard index load. That
+// surfaces misleadingly as "WriteLine ... Broken pipe [daemon exited with
+// code 0]" on the *next* Submit. The daemon is already reaped deterministically
+// via PR_SET_PDEATHSIG (parent death) and Session::Shutdown / ~ChildProcess
+// SIGTERM, so the idle timer is only a backstop against a wedged-but-alive
+// miint; 60 min keeps that backstop while tolerating any realistic batch gap.
+constexpr const char *kInitLine = R"({"init":{"idle_timeout_ms":3600000}})";
 constexpr const char *kShutdownLine = R"({"shutdown":true})";
 
 // Get a string field from a yyjson object; returns empty string if absent
