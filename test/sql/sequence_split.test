@@ -1,0 +1,143 @@
+# name: test/sql/sequence_split.test
+# description: Test sequence_split fixed-width chunking (linear, bounded-memory)
+# group: [sql]
+
+require miint
+
+# --- exact division: every chunk is full width, dense 0-based index ---
+query ITI
+SELECT c.chunk_index, c.chunk_data, length(c.chunk_data)
+FROM (SELECT UNNEST(sequence_split('ACGTACGTACGT', 4)) AS c)
+ORDER BY c.chunk_index;
+----
+0	ACGT	4
+1	ACGT	4
+2	ACGT	4
+
+# --- remainder: last chunk is the leftover, no padding ---
+query ITI
+SELECT c.chunk_index, c.chunk_data, length(c.chunk_data)
+FROM (SELECT UNNEST(sequence_split('ACGTACGTAC', 4)) AS c)
+ORDER BY c.chunk_index;
+----
+0	ACGT	4
+1	ACGT	4
+2	AC	2
+
+# --- byte-exact round-trip: concatenating chunks in order reproduces input ---
+query T
+SELECT string_agg(c.chunk_data, '' ORDER BY c.chunk_index)
+FROM (SELECT UNNEST(sequence_split('ACGTACGTAC', 4)) AS c);
+----
+ACGTACGTAC
+
+# --- sequence shorter than chunk_size: a single full-content chunk ---
+query ITI
+SELECT c.chunk_index, c.chunk_data, length(c.chunk_data)
+FROM (SELECT UNNEST(sequence_split('AC', 4)) AS c)
+ORDER BY c.chunk_index;
+----
+0	AC	2
+
+# --- chunk_size of 1: one chunk per byte ---
+query I
+SELECT len(sequence_split('ACGT', 1));
+----
+4
+
+# --- chunk count via ceil(len/chunk_size) ---
+query I
+SELECT len(sequence_split('ACGTACGTAC', 4));
+----
+3
+
+# --- struct field names are chunk_index / chunk_data ---
+query IT
+SELECT (sequence_split('ACGTAC', 4))[1].chunk_index, (sequence_split('ACGTAC', 4))[1].chunk_data;
+----
+0	ACGT
+
+# --- empty sequence: empty list (0 chunks), so UNNEST yields no rows ---
+query I
+SELECT len(sequence_split('', 65536));
+----
+0
+
+query TIT
+SELECT id, c.chunk_index, c.chunk_data
+FROM (SELECT id, UNNEST(sequence_split(seq, 4)) AS c FROM (VALUES ('x', '')) t(id, seq));
+----
+
+# --- NULL propagation: NULL sequence or NULL chunk_size -> NULL list ---
+query I
+SELECT len(sequence_split(NULL, 4));
+----
+NULL
+
+query I
+SELECT len(sequence_split('ACGT', NULL));
+----
+NULL
+
+# --- multiple rows in one query: vectorized, per-row correctness, empties drop out ---
+query TII
+SELECT id, c.chunk_index, length(c.chunk_data)
+FROM (SELECT id, UNNEST(sequence_split(seq, 4)) AS c
+      FROM (VALUES ('a', 'ACGTAC'), ('b', 'TT'), ('c', '')) t(id, seq))
+ORDER BY id, c.chunk_index;
+----
+a	0	4
+a	1	2
+b	0	2
+
+# --- NULL interleaved with data in one batch: NULL rows drop out, others chunk normally ---
+query TII
+SELECT id, c.chunk_index, length(c.chunk_data)
+FROM (SELECT id, UNNEST(sequence_split(seq, 4)) AS c
+      FROM (VALUES ('a', 'ACGT'), ('b', CAST(NULL AS VARCHAR)), ('c', 'ACGTAC')) t(id, seq))
+ORDER BY id, c.chunk_index;
+----
+a	0	4
+c	0	4
+c	1	2
+
+# --- per-row varying chunk_size (chunk_size as a column, not a constant) ---
+query TII
+SELECT id, c.chunk_index, length(c.chunk_data)
+FROM (SELECT id, UNNEST(sequence_split(seq, cs)) AS c
+      FROM (VALUES ('a', 'ACGTACGT', 2), ('b', 'ACGTACGT', 8)) t(id, seq, cs))
+ORDER BY id, c.chunk_index;
+----
+a	0	2
+a	1	2
+a	2	2
+a	3	2
+b	0	8
+
+# --- realistic scale: 200 KB sequence, default 64 KB chunks, remainder + round-trip ---
+query II
+SELECT c.chunk_index, length(c.chunk_data)
+FROM (SELECT UNNEST(sequence_split(repeat('ACGT', 50000), 65536)) AS c)
+ORDER BY c.chunk_index;
+----
+0	65536
+1	65536
+2	65536
+3	3392
+
+query T
+SELECT string_agg(c.chunk_data, '' ORDER BY c.chunk_index) = repeat('ACGT', 50000)
+FROM (SELECT UNNEST(sequence_split(repeat('ACGT', 50000), 65536)) AS c);
+----
+true
+
+# --- chunk_size must be > 0 ---
+statement error
+SELECT sequence_split('ACGT', 0);
+----
+chunk_size must be > 0
+
+statement error
+SELECT sequence_split('ACGT', -1);
+----
+chunk_size must be > 0
