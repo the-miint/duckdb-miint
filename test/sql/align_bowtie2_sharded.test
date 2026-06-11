@@ -351,6 +351,103 @@ statement ok
 DROP TABLE paired_mapping;
 
 # ==============================================================================
+# SUBMIT_BATCH_READS PARAMETER TESTS
+# ==============================================================================
+# submit_batch_reads controls how many reads are accumulated into one daemon
+# Submit. It is a throughput knob ONLY — alignment results must be identical
+# regardless of its value (each read is aligned independently). This fixture is
+# tiny (3 reads, one DuckDB chunk) so it can only verify param acceptance +
+# tiny-case invariance + range validation; multi-chunk accumulation invariance
+# is covered by the CLI script in scratch/ against the large bench data.
+
+# Invariance: a small batch size yields the same alignments as the default.
+query II
+SELECT read_id, reference
+FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    submit_batch_reads := 1,
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# Invariance: a large batch size yields the same alignments.
+query II
+SELECT read_id, reference
+FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    submit_batch_reads := 100000,
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# Range validation: too low
+statement error
+SELECT * FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    submit_batch_reads := 0);
+----
+submit_batch_reads must be between 1 and 1000000
+
+# Range validation: too high
+statement error
+SELECT * FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    submit_batch_reads := 2000000);
+----
+submit_batch_reads must be between 1 and 1000000
+
+# Multi-chunk accumulation invariance: 5000 reads (> STANDARD_VECTOR_SIZE=2048)
+# so FetchShardBatch accumulates several chunks per Submit. This is the core new
+# code path; the tiny fixture above is a single chunk and can't exercise it.
+# Assert batch=1 (one chunk/Submit, ~3 submits) and batch=8192 (one Submit)
+# produce IDENTICAL output multisets and are non-empty — without hard-coding the
+# alignment count (which would be a guessed expected value).
+statement ok
+CREATE TABLE big_queries AS
+  SELECT 'r' || i AS read_id,
+         'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT' AS sequence1
+  FROM range(5000) t(i);
+
+statement ok
+CREATE TABLE big_mapping AS SELECT read_id, 'shard_a' AS shard_name FROM big_queries;
+
+statement ok
+CREATE TEMP TABLE mc_a AS
+  SELECT read_id, flags, reference, position, cigar
+  FROM align_bowtie2_sharded('big_queries', shard_directory := 'data/bowtie2_shards/',
+       read_to_shard := 'big_mapping', submit_batch_reads := 1, max_secondary := 0);
+
+statement ok
+CREATE TEMP TABLE mc_b AS
+  SELECT read_id, flags, reference, position, cigar
+  FROM align_bowtie2_sharded('big_queries', shard_directory := 'data/bowtie2_shards/',
+       read_to_shard := 'big_mapping', submit_batch_reads := 8192, max_secondary := 0);
+
+query I
+SELECT (SELECT count(*) FROM mc_a) > 0
+   AND (SELECT count(*) FROM mc_a) = (SELECT count(*) FROM mc_b)
+   AND (SELECT count(*) FROM (SELECT * FROM mc_a EXCEPT ALL SELECT * FROM mc_b)) = 0
+   AND (SELECT count(*) FROM (SELECT * FROM mc_b EXCEPT ALL SELECT * FROM mc_a)) = 0;
+----
+true
+
+statement ok
+DROP TABLE big_queries;
+
+statement ok
+DROP TABLE big_mapping;
+
+# ==============================================================================
 # CLEANUP
 # ==============================================================================
 
