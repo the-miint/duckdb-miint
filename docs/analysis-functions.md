@@ -7,6 +7,7 @@ Functions for higher-level genomic analysis, sequence manipulation, and pairwise
 - [`woltka_ogu`](#woltka_ogurelation-sequence_id_field-sample_id) - OGU counts (global or per-sample)
 - [`sequence_dna_reverse_complement` / `sequence_rna_reverse_complement`](#sequence_dna_reverse_complementsequence-and-sequence_rna_reverse_complementsequence) - Reverse complement
 - [`sequence_dna_as_regexp` / `sequence_rna_as_regexp`](#sequence_dna_as_regexpsequence-and-sequence_rna_as_regexpsequence) - IUPAC to regex
+- [`sequence_split`](#sequence_splitsequence-chunk_size) - Fixed-width chunking (linear, bounded memory)
 - [`compress_intervals`](#compress_intervalsstart-stop) - Merge overlapping intervals
 - [`compute_coverage_depth`](#compute_coverage_depthposition-stop_position-cigar-reference_length-mode) - Per-position depth aggregate
 - [`compute_msa_consensus`](#compute_msa_consensusaligned_seq-qual) - Q-aware MSA column consensus with HP post-correction
@@ -244,6 +245,47 @@ SELECT sequence_rna_as_regexp('ATNGG');
 - **Pattern-based classification**: Group sequences by motif presence
 
 **Note:** Gap characters become `.` (regex wildcard), which matches any single character. This is useful for representing unknown or variable positions in alignments.
+
+## `sequence_split(sequence, chunk_size)`
+
+Split a sequence into fixed-width chunks in a single linear pass. Returns a list of `{chunk_index, chunk_data}` structs; `UNNEST` it to get one row per chunk. Intended for emitting very large records (host reference genomes, hundreds of MB to multi-GB) as bounded-width rows for chunked storage, without the quadratic blow-up of the `list_transform` + `substring` idiom.
+
+**Parameters:**
+- `sequence` (VARCHAR): the sequence (or any string) to split
+- `chunk_size` (INTEGER): chunk width in bytes; must be `> 0`
+
+**Returns:** `LIST(STRUCT(chunk_index INTEGER, chunk_data VARCHAR))`
+
+**Behavior:**
+- Chunks are exactly `chunk_size` bytes; the last chunk is the remainder (no padding).
+- `chunk_index` is dense, 0-based, and ascending within a sequence.
+- Byte-exact: concatenating `chunk_data` in `chunk_index` order reproduces the input.
+- Empty sequence -> empty list (zero chunks), so `UNNEST` yields no rows for it.
+- `NULL` sequence or `NULL` `chunk_size` -> `NULL`.
+- `chunk_size <= 0` raises an error.
+- Linear time and bounded (~O(L) per record) memory: a 1 GB record chunks in well under a second, where the `substring`-in-`list_transform` macro is O(L²) and takes tens of minutes.
+
+**Examples:**
+```sql
+-- Fixed-width chunks; last chunk is the remainder
+SELECT c.chunk_index, c.chunk_data
+FROM (SELECT UNNEST(sequence_split('ACGTACGTAC', 4)) AS c)
+ORDER BY c.chunk_index;
+-- 0 | ACGT
+-- 1 | ACGT
+-- 2 | AC
+
+-- Emit a sequence table as 64 KB chunk rows for chunked-Parquet storage
+SELECT read_id, c.chunk_index, c.chunk_data
+FROM (SELECT read_id, UNNEST(sequence_split(sequence, 65536)) AS c FROM reads);
+
+-- Byte-exact round-trip
+SELECT string_agg(c.chunk_data, '' ORDER BY c.chunk_index)
+FROM (SELECT UNNEST(sequence_split('ACGTACGTAC', 4)) AS c);
+-- Returns: ACGTACGTAC
+```
+
+**Note:** `chunk_data` is `VARCHAR`. Chunking is by byte width, which is byte-exact for ASCII sequence data; splitting arbitrary multi-byte UTF-8 text at a byte boundary can produce invalid-UTF-8 chunks.
 
 ## `compress_intervals(start, stop)`
 
