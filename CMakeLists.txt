@@ -302,7 +302,14 @@ if(NOT SKBB_GIT_VERSION)
     set(SKBB_GIT_VERSION "unknown")
 endif()
 
-message(STATUS "Submodule versions: minimap2=${MINIMAP2_GIT_VERSION} WFA2=${WFA2_GIT_VERSION} rype=${RYPE_GIT_VERSION} vsearch=${VSEARCH_GIT_VERSION} mafft=${MAFFT_GIT_VERSION} abpoa=${ABPOA_GIT_VERSION} unifrac=${UNIFRAC_GIT_VERSION} skbb=${SKBB_GIT_VERSION}")
+execute_process(COMMAND git describe --tags --dirty --always
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ext/sylph
+    OUTPUT_VARIABLE SYLPH_GIT_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT SYLPH_GIT_VERSION)
+    set(SYLPH_GIT_VERSION "unknown")
+endif()
+
+message(STATUS "Submodule versions: minimap2=${MINIMAP2_GIT_VERSION} WFA2=${WFA2_GIT_VERSION} rype=${RYPE_GIT_VERSION} vsearch=${VSEARCH_GIT_VERSION} mafft=${MAFFT_GIT_VERSION} abpoa=${ABPOA_GIT_VERSION} sylph=${SYLPH_GIT_VERSION} unifrac=${UNIFRAC_GIT_VERSION} skbb=${SKBB_GIT_VERSION}")
 
 # Build htslib from release tarball
 # Configure with zstd support if available (htslib autodetects via pkg-config)
@@ -1300,7 +1307,8 @@ if(MIINT_ENABLE_SORTMERNA)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_SORTMERNA)
 endif()
 if(MIINT_ENABLE_SYLPH)
-    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_SYLPH)
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_SYLPH
+        SYLPH_GIT_VERSION="${SYLPH_GIT_VERSION}")
 endif()
 if(MIINT_ENABLE_CURL)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_CURL)
@@ -1436,7 +1444,8 @@ if(MIINT_ENABLE_SORTMERNA)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_SORTMERNA)
 endif()
 if(MIINT_ENABLE_SYLPH)
-    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_SYLPH)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_SYLPH
+        SYLPH_GIT_VERSION="${SYLPH_GIT_VERSION}")
 endif()
 if(MIINT_ENABLE_CURL)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_CURL)

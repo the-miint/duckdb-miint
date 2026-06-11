@@ -193,6 +193,9 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 #ifdef MIINT_HAS_ABPOA
 	data->versions.emplace_back("abpoa", ABPOA_GIT_VERSION);
 #endif
+#ifdef MIINT_HAS_SYLPH
+	data->versions.emplace_back("sylph", SYLPH_GIT_VERSION);
+#endif
 #ifdef MIINT_HAS_UNIFRAC
 	data->versions.emplace_back("unifrac", UNIFRAC_GIT_VERSION);
 	data->versions.emplace_back("scikit-bio-binaries", SKBB_GIT_VERSION);
