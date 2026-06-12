@@ -2342,6 +2342,7 @@ SELECT * FROM align_bowtie2_sharded('paired_queries',
 - Shards are processed sequentially; per-shard bowtie2 parallelism comes from `max_threads_per_shard`
 - The `threads` parameter is ignored (a warning is emitted); use `max_threads_per_shard` instead
 - Shards are sorted by read count (largest first) so the first shard's index stays hot in the daemon's worker pool
+- Within a shard, each worker double-buffers its read batches: the next batch is queued with the daemon while the current one aligns, so the daemon never idles during miint's per-batch decode/encode of the surrounding work. This is internal and **output-invariant** — there is no knob, and results are byte-identical to a synchronous submit; it only raises throughput by hiding the prep bubble behind alignment
 
 **Comparison of sharded vs non-sharded alignment functions:**
 | Feature | `align_minimap2` / `align_bowtie2` | `align_minimap2_sharded` / `align_bowtie2_sharded` |

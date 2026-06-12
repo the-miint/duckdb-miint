@@ -624,3 +624,115 @@ exit 0)";
 	REQUIRE_THROWS(session.AwaitNext());
 	REQUIRE_NOTHROW(session.Shutdown());
 }
+
+// Phase 3 edge cases for the pipelined path. The async primitives shipped in
+// Cycle 4.3 (above); these pin the FAILURE-path invariants that the happy-path
+// FIFO/lifetime tests don't exercise — a queued batch whose align fails, and a
+// daemon that dies with batches still outstanding. Both assert the load-bearing
+// property of double-buffering: an error mid-pipeline leaks no /dev/shm input
+// segment and leaves the session in a well-defined state (no deadlock).
+
+TEST_CASE("Session::AwaitNext surfaces a queued batch's failure in FIFO order and frees its input shm",
+          "[gpl-boundary][session]") {
+	// Two outstanding batches, same fingerprint. The daemon answers batch1 OK but
+	// fails batch2 ({success:false}) — the error-injection case from the plan. The
+	// pipeline contract: AwaitNext#1 returns the good result, AwaitNext#2 throws
+	// with the daemon's message (FIFO — the failure surfaces in submit order, not
+	// whenever the daemon got around to it). The failed batch's input shm is popped
+	// before the throw, so a mid-pipeline align failure strands nothing in flight
+	// and leaks no segment.
+	const std::string out1 = make_test_segment_name("errinj-1");
+	auto stub1 = fake_daemon_segment(out1, "ok payload");
+	const std::string resp1 = R"({"success":true,"schema_version":2,"batch_id":1,"shm_outputs":[{"name":")" + out1 +
+	                          R"(","label":"o","size":)" + std::to_string(stub1.size) + R"(}]})";
+	const std::string resp2 = R"({"success":false,"error":"shard 2 align blew up","batch_id":2})";
+	std::string script;
+	script += "read -r init_line\n";
+	script += R"(echo '{"success":true,"protocol_version":3,"tools":[{"name":"bowtie2-align","schema_version":2}]}')";
+	script += "\n";
+	script += "read -r batch1\n echo '" + resp1 + "'\n";
+	script += "read -r batch2\n echo '" + resp2 + "'\n";
+	script += "read -r shutdown_line\n exit 0\n";
+
+	auto child = spawn_shim(script);
+	Session session(std::move(child));
+	REQUIRE_NOTHROW(session.Initialize());
+
+	const int before = count_input_shm_segments();
+	REQUIRE(before >= 0);
+
+	const std::string in1 = "GOOD";
+	const std::string in2 = "BAD";
+	session.SubmitAsync("bowtie2-align", "{}", in1.data(), in1.size());
+	session.SubmitAsync("bowtie2-align", "{}", in2.data(), in2.size());
+	REQUIRE(session.inflight() == 2);
+	REQUIRE(count_input_shm_segments() == before + 2);
+
+	// First batch drains cleanly; its input shm frees.
+	SubmitResult r1;
+	REQUIRE_NOTHROW(r1 = session.AwaitNext());
+	REQUIRE(r1.batch_id == 1);
+	REQUIRE(session.inflight() == 1);
+	REQUIRE(count_input_shm_segments() == before + 1);
+
+	// Second batch's failure surfaces here, in FIFO order, carrying the daemon's
+	// error text so the operator sees which batch died.
+	REQUIRE_THROWS_WITH(session.AwaitNext(), ContainsSubstring("shard 2 align blew up"));
+	// Popped before the throw: nothing left in flight and its input shm is gone.
+	REQUIRE(session.inflight() == 0);
+	REQUIRE(count_input_shm_segments() == before);
+
+	REQUIRE_NOTHROW(session.Shutdown());
+}
+
+TEST_CASE("Session::AwaitNext on a daemon that dies mid-pipeline throws and leaks no input shm",
+          "[gpl-boundary][session]") {
+	// Two outstanding batches. The daemon answers batch1, then exits without
+	// answering batch2 (closes stdout = EOF). AwaitNext#1 returns OK; AwaitNext#2
+	// hits EOF and throws the daemon-death diagnostics. Unlike the {success:false}
+	// path, the unanswered front is NOT popped (we never got a reply to correlate),
+	// so it lingers in flight — its input shm is reclaimed only when the Session is
+	// destroyed. A daemon crash mid-pipeline must not strand a /dev/shm segment.
+	const std::string out1 = make_test_segment_name("eof-1");
+	auto stub1 = fake_daemon_segment(out1, "only payload");
+	const std::string resp1 = R"({"success":true,"schema_version":2,"batch_id":1,"shm_outputs":[{"name":")" + out1 +
+	                          R"(","label":"o","size":)" + std::to_string(stub1.size) + R"(}]})";
+	std::string script;
+	script += "read -r init_line\n";
+	script += R"(echo '{"success":true,"protocol_version":3,"tools":[{"name":"bowtie2-align","schema_version":2}]}')";
+	script += "\n";
+	script += "read -r batch1\n echo '" + resp1 + "'\n";
+	// `read -r batch2` is load-bearing, NOT cosmetic: a blocking read can't return
+	// until SubmitAsync#2's write has already landed the bytes in the pipe, so the
+	// shim cannot exit before that write succeeds. That guarantees SubmitAsync#2
+	// can't see EPIPE and the only throw comes from AwaitNext#2's EOF (with
+	// inflight()==2 as set up). Dropping the read would let the shim exit first and
+	// race SubmitAsync#2 into an EPIPE throw — testing the wrong failure mode.
+	script += "read -r batch2\n exit 0\n"; // consume batch2's line, then die without replying
+
+	auto child = spawn_shim(script);
+	const int before = count_input_shm_segments();
+	REQUIRE(before >= 0);
+	{
+		Session session(std::move(child));
+		REQUIRE_NOTHROW(session.Initialize());
+
+		const std::string in1 = "AAA";
+		const std::string in2 = "BBB";
+		session.SubmitAsync("bowtie2-align", "{}", in1.data(), in1.size());
+		session.SubmitAsync("bowtie2-align", "{}", in2.data(), in2.size());
+		REQUIRE(session.inflight() == 2);
+
+		REQUIRE_NOTHROW(session.AwaitNext()); // batch1 answered
+		REQUIRE(session.inflight() == 1);
+
+		// batch2: the daemon closed stdout — AwaitNext detects EOF and throws.
+		REQUIRE_THROWS(session.AwaitNext());
+		// EOF leaves the unanswered batch in flight (no reply to pop on); teardown
+		// is what reclaims it.
+		REQUIRE(session.inflight() == 1);
+	} // Session destructs: no active drain — its deque<InFlight> destructs, each
+	  // InFlight's InputShmRegion destructor munmaps + shm_unlinks (shm.cpp). Pure
+	  // RAII, so even an outstanding batch's segment is reclaimed.
+	REQUIRE(count_input_shm_segments() == before);
+}

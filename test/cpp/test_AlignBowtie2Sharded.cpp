@@ -53,3 +53,33 @@ TEST_CASE("EffectiveShardThreads: zero active workers is a safe no-op", "[bowtie
 	// A transient read where no worker holds a shard must not divide by zero.
 	REQUIRE(EffectiveShardThreads(4, 8, 0, true) == 4);
 }
+
+// -----------------------------------------------------------------------------
+// Multi-thread / multi-shard correctness: verified by a local (untracked)
+// harness, not a unit test. WHY there is no automated case here:
+//
+// The load-bearing concurrency invariant of the async pipeline is that no two
+// daemon fingerprints (tool + config, where config carries bowtie2 `-p`) are
+// ever outstanding on one connection at once — Session::AwaitNext correlates
+// responses POSITIONALLY (FIFO), so a fingerprint change (shard switch OR a `-p`
+// ramp step) must drain inflight() to 0 first. That logic only engages with
+// >=2 worker threads each holding a real shard and a real gpl-boundary daemon
+// fanning out on `-p`. Reproducing it in-process needs a live daemon AND
+// on-disk bowtie2 indexes, neither of which exists in CI — a gated test would
+// be inert everywhere it ran.
+//
+// So this is verified the same way the shipped `-p` ramp is: the DEPTH-INVARIANCE
+// HARNESS at `scratch/bt2bench/depth_invariance_check.sh`. It aligns the same
+// multi-shard read set three ways —
+//     ground = threads=1 depth=1   (serial reference)
+//     pipe1  = threads=N depth=1   (parallel, synchronous)
+//     pipe2  = threads=N depth=2   (parallel, pipelined)
+// — and asserts pipe1 and pipe2 are MULTISET-equal to ground (EXCEPT ALL both
+// directions == 0) over the full alignment-identifying column set incl.
+// `shard_name`, so a mis-attributed shard or a reordered/dropped row surfaces as
+// a diff. Last run: 7,127,029 rows, 0 diff in every direction. sqllogictest
+// can't stand in for it: it forces threads=1, collapsing the very interleaving
+// this guards. The script lives under the untracked `scratch/` dir; the recipe
+// to recreate it (and the bench data it needs) is in the bowtie2-sharded
+// throughput notes (localdocs).
+// -----------------------------------------------------------------------------
