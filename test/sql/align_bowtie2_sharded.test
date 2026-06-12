@@ -448,6 +448,59 @@ statement ok
 DROP TABLE big_mapping;
 
 # ==============================================================================
+# prefetch_ahead — warms upcoming shards' index files into page cache. Throughput
+# knob ONLY: alignment output must be identical for any value (a cache hint, not
+# a semantic change). Validates acceptance, tiny-case invariance, and range.
+# ==============================================================================
+
+# Invariance: prefetch disabled (0) yields the default alignments.
+query II
+SELECT read_id, reference
+FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    prefetch_ahead := 0,
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# Invariance: an explicit lookahead yields the same alignments.
+query II
+SELECT read_id, reference
+FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    prefetch_ahead := 4,
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# Range validation: too high
+statement error
+SELECT * FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    prefetch_ahead := 5000);
+----
+prefetch_ahead must be between 0 (disabled) and 4096
+
+# Range validation: negative. The -1 "auto" sentinel is internal — users select
+# auto by omitting the parameter, never by passing -1.
+statement error
+SELECT * FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    prefetch_ahead := -1);
+----
+prefetch_ahead must be between 0 (disabled) and 4096
+
+# ==============================================================================
 # CLEANUP
 # ==============================================================================
 

@@ -2,6 +2,11 @@
 
 #include "align_bowtie2_sharded.hpp"
 
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <unistd.h>
+
 using duckdb::EffectiveShardThreads;
 using duckdb::idx_t;
 
@@ -52,4 +57,44 @@ TEST_CASE("EffectiveShardThreads: ramps with a finer base as survivors drop", "[
 TEST_CASE("EffectiveShardThreads: zero active workers is a safe no-op", "[bowtie2_sharded]") {
 	// A transient read where no worker holds a shard must not divide by zero.
 	REQUIRE(EffectiveShardThreads(4, 8, 0, true) == 4);
+}
+
+// ShardIndexFiles drives prefetch: it must enumerate exactly the bowtie2 index
+// files present for a prefix so we warm the right pages (and only those) into
+// cache. The WHY: warming a wrong/empty set wastes the prefetch; warming a
+// partial set is fine (the missing files just aren't there to read). These
+// cases pin small vs large format, partial, and absent.
+TEST_CASE("ShardIndexFiles enumerates the present bowtie2 index files", "[bowtie2_sharded]") {
+	namespace fs = std::filesystem;
+	const fs::path dir = fs::temp_directory_path() / ("miint-bt2-prefetch-" + std::to_string(::getpid()));
+	fs::create_directories(dir);
+	auto touch = [](const std::string &p) {
+		std::ofstream(p) << "x";
+	};
+
+	// Small (.bt2) format: all four mandatory files present.
+	const std::string small = (dir / "small").string();
+	for (const char *e : {".1.bt2", ".2.bt2", ".rev.1.bt2", ".rev.2.bt2"}) {
+		touch(small + e);
+	}
+	REQUIRE(duckdb::ShardIndexFiles(small).size() == 4);
+
+	// Large (.bt2l) format: the variant used for big references.
+	const std::string large = (dir / "large").string();
+	for (const char *e : {".1.bt2l", ".2.bt2l", ".rev.1.bt2l", ".rev.2.bt2l"}) {
+		touch(large + e);
+	}
+	REQUIRE(duckdb::ShardIndexFiles(large).size() == 4);
+
+	// Partial index: only the files that exist are listed (warming a subset is
+	// harmless — the absent files simply aren't read).
+	const std::string partial = (dir / "partial").string();
+	touch(partial + ".1.bt2");
+	touch(partial + ".rev.1.bt2");
+	REQUIRE(duckdb::ShardIndexFiles(partial).size() == 2);
+
+	// Absent index: nothing to warm.
+	REQUIRE(duckdb::ShardIndexFiles((dir / "missing").string()).empty());
+
+	fs::remove_all(dir);
 }

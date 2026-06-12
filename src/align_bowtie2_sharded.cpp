@@ -23,10 +23,12 @@
 #include "gpl_boundary/session.hpp"
 
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -54,6 +56,7 @@ std::unordered_set<std::string> MakeKnownShardedParams() {
 	s.insert("max_threads_per_shard");
 	s.insert("include_shard_name");
 	s.insert("submit_batch_reads");
+	s.insert("prefetch_ahead");
 	return s;
 }
 
@@ -82,6 +85,35 @@ bool HasShardIndex(const std::string &prefix) {
 		}
 	}
 	return true;
+}
+
+// Best-effort: warm a shard's index files into the OS page cache ahead of the
+// daemon's mmap'd (`--mm`) load, so the worker that claims this shard next skips
+// the cold network-FS fault that otherwise dominates the long tail (5–99s for a
+// few-read shard). POSIX_FADV_WILLNEED is non-blocking and consumes no alignment
+// thread — the kernel does the readahead — so it adds load concurrency without
+// touching the per-shard `-p` core budget (the only in-allocation way to overlap
+// more than `max_active_shards` cold loads at once). A pure cache hint: errors
+// are ignored, alignment results are unaffected. Compiles to a no-op where
+// POSIX_FADV_WILLNEED is unavailable (macOS/WASM, which never run the daemon).
+//
+// Takes the precomputed file list (cached in InitGlobal) rather than re-deriving
+// it: a fresh ShardIndexFiles() here would issue up to 8 stat()s per call on the
+// very filesystem whose slowness we are working around.
+void PrefetchShardIndexFiles(const std::vector<std::string> &index_files) {
+#ifdef POSIX_FADV_WILLNEED
+	for (const auto &path : index_files) {
+		const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+		if (fd < 0) {
+			continue;
+		}
+		// offset 0, length 0 = advise the whole file.
+		(void)::posix_fadvise(fd, 0, 0, POSIX_FADV_WILLNEED);
+		::close(fd);
+	}
+#else
+	(void)index_files;
+#endif
 }
 
 // read_to_shard schema validation is handled by align_common.hpp's catalog-
@@ -159,6 +191,16 @@ struct AlignBowtie2ShardedBindData : public TableFunctionData {
 	// FetchShardBatch), so a value below the chunk size still submits a full
 	// chunk per round-trip.
 	idx_t submit_batch_reads = 16384;
+
+	// How many upcoming shards' index files to warm into page cache (via
+	// POSIX_FADV_WILLNEED) ahead of the claim frontier — see
+	// PrefetchShardIndexFiles. -1 is an INTERNAL "auto" sentinel (the field
+	// default); users get auto by omitting the parameter, and the auto value is
+	// resolved to max_active_shards in InitGlobal (GlobalState::prefetch_ahead).
+	// User-supplied values are bind-validated to 0 (disabled) .. 4096. Throughput
+	// knob only — alignment output is identical for any value (a cache hint, not
+	// a semantic change).
+	int64_t prefetch_ahead = -1;
 };
 
 struct AlignBowtie2ShardedGlobalState : public GlobalTableFunctionState {
@@ -186,6 +228,17 @@ struct AlignBowtie2ShardedGlobalState : public GlobalTableFunctionState {
 	// DuckDB thread-pool size, captured in InitGlobal. The ceiling for a
 	// survivor's bowtie2 `-p` when it grows to fill freed cores.
 	idx_t db_threads = 1;
+
+	// Resolved prefetch lookahead (BindData.prefetch_ahead, with its -1 "auto"
+	// sentinel collapsed to max_active_shards here in InitGlobal where db_threads
+	// is known). 0 = disabled. Read directly in Execute — no per-claim ternary.
+	idx_t prefetch_ahead = 0;
+
+	// Per-shard index file paths, parallel to bd.shards, computed once in
+	// InitGlobal (the filesystem-metadata cache is already warm there from the
+	// HasShardIndex pass). Claim-time prefetch indexes into this so it issues NO
+	// stats on the (slow, the whole reason we prefetch) shard filesystem.
+	std::vector<std::vector<std::string>> shard_index_files;
 
 	idx_t MaxThreads() const override {
 		// DuckDB clamps to its own scheduler concurrency anyway, but
@@ -424,6 +477,16 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 		bd->submit_batch_reads = static_cast<idx_t>(val);
 	}
 
+	auto prefetch_param = input.named_parameters.find("prefetch_ahead");
+	if (prefetch_param != input.named_parameters.end() && !prefetch_param->second.IsNull()) {
+		const int64_t val = bt2_daemon::ValueAsInt("align_bowtie2_sharded", "prefetch_ahead", prefetch_param->second);
+		if (val < 0 || val > 4096) {
+			throw BinderException("prefetch_ahead must be between 0 (disabled) and 4096 (got %lld)",
+			                      static_cast<long long>(val));
+		}
+		bd->prefetch_ahead = val;
+	}
+
 	DetectQueryColumns(context, *bd);
 
 	bd->shards = EnumerateShards(context, bd->read_to_shard_table, bd->shard_directory);
@@ -477,15 +540,20 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	// than in Bind because filesystem stats from the planner cost real time
 	// on NFS / very wide shard sets, and the check is best-effort anyway
 	// (the daemon will fail at Submit if a shard disappears mid-query).
+	auto gs = make_uniq<AlignBowtie2ShardedGlobalState>();
+	gs->shard_index_files.reserve(bd.shards.size());
 	for (const auto &shard : bd.shards) {
 		if (!HasShardIndex(shard.index_prefix)) {
 			throw IOException("No valid bowtie2 index found at prefix: %s. "
 			                  "Expected files like %s.1.bt2, %s.rev.1.bt2, etc.",
 			                  shard.index_prefix, shard.index_prefix, shard.index_prefix);
 		}
+		// Cache the file list for prefetch now, while HasShardIndex has just warmed
+		// the metadata cache for these paths — so the claim-time prefetch never
+		// re-stats the slow shard filesystem.
+		gs->shard_index_files.push_back(ShardIndexFiles(shard.index_prefix));
 	}
 
-	auto gs = make_uniq<AlignBowtie2ShardedGlobalState>();
 	// Each miint worker thread orchestrates one shard at a time; the daemon's
 	// per-fingerprint pool fans out internally on `nthreads`
 	// (= max_threads_per_shard). So our slice of the DuckDB thread pool is
@@ -497,6 +565,9 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	const idx_t derived = (db_threads + bd.max_threads_per_shard - 1) / bd.max_threads_per_shard;
 	gs->max_active_shards = std::max<idx_t>(1, std::min<idx_t>(derived, bd.shards.size()));
 	gs->db_threads = db_threads;
+	// Resolve the -1 "auto" sentinel now that db_threads (hence max_active_shards)
+	// is known: auto warms one full wave ahead (≈ one processing cycle of lead).
+	gs->prefetch_ahead = bd.prefetch_ahead < 0 ? gs->max_active_shards : static_cast<idx_t>(bd.prefetch_ahead);
 	return std::move(gs);
 }
 
@@ -787,6 +858,24 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 		// the fetch_sub on exhaustion above). Done only after a valid claim, so
 		// the failed-claim path that ends the worker never touches the count.
 		gs.active_workers.fetch_add(1, std::memory_order_relaxed);
+		// Warm the index of a shard `ahead` positions later into page cache while
+		// this worker loads+aligns its own, so by the time some worker claims that
+		// shard its mmap'd index isn't a cold fault. `shard_idx` is unique per
+		// atomic claim and `ahead` is constant, so each target is warmed at most
+		// once (no redundant opens, no shared state). The first `ahead` shards
+		// have no earlier claim to warm them, so they load cold — unavoidable at
+		// the start. `gs.prefetch_ahead` is the resolved lookahead (0 disables);
+		// pure CPU-free kernel readahead, output-invariant.
+		const idx_t ahead = gs.prefetch_ahead;
+		if (ahead > 0) {
+			// shard_idx < shards.size() (claim semantics) + ahead <= 4096
+			// (bind-validated) => no meaningful wrap; the guard below is what
+			// bounds the access regardless.
+			const idx_t target = shard_idx + ahead;
+			if (target < bd.shards.size()) {
+				PrefetchShardIndexFiles(gs.shard_index_files[target]);
+			}
+		}
 		OpenCurrentShardStream(local, bd);
 	}
 }
@@ -806,6 +895,7 @@ TableFunction AlignBowtie2ShardedTableFunction::GetFunction() {
 	tf.named_parameters["max_threads_per_shard"] = LogicalType::INTEGER;
 	tf.named_parameters["include_shard_name"] = LogicalType::BOOLEAN;
 	tf.named_parameters["submit_batch_reads"] = LogicalType::INTEGER;
+	tf.named_parameters["prefetch_ahead"] = LogicalType::INTEGER;
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }

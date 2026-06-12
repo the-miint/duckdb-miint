@@ -3,6 +3,10 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
+#include <filesystem>
+#include <string>
+#include <vector>
+
 namespace duckdb {
 
 // Effective bowtie2 `-p` (nthreads) for one shard's batch submit. As worker
@@ -27,6 +31,30 @@ inline idx_t EffectiveShardThreads(idx_t base_threads_per_shard, idx_t db_thread
 	}
 	const idx_t fair_share = db_threads / active_workers; // <= db_threads (active_workers >= 1)
 	return fair_share > base_threads_per_shard ? fair_share : base_threads_per_shard;
+}
+
+// The bowtie2 index files that actually exist for a shard prefix — the subset
+// of the 8 candidates (`<prefix>.1.bt2` … `.rev.2.bt2`, and the large-index
+// `.bt2l` variants) present on disk. Used to warm them into the OS page cache
+// (POSIX_FADV_WILLNEED) ahead of a worker claiming the shard, so the daemon's
+// mmap'd (`--mm`) index load doesn't stall on a cold network-FS fault. Returns
+// only files that exist: an incomplete index yields a partial list (warming a
+// subset is harmless), an absent one yields empty. Inline (like
+// EffectiveShardThreads) so the C++ unit test links it without pulling in the
+// .cpp's daemon dependencies.
+inline std::vector<std::string> ShardIndexFiles(const std::string &prefix) {
+	// The 8 possible bowtie2 index files: 4 mandatory in small (.bt2) format,
+	// or 4 in large (.bt2l) format for big references. We list whichever exist.
+	static const char *const kSuffixes[] = {".1.bt2",  ".2.bt2",  ".rev.1.bt2",  ".rev.2.bt2",
+	                                        ".1.bt2l", ".2.bt2l", ".rev.1.bt2l", ".rev.2.bt2l"};
+	std::vector<std::string> out;
+	for (const char *ext : kSuffixes) {
+		std::string p = prefix + ext;
+		if (std::filesystem::exists(p)) {
+			out.push_back(std::move(p));
+		}
+	}
+	return out;
 }
 
 // align_bowtie2_sharded routes per-shard through the gpl-boundary daemon's
