@@ -965,19 +965,22 @@ ExternalProject_Add(
     BUILD_BYPRODUCTS ${GLUE_LIB_PATH}
 )
 
-# Both `rype` and (optionally) `sylph` are IMPORTED targets pointing at the
-# same merged archive. Existing target_link_libraries(... rype) /
-# (... sylph) calls work unchanged; listing the archive twice on the link
-# line is harmless (the second pass finds no new undefined symbols).
+# `rype` is the sole IMPORTED STATIC target for the merged archive. The
+# archive contains both rype and sylph symbols, so linking `rype` provides
+# everything — there is no separate `sylph` link target.
+#
+# Why no second target: declaring an additional IMPORTED STATIC target
+# pointing at the same archive caused libmiint_rust_glue.a to appear twice on
+# the link line. Combined with -Wl,--allow-multiple-definition + --gc-sections,
+# each pass resolved the Rust runtime symbols (__rust_alloc /
+# rust_eh_personality / EMPTY_PANIC / ...) from a different instance and
+# pruned the other; allocations made through one resolution freed via the
+# other corrupted the heap, producing non-deterministic SIGSEGVs in unrelated
+# code paths (mzXML reader, abPOA consensus, ...) on Linux glibc CI runners.
+# Local Red Hat builds happened to dodge it.
 add_library(rype STATIC IMPORTED GLOBAL)
 set_target_properties(rype PROPERTIES IMPORTED_LOCATION ${GLUE_LIB_PATH})
 add_dependencies(rype miint_rust_glue_build)
-
-if(MIINT_ENABLE_SYLPH)
-    add_library(sylph STATIC IMPORTED GLOBAL)
-    set_target_properties(sylph PROPERTIES IMPORTED_LOCATION ${GLUE_LIB_PATH})
-    add_dependencies(sylph miint_rust_glue_build)
-endif()
 
 # Build MAFFT PartTree static library for multiple sequence alignment
 if(MIINT_ENABLE_MAFFT)
@@ -1347,9 +1350,10 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_link_libraries(${EXTENSION_NAME} sortmerna RocksDB::rocksdb)
 endif()
-if(MIINT_ENABLE_SYLPH)
-    target_link_libraries(${EXTENSION_NAME} sylph)
-endif()
+# MIINT_ENABLE_SYLPH: sylph's symbols ship inside libmiint_rust_glue.a alongside
+# rype's, so the existing `rype` link above already provides them. No separate
+# target_link_libraries(... sylph) is needed; adding one would double-list the
+# archive on the link line — see the comment near the rype target declaration.
 if(MIINT_ENABLE_CURL)
     target_link_libraries(${EXTENSION_NAME} CURL::libcurl)
 endif()
@@ -1484,9 +1488,8 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} sortmerna RocksDB::rocksdb)
 endif()
-if(MIINT_ENABLE_SYLPH)
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} sylph)
-endif()
+# sylph's symbols come in via rype's archive — see comment in EXTENSION_NAME
+# block above.
 if(MIINT_ENABLE_CURL)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} CURL::libcurl)
 endif()
@@ -1730,7 +1733,9 @@ if(MIINT_ENABLE_SORTMERNA)
     target_compile_definitions(tests PRIVATE MIINT_HAS_SORTMERNA)
 endif()
 if(MIINT_ENABLE_SYLPH)
-    target_link_libraries(tests sylph)
+    # Link rype (the umbrella archive), which transitively provides sylph
+    # symbols — see comment near the rype IMPORTED target declaration.
+    target_link_libraries(tests rype)
     target_compile_definitions(tests PRIVATE MIINT_HAS_SYLPH)
 endif()
 if(MIINT_ENABLE_GPL_BOUNDARY)
