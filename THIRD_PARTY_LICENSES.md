@@ -134,8 +134,7 @@ SOFTWARE.
 ## WFA2-lib
 
 Pairwise sequence alignment using the Wavefront Alignment Algorithm (WFA).
-Used by `align_pairwise_wfa2_score`, `align_pairwise_wfa2_cigar`, `align_pairwise_wfa2_full`,
-`uchime_ref`, and `uchime_denovo`.
+Used by `align_pairwise_wfa2_score`, `align_pairwise_wfa2_cigar`, and `align_pairwise_wfa2_full`.
 
 - Repository: https://github.com/smarco/WFA2-lib
 - Version: v2.3.5
