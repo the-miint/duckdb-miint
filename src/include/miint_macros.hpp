@@ -2,6 +2,9 @@
 
 #include "duckdb.hpp"
 #include "duckdb/main/extension_helper.hpp"
+#include "duckdb/parser/parser.hpp"
+#include "duckdb/parser/statement/create_statement.hpp"
+#include "duckdb/parser/parsed_data/create_macro_info.hpp"
 
 namespace duckdb {
 
@@ -716,14 +719,31 @@ const std::string GENOME_COVERAGE = // NOLINT
 class MIINTMacros {
 public:
 	static void Register(ExtensionLoader &loader) {
-		auto &instance = loader.GetDatabaseInstance();
-		Connection con(instance);
-
+		// Register macros into the system catalog (like DuckDB's built-in macros)
+		// rather than executing CREATE statements against the default catalog.
+		// The default catalog may be a database the user attached read-only, in
+		// which case a CREATE would abort extension load with an internal error.
+		// The system catalog is always writable and resolves across all catalogs.
 		auto register_macro = [&](const std::string &sql, const char *name) {
-			auto result = con.Query(sql);
-			if (result->HasError()) {
-				throw InternalException("Failed to register macro '%s': %s", name, result->GetError());
+			Parser parser;
+			parser.ParseQuery(sql);
+			if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::CREATE_STATEMENT) {
+				throw InternalException("Failed to register macro '%s': expected a single CREATE statement", name);
 			}
+			auto &create = parser.statements[0]->Cast<CreateStatement>();
+			if (create.info->type != CatalogType::MACRO_ENTRY && create.info->type != CatalogType::TABLE_MACRO_ENTRY) {
+				throw InternalException("Failed to register macro '%s': not a macro definition", name);
+			}
+			auto &macro_info = create.info->Cast<CreateMacroInfo>();
+			// Pin to the system catalog's default schema. RegisterFunction targets
+			// the system catalog directly; the parsed statement leaves the schema
+			// empty, which GetSchema would otherwise fail to resolve there.
+			macro_info.schema = DEFAULT_SCHEMA;
+			// The system catalog only accepts internal entries (same as built-in
+			// macros and RegisterType). Mark accordingly.
+			macro_info.internal = true;
+			macro_info.temporary = true;
+			loader.RegisterFunction(macro_info);
 		};
 
 		register_macro(MIINT_WARNINGS, "miint_warnings");
