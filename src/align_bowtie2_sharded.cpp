@@ -17,6 +17,7 @@
 #include "duckdb/parser/keyword_helper.hpp"
 
 #include <atomic>
+#include <cstdlib>
 
 #include "gpl_boundary/arrow_ipc.hpp"
 #include "gpl_boundary/process.hpp"
@@ -187,6 +188,15 @@ struct AlignBowtie2ShardedGlobalState : public GlobalTableFunctionState {
 	// survivor's bowtie2 `-p` when it grows to fill freed cores.
 	idx_t db_threads = 1;
 
+	// How many batches each worker keeps in flight (SubmitAsync) so its daemon
+	// stays continuously fed — it picks up the already-queued next command the
+	// instant it finishes the current align, instead of idling ~10-25% of every
+	// cycle while miint decodes output + fetches/encodes the next input. Default
+	// 2 (one batch of look-ahead fully hides the prep, since align >> prep).
+	// MIINT_BT2_PIPELINE_DEPTH overrides it (1 = synchronous = pre-pipeline
+	// behavior) for A/B benchmarking. TEMP env hook; see InitGlobal.
+	idx_t pipeline_depth = 2;
+
 	idx_t MaxThreads() const override {
 		// DuckDB clamps to its own scheduler concurrency anyway, but
 		// returning the per-shard ceiling here keeps the planner honest
@@ -232,6 +242,13 @@ struct AlignBowtie2ShardedLocalState : public LocalTableFunctionState {
 	// false immediately. Reset when a new shard stream is opened. Plain bool,
 	// order-independent — safe to declare outside the SHM/Arrow ordering block.
 	bool stream_exhausted = false;
+
+	// The bowtie2 `-p` (nthreads) the currently in-flight batches were submitted
+	// at. The pipeline keeps only one daemon fingerprint outstanding at a time
+	// (Session::SubmitAsync's contract); when the desired `-p` changes (a `-p`
+	// ramp step), we drain the in-flight batches before submitting at the new
+	// value. 0 = nothing in flight.
+	idx_t inflight_nthreads = 0;
 
 	// Latest Submit response + its decoder. The ArrowArrayWrapper batches
 	// inside `current_batches` hold pointers into SubmitResult's SHM regions,
@@ -497,6 +514,17 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	const idx_t derived = (db_threads + bd.max_threads_per_shard - 1) / bd.max_threads_per_shard;
 	gs->max_active_shards = std::max<idx_t>(1, std::min<idx_t>(derived, bd.shards.size()));
 	gs->db_threads = db_threads;
+
+	// TEMP(bench): A/B the pipeline depth without a rebuild (1 = synchronous,
+	// i.e. pre-pipeline behavior). Remove before ship. Clamp to [1, db_threads]
+	// so a fat value can't pin unbounded /dev/shm input segments per worker.
+	gs->pipeline_depth = 2;
+	if (const char *env = std::getenv("MIINT_BT2_PIPELINE_DEPTH")) {
+		const int v = std::atoi(env);
+		if (v >= 1) {
+			gs->pipeline_depth = std::min<idx_t>(static_cast<idx_t>(v), std::max<idx_t>(1, db_threads));
+		}
+	}
 	return std::move(gs);
 }
 
@@ -656,22 +684,70 @@ bool FetchShardBatch(AlignBowtie2ShardedLocalState &local, const AlignBowtie2Sha
 	return accumulated > 0;
 }
 
-void SubmitAndDecode(AlignBowtie2ShardedLocalState &local, const AlignBowtie2ShardedBindData &bd,
-                     const AlignBowtie2ShardedGlobalState &gs, const bt2_daemon::QueryBatch &qb) {
-	const auto &shard = bd.shards[local.current_shard_idx];
-	// Once every shard has been handed out, surviving workers grow their `-p` to
-	// reclaim the cores that finished workers freed (see EffectiveShardThreads).
-	// Changing nthreads re-fingerprints this shard in the daemon (one warm
-	// ~60ms index reload), but it only steps up a bounded number of times.
+// Effective bowtie2 `-p` for the next batch given how many workers are still
+// active (see EffectiveShardThreads). Recomputed per batch so a surviving worker
+// grows its `-p` to fill cores freed as the tail drains. Once every shard has
+// been handed out, a step up re-fingerprints the shard in the daemon (one warm
+// ~60ms index reload) — bounded and monotonic, see RefillInflight's drain.
+idx_t DesiredNThreads(const AlignBowtie2ShardedBindData &bd, const AlignBowtie2ShardedGlobalState &gs) {
+	// `next_shard_idx` and `active_workers` are two independent relaxed atoms, so
+	// this read may be snapshot-inconsistent (e.g. on weak-memory hardware, see
+	// all shards claimed but a not-yet-observed active_workers decrement). That's
+	// fine: the result only picks this batch's bowtie2 `-p`, never which reads
+	// are aligned (output is `-p`-invariant). A stale read at worst defers or
+	// advances a ramp step by one batch; `-p` only ratchets up after all shards
+	// are claimed, so it can't thrash.
 	const bool all_shards_claimed = gs.next_shard_idx.load(std::memory_order_relaxed) >= bd.shards.size();
-	const idx_t nthreads = EffectiveShardThreads(bd.max_threads_per_shard, gs.db_threads,
-	                                             gs.active_workers.load(std::memory_order_relaxed), all_shards_claimed);
+	return EffectiveShardThreads(bd.max_threads_per_shard, gs.db_threads,
+	                             gs.active_workers.load(std::memory_order_relaxed), all_shards_claimed);
+}
+
+// Encode one fetched batch and hand it to the daemon WITHOUT blocking, at `-p` =
+// nthreads. It joins the Session's in-flight FIFO; its response is drained later
+// by DecodeNextResponse. SubmitAsync copies the IPC bytes into the input shm
+// before returning, so the local `ipc` buffer is safe to drop here.
+void SubmitBatchAsync(AlignBowtie2ShardedLocalState &local, const AlignBowtie2ShardedBindData &bd,
+                      const bt2_daemon::QueryBatch &qb, idx_t nthreads) {
+	const auto &shard = bd.shards[local.current_shard_idx];
 	const std::string config_json = BuildAlignConfigJson(bd.named_params, shard.index_prefix, nthreads);
 	bt2_daemon::QueryArrowSchema schema_flags {bd.query_has_sequence2, bd.query_has_qual1, bd.query_has_qual2};
 	const auto ipc = bt2_daemon::BuildQueryIpc(qb, schema_flags);
-	auto submit_result = local.session->Submit("bowtie2-align", config_json, ipc.data(), ipc.size());
+	local.session->SubmitAsync("bowtie2-align", config_json, ipc.data(), ipc.size());
+}
+
+// Keep the daemon fed: top the in-flight FIFO up to `pipeline_depth`, fetching
+// and submitting batches from the current shard's stream. This is the work that
+// used to serialize behind each align (fetch + Arrow-encode the next input);
+// running it ahead lets it overlap the daemon's alignment of already-queued
+// batches. Stops at depth, at stream EOF, or when the desired `-p` changed while
+// batches are still in flight — we never keep two fingerprints outstanding
+// (Session::SubmitAsync's contract), so the caller drains the in-flight batches
+// first (via DecodeNextResponse) and the next RefillInflight resumes at the new
+// `-p` once the FIFO is empty.
+void RefillInflight(AlignBowtie2ShardedLocalState &local, const AlignBowtie2ShardedBindData &bd,
+                    const AlignBowtie2ShardedGlobalState &gs) {
+	while (local.session->inflight() < gs.pipeline_depth) {
+		const idx_t desired = DesiredNThreads(bd, gs);
+		if (local.session->inflight() > 0 && desired != local.inflight_nthreads) {
+			break; // fingerprint would change — drain the in-flight batches first
+		}
+		bt2_daemon::QueryBatch qb;
+		if (!FetchShardBatch(local, bd, qb)) {
+			break; // stream exhausted (stream_exhausted now set)
+		}
+		SubmitBatchAsync(local, bd, qb, desired);
+		local.inflight_nthreads = desired;
+	}
+}
+
+// Block for the oldest in-flight batch's response (FIFO) and decode it into
+// current_batches for the emit loop. The submit half lives in SubmitBatchAsync;
+// this is the old SubmitAndDecode's decode half, now driven by AwaitNext.
+void DecodeNextResponse(AlignBowtie2ShardedLocalState &local) {
+	auto submit_result = local.session->AwaitNext();
 	if (submit_result.outputs.empty()) {
-		throw IOException("align_bowtie2_sharded: daemon returned zero shm_outputs for shard '%s'", shard.name);
+		throw IOException("align_bowtie2_sharded: daemon returned zero shm_outputs for shard '%s'",
+		                  local.current_shard_name);
 	}
 	if (submit_result.schema_version != bt2_daemon::kAlignSchemaVersion) {
 		throw IOException("align_bowtie2_sharded: daemon returned schema_version=%u, expected %u",
@@ -749,22 +825,26 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 			return;
 		}
 
-		// 2. Current Submit is drained. Pull next batch from the shard this
-		//    thread is currently working on (if any). `FetchShardBatch`
-		//    returns false iff the stream is fully exhausted; a successful
-		//    fetch always populates at least one row (the NULL guard inside
-		//    the loop throws rather than returning an empty batch), so there
-		//    is no need for an "empty but non-exhausted" code path.
+		// 2. Current decode is drained. Keep `pipeline_depth` batches in flight so
+		//    the daemon never waits on miint (it picks up the already-queued next
+		//    command the instant it finishes the current align), then pull the
+		//    next response. RefillInflight does the fetch+encode that used to
+		//    serialize behind each align; it now overlaps the daemon's work on
+		//    the batches already queued.
 		if (local.current_shard_idx != DConstants::INVALID_INDEX) {
-			bt2_daemon::QueryBatch qb;
-			if (FetchShardBatch(local, bd, qb)) {
-				SubmitAndDecode(local, bd, gs, qb);
+			RefillInflight(local, bd, gs);
+			if (local.session->inflight() > 0) {
+				DecodeNextResponse(local);
 				continue; // loop back to drain decoded rows
 			}
-			// Shard exhausted — release for re-claim attempt. Drop this worker
-			// from the active count so a surviving worker can grow its `-p`.
+			// Nothing in flight and the stream is exhausted — this shard is done.
+			// inflight() == 0 here guarantees no batch from this shard outlives
+			// it, so the next shard never mixes fingerprints with a stale one.
+			// Release the cursor and drop from the active count so a surviving
+			// worker can grow its `-p`.
 			local.input_stream.reset();
 			local.current_shard_idx = DConstants::INVALID_INDEX;
+			local.inflight_nthreads = 0;
 			gs.active_workers.fetch_sub(1, std::memory_order_relaxed);
 		}
 
@@ -785,7 +865,11 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 		local.current_shard_idx = shard_idx;
 		// Count this worker as active for the duration of the shard (balanced by
 		// the fetch_sub on exhaustion above). Done only after a valid claim, so
-		// the failed-claim path that ends the worker never touches the count.
+		// the failed-claim path that ends the worker never touches the count. If
+		// a later RefillInflight/DecodeNextResponse throws mid-shard, the
+		// decrement is skipped — harmless, because the throw aborts the whole
+		// query and all per-worker/global state is torn down (in-flight input
+		// shm is unlinked by ~Session); no surviving worker reads a stale count.
 		gs.active_workers.fetch_add(1, std::memory_order_relaxed);
 		OpenCurrentShardStream(local, bd);
 	}
