@@ -215,9 +215,14 @@ Session::~Session() {
 
 Session::Session(Session &&other) noexcept
     : child_(std::move(other.child_)), reader_(std::move(other.reader_)), tools_(std::move(other.tools_)),
-      initialized_(other.initialized_), shut_down_(other.shut_down_), stderr_tail_(std::move(other.stderr_tail_)) {
+      initialized_(other.initialized_), shut_down_(other.shut_down_), next_batch_id_(other.next_batch_id_),
+      inflight_(std::move(other.inflight_)), stderr_tail_(std::move(other.stderr_tail_)) {
 	other.initialized_ = false;
 	other.shut_down_ = true;
+	// Carry the id counter (and the moved in-flight FIFO) so a Session moved
+	// *after* it has submitted batches keeps correlating responses correctly —
+	// don't bake in the "only moved before first Submit" assumption.
+	other.next_batch_id_ = 1;
 }
 
 Session &Session::operator=(Session &&other) noexcept {
@@ -376,6 +381,15 @@ std::string build_batch_line(const std::string &tool, const std::string &config_
 
 SubmitResult Session::Submit(const std::string &tool, const std::string &config_json, const void *input_bytes,
                              std::size_t input_size) {
+	// Synchronous = async send + immediate await of its (only) response. Keeps
+	// every existing caller byte-identical; the pipelined path reuses the same
+	// two primitives directly to keep >1 batch outstanding.
+	SubmitAsync(tool, config_json, input_bytes, input_size);
+	return AwaitNext();
+}
+
+void Session::SubmitAsync(const std::string &tool, const std::string &config_json, const void *input_bytes,
+                          std::size_t input_size) {
 	if (!initialized_) {
 		throw std::runtime_error("gpl_boundary: Session::Submit called before Initialize()");
 	}
@@ -399,9 +413,9 @@ SubmitResult Session::Submit(const std::string &tool, const std::string &config_
 		}
 	}
 
-	// 1. Allocate input shm and copy the caller's IPC bytes in. The region's
-	//    destructor unlinks the segment automatically when this function
-	//    returns (whether normal exit or exception).
+	// 1. Allocate input shm and copy the caller's IPC bytes in. On a send error
+	//    below (before enqueue) its destructor unlinks it; on success it is moved
+	//    into the in-flight FIFO and unlinked later, when AwaitNext drains it.
 	InputShmRegion in_shm = InputShmRegion::Create(input_size);
 	std::memcpy(in_shm.data(), input_bytes, input_size);
 
@@ -418,9 +432,22 @@ SubmitResult Session::Submit(const std::string &tool, const std::string &config_
 		// how it died + its stderr so the cause is actionable.
 		throw std::runtime_error(std::string(e.what()) + DaemonDeathSuffix(child_, stderr_tail_));
 	}
+	// 3. Enqueue, then consume the id. The InFlight owns the input shm so it
+	//    stays mapped+linked until AwaitNext drains this batch's response. FIFO:
+	//    push back, drain front. push_back precedes the ++ so the id↔ticket
+	//    invariant holds even if push_back throws (deque is strong-guarantee).
+	inflight_.push_back(InFlight {std::move(in_shm), batch_id});
 	++next_batch_id_;
+}
 
-	// 3. Read response.
+SubmitResult Session::AwaitNext() {
+	if (inflight_.empty()) {
+		throw std::runtime_error("gpl_boundary: Session::AwaitNext called with no outstanding batch");
+	}
+
+	// Read the response — it belongs to the oldest outstanding batch (FIFO; all
+	// outstanding batches share one fingerprint by SubmitAsync's contract, so the
+	// daemon answers them in order on this connection).
 	std::string reply;
 	if (!reader_->ReadLine(reply)) {
 		// The daemon consumed our batch line but closed stdout without replying:
@@ -437,6 +464,13 @@ SubmitResult Session::Submit(const std::string &tool, const std::string &config_
 	// every batch keeps the pipe near-empty so it can never back up. Cheap
 	// no-op when the tool is quiet.
 	PumpStderr();
+
+	// This response is the FIFO-front batch's. Consume it now: the InFlight (and
+	// its input shm) is released when `front` destructs at function exit — the
+	// daemon has finished reading the input by the time it answers.
+	InFlight front = std::move(inflight_.front());
+	inflight_.pop_front();
+	const int64_t batch_id = front.batch_id;
 
 	// 4. Parse response.
 	auto doc = make_doc(yj::yyjson_read(reply.data(), reply.size(), 0));
@@ -466,13 +500,10 @@ SubmitResult Session::Submit(const std::string &tool, const std::string &config_
 		throw std::runtime_error(msg);
 	}
 
-	// MVP correlation: at most one Submit is outstanding at a time (caller
-	// blocks for the response before issuing the next), so we simply assert
-	// the daemon echoed our batch_id rather than maintaining a map of
-	// in-flight requests. If/when miint ever pipelines multiple Submits on
-	// the same connection (gpl-boundary supports parallel batches across
-	// distinct fingerprints), the assert below has to be replaced with a
-	// pid_t→Promise dispatch. Until then: assert.
+	// FIFO correlation: for a single fingerprint the daemon answers in
+	// submission order, so its echoed batch_id must equal the front ticket's. A
+	// mismatch is either a protocol bug or a caller that broke SubmitAsync's
+	// single-fingerprint rule and let responses reorder — fail loud either way.
 	SubmitResult result;
 	yj::yyjson_val *bid = yj::yyjson_obj_get(root, "batch_id");
 	if (bid && yj::yyjson_is_int(bid)) {

@@ -8,6 +8,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstring>
+#include <dirent.h>
 #include <fcntl.h>
 #include <fstream>
 #include <stdexcept>
@@ -490,5 +491,136 @@ TEST_CASE("Session::Submit increments batch_id across consecutive calls "
 	REQUIRE(r2.batch_id == 2);
 
 	REQUIRE(session.daemon_pid() == pid_before);
+	REQUIRE_NOTHROW(session.Shutdown());
+}
+
+// =============================================================================
+// Cycle 4.3 — Async double-buffered submit (SubmitAsync / AwaitNext)
+// =============================================================================
+//
+// The pipelined path keeps >1 batch outstanding so the daemon stays fed.
+// SubmitAsync sends without blocking; AwaitNext drains responses in FIFO order.
+// The input shm of an outstanding batch must stay alive until ITS AwaitNext
+// (the daemon mmaps it lazily when it dequeues the command) — freeing it at
+// SubmitAsync time (as the synchronous Submit's stack-local did) would unlink a
+// segment the daemon hasn't read yet.
+
+namespace {
+// Count POSIX shm input segments this process currently owns
+// (`/dev/shm/miint-input-<pid>-*`). Used to assert the deferred-unlink lifetime.
+int count_input_shm_segments() {
+	const std::string prefix = "miint-input-" + std::to_string(static_cast<unsigned long>(::getpid())) + "-";
+	DIR *d = ::opendir("/dev/shm");
+	if (!d) {
+		return -1;
+	}
+	int n = 0;
+	while (dirent *e = ::readdir(d)) {
+		if (std::strncmp(e->d_name, prefix.c_str(), prefix.size()) == 0) {
+			++n;
+		}
+	}
+	::closedir(d);
+	return n;
+}
+} // namespace
+
+TEST_CASE("Session::SubmitAsync/AwaitNext return responses in FIFO order", "[gpl-boundary][session]") {
+	// Two outstanding batches, same fingerprint. The serial shim reads batch1,
+	// replies, reads batch2, replies — so responses arrive in submit order; the
+	// point under test is that AwaitNext maps them back positionally (FIFO) with
+	// the right batch_id and payload.
+	const std::string out1 = make_test_segment_name("async-1");
+	const std::string out2 = make_test_segment_name("async-2");
+	auto stub1 = fake_daemon_segment(out1, "first payload");
+	auto stub2 = fake_daemon_segment(out2, "second payload longer");
+
+	const std::string resp1 = R"({"success":true,"schema_version":2,"batch_id":1,"shm_outputs":[{"name":")" + out1 +
+	                          R"(","label":"o","size":)" + std::to_string(stub1.size) + R"(}]})";
+	const std::string resp2 = R"({"success":true,"schema_version":2,"batch_id":2,"shm_outputs":[{"name":")" + out2 +
+	                          R"(","label":"o","size":)" + std::to_string(stub2.size) + R"(}]})";
+	std::string script;
+	script += "read -r init_line\n";
+	script += R"(echo '{"success":true,"protocol_version":3,"tools":[{"name":"bowtie2-align","schema_version":2}]}')";
+	script += "\n";
+	script += "read -r batch1\n echo '" + resp1 + "'\n";
+	script += "read -r batch2\n echo '" + resp2 + "'\n";
+	script += "read -r shutdown_line\n exit 0\n";
+
+	auto child = spawn_shim(script);
+	Session session(std::move(child));
+	REQUIRE_NOTHROW(session.Initialize());
+
+	const std::string in1 = "INPUT-ONE";
+	const std::string in2 = "INPUT-TWO";
+	REQUIRE_NOTHROW(session.SubmitAsync("bowtie2-align", "{}", in1.data(), in1.size()));
+	REQUIRE_NOTHROW(session.SubmitAsync("bowtie2-align", "{}", in2.data(), in2.size()));
+	REQUIRE(session.inflight() == 2);
+
+	auto r1 = session.AwaitNext();
+	REQUIRE(r1.batch_id == 1);
+	REQUIRE(r1.outputs.size() == 1);
+	REQUIRE(std::memcmp(r1.outputs[0].bytes(), "first payload", stub1.size) == 0);
+	REQUIRE(session.inflight() == 1);
+
+	auto r2 = session.AwaitNext();
+	REQUIRE(r2.batch_id == 2);
+	REQUIRE(std::memcmp(r2.outputs[0].bytes(), "second payload longer", stub2.size) == 0);
+	REQUIRE(session.inflight() == 0);
+
+	REQUIRE_NOTHROW(session.Shutdown());
+}
+
+TEST_CASE("Session::SubmitAsync keeps input shm alive until AwaitNext", "[gpl-boundary][session]") {
+	// The deferred-unlink correctness property: an outstanding batch's input
+	// segment must persist until its response is consumed.
+	const std::string out1 = make_test_segment_name("life-1");
+	const std::string out2 = make_test_segment_name("life-2");
+	auto stub1 = fake_daemon_segment(out1, "p1");
+	auto stub2 = fake_daemon_segment(out2, "p2");
+	const std::string resp1 = R"({"success":true,"schema_version":2,"batch_id":1,"shm_outputs":[{"name":")" + out1 +
+	                          R"(","label":"o","size":)" + std::to_string(stub1.size) + R"(}]})";
+	const std::string resp2 = R"({"success":true,"schema_version":2,"batch_id":2,"shm_outputs":[{"name":")" + out2 +
+	                          R"(","label":"o","size":)" + std::to_string(stub2.size) + R"(}]})";
+	std::string script;
+	script += "read -r init_line\n";
+	script += R"(echo '{"success":true,"protocol_version":3,"tools":[{"name":"bowtie2-align","schema_version":2}]}')";
+	script += "\n";
+	script += "read -r batch1\n echo '" + resp1 + "'\n";
+	script += "read -r batch2\n echo '" + resp2 + "'\n";
+	script += "read -r shutdown_line\n exit 0\n";
+
+	auto child = spawn_shim(script);
+	Session session(std::move(child));
+	REQUIRE_NOTHROW(session.Initialize());
+
+	const int before = count_input_shm_segments();
+	REQUIRE(before >= 0); // /dev/shm readable
+
+	const std::string in1 = "AAA";
+	const std::string in2 = "BBB";
+	session.SubmitAsync("bowtie2-align", "{}", in1.data(), in1.size());
+	session.SubmitAsync("bowtie2-align", "{}", in2.data(), in2.size());
+	// Both inputs must still be linked — the daemon may not have read them yet.
+	REQUIRE(count_input_shm_segments() == before + 2);
+
+	session.AwaitNext();
+	REQUIRE(count_input_shm_segments() == before + 1); // first input freed
+	session.AwaitNext();
+	REQUIRE(count_input_shm_segments() == before); // both freed
+
+	REQUIRE_NOTHROW(session.Shutdown());
+}
+
+TEST_CASE("Session::AwaitNext with no outstanding batch throws", "[gpl-boundary][session]") {
+	const std::string script =
+	    R"(read -r init_line
+echo '{"success":true,"protocol_version":3,"tools":[{"name":"bowtie2-align","schema_version":2}]}'
+read -r shutdown_line
+exit 0)";
+	auto child = spawn_shim(script);
+	Session session(std::move(child));
+	REQUIRE_NOTHROW(session.Initialize());
+	REQUIRE_THROWS(session.AwaitNext());
 	REQUIRE_NOTHROW(session.Shutdown());
 }

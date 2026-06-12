@@ -4,6 +4,7 @@
 #include "gpl_boundary/shm.hpp"
 
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
@@ -117,6 +118,44 @@ public:
 	SubmitResult Submit(const std::string &tool, const std::string &config_json, const void *input_bytes,
 	                    std::size_t input_size);
 
+	/// Send one batch WITHOUT blocking for its response (the async half of
+	/// `Submit`). The input shm region is held alive in an internal in-flight
+	/// FIFO until the matching `AwaitNext()` consumes the response — so a caller
+	/// can keep several batches outstanding and let the daemon stay continuously
+	/// fed (it picks up the next already-queued command the instant it finishes
+	/// the current one; the daemon worker loop has no flow-control handshake).
+	///
+	/// CONTRACT: every batch outstanding at once MUST share a single daemon
+	/// fingerprint (same `tool` + same `config_json`). gpl-boundary routes
+	/// distinct fingerprints to distinct workers that can complete out of order
+	/// on this one connection, and `AwaitNext` matches responses POSITIONALLY
+	/// (FIFO), not by `batch_id`. A caller that changes fingerprint (e.g. a new
+	/// shard index, or a new bowtie2 `-p`) must `AwaitNext` all outstanding
+	/// batches to empty before submitting at the new fingerprint.
+	///
+	/// Single-threaded contract: like `Submit`, all calls on one `Session` come
+	/// from that session's owning thread. No internal locking.
+	///
+	/// Validation (Initialize ran, input_size > 0, config_json is a JSON object)
+	/// is identical to `Submit` and happens here, before any bytes hit the
+	/// daemon. Throws on validation failure or a write error (in which case the
+	/// batch is NOT enqueued and `batch_id` is not consumed).
+	void SubmitAsync(const std::string &tool, const std::string &config_json, const void *input_bytes,
+	                 std::size_t input_size);
+
+	/// Block for the oldest outstanding batch's response (FIFO order) and return
+	/// it, freeing that batch's input shm. Throws if no batch is outstanding, or
+	/// on daemon death / `{success:false}` / malformed reply (same diagnostics as
+	/// `Submit`). The daemon must echo the front batch's `batch_id` — a mismatch
+	/// is a protocol violation and throws.
+	SubmitResult AwaitNext();
+
+	/// Number of batches submitted via `SubmitAsync` but not yet drained by
+	/// `AwaitNext`. `Submit` always leaves this at 0 on return.
+	std::size_t inflight() const {
+		return inflight_.size();
+	}
+
 	/// True iff Initialize() has completed successfully.
 	bool initialized() const {
 		return initialized_;
@@ -154,12 +193,25 @@ private:
 	/// wedge a verbose daemon on a blocked write) and again on the failure paths.
 	void PumpStderr();
 
+	/// One batch sent to the daemon but not yet answered. Owns the input shm
+	/// region so it stays mapped+linked until the daemon's response arrives (the
+	/// daemon mmaps it lazily when it dequeues the command). `batch_id` is the id
+	/// we stamped, checked against the daemon's echo for FIFO correctness.
+	struct InFlight {
+		InputShmRegion input;
+		int64_t batch_id = 0;
+	};
+
 	ChildProcess child_;
 	std::unique_ptr<LineReader> reader_;
 	std::vector<ToolEntry> tools_;
 	bool initialized_ = false;
 	bool shut_down_ = false;
 	int64_t next_batch_id_ = 1;
+
+	/// FIFO of batches awaiting a response. Front is the oldest (next to be
+	/// returned by `AwaitNext`). All entries share one fingerprint by contract.
+	std::deque<InFlight> inflight_;
 
 	/// Rolling tail of the daemon's stderr, accumulated across the session.
 	/// Drained once per batch by `Submit` so a chatty tool (e.g. bowtie2 with
