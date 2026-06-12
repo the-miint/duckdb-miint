@@ -1,0 +1,41 @@
+# name: test/sql/read_only_load.test
+# description: miint must load into a read-only database; macros register in the system catalog, not the read-only default catalog
+# group: [sql]
+
+require miint
+
+# Create a persistent database file we can later reopen read-only.
+load __TEST_DIR__/miint_readonly.db
+
+statement ok
+CREATE TABLE t(i INTEGER);
+
+statement ok
+INSERT INTO t VALUES (1), (2), (3);
+
+# Reopen the same file read-only. This re-loads miint into a database that is
+# attached in read-only mode. Macro registration must target the (always
+# writable) system catalog instead of the read-only default catalog; otherwise
+# extension load aborts with:
+#   INTERNAL Error: Failed to register macro 'miint_warnings': ...
+#   Cannot execute statement of type "CREATE" on database ... attached in read-only mode!
+load __TEST_DIR__/miint_readonly.db readonly
+
+# The committed data is still readable.
+query I
+SELECT count(*) FROM t;
+----
+3
+
+# A table macro registered by the extension resolves and runs even though the
+# default catalog is read-only.
+query I
+SELECT count(*) FROM miint_warnings();
+----
+0
+
+# A scalar macro is likewise callable.
+query I
+SELECT cardinality(parse_gff_attributes('a=1;b=2'));
+----
+2
