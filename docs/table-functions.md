@@ -2845,7 +2845,7 @@ SELECT flag, count(*) FROM detect_chimera_uchime('queries', db:='refs') GROUP BY
 
 **Algorithm:**
 1. For each query, partition into 4 chunks and search the reference DB using an 8-mer index for candidate parents (up to 16)
-2. Align query to each candidate using WFA2 global alignment
+2. Align query to each candidate using vsearch's SIMD-optimized Needleman-Wunsch global alignment
 3. Select the 2 best parents via smoothed identity (32bp sliding window)
 4. Build a 3-way star alignment and classify each column (match-A, match-B, no-vote, abstain)
 5. Sweep all breakpoints left-to-right, computing h-score at each position
