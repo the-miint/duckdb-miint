@@ -1,0 +1,93 @@
+# name: test/sql/rype_extract_bigint.test
+# description: rype_extract_* mirror the id_column type (BIGINT) on read_id, matching align_minimap2.
+# group: [sql]
+
+#   Companion to rype_classify_bigint.test — both extraction functions
+#   (rype_extract_minimizer_set, rype_extract_strand_minimizers) share the same
+#   type-blind id path and must return read_id in the input column's storage
+#   type. Adversarial int64 values prove the round-trip is exact.
+
+require miint
+
+statement ok
+CREATE TABLE seq_bigint (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO seq_bigint VALUES
+    (9007199254740993, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    (9223372036854775807, 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA');
+
+# --- rype_extract_minimizer_set ---
+query T
+SELECT DISTINCT typeof(read_id)
+FROM rype_extract_minimizer_set('seq_bigint', 32, 10);
+----
+BIGINT
+
+query I
+SELECT read_id
+FROM rype_extract_minimizer_set('seq_bigint', 32, 10)
+ORDER BY read_id;
+----
+9007199254740993
+9223372036854775807
+
+# --- rype_extract_strand_minimizers ---
+query T
+SELECT DISTINCT typeof(read_id)
+FROM rype_extract_strand_minimizers('seq_bigint', 32, 10);
+----
+BIGINT
+
+query I
+SELECT read_id
+FROM rype_extract_strand_minimizers('seq_bigint', 32, 10)
+ORDER BY read_id;
+----
+9007199254740993
+9223372036854775807
+
+# --- Disallowed id types are rejected at bind ---
+statement ok
+CREATE TABLE seq_hugeint (read_id HUGEINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO seq_hugeint VALUES (1, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT');
+
+statement error
+SELECT * FROM rype_extract_minimizer_set('seq_hugeint', 32, 10);
+----
+must be VARCHAR, BIGINT, or UUID
+
+statement error
+SELECT * FROM rype_extract_strand_minimizers('seq_hugeint', 32, 10);
+----
+must be VARCHAR, BIGINT, or UUID
+
+# --- NULL ids emit SQL NULL instead of aborting the query (shared ingress maps a
+#     NULL id to the empty carrier, which the codec resolves to NULL). ---
+statement ok
+CREATE TABLE seq_bigint_null (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO seq_bigint_null VALUES
+    (NULL, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    (7, 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA');
+
+query II
+SELECT
+    COUNT(*) FILTER (WHERE read_id IS NULL),
+    COUNT(*) FILTER (WHERE read_id = 7)
+FROM rype_extract_minimizer_set('seq_bigint_null', 32, 10);
+----
+1	1
+
+statement ok
+DROP TABLE seq_bigint_null;
+
+# --- Cleanup ---
+statement ok
+DROP TABLE seq_bigint;
+
+statement ok
+DROP TABLE seq_hugeint;

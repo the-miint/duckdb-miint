@@ -27,7 +27,8 @@ public:
 		std::string id_column;
 		double threshold;
 		std::string negative_index_path;
-		bool has_sequence2 = false; // Cached from ValidateSequenceTable
+		bool has_sequence2 = false;                                // Cached from ValidateSequenceTable
+		LogicalType id_type = LogicalType(LogicalTypeId::INVALID); // Storage type of id_column; drives read_id output
 
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
