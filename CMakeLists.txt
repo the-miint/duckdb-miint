@@ -432,7 +432,8 @@ if(WIN32)
         htslib_build
         SOURCE_DIR ${HTSLIB_SRC}
         CONFIGURE_COMMAND ""
-        BUILD_COMMAND make -C ${HTSLIB_SRC} clean libhts.a
+        BUILD_COMMAND make -C ${HTSLIB_SRC} clean
+            COMMAND make -C ${HTSLIB_SRC} libhts.a
         INSTALL_COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib
             COMMAND ${CMAKE_COMMAND} -E copy ${HTSLIB_SRC}/libhts.a ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib/libhts.a
             COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/htslib/include/htslib
@@ -532,7 +533,8 @@ ExternalProject_Add(
     minimap2_build
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2
     CONFIGURE_COMMAND ""
-    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2 clean libminimap2.a "CFLAGS=-g -Wall -O2 -Wc++-compat ${MINIMAP2_FPIC} ${MINIMAP2_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}" "CPPFLAGS=-DHAVE_KALLOC ${MINIMAP2_ALLOC_FLAGS}" ${MINIMAP2_ARCH_FLAGS}
+    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2 clean
+        COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2 libminimap2.a "CFLAGS=-g -Wall -O2 -Wc++-compat ${MINIMAP2_FPIC} ${MINIMAP2_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}" "CPPFLAGS=-DHAVE_KALLOC ${MINIMAP2_ALLOC_FLAGS}" ${MINIMAP2_ARCH_FLAGS}
     INSTALL_COMMAND ${CMAKE_COMMAND} -E copy
         ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2/libminimap2.a
         ${CMAKE_CURRENT_BINARY_DIR}/minimap2/lib/libminimap2.a
@@ -566,7 +568,8 @@ ExternalProject_Add(
     wfa2_build
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib
     CONFIGURE_COMMAND ""
-    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib clean all
+    BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib clean
+        COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib all
         "BUILD_TOOLS=0" "BUILD_EXAMPLES=0" "BUILD_WFA_PARALLEL=0"
         "CC_FLAGS=-Wall -O2 ${WFA2_FPIC} ${WFA2_ARCH_CFLAGS}"
     INSTALL_COMMAND ${CMAKE_COMMAND} -E copy
@@ -881,7 +884,8 @@ if(MIINT_ENABLE_MAFFT)
         mafft_build
         SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core
         CONFIGURE_COMMAND ""
-        BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core clean libmafft_parttree.a
+        BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core clean
+            COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core libmafft_parttree.a
             "CC=${CMAKE_C_COMPILER}"
             "CFLAGS=-O3 ${MAFFT_FPIC} ${MAFFT_ARCH_CFLAGS}"
             "ENABLE_MULTITHREAD=-Denablemultithread"
