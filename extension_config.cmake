@@ -1,13 +1,11 @@
 # This file is included by DuckDB's build system. It specifies which extension to load
 
-# MinGW's ld treats duplicate COMDAT symbols (C++ constexpr/inline from DuckDB headers)
-# as errors when the extension's static lib and DuckDB's static lib are linked into the
-# same binary. This is set here (not in the extension's CMakeLists.txt) because this file
-# runs in DuckDB's CMake scope before libduckdb.dll/duckdb.exe targets are configured.
-if(MINGW)
-    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--allow-multiple-definition")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--allow-multiple-definition")
-endif()
+# The rype + sylph duplicate-Rust-std issue used to require platform-specific
+# linker workarounds here (-Wl,--allow-multiple-definition on GNU ld,
+# -Wl,-ld_classic -Wl,-multiply_defined,suppress on Apple). Both crates are
+# now bundled through the `miint_rust_glue` umbrella staticlib (see
+# ext/miint-rust-glue/), which gives them a single shared std and removes
+# the duplicate symbols at their source — no link flag needed.
 
 # Extensions that miint depends on (must load before miint)
 # Load order matters for LoadAllExtensions: macros reference functions from

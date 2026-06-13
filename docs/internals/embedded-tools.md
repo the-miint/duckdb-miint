@@ -19,8 +19,9 @@ Four embedding categories:
 | `MIINT_ENABLE_SORTMERNA` | ON | Emscripten (RocksDB vcpkg port not built for wasm32), Windows/MinGW (cmph assumes POSIX `<sys/time.h>`; MSVC-on-Windows would work if anyone wires it up) |
 | `MIINT_ENABLE_GPL_BOUNDARY` | ON | Emscripten, Windows (subsystem uses POSIX shm + fork/exec) |
 | `MIINT_ENABLE_UNIFRAC` | ON | Windows (libssu's inmem build assumes POSIX; first-class on Emscripten via the WASM target) |
+| `MIINT_ENABLE_SYLPH`   | ON | Emscripten (WASM-incompatible), Windows/MinGW (POSIX-only sketch indexing) |
 
-Corresponding preprocessor macros: `MIINT_HAS_HDF5`, `MIINT_HAS_MAFFT`, `MIINT_HAS_ABPOA`, `MIINT_HAS_VSEARCH`, `MIINT_HAS_SORTMERNA`, `MIINT_HAS_GPL_BOUNDARY`, `MIINT_HAS_UNIFRAC`. Also `MIINT_ASPERA_SUPPORTED=0` on Windows/WASM (POSIX-only runtime).
+Corresponding preprocessor macros: `MIINT_HAS_HDF5`, `MIINT_HAS_MAFFT`, `MIINT_HAS_ABPOA`, `MIINT_HAS_VSEARCH`, `MIINT_HAS_SORTMERNA`, `MIINT_HAS_GPL_BOUNDARY`, `MIINT_HAS_UNIFRAC`, `MIINT_HAS_SYLPH`. Also `MIINT_ASPERA_SUPPORTED=0` on Windows/WASM (POSIX-only runtime).
 
 Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is linked (not on musl/macOS/Windows).
 
@@ -126,18 +127,42 @@ Two coupled submodules implementing the UniFrac distance + Faith's PD + PERMANOV
 - **`skbb_pcoa_fsvd_fp32` output layout:** the API header comment says "Matrix of size (n_eighs × n_dims)", but the implementation in `principal_coordinate_analysis.cpp:574-578` writes `samples + row*n_eighs` with `row` iterating over **samples** — so the buffer is `(n_samples × n_dims)` sample-major. Index as `samples[sample_idx * n_dims + axis]`. The header comment is misleading; the implementation is canonical.
 - **Subsampling drops samples:** when `subsample_depth > 0`, libssu drops samples whose total counts fall below the depth. `mat->n_samples` and `mat->sample_ids` reflect the **post-subsample** view; always trust them over the input feature-table's size. `UnifracDistanceMatrix::sample_ids()` exposes the post-subsample list as a `std::vector<std::string>` for downstream consumers.
 
-### rype (Rust, Arrow FFI)
-- **Location:** `ext/rype/` (git submodule; version captured via `git describe` → `RYPE_GIT_VERSION`)
-- **Purpose:** Rust implementations (e.g., classify, extract, log-ratio) exposed via Arrow C Data Interface for zero-copy FFI
-- **Build:** `cargo rustc --release --features arrow-ffi --lib --crate-type=staticlib`; produces `librype.a`
-- **Compile definition:** `RYPE_ARROW`
+### Rust crates via the `miint_rust_glue` umbrella
+
+Two Rust crates — rype and sylph — are statically linked into the extension. They are bundled through a thin umbrella crate at `ext/miint-rust-glue/` that produces a single `libmiint_rust_glue.a`.
+
+**Why an umbrella, not two independent staticlibs?** Each independent Rust staticlib embeds its own copy of the Rust standard library (`rust_eh_personality`, `std::panicking::EMPTY_PANIC`, ...). Linking two of them into the same binary trips duplicate-symbol errors on every supported linker. Previous workarounds (`-Wl,--allow-multiple-definition` on GNU ld, `-Wl,-ld_classic -Wl,-multiply_defined,suppress` on Apple) lived in `extension_config.cmake` until macOS 26 / Xcode 17's ld-prime stopped honoring `-multiply_defined,suppress` even via `-ld_classic`, breaking the duckdb shell, `libduckdb.dylib`, `plan_serializer`, and `unittest` link targets. The umbrella is the canonical fix per the Rust Reference "Linkage" chapter — a single staticlib emitted from one cargo invocation has one shared std and one set of symbols. Same pattern Mozilla has used in Firefox's `rul` super-crate since 2015.
+
+- **Location:** `ext/miint-rust-glue/` (in-tree Cargo crate; `Cargo.toml` lists `rype` and `sylph` as path dependencies)
+- **Build:** `ExternalProject_Add(miint_rust_glue_build)` drives `cargo build --release`; produces `libmiint_rust_glue.a`
+- **Cargo features:**
+  - `with-sylph` — on when `MIINT_ENABLE_SYLPH=ON` (default). Off on Emscripten and Windows/MinGW (sylph leans on POSIX APIs in its sketch indexer).
+  - `rype-fastx` — enables rype's needletail-based FASTX reader. Off on Emscripten and Windows/MinGW because needletail's `cdylib` crate type triggers linker errors (standalone-linking failures on WASM; unresolved `___chkstk_ms` on MSVC).
+  - `arrow-ffi` — always on for both crates; the extension consumes both via the Arrow C Data Interface for zero-copy FFI.
+- **CMake exposure:** the umbrella is wired up as two `IMPORTED STATIC` targets — `rype` and `sylph` — both pointing at the same `libmiint_rust_glue.a`. Existing call sites like `target_link_libraries(... rype)` and `target_link_libraries(... sylph)` work unchanged; the linker dedupes the duplicate archive on the link line.
 - **Cross-compilation gotchas:**
-  - Cargo `--target` flag selected per platform; `rustup target add` called at configure time
-  - **Emscripten:** `--target wasm32-unknown-emscripten` + `RUSTFLAGS=-C relocation-model=pic` (default wasm32 is static; side modules need PIC)
-  - **Windows/MinGW:** `--target x86_64-pc-windows-gnu` (NOT the MSVC default) so object files are compatible with MinGW `ld.exe`
-  - **macOS cross:** explicit `x86_64-apple-darwin` / `aarch64-apple-darwin` targets
-- **Feature gating:** on Emscripten and Windows, `--no-default-features --features arrow-ffi` disables the `fastx` (needletail) feature whose `cdylib` crate type triggers linker errors (standalone linking on WASM; unresolved `___chkstk_ms` on MSVC).
-- **Forcing a rebuild:** ExternalProject caches `rype_build`. Touching source files doesn't invalidate — you must touch the configure stamp: `touch build/release/extension/miint/rype_build-prefix/src/rype_build-stamp/rype_build-configure`
+  - Cargo `--target` flag selected per platform; `rustup target add` called at configure time.
+  - **Emscripten:** `--target wasm32-unknown-emscripten` + `RUSTFLAGS=-C relocation-model=pic` (default wasm32 is static; DuckDB WASM side modules need PIC).
+  - **Windows/MinGW:** `--target x86_64-pc-windows-gnu` (NOT the MSVC default) so object files are compatible with MinGW `ld.exe`.
+  - **macOS cross:** explicit `x86_64-apple-darwin` / `aarch64-apple-darwin` targets.
+- **Forcing a rebuild:** ExternalProject caches `miint_rust_glue_build` aggressively. Touching source files in `ext/rype/` or `ext/sylph/` does not invalidate it. To force a rebuild: `touch build/release/extension/miint/miint_rust_glue_build-prefix/src/miint_rust_glue_build-stamp/miint_rust_glue_build-configure`.
+
+#### rype subsystem
+
+- **Location:** `ext/rype/` (git submodule on `the-miint/rype`; version captured via `git describe` → `RYPE_GIT_VERSION`)
+- **Purpose:** Rust implementations of classify, extract, and log-ratio operations, exposed via Arrow C Data Interface
+- **Compile definition:** `RYPE_ARROW`
+- **Reported as:** `rype` row in `miint_versions()`
+
+#### sylph subsystem
+
+- **Location:** `ext/sylph/` (git submodule on `the-miint/sylph`, branch `v0.9.0-miint`; version captured via `git describe` → `SYLPH_GIT_VERSION`)
+- **Purpose:** FracMinHash sketch-based relative-abundance profiling of microbial communities, exposed as the `sylph_profile` table function
+- **Gated by:** `MIINT_ENABLE_SYLPH` (auto-off on Emscripten + Windows/MinGW per the POSIX-API requirement above). `MIINT_HAS_SYLPH` compile define when on; `SYLPH_GIT_VERSION` carries the configure-time `git describe` string.
+- **Reported as:** `sylph` row in `miint_versions()` (only emitted when `MIINT_HAS_SYLPH` is defined)
+- **C++ wrappers:**
+  - `src/include/SylphDatabase.hpp` / `src/SylphDatabase.cpp` — `SylphDatabaseHandle`, a RAII wrapper around the C FFI `SylphDatabase*` from `ext/sylph/sylph.h`. Non-copyable, non-movable; owned by the `sylph_profile` GlobalState.
+  - `src/include/sylph_profile.hpp` / `src/sylph_profile.cpp` — `SylphProfileTableFunction`, the DuckDB table-function binding. The `.syldb` is loaded once into GlobalState and shared read-only across worker threads; sylph treats the loaded database as immutable so no read-side mutex is required.
 
 ## 2. Header-Only
 

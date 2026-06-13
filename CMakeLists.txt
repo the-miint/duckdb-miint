@@ -62,6 +62,7 @@ option(MIINT_ENABLE_HDF5 "Build with HDF5/BIOM support" ON)
 option(MIINT_ENABLE_MAFFT "Build with MAFFT multiple sequence alignment support" ON)
 option(MIINT_ENABLE_ABPOA "Build with abPOA partial-order alignment support" ON)
 option(MIINT_ENABLE_SORTMERNA "Build with SortMeRNA rRNA alignment support" ON)
+option(MIINT_ENABLE_SYLPH "Build with sylph FracMinHash relative-abundance profiling" ON)
 option(MIINT_ENABLE_GPL_BOUNDARY "Build with gpl-boundary subsystem (process pipes + Arrow IPC over POSIX shm)" ON)
 option(MIINT_ENABLE_UNIFRAC "Build with UniFrac (PCoA / PERMANOVA / Faith PD) support" ON)
 
@@ -160,18 +161,20 @@ endif()
 if(EMSCRIPTEN)
     set(MIINT_ENABLE_HDF5 OFF)
     set(MIINT_ENABLE_SORTMERNA OFF)
+    set(MIINT_ENABLE_SYLPH OFF)
     set(MIINT_ENABLE_GPL_BOUNDARY OFF)
-    message(STATUS "Emscripten detected: disabling HDF5, SortMeRNA, and gpl-boundary (WASM-incompatible)")
+    message(STATUS "Emscripten detected: disabling HDF5, SortMeRNA, sylph, and gpl-boundary (WASM-incompatible)")
 elseif(WIN32)
     set(MIINT_ENABLE_MAFFT OFF)
     set(MIINT_ENABLE_ABPOA OFF)
+    set(MIINT_ENABLE_SYLPH OFF)
     set(MIINT_ENABLE_GPL_BOUNDARY OFF)
     set(MIINT_ENABLE_UNIFRAC OFF)
     if(MINGW)
         set(MIINT_ENABLE_SORTMERNA OFF)
-        message(STATUS "MinGW detected: disabling MAFFT, SortMeRNA, gpl-boundary, and UniFrac (cmph + gpl-boundary rely on POSIX APIs; libssu inmem assumes POSIX)")
+        message(STATUS "MinGW detected: disabling MAFFT, SortMeRNA, sylph, gpl-boundary, and UniFrac (cmph + gpl-boundary rely on POSIX APIs; libssu inmem assumes POSIX)")
     else()
-        message(STATUS "Windows detected: disabling MAFFT, gpl-boundary, and UniFrac (require POSIX APIs)")
+        message(STATUS "Windows detected: disabling MAFFT, sylph, gpl-boundary, and UniFrac (require POSIX APIs)")
     endif()
 endif()
 
@@ -299,7 +302,14 @@ if(NOT SKBB_GIT_VERSION)
     set(SKBB_GIT_VERSION "unknown")
 endif()
 
-message(STATUS "Submodule versions: minimap2=${MINIMAP2_GIT_VERSION} WFA2=${WFA2_GIT_VERSION} rype=${RYPE_GIT_VERSION} vsearch=${VSEARCH_GIT_VERSION} mafft=${MAFFT_GIT_VERSION} abpoa=${ABPOA_GIT_VERSION} unifrac=${UNIFRAC_GIT_VERSION} skbb=${SKBB_GIT_VERSION}")
+execute_process(COMMAND git describe --tags --dirty --always
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ext/sylph
+    OUTPUT_VARIABLE SYLPH_GIT_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT SYLPH_GIT_VERSION)
+    set(SYLPH_GIT_VERSION "unknown")
+endif()
+
+message(STATUS "Submodule versions: minimap2=${MINIMAP2_GIT_VERSION} WFA2=${WFA2_GIT_VERSION} rype=${RYPE_GIT_VERSION} vsearch=${VSEARCH_GIT_VERSION} mafft=${MAFFT_GIT_VERSION} abpoa=${ABPOA_GIT_VERSION} sylph=${SYLPH_GIT_VERSION} unifrac=${UNIFRAC_GIT_VERSION} skbb=${SKBB_GIT_VERSION}")
 
 # Build htslib from release tarball
 # Configure with zstd support if available (htslib autodetects via pkg-config)
@@ -864,6 +874,117 @@ if(MIINT_ENABLE_SORTMERNA)
     add_dependencies(sortmerna sortmerna_bundle)
 endif()
 
+# rype + sylph are independent Rust crates; each emits a staticlib that
+# statically embeds its own copy of the Rust std runtime (rust_eh_personality,
+# EMPTY_PANIC, ...). Linking both as separate .a archives produces
+# duplicate-symbol errors on every supported linker (GNU ld, Apple ld-prime,
+# Mach-O classic, lld) — see the Rust Reference (Linkage chapter).
+#
+# Fix: an umbrella `miint_rust_glue` crate (ext/miint-rust-glue/) lists both
+# as path dependencies, cargo compiles them through a shared std, and the
+# resulting libmiint_rust_glue.a contains a single deduplicated copy of std
+# plus the #[no_mangle] C ABI surface from both crates. This is the canonical
+# pattern (Mozilla's "rul" super-crate for Firefox/Gecko).
+find_program(CARGO cargo REQUIRED)
+message(STATUS "Found cargo: ${CARGO}")
+
+set(GLUE_LIB_NAME "libmiint_rust_glue.a")
+set(GLUE_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/miint_rust_glue_target)
+
+# Cross-compile flags mirror the original per-crate logic.
+set(GLUE_CARGO_TARGET_FLAG "")
+set(GLUE_LIB_SUBDIR "release")
+set(GLUE_CONFIGURE_CMD "")
+if(EMSCRIPTEN)
+    find_program(RUSTUP rustup)
+    set(GLUE_CARGO_TARGET_FLAG "--target" "wasm32-unknown-emscripten")
+    set(GLUE_LIB_SUBDIR "wasm32-unknown-emscripten/release")
+    if(RUSTUP)
+        set(GLUE_CONFIGURE_CMD ${RUSTUP} target add wasm32-unknown-emscripten)
+    endif()
+    message(STATUS "Rust glue cross-compiling for wasm32-unknown-emscripten")
+elseif(WIN32)
+    find_program(RUSTUP rustup)
+    set(GLUE_CARGO_TARGET_FLAG "--target" "x86_64-pc-windows-gnu")
+    set(GLUE_LIB_SUBDIR "x86_64-pc-windows-gnu/release")
+    if(RUSTUP)
+        set(GLUE_CONFIGURE_CMD ${RUSTUP} target add x86_64-pc-windows-gnu)
+    endif()
+    message(STATUS "Rust glue targeting x86_64-pc-windows-gnu for MinGW compatibility")
+elseif(APPLE AND OSX_BUILD_ARCH)
+    find_program(RUSTUP rustup)
+    if(OSX_BUILD_ARCH STREQUAL "x86_64")
+        set(GLUE_CARGO_TARGET_FLAG "--target" "x86_64-apple-darwin")
+        set(GLUE_LIB_SUBDIR "x86_64-apple-darwin/release")
+        if(RUSTUP)
+            set(GLUE_CONFIGURE_CMD ${RUSTUP} target add x86_64-apple-darwin)
+        endif()
+    elseif(OSX_BUILD_ARCH STREQUAL "arm64")
+        set(GLUE_CARGO_TARGET_FLAG "--target" "aarch64-apple-darwin")
+        set(GLUE_LIB_SUBDIR "aarch64-apple-darwin/release")
+        if(RUSTUP)
+            set(GLUE_CONFIGURE_CMD ${RUSTUP} target add aarch64-apple-darwin)
+        endif()
+    endif()
+endif()
+
+# Feature selection: rype's fastx (needletail) is off on WASM and Windows
+# (matches the original rype_build wiring). sylph is off on WASM/Windows
+# (matches MIINT_ENABLE_SYLPH gating).
+set(GLUE_FEATURES "")
+if(NOT EMSCRIPTEN AND NOT WIN32)
+    list(APPEND GLUE_FEATURES "rype-fastx")
+endif()
+if(MIINT_ENABLE_SYLPH)
+    list(APPEND GLUE_FEATURES "with-sylph")
+endif()
+string(REPLACE ";" "," GLUE_FEATURES_CSV "${GLUE_FEATURES}")
+if(GLUE_FEATURES_CSV)
+    set(GLUE_FEATURES_ARGS "--features" "${GLUE_FEATURES_CSV}")
+else()
+    set(GLUE_FEATURES_ARGS "")
+endif()
+
+# WASM side modules (-sSIDE_MODULE=2) need PIC across the board.
+if(EMSCRIPTEN)
+    set(GLUE_BUILD_ENV ${CMAKE_COMMAND} -E env "RUSTFLAGS=-C relocation-model=pic")
+else()
+    set(GLUE_BUILD_ENV)
+endif()
+
+set(GLUE_LIB_PATH ${GLUE_TARGET_DIR}/${GLUE_LIB_SUBDIR}/${GLUE_LIB_NAME})
+
+ExternalProject_Add(
+    miint_rust_glue_build
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/miint-rust-glue
+    CONFIGURE_COMMAND "${GLUE_CONFIGURE_CMD}"
+    BUILD_COMMAND ${GLUE_BUILD_ENV} ${CARGO} build --release
+        ${GLUE_FEATURES_ARGS}
+        --target-dir ${GLUE_TARGET_DIR}
+        --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/ext/miint-rust-glue/Cargo.toml
+        ${GLUE_CARGO_TARGET_FLAG}
+    INSTALL_COMMAND ""
+    BUILD_IN_SOURCE 0
+    BUILD_BYPRODUCTS ${GLUE_LIB_PATH}
+)
+
+# `rype` is the sole IMPORTED STATIC target for the merged archive. The
+# archive contains both rype and sylph symbols, so linking `rype` provides
+# everything — there is no separate `sylph` link target.
+#
+# Why no second target: declaring an additional IMPORTED STATIC target
+# pointing at the same archive caused libmiint_rust_glue.a to appear twice on
+# the link line. Combined with -Wl,--allow-multiple-definition + --gc-sections,
+# each pass resolved the Rust runtime symbols (__rust_alloc /
+# rust_eh_personality / EMPTY_PANIC / ...) from a different instance and
+# pruned the other; allocations made through one resolution freed via the
+# other corrupted the heap, producing non-deterministic SIGSEGVs in unrelated
+# code paths (mzXML reader, abPOA consensus, ...) on Linux glibc CI runners.
+# Local Red Hat builds happened to dodge it.
+add_library(rype STATIC IMPORTED GLOBAL)
+set_target_properties(rype PROPERTIES IMPORTED_LOCATION ${GLUE_LIB_PATH})
+add_dependencies(rype miint_rust_glue_build)
+
 # Build MAFFT PartTree static library for multiple sequence alignment
 if(MIINT_ENABLE_MAFFT)
     # Handle cross-compilation arch flags for MAFFT (same pattern as WFA2/minimap2)
@@ -916,101 +1037,15 @@ if(MIINT_ENABLE_ABPOA)
     endif()
 endif()
 
-# Build RYpe from Rust source with Arrow support
-find_program(CARGO cargo REQUIRED)
-message(STATUS "Found cargo: ${CARGO}")
-
-# Determine the static library name based on platform.
-# On Windows/MinGW, cargo with --target x86_64-pc-windows-gnu produces librype.a (not .lib).
-set(RYPE_LIB_NAME "librype.a")
-
-set(RYPE_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/rype_target)
-
-# Handle cross-compilation for Rust via --target flag.
-# When cross-compiling, cargo places output in <target-dir>/<triple>/release/
-# instead of <target-dir>/release/.
-# Also ensure the Rust target is installed via `rustup target add`.
-set(RYPE_CARGO_TARGET_FLAG "")
-set(RYPE_LIB_SUBDIR "release")
-set(RYPE_CONFIGURE_CMD "")
-if(EMSCRIPTEN)
-    find_program(RUSTUP rustup)
-    set(RYPE_CARGO_TARGET_FLAG "--target" "wasm32-unknown-emscripten")
-    set(RYPE_LIB_SUBDIR "wasm32-unknown-emscripten/release")
-    if(RUSTUP)
-        set(RYPE_CONFIGURE_CMD ${RUSTUP} target add wasm32-unknown-emscripten)
-    endif()
-    message(STATUS "RYpe cross-compiling for wasm32-unknown-emscripten")
-elseif(WIN32)
-    # Windows/MinGW: Rust defaults to MSVC target but we link with MinGW ld.exe.
-    # Must target x86_64-pc-windows-gnu to produce compatible object files.
-    find_program(RUSTUP rustup)
-    set(RYPE_CARGO_TARGET_FLAG "--target" "x86_64-pc-windows-gnu")
-    set(RYPE_LIB_SUBDIR "x86_64-pc-windows-gnu/release")
-    if(RUSTUP)
-        set(RYPE_CONFIGURE_CMD ${RUSTUP} target add x86_64-pc-windows-gnu)
-    endif()
-    message(STATUS "RYpe targeting x86_64-pc-windows-gnu for MinGW compatibility")
-elseif(APPLE AND OSX_BUILD_ARCH)
-    find_program(RUSTUP rustup)
-    if(OSX_BUILD_ARCH STREQUAL "x86_64")
-        set(RYPE_CARGO_TARGET_FLAG "--target" "x86_64-apple-darwin")
-        set(RYPE_LIB_SUBDIR "x86_64-apple-darwin/release")
-        if(RUSTUP)
-            set(RYPE_CONFIGURE_CMD ${RUSTUP} target add x86_64-apple-darwin)
-        endif()
-        message(STATUS "RYpe cross-compiling for x86_64 on Apple Silicon")
-    elseif(OSX_BUILD_ARCH STREQUAL "arm64")
-        set(RYPE_CARGO_TARGET_FLAG "--target" "aarch64-apple-darwin")
-        set(RYPE_LIB_SUBDIR "aarch64-apple-darwin/release")
-        if(RUSTUP)
-            set(RYPE_CONFIGURE_CMD ${RUSTUP} target add aarch64-apple-darwin)
-        endif()
-        message(STATUS "RYpe cross-compiling for arm64")
-    endif()
-endif()
-
-set(RYPE_LIB_PATH ${RYPE_TARGET_DIR}/${RYPE_LIB_SUBDIR}/${RYPE_LIB_NAME})
-
-# Build RYpe with Arrow FFI support for zero-copy data exchange.
-# On Emscripten and Windows: --no-default-features disables the "fastx" feature
-# (needletail), whose cdylib crate-type triggers linker errors (emcc standalone
-# linking on WASM, unresolved ___chkstk_ms on MSVC).
-if(EMSCRIPTEN OR WIN32)
-    set(RYPE_CARGO_FEATURES "--no-default-features" "--features" "arrow-ffi")
-else()
-    set(RYPE_CARGO_FEATURES "--features" "arrow-ffi")
-endif()
-# For WASM side modules (-sSIDE_MODULE=2), all objects need PIC relocations.
-# Rust's default for wasm32-unknown-emscripten is static; override to PIC.
-if(EMSCRIPTEN)
-    set(RYPE_BUILD_ENV ${CMAKE_COMMAND} -E env "RUSTFLAGS=-C relocation-model=pic")
-else()
-    # Unset (not empty string "") so it expands to zero arguments in BUILD_COMMAND
-    set(RYPE_BUILD_ENV)
-endif()
-ExternalProject_Add(
-    rype_build
-    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype
-    CONFIGURE_COMMAND "${RYPE_CONFIGURE_CMD}"
-    BUILD_COMMAND ${RYPE_BUILD_ENV} ${CARGO} rustc --release ${RYPE_CARGO_FEATURES} --lib --crate-type=staticlib
-        --target-dir ${RYPE_TARGET_DIR}
-        --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype/Cargo.toml
-        ${RYPE_CARGO_TARGET_FLAG}
-    INSTALL_COMMAND ""
-    BUILD_IN_SOURCE 0
-    BUILD_BYPRODUCTS ${RYPE_LIB_PATH}
-)
-
-# Create imported library for rype
-add_library(rype STATIC IMPORTED GLOBAL)
-set_target_properties(rype PROPERTIES
-    IMPORTED_LOCATION ${RYPE_LIB_PATH}
-)
-add_dependencies(rype rype_build)
+# Backward-compat alias: the WASM linked-libs block below still references
+# RYPE_LIB_PATH. rype now lives inside libmiint_rust_glue.a (built above).
+set(RYPE_LIB_PATH ${GLUE_LIB_PATH})
 
 # adapted kseq++ include use from strobealign
 include_directories(src/include ext ext/WFA2-lib ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype)
+if(MIINT_ENABLE_SYLPH)
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/ext/sylph)
+endif()
 if(MIINT_ENABLE_MAFFT)
     include_directories(ext/mafft/core)
 endif()
@@ -1169,6 +1204,9 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     list(APPEND EXTENSION_SOURCES src/SortMeRNAAligner.cpp src/align_sortmerna.cpp src/align_sortmerna_rrna.cpp)
 endif()
+if(MIINT_ENABLE_SYLPH)
+    list(APPEND EXTENSION_SOURCES src/SylphDatabase.cpp src/sylph_profile.cpp)
+endif()
 if(MIINT_ENABLE_CURL)
     list(APPEND EXTENSION_SOURCES src/curl_send.cpp)
 endif()
@@ -1275,6 +1313,10 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_SORTMERNA)
 endif()
+if(MIINT_ENABLE_SYLPH)
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_SYLPH
+        SYLPH_GIT_VERSION="${SYLPH_GIT_VERSION}")
+endif()
 if(MIINT_ENABLE_CURL)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_CURL)
 endif()
@@ -1312,6 +1354,10 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_link_libraries(${EXTENSION_NAME} sortmerna RocksDB::rocksdb)
 endif()
+# MIINT_ENABLE_SYLPH: sylph's symbols ship inside libmiint_rust_glue.a alongside
+# rype's, so the existing `rype` link above already provides them. No separate
+# target_link_libraries(... sylph) is needed; adding one would double-list the
+# archive on the link line — see the comment near the rype target declaration.
 if(MIINT_ENABLE_CURL)
     target_link_libraries(${EXTENSION_NAME} CURL::libcurl)
 endif()
@@ -1405,6 +1451,10 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_SORTMERNA)
 endif()
+if(MIINT_ENABLE_SYLPH)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_SYLPH
+        SYLPH_GIT_VERSION="${SYLPH_GIT_VERSION}")
+endif()
 if(MIINT_ENABLE_CURL)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_CURL)
 endif()
@@ -1442,6 +1492,8 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} sortmerna RocksDB::rocksdb)
 endif()
+# sylph's symbols come in via rype's archive — see comment in EXTENSION_NAME
+# block above.
 if(MIINT_ENABLE_CURL)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} CURL::libcurl)
 endif()
@@ -1612,6 +1664,17 @@ if(MIINT_ENABLE_SORTMERNA)
         test/cpp/test_sortmerna_build.cpp
         test/cpp/test_SortMeRNAAligner.cpp)
 endif()
+if(MIINT_ENABLE_SYLPH)
+    # Tests only exercise SylphDatabaseHandle + the FFI default getters from
+    # libsylph.a; sylph_profile.cpp itself isn't linked into the tests binary
+    # because it pulls in DuckDB-internal symbols (ArrowArrayWrapper) +
+    # miint's PerSampleGlobalState that the tests target doesn't otherwise
+    # depend on. The behavioral coverage for sylph_profile lives in the SQL
+    # tests, which run against the full extension binary.
+    list(APPEND TEST_SOURCES
+        src/SylphDatabase.cpp
+        test/cpp/test_SylphDatabase.cpp)
+endif()
 if(MIINT_ENABLE_CURL)
     list(APPEND TEST_SOURCES src/curl_send.cpp test/cpp/test_curl_send.cpp)
 endif()
@@ -1674,6 +1737,12 @@ if(MIINT_ENABLE_SORTMERNA)
     target_link_libraries(tests sortmerna RocksDB::rocksdb)
     target_compile_definitions(tests PRIVATE MIINT_HAS_SORTMERNA)
 endif()
+if(MIINT_ENABLE_SYLPH)
+    # Link rype (the umbrella archive), which transitively provides sylph
+    # symbols — see comment near the rype IMPORTED target declaration.
+    target_link_libraries(tests rype)
+    target_compile_definitions(tests PRIVATE MIINT_HAS_SYLPH)
+endif()
 if(MIINT_ENABLE_GPL_BOUNDARY)
     target_sources(tests PRIVATE $<TARGET_OBJECTS:miint_nanoarrow_ipc>)
     target_include_directories(tests PRIVATE
@@ -1693,6 +1762,13 @@ endif()
 if(WIN32)
     # Tests target only needs HTSlib deps (no Rust code linked here)
     target_link_libraries(tests regex ws2_32)
+endif()
+if(APPLE)
+    # libmiint_rust_glue.a transitively pulls rype's chrono → iana_time_zone,
+    # which calls CoreFoundation symbols (CFRelease, CFTimeZoneCopySystem, ...).
+    # The extension targets already link CoreFoundation; the tests target
+    # historically didn't, because pre-glue it only linked libsylph.a.
+    target_link_libraries(tests "-framework CoreFoundation")
 endif()
 if(MIINT_ENABLE_HDF5 AND HDF5_FOUND)
     target_link_libraries(tests
