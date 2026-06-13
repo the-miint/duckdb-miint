@@ -71,7 +71,10 @@ static unique_ptr<RypeExtractData> BindExtraction(ClientContext &context, TableF
 		data->id_column = id_col_param->second.ToString();
 	}
 
-	ValidateSequenceTable(context, data->sequence_table, data->id_column);
+	// Capture the id column's storage type so read_id mirrors it on output
+	// (BIGINT/UUID/VARCHAR) instead of always VARCHAR. Extraction is single-end,
+	// so has_sequence2 is irrelevant here.
+	data->id_type = ValidateSequenceTable(context, data->sequence_table, data->id_column).id_type;
 
 	return data;
 }
@@ -135,7 +138,7 @@ BuildExtractionInputStream(ClientContext &context, const RypeExtractData &bind_d
 // Column 0 (id → read_id) requires manual transformation.
 // num_list_cols is the number of list columns starting at index 1.
 static void ExecuteExtraction(RypeExtractGlobalState &gstate, RypeExtractLocalState &lstate, DataChunk &output,
-                              idx_t num_list_cols) {
+                              idx_t num_list_cols, const LogicalType &id_type) {
 	if (gstate.done) {
 		output.SetCardinality(0);
 		return;
@@ -169,7 +172,7 @@ static void ExecuteExtraction(RypeExtractGlobalState &gstate, RypeExtractLocalSt
 	idx_t to_output = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
 	output.SetCardinality(to_output);
 
-	// Column 0: id (Int64) → read_id (VARCHAR) — manual transformation.
+	// Column 0: id (Int64) → read_id (mirrors id_column type) — manual transformation.
 	// Offset calculation follows rype_classify pattern: parent batch offset + child array offset.
 	auto &id_array = *batch.children[0];
 	if (!id_array.buffers[1]) {
@@ -185,8 +188,7 @@ static void ExecuteExtraction(RypeExtractGlobalState &gstate, RypeExtractLocalSt
 			throw IOException("RYpe returned invalid query_id %lld (expected 0-%zu)", static_cast<long long>(query_id),
 			                  gstate.read_ids.size() - 1);
 		}
-		FlatVector::GetData<string_t>(output.data[0])[i] =
-		    StringVector::AddString(output.data[0], gstate.read_ids[query_id]);
+		EmitIdCell(output.data[0], i, gstate.read_ids[query_id], id_type);
 	}
 
 	// Columns 1..N: List<UInt64> — use DuckDB's built-in Arrow-to-DuckDB conversion.
@@ -219,8 +221,7 @@ unique_ptr<FunctionData> RypeExtractMinimizerSetTableFunction::Bind(ClientContex
 	auto data = BindExtraction(context, input, "rype_extract_minimizer_set");
 
 	data->names = {"read_id", "fwd_set", "rc_set"};
-	data->types = {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UBIGINT),
-	               LogicalType::LIST(LogicalType::UBIGINT)};
+	data->types = {data->id_type, LogicalType::LIST(LogicalType::UBIGINT), LogicalType::LIST(LogicalType::UBIGINT)};
 
 	for (const auto &name : data->names) {
 		names.emplace_back(name);
@@ -276,8 +277,9 @@ void RypeExtractMinimizerSetTableFunction::Execute(ClientContext &context, Table
                                                    DataChunk &output) {
 	auto &gstate = data_p.global_state->Cast<RypeExtractGlobalState>();
 	auto &lstate = data_p.local_state->Cast<RypeExtractLocalState>();
+	auto &bind_data = data_p.bind_data->Cast<RypeExtractData>();
 	// Output: read_id, fwd_set, rc_set → 2 list columns
-	ExecuteExtraction(gstate, lstate, output, 2);
+	ExecuteExtraction(gstate, lstate, output, 2, bind_data.id_type);
 }
 
 TableFunction RypeExtractMinimizerSetTableFunction::GetFunction() {
@@ -302,9 +304,8 @@ unique_ptr<FunctionData> RypeExtractStrandMinimizersTableFunction::Bind(ClientCo
 	auto data = BindExtraction(context, input, "rype_extract_strand_minimizers");
 
 	data->names = {"read_id", "fwd_hashes", "fwd_positions", "rc_hashes", "rc_positions"};
-	data->types = {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UBIGINT),
-	               LogicalType::LIST(LogicalType::UBIGINT), LogicalType::LIST(LogicalType::UBIGINT),
-	               LogicalType::LIST(LogicalType::UBIGINT)};
+	data->types = {data->id_type, LogicalType::LIST(LogicalType::UBIGINT), LogicalType::LIST(LogicalType::UBIGINT),
+	               LogicalType::LIST(LogicalType::UBIGINT), LogicalType::LIST(LogicalType::UBIGINT)};
 
 	for (const auto &name : data->names) {
 		names.emplace_back(name);
@@ -359,8 +360,9 @@ void RypeExtractStrandMinimizersTableFunction::Execute(ClientContext &context, T
                                                        DataChunk &output) {
 	auto &gstate = data_p.global_state->Cast<RypeExtractGlobalState>();
 	auto &lstate = data_p.local_state->Cast<RypeExtractLocalState>();
+	auto &bind_data = data_p.bind_data->Cast<RypeExtractData>();
 	// Output: read_id, fwd_hashes, fwd_positions, rc_hashes, rc_positions → 4 list columns
-	ExecuteExtraction(gstate, lstate, output, 4);
+	ExecuteExtraction(gstate, lstate, output, 4, bind_data.id_type);
 }
 
 TableFunction RypeExtractStrandMinimizersTableFunction::GetFunction() {

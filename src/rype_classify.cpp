@@ -100,9 +100,13 @@ unique_ptr<FunctionData> RypeClassifyTableFunction::Bind(ClientContext &context,
 	// missing paths, invalid formats, and corrupted indices. Early validation here
 	// would create TOCTOU race conditions and duplicate RYpe's validation logic.
 
-	// Validate sequence table exists and has required columns
-	// Cache whether sequence2 exists to avoid querying information_schema later
-	data->has_sequence2 = ValidateSequenceTable(context, data->sequence_table, data->id_column);
+	// Validate sequence table exists and has required columns. Cache whether
+	// sequence2 exists, and capture the id column's storage type so read_id
+	// mirrors it on output (BIGINT/UUID/VARCHAR) instead of always VARCHAR.
+	auto table_info = ValidateSequenceTable(context, data->sequence_table, data->id_column);
+	data->has_sequence2 = table_info.has_sequence2;
+	data->id_type = table_info.id_type;
+	data->types[0] = data->id_type;
 
 	// Set output schema
 	for (const auto &name : data->names) {
@@ -238,6 +242,7 @@ unique_ptr<LocalTableFunctionState> RypeClassifyTableFunction::InitLocal(Executi
 void RypeClassifyTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 	auto &lstate = data_p.local_state->Cast<LocalState>();
+	auto &bind_data = data_p.bind_data->Cast<Data>();
 
 	// No mutex needed - MaxThreads() returns 1, enforcing single-threaded execution
 
@@ -301,8 +306,7 @@ void RypeClassifyTableFunction::Execute(ClientContext &context, TableFunctionInp
 			throw IOException("RYpe returned invalid query_id %lld (expected 0-%zu)", static_cast<long long>(query_id),
 			                  gstate.read_ids.size() - 1);
 		}
-		FlatVector::GetData<string_t>(output.data[0])[i] =
-		    StringVector::AddString(output.data[0], gstate.read_ids[query_id]);
+		EmitIdCell(output.data[0], i, gstate.read_ids[query_id], bind_data.id_type);
 
 		// Column 2: bucket_name (lookup from index using bucket_id)
 		uint32_t bucket_id = bucket_ids[array_idx + bucket_id_array.offset];

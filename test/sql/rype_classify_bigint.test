@@ -1,0 +1,131 @@
+# name: test/sql/rype_classify_bigint.test
+# description: rype_classify mirrors the id_column type (BIGINT/UUID) on read_id, matching align_minimap2.
+# group: [sql]
+
+#   Before the fix rype_classify always returned read_id as VARCHAR, even for a
+#   BIGINT id_column — inconsistent with align_minimap2 and the rest of the id-
+#   aware tree. read_id must now mirror the input column's storage type, and the
+#   adversarial int64 values (2^53+1, int64 max) prove the round-trip is exact,
+#   not a lossy float detour.
+
+require miint
+
+# --- BIGINT id_column: read_id comes back BIGINT and round-trips exactly ---
+statement ok
+CREATE TABLE seq_bigint (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO seq_bigint VALUES
+    (9007199254740993, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    (9223372036854775807, 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA');
+
+query T
+SELECT DISTINCT typeof(read_id)
+FROM rype_classify('data/rype/test.ryxdi', 'seq_bigint', threshold := 0.05);
+----
+BIGINT
+
+query I
+SELECT DISTINCT read_id
+FROM rype_classify('data/rype/test.ryxdi', 'seq_bigint', threshold := 0.05)
+ORDER BY read_id;
+----
+9007199254740993
+9223372036854775807
+
+# --- UUID id_column: read_id mirrors UUID and round-trips the full INT128 range ---
+statement ok
+CREATE TABLE seq_uuid (read_id UUID, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO seq_uuid VALUES
+    ('00000000-0000-0000-0000-000000000001', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('ffffffff-ffff-ffff-ffff-ffffffffffff', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA');
+
+query T
+SELECT DISTINCT typeof(read_id)
+FROM rype_classify('data/rype/test.ryxdi', 'seq_uuid', threshold := 0.05);
+----
+UUID
+
+query I
+SELECT DISTINCT read_id
+FROM rype_classify('data/rype/test.ryxdi', 'seq_uuid', threshold := 0.05)
+ORDER BY read_id;
+----
+00000000-0000-0000-0000-000000000001
+ffffffff-ffff-ffff-ffff-ffffffffffff
+
+# --- VARCHAR id_column: unchanged (read_id stays VARCHAR) ---
+statement ok
+CREATE TABLE seq_varchar AS SELECT CAST(read_id AS VARCHAR) AS read_id, sequence1 FROM seq_bigint;
+
+query T
+SELECT DISTINCT typeof(read_id)
+FROM rype_classify('data/rype/test.ryxdi', 'seq_varchar', threshold := 0.05);
+----
+VARCHAR
+
+# --- Disallowed id types are rejected at bind (matches align_minimap2) ---
+statement ok
+CREATE TABLE seq_hugeint (read_id HUGEINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO seq_hugeint VALUES (1, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT');
+
+statement error
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seq_hugeint', threshold := 0.05);
+----
+must be VARCHAR, BIGINT, or UUID
+
+# --- NULL ids emit SQL NULL instead of aborting the query. A NULL id is carried
+#     as the empty string on ingress, which the id codec resolves to SQL NULL for
+#     BIGINT/UUID — matching align_minimap2 rather than throwing mid-stream. ---
+statement ok
+CREATE TABLE seq_bigint_null (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO seq_bigint_null VALUES
+    (NULL, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    (42, 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA');
+
+query II
+SELECT
+    COUNT(*) FILTER (WHERE read_id IS NULL) > 0 AS has_null_read_id,
+    COUNT(*) FILTER (WHERE read_id = 42) > 0 AS has_id_42
+FROM rype_classify('data/rype/test.ryxdi', 'seq_bigint_null', threshold := 0.05);
+----
+true	true
+
+statement ok
+DROP TABLE seq_bigint_null;
+
+statement ok
+CREATE TABLE seq_uuid_null (read_id UUID, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO seq_uuid_null VALUES
+    (NULL, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('00000000-0000-0000-0000-00000000002a', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA');
+
+query I
+SELECT COUNT(*) FILTER (WHERE read_id IS NULL) > 0 AS has_null_read_id
+FROM rype_classify('data/rype/test.ryxdi', 'seq_uuid_null', threshold := 0.05);
+----
+true
+
+statement ok
+DROP TABLE seq_uuid_null;
+
+# --- Cleanup ---
+statement ok
+DROP TABLE seq_bigint;
+
+statement ok
+DROP TABLE seq_uuid;
+
+statement ok
+DROP TABLE seq_varchar;
+
+statement ok
+DROP TABLE seq_hugeint;
