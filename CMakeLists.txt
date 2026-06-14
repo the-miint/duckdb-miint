@@ -945,9 +945,40 @@ else()
     set(GLUE_FEATURES_ARGS "")
 endif()
 
-# WASM side modules (-sSIDE_MODULE=2) need PIC across the board.
+# Per-target RUSTFLAGS for the umbrella's cargo build. Cargo's RUSTFLAGS env
+# var overrides .cargo/config.toml's rustflags rather than merging, so all
+# platform-specific flags must accumulate here.
+set(GLUE_RUSTFLAGS_LIST "")
+
 if(EMSCRIPTEN)
-    set(GLUE_BUILD_ENV ${CMAKE_COMMAND} -E env "RUSTFLAGS=-C relocation-model=pic")
+    # PIC for WASM side modules. The umbrella itself is a staticlib (no link
+    # step), but rype's [lib] declares crate-type = ["cdylib", "rlib"] and
+    # cargo unconditionally builds the cdylib for the wasm32-unknown-emscripten
+    # path-dep. -sSIDE_MODULE=2 tells wasm-ld that rype.wasm is a side module
+    # rather than a standalone wasm — so no `main` symbol is required. We
+    # never actually link rype.wasm into anything; only libmiint_rust_glue.a
+    # goes into the extension. This just unblocks the cargo build.
+    list(APPEND GLUE_RUSTFLAGS_LIST "-C" "relocation-model=pic")
+    list(APPEND GLUE_RUSTFLAGS_LIST "-C" "link-arg=-sSIDE_MODULE=2")
+endif()
+
+if(WIN32 AND MINGW)
+    # rtools42's MinGW64 doesn't ship libgcc_eh.a (modern GCC folded EH into
+    # libgcc), but rustc's windows-gnu linker spec still passes -lgcc_eh. Same
+    # situation as the WASM case above — cargo builds rype's cdylib
+    # (rype.dll) even though we never link it. Stub an empty archive in a -L
+    # search path so the cdylib link step finds something and proceeds.
+    set(GLUE_MINGW_STUB_DIR ${CMAKE_CURRENT_BINARY_DIR}/mingw_libgcc_eh_stub)
+    file(MAKE_DIRECTORY ${GLUE_MINGW_STUB_DIR})
+    if(NOT EXISTS ${GLUE_MINGW_STUB_DIR}/libgcc_eh.a)
+        execute_process(COMMAND ${CMAKE_AR} rcs ${GLUE_MINGW_STUB_DIR}/libgcc_eh.a)
+    endif()
+    list(APPEND GLUE_RUSTFLAGS_LIST "-C" "link-arg=-L${GLUE_MINGW_STUB_DIR}")
+endif()
+
+if(GLUE_RUSTFLAGS_LIST)
+    string(JOIN " " GLUE_RUSTFLAGS_STR ${GLUE_RUSTFLAGS_LIST})
+    set(GLUE_BUILD_ENV ${CMAKE_COMMAND} -E env "RUSTFLAGS=${GLUE_RUSTFLAGS_STR}")
 else()
     set(GLUE_BUILD_ENV)
 endif()
