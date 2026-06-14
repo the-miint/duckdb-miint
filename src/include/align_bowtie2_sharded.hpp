@@ -3,7 +3,10 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
+#include <cstdint>
 #include <filesystem>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -55,6 +58,77 @@ inline std::vector<std::string> ShardIndexFiles(const std::string &prefix) {
 		}
 	}
 	return out;
+}
+
+// =============================================================================
+// Per-batch telemetry (env-gated by MIINT_BT2_TELEMETRY; see align_bowtie2_
+// sharded.cpp). One record per daemon Submit, emitted as a TSV line, splitting
+// the per-shard wall time into miint-side phases (fetch / encode / decode) vs.
+// the opaque daemon round-trip (`t_submit_ms`) — so we measure where the
+// per-shard seconds go instead of inferring it from straces/seff. Output-
+// invariant: pure diagnostics, never affects alignment results.
+//
+// The record struct + formatter live in the header (like EffectiveShardThreads /
+// ShardIndexFiles) so the C++ unit test can exercise the formatting — the one
+// part that's deterministically testable — without the .cpp's daemon deps.
+// =============================================================================
+struct BatchTelemetry {
+	double wall_ms = 0.0;          // steady-clock ms since scan start, stamped at emit
+	int64_t worker_id = 0;         // daemon pid: tags which worker thread (and daemon)
+	std::string shard;             // shard name this batch was aligned against
+	idx_t batch_seq = 0;           // 0-based batch counter within this worker
+	idx_t n_reads = 0;             // reads submitted in this batch
+	idx_t input_bytes = 0;         // Arrow IPC bytes sent to the daemon
+	idx_t n_alignments = 0;        // alignment rows decoded from the response
+	idx_t output_bytes = 0;        // Arrow IPC bytes received from the daemon
+	double t_open_stream_ms = 0.0; // cursor open (first batch of a shard; 0 after)
+	double t_fetch_ms = 0.0;       // FetchShardBatch: read⋈read_to_shard pull
+	double t_encode_ms = 0.0;      // BuildQueryIpc
+	double t_submit_ms = 0.0;      // Session::Submit round-trip (daemon black box)
+	double t_decode_ms = 0.0;      // IPC decode loop
+	std::string metrics;           // raw daemon `metrics` JSON; empty if absent
+};
+
+// Tab-separated column names, in the exact order FormatBatchTelemetry writes the
+// values. `metrics` is LAST so the daemon's raw JSON (braces/commas) can never be
+// mistaken for additional columns. Keep this and FormatBatchTelemetry in lockstep
+// — the unit test asserts the header and a data line have the same column count.
+inline const char *BatchTelemetryColumns() {
+	return "wall_ms\tworker_id\tshard\tbatch_seq\tn_reads\tinput_bytes\t"
+	       "n_alignments\toutput_bytes\tt_open_stream_ms\tt_fetch_ms\t"
+	       "t_encode_ms\tt_submit_ms\tt_decode_ms\tmetrics";
+}
+
+inline std::string BatchTelemetryHeader() {
+	return std::string(BatchTelemetryColumns()) + "\n";
+}
+
+// Replace TSV-breaking control characters (tab, CR, LF) in a free-form string
+// field with spaces, so an embedded one can't split a column or truncate the
+// line. Numeric fields never need this; only the two std::string fields (`shard`,
+// a user-supplied read_to_shard value, and `metrics`, daemon-provided) do. The
+// daemon JSON is re-serialized by yyjson (which escapes control chars), so this
+// is belt-and-braces there, but `shard` names are arbitrary user strings.
+inline std::string TsvSanitize(std::string s) {
+	for (char &c : s) {
+		if (c == '\t' || c == '\n' || c == '\r') {
+			c = ' ';
+		}
+	}
+	return s;
+}
+
+// Render one record as a newline-terminated TSV line. Milliseconds get 3 decimal
+// places (microsecond resolution); counts/sizes/ids print as integers. Pure (no
+// timing, no I/O) so it is unit-testable in isolation.
+inline std::string FormatBatchTelemetry(const BatchTelemetry &r) {
+	std::ostringstream os;
+	os << std::fixed << std::setprecision(3);
+	os << r.wall_ms << '\t' << r.worker_id << '\t' << TsvSanitize(r.shard) << '\t' << r.batch_seq << '\t' << r.n_reads
+	   << '\t' << r.input_bytes << '\t' << r.n_alignments << '\t' << r.output_bytes << '\t' << r.t_open_stream_ms
+	   << '\t' << r.t_fetch_ms << '\t' << r.t_encode_ms << '\t' << r.t_submit_ms << '\t' << r.t_decode_ms << '\t'
+	   << TsvSanitize(r.metrics) << '\n';
+	return os.str();
 }
 
 // align_bowtie2_sharded routes per-shard through the gpl-boundary daemon's

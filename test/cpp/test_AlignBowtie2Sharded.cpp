@@ -2,10 +2,12 @@
 
 #include "align_bowtie2_sharded.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <unistd.h>
+#include <vector>
 
 using duckdb::EffectiveShardThreads;
 using duckdb::idx_t;
@@ -97,4 +99,126 @@ TEST_CASE("ShardIndexFiles enumerates the present bowtie2 index files", "[bowtie
 	REQUIRE(duckdb::ShardIndexFiles((dir / "missing").string()).empty());
 
 	fs::remove_all(dir);
+}
+
+// FormatBatchTelemetry renders one per-batch record as a single TSV line. The
+// WHOLE point of this telemetry is to split miint-side cost (fetch / encode /
+// decode) from the opaque daemon round-trip (t_submit_ms) so we stop *inferring*
+// where the per-shard seconds go. These tests pin: (1) the line is a single
+// newline-terminated TSV row, (2) the data columns line up 1:1 with the header
+// (so adding a field without updating the header — the classic schema-drift bug —
+// fails the build), (3) the daemon black-box and miint-side phases are distinct
+// columns, and (4) raw daemon `metrics` JSON rides in the trailing column so its
+// embedded punctuation can't shift the earlier numeric columns.
+static std::vector<std::string> SplitTabs(const std::string &line) {
+	std::vector<std::string> out;
+	std::string cur;
+	for (char c : line) {
+		if (c == '\n') {
+			break; // stop at the first newline; the record is one line
+		}
+		if (c == '\t') {
+			out.push_back(cur);
+			cur.clear();
+		} else {
+			cur += c;
+		}
+	}
+	out.push_back(cur);
+	return out;
+}
+
+TEST_CASE("FormatBatchTelemetry: one newline-terminated TSV line, header-aligned", "[bowtie2_sharded]") {
+	duckdb::BatchTelemetry r;
+	r.wall_ms = 12.5;
+	r.worker_id = 4242;
+	r.shard = "shardA";
+	r.batch_seq = 3;
+	r.n_reads = 16384;
+	r.input_bytes = 1000000;
+	r.n_alignments = 50000;
+	r.output_bytes = 2000000;
+	r.t_open_stream_ms = 1.0;
+	r.t_fetch_ms = 2.25;
+	r.t_encode_ms = 3.0;
+	r.t_submit_ms = 55000.0;
+	r.t_decode_ms = 4.5;
+	r.metrics = R"({"worker_majflt":17})";
+
+	const std::string line = duckdb::FormatBatchTelemetry(r);
+
+	// (1) Exactly one record: ends in a newline and contains no other newline.
+	REQUIRE(line.back() == '\n');
+	REQUIRE(std::count(line.begin(), line.end(), '\n') == 1);
+
+	// (2) Data columns line up 1:1 with the header — a field added to the struct
+	// but not the formatter (or vice-versa) breaks this.
+	const auto cols = SplitTabs(line);
+	const auto hdr = SplitTabs(duckdb::BatchTelemetryHeader());
+	REQUIRE(cols.size() == hdr.size());
+}
+
+TEST_CASE("FormatBatchTelemetry: daemon round-trip is its own column, distinct from miint phases",
+          "[bowtie2_sharded]") {
+	// The split is the deliverable: t_submit_ms (the daemon black box) must be a
+	// separate field from the miint-side fetch/encode/decode, else we're back to
+	// inferring. Pin each phase to a distinct value and confirm all appear.
+	duckdb::BatchTelemetry r;
+	r.t_fetch_ms = 11.0;
+	r.t_encode_ms = 22.0;
+	r.t_submit_ms = 33.0;
+	r.t_decode_ms = 44.0;
+	const auto cols = SplitTabs(duckdb::FormatBatchTelemetry(r));
+	const auto hdr = SplitTabs(duckdb::BatchTelemetryHeader());
+
+	auto value_of = [&](const std::string &name) -> std::string {
+		for (idx_t i = 0; i < hdr.size(); ++i) {
+			if (hdr[i] == name) {
+				return cols[i];
+			}
+		}
+		FAIL("column not found in header: " << name);
+		return {};
+	};
+	REQUIRE(value_of("t_fetch_ms") == "11.000");
+	REQUIRE(value_of("t_encode_ms") == "22.000");
+	REQUIRE(value_of("t_submit_ms") == "33.000");
+	REQUIRE(value_of("t_decode_ms") == "44.000");
+}
+
+TEST_CASE("FormatBatchTelemetry: raw daemon metrics ride in the trailing column", "[bowtie2_sharded]") {
+	// Folding the daemon's `metrics` object in as raw JSON keeps miint decoupled
+	// from the (still-being-specced) metrics schema. It must be the LAST column so
+	// its braces/commas can never be mistaken for additional TSV fields.
+	duckdb::BatchTelemetry r;
+	r.shard = "s";
+	r.metrics = R"({"worker_majflt":17,"worker_reused":true})";
+	const std::string line = duckdb::FormatBatchTelemetry(r);
+	const auto hdr = SplitTabs(duckdb::BatchTelemetryHeader());
+	REQUIRE(hdr.back() == "metrics");
+	// The trailing column is the verbatim JSON, immediately before the newline.
+	REQUIRE(line.find(r.metrics + "\n") != std::string::npos);
+
+	// Absent metrics (old daemons) → empty trailing column, still header-aligned.
+	duckdb::BatchTelemetry empty;
+	const auto cols = SplitTabs(duckdb::FormatBatchTelemetry(empty));
+	REQUIRE(cols.size() == hdr.size());
+	REQUIRE(cols.back().empty());
+}
+
+TEST_CASE("FormatBatchTelemetry: control chars in free-form fields can't break the TSV row", "[bowtie2_sharded]") {
+	// `shard` is an arbitrary user-supplied read_to_shard value; a tab or newline
+	// in it (or in daemon metrics) must NOT split a column or truncate the line —
+	// otherwise one bad shard name silently corrupts the offline-parsed telemetry.
+	duckdb::BatchTelemetry r;
+	r.shard = "weird\tshard\nname";
+	r.metrics = "{\"k\":\"a\tb\"}";
+	const std::string line = duckdb::FormatBatchTelemetry(r);
+	const auto hdr = SplitTabs(duckdb::BatchTelemetryHeader());
+
+	// Still exactly one line (the embedded newline became a space).
+	REQUIRE(std::count(line.begin(), line.end(), '\n') == 1);
+	REQUIRE(line.back() == '\n');
+	// Still header-aligned (the embedded tabs became spaces, not new columns).
+	REQUIRE(SplitTabs(line).size() == hdr.size());
 }
