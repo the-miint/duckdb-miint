@@ -56,6 +56,7 @@ struct SubmitResult {
 	uint32_t schema_version = 0;       // gpl-boundary per-tool schema version
 	std::vector<SubmitOutput> outputs; // one entry per shm_outputs[]
 	std::string result_json;           // raw JSON for the optional `result` field; empty if absent
+	std::string metrics_json;          // raw JSON for the optional `metrics` field; empty if absent
 };
 
 /// Connection-scoped handle to a `gpl-boundary` daemon process.

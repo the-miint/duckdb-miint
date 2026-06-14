@@ -22,12 +22,15 @@
 #include "gpl_boundary/process.hpp"
 #include "gpl_boundary/session.hpp"
 
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -38,6 +41,33 @@ namespace duckdb {
 namespace {
 
 namespace gb = ::duckdb::miint::gpl_boundary;
+
+// Telemetry timing uses a monotonic clock (wall-clock-independent, never goes
+// backwards across NTP steps). All timing is gated behind a single fd>=0 check
+// in Execute, so when telemetry is off these are never called.
+using TelClock = std::chrono::steady_clock;
+inline double TelMsSince(TelClock::time_point t0) {
+	return std::chrono::duration<double, std::milli>(TelClock::now() - t0).count();
+}
+
+// Append one telemetry line to the (already-open) fd from a worker thread. A
+// SINGLE write() per line is deliberate, and is what keeps this lock-free:
+//   - regular file (a path in MIINT_BT2_TELEMETRY): O_APPEND makes the seek-to-
+//     EOF + write atomic w.r.t. other writers on the same inode, so concurrent
+//     workers' whole lines never interleave (Linux holds the inode lock across
+//     the write — not subject to PIPE_BUF for regular files).
+//   - stderr ("stderr"/"1"): if stderr is a pipe, atomicity holds only up to
+//     PIPE_BUF (4096 B). Our lines are a few hundred bytes (the daemon `metrics`
+//     object is a small rusage blob), so they stay well under that.
+// A partial short-write would tear a line, but looping would split into multiple
+// write()s and re-introduce interleaving — for a best-effort diagnostic the
+// single write() is the right trade. The result is ignored: a failed telemetry
+// write must never abort a real query.
+inline void EmitBatchTelemetry(int fd, const BatchTelemetry &rec) {
+	const std::string line = FormatBatchTelemetry(rec);
+	const ssize_t n = ::write(fd, line.data(), line.size());
+	(void)n;
+}
 
 // =============================================================================
 // Per-caller known-parameter set. Common bowtie2-align knobs live in
@@ -240,11 +270,30 @@ struct AlignBowtie2ShardedGlobalState : public GlobalTableFunctionState {
 	// stats on the (slow, the whole reason we prefetch) shard filesystem.
 	std::vector<std::vector<std::string>> shard_index_files;
 
+	// Per-batch telemetry sink (env-gated by MIINT_BT2_TELEMETRY; resolved once
+	// in InitGlobal). -1 = disabled (the only cost when off is the fd>=0 check at
+	// each batch). When enabled it's either an O_APPEND file fd we own (and must
+	// close) or STDERR_FILENO (which we must NOT close). `telemetry_start` anchors
+	// the per-line `wall_ms`. See InitGlobal for the gate and EmitBatchTelemetry
+	// for the write. Like the other fields above (db_threads, max_active_shards,
+	// prefetch_ahead), these are written once in InitGlobal — before any Execute
+	// runs, under the scheduler's thread-launch barrier — then read-only from the
+	// worker threads, so no atomics are needed.
+	int telemetry_fd = -1;
+	bool telemetry_owns_fd = false;
+	TelClock::time_point telemetry_start;
+
 	idx_t MaxThreads() const override {
 		// DuckDB clamps to its own scheduler concurrency anyway, but
 		// returning the per-shard ceiling here keeps the planner honest
 		// when the thread pool is larger than the work supports.
 		return max_active_shards;
+	}
+
+	~AlignBowtie2ShardedGlobalState() override {
+		if (telemetry_owns_fd && telemetry_fd >= 0) {
+			::close(telemetry_fd);
+		}
 	}
 };
 
@@ -297,6 +346,13 @@ struct AlignBowtie2ShardedLocalState : public LocalTableFunctionState {
 	idx_t batch_index = 0;
 	idx_t row_in_batch = 0;
 	bool schema_validated = false;
+
+	// Telemetry-only (read/written solely on the MIINT_BT2_TELEMETRY path).
+	// `telemetry_batch_seq` orders this worker's batches in the TSV;
+	// `telemetry_open_stream_ms` carries the cursor-open cost from a shard claim
+	// forward onto that shard's first batch line (0 on subsequent batches).
+	idx_t telemetry_batch_seq = 0;
+	double telemetry_open_stream_ms = 0.0;
 
 	~AlignBowtie2ShardedLocalState() override {
 		if (session) {
@@ -568,6 +624,42 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	// Resolve the -1 "auto" sentinel now that db_threads (hence max_active_shards)
 	// is known: auto warms one full wave ahead (≈ one processing cycle of lead).
 	gs->prefetch_ahead = bd.prefetch_ahead < 0 ? gs->max_active_shards : static_cast<idx_t>(bd.prefetch_ahead);
+
+	// Telemetry gate (resolved once, here). MIINT_BT2_TELEMETRY is a file path,
+	// or the literal "stderr"/"1" for fd 2. Purely diagnostic and output-
+	// invariant, so a bad path warns and disables rather than failing the query.
+	if (const char *tel_env = std::getenv("MIINT_BT2_TELEMETRY")) {
+		if (tel_env[0] != '\0') {
+			const std::string spec(tel_env);
+			if (spec == "stderr" || spec == "1") {
+				gs->telemetry_fd = STDERR_FILENO;
+				gs->telemetry_owns_fd = false;
+			} else {
+				const int fd = ::open(spec.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+				if (fd < 0) {
+					::miint::EmitWarning(context,
+					                     "align_bowtie2_sharded: MIINT_BT2_TELEMETRY set but could not open '" + spec +
+					                         "' for append; telemetry disabled.");
+				} else {
+					gs->telemetry_fd = fd;
+					gs->telemetry_owns_fd = true;
+					// Header only for a freshly-created (empty) file, so a file
+					// appended across runs stays a single parseable TSV. (stderr
+					// gets no header — it interleaves with daemon output.)
+					struct stat st;
+					if (::fstat(fd, &st) == 0 && st.st_size == 0) {
+						const std::string hdr = BatchTelemetryHeader();
+						const ssize_t n = ::write(fd, hdr.data(), hdr.size());
+						(void)n;
+					}
+				}
+			}
+			if (gs->telemetry_fd >= 0) {
+				gs->telemetry_start = TelClock::now();
+			}
+		}
+	}
+
 	return std::move(gs);
 }
 
@@ -727,8 +819,11 @@ bool FetchShardBatch(AlignBowtie2ShardedLocalState &local, const AlignBowtie2Sha
 	return accumulated > 0;
 }
 
+// `tel` is non-null only when telemetry is enabled; when set, this stamps the
+// encode / submit-round-trip / decode phase timings, the input/output byte
+// sizes, the decoded alignment count, and the raw daemon `metrics` JSON into it.
 void SubmitAndDecode(AlignBowtie2ShardedLocalState &local, const AlignBowtie2ShardedBindData &bd,
-                     const AlignBowtie2ShardedGlobalState &gs, const bt2_daemon::QueryBatch &qb) {
+                     const AlignBowtie2ShardedGlobalState &gs, const bt2_daemon::QueryBatch &qb, BatchTelemetry *tel) {
 	const auto &shard = bd.shards[local.current_shard_idx];
 	// Once every shard has been handed out, surviving workers grow their `-p` to
 	// reclaim the cores that finished workers freed (see EffectiveShardThreads).
@@ -739,8 +834,17 @@ void SubmitAndDecode(AlignBowtie2ShardedLocalState &local, const AlignBowtie2Sha
 	                                             gs.active_workers.load(std::memory_order_relaxed), all_shards_claimed);
 	const std::string config_json = BuildAlignConfigJson(bd.named_params, shard.index_prefix, nthreads);
 	bt2_daemon::QueryArrowSchema schema_flags {bd.query_has_sequence2, bd.query_has_qual1, bd.query_has_qual2};
+	const auto t_encode0 = tel ? TelClock::now() : TelClock::time_point {};
 	const auto ipc = bt2_daemon::BuildQueryIpc(qb, schema_flags);
+	if (tel) {
+		tel->t_encode_ms = TelMsSince(t_encode0);
+		tel->input_bytes = static_cast<idx_t>(ipc.size());
+	}
+	const auto t_submit0 = tel ? TelClock::now() : TelClock::time_point {};
 	auto submit_result = local.session->Submit("bowtie2-align", config_json, ipc.data(), ipc.size());
+	if (tel) {
+		tel->t_submit_ms = TelMsSince(t_submit0);
+	}
 	if (submit_result.outputs.empty()) {
 		throw IOException("align_bowtie2_sharded: daemon returned zero shm_outputs for shard '%s'", shard.name);
 	}
@@ -760,6 +864,10 @@ void SubmitAndDecode(AlignBowtie2ShardedLocalState &local, const AlignBowtie2Sha
 
 	local.current_result = std::make_unique<gb::SubmitResult>(std::move(submit_result));
 	const auto &out0 = local.current_result->outputs[0];
+	if (tel) {
+		tel->output_bytes = static_cast<idx_t>(out0.size_bytes());
+		tel->metrics = local.current_result->metrics_json; // empty on daemons without metrics
+	}
 	local.current_decoder = std::make_unique<gb::IpcStreamDecoder>(out0.bytes(), out0.size_bytes());
 	local.current_decoder->GetSchema(&local.current_schema.arrow_schema);
 
@@ -768,12 +876,21 @@ void SubmitAndDecode(AlignBowtie2ShardedLocalState &local, const AlignBowtie2Sha
 		local.schema_validated = true;
 	}
 
+	const auto t_decode0 = tel ? TelClock::now() : TelClock::time_point {};
 	for (;;) {
 		ArrowArrayWrapper w;
 		if (!local.current_decoder->NextBatch(&w.arrow_array)) {
 			break;
 		}
 		local.current_batches.push_back(std::move(w));
+	}
+	if (tel) {
+		tel->t_decode_ms = TelMsSince(t_decode0);
+		idx_t rows = 0;
+		for (const auto &w : local.current_batches) {
+			rows += static_cast<idx_t>(w.arrow_array.length);
+		}
+		tel->n_alignments = rows;
 	}
 }
 
@@ -828,8 +945,29 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 		//    is no need for an "empty but non-exhausted" code path.
 		if (local.current_shard_idx != DConstants::INVALID_INDEX) {
 			bt2_daemon::QueryBatch qb;
-			if (FetchShardBatch(local, bd, qb)) {
-				SubmitAndDecode(local, bd, gs, qb);
+			BatchTelemetry rec;
+			BatchTelemetry *tel = gs.telemetry_fd >= 0 ? &rec : nullptr;
+			const auto t_fetch0 = tel ? TelClock::now() : TelClock::time_point {};
+			const bool got = FetchShardBatch(local, bd, qb);
+			if (tel) {
+				rec.t_fetch_ms = TelMsSince(t_fetch0);
+			}
+			if (got) {
+				if (tel) {
+					rec.worker_id = static_cast<int64_t>(local.session->daemon_pid());
+					rec.shard = local.current_shard_name;
+					rec.batch_seq = local.telemetry_batch_seq++;
+					rec.n_reads = static_cast<idx_t>(qb.read_ids.size());
+					// Attribute the shard's one-time cursor-open cost to its first
+					// batch, then clear so later batches of the same shard read 0.
+					rec.t_open_stream_ms = local.telemetry_open_stream_ms;
+					local.telemetry_open_stream_ms = 0.0;
+				}
+				SubmitAndDecode(local, bd, gs, qb, tel);
+				if (tel) {
+					rec.wall_ms = TelMsSince(gs.telemetry_start);
+					EmitBatchTelemetry(gs.telemetry_fd, rec);
+				}
 				continue; // loop back to drain decoded rows
 			}
 			// Shard exhausted — release for re-claim attempt. Drop this worker
@@ -837,6 +975,12 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 			local.input_stream.reset();
 			local.current_shard_idx = DConstants::INVALID_INDEX;
 			gs.active_workers.fetch_sub(1, std::memory_order_relaxed);
+			// A shard that matched zero reads emits no batch line, so its
+			// cursor-open cost has nothing to attach to; clear it so it can't be
+			// mistaken for the next shard's open. (The next OpenCurrentShardStream
+			// overwrites it regardless, so this is belt-and-braces, but it keeps
+			// the per-batch open-cost attribution correct under any reordering.)
+			local.telemetry_open_stream_ms = 0.0;
 		}
 
 		// 3. Claim the next shard atomically. fetch_add is the entire
@@ -876,7 +1020,15 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 				PrefetchShardIndexFiles(gs.shard_index_files[target]);
 			}
 		}
+		// Time the cursor open so its cost shows up (on this shard's first
+		// batch line) distinctly from the daemon round-trip. Stamped into
+		// LocalState; consumed by the next FetchShardBatch's telemetry above.
+		const bool tel_on = gs.telemetry_fd >= 0;
+		const auto t_open0 = tel_on ? TelClock::now() : TelClock::time_point {};
 		OpenCurrentShardStream(local, bd);
+		if (tel_on) {
+			local.telemetry_open_stream_ms = TelMsSince(t_open0);
+		}
 	}
 }
 

@@ -530,6 +530,20 @@ SubmitResult Session::Submit(const std::string &tool, const std::string &config_
 		}
 	}
 
+	// Optional `metrics` field — additive, opt-in batch metrics (e.g. the
+	// bowtie2 worker's getrusage). Captured raw exactly like `result`; old
+	// daemons omit it and callers see an empty string. Folded into
+	// align_bowtie2_sharded's per-batch telemetry when present.
+	yj::yyjson_val *met = yj::yyjson_obj_get(root, "metrics");
+	if (met) {
+		size_t len = 0;
+		char *json_str = yj::yyjson_val_write(met, 0, &len);
+		if (json_str) {
+			result.metrics_json.assign(json_str, len);
+			std::free(json_str);
+		}
+	}
+
 	return result;
 }
 
