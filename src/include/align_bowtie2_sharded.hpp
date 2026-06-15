@@ -36,13 +36,37 @@ inline idx_t EffectiveShardThreads(idx_t base_threads_per_shard, idx_t db_thread
 	return fair_share > base_threads_per_shard ? fair_share : base_threads_per_shard;
 }
 
+// Inject align_bowtie2_sharded's mm-off default: insert `memory_mapped=false`
+// into the named-parameter map iff the user did not supply it. HPC telemetry
+// (WOL3, 1000 shards, cold Lustre) measured sequential-fread index loads at 3.7x
+// the throughput of bowtie2's `--mm` default (worker_majflt 13 vs 47.5M), so
+// sharded mode defaults the knob OFF — but a user-supplied value (true or false)
+// is preserved, since this is a perf default, not a hard policy. Output-invariant
+// either way (mm vs fread produce identical alignments).
+//
+// Templated over the map type and a bool→value factory so the logic is unit-
+// testable in the standalone Catch2 binary, which links no libduckdb (hence no
+// `Value` / `named_parameter_map_t` symbols). Production instantiates it with
+// `named_parameter_map_t` + `Value::BOOLEAN`; the test uses a plain
+// `std::map<std::string,bool>`. Same rationale as keeping EffectiveShardThreads /
+// ShardIndexFiles inline and duckdb-free below.
+template <class Map, class MakeBool>
+void InjectMemoryMappedDefault(Map &params, MakeBool make_bool) {
+	if (params.find("memory_mapped") == params.end()) {
+		params.emplace("memory_mapped", make_bool(false));
+	}
+}
+
 // The bowtie2 index files that actually exist for a shard prefix — the subset
 // of the 8 candidates (`<prefix>.1.bt2` … `.rev.2.bt2`, and the large-index
 // `.bt2l` variants) present on disk. Used to warm them into the OS page cache
 // (POSIX_FADV_WILLNEED) ahead of a worker claiming the shard, so the daemon's
-// mmap'd (`--mm`) index load doesn't stall on a cold network-FS fault. Returns
-// only files that exist: an incomplete index yields a partial list (warming a
-// subset is harmless), an absent one yields empty. Inline (like
+// index load doesn't stall on a cold network-FS fault. Under the sharded mm-off
+// default (see InjectMemoryMappedDefault) the worker freads the index
+// sequentially from offset 0, which is exactly the access pattern WILLNEED
+// readahead serves — a better match than the lazy random faults of `--mm`.
+// Returns only files that exist: an incomplete index yields a partial list
+// (warming a subset is harmless), an absent one yields empty. Inline (like
 // EffectiveShardThreads) so the C++ unit test links it without pulling in the
 // .cpp's daemon dependencies.
 inline std::vector<std::string> ShardIndexFiles(const std::string &prefix) {

@@ -489,6 +489,12 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	}
 	bd->named_params = input.named_parameters;
 
+	// Sharded default: mm-off (sequential fread) unless the user set memory_mapped.
+	// Injected after the unknown-param check and the input copy, so it reaches the
+	// daemon via AppendBowtie2AlignParams (which consumes bd->named_params at submit
+	// time) without tripping the typo guard above. See InjectMemoryMappedDefault.
+	InjectMemoryMappedDefault(bd->named_params, [](bool b) { return Value::BOOLEAN(b); });
+
 	// `threads` is ignored at the table-function level: with the Phase 6
 	// fan-out, cross-shard parallelism is driven by DuckDB's own scheduler
 	// (`SET threads=N`), and per-shard bowtie2 internal threading is driven

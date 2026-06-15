@@ -5,12 +5,58 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <string>
 #include <unistd.h>
 #include <vector>
 
 using duckdb::EffectiveShardThreads;
 using duckdb::idx_t;
+using duckdb::InjectMemoryMappedDefault;
+
+// InjectMemoryMappedDefault gives align_bowtie2_sharded its mm-off default:
+// HPC telemetry measured sequential-fread index loads (memory_mapped=false) at
+// 3.7x the throughput of --mm on a cold network FS, so sharded mode defaults the
+// knob OFF — UNLESS the user supplied it, in which case their value (true or
+// false) must survive untouched. The helper is templated over the map/value
+// types (production: named_parameter_map_t + Value::BOOLEAN; test: a plain
+// std::map<string,bool>) so this intent is exercised in the duckdb-free Catch2
+// binary, the same reason EffectiveShardThreads/ShardIndexFiles are inline here.
+// These cases encode WHY: absent must become false; a user value must be kept.
+//
+// NOT exercised here: the production named_parameter_map_t is case-INSENSITIVE
+// (find/emplace fold case), whereas std::map is case-sensitive. That gap is
+// immaterial — DuckDB lowercases unquoted named-parameter keys at parse time, so
+// the key always arrives as "memory_mapped"; the case-insensitive map is just
+// belt-and-braces for a quoted-identifier degenerate case, not logic this helper
+// owns.
+TEST_CASE("InjectMemoryMappedDefault: absent → defaults to false (mm-off)", "[bowtie2_sharded]") {
+	std::map<std::string, bool> params;
+	InjectMemoryMappedDefault(params, [](bool b) { return b; });
+	REQUIRE(params.size() == 1);
+	REQUIRE(params.count("memory_mapped") == 1);
+	REQUIRE(params.at("memory_mapped") == false);
+}
+
+TEST_CASE("InjectMemoryMappedDefault: user memory_mapped=true is preserved", "[bowtie2_sharded]") {
+	// A user who explicitly opts back into --mm must not be silently overridden
+	// to mm-off — the default only fills the gap when the knob is absent.
+	std::map<std::string, bool> params;
+	params.emplace("memory_mapped", true);
+	InjectMemoryMappedDefault(params, [](bool b) { return b; });
+	REQUIRE(params.size() == 1);
+	REQUIRE(params.at("memory_mapped") == true);
+}
+
+TEST_CASE("InjectMemoryMappedDefault: user memory_mapped=false is preserved (no duplicate)", "[bowtie2_sharded]") {
+	// Same value as the default, but it must pass through the user-supplied path
+	// (not be re-inserted), so the knob is never double-written.
+	std::map<std::string, bool> params;
+	params.emplace("memory_mapped", false);
+	InjectMemoryMappedDefault(params, [](bool b) { return b; });
+	REQUIRE(params.size() == 1);
+	REQUIRE(params.at("memory_mapped") == false);
+}
 
 // EffectiveShardThreads decides bowtie2's `-p` (nthreads) for one shard's batch
 // submit. The intent: as worker threads finish the tail of small shards and

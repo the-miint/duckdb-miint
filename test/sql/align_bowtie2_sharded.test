@@ -501,6 +501,40 @@ SELECT * FROM align_bowtie2_sharded('queries',
 prefetch_ahead must be between 0 (disabled) and 4096
 
 # ==============================================================================
+# MEMORY-MAPPED DEFAULT (mm-off) — OUTPUT INVARIANCE
+# ==============================================================================
+# Sharded mode now defaults memory_mapped=false (sequential fread; see
+# InjectMemoryMappedDefault). memory_mapped is a load-MECHANISM knob only — the
+# alignments are identical whether the index is mmap'd (--mm) or fread. This pins
+# that contract on the sharded path: the DEFAULT (memory_mapped omitted) produces
+# the byte-identical alignment MULTISET as an explicit memory_mapped:=true, so
+# flipping the default is safe. Two-direction EXCEPT ALL == 0 ⟺ equal multisets.
+#
+# What this guards: a Bind/wire regression that made the default path emit WRONG
+# or no alignments would diverge here. What it CANNOT (by design) catch: whether
+# the default is actually mm-off vs --mm — those two are output-identical, so only
+# the per-batch telemetry's worker_majflt/RSS can distinguish the load mechanism.
+query I
+SELECT
+  (SELECT COUNT(*) FROM (
+     SELECT read_id, reference, position, flags, mapq FROM align_bowtie2_sharded('queries',
+        shard_directory := 'data/bowtie2_shards/', read_to_shard := 'read_to_shard', max_secondary := 0)
+     EXCEPT ALL
+     SELECT read_id, reference, position, flags, mapq FROM align_bowtie2_sharded('queries',
+        shard_directory := 'data/bowtie2_shards/', read_to_shard := 'read_to_shard', max_secondary := 0,
+        memory_mapped := true)))
+  +
+  (SELECT COUNT(*) FROM (
+     SELECT read_id, reference, position, flags, mapq FROM align_bowtie2_sharded('queries',
+        shard_directory := 'data/bowtie2_shards/', read_to_shard := 'read_to_shard', max_secondary := 0,
+        memory_mapped := true)
+     EXCEPT ALL
+     SELECT read_id, reference, position, flags, mapq FROM align_bowtie2_sharded('queries',
+        shard_directory := 'data/bowtie2_shards/', read_to_shard := 'read_to_shard', max_secondary := 0)));
+----
+0
+
+# ==============================================================================
 # CLEANUP
 # ==============================================================================
 
