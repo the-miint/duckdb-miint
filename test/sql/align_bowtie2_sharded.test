@@ -263,37 +263,93 @@ SELECT shard_name FROM align_bowtie2_sharded('queries',
 shard_name
 
 # ==============================================================================
-# MAX_THREADS_PER_SHARD PARAMETER TEST
+# TWO-POOL SCHEDULER PARAMETERS (oversubscribe + big_shard_min_batches)
 # ==============================================================================
 
-# Test max_threads_per_shard parameter is accepted (just verify no error)
+# oversubscribe (concurrent tail lanes) is accepted and produces correct output.
 query I
 SELECT COUNT(*) FROM align_bowtie2_sharded('queries',
     shard_directory := 'data/bowtie2_shards/',
     read_to_shard := 'read_to_shard',
-    max_threads_per_shard := 2,
+    oversubscribe := 4,
     max_secondary := 0)
 WHERE flags & 4 = 0;
 ----
 2
 
-# Test max_threads_per_shard validation: too low
-statement error
-SELECT * FROM align_bowtie2_sharded('queries',
+# oversubscribe := 0 (big lane only, no concurrent tail lanes) still works.
+query I
+SELECT COUNT(*) FROM align_bowtie2_sharded('queries',
     shard_directory := 'data/bowtie2_shards/',
     read_to_shard := 'read_to_shard',
-    max_threads_per_shard := 0);
+    oversubscribe := 0,
+    max_secondary := 0)
+WHERE flags & 4 = 0;
 ----
-max_threads_per_shard must be between 1 and 64
+2
 
-# Test max_threads_per_shard validation: too high
+# big_shard_min_batches := 1 forces every shard into the big lane; output unchanged.
+query I
+SELECT COUNT(*) FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    big_shard_min_batches := 1,
+    max_secondary := 0)
+WHERE flags & 4 = 0;
+----
+2
+
+# A very large big_shard_min_batches forces every shard into the TAIL pool (the
+# big worker finds its pool empty and falls straight through to the tail). Output
+# must be identical — exercises the all-tail scheduler path.
+query I
+SELECT COUNT(*) FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    big_shard_min_batches := 1000000,
+    max_secondary := 0)
+WHERE flags & 4 = 0;
+----
+2
+
+# oversubscribe validation: negative
 statement error
 SELECT * FROM align_bowtie2_sharded('queries',
     shard_directory := 'data/bowtie2_shards/',
     read_to_shard := 'read_to_shard',
-    max_threads_per_shard := 100);
+    oversubscribe := -1);
 ----
-max_threads_per_shard must be between 1 and 64
+oversubscribe must be between 0 and 256
+
+# oversubscribe validation: too high
+statement error
+SELECT * FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    oversubscribe := 257);
+----
+oversubscribe must be between 0 and 256
+
+# big_shard_min_batches validation: too low (must be >= 1)
+statement error
+SELECT * FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    big_shard_min_batches := 0);
+----
+big_shard_min_batches must be >= 1
+
+# max_threads_per_shard is no longer a parameter of align_bowtie2_sharded (the
+# two-pool scheduler subsumes it). It is no longer registered, so DuckDB's binder
+# rejects it as an invalid named parameter — guarding against a silent
+# reintroduction. (align_minimap2_sharded keeps its own copy.)
+statement error
+SELECT * FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'read_to_shard',
+    max_threads_per_shard := 2);
+----
+Invalid named parameter "max_threads_per_shard"
 
 # ==============================================================================
 # PAIRED-END TEST
