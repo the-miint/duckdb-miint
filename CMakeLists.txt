@@ -1828,6 +1828,22 @@ if(MIINT_ENABLE_VSEARCH AND MIINT_ENABLE_CURL AND UNIX AND NOT APPLE)
     target_link_options(${EXTENSION_NAME} INTERFACE "-Wl,--allow-multiple-definition")
     target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE "-Wl,--allow-multiple-definition")
 endif()
+
+# Windows MinGW: duckdb's LogicalType static members (VARCHAR, DOUBLE, BIGINT, ...)
+# are emitted into COMDAT sections in every translation unit that references them.
+# GNU ld on Linux folds these by default; rtools42's MinGW ld on Windows does not,
+# so the duckdb.dll link sees duplicate `duckdb::LogicalType::VARCHAR` symbols
+# between libmiint_extension.a's TUs and duckdb_common's TUs. Pre-sylph-merge this
+# was masked by --allow-multiple-definition being applied for the unrelated
+# vsearch+curl MD5/SHA1 collision; that flag is now gated on
+# `MIINT_ENABLE_VSEARCH AND MIINT_ENABLE_CURL`, both of which are OFF on Windows.
+# Re-add the flag for MinGW with the actual C++ COMDAT reason.
+if(WIN32 AND MINGW)
+    target_link_options(tests PRIVATE "-Wl,--allow-multiple-definition")
+    target_link_options(${EXTENSION_NAME} INTERFACE "-Wl,--allow-multiple-definition")
+    target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE "-Wl,--allow-multiple-definition")
+endif()
+
 if(HAVE_LIBZSTD)
     target_link_libraries(tests ${ZSTD_TARGET})
 endif()
