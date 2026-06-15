@@ -841,7 +841,11 @@ void SubmitAndDecode(AlignBowtie2ShardedLocalState &local, const AlignBowtie2Sha
 		tel->input_bytes = static_cast<idx_t>(ipc.size());
 	}
 	const auto t_submit0 = tel ? TelClock::now() : TelClock::time_point {};
-	auto submit_result = local.session->Submit("bowtie2-align", config_json, ipc.data(), ipc.size());
+	// Opt into the daemon's per-batch worker metrics (getrusage: ru_majflt, CPU
+	// vs wall, RSS, reused-flag) only when telemetry is on — they land in the
+	// telemetry line's `metrics` column. Off ⇒ no flag, no daemon-side cost.
+	auto submit_result =
+	    local.session->Submit("bowtie2-align", config_json, ipc.data(), ipc.size(), /*request_metrics=*/tel != nullptr);
 	if (tel) {
 		tel->t_submit_ms = TelMsSince(t_submit0);
 	}

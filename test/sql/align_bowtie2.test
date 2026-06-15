@@ -39,6 +39,28 @@ ORDER BY read_id;
 query1	true
 query2	true
 
+# memory_mapped (--mm) knob — gpl-boundary v0.4.2+. `--mm` is the daemon default
+# (omit ⇒ mmap on, unchanged); exposing it lets a diagnostic run force a
+# sequential fread load instead (memory_mapped := false) to contrast the cold
+# page-fault/RSS profile. It is a load-MECHANISM knob only: the alignment output
+# MUST be identical to the basic test above for EITHER value. Pre-0.4.2 daemons
+# ignore the key and keep mmap on — still output-invariant.
+query IIII
+SELECT read_id, reference, position, mapq >= 0 as has_mapq
+FROM align_bowtie2('queries', 'subjects', memory_mapped := false)
+ORDER BY read_id, reference;
+----
+query1	ref1	1	true
+query2	ref2	1	true
+
+query IIII
+SELECT read_id, reference, position, mapq >= 0 as has_mapq
+FROM align_bowtie2('queries', 'subjects', memory_mapped := true)
+ORDER BY read_id, reference;
+----
+query1	ref1	1	true
+query2	ref2	1	true
+
 # Test alignment score tag (bowtie2 uses AS:i tag, 0 is valid for perfect matches)
 query II
 SELECT read_id, tag_as >= 0 as has_score
@@ -494,6 +516,16 @@ SELECT COUNT(*) >= 1 FROM align_bowtie2_sharded('typed_queries',
     no_exact_upfront := true,
     no_1mm_upfront := true,
     deterministic_seeds := true);
+----
+true
+
+# memory_mapped (--mm) knob on the sharded variant — accepted + forwarded
+# (gpl-boundary v0.4.2+; see the non-sharded invariance test near the top).
+query I
+SELECT COUNT(*) >= 1 FROM align_bowtie2_sharded('typed_queries',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'typed_assoc',
+    memory_mapped := false);
 ----
 true
 

@@ -127,6 +127,7 @@ const std::unordered_set<std::string> kCommonAlignParams = {
     "no_1mm_upfront",
     "deterministic_seeds",
     "lowseeds",
+    "memory_mapped",
 };
 
 void AppendBowtie2AlignParams(ConfigJsonBuilder &cfg, const named_parameter_map_t &named_params, const char *caller) {
@@ -283,6 +284,15 @@ void AppendBowtie2AlignParams(ConfigJsonBuilder &cfg, const named_parameter_map_
 	if (auto *v = get("lowseeds")) {
 		cfg.append_str("lowseeds", ValueAsStr(caller, "lowseeds", *v));
 	}
+
+	// 9. Index loading (gpl-boundary v0.4.2+). `--mm` is the daemon's default, so
+	//    UNLIKE the section-5 bools we only emit a value when the user sets one —
+	//    omitting it preserves the daemon's mmap-on behavior. A diagnostic/perf
+	//    lever: `memory_mapped:=false` makes the worker fread the whole index
+	//    sequentially (vs lazy random page-faults), which can win on a cold
+	//    network FS at the cost of anonymous RSS. Output-invariant. Silently
+	//    ignored by pre-0.4.2 daemons (which always mmap).
+	pass_bool("memory_mapped");
 }
 
 void RegisterBowtie2AlignNamedParameterTypes(TableFunction &tf) {
@@ -326,6 +336,7 @@ void RegisterBowtie2AlignNamedParameterTypes(TableFunction &tf) {
 	tf.named_parameters["no_1mm_upfront"] = LogicalType::BOOLEAN;
 	tf.named_parameters["deterministic_seeds"] = LogicalType::BOOLEAN;
 	tf.named_parameters["lowseeds"] = LogicalType::VARCHAR;
+	tf.named_parameters["memory_mapped"] = LogicalType::BOOLEAN;
 }
 
 const char *const kOutputColumnNames[kNumOutputColumns] = {

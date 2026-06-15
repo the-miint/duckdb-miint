@@ -111,12 +111,19 @@ public:
 	/// output shm segment with the explicit size from `ShmOutput.size`, and
 	/// returns the bundle. Input shm is unlinked before this function returns.
 	///
+	/// - `request_metrics` — when true, sets the opt-in `"metrics":true` flag on
+	///   the batch request (gpl-boundary `v0.4.2`+). A subprocess worker
+	///   (bowtie2-align) then self-reports `getrusage` deltas etc. into the
+	///   response's `metrics` object, surfaced as `SubmitResult::metrics_json`.
+	///   Default false emits no flag at all, so older daemons (which ignore
+	///   unknown request fields) see the unchanged request shape and pay nothing.
+	///
 	/// Throws `std::runtime_error` if `Initialize()` hasn't run yet, the
 	/// daemon returns `{success:false}`, the response is malformed, or any
 	/// I/O fails. The output segments are unlinked automatically when the
 	/// returned `SubmitResult` is destroyed.
 	SubmitResult Submit(const std::string &tool, const std::string &config_json, const void *input_bytes,
-	                    std::size_t input_size);
+	                    std::size_t input_size, bool request_metrics = false);
 
 	/// True iff Initialize() has completed successfully.
 	bool initialized() const {

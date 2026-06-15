@@ -363,19 +363,26 @@ namespace {
 // going through yyjson's writer because the schema is fixed and the cost of
 // pulling in a full JSON builder for one writer-side message isn't justified.
 std::string build_batch_line(const std::string &tool, const std::string &config_json, const std::string &shm_input_name,
-                             std::size_t shm_input_size, int64_t batch_id) {
+                             std::size_t shm_input_size, int64_t batch_id, bool request_metrics) {
 	std::ostringstream os;
 	os << R"({"tool":")" << JsonEscape(tool) << R"(",)"
 	   << R"("config":)" << config_json << ","
 	   << R"("shm_input":")" << JsonEscape(shm_input_name) << R"(",)"
 	   << R"("shm_input_size":)" << shm_input_size << ","
-	   << R"("batch_id":)" << batch_id << "}";
+	   << R"("batch_id":)" << batch_id;
+	// Opt-in only: emit the flag solely when requested, so a non-telemetry batch
+	// is byte-for-byte the pre-0.4.2 request shape (older daemons ignore unknown
+	// fields, but emitting nothing keeps the contract explicit and free).
+	if (request_metrics) {
+		os << R"(,"metrics":true)";
+	}
+	os << "}";
 	return os.str();
 }
 } // namespace
 
 SubmitResult Session::Submit(const std::string &tool, const std::string &config_json, const void *input_bytes,
-                             std::size_t input_size) {
+                             std::size_t input_size, bool request_metrics) {
 	if (!initialized_) {
 		throw std::runtime_error("gpl_boundary: Session::Submit called before Initialize()");
 	}
@@ -409,7 +416,8 @@ SubmitResult Session::Submit(const std::string &tool, const std::string &config_
 	//    the line. If WriteLine throws (EPIPE on a dead daemon), the daemon
 	//    never saw this batch_id and we shouldn't burn it for the next call.
 	const int64_t batch_id = next_batch_id_;
-	const std::string batch_line = build_batch_line(tool, config_json, in_shm.name(), in_shm.size_bytes(), batch_id);
+	const std::string batch_line =
+	    build_batch_line(tool, config_json, in_shm.name(), in_shm.size_bytes(), batch_id, request_metrics);
 	try {
 		WriteLine(child_.stdin_fd(), batch_line);
 	} catch (const std::runtime_error &e) {
