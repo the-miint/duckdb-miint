@@ -214,14 +214,15 @@ struct AlignBowtie2ShardedBindData : public TableFunctionData {
 	// Ordered shards (largest first) with index path resolved + verified.
 	std::vector<ShardInfo> shards;
 
-	// Number of concurrent single-thread (`-p1`) TAIL lanes that run alongside the
-	// one full-threaded BIG lane. Total bowtie2 OS threads ≈ db_threads + oversubscribe;
-	// safe because tail lanes sleep on FS I/O while the big lane computes (see the
-	// two-pool model in InitGlobal/Execute). -1 is an INTERNAL "auto" sentinel (the
-	// field default): users get auto by omitting the parameter, and auto resolves to
-	// db_threads in InitGlobal. User-supplied values are bind-validated to 0..256
-	// (0 = big lane only). Throughput knob only — alignment output is invariant.
-	int64_t oversubscribe = -1;
+	// EXTRA bowtie2 OS threads to run beyond the core budget (`SET threads`), as
+	// single-thread (`-p1`) TAIL lanes. The big lane takes ~75% of the budget; the
+	// budget remainder plus `oversubscribe` become tail lanes, so total bowtie2
+	// threads = db_threads + oversubscribe (see ResolveLaneSplit). Default 2 — a
+	// light oversubscription that overlaps a few cold tail loads without starving
+	// the big lane (the first HPC run's 1×-p8 + 7×-p1 = 15 threads on 8 cores ran
+	// the big lane at -p4 speed). Bind-validated to 0..256 (0 = no oversubscription:
+	// total threads = db_threads). Throughput knob only — alignment output invariant.
+	int64_t oversubscribe = 2;
 
 	// Breakpoint between the big and tail pools: a shard is "big" iff it needs
 	// >= big_shard_min_batches daemon Submits (ceil(read_count / submit_batch_reads);
@@ -284,13 +285,12 @@ struct AlignBowtie2ShardedGlobalState : public GlobalTableFunctionState {
 	// BIG worker; all others are TAIL workers. fetch_add gives the uniqueness.
 	std::atomic<idx_t> next_worker_ordinal {0};
 
-	// DuckDB thread-pool size (`SET threads`), captured in InitGlobal. Doubles as
-	// the big lane's bowtie2 `-p` (the monster gets all cores for compute).
+	// DuckDB thread-pool size (`SET threads`) = the core budget, captured in InitGlobal.
 	idx_t db_threads = 1;
 
-	// Resolved knobs (sentinels collapsed in InitGlobal where db_threads is known).
-	idx_t big_lane_threads = 1; // = db_threads; the big lane's `-p`
-	idx_t tail_lanes = 0;       // = oversubscribe; concurrent `-p1` tail lanes
+	// Resolved thread split (ResolveLaneSplit, in InitGlobal once db_threads is known).
+	idx_t big_lane_threads = 1; // big lane's bowtie2 `-p` (~75% of db_threads)
+	idx_t tail_lanes = 0;       // count of concurrent `-p1` tail lanes (budget remainder + oversubscribe)
 
 	// Resolved prefetch lookahead, per pool. 0 disables that pool's prefetch.
 	// big = 1 (one shard ahead; the big lane is sequential, single-consumer) and
@@ -559,17 +559,16 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	if (threads_param != input.named_parameters.end() && !threads_param->second.IsNull()) {
 		const int64_t threads_val = bt2_daemon::ValueAsInt("align_bowtie2_sharded", "threads", threads_param->second);
 		if (threads_val != 1) {
-			::miint::EmitWarning(
-			    context, "WARNING: Parameter 'threads' is ignored in sharded mode. "
-			             "Use `SET threads=N` to set the core budget (the big lane runs `-p` that many threads); "
-			             "use `oversubscribe` to control how many single-thread tail lanes run alongside it, and "
-			             "`big_shard_min_batches` to set the big/tail breakpoint.");
+			::miint::EmitWarning(context,
+			                     "WARNING: Parameter 'threads' is ignored in sharded mode. "
+			                     "Use `SET threads=N` to set the core budget (the big lane runs ~75% of it); "
+			                     "use `oversubscribe` for extra single-thread tail threads beyond the budget, and "
+			                     "`big_shard_min_batches` to set the big/tail breakpoint.");
 		}
 	}
 
-	// Concurrent single-thread (`-p1`) tail lanes alongside the one big lane.
-	// 0..256 (0 = big lane only). Omit ⇒ auto (resolves to db_threads in InitGlobal,
-	// kept as the -1 sentinel here).
+	// Extra bowtie2 threads beyond the core budget, run as `-p1` tail lanes
+	// (see ResolveLaneSplit). 0..256 (0 = no oversubscription). Default 2.
 	auto oversub_param = input.named_parameters.find("oversubscribe");
 	if (oversub_param != input.named_parameters.end() && !oversub_param->second.IsNull()) {
 		const int64_t val = bt2_daemon::ValueAsInt("align_bowtie2_sharded", "oversubscribe", oversub_param->second);
@@ -696,17 +695,17 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 		}
 	}
 
-	// `SET threads` is the core budget; it doubles as the big lane's `-p`. Resolve
-	// the oversubscribe -1 "auto" sentinel to db_threads (as many tail lanes as
-	// DuckDB will run alongside the big lane); an explicit value is taken as-is.
-	// max(1, ...): a thread pool always has >=1 worker, but guard a degenerate
-	// NumberOfThreads()==0 so the big lane never sends nthreads=0 to the daemon
-	// (and auto-oversubscribe below never resolves to 0 tail lanes from it).
+	// `SET threads` is the core budget. The big lane takes ~75% of it; the budget
+	// remainder plus `oversubscribe` extra threads become `-p1` tail lanes, so total
+	// bowtie2 threads = db_threads + oversubscribe (see ResolveLaneSplit). max(1, ..):
+	// a thread pool always has >=1 worker, but guard a degenerate NumberOfThreads()==0
+	// so the big lane never sends nthreads=0 to the daemon.
 	const idx_t db_threads =
 	    std::max<idx_t>(1, NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()));
 	gs->db_threads = db_threads;
-	gs->big_lane_threads = db_threads;
-	gs->tail_lanes = bd.oversubscribe < 0 ? db_threads : static_cast<idx_t>(bd.oversubscribe);
+	const auto split = ResolveLaneSplit(db_threads, static_cast<idx_t>(bd.oversubscribe));
+	gs->big_lane_threads = split.big_lane_threads;
+	gs->tail_lanes = split.tail_lanes;
 
 	// Resolve per-pool prefetch lookahead. prefetch_ahead==0 disables both pools.
 	// Otherwise the big lane warms 1 ahead (hardcoded; it is sequential and not a
@@ -928,9 +927,13 @@ void SubmitAndDecode(AlignBowtie2ShardedLocalState &local, const AlignBowtie2Sha
                      const AlignBowtie2ShardedGlobalState &gs, const bt2_daemon::QueryBatch &qb, BatchTelemetry *tel) {
 	const auto &shard = bd.shards[local.current_shard_idx];
 	// Per-role bowtie2 `-p`, fixed for the life of this shard's claim (no mid-run
-	// ramp, so no daemon re-fingerprint churn): the big lane gets all cores for
-	// compute; tail lanes run single-threaded and overlap each other on I/O.
+	// ramp, so no daemon re-fingerprint churn): the big lane gets ~75% of the cores;
+	// tail lanes run single-threaded and overlap each other on I/O.
 	const idx_t nthreads = local.current_is_big ? gs.big_lane_threads : 1;
+	if (tel) {
+		tel->is_big = local.current_is_big; // tag the lane + its resolved -p so offline
+		tel->nthreads = nthreads;           // analysis attributes time to big vs tail
+	}
 	const std::string config_json = BuildAlignConfigJson(bd.named_params, shard.index_prefix, nthreads);
 	bt2_daemon::QueryArrowSchema schema_flags {bd.query_has_sequence2, bd.query_has_qual1, bd.query_has_qual2};
 	const auto t_encode0 = tel ? TelClock::now() : TelClock::time_point {};

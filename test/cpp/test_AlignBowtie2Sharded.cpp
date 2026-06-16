@@ -14,6 +14,44 @@ using duckdb::EstimateBatches;
 using duckdb::idx_t;
 using duckdb::InjectMemoryMappedDefault;
 using duckdb::IsBigShard;
+using duckdb::ResolveLaneSplit;
+
+// ResolveLaneSplit fixes the thread split that the first HPC run got wrong:
+// `-p db_threads` on the big lane + one `-p1` tail lane per extra worker put 15
+// bowtie2 threads on 8 cores, starving the big lane (it ran -p8 at -p4 speed).
+// The new split gives the big lane 75% of the core budget and runs only
+// `oversubscribe` extra threads beyond it as `-p1` tail lanes, so total bowtie2
+// threads = db_threads + oversubscribe (default +2). These cases pin that
+// arithmetic — getting it wrong silently re-introduces the oversubscription.
+TEST_CASE("ResolveLaneSplit: big lane = 75% of budget, tail = remainder + oversubscribe", "[bowtie2_sharded]") {
+	// 8-core budget, oversubscribe by 2: big = round(0.75*8) = 6; total threads =
+	// 8+2 = 10; tail = 10-6 = 4 single-thread lanes. 6 + 4*1 = 10 = db+oversub.
+	auto s = ResolveLaneSplit(/*db_threads*/ 8, /*oversubscribe*/ 2);
+	REQUIRE(s.big_lane_threads == 6);
+	REQUIRE(s.tail_lanes == 4);
+}
+
+TEST_CASE("ResolveLaneSplit: 75% rounds to nearest, floored at one thread", "[bowtie2_sharded]") {
+	REQUIRE(ResolveLaneSplit(4, 2).big_lane_threads == 3); // 0.75*4 = 3
+	REQUIRE(ResolveLaneSplit(2, 2).big_lane_threads == 2); // 0.75*2 = 1.5 -> 2
+	REQUIRE(ResolveLaneSplit(1, 2).big_lane_threads == 1); // 0.75 -> 1 (floor at >=1)
+}
+
+TEST_CASE("ResolveLaneSplit: oversubscribe is EXTRA threads beyond the core budget", "[bowtie2_sharded]") {
+	// Total bowtie2 threads must be db_threads + oversubscribe; tail absorbs the
+	// difference after the big lane's 75% (=6 at db=8).
+	REQUIRE(ResolveLaneSplit(8, 0).tail_lanes == 2);  // no oversubscription: 8-6
+	REQUIRE(ResolveLaneSplit(8, 2).tail_lanes == 4);  // +2 (the chosen default)
+	REQUIRE(ResolveLaneSplit(8, 8).tail_lanes == 10); // +8
+}
+
+TEST_CASE("ResolveLaneSplit: tail never goes negative on a tiny budget", "[bowtie2_sharded]") {
+	// db=2, oversubscribe=0: big=2, total=2, tail=0 -> big lane only (it falls
+	// through and drains any tail shards itself). Must not underflow idx_t.
+	auto s = ResolveLaneSplit(2, 0);
+	REQUIRE(s.big_lane_threads == 2);
+	REQUIRE(s.tail_lanes == 0);
+}
 
 // InjectMemoryMappedDefault gives align_bowtie2_sharded its mm-off default:
 // HPC telemetry measured sequential-fread index loads (memory_mapped=false) at
@@ -194,6 +232,8 @@ TEST_CASE("FormatBatchTelemetry: one newline-terminated TSV line, header-aligned
 	r.t_encode_ms = 3.0;
 	r.t_submit_ms = 55000.0;
 	r.t_decode_ms = 4.5;
+	r.is_big = true;
+	r.nthreads = 6;
 	r.metrics = R"({"worker_majflt":17})";
 
 	const std::string line = duckdb::FormatBatchTelemetry(r);
@@ -207,6 +247,23 @@ TEST_CASE("FormatBatchTelemetry: one newline-terminated TSV line, header-aligned
 	const auto cols = SplitTabs(line);
 	const auto hdr = SplitTabs(duckdb::BatchTelemetryHeader());
 	REQUIRE(cols.size() == hdr.size());
+
+	// (3) The new scheduler-tag columns report the lane and its resolved `-p`, so
+	// offline analysis can attribute time to big vs tail without guessing from the
+	// worker ordinal. Look them up by header name (position-independent).
+	auto col_of = [&](const std::string &name) -> std::string {
+		for (idx_t i = 0; i < hdr.size(); ++i) {
+			if (hdr[i] == name) {
+				return cols[i];
+			}
+		}
+		FAIL("column not found: " << name);
+		return {};
+	};
+	REQUIRE(col_of("lane") == "big");
+	REQUIRE(col_of("nthreads") == "6");
+	// metrics stays the trailing column (its JSON braces/commas can't shift others).
+	REQUIRE(hdr.back() == "metrics");
 }
 
 TEST_CASE("FormatBatchTelemetry: daemon round-trip is its own column, distinct from miint phases",

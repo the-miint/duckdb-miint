@@ -3,6 +3,7 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <iomanip>
@@ -35,6 +36,27 @@ inline idx_t EstimateBatches(idx_t read_count, idx_t submit_batch_reads) {
 // EstimateBatches.
 inline bool IsBigShard(idx_t read_count, idx_t submit_batch_reads, idx_t min_batches) {
 	return EstimateBatches(read_count, submit_batch_reads) >= min_batches;
+}
+
+// Resolve the two-pool thread split from the DuckDB core budget (`SET threads`)
+// and the `oversubscribe` knob. The big lane gets ~75% of the budget (one daemon
+// worker at that `-p`); the rest of the budget PLUS `oversubscribe` extra threads
+// become single-thread (`-p1`) tail lanes. So total bowtie2 OS threads =
+// db_threads + oversubscribe (default +2). Why 75%/+2 and not the original
+// `-p db_threads` + one tail lane per worker: the first HPC run put 1×-p8 + 7×-p1
+// = 15 threads on 8 cores, and the contention ran the big lane (the critical path
+// carrying ~80% of reads) at only -p4 speed. Capping total at db+2 keeps the big
+// lane nearly un-contended while still overlapping a few cold tail loads. Pure /
+// inline (duckdb-free) so it unit-tests in the standalone Catch2 binary.
+struct LaneSplit {
+	idx_t big_lane_threads; // bowtie2 `-p` for the single big lane (~75% of budget)
+	idx_t tail_lanes;       // count of concurrent `-p1` tail lanes
+};
+inline LaneSplit ResolveLaneSplit(idx_t db_threads, idx_t oversubscribe) {
+	const idx_t big = std::max<idx_t>(1, (db_threads * 3 + 2) / 4); // round(0.75 * db_threads)
+	const idx_t total = db_threads + oversubscribe;                 // total bowtie2 OS threads target
+	const idx_t tail = total > big ? total - big : 0;               // -p1 lanes (never underflow)
+	return {big, tail};
 }
 
 // Inject align_bowtie2_sharded's mm-off default: insert `memory_mapped=false`
@@ -111,6 +133,8 @@ struct BatchTelemetry {
 	double t_encode_ms = 0.0;      // BuildQueryIpc
 	double t_submit_ms = 0.0;      // Session::Submit round-trip (daemon black box)
 	double t_decode_ms = 0.0;      // IPC decode loop
+	bool is_big = false;           // which pool this batch ran on (big lane vs tail)
+	idx_t nthreads = 0;            // resolved bowtie2 `-p` for this batch (big=~75%, tail=1)
 	std::string metrics;           // raw daemon `metrics` JSON; empty if absent
 };
 
@@ -121,7 +145,7 @@ struct BatchTelemetry {
 inline const char *BatchTelemetryColumns() {
 	return "wall_ms\tworker_id\tshard\tbatch_seq\tn_reads\tinput_bytes\t"
 	       "n_alignments\toutput_bytes\tt_open_stream_ms\tt_fetch_ms\t"
-	       "t_encode_ms\tt_submit_ms\tt_decode_ms\tmetrics";
+	       "t_encode_ms\tt_submit_ms\tt_decode_ms\tlane\tnthreads\tmetrics";
 }
 
 inline std::string BatchTelemetryHeader() {
@@ -152,7 +176,7 @@ inline std::string FormatBatchTelemetry(const BatchTelemetry &r) {
 	os << r.wall_ms << '\t' << r.worker_id << '\t' << TsvSanitize(r.shard) << '\t' << r.batch_seq << '\t' << r.n_reads
 	   << '\t' << r.input_bytes << '\t' << r.n_alignments << '\t' << r.output_bytes << '\t' << r.t_open_stream_ms
 	   << '\t' << r.t_fetch_ms << '\t' << r.t_encode_ms << '\t' << r.t_submit_ms << '\t' << r.t_decode_ms << '\t'
-	   << TsvSanitize(r.metrics) << '\n';
+	   << (r.is_big ? "big" : "tail") << '\t' << r.nthreads << '\t' << TsvSanitize(r.metrics) << '\n';
 	return os.str();
 }
 
