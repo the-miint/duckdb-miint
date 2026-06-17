@@ -10,48 +10,9 @@
 #include <unistd.h>
 #include <vector>
 
-using duckdb::EstimateBatches;
+using duckdb::EffectiveShardThreads;
 using duckdb::idx_t;
 using duckdb::InjectMemoryMappedDefault;
-using duckdb::IsBigShard;
-using duckdb::ResolveLaneSplit;
-
-// ResolveLaneSplit fixes the thread split that the first HPC run got wrong:
-// `-p db_threads` on the big lane + one `-p1` tail lane per extra worker put 15
-// bowtie2 threads on 8 cores, starving the big lane (it ran -p8 at -p4 speed).
-// The new split gives the big lane 75% of the core budget and runs only
-// `oversubscribe` extra threads beyond it as `-p1` tail lanes, so total bowtie2
-// threads = db_threads + oversubscribe (default +2). These cases pin that
-// arithmetic — getting it wrong silently re-introduces the oversubscription.
-TEST_CASE("ResolveLaneSplit: big lane = 75% of budget, tail = remainder + oversubscribe", "[bowtie2_sharded]") {
-	// 8-core budget, oversubscribe by 2: big = round(0.75*8) = 6; total threads =
-	// 8+2 = 10; tail = 10-6 = 4 single-thread lanes. 6 + 4*1 = 10 = db+oversub.
-	auto s = ResolveLaneSplit(/*db_threads*/ 8, /*oversubscribe*/ 2);
-	REQUIRE(s.big_lane_threads == 6);
-	REQUIRE(s.tail_lanes == 4);
-}
-
-TEST_CASE("ResolveLaneSplit: 75% rounds to nearest, floored at one thread", "[bowtie2_sharded]") {
-	REQUIRE(ResolveLaneSplit(4, 2).big_lane_threads == 3); // 0.75*4 = 3
-	REQUIRE(ResolveLaneSplit(2, 2).big_lane_threads == 2); // 0.75*2 = 1.5 -> 2
-	REQUIRE(ResolveLaneSplit(1, 2).big_lane_threads == 1); // 0.75 -> 1 (floor at >=1)
-}
-
-TEST_CASE("ResolveLaneSplit: oversubscribe is EXTRA threads beyond the core budget", "[bowtie2_sharded]") {
-	// Total bowtie2 threads must be db_threads + oversubscribe; tail absorbs the
-	// difference after the big lane's 75% (=6 at db=8).
-	REQUIRE(ResolveLaneSplit(8, 0).tail_lanes == 2);  // no oversubscription: 8-6
-	REQUIRE(ResolveLaneSplit(8, 2).tail_lanes == 4);  // +2 (the chosen default)
-	REQUIRE(ResolveLaneSplit(8, 8).tail_lanes == 10); // +8
-}
-
-TEST_CASE("ResolveLaneSplit: tail never goes negative on a tiny budget", "[bowtie2_sharded]") {
-	// db=2, oversubscribe=0: big=2, total=2, tail=0 -> big lane only (it falls
-	// through and drains any tail shards itself). Must not underflow idx_t.
-	auto s = ResolveLaneSplit(2, 0);
-	REQUIRE(s.big_lane_threads == 2);
-	REQUIRE(s.tail_lanes == 0);
-}
 
 // InjectMemoryMappedDefault gives align_bowtie2_sharded its mm-off default:
 // HPC telemetry measured sequential-fread index loads (memory_mapped=false) at
@@ -60,7 +21,7 @@ TEST_CASE("ResolveLaneSplit: tail never goes negative on a tiny budget", "[bowti
 // false) must survive untouched. The helper is templated over the map/value
 // types (production: named_parameter_map_t + Value::BOOLEAN; test: a plain
 // std::map<string,bool>) so this intent is exercised in the duckdb-free Catch2
-// binary, the same reason IsBigShard / ShardIndexFiles are inline here.
+// binary, the same reason EffectiveShardThreads/ShardIndexFiles are inline here.
 // These cases encode WHY: absent must become false; a user value must be kept.
 //
 // NOT exercised here: the production named_parameter_map_t is case-INSENSITIVE
@@ -97,57 +58,53 @@ TEST_CASE("InjectMemoryMappedDefault: user memory_mapped=false is preserved (no 
 	REQUIRE(params.at("memory_mapped") == false);
 }
 
-// EstimateBatches / IsBigShard drive the two-pool scheduler's partition. A shard
-// is submitted to the daemon in chunks of `submit_batch_reads` reads; the number
-// of submits it takes is ceil(read_count / submit_batch_reads). IsBigShard calls
-// a shard "big" iff it needs >= big_shard_min_batches submits — enough reads that
-// it is compute-bound and worth handing the full-thread (`-p db_threads`) big
-// lane; fewer ⇒ a load-bound "tail" shard that runs single-threaded (`-p1`)
-// alongside others. These tests pin the breakpoint math because mis-partitioning
-// is the one way the scheduler can regress without changing the alignment output.
-TEST_CASE("EstimateBatches: ceil division, exact and off-by-one boundaries", "[bowtie2_sharded]") {
-	// Empty / sub-batch shards still cost one submit (ceil), except a literally
-	// zero-read shard which costs none.
-	REQUIRE(EstimateBatches(0, 16384) == 0);
-	REQUIRE(EstimateBatches(1, 16384) == 1);
-	REQUIRE(EstimateBatches(16384, 16384) == 1); // exactly one batch
-	REQUIRE(EstimateBatches(16385, 16384) == 2); // one over ⇒ a second submit
-	REQUIRE(EstimateBatches(32768, 16384) == 2); // exactly two
-	REQUIRE(EstimateBatches(32769, 16384) == 3); // one over ⇒ a third
+// EffectiveShardThreads decides bowtie2's `-p` (nthreads) for one shard's batch
+// submit. The intent: as worker threads finish the tail of small shards and
+// exit, the survivors should grow their thread count to fill the cores those
+// workers freed — but never before the work is fully distributed (else they
+// oversubscribe), and never below the user's configured floor. These tests
+// encode WHY each rule exists; flip any rule and one assertion must fail.
+
+TEST_CASE("EffectiveShardThreads: stays at base while shards still being handed out", "[bowtie2_sharded]") {
+	// While work is still being distributed, bumping a worker would oversubscribe
+	// the box against the workers about to claim the remaining shards. So the
+	// gate (all_shards_claimed=false) pins everyone to base, regardless of how
+	// few workers currently hold a shard.
+	REQUIRE(EffectiveShardThreads(/*base*/ 4, /*db*/ 8, /*active*/ 1, /*all_claimed*/ false) == 4);
+	REQUIRE(EffectiveShardThreads(4, 8, 2, false) == 4);
 }
 
-TEST_CASE("EstimateBatches: zero batch size is a safe no-op (no divide-by-zero)", "[bowtie2_sharded]") {
-	// submit_batch_reads is bind-validated to >= 1, but the pure fn must not trap
-	// if ever called with 0 (defensive — a div-by-zero here would crash a worker).
-	REQUIRE(EstimateBatches(1000, 0) == 0);
+TEST_CASE("EffectiveShardThreads: sole survivor takes all cores once work is distributed", "[bowtie2_sharded]") {
+	// The core win: a lone big shard left running after the tail drains should
+	// use the whole box instead of idling half of it at the base `-p`.
+	REQUIRE(EffectiveShardThreads(4, 8, 1, true) == 8);
 }
 
-TEST_CASE("IsBigShard: breakpoint is `>= min_batches` submits", "[bowtie2_sharded]") {
-	// Default min_batches=2: a single-batch shard (read_count <= submit_batch_reads)
-	// is tail; the first read that forces a second submit makes it big. This is the
-	// exact line that sent 837/1000 single-batch shards to the load-bound tail.
-	REQUIRE(IsBigShard(/*reads*/ 16384, /*sbr*/ 16384, /*min*/ 2) == false); // 1 batch  -> tail
-	REQUIRE(IsBigShard(16385, 16384, 2) == true);                            // 2 batches -> big
-	REQUIRE(IsBigShard(1, 16384, 2) == false);                               // tiny shard -> tail
+TEST_CASE("EffectiveShardThreads: multiple survivors keep base (cores already full)", "[bowtie2_sharded]") {
+	// Two survivors at base already saturate an 8-core box (2*4=8); bumping
+	// either would oversubscribe. Fair share (8/2=4) equals base → no change.
+	REQUIRE(EffectiveShardThreads(4, 8, 2, true) == 4);
 }
 
-TEST_CASE("IsBigShard: min_batches=1 makes every non-empty shard big", "[bowtie2_sharded]") {
-	// The floor case: with min_batches=1 even a one-read shard clears the bar, so
-	// the whole set goes to the big lane (sequential, full-thread). Pins that the
-	// breakpoint is inclusive (`>=`), not strict.
-	REQUIRE(IsBigShard(1, 16384, 1) == true);
-	REQUIRE(IsBigShard(16384, 16384, 1) == true);
-	// A literally zero-read shard (defensive: read_count is >=1 in practice via the
-	// GROUP BY) has 0 batches, so it never clears even min_batches=1 ⇒ tail.
-	REQUIRE(IsBigShard(0, 16384, 1) == false);
+TEST_CASE("EffectiveShardThreads: never drops below the configured floor", "[bowtie2_sharded]") {
+	// More live workers than cores can back at base would give a fair share
+	// below base (8/4=2), but base is the user's floor — honor it, don't shrink.
+	REQUIRE(EffectiveShardThreads(4, 8, 4, true) == 4);
+	// Floor also wins when the box has fewer cores than the configured `-p`
+	// (e.g. SET threads=1 with max_threads_per_shard=4): keep the user's value.
+	REQUIRE(EffectiveShardThreads(4, 1, 1, true) == 4);
 }
 
-TEST_CASE("IsBigShard: higher min_batches pushes the breakpoint out", "[bowtie2_sharded]") {
-	// min_batches=3 requires a third submit to qualify as big: two full batches is
-	// still tail, the read that forces the third flips it. Confirms the threshold
-	// tracks min_batches rather than being hard-coded at 2.
-	REQUIRE(IsBigShard(32768, 16384, 3) == false); // 2 batches -> tail
-	REQUIRE(IsBigShard(32769, 16384, 3) == true);  // 3 batches -> big
+TEST_CASE("EffectiveShardThreads: ramps with a finer base as survivors drop", "[bowtie2_sharded]") {
+	// With base=2 on an 8-core box the ramp is visible at >1 survivor:
+	REQUIRE(EffectiveShardThreads(2, 8, 4, true) == 2); // 8/4=2 == base
+	REQUIRE(EffectiveShardThreads(2, 8, 2, true) == 4); // 8/2=4 > base
+	REQUIRE(EffectiveShardThreads(2, 8, 1, true) == 8); // sole survivor
+}
+
+TEST_CASE("EffectiveShardThreads: zero active workers is a safe no-op", "[bowtie2_sharded]") {
+	// A transient read where no worker holds a shard must not divide by zero.
+	REQUIRE(EffectiveShardThreads(4, 8, 0, true) == 4);
 }
 
 // ShardIndexFiles drives prefetch: it must enumerate exactly the bowtie2 index
@@ -232,8 +189,6 @@ TEST_CASE("FormatBatchTelemetry: one newline-terminated TSV line, header-aligned
 	r.t_encode_ms = 3.0;
 	r.t_submit_ms = 55000.0;
 	r.t_decode_ms = 4.5;
-	r.is_big = true;
-	r.nthreads = 6;
 	r.metrics = R"({"worker_majflt":17})";
 
 	const std::string line = duckdb::FormatBatchTelemetry(r);
@@ -247,23 +202,6 @@ TEST_CASE("FormatBatchTelemetry: one newline-terminated TSV line, header-aligned
 	const auto cols = SplitTabs(line);
 	const auto hdr = SplitTabs(duckdb::BatchTelemetryHeader());
 	REQUIRE(cols.size() == hdr.size());
-
-	// (3) The new scheduler-tag columns report the lane and its resolved `-p`, so
-	// offline analysis can attribute time to big vs tail without guessing from the
-	// worker ordinal. Look them up by header name (position-independent).
-	auto col_of = [&](const std::string &name) -> std::string {
-		for (idx_t i = 0; i < hdr.size(); ++i) {
-			if (hdr[i] == name) {
-				return cols[i];
-			}
-		}
-		FAIL("column not found: " << name);
-		return {};
-	};
-	REQUIRE(col_of("lane") == "big");
-	REQUIRE(col_of("nthreads") == "6");
-	// metrics stays the trailing column (its JSON braces/commas can't shift others).
-	REQUIRE(hdr.back() == "metrics");
 }
 
 TEST_CASE("FormatBatchTelemetry: daemon round-trip is its own column, distinct from miint phases",

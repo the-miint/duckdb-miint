@@ -73,9 +73,9 @@ inline void EmitBatchTelemetry(int fd, const BatchTelemetry &rec) {
 // Per-caller known-parameter set. Common bowtie2-align knobs live in
 // `bt2_daemon::kCommonAlignParams`; we union those with the sharded-specific
 // miint-side knobs (`shard_directory`, `read_to_shard`, `threads`,
-// `oversubscribe`, `big_shard_min_batches`, `include_shard_name`). Anything
-// outside this set is rejected at bind time so typos surface at SQL-compile
-// rather than running silently with default semantics.
+// `max_threads_per_shard`, `include_shard_name`). Anything outside this set
+// is rejected at bind time so typos surface at SQL-compile rather than
+// running silently with default semantics.
 // =============================================================================
 
 std::unordered_set<std::string> MakeKnownShardedParams() {
@@ -83,8 +83,7 @@ std::unordered_set<std::string> MakeKnownShardedParams() {
 	s.insert("shard_directory");
 	s.insert("read_to_shard");
 	s.insert("threads"); // sharded-mode warning; not forwarded to daemon
-	s.insert("oversubscribe");
-	s.insert("big_shard_min_batches");
+	s.insert("max_threads_per_shard");
 	s.insert("include_shard_name");
 	s.insert("submit_batch_reads");
 	s.insert("prefetch_ahead");
@@ -119,16 +118,13 @@ bool HasShardIndex(const std::string &prefix) {
 }
 
 // Best-effort: warm a shard's index files into the OS page cache ahead of the
-// daemon's sequential fread load (mm-off default; see InjectMemoryMappedDefault),
-// so the worker that claims this shard next skips the cold network-FS fault that
-// otherwise dominates the long tail (5–99s for a few-read shard). WILLNEED
-// readahead reads from offset 0 forward, which exactly matches the mm-off
-// fread access pattern (the mismatch that made it useless under `--mm`'s random
-// faults is gone). POSIX_FADV_WILLNEED is non-blocking and consumes no alignment
+// daemon's mmap'd (`--mm`) load, so the worker that claims this shard next skips
+// the cold network-FS fault that otherwise dominates the long tail (5–99s for a
+// few-read shard). POSIX_FADV_WILLNEED is non-blocking and consumes no alignment
 // thread — the kernel does the readahead — so it adds load concurrency without
-// touching a lane's `-p` core budget, overlapping more cold tail loads than the
-// number of concurrent tail lanes alone would. A pure cache hint: errors are
-// ignored, alignment results are unaffected. Compiles to a no-op where
+// touching the per-shard `-p` core budget (the only in-allocation way to overlap
+// more than `max_active_shards` cold loads at once). A pure cache hint: errors
+// are ignored, alignment results are unaffected. Compiles to a no-op where
 // POSIX_FADV_WILLNEED is unavailable (macOS/WASM, which never run the daemon).
 //
 // Takes the precomputed file list (cached in InitGlobal) rather than re-deriving
@@ -214,22 +210,14 @@ struct AlignBowtie2ShardedBindData : public TableFunctionData {
 	// Ordered shards (largest first) with index path resolved + verified.
 	std::vector<ShardInfo> shards;
 
-	// EXTRA bowtie2 OS threads to run beyond the core budget (`SET threads`), as
-	// single-thread (`-p1`) TAIL lanes. The big lane takes ~75% of the budget; the
-	// budget remainder plus `oversubscribe` become tail lanes, so total bowtie2
-	// threads = db_threads + oversubscribe (see ResolveLaneSplit). Default 2 — a
-	// light oversubscription that overlaps a few cold tail loads without starving
-	// the big lane (the first HPC run's 1×-p8 + 7×-p1 = 15 threads on 8 cores ran
-	// the big lane at -p4 speed). Bind-validated to 0..256 (0 = no oversubscription:
-	// total threads = db_threads). Throughput knob only — alignment output invariant.
-	int64_t oversubscribe = 2;
-
-	// Breakpoint between the big and tail pools: a shard is "big" iff it needs
-	// >= big_shard_min_batches daemon Submits (ceil(read_count / submit_batch_reads);
-	// see IsBigShard). Default 2 ⇒ every single-batch shard is tail. Bind-validated
-	// to >= 1 (1 ⇒ every non-empty shard is big). Throughput knob only.
-	idx_t big_shard_min_batches = 2;
-
+	// Default 1: one shard per lane — maximize shard-level concurrency with a
+	// single-threaded bowtie2 each. For many-shard workloads on a cold network FS
+	// (the dominant sharded case) per-shard index load dominates and is hidden best
+	// by prefetch + mm-off across many parallel lanes; this measured faster than
+	// fewer fat lanes (e.g. one shard per core beat ceil(cores/4) shards at `-p4`).
+	// Raise for few-shard / few-core workloads where bowtie2's internal `-p`
+	// threading matters more than the number of concurrent shards.
+	idx_t max_threads_per_shard = 1;
 	bool include_shard_name = false;
 
 	// Lower-bound threshold on reads accumulated into one daemon Submit. Larger
@@ -242,67 +230,51 @@ struct AlignBowtie2ShardedBindData : public TableFunctionData {
 	idx_t submit_batch_reads = 16384;
 
 	// How many upcoming shards' index files to warm into page cache (via
-	// POSIX_FADV_WILLNEED) ahead of the per-pool claim frontier — see
+	// POSIX_FADV_WILLNEED) ahead of the claim frontier — see
 	// PrefetchShardIndexFiles. -1 is an INTERNAL "auto" sentinel (the field
-	// default); users get auto by omitting the parameter. In InitGlobal this
-	// resolves per pool (GlobalState::prefetch_ahead_big / _tail): big = 1, tail =
-	// tail_lanes under auto, or the explicit value for both pools' tail frontier.
-	// 0 disables prefetch entirely. User-supplied values are bind-validated to
-	// 0 .. 4096. Throughput knob only — alignment output is identical for any
-	// value (a cache hint, not a semantic change).
+	// default); users get auto by omitting the parameter, and the auto value is
+	// resolved to max_active_shards in InitGlobal (GlobalState::prefetch_ahead).
+	// User-supplied values are bind-validated to 0 (disabled) .. 4096. Throughput
+	// knob only — alignment output is identical for any value (a cache hint, not
+	// a semantic change).
 	int64_t prefetch_ahead = -1;
 };
 
 struct AlignBowtie2ShardedGlobalState : public GlobalTableFunctionState {
-	// Two-pool scheduler. Shards are partitioned in InitGlobal into BIG
-	// (compute-bound; run one-at-a-time on the full-thread `-p db_threads` lane)
-	// and TAIL (load/FS-bound; run single-threaded `-p1`, many concurrently so
-	// their cold index loads overlap). Both vectors hold ORIGINAL indices into
-	// bd.shards, each preserving bd.shards' largest-first order. Built once in
-	// InitGlobal before any Execute runs; read-only thereafter.
-	std::vector<idx_t> big_shards;
-	std::vector<idx_t> tail_shards;
+	// Shared shard-claim counter. Each Execute thread atomically increments
+	// to grab the next unclaimed shard; when this exceeds shards.size() the
+	// scan is done. No per-shard mutex needed — the counter is the only
+	// shared state across worker threads.
+	std::atomic<idx_t> next_shard_idx {0};
 
-	// Lock-free claim frontiers, one per pool (same idiom as the old single
-	// next_shard_idx). A worker grabs the next unclaimed position via fetch_add;
-	// when the returned position is >= the pool size the pool is drained.
-	//   - next_big_idx is touched ONLY by the big worker (ordinal 0), so it needs
-	//     no atomicity for correctness, but stays atomic to keep one idiom.
-	//   - next_tail_idx is shared by the tail workers AND the big worker (which
-	//     falls through to help drain the tail once bigs are done); fetch_add makes
-	//     that race-free.
-	// relaxed ordering suffices: uniqueness of the value each thread gets is
-	// guaranteed by the atomicity of fetch_add itself (an indivisible RMW — two
-	// threads can never read the same position), NOT by the memory order. The
-	// order only governs visibility of surrounding stores, and the only shared
-	// state read after a claim is big_shards/tail_shards/bd.shards, all built
-	// before Execute under the scheduler's thread-launch barrier (which provides
-	// that release/acquire) — so no store needs to be observed via these atomics.
-	std::atomic<idx_t> next_big_idx {0};
-	std::atomic<idx_t> next_tail_idx {0};
+	// Per-shard worker concurrency. Derived from DuckDB's thread pool and
+	// `max_threads_per_shard`: ceil(db_threads / max_threads_per_shard),
+	// clamped to the number of shards. Each miint worker thread orchestrates
+	// one shard at a time; the daemon's per-fingerprint worker pool fans out
+	// internally on `nthreads` = max_threads_per_shard, so total CPU usage
+	// is roughly max_active_shards × max_threads_per_shard ≈ db_threads.
+	idx_t max_active_shards = 1;
 
-	// Hands each InitLocal call a unique 0-based ordinal. Ordinal 0 is the single
-	// BIG worker; all others are TAIL workers. fetch_add gives the uniqueness.
-	std::atomic<idx_t> next_worker_ordinal {0};
+	// Live count of worker threads currently holding a shard (++ on claim, -- on
+	// release in Execute). Read at submit time to redistribute idle cores to
+	// survivors via `EffectiveShardThreads` once `next_shard_idx` shows all
+	// shards are claimed. Advisory only (never affects alignment results), so
+	// relaxed ordering is sufficient.
+	std::atomic<idx_t> active_workers {0};
 
-	// DuckDB thread-pool size (`SET threads`) = the core budget, captured in InitGlobal.
+	// DuckDB thread-pool size, captured in InitGlobal. The ceiling for a
+	// survivor's bowtie2 `-p` when it grows to fill freed cores.
 	idx_t db_threads = 1;
 
-	// Resolved thread split (ResolveLaneSplit, in InitGlobal once db_threads is known).
-	idx_t big_lane_threads = 1; // big lane's bowtie2 `-p` (~75% of db_threads)
-	idx_t tail_lanes = 0;       // count of concurrent `-p1` tail lanes (budget remainder + oversubscribe)
+	// Resolved prefetch lookahead (BindData.prefetch_ahead, with its -1 "auto"
+	// sentinel collapsed to max_active_shards here in InitGlobal where db_threads
+	// is known). 0 = disabled. Read directly in Execute — no per-claim ternary.
+	idx_t prefetch_ahead = 0;
 
-	// Resolved prefetch lookahead, per pool. 0 disables that pool's prefetch.
-	// big = 1 (one shard ahead; the big lane is sequential, single-consumer) and
-	// is NOT user-tunable (YAGNI); tail = oversubscribe under auto (warm one full
-	// wave ahead) or the explicit prefetch_ahead value. Read directly in Execute.
-	idx_t prefetch_ahead_big = 0;
-	idx_t prefetch_ahead_tail = 0;
-
-	// Per-shard index file paths, parallel to bd.shards (indexed by ORIGINAL idx),
-	// computed once in InitGlobal (the filesystem-metadata cache is already warm
-	// there from the HasShardIndex pass). Claim-time prefetch indexes into this so
-	// it issues NO stats on the (slow, the whole reason we prefetch) shard FS.
+	// Per-shard index file paths, parallel to bd.shards, computed once in
+	// InitGlobal (the filesystem-metadata cache is already warm there from the
+	// HasShardIndex pass). Claim-time prefetch indexes into this so it issues NO
+	// stats on the (slow, the whole reason we prefetch) shard filesystem.
 	std::vector<std::vector<std::string>> shard_index_files;
 
 	// Per-batch telemetry sink (env-gated by MIINT_BT2_TELEMETRY; resolved once
@@ -310,22 +282,19 @@ struct AlignBowtie2ShardedGlobalState : public GlobalTableFunctionState {
 	// each batch). When enabled it's either an O_APPEND file fd we own (and must
 	// close) or STDERR_FILENO (which we must NOT close). `telemetry_start` anchors
 	// the per-line `wall_ms`. See InitGlobal for the gate and EmitBatchTelemetry
-	// for the write. Like the resolved knobs above (db_threads, big_lane_threads,
-	// tail_lanes, prefetch_ahead_*), these are written once in InitGlobal — before
-	// any Execute runs, under the scheduler's thread-launch barrier — then read-only
-	// from the worker threads, so no atomics are needed.
+	// for the write. Like the other fields above (db_threads, max_active_shards,
+	// prefetch_ahead), these are written once in InitGlobal — before any Execute
+	// runs, under the scheduler's thread-launch barrier — then read-only from the
+	// worker threads, so no atomics are needed.
 	int telemetry_fd = -1;
 	bool telemetry_owns_fd = false;
 	TelClock::time_point telemetry_start;
 
 	idx_t MaxThreads() const override {
-		// One big lane + `tail_lanes` tail lanes, clamped to the shard count (no
-		// point asking for more workers than shards). DuckDB further clamps to its
-		// own `SET threads`, so the effective concurrent lanes are
-		// min(1 + tail_lanes, SET threads, n_shards). max(1, ...) guards the empty
-		// shard set so we never return 0 (which the planner treats oddly).
-		const idx_t n_shards = big_shards.size() + tail_shards.size();
-		return std::max<idx_t>(1, std::min<idx_t>(1 + tail_lanes, n_shards));
+		// DuckDB clamps to its own scheduler concurrency anyway, but
+		// returning the per-shard ceiling here keeps the planner honest
+		// when the thread pool is larger than the work supports.
+		return max_active_shards;
 	}
 
 	~AlignBowtie2ShardedGlobalState() override {
@@ -359,22 +328,6 @@ struct AlignBowtie2ShardedGlobalState : public GlobalTableFunctionState {
 struct AlignBowtie2ShardedLocalState : public LocalTableFunctionState {
 	std::unique_ptr<gb::Session> session;
 	std::unique_ptr<Connection> input_conn;
-
-	// This worker's role in the two-pool scheduler, assigned once in InitLocal:
-	// ordinal 0 is the single BIG worker (drains big_shards on the `-p db_threads`
-	// lane, then helps drain the tail), every other ordinal is a TAIL worker
-	// (tail_shards only, `-p1`). Set once, then read-only. See Execute's claim.
-	idx_t worker_ordinal = 0;
-	// Whether the CURRENTLY-claimed shard is a big-pool shard (⇒ `-p db_threads`)
-	// or a tail-pool shard (⇒ `-p1`). Set by each claim in Execute; read by
-	// SubmitAndDecode to pick `nthreads`. The big worker flips this to false when
-	// it falls through to tail shards.
-	bool current_is_big = false;
-	// Set once (big worker only) when next_big_idx first runs past big_shards: after
-	// that the big worker claims only from the tail pool, so it must stop bumping
-	// next_big_idx — otherwise every later claim does a useless atomic RMW on it.
-	// Single-threaded (this worker writes and reads it), so a plain bool is enough.
-	bool big_pool_exhausted = false;
 
 	// Current shard claim. Sentinel value DConstants::INVALID_INDEX means
 	// "no shard claimed yet"; Execute will claim next on the next iteration.
@@ -470,10 +423,10 @@ void DetectQueryColumns(ClientContext &context, AlignBowtie2ShardedBindData &bd)
 // per-fingerprint workers in the daemon — that's how cross-shard
 // parallelism falls out for free.
 std::string BuildAlignConfigJson(const named_parameter_map_t &named_params, const std::string &index_prefix,
-                                 idx_t nthreads) {
+                                 idx_t max_threads_per_shard) {
 	bt2_daemon::ConfigJsonBuilder cfg;
 	cfg.append_str("index_path", index_prefix);
-	cfg.append_int("nthreads", static_cast<int64_t>(nthreads));
+	cfg.append_int("nthreads", static_cast<int64_t>(max_threads_per_shard));
 
 	bt2_daemon::AppendBowtie2AlignParams(cfg, named_params, "align_bowtie2_sharded");
 
@@ -549,45 +502,32 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	// time) without tripping the typo guard above. See InjectMemoryMappedDefault.
 	InjectMemoryMappedDefault(bd->named_params, [](bool b) { return Value::BOOLEAN(b); });
 
-	// `threads` is ignored at the table-function level: the two-pool scheduler
-	// derives the big lane's bowtie2 `-p` from DuckDB's own scheduler (`SET
-	// threads=N`), and the tail lanes always run `-p1`. `oversubscribe` and
-	// `big_shard_min_batches` are the sharded-mode tuning knobs.
+	// `threads` is ignored at the table-function level: with the Phase 6
+	// fan-out, cross-shard parallelism is driven by DuckDB's own scheduler
+	// (`SET threads=N`), and per-shard bowtie2 internal threading is driven
+	// by `max_threads_per_shard` (the daemon's `nthreads`).
 	// Preserved the "Parameter 'threads' is ignored in sharded mode" prefix
 	// because miint_warnings_bowtie2.test asserts on that substring.
 	auto threads_param = input.named_parameters.find("threads");
 	if (threads_param != input.named_parameters.end() && !threads_param->second.IsNull()) {
 		const int64_t threads_val = bt2_daemon::ValueAsInt("align_bowtie2_sharded", "threads", threads_param->second);
 		if (threads_val != 1) {
-			::miint::EmitWarning(context,
-			                     "WARNING: Parameter 'threads' is ignored in sharded mode. "
-			                     "Use `SET threads=N` to set the core budget (the big lane runs ~75% of it); "
-			                     "use `oversubscribe` for extra single-thread tail threads beyond the budget, and "
-			                     "`big_shard_min_batches` to set the big/tail breakpoint.");
+			::miint::EmitWarning(
+			    context, "WARNING: Parameter 'threads' is ignored in sharded mode. "
+			             "Use `SET threads=N` to control cross-shard parallelism (one worker thread per shard); "
+			             "use `max_threads_per_shard` to control bowtie2's internal threads per shard.");
 		}
 	}
 
-	// Extra bowtie2 threads beyond the core budget, run as `-p1` tail lanes
-	// (see ResolveLaneSplit). 0..256 (0 = no oversubscription). Default 2.
-	auto oversub_param = input.named_parameters.find("oversubscribe");
-	if (oversub_param != input.named_parameters.end() && !oversub_param->second.IsNull()) {
-		const int64_t val = bt2_daemon::ValueAsInt("align_bowtie2_sharded", "oversubscribe", oversub_param->second);
-		if (val < 0 || val > 256) {
-			throw BinderException("oversubscribe must be between 0 and 256 (got %lld)", static_cast<long long>(val));
-		}
-		bd->oversubscribe = val;
-	}
-
-	// Big/tail breakpoint: a shard is "big" iff it needs >= this many daemon
-	// Submits (see IsBigShard). >= 1 (1 ⇒ every non-empty shard is big).
-	auto min_batches_param = input.named_parameters.find("big_shard_min_batches");
-	if (min_batches_param != input.named_parameters.end() && !min_batches_param->second.IsNull()) {
+	auto max_tps_param = input.named_parameters.find("max_threads_per_shard");
+	if (max_tps_param != input.named_parameters.end() && !max_tps_param->second.IsNull()) {
 		const int64_t val =
-		    bt2_daemon::ValueAsInt("align_bowtie2_sharded", "big_shard_min_batches", min_batches_param->second);
-		if (val < 1) {
-			throw BinderException("big_shard_min_batches must be >= 1 (got %lld)", static_cast<long long>(val));
+		    bt2_daemon::ValueAsInt("align_bowtie2_sharded", "max_threads_per_shard", max_tps_param->second);
+		if (val < 1 || val > 64) {
+			throw BinderException("max_threads_per_shard must be between 1 and 64 (got %lld)",
+			                      static_cast<long long>(val));
 		}
-		bd->big_shard_min_batches = static_cast<idx_t>(val);
+		bd->max_threads_per_shard = static_cast<idx_t>(val);
 	}
 
 	auto include_shard_param = input.named_parameters.find("include_shard_name");
@@ -683,41 +623,20 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 		gs->shard_index_files.push_back(ShardIndexFiles(shard.index_prefix));
 	}
 
-	// Partition shards into the two pools, preserving bd.shards' largest-first
-	// order within each (so the big lane processes the heaviest shard first, and
-	// tail lanes drain largest-first too). Both vectors hold ORIGINAL indices into
-	// bd.shards so shard_index_files[idx] / bd.shards[idx] stay valid lookups.
-	for (idx_t i = 0; i < bd.shards.size(); ++i) {
-		if (IsBigShard(bd.shards[i].read_count, bd.submit_batch_reads, bd.big_shard_min_batches)) {
-			gs->big_shards.push_back(i);
-		} else {
-			gs->tail_shards.push_back(i);
-		}
-	}
-
-	// `SET threads` is the core budget. The big lane takes ~75% of it; the budget
-	// remainder plus `oversubscribe` extra threads become `-p1` tail lanes, so total
-	// bowtie2 threads = db_threads + oversubscribe (see ResolveLaneSplit). max(1, ..):
-	// a thread pool always has >=1 worker, but guard a degenerate NumberOfThreads()==0
-	// so the big lane never sends nthreads=0 to the daemon.
-	const idx_t db_threads =
-	    std::max<idx_t>(1, NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()));
+	// Each miint worker thread orchestrates one shard at a time; the daemon's
+	// per-fingerprint pool fans out internally on `nthreads`
+	// (= max_threads_per_shard). So our slice of the DuckDB thread pool is
+	// `ceil(db_threads / max_threads_per_shard)`, clamped by the shard count
+	// (no point asking for more workers than shards). Mirrors the formula
+	// `align_minimap2_sharded` uses to honor `SET threads` without a separate
+	// knob.
+	const idx_t db_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+	const idx_t derived = (db_threads + bd.max_threads_per_shard - 1) / bd.max_threads_per_shard;
+	gs->max_active_shards = std::max<idx_t>(1, std::min<idx_t>(derived, bd.shards.size()));
 	gs->db_threads = db_threads;
-	const auto split = ResolveLaneSplit(db_threads, static_cast<idx_t>(bd.oversubscribe));
-	gs->big_lane_threads = split.big_lane_threads;
-	gs->tail_lanes = split.tail_lanes;
-
-	// Resolve per-pool prefetch lookahead. prefetch_ahead==0 disables both pools.
-	// Otherwise the big lane warms 1 ahead (hardcoded; it is sequential and not a
-	// knob), and the tail warms `tail_lanes` ahead under auto (-1) — one full wave
-	// of lead — or the explicit value the user gave.
-	if (bd.prefetch_ahead == 0) {
-		gs->prefetch_ahead_big = 0;
-		gs->prefetch_ahead_tail = 0;
-	} else {
-		gs->prefetch_ahead_big = 1;
-		gs->prefetch_ahead_tail = bd.prefetch_ahead < 0 ? gs->tail_lanes : static_cast<idx_t>(bd.prefetch_ahead);
-	}
+	// Resolve the -1 "auto" sentinel now that db_threads (hence max_active_shards)
+	// is known: auto warms one full wave ahead (≈ one processing cycle of lead).
+	gs->prefetch_ahead = bd.prefetch_ahead < 0 ? gs->max_active_shards : static_cast<idx_t>(bd.prefetch_ahead);
 
 	// Telemetry gate (resolved once, here). MIINT_BT2_TELEMETRY is a file path,
 	// or the literal "stderr"/"1" for fd 2. Purely diagnostic and output-
@@ -758,15 +677,8 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 }
 
 unique_ptr<LocalTableFunctionState> InitLocal(ExecutionContext &context, TableFunctionInitInput &,
-                                              GlobalTableFunctionState *gstate) {
+                                              GlobalTableFunctionState *) {
 	auto ls = make_uniq<AlignBowtie2ShardedLocalState>();
-	// Assign this worker's two-pool role. fetch_add hands out unique 0-based
-	// ordinals across the (sequential) InitLocal calls; ordinal 0 is the single
-	// BIG worker, all others are TAIL workers. relaxed is fine — InitLocal runs
-	// before Execute under the scheduler's launch barrier, and the value is only
-	// read by this worker's own Execute thereafter.
-	auto &gs = gstate->Cast<AlignBowtie2ShardedGlobalState>();
-	ls->worker_ordinal = gs.next_worker_ordinal.fetch_add(1, std::memory_order_relaxed);
 	// One DuckDB connection per worker thread — `QueryResult::Fetch` isn't
 	// thread-safe across a shared connection, and each shard needs its own
 	// streaming cursor.
@@ -926,14 +838,13 @@ bool FetchShardBatch(AlignBowtie2ShardedLocalState &local, const AlignBowtie2Sha
 void SubmitAndDecode(AlignBowtie2ShardedLocalState &local, const AlignBowtie2ShardedBindData &bd,
                      const AlignBowtie2ShardedGlobalState &gs, const bt2_daemon::QueryBatch &qb, BatchTelemetry *tel) {
 	const auto &shard = bd.shards[local.current_shard_idx];
-	// Per-role bowtie2 `-p`, fixed for the life of this shard's claim (no mid-run
-	// ramp, so no daemon re-fingerprint churn): the big lane gets ~75% of the cores;
-	// tail lanes run single-threaded and overlap each other on I/O.
-	const idx_t nthreads = local.current_is_big ? gs.big_lane_threads : 1;
-	if (tel) {
-		tel->is_big = local.current_is_big; // tag the lane + its resolved -p so offline
-		tel->nthreads = nthreads;           // analysis attributes time to big vs tail
-	}
+	// Once every shard has been handed out, surviving workers grow their `-p` to
+	// reclaim the cores that finished workers freed (see EffectiveShardThreads).
+	// Changing nthreads re-fingerprints this shard in the daemon (one warm
+	// ~60ms index reload), but it only steps up a bounded number of times.
+	const bool all_shards_claimed = gs.next_shard_idx.load(std::memory_order_relaxed) >= bd.shards.size();
+	const idx_t nthreads = EffectiveShardThreads(bd.max_threads_per_shard, gs.db_threads,
+	                                             gs.active_workers.load(std::memory_order_relaxed), all_shards_claimed);
 	const std::string config_json = BuildAlignConfigJson(bd.named_params, shard.index_prefix, nthreads);
 	bt2_daemon::QueryArrowSchema schema_flags {bd.query_has_sequence2, bd.query_has_qual1, bd.query_has_qual2};
 	const auto t_encode0 = tel ? TelClock::now() : TelClock::time_point {};
@@ -1076,9 +987,11 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 				}
 				continue; // loop back to drain decoded rows
 			}
-			// Shard exhausted — release so the loop claims this worker's next shard.
+			// Shard exhausted — release for re-claim attempt. Drop this worker
+			// from the active count so a surviving worker can grow its `-p`.
 			local.input_stream.reset();
 			local.current_shard_idx = DConstants::INVALID_INDEX;
+			gs.active_workers.fetch_sub(1, std::memory_order_relaxed);
 			// A shard that matched zero reads emits no batch line, so its
 			// cursor-open cost has nothing to attach to; clear it so it can't be
 			// mistaken for the next shard's open. (The next OpenCurrentShardStream
@@ -1087,62 +1000,41 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 			local.telemetry_open_stream_ms = 0.0;
 		}
 
-		// 3. Claim the next shard from this worker's reachable pool(s). fetch_add
-		//    is the entire coordination — no mutex needed. relaxed ordering is
-		//    sufficient because the only shared state read after a claim is
-		//    big_shards/tail_shards/bd.shards, all built before Execute (under the
-		//    scheduler's thread-launch barrier) and never mutated — there is no
-		//    store any thread needs to observe via these atomics. Don't "upgrade"
-		//    to acq_rel without re-checking that invariant.
-		//
-		// The BIG worker (ordinal 0) drains big_shards first, then FALLS THROUGH to
-		// help drain the tail; TAIL workers (ordinal != 0) only ever claim tail
-		// shards. A worker is done when its reachable pool(s) are exhausted.
-		const std::vector<idx_t> *pool = nullptr; // chosen pool list (for prefetch)
-		idx_t pool_pos = 0;                       // claimed position within `pool`
-		idx_t ahead = 0;                          // resolved lookahead for `pool`
-		bool claimed = false;
-		if (local.worker_ordinal == 0 && !local.big_pool_exhausted) {
-			const idx_t p = gs.next_big_idx.fetch_add(1, std::memory_order_relaxed);
-			if (p < gs.big_shards.size()) {
-				local.current_shard_idx = gs.big_shards[p];
-				local.current_is_big = true;
-				pool = &gs.big_shards;
-				pool_pos = p;
-				ahead = gs.prefetch_ahead_big;
-				claimed = true;
-			} else {
-				// Big pool drained. Latch so future iterations skip the (now always
-				// failing) next_big_idx bump and go straight to the tail claim below.
-				local.big_pool_exhausted = true;
-			}
-		}
-		if (!claimed) {
-			const idx_t q = gs.next_tail_idx.fetch_add(1, std::memory_order_relaxed);
-			if (q < gs.tail_shards.size()) {
-				local.current_shard_idx = gs.tail_shards[q];
-				local.current_is_big = false;
-				pool = &gs.tail_shards;
-				pool_pos = q;
-				ahead = gs.prefetch_ahead_tail;
-				claimed = true;
-			}
-		}
-		if (!claimed) {
+		// 3. Claim the next shard atomically. fetch_add is the entire
+		//    coordination — no mutex needed. When the counter exceeds the
+		//    shard count this thread is done.
+		//    `memory_order_relaxed` is sufficient because the only shared
+		//    state we read after claiming is `bd.shards[shard_idx]`, and
+		//    `bd.shards` is built once in Bind() and never mutated
+		//    afterwards — there is no store that any thread needs to
+		//    observe via this atomic. Don't "upgrade" this to acq_rel
+		//    without re-checking that invariant.
+		const idx_t shard_idx = gs.next_shard_idx.fetch_add(1, std::memory_order_relaxed);
+		if (shard_idx >= bd.shards.size()) {
 			output.SetCardinality(0);
 			return;
 		}
-		// Warm the index of the shard `ahead` positions later IN THE SAME POOL into
-		// page cache while this worker loads+aligns its own, so when a worker claims
-		// that position its index load isn't a cold fault. `pool_pos` is unique per
-		// atomic claim within a pool and `ahead` is constant, so each target is
-		// warmed at most once. The first `ahead` positions of each pool have no
-		// earlier claim to warm them, so they load cold — unavoidable at the start.
-		// 0 disables; pure CPU-free kernel readahead, output-invariant.
+		local.current_shard_idx = shard_idx;
+		// Count this worker as active for the duration of the shard (balanced by
+		// the fetch_sub on exhaustion above). Done only after a valid claim, so
+		// the failed-claim path that ends the worker never touches the count.
+		gs.active_workers.fetch_add(1, std::memory_order_relaxed);
+		// Warm the index of a shard `ahead` positions later into page cache while
+		// this worker loads+aligns its own, so by the time some worker claims that
+		// shard its mmap'd index isn't a cold fault. `shard_idx` is unique per
+		// atomic claim and `ahead` is constant, so each target is warmed at most
+		// once (no redundant opens, no shared state). The first `ahead` shards
+		// have no earlier claim to warm them, so they load cold — unavoidable at
+		// the start. `gs.prefetch_ahead` is the resolved lookahead (0 disables);
+		// pure CPU-free kernel readahead, output-invariant.
+		const idx_t ahead = gs.prefetch_ahead;
 		if (ahead > 0) {
-			const idx_t target = pool_pos + ahead;
-			if (target < pool->size()) {
-				PrefetchShardIndexFiles(gs.shard_index_files[(*pool)[target]]);
+			// shard_idx < shards.size() (claim semantics) + ahead <= 4096
+			// (bind-validated) => no meaningful wrap; the guard below is what
+			// bounds the access regardless.
+			const idx_t target = shard_idx + ahead;
+			if (target < bd.shards.size()) {
+				PrefetchShardIndexFiles(gs.shard_index_files[target]);
 			}
 		}
 		// Time the cursor open so its cost shows up (on this shard's first
@@ -1169,8 +1061,7 @@ TableFunction AlignBowtie2ShardedTableFunction::GetFunction() {
 	tf.named_parameters["shard_directory"] = LogicalType::VARCHAR;
 	tf.named_parameters["read_to_shard"] = LogicalType::VARCHAR;
 	tf.named_parameters["threads"] = LogicalType::INTEGER; // ignored in sharded mode; warning at bind
-	tf.named_parameters["oversubscribe"] = LogicalType::INTEGER;
-	tf.named_parameters["big_shard_min_batches"] = LogicalType::INTEGER;
+	tf.named_parameters["max_threads_per_shard"] = LogicalType::INTEGER;
 	tf.named_parameters["include_shard_name"] = LogicalType::BOOLEAN;
 	tf.named_parameters["submit_batch_reads"] = LogicalType::INTEGER;
 	tf.named_parameters["prefetch_ahead"] = LogicalType::INTEGER;

@@ -3,7 +3,6 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
-#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <iomanip>
@@ -13,50 +12,28 @@
 
 namespace duckdb {
 
-// Number of daemon Submits a shard takes: ceil(read_count / submit_batch_reads).
-// FetchShardBatch accumulates up to `submit_batch_reads` reads per Submit (see
-// align_bowtie2_sharded.cpp), so this is the submit count the two-pool scheduler
-// uses to classify a shard. Pure / inline (duckdb-free) so it links into the
-// standalone Catch2 binary. Guards submit_batch_reads==0 (bind-validated to >=1,
-// but an unguarded division by zero here would fault the calling thread) by
-// reporting 0 batches.
-inline idx_t EstimateBatches(idx_t read_count, idx_t submit_batch_reads) {
-	if (submit_batch_reads == 0) {
-		return 0;
+// Effective bowtie2 `-p` (nthreads) for one shard's batch submit. As worker
+// threads finish the tail of small shards and exit, the survivors should grow
+// their thread count to fill the cores those workers freed — otherwise a lone
+// big shard runs at the base `-p` with the rest of the box idle (measured: a
+// dominant shard pinned at -p4 leaves half an 8-core box unused for most of a
+// run). bowtie2's `-p` only partitions reads across threads, so the alignments
+// produced are independent of its value — this is a pure throughput knob.
+//
+// Gated on `all_shards_claimed`: while shards are still being handed out we keep
+// every worker at the base so nobody oversubscribes the workers about to claim
+// the rest. Once the last shard is claimed `active_workers` only decreases, so
+// the result is monotonic non-decreasing per surviving worker (bounded daemon
+// index reloads, no fingerprint flapping). Never drops below
+// `base_threads_per_shard` (the user's floor) and never exceeds `db_threads`
+// (the cores actually available).
+inline idx_t EffectiveShardThreads(idx_t base_threads_per_shard, idx_t db_threads, idx_t active_workers,
+                                   bool all_shards_claimed) {
+	if (!all_shards_claimed || active_workers == 0) {
+		return base_threads_per_shard;
 	}
-	return (read_count + submit_batch_reads - 1) / submit_batch_reads;
-}
-
-// Classify a shard for the two-pool scheduler. "Big" (compute-bound, worth the
-// full-thread `-p db_threads` big lane) iff it needs >= `min_batches` Submits;
-// otherwise "tail" (load/FS-bound, run single-threaded `-p1` alongside other tail
-// shards so their cold index loads overlap). The breakpoint is inclusive (`>=`):
-// min_batches=1 makes every non-empty shard big, the default 2 sends every
-// single-batch shard to the tail. Pure / inline for the same reason as
-// EstimateBatches.
-inline bool IsBigShard(idx_t read_count, idx_t submit_batch_reads, idx_t min_batches) {
-	return EstimateBatches(read_count, submit_batch_reads) >= min_batches;
-}
-
-// Resolve the two-pool thread split from the DuckDB core budget (`SET threads`)
-// and the `oversubscribe` knob. The big lane gets ~75% of the budget (one daemon
-// worker at that `-p`); the rest of the budget PLUS `oversubscribe` extra threads
-// become single-thread (`-p1`) tail lanes. So total bowtie2 OS threads =
-// db_threads + oversubscribe (default +2). Why 75%/+2 and not the original
-// `-p db_threads` + one tail lane per worker: the first HPC run put 1×-p8 + 7×-p1
-// = 15 threads on 8 cores, and the contention ran the big lane (the critical path
-// carrying ~80% of reads) at only -p4 speed. Capping total at db+2 keeps the big
-// lane nearly un-contended while still overlapping a few cold tail loads. Pure /
-// inline (duckdb-free) so it unit-tests in the standalone Catch2 binary.
-struct LaneSplit {
-	idx_t big_lane_threads; // bowtie2 `-p` for the single big lane (~75% of budget)
-	idx_t tail_lanes;       // count of concurrent `-p1` tail lanes
-};
-inline LaneSplit ResolveLaneSplit(idx_t db_threads, idx_t oversubscribe) {
-	const idx_t big = std::max<idx_t>(1, (db_threads * 3 + 2) / 4); // round(0.75 * db_threads)
-	const idx_t total = db_threads + oversubscribe;                 // total bowtie2 OS threads target
-	const idx_t tail = total > big ? total - big : 0;               // -p1 lanes (never underflow)
-	return {big, tail};
+	const idx_t fair_share = db_threads / active_workers; // <= db_threads (active_workers >= 1)
+	return fair_share > base_threads_per_shard ? fair_share : base_threads_per_shard;
 }
 
 // Inject align_bowtie2_sharded's mm-off default: insert `memory_mapped=false`
@@ -133,8 +110,6 @@ struct BatchTelemetry {
 	double t_encode_ms = 0.0;      // BuildQueryIpc
 	double t_submit_ms = 0.0;      // Session::Submit round-trip (daemon black box)
 	double t_decode_ms = 0.0;      // IPC decode loop
-	bool is_big = false;           // which pool this batch ran on (big lane vs tail)
-	idx_t nthreads = 0;            // resolved bowtie2 `-p` for this batch (big=~75%, tail=1)
 	std::string metrics;           // raw daemon `metrics` JSON; empty if absent
 };
 
@@ -145,7 +120,7 @@ struct BatchTelemetry {
 inline const char *BatchTelemetryColumns() {
 	return "wall_ms\tworker_id\tshard\tbatch_seq\tn_reads\tinput_bytes\t"
 	       "n_alignments\toutput_bytes\tt_open_stream_ms\tt_fetch_ms\t"
-	       "t_encode_ms\tt_submit_ms\tt_decode_ms\tlane\tnthreads\tmetrics";
+	       "t_encode_ms\tt_submit_ms\tt_decode_ms\tmetrics";
 }
 
 inline std::string BatchTelemetryHeader() {
@@ -176,7 +151,7 @@ inline std::string FormatBatchTelemetry(const BatchTelemetry &r) {
 	os << r.wall_ms << '\t' << r.worker_id << '\t' << TsvSanitize(r.shard) << '\t' << r.batch_seq << '\t' << r.n_reads
 	   << '\t' << r.input_bytes << '\t' << r.n_alignments << '\t' << r.output_bytes << '\t' << r.t_open_stream_ms
 	   << '\t' << r.t_fetch_ms << '\t' << r.t_encode_ms << '\t' << r.t_submit_ms << '\t' << r.t_decode_ms << '\t'
-	   << (r.is_big ? "big" : "tail") << '\t' << r.nthreads << '\t' << TsvSanitize(r.metrics) << '\n';
+	   << TsvSanitize(r.metrics) << '\n';
 	return os.str();
 }
 
