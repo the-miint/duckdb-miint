@@ -117,9 +117,13 @@ bool HasShardIndex(const std::string &prefix) {
 // few-read shard). POSIX_FADV_WILLNEED is non-blocking and consumes no alignment
 // thread — the kernel does the readahead — so it adds load concurrency without
 // touching the per-shard `-p` core budget (the only in-allocation way to overlap
-// more than `max_active_shards` cold loads at once). A pure cache hint: errors
-// are ignored, alignment results are unaffected. Compiles to a no-op where
-// POSIX_FADV_WILLNEED is unavailable (macOS/WASM, which never run the daemon).
+// more than `max_active_shards` cold loads at once). The WILLNEED hint itself is
+// non-blocking, but the per-file `open()` it requires IS a blocking cold-FS
+// metadata round-trip on the claiming worker's critical path; left in place
+// deliberately, pending an HPC measurement showing it actually stalls the claim
+// frontier before adding a background-prefetch mechanism to hide it. A pure cache
+// hint: errors are ignored, alignment results are unaffected. Compiles to a no-op
+// where POSIX_FADV_WILLNEED is unavailable (macOS/WASM, which never run the daemon).
 //
 // Takes the precomputed file list (cached in InitGlobal) rather than re-deriving
 // it: a fresh ShardIndexFiles() here would issue up to 8 stat()s per call on the
@@ -347,6 +351,21 @@ struct AlignBowtie2ShardedLocalState : public LocalTableFunctionState {
 	idx_t batch_index = 0;
 	idx_t row_in_batch = 0;
 	bool schema_validated = false;
+
+	// Per-claim config-JSON cache. BuildAlignConfigJson is a pure function of
+	// (shard.index_prefix, nthreads): the param map is constant for the whole
+	// query and index_prefix is fixed by current_shard_idx, so the config string
+	// only changes when this worker moves to a new shard or the EffectiveShardThreads
+	// ramp steps nthreads up. We key on (shard_idx, nthreads) and rebuild only on a
+	// miss — avoiding a full param-map re-serialization on every batch (the common
+	// case is one shard, many batches, constant nthreads). Output-identical to
+	// rebuilding each batch. Keying on shard_idx (not just nthreads) is load-bearing
+	// for correctness: two consecutive shards a worker processes can share the same
+	// nthreads, and reusing the prior shard's config would send reads to the wrong
+	// index. Plain values, order-independent — outside the SHM/Arrow teardown block.
+	std::string cached_config_json;
+	idx_t cached_config_shard_idx = DConstants::INVALID_INDEX;
+	idx_t cached_config_nthreads = 0;
 
 	// Telemetry-only (read/written solely on the MIINT_BT2_TELEMETRY path).
 	// `telemetry_batch_seq` orders this worker's batches in the TSV;
@@ -847,12 +866,31 @@ void SubmitAndDecode(AlignBowtie2ShardedLocalState &local, const AlignBowtie2Sha
 	const auto &shard = bd.shards[local.current_shard_idx];
 	// Once every shard has been handed out, surviving workers grow their `-p` to
 	// reclaim the cores that finished workers freed (see EffectiveShardThreads).
-	// Changing nthreads re-fingerprints this shard in the daemon (one warm
-	// ~60ms index reload), but it only steps up a bounded number of times.
+	// Changing nthreads re-fingerprints this shard in the daemon, spawning a new
+	// bowtie2 worker that reloads the FM-index. Under the sharded mm-off default
+	// (memory_mapped=false) that reload is a full sequential fread of the (multi-GB)
+	// index, NOT the cheap warm-mmap minor-fault reload — far from free on a cold
+	// network FS. It stays bounded, though: nthreads only ever steps UP, and only
+	// when db_threads/active_workers crosses an integer, so a surviving worker pays
+	// it a handful of times at most, amortized over that shard's remaining batches
+	// at the higher `-p`. Kept per-batch deliberately: claim-locking nthreads would
+	// pin a big head shard (claimed first under largest-first ordering, while shards
+	// are still being handed out) at the base `-p`, surrendering the very tail-core
+	// reclaim this ramp exists for — claim-lock was evaluated for this workload and
+	// rejected.
 	const bool all_shards_claimed = gs.next_shard_idx.load(std::memory_order_relaxed) >= bd.shards.size();
 	const idx_t nthreads = EffectiveShardThreads(bd.max_threads_per_shard, gs.db_threads,
 	                                             gs.active_workers.load(std::memory_order_relaxed), all_shards_claimed);
-	const std::string config_json = BuildAlignConfigJson(bd.named_params, shard.index_prefix, nthreads);
+	// Reuse the cached config_json unless this worker moved to a new shard or the
+	// ramp stepped nthreads (see the cache fields on LocalState). config_json is a
+	// pure function of (shard.index_prefix, nthreads); rebuilding only on a miss
+	// avoids re-serializing the full param map every batch and is output-identical.
+	if (local.current_shard_idx != local.cached_config_shard_idx || nthreads != local.cached_config_nthreads) {
+		local.cached_config_json = BuildAlignConfigJson(bd.named_params, shard.index_prefix, nthreads);
+		local.cached_config_shard_idx = local.current_shard_idx;
+		local.cached_config_nthreads = nthreads;
+	}
+	const std::string &config_json = local.cached_config_json;
 	bt2_daemon::QueryArrowSchema schema_flags {bd.query_has_sequence2, bd.query_has_qual1, bd.query_has_qual2};
 	const auto t_encode0 = tel ? TelClock::now() : TelClock::time_point {};
 	const auto ipc = bt2_daemon::BuildQueryIpc(qb, schema_flags);
