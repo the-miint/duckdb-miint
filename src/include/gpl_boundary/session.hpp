@@ -4,6 +4,7 @@
 #include "gpl_boundary/shm.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <vector>
@@ -23,6 +24,44 @@ namespace gpl_boundary {
 /// need it, but routing everything through this is cheaper than auditing
 /// each builder for "is the source trusted today?".
 std::string JsonEscape(const std::string &in);
+
+/// Parse the gpl-boundary semver from its `--version` JSON output
+/// (`{"gpl_boundary":"X.Y.Z", ...}`) WITHOUT a full JSON parser. Returns true and
+/// fills major/minor/patch on success; false if the `gpl_boundary` field is
+/// missing or its value is not a dotted version (a pre-release/build suffix after
+/// the patch number is tolerated). Pure + header-inline so callers that need a
+/// minimum daemon version can gate on it, and it is unit-testable in the
+/// duckdb-free Catch2 binary. (The IPC init handshake carries only
+/// protocol_version + per-tool schema_version, so it cannot report the daemon's
+/// release version — this CLI parse is the only way to detect it.)
+inline bool ParseGplBoundaryVersion(const std::string &cli_output, int &major, int &minor, int &patch) {
+	static const std::string kKey = "\"gpl_boundary\"";
+	const auto kpos = cli_output.find(kKey);
+	if (kpos == std::string::npos) {
+		return false;
+	}
+	const auto colon = cli_output.find(':', kpos + kKey.size());
+	if (colon == std::string::npos) {
+		return false;
+	}
+	const auto q1 = cli_output.find('"', colon + 1);
+	if (q1 == std::string::npos) {
+		return false;
+	}
+	const auto q2 = cli_output.find('"', q1 + 1);
+	if (q2 == std::string::npos) {
+		return false;
+	}
+	const std::string ver = cli_output.substr(q1 + 1, q2 - q1 - 1);
+	int a = 0, b = 0, c = 0;
+	if (std::sscanf(ver.c_str(), "%d.%d.%d", &a, &b, &c) < 2) {
+		return false;
+	}
+	major = a;
+	minor = b;
+	patch = c;
+	return true;
+}
 
 /// One entry in the daemon's tool registry, as advertised on the init reply.
 /// Populated by `Session::Initialize()` from the protocol-v3 `tools` field

@@ -97,24 +97,18 @@ std::unordered_set<std::string> MakeKnownShardedParams() {
 
 bool HasShardIndex(const std::string &prefix) {
 	namespace fs = std::filesystem;
-	const std::vector<std::string> small = {".1.bt2", ".2.bt2", ".rev.1.bt2", ".rev.2.bt2"};
-	bool small_ok = true;
-	for (const auto &ext : small) {
-		if (!fs::exists(prefix + ext)) {
-			small_ok = false;
-			break;
+	// A valid index is the complete small (.bt2) set OR the complete large
+	// (.bt2l) set — the same suffix lists ShardIndexFiles enumerates for prefetch
+	// (single source of truth in align_bowtie2_sharded.hpp).
+	auto all_exist = [&](const auto &suffixes) {
+		for (const char *ext : suffixes) {
+			if (!fs::exists(prefix + ext)) {
+				return false;
+			}
 		}
-	}
-	if (small_ok) {
 		return true;
-	}
-	const std::vector<std::string> large = {".1.bt2l", ".2.bt2l", ".rev.1.bt2l", ".rev.2.bt2l"};
-	for (const auto &ext : large) {
-		if (!fs::exists(prefix + ext)) {
-			return false;
-		}
-	}
-	return true;
+	};
+	return all_exist(kBowtie2IndexSuffixesSmall) || all_exist(kBowtie2IndexSuffixesLarge);
 }
 
 // Best-effort: warm a shard's index files into the OS page cache ahead of the
@@ -586,6 +580,10 @@ std::unique_ptr<gb::Session> SpawnAndCheckSession() {
 		                  "If gpl-boundary is installed at a non-standard location, set "
 		                  "MIINT_GPL_BOUNDARY_PATH=<absolute path>.");
 	}
+	// Fail loud if the resolved daemon predates bowtie2 `memory_mapped` support
+	// (>= 0.4.2): the sharded mm-off default depends on it, and older daemons
+	// silently ignore the field — reintroducing the cold-FS regression.
+	bt2_daemon::RequireGplBoundaryVersion(gpl_path, "align_bowtie2_sharded");
 	std::vector<std::string> argv = {gpl_path};
 	gb::ChildProcess child(argv);
 	auto session = std::make_unique<gb::Session>(std::move(child));
@@ -605,38 +603,47 @@ std::unique_ptr<gb::Session> SpawnAndCheckSession() {
 unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bd = input.bind_data->Cast<AlignBowtie2ShardedBindData>();
 
-	// Verify each shard's bowtie2 index files exist on disk. Done here rather
-	// than in Bind because filesystem stats from the planner cost real time
-	// on NFS / very wide shard sets, and the check is best-effort anyway
-	// (the daemon will fail at Submit if a shard disappears mid-query).
 	auto gs = make_uniq<AlignBowtie2ShardedGlobalState>();
-	gs->shard_index_files.reserve(bd.shards.size());
-	for (const auto &shard : bd.shards) {
-		if (!HasShardIndex(shard.index_prefix)) {
-			throw IOException("No valid bowtie2 index found at prefix: %s. "
-			                  "Expected files like %s.1.bt2, %s.rev.1.bt2, etc.",
-			                  shard.index_prefix, shard.index_prefix, shard.index_prefix);
-		}
-		// Cache the file list for prefetch now, while HasShardIndex has just warmed
-		// the metadata cache for these paths — so the claim-time prefetch never
-		// re-stats the slow shard filesystem.
-		gs->shard_index_files.push_back(ShardIndexFiles(shard.index_prefix));
-	}
 
+	// Resolve concurrency + prefetch depth FIRST, before the validation loop.
 	// Each miint worker thread orchestrates one shard at a time; the daemon's
 	// per-fingerprint pool fans out internally on `nthreads`
 	// (= max_threads_per_shard). So our slice of the DuckDB thread pool is
 	// `ceil(db_threads / max_threads_per_shard)`, clamped by the shard count
 	// (no point asking for more workers than shards). Mirrors the formula
 	// `align_minimap2_sharded` uses to honor `SET threads` without a separate
-	// knob.
+	// knob. The prefetch_ahead -1 "auto" sentinel resolves to max_active_shards
+	// (one full wave of lead); we resolve it here so the loop below can skip the
+	// per-shard index-file enumeration entirely when prefetch is disabled.
 	const idx_t db_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
 	const idx_t derived = (db_threads + bd.max_threads_per_shard - 1) / bd.max_threads_per_shard;
 	gs->max_active_shards = std::max<idx_t>(1, std::min<idx_t>(derived, bd.shards.size()));
 	gs->db_threads = db_threads;
-	// Resolve the -1 "auto" sentinel now that db_threads (hence max_active_shards)
-	// is known: auto warms one full wave ahead (≈ one processing cycle of lead).
 	gs->prefetch_ahead = bd.prefetch_ahead < 0 ? gs->max_active_shards : static_cast<idx_t>(bd.prefetch_ahead);
+	const bool prefetch_enabled = gs->prefetch_ahead > 0;
+
+	// Verify each shard's bowtie2 index files exist on disk. Done here rather
+	// than in Bind because filesystem stats from the planner cost real time
+	// on NFS / very wide shard sets, and the check is best-effort anyway
+	// (the daemon will fail at Submit if a shard disappears mid-query). When
+	// prefetch is enabled, cache the existing index-file paths now — HasShardIndex
+	// has just warmed the metadata cache for them — so claim-time prefetch never
+	// re-stats the slow shard filesystem. When prefetch is disabled, skip the
+	// enumeration entirely: shard_index_files stays empty and the (ahead>0)-guarded
+	// prefetch in Execute never reads it.
+	if (prefetch_enabled) {
+		gs->shard_index_files.reserve(bd.shards.size());
+	}
+	for (const auto &shard : bd.shards) {
+		if (!HasShardIndex(shard.index_prefix)) {
+			throw IOException("No valid bowtie2 index found at prefix: %s. "
+			                  "Expected files like %s.1.bt2, %s.rev.1.bt2, etc.",
+			                  shard.index_prefix, shard.index_prefix, shard.index_prefix);
+		}
+		if (prefetch_enabled) {
+			gs->shard_index_files.push_back(ShardIndexFiles(shard.index_prefix));
+		}
+	}
 
 	// Telemetry gate (resolved once, here). MIINT_BT2_TELEMETRY is a file path,
 	// or the literal "stderr"/"1" for fd 2. Purely diagnostic and output-

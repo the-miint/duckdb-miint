@@ -553,3 +553,38 @@ TEST_CASE("Session::Submit increments batch_id across consecutive calls "
 	REQUIRE(session.daemon_pid() == pid_before);
 	REQUIRE_NOTHROW(session.Shutdown());
 }
+
+// =============================================================================
+// ParseGplBoundaryVersion — the bowtie2 version gate parses `--version` JSON to
+// detect a daemon older than the bowtie2 `memory_mapped` minimum (0.4.2), since
+// the IPC handshake can't report the release version.
+// =============================================================================
+
+TEST_CASE("ParseGplBoundaryVersion: extracts the semver from --version JSON", "[gpl-boundary][session]") {
+	int major = -1, minor = -1, patch = -1;
+
+	// Real shape: {"gpl_boundary": "0.4.2", "tools": [...]}.
+	REQUIRE(ParseGplBoundaryVersion(R"({"gpl_boundary": "0.4.2", "tools": []})", major, minor, patch));
+	REQUIRE(major == 0);
+	REQUIRE(minor == 4);
+	REQUIRE(patch == 2);
+
+	// A higher release parses (no whitespace around the colon either).
+	REQUIRE(ParseGplBoundaryVersion(R"({"gpl_boundary":"1.2.3"})", major, minor, patch));
+	REQUIRE((major == 1 && minor == 2 && patch == 3));
+
+	// A pre-release/build suffix after patch is tolerated.
+	REQUIRE(ParseGplBoundaryVersion(R"({"gpl_boundary":"0.4.2-rc1"})", major, minor, patch));
+	REQUIRE((major == 0 && minor == 4 && patch == 2));
+}
+
+TEST_CASE("ParseGplBoundaryVersion: unparseable output is rejected (caller fails loud)", "[gpl-boundary][session]") {
+	int major = 9, minor = 9, patch = 9;
+	// Field absent, plain-text (older/foreign --version), garbage value, and empty
+	// all return false → the caller treats them as "can't confirm >= 0.4.2" and
+	// throws rather than proceeding against an unknown daemon.
+	REQUIRE_FALSE(ParseGplBoundaryVersion(R"({"tools": []})", major, minor, patch));
+	REQUIRE_FALSE(ParseGplBoundaryVersion("gpl-boundary 0.4.1\n", major, minor, patch));
+	REQUIRE_FALSE(ParseGplBoundaryVersion(R"({"gpl_boundary": "not-a-version"})", major, minor, patch));
+	REQUIRE_FALSE(ParseGplBoundaryVersion("", major, minor, patch));
+}

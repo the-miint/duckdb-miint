@@ -204,6 +204,57 @@ TEST_CASE("FormatBatchTelemetry: one newline-terminated TSV line, header-aligned
 	REQUIRE(cols.size() == hdr.size());
 }
 
+TEST_CASE("FormatBatchTelemetry: every column's value sits under its own header name (lockstep)", "[bowtie2_sharded]") {
+	// Count-alignment alone misses a same-count reorder — e.g. n_reads <-> n_alignments
+	// or input_bytes <-> output_bytes, the plausible copy-paste swaps. Pin every field
+	// to a DISTINCT value and assert the value under each header NAME is the one that
+	// field renders to, so any reorder/rename of either BatchTelemetryColumns or
+	// FormatBatchTelemetry fails here instead of silently in an offline-parsed TSV.
+	duckdb::BatchTelemetry r;
+	r.wall_ms = 1.0;
+	r.worker_id = 2;
+	r.shard = "shard_v3";
+	r.batch_seq = 4;
+	r.n_reads = 5;
+	r.input_bytes = 6;
+	r.n_alignments = 7;
+	r.output_bytes = 8;
+	r.t_open_stream_ms = 9.0;
+	r.t_fetch_ms = 10.0;
+	r.t_encode_ms = 11.0;
+	r.t_submit_ms = 12.0;
+	r.t_decode_ms = 13.0;
+	r.metrics = "m14";
+
+	const auto cols = SplitTabs(duckdb::FormatBatchTelemetry(r));
+	const auto hdr = SplitTabs(duckdb::BatchTelemetryHeader());
+	REQUIRE(cols.size() == hdr.size());
+
+	auto value_of = [&](const std::string &name) -> std::string {
+		for (idx_t i = 0; i < hdr.size(); ++i) {
+			if (hdr[i] == name) {
+				return cols[i];
+			}
+		}
+		FAIL("column not found in header: " << name);
+		return {};
+	};
+	REQUIRE(value_of("wall_ms") == "1.000");
+	REQUIRE(value_of("worker_id") == "2");
+	REQUIRE(value_of("shard") == "shard_v3");
+	REQUIRE(value_of("batch_seq") == "4");
+	REQUIRE(value_of("n_reads") == "5");
+	REQUIRE(value_of("input_bytes") == "6");
+	REQUIRE(value_of("n_alignments") == "7");
+	REQUIRE(value_of("output_bytes") == "8");
+	REQUIRE(value_of("t_open_stream_ms") == "9.000");
+	REQUIRE(value_of("t_fetch_ms") == "10.000");
+	REQUIRE(value_of("t_encode_ms") == "11.000");
+	REQUIRE(value_of("t_submit_ms") == "12.000");
+	REQUIRE(value_of("t_decode_ms") == "13.000");
+	REQUIRE(value_of("metrics") == "m14");
+}
+
 TEST_CASE("FormatBatchTelemetry: daemon round-trip is its own column, distinct from miint phases",
           "[bowtie2_sharded]") {
 	// The split is the deliverable: t_submit_ms (the daemon black box) must be a

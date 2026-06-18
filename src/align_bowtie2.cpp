@@ -476,6 +476,9 @@ std::unique_ptr<gb::Session> SpawnAndCheckSession() {
 		                  "If gpl-boundary is installed at a non-standard location, set "
 		                  "MIINT_GPL_BOUNDARY_PATH=<absolute path>.");
 	}
+	// Fail loud if the resolved daemon predates bowtie2 `memory_mapped` support
+	// (>= 0.4.2), since older daemons silently ignore the field.
+	bt2_daemon::RequireGplBoundaryVersion(gpl_path, "align_bowtie2");
 	std::vector<std::string> argv = {gpl_path};
 	gb::ChildProcess child(argv);
 	auto session = std::make_unique<gb::Session>(std::move(child));

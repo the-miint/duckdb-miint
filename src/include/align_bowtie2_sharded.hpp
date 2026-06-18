@@ -57,6 +57,15 @@ void InjectMemoryMappedDefault(Map &params, MakeBool make_bool) {
 	}
 }
 
+// The complete bowtie2 index file set — the single source of truth shared by
+// index validation (HasShardIndex, in the .cpp) and prefetch enumeration
+// (ShardIndexFiles, below). A valid index is the 4 "small" (.bt2) files OR the
+// 4 "large" (.bt2l) files (bowtie2-build emits the large variant for big
+// references). One definition means a future bowtie2 index-file change can't
+// silently desync validation from prefetch.
+inline constexpr const char *kBowtie2IndexSuffixesSmall[] = {".1.bt2", ".2.bt2", ".rev.1.bt2", ".rev.2.bt2"};
+inline constexpr const char *kBowtie2IndexSuffixesLarge[] = {".1.bt2l", ".2.bt2l", ".rev.1.bt2l", ".rev.2.bt2l"};
+
 // The bowtie2 index files that actually exist for a shard prefix — the subset
 // of the 8 candidates (`<prefix>.1.bt2` … `.rev.2.bt2`, and the large-index
 // `.bt2l` variants) present on disk. Used to warm them into the OS page cache
@@ -70,17 +79,20 @@ void InjectMemoryMappedDefault(Map &params, MakeBool make_bool) {
 // EffectiveShardThreads) so the C++ unit test links it without pulling in the
 // .cpp's daemon dependencies.
 inline std::vector<std::string> ShardIndexFiles(const std::string &prefix) {
-	// The 8 possible bowtie2 index files: 4 mandatory in small (.bt2) format,
-	// or 4 in large (.bt2l) format for big references. We list whichever exist.
-	static const char *const kSuffixes[] = {".1.bt2",  ".2.bt2",  ".rev.1.bt2",  ".rev.2.bt2",
-	                                        ".1.bt2l", ".2.bt2l", ".rev.1.bt2l", ".rev.2.bt2l"};
+	// List whichever of the small/large index files exist (an incomplete index
+	// yields a partial list; warming a subset is harmless). Small-then-large
+	// order is preserved for stable output.
 	std::vector<std::string> out;
-	for (const char *ext : kSuffixes) {
-		std::string p = prefix + ext;
-		if (std::filesystem::exists(p)) {
-			out.push_back(std::move(p));
+	auto collect = [&](const auto &suffixes) {
+		for (const char *ext : suffixes) {
+			std::string p = prefix + ext;
+			if (std::filesystem::exists(p)) {
+				out.push_back(std::move(p));
+			}
 		}
-	}
+	};
+	collect(kBowtie2IndexSuffixesSmall);
+	collect(kBowtie2IndexSuffixesLarge);
 	return out;
 }
 
