@@ -1,5 +1,14 @@
 set -e
 
+# Guard against the make-clean-build-target race (issue #83). A single `make`
+# invocation with both `clean` and a build goal lets -j run them concurrently,
+# and clean ends up rm-ing .o files mid-archive.
+if grep -nE '\bmake\b[^\n]*\bclean\b[^\n]*(\blib[A-Za-z0-9_]+\.a\b|\ball\b)' CMakeLists.txt; then
+    echo "ERROR: BUILD_COMMAND has 'make ... clean <target>' on one line (race per #83)." >&2
+    echo "Split into two sequential COMMAND steps." >&2
+    exit 1
+fi
+
 # Start local HTTP server for HTTPS reader tests (unless already set externally)
 HTTP_SERVER_PID=""
 if [ -z "$MIINT_HTTPS_TEST_URL" ]; then
@@ -296,29 +305,32 @@ fi
 if echo "SELECT * FROM miint_versions() WHERE library = 'HDF5';" | ./build/release/duckdb -csv 2>/dev/null | grep -q HDF5; then
     export HDF5_AVAILABLE=1
 fi
-if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'detect_chimera_uchime';" | ./build/release/duckdb -csv 2>/dev/null | grep -q 1; then
+if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'detect_chimera_uchime';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
     export VSEARCH_AVAILABLE=1
 fi
-if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'align_mafft';" | ./build/release/duckdb -csv 2>/dev/null | grep -q 1; then
+if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'align_mafft';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
     export MAFFT_AVAILABLE=1
 fi
 if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'align_abpoa';" | ./build/release/duckdb -csv 2>/dev/null | grep -q 1; then
     export ABPOA_AVAILABLE=1
 fi
-if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'align_sortmerna_rrna';" | ./build/release/duckdb -csv 2>/dev/null | grep -q 1; then
+if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'align_sortmerna_rrna';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
     export SORTMERNA_AVAILABLE=1
 fi
-if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'unifrac_pcoa' AND function_type = 'table';" | ./build/release/duckdb -csv 2>/dev/null | grep -q 1; then
+if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'unifrac_pcoa' AND function_type = 'table';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
     export UNIFRAC_AVAILABLE=1
 fi
+if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'sylph_profile';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
+    export SYLPH_AVAILABLE=1
+fi
 # libcurl streaming-upload transport (off on macOS — vsearch/OpenSSL symbol clash).
-if echo "SELECT 1 FROM miint_versions() WHERE library = 'libcurl';" | ./build/release/duckdb -csv 2>/dev/null | grep -q 1; then
+if echo "SELECT 1 FROM miint_versions() WHERE library = 'libcurl';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
     export MIINT_HAS_CURL=1
 fi
 # Compile-time gate (separate from runtime GPL_BOUNDARY_AVAILABLE which
 # tracks whether the binary is on PATH). Set when the table function is
 # registered — i.e., MIINT_HAS_GPL_BOUNDARY was on at build time.
-if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'phylogeny_fasttree' AND function_type = 'table';" | ./build/release/duckdb -csv 2>/dev/null | grep -q 1; then
+if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'phylogeny_fasttree' AND function_type = 'table';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
     export PHYLOGENY_FASTTREE_AVAILABLE=1
 fi
 

@@ -28,6 +28,7 @@ public:
 		std::string id_column;
 		double skip_threshold;
 		bool has_sequence2 = false;
+		LogicalType id_type = LogicalType(LogicalTypeId::INVALID); // Storage type of id_column; drives read_id output
 
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;

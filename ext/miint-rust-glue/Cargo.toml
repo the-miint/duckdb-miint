@@ -1,0 +1,33 @@
+[package]
+name = "miint_rust_glue"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Umbrella crate that bundles rype + sylph into a single staticlib so they
+# share one copy of the Rust standard library. Linking two independent Rust
+# staticlibs into the same binary produces duplicate-symbol errors
+# (rust_eh_personality, std::panicking::EMPTY_PANIC, ...) — this crate is
+# the canonical fix per https://doc.rust-lang.org/reference/linkage.html
+# ("If you need to link multiple Rust subsystems, you will need to generate
+# a single staticlib"). Same pattern Mozilla uses for the Firefox "rul"
+# super-crate.
+
+[lib]
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+[features]
+default = []
+# Enable sylph (gated on MIINT_ENABLE_SYLPH in CMake; off on WASM + Windows).
+with-sylph = ["dep:sylph"]
+# Enable rype's needletail-based FASTX reader (default-features in upstream).
+# Off on WASM (no needletail) and Windows (cdylib of needletail triggers MSVC
+# linker errors per the historical comment in CMakeLists.txt).
+rype-fastx = ["rype/fastx"]
+
+[dependencies]
+# arrow-ffi is always required: the extension uses Arrow C Data Interface
+# entry points from both crates (rype's classify + sylph_profile).
+rype  = { path = "../rype",  default-features = false, features = ["arrow-ffi"] }
+sylph = { path = "../sylph", default-features = false, features = ["arrow-ffi"], optional = true }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rype.h"
+#include "id_column_utils.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
@@ -76,12 +77,21 @@ inline size_t SampleAvgReadLength(Connection &conn, const std::string &table_quo
 	return fallback;
 }
 
-//! Look up a table or view by name and return its column names, lowercased.
-//! Throws BinderException if the entry does not exist or is not a table/view.
-//! `role` names the entry in the "does not exist" message (e.g. "Table or view",
-//! "chunk table"), so callers can produce role-specific diagnostics.
-inline vector<string> GetTableColumnNamesLower(ClientContext &context, const std::string &table_name,
-                                               const std::string &role = "Table or view") {
+//! Column names (lowercased) and their storage types for a table/view,
+//! index-aligned. The single backing query for both GetTableColumnNamesLower
+//! and the id-type capture in ValidateSequenceTable.
+struct LowercasedColumns {
+	vector<string> names;
+	vector<LogicalType> types;
+};
+
+//! Look up a table or view by name and return its column names (lowercased) and
+//! types, index-aligned. Throws BinderException if the entry does not exist or
+//! is not a table/view. `role` names the entry in the "does not exist" message
+//! (e.g. "Table or view", "chunk table"), so callers can produce role-specific
+//! diagnostics.
+inline LowercasedColumns GetTableColumnsLower(ClientContext &context, const std::string &table_name,
+                                              const std::string &role = "Table or view") {
 	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
 	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
 
@@ -89,45 +99,80 @@ inline vector<string> GetTableColumnNamesLower(ClientContext &context, const std
 		throw BinderException("%s '%s' does not exist", role, table_name);
 	}
 
-	vector<string> col_names;
+	LowercasedColumns cols;
 	if (entry->type == CatalogType::TABLE_ENTRY) {
 		auto &table = entry->Cast<TableCatalogEntry>();
 		auto &columns = table.GetColumns();
 		for (idx_t i = 0; i < columns.LogicalColumnCount(); i++) {
-			col_names.push_back(StringUtil::Lower(columns.GetColumn(LogicalIndex(i)).Name()));
+			auto &col = columns.GetColumn(LogicalIndex(i));
+			cols.names.push_back(StringUtil::Lower(col.Name()));
+			cols.types.push_back(col.Type());
 		}
 	} else if (entry->type == CatalogType::VIEW_ENTRY) {
 		auto &view = entry->Cast<ViewCatalogEntry>();
 		view.BindView(context);
 		auto col_info = view.GetColumnInfo();
-		for (const auto &name : col_info->names) {
-			col_names.push_back(StringUtil::Lower(name));
+		for (idx_t i = 0; i < col_info->names.size(); i++) {
+			cols.names.push_back(StringUtil::Lower(col_info->names[i]));
+			cols.types.push_back(col_info->types[i]);
 		}
 	} else {
 		throw BinderException("'%s' is not a table or view", table_name);
 	}
-	return col_names;
+	return cols;
 }
 
-//! Validate that a table/view exists and has the required columns for RYpe functions.
-//! Returns true if the optional "sequence2" column is present (used by rype_classify
-//! for paired-end reads). All RYpe functions require id_column and "sequence1".
-inline bool ValidateSequenceTable(ClientContext &context, const std::string &table_name, const std::string &id_column) {
-	auto col_names = GetTableColumnNamesLower(context, table_name);
+//! Look up a table or view by name and return its column names, lowercased.
+//! Throws BinderException if the entry does not exist or is not a table/view.
+//! `role` names the entry in the "does not exist" message (e.g. "Table or view",
+//! "chunk table"), so callers can produce role-specific diagnostics.
+inline vector<string> GetTableColumnNamesLower(ClientContext &context, const std::string &table_name,
+                                               const std::string &role = "Table or view") {
+	return GetTableColumnsLower(context, table_name, role).names;
+}
+
+//! Result of validating a RYpe sequence table: whether the optional "sequence2"
+//! column is present (paired-end, used by rype_classify/rype_log_ratio) and the
+//! storage type of the id column.
+struct RypeSequenceTableInfo {
+	bool has_sequence2 = false;
+	LogicalType id_type = LogicalType(LogicalTypeId::INVALID);
+};
+
+//! Validate that a table/view exists and has the required columns for RYpe
+//! functions. Reports whether the optional "sequence2" column is present and the
+//! id column's storage type. All RYpe functions require id_column and
+//! "sequence1". The id column must be VARCHAR, BIGINT, or UUID — RYpe carries
+//! ids as strings internally and emits them back in their SQL storage type, so
+//! only the codec-supported set round-trips losslessly; anything else is
+//! rejected loud at bind, matching align_minimap2 and the rest of the id-aware
+//! tree.
+inline RypeSequenceTableInfo ValidateSequenceTable(ClientContext &context, const std::string &table_name,
+                                                   const std::string &id_column) {
+	auto cols = GetTableColumnsLower(context, table_name);
+	auto &col_names = cols.names;
 
 	auto id_col_lower = StringUtil::Lower(id_column);
-	bool has_id = std::find(col_names.begin(), col_names.end(), id_col_lower) != col_names.end();
+	auto id_it = std::find(col_names.begin(), col_names.end(), id_col_lower);
 	bool has_seq1 = std::find(col_names.begin(), col_names.end(), "sequence1") != col_names.end();
 	bool has_seq2 = std::find(col_names.begin(), col_names.end(), "sequence2") != col_names.end();
 
-	if (!has_id) {
+	if (id_it == col_names.end()) {
 		throw BinderException("Table '%s' missing required column '%s'", table_name, id_column);
 	}
 	if (!has_seq1) {
 		throw BinderException("Table '%s' missing required column 'sequence1'", table_name);
 	}
 
-	return has_seq2;
+	RypeSequenceTableInfo info;
+	info.has_sequence2 = has_seq2;
+	info.id_type = cols.types[static_cast<size_t>(std::distance(col_names.begin(), id_it))];
+
+	if (!IsAllowedIdType(info.id_type)) {
+		throw BinderException("Column '%s' in table '%s' must be %s", id_column, table_name, AllowedIdTypeList());
+	}
+
+	return info;
 }
 
 //! Validate that a table/view exists and contains every column in
@@ -213,7 +258,12 @@ inline std::string MaterializeRypeInputTempTable(Connection &conn, const std::st
 	auto &id_materialized = id_result->Cast<MaterializedQueryResult>();
 	while (auto chunk = id_materialized.Fetch()) {
 		for (idx_t i = 0; i < chunk->size(); i++) {
-			out_read_ids.push_back(chunk->data[0].GetValue(i).ToString());
+			// Carry a NULL id as the empty string, not Value::ToString()'s literal
+			// "NULL". The egress codec (EmitIdCell) maps the empty carrier to SQL
+			// NULL for BIGINT/UUID — matching align_minimap2 — rather than throwing
+			// mid-stream on an unparseable "NULL"; VARCHAR emits the empty string.
+			auto id_val = chunk->data[0].GetValue(i);
+			out_read_ids.push_back(id_val.IsNull() ? std::string() : id_val.ToString());
 		}
 	}
 

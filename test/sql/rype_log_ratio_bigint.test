@@ -1,0 +1,50 @@
+# name: test/sql/rype_log_ratio_bigint.test
+# description: rype_log_ratio mirrors the id_column type (BIGINT) on read_id, matching align_minimap2.
+# group: [sql]
+
+#   Companion to rype_classify_bigint.test — rype_log_ratio shares the same
+#   type-blind id path and must likewise return read_id in the input column's
+#   storage type. Adversarial int64 values prove the round-trip is exact.
+
+require miint
+
+statement ok
+CREATE TABLE seq_bigint (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO seq_bigint VALUES
+    (9007199254740993, 'GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    (9223372036854775807, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT');
+
+query T
+SELECT DISTINCT typeof(read_id)
+FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'seq_bigint');
+----
+BIGINT
+
+query I
+SELECT read_id
+FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'seq_bigint')
+ORDER BY read_id;
+----
+9007199254740993
+9223372036854775807
+
+# --- Disallowed id types are rejected at bind ---
+statement ok
+CREATE TABLE seq_hugeint (read_id HUGEINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO seq_hugeint VALUES (1, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT');
+
+statement error
+SELECT * FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'seq_hugeint');
+----
+must be VARCHAR, BIGINT, or UUID
+
+# --- Cleanup ---
+statement ok
+DROP TABLE seq_bigint;
+
+statement ok
+DROP TABLE seq_hugeint;

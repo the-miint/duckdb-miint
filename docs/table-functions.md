@@ -42,6 +42,7 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`search_sequences_vsearch`](#search_sequences_vsearchquery_table-dbref_table-idthreshold-options) - Global sequence search
 - [`cluster_sequences_vsearch`](#cluster_sequences_vsearchinput_table-idthreshold-options) - Greedy sequence clustering
 - [`deblur`](#deblurinput_table-options) - Deblur amplicon sequence denoising
+- [`sylph_profile`](#sylph_profilesource_table-syldb_path-sample_idcol-options) - FracMinHash relative-abundance profiling (sylph)
 - [`alignment_slice`](#alignment_slicetable_name-start-stop-include_deletionsfalse) - Slice alignments to a genomic region
 - [`unifrac_pcoa`](#unifrac_pcoaobservations-tree-options) - UniFrac distance + Principal Coordinates Analysis
 - [`unifrac_permanova`](#unifrac_permanovaobservations-tree-metadata-options) - UniFrac distance + PERMANOVA pseudo-F + p-value
@@ -2849,7 +2850,7 @@ SELECT flag, count(*) FROM detect_chimera_uchime('queries', db:='refs') GROUP BY
 
 **Algorithm:**
 1. For each query, partition into 4 chunks and search the reference DB using an 8-mer index for candidate parents (up to 16)
-2. Align query to each candidate using WFA2 global alignment
+2. Align query to each candidate using vsearch's SIMD-optimized Needleman-Wunsch global alignment
 3. Select the 2 best parents via smoothed identity (32bp sliding window)
 4. Build a 3-way star alignment and classify each column (match-A, match-B, no-vote, abstain)
 5. Sweep all breakpoints left-to-right, computing h-score at each position
@@ -3181,6 +3182,84 @@ SELECT * FROM unifrac_faith_pd('observations', 'tree',
 Output: `(iteration INTEGER, sample_id VARCHAR, faith_pd DOUBLE)`. Deterministic — same seed produces byte-identical output (no fp32 tolerance needed).
 
 Full parameter reference and worked examples: see **[`docs/unifrac.md`](unifrac.md#unifrac_faith_pd)**.
+
+---
+
+## `sylph_profile(source_table, syldb_path, [sample_id='col'], [options])`
+
+FracMinHash-based relative-abundance profiling of paired-end shotgun metagenomic reads against a pre-built `.syldb` reference database, using [sylph](https://github.com/bluenote-1577/sylph) (Shaw & Yu 2024, *Nature Biotechnology*). Sequences come from a DuckDB table or view — there is no FASTQ path argument — and the database is loaded once per call, mmap-backed. The result is streamed back via the Arrow C Data Interface (zero-copy).
+
+Embedded as a Rust static library (sylph 0.9.0-miint fork; MIT). Linux and macOS only; the function is not registered on WASM or Windows builds.
+
+**Parameters:**
+
+- `source_table` (VARCHAR, positional): Name of a table or view with columns `read_id` (VARCHAR), `sequence1` (VARCHAR), and optionally `sequence2` (VARCHAR). When `sequence2` is present and non-empty per row, the read pair is processed paired-end; otherwise the call is single-end.
+- `syldb_path` (VARCHAR, positional): Path to a sylph `.syldb` reference database, built offline via the upstream `sylph sketch` CLI. The file is opened read-only and shared mmap-style across the call.
+- `sample_id` (VARCHAR, optional): Name of a column on `source_table` to partition by. When set, the function fans out per-sample (parallelized via the per-sample helper used by `deblur` / `align_mafft` / `detect_chimera_uchime_denovo`) and prepends a `sample_id` column to the output. Without this option, the entire table is processed as a single sample.
+- `min_ani` (DOUBLE, default = sylph default): Minimum adjusted ANI (percent, 0..100) for a genome to be reported. Negative or unset = use sylph's built-in default.
+- `min_number_kmers` (UINTEGER, default = 50): Minimum number of matching k-mers required to report a genome.
+- `min_count_correct` (DOUBLE, default = 3.0): Minimum corrected k-mer count for genome detection. Lower values increase sensitivity at the cost of false positives.
+- `estimate_unknown` (BOOLEAN, default false): Renormalize `taxonomic_abundance` to fraction-of-reads-explained, accounting for unknown / unmatched fraction.
+- `dedup_paired_reads` (BOOLEAN, default true): Enable approximate paired-read deduplication during sketching. Matches sylph CLI behavior.
+- `dedup_fpr` (DOUBLE, default 0.0001): Bloom-filter false-positive rate used during sketch-time deduplication. Matches `--fpr` on the upstream CLI.
+- `threads` (UINTEGER, default 0 = auto): Rayon thread count for the inner sylph compute. In per-sample mode, the inner count auto-balances against DuckDB's worker count so that `outer × inner ≈ db_threads` — same total core utilization as `sylph profile -t db_threads`.
+
+**Output schema:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `sample_id` | (matches source column type) | Only present when `sample_id` is set; the partition value for the row |
+| `genome_index` | UINTEGER | 0-based row offset of the genome within the `.syldb` |
+| `genome_name` | VARCHAR | Genome identifier from the sketch (typically the reference FASTA path or accession) |
+| `contig_name` | VARCHAR | First contig name from the genome's sketch — disambiguator when multiple genomes share `genome_name` |
+| `sequence_abundance` | DOUBLE | Fraction of the sample's reads explained by this genome (0..1) |
+| `taxonomic_abundance` | DOUBLE | Coverage-corrected relative abundance (sums to ~1.0 across all reported genomes, or to "explained fraction" when `estimate_unknown := true`) |
+| `adjusted_ani` | DOUBLE | Lambda-adjusted average nucleotide identity (percent) between sample reads and the genome sketch |
+| `eff_cov` | DOUBLE | Effective sequencing coverage of the genome by the sample |
+| `naive_ani` | DOUBLE | Unadjusted ANI (percent) — useful for comparison against `adjusted_ani` to spot low-coverage / high-correction cases |
+| `kmers_reassigned` | UBIGINT | Number of k-mers reassigned away from this genome by the winner-take-all step |
+
+Adding columns at the end is non-breaking; reordering is.
+
+**Behavior:**
+
+- **Single-vs-paired:** auto-detected per-row. Rows whose `sequence2` is NULL or empty are sketched single-end; rows with both sequences set are sketched paired. Mixing within one sample is allowed.
+- **Database lifecycle:** the `.syldb` is loaded once per `sylph_profile` call into the GlobalState and reused across all execute invocations on that call. Back-to-back calls against the same DB pay the load cost each time (a future session-scoped cache is on the roadmap).
+- **Ordering:** `order_preservation_type = NO_ORDER` — rows may interleave across genomes when running per-sample. Sort downstream if needed.
+- **Numerical parity:** bit-identical to upstream `sylph profile --reads` on the same data, modulo a small documented set of divergences in the embedded library (see `localdocs/PLAN-sylph.md` in branch history for the parity audit).
+
+**Examples:**
+
+```sql
+-- Profile a metagenome against the GTDB sylph DB (single sample).
+CREATE TABLE reads AS
+  SELECT read_id, sequence1, sequence2
+  FROM read_fastx('sample_R1.fq.gz', sequence2 := 'sample_R2.fq.gz');
+
+SELECT genome_name, taxonomic_abundance, adjusted_ani, eff_cov
+FROM sylph_profile('reads', '/refs/gtdb-r220-c200-dbv1.syldb')
+ORDER BY taxonomic_abundance DESC
+LIMIT 20;
+```
+
+```sql
+-- Per-sample profiling: one row stream per sample_accession, parallelized.
+CREATE TABLE reads AS
+  SELECT sample_accession, read_id, sequence1, sequence2
+  FROM 'PRJNA000000.parquet';
+
+SELECT *
+FROM sylph_profile('reads', '/refs/gtdb-r220-c200-dbv1.syldb',
+                   sample_id := 'sample_accession',
+                   estimate_unknown := true);
+```
+
+**Error handling:**
+
+- Error if `source_table` does not exist or is missing required columns (`read_id`, `sequence1`).
+- Error if `syldb_path` cannot be opened, is corrupt, or is not a sylph `.syldb` file.
+- Error if `sample_id` is set but the named column does not exist on `source_table` or collides with an output column name.
+- IO error surfaces the underlying sylph diagnostic string (e.g., truncated database, unsupported version).
 
 ---
 

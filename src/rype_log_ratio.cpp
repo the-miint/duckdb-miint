@@ -95,8 +95,13 @@ unique_ptr<FunctionData> RypeLogRatioTableFunction::Bind(ClientContext &context,
 		}
 	}
 
-	// Validate sequence table exists and has required columns
-	data->has_sequence2 = ValidateSequenceTable(context, data->sequence_table, data->id_column);
+	// Validate sequence table exists and has required columns. Capture the id
+	// column's storage type so read_id mirrors it on output (BIGINT/UUID/VARCHAR)
+	// instead of always VARCHAR.
+	auto table_info = ValidateSequenceTable(context, data->sequence_table, data->id_column);
+	data->has_sequence2 = table_info.has_sequence2;
+	data->id_type = table_info.id_type;
+	data->types[0] = data->id_type;
 
 	// Set output schema
 	for (const auto &name : data->names) {
@@ -230,6 +235,7 @@ unique_ptr<LocalTableFunctionState> RypeLogRatioTableFunction::InitLocal(Executi
 void RypeLogRatioTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 	auto &lstate = data_p.local_state->Cast<LocalState>();
+	auto &bind_data = data_p.bind_data->Cast<Data>();
 
 	if (gstate.done) {
 		output.SetCardinality(0);
@@ -288,8 +294,7 @@ void RypeLogRatioTableFunction::Execute(ClientContext &context, TableFunctionInp
 			throw IOException("RYpe returned invalid query_id %lld (expected 0-%zu)", static_cast<long long>(query_id),
 			                  gstate.read_ids.size() - 1);
 		}
-		FlatVector::GetData<string_t>(output.data[0])[i] =
-		    StringVector::AddString(output.data[0], gstate.read_ids[query_id]);
+		EmitIdCell(output.data[0], i, gstate.read_ids[query_id], bind_data.id_type);
 	}
 
 	// --- Column 1 (log_ratio) and Column 2 (fast_path): zero-copy via Arrow conversion ---

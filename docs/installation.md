@@ -88,9 +88,30 @@ Run `miint --help` or `miint <command> --help` for detailed usage.
 
 ## Building
 
+### System prerequisites
+
+These are the system-level tools the build invokes directly. CI installs the same set via `duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml` (with `extra_toolchains: 'rust;omp'`); see `.github/workflows/MainDistributionPipeline.yml` for the upstream reference.
+
+**macOS (Homebrew):**
+```shell
+brew install ninja pkg-config autoconf automake libtool autoconf-archive libomp
+```
+- `ninja` — build driver (`bash build.sh` runs `GEN=ninja make`).
+- `pkg-config` — required by vcpkg's `openssl` port (transitively pulled in by `curl` / `rocksdb`).
+- `autoconf`, `automake`, `libtool`, `autoconf-archive` — vsearch ships `autogen.sh`; without these the configure step fails with `autoreconf: command not found`.
+- `libomp` — required when `MIINT_ENABLE_UNIFRAC=ON` (the default). Apple Clang doesn't ship libomp, and the CMake check looks for Homebrew's `libomp.a` at `/opt/homebrew/opt/libomp` (Apple Silicon) or `/usr/local/opt/libomp` (Intel). Pass `-DMIINT_ENABLE_UNIFRAC=OFF` to build without UniFrac and skip this.
+
+**Linux (Debian/Ubuntu):**
+```shell
+sudo apt-get install -y ninja-build pkg-config autoconf automake libtool autoconf-archive
+```
+OpenMP comes from `libgomp` shipped with gcc, so no separate install is needed for UniFrac.
+
+**Windows:** see CI for the reference setup. The `windows_amd64` MSVC and `windows_amd64_rtools` builds are currently excluded from CI (see `exclude_archs` in `MainDistributionPipeline.yml`); `windows_amd64_mingw` is the supported path.
+
 ### Managing dependencies
 
-**Rust toolchain (required):** The RYpe sequence classification library is written in Rust. Install Rust via [rustup](https://rustup.rs/):
+**Rust toolchain (required):** The RYpe sequence classification library, and the embedded sylph profiler, are written in Rust. Install Rust via [rustup](https://rustup.rs/):
 ```shell
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
@@ -102,8 +123,29 @@ git clone https://github.com/Microsoft/vcpkg.git
 export VCPKG_TOOLCHAIN_PATH=`pwd`/vcpkg/scripts/buildsystems/vcpkg.cmake
 ```
 
+**Submodules (required):** Several embedded libraries (MAFFT, vsearch, sylph, scikit-bio-binaries, unifrac-binaries, etc.) are git submodules. After cloning:
+```shell
+git submodule update --init --recursive
+```
+
 ### Build system
-We use [Ninja](https://ninja-build.org) for quick builds. The easiest install is to use prebuilt [release](https://github.com/ninja-build/ninja/releases) binaries.
+We use [Ninja](https://ninja-build.org) for quick builds. The easiest install is to use prebuilt [release](https://github.com/ninja-build/ninja/releases) binaries, or `brew install ninja` / `apt-get install ninja-build` as listed above.
+
+### Optional feature flags
+
+Pass these to CMake via `EXT_FLAGS` (e.g. `EXT_FLAGS="-DMIINT_ENABLE_UNIFRAC=OFF" bash build.sh`) to opt out of optional subsystems:
+
+| Flag | Default | What it controls |
+|------|---------|------------------|
+| `MIINT_ENABLE_CURL` | `ON` | libcurl-based streaming uploads (auto-disabled on macOS + WASM) |
+| `MIINT_ENABLE_HDF5` | `ON` | HDF5/BIOM reader and writer |
+| `MIINT_ENABLE_MAFFT` | `ON` | MAFFT multiple sequence alignment |
+| `MIINT_ENABLE_SORTMERNA` | `ON` | SortMeRNA rRNA alignment (requires RocksDB) |
+| `MIINT_ENABLE_SYLPH` | `ON` | sylph FracMinHash relative-abundance profiling (Rust) |
+| `MIINT_ENABLE_GPL_BOUNDARY` | `ON` | gpl-boundary subsystem (process pipes + Arrow IPC over POSIX shm) |
+| `MIINT_ENABLE_UNIFRAC` | `ON` | UniFrac (PCoA / PERMANOVA / Faith PD) — requires libomp on macOS |
+
+WASM (Emscripten) builds automatically disable HDF5, SortMeRNA, sylph, gpl-boundary, MAFFT, and UniFrac.
 
 ### Build steps
 Now to build the extension, run:

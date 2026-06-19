@@ -1,0 +1,2 @@
+Sample_file	Genome_file	Taxonomic_abundance	Sequence_abundance	Adjusted_ANI	Eff_cov	ANI_5-95_percentile	Eff_lambda	Lambda_5-95_percentile	Median_cov	Mean_cov_geq1	Containment_ind	Naive_ANI	kmers_reassigned	Contig_name
+tiny_reads_R1.fq.gz	tiny_refs/e.coli-K12.fasta.gz	100.0000	100.0000	98.89	0.032	96.80-100.69	0.032	0.02-0.06	1	1.016	439/19485	88.48	0	NC_007779.1 Escherichia coli str. K-12 substr. W3110, complete sequence

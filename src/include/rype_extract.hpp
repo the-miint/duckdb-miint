@@ -28,6 +28,7 @@ struct RypeExtractData : public TableFunctionData {
 	size_t k;
 	size_t w;
 	uint64_t salt;
+	LogicalType id_type = LogicalType(LogicalTypeId::INVALID); // Storage type of id_column; drives read_id output
 
 	std::vector<std::string> names;
 	std::vector<LogicalType> types;

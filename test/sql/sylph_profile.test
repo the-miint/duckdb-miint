@@ -1,0 +1,153 @@
+# name: test/sql/sylph_profile.test
+# description: test sylph_profile table function
+# group: [sql]
+
+require miint
+
+require-env SYLPH_AVAILABLE
+
+# --- Phase 3.1: function is registered and discoverable -------------------
+
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'sylph_profile';
+----
+1
+
+query T
+SELECT function_type FROM duckdb_functions() WHERE function_name = 'sylph_profile';
+----
+table
+
+# --- Phase 3.2/3.3: golden values match upstream sylph profile -----------
+
+# Load the bundled K12 paired-end fixtures into a DuckDB table. read_fastx
+# produces (read_id, sequence1, sequence2) columns, which sylph_profile's
+# bind validates.
+statement ok
+CREATE TABLE k12_reads AS
+  SELECT * FROM read_fastx(
+    'data/sylph/tiny_reads_R1.fq.gz',
+    sequence2 := 'data/sylph/tiny_reads_R2.fq.gz');
+
+# Sanity check: paired-end columns are present.
+query III
+SELECT count(*),
+       count(sequence1) > 0,
+       count(sequence2) > 0
+  FROM k12_reads;
+----
+2500	true	true
+
+# K12 should be the only genome passing the default 95% adjusted-ANI cutoff
+# (sister strains EC590 and o157 fall below). Output ordered by taxonomic
+# abundance descending — K12 is the single row, ~100%.
+query I
+SELECT count(*)
+  FROM sylph_profile('k12_reads', 'data/sylph/tiny.syldb');
+----
+1
+
+query TT
+SELECT regexp_extract(genome_name, 'K12'),
+       round(taxonomic_abundance, 2)
+  FROM sylph_profile('k12_reads', 'data/sylph/tiny.syldb');
+----
+K12	100.00
+
+# Verify all 9 output columns exist with the right types.
+query I
+SELECT count(*) FROM (DESCRIBE SELECT * FROM sylph_profile('k12_reads', 'data/sylph/tiny.syldb'));
+----
+9
+
+# adjusted_ani matches upstream sylph CLI's expected_profile.tsv to 0.5
+# percentage points (CLI golden: 98.89%).
+query I
+SELECT count(*) FROM sylph_profile('k12_reads', 'data/sylph/tiny.syldb')
+  WHERE adjusted_ani * 100.0 BETWEEN 98.4 AND 99.4;
+----
+1
+
+# --- Phase 3.4: error paths ------------------------------------------------
+
+# Nonexistent source table.
+statement error
+SELECT * FROM sylph_profile('nonexistent_table', 'data/sylph/tiny.syldb');
+----
+does not exist
+
+# Missing required column 'sequence1'.
+statement ok
+CREATE TABLE no_seq(read_id VARCHAR);
+
+statement error
+SELECT * FROM sylph_profile('no_seq', 'data/sylph/tiny.syldb');
+----
+sequence1
+
+# Nonexistent .syldb path.
+statement error
+SELECT * FROM sylph_profile('k12_reads', '/tmp/__sylph_no_such_file__.syldb');
+----
+failed to open
+
+# --- Phase 3.5: view support ----------------------------------------------
+
+# A VIEW over the same fastq must produce identical results to the base table.
+statement ok
+CREATE VIEW k12_view AS SELECT * FROM k12_reads;
+
+query II
+SELECT round(taxonomic_abundance, 4),
+       round(adjusted_ani, 4)
+  FROM sylph_profile('k12_view', 'data/sylph/tiny.syldb');
+----
+100.0000	0.9889
+
+# --- Phase 3.6: named parameter validation --------------------------------
+
+# min_ani must be in [0, 1]; 50 is invalid.
+statement error
+SELECT * FROM sylph_profile('k12_reads', 'data/sylph/tiny.syldb', min_ani := 50);
+----
+must be in [0, 1]
+
+# Setting min_ani to 0.999 (above K12's adjusted_ani of 98.89%) drops it.
+query I
+SELECT count(*)
+  FROM sylph_profile('k12_reads', 'data/sylph/tiny.syldb', min_ani := 0.999);
+----
+0
+
+# Disabling dedup must not crash and must still recover K12.
+query I
+SELECT count(*)
+  FROM sylph_profile('k12_reads', 'data/sylph/tiny.syldb', dedup_paired_reads := false);
+----
+1
+
+# An absurdly high min_number_kmers cutoff drops K12. Catches plumbing
+# regressions in the Bind-time uint -> double cast for the FFI struct.
+query I
+SELECT count(*)
+  FROM sylph_profile('k12_reads', 'data/sylph/tiny.syldb', min_number_kmers := 100000000);
+----
+0
+
+# Same plumbing class for the second untested float param: an absurd
+# min_count_correct floor drops K12.
+query I
+SELECT count(*)
+  FROM sylph_profile('k12_reads', 'data/sylph/tiny.syldb', min_count_correct := 1e8);
+----
+0
+
+# Exact-dedup (dedup_fpr := 0.0) takes the FxHashSet branch in sylph's
+# sketcher — order-independent and deterministic. K12 still detected and
+# adjusted_ani matches the golden 98.89% within 4 decimal places.
+query II
+SELECT round(taxonomic_abundance, 2),
+       round(adjusted_ani, 4)
+  FROM sylph_profile('k12_reads', 'data/sylph/tiny.syldb', dedup_fpr := 0.0);
+----
+100.00	0.9889
