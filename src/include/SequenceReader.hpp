@@ -42,6 +42,13 @@ public:
 	// Defaults to SIZE_MAX, preserving the row-only behavior for existing callers.
 	SequenceRecordBatch read(const int n, const size_t max_bytes = SIZE_MAX);
 
+	// Test seam: the largest number of records materialized by any single underlying stream
+	// poll over this reader's lifetime. Lets tests assert that large records do not trigger
+	// oversized prefetches (see dynamic poll sizing in read_se/read_pe).
+	size_t MaxPollCount() const {
+		return max_poll_count_;
+	}
+
 private:
 	using SeqStreamIn = klibpp::SeqStreamIn;
 
@@ -63,6 +70,12 @@ private:
 	bool first_read_; // Track if we need to return buffered data
 	std::vector<klibpp::KSeq> buffered_read1_;
 	std::vector<klibpp::KSeq> buffered_read2_;
+
+	// Running estimate of bytes per record (per pair in PE), used to size each poll so a
+	// single read_stream call never materializes far more than the byte budget. 0 until the
+	// first record is accepted.
+	size_t observed_record_bytes_ = 0;
+	size_t max_poll_count_ = 0; // test seam; see MaxPollCount()
 
 	SequenceRecordBatch read_se(const int n, const size_t max_bytes);
 	SequenceRecordBatch read_pe(const int n, const size_t max_bytes);

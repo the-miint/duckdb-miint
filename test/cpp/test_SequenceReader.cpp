@@ -449,6 +449,81 @@ TEST_CASE("SequenceReader byte budget PE: budget counts both mates", "[SequenceR
 	REQUIRE((total == 5));
 }
 
+TEST_CASE("SequenceReader byte budget SE: large records do not over-prefetch", "[SequenceReader][byte_budget]") {
+	// Each record alone exceeds the budget, so the byte budget caps the batch at one record.
+	// The poll that feeds that batch must NOT eagerly materialize a fixed chunk of large
+	// records: with a 500 B budget and ~4 KB records, a single poll should pull one record,
+	// not POLL_CHUNK_SIZE of them. This is the memory bound the byte budget is meant to give.
+	TempFileFixture fixture;
+	auto path = "budget_large_prefetch.fq";
+	std::vector<std::string> records;
+	for (int i = 0; i < 12; i++) {
+		records.push_back(fixture.simple_read("r" + std::to_string(i), std::string(2000, 'A'), std::string(2000, 'I')));
+	}
+	fixture.write_temp_fastq(path, records);
+
+	miint::SequenceReader reader(path);
+
+	size_t total = 0;
+	for (int call = 0; call < 50; call++) {
+		auto batch = reader.read(100, 500); // budget << one record
+		if (batch.empty()) {
+			break;
+		}
+		REQUIRE((batch.size() == 1));
+		total += batch.size();
+	}
+	REQUIRE((total == 12));
+	// The dynamic poll must size to the budget: at most one ~4 KB record per poll.
+	REQUIRE((reader.MaxPollCount() == 1));
+}
+
+TEST_CASE("SequenceReader byte budget PE: large pairs do not over-prefetch", "[SequenceReader][byte_budget]") {
+	TempFileFixture fixture;
+	auto r1 = "budget_large_pe_r1.fq";
+	auto r2 = "budget_large_pe_r2.fq";
+	std::vector<std::string> recs1, recs2;
+	for (int i = 0; i < 8; i++) {
+		std::string id = "pair" + std::to_string(i);
+		recs1.push_back(fixture.simple_read(id, std::string(2000, 'A'), std::string(2000, 'I')));
+		recs2.push_back(fixture.simple_read(id, std::string(2000, 'C'), std::string(2000, 'H')));
+	}
+	fixture.write_temp_fastq(r1, recs1);
+	fixture.write_temp_fastq(r2, recs2);
+
+	miint::SequenceReader reader(r1, r2);
+
+	size_t total = 0;
+	for (int call = 0; call < 50; call++) {
+		auto batch = reader.read(100, 500); // budget << one pair (~8 KB)
+		if (batch.empty()) {
+			break;
+		}
+		REQUIRE((batch.size() == 1));
+		total += batch.size();
+	}
+	REQUIRE((total == 8));
+	REQUIRE((reader.MaxPollCount() == 1));
+}
+
+TEST_CASE("SequenceReader byte budget SE: small records still poll in chunks", "[SequenceReader][byte_budget]") {
+	// Guard against the dynamic poll collapsing to 1 for the common short-read case: with a
+	// generous budget and tiny records, the poll must still amortize (reach POLL_CHUNK_SIZE).
+	TempFileFixture fixture;
+	auto path = "budget_small_chunked.fq";
+	std::vector<std::string> records;
+	for (int i = 0; i < 200; i++) {
+		records.push_back(fixture.simple_read("r" + std::to_string(i), "ACGT", "IIII"));
+	}
+	fixture.write_temp_fastq(path, records);
+
+	miint::SequenceReader reader(path);
+	auto batch = reader.read(100, 1024 * 1024); // generous budget, fills to n
+	REQUIRE((batch.size() == 100));
+	// Must still batch the poll, not degrade to one-record-at-a-time.
+	REQUIRE((reader.MaxPollCount() > 1));
+}
+
 TEST_CASE("SequenceReader byte budget default (SIZE_MAX) unchanged behavior", "[SequenceReader][byte_budget]") {
 	// Regression: callers that don't pass a budget see the same rows-only behavior.
 	TempFileFixture fixture;
