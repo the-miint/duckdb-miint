@@ -10,9 +10,13 @@
 // calls inside the `duckdb` namespace must use the absolute `::miint::`
 // qualifier to avoid resolving to duckdb::miint first.
 
+#include "gpl_boundary/process.hpp"
 #include "nanoarrow/nanoarrow.h"
 
 #include <cstring>
+#include <mutex>
+#include <tuple>
+#include <unistd.h>
 
 namespace duckdb {
 namespace bt2_daemon {
@@ -127,6 +131,7 @@ const std::unordered_set<std::string> kCommonAlignParams = {
     "no_1mm_upfront",
     "deterministic_seeds",
     "lowseeds",
+    "memory_mapped",
 };
 
 void AppendBowtie2AlignParams(ConfigJsonBuilder &cfg, const named_parameter_map_t &named_params, const char *caller) {
@@ -283,6 +288,15 @@ void AppendBowtie2AlignParams(ConfigJsonBuilder &cfg, const named_parameter_map_
 	if (auto *v = get("lowseeds")) {
 		cfg.append_str("lowseeds", ValueAsStr(caller, "lowseeds", *v));
 	}
+
+	// 9. Index loading (gpl-boundary v0.4.2+). `--mm` is the daemon's default, so
+	//    UNLIKE the section-5 bools we only emit a value when the user sets one —
+	//    omitting it preserves the daemon's mmap-on behavior. A diagnostic/perf
+	//    lever: `memory_mapped:=false` makes the worker fread the whole index
+	//    sequentially (vs lazy random page-faults), which can win on a cold
+	//    network FS at the cost of anonymous RSS. Output-invariant. Silently
+	//    ignored by pre-0.4.2 daemons (which always mmap).
+	pass_bool("memory_mapped");
 }
 
 void RegisterBowtie2AlignNamedParameterTypes(TableFunction &tf) {
@@ -326,6 +340,7 @@ void RegisterBowtie2AlignNamedParameterTypes(TableFunction &tf) {
 	tf.named_parameters["no_1mm_upfront"] = LogicalType::BOOLEAN;
 	tf.named_parameters["deterministic_seeds"] = LogicalType::BOOLEAN;
 	tf.named_parameters["lowseeds"] = LogicalType::VARCHAR;
+	tf.named_parameters["memory_mapped"] = LogicalType::BOOLEAN;
 }
 
 const char *const kOutputColumnNames[kNumOutputColumns] = {
@@ -751,6 +766,63 @@ void EmitChunkRows(DataChunk &output, idx_t to_emit, idx_t row_start, const Arro
 		emit_nullable_str(v_tag_md, mask_tag_md, col_tag_md);
 		emit_nullable_str(v_tag_sa, mask_tag_sa, col_tag_sa);
 	}
+}
+
+void RequireGplBoundaryVersion(const std::string &binary_path, const char *caller) {
+	// The daemon's release version is a process-level constant, but the sharded
+	// SpawnAndCheckSession runs once PER worker thread (InitLocal) — so validate
+	// once and cache the success. A failed check throws and leaves the once_flag
+	// unset, so a later query (e.g. after the user upgrades the binary) re-checks;
+	// a too-old daemon therefore always fails loud, never silently proceeds.
+	static std::once_flag flag;
+	std::call_once(flag, [&]() {
+		// Minimum gpl-boundary release that supports the bowtie2 `memory_mapped`
+		// (--mm toggle) config field. Below this, the field is silently ignored.
+		constexpr int kReqMajor = 0, kReqMinor = 4, kReqPatch = 2;
+
+		int major = 0, minor = 0, patch = 0;
+		bool parsed = false;
+		try {
+			// Run `<binary> --version` and drain its small JSON stdout
+			// ({"gpl_boundary":"X.Y.Z", ...}). Mirrors the drain pattern in
+			// align_bowtie2.cpp's bowtie2_available() probe.
+			std::vector<std::string> argv = {binary_path, "--version"};
+			gb::ChildProcess child(argv);
+			auto drain = [](int fd, std::string &dst) {
+				if (fd < 0) {
+					return;
+				}
+				char buf[256];
+				ssize_t n;
+				while ((n = ::read(fd, buf, sizeof(buf))) > 0) {
+					dst.append(buf, static_cast<size_t>(n));
+				}
+			};
+			std::string out;
+			std::string err;
+			drain(child.stdout_fd(), out);
+			drain(child.stderr_fd(), err);
+			child.Wait();
+			parsed = gb::ParseGplBoundaryVersion(out, major, minor, patch);
+		} catch (...) {
+			// Any spawn/read failure → treat as "version undetermined" and fail
+			// loud below, rather than proceeding against an unknown daemon.
+			parsed = false;
+		}
+
+		const bool at_least =
+		    parsed && std::tie(major, minor, patch) >= std::make_tuple(kReqMajor, kReqMinor, kReqPatch);
+		if (!at_least) {
+			const std::string found =
+			    parsed ? (std::to_string(major) + "." + std::to_string(minor) + "." + std::to_string(patch))
+			           : std::string("unknown (could not parse `gpl-boundary --version`)");
+			throw IOException(
+			    "%s requires gpl-boundary >= 0.4.2 (for the bowtie2 `memory_mapped` index-load control), but the "
+			    "binary at %s reports version %s. Upgrade with `SELECT install_gpl_boundary();`, or point "
+			    "MIINT_GPL_BOUNDARY_PATH at a >= 0.4.2 binary.",
+			    caller, binary_path, found);
+		}
+	});
 }
 
 } // namespace bt2_daemon

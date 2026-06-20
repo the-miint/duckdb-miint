@@ -316,6 +316,67 @@ TEST_CASE("Session::Submit happy path: batch JSON and shm round trip", "[gpl-bou
 	::unlink(capture_path.c_str());
 }
 
+TEST_CASE("Session::Submit opts into per-batch metrics only when requested", "[gpl-boundary][session]") {
+	// gpl-boundary v0.4.2 added an opt-in `metrics` object (bowtie2 worker
+	// getrusage: ru_majflt, CPU/faults/RSS, worker_reused). It is gated on a
+	// top-level `"metrics":true` in the BatchRequest — non-opted batches pay
+	// nothing (no extra syscalls daemon-side). miint must send the flag ONLY when
+	// its telemetry is enabled, so an ordinary run is unaffected. This pins the
+	// wire contract: request_metrics=true emits `"metrics":true`; the default
+	// omits the key ENTIRELY (not `"metrics":false`), so a pre-0.4.2 daemon — which
+	// ignores unknown request fields — sees exactly the request shape it always did.
+	const std::string out_a = make_test_segment_name("metrics-on");
+	const std::string out_b = make_test_segment_name("metrics-off");
+	const std::string payload = "x"; // tiny output; the assertion is on the REQUEST line
+	auto stub_a = fake_daemon_segment(out_a, payload);
+	auto stub_b = fake_daemon_segment(out_b, payload);
+
+	const std::string capture_path =
+	    "/tmp/miint-test-metrics-line-" + std::to_string(::getpid()) + "-" + out_a.substr(1);
+	::unlink(capture_path.c_str()); // start clean — the shim appends two lines
+
+	auto resp = [](const std::string &name, size_t sz, int64_t bid) {
+		return R"({"success":true,"schema_version":2,"batch_id":)" + std::to_string(bid) +
+		       R"(,"shm_outputs":[{"name":")" + name + R"(","label":"sam","size":)" + std::to_string(sz) + R"(}]})";
+	};
+	std::string script;
+	script += "read -r init_line\n";
+	script += R"(echo '{"success":true,"protocol_version":3,"tools":[{"name":"bowtie2-align","schema_version":2}]}')";
+	script += "\n";
+	script += "read -r batch_line\n";
+	script += "printf '%s\\n' \"$batch_line\" >> '" + capture_path + "'\n";
+	script += "echo '" + resp(out_a, stub_a.size, 1) + "'\n";
+	script += "read -r batch_line\n";
+	script += "printf '%s\\n' \"$batch_line\" >> '" + capture_path + "'\n";
+	script += "echo '" + resp(out_b, stub_b.size, 2) + "'\n";
+	script += "read -r shutdown_line\n";
+	script += "exit 0\n";
+
+	auto child = spawn_shim(script);
+	Session session(std::move(child));
+	REQUIRE_NOTHROW(session.Initialize());
+
+	const std::string input_bytes = "ARROW_IPC_PLACEHOLDER";
+	// Hold both results alive so neither output segment is unlinked early.
+	SubmitResult r_on = session.Submit("bowtie2-align", R"({"index_path":"x"})", input_bytes.data(), input_bytes.size(),
+	                                   /*request_metrics=*/true);
+	SubmitResult r_off =
+	    session.Submit("bowtie2-align", R"({"index_path":"x"})", input_bytes.data(), input_bytes.size());
+	REQUIRE_NOTHROW(session.Shutdown());
+
+	const std::string captured = slurp(capture_path);
+	const auto nl = captured.find('\n');
+	REQUIRE(nl != std::string::npos);
+	const std::string line_on = captured.substr(0, nl);
+	const std::string line_off = captured.substr(nl + 1);
+	INFO("opted-in line: " << line_on);
+	INFO("default line:  " << line_off);
+	REQUIRE(line_on.find("\"metrics\":true") != std::string::npos);
+	REQUIRE(line_off.find("\"metrics\"") == std::string::npos);
+
+	::unlink(capture_path.c_str());
+}
+
 TEST_CASE("Session::Submit propagates daemon error responses", "[gpl-boundary][session]") {
 	const std::string script =
 	    R"(read -r init_line
@@ -491,4 +552,39 @@ TEST_CASE("Session::Submit increments batch_id across consecutive calls "
 
 	REQUIRE(session.daemon_pid() == pid_before);
 	REQUIRE_NOTHROW(session.Shutdown());
+}
+
+// =============================================================================
+// ParseGplBoundaryVersion — the bowtie2 version gate parses `--version` JSON to
+// detect a daemon older than the bowtie2 `memory_mapped` minimum (0.4.2), since
+// the IPC handshake can't report the release version.
+// =============================================================================
+
+TEST_CASE("ParseGplBoundaryVersion: extracts the semver from --version JSON", "[gpl-boundary][session]") {
+	int major = -1, minor = -1, patch = -1;
+
+	// Real shape: {"gpl_boundary": "0.4.2", "tools": [...]}.
+	REQUIRE(ParseGplBoundaryVersion(R"({"gpl_boundary": "0.4.2", "tools": []})", major, minor, patch));
+	REQUIRE(major == 0);
+	REQUIRE(minor == 4);
+	REQUIRE(patch == 2);
+
+	// A higher release parses (no whitespace around the colon either).
+	REQUIRE(ParseGplBoundaryVersion(R"({"gpl_boundary":"1.2.3"})", major, minor, patch));
+	REQUIRE((major == 1 && minor == 2 && patch == 3));
+
+	// A pre-release/build suffix after patch is tolerated.
+	REQUIRE(ParseGplBoundaryVersion(R"({"gpl_boundary":"0.4.2-rc1"})", major, minor, patch));
+	REQUIRE((major == 0 && minor == 4 && patch == 2));
+}
+
+TEST_CASE("ParseGplBoundaryVersion: unparseable output is rejected (caller fails loud)", "[gpl-boundary][session]") {
+	int major = 9, minor = 9, patch = 9;
+	// Field absent, plain-text (older/foreign --version), garbage value, and empty
+	// all return false → the caller treats them as "can't confirm >= 0.4.2" and
+	// throws rather than proceeding against an unknown daemon.
+	REQUIRE_FALSE(ParseGplBoundaryVersion(R"({"tools": []})", major, minor, patch));
+	REQUIRE_FALSE(ParseGplBoundaryVersion("gpl-boundary 0.4.1\n", major, minor, patch));
+	REQUIRE_FALSE(ParseGplBoundaryVersion(R"({"gpl_boundary": "not-a-version"})", major, minor, patch));
+	REQUIRE_FALSE(ParseGplBoundaryVersion("", major, minor, patch));
 }

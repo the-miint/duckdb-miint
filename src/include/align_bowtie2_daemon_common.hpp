@@ -190,5 +190,16 @@ void AppendBowtie2AlignParams(ConfigJsonBuilder &cfg, const named_parameter_map_
 // align_bowtie2_sharded call this so the SQL surface stays in lockstep.
 void RegisterBowtie2AlignNamedParameterTypes(TableFunction &tf);
 
+// Fail-loud version gate for the bowtie2 callers. The `memory_mapped` knob (and
+// the sharded mm-off default) require gpl-boundary >= 0.4.2, but the IPC
+// handshake cannot report the daemon's release version (it carries only
+// protocol_version + per-tool schema_version, and bowtie2's schema_version was
+// not bumped for 0.4.2). So we parse the `--version` CLI of the resolved binary
+// and throw IOException (naming `caller`) when it is older than 0.4.2 or its
+// version cannot be determined — rather than letting an old daemon silently
+// ignore `memory_mapped` and reintroduce the cold-FS regression. `binary_path`
+// is the path returned by gpl_boundary::FindGplBoundary().
+void RequireGplBoundaryVersion(const std::string &binary_path, const char *caller);
+
 } // namespace bt2_daemon
 } // namespace duckdb
