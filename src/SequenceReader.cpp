@@ -203,6 +203,22 @@ static size_t record_bytes(const klibpp::KSeq &rec) {
 	return rec.name.size() + rec.comment.size() + rec.seq.size() + rec.qual.size();
 }
 
+// Size the next poll so a single read_stream call materializes at most ~max_bytes worth of
+// records, rather than a fixed POLL_CHUNK_SIZE that ignores record size. Without a byte budget
+// (SIZE_MAX) or before any record is observed, fall back to POLL_CHUNK_SIZE -- preserving the
+// short-read fast path. Never exceeds POLL_CHUNK_SIZE and never returns less than 1. Capped at
+// `remaining` by the caller's batch limit.
+static int dynamic_poll_n(size_t observed_record_bytes, size_t max_bytes, int remaining) {
+	int poll_n = POLL_CHUNK_SIZE;
+	if (observed_record_bytes > 0 && max_bytes != SIZE_MAX) {
+		const size_t by_budget = max_bytes / observed_record_bytes;
+		if (by_budget < static_cast<size_t>(POLL_CHUNK_SIZE)) {
+			poll_n = by_budget < 1 ? 1 : static_cast<int>(by_budget);
+		}
+	}
+	return remaining < poll_n ? remaining : poll_n;
+}
+
 // Append a KSeq into an SE batch, stripping sequence whitespace in place.
 static void append_se(SequenceRecordBatch &batch, klibpp::KSeq &rec) {
 	rec.seq.erase(std::remove_if(rec.seq.begin(), rec.seq.end(), [](unsigned char c) { return std::isspace(c); }),
@@ -239,6 +255,7 @@ SequenceRecordBatch SequenceReader::read_se(const int n, const size_t max_bytes)
 			}
 			append_se(batch, rec);
 			cumulative_bytes += rec_bytes;
+			observed_record_bytes_ = rec_bytes;
 			const bool done = (int)batch.size() >= n || cumulative_bytes >= max_bytes;
 			if (done) {
 				if (i + 1 < chunk.size()) {
@@ -268,8 +285,9 @@ SequenceRecordBatch SequenceReader::read_se(const int n, const size_t max_bytes)
 	// Poll the stream in chunks so the budget can short-circuit before the next I/O round.
 	while ((int)batch.size() < n && cumulative_bytes < max_bytes) {
 		const int remaining = n - (int)batch.size();
-		const int poll_n = remaining < POLL_CHUNK_SIZE ? remaining : POLL_CHUNK_SIZE;
+		const int poll_n = dynamic_poll_n(observed_record_bytes_, max_bytes, remaining);
 		auto more = read_stream(sequence1_reader_, poll_n);
+		max_poll_count_ = more.size() > max_poll_count_ ? more.size() : max_poll_count_;
 		if (more.empty()) {
 			break;
 		}
@@ -334,6 +352,7 @@ SequenceRecordBatch SequenceReader::read_pe(const int n, const size_t max_bytes)
 			}
 			append_pe(batch, rec1, rec2);
 			cumulative_bytes += pair_bytes;
+			observed_record_bytes_ = pair_bytes;
 			const bool done = (int)batch.size() >= n || cumulative_bytes >= max_bytes;
 			if (done) {
 				if (i + 1 < c1.size()) {
@@ -363,9 +382,10 @@ SequenceRecordBatch SequenceReader::read_pe(const int n, const size_t max_bytes)
 
 	while ((int)batch.size() < n && cumulative_bytes < max_bytes) {
 		const int remaining = n - (int)batch.size();
-		const int poll_n = remaining < POLL_CHUNK_SIZE ? remaining : POLL_CHUNK_SIZE;
+		const int poll_n = dynamic_poll_n(observed_record_bytes_, max_bytes, remaining);
 		auto more1 = read_stream(sequence1_reader_, poll_n);
 		auto more2 = read_stream(sequence2_reader_.value(), poll_n);
+		max_poll_count_ = more1.size() > max_poll_count_ ? more1.size() : max_poll_count_;
 
 		if (more1.empty() && more2.empty()) {
 			break;
