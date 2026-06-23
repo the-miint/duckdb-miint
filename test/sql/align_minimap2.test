@@ -334,3 +334,67 @@ DROP TABLE mt_subjects;
 
 statement ok
 DROP TABLE mt_queries;
+
+# ==============================================================================
+# MAP-TIME SCORING / CHAINING PARAMETERS
+# ==============================================================================
+# The same mm_mapopt_t knobs exposed on align_minimap2_sharded are available here
+# too (shared Minimap2Config / InitOptions path), applied after the preset. Defaults
+# = preset defaults, so omitting them is unchanged. k/w remain index-build options.
+
+statement ok
+CREATE TABLE score_subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE score_queries AS SELECT * FROM (VALUES
+    ('q1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT')
+) AS t(read_id, sequence1);
+
+# Baseline: q1 aligns to ref1.
+query I
+SELECT COUNT(*) FROM align_minimap2('score_queries', subject_table := 'score_subjects', max_secondary := 0)
+WHERE NOT alignment_is_unmapped(flags);
+----
+1
+
+# min_chain_score set absurdly high drops the alignment -- proves the knob is
+# registered and wired on the non-sharded function too.
+query I
+SELECT COUNT(*) FROM align_minimap2('score_queries', subject_table := 'score_subjects',
+    max_secondary := 0, min_chain_score := 100000)
+WHERE NOT alignment_is_unmapped(flags);
+----
+0
+
+# min_dp_max (minimap2 -s) above any 52bp DP score drops the alignment.
+query I
+SELECT COUNT(*) FROM align_minimap2('score_queries', subject_table := 'score_subjects',
+    max_secondary := 0, min_dp_max := 100000)
+WHERE NOT alignment_is_unmapped(flags);
+----
+0
+
+# All new knobs accept valid values together and still align.
+query I
+SELECT COUNT(*) FROM align_minimap2('score_queries', subject_table := 'score_subjects',
+    max_secondary := 0, match_score := 2, mismatch_penalty := 4, gap_open := 4,
+    gap_extend := 2, gap_open2 := 24, gap_extend2 := 1, bandwidth := 500, zdrop := 400,
+    zdrop_inv := 200, min_count := 1, max_gap := 5000, min_dp_max := 1, pri_ratio := 0.8,
+    mask_level := 0.5)
+WHERE NOT alignment_is_unmapped(flags);
+----
+1
+
+# Validation is shared with the sharded path (negative penalty rejected).
+statement error
+SELECT * FROM align_minimap2('score_queries', subject_table := 'score_subjects', mismatch_penalty := -3);
+----
+mismatch_penalty must be >= 0
+
+statement ok
+DROP TABLE score_subjects;
+
+statement ok
+DROP TABLE score_queries;

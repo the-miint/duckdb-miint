@@ -1759,6 +1759,24 @@ Align query sequences to subject sequences using minimap2. This function enables
 - `w` (INTEGER, optional): Minimizer window size (overrides preset default if specified). **Warning:** Ignored when using `index_path` (window size is baked into the pre-built index)
 - `eqx` (BOOLEAN, default: true): Use =/X CIGAR operators instead of M
 
+**Map-time scoring / chaining parameters (optional):**
+These tune the minimap2 mapping options (`mm_mapopt_t`) applied *after* the preset — they affect alignment/chaining whether the index is built from `subject_table` or loaded from `index_path` (they are map-time, not index-time, unlike `k`/`w`). Each is optional; omitting it uses the preset default, so omitting them all is unchanged behavior. Negative values are rejected. (Identical set and semantics as `align_minimap2_sharded`.)
+- `match_score` (INTEGER, ≥ 1, minimap2 `-A`): matching score
+- `mismatch_penalty` (INTEGER, ≥ 0, `-B`): mismatch penalty
+- `gap_open` (INTEGER, ≥ 0, `-O`): gap-open penalty
+- `gap_extend` (INTEGER, ≥ 0, `-E`): gap-extension penalty
+- `gap_open2` (INTEGER, ≥ 0, `-O2`): long-gap open penalty (two-piece affine)
+- `gap_extend2` (INTEGER, ≥ 0, `-E2`): long-gap extension penalty
+- `bandwidth` (INTEGER, ≥ 1, `-r`): chaining/alignment bandwidth
+- `zdrop` (INTEGER, ≥ 0, `-z`): Z-drop score for alignment extension
+- `zdrop_inv` (INTEGER, ≥ 0): Z-drop for inversion detection (`-z`'s second value)
+- `min_chain_score` (INTEGER, ≥ 1, `-m`): minimum chaining score to keep a chain
+- `min_count` (INTEGER, ≥ 1, `-n`): minimum number of minimizers on a chain
+- `max_gap` (INTEGER, ≥ 1, `-g`): maximum gap between chained minimizers
+- `min_dp_max` (INTEGER, ≥ 0, `-s`): minimum peak DP alignment score to keep a hit. The preset sets this (e.g. `sr` → 40) and it is **not** auto-recomputed when you change `match_score`/`min_chain_score`, so if you lower the match score, set `min_dp_max` too or the preset default may filter out otherwise-valid hits.
+- `pri_ratio` (FLOAT, 0.0–1.0, `-p`): minimum secondary-to-primary score ratio
+- `mask_level` (FLOAT, 0.0–1.0, `-M`): maximum fraction of query overlap to mask a redundant hit
+
 **Output schema:**
 Returns the same schema as `read_alignments` (21 columns):
 - `read_id` (VARCHAR, BIGINT, or UUID — mirrors `query_table.read_id`): Query sequence identifier
