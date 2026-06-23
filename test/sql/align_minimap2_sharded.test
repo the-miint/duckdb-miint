@@ -366,6 +366,123 @@ SELECT
 0
 
 # ==============================================================================
+# MINIMAP2 MAP-TIME SCORING / CHAINING PARAMETERS
+# ==============================================================================
+# These knobs set mm_mapopt_t fields after the preset, so callers can tune
+# alignment/chaining against a prebuilt .mmi without rebuilding it. Defaults =
+# preset defaults, so omitting them is unchanged (every test above passing is
+# that invariance assertion).
+
+# min_chain_score set absurdly high drops every alignment (a 52bp read's chain
+# score is in the tens, never 100000) -- proves the knob reaches the mapper and
+# changes the output.
+query I
+SELECT COUNT(*) FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/', read_to_shard := 'read_to_shard',
+    min_chain_score := 100000, max_secondary := 0)
+WHERE NOT alignment_is_unmapped(flags);
+----
+0
+
+# A permissive min_chain_score is wired but does not drop the well-aligned reads.
+query II
+SELECT read_id, reference FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/', read_to_shard := 'read_to_shard',
+    min_chain_score := 1, max_secondary := 0)
+WHERE NOT alignment_is_unmapped(flags) ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# min_count (mm_mapopt_t::min_cnt) set above any 52bp read's minimizer count drops
+# all alignments -- proves min_count maps to a DISTINCT field from min_chain_score.
+query I
+SELECT COUNT(*) FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/', read_to_shard := 'read_to_shard',
+    min_count := 100, max_secondary := 0)
+WHERE NOT alignment_is_unmapped(flags);
+----
+0
+
+# min_dp_max (minimap2 -s) set above any 52bp read's DP score drops all alignments --
+# proves the alignment-score filter is exposed and wired to its own field.
+query I
+SELECT COUNT(*) FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/', read_to_shard := 'read_to_shard',
+    min_dp_max := 100000, max_secondary := 0)
+WHERE NOT alignment_is_unmapped(flags);
+----
+0
+
+# match_score (mm_mapopt_t::a) lowers the alignment (AS) score vs the default a=2 --
+# proves a scoring knob reaches the DP and is wired to its own field, not a no-op.
+query I
+SELECT
+  (SELECT tag_as FROM align_minimap2_sharded('queries',
+       shard_directory := 'data/shards/', read_to_shard := 'read_to_shard',
+       match_score := 1, max_secondary := 0) WHERE read_id = 'query1' AND NOT alignment_is_unmapped(flags))
+  <
+  (SELECT tag_as FROM align_minimap2_sharded('queries',
+       shard_directory := 'data/shards/', read_to_shard := 'read_to_shard',
+       max_secondary := 0) WHERE read_id = 'query1' AND NOT alignment_is_unmapped(flags));
+----
+true
+
+# All new scoring/chaining knobs accept valid values together and still align.
+query II
+SELECT read_id, reference FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/', read_to_shard := 'read_to_shard',
+    match_score := 2, mismatch_penalty := 4, gap_open := 4, gap_extend := 2,
+    gap_open2 := 24, gap_extend2 := 1, bandwidth := 500, zdrop := 400,
+    zdrop_inv := 200, min_count := 1, max_gap := 5000,
+    pri_ratio := 0.8, mask_level := 0.5, max_secondary := 0)
+WHERE NOT alignment_is_unmapped(flags) ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# Validation: pri_ratio out of [0,1]
+statement error
+SELECT * FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/', read_to_shard := 'read_to_shard',
+    pri_ratio := 1.5);
+----
+pri_ratio must be between 0.0 and 1.0
+
+# Validation: mask_level out of [0,1]
+statement error
+SELECT * FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/', read_to_shard := 'read_to_shard',
+    mask_level := 2.0);
+----
+mask_level must be between 0.0 and 1.0
+
+# Validation: match_score must be >= 1
+statement error
+SELECT * FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/', read_to_shard := 'read_to_shard',
+    match_score := 0);
+----
+match_score must be >= 1
+
+# Validation: min_count must be >= 1
+statement error
+SELECT * FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/', read_to_shard := 'read_to_shard',
+    min_count := 0);
+----
+min_count must be >= 1
+
+# Validation: negative penalty rejected (a negative would otherwise collide with
+# the "unset" sentinel and be silently ignored).
+statement error
+SELECT * FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/', read_to_shard := 'read_to_shard',
+    mismatch_penalty := -3);
+----
+mismatch_penalty must be >= 0
+
+# ==============================================================================
 # CLEANUP
 # ==============================================================================
 

@@ -308,6 +308,25 @@ TableFunction AlignMinimap2TableFunction::GetFunction() {
 	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
 	tf.named_parameters["min_chain_coverage"] = LogicalType::FLOAT;
 
+	// Map-time scoring/chaining knobs (set on mm_mapopt_t after the preset). Same shared
+	// Minimap2Config path as align_minimap2_sharded; parsed + validated by
+	// ParseMinimap2ConfigParams. k/w above stay index-build options.
+	tf.named_parameters["match_score"] = LogicalType::INTEGER;
+	tf.named_parameters["mismatch_penalty"] = LogicalType::INTEGER;
+	tf.named_parameters["gap_open"] = LogicalType::INTEGER;
+	tf.named_parameters["gap_extend"] = LogicalType::INTEGER;
+	tf.named_parameters["gap_open2"] = LogicalType::INTEGER;
+	tf.named_parameters["gap_extend2"] = LogicalType::INTEGER;
+	tf.named_parameters["bandwidth"] = LogicalType::INTEGER;
+	tf.named_parameters["zdrop"] = LogicalType::INTEGER;
+	tf.named_parameters["zdrop_inv"] = LogicalType::INTEGER;
+	tf.named_parameters["min_chain_score"] = LogicalType::INTEGER;
+	tf.named_parameters["min_count"] = LogicalType::INTEGER;
+	tf.named_parameters["max_gap"] = LogicalType::INTEGER;
+	tf.named_parameters["min_dp_max"] = LogicalType::INTEGER;
+	tf.named_parameters["pri_ratio"] = LogicalType::FLOAT;
+	tf.named_parameters["mask_level"] = LogicalType::FLOAT;
+
 	// Alignment output order is non-deterministic (depends on thread scheduling),
 	// so NO_ORDER lets DuckDB parallelize CTAS pipelines instead of serializing
 	// them via preserve_insertion_order.

@@ -26,6 +26,7 @@ public:
 		std::optional<std::vector<std::string>> sequence2_paths;
 		bool include_filepath;
 		bool uses_stdin;
+		bool interleaved;
 		uint8_t qual_offset;
 		uint64_t max_batch_bytes;
 
@@ -33,9 +34,9 @@ public:
 		std::vector<LogicalType> types; // field types
 
 		Data(const std::vector<std::string> &r1_paths, const std::optional<std::vector<std::string>> &r2_paths,
-		     bool include_fp, bool stdin_used, uint8_t offset, uint64_t max_bytes)
+		     bool include_fp, bool stdin_used, bool interleaved_in, uint8_t offset, uint64_t max_bytes)
 		    : sequence1_paths(r1_paths), sequence2_paths(r2_paths), include_filepath(include_fp),
-		      uses_stdin(stdin_used), qual_offset(offset), max_batch_bytes(max_bytes),
+		      uses_stdin(stdin_used), interleaved(interleaved_in), qual_offset(offset), max_batch_bytes(max_bytes),
 		      names({"sequence_index", "read_id", "comment", "sequence1", "sequence2", "qual1", "qual2"}),
 		      types({LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
 		             LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT),
@@ -56,6 +57,7 @@ public:
 		std::vector<std::string> sequence2_filepaths;
 		size_t next_file_idx; // Next file available for claiming
 		bool uses_stdin;
+		bool interleaved;
 		std::vector<uint64_t>
 		    file_sequence_counters; // Per-file sequence counters (no atomic needed - file access is exclusive)
 		FileSystem &fs;
@@ -71,8 +73,9 @@ public:
 		};
 
 		GlobalState(FileSystem &fs, const std::vector<std::string> &sequence1_paths,
-		            const std::optional<std::vector<std::string>> &sequence2_paths, bool stdin_used)
-		    : next_file_idx(0), uses_stdin(stdin_used), fs(fs) {
+		            const std::optional<std::vector<std::string>> &sequence2_paths, bool stdin_used,
+		            bool interleaved_in)
+		    : next_file_idx(0), uses_stdin(stdin_used), interleaved(interleaved_in), fs(fs) {
 			sequence1_filepaths = sequence1_paths;
 			if (sequence2_paths.has_value()) {
 				sequence2_filepaths = sequence2_paths.value();
@@ -104,6 +107,12 @@ public:
 				                                                            sequence2_filepaths[file_idx]);
 			} else {
 				readers[file_idx] = std::make_unique<miint::SequenceReader>(sequence1_filepaths[file_idx]);
+			}
+			// Interleaved: read the single stream as paired-end (R1,R2,R1,R2,...). Bind has
+			// already rejected interleaved + sequence2, so this only applies to single-stream
+			// readers.
+			if (interleaved) {
+				readers[file_idx]->set_interleaved(true);
 			}
 		}
 	};

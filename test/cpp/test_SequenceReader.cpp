@@ -538,3 +538,113 @@ TEST_CASE("SequenceReader byte budget default (SIZE_MAX) unchanged behavior", "[
 	auto batch = reader.read(100); // no budget argument -> default SIZE_MAX
 	REQUIRE((batch.size() == 50));
 }
+
+// Interleaved single stream: consecutive records pair up (2k-1 = R1, 2k = R2). R1's id
+// wins (the /1 is stripped); the A-sequence (R1) always lands in sequence1, the C-sequence
+// (R2) in sequence2.
+TEST_CASE("SequenceReader interleaved basic", "[SequenceReader][interleaved]") {
+	TempFileFixture fixture;
+	auto path = "il_basic.fq";
+	fixture.write_temp_fastq(
+	    path, {fixture.simple_read("p0/1", "AAAA", "IIII"), fixture.simple_read("p0/2", "CCCC", "HHHH"),
+	           fixture.simple_read("p1/1", "AAAA", "IIII"), fixture.simple_read("p1/2", "CCCC", "HHHH")});
+
+	miint::SequenceReader reader(path);
+	reader.set_interleaved(true);
+	auto batch = reader.read(100);
+
+	REQUIRE((batch.size() == 2));
+	REQUIRE((batch.is_paired));
+	REQUIRE((batch.read_ids[0] == "p0"));
+	REQUIRE((batch.read_ids[1] == "p1"));
+	REQUIRE((batch.sequences1[0] == "AAAA"));
+	REQUIRE((batch.sequences2[0] == "CCCC"));
+	REQUIRE((batch.quals1[0].as_string() == "IIII"));
+	REQUIRE((batch.quals2[0].as_string() == "HHHH"));
+}
+
+// The hard path: with 10 pairs (20 records) the reader polls in POLL_CHUNK_SIZE (16) bursts,
+// so a poll lands on an odd record boundary and a lone R1 must be carried over to pair with
+// the next poll's first record. A carry bug would swap an R1/R2 across the boundary.
+TEST_CASE("SequenceReader interleaved carry across poll boundary", "[SequenceReader][interleaved]") {
+	TempFileFixture fixture;
+	auto path = "il_carry.fq";
+	std::vector<std::string> records;
+	for (int i = 0; i < 10; i++) {
+		records.push_back(fixture.simple_read("p" + std::to_string(i) + "/1", "AAAA", "IIII"));
+		records.push_back(fixture.simple_read("p" + std::to_string(i) + "/2", "CCCC", "HHHH"));
+	}
+	fixture.write_temp_fastq(path, records);
+
+	miint::SequenceReader reader(path);
+	reader.set_interleaved(true);
+	auto batch = reader.read(100);
+
+	REQUIRE((batch.size() == 10));
+	for (size_t k = 0; k < batch.size(); k++) {
+		REQUIRE((batch.read_ids[k] == "p" + std::to_string(k)));
+		REQUIRE((batch.sequences1[k] == "AAAA")); // R1 never swapped to sequence2
+		REQUIRE((batch.sequences2[k] == "CCCC"));
+	}
+}
+
+// Budget so tight only one pair fits per call: every pair must still surface, in order, with
+// R1/R2 correctly placed (the leftover-tail stash carries records between calls).
+TEST_CASE("SequenceReader interleaved byte budget across calls", "[SequenceReader][interleaved][byte_budget]") {
+	TempFileFixture fixture;
+	auto path = "il_budget.fq";
+	std::vector<std::string> records;
+	for (int i = 0; i < 6; i++) {
+		records.push_back(fixture.simple_read("p" + std::to_string(i) + "/1", "AAAA", "IIII"));
+		records.push_back(fixture.simple_read("p" + std::to_string(i) + "/2", "CCCC", "HHHH"));
+	}
+	fixture.write_temp_fastq(path, records);
+
+	miint::SequenceReader reader(path);
+	reader.set_interleaved(true);
+
+	std::vector<std::string> seen;
+	for (int call = 0; call < 50; call++) {
+		auto batch = reader.read(100, 40); // pair ~26 bytes; only one pair fits
+		if (batch.empty()) {
+			break;
+		}
+		REQUIRE((batch.size() == 1));
+		REQUIRE((batch.sequences1[0] == "AAAA"));
+		REQUIRE((batch.sequences2[0] == "CCCC"));
+		seen.push_back(batch.read_ids[0]);
+	}
+	std::vector<std::string> expected = {"p0", "p1", "p2", "p3", "p4", "p5"};
+	REQUIRE((seen == expected));
+}
+
+// An odd number of records means the final record has no mate -> loud error.
+TEST_CASE("SequenceReader interleaved odd record count throws", "[SequenceReader][interleaved][error]") {
+	TempFileFixture fixture;
+	auto path = "il_odd.fq";
+	fixture.write_temp_fastq(path,
+	                         {fixture.simple_read("p0/1", "AAAA", "IIII"), fixture.simple_read("p0/2", "CCCC", "HHHH"),
+	                          fixture.simple_read("p1/1", "AAAA", "IIII")});
+
+	miint::SequenceReader reader(path);
+	reader.set_interleaved(true);
+	REQUIRE_THROWS_WITH(reader.read(100), Catch::Matchers::ContainsSubstring("odd number of records"));
+}
+
+// Interleaved FASTA has no quality: both qual columns are empty, mates still paired.
+TEST_CASE("SequenceReader interleaved FASTA has no quality", "[SequenceReader][interleaved][FASTA]") {
+	TempFileFixture fixture;
+	auto path = "il_fasta.fa";
+	fixture.write_temp_fastq(path, {fixture.simple_fasta("p0/1", "AAAA"), fixture.simple_fasta("p0/2", "CCCC")});
+
+	miint::SequenceReader reader(path);
+	reader.set_interleaved(true);
+	auto batch = reader.read(100);
+
+	REQUIRE((batch.size() == 1));
+	REQUIRE((batch.is_paired));
+	REQUIRE((batch.sequences1[0] == "AAAA"));
+	REQUIRE((batch.sequences2[0] == "CCCC"));
+	REQUIRE((batch.quals1[0].as_string().empty()));
+	REQUIRE((batch.quals2[0].as_string().empty()));
+}

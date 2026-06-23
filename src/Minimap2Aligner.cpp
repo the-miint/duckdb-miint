@@ -110,6 +110,61 @@ void Minimap2Aligner::InitOptions(const Minimap2Config &config, mm_idxopt_t &iop
 
 	// Coverage pre-filter threshold
 	mopt.min_chain_coverage = config.min_chain_coverage;
+
+	// Map-time scoring/chaining overrides. Applied after mm_set_opt(preset) so a caller
+	// can tune alignment against a prebuilt index. mm_mapopt_update() (run after the index
+	// loads) only adjusts occurrence thresholds, not these fields, so the overrides persist.
+	// -1 / -1.0f means "unset" (keep the preset default); ParseMinimap2ConfigParams has
+	// already rejected negative user values, so >= 0 reliably distinguishes a set override.
+	if (config.match_score >= 0) {
+		mopt.a = config.match_score;
+	}
+	if (config.mismatch_penalty >= 0) {
+		mopt.b = config.mismatch_penalty;
+	}
+	if (config.gap_open >= 0) {
+		mopt.q = config.gap_open;
+	}
+	if (config.gap_extend >= 0) {
+		mopt.e = config.gap_extend;
+	}
+	if (config.gap_open2 >= 0) {
+		mopt.q2 = config.gap_open2;
+	}
+	if (config.gap_extend2 >= 0) {
+		mopt.e2 = config.gap_extend2;
+	}
+	if (config.bandwidth >= 0) {
+		mopt.bw = config.bandwidth;
+	}
+	if (config.zdrop >= 0) {
+		mopt.zdrop = config.zdrop;
+	}
+	if (config.zdrop_inv >= 0) {
+		mopt.zdrop_inv = config.zdrop_inv;
+	}
+	if (config.min_chain_score >= 0) {
+		mopt.min_chain_score = config.min_chain_score;
+	}
+	if (config.min_count >= 0) {
+		mopt.min_cnt = config.min_count;
+	}
+	if (config.max_gap >= 0) {
+		mopt.max_gap = config.max_gap;
+	}
+	// min_dp_max is the minimal peak DP score to keep a hit (minimap2 -s). The preset sets it
+	// (sr -> 40); like minimap2's CLI we do NOT auto-recompute it from match_score/min_chain_score,
+	// so a caller that drops the match score should set min_dp_max too if the default would filter
+	// their hits.
+	if (config.min_dp_max >= 0) {
+		mopt.min_dp_max = config.min_dp_max;
+	}
+	if (config.pri_ratio >= 0.0f) {
+		mopt.pri_ratio = config.pri_ratio;
+	}
+	if (config.mask_level >= 0.0f) {
+		mopt.mask_level = config.mask_level;
+	}
 }
 
 // Static helper: load index from .mmi file
