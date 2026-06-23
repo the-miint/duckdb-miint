@@ -1,6 +1,7 @@
 #include "align_minimap2_sharded.hpp"
 #include "align_common.hpp"
 #include "shard_debug.hpp"
+#include "shard_progress.hpp"
 #include "duckdb/common/file_system.hpp"
 
 namespace duckdb {
@@ -118,6 +119,13 @@ unique_ptr<FunctionData> AlignMinimap2ShardedTableFunction::Bind(ClientContext &
 		data->debug = debug_param->second.GetValue<bool>();
 	}
 
+	// Parse progress parameter (opt-in, default false): when true, the function
+	// emits clean per-shard progress lines to stderr (see shard_progress.hpp).
+	auto progress_param = input.named_parameters.find("progress");
+	if (progress_param != input.named_parameters.end() && !progress_param->second.IsNull()) {
+		data->progress = progress_param->second.GetValue<bool>();
+	}
+
 	// Parse include_shard_name parameter
 	auto include_shard_param = input.named_parameters.find("include_shard_name");
 	if (include_shard_param != input.named_parameters.end() && !include_shard_param->second.IsNull()) {
@@ -157,6 +165,7 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2ShardedTableFunction::InitGlob
 	idx_t derived = (db_threads + data.max_threads_per_shard - 1) / data.max_threads_per_shard;
 	gstate->max_active_shards = std::max<idx_t>(1, std::min(derived, gstate->shard_count));
 	gstate->debug = data.debug;
+	gstate->progress = data.progress;
 	gstate->start_time = std::chrono::steady_clock::now();
 	idx_t total = 0;
 	for (const auto &shard : data.shards) {
@@ -338,11 +347,19 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 	}
 
 	// Phase 5: Publish under lock to prevent lost wake-ups with CV
+	active->total_reads = seq_count;
+	active->start_time = std::chrono::steady_clock::now();
 	{
 		std::lock_guard<std::mutex> guard(gstate.lock);
 		active->ready.store(true, std::memory_order_release);
 	}
 	gstate.cv.notify_all();
+	if (gstate.progress) {
+		shard_progress::Emit("minimap2",
+		                     shard_progress::FormatShardStart(static_cast<uint64_t>(shard_idx) + 1,
+		                                                      static_cast<uint64_t>(gstate.shard_count),
+		                                                      shard_info.name, static_cast<int64_t>(seq_count)));
+	}
 	return active;
 }
 
@@ -366,6 +383,24 @@ void AlignMinimap2ShardedTableFunction::ReleaseWork(GlobalState &gstate, LocalSt
 			shards.erase(std::remove(shards.begin(), shards.end(), active), shards.end());
 			SHARD_DBG_MEM(gstate, "ReleaseWork: REMOVED shard %zu (active_shards=%zu)",
 			              static_cast<size_t>(active->shard_idx), static_cast<size_t>(shards.size()));
+			if (gstate.progress) {
+				// The relaxed load sees every worker's relaxed alignments_emitted
+				// fetch_add: each fetch_add is sequenced-before that worker's
+				// acq_rel active_workers.fetch_sub, and this REMOVE runs only for
+				// the last worker (its fetch_sub read 1), whose acquire chains
+				// back through the prior decrements' releases — so all fetch_adds
+				// happen-before this load. (A miscount would only mis-state this
+				// diagnostic line; alignment results are unaffected.)
+				const double elapsed_s = std::chrono::duration_cast<std::chrono::duration<double>>(
+				                             std::chrono::steady_clock::now() - active->start_time)
+				                             .count();
+				shard_progress::Emit("minimap2",
+				                     shard_progress::FormatShardDone(
+				                         static_cast<uint64_t>(active->shard_idx) + 1,
+				                         static_cast<uint64_t>(gstate.shard_count), lstate.current_shard_name,
+				                         active->total_reads,
+				                         active->alignments_emitted.load(std::memory_order_relaxed), elapsed_s));
+			}
 		}
 		lstate.current_active_shard = nullptr;
 		// Notify under lock to prevent lost wake-ups with CV
@@ -475,6 +510,9 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 			        .count();
 			// Filter out unmapped reads
 			FilterMappedOnly(local_state.result_buffer);
+			if (global_state.progress) {
+				active->alignments_emitted.fetch_add(local_state.result_buffer.size(), std::memory_order_relaxed);
+			}
 			SHARD_DBG_MEM(global_state, "Execute: shard %zu ALIGN %zu reads -> %zu results in %ldms",
 			              static_cast<size_t>(active->shard_idx), static_cast<size_t>(query_batch.size()),
 			              static_cast<size_t>(local_state.result_buffer.size()), static_cast<long>(align_ms));
@@ -507,6 +545,7 @@ TableFunction AlignMinimap2ShardedTableFunction::GetFunction() {
 	tf.named_parameters["eqx"] = LogicalType::BOOLEAN;
 	tf.named_parameters["max_threads_per_shard"] = LogicalType::INTEGER;
 	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
+	tf.named_parameters["progress"] = LogicalType::BOOLEAN;
 	tf.named_parameters["min_chain_coverage"] = LogicalType::FLOAT;
 	tf.named_parameters["include_shard_name"] = LogicalType::BOOLEAN;
 

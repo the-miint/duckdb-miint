@@ -535,6 +535,37 @@ SELECT
 0
 
 # ==============================================================================
+# PROGRESS PARAM (opt-in, result-invariant)
+# ==============================================================================
+# `progress := true` enables timestamped per-shard progress lines on stderr.
+# It is a pure side channel: the result multiset MUST be byte-identical to the
+# default (which emits nothing — programmatic callers are unaffected). The
+# stderr lines themselves are asserted by shaln's --verbose stderr-capture test.
+
+statement ok
+SELECT count(*) FROM align_bowtie2_sharded('queries',
+    shard_directory := 'data/bowtie2_shards/', read_to_shard := 'read_to_shard', progress := true);
+
+# Two-direction EXCEPT ALL == 0 ⟺ progress:=true and the default yield equal multisets.
+query I
+SELECT
+  (SELECT COUNT(*) FROM (
+     SELECT read_id, reference, position, flags, cigar FROM align_bowtie2_sharded('queries',
+        shard_directory := 'data/bowtie2_shards/', read_to_shard := 'read_to_shard', progress := true)
+     EXCEPT ALL
+     SELECT read_id, reference, position, flags, cigar FROM align_bowtie2_sharded('queries',
+        shard_directory := 'data/bowtie2_shards/', read_to_shard := 'read_to_shard')))
+  +
+  (SELECT COUNT(*) FROM (
+     SELECT read_id, reference, position, flags, cigar FROM align_bowtie2_sharded('queries',
+        shard_directory := 'data/bowtie2_shards/', read_to_shard := 'read_to_shard')
+     EXCEPT ALL
+     SELECT read_id, reference, position, flags, cigar FROM align_bowtie2_sharded('queries',
+        shard_directory := 'data/bowtie2_shards/', read_to_shard := 'read_to_shard', progress := true)));
+----
+0
+
+# ==============================================================================
 # CLEANUP
 # ==============================================================================
 

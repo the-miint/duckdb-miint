@@ -41,6 +41,10 @@ struct ActiveShard {
 	std::atomic<idx_t> active_workers {0};             // Threads currently on this shard
 	std::atomic<bool> exhausted {false};               // Set when no more batches to read
 	std::atomic<bool> ready {false};                   // Set when index is loaded and IDs materialized
+	// Progress-only (read/written only when GlobalState::progress is true).
+	std::atomic<idx_t> alignments_emitted {0};        // Mapped alignments produced for this shard
+	idx_t total_reads = 0;                            // Reads pre-fetched for this shard
+	std::chrono::steady_clock::time_point start_time; // Stamped when the shard becomes ready
 };
 
 class AlignMinimap2ShardedTableFunction {
@@ -54,6 +58,7 @@ public:
 		std::vector<ShardInfo> shards; // Sorted by read_count DESC (largest first)
 		idx_t max_threads_per_shard = 4;
 		bool debug = false;
+		bool progress = false;
 		bool include_shard_name = false;
 
 		// Subject-side id type. Sharded mode always loads prebuilt .mmi indexes
@@ -85,6 +90,7 @@ public:
 		idx_t max_threads_per_shard = 4;
 		idx_t max_active_shards = 1; // ceil(db_threads / max_threads_per_shard)
 		bool debug = false;
+		bool progress = false;
 		std::chrono::steady_clock::time_point start_time;
 		std::vector<std::shared_ptr<ActiveShard>> active_shards;
 		std::atomic<idx_t> total_associations {0};

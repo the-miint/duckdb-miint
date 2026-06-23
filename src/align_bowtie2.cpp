@@ -18,9 +18,6 @@
 #include "gpl_boundary/process.hpp"
 #include "gpl_boundary/session.hpp"
 
-#include "nanoarrow/nanoarrow.h"
-#include "yyjson.hpp"
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -40,7 +37,6 @@ namespace duckdb {
 namespace {
 
 namespace gb = ::duckdb::miint::gpl_boundary;
-namespace yj = duckdb_yyjson;
 
 // Schema/output helpers, ConfigJsonBuilder, ValueAs* coercers, and the
 // shared bowtie2-align param mapper all live in
@@ -89,15 +85,6 @@ std::string BuildAlignConfigJson(const named_parameter_map_t &named_params, cons
 	return cfg.build();
 }
 
-std::string BuildBuildConfigJson(const std::string &index_basename, int64_t nthreads) {
-	bt2_daemon::ConfigJsonBuilder cfg;
-	cfg.append_str("index_path", index_basename);
-	if (nthreads > 1) {
-		cfg.append_int("nthreads", nthreads);
-	}
-	return cfg.build();
-}
-
 // -----------------------------------------------------------------------------
 // Temp-dir for bowtie2-build outputs. Respects $TMPDIR (default /tmp). One
 // dir per query; cleaned up in GlobalState destructor.
@@ -116,181 +103,6 @@ std::string MakeTempIndexDir() {
 		                  std::string(tmp), errno);
 	}
 	return std::string(buf.data());
-}
-
-// -----------------------------------------------------------------------------
-// Read subjects via separate connection. Reuses the existing miint contract:
-// subjects table has (read_id, sequence1); sequence2 if present must be
-// all-NULL. The daemon's bowtie2-build expects (name, sequence), so we
-// rename when materializing the Arrow batch.
-// -----------------------------------------------------------------------------
-
-struct LoadedSubjects {
-	std::vector<std::string> names;
-	std::vector<std::string> sequences;
-};
-
-LoadedSubjects LoadSubjects(ClientContext &context, const std::string &table_name) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
-	// Two-query approach: first probe column presence to detect optional
-	// sequence2 (which we need to validate is all-NULL — paired subjects are
-	// rejected per test/sql/align_bowtie2.test:191-200), then issue the
-	// actual SELECT. The schema validator in Bind already accepted read_id
-	// as VARCHAR or BIGINT; the implicit Value::GetValue<std::string>() cast
-	// below handles either type uniformly into the carrier vector.
-	const std::string columns_sql = "SELECT column_name FROM (DESCRIBE " +
-	                                KeywordHelper::WriteOptionallyQuoted(table_name) +
-	                                ") WHERE column_name IN ('sequence2')";
-	auto columns_res = conn.Query(columns_sql);
-	if (columns_res->HasError()) {
-		throw InvalidInputException("align_bowtie2: failed to introspect subject table '%s': %s", table_name,
-		                            columns_res->GetError());
-	}
-	const bool has_sequence2 = columns_res->RowCount() > 0;
-
-	std::string select_sql = "SELECT read_id, sequence1";
-	if (has_sequence2) {
-		select_sql += ", sequence2";
-	}
-	select_sql += " FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
-
-	auto result = conn.Query(select_sql);
-	if (result->HasError()) {
-		throw InvalidInputException("align_bowtie2: failed to read subject table '%s' "
-		                            "(must have columns read_id VARCHAR or BIGINT, sequence1 VARCHAR): %s",
-		                            table_name, result->GetError());
-	}
-
-	LoadedSubjects out;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
-	out.names.reserve(materialized.RowCount());
-	out.sequences.reserve(materialized.RowCount());
-	while (auto chunk = materialized.Fetch()) {
-		for (idx_t i = 0; i < chunk->size(); ++i) {
-			auto name_val = chunk->GetValue(0, i);
-			auto seq_val = chunk->GetValue(1, i);
-			if (name_val.IsNull() || seq_val.IsNull()) {
-				throw InvalidInputException("align_bowtie2: NULL read_id or sequence1 in subject table '%s'",
-				                            table_name);
-			}
-			if (has_sequence2) {
-				auto s2_val = chunk->GetValue(2, i);
-				if (!s2_val.IsNull()) {
-					throw InvalidInputException("align_bowtie2: subject table '%s' has non-NULL sequence2 — "
-					                            "subjects must be single-end (sequence2 must be NULL)",
-					                            table_name);
-				}
-			}
-			out.names.push_back(name_val.GetValue<std::string>());
-			out.sequences.push_back(seq_val.GetValue<std::string>());
-		}
-	}
-	if (out.names.empty()) {
-		throw InvalidInputException("align_bowtie2: subject table '%s' is empty", table_name);
-	}
-	return out;
-}
-
-// -----------------------------------------------------------------------------
-// Arrow IPC encoders. Subjects ⇒ {name, sequence}; queries ⇒ {read_id,
-// sequence1, sequence2?, qual1?, qual2?}. Mirrors phylogeny_fasttree's
-// BuildInputIpcStream (nanoarrow's Init/StartAppending/AppendString/
-// FinishElement/FinishBuildingDefault + EncodeIpcStream).
-// -----------------------------------------------------------------------------
-
-std::vector<uint8_t> BuildSubjectsIpc(const LoadedSubjects &subjects) {
-	ArrowSchema schema {};
-	auto rc = ArrowSchemaInitFromType(&schema, NANOARROW_TYPE_STRUCT);
-	if (rc != NANOARROW_OK) {
-		throw InternalException("align_bowtie2: ArrowSchemaInit failed");
-	}
-	rc = ArrowSchemaAllocateChildren(&schema, 2);
-	if (rc != NANOARROW_OK) {
-		schema.release(&schema);
-		throw InternalException("align_bowtie2: ArrowSchemaAllocateChildren failed");
-	}
-	ArrowSchemaInitFromType(schema.children[0], NANOARROW_TYPE_STRING);
-	ArrowSchemaSetName(schema.children[0], "name");
-	ArrowSchemaInitFromType(schema.children[1], NANOARROW_TYPE_STRING);
-	ArrowSchemaSetName(schema.children[1], "sequence");
-
-	ArrowArray array {};
-	ArrowError err {};
-	if (ArrowArrayInitFromSchema(&array, &schema, &err) != NANOARROW_OK) {
-		schema.release(&schema);
-		throw InternalException("align_bowtie2: ArrowArrayInit failed: %s", err.message);
-	}
-	if (ArrowArrayStartAppending(&array) != NANOARROW_OK) {
-		array.release(&array);
-		schema.release(&schema);
-		throw InternalException("align_bowtie2: ArrowArrayStartAppending failed");
-	}
-	for (size_t i = 0; i < subjects.names.size(); ++i) {
-		ArrowStringView nv {subjects.names[i].data(), static_cast<int64_t>(subjects.names[i].size())};
-		ArrowStringView sv {subjects.sequences[i].data(), static_cast<int64_t>(subjects.sequences[i].size())};
-		if (ArrowArrayAppendString(array.children[0], nv) != NANOARROW_OK ||
-		    ArrowArrayAppendString(array.children[1], sv) != NANOARROW_OK ||
-		    ArrowArrayFinishElement(&array) != NANOARROW_OK) {
-			array.release(&array);
-			schema.release(&schema);
-			throw InternalException("align_bowtie2: subjects append failed at row %d", static_cast<int>(i));
-		}
-	}
-	if (ArrowArrayFinishBuildingDefault(&array, &err) != NANOARROW_OK) {
-		array.release(&array);
-		schema.release(&schema);
-		throw InternalException("align_bowtie2: ArrowArrayFinishBuilding failed: %s", err.message);
-	}
-
-	std::vector<uint8_t> bytes;
-	try {
-		bytes = gb::EncodeIpcStream(&schema, &array, 1);
-	} catch (...) {
-		array.release(&array);
-		schema.release(&schema);
-		throw;
-	}
-	if (array.release) {
-		array.release(&array);
-	}
-	if (schema.release) {
-		schema.release(&schema);
-	}
-	return bytes;
-}
-
-// -----------------------------------------------------------------------------
-// Parse bowtie2-build's `result.index_files` array into a vector of paths.
-// Returns paths in registry order; we use the first one to derive the index
-// basename. Daemon contract: 6 absolute paths.
-// -----------------------------------------------------------------------------
-
-std::vector<std::string> ParseIndexFilesFromResultJson(const std::string &result_json) {
-	using YyjsonDocPtr = std::unique_ptr<yj::yyjson_doc, decltype(&yj::yyjson_doc_free)>;
-	YyjsonDocPtr doc(yj::yyjson_read(result_json.data(), result_json.size(), 0), &yj::yyjson_doc_free);
-	if (!doc) {
-		throw IOException("align_bowtie2: bowtie2-build result_json was not valid JSON: %s", result_json);
-	}
-	yj::yyjson_val *root = yj::yyjson_doc_get_root(doc.get());
-	if (!yj::yyjson_is_obj(root)) {
-		throw IOException("align_bowtie2: bowtie2-build result was not a JSON object: %s", result_json);
-	}
-	yj::yyjson_val *arr = yj::yyjson_obj_get(root, "index_files");
-	if (!arr || !yj::yyjson_is_arr(arr)) {
-		throw IOException("align_bowtie2: bowtie2-build result missing 'index_files' array: %s", result_json);
-	}
-	std::vector<std::string> out;
-	const size_t n = yj::yyjson_arr_size(arr);
-	out.reserve(n);
-	for (size_t i = 0; i < n; ++i) {
-		yj::yyjson_val *item = yj::yyjson_arr_get(arr, i);
-		if (!yj::yyjson_is_str(item)) {
-			throw IOException("align_bowtie2: bowtie2-build index_files contained non-string entry");
-		}
-		out.emplace_back(yj::yyjson_get_str(item));
-	}
-	return out;
 }
 
 // -----------------------------------------------------------------------------
@@ -507,9 +319,9 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	// 1. Spawn the daemon + handshake. Fail loud if not present or stale.
 	gs->session = SpawnAndCheckSession();
 
-	// 2. Load subjects + materialize as Arrow IPC.
-	const auto subjects = LoadSubjects(context, bd.subject_table);
-	const auto subjects_ipc = BuildSubjectsIpc(subjects);
+	// 2. Load subjects + materialize as Arrow IPC (shared bowtie2-build glue).
+	const auto subjects = bt2_daemon::LoadSingleEndSubjects(context, bd.subject_table, "align_bowtie2");
+	const auto subjects_ipc = bt2_daemon::BuildSubjectsIpc(subjects, "align_bowtie2");
 
 	// 3. Build the bowtie2 index under a fresh temp dir.
 	gs->temp_dir = MakeTempIndexDir();
@@ -528,9 +340,9 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 			}
 		}
 	}
-	const std::string build_config = BuildBuildConfigJson(index_basename, threads);
+	const std::string build_config = bt2_daemon::BuildBowtie2BuildConfigJson(index_basename, threads);
 	auto build_result = gs->session->Submit("bowtie2-build", build_config, subjects_ipc.data(), subjects_ipc.size());
-	gs->index_files = ParseIndexFilesFromResultJson(build_result.result_json);
+	gs->index_files = bt2_daemon::ParseBowtie2BuildIndexFiles(build_result.result_json, "align_bowtie2");
 	if (gs->index_files.empty()) {
 		throw IOException("align_bowtie2: bowtie2-build returned zero index_files");
 	}

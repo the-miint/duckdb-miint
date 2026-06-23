@@ -1251,7 +1251,8 @@ if(MIINT_ENABLE_GPL_BOUNDARY)
         src/phylogeny_fasttree.cpp
         src/align_bowtie2_daemon_common.cpp
         src/align_bowtie2.cpp
-        src/align_bowtie2_sharded.cpp)
+        src/align_bowtie2_sharded.cpp
+        src/save_bowtie2_index.cpp)
 endif()
 if(MIINT_ENABLE_UNIFRAC)
     list(APPEND EXTENSION_SOURCES
@@ -1601,6 +1602,7 @@ set(TEST_SOURCES
     src/Minimap2Aligner.cpp
     test/cpp/test_Minimap2Aligner.cpp
     test/cpp/test_AlignBowtie2Sharded.cpp
+    test/cpp/test_ShardProgress.cpp
     src/ncbi_parser.cpp
     src/zip_utils.cpp
     duckdb/third_party/miniz/miniz.cpp  # For ExtractFromZip tests

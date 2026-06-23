@@ -24,6 +24,9 @@ struct ArrowSchema;
 struct ArrowArray;
 
 namespace duckdb {
+
+class ClientContext;
+
 namespace bt2_daemon {
 
 // gpl-boundary bowtie2-align output schema_version we wire against
@@ -200,6 +203,35 @@ void RegisterBowtie2AlignNamedParameterTypes(TableFunction &tf);
 // ignore `memory_mapped` and reintroduce the cold-FS regression. `binary_path`
 // is the path returned by gpl_boundary::FindGplBoundary().
 void RequireGplBoundaryVersion(const std::string &binary_path, const char *caller);
+
+// =============================================================================
+// bowtie2-build glue shared by align_bowtie2 (temp-dir index) and
+// save_bowtie2_index (persisted index). Every `caller` argument is spliced into
+// the error message so users see the right function name.
+// =============================================================================
+
+// Subjects loaded from a single-end subject table, ready for bowtie2-build.
+struct LoadedSubjects {
+	std::vector<std::string> names;     // subject read_id, coerced to string
+	std::vector<std::string> sequences; // subject sequence1
+};
+
+// Read (read_id, sequence1) from `table_name` through a separate connection.
+// Rejects NULL read_id/sequence1, rejects a non-NULL sequence2 (subjects must be
+// single-end), and rejects an empty result. Throws InvalidInputException.
+LoadedSubjects LoadSingleEndSubjects(ClientContext &context, const std::string &table_name, const char *caller);
+
+// Encode subjects as an Arrow IPC stream of {name, sequence} consumable by the
+// daemon's bowtie2-build input schema. Throws InternalException on encoder failure.
+std::vector<uint8_t> BuildSubjectsIpc(const LoadedSubjects &subjects, const char *caller);
+
+// Build the bowtie2-build config_json: {"index_path": <basename>[, "nthreads": n]}.
+// nthreads is omitted when <= 1 (daemon default).
+std::string BuildBowtie2BuildConfigJson(const std::string &index_basename, int64_t nthreads);
+
+// Parse bowtie2-build's `result.index_files` JSON array into a vector of paths.
+// Throws IOException on malformed JSON or a missing array.
+std::vector<std::string> ParseBowtie2BuildIndexFiles(const std::string &result_json, const char *caller);
 
 } // namespace bt2_daemon
 } // namespace duckdb

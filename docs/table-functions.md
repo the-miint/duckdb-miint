@@ -30,6 +30,7 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`align_minimap2_sharded`](#align_minimap2_shardedquery_table-shard_directory-read_to_shard-options) - Sharded minimap2 alignment
 - [`align_bowtie2`](#align_bowtie2query_table-subject_table-options) - Bowtie2 alignment
 - [`align_bowtie2_sharded`](#align_bowtie2_shardedquery_table-shard_directory-read_to_shard-options) - Sharded bowtie2 alignment
+- [`save_bowtie2_index`](#save_bowtie2_indexsubject_table-output_path-options) - Save bowtie2 index (for `align_bowtie2_sharded`; requires gpl-boundary)
 - [`align_mafft`](#align_maffttable_name) - MAFFT multiple sequence alignment (PartTree)
 - [`align_abpoa`](#align_abpoatable_name-options) - abPOA partial order multiple sequence alignment
 - [`consensus_abpoa`](#consensus_abpoatable_name-options) - abPOA consensus sequence generation
@@ -1965,6 +1966,48 @@ CREATE VIEW marker_genes AS
 SELECT * FROM save_minimap2_index('marker_genes', 'markers.mmi');
 ```
 
+## `save_bowtie2_index(subject_table, output_path, [options])`
+
+Build and save a bowtie2 index to disk, primarily for use as a shard with [`align_bowtie2_sharded`](#align_bowtie2_shardedquery_table-shard_directory-read_to_shard-options). This is the bowtie2 analogue of `save_minimap2_index`. The index is produced by the gpl-boundary daemon's bundled `bowtie2-build`, so this function **requires gpl-boundary** (install with `SELECT install_gpl_boundary();`).
+
+**Use case:** Build per-shard bowtie2 indexes once, then align many query sets against them with `align_bowtie2_sharded`. `align_bowtie2_sharded` expects each shard's index at `<shard_directory>/<shard_name>/index.*.bt2`, so build each shard with `output_path = '<shard_directory>/<shard_name>/index'`.
+
+**Parameters:**
+- `subject_table` (VARCHAR): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent). The `read_id` column may be `VARCHAR` or `BIGINT`; `BIGINT` ids are stringified before being written into the index (recovered subject names are always `VARCHAR`).
+- `output_path` (VARCHAR): Basename **prefix** for the index. bowtie2-build writes multiple files (`<output_path>.1.bt2`, `.2.bt2`, `.3.bt2`, `.4.bt2`, `.rev.1.bt2`, `.rev.2.bt2`). The parent directory is created if it does not exist. Note this differs from `save_minimap2_index`, which writes a single `.mmi` file.
+- `threads` (INTEGER, default: 1): Number of threads `bowtie2-build` may use. Must be >= 1.
+
+**Output schema:**
+- `success` (BOOLEAN): Always true if function completes successfully
+- `index_path` (VARCHAR): The `output_path` prefix the index files were written under
+- `num_subjects` (BIGINT): Number of subject sequences indexed
+
+**Behavior:**
+- Loads all subject sequences from the table (rejects an empty table and rejects paired subjects)
+- Submits them to the gpl-boundary daemon's `bowtie2-build` tool, which writes the `.bt2` files at `output_path`
+- Returns a single row with success status and metadata
+- Unlike `align_bowtie2`/`align_bowtie2_sharded` (which need gpl-boundary >= 0.4.2 for the alignment-time `memory_mapped` control), index building works with any daemon that advertises `bowtie2-build`.
+
+**Examples:**
+```sql
+-- Build a single bowtie2 index from references fetched from NCBI
+CREATE TABLE refs AS
+    SELECT * FROM read_ncbi_fasta(['NC_000913.3', 'NC_002695.2', 'NC_011751.1']);
+SELECT * FROM save_bowtie2_index('refs', 'shards/ecoli/index');
+-- Returns: true | shards/ecoli/index | 3
+
+-- Build per-shard indexes for align_bowtie2_sharded (one subdir per shard)
+CREATE TABLE shard_a AS SELECT * FROM read_fastx('shard_a.fna');
+CREATE TABLE shard_b AS SELECT * FROM read_fastx('shard_b.fna');
+SELECT * FROM save_bowtie2_index('shard_a', 'shards/shard_a/index');
+SELECT * FROM save_bowtie2_index('shard_b', 'shards/shard_b/index');
+
+-- Then align against the shard directory
+SELECT * FROM align_bowtie2_sharded('queries',
+    shard_directory := 'shards',
+    read_to_shard := 'read_to_shard');
+```
+
 **Error handling:**
 - Error if subject_table does not exist
 - Error if subject_table contains paired-end data (sequence2 not NULL)
@@ -2002,6 +2045,7 @@ Align query sequences against multiple pre-built minimap2 index shards in parall
 - `preset` (VARCHAR, default: 'sr'): Minimap2 preset ('sr', 'map-ont', 'map-pb', etc.)
 - `max_secondary` (INTEGER, default: 5): Maximum secondary alignments per query. Set to 0 for primary only
 - `eqx` (BOOLEAN, default: true): Use =/X CIGAR operators instead of M
+- `progress` (BOOLEAN, default: false): Opt-in progress reporting. When true, emit clean, timestamped per-shard lines to **stderr** (`shard i/N 'name': index loaded, R reads` → `done - R reads, A alignments (T s)`). Pure side channel — results are byte-identical to the default, which emits nothing, so programmatic callers are unaffected unless they pass `progress := true`.
 
 **Output schema:**
 Returns the same 21-column schema as `align_minimap2` and `read_alignments`.
@@ -2268,6 +2312,7 @@ The sharded path emits only mapped reads (the daemon is invoked with `--no-unal`
 - `memory_mapped` (BOOLEAN, default: **false** in sharded mode): How each shard's bowtie2 FM-index is loaded by the daemon. `false` (the sharded default) reads the index with a sequential `fread`; `true` memory-maps it (bowtie2 `--mm`). Sharded mode defaults to `false` because on a cold network filesystem the sequential read is ~3.7× faster than the random page-faults of `--mm`. (The non-sharded [`align_bowtie2`](#align_bowtie2query_table-subject_table-options) keeps the daemon's `--mm`-on default, which lets warm-cache local runs share mmap'd index pages across processes.) Requires gpl-boundary ≥ 0.4.2 — older daemons are rejected at query start, since they would otherwise silently ignore this field.
 - `prefetch_ahead` (INTEGER, default: auto, range 0–4096): How many upcoming shards' index files to warm into the OS page cache (`POSIX_FADV_WILLNEED`) ahead of the shard-claim frontier, so a worker doesn't stall on a cold network-FS fault when it claims the next shard. The default (`auto`, when unset) warms one full wave ahead — `ceil(SET threads / max_threads_per_shard)` shards; `0` disables prefetch. A pure cache hint: alignment results are identical for any value.
 - `include_shard_name` (BOOLEAN, default: false): When true, append a `shard_name` column to the output
+- `progress` (BOOLEAN, default: false): Opt-in progress reporting. When true, emit clean, timestamped per-shard lines to **stderr** (`shard i/N 'name': index loaded` → `done - R reads, A alignments (T s)`). Pure side channel — results are byte-identical to the default, which emits nothing, so programmatic callers are unaffected unless they pass `progress := true`. (Distinct from `MIINT_BT2_TELEMETRY`, which emits machine-readable per-batch TSV.)
 - `quiet` (BOOLEAN, default: true): Runs Bowtie2 with `--quiet`. Keep the default — miint never surfaces Bowtie2's stderr statistics to SQL, so `quiet := false` has no user-visible effect and only adds overhead (per-batch summaries that miint drains and discards).
 - `threads` (INTEGER): Ignored in sharded mode. Use DuckDB's `SET threads=N` to control cross-shard parallelism and `max_threads_per_shard` for per-shard bowtie2 threading. A warning is printed at bind if `threads != 1` is passed directly to this function.
 
