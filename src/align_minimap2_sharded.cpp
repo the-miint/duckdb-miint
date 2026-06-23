@@ -549,6 +549,25 @@ TableFunction AlignMinimap2ShardedTableFunction::GetFunction() {
 	tf.named_parameters["min_chain_coverage"] = LogicalType::FLOAT;
 	tf.named_parameters["include_shard_name"] = LogicalType::BOOLEAN;
 
+	// Map-time scoring/chaining knobs (set on mm_mapopt_t after the preset; tune
+	// alignment against the prebuilt .mmi without rebuilding). Parsed + validated by
+	// ParseMinimap2ConfigParams. k/w stay index-time only (baked into the .mmi).
+	tf.named_parameters["match_score"] = LogicalType::INTEGER;
+	tf.named_parameters["mismatch_penalty"] = LogicalType::INTEGER;
+	tf.named_parameters["gap_open"] = LogicalType::INTEGER;
+	tf.named_parameters["gap_extend"] = LogicalType::INTEGER;
+	tf.named_parameters["gap_open2"] = LogicalType::INTEGER;
+	tf.named_parameters["gap_extend2"] = LogicalType::INTEGER;
+	tf.named_parameters["bandwidth"] = LogicalType::INTEGER;
+	tf.named_parameters["zdrop"] = LogicalType::INTEGER;
+	tf.named_parameters["zdrop_inv"] = LogicalType::INTEGER;
+	tf.named_parameters["min_chain_score"] = LogicalType::INTEGER;
+	tf.named_parameters["min_count"] = LogicalType::INTEGER;
+	tf.named_parameters["max_gap"] = LogicalType::INTEGER;
+	tf.named_parameters["min_dp_max"] = LogicalType::INTEGER;
+	tf.named_parameters["pri_ratio"] = LogicalType::FLOAT;
+	tf.named_parameters["mask_level"] = LogicalType::FLOAT;
+
 	tf.table_scan_progress = Progress;
 
 	// Alignment output order is non-deterministic — NO_ORDER enables parallel CTAS.

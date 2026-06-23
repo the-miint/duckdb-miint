@@ -1,0 +1,43 @@
+# name: test/sql/read_fastx_interleaved.test
+# description: Native de-interleave in read_fastx via the interleaved parameter
+# group: [sql]
+
+require miint
+
+# Interleaved FASTQ: consecutive records (R1,R2,R1,R2) collapse into paired rows.
+# R1's read_id wins (the trailing /1 is stripped); one sequence_index per pair.
+query IIIIIII
+SELECT sequence_index, read_id, comment, sequence1, sequence2, qual1, qual2
+FROM read_fastx('data/fastq/interleaved.fq', interleaved=true)
+ORDER BY sequence_index;
+----
+1	ip1	NULL	AAAA	TTTT	[40, 40, 40, 40]	[39, 39, 39, 39]
+2	ip2	NULL	GGGG	CCCC	[41, 41, 41, 41]	[42, 42, 42, 42]
+
+# One sequence_index per pair (2 pairs from 4 records), unique.
+query II
+SELECT COUNT(*), COUNT(DISTINCT sequence_index)
+FROM read_fastx('data/fastq/interleaved.fq', interleaved=true);
+----
+2	2
+
+# Interleaved FASTA has no quality: qual columns are NULL, mates still paired.
+query IIIII
+SELECT sequence_index, read_id, sequence1, sequence2, qual1
+FROM read_fastx('data/fastq/interleaved.fa', interleaved=true)
+ORDER BY sequence_index;
+----
+1	ip1	AAAA	TTTT	NULL
+2	ip2	GGGG	CCCC	NULL
+
+# Odd number of records -> loud error (the trailing record has no mate).
+statement error
+SELECT * FROM read_fastx('data/fastq/interleaved_odd.fq', interleaved=true);
+----
+odd number of records
+
+# interleaved is mutually exclusive with the two-file sequence2 mode.
+statement error
+SELECT * FROM read_fastx('data/fastq/small_a_r1.fq', sequence2='data/fastq/small_a_r2.fq', interleaved=true);
+----
+cannot be combined

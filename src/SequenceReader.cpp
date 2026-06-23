@@ -398,8 +398,94 @@ SequenceRecordBatch SequenceReader::read_pe(const int n, const size_t max_bytes)
 	return batch;
 }
 
+// Read a single stream as interleaved paired-end: consecutive records collapse into one
+// paired row (record 2k-1 -> R1, record 2k -> R2). Mirrors read_pe's budget/tail-buffer
+// machinery but draws both mates from the one stream, so it carries any odd trailing record
+// across polls (in buffered_read1_) until its mate arrives. R1's id wins (append_pe). The
+// mate-id parity check is intentionally skipped: interleaved files do not always carry /1 /2.
+SequenceRecordBatch SequenceReader::read_interleaved(const int n, const size_t max_bytes) {
+	SequenceRecordBatch batch(true);
+	batch.reserve(n);
+
+	size_t cumulative_bytes = 0;
+
+	// Records pulled from the stream but not yet formed into pairs. Seeded from
+	// buffered_read1_ (the construction-time peek, or a stashed tail from a prior call)
+	// and refilled by polling. Any unconsumed remainder is stashed back into
+	// buffered_read1_ for the next call.
+	std::vector<klibpp::KSeq> pending = std::move(buffered_read1_);
+	buffered_read1_.clear();
+	first_read_ = false;
+
+	auto stash = [&](size_t i) {
+		buffered_read1_.clear();
+		buffered_read1_.reserve(pending.size() - i);
+		for (size_t j = i; j < pending.size(); j++) {
+			buffered_read1_.push_back(std::move(pending[j]));
+		}
+	};
+
+	while (true) {
+		// Form as many pairs as possible from the currently pending records.
+		size_t i = 0;
+		while (i + 1 < pending.size()) {
+			auto &rec1 = pending[i];
+			auto &rec2 = pending[i + 1];
+			const size_t pair_bytes = record_bytes(rec1) + record_bytes(rec2);
+			// Starvation guard: always accept at least one pair, even if it exceeds the budget.
+			if (!batch.empty() && cumulative_bytes + pair_bytes > max_bytes) {
+				stash(i);
+				return batch;
+			}
+			append_pe(batch, rec1, rec2);
+			cumulative_bytes += pair_bytes;
+			observed_record_bytes_ = pair_bytes;
+			i += 2;
+			if ((int)batch.size() >= n || cumulative_bytes >= max_bytes) {
+				stash(i);
+				return batch;
+			}
+		}
+
+		// 0 or 1 leftover record remains unpaired; keep it and poll for its mate / more.
+		std::vector<klibpp::KSeq> leftover;
+		if (i < pending.size()) {
+			leftover.push_back(std::move(pending[i]));
+		}
+
+		// Each pair consumes two records; size the poll to the rows still wanted (>= one pair).
+		const int remaining_pairs = n - (int)batch.size();
+		const int remaining_records = (remaining_pairs > 0 ? remaining_pairs : 1) * 2;
+		const int poll_n = dynamic_poll_n(observed_record_bytes_, max_bytes, remaining_records);
+		auto more = read_stream(sequence1_reader_, poll_n);
+		max_poll_count_ = more.size() > max_poll_count_ ? more.size() : max_poll_count_;
+
+		if (more.empty()) {
+			// EOF. A lone leftover record has no mate -> odd-count error.
+			if (!leftover.empty()) {
+				throw std::runtime_error(
+				    "read_fastx: interleaved input has an odd number of records (unpaired mate for '" +
+				    leftover[0].name + "')");
+			}
+			return batch;
+		}
+
+		// pending = leftover ++ more
+		pending.clear();
+		pending.reserve(leftover.size() + more.size());
+		for (auto &r : leftover) {
+			pending.push_back(std::move(r));
+		}
+		for (auto &r : more) {
+			pending.push_back(std::move(r));
+		}
+	}
+}
+
 SequenceRecordBatch SequenceReader::read(const int n, const size_t max_bytes) {
-	if (paired_) {
+	if (interleaved_) {
+		return read_interleaved(n, max_bytes);
+	} else if (paired_) {
 		return read_pe(n, max_bytes);
 	} else {
 		return read_se(n, max_bytes);

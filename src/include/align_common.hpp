@@ -108,6 +108,46 @@ inline void ParseMinimap2ConfigParams(const named_parameter_map_t &params, miint
 			throw InvalidInputException("min_chain_coverage must be between 0.0 and 1.0");
 		}
 	}
+
+	// Map-time scoring/chaining overrides. Each is optional; when present it must be
+	// in range (negatives are rejected so a user value can never alias the "unset"
+	// sentinel and be silently dropped). Stored into config; applied in InitOptions.
+	auto parse_int_min = [&params](const char *name, int &dst, int min_val) {
+		auto it = params.find(name);
+		if (it != params.end() && !it->second.IsNull()) {
+			int v = it->second.GetValue<int32_t>();
+			if (v < min_val) {
+				throw InvalidInputException("%s must be >= %d", name, min_val);
+			}
+			dst = v;
+		}
+	};
+	auto parse_ratio = [&params](const char *name, float &dst) {
+		auto it = params.find(name);
+		if (it != params.end() && !it->second.IsNull()) {
+			float v = it->second.GetValue<float>();
+			if (v < 0.0f || v > 1.0f) {
+				throw InvalidInputException("%s must be between 0.0 and 1.0", name);
+			}
+			dst = v;
+		}
+	};
+
+	parse_int_min("match_score", config.match_score, 1);
+	parse_int_min("mismatch_penalty", config.mismatch_penalty, 0);
+	parse_int_min("gap_open", config.gap_open, 0);
+	parse_int_min("gap_extend", config.gap_extend, 0);
+	parse_int_min("gap_open2", config.gap_open2, 0);
+	parse_int_min("gap_extend2", config.gap_extend2, 0);
+	parse_int_min("bandwidth", config.bandwidth, 1);
+	parse_int_min("zdrop", config.zdrop, 0);
+	parse_int_min("zdrop_inv", config.zdrop_inv, 0);
+	parse_int_min("min_chain_score", config.min_chain_score, 1);
+	parse_int_min("min_count", config.min_count, 1);
+	parse_int_min("max_gap", config.max_gap, 1);
+	parse_int_min("min_dp_max", config.min_dp_max, 0);
+	parse_ratio("pri_ratio", config.pri_ratio);
+	parse_ratio("mask_level", config.mask_level);
 }
 
 // Output SAMRecordBatch to DataChunk using the standard alignment schema.

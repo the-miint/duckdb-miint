@@ -42,6 +42,14 @@ public:
 	// Defaults to SIZE_MAX, preserving the row-only behavior for existing callers.
 	SequenceRecordBatch read(const int n, const size_t max_bytes = SIZE_MAX);
 
+	// Treat the single stream as interleaved paired-end (record 2k-1 = R1, record 2k = R2),
+	// emitting one paired row per two consecutive records. Must be called before the first
+	// read() and only on a single-stream (non-paired) reader. read() then dispatches to
+	// read_interleaved() instead of read_se().
+	void set_interleaved(bool v) {
+		interleaved_ = v;
+	}
+
 	// Test seam: the largest number of records materialized by any single underlying stream
 	// poll over this reader's lifetime. Lets tests assert that large records do not trigger
 	// oversized prefetches (see dynamic poll sizing in read_se/read_pe).
@@ -67,7 +75,8 @@ private:
 	std::optional<StreamVar> sequence2_reader_;
 
 	bool paired_;
-	bool first_read_; // Track if we need to return buffered data
+	bool interleaved_ = false; // single stream read as interleaved paired-end
+	bool first_read_;          // Track if we need to return buffered data
 	std::vector<klibpp::KSeq> buffered_read1_;
 	std::vector<klibpp::KSeq> buffered_read2_;
 
@@ -79,5 +88,6 @@ private:
 
 	SequenceRecordBatch read_se(const int n, const size_t max_bytes);
 	SequenceRecordBatch read_pe(const int n, const size_t max_bytes);
+	SequenceRecordBatch read_interleaved(const int n, const size_t max_bytes);
 };
 }; // namespace miint

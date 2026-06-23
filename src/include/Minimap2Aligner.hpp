@@ -36,6 +36,26 @@ struct Minimap2Config {
 	int k = 0;                       // k-mer size (0 = use preset default)
 	int w = 0;                       // minimizer window (0 = use preset default)
 	float min_chain_coverage = 0.0f; // min best-chain span (qe-qs)/qlen to attempt DP (0.0 = disabled)
+
+	// Map-time scoring/chaining overrides (mm_mapopt_t). -1 / -1.0f = "unset, use the
+	// preset default". Applied in InitOptions after mm_set_opt(preset), so they tune
+	// alignment against a prebuilt index without rebuilding it. Validated in
+	// ParseMinimap2ConfigParams (negatives rejected so they never alias the sentinel).
+	int match_score = -1;      // -A  matching score (mm_mapopt_t::a)
+	int mismatch_penalty = -1; // -B  mismatch penalty (::b)
+	int gap_open = -1;         // -O  gap-open penalty (::q)
+	int gap_extend = -1;       // -E  gap-extension penalty (::e)
+	int gap_open2 = -1;        // -O2 long-gap open penalty (::q2)
+	int gap_extend2 = -1;      // -E2 long-gap extension penalty (::e2)
+	int bandwidth = -1;        // -r  chaining/alignment bandwidth (::bw)
+	int zdrop = -1;            // -z  Z-drop score (::zdrop)
+	int zdrop_inv = -1;        // -z second value, inversion Z-drop (::zdrop_inv)
+	int min_chain_score = -1;  // -m  min chaining score (::min_chain_score)
+	int min_count = -1;        // -n  min number of minimizers on a chain (::min_cnt)
+	int max_gap = -1;          // -g  max gap between chained minimizers (::max_gap)
+	int min_dp_max = -1;       // -s  min peak DP alignment score to keep a hit (::min_dp_max)
+	float pri_ratio = -1.0f;   // -p  min secondary-to-primary score ratio (::pri_ratio)
+	float mask_level = -1.0f;  // -M  max fraction of overlap to mask (::mask_level)
 };
 
 // Custom deleter for minimap2 index

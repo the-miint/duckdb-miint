@@ -5,7 +5,7 @@ Table functions allow querying bioinformatics files as SQL tables.
 ## Table of Contents
 
 - [`read_alignments`](#read_alignmentsfilename-reference_lengthstable_name-include_filepathfalse-include_seq_qualfalse) - SAM/BAM alignment files
-- [`read_fastx`](#read_fastxfilename-sequence2filename-include_filepathfalse-qual_offset33-max_batch_bytes512mib) - FASTA/FASTQ sequence files
+- [`read_fastx`](#read_fastxfilename-sequence2filename-interleavedfalse-include_filepathfalse-qual_offset33-max_batch_bytes512mib) - FASTA/FASTQ sequence files
 - [`read_sequences_sff`](#read_sequences_sfffilename-include_filepathfalse-trimtrue) - SFF (454/Roche) sequence files
 - [`read_mzml`](#read_mzmlfilename-include_filepathfalse) - mzML mass spectrometry files
 - [`read_mzxml`](#read_mzxmlfilename-include_filepathfalse) - mzXML mass spectrometry files
@@ -215,7 +215,7 @@ FROM alignment_slice('chr1_alns', 1000, 2000);
 - Multi-region slicing (different regions per reference) is not yet supported; use separate queries per region
 - `alignment_seq_identity` with the `'cigar'` method works on sliced output because it reads identity directly from `=`/`X` CIGAR ops without needing tags. Other methods (`gap_compressed`, `blast`, `gap_excluded`) require NM or MD tags which are NULLed after trimming.
 
-## `read_fastx(filename, [sequence2=filename], [include_filepath=false], [qual_offset=33], [max_batch_bytes='512MiB'])`
+## `read_fastx(filename, [sequence2=filename], [interleaved=false], [include_filepath=false], [qual_offset=33], [max_batch_bytes='512MiB'])`
 Read FASTA/FASTQ sequence files.
 
 **Parameters:**
@@ -224,6 +224,7 @@ Read FASTA/FASTQ sequence files.
   - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
 - `sequence2` (VARCHAR or VARCHAR[], optional): Path to R2 file(s) for paired-end reads. Must have same number of files as `filename`
   - **Paired-end with globs**: When `filename` is a glob pattern, `sequence2` must also be a glob pattern. Both are expanded and sorted independently, then paired by position. The expanded file counts must match.
+- `interleaved` (BOOLEAN, optional, default false): Treat each input as an interleaved paired-end stream — consecutive records pair up (record 2k-1 → `sequence1`/`qual1`, record 2k → `sequence2`/`qual2`), emitting one row per pair. Mutually exclusive with `sequence2`. The R1 record's `read_id`/`comment` are used for the pair (any trailing `/1` is stripped). An odd number of records is an error (the final record has no mate). Works with single-stream stdin.
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
 - `qual_offset` (INTEGER, optional, default 33): Quality score offset (33 for Phred+33, 64 for Phred+64)
 - `max_batch_bytes` (VARCHAR, optional, default `'512MiB'`): Soft cap on the uncompressed sequence+quality bytes buffered per output chunk, given as a formatted byte size (e.g. `'256MiB'`, `'2GB'`). The reader stops adding records to a chunk once their combined bytes reach this budget, which bounds memory when individual records are very large (e.g. assembled genomes at multiple MB each). Short-read data is unaffected — a chunk fills to the standard vector size long before the cap. Must be greater than 0.
@@ -259,6 +260,9 @@ SELECT * FROM read_fastx('reads.fastq.gz');
 
 -- Read paired-end FASTQ files
 SELECT * FROM read_fastx('R1.fastq', sequence2='R2.fastq');
+
+-- Read interleaved paired-end (R1,R2,R1,R2,... in one file or stdin)
+SELECT * FROM read_fastx('interleaved.fastq', interleaved=true);
 
 -- Read multiple single-end files
 SELECT * FROM read_fastx(['sample1.fastq', 'sample2.fastq', 'sample3.fastq']);
@@ -2046,6 +2050,24 @@ Align query sequences against multiple pre-built minimap2 index shards in parall
 - `max_secondary` (INTEGER, default: 5): Maximum secondary alignments per query. Set to 0 for primary only
 - `eqx` (BOOLEAN, default: true): Use =/X CIGAR operators instead of M
 - `progress` (BOOLEAN, default: false): Opt-in progress reporting. When true, emit clean, timestamped per-shard lines to **stderr** (`shard i/N 'name': index loaded, R reads` → `done - R reads, A alignments (T s)`). Pure side channel — results are byte-identical to the default, which emits nothing, so programmatic callers are unaffected unless they pass `progress := true`.
+
+**Map-time scoring / chaining parameters (optional):**
+These tune the minimap2 mapping options (`mm_mapopt_t`) applied *after* the preset, so they change alignment/chaining against the **prebuilt** `.mmi` without rebuilding it. Each is optional; when omitted, the preset default is used (so omitting them all is unchanged behavior). The minimap2 `-k`/`-w` (k-mer/window) options are **not** here — they are baked into the index at `save_minimap2_index` time. Negative values are rejected.
+- `match_score` (INTEGER, ≥ 1, minimap2 `-A`): matching score
+- `mismatch_penalty` (INTEGER, ≥ 0, `-B`): mismatch penalty
+- `gap_open` (INTEGER, ≥ 0, `-O`): gap-open penalty
+- `gap_extend` (INTEGER, ≥ 0, `-E`): gap-extension penalty
+- `gap_open2` (INTEGER, ≥ 0, `-O2`): long-gap open penalty (two-piece affine)
+- `gap_extend2` (INTEGER, ≥ 0, `-E2`): long-gap extension penalty
+- `bandwidth` (INTEGER, ≥ 1, `-r`): chaining/alignment bandwidth
+- `zdrop` (INTEGER, ≥ 0, `-z`): Z-drop score for alignment extension
+- `zdrop_inv` (INTEGER, ≥ 0): Z-drop for inversion detection (`-z`'s second value)
+- `min_chain_score` (INTEGER, ≥ 1, `-m`): minimum chaining score to keep a chain
+- `min_count` (INTEGER, ≥ 1, `-n`): minimum number of minimizers on a chain
+- `max_gap` (INTEGER, ≥ 1, `-g`): maximum gap between chained minimizers
+- `min_dp_max` (INTEGER, ≥ 0, `-s`): minimum peak DP alignment score to keep a hit. The preset sets this (e.g. `sr` → 40); like minimap2's CLI it is **not** auto-recomputed when you change `match_score`/`min_chain_score`, so if you lower the match score, set `min_dp_max` too or the preset default may filter out otherwise-valid hits.
+- `pri_ratio` (FLOAT, 0.0–1.0, `-p`): minimum secondary-to-primary score ratio
+- `mask_level` (FLOAT, 0.0–1.0, `-M`): maximum fraction of query overlap to mask a redundant hit
 
 **Output schema:**
 Returns the same 21-column schema as `align_minimap2` and `read_alignments`.
