@@ -23,6 +23,7 @@
 #include <align_minimap2.hpp>
 #include <align_minimap2_sharded.hpp>
 #include <save_minimap2_index.hpp>
+#include <save_bowtie2_index.hpp>
 #include <read_ncbi_fasta.hpp>
 #include <read_ncbi.hpp>
 #include <read_ncbi_annotation.hpp>
@@ -265,6 +266,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 #ifdef MIINT_HAS_GPL_BOUNDARY
 	AlignBowtie2TableFunction::Register(loader);
 	AlignBowtie2ShardedTableFunction::Register(loader);
+	SaveBowtie2IndexTableFunction::Register(loader);
 	RegisterBowtie2AvailableFunction(loader);
 #else
 	// Stub: bowtie2_available() always returns false when the gpl-boundary

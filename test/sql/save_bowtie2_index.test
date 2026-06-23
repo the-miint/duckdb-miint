@@ -1,0 +1,97 @@
+# name: test/sql/save_bowtie2_index.test
+# description: Test save_bowtie2_index — builds and persists a bowtie2 index from a subject table
+# group: [sql]
+
+require miint
+
+require-env GPL_BOUNDARY_AVAILABLE
+
+# Match the sharded-test convention: the sqllogictest framework is happiest with
+# single-threaded table-function execution.
+statement ok
+SET threads=1;
+
+# ==============================================================================
+# BASIC BUILD: save_bowtie2_index writes a usable bowtie2 index to disk.
+# Reuses the exact ref1/ref2 subject sequences from align_bowtie2.test so the
+# round-trip below has known-aligning query/reference pairs.
+# ==============================================================================
+
+statement ok
+CREATE TABLE subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('ref2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCAAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAA')
+) AS t(read_id, sequence1);
+
+# Build into a sharded-layout subdir <dir>/myshard/index.* (what align_bowtie2_sharded expects).
+query II
+SELECT success, num_subjects
+FROM save_bowtie2_index('subjects', '__TEST_DIR__/shards/myshard/index');
+----
+true	2
+
+# The four bowtie2 index files required by align_bowtie2_sharded must exist
+# (bowtie2-build also writes .3/.4, so assert at least the required set).
+query I
+SELECT COUNT(*) >= 4 FROM glob('__TEST_DIR__/shards/myshard/index.*.bt2');
+----
+true
+
+# ==============================================================================
+# ROUND-TRIP (Rule 7 — verify the intent): the freshly built index is consumable
+# by align_bowtie2_sharded and produces the expected alignments.
+# ==============================================================================
+
+statement ok
+CREATE TABLE queries AS SELECT * FROM (VALUES
+    ('query1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('query2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE read_to_shard AS SELECT * FROM (VALUES
+    ('query1', 'myshard'),
+    ('query2', 'myshard')
+) AS t(read_id, shard_name);
+
+query II
+SELECT read_id, reference
+FROM align_bowtie2_sharded('queries',
+    shard_directory := '__TEST_DIR__/shards',
+    read_to_shard := 'read_to_shard',
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+query1	ref1
+query2	ref2
+
+# ==============================================================================
+# ERROR HANDLING (fail loud)
+# ==============================================================================
+
+# Missing subject table
+statement error
+SELECT * FROM save_bowtie2_index('nonexistent_subjects', '__TEST_DIR__/shards/none/index');
+----
+does not exist
+
+# Empty subject table
+statement ok
+CREATE TABLE empty_subjects(read_id VARCHAR, sequence1 VARCHAR);
+
+statement error
+SELECT * FROM save_bowtie2_index('empty_subjects', '__TEST_DIR__/shards/empty/index');
+----
+is empty
+
+# Paired subjects rejected — subjects must be single-end (sequence2 must be NULL)
+statement ok
+CREATE TABLE paired_subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGT', 'ACGTACGTACGTACGTACGTACGTACGT')
+) AS t(read_id, sequence1, sequence2);
+
+statement error
+SELECT * FROM save_bowtie2_index('paired_subjects', '__TEST_DIR__/shards/paired/index');
+----
+single-end

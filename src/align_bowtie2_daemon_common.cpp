@@ -13,7 +13,14 @@
 #include "gpl_boundary/process.hpp"
 #include "nanoarrow/nanoarrow.h"
 
+#include "duckdb/main/connection.hpp"
+#include "duckdb/main/database.hpp"
+#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/parser/keyword_helper.hpp"
+#include "yyjson.hpp"
+
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <tuple>
 #include <unistd.h>
@@ -22,6 +29,7 @@ namespace duckdb {
 namespace bt2_daemon {
 
 namespace gb = ::duckdb::miint::gpl_boundary;
+namespace yj = duckdb_yyjson;
 
 // =============================================================================
 // Config builder + param mapping (used by both align_bowtie2 callers)
@@ -823,6 +831,165 @@ void RequireGplBoundaryVersion(const std::string &binary_path, const char *calle
 			    caller, binary_path, found);
 		}
 	});
+}
+
+// =============================================================================
+// bowtie2-build glue (shared by align_bowtie2 + save_bowtie2_index)
+// =============================================================================
+
+LoadedSubjects LoadSingleEndSubjects(ClientContext &context, const std::string &table_name, const char *caller) {
+	auto &db = DatabaseInstance::GetDatabase(context);
+	Connection conn(db);
+	// Probe for an optional sequence2 column first (paired subjects are
+	// rejected), then issue the actual SELECT. read_id may be VARCHAR or BIGINT;
+	// the implicit Value::GetValue<std::string>() cast below handles either.
+	const std::string columns_sql = "SELECT column_name FROM (DESCRIBE " +
+	                                KeywordHelper::WriteOptionallyQuoted(table_name) +
+	                                ") WHERE column_name IN ('sequence2')";
+	auto columns_res = conn.Query(columns_sql);
+	if (columns_res->HasError()) {
+		throw InvalidInputException("%s: failed to introspect subject table '%s': %s", caller, table_name,
+		                            columns_res->GetError());
+	}
+	const bool has_sequence2 = columns_res->RowCount() > 0;
+
+	std::string select_sql = "SELECT read_id, sequence1";
+	if (has_sequence2) {
+		select_sql += ", sequence2";
+	}
+	select_sql += " FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+
+	auto result = conn.Query(select_sql);
+	if (result->HasError()) {
+		throw InvalidInputException("%s: failed to read subject table '%s' "
+		                            "(must have columns read_id VARCHAR or BIGINT, sequence1 VARCHAR): %s",
+		                            caller, table_name, result->GetError());
+	}
+
+	LoadedSubjects out;
+	auto &materialized = result->Cast<MaterializedQueryResult>();
+	out.names.reserve(materialized.RowCount());
+	out.sequences.reserve(materialized.RowCount());
+	while (auto chunk = materialized.Fetch()) {
+		for (idx_t i = 0; i < chunk->size(); ++i) {
+			auto name_val = chunk->GetValue(0, i);
+			auto seq_val = chunk->GetValue(1, i);
+			if (name_val.IsNull() || seq_val.IsNull()) {
+				throw InvalidInputException("%s: NULL read_id or sequence1 in subject table '%s'", caller, table_name);
+			}
+			if (has_sequence2) {
+				auto s2_val = chunk->GetValue(2, i);
+				if (!s2_val.IsNull()) {
+					throw InvalidInputException("%s: subject table '%s' has non-NULL sequence2 — "
+					                            "subjects must be single-end (sequence2 must be NULL)",
+					                            caller, table_name);
+				}
+			}
+			out.names.push_back(name_val.GetValue<std::string>());
+			out.sequences.push_back(seq_val.GetValue<std::string>());
+		}
+	}
+	if (out.names.empty()) {
+		throw InvalidInputException("%s: subject table '%s' is empty", caller, table_name);
+	}
+	return out;
+}
+
+std::vector<uint8_t> BuildSubjectsIpc(const LoadedSubjects &subjects, const char *caller) {
+	ArrowSchema schema {};
+	auto rc = ArrowSchemaInitFromType(&schema, NANOARROW_TYPE_STRUCT);
+	if (rc != NANOARROW_OK) {
+		throw InternalException("%s: ArrowSchemaInit failed", caller);
+	}
+	rc = ArrowSchemaAllocateChildren(&schema, 2);
+	if (rc != NANOARROW_OK) {
+		schema.release(&schema);
+		throw InternalException("%s: ArrowSchemaAllocateChildren failed", caller);
+	}
+	ArrowSchemaInitFromType(schema.children[0], NANOARROW_TYPE_STRING);
+	ArrowSchemaSetName(schema.children[0], "name");
+	ArrowSchemaInitFromType(schema.children[1], NANOARROW_TYPE_STRING);
+	ArrowSchemaSetName(schema.children[1], "sequence");
+
+	ArrowArray array {};
+	ArrowError err {};
+	if (ArrowArrayInitFromSchema(&array, &schema, &err) != NANOARROW_OK) {
+		schema.release(&schema);
+		throw InternalException("%s: ArrowArrayInit failed: %s", caller, err.message);
+	}
+	if (ArrowArrayStartAppending(&array) != NANOARROW_OK) {
+		array.release(&array);
+		schema.release(&schema);
+		throw InternalException("%s: ArrowArrayStartAppending failed", caller);
+	}
+	for (size_t i = 0; i < subjects.names.size(); ++i) {
+		ArrowStringView nv {subjects.names[i].data(), static_cast<int64_t>(subjects.names[i].size())};
+		ArrowStringView sv {subjects.sequences[i].data(), static_cast<int64_t>(subjects.sequences[i].size())};
+		if (ArrowArrayAppendString(array.children[0], nv) != NANOARROW_OK ||
+		    ArrowArrayAppendString(array.children[1], sv) != NANOARROW_OK ||
+		    ArrowArrayFinishElement(&array) != NANOARROW_OK) {
+			array.release(&array);
+			schema.release(&schema);
+			throw InternalException("%s: subjects append failed at row %d", caller, static_cast<int>(i));
+		}
+	}
+	if (ArrowArrayFinishBuildingDefault(&array, &err) != NANOARROW_OK) {
+		array.release(&array);
+		schema.release(&schema);
+		throw InternalException("%s: ArrowArrayFinishBuilding failed: %s", caller, err.message);
+	}
+
+	std::vector<uint8_t> bytes;
+	try {
+		bytes = gb::EncodeIpcStream(&schema, &array, 1);
+	} catch (...) {
+		array.release(&array);
+		schema.release(&schema);
+		throw;
+	}
+	if (array.release) {
+		array.release(&array);
+	}
+	if (schema.release) {
+		schema.release(&schema);
+	}
+	return bytes;
+}
+
+std::string BuildBowtie2BuildConfigJson(const std::string &index_basename, int64_t nthreads) {
+	ConfigJsonBuilder cfg;
+	cfg.append_str("index_path", index_basename);
+	if (nthreads > 1) {
+		cfg.append_int("nthreads", nthreads);
+	}
+	return cfg.build();
+}
+
+std::vector<std::string> ParseBowtie2BuildIndexFiles(const std::string &result_json, const char *caller) {
+	using YyjsonDocPtr = std::unique_ptr<yj::yyjson_doc, decltype(&yj::yyjson_doc_free)>;
+	YyjsonDocPtr doc(yj::yyjson_read(result_json.data(), result_json.size(), 0), &yj::yyjson_doc_free);
+	if (!doc) {
+		throw IOException("%s: bowtie2-build result_json was not valid JSON: %s", caller, result_json);
+	}
+	yj::yyjson_val *root = yj::yyjson_doc_get_root(doc.get());
+	if (!yj::yyjson_is_obj(root)) {
+		throw IOException("%s: bowtie2-build result was not a JSON object: %s", caller, result_json);
+	}
+	yj::yyjson_val *arr = yj::yyjson_obj_get(root, "index_files");
+	if (!arr || !yj::yyjson_is_arr(arr)) {
+		throw IOException("%s: bowtie2-build result missing 'index_files' array: %s", caller, result_json);
+	}
+	std::vector<std::string> out;
+	const size_t n = yj::yyjson_arr_size(arr);
+	out.reserve(n);
+	for (size_t i = 0; i < n; ++i) {
+		yj::yyjson_val *item = yj::yyjson_arr_get(arr, i);
+		if (!yj::yyjson_is_str(item)) {
+			throw IOException("%s: bowtie2-build index_files contained non-string entry", caller);
+		}
+		out.emplace_back(yj::yyjson_get_str(item));
+	}
+	return out;
 }
 
 } // namespace bt2_daemon

@@ -3,6 +3,7 @@
 #include "align_common.hpp"
 #include "miint_log.hpp"
 #include "sequence_table_reader.hpp"
+#include "shard_progress.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
@@ -87,6 +88,7 @@ std::unordered_set<std::string> MakeKnownShardedParams() {
 	s.insert("include_shard_name");
 	s.insert("submit_batch_reads");
 	s.insert("prefetch_ahead");
+	s.insert("progress");
 	return s;
 }
 
@@ -217,6 +219,8 @@ struct AlignBowtie2ShardedBindData : public TableFunctionData {
 	// threading matters more than the number of concurrent shards.
 	idx_t max_threads_per_shard = 1;
 	bool include_shard_name = false;
+	// Opt-in per-shard progress to stderr (default false; see shard_progress.hpp).
+	bool progress = false;
 
 	// Lower-bound threshold on reads accumulated into one daemon Submit. Larger
 	// batches amortize bowtie2's per-batch FM-index reload and keep `bowtie2 -p N`
@@ -287,6 +291,10 @@ struct AlignBowtie2ShardedGlobalState : public GlobalTableFunctionState {
 	int telemetry_fd = -1;
 	bool telemetry_owns_fd = false;
 	TelClock::time_point telemetry_start;
+
+	// Opt-in per-shard progress (mirrors BindData::progress; set in InitGlobal,
+	// read-only from workers). When false, no progress lines are emitted.
+	bool progress = false;
 
 	idx_t MaxThreads() const override {
 		// DuckDB clamps to its own scheduler concurrency anyway, but
@@ -371,6 +379,12 @@ struct AlignBowtie2ShardedLocalState : public LocalTableFunctionState {
 	// `telemetry_batch_seq` orders this worker's batches in the TSV;
 	// `telemetry_open_stream_ms` carries the cursor-open cost from a shard claim
 	// forward onto that shard's first batch line (0 on subsequent batches).
+	// Progress-only per-shard accumulators (used when GlobalState::progress is
+	// true). Reset when a shard stream opens; read when it exhausts.
+	idx_t shard_reads = 0;
+	idx_t shard_alignments = 0;
+	TelClock::time_point shard_start;
+
 	idx_t telemetry_batch_seq = 0;
 	double telemetry_open_stream_ms = 0.0;
 
@@ -549,6 +563,13 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 		    bt2_daemon::ValueAsBool("align_bowtie2_sharded", "include_shard_name", include_shard_param->second);
 	}
 
+	// Opt-in per-shard progress to stderr (default false): a programmatic caller
+	// that never passes progress:=true emits nothing.
+	auto progress_param = input.named_parameters.find("progress");
+	if (progress_param != input.named_parameters.end() && !progress_param->second.IsNull()) {
+		bd->progress = bt2_daemon::ValueAsBool("align_bowtie2_sharded", "progress", progress_param->second);
+	}
+
 	auto batch_param = input.named_parameters.find("submit_batch_reads");
 	if (batch_param != input.named_parameters.end() && !batch_param->second.IsNull()) {
 		const int64_t val = bt2_daemon::ValueAsInt("align_bowtie2_sharded", "submit_batch_reads", batch_param->second);
@@ -638,6 +659,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	const idx_t derived = (db_threads + bd.max_threads_per_shard - 1) / bd.max_threads_per_shard;
 	gs->max_active_shards = std::max<idx_t>(1, std::min<idx_t>(derived, bd.shards.size()));
 	gs->db_threads = db_threads;
+	gs->progress = bd.progress;
 	gs->prefetch_ahead = bd.prefetch_ahead < 0 ? gs->max_active_shards : static_cast<idx_t>(bd.prefetch_ahead);
 	const bool prefetch_enabled = gs->prefetch_ahead > 0;
 
@@ -1030,10 +1052,23 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 					rec.wall_ms = TelMsSince(gs.telemetry_start);
 					EmitBatchTelemetry(gs.telemetry_fd, rec);
 				}
+				if (gs.progress) {
+					local.shard_reads += static_cast<idx_t>(qb.read_ids.size());
+					for (const auto &w : local.current_batches) {
+						local.shard_alignments += static_cast<idx_t>(w.arrow_array.length);
+					}
+				}
 				continue; // loop back to drain decoded rows
 			}
 			// Shard exhausted — release for re-claim attempt. Drop this worker
 			// from the active count so a surviving worker can grow its `-p`.
+			if (gs.progress) {
+				const double elapsed_s = std::chrono::duration<double>(TelClock::now() - local.shard_start).count();
+				shard_progress::Emit("bowtie2", shard_progress::FormatShardDone(
+				                                    static_cast<uint64_t>(local.current_shard_idx) + 1,
+				                                    static_cast<uint64_t>(bd.shards.size()), local.current_shard_name,
+				                                    local.shard_reads, local.shard_alignments, elapsed_s));
+			}
 			local.input_stream.reset();
 			local.current_shard_idx = DConstants::INVALID_INDEX;
 			gs.active_workers.fetch_sub(1, std::memory_order_relaxed);
@@ -1091,6 +1126,19 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 		if (tel_on) {
 			local.telemetry_open_stream_ms = TelMsSince(t_open0);
 		}
+		// Per-shard progress accounting: reset accumulators and stamp the start
+		// of this shard, then announce it. Read count is unknown at open (reads
+		// stream in batches), so the "started" line omits it; the "done" line
+		// below reports the totals.
+		local.shard_reads = 0;
+		local.shard_alignments = 0;
+		local.shard_start = TelClock::now();
+		if (gs.progress) {
+			shard_progress::Emit("bowtie2", shard_progress::FormatShardStart(
+			                                    static_cast<uint64_t>(local.current_shard_idx) + 1,
+			                                    static_cast<uint64_t>(bd.shards.size()), local.current_shard_name,
+			                                    /*n_reads=*/-1));
+		}
 	}
 }
 
@@ -1110,6 +1158,7 @@ TableFunction AlignBowtie2ShardedTableFunction::GetFunction() {
 	tf.named_parameters["include_shard_name"] = LogicalType::BOOLEAN;
 	tf.named_parameters["submit_batch_reads"] = LogicalType::INTEGER;
 	tf.named_parameters["prefetch_ahead"] = LogicalType::INTEGER;
+	tf.named_parameters["progress"] = LogicalType::BOOLEAN;
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }
