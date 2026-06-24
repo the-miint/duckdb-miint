@@ -22,6 +22,14 @@ namespace duckdb {
 // chunk_data VARCHAR) plus an optional feature->bucket mapping. Wraps the rype
 // FFI rype_index_build_from_arrow, feeding it two DuckDB query results as Arrow
 // streams. Returns a single status row.
+//
+// The chunk_table may be in ANY physical order. The feed is assembled from a
+// sequence of bounded, independently-sorted windows over feature_idx ranges (see
+// WindowedChunkStream in rype_index_create.cpp): a single `ORDER BY` over the
+// whole corpus would buffer every 64 KB chunk and OOM, because DuckDB cannot spill
+// large variable-length sort payloads. Per-window sorts stay small and spillable,
+// and the windows are spliced back-to-back so RYpe still sees each feature
+// contiguous and in ascending chunk_index order.
 class RypeIndexCreateTableFunction {
 public:
 	struct Data : public TableFunctionData {
@@ -33,13 +41,14 @@ public:
 		int32_t w;
 		uint64_t salt;
 		bool orient;
-		int64_t max_memory; // bytes; 0 = auto-detect
+		int64_t max_memory;           // bytes; 0 = auto-detect
+		int64_t feed_window_features; // features per feed window; 0 = auto-size from a byte budget
 
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
 		Data()
-		    : k(64), w(50), salt(0x5555555555555555ULL), orient(true), max_memory(0),
+		    : k(64), w(50), salt(0x5555555555555555ULL), orient(true), max_memory(0), feed_window_features(0),
 		      names({"output_path", "k", "w", "status"}),
 		      types({LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::VARCHAR}) {
 		}

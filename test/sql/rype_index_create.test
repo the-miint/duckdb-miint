@@ -12,6 +12,9 @@
 
 require miint
 
+# Needed by the VIEW-over-parquet round-trip in the "Input order contract" section.
+require parquet
+
 # =============================================================================
 # Setup: a chunked sequence table with DISTINCT, non-repetitive chunks.
 #  - feature 1 (bucket_alpha): two DIFFERENT 64 bp chunks (chunk 0 then chunk 1)
@@ -205,6 +208,122 @@ appears multiple times
 
 statement ok
 DROP TABLE dup_mapping;
+
+# =============================================================================
+# Input order: the chunk_table may be in ANY physical order. The build sorts
+# chunks in bounded per-feature windows (WindowedChunkStream) instead of one
+# corpus-wide ORDER BY (which OOMs on large 64 KB-chunk corpora). So unordered
+# input still yields a correct index, while RYpe's per-feature contiguity check
+# still rejects genuinely malformed features (gap / null chunk_index).
+# =============================================================================
+
+# Build from a VIEW over a parquet file (the real-world access pattern) that is
+# written deliberately UNSORTED — proves the windowed feed sorts it correctly.
+statement ok
+COPY (SELECT * FROM chunks ORDER BY chunk_index DESC, feature_idx DESC)
+  TO '__TEST_DIR__/chunks_unsorted.parquet' (FORMAT parquet);
+
+statement ok
+CREATE VIEW chunks_view AS SELECT * FROM read_parquet('__TEST_DIR__/chunks_unsorted.parquet');
+
+query IIT
+SELECT k, w, status
+FROM rype_index_create('chunks_view', '__TEST_DIR__/built_view.ryxdi', mapping_table := 'mapping', k := 16, w := 8);
+----
+16	8	ok
+
+# Correct despite the unsorted parquet: the two-chunk feature self-matches
+# perfectly, which requires chunk 0 then chunk 1 to have been reassembled in order.
+query I
+SELECT score = 1.0 AS alpha_perfect
+FROM rype_classify('__TEST_DIR__/built_view.ryxdi', 'queries', threshold := 0.05)
+WHERE read_id = 'q_alpha_correct' AND bucket_name = 'bucket_alpha';
+----
+true
+
+statement ok
+DROP VIEW chunks_view;
+
+# Adversarially scrambled input: features interleaved AND chunk_index descending.
+# A pre-fix corpus-wide build with no sort would mis-pair these; the windowed sort
+# repairs both within-feature order and feature contiguity.
+statement ok
+CREATE TABLE scrambled AS SELECT * FROM (VALUES
+    (2::BIGINT, 0::INTEGER, 'GATTACAGGCATCAGTCAGTGGCCAATTGGCCAATTACGCGCGATATCGCGTATATGCATGCAT'),
+    (1::BIGINT, 1::INTEGER, 'AACCGGTTAGGCTACGATCGTACGATTCAGGCTAACGTACCGATTGCATGCATTACGGATCCGA'),
+    (1::BIGINT, 0::INTEGER, 'TTGCACGATCAGGTACCGATTACAGCATTGGCCAAGTCATGCATGGATCCGATCGTTAACGGAT')
+) AS t(feature_idx, chunk_index, chunk_data);
+
+query IIT
+SELECT k, w, status
+FROM rype_index_create('scrambled', '__TEST_DIR__/built_scrambled.ryxdi', mapping_table := 'mapping', k := 16, w := 8);
+----
+16	8	ok
+
+# Both features self-match perfectly (alpha is two-chunk → only possible if chunk 0
+# then 1 were reassembled in order despite the scrambled input).
+query I
+SELECT COUNT(*) AS perfect
+FROM rype_classify('__TEST_DIR__/built_scrambled.ryxdi', 'queries', threshold := 0.05)
+WHERE score = 1.0
+  AND ((read_id = 'q_alpha_correct' AND bucket_name = 'bucket_alpha')
+       OR (read_id = 'q_beta' AND bucket_name = 'bucket_beta'));
+----
+2
+
+# Same scrambled input with feed_window_features := 1 forces one window PER feature
+# (two windows), exercising the multiplexer's window-boundary advance. Still correct.
+query IIT
+SELECT k, w, status
+FROM rype_index_create('scrambled', '__TEST_DIR__/built_windows.ryxdi',
+                       mapping_table := 'mapping', k := 16, w := 8, feed_window_features := 1);
+----
+16	8	ok
+
+query I
+SELECT COUNT(*) AS perfect
+FROM rype_classify('__TEST_DIR__/built_windows.ryxdi', 'queries', threshold := 0.05)
+WHERE score = 1.0
+  AND ((read_id = 'q_alpha_correct' AND bucket_name = 'bucket_alpha')
+       OR (read_id = 'q_beta' AND bucket_name = 'bucket_beta'));
+----
+2
+
+statement ok
+DROP TABLE scrambled;
+
+# --- RYpe still rejects genuinely malformed features (regardless of order) ---
+
+# (a) Gap within a feature: chunk 0 then chunk 2 (chunk 1 missing). Sorting cannot
+# invent the missing chunk, so the build fails loudly.
+statement ok
+CREATE TABLE bad_gap AS SELECT * FROM (VALUES
+    (1::BIGINT, 0::INTEGER, 'TTGCACGATCAGGTACCGATTACAGCATTGGCCAAGTCATGCATGGATCCGATCGTTAACGGAT'),
+    (1::BIGINT, 2::INTEGER, 'AACCGGTTAGGCTACGATCGTACGATTCAGGCTAACGTACCGATTGCATGCATTACGGATCCGA')
+) AS t(feature_idx, chunk_index, chunk_data);
+
+statement error
+SELECT * FROM rype_index_create('bad_gap', '__TEST_DIR__/err_gap.ryxdi', k := 16, w := 8);
+----
+expected chunk_index 1 but got 2
+
+statement ok
+DROP TABLE bad_gap;
+
+# (b) NULL chunk_index: RYpe rejects null key/data columns with a distinct error.
+statement ok
+CREATE TABLE bad_null AS SELECT * FROM (VALUES
+    (1::BIGINT, 0::INTEGER, 'TTGCACGATCAGGTACCGATTACAGCATTGGCCAAGTCATGCATGGATCCGATCGTTAACGGAT'),
+    (1::BIGINT, NULL::INTEGER, 'AACCGGTTAGGCTACGATCGTACGATTCAGGCTAACGTACCGATTGCATGCATTACGGATCCGA')
+) AS t(feature_idx, chunk_index, chunk_data);
+
+statement error
+SELECT * FROM rype_index_create('bad_null', '__TEST_DIR__/err_null.ryxdi', k := 16, w := 8);
+----
+null 'chunk_index'
+
+statement ok
+DROP TABLE bad_null;
 
 statement ok
 DROP TABLE queries;

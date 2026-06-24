@@ -28,6 +28,7 @@ Build a RYpe `.ryxdi` index directly from a DuckDB table of chunked reference se
 - `salt` (UBIGINT, optional, default 6148914691236517205): Hash salt. An index can only be classified against with matching `k`, `w`, and `salt`
 - `orient` (BOOLEAN, optional, default true): Orient sequences within each bucket for better overlap before extraction
 - `max_memory` (BIGINT, optional, default 0): Approximate memory budget in bytes for the build; 0 auto-detects available memory
+- `feed_window_features` (BIGINT, optional, default 0): Advanced. Number of features per internal feed window (see *Behavior*); 0 auto-sizes each window from a memory budget. Set a small value to force more, smaller windows. Rarely needed.
 
 **Output schema:** a single status row.
 - `output_path` (VARCHAR): The path of the index that was created (echoes the input)
@@ -35,9 +36,10 @@ Build a RYpe `.ryxdi` index directly from a DuckDB table of chunked reference se
 - `w` (INTEGER): The window size used
 - `status` (VARCHAR): `ok` on success
 
+**Input order:** the `chunk_table` may be in **any** physical order — chunks are sorted as part of the build. Within each feature, `chunk_index` must still be 0-based and gap-free; a missing or duplicate `chunk_index` (a genuinely malformed feature) fails the build with a clear RYpe error (e.g. `expected chunk_index N but got M`, or `first chunk_index must be 0`).
+
 **Behavior:**
-- A feature's chunks must be contiguous and form an ascending, 0-based, gap-free `chunk_index` sequence; the function reads them ordered by `(feature_idx, chunk_index)`.
-- The large sequence/chunk data is streamed (never fully materialized); the small bucket mapping is read into memory.
+- Memory is bounded regardless of corpus size. The build never sorts the whole corpus at once — a single `ORDER BY` over many 64 KB chunks would buffer everything and run out of memory, because DuckDB cannot spill large variable-length sort payloads. Instead the features are partitioned into windows (contiguous `feature_idx` ranges, auto-sized to a per-window memory budget, or set explicitly via `feed_window_features`), each window is read and sorted independently (multi-threaded, spillable), and the windows are spliced into one stream so chunks still reach RYpe fully ordered. The small bucket mapping is read into memory.
 - Inputs are validated at bind time: a missing table, a missing required column, `k` not in {16, 32, 64}, or `w < 1` all raise an error before any build work begins.
 - A duplicate `feature_idx` in `mapping_table` is rejected.
 - The index directory is written **non-atomically**: if the build fails partway, a partial, unusable directory may remain at `output_path` and should be discarded. Build to a temporary path and move it into place if atomicity is required.
