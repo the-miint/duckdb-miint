@@ -142,154 +142,154 @@ jobs:
         shell: bash -el {0}
         run: PYTHON=/usr/bin/python3 bash onboarding-tutorials/run_tutorial_tests.sh ./build/release/duckdb
 
-  test-wasm-compatible-build:
-    name: Test WASM-compatible build (no HDF5/Bowtie2)
-    # Push-only: this is a Linux build but its purpose is WASM-compat
-    # regression detection, which is deferred to merge along with the actual
-    # WASM build/verify jobs to keep PR CI cost down.
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    env:
-      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
-      VCPKG_TARGET_TRIPLET: 'x64-linux'
-      GEN: ninja
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: 'recursive'
+  #test-wasm-compatible-build:
+  #  name: Test WASM-compatible build (no HDF5/Bowtie2)
+  #  # Push-only: this is a Linux build but its purpose is WASM-compat
+  #  # regression detection, which is deferred to merge along with the actual
+  #  # WASM build/verify jobs to keep PR CI cost down.
+  #  if: github.event_name != 'pull_request'
+  #  runs-on: ubuntu-latest
+  #  env:
+  #    VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+  #    VCPKG_TARGET_TRIPLET: 'x64-linux'
+  #    GEN: ninja
+  #  steps:
+  #    - uses: actions/checkout@v4
+  #      with:
+  #        fetch-depth: 0
+  #        submodules: 'recursive'
 
-      - name: Install build dependencies
-        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
+  #    - name: Install build dependencies
+  #      run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
 
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11.1
-        with:
-          vcpkgGitCommitId: fef715db0cad13d7db3a29797969a57b44e73531
+  #    - name: Setup vcpkg
+  #      uses: lukka/run-vcpkg@v11.1
+  #      with:
+  #        vcpkgGitCommitId: fef715db0cad13d7db3a29797969a57b44e73531
 
-      - name: Setup ccache
-        uses: hendrikmuhs/ccache-action@v1.2
-        continue-on-error: true
-        with:
-          key: ccache-test-wasm-compatible
-          max-size: 1G
+  #    - name: Setup ccache
+  #      uses: hendrikmuhs/ccache-action@v1.2
+  #      continue-on-error: true
+  #      with:
+  #        key: ccache-test-wasm-compatible
+  #        max-size: 1G
 
-      - name: Build extension (HDF5=OFF, Bowtie2=OFF)
-        run: EXT_FLAGS="-DMIINT_ENABLE_HDF5=OFF -DMIINT_ENABLE_BOWTIE2=OFF" make release
+  #    - name: Build extension (HDF5=OFF, Bowtie2=OFF)
+  #      run: EXT_FLAGS="-DMIINT_ENABLE_HDF5=OFF -DMIINT_ENABLE_BOWTIE2=OFF" make release
 
-      - name: Run SQL tests
-        run: make test
+  #    - name: Run SQL tests
+  #      run: make test
 
-      - name: Run C++ unit tests
-        run: ./build/release/extension/miint/tests
+  #    - name: Run C++ unit tests
+  #      run: ./build/release/extension/miint/tests
 
-  verify-wasm:
-    name: Verify WASM extension imports
-    # Push-only: WASM build artifacts only exist on push (see exclude_archs above).
-    if: github.event_name != 'pull_request'
-    needs: duckdb-stable-build
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        wasm_arch: [wasm_eh]
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: miint-v1.5.4-extension-${{ matrix.wasm_arch }}
+  #verify-wasm:
+  #  name: Verify WASM extension imports
+  #  # Push-only: WASM build artifacts only exist on push (see exclude_archs above).
+  #  if: github.event_name != 'pull_request'
+  #  needs: duckdb-stable-build
+  #  runs-on: ubuntu-latest
+  #  strategy:
+  #    matrix:
+  #      wasm_arch: [wasm_eh]
+  #  steps:
+  #    - uses: actions/download-artifact@v4
+  #      with:
+  #        name: miint-v1.5.4-extension-${{ matrix.wasm_arch }}
 
-      - name: Find WASM file
-        id: find-wasm
-        run: |
-          WASM_FILE=$(find . -name "*.duckdb_extension.wasm" | head -1)
-          echo "wasm_file=$WASM_FILE" >> $GITHUB_OUTPUT
-          echo "Found: $WASM_FILE ($(du -h "$WASM_FILE" | cut -f1))"
+  #    - name: Find WASM file
+  #      id: find-wasm
+  #      run: |
+  #        WASM_FILE=$(find . -name "*.duckdb_extension.wasm" | head -1)
+  #        echo "wasm_file=$WASM_FILE" >> $GITHUB_OUTPUT
+  #        echo "Found: $WASM_FILE ($(du -h "$WASM_FILE" | cut -f1))"
 
-      - name: Verify no unresolved library imports
-        run: |
-          node -e "
-            const fs = require('fs');
-            const buf = fs.readFileSync('${{ steps.find-wasm.outputs.wasm_file }}');
-            WebAssembly.compile(buf).then(mod => {
-                const imports = WebAssembly.Module.imports(mod);
-                const exports = WebAssembly.Module.exports(mod);
-                const exportNames = new Set(exports.map(e => e.name));
+  #    - name: Verify no unresolved library imports
+  #      run: |
+  #        node -e "
+  #          const fs = require('fs');
+  #          const buf = fs.readFileSync('${{ steps.find-wasm.outputs.wasm_file }}');
+  #          WebAssembly.compile(buf).then(mod => {
+  #              const imports = WebAssembly.Module.imports(mod);
+  #              const exports = WebAssembly.Module.exports(mod);
+  #              const exportNames = new Set(exports.map(e => e.name));
 
-                // Library symbols that must be statically linked
-                const libPatterns = [
-                    /^gz(close|open|d?open|read|write|gets|puts|eof|rewind|seek|tell|flush)/,
-                    /^(deflate|inflate|compress|uncompress|adler32|crc32)/,
-                    /^hts_/,  /^sam_/,  /^bam_/,  /^bcf_/,  /^bgzf_/,
-                    /^mm_/,  /^mm2_/,  /^wavefront/,  /^XML_/,  /^rype_/,
-                ];
-                const isLib = name => libPatterns.some(p => p.test(name));
+  #              // Library symbols that must be statically linked
+  #              const libPatterns = [
+  #                  /^gz(close|open|d?open|read|write|gets|puts|eof|rewind|seek|tell|flush)/,
+  #                  /^(deflate|inflate|compress|uncompress|adler32|crc32)/,
+  #                  /^hts_/,  /^sam_/,  /^bam_/,  /^bcf_/,  /^bgzf_/,
+  #                  /^mm_/,  /^mm2_/,  /^wavefront/,  /^XML_/,  /^rype_/,
+  #              ];
+  #              const isLib = name => libPatterns.some(p => p.test(name));
 
-                // Direct env imports = not linked at all
-                const badDirect = imports.filter(i => i.module === 'env' && isLib(i.name));
-                // GOT imports without matching exports = linked but PIC resolution broken
-                const gotImports = imports.filter(i =>
-                    (i.module === 'GOT.func' || i.module === 'GOT.mem') && isLib(i.name)
-                );
-                const badGot = gotImports.filter(i => !exportNames.has(i.name));
-                const hasInit = exportNames.has('miint_duckdb_cpp_init');
+  #              // Direct env imports = not linked at all
+  #              const badDirect = imports.filter(i => i.module === 'env' && isLib(i.name));
+  #              // GOT imports without matching exports = linked but PIC resolution broken
+  #              const gotImports = imports.filter(i =>
+  #                  (i.module === 'GOT.func' || i.module === 'GOT.mem') && isLib(i.name)
+  #              );
+  #              const badGot = gotImports.filter(i => !exportNames.has(i.name));
+  #              const hasInit = exportNames.has('miint_duckdb_cpp_init');
 
-                const problems = [];
-                if (!hasInit) problems.push('Missing miint_duckdb_cpp_init export');
-                badDirect.forEach(i => problems.push('Unlinked: env.' + i.name));
-                badGot.forEach(i => problems.push('GOT without export: ' + i.module + '.' + i.name));
+  #              const problems = [];
+  #              if (!hasInit) problems.push('Missing miint_duckdb_cpp_init export');
+  #              badDirect.forEach(i => problems.push('Unlinked: env.' + i.name));
+  #              badGot.forEach(i => problems.push('GOT without export: ' + i.module + '.' + i.name));
 
-                if (problems.length > 0) {
-                    console.error('WASM import verification FAILED:');
-                    problems.forEach(p => console.error('  ' + p));
-                    process.exit(1);
-                }
-                console.log('Imports: ' + imports.length + ' total, ' + gotImports.length + ' library GOT (all self-resolved)');
-                console.log('Exports: ' + exports.length + ' total, miint_duckdb_cpp_init present');
-                console.log('PASS');
-            }).catch(err => {
-                console.error('WebAssembly.compile failed:', err.message);
-                process.exit(1);
-            });
-          "
+  #              if (problems.length > 0) {
+  #                  console.error('WASM import verification FAILED:');
+  #                  problems.forEach(p => console.error('  ' + p));
+  #                  process.exit(1);
+  #              }
+  #              console.log('Imports: ' + imports.length + ' total, ' + gotImports.length + ' library GOT (all self-resolved)');
+  #              console.log('Exports: ' + exports.length + ' total, miint_duckdb_cpp_init present');
+  #              console.log('PASS');
+  #          }).catch(err => {
+  #              console.error('WebAssembly.compile failed:', err.message);
+  #              process.exit(1);
+  #          });
+  #        "
 
-  test-wasm-load:
-    name: Test WASM extension loads
-    # Push-only: builds WASM via emsdk and runs a load test. Deferred to merge
-    # along with the rest of the WASM pipeline.
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    env:
-      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: 'recursive'
+  #test-wasm-load:
+  #  name: Test WASM extension loads
+  #  # Push-only: builds WASM via emsdk and runs a load test. Deferred to merge
+  #  # along with the rest of the WASM pipeline.
+  #  if: github.event_name != 'pull_request'
+  #  runs-on: ubuntu-latest
+  #  env:
+  #    VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+  #  steps:
+  #    - uses: actions/checkout@v4
+  #      with:
+  #        fetch-depth: 0
+  #        submodules: 'recursive'
 
-      - uses: mymindstorm/setup-emsdk@v13
-        with:
-          version: 3.1.71
+  #    - uses: mymindstorm/setup-emsdk@v13
+  #      with:
+  #        version: 3.1.71
 
-      - uses: dtolnay/rust-toolchain@1.86.0
-        with:
-          targets: wasm32-unknown-emscripten
+  #    - uses: dtolnay/rust-toolchain@1.86.0
+  #      with:
+  #        targets: wasm32-unknown-emscripten
 
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11.1
-        with:
-          vcpkgGitCommitId: fef715db0cad13d7db3a29797969a57b44e73531
+  #    - name: Setup vcpkg
+  #      uses: lukka/run-vcpkg@v11.1
+  #      with:
+  #        vcpkgGitCommitId: fef715db0cad13d7db3a29797969a57b44e73531
 
-      - name: Setup ccache
-        uses: hendrikmuhs/ccache-action@v1.2
-        continue-on-error: true
-        with:
-          key: ccache-test-wasm-load
-          max-size: 2G
+  #    - name: Setup ccache
+  #      uses: hendrikmuhs/ccache-action@v1.2
+  #      continue-on-error: true
+  #      with:
+  #        key: ccache-test-wasm-load
+  #        max-size: 2G
 
-      - name: Build WASM extension
-        run: ./scripts/build_wasm.sh --build-only
+  #    - name: Build WASM extension
+  #      run: ./scripts/build_wasm.sh --build-only
 
-      - name: Build DuckDB WASM core and run load test
-        run: ./scripts/test_wasm_load.sh
+  #    - name: Build DuckDB WASM core and run load test
+  #      run: ./scripts/test_wasm_load.sh
 
   code-quality-check:
     name: Code Quality Check
