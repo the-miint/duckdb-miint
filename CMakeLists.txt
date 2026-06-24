@@ -996,6 +996,15 @@ ExternalProject_Add(
         ${GLUE_CARGO_TARGET_FLAG}
     INSTALL_COMMAND ""
     BUILD_IN_SOURCE 0
+    # Run the cargo build on EVERY build, deferring change detection to cargo's own
+    # fingerprinting. ExternalProject does not track SOURCE_DIR (or path-dependency,
+    # e.g. ext/rype / ext/sylph) file contents, so without this an incremental build
+    # after a submodule bump or a local rype/sylph edit would silently relink the
+    # STALE libmiint_rust_glue.a — the dev gets a binary that doesn't match their
+    # source and has no way to notice. Cargo's no-op when nothing changed is ~1-3s.
+    # (Clean builds — CI's fresh ubuntu-latest runners, or `make clean` locally —
+    # were always correct; this only closes the incremental-build footgun.)
+    BUILD_ALWAYS 1
     BUILD_BYPRODUCTS ${GLUE_LIB_PATH}
 )
 
