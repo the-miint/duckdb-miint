@@ -123,16 +123,43 @@ jobs:
         continue-on-error: true
         with:
           key: ccache-test-with-bowtie2
-          # This job rebuilds all of DuckDB core from source on a 4-core
-          # runner and is the wall-clock critical path for every PR/push
-          # (~21m). 1G is far too small to hold a DuckDB build's object set,
-          # so ccache was thrashing and recompiling core on every run. 2G
-          # holds the working set; raise further only against the 10G repo
-          # cache budget shared across all branches/jobs.
+          # DuckDB-core compile working set measured at ~1.0 GB (ccache -s:
+          # 99.6% hit rate). The old 1G cap sat right at that limit, risking
+          # eviction; 2G gives headroom. Note: compilation is NOT this job's
+          # bottleneck (cache already hits ~99%) — the dependency build is,
+          # see the vcpkg binary cache below. Raise further only against the
+          # 10G repo cache budget shared across all branches/jobs.
           max-size: 2G
 
+      # Persist vcpkg's binary cache across runs. WHY: lukka/run-vcpkg points
+      # VCPKG_BINARY_SOURCES at the `x-gha` backend, which vcpkg has REMOVED
+      # ("the 'x-gha' binary caching backend has been removed"), so this job
+      # had no binary cache and rebuilt every dependency from source every run
+      # (~5m39s measured: openssl 2.2m, hdf5 1.9m, curl/rocksdb/zstd/zlib/...).
+      # A `files` cache backed by actions/cache fixes it. Stable key on the
+      # manifest hash: deps change only when vcpkg.json (incl. builtin-baseline)
+      # changes, so unchanged runs are exact hits (no re-save); a changed
+      # manifest restores the prior cache via restore-keys and rebuilds only
+      # the deltas. vcpkg keys stored zips by ABI hash, so a stale entry is
+      # never miscompiled — at worst rebuilt and re-added. Bump -v1 to bust.
+      - name: Cache vcpkg binary artifacts
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/vcpkg_bincache
+          key: vcpkg-bincache-x64-linux-v1-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-bincache-x64-linux-v1-
+
       - name: Build extension
-        run: make release
+        # Override run-vcpkg's dead `x-gha` source. `clear` drops all defaults,
+        # then: duckdb's public HTTP cache (read) covers core deps when ABIs
+        # match the runner toolchain; our `files` cache (readwrite, persisted
+        # above) covers everything built locally — notably the miint-only
+        # hdf5/rocksdb that duckdb's cache doesn't carry — across runs.
+        # Set inline so it wins over the value run-vcpkg wrote to $GITHUB_ENV.
+        run: |
+          VCPKG_BINARY_SOURCES="clear;http,https://vcpkg-cache.duckdb.org,read;files,${{ github.workspace }}/vcpkg_bincache,readwrite" \
+            make release
 
       - name: Run all tests
         shell: bash -el {0}
