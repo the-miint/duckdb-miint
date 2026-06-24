@@ -200,10 +200,12 @@ inline void ValidateTableHasColumns(ClientContext &context, const std::string &t
 // sequence_table corrupts the correspondence whenever the two scans see rows
 // in different orders (multi-threaded scans, views, parquet sources,
 // preserve_insertion_order=false). The helpers below materialize the source
-// once into a per-call TEMP table with an explicit id column, then read
-// read_ids and stream sequences from that same table ORDER BY id — the id
-// column is now a stable attribute of the data, not an emergent property of
-// independent scans.
+// once into a per-call TEMP table with an explicit id column. id, read_id, and
+// sequence now live together in one row, so the correspondence is intrinsic to
+// the data rather than an emergent property of independent scans. read_ids is
+// read ORDER BY id (so the vector is indexed by id); the sequence stream needs
+// no ordering — RYpe echoes each row's id back as the output query_id, so it is
+// fed unordered and lazily (SendQuery) to keep memory at O(batch).
 //
 // Usage pattern (in InitGlobal, on a per-GlobalState sub-Connection):
 //
@@ -272,8 +274,19 @@ inline std::string MaterializeRypeInputTempTable(Connection &conn, const std::st
 }
 
 //! Build the Arrow input stream RYpe will consume. Reads (id, sequence1, [sequence2])
-//! from the named TEMP table ordered by id. `include_pair_column` exposes a
-//! pair_sequence column (true for classify/log_ratio, false for extract).
+//! from the named TEMP table. `include_pair_column` exposes a pair_sequence column
+//! (true for classify/log_ratio, false for extract).
+//!
+//! Streamed via SendQuery (NOT Query) so RYpe consumes one batch at a time —
+//! O(batch_size) memory — instead of materializing the whole sequence corpus in
+//! RAM up front (which OOMs on large inputs, e.g. many genomes).
+//!
+//! No ORDER BY: RYpe echoes each row's `id` column back as the output query_id and
+//! never relies on input row order (see rype_classify/extract/log_ratio Execute,
+//! which all index read_ids[query_id]). id, read_id, and sequence already travel
+//! together in one temp-table row, so the read_ids[query_id] mapping is
+//! order-independent. Avoiding the sort also avoids a corpus-wide sort of large
+//! sequence BLOBs, which DuckDB cannot spill and which OOMs at scale.
 //!
 //! Caller transfers ownership of the returned wrapper to RYpe by calling
 //! .release() AFTER rype_*_arrow() succeeds; on failure, the unique_ptr's
@@ -284,8 +297,8 @@ BuildRypeArrowInput(Connection &conn, const std::string &tmp_table_name, bool in
 	std::string select_cols = include_pair_column
 	                              ? std::string("id, sequence1::BLOB AS sequence, sequence2::BLOB AS pair_sequence")
 	                              : std::string("id, sequence1::BLOB AS sequence");
-	std::string query = "SELECT " + select_cols + " FROM " + tmp_quoted + " ORDER BY id";
-	auto query_result = conn.Query(query);
+	std::string query = "SELECT " + select_cols + " FROM " + tmp_quoted;
+	auto query_result = conn.SendQuery(query);
 	if (query_result->HasError()) {
 		throw InvalidInputException("Failed to read from temp table: %s", query_result->GetError());
 	}
