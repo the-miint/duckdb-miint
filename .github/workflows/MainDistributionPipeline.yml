@@ -151,14 +151,14 @@ jobs:
             vcpkg-bincache-x64-linux-v1-
 
       - name: Build extension
-        # Override run-vcpkg's dead `x-gha` source. `clear` drops all defaults,
-        # then: duckdb's public HTTP cache (read) covers core deps when ABIs
-        # match the runner toolchain; our `files` cache (readwrite, persisted
-        # above) covers everything built locally — notably the miint-only
-        # hdf5/rocksdb that duckdb's cache doesn't carry — across runs.
-        # Set inline so it wins over the value run-vcpkg wrote to $GITHUB_ENV.
+        # Override run-vcpkg's dead `x-gha` source with our actions/cache-backed
+        # `files` cache (persisted above). `clear` drops all defaults. Set inline
+        # so it wins over the value run-vcpkg writes to $GITHUB_ENV.
+        # NB: duckdb's public HTTP read cache was tried here and measured 0 hits
+        # (run 28135833867) — ubuntu-latest's gcc ABI doesn't match duckdb's
+        # manylinux-docker toolchain, so its prebuilt zips never match. Dropped.
         run: |
-          VCPKG_BINARY_SOURCES="clear;http,https://vcpkg-cache.duckdb.org,read;files,${{ github.workspace }}/vcpkg_bincache,readwrite" \
+          VCPKG_BINARY_SOURCES="clear;files,${{ github.workspace }}/vcpkg_bincache,readwrite" \
             make release
 
       - name: Run all tests
