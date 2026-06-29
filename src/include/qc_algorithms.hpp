@@ -59,14 +59,16 @@ struct AdapterMatch {
 
 class AdapterMatcher {
 public:
-	// 3-phase adapter search ported from fastp:
-	//   phase 1: exact Hamming with 1 mismatch per 8 compared bases
-	//   phase 2: phase 1 + one insertion in seq (seq has one extra base)
-	//   phase 3: phase 1 + one deletion in seq (seq missing one base)
-	// Phases are tried in order; the first phase that finds a match wins.
-	// Within a phase, the LEFTMOST match wins (fastp's behavior — the leftmost
-	// hit is the most likely true adapter start; "best match" ranking would
-	// over-trim on genomic chatter that happens to match late in the read).
+	// Hamming-tolerant adapter search ported from fastp's
+	// AdapterTrimmer::trimBySequence: scan positions left-to-right, comparing
+	// adapter vs seq with a tolerance of 1 mismatch per 8 compared bases, and
+	// return the first match. No indel handling (fastp's by-sequence trim has
+	// none) — a single inserted/deleted base in the adapter region is not
+	// matched. The LEFTMOST match wins (fastp's behavior — the leftmost hit is
+	// the most likely true adapter start; "best match" ranking would over-trim
+	// on genomic chatter that happens to match late in the read). `indels` in
+	// the result is therefore always 0; the field is kept for symmetry with the
+	// other match metrics (only tests read it).
 	//
 	// `min_match` is the minimum length of compared region required for a
 	// match. fastp auto-scales this 4..6 based on adapter list size; here we

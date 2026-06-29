@@ -257,20 +257,20 @@ TrimResult PolyXScanner::scan_polyx(const std::uint8_t *seq, std::size_t len, st
 }
 
 // ---------------------------------------------------------------------------
-// AdapterMatcher — 3-phase port of fastp's adapter trimming
+// AdapterMatcher — Hamming-tolerant port of fastp's by-sequence adapter trim
 // ---------------------------------------------------------------------------
 //
-// Phase 1: scan candidate positions left-to-right. At each position, compare
-// adapter vs seq with a tolerance of cmplen/8 mismatches. Return first match.
+// Scan candidate positions left-to-right. At each position, compare adapter vs
+// seq with a tolerance of cmplen/8 mismatches; return the first (leftmost)
+// match. This mirrors fastp's AdapterTrimmer::trimBySequence, which is
+// Hamming-only — it does NOT do indel-aware matching, so a single inserted or
+// deleted base in the adapter region frame-shifts the comparison past the
+// budget and the occurrence is not trimmed.
 //
-// Phase 2: same scan but allow exactly one insertion in seq (seq has one
-// extra base relative to adapter). Two-pointer walk; on first mismatch, skip
-// a seq base and continue. Mismatches AFTER the indel still count.
-//
-// Phase 3: same as phase 2 but the indel is a deletion in seq (seq missing
-// one base). On first mismatch, skip an adapter base.
-//
-// Phases are tried in order; first to find a match wins.
+// (An earlier build added an exhaustive single-indel search here. It matched
+// nothing on real data, dominated trim_adapters runtime — ~99% of it on a
+// 177-adapter set — and was never part of the fastp parity contract, which only
+// pins the clean exact-adapter cases.)
 
 namespace {
 
@@ -327,85 +327,6 @@ AdapterMatch phase1_hamming(const std::uint8_t *seq, std::size_t seq_len, const 
 	return {};
 }
 
-// Phase 2/3 shared body. For each candidate starting position, try every
-// possible indel position k in the adapter and pick the best (fewest
-// mismatches) result. Exhaustive search across k is required for
-// correctness: a greedy commit-on-first-mismatch approach produces false
-// negatives when a substitution precedes the true indel (e.g. one leading
-// sequencing error before the adapter's actual insertion site exhausts the
-// mismatch budget if the indel slot is wasted on the substitution).
-//
-// `insertion_in_seq` selects direction:
-//   true  → seq has one extra base at indel position k; skip seq[k]
-//   false → seq is missing one base at adapter position k; skip adapter[k]
-AdapterMatch phase_indel(const std::uint8_t *seq, std::size_t seq_len, const std::uint8_t *adapter,
-                         std::size_t adapter_len, std::size_t min_match, int start_pos, bool insertion_in_seq) {
-	const int seq_len_i = static_cast<int>(seq_len);
-	const int adapter_len_i = static_cast<int>(adapter_len);
-	const int min_match_i = static_cast<int>(min_match);
-
-	for (int pos = start_pos; pos + min_match_i <= seq_len_i; pos++) {
-		const int adapter_off = pos < 0 ? -pos : 0;
-		const int seq_off = pos < 0 ? 0 : pos;
-		const int adapter_remain = adapter_len_i - adapter_off;
-		const int seq_remain = seq_len_i - seq_off;
-		// Defensive guard: adapter_remain == 0 would underflow seq_region_len in the deletion case.
-		if (adapter_remain <= 0 || adapter_remain < min_match_i) {
-			continue;
-		}
-
-		const int seq_region_len = insertion_in_seq ? adapter_remain + 1 : adapter_remain - 1;
-		if (seq_region_len < min_match_i || seq_remain < seq_region_len) {
-			continue;
-		}
-
-		const std::uint32_t allowed = static_cast<std::uint32_t>(adapter_remain / MISMATCH_PER_8_BASES);
-		// max_k:
-		//   insertion: k can be any "gap" in adapter from 0 to adapter_remain inclusive
-		//              (inserted base at seq index k means adapter[j] maps to seq[j+1] for j>=k)
-		//   deletion:  k can be any adapter index 0..adapter_remain-1 to be "missing" from seq
-		const int max_k = insertion_in_seq ? adapter_remain : adapter_remain - 1;
-		std::uint32_t best_mm = allowed + 1; // sentinel: "no valid match yet"
-
-		for (int k = 0; k <= max_k; k++) {
-			std::uint32_t mm = 0;
-			bool ok = true;
-			for (int j = 0; j < adapter_remain; j++) {
-				if (!insertion_in_seq && j == k) {
-					continue; // adapter[k] is the deleted base; not in seq
-				}
-				int si;
-				if (insertion_in_seq) {
-					si = j < k ? j : j + 1;
-				} else {
-					si = j < k ? j : j - 1;
-				}
-				if (adapter[adapter_off + j] != seq[seq_off + si]) {
-					mm++;
-					if (mm > allowed) {
-						ok = false;
-						break;
-					}
-				}
-			}
-			if (ok && mm < best_mm) {
-				best_mm = mm;
-			}
-		}
-
-		if (best_mm <= allowed) {
-			AdapterMatch m;
-			m.matched = true;
-			m.trim_start = static_cast<std::size_t>(seq_off);
-			m.match_len = static_cast<std::size_t>(seq_region_len);
-			m.mismatches = best_mm;
-			m.indels = 1;
-			return m;
-		}
-	}
-	return {};
-}
-
 } // namespace
 
 AdapterMatch AdapterMatcher::find(const std::uint8_t *seq, std::size_t seq_len, const std::uint8_t *adapter,
@@ -416,15 +337,7 @@ AdapterMatch AdapterMatcher::find(const std::uint8_t *seq, std::size_t seq_len, 
 
 	const int start_pos = allow_pre_start ? pre_start_offset(adapter_len) : 0;
 
-	auto m = phase1_hamming(seq, seq_len, adapter, adapter_len, min_match, start_pos);
-	if (m.matched) {
-		return m;
-	}
-	m = phase_indel(seq, seq_len, adapter, adapter_len, min_match, start_pos, /*insertion_in_seq=*/true);
-	if (m.matched) {
-		return m;
-	}
-	return phase_indel(seq, seq_len, adapter, adapter_len, min_match, start_pos, /*insertion_in_seq=*/false);
+	return phase1_hamming(seq, seq_len, adapter, adapter_len, min_match, start_pos);
 }
 
 std::size_t AdapterMatcher::find_leftmost(const std::uint8_t *seq, std::size_t seq_len,

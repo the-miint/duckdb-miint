@@ -422,58 +422,29 @@ TEST_CASE("AdapterMatcher::find phase 1 (exact Hamming)", "[qc][adapter]") {
 	}
 }
 
-TEST_CASE("AdapterMatcher::find phase 2 (insertion in seq)", "[qc][adapter]") {
+TEST_CASE("AdapterMatcher::find is Hamming-only — no indel detection (fastp parity)", "[qc][adapter]") {
+	// fastp's by-sequence adapter trim (AdapterTrimmer::trimBySequence) is a
+	// Hamming-tolerant sliding scan (1 mismatch per 8 compared bases) with NO
+	// indel handling. miint matches that exactly: a single inserted or deleted
+	// base in the adapter region frame-shifts the comparison past the mismatch
+	// budget, so the occurrence is deliberately NOT detected. (Earlier builds did
+	// an exhaustive per-position indel search here. It matched nothing on real
+	// data, cost ~99% of trim_adapters runtime, and was never fastp-faithful —
+	// the parity oracle only ever pinned the clean exact-adapter cases.)
 	const std::string adapter = "AGATCGGAAGAGC"; // 13bp
 
-	SECTION("seq has one inserted base in the middle of the adapter") {
-		// "AGATC" + 'X' + "GGAAGAGC" — adapter with extra X at position 5
-		const std::string seq = "ACGTACGTAGATCXGGAAGAGC"; // 22bp; adapter region starts at 8
+	SECTION("one inserted base in the adapter region is not matched") {
+		// "AGATC" + 'X' + "GGAAGAGC" — an extra X at adapter position 5.
+		const std::string seq = "ACGTACGTAGATCXGGAAGAGC";
 		auto m = AdapterMatcher::find(bp(seq), seq.size(), bp(adapter), adapter.size(), 4, false);
-		REQUIRE(m.matched);
-		CHECK(m.trim_start == 8);
-		CHECK(m.indels == 1);
-		CHECK(m.match_len == 14); // adapter_len + 1
+		CHECK_FALSE(m.matched);
 	}
 
-	SECTION("insertion + 1 mismatch within tolerance") {
-		// Insert + one substitution; cmplen=14 (adapter+1), allowed=14/8=1.
-		// Wait: allowed is based on adapter_len for indel phases. allowed=13/8=1.
-		std::string seq = "ACGTACGTAGATCXGGAAGAGC";
-		seq[16] = 'T'; // was 'G' — one mismatch after the insertion
+	SECTION("one deleted base in the adapter region is not matched") {
+		// Adapter with a 'G' deleted → "AGATCGAAGAGC" (12bp) in the read.
+		const std::string seq = "ACGTACGTAGATCGAAGAGC";
 		auto m = AdapterMatcher::find(bp(seq), seq.size(), bp(adapter), adapter.size(), 4, false);
-		REQUIRE(m.matched);
-		CHECK(m.trim_start == 8);
-		CHECK(m.indels == 1);
-		CHECK(m.mismatches == 1);
-	}
-
-	SECTION("substitution BEFORE true insertion site — exhaustive search required") {
-		// Adapter (13): "AGATCGGAAGAGC"
-		// Seq region (14): "TGATCXGGAAGAGC" — substitution T@0 + insertion X@5
-		// A greedy commit-on-first-mismatch algorithm wastes the indel slot
-		// on position 0 (the T-vs-A substitution) and then runs out of
-		// mismatch budget. Exhaustive search across indel positions finds
-		// k=5 with 1 mismatch (the T at position 0) and matches.
-		const std::string seq = std::string("ACGT") + "TGATCXGGAAGAGC";
-		auto m = AdapterMatcher::find(bp(seq), seq.size(), bp(adapter), adapter.size(), 4, false);
-		REQUIRE(m.matched);
-		CHECK(m.trim_start == 4);
-		CHECK(m.indels == 1);
-		CHECK(m.mismatches == 1);
-	}
-}
-
-TEST_CASE("AdapterMatcher::find phase 3 (deletion in seq)", "[qc][adapter]") {
-	const std::string adapter = "AGATCGGAAGAGC"; // 13bp
-
-	SECTION("seq is missing one base from the adapter") {
-		// Adapter minus the 'C' at position 5 → "AGATCGAAGAGC" (12bp)
-		const std::string seq = "ACGTACGTAGATCGAAGAGC"; // 20bp; adapter region at 8
-		auto m = AdapterMatcher::find(bp(seq), seq.size(), bp(adapter), adapter.size(), 4, false);
-		REQUIRE(m.matched);
-		CHECK(m.trim_start == 8);
-		CHECK(m.indels == 1);
-		CHECK(m.match_len == 12); // adapter_len - 1
+		CHECK_FALSE(m.matched);
 	}
 }
 
