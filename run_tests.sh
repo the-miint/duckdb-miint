@@ -202,6 +202,15 @@ if curl -sSf --max-time 3 -o /dev/null \
     export ENA_AVAILABLE=1
 fi
 
+# ena_upload_reads streaming memory proof (opt-in, expensive). Uploads a
+# multi-GB lazy view to file:// under a tight memory_limit; the streaming
+# implementation completes in bounded memory whereas the old materialise-the-
+# whole-relation path would OOM. Off by default (slow, multi-GB encode); run
+# with `MIINT_ENA_BIG_STREAM_TEST=1 bash run_tests.sh` to include it.
+if [ "${MIINT_ENA_BIG_STREAM_TEST:-0}" = "1" ]; then
+    export MIINT_ENA_BIG_STREAM_TEST=1
+fi
+
 # ENA Webin V2 submission test endpoint. Live-integration tests for
 # INSERT INTO ena.{projects,samples,...} require a real Webin account
 # (free, registered at https://www.ebi.ac.uk/ena/submit/webin/). When the

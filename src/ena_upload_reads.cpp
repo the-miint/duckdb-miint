@@ -22,6 +22,7 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
+#include "duckdb/common/types/value.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
@@ -30,7 +31,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-#include <map>
 #include <stdexcept>
 #include <string>
 #include <unistd.h> // unlink, rmdir; mkdtemp on POSIX only (Aspera path is compiled out on MinGW)
@@ -54,26 +54,15 @@ struct ENAUploadReadsBindData : public TableFunctionData {
 };
 
 // =====================================================================
-// Materialised input rows
+// Per-sample upload plan
 // =====================================================================
-struct UploadInputRows {
-	vector<string> sample_ref;
-	vector<string> read_id;
-	vector<string> sequence1;
-	vector<vector<uint8_t>> qual1;
-	vector<bool> has_seq2;
-	vector<string> sequence2;
-	vector<vector<uint8_t>> qual2;
-	vector<int64_t> sequence_index;
-	vector<bool> sequence_index_valid;
-	uint64_t total_seq_bytes = 0; // running total of sequence1 + sequence2 lengths
-};
-
-// One per (sample_ref) after grouping + layout resolution.
-struct SampleGroup {
+// One per distinct sample_ref, produced by the aggregate pre-pass. Carries only
+// the metadata needed to drive that sample's streaming data pass — no row
+// payload is held, which is what keeps peak memory bounded regardless of how
+// large the dataset (or any single sample) is.
+struct SamplePlan {
 	string sample_ref;
 	FastqLayoutMode resolved_layout;
-	vector<size_t> row_indices; // already sorted by sequence_index NULLS LAST
 };
 
 // One per output FASTQ file (single sample → 1 or 2 files).
@@ -87,8 +76,7 @@ struct EmittedFile {
 };
 
 struct ENAUploadReadsGlobalState : public GlobalTableFunctionState {
-	UploadInputRows input;
-	vector<SampleGroup> samples;
+	vector<SamplePlan> samples;
 	UploadTargetURL target;
 
 	// Authenticated-transport fields (left empty when transport=LOCAL_FILE).
@@ -109,7 +97,7 @@ struct ENAUploadReadsGlobalState : public GlobalTableFunctionState {
 };
 
 // =====================================================================
-// Input materialisation (separate connection, read-time)
+// Schema validation, sample planning, and row extraction (read-time)
 // =====================================================================
 
 // Find a column by case-insensitive name. Returns -1 when missing.
@@ -153,28 +141,18 @@ vector<uint8_t> ExtractQualList(Vector &list_vec, UnifiedVectorFormat &list_data
 	return out;
 }
 
-// Hard caps on the materialised input. We pull the entire relation into
-// memory once (one std::string per sequence + one std::vector per quality
-// list), which is fine for the typical "submit a few GB of FASTQ per batch"
-// workflow but will OOM on truly large inputs. These bounds turn the silent
-// OOM into an actionable error pointing the user at the right escape hatch
-// (split-by-sample, or re-call per chunk). Streaming would remove the cap;
-// it's deferred until a user actually trips this.
-constexpr idx_t MAX_INPUT_ROWS = 50'000'000;
-constexpr uint64_t MAX_INPUT_SEQUENCE_BYTES = 5ULL * 1024 * 1024 * 1024; // 5 GB
-
-void MaterialiseInput(ClientContext &context, const string &relation_name, UploadInputRows &out) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
-	const string query = "SELECT * FROM " + KeywordHelper::WriteOptionallyQuoted(relation_name);
+// Validate the input relation's required columns + types against a zero-row
+// probe, so we never materialise data just to check the schema. Returns whether
+// the optional R2 columns (sequence2 + qual2) are present.
+bool ValidateSchemaDetectR2(Connection &conn, const string &relation_name) {
+	const string query = "SELECT * FROM " + KeywordHelper::WriteOptionallyQuoted(relation_name) + " LIMIT 0";
 	auto result = conn.Query(query);
 	if (result->HasError()) {
 		throw InvalidInputException("ena_upload_reads: failed to read relation '%s': %s", relation_name,
 		                            result->GetError());
 	}
-	auto &materialized = result->Cast<MaterializedQueryResult>();
-	auto &types = materialized.types;
-	auto &names = materialized.names;
+	auto &names = result->names;
+	auto &types = result->types;
 
 	const int sample_ref_idx = FindColumn(names, "sample_ref");
 	const int read_id_idx = FindColumn(names, "read_id");
@@ -182,7 +160,6 @@ void MaterialiseInput(ClientContext &context, const string &relation_name, Uploa
 	const int qual1_idx = FindColumn(names, "qual1");
 	const int sequence2_idx = FindColumn(names, "sequence2");
 	const int qual2_idx = FindColumn(names, "qual2");
-	const int sequence_index_idx = FindColumn(names, "sequence_index");
 
 	if (sample_ref_idx < 0) {
 		throw InvalidInputException("ena_upload_reads: input relation must include a 'sample_ref' column");
@@ -196,187 +173,85 @@ void MaterialiseInput(ClientContext &context, const string &relation_name, Uploa
 	if (qual1_idx < 0) {
 		throw InvalidInputException("ena_upload_reads: input relation must include a 'qual1' column");
 	}
-	const bool has_r2_columns = sequence2_idx >= 0 && qual2_idx >= 0;
-
 	RequireType("sample_ref", types[sample_ref_idx], LogicalTypeId::VARCHAR);
 	RequireType("read_id", types[read_id_idx], LogicalTypeId::VARCHAR);
 	RequireType("sequence1", types[sequence1_idx], LogicalTypeId::VARCHAR);
 	RequireListUtinyint("qual1", types[qual1_idx]);
+
+	// R2 is opt-in but all-or-nothing: a relation with only one of the two
+	// columns is a malformed schema, not a single-end relation. Treating it as
+	// single-end would silently drop the present mate, so reject it loudly.
+	const bool has_sequence2 = sequence2_idx >= 0;
+	const bool has_qual2 = qual2_idx >= 0;
+	if (has_sequence2 != has_qual2) {
+		throw InvalidInputException(
+		    "ena_upload_reads: input relation has '%s' but not '%s' — paired input requires both (or neither)",
+		    has_sequence2 ? "sequence2" : "qual2", has_sequence2 ? "qual2" : "sequence2");
+	}
+	const bool has_r2_columns = has_sequence2; // == has_qual2
 	if (has_r2_columns) {
 		RequireType("sequence2", types[sequence2_idx], LogicalTypeId::VARCHAR);
 		RequireListUtinyint("qual2", types[qual2_idx]);
 	}
+	return has_r2_columns;
+}
 
-	while (true) {
-		auto chunk = materialized.Fetch();
-		if (!chunk || chunk->size() == 0) {
-			break;
-		}
-		const idx_t n = chunk->size();
-
-		UnifiedVectorFormat sample_ref_data, read_id_data, sequence1_data, qual1_data;
-		chunk->data[sample_ref_idx].ToUnifiedFormat(n, sample_ref_data);
-		chunk->data[read_id_idx].ToUnifiedFormat(n, read_id_data);
-		chunk->data[sequence1_idx].ToUnifiedFormat(n, sequence1_data);
-		chunk->data[qual1_idx].ToUnifiedFormat(n, qual1_data);
-
-		auto sample_ref_strs = UnifiedVectorFormat::GetData<string_t>(sample_ref_data);
-		auto read_id_strs = UnifiedVectorFormat::GetData<string_t>(read_id_data);
-		auto sequence1_strs = UnifiedVectorFormat::GetData<string_t>(sequence1_data);
-
-		UnifiedVectorFormat sequence2_data, qual2_data;
-		const string_t *sequence2_strs = nullptr;
-		if (has_r2_columns) {
-			chunk->data[sequence2_idx].ToUnifiedFormat(n, sequence2_data);
-			chunk->data[qual2_idx].ToUnifiedFormat(n, qual2_data);
-			sequence2_strs = UnifiedVectorFormat::GetData<string_t>(sequence2_data);
-		}
-
-		UnifiedVectorFormat sequence_index_data;
-		if (sequence_index_idx >= 0) {
-			chunk->data[sequence_index_idx].ToUnifiedFormat(n, sequence_index_data);
-		}
-
-		for (idx_t row = 0; row < n; row++) {
-			const idx_t global_row = out.sample_ref.size();
-			if (global_row >= MAX_INPUT_ROWS) {
-				throw InvalidInputException(
-				    "ena_upload_reads: input relation exceeds %llu rows; split by sample_ref and call per-batch",
-				    MAX_INPUT_ROWS);
-			}
-			const auto sr_idx = sample_ref_data.sel->get_index(row);
-			if (!sample_ref_data.validity.RowIsValid(sr_idx)) {
-				throw InvalidInputException("ena_upload_reads: NULL sample_ref at row %llu", global_row);
-			}
-			const auto sample_ref = sample_ref_strs[sr_idx].GetString();
-			if (sample_ref.empty()) {
-				throw InvalidInputException("ena_upload_reads: empty sample_ref at row %llu", global_row);
-			}
-			if (sample_ref.find('/') != string::npos) {
-				throw InvalidInputException(
-				    "ena_upload_reads: sample_ref '%s' contains '/' which is not allowed in a filename", sample_ref);
-			}
-			// Reject path-traversal components — the sample_ref is concatenated
-			// directly into a destination path for `file://` writes, so
-			// `..` could escape the upload directory.
-			if (sample_ref == ".." || sample_ref == "." || sample_ref.find("..") != string::npos) {
-				throw InvalidInputException(
-				    "ena_upload_reads: sample_ref '%s' contains '..' (path-traversal not allowed)", sample_ref);
-			}
-
-			const auto rid_idx = read_id_data.sel->get_index(row);
-			if (!read_id_data.validity.RowIsValid(rid_idx)) {
-				throw InvalidInputException("ena_upload_reads: NULL read_id at row %llu", global_row);
-			}
-			const auto seq1_idx = sequence1_data.sel->get_index(row);
-			if (!sequence1_data.validity.RowIsValid(seq1_idx)) {
-				throw InvalidInputException("ena_upload_reads: NULL sequence1 at row %llu", global_row);
-			}
-			const auto q1_idx = qual1_data.sel->get_index(row);
-			if (!qual1_data.validity.RowIsValid(q1_idx)) {
-				throw InvalidInputException("ena_upload_reads: NULL qual1 at row %llu", global_row);
-			}
-
-			out.sample_ref.push_back(sample_ref);
-			out.read_id.push_back(read_id_strs[rid_idx].GetString());
-			out.sequence1.push_back(sequence1_strs[seq1_idx].GetString());
-			auto qual1 = ExtractQualList(chunk->data[qual1_idx], qual1_data, row);
-			if (qual1.size() != out.sequence1.back().size()) {
-				throw InvalidInputException(
-				    "ena_upload_reads: qual1 length (%llu) does not match sequence1 length (%llu) at row %llu",
-				    qual1.size(), out.sequence1.back().size(), global_row);
-			}
-			out.qual1.push_back(std::move(qual1));
-			out.total_seq_bytes += out.sequence1.back().size();
-
-			if (has_r2_columns) {
-				const auto s2 = sequence2_data.sel->get_index(row);
-				const auto q2 = qual2_data.sel->get_index(row);
-				const bool s2_valid = sequence2_data.validity.RowIsValid(s2);
-				const bool q2_valid = qual2_data.validity.RowIsValid(q2);
-				if (s2_valid != q2_valid) {
-					throw InvalidInputException(
-					    "ena_upload_reads: sequence2 and qual2 must both be NULL or both non-NULL at row %llu",
-					    global_row);
-				}
-				out.has_seq2.push_back(s2_valid);
-				if (s2_valid) {
-					out.sequence2.push_back(sequence2_strs[s2].GetString());
-					auto q2_vec = ExtractQualList(chunk->data[qual2_idx], qual2_data, row);
-					if (q2_vec.size() != out.sequence2.back().size()) {
-						throw InvalidInputException(
-						    "ena_upload_reads: qual2 length (%llu) does not match sequence2 length (%llu) at row %llu",
-						    q2_vec.size(), out.sequence2.back().size(), global_row);
-					}
-					out.qual2.push_back(std::move(q2_vec));
-					out.total_seq_bytes += out.sequence2.back().size();
-				} else {
-					out.sequence2.emplace_back();
-					out.qual2.emplace_back();
-				}
-			} else {
-				out.has_seq2.push_back(false);
-				out.sequence2.emplace_back();
-				out.qual2.emplace_back();
-			}
-
-			if (out.total_seq_bytes > MAX_INPUT_SEQUENCE_BYTES) {
-				throw InvalidInputException(
-				    "ena_upload_reads: input sequences exceed %llu bytes (cap is to keep the in-memory pipeline "
-				    "bounded; split by sample_ref and call per-batch)",
-				    MAX_INPUT_SEQUENCE_BYTES);
-			}
-
-			if (sequence_index_idx >= 0) {
-				const auto si = sequence_index_data.sel->get_index(row);
-				if (sequence_index_data.validity.RowIsValid(si)) {
-					out.sequence_index.push_back(UnifiedVectorFormat::GetData<int64_t>(sequence_index_data)[si]);
-					out.sequence_index_valid.push_back(true);
-				} else {
-					out.sequence_index.push_back(0);
-					out.sequence_index_valid.push_back(false);
-				}
-			} else {
-				out.sequence_index.push_back(0);
-				out.sequence_index_valid.push_back(false);
-			}
-		}
+// A sample_ref becomes a filename component (and, for file://, a path segment),
+// so reject anything that could break the name or escape the upload directory.
+void ValidateSampleRef(const string &sample_ref) {
+	if (sample_ref.empty()) {
+		throw InvalidInputException("ena_upload_reads: empty sample_ref");
+	}
+	if (sample_ref.find('/') != string::npos) {
+		throw InvalidInputException("ena_upload_reads: sample_ref '%s' contains '/' which is not allowed in a filename",
+		                            sample_ref);
+	}
+	if (sample_ref == "." || sample_ref.find("..") != string::npos) {
+		throw InvalidInputException("ena_upload_reads: sample_ref '%s' is '.' or contains '..' (path-traversal not "
+		                            "allowed)",
+		                            sample_ref);
 	}
 }
 
-// =====================================================================
-// Grouping + layout resolution
-// =====================================================================
-
-void GroupAndResolveLayout(const UploadInputRows &input, FastqLayoutMode requested, vector<SampleGroup> &out) {
-	std::map<string, vector<size_t>> by_sample;
-	for (size_t i = 0; i < input.sample_ref.size(); i++) {
-		by_sample[input.sample_ref[i]].push_back(i);
+// Cheap aggregate pre-pass: a single projected GROUP BY scan that learns each
+// sample's R2 pattern — `all_paired` (bool_and) and `any_paired` (bool_or) of
+// "sequence2 IS NOT NULL" — without ever touching the sequence payload. Resolves
+// every sample's layout up front, failing fast on a mixed sample or a
+// layout/mode conflict BEFORE any upload begins (so an invalid sample can't
+// leave earlier samples half-uploaded), and yields the list of samples to
+// stream. O(#samples) memory.
+void PlanSamples(Connection &conn, const string &relation_name, FastqLayoutMode requested, bool has_r2_columns,
+                 vector<SamplePlan> &out) {
+	const string quoted = KeywordHelper::WriteOptionallyQuoted(relation_name);
+	const string r2_expr = has_r2_columns ? "sequence2 IS NOT NULL" : "false";
+	const string query = "SELECT sample_ref, bool_and(" + r2_expr + ") AS all_paired, bool_or(" + r2_expr +
+	                     ") AS any_paired FROM " + quoted + " GROUP BY sample_ref";
+	auto result = conn.Query(query);
+	if (result->HasError()) {
+		throw InvalidInputException("ena_upload_reads: failed to scan relation '%s': %s", relation_name,
+		                            result->GetError());
 	}
-	for (auto &kv : by_sample) {
-		SampleGroup g;
-		g.sample_ref = kv.first;
-		g.row_indices = std::move(kv.second);
-		// Sort by sequence_index, NULLS LAST. Stable so equal/null rows keep
-		// original input order, which matches reader expectations.
-		std::stable_sort(g.row_indices.begin(), g.row_indices.end(), [&input](size_t a, size_t b) {
-			const bool av = input.sequence_index_valid[a];
-			const bool bv = input.sequence_index_valid[b];
-			if (av && bv) {
-				return input.sequence_index[a] < input.sequence_index[b];
+	while (auto chunk = result->Fetch()) {
+		const idx_t n = chunk->size();
+		for (idx_t row = 0; row < n; row++) {
+			auto sr_val = chunk->data[0].GetValue(row);
+			if (sr_val.IsNull()) {
+				throw InvalidInputException("ena_upload_reads: NULL sample_ref");
 			}
-			if (av) {
-				return true; // valid before null
+			const string sample_ref = sr_val.ToString();
+			ValidateSampleRef(sample_ref);
+			// bool_and / bool_or over a non-empty group are never NULL.
+			const bool all_paired = chunk->data[1].GetValue(row).GetValue<bool>();
+			const bool any_paired = chunk->data[2].GetValue(row).GetValue<bool>();
+			SamplePlan plan;
+			plan.sample_ref = sample_ref;
+			try {
+				plan.resolved_layout = ResolveLayoutFromCounts(sample_ref, requested, all_paired, any_paired);
+			} catch (const std::exception &e) {
+				throw InvalidInputException("ena_upload_reads: %s", e.what());
 			}
-			return false;
-		});
-		vector<bool> has_r2;
-		has_r2.reserve(g.row_indices.size());
-		for (auto idx : g.row_indices) {
-			has_r2.push_back(input.has_seq2[idx]);
+			out.push_back(std::move(plan));
 		}
-		g.resolved_layout = ResolveLayout(g.sample_ref, requested, has_r2);
-		out.push_back(std::move(g));
 	}
 }
 
@@ -384,14 +259,10 @@ void GroupAndResolveLayout(const UploadInputRows &input, FastqLayoutMode request
 // Encoder → gzip → MD5 stream
 // =====================================================================
 //
-// Shared core for the file-sink (push, eager file write) and the libcurl
-// streaming producer (pull, in-memory buffering). Both run identical zlib +
-// MD5 plumbing — only the destination of the gzipped output differs. The
-// destination is supplied via a `ChunkSink` callback so consumers can route
-// bytes wherever they need.
-//
-// MD5 is computed over the bytes handed to the sink, which is exactly what
-// the consumer ultimately writes / uploads — the digest matches.
+// Streaming zlib + MD5 plumbing. The gzipped output is handed to a `ChunkSink`
+// callback (here always a file write — every transport stages to a file). MD5 is
+// computed over the bytes handed to the sink, which is exactly what the consumer
+// ultimately writes / uploads, so the digest matches the on-disk file.
 
 class GzipMd5Stream {
 public:
@@ -543,302 +414,288 @@ private:
 };
 
 // =====================================================================
-// Streaming encode → gzip → MD5 producer for libcurl
+// Per-chunk FASTQ encoding
 // =====================================================================
 //
-// libcurl pulls bytes via CURLOPT_READFUNCTION; this producer satisfies that
-// contract by encoding records on demand. Wraps a GzipMd5Stream whose sink
-// appends gzipped chunks into `out_buf`; `Read` drains `out_buf` to libcurl
-// and produces more on demand.
-//
-// State machine:
-//   1) Encoding: fetch next row, encode FASTQ via the encoder, feed the
-//      record bytes to `stream.Write` — gzip output lands in `out_buf`.
-//   2) Finishing: when no more rows, call `stream.Finish()` (Z_FINISH)
-//      which drains the trailer into `out_buf` and yields the final
-//      md5 + bytes_emitted, which we cache for `Finish()`.
-//   3) EOF: Read returns 0 once `out_buf` is drained AND `stream.Finished()`.
-//
-// `Finish()` is valid only after Read has returned 0.
+// Encode the rows of one streamed DataChunk into the sample's gzip sink(s). The
+// data query selects a fixed column order — 0=read_id, 1=sequence1, 2=qual1,
+// (3=sequence2, 4=qual2) — so indices are positional. R1 always goes to sink0;
+// for split PAIRED, R2 goes to sink1; for PAIRED_INTERLEAVED, R2 follows R1 into
+// sink0 (one pass over the row → positional pairing by construction). The R2
+// columns are guaranteed present whenever the resolved layout needs them
+// (PlanSamples would have rejected the sample otherwise).
+void EncodeChunk(DataChunk &chunk, FastqLayoutMode layout, FastqEncoder &encoder, GzipMd5FileSink &sink0,
+                 GzipMd5FileSink *sink1, const string &sample_ref) {
+	const idx_t n = chunk.size();
 
-class StreamingGzipMd5Producer {
-public:
-	StreamingGzipMd5Producer(const UploadInputRows &input, const SampleGroup &group, FastqLayoutMode layout,
-	                         int which_file, uint8_t qual_offset)
-	    : input(input), group(group), layout(layout), which_file(which_file), encoder(qual_offset),
-	      stream([this](const uint8_t *p, std::size_t n) { out_buf.insert(out_buf.end(), p, p + n); }) {
+	UnifiedVectorFormat read_id_data, sequence1_data, qual1_data;
+	chunk.data[0].ToUnifiedFormat(n, read_id_data);
+	chunk.data[1].ToUnifiedFormat(n, sequence1_data);
+	chunk.data[2].ToUnifiedFormat(n, qual1_data);
+	auto read_id_strs = UnifiedVectorFormat::GetData<string_t>(read_id_data);
+	auto sequence1_strs = UnifiedVectorFormat::GetData<string_t>(sequence1_data);
+
+	const bool need_r2 = layout == FastqLayoutMode::PAIRED || layout == FastqLayoutMode::PAIRED_INTERLEAVED;
+	UnifiedVectorFormat sequence2_data, qual2_data;
+	const string_t *sequence2_strs = nullptr;
+	if (need_r2) {
+		chunk.data[3].ToUnifiedFormat(n, sequence2_data);
+		chunk.data[4].ToUnifiedFormat(n, qual2_data);
+		sequence2_strs = UnifiedVectorFormat::GetData<string_t>(sequence2_data);
 	}
 
-	StreamingGzipMd5Producer(const StreamingGzipMd5Producer &) = delete;
-	StreamingGzipMd5Producer &operator=(const StreamingGzipMd5Producer &) = delete;
-
-	std::size_t Read(char *buf, std::size_t max_bytes) {
-		while (true) {
-			if (out_buf_pos < out_buf.size()) {
-				const std::size_t avail = out_buf.size() - out_buf_pos;
-				const std::size_t to_copy = std::min(avail, max_bytes);
-				std::memcpy(buf, out_buf.data() + out_buf_pos, to_copy);
-				out_buf_pos += to_copy;
-				return to_copy;
-			}
-			out_buf.clear();
-			out_buf_pos = 0;
-			if (stream.Finished()) {
-				return 0;
-			}
-			ProduceMore();
-		}
-	}
-
-	std::pair<string, uint64_t> Finish() {
-		if (!stream.Finished()) {
-			throw IOException("ena_upload_reads: StreamingGzipMd5Producer::Finish before EOF");
-		}
-		return cached_result;
-	}
-
-private:
-	void ProduceMore() {
-		std::vector<uint8_t> record_buf;
-		auto record_sink = [&record_buf](const char *data, std::size_t size) {
-			record_buf.insert(record_buf.end(), reinterpret_cast<const uint8_t *>(data),
-			                  reinterpret_cast<const uint8_t *>(data) + size);
-		};
-		if (!EncodeOneRecord(record_sink)) {
-			cached_result = stream.Finish();
-			return;
-		}
-		stream.Write(record_buf.data(), record_buf.size());
-	}
-
-	bool EncodeOneRecord(const FastqEncoder::Sink &sink) {
-		if (row_cursor >= group.row_indices.size()) {
-			return false;
-		}
-		const auto rid = group.row_indices[row_cursor++];
-		const char *id = input.read_id[rid].data();
-		const std::size_t id_len = input.read_id[rid].size();
-
-		if (layout == FastqLayoutMode::SINGLE || (layout == FastqLayoutMode::PAIRED && which_file == 0)) {
-			const auto &seq = input.sequence1[rid];
-			const auto &q = input.qual1[rid];
-			encoder.Encode(sink, id, id_len, nullptr, 0, seq.data(), seq.size(), q.data(), q.size());
-		} else if (layout == FastqLayoutMode::PAIRED && which_file == 1) {
-			const auto &seq = input.sequence2[rid];
-			const auto &q = input.qual2[rid];
-			encoder.Encode(sink, id, id_len, nullptr, 0, seq.data(), seq.size(), q.data(), q.size());
-		} else if (layout == FastqLayoutMode::PAIRED_INTERLEAVED) {
-			const auto &s1 = input.sequence1[rid];
-			const auto &q1 = input.qual1[rid];
-			encoder.Encode(sink, id, id_len, nullptr, 0, s1.data(), s1.size(), q1.data(), q1.size());
-			const auto &s2 = input.sequence2[rid];
-			const auto &q2 = input.qual2[rid];
-			encoder.Encode(sink, id, id_len, nullptr, 0, s2.data(), s2.size(), q2.data(), q2.size());
-		} else {
-			// AUTO must be resolved by ResolveLayout before this class is
-			// instantiated. A future enum addition would land here too.
-			throw std::logic_error("StreamingGzipMd5Producer::EncodeOneRecord: unhandled layout");
-		}
-		return true;
-	}
-
-	const UploadInputRows &input;
-	const SampleGroup &group;
-	const FastqLayoutMode layout;
-	const int which_file;
-	FastqEncoder encoder;
-
-	// `out_buf` MUST be declared before `stream` so that the sink lambda
-	// stored inside `stream` is destroyed (with `stream`) before `out_buf` —
-	// otherwise the lambda's last access could touch a destroyed vector.
-	std::vector<std::uint8_t> out_buf;
-	std::size_t out_buf_pos = 0;
-	std::size_t row_cursor = 0;
-	std::pair<string, uint64_t> cached_result;
-	GzipMd5Stream stream;
-};
-
-// =====================================================================
-// Sample → file write
-// =====================================================================
-
-// Encode the rows of one sample into the supplied sink. `which_file` controls
-// which side of the layout we emit (0 = R1 / single / interleaved; 1 = R2
-// only, used by the split-paired layout's second pass).
-//
-// `qual_offset` is wired through the encoder constructor by the caller; this
-// helper only forwards reads, so the active offset is implicit in `encoder`.
-void EncodeSampleRows(const UploadInputRows &in, const SampleGroup &group, FastqLayoutMode layout, int which_file,
-                      FastqEncoder &encoder, GzipMd5FileSink &sink) {
-	auto sink_fn = [&sink](const char *data, std::size_t size) {
-		sink.Write(data, size);
+	auto write0 = [&sink0](const char *data, std::size_t size) {
+		sink0.Write(data, size);
+	};
+	// R2 destination: split PAIRED → sink1; PAIRED_INTERLEAVED → sink0 (R2 right
+	// after R1 in the same file). `r2_sink` is non-null exactly when `need_r2`, so
+	// `write_r2` is only ever invoked through a valid pointer.
+	GzipMd5FileSink *r2_sink = need_r2 ? (layout == FastqLayoutMode::PAIRED ? sink1 : &sink0) : nullptr;
+	auto write_r2 = [r2_sink](const char *data, std::size_t size) {
+		r2_sink->Write(data, size);
 	};
 
-	for (auto rid : group.row_indices) {
-		const char *id = in.read_id[rid].data();
-		const std::size_t id_len = in.read_id[rid].size();
-
-		if (layout == FastqLayoutMode::SINGLE || (layout == FastqLayoutMode::PAIRED && which_file == 0)) {
-			const auto &seq = in.sequence1[rid];
-			const auto &q = in.qual1[rid];
-			encoder.Encode(sink_fn, id, id_len, nullptr, 0, seq.data(), seq.size(), q.data(), q.size());
-		} else if (layout == FastqLayoutMode::PAIRED && which_file == 1) {
-			const auto &seq = in.sequence2[rid];
-			const auto &q = in.qual2[rid];
-			encoder.Encode(sink_fn, id, id_len, nullptr, 0, seq.data(), seq.size(), q.data(), q.size());
-		} else if (layout == FastqLayoutMode::PAIRED_INTERLEAVED) {
-			const auto &s1 = in.sequence1[rid];
-			const auto &q1 = in.qual1[rid];
-			encoder.Encode(sink_fn, id, id_len, nullptr, 0, s1.data(), s1.size(), q1.data(), q1.size());
-			const auto &s2 = in.sequence2[rid];
-			const auto &q2 = in.qual2[rid];
-			encoder.Encode(sink_fn, id, id_len, nullptr, 0, s2.data(), s2.size(), q2.data(), q2.size());
-		} else {
-			// AUTO must be resolved before this point; see ResolveLayout.
-			throw std::logic_error("EncodeSampleRows: unhandled FastqLayoutMode");
+	for (idx_t row = 0; row < n; row++) {
+		const auto rid_i = read_id_data.sel->get_index(row);
+		if (!read_id_data.validity.RowIsValid(rid_i)) {
+			throw InvalidInputException("ena_upload_reads: NULL read_id in sample '%s'", sample_ref);
 		}
+		const auto s1_i = sequence1_data.sel->get_index(row);
+		if (!sequence1_data.validity.RowIsValid(s1_i)) {
+			throw InvalidInputException("ena_upload_reads: NULL sequence1 in sample '%s'", sample_ref);
+		}
+		const auto q1_i = qual1_data.sel->get_index(row);
+		if (!qual1_data.validity.RowIsValid(q1_i)) {
+			throw InvalidInputException("ena_upload_reads: NULL qual1 in sample '%s'", sample_ref);
+		}
+
+		const char *id = read_id_strs[rid_i].GetData();
+		const std::size_t id_len = read_id_strs[rid_i].GetSize();
+		const char *s1 = sequence1_strs[s1_i].GetData();
+		const std::size_t s1_len = sequence1_strs[s1_i].GetSize();
+		auto q1 = ExtractQualList(chunk.data[2], qual1_data, row);
+		if (q1.size() != s1_len) {
+			throw InvalidInputException(
+			    "ena_upload_reads: qual1 length (%llu) does not match sequence1 length (%llu) in sample '%s'",
+			    (uint64_t)q1.size(), (uint64_t)s1_len, sample_ref);
+		}
+		encoder.Encode(write0, id, id_len, nullptr, 0, s1, s1_len, q1.data(), q1.size());
+
+		if (!need_r2) {
+			continue;
+		}
+		const auto s2_i = sequence2_data.sel->get_index(row);
+		const auto q2_i = qual2_data.sel->get_index(row);
+		if (!sequence2_data.validity.RowIsValid(s2_i) || !qual2_data.validity.RowIsValid(q2_i)) {
+			// PlanSamples resolved this sample as paired; a NULL R2 here means the
+			// relation returned different rows between the pre-pass and this scan
+			// (a non-deterministic view). Refuse rather than emit a broken pair.
+			throw InvalidInputException("ena_upload_reads: sample '%s' resolved as paired but a row has NULL R2 "
+			                            "(is the input relation non-deterministic across scans?)",
+			                            sample_ref);
+		}
+		const char *s2 = sequence2_strs[s2_i].GetData();
+		const std::size_t s2_len = sequence2_strs[s2_i].GetSize();
+		auto q2 = ExtractQualList(chunk.data[4], qual2_data, row);
+		if (q2.size() != s2_len) {
+			throw InvalidInputException(
+			    "ena_upload_reads: qual2 length (%llu) does not match sequence2 length (%llu) in sample '%s'",
+			    (uint64_t)q2.size(), (uint64_t)s2_len, sample_ref);
+		}
+		encoder.Encode(write_r2, id, id_len, nullptr, 0, s2, s2_len, q2.data(), q2.size());
 	}
 }
 
-void RunUpload(ClientContext &context, const ENAUploadReadsBindData &bind, ENAUploadReadsGlobalState &gs) {
-	auto &fs = FileSystem::GetFileSystem(context);
+#ifdef MIINT_HAS_CURL
+// Upload an already-staged local file to a curl URL (ftp/ftps/http/https). The
+// encode path stages every transport's output to a file (uniform); for curl we
+// then stream that file to the socket via a file-backed read callback.
+miint::CurlUploadResult UploadFileViaCurl(FileSystem &fs, const string &path, miint::CurlUploadOptions opts) {
+	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
+	opts.expected_size = static_cast<long long>(fs.GetFileSize(*handle));
+	auto producer = [&fs, &handle](char *buf, std::size_t max_bytes) -> std::size_t {
+		return static_cast<std::size_t>(fs.Read(*handle, buf, static_cast<int64_t>(max_bytes)));
+	};
+	return miint::RunCurlUpload(opts, producer);
+}
+#endif
 
-	if (gs.target.transport == UploadTransport::LOCAL_FILE) {
-		fs.CreateDirectoriesRecursive(gs.target.remote_dir);
+// Encode + stage + transport one sample's file(s). Every transport stages the
+// gzipped output to a file first — the destination for file://, a private temp
+// dir for aspera/curl — then ships it: ascp for Aspera, a file-backed upload for
+// curl, nothing more for file://. The sample's rows are streamed once (both
+// sinks stay open across the single pass for split-paired), so peak memory is
+// one DataChunk + one zlib window regardless of how large the sample is.
+void UploadOneSample(ClientContext &context, const ENAUploadReadsBindData &bind, ENAUploadReadsGlobalState &gs,
+                     Connection &conn, const string &data_query_prefix, const SamplePlan &plan) {
+	auto &fs = FileSystem::GetFileSystem(context);
+	const auto filenames = OutputFilenames(plan.sample_ref, plan.resolved_layout); // 1 (single/interleaved) or 2
+
+	// On platforms without Aspera support fail-fast *before* the mkdtemp staging
+	// code — mkdtemp is POSIX-only and MinGW's libc doesn't provide it, so this
+	// guard also keeps the file compilable on Windows.
+#if !(MIINT_ASPERA_SUPPORTED && defined(MIINT_STATIC_BUILD))
+	if (gs.target.transport == UploadTransport::ASPERA) {
+		throw IOException("ena_upload_reads: Aspera transport is not supported on this build/platform");
+	}
+#endif
+
+	const bool stage = gs.target.transport != UploadTransport::LOCAL_FILE;
+	string temp_dir;
+	vector<string> write_paths;
+	if (!stage) {
+		for (auto &fname : filenames) {
+			write_paths.push_back(gs.target.remote_dir + fname);
+		}
+	} else {
+		// Private temp dir so each staged file's basename matches its remote
+		// name; unlink + rmdir after transport.
+		string tmpl = miint::GetTempDir() + "/ena-upload-XXXXXX";
+		vector<char> buf(tmpl.begin(), tmpl.end());
+		buf.push_back('\0');
+		if (mkdtemp(buf.data()) == nullptr) {
+			throw IOException("ena_upload_reads: mkdtemp failed: %s", std::strerror(errno));
+		}
+		temp_dir.assign(buf.data());
+		for (auto &fname : filenames) {
+			write_paths.push_back(temp_dir + "/" + fname);
+		}
 	}
 
-	for (auto &group : gs.samples) {
-		auto filenames = OutputFilenames(group.sample_ref, group.resolved_layout);
-		for (size_t f = 0; f < filenames.size(); f++) {
-			const auto &fname = filenames[f];
-			const int which_file = (group.resolved_layout == FastqLayoutMode::PAIRED && f == 1) ? 1 : 0;
+	// Cleanup runs whether the block below succeeds or throws. For LOCAL_FILE
+	// temp_dir is empty, so the destination is left in place (matches COPY).
+	auto cleanup_temp = [&]() noexcept {
+		if (!temp_dir.empty()) {
+			for (auto &wp : write_paths) {
+				(void)unlink(wp.c_str());
+			}
+			(void)rmdir(temp_dir.c_str());
+		}
+	};
 
-			string md5_hex;
-			uint64_t bytes_written = 0;
+	try {
+		vector<unique_ptr<GzipMd5FileSink>> sinks;
+		sinks.reserve(write_paths.size());
+		for (auto &wp : write_paths) {
+			sinks.push_back(make_uniq<GzipMd5FileSink>(fs, wp));
+		}
+		GzipMd5FileSink *sink1 = sinks.size() > 1 ? sinks[1].get() : nullptr;
+
+		// Stream this sample's rows once and encode straight into the sink(s).
+		// SendQuery (not a prepared statement) is deliberate: it defaults to a
+		// streaming result, so Fetch pulls one DataChunk at a time and peak memory
+		// stays bounded. A prepared statement's result output_type defaults to
+		// FORCE_MATERIALIZED — it would buffer the entire sample in RAM, defeating
+		// the whole refactor. Draining to exhaustion closes the stream before the
+		// next sample's query. If EncodeChunk throws mid-stream the result is
+		// abandoned un-closed, but the exception aborts the statement: `conn` is
+		// torn down (its dtor runs cleanup) and never reused, so the dangling
+		// active query never matters here.
+		FastqEncoder encoder(bind.qual_offset);
+		auto result = conn.SendQuery(data_query_prefix + KeywordHelper::WriteQuoted(plan.sample_ref, '\''));
+		if (result->HasError()) {
+			throw InvalidInputException("ena_upload_reads: failed to read sample '%s': %s", plan.sample_ref,
+			                            result->GetError());
+		}
+		while (auto chunk = result->Fetch()) {
+			if (chunk->size() == 0) {
+				continue;
+			}
+			EncodeChunk(*chunk, plan.resolved_layout, encoder, *sinks[0], sink1, plan.sample_ref);
+		}
+
+		// Finish each file (flushes the gzip trailer, closes the handle, yields
+		// the md5 over exactly the on-disk bytes), then transport it.
+		for (size_t f = 0; f < filenames.size(); f++) {
+			auto finished = sinks[f]->Finish();
+			string md5_hex = std::move(finished.first);
+			const uint64_t bytes_written = finished.second;
 
 			if (gs.target.transport == UploadTransport::CURL) {
 #ifdef MIINT_HAS_CURL
-				// Streaming path — no temp file. libcurl pulls bytes from
-				// the producer until EOF; the producer encodes records on
-				// demand and computes MD5 over the gzipped output as it
-				// flows through.
-				StreamingGzipMd5Producer producer(gs.input, group, group.resolved_layout, which_file, bind.qual_offset);
 				miint::CurlUploadOptions opts;
-				opts.url = gs.target.url_for_curl + fname;
+				opts.url = gs.target.url_for_curl + filenames[f];
 				opts.user = gs.user;
 				opts.password = gs.password;
 				opts.create_dirs = true;
 				// `MIINT_CURL_VERBOSE=1` enables CURLOPT_VERBOSE wire trace on
-				// stderr — invaluable for diagnosing FTPS/HTTPS upload hangs
-				// against the live ENA endpoint.
+				// stderr — invaluable for diagnosing FTPS/HTTPS upload hangs.
 				if (const char *v = std::getenv("MIINT_CURL_VERBOSE"); v && std::string(v) == "1") {
 					opts.verbose = true;
 				}
-				auto curl_producer = [&producer](char *buf, std::size_t max_bytes) -> std::size_t {
-					return producer.Read(buf, max_bytes);
-				};
-				auto result = miint::RunCurlUpload(opts, curl_producer);
-				if (!result.error_message.empty()) {
+				auto curl_result = UploadFileViaCurl(fs, write_paths[f], opts);
+				if (!curl_result.error_message.empty()) {
 					throw IOException("ena_upload_reads: %s upload failed for sample '%s' file '%s': %s",
-					                  gs.target.scheme, group.sample_ref, fname, result.error_message);
+					                  gs.target.scheme, plan.sample_ref, filenames[f], curl_result.error_message);
 				}
-				auto finished = producer.Finish();
-				md5_hex = std::move(finished.first);
-				bytes_written = finished.second;
 #else
-				throw IOException("ena_upload_reads: %s:// transport requires libcurl, which is disabled in this build "
-				                  "(use aspera:// or file:// instead, or rebuild with -DMIINT_ENABLE_CURL=ON)",
+				throw IOException("ena_upload_reads: %s:// transport requires libcurl, which is disabled in this "
+				                  "build (use aspera:// or file:// instead, or rebuild with -DMIINT_ENABLE_CURL=ON)",
 				                  gs.target.scheme);
 #endif
-			} else {
-				// Encode → gzip → MD5 → file. For Aspera we then ascp the
-				// file. For LOCAL_FILE the destination IS the local path.
-				//
-				// On platforms without Aspera support (Windows/MinGW, Emscripten)
-				// fail-fast *before* the temp-dir staging code — mkdtemp is POSIX-only
-				// and MinGW's libc doesn't provide it, so guarding here also keeps
-				// the file compilable on Windows.
-#if !(MIINT_ASPERA_SUPPORTED && defined(MIINT_STATIC_BUILD))
-				if (gs.target.transport == UploadTransport::ASPERA) {
-					throw IOException("ena_upload_reads: Aspera transport is not supported on this build/platform");
-				}
-#endif
-				string write_path;
-				string temp_dir;
-				if (gs.target.transport == UploadTransport::LOCAL_FILE) {
-					write_path = gs.target.remote_dir + fname;
-				}
-#if MIINT_ASPERA_SUPPORTED && defined(MIINT_STATIC_BUILD)
-				else {
-					// Aspera: write to a private temp directory so the
-					// basename matches the desired remote name. mkdtemp
-					// gives us a unique path; we unlink + rmdir after
-					// ascp finishes.
-					string tmpl = miint::GetTempDir() + "/ena-upload-XXXXXX";
-					vector<char> buf(tmpl.begin(), tmpl.end());
-					buf.push_back('\0');
-					if (mkdtemp(buf.data()) == nullptr) {
-						throw IOException("ena_upload_reads: mkdtemp failed: %s", std::strerror(errno));
-					}
-					temp_dir.assign(buf.data());
-					write_path = temp_dir + "/" + fname;
-				}
-#endif
-
-				// Cleanup helper — runs whether the encode/gzip/transport
-				// block succeeds or throws. For LOCAL_FILE we leave the
-				// destination in place regardless (matches COPY behaviour).
-				auto cleanup_temp = [&]() noexcept {
-					if (!temp_dir.empty()) {
-						(void)unlink(write_path.c_str());
-						(void)rmdir(temp_dir.c_str());
-					}
-				};
-
-				try {
-					FastqEncoder encoder(bind.qual_offset);
-					GzipMd5FileSink sink(fs, write_path);
-					EncodeSampleRows(gs.input, group, group.resolved_layout, which_file, encoder, sink);
-					auto finished = sink.Finish();
-					md5_hex = std::move(finished.first);
-					bytes_written = finished.second;
-
-#if MIINT_ASPERA_SUPPORTED && defined(MIINT_STATIC_BUILD)
-					if (gs.target.transport == UploadTransport::ASPERA) {
-						AsperaSendOptions opts;
-						opts.ascp_path = gs.aspera_ascp_path;
-						opts.key_path = gs.aspera_key_path;
-						opts.user = gs.user;
-						opts.host = gs.target.host;
-						opts.port = 33001;
-						opts.local_path = write_path;
-						opts.remote_dir = gs.target.remote_dir;
-						opts.max_rate = gs.aspera_max_rate;
-						auto argv = BuildAscpSendArgv(opts);
-
-						auto result = miint::RunAsperaSend(argv, gs.password);
-						if (result.exit_code != 0) {
-							throw IOException("ena_upload_reads: ascp failed (exit %d) for sample '%s' file '%s': %s",
-							                  result.exit_code, group.sample_ref, fname, result.stderr_output);
-						}
-					}
-#endif
-				} catch (...) {
-					cleanup_temp();
-					throw;
-				}
-				cleanup_temp();
 			}
+#if MIINT_ASPERA_SUPPORTED && defined(MIINT_STATIC_BUILD)
+			else if (gs.target.transport == UploadTransport::ASPERA) {
+				AsperaSendOptions opts;
+				opts.ascp_path = gs.aspera_ascp_path;
+				opts.key_path = gs.aspera_key_path;
+				opts.user = gs.user;
+				opts.host = gs.target.host;
+				opts.port = 33001;
+				opts.local_path = write_paths[f];
+				opts.remote_dir = gs.target.remote_dir;
+				opts.max_rate = gs.aspera_max_rate;
+				auto argv = BuildAscpSendArgv(opts);
+				auto ascp_result = miint::RunAsperaSend(argv, gs.password);
+				if (ascp_result.exit_code != 0) {
+					throw IOException("ena_upload_reads: ascp failed (exit %d) for sample '%s' file '%s': %s",
+					                  ascp_result.exit_code, plan.sample_ref, filenames[f], ascp_result.stderr_output);
+				}
+			}
+#endif
+			// LOCAL_FILE: the destination IS write_paths[f]; nothing more to do.
 
 			EmittedFile e;
-			e.sample_ref = group.sample_ref;
-			e.filename = fname;
+			e.sample_ref = plan.sample_ref;
+			e.filename = filenames[f];
 			e.filetype = "fastq";
 			e.md5_hex = std::move(md5_hex);
 			e.bytes_written = bytes_written;
-			e.layout_name = FastqLayoutModeName(group.resolved_layout);
+			e.layout_name = FastqLayoutModeName(plan.resolved_layout);
 			gs.emitted.push_back(std::move(e));
 		}
+	} catch (...) {
+		cleanup_temp();
+		throw;
+	}
+	cleanup_temp();
+}
+
+// Plan the samples (cheap aggregate pre-pass), then stream each one to its
+// destination, one at a time. A single Connection is reused across samples; each
+// sample's streaming result is fully drained before the next query (DuckDB
+// allows only one active stream per connection).
+void RunStreamingUpload(ClientContext &context, const ENAUploadReadsBindData &bind, ENAUploadReadsGlobalState &gs) {
+	auto &db = DatabaseInstance::GetDatabase(context);
+	Connection conn(db);
+
+	const bool has_r2_columns = ValidateSchemaDetectR2(conn, bind.relation_name);
+	PlanSamples(conn, bind.relation_name, bind.layout_mode, has_r2_columns, gs.samples);
+
+	if (gs.target.transport == UploadTransport::LOCAL_FILE) {
+		auto &fs = FileSystem::GetFileSystem(context);
+		fs.CreateDirectoriesRecursive(gs.target.remote_dir);
+	}
+
+	// Per-sample data query, completed in UploadOneSample by appending a quoted
+	// sample_ref literal. WriteQuoted escapes the value, so a sample_ref with an
+	// embedded quote stays safe (the filename-level checks in ValidateSampleRef
+	// reject '/' and '..' but allow quotes).
+	const string data_query_prefix = "SELECT read_id, sequence1, qual1" +
+	                                 string(has_r2_columns ? ", sequence2, qual2" : "") + " FROM " +
+	                                 KeywordHelper::WriteOptionallyQuoted(bind.relation_name) + " WHERE sample_ref = ";
+	for (auto &plan : gs.samples) {
+		UploadOneSample(context, bind, gs, conn, data_query_prefix, plan);
 	}
 }
 
@@ -964,14 +821,12 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 #endif
 	}
 
-	MaterialiseInput(context, bind.relation_name, gs->input);
-	GroupAndResolveLayout(gs->input, bind.layout_mode, gs->samples);
-
-	// Run the entire upload eagerly during init. The execution side just
-	// drains the per-file rows from `emitted`. This keeps the error model
-	// simple (any failure aborts the statement) and matches the typical
-	// per-batch upload size — usually under a few GB of FASTQ.
-	RunUpload(context, bind, *gs);
+	// Plan the samples (cheap aggregate pre-pass, fail-fast layout resolution)
+	// and run the entire upload eagerly during init, streaming one sample at a
+	// time. The execution side just drains the per-file rows from `emitted`. This
+	// keeps the error model simple (any failure aborts the statement) and keeps
+	// peak memory bounded to one DataChunk + one zlib window regardless of size.
+	RunStreamingUpload(context, bind, *gs);
 	return std::move(gs);
 }
 
