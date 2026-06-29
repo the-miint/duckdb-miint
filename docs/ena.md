@@ -138,11 +138,11 @@ RETURNING samea_accession;
 
 Run registration is two steps: (a) upload the FASTQ files to your Webin "drop box" and capture the per-file MD5s, then (b) `INSERT INTO ena.runs` referencing those filenames + MD5s.
 
-`ena_upload_reads` drives the upload from an in-DuckDB relation, encoding sequences and quality scores into FASTQ format on the fly, gzipping, computing MD5 in a single streaming pass, and shipping the bytes to ENA.
+`ena_upload_reads` drives the upload from an in-DuckDB relation, encoding sequences and quality scores into FASTQ format on the fly, gzipping, and computing each file's MD5 as it is written. It processes one sample at a time and streams that sample's reads chunk-by-chunk — it never loads the whole relation, or even a whole sample, into memory — so peak memory is bounded (roughly one chunk + one gzip window) regardless of dataset size. There is no input-size cap.
 
 ```sql
--- Required input columns: sample_ref, read_id, sequence1, qual1, sequence_index.
--- Optional: sequence2, qual2 (paired-end).
+-- Required input columns: sample_ref, read_id, sequence1, qual1.
+-- Optional: sequence2, qual2 (paired-end; supply both columns or neither).
 CREATE TABLE my_reads AS SELECT … ;
 
 CREATE TABLE upload_results AS
@@ -160,11 +160,13 @@ SELECT * FROM ena_upload_reads(
 -- └────────────┴─────────────────┴──────────┴────────────────────┴───────────────┴────────┘
 ```
 
-Layout is auto-detected from the input rows: presence of `sequence2` / `qual2` per sample-group decides single vs. paired. `layout := 'paired_interleaved'` overrides this to emit one interleaved file per sample. Mixed single/paired rows under the same `sample_ref` are rejected at scan time.
+Layout is auto-detected per sample by a cheap aggregate pre-pass: whether every / no / some rows under a `sample_ref` carry a non-null `sequence2` decides paired / single / (rejected) mixed. `layout := 'paired_interleaved'` overrides this to emit one interleaved file per sample. Mixed single/paired rows under the same `sample_ref` are rejected before any upload begins, as is a relation that carries only one of `sequence2` / `qual2` (which would silently drop a mate).
+
+Reads are written in the relation's scan order — they are **not** sorted by `sequence_index` (a payload sort cannot spill and would defeat the bounded-memory design). R1/R2 pairing is unaffected, since both mates come from the same input row. One consequence: a file's exact bytes (hence its MD5) are reproducible only insofar as the source relation's scan order is — the MD5 always matches the bytes actually uploaded, which is what ENA validates.
 
 `target_url` schemes:
 - `aspera://webin2.ebi.ac.uk/` — production Aspera transport, requires `ascp` on `PATH` (`MIINT_ENABLE_ASPERA` runtime check).
-- `ftp://` / `ftps://` / `http://` / `https://` — libcurl streaming-upload transport.
+- `ftp://` / `ftps://` / `http://` / `https://` — libcurl transport. Each file is encoded to a temp file, then uploaded.
 - `file:///some/dir/` — write to a local directory; no `secret` parameter required. Useful for testing the encode→gzip→md5 pipeline without round-tripping through ENA.
 
 ### 6. Register experiments and runs
@@ -357,5 +359,5 @@ DETACH ena;
 
 - `SELECT * FROM ena.<submission table>` is **not** supported (other than `submission_log`). The Webin V2 API doesn't expose registered objects through the same endpoint they were submitted to. The extension uses the [Reports API](https://www.ebi.ac.uk/ena/submit/report) for the alias→accession lookup that powers `refname` + `kind` lifecycle calls and `DELETE WHERE alias = '…'`, but doesn't surface a `SELECT *` view of the user's submission account through the catalog.
 - The `test` endpoint (`wwwdev.ebi.ac.uk`) is a sandbox: receipts come back with valid-looking accessions, but those accessions are not addressable through the public Browser. Use it for dry runs and CI; switch to `production` for real submissions.
-- File uploads require either `ascp` (Aspera) on `PATH` or libcurl-backed streaming. Aspera is faster for large files but requires the IBM Aspera client; HTTPS/FTP works without extra dependencies. The local `file://` transport is for testing the encode pipeline only — it does not push anything to ENA.
+- File uploads require either `ascp` (Aspera) on `PATH` or a libcurl-backed transport. Aspera is faster for large files but requires the IBM Aspera client; HTTPS/FTP works without extra dependencies. The local `file://` transport is for testing the encode pipeline only — it does not push anything to ENA.
 - WASM builds: ENA *reading* works in all WASM variants. ENA *submission* requires an upload transport — Aspera is unavailable on any WASM (no `fork`/`exec`) and libcurl is gated off on `wasm_threads` (vcpkg port lacks `-pthread`); only `wasm_eh` and `wasm_mvp` can submit, and only via curl-based HTTPS/FTP transports.

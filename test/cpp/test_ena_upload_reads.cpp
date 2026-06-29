@@ -32,78 +32,59 @@ using duckdb::FastqLayoutModeName;
 using duckdb::OutputFilenames;
 using duckdb::ParseFastqLayoutMode;
 using duckdb::ParseUploadTargetURL;
-using duckdb::ResolveLayout;
+using duckdb::ResolveLayoutFromCounts;
 using duckdb::UploadTargetURL;
 using duckdb::UploadTransport;
 
-// ---- Layout detection ----------------------------------------------------
+// ---- Layout detection from aggregate counts (streaming pre-pass) ----------
+// (all_paired, any_paired) is the (bool_and, bool_or) of "sequence2 IS NOT NULL"
+// over a sample. all-single = (false,false); all-paired = (true,true);
+// mixed = (false,true). (true,false) is impossible for a non-empty sample.
 
-TEST_CASE("ResolveLayout: AUTO collapses to SINGLE when no row has R2", "[ena_upload_reads]") {
-	std::vector<bool> has_r2 = {false, false, false};
-	REQUIRE(ResolveLayout("sampleA", FastqLayoutMode::AUTO, has_r2) == FastqLayoutMode::SINGLE);
+TEST_CASE("ResolveLayoutFromCounts: AUTO collapses to SINGLE when no row has R2", "[ena_upload_reads]") {
+	REQUIRE(ResolveLayoutFromCounts("sampleA", FastqLayoutMode::AUTO, /*all_paired=*/false, /*any_paired=*/false) ==
+	        FastqLayoutMode::SINGLE);
 }
 
-TEST_CASE("ResolveLayout: AUTO collapses to PAIRED when every row has R2", "[ena_upload_reads]") {
-	std::vector<bool> has_r2 = {true, true, true};
-	REQUIRE(ResolveLayout("sampleA", FastqLayoutMode::AUTO, has_r2) == FastqLayoutMode::PAIRED);
+TEST_CASE("ResolveLayoutFromCounts: AUTO collapses to PAIRED when every row has R2", "[ena_upload_reads]") {
+	REQUIRE(ResolveLayoutFromCounts("sampleA", FastqLayoutMode::AUTO, /*all_paired=*/true, /*any_paired=*/true) ==
+	        FastqLayoutMode::PAIRED);
 }
 
-TEST_CASE("ResolveLayout: mixed rows raise a clear error naming sample and row", "[ena_upload_reads]") {
-	std::vector<bool> has_r2 = {true, true, false, true};
-	REQUIRE_THROWS_WITH(ResolveLayout("sampleA", FastqLayoutMode::AUTO, has_r2),
-	                    Catch::Matchers::ContainsSubstring("sampleA") && Catch::Matchers::ContainsSubstring("row 2"));
-
-	std::vector<bool> has_r2_other = {false, false, true};
-	REQUIRE_THROWS_WITH(ResolveLayout("anotherSample", FastqLayoutMode::AUTO, has_r2_other),
-	                    Catch::Matchers::ContainsSubstring("anotherSample") &&
-	                        Catch::Matchers::ContainsSubstring("row 2"));
+TEST_CASE("ResolveLayoutFromCounts: AUTO mixed single/paired raises naming the sample", "[ena_upload_reads]") {
+	REQUIRE_THROWS_WITH(
+	    ResolveLayoutFromCounts("sampleA", FastqLayoutMode::AUTO, /*all_paired=*/false, /*any_paired=*/true),
+	    Catch::Matchers::ContainsSubstring("sampleA") && Catch::Matchers::ContainsSubstring("mixes"));
 }
 
-TEST_CASE("ResolveLayout: explicit SINGLE rejects rows that supplied R2", "[ena_upload_reads]") {
-	std::vector<bool> has_r2 = {false, true, false};
-	REQUIRE_THROWS_WITH(ResolveLayout("sampleA", FastqLayoutMode::SINGLE, has_r2),
-	                    Catch::Matchers::ContainsSubstring("layout=single") &&
-	                        Catch::Matchers::ContainsSubstring("sampleA") &&
-	                        Catch::Matchers::ContainsSubstring("row 1"));
+TEST_CASE("ResolveLayoutFromCounts: explicit SINGLE rejects a sample with any R2", "[ena_upload_reads]") {
+	// mixed
+	REQUIRE_THROWS_WITH(
+	    ResolveLayoutFromCounts("sampleA", FastqLayoutMode::SINGLE, /*all_paired=*/false, /*any_paired=*/true),
+	    Catch::Matchers::ContainsSubstring("layout=single") && Catch::Matchers::ContainsSubstring("sampleA"));
+	// fully paired
+	REQUIRE_THROWS_WITH(
+	    ResolveLayoutFromCounts("sampleA", FastqLayoutMode::SINGLE, /*all_paired=*/true, /*any_paired=*/true),
+	    Catch::Matchers::ContainsSubstring("layout=single"));
 }
 
-TEST_CASE("ResolveLayout: SINGLE error reports first row with R2, even when row 0 has R2", "[ena_upload_reads]") {
-	// Regression: an earlier implementation reused the AUTO "first mismatch
-	// vs row 0" counter and reported the wrong row when the first row was
-	// the offender.
-	std::vector<bool> has_r2 = {true, false, true};
-	REQUIRE_THROWS_WITH(ResolveLayout("sampleA", FastqLayoutMode::SINGLE, has_r2),
-	                    Catch::Matchers::ContainsSubstring("layout=single") &&
-	                        Catch::Matchers::ContainsSubstring("row 0"));
+TEST_CASE("ResolveLayoutFromCounts: explicit PAIRED rejects a sample missing any R2", "[ena_upload_reads]") {
+	// fully single
+	REQUIRE_THROWS_WITH(
+	    ResolveLayoutFromCounts("sampleA", FastqLayoutMode::PAIRED, /*all_paired=*/false, /*any_paired=*/false),
+	    Catch::Matchers::ContainsSubstring("layout=paired") && Catch::Matchers::ContainsSubstring("sampleA"));
+	// mixed
+	REQUIRE_THROWS_WITH(
+	    ResolveLayoutFromCounts("sampleA", FastqLayoutMode::PAIRED, /*all_paired=*/false, /*any_paired=*/true),
+	    Catch::Matchers::ContainsSubstring("layout=paired"));
 }
 
-TEST_CASE("ResolveLayout: PAIRED error reports first row missing R2, even when row 0 has R2", "[ena_upload_reads]") {
-	std::vector<bool> has_r2 = {true, true, false, true};
-	REQUIRE_THROWS_WITH(ResolveLayout("sampleA", FastqLayoutMode::PAIRED, has_r2),
-	                    Catch::Matchers::ContainsSubstring("layout=paired") &&
-	                        Catch::Matchers::ContainsSubstring("row 2"));
-}
-
-TEST_CASE("ResolveLayout: explicit PAIRED rejects rows missing R2", "[ena_upload_reads]") {
-	std::vector<bool> has_r2 = {true, true, false};
-	REQUIRE_THROWS_WITH(ResolveLayout("sampleA", FastqLayoutMode::PAIRED, has_r2),
-	                    Catch::Matchers::ContainsSubstring("layout=paired") &&
-	                        Catch::Matchers::ContainsSubstring("sampleA"));
-}
-
-TEST_CASE("ResolveLayout: PAIRED_INTERLEAVED requires every row to have R2", "[ena_upload_reads]") {
-	std::vector<bool> all_paired = {true, true};
-	REQUIRE(ResolveLayout("sampleA", FastqLayoutMode::PAIRED_INTERLEAVED, all_paired) ==
-	        FastqLayoutMode::PAIRED_INTERLEAVED);
-
-	std::vector<bool> mixed = {true, false};
-	REQUIRE_THROWS_WITH(ResolveLayout("sampleA", FastqLayoutMode::PAIRED_INTERLEAVED, mixed),
+TEST_CASE("ResolveLayoutFromCounts: PAIRED_INTERLEAVED requires every row to have R2", "[ena_upload_reads]") {
+	REQUIRE(ResolveLayoutFromCounts("sampleA", FastqLayoutMode::PAIRED_INTERLEAVED, /*all_paired=*/true,
+	                                /*any_paired=*/true) == FastqLayoutMode::PAIRED_INTERLEAVED);
+	REQUIRE_THROWS_WITH(ResolveLayoutFromCounts("sampleA", FastqLayoutMode::PAIRED_INTERLEAVED, /*all_paired=*/false,
+	                                            /*any_paired=*/true),
 	                    Catch::Matchers::ContainsSubstring("paired_interleaved"));
-}
-
-TEST_CASE("ResolveLayout: empty rows is treated as a programming error", "[ena_upload_reads]") {
-	std::vector<bool> empty;
-	REQUIRE_THROWS(ResolveLayout("sampleA", FastqLayoutMode::AUTO, empty));
 }
 
 // ---- Filenames ------------------------------------------------------------

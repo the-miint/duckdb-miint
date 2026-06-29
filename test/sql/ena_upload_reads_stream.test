@@ -1,0 +1,224 @@
+# name: test/sql/ena_upload_reads_stream.test
+# description: ena_upload_reads — order-independent round-trip + multi-chunk characterization (file://)
+# group: [sql]
+
+#
+# These tests lock the *observable* behaviour of ena_upload_reads ahead of the
+# per-sample streaming refactor: every input read must survive the
+# encode→gzip→upload→decode round-trip exactly, regardless of the order in which
+# reads are emitted. We compare the decoded .fastq.gz against the input as a
+# MULTISET (symmetric difference via EXCEPT ALL both directions == 0), so the
+# assertions stay green whether the implementation emits in sequence_index order
+# (today) or in scan order (after the refactor).
+
+require miint
+
+# ---------------------------------------------------------------------------
+# Single-end + paired-split losslessness on the canned fixtures.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE in_single AS
+  SELECT 'sampleA' AS sample_ref, read_id, sequence1, qual1,
+         CAST(NULL AS VARCHAR) AS sequence2, CAST(NULL AS UTINYINT[]) AS qual2, sequence_index
+  FROM read_fastx('data/fastq/small_a.fq');
+
+statement ok
+CREATE TABLE in_paired AS
+  SELECT 'sampleB' AS sample_ref, read_id, sequence1, qual1, sequence2, qual2, sequence_index
+  FROM read_fastx('data/fastq/small_a_r1.fq', sequence2='data/fastq/small_a_r2.fq');
+
+statement ok
+CREATE TABLE rt_input AS
+  SELECT * FROM in_single UNION ALL BY NAME SELECT * FROM in_paired;
+
+statement ok
+CREATE TABLE rt_result AS
+  SELECT * FROM ena_upload_reads(relation := 'rt_input',
+                                 target_url := 'file://__TEST_DIR__/rt/');
+
+# sampleA single-end → 1 file; sampleB paired → 2 files.
+query I
+SELECT count(*) FROM rt_result;
+----
+3
+
+# Single-end round-trip: decoded == input as a multiset of (read_id, sequence1, qual1).
+query I
+WITH decoded AS (SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/rt/sampleA.fastq.gz'))
+SELECT count(*) FROM (
+  (SELECT * FROM decoded EXCEPT ALL SELECT read_id, sequence1, qual1 FROM in_single)
+  UNION ALL
+  (SELECT read_id, sequence1, qual1 FROM in_single EXCEPT ALL SELECT * FROM decoded));
+----
+0
+
+# Paired R1 file round-trips against (read_id, sequence1, qual1).
+query I
+WITH d1 AS (SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/rt/sampleB_1.fastq.gz'))
+SELECT count(*) FROM (
+  (SELECT * FROM d1 EXCEPT ALL SELECT read_id, sequence1, qual1 FROM in_paired)
+  UNION ALL
+  (SELECT read_id, sequence1, qual1 FROM in_paired EXCEPT ALL SELECT * FROM d1));
+----
+0
+
+# Paired R2 file round-trips against (read_id, sequence2, qual2) as a multiset.
+# Positional R1[i]<->R2[i] pairing is guaranteed structurally (R1 and R2 are the
+# same input row, emitted in one streaming pass), so this checks per-mate content
+# fidelity rather than ordering.
+query I
+WITH d2 AS (SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/rt/sampleB_2.fastq.gz'))
+SELECT count(*) FROM (
+  (SELECT * FROM d2 EXCEPT ALL SELECT read_id, sequence2, qual2 FROM in_paired)
+  UNION ALL
+  (SELECT read_id, sequence2, qual2 FROM in_paired EXCEPT ALL SELECT * FROM d2));
+----
+0
+
+# ---------------------------------------------------------------------------
+# paired_interleaved: one file carrying both mates; decoded == R1∪R2 multiset.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE ri_result AS
+  SELECT * FROM ena_upload_reads(relation := 'in_paired',
+                                 target_url := 'file://__TEST_DIR__/ri/',
+                                 layout := 'paired_interleaved');
+
+query I
+WITH decoded AS (SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/ri/sampleB.fastq.gz')),
+     expanded AS (
+       SELECT read_id, sequence1, qual1 FROM in_paired
+       UNION ALL
+       SELECT read_id, sequence2, qual2 FROM in_paired)
+SELECT count(*) FROM (
+  (SELECT * FROM decoded EXCEPT ALL SELECT * FROM expanded)
+  UNION ALL
+  (SELECT * FROM expanded EXCEPT ALL SELECT * FROM decoded));
+----
+0
+
+# ---------------------------------------------------------------------------
+# Multi-chunk, multi-sample: 7500 rows across 3 samples (>2500 each) forces the
+# input across DataChunk boundaries. Every read must land in its own sample's
+# file and survive the round-trip.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE in_big AS
+  SELECT 'bigS' || (i % 3) AS sample_ref,
+         'r' || i AS read_id,
+         'ACGTACGT' AS sequence1,
+         [40,40,40,40,40,40,40,40]::UTINYINT[] AS qual1,
+         CAST(NULL AS VARCHAR) AS sequence2, CAST(NULL AS UTINYINT[]) AS qual2,
+         i AS sequence_index
+  FROM range(1, 7501) t(i);
+
+statement ok
+CREATE TABLE big_result AS
+  SELECT * FROM ena_upload_reads(relation := 'in_big',
+                                 target_url := 'file://__TEST_DIR__/big/');
+
+# Three single-end files, one per sample.
+query II
+SELECT count(*), count(DISTINCT layout) FROM big_result;
+----
+3	1
+
+# Every read round-trips, across all three samples and all chunk boundaries.
+query I
+WITH decoded AS (
+  SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/big/bigS0.fastq.gz')
+  UNION ALL SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/big/bigS1.fastq.gz')
+  UNION ALL SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/big/bigS2.fastq.gz'))
+SELECT count(*) FROM (
+  (SELECT * FROM decoded EXCEPT ALL SELECT read_id, sequence1, qual1 FROM in_big)
+  UNION ALL
+  (SELECT read_id, sequence1, qual1 FROM in_big EXCEPT ALL SELECT * FROM decoded));
+----
+0
+
+# Per-sample read counts are preserved exactly (no cross-sample leakage).
+# read_fastx is a table function and doesn't take correlated args, so spell out
+# one count per file (2500 each: i in [1,7500] split by i%3).
+query I
+SELECT count(*) FROM read_fastx('__TEST_DIR__/big/bigS0.fastq.gz');
+----
+2500
+
+query I
+SELECT count(*) FROM read_fastx('__TEST_DIR__/big/bigS1.fastq.gz');
+----
+2500
+
+query I
+SELECT count(*) FROM read_fastx('__TEST_DIR__/big/bigS2.fastq.gz');
+----
+2500
+
+# ---------------------------------------------------------------------------
+# Schema / planning errors are raised before any upload (fail-fast).
+# ---------------------------------------------------------------------------
+
+# A relation with sequence2 but no qual2 is malformed — not single-end. Treating
+# it as single-end would silently drop the present mate, so it must error.
+statement ok
+CREATE TABLE in_partial_r2 AS
+  SELECT 'sP' AS sample_ref, read_id, sequence1, qual1, sequence2, sequence_index
+  FROM read_fastx('data/fastq/small_a_r1.fq', sequence2='data/fastq/small_a_r2.fq');
+
+statement error
+SELECT * FROM ena_upload_reads(relation := 'in_partial_r2',
+                               target_url := 'file://__TEST_DIR__/perr/');
+----
+qual2
+
+# layout=paired requested on a relation with no R2 columns at all → fail-fast.
+statement ok
+CREATE TABLE in_r1only AS
+  SELECT 'sR' AS sample_ref, read_id, sequence1, qual1, sequence_index
+  FROM read_fastx('data/fastq/small_a.fq');
+
+statement error
+SELECT * FROM ena_upload_reads(relation := 'in_r1only',
+                               target_url := 'file://__TEST_DIR__/perr2/',
+                               layout := 'paired');
+----
+layout=paired
+
+# Successful single-end upload from a relation with NO R2 columns at all
+# (exercises the 3-column data query + the bool_and(false) pre-pass branch, which
+# the other fixtures — carrying NULL sequence2/qual2 columns — never hit).
+statement ok
+CREATE TABLE in_noR2 AS
+  SELECT 'sN' AS sample_ref, read_id, sequence1, qual1, sequence_index
+  FROM read_fastx('data/fastq/small_a.fq');
+
+statement ok
+CREATE TABLE noR2_result AS
+  SELECT * FROM ena_upload_reads(relation := 'in_noR2',
+                                 target_url := 'file://__TEST_DIR__/nor2/');
+
+query II
+SELECT layout, bytes_written > 0 FROM noR2_result;
+----
+single	true
+
+query I
+WITH decoded AS (SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/nor2/sN.fastq.gz'))
+SELECT count(*) FROM (
+  (SELECT * FROM decoded EXCEPT ALL SELECT read_id, sequence1, qual1 FROM in_noR2)
+  UNION ALL
+  (SELECT read_id, sequence1, qual1 FROM in_noR2 EXCEPT ALL SELECT * FROM decoded));
+----
+0
+
+# A sample_ref of '.' is rejected (path-traversal guard), with an accurate message.
+statement ok
+CREATE TABLE in_dot AS
+  SELECT '.' AS sample_ref, read_id, sequence1, qual1, sequence_index
+  FROM read_fastx('data/fastq/small_a.fq');
+
+statement error
+SELECT * FROM ena_upload_reads(relation := 'in_dot',
+                               target_url := 'file://__TEST_DIR__/derr/');
+----
+path-traversal

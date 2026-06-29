@@ -1,0 +1,56 @@
+# name: test/sql/ena_upload_reads_bigmem.test
+# description: ena_upload_reads streaming memory proof — a single sample far larger than memory_limit uploads losslessly
+# group: [sql]
+
+#
+# Opt-in / expensive (encodes millions of reads), so it is gated behind
+# MIINT_ENA_BIG_STREAM_TEST (exported by run_tests.sh when set). It proves the
+# per-sample streaming path handles a single sample whose materialised size far
+# exceeds the configured memory_limit.
+#
+# The pre-streaming implementation read the whole relation into RAM (and a
+# prepared statement's result FORCE-materialises), so this would OOM. The
+# SendQuery streaming path Fetches one DataChunk at a time: peak RSS was measured
+# (manually, /usr/bin/time -v) at ~48 MB for 200k reads and ~49 MB for 2M reads —
+# flat in N. This test is the in-suite functional smoke that a multi-GB single
+# sample uploads losslessly without error; it does not itself assert RSS.
+
+require miint
+
+require-env MIINT_ENA_BIG_STREAM_TEST
+
+# Bound DuckDB's tracked memory well below the dataset's materialised footprint
+# (~1.4 GB for 3M x 200 bp reads + equal-length quality lists). A streaming scan
+# stays comfortably under this; a regression that materialised the scan (e.g. an
+# ORDER BY on the payload, or a prepared statement) would blow past it.
+statement ok
+SET memory_limit = '512MB';
+
+# Lazy single-sample view: nothing is built until scanned, and each scan streams.
+statement ok
+CREATE VIEW big_reads AS
+  SELECT 'bigsample' AS sample_ref,
+         'r' || i AS read_id,
+         repeat('ACGT', 50) AS sequence1,                       -- 200 bp
+         list_resize([40]::UTINYINT[], 200, 40::UTINYINT) AS qual1,
+         CAST(NULL AS VARCHAR) AS sequence2,
+         CAST(NULL AS UTINYINT[]) AS qual2,
+         i AS sequence_index
+  FROM range(0, 3000000) t(i);
+
+statement ok
+CREATE TABLE big_result AS
+  SELECT * FROM ena_upload_reads(relation := 'big_reads',
+                                 target_url := 'file://__TEST_DIR__/bigmem/');
+
+# One single-end file, non-empty.
+query II
+SELECT layout, bytes_written > 0 FROM big_result;
+----
+single	true
+
+# Losslessness at scale: every read survived the encode→gzip→decode round-trip.
+query I
+SELECT count(*) FROM read_fastx('__TEST_DIR__/bigmem/bigsample.fastq.gz');
+----
+3000000

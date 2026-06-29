@@ -20,10 +20,10 @@
 namespace duckdb {
 
 // User-requested or auto-detected per-sample FASTQ layout. AUTO is a
-// bind-time placeholder; ResolveLayout collapses it to SINGLE or PAIRED based
-// on the actual rows. PAIRED_INTERLEAVED is a user override (the only layout
-// the encoder side cannot infer from data alone) that emits one file with R1
-// and R2 records alternating.
+// bind-time placeholder; ResolveLayoutFromCounts collapses it to SINGLE or
+// PAIRED based on the sample's actual R2 presence. PAIRED_INTERLEAVED is a user
+// override (the only layout the encoder side cannot infer from data alone) that
+// emits one file with R1 and R2 records alternating.
 enum class FastqLayoutMode : uint8_t {
 	AUTO,
 	SINGLE,
@@ -39,13 +39,17 @@ const char *FastqLayoutModeName(FastqLayoutMode mode);
 // std::runtime_error with the offending value when the name isn't recognised.
 FastqLayoutMode ParseFastqLayoutMode(const std::string &name);
 
-// Resolve the per-sample layout from rows. `has_r2[i]` records whether row i
-// in the sample's grouped chunk supplied a non-null R2. Mixed rows (some with,
-// some without) raise std::runtime_error naming the sample_ref and the
-// 0-based index of the first inconsistent row. PAIRED_INTERLEAVED is honored
-// only when every row has a non-null R2; otherwise behaves like PAIRED.
-FastqLayoutMode ResolveLayout(const std::string &sample_ref, FastqLayoutMode requested,
-                              const std::vector<bool> &has_r2);
+// Resolve the per-sample layout from aggregate R2-presence counts. `all_paired`
+// is true when *every* row in the sample supplied a non-null R2 (SQL
+// `bool_and(sequence2 IS NOT NULL)`); `any_paired` is true when *at least one*
+// did (`bool_or(...)`). This is the entry point for the streaming upload path,
+// which learns each sample's R2 pattern from a cheap GROUP BY pre-pass instead
+// of buffering every row. Mixed samples (`any_paired && !all_paired`) and
+// layout/mode conflicts raise std::runtime_error naming the sample_ref.
+// PAIRED_INTERLEAVED is honored only when every row has a non-null R2; otherwise
+// (like PAIRED) it errors. Callers must pass a sample with >= 1 row.
+FastqLayoutMode ResolveLayoutFromCounts(const std::string &sample_ref, FastqLayoutMode requested, bool all_paired,
+                                        bool any_paired);
 
 // Output FASTQ filenames for one sample given its resolved layout.
 //   SINGLE             → ["{sample_ref}.fastq.gz"]

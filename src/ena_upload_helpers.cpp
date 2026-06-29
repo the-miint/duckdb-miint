@@ -60,38 +60,13 @@ FastqLayoutMode ParseFastqLayoutMode(const std::string &name) {
 	                         "' — expected one of: auto, single, paired, paired_interleaved");
 }
 
-FastqLayoutMode ResolveLayout(const std::string &sample_ref, FastqLayoutMode requested,
-                              const std::vector<bool> &has_r2) {
-	if (has_r2.empty()) {
-		throw std::runtime_error("ResolveLayout: sample '" + sample_ref + "' has zero rows");
-	}
-
-	// Compute three per-mode "first offending row" indices. AUTO wants the
-	// first row inconsistent with row 0 (either flip direction). SINGLE wants
-	// the first row that *has* R2. PAIRED / PAIRED_INTERLEAVED want the first
-	// row that *lacks* R2. The earlier code reused one counter and reported
-	// the wrong row when the input started with R2 and later went single.
-	std::size_t r2_count = 0;
-	const std::size_t sentinel = has_r2.size();
-	std::size_t first_auto_mismatch = sentinel;
-	std::size_t first_with_r2 = sentinel;
-	std::size_t first_without_r2 = sentinel;
-	const bool first_has = has_r2[0];
-	for (std::size_t i = 0; i < has_r2.size(); i++) {
-		if (has_r2[i]) {
-			r2_count++;
-			if (first_with_r2 == sentinel) {
-				first_with_r2 = i;
-			}
-		} else if (first_without_r2 == sentinel) {
-			first_without_r2 = i;
-		}
-		if (has_r2[i] != first_has && first_auto_mismatch == sentinel) {
-			first_auto_mismatch = i;
-		}
-	}
-	const bool all_paired = r2_count == has_r2.size();
-	const bool all_single = r2_count == 0;
+FastqLayoutMode ResolveLayoutFromCounts(const std::string &sample_ref, FastqLayoutMode requested, bool all_paired,
+                                        bool any_paired) {
+	// A sample reaching here always has >= 1 row (it came from a GROUP BY), so
+	// the empty-set degenerate case (all_paired=true, any_paired=false) cannot
+	// occur. The decision is driven by (bool_and, bool_or) of "sequence2 IS NOT
+	// NULL" — so the errors name the sample but cannot point at an offending row.
+	const bool all_single = !any_paired;
 
 	switch (requested) {
 	case FastqLayoutMode::AUTO:
@@ -102,33 +77,29 @@ FastqLayoutMode ResolveLayout(const std::string &sample_ref, FastqLayoutMode req
 			return FastqLayoutMode::PAIRED;
 		}
 		throw std::runtime_error("Sample '" + sample_ref +
-		                         "' mixes single-end and paired-end rows (first mismatch at row " +
-		                         std::to_string(first_auto_mismatch) +
-		                         "). Specify layout explicitly or split the input into per-sample groups.");
+		                         "' mixes single-end and paired-end rows. Specify layout explicitly or "
+		                         "split the input into per-sample groups.");
 
 	case FastqLayoutMode::SINGLE:
 		if (all_single) {
 			return FastqLayoutMode::SINGLE;
 		}
-		throw std::runtime_error("Sample '" + sample_ref + "' has rows with non-null R2 but layout=single requested" +
-		                         " (first offending row " + std::to_string(first_with_r2) + ")");
+		throw std::runtime_error("Sample '" + sample_ref + "' has rows with non-null R2 but layout=single requested");
 
 	case FastqLayoutMode::PAIRED:
 		if (all_paired) {
 			return FastqLayoutMode::PAIRED;
 		}
-		throw std::runtime_error("Sample '" + sample_ref + "' has rows missing R2 but layout=paired requested" +
-		                         " (first offending row " + std::to_string(first_without_r2) + ")");
+		throw std::runtime_error("Sample '" + sample_ref + "' has rows missing R2 but layout=paired requested");
 
 	case FastqLayoutMode::PAIRED_INTERLEAVED:
 		if (all_paired) {
 			return FastqLayoutMode::PAIRED_INTERLEAVED;
 		}
 		throw std::runtime_error("Sample '" + sample_ref +
-		                         "' has rows missing R2 but layout=paired_interleaved requested" +
-		                         " (first offending row " + std::to_string(first_without_r2) + ")");
+		                         "' has rows missing R2 but layout=paired_interleaved requested");
 	}
-	throw std::logic_error("ResolveLayout: unhandled FastqLayoutMode");
+	throw std::logic_error("ResolveLayoutFromCounts: unhandled FastqLayoutMode");
 }
 
 std::vector<std::string> OutputFilenames(const std::string &sample_ref, FastqLayoutMode layout) {
