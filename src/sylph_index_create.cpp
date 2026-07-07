@@ -118,8 +118,7 @@ unique_ptr<FunctionData> SylphIndexCreateTableFunction::Bind(ClientContext &cont
 		auto ocol = KeywordHelper::WriteOptionallyQuoted(data->order_by_col);
 		auto probe = conn.Query("SELECT " + gcol + ", " + ocol + " FROM " + src + " LIMIT 0");
 		if (probe->HasError()) {
-			throw BinderException("sylph_index_create: genome_id/order_by column check failed: %s",
-			                      probe->GetError());
+			throw BinderException("sylph_index_create: genome_id/order_by column check failed: %s", probe->GetError());
 		}
 		// Detect an optional `comment` column (present in read_fastx output). Its
 		// presence switches on full-header contig-name reconstruction below.
@@ -136,7 +135,7 @@ unique_ptr<FunctionData> SylphIndexCreateTableFunction::Bind(ClientContext &cont
 // InitGlobal — performs the build (a synchronous side effect)
 // =============================================================================
 unique_ptr<GlobalTableFunctionState> SylphIndexCreateTableFunction::InitGlobal(ClientContext &context,
-                                                                              TableFunctionInitInput &input) {
+                                                                               TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 
@@ -182,11 +181,10 @@ unique_ptr<GlobalTableFunctionState> SylphIndexCreateTableFunction::InitGlobal(C
 		// read_id (first token) + comment (remainder). When a comment column is
 		// present we rejoin them ("read_id comment") so a miint-built .syldb's
 		// contig names match `sylph sketch`; otherwise the contig name is read_id.
-		std::string contig_expr =
-		    data.has_comment
-		        ? "CAST(read_id AS VARCHAR) || CASE WHEN comment IS NOT NULL AND comment <> '' "
-		          "THEN ' ' || CAST(comment AS VARCHAR) ELSE '' END"
-		        : "CAST(read_id AS VARCHAR)";
+		std::string contig_expr = data.has_comment
+		                              ? "CAST(read_id AS VARCHAR) || CASE WHEN comment IS NOT NULL AND comment <> '' "
+		                                "THEN ' ' || CAST(comment AS VARCHAR) ELSE '' END"
+		                              : "CAST(read_id AS VARCHAR)";
 
 		auto key_lit = Value(key).ToSQLString();
 		auto sql = "SELECT " + contig_expr + " AS contig, sequence1 AS seq FROM " + src + " WHERE CAST(" + gcol +
@@ -219,9 +217,9 @@ unique_ptr<GlobalTableFunctionState> SylphIndexCreateTableFunction::InitGlobal(C
 				// as (ptr, len) so its bytes need no terminator.
 				std::string contig = contig_valid.RowIsValid(i) ? contig_data[i].GetString() : std::string();
 				auto seq = seq_data[i];
-				int rc = sylph_index_builder_add_contig(
-				    guard.builder, contig.c_str(), reinterpret_cast<const unsigned char *>(seq.GetData()),
-				    seq.GetSize());
+				int rc = sylph_index_builder_add_contig(guard.builder, contig.c_str(),
+				                                        reinterpret_cast<const unsigned char *>(seq.GetData()),
+				                                        seq.GetSize());
 				if (rc != 0) {
 					ThrowFFI("add_contig failed");
 				}
@@ -241,8 +239,8 @@ unique_ptr<GlobalTableFunctionState> SylphIndexCreateTableFunction::InitGlobal(C
 	return std::move(gstate);
 }
 
-unique_ptr<LocalTableFunctionState> SylphIndexCreateTableFunction::InitLocal(ExecutionContext &, TableFunctionInitInput &,
-                                                                            GlobalTableFunctionState *) {
+unique_ptr<LocalTableFunctionState>
+SylphIndexCreateTableFunction::InitLocal(ExecutionContext &, TableFunctionInitInput &, GlobalTableFunctionState *) {
 	return make_uniq<LocalState>();
 }
 

@@ -44,8 +44,8 @@ public:
 	struct Data : public TableFunctionData {
 		std::string source_table;
 		std::string output_path;
-		std::string genome_id_col;             // grouping column (required)
-		std::string order_by_col = "read_id";  // within-genome contig order
+		std::string genome_id_col;            // grouping column (required)
+		std::string order_by_col = "read_id"; // within-genome contig order
 
 		// Source has a `comment` column (read_fastx does). If so, the contig name
 		// is rebuilt as the full header `read_id || ' ' || comment` to match
