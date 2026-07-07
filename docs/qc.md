@@ -27,6 +27,10 @@ All scalars accept `seq VARCHAR` + `qual LIST(UTINYINT)`. Quality is the
 decoded Phred integer list emitted by `read_fastx` (not ASCII), so values
 are 0..93 directly.
 
+Beyond these per-read scalars, [`infer_trim`](#reconciling-external-qc-results--infer_trim)
+is a **table macro** that reconciles reads trimmed by an *external* QC tool back
+to 5'/3' trim coordinates — see its section below.
+
 ## Return structs
 
 Every trim function returns a `STRUCT` with these fields:
@@ -313,6 +317,83 @@ maintain bit-for-bit parity in the common case:
   accepted overlap longer than 50 the reported `diff` (mismatch count) is the
   *full* count over the whole overlap, which can exceed `overlap_diff_limit`.
   This is a fastp quirk, ported faithfully to keep byte-for-byte parity.
+
+## Reconciling external QC results — `infer_trim`
+
+Sometimes reads are quality-controlled by an **external** tool rather than the
+scalars above. When that tool only *trims* read ends (no base edits) and may
+*omit* reads entirely, `infer_trim` recovers the per-read 5'/3' trim coordinates
+so you can persist two integers against the originals instead of storing a
+second copy of every trimmed sequence.
+
+`infer_trim(original_reads, qcd_reads)` is a **table macro** (not a scalar). It
+LEFT JOINs the two relations on `sequence_index` and locates the contiguous
+QC'd sequence inside the original. Both relations must expose:
+
+| Column | Type | Role |
+|---|---|---|
+| `sequence_index` | `BIGINT` | Join key |
+| `sequence` | `VARCHAR` | Read sequence |
+
+It returns one row per original read:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `sequence_index` | `BIGINT` | Join key, passed through |
+| `trimmed_5p` | `UINTEGER` | Bases removed from the 5' end; `NULL` if the read was omitted by QC |
+| `trimmed_3p` | `UINTEGER` | Bases removed from the 3' end; `NULL` if the read was omitted by QC |
+
+> **Getting the join key right.** `sequence_index` must be **globally unique**
+> per read and must identify the *same* read on both sides — the external tool
+> has to carry the key through and emit it alongside each surviving read. Two
+> traps with `read_fastx` as the source: it assigns `sequence_index`
+> **positionally and resets it to 1 per input file**, so it is a safe key only
+> for a *single* file; and you **cannot** recover a matching key by re-running
+> `read_fastx` on the QC'd output — QC drops reads, so a fresh positional
+> numbering no longer lines up with the original. A duplicated `sequence_index`
+> on the `qcd_reads` side fans the join out (more than one row per original);
+> the macro treats uniqueness as a precondition and does not police it. If keys
+> are misaligned `infer_trim` usually fails loud on the resulting non-substring,
+> but a coincidental substring match would pass silently, so get the key right.
+
+```sql
+-- Original reads from a SINGLE file; sequence_index is read_fastx's positional id.
+CREATE VIEW original AS
+    SELECT sequence_index, sequence1 AS sequence FROM read_fastx('reads.fastq.gz');
+
+-- qcd_reads: the external tool's surviving reads, each carrying the ORIGINAL
+-- sequence_index (project/rename so both sides share `sequence_index` + `sequence`).
+SELECT * FROM infer_trim(original, qcd_reads) ORDER BY sequence_index;
+```
+
+Semantics:
+
+- **Omitted reads → `NULL` / `NULL`.** A read with no row in `qcd_reads`
+  (dropped by QC) yields `NULL` coordinates, straight from the LEFT JOIN — the
+  "any sequence omitted is null" case. A `qcd_reads` row whose `sequence_index`
+  is absent from `original_reads` is dropped (one row per original, by design).
+- **Fails loud, whatever you `SELECT`.** The integrity checks live in a
+  row-level `WHERE` filter the optimizer cannot prune, so they fire even for
+  `SELECT count(*)` or a single-column projection — not only for `SELECT *`.
+  `infer_trim` throws, naming the offending `sequence_index`, when a QC'd
+  sequence is **not a contiguous substring** of its original (the external tool
+  edited bases, or the join key is mismatched), or when a *present* QC row has a
+  **NULL or empty** sequence, or the **original** sequence is `NULL`. It is
+  strictly for pure end-trimming; represent a dropped read by omitting its row
+  (→ `NULL` / `NULL`), not by an empty sequence. Base-modifying QC (quality
+  masking, error correction, reverse-complementing) needs alignment, not a
+  substring search.
+- **Leftmost match wins.** If the kept block occurs at more than one offset in a
+  self-repetitive read, the leftmost occurrence is chosen — the true offset
+  cannot be recovered from sequence alone, so the most conservative 5' trim is
+  taken.
+- **Persist coordinates, reconstruct on demand.** Store only `trimmed_5p` /
+  `trimmed_3p` next to the originals; regenerate the trimmed read when needed
+  with `substr(sequence, trimmed_5p + 1, length(sequence) - trimmed_5p - trimmed_3p)`.
+
+Performance: a parallel hash join plus one `position()` substring search per
+matched read, so cost is linear in total sequence bytes (≈ Σ read length) with
+the join scaling in row count; both stages are fully parallel.
 
 ## Related — long-read amplicon / UMI primitives
 

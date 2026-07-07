@@ -716,6 +716,85 @@ const std::string GENOME_COVERAGE = // NOLINT
     "JOIN query_table(subject_total_length) tl "
     "  USING (genome_id);";
 
+// infer_trim(original_reads, qcd_reads)
+//
+// Recover per-read 5'/3' trim coordinates from reads that were quality-
+// controlled by an *external* tool that only trims read ends (no base edits)
+// and may omit reads entirely. LEFT JOINs original -> QC'd on sequence_index
+// and locates the (contiguous) QC'd sequence within the original.
+//
+// Both relations must expose:
+//   sequence_index : BIGINT  (join key)
+//   sequence       : VARCHAR (read sequence)
+//
+// CONTRACT / preconditions (documented, not all enforced):
+//   sequence_index must be GLOBALLY UNIQUE per read and identify the SAME read
+//   on both sides -- it is the caller's job to carry a stable key through the
+//   external tool. read_fastx assigns sequence_index positionally and RESETS it
+//   per input file, so it is a valid key only for a single file whose numbering
+//   the external tool round-trips; you cannot re-derive a matching key by
+//   re-running read_fastx on the QC'd output (QC drops reads, so the positional
+//   numbering diverges). A non-unique sequence_index on the qcd side fans the
+//   LEFT JOIN out (>1 row per original); this precondition is documented rather
+//   than enforced, to keep the macro a single linear scan. A qcd row whose
+//   sequence_index is absent from the originals is dropped (one row per
+//   original), by design.
+//
+// Returns one row per original read:
+//   sequence_index : BIGINT
+//   trimmed_5p     : UINTEGER  bases removed from the 5' end (NULL if omitted)
+//   trimmed_3p     : UINTEGER  bases removed from the 3' end (NULL if omitted)
+//
+// A read with no QC'd counterpart yields NULL/NULL (omitted). Per-row data-
+// integrity violations FAIL LOUD (throw) regardless of which output columns the
+// caller projects, because the checks live in a row-level WHERE filter the
+// optimizer cannot prune away: a present QC row with a NULL or empty sequence,
+// a NULL original sequence, or a QC sequence that is not a contiguous substring
+// of its original (base edits, or a mismatched join key). This macro is strictly
+// for pure end-trimming. When the kept block occurs at multiple offsets
+// (self-repetitive reads), the leftmost match wins. position() is computed once
+// in a CTE, not per output column. A qcd `matched` marker distinguishes an
+// omitted read (no row) from a present row with a NULL sequence.
+const std::string INFER_TRIM = // NOLINT
+    "CREATE OR REPLACE MACRO infer_trim(original_reads, qcd_reads) AS TABLE "
+    "WITH joined AS ( "
+    "    SELECT o.sequence_index AS sequence_index, "
+    "           o.sequence       AS oseq, "
+    "           q.sequence       AS qseq, "
+    "           q.matched        AS matched "
+    "    FROM query_table(original_reads) o "
+    "    LEFT JOIN (SELECT sequence_index, sequence, TRUE AS matched "
+    "               FROM query_table(qcd_reads)) q USING (sequence_index) "
+    "), "
+    "computed AS ( "
+    "    SELECT sequence_index, matched, oseq, qseq, "
+    "           CASE WHEN matched IS NULL THEN NULL ELSE position(qseq IN oseq) END AS p, "
+    "           length(oseq) AS olen, "
+    "           length(qseq) AS qlen "
+    "    FROM joined "
+    "), "
+    "validated AS ( "
+    "    SELECT * FROM computed "
+    "    WHERE CASE "
+    "        WHEN matched IS NULL THEN TRUE "
+    "        WHEN oseq IS NULL THEN error(printf("
+    "            'infer_trim: original sequence for sequence_index=%d is NULL', sequence_index)) "
+    "        WHEN qseq IS NULL THEN error(printf("
+    "            'infer_trim: QC sequence for sequence_index=%d is NULL (a kept read must have a sequence)', "
+    "            sequence_index)) "
+    "        WHEN qseq = '' THEN error(printf("
+    "            'infer_trim: QC sequence for sequence_index=%d is empty (omit the row to mark a dropped read)', "
+    "            sequence_index)) "
+    "        WHEN p = 0 THEN error(printf("
+    "            'infer_trim: QC sequence for sequence_index=%d is not a contiguous substring of its original', "
+    "            sequence_index)) "
+    "        ELSE TRUE END "
+    ") "
+    "SELECT sequence_index, "
+    "       CASE WHEN matched IS NULL THEN NULL ELSE (p - 1)::UINTEGER END AS trimmed_5p, "
+    "       CASE WHEN matched IS NULL THEN NULL ELSE (olen - (p - 1) - qlen)::UINTEGER END AS trimmed_3p "
+    "FROM validated; ";
+
 class MIINTMacros {
 public:
 	static void Register(ExtensionLoader &loader) {
@@ -751,6 +830,7 @@ public:
 		register_macro(PARSE_GFF_ATTRIBUTES, "parse_gff_attributes");
 		register_macro(READ_GFF, "read_gff");
 		register_macro(GENOME_COVERAGE, "genome_coverage");
+		register_macro(INFER_TRIM, "infer_trim");
 
 		register_macro(READ_JPLACE, "read_jplace");
 

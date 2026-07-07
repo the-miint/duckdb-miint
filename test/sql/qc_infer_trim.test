@@ -1,0 +1,175 @@
+# name: test/sql/qc_infer_trim.test
+# description: Tests for infer_trim table macro (recover 5'/3' trim coordinates from externally QC'd reads)
+# group: [sql]
+
+require miint
+
+# -----------------------------------------------------------------------------
+# Contract: original_reads and qcd_reads each expose sequence_index BIGINT and
+# sequence VARCHAR. infer_trim LEFT JOINs original -> QC'd on sequence_index and
+# infers trimmed_5p / trimmed_3p by locating the (contiguous) QC'd sequence in
+# the original. Pure end-trimming only; no base edits.
+# -----------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE original AS SELECT * FROM (VALUES
+    (1::BIGINT, 'AACGTACGTTT'),   -- kept 'CGTACGT'  -> 5p=2, 3p=2
+    (2::BIGINT, 'GGGGTTTTCCCC'),  -- omitted by QC (no qcd row) -> NULL, NULL
+    (3::BIGINT, 'ACGTACGT'),      -- untrimmed -> 5p=0, 3p=0
+    (4::BIGINT, 'TTTTTTAAAA'),    -- kept 'AAAA' (left-only) -> 5p=6, 3p=0
+    (5::BIGINT, 'ACGTTTTTTT')     -- kept 'ACGT' (right-only) -> 5p=0, 3p=6
+) t(sequence_index, sequence);
+
+statement ok
+CREATE TABLE qcd AS SELECT * FROM (VALUES
+    (1::BIGINT, 'CGTACGT'),
+    (3::BIGINT, 'ACGTACGT'),
+    (4::BIGINT, 'AAAA'),
+    (5::BIGINT, 'ACGT')
+) t(sequence_index, sequence);
+
+# Core cases: left+right, omission (NULL/NULL), untrimmed, left-only, right-only
+query III
+SELECT * FROM infer_trim(original, qcd) ORDER BY sequence_index;
+----
+1	2	2
+2	NULL	NULL
+3	0	0
+4	6	0
+5	0	6
+
+# The omitted read is the ONLY one with NULL coordinates (falls out of LEFT JOIN)
+query I
+SELECT count(*) FROM infer_trim(original, qcd) WHERE trimmed_5p IS NULL;
+----
+1
+
+# -----------------------------------------------------------------------------
+# Fail loud: a QC'd sequence that is not a contiguous substring of its original
+# is a data-integrity error (base edit, or mismatched join), not a valid trim.
+# The guard lives in a row-level WHERE filter, so it fires regardless of which
+# columns the caller projects — SELECT count(*) and a single column must throw
+# just as SELECT * does (regression test for the column-pruning bypass, where an
+# error() in only the trimmed_5p projection was silently pruned away).
+# -----------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE original_bad AS SELECT 10::BIGINT AS sequence_index, 'AACCGGTT' AS sequence;
+
+statement ok
+CREATE TABLE qcd_bad AS SELECT 10::BIGINT AS sequence_index, 'ZZZZ' AS sequence;
+
+statement error
+SELECT * FROM infer_trim(original_bad, qcd_bad);
+----
+not a contiguous substring
+
+statement error
+SELECT count(*) FROM infer_trim(original_bad, qcd_bad);
+----
+not a contiguous substring
+
+statement error
+SELECT sequence_index FROM infer_trim(original_bad, qcd_bad);
+----
+not a contiguous substring
+
+# QC longer than the original (position=0). trimmed_3p = olen-(p-1)-qlen would go
+# negative and raise a misleading UINT32 cast error if the guard were computed
+# per-column; the row-level WHERE guard yields the clean substring message even
+# when ONLY trimmed_3p is projected.
+statement ok
+CREATE TABLE original_short AS SELECT 11::BIGINT AS sequence_index, 'ACGT' AS sequence;
+
+statement ok
+CREATE TABLE qcd_long AS SELECT 11::BIGINT AS sequence_index, 'ACGTACGTAC' AS sequence;
+
+statement error
+SELECT trimmed_3p FROM infer_trim(original_short, qcd_long);
+----
+not a contiguous substring
+
+# A PRESENT QC row with a NULL sequence is a data error, not an omission
+# (omission = no row at all). The `matched` marker distinguishes the two, so
+# this must throw rather than silently returning NULL/NULL.
+statement ok
+CREATE TABLE original_nseq AS SELECT 12::BIGINT AS sequence_index, 'ACGT' AS sequence;
+
+statement ok
+CREATE TABLE qcd_nullseq AS SELECT 12::BIGINT AS sequence_index, NULL::VARCHAR AS sequence;
+
+statement error
+SELECT count(*) FROM infer_trim(original_nseq, qcd_nullseq);
+----
+is NULL
+
+# A present QC row with an EMPTY sequence is a data error — a dropped read must
+# be represented by omitting its row, not by an empty sequence.
+statement ok
+CREATE TABLE qcd_emptyseq AS SELECT 12::BIGINT AS sequence_index, '' AS sequence;
+
+statement error
+SELECT count(*) FROM infer_trim(original_nseq, qcd_emptyseq);
+----
+is empty
+
+# A NULL original sequence with a present QC row also fails loud.
+statement ok
+CREATE TABLE original_null AS SELECT 13::BIGINT AS sequence_index, NULL::VARCHAR AS sequence;
+
+statement ok
+CREATE TABLE qcd_present AS SELECT 13::BIGINT AS sequence_index, 'ACGT' AS sequence;
+
+statement error
+SELECT count(*) FROM infer_trim(original_null, qcd_present);
+----
+original sequence for sequence_index=13 is NULL
+
+# -----------------------------------------------------------------------------
+# Leftmost match wins when the kept block occurs at multiple offsets in a
+# self-repetitive read. 'ACGT' matches at offset 0 and offset 4; leftmost -> 0.
+# This encodes the documented tie-break: we cannot recover the true offset from
+# sequence alone, so the most conservative 5' trim is chosen.
+# -----------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE original_rep AS SELECT 20::BIGINT AS sequence_index, 'ACGTACGT' AS sequence;
+
+statement ok
+CREATE TABLE qcd_rep AS SELECT 20::BIGINT AS sequence_index, 'ACGT' AS sequence;
+
+query III
+SELECT * FROM infer_trim(original_rep, qcd_rep);
+----
+20	0	4
+
+# -----------------------------------------------------------------------------
+# Works over a view (relation parameter accepts any table/view) and reconstructs
+# the trimmed read from the inferred coordinates against the original.
+# -----------------------------------------------------------------------------
+
+statement ok
+CREATE VIEW original_view AS SELECT sequence_index, sequence FROM original;
+
+query IT
+SELECT o.sequence_index,
+       substr(o.sequence, t.trimmed_5p + 1,
+              length(o.sequence) - t.trimmed_5p - t.trimmed_3p) AS reconstructed
+FROM original_view o
+JOIN infer_trim(original_view, qcd) t USING (sequence_index)
+WHERE t.trimmed_5p IS NOT NULL
+ORDER BY o.sequence_index;
+----
+1	CGTACGT
+3	ACGTACGT
+4	AAAA
+5	ACGT
+
+statement ok
+DROP VIEW original_view;
+
+statement ok
+DROP TABLE original; DROP TABLE qcd; DROP TABLE original_bad; DROP TABLE qcd_bad; DROP TABLE original_rep; DROP TABLE qcd_rep;
+
+statement ok
+DROP TABLE original_short; DROP TABLE qcd_long; DROP TABLE original_nseq; DROP TABLE qcd_nullseq; DROP TABLE qcd_emptyseq; DROP TABLE original_null; DROP TABLE qcd_present;
