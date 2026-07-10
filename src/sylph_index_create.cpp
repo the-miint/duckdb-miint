@@ -1,11 +1,17 @@
 // sylph_index_create() — build a sylph `.syldb` from a reference-sequence table.
-// See sylph_index_create.hpp for the contract. Like rype_index_create, the build
-// is a synchronous side effect in InitGlobal; Execute emits one status row.
+// See sylph_index_create.hpp for the contract. The build is a synchronous side
+// effect in InitGlobal: the distinct genome ids are enumerated, then N worker
+// threads each claim genomes off a shared counter and sketch one genome at a time
+// via a `WHERE genome_id = <id>` query (so only ~one genome is resident per
+// thread, and a clustered source is pruned to that genome's row groups); each
+// worker sketches into its own builder, the builders are merged, and the database
+// is written once. Execute then emits the single status row.
 
 #ifdef MIINT_HAS_SYLPH
 
 #include "sylph_index_create.hpp"
 
+#include "id_column_utils.hpp"
 #include "sequence_table_reader.hpp"
 #include "sylph.h"
 
@@ -15,25 +21,20 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 
+#include <atomic>
+#include <limits>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace duckdb {
 
 namespace {
-
-// RAII guard so the FFI builder is freed on any throw between create and the
-// normal end-of-InitGlobal free.
-struct IndexBuilderGuard {
-	::SylphIndexBuilder *builder = nullptr;
-	~IndexBuilderGuard() {
-		if (builder) {
-			sylph_index_builder_free(builder);
-		}
-	}
-};
 
 [[noreturn]] void ThrowFFI(const char *prefix) {
 	const char *err = sylph_get_last_error();
@@ -105,6 +106,16 @@ unique_ptr<FunctionData> SylphIndexCreateTableFunction::Bind(ClientContext &cont
 		data->sketch_params.pseudotax = pseudotax_param->second.GetValue<bool>() ? 1 : 0;
 	}
 
+	// Genome-sketch parallelism. 0 = auto (DuckDB scheduler thread count).
+	auto threads_param = input.named_parameters.find("threads");
+	if (threads_param != input.named_parameters.end() && !threads_param->second.IsNull()) {
+		auto t = threads_param->second.GetValue<int64_t>();
+		if (t < 0) {
+			throw BinderException("sylph_index_create: threads must be >= 0 (got %lld)", (long long)t);
+		}
+		data->user_threads = static_cast<uint32_t>(t);
+	}
+
 	// Fail-fast schema validation (before the build side effect). read_id +
 	// sequence1 are required; read_id may be VARCHAR or BIGINT.
 	ValidateSequenceTableSchema(context, data->source_table, /*allow_bigint=*/true);
@@ -119,6 +130,14 @@ unique_ptr<FunctionData> SylphIndexCreateTableFunction::Bind(ClientContext &cont
 		auto probe = conn.Query("SELECT " + gcol + ", " + ocol + " FROM " + src + " LIMIT 0");
 		if (probe->HasError()) {
 			throw BinderException("sylph_index_create: genome_id/order_by column check failed: %s", probe->GetError());
+		}
+		// genome_id is an identifier column — hold it to the same type contract
+		// as read_id / the other tools (VARCHAR, BIGINT, or UUID). Its value is
+		// persisted as the genome's file_name; the decimal/canonical string form
+		// (what CAST/ToString produces) matches the id_column codec.
+		if (!IsAllowedIdType(probe->types[0])) {
+			throw BinderException("sylph_index_create: genome_id column '%s' must be %s (got %s)",
+			                      data->genome_id_col.c_str(), AllowedIdTypeList(), probe->types[0].ToString().c_str());
 		}
 		// Detect an optional `comment` column (present in read_fastx output). Its
 		// presence switches on full-header contig-name reconstruction below.
@@ -139,103 +158,165 @@ unique_ptr<GlobalTableFunctionState> SylphIndexCreateTableFunction::InitGlobal(C
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 
-	IndexBuilderGuard guard;
-	guard.builder = sylph_index_builder_create(&data.sketch_params);
-	if (guard.builder == nullptr) {
-		ThrowFFI("index builder create failed");
-	}
-
-	Connection conn(*context.db);
+	auto &db = *context.db;
 	auto src = KeywordHelper::WriteOptionallyQuoted(data.source_table);
 	auto gcol = KeywordHelper::WriteOptionallyQuoted(data.genome_id_col);
 	auto ocol = KeywordHelper::WriteOptionallyQuoted(data.order_by_col);
 
-	// Distinct genome keys (as VARCHAR), stably ordered so the resulting
-	// genome_index ordering in the .syldb is reproducible.
-	auto keys_res = conn.Query("SELECT DISTINCT CAST(" + gcol + " AS VARCHAR) AS gk FROM " + src + " WHERE " + gcol +
-	                           " IS NOT NULL ORDER BY gk");
-	if (keys_res->HasError()) {
-		throw InvalidInputException("sylph_index_create: failed to enumerate genomes: %s", keys_res->GetError());
-	}
-	std::vector<std::string> genome_keys;
-	for (idx_t r = 0; r < keys_res->RowCount(); r++) {
-		auto v = keys_res->GetValue(0, r);
-		if (v.IsNull()) {
-			continue;
+	// Contig name = the full FASTA header. sylph (via needletail) stores the whole
+	// header line as first_contig_name; read_fastx splits it into read_id (first
+	// token) + comment (remainder). When a comment column is present we rejoin
+	// them so a miint-built .syldb's contig names match `sylph sketch`.
+	const std::string contig_expr = data.has_comment
+	                                    ? "CAST(read_id AS VARCHAR) || CASE WHEN comment IS NOT NULL AND comment <> '' "
+	                                      "THEN ' ' || CAST(comment AS VARCHAR) ELSE '' END"
+	                                    : "CAST(read_id AS VARCHAR)";
+
+	// Enumerate the distinct genome ids up front (one lightweight scan of just the
+	// id column). Each becomes an independent unit of work below.
+	std::vector<Value> ids;
+	{
+		Connection conn(db);
+		auto res = conn.Query("SELECT DISTINCT " + gcol + " AS gk FROM " + src + " WHERE " + gcol +
+		                      " IS NOT NULL ORDER BY gk");
+		if (res->HasError()) {
+			throw InvalidInputException("sylph_index_create: failed to enumerate genomes: %s", res->GetError());
 		}
-		genome_keys.push_back(v.ToString());
+		for (idx_t r = 0; r < res->RowCount(); r++) {
+			auto v = res->GetValue(0, r);
+			if (!v.IsNull()) {
+				ids.push_back(std::move(v));
+			}
+		}
 	}
-	if (genome_keys.empty()) {
+	if (ids.empty()) {
 		throw InvalidInputException("sylph_index_create: no non-NULL genome_id values found in '%s'",
 		                            data.source_table.c_str());
 	}
 
-	// One genome at a time: begin → stream its contigs in order → end.
-	for (const auto &key : genome_keys) {
-		if (sylph_index_builder_begin_genome(guard.builder, key.c_str()) != 0) {
-			ThrowFFI("begin_genome failed");
-		}
+	// One builder per worker thread (mirrors `sylph sketch -t <cores>`; `threads`
+	// overrides). Merged into the first before the single write. Freed on any throw.
+	const idx_t db_threads = static_cast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+	idx_t nthreads = data.user_threads != 0 ? static_cast<idx_t>(data.user_threads) : db_threads;
+	nthreads = std::max<idx_t>(1, std::min<idx_t>(nthreads, ids.size()));
 
-		// Contig name = the full FASTA header. sylph (via needletail) stores the
-		// whole header line as first_contig_name; read_fastx splits it into
-		// read_id (first token) + comment (remainder). When a comment column is
-		// present we rejoin them ("read_id comment") so a miint-built .syldb's
-		// contig names match `sylph sketch`; otherwise the contig name is read_id.
-		std::string contig_expr = data.has_comment
-		                              ? "CAST(read_id AS VARCHAR) || CASE WHEN comment IS NOT NULL AND comment <> '' "
-		                                "THEN ' ' || CAST(comment AS VARCHAR) ELSE '' END"
-		                              : "CAST(read_id AS VARCHAR)";
-
-		auto key_lit = Value(key).ToSQLString();
-		auto sql = "SELECT " + contig_expr + " AS contig, sequence1 AS seq FROM " + src + " WHERE CAST(" + gcol +
-		           " AS VARCHAR) = " + key_lit + " AND sequence1 IS NOT NULL ORDER BY " + ocol;
-		auto stream = conn.SendQuery(sql);
-		if (stream->HasError()) {
-			throw InvalidInputException("sylph_index_create: failed to read genome '%s': %s", key.c_str(),
-			                            stream->GetError());
-		}
-
-		while (true) {
-			auto chunk = stream->Fetch();
-			if (!chunk || chunk->size() == 0) {
-				break;
-			}
-			auto &contig_vec = chunk->data[0];
-			auto &seq_vec = chunk->data[1];
-			contig_vec.Flatten(chunk->size());
-			seq_vec.Flatten(chunk->size());
-			auto contig_data = FlatVector::GetData<string_t>(contig_vec);
-			auto &contig_valid = FlatVector::Validity(contig_vec);
-			auto seq_data = FlatVector::GetData<string_t>(seq_vec);
-			auto &seq_valid = FlatVector::Validity(seq_vec);
-
-			for (idx_t i = 0; i < chunk->size(); i++) {
-				if (!seq_valid.RowIsValid(i)) {
-					continue; // SQL already filters NULL seq; defensive.
-				}
-				// contig_name needs NUL-termination for the C FFI; seq is passed
-				// as (ptr, len) so its bytes need no terminator.
-				std::string contig = contig_valid.RowIsValid(i) ? contig_data[i].GetString() : std::string();
-				auto seq = seq_data[i];
-				int rc = sylph_index_builder_add_contig(guard.builder, contig.c_str(),
-				                                        reinterpret_cast<const unsigned char *>(seq.GetData()),
-				                                        seq.GetSize());
-				if (rc != 0) {
-					ThrowFFI("add_contig failed");
+	std::vector<::SylphIndexBuilder *> builders(nthreads, nullptr);
+	struct BuildersGuard {
+		std::vector<::SylphIndexBuilder *> *v;
+		~BuildersGuard() {
+			if (v) {
+				for (auto *b : *v) {
+					if (b) {
+						sylph_index_builder_free(b);
+					}
 				}
 			}
 		}
-
-		if (sylph_index_builder_end_genome(guard.builder) != 0) {
-			ThrowFFI("end_genome failed");
+	} builders_guard {&builders};
+	for (auto *&b : builders) {
+		b = sylph_index_builder_create(&data.sketch_params);
+		if (b == nullptr) {
+			ThrowFFI("index builder create failed");
 		}
 	}
 
-	if (sylph_index_builder_write(guard.builder, data.output_path.c_str()) != 0) {
+	std::atomic<size_t> next_genome {0};
+	std::atomic<bool> failed {false};
+	std::mutex err_mutex;
+	std::string err_msg;
+
+	// Each worker claims genome ids off the counter and sketches one at a time: a
+	// `WHERE genome_id = <id>` query reads just that genome. Within it, consecutive
+	// rows sharing the contig name are one contig (so a read_fastx whole-contig row
+	// and Qiita's 64 KB chunk rows both work); first_contig_name is the lowest-
+	// order_by contig.
+	auto worker = [&](idx_t tid) {
+		try {
+			::SylphIndexBuilder *b = builders[tid];
+			Connection conn(db);
+			size_t i;
+			while (!failed.load(std::memory_order_relaxed) &&
+			       (i = next_genome.fetch_add(1, std::memory_order_relaxed)) < ids.size()) {
+				const std::string name = ids[i].ToString();   // genome id / file_name
+				const std::string lit = ids[i].ToSQLString(); // typed literal → prune-friendly
+				auto res = conn.Query("SELECT CAST(" + ocol + " AS BIGINT) AS ord, " + contig_expr +
+				                      " AS nm, sequence1 AS seq FROM " + src + " WHERE " + gcol + " = " + lit +
+				                      " AND sequence1 IS NOT NULL ORDER BY nm, ord");
+				if (res->HasError()) {
+					throw InvalidInputException("sylph_index_create: failed to read genome %s: %s", name.c_str(),
+					                            res->GetError());
+				}
+
+				// Reassemble contigs (consecutive rows sharing nm) and sketch each.
+				std::string cur_name, cur_seq;
+				int64_t cur_order = 0;
+				bool have_contig = false;
+				auto flush = [&]() {
+					if (sylph_index_builder_add_contig(b, name.c_str(), cur_order, cur_name.c_str(),
+					                                   reinterpret_cast<const unsigned char *>(cur_seq.data()),
+					                                   cur_seq.size()) != 0) {
+						ThrowFFI("add_contig failed");
+					}
+				};
+				for (idx_t r = 0; r < res->RowCount(); r++) {
+					auto ordv = res->GetValue(0, r);
+					int64_t ord = ordv.IsNull() ? std::numeric_limits<int64_t>::max() : ordv.GetValue<int64_t>();
+					std::string nm = res->GetValue(1, r).ToString();
+					std::string seq = res->GetValue(2, r).ToString();
+					if (!have_contig || nm != cur_name) {
+						if (have_contig) {
+							flush();
+						}
+						cur_name = std::move(nm);
+						cur_seq = std::move(seq);
+						cur_order = ord;
+						have_contig = true;
+					} else {
+						cur_seq += seq;
+						if (ord < cur_order) {
+							cur_order = ord;
+						}
+					}
+				}
+				if (have_contig) {
+					flush();
+				}
+				if (sylph_index_builder_end_genome(b, name.c_str()) != 0) {
+					ThrowFFI("end_genome failed");
+				}
+			}
+		} catch (const std::exception &e) {
+			failed.store(true, std::memory_order_relaxed);
+			std::lock_guard<std::mutex> lk(err_mutex);
+			if (err_msg.empty()) {
+				err_msg = e.what();
+			}
+		}
+	};
+
+	std::vector<std::thread> pool;
+	pool.reserve(nthreads);
+	for (idx_t t = 0; t < nthreads; t++) {
+		pool.emplace_back(worker, t);
+	}
+	for (auto &th : pool) {
+		th.join();
+	}
+	if (failed.load()) {
+		throw IOException("sylph_index_create: %s", err_msg.c_str());
+	}
+
+	// Merge all per-thread builders into the first, then write once.
+	for (idx_t t = 1; t < nthreads; t++) {
+		if (sylph_index_builder_merge(builders[0], builders[t]) != 0) {
+			ThrowFFI("merge failed");
+		}
+	}
+	gstate->num_genomes = sylph_index_builder_num_genomes(builders[0]);
+	if (sylph_index_builder_write(builders[0], data.output_path.c_str()) != 0) {
 		ThrowFFI("failed to write database");
 	}
-	gstate->num_genomes = sylph_index_builder_num_genomes(guard.builder);
-	// guard frees the builder on return.
+	// builders_guard frees all builders on return.
 	return std::move(gstate);
 }
 
@@ -283,6 +364,7 @@ TableFunction SylphIndexCreateTableFunction::GetFunction() {
 	tf.named_parameters["c"] = LogicalType::INTEGER;
 	tf.named_parameters["min_spacing"] = LogicalType::INTEGER;
 	tf.named_parameters["pseudotax"] = LogicalType::BOOLEAN;
+	tf.named_parameters["threads"] = LogicalType::INTEGER;
 
 	return tf;
 }

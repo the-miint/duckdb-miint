@@ -107,6 +107,19 @@ SELECT k FROM sylph_index_create(
 ----
 21
 
+# BIGINT genome_id (Qiita uses BIGINT feature ids) builds the same 3 genomes.
+statement ok
+CREATE TABLE refs_bigint AS
+  SELECT *, (hash(filepath) >> 1)::BIGINT AS feature_id
+  FROM read_fastx('data/sylph/tiny_refs/*.fasta.gz', include_filepath := true);
+
+query I
+SELECT num_genomes FROM sylph_index_create(
+  'refs_bigint', '__TEST_DIR__/miint_bigint.syldb',
+  genome_id := 'feature_id', order_by := 'sequence_index');
+----
+3
+
 # --- error handling -------------------------------------------------------
 
 # genome_id is required.

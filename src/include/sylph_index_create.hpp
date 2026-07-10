@@ -24,28 +24,39 @@ namespace duckdb {
 // row.
 //
 // Input contract (validated at bind time via ValidateSequenceTableSchema):
-//   read_id   VARCHAR|BIGINT (required) — contig name; the first contig of each
-//                                         genome supplies its first_contig_name
-//   sequence1 VARCHAR        (required) — the contig sequence
+//   read_id   VARCHAR|BIGINT (required) — contig name (also the contig boundary:
+//                                         consecutive rows sharing genome_id +
+//                                         read_id are reassembled into one contig)
+//   sequence1 VARCHAR        (required) — the contig sequence (or a piece of it)
 //   <genome_id> (required named param)  — grouping column; one GenomeSketch per
 //                                         distinct value, all its contigs merged
 //
-// Contigs within a genome are fed in `order_by` order (default: read_id) so the
-// resulting sketch is reproducible; pass order_by := 'sequence_index' to match
-// original FASTA order. Given the same genomes + params, the resulting sketches
-// are content-identical to `sylph sketch` (verified in test/sql/sylph_index_create.test
-// and ext/sylph's builder tests) — but not byte-identical: sylph orders genomes
-// in the file by parallel-completion, so its output isn't byte-deterministic.
+// Each genome is read independently (WHERE genome_id = <id>), so no particular
+// row order is required for correctness; within one genome, consecutive rows
+// sharing read_id are reassembled into one contig (so it handles read_fastx's one
+// whole contig per row AND Qiita's sequence split into 64 KB rows), and
+// first_contig_name is the genome's lowest-`order_by` contig (default order_by:
+// sequence_index, i.e. FASTA order). Clustering the source by genome_id is not
+// required but lets DuckDB prune each per-genome read to its row group(s) (faster).
+// Results are content-identical to `sylph sketch` (verified in
+// test/sql/sylph_index_create.test and ext/sylph's builder tests) — but not
+// byte-identical: sylph orders genomes in the file by parallel-completion, so its
+// output isn't byte-deterministic.
 //
-// Like rype_index_create, the build is a synchronous side effect performed in
-// InitGlobal; Execute only emits the status row. Single-threaded.
+// The build is a synchronous side effect performed in InitGlobal: the distinct
+// genome ids are enumerated, then N worker threads claim genomes off a shared
+// counter and sketch one at a time (a per-genome query materializes only that
+// genome) into per-thread builders (`threads` controls the count, default = all
+// cores); the builders are merged and written once. Peak memory is ~one genome
+// per worker plus the finalized sketches (the output size), not the corpus.
+// Execute only emits the status row.
 class SylphIndexCreateTableFunction {
 public:
 	struct Data : public TableFunctionData {
 		std::string source_table;
 		std::string output_path;
-		std::string genome_id_col;            // grouping column (required)
-		std::string order_by_col = "read_id"; // within-genome contig order
+		std::string genome_id_col;                   // grouping column (required)
+		std::string order_by_col = "sequence_index"; // picks first_contig_name (integer)
 
 		// Source has a `comment` column (read_fastx does). If so, the contig name
 		// is rebuilt as the full header `read_id || ' ' || comment` to match
@@ -55,6 +66,10 @@ public:
 		// Seeded from sylph defaults in Bind(); named params override individual
 		// fields. 0 fields mean "use sylph's default" (k=31, c=200, spacing=30).
 		SylphGenomeSketchParams sketch_params;
+
+		// Genome-sketch parallelism. 0 = auto (= DuckDB scheduler thread count,
+		// matching `sylph sketch -t <cores>`); a `threads` named param overrides.
+		uint32_t user_threads = 0;
 
 		vector<std::string> names;
 		vector<LogicalType> types;
