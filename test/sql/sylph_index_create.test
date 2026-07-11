@@ -1,0 +1,145 @@
+# name: test/sql/sylph_index_create.test
+# description: test sylph_index_create table function (build a .syldb)
+# group: [sql]
+
+require miint
+
+require-env SYLPH_AVAILABLE
+
+# --- registration ---------------------------------------------------------
+
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'sylph_index_create';
+----
+1
+
+query T
+SELECT function_type FROM duckdb_functions() WHERE function_name = 'sylph_index_create';
+----
+table
+
+# --- build a .syldb from the 3 bundled E. coli references -----------------
+# One row per contig; filepath is the genome key (one GenomeSketch per file).
+statement ok
+CREATE TABLE refs AS
+  SELECT * FROM read_fastx('data/sylph/tiny_refs/*.fasta.gz', include_filepath := true);
+
+query I
+SELECT count(DISTINCT filepath) FROM refs;
+----
+3
+
+query TIII
+SELECT regexp_replace(output_path, '.*/', ''), k, c, num_genomes
+  FROM sylph_index_create(
+    'refs', '__TEST_DIR__/miint_tiny.syldb',
+    genome_id := 'filepath', order_by := 'sequence_index');
+----
+miint_tiny.syldb	31	200	3
+
+# --- profile against our DB: full parity with the sylph CLI golden --------
+# expected_profile.tsv is the sylph CLI's own sketch+profile output. Building
+# with miint and profiling with miint must reproduce it exactly.
+statement ok
+CREATE TABLE k12_reads AS
+  SELECT * FROM read_fastx(
+    'data/sylph/tiny_reads_R1.fq.gz',
+    sequence2 := 'data/sylph/tiny_reads_R2.fq.gz');
+
+query TT
+SELECT regexp_extract(genome_name, 'K12'),
+       round(taxonomic_abundance, 2)
+  FROM sylph_profile('k12_reads', '__TEST_DIR__/miint_tiny.syldb');
+----
+K12	100.00
+
+# Every reported metric matches the CLI golden at its precision.
+query TTTTI
+SELECT round(taxonomic_abundance, 2),
+       round(sequence_abundance, 2),
+       round(adjusted_ani * 100.0, 2),
+       round(naive_ani * 100.0, 2),
+       kmers_reassigned
+  FROM sylph_profile('k12_reads', '__TEST_DIR__/miint_tiny.syldb');
+----
+100.00	100.00	98.89	88.48	0
+
+# Eff_cov golden 0.032 (band avoids 3rd-decimal FP flakiness).
+query I
+SELECT count(*) FROM sylph_profile('k12_reads', '__TEST_DIR__/miint_tiny.syldb')
+  WHERE eff_cov BETWEEN 0.031 AND 0.033;
+----
+1
+
+# --- parity against the committed CLI-built oracle DB ---------------------
+# Profiling the same reads against our DB vs the oracle DB gives identical
+# numbers (single K12 row each; compared to 6 dp).
+query I
+SELECT count(*)
+  FROM sylph_profile('k12_reads', '__TEST_DIR__/miint_tiny.syldb') mine,
+       sylph_profile('k12_reads', 'data/sylph/tiny.syldb') oracle
+ WHERE round(mine.adjusted_ani, 6) = round(oracle.adjusted_ani, 6)
+   AND round(mine.taxonomic_abundance, 6) = round(oracle.taxonomic_abundance, 6);
+----
+1
+
+# contig_name matches exactly: a `comment` column triggers full-header
+# reconstruction, matching sylph's first_contig_name.
+query I
+SELECT count(*)
+  FROM sylph_profile('k12_reads', '__TEST_DIR__/miint_tiny.syldb') mine
+  JOIN sylph_profile('k12_reads', 'data/sylph/tiny.syldb') oracle
+    ON mine.contig_name = oracle.contig_name;
+----
+1
+
+# --- parameters -----------------------------------------------------------
+
+statement ok
+SELECT num_genomes FROM sylph_index_create(
+  'refs', '__TEST_DIR__/miint_query.syldb',
+  genome_id := 'filepath', pseudotax := false);
+
+query I
+SELECT k FROM sylph_index_create(
+  'refs', '__TEST_DIR__/miint_k21.syldb',
+  genome_id := 'filepath', k := 21);
+----
+21
+
+# BIGINT genome_id (Qiita uses BIGINT feature ids) builds the same 3 genomes.
+statement ok
+CREATE TABLE refs_bigint AS
+  SELECT *, (hash(filepath) >> 1)::BIGINT AS feature_id
+  FROM read_fastx('data/sylph/tiny_refs/*.fasta.gz', include_filepath := true);
+
+query I
+SELECT num_genomes FROM sylph_index_create(
+  'refs_bigint', '__TEST_DIR__/miint_bigint.syldb',
+  genome_id := 'feature_id', order_by := 'sequence_index');
+----
+3
+
+# --- error handling -------------------------------------------------------
+
+# genome_id is required.
+statement error
+SELECT * FROM sylph_index_create('refs', '__TEST_DIR__/err.syldb');
+----
+genome_id
+
+# Non-existent source table.
+statement error
+SELECT * FROM sylph_index_create('does_not_exist', '__TEST_DIR__/err.syldb', genome_id := 'filepath');
+----
+
+# Non-existent genome_id column.
+statement error
+SELECT * FROM sylph_index_create('refs', '__TEST_DIR__/err.syldb', genome_id := 'not_a_column');
+----
+
+# Unsupported k.
+statement error
+SELECT * FROM sylph_index_create('refs', '__TEST_DIR__/err.syldb', genome_id := 'filepath', k := 30);
+----
+k must be 21 or 31

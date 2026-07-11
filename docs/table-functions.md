@@ -44,6 +44,7 @@ Table functions allow querying bioinformatics files as SQL tables.
 - [`cluster_sequences_vsearch`](#cluster_sequences_vsearchinput_table-idthreshold-options) - Greedy sequence clustering
 - [`deblur`](#deblurinput_table-options) - Deblur amplicon sequence denoising
 - [`sylph_profile`](#sylph_profilesource_table-syldb_path-sample_idcol-options) - FracMinHash relative-abundance profiling (sylph)
+- [`sylph_index_create`](#sylph_index_createsource_table-output_path-genome_idcol-options) - Build a sylph `.syldb` reference database
 - [`alignment_slice`](#alignment_slicetable_name-start-stop-include_deletionsfalse) - Slice alignments to a genomic region
 - [`unifrac_pcoa`](#unifrac_pcoaobservations-tree-options) - UniFrac distance + Principal Coordinates Analysis
 - [`unifrac_permanova`](#unifrac_permanovaobservations-tree-metadata-options) - UniFrac distance + PERMANOVA pseudo-F + p-value
@@ -3239,7 +3240,7 @@ Embedded as a Rust static library (sylph 0.9.0-miint fork; MIT). Linux and macOS
 **Parameters:**
 
 - `source_table` (VARCHAR, positional): Name of a table or view with columns `read_id` (VARCHAR), `sequence1` (VARCHAR), and optionally `sequence2` (VARCHAR). When `sequence2` is present and non-empty per row, the read pair is processed paired-end; otherwise the call is single-end.
-- `syldb_path` (VARCHAR, positional): Path to a sylph `.syldb` reference database, built offline via the upstream `sylph sketch` CLI. The file is opened read-only and shared mmap-style across the call.
+- `syldb_path` (VARCHAR, positional): Path to a sylph `.syldb` reference database, built either via [`sylph_index_create`](#sylph_index_createsource_table-output_path-genome_idcol-options) or the upstream `sylph sketch` CLI. The file is opened read-only and shared mmap-style across the call.
 - `sample_id` (VARCHAR, optional): Name of a column on `source_table` to partition by. When set, the function fans out per-sample (parallelized via the per-sample helper used by `deblur` / `align_mafft` / `detect_chimera_uchime_denovo`) and prepends a `sample_id` column to the output. Without this option, the entire table is processed as a single sample.
 - `min_ani` (DOUBLE, default = sylph default): Minimum adjusted ANI (percent, 0..100) for a genome to be reported. Negative or unset = use sylph's built-in default.
 - `min_number_kmers` (UINTEGER, default = 50): Minimum number of matching k-mers required to report a genome.
@@ -3305,6 +3306,67 @@ FROM sylph_profile('reads', '/refs/gtdb-r220-c200-dbv1.syldb',
 - Error if `syldb_path` cannot be opened, is corrupt, or is not a sylph `.syldb` file.
 - Error if `sample_id` is set but the named column does not exist on `source_table` or collides with an output column name.
 - IO error surfaces the underlying sylph diagnostic string (e.g., truncated database, unsupported version).
+
+---
+
+## `sylph_index_create(source_table, output_path, genome_id='col', [options])`
+
+Builds a sylph `.syldb` reference database from a DuckDB table or view of reference sequences, then writes it to disk. The in-SQL counterpart to the upstream `sylph sketch` CLI: reference genomes come from a table (e.g. the output of [`read_fastx`](#read_fastxsequence1-options) over reference FASTAs) rather than file paths, so the reference set can be assembled with ordinary SQL (joins, filters, unions). The resulting file is consumable by [`sylph_profile`](#sylph_profilesource_table-syldb_path-sample_idcol-options) and by the upstream sylph CLI.
+
+Sketching is done from in-memory sequence bytes via the same sylph 0.9.0-miint Rust static library that backs `sylph_profile`; a genome built here is byte-identical to one from `sylph sketch` given the same contigs in the same order. Linux and macOS only; not registered on WASM or Windows builds.
+
+**Parameters:**
+
+- `source_table` (VARCHAR, positional): Name of a table or view with columns `read_id` (VARCHAR or BIGINT) and `sequence1` (VARCHAR). Each row is one contig; `sequence1` is the contig sequence and `read_id` is its name. If a `comment` column is also present (as in `read_fastx` output), the contig name is reconstructed as the full FASTA header `read_id || ' ' || comment` — matching how `sylph sketch` (via needletail) stores `first_contig_name`. Without a `comment` column, the contig name is `read_id` as-is.
+- `output_path` (VARCHAR, positional): Destination path for the `.syldb` file. Overwritten if it exists.
+- `genome_id` (VARCHAR, **required**): Name of the grouping column. One `GenomeSketch` is produced per distinct value; all contigs sharing a value are merged into that genome (matching `sylph sketch`'s default whole-file behavior). A natural choice is the `filepath` column from `read_fastx(..., include_filepath := true)` — one genome per reference FASTA.
+- `order_by` (VARCHAR, default `read_id`): Column used to order a genome's contigs before sketching. Pass `sequence_index` to reproduce original FASTA order (and thus byte-parity with `sylph sketch`).
+- `k` (INTEGER, default 31): k-mer size. Only 21 and 31 are supported. Must match the `k` used at profile time.
+- `c` (INTEGER, default 200): FracMinHash subsampling rate. Must be ≥ the `c` of any sample sketch profiled against the database.
+- `min_spacing` (INTEGER, default 30): Minimum k-mer spacing; thins densely-seeded regions.
+- `pseudotax` (BOOLEAN, default true): Track min-spacing-dropped k-mers so the database supports pseudotax/profiling mode. Set false for query-only databases.
+
+**Output schema:** a single status row.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `output_path` | VARCHAR | The path the database was written to |
+| `k` | INTEGER | k-mer size used |
+| `c` | INTEGER | FracMinHash subsampling rate used |
+| `num_genomes` | UBIGINT | Number of genomes written to the database |
+| `status` | VARCHAR | `'ok'` on success |
+
+**Behavior:**
+
+- **Grouping:** genomes are enumerated as the distinct non-NULL `genome_id` values (compared as VARCHAR), ordered so the `.syldb`'s genome ordering is reproducible. Within each genome, contigs are fed in `order_by` order.
+- **Memory:** one genome's contigs are streamed and sketched at a time; only the finalized (compact) genome sketches accumulate before the single write at the end.
+- **Single-threaded:** the build runs as a synchronous side effect; the status row is emitted once it completes.
+
+**Examples:**
+
+```sql
+-- Build a .syldb from a directory of reference FASTAs, one genome per file.
+CREATE TABLE refs AS
+  SELECT * FROM read_fastx('refs/*.fasta.gz', include_filepath := true);
+
+SELECT num_genomes
+FROM sylph_index_create('refs', 'my_refs-c200.syldb',
+                        genome_id := 'filepath',
+                        order_by  := 'sequence_index');
+
+-- Then profile reads against the freshly built database.
+SELECT genome_name, taxonomic_abundance
+FROM sylph_profile('reads', 'my_refs-c200.syldb')
+ORDER BY taxonomic_abundance DESC;
+```
+
+**Error handling:**
+
+- Error if `source_table` does not exist or is missing required columns (`read_id`, `sequence1`).
+- Error if the `genome_id` parameter is not supplied, or if the `genome_id` / `order_by` column does not exist.
+- Error if `k` is not 21 or 31.
+- Error if no non-NULL `genome_id` values are found.
+- IO error surfaces the underlying sylph diagnostic string (e.g., failure to write the output path).
 
 ---
 
