@@ -363,10 +363,13 @@ elseif(APPLE AND OSX_BUILD_ARCH)
     endif()
 endif()
 
+# -O2: passing CFLAGS to htslib's configure overrides its Makefile default
+# (-g -Wall -O2), so an explicit -O is required or htslib builds at -O0. -O2
+# matches htslib/samtools upstream's shipping optimization level.
 if(EMSCRIPTEN)
-    set(HTSLIB_CFLAGS "CFLAGS=-fPIC ${HTSLIB_ARCH_CFLAGS} ${EMSCRIPTEN_THREAD_CFLAGS} -I${ZLIB_INCLUDE_DIRS}")
+    set(HTSLIB_CFLAGS "CFLAGS=-O2 -fPIC ${HTSLIB_ARCH_CFLAGS} ${EMSCRIPTEN_THREAD_CFLAGS} -I${ZLIB_INCLUDE_DIRS}")
 else()
-    set(HTSLIB_CFLAGS "CFLAGS=-fPIC ${HTSLIB_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}")
+    set(HTSLIB_CFLAGS "CFLAGS=-O2 -fPIC ${HTSLIB_ARCH_CFLAGS} -I${ZLIB_INCLUDE_DIRS}")
 endif()
 if(ZLIB_LIBRARY_DIR)
     set(HTSLIB_LDFLAGS "LDFLAGS=${HTSLIB_ARCH_CFLAGS} -L${ZLIB_LIBRARY_DIR}")
@@ -642,7 +645,11 @@ if(MIINT_ENABLE_VSEARCH)
         # fresh CI checkout has none of them, so we must regenerate here before
         # invoking configure.
         CONFIGURE_COMMAND ${CMAKE_COMMAND} -E chdir ${VSEARCH_SRC_DIR} sh ./autogen.sh
-            COMMAND ${CMAKE_COMMAND} -E env "CXXFLAGS=-fPIC ${VSEARCH_ARCH_CFLAGS}" "CFLAGS=-fPIC ${VSEARCH_ARCH_CFLAGS}"
+            # -O3: autoconf treats a user-supplied CXXFLAGS/CFLAGS as authoritative and
+            # drops its default -O2, and vsearch's Makefile.am does not hardcode an
+            # optimization level — so without an explicit -O here the whole library
+            # (including the SIMD Needleman-Wunsch aligner) builds at -O0, ~4x slower.
+            COMMAND ${CMAKE_COMMAND} -E env "CXXFLAGS=-O3 -fPIC ${VSEARCH_ARCH_CFLAGS}" "CFLAGS=-O3 -fPIC ${VSEARCH_ARCH_CFLAGS}"
             ${VSEARCH_SRC_DIR}/configure ${VSEARCH_HOST_FLAG}
         BUILD_COMMAND make -C src libvsearch.a
         INSTALL_COMMAND ""
