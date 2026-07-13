@@ -12,6 +12,7 @@ Functions for higher-level genomic analysis, sequence manipulation, and pairwise
 - [`compute_coverage_depth`](#compute_coverage_depthposition-stop_position-cigar-reference_length-mode) - Per-position depth aggregate
 - [`compute_msa_consensus`](#compute_msa_consensusaligned_seq-qual) - Q-aware MSA column consensus with HP post-correction
 - [`genome_coverage`](#genome_coveragealignments-subject_total_length-subject_genome_id) - Compute genome coverage from alignments
+- [Worked example: joint identity filtering of concordant read pairs](#worked-example-joint-identity-filtering-of-concordant-read-pairs) - Filter paired-end alignments without orphaning mates
 - [Pairwise Alignment Functions](#pairwise-alignment-functions) - WFA2-based pairwise alignment
 - [`formula`](#formulaformula_string) - Chemical formula to monoisotopic mass
 - [`massql`](#massqlquery-source) - MassQL query language for mass spectrometry
@@ -553,6 +554,60 @@ SELECT * FROM genome_coverage(alignments, genome_lengths, contig_to_genome);
 SELECT * FROM genome_coverage(alignments, genome_lengths, contig_to_genome)
 WHERE proportion_covered > 0.5;
 ```
+
+## Worked example: joint identity filtering of concordant read pairs
+
+A per-row identity filter breaks paired-end data: `WHERE cigar_sequence_identity(cigar) >= 0.99` is evaluated one alignment at a time, so it can keep one mate and drop the other, leaving orphaned half-pairs. This recipe applies an identity threshold to the **pair as a unit** — both mates of a concordant alignment are kept or dropped together — using a windowed `QUALIFY` instead of a `WHERE`.
+
+**Applies to** any concordant paired-end alignment source with extended (`=`/`X`) CIGAR: `read_alignments()` on a paired BAM, `align_bowtie2`, or `align_bowtie2_sharded`. The aligner must emit `=`/`X` ops (`--xeq` / `xeq := true`) so `cigar_sequence_identity` can work from the CIGAR alone; a legacy `M`-only CIGAR yields NULL. Run with `no_discordant`/`no_mixed` (or otherwise restrict to concordant pairs) so every emitted record is part of a mapped pair.
+
+**The pair key.** Group the two mate rows of one concordant placement with:
+
+```sql
+PARTITION BY read_id, reference,
+             LEAST(position, mate_position),
+             GREATEST(position, mate_position)
+```
+
+- `read_id` is shared by both mates (QNAME); `reference` is the shared contig of a concordant pair.
+- The two mate rows carry `position`/`mate_position` **swapped** (mate 1: `pos=P1, mate_pos=P2`; mate 2: `pos=P2, mate_pos=P1`). `LEAST`/`GREATEST` normalizes both to the same unordered coordinate pair `{P1, P2}` so they land in the same partition.
+- With `report_all`, a read pair can align concordantly at several places. bowtie2 emits each placement as its own self-consistent 2-record pair (duplicating the shared mate, secondary bit set on extras), so each placement gets a distinct `{P1, P2}` and is judged independently.
+
+**Choosing the pair-level metric.** Each partition holds exactly the two mates, so the aggregate reduces to a two-value combine:
+
+| Intent | Aggregate in `QUALIFY` |
+|---|---|
+| Both mates must pass (strict) | `MIN(cigar_sequence_identity(cigar)) OVER pair >= t` |
+| At least one mate passes | `MAX(cigar_sequence_identity(cigar)) OVER pair >= t` |
+| Mean of the two mate identities (equal weight per mate) | `AVG(cigar_sequence_identity(cigar)) OVER pair >= t` |
+| Fragment-pooled identity (weighted by aligned length) | `cigar_sequence_identity(string_agg(cigar, '') OVER pair) >= t` |
+
+The pooled form concatenates the two CIGARs and scores them as one alignment; because `cigar_sequence_identity` is additive over CIGAR ops (`#= / (M+I+D)`), this is exactly `(matches₁+matches₂)/(cols₁+cols₂)`. It differs from `AVG` only when the two mates align over different numbers of columns (the longer mate gets more weight) — the correct behavior when read/aligned lengths are unequal.
+
+**Example** — keep only concordant pairs whose fragment-pooled identity is ≥ 0.99:
+
+```sql
+WITH aln AS (
+  SELECT * FROM align_bowtie2_sharded('reads',
+    shard_directory := 'shards', read_to_shard := 'read_to_shard',
+    report_all := true, xeq := true,
+    no_discordant := true, no_mixed := true /* , other bowtie2 params ... */)
+)
+SELECT *
+FROM aln
+QUALIFY cigar_sequence_identity(
+          string_agg(cigar, '') OVER (
+            PARTITION BY read_id, reference,
+                         LEAST(position, mate_position),
+                         GREATEST(position, mate_position))
+        ) >= 0.99;
+```
+
+**Gotchas:**
+- `string_agg(cigar, '')` — the empty separator is required. The default separator is a comma, which injects `,` into the concatenated CIGAR and raises `Invalid CIGAR string`.
+- Clause order: `QUALIFY` must come **after** any named `WINDOW` clause. To avoid the ordering entirely, inline the window with `OVER ( ... )` as above.
+- `string_agg` skips NULL CIGARs, so the pooled form silently degrades to a single-mate identity if one mate is unmapped — safe under `no_mixed`/`no_discordant` (both mates always mapped), but add a guard if you relax those.
+- This filter is a partitioned window aggregate (roughly one pass over the data); it scales linearly and comfortably handles tens of millions of alignment rows. The dominant cost at scale is the alignment step and any row multiplication from `report_all`, not this query.
 
 ## Pairwise Alignment Functions
 
