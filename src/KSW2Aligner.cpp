@@ -241,7 +241,9 @@ std::optional<KSW2CigarResult> KSW2Aligner::align_extz_cigar(const std::string &
 
 	std::optional<KSW2CigarResult> result;
 	if (ez.score != KSW_NEG_INF) {
-		result = KSW2CigarResult {ez.score, decode_ksw2_cigar(ez.cigar, ez.n_cigar)};
+		// eqx post-pass: KSW2 emits only 'M'; split into '='/'X' so identity is readable
+		// from the CIGAR alone (see eqx_split_cigar in cigar_reconstruction.hpp).
+		result = KSW2CigarResult {ez.score, eqx_split_cigar(decode_ksw2_cigar(ez.cigar, ez.n_cigar), query, subject)};
 	}
 	kfree(nullptr, ez.cigar);
 	return result;
@@ -327,7 +329,9 @@ std::optional<KSW2CigarResult> KSW2Aligner::align_extd_cigar(const std::string &
 
 	std::optional<KSW2CigarResult> result;
 	if (ez.score != KSW_NEG_INF) {
-		result = KSW2CigarResult {ez.score, decode_ksw2_cigar(ez.cigar, ez.n_cigar)};
+		// eqx post-pass: KSW2 emits only 'M'; split into '='/'X' so identity is readable
+		// from the CIGAR alone (see eqx_split_cigar in cigar_reconstruction.hpp).
+		result = KSW2CigarResult {ez.score, eqx_split_cigar(decode_ksw2_cigar(ez.cigar, ez.n_cigar), query, subject)};
 	}
 	kfree(nullptr, ez.cigar);
 	return result;
@@ -402,7 +406,9 @@ std::optional<KSW2CigarResult> KSW2Aligner::align_exts_cigar(const std::string &
 
 	std::optional<KSW2CigarResult> result;
 	if (ez.score != KSW_NEG_INF) {
-		result = KSW2CigarResult {ez.score, decode_ksw2_cigar(ez.cigar, ez.n_cigar)};
+		// eqx post-pass: split 'M' into '='/'X'. 'N' (intron skip) passes through unchanged
+		// (see eqx_split_cigar in cigar_reconstruction.hpp).
+		result = KSW2CigarResult {ez.score, eqx_split_cigar(decode_ksw2_cigar(ez.cigar, ez.n_cigar), query, subject)};
 	}
 	kfree(nullptr, ez.cigar);
 	return result;

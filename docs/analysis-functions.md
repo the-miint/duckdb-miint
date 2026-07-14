@@ -623,10 +623,12 @@ NULL inputs produce NULL output. Alignment failure (e.g., z-drop early terminati
 
 | Family | Backend | Score semantic | CIGAR ops | Pick when |
 |---|---|---|---|---|
-| `align_pairwise_wfa2_*` | WFA2-lib (Wavefront) | Penalty: `0` = identical, larger = more divergent | Extended (`=` / `X`) | Short to long DNA; want match/mismatch distinguished in CIGAR |
-| `align_pairwise_ksw2_*` | KSW2 `ksw_extz2_sse` (SIMD banded DP) | Native positive: identical = `qlen * match` | Standard (`M` lumps match and mismatch) | General DNA alignment; optional bandwidth / z-drop tuning |
-| `align_pairwise_ksw2_dual_affine_*` | KSW2 `ksw_extd2_sse` | Native positive | `M`, `I`, `D` | Long-read alignment; long indels amortize over a second affine pair |
-| `align_pairwise_ksw2_splice_*` | KSW2 `ksw_exts2_sse` | Native positive | `M`, `I`, `D`, `N` (intron skip) | Splice-aware (RNA-seq); intron-open penalty + non-canonical-boundary penalty |
+| `align_pairwise_wfa2_*` | WFA2-lib (Wavefront) | Penalty: `0` = identical, larger = more divergent | Extended (`=` / `X`) | Short to long DNA; exact gap-affine global alignment |
+| `align_pairwise_ksw2_*` | KSW2 `ksw_extz2_sse` (SIMD banded DP) | Native positive: identical = `qlen * match` | Extended (`=` / `X`, plus `I` / `D`) | General DNA alignment; optional bandwidth / z-drop tuning |
+| `align_pairwise_ksw2_dual_affine_*` | KSW2 `ksw_extd2_sse` | Native positive | `=`, `X`, `I`, `D` | Long-read alignment; long indels amortize over a second affine pair |
+| `align_pairwise_ksw2_splice_*` | KSW2 `ksw_exts2_sse` | Native positive | `=`, `X`, `I`, `D`, `N` (intron skip) | Splice-aware (RNA-seq); intron-open penalty + non-canonical-boundary penalty |
+
+All families emit **extended** CIGAR (`=` for match, `X` for mismatch). KSW2 natively produces only `M`; the `_cigar` and `_full` outputs run an eqx post-pass that splits each `M` into `=` / `X` by comparing the aligned bases (case-insensitive, so soft-masked lowercase bases are not counted as mismatches). This means sequence identity can be read directly off any family's CIGAR with `cigar_sequence_identity`.
 
 WFA2 scores and KSW2 scores are on different scales -- WFA2 is penalty-style (lower is better, identical = 0), KSW2 is additive (higher is better, positive contributions from matches). Do not compare scores across families.
 
@@ -685,7 +687,7 @@ SELECT align_pairwise_ksw2_score(query, subject, 2, 4, 6, 2, 100, 400);
 ```sql
 SELECT align_pairwise_ksw2_score('ACGT', 'ACGT');           -- 8  (4 * match=2)
 SELECT align_pairwise_ksw2_score('ACGT', 'ACAT');           -- 2  (3*2 - 4)
-SELECT (align_pairwise_ksw2_cigar('ACGT', 'ACAT')).cigar;   -- 4M (KSW2 lumps match/mismatch)
+SELECT (align_pairwise_ksw2_cigar('ACGT', 'ACAT')).cigar;   -- 2=1X1= (eqx post-pass splits M into =/X)
 ```
 
 ### `align_pairwise_ksw2_dual_affine_*` -- KSW2 extd (dual affine)

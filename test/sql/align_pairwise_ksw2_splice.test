@@ -93,17 +93,18 @@ s2	2
 # align_pairwise_ksw2_splice_cigar
 ###############################################################################
 
+# eqx post-pass splits M into =/X (N intron ops pass through unchanged)
 query IT
 SELECT (align_pairwise_ksw2_splice_cigar('ACGT', 'ACGT')).score,
        (align_pairwise_ksw2_splice_cigar('ACGT', 'ACGT')).cigar;
 ----
-8	4M
+8	4=
 
 query IT
 SELECT (align_pairwise_ksw2_splice_cigar('ACGT', 'ACAT')).score,
        (align_pairwise_ksw2_splice_cigar('ACGT', 'ACAT')).cigar;
 ----
-2	4M
+2	2=1X1=
 
 query I
 SELECT align_pairwise_ksw2_splice_cigar(NULL, 'ACGT') IS NULL;
@@ -120,7 +121,7 @@ SELECT (align_pairwise_ksw2_splice_full('ACGT', 'ACGT')).score,
        (align_pairwise_ksw2_splice_full('ACGT', 'ACGT')).query_aligned,
        (align_pairwise_ksw2_splice_full('ACGT', 'ACGT')).subject_aligned;
 ----
-8	4M	ACGT	ACGT
+8	4=	ACGT	ACGT
 
 query I
 SELECT align_pairwise_ksw2_splice_full(NULL, 'ACGT') IS NULL;
@@ -136,7 +137,8 @@ true
 # for canonical), the kernel prefers a single intron skip over a 104bp deletion:
 #   intron-open cost           = gap_open2 + noncan = 24 + 0 = 24
 #   pure-deletion cost (104bp) = gap_open + 104*gap_extend = 6 + 208 = 214
-# Expected CIGAR is "12M104N12M" and score = 24 matches * 2 - 24 = 24.
+# Both 12bp exons match exactly, so the eqx post-pass renders them as "12=" (the N intron
+# op passes through). Expected CIGAR is "12=104N12=" and score = 24 matches * 2 - 24 = 24.
 ###############################################################################
 
 query IT
@@ -148,7 +150,7 @@ SELECT (align_pairwise_ksw2_splice_cigar(q, s)).score,
        (align_pairwise_ksw2_splice_cigar(q, s)).cigar
 FROM t;
 ----
-24	12M104N12M
+24	12=104N12=
 
 # Reconstructed aligned-subject must contain dashes for every position skipped by
 # the N op (104 of them), preserving alignment length = subject length.
