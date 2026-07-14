@@ -117,17 +117,18 @@ s2	2
 # align_pairwise_ksw2_dual_affine_cigar
 ###############################################################################
 
+# eqx post-pass splits M into =/X
 query IT
 SELECT (align_pairwise_ksw2_dual_affine_cigar('ACGT', 'ACGT')).score,
        (align_pairwise_ksw2_dual_affine_cigar('ACGT', 'ACGT')).cigar;
 ----
-8	4M
+8	4=
 
 query IT
 SELECT (align_pairwise_ksw2_dual_affine_cigar('ACGT', 'ACAT')).score,
        (align_pairwise_ksw2_dual_affine_cigar('ACGT', 'ACAT')).cigar;
 ----
-2	4M
+2	2=1X1=
 
 query I
 SELECT align_pairwise_ksw2_dual_affine_cigar(NULL, 'ACGT') IS NULL;
@@ -144,7 +145,7 @@ SELECT (align_pairwise_ksw2_dual_affine_full('ACGT', 'ACGT')).score,
        (align_pairwise_ksw2_dual_affine_full('ACGT', 'ACGT')).query_aligned,
        (align_pairwise_ksw2_dual_affine_full('ACGT', 'ACGT')).subject_aligned;
 ----
-8	4M	ACGT	ACGT
+8	4=	ACGT	ACGT
 
 query I
 SELECT (align_pairwise_ksw2_dual_affine_full('ACGGT', 'ACGT')).subject_aligned LIKE '%-%';
