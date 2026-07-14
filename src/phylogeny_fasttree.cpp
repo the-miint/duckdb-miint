@@ -146,7 +146,7 @@ std::string BuildConfigJson(const named_parameter_map_t &named_params) {
 	for (const auto &kv : named_params) {
 		if (kKnownParams.find(kv.first) == kKnownParams.end()) {
 			throw InvalidInputException("phylogeny_fasttree: unknown named parameter '%s'. "
-			                            "See `docs/table-functions.md` for the supported list.",
+			                            "See `docs/phylogeny.md` for the supported list.",
 			                            kv.first);
 		}
 	}

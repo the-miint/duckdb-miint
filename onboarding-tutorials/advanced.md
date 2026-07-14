@@ -135,7 +135,7 @@ In the intermediate tutorial we saw that 16S V4 reads cover only a tiny
 fraction of the *E. coli* genome. But *where* exactly do they land, and do
 they match the known rRNA operons?
 
-[`read_ncbi_annotation`](../docs/table-functions.md#read_ncbi_annotationaccession-api_key-include_filepathfalse)
+[`read_ncbi_annotation`](../docs/insdc_ncbi.md#read-annotations)
 fetches gene annotations from NCBI. Let's set up the full pipeline and
 retrieve the 16S rRNA gene coordinates:
 
@@ -192,13 +192,13 @@ Seven 16S rRNA operons, as expected.
 ### Crossing alignments with gene coordinates
 
 Now, merge the alignment positions using
-[`compress_intervals`](../docs/analysis-functions.md#compress_intervalsstart-stop)
+[`compress_intervals`](../docs/alignment_analysis.md#merge-overlapping-intervals)
 and
 [`JOIN`](https://duckdb.org/docs/current/sql/query_syntax/from) them against
 the gene annotations to see which operons our reads hit:
 
 We filter to primary alignments with high
-[query coverage](../docs/scalar-functions.md#cigar_query_coveragecigar-typealigned)
+[query coverage](../docs/alignment_analysis.md#cigar-query-coverage)
 (&ge; 99% of the read aligned) to exclude partial soft-clipped matches that
 inflate counts &mdash; see the
 [intermediate tutorial](intermediate.md#step-5-the-query-coverage-lesson) for
@@ -437,7 +437,7 @@ Zero matches in either orientation. To confirm there is no broader homology, we
 can excise a 16S-length (1,541 bp) region around the DosP alignment &mdash;
 using the same V4 offset of 533 bp observed in the real operons &mdash; and
 align it against an annotated 16S gene using
-[WFA2](../docs/analysis-functions.md#pairwise-alignment-functions) (Marco-Sola
+[WFA2](../docs/alignment_pairwise.md) (Marco-Sola
 et al., 2023):
 
 ```sql
@@ -464,53 +464,50 @@ These tutorials focused on amplicon sequencing against a single genome, but
 miint supports a much broader range of bioinformatics workflows:
 
 - **File formats** &mdash;
-  [read](../docs/table-functions.md) FASTA, FASTQ, SAM, BAM, SFF, BIOM,
+  [read](../docs/reading.md) FASTA, FASTQ, SAM, BAM, SFF, BIOM,
   Newick, GFF, mzML, mzXML, and jplace files;
-  [write](../docs/copy-formats.md) FASTA, FASTQ, SAM, BAM, BIOM, and
+  [write](../docs/writing.md) FASTA, FASTQ, SAM, BAM, BIOM, and
   Newick.
 - **Alignment** &mdash; align with
-  [minimap2](../docs/table-functions.md#align_minimap2query_table-subject_tablenull-index_pathnull-options),
-  [Bowtie2](../docs/table-functions.md#align_bowtie2query_table-subject_table-options),
-  [MAFFT](../docs/table-functions.md#align_maffttable_name) (multiple sequence
+  [minimap2](../docs/alignment_reference.md#minimap2),
+  [Bowtie2](../docs/alignment_reference.md#bowtie2),
+  [MAFFT](../docs/alignment_multiple.md) (multiple sequence
   alignment), or compute
-  [pairwise alignment scores](../docs/analysis-functions.md#pairwise-alignment-functions)
+  [pairwise alignment scores](../docs/alignment_pairwise.md)
   with WFA2.
 - **Quality control** &mdash;
-  [detect chimeras](../docs/table-functions.md#detect_chimera_uchimequery_table-dbrefs_table-options)
+  [detect chimeras](../docs/chimera.md)
   with UCHIME,
-  [mask low-complexity regions](../docs/scalar-functions.md#mask_dustsequence-hardmaskfalse)
+  [mask low-complexity regions](../docs/utilities.md#low-complexity-masking)
   with DUST,
-  [merge overlapping paired-end reads](../docs/scalar-functions.md#merge_pairs_vsearchfwd_seq-fwd_qual-rev_seq-rev_qual-options).
+  [merge overlapping paired-end reads](../docs/utilities.md#merging-paired-end-reads).
 - **Sequence analysis** &mdash;
-  [reverse complement](../docs/analysis-functions.md#sequence_dna_reverse_complementsequence-and-sequence_rna_reverse_complementsequence),
-  [degenerate base matching](../docs/analysis-functions.md#sequence_dna_as_regexpsequence-and-sequence_rna_as_regexpsequence),
-  [sequence search](../docs/table-functions.md#search_sequences_vsearchquery_table-dbref_table-idthreshold-options)
+  [reverse complement](../docs/utilities.md#reverse-complement),
+  [degenerate base matching](../docs/utilities.md#iupac-sequence-to-regex),
+  [sequence search](../docs/search.md)
   and
-  [clustering](../docs/table-functions.md#cluster_sequences_vsearchinput_table-idthreshold-options).
+  [clustering](../docs/clustering.md).
 - **Community ecology** &mdash;
-  [OGU counting](../docs/analysis-functions.md#woltka_ogurelation-sequence_id_field-sample_id)
+  [OGU counting](../docs/profiling.md#woltka_ogu)
   per sample,
-  [genome coverage](../docs/analysis-functions.md#genome_coveragealignments-subject_total_length-subject_genome_id),
+  [genome coverage](../docs/alignment_analysis.md#genome-coverage),
   reading phylogenetic
-  [placement data](../docs/table-functions.md#read_jplacepath) and
-  [resolving placements onto trees](../docs/table-functions.md#tree_resolve_placementtree_table-placements_table).
+  [placement data](../docs/reading.md#jplace) and
+  [resolving placements onto trees](../docs/phylogeny.md#resolve-placements).
 - **Mass spectrometry** &mdash;
   [MassQL queries](../docs/massql.md),
-  read [mzML](../docs/table-functions.md#read_mzmlfilename-include_filepathfalse)
+  read [mzML](../docs/reading.md#mzml-and-mzxml)
   and
-  [mzXML](../docs/table-functions.md#read_mzxmlfilename-include_filepathfalse)
+  [mzXML](../docs/reading.md#mzml-and-mzxml)
   files, isotope pattern matching.
 - **NCBI integration** &mdash;
   fetch
-  [genomes](../docs/table-functions.md#read_ncbi_fastaaccession-api_key-include_filepathfalse),
-  [metadata](../docs/table-functions.md#read_ncbiaccession-api_key), and
-  [annotations](../docs/table-functions.md#read_ncbi_annotationaccession-api_key-include_filepathfalse)
+  [genomes](../docs/insdc_ncbi.md#read-sequences),
+  [metadata](../docs/insdc_ncbi.md#read-metadata), and
+  [annotations](../docs/insdc_ncbi.md#read-annotations)
   directly from NCBI by accession.
 
-See the full [table functions](../docs/table-functions.md),
-[scalar functions](../docs/scalar-functions.md),
-[analysis functions](../docs/analysis-functions.md), and
-[COPY formats](../docs/copy-formats.md) reference documentation.
+See the full [documentation index](../docs/table_of_contents.md) for all topics.
 
 ## Extending miint
 
@@ -534,7 +531,7 @@ For example, `cigar_query_coverage` is defined in
 
 1. Fork the [duckdb-miint](https://github.com/the-miint/duckdb-miint)
    repository.
-2. Read the [DuckDB extension template](../docs/README.md) documentation.
+2. Read the [DuckDB extension template](https://github.com/duckdb/extension-template) documentation.
 3. Look at existing scalar functions in `src/` for patterns to follow.
 4. Add tests in `test/sql/` and `test/cpp/` &mdash; see the
    [testing guide](../docs/testing.md).

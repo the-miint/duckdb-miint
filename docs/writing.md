@@ -1,16 +1,21 @@
-# COPY Formats
+# Writing files
 
-DuckDB miint provides custom COPY formats for writing bioinformatics file formats.
+MIINT provides custom COPY formats for writing bioinformatics file formats. The writers extend the native SQL methods for writing files through the `COPY ... TO '...' (FORMAT csv)` style. A quick example is below, where we read a FASTQ file and write it as FASTA:
+
+```sql
+COPY (SELECT * FROM read_fastx('some_file.fastq')) 
+TO 'some_other_file.fasta' (FORMAT FASTA);
+```
 
 ## Table of Contents
 
-- [FORMAT FASTQ](#copy-to-format-fastq) - Write FASTQ sequence files
-- [FORMAT FASTA](#copy-to-format-fasta) - Write FASTA sequence files
-- [FORMAT SAM / FORMAT BAM](#copy-to-format-sam-and-copy-to-format-bam) - Write SAM/BAM alignment files
-- [FORMAT BIOM](#copy-to-format-biom) - Write BIOM observation matrix files
-- [FORMAT NEWICK](#copy-to-format-newick) - Write Newick phylogenetic trees
+- [FASTQ](#fastq) - Write FASTQ sequence files
+- [FASTA](#fasta) - Write FASTA sequence files
+- [SAM / BAM](#sam-and-bam) - Write SAM/BAM alignment files
+- [BIOM](#biom) - Write BIOM observation matrix files
+- [NEWICK](#newick) - Write Newick phylogenetic trees
 
-## `COPY ... TO '...' (FORMAT FASTQ)`
+### FASTQ 
 
 Write query results to FASTQ format files. Requires `read_id`, `sequence1`, and `qual1` columns from `read_fastx` output.
 
@@ -74,7 +79,7 @@ COPY (SELECT * FROM read_fastx('input.fastq'))
 TO 'output.fastq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true);
 ```
 
-## `COPY ... TO '...' (FORMAT FASTA)`
+### FASTA
 
 Write query results to FASTA format files. Requires `read_id` and `sequence1` columns from `read_fastx` output.
 
@@ -116,7 +121,7 @@ COPY (SELECT * FROM read_fastx('input.fasta'))
 TO 'output.fasta.gz' (FORMAT FASTA, INCLUDE_COMMENT true);
 ```
 
-## `COPY ... TO '...' (FORMAT SAM)` and `COPY ... TO '...' (FORMAT BAM)`
+###  SAM and BAM
 
 Write query results to SAM or BAM format files. Requires all mandatory SAM columns from `read_alignments` output.
 
@@ -211,7 +216,7 @@ COPY (SELECT * FROM read_alignments('input.bam'))
 TO 'with_seq.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table', SEQUENCE_DATA 'sequences');
 ```
 
-### Sequence Data
+#### Sequence Data
 
 The `SEQUENCE_DATA` parameter allows writing actual SEQ and QUAL fields into SAM/BAM output by looking up original read sequences from a table or view. Without this parameter, SEQ and QUAL are written as `*`.
 
@@ -254,7 +259,7 @@ TO 'output.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table', SEQUENCE_DATA 'seque
 - All optional tags present in the input are preserved in the output
 - BAM files always require headers (binary format specification)
 
-## `COPY ... TO '...' (FORMAT BIOM)`
+### BIOM
 
 Write query results to BIOM (Biological Observation Matrix) format files. BIOM is an HDF5-based format commonly used for representing OGU/OTU/ASV tables in microbiome analyses.
 
@@ -382,7 +387,7 @@ TO 'sparse.biom' (FORMAT BIOM);
 - Feature and sample metadata columns are not currently supported (data only)
 - The output follows BIOM format specification v2.1
 
-## `COPY ... TO '...' (FORMAT NEWICK)`
+## Newick
 
 Write query results to Newick phylogenetic tree format. Reconstructs a tree from tabular node data and serializes to standard Newick format.
 

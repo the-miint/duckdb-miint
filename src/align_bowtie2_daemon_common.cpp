@@ -178,7 +178,7 @@ void AppendBowtie2AlignParams(ConfigJsonBuilder &cfg, const named_parameter_map_
 	// 3. quiet (miint default true) inverts to daemon verbose=false. Note that
 	//    quiet=false has no user-visible effect: the daemon's verbose stderr is
 	//    drained and discarded by Session::PumpStderr (never surfaced to SQL).
-	//    It only adds overhead — see the `quiet` param docs in table-functions.md.
+	//    It only adds overhead — see the `quiet` param docs in alignment_reference.md.
 	bool quiet = true;
 	if (auto *v = get("quiet")) {
 		quiet = ValueAsBool(caller, "quiet", *v);

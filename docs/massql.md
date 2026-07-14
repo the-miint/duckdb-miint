@@ -302,7 +302,7 @@ SELECT * FROM read_mzxml('sample.mzXML');
 SELECT * FROM read_mzml_chromatograms('sample.mzML');
 ```
 
-See [Table Functions](table-functions.md) for the full column schema.
+See [Reading files](reading.md#mzml-and-mzxml) for the full column schema.
 
 ### Useful SQL Macros for Mass Spec
 
@@ -321,3 +321,19 @@ SELECT * FROM mzml_scaninfo('my_table');   -- one row per spectrum
 SELECT * FROM mzml_scansum('my_table');    -- intensity sums
 SELECT * FROM mzml_scannum('my_table');    -- distinct scan indices
 ```
+
+#### `mzml_peak_pair(relation, formula_str)`
+
+Finds MS2 spectra that contain a **peak pair** — one peak at m/z = X and another at m/z = `2*X - formula(formula_str)`, within 0.1 Da — and returns all peaks from the matching spectra (composable with `mzml_scaninfo`). Useful for isotope/adduct-offset patterns keyed to an element or group.
+
+- `relation` (VARCHAR): a table/view name holding [`read_mzml`](reading.md#mzml-and-mzxml) output.
+- `formula_str` (VARCHAR): a chemical formula (e.g. `'Fe'`); its monoisotopic mass is computed via [`formula()`](#chemical-formula-functions).
+
+Output columns mirror the input relation's schema.
+
+```sql
+-- MS2 spectra with an iron-offset peak pair
+SELECT * FROM mzml_peak_pair('spectra', 'Fe');
+```
+
+> **Note:** `massql.md` documents the most commonly used mass-spec helper macros. The full set (`mzml_ms`, `mzml_filter_mz`/`_nl`, `mzml_x_*`, `mzml_isotope_pattern`, `massdefect`, `mz_massdefect_within`, `mzml_i_norm`, `mzml_or_cardinality`, `mzml_excluded_ms`, …) is registered and callable; a complete helper-macro reference is a tracked follow-up.

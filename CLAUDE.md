@@ -158,5 +158,5 @@ Developer-facing deep dives live under `docs/internals/`:
 - **[`docs/internals/reading-tables-views.md`](docs/internals/reading-tables-views.md)** — the separate-connection recipe for reading user-specified tables/views from extension code (avoids the `context.Query()` deadlock). Covers both data reads and schema validation.
 - **[`docs/internals/arrow-zero-copy.md`](docs/internals/arrow-zero-copy.md)** — zero-copy Arrow C Data Interface → DuckDB Vector conversion, with lifetime management and reference implementations.
 
-User-facing API reference (parameters, return types, examples): `docs/table-functions.md`, `docs/scalar-functions.md`, `docs/copy-formats.md`, `docs/analysis-functions.md`, `docs/ena.md`.
+User-facing API reference (parameters, return types, examples) is organized by task under `docs/` — start from the index at [`docs/table_of_contents.md`](docs/table_of_contents.md) (e.g. `docs/reading.md`, `docs/writing.md`, `docs/alignment_*.md`, `docs/qc.md`, `docs/diversity.md`, `docs/insdc_ena.md`, `docs/utilities.md`).
 
