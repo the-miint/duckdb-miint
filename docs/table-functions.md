@@ -180,7 +180,7 @@ Slice alignment data from a table or view to a genomic region. Each alignment is
 
 **Required input columns:** `cigar` (VARCHAR), `position` (BIGINT), `stop_position` (BIGINT)
 
-**Output schema:** Same columns as found in the input table (from the recognized alignment column set), with adjusted values for overlapping reads.
+**Output schema:** Same columns as found in the input table (from the recognized alignment column set), with adjusted values for overlapping reads. The identifier columns `read_id`, `reference`, and `mate_reference` keep their input storage type — `VARCHAR`, `BIGINT`, or `UUID` — rather than being coerced to `VARCHAR`, so a `BIGINT`/`UUID` id round-trips through slicing unchanged (consistent with `align_minimap2`).
 
 **Behavior:**
 - Reads that don't overlap the region are excluded
@@ -189,6 +189,7 @@ Slice alignment data from a table or view to a genomic region. Each alignment is
 - Tags (`tag_as` through `tag_sa`) are set to NULL when trimming occurs
 - `template_length` is set to NULL when trimming occurs
 - `mapq` and mate fields are preserved
+- `read_id`, `reference`, and `mate_reference` must each be `VARCHAR`, `BIGINT`, or `UUID` if present; another type is rejected at bind time
 - If the input table has a `reference` column, all rows must have the same reference (single-region slicing)
 - Rows with NULL `cigar`, `position`, or `stop_position` are skipped
 
