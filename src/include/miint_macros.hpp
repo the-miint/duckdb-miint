@@ -17,14 +17,21 @@ const std::string MIINT_WARNINGS = // NOLINT
     "WHERE type = 'MiintWarning' "
     "ORDER BY timestamp;";
 
+// GFF3 (col 9) reserves ; = & , and requires them percent-encoded inside keys and
+// values, so decode every key/value with url_decode. The value is everything after
+// the FIRST '=' (rejoined), not string_split(x,'=')[2] — a raw '=' in a value (e.g.
+// an insert name "gc=0.46") must not be truncated, which would silently collapse
+// distinct features onto one id. A token with no '=' keeps a NULL value.
 const std::string PARSE_GFF_ATTRIBUTES = // NOLINT
     "CREATE OR REPLACE MACRO parse_gff_attributes(kvp_string) AS ( "
     "  map_from_entries( "
     "    list_transform( "
     "      string_split(kvp_string, ';'), "
     "      lambda x: struct_pack( "
-    "        key := string_split(x, '=')[1], "
-    "        value := string_split(x, '=')[2] "
+    "        key := url_decode(string_split(x, '=')[1]), "
+    "        value := CASE WHEN contains(x, '=') "
+    "                      THEN url_decode(array_to_string(string_split(x, '=')[2:], '=')) "
+    "                      ELSE NULL END "
     "      ) "
     "    ) "
     "  ) "
