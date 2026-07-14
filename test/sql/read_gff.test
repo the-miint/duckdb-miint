@@ -190,6 +190,51 @@ SELECT COUNT(*) FROM gff_data WHERE seqid LIKE '##%';
 statement ok
 DROP TABLE gff_data;
 
+# GFF3 spec requires %XX percent-decoding of attribute keys and values (reserved
+# chars ;=&, must be encoded). read_gff must decode them, and must not truncate a
+# value at a second '=' — a raw '=' inside a value (e.g. an insert name "gc=0.46")
+# would otherwise collapse distinct features onto one ID.
+
+# Raw '=' inside a value must survive intact (regression: values truncated at 2nd '=')
+query T
+SELECT attributes['ID'] FROM read_gff('data/gff/encoded.gff') WHERE type = 'insert' ORDER BY position;
+----
+SynDNA_gc=0.46
+SynDNA_gc=0.50
+
+# The two inserts must remain distinct IDs, not collapse to one
+query I
+SELECT COUNT(DISTINCT attributes['ID']) FROM read_gff('data/gff/encoded.gff') WHERE type = 'insert';
+----
+2
+
+# Percent-encoded reserved characters in values must be decoded
+# ID=gene%3D1 -> gene=1 ; taxon%3A9606 -> taxon:9606 ; a%2Cb%3Bc%26d -> a,b;c&d
+query TTT
+SELECT attributes['ID'], attributes['Dbxref'], attributes['desc']
+FROM read_gff('data/gff/encoded.gff') WHERE position = 500;
+----
+gene=1	taxon:9606	a,b;c&d
+
+# %20 must decode to a space
+query T
+SELECT attributes['Note'] FROM read_gff('data/gff/encoded.gff') WHERE type = 'insert' ORDER BY position;
+----
+first insert
+second insert
+
+# Percent-encoded characters in KEYS must be decoded too (weird%20key -> "weird key")
+query T
+SELECT attributes['weird key'] FROM read_gff('data/gff/encoded.gff') WHERE position = 700;
+----
+val
+
+# Multi-byte UTF-8 percent-encoding must decode correctly (caf%C3%A9 -> café)
+query T
+SELECT attributes['Name'] FROM read_gff('data/gff/encoded.gff') WHERE position = 900;
+----
+café
+
 # Test error: nonexistent file
 statement error
 SELECT * FROM read_gff('data/gff/nonexistent.gff');
