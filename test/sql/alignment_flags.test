@@ -127,6 +127,57 @@ SELECT
 ----
 true	false	false	false
 
+# alignment_is_primary matches the SAM spec's "primary line" (FLAG & 0x900 == 0),
+# which is deliberately independent of the unmapped bit (0x4): an unmapped read's
+# single line IS its primary line. So alignment_is_primary is TRUE for an unmapped
+# read. Callers who mean "mapped primary" must exclude unmapped explicitly (or use
+# alignment_is_mapped_primary). Pinning this so the spec semantics can't silently drift.
+query I
+SELECT alignment_is_primary(4::USMALLINT);
+----
+true
+
+# alignment_is_mapped_primary: primary line AND mapped (FLAG & 0x904 == 0)
+query I
+SELECT alignment_is_mapped_primary(0::USMALLINT);
+----
+true
+
+# unmapped: primary line but not mapped -> false (this is the whole point of the companion)
+query I
+SELECT alignment_is_mapped_primary(4::USMALLINT);
+----
+false
+
+# secondary (0x100): not primary -> false regardless of mapped state
+query I
+SELECT alignment_is_mapped_primary(256::USMALLINT);
+----
+false
+
+# supplementary (0x800): not primary -> false
+query I
+SELECT alignment_is_mapped_primary(2048::USMALLINT);
+----
+false
+
+# unmapped secondary (0x104): false
+query I
+SELECT alignment_is_mapped_primary(260::USMALLINT);
+----
+false
+
+# alignment_is_mapped_primary(flags) is equivalent to
+# alignment_is_primary(flags) AND NOT alignment_is_unmapped(flags)
+query IIII
+SELECT
+    alignment_is_mapped_primary(0::USMALLINT),      -- mapped primary: true
+    alignment_is_mapped_primary(4::USMALLINT),      -- unmapped primary: false
+    alignment_is_mapped_primary(256::USMALLINT),    -- secondary: false
+    alignment_is_mapped_primary(2048::USMALLINT);   -- supplementary: false
+----
+true	false	false	false
+
 query I
 SELECT alignment_is_qc_failed(512::USMALLINT);
 ----

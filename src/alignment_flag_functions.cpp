@@ -65,6 +65,15 @@ static void AlignmentIsPrimaryFunction(DataChunk &args, ExpressionState &state, 
 	});
 }
 
+// SAM spec "primary line" (FLAG & 0x900 == 0) is TRUE for unmapped reads. This companion
+// adds the mapped requirement (FLAG & 0x904 == 0) for callers who mean "mapped primary".
+static void AlignmentIsMappedPrimaryFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &flags_vector = args.data[0];
+	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(), [&](uint16_t flags) {
+		return (flags & 0x100) == 0 && (flags & 0x800) == 0 && (flags & 0x4) == 0;
+	});
+}
+
 static void AlignmentIsQcFailedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &flags_vector = args.data[0];
 	UnaryExecutor::Execute<uint16_t, bool>(flags_vector, result, args.size(),
@@ -143,6 +152,10 @@ void AlignmentFlagFunctions::Register(ExtensionLoader &loader) {
 	ScalarFunction alignment_is_primary("alignment_is_primary", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
 	                                    AlignmentIsPrimaryFunction);
 	loader.RegisterFunction(alignment_is_primary);
+
+	ScalarFunction alignment_is_mapped_primary("alignment_is_mapped_primary", {LogicalType::USMALLINT},
+	                                           LogicalType::BOOLEAN, AlignmentIsMappedPrimaryFunction);
+	loader.RegisterFunction(alignment_is_mapped_primary);
 
 	ScalarFunction is_secondary("is_secondary", {LogicalType::USMALLINT}, LogicalType::BOOLEAN,
 	                            AlignmentIsSecondaryFunction);
