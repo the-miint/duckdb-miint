@@ -29,13 +29,13 @@ Compute [Woltka](https://github.com/qiyunzhu/woltka) OGU (Operational Genomic Un
 
 **Required columns in relation:**
 - Column named by `sequence_id_field`: read/sequence identifier
-- `reference` (VARCHAR): reference sequence name (becomes `feature_id`)
+- `reference` (VARCHAR, BIGINT, or UUID): reference sequence name (becomes `feature_id`, preserving the storage type). A non-identifier type is rejected at bind time.
 - `flags` (USMALLINT): SAM alignment flags
 - When `sample_id` is supplied: the named column (any comparable type) — NULLs are rejected at bind time
 
 **Returns:**
-- When `sample_id` is omitted: `(feature_id VARCHAR, value DOUBLE)`
-- When `sample_id` is supplied: `(<sample_id_column> <its_type>, feature_id VARCHAR, value DOUBLE)` — the first column's name matches the value you passed to `sample_id`.
+- When `sample_id` is omitted: `(feature_id <reference_type>, value DOUBLE)` — `feature_id` preserves the `reference` column's storage type (VARCHAR/BIGINT/UUID), mirroring `align_minimap2`/`alignment_slice` id-type preservation.
+- When `sample_id` is supplied: `(<sample_id_column> <its_type>, feature_id <reference_type>, value DOUBLE)` — the first column's name matches the value you passed to `sample_id`, and both id columns preserve their input storage types.
 
 **Algorithm:**
 1. Orients reads using alignment flags (forward/reverse via `alignment_is_read1`).
