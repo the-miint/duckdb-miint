@@ -1,5 +1,6 @@
 #include "alignment_slice.hpp"
 #include "catalog_utils.hpp"
+#include "id_column_utils.hpp"
 #include "AlignmentSlicer.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -18,31 +19,31 @@ namespace duckdb {
 using ColRole = AlignmentSliceTableFunction::ColRole;
 
 const vector<AlignmentSliceTableFunction::ColumnInfo> &AlignmentSliceTableFunction::GetRecognizedColumns() {
-	// name, type, required, is_tag, invalidate_on_trim
+	// name, type, required, is_tag, invalidate_on_trim, is_id
 	static const vector<ColumnInfo> columns = {
-	    {"read_id", LogicalType::VARCHAR, false, false, false},
-	    {"flags", LogicalType::USMALLINT, false, false, false},
-	    {"reference", LogicalType::VARCHAR, false, false, false},
-	    {"position", LogicalType::BIGINT, true, false, false},
-	    {"stop_position", LogicalType::BIGINT, true, false, false},
-	    {"mapq", LogicalType::UTINYINT, false, false, false},
-	    {"cigar", LogicalType::VARCHAR, true, false, false},
-	    {"mate_reference", LogicalType::VARCHAR, false, false, false},
-	    {"mate_position", LogicalType::BIGINT, false, false, false},
-	    {"template_length", LogicalType::BIGINT, false, false, true},
-	    {"tag_as", LogicalType::BIGINT, false, true, false},
-	    {"tag_xs", LogicalType::BIGINT, false, true, false},
-	    {"tag_ys", LogicalType::BIGINT, false, true, false},
-	    {"tag_xn", LogicalType::BIGINT, false, true, false},
-	    {"tag_xm", LogicalType::BIGINT, false, true, false},
-	    {"tag_xo", LogicalType::BIGINT, false, true, false},
-	    {"tag_xg", LogicalType::BIGINT, false, true, false},
-	    {"tag_nm", LogicalType::BIGINT, false, true, false},
-	    {"tag_yt", LogicalType::VARCHAR, false, true, false},
-	    {"tag_md", LogicalType::VARCHAR, false, true, false},
-	    {"tag_sa", LogicalType::VARCHAR, false, true, false},
-	    {"sequence", LogicalType::VARCHAR, false, false, false},
-	    {"qual", LogicalType::LIST(LogicalType::UTINYINT), false, false, false},
+	    {"read_id", LogicalType::VARCHAR, false, false, false, true},
+	    {"flags", LogicalType::USMALLINT, false, false, false, false},
+	    {"reference", LogicalType::VARCHAR, false, false, false, true},
+	    {"position", LogicalType::BIGINT, true, false, false, false},
+	    {"stop_position", LogicalType::BIGINT, true, false, false, false},
+	    {"mapq", LogicalType::UTINYINT, false, false, false, false},
+	    {"cigar", LogicalType::VARCHAR, true, false, false, false},
+	    {"mate_reference", LogicalType::VARCHAR, false, false, false, true},
+	    {"mate_position", LogicalType::BIGINT, false, false, false, false},
+	    {"template_length", LogicalType::BIGINT, false, false, true, false},
+	    {"tag_as", LogicalType::BIGINT, false, true, false, false},
+	    {"tag_xs", LogicalType::BIGINT, false, true, false, false},
+	    {"tag_ys", LogicalType::BIGINT, false, true, false, false},
+	    {"tag_xn", LogicalType::BIGINT, false, true, false, false},
+	    {"tag_xm", LogicalType::BIGINT, false, true, false, false},
+	    {"tag_xo", LogicalType::BIGINT, false, true, false, false},
+	    {"tag_xg", LogicalType::BIGINT, false, true, false, false},
+	    {"tag_nm", LogicalType::BIGINT, false, true, false, false},
+	    {"tag_yt", LogicalType::VARCHAR, false, true, false, false},
+	    {"tag_md", LogicalType::VARCHAR, false, true, false, false},
+	    {"tag_sa", LogicalType::VARCHAR, false, true, false, false},
+	    {"sequence", LogicalType::VARCHAR, false, false, false, false},
+	    {"qual", LogicalType::LIST(LogicalType::UTINYINT), false, false, false, false},
 	};
 	return columns;
 }
@@ -124,7 +125,24 @@ unique_ptr<FunctionData> AlignmentSliceTableFunction::Bind(ClientContext &contex
 	for (const auto &col : recognized) {
 		if (input_col_present[col.name] >= 0) {
 			data->output_names.push_back(col.name);
-			data->output_types.push_back(col.type);
+
+			// Identifier columns (read_id, reference, mate_reference) preserve the
+			// input's storage type (VARCHAR/BIGINT/UUID) instead of coercing to
+			// VARCHAR, matching align_minimap2 (query id_type drives read_id;
+			// subject id_type drives reference + mate_reference). Without this a
+			// BIGINT/UUID id is silently stringified on the pass-through path.
+			// mate_reference is pass-through here (no "="/"*" resolution), so
+			// mirroring the column's own type is always correct.
+			LogicalType out_type = col.type;
+			if (col.is_id) {
+				const auto &actual_type = table_info.types[static_cast<idx_t>(input_col_present[col.name])];
+				if (!IsAllowedIdType(actual_type)) {
+					throw BinderException("alignment_slice: '%s' column must be %s, got %s", col.name,
+					                      AllowedIdTypeList(), actual_type.ToString());
+				}
+				out_type = actual_type;
+			}
+			data->output_types.push_back(out_type);
 			data->output_input_idx.push_back(select_col_idx.at(col.name));
 
 			ColRole role;

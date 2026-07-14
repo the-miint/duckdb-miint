@@ -30,7 +30,8 @@ Test individual SAM flag bits. Each function takes a `USMALLINT` (the flags colu
 - `alignment_is_read1(flags)` - Read is first in pair (0x40)
 - `alignment_is_read2(flags)` - Read is second in pair (0x80)
 - `alignment_is_secondary(flags)` - Secondary alignment (0x100)
-- `alignment_is_primary(flags)` - Primary alignment (neither secondary nor supplementary)
+- `alignment_is_primary(flags)` - Primary *line* — neither secondary (0x100) nor supplementary (0x800) set, i.e. `FLAG & 0x900 == 0`. ⚠️ **TRUE for an unmapped read** (see note below).
+- `alignment_is_mapped_primary(flags)` - Primary line **and** mapped — `FLAG & 0x904 == 0`; equivalent to `alignment_is_primary(flags) AND NOT alignment_is_unmapped(flags)`. Use this when you mean "a real, mapped primary alignment".
 - `alignment_is_qc_failed(flags)` - QC failure (0x200)
 - `alignment_is_duplicate(flags)` - PCR/optical duplicate (0x400)
 - `alignment_is_supplementary(flags)` - Supplementary alignment (0x800)
@@ -38,12 +39,13 @@ Test individual SAM flag bits. Each function takes a `USMALLINT` (the flags colu
 **HTSlib-compatible aliases:**
 `is_paired`, `is_proper_pair`, `is_unmapped`, `is_munmap`, `is_reverse`, `is_mreverse`, `is_read1`, `is_read2`, `is_secondary`, `is_qcfail`, `is_dup`, `is_supplementary`
 
+> **Note on `alignment_is_primary` and unmapped reads.** `alignment_is_primary` intentionally matches the SAM spec's definition of the *primary line*: the one line per read with neither the SECONDARY (0x100) nor SUPPLEMENTARY (0x800) bit set (`FLAG & 0x900 == 0`). The spec guarantees exactly one such line per read, and that line exists **whether or not the read is mapped** — so `alignment_is_primary(flags)` is `true` for an unmapped read (`flags = 0x4`). This is consistent with the SAM specification (see [SAMv1, §1.4 FLAG](https://samtools.github.io/hts-specs/SAMv1.pdf), the primary-line definition) and with HTSlib/samtools. If you actually want "a mapped primary alignment", use `alignment_is_mapped_primary(flags)` (or spell out `alignment_is_primary(flags) AND NOT alignment_is_unmapped(flags)`).
+
 **Example:**
 ```sql
 SELECT read_id, flags
 FROM read_alignments('alignments.sam')
-WHERE alignment_is_paired(flags)
-  AND NOT alignment_is_unmapped(flags);
+WHERE alignment_is_mapped_primary(flags);
 ```
 
 ## `alignment_seq_identity(cigar, nm, md, type)`

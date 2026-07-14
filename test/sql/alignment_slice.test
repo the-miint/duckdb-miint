@@ -389,3 +389,159 @@ query TIIT
 SELECT read_id, cigar, position, stop_position FROM alignment_slice('sam_data', 140, 145) ORDER BY read_id
 ----
 read_hclip	5H5M5H	140	145
+
+# =====================================================================
+# Phase 6: read_id type preservation
+#
+# read_id is an identifier column: its storage type (VARCHAR / BIGINT /
+# UUID) must survive slicing rather than being silently coerced to VARCHAR,
+# matching align_minimap2 and the other id-emitting functions. A user
+# reported a BIGINT read_id coming back as VARCHAR (the whole point of these
+# tests is to pin the type, not just the value).
+# =====================================================================
+
+# BIGINT read_id round-trips as BIGINT, not VARCHAR
+statement ok
+CREATE TABLE slice_bigint_id (cigar VARCHAR, position BIGINT, stop_position BIGINT, read_id BIGINT)
+
+statement ok
+INSERT INTO slice_bigint_id VALUES ('10M', 5, 15, 42)
+
+query T
+SELECT typeof(read_id) FROM alignment_slice('slice_bigint_id', 1, 20)
+----
+BIGINT
+
+query I
+SELECT read_id FROM alignment_slice('slice_bigint_id', 1, 20)
+----
+42
+
+# UUID read_id round-trips as UUID
+statement ok
+CREATE TABLE slice_uuid_id (cigar VARCHAR, position BIGINT, stop_position BIGINT, read_id UUID)
+
+statement ok
+INSERT INTO slice_uuid_id VALUES ('10M', 5, 15, '123e4567-e89b-12d3-a456-426614174000')
+
+query T
+SELECT typeof(read_id) FROM alignment_slice('slice_uuid_id', 1, 20)
+----
+UUID
+
+query T
+SELECT read_id FROM alignment_slice('slice_uuid_id', 1, 20)
+----
+123e4567-e89b-12d3-a456-426614174000
+
+# VARCHAR read_id remains VARCHAR (unchanged behavior)
+query T
+SELECT typeof(read_id) FROM alignment_slice('t1', 1, 20)
+----
+VARCHAR
+
+# Type is preserved even when the row is trimmed (read_id is pass-through;
+# trimming must not perturb its type)
+statement ok
+CREATE TABLE slice_bigint_trim (cigar VARCHAR, position BIGINT, stop_position BIGINT, read_id BIGINT, sequence VARCHAR)
+
+statement ok
+INSERT INTO slice_bigint_trim VALUES ('10M', 1, 11, 99, 'ABCDEFGHIJ')
+
+query TIT
+SELECT typeof(read_id), read_id, cigar FROM alignment_slice('slice_bigint_trim', 4, 8)
+----
+BIGINT	99	3H4M3H
+
+# A read_id column of a type outside the allowed id set is rejected at bind
+# (mirrors align_minimap2's VARCHAR/BIGINT/UUID contract) rather than being
+# silently stringified as before.
+statement ok
+CREATE TABLE slice_badid (cigar VARCHAR, position BIGINT, stop_position BIGINT, read_id INTEGER)
+
+statement error
+SELECT * FROM alignment_slice('slice_badid', 1, 20)
+----
+read_id
+
+# reference is the subject-side identifier column (align_minimap2 drives it and
+# mate_reference from subject id_type); its type must be preserved too, and the
+# single-reference check must still work on a non-VARCHAR reference.
+statement ok
+CREATE TABLE slice_bigint_ref (cigar VARCHAR, position BIGINT, stop_position BIGINT, reference BIGINT)
+
+statement ok
+INSERT INTO slice_bigint_ref VALUES ('5M', 1, 6, 7), ('5M', 10, 15, 7)
+
+query T
+SELECT DISTINCT typeof(reference) FROM alignment_slice('slice_bigint_ref', 1, 20)
+----
+BIGINT
+
+query I
+SELECT count(*) FROM alignment_slice('slice_bigint_ref', 1, 20)
+----
+2
+
+# single-reference check still fires for a BIGINT reference with two distinct values
+statement ok
+CREATE TABLE slice_bigint_multiref (cigar VARCHAR, position BIGINT, stop_position BIGINT, reference BIGINT)
+
+statement ok
+INSERT INTO slice_bigint_multiref VALUES ('5M', 1, 6, 7), ('5M', 10, 15, 9)
+
+statement error
+SELECT * FROM alignment_slice('slice_bigint_multiref', 1, 20)
+----
+multiple references found
+
+# mate_reference type is preserved as well
+statement ok
+CREATE TABLE slice_uuid_materef (cigar VARCHAR, position BIGINT, stop_position BIGINT, mate_reference UUID)
+
+statement ok
+INSERT INTO slice_uuid_materef VALUES ('10M', 5, 15, '123e4567-e89b-12d3-a456-426614174000')
+
+query T
+SELECT typeof(mate_reference) FROM alignment_slice('slice_uuid_materef', 1, 20)
+----
+UUID
+
+query T
+SELECT mate_reference FROM alignment_slice('slice_uuid_materef', 1, 20)
+----
+123e4567-e89b-12d3-a456-426614174000
+
+# a reference column of a disallowed type is rejected at bind
+statement ok
+CREATE TABLE slice_badref (cigar VARCHAR, position BIGINT, stop_position BIGINT, reference INTEGER)
+
+statement error
+SELECT * FROM alignment_slice('slice_badref', 1, 20)
+----
+reference
+
+# A NULL id value must round-trip as NULL (not 0 / empty) while keeping the
+# column's storage type. Pins the pass-through egress against a future switch to
+# an id codec whose BIGINT branch maps empty/"*" to NULL.
+statement ok
+CREATE TABLE slice_null_bigint_id (cigar VARCHAR, position BIGINT, stop_position BIGINT, read_id BIGINT)
+
+statement ok
+INSERT INTO slice_null_bigint_id VALUES ('10M', 5, 15, NULL)
+
+query TT
+SELECT typeof(read_id), read_id FROM alignment_slice('slice_null_bigint_id', 1, 20)
+----
+BIGINT	NULL
+
+statement ok
+CREATE TABLE slice_null_uuid_id (cigar VARCHAR, position BIGINT, stop_position BIGINT, read_id UUID)
+
+statement ok
+INSERT INTO slice_null_uuid_id VALUES ('10M', 5, 15, NULL)
+
+query TT
+SELECT typeof(read_id), read_id FROM alignment_slice('slice_null_uuid_id', 1, 20)
+----
+UUID	NULL
