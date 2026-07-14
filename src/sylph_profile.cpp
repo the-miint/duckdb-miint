@@ -103,7 +103,12 @@ unique_ptr<FunctionData> SylphProfileTableFunction::Bind(ClientContext &context,
 	data->source_table = input.inputs[0].GetValue<std::string>();
 	data->syldb_path = input.inputs[1].GetValue<std::string>();
 
-	data->schema = ValidateSequenceTableSchema(context, data->source_table);
+	// Accept BIGINT/UUID read_id (allow_bigint=true), consistent with the other
+	// tools and with sylph_index_create — so a Qiita BIGINT-keyed reads table
+	// works index->profile end to end. QuerySequenceStream threads schema.id_type
+	// and stringifies ids via the id-column codec; profiling itself is on the
+	// sequences, so the id type only affects how read_id is read, not the result.
+	data->schema = ValidateSequenceTableSchema(context, data->source_table, /*allow_bigint=*/true);
 
 	// Seed FFI parameter structs from sylph defaults — single source of truth.
 	if (sylph_profile_params_default(&data->profile_params) != 0) {

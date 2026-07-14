@@ -103,19 +103,19 @@ s2	2
 # align_pairwise_ksw2_cigar
 ###############################################################################
 
-# Identical -> 4M (KSW2 does not distinguish = from X)
+# Identical -> 4= (eqx post-pass splits M into =/X)
 query IT
 SELECT (align_pairwise_ksw2_cigar('ACGT', 'ACGT')).score,
        (align_pairwise_ksw2_cigar('ACGT', 'ACGT')).cigar;
 ----
-8	4M
+8	4=
 
-# Single mismatch -> still 4M, score 2
+# Single mismatch -> 2=1X1=, score 2 (eqx post-pass distinguishes the mismatch)
 query IT
 SELECT (align_pairwise_ksw2_cigar('ACGT', 'ACAT')).score,
        (align_pairwise_ksw2_cigar('ACGT', 'ACAT')).cigar;
 ----
-2	4M
+2	2=1X1=
 
 # NULL -> NULL
 query I
@@ -128,7 +128,26 @@ query IT
 SELECT (align_pairwise_ksw2_cigar('ACGT', 'ACAT', 1, 4, 6, 2)).score,
        (align_pairwise_ksw2_cigar('ACGT', 'ACAT', 1, 4, 6, 2)).cigar;
 ----
--1	4M
+-1	2=1X1=
+
+# eqx post-pass: sequence identity is now readable directly from the KSW2 CIGAR.
+# This is the point of the =/X split — a bare 'M' CIGAR returns NULL here.
+query I
+SELECT cigar_sequence_identity((align_pairwise_ksw2_cigar('ACGT', 'ACAT')).cigar);
+----
+0.75
+
+# Adjacent mismatches coalesce into a single X run
+query T
+SELECT (align_pairwise_ksw2_cigar('AAAA', 'TTAA')).cigar;
+----
+2X2=
+
+# Soft-masked (lowercase) bases are matches, not mismatches
+query T
+SELECT (align_pairwise_ksw2_cigar('acgt', 'ACGT')).cigar;
+----
+4=
 
 ###############################################################################
 # align_pairwise_ksw2_full
@@ -141,7 +160,7 @@ SELECT (align_pairwise_ksw2_full('ACGT', 'ACGT')).score,
        (align_pairwise_ksw2_full('ACGT', 'ACGT')).query_aligned,
        (align_pairwise_ksw2_full('ACGT', 'ACGT')).subject_aligned;
 ----
-8	4M	ACGT	ACGT
+8	4=	ACGT	ACGT
 
 # Single mismatch -> aligned seqs match originals (no gaps)
 query TT

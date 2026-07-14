@@ -9,6 +9,7 @@ require-env ASPERA_AVAILABLE
 
 # Need a real Webin account — register at https://www.ebi.ac.uk/ena/submit/webin/.
 require-env ENA_WEBIN_TEST_USER
+
 require-env ENA_WEBIN_TEST_PASSWORD
 
 # Build a tiny single-end input. Use a timestamped sample alias so re-runs

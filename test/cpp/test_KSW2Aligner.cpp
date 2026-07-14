@@ -85,17 +85,28 @@ TEST_CASE("KSW2Aligner - align_extz_score", "[KSW2Aligner]") {
 TEST_CASE("KSW2Aligner - align_extz_cigar", "[KSW2Aligner]") {
 	KSW2Aligner aligner;
 
-	SECTION("Identical sequences -> 4M") {
+	SECTION("Identical sequences -> 4= (eqx post-pass splits M into =/X)") {
 		auto result = aligner.align_extz_cigar("ACGT", "ACGT");
 		REQUIRE(result.has_value());
 		REQUIRE(result->score == 8);
-		REQUIRE(result->cigar == "4M");
+		REQUIRE(result->cigar == "4=");
 	}
-	SECTION("Single mismatch -> still 4M (KSW2 lumps match+mismatch)") {
+	SECTION("Single mismatch -> 2=1X1= (eqx post-pass distinguishes the mismatch)") {
 		auto result = aligner.align_extz_cigar("ACGT", "ACAT");
 		REQUIRE(result.has_value());
 		REQUIRE(result->score == 2);
-		REQUIRE(result->cigar == "4M");
+		REQUIRE(result->cigar == "2=1X1=");
+	}
+	SECTION("Adjacent mismatches coalesce into one X run") {
+		// AAAA vs TTAA: mismatch, mismatch, match, match (ungapped) -> 2X2=
+		auto result = aligner.align_extz_cigar("AAAA", "TTAA");
+		REQUIRE(result.has_value());
+		REQUIRE(result->cigar == "2X2=");
+	}
+	SECTION("Soft-masked (lowercase) bases are matches, not mismatches") {
+		auto result = aligner.align_extz_cigar("acgt", "ACGT");
+		REQUIRE(result.has_value());
+		REQUIRE(result->cigar == "4=");
 	}
 	SECTION("CIGAR contains I for insertion") {
 		auto result = aligner.align_extz_cigar("ACGGT", "ACGT");
@@ -116,7 +127,7 @@ TEST_CASE("KSW2Aligner - align_extz_full", "[KSW2Aligner]") {
 		auto result = aligner.align_extz_full("ACGT", "ACGT");
 		REQUIRE(result.has_value());
 		REQUIRE(result->score == 8);
-		REQUIRE(result->cigar == "4M");
+		REQUIRE(result->cigar == "4=");
 		REQUIRE(result->query_aligned == "ACGT");
 		REQUIRE(result->subject_aligned == "ACGT");
 	}
@@ -368,17 +379,17 @@ TEST_CASE("KSW2Aligner - align_extd_score: long gap uses second affine", "[KSW2A
 TEST_CASE("KSW2Aligner - align_extd_cigar", "[KSW2Aligner]") {
 	KSW2Aligner aligner(2, 4, 6, 2, 24, 1, -1, -1);
 
-	SECTION("Identical sequences -> 4M") {
+	SECTION("Identical sequences -> 4= (eqx post-pass)") {
 		auto result = aligner.align_extd_cigar("ACGT", "ACGT");
 		REQUIRE(result.has_value());
 		REQUIRE(result->score == 8);
-		REQUIRE(result->cigar == "4M");
+		REQUIRE(result->cigar == "4=");
 	}
-	SECTION("Single mismatch -> still 4M (KSW2 lumps M)") {
+	SECTION("Single mismatch -> 2=1X1= (eqx post-pass)") {
 		auto result = aligner.align_extd_cigar("ACGT", "ACAT");
 		REQUIRE(result.has_value());
 		REQUIRE(result->score == 2);
-		REQUIRE(result->cigar == "4M");
+		REQUIRE(result->cigar == "2=1X1=");
 	}
 	SECTION("CIGAR contains I for insertion") {
 		auto result = aligner.align_extd_cigar("ACGGT", "ACGT");
@@ -493,17 +504,17 @@ TEST_CASE("KSW2Aligner - align_exts_score: identical and short gaps behave like 
 TEST_CASE("KSW2Aligner - align_exts_cigar", "[KSW2Aligner]") {
 	KSW2Aligner aligner(2, 4, 6, 2, 24, 9, -1);
 
-	SECTION("Identical -> 4M, score 8") {
+	SECTION("Identical -> 4=, score 8 (eqx post-pass)") {
 		auto result = aligner.align_exts_cigar("ACGT", "ACGT");
 		REQUIRE(result.has_value());
 		REQUIRE(result->score == 8);
-		REQUIRE(result->cigar == "4M");
+		REQUIRE(result->cigar == "4=");
 	}
-	SECTION("Mismatch -> 4M, score 2") {
+	SECTION("Mismatch -> 2=1X1=, score 2 (eqx post-pass)") {
 		auto result = aligner.align_exts_cigar("ACGT", "ACAT");
 		REQUIRE(result.has_value());
 		REQUIRE(result->score == 2);
-		REQUIRE(result->cigar == "4M");
+		REQUIRE(result->cigar == "2=1X1=");
 	}
 }
 

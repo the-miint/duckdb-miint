@@ -89,6 +89,7 @@
 #include <unifrac_table_functions.hpp>
 #endif
 #ifdef MIINT_HAS_SYLPH
+#include <sylph_index_create.hpp>
 #include <sylph_profile.hpp>
 #endif
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
@@ -344,6 +345,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 #endif
 #ifdef MIINT_HAS_SYLPH
 	SylphProfileTableFunction::Register(loader);
+	SylphIndexCreateTableFunction::Register(loader);
 #endif
 #ifdef MIINT_HAS_GPL_BOUNDARY
 	PhylogenyFastTreeTableFunction::Register(loader);

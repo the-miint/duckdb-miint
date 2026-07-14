@@ -1,0 +1,7 @@
+##gff-version 3
+##sequence-region chr1 1 2000
+chr1	SynDNA	insert	100	200	.	+	.	ID=SynDNA_gc=0.46;Note=first%20insert
+chr1	SynDNA	insert	300	400	.	+	.	ID=SynDNA_gc=0.50;Note=second%20insert
+chr1	NCBI	gene	500	600	.	+	.	ID=gene%3D1;Dbxref=taxon%3A9606;desc=a%2Cb%3Bc%26d
+chr1	NCBI	gene	700	800	.	+	.	ID=gene4;weird%20key=val
+chr1	NCBI	gene	900	1000	.	+	.	ID=gene5;Name=caf%C3%A9
