@@ -20,6 +20,7 @@ public:
 		bool required;           // cigar, position, stop_position are required
 		bool is_tag;             // tag columns are NULLed after trimming
 		bool invalidate_on_trim; // template_length is NULLed on any trim
+		bool is_id;              // read_id/reference/mate_reference: preserve input id type, don't coerce to VARCHAR
 	};
 
 	// Per-output-column role, precomputed at bind time for fast dispatch in Execute

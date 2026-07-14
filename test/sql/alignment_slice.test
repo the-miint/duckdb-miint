@@ -520,3 +520,28 @@ statement error
 SELECT * FROM alignment_slice('slice_badref', 1, 20)
 ----
 reference
+
+# A NULL id value must round-trip as NULL (not 0 / empty) while keeping the
+# column's storage type. Pins the pass-through egress against a future switch to
+# an id codec whose BIGINT branch maps empty/"*" to NULL.
+statement ok
+CREATE TABLE slice_null_bigint_id (cigar VARCHAR, position BIGINT, stop_position BIGINT, read_id BIGINT)
+
+statement ok
+INSERT INTO slice_null_bigint_id VALUES ('10M', 5, 15, NULL)
+
+query TT
+SELECT typeof(read_id), read_id FROM alignment_slice('slice_null_bigint_id', 1, 20)
+----
+BIGINT	NULL
+
+statement ok
+CREATE TABLE slice_null_uuid_id (cigar VARCHAR, position BIGINT, stop_position BIGINT, read_id UUID)
+
+statement ok
+INSERT INTO slice_null_uuid_id VALUES ('10M', 5, 15, NULL)
+
+query TT
+SELECT typeof(read_id), read_id FROM alignment_slice('slice_null_uuid_id', 1, 20)
+----
+UUID	NULL
