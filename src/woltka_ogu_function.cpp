@@ -3,6 +3,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "id_column_utils.hpp"
 #include "per_sample_table_function.hpp"
 
 namespace duckdb {
@@ -81,11 +82,18 @@ static unique_ptr<MaterializedQueryResult> RunGlobalAggregation(Connection &conn
 // scoped to `conn`. Each thread has its own Connection, so names don't collide.
 static unique_ptr<MaterializedQueryResult> RunSampleAggregation(Connection &conn, const string &source,
                                                                 const string &seq_id_col, const string &sample_col,
-                                                                const Value &sample_value) {
+                                                                const Value &sample_value,
+                                                                const LogicalType &sample_type) {
 	auto q_src = KeywordHelper::WriteOptionallyQuoted(source);
 	auto q_sample = KeywordHelper::WriteOptionallyQuoted(sample_col);
 	// ToSQLString handles all Value types (integers, timestamps, strings) safely.
 	auto sample_literal = sample_value.ToSQLString();
+	// Cast the inlined literal back to the sample column's declared type before
+	// projecting it: a bare integer literal (e.g. 100) binds as INTEGER, so a
+	// BIGINT sample_id would otherwise emit an INTEGER column and mismatch the
+	// declared output type at output.Reference(). The comparison below is done
+	// as VARCHAR, so it's unaffected.
+	auto sample_expr = "CAST(" + sample_literal + " AS " + sample_type.ToString() + ")";
 
 	auto view_sql = "CREATE OR REPLACE TEMP VIEW __woltka_per_sample AS SELECT * FROM " + q_src + " WHERE CAST(" +
 	                q_sample + " AS VARCHAR) = CAST(" + sample_literal + " AS VARCHAR)";
@@ -95,7 +103,7 @@ static unique_ptr<MaterializedQueryResult> RunSampleAggregation(Connection &conn
 	}
 
 	auto inner_sql = BuildAggregationSql("__woltka_per_sample", seq_id_col);
-	auto wrapped_sql = "SELECT " + sample_literal + " AS " + q_sample + ", __q.* FROM (" + inner_sql + ") __q";
+	auto wrapped_sql = "SELECT " + sample_expr + " AS " + q_sample + ", __q.* FROM (" + inner_sql + ") __q";
 
 	auto result = conn.Query(wrapped_sql);
 	if (result->HasError()) {
@@ -129,14 +137,38 @@ static unique_ptr<FunctionData> WoltkaOguBind(ClientContext &context, TableFunct
 	auto q_src = KeywordHelper::WriteOptionallyQuoted(data->source);
 	auto q_seq = KeywordHelper::WriteOptionallyQuoted(data->seq_id_col);
 
-	// Validate source resolves AND required columns exist AND their types are compatible
-	// with the aggregation (reference → VARCHAR, flags → USMALLINT). LIMIT 0 binds the
-	// casts without scanning rows.
-	auto probe = conn.Query("SELECT " + q_seq + ", reference::VARCHAR, flags::USMALLINT FROM " + q_src + " LIMIT 0");
+	// Validate source resolves AND required columns exist AND flags casts to USMALLINT.
+	// reference is selected natively (not cast to VARCHAR) so its storage type can
+	// drive feature_id below. LIMIT 0 binds the casts without scanning rows.
+	auto probe = conn.Query("SELECT " + q_seq + ", reference, flags::USMALLINT FROM " + q_src + " LIMIT 0");
 	if (probe->HasError()) {
 		throw InvalidInputException("woltka_ogu: source, required columns (reference, flags), or their types "
 		                            "are not compatible: %s",
 		                            probe->GetError());
+	}
+
+	// feature_id inherits reference's storage type (VARCHAR/BIGINT/UUID), mirroring
+	// align_minimap2 / alignment_slice id-type preservation. BuildAggregationSql
+	// passes `reference` through uncasted, so the declared output type must match
+	// or output.Reference() aborts with an internal type-mismatch error. Resolve
+	// the column by name (not by position in the probe above) so a future edit to
+	// the probe's select list can't silently pick the wrong column's type.
+	LogicalType reference_type;
+	bool reference_found = false;
+	for (idx_t i = 0; i < probe->names.size(); i++) {
+		if (StringUtil::CIEquals(probe->names[i], "reference")) {
+			reference_type = probe->types[i];
+			reference_found = true;
+			break;
+		}
+	}
+	if (!reference_found) {
+		// Unreachable: the probe above selected `reference` and succeeded.
+		throw InternalException("woltka_ogu: 'reference' column missing from validation probe result");
+	}
+	if (!IsAllowedIdType(reference_type)) {
+		throw BinderException("woltka_ogu: 'reference' column must be %s, got %s", AllowedIdTypeList(),
+		                      reference_type.ToString());
 	}
 
 	if (data->has_sample_id) {
@@ -152,7 +184,7 @@ static unique_ptr<FunctionData> WoltkaOguBind(ClientContext &context, TableFunct
 	}
 
 	names.emplace_back("feature_id");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(reference_type);
 	names.emplace_back("value");
 	return_types.emplace_back(LogicalType::DOUBLE);
 
@@ -215,8 +247,9 @@ static void WoltkaOguExecute(ClientContext &context, TableFunctionInput &input, 
 			output.SetCardinality(0);
 			return;
 		}
-		lstate.result = RunSampleAggregation(*lstate.conn, data.source, data.seq_id_col, data.sample_info.sample_id_col,
-		                                     data.sample_info.sample_values[sample_idx]);
+		lstate.result =
+		    RunSampleAggregation(*lstate.conn, data.source, data.seq_id_col, data.sample_info.sample_id_col,
+		                         data.sample_info.sample_values[sample_idx], data.sample_info.sample_id_type);
 	}
 }
 

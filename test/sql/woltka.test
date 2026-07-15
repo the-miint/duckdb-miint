@@ -149,6 +149,174 @@ SELECT * FROM woltka_ogu('test_sam_data', 'read_id', sample_id := 'no_such_col')
 ----
 not found
 
+# ── Identifier type preservation (BIGINT / UUID) ────────────────────────────
+# align_minimap2 & friends preserve read_id/reference/mate_reference storage
+# types (VARCHAR/BIGINT/UUID). woltka_ogu consumes that output, so it must
+# preserve the reference type into feature_id and the sample_id type, and
+# tolerate a non-VARCHAR sequence_id_field (used only as an internal grouping
+# key). Mirrors alignment_slice's id-type handling.
+
+# reference -> feature_id preserves BIGINT (was: INTERNAL crash "Vector::Reference
+# used on vector of different type (source VARCHAR referenced BIGINT)")
+statement ok
+CREATE TABLE aln_ref_bigint AS SELECT * FROM (VALUES
+  ('r1', 100::BIGINT, 0),
+  ('r2', 100::BIGINT, 0),
+  ('r3', 200::BIGINT, 0)
+) t(read_id, reference, flags);
+
+query T
+SELECT DISTINCT typeof(feature_id) FROM woltka_ogu('aln_ref_bigint', 'read_id');
+----
+BIGINT
+
+query II
+SELECT feature_id, value FROM woltka_ogu('aln_ref_bigint', 'read_id') ORDER BY feature_id;
+----
+100	2.0
+200	1.0
+
+# reference -> feature_id preserves UUID
+statement ok
+CREATE TABLE aln_ref_uuid AS SELECT * FROM (VALUES
+  ('r1', '11111111-1111-1111-1111-111111111111'::UUID, 0),
+  ('r2', '11111111-1111-1111-1111-111111111111'::UUID, 0),
+  ('r3', '22222222-2222-2222-2222-222222222222'::UUID, 0)
+) t(read_id, reference, flags);
+
+query T
+SELECT DISTINCT typeof(feature_id) FROM woltka_ogu('aln_ref_uuid', 'read_id');
+----
+UUID
+
+query II
+SELECT feature_id, value FROM woltka_ogu('aln_ref_uuid', 'read_id') ORDER BY feature_id;
+----
+11111111-1111-1111-1111-111111111111	2.0
+22222222-2222-2222-2222-222222222222	1.0
+
+# sequence_id_field may be BIGINT (internal grouping key, not an output column)
+statement ok
+CREATE TABLE aln_seq_bigint AS SELECT * FROM (VALUES
+  (10::BIGINT, 'refA', 0),
+  (20::BIGINT, 'refA', 0),
+  (30::BIGINT, 'refB', 0)
+) t(read_id, reference, flags);
+
+query II
+SELECT feature_id, value FROM woltka_ogu('aln_seq_bigint', 'read_id') ORDER BY feature_id;
+----
+refA	2.0
+refB	1.0
+
+# sequence_id_field may be UUID
+statement ok
+CREATE TABLE aln_seq_uuid AS SELECT * FROM (VALUES
+  ('aaaaaaaa-0000-0000-0000-000000000001'::UUID, 'refA', 0),
+  ('aaaaaaaa-0000-0000-0000-000000000002'::UUID, 'refA', 0),
+  ('aaaaaaaa-0000-0000-0000-000000000003'::UUID, 'refB', 0)
+) t(read_id, reference, flags);
+
+query II
+SELECT feature_id, value FROM woltka_ogu('aln_seq_uuid', 'read_id') ORDER BY feature_id;
+----
+refA	2.0
+refB	1.0
+
+# sample_id preserves BIGINT (was: INTERNAL crash "source BIGINT referenced INTEGER"
+# -- Value::ToSQLString() renders a bare integer literal that binds as INTEGER)
+statement ok
+CREATE TABLE aln_samp_bigint AS SELECT * FROM (VALUES
+  ('r1', 'refA', 0, 100::BIGINT),
+  ('r2', 'refB', 0, 100::BIGINT),
+  ('r3', 'refA', 0, 200::BIGINT)
+) t(read_id, reference, flags, samp);
+
+query T
+SELECT DISTINCT typeof(samp) FROM woltka_ogu('aln_samp_bigint', 'read_id', sample_id := 'samp');
+----
+BIGINT
+
+query III
+SELECT samp, feature_id, value FROM woltka_ogu('aln_samp_bigint', 'read_id', sample_id := 'samp') ORDER BY samp, feature_id;
+----
+100	refA	1.0
+100	refB	1.0
+200	refA	1.0
+
+# sample_id preserves UUID
+statement ok
+CREATE TABLE aln_samp_uuid AS SELECT * FROM (VALUES
+  ('r1', 'refA', 0, 'bbbbbbbb-0000-0000-0000-000000000001'::UUID),
+  ('r2', 'refB', 0, 'bbbbbbbb-0000-0000-0000-000000000001'::UUID)
+) t(read_id, reference, flags, samp);
+
+query T
+SELECT DISTINCT typeof(samp) FROM woltka_ogu('aln_samp_uuid', 'read_id', sample_id := 'samp');
+----
+UUID
+
+query III
+SELECT samp, feature_id, value FROM woltka_ogu('aln_samp_uuid', 'read_id', sample_id := 'samp') ORDER BY feature_id;
+----
+bbbbbbbb-0000-0000-0000-000000000001	refA	1.0
+bbbbbbbb-0000-0000-0000-000000000001	refB	1.0
+
+# Combined: BIGINT reference AND BIGINT sample_id together
+statement ok
+CREATE TABLE aln_both_bigint AS SELECT * FROM (VALUES
+  ('r1', 100::BIGINT, 0, 7::BIGINT),
+  ('r2', 200::BIGINT, 0, 7::BIGINT)
+) t(read_id, reference, flags, samp);
+
+query T
+SELECT DISTINCT typeof(samp) || ',' || typeof(feature_id)
+FROM woltka_ogu('aln_both_bigint', 'read_id', sample_id := 'samp');
+----
+BIGINT,BIGINT
+
+query III
+SELECT samp, feature_id, value FROM woltka_ogu('aln_both_bigint', 'read_id', sample_id := 'samp') ORDER BY feature_id;
+----
+7	100	1.0
+7	200	1.0
+
+# A non-identifier reference type is rejected at bind (mirrors alignment_slice)
+statement ok
+CREATE TABLE aln_ref_double AS SELECT * FROM (VALUES
+  ('r1', 1.5::DOUBLE, 0)
+) t(read_id, reference, flags);
+
+statement error
+SELECT * FROM woltka_ogu('aln_ref_double', 'read_id')
+----
+VARCHAR, BIGINT, or UUID
+
+# Cleanup type-preservation tables
+statement ok
+DROP TABLE aln_ref_bigint;
+
+statement ok
+DROP TABLE aln_ref_uuid;
+
+statement ok
+DROP TABLE aln_seq_bigint;
+
+statement ok
+DROP TABLE aln_seq_uuid;
+
+statement ok
+DROP TABLE aln_samp_bigint;
+
+statement ok
+DROP TABLE aln_samp_uuid;
+
+statement ok
+DROP TABLE aln_both_bigint;
+
+statement ok
+DROP TABLE aln_ref_double;
+
 # Cleanup
 statement ok
 DROP TABLE test_sam_data;
