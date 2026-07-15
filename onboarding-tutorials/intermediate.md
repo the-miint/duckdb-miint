@@ -46,7 +46,7 @@ fetched from NCBI.
 
 ### Fetch the reference genome
 
-[`read_ncbi_fasta`](../docs/table-functions.md#read_ncbi_fastaaccession-api_key-include_filepathfalse)
+[`read_ncbi_fasta`](../docs/insdc_ncbi.md#read-sequences)
 downloads a FASTA record from NCBI by accession and returns it as a table.
 We'll save it into a local table with
 [`CREATE TABLE ... AS`](https://duckdb.org/docs/current/sql/statements/create_table)
@@ -75,7 +75,7 @@ every query.
 
 ## Step 2: Align reads to the reference
 
-[`align_minimap2`](../docs/table-functions.md#align_minimap2query_table-subject_tablenull-index_pathnull-options)
+[`align_minimap2`](../docs/alignment_reference.md#minimap2)
 aligns reads against a reference using
 [minimap2](https://github.com/lh3/minimap2) (Li, 2018). It reads sequences
 from DuckDB tables and returns standard SAM alignment fields:
@@ -110,7 +110,7 @@ expected.
 
 Because we allowed secondary alignments (`max_secondary=5`), a single read can
 appear in the results multiple times. Let's see the breakdown using miint's
-[SAM flag functions](../docs/scalar-functions.md#sam-flag-functions):
+[SAM flag functions](../docs/alignment_analysis.md#sam-flag-functions):
 
 ```sql
 SELECT alignment_is_primary(flags) AS is_primary,
@@ -130,21 +130,21 @@ hits to other copies of the rRNA operon.
 For single-end data like ours, filtering to **primary alignments** removes
 duplicate counting. For paired-end data, you would also want to filter to
 **proper pairs** using
-[`alignment_is_proper_pair(flags)`](../docs/scalar-functions.md#sam-flag-functions),
+[`alignment_is_proper_pair(flags)`](../docs/alignment_analysis.md#sam-flag-functions),
 which ensures both mates mapped in the expected orientation and distance. miint
 provides flag-checking functions for all standard
-[SAM flags](../docs/scalar-functions.md#sam-flag-functions).
+[SAM flags](../docs/alignment_analysis.md#sam-flag-functions).
 
 ## Step 4: Examine alignment quality
 
 Even among primary alignments, not all are trustworthy. Two key metrics:
 
-- [`cigar_query_coverage(cigar)`](../docs/scalar-functions.md#cigar_query_coveragecigar-typealigned)
+- [`cigar_query_coverage(cigar)`](../docs/alignment_analysis.md#cigar-query-coverage)
   &mdash; what fraction of the read actually aligned? A value of 1.0 means the
   entire read matched; 0.6 means 40% of the read was soft-clipped (ignored by
   the aligner).
 
-- [`alignment_seq_identity(cigar, nm, md, type)`](../docs/scalar-functions.md#alignment_seq_identitycigar-nm-md-type)
+- [`alignment_seq_identity(cigar, nm, md, type)`](../docs/alignment_analysis.md#sequence-identity)
   &mdash; of the bases that *did* align, what fraction are identical to the
   reference?
 
@@ -229,7 +229,7 @@ homology with *E. coli* &mdash; not genuine *E. coli* reads.
 ## Step 6: Filter and count with `woltka_ogu`
 
 Now let's apply a proper filter and count with
-[`woltka_ogu`](../docs/analysis-functions.md#woltka_ogurelation-sequence_id_field-sample_id),
+[`woltka_ogu`](../docs/profiling.md#woltka_ogu),
 a built-in table macro that implements the Woltka OGU (Operational Genomic
 Unit) counting method (Zhu et al., 2022). `woltka_ogu` is primarily designed
 for shotgun metagenomic data, where reads span the entire genome; however, its
@@ -349,9 +349,9 @@ SELECT * FROM woltka_ogu('strictest_filtered', 'read_id');
 ## Step 9: Genome coverage
 
 How much of the *E. coli* genome did our reads actually cover? The
-[`genome_coverage`](../docs/analysis-functions.md#genome_coveragealignments-subject_total_length-subject_genome_id)
+[`genome_coverage`](../docs/alignment_analysis.md#genome-coverage)
 macro computes this by merging overlapping alignment intervals using
-[`compress_intervals`](../docs/analysis-functions.md#compress_intervalsstart-stop):
+[`compress_intervals`](../docs/alignment_analysis.md#merge-overlapping-intervals):
 
 ```sql
 CREATE TABLE ecoli_genome_id AS

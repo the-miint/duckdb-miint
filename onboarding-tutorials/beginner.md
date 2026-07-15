@@ -71,7 +71,7 @@ SQL it uses. For a broader introduction, see DuckDB's
 ## Reading a FASTQ file
 
 The
-[`read_ena_sequences`](../docs/table-functions.md#read_ena_sequencesaccession-include_filepathfalse-qual_offset33-max_sequences0)
+[`read_ena_sequences`](../docs/insdc_ena.md#read-ena-sequences)
 table function streams FASTA/FASTQ data straight from the European Nucleotide
 Archive (ENA) given a run, sample, study, or experiment accession &mdash; it
 looks up the download URLs for you, so you never have to hardcode a file path.
@@ -113,7 +113,7 @@ The columns are:
 There are additional columns such as `qual1` (per-base quality scores),
 `sequence_index` (1-based read number), and the `run_accession` /
 `sample_accession` / `experiment_accession` provenance columns &mdash; see the
-[`read_ena_sequences` reference](../docs/table-functions.md#read_ena_sequencesaccession-include_filepathfalse-qual_offset33-max_sequences0)
+[`read_ena_sequences` reference](../docs/insdc_ena.md#read-ena-sequences)
 for the full schema.
 
 ## How many reads are there?

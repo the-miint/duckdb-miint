@@ -53,15 +53,20 @@ GROUP BY sample_id;
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [Installation & Building](docs/installation.md) | Installing from community extensions, building from source, dependencies |
-| [Table Functions](docs/table-functions.md) | `read_alignments`, `read_fastx`, `read_mzml`, `read_mzxml`, `read_biom`, `align_minimap2`, `align_bowtie2`, `align_mafft`, `detect_chimera_uchime`, `search_sequences_vsearch`, `cluster_sequences_vsearch`, and more |
-| [Mass Spectrometry & MassQL](docs/massql.md) | MassQL query language, `read_mzml`/`read_mzxml`, helper macros, formula functions |
-| [Scalar Functions](docs/scalar-functions.md) | SAM flag functions, sequence identity, query length, query coverage |
-| [RYpe Functions](docs/rype.md) | RYpe sequence classification and minimizer extraction |
-| [Analysis Functions](docs/analysis-functions.md) | Woltka OGU, reverse complement, IUPAC regexp, interval compression, pairwise alignment, `formula()`, `miint_version()` |
-| [COPY Formats](docs/copy-formats.md) | Writing FASTQ, FASTA, SAM, BAM, BIOM, and Newick files |
+The docs are organized by task. Full index: **[docs/table_of_contents.md](docs/table_of_contents.md)**.
+
+| Topic | Description |
+|-------|-------------|
+| [Installation & building](docs/installation.md) | Installing from community extensions, building from source, dependencies |
+| [Reading files](docs/reading.md) | FASTA/FASTQ, SAM/BAM, SFF, BIOM, mzML/mzXML, GFF, jplace, Newick |
+| [Writing files](docs/writing.md) | Writing FASTQ, FASTA, SAM/BAM, BIOM, and Newick files |
+| Alignment | [Reference](docs/alignment_reference.md) (minimap2/bowtie2/SortMeRNA), [pairwise](docs/alignment_pairwise.md) (WFA2/KSW2), [multiple](docs/alignment_multiple.md) (MAFFT/abPOA), and [analysis](docs/alignment_analysis.md) |
+| Amplicon & community | [Quality control](docs/qc.md), [denoising](docs/denoising.md), [chimera checking](docs/chimera.md), [clustering](docs/clustering.md), [search](docs/search.md) |
+| Classification & abundance | [Taxonomic classification](docs/classification.md) (RYpe), [profiling & feature tables](docs/profiling.md) (sylph, Woltka OGU) |
+| [Phylogeny](docs/phylogeny.md) & [diversity](docs/diversity.md) | FastTree, placement resolution; UniFrac, Faith PD, PCoA/PERMANOVA |
+| Public repositories | [EBI/ENA](docs/insdc_ena.md) and [NCBI](docs/insdc_ncbi.md) fetch & submission |
+| [Mass spectrometry & MassQL](docs/massql.md) | MassQL query language, `read_mzml`/`read_mzxml`, helper macros, formula functions |
+| [Utilities](docs/utilities.md) | Sequence helpers (reverse complement, IUPAC→regex, split), versions/diagnostics, optional-tool install |
 | [Testing](docs/testing.md) | SQL logic tests, C++ unit tests, shell tests, test data |
 
 ## Installing

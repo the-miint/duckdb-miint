@@ -7,7 +7,7 @@ from [fastp](https://github.com/OpenGene/fastp) — see
 [`THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md) for attribution.
 
 These functions compose in SQL to express the canonical fastp QC pipeline
-over any source of sequence + quality data — typically [`read_fastx`](table-functions.md#read_fastx).
+over any source of sequence + quality data — typically [`read_fastx`](reading.md#fasta-and-fastq).
 
 ## Function catalog
 
@@ -402,13 +402,13 @@ long-read amplicon work (UMI binning, MSA consensus, per-base variant
 positions) miint exposes a complementary set of primitives that compose
 into a Karst-protocol UMI consensus pipeline:
 
-- [`extract_linked_amplicon`](scalar-functions.md#extract_linked_ampliconseq-qual-anchor5-anchor3-min_len-max_len-error_rate) — cut out the interior between two
+- [`extract_linked_amplicon`](utilities.md#extracting-linked-amplicons) — cut out the interior between two
   flanking adapters (cutadapt `-g X...Y` equivalent), WFA2-powered.
-- [`match_short_barcodes`](table-functions.md#match_short_barcodesquery_table-ref_table-max_nmn-report_alltrue) — Hamming-distance matcher for
+- [`match_short_barcodes`](alignment_analysis.md#barcode-matching) — Hamming-distance matcher for
   fixed-length barcodes (UMIs, sample indices).
-- [`compute_pileup`](table-functions.md#compute_pileupalignments_table-reference_table) — per-base CIGAR walker that emits
+- [`compute_pileup`](alignment_analysis.md#per-base-pileup) — per-base CIGAR walker that emits
   `(read_id, ref_pos, ref_base, query_base, query_qual)` rows.
-- [`compute_msa_consensus`](analysis-functions.md#compute_msa_consensusaligned_seq-qual) — Q-aware MSA column consensus
+- [`compute_msa_consensus`](alignment_analysis.md#msa-column-consensus) — Q-aware MSA column consensus
   with HP post-correction (replaces Racon polishing for HiFi).
 
 ## Backlog (deferred from v1)

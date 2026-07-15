@@ -1,18 +1,22 @@
-# RYpe Classification and Extraction Functions
+# Taxonomic classification
 
-[RYpe](https://github.com/biocore/rype) is a minimizer-based sequence classification tool that uses RY-space encoding (purine/pyrimidine) for robust sequence matching. These functions require a RYpe index directory (`.ryxdi`), which contains a Parquet-based inverted index built from reference sequences.
+Assign sequencing reads to references or taxa by their minimizer/k-mer content against a prebuilt index, without performing a full alignment. Use this when you want fast, robust bucket (reference/taxon) assignments for reads — for example, screening reads as host vs. microbe, or binning reads by which reference set they best match.
 
-Most RYpe functions take a `sequence_table` parameter that references a DuckDB table or view containing sequence data. The table must have a `sequence1` column and an identifier column (default `read_id`). The exception is `rype_index_create`, which *builds* a `.ryxdi` index from a chunked reference table.
+These functions are powered by [RYpe](https://github.com/biocore/rype), a minimizer-based sequence classification tool that uses RY-space encoding (purine/pyrimidine) for robust sequence matching. They require a RYpe index directory (`.ryxdi`), which contains a Parquet-based inverted index built from reference sequences.
+
+Most of these functions take a `sequence_table` parameter that references a DuckDB table or view containing sequence data. The table must have a `sequence1` column and an identifier column (default `read_id`). The exception is `rype_index_create`, which *builds* a `.ryxdi` index from a chunked reference table. Sequence tables are typically produced by the readers in [reading](reading.md). For turning classification hits into per-sample abundance tables, see [profiling](profiling.md).
 
 ## Table of Contents
 
-- [`rype_index_create`](#rype_index_createchunk_table-output_path-mapping_table-k64-w50-salt6148914691236517205-orienttrue-max_memory0) - Build a `.ryxdi` index from a chunked sequence table
-- [`rype_classify`](#rype_classifyindex_path-sequence_table-id_columnread_id-threshold01-negative_indexpath) - Classify sequences against an index
-- [`rype_log_ratio`](#rype_log_rationumerator_path-denominator_path-sequence_table-id_columnread_id-skip_threshold05) - Log-ratio classification between two single-bucket indices
-- [`rype_extract_minimizer_set`](#rype_extract_minimizer_setsequence_table-k-w-salt6148914691236517205-id_columnread_id) - Extract deduplicated minimizer hash sets
-- [`rype_extract_strand_minimizers`](#rype_extract_strand_minimizerssequence_table-k-w-salt6148914691236517205-id_columnread_id) - Extract minimizers with positions
+- [`rype_index_create`](#rype_index_create) - Build a `.ryxdi` index from a chunked sequence table
+- [`rype_classify`](#rype_classify) - Classify sequences against an index
+- [`rype_log_ratio`](#rype_log_ratio) - Log-ratio classification between two single-bucket indices
+- [`rype_extract_minimizer_set`](#rype_extract_minimizer_set) - Extract deduplicated minimizer hash sets
+- [`rype_extract_strand_minimizers`](#rype_extract_strand_minimizers) - Extract minimizers with positions
 
-## `rype_index_create(chunk_table, output_path, [mapping_table], [k=64], [w=50], [salt=6148914691236517205], [orient=true], [max_memory=0])`
+### rype_index_create
+
+`rype_index_create(chunk_table, output_path, [mapping_table], [k=64], [w=50], [salt=6148914691236517205], [orient=true], [max_memory=0])`
 
 Build a RYpe `.ryxdi` index directly from a DuckDB table of chunked reference sequences, without going through the `rype` CLI. The references are supplied in an at-rest *chunked* layout (one row per fixed-size block of a sequence) — the same shape microbiome reference data is stored in for efficient columnar storage. Chunks belonging to a feature are reassembled, in order, before minimizers are extracted, so minimizers spanning chunk boundaries are computed correctly.
 
@@ -43,7 +47,7 @@ Build a RYpe `.ryxdi` index directly from a DuckDB table of chunked reference se
 - Inputs are validated at bind time: a missing table, a missing required column, `k` not in {16, 32, 64}, or `w < 1` all raise an error before any build work begins.
 - A duplicate `feature_idx` in `mapping_table` is rejected.
 - The index directory is written **non-atomically**: if the build fails partway, a partial, unusable directory may remain at `output_path` and should be discarded. Build to a temporary path and move it into place if atomicity is required.
-- The resulting `.ryxdi` is usable by `rype_classify`, `rype_log_ratio`, and the other RYpe functions.
+- The resulting `.ryxdi` is usable by `rype_classify`, `rype_log_ratio`, and the other functions here.
 
 **Examples:**
 ```sql
@@ -65,7 +69,16 @@ CREATE TABLE reads AS SELECT * FROM read_fastx('reads.fastq');
 SELECT * FROM rype_classify('bacteria.ryxdi', 'reads');
 ```
 
-## `rype_classify(index_path, sequence_table, [id_column='read_id'], [threshold=0.1], [negative_index=path])`
+**Error conditions:**
+- `chunk_table` (or `mapping_table`) does not exist
+- `chunk_table` missing a required column (`feature_idx`, `chunk_index`, `chunk_data`)
+- `k` not in {16, 32, 64}, or `w < 1`
+- Duplicate `feature_idx` in `mapping_table`
+- Malformed feature ordering (missing or duplicate `chunk_index`, or first `chunk_index` not 0)
+
+### rype_classify
+
+`rype_classify(index_path, sequence_table, [id_column='read_id'], [threshold=0.1], [negative_index=path])`
 
 Classify sequences against a RYpe index, returning bucket assignments with confidence scores.
 
@@ -115,7 +128,15 @@ CREATE TABLE paired AS SELECT * FROM read_fastx('R1.fastq', sequence2='R2.fastq'
 SELECT * FROM rype_classify('my_index.ryxdi', 'paired');
 ```
 
-## `rype_log_ratio(numerator_path, denominator_path, sequence_table, [id_column='read_id'], [skip_threshold=0.5])`
+**Error conditions:**
+- `index_path` does not point to a valid `.ryxdi` index directory
+- `sequence_table` does not exist, or is missing the identifier column or `sequence1`
+- `threshold` outside the 0.0-1.0 range
+- `negative_index` does not point to a valid index
+
+### rype_log_ratio
+
+`rype_log_ratio(numerator_path, denominator_path, sequence_table, [id_column='read_id'], [skip_threshold=0.5])`
 
 Compute the log-ratio of classification scores between two single-bucket RYpe indices. For each input sequence, this returns `log10(numerator_score / denominator_score)`, indicating which index the sequence is more similar to.
 
@@ -171,7 +192,14 @@ SELECT * FROM rype_log_ratio('host.ryxdi', 'microbe.ryxdi', 'paired');
 SELECT * FROM rype_log_ratio('host.ryxdi', 'microbe.ryxdi', 'seqs', id_column := 'sample_id');
 ```
 
-## `rype_extract_minimizer_set(sequence_table, k, w, [salt=6148914691236517205], [id_column='read_id'])`
+**Error conditions:**
+- Either `numerator_path` or `denominator_path` is not a valid `.ryxdi` index directory
+- Either index is not a single-bucket index (multi-bucket indices are rejected)
+- `sequence_table` does not exist, or is missing the identifier column or `sequence1`
+
+### rype_extract_minimizer_set
+
+`rype_extract_minimizer_set(sequence_table, k, w, [salt=6148914691236517205], [id_column='read_id'])`
 
 Extract deduplicated minimizer hash sets from sequences for both forward and reverse complement strands.
 
@@ -217,7 +245,14 @@ FROM mins a, mins b
 WHERE a.read_id < b.read_id;
 ```
 
-## `rype_extract_strand_minimizers(sequence_table, k, w, [salt=6148914691236517205], [id_column='read_id'])`
+**Error conditions:**
+- `sequence_table` does not exist, or is missing the identifier column or `sequence1`
+- `k` not in {16, 32, 64}
+- `w` not greater than 0
+
+### rype_extract_strand_minimizers
+
+`rype_extract_strand_minimizers(sequence_table, k, w, [salt=6148914691236517205], [id_column='read_id'])`
 
 Extract minimizer hashes with their positions for both forward and reverse complement strands. Unlike `rype_extract_minimizer_set`, this preserves positional information and may contain duplicate hashes at different positions.
 
@@ -258,3 +293,8 @@ SELECT read_id, unnest(fwd_hashes) as hash, unnest(fwd_positions) as pos
 FROM rype_extract_strand_minimizers('seqs', 32, 10)
 ORDER BY read_id, pos;
 ```
+
+**Error conditions:**
+- `sequence_table` does not exist, or is missing the identifier column or `sequence1`
+- `k` not in {16, 32, 64}
+- `w` not greater than 0

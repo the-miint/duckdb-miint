@@ -3,7 +3,7 @@
 Cross-cutting design patterns and implementation notes for duckdb-miint. This file is for developers working on the extension itself.
 
 **Not here:**
-- Per-function API reference → `docs/table-functions.md`, `docs/scalar-functions.md`, `docs/copy-formats.md`, `docs/analysis-functions.md`
+- Per-function API reference → the task-organized user docs under `docs/` (index: `docs/table_of_contents.md`)
 - Authoritative list of what's registered → `src/miint_extension.cpp` (`LoadInternal()`)
 - How external libraries are embedded → `docs/internals/embedded-tools.md`
 - Reading from user-specified tables/views → `docs/internals/reading-tables-views.md`

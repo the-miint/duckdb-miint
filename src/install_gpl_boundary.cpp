@@ -25,7 +25,7 @@ constexpr const char *kInstallScriptUrl =
 // --max-time on OUR fetch of install.sh. Once we hand off to /bin/sh running
 // install.sh, we're at the mercy of upstream's internal curl call for the
 // tarball (which has no timeout we can set from outside). The user-facing
-// docs at docs/scalar-functions.md call this out as a known limitation.
+// docs at docs/utilities.md call this out as a known limitation.
 constexpr int kInstallScriptFetchTimeoutSec = 60;
 
 // =============================================================================
