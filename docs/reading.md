@@ -762,6 +762,7 @@ Read GFF3 (General Feature Format) annotation files. GFF is a standard format fo
 - Automatically filters comment lines starting with '##'
 - Converts '.' to NULL for score, strand, and phase fields
 - Parses the attributes column (semicolon-separated key=value pairs) into a SQL MAP
+- Percent-decodes (`%XX`) attribute keys and values per the GFF3 spec (e.g. `%3D` → `=`, `%2C` → `,`, `%3B` → `;`, `%26` → `&`); the value is everything after the first `=`, so a raw `=` inside a value is preserved rather than truncated
 - Supports standard GFF3 specification
 
 **Examples:**

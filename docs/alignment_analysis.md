@@ -16,6 +16,7 @@ A considerable amount of analysis on alignment data can be performed with native
 - [Genome coverage](#genome-coverage) - Proportion of each genome covered by alignments
 - [Barcode matching](#barcode-matching) - Hamming-distance matcher for short fixed-length barcodes
 - [MSA column consensus](#msa-column-consensus) - Quality-aware consensus from a multiple alignment
+- [Concordant-pair identity filtering](#worked-example-joint-identity-filtering-of-concordant-read-pairs) - Filter paired-end alignments as a unit
 
 ### SAM flag functions
 
@@ -31,7 +32,8 @@ Test individual SAM flag bits. Each function takes a `USMALLINT` (the flags colu
 - `alignment_is_read1(flags)` - Read is first in pair (0x40)
 - `alignment_is_read2(flags)` - Read is second in pair (0x80)
 - `alignment_is_secondary(flags)` - Secondary alignment (0x100)
-- `alignment_is_primary(flags)` - Primary alignment (neither secondary nor supplementary)
+- `alignment_is_primary(flags)` - Primary *line* — neither secondary (0x100) nor supplementary (0x800) set, i.e. `FLAG & 0x900 == 0`. ⚠️ **TRUE for an unmapped read** (see note below).
+- `alignment_is_mapped_primary(flags)` - Primary line **and** mapped — `FLAG & 0x904 == 0`; equivalent to `alignment_is_primary(flags) AND NOT alignment_is_unmapped(flags)`. Use this when you mean "a real, mapped primary alignment".
 - `alignment_is_qc_failed(flags)` - QC failure (0x200)
 - `alignment_is_duplicate(flags)` - PCR/optical duplicate (0x400)
 - `alignment_is_supplementary(flags)` - Supplementary alignment (0x800)
@@ -39,12 +41,13 @@ Test individual SAM flag bits. Each function takes a `USMALLINT` (the flags colu
 **HTSlib-compatible aliases:**
 `is_paired`, `is_proper_pair`, `is_unmapped`, `is_munmap`, `is_reverse`, `is_mreverse`, `is_read1`, `is_read2`, `is_secondary`, `is_qcfail`, `is_dup`, `is_supplementary`
 
+> **Note on `alignment_is_primary` and unmapped reads.** `alignment_is_primary` intentionally matches the SAM spec's definition of the *primary line*: the one line per read with neither the SECONDARY (0x100) nor SUPPLEMENTARY (0x800) bit set (`FLAG & 0x900 == 0`). The spec guarantees exactly one such line per read, and that line exists **whether or not the read is mapped** — so `alignment_is_primary(flags)` is `true` for an unmapped read (`flags = 0x4`). This is consistent with the SAM specification and with HTSlib/samtools. If you actually want "a mapped primary alignment", use `alignment_is_mapped_primary(flags)` (or spell out `alignment_is_primary(flags) AND NOT alignment_is_unmapped(flags)`).
+
 **Example:**
 ```sql
 SELECT read_id, flags
 FROM read_alignments('alignments.sam')
-WHERE alignment_is_paired(flags)
-  AND NOT alignment_is_unmapped(flags);
+WHERE alignment_is_mapped_primary(flags);
 ```
 
 ### Per-base pileup
@@ -138,7 +141,7 @@ Slice alignment data from a table or view to a genomic region. Each alignment is
 
 **Required input columns:** `cigar` (VARCHAR), `position` (BIGINT), `stop_position` (BIGINT)
 
-**Output schema:** Same columns as found in the input table (from the recognized alignment column set), with adjusted values for overlapping reads.
+**Output schema:** Same columns as found in the input table (from the recognized alignment column set), with adjusted values for overlapping reads. The identifier columns `read_id`, `reference`, and `mate_reference` keep their input storage type — `VARCHAR`, `BIGINT`, or `UUID` — rather than being coerced to `VARCHAR`, so a `BIGINT`/`UUID` id round-trips through slicing unchanged (consistent with `align_minimap2`).
 
 **Behavior:**
 - Reads that don't overlap the region are excluded
@@ -147,6 +150,7 @@ Slice alignment data from a table or view to a genomic region. Each alignment is
 - Tags (`tag_as` through `tag_sa`) are set to NULL when trimming occurs
 - `template_length` is set to NULL when trimming occurs
 - `mapq` and mate fields are preserved
+- `read_id`, `reference`, and `mate_reference` must each be `VARCHAR`, `BIGINT`, or `UUID` if present; another type is rejected at bind time
 - If the input table has a `reference` column, all rows must have the same reference (single-region slicing)
 - Rows with NULL `cigar`, `position`, or `stop_position` are skipped
 
@@ -710,3 +714,58 @@ GROUP BY bin_id;
 ```
 
 **See also:** [`match_short_barcodes`](#barcode-matching), [`compute_pileup`](#per-base-pileup), [`extract_linked_amplicon`](utilities.md#extracting-linked-amplicons), and [`align_mafft`](alignment_multiple.md) — together these primitives compose into a long-read UMI consensus pipeline.
+
+### Worked example: joint identity filtering of concordant read pairs
+
+A per-row identity filter breaks paired-end data: `WHERE cigar_sequence_identity(cigar) >= 0.99` is evaluated one alignment at a time, so it can keep one mate and drop the other, leaving orphaned half-pairs. This recipe applies an identity threshold to the **pair as a unit** — both mates of a concordant alignment are kept or dropped together — using a windowed `QUALIFY` instead of a `WHERE`.
+
+**Applies to** any concordant paired-end alignment source with extended (`=`/`X`) CIGAR: `read_alignments()` on a paired BAM, [`align_bowtie2`](alignment_reference.md#bowtie2), or `align_bowtie2_sharded`. The aligner must emit `=`/`X` ops (`--xeq` / `xeq := true`) so `cigar_sequence_identity` can work from the CIGAR alone; a legacy `M`-only CIGAR yields NULL. Run with `no_discordant`/`no_mixed` (or otherwise restrict to concordant pairs) so every emitted record is part of a mapped pair.
+
+**The pair key.** Group the two mate rows of one concordant placement with:
+
+```sql
+PARTITION BY read_id, reference,
+             LEAST(position, mate_position),
+             GREATEST(position, mate_position)
+```
+
+- `read_id` is shared by both mates (QNAME); `reference` is the shared contig of a concordant pair.
+- The two mate rows carry `position`/`mate_position` **swapped** (mate 1: `pos=P1, mate_pos=P2`; mate 2: `pos=P2, mate_pos=P1`). `LEAST`/`GREATEST` normalizes both to the same unordered coordinate pair `{P1, P2}` so they land in the same partition.
+- With `report_all`, a read pair can align concordantly at several places. bowtie2 emits each placement as its own self-consistent 2-record pair (duplicating the shared mate, secondary bit set on extras), so each placement gets a distinct `{P1, P2}` and is judged independently.
+
+**Choosing the pair-level metric.** Each partition holds exactly the two mates, so the aggregate reduces to a two-value combine:
+
+| Intent | Aggregate in `QUALIFY` |
+|---|---|
+| Both mates must pass (strict) | `MIN(cigar_sequence_identity(cigar)) OVER pair >= t` |
+| At least one mate passes | `MAX(cigar_sequence_identity(cigar)) OVER pair >= t` |
+| Mean of the two mate identities (equal weight per mate) | `AVG(cigar_sequence_identity(cigar)) OVER pair >= t` |
+| Fragment-pooled identity (weighted by aligned length) | `cigar_sequence_identity(string_agg(cigar, '') OVER pair) >= t` |
+
+The pooled form concatenates the two CIGARs and scores them as one alignment; because `cigar_sequence_identity` is additive over CIGAR ops (`#= / (M+I+D)`), this is exactly `(matches₁+matches₂)/(cols₁+cols₂)`. It differs from `AVG` only when the two mates align over different numbers of columns (the longer mate gets more weight) — the correct behavior when read/aligned lengths are unequal.
+
+**Example** — keep only concordant pairs whose fragment-pooled identity is ≥ 0.99:
+
+```sql
+WITH aln AS (
+  SELECT * FROM align_bowtie2_sharded('reads',
+    shard_directory := 'shards', read_to_shard := 'read_to_shard',
+    report_all := true, xeq := true,
+    no_discordant := true, no_mixed := true /* , other bowtie2 params ... */)
+)
+SELECT *
+FROM aln
+QUALIFY cigar_sequence_identity(
+          string_agg(cigar, '') OVER (
+            PARTITION BY read_id, reference,
+                         LEAST(position, mate_position),
+                         GREATEST(position, mate_position))
+        ) >= 0.99;
+```
+
+**Gotchas:**
+- `string_agg(cigar, '')` — the empty separator is required. The default separator is a comma, which injects `,` into the concatenated CIGAR and raises `Invalid CIGAR string`.
+- Clause order: `QUALIFY` must come **after** any named `WINDOW` clause. To avoid the ordering entirely, inline the window with `OVER ( ... )` as above.
+- `string_agg` skips NULL CIGARs, so the pooled form silently degrades to a single-mate identity if one mate is unmapped — safe under `no_mixed`/`no_discordant` (both mates always mapped), but add a guard if you relax those.
+- This filter is a partitioned window aggregate (roughly one pass over the data); it scales linearly and comfortably handles tens of millions of alignment rows.
+

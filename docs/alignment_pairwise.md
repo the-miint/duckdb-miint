@@ -19,10 +19,12 @@ NULL inputs produce NULL output. Alignment failure (e.g., z-drop early terminati
 
 | Family | Backend | Score semantic | CIGAR ops | Pick when |
 |---|---|---|---|---|
-| `align_pairwise_wfa2_*` | WFA2-lib (Wavefront) | Penalty: `0` = identical, larger = more divergent | Extended (`=` / `X`) | Short to long DNA; want match/mismatch distinguished in CIGAR |
-| `align_pairwise_ksw2_*` | KSW2 `ksw_extz2_sse` (SIMD banded DP) | Native positive: identical = `qlen * match` | Standard (`M` lumps match and mismatch) | General DNA alignment; optional bandwidth / z-drop tuning |
-| `align_pairwise_ksw2_dual_affine_*` | KSW2 `ksw_extd2_sse` | Native positive | `M`, `I`, `D` | Long-read alignment; long indels amortize over a second affine pair |
-| `align_pairwise_ksw2_splice_*` | KSW2 `ksw_exts2_sse` | Native positive | `M`, `I`, `D`, `N` (intron skip) | Splice-aware (RNA-seq); intron-open penalty + non-canonical-boundary penalty |
+| `align_pairwise_wfa2_*` | WFA2-lib (Wavefront) | Penalty: `0` = identical, larger = more divergent | Extended (`=` / `X`) | Short to long DNA; exact gap-affine global alignment |
+| `align_pairwise_ksw2_*` | KSW2 `ksw_extz2_sse` (SIMD banded DP) | Native positive: identical = `qlen * match` | Extended (`=` / `X`, plus `I` / `D`) | General DNA alignment; optional bandwidth / z-drop tuning |
+| `align_pairwise_ksw2_dual_affine_*` | KSW2 `ksw_extd2_sse` | Native positive | `=`, `X`, `I`, `D` | Long-read alignment; long indels amortize over a second affine pair |
+| `align_pairwise_ksw2_splice_*` | KSW2 `ksw_exts2_sse` | Native positive | `=`, `X`, `I`, `D`, `N` (intron skip) | Splice-aware (RNA-seq); intron-open penalty + non-canonical-boundary penalty |
+
+All families emit **extended** CIGAR (`=` for match, `X` for mismatch). KSW2 natively produces only `M`; the `_cigar` and `_full` outputs run an eqx post-pass that splits each `M` into `=` / `X` by comparing the aligned bases (case-insensitive, so soft-masked lowercase bases are not counted as mismatches). This means sequence identity can be read directly off any family's CIGAR with `cigar_sequence_identity`.
 
 WFA2 scores and KSW2 scores are on different scales -- WFA2 is penalty-style (lower is better, identical = 0), KSW2 is additive (higher is better, positive contributions from matches). Do not compare scores across families.
 
@@ -85,7 +87,7 @@ SELECT (align_pairwise_wfa2_full('ACGT', 'AGT')).query_aligned,
 
 ## KSW2 extz (standard affine)
 
-Standard affine extension alignment via `ksw_extz2_sse` (bundled inside [minimap2](https://github.com/lh3/minimap2)). Scores are native positive: an identical alignment scores `qlen * match`, and mismatches/gaps subtract. The CIGAR is standard (`M` lumps match and mismatch together).
+Standard affine extension alignment via `ksw_extz2_sse` (bundled inside [minimap2](https://github.com/lh3/minimap2)). Scores are native positive: an identical alignment scores `qlen * match`, and mismatches/gaps subtract. The `_cigar` / `_full` outputs use the extended alphabet (`=` match, `X` mismatch): KSW2 natively emits `M`, and an eqx post-pass splits each `M` into `=` / `X`.
 
 Functions: `align_pairwise_ksw2_score`, `align_pairwise_ksw2_cigar`, `align_pairwise_ksw2_full`.
 
@@ -118,7 +120,7 @@ SELECT align_pairwise_ksw2_score(query, subject, 2, 4, 6, 2, 100, 400);
 
 **Behavior:**
 - Score is native positive: an identical alignment scores `qlen * match`.
-- CIGAR is standard: `M` lumps match and mismatch together.
+- CIGAR uses the extended alphabet (`=` / `X`); KSW2's native `M` is split into `=` / `X` by an eqx post-pass.
 - NULL inputs produce NULL output; alignment failure (e.g., z-drop early termination) produces NULL.
 - Penalty parameters must be constant values, not column references.
 
@@ -126,7 +128,7 @@ SELECT align_pairwise_ksw2_score(query, subject, 2, 4, 6, 2, 100, 400);
 ```sql
 SELECT align_pairwise_ksw2_score('ACGT', 'ACGT');           -- 8  (4 * match=2)
 SELECT align_pairwise_ksw2_score('ACGT', 'ACAT');           -- 2  (3*2 - 4)
-SELECT (align_pairwise_ksw2_cigar('ACGT', 'ACAT')).cigar;   -- 4M (KSW2 lumps match/mismatch)
+SELECT (align_pairwise_ksw2_cigar('ACGT', 'ACAT')).cigar;   -- 2=1X1= (eqx post-pass splits M into =/X)
 ```
 
 **Error conditions:**
@@ -167,7 +169,7 @@ SELECT align_pairwise_ksw2_dual_affine_score(query, subject, 2, 4, 6, 2, 24, 1, 
 
 **Behavior:**
 - Score is native positive (same scale as the extz family).
-- CIGAR ops are `M`, `I`, `D`.
+- CIGAR ops are `=`, `X`, `I`, `D` (eqx post-pass splits KSW2's native `M`).
 - For each gap of length `L`, the cheaper of `gap_open + L*gap_extend` and `gap_open2 + L*gap_extend2` is chosen.
 - NULL inputs produce NULL output; alignment failure produces NULL.
 - Penalty parameters must be constant values, not column references.
@@ -223,8 +225,8 @@ SELECT align_pairwise_ksw2_splice_score(query, subject, 2, 4, 6, 2, 24, 9, -1);
 
 **Behavior:**
 - Score is native positive (same scale as the extz family).
-- CIGAR ops are `M`, `I`, `D`, and `N` (intron skip).
-- The `_full` aligned-sequence output renders `N` (intron-skip) the same as `D` -- the intron appears as gap characters in `query_aligned`, with the corresponding subject bases in `subject_aligned`. The CIGAR string preserves the `M` vs `N` distinction for downstream consumers.
+- CIGAR ops are `=`, `X`, `I`, `D`, and `N` (intron skip); the eqx post-pass splits `M` into `=` / `X`.
+- The `_full` aligned-sequence output renders `N` (intron-skip) the same as `D` -- the intron appears as gap characters in `query_aligned`, with the corresponding subject bases in `subject_aligned`. The CIGAR string preserves the aligned-op (`=` / `X`) vs `N` distinction for downstream consumers.
 - Forward-strand splice flag (`KSW_EZ_SPLICE_FOR`) is fixed in v1; no junction guidance is available.
 - NULL inputs produce NULL output; alignment failure produces NULL.
 - Penalty parameters must be constant values, not column references.
