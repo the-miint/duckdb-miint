@@ -929,6 +929,141 @@ void NewickTree::insert_fully_resolved(const std::vector<Placement> &placements)
 // Modification
 // ============================================================================
 
+NewickTree NewickTree::shear(const std::unordered_set<std::string> &keep_names, bool collapse,
+                             bool ignore_missing) const {
+	const uint32_t n = static_cast<uint32_t>(nodes_.size());
+
+	// Map tip name -> tip node indices (only leaves; internal labels do not
+	// count as tips). Duplicate tip labels map to multiple indices.
+	std::unordered_map<std::string_view, std::vector<uint32_t>> tip_name_to_indices;
+	for (uint32_t i = 0; i < n; ++i) {
+		if (nodes_[i].children.empty()) {
+			tip_name_to_indices[nodes_[i].name].push_back(i);
+		}
+	}
+
+	// Upward closure: mark every kept tip and all of its ancestors. Early-stop
+	// when we reach an already-marked node keeps this O(num_nodes) overall.
+	std::vector<bool> marked(n, false);
+	std::vector<std::string> missing;
+	size_t kept_tip_count = 0;
+	for (const auto &want : keep_names) {
+		auto it = tip_name_to_indices.find(want);
+		if (it == tip_name_to_indices.end()) {
+			missing.push_back(want);
+			continue;
+		}
+		for (uint32_t tip : it->second) {
+			++kept_tip_count;
+			uint32_t cur = tip;
+			while (cur != NO_PARENT && !marked[cur]) {
+				marked[cur] = true;
+				cur = nodes_[cur].parent;
+			}
+		}
+	}
+
+	if (!missing.empty() && !ignore_missing) {
+		std::sort(missing.begin(), missing.end());
+		std::string msg =
+		    "shear: " + std::to_string(missing.size()) + " requested tip name(s) not found as tips in the tree: ";
+		constexpr size_t cap = 10;
+		for (size_t i = 0; i < missing.size() && i < cap; ++i) {
+			if (i > 0) {
+				msg += ", ";
+			}
+			msg += "'" + missing[i] + "'";
+		}
+		if (missing.size() > cap) {
+			msg += ", ... (" + std::to_string(missing.size() - cap) + " more)";
+		}
+		throw std::runtime_error(msg);
+	}
+
+	if (kept_tip_count == 0) {
+		throw std::runtime_error("shear: no tips from the requested set matched a tip in the tree");
+	}
+
+	std::vector<NodeInput> out;
+	out.reserve(n);
+
+	if (!collapse) {
+		// Preserve every marked node with its original structure. Emitting in
+		// ascending original-index order keeps parents defined and gives the
+		// rebuilt tree a stable node ordering.
+		for (uint32_t i = 0; i < n; ++i) {
+			if (!marked[i]) {
+				continue;
+			}
+			NodeInput ni;
+			ni.node_id = static_cast<int64_t>(i);
+			ni.parent_id = (nodes_[i].parent == NO_PARENT) ? std::optional<int64_t>(std::nullopt)
+			                                               : std::optional<int64_t>(nodes_[i].parent);
+			ni.name = nodes_[i].name;
+			ni.branch_length = nodes_[i].branch_length;
+			ni.edge_id = nodes_[i].edge_id;
+			out.push_back(std::move(ni));
+		}
+		return build(out);
+	}
+
+	// collapse=true: a marked node is "retained" iff it is a tip or has >= 2
+	// marked children; single-child internal nodes are dropped and their edges
+	// merged. Count marked children (every marked non-root node's parent is
+	// marked, by construction of the upward closure).
+	std::vector<uint32_t> marked_child_count(n, 0);
+	for (uint32_t i = 0; i < n; ++i) {
+		if (marked[i] && nodes_[i].parent != NO_PARENT) {
+			++marked_child_count[nodes_[i].parent];
+		}
+	}
+	auto retained = [&](uint32_t node) -> bool {
+		return marked[node] && (nodes_[node].children.empty() || marked_child_count[node] >= 2);
+	};
+
+	for (uint32_t i = 0; i < n; ++i) {
+		if (!retained(i)) {
+			continue;
+		}
+
+		// Walk up through the collapsed (single-child) intermediates to the
+		// nearest retained ancestor, summing branch lengths onto the surviving
+		// edge. NaN (unspecified) contributes 0, but an all-NaN chain stays NaN
+		// so topology-only trees are preserved.
+		double acc = 0.0;
+		bool any_finite = false;
+		auto add_bl = [&](double v) {
+			if (!std::isnan(v)) {
+				acc += v;
+				any_finite = true;
+			}
+		};
+		add_bl(nodes_[i].branch_length); // edge i -> parent(i)
+		uint32_t cur = nodes_[i].parent;
+		while (cur != NO_PARENT && !retained(cur)) {
+			add_bl(nodes_[cur].branch_length);
+			cur = nodes_[cur].parent;
+		}
+
+		NodeInput ni;
+		ni.node_id = static_cast<int64_t>(i);
+		ni.name = nodes_[i].name;
+		ni.edge_id = nodes_[i].edge_id;
+		if (cur == NO_PARENT) {
+			// No retained ancestor -> this is the LCA of the kept tips, i.e. the
+			// new root. It has no incoming edge, so its branch length is dropped.
+			ni.parent_id = std::nullopt;
+			ni.branch_length = std::numeric_limits<double>::quiet_NaN();
+		} else {
+			ni.parent_id = static_cast<int64_t>(cur);
+			ni.branch_length = any_finite ? acc : std::numeric_limits<double>::quiet_NaN();
+		}
+		out.push_back(std::move(ni));
+	}
+
+	return build(out);
+}
+
 uint32_t NewickTree::add_node(const std::string &name, double branch_length, std::optional<int64_t> edge_id) {
 	if (nodes_.size() >= MAX_NODES) {
 		throw std::runtime_error("Tree too large: exceeds maximum of " + std::to_string(MAX_NODES) + " nodes");

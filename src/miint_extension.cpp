@@ -14,6 +14,7 @@
 #include <copy_sam.hpp>
 #include <read_jplace_newick.hpp>
 #include <read_newick.hpp>
+#include <shear_tree.hpp>
 #include <tree_resolve_placement.hpp>
 #include <kseq++/seqio.hpp>
 #include <read_fastx.hpp>
@@ -263,6 +264,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadNewickTableFunction::Register(loader);
 	ReadJplaceNewickTableFunction::Register(loader);
 	TreeResolvePlacementTableFunction::Register(loader);
+	ShearTreeTableFunction::Register(loader);
 	AlignMinimap2TableFunction::Register(loader);
 	AlignMinimap2ShardedTableFunction::Register(loader);
 	SaveMinimap2IndexTableFunction::Register(loader);

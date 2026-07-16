@@ -3,6 +3,7 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
 
@@ -38,6 +39,16 @@ TableOrViewColumns GetTableOrViewColumns(ClientContext &context, const std::stri
 	}
 
 	return result;
+}
+
+bool HasColumn(const TableOrViewColumns &columns, const std::string &col) {
+	auto target = StringUtil::Lower(col);
+	for (const auto &name : columns.names) {
+		if (StringUtil::Lower(name) == target) {
+			return true;
+		}
+	}
+	return false;
 }
 
 } // namespace duckdb

@@ -1,0 +1,255 @@
+# name: test/sql/shear_tree.test
+# description: Test shear_tree table function (subset a tree to a set of tips)
+# group: [sql]
+
+require miint
+
+# =============================================================================
+# Setup — the same tree used by test/cpp/test_ShearTree.cpp:
+#   (((A:1,B:2)G:3,C:4)H:5,(D:6,E:7)I:8)root;
+# stored in read_newick edge-list form.
+# =============================================================================
+
+statement ok
+CREATE TABLE t AS SELECT * FROM (VALUES
+    (0, 'A',    1.0, CAST(NULL AS BIGINT), 2),
+    (1, 'B',    2.0, NULL, 2),
+    (2, 'G',    3.0, NULL, 4),
+    (3, 'C',    4.0, NULL, 4),
+    (4, 'H',    5.0, NULL, 8),
+    (5, 'D',    6.0, NULL, 7),
+    (6, 'E',    7.0, NULL, 7),
+    (7, 'I',    8.0, NULL, 8),
+    (8, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE tips_abc AS SELECT * FROM (VALUES ('A'), ('B'), ('C')) AS v(name);
+
+statement ok
+CREATE TABLE tips_ad AS SELECT * FROM (VALUES ('A'), ('D')) AS v(name);
+
+# =============================================================================
+# collapse=true (default): remove single-descendant ancestors, sum lengths
+# =============================================================================
+
+# Keep A,B,C -> root collapses (single kept child H), H becomes the new root.
+query TTR
+SELECT s.name, p.name AS parent_name, s.branch_length
+FROM shear_tree('t', 'tips_abc') s
+LEFT JOIN shear_tree('t', 'tips_abc') p ON s.parent_index = p.node_index
+ORDER BY s.name;
+----
+A	G	1.0
+B	G	2.0
+C	H	4.0
+G	H	3.0
+H	NULL	NULL
+
+# Omitting the collapse param must behave identically to collapse:=true.
+query I
+SELECT count(*) FROM shear_tree('t', 'tips_abc', collapse := true);
+----
+5
+
+# Branch lengths are summed across the collapsed chain: A->G->H->root = 1+3+5=9,
+# D->I->root = 6+8=14. LCA of {A,D} is the root, which survives.
+query TTR
+SELECT s.name, p.name AS parent_name, s.branch_length
+FROM shear_tree('t', 'tips_ad') s
+LEFT JOIN shear_tree('t', 'tips_ad') p ON s.parent_index = p.node_index
+ORDER BY s.name;
+----
+A	root	9.0
+D	root	14.0
+root	NULL	NULL
+
+# is_tip is emitted (read_newick-compatible): A,C are tips; G,H are internal.
+query TT
+SELECT name, is_tip FROM shear_tree('t', 'tips_abc') ORDER BY name;
+----
+A	true
+B	true
+C	true
+G	false
+H	false
+
+# =============================================================================
+# collapse=false: preserve every ancestor on the kept paths
+# =============================================================================
+
+# Same tips A,B,C, but now the unifurcation 'root' (single child H) is retained.
+query TTR
+SELECT s.name, p.name AS parent_name, s.branch_length
+FROM shear_tree('t', 'tips_abc', collapse := false) s
+LEFT JOIN shear_tree('t', 'tips_abc', collapse := false) p ON s.parent_index = p.node_index
+ORDER BY s.name;
+----
+A	G	1.0
+B	G	2.0
+C	H	4.0
+G	H	3.0
+H	root	5.0
+root	NULL	NULL
+
+# =============================================================================
+# Trifurcating (unrooted) root — the shape phylogeny_fasttree emits
+# =============================================================================
+
+statement ok
+CREATE TABLE tri AS SELECT * FROM (VALUES
+    (0, 'A',    1.0, CAST(NULL AS BIGINT), 6),
+    (1, 'B',    2.0, NULL, 6),
+    (2, 'C',    4.0, NULL, 7),
+    (3, 'D',    5.0, NULL, 7),
+    (4, 'E',    7.0, NULL, 8),
+    (5, 'X',    8.0, NULL, 8),
+    (6, 'F',    3.0, NULL, 9),
+    (7, 'G',    6.0, NULL, 9),
+    (8, 'I',    9.0, NULL, 9),
+    (9, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE tips_ace AS SELECT * FROM (VALUES ('A'), ('C'), ('E')) AS v(name);
+
+# One kept tip per subtree: each subtree collapses to a unifurcation and merges
+# away, but the root keeps 3 children so the trifurcation survives. Branch
+# lengths sum across the collapsed subtrees (A:1+3, C:4+6, E:7+9).
+query TTR
+SELECT s.name, p.name AS parent_name, s.branch_length
+FROM shear_tree('tri', 'tips_ace') s
+LEFT JOIN shear_tree('tri', 'tips_ace') p ON s.parent_index = p.node_index
+ORDER BY s.name;
+----
+A	root	4.0
+C	root	10.0
+E	root	16.0
+root	NULL	NULL
+
+# =============================================================================
+# Views work for both inputs
+# =============================================================================
+
+statement ok
+CREATE VIEW tips_abc_v AS SELECT name FROM tips_abc WHERE name IN ('A', 'B', 'C');
+
+statement ok
+CREATE VIEW tree_v AS SELECT * FROM t;
+
+query I
+SELECT count(*) FROM shear_tree('tree_v', 'tips_abc_v');
+----
+5
+
+# =============================================================================
+# Optional tree columns may be absent (branch_length / edge_id)
+# =============================================================================
+
+# A tree table with only node_index/name/parent_index must work: the reader
+# substitutes NULL for the missing branch_length/edge_id columns instead of
+# failing at read time. With no branch lengths, the collapsed edges stay NULL.
+statement ok
+CREATE TABLE t_min AS SELECT node_index, name, parent_index FROM t;
+
+query TR
+SELECT name, branch_length FROM shear_tree('t_min', 'tips_abc') ORDER BY name;
+----
+A	NULL
+B	NULL
+C	NULL
+G	NULL
+H	NULL
+
+# =============================================================================
+# read_newick schema compatibility + COPY NEWICK round-trip
+# =============================================================================
+
+statement ok
+COPY (
+    SELECT node_index, name, branch_length, edge_id, parent_index
+    FROM shear_tree('t', 'tips_abc')
+) TO '__TEST_DIR__/sheared.nwk' (FORMAT NEWICK);
+
+query I
+SELECT count(*) FROM read_newick('__TEST_DIR__/sheared.nwk');
+----
+5
+
+# Output columns are UNION ALL-compatible with read_newick.
+statement ok
+SELECT node_index, name, branch_length, edge_id, parent_index, is_tip
+    FROM read_newick('__TEST_DIR__/sheared.nwk')
+UNION ALL
+SELECT * FROM shear_tree('t', 'tips_abc');
+
+# =============================================================================
+# Missing-tip policy
+# =============================================================================
+
+statement ok
+CREATE TABLE tips_missing AS SELECT * FROM (VALUES ('A'), ('ZZZ')) AS v(name);
+
+# Strict by default: a requested tip absent from the tree is an error.
+statement error
+SELECT * FROM shear_tree('t', 'tips_missing');
+----
+ZZZ
+
+# ignore_missing:=true skips the absent name and keeps the rest (just A).
+query T
+SELECT name FROM shear_tree('t', 'tips_missing', ignore_missing := true);
+----
+A
+
+# An internal-node label is not a tip -> treated as missing.
+statement ok
+CREATE TABLE tips_internal AS SELECT * FROM (VALUES ('G')) AS v(name);
+
+statement error
+SELECT * FROM shear_tree('t', 'tips_internal');
+----
+G
+
+# Nothing matches at all -> error even with ignore_missing.
+statement ok
+CREATE TABLE tips_none AS SELECT * FROM (VALUES ('ZZZ'), ('QQQ')) AS v(name);
+
+statement error
+SELECT * FROM shear_tree('t', 'tips_none', ignore_missing := true);
+----
+no tips
+
+# =============================================================================
+# Error cases: bad tables/columns
+# =============================================================================
+
+# Nonexistent tree table
+statement error
+SELECT * FROM shear_tree('no_tree', 'tips_abc');
+----
+does not exist
+
+# Nonexistent tips table
+statement error
+SELECT * FROM shear_tree('t', 'no_tips');
+----
+does not exist
+
+# Tree table missing required node_index/parent_index columns
+statement ok
+CREATE TABLE bad_tree AS SELECT 1 AS x;
+
+statement error
+SELECT * FROM shear_tree('bad_tree', 'tips_abc');
+----
+node_index
+
+# Tips table missing required 'name' column
+statement ok
+CREATE TABLE bad_tips AS SELECT 1 AS x;
+
+statement error
+SELECT * FROM shear_tree('t', 'bad_tips');
+----
+name

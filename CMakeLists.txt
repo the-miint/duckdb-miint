@@ -1137,6 +1137,7 @@ set(EXTENSION_SOURCES
     src/read_newick.cpp
     src/tree_table_reader.cpp
     src/tree_resolve_placement.cpp
+    src/shear_tree.cpp
     src/copy_newick.cpp
     src/Minimap2Aligner.cpp
     src/sequence_table_reader.cpp
@@ -1623,6 +1624,7 @@ set(TEST_SOURCES
     src/NewickTree.cpp
     test/cpp/test_NewickParser.cpp
     test/cpp/test_InsertFullyResolved.cpp
+    test/cpp/test_ShearTree.cpp
     src/Minimap2Aligner.cpp
     test/cpp/test_Minimap2Aligner.cpp
     test/cpp/test_AlignBowtie2Sharded.cpp

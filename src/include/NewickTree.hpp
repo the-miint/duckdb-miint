@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace miint {
@@ -189,6 +190,32 @@ public:
 	//
 	// Throws if edge_id not found or distal_length exceeds edge length
 	void insert_fully_resolved(const std::vector<Placement> &placements);
+
+	// ========================================================================
+	// Subsetting (shear / prune to a set of tips)
+	// ========================================================================
+
+	// Return a new tree restricted to the tips named in `keep_names`.
+	//
+	// - collapse=false: keep every ancestor of a kept tip. Original parent
+	//   links, branch lengths, names, and edge ids are preserved; only nodes
+	//   that lie on no kept root-path are dropped. Internal nodes left with a
+	//   single child are retained (unifurcations preserved).
+	// - collapse=true: additionally remove single-child internal nodes, summing
+	//   their branch lengths onto the surviving descendant edge. The lowest
+	//   common ancestor of the kept tips becomes the new root (nodes above it
+	//   are dropped). A collapsed edge keeps the surviving (lower) node's
+	//   edge_id; merged intermediate edge_ids are dropped. Branch-length
+	//   summation treats NaN (unspecified) as 0, but a chain that is entirely
+	//   NaN stays NaN (topology-only trees are preserved).
+	//
+	// `keep_names` is matched against tip names only (internal-node labels do
+	// not count). A name matching no tip is "missing": if ignore_missing is
+	// false, throws std::runtime_error listing the missing names; otherwise the
+	// missing names are skipped. Throws std::runtime_error if no tip matches.
+	//
+	// The returned tree's node indices are reassigned 0-based (as with build()).
+	NewickTree shear(const std::unordered_set<std::string> &keep_names, bool collapse, bool ignore_missing) const;
 
 	// ========================================================================
 	// Modification (for insert_fully_resolved)
