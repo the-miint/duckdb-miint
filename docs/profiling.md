@@ -238,3 +238,4 @@ FROM sylph_profile('reads', '/refs/gtdb-r220-c200-dbv1.syldb',
 - [Writing files](writing.md) — exporting a feature table to BIOM.
 - [Alpha and beta diversity](diversity.md) — consuming the long-form feature table produced here.
 - [Taxonomic classification](classification.md) — per-sequence k-mer classification with RYpe.
+- [NCBI taxonomy](insdc_ncbi.md#taxonomy) — resolve taxids in a feature table to ranks, names, and full lineages (`read_ncbi_taxdump`, `taxonomy_lineage`, `read_ncbi_lineage`).

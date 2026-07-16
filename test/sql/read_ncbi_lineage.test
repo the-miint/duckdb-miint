@@ -1,0 +1,43 @@
+# name: test/sql/read_ncbi_lineage.test
+# description: Test read_ncbi_lineage table function (E-utilities db=taxonomy)
+# group: [sql]
+
+# NOTE: This test requires network access to NCBI servers.
+# Fetch once into a temp table to minimize NCBI requests.
+
+require httpfs
+
+require miint
+
+statement ok
+CREATE TEMP TABLE lin AS SELECT * FROM read_ncbi_lineage([9606, 562]);
+
+# Both taxids resolve.
+query I
+SELECT COUNT(*) FROM lin;
+----
+2
+
+# The shared lineage schema has 12 columns.
+query I
+SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM lin);
+----
+12
+
+# Homo sapiens (superkingdom/domain -> domain column regardless of NCBI's rank string).
+query TTTTT
+SELECT name, rank, domain, genus, species FROM lin WHERE taxid = 9606;
+----
+Homo sapiens	species	Eukaryota	Homo	Homo sapiens
+
+# Escherichia coli.
+query TTTTT
+SELECT name, rank, domain, genus, species FROM lin WHERE taxid = 562;
+----
+Escherichia coli	species	Bacteria	Escherichia	Escherichia coli
+
+# The formatted lineage string is present and rank-prefixed.
+query I
+SELECT COUNT(*) FROM lin WHERE starts_with(lineage, 'd__');
+----
+2

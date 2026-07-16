@@ -1089,7 +1089,7 @@ endif()
 set(RYPE_LIB_PATH ${GLUE_LIB_PATH})
 
 # adapted kseq++ include use from strobealign
-include_directories(src/include ext ext/WFA2-lib ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype)
+include_directories(src/include third_party/microtar ext ext/WFA2-lib ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype)
 if(MIINT_ENABLE_SYLPH)
     include_directories(${CMAKE_CURRENT_SOURCE_DIR}/ext/sylph)
 endif()
@@ -1146,6 +1146,10 @@ set(EXTENSION_SOURCES
     src/save_minimap2_index.cpp
     src/ncbi_parser.cpp
     src/ncbi_client.cpp
+    src/taxdump_parser.cpp
+    src/taxdump_archive.cpp
+    src/taxonomy_lineage.cpp
+    third_party/microtar/microtar.c
     src/blast_parser.cpp
     src/blast_client.cpp
     src/blast_search.cpp
@@ -1153,6 +1157,10 @@ set(EXTENSION_SOURCES
     src/read_ncbi_fasta.cpp
     src/read_ncbi.cpp
     src/read_ncbi_annotation.cpp
+    src/read_ncbi_taxdump.cpp
+    src/read_ncbi_lineage.cpp
+    src/miint_cache.cpp
+    src/ensure_httpfs.cpp
     src/ena_parser.cpp
     src/ena_client.cpp
     src/ena_run_info_extractor.cpp
@@ -1625,6 +1633,13 @@ set(TEST_SOURCES
     test/cpp/test_ncbi_client.cpp
     src/blast_parser.cpp
     test/cpp/test_blast_parser.cpp
+    src/taxdump_parser.cpp
+    test/cpp/test_taxdump_parser.cpp
+    src/taxdump_archive.cpp
+    third_party/microtar/microtar.c
+    test/cpp/test_taxdump_archive.cpp
+    src/taxonomy_lineage.cpp
+    test/cpp/test_taxonomy_lineage.cpp
     src/ena_parser.cpp
     src/ena_run_info_extractor.cpp
     src/ena_resolver_cache.cpp

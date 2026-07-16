@@ -1,0 +1,107 @@
+# name: test/sql/taxonomy_lineage.test
+# description: taxonomy_lineage macro rank-collapses a taxdump tree into the shared lineage schema
+# group: [sql]
+
+require miint
+
+# --- shared lineage schema (must match read_ncbi_lineage exactly) -----------
+
+query TT
+SELECT column_name, column_type
+FROM (DESCRIBE SELECT * FROM taxonomy_lineage(taxids := [1], source := 'data/taxonomy/synthetic'));
+----
+taxid	BIGINT
+name	VARCHAR
+rank	VARCHAR
+domain	VARCHAR
+phylum	VARCHAR
+class	VARCHAR
+order	VARCHAR
+family	VARCHAR
+genus	VARCHAR
+species	VARCHAR
+strain	VARCHAR
+lineage	VARCHAR
+
+# --- full 8-rank lineage (strain); legacy 'superkingdom' collapses to domain -
+# PARITY PIN: this taxid-90 row is byte-for-byte the golden asserted for the online
+# path in test/cpp/test_taxonomy_lineage.cpp ("online==offline"). Keep them in lockstep.
+
+query ITTTTTTTTTTT
+SELECT * FROM taxonomy_lineage(taxids := [90], source := 'data/taxonomy/synthetic');
+----
+90	Escherichia coli K-12	strain	Bacteria	Pseudomonadota	Gammaproteobacteria	Enterobacterales	Enterobacteriaceae	Escherichia	Escherichia coli	Escherichia coli K-12	d__Bacteria;p__Pseudomonadota;c__Gammaproteobacteria;o__Enterobacterales;f__Enterobacteriaceae;g__Escherichia;s__Escherichia coli;t__Escherichia coli K-12
+
+# --- species: strain absent -> NULL column and no ;t__ segment ---------------
+
+query ITTTTTTTTTTT
+SELECT * FROM taxonomy_lineage(taxids := [80], source := 'data/taxonomy/synthetic');
+----
+80	Escherichia coli	species	Bacteria	Pseudomonadota	Gammaproteobacteria	Enterobacterales	Enterobacteriaceae	Escherichia	Escherichia coli	NULL	d__Bacteria;p__Pseudomonadota;c__Gammaproteobacteria;o__Enterobacterales;f__Enterobacteriaceae;g__Escherichia;s__Escherichia coli
+
+# --- newer 'domain' rank also collapses to the domain column -----------------
+
+query ITTTTTTTTTTT
+SELECT * FROM taxonomy_lineage(taxids := [21], source := 'data/taxonomy/synthetic');
+----
+21	Archaea	domain	Archaea	NULL	NULL	NULL	NULL	NULL	NULL	NULL	d__Archaea;p__;c__;o__;f__;g__;s__
+
+# --- a phylum under the 'domain'-ranked ancestor -----------------------------
+
+query ITTTTTTTTTTT
+SELECT * FROM taxonomy_lineage(taxids := [31], source := 'data/taxonomy/synthetic');
+----
+31	Euryarchaeota	phylum	Archaea	Euryarchaeota	NULL	NULL	NULL	NULL	NULL	NULL	d__Archaea;p__Euryarchaeota;c__;o__;f__;g__;s__
+
+# --- root: no standard ranks -> all columns NULL, lineage all-empty ----------
+
+query ITTTTTTTTTTT
+SELECT * FROM taxonomy_lineage(taxids := [1], source := 'data/taxonomy/synthetic');
+----
+1	root	no rank	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	d__;p__;c__;o__;f__;g__;s__
+
+# --- multiple taxids resolve independently -----------------------------------
+
+query IT
+SELECT taxid, species FROM taxonomy_lineage(taxids := [80, 90], source := 'data/taxonomy/synthetic')
+ORDER BY taxid;
+----
+80	Escherichia coli
+90	Escherichia coli
+
+# --- taxids := NULL (default) collapses every live node ----------------------
+
+query I
+SELECT COUNT(*) FROM taxonomy_lineage(source := 'data/taxonomy/synthetic');
+----
+12
+
+# --- a taxid absent from the tree yields no row (parity with read_ncbi_lineage omission)
+
+query I
+SELECT COUNT(*) FROM taxonomy_lineage(taxids := [999999], source := 'data/taxonomy/synthetic');
+----
+0
+
+# --- a ranked node with no scientific name collapses to NULL, not '' -----------
+# (matches read_ncbi_lineage's SetRankCell: empty rank name -> NULL column). In the
+# noname fixture, taxid 5 is a phylum with only a synonym, so its scientific name
+# is empty; the phylum column must be NULL while species (taxid 8, named) is set.
+
+query TT
+SELECT phylum, species FROM taxonomy_lineage(taxids := [8], source := 'data/taxonomy/noname');
+----
+NULL	Testus example
+
+# the empty phylum still renders as an empty segment (p__) in the formatted string
+query T
+SELECT lineage FROM taxonomy_lineage(taxids := [8], source := 'data/taxonomy/noname');
+----
+d__;p__;c__;o__;f__;g__;s__Testus example
+
+# --- a NULL inside the taxids list is rejected (parity with read_ncbi_lineage) ---
+
+statement error
+SELECT * FROM taxonomy_lineage(taxids := [90, NULL], source := 'data/taxonomy/synthetic');
+----
+taxids list cannot contain NULL

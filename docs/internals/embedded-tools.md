@@ -2,11 +2,12 @@
 
 How duckdb-miint embeds external libraries and tools. `CMakeLists.txt` is the source of truth; this file explains the *why* and the non-obvious gotchas.
 
-Four embedding categories:
+Five embedding categories:
 1. **Static libraries built from source** via `ExternalProject_Add`, linked into the extension
 2. **Header-only libraries** included directly
 3. **System/vcpkg libraries** via `find_package`
 4. **Runtime binaries** invoked via `fork`/`exec` (not compiled in)
+5. **Vendored source** compiled inline (a `.c`/`.h` pair added to the source lists)
 
 ## Feature Flags (CMake Options)
 
@@ -223,6 +224,16 @@ These are invoked via `fork`/`exec` at runtime; the extension links no code for 
 - SSH key auto-discovered at `~/.aspera/connect/etc/`, `$CONDA_PREFIX/etc/`, or downloaded from GitHub on demand
 - Uses `stdio://` and `stdio-tar://` protocols to stream directly to stdout (confirmed working with ENA FASP servers)
 - `read_ena_fastx` with `download_method='auto'` falls back to HTTP transparently when `ascp` isn't available
+
+## 5. Vendored Source (compiled inline)
+
+Small third-party sources dropped into the tree and compiled directly into the extension (added to both `EXTENSION_SOURCES` and `TEST_SOURCES`), rather than built as a separate `ExternalProject` or included header-only.
+
+### microtar 0.1.0
+- **Location:** `third_party/microtar/` (`microtar.c` + `microtar.h`, vendored verbatim from https://github.com/rxi/microtar; MIT, see `third_party/microtar/LICENSE` and `README.md`)
+- **Purpose:** read `.tar` members. Used by `src/taxdump_archive.cpp` to extract `nodes.dmp`/`names.dmp`/`merged.dmp`/`delnodes.dmp` from NCBI's `taxdump.tar.gz` for `read_ncbi_taxdump`.
+- **Build:** compiled as C directly into the extension; include path added via `include_directories(... third_party/microtar ...)`. No feature flag — always built (pure ANSI C, no platform deps).
+- **Layering:** microtar owns only the `.tar` layer; the `.gz` layer is inflated separately by the existing zlib helper before microtar reads the resulting tar bytes from an in-memory buffer via its stream callbacks. Only the read side of the API is exercised.
 
 ## Platform Link-Deps Summary
 

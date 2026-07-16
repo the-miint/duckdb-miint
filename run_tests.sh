@@ -202,6 +202,16 @@ if curl -sSf --max-time 3 -o /dev/null \
     export ENA_AVAILABLE=1
 fi
 
+# NCBI taxonomy dump reachability (opt-in integration test; the test downloads
+# ~60MB). Cache into a contained repo dir (not the user's ~/.cache/miint) so the
+# test is self-contained and re-runs hit the cache instead of re-downloading.
+if curl -sSf --max-time 10 -I -o /dev/null \
+        "https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz" 2>/dev/null; then
+    export MIINT_TAXDUMP_REMOTE=1
+    export MIINT_TAXONOMY_CACHE_DIR="$PWD/data/cache/taxonomy"
+    mkdir -p "$MIINT_TAXONOMY_CACHE_DIR"
+fi
+
 # ena_upload_reads streaming memory proof (opt-in, expensive). Uploads a
 # multi-GB lazy view to file:// under a tight memory_limit; the streaming
 # implementation completes in bounded memory whereas the old materialise-the-
