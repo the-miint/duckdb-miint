@@ -63,13 +63,18 @@ public:
 	// returns a WebEnv+QueryKey handle; efetch then reads all records in one call.
 	// This collapses an N-call sequence into 2 calls per batch and is the NCBI-
 	// recommended path for >1 accession.
-	EPostResult EPostIds(const std::vector<std::string> &accessions);
+	// `db` selects the Entrez database (default "nuccore"; "taxonomy" for taxid lineages).
+	EPostResult EPostIds(const std::vector<std::string> &accessions, const std::string &db = "nuccore");
 
 	// Batched fetch of FASTA / GenBank XML. Empty input is a no-op (returns "") so
 	// callers can pass already-partitioned lists (e.g. sequences vs. assemblies)
 	// without guarding the empty case.
 	std::string FetchFastaBatch(const std::vector<std::string> &accessions);
 	std::string FetchGenBankXMLBatch(const std::vector<std::string> &accessions);
+
+	// Batched fetch of taxonomy XML (db=taxonomy, retmode=xml) for a list of taxids.
+	// Empty input is a no-op (returns "").
+	std::string FetchTaxonomyXMLBatch(const std::vector<std::string> &taxids);
 
 	// Datasets API methods
 	std::string FetchAssemblyReport(const std::string &accession); // JSON metadata

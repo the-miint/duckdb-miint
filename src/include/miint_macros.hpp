@@ -802,6 +802,88 @@ const std::string INFER_TRIM = // NOLINT
     "       CASE WHEN matched IS NULL THEN NULL ELSE (olen - (p - 1) - qlen)::UINTEGER END AS trimmed_3p "
     "FROM validated; ";
 
+// taxonomy_lineage(taxids := NULL, source := NULL, refresh := false)
+//
+// Offline counterpart to read_ncbi_lineage: walks an NCBI taxdump tree (read via
+// read_ncbi_taxdump(source, refresh)) from each query taxon up to the root and
+// rank-collapses the path into the SHARED lineage schema, so the two functions are
+// drop-in interchangeable. `taxids` is a BIGINT[] of query taxa; NULL (default)
+// collapses every live node. `source`/`refresh` pass straight through to
+// read_ncbi_taxdump (NULL source => auto-download + cache the canonical NCBI dump).
+//
+// Rank -> column mapping is the single documented source of truth mirrored from
+// src/taxonomy_lineage.cpp: legacy 'superkingdom' and newer 'domain' both collapse
+// to `domain`; phylum/class/order/family/genus/species/strain map to like-named
+// columns; every other rank (clade, subspecies, no rank, ...) is dropped. The
+// formatted `lineage` renders d__;p__;c__;o__;f__;g__;s__ (empty where absent) and
+// appends ;t__<strain> only when a strain is present. Absent ranks are NULL in
+// their column but empty in the formatted string, matching read_ncbi_lineage.
+//
+// `tree` is MATERIALIZED so the (expensive) taxdump parse runs once, not once per
+// recursive iteration. A requested taxid absent from the tree yields no row (same
+// omission semantics as read_ncbi_lineage).
+const std::string TAXONOMY_LINEAGE = // NOLINT
+    "CREATE OR REPLACE MACRO taxonomy_lineage(taxids := NULL, source := NULL, refresh := false) AS TABLE "
+    "WITH RECURSIVE tree AS MATERIALIZED ( "
+    "    SELECT node_index, parent_index, name, rank "
+    "    FROM read_ncbi_taxdump(source, refresh := refresh) "
+    "), "
+    "seeds(q_taxid) AS ( "
+    "    SELECT node_index FROM tree WHERE taxids IS NULL "
+    "    UNION ALL "
+    // A NULL element in the taxids list is a user error; reject it row-wise via
+    // error() rather than silently dropping it (parity with read_ncbi_lineage,
+    // which throws "taxid list cannot contain NULL"). The check lives in the
+    // CASE THEN branch so it fires only for a NULL element, never when the list
+    // is clean or when taxids itself is NULL (then UNNEST yields no rows).
+    "    SELECT DISTINCT CASE WHEN v IS NULL "
+    "                         THEN error('taxonomy_lineage: taxids list cannot contain NULL') "
+    "                         ELSE v END "
+    "    FROM (SELECT UNNEST(taxids)::BIGINT AS v) "
+    "), "
+    "walk(q_taxid, cur, w_name, w_rank, w_parent) AS ( "
+    "    SELECT s.q_taxid, t.node_index, t.name, t.rank, t.parent_index "
+    "    FROM seeds s JOIN tree t ON t.node_index = s.q_taxid "
+    "    UNION ALL "
+    "    SELECT w.q_taxid, t.node_index, t.name, t.rank, t.parent_index "
+    "    FROM walk w JOIN tree t ON t.node_index = w.w_parent "
+    "), "
+    "collapsed AS ( "
+    "    SELECT "
+    "        q_taxid AS taxid, "
+    // name/rank of the query taxon itself: always emitted (never NULLed), even when
+    // empty, matching read_ncbi_lineage which always writes name/rank cells.
+    "        MAX(CASE WHEN cur = q_taxid THEN w_name END) AS name, "
+    "        MAX(CASE WHEN cur = q_taxid THEN w_rank END) AS rank, "
+    // Rank-collapse columns: NULLIF(..., '') so a node with no scientific name yields
+    // NULL, not '', matching read_ncbi_lineage's SetRankCell (empty -> NULL column).
+    // The formatted lineage below COALESCEs these back to '' so its segments are
+    // unaffected.
+    "        NULLIF(MAX(CASE WHEN w_rank IN ('superkingdom', 'domain') THEN w_name END), '') AS domain, "
+    "        NULLIF(MAX(CASE WHEN w_rank = 'phylum'  THEN w_name END), '') AS phylum, "
+    "        NULLIF(MAX(CASE WHEN w_rank = 'class'   THEN w_name END), '') AS \"class\", "
+    "        NULLIF(MAX(CASE WHEN w_rank = 'order'   THEN w_name END), '') AS \"order\", "
+    "        NULLIF(MAX(CASE WHEN w_rank = 'family'  THEN w_name END), '') AS family, "
+    "        NULLIF(MAX(CASE WHEN w_rank = 'genus'   THEN w_name END), '') AS genus, "
+    "        NULLIF(MAX(CASE WHEN w_rank = 'species' THEN w_name END), '') AS species, "
+    "        NULLIF(MAX(CASE WHEN w_rank = 'strain'  THEN w_name END), '') AS strain "
+    "    FROM walk "
+    "    GROUP BY q_taxid "
+    ") "
+    "SELECT "
+    "    taxid, name, rank, "
+    "    domain, phylum, \"class\", \"order\", family, genus, species, strain, "
+    "    'd__' || COALESCE(domain, '') || "
+    "    ';p__' || COALESCE(phylum, '') || "
+    "    ';c__' || COALESCE(\"class\", '') || "
+    "    ';o__' || COALESCE(\"order\", '') || "
+    "    ';f__' || COALESCE(family, '') || "
+    "    ';g__' || COALESCE(genus, '') || "
+    "    ';s__' || COALESCE(species, '') || "
+    "    CASE WHEN strain IS NOT NULL AND strain <> '' THEN ';t__' || strain ELSE '' END "
+    "    AS lineage "
+    "FROM collapsed; ";
+
 class MIINTMacros {
 public:
 	static void Register(ExtensionLoader &loader) {
@@ -840,6 +922,8 @@ public:
 		register_macro(INFER_TRIM, "infer_trim");
 
 		register_macro(READ_JPLACE, "read_jplace");
+
+		register_macro(TAXONOMY_LINEAGE, "taxonomy_lineage");
 
 		register_macro(MZ_WITHIN, "mz_within");
 		register_macro(MZ_WITHIN_PPM, "mz_within_ppm");

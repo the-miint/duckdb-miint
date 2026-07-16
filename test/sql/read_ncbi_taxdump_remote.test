@@ -1,0 +1,40 @@
+# name: test/sql/read_ncbi_taxdump_remote.test
+# description: Integration test for read_ncbi_taxdump default remote download + cache (opt-in, downloads ~60MB)
+# group: [sql]
+
+require miint
+
+require httpfs
+
+require-env MIINT_TAXDUMP_REMOTE
+
+# No-arg call auto-downloads the full NCBI taxonomy (default URL) and populates the
+# cache. The live taxonomy has well over 2 million nodes.
+query I
+SELECT COUNT(*) > 2000000 FROM read_ncbi_taxdump();
+----
+true
+
+# A stable, well-known taxon resolves correctly with its scientific name and rank.
+query TT
+SELECT name, rank FROM read_ncbi_taxdump() WHERE node_index = 9606;
+----
+Homo sapiens	species
+
+# Second call hits the on-disk cache (no re-download) and returns the same result.
+query I
+SELECT COUNT(*) > 2000000 FROM read_ncbi_taxdump();
+----
+true
+
+# refresh := true forces a re-download and still succeeds.
+query I
+SELECT COUNT(*) > 2000000 FROM read_ncbi_taxdump(refresh := true);
+----
+true
+
+# merged.dmp is populated for the real taxonomy (thousands of retired taxids).
+query I
+SELECT COUNT(*) > 0 FROM read_ncbi_taxdump_merged();
+----
+true

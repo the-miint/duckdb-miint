@@ -27,6 +27,8 @@
 #include <read_ncbi_fasta.hpp>
 #include <read_ncbi.hpp>
 #include <read_ncbi_annotation.hpp>
+#include <read_ncbi_taxdump.hpp>
+#include <read_ncbi_lineage.hpp>
 #include <blast_search.hpp>
 #include <read_ena.hpp>
 #include <read_ena_attributes.hpp>
@@ -282,6 +284,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadNCBIFastaTableFunction::Register(loader);
 	ReadNCBITableFunction::Register(loader);
 	ReadNCBIAnnotationTableFunction::Register(loader);
+	ReadNCBITaxdumpTableFunction::Register(loader);
+	ReadNCBITaxdumpMergedTableFunction::Register(loader);
+	ReadNCBILineageTableFunction::Register(loader);
 	BlastSearchTableFunction::Register(loader);
 	ReadENATableFunction::Register(loader);
 	ReadENAAttributesTableFunction::Register(loader);

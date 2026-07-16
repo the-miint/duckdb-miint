@@ -1,0 +1,87 @@
+# name: test/sql/read_ncbi_taxdump.test
+# description: Test read_ncbi_taxdump / read_ncbi_taxdump_merged over local taxdump sources
+# group: [sql]
+
+require miint
+
+# --- directory source (extracted .dmp files) --------------------------------
+
+# every live node in nodes.dmp is emitted (12 in the synthetic fixture)
+query I
+SELECT COUNT(*) FROM read_ncbi_taxdump('data/taxonomy/synthetic');
+----
+12
+
+# schema: node_index, parent_index, name, rank, is_tip
+query I
+SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM read_ncbi_taxdump('data/taxonomy/synthetic'));
+----
+5
+
+# the self-parented root (taxid 1) gets a NULL parent_index
+query IITTI
+SELECT node_index, parent_index, name, rank, is_tip
+FROM read_ncbi_taxdump('data/taxonomy/synthetic')
+WHERE node_index = 1;
+----
+1	NULL	root	no rank	false
+
+# a species node keeps its parent, rank, and scientific name (not the synonym/common name)
+query ITTI
+SELECT parent_index, name, rank, is_tip
+FROM read_ncbi_taxdump('data/taxonomy/synthetic')
+WHERE node_index = 80;
+----
+70	Escherichia coli	species	false
+
+# both the legacy 'superkingdom' node and the newer 'domain' node are present with raw ranks
+query TT
+SELECT rank, name
+FROM read_ncbi_taxdump('data/taxonomy/synthetic')
+WHERE node_index IN (20, 21)
+ORDER BY node_index;
+----
+superkingdom	Bacteria
+domain	Archaea
+
+# tips are exactly the leaves (strain 90 and phylum 31)
+query I
+SELECT node_index FROM read_ncbi_taxdump('data/taxonomy/synthetic')
+WHERE is_tip ORDER BY node_index;
+----
+31
+90
+
+# --- tarball source (.tar.gz) -----------------------------------------------
+
+# same result whether the source is the extracted directory or the archive
+query I
+SELECT COUNT(*) FROM read_ncbi_taxdump('data/taxonomy/synthetic.tar.gz');
+----
+12
+
+query ITT
+SELECT node_index, name, rank
+FROM read_ncbi_taxdump('data/taxonomy/synthetic.tar.gz')
+WHERE node_index = 90;
+----
+90	Escherichia coli K-12	strain
+
+# --- read_ncbi_taxdump_merged -----------------------------------------------
+
+# merged.dmp exposes the retired -> current remap (999 -> 80)
+query II
+SELECT old_taxid, new_taxid FROM read_ncbi_taxdump_merged('data/taxonomy/synthetic');
+----
+999	80
+
+query II
+SELECT old_taxid, new_taxid FROM read_ncbi_taxdump_merged('data/taxonomy/synthetic.tar.gz');
+----
+999	80
+
+# --- error handling ---------------------------------------------------------
+
+statement error
+SELECT * FROM read_ncbi_taxdump('data/taxonomy/does_not_exist');
+----

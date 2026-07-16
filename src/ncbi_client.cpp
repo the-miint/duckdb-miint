@@ -139,13 +139,13 @@ std::string NCBIClient::MakeRequestPOST(const std::string &url, const std::strin
 	throw duckdb::IOException("NCBI POST failed after %d retries (URL: %s)", MAX_RETRIES, url);
 }
 
-EPostResult NCBIClient::EPostIds(const std::vector<std::string> &accessions) {
+EPostResult NCBIClient::EPostIds(const std::vector<std::string> &accessions, const std::string &db) {
 	if (accessions.empty()) {
 		throw duckdb::IOException("NCBIClient::EPostIds called with empty accession list");
 	}
 
 	std::ostringstream body;
-	body << "db=nuccore&id=";
+	body << "db=" << db << "&id=";
 	for (size_t i = 0; i < accessions.size(); i++) {
 		if (i > 0) {
 			body << ",";
@@ -197,6 +197,20 @@ std::string NCBIClient::FetchGenBankXMLBatch(const std::vector<std::string> &acc
 	std::ostringstream url;
 	url << EUTILS_BASE << "/efetch.fcgi?db=nuccore&query_key=" << post.query_key << "&WebEnv=" << post.webenv
 	    << "&rettype=gb&retmode=xml";
+	if (!api_key.empty()) {
+		url << "&api_key=" << api_key;
+	}
+	return MakeRequest(url.str(), false);
+}
+
+std::string NCBIClient::FetchTaxonomyXMLBatch(const std::vector<std::string> &taxids) {
+	if (taxids.empty()) {
+		return "";
+	}
+	auto post = EPostIds(taxids, "taxonomy");
+	std::ostringstream url;
+	url << EUTILS_BASE << "/efetch.fcgi?db=taxonomy&query_key=" << post.query_key << "&WebEnv=" << post.webenv
+	    << "&retmode=xml";
 	if (!api_key.empty()) {
 		url << "&api_key=" << api_key;
 	}
