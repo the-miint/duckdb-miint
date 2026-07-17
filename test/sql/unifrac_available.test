@@ -25,6 +25,12 @@ WHERE function_name = 'unifrac_faith_pd' AND function_type = 'table';
 ----
 1
 
+query I
+SELECT COUNT(*) FROM duckdb_functions()
+WHERE function_name = 'unifrac_distances' AND function_type = 'table';
+----
+1
+
 # Both embedded libraries report a version string (git describe output).
 query I
 SELECT COUNT(*) FROM miint_versions()

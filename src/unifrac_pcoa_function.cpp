@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "NewickTree.hpp"
+#include "id_column_utils.hpp"
 #include "tree_table_reader.hpp"
 #include "unifrac_bptree.hpp"
 #include "unifrac_distance.hpp"
@@ -32,6 +33,7 @@ namespace {
 using unifrac_internal::AcceptedVariantList;
 using unifrac_internal::IsValidVariant;
 using unifrac_internal::ReadFeatureTable;
+using unifrac_internal::ResolveSampleIdOutputType;
 using unifrac_internal::ResolveThreadsParameter;
 
 struct PcoaRow {
@@ -45,11 +47,15 @@ struct PcoaRow {
 
 struct UnifracPcoaData : public TableFunctionData {
 	std::vector<PcoaRow> rows;
+	// Output type for sample_id — mirrors the input sample_id type (BIGINT/UUID)
+	// or VARCHAR otherwise. See ResolveSampleIdOutputType.
+	LogicalType sample_id_type = LogicalType::VARCHAR;
 };
 
 struct UnifracPcoaGlobalState : public GlobalTableFunctionState {
 	std::vector<PcoaRow> rows;
 	size_t cursor = 0;
+	LogicalType sample_id_type = LogicalType::VARCHAR;
 	idx_t MaxThreads() const override {
 		return 1;
 	}
@@ -210,7 +216,8 @@ unique_ptr<FunctionData> UnifracPcoaBind(ClientContext &context, TableFunctionBi
 		    seed, n_subsamples);
 	}
 
-	auto coo_rows = ReadFeatureTable(context, table_name, "unifrac_pcoa");
+	LogicalType sample_id_col_type = LogicalType::VARCHAR;
+	auto coo_rows = ReadFeatureTable(context, table_name, "unifrac_pcoa", &sample_id_col_type);
 	if (coo_rows.empty()) {
 		throw InvalidInputException("unifrac_pcoa: feature-table '%s' is empty after dropping NULL/zero rows",
 		                            table_name);
@@ -254,6 +261,7 @@ unique_ptr<FunctionData> UnifracPcoaBind(ClientContext &context, TableFunctionBi
 	const std::string variant_fp32 = variant + "_fp32";
 
 	auto data = make_uniq<UnifracPcoaData>();
+	data->sample_id_type = ResolveSampleIdOutputType(sample_id_col_type);
 	const auto rows_per_iter = static_cast<size_t>(n_samples) * static_cast<size_t>(n_dims);
 	data->rows.reserve(static_cast<size_t>(n_subsamples) * rows_per_iter);
 	for (int32_t i = 0; i < n_subsamples; ++i) {
@@ -267,7 +275,7 @@ unique_ptr<FunctionData> UnifracPcoaBind(ClientContext &context, TableFunctionBi
 	names.emplace_back("iteration");
 	return_types.emplace_back(LogicalType::INTEGER);
 	names.emplace_back("sample_id");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(data->sample_id_type);
 	names.emplace_back("axis");
 	return_types.emplace_back(LogicalType::INTEGER);
 	names.emplace_back("coordinate");
@@ -284,6 +292,7 @@ unique_ptr<GlobalTableFunctionState> UnifracPcoaInitGlobal(ClientContext &, Tabl
 	auto &data = input.bind_data->CastNoConst<UnifracPcoaData>();
 	auto gstate = make_uniq<UnifracPcoaGlobalState>();
 	gstate->rows = std::move(data.rows);
+	gstate->sample_id_type = data.sample_id_type;
 	return std::move(gstate);
 }
 
@@ -299,7 +308,6 @@ void UnifracPcoaExecute(ClientContext &, TableFunctionInput &input, DataChunk &o
 
 	auto iter_data = FlatVector::GetData<int32_t>(output.data[0]);
 	auto &sample_id_vec = output.data[1];
-	auto sample_id_data = FlatVector::GetData<string_t>(sample_id_vec);
 	auto axis_data = FlatVector::GetData<int32_t>(output.data[2]);
 	auto coord_data = FlatVector::GetData<double>(output.data[3]);
 	auto eig_data = FlatVector::GetData<double>(output.data[4]);
@@ -308,7 +316,9 @@ void UnifracPcoaExecute(ClientContext &, TableFunctionInput &input, DataChunk &o
 	for (idx_t i = 0; i < n; ++i) {
 		const auto &r = gstate.rows[gstate.cursor + i];
 		iter_data[i] = r.iteration;
-		sample_id_data[i] = StringVector::AddString(sample_id_vec, r.sample_id);
+		// EmitIdCell mirrors the id type; its ""/"*"→NULL sentinel branch is
+		// unreachable here (ReadFeatureTable drops NULL sample_ids).
+		EmitIdCell(sample_id_vec, i, r.sample_id, gstate.sample_id_type);
 		axis_data[i] = r.axis;
 		coord_data[i] = r.coordinate;
 		eig_data[i] = r.eigenvalue;

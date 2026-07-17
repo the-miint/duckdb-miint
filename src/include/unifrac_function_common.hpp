@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "duckdb/common/types.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "unifrac_support_biom.hpp"
 
@@ -48,8 +49,32 @@ inline std::string AcceptedVariantList() {
 // Rows with NULL sample_id, feature_id, or value are silently dropped,
 // as are zero/NaN values (UnifracSupportBiomView's sparse-storage
 // invariant would drop them anyway).
+//
+// When `sample_id_type` is non-null, the original SQL type of the `sample_id`
+// column (before the internal `::VARCHAR` cast) is written through it, so
+// callers can mirror BIGINT/UUID identifiers back onto their output columns.
+// The ids themselves are always carried as canonical VARCHAR text internally.
 std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, const std::string &table_name,
-                                                     const std::string &caller_name);
+                                                     const std::string &caller_name,
+                                                     LogicalType *sample_id_type = nullptr);
+
+// Resolve the SQL type that a mirrored sample-id output column should carry.
+// BIGINT and UUID are mirrored (so results join back to typed metadata without
+// a cast — parity with align_minimap2); every other input type collapses to
+// VARCHAR, matching what the ::VARCHAR-cast feature-table reader already
+// accepts (so this never rejects a type ReadFeatureTable would have read).
+//
+// Deliberate divergence from align_minimap2: that function rejects any id
+// column outside {VARCHAR, BIGINT, UUID} at bind via IsAllowedIdType. The
+// unifrac readers stay intentionally permissive — a DOUBLE/DATE sample_id is
+// accepted and simply emitted as VARCHAR, preserving the pre-existing behavior
+// of the ::VARCHAR-cast reader rather than tightening it.
+inline LogicalType ResolveSampleIdOutputType(const LogicalType &input_type) {
+	if (input_type.id() == LogicalTypeId::BIGINT || input_type.id() == LogicalTypeId::UUID) {
+		return input_type;
+	}
+	return LogicalType::VARCHAR;
+}
 
 // Resolve the user-supplied `threads` named parameter into a concrete count
 // that the libssu / scikit-bio-binaries OpenMP regions will run with.

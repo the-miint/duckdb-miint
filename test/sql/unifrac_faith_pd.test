@@ -128,3 +128,40 @@ statement error
 SELECT * FROM unifrac_faith_pd('observations', 'tree', subsample_depth := -1);
 ----
 subsample_depth
+
+# ── Sample-ID type parity (BIGINT / UUID mirrored onto the output) ────────────
+# The sample_id output column mirrors the input feature-table's sample_id type,
+# so PD values join back to typed metadata without a cast (align_minimap2 parity).
+statement ok
+CREATE TABLE obs_bigint AS
+    SELECT replace(sample_id, 'Sample', '')::BIGINT AS sample_id, feature_id, value FROM observations;
+
+query T
+SELECT DISTINCT typeof(sample_id) FROM unifrac_faith_pd('obs_bigint', 'tree');
+----
+BIGINT
+
+# Values are unchanged by the type change; id 5 == Sample5 → PD 0.5.
+query IR
+SELECT sample_id, faith_pd FROM unifrac_faith_pd('obs_bigint', 'tree') WHERE sample_id = 5;
+----
+5	0.5
+
+statement ok
+CREATE TABLE obs_uuid AS
+    SELECT m.uid AS sample_id, o.feature_id, o.value
+    FROM observations o JOIN (VALUES
+        ('Sample1', '11111111-1111-1111-1111-111111111111'::UUID),
+        ('Sample5', '55555555-5555-5555-5555-555555555555'::UUID)
+    ) m(orig, uid) ON o.sample_id = m.orig;
+
+query T
+SELECT DISTINCT typeof(sample_id) FROM unifrac_faith_pd('obs_uuid', 'tree');
+----
+UUID
+
+# VARCHAR input stays VARCHAR (non-regression).
+query T
+SELECT DISTINCT typeof(sample_id) FROM unifrac_faith_pd('observations', 'tree');
+----
+VARCHAR

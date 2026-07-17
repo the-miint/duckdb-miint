@@ -1,0 +1,108 @@
+# name: test/sql/beta_distance_macros.test
+# description: beta-distance SQL macros over a condensed distance table — within/between grouping and k-NN.
+# group: [sql]
+
+require miint
+
+# Macros are registered at extension load, so no require-env gate is needed.
+
+statement ok
+PRAGMA enable_verification;
+
+# A tiny condensed distance table (upper triangle, as unifrac_distances emits).
+statement ok
+CREATE TABLE dist AS SELECT sample_a, sample_b, distance::DOUBLE AS distance FROM (VALUES
+    ('a', 'b', 0.1), ('a', 'c', 0.5), ('b', 'c', 0.4)
+) t(sample_a, sample_b, distance);
+
+# A (sample_id, grouping) reduction of some metadata.
+statement ok
+CREATE TABLE grp AS SELECT * FROM (VALUES
+    ('a', 'gut'), ('b', 'gut'), ('c', 'skin')
+) t(sample_id, grouping);
+
+# All three macros are registered.
+query I
+SELECT COUNT(DISTINCT function_name) FROM duckdb_functions()
+WHERE function_name IN ('beta_group_distances', 'beta_knn', 'beta_knn_from_sample');
+----
+3
+
+# ── beta_group_distances: label each pair within/between ──────────────────────
+query TTTT
+SELECT sample_a, sample_b, comparison, group_a || '|' || group_b AS groups
+FROM beta_group_distances(dist, grp)
+ORDER BY sample_a, sample_b;
+----
+a	b	within	gut|gut
+a	c	between	gut|skin
+b	c	between	gut|skin
+
+# The #158 use case: aggregated within/between distance distribution.
+query TIR
+SELECT comparison, count(*) AS n, round(avg(distance), 4) AS mean
+FROM beta_group_distances(dist, grp)
+GROUP BY comparison ORDER BY comparison;
+----
+between	2	0.45
+within	1	0.1
+
+# ── beta_knn: k nearest neighbors per sample, both orientations, with distance ─
+# k=1: each sample's single nearest neighbor. a↔b are mutual nearest (0.1);
+# c's nearest is b (0.4 < 0.5).
+query TTR
+SELECT sample_id, neighbor, distance FROM beta_knn(dist, 1) ORDER BY sample_id;
+----
+a	b	0.1
+b	a	0.1
+c	b	0.4
+
+# k=2 returns every directed neighbor (3 samples × 2 = 6).
+query I
+SELECT COUNT(*) FROM beta_knn(dist, 2);
+----
+6
+
+# rank is exposed and starts at 1.
+query I
+SELECT COUNT(*) FROM beta_knn(dist, 2) WHERE rank NOT IN (1, 2);
+----
+0
+
+# ── beta_knn_from_sample: nearest neighbors of one source, with distance ──────
+query TR
+SELECT neighbor, distance FROM beta_knn_from_sample(dist, 2, 'a') ORDER BY distance, neighbor;
+----
+b	0.1
+c	0.5
+
+# c appears only as sample_b in dist; the macro still finds both orientations.
+query TR
+SELECT neighbor, distance FROM beta_knn_from_sample(dist, 1, 'c');
+----
+b	0.4
+
+# 'b' appears on BOTH sides (sample_b of (a,b), sample_a of (b,c)) — both UNION
+# branches must fire and merge for its neighbor list to be complete.
+query TR
+SELECT neighbor, distance FROM beta_knn_from_sample(dist, 2, 'b') ORDER BY distance, neighbor;
+----
+a	0.1
+c	0.4
+
+# Absent source → empty result (not an error).
+query I
+SELECT COUNT(*) FROM beta_knn_from_sample(dist, 5, 'nonexistent');
+----
+0
+
+# k <= 0 yields no rows for either k-NN macro (locks the boundary behavior).
+query I
+SELECT COUNT(*) FROM beta_knn(dist, 0);
+----
+0
+
+query I
+SELECT COUNT(*) FROM beta_knn_from_sample(dist, 0, 'a');
+----
+0

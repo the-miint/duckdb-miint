@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "NewickTree.hpp"
+#include "id_column_utils.hpp"
 #include "tree_table_reader.hpp"
 #include "unifrac_bptree.hpp"
 #include "unifrac_function_common.hpp"
@@ -28,6 +29,7 @@ namespace duckdb {
 namespace {
 
 using unifrac_internal::ReadFeatureTable;
+using unifrac_internal::ResolveSampleIdOutputType;
 using unifrac_internal::ResolveThreadsParameter;
 
 struct FaithPdRow {
@@ -38,11 +40,15 @@ struct FaithPdRow {
 
 struct UnifracFaithPdData : public TableFunctionData {
 	std::vector<FaithPdRow> rows;
+	// Output type for sample_id — mirrors the input sample_id type (BIGINT/UUID)
+	// or VARCHAR otherwise. See ResolveSampleIdOutputType.
+	LogicalType sample_id_type = LogicalType::VARCHAR;
 };
 
 struct UnifracFaithPdGlobalState : public GlobalTableFunctionState {
 	std::vector<FaithPdRow> rows;
 	size_t cursor = 0;
+	LogicalType sample_id_type = LogicalType::VARCHAR;
 	idx_t MaxThreads() const override {
 		return 1;
 	}
@@ -167,7 +173,8 @@ unique_ptr<FunctionData> UnifracFaithPdBind(ClientContext &context, TableFunctio
 		                      seed, n_subsamples);
 	}
 
-	auto coo_rows = ReadFeatureTable(context, table_name, "unifrac_faith_pd");
+	LogicalType sample_id_col_type = LogicalType::VARCHAR;
+	auto coo_rows = ReadFeatureTable(context, table_name, "unifrac_faith_pd", &sample_id_col_type);
 	if (coo_rows.empty()) {
 		throw InvalidInputException("unifrac_faith_pd: feature-table '%s' is empty after dropping NULL/zero rows",
 		                            table_name);
@@ -196,6 +203,7 @@ unique_ptr<FunctionData> UnifracFaithPdBind(ClientContext &context, TableFunctio
 	auto bptree_view = miint::unifrac::UnifracBptreeView::FromNewickTree(tree);
 
 	auto data = make_uniq<UnifracFaithPdData>();
+	data->sample_id_type = ResolveSampleIdOutputType(sample_id_col_type);
 	data->rows.reserve(static_cast<size_t>(n_subsamples) * biom_struct->n_samples);
 
 	if (subsample_depth == 0) {
@@ -223,7 +231,7 @@ unique_ptr<FunctionData> UnifracFaithPdBind(ClientContext &context, TableFunctio
 	names.emplace_back("iteration");
 	return_types.emplace_back(LogicalType::INTEGER);
 	names.emplace_back("sample_id");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(data->sample_id_type);
 	names.emplace_back("faith_pd");
 	return_types.emplace_back(LogicalType::DOUBLE);
 
@@ -234,6 +242,7 @@ unique_ptr<GlobalTableFunctionState> UnifracFaithPdInitGlobal(ClientContext &, T
 	auto &data = input.bind_data->CastNoConst<UnifracFaithPdData>();
 	auto gstate = make_uniq<UnifracFaithPdGlobalState>();
 	gstate->rows = std::move(data.rows);
+	gstate->sample_id_type = data.sample_id_type;
 	return std::move(gstate);
 }
 
@@ -249,13 +258,14 @@ void UnifracFaithPdExecute(ClientContext &, TableFunctionInput &input, DataChunk
 
 	auto iter_data = FlatVector::GetData<int32_t>(output.data[0]);
 	auto &sample_id_vec = output.data[1];
-	auto sample_id_data = FlatVector::GetData<string_t>(sample_id_vec);
 	auto faith_pd_data = FlatVector::GetData<double>(output.data[2]);
 
 	for (idx_t i = 0; i < n; ++i) {
 		const auto &r = gstate.rows[gstate.cursor + i];
 		iter_data[i] = r.iteration;
-		sample_id_data[i] = StringVector::AddString(sample_id_vec, r.sample_id);
+		// EmitIdCell mirrors the id type; its ""/"*"→NULL sentinel branch is
+		// unreachable here (ReadFeatureTable drops NULL sample_ids).
+		EmitIdCell(sample_id_vec, i, r.sample_id, gstate.sample_id_type);
 		faith_pd_data[i] = r.faith_pd;
 	}
 	gstate.cursor += n;

@@ -2,6 +2,7 @@
 
 #include <cmath>
 
+#include "catalog_utils.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -14,7 +15,7 @@
 namespace duckdb::unifrac_internal {
 
 std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, const std::string &table_name,
-                                                     const std::string &caller_name) {
+                                                     const std::string &caller_name, LogicalType *sample_id_type) {
 	auto &db = DatabaseInstance::GetDatabase(context);
 	Connection conn(db);
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
@@ -26,6 +27,21 @@ std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, con
 		throw InvalidInputException(
 		    "%s: feature-table '%s' must expose (sample_id VARCHAR, feature_id VARCHAR, value DOUBLE): %s", caller_name,
 		    table_name, probe->GetError());
+	}
+
+	// Capture the sample_id column's original SQL type (before the ::VARCHAR cast
+	// above) for callers that mirror the id type onto their output. A catalog
+	// metadata lookup — the same mechanism sequence_table_reader/tree_table_reader
+	// use — rather than a second query; the probe above already proved sample_id
+	// exists and is VARCHAR-castable, so the lookup here always finds it.
+	if (sample_id_type != nullptr) {
+		auto cols = GetTableOrViewColumns(context, table_name, "feature-table");
+		for (idx_t i = 0; i < cols.names.size(); ++i) {
+			if (StringUtil::Lower(cols.names[i]) == "sample_id") {
+				*sample_id_type = cols.types[i];
+				break;
+			}
+		}
 	}
 
 	auto result = conn.Query("SELECT sample_id::VARCHAR, feature_id::VARCHAR, value::DOUBLE FROM " + qname);
