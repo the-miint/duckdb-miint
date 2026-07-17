@@ -12,6 +12,8 @@ Methods to estimate alpha and beta diversity, and supporting statistics.
 - [Rarefaction](#rarefaction) - Rarefaction detail with UniFrac and Faith PD.
 - [UniFrac distances](#unifrac-distances) - Condensed (pairwise) UniFrac distances in long form
 - [Beta-distance macros](#beta-distance-macros) - within/between-group distributions and k-nearest-neighbors over a distance table
+- [PCoA (from a distance table)](#pcoa-from-a-distance-table) - metric-agnostic PCoA over any condensed distance table
+- [PERMANOVA (from a distance table)](#permanova-from-a-distance-table) - metric-agnostic PERMANOVA over any condensed distance table
 - [UniFrac PCoA](#unifrac-pcoa) - UniFrac distance + Principal Coordinates Analysis
 - [UniFrac PERMANOVA](#unifrac-permanova) - UniFrac distance + PERMANOVA pseudo-F + p-value
 - [Faith PD](#faith-pd) - Faith's phylogenetic diversity per sample
@@ -203,6 +205,75 @@ FROM dm_weighted x JOIN dm_unweighted y USING (sample_a, sample_b);
 ```
 
 The permutation-based Mantel **p-value** is not yet implemented; it is tracked in [issue #160](https://github.com/the-miint/duckdb-miint/issues/160).
+
+---
+
+### PCoA (from a distance table)
+
+`pcoa(distances, ...)` runs Principal Coordinates Analysis over **any** condensed distance table with columns `(sample_a, sample_b, distance)` — the [`unifrac_distances`](#unifrac-distances) output, a [beta-distance](#beta-distance-macros) relation, or a precomputed Bray-Curtis / Jaccard / Euclidean table you built yourself. It is **metric-agnostic**: the ordination is decoupled from UniFrac. [`unifrac_pcoa`](#unifrac-pcoa) remains the end-to-end convenience wrapper (feature table + tree → coordinates); `pcoa` is the same ordination over a distance matrix you already have.
+
+It takes a relation *name* (a table or view), so materialize the distances first:
+
+```sql
+CREATE TABLE dm AS SELECT sample_a, sample_b, distance
+    FROM unifrac_distances('observations', 'tree', seed := 42);
+
+SELECT * FROM pcoa('dm', n_dims := 3, seed := 42);
+```
+
+**Parameters:**
+- `distances` (VARCHAR): name of the condensed distance relation exposing `(sample_a, sample_b, distance)`
+- `n_dims` (INTEGER, default 3): number of PCoA axes to compute; must be `≤ n_samples - 1`
+- `seed` (INTEGER, default -1): FSVD randomization seed; `-1` = unseeded
+- `threads` (INTEGER, default 0): OpenMP threads; `0` follows DuckDB's thread count
+
+**Output schema:** identical to [`unifrac_pcoa`](#unifrac-pcoa) — `(iteration, sample_id, axis, coordinate, eigenvalue, proportion_explained)`. `iteration` is always `0` (kept for schema parity; a distance table is a single fixed matrix, so there is no subsampling). `sample_id` mirrors the input `sample_a` type — see [Sample identifier types](#sample-identifier-types).
+
+**Behavior:**
+- **Input shape:** distinct ids are collected from *both* `sample_a` and `sample_b`, sorted lexicographically, and assembled into a dense symmetric matrix with a zero diagonal. `sample_a` and `sample_b` must resolve to the same output type (a BIGINT/VARCHAR mix is rejected at bind).
+- <a name="distance-table-completeness"></a>**Completeness (fail loud):** the matrix must be complete — every unordered pair present exactly once. A missing pair, a negative or non-finite distance, a nonzero self-distance, or a pair given two conflicting values is an error that names the offending pair. Rows with a NULL `sample_a`/`sample_b` are skipped; a NULL/NaN `distance` is treated as "not provided" (its ids are still recorded, so a sample whose every distance is NULL/NaN surfaces as an incompleteness error rather than silently vanishing). `unifrac_distances` always emits the full triangle, so its output is complete by construction; a hand-built table you must complete yourself.
+- **Equivalence:** `pcoa` over `unifrac_distances(obs, tree, variant := v, seed := s)` reproduces `unifrac_pcoa(obs, tree, variant := v, n_dims := d, seed := s)` — same matrix, same FSVD call, same seed. Coordinates match up to axis sign (compare `abs(coordinate)`) within the fp32 tolerance noted under [Reproducibility](#reproducibility).
+- **Fewer than two samples**, or **`n_dims > n_samples - 1`**: an error (an ordination is undefined).
+
+**Example:**
+
+```sql
+-- Bray-Curtis PCoA with no tree involved: build the distance table however you
+-- like (here a placeholder), then ordinate it.
+CREATE TABLE bc AS SELECT sample_a, sample_b, distance FROM my_bray_curtis_distances;
+SELECT sample_id, axis, coordinate
+FROM pcoa('bc', n_dims := 2, seed := 42)
+ORDER BY axis, sample_id;
+```
+
+---
+
+### PERMANOVA (from a distance table)
+
+`permanova(distances, metadata, ...)` runs PERMANOVA (pseudo-F + a permutation p-value) over any condensed distance table and a wide-form metadata relation. Like [`pcoa`](#pcoa-from-a-distance-table) it is **metric-agnostic** — the omnibus test is decoupled from UniFrac. [`unifrac_permanova`](#unifrac-permanova) remains the end-to-end wrapper.
+
+```sql
+CREATE TABLE dm AS SELECT sample_a, sample_b, distance
+    FROM unifrac_distances('observations', 'tree', seed := 42);
+
+SELECT * FROM permanova('dm', 'metadata',
+    variables := ['body_site'], n_permutations := 999, seed := 42);
+```
+
+**Parameters:**
+- `distances` (VARCHAR): name of the condensed distance relation exposing `(sample_a, sample_b, distance)`
+- `metadata` (VARCHAR): name of the wide-form metadata relation — a `sample_id` column plus one column per variable (see [Metadata](#metadata))
+- `n_permutations` (INTEGER, default 999): permutations for the p-value
+- `variables` (VARCHAR[], default all non-`sample_id` columns): metadata columns to test
+- `seed` (INTEGER, default -1): permutation seed; `-1` = unseeded
+- `threads` (INTEGER, default 0): OpenMP threads; `0` follows DuckDB's thread count
+
+**Output schema:** identical to [`unifrac_permanova`](#unifrac-permanova) — `(iteration, variable, n_groups, f_stat, p_value, n_permutations)`. `iteration` is always `0`. There is no `sample_id` output, so no id-type mirroring.
+
+**Behavior:**
+- **Input shape / completeness:** the same dense-matrix construction and [completeness requirement](#distance-table-completeness) as `pcoa`.
+- **Metadata alignment:** every sample in the distance matrix must have a row for each tested variable, else an error naming the missing sample and variable; metadata samples not present in the distance matrix are ignored. A NULL metadata value is treated as an (empty-string) group value — filter the metadata first if you want NULL samples dropped.
+- **Equivalence:** `permanova` over `unifrac_distances(obs, tree, variant := v, seed := s)` reproduces `unifrac_permanova(obs, tree, metadata, variant := v, seed := s)` under the same `seed` and `n_permutations`: `p_value` is byte-identical (same permutations) and `f_stat` matches within `1e-5` (fp32; see the [reproducibility note](#reproducibility)).
 
 ---
 

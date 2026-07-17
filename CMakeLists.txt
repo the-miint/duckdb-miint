@@ -1815,6 +1815,7 @@ if(MIINT_ENABLE_UNIFRAC)
         test/cpp/test_UnifracMetadata.cpp
         test/cpp/test_UnifracDistance.cpp
         test/cpp/test_UnifracCondensed.cpp
+        test/cpp/test_UnifracDenseDistance.cpp
         test/cpp/test_UnifracSubsampleBridge.cpp)
 endif()
 
