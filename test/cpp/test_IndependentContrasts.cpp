@@ -179,6 +179,25 @@ TEST_CASE("independent_contrasts rejects a polytomy, naming the resolver", "[New
 	REQUIRE_THROWS_WITH(tree.independent_contrasts(t), ContainsSubstring("tree_resolve_multifurcations"));
 }
 
+TEST_CASE("independent_contrasts error reports the caller's node_index for unnamed nodes", "[NewickTree][pic]") {
+	// Unnamed root (caller node_index 77) with three children. Built in node_index
+	// order, so its dense index is 3 — but with a node_ids map the error must name
+	// 77 (what the user can join on), not the internal index 3.
+	std::vector<miint::NodeInput> in = {
+	    {10, std::optional<int64_t>(77), "A", 1.0, std::nullopt},
+	    {20, std::optional<int64_t>(77), "B", 1.0, std::nullopt},
+	    {30, std::optional<int64_t>(77), "C", 1.0, std::nullopt},
+	    {77, std::nullopt, "", std::numeric_limits<double>::quiet_NaN(), std::nullopt},
+	};
+	auto tree = miint::NewickTree::build(in);
+	std::vector<int64_t> node_ids = {10, 20, 30, 77}; // dense index -> caller node_index
+	std::unordered_map<std::string, double> t({{"A", 1.0}, {"B", 2.0}, {"C", 3.0}});
+
+	REQUIRE_THROWS_WITH(tree.independent_contrasts(t, &node_ids), ContainsSubstring("node 77"));
+	// Without the map it falls back to the dense index (3).
+	REQUIRE_THROWS_WITH(tree.independent_contrasts(t), ContainsSubstring("node 3"));
+}
+
 TEST_CASE("independent_contrasts rejects a unifurcation, naming shear_tree", "[NewickTree][pic]") {
 	// root has a single child X: not bifurcating, but the remedy is collapsing the
 	// unifurcation (shear_tree), not resolving a polytomy.

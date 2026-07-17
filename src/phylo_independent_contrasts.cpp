@@ -165,14 +165,14 @@ unique_ptr<GlobalTableFunctionState> PhyloIndependentContrastsTableFunction::Ini
 
 	std::vector<std::vector<miint::IndependentContrast>> per_trait;
 	try {
-		per_trait = tree.independent_contrasts(trait_maps);
+		per_trait = tree.independent_contrasts(trait_maps, &tree_index_to_node_id);
 	} catch (const std::exception &e) {
 		// Cold path: re-run per trait to attribute a completeness failure to the
 		// specific trait for a precise message (structural/branch errors are
 		// trait-independent and surface on the first trait).
 		for (size_t t = 0; t < trait_maps.size(); t++) {
 			try {
-				tree.independent_contrasts(trait_maps[t]);
+				tree.independent_contrasts(trait_maps[t], &tree_index_to_node_id);
 			} catch (const std::exception &inner) {
 				throw InvalidInputException("phylo_independent_contrasts failed for trait '%s': %s", trait_names[t],
 				                            inner.what());

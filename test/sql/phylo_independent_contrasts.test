@@ -243,6 +243,24 @@ SELECT * FROM phylo_independent_contrasts('poly', 'ptraits');
 ----
 tree_resolve_multifurcations
 
+# The offending node is unnamed and has a non-contiguous node_index (77). The
+# error must report the caller's node_index (77), not the internal dense index.
+statement ok
+CREATE TABLE unnamed_poly AS SELECT * FROM (VALUES
+    (10, 'A',  1.0, CAST(NULL AS BIGINT), 77),
+    (20, 'B',  1.0, NULL, 77),
+    (30, 'C',  1.0, NULL, 77),
+    (77, CAST(NULL AS VARCHAR), NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE unnamed_poly_traits AS SELECT * FROM (VALUES ('A', 'w', 1.0), ('B', 'w', 5.0), ('C', 'w', 2.0)) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_independent_contrasts('unnamed_poly', 'unnamed_poly_traits');
+----
+node 77
+
 # =============================================================================
 # Error: trait/tip mismatches
 # =============================================================================

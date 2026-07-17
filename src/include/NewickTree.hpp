@@ -261,16 +261,23 @@ public:
 	// Zero-length internal edges are allowed. Throws std::runtime_error /
 	// std::invalid_argument describing the first violation. The root's own branch
 	// length is unused.
-	std::vector<IndependentContrast>
-	independent_contrasts(const std::unordered_map<std::string, double> &trait_values) const;
+	//
+	// `node_ids` (optional) maps this tree's dense node index to a caller-facing
+	// identifier (e.g. the original node_index of the source table); when supplied,
+	// error messages for unnamed nodes report that identifier instead of the
+	// internal dense index. Pass nullptr to use the dense index.
+	std::vector<IndependentContrast> independent_contrasts(const std::unordered_map<std::string, double> &trait_values,
+	                                                       const std::vector<int64_t> *node_ids = nullptr) const;
 
 	// Batch overload for many traits over the same tree: the trait-independent work
 	// (structural + branch-length validation, variance-extended branch lengths, and
 	// per-node contrast variances) is done once and reused across every trait.
 	// Returns one contrast vector per input trait, in the same order. Per-trait
-	// completeness is still validated; the same exceptions are thrown.
+	// completeness is still validated; the same exceptions are thrown. `node_ids` is
+	// as above (used only for error-message identifiers).
 	std::vector<std::vector<IndependentContrast>>
-	independent_contrasts(const std::vector<std::unordered_map<std::string, double>> &trait_values_list) const;
+	independent_contrasts(const std::vector<std::unordered_map<std::string, double>> &trait_values_list,
+	                      const std::vector<int64_t> *node_ids = nullptr) const;
 
 	// ========================================================================
 	// Modification (for insert_fully_resolved)
