@@ -40,8 +40,17 @@ std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::s
 	std::string bl_proj = HasColumn(info, "branch_length") ? "branch_length::DOUBLE" : "CAST(NULL AS DOUBLE)";
 	std::string edge_proj = HasColumn(info, "edge_id") ? "edge_id::BIGINT" : "CAST(NULL AS BIGINT)";
 
+	// ORDER BY node_index: build() assigns node-array positions (and therefore
+	// each node's slot in its parent's children list) by the row order this query
+	// returns. Without an explicit order, that follows scan order, which is not
+	// guaranteed to match node_index for views/joins, Parquet-backed tables,
+	// parallel scans, or preserve_insertion_order=false. node_index is the
+	// canonical child order (it encodes read_newick's original left-to-right
+	// order), so ordering by it makes order-sensitive consumers
+	// (tree_resolve_multifurcations) reproducible regardless of storage.
 	std::string query = "SELECT node_index::BIGINT, parent_index::BIGINT, " + name_proj + ", " + bl_proj + ", " +
-	                    edge_proj + " FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+	                    edge_proj + " FROM " + KeywordHelper::WriteOptionallyQuoted(table_name) +
+	                    " ORDER BY node_index";
 
 	auto query_result = conn.Query(query);
 

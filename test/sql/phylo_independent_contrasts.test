@@ -1,0 +1,435 @@
+# name: test/sql/phylo_independent_contrasts.test
+# description: Test phylo_independent_contrasts (Felsenstein 1985 PIC)
+# group: [sql]
+
+require miint
+
+# =============================================================================
+# Golden tree: ((A:1,B:3)E:2,C:4)root;  (internal nodes E=2, root=4)
+# Two traits, long form. Expected values are hand-derived (see
+# test/cpp/test_IndependentContrasts.cpp).
+#
+# Child order follows node_index, so E (2) precedes C (3) as children of root and
+# A (0) precedes B (1) as children of E — matching the Newick left-to-right order
+# used by the C++ golden, so the contrast signs are identical.
+# =============================================================================
+
+statement ok
+CREATE TABLE gtree AS SELECT * FROM (VALUES
+    (0, 'A',    1.0, CAST(NULL AS BIGINT), 2),
+    (1, 'B',    3.0, NULL, 2),
+    (2, 'E',    2.0, NULL, 4),
+    (3, 'C',    4.0, NULL, 4),
+    (4, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE gtraits AS SELECT * FROM (VALUES
+    ('A', 'X', 2.0), ('B', 'X', 6.0), ('C', 'X', 1.0),
+    ('A', 'Y', 5.0), ('B', 'Y', 1.0), ('C', 'Y', 0.0)
+) AS v(name, trait, value);
+
+# 2 internal nodes x 2 traits = 4 rows.
+query I
+SELECT count(*) FROM phylo_independent_contrasts('gtree', 'gtraits');
+----
+4
+
+# Every output row matches an expected (node_index, trait) key (nothing spurious,
+# nothing missing) ...
+query I
+WITH expected(node_index, trait) AS (
+    VALUES (2, 'X'), (4, 'X'), (2, 'Y'), (4, 'Y')
+)
+SELECT count(*)
+FROM phylo_independent_contrasts('gtree', 'gtraits') p
+JOIN expected e ON p.node_index = e.node_index AND p.trait = e.trait;
+----
+4
+
+# ... and every value matches the hand-derived golden within tolerance.
+query I
+WITH expected(node_index, trait, contrast, ancestral, variance) AS (
+    VALUES
+        (2, 'X', -2.0,         3.0,         4.0),
+        (4, 'X',  0.769800359, 2.185185185, 6.75),
+        (2, 'Y',  2.0,         4.0,         4.0),
+        (4, 'Y',  1.539600718, 2.370370370, 6.75)
+)
+SELECT count(*)
+FROM phylo_independent_contrasts('gtree', 'gtraits') p
+JOIN expected e ON p.node_index = e.node_index AND p.trait = e.trait
+WHERE abs(p.contrast - e.contrast) > 1e-6
+   OR abs(p.ancestral_estimate - e.ancestral) > 1e-6
+   OR abs(p.contrast_variance - e.variance) > 1e-9;
+----
+0
+
+# =============================================================================
+# node_index remap: output carries the caller's ORIGINAL node_index, not the
+# internal dense index — even with non-contiguous node_index and rows that are
+# not in ascending node_index order.
+# =============================================================================
+
+# Same tree as gtree, renumbered node_index = {A:10, B:30, E:20, C:40, root:5},
+# rows deliberately out of ascending order. Internal nodes are E (20), root (5);
+# their dense build indices would be 2 and 0.
+statement ok
+CREATE TABLE reindexed AS SELECT * FROM (VALUES
+    (10, 'A',    1.0, CAST(NULL AS BIGINT), 20),
+    (30, 'B',    3.0, NULL, 20),
+    (20, 'E',    2.0, NULL, 5),
+    (40, 'C',    4.0, NULL, 5),
+    (5,  'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+# All 4 output rows carry the internal nodes' ORIGINAL labels (5, 20), never the
+# dense positions (0, 2) — this is what the ReadTreeTable ORDER BY + remap buys.
+query II
+SELECT count(*), count(*) FILTER (WHERE node_index NOT IN (5, 20))
+FROM phylo_independent_contrasts('reindexed', 'gtraits');
+----
+4	0
+
+# The distinctive E contrast (X = -2.0) is reported against E's label (20).
+query I
+SELECT node_index FROM phylo_independent_contrasts('reindexed', 'gtraits')
+WHERE trait = 'X' AND abs(contrast - (-2.0)) < 1e-9;
+----
+20
+
+# =============================================================================
+# Type-flexible tip keys: BIGINT and UUID names match tip labels by canonical
+# text (same posture as read_id). Matching failure would surface as a "no trait
+# value for tip" error, so count = n-1 = 2 proves the join worked.
+# =============================================================================
+
+statement ok
+CREATE TABLE btree AS SELECT * FROM (VALUES
+    (0, CAST(100 AS BIGINT), 1.0, CAST(NULL AS BIGINT), 3),
+    (1, 200, 1.0, NULL, 3),
+    (2, 300, 1.0, NULL, 4),
+    (3, 900, 1.0, NULL, 4),
+    (4, CAST(NULL AS BIGINT), NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE btraits AS SELECT * FROM (VALUES
+    (CAST(100 AS BIGINT), 'w', 1.0), (200, 'w', 2.0), (300, 'w', 3.0)
+) AS v(name, trait, value);
+
+query I
+SELECT count(*) FROM phylo_independent_contrasts('btree', 'btraits');
+----
+2
+
+statement ok
+CREATE TABLE utree AS SELECT * FROM (VALUES
+    (0, CAST('11111111-1111-1111-1111-111111111111' AS UUID), 1.0, CAST(NULL AS BIGINT), 3),
+    (1, CAST('22222222-2222-2222-2222-222222222222' AS UUID), 1.0, NULL, 3),
+    (2, CAST('33333333-3333-3333-3333-333333333333' AS UUID), 1.0, NULL, 4),
+    (3, CAST(NULL AS UUID), 1.0, NULL, 4),
+    (4, CAST(NULL AS UUID), NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE utraits AS SELECT * FROM (VALUES
+    (CAST('11111111-1111-1111-1111-111111111111' AS UUID), 'w', 1.0),
+    (CAST('22222222-2222-2222-2222-222222222222' AS UUID), 'w', 2.0),
+    (CAST('33333333-3333-3333-3333-333333333333' AS UUID), 'w', 3.0)
+) AS v(name, trait, value);
+
+query I
+SELECT count(*) FROM phylo_independent_contrasts('utree', 'utraits');
+----
+2
+
+# =============================================================================
+# Round-trip: a polytomy resolved by tree_resolve_multifurcations feeds PIC.
+# The resolver inserts a zero-length internal connector; PIC must accept it.
+# =============================================================================
+
+statement ok
+CREATE TABLE poly AS SELECT * FROM (VALUES
+    (0, 'A',    1.0, CAST(NULL AS BIGINT), 3),
+    (1, 'B',    2.0, NULL, 3),
+    (2, 'C',    3.0, NULL, 3),
+    (3, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE ptraits AS SELECT * FROM (VALUES ('A', 'w', 1.0), ('B', 'w', 5.0), ('C', 'w', 2.0)) AS v(name, trait, value);
+
+statement ok
+CREATE TABLE poly_resolved AS SELECT * FROM tree_resolve_multifurcations('poly');
+
+query I
+SELECT count(*) FROM phylo_independent_contrasts('poly_resolved', 'ptraits');
+----
+2
+
+# =============================================================================
+# Scaling: a large balanced tree and a deep caterpillar both yield n-1 finite
+# contrasts and stay fast (guards against O(n^2) / stack-overflow regressions).
+# =============================================================================
+
+# Balanced complete binary tree, 2^14 = 16384 tips (32767 nodes), heap layout:
+# node i has parent (i-1)//2, so every internal node has exactly two children.
+statement ok
+CREATE TABLE big_tree AS
+  SELECT i AS node_index, 't' || i AS name,
+         CASE WHEN i = 0 THEN NULL ELSE 1.0 END AS branch_length,
+         NULL::BIGINT AS edge_id,
+         CASE WHEN i = 0 THEN NULL ELSE (i - 1) // 2 END AS parent_index
+  FROM range(32767) t(i);
+
+statement ok
+CREATE TABLE big_traits AS
+  SELECT 't' || i AS name, 'w' AS trait, (i % 997)::DOUBLE AS value
+  FROM range(32767) t(i) WHERE 2 * i + 1 >= 32767;
+
+# 16383 internal nodes -> 16383 contrasts, all finite.
+query II
+SELECT count(*), count(*) FILTER (WHERE NOT isfinite(contrast))
+FROM phylo_independent_contrasts('big_tree', 'big_traits');
+----
+16383	0
+
+# Deep caterpillar: a 10000-way star -> resolve -> PIC. Exercises the iterative
+# post-order at depth (no stack overflow) and PIC over zero-length connectors.
+statement ok
+CREATE TABLE big_star AS
+  SELECT i AS node_index, CASE WHEN i = 0 THEN 'root' ELSE 't' || i END AS name,
+         CASE WHEN i = 0 THEN NULL ELSE 1.0 END AS branch_length,
+         NULL::BIGINT AS edge_id,
+         CASE WHEN i = 0 THEN NULL ELSE 0 END AS parent_index
+  FROM range(10001) t(i);
+
+statement ok
+CREATE TABLE big_cat AS SELECT * FROM tree_resolve_multifurcations('big_star');
+
+statement ok
+CREATE TABLE big_cat_traits AS
+  SELECT 't' || i AS name, 'w' AS trait, (i % 997)::DOUBLE AS value FROM range(1, 10001) t(i);
+
+# 10000 tips -> 9999 contrasts, all finite (zero-length connectors accepted).
+query II
+SELECT count(*), count(*) FILTER (WHERE NOT isfinite(contrast))
+FROM phylo_independent_contrasts('big_cat', 'big_cat_traits');
+----
+9999	0
+
+# =============================================================================
+# Views work for both inputs
+# =============================================================================
+
+statement ok
+CREATE VIEW gtree_v AS SELECT * FROM gtree;
+
+statement ok
+CREATE VIEW gtraits_v AS SELECT * FROM gtraits;
+
+query I
+SELECT count(*) FROM phylo_independent_contrasts('gtree_v', 'gtraits_v');
+----
+4
+
+# =============================================================================
+# Error: non-bifurcating tree names the resolver as the remedy
+# =============================================================================
+
+statement error
+SELECT * FROM phylo_independent_contrasts('poly', 'ptraits');
+----
+tree_resolve_multifurcations
+
+# =============================================================================
+# Error: trait/tip mismatches
+# =============================================================================
+
+# A tip with no trait value.
+statement ok
+CREATE TABLE gtraits_missing AS SELECT * FROM (VALUES ('A', 'X', 2.0), ('B', 'X', 6.0)) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_independent_contrasts('gtree', 'gtraits_missing');
+----
+C
+
+# A trait value for a name that is not a tip.
+statement ok
+CREATE TABLE gtraits_extra AS SELECT * FROM (VALUES
+    ('A', 'X', 2.0), ('B', 'X', 6.0), ('C', 'X', 1.0), ('Z', 'X', 9.0)
+) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_independent_contrasts('gtree', 'gtraits_extra');
+----
+not a tip
+
+# A NULL trait value.
+statement ok
+CREATE TABLE gtraits_null AS SELECT * FROM (VALUES
+    ('A', 'X', 2.0), ('B', 'X', 6.0), ('C', 'X', CAST(NULL AS DOUBLE))
+) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_independent_contrasts('gtree', 'gtraits_null');
+----
+NULL value
+
+# A NULL name.
+statement ok
+CREATE TABLE gtraits_nullname AS SELECT * FROM (VALUES
+    (CAST(NULL AS VARCHAR), 'X', 2.0), ('B', 'X', 6.0), ('C', 'X', 1.0)
+) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_independent_contrasts('gtree', 'gtraits_nullname');
+----
+NULL name
+
+# A NULL trait label.
+statement ok
+CREATE TABLE gtraits_nulltrait AS SELECT * FROM (VALUES
+    ('A', CAST(NULL AS VARCHAR), 2.0), ('B', 'X', 6.0), ('C', 'X', 1.0)
+) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_independent_contrasts('gtree', 'gtraits_nulltrait');
+----
+NULL trait
+
+# An empty traits table.
+statement ok
+CREATE TABLE gtraits_empty AS SELECT * FROM gtraits WHERE false;
+
+statement error
+SELECT * FROM phylo_independent_contrasts('gtree', 'gtraits_empty');
+----
+empty
+
+# Multi-trait attribution: three traits, only the LAST (sorted) one is incomplete.
+# The error must name that trait ('zzz_last'), not the first — this pins the
+# cold-path retry loop that re-runs per trait to attribute the failure.
+statement ok
+CREATE TABLE gtraits_lastbad AS SELECT * FROM (VALUES
+    ('A', 'aaa', 1.0), ('B', 'aaa', 2.0), ('C', 'aaa', 3.0),
+    ('A', 'bbb', 1.0), ('B', 'bbb', 2.0), ('C', 'bbb', 3.0),
+    ('A', 'zzz_last', 1.0), ('B', 'zzz_last', 2.0)  -- C missing for zzz_last only
+) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_independent_contrasts('gtree', 'gtraits_lastbad');
+----
+zzz_last
+
+# A duplicate (name, trait) pair.
+statement ok
+CREATE TABLE gtraits_dup AS SELECT * FROM (VALUES
+    ('A', 'X', 2.0), ('A', 'X', 3.0), ('B', 'X', 6.0), ('C', 'X', 1.0)
+) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_independent_contrasts('gtree', 'gtraits_dup');
+----
+Duplicate
+
+# =============================================================================
+# Error: branch-length problems
+# =============================================================================
+
+# Negative branch length.
+statement ok
+CREATE TABLE negtree AS SELECT * FROM (VALUES
+    (0, 'A', -1.0, CAST(NULL AS BIGINT), 3),
+    (1, 'B',  3.0, NULL, 3),
+    (2, 'C',  4.0, NULL, 4),
+    (3, 'E',  2.0, NULL, 4),
+    (4, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement error
+SELECT * FROM phylo_independent_contrasts('negtree', 'gtraits');
+----
+negative
+
+# No branch lengths at all (cladogram): reader substitutes NULL -> NaN.
+statement ok
+CREATE TABLE clad AS SELECT node_index, name, parent_index FROM gtree;
+
+statement error
+SELECT * FROM phylo_independent_contrasts('clad', 'gtraits');
+----
+branch length
+
+# Infinite branch length ('infinity'::DOUBLE): non-finite, must be rejected
+# (without the isfinite check it silently emits contrast=0 / NaN).
+statement ok
+CREATE TABLE inftree AS SELECT * FROM (VALUES
+    (0, 'A', CAST('infinity' AS DOUBLE), CAST(NULL AS BIGINT), 2),
+    (1, 'B', 3.0, NULL, 2),
+    (2, 'E', 2.0, NULL, 4),
+    (3, 'C', 4.0, NULL, 4),
+    (4, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement error
+SELECT * FROM phylo_independent_contrasts('inftree', 'gtraits');
+----
+finite
+
+# Two zero-length children -> contrast variance is zero.
+statement ok
+CREATE TABLE ztree AS SELECT * FROM (VALUES
+    (0, 'A', 0.0, CAST(NULL AS BIGINT), 3),
+    (1, 'B', 0.0, NULL, 3),
+    (2, 'C', 4.0, NULL, 4),
+    (3, 'E', 2.0, NULL, 4),
+    (4, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement error
+SELECT * FROM phylo_independent_contrasts('ztree', 'gtraits');
+----
+zero
+
+# =============================================================================
+# Error: bad relations / columns
+# =============================================================================
+
+statement error
+SELECT * FROM phylo_independent_contrasts('no_tree', 'gtraits');
+----
+does not exist
+
+statement error
+SELECT * FROM phylo_independent_contrasts('gtree', 'no_traits');
+----
+does not exist
+
+statement ok
+CREATE TABLE bad_tree AS SELECT 1 AS x;
+
+statement error
+SELECT * FROM phylo_independent_contrasts('bad_tree', 'gtraits');
+----
+node_index
+
+statement ok
+CREATE TABLE bad_traits AS SELECT 1 AS x;
+
+statement error
+SELECT * FROM phylo_independent_contrasts('gtree', 'bad_traits');
+----
+name
+
+# Traits table with name+trait but no value column (exercises the 'value' branch
+# of the schema check specifically).
+statement ok
+CREATE TABLE traits_noval AS SELECT name, trait FROM gtraits;
+
+statement error
+SELECT * FROM phylo_independent_contrasts('gtree', 'traits_noval');
+----
+value
