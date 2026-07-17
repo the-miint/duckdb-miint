@@ -1,0 +1,110 @@
+# name: test/sql/copy_fastx_id_types.test
+# description: COPY FORMAT FASTQ/FASTA accept BIGINT and UUID for read_id (issue #145)
+# group: [sql]
+
+#   Previously the FASTA/FASTQ writers assumed read_id was VARCHAR and called
+#   GetData<string_t> unconditionally at sink time. A BIGINT read_id threw an
+#   INTERNAL error that fatally invalidated the connection. #145 relaxes this to
+#   accept VARCHAR / BIGINT / UUID (mirroring COPY FORMAT SAM), with BIGINT
+#   stringified to decimal and UUID to its canonical 36-char lowercase form.
+#   Round-trip via read_fastx returns VARCHAR (type loss, same as SAM).
+
+require miint
+
+# ---------------------------------------------------------------------------
+# FASTQ — BIGINT read_id (the exact #145 repro).
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT 42::BIGINT AS read_id, 'ACGT' AS sequence1, [35, 35, 35, 35]::UTINYINT[] AS qual1)
+TO '__TEST_DIR__/bigint.fq' (FORMAT FASTQ);
+
+query III
+SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/bigint.fq');
+----
+42	ACGT	[35, 35, 35, 35]
+
+# read_id survives a round-trip back to BIGINT (qiita's use case).
+query I
+SELECT read_id::BIGINT FROM read_fastx('__TEST_DIR__/bigint.fq');
+----
+42
+
+# Regression guard: the connection must still be usable (the bug fatally
+# invalidated it, so every subsequent statement failed).
+query I
+SELECT 1;
+----
+1
+
+# ---------------------------------------------------------------------------
+# FASTQ — UUID read_id, written as canonical 36-char lowercase.
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT '12345678-1234-5678-1234-567812345678'::UUID AS read_id, 'ACGT' AS sequence1, [35, 35, 35, 35]::UTINYINT[] AS qual1)
+TO '__TEST_DIR__/uuid.fq' (FORMAT FASTQ);
+
+query II
+SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/uuid.fq');
+----
+12345678-1234-5678-1234-567812345678	ACGT
+
+# An uppercase UUID literal must be written as the canonical 36-char LOWERCASE
+# form (proves UUID::ToString canonicalization, not verbatim pass-through).
+statement ok
+COPY (SELECT 'AABBCCDD-EEFF-1122-3344-556677889900'::UUID AS read_id, 'ACGT' AS sequence1, [35, 35, 35, 35]::UTINYINT[] AS qual1)
+TO '__TEST_DIR__/uuid_upper.fq' (FORMAT FASTQ);
+
+query II
+SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/uuid_upper.fq');
+----
+aabbccdd-eeff-1122-3344-556677889900	ACGT
+
+# ---------------------------------------------------------------------------
+# FASTQ — ID_AS_SEQUENCE_INDEX with a BIGINT read_id (previously also crashed
+# because read_id was still read as string_t at the top of the sink loop).
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT 999::BIGINT AS read_id, 7::BIGINT AS sequence_index, 'ACGT' AS sequence1, [35, 35, 35, 35]::UTINYINT[] AS qual1)
+TO '__TEST_DIR__/idx.fq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true);
+
+query II
+SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/idx.fq');
+----
+7	ACGT
+
+# ---------------------------------------------------------------------------
+# FASTA — BIGINT and UUID read_id.
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT 42::BIGINT AS read_id, 'ACGT' AS sequence1)
+TO '__TEST_DIR__/bigint.fa' (FORMAT FASTA);
+
+query II
+SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/bigint.fa');
+----
+42	ACGT
+
+statement ok
+COPY (SELECT '12345678-1234-5678-1234-567812345678'::UUID AS read_id, 'ACGT' AS sequence1)
+TO '__TEST_DIR__/uuid.fa' (FORMAT FASTA);
+
+query II
+SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/uuid.fa');
+----
+12345678-1234-5678-1234-567812345678	ACGT
+
+# ---------------------------------------------------------------------------
+# Bind-time rejection of a disallowed id type — a clean BinderError, NOT a
+# fatal INTERNAL error. Matches the COPY FORMAT SAM message exactly.
+# ---------------------------------------------------------------------------
+statement error
+COPY (SELECT 3.14::DOUBLE AS read_id, 'ACGT' AS sequence1, [35, 35, 35, 35]::UTINYINT[] AS qual1)
+TO '__TEST_DIR__/bad.fq' (FORMAT FASTQ);
+----
+Column 'read_id' must be VARCHAR, BIGINT, or UUID
+
+statement error
+COPY (SELECT 3.14::DOUBLE AS read_id, 'ACGT' AS sequence1)
+TO '__TEST_DIR__/bad.fa' (FORMAT FASTA);
+----
+Column 'read_id' must be VARCHAR, BIGINT, or UUID

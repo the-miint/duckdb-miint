@@ -1,0 +1,168 @@
+# name: test/sql/copy_ubam.test
+# description: COPY FORMAT UBAM writes an unaligned reads BAM (issue #156)
+# group: [sql]
+
+#   FORMAT UBAM is the reads-side counterpart of FORMAT FASTQ: it writes SEQ/QUAL
+#   from read_id/sequence1/qual1 into a headerless (no @SQ) unaligned BAM, with an
+#   optional settable @RG and per-read integer aux tags. This file covers the
+#   miint-observable behavior (SEQ/QUAL/read_id round-trip + bind errors); the
+#   header/@RG/zm/no-@SQ structure that miint's readers don't expose is asserted
+#   with htslib in test/cpp/test_copy_ubam.cpp.
+
+require miint
+
+# ---------------------------------------------------------------------------
+# Setup: single-end CCS-style reads. read_id is an opaque QNAME; zmw is a
+# separate integer column feeding the per-read zm tag (no structure assumed).
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE reads AS
+SELECT * FROM (VALUES
+    ('movie/1/ccs', 'ACGTACGT', [30, 31, 32, 33, 34, 35, 36, 37]::UTINYINT[], 1),
+    ('movie/2/ccs', 'TTTTGGGG', [20, 20, 20, 20, 25, 25, 25, 25]::UTINYINT[], 2),
+    ('movie/3/ccs', 'CCCCAAAA', [40, 40, 40, 40, 10, 10, 10, 10]::UTINYINT[], 3)
+) AS t(read_id, sequence1, qual1, zmw);
+
+# ---------------------------------------------------------------------------
+# Happy path: write a uBAM with @RG and a per-read zm tag.
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT read_id, sequence1, qual1, zmw FROM reads ORDER BY zmw)
+TO '__TEST_DIR__/ccs.bam'
+(FORMAT UBAM, READ_GROUP {ID: 'qiita', PL: 'PACBIO', DS: 'READTYPE=CCS'}, TAGS {zm: zmw});
+
+# SEQ/QUAL and verbatim record names round-trip via read_sequences_sam.
+query III
+SELECT read_id, sequence1, qual1 FROM read_sequences_sam('__TEST_DIR__/ccs.bam') ORDER BY read_id;
+----
+movie/1/ccs	ACGTACGT	[30, 31, 32, 33, 34, 35, 36, 37]
+movie/2/ccs	TTTTGGGG	[20, 20, 20, 20, 25, 25, 25, 25]
+movie/3/ccs	CCCCAAAA	[40, 40, 40, 40, 10, 10, 10, 10]
+
+query I
+SELECT COUNT(*) FROM read_sequences_sam('__TEST_DIR__/ccs.bam');
+----
+3
+
+# ---------------------------------------------------------------------------
+# Minimal form: no READ_GROUP, no TAGS (a plain uBAM is still valid).
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM reads ORDER BY zmw)
+TO '__TEST_DIR__/plain.bam' (FORMAT UBAM);
+
+query II
+SELECT read_id, sequence1 FROM read_sequences_sam('__TEST_DIR__/plain.bam') ORDER BY read_id;
+----
+movie/1/ccs	ACGTACGT
+movie/2/ccs	TTTTGGGG
+movie/3/ccs	CCCCAAAA
+
+# ---------------------------------------------------------------------------
+# BIGINT read_id is written verbatim as the QNAME (decimal string).
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT 42::BIGINT AS read_id, 'ACGT' AS sequence1, [35, 35, 35, 35]::UTINYINT[] AS qual1)
+TO '__TEST_DIR__/bigint_id.bam' (FORMAT UBAM);
+
+query II
+SELECT read_id, sequence1 FROM read_sequences_sam('__TEST_DIR__/bigint_id.bam');
+----
+42	ACGT
+
+# ---------------------------------------------------------------------------
+# COMPRESSION_LEVEL is accepted (0-9); output still round-trips.
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM reads ORDER BY zmw)
+TO '__TEST_DIR__/level0.bam' (FORMAT UBAM, COMPRESSION_LEVEL 0);
+
+query I
+SELECT COUNT(*) FROM read_sequences_sam('__TEST_DIR__/level0.bam');
+----
+3
+
+# ---------------------------------------------------------------------------
+# Empty input still produces a valid header-only BAM (0 records) -- exercises
+# the Finalize header-write path.
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM reads WHERE false)
+TO '__TEST_DIR__/empty.bam' (FORMAT UBAM, READ_GROUP {ID: 'qiita', DS: 'READTYPE=CCS'});
+
+query I
+SELECT COUNT(*) FROM read_sequences_sam('__TEST_DIR__/empty.bam');
+----
+0
+
+# ---------------------------------------------------------------------------
+# Bind errors.
+# ---------------------------------------------------------------------------
+
+# COMPRESSION_LEVEL out of range.
+statement error
+COPY (SELECT read_id, sequence1, qual1 FROM reads) TO '__TEST_DIR__/e.bam' (FORMAT UBAM, COMPRESSION_LEVEL 10);
+----
+COMPRESSION_LEVEL must be between 0 and 9
+
+# Missing qual1.
+statement error
+COPY (SELECT read_id, sequence1 FROM reads) TO '__TEST_DIR__/e.bam' (FORMAT UBAM);
+----
+COPY FORMAT UBAM requires 'qual1' column
+
+# read_id of a disallowed type.
+statement error
+COPY (SELECT 3.14::DOUBLE AS read_id, 'ACGT' AS sequence1, [35]::UTINYINT[] AS qual1)
+TO '__TEST_DIR__/e.bam' (FORMAT UBAM);
+----
+Column 'read_id' must be VARCHAR, BIGINT, or UUID
+
+# TAGS pointing at a non-integer column.
+statement error
+COPY (SELECT read_id, sequence1, qual1, 'x' AS notint FROM reads)
+TO '__TEST_DIR__/e.bam' (FORMAT UBAM, TAGS {zm: notint});
+----
+must be an integer type
+
+# TAGS pointing at a column that isn't in the projection.
+statement error
+COPY (SELECT read_id, sequence1, qual1 FROM reads)
+TO '__TEST_DIR__/e.bam' (FORMAT UBAM, TAGS {zm: missing_col});
+----
+not found
+
+# TAGS tag name that isn't exactly two characters.
+statement error
+COPY (SELECT read_id, sequence1, qual1, zmw FROM reads)
+TO '__TEST_DIR__/e.bam' (FORMAT UBAM, TAGS {zmw: zmw});
+----
+exactly 2 characters
+
+# READ_GROUP without an ID field.
+statement error
+COPY (SELECT read_id, sequence1, qual1 FROM reads)
+TO '__TEST_DIR__/e.bam' (FORMAT UBAM, READ_GROUP {PL: 'PACBIO'});
+----
+READ_GROUP requires an 'ID'
+
+# READ_GROUP field that isn't a 2-character SAM code.
+statement error
+COPY (SELECT read_id, sequence1, qual1 FROM reads)
+TO '__TEST_DIR__/e.bam' (FORMAT UBAM, READ_GROUP {ID: 'x', DESCRIPTION: 'y'});
+----
+must be a 2-character SAM @RG code
+
+# REFERENCE_LENGTHS is rejected — a uBAM is headerless by construction.
+statement error
+COPY (SELECT read_id, sequence1, qual1 FROM reads)
+TO '__TEST_DIR__/e.bam' (FORMAT UBAM, REFERENCE_LENGTHS 'reads');
+----
+UBAM
+
+# qual/seq length mismatch is a runtime error.
+statement error
+COPY (SELECT 'r' AS read_id, 'ACGT' AS sequence1, [35, 35]::UTINYINT[] AS qual1)
+TO '__TEST_DIR__/e.bam' (FORMAT UBAM);
+----
+does not match

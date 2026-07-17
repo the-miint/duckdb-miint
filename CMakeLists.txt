@@ -1129,6 +1129,7 @@ set(EXTENSION_SOURCES
     src/copy_fastq.cpp
     src/copy_fasta.cpp
     src/copy_sam.cpp
+    src/copy_ubam.cpp
     src/catalog_utils.cpp
     src/reference_table_reader.cpp
     src/placement_table_reader.cpp
@@ -1608,6 +1609,7 @@ set(TEST_SOURCES
     test/cpp/test_SequenceReader.cpp
     test/cpp/test_DuckDBSeqStream.cpp
     test/cpp/test_CopyFileHandlePipe.cpp
+    test/cpp/test_copy_ubam.cpp
     src/QualScore.cpp
     test/cpp/test_QualScore.cpp
     src/qc_algorithms.cpp

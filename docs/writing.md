@@ -12,6 +12,7 @@ TO 'some_other_file.fasta' (FORMAT FASTA);
 - [FASTQ](#fastq) - Write FASTQ sequence files
 - [FASTA](#fasta) - Write FASTA sequence files
 - [SAM / BAM](#sam-and-bam) - Write SAM/BAM alignment files
+- [UBAM](#ubam) - Write unaligned reads BAM (uBAM) files
 - [BIOM](#biom) - Write BIOM observation matrix files
 - [NEWICK](#newick) - Write Newick phylogenetic trees
 
@@ -20,7 +21,7 @@ TO 'some_other_file.fasta' (FORMAT FASTA);
 Write query results to FASTQ format files. Requires `read_id`, `sequence1`, and `qual1` columns from `read_fastx` output.
 
 **Required columns:**
-- `read_id` (VARCHAR): Sequence identifier
+- `read_id` (VARCHAR, BIGINT, or UUID): Sequence identifier. `BIGINT` is stringified to decimal and `UUID` to its canonical 36-char lowercase form; the record name on disk is always text. Round-trip via `read_fastx` returns `read_id` as `VARCHAR` (the `BIGINT`/`UUID` type is not preserved on disk — recover it with e.g. `read_id::BIGINT`).
 - `sequence1` (VARCHAR): DNA/RNA sequence
 - `qual1` (BLOB): Quality scores as raw bytes
 
@@ -84,7 +85,7 @@ TO 'output.fastq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true);
 Write query results to FASTA format files. Requires `read_id` and `sequence1` columns from `read_fastx` output.
 
 **Required columns:**
-- `read_id` (VARCHAR): Sequence identifier
+- `read_id` (VARCHAR, BIGINT, or UUID): Sequence identifier. `BIGINT` is stringified to decimal and `UUID` to its canonical 36-char lowercase form; the record name on disk is always text. Round-trip via `read_fastx` returns `read_id` as `VARCHAR` (the `BIGINT`/`UUID` type is not preserved on disk — recover it with e.g. `read_id::BIGINT`).
 - `sequence1` (VARCHAR): DNA/RNA/protein sequence
 
 **Optional columns:**
@@ -258,6 +259,44 @@ TO 'output.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table', SEQUENCE_DATA 'seque
 - Reference lengths must be provided explicitly when writing headers - they cannot be inferred from the data
 - All optional tags present in the input are preserved in the output
 - BAM files always require headers (binary format specification)
+
+### UBAM
+
+Write query results to an **unaligned reads BAM** (uBAM): reads with SEQ/QUAL and no reference alignment. This is the BAM counterpart of `FORMAT FASTQ` — it takes the same `read_id`/`sequence1`/`qual1` columns — and exists for tools that require a BAM (rather than FASTQ) input for unaligned reads, e.g. PacBio's `lima`, which selects CCS-vs-CLR demultiplexing from the input **format**.
+
+Every record is written unmapped (`FLAG=4`), with no `@SQ` header and no reference table. `read_id` is written **verbatim** as the record name (QNAME) — the writer makes no assumption about its contents. Output is always BAM (block-gzip).
+
+**Required columns:**
+- `read_id` (VARCHAR, BIGINT, or UUID): Record name (QNAME), written verbatim. `BIGINT`/`UUID` are stringified as for FASTQ.
+- `sequence1` (VARCHAR): Read sequence.
+- `qual1` (UTINYINT[]): Phred quality scores, raw values 0–93 (no ASCII offset) — exactly what `read_fastx` / `read_sequences_sam` emit. Must be the same length as `sequence1`.
+
+Single-end only (no `sequence2`/`qual2`). Any additional projected columns are ignored unless referenced by `TAGS`.
+
+**Parameters:**
+- `READ_GROUP` (STRUCT, optional): Emits an `@RG` header line and a per-record `RG:Z` tag. An `ID` field is required; any other fields (`PL`, `DS`, `SM`, `LB`, `PU`, `CN`, …) are passed through. Field names are case-insensitive (upper-cased to the SAM codes). Example: `READ_GROUP {ID: 'qiita', PL: 'PACBIO', DS: 'READTYPE=CCS'}`. `DS:READTYPE=CCS` is the field `lima` keys on to treat the input as CCS.
+- `TAGS` (STRUCT, optional): Maps a 2-character BAM aux tag to a projected **integer** column, written as a signed 32-bit (`i`) tag per record. A NULL cell omits the tag for that record. Example: `TAGS {zm: zmw}` writes `zm:i:<zmw>` (PacBio ZMW hole number). Non-integer columns are rejected at bind. Note: struct keys are lower-cased unless quoted, so an uppercase tag needs a quoted key (e.g. `TAGS {'NM': edit_distance}`); the `RG` tag is reserved for `READ_GROUP`.
+- `COMPRESSION_LEVEL` (0–9, optional): BAM compression level (default: HTSlib's level 6).
+
+`REFERENCE_LENGTHS` is **not** accepted — a uBAM is headerless by construction. Use `FORMAT BAM` for aligned records.
+
+**Examples:**
+```sql
+-- CCS reads from the lake -> a uBAM lima will accept. zmw is a projected
+-- integer column carrying the ZMW hole number for the zm tag.
+COPY (SELECT read_id, sequence1, qual1, zmw FROM reads)
+TO 'out.bam' (
+  FORMAT UBAM,
+  READ_GROUP {ID: 'qiita', PL: 'PACBIO', DS: 'READTYPE=CCS'},
+  TAGS {zm: zmw}
+);
+
+-- Minimal uBAM (no @RG, no tags).
+COPY (SELECT read_id, sequence1, qual1 FROM read_fastx('input.fastq'))
+TO 'reads.bam' (FORMAT UBAM);
+```
+
+Round-trip via `read_sequences_sam('out.bam')` returns `read_id`/`sequence1`/`qual1` (with `read_id` as VARCHAR, as for the FASTQ writer).
 
 ### BIOM
 

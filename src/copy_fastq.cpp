@@ -1,5 +1,6 @@
 #include "copy_fastq.hpp"
 #include "copy_format_common.hpp"
+#include "id_column_utils.hpp"
 #include "fastq_encoder.hpp"
 #include "QualScore.hpp"
 #include "duckdb/common/exception.hpp"
@@ -29,6 +30,7 @@ struct FastqCopyBindData : public SequenceCopyBindData {
 		result->split_output = split_output;
 		result->names = names;
 		result->indices = indices;
+		result->read_id_type = read_id_type;
 		// Copy FASTQ-specific field
 		result->qual_offset = qual_offset;
 		return result;
@@ -40,7 +42,7 @@ struct FastqCopyBindData : public SequenceCopyBindData {
 		       include_comment == other.include_comment && qual_offset == other.qual_offset &&
 		       compression == other.compression && file_path == other.file_path &&
 		       has_r2_columns == other.has_r2_columns && split_output == other.split_output &&
-		       flush_size == other.flush_size && names == other.names;
+		       flush_size == other.flush_size && names == other.names && read_id_type == other.read_id_type;
 	}
 };
 
@@ -68,6 +70,13 @@ static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFuncti
 	if (!has_qual1) {
 		throw BinderException("COPY FORMAT FASTQ requires 'qual1' column");
 	}
+
+	// read_id may be VARCHAR, BIGINT, or UUID (mirrors COPY FORMAT SAM). Validate at
+	// bind so a bad type is a clean BinderError, not a fatal INTERNAL error at sink.
+	if (!IsAllowedIdType(sql_types[result->indices.read_id_idx])) {
+		throw BinderException("Column 'read_id' must be %s", AllowedIdTypeList());
+	}
+	result->read_id_type = sql_types[result->indices.read_id_idx];
 
 	// Column presence only; whether each record is actually paired is decided per-row at write
 	// time from R2 NULL-ness (read_fastx always emits sequence2/qual2, NULL for single-end).
@@ -153,8 +162,10 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 	UnifiedVectorFormat read_id_data, sequence_index_data, comment_data;
 	UnifiedVectorFormat seq1_data, seq2_data, qual1_data, qual2_data;
 
+	// read_id is dispatched per-row on its bind-captured type (VARCHAR / BIGINT /
+	// UUID) via ResolveSequenceRecordId -- do NOT read it as string_t here, that
+	// is exactly the crash a BIGINT read_id triggered (#145).
 	input.data[indices.read_id_idx].ToUnifiedFormat(input.size(), read_id_data);
-	auto read_ids = UnifiedVectorFormat::GetData<string_t>(read_id_data);
 
 	if (fdata.id_as_sequence_index) {
 		input.data[indices.sequence_index_idx].ToUnifiedFormat(input.size(), sequence_index_data);
@@ -206,8 +217,7 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 			id_ptr = id_buf.data();
 			id_size = id_buf.size();
 		} else {
-			id_ptr = read_ids[row_idx].GetData();
-			id_size = read_ids[row_idx].GetSize();
+			ResolveSequenceRecordId(read_id_data, row, fdata.read_id_type, id_buf, id_ptr, id_size);
 		}
 
 		// Get comment (may be absent or NULL)
