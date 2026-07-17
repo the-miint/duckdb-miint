@@ -65,6 +65,23 @@ COPY (
 - A requested tip is not a tip in the tree and `ignore_missing := false`.
 - No requested tip matches any tip in the tree.
 
+**Performance note (large trees):** building and shearing a large tree is
+allocation-bound — profiling a multi-million-node shear shows ~40% of the time
+in the system allocator (many small allocations for node names, child lists, and
+index maps). glibc's allocator is comparatively slow for this pattern. Because
+miint runs inside a host process, the safe way to switch allocators is a
+whole-process launch option rather than anything baked into the extension:
+preload jemalloc so *every* allocation in the process uses it uniformly.
+
+```bash
+# Linux: ~30% faster on large tree build/shear in our benchmarks.
+LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 duckdb   # or python, etc.
+```
+
+This applies to any allocation-heavy miint workload (large `read_newick`
+builds, `tree_resolve_placement`, QC), not just `shear_tree`. It does not reduce
+peak memory materially — it is a speed optimization.
+
 ### Resolve placements
 
 Resolve phylogenetic placements into a reference tree, returning a fully resolved tree with placed fragments as new tips. This exposes the `insert_fully_resolved` algorithm as a SQL-accessible table function.
