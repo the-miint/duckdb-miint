@@ -4,8 +4,83 @@ Methods for estimating and operating on phylogenies.
 
 ## Table of Contents
 
+- [Shear (subset to tips)](#shear-subset-to-tips) - Prune a tree down to a set of tips.
 - [Resolve placements](#resolve-placements) - Fully resolve sequence placements against a backbone.
 - [FastTree](#fasttree) - Estimate a phylogeny from a MSA with FastTree.
+
+### Shear (subset to tips)
+
+Subset ("shear" / prune) a tree down to a specified set of tips. This is the operation you want when a large reference phylogeny is persisted (e.g. in Parquet via `COPY ... (FORMAT NEWICK)`) and you need to restrict it to the tips relevant to one analysis.
+
+**Function signature**:
+
+`shear_tree(tree_table, tips_table, collapse := true, ignore_missing := false)`
+
+**Parameters:**
+- `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema (`node_index`, `parent_index`, `name`, `branch_length`, `edge_id`).
+- `tips_table` (VARCHAR): Name of a table or view with a `name` (VARCHAR) column listing the tip names to keep. Passing the tips as a table (rather than a list literal) keeps the call practical when the kept set is large. Duplicate and `NULL` names are ignored.
+- `collapse` (BOOLEAN, default `true`): How to treat internal nodes left with a single child after pruning.
+  - `true` — standard phylogenetic shear: remove single-descendant ancestors and **sum their branch lengths onto the surviving descendant edge**, so tip-to-tip distances are preserved. The lowest common ancestor (LCA) of the kept tips becomes the new root; nodes above it are dropped.
+  - `false` — preserve every internal node that lies on a path to a kept tip, with original parent links and branch lengths unchanged (unifurcations retained).
+- `ignore_missing` (BOOLEAN, default `false`): When `false`, a requested tip name not present as a tip in the tree is an error (the message lists the missing names). When `true`, absent names are skipped. Either way, if *no* requested tip matches, the call errors (a tree cannot be sheared to nothing).
+
+**Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath), reindexed 0-based:
+- `node_index` (BIGINT), `name` (VARCHAR), `branch_length` (DOUBLE, nullable), `edge_id` (BIGINT, nullable), `parent_index` (BIGINT, nullable, NULL for root), `is_tip` (BOOLEAN).
+
+The schema is `UNION ALL`-compatible with `read_newick` and can be written straight back out with `COPY ... (FORMAT NEWICK)`.
+
+**Behavior / semantics:**
+- Only **tip** names are matched — an internal-node label in `tips_table` is treated as missing.
+- Branch-length summation (collapse mode) treats an unspecified length (NaN → `NULL`) as `0`, but a collapsed chain that is *entirely* unspecified stays `NULL`, so topology-only trees (cladograms) round-trip as cladograms.
+- A collapsed edge keeps the surviving (lower) node's `edge_id`; the `edge_id`s of merged intermediate nodes are dropped.
+- The new root has no incoming edge, so its `branch_length` is `NULL`.
+- Reads both `tree_table` and `tips_table` via a fresh connection (works with tables and views); single-threaded build.
+
+**Examples:**
+```sql
+-- Persisted reference tree in Parquet, and the tips this analysis cares about.
+CREATE TABLE ref_tree AS SELECT * FROM 'reference_tree.parquet';
+CREATE TABLE keep AS SELECT feature_id AS name FROM my_feature_table;
+
+-- Standard shear: collapse single-child ancestors, preserve distances.
+SELECT * FROM shear_tree('ref_tree', 'keep');
+
+-- Keep every internal node on the retained paths instead.
+SELECT * FROM shear_tree('ref_tree', 'keep', collapse := false);
+
+-- Shear many trees against one shared tip list, tolerating tips absent from a
+-- given tree.
+SELECT * FROM shear_tree('ref_tree', 'keep', ignore_missing := true);
+
+-- Write the sheared tree back out to Newick.
+COPY (
+    SELECT node_index, name, branch_length, edge_id, parent_index
+    FROM shear_tree('ref_tree', 'keep')
+) TO 'sheared.nwk' (FORMAT NEWICK);
+```
+
+**Error conditions:**
+- `tree_table` or `tips_table` does not exist.
+- `tree_table` missing required `node_index` / `parent_index` columns; `tips_table` missing required `name` column.
+- A requested tip is not a tip in the tree and `ignore_missing := false`.
+- No requested tip matches any tip in the tree.
+
+**Performance note (large trees):** building and shearing a large tree is
+allocation-bound — profiling a multi-million-node shear shows ~40% of the time
+in the system allocator (many small allocations for node names, child lists, and
+index maps). glibc's allocator is comparatively slow for this pattern. Because
+miint runs inside a host process, the safe way to switch allocators is a
+whole-process launch option rather than anything baked into the extension:
+preload jemalloc so *every* allocation in the process uses it uniformly.
+
+```bash
+# Linux: ~30% faster on large tree build/shear in our benchmarks.
+LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 duckdb   # or python, etc.
+```
+
+This applies to any allocation-heavy miint workload (large `read_newick`
+builds, `tree_resolve_placement`, QC), not just `shear_tree`. It does not reduce
+peak memory materially — it is a speed optimization.
 
 ### Resolve placements
 

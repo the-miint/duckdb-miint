@@ -12,23 +12,14 @@ namespace duckdb {
 
 void ValidateTreeTableSchema(ClientContext &context, const std::string &table_name) {
 	auto info = GetTableOrViewColumns(context, table_name, "Tree table");
-	auto &col_names = info.names;
-	auto &col_types = info.types;
 
-	std::unordered_map<string, idx_t> name_to_idx;
-	for (idx_t i = 0; i < col_names.size(); i++) {
-		name_to_idx[StringUtil::Lower(col_names[i])] = i;
-	}
-
-	// Only check that required columns exist — the SQL query casts to correct types
-	auto check_exists = [&](const string &col_name) {
-		if (name_to_idx.find(col_name) == name_to_idx.end()) {
-			throw BinderException("Tree table '%s' missing required column '%s'", table_name, col_name);
+	// node_index and parent_index are required; name/branch_length/edge_id are
+	// optional (ReadTreeTable substitutes NULL when they are absent).
+	for (const char *required : {"node_index", "parent_index"}) {
+		if (!HasColumn(info, required)) {
+			throw BinderException("Tree table '%s' missing required column '%s'", table_name, required);
 		}
-	};
-
-	check_exists("node_index");
-	check_exists("parent_index");
+	}
 }
 
 std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::string &table_name) {
@@ -37,11 +28,20 @@ std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::s
 	auto &db = DatabaseInstance::GetDatabase(context);
 	Connection conn(db);
 
+	// Optional columns (name, branch_length, edge_id) default to NULL when the
+	// tree table lacks them, so a minimal node_index+parent_index table is
+	// accepted rather than failing mid-read. node_index/parent_index are
+	// guaranteed present by ValidateTreeTableSchema at bind time.
+	//
 	// Cast to canonical types so GetData<> always matches the backing store.
 	// DuckDB handles INTEGER->BIGINT, FLOAT->DOUBLE etc. transparently.
-	std::string query = "SELECT node_index::BIGINT, parent_index::BIGINT, name::VARCHAR, "
-	                    "branch_length::DOUBLE, edge_id::BIGINT FROM " +
-	                    KeywordHelper::WriteOptionallyQuoted(table_name);
+	auto info = GetTableOrViewColumns(context, table_name, "Tree table");
+	std::string name_proj = HasColumn(info, "name") ? "name::VARCHAR" : "CAST(NULL AS VARCHAR)";
+	std::string bl_proj = HasColumn(info, "branch_length") ? "branch_length::DOUBLE" : "CAST(NULL AS DOUBLE)";
+	std::string edge_proj = HasColumn(info, "edge_id") ? "edge_id::BIGINT" : "CAST(NULL AS BIGINT)";
+
+	std::string query = "SELECT node_index::BIGINT, parent_index::BIGINT, " + name_proj + ", " + bl_proj + ", " +
+	                    edge_proj + " FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
 
 	auto query_result = conn.Query(query);
 

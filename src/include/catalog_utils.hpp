@@ -19,4 +19,7 @@ struct TableOrViewColumns {
 TableOrViewColumns GetTableOrViewColumns(ClientContext &context, const std::string &table_name,
                                          const std::string &entity_type = "Table");
 
+// Case-insensitive check for whether `columns` contains a column named `col`.
+bool HasColumn(const TableOrViewColumns &columns, const std::string &col);
+
 } // namespace duckdb
