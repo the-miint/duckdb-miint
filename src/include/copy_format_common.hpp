@@ -5,6 +5,10 @@
 #include "duckdb/common/serializer/buffered_file_writer.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/common/enums/file_compression_type.hpp"
+// ResolveSequenceRecordId is header-inline (hot path) so it needs the id codec,
+// UUID::ToString, AllowedIdTypeList, exception types, and UnifiedVectorFormat --
+// id_column_utils.hpp transitively provides all of them.
+#include "id_column_utils.hpp"
 
 // htslib's BGZF handle; defined in <htslib/bgzf.h>, only included in the .cpp.
 struct BGZF;
@@ -104,6 +108,44 @@ void ValidateRequiredColumns(bool has_read_id, bool has_sequence1, const string 
 void ResolveOutputMode(const string &file_path, bool interleave, bool &out_split_output);
 void ValidateSequenceIndexParameter(bool id_as_sequence_index, bool has_sequence_index);
 
+// Resolve a read_id cell to (out_ptr, out_size), dispatching on the SQL type
+// captured at bind (VARCHAR / BIGINT / UUID). VARCHAR is zero-copy into the DuckDB
+// string heap; BIGINT/UUID are stringified into `buf` (a caller-owned buffer reused
+// across rows). The caller is responsible for NULL handling before calling. Shared
+// by the FASTA and FASTQ sinks so id-type support lives in one place. Inline: this
+// is on the per-record write path, so the VARCHAR fast path stays call-free.
+inline void ResolveSequenceRecordId(const UnifiedVectorFormat &read_id_data, idx_t row, const LogicalType &read_id_type,
+                                    string &buf, const char *&out_ptr, idx_t &out_size) {
+	auto idx = read_id_data.sel->get_index(row);
+	switch (read_id_type.id()) {
+	case LogicalTypeId::VARCHAR: {
+		// Zero-copy: point directly into the DuckDB string heap (hot path).
+		auto data = UnifiedVectorFormat::GetData<string_t>(read_id_data);
+		out_ptr = data[idx].GetData();
+		out_size = data[idx].GetSize();
+		return;
+	}
+	case LogicalTypeId::BIGINT: {
+		auto data = UnifiedVectorFormat::GetData<int64_t>(read_id_data);
+		buf = ::miint::FormatIdFromInt64(data[idx]);
+		out_ptr = buf.data();
+		out_size = buf.size();
+		return;
+	}
+	case LogicalTypeId::UUID: {
+		auto data = UnifiedVectorFormat::GetData<hugeint_t>(read_id_data);
+		buf = UUID::ToString(data[idx]);
+		out_ptr = buf.data();
+		out_size = buf.size();
+		return;
+	}
+	default:
+		// Bind validates the type via IsAllowedIdType, so this is unreachable.
+		throw InternalException("ResolveSequenceRecordId: unsupported read_id type '%s' (must be %s)",
+		                        read_id_type.ToString(), AllowedIdTypeList());
+	}
+}
+
 //===--------------------------------------------------------------------===//
 // Shared Sequence Copy Structures (FASTA/FASTQ)
 //===--------------------------------------------------------------------===//
@@ -124,6 +166,10 @@ struct SequenceCopyBindData : public FunctionData {
 	bool split_output = false;
 	vector<string> names;
 	ColumnIndices indices; // Pre-computed column indices
+	// SQL type of the read_id column, captured at bind (VARCHAR / BIGINT / UUID).
+	// The sink dispatches on this so BIGINT/UUID ids are stringified rather than
+	// (incorrectly) read as string_t -- see ResolveSequenceRecordId.
+	LogicalType read_id_type;
 
 	// Subclasses must implement Copy() and Equals()
 };

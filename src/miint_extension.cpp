@@ -12,6 +12,7 @@
 #include <copy_fastq.hpp>
 #include <copy_newick.hpp>
 #include <copy_sam.hpp>
+#include <copy_ubam.hpp>
 #include <read_jplace_newick.hpp>
 #include <read_newick.hpp>
 #include <shear_tree.hpp>
@@ -408,6 +409,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	CopyFastaFunction::Register(loader);
 	CopyNewickFunction::Register(loader);
 	CopySAMFunction::Register(loader);
+	CopyUBAMFunction::Register(loader);
 
 	ReadMzMLTableFunction::Register(loader);
 	ReadMzMLChromatogramsTableFunction::Register(loader);
