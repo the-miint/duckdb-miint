@@ -145,7 +145,7 @@ Pass these to CMake via `EXT_FLAGS` (e.g. `EXT_FLAGS="-DMIINT_ENABLE_UNIFRAC=OFF
 | `MIINT_ENABLE_GPL_BOUNDARY` | `ON` | gpl-boundary subsystem (process pipes + Arrow IPC over POSIX shm) |
 | `MIINT_ENABLE_UNIFRAC` | `ON` | UniFrac (PCoA / PERMANOVA / Faith PD) — requires libomp on macOS |
 
-WASM (Emscripten) builds automatically disable HDF5, SortMeRNA, sylph, gpl-boundary, MAFFT, and UniFrac.
+WASM (Emscripten) builds automatically disable HDF5, SortMeRNA, sylph, gpl-boundary, vsearch, and libcurl. UniFrac and MAFFT remain enabled — UniFrac builds against a dedicated single-threaded WASM target (`libssu_wasm.a` / `libskbb_wasm.a`, Eigen-backed, OpenMP stubbed out).
 
 ### Build steps
 Now to build the extension, run:

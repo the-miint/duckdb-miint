@@ -895,6 +895,19 @@ endif()
 find_program(CARGO cargo REQUIRED)
 message(STATUS "Found cargo: ${CARGO}")
 
+# emsdk 3.1.71 (the version DuckDB v1.5.4 pins for its WASM build) ships
+# binaryen v120, which predates the `bulk-memory-opt` and
+# `call-indirect-overlong` target-features that newer rustc/LLVM (>= LLVM 20,
+# i.e. Rust >= 1.87) stamp into wasm objects. At link time emcc forwards those
+# features to wasm-opt, and the older binaryen aborts with
+# "Unknown option '--enable-bulk-memory-opt'" — which builds the C++ extension
+# to 100% and then fails linking the Rust glue. Pin the glue's wasm cargo build
+# to an LLVM-19-era toolchain so the emitted objects stay within emsdk 3.1.71's
+# binaryen feature set. Matches the CI wasm-load job's `rust-toolchain@1.86.0`.
+# Override only if you have verified a different toolchain against emsdk 3.1.71.
+set(MIINT_WASM_RUST_TOOLCHAIN "1.86.0" CACHE STRING
+    "Rust toolchain used to cross-compile the rust glue for WASM (emsdk 3.1.71 binaryen compat)")
+
 set(GLUE_LIB_NAME "libmiint_rust_glue.a")
 set(GLUE_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/miint_rust_glue_target)
 
@@ -902,12 +915,33 @@ set(GLUE_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/miint_rust_glue_target)
 set(GLUE_CARGO_TARGET_FLAG "")
 set(GLUE_LIB_SUBDIR "release")
 set(GLUE_CONFIGURE_CMD "")
+# Rust toolchain to run the glue build under (empty = the default toolchain).
+# Set for EMSCRIPTEN so cargo emits binaryen-compatible objects (see
+# MIINT_WASM_RUST_TOOLCHAIN above); propagated to the build via RUSTUP_TOOLCHAIN.
+set(GLUE_RUSTUP_TOOLCHAIN "")
 if(EMSCRIPTEN)
     find_program(RUSTUP rustup)
     set(GLUE_CARGO_TARGET_FLAG "--target" "wasm32-unknown-emscripten")
     set(GLUE_LIB_SUBDIR "wasm32-unknown-emscripten/release")
     if(RUSTUP)
-        set(GLUE_CONFIGURE_CMD ${RUSTUP} target add wasm32-unknown-emscripten)
+        # Idempotently ensure the pinned toolchain + wasm target are installed,
+        # then build cargo under it (RUSTUP_TOOLCHAIN, set in GLUE_BUILD_ENV).
+        # Bracket-argument ([=[ ]=]) so CMake does NOT expand ${ver} — the shell
+        # must see it verbatim at build time.
+        set(GLUE_WASM_RUST_PIN_SH ${CMAKE_CURRENT_BINARY_DIR}/glue_wasm_rust_pin.sh)
+        file(WRITE ${GLUE_WASM_RUST_PIN_SH}
+[=[#!/bin/sh
+# Pin the miint rust-glue WASM build to an emsdk-3.1.71-compatible toolchain.
+set -e
+ver="$1"
+if ! rustup toolchain list | grep -q "^${ver}"; then
+    rustup toolchain install "${ver}" --profile minimal
+fi
+rustup target add --toolchain "${ver}" wasm32-unknown-emscripten
+]=])
+        set(GLUE_CONFIGURE_CMD sh ${GLUE_WASM_RUST_PIN_SH} ${MIINT_WASM_RUST_TOOLCHAIN})
+        set(GLUE_RUSTUP_TOOLCHAIN ${MIINT_WASM_RUST_TOOLCHAIN})
+        message(STATUS "Rust glue: pinning WASM build to toolchain ${MIINT_WASM_RUST_TOOLCHAIN} (emsdk 3.1.71 binaryen compat)")
     endif()
     message(STATUS "Rust glue cross-compiling for wasm32-unknown-emscripten")
 elseif(WIN32)
@@ -983,9 +1017,17 @@ if(WIN32 AND MINGW)
     list(APPEND GLUE_RUSTFLAGS_LIST "-C" "link-arg=-L${GLUE_MINGW_STUB_DIR}")
 endif()
 
+set(GLUE_ENV_ARGS "")
 if(GLUE_RUSTFLAGS_LIST)
     string(JOIN " " GLUE_RUSTFLAGS_STR ${GLUE_RUSTFLAGS_LIST})
-    set(GLUE_BUILD_ENV ${CMAKE_COMMAND} -E env "RUSTFLAGS=${GLUE_RUSTFLAGS_STR}")
+    list(APPEND GLUE_ENV_ARGS "RUSTFLAGS=${GLUE_RUSTFLAGS_STR}")
+endif()
+if(GLUE_RUSTUP_TOOLCHAIN)
+    # Force cargo (the rustup shim) onto the pinned toolchain for this build.
+    list(APPEND GLUE_ENV_ARGS "RUSTUP_TOOLCHAIN=${GLUE_RUSTUP_TOOLCHAIN}")
+endif()
+if(GLUE_ENV_ARGS)
+    set(GLUE_BUILD_ENV ${CMAKE_COMMAND} -E env ${GLUE_ENV_ARGS})
 else()
     set(GLUE_BUILD_ENV)
 endif()
