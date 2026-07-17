@@ -50,9 +50,11 @@ jobs:
       # On pull_request also exclude windows_amd64_mingw and wasm_eh — Windows
       # and WASM build/verify only on push to main/v1.5-variegata/tags so
       # release candidates still cover them, while PRs only pay for Linux + macOS.
-      #exclude_archs: ${{ github.event_name == 'pull_request' && 'windows_amd64_rtools;windows_amd64;windows_amd64_mingw;osx_amd64;wasm_eh;wasm_mvp;wasm_threads' || 'windows_amd64_rtools;windows_amd64;osx_amd64;wasm_mvp;wasm_threads' }}
-      # temporarily disable windows and wasm builds entirely
-      exclude_archs: ${{ 'windows_amd64_rtools;windows_amd64;windows_amd64_mingw;osx_amd64;wasm_eh;wasm_mvp;wasm_threads' }}
+      # WASM (wasm_eh) is an expensive build, so it runs ONLY on tag pushes —
+      # excluded on branch pushes and PRs. Windows (all variants) + osx_amd64 +
+      # wasm_mvp/wasm_threads stay excluded everywhere (broken / not shipped).
+      # Tag builds drop wasm_eh from the exclude list so release artifacts carry it.
+      exclude_archs: ${{ startsWith(github.ref, 'refs/tags/') && 'windows_amd64_rtools;windows_amd64;windows_amd64_mingw;osx_amd64;wasm_mvp;wasm_threads' || 'windows_amd64_rtools;windows_amd64;windows_amd64_mingw;osx_amd64;wasm_eh;wasm_mvp;wasm_threads' }}
 
   test-with-bowtie2:
     name: Test with Bowtie2

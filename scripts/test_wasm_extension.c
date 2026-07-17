@@ -74,6 +74,50 @@ int main(int argc, char **argv) {
     printf("\n3. miint_version()\n");
     if (run_query_check(conn, "SELECT miint_version()", NULL)) return 1;
 
+    // Test UniFrac end-to-end: build a feature table + phylogeny inline (no
+    // read_biom/read_newick — HDF5 and the filesystem are unavailable under
+    // WASM) and compute Faith's phylogenetic diversity. Expected values are
+    // hand-checked against test/sql/unifrac_faith_pd.test for the gg_otu tree
+    // ((GG_OTU_1:0.1,GG_OTU_2:0.2)Int1:0.3,(GG_OTU_3:0.4,(GG_OTU_4:0.5,GG_OTU_5:0.6)Int2:0.7)Int3:0.8);
+    //   Sample1 {OTU_2,OTU_4}      = 0.2+0.3+0.5+0.7+0.8 = 2.5
+    //   Sample3 {OTU_1,OTU_3,OTU_4,OTU_5} = 0.1+0.3+0.4+0.5+0.6+0.7+0.8 = 3.4
+    printf("\n4. UniFrac faith_pd (end-to-end libssu compute)\n");
+    const char *setup[] = {
+        "CREATE TABLE observations(sample_id VARCHAR, feature_id VARCHAR, value DOUBLE)",
+        "INSERT INTO observations VALUES "
+        "('Sample1','GG_OTU_2',1),('Sample1','GG_OTU_4',1),"
+        "('Sample2','GG_OTU_2',1),('Sample2','GG_OTU_4',1),('Sample2','GG_OTU_5',1),"
+        "('Sample3','GG_OTU_1',1),('Sample3','GG_OTU_3',1),('Sample3','GG_OTU_4',1),('Sample3','GG_OTU_5',1),"
+        "('Sample4','GG_OTU_2',1),('Sample4','GG_OTU_3',1),"
+        "('Sample5','GG_OTU_2',1),"
+        "('Sample6','GG_OTU_2',1),('Sample6','GG_OTU_3',1),('Sample6','GG_OTU_4',1)",
+        "CREATE TABLE tree(node_index BIGINT, name VARCHAR, branch_length DOUBLE, edge_id BIGINT, "
+        "parent_index BIGINT, is_tip BOOLEAN)",
+        "INSERT INTO tree VALUES "
+        "(0,'GG_OTU_1',0.1,NULL,2,true),(1,'GG_OTU_2',0.2,NULL,2,true),(2,'Int1',0.3,NULL,8,false),"
+        "(3,'GG_OTU_3',0.4,NULL,7,true),(4,'GG_OTU_4',0.5,NULL,6,true),(5,'GG_OTU_5',0.6,NULL,6,true),"
+        "(6,'Int2',0.7,NULL,7,false),(7,'Int3',0.8,NULL,8,false),(8,'',NULL,NULL,NULL,false)",
+    };
+    for (size_t i = 0; i < sizeof(setup) / sizeof(setup[0]); i++) {
+        if (duckdb_query(conn, setup[i], &result) != DuckDBSuccess) {
+            fprintf(stderr, "  FAIL (setup): %s\n", duckdb_result_error(&result));
+            duckdb_destroy_result(&result);
+            return 1;
+        }
+        duckdb_destroy_result(&result);
+    }
+    // round() to 4dp so the check is robust to floating-point summation noise.
+    if (run_query_check(conn,
+                        "SELECT round(faith_pd, 4) FROM unifrac_faith_pd('observations', 'tree') "
+                        "WHERE sample_id = 'Sample1'",
+                        "2.5"))
+        return 1;
+    if (run_query_check(conn,
+                        "SELECT round(faith_pd, 4) FROM unifrac_faith_pd('observations', 'tree') "
+                        "WHERE sample_id = 'Sample3'",
+                        "3.4"))
+        return 1;
+
     printf("\n=== All tests passed ===\n");
 
     duckdb_disconnect(&conn);
