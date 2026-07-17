@@ -241,6 +241,51 @@ TEST_CASE("shear collapse handles a trifurcating (unrooted) root", "[NewickTree]
 	}
 }
 
+TEST_CASE("shear collapse handles a large internal multifurcation", "[NewickTree][shear]") {
+	// root -> M(:5); M has N direct tips ta_k(:1) AND N single-child chains
+	// (tb_k:3)u_k(:2). A large (2N-way), non-binary internal node whose children
+	// are a mix of kept tips and unifurcations that must collapse. Arity is not
+	// special-cased anywhere, so this must behave like the binary cases.
+	const int N = 100; // 2N = 200 children on M -> well past binary
+	std::string nwk = "((";
+	for (int k = 0; k < N; ++k) {
+		nwk += "ta" + std::to_string(k) + ":1,";
+	}
+	for (int k = 0; k < N; ++k) {
+		nwk += "(tb" + std::to_string(k) + ":3)u" + std::to_string(k) + ":2";
+		nwk += (k + 1 < N) ? "," : "";
+	}
+	nwk += ")M:5)root;";
+
+	auto tree = miint::NewickTree::parse(nwk);
+
+	std::unordered_set<std::string> keep;
+	for (int k = 0; k < N; ++k) {
+		keep.insert("ta" + std::to_string(k));
+		keep.insert("tb" + std::to_string(k));
+	}
+
+	// root has a single kept child (M) -> collapses; M becomes the root and
+	// keeps ALL 2N children; every u_k (single child) collapses, summing 3+2
+	// onto tb. WHY: a multifurcation with >= 2 kept lineages is preserved at any
+	// arity, and collapse-through works the same regardless of node degree.
+	auto out = tree.shear(keep, /*collapse=*/true, /*ignore_missing=*/false);
+	REQUIRE(out.num_nodes() == static_cast<size_t>(1 + 2 * N));
+	REQUIRE(out.name(out.root()) == "M");
+	REQUIRE(out.children(out.root()).size() == static_cast<size_t>(2 * N));
+	REQUIRE(out.branch_length(idx(out, "ta7")) == Catch::Approx(1.0));
+	REQUIRE(out.branch_length(idx(out, "tb7")) == Catch::Approx(5.0)); // 3 + 2 merged
+	REQUIRE(out.find_node_by_name("u7") == std::nullopt);              // collapsed away
+
+	// Reducing the same multifurcation to exactly two kept lineages must leave a
+	// bifurcation, not a degenerate single-child node.
+	auto two = tree.shear(names_of({"ta9", "tb3"}), /*collapse=*/true, /*ignore_missing=*/false);
+	REQUIRE(two.num_nodes() == 3); // M + ta9 + tb3
+	REQUIRE(two.name(two.root()) == "M");
+	REQUIRE(two.children(two.root()).size() == 2);
+	REQUIRE(two.branch_length(idx(two, "tb3")) == Catch::Approx(5.0));
+}
+
 // ============================================================================
 // edge_id handling across a collapse
 // ============================================================================

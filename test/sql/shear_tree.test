@@ -128,6 +128,37 @@ E	root	16.0
 root	NULL	NULL
 
 # =============================================================================
+# Large multifurcation (arity is not special-cased)
+# =============================================================================
+
+# Star tree: root with 1000 tip children. Keep 500 -> the root stays a 500-way
+# multifurcation (a real branch point with >= 2 kept lineages), proving there is
+# no arity limit and no O(arity^2) blowup at realistic width.
+statement ok
+CREATE TABLE star AS
+SELECT i AS node_index,
+       CASE WHEN i = 0 THEN 'root' ELSE 't' || i END AS name,
+       CASE WHEN i = 0 THEN NULL ELSE 1.0 END AS branch_length,
+       NULL::BIGINT AS edge_id,
+       CASE WHEN i = 0 THEN NULL ELSE 0 END AS parent_index
+FROM range(1001) t(i);
+
+statement ok
+CREATE TABLE starkeep AS SELECT 't' || i AS name FROM range(1, 1001) t(i) WHERE i % 2 = 1;
+
+statement ok
+CREATE TABLE star_sheared AS SELECT * FROM shear_tree('star', 'starkeep');
+
+# total nodes (500 tips + root), exactly one root, root retains 500 children.
+query III
+SELECT (SELECT count(*) FROM star_sheared),
+       (SELECT count(*) FROM star_sheared WHERE parent_index IS NULL),
+       (SELECT count(*) FROM star_sheared
+          WHERE parent_index = (SELECT node_index FROM star_sheared WHERE parent_index IS NULL));
+----
+501	1	500
+
+# =============================================================================
 # Views work for both inputs
 # =============================================================================
 
