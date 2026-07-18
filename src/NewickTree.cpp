@@ -1082,6 +1082,253 @@ NewickTree NewickTree::shear(const std::unordered_set<std::string> &keep_names, 
 	return result;
 }
 
+NewickTree NewickTree::resolve_multifurcations() const {
+	const uint32_t n = static_cast<uint32_t>(nodes_.size());
+
+	NewickTree result;
+
+	// Pass 1: copy every original node in ascending index order, preserving
+	// name / branch length / edge id. Because nodes are added in order, original
+	// index i maps to result index i; new connector nodes are appended after, so
+	// original edges and node identities are untouched.
+	for (uint32_t i = 0; i < n; ++i) {
+		result.add_node(nodes_[i].name, nodes_[i].branch_length, nodes_[i].edge_id);
+	}
+	// build()/parse() always yield >= 1 node with a valid root, so root_ is a real
+	// index here; an empty source would copy NO_PARENT through, matching an empty
+	// result, so no separate guard is needed (cf. shear()'s explicit check).
+	result.root_ = root_;
+
+	// Pass 2: wire children. A node with <= 2 children is attached directly in
+	// its original order (bifurcations and single-child unifurcations pass
+	// through unchanged). A node with m >= 3 children is resolved into a
+	// deterministic left-comb: c0 stays on the node and each further child hangs
+	// off a fresh zero-length connector, so c0,c1,...,c(m-1) become successive
+	// "left" children and the final connector holds the last two.
+	for (uint32_t i = 0; i < n; ++i) {
+		const auto &ch = nodes_[i].children;
+		const size_t m = ch.size();
+		if (m <= 2) {
+			for (uint32_t c : ch) {
+				result.set_parent(c, i);
+			}
+			continue;
+		}
+		uint32_t current = i;
+		for (size_t k = 0; k < m; ++k) {
+			result.set_parent(ch[k], current);
+			if (k < m - 2) {
+				uint32_t connector = result.add_node("", 0.0, std::nullopt);
+				result.set_parent(connector, current);
+				current = connector;
+			}
+		}
+	}
+
+	return result;
+}
+
+namespace {
+
+// Trait-independent scaffold for Felsenstein independent contrasts: the validated
+// tree plus per-node variance-extended branch lengths and per-internal-node
+// contrast variances. Built once, reused across every trait over the same tree.
+struct ContrastScaffold {
+	std::vector<uint32_t> postorder;                            // children-before-parents
+	std::vector<double> extended_length;                        // v' per node (raw branch length at tips)
+	std::vector<double> contrast_variance;                      // v_i + v_j per internal node (unused at tips)
+	std::unordered_map<std::string_view, uint32_t> tip_by_name; // for trait-completeness checks
+};
+
+// Human-readable node identifier for error messages. Prefers the node's name;
+// for unnamed nodes, reports the caller-facing id from `node_ids` when available
+// (so messages reference the source table's node_index, not the internal dense
+// index), else the dense index.
+std::string node_label(const NewickTree &t, uint32_t i, const std::vector<int64_t> *node_ids) {
+	if (!t.name(i).empty()) {
+		return "node '" + t.name(i) + "'";
+	}
+	if (node_ids && i < node_ids->size()) {
+		return "node " + std::to_string((*node_ids)[i]);
+	}
+	return "node " + std::to_string(i);
+}
+
+std::string join_names(std::vector<std::string> &v) {
+	std::sort(v.begin(), v.end());
+	std::string s;
+	constexpr size_t cap = 10;
+	for (size_t i = 0; i < v.size() && i < cap; ++i) {
+		if (i) {
+			s += ", ";
+		}
+		s += "'" + v[i] + "'";
+	}
+	if (v.size() > cap) {
+		s += ", ... (" + std::to_string(v.size() - cap) + " more)";
+	}
+	return s;
+}
+
+// Validate structure + branch lengths (all trait-independent) and precompute the
+// variance-extended branch lengths and per-node contrast variances in one
+// post-order pass. Throws on any structural / branch-length violation.
+ContrastScaffold build_contrast_scaffold(const NewickTree &t, const std::vector<int64_t> *node_ids) {
+	const uint32_t n = static_cast<uint32_t>(t.num_nodes());
+	ContrastScaffold s;
+	s.extended_length.assign(n, 0.0);
+	s.contrast_variance.assign(n, 0.0);
+
+	// Bifurcation + unique tip names.
+	for (uint32_t i = 0; i < n; ++i) {
+		const size_t nc = t.children(i).size();
+		if (nc == 0) {
+			bool inserted = s.tip_by_name.emplace(t.name(i), i).second;
+			if (!inserted) {
+				throw std::runtime_error("independent_contrasts: duplicate tip name '" + t.name(i) +
+				                         "' (tip names must be unique to key traits)");
+			}
+		} else if (nc > 2) {
+			throw std::runtime_error(
+			    "independent_contrasts: " + node_label(t, i, node_ids) + " has " + std::to_string(nc) +
+			    " children; requires a strictly bifurcating tree — use tree_resolve_multifurcations to resolve "
+			    "polytomies");
+		} else if (nc == 1) {
+			throw std::runtime_error(
+			    "independent_contrasts: " + node_label(t, i, node_ids) +
+			    " has 1 child; requires a strictly bifurcating tree — use shear_tree (collapse) to remove "
+			    "unifurcations");
+		}
+	}
+
+	// Finite, non-negative branch length on every non-root edge. (The root's own
+	// branch length is never used.) A non-finite length (NaN from an unspecified
+	// edge, or ±Inf from a literal 'inf'/'infinity') would poison sqrt()/the
+	// weighting and silently emit 0 / NaN contrasts, so reject both; a negative
+	// length is biologically meaningless even if a sibling masks it in the sum.
+	// Zero is allowed here — only a zero contrast *variance* is fatal, checked
+	// below, so resolver-inserted zero-length internal edges pass.
+	for (uint32_t i = 0; i < n; ++i) {
+		if (i == t.root()) {
+			continue;
+		}
+		double bl = t.branch_length(i);
+		if (!std::isfinite(bl)) {
+			throw std::runtime_error("independent_contrasts: " + node_label(t, i, node_ids) +
+			                         " has a non-finite (NaN or infinite) branch length; PIC requires a finite branch "
+			                         "length on every non-root edge");
+		}
+		if (bl < 0.0) {
+			throw std::runtime_error("independent_contrasts: " + node_label(t, i, node_ids) +
+			                         " has a negative branch length (" + std::to_string(bl) + ")");
+		}
+	}
+
+	// Variance-extended branch lengths + per-node contrast variances in one
+	// post-order pass (none of this depends on the trait values).
+	s.postorder = t.postorder();
+	for (uint32_t node : s.postorder) {
+		if (t.is_tip(node)) {
+			s.extended_length[node] = t.branch_length(node);
+			continue;
+		}
+		uint32_t i = t.children(node)[0];
+		uint32_t j = t.children(node)[1];
+		double vi = s.extended_length[i];
+		double vj = s.extended_length[j];
+		double denom = vi + vj;
+		if (!(denom > 0.0)) {
+			throw std::runtime_error("independent_contrasts: " + node_label(t, node, node_ids) +
+			                         " has two children with zero total branch length (contrast variance is zero)");
+		}
+		s.contrast_variance[node] = denom;
+		// The root has no incoming edge, so only the variance-adjustment term
+		// applies; every other node adds its own branch length.
+		double own_bl = (node == t.root()) ? 0.0 : t.branch_length(node);
+		s.extended_length[node] = own_bl + (vi * vj) / denom;
+	}
+
+	return s;
+}
+
+// Per-trait pass: validate completeness against the scaffold's tip set, then a
+// single post-order computing ancestral values + standardized contrasts using the
+// precomputed variances (Felsenstein 1985).
+// `x_workspace` is a caller-owned scratch buffer sized to num_nodes; every entry
+// is overwritten during the post-order (each node is written before any ancestor
+// reads it), so it needs no re-initialization and can be reused across traits.
+std::vector<IndependentContrast> contrasts_for_trait(const NewickTree &t, const ContrastScaffold &s,
+                                                     const std::unordered_map<std::string, double> &trait_values,
+                                                     std::vector<double> &x_workspace) {
+	// Trait completeness: exactly the tip set (no missing tips, no extras).
+	std::vector<std::string> missing;
+	for (const auto &entry : s.tip_by_name) {
+		if (trait_values.find(std::string(entry.first)) == trait_values.end()) {
+			missing.emplace_back(entry.first);
+		}
+	}
+	if (!missing.empty()) {
+		throw std::runtime_error("independent_contrasts: no trait value for tip(s): " + join_names(missing));
+	}
+	if (trait_values.size() != s.tip_by_name.size()) {
+		std::vector<std::string> extra;
+		for (const auto &[name, val] : trait_values) {
+			if (s.tip_by_name.find(name) == s.tip_by_name.end()) {
+				extra.push_back(name);
+			}
+		}
+		throw std::runtime_error("independent_contrasts: trait value(s) for name(s) that are not a tip in the tree: " +
+		                         join_names(extra));
+	}
+
+	std::vector<double> &X = x_workspace; // reconstructed ancestral value (tip trait value at leaves)
+	std::vector<IndependentContrast> result;
+	result.reserve(s.tip_by_name.empty() ? 0 : s.tip_by_name.size() - 1);
+
+	for (uint32_t node : s.postorder) {
+		if (t.is_tip(node)) {
+			X[node] = trait_values.at(t.name(node)); // present (validated above)
+			continue;
+		}
+		uint32_t i = t.children(node)[0];
+		uint32_t j = t.children(node)[1];
+		double vi = s.extended_length[i];
+		double vj = s.extended_length[j];
+		double denom = s.contrast_variance[node]; // precomputed, guaranteed > 0
+		double contrast = (X[i] - X[j]) / std::sqrt(denom);
+		double anc = (X[i] * vj + X[j] * vi) / denom;
+		X[node] = anc;
+		result.push_back(IndependentContrast {node, contrast, anc, denom});
+	}
+
+	return result;
+}
+
+} // namespace
+
+std::vector<IndependentContrast>
+NewickTree::independent_contrasts(const std::unordered_map<std::string, double> &trait_values,
+                                  const std::vector<int64_t> *node_ids) const {
+	ContrastScaffold scaffold = build_contrast_scaffold(*this, node_ids);
+	std::vector<double> x_workspace(num_nodes());
+	return contrasts_for_trait(*this, scaffold, trait_values, x_workspace);
+}
+
+std::vector<std::vector<IndependentContrast>>
+NewickTree::independent_contrasts(const std::vector<std::unordered_map<std::string, double>> &trait_values_list,
+                                  const std::vector<int64_t> *node_ids) const {
+	// Trait-independent validation + variances computed once, reused per trait; the
+	// tree-sized ancestral-value scratch buffer is allocated once and reused too.
+	ContrastScaffold scaffold = build_contrast_scaffold(*this, node_ids);
+	std::vector<double> x_workspace(num_nodes());
+	std::vector<std::vector<IndependentContrast>> results;
+	results.reserve(trait_values_list.size());
+	for (const auto &trait_values : trait_values_list) {
+		results.push_back(contrasts_for_trait(*this, scaffold, trait_values, x_workspace));
+	}
+	return results;
+}
+
 uint32_t NewickTree::add_node(const std::string &name, double branch_length, std::optional<int64_t> edge_id) {
 	if (nodes_.size() >= MAX_NODES) {
 		throw std::runtime_error("Tree too large: exceeds maximum of " + std::to_string(MAX_NODES) + " nodes");

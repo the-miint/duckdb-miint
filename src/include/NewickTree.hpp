@@ -50,6 +50,15 @@ struct NodeInput {
 	std::optional<int64_t> edge_id;   // Edge identifier (nullopt if not specified)
 };
 
+// One standardized phylogenetic independent contrast (Felsenstein 1985) at an
+// internal node, for a single trait.
+struct IndependentContrast {
+	uint32_t node;             // Internal node index (this tree's index)
+	double contrast;           // Standardized contrast (X_i - X_j) / sqrt(v_i + v_j)
+	double ancestral_estimate; // Reconstructed trait value X_k at the node
+	double contrast_variance;  // v_i + v_j (the contrast's expected variance)
+};
+
 class NewickTree {
 public:
 	// Constants
@@ -216,6 +225,59 @@ public:
 	//
 	// The returned tree's node indices are reassigned 0-based (as with build()).
 	NewickTree shear(const std::unordered_set<std::string> &keep_names, bool collapse, bool ignore_missing) const;
+
+	// ========================================================================
+	// Resolution (make multifurcations bifurcating)
+	// ========================================================================
+
+	// Return a new tree in which every node with more than two children is
+	// resolved into a series of bifurcations. For a node with children
+	// c0,c1,...,c(m-1) (m >= 3) in their existing order, the resolution is a
+	// deterministic left-comb: the node keeps c0 and a new internal node N1;
+	// N1 keeps c1 and N2; ...; N(m-2) keeps c(m-2) and c(m-1). The m-2 new
+	// internal nodes are unnamed, have branch length 0, and no edge id, so tip
+	// counts and every original edge length are preserved and root-to-tip
+	// distances are unchanged.
+	//
+	// Nodes with two or fewer children are left untouched, including
+	// single-child unifurcations (this resolves polytomies only; use shear() to
+	// collapse unifurcations). The returned tree's node indices are reassigned
+	// 0-based (original nodes keep their index; new nodes follow).
+	NewickTree resolve_multifurcations() const;
+
+	// ========================================================================
+	// Comparative methods
+	// ========================================================================
+
+	// Compute Felsenstein (1985) phylogenetic independent contrasts for one
+	// numeric per-tip trait, keyed by tip name. Returns one contrast per internal
+	// node (n-1 for a rooted bifurcating tree with n tips).
+	//
+	// Requires a strictly bifurcating tree (every internal node has exactly two
+	// children) with unique tip names, a trait value for exactly the set of tips
+	// (no missing tips, no extra names), and finite non-negative branch lengths on
+	// every non-root edge; each contrast's variance (v_i + v_j) must be > 0
+	// (so at most one of a node's two children may have zero effective length).
+	// Zero-length internal edges are allowed. Throws std::runtime_error /
+	// std::invalid_argument describing the first violation. The root's own branch
+	// length is unused.
+	//
+	// `node_ids` (optional) maps this tree's dense node index to a caller-facing
+	// identifier (e.g. the original node_index of the source table); when supplied,
+	// error messages for unnamed nodes report that identifier instead of the
+	// internal dense index. Pass nullptr to use the dense index.
+	std::vector<IndependentContrast> independent_contrasts(const std::unordered_map<std::string, double> &trait_values,
+	                                                       const std::vector<int64_t> *node_ids = nullptr) const;
+
+	// Batch overload for many traits over the same tree: the trait-independent work
+	// (structural + branch-length validation, variance-extended branch lengths, and
+	// per-node contrast variances) is done once and reused across every trait.
+	// Returns one contrast vector per input trait, in the same order. Per-trait
+	// completeness is still validated; the same exceptions are thrown. `node_ids` is
+	// as above (used only for error-message identifiers).
+	std::vector<std::vector<IndependentContrast>>
+	independent_contrasts(const std::vector<std::unordered_map<std::string, double>> &trait_values_list,
+	                      const std::vector<int64_t> *node_ids = nullptr) const;
 
 	// ========================================================================
 	// Modification (for insert_fully_resolved)

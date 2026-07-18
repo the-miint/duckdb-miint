@@ -1,0 +1,245 @@
+# name: test/sql/tree_resolve_multifurcations.test
+# description: Test tree_resolve_multifurcations (resolve polytomies into bifurcations)
+# group: [sql]
+
+require miint
+
+# =============================================================================
+# Trifurcating root: (A:1,B:2,C:3)root;  ->  root:[A, N], N:[B, C]
+# =============================================================================
+
+statement ok
+CREATE TABLE tri3 AS SELECT * FROM (VALUES
+    (0, 'A',    1.0, CAST(NULL AS BIGINT), 3),
+    (1, 'B',    2.0, NULL, 3),
+    (2, 'C',    3.0, NULL, 3),
+    (3, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE r3 AS SELECT * FROM tree_resolve_multifurcations('tri3');
+
+# 5 nodes total (root, A, B, C, + 1 connector), 3 tips.
+query II
+SELECT count(*), count(*) FILTER (WHERE is_tip) FROM r3;
+----
+5	3
+
+# No node has more than two children after resolution.
+query I
+SELECT coalesce(max(cnt), 0) FROM (
+    SELECT parent_index, count(*) AS cnt FROM r3 WHERE parent_index IS NOT NULL GROUP BY parent_index
+);
+----
+2
+
+# Exactly one root.
+query I
+SELECT count(*) FROM r3 WHERE parent_index IS NULL;
+----
+1
+
+# Original tip branch lengths are preserved.
+query TR
+SELECT name, branch_length FROM r3 WHERE name IN ('A', 'B', 'C') ORDER BY name;
+----
+A	1.0
+B	2.0
+C	3.0
+
+# Exactly one connector: unnamed, internal, zero branch length.
+query IR
+SELECT count(*), coalesce(max(branch_length), -1) FROM r3 WHERE name = '' AND is_tip = false;
+----
+1	0.0
+
+# Left-comb wiring: A stays on the root; B and C share the connector, whose
+# parent is the root.
+query T
+SELECT p.name FROM r3 s JOIN r3 p ON s.parent_index = p.node_index WHERE s.name = 'A';
+----
+root
+
+query I
+SELECT count(DISTINCT parent_index) FROM r3 WHERE name IN ('B', 'C');
+----
+1
+
+query T
+SELECT DISTINCT p.name FROM r3 s JOIN r3 p ON s.parent_index = p.node_index WHERE s.name IN ('B', 'C');
+----
+(empty)
+
+query T
+SELECT gp.name
+FROM r3 s
+JOIN r3 p ON s.parent_index = p.node_index
+JOIN r3 gp ON p.parent_index = gp.node_index
+WHERE s.name = 'B';
+----
+root
+
+# =============================================================================
+# Determinism: resolution follows node_index, not scan order
+# =============================================================================
+
+# Materialize tri3 in reverse node_index order. With preserve_insertion_order on
+# (default), an unordered scan of this table returns rows DESC — so if the reader
+# did not ORDER BY node_index, build() would see C first and the comb would put C
+# (not A) directly on the root. The reader sorts by node_index, so the result is
+# identical to the ascending input.
+statement ok
+CREATE TABLE tri3_desc AS SELECT * FROM tri3 ORDER BY node_index DESC;
+
+statement ok
+CREATE TABLE r3_desc AS SELECT * FROM tree_resolve_multifurcations('tri3_desc');
+
+# A still sits directly on the root (c0), exactly as for tri3.
+query T
+SELECT p.name FROM r3_desc s JOIN r3_desc p ON s.parent_index = p.node_index WHERE s.name = 'A';
+----
+root
+
+# B and C still share the connector (empty name), not the root.
+query T
+SELECT DISTINCT p.name FROM r3_desc s JOIN r3_desc p ON s.parent_index = p.node_index WHERE s.name IN ('B', 'C');
+----
+(empty)
+
+# =============================================================================
+# Already bifurcating: (((A:1,B:2)G:3,C:4)H:5,(D:6,E:7)I:8)root; -> unchanged
+# =============================================================================
+
+statement ok
+CREATE TABLE t AS SELECT * FROM (VALUES
+    (0, 'A',    1.0, CAST(NULL AS BIGINT), 2),
+    (1, 'B',    2.0, NULL, 2),
+    (2, 'G',    3.0, NULL, 4),
+    (3, 'C',    4.0, NULL, 4),
+    (4, 'H',    5.0, NULL, 8),
+    (5, 'D',    6.0, NULL, 7),
+    (6, 'E',    7.0, NULL, 7),
+    (7, 'I',    8.0, NULL, 8),
+    (8, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+# Same node/tip counts, no connectors added (no empty-named nodes).
+query III
+SELECT count(*), count(*) FILTER (WHERE is_tip), count(*) FILTER (WHERE name = '')
+FROM tree_resolve_multifurcations('t');
+----
+9	5	0
+
+# =============================================================================
+# Unifurcation is NOT collapsed (resolve handles polytomies only)
+# =============================================================================
+
+statement ok
+CREATE TABLE uni AS SELECT * FROM (VALUES
+    (0, 'A',    1.0, CAST(NULL AS BIGINT), 2),
+    (1, 'B',    2.0, NULL, 2),
+    (2, 'X',    3.0, NULL, 3),
+    (3, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+# root keeps its single child X untouched.
+query I
+SELECT count(*) FROM tree_resolve_multifurcations('uni') s
+WHERE s.parent_index = (SELECT node_index FROM tree_resolve_multifurcations('uni') WHERE parent_index IS NULL);
+----
+1
+
+# =============================================================================
+# Large star tree: root with 1000 tip children
+# =============================================================================
+
+statement ok
+CREATE TABLE star AS
+SELECT i AS node_index,
+       CASE WHEN i = 0 THEN 'root' ELSE 't' || i END AS name,
+       CASE WHEN i = 0 THEN NULL ELSE 1.0 END AS branch_length,
+       NULL::BIGINT AS edge_id,
+       CASE WHEN i = 0 THEN NULL ELSE 0 END AS parent_index
+FROM range(1001) t(i);
+
+# 1000 tips + root + (1000-2) connectors = 1999 nodes; exactly one root; no node
+# has more than two children.
+query III
+SELECT count(*),
+       count(*) FILTER (WHERE is_tip),
+       count(*) FILTER (WHERE parent_index IS NULL)
+FROM tree_resolve_multifurcations('star');
+----
+1999	1000	1
+
+query I
+SELECT coalesce(max(cnt), 0) FROM (
+    SELECT parent_index, count(*) AS cnt
+    FROM tree_resolve_multifurcations('star')
+    WHERE parent_index IS NOT NULL GROUP BY parent_index
+);
+----
+2
+
+# =============================================================================
+# Idempotence + round-trip into another tree-consuming function
+# =============================================================================
+
+# r3 is already bifurcating, so resolving it again is a no-op (still 5 nodes).
+# This also proves the output carries the read_newick schema and feeds back in.
+query I
+SELECT count(*) FROM tree_resolve_multifurcations('r3');
+----
+5
+
+# =============================================================================
+# read_newick schema compatibility + COPY NEWICK round-trip
+# =============================================================================
+
+statement ok
+COPY (
+    SELECT node_index, name, branch_length, edge_id, parent_index
+    FROM tree_resolve_multifurcations('tri3')
+) TO '__TEST_DIR__/resolved.nwk' (FORMAT NEWICK);
+
+query I
+SELECT count(*) FROM read_newick('__TEST_DIR__/resolved.nwk');
+----
+5
+
+statement ok
+SELECT node_index, name, branch_length, edge_id, parent_index, is_tip
+FROM read_newick('__TEST_DIR__/resolved.nwk')
+UNION ALL
+SELECT * FROM tree_resolve_multifurcations('tri3');
+
+# =============================================================================
+# Views work
+# =============================================================================
+
+statement ok
+CREATE VIEW tri3_v AS SELECT * FROM tri3;
+
+query I
+SELECT count(*) FROM tree_resolve_multifurcations('tri3_v');
+----
+5
+
+# =============================================================================
+# Error cases
+# =============================================================================
+
+# Nonexistent tree table
+statement error
+SELECT * FROM tree_resolve_multifurcations('no_tree');
+----
+does not exist
+
+# Tree table missing required node_index/parent_index columns
+statement ok
+CREATE TABLE bad_tree AS SELECT 1 AS x;
+
+statement error
+SELECT * FROM tree_resolve_multifurcations('bad_tree');
+----
+node_index

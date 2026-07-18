@@ -5,8 +5,10 @@ Methods for estimating and operating on phylogenies.
 ## Table of Contents
 
 - [Shear (subset to tips)](#shear-subset-to-tips) - Prune a tree down to a set of tips.
+- [Resolve multifurcations](#resolve-multifurcations) - Resolve polytomies into a strictly bifurcating tree.
 - [Resolve placements](#resolve-placements) - Fully resolve sequence placements against a backbone.
 - [FastTree](#fasttree) - Estimate a phylogeny from a MSA with FastTree.
+- [Independent contrasts (PIC)](#independent-contrasts-pic) - Felsenstein (1985) phylogenetic independent contrasts.
 
 ### Shear (subset to tips)
 
@@ -81,6 +83,51 @@ LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 duckdb   # or python, etc.
 This applies to any allocation-heavy miint workload (large `read_newick`
 builds, `tree_resolve_placement`, QC), not just `shear_tree`. It does not reduce
 peak memory materially — it is a speed optimization.
+
+### Resolve multifurcations
+
+Resolve every multifurcation (a node with more than two children — a "polytomy") in a tree into a series of bifurcations, producing a strictly bifurcating tree. This is the operation you want before running a method that requires a binary tree — notably [`phylo_independent_contrasts`](#independent-contrasts-pic) — on a tree that contains polytomies (e.g. an unrooted tree whose root is a trifurcation, as `phylogeny_fasttree` emits, or a tree flattened from a taxonomy).
+
+**Function signature**:
+
+`tree_resolve_multifurcations(tree_table)`
+
+**Parameters:**
+- `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema (requires `node_index` and `parent_index`; `name`, `branch_length`, `edge_id` optional).
+
+**Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath), reindexed 0-based: `node_index`, `name`, `branch_length`, `edge_id`, `parent_index`, `is_tip`. The schema is `UNION ALL`-compatible with `read_newick`, can be written back out with `COPY ... (FORMAT NEWICK)`, and feeds directly into `phylo_independent_contrasts`.
+
+**Behavior / semantics:**
+- A node with `m ≥ 3` children `c0, c1, …, c(m-1)` (in `node_index` order) is resolved into a **deterministic left-comb**: the node keeps `c0` and a new internal node `N1`; `N1` keeps `c1` and `N2`; … ; `N(m-2)` keeps `c(m-2)` and `c(m-1)`. This inserts `m-2` new internal nodes.
+- New connector nodes are **unnamed**, have **branch length `0`**, and no `edge_id`. Because the connectors are zero-length, the original edge lengths and all root-to-tip distances are unchanged.
+- Nodes with two or fewer children are left untouched. **Single-child unifurcations are not collapsed** — that is a different operation; use [`shear_tree`](#shear-subset-to-tips) with `collapse := true` for that.
+- A multifurcating root is resolved as well.
+- Child order follows `node_index` (the canonical order `read_newick` assigns, encoding the original Newick left-to-right order); the reader sorts input rows by `node_index`, so the result is reproducible regardless of how the tree relation is physically stored.
+
+**Important — the resolution is statistically arbitrary.** A polytomy carries no information about the order in which its lineages diverged, so any bifurcating resolution is as valid as any other. When the resolved tree feeds a downstream analysis such as independent contrasts, each artificially-created dichotomy contributes a contrast that is not real independent information; the effective degrees of freedom should be reduced accordingly. Resolving is a pragmatic step to satisfy a binary-tree requirement, not a reconstruction of unknown branching order.
+
+**Examples:**
+```sql
+-- A tree with a trifurcating (unrooted) root, e.g. from phylogeny_fasttree.
+CREATE TABLE ref_tree AS SELECT * FROM read_newick('unrooted.nwk');
+
+-- Resolve polytomies into bifurcations (zero-length connectors).
+SELECT * FROM tree_resolve_multifurcations('ref_tree');
+
+-- Prep a tree for PIC: resolve, persist, then run independent contrasts.
+CREATE TABLE binary_tree AS SELECT * FROM tree_resolve_multifurcations('ref_tree');
+SELECT * FROM phylo_independent_contrasts('binary_tree', 'traits');
+
+-- Write the resolved tree back out.
+COPY (
+    SELECT node_index, name, branch_length, edge_id, parent_index
+    FROM tree_resolve_multifurcations('ref_tree')
+) TO 'binary.nwk' (FORMAT NEWICK);
+```
+
+**Error conditions:**
+- `tree_table` does not exist.
+- `tree_table` missing required `node_index` / `parent_index` columns.
 
 ### Resolve placements
 
@@ -323,3 +370,72 @@ SELECT * FROM tree_resolve_placement('ref_tree', 'placements');
 - Daemon process exits non-zero or returns a non-OK protocol response (exit message includes the daemon's stderr)
 
 **Reproducibility:** With `threads=1` and a fixed `seed`, the tree is bit-deterministic across runs of the same `gpl-boundary` build. With `threads>1`, FastTree's parallel sections produce floating-point variation in branch lengths and (rarely) topology — pin `threads=1` for deterministic output.
+
+### Independent contrasts (PIC)
+
+Compute Felsenstein's (1985) **phylogenetic independent contrasts** for one or more numeric per-tip traits over a tree. Per-tip traits are not statistically independent — related tips share evolutionary history — so naively correlating two traits across tips is biased. Independent contrasts is the standard correction: it transforms the correlated tip values into `n-1` contrasts that are independent and identically distributed under a Brownian-motion model, which can then be correlated or regressed (through the origin) in downstream SQL.
+
+Reference: Felsenstein, J. (1985) "Phylogenies and the Comparative Method." *The American Naturalist* 125(1):1–15.
+
+**Function signature**:
+
+`phylo_independent_contrasts(tree_table, traits_table)`
+
+**Parameters:**
+- `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema (requires `node_index` and `parent_index`; `name` and `branch_length` are needed for a meaningful contrast; `edge_id` optional). The tree must be **strictly bifurcating** with **finite, non-negative branch lengths** (see requirements below).
+- `traits_table` (VARCHAR): Name of a table or view in **long form** with columns `name`, `trait`, `value`:
+  - `name`: the tip identifier, matched to the tree's tip labels. Type-flexible — `VARCHAR`, `UUID`, and `BIGINT` are all accepted and matched to tip labels by their canonical text form (the same posture as `read_id` elsewhere), so a numeric or UUID feature key works directly.
+  - `trait` (VARCHAR): the trait name; one trait is computed per distinct value.
+  - `value` (DOUBLE): the numeric trait value for that tip.
+
+  Every trait must cover **exactly** the tree's tip set — no missing tips, no extra names, no `NULL` values. To analyze a subset of tips, [`shear_tree`](#shear-subset-to-tips) the tree to those tips first: pruning re-sums branch lengths, which changes the contrasts, so it cannot be skipped by simply omitting tips from the traits.
+
+**Output schema:** long form, one row per (internal node, trait):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `node_index` | BIGINT | The input tree's `node_index` for the internal node at which the contrast is computed |
+| `trait` | VARCHAR | The trait name |
+| `contrast` | DOUBLE | The standardized independent contrast `(X_i − X_j) / sqrt(v_i + v_j)` |
+| `ancestral_estimate` | DOUBLE | The reconstructed (inverse-variance-weighted) trait value at the node |
+| `contrast_variance` | DOUBLE | `v_i + v_j`, the contrast's expected variance (a property of the tree, identical across traits) |
+
+For a rooted bifurcating tree with `n` tips there are `n-1` internal nodes and thus `n-1` contrasts per trait.
+
+**Behavior / semantics:**
+- Computed by Felsenstein's post-order pruning. At each internal node with children `i`, `j` and variance-extended branch lengths `v_i`, `v_j`: `contrast = (X_i − X_j)/sqrt(v_i+v_j)`; the ancestral estimate is the inverse-variance-weighted mean `(X_i·v_j + X_j·v_i)/(v_i+v_j)`; and the node's branch length is extended by `(v_i·v_j)/(v_i+v_j)` for use higher in the tree.
+- **The sign of a contrast is arbitrary** — it depends on which child is `i` vs `j` (here, `node_index` order). This is why the standard two-trait analysis is a regression *through the origin* over the paired contrasts (or a correlation after fixing one axis's sign). Results are reproducible: child order follows `node_index`.
+- `contrast_variance` is identical across traits for a given node, which is what makes multi-trait computation cheap (the tree is validated and its variances precomputed once).
+- The two-trait correlation / regression is intentionally **not** built in — layer it in SQL over the per-node output (example below).
+
+**Requirements and error conditions:**
+- **Strictly bifurcating.** Every internal node must have exactly two children. A polytomy (`> 2` children) errors and points to [`tree_resolve_multifurcations`](#resolve-multifurcations); a unifurcation (`1` child) errors and points to [`shear_tree`](#shear-subset-to-tips). Common gotcha: an *unrooted* Newick tree has a trifurcating root and must be resolved (or rooted) first.
+- **Finite, non-negative branch lengths on every non-root edge.** PIC divides by `v_i + v_j`, so an unspecified (`NULL`/NaN) or infinite length errors, and a negative length errors. The root's own branch length is unused. Zero-length internal edges are allowed (e.g. the connectors from `tree_resolve_multifurcations`); only a contrast whose variance `v_i + v_j` is exactly zero (both children zero-length) errors.
+- **Trait coverage.** A tip with no trait value, a trait value for a name that is not a tip, a duplicate `(name, trait)` pair, or a `NULL` `value` all error.
+- Tip names must be unique (they key the traits); `tree_table` / `traits_table` must exist and have the required columns.
+
+**Examples:**
+```sql
+-- Tree (must be bifurcating) and per-tip traits in long form.
+CREATE TABLE tree AS SELECT * FROM read_newick('tree.nwk');
+CREATE TABLE traits AS SELECT * FROM (VALUES
+    ('sp1', 'body_mass', 3.2), ('sp2', 'body_mass', 1.1), ('sp3', 'body_mass', 2.7),
+    ('sp1', 'metabolic_rate', 0.9), ('sp2', 'metabolic_rate', 0.4), ('sp3', 'metabolic_rate', 0.7)
+) AS v(name, trait, value);
+
+-- Contrasts for every trait.
+SELECT * FROM phylo_independent_contrasts('tree', 'traits') ORDER BY trait, node_index;
+
+-- Two-trait association via regression THROUGH THE ORIGIN over paired contrasts
+-- (through the origin because each contrast's sign is arbitrary).
+WITH c AS (SELECT * FROM phylo_independent_contrasts('tree', 'traits'))
+SELECT sum(x.contrast * y.contrast) / sum(x.contrast * x.contrast) AS pic_slope
+FROM c AS x JOIN c AS y USING (node_index)
+WHERE x.trait = 'body_mass' AND y.trait = 'metabolic_rate';
+
+-- If the tree has polytomies, resolve first (see the arbitrariness caveat there).
+CREATE TABLE binary_tree AS SELECT * FROM tree_resolve_multifurcations('tree');
+SELECT * FROM phylo_independent_contrasts('binary_tree', 'traits');
+```
+
+**Cleanroom note:** this is a from-scratch implementation of the algorithm as published in Felsenstein (1985); it does not derive from any GPL comparative-methods package.
