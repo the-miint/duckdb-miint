@@ -105,7 +105,7 @@ Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is li
 
 ### unifrac-binaries + scikit-bio-binaries (UniFrac analytics)
 
-Two coupled submodules implementing the UniFrac distance + Faith's PD + PERMANOVA + PCoA stack consumed by `unifrac_pcoa`, `unifrac_permanova`, and `unifrac_faith_pd`.
+Two coupled submodules implementing the UniFrac distance + Faith's PD + PERMANOVA + PCoA stack consumed by `unifrac_distances`, `unifrac_pcoa`, `unifrac_permanova`, and `unifrac_faith_pd`.
 
 - **Locations:**
   - `ext/unifrac-binaries/` — libssu (the UniFrac and Faith PD engine). Version captured via `git describe` → `UNIFRAC_GIT_VERSION`.

@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "duckdb/common/types.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "unifrac_support_biom.hpp"
 
@@ -48,8 +49,72 @@ inline std::string AcceptedVariantList() {
 // Rows with NULL sample_id, feature_id, or value are silently dropped,
 // as are zero/NaN values (UnifracSupportBiomView's sparse-storage
 // invariant would drop them anyway).
+//
+// When `sample_id_type` is non-null, the original SQL type of the `sample_id`
+// column (before the internal `::VARCHAR` cast) is written through it, so
+// callers can mirror BIGINT/UUID identifiers back onto their output columns.
+// The ids themselves are always carried as canonical VARCHAR text internally.
 std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, const std::string &table_name,
-                                                     const std::string &caller_name);
+                                                     const std::string &caller_name,
+                                                     LogicalType *sample_id_type = nullptr);
+
+// A dense, symmetric, zero-diagonal fp32 distance matrix materialized from a
+// condensed COO distance relation (`sample_a, sample_b, distance`). This is the
+// metric-agnostic input shape shared by the `pcoa` and `permanova` table
+// functions: any relation with those three columns can be read — the
+// `unifrac_distances` output, a `beta_*` macro result, or a precomputed
+// Bray-Curtis/Jaccard/Euclidean table — so ordination and the omnibus test are
+// decoupled from UniFrac.
+struct DenseDistanceMatrix {
+	std::vector<float> matrix;           // n*n row-major, symmetric, zero diagonal (mat[i*n+j])
+	std::vector<std::string> sample_ids; // distinct ids from both columns, lexicographically sorted
+	uint32_t n_samples = 0;
+	// Output type mirrored from sample_a's input column (BIGINT/UUID → same,
+	// else VARCHAR); see ResolveSampleIdOutputType.
+	LogicalType sample_id_type = LogicalType::VARCHAR;
+};
+
+// Read the user-named condensed distance relation into a dense matrix. The
+// relation must expose `(sample_a, sample_b, distance)`: sample_a/sample_b of
+// any type castable to VARCHAR, distance castable to DOUBLE (mirrors
+// ReadFeatureTable's probe-then-cast approach).
+//
+// Rows with a NULL sample_a/sample_b are skipped entirely (a NULL id has no
+// identity). A row with a valid id pair but a NULL/NaN distance still registers
+// both ids in the dictionary but contributes no distance ("not provided"), so a
+// sample whose every distance is NULL/NaN does NOT silently vanish — it surfaces
+// as a completeness error. Distinct ids are collected from BOTH columns and
+// sorted lexicographically (the build_dictionary convention shared with
+// UnifracSupportBiomView::FromCoo, so sample_a < sample_b holds for VARCHAR ids
+// exactly as for unifrac_distances). The fill + validation (n>=2, completeness,
+// conflicting duplicates, negative/non-finite, nonzero self-distance) is
+// delegated to BuildDenseDistanceMatrix and re-thrown as InvalidInputException
+// prefixed with `caller_name`.
+//
+// sample_a's original SQL type is captured (BIGINT/UUID mirrored, else VARCHAR)
+// into DenseDistanceMatrix::sample_id_type. sample_a and sample_b are merged into
+// one dictionary emitted under that type, so their resolved output types must
+// match (else a BinderException) — sample_a's is mirrored.
+DenseDistanceMatrix ReadDistanceTable(ClientContext &context, const std::string &table_name,
+                                      const std::string &caller_name);
+
+// Resolve the SQL type that a mirrored sample-id output column should carry.
+// BIGINT and UUID are mirrored (so results join back to typed metadata without
+// a cast — parity with align_minimap2); every other input type collapses to
+// VARCHAR, matching what the ::VARCHAR-cast feature-table reader already
+// accepts (so this never rejects a type ReadFeatureTable would have read).
+//
+// Deliberate divergence from align_minimap2: that function rejects any id
+// column outside {VARCHAR, BIGINT, UUID} at bind via IsAllowedIdType. The
+// unifrac readers stay intentionally permissive — a DOUBLE/DATE sample_id is
+// accepted and simply emitted as VARCHAR, preserving the pre-existing behavior
+// of the ::VARCHAR-cast reader rather than tightening it.
+inline LogicalType ResolveSampleIdOutputType(const LogicalType &input_type) {
+	if (input_type.id() == LogicalTypeId::BIGINT || input_type.id() == LogicalTypeId::UUID) {
+		return input_type;
+	}
+	return LogicalType::VARCHAR;
+}
 
 // Resolve the user-supplied `threads` named parameter into a concrete count
 // that the libssu / scikit-bio-binaries OpenMP regions will run with.

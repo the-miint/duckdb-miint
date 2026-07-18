@@ -1,0 +1,260 @@
+# name: test/sql/pcoa.test
+# description: pcoa table function — metric-agnostic PCoA over a condensed (sample_a, sample_b, distance) distance table.
+# group: [sql]
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+# ── Inline distance table: 4 samples, complete upper triangle (6 pairs) ───────
+statement ok
+CREATE TABLE dist AS SELECT * FROM (VALUES
+    ('A', 'B', 0.50),
+    ('A', 'C', 0.60),
+    ('A', 'D', 0.70),
+    ('B', 'C', 0.30),
+    ('B', 'D', 0.40),
+    ('C', 'D', 0.20)
+) AS t(sample_a, sample_b, distance);
+
+# Default n_dims=3 over 4 samples → 4 * 3 = 12 rows.
+query I
+SELECT COUNT(*) FROM pcoa('dist', seed := 42);
+----
+12
+
+# n_dims is honoured: 4 samples * 2 dims = 8 rows, exactly 2 distinct axes.
+query I
+SELECT COUNT(*) FROM pcoa('dist', n_dims := 2, seed := 42);
+----
+8
+
+query I
+SELECT COUNT(DISTINCT axis) FROM pcoa('dist', n_dims := 2, seed := 42);
+----
+2
+
+# iteration is always 0 (kept for schema parity with unifrac_pcoa); every sample
+# appears once per axis.
+query I
+SELECT COUNT(DISTINCT iteration) FROM pcoa('dist', n_dims := 3, seed := 42);
+----
+1
+
+query I
+SELECT COUNT(DISTINCT sample_id) FROM pcoa('dist', n_dims := 3, seed := 42);
+----
+4
+
+# Output schema + column types are stable (VARCHAR ids stay VARCHAR).
+query ITIIII
+SELECT iteration, typeof(sample_id), axis, coordinate IS NOT NULL,
+       eigenvalue IS NOT NULL, proportion_explained IS NOT NULL
+FROM pcoa('dist', n_dims := 3, seed := 42)
+WHERE sample_id = 'A' AND axis = 0;
+----
+0	VARCHAR	0	true	true	true
+
+# Eigenvalues are non-increasing across axes (axis 0 is the largest).
+query I
+WITH per_axis AS (
+    SELECT DISTINCT axis, eigenvalue FROM pcoa('dist', n_dims := 3, seed := 42)
+), lagged AS (
+    SELECT axis, eigenvalue, LAG(eigenvalue) OVER (ORDER BY axis) AS prev_eigenvalue
+    FROM per_axis
+)
+SELECT bool_and(prev_eigenvalue IS NULL OR prev_eigenvalue >= eigenvalue) FROM lagged;
+----
+true
+
+# ── Seed reproducibility (tolerance-based; see the fp32 note in unifrac_pcoa.test) ──
+query I
+WITH a AS (SELECT * FROM pcoa('dist', n_dims := 3, seed := 42)),
+     b AS (SELECT * FROM pcoa('dist', n_dims := 3, seed := 42))
+SELECT COUNT(*) FROM a
+JOIN b USING (iteration, sample_id, axis)
+WHERE abs(a.coordinate - b.coordinate) < 1e-5
+  AND abs(a.eigenvalue - b.eigenvalue) < 1e-5
+  AND abs(a.proportion_explained - b.proportion_explained) < 1e-5;
+----
+12
+
+# ── Sample-ID type parity (BIGINT / UUID mirrored onto the output) ────────────
+statement ok
+CREATE TABLE dist_bigint AS
+    SELECT (ascii(sample_a) - 64)::BIGINT AS sample_a,
+           (ascii(sample_b) - 64)::BIGINT AS sample_b, distance FROM dist;
+
+query T
+SELECT DISTINCT typeof(sample_id) FROM pcoa('dist_bigint', n_dims := 3, seed := 42);
+----
+BIGINT
+
+query I
+SELECT COUNT(DISTINCT sample_id) FROM pcoa('dist_bigint', n_dims := 3, seed := 42);
+----
+4
+
+statement ok
+CREATE TABLE dist_uuid AS
+    SELECT ma.uid AS sample_a, mb.uid AS sample_b, d.distance
+    FROM dist d
+    JOIN (VALUES
+        ('A', '11111111-1111-1111-1111-111111111111'::UUID),
+        ('B', '22222222-2222-2222-2222-222222222222'::UUID),
+        ('C', '33333333-3333-3333-3333-333333333333'::UUID),
+        ('D', '44444444-4444-4444-4444-444444444444'::UUID)
+    ) ma(orig, uid) ON d.sample_a = ma.orig
+    JOIN (VALUES
+        ('A', '11111111-1111-1111-1111-111111111111'::UUID),
+        ('B', '22222222-2222-2222-2222-222222222222'::UUID),
+        ('C', '33333333-3333-3333-3333-333333333333'::UUID),
+        ('D', '44444444-4444-4444-4444-444444444444'::UUID)
+    ) mb(orig, uid) ON d.sample_b = mb.orig;
+
+query T
+SELECT DISTINCT typeof(sample_id) FROM pcoa('dist_uuid', n_dims := 3, seed := 42);
+----
+UUID
+
+# ── Bind-time / read errors ──────────────────────────────────────────────────
+
+# n_dims > n_samples - 1 → Binder error (PCoA loses one dim to centering).
+# 4 samples → max allowed n_dims is 3.
+statement error
+SELECT * FROM pcoa('dist', n_dims := 4);
+----
+n_dims
+
+# n_dims must be >= 1.
+statement error
+SELECT * FROM pcoa('dist', n_dims := 0);
+----
+n_dims
+
+# Incomplete matrix (a pair is missing) → error naming the first missing pair.
+statement ok
+CREATE TABLE dist_incomplete AS SELECT * FROM dist WHERE NOT (sample_a = 'A' AND sample_b = 'C');
+
+statement error
+SELECT * FROM pcoa('dist_incomplete', n_dims := 2);
+----
+incomplete distance matrix
+
+# Negative distance → error.
+statement ok
+CREATE TABLE dist_negative AS SELECT * FROM (VALUES
+    ('A', 'B', -0.50), ('A', 'C', 0.60), ('B', 'C', 0.30)
+) AS t(sample_a, sample_b, distance);
+
+statement error
+SELECT * FROM pcoa('dist_negative', n_dims := 2);
+----
+negative distance
+
+# Conflicting duplicate (same pair, two different values) → error.
+statement ok
+CREATE TABLE dist_conflict AS SELECT * FROM (VALUES
+    ('A', 'B', 0.50), ('A', 'B', 0.60), ('A', 'C', 0.60), ('B', 'C', 0.30)
+) AS t(sample_a, sample_b, distance);
+
+statement error
+SELECT * FROM pcoa('dist_conflict', n_dims := 2);
+----
+conflicting distances
+
+# Fewer than 2 distinct samples → error (a single self-pair yields 1 id).
+statement ok
+CREATE TABLE dist_one AS SELECT * FROM (VALUES ('A', 'A', 0.0)) AS t(sample_a, sample_b, distance);
+
+statement error
+SELECT * FROM pcoa('dist_one', n_dims := 1);
+----
+at least 2 are required
+
+# Mismatched sample_a / sample_b id types → Binder error (they merge into one
+# output column, so both must resolve to the same output type).
+statement ok
+CREATE TABLE dist_mixed_types AS
+    SELECT sample_a, (ascii(sample_b) - 64)::BIGINT AS sample_b, distance FROM dist;
+
+statement error
+SELECT * FROM pcoa('dist_mixed_types', n_dims := 2);
+----
+mismatched
+
+# ── Order-independence: ids are collected from BOTH columns ───────────────────
+# Swapping sample_a<->sample_b (so sample_a > sample_b for every row, and 'A'
+# now appears only in sample_b) must yield the identical ordination. A reader
+# that only read sample_a would lose sample 'A' entirely.
+statement ok
+CREATE TABLE dist_swapped AS SELECT sample_b AS sample_a, sample_a AS sample_b, distance FROM dist;
+
+query I
+SELECT COUNT(DISTINCT sample_id) FROM pcoa('dist_swapped', n_dims := 3, seed := 42);
+----
+4
+
+query I
+WITH a AS (SELECT sample_id, axis, abs(coordinate) AS c FROM pcoa('dist', n_dims := 3, seed := 42)),
+     b AS (SELECT sample_id, axis, abs(coordinate) AS c FROM pcoa('dist_swapped', n_dims := 3, seed := 42))
+SELECT COUNT(*) FROM a JOIN b USING (sample_id, axis) WHERE abs(a.c - b.c) < 1e-5;
+----
+12
+
+# ── A sample whose every distance is NaN must not silently vanish ─────────────
+# 'D' appears in three rows, all with NaN distance. Its ids are still recorded,
+# so it enters the dictionary and the missing (·, D) pairs surface as an
+# incompleteness error — rather than pcoa silently ordinating only {A,B,C} and
+# returning a smaller result than the user's table implies.
+statement ok
+CREATE TABLE dist_nan_sample AS SELECT * FROM (VALUES
+    ('A', 'B', 0.50),
+    ('A', 'C', 0.60),
+    ('B', 'C', 0.30),
+    ('A', 'D', 'nan'::DOUBLE),
+    ('B', 'D', 'nan'::DOUBLE),
+    ('C', 'D', 'nan'::DOUBLE)
+) AS t(sample_a, sample_b, distance);
+
+statement error
+SELECT * FROM pcoa('dist_nan_sample', n_dims := 2);
+----
+incomplete distance matrix
+
+# ── Equivalence (killer test): pcoa over unifrac_distances ≈ unifrac_pcoa ─────
+# Same distance matrix + same skbb_pcoa_fsvd_fp32 + same seed ⇒ identical
+# coordinates (up to axis sign, so compare |coordinate|) within fp32 tolerance.
+statement ok
+CREATE TABLE observations AS SELECT * FROM read_biom('data/biom/test.biom');
+
+statement ok
+CREATE TABLE tree AS SELECT * FROM read_newick('data/unifrac/gg_otu_tree.nwk');
+
+statement ok
+CREATE TABLE ud AS SELECT sample_a, sample_b, distance
+FROM unifrac_distances('observations', 'tree', variant := 'weighted_normalized');
+
+# Independent cardinality check before the join: guards against a dedup bug that
+# could fan the join out and coincidentally still land on 18 matched rows.
+query I
+SELECT COUNT(*) FROM pcoa('ud', n_dims := 3, seed := 42);
+----
+18
+
+# 6 samples × 3 dims = 18 rows match within tolerance (join on sample_id, axis).
+query I
+WITH viadist AS (
+    SELECT sample_id, axis, abs(coordinate) AS c, eigenvalue AS e
+    FROM pcoa('ud', n_dims := 3, seed := 42)
+),
+     direct AS (
+    SELECT sample_id, axis, abs(coordinate) AS c, eigenvalue AS e
+    FROM unifrac_pcoa('observations', 'tree', variant := 'weighted_normalized', n_dims := 3, seed := 42)
+)
+SELECT COUNT(*) FROM viadist
+JOIN direct USING (sample_id, axis)
+WHERE abs(viadist.c - direct.c) < 1e-5
+  AND abs(viadist.e - direct.e) < 1e-5;
+----
+18

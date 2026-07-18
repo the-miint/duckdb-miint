@@ -317,6 +317,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterUnifracPcoa(loader);
 	RegisterUnifracPermanova(loader);
 	RegisterUnifracFaithPD(loader);
+	RegisterUnifracDistances(loader);
+	RegisterPcoaFromDistances(loader);
+	RegisterPermanovaFromDistances(loader);
 #endif
 
 	AlignPairwiseWfa2ScoreFunction::Register(loader);

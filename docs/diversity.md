@@ -7,8 +7,13 @@ Methods to estimate alpha and beta diversity, and supporting statistics.
 - [Feature table](#feature-table) - Feature table expectations.
 - [Tree](#tree) - Tree expectations.
 - [Metadata](#metadata) - Metadata expectations.
+- [Sample identifier types](#sample-identifier-types) - How VARCHAR/BIGINT/UUID sample ids are handled.
 - [UniFrac algorithm variants](#unifrac-algorithm-variants) - Detail on different UniFrac algorithms and how to specify them.
 - [Rarefaction](#rarefaction) - Rarefaction detail with UniFrac and Faith PD.
+- [UniFrac distances](#unifrac-distances) - Condensed (pairwise) UniFrac distances in long form
+- [Beta-distance macros](#beta-distance-macros) - within/between-group distributions and k-nearest-neighbors over a distance table
+- [PCoA (from a distance table)](#pcoa-from-a-distance-table) - metric-agnostic PCoA over any condensed distance table
+- [PERMANOVA (from a distance table)](#permanova-from-a-distance-table) - metric-agnostic PERMANOVA over any condensed distance table
 - [UniFrac PCoA](#unifrac-pcoa) - UniFrac distance + Principal Coordinates Analysis
 - [UniFrac PERMANOVA](#unifrac-permanova) - UniFrac distance + PERMANOVA pseudo-F + p-value
 - [Faith PD](#faith-pd) - Faith's phylogenetic diversity per sample
@@ -45,9 +50,13 @@ CREATE TABLE metadata AS SELECT * FROM read_csv('data/unifrac/small_metadata.csv
 
 Samples appearing in the metadata but not in the feature-table are silently ignored. Samples missing from the metadata fail loudly with an error naming both the missing sample and the variable.
 
+### Sample identifier types
+
+The feature table's `sample_id` column may be `VARCHAR`, `BIGINT`, or `UUID` (any other type is accepted and read as text). `unifrac_distances`, `unifrac_pcoa`, and `unifrac_faith_pd` **mirror the input `sample_id` type onto their output identifier columns** — `BIGINT → BIGINT`, `UUID → UUID`, otherwise `VARCHAR` — so results join back to typed metadata without a cast (parity with `align_minimap2`). `unifrac_permanova` emits no per-sample identifier column, so this does not apply to it.
+
 ### UniFrac algorithm variants 
 
-`unifrac_pcoa` and `unifrac_permanova` accept the following `variant` values (passed unquoted to libssu, with `_fp32` appended internally):
+`unifrac_distances`, `unifrac_pcoa`, and `unifrac_permanova` accept the following `variant` values (passed unquoted to libssu, with `_fp32` appended internally):
 
 | Variant | Description |
 |---|---|
@@ -59,12 +68,212 @@ Samples appearing in the metadata but not in the feature-table are silently igno
 
 ### Rarefaction
 
-All three functions accept `subsample_depth`, `subsample_with_replacement`, `n_subsamples`, and `seed` parameters.
+`unifrac_distances`, `unifrac_pcoa`, `unifrac_permanova`, and `unifrac_faith_pd` all accept `subsample_depth`, `subsample_with_replacement`, `n_subsamples`, and `seed` parameters.
 
 - `subsample_depth := 0` (default): no subsampling; iterations would be identical so `n_subsamples > 1` is rejected at bind.
 - `subsample_depth > 0`: libssu rarefies every sample to exactly `subsample_depth` total counts. **Samples whose total count is below the depth are dropped** from the result; depending on the function's invariants this can also cause a bind-time error (e.g., `unifrac_pcoa` requires `n_dims ≤ n_samples - 1` after subsampling).
 - `subsample_with_replacement := true` uses multinomial sampling; the default `false` uses permutation without replacement.
 - `seed := -1` (default) uses system entropy; any `seed >= 0` is deterministic. Per-iteration seed is `seed + iteration_index`; bind rejects `seed + n_subsamples - 1 > INT_MAX`.
+
+---
+
+### UniFrac distances
+
+Compute the UniFrac distance matrix and return it in **condensed long form** — one row per unordered sample pair, `(iteration, sample_a, sample_b, distance)`. This is the primitive underneath [PCoA](#unifrac-pcoa) and [PERMANOVA](#unifrac-permanova); exposing it directly lets you build within/between-group distributions, k-nearest-neighbors, and correlations between distance matrices with ordinary SQL (see [Beta-distance macros](#beta-distance-macros)).
+
+```sql
+SELECT * FROM unifrac_distances('observations', 'tree',
+    variant := 'weighted_normalized',
+    variance_adjust := false,
+    alpha := 1.0,
+    bypass_tips := false,
+    normalize_sample_counts := true,
+    subsample_depth := 0,
+    subsample_with_replacement := false,
+    n_subsamples := 1,
+    seed := -1);
+```
+
+**Parameters:**
+- `observations` (VARCHAR): name of the feature-table relation
+- `tree` (VARCHAR): name of the tree relation
+- `variant` (VARCHAR, default `'weighted_normalized'`): one of the [variants](#unifrac-algorithm-variants) above
+- `variance_adjust` (BOOLEAN, default false): apply Chang & Liu's variance adjustment
+- `alpha` (DOUBLE, default 1.0): GUniFrac alpha, only relevant when `variant := 'generalized'`
+- `bypass_tips` (BOOLEAN, default false): skip tip-level contributions (≈50% faster, mildly different result)
+- `normalize_sample_counts` (BOOLEAN, default true): normalize each sample to relative abundances before computing distances
+- `subsample_depth`, `subsample_with_replacement`, `n_subsamples`, `seed`: see [Rarefaction](#rarefaction)
+
+**Output schema:**
+- `iteration` (INTEGER): 0-indexed iteration; constant when `n_subsamples = 1`
+- `sample_a`, `sample_b` (mirror input type — see [Sample identifier types](#sample-identifier-types)): the two samples of the pair
+- `distance` (DOUBLE): the UniFrac distance between them (fp32-computed, widened to DOUBLE)
+
+**Behavior:**
+- **Condensed / upper triangle:** each unordered pair is emitted exactly once, no self-pairs. Pairs are ordered by the canonical *lexical* sample-id form, so `sample_a < sample_b` holds for VARCHAR; for BIGINT/UUID the direction follows the text form (e.g. `10` may sort before `2`) — uniqueness holds regardless.
+- **Streaming:** the full N×N matrix is held in memory once (O(N²) — intrinsic to the distance computation), but the pairs are streamed out, so the O(N²) *result rows* are never all materialized at once.
+- **Fewer than two samples:** an empty result (the condensed form of a <2-sample matrix has no pairs). This differs from `unifrac_pcoa`, which errors — an ordination is undefined for <2 samples, whereas "no pairs" is a valid distance answer.
+- **Rarefaction:** with `subsample_depth > 0`, samples whose total count falls below the depth are dropped from that iteration; each iteration emits its own triangle, tagged by `iteration`.
+- **Reproducibility:** same `seed` → same distances at fp32 precision (compare with a `1e-5` tolerance; see the [PCoA reproducibility note](#reproducibility)).
+
+> **Output size:** the result has `N·(N-1)/2` rows per iteration — ~50M rows at 10k samples, growing quadratically. Aggregate or filter it (the macros below, a `GROUP BY`, a `WHERE`) rather than `SELECT *`-ing it into a client.
+
+**Examples:**
+
+```sql
+-- Condensed distances for the whole table
+SELECT * FROM unifrac_distances('observations', 'tree', seed := 42)
+ORDER BY sample_a, sample_b;
+
+-- Within/between-group distribution via a plain SQL join to metadata
+SELECT CASE WHEN a.body_site = b.body_site THEN 'within' ELSE 'between' END AS comparison,
+       count(*) AS n, avg(distance) AS mean,
+       quantile_cont(distance, [0.25, 0.5, 0.75]) AS quartiles
+FROM unifrac_distances('observations', 'tree') d
+JOIN metadata a ON d.sample_a = a.sample_id
+JOIN metadata b ON d.sample_b = b.sample_id
+GROUP BY comparison;
+```
+
+---
+
+### Beta-distance macros
+
+Three SQL macros operate over any **condensed distance table** with columns `(sample_a, sample_b, distance)` — the [`unifrac_distances`](#unifrac-distances) output, or any distance relation you build yourself. They take relation *names* (a table or view), following the `query_table` convention, so materialize the distances first:
+
+```sql
+-- Macros take a relation name, not a table function call
+CREATE TABLE dm AS SELECT * FROM unifrac_distances('observations', 'tree', seed := 42);
+```
+
+> **One iteration at a time:** these macros are `iteration`-blind. If the distance table carries multiple iterations (`n_subsamples > 1`), filter to a single iteration first (e.g. build `dm` with `n_subsamples := 1`, or `... WHERE iteration = 0`) — otherwise distributions and neighbor rankings pool across bootstrap replicates. Pass the distances **as a materialized table**, not a view over `unifrac_distances`, since it is referenced more than once.
+
+#### `beta_group_distances(distances, groups)`
+
+Labels each pair within- or between-group. `groups` is a `(sample_id, grouping)` relation — reduce your metadata to the one grouping column of interest:
+
+```sql
+CREATE VIEW groups AS SELECT sample_id, body_site AS grouping FROM metadata;
+
+-- Aggregated within/between distribution (the group-cohesion question)
+SELECT comparison, count(*) AS n,
+       quantile_cont(distance, [0.25, 0.5, 0.75]) AS quartiles
+FROM beta_group_distances(dm, groups)
+GROUP BY comparison ORDER BY comparison;
+```
+
+Returns `(sample_a, sample_b, distance, group_a, group_b, comparison)` where `comparison` is `'within'` when `group_a = group_b` else `'between'`. Notes: `sample_id` must be unique in `groups` (a duplicate fans the joins out and inflates counts); a pair whose either endpoint is absent from `groups` is dropped; two NULL-group samples are labeled `'between'` (SQL `NULL = NULL` is NULL).
+
+**Per-group-vs-rest:** the condensed table holds each pair once, so a naive `GROUP BY group_a` attributes a between-pair only to `sample_a`'s group. To get, for each group, its within-group distances and its distances to every other group, attribute each *between* pair to **both** its groups but each *within* pair to its group only once (both endpoints share it):
+
+```sql
+WITH bg AS (SELECT * FROM beta_group_distances(dm, groups))
+SELECT grp, comparison, count(*) AS n, avg(distance) AS mean FROM (
+    -- within pairs: count once for their (single) group
+    SELECT group_a AS grp, comparison, distance FROM bg WHERE comparison = 'within'
+    UNION ALL
+    -- between pairs: count once for each of the two groups
+    SELECT group_a AS grp, comparison, distance FROM bg WHERE comparison = 'between'
+    UNION ALL
+    SELECT group_b AS grp, comparison, distance FROM bg WHERE comparison = 'between'
+) GROUP BY grp, comparison ORDER BY grp, comparison;
+```
+
+#### `beta_knn(distances, k)`
+
+The `k` nearest neighbors of every sample (both orientations of the condensed table are considered). Returns `(sample_id, neighbor, distance, rank)`, `rank` in `1..k`, ties broken by neighbor id:
+
+```sql
+SELECT * FROM beta_knn(dm, 5) ORDER BY sample_id, rank;
+```
+
+#### `beta_knn_from_sample(distances, k, source)`
+
+The `k` samples nearest one `source` sample. Returns `(neighbor, distance)`, nearest first:
+
+```sql
+SELECT * FROM beta_knn_from_sample(dm, 10, 'Sample1');
+```
+
+#### Correlating two distance matrices (Mantel)
+
+The Mantel **r-statistic** — the correlation between two distance matrices over the same samples — is a one-liner over two condensed tables (both must be over the same sample set, so their `(sample_a, sample_b)` pairs align):
+
+```sql
+SELECT corr(x.distance, y.distance) AS mantel_r
+FROM dm_weighted x JOIN dm_unweighted y USING (sample_a, sample_b);
+```
+
+The permutation-based Mantel **p-value** is not yet implemented; it is tracked in [issue #160](https://github.com/the-miint/duckdb-miint/issues/160).
+
+---
+
+### PCoA (from a distance table)
+
+`pcoa(distances, ...)` runs Principal Coordinates Analysis over **any** condensed distance table with columns `(sample_a, sample_b, distance)` — the [`unifrac_distances`](#unifrac-distances) output, a [beta-distance](#beta-distance-macros) relation, or a precomputed Bray-Curtis / Jaccard / Euclidean table you built yourself. It is **metric-agnostic**: the ordination is decoupled from UniFrac. [`unifrac_pcoa`](#unifrac-pcoa) remains the end-to-end convenience wrapper (feature table + tree → coordinates); `pcoa` is the same ordination over a distance matrix you already have.
+
+It takes a relation *name* (a table or view), so materialize the distances first:
+
+```sql
+CREATE TABLE dm AS SELECT sample_a, sample_b, distance
+    FROM unifrac_distances('observations', 'tree', seed := 42);
+
+SELECT * FROM pcoa('dm', n_dims := 3, seed := 42);
+```
+
+**Parameters:**
+- `distances` (VARCHAR): name of the condensed distance relation exposing `(sample_a, sample_b, distance)`
+- `n_dims` (INTEGER, default 3): number of PCoA axes to compute; must be `≤ n_samples - 1`
+- `seed` (INTEGER, default -1): FSVD randomization seed; `-1` = unseeded
+- `threads` (INTEGER, default 0): OpenMP threads; `0` follows DuckDB's thread count
+
+**Output schema:** identical to [`unifrac_pcoa`](#unifrac-pcoa) — `(iteration, sample_id, axis, coordinate, eigenvalue, proportion_explained)`. `iteration` is always `0` (kept for schema parity; a distance table is a single fixed matrix, so there is no subsampling). `sample_id` mirrors the input `sample_a` type — see [Sample identifier types](#sample-identifier-types).
+
+**Behavior:**
+- **Input shape:** distinct ids are collected from *both* `sample_a` and `sample_b`, sorted lexicographically, and assembled into a dense symmetric matrix with a zero diagonal. `sample_a` and `sample_b` must resolve to the same output type (a BIGINT/VARCHAR mix is rejected at bind).
+- <a name="distance-table-completeness"></a>**Completeness (fail loud):** the matrix must be complete — every unordered pair present exactly once. A missing pair, a negative or non-finite distance, a nonzero self-distance, or a pair given two conflicting values is an error that names the offending pair. Rows with a NULL `sample_a`/`sample_b` are skipped; a NULL/NaN `distance` is treated as "not provided" (its ids are still recorded, so a sample whose every distance is NULL/NaN surfaces as an incompleteness error rather than silently vanishing). `unifrac_distances` always emits the full triangle, so its output is complete by construction; a hand-built table you must complete yourself.
+- **Equivalence:** `pcoa` over `unifrac_distances(obs, tree, variant := v, seed := s)` reproduces `unifrac_pcoa(obs, tree, variant := v, n_dims := d, seed := s)` — same matrix, same FSVD call, same seed. Coordinates match up to axis sign (compare `abs(coordinate)`) within the fp32 tolerance noted under [Reproducibility](#reproducibility).
+- **Fewer than two samples**, or **`n_dims > n_samples - 1`**: an error (an ordination is undefined).
+
+**Example:**
+
+```sql
+-- Bray-Curtis PCoA with no tree involved: build the distance table however you
+-- like (here a placeholder), then ordinate it.
+CREATE TABLE bc AS SELECT sample_a, sample_b, distance FROM my_bray_curtis_distances;
+SELECT sample_id, axis, coordinate
+FROM pcoa('bc', n_dims := 2, seed := 42)
+ORDER BY axis, sample_id;
+```
+
+---
+
+### PERMANOVA (from a distance table)
+
+`permanova(distances, metadata, ...)` runs PERMANOVA (pseudo-F + a permutation p-value) over any condensed distance table and a wide-form metadata relation. Like [`pcoa`](#pcoa-from-a-distance-table) it is **metric-agnostic** — the omnibus test is decoupled from UniFrac. [`unifrac_permanova`](#unifrac-permanova) remains the end-to-end wrapper.
+
+```sql
+CREATE TABLE dm AS SELECT sample_a, sample_b, distance
+    FROM unifrac_distances('observations', 'tree', seed := 42);
+
+SELECT * FROM permanova('dm', 'metadata',
+    variables := ['body_site'], n_permutations := 999, seed := 42);
+```
+
+**Parameters:**
+- `distances` (VARCHAR): name of the condensed distance relation exposing `(sample_a, sample_b, distance)`
+- `metadata` (VARCHAR): name of the wide-form metadata relation — a `sample_id` column plus one column per variable (see [Metadata](#metadata))
+- `n_permutations` (INTEGER, default 999): permutations for the p-value
+- `variables` (VARCHAR[], default all non-`sample_id` columns): metadata columns to test
+- `seed` (INTEGER, default -1): permutation seed; `-1` = unseeded
+- `threads` (INTEGER, default 0): OpenMP threads; `0` follows DuckDB's thread count
+
+**Output schema:** identical to [`unifrac_permanova`](#unifrac-permanova) — `(iteration, variable, n_groups, f_stat, p_value, n_permutations)`. `iteration` is always `0`. There is no `sample_id` output, so no id-type mirroring.
+
+**Behavior:**
+- **Input shape / completeness:** the same dense-matrix construction and [completeness requirement](#distance-table-completeness) as `pcoa`.
+- **Metadata alignment:** every sample in the distance matrix must have a row for each tested variable, else an error naming the missing sample and variable; metadata samples not present in the distance matrix are ignored. A NULL metadata value is treated as an (empty-string) group value — filter the metadata first if you want NULL samples dropped.
+- **Equivalence:** `permanova` over `unifrac_distances(obs, tree, variant := v, seed := s)` reproduces `unifrac_permanova(obs, tree, metadata, variant := v, seed := s)` under the same `seed` and `n_permutations`: `p_value` is byte-identical (same permutations) and `f_stat` matches within `1e-5` (fp32; see the [reproducibility note](#reproducibility)).
 
 ---
 
@@ -99,7 +308,7 @@ SELECT * FROM unifrac_pcoa('observations', 'tree',
 
 **Output schema:**
 - `iteration` (INTEGER): 0-indexed iteration; constant when `n_subsamples = 1`
-- `sample_id` (VARCHAR): sample identifier (post-subsample ordering)
+- `sample_id` (mirrors input type — see [Sample identifier types](#sample-identifier-types)): sample identifier (post-subsample ordering)
 - `axis` (INTEGER): 0-indexed PCoA axis; `axis = 0` is the largest eigenvalue
 - `coordinate` (DOUBLE): the sample's coordinate on this axis
 - `eigenvalue` (DOUBLE): eigenvalue for this axis — **replicated across all samples within `(iteration, axis)`**
@@ -226,7 +435,7 @@ SELECT * FROM unifrac_faith_pd('observations', 'tree',
 
 **Output schema:**
 - `iteration` (INTEGER): 0-indexed iteration; always 0 when `subsample_depth = 0`
-- `sample_id` (VARCHAR): sample identifier
+- `sample_id` (mirrors input type — see [Sample identifier types](#sample-identifier-types)): sample identifier
 - `faith_pd` (DOUBLE): sum of branch lengths on the spanning subtree (non-negative)
 
 #### Behavior

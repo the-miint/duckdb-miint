@@ -884,6 +884,71 @@ const std::string TAXONOMY_LINEAGE = // NOLINT
     "    AS lineage "
     "FROM collapsed; ";
 
+// beta_group_distances(distances, groups)
+//
+// Labels each pair in a condensed distance table (e.g. unifrac_distances output:
+// sample_a, sample_b, distance) as within- or between-group by joining each side
+// to a (sample_id, grouping) relation. Returns the per-pair rows; aggregate with
+// GROUP BY comparison + quantile_cont/avg for the within/between distribution.
+//
+// Preconditions (documented, not enforced — pass clean inputs):
+//   - `distances` holds each unordered pair once. If it carries multiple
+//     `iteration`s (unifrac_distances with n_subsamples > 1), pre-filter to a
+//     single iteration first, or the distribution pools across bootstrap
+//     replicates. query_table() rejects subqueries, so filter into a table/view.
+//   - `sample_id` is unique in `groups`; a duplicate fans the two joins out and
+//     silently inflates the counts.
+//   - A pair whose either endpoint is absent from `groups` is dropped (inner join).
+//   - NULL grouping: `NULL = NULL` is NULL in SQL, so a pair of two NULL-group
+//     samples is labeled 'between', the same as genuinely different groups.
+//   - `groups` is referenced twice; pass a materialized table, not a view over an
+//     expensive query.
+const std::string BETA_GROUP_DISTANCES = // NOLINT
+    "CREATE OR REPLACE MACRO beta_group_distances(distances, groups) AS TABLE "
+    "SELECT d.sample_a, d.sample_b, d.distance, "
+    "       ga.grouping AS group_a, gb.grouping AS group_b, "
+    "       CASE WHEN ga.grouping = gb.grouping THEN 'within' ELSE 'between' END AS comparison "
+    "FROM query_table(distances) d "
+    "JOIN query_table(groups) ga ON d.sample_a = ga.sample_id "
+    "JOIN query_table(groups) gb ON d.sample_b = gb.sample_id; ";
+
+// beta_knn(distances, k)
+//
+// The k nearest neighbors of every sample over a condensed distance table. The
+// input holds each unordered pair once, so both orientations are unioned before
+// ranking. Returns (sample_id, neighbor, distance, rank), rank in 1..k. Ties are
+// broken by neighbor id (deterministic); k <= 0 yields no rows.
+//
+// If `distances` carries multiple `iteration`s (unifrac_distances with
+// n_subsamples > 1), pre-filter to a single iteration first, or neighbors are
+// ranked across all iterations together. `distances` is referenced twice, so pass
+// a materialized table, not a view over an expensive query.
+const std::string BETA_KNN = // NOLINT
+    "CREATE OR REPLACE MACRO beta_knn(distances, k) AS TABLE "
+    "SELECT sample_id, neighbor, distance, rank FROM ( "
+    "    SELECT sample_id, neighbor, distance, "
+    "           ROW_NUMBER() OVER (PARTITION BY sample_id ORDER BY distance, neighbor) AS rank "
+    "    FROM ( "
+    "        SELECT sample_a AS sample_id, sample_b AS neighbor, distance FROM query_table(distances) "
+    "        UNION ALL "
+    "        SELECT sample_b AS sample_id, sample_a AS neighbor, distance FROM query_table(distances) "
+    "    ) "
+    ") WHERE rank <= k; ";
+
+// beta_knn_from_sample(distances, k, source)
+//
+// The k samples nearest a single `source` sample over a condensed distance table,
+// checking both orientations. Returns (neighbor, distance) ordered nearest-first;
+// ties broken by neighbor id. An absent source yields no rows. Same
+// iteration/materialization caveats as beta_knn.
+const std::string BETA_KNN_FROM_SAMPLE = // NOLINT
+    "CREATE OR REPLACE MACRO beta_knn_from_sample(distances, k, source) AS TABLE "
+    "SELECT neighbor, distance FROM ( "
+    "    SELECT sample_b AS neighbor, distance FROM query_table(distances) WHERE sample_a = source "
+    "    UNION ALL "
+    "    SELECT sample_a AS neighbor, distance FROM query_table(distances) WHERE sample_b = source "
+    ") ORDER BY distance, neighbor LIMIT k; ";
+
 class MIINTMacros {
 public:
 	static void Register(ExtensionLoader &loader) {
@@ -961,6 +1026,10 @@ public:
 		register_macro(MZML_EXCLUDED_MS1MZ, "mzml_excluded_ms1mz");
 		register_macro(MZML_EXCLUDED_MS2PREC, "mzml_excluded_ms2prec");
 		register_macro(MZML_ISOTOPE_PATTERN, "mzml_isotope_pattern");
+
+		register_macro(BETA_GROUP_DISTANCES, "beta_group_distances");
+		register_macro(BETA_KNN, "beta_knn");
+		register_macro(BETA_KNN_FROM_SAMPLE, "beta_knn_from_sample");
 	}
 };
 

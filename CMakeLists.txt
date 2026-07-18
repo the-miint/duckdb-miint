@@ -1333,7 +1333,8 @@ if(MIINT_ENABLE_UNIFRAC)
         src/unifrac_function_common.cpp
         src/unifrac_pcoa_function.cpp
         src/unifrac_permanova_function.cpp
-        src/unifrac_faith_pd_function.cpp)
+        src/unifrac_faith_pd_function.cpp
+        src/unifrac_distances_function.cpp)
 endif()
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
@@ -1813,6 +1814,8 @@ if(MIINT_ENABLE_UNIFRAC)
         test/cpp/test_UnifracBptree.cpp
         test/cpp/test_UnifracMetadata.cpp
         test/cpp/test_UnifracDistance.cpp
+        test/cpp/test_UnifracCondensed.cpp
+        test/cpp/test_UnifracDenseDistance.cpp
         test/cpp/test_UnifracSubsampleBridge.cpp)
 endif()
 

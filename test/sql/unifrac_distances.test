@@ -1,0 +1,348 @@
+# name: test/sql/unifrac_distances.test
+# description: unifrac_distances table function — condensed (upper-triangle) UniFrac distances in COO long form.
+# group: [sql]
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+# 6 samples × 5 features; tips of gg_otu_tree.nwk are GG_OTU_1..GG_OTU_5.
+statement ok
+CREATE TABLE observations AS SELECT * FROM read_biom('data/biom/test.biom');
+
+statement ok
+CREATE TABLE tree AS SELECT * FROM read_newick('data/unifrac/gg_otu_tree.nwk');
+
+# ── Completeness / shape ─────────────────────────────────────────────────────
+# Condensed upper triangle of a 6-sample matrix = 6*5/2 = 15 pairs, one iteration.
+query I
+SELECT COUNT(*) FROM unifrac_distances('observations', 'tree', variant := 'weighted_normalized');
+----
+15
+
+# Every emitted pair is unique (no duplicates, no diagonal).
+query I
+SELECT COUNT(*) = COUNT(DISTINCT (sample_a, sample_b)) AND COUNT(*) = 15
+FROM unifrac_distances('observations', 'tree', variant := 'weighted_normalized');
+----
+true
+
+# Canonical ordering: sample_a is strictly less than sample_b for every row
+# (upper triangle over lexicographically sorted sample ids). No self-pairs.
+query I
+SELECT COUNT(*) FROM unifrac_distances('observations', 'tree', variant := 'weighted_normalized')
+WHERE sample_a >= sample_b;
+----
+0
+
+# Single iteration by default → iteration is 0 for every row.
+query I
+SELECT COUNT(DISTINCT iteration) FROM unifrac_distances('observations', 'tree',
+    variant := 'weighted_normalized');
+----
+1
+
+# Output schema column types are stable.
+query ITTI
+SELECT iteration, typeof(sample_a), typeof(sample_b), distance IS NOT NULL
+FROM unifrac_distances('observations', 'tree', variant := 'weighted_normalized')
+ORDER BY sample_a, sample_b
+LIMIT 1;
+----
+0	VARCHAR	VARCHAR	true
+
+# ── Value bounds ─────────────────────────────────────────────────────────────
+# Normalized variants produce distances in [0, 1]; all distances are >= 0.
+query I
+SELECT COUNT(*) FROM unifrac_distances('observations', 'tree', variant := 'weighted_normalized')
+WHERE distance < 0 OR distance > 1;
+----
+0
+
+# ── Exact hand-computed values (unweighted UniFrac) ──────────────────────────
+# Tree ((A:0.1,B:0.2):0.3,C:0.4): internal edge int=0.3 is the parent of A,B.
+# Unweighted UniFrac = (branch length unique to one sample) / (branch length in
+# either sample). Hand-derived for each pair below:
+#   {A} vs {B}      : unique A(0.1)+B(0.2)=0.3, union 0.6                  → 0.5
+#   {A} vs {C}      : unique 0.1+0.3+0.4=0.8,   union 0.8                  → 1.0
+#   {B} vs {C}      : unique 0.2+0.3+0.4=0.9,   union 0.9                  → 1.0
+#   {A} vs {A,B,C}  : unique B(0.2)+C(0.4)=0.6, union 1.0                  → 0.6
+#   {B} vs {A,B,C}  : unique A(0.1)+C(0.4)=0.5, union 1.0                  → 0.5
+#   {C} vs {A,B,C}  : unique A(0.1)+B(0.2)+int(0.3)=0.6, union 1.0         → 0.6
+# Lexicographic sample order is S1, S2, S3, Sall (('1' < 'a')).
+statement ok
+CREATE TABLE simple_tree AS SELECT * FROM read_newick('data/newick/simple.nwk');
+
+statement ok
+CREATE TABLE simple_obs AS SELECT * FROM (VALUES
+    ('S1', 'A', 1.0), ('S2', 'B', 1.0), ('S3', 'C', 1.0),
+    ('Sall', 'A', 1.0), ('Sall', 'B', 1.0), ('Sall', 'C', 1.0)
+) t(sample_id, feature_id, value);
+
+# 4 samples → 6 pairs; assert every pair matches its hand-computed value.
+query I
+WITH d AS (SELECT * FROM unifrac_distances('simple_obs', 'simple_tree', variant := 'unweighted'))
+SELECT COUNT(*) FROM d WHERE
+    (sample_a = 'S1' AND sample_b = 'S2'   AND abs(distance - 0.5) < 1e-5) OR
+    (sample_a = 'S1' AND sample_b = 'S3'   AND abs(distance - 1.0) < 1e-5) OR
+    (sample_a = 'S1' AND sample_b = 'Sall' AND abs(distance - 0.6) < 1e-5) OR
+    (sample_a = 'S2' AND sample_b = 'S3'   AND abs(distance - 1.0) < 1e-5) OR
+    (sample_a = 'S2' AND sample_b = 'Sall' AND abs(distance - 0.5) < 1e-5) OR
+    (sample_a = 'S3' AND sample_b = 'Sall' AND abs(distance - 0.6) < 1e-5);
+----
+6
+
+# ── Streaming across chunk boundaries ────────────────────────────────────────
+# 70 samples → 70*69/2 = 2415 pairs > STANDARD_VECTOR_SIZE (2048), so the
+# execute cursor must span multiple output chunks. Distances vary by sample.
+statement ok
+CREATE TABLE big_obs AS
+SELECT 'S' || i AS sample_id, f.feature_id, (1 + (i % 3))::DOUBLE AS value
+FROM range(70) t(i)
+CROSS JOIN (VALUES ('GG_OTU_1'), ('GG_OTU_2'), ('GG_OTU_3')) f(feature_id);
+
+query I
+SELECT COUNT(*) = 2415 AND COUNT(*) = COUNT(DISTINCT (sample_a, sample_b))
+FROM unifrac_distances('big_obs', 'tree', variant := 'weighted_normalized');
+----
+true
+
+# Multi-iteration AND multi-chunk together: 70 samples survive depth=3, so
+# 2415 pairs × 2 iterations = 4830 rows spanning 3 output chunks. The iteration
+# boundary (row 2415) lands mid-chunk, forcing LoadIteration between chunks and
+# carrying iteration state across an Execute() boundary. COUNT(DISTINCT (...))
+# catches any pair duplicated or dropped at either boundary.
+query I
+WITH d AS (SELECT * FROM unifrac_distances('big_obs', 'tree',
+              variant := 'weighted_normalized', subsample_depth := 3, n_subsamples := 2, seed := 11))
+SELECT COUNT(*) = 4830
+   AND COUNT(*) = COUNT(DISTINCT (iteration, sample_a, sample_b))
+   AND COUNT(DISTINCT iteration) = 2
+FROM d;
+----
+true
+
+# ── Multi-iteration with subsampling ─────────────────────────────────────────
+# depth=3 keeps all 6 samples every iteration → 15 pairs × 5 iterations = 75 rows.
+query I
+SELECT COUNT(*) FROM unifrac_distances('observations', 'tree',
+    variant := 'weighted_normalized', subsample_depth := 3, n_subsamples := 5, seed := 7);
+----
+75
+
+query I
+SELECT COUNT(DISTINCT iteration) FROM unifrac_distances('observations', 'tree',
+    variant := 'weighted_normalized', subsample_depth := 3, n_subsamples := 5, seed := 7);
+----
+5
+
+# Seed reproducibility: two identical invocations agree pair-for-pair.
+query I
+WITH a AS (SELECT * FROM unifrac_distances('observations', 'tree',
+              variant := 'weighted_normalized', subsample_depth := 3, n_subsamples := 5, seed := 7)),
+     b AS (SELECT * FROM unifrac_distances('observations', 'tree',
+              variant := 'weighted_normalized', subsample_depth := 3, n_subsamples := 5, seed := 7))
+SELECT COUNT(*) FROM a
+JOIN b USING (iteration, sample_a, sample_b)
+WHERE abs(a.distance - b.distance) < 1e-5;
+----
+75
+
+# ── Subsampling that drops samples changes the per-iteration triangle size ───
+# S1 has total count 1, so at subsample_depth=2 it is dropped (a sample whose
+# total falls below the depth can't be rarefied); the remaining 3 samples give
+# 3*2/2 = 3 pairs, and S1 appears in no pair. Guards the "cursor is re-sized
+# from each iteration's matrix, not the input table" contract.
+statement ok
+CREATE TABLE dropped_obs AS SELECT * FROM (VALUES
+    ('S1', 'GG_OTU_1', 1.0),
+    ('S2', 'GG_OTU_1', 1.0), ('S2', 'GG_OTU_2', 1.0),
+    ('S3', 'GG_OTU_1', 1.0), ('S3', 'GG_OTU_3', 1.0),
+    ('S4', 'GG_OTU_2', 1.0), ('S4', 'GG_OTU_3', 1.0)
+) t(sample_id, feature_id, value);
+
+query I
+SELECT COUNT(*) FROM unifrac_distances('dropped_obs', 'tree',
+    variant := 'weighted_normalized', subsample_depth := 2);
+----
+3
+
+query I
+SELECT COUNT(*) FROM unifrac_distances('dropped_obs', 'tree',
+    variant := 'weighted_normalized', subsample_depth := 2)
+WHERE sample_a = 'S1' OR sample_b = 'S1';
+----
+0
+
+# ── Fewer than two samples → empty result (not an error) ─────────────────────
+# The condensed form of a <2-sample matrix has no pairs. Unlike unifrac_pcoa
+# (undefined for <2 samples → error), a distance dump legitimately returns 0
+# rows. Documented behavior, tested in both the base and subsampling cases.
+statement ok
+CREATE TABLE one_sample_obs AS SELECT * FROM (VALUES
+    ('Solo', 'GG_OTU_1', 1.0), ('Solo', 'GG_OTU_2', 1.0)
+) t(sample_id, feature_id, value);
+
+query I
+SELECT COUNT(*) FROM unifrac_distances('one_sample_obs', 'tree', variant := 'weighted_normalized');
+----
+0
+
+# ── Bind-time errors ─────────────────────────────────────────────────────────
+
+# Tree missing a feature_id → error naming the missing tip.
+statement ok
+CREATE TABLE observations_extra_feature AS
+    SELECT * FROM observations
+    UNION ALL SELECT 'Sample1' AS sample_id, 'MISSING_OTU' AS feature_id, 1.0::DOUBLE AS value;
+
+statement error
+SELECT * FROM unifrac_distances('observations_extra_feature', 'tree', variant := 'weighted_normalized');
+----
+MISSING_OTU
+
+# Bad variant → Binder error listing the accepted set.
+statement error
+SELECT * FROM unifrac_distances('observations', 'tree', variant := 'made_up_metric');
+----
+variant
+
+# Empty feature table → InvalidInput error.
+statement ok
+CREATE TABLE empty_obs AS SELECT * FROM observations WHERE false;
+
+statement error
+SELECT * FROM unifrac_distances('empty_obs', 'tree', variant := 'weighted_normalized');
+----
+empty
+
+# n_subsamples > 1 with subsample_depth = 0 → Binder error (iterations identical).
+statement error
+SELECT * FROM unifrac_distances('observations', 'tree', variant := 'weighted_normalized', n_subsamples := 5);
+----
+subsample_depth
+
+# n_subsamples must be >= 1.
+statement error
+SELECT * FROM unifrac_distances('observations', 'tree', variant := 'weighted_normalized', n_subsamples := 0);
+----
+n_subsamples
+
+# ── Sample-ID type parity (BIGINT / UUID mirrored onto the output) ────────────
+# Parity with align_minimap2: sample_a/sample_b are emitted with the input
+# sample_id's type so results join back to metadata without a cast. Pairs are
+# still emitted once each (ordered by the canonical lexical id form), so numeric
+# sample_a < sample_b need not hold for BIGINT — uniqueness is what we assert.
+statement ok
+CREATE TABLE obs_bigint AS
+    SELECT replace(sample_id, 'Sample', '')::BIGINT AS sample_id, feature_id, value FROM observations;
+
+query T
+SELECT DISTINCT typeof(sample_a) FROM unifrac_distances('obs_bigint', 'tree');
+----
+BIGINT
+
+query T
+SELECT DISTINCT typeof(sample_b) FROM unifrac_distances('obs_bigint', 'tree');
+----
+BIGINT
+
+# 15 unique pairs; all six ids (1..6) round-trip through the output.
+query I
+SELECT COUNT(*) = 15 AND COUNT(*) = COUNT(DISTINCT (sample_a, sample_b))
+FROM unifrac_distances('obs_bigint', 'tree');
+----
+true
+
+query I
+SELECT COUNT(DISTINCT s) FROM (
+    SELECT sample_a AS s FROM unifrac_distances('obs_bigint', 'tree')
+    UNION ALL SELECT sample_b FROM unifrac_distances('obs_bigint', 'tree'));
+----
+6
+
+# Joins back to a BIGINT metadata key with no cast (the parity payoff).
+statement ok
+CREATE TABLE md_bigint AS SELECT DISTINCT replace(sample_id, 'Sample', '')::BIGINT AS sample_id FROM observations;
+
+query I
+SELECT COUNT(*) FROM unifrac_distances('obs_bigint', 'tree') d
+JOIN md_bigint m ON d.sample_a = m.sample_id;
+----
+15
+
+# UUIDs carry hex letters (a-f), so the round-trip exercises real hex conversion,
+# not just an all-digits degenerate case.
+statement ok
+CREATE TABLE obs_uuid AS
+    SELECT m.uid AS sample_id, o.feature_id, o.value
+    FROM observations o JOIN (VALUES
+        ('Sample1', 'aaaaaaaa-1111-4222-8333-444444444444'::UUID),
+        ('Sample2', 'bbbbbbbb-1111-4222-8333-444444444444'::UUID),
+        ('Sample3', 'cccccccc-1111-4222-8333-444444444444'::UUID),
+        ('Sample4', 'dddddddd-1111-4222-8333-444444444444'::UUID),
+        ('Sample5', 'eeeeeeee-1111-4222-8333-444444444444'::UUID),
+        ('Sample6', 'ffffffff-1111-4222-8333-444444444444'::UUID)
+    ) m(orig, uid) ON o.sample_id = m.orig;
+
+query T
+SELECT DISTINCT typeof(sample_a) FROM unifrac_distances('obs_uuid', 'tree');
+----
+UUID
+
+query I
+SELECT COUNT(*) FROM unifrac_distances('obs_uuid', 'tree');
+----
+15
+
+query I
+SELECT COUNT(DISTINCT s) FROM (
+    SELECT sample_a AS s FROM unifrac_distances('obs_uuid', 'tree')
+    UNION ALL SELECT sample_b FROM unifrac_distances('obs_uuid', 'tree'));
+----
+6
+
+# VARCHAR input stays VARCHAR (non-regression).
+query T
+SELECT DISTINCT typeof(sample_a) FROM unifrac_distances('observations', 'tree');
+----
+VARCHAR
+
+# Negative and INT64-extreme BIGINT ids survive the ::VARCHAR-cast → lexical-sort
+# → re-parse egress path losslessly. Lexically "-5" < "9223..." ('-' < '9'), so
+# that is the emitted (sample_a, sample_b) order for this 2-sample table.
+statement ok
+CREATE TABLE obs_neg AS SELECT * FROM (VALUES
+    ((-5)::BIGINT, 'GG_OTU_1', 1.0), ((-5)::BIGINT, 'GG_OTU_2', 1.0),
+    (9223372036854775807::BIGINT, 'GG_OTU_1', 1.0), (9223372036854775807::BIGINT, 'GG_OTU_3', 1.0)
+) t(sample_id, feature_id, value);
+
+query II
+SELECT sample_a, sample_b FROM unifrac_distances('obs_neg', 'tree');
+----
+-5	9223372036854775807
+
+# ── Composition with the beta-distance macros (end-to-end) ───────────────────
+# The #158 within/between use case, straight off the primitive's output.
+statement ok
+CREATE TABLE dm AS SELECT * FROM unifrac_distances('observations', 'tree', variant := 'weighted_normalized');
+
+statement ok
+CREATE TABLE md_groups AS SELECT * FROM (VALUES
+    ('Sample1', 'gut'), ('Sample2', 'gut'), ('Sample3', 'gut'),
+    ('Sample4', 'skin'), ('Sample5', 'skin'), ('Sample6', 'skin')
+) t(sample_id, grouping);
+
+# 3 gut × 3 skin = 9 between; 2×C(3,2) = 6 within.
+query TI
+SELECT comparison, count(*) AS n FROM beta_group_distances('dm', 'md_groups')
+GROUP BY comparison ORDER BY comparison;
+----
+between	9
+within	6
+
+# k-NN over the same distances: 6 samples × 2 neighbors = 12 rows.
+query I
+SELECT COUNT(*) FROM beta_knn('dm', 2);
+----
+12

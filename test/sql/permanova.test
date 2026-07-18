@@ -1,0 +1,181 @@
+# name: test/sql/permanova.test
+# description: permanova table function — metric-agnostic PERMANOVA over a condensed (sample_a, sample_b, distance) distance table + wide metadata.
+# group: [sql]
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+# ── Inline distance table: 4 samples, complete upper triangle (6 pairs) ───────
+# A,B close and C,D close; A,B far from C,D — a clear two-group structure.
+statement ok
+CREATE TABLE dist AS SELECT * FROM (VALUES
+    ('A', 'B', 0.10),
+    ('A', 'C', 0.90),
+    ('A', 'D', 0.85),
+    ('B', 'C', 0.88),
+    ('B', 'D', 0.92),
+    ('C', 'D', 0.15)
+) AS t(sample_a, sample_b, distance);
+
+statement ok
+CREATE TABLE metadata AS SELECT * FROM (VALUES
+    ('A', 'left',  'x'),
+    ('B', 'left',  'x'),
+    ('C', 'right', 'x'),
+    ('D', 'right', 'x')
+) AS t(sample_id, grp, single_group);
+
+# ── Single-variable happy path ───────────────────────────────────────────────
+query I
+SELECT COUNT(*) FROM permanova('dist', 'metadata', variables := ['grp'],
+    n_permutations := 99, seed := 42);
+----
+1
+
+# Output schema: iteration, variable, n_groups, f_stat, p_value, n_permutations.
+query IIIIII
+SELECT iteration, variable, n_groups,
+       f_stat IS NOT NULL, p_value IS NOT NULL, n_permutations
+FROM permanova('dist', 'metadata', variables := ['grp'], n_permutations := 99, seed := 42);
+----
+0	grp	2	true	true	99
+
+# p_value in [0, 1]; f_stat finite for a real two-group split.
+query I
+SELECT COUNT(*) FROM permanova('dist', 'metadata', variables := ['grp'],
+    n_permutations := 99, seed := 42)
+WHERE p_value < 0 OR p_value > 1 OR NOT isfinite(f_stat);
+----
+0
+
+# n_groups matches the count of distinct values per requested variable.
+query II
+SELECT variable, n_groups FROM permanova('dist', 'metadata',
+    variables := ['grp', 'single_group'], n_permutations := 99, seed := 42)
+ORDER BY variable;
+----
+grp	2
+single_group	1
+
+# Default variables: empty list selects every non-sample_id column → 2 rows.
+query I
+SELECT COUNT(*) FROM permanova('dist', 'metadata', n_permutations := 99, seed := 42);
+----
+2
+
+# ── Seed reproducibility ─────────────────────────────────────────────────────
+# Same seed ⇒ identical p_value (byte-identical: same permutations) and f_stat.
+query I
+WITH a AS (SELECT * FROM permanova('dist', 'metadata', variables := ['grp'],
+              n_permutations := 99, seed := 42)),
+     b AS (SELECT * FROM permanova('dist', 'metadata', variables := ['grp'],
+              n_permutations := 99, seed := 42))
+SELECT COUNT(*) FROM a JOIN b USING (iteration, variable)
+WHERE a.p_value = b.p_value AND abs(a.f_stat - b.f_stat) < 1e-5 AND a.n_groups = b.n_groups;
+----
+1
+
+# ── Read / bind errors ───────────────────────────────────────────────────────
+
+# Metadata missing a sample present in the distance matrix → error naming it.
+statement ok
+CREATE TABLE metadata_missing AS SELECT sample_id, grp FROM metadata WHERE sample_id <> 'C';
+
+statement error
+SELECT * FROM permanova('dist', 'metadata_missing', variables := ['grp']);
+----
+C
+
+# Unknown variable → Binder error naming it.
+statement error
+SELECT * FROM permanova('dist', 'metadata', variables := ['nonexistent_column']);
+----
+nonexistent_column
+
+# n_permutations must be >= 1.
+statement error
+SELECT * FROM permanova('dist', 'metadata', n_permutations := 0);
+----
+n_permutations
+
+# Metadata without a sample_id column → Binder error.
+statement ok
+CREATE TABLE metadata_no_sid AS SELECT grp, single_group FROM metadata;
+
+statement error
+SELECT * FROM permanova('dist', 'metadata_no_sid');
+----
+sample_id
+
+# Incomplete distance matrix → error naming the first missing pair.
+statement ok
+CREATE TABLE dist_incomplete AS SELECT * FROM dist WHERE NOT (sample_a = 'A' AND sample_b = 'C');
+
+statement error
+SELECT * FROM permanova('dist_incomplete', 'metadata', variables := ['grp']);
+----
+incomplete distance matrix
+
+# ── Sample-ID type parity: BIGINT distance-table ids join to BIGINT metadata ──
+statement ok
+CREATE TABLE dist_bigint AS
+    SELECT (ascii(sample_a) - 64)::BIGINT AS sample_a,
+           (ascii(sample_b) - 64)::BIGINT AS sample_b, distance FROM dist;
+
+statement ok
+CREATE TABLE metadata_bigint AS
+    SELECT (ascii(sample_id) - 64)::BIGINT AS sample_id, grp FROM metadata;
+
+query II
+SELECT variable, n_groups FROM permanova('dist_bigint', 'metadata_bigint',
+    variables := ['grp'], n_permutations := 99, seed := 42);
+----
+grp	2
+
+# Same underlying data + same seed ⇒ the BIGINT-keyed result matches the
+# VARCHAR baseline exactly (sample matching is value-based, not positional).
+query I
+WITH v AS (SELECT variable, n_groups, f_stat, p_value FROM permanova('dist', 'metadata',
+              variables := ['grp'], n_permutations := 99, seed := 42)),
+     b AS (SELECT variable, n_groups, f_stat, p_value FROM permanova('dist_bigint', 'metadata_bigint',
+              variables := ['grp'], n_permutations := 99, seed := 42))
+SELECT COUNT(*) FROM v JOIN b USING (variable)
+WHERE v.n_groups = b.n_groups AND v.p_value = b.p_value AND abs(v.f_stat - b.f_stat) < 1e-5;
+----
+1
+
+# ── Equivalence (killer test): permanova over unifrac_distances ≈ unifrac_permanova ──
+# Same distance matrix + same groupings + same skbb_permanova_fp32 + same seed ⇒
+# p_value byte-identical and f_stat within fp32 tolerance.
+statement ok
+CREATE TABLE observations AS SELECT * FROM read_biom('data/biom/test.biom');
+
+statement ok
+CREATE TABLE tree AS SELECT * FROM read_newick('data/unifrac/gg_otu_tree.nwk');
+
+statement ok
+CREATE TABLE ud AS SELECT sample_a, sample_b, distance
+FROM unifrac_distances('observations', 'tree', variant := 'weighted_normalized');
+
+statement ok
+CREATE TABLE meta6 AS SELECT * FROM (VALUES
+    ('Sample1', 'gut'),  ('Sample2', 'gut'),  ('Sample3', 'gut'),
+    ('Sample4', 'skin'), ('Sample5', 'skin'), ('Sample6', 'skin')
+) AS t(sample_id, body_site);
+
+query I
+WITH viadist AS (
+    SELECT variable, n_groups, f_stat, p_value FROM permanova('ud', 'meta6',
+        variables := ['body_site'], n_permutations := 99, seed := 42)
+),
+     direct AS (
+    SELECT variable, n_groups, f_stat, p_value FROM unifrac_permanova('observations', 'tree', 'meta6',
+        variant := 'weighted_normalized', variables := ['body_site'], n_permutations := 99, seed := 42)
+)
+SELECT COUNT(*) FROM viadist JOIN direct USING (variable)
+WHERE viadist.n_groups = direct.n_groups
+  AND viadist.p_value = direct.p_value
+  AND abs(viadist.f_stat - direct.f_stat) < 1e-5;
+----
+1

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "NewickTree.hpp"
+#include "id_column_utils.hpp"
 #include "tree_table_reader.hpp"
 #include "unifrac_bptree.hpp"
 #include "unifrac_distance.hpp"
@@ -31,7 +32,9 @@ namespace {
 
 using unifrac_internal::AcceptedVariantList;
 using unifrac_internal::IsValidVariant;
+using unifrac_internal::ReadDistanceTable;
 using unifrac_internal::ReadFeatureTable;
+using unifrac_internal::ResolveSampleIdOutputType;
 using unifrac_internal::ResolveThreadsParameter;
 
 struct PcoaRow {
@@ -45,11 +48,15 @@ struct PcoaRow {
 
 struct UnifracPcoaData : public TableFunctionData {
 	std::vector<PcoaRow> rows;
+	// Output type for sample_id — mirrors the input sample_id type (BIGINT/UUID)
+	// or VARCHAR otherwise. See ResolveSampleIdOutputType.
+	LogicalType sample_id_type = LogicalType::VARCHAR;
 };
 
 struct UnifracPcoaGlobalState : public GlobalTableFunctionState {
 	std::vector<PcoaRow> rows;
 	size_t cursor = 0;
+	LogicalType sample_id_type = LogicalType::VARCHAR;
 	idx_t MaxThreads() const override {
 		return 1;
 	}
@@ -62,6 +69,76 @@ std::vector<std::string> CollectIds(char **ids, int n) {
 		out.emplace_back(ids[i]);
 	}
 	return out;
+}
+
+// Run randomized PCoA (skbb_pcoa_fsvd_fp32) on a dense fp32 distance matrix and
+// append one PcoaRow per (sample, axis). Shared by unifrac_pcoa (once per
+// subsample iteration, over a freshly computed UniFrac matrix) and the
+// metric-agnostic `pcoa` (a single iteration over any distance table), so the
+// ordination + row-emission path is byte-for-byte identical for both — the
+// property the pcoa/unifrac_pcoa equivalence test pins.
+//
+// `mat` is n×n row-major fp32; `ids` are the matrix's sample ids (size n).
+// `caller_name` prefixes the too-few-samples error. Throws InvalidInputException
+// when n < n_dims + 1 (PCoA loses one dimension to centering).
+void RunPcoaOnMatrix(const float *mat, uint32_t n, const std::vector<std::string> &ids, uint32_t n_dims, int seed,
+                     int n_threads, int32_t iteration_index, const char *caller_name, std::vector<PcoaRow> &out_rows) {
+	if (n < n_dims + 1) {
+		throw InvalidInputException("%s: only %u sample(s) available for ordination; n_dims=%u requires at least %u "
+		                            "samples (PCoA loses one dimension to centering)",
+		                            caller_name, n, n_dims, n_dims + 1);
+	}
+
+	std::vector<float> eigvals(n_dims);
+	std::vector<float> samples(static_cast<size_t>(n) * n_dims);
+	std::vector<float> prop(n_dims);
+
+	// skbb_pcoa_fsvd_fp32 uses its own per-call seed for randomization, but its
+	// `#pragma omp parallel for` regions (principal_coordinate_analysis.cpp)
+	// still need the process-wide OpenMP serialization so concurrent queries
+	// don't race on omp_set_num_threads.
+	{
+		miint::unifrac::OmpThreadScope omp_scope(n_threads);
+		skbb_pcoa_fsvd_fp32(n, mat, n_dims, seed, eigvals.data(), samples.data(), prop.data());
+	}
+
+	// samples is laid out (n × n_dims), sample-major. The header comment in
+	// ordination.h reads "(n_eighs × n_dims)" but the actual implementation
+	// (principal_coordinate_analysis.cpp:574-578 and the preceding
+	// transpose_T(n_dims, n_eighs, ...)) writes `samples + row * n_eighs` with
+	// row iterating over samples, i.e. sample-major.
+	for (uint32_t s = 0; s < n; ++s) {
+		for (uint32_t axis = 0; axis < n_dims; ++axis) {
+			PcoaRow row;
+			row.iteration = iteration_index;
+			row.sample_id = ids[s];
+			row.axis = static_cast<int32_t>(axis);
+			row.coordinate = static_cast<double>(samples[s * n_dims + axis]);
+			row.eigenvalue = static_cast<double>(eigvals[axis]);
+			row.proportion_explained = static_cast<double>(prop[axis]);
+			out_rows.push_back(std::move(row));
+		}
+	}
+}
+
+// Declare the PCoA output schema. Shared by unifrac_pcoa and pcoa so the two
+// functions can never drift apart column-wise — the "identical output schema"
+// invariant is enforced structurally rather than by discipline. `sample_id_type`
+// is the mirrored input id type (see ResolveSampleIdOutputType).
+void DeclarePcoaOutputSchema(const LogicalType &sample_id_type, vector<LogicalType> &return_types,
+                             vector<string> &names) {
+	names.emplace_back("iteration");
+	return_types.emplace_back(LogicalType::INTEGER);
+	names.emplace_back("sample_id");
+	return_types.emplace_back(sample_id_type);
+	names.emplace_back("axis");
+	return_types.emplace_back(LogicalType::INTEGER);
+	names.emplace_back("coordinate");
+	return_types.emplace_back(LogicalType::DOUBLE);
+	names.emplace_back("eigenvalue");
+	return_types.emplace_back(LogicalType::DOUBLE);
+	names.emplace_back("proportion_explained");
+	return_types.emplace_back(LogicalType::DOUBLE);
 }
 
 void ComputeOneIteration(const miint::unifrac::UnifracSupportBiomView &biom_view,
@@ -85,48 +162,12 @@ void ComputeOneIteration(const miint::unifrac::UnifracSupportBiomView &biom_view
 	}();
 
 	// Subsampling can drop samples whose total counts fall below
-	// subsample_depth, so the distance matrix's n_samples may be smaller
-	// than the input feature-table's n_samples; n_dims must still fit.
-	const uint32_t actual_n_samples = dist.n_samples();
-	if (actual_n_samples < n_dims + 1) {
-		throw InvalidInputException(
-		    "unifrac_pcoa: after subsampling iteration %d only %u sample(s) survive "
-		    "(samples whose total count falls below subsample_depth=%u are dropped); n_dims=%u requires >= %u samples",
-		    iteration_index, actual_n_samples, subsample_depth, n_dims, n_dims + 1);
-	}
-
-	std::vector<float> eigvals(n_dims);
-	std::vector<float> samples(static_cast<size_t>(actual_n_samples) * n_dims);
-	std::vector<float> prop(n_dims);
-
-	// skbb_pcoa_fsvd_fp32 uses its own per-call seed for randomization, but its
-	// `#pragma omp parallel for` regions (principal_coordinate_analysis.cpp)
-	// still need the process-wide OpenMP serialization so concurrent queries
-	// don't race on omp_set_num_threads.
-	{
-		miint::unifrac::OmpThreadScope omp_scope(n_threads);
-		skbb_pcoa_fsvd_fp32(actual_n_samples, dist.matrix(), n_dims, seed_iter, eigvals.data(), samples.data(),
-		                    prop.data());
-	}
-
-	// samples is laid out (actual_n_samples × n_dims), sample-major. The header
-	// comment in ordination.h reads "(n_eighs × n_dims)" but the actual
-	// implementation (principal_coordinate_analysis.cpp:574-578 and the
-	// preceding transpose_T(n_dims, n_eighs, ...)) writes `samples + row *
-	// n_eighs` with row iterating over samples, i.e. sample-major.
-	const auto &sample_ids = dist.sample_ids();
-	for (uint32_t s = 0; s < actual_n_samples; ++s) {
-		for (uint32_t axis = 0; axis < n_dims; ++axis) {
-			PcoaRow row;
-			row.iteration = iteration_index;
-			row.sample_id = sample_ids[s];
-			row.axis = static_cast<int32_t>(axis);
-			row.coordinate = static_cast<double>(samples[s * n_dims + axis]);
-			row.eigenvalue = static_cast<double>(eigvals[axis]);
-			row.proportion_explained = static_cast<double>(prop[axis]);
-			out_rows.push_back(std::move(row));
-		}
-	}
+	// subsample_depth, so the distance matrix's n_samples may be smaller than
+	// the input feature-table's n_samples. RunPcoaOnMatrix guards n vs n_dims
+	// (the same check the bind-time validation applies to the pre-subsample
+	// count) and emits the rows.
+	RunPcoaOnMatrix(dist.matrix(), dist.n_samples(), dist.sample_ids(), n_dims, seed_iter, n_threads, iteration_index,
+	                "unifrac_pcoa", out_rows);
 }
 
 unique_ptr<FunctionData> UnifracPcoaBind(ClientContext &context, TableFunctionBindInput &input,
@@ -210,7 +251,8 @@ unique_ptr<FunctionData> UnifracPcoaBind(ClientContext &context, TableFunctionBi
 		    seed, n_subsamples);
 	}
 
-	auto coo_rows = ReadFeatureTable(context, table_name, "unifrac_pcoa");
+	LogicalType sample_id_col_type = LogicalType::VARCHAR;
+	auto coo_rows = ReadFeatureTable(context, table_name, "unifrac_pcoa", &sample_id_col_type);
 	if (coo_rows.empty()) {
 		throw InvalidInputException("unifrac_pcoa: feature-table '%s' is empty after dropping NULL/zero rows",
 		                            table_name);
@@ -254,6 +296,7 @@ unique_ptr<FunctionData> UnifracPcoaBind(ClientContext &context, TableFunctionBi
 	const std::string variant_fp32 = variant + "_fp32";
 
 	auto data = make_uniq<UnifracPcoaData>();
+	data->sample_id_type = ResolveSampleIdOutputType(sample_id_col_type);
 	const auto rows_per_iter = static_cast<size_t>(n_samples) * static_cast<size_t>(n_dims);
 	data->rows.reserve(static_cast<size_t>(n_subsamples) * rows_per_iter);
 	for (int32_t i = 0; i < n_subsamples; ++i) {
@@ -264,18 +307,7 @@ unique_ptr<FunctionData> UnifracPcoaBind(ClientContext &context, TableFunctionBi
 		                    seed_iter, static_cast<uint32_t>(n_dims), n_threads, i, data->rows);
 	}
 
-	names.emplace_back("iteration");
-	return_types.emplace_back(LogicalType::INTEGER);
-	names.emplace_back("sample_id");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("axis");
-	return_types.emplace_back(LogicalType::INTEGER);
-	names.emplace_back("coordinate");
-	return_types.emplace_back(LogicalType::DOUBLE);
-	names.emplace_back("eigenvalue");
-	return_types.emplace_back(LogicalType::DOUBLE);
-	names.emplace_back("proportion_explained");
-	return_types.emplace_back(LogicalType::DOUBLE);
+	DeclarePcoaOutputSchema(data->sample_id_type, return_types, names);
 
 	return std::move(data);
 }
@@ -284,6 +316,7 @@ unique_ptr<GlobalTableFunctionState> UnifracPcoaInitGlobal(ClientContext &, Tabl
 	auto &data = input.bind_data->CastNoConst<UnifracPcoaData>();
 	auto gstate = make_uniq<UnifracPcoaGlobalState>();
 	gstate->rows = std::move(data.rows);
+	gstate->sample_id_type = data.sample_id_type;
 	return std::move(gstate);
 }
 
@@ -299,7 +332,6 @@ void UnifracPcoaExecute(ClientContext &, TableFunctionInput &input, DataChunk &o
 
 	auto iter_data = FlatVector::GetData<int32_t>(output.data[0]);
 	auto &sample_id_vec = output.data[1];
-	auto sample_id_data = FlatVector::GetData<string_t>(sample_id_vec);
 	auto axis_data = FlatVector::GetData<int32_t>(output.data[2]);
 	auto coord_data = FlatVector::GetData<double>(output.data[3]);
 	auto eig_data = FlatVector::GetData<double>(output.data[4]);
@@ -308,7 +340,9 @@ void UnifracPcoaExecute(ClientContext &, TableFunctionInput &input, DataChunk &o
 	for (idx_t i = 0; i < n; ++i) {
 		const auto &r = gstate.rows[gstate.cursor + i];
 		iter_data[i] = r.iteration;
-		sample_id_data[i] = StringVector::AddString(sample_id_vec, r.sample_id);
+		// EmitIdCell mirrors the id type; its ""/"*"→NULL sentinel branch is
+		// unreachable here (ReadFeatureTable drops NULL sample_ids).
+		EmitIdCell(sample_id_vec, i, r.sample_id, gstate.sample_id_type);
 		axis_data[i] = r.axis;
 		coord_data[i] = r.coordinate;
 		eig_data[i] = r.eigenvalue;
@@ -317,6 +351,57 @@ void UnifracPcoaExecute(ClientContext &, TableFunctionInput &input, DataChunk &o
 
 	gstate.cursor += n;
 	output.SetCardinality(n);
+}
+
+// ── pcoa(distances, ...) — metric-agnostic PCoA over a condensed distance table ──
+// Decoupled from UniFrac: reads any `(sample_a, sample_b, distance)` relation
+// (the unifrac_distances output, a beta_* macro result, or a precomputed
+// Bray-Curtis/Jaccard/Euclidean table) into a dense matrix and runs the exact
+// same skbb_pcoa_fsvd_fp32 + emit path as unifrac_pcoa via RunPcoaOnMatrix. It
+// reuses UnifracPcoaData / UnifracPcoaGlobalState / UnifracPcoaExecute /
+// UnifracPcoaInitGlobal unchanged — the output schema is identical, iteration is
+// always 0 (kept for schema parity), and there is no subsampling (a distance
+// table is a fixed matrix).
+unique_ptr<FunctionData> PcoaFromDistancesBind(ClientContext &context, TableFunctionBindInput &input,
+                                               vector<LogicalType> &return_types, vector<string> &names) {
+	const std::string table_name = input.inputs[0].GetValue<string>();
+	if (table_name.empty()) {
+		throw BinderException("pcoa: distance-table name must not be empty");
+	}
+
+	int32_t n_dims = 3;
+	int32_t seed = -1;
+	int32_t threads = 0; // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
+	for (const auto &kv : input.named_parameters) {
+		const auto key = StringUtil::Lower(kv.first);
+		if (key == "n_dims") {
+			n_dims = kv.second.GetValue<int32_t>();
+		} else if (key == "seed") {
+			seed = kv.second.GetValue<int32_t>();
+		} else if (key == "threads") {
+			threads = kv.second.GetValue<int32_t>();
+		}
+	}
+	const int n_threads = ResolveThreadsParameter(context, threads, "pcoa");
+	if (n_dims < 1) {
+		throw BinderException("pcoa: n_dims must be >= 1 (got %d)", n_dims);
+	}
+
+	auto dist = ReadDistanceTable(context, table_name, "pcoa");
+	if (static_cast<uint32_t>(n_dims) > dist.n_samples - 1) {
+		throw BinderException("pcoa: n_dims (%d) must be <= n_samples - 1 (%u). PCoA loses one dimension to centering.",
+		                      n_dims, dist.n_samples - 1);
+	}
+
+	auto data = make_uniq<UnifracPcoaData>();
+	data->sample_id_type = dist.sample_id_type;
+	data->rows.reserve(static_cast<size_t>(dist.n_samples) * static_cast<size_t>(n_dims));
+	RunPcoaOnMatrix(dist.matrix.data(), dist.n_samples, dist.sample_ids, static_cast<uint32_t>(n_dims), seed, n_threads,
+	                /*iteration_index*/ 0, "pcoa", data->rows);
+
+	DeclarePcoaOutputSchema(data->sample_id_type, return_types, names);
+
+	return std::move(data);
 }
 
 } // namespace
@@ -333,6 +418,14 @@ void RegisterUnifracPcoa(ExtensionLoader &loader) {
 	fn.named_parameters["subsample_depth"] = LogicalType::INTEGER;
 	fn.named_parameters["subsample_with_replacement"] = LogicalType::BOOLEAN;
 	fn.named_parameters["n_subsamples"] = LogicalType::INTEGER;
+	fn.named_parameters["seed"] = LogicalType::INTEGER;
+	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	loader.RegisterFunction(fn);
+}
+
+void RegisterPcoaFromDistances(ExtensionLoader &loader) {
+	TableFunction fn("pcoa", {LogicalType::VARCHAR}, UnifracPcoaExecute, PcoaFromDistancesBind, UnifracPcoaInitGlobal);
+	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
 	fn.named_parameters["seed"] = LogicalType::INTEGER;
 	fn.named_parameters["threads"] = LogicalType::INTEGER;
 	loader.RegisterFunction(fn);
