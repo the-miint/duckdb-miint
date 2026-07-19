@@ -75,7 +75,12 @@ std::string BuildAlignConfigJson(const named_parameter_map_t &named_params, cons
 
 	bt2_daemon::ConfigJsonBuilder cfg;
 	cfg.append_str("index_path", index_basename);
-	cfg.append_int("nthreads", bt2_daemon::ResolveNthreadsFromParams(named_params, db_threads, "align_bowtie2"));
+	// Emit nthreads only when > 1, matching BuildBowtie2BuildConfigJson: a resolved
+	// value of 1 is bowtie2's own -p default, so sending it is redundant.
+	const int64_t nthreads = bt2_daemon::ResolveNthreadsFromParams(named_params, db_threads, "align_bowtie2");
+	if (nthreads > 1) {
+		cfg.append_int("nthreads", nthreads);
+	}
 
 	bt2_daemon::AppendBowtie2AlignParams(cfg, named_params, "align_bowtie2");
 	return cfg.build();
