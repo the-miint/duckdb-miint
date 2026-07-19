@@ -229,6 +229,32 @@ std::vector<uint8_t> BuildSubjectsIpc(const LoadedSubjects &subjects, const char
 // nthreads is omitted when <= 1 (daemon default).
 std::string BuildBowtie2BuildConfigJson(const std::string &index_basename, int64_t nthreads);
 
+// The effective bowtie2 nthreads for a NON-sharded build/align, given whether the
+// user explicitly supplied the `threads` knob and DuckDB's configured thread
+// budget. An explicit value wins; its ABSENCE falls back to `db_threads` so a
+// build/align uses the query's whole core budget by default instead of silently
+// running on one core — the same convention align_minimap2 follows via
+// TaskScheduler::NumberOfThreads(). `db_threads` is floored at 1 so a degenerate 0
+// can never produce a 0/negative `-p`. (align_bowtie2_sharded has its own thread
+// model — max_threads_per_shard × active shards, see EffectiveShardThreads — and
+// does not use this.) Kept inline + duckdb-free (like EffectiveShardThreads) so
+// the Catch2 binary exercises the decision without linking libduckdb; the Value
+// extraction + `>= 1` validation live in ResolveNthreadsFromParams below.
+inline int64_t ResolveBowtie2Nthreads(bool threads_supplied, int64_t user_threads, int64_t db_threads) {
+	if (threads_supplied) {
+		return user_threads;
+	}
+	return db_threads >= 1 ? db_threads : 1;
+}
+
+// Resolve the effective bowtie2 nthreads from a table function's named-parameter
+// map: read the miint-side `threads` knob (coerced via ValueAsInt, validated
+// `>= 1` — throws InvalidInputException naming `caller`), else fall back to
+// `db_threads` (DuckDB's configured thread count). Shared by save_bowtie2_index
+// and align_bowtie2 so the "explicit wins, else use the query's thread budget"
+// contract lives in one place; delegates the decision to ResolveBowtie2Nthreads.
+int64_t ResolveNthreadsFromParams(const named_parameter_map_t &named_params, int64_t db_threads, const char *caller);
+
 // Parse bowtie2-build's `result.index_files` JSON array into a vector of paths.
 // Throws IOException on malformed JSON or a missing array.
 std::vector<std::string> ParseBowtie2BuildIndexFiles(const std::string &result_json, const char *caller);

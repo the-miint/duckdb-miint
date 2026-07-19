@@ -12,6 +12,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/materialized_query_result.hpp"
 #include "duckdb/main/query_result.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 
 #include "gpl_boundary/arrow_ipc.hpp"
@@ -60,8 +61,11 @@ std::unordered_set<std::string> MakeKnownAlignParams() {
 // Build the bowtie2-align config_json. Common bowtie2 knobs flow through
 // `bt2_daemon::AppendBowtie2AlignParams`; the non-sharded path additionally
 // handles `threads` (its own knob, since the sharded variant warns about it
-// instead).
-std::string BuildAlignConfigJson(const named_parameter_map_t &named_params, const std::string &index_basename) {
+// instead) — an explicit value wins, else nthreads defaults to `db_threads`
+// (DuckDB's configured thread budget) so alignment uses the query's cores by
+// default rather than one.
+std::string BuildAlignConfigJson(const named_parameter_map_t &named_params, const std::string &index_basename,
+                                 int64_t db_threads) {
 	static const auto kKnown = MakeKnownAlignParams();
 	for (const auto &kv : named_params) {
 		if (kKnown.find(kv.first) == kKnown.end()) {
@@ -71,15 +75,7 @@ std::string BuildAlignConfigJson(const named_parameter_map_t &named_params, cons
 
 	bt2_daemon::ConfigJsonBuilder cfg;
 	cfg.append_str("index_path", index_basename);
-
-	auto threads_it = named_params.find("threads");
-	if (threads_it != named_params.end() && !threads_it->second.IsNull()) {
-		const int64_t n = bt2_daemon::ValueAsInt("align_bowtie2", "threads", threads_it->second);
-		if (n < 1) {
-			throw InvalidInputException("align_bowtie2: threads must be >= 1 (got %lld)", static_cast<long long>(n));
-		}
-		cfg.append_int("nthreads", n);
-	}
+	cfg.append_int("nthreads", bt2_daemon::ResolveNthreadsFromParams(named_params, db_threads, "align_bowtie2"));
 
 	bt2_daemon::AppendBowtie2AlignParams(cfg, named_params, "align_bowtie2");
 	return cfg.build();
@@ -327,19 +323,12 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	gs->temp_dir = MakeTempIndexDir();
 	const std::string index_basename = gs->temp_dir + "/idx";
 
-	// nthreads for build comes from the user's `threads` param (same
-	// rationale as the old direct-subprocess path: one knob covers both).
-	int64_t threads = 1;
-	{
-		auto it = bd.named_params.find("threads");
-		if (it != bd.named_params.end() && !it->second.IsNull()) {
-			threads = bt2_daemon::ValueAsInt("align_bowtie2", "threads", it->second);
-			if (threads < 1) {
-				throw InvalidInputException("align_bowtie2: threads must be >= 1 (got %lld)",
-				                            static_cast<long long>(threads));
-			}
-		}
-	}
+	// nthreads for build (and align, below) defaults to DuckDB's configured thread
+	// budget — one knob covers both, and omitting `threads` should use the query's
+	// cores rather than silently building single-threaded. An explicit `threads`
+	// overrides. Resolved once here and reused for the align config.
+	const int64_t db_threads = static_cast<int64_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+	const int64_t threads = bt2_daemon::ResolveNthreadsFromParams(bd.named_params, db_threads, "align_bowtie2");
 	const std::string build_config = bt2_daemon::BuildBowtie2BuildConfigJson(index_basename, threads);
 	auto build_result = gs->session->Submit("bowtie2-build", build_config, subjects_ipc.data(), subjects_ipc.size());
 	gs->index_files = bt2_daemon::ParseBowtie2BuildIndexFiles(build_result.result_json, "align_bowtie2");
@@ -349,7 +338,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 
 	// 4. Now that we have the index basename, finish building the align
 	//    config JSON.
-	gs->config_json_align = BuildAlignConfigJson(bd.named_params, index_basename);
+	gs->config_json_align = BuildAlignConfigJson(bd.named_params, index_basename, db_threads);
 
 	// 5. Open a streaming cursor on the query table. SendQuery returns a
 	//    StreamQueryResult that fetches chunks lazily.
