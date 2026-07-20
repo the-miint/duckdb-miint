@@ -12,6 +12,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace duckdb::miint::gpl_boundary;
@@ -75,6 +76,46 @@ void make_array_two_rows(const ArrowSchema *schema, ArrowArray *array) {
 	}
 }
 
+// Build an ArrowSchema for `struct<name: utf8, sequence: utf8>` — the exact
+// schema BuildSubjectsIpc emits for bowtie2-build subjects. Caller owns it.
+void make_subjects_schema(ArrowSchema *schema) {
+	if (ArrowSchemaInitFromType(schema, NANOARROW_TYPE_STRUCT) != NANOARROW_OK) {
+		throw std::runtime_error("subjects schema init failed");
+	}
+	if (ArrowSchemaAllocateChildren(schema, 2) != NANOARROW_OK) {
+		throw std::runtime_error("subjects alloc children failed");
+	}
+	ArrowSchemaInitFromType(schema->children[0], NANOARROW_TYPE_STRING);
+	ArrowSchemaSetName(schema->children[0], "name");
+	ArrowSchemaInitFromType(schema->children[1], NANOARROW_TYPE_STRING);
+	ArrowSchemaSetName(schema->children[1], "sequence");
+}
+
+// Build one ArrowArray batch of (name, sequence) string rows against `schema`.
+// Caller owns array and must release it.
+void make_subjects_array(const ArrowSchema *schema, ArrowArray *array,
+                         const std::vector<std::pair<std::string, std::string>> &rows) {
+	ArrowError err {};
+	if (ArrowArrayInitFromSchema(array, schema, &err) != NANOARROW_OK) {
+		throw std::runtime_error("subjects array init failed");
+	}
+	if (ArrowArrayStartAppending(array) != NANOARROW_OK) {
+		throw std::runtime_error("subjects start appending failed");
+	}
+	for (const auto &row : rows) {
+		ArrowStringView nv {row.first.data(), static_cast<int64_t>(row.first.size())};
+		ArrowStringView sv {row.second.data(), static_cast<int64_t>(row.second.size())};
+		if (ArrowArrayAppendString(array->children[0], nv) != NANOARROW_OK ||
+		    ArrowArrayAppendString(array->children[1], sv) != NANOARROW_OK ||
+		    ArrowArrayFinishElement(array) != NANOARROW_OK) {
+			throw std::runtime_error("subjects append failed");
+		}
+	}
+	if (ArrowArrayFinishBuildingDefault(array, &err) != NANOARROW_OK) {
+		throw std::runtime_error("subjects finish building failed");
+	}
+}
+
 } // namespace
 
 TEST_CASE("EncodeIpcStream + DecodeIpcStream roundtrip preserves schema and rows", "[gpl-boundary][arrow_ipc]") {
@@ -129,6 +170,80 @@ TEST_CASE("EncodeIpcStream + DecodeIpcStream roundtrip preserves schema and rows
 	}
 	if (array.release) {
 		array.release(&array);
+	}
+	if (schema.release) {
+		schema.release(&schema);
+	}
+}
+
+TEST_CASE("EncodeIpcStream emits one RecordBatch per array for n_arrays > 1", "[gpl-boundary][arrow_ipc]") {
+	// Locks the multi-batch transport that the chunked BuildSubjectsIpc relies
+	// on to keep a >2 GB reference under Arrow's int32 STRING-offset limit: two
+	// arrays under ONE shared schema must decode back as two distinct batches
+	// (correct rows each), then EOS. Prior tests only covered n_arrays == 1.
+	ArrowSchema schema {};
+	make_subjects_schema(&schema);
+
+	std::vector<ArrowArray> arrays(2); // value-initialized: both start released (release == null)
+	make_subjects_array(&schema, &arrays[0], {{"c1", "ACGT"}, {"c2", "TTTT"}});
+	make_subjects_array(&schema, &arrays[1], {{"c3", "GGG"}});
+
+	std::vector<uint8_t> bytes = EncodeIpcStream(&schema, arrays.data(), arrays.size());
+	REQUIRE_FALSE(bytes.empty());
+
+	IpcStreamDecoder decoder(bytes.data(), bytes.size());
+	ArrowSchema decoded_schema {};
+	decoder.GetSchema(&decoded_schema);
+	REQUIRE(decoded_schema.n_children == 2);
+	REQUIRE(std::string(decoded_schema.children[0]->name) == "name");
+	REQUIRE(std::string(decoded_schema.children[1]->name) == "sequence");
+
+	// Batch 1: two rows, distinct content from batch 2.
+	ArrowArray batch1 {};
+	REQUIRE(decoder.NextBatch(&batch1));
+	REQUIRE(batch1.length == 2);
+	{
+		const auto *noff = static_cast<const int32_t *>(batch1.children[0]->buffers[1]);
+		const auto *nbytes = static_cast<const char *>(batch1.children[0]->buffers[2]);
+		const auto *soff = static_cast<const int32_t *>(batch1.children[1]->buffers[1]);
+		const auto *sbytes = static_cast<const char *>(batch1.children[1]->buffers[2]);
+		REQUIRE(std::string(nbytes + noff[0], noff[1] - noff[0]) == "c1");
+		REQUIRE(std::string(nbytes + noff[1], noff[2] - noff[1]) == "c2");
+		REQUIRE(std::string(sbytes + soff[0], soff[1] - soff[0]) == "ACGT");
+		REQUIRE(std::string(sbytes + soff[1], soff[2] - soff[1]) == "TTTT");
+	}
+
+	// Batch 2: one row.
+	ArrowArray batch2 {};
+	REQUIRE(decoder.NextBatch(&batch2));
+	REQUIRE(batch2.length == 1);
+	{
+		const auto *noff = static_cast<const int32_t *>(batch2.children[0]->buffers[1]);
+		const auto *nbytes = static_cast<const char *>(batch2.children[0]->buffers[2]);
+		const auto *soff = static_cast<const int32_t *>(batch2.children[1]->buffers[1]);
+		const auto *sbytes = static_cast<const char *>(batch2.children[1]->buffers[2]);
+		REQUIRE(std::string(nbytes + noff[0], noff[1] - noff[0]) == "c3");
+		REQUIRE(std::string(sbytes + soff[0], soff[1] - soff[0]) == "GGG");
+	}
+
+	// EOS after the last batch.
+	ArrowArray empty {};
+	REQUIRE_FALSE(decoder.NextBatch(&empty));
+
+	// Cleanup
+	if (decoded_schema.release) {
+		decoded_schema.release(&decoded_schema);
+	}
+	if (batch1.release) {
+		batch1.release(&batch1);
+	}
+	if (batch2.release) {
+		batch2.release(&batch2);
+	}
+	for (auto &a : arrays) {
+		if (a.release) {
+			a.release(&a);
+		}
 	}
 	if (schema.release) {
 		schema.release(&schema);

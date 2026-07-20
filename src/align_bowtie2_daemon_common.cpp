@@ -896,6 +896,7 @@ LoadedSubjects LoadSingleEndSubjects(ClientContext &context, const std::string &
 }
 
 std::vector<uint8_t> BuildSubjectsIpc(const LoadedSubjects &subjects, const char *caller) {
+	// Build the struct<name:utf8, sequence:utf8> schema once; every batch shares it.
 	ArrowSchema schema {};
 	auto rc = ArrowSchemaInitFromType(&schema, NANOARROW_TYPE_STRUCT);
 	if (rc != NANOARROW_OK) {
@@ -911,48 +912,70 @@ std::vector<uint8_t> BuildSubjectsIpc(const LoadedSubjects &subjects, const char
 	ArrowSchemaInitFromType(schema.children[1], NANOARROW_TYPE_STRING);
 	ArrowSchemaSetName(schema.children[1], "sequence");
 
-	ArrowArray array {};
-	ArrowError err {};
-	if (ArrowArrayInitFromSchema(&array, &schema, &err) != NANOARROW_OK) {
-		schema.release(&schema);
-		throw InternalException("%s: ArrowArrayInit failed: %s", caller, err.message);
-	}
-	if (ArrowArrayStartAppending(&array) != NANOARROW_OK) {
-		array.release(&array);
-		schema.release(&schema);
-		throw InternalException("%s: ArrowArrayStartAppending failed", caller);
-	}
-	for (size_t i = 0; i < subjects.names.size(); ++i) {
-		ArrowStringView nv {subjects.names[i].data(), static_cast<int64_t>(subjects.names[i].size())};
-		ArrowStringView sv {subjects.sequences[i].data(), static_cast<int64_t>(subjects.sequences[i].size())};
-		if (ArrowArrayAppendString(array.children[0], nv) != NANOARROW_OK ||
-		    ArrowArrayAppendString(array.children[1], sv) != NANOARROW_OK ||
-		    ArrowArrayFinishElement(&array) != NANOARROW_OK) {
-			array.release(&array);
-			schema.release(&schema);
-			throw InternalException("%s: subjects append failed at row %d", caller, static_cast<int>(i));
+	// Split subjects into byte-bounded record batches so no batch's `name` or
+	// `sequence` STRING offset buffer crosses INT32_MAX — the >2 GB reference
+	// overflow ("subjects append failed at row N"). Each batch becomes one Arrow
+	// record batch; the daemon (bowtie2_build read_input) concatenates them all.
+	// LoadSingleEndSubjects guarantees non-empty subjects, so batch_rows is never
+	// empty and EncodeIpcStream always gets >= 1 array.
+	const std::vector<size_t> batch_rows =
+	    ComputeSubjectBatchRowCounts(subjects.names, subjects.sequences, kMaxSubjectBatchBytes);
+
+	// One ArrowArray per batch. Pre-sized (never reallocated) so references into
+	// it stay stable and each element starts zero-initialized (release == null),
+	// which release_all() relies on to skip not-yet-built arrays.
+	std::vector<ArrowArray> arrays(batch_rows.size());
+	// Release every already-built array plus the schema — the single cleanup used
+	// on every throw path and on success.
+	auto release_all = [&arrays, &schema]() {
+		for (auto &a : arrays) {
+			if (a.release) {
+				a.release(&a);
+			}
 		}
-	}
-	if (ArrowArrayFinishBuildingDefault(&array, &err) != NANOARROW_OK) {
-		array.release(&array);
-		schema.release(&schema);
-		throw InternalException("%s: ArrowArrayFinishBuilding failed: %s", caller, err.message);
+		if (schema.release) {
+			schema.release(&schema);
+		}
+	};
+
+	ArrowError err {};
+	size_t row = 0; // global subject index across all batches (for error messages)
+	for (size_t b = 0; b < batch_rows.size(); ++b) {
+		ArrowArray &array = arrays[b];
+		if (ArrowArrayInitFromSchema(&array, &schema, &err) != NANOARROW_OK) {
+			// This array's release is still null (init failed); release_all()
+			// cleans up the prior batches + schema.
+			release_all();
+			throw InternalException("%s: ArrowArrayInit failed: %s", caller, err.message);
+		}
+		if (ArrowArrayStartAppending(&array) != NANOARROW_OK) {
+			release_all();
+			throw InternalException("%s: ArrowArrayStartAppending failed", caller);
+		}
+		for (size_t j = 0; j < batch_rows[b]; ++j, ++row) {
+			ArrowStringView nv {subjects.names[row].data(), static_cast<int64_t>(subjects.names[row].size())};
+			ArrowStringView sv {subjects.sequences[row].data(), static_cast<int64_t>(subjects.sequences[row].size())};
+			if (ArrowArrayAppendString(array.children[0], nv) != NANOARROW_OK ||
+			    ArrowArrayAppendString(array.children[1], sv) != NANOARROW_OK ||
+			    ArrowArrayFinishElement(&array) != NANOARROW_OK) {
+				release_all();
+				throw InternalException("%s: subjects append failed at row %d", caller, static_cast<int>(row));
+			}
+		}
+		if (ArrowArrayFinishBuildingDefault(&array, &err) != NANOARROW_OK) {
+			release_all();
+			throw InternalException("%s: ArrowArrayFinishBuilding failed: %s", caller, err.message);
+		}
 	}
 
 	std::vector<uint8_t> bytes;
 	try {
-		bytes = gb::EncodeIpcStream(&schema, &array, 1);
+		bytes = gb::EncodeIpcStream(&schema, arrays.data(), arrays.size());
 	} catch (...) {
-		array.release(&array);
-		schema.release(&schema);
+		release_all();
 		throw;
 	}
-	if (array.release) {
-		array.release(&array);
-	}
-	if (schema.release) {
-		schema.release(&schema);
-	}
+	release_all();
 	return bytes;
 }
 
