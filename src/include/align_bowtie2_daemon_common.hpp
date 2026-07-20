@@ -247,6 +247,53 @@ inline int64_t ResolveBowtie2Nthreads(bool threads_supplied, int64_t user_thread
 	return db_threads >= 1 ? db_threads : 1;
 }
 
+// Max cumulative bytes for one subject Arrow record batch's STRING column. Arrow
+// STRING uses 32-bit offsets, so a column's running byte offset must never reach
+// INT32_MAX (2^31-1 ≈ 2.15 GB); BuildSubjectsIpc chunks subjects into batches
+// under this cap so a >2 GB total reference no longer overflows the offset buffer
+// (the "subjects append failed at row N" crash). 1.5 GB leaves margin below
+// INT32_MAX for the separate `name` offset buffer and the (n+1)-th offset entry.
+constexpr size_t kMaxSubjectBatchBytes = 1500000000; // 1.5 GB
+
+// Split subjects into Arrow record batches so NEITHER the `name` nor the
+// `sequence` STRING column's cumulative bytes exceed `max_batch_bytes` in any one
+// batch. Returns the row count per batch, in order; sum == names.size(). Empty
+// input yields {}. Requires names.size() == sequences.size().
+//
+// A subject whose own name or sequence already exceeds the cap still gets its own
+// single-row batch (it can't be split further) — safe in production because each
+// contig is < 2 GB < INT32_MAX, so a lone oversized row still fits int32 offsets.
+// Kept inline + duckdb-free (like ResolveBowtie2Nthreads) so the Catch2 binary
+// exercises the decision without linking libduckdb.
+inline std::vector<size_t> ComputeSubjectBatchRowCounts(const std::vector<std::string> &names,
+                                                        const std::vector<std::string> &sequences,
+                                                        size_t max_batch_bytes) {
+	std::vector<size_t> counts;
+	size_t cur_name_bytes = 0;
+	size_t cur_seq_bytes = 0;
+	size_t cur_count = 0;
+	for (size_t i = 0; i < names.size(); ++i) {
+		const size_t nb = names[i].size();
+		const size_t sb = sequences[i].size();
+		// Flush the current batch before adding row i if it would push either
+		// column past the cap. Never flush an empty batch — a lone oversized row
+		// must still land somewhere.
+		if (cur_count > 0 && (cur_name_bytes + nb > max_batch_bytes || cur_seq_bytes + sb > max_batch_bytes)) {
+			counts.push_back(cur_count);
+			cur_name_bytes = 0;
+			cur_seq_bytes = 0;
+			cur_count = 0;
+		}
+		cur_name_bytes += nb;
+		cur_seq_bytes += sb;
+		++cur_count;
+	}
+	if (cur_count > 0) {
+		counts.push_back(cur_count);
+	}
+	return counts;
+}
+
 // Resolve the effective bowtie2 nthreads from a table function's named-parameter
 // map: read the miint-side `threads` knob (coerced via ValueAsInt, validated
 // `>= 1` — throws InvalidInputException naming `caller`), else fall back to
