@@ -1677,6 +1677,7 @@ set(TEST_SOURCES
     src/Minimap2Aligner.cpp
     test/cpp/test_Minimap2Aligner.cpp
     test/cpp/test_AlignBowtie2Sharded.cpp
+    test/cpp/test_Bowtie2Nthreads.cpp
     test/cpp/test_ShardProgress.cpp
     src/ncbi_parser.cpp
     src/zip_utils.cpp

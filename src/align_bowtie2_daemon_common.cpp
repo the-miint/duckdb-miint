@@ -965,6 +965,20 @@ std::string BuildBowtie2BuildConfigJson(const std::string &index_basename, int64
 	return cfg.build();
 }
 
+int64_t ResolveNthreadsFromParams(const named_parameter_map_t &named_params, int64_t db_threads, const char *caller) {
+	auto it = named_params.find("threads");
+	const bool supplied = it != named_params.end() && !it->second.IsNull();
+	int64_t user_threads = 1;
+	if (supplied) {
+		user_threads = ValueAsInt(caller, "threads", it->second);
+		if (user_threads < 1) {
+			throw InvalidInputException("%s: threads must be >= 1 (got %lld)", caller,
+			                            static_cast<long long>(user_threads));
+		}
+	}
+	return ResolveBowtie2Nthreads(supplied, user_threads, db_threads);
+}
+
 std::vector<std::string> ParseBowtie2BuildIndexFiles(const std::string &result_json, const char *caller) {
 	using YyjsonDocPtr = std::unique_ptr<yj::yyjson_doc, decltype(&yj::yyjson_doc_free)>;
 	YyjsonDocPtr doc(yj::yyjson_read(result_json.data(), result_json.size(), 0), &yj::yyjson_doc_free);

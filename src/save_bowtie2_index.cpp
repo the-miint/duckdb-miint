@@ -4,6 +4,7 @@
 #include "sequence_table_reader.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 
 #include "gpl_boundary/process.hpp"
 #include "gpl_boundary/session.hpp"
@@ -64,14 +65,11 @@ unique_ptr<FunctionData> SaveBowtie2IndexTableFunction::Bind(ClientContext &cont
 	// schema isn't otherwise needed here.
 	ValidateSequenceTableSchema(context, data->subject_table, /*allow_bigint=*/true);
 
-	auto threads_param = input.named_parameters.find("threads");
-	if (threads_param != input.named_parameters.end() && !threads_param->second.IsNull()) {
-		data->threads = threads_param->second.GetValue<int64_t>();
-		if (data->threads < 1) {
-			throw InvalidInputException("save_bowtie2_index: threads must be >= 1 (got %lld)",
-			                            static_cast<long long>(data->threads));
-		}
-	}
+	// Carry the named parameters to InitGlobal, where nthreads is resolved against
+	// the live DuckDB thread budget (matching align_bowtie2). Resolving there, not
+	// here, means a prepared statement re-executed after `SET threads=N` tracks the
+	// new count instead of the value captured at prepare time.
+	data->named_params = input.named_parameters;
 
 	for (const auto &name : data->names) {
 		names.emplace_back(name);
@@ -86,6 +84,14 @@ unique_ptr<GlobalTableFunctionState> SaveBowtie2IndexTableFunction::InitGlobal(C
                                                                                TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
+
+	// Resolve nthreads before doing any work (spawn/load/build): an explicit
+	// `threads` wins — validated >= 1, so a bad value still throws before the
+	// daemon starts — else default to DuckDB's configured thread budget so the
+	// index builds in parallel. Read here (not at bind) so a re-executed prepared
+	// statement tracks the current `SET threads`.
+	const int64_t db_threads = static_cast<int64_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+	const int64_t nthreads = bt2_daemon::ResolveNthreadsFromParams(data.named_params, db_threads, "save_bowtie2_index");
 
 	// 1. Spawn the daemon + require bowtie2-build (no >= 0.4.2 gate).
 	auto session = SpawnBuildSession();
@@ -107,7 +113,7 @@ unique_ptr<GlobalTableFunctionState> SaveBowtie2IndexTableFunction::InitGlobal(C
 		}
 	}
 
-	const std::string build_config = bt2_daemon::BuildBowtie2BuildConfigJson(data.output_path, data.threads);
+	const std::string build_config = bt2_daemon::BuildBowtie2BuildConfigJson(data.output_path, nthreads);
 	auto build_result = session->Submit("bowtie2-build", build_config, subjects_ipc.data(), subjects_ipc.size());
 	const auto index_files = bt2_daemon::ParseBowtie2BuildIndexFiles(build_result.result_json, "save_bowtie2_index");
 	if (index_files.empty()) {
