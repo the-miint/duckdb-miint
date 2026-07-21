@@ -186,6 +186,20 @@ else
     echo "Warning: moderate FastTree oracle: $ft_moderate_status; rerun with MIINT_FASTTREE_REGENERATE=1 to refresh"
 fi
 
+# ASR (ancestral-state) parity goldens: independent ground-truth reconstructions
+# (Brownian-motion GLS via the phylogenetic VCV; ape::ace for the discrete Mk models).
+# The NUMERIC CSVs under data/asr/ ARE the fixed expected output -- committed and
+# pinned by data/asr/goldens.sha256, so there is nothing to regenerate here. The
+# offline generator is a dev-only R + ape (GPL) tool deliberately kept out of this
+# BSD tree (../duckdb-miint-localdocs/gen_asr_oracle.R); ape's code is never committed
+# or distributed -- only its numeric output is. The gate below just verifies the
+# committed goldens are intact before the parity test runs (require-env MIINT_ASR_PARITY_OK).
+if [ -f data/asr/goldens.sha256 ] && (cd data/asr && sha256sum -c --quiet goldens.sha256) 2>/dev/null; then
+    export MIINT_ASR_PARITY_OK=1
+else
+    echo "Warning: ASR parity goldens missing or corrupt; parity test skipped"
+fi
+
 # NCBI BLAST network reachability. Probes the BLAST CGI endpoint so
 # live blast tests can skip gracefully in offline CI.
 if curl -sSf --max-time 5 -o /dev/null \

@@ -1,0 +1,427 @@
+# name: test/sql/phylo_ancestral_parsimony.test
+# description: Test phylo_ancestral_parsimony (discrete Sankoff/Fitch parsimony ancestral state reconstruction)
+# group: [sql]
+
+require miint
+
+# =============================================================================
+# Golden bifurcating tree ((A,B)E,C)root; unit cost, 2 states. Branch lengths are
+# NULL to confirm parsimony ignores them (topology-only). Tips A=0, B=1, C=0.
+# Hand-derived (see test/cpp/test_AncestralStatesParsimony.cpp): score=1;
+# MPR(E)={0}, MPR(root)={0}; min_cost of the losing state is 2 at both nodes.
+# =============================================================================
+
+statement ok
+CREATE TABLE gtree AS SELECT * FROM (VALUES
+    (0, 'A',    CAST(NULL AS DOUBLE), CAST(NULL AS BIGINT), 2),
+    (1, 'B',    NULL, NULL, 2),
+    (2, 'E',    NULL, NULL, 4),
+    (3, 'C',    NULL, NULL, 4),
+    (4, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE gtraits AS SELECT * FROM (VALUES
+    ('A', 't', '0'), ('B', 't', '1'), ('C', 't', '0')
+) AS v(name, trait, value);
+
+# 2 internal nodes x 2 states = 4 rows.
+query I
+SELECT count(*) FROM phylo_ancestral_parsimony('gtree', 'gtraits');
+----
+4
+
+query I
+WITH expected(node_index, state, in_mpr, min_cost) AS (
+    VALUES
+        (2, '0', true,  1.0),
+        (2, '1', false, 2.0),
+        (4, '0', true,  1.0),
+        (4, '1', false, 2.0)
+)
+SELECT count(*)
+FROM phylo_ancestral_parsimony('gtree', 'gtraits') p
+JOIN expected e ON p.node_index = e.node_index AND p.state = e.state
+WHERE p.in_mpr IS DISTINCT FROM e.in_mpr OR abs(p.min_cost - e.min_cost) > 1e-9;
+----
+0
+
+# The whole-tree parsimony score (min_cost of any MPR entry) is 1.
+query I
+SELECT DISTINCT min_cost FROM phylo_ancestral_parsimony('gtree', 'gtraits') WHERE in_mpr;
+----
+1
+
+# =============================================================================
+# Ambiguous (tied) root: ((A,B)X,(C,D)Y)root; A=B=0, C=D=1. MPR(root)={0,1} (both
+# at score 1); each subclade root is unambiguous. Ties are first-class.
+# =============================================================================
+
+statement ok
+CREATE TABLE ttree AS SELECT * FROM (VALUES
+    (0, 'A',    CAST(NULL AS DOUBLE), CAST(NULL AS BIGINT), 2),
+    (1, 'B',    NULL, NULL, 2),
+    (2, 'X',    NULL, NULL, 6),
+    (3, 'C',    NULL, NULL, 5),
+    (4, 'D',    NULL, NULL, 5),
+    (5, 'Y',    NULL, NULL, 6),
+    (6, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE ttraits AS SELECT * FROM (VALUES
+    ('A', 't', '0'), ('B', 't', '0'), ('C', 't', '1'), ('D', 't', '1')
+) AS v(name, trait, value);
+
+# Root is tied between both states (2 in_mpr rows at the root).
+query I
+SELECT count(*) FROM phylo_ancestral_parsimony('ttree', 'ttraits') WHERE node_index = 6 AND in_mpr;
+----
+2
+
+# X resolves to 0, Y resolves to 1 (each a single in_mpr state).
+query II
+SELECT
+  (SELECT state FROM phylo_ancestral_parsimony('ttree', 'ttraits') WHERE node_index = 2 AND in_mpr),
+  (SELECT state FROM phylo_ancestral_parsimony('ttree', 'ttraits') WHERE node_index = 5 AND in_mpr);
+----
+0	1
+
+# =============================================================================
+# Multifurcation IS supported. A hard 4-way star (A,B,C,D)root; A=B=0, C=D=1 is a
+# tie {0,1} at score 2 (majority rule with a tie).
+# =============================================================================
+
+statement ok
+CREATE TABLE star AS SELECT * FROM (VALUES
+    (0, 'A', CAST(NULL AS DOUBLE), CAST(NULL AS BIGINT), 4),
+    (1, 'B', NULL, NULL, 4),
+    (2, 'C', NULL, NULL, 4),
+    (3, 'D', NULL, NULL, 4),
+    (4, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE star_traits AS SELECT * FROM (VALUES
+    ('A', 't', '0'), ('B', 't', '0'), ('C', 't', '1'), ('D', 't', '1')
+) AS v(name, trait, value);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE in_mpr)
+FROM phylo_ancestral_parsimony('star', 'star_traits') WHERE node_index = 4;
+----
+2	2
+
+query I
+SELECT DISTINCT min_cost FROM phylo_ancestral_parsimony('star', 'star_traits') WHERE in_mpr;
+----
+2
+
+# =============================================================================
+# Text-coded states work (state labels are arbitrary VARCHAR). Same shape as the
+# golden tree with states cat/dog: cat plays the role of state 0.
+# =============================================================================
+
+statement ok
+CREATE TABLE txtraits AS SELECT * FROM (VALUES
+    ('A', 't', 'cat'), ('B', 't', 'dog'), ('C', 't', 'cat')
+) AS v(name, trait, value);
+
+query TI
+SELECT state, min_cost
+FROM phylo_ancestral_parsimony('gtree', 'txtraits')
+WHERE node_index = 4 AND in_mpr;
+----
+cat	1
+
+# =============================================================================
+# node_index remap: output carries the caller's ORIGINAL node_index.
+# =============================================================================
+
+statement ok
+CREATE TABLE reindexed AS SELECT * FROM (VALUES
+    (10, 'A',    CAST(NULL AS DOUBLE), CAST(NULL AS BIGINT), 20),
+    (30, 'B',    NULL, NULL, 20),
+    (20, 'E',    NULL, NULL, 5),
+    (40, 'C',    NULL, NULL, 5),
+    (5,  'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE node_index NOT IN (5, 20))
+FROM phylo_ancestral_parsimony('reindexed', 'gtraits');
+----
+4	0
+
+# =============================================================================
+# Type-flexible tip keys: BIGINT names match tip labels by canonical text.
+# Tips 100, 200, 300; node 900 is internal (children 100, 200).
+# =============================================================================
+
+statement ok
+CREATE TABLE btree AS SELECT * FROM (VALUES
+    (0, CAST(100 AS BIGINT), CAST(NULL AS DOUBLE), CAST(NULL AS BIGINT), 3),
+    (1, 200, NULL, NULL, 3),
+    (2, 300, NULL, NULL, 4),
+    (3, 900, NULL, NULL, 4),
+    (4, CAST(NULL AS BIGINT), NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE btraits AS SELECT * FROM (VALUES
+    (CAST(100 AS BIGINT), 's', '0'), (200, 's', '1'), (300, 's', '0')
+) AS v(name, trait, value);
+
+# 2 internal nodes (900, root) x 2 states = 4 rows.
+query I
+SELECT count(*) FROM phylo_ancestral_parsimony('btree', 'btraits');
+----
+4
+
+# =============================================================================
+# Views work for both inputs.
+# =============================================================================
+
+statement ok
+CREATE VIEW gtree_v AS SELECT * FROM gtree;
+
+statement ok
+CREATE VIEW gtraits_v AS SELECT * FROM gtraits;
+
+query I
+SELECT count(*) FROM phylo_ancestral_parsimony('gtree_v', 'gtraits_v');
+----
+4
+
+# =============================================================================
+# Unifurcation IS allowed for parsimony (unlike BM/PIC): a single-child internal
+# node is a valid degree-2 ancestor. Node E has the single child A; tips A, B.
+# =============================================================================
+
+statement ok
+CREATE TABLE unifurc AS SELECT * FROM (VALUES
+    (0, 'A',    CAST(NULL AS DOUBLE), CAST(NULL AS BIGINT), 2),
+    (1, 'B',    NULL, NULL, 3),
+    (2, 'E',    NULL, NULL, 3),
+    (3, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE unifurc_traits AS SELECT * FROM (VALUES ('A', 't', '0'), ('B', 't', '1')) AS v(name, trait, value);
+
+# 2 internal nodes (E, root) x 2 states = 4 rows; no error.
+query I
+SELECT count(*) FROM phylo_ancestral_parsimony('unifurc', 'unifurc_traits');
+----
+4
+
+# =============================================================================
+# Cost matrix (Sankoff): states {0,1,2} where 0<->2 costs 3 directly but only 2 via
+# the intermediate state 1 (0-1 and 1-2 each cost 1). Tree ((A,B)E,C)root with
+# A=0, B=2, C=0. Hand-derived AND brute-force-verified (see the C++ test's
+# brute_force oracle): score=3; F_E=[3,3,5], F_root=[3,3,6]. State 1 (which NO tip
+# has) is in the MPR of both internal nodes -- the alphabet comes from the matrix.
+# =============================================================================
+
+statement ok
+CREATE TABLE cmtraits AS SELECT * FROM (VALUES
+    ('A', 't', '0'), ('B', 't', '2'), ('C', 't', '0')
+) AS v(name, trait, value);
+
+statement ok
+CREATE TABLE cost AS SELECT * FROM (VALUES
+    ('0','1',1.0), ('1','0',1.0), ('1','2',1.0), ('2','1',1.0), ('0','2',3.0), ('2','0',3.0)
+) AS v(from_state, to_state, cost);
+
+# 2 internal nodes x 3 states = 6 rows.
+query I
+SELECT count(*) FROM phylo_ancestral_parsimony('gtree', 'cmtraits', 'cost');
+----
+6
+
+query I
+WITH expected(node_index, state, in_mpr, min_cost) AS (
+    VALUES
+        (2, '0', true,  3.0), (2, '1', true,  3.0), (2, '2', false, 5.0),
+        (4, '0', true,  3.0), (4, '1', true,  3.0), (4, '2', false, 6.0)
+)
+SELECT count(*)
+FROM phylo_ancestral_parsimony('gtree', 'cmtraits', 'cost') p
+JOIN expected e ON p.node_index = e.node_index AND p.state = e.state
+WHERE p.in_mpr IS DISTINCT FROM e.in_mpr OR abs(p.min_cost - e.min_cost) > 1e-9;
+----
+0
+
+# The unobserved intermediate state 1 is present in the output (from the matrix).
+query I
+SELECT count(*) FROM phylo_ancestral_parsimony('gtree', 'cmtraits', 'cost') WHERE state = '1' AND in_mpr;
+----
+2
+
+# =============================================================================
+# ASYMMETRIC (directed) cost matrix exercised THROUGH the SQL cost-matrix reader (the
+# cost golden above is symmetric, so a from_state/to_state transpose bug would be
+# invisible there). cost(0->1)=1 is cheap, cost(1->0)=10 is dear; parent end = from,
+# child end = to. Tree ((A,B)E,C)root with A=0, B=1, C=0. Hand-derived AND matches the
+# C++ asymmetric brute-force test: score=1; F_E=[1,11], F_root=[1,20]; MPR = {0} at
+# both nodes. Under a transpose this scenario yields score=2 with MPR(root)={1}.
+# =============================================================================
+
+statement ok
+CREATE TABLE acost AS SELECT * FROM (VALUES ('0','1',1.0), ('1','0',10.0)) AS v(from_state, to_state, cost);
+
+query I
+WITH expected(node_index, state, in_mpr, min_cost) AS (
+    VALUES
+        (2, '0', true,  1.0),  (2, '1', false, 11.0),
+        (4, '0', true,  1.0),  (4, '1', false, 20.0)
+)
+SELECT count(*)
+FROM phylo_ancestral_parsimony('gtree', 'gtraits', 'acost') p
+JOIN expected e ON p.node_index = e.node_index AND p.state = e.state
+WHERE p.in_mpr IS DISTINCT FROM e.in_mpr OR abs(p.min_cost - e.min_cost) > 1e-9;
+----
+0
+
+# =============================================================================
+# A single-tip tree has no internal nodes -> empty output (not an error).
+# =============================================================================
+
+statement ok
+CREATE TABLE onetip AS SELECT * FROM (VALUES
+    (0, 'A', CAST(NULL AS DOUBLE), CAST(NULL AS BIGINT), CAST(NULL AS INTEGER))
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE onetip_traits AS SELECT * FROM (VALUES ('A', 't', '0')) AS v(name, trait, value);
+
+query I
+SELECT count(*) FROM phylo_ancestral_parsimony('onetip', 'onetip_traits');
+----
+0
+
+# =============================================================================
+# Scaling: a large balanced tree (small k) and a wide polytomy both stay fast and
+# finite (guard against O(n^2)/stack-overflow regressions; the wide star exercises
+# the O(n) up-pass over a degree-10000 node).
+# =============================================================================
+
+statement ok
+CREATE TABLE big_tree AS
+  SELECT i AS node_index, 't' || i AS name, NULL::DOUBLE AS branch_length, NULL::BIGINT AS edge_id,
+         CASE WHEN i = 0 THEN NULL ELSE (i - 1) // 2 END AS parent_index
+  FROM range(32767) t(i);
+
+statement ok
+CREATE TABLE big_traits AS
+  SELECT 't' || i AS name, 'w' AS trait, (i % 2)::VARCHAR AS value
+  FROM range(32767) t(i) WHERE 2 * i + 1 >= 32767;
+
+# 16383 internal nodes * 2 states = 32766 rows, all min_cost finite and >= 0, and
+# every internal node has at least one MPR state.
+query III
+SELECT count(*), count(*) FILTER (WHERE NOT (isfinite(min_cost) AND min_cost >= 0)),
+       count(DISTINCT node_index) FILTER (WHERE in_mpr)
+FROM phylo_ancestral_parsimony('big_tree', 'big_traits');
+----
+32766	0	16383
+
+statement ok
+CREATE TABLE wide_star AS
+  SELECT i AS node_index, CASE WHEN i = 0 THEN 'root' ELSE 't' || i END AS name,
+         NULL::DOUBLE AS branch_length, NULL::BIGINT AS edge_id,
+         CASE WHEN i = 0 THEN NULL ELSE 0 END AS parent_index
+  FROM range(10001) t(i);
+
+statement ok
+CREATE TABLE wide_star_traits AS
+  SELECT 't' || i AS name, 'w' AS trait, (i % 2)::VARCHAR AS value FROM range(1, 10001) t(i);
+
+# 1 internal node * 2 states = 2 rows; equal split -> a tie at both states.
+query II
+SELECT count(*), count(*) FILTER (WHERE in_mpr)
+FROM phylo_ancestral_parsimony('wide_star', 'wide_star_traits');
+----
+2	2
+
+# =============================================================================
+# Error matrix: trait/tip mismatches, bad relations/columns, cost-matrix problems.
+# =============================================================================
+
+statement ok
+CREATE TABLE gtraits_missing AS SELECT * FROM (VALUES ('A', 't', '0'), ('B', 't', '1')) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_ancestral_parsimony('gtree', 'gtraits_missing');
+----
+no state for tip
+
+statement ok
+CREATE TABLE gtraits_extra AS SELECT * FROM (VALUES
+    ('A', 't', '0'), ('B', 't', '1'), ('C', 't', '0'), ('Z', 't', '1')
+) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_ancestral_parsimony('gtree', 'gtraits_extra');
+----
+not a tip
+
+statement ok
+CREATE TABLE gtraits_null AS SELECT * FROM (VALUES
+    ('A', 't', '0'), ('B', 't', '1'), ('C', 't', CAST(NULL AS VARCHAR))
+) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_ancestral_parsimony('gtree', 'gtraits_null');
+----
+NULL value
+
+statement error
+SELECT * FROM phylo_ancestral_parsimony('no_tree', 'gtraits');
+----
+does not exist
+
+statement ok
+CREATE TABLE bad_tree AS SELECT 1 AS x;
+
+statement error
+SELECT * FROM phylo_ancestral_parsimony('bad_tree', 'gtraits');
+----
+node_index
+
+statement ok
+CREATE TABLE bad_traits AS SELECT 1 AS x;
+
+statement error
+SELECT * FROM phylo_ancestral_parsimony('gtree', 'bad_traits');
+----
+name
+
+# Cost matrix missing a required column.
+statement ok
+CREATE TABLE bad_cost AS SELECT '0' AS from_state, '1' AS to_state;
+
+statement error
+SELECT * FROM phylo_ancestral_parsimony('gtree', 'cmtraits', 'bad_cost');
+----
+cost
+
+# A tip state absent from the supplied cost matrix.
+statement ok
+CREATE TABLE cost_small AS SELECT * FROM (VALUES ('0','1',1.0), ('1','0',1.0)) AS v(from_state, to_state, cost);
+
+statement error
+SELECT * FROM phylo_ancestral_parsimony('gtree', 'cmtraits', 'cost_small');
+----
+not present in the cost matrix
+
+# A cost matrix missing an off-diagonal entry over its own alphabet.
+statement ok
+CREATE TABLE cost_incomplete AS SELECT * FROM (VALUES
+    ('0','1',1.0), ('1','2',1.0), ('2','0',1.0)
+) AS v(from_state, to_state, cost);
+
+statement error
+SELECT * FROM phylo_ancestral_parsimony('gtree', 'cmtraits', 'cost_incomplete');
+----
+missing entry

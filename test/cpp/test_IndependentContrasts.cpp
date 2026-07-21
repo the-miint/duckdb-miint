@@ -224,6 +224,18 @@ TEST_CASE("independent_contrasts rejects duplicate tip names", "[NewickTree][pic
 	REQUIRE_THROWS_WITH(tree.independent_contrasts(t), ContainsSubstring("duplicate"));
 }
 
+// A non-finite (NaN/Inf) trait value must fail loud, not silently propagate into every
+// contrast/ancestral estimate on the path to the root (matches ancestral_states_bm).
+TEST_CASE("independent_contrasts rejects a non-finite trait value", "[NewickTree][pic]") {
+	auto tree = miint::NewickTree::parse(kGolden);
+	std::unordered_map<std::string, double> nan_t(
+	    {{"A", 2.0}, {"B", 6.0}, {"C", std::numeric_limits<double>::quiet_NaN()}});
+	REQUIRE_THROWS_WITH(tree.independent_contrasts(nan_t), ContainsSubstring("non-finite"));
+	std::unordered_map<std::string, double> inf_t(
+	    {{"A", std::numeric_limits<double>::infinity()}, {"B", 6.0}, {"C", 1.0}});
+	REQUIRE_THROWS_WITH(tree.independent_contrasts(inf_t), ContainsSubstring("non-finite"));
+}
+
 TEST_CASE("independent_contrasts rejects NaN (unspecified) branch lengths", "[NewickTree][pic]") {
 	// A cladogram has no branch lengths — PIC is undefined.
 	auto tree = miint::NewickTree::parse("((A,B)E,C)root;");

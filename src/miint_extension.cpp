@@ -16,6 +16,9 @@
 #include <read_jplace_newick.hpp>
 #include <read_newick.hpp>
 #include <phylo_independent_contrasts.hpp>
+#include <phylo_ancestral_states.hpp>
+#include <phylo_ancestral_parsimony.hpp>
+#include <phylo_ancestral_ml.hpp>
 #include <shear_tree.hpp>
 #include <tree_resolve_multifurcations.hpp>
 #include <tree_resolve_placement.hpp>
@@ -270,6 +273,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ShearTreeTableFunction::Register(loader);
 	TreeResolveMultifurcationsTableFunction::Register(loader);
 	PhyloIndependentContrastsTableFunction::Register(loader);
+	PhyloAncestralStatesTableFunction::Register(loader);
+	PhyloAncestralParsimonyTableFunction::Register(loader);
+	PhyloAncestralMLTableFunction::Register(loader);
 	AlignMinimap2TableFunction::Register(loader);
 	AlignMinimap2ShardedTableFunction::Register(loader);
 	SaveMinimap2IndexTableFunction::Register(loader);

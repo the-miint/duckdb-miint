@@ -243,6 +243,18 @@ SELECT * FROM phylo_independent_contrasts('poly', 'ptraits');
 ----
 tree_resolve_multifurcations
 
+# A non-finite trait value (NaN) is rejected -- it would otherwise silently propagate into
+# every contrast and ancestral estimate on the path to the root. Fail loud.
+statement ok
+CREATE TABLE gtraits_nan AS SELECT * FROM (VALUES
+    ('A', 'X', 2.0), ('B', 'X', 6.0), ('C', 'X', CAST('nan' AS DOUBLE))
+) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_independent_contrasts('gtree', 'gtraits_nan');
+----
+non-finite
+
 # The offending node is unnamed and has a non-contiguous node_index (77). The
 # error must report the caller's node_index (77), not the internal dense index.
 statement ok

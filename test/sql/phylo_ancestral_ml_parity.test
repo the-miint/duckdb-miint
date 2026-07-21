@@ -1,0 +1,55 @@
+# name: test/sql/phylo_ancestral_ml_parity.test
+# description: phylo_ancestral_ml (Mk-ML, ER) parity vs ape::ace(type="discrete", model="ER")
+# group: [sql]
+
+# ape::ace(type="discrete", model="ER") is a standard, well-tested reference for the
+# equal-rates Mk model (unlike its continuous ML, which the BM oracle avoids). The
+# goldens under data/asr/ml_er_* were generated OFFLINE by a dev-only R + ape script
+# kept out of this BSD tree (../duckdb-miint-localdocs/gen_asr_oracle.R) and committed
+# as NUMBERS only (never ape's code); run_tests.sh exports MIINT_ASR_PARITY_OK when the
+# committed goldens are intact. Our fitted rate matches ape to ~1e-15 and the marginal
+# posteriors to ~1e-8 (ape's own reconstruction is iterative), confirming the ER rate
+# parameterization, uniform root prior, and marginal-reconstruction conventions agree.
+
+require miint
+
+require-env MIINT_ASR_PARITY_OK
+
+statement ok
+CREATE TABLE ml_tree AS SELECT * FROM read_csv_auto('data/asr/ml_er_tree.csv', nullstr='');
+
+statement ok
+CREATE TABLE ml_traits AS SELECT * FROM read_csv_auto('data/asr/ml_er_traits.csv');
+
+statement ok
+CREATE TABLE ml_expected AS SELECT * FROM read_csv_auto('data/asr/ml_er_ml_expected.csv');
+
+statement ok
+CREATE TABLE ml_rate AS SELECT * FROM read_csv_auto('data/asr/ml_er_ml_rate.csv');
+
+# Our fitted ML rate matches ape's.
+query I
+SELECT count(*)
+FROM (SELECT DISTINCT rate FROM phylo_ancestral_ml('ml_tree', 'ml_traits')) o, ml_rate r
+WHERE abs(o.rate - r.rate) > 1e-6;
+----
+0
+
+# Every internal-node marginal posterior matches ape's fit$lik.anc.
+query I
+SELECT count(*)
+FROM phylo_ancestral_ml('ml_tree', 'ml_traits') a
+JOIN ml_tree t ON a.node_index = t.node_index
+JOIN ml_expected e ON t.name = e.name AND a.state = e.state::VARCHAR
+WHERE abs(a.probability - e.probability) > 1e-6;
+----
+0
+
+# The join covers all 49 internal nodes x 2 states = 98 rows (nothing unmatched).
+query I
+SELECT count(*)
+FROM phylo_ancestral_ml('ml_tree', 'ml_traits') a
+JOIN ml_tree t ON a.node_index = t.node_index
+JOIN ml_expected e ON t.name = e.name AND a.state = e.state::VARCHAR;
+----
+98

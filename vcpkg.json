@@ -3,6 +3,7 @@
   "dependencies": [
     "zlib",
     "zstd",
+    "eigen3",
     { "name": "libdeflate", "platform": "linux" },
     "expat",
     "openssl",
