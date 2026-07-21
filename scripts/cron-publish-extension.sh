@@ -2,28 +2,48 @@
 #
 # cron-publish-extension.sh
 #
-# Poll GitHub Actions for the latest passing build of duckdb-miint on a
-# given branch, download the extension artifacts, gzip them, and publish
-# them to a custom DuckDB extension repository via rsync. Designed to run
-# from cron on a host other than the builder.
+# Poll GitHub Actions for the latest passing build(s) of duckdb-miint,
+# download the extension artifacts, gzip them, and publish them to a custom
+# DuckDB extension repository via rsync. Designed to run from cron on a host
+# other than the builder.
+#
+# TWO PUBLISH STREAMS, both handled in a single invocation (see $STREAMS):
+#
+#   branch  — the latest passing run on $BRANCH. These are NATIVE-only
+#             builds (CI excludes wasm on branch pushes). Published to the
+#             continuously-updated live path:
+#                 $DEST_BASE/<duckdb_version>
+#
+#   tagged  — the latest passing run whose head ref is a release TAG
+#             (vX.Y.Z...). Tag runs additionally carry the wasm_eh build, so
+#             this stream is what serves the in-browser DuckDB-Wasm console.
+#             Published, keyed by DuckDB version (latest tag wins), to:
+#                 $DEST_BASE/tagged/<duckdb_version>
+#
+# Keeping the streams in separate locations means the branch's native-only
+# builds never overwrite the tagged release's wasm (and vice versa), while a
+# stable client URL — .../tagged/<duckdb_version>/wasm_eh/... — always points
+# at the newest tagged release for that DuckDB version.
 #
 # Deployment is atomic via a symlink swap: each release lives under
-# $DEST_BASE/releases/<duckdb_version>-run<run_id>/ and
-# $DEST_BASE/<duckdb_version> is a symlink that flips to the new release
-# in a single rename(2) call. Old releases are left in place; prune them
-# manually if disk space becomes an issue.
+# $DEST_BASE/releases/<name>/ and the live symlink flips to it in a single
+# rename(2) call. Release dir names are stream-scoped so the two streams
+# never collide:
+#   branch:  releases/<duckdb_version>-run<run_id>/
+#   tagged:  releases/tagged-<duckdb_version>-run<run_id>/
+# Old releases are left in place; prune them manually if disk fills up.
 #
-# Idempotent: re-running without a new passing build is a no-op deploy,
-# but always emails a status. Concurrent runs are prevented via flock.
+# Idempotent per stream: a stream with no new passing build is a no-op. The
+# script always emails one combined status covering every stream. Concurrent
+# runs are prevented via flock.
 #
-# Email subject prefixes:
-#   [SUCCEED]  a new build was successfully deployed
-#   [OK]       script ran, no action needed (no new build, or latest run
+# Email subject prefixes (worst stream disposition wins):
+#   [SUCCEED]  at least one stream deployed a new build, none failed
+#   [OK]       ran, no action needed (no new builds, or a stream's latest run
 #              is still in progress upstream)
-#   [FAIL]     this script itself errored, or the latest passing build's
+#   [FAIL]     the script itself errored, or a stream's latest passing build's
 #              artifacts don't match $DUCKDB_VERSION (rejected)
-#   [FAIL-CI]  the latest workflow run on $BRANCH did not succeed
-#              (failure, cancelled, timed_out, ...); no deploy attempted
+#   [FAIL-CI]  a stream's latest run did not succeed (failure, cancelled, ...)
 #
 # Prereqs on the cron host (none scripted — all assumed ready):
 #   - `gh` authenticated (check with: gh auth status)
@@ -31,10 +51,10 @@
 #   - `mail` configured to deliver to $NOTIFY_EMAIL
 #   - gzip, rsync, ssh, flock, jq, find, mktemp (standard)
 #
-# First-deploy note: if $DEST_BASE/<duckdb_version> already exists as a
-# plain directory, the symlink swap will fail (rename(2) refuses to
-# replace a non-empty directory with a non-directory). Rename or move
-# that directory out of the way before the first cron run.
+# First-deploy note: if a live path ($DEST_BASE/<duckdb_version> or
+# $DEST_BASE/tagged/<duckdb_version>) already exists as a plain directory, the
+# symlink swap will fail (rename(2) refuses to replace a non-empty directory
+# with a non-symlink). Move that directory aside before the first cron run.
 #
 # Configure via env vars or by passing an env file as $1. All vars marked
 # REQUIRED must be set; others have sensible defaults. See bottom of file
@@ -56,6 +76,16 @@ fi
 : "${BRANCH:=v1.5-variegata}"
 : "${WORKFLOW:=MainDistributionPipeline.yml}"
 
+# Which streams to publish this invocation, space-separated. Default is both.
+# Valid tokens: "branch" "tagged".
+: "${STREAMS:=branch tagged}"
+
+# How far back to scan push runs when hunting for the latest release-tag run.
+# Tags are infrequent while branch pushes are not, so the newest tag run may
+# sit well below the newest branch run. If a tag build isn't found within this
+# window the tagged stream logs a skip (see "no tag run found" below).
+: "${TAG_SCAN_LIMIT:=100}"
+
 # DUCKDB_VERSION must match both the duckdb submodule pin and the
 # duckdb_version input in .github/workflows/MainDistributionPipeline.yml.
 # When the extension targets a new DuckDB version, bump all three together.
@@ -67,7 +97,6 @@ fi
 : "${NOTIFY_EMAIL:?NOTIFY_EMAIL is required}"
 
 : "${STATE_DIR:=${HOME}/.local/state/miint-publish}"
-STATE_FILE="${STATE_DIR}/last_run_id"
 LOCK_FILE="${STATE_DIR}/lock"
 WORK_DIR="${STATE_DIR}/work"
 LOG_FILE="${STATE_DIR}/last_run.log"
@@ -89,13 +118,17 @@ send_mail() {
     printf '%s\n' "$body" | mail -s "$subject" "$NOTIFY_EMAIL"
 }
 
-# State file format: TAB-separated "<status>\t<run_id>\t<duckdb_version>".
-# status ∈ {deployed, rejected}. Old one-field format is treated as deployed
-# with an unknown version (forces a re-examination on next run).
+# Per-stream state file. Format: TAB-separated "<status>\t<run_id>\t<duckdb_version>".
+# status ∈ {deployed, rejected}. Old single-field format (from before streams
+# existed) is treated as deployed with an unknown version, which forces a
+# re-examination on next run.
+state_file() { printf '%s/last_run_id.%s' "$STATE_DIR" "$1"; }
+
 read_state() {
-    [[ -f "$STATE_FILE" ]] || return 0
+    local sf; sf=$(state_file "$1")
+    [[ -f "$sf" ]] || return 0
     local line fields
-    line=$(cat "$STATE_FILE")
+    line=$(cat "$sf")
     IFS=$'\t' read -ra fields <<<"$line"
     case ${#fields[@]} in
         0) ;;
@@ -106,8 +139,26 @@ read_state() {
 }
 
 write_state() {
-    printf '%s\t%s\t%s\n' "$1" "$2" "$3" > "$STATE_FILE"
+    local sf; sf=$(state_file "$1")
+    printf '%s\t%s\t%s\n' "$2" "$3" "$4" > "$sf"
 }
+
+# ----- combined-report accumulators -----
+#
+# process_stream() never exits; it appends a section to REPORT and bumps the
+# worst-disposition tracker. main() composes one email from these at the end.
+# WORST_RANK: 0 none/noop, 1 in-progress, 3 ci-fail, 4 rejected.
+REPORT=""
+WORST_RANK=0
+WORST_KIND="ok"
+ANY_DEPLOYED=0
+
+bump() {
+    # bump <rank> <kind>
+    if (( $1 > WORST_RANK )); then WORST_RANK=$1; WORST_KIND="$2"; fi
+}
+
+add_report() { REPORT+="$1"$'\n'; }
 
 fail() {
     trap - ERR
@@ -131,85 +182,6 @@ EOF
     exit 1
 }
 
-# Reject = the latest passing run exists, but its artifacts don't match our
-# expected naming (e.g., workflow on that commit targeted a different
-# duckdb_version). Record in state so we don't re-alert on the same run id,
-# email once, and exit 0 so cron doesn't treat the script itself as failing.
-reject() {
-    trap - ERR
-    local msg="$1" avail="$2"
-    log "REJECT: $msg"
-    write_state rejected "$RUN_ID" "$DUCKDB_VERSION"
-    local avail_fmt
-    avail_fmt=$(while IFS= read -r n; do [[ -n "$n" ]] && printf '  - %s\n' "$n"; done <<<"$avail")
-    local subject="[FAIL] miint publish on ${HOSTNAME_SHORT} — ${msg}"
-    local body
-    body=$(cat <<EOF
-Host:          $HOSTNAME_SHORT
-Repo:          $REPO @ $BRANCH
-Workflow:      $WORKFLOW
-DuckDB ver:    $DUCKDB_VERSION
-
-Expected artifact prefix: $ARTIFACT_PREFIX
-Latest passing run:
-  id:    $RUN_ID
-  sha:   $RUN_SHA
-  title: $RUN_TITLE
-  url:   $RUN_URL
-
-Artifacts actually present on this run:
-$avail_fmt
-
-This typically means the workflow on this commit built against a different
-DuckDB version than \$DUCKDB_VERSION=$DUCKDB_VERSION, so its artifacts are
-named for that other version. Wait for a newer passing run whose workflow
-matches, or bump \$DUCKDB_VERSION and re-run.
-
-The rejection has been recorded in $STATE_FILE so this alert will not
-repeat until a new passing run id appears (or \$DUCKDB_VERSION changes).
-EOF
-)
-    send_mail "$subject" "$body" || true
-    exit 0
-}
-
-# Latest workflow run on $BRANCH ended with a non-success conclusion (or is
-# still in progress / queued and we want to alert anyway). Email once per
-# cron tick — no state dedupe, so a stuck-broken branch will re-alert daily
-# until someone fixes it or a newer run completes successfully.
-fail_ci() {
-    trap - ERR
-    local msg="$1"
-    log "FAIL-CI: $msg"
-    local subject="[FAIL-CI] miint publish on ${HOSTNAME_SHORT} — $msg"
-    local body
-    body=$(cat <<EOF
-Host:          $HOSTNAME_SHORT
-Repo:          $REPO @ $BRANCH
-Workflow:      $WORKFLOW
-DuckDB ver:    $DUCKDB_VERSION
-
-The latest workflow run on $BRANCH did not succeed; no deploy attempted.
-
-Latest run:
-  id:         $RUN_ID
-  sha:        $RUN_SHA
-  title:      $RUN_TITLE
-  time:       $RUN_TIME
-  url:        $RUN_URL
-  status:     $RUN_STATUS
-  conclusion: $RUN_CONCLUSION
-
-Last handled run:   ${LAST_RUN_ID:-<none>} (status=${LAST_STATUS:-<none>}, version=${LAST_DUCKDB_VERSION:-<none>})
-
-This alert will recur on every cron tick until a newer run on $BRANCH
-completes successfully.
-EOF
-)
-    send_mail "$subject" "$body" || true
-    exit 0
-}
-
 trap 'fail "unexpected error at line $LINENO"' ERR
 
 # ----- lock -----
@@ -220,7 +192,7 @@ if ! flock -n 9; then
     exit 0
 fi
 
-# ----- reset fixed work dirs (rsync --delete trick; no rm) -----
+# ----- work-dir reset helper (rsync --delete trick; no rm) -----
 
 reset_dir() {
     local d="$1"
@@ -228,266 +200,264 @@ reset_dir() {
     rsync -a --delete "$WORK_DIR/.empty/" "$d/"
 }
 
-ART_DIR="$WORK_DIR/artifacts"
-STAGE_DIR="$WORK_DIR/stage"
-reset_dir "$ART_DIR"
-reset_dir "$STAGE_DIR"
-
-# ----- query latest run on the branch (any conclusion) -----
+# ----- select the run for a stream -----
 #
-# Intentionally NOT filtering by --status success: doing so would hide
-# failed/cancelled latest runs behind the previous green run, and the
-# script would send a misleading [SUCCEED]/[OK] heartbeat for a branch
-# that is actually broken in CI. We fetch the most recent run regardless
-# of conclusion and gate on its status/conclusion below.
-
-log "Querying latest run of $WORKFLOW on $REPO@$BRANCH"
-RUN_JSON=$(gh run list \
-    --repo "$REPO" \
-    --workflow "$WORKFLOW" \
-    --branch "$BRANCH" \
-    --limit 1 \
-    --json databaseId,headSha,displayTitle,createdAt,url,status,conclusion)
-
-RUN_ID=$(jq -r '.[0].databaseId // empty' <<<"$RUN_JSON")
-RUN_SHA=$(jq -r '.[0].headSha // empty' <<<"$RUN_JSON")
-RUN_TITLE=$(jq -r '.[0].displayTitle // empty' <<<"$RUN_JSON")
-RUN_TIME=$(jq -r '.[0].createdAt // empty' <<<"$RUN_JSON")
-RUN_URL=$(jq -r '.[0].url // empty' <<<"$RUN_JSON")
-RUN_STATUS=$(jq -r '.[0].status // empty' <<<"$RUN_JSON")
-RUN_CONCLUSION=$(jq -r '.[0].conclusion // empty' <<<"$RUN_JSON")
-
-[[ -n "$RUN_ID" ]] || fail "no runs found for $WORKFLOW on $BRANCH"
-
-LAST_STATUS=""
-LAST_RUN_ID=""
-LAST_DUCKDB_VERSION=""
-LAST_STATE=$(read_state)
-if [[ -n "$LAST_STATE" ]]; then
-    IFS=$'\t' read -r LAST_STATUS LAST_RUN_ID LAST_DUCKDB_VERSION <<<"$LAST_STATE"
-fi
-
-log "Latest run: $RUN_ID ($RUN_SHA) status=$RUN_STATUS conclusion=$RUN_CONCLUSION"
-log "Last handled run: ${LAST_RUN_ID:-<none>} (status=${LAST_STATUS:-<none>}, version=${LAST_DUCKDB_VERSION:-<none>})"
-
-# ----- gate: latest run not yet completed -----
-#
-# Run is queued / in_progress / waiting / ... — no artifacts to fetch yet.
-# Heartbeat [OK] and exit; next cron tick will recheck.
-
-if [[ "$RUN_STATUS" != "completed" ]]; then
-    subject="[OK] miint publish on ${HOSTNAME_SHORT} — run ${RUN_ID} is ${RUN_STATUS}"
-    body=$(cat <<EOF
-Host:          $HOSTNAME_SHORT
-Repo:          $REPO @ $BRANCH
-Workflow:      $WORKFLOW
-DuckDB ver:    $DUCKDB_VERSION
-
-Latest run on $BRANCH has not completed yet (status=$RUN_STATUS); skipping
-this tick. Will recheck on the next cron run.
-
-Latest run:
-  id:    $RUN_ID
-  sha:   $RUN_SHA
-  title: $RUN_TITLE
-  time:  $RUN_TIME
-  url:   $RUN_URL
-
-Last handled run:  ${LAST_RUN_ID:-<none>} (status=${LAST_STATUS:-<none>}, version=${LAST_DUCKDB_VERSION:-<none>})
-EOF
-)
-    send_mail "$subject" "$body"
-    log "Latest run not yet completed; exit."
-    exit 0
-fi
-
-# ----- gate: latest completed run did not succeed -----
-#
-# failure / cancelled / timed_out / startup_failure / action_required / ...
-# Do NOT fall through to a successful older run — that's the bug we used to
-# have. Alert via [FAIL-CI] and exit.
-
-if [[ "$RUN_CONCLUSION" != "success" ]]; then
-    fail_ci "latest run on $BRANCH ended with conclusion=$RUN_CONCLUSION"
-fi
-
-# ----- no-op path: heartbeat -----
-#
-# Latest run is success and matches what we already handled. Subject prefix
-# reflects the prior disposition: [OK] for a clean deployed state, [FAIL]
-# if the artifacts on that run were rejected (so the user isn't misled into
-# thinking the rejection resolved itself).
-
-if [[ "$RUN_ID" == "$LAST_RUN_ID" && "$DUCKDB_VERSION" == "$LAST_DUCKDB_VERSION" ]]; then
-    if [[ "$LAST_STATUS" == "rejected" ]]; then
-        subject="[FAIL] miint publish on ${HOSTNAME_SHORT} — awaiting new run (run ${RUN_ID} was rejected)"
-        state_note="Last run was REJECTED (artifact naming mismatch); still waiting for a newer passing run."
-    else
-        subject="[OK] miint publish on ${HOSTNAME_SHORT} — no new build (run ${RUN_ID})"
-        state_note="No new passing build since last deploy."
-    fi
-    body=$(cat <<EOF
-Host:          $HOSTNAME_SHORT
-Repo:          $REPO @ $BRANCH
-Workflow:      $WORKFLOW
-DuckDB ver:    $DUCKDB_VERSION
-
-$state_note
-
-Latest passing run:
-  id:    $RUN_ID
-  sha:   $RUN_SHA
-  title: $RUN_TITLE
-  time:  $RUN_TIME
-  url:   $RUN_URL
-EOF
-)
-    send_mail "$subject" "$body"
-    log "No-op heartbeat; exit."
-    exit 0
-fi
-
-# ----- artifact precheck -----
-#
-# `gh run download --pattern` exits non-zero with a confusing message if no
-# artifact matches. List artifacts up front so we can (a) give a clear error
-# when this run's naming doesn't match $DUCKDB_VERSION, (b) record it in state
-# so we don't re-alert until a newer run appears.
-
-log "Listing artifacts on run $RUN_ID"
-ART_NAMES=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
-    --paginate --jq '.artifacts[].name')
-
-matched=()
-while IFS= read -r n; do
-    [[ -z "$n" ]] && continue
-    [[ "$n" == "$ARTIFACT_PREFIX"* ]] && matched+=("$n")
-done <<<"$ART_NAMES"
-
-if [[ ${#matched[@]} -eq 0 ]]; then
-    reject "artifact naming mismatch on run $RUN_ID" "$ART_NAMES"
-fi
-
-log "Matched ${#matched[@]} artifact(s) against prefix $ARTIFACT_PREFIX"
-
-# ----- download artifacts -----
-
-log "Downloading artifacts for run $RUN_ID into $ART_DIR"
-gh run download "$RUN_ID" \
-    --repo "$REPO" \
-    --dir "$ART_DIR" \
-    --pattern "${ARTIFACT_PREFIX}*"
-
-# ----- stage: gzip + lay out release tree -----
-
-RELEASE_NAME="${DUCKDB_VERSION}-run${RUN_ID}"
-RELEASE_DIR="$STAGE_DIR/$RELEASE_NAME"
-mkdir -p "$RELEASE_DIR"
-
-deployed=()
-while IFS= read -r -d '' art; do
-    name=$(basename "$art")
-    # Strip the prefix; remainder is the platform directory name that the
-    # DuckDB client's Platform() resolves to at INSTALL time.
-    platform="${name#"$ARTIFACT_PREFIX"}"
-    if [[ "$platform" == "$name" ]]; then
-        log "  skip $name (no prefix match)"
-        continue
-    fi
-
-    # Locate the payload. Three accepted shapes:
-    #   *.duckdb_extension       native, uncompressed (typical CI output) -> gzip
-    #   *.duckdb_extension.gz    native, already compressed               -> copy
-    #   *.duckdb_extension.wasm  wasm build (served as-is, no .gz)        -> copy
-    ext_path=""
-    for pat in '*.duckdb_extension' '*.duckdb_extension.gz' '*.duckdb_extension.wasm'; do
-        ext_path=$(find "$art" -type f -name "$pat" -print -quit)
-        [[ -n "$ext_path" ]] && break
-    done
-    [[ -n "$ext_path" ]] || fail "artifact $name contains no .duckdb_extension{,.gz,.wasm} file"
-
-    out_dir="$RELEASE_DIR/$platform"
-    mkdir -p "$out_dir"
-
-    case "$ext_path" in
-        *.duckdb_extension.wasm)
-            out_file="$out_dir/miint.duckdb_extension.wasm"
-            cp "$ext_path" "$out_file"
-            kind=wasm
+# Echoes a single-run JSON object (or empty). For "branch" it's the newest run
+# on $BRANCH; for "tagged" it's the newest push run whose head ref is a release
+# tag (v-prefixed, e.g. v1.5.4 / v1.0.0-rc.2), excluding $BRANCH itself.
+select_run() {
+    local stream="$1"
+    case "$stream" in
+        branch)
+            gh run list --repo "$REPO" --workflow "$WORKFLOW" --branch "$BRANCH" \
+                --limit 1 \
+                --json databaseId,headBranch,headSha,displayTitle,createdAt,url,status,conclusion \
+                | jq -c '.[0] // empty'
             ;;
-        *.duckdb_extension.gz)
-            out_file="$out_dir/miint.duckdb_extension.gz"
-            cp "$ext_path" "$out_file"
-            kind=gz
+        tagged)
+            # Match the CI tag trigger faithfully: MainDistributionPipeline.yml
+            # fires wasm builds on tags globbing `v[0-9]+*` (v + >=1 digit +
+            # anything) — e.g. v2, v1.6, v1.5.4, v1.0.0-rc.2. The regex below is
+            # that glob. Push runs also exist for the trigger branches
+            # (main, $BRANCH); `main` fails `^v[0-9]` and $BRANCH is excluded
+            # explicitly, so what remains is exactly the tag runs.
+            gh run list --repo "$REPO" --workflow "$WORKFLOW" --event push \
+                --limit "$TAG_SCAN_LIMIT" \
+                --json databaseId,headBranch,headSha,displayTitle,createdAt,url,status,conclusion \
+                | jq -c --arg br "$BRANCH" \
+                    '[.[] | select(.headBranch != $br and (.headBranch | test("^v[0-9]+")))] | .[0] // empty'
             ;;
         *)
-            out_file="$out_dir/miint.duckdb_extension.gz"
-            gzip -9 -c "$ext_path" > "$out_file"
-            kind=gz
+            fail "unknown stream '$stream'"
+            ;;
+    esac
+}
+
+# ----- process one stream (no exit; reports via accumulators) -----
+
+process_stream() {
+    local stream="$1"
+
+    # Stream-scoped destination + naming.
+    local link_dir link_target release_name state_key ref_label ensure_dir
+    case "$stream" in
+        branch)
+            link_dir="$DEST_BASE"
+            release_name="${DUCKDB_VERSION}-run__RUNID__"
+            link_target="releases/$release_name"
+            state_key="branch"
+            ref_label="$REPO @ $BRANCH (native)"
+            ensure_dir=""
+            ;;
+        tagged)
+            link_dir="$DEST_BASE/tagged"
+            release_name="tagged-${DUCKDB_VERSION}-run__RUNID__"
+            link_target="../releases/$release_name"
+            state_key="tagged"
+            ref_label="$REPO @ tags (native + wasm)"
+            ensure_dir="$DEST_BASE/tagged"
             ;;
     esac
 
-    size=$(stat -c %s "$out_file")
-    deployed+=("$platform ($(numfmt --to=iec --suffix=B "$size") $kind)")
-    log "  staged $platform <- $(basename "$ext_path") ($size bytes $kind)"
-done < <(find "$ART_DIR" -mindepth 1 -maxdepth 1 -type d -print0)
+    log "== stream '$stream': selecting run =="
+    local run_json
+    run_json=$(select_run "$stream")
 
-[[ ${#deployed[@]} -gt 0 ]] || fail "no artifacts matched prefix $ARTIFACT_PREFIX"
+    if [[ -z "$run_json" ]]; then
+        log "stream '$stream': no matching run found"
+        add_report "[$stream] no matching run found (nothing to publish yet)."
+        return 0
+    fi
 
-# ----- push to remote + atomic symlink swap -----
+    local RUN_ID RUN_SHA RUN_TITLE RUN_TIME RUN_URL RUN_STATUS RUN_CONCLUSION RUN_REF
+    RUN_ID=$(jq -r '.databaseId // empty' <<<"$run_json")
+    RUN_SHA=$(jq -r '.headSha // empty' <<<"$run_json")
+    RUN_TITLE=$(jq -r '.displayTitle // empty' <<<"$run_json")
+    RUN_TIME=$(jq -r '.createdAt // empty' <<<"$run_json")
+    RUN_URL=$(jq -r '.url // empty' <<<"$run_json")
+    RUN_STATUS=$(jq -r '.status // empty' <<<"$run_json")
+    RUN_CONCLUSION=$(jq -r '.conclusion // empty' <<<"$run_json")
+    RUN_REF=$(jq -r '.headBranch // empty' <<<"$run_json")
 
-REMOTE_RELEASES="$DEST_BASE/releases"
-REMOTE_RELEASE="$REMOTE_RELEASES/$RELEASE_NAME"
+    # Resolve the run-id into the release name / link target placeholders.
+    release_name="${release_name/__RUNID__/$RUN_ID}"
+    link_target="${link_target/__RUNID__/$RUN_ID}"
 
-log "Ensuring $REMOTE_RELEASES exists on $DEST_HOST"
-# shellcheck disable=SC2029  # intentional local expansion of $REMOTE_RELEASES
-ssh "${DEST_USER}@${DEST_HOST}" "mkdir -p '$REMOTE_RELEASES'"
+    # Prior disposition for this stream.
+    local LAST_STATUS="" LAST_RUN_ID="" LAST_DUCKDB_VERSION="" last_state
+    last_state=$(read_state "$state_key")
+    if [[ -n "$last_state" ]]; then
+        IFS=$'\t' read -r LAST_STATUS LAST_RUN_ID LAST_DUCKDB_VERSION <<<"$last_state"
+    fi
 
-log "Syncing $RELEASE_DIR/ -> ${DEST_USER}@${DEST_HOST}:${REMOTE_RELEASE}/"
-rsync -az --chmod=D755,F644 \
-    "$RELEASE_DIR/" \
-    "${DEST_USER}@${DEST_HOST}:${REMOTE_RELEASE}/"
+    log "stream '$stream': run $RUN_ID ref=$RUN_REF status=$RUN_STATUS conclusion=$RUN_CONCLUSION (last=${LAST_RUN_ID:-none}/${LAST_STATUS:-none})"
 
-log "Flipping $DEST_BASE/$DUCKDB_VERSION -> releases/$RELEASE_NAME"
-# ln -sfn + mv -Tf is the atomic symlink-swap idiom: ln stages a new link
-# at a temp name, mv -T uses rename(2) to replace the live link in one step.
-# shellcheck disable=SC2029  # intentional local expansion of $DEST_BASE etc.
-ssh "${DEST_USER}@${DEST_HOST}" "
-    set -euo pipefail
-    cd '$DEST_BASE'
-    ln -sfn 'releases/$RELEASE_NAME' '${DUCKDB_VERSION}.tmp'
-    mv -Tf '${DUCKDB_VERSION}.tmp' '$DUCKDB_VERSION'
-"
+    # Gate: not completed yet.
+    if [[ "$RUN_STATUS" != "completed" ]]; then
+        bump 1 inprogress
+        add_report "[$stream] latest run $RUN_ID ($RUN_REF) is $RUN_STATUS; skipping this tick. $RUN_URL"
+        return 0
+    fi
 
-# ----- record state + success email -----
+    # Gate: completed but not success.
+    if [[ "$RUN_CONCLUSION" != "success" ]]; then
+        bump 3 ci
+        add_report "[$stream] FAIL-CI: latest run $RUN_ID ($RUN_REF) ended conclusion=$RUN_CONCLUSION; no deploy. $RUN_URL"
+        return 0
+    fi
 
-write_state deployed "$RUN_ID" "$DUCKDB_VERSION"
+    # No-op: already handled this exact run at this version.
+    if [[ "$RUN_ID" == "$LAST_RUN_ID" && "$DUCKDB_VERSION" == "$LAST_DUCKDB_VERSION" ]]; then
+        if [[ "$LAST_STATUS" == "rejected" ]]; then
+            bump 4 reject
+            add_report "[$stream] FAIL: run $RUN_ID ($RUN_REF) was previously REJECTED (artifact naming mismatch); awaiting a newer passing run."
+        else
+            add_report "[$stream] OK: no new build since last deploy (run $RUN_ID, $RUN_REF)."
+        fi
+        return 0
+    fi
 
-subject="[SUCCEED] miint publish on ${HOSTNAME_SHORT} — deployed $DUCKDB_VERSION run ${RUN_ID}"
+    # Artifact precheck.
+    log "stream '$stream': listing artifacts on run $RUN_ID"
+    local art_names matched=()
+    art_names=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --paginate --jq '.artifacts[].name')
+    local n
+    while IFS= read -r n; do
+        [[ -z "$n" ]] && continue
+        [[ "$n" == "$ARTIFACT_PREFIX"* ]] && matched+=("$n")
+    done <<<"$art_names"
+
+    if [[ ${#matched[@]} -eq 0 ]]; then
+        write_state "$state_key" rejected "$RUN_ID" "$DUCKDB_VERSION"
+        bump 4 reject
+        local avail_fmt
+        avail_fmt=$(while IFS= read -r n; do [[ -n "$n" ]] && printf '      - %s\n' "$n"; done <<<"$art_names")
+        add_report "[$stream] FAIL: artifact naming mismatch on run $RUN_ID ($RUN_REF). Expected prefix $ARTIFACT_PREFIX; present:
+$avail_fmt    (recorded; will not re-alert until a newer run appears.)"
+        return 0
+    fi
+
+    log "stream '$stream': matched ${#matched[@]} artifact(s) against prefix $ARTIFACT_PREFIX"
+
+    # Fresh per-stream work dirs.
+    local art_dir="$WORK_DIR/artifacts.$stream" stage_dir="$WORK_DIR/stage.$stream"
+    reset_dir "$art_dir"
+    reset_dir "$stage_dir"
+
+    log "stream '$stream': downloading artifacts into $art_dir"
+    gh run download "$RUN_ID" --repo "$REPO" --dir "$art_dir" --pattern "${ARTIFACT_PREFIX}*"
+
+    # Stage: gzip natives, copy wasm/.gz as-is, laid out by platform.
+    local release_dir="$stage_dir/$release_name"
+    mkdir -p "$release_dir"
+
+    local deployed=() art name platform ext_path pat out_dir out_file kind size
+    while IFS= read -r -d '' art; do
+        name=$(basename "$art")
+        platform="${name#"$ARTIFACT_PREFIX"}"
+        if [[ "$platform" == "$name" ]]; then
+            log "  skip $name (no prefix match)"
+            continue
+        fi
+
+        ext_path=""
+        for pat in '*.duckdb_extension' '*.duckdb_extension.gz' '*.duckdb_extension.wasm'; do
+            ext_path=$(find "$art" -type f -name "$pat" -print -quit)
+            [[ -n "$ext_path" ]] && break
+        done
+        [[ -n "$ext_path" ]] || fail "artifact $name contains no .duckdb_extension{,.gz,.wasm} file"
+
+        out_dir="$release_dir/$platform"
+        mkdir -p "$out_dir"
+
+        case "$ext_path" in
+            *.duckdb_extension.wasm)
+                out_file="$out_dir/miint.duckdb_extension.wasm"
+                cp "$ext_path" "$out_file"
+                kind=wasm
+                ;;
+            *.duckdb_extension.gz)
+                out_file="$out_dir/miint.duckdb_extension.gz"
+                cp "$ext_path" "$out_file"
+                kind=gz
+                ;;
+            *)
+                out_file="$out_dir/miint.duckdb_extension.gz"
+                gzip -9 -c "$ext_path" > "$out_file"
+                kind=gz
+                ;;
+        esac
+
+        size=$(stat -c %s "$out_file")
+        deployed+=("$platform ($(numfmt --to=iec --suffix=B "$size") $kind)")
+        log "  staged $platform <- $(basename "$ext_path") ($size bytes $kind)"
+    done < <(find "$art_dir" -mindepth 1 -maxdepth 1 -type d -print0)
+
+    [[ ${#deployed[@]} -gt 0 ]] || fail "stream '$stream': no artifacts matched prefix $ARTIFACT_PREFIX after download"
+
+    # Push to remote + atomic symlink swap.
+    local remote_releases="$DEST_BASE/releases" remote_release="$DEST_BASE/releases/$release_name"
+
+    log "stream '$stream': ensuring remote dirs exist on $DEST_HOST"
+    # shellcheck disable=SC2029  # intentional local expansion
+    ssh "${DEST_USER}@${DEST_HOST}" "mkdir -p '$remote_releases'${ensure_dir:+ '$ensure_dir'}"
+
+    log "stream '$stream': syncing $release_dir/ -> ${DEST_USER}@${DEST_HOST}:${remote_release}/"
+    rsync -az --chmod=D755,F644 "$release_dir/" "${DEST_USER}@${DEST_HOST}:${remote_release}/"
+
+    log "stream '$stream': flipping $link_dir/$DUCKDB_VERSION -> $link_target"
+    # shellcheck disable=SC2029  # intentional local expansion
+    ssh "${DEST_USER}@${DEST_HOST}" "
+        set -euo pipefail
+        cd '$link_dir'
+        ln -sfn '$link_target' '${DUCKDB_VERSION}.tmp'
+        mv -Tf '${DUCKDB_VERSION}.tmp' '$DUCKDB_VERSION'
+    "
+
+    write_state "$state_key" deployed "$RUN_ID" "$DUCKDB_VERSION"
+    ANY_DEPLOYED=1
+
+    local plat_list
+    plat_list=$(printf '      - %s\n' "${deployed[@]}")
+    add_report "[$stream] SUCCEED: deployed run $RUN_ID ($RUN_REF)
+    ref:   $ref_label
+    sha:   $RUN_SHA
+    title: $RUN_TITLE
+    time:  $RUN_TIME
+    url:   $RUN_URL
+    live:  ${DEST_USER}@${DEST_HOST}:${link_dir}/${DUCKDB_VERSION}  ->  $link_target
+    platforms (${#deployed[@]}):
+$plat_list"
+    log "stream '$stream': done."
+}
+
+# ----- run every requested stream, then send one combined email -----
+
+for s in $STREAMS; do
+    process_stream "$s"
+done
+
+case "$WORST_KIND" in
+    reject) prefix="[FAIL]" ;;
+    ci)     prefix="[FAIL-CI]" ;;
+    *)      if (( ANY_DEPLOYED )); then prefix="[SUCCEED]"; else prefix="[OK]"; fi ;;
+esac
+
+subject="$prefix miint publish on ${HOSTNAME_SHORT} — streams: ${STREAMS}"
 body=$(cat <<EOF
 Host:          $HOSTNAME_SHORT
-Repo:          $REPO @ $BRANCH
+Repo:          $REPO
+Branch:        $BRANCH
 Workflow:      $WORKFLOW
 DuckDB ver:    $DUCKDB_VERSION
+Streams:       $STREAMS
+Destination:   ${DEST_USER}@${DEST_HOST}:${DEST_BASE}
 
-Deployed run:
-  id:    $RUN_ID
-  sha:   $RUN_SHA
-  title: $RUN_TITLE
-  time:  $RUN_TIME
-  url:   $RUN_URL
-
-Remote release dir: ${DEST_USER}@${DEST_HOST}:${REMOTE_RELEASE}
-Live symlink:       ${DEST_USER}@${DEST_HOST}:${DEST_BASE}/${DUCKDB_VERSION}
-
-Previous run id:    ${LAST_RUN_ID:-<none>}
-
-Platforms published (${#deployed[@]}):
-$(printf '  - %s\n' "${deployed[@]}")
+$REPORT
 EOF
 )
 send_mail "$subject" "$body"
-log "Done."
+log "All streams processed ($prefix)."
 
 # ──────────────────────────────────────────────────────────────────────
 # Example env file (save as e.g. /etc/miint-publish.env, chmod 600):
@@ -496,12 +466,14 @@ log "Done."
 #   BRANCH=v1.5-variegata
 #   WORKFLOW=MainDistributionPipeline.yml
 #   DUCKDB_VERSION=v1.5.4
+#   STREAMS="branch tagged"          # or just "branch" / just "tagged"
 #   DEST_USER=deploy
 #   DEST_HOST=repo.example.com
 #   DEST_BASE=/var/www/miint-ext
 #   NOTIFY_EMAIL=releases@example.com
 #   # optional:
 #   # STATE_DIR=/var/lib/miint-publish
+#   # TAG_SCAN_LIMIT=100
 #
 # After install:
 #   chmod +x scripts/cron-publish-extension.sh
