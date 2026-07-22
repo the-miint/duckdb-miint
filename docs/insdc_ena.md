@@ -196,6 +196,11 @@ Stream FASTA/FASTQ sequence data from EBI/ENA with run, sample, and experiment a
 - `qual_offset` (BIGINT, optional, default 33): Quality score offset (33 for Phred+33/Sanger, 64 for Phred+64/Illumina 1.3+)
 - `max_sequences` (BIGINT, optional, default 0): If `> 0`, stop emitting from each run after this many sequences. `0` (or NULL / absent) means unlimited. For paired-end runs the cap counts **pairs** (one output row per pair), not underlying FASTQ records — `max_sequences=N` yields at most N rows and corresponds to 2N downloaded reads. When downloading via Aspera the cap tears down the `ascp` transfer early, saving real bandwidth. For SFF runs the cap applies but the full file is downloaded before any record is parsed; a loud warning is printed in that case.
 - `trim_sff` (BOOLEAN, optional, default true): For SFF runs, apply the quality and adapter clip positions from the SFF header to trim sequences and quality scores. Ignored for FASTQ runs. Named `trim_sff` rather than `trim` because `TRIM` is a SQL function keyword and this function is dual-path (supports both scalar and lateral invocation), which together prevent DuckDB's binder from accepting `trim=...`.
+- `verify_md5` (BOOLEAN, optional, default **true**): Verify each downloaded FASTQ file's bytes against ENA's reported `fastq_md5` once the file has been read to completion, raising a hard error (`IOException`) on mismatch. On by default — it's cheap (the digest is computed incrementally over bytes already in flight) and catches silent truncation/corruption that byte- or row-count checks miss. Verification is automatically skipped (with a loud warning, never silently) when it doesn't apply:
+  - ENA reported no `fastq_md5` for a given file.
+  - The file is not gzip-compressed (verification hashes the raw pre-decompression bytes, matching the basis of ENA's reported digest; a non-gzip file has no such basis here).
+  - The run routes through SFF (`OpenSFF`) or Aspera (`download_method='aspera'`) — neither transport is wired to the verification tap.
+  - `max_sequences` capped the run before it reached the file's true end — verification requires having seen every byte, so a deliberately partial read is never treated as a failure.
 
 Because `read_ena_sequences` supports lateral / correlated invocation, named parameters must be passed with arrow syntax (`name => value`), not `name = value`. For example: `read_ena_sequences('X', prefer_format => 'sff', trim_sff => false)`.
 
@@ -255,6 +260,14 @@ FROM read_ena_sequences('ERR1074767', include_filepath=true) LIMIT 5;
   other runs. If you see such a warning, re-run the query (the metadata
   lookup is cached) or use a smaller per-run selection to recover the
   truncated data.
+- **md5 verification** (see `verify_md5` above, on by default): a mismatch
+  between ENA's reported `fastq_md5` and the downloaded bytes raises a hard
+  error identifying the run and file, rather than emitting a warning and
+  continuing — a corrupted download is a data-integrity problem the caller
+  should not silently accept partial/wrong data for. This is a literal-path
+  failure only (`Execute`); in lateral mode (`ExecuteInOut`) it's treated like
+  any other mid-stream failure and skips with a loud warning instead, since
+  the outer query already has rows from other outer values it shouldn't lose.
 
 **Lateral invocation (correlated arguments):**
 

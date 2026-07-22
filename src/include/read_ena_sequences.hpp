@@ -40,6 +40,10 @@ public:
 		// `max_sequences == 0` means unlimited. For paired-end runs this counts
 		// pairs (one batch row per pair), not underlying FASTQ records.
 		uint64_t max_sequences = 0;
+		// Verify downloaded bytes against ENA's reported fastq_md5 once a run's
+		// HTTP FASTX stream reaches true EOF. On by default; see
+		// PerRunReader::Finish. Ignored (with a warning) for SFF and Aspera.
+		bool verify_md5 = true;
 #if MIINT_ASPERA_SUPPORTED
 		miint::AsperaConfig aspera_config;
 #endif
