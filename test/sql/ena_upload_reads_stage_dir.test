@@ -1,0 +1,42 @@
+# name: test/sql/ena_upload_reads_stage_dir.test
+# description: ena_upload_reads — the curl stage branch creates a private temp staging dir (portable FileSystem path, not POSIX mkdtemp) before transport
+# group: [sql]
+
+require miint
+
+# libcurl streaming-upload transport is compiled in on Linux/Windows but
+# disabled on macOS (vsearch/OpenSSL symbol clash); run_tests.sh exports
+# MIINT_HAS_CURL when the libcurl entry is present in miint_versions().
+require-env MIINT_HAS_CURL
+
+# Minimal single-end input (same fixture as ena_upload_reads_local.test).
+statement ok
+CREATE TABLE stage_in AS
+  SELECT 'sampleA' AS sample_ref, read_id, sequence1, qual1,
+         CAST(NULL AS VARCHAR) AS sequence2,
+         CAST(NULL AS UTINYINT[]) AS qual2,
+         sequence_index
+  FROM read_fastx('data/fastq/small_a.fq');
+
+# curl transport requires a user/password SECRET (ResolveUploadCredentials).
+statement ok
+CREATE SECRET stage_secret (TYPE ENA, USER 'anon', PASSWORD 'anon', ENDPOINT 'test');
+
+# Drive the stage branch: an ftp:// target routes through curl, so the sample is
+# first staged into a freshly-created private temp directory — the code path
+# reworked to use DuckDB's FileSystem (GetTempDirectory + CreateDirectoriesRecursive)
+# instead of POSIX mkdtemp(3), which MinGW omits. Point at a closed loopback port
+# so the transport fails fast *after* staging: reaching the "upload failed for
+# sample" error proves the staging directory was created and a gzipped file was
+# written into it on this platform (incl. Windows/MinGW) — exactly the temp-dir
+# portability path under test. A staging failure would surface a different error
+# (temp-dir creation), so this assertion also guards that regression.
+statement error
+SELECT * FROM ena_upload_reads(relation := 'stage_in',
+                               secret := 'stage_secret',
+                               target_url := 'ftp://127.0.0.1:1/incoming/');
+----
+upload failed for sample
+
+statement ok
+DROP SECRET stage_secret;

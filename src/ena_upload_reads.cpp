@@ -11,10 +11,12 @@
 #endif
 #include "ena_upload_helpers.hpp"
 #include "fastq_encoder.hpp"
+#include "remote_file_helper.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_open_flags.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/random_engine.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/crypto/md5.hpp"
@@ -33,7 +35,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
-#include <unistd.h> // unlink, rmdir; mkdtemp on POSIX only (Aspera path is compiled out on MinGW)
+#include <unistd.h> // unlink, rmdir for temp-staging cleanup (available on MinGW)
 #include <vector>
 #include <zlib.h>
 
@@ -531,9 +533,8 @@ void UploadOneSample(ClientContext &context, const ENAUploadReadsBindData &bind,
 	auto &fs = FileSystem::GetFileSystem(context);
 	const auto filenames = OutputFilenames(plan.sample_ref, plan.resolved_layout); // 1 (single/interleaved) or 2
 
-	// On platforms without Aspera support fail-fast *before* the mkdtemp staging
-	// code — mkdtemp is POSIX-only and MinGW's libc doesn't provide it, so this
-	// guard also keeps the file compilable on Windows.
+	// On builds without Aspera support, fail-fast if Aspera transport was
+	// requested — the ascp binary path and its config aren't compiled in.
 #if !(MIINT_ASPERA_SUPPORTED && defined(MIINT_STATIC_BUILD))
 	if (gs.target.transport == UploadTransport::ASPERA) {
 		throw IOException("ena_upload_reads: Aspera transport is not supported on this build/platform");
@@ -549,16 +550,31 @@ void UploadOneSample(ClientContext &context, const ENAUploadReadsBindData &bind,
 		}
 	} else {
 		// Private temp dir so each staged file's basename matches its remote
-		// name; unlink + rmdir after transport.
-		string tmpl = miint::GetTempDir() + "/ena-upload-XXXXXX";
-		vector<char> buf(tmpl.begin(), tmpl.end());
-		buf.push_back('\0');
-		if (mkdtemp(buf.data()) == nullptr) {
-			throw IOException("ena_upload_reads: mkdtemp failed: %s", std::strerror(errno));
+		// name; removed after transport. mkdtemp(3) is POSIX-only (MinGW's libc
+		// omits it), so build a uniquely-named directory through DuckDB's
+		// FileSystem instead — portable across POSIX, Windows and Emscripten.
+		// GetTempDirectory honours DuckDB's configured temp_directory and the
+		// platform temp path; CreateDirectory is non-recursive, so ensure that
+		// root exists first. A 64-bit random suffix makes collision with an
+		// existing directory negligible; the bounded retry covers the off chance.
+		const string temp_root = miint::RemoteFileHelper::GetTempDirectory(context);
+		fs.CreateDirectoriesRecursive(temp_root);
+		RandomEngine rng;
+		for (idx_t attempt = 0;; attempt++) {
+			string candidate = fs.JoinPath(
+			    temp_root, StringUtil::Format("ena-upload-%016llx", (unsigned long long)rng.NextRandomInteger64()));
+			if (!fs.DirectoryExists(candidate)) {
+				fs.CreateDirectory(candidate);
+				temp_dir = candidate;
+				break;
+			}
+			if (attempt >= 64) {
+				throw IOException("ena_upload_reads: could not create a unique staging directory under '%s'",
+				                  temp_root);
+			}
 		}
-		temp_dir.assign(buf.data());
 		for (auto &fname : filenames) {
-			write_paths.push_back(temp_dir + "/" + fname);
+			write_paths.push_back(fs.JoinPath(temp_dir, fname));
 		}
 	}
 
