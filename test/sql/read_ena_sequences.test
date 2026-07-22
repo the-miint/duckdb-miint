@@ -163,3 +163,38 @@ statement error
 SELECT * FROM read_ena_sequences('ERR1074767', max_sequences=-5);
 ----
 max_sequences must be >= 0
+
+# ---- verify_md5 ----
+
+# verify_md5 defaults to true; a real run with a correct ENA-reported
+# fastq_md5 must stream through unchanged (same row count as without the
+# parameter at all).
+query I
+SELECT COUNT(*) FROM read_ena_sequences('ERR1074767', max_sequences=10);
+----
+10
+
+query I
+SELECT COUNT(*) FROM read_ena_sequences('ERR1074767', max_sequences=10, verify_md5 => true);
+----
+10
+
+# Explicit opt-out regression: verify_md5 => false must not change row count
+# (or otherwise affect the data) for a run whose md5 matches anyway.
+query I
+SELECT COUNT(*) FROM read_ena_sequences('ERR1074767', max_sequences=10, verify_md5 => false);
+----
+10
+
+# Uncapped read: unlike the max_sequences-capped queries above, this consumes
+# the run to its natural EOF, which is the only point PerRunReader::Finish()
+# actually verifies md5 (a capped read never reaches true EOF and is
+# deliberately skipped -- see per_run_reader.cpp). Verification is on by
+# default here; a mismatch would make this query fail instead of complete.
+# ERR1074767 has ~21K reads; the inequality avoids pinning to an exact count
+# that could shift if ENA's archived metadata is ever amended.
+query I
+SELECT COUNT(*) > 20000 AS full_run_verified_ok
+FROM read_ena_sequences('ERR1074767');
+----
+true

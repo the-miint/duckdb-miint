@@ -6,6 +6,7 @@
 
 #ifdef MIINT_STATIC_BUILD
 #include "duckdb/common/file_system.hpp"
+#include "stream_md5.hpp"
 #endif
 
 namespace miint {
@@ -146,6 +147,15 @@ struct DuckDBSeqStream {
 	bool input_eof;
 	bool stream_end; // Z_STREAM_END observed → subsequent reads are legitimately EOF
 
+	// Optional md5 verification tap over the raw (pre-decompression) bytes as
+	// they arrive from `handle`. Null when verification isn't requested for
+	// this stream (the common case — read_fastx callers never set it).
+	// Shared (not owned) so the constructing caller (PerRunReader) can retain
+	// its own reference and call VerifyOrThrow once the read loop reaches
+	// true EOF; a fresh DuckDBSeqStream (e.g. the empty-R2 reopen) gets a
+	// fresh StreamMd5 passed in, so there's nothing to "reset" here.
+	std::shared_ptr<miint::StreamMd5> md5_tap;
+
 	DuckDBSeqStream();
 	~DuckDBSeqStream();
 
@@ -179,10 +189,14 @@ namespace duckdb {
 // Create a DuckDBSeqStream for reading a remote (or local) file through DuckDB's FileSystem.
 // Handles gzip detection and decompression initialization.
 // Caller takes ownership of the returned pointer (kseq++ close callback deletes it).
-miint::DuckDBSeqStream *CreateDuckDBSeqStream(FileSystem &fs, const std::string &path);
+// `md5_tap`, when non-null, receives the raw (pre-decompression) bytes read from `handle` — see
+// duckdb_seq_read. Optional; read_fastx and other callers that don't need verification omit it.
+miint::DuckDBSeqStream *CreateDuckDBSeqStream(FileSystem &fs, const std::string &path,
+                                              std::shared_ptr<miint::StreamMd5> md5_tap = nullptr);
 
 // Overload that accepts an explicit gzip flag instead of inferring from path extension.
 // Use when the file path does not reflect the actual compression (e.g., temp files).
-miint::DuckDBSeqStream *CreateDuckDBSeqStream(FileSystem &fs, const std::string &path, bool is_gzipped);
+miint::DuckDBSeqStream *CreateDuckDBSeqStream(FileSystem &fs, const std::string &path, bool is_gzipped,
+                                              std::shared_ptr<miint::StreamMd5> md5_tap = nullptr);
 } // namespace duckdb
 #endif

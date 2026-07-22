@@ -176,6 +176,16 @@ unique_ptr<FunctionData> ReadENASequencesTableFunction::Bind(ClientContext &cont
 		max_sequences = static_cast<uint64_t>(raw);
 	}
 
+	// `verify_md5`: on by default. Verifying downloaded bytes against ENA's
+	// reported fastq_md5 is cheap (incremental hashing over bytes already in
+	// flight) and catches silent truncation/corruption that a byte-count or
+	// row-count check would miss; there's no reason to make users opt in.
+	bool verify_md5 = true;
+	auto vm_param = input.named_parameters.find("verify_md5");
+	if (vm_param != input.named_parameters.end() && !vm_param->second.IsNull()) {
+		verify_md5 = vm_param->second.GetValue<bool>();
+	}
+
 	auto &db = DatabaseInstance::GetDatabase(context);
 
 	std::vector<miint::ENARunInfo> runs;
@@ -193,6 +203,7 @@ unique_ptr<FunctionData> ReadENASequencesTableFunction::Bind(ClientContext &cont
 	data->deferred_resolution = deferred;
 	data->db_ptr = &db;
 	data->max_sequences = max_sequences;
+	data->verify_md5 = verify_md5;
 	if (deferred) {
 		// Per-bind cache + ENAClient: metadata lookups across outer rows dedupe
 		// and the ENAClient's rate limiter (~3 req/sec) throttles globally.
@@ -309,8 +320,8 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 		}
 #endif
 		return std::make_unique<miint::PerRunReader>(global_state.fs, global_state.runs[idx], global_state.use_aspera,
-		                                             global_state.trim, global_state.open_mutex, cfg,
-		                                             bind_data.max_sequences, &context);
+		                                             global_state.trim, bind_data.verify_md5, global_state.open_mutex,
+		                                             cfg, bind_data.max_sequences, &context);
 	};
 
 	miint::SequenceRecordBatch batch;
@@ -597,7 +608,7 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 	// download_method='aspera' in deferred mode).
 	auto make_reader_for = [&](const miint::ENARunInfo &run) {
 		return std::make_unique<miint::PerRunReader>(
-		    global.fs, run, /*use_aspera=*/false, bind_data.trim, global.open_mutex,
+		    global.fs, run, /*use_aspera=*/false, bind_data.trim, bind_data.verify_md5, global.open_mutex,
 		    static_cast<const miint::AsperaConfig *>(nullptr), bind_data.max_sequences, &context.client);
 	};
 
@@ -784,6 +795,7 @@ TableFunction ReadENASequencesTableFunction::GetFunction() {
 	tf.named_parameters["prefer_format"] = LogicalType::VARCHAR;
 	tf.named_parameters["trim_sff"] = LogicalType::BOOLEAN;
 	tf.named_parameters["max_sequences"] = LogicalType::BIGINT;
+	tf.named_parameters["verify_md5"] = LogicalType::BOOLEAN;
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	tf.table_scan_progress = Progress;
 	return tf;
