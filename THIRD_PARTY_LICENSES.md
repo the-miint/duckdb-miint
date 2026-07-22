@@ -13,6 +13,13 @@ binary that links any copyleft dependency listed below must ship the
 corresponding full license text themselves (LGPL §6 / §10 obligations
 are not satisfied by this file alone).
 
+Dependencies whose source is **not** vendored in this repository — those
+fetched at build time by vcpkg, and the OpenMP runtime supplied by the
+system toolchain — are likewise identified by SPDX expression with a
+pointer to where the authoritative license text ships (the vcpkg build
+tree / the installed toolchain), rather than inlined here, for the same
+anti-drift reason.
+
 ---
 
 ## HTSlib
@@ -137,7 +144,7 @@ Pairwise sequence alignment using the Wavefront Alignment Algorithm (WFA).
 Used by `align_pairwise_wfa2_score`, `align_pairwise_wfa2_cigar`, and `align_pairwise_wfa2_full`.
 
 - Repository: https://github.com/smarco/WFA2-lib
-- Version: v2.3.5
+- Version: v2.3.6
 - License: MIT
 
 ### Citation
@@ -636,3 +643,289 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
 LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
 ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
+
+---
+
+## unifrac-binaries (libssu)
+
+UniFrac phylogenetic distances and Faith's PD engine. Embedded as a
+statically linked archive (`libssu_inmem.a` native / `libssu_wasm.a`
+Emscripten). Used by `unifrac_distances`, `unifrac_pcoa`,
+`unifrac_permanova`, and `unifrac_faith_pd`. Reported as the `unifrac`
+row in `miint_versions()`.
+
+- Repository: https://github.com/biocore/unifrac-binaries (branch `main`, pinned at the submodule SHA in `.gitmodules` / `git submodule status ext/unifrac-binaries`)
+- License: BSD 3-Clause
+
+### BSD 3-Clause License
+
+BSD 3-Clause License
+
+Copyright (c) 2022, biocore
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+---
+
+## scikit-bio-binaries (libskbb)
+
+Principal Coordinates Analysis (randomized FSVD) and PERMANOVA pseudo-F.
+Embedded as a statically linked archive (`libskbb_inmem.a` native /
+`libskbb_wasm.a` Emscripten); backs the PCoA/PERMANOVA paths of
+`unifrac_pcoa` and `unifrac_permanova` (and the metric-agnostic `pcoa`
+/ `permanova` functions). Reported as the `scikit-bio-binaries` row in
+`miint_versions()`.
+
+- Repository: https://github.com/scikit-bio/scikit-bio-binaries (branch `main`, pinned at the submodule SHA in `.gitmodules` / `git submodule status ext/scikit-bio-binaries`)
+- License: BSD 3-Clause
+
+### BSD 3-Clause License
+
+Copyright (c) 2013--, scikit-bio development team.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice, this
+  list of conditions and the following disclaimer in the documentation and/or
+  other materials provided with the distribution.
+
+* Neither the names scikit-bio, skbio, or biocore nor the names of its
+  contributors may be used to endorse or promote products derived from
+  this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+---
+
+## rype
+
+Rust implementations of k-mer classification, minimizer extraction, and
+log-ratio operations, consumed via the Arrow C Data Interface. Its
+symbols ship inside the merged `libmiint_rust_glue.a` static archive
+(built from the `ext/miint-rust-glue/` umbrella crate) and are linked
+into the extension. Used by `rype_classify`, `rype_extract_minimizer_set`,
+`rype_extract_strand_minimizers`, `rype_index_create`, and
+`rype_log_ratio`. Reported as the `rype` row in `miint_versions()`.
+
+- Repository: https://github.com/the-miint/rype (pinned at the submodule SHA in `.gitmodules` / `git submodule status ext/rype`)
+- License: BSD 3-Clause (Modified BSD)
+
+### Modified BSD License
+
+Copyright (c) 2024-, The RYpe Development Team <damcdonald@ucsd.edu>
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+    * Neither the name of the RYpe development team nor the names of its
+      contributors may be used to endorse or promote products derived from this
+      software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE RYpe DEVELOPMENT TEAM BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+---
+
+## sylph
+
+FracMinHash sketch-based relative-abundance profiling of microbial
+communities, consumed via the Arrow C Data Interface. Its symbols ship
+inside the same merged `libmiint_rust_glue.a` archive as rype. Used by
+the `sylph_profile` and `sylph_index_create` table functions. Reported
+as the `sylph` row in `miint_versions()`.
+
+- Repository: https://github.com/the-miint/sylph (branch `v0.9.0-miint`, pinned at the submodule SHA in `.gitmodules` / `git submodule status ext/sylph`)
+- License: `MIT OR Apache-2.0` (SPDX expression, dual). The MIT text ships at `ext/sylph/LICENSE` and is reproduced below.
+
+### MIT License
+
+MIT License
+
+Copyright (c) 2023 Jim Shaw
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## microtar
+
+Minimal TAR archive reader. Compiled as C directly into the extension
+(`third_party/microtar/microtar.c`), no feature flag. Used by
+`src/taxdump_archive.cpp` to read NCBI taxdump `.tar` archives from an
+in-memory buffer (read side only).
+
+- Repository: https://github.com/rxi/microtar
+- License: MIT
+
+### MIT License
+
+Copyright (c) 2017 rxi
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## nanoarrow / nanoarrow_ipc / flatcc
+
+Arrow IPC stream byte-serialization used by the GPL-boundary transport
+(`src/gpl_boundary/arrow_ipc.cpp`). DuckDB exposes only the Arrow C Data
+Interface, not IPC byte serialization, so the official `nanoarrow_ipc`
+(plus the `nanoarrow` C runtime and the `flatcc` FlatBuffers runtime it
+depends on) is vendored under `third_party/nanoarrow_ipc/` and compiled
+as the `miint_nanoarrow_ipc` object library linked into the extension.
+Only built when `MIINT_ENABLE_GPL_BOUNDARY` is on (auto-off on
+Emscripten and Windows). Symbols are namespaced (`NANOARROW_NAMESPACE=miint`)
+to avoid colliding with DuckDB's bundled nanoarrow.
+
+- Repository: https://github.com/apache/arrow-nanoarrow (pinned tag `apache-arrow-nanoarrow-0.8.0`)
+- License: Apache License 2.0 (both nanoarrow/nanoarrow_ipc and the bundled flatcc runtime)
+
+### Apache License 2.0 (Summary)
+
+Full text ships in-tree at `third_party/nanoarrow_ipc/LICENSE` (nanoarrow)
+and `third_party/nanoarrow_ipc/LICENSE.flatcc` (flatcc runtime).
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+---
+
+## OpenMP runtime (libgomp / libomp)
+
+The UniFrac archives (`libssu_inmem.a` / `libskbb_inmem.a`) are compiled
+with `-fopenmp`, so the final extension must resolve their OpenMP runtime
+symbols. This runtime is **not** vendored in this repository — it is
+supplied by the platform toolchain and linked in via the `miint_openmp`
+INTERFACE target (see `CMakeLists.txt`). Only present when
+`MIINT_ENABLE_UNIFRAC` is on and not building for Emscripten.
+
+- **Linux:** GCC's `libgomp`, `find_package(OpenMP)` → `OpenMP::OpenMP_CXX`.
+  License: `GPL-3.0-or-later WITH GCC-exception-3.1` (SPDX) — GPLv3 with the
+  GCC Runtime Library Exception. The exception explicitly permits linking
+  the runtime into a program **regardless of that program's own license**,
+  so it imposes no copyleft obligation on this BSD-licensed extension. Full
+  text ships with the installed GCC toolchain (e.g.
+  `/usr/share/gcc/COPYING.RUNTIME` / `COPYING3`).
+- **macOS:** LLVM's `libomp`, linked statically (`libomp.a`) from Homebrew's
+  `libomp` keg. License: `Apache-2.0 WITH LLVM-exception` (SPDX). Full text
+  ships with the installed keg (`$(brew --prefix libomp)/LICENSE.TXT`).
+
+Neither runtime causes copyleft to propagate to the extension; both carry
+explicit linking exceptions that authorize inclusion in non-GPL binaries.
+
+---
+
+## System libraries (via vcpkg)
+
+The following libraries are fetched and built at configure time by vcpkg
+(see `vcpkg.json`) and linked into the extension. Their source is not
+vendored in this repository; vcpkg places each library's authoritative
+license text under its build tree (e.g.
+`vcpkg/buildtrees/<port>/src/.../COPYING`) and installed share directory
+(`vcpkg_installed/<triplet>/share/<port>/copyright`). All are permissive.
+
+| Library | Purpose | SPDX / License | Notes |
+|---|---|---|---|
+| zlib | DEFLATE (de)compression for gzip I/O | `Zlib` | |
+| zstd | Zstandard (de)compression | `BSD-3-Clause` (dual with `GPL-2.0-only`; used under BSD-3-Clause) | |
+| libdeflate | Fast DEFLATE for bgzf gzip COPY | `MIT` | Linux only (`vcpkg.json` `platform: linux`) |
+| expat | XML parsing (mzML / ENA payloads) | `MIT` | |
+| curl | HTTP(S) transfers (INSDC/ENA paths) | `curl` (MIT/X-derivative) | Linked only when `MIINT_ENABLE_CURL` is on (auto-disabled on macOS to avoid an MD5/SHA1 symbol clash with vsearch) |
+| OpenSSL | TLS backend | `Apache-2.0` (OpenSSL 3.x) | Pulled in transitively by curl; present only where curl is linked |
+| HDF5 | HDF5 container I/O (fast5, etc.) | `BSD-3-Clause`-style (The HDF Group license) | Not built for Emscripten (`vcpkg.json` `platform: !emscripten`) |
+
+RocksDB — also sourced via vcpkg — is documented separately above (it is
+dual `GPL-2.0-only OR Apache-2.0`, used under Apache-2.0).
