@@ -728,7 +728,7 @@ struct MockFetcher {
 };
 
 // Build a minimal single-row TSV response matching BATCH_FIELDS.
-// Columns (12): run_accession,sample_accession,experiment_accession,study_accession,
+// Columns (13): run_accession,sample_accession,experiment_accession,study_accession,
 //               fastq_ftp,fastq_aspera,fastq_bytes,library_layout,
 //               submitted_ftp,submitted_aspera,submitted_bytes,submitted_format
 static std::string RunRowTSV(const std::string &run_accession, const std::string &study_accession = "") {
