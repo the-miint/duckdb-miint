@@ -1,6 +1,6 @@
 // Tests for threading ENA's fastq_md5 field through to ENARunInfo.
 //
-// This is the blocker half of md5 verification (TASK-10): without fastq_md5
+// This is the blocker half of md5 verification: without fastq_md5
 // present in BATCH_FIELDS (src/ena_resolver_cache.cpp) and correctly parsed /
 // aligned here, read_ena_sequences would silently never have a digest to
 // verify against, no matter how the streaming tap is wired up.
