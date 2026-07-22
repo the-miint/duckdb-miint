@@ -471,7 +471,7 @@ References: Felsenstein, J. (1985) *The American Naturalist* 125(1):1–15; Schl
 **Behavior / semantics:**
 - Computed by Gaussian belief propagation on the tree: a post-order down-pass (each internal node is the **precision-weighted** mean of its children's messages — this reduces to PIC at a bifurcation but is correct for any arity) plus a pre-order up-pass (an O(n) leave-one-out that folds in the rest of the tree). The result is exact on a tree.
 - **The root estimate equals PIC's root `ancestral_estimate`** (a free cross-check); interior estimates generally differ from PIC's down-pass values because the up-pass adds information from outside each subtree.
-- The BM rate `σ̂²` is estimated by **REML** (sum of squared standardized contrasts divided by `n_tips − 1`, the unbiased/PIC-consistent estimator). This differs from full ML (divisor `n_tips`, e.g. `ape::ace(method="ML")`) by a factor `(n_tips−1)/n_tips`. `variance` and the CI are `σ̂²` times each node's rate-independent structural variance; `z = 1.959964 = qnorm(0.975)`.
+- The BM rate `σ̂²` is estimated by **REML** (sum of squared standardized contrasts divided by `n_tips − 1`, the unbiased/PIC-consistent estimator). The alternative full-ML divisor `n_tips` would differ by a factor `(n_tips−1)/n_tips`. `variance` and the CI are `σ̂²` times each node's rate-independent structural variance; `z = 1.959964 = qnorm(0.975)`.
 
 **Requirements and error conditions:**
 - Multifurcations are supported; a **unifurcation** (internal node with a single child) errors and points to [`shear_tree`](#shear-subset-to-tips) (it carries no information).
@@ -495,7 +495,7 @@ JOIN phylo_independent_contrasts('tree', 'traits') p USING (node_index, trait)
 WHERE a.node_index = (SELECT node_index FROM tree WHERE parent_index IS NULL);
 ```
 
-**Cleanroom note:** a from-scratch implementation of BM ancestral reconstruction from the published algorithm (Felsenstein 1985; Schluter et al. 1997). It does not derive from any GPL comparative-methods package. Correctness is validated against an independent generalized-least-squares (phylogenetic VCV) ground truth (note: `ape::ace(method="ML")` is *inaccurate* for continuous ASR and is not used as the reference).
+**Cleanroom note:** a from-scratch implementation of BM ancestral reconstruction from the published algorithm (Felsenstein 1985; Schluter et al. 1997). It does not derive from any GPL comparative-methods package. Correctness is validated against an independent generalized-least-squares (phylogenetic VCV) ground truth, which is exact on a tree. (We don't use `ape::ace(method="ML")` as the reference: its point estimates agree with this GLS truth, but it reports the BM rate `σ²` on a different scale, so its variances/CIs aren't directly comparable.)
 
 ### Ancestral parsimony (Sankoff)
 
