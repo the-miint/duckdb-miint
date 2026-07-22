@@ -9,6 +9,9 @@ Methods for estimating and operating on phylogenies.
 - [Resolve placements](#resolve-placements) - Fully resolve sequence placements against a backbone.
 - [FastTree](#fasttree) - Estimate a phylogeny from a MSA with FastTree.
 - [Independent contrasts (PIC)](#independent-contrasts-pic) - Felsenstein (1985) phylogenetic independent contrasts.
+- [Ancestral states (Brownian motion)](#ancestral-states-brownian-motion) - Continuous ancestral state reconstruction under Brownian motion.
+- [Ancestral parsimony (Sankoff)](#ancestral-parsimony-sankoff) - Discrete ancestral states by Fitch/Sankoff parsimony.
+- [Ancestral maximum likelihood (Mk)](#ancestral-maximum-likelihood-mk) - Discrete ancestral states by Mk maximum likelihood.
 
 ### Shear (subset to tips)
 
@@ -439,3 +442,177 @@ SELECT * FROM phylo_independent_contrasts('binary_tree', 'traits');
 ```
 
 **Cleanroom note:** this is a from-scratch implementation of the algorithm as published in Felsenstein (1985); it does not derive from any GPL comparative-methods package.
+
+### Ancestral states (Brownian motion)
+
+Reconstruct **continuous ancestral states** under a Brownian-motion (BM) model for one or more numeric per-tip traits — the maximum-likelihood estimate of each internal node's trait value, with a variance and 95% confidence interval. This is the sibling of [independent contrasts (PIC)](#independent-contrasts-pic): PIC's per-node `ancestral_estimate` is BM's post-order **down-pass**, which is the true ancestral value only at the root; full reconstruction adds a pre-order **up-pass** so every internal node conditions on the *whole* tree, not just the tips below it.
+
+References: Felsenstein, J. (1985) *The American Naturalist* 125(1):1–15; Schluter, D. et al. (1997) "Likelihood of Ancestor States in Adaptive Radiation." *Evolution* 51(6):1699–1711.
+
+**Function signature**:
+
+`phylo_ancestral_states(tree_table, traits_table)`
+
+**Parameters:**
+- `tree_table` (VARCHAR): a table/view in [`read_newick`](reading.md#newick) schema. Unlike PIC, the tree **may be multifurcating** (polytomies are handled directly — no need to `tree_resolve_multifurcations`).
+- `traits_table` (VARCHAR): long form `name`, `trait`, `value` — identical to PIC. `name` is type-flexible (`VARCHAR`/`UUID`/`BIGINT`, matched by canonical text); `value` is `DOUBLE`. Every trait must cover exactly the tree's tip set.
+
+**Output schema:** long form, one row per (internal node, trait):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `node_index` | BIGINT | The input tree's `node_index` for the internal node |
+| `trait` | VARCHAR | The trait name |
+| `estimate` | DOUBLE | The marginal ML ancestral estimate (mean) at the node |
+| `variance` | DOUBLE | Variance of the estimate (`σ̂²` × the node's structural variance) |
+| `ci_low` | DOUBLE | 95% CI lower bound: `estimate − 1.959964·sqrt(variance)` |
+| `ci_high` | DOUBLE | 95% CI upper bound: `estimate + 1.959964·sqrt(variance)` |
+
+**Behavior / semantics:**
+- Computed by Gaussian belief propagation on the tree: a post-order down-pass (each internal node is the **precision-weighted** mean of its children's messages — this reduces to PIC at a bifurcation but is correct for any arity) plus a pre-order up-pass (an O(n) leave-one-out that folds in the rest of the tree). The result is exact on a tree.
+- **The root estimate equals PIC's root `ancestral_estimate`** (a free cross-check); interior estimates generally differ from PIC's down-pass values because the up-pass adds information from outside each subtree.
+- The BM rate `σ̂²` is estimated by **REML** (sum of squared standardized contrasts divided by `n_tips − 1`, the unbiased/PIC-consistent estimator). The alternative full-ML divisor `n_tips` would differ by a factor `(n_tips−1)/n_tips`. `variance` and the CI are `σ̂²` times each node's rate-independent structural variance; `z = 1.959964 = qnorm(0.975)`.
+
+**Requirements and error conditions:**
+- Multifurcations are supported; a **unifurcation** (internal node with a single child) errors and points to [`shear_tree`](#shear-subset-to-tips) (it carries no information).
+- **Finite, non-negative branch lengths on every non-root edge, and a strictly positive length on every tip edge.** A zero-length *tip* edge would pin the estimate and break the leave-one-out, so it errors (a deliberate difference from PIC, which tolerates one zero-length tip per contrast). Zero-length *internal* edges are allowed.
+- **Trait coverage** (missing tip, extra name, duplicate `(name, trait)`, `NULL` value) errors as in PIC. A **non-finite** (`NaN`/infinite) trait value also errors — it would silently poison the shared rate and the whole output, so it fails loud.
+
+**Examples:**
+```sql
+CREATE TABLE tree AS SELECT * FROM read_newick('tree.nwk');   -- may be multifurcating
+CREATE TABLE traits AS SELECT * FROM (VALUES
+    ('sp1', 'body_mass', 3.2), ('sp2', 'body_mass', 1.1), ('sp3', 'body_mass', 2.7)
+) AS v(name, trait, value);
+
+-- Ancestral estimate + 95% CI at every internal node.
+SELECT * FROM phylo_ancestral_states('tree', 'traits') ORDER BY trait, node_index;
+
+-- Cross-check: the root estimate equals PIC's root ancestral_estimate.
+SELECT a.estimate, p.ancestral_estimate
+FROM phylo_ancestral_states('tree', 'traits') a
+JOIN phylo_independent_contrasts('tree', 'traits') p USING (node_index, trait)
+WHERE a.node_index = (SELECT node_index FROM tree WHERE parent_index IS NULL);
+```
+
+**Cleanroom note:** a from-scratch implementation of BM ancestral reconstruction from the published algorithm (Felsenstein 1985; Schluter et al. 1997). It does not derive from any GPL comparative-methods package. Correctness is validated against an independent generalized-least-squares (phylogenetic VCV) ground truth, which is exact on a tree. (We don't use `ape::ace(method="ML")` as the reference: its point estimates agree with this GLS truth, but it reports the BM rate `σ²` on a different scale, so its variances/CIs aren't directly comparable.)
+
+### Ancestral parsimony (Sankoff)
+
+Reconstruct **discrete ancestral states** by parsimony — the state assignments that minimize the total number (or cost) of state changes over the tree — for one or more categorical per-tip traits. The engine is **Sankoff's** dynamic program, which is correct for any tree shape and any substitution-cost matrix; with the default **unit cost** (0 for no change, 1 for any change) it is **Fitch** parsimony.
+
+References: Sankoff, D. (1975) *SIAM J. Appl. Math.* 28(1):35–42; Fitch, W.M. (1971) *Systematic Zoology* 20(4):406–416.
+
+**Function signature**:
+
+`phylo_ancestral_parsimony(tree_table, traits_table [, cost_matrix_table])`
+
+**Parameters:**
+- `tree_table` (VARCHAR): a table/view in [`read_newick`](reading.md#newick) schema. **Branch lengths are ignored** — topology-only trees are fine. Multifurcations and unifurcations are both supported.
+- `traits_table` (VARCHAR): long form `name`, `trait`, `value`. `name` is type-flexible as elsewhere; `value` is the categorical **state**, cast to `VARCHAR` (so integer- or text-coded states both work). Every trait must cover exactly the tree's tip set.
+- `cost_matrix_table` (VARCHAR, optional): long form `from_state`, `to_state`, `cost` (a `DOUBLE ≥ 0`, the cost of a change from `from_state` to `to_state`). When supplied it **defines the state alphabet** (the sorted union of `from_state`/`to_state`), which may include states not observed at any tip (a Sankoff intermediate). Every off-diagonal ordered pair over that alphabet must be present (a missing transition cost errors — there is no sensible default); the diagonal defaults to `0`. Omit it for the unit-cost (Fitch) default, whose alphabet is that trait's sorted distinct observed states.
+
+**Output schema:** long form, one row per (internal node, trait, **state**):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `node_index` | BIGINT | The input tree's `node_index` for the internal node |
+| `trait` | VARCHAR | The trait name |
+| `state` | VARCHAR | A state from the trait's alphabet |
+| `in_mpr` | BOOLEAN | Whether this state is in the node's most-parsimonious-reconstruction (MPR) set |
+| `min_cost` | DOUBLE | The minimum total tree cost with this node fixed to this state |
+
+**Behavior / semantics:**
+- A post-order Sankoff down-pass computes, per node/state, the min cost of the subtree below it; a pre-order pass computes the rest-of-tree cost; their sum is `min_cost` (the min total cost with the node pinned to that state). The whole-tree parsimony **score** is `min(min_cost)`, and `in_mpr` is true exactly when `min_cost` equals that score.
+- **Ties are first-class:** an ambiguous node simply has more than one `in_mpr = true` state. Filter with `WHERE in_mpr` for the MPR set; the non-MPR rows give the extra cost of each alternative state.
+- Multifurcation and unifurcation are both handled by the same recurrence (arity-agnostic).
+
+**Requirements and error conditions:**
+- Tip names must be unique; **trait coverage** (missing tip, extra name, duplicate `(name, trait)`, `NULL`) errors.
+- A `cost_matrix_table` with a missing off-diagonal entry, a non-zero diagonal, a duplicate pair, a negative/non-finite cost, or a tip whose observed state is absent from the matrix alphabet all error.
+
+**Examples:**
+```sql
+CREATE TABLE tree AS SELECT * FROM read_newick('tree.nwk');
+CREATE TABLE traits AS SELECT * FROM (VALUES
+    ('sp1', 'habitat', 'marine'), ('sp2', 'habitat', 'marine'), ('sp3', 'habitat', 'terrestrial')
+) AS v(name, trait, value);
+
+-- Fitch (unit-cost) reconstruction; the MPR state(s) per node:
+SELECT node_index, state, min_cost
+FROM phylo_ancestral_parsimony('tree', 'traits') WHERE in_mpr ORDER BY node_index;
+
+-- Weighted Sankoff: an ordered character 0 - 1 - 2 where a direct 0<->2 change is dear.
+CREATE TABLE cost AS SELECT * FROM (VALUES
+    ('0','1',1.0), ('1','0',1.0), ('1','2',1.0), ('2','1',1.0), ('0','2',3.0), ('2','0',3.0)
+) AS v(from_state, to_state, cost);
+SELECT * FROM phylo_ancestral_parsimony('tree', 'traits', 'cost') ORDER BY node_index, state;
+```
+
+**Cleanroom note:** a from-scratch implementation of Sankoff (1975) parsimony (Fitch 1971 for the unit-cost case). It does not derive from any GPL comparative-methods package. Correctness (including multifurcations and arbitrary cost matrices) is validated against an independent brute-force enumerator over all state assignments.
+
+### Ancestral maximum likelihood (Mk)
+
+Reconstruct **discrete ancestral states** by **maximum likelihood** under the Mk model (a `k`-state continuous-time Markov model), returning the marginal posterior probability distribution over states at each internal node. Unlike parsimony, this uses branch lengths and reports a full probability distribution and a model fit.
+
+Three models are supported: **`ER`** (equal rates — all state changes share one rate), **`SYM`** (symmetric rates — `q_ij = q_ji`, with `k(k−1)/2` independent off-diagonal rates), and **`ARD`** (all rates different — every one of the `k(k−1)` off-diagonal rates is free). ER and SYM are reversible; ARD is **not** (its reconstruction depends on where the tree is rooted). All three use a uniform root prior `1/k`.
+
+References: Lewis, P.O. (2001) *Systematic Biology* 50(6):913–925 (Mk model); Felsenstein, J. (1981) *J. Mol. Evol.* 17(6):368–376 (pruning likelihood); Yang, Z., Kumar, S. & Nei, M. (1995) *Genetics* 141(4):1641–1650 (marginal reconstruction); Nelder, J.A. & Mead, R. (1965) *Computer Journal* 7(4):308–313 (simplex optimizer, for the SYM/ARD fits); Higham, N.J. (2005) *SIAM J. Matrix Anal. Appl.* 26(4):1179–1193 (scaling-and-squaring matrix exponential, for the ARD `P(t)`).
+
+**Function signature**:
+
+`phylo_ancestral_ml(tree_table, traits_table, model := 'ER', rate := NULL)`
+
+**Parameters:**
+- `tree_table` (VARCHAR): a table/view in [`read_newick`](reading.md#newick) schema. **Branch lengths are used** (the transition probabilities depend on them). Multifurcations and unifurcations are supported.
+- `traits_table` (VARCHAR): long form `name`, `trait`, `value` (state cast to `VARCHAR`), as for parsimony. The per-trait alphabet is its sorted distinct observed states.
+- `model` (VARCHAR, named, default `'ER'`): the substitution model — `'ER'` (equal rates), `'SYM'` (symmetric rates), or `'ARD'` (all rates different). Any other value errors.
+- `rate` (DOUBLE, named, optional): applies to **`ER` only**. If given (a finite positive number), the single rate is **fixed** to it; otherwise it is **fitted** by maximum likelihood. It has no meaning for `SYM`/`ARD` (which fit a whole rate matrix) — supplying `rate` with `model := 'SYM'` or `'ARD'` errors.
+
+**Output schema:** long form, one row per (internal node, trait, **state**):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `node_index` | BIGINT | The input tree's `node_index` for the internal node |
+| `trait` | VARCHAR | The trait name |
+| `state` | VARCHAR | A state from the trait's alphabet |
+| `probability` | DOUBLE | Marginal posterior probability that the node is in this state given the data; the per-node probabilities sum to 1 |
+| `rate` | DOUBLE | ER: the fitted (or fixed) scalar rate, the same value on every row of the trait. **SYM/ARD: `NULL`** (a rate matrix has no single scalar rate) |
+| `log_likelihood` | DOUBLE | The model log-likelihood at the fitted/fixed parameters — the same value on every row of the trait |
+
+**Behavior / semantics:**
+- Computed by Felsenstein's pruning algorithm with per-node rescaling (numerically stable on deep trees), a uniform root prior (the stationary distribution `1/k`, shared by ER and SYM), and a marginal two-pass so every internal node conditions on the whole tree.
+- **ER**: the transition matrix is closed-form (`P(t)[i][j] = 1/k + (δ_ij − 1/k)·e^{−k·rate·t}`), so no eigendecomposition is needed and it scales to large trees. The single rate is fitted by a grid-scan + golden-section search on the log-likelihood.
+- **SYM**: the transition matrix `P(t) = exp(Q·t)` is built from a symmetric eigendecomposition of `Q` (`P(t) = U·diag(e^{λt})·Uᵀ`); the `k(k−1)/2` off-diagonal rates are fitted jointly by a Nelder–Mead simplex search (warm-started from the ER fit, so SYM's log-likelihood is always at least ER's). At `k = 2` SYM has one free rate and reduces exactly to ER.
+- **ARD**: `Q` is a general (non-symmetric) generator, so `P(t) = exp(Q·t)` is built by a general matrix exponential (scaling-and-squaring). The `k(k−1)` rates are fitted by a **multi-start** Nelder–Mead search (the ER warm start plus several deterministic fixed-seed restarts, so the fit is reproducible). This is a **best-effort** optimizer: on ARD's high-dimensional, multimodal surface it may settle at a local optimum, and gradient-based tools can reach boundary (rate→0) solutions this log-space search does not. Because ARD is non-reversible, the reconstruction **depends on the root** (there is no pulley-principle invariance). ARD does not scale to large state counts (`k(k−1)` simplex parameters) or, as fast as ER, to very large trees.
+- **State-count caps**: `SYM` rejects `k > 8` and `ARD` rejects `k > 6` (the simplex fit becomes unreliable) — use `ER` for high-state traits.
+- Per-trait `rate` (ER only; `NULL` for SYM/ARD) and `log_likelihood` are surfaced (denormalized onto every row) so a `SELECT DISTINCT trait, rate, log_likelihood` recovers the fit.
+- ER and SYM output match `ape::ace(type="discrete", model=...)` posteriors closely — to ~1e-8 (ER) and ~1e-6 (SYM), i.e. optimizer/iteration tolerance — and the ER rate to ~1e-8. For **ARD the reported fit is not guaranteed to be the global optimum**: the search is in log-rate space, so it cannot reach *boundary* solutions where a rate is exactly 0 (a common true MLE for sparse discrete data with rare or absent transitions) — a box- or gradient-constrained optimizer (e.g. `ape`) may find a higher-likelihood fit on the same data. ARD's *machinery* (pruning, `P(t)`, the marginal up-pass) is nonetheless validated exactly against an independent brute-force likelihood at whatever rates are fitted; only the optimizer, not the reconstruction math, is best-effort.
+
+**Requirements and error conditions:**
+- **Finite, non-negative branch lengths on every non-root edge, and a strictly positive length on every tip edge** (as in [ancestral states](#ancestral-states-brownian-motion)); zero-length internal edges are allowed. A branch so small that `e^{−k·rate·t}` rounds to exactly 1 (an *effectively-zero* edge) can make the likelihood degenerate and errors (rather than emitting a `NaN`/`−inf` silently).
+- Tip names unique; **trait coverage** errors as elsewhere. An unsupported `model`, a non-positive / non-finite `rate`, a `rate` combined with `model := 'SYM'`/`'ARD'`, or a state count above a model's cap (`SYM` `k > 8`, `ARD` `k > 6`), errors.
+
+**Examples:**
+```sql
+CREATE TABLE tree AS SELECT * FROM read_newick('tree.nwk');
+CREATE TABLE traits AS SELECT * FROM (VALUES
+    ('sp1', 'diet', 'carnivore'), ('sp2', 'diet', 'herbivore'), ('sp3', 'diet', 'herbivore')
+) AS v(name, trait, value);
+
+-- Fit the ER rate by ML; posterior distribution at each internal node.
+SELECT node_index, state, probability FROM phylo_ancestral_ml('tree', 'traits') ORDER BY node_index, state;
+
+-- The fitted rate and model fit per trait.
+SELECT DISTINCT trait, rate, log_likelihood FROM phylo_ancestral_ml('tree', 'traits');
+
+-- Reconstruct at a fixed (known) rate instead of fitting (ER only).
+SELECT * FROM phylo_ancestral_ml('tree', 'traits', rate := 0.5);
+
+-- Symmetric-rates (SYM) or all-rates-different (ARD): the full rate matrix is fitted; the
+-- `rate` column is NULL. ARD additionally distinguishes gain vs loss (direction) of a state.
+SELECT node_index, state, probability FROM phylo_ancestral_ml('tree', 'traits', model := 'SYM') ORDER BY node_index, state;
+SELECT node_index, state, probability FROM phylo_ancestral_ml('tree', 'traits', model := 'ARD') ORDER BY node_index, state;
+```
+
+**Cleanroom note:** a from-scratch implementation of Mk maximum-likelihood reconstruction from the published algorithms (Lewis 2001; Felsenstein 1981; Yang, Kumar & Nei 1995; Nelder & Mead 1965 for the SYM/ARD optimizer; Higham 2005 for the ARD matrix exponential). It does not derive from any GPL comparative-methods package. The `P(t)` transition matrices use [Eigen](https://eigen.tuxfamily.org/) (MPL-2.0, a permissive license compatible with this project's Modified-BSD license; `EIGEN_MPL2_ONLY` is defined): a `SelfAdjointEigenSolver` for SYM and the `MatrixExponential` (scaling-and-squaring Padé) for ARD. Correctness is validated against an independent brute-force likelihood over all state assignments (with an independent matrix exponential for SYM/ARD). The ER and SYM conventions are confirmed to match `ape::ace(type="discrete", model=...)` numerically (that tool is used offline as an oracle only — its code is never read, linked, or distributed).

@@ -128,4 +128,25 @@ std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::s
 	return result;
 }
 
+TreeWithNodeIds BuildTreeAndNodeIds(ClientContext &context, const std::string &table_name) {
+	auto node_inputs = ReadTreeTable(context, table_name);
+
+	// build() preserves input order for node indices, and ReadTreeTable sorts by
+	// node_index, so tree dense index i corresponds to node_inputs[i]. Capture the
+	// original node_index up front so results are reported against the caller's
+	// node_index (a stable join key), not the internal dense index.
+	TreeWithNodeIds out;
+	out.node_ids.reserve(node_inputs.size());
+	for (const auto &ni : node_inputs) {
+		out.node_ids.push_back(ni.node_id);
+	}
+
+	try {
+		out.tree = miint::NewickTree::build(node_inputs);
+	} catch (const std::exception &e) {
+		throw InvalidInputException("Failed to build tree from '%s': %s", table_name, e.what());
+	}
+	return out;
+}
+
 } // namespace duckdb

@@ -1,0 +1,454 @@
+# name: test/sql/phylo_ancestral_ml.test
+# description: Test phylo_ancestral_ml (discrete Mk maximum-likelihood, ER model, ancestral state reconstruction)
+# group: [sql]
+
+require miint
+
+# =============================================================================
+# Golden 3-tip tree ((A:1,B:1)E:1,C:1)root; k=2 states, tips A=0, B=1, C=0, at a
+# FIXED rate 0.5 (no optimizer). With E=exp(-2*0.5*1)=exp(-1), P_ii=(1+E)/2 and
+# P_ij=(1-E)/2, the down-pass gives a flat L_E and the root's posterior reduces to
+# [P_ii, P_ij] = [0.68393972, 0.31606028] (hand-derived; the exact math is also
+# cross-checked against a brute-force oracle in test/cpp/test_AncestralStatesML.cpp).
+# =============================================================================
+
+statement ok
+CREATE TABLE gtree AS SELECT * FROM (VALUES
+    (0, 'A',    1.0, CAST(NULL AS BIGINT), 2),
+    (1, 'B',    1.0, NULL, 2),
+    (2, 'E',    1.0, NULL, 4),
+    (3, 'C',    1.0, NULL, 4),
+    (4, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE gtraits AS SELECT * FROM (VALUES
+    ('A', 't', '0'), ('B', 't', '1'), ('C', 't', '0')
+) AS v(name, trait, value);
+
+# 2 internal nodes x 2 states = 4 rows.
+query I
+SELECT count(*) FROM phylo_ancestral_ml('gtree', 'gtraits', rate := 0.5);
+----
+4
+
+# Root posterior matches the hand-derived [P_ii, P_ij], and the fixed rate is echoed.
+query I
+SELECT count(*)
+FROM phylo_ancestral_ml('gtree', 'gtraits', rate := 0.5)
+WHERE node_index = 4
+  AND ((state = '0' AND abs(probability - 0.6839397205857211) > 1e-9)
+    OR (state = '1' AND abs(probability - 0.3160602794142789) > 1e-9)
+    OR abs(rate - 0.5) > 1e-12);
+----
+0
+
+# Posteriors sum to 1 at every (node, trait); the log-likelihood is finite, negative,
+# and single-valued per trait.
+query I
+SELECT count(*) FROM (
+  SELECT node_index, trait, sum(probability) s FROM phylo_ancestral_ml('gtree', 'gtraits', rate := 0.5)
+  GROUP BY 1, 2
+) WHERE abs(s - 1.0) > 1e-9;
+----
+0
+
+query II
+SELECT count(DISTINCT log_likelihood), count(*) FILTER (WHERE log_likelihood >= 0.0 OR NOT isfinite(log_likelihood))
+FROM phylo_ancestral_ml('gtree', 'gtraits', rate := 0.5);
+----
+1	0
+
+# =============================================================================
+# Symmetric 2-tip tree (A:1,B:1)root; A=0, B=1. The root posterior is exactly
+# [0.5, 0.5] by symmetry, for ANY rate (here fitted).
+# =============================================================================
+
+statement ok
+CREATE TABLE twotip AS SELECT * FROM (VALUES
+    (0, 'A', 1.0, CAST(NULL AS BIGINT), 2),
+    (1, 'B', 1.0, NULL, 2),
+    (2, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE twotip_traits AS SELECT * FROM (VALUES ('A', 't', '0'), ('B', 't', '1')) AS v(name, trait, value);
+
+query I
+SELECT count(*) FROM phylo_ancestral_ml('twotip', 'twotip_traits') WHERE abs(probability - 0.5) > 1e-9;
+----
+0
+
+# =============================================================================
+# Monomorphic tips (all state 0): the fitted rate collapses toward 0 and every
+# internal posterior concentrates on state 0.
+# =============================================================================
+
+statement ok
+CREATE TABLE monotraits AS SELECT * FROM (VALUES ('A', 't', '0'), ('B', 't', '0'), ('C', 't', '0')) AS v(name, trait, value);
+
+query I
+SELECT count(*) FROM phylo_ancestral_ml('gtree', 'monotraits') WHERE state = '0' AND probability < 0.999;
+----
+0
+
+# =============================================================================
+# rate -> infinity (a huge fixed rate): posteriors approach the uniform prior 1/k.
+# =============================================================================
+
+query I
+SELECT count(*) FROM phylo_ancestral_ml('gtree', 'gtraits', rate := 1e6) WHERE abs(probability - 0.5) > 1e-3;
+----
+0
+
+# =============================================================================
+# node_index remap: output carries the caller's ORIGINAL node_index.
+# =============================================================================
+
+statement ok
+CREATE TABLE reindexed AS SELECT * FROM (VALUES
+    (10, 'A',    1.0, CAST(NULL AS BIGINT), 20),
+    (30, 'B',    1.0, NULL, 20),
+    (20, 'E',    1.0, NULL, 5),
+    (40, 'C',    1.0, NULL, 5),
+    (5,  'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE node_index NOT IN (5, 20))
+FROM phylo_ancestral_ml('reindexed', 'gtraits', rate := 0.5);
+----
+4	0
+
+# =============================================================================
+# Type-flexible tip keys: BIGINT names match tip labels by canonical text.
+# =============================================================================
+
+statement ok
+CREATE TABLE btree AS SELECT * FROM (VALUES
+    (0, CAST(100 AS BIGINT), 1.0, CAST(NULL AS BIGINT), 3),
+    (1, 200, 1.0, NULL, 3),
+    (2, 300, 1.0, NULL, 4),
+    (3, 900, 1.0, NULL, 4),
+    (4, CAST(NULL AS BIGINT), NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE btraits AS SELECT * FROM (VALUES
+    (CAST(100 AS BIGINT), 's', '0'), (200, 's', '1'), (300, 's', '0')
+) AS v(name, trait, value);
+
+query I
+SELECT count(*) FROM phylo_ancestral_ml('btree', 'btraits');
+----
+4
+
+# =============================================================================
+# Views work for both inputs.
+# =============================================================================
+
+statement ok
+CREATE VIEW gtree_v AS SELECT * FROM gtree;
+
+statement ok
+CREATE VIEW gtraits_v AS SELECT * FROM gtraits;
+
+query I
+SELECT count(*) FROM phylo_ancestral_ml('gtree_v', 'gtraits_v', rate := 0.5);
+----
+4
+
+# =============================================================================
+# Multifurcation IS supported. A 3-way star (A,B,C)root with branch lengths.
+# =============================================================================
+
+statement ok
+CREATE TABLE star AS SELECT * FROM (VALUES
+    (0, 'A', 1.0, CAST(NULL AS BIGINT), 3),
+    (1, 'B', 1.0, NULL, 3),
+    (2, 'C', 1.0, NULL, 3),
+    (3, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE star_traits AS SELECT * FROM (VALUES ('A', 't', '0'), ('B', 't', '0'), ('C', 't', '1')) AS v(name, trait, value);
+
+# 1 internal node x 2 states = 2 rows; posteriors sum to 1.
+query II
+SELECT count(*), count(*) FILTER (WHERE NOT isfinite(probability))
+FROM phylo_ancestral_ml('star', 'star_traits');
+----
+2	0
+
+# =============================================================================
+# Scaling: a balanced tree with unit branch lengths, fitted rate, finite output.
+# =============================================================================
+
+statement ok
+CREATE TABLE big_tree AS
+  SELECT i AS node_index, 't' || i AS name,
+         CASE WHEN i = 0 THEN NULL ELSE 1.0 END AS branch_length,
+         NULL::BIGINT AS edge_id,
+         CASE WHEN i = 0 THEN NULL ELSE (i - 1) // 2 END AS parent_index
+  FROM range(8191) t(i);
+
+statement ok
+CREATE TABLE big_traits AS
+  SELECT 't' || i AS name, 'w' AS trait, (i % 2)::VARCHAR AS value
+  FROM range(8191) t(i) WHERE 2 * i + 1 >= 8191;
+
+# 4095 internal nodes * 2 states = 8190 rows, all probability finite; per-node sum 1.
+query III
+SELECT count(*), count(*) FILTER (WHERE NOT isfinite(probability)),
+       (SELECT count(*) FROM (SELECT node_index, sum(probability) s
+                              FROM phylo_ancestral_ml('big_tree', 'big_traits') GROUP BY 1) WHERE abs(s - 1.0) > 1e-9)
+FROM phylo_ancestral_ml('big_tree', 'big_traits');
+----
+8190	0	0
+
+# =============================================================================
+# SYM model (symmetric rates). The full rate matrix is always fitted by ML; the
+# reported `rate` column is NULL (a matrix has no single scalar rate). Posteriors
+# still sum to 1 per node and the log-likelihood is finite.
+# =============================================================================
+
+# 2 internal * 2 states = 4 rows; every `rate` is NULL; posteriors sum to 1 per node.
+query III
+SELECT count(*), count(*) FILTER (WHERE rate IS NOT NULL),
+       (SELECT count(*) FROM (SELECT node_index, sum(probability) s
+                              FROM phylo_ancestral_ml('gtree', 'gtraits', model := 'SYM') GROUP BY 1)
+        WHERE abs(s - 1.0) > 1e-9)
+FROM phylo_ancestral_ml('gtree', 'gtraits', model := 'SYM');
+----
+4	0	0
+
+# log_likelihood is finite, negative, and single-valued per trait.
+query II
+SELECT count(DISTINCT log_likelihood), count(*) FILTER (WHERE log_likelihood >= 0.0 OR NOT isfinite(log_likelihood))
+FROM phylo_ancestral_ml('gtree', 'gtraits', model := 'SYM');
+----
+1	0
+
+# Analytical reduction: at k=2 SYM has exactly one free rate, so it reduces to ER. The
+# per-(node,state) posteriors agree to ~1e-4 (SYM's Nelder-Mead vs ER's golden-section).
+query I
+SELECT count(*) FROM (
+  SELECT s.probability AS ps, e.probability AS pe
+  FROM phylo_ancestral_ml('gtree', 'gtraits', model := 'SYM') s
+  JOIN phylo_ancestral_ml('gtree', 'gtraits') e USING (node_index, trait, state)
+) WHERE abs(ps - pe) > 1e-4;
+----
+0
+
+# SYM on a k=3 multifurcation (3-way star): 1 internal node * 3 states = 3 rows, all
+# finite, rate NULL.
+statement ok
+CREATE TABLE star3_traits AS SELECT * FROM (VALUES ('A', 't', '0'), ('B', 't', '1'), ('C', 't', '2')) AS v(name, trait, value);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE rate IS NOT NULL OR NOT isfinite(probability))
+FROM phylo_ancestral_ml('star', 'star3_traits', model := 'SYM');
+----
+3	0
+
+# =============================================================================
+# ARD model (all rates different). Non-reversible; the full k(k-1)-rate matrix is
+# fitted by ML; the `rate` column is NULL. Posteriors still sum to 1.
+# =============================================================================
+
+# 2 internal * 2 states = 4 rows; every `rate` NULL; posteriors sum to 1 per node.
+query III
+SELECT count(*), count(*) FILTER (WHERE rate IS NOT NULL),
+       (SELECT count(*) FROM (SELECT node_index, sum(probability) s
+                              FROM phylo_ancestral_ml('gtree', 'gtraits', model := 'ARD') GROUP BY 1)
+        WHERE abs(s - 1.0) > 1e-9)
+FROM phylo_ancestral_ml('gtree', 'gtraits', model := 'ARD');
+----
+4	0	0
+
+# Nested-model invariant: ARD's maximized log-likelihood dominates ER's (ER is a submodel).
+query I
+SELECT count(*) FROM (
+  SELECT (SELECT DISTINCT log_likelihood FROM phylo_ancestral_ml('gtree', 'gtraits', model := 'ARD')) AS ard,
+         (SELECT DISTINCT log_likelihood FROM phylo_ancestral_ml('gtree', 'gtraits')) AS er
+) WHERE ard < er - 1e-6;
+----
+0
+
+# ARD on a k=3 multifurcation (3-way star): 1 internal * 3 states = 3 rows, finite, rate NULL.
+query II
+SELECT count(*), count(*) FILTER (WHERE rate IS NOT NULL OR NOT isfinite(probability))
+FROM phylo_ancestral_ml('star', 'star3_traits', model := 'ARD');
+----
+3	0
+
+# =============================================================================
+# Error matrix.
+# =============================================================================
+
+statement ok
+CREATE TABLE gtraits_missing AS SELECT * FROM (VALUES ('A', 't', '0'), ('B', 't', '1')) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_ancestral_ml('gtree', 'gtraits_missing');
+----
+no state for tip
+
+statement ok
+CREATE TABLE gtraits_extra AS SELECT * FROM (VALUES
+    ('A', 't', '0'), ('B', 't', '1'), ('C', 't', '0'), ('Z', 't', '1')
+) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_ancestral_ml('gtree', 'gtraits_extra');
+----
+not a tip
+
+statement ok
+CREATE TABLE gtraits_null AS SELECT * FROM (VALUES
+    ('A', 't', '0'), ('B', 't', '1'), ('C', 't', CAST(NULL AS VARCHAR))
+) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_ancestral_ml('gtree', 'gtraits_null');
+----
+NULL value
+
+# An unknown model errors (ER, SYM, ARD are the supported set).
+statement error
+SELECT * FROM phylo_ancestral_ml('gtree', 'gtraits', model := 'GTR');
+----
+model must be
+
+# The `rate` parameter fixes the single ER rate and cannot be combined with a rate-matrix
+# model (SYM or ARD, which fit a full matrix).
+statement error
+SELECT * FROM phylo_ancestral_ml('gtree', 'gtraits', model := 'SYM', rate := 0.5);
+----
+does not apply to model 'SYM'
+
+statement error
+SELECT * FROM phylo_ancestral_ml('gtree', 'gtraits', model := 'ARD', rate := 0.5);
+----
+does not apply to model 'ARD'
+
+# SYM fits k(k-1)/2 rates by a simplex search, so the state count is capped (k > 8);
+# high-state traits error and are pointed at ER.
+statement ok
+CREATE TABLE star9 AS SELECT * FROM (VALUES
+    (0, 'A', 1.0, CAST(NULL AS BIGINT), 9), (1, 'B', 1.0, NULL, 9), (2, 'C', 1.0, NULL, 9),
+    (3, 'D', 1.0, NULL, 9), (4, 'E', 1.0, NULL, 9), (5, 'F', 1.0, NULL, 9), (6, 'G', 1.0, NULL, 9),
+    (7, 'H', 1.0, NULL, 9), (8, 'J', 1.0, NULL, 9), (9, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE star9_traits AS SELECT * FROM (VALUES
+    ('A', 't', '0'), ('B', 't', '1'), ('C', 't', '2'), ('D', 't', '3'), ('E', 't', '4'),
+    ('F', 't', '5'), ('G', 't', '6'), ('H', 't', '7'), ('J', 't', '8')
+) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_ancestral_ml('star9', 'star9_traits', model := 'SYM');
+----
+model 'ER'
+
+# ARD fits k(k-1) rates, so its ceiling is tighter (k > 6). A 7-state trait errors.
+statement ok
+CREATE TABLE star7 AS SELECT * FROM (VALUES
+    (0, 'A', 1.0, CAST(NULL AS BIGINT), 7), (1, 'B', 1.0, NULL, 7), (2, 'C', 1.0, NULL, 7),
+    (3, 'D', 1.0, NULL, 7), (4, 'E', 1.0, NULL, 7), (5, 'F', 1.0, NULL, 7), (6, 'G', 1.0, NULL, 7),
+    (7, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE star7_traits AS SELECT * FROM (VALUES
+    ('A', 't', '0'), ('B', 't', '1'), ('C', 't', '2'), ('D', 't', '3'), ('E', 't', '4'),
+    ('F', 't', '5'), ('G', 't', '6')
+) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_ancestral_ml('star7', 'star7_traits', model := 'ARD');
+----
+model 'ER'
+
+# A non-positive fixed rate is rejected.
+statement error
+SELECT * FROM phylo_ancestral_ml('gtree', 'gtraits', rate := -1.0);
+----
+positive
+
+# A non-finite fixed rate is rejected.
+statement error
+SELECT * FROM phylo_ancestral_ml('gtree', 'gtraits', rate := 'infinity'::DOUBLE);
+----
+finite
+
+# An effectively-zero (but positive) branch length that hard-pins conflicting sibling
+# tips fails loud rather than emitting a NaN/-inf silently. A fixed small rate forces
+# the zero-likelihood regime (with a fitted rate the optimizer escapes to a huge rate).
+statement ok
+CREATE TABLE tinytree AS SELECT * FROM (VALUES
+    (0, 'A', 1e-18, CAST(NULL AS BIGINT), 3),
+    (1, 'B', 1e-18, NULL, 3),
+    (2, 'C', 1.0,   NULL, 3),
+    (3, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE tinytraits AS SELECT * FROM (VALUES ('A', 't', '0'), ('B', 't', '1'), ('C', 't', '0')) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_ancestral_ml('tinytree', 'tinytraits', rate := 0.5);
+----
+effectively-zero-length
+
+# A zero-length tip edge is rejected (ML requires positive tip edges).
+statement ok
+CREATE TABLE ztiptree AS SELECT * FROM (VALUES
+    (0, 'A',    0.0, CAST(NULL AS BIGINT), 2),
+    (1, 'B',    1.0, NULL, 2),
+    (2, 'E',    1.0, NULL, 4),
+    (3, 'C',    1.0, NULL, 4),
+    (4, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement error
+SELECT * FROM phylo_ancestral_ml('ztiptree', 'gtraits');
+----
+positive
+
+# A non-finite (missing) branch length on a non-root edge is rejected.
+statement ok
+CREATE TABLE nanbltree AS SELECT * FROM (VALUES
+    (0, 'A',    CAST(NULL AS DOUBLE), CAST(NULL AS BIGINT), 2),
+    (1, 'B',    1.0, NULL, 2),
+    (2, 'E',    1.0, NULL, 4),
+    (3, 'C',    1.0, NULL, 4),
+    (4, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement error
+SELECT * FROM phylo_ancestral_ml('nanbltree', 'gtraits');
+----
+non-finite
+
+statement error
+SELECT * FROM phylo_ancestral_ml('no_tree', 'gtraits');
+----
+does not exist
+
+statement ok
+CREATE TABLE bad_tree AS SELECT 1 AS x;
+
+statement error
+SELECT * FROM phylo_ancestral_ml('bad_tree', 'gtraits');
+----
+node_index
+
+statement ok
+CREATE TABLE bad_traits AS SELECT 1 AS x;
+
+statement error
+SELECT * FROM phylo_ancestral_ml('gtree', 'bad_traits');
+----
+name

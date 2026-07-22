@@ -1,0 +1,70 @@
+# name: test/sql/phylo_ancestral_states_parity.test
+# description: phylo_ancestral_states parity vs independent ground-truth GLS ancestral reconstruction
+# group: [sql]
+
+# Ground-truth reference: Brownian-motion ancestral states via the phylogenetic
+# variance-covariance matrix + GLS -- a DIFFERENT algorithm from our C++ two-pass,
+# on moderate random trees, so agreement is strong independent corroboration. The
+# goldens under data/asr/ were generated OFFLINE by a dev-only R + ape script kept out
+# of this BSD tree (../duckdb-miint-localdocs/gen_asr_oracle.R) and committed as NUMBERS
+# only (never ape's code). run_tests.sh exports MIINT_ASR_PARITY_OK when the committed
+# goldens are intact. NB: ape::ace(method="ML") is NOT the oracle -- its
+# continuous-ML reconstruction is inaccurate (off ~1e-2 where our method matches
+# this GLS truth to ~1e-14).
+
+require miint
+
+require-env MIINT_ASR_PARITY_OK
+
+# ---- Bifurcating case (60 tips, 59 internal nodes) ----
+statement ok
+CREATE TABLE bif_tree AS SELECT * FROM read_csv_auto('data/asr/bm_bifurcating_tree.csv', nullstr='');
+
+statement ok
+CREATE TABLE bif_traits AS SELECT * FROM read_csv_auto('data/asr/bm_bifurcating_traits.csv');
+
+statement ok
+CREATE TABLE bif_expected AS SELECT * FROM read_csv_auto('data/asr/bm_bifurcating_expected.csv');
+
+# Every internal node's estimate matches the GLS ground truth (tight tolerance).
+query I
+SELECT count(*) FROM phylo_ancestral_states('bif_tree', 'bif_traits') a
+JOIN bif_tree t ON a.node_index = t.node_index
+JOIN bif_expected e ON t.name = e.name
+WHERE abs(a.estimate - e.estimate) > 1e-9;
+----
+0
+
+# The join covers all 59 internal nodes (nothing silently unmatched).
+query I
+SELECT count(*) FROM phylo_ancestral_states('bif_tree', 'bif_traits') a
+JOIN bif_tree t ON a.node_index = t.node_index
+JOIN bif_expected e ON t.name = e.name;
+----
+59
+
+# ---- Multifurcating case (60 tips, 52 internal nodes, internal polytomies) ----
+# Proves the O(n) leave-one-out up-pass is correct on multifurcations vs ground truth.
+statement ok
+CREATE TABLE mul_tree AS SELECT * FROM read_csv_auto('data/asr/bm_multifurcating_tree.csv', nullstr='');
+
+statement ok
+CREATE TABLE mul_traits AS SELECT * FROM read_csv_auto('data/asr/bm_multifurcating_traits.csv');
+
+statement ok
+CREATE TABLE mul_expected AS SELECT * FROM read_csv_auto('data/asr/bm_multifurcating_expected.csv');
+
+query I
+SELECT count(*) FROM phylo_ancestral_states('mul_tree', 'mul_traits') a
+JOIN mul_tree t ON a.node_index = t.node_index
+JOIN mul_expected e ON t.name = e.name
+WHERE abs(a.estimate - e.estimate) > 1e-9;
+----
+0
+
+query I
+SELECT count(*) FROM phylo_ancestral_states('mul_tree', 'mul_traits') a
+JOIN mul_tree t ON a.node_index = t.node_index
+JOIN mul_expected e ON t.name = e.name;
+----
+52

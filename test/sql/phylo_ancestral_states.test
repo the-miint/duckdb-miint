@@ -1,0 +1,310 @@
+# name: test/sql/phylo_ancestral_states.test
+# description: Test phylo_ancestral_states (continuous Brownian-motion ancestral state reconstruction)
+# group: [sql]
+
+require miint
+
+# =============================================================================
+# Golden tree: ((A:1,B:3)E:2,C:4)root;  internal nodes E=2, root=4.
+# Two traits, long form. Expected estimates/variances are hand-derived (see
+# test/cpp/test_AncestralStatesContinuous.cpp); the root estimate equals PIC's
+# root ancestral_estimate (a cross-check), and the interior node E's marginal
+# differs from its PIC down-pass value because the up-pass folds in the rest of
+# the tree. Variance uses the REML BM-rate estimate; CIs are estimate +/- z*sd
+# with z = qnorm(0.975).
+# =============================================================================
+
+statement ok
+CREATE TABLE gtree AS SELECT * FROM (VALUES
+    (0, 'A',    1.0, CAST(NULL AS BIGINT), 2),
+    (1, 'B',    3.0, NULL, 2),
+    (2, 'E',    2.0, NULL, 4),
+    (3, 'C',    4.0, NULL, 4),
+    (4, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE gtraits AS SELECT * FROM (VALUES
+    ('A', 'X', 2.0), ('B', 'X', 6.0), ('C', 'X', 1.0),
+    ('A', 'Y', 5.0), ('B', 'Y', 1.0), ('C', 'Y', 0.0)
+) AS v(name, trait, value);
+
+# 2 internal nodes x 2 traits = 4 rows.
+query I
+SELECT count(*) FROM phylo_ancestral_states('gtree', 'gtraits');
+----
+4
+
+# Every value matches the hand-derived golden (estimate + variance), and the CI is
+# estimate +/- z*sqrt(variance) with z = qnorm(0.975).
+query I
+WITH expected(node_index, trait, estimate, variance) AS (
+    VALUES
+        (2, 'X', 2.7777778, 1.5308642),
+        (4, 'X', 2.1851852, 3.7421124),
+        (2, 'Y', 3.5555556, 2.1234568),
+        (4, 'Y', 2.3703704, 5.1906721)
+)
+SELECT count(*)
+FROM phylo_ancestral_states('gtree', 'gtraits') p
+JOIN expected e ON p.node_index = e.node_index AND p.trait = e.trait
+WHERE abs(p.estimate - e.estimate) > 1e-6
+   OR abs(p.variance - e.variance) > 1e-6
+   OR abs(p.ci_low  - (e.estimate - 1.959963984540054 * sqrt(e.variance))) > 1e-6
+   OR abs(p.ci_high - (e.estimate + 1.959963984540054 * sqrt(e.variance))) > 1e-6;
+----
+0
+
+# The root marginal equals PIC's root ancestral_estimate (free cross-check).
+query I
+SELECT count(*)
+FROM phylo_ancestral_states('gtree', 'gtraits') a
+JOIN phylo_independent_contrasts('gtree', 'gtraits') p
+  ON a.node_index = p.node_index AND a.trait = p.trait
+WHERE a.node_index = 4 AND abs(a.estimate - p.ancestral_estimate) > 1e-9;
+----
+0
+
+# =============================================================================
+# Multifurcation IS supported (unlike PIC, which errors on a polytomy). A 3-way
+# star has one internal node whose estimate is the PRECISION-weighted mean of the
+# tips: (4/1 + 6/2 + 8/4)/(1/1 + 1/2 + 1/4) = 9/1.75 = 36/7.
+# =============================================================================
+
+statement ok
+CREATE TABLE star AS SELECT * FROM (VALUES
+    (0, 'A', 1.0, CAST(NULL AS BIGINT), 3),
+    (1, 'B', 2.0, NULL, 3),
+    (2, 'C', 4.0, NULL, 3),
+    (3, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE star_traits AS SELECT * FROM (VALUES ('A', 'm', 4.0), ('B', 'm', 6.0), ('C', 'm', 8.0)) AS v(name, trait, value);
+
+query I
+SELECT count(*) FROM phylo_ancestral_states('star', 'star_traits');
+----
+1
+
+query I
+SELECT count(*) FROM phylo_ancestral_states('star', 'star_traits')
+WHERE node_index = 3 AND abs(estimate - 36.0/7.0) < 1e-9;
+----
+1
+
+# =============================================================================
+# node_index remap: output carries the caller's ORIGINAL node_index, not the
+# internal dense index (rows deliberately out of ascending order).
+# =============================================================================
+
+statement ok
+CREATE TABLE reindexed AS SELECT * FROM (VALUES
+    (10, 'A',    1.0, CAST(NULL AS BIGINT), 20),
+    (30, 'B',    3.0, NULL, 20),
+    (20, 'E',    2.0, NULL, 5),
+    (40, 'C',    4.0, NULL, 5),
+    (5,  'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE node_index NOT IN (5, 20))
+FROM phylo_ancestral_states('reindexed', 'gtraits');
+----
+4	0
+
+# =============================================================================
+# Type-flexible tip keys: BIGINT names match tip labels by canonical text.
+# Tips are 100, 200, 300; node 900 is an internal node (children 100, 200).
+# =============================================================================
+
+statement ok
+CREATE TABLE btree AS SELECT * FROM (VALUES
+    (0, CAST(100 AS BIGINT), 1.0, CAST(NULL AS BIGINT), 3),
+    (1, 200, 1.0, NULL, 3),
+    (2, 300, 1.0, NULL, 4),
+    (3, 900, 1.0, NULL, 4),
+    (4, CAST(NULL AS BIGINT), NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE btraits AS SELECT * FROM (VALUES
+    (CAST(100 AS BIGINT), 'w', 1.0), (200, 'w', 2.0), (300, 'w', 3.0)
+) AS v(name, trait, value);
+
+query I
+SELECT count(*) FROM phylo_ancestral_states('btree', 'btraits');
+----
+2
+
+# =============================================================================
+# Views work for both inputs.
+# =============================================================================
+
+statement ok
+CREATE VIEW gtree_v AS SELECT * FROM gtree;
+
+statement ok
+CREATE VIEW gtraits_v AS SELECT * FROM gtraits;
+
+query I
+SELECT count(*) FROM phylo_ancestral_states('gtree_v', 'gtraits_v');
+----
+4
+
+# =============================================================================
+# Scaling: a large balanced tree and a wide polytomy both yield finite estimates
+# and stay fast (guard against O(n^2) / stack-overflow regressions; the wide star
+# specifically exercises the O(n) leave-one-out up-pass at a degree-10000 node).
+# =============================================================================
+
+# Balanced complete binary tree, 2^14 = 16384 tips (32767 nodes): node i has
+# parent (i-1)//2, so tips are i with 2*i+1 >= 32767 (i >= 16383).
+statement ok
+CREATE TABLE big_tree AS
+  SELECT i AS node_index, 't' || i AS name,
+         CASE WHEN i = 0 THEN NULL ELSE 1.0 END AS branch_length,
+         NULL::BIGINT AS edge_id,
+         CASE WHEN i = 0 THEN NULL ELSE (i - 1) // 2 END AS parent_index
+  FROM range(32767) t(i);
+
+statement ok
+CREATE TABLE big_traits AS
+  SELECT 't' || i AS name, 'w' AS trait, (i % 997)::DOUBLE AS value
+  FROM range(32767) t(i) WHERE 2 * i + 1 >= 32767;
+
+# 16383 internal nodes -> 16383 estimates, all finite.
+query II
+SELECT count(*), count(*) FILTER (WHERE NOT (isfinite(estimate) AND isfinite(variance)))
+FROM phylo_ancestral_states('big_tree', 'big_traits');
+----
+16383	0
+
+# Wide star: 10000 tips under one root (a degree-10000 polytomy). One internal
+# node; the up-pass computes 10000 leave-one-out cavities in O(n), not O(n^2).
+statement ok
+CREATE TABLE wide_star AS
+  SELECT i AS node_index, CASE WHEN i = 0 THEN 'root' ELSE 't' || i END AS name,
+         CASE WHEN i = 0 THEN NULL ELSE 1.0 END AS branch_length,
+         NULL::BIGINT AS edge_id,
+         CASE WHEN i = 0 THEN NULL ELSE 0 END AS parent_index
+  FROM range(10001) t(i);
+
+statement ok
+CREATE TABLE wide_star_traits AS
+  SELECT 't' || i AS name, 'w' AS trait, (i % 997)::DOUBLE AS value FROM range(1, 10001) t(i);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE NOT isfinite(estimate))
+FROM phylo_ancestral_states('wide_star', 'wide_star_traits');
+----
+1	0
+
+# =============================================================================
+# Error: a zero-length tip edge is rejected (would pin the estimate / break the
+# leave-one-out). This is an intentional departure from PIC.
+# =============================================================================
+
+statement ok
+CREATE TABLE ztiptree AS SELECT * FROM (VALUES
+    (0, 'A',    0.0, CAST(NULL AS BIGINT), 2),
+    (1, 'B',    3.0, NULL, 2),
+    (2, 'E',    2.0, NULL, 4),
+    (3, 'C',    4.0, NULL, 4),
+    (4, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement error
+SELECT * FROM phylo_ancestral_states('ztiptree', 'gtraits');
+----
+positive
+
+# A zero-length INTERNAL edge is allowed (resolver connectors). Give E branch 0.
+statement ok
+CREATE TABLE zinttree AS SELECT * FROM (VALUES
+    (0, 'A',    1.0, CAST(NULL AS BIGINT), 2),
+    (1, 'B',    3.0, NULL, 2),
+    (2, 'E',    0.0, NULL, 4),
+    (3, 'C',    4.0, NULL, 4),
+    (4, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+query I
+SELECT count(*) FROM phylo_ancestral_states('zinttree', 'gtraits');
+----
+4
+
+# =============================================================================
+# Error: trait/tip mismatches and bad relations/columns.
+# =============================================================================
+
+# A tip with no trait value.
+statement ok
+CREATE TABLE gtraits_missing AS SELECT * FROM (VALUES ('A', 'X', 2.0), ('B', 'X', 6.0)) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_ancestral_states('gtree', 'gtraits_missing');
+----
+no trait value
+
+# A trait value for a name that is not a tip.
+statement ok
+CREATE TABLE gtraits_extra AS SELECT * FROM (VALUES
+    ('A', 'X', 2.0), ('B', 'X', 6.0), ('C', 'X', 1.0), ('Z', 'X', 9.0)
+) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_ancestral_states('gtree', 'gtraits_extra');
+----
+not a tip
+
+# A non-finite trait value (NaN) is rejected -- it would silently poison the whole
+# output (means + the shared REML rate), so we fail loud.
+statement ok
+CREATE TABLE gtraits_nan AS SELECT * FROM (VALUES
+    ('A', 'X', 2.0), ('B', 'X', 6.0), ('C', 'X', CAST('nan' AS DOUBLE))
+) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_ancestral_states('gtree', 'gtraits_nan');
+----
+non-finite
+
+# A unifurcation (internal node with a single child) is rejected with a shear_tree
+# hint. Here node 2 (E) has only child 0 (A); tips are A and B.
+statement ok
+CREATE TABLE unifurc AS SELECT * FROM (VALUES
+    (0, 'A',    1.0, CAST(NULL AS BIGINT), 2),
+    (1, 'B',    3.0, NULL, 3),
+    (2, 'E',    2.0, NULL, 3),
+    (3, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE unifurc_traits AS SELECT * FROM (VALUES ('A', 'w', 1.0), ('B', 'w', 2.0)) AS v(name, trait, value);
+
+statement error
+SELECT * FROM phylo_ancestral_states('unifurc', 'unifurc_traits');
+----
+shear_tree
+
+statement error
+SELECT * FROM phylo_ancestral_states('no_tree', 'gtraits');
+----
+does not exist
+
+statement ok
+CREATE TABLE bad_tree AS SELECT 1 AS x;
+
+statement error
+SELECT * FROM phylo_ancestral_states('bad_tree', 'gtraits');
+----
+node_index
+
+statement ok
+CREATE TABLE bad_traits AS SELECT 1 AS x;
+
+statement error
+SELECT * FROM phylo_ancestral_states('gtree', 'bad_traits');
+----
+name
