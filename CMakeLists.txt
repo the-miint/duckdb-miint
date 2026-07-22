@@ -23,7 +23,42 @@ find_package(expat CONFIG REQUIRED)
 # the non-ER rate matrices. EIGEN_MPL2_ONLY restricts to Eigen's pure-MPL2 subset so no
 # stronger-copyleft file is pulled in, keeping miint's Modified-BSD license clean. This
 # is miint's own decoupled Eigen dependency (vcpkg eigen3), NOT skbb's UNIFRAC-gated copy.
-find_package(Eigen3 CONFIG REQUIRED)
+#
+# Production and local builds resolve Eigen from vcpkg (or a system install) via the
+# CONFIG package. The Code-Quality "Tidy Check" CI lane, however, runs a no-vcpkg CMake
+# configure (it installs only ninja/clang-tidy) yet still has to parse NewickTree.cpp's
+# Eigen includes, so a hard find_package(... REQUIRED) fails that configure before
+# clang-tidy can run. When the CONFIG package is absent, fall back to a pinned,
+# SHA-verified header-only Eigen fetched at configure time (header-only: no build step;
+# same 3.4.0 tarball + SHA that ext/scikit-bio-binaries/scripts/fetch_eigen.sh trusts).
+# SOURCE_SUBDIR points at a nonexistent dir so FetchContent only downloads/extracts and
+# does NOT add_subdirectory Eigen's own CMake (which would pull in its test/GPL targets).
+# Real builds never take the fallback -- the CONFIG package is found first.
+find_package(Eigen3 CONFIG QUIET)
+if(NOT TARGET Eigen3::Eigen)
+    message(
+        STATUS
+        "Eigen3 CONFIG package not found; fetching pinned header-only Eigen 3.4.0 (tidy/no-vcpkg fallback)"
+    )
+    include(FetchContent)
+    FetchContent_Declare(
+        eigen_fallback
+        URL
+        https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
+        URL_HASH
+        SHA256=8586084f71f9bde545ee7fa6d00288b264a2b7ac3607b974e54d13e7162c1c72
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        SOURCE_SUBDIR __miint_no_eigen_configure__
+    )
+    FetchContent_MakeAvailable(eigen_fallback)
+    if(NOT TARGET Eigen3::Eigen)
+        add_library(Eigen3::Eigen INTERFACE IMPORTED)
+        set_target_properties(
+            Eigen3::Eigen
+            PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${eigen_fallback_SOURCE_DIR}"
+        )
+    endif()
+endif()
 add_compile_definitions(EIGEN_MPL2_ONLY)
 
 # libcurl powers the streaming HTTPS-PUT / FTP / FTPS transport in
