@@ -1,0 +1,188 @@
+# name: test/sql/simulate_gradient_otus_parity.test
+# description: simulate_gradient_otus statistical equivalence to the committed Kuczynski-2010 oracle bands
+# group: [sql]
+
+# The oracle bands (mean/lo/hi per param-set x statistic) were generated OFFLINE by
+# running the actual Python-2.7 ord_survey generation code over R=1000 replicates and
+# committed as NUMBERS only under data/simsurvey/ (the generator itself is not in this
+# tree). run_tests.sh exports MIINT_RESEMBLANCE_SIM_ORACLE_OK when the SHA-pinned
+# fixtures are intact. Each statistic is recomputed in SQL from the emitted COO and
+# must fall inside its committed [lo,hi] band. Bray-Curtis uses the identity
+# L1 = Da+Db-2*sum_shared(min), so an INNER JOIN on shared OTUs suffices; this
+# equals sum|a-b|/(Da+Db) for ANY depths (the identity is not depth-restricted --
+# here every sample happens to have depth D by construction), no full-outer-join needed.
+
+require miint
+
+require-env MIINT_RESEMBLANCE_SIM_ORACLE_OK
+
+statement ok
+CREATE TABLE soil AS SELECT * FROM read_csv_auto('data/simsurvey/soil_abundances.csv');
+
+statement ok
+CREATE TABLE grad_oracle AS SELECT * FROM read_csv_auto('data/simsurvey/gradient_oracle.csv');
+
+# Table-function args must be constant-foldable (no subqueries); stage the abundance
+# vector into a session variable so it folds to a LIST(DOUBLE) constant.
+statement ok
+SET VARIABLE soil_abund = (SELECT list(abund ORDER BY idx) FROM soil);
+
+# --- one realization per parameter set at a fixed seed ---
+statement ok
+CREATE TABLE g_pn20 AS SELECT * FROM simulate_gradient_otus(
+  getvariable('soil_abund'), 20, 1000, noise := 0.5, noise_type := '*sample', seed := 42);
+
+statement ok
+CREATE TABLE g_sn20 AS SELECT * FROM simulate_gradient_otus(
+  getvariable('soil_abund'), 20, 1000, noise := 1.0, noise_type := '*sample', seed := 42);
+
+statement ok
+CREATE TABLE g_pn100 AS SELECT * FROM simulate_gradient_otus(
+  getvariable('soil_abund'), 100, 1000, noise := 0.5, noise_type := '*sample', seed := 42);
+
+statement ok
+CREATE TABLE g_sn100 AS SELECT * FROM simulate_gradient_otus(
+  getvariable('soil_abund'), 100, 1000, noise := 1.0, noise_type := '*sample', seed := 42);
+
+# ---------- richness_mean = avg over samples of (# nonzero OTUs) ----------
+query I
+WITH s AS (SELECT avg(r) v FROM (SELECT sample_id, count(*) r FROM g_pn20 GROUP BY sample_id))
+SELECT count(*) FROM s, grad_oracle o
+WHERE o.param_set='gradient_prominent_N20_D1000' AND o.statistic='richness_mean' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+query I
+WITH s AS (SELECT avg(r) v FROM (SELECT sample_id, count(*) r FROM g_sn20 GROUP BY sample_id))
+SELECT count(*) FROM s, grad_oracle o
+WHERE o.param_set='gradient_subtle_N20_D1000' AND o.statistic='richness_mean' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+query I
+WITH s AS (SELECT avg(r) v FROM (SELECT sample_id, count(*) r FROM g_pn100 GROUP BY sample_id))
+SELECT count(*) FROM s, grad_oracle o
+WHERE o.param_set='gradient_prominent_N100_D1000' AND o.statistic='richness_mean' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+query I
+WITH s AS (SELECT avg(r) v FROM (SELECT sample_id, count(*) r FROM g_sn100 GROUP BY sample_id))
+SELECT count(*) FROM s, grad_oracle o
+WHERE o.param_set='gradient_subtle_N100_D1000' AND o.statistic='richness_mean' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+# ---------- top10_frac = pooled top-10 OTU counts / grand total ----------
+query I
+WITH s AS (SELECT (SELECT sum(c) FROM (SELECT otu_id, sum("count") c FROM g_pn20 GROUP BY otu_id ORDER BY c DESC LIMIT 10))
+                  / (SELECT sum("count") FROM g_pn20) v)
+SELECT count(*) FROM s, grad_oracle o
+WHERE o.param_set='gradient_prominent_N20_D1000' AND o.statistic='top10_frac' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+query I
+WITH s AS (SELECT (SELECT sum(c) FROM (SELECT otu_id, sum("count") c FROM g_sn20 GROUP BY otu_id ORDER BY c DESC LIMIT 10))
+                  / (SELECT sum("count") FROM g_sn20) v)
+SELECT count(*) FROM s, grad_oracle o
+WHERE o.param_set='gradient_subtle_N20_D1000' AND o.statistic='top10_frac' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+query I
+WITH s AS (SELECT (SELECT sum(c) FROM (SELECT otu_id, sum("count") c FROM g_pn100 GROUP BY otu_id ORDER BY c DESC LIMIT 10))
+                  / (SELECT sum("count") FROM g_pn100) v)
+SELECT count(*) FROM s, grad_oracle o
+WHERE o.param_set='gradient_prominent_N100_D1000' AND o.statistic='top10_frac' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+query I
+WITH s AS (SELECT (SELECT sum(c) FROM (SELECT otu_id, sum("count") c FROM g_sn100 GROUP BY otu_id ORDER BY c DESC LIMIT 10))
+                  / (SELECT sum("count") FROM g_sn100) v)
+SELECT count(*) FROM s, grad_oracle o
+WHERE o.param_set='gradient_subtle_N100_D1000' AND o.statistic='top10_frac' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+# ---------- dist_decay_corr = corr(pairwise Bray-Curtis, |delta gradient_position|) ----------
+query I
+WITH depths AS (SELECT sample_id, sum("count") d, any_value(gradient_position) pos FROM g_pn20 GROUP BY sample_id),
+     shared AS (SELECT a.sample_id sa, b.sample_id sb, sum(least(a."count", b."count")) c
+                FROM g_pn20 a JOIN g_pn20 b ON a.otu_id=b.otu_id AND a.sample_id < b.sample_id
+                GROUP BY a.sample_id, b.sample_id),
+     bc AS (SELECT 1.0 - 2.0*coalesce(sh.c,0)/(da.d+db.d) bcval, abs(da.pos-db.pos) dpos
+            FROM depths da JOIN depths db ON da.sample_id < db.sample_id
+            LEFT JOIN shared sh ON sh.sa=da.sample_id AND sh.sb=db.sample_id),
+     s AS (SELECT corr(bcval, dpos) v FROM bc)
+SELECT count(*) FROM s, grad_oracle o
+WHERE o.param_set='gradient_prominent_N20_D1000' AND o.statistic='dist_decay_corr' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+query I
+WITH depths AS (SELECT sample_id, sum("count") d, any_value(gradient_position) pos FROM g_sn20 GROUP BY sample_id),
+     shared AS (SELECT a.sample_id sa, b.sample_id sb, sum(least(a."count", b."count")) c
+                FROM g_sn20 a JOIN g_sn20 b ON a.otu_id=b.otu_id AND a.sample_id < b.sample_id
+                GROUP BY a.sample_id, b.sample_id),
+     bc AS (SELECT 1.0 - 2.0*coalesce(sh.c,0)/(da.d+db.d) bcval, abs(da.pos-db.pos) dpos
+            FROM depths da JOIN depths db ON da.sample_id < db.sample_id
+            LEFT JOIN shared sh ON sh.sa=da.sample_id AND sh.sb=db.sample_id),
+     s AS (SELECT corr(bcval, dpos) v FROM bc)
+SELECT count(*) FROM s, grad_oracle o
+WHERE o.param_set='gradient_subtle_N20_D1000' AND o.statistic='dist_decay_corr' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+query I
+WITH depths AS (SELECT sample_id, sum("count") d, any_value(gradient_position) pos FROM g_pn100 GROUP BY sample_id),
+     shared AS (SELECT a.sample_id sa, b.sample_id sb, sum(least(a."count", b."count")) c
+                FROM g_pn100 a JOIN g_pn100 b ON a.otu_id=b.otu_id AND a.sample_id < b.sample_id
+                GROUP BY a.sample_id, b.sample_id),
+     bc AS (SELECT 1.0 - 2.0*coalesce(sh.c,0)/(da.d+db.d) bcval, abs(da.pos-db.pos) dpos
+            FROM depths da JOIN depths db ON da.sample_id < db.sample_id
+            LEFT JOIN shared sh ON sh.sa=da.sample_id AND sh.sb=db.sample_id),
+     s AS (SELECT corr(bcval, dpos) v FROM bc)
+SELECT count(*) FROM s, grad_oracle o
+WHERE o.param_set='gradient_prominent_N100_D1000' AND o.statistic='dist_decay_corr' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+query I
+WITH depths AS (SELECT sample_id, sum("count") d, any_value(gradient_position) pos FROM g_sn100 GROUP BY sample_id),
+     shared AS (SELECT a.sample_id sa, b.sample_id sb, sum(least(a."count", b."count")) c
+                FROM g_sn100 a JOIN g_sn100 b ON a.otu_id=b.otu_id AND a.sample_id < b.sample_id
+                GROUP BY a.sample_id, b.sample_id),
+     bc AS (SELECT 1.0 - 2.0*coalesce(sh.c,0)/(da.d+db.d) bcval, abs(da.pos-db.pos) dpos
+            FROM depths da JOIN depths db ON da.sample_id < db.sample_id
+            LEFT JOIN shared sh ON sh.sa=da.sample_id AND sh.sb=db.sample_id),
+     s AS (SELECT corr(bcval, dpos) v FROM bc)
+SELECT count(*) FROM s, grad_oracle o
+WHERE o.param_set='gradient_subtle_N100_D1000' AND o.statistic='dist_decay_corr' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+# Cross-check: distance-decay is stronger for prominent (c=0.5) than subtle (c=1.0)
+# -- the qualitative Kuczynski-2010 gradient signature. g_pn20/g_sn20 share seed,
+# num_samples and species count, so their optima + underlying standard-normal draws
+# are common (only the noise scale differs, 0.5x vs 1.0x): a coupled comparison, not
+# two independent draws. A margin of 0.1 keeps it robust without depending on that
+# coupling being exact (oracle means differ by ~0.44, far above the margin).
+query I
+WITH corr_of AS (
+  SELECT 'p20' k, corr(bcval,dpos) v FROM (
+    SELECT 1.0-2.0*coalesce(sh.c,0)/(da.d+db.d) bcval, abs(da.pos-db.pos) dpos
+    FROM (SELECT sample_id,sum("count") d,any_value(gradient_position) pos FROM g_pn20 GROUP BY sample_id) da
+    JOIN (SELECT sample_id,sum("count") d,any_value(gradient_position) pos FROM g_pn20 GROUP BY sample_id) db ON da.sample_id<db.sample_id
+    LEFT JOIN (SELECT a.sample_id sa,b.sample_id sb,sum(least(a."count",b."count")) c FROM g_pn20 a JOIN g_pn20 b ON a.otu_id=b.otu_id AND a.sample_id<b.sample_id GROUP BY 1,2) sh ON sh.sa=da.sample_id AND sh.sb=db.sample_id)
+  UNION ALL
+  SELECT 's20' k, corr(bcval,dpos) v FROM (
+    SELECT 1.0-2.0*coalesce(sh.c,0)/(da.d+db.d) bcval, abs(da.pos-db.pos) dpos
+    FROM (SELECT sample_id,sum("count") d,any_value(gradient_position) pos FROM g_sn20 GROUP BY sample_id) da
+    JOIN (SELECT sample_id,sum("count") d,any_value(gradient_position) pos FROM g_sn20 GROUP BY sample_id) db ON da.sample_id<db.sample_id
+    LEFT JOIN (SELECT a.sample_id sa,b.sample_id sb,sum(least(a."count",b."count")) c FROM g_sn20 a JOIN g_sn20 b ON a.otu_id=b.otu_id AND a.sample_id<b.sample_id GROUP BY 1,2) sh ON sh.sa=da.sample_id AND sh.sb=db.sample_id)
+)
+SELECT (SELECT v FROM corr_of WHERE k='p20') - (SELECT v FROM corr_of WHERE k='s20') > 0.1;
+----
+true

@@ -200,6 +200,22 @@ else
     echo "Warning: ASR parity goldens missing or corrupt; parity test skipped"
 fi
 
+# Resemblance-simulator (Kuczynski 2010) statistical oracle bands: committed
+# tolerance bands (mean/lo/hi per param-set x statistic) that the SQL tests check
+# simulate_gradient_otus / simulate_cluster_otus against by statistical equivalence.
+# The bands ARE the fixed expected output -- committed under data/simsurvey/ and
+# pinned by data/simsurvey/simsurvey_oracle.sha256. The generator (the actual
+# Python-2.7 ord_survey code, run in a throwaway conda env) is dev-only and
+# deliberately kept out of this BSD tree; only its numeric bands are committed.
+# The gate below just verifies the committed fixtures are intact before the
+# stat-equivalence tests run (require-env MIINT_RESEMBLANCE_SIM_ORACLE_OK).
+if [ -f data/simsurvey/simsurvey_oracle.sha256 ] && \
+        (cd data/simsurvey && sha256sum -c --quiet simsurvey_oracle.sha256) 2>/dev/null; then
+    export MIINT_RESEMBLANCE_SIM_ORACLE_OK=1
+else
+    echo "Warning: resemblance-sim oracle fixtures missing or corrupt; stat-equivalence tests skipped"
+fi
+
 # NCBI BLAST network reachability. Probes the BLAST CGI endpoint so
 # live blast tests can skip gracefully in offline CI.
 if curl -sSf --max-time 5 -o /dev/null \

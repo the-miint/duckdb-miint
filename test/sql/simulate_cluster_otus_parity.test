@@ -1,0 +1,203 @@
+# name: test/sql/simulate_cluster_otus_parity.test
+# description: simulate_cluster_otus statistical equivalence to the committed Kuczynski-2010 oracle bands
+# group: [sql]
+
+# Oracle bands generated OFFLINE from the actual Python-2.7 ord_survey cluster code
+# over R=1000 replicates, committed as NUMBERS only under data/simsurvey/. Gated by
+# MIINT_RESEMBLANCE_SIM_ORACLE_OK (exported by run_tests.sh when the SHA-pinned
+# fixtures are intact). dissim_ratio = mean(inter-cluster L1)/mean(intra-cluster L1)
+# on RELATIVE abundances; L1_rel = 2 - 2*sum_shared(min(ra,rb)) (the same shared-min
+# identity as Bray-Curtis, no full-outer-join needed).
+
+require miint
+
+require-env MIINT_RESEMBLANCE_SIM_ORACLE_OK
+
+statement ok
+CREATE TABLE kbd AS SELECT * FROM read_csv_auto('data/simsurvey/keyboard_abundances.csv');
+
+statement ok
+CREATE TABLE clust_oracle AS SELECT * FROM read_csv_auto('data/simsurvey/cluster_oracle.csv');
+
+# Table-function args can't be subqueries; stage the abundance vector as a constant.
+statement ok
+SET VARIABLE kbd_abund = (SELECT list(abund ORDER BY idx) FROM kbd);
+
+# --- one realization per parameter set at a fixed seed (default cluster_sizes=[30,30,30]) ---
+statement ok
+CREATE TABLE c_pD10 AS SELECT * FROM simulate_cluster_otus(
+  getvariable('kbd_abund'), 10, cluster_spacing := 1.0, sample_spacing := 0.5, seed := 42);
+
+statement ok
+CREATE TABLE c_sD10 AS SELECT * FROM simulate_cluster_otus(
+  getvariable('kbd_abund'), 10, cluster_spacing := 0.1, sample_spacing := 0.1, seed := 42);
+
+statement ok
+CREATE TABLE c_pD1000 AS SELECT * FROM simulate_cluster_otus(
+  getvariable('kbd_abund'), 1000, cluster_spacing := 1.0, sample_spacing := 0.5, seed := 42);
+
+statement ok
+CREATE TABLE c_sD1000 AS SELECT * FROM simulate_cluster_otus(
+  getvariable('kbd_abund'), 1000, cluster_spacing := 0.1, sample_spacing := 0.1, seed := 42);
+
+# ---------- richness_mean ----------
+query I
+WITH s AS (SELECT avg(r) v FROM (SELECT sample_id, count(*) r FROM c_pD10 GROUP BY sample_id))
+SELECT count(*) FROM s, clust_oracle o
+WHERE o.param_set='cluster_prominent_D10' AND o.statistic='richness_mean' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+query I
+WITH s AS (SELECT avg(r) v FROM (SELECT sample_id, count(*) r FROM c_sD10 GROUP BY sample_id))
+SELECT count(*) FROM s, clust_oracle o
+WHERE o.param_set='cluster_subtle_D10' AND o.statistic='richness_mean' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+query I
+WITH s AS (SELECT avg(r) v FROM (SELECT sample_id, count(*) r FROM c_pD1000 GROUP BY sample_id))
+SELECT count(*) FROM s, clust_oracle o
+WHERE o.param_set='cluster_prominent_D1000' AND o.statistic='richness_mean' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+query I
+WITH s AS (SELECT avg(r) v FROM (SELECT sample_id, count(*) r FROM c_sD1000 GROUP BY sample_id))
+SELECT count(*) FROM s, clust_oracle o
+WHERE o.param_set='cluster_subtle_D1000' AND o.statistic='richness_mean' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+# ---------- top10_frac ----------
+query I
+WITH s AS (SELECT (SELECT sum(c) FROM (SELECT otu_id, sum("count") c FROM c_pD10 GROUP BY otu_id ORDER BY c DESC LIMIT 10))
+                  / (SELECT sum("count") FROM c_pD10) v)
+SELECT count(*) FROM s, clust_oracle o
+WHERE o.param_set='cluster_prominent_D10' AND o.statistic='top10_frac' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+query I
+WITH s AS (SELECT (SELECT sum(c) FROM (SELECT otu_id, sum("count") c FROM c_sD10 GROUP BY otu_id ORDER BY c DESC LIMIT 10))
+                  / (SELECT sum("count") FROM c_sD10) v)
+SELECT count(*) FROM s, clust_oracle o
+WHERE o.param_set='cluster_subtle_D10' AND o.statistic='top10_frac' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+query I
+WITH s AS (SELECT (SELECT sum(c) FROM (SELECT otu_id, sum("count") c FROM c_pD1000 GROUP BY otu_id ORDER BY c DESC LIMIT 10))
+                  / (SELECT sum("count") FROM c_pD1000) v)
+SELECT count(*) FROM s, clust_oracle o
+WHERE o.param_set='cluster_prominent_D1000' AND o.statistic='top10_frac' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+query I
+WITH s AS (SELECT (SELECT sum(c) FROM (SELECT otu_id, sum("count") c FROM c_sD1000 GROUP BY otu_id ORDER BY c DESC LIMIT 10))
+                  / (SELECT sum("count") FROM c_sD1000) v)
+SELECT count(*) FROM s, clust_oracle o
+WHERE o.param_set='cluster_subtle_D1000' AND o.statistic='top10_frac' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+# ---------- dissim_ratio = mean(inter-cluster L1) / mean(intra-cluster L1) on rel. abundances ----------
+# L1_rel(a,b) = 2 - 2*sum_shared(min(ca/Da, cb/Db)); ratio = mean over inter pairs / mean over intra pairs.
+query I
+WITH depths AS (SELECT sample_id, sum("count") d, any_value(cluster_id) cid FROM c_pD1000 GROUP BY sample_id),
+     shared AS (SELECT a.sample_id sa, b.sample_id sb,
+                       sum(least(a."count"::DOUBLE/da.d, b."count"::DOUBLE/db.d)) smin
+                FROM c_pD1000 a JOIN depths da ON a.sample_id=da.sample_id
+                               JOIN c_pD1000 b ON a.otu_id=b.otu_id AND a.sample_id<b.sample_id
+                               JOIN depths db ON b.sample_id=db.sample_id
+                GROUP BY a.sample_id, b.sample_id),
+     pairs AS (SELECT da.cid ca, db.cid cb, 2.0 - 2.0*coalesce(sh.smin,0) l1
+               FROM depths da JOIN depths db ON da.sample_id<db.sample_id
+               LEFT JOIN shared sh ON sh.sa=da.sample_id AND sh.sb=db.sample_id),
+     s AS (SELECT avg(CASE WHEN ca<>cb THEN l1 END)/avg(CASE WHEN ca=cb THEN l1 END) v FROM pairs)
+SELECT count(*) FROM s, clust_oracle o
+WHERE o.param_set='cluster_prominent_D1000' AND o.statistic='dissim_ratio' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+query I
+WITH depths AS (SELECT sample_id, sum("count") d, any_value(cluster_id) cid FROM c_sD1000 GROUP BY sample_id),
+     shared AS (SELECT a.sample_id sa, b.sample_id sb,
+                       sum(least(a."count"::DOUBLE/da.d, b."count"::DOUBLE/db.d)) smin
+                FROM c_sD1000 a JOIN depths da ON a.sample_id=da.sample_id
+                               JOIN c_sD1000 b ON a.otu_id=b.otu_id AND a.sample_id<b.sample_id
+                               JOIN depths db ON b.sample_id=db.sample_id
+                GROUP BY a.sample_id, b.sample_id),
+     pairs AS (SELECT da.cid ca, db.cid cb, 2.0 - 2.0*coalesce(sh.smin,0) l1
+               FROM depths da JOIN depths db ON da.sample_id<db.sample_id
+               LEFT JOIN shared sh ON sh.sa=da.sample_id AND sh.sb=db.sample_id),
+     s AS (SELECT avg(CASE WHEN ca<>cb THEN l1 END)/avg(CASE WHEN ca=cb THEN l1 END) v FROM pairs)
+SELECT count(*) FROM s, clust_oracle o
+WHERE o.param_set='cluster_subtle_D1000' AND o.statistic='dissim_ratio' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+query I
+WITH depths AS (SELECT sample_id, sum("count") d, any_value(cluster_id) cid FROM c_pD10 GROUP BY sample_id),
+     shared AS (SELECT a.sample_id sa, b.sample_id sb,
+                       sum(least(a."count"::DOUBLE/da.d, b."count"::DOUBLE/db.d)) smin
+                FROM c_pD10 a JOIN depths da ON a.sample_id=da.sample_id
+                             JOIN c_pD10 b ON a.otu_id=b.otu_id AND a.sample_id<b.sample_id
+                             JOIN depths db ON b.sample_id=db.sample_id
+                GROUP BY a.sample_id, b.sample_id),
+     pairs AS (SELECT da.cid ca, db.cid cb, 2.0 - 2.0*coalesce(sh.smin,0) l1
+               FROM depths da JOIN depths db ON da.sample_id<db.sample_id
+               LEFT JOIN shared sh ON sh.sa=da.sample_id AND sh.sb=db.sample_id),
+     s AS (SELECT avg(CASE WHEN ca<>cb THEN l1 END)/avg(CASE WHEN ca=cb THEN l1 END) v FROM pairs)
+SELECT count(*) FROM s, clust_oracle o
+WHERE o.param_set='cluster_prominent_D10' AND o.statistic='dissim_ratio' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+query I
+WITH depths AS (SELECT sample_id, sum("count") d, any_value(cluster_id) cid FROM c_sD10 GROUP BY sample_id),
+     shared AS (SELECT a.sample_id sa, b.sample_id sb,
+                       sum(least(a."count"::DOUBLE/da.d, b."count"::DOUBLE/db.d)) smin
+                FROM c_sD10 a JOIN depths da ON a.sample_id=da.sample_id
+                             JOIN c_sD10 b ON a.otu_id=b.otu_id AND a.sample_id<b.sample_id
+                             JOIN depths db ON b.sample_id=db.sample_id
+                GROUP BY a.sample_id, b.sample_id),
+     pairs AS (SELECT da.cid ca, db.cid cb, 2.0 - 2.0*coalesce(sh.smin,0) l1
+               FROM depths da JOIN depths db ON da.sample_id<db.sample_id
+               LEFT JOIN shared sh ON sh.sa=da.sample_id AND sh.sb=db.sample_id),
+     s AS (SELECT avg(CASE WHEN ca<>cb THEN l1 END)/avg(CASE WHEN ca=cb THEN l1 END) v FROM pairs)
+SELECT count(*) FROM s, clust_oracle o
+WHERE o.param_set='cluster_subtle_D10' AND o.statistic='dissim_ratio' AND (s.v < o.lo OR s.v > o.hi);
+----
+0
+
+# Cross-check: prominent clusters separate more than subtle at D=1000 -- the core
+# Kuczynski-2010 cluster signature. prominent/subtle share seed + sizes + species,
+# so their perturbation standard-normals are common (scaled 1.0/0.5 vs 0.1/0.1): a
+# coupled comparison. Margin 0.1 keeps it robust (oracle means differ by ~0.64).
+query I
+WITH ratio_of AS (
+  SELECT 'p' k, avg(CASE WHEN ca<>cb THEN l1 END)/avg(CASE WHEN ca=cb THEN l1 END) v FROM (
+    SELECT da.cid ca, db.cid cb, 2.0-2.0*coalesce(sh.smin,0) l1
+    FROM (SELECT sample_id,sum("count") d,any_value(cluster_id) cid FROM c_pD1000 GROUP BY sample_id) da
+    JOIN (SELECT sample_id,sum("count") d,any_value(cluster_id) cid FROM c_pD1000 GROUP BY sample_id) db ON da.sample_id<db.sample_id
+    LEFT JOIN (SELECT a.sample_id sa,b.sample_id sb,sum(least(a."count"::DOUBLE/x.d,b."count"::DOUBLE/y.d)) smin
+               FROM c_pD1000 a JOIN (SELECT sample_id,sum("count") d FROM c_pD1000 GROUP BY sample_id) x ON a.sample_id=x.sample_id
+                              JOIN c_pD1000 b ON a.otu_id=b.otu_id AND a.sample_id<b.sample_id
+                              JOIN (SELECT sample_id,sum("count") d FROM c_pD1000 GROUP BY sample_id) y ON b.sample_id=y.sample_id
+               GROUP BY 1,2) sh ON sh.sa=da.sample_id AND sh.sb=db.sample_id)
+  UNION ALL
+  SELECT 's' k, avg(CASE WHEN ca<>cb THEN l1 END)/avg(CASE WHEN ca=cb THEN l1 END) v FROM (
+    SELECT da.cid ca, db.cid cb, 2.0-2.0*coalesce(sh.smin,0) l1
+    FROM (SELECT sample_id,sum("count") d,any_value(cluster_id) cid FROM c_sD1000 GROUP BY sample_id) da
+    JOIN (SELECT sample_id,sum("count") d,any_value(cluster_id) cid FROM c_sD1000 GROUP BY sample_id) db ON da.sample_id<db.sample_id
+    LEFT JOIN (SELECT a.sample_id sa,b.sample_id sb,sum(least(a."count"::DOUBLE/x.d,b."count"::DOUBLE/y.d)) smin
+               FROM c_sD1000 a JOIN (SELECT sample_id,sum("count") d FROM c_sD1000 GROUP BY sample_id) x ON a.sample_id=x.sample_id
+                              JOIN c_sD1000 b ON a.otu_id=b.otu_id AND a.sample_id<b.sample_id
+                              JOIN (SELECT sample_id,sum("count") d FROM c_sD1000 GROUP BY sample_id) y ON b.sample_id=y.sample_id
+               GROUP BY 1,2) sh ON sh.sa=da.sample_id AND sh.sb=db.sample_id)
+)
+SELECT (SELECT v FROM ratio_of WHERE k='p') - (SELECT v FROM ratio_of WHERE k='s') > 0.1;
+----
+true

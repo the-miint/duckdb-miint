@@ -71,6 +71,7 @@
 #include <align_sortmerna_rrna.hpp>
 #endif
 #include <deblur_table_function.hpp>
+#include <simulate_resemblance.hpp>
 #include <align_pairwise_wfa2_functions.hpp>
 #include <align_pairwise_ksw2_functions.hpp>
 #include <align_pairwise_ksw2_dual_affine_functions.hpp>
@@ -414,6 +415,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(install_gpl_boundary_stub_set);
 #endif
 	DeblurTableFunction::Register(loader);
+	RegisterSimulateResemblance(loader);
 
 #ifdef MIINT_HAS_HDF5
 	CopyBiomFunction::Register(loader);

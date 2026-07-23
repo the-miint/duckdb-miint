@@ -1,0 +1,81 @@
+# name: test/sql/simulate_resemblance_ordination.test
+# description: paper-level cross-check: simulated tables through miint Bray-Curtis PCoA / PERMANOVA vs Kuczynski-2010 signatures
+# group: [sql]
+
+# Confirms the paper's qualitative signatures: a gradient is recovered by
+# ordination, and prominent clusters separate far more strongly than subtle
+# ones. Qualitative (thresholded), not parity.
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+# Self-contained synthetic abundance vector (150 species, decreasing abundance).
+statement ok
+SET VARIABLE ab = (SELECT list(1.0/(i+1) ORDER BY i) FROM range(150) t(i));
+
+# ── Gradient: PCoA on Bray-Curtis recovers the environmental gradient ──────────
+statement ok
+CREATE TABLE g AS SELECT * FROM simulate_gradient_otus(getvariable('ab'), 40, 1000, noise := 0.5, seed := 42);
+
+# Condensed Bray-Curtis distance over all sample pairs (shared-min identity).
+statement ok
+CREATE TABLE g_dist AS
+WITH depths AS (SELECT sample_id, sum("count") d FROM g GROUP BY sample_id),
+     shared AS (SELECT a.sample_id sa, b.sample_id sb, sum(least(a."count", b."count")) c
+                FROM g a JOIN g b ON a.otu_id=b.otu_id AND a.sample_id < b.sample_id GROUP BY 1, 2)
+SELECT da.sample_id::VARCHAR sample_a, db.sample_id::VARCHAR sample_b,
+       1.0 - 2.0*coalesce(sh.c, 0)/(da.d+db.d) distance
+FROM depths da JOIN depths db ON da.sample_id < db.sample_id
+LEFT JOIN shared sh ON sh.sa=da.sample_id AND sh.sb=db.sample_id;
+
+# PCoA axis 0 correlates with the true gradient position (|r| > 0.4). The signal
+# arches across axes 0-1 (the horseshoe the paper describes), so axis 0 alone is a
+# conservative lower bound on recovery.
+query I
+WITH e AS (SELECT sample_id sid, coordinate FROM pcoa('g_dist', n_dims := 3, seed := 42) WHERE axis=0),
+     p AS (SELECT DISTINCT sample_id::VARCHAR sid, gradient_position gp FROM g)
+SELECT abs(corr(e.coordinate, p.gp)) > 0.4 FROM e JOIN p ON e.sid=p.sid;
+----
+true
+
+# ── Cluster: prominent clusters separate far more than subtle (PERMANOVA F) ────
+statement ok
+CREATE TABLE cp AS SELECT * FROM simulate_cluster_otus(getvariable('ab'), 1000, cluster_spacing := 1.0, sample_spacing := 0.5, seed := 42);
+
+statement ok
+CREATE TABLE cs AS SELECT * FROM simulate_cluster_otus(getvariable('ab'), 1000, cluster_spacing := 0.1, sample_spacing := 0.1, seed := 42);
+
+statement ok
+CREATE TABLE cp_dist AS
+WITH depths AS (SELECT sample_id, sum("count") d FROM cp GROUP BY sample_id),
+     shared AS (SELECT a.sample_id sa, b.sample_id sb, sum(least(a."count", b."count")) c
+                FROM cp a JOIN cp b ON a.otu_id=b.otu_id AND a.sample_id < b.sample_id GROUP BY 1, 2)
+SELECT da.sample_id::VARCHAR sample_a, db.sample_id::VARCHAR sample_b,
+       1.0 - 2.0*coalesce(sh.c, 0)/(da.d+db.d) distance
+FROM depths da JOIN depths db ON da.sample_id < db.sample_id
+LEFT JOIN shared sh ON sh.sa=da.sample_id AND sh.sb=db.sample_id;
+
+statement ok
+CREATE TABLE cs_dist AS
+WITH depths AS (SELECT sample_id, sum("count") d FROM cs GROUP BY sample_id),
+     shared AS (SELECT a.sample_id sa, b.sample_id sb, sum(least(a."count", b."count")) c
+                FROM cs a JOIN cs b ON a.otu_id=b.otu_id AND a.sample_id < b.sample_id GROUP BY 1, 2)
+SELECT da.sample_id::VARCHAR sample_a, db.sample_id::VARCHAR sample_b,
+       1.0 - 2.0*coalesce(sh.c, 0)/(da.d+db.d) distance
+FROM depths da JOIN depths db ON da.sample_id < db.sample_id
+LEFT JOIN shared sh ON sh.sa=da.sample_id AND sh.sb=db.sample_id;
+
+statement ok
+CREATE TABLE cp_md AS SELECT DISTINCT sample_id::VARCHAR sample_id, cluster_id::VARCHAR cluster_id FROM cp;
+
+statement ok
+CREATE TABLE cs_md AS SELECT DISTINCT sample_id::VARCHAR sample_id, cluster_id::VARCHAR cluster_id FROM cs;
+
+# PERMANOVA pseudo-F for cluster membership is much larger under prominent spacing
+# than subtle (>2x); both partition the same 90 samples into 3 clusters.
+query I
+SELECT (SELECT f_stat FROM permanova('cp_dist', 'cp_md', variables := ['cluster_id'], n_permutations := 99, seed := 42))
+     > 2.0 * (SELECT f_stat FROM permanova('cs_dist', 'cs_md', variables := ['cluster_id'], n_permutations := 99, seed := 42));
+----
+true

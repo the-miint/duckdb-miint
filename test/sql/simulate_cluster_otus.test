@@ -1,0 +1,175 @@
+# name: test/sql/simulate_cluster_otus.test
+# description: simulate_cluster_otus structural invariants (always run; no oracle/fixture dependency)
+# group: [sql]
+
+require miint
+
+# Small inline abundance vector + small clusters keep these fast and fixture-free.
+
+# Schema: (sample_id INT, otu_id INT, count BIGINT, cluster_id INT)
+query I
+SELECT count(*) FROM (
+  DESCRIBE SELECT * FROM simulate_cluster_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 500, cluster_sizes := [2,3], seed := 7)
+) WHERE (column_name='sample_id' AND column_type='INTEGER')
+     OR (column_name='otu_id' AND column_type='INTEGER')
+     OR (column_name='count' AND column_type='BIGINT')
+     OR (column_name='cluster_id' AND column_type='INTEGER');
+----
+4
+
+# Every sample sums to exactly seqs_per_sample (multinomial invariant).
+query I
+SELECT count(*) FROM (
+  SELECT sample_id, sum("count") d
+  FROM simulate_cluster_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 500, cluster_sizes := [2,3], seed := 7)
+  GROUP BY sample_id
+) WHERE d <> 500;
+----
+0
+
+# COO stores only nonzero counts.
+query I
+SELECT count(*) FROM simulate_cluster_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 500, cluster_sizes := [2,3], seed := 7)
+WHERE "count" < 1;
+----
+0
+
+# Number of samples = sum(cluster_sizes).
+query I
+SELECT count(DISTINCT sample_id) FROM simulate_cluster_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 500, cluster_sizes := [2,3], seed := 7);
+----
+5
+
+# cluster_id assignment follows cluster_sizes in order: [2,3] -> 0,0,1,1,1.
+query II
+SELECT sample_id, any_value(cluster_id)
+FROM simulate_cluster_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 500, cluster_sizes := [2,3], seed := 7)
+GROUP BY sample_id ORDER BY sample_id;
+----
+0	0
+1	0
+2	1
+3	1
+4	1
+
+# cluster_id in [0, K).
+query I
+SELECT count(*) FROM simulate_cluster_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 500, cluster_sizes := [2,3], seed := 7)
+WHERE cluster_id < 0 OR cluster_id >= 2;
+----
+0
+
+# otu_id is a 0-based species index in [0, M).
+query I
+SELECT count(*) FROM simulate_cluster_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 500, cluster_sizes := [2,3], seed := 7)
+WHERE otu_id < 0 OR otu_id >= 5;
+----
+0
+
+# Default cluster_sizes = [30,30,30] -> 90 samples, 3 clusters.
+query II
+SELECT count(DISTINCT sample_id), count(DISTINCT cluster_id)
+FROM simulate_cluster_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 100, seed := 7);
+----
+90	3
+
+# Multiplicative '*sample'/'clip' preserves structural zeros: a zero-abundance OTU
+# never appears (0 * anything -> 0, clip keeps 0, renorm keeps 0, never sampled).
+query I
+SELECT count(*) FROM simulate_cluster_otus([0.5,0.0,0.5]::DOUBLE[], 500, cluster_sizes := [2,2], seed := 7)
+WHERE otu_id = 1;
+----
+0
+
+# Seed determinism.
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM simulate_cluster_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 500, cluster_sizes := [2,3], seed := 123))
+  EXCEPT
+  (SELECT * FROM simulate_cluster_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 500, cluster_sizes := [2,3], seed := 123))
+);
+----
+0
+
+query I
+SELECT
+  (SELECT count(*) FROM simulate_cluster_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 500, cluster_sizes := [2,3], seed := 123))
+= (SELECT count(*) FROM simulate_cluster_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 500, cluster_sizes := [2,3], seed := 123));
+----
+true
+
+# Additive '+sample' / 'rescale' variant is also accepted and preserves depth.
+query I
+SELECT count(*) FROM (
+  SELECT sample_id, sum("count") d
+  FROM simulate_cluster_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 500, cluster_sizes := [2,3],
+                             noise_type := '+sample', normalization := 'rescale', seed := 7)
+  GROUP BY sample_id
+) WHERE d <> 500;
+----
+0
+
+# Default seed (-1) uses std::random_device; the unseeded path still runs and
+# yields a structurally valid table.
+query I
+SELECT count(DISTINCT sample_id) FROM simulate_cluster_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 500, cluster_sizes := [2,3]);
+----
+5
+
+# --- error paths (fail loud) ---
+statement error
+SELECT * FROM simulate_cluster_otus([]::DOUBLE[], 500);
+----
+non-empty
+
+statement error
+SELECT * FROM simulate_cluster_otus([0.0,0.0,0.0]::DOUBLE[], 500);
+----
+all zero
+
+statement error
+SELECT * FROM simulate_cluster_otus([0.4,0.3,0.3]::DOUBLE[], 0);
+----
+seqs_per_sample
+
+statement error
+SELECT * FROM simulate_cluster_otus([0.4,0.3,0.3]::DOUBLE[], 500, cluster_sizes := []::INTEGER[]);
+----
+cluster_sizes
+
+statement error
+SELECT * FROM simulate_cluster_otus([0.4,0.3,0.3]::DOUBLE[], 500, cluster_sizes := [2,0,3]);
+----
+cluster_sizes
+
+statement error
+SELECT * FROM simulate_cluster_otus([0.4,0.3,0.3]::DOUBLE[], 500, noise_type := 'bogus');
+----
+noise_type
+
+statement error
+SELECT * FROM simulate_cluster_otus([0.4,0.3,0.3]::DOUBLE[], 500, normalization := 'bogus');
+----
+normalization
+
+statement error
+SELECT * FROM simulate_cluster_otus([0.4,0.3,0.3]::DOUBLE[], 500, cluster_spacing := -0.5);
+----
+cluster_spacing
+
+statement error
+SELECT * FROM simulate_cluster_otus([0.4,0.3,0.3]::DOUBLE[], 500, sample_spacing := 'nan'::DOUBLE);
+----
+sample_spacing
+
+statement error
+SELECT * FROM simulate_cluster_otus([0.4,0.3,0.3]::DOUBLE[], 500, cluster_sizes := [2, NULL, 3]);
+----
+NULL
+
+# Degenerate perturbation (single species collapsed by 'rescale') surfaces a
+# clean, named InvalidInput error rather than a raw internal exception.
+statement error
+SELECT * FROM simulate_cluster_otus([1.0]::DOUBLE[], 100, normalization := 'rescale');
+----
+degenerate
