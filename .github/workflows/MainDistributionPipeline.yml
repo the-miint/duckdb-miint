@@ -54,11 +54,7 @@ jobs:
       # excluded on branch pushes and PRs. Windows (all variants) + osx_amd64 +
       # wasm_mvp/wasm_threads stay excluded everywhere (broken / not shipped).
       # Tag builds drop wasm_eh from the exclude list so release artifacts carry it.
-      # TEMPORARY (revert once green): windows_amd64_mingw is un-excluded from
-      # both strings to verify the ena_upload_reads mkdtemp portability fix
-      # compiles on MinGW in our own CI. Re-add 'windows_amd64_mingw;' to both
-      # exclude lists after the mingw lane is confirmed green — it is costly.
-      exclude_archs: ${{ startsWith(github.ref, 'refs/tags/') && 'windows_amd64_rtools;windows_amd64;osx_amd64;wasm_mvp;wasm_threads' || 'windows_amd64_rtools;windows_amd64;osx_amd64;wasm_eh;wasm_mvp;wasm_threads' }}
+      exclude_archs: ${{ startsWith(github.ref, 'refs/tags/') && 'windows_amd64_rtools;windows_amd64;windows_amd64_mingw;osx_amd64;wasm_mvp;wasm_threads' || 'windows_amd64_rtools;windows_amd64;windows_amd64_mingw;osx_amd64;wasm_eh;wasm_mvp;wasm_threads' }}
 
   test-with-bowtie2:
     name: Test with Bowtie2
