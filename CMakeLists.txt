@@ -1327,6 +1327,8 @@ set(EXTENSION_SOURCES
     src/deblur_table_function.cpp
     src/simulate_resemblance.cpp
     src/simulate_resemblance_function.cpp
+    src/community_distances.cpp
+    src/community_distances_function.cpp
     src/per_sample_table_function.cpp
     src/id_column_codec.cpp
     src/extract_linked_amplicon.cpp
@@ -1731,6 +1733,8 @@ set(TEST_SOURCES
     src/simulate_resemblance.cpp
     test/cpp/test_SimulateGradient.cpp
     test/cpp/test_SimulateCluster.cpp
+    src/community_distances.cpp
+    test/cpp/test_CommunityDistances.cpp
     src/Minimap2Aligner.cpp
     test/cpp/test_Minimap2Aligner.cpp
     test/cpp/test_AlignBowtie2Sharded.cpp

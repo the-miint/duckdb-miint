@@ -216,6 +216,20 @@ else
     echo "Warning: resemblance-sim oracle fixtures missing or corrupt; stat-equivalence tests skipped"
 fi
 
+# community_distances numeric-parity oracle. The fixture feature table +
+# per-metric goldens (metric, sample_a, sample_b, distance) are committed under
+# data/simsurvey/ and pinned by beta_distance_oracle.sha256. The generator (a
+# throwaway scratchpad script that cross-checks every metric against a
+# scipy/scikit-bio primitive) is dev-only and kept out of this BSD tree; only the
+# numeric goldens are committed. The gate verifies the fixtures are intact before
+# the exact-parity test runs (require-env MIINT_BETA_DISTANCE_ORACLE_OK).
+if [ -f data/simsurvey/beta_distance_oracle.sha256 ] && \
+        (cd data/simsurvey && sha256sum -c --quiet beta_distance_oracle.sha256) 2>/dev/null; then
+    export MIINT_BETA_DISTANCE_ORACLE_OK=1
+else
+    echo "Warning: community_distances parity oracle missing or corrupt; distance-parity test skipped"
+fi
+
 # NCBI BLAST network reachability. Probes the BLAST CGI endpoint so
 # live blast tests can skip gracefully in offline CI.
 if curl -sSf --max-time 5 -o /dev/null \

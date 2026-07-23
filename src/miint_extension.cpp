@@ -70,6 +70,7 @@
 #include <align_sortmerna.hpp>
 #include <align_sortmerna_rrna.hpp>
 #endif
+#include <community_distances.hpp>
 #include <deblur_table_function.hpp>
 #include <simulate_resemblance.hpp>
 #include <align_pairwise_wfa2_functions.hpp>
@@ -416,6 +417,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 #endif
 	DeblurTableFunction::Register(loader);
 	RegisterSimulateResemblance(loader);
+	RegisterCommunityDistances(loader);
 
 #ifdef MIINT_HAS_HDF5
 	CopyBiomFunction::Register(loader);
