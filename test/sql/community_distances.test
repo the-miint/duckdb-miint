@@ -4,6 +4,9 @@
 
 require miint
 
+# community_distances is part of the unifrac/ordination feature group.
+require-env UNIFRAC_AVAILABLE
+
 # Tiny sparse feature table (zeros omitted) == the 3x4 matrix pinned by the
 # Catch2 pure-core test. Sorted ids s1<s2<s3 give rows:
 #   s1=[1,2,0,3]  s2=[0,2,4,1]  s3=[2,0,1,1]  over features f0..f3.

@@ -1,0 +1,43 @@
+# name: test/sql/cluster_kmeans_parity.test
+# description: cluster_kmeans partition parity vs a committed scikit-learn KMeans reference on a well-separated fixture
+# group: [sql]
+
+# The fixture (3 very well-separated 3-D blobs, unique k-means optimum) and the
+# scikit-learn KMeans reference partition are committed under data/simsurvey/ and
+# pinned by cluster_methods_oracle.sha256. The generator (scikit-learn, BSD-3) is
+# dev-only and not committed. Because the optimum is unique, any correct k-means
+# recovers the same partition, so this is a co-membership (partition) match that
+# is robust to label permutation.
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+require-env MIINT_CLUSTER_ORACLE_OK
+
+statement ok
+CREATE TABLE kfix AS SELECT * FROM read_csv_auto('data/simsurvey/cluster_kmeans_fixture.csv');
+
+statement ok
+CREATE TABLE kgold AS SELECT * FROM read_csv_auto('data/simsurvey/cluster_kmeans_oracle.csv');
+
+statement ok
+CREATE TABLE kmine AS SELECT * FROM cluster_kmeans('kfix', k := 3, seed := 42);
+
+# Co-membership parity: for every unordered sample pair, "same cluster in mine"
+# must equal "same cluster in the sklearn reference". 0 disagreements = ARI 1.
+query I
+SELECT count(*) FROM (
+  SELECT (m1.cluster = m2.cluster) AS mine_same, (g1.cluster = g2.cluster) AS gold_same
+  FROM kmine m1 JOIN kmine m2 ON m1.sample_id < m2.sample_id
+  JOIN kgold g1 ON g1.sample_id = m1.sample_id
+  JOIN kgold g2 ON g2.sample_id = m2.sample_id
+) WHERE mine_same <> gold_same;
+----
+0
+
+# Same sample set on both sides, exactly 3 clusters.
+query I
+SELECT count(DISTINCT cluster) FROM kmine;
+----
+3

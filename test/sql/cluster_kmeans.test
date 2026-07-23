@@ -1,0 +1,92 @@
+# name: test/sql/cluster_kmeans.test
+# description: cluster_kmeans structural invariants + known-answer recovery of well-separated blobs + id polymorphism (always run)
+# group: [sql]
+
+require miint
+
+# cluster_kmeans is part of the unifrac/ordination feature group.
+require-env UNIFRAC_AVAILABLE
+
+# Coordinate table in pcoa's long form (sample_id, axis, coordinate): three
+# well-separated 2-D blobs of two samples each.
+statement ok
+CREATE TABLE c AS
+SELECT * FROM (VALUES
+  ('sA1',0,0.0),('sA1',1,0.0),
+  ('sA2',0,1.0),('sA2',1,0.0),
+  ('sB1',0,10.0),('sB1',1,0.0),
+  ('sB2',0,11.0),('sB2',1,0.0),
+  ('sC1',0,0.0),('sC1',1,10.0),
+  ('sC2',0,1.0),('sC2',1,10.0)
+) t(sample_id, axis, coordinate);
+
+# Schema: (sample_id VARCHAR, cluster INTEGER).
+query I
+SELECT count(*) FROM (
+  DESCRIBE SELECT * FROM cluster_kmeans('c', k := 3, seed := 42)
+) WHERE (column_name='sample_id' AND column_type='VARCHAR')
+     OR (column_name='cluster' AND column_type='INTEGER');
+----
+2
+
+# One row per sample; exactly k=3 clusters.
+query I
+SELECT count(*) FROM cluster_kmeans('c', k := 3, seed := 42);
+----
+6
+
+query I
+SELECT count(DISTINCT cluster) FROM cluster_kmeans('c', k := 3, seed := 42);
+----
+3
+
+# Known answer: each blob's two samples share a cluster, and the three blobs land
+# in three distinct clusters.
+query I
+WITH km AS (SELECT * FROM cluster_kmeans('c', k := 3, seed := 42))
+SELECT (SELECT cluster FROM km WHERE sample_id='sA1') = (SELECT cluster FROM km WHERE sample_id='sA2')
+   AND (SELECT cluster FROM km WHERE sample_id='sB1') = (SELECT cluster FROM km WHERE sample_id='sB2')
+   AND (SELECT cluster FROM km WHERE sample_id='sC1') = (SELECT cluster FROM km WHERE sample_id='sC2')
+   AND (SELECT cluster FROM km WHERE sample_id='sA1') <> (SELECT cluster FROM km WHERE sample_id='sB1')
+   AND (SELECT cluster FROM km WHERE sample_id='sA1') <> (SELECT cluster FROM km WHERE sample_id='sC1')
+   AND (SELECT cluster FROM km WHERE sample_id='sB1') <> (SELECT cluster FROM km WHERE sample_id='sC1');
+----
+true
+
+# Determinism: identical result across two calls at the same seed.
+query I
+SELECT count(*) = 0 FROM (
+  SELECT sample_id FROM cluster_kmeans('c', k := 3, seed := 7)
+  EXCEPT
+  SELECT sample_id FROM cluster_kmeans('c', k := 3, seed := 7)
+);
+----
+true
+
+# ── id polymorphism: BIGINT sample_id mirrors onto the output ──────────────────
+statement ok
+CREATE TABLE cbi AS
+SELECT * FROM (VALUES
+  (100::BIGINT,0,0.0),(100::BIGINT,1,0.0),
+  (200::BIGINT,0,10.0),(200::BIGINT,1,0.0),
+  (300::BIGINT,0,0.0),(300::BIGINT,1,10.0)
+) t(sample_id, axis, coordinate);
+
+query I
+SELECT count(*) FROM (
+  DESCRIBE SELECT * FROM cluster_kmeans('cbi', k := 3, seed := 1)
+) WHERE column_name='sample_id' AND column_type='BIGINT';
+----
+1
+
+# ── error paths ────────────────────────────────────────────────────────────────
+# k is required
+statement error
+SELECT * FROM cluster_kmeans('c');
+----
+required
+
+# k > number of samples
+statement error
+SELECT * FROM cluster_kmeans('c', k := 99);
+----

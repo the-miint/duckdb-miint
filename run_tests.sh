@@ -230,6 +230,18 @@ else
     echo "Warning: community_distances parity oracle missing or corrupt; distance-parity test skipped"
 fi
 
+# cluster_kmeans / cluster_upgma parity oracle. Fixtures + reference partitions/
+# trees are committed under data/simsurvey/ and pinned by
+# cluster_methods_oracle.sha256. The generator (a throwaway scratchpad script
+# that calls scikit-learn KMeans and scipy average-linkage, both BSD-3) is
+# dev-only and kept out of this BSD tree; only the numeric goldens are committed.
+if [ -f data/simsurvey/cluster_methods_oracle.sha256 ] && \
+        (cd data/simsurvey && sha256sum -c --quiet cluster_methods_oracle.sha256) 2>/dev/null; then
+    export MIINT_CLUSTER_ORACLE_OK=1
+else
+    echo "Warning: clustering parity oracle missing or corrupt; cluster parity tests skipped"
+fi
+
 # NCBI BLAST network reachability. Probes the BLAST CGI endpoint so
 # live blast tests can skip gracefully in offline CI.
 if curl -sSf --max-time 5 -o /dev/null \

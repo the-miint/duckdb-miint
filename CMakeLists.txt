@@ -1328,7 +1328,8 @@ set(EXTENSION_SOURCES
     src/simulate_resemblance.cpp
     src/simulate_resemblance_function.cpp
     src/community_distances.cpp
-    src/community_distances_function.cpp
+    src/cluster_kmeans.cpp
+    src/cluster_upgma.cpp
     src/per_sample_table_function.cpp
     src/id_column_codec.cpp
     src/extract_linked_amplicon.cpp
@@ -1387,7 +1388,14 @@ if(MIINT_ENABLE_UNIFRAC)
         src/unifrac_pcoa_function.cpp
         src/unifrac_permanova_function.cpp
         src/unifrac_faith_pd_function.cpp
-        src/unifrac_distances_function.cpp)
+        src/unifrac_distances_function.cpp
+        # Beta-diversity / ordination toolset: the wrappers depend on the unifrac
+        # module's generic table readers (ReadFeatureTable / ReadDistanceTable) and
+        # feed pcoa/permanova, so they are part of this feature group. The
+        # DuckDB-free pure cores stay unconditional above.
+        src/community_distances_function.cpp
+        src/cluster_kmeans_function.cpp
+        src/cluster_upgma_function.cpp)
 endif()
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
@@ -1735,6 +1743,10 @@ set(TEST_SOURCES
     test/cpp/test_SimulateCluster.cpp
     src/community_distances.cpp
     test/cpp/test_CommunityDistances.cpp
+    src/cluster_kmeans.cpp
+    test/cpp/test_ClusterKmeans.cpp
+    src/cluster_upgma.cpp
+    test/cpp/test_ClusterUpgma.cpp
     src/Minimap2Aligner.cpp
     test/cpp/test_Minimap2Aligner.cpp
     test/cpp/test_AlignBowtie2Sharded.cpp

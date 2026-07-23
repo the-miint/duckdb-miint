@@ -1,0 +1,90 @@
+# name: test/sql/cluster_upgma.test
+# description: cluster_upgma structural invariants, read_newick-schema output, hand-computed 4-taxon tree, and monophyly recovery (unifrac feature group)
+# group: [sql]
+
+require miint
+
+# cluster_upgma is part of the unifrac/ordination feature group.
+require-env UNIFRAC_AVAILABLE
+
+# 4-taxon condensed distances (A,B,C,D): A-B=2, C-D=4, all cross pairs =6.
+# Hand-computed UPGMA: merge A,B (h=1), then C,D (h=2), then AB,CD (h=3).
+statement ok
+CREATE TABLE d AS SELECT * FROM (VALUES
+  ('A','B',2.0),('A','C',6.0),('A','D',6.0),
+  ('B','C',6.0),('B','D',6.0),('C','D',4.0)
+) t(sample_a, sample_b, distance);
+
+# Output schema == read_newick tree table (node_index, name, branch_length,
+# edge_id, parent_index, is_tip).
+query I
+SELECT count(*) FROM (
+  DESCRIBE SELECT * FROM cluster_upgma('d')
+) WHERE (column_name='node_index' AND column_type='BIGINT')
+     OR (column_name='name' AND column_type='VARCHAR')
+     OR (column_name='branch_length' AND column_type='DOUBLE')
+     OR (column_name='edge_id' AND column_type='BIGINT')
+     OR (column_name='parent_index' AND column_type='BIGINT')
+     OR (column_name='is_tip' AND column_type='BOOLEAN');
+----
+6
+
+# 2n-1 = 7 nodes; 4 tips; exactly one root (NULL parent).
+query I
+SELECT count(*) FROM cluster_upgma('d');
+----
+7
+
+query I
+SELECT count(*) FILTER (WHERE is_tip) FROM cluster_upgma('d');
+----
+4
+
+query I
+SELECT count(*) FILTER (WHERE parent_index IS NULL) FROM cluster_upgma('d');
+----
+1
+
+# Tip names are exactly the sample ids.
+query I
+SELECT count(*) = 4 FROM (
+  SELECT name FROM cluster_upgma('d') WHERE is_tip
+  INTERSECT
+  SELECT * FROM (VALUES ('A'),('B'),('C'),('D')) v(x)
+);
+----
+true
+
+# Hand-computed topology: A,B share a parent; C,D share a parent; those differ.
+query I
+WITH t AS (SELECT * FROM cluster_upgma('d'))
+SELECT (SELECT parent_index FROM t WHERE name='A') = (SELECT parent_index FROM t WHERE name='B')
+   AND (SELECT parent_index FROM t WHERE name='C') = (SELECT parent_index FROM t WHERE name='D')
+   AND (SELECT parent_index FROM t WHERE name='A') <> (SELECT parent_index FROM t WHERE name='C');
+----
+true
+
+# Hand-computed leaf branch lengths: A,B = 1 ; C,D = 2.
+query I
+WITH t AS (SELECT * FROM cluster_upgma('d'))
+SELECT abs((SELECT branch_length FROM t WHERE name='A') - 1.0) < 1e-9
+   AND abs((SELECT branch_length FROM t WHERE name='B') - 1.0) < 1e-9
+   AND abs((SELECT branch_length FROM t WHERE name='C') - 2.0) < 1e-9
+   AND abs((SELECT branch_length FROM t WHERE name='D') - 2.0) < 1e-9;
+----
+true
+
+# Valid tree: every node reaches the single root by walking parent_index (no
+# orphans, no cycles) -- proves the output is a well-formed read_newick tree.
+statement ok
+CREATE TABLE tt AS SELECT * FROM cluster_upgma('d');
+
+query I
+WITH RECURSIVE up(node_index, root) AS (
+  SELECT node_index, node_index FROM tt WHERE parent_index IS NULL
+  UNION ALL
+  SELECT c.node_index, up.root FROM tt c JOIN up ON c.parent_index = up.node_index
+)
+SELECT count(DISTINCT node_index) = 7 AND count(DISTINCT root) = 1 FROM up;
+----
+true

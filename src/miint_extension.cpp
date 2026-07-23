@@ -70,6 +70,8 @@
 #include <align_sortmerna.hpp>
 #include <align_sortmerna_rrna.hpp>
 #endif
+#include <cluster_kmeans.hpp>
+#include <cluster_upgma.hpp>
 #include <community_distances.hpp>
 #include <deblur_table_function.hpp>
 #include <simulate_resemblance.hpp>
@@ -417,7 +419,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 #endif
 	DeblurTableFunction::Register(loader);
 	RegisterSimulateResemblance(loader);
+#ifdef MIINT_HAS_UNIFRAC
+	// Beta-diversity / ordination toolset: the wrappers link the unifrac module's
+	// table readers, so they are registered only when that feature is compiled.
 	RegisterCommunityDistances(loader);
+	RegisterClusterKmeans(loader);
+	RegisterClusterUpgma(loader);
+#endif
 
 #ifdef MIINT_HAS_HDF5
 	CopyBiomFunction::Register(loader);
