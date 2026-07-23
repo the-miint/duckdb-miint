@@ -3,6 +3,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <cmath>
+#include <cstdint>
 #include <stdexcept>
 #include <vector>
 
@@ -209,6 +210,42 @@ TEST_CASE("condensed size and pair ordering", "[community_distances]") {
 	const std::vector<double> m(4 * 3, 1.0); // all-equal rows -> all distances 0
 	auto d = miint::CommunityDistancesCondensed(m, 4, 3, "euclidean");
 	CHECK(d.size() == 6);
+}
+
+TEST_CASE("parallel result is bit-identical to serial for every metric", "[community_distances]") {
+	// Determinism contract: adding threads is a performance change that must NOT
+	// change a single bit of the output (the SQL parity goldens are pinned exact).
+	// Each pair (i,j) is computed by identical arithmetic and written to a fixed
+	// output slot regardless of which thread handles row i, so serial and parallel
+	// must agree exactly.
+	//
+	// 9 samples so the row cursor genuinely splits work across threads (and the
+	// thread cap at n-1 is exercised by nt=16). Values are strictly positive and
+	// every row is non-constant, so no metric hits its NaN/empty special case
+	// (bit-equality on NaN would be meaningless).
+	const uint32_t n = 9, f = 6;
+	std::vector<double> m(static_cast<size_t>(n) * f);
+	for (uint32_t i = 0; i < n; ++i) {
+		for (uint32_t k = 0; k < f; ++k) {
+			// The 2*k term guarantees a non-constant row (pearson variance > 0);
+			// the leading +1 guarantees a positive row sum (morisita/chisq defined).
+			m[static_cast<size_t>(i) * f + k] = 1.0 + 2.0 * k + static_cast<double>((i * 5 + k * 3) % 7) + 0.25 * i;
+		}
+	}
+	for (const auto *metric :
+	     {"bray_curtis", "euclidean", "jaccard", "soergel", "morisita_horn", "pearson", "chisq", "gower"}) {
+		const auto serial = miint::CommunityDistancesCondensed(m, n, f, metric, 1);
+		// 1000 exercises the thread cap (min with n-1 and hardware_concurrency):
+		// it must not spawn 1000 OS threads, must not hang/crash, and must still
+		// produce the identical serial result.
+		for (unsigned nt : {2u, 3u, 4u, 8u, 16u, 1000u}) {
+			const auto par = miint::CommunityDistancesCondensed(m, n, f, metric, nt);
+			REQUIRE(par.size() == serial.size());
+			for (size_t p = 0; p < serial.size(); ++p) {
+				CHECK(par[p] == serial[p]); // exact bit equality, not Approx
+			}
+		}
+	}
 }
 
 TEST_CASE("community_distances guards", "[community_distances]") {

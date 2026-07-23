@@ -20,6 +20,7 @@ namespace {
 
 using unifrac_internal::ReadFeatureTable;
 using unifrac_internal::ResolveSampleIdOutputType;
+using unifrac_internal::ResolveThreadsParameter;
 
 struct CommunityDistBindData : public TableFunctionData {
 	std::string table_name;
@@ -27,6 +28,9 @@ struct CommunityDistBindData : public TableFunctionData {
 	// Output type for sample_a/sample_b, mirrored from the feature table's
 	// sample_id column (BIGINT/UUID preserved, else VARCHAR).
 	LogicalType sample_id_type = LogicalType::VARCHAR;
+	// Threads for the O(n^2 * f) pair loop (resolved from the `threads` named
+	// param at bind: 0 = follow DuckDB's thread count; always >= 1 here).
+	int n_threads = 1;
 };
 
 // Holds the fully-computed condensed distance list. Single-threaded emission
@@ -54,6 +58,14 @@ unique_ptr<FunctionData> CommunityDistBind(ClientContext &context, TableFunction
 		throw BinderException("community_distances: unknown metric '%s' (must be one of %s)", data->metric,
 		                      miint::CommunityMetricList());
 	}
+
+	int32_t threads = 0; // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
+	for (const auto &kv : input.named_parameters) {
+		if (StringUtil::Lower(kv.first) == "threads") {
+			threads = kv.second.GetValue<int32_t>();
+		}
+	}
+	data->n_threads = ResolveThreadsParameter(context, threads, "community_distances");
 
 	// Mirror the sample_id column's type onto the output ids so BIGINT/UUID
 	// results join back to typed metadata without a cast (parity with
@@ -133,7 +145,8 @@ unique_ptr<GlobalTableFunctionState> CommunityDistInitGlobal(ClientContext &cont
 	// the core's already-prefixed message.
 	std::vector<double> condensed;
 	try {
-		condensed = miint::CommunityDistancesCondensed(matrix, n, f, data.metric);
+		condensed =
+		    miint::CommunityDistancesCondensed(matrix, n, f, data.metric, static_cast<unsigned>(data.n_threads));
 	} catch (const std::invalid_argument &e) {
 		throw InvalidInputException("%s", e.what());
 	}
@@ -177,6 +190,10 @@ void CommunityDistExecute(ClientContext &, TableFunctionInput &data_p, DataChunk
 void RegisterCommunityDistances(ExtensionLoader &loader) {
 	TableFunction fn("community_distances", {LogicalType::VARCHAR, LogicalType::VARCHAR}, CommunityDistExecute,
 	                 CommunityDistBind, CommunityDistInitGlobal);
+	// Threads for the internal pair-loop parallelism (0 = follow DuckDB). The
+	// distances are computed up front in InitGlobal; row emission stays
+	// single-threaded (MaxThreads() == 1), so this only scales the compute.
+	fn.named_parameters["threads"] = LogicalType::INTEGER;
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);
 }

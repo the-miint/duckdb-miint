@@ -174,11 +174,44 @@ SELECT isnan(distance) FROM community_distances('feat_const', 'pearson');
 ----
 true
 
+# ── threads param: parallelism must not change a single value ──────────────────
+# threads:=4 reproduces the pinned serial morisita_horn (s1,s2) = 61/103.
+query I
+SELECT abs(distance - 61.0/103.0) < 1e-9
+FROM community_distances('feat', 'morisita_horn', threads := 4) WHERE sample_a='s1' AND sample_b='s2';
+----
+true
+
+# Every pair from threads:=8 is BIT-identical to threads:=1 (0 differing rows,
+# and the join is non-vacuous: all 3 pairs match). Exact `IS DISTINCT FROM`, not
+# a tolerance — the parallel path writes the same value into the same slot.
+query II
+SELECT
+  (SELECT count(*) FROM community_distances('feat','gower', threads:=8) a
+     JOIN community_distances('feat','gower', threads:=1) b USING (sample_a, sample_b)
+   WHERE a.distance IS DISTINCT FROM b.distance) AS differing,
+  (SELECT count(*) FROM community_distances('feat','gower', threads:=8) a
+     JOIN community_distances('feat','gower', threads:=1) b USING (sample_a, sample_b)) AS matched;
+----
+0	3
+
+# threads:=0 means "follow DuckDB's thread count" and still emits all 3 pairs.
+query I
+SELECT count(*) FROM community_distances('feat', 'euclidean', threads := 0);
+----
+3
+
 # ── error paths ────────────────────────────────────────────────────────────────
 statement error
 SELECT * FROM community_distances('feat', 'manhattan');
 ----
 manhattan
+
+# negative threads is rejected at bind.
+statement error
+SELECT * FROM community_distances('feat', 'euclidean', threads := -1);
+----
+threads must be >= 0
 
 statement error
 SELECT * FROM community_distances('feat', 'euclidean', 'extra');

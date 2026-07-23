@@ -54,10 +54,21 @@ std::string CommunityMetricList();
 //! χ² and Gower depend on GLOBAL column statistics (column sums / column ranges
 //! over ALL samples), so they are matrix-wide, not purely per-pair.
 //!
+//! `n_threads` parallelizes the O(n^2 * f) pair loop. 0 or 1 runs fully serial
+//! (no threads spawned; the caller resolves 0 = "follow DuckDB" before calling,
+//! but 0 is also accepted here and treated as serial). >= 2 spawns up to
+//! n_threads workers, itself capped at the number of rows with pairs (n-1) and
+//! at std::thread::hardware_concurrency() — more threads than cores only add
+//! context-switch overhead on this CPU-bound loop, and thousands risk a
+//! pids/ulimit hit. The result is BIT-IDENTICAL for any thread count: each pair
+//! writes to a fixed condensed slot, so threading only reorders WHEN each slot
+//! is filled, never the value. The per-sample and global-column pre-passes are
+//! always serial (they are O(n*f), not the hot loop).
+//!
 //! Throws std::invalid_argument on: n_samples < 2; matrix.size() !=
 //! n_samples*n_features; or an unknown metric.
 std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matrix, uint32_t n_samples,
-                                                uint32_t n_features, const std::string &metric);
+                                                uint32_t n_features, const std::string &metric, unsigned n_threads = 1);
 
 } // namespace miint
 

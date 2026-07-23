@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <system_error>
+#include <thread>
 
 namespace miint {
 
@@ -57,7 +60,7 @@ std::string CommunityMetricList() {
 }
 
 std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matrix, uint32_t n_samples,
-                                                uint32_t n_features, const std::string &metric) {
+                                                uint32_t n_features, const std::string &metric, unsigned n_threads) {
 	if (n_samples < 2) {
 		throw std::invalid_argument("community_distances requires at least 2 samples (got " +
 		                            std::to_string(n_samples) + ")");
@@ -126,11 +129,23 @@ std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matri
 	}
 
 	const double NaN = std::numeric_limits<double>::quiet_NaN();
-	std::vector<double> out;
-	out.reserve(PairCount(n));
+	std::vector<double> out(PairCount(n));
 
-	for (uint32_t i = 0; i + 1 < n; ++i) {
+	// Base offset of row i's block in the condensed upper-triangle output: rows
+	// 0..i-1 contribute sum_{t<i}(n-1-t) = i*(n-1) - i*(i-1)/2 pairs. Every pair
+	// (i,j) thus has a FIXED destination slot, independent of which thread
+	// computes it, so the result is bit-identical for any n_threads.
+	auto row_base = [n](uint32_t i) -> size_t {
+		// For i == 0 the (i - 1) subterm underflows to UINT32_MAX in uint32_t, but
+		// its leading static_cast<size_t>(i) factor is 0, so the whole term is
+		// exactly 0. Do NOT "simplify" the (i - 1) away as an overflow fix.
+		return static_cast<size_t>(i) * (n - 1) - static_cast<size_t>(i) * (i - 1) / 2;
+	};
+
+	// All pairs (i, j>i) of one outer row, each written to its fixed slot.
+	auto compute_row = [&](uint32_t i) {
 		const double *xi = row(i);
+		size_t o = row_base(i);
 		for (uint32_t j = i + 1; j < n; ++j) {
 			const double *yj = row(j);
 			double d = 0.0;
@@ -264,7 +279,60 @@ std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matri
 			}
 			}
 
-			out.push_back(d);
+			out[o++] = d;
+		}
+	};
+
+	if (n_threads <= 1) {
+		for (uint32_t i = 0; i + 1 < n; ++i) {
+			compute_row(i);
+		}
+	} else {
+		// Dynamic row-stealing: row i does (n-1-i) pairs, so a static contiguous
+		// split would overload the low-index threads. An atomic row cursor keeps
+		// the load balanced while the fixed output slots keep the result
+		// deterministic. Cap the OS-thread count two ways: never more than there
+		// are rows with pairs (n-1), and never more than the hardware can run
+		// concurrently — extra threads on this CPU-bound loop only add
+		// context-switch overhead, and spawning thousands risks a pids/ulimit
+		// hit. hardware_concurrency() reports 0 when it cannot detect; fall back
+		// to the requested count (leaving only the n-1 cap) in that case.
+		unsigned hw = std::thread::hardware_concurrency();
+		if (hw == 0) {
+			hw = n_threads;
+		}
+		unsigned nt = std::min<unsigned>(n_threads, n - 1);
+		nt = std::min(nt, hw);
+		std::atomic<uint32_t> next_row {0};
+		auto worker = [&]() {
+			for (;;) {
+				const uint32_t i = next_row.fetch_add(1);
+				if (i + 1 >= n) {
+					break;
+				}
+				compute_row(i);
+			}
+		};
+		std::vector<std::thread> pool;
+		pool.reserve(nt - 1);
+		try {
+			for (unsigned t = 1; t < nt; ++t) {
+				pool.emplace_back(worker);
+			}
+		} catch (const std::system_error &) {
+			// A thread constructor failed (e.g. EAGAIN under a pids/ulimit cap).
+			// Do NOT let it unwind past the joinable threads already in `pool` —
+			// a joinable std::thread's destructor calls std::terminate() and
+			// would crash the entire process. Swallow it and degrade gracefully:
+			// the threads already spawned keep draining rows through the atomic
+			// cursor and the calling thread finishes the remainder below, so the
+			// full result is still computed, just with fewer workers. (The vector
+			// is pre-reserved, so emplace_back itself cannot throw bad_alloc; the
+			// only exception here is the thread constructor's.)
+		}
+		worker(); // the calling thread participates as one worker
+		for (auto &th : pool) {
+			th.join();
 		}
 	}
 	return out;
