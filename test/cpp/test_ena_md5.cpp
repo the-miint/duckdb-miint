@@ -17,6 +17,7 @@
 // test/sql/ena_upload_reads_local.test for the write-side precedent and
 // test/sql/read_ena_sequences.test for the read-side coverage added here).
 #include "ena_run_info_extractor.hpp"
+#include "read_ena_sequences_policy.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -158,4 +159,16 @@ TEST_CASE("ENARunInfoExtractor degrades to empty fastq_md5 on a count mismatch r
 	REQUIRE(runs.size() == 1);
 	REQUIRE(runs[0].fastq_urls.size() == 2);
 	CHECK(runs[0].fastq_md5.empty());
+}
+
+TEST_CASE("ShouldSkipRunIntegrityFailure skips a corrupt run only when siblings exist", "[ena_md5]") {
+	// A run's md5 mismatch (or bad ascp exit) at completion must not abort a
+	// multi-run scan and discard every sibling already downloaded -- the
+	// varchar[] / project-accession case that would otherwise make bulk fetches
+	// unusable. A single-run scan keeps the hard throw: no sibling to protect,
+	// and a downstream that resolves a scalar accession one run per call (the
+	// Qiita ENA ingest job) relies on that error to fail the run.
+	CHECK_FALSE(miint::ShouldSkipRunIntegrityFailure(1)); // scalar / single run -> throw
+	CHECK(miint::ShouldSkipRunIntegrityFailure(2));       // varchar[] siblings -> skip the bad one
+	CHECK(miint::ShouldSkipRunIntegrityFailure(100));     // project expansion -> skip the bad one
 }

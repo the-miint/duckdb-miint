@@ -2,6 +2,7 @@
 #include "SequenceRecord.hpp"
 #include "ena_resolver_cache.hpp"
 #include "miint_log.hpp"
+#include "read_ena_sequences_policy.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include <cerrno>
 #include <fstream>
@@ -454,15 +455,41 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 		}
 
 		if (batch.empty()) {
-			// Run completed successfully — wait for ascp (if any) and release.
-			// Finish() may throw on ascp non-zero exit; clean up the reader first
-			// so the throw doesn't leave dangling state behind.
+			// Run reached true EOF — Finish() verifies md5 (and reaps ascp), so it
+			// may throw on a digest mismatch or a bad ascp exit. Clean up the
+			// reader first so the throw/skip doesn't leave dangling state behind.
 			auto &reader = *global_state.readers[current_run_idx];
 			try {
 				reader.Finish();
-			} catch (...) {
+			} catch (const std::exception &e) {
 				global_state.readers[current_run_idx].reset();
-				throw;
+				// A single-run scan still throws: nothing else to discard, and a
+				// downstream that resolves a scalar accession one run per call
+				// relies on the error. A multi-run scan (varchar[] of accessions,
+				// or a project accession expanded to many runs) must NOT let one
+				// corrupt run abort the whole scan and throw away every sibling
+				// already downloaded -- skip it with a loud warning, like the
+				// open-failure and mid-stream branches, and let the rest land.
+				// The skipped run's rows were already emitted by true EOF; the
+				// warning + skipped_runs summary flag them as unverified.
+				if (!miint::ShouldSkipRunIntegrityFailure(global_state.total_runs)) {
+					throw;
+				}
+				auto &run = global_state.runs[current_run_idx];
+				miint::EmitWarning(context,
+				                   "read_ena_sequences: WARNING: run '%s' failed integrity verification at "
+				                   "completion (%s); skipping — its already-emitted rows are unverified",
+				                   run.run_accession, e.what());
+				{
+					lock_guard<mutex> skip_guard(global_state.skipped_lock);
+					global_state.skipped_runs.push_back(run.run_accession);
+				}
+				global_state.bytes_completed.fetch_add(run.total_bytes, std::memory_order_relaxed);
+				// release: publishes skipped_runs.push_back above to the summary
+				// thread's acquire load on runs_completed (see all_claimed branch).
+				global_state.runs_completed.fetch_add(1, std::memory_order_release);
+				local_state.has_run = false;
+				continue;
 			}
 			global_state.readers[current_run_idx].reset();
 			global_state.bytes_completed.fetch_add(global_state.runs[current_run_idx].total_bytes,
