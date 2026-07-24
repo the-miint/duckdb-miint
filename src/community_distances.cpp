@@ -128,7 +128,6 @@ std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matri
 		}
 	}
 
-	const double NaN = std::numeric_limits<double>::quiet_NaN();
 	std::vector<double> out(PairCount(n));
 
 	// Base offset of row i's block in the condensed upper-triangle output: rows
@@ -223,9 +222,8 @@ std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matri
 				// than the Sum(x^2) - f*mean^2 shortcut: the shortcut suffers
 				// catastrophic cancellation on high-mean/low-variance profiles
 				// (common with a few dominant high-count features), which can both
-				// diverge from scipy's `correlation` and spuriously report zero
-				// variance for a genuinely non-constant row. Matches scipy, which
-				// also de-means before the dot products.
+				// diverge from the reference and spuriously report zero variance for
+				// a genuinely non-constant row. De-means before the dot products.
 				const double mi = rowsum[i] / static_cast<double>(f);
 				const double mj = rowsum[j] / static_cast<double>(f);
 				double cov = 0.0, varx = 0.0, vary = 0.0;
@@ -236,21 +234,32 @@ std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matri
 					varx += dxi * dxi;
 					vary += dyj * dyj;
 				}
-				// A constant profile has zero variance -> correlation is undefined
-				// (scipy returns nan). The guard is explicit intent, not strictly
-				// load-bearing: for an exactly-constant row every dxi is 0 so cov is
-				// also exactly 0, and 0/0 would already yield NaN. We keep it so the
-				// NaN is deliberate rather than an implicit IEEE 0/0. A downstream
-				// reader (ReadDistanceTable) rejects the non-finite distance as
-				// "not provided" rather than inventing a value.
-				d = (varx > 0.0 && vary > 0.0) ? 1.0 - cov / std::sqrt(varx * vary) : NaN;
+				// Flat (constant) profiles have zero variance -> correlation is
+				// undefined. Follow PyCogent dist_pearson (the metric Kuczynski 2010
+				// used, verified against its source), NOT scipy: two flat rows are
+				// identical (r=1 -> distance 0); a flat vs a non-flat row has no
+				// correlation (r=0 -> distance 1). This keeps a constant-profile
+				// sample as a well-defined, finite distance rather than a NaN that a
+				// downstream reader would reject.
+				if (varx == 0.0 && vary == 0.0) {
+					d = 0.0;
+				} else if (varx == 0.0 || vary == 0.0) {
+					d = 1.0;
+				} else {
+					d = 1.0 - cov / std::sqrt(varx * vary);
+				}
 				break;
 			}
 			case Metric::Chisq: {
 				const double ri = rowsum[i];
 				const double rj = rowsum[j];
-				if (ri <= 0.0 || rj <= 0.0) {
-					d = NaN; // an all-zero sample has no row profile (see note above)
+				if (ri <= 0.0 && rj <= 0.0) {
+					// Both empty: no row profiles, but PyCogent dist_chisq defines
+					// this as distance 0 (identical). Follow it for faithful
+					// reproduction (verified against the PyCogent source).
+					d = 0.0;
+				} else if (ri <= 0.0 || rj <= 0.0) {
+					d = 1.0; // one empty vs non-empty -> maximal (PyCogent dist_chisq)
 				} else {
 					double s = 0.0;
 					for (uint32_t k = 0; k < f; ++k) {

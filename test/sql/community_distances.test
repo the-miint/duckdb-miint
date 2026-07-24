@@ -160,8 +160,10 @@ SELECT count(*) FROM community_distances('feat_z', 'bray_curtis') WHERE sample_a
 ----
 0
 
-# ── pearson NaN contract: a constant profile has undefined correlation ─────────
-# feature universe is exactly {f0,f1}, so p=[5,5] is a constant profile -> NaN.
+# ── pearson flat-profile contract: PyCogent dist_pearson finite semantics ──────
+# feature universe is exactly {f0,f1}, so p=[5,5] is a flat (constant) profile.
+# Kuczynski 2010 used PyCogent dist_pearson, which returns a FINITE distance of 1
+# for a flat vs a non-flat row (r=0), NOT NaN. (Verified against PyCogent source.)
 statement ok
 CREATE TABLE feat_const AS
 SELECT * FROM (VALUES
@@ -170,7 +172,7 @@ SELECT * FROM (VALUES
 ) t(sample_id, feature_id, value);
 
 query I
-SELECT isnan(distance) FROM community_distances('feat_const', 'pearson');
+SELECT abs(distance - 1.0) < 1e-12 FROM community_distances('feat_const', 'pearson');
 ----
 true
 

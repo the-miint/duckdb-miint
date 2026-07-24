@@ -162,27 +162,35 @@ TEST_CASE("all-zero sample pair -> zero for guarded metrics", "[community_distan
 	}
 }
 
-TEST_CASE("pearson constant profile -> NaN (undefined correlation)", "[community_distances]") {
-	// A constant row has zero variance, so Pearson r is undefined (scipy returns
-	// nan). We surface NaN so a downstream reader rejects it as "not provided".
-	const std::vector<double> m = {2, 2, 2, 2, 1, 3, 0, 5};
-	auto d = miint::CommunityDistancesCondensed(m, 2, 4, "pearson");
+TEST_CASE("pearson flat/constant profile -> PyCogent finite semantics", "[community_distances]") {
+	// A constant row has zero variance, so Pearson r is undefined. Kuczynski 2010
+	// used PyCogent's dist_pearson, which returns FINITE values here (verified
+	// against the PyCogent source): a flat vs a non-flat row -> r=0 -> distance 1;
+	// two flat rows -> r=1 -> distance 0. (scipy's `correlation` returns NaN
+	// instead; we deliberately follow PyCogent for faithful reproduction.)
+	const std::vector<double> flat_vs_nonflat = {2, 2, 2, 2, 1, 3, 0, 5};
+	auto d = miint::CommunityDistancesCondensed(flat_vs_nonflat, 2, 4, "pearson");
 	REQUIRE(d.size() == 1);
-	CHECK(std::isnan(d[0]));
-	// A non-constant identical pair is well-defined (r=1 -> distance 0), i.e. NaN
-	// is specific to the zero-variance case, not to pearson generally.
+	CHECK(d[0] == Approx(1.0)); // one flat row -> maximal pearson distance
+	const std::vector<double> flat_vs_flat = {2, 2, 2, 2, 7, 7, 7, 7};
+	CHECK(miint::CommunityDistancesCondensed(flat_vs_flat, 2, 4, "pearson")[0] == Approx(0.0));
+	// A non-constant identical pair is well-defined (r=1 -> distance 0).
 	const std::vector<double> ok = {1, 3, 0, 5, 1, 3, 0, 5};
 	CHECK(miint::CommunityDistancesCondensed(ok, 2, 4, "pearson")[0] == Approx(0.0).margin(1e-12));
 }
 
-TEST_CASE("chisq zero-row-sum sample -> NaN (no row profile)", "[community_distances]") {
-	// An all-zero sample has no correspondence-analysis row profile; the distance
-	// is undefined and surfaced as NaN. (Reachable only from a dense caller: the
-	// sparse SQL reader drops all-zero samples before they reach the core.)
-	const std::vector<double> m = {0, 0, 0, 0, 1, 2, 3, 4};
-	auto d = miint::CommunityDistancesCondensed(m, 2, 4, "chisq");
+TEST_CASE("chisq zero-row-sum sample -> PyCogent finite semantics", "[community_distances]") {
+	// An all-zero sample has no correspondence-analysis row profile. PyCogent
+	// dist_chisq (the metric Kuczynski 2010 used, verified against its source)
+	// returns FINITE values here, not NaN: one empty vs a non-empty row -> 1;
+	// two empty rows -> 0. (Reachable only from a dense caller: the sparse SQL
+	// reader drops all-zero samples before they reach the core.)
+	const std::vector<double> one_empty = {0, 0, 0, 0, 1, 2, 3, 4};
+	auto d = miint::CommunityDistancesCondensed(one_empty, 2, 4, "chisq");
 	REQUIRE(d.size() == 1);
-	CHECK(std::isnan(d[0]));
+	CHECK(d[0] == Approx(1.0));
+	const std::vector<double> both_empty = {0, 0, 0, 0, 0, 0, 0, 0};
+	CHECK(miint::CommunityDistancesCondensed(both_empty, 2, 4, "chisq")[0] == Approx(0.0));
 }
 
 TEST_CASE("pearson numerical stability on high-mean/low-variance profiles", "[community_distances]") {
