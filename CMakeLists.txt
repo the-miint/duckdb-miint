@@ -1752,6 +1752,7 @@ set(TEST_SOURCES
     src/ena_attributes_filter.cpp
     test/cpp/test_ENAClient.cpp
     test/cpp/test_ENAResolverCache.cpp
+    test/cpp/test_ena_md5.cpp
     test/cpp/test_ena_search_field_registry.cpp
     test/cpp/test_ena_attributes_filter.cpp
     test/cpp/test_ena_attributes_pushdown.cpp

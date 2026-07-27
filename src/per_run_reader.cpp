@@ -14,11 +14,11 @@
 
 namespace miint {
 
-PerRunReader::PerRunReader(duckdb::FileSystem &fs, ENARunInfo run, bool use_aspera, bool trim, std::mutex &open_mutex,
-                           const AsperaConfig *aspera_config, uint64_t max_sequences,
+PerRunReader::PerRunReader(duckdb::FileSystem &fs, ENARunInfo run, bool use_aspera, bool trim, bool verify_md5,
+                           std::mutex &open_mutex, const AsperaConfig *aspera_config, uint64_t max_sequences,
                            duckdb::ClientContext *log_context)
-    : fs_(fs), run_(std::move(run)), use_aspera_(use_aspera), trim_(trim), open_mutex_(open_mutex),
-      aspera_config_(aspera_config), max_sequences_(max_sequences), log_context_(log_context) {
+    : fs_(fs), run_(std::move(run)), use_aspera_(use_aspera), trim_(trim), verify_md5_(verify_md5),
+      open_mutex_(open_mutex), aspera_config_(aspera_config), max_sequences_(max_sequences), log_context_(log_context) {
 }
 
 PerRunReader::~PerRunReader() {
@@ -37,10 +37,18 @@ void PerRunReader::Open() {
 		return;
 	}
 	if (run_.format == ENASequenceFormat::SFF) {
+		if (verify_md5_) {
+			WarnMd5Skipped("SFF runs are downloaded whole and reassembled from multiple files; md5 verification is "
+			               "not supported for this path");
+		}
 		OpenSFF();
 	} else {
 #if MIINT_ASPERA_SUPPORTED
 		if (use_aspera_) {
+			if (verify_md5_) {
+				WarnMd5Skipped("Aspera downloads do not go through the md5-verification tap; use "
+				               "download_method='http' to verify");
+			}
 			OpenAspera();
 		} else {
 			OpenHTTP();
@@ -50,6 +58,16 @@ void PerRunReader::Open() {
 #endif
 	}
 	opened_ = true;
+}
+
+void PerRunReader::WarnMd5Skipped(const std::string &reason) {
+	auto msg = duckdb::StringUtil::Format("read_ena_sequences: WARNING: md5 verification skipped for run '%s' — %s",
+	                                      run_.run_accession, reason);
+	if (log_context_) {
+		miint::EmitWarning(*log_context_, msg);
+	} else {
+		duckdb::Printer::Print(msg);
+	}
 }
 
 SequenceRecordBatch PerRunReader::ReadBatch(size_t max_size) {
@@ -78,6 +96,11 @@ SequenceRecordBatch PerRunReader::ReadBatch(size_t max_size) {
 	sequences_emitted_ += batch.size();
 	if (batch.empty()) {
 		exhausted_ = true;
+		// Reached naturally (not via the max_sequences_ cap above, which
+		// returns early and never reaches this line) — every byte of the
+		// underlying file(s) has been consumed, so md5 verification (if
+		// requested) is meaningful. See reached_true_eof_ docs in the header.
+		reached_true_eof_ = true;
 	}
 	return batch;
 }
@@ -87,6 +110,19 @@ void PerRunReader::Finish() {
 		return;
 	}
 	finished_ = true;
+	// Verify before the Aspera wait below: a bad transfer's process exit code
+	// isn't more or less important than a digest mismatch, but checking the
+	// digest first means a corrupted-but-cleanly-exited ascp still surfaces as
+	// the more specific "md5 mismatch" error rather than being masked by
+	// falling through silently.
+	if (reached_true_eof_ && verify_md5_) {
+		if (md5_r1_) {
+			md5_r1_->VerifyOrThrow(run_.run_accession + " " + run_.fastq_urls[0]);
+		}
+		if (md5_r2_ && run_.fastq_urls.size() > 1) {
+			md5_r2_->VerifyOrThrow(run_.run_accession + " " + run_.fastq_urls[1]);
+		}
+	}
 #if MIINT_ASPERA_SUPPORTED
 	if (!use_aspera_) {
 		return;
@@ -125,6 +161,26 @@ void PerRunReader::Finish() {
 #endif
 }
 
+// Builds (or clears) the md5 tap for fastq_urls[file_idx], storing it into
+// `*slot` so Finish() can verify it later. Returns nullptr (and empties
+// `*slot`) whenever verification doesn't apply to this file: verify_md5_ is
+// off, ENA reported no md5 for this file, or the file isn't gzip-compressed
+// (verification only supports the gzip transport basis — see
+// duckdb_seq_read, which hashes raw pre-decompression bytes).
+std::shared_ptr<miint::StreamMd5> PerRunReader::MakeMd5Tap(size_t file_idx, std::shared_ptr<miint::StreamMd5> *slot) {
+	slot->reset();
+	if (!verify_md5_ || file_idx >= run_.fastq_md5.size() || run_.fastq_md5[file_idx].empty()) {
+		return nullptr;
+	}
+	if (!duckdb::IsGzipped(run_.fastq_urls[file_idx])) {
+		WarnMd5Skipped("file '" + run_.fastq_urls[file_idx] +
+		               "' is not gzip-compressed; md5 verification only supports the gzip transport basis");
+		return nullptr;
+	}
+	*slot = std::make_shared<miint::StreamMd5>(run_.fastq_md5[file_idx]);
+	return *slot;
+}
+
 void PerRunReader::OpenHTTP() {
 	if (run_.fastq_urls.empty()) {
 		throw duckdb::IOException("read_ena_sequences: no FASTQ URLs available for run '%s'", run_.run_accession);
@@ -140,9 +196,11 @@ void PerRunReader::OpenHTTP() {
 	// stack unwind; if the kstream wrapper had already taken over, its
 	// destructor frees the stream — no double-free.
 	const bool is_paired_open = run_.is_paired && run_.fastq_urls.size() >= 2;
-	DuckDBSeqStreamHandle s1(duckdb::CreateDuckDBSeqStream(fs_, run_.fastq_urls[0]), duckdb_seq_close);
-	DuckDBSeqStreamHandle s2(is_paired_open ? duckdb::CreateDuckDBSeqStream(fs_, run_.fastq_urls[1]) : nullptr,
+	DuckDBSeqStreamHandle s1(duckdb::CreateDuckDBSeqStream(fs_, run_.fastq_urls[0], MakeMd5Tap(0, &md5_r1_)),
 	                         duckdb_seq_close);
+	DuckDBSeqStreamHandle s2(
+	    is_paired_open ? duckdb::CreateDuckDBSeqStream(fs_, run_.fastq_urls[1], MakeMd5Tap(1, &md5_r2_)) : nullptr,
+	    duckdb_seq_close);
 
 	try {
 		fastx_reader_ = std::make_unique<SequenceReader>(std::move(s1), std::move(s2), true);
@@ -151,8 +209,12 @@ void PerRunReader::OpenHTTP() {
 			// ENA metadata may report PAIRED layout but the second FASTQ file
 			// is actually empty (single-end deposited with PAIRED metadata).
 			// The previous SequenceReader took (and freed) the original streams
-			// on throw; reopen R1 fresh and retry as single-end.
-			DuckDBSeqStreamHandle s1_retry(duckdb::CreateDuckDBSeqStream(fs_, run_.fastq_urls[0]), duckdb_seq_close);
+			// on throw; reopen R1 fresh and retry as single-end. No R2 stream
+			// will exist for the rest of this run, so drop its tap — verifying
+			// it against ENA's non-empty R2 digest would always mismatch.
+			md5_r2_.reset();
+			DuckDBSeqStreamHandle s1_retry(
+			    duckdb::CreateDuckDBSeqStream(fs_, run_.fastq_urls[0], MakeMd5Tap(0, &md5_r1_)), duckdb_seq_close);
 			fastx_reader_ = std::make_unique<SequenceReader>(std::move(s1_retry),
 			                                                 DuckDBSeqStreamHandle(nullptr, duckdb_seq_close), true);
 		} else {
