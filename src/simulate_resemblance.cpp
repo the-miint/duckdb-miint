@@ -127,22 +127,37 @@ SimulationCOO SimulateGradient(const std::vector<double> &abundances, int32_t nu
 	}
 	std::vector<std::vector<double>> tru = BuildTrueDistribution(abundances, pos, optima, sp_width);
 
-	// Optional per-sample perturbation. Multiplicative: x *= N(1, noise*rowsum);
-	// additive: x += N(0, noise*rowsum). Then shift floor to 0 and rescale to
-	// preserve the sample's original mean abundance (matches ord_survey).
+	// Optional perturbation. The noise width is drawn from either the species' own
+	// abundance or the sample total:
+	//   '+species' : x += N(0, noise*x)       -- per-species width (default)
+	//   '*sample'  : x *= N(1, noise*rowsum)  -- shared sample-total width
+	//   '+sample'  : x += N(0, noise*rowsum)  -- shared sample-total width
+	// Then shift floor to 0 and rescale to preserve the sample's original mean
+	// abundance (matches ord_survey).
 	if (noise != 0.0) {
+		const bool per_species = (noise_type == "+species");
 		const bool multiplicative = (noise_type == "*sample");
 		for (int32_t i = 0; i < n; i++) {
 			auto &row = tru[static_cast<size_t>(i)];
 			const double original_mean = VecMean(row);
-			const double scale = noise * VecSum(row); // rowsum BEFORE perturbation
-			std::normal_distribution<double> perturb(multiplicative ? 1.0 : 0.0, scale);
-			for (size_t s = 0; s < num_sp; s++) {
-				const double z = perturb(rng);
-				if (multiplicative) {
-					row[s] *= z;
-				} else {
-					row[s] += z;
+			if (per_species) {
+				// Width scales with each element, so draw a standard normal and
+				// scale per species. One distribution object keeps the engine
+				// consumption uniform across species.
+				std::normal_distribution<double> unit_normal(0.0, 1.0);
+				for (size_t s = 0; s < num_sp; s++) {
+					row[s] += unit_normal(rng) * noise * row[s];
+				}
+			} else {
+				const double scale = noise * VecSum(row); // rowsum BEFORE perturbation
+				std::normal_distribution<double> perturb(multiplicative ? 1.0 : 0.0, scale);
+				for (size_t s = 0; s < num_sp; s++) {
+					const double z = perturb(rng);
+					if (multiplicative) {
+						row[s] *= z;
+					} else {
+						row[s] += z;
+					}
 				}
 			}
 			const double floor_val = *std::min_element(row.begin(), row.end());

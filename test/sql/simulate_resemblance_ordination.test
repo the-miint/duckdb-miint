@@ -16,7 +16,9 @@ SET VARIABLE ab = (SELECT list(1.0/(i+1) ORDER BY i) FROM range(150) t(i));
 
 # ── Gradient: PCoA on Bray-Curtis recovers the environmental gradient ──────────
 statement ok
-CREATE TABLE g AS SELECT * FROM simulate_gradient_otus(getvariable('ab'), 40, 1000, noise := 0.5, seed := 42);
+-- noise_type pinned explicitly so this assertion is insulated from a change to
+-- the function's default noise width.
+CREATE TABLE g AS SELECT * FROM simulate_gradient_otus(getvariable('ab'), 40, 1000, noise := 0.5, noise_type := '+species', seed := 42);
 
 # Condensed Bray-Curtis distance over all sample pairs (shared-min identity).
 statement ok

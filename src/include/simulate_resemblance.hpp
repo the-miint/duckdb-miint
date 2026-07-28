@@ -43,9 +43,16 @@ std::vector<std::vector<double>> BuildTrueDistribution(const std::vector<double>
 //! Non-phylogenetic gradient simulator (Kuczynski et al. 2010). Mirrors the model
 //! in ord_survey `generate_1d_gradient_data`: per-species Gaussian response curves
 //! with random optima along [0,1], sampled at `num_samples` evenly-spaced positions
-//! in [range_lo, range_hi], optional per-sample noise, then a multinomial draw of
+//! in [range_lo, range_hi], optional noise, then a multinomial draw of
 //! `seqs_per_sample` reads per sample. Globally-absent OTUs never appear (COO is
 //! nonzero-only). `ground_truth` = the sample's gradient position.
+//!
+//! noise_type selects where each perturbation's width comes from:
+//!   "+species" : x += N(0, noise*x)       -- that species' own abundance
+//!   "*sample"  : x *= N(1, noise*rowsum)  -- the sample total, shared by all species
+//!   "+sample"  : x += N(0, noise*rowsum)  -- the sample total, shared by all species
+//! Negatives are then floored to 0 by subtracting the row minimum, and the row is
+//! rescaled to its original mean.
 //!
 //! seed < 0 => nondeterministic (random_device); seed >= 0 => reproducible.
 SimulationCOO SimulateGradient(const std::vector<double> &abundances, int32_t num_samples, int64_t seqs_per_sample,

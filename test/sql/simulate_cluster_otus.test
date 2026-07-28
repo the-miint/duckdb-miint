@@ -147,6 +147,14 @@ SELECT * FROM simulate_cluster_otus([0.4,0.3,0.3]::DOUBLE[], 500, noise_type := 
 ----
 noise_type
 
+# '+species' is gradient-only: the cluster model's perturbation width is the
+# spacing parameter itself, not a function of abundance, so there is no
+# per-species width to select. Rejected rather than silently ignored.
+statement error
+SELECT * FROM simulate_cluster_otus([0.4,0.3,0.3]::DOUBLE[], 500, noise_type := '+species');
+----
+noise_type
+
 statement error
 SELECT * FROM simulate_cluster_otus([0.4,0.3,0.3]::DOUBLE[], 500, normalization := 'bogus');
 ----

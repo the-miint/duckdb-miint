@@ -10,7 +10,7 @@ Generate synthetic OTU/feature tables with known ground truth, for benchmarking 
 
 ### Gradient communities
 
-Each species is assigned a random optimum position drawn uniformly on `[0, 1]` and a Gaussian response curve of fixed width `sp_width`, scaled by its input relative abundance. The gradient is sampled at `num_samples` evenly spaced positions on `[range_lo, range_hi]`; each sample's per-species profile is optionally perturbed by per-sample noise, then `seqs_per_sample` reads are drawn multinomially. Species absent from every sample are dropped (the output is nonzero-only).
+Each species is assigned a random optimum position drawn uniformly on `[0, 1]` and a Gaussian response curve of fixed width `sp_width`, scaled by its input relative abundance. The gradient is sampled at `num_samples` evenly spaced positions on `[range_lo, range_hi]`; each sample's per-species profile is optionally perturbed by noise, then `seqs_per_sample` reads are drawn multinomially. Species absent from every sample are dropped (the output is nonzero-only).
 
 **Function signature**:
 
@@ -21,8 +21,13 @@ Each species is assigned a random optimum position drawn uniformly on `[0, 1]` a
 - `num_samples` (INTEGER, required, positional): Number of samples along the gradient (≥ 1).
 - `seqs_per_sample` (BIGINT, required, positional): Sequencing depth — reads drawn per sample (≥ 1).
 - `sp_width` (DOUBLE, default `0.1`): Gaussian width (σ) of every species' response curve; must be finite and positive.
-- `noise` (DOUBLE, default `0.0`): Per-sample noise magnitude. `0.0` = unperturbed. The perturbation standard deviation is `noise × (sample abundance sum)`.
-- `noise_type` (VARCHAR, default `'*sample'`): `'*sample'` multiplies each species by `Normal(1, noise·Σ)`; `'+sample'` adds `Normal(0, noise·Σ)`. After perturbation the profile is shifted so its minimum is 0 (a uniform per-sample shift — not a per-species clip; there is no clip option for gradient noise) and then rescaled to preserve the sample's mean abundance. Only validated when `noise ≠ 0`.
+- `noise` (DOUBLE, default `0.0`): Noise magnitude. `0.0` = unperturbed. The perturbation standard deviation is `noise ×` the width source selected by `noise_type`.
+- `noise_type` (VARCHAR, default `'+species'`): selects where each perturbation's standard deviation comes from — a species' own abundance, or the sample total shared across all species.
+  - `'+species'` (default): adds `Normal(0, noise·x)` to each species' abundance `x`. The width is per species, so the perturbation is a relative jitter of the same proportion everywhere, and a species with zero abundance takes zero width — the perturbation step leaves it at zero. Note this does not by itself guarantee such a species stays absent from the output: the floor-shift below lifts the whole profile whenever some other species is driven negative, which becomes likely as `noise` approaches (or exceeds) 1.
+  - `'*sample'`: multiplies each species by `Normal(1, noise·Σ)`, where `Σ` is the sample's abundance sum.
+  - `'+sample'`: adds `Normal(0, noise·Σ)` to each species.
+
+  After perturbation the profile is shifted so its minimum is 0 (a uniform per-sample shift — not a per-species clip; there is no clip option for gradient noise) and then rescaled to preserve the sample's mean abundance. Only validated when `noise ≠ 0`.
 - `range_lo` (DOUBLE, default `0.1`), `range_hi` (DOUBLE, default `0.9`): Gradient sampling interval; both finite with `range_lo ≤ range_hi`.
 - `seed` (BIGINT, default `-1`): RNG seed. `-1` = nondeterministic; `≥ 0` = reproducible.
 

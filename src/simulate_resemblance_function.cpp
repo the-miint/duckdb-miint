@@ -48,7 +48,7 @@ struct SimGradientBindData : public TableFunctionData {
 	int64_t seqs_per_sample = 0;
 	double sp_width = 0.1;
 	double noise = 0.0;
-	std::string noise_type = "*sample";
+	std::string noise_type = "+species";
 	double range_lo = 0.1;
 	double range_hi = 0.9;
 	int64_t seed = -1;
@@ -104,9 +104,11 @@ unique_ptr<FunctionData> SimGradientBind(ClientContext &context, TableFunctionBi
 		throw InvalidInputException("simulate_gradient_otus: noise must be a finite non-negative number (got %g)",
 		                            data->noise);
 	}
-	if (data->noise != 0.0 && data->noise_type != "*sample" && data->noise_type != "+sample") {
-		throw InvalidInputException("simulate_gradient_otus: noise_type must be '*sample' or '+sample' (got '%s')",
-		                            data->noise_type);
+	if (data->noise != 0.0 && data->noise_type != "+species" && data->noise_type != "*sample" &&
+	    data->noise_type != "+sample") {
+		throw InvalidInputException(
+		    "simulate_gradient_otus: noise_type must be '+species', '*sample' or '+sample' (got '%s')",
+		    data->noise_type);
 	}
 	// isfinite BEFORE the ordering check: NaN silently satisfies `range_lo > range_hi`
 	// (NaN comparisons are false) and would then poison every position/weight.

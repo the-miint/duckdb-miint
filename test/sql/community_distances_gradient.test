@@ -11,7 +11,9 @@
 # vs its true gradient position. Equal per-sample depth means raw counts vs
 # relative abundance only rescale distances, which does not change the PCoA
 # shape or these correlations. Signatures verified seed-stable over 5 seeds; the
-# committed thresholds use seed=42 with margin.
+# committed thresholds use seed=42 with margin. The noisy runs pin noise_type
+# explicitly so these thresholds cannot drift if the function's default changes
+# (the clean runs skip perturbation entirely, so noise_type is dead there).
 #
 # Paper Fig-2 claims encoded below:
 #   - every metric recovers the gradient on PC1 when clean; none escapes the
@@ -66,7 +68,7 @@ SELECT 'chisq', 0.0,
 
 # ===== chi-square, noise 0.5 =====
 statement ok
-CREATE OR REPLACE TABLE g AS SELECT * FROM simulate_gradient_otus(getvariable('soil'), 50, 1000, noise := 0.5, seed := 42);
+CREATE OR REPLACE TABLE g AS SELECT * FROM simulate_gradient_otus(getvariable('soil'), 50, 1000, noise := 0.5, noise_type := '+species', seed := 42);
 
 statement ok
 CREATE OR REPLACE TABLE gf AS SELECT sample_id, otu_id AS feature_id, "count" AS value FROM g;
@@ -118,7 +120,7 @@ SELECT 'euclidean', 0.0,
 
 # ===== Euclidean, noise 0.5 =====
 statement ok
-CREATE OR REPLACE TABLE g AS SELECT * FROM simulate_gradient_otus(getvariable('soil'), 50, 1000, noise := 0.5, seed := 42);
+CREATE OR REPLACE TABLE g AS SELECT * FROM simulate_gradient_otus(getvariable('soil'), 50, 1000, noise := 0.5, noise_type := '+species', seed := 42);
 
 statement ok
 CREATE OR REPLACE TABLE gf AS SELECT sample_id, otu_id AS feature_id, "count" AS value FROM g;
@@ -170,7 +172,7 @@ SELECT 'gower', 0.0,
 
 # ===== Gower, noise 0.5 =====
 statement ok
-CREATE OR REPLACE TABLE g AS SELECT * FROM simulate_gradient_otus(getvariable('soil'), 50, 1000, noise := 0.5, seed := 42);
+CREATE OR REPLACE TABLE g AS SELECT * FROM simulate_gradient_otus(getvariable('soil'), 50, 1000, noise := 0.5, noise_type := '+species', seed := 42);
 
 statement ok
 CREATE OR REPLACE TABLE gf AS SELECT sample_id, otu_id AS feature_id, "count" AS value FROM g;
@@ -216,8 +218,8 @@ SELECT pc2_arch > 0.9 FROM gq WHERE metric = 'euclidean' AND noise = 0.0;
 true
 
 # ── Claim 3: chi-square is noise-robust; Gower degrades ─────────────────────────
-# At noise 0.5, chi-square keeps strong PC1 recovery (> 0.80; seed=42 0.91),
-# while Gower has clearly collapsed (< 0.80; seed=42 0.65).
+# At noise 0.5, chi-square keeps strong PC1 recovery (> 0.80; seed=42 0.86),
+# while Gower has clearly collapsed (< 0.80; seed=42 0.04).
 query I
 SELECT pc1_pearson > 0.80 FROM gq WHERE metric = 'chisq' AND noise = 0.5;
 ----
@@ -236,7 +238,7 @@ SELECT (SELECT pc1_pearson FROM gq WHERE metric = 'chisq' AND noise = 0.5)
 true
 
 # ── Claim 4: chi-square degrades LESS than Gower under the same noise ───────────
-# (chi2_clean - chi2_noisy) < (gower_clean - gower_noisy). seed=42: 0.08 < 0.30.
+# (chi2_clean - chi2_noisy) < (gower_clean - gower_noisy). seed=42: 0.13 < 0.92.
 query I
 SELECT ((SELECT pc1_pearson FROM gq WHERE metric = 'chisq' AND noise = 0.0)
       - (SELECT pc1_pearson FROM gq WHERE metric = 'chisq' AND noise = 0.5))
