@@ -1424,7 +1424,8 @@ if(MIINT_ENABLE_UNIFRAC)
         src/unifrac_pcoa_function.cpp
         src/unifrac_permanova_function.cpp
         src/unifrac_faith_pd_function.cpp
-        src/unifrac_distances_function.cpp)
+        src/unifrac_distances_function.cpp
+        src/progressive_pcoa_core.cpp)
 endif()
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
@@ -1767,6 +1768,8 @@ set(TEST_SOURCES
     test/cpp/test_AncestralStatesContinuous.cpp
     test/cpp/test_AncestralStatesParsimony.cpp
     test/cpp/test_AncestralStatesML.cpp
+    src/procrustes_core.cpp
+    test/cpp/test_Procrustes.cpp
     src/Minimap2Aligner.cpp
     test/cpp/test_Minimap2Aligner.cpp
     test/cpp/test_AlignBowtie2Sharded.cpp
@@ -1915,7 +1918,9 @@ if(MIINT_ENABLE_UNIFRAC)
         test/cpp/test_UnifracDistance.cpp
         test/cpp/test_UnifracCondensed.cpp
         test/cpp/test_UnifracDenseDistance.cpp
-        test/cpp/test_UnifracSubsampleBridge.cpp)
+        test/cpp/test_UnifracSubsampleBridge.cpp
+        src/progressive_pcoa_core.cpp
+        test/cpp/test_ProgressivePcoa.cpp)
 endif()
 
 add_executable(tests ${TEST_SOURCES})

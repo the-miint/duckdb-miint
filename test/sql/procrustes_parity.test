@@ -1,0 +1,112 @@
+# name: test/sql/procrustes_parity.test
+# description: procrustes parity vs SciPy (scipy.spatial.procrustes full + q2#338 numpy partial). Goldens SHA-pinned in data/procrustes/goldens.sha256; gate exported by run_tests.sh only when they match.
+# group: [sql]
+
+require miint
+
+require-env MIINT_PROCRUSTES_PARITY_OK
+
+# ── full_small: n=6, d=3 ──
+statement ok
+CREATE TABLE fs_ref AS SELECT * FROM read_csv('data/procrustes/full_small.reference.csv');
+
+statement ok
+CREATE TABLE fs_oth AS SELECT * FROM read_csv('data/procrustes/full_small.other.csv');
+
+# every one of the 2*n*d = 36 transformed coordinates matches SciPy's
+query I
+WITH got AS (SELECT * FROM procrustes('fs_ref', 'fs_oth', permutations := 0)),
+     exp AS (SELECT * FROM read_csv('data/procrustes/full_small.expected.csv'))
+SELECT count(*) FROM got g JOIN exp e
+  ON g.matrix = e.matrix AND g.sample_id = e.sample_id AND g.axis = e.axis
+WHERE abs(g.coordinate - e.coordinate) < 1e-9;
+----
+36
+
+# disparity matches SciPy's
+query I
+WITH got AS (SELECT DISTINCT m2 FROM procrustes('fs_ref', 'fs_oth', permutations := 0)),
+     exp AS (SELECT m2 FROM read_csv('data/procrustes/full_small.m2.csv'))
+SELECT count(*) FROM got g, exp e WHERE abs(g.m2 - e.m2) < 1e-12;
+----
+1
+
+# ── full_reflect: n=8, d=3, includes a reflection (det R = -1) ──
+statement ok
+CREATE TABLE fr_ref AS SELECT * FROM read_csv('data/procrustes/full_reflect.reference.csv');
+
+statement ok
+CREATE TABLE fr_oth AS SELECT * FROM read_csv('data/procrustes/full_reflect.other.csv');
+
+query I
+WITH got AS (SELECT * FROM procrustes('fr_ref', 'fr_oth', permutations := 0)),
+     exp AS (SELECT * FROM read_csv('data/procrustes/full_reflect.expected.csv'))
+SELECT count(*) FROM got g JOIN exp e
+  ON g.matrix = e.matrix AND g.sample_id = e.sample_id AND g.axis = e.axis
+WHERE abs(g.coordinate - e.coordinate) < 1e-9;
+----
+48
+
+query I
+WITH got AS (SELECT DISTINCT m2 FROM procrustes('fr_ref', 'fr_oth', permutations := 0)),
+     exp AS (SELECT m2 FROM read_csv('data/procrustes/full_reflect.m2.csv'))
+SELECT count(*) FROM got g, exp e WHERE abs(g.m2 - e.m2) < 1e-12;
+----
+1
+
+# ── full_wide: n=12, d=5 ──
+statement ok
+CREATE TABLE fw_ref AS SELECT * FROM read_csv('data/procrustes/full_wide.reference.csv');
+
+statement ok
+CREATE TABLE fw_oth AS SELECT * FROM read_csv('data/procrustes/full_wide.other.csv');
+
+query I
+WITH got AS (SELECT * FROM procrustes('fw_ref', 'fw_oth', permutations := 0)),
+     exp AS (SELECT * FROM read_csv('data/procrustes/full_wide.expected.csv'))
+SELECT count(*) FROM got g JOIN exp e
+  ON g.matrix = e.matrix AND g.sample_id = e.sample_id AND g.axis = e.axis
+WHERE abs(g.coordinate - e.coordinate) < 1e-9;
+----
+120
+
+query I
+WITH got AS (SELECT DISTINCT m2 FROM procrustes('fw_ref', 'fw_oth', permutations := 0)),
+     exp AS (SELECT m2 FROM read_csv('data/procrustes/full_wide.m2.csv'))
+SELECT count(*) FROM got g, exp e WHERE abs(g.m2 - e.m2) < 1e-12;
+----
+1
+
+# ── partial_anchored: 6 anchors + 4 extra in `other`, d=3 (q2#338 technique) ──
+statement ok
+CREATE TABLE pa_ref AS SELECT * FROM read_csv('data/procrustes/partial_anchored.reference.csv');
+
+statement ok
+CREATE TABLE pa_oth AS SELECT * FROM read_csv('data/procrustes/partial_anchored.other.csv');
+
+statement ok
+CREATE TABLE pa_pair AS SELECT * FROM read_csv('data/procrustes/partial_anchored.pairing.csv');
+
+# (6 reference + 10 other) * 3 axes = 48 rows, all matching the numpy partial oracle
+query I
+WITH got AS (SELECT * FROM procrustes('pa_ref', 'pa_oth', pairing := 'pa_pair')),
+     exp AS (SELECT * FROM read_csv('data/procrustes/partial_anchored.expected.csv'))
+SELECT count(*) FROM got g JOIN exp e
+  ON g.matrix = e.matrix AND g.sample_id = e.sample_id AND g.axis = e.axis
+WHERE abs(g.coordinate - e.coordinate) < 1e-9;
+----
+48
+
+# anchor disparity matches the oracle m2
+query I
+WITH got AS (SELECT DISTINCT m2 FROM procrustes('pa_ref', 'pa_oth', pairing := 'pa_pair')),
+     exp AS (SELECT m2 FROM read_csv('data/procrustes/partial_anchored.m2.csv'))
+SELECT count(*) FROM got g, exp e WHERE abs(g.m2 - e.m2) < 1e-12;
+----
+1
+
+# partial case leaves the p-value NULL (q2 partial_procrustes runs no Monte Carlo test)
+query T
+SELECT DISTINCT pvalue IS NULL FROM procrustes('pa_ref', 'pa_oth', pairing := 'pa_pair');
+----
+true

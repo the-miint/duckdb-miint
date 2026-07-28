@@ -9,6 +9,8 @@ void RegisterUnifracPermanova(ExtensionLoader &loader);
 void RegisterUnifracFaithPD(ExtensionLoader &loader);
 void RegisterUnifracDistances(ExtensionLoader &loader);
 void RegisterPcoaFromDistances(ExtensionLoader &loader);
+void RegisterProgressivePcoaFromDistances(ExtensionLoader &loader);
+void RegisterProgressivePcoaFromUnifrac(ExtensionLoader &loader);
 void RegisterPermanovaFromDistances(ExtensionLoader &loader);
 
 } // namespace duckdb

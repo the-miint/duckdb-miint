@@ -1,0 +1,252 @@
+# name: test/sql/progressive_pcoa_from_distances.test
+# description: progressive_pcoa_from_distances — scalable reference-anchored PCoA over a condensed (sample_a, sample_b, distance) distance table; long-format output matches pcoa.
+# group: [sql]
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+# ── fixture: 50 points in R^3 (three distinct frequencies → genuinely 3-D), then
+#    an exact condensed Euclidean distance table. Classical PCoA of a Euclidean
+#    distance matrix recovers the configuration, so the progressive result must
+#    match a full pcoa up to a similarity transform (procrustes M^2 ~ 0) — the
+#    same oracle the origin PoC uses (2025.07.30-progressive-pcoa/poc.py). ──
+statement ok
+CREATE TABLE pts AS
+SELECT i AS idx, 's' || i AS id, sin(i * 1.1) AS x, cos(i * 0.7) AS y, sin(i * 0.37 + 2.0) AS z
+FROM range(50) t(i);
+
+statement ok
+CREATE TABLE dcoo AS
+SELECT a.id AS sample_a, b.id AS sample_b,
+       sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z)) AS distance
+FROM pts a JOIN pts b ON a.idx < b.idx;
+
+# ── availability ──
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'progressive_pcoa_from_distances';
+----
+1
+
+# ── output arity: 50 samples * 3 dims = 150 rows ──
+query I
+SELECT count(*) FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+150
+
+# every sample appears once per axis; exactly 3 axes; iteration is always 0
+query I
+SELECT count(DISTINCT sample_id) FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+50
+
+query I
+SELECT count(DISTINCT axis) FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+3
+
+query I
+SELECT count(DISTINCT iteration) FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+1
+
+query I
+SELECT DISTINCT iteration FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+0
+
+# n_dims is honoured (2 dims → 100 rows, 2 axes)
+query I
+SELECT count(*) FROM progressive_pcoa_from_distances('dcoo', n_dims := 2, n_anchors := 15, batch_size := 12, seed := 42);
+----
+100
+
+# ── CORRECTNESS ORACLE: progressive reproduces the full pcoa up to a similarity
+#    transform, so our own procrustes disparity between them is ~0. ──
+statement ok
+CREATE TABLE full_ord AS SELECT sample_id, axis, coordinate FROM pcoa('dcoo', n_dims := 3, seed := 42);
+
+statement ok
+CREATE TABLE prog_ord AS
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+
+# observed M^2 ~ 1.4e-13 (Euclidean-exact); 1e-6 bounds it with generous headroom
+# for cross-platform fp32/FSVD rounding while asserting numerical reproduction.
+query T
+SELECT DISTINCT m2 < 1e-6 FROM procrustes('full_ord', 'prog_ord', permutations := 0);
+----
+true
+
+# eigenvalues / proportions are the anchor reference PCoA's (documented caveat):
+# a single value per axis, present and finite.
+query I
+SELECT count(DISTINCT eigenvalue) FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+3
+
+query T
+SELECT bool_and(proportion_explained >= 0.0 AND proportion_explained <= 1.0)
+FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+true
+
+# ── determinism: same seed → identical coordinates ──
+statement ok
+CREATE TABLE prog_ord2 AS
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+
+query I
+SELECT count(*) FROM (SELECT * FROM prog_ord EXCEPT SELECT * FROM prog_ord2);
+----
+0
+
+# ── single batch (batch_size >= remaining) covers all in one go ──
+query I
+SELECT count(*) FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 1000, seed := 42);
+----
+150
+
+# ── id-type mirroring: an integer-keyed distance table emits BIGINT sample_id ──
+statement ok
+CREATE TABLE dcoo_int AS
+SELECT a.idx AS sample_a, b.idx AS sample_b,
+       sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z)) AS distance
+FROM pts a JOIN pts b ON a.idx < b.idx;
+
+query T
+SELECT DISTINCT typeof(sample_id) FROM progressive_pcoa_from_distances('dcoo_int', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+BIGINT
+
+# ── error matrix (fail loud) ──
+statement error
+SELECT * FROM progressive_pcoa_from_distances('dcoo', n_dims := 0, n_anchors := 15, batch_size := 12, seed := 42);
+----
+
+statement error
+SELECT * FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 3, batch_size := 12, seed := 42);
+----
+
+statement error
+SELECT * FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 100, batch_size := 12, seed := 42);
+----
+
+statement error
+SELECT * FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 0, seed := 42);
+----
+
+statement error
+SELECT * FROM progressive_pcoa_from_distances('', n_dims := 3, n_anchors := 15, batch_size := 12);
+----
+
+statement error
+SELECT * FROM progressive_pcoa_from_distances('no_such_table', n_dims := 3, n_anchors := 15, batch_size := 12);
+----
+
+# malformed distance data is rejected within a block, same contract as pcoa
+statement ok
+CREATE TABLE dneg AS SELECT * FROM (VALUES ('a', 'b', -1.0), ('a', 'c', 0.5), ('b', 'c', 0.5)) t(sample_a, sample_b, distance);
+
+statement error
+SELECT * FROM progressive_pcoa_from_distances('dneg', n_dims := 2, n_anchors := 3, batch_size := 5);
+----
+negative distance
+
+statement ok
+CREATE TABLE dconf AS SELECT * FROM (VALUES ('a', 'b', 1.0), ('b', 'a', 9.0), ('a', 'c', 0.5), ('b', 'c', 0.5)) t(sample_a, sample_b, distance);
+
+statement error
+SELECT * FROM progressive_pcoa_from_distances('dconf', n_dims := 2, n_anchors := 3, batch_size := 5);
+----
+conflicting distances
+
+# an incomplete block (missing the (b,c) pair) fails loud naming the pair
+statement ok
+CREATE TABLE dmiss AS SELECT * FROM (VALUES ('a', 'b', 0.5), ('a', 'c', 0.5)) t(sample_a, sample_b, distance);
+
+statement error
+SELECT * FROM progressive_pcoa_from_distances('dmiss', n_dims := 2, n_anchors := 3, batch_size := 5);
+----
+incomplete distance matrix
+
+# ── explicit anchors: a caller-supplied anchor set replaces seeded random
+#    selection, making the reference frame fully reproducible/controllable
+#    (required for apples-to-apples parity against an oracle that fixes its own
+#    anchors). ──
+
+# arity is unchanged: still 50 samples * 3 dims = 150 rows, all 50 samples present
+query I
+SELECT count(*) FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, batch_size := 12,
+    anchors := ['s0','s1','s2','s3','s4','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
+----
+150
+
+query I
+SELECT count(DISTINCT sample_id) FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, batch_size := 12,
+    anchors := ['s0','s1','s2','s3','s4','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
+----
+50
+
+# CORRECTNESS: the explicit-anchor path also reproduces the full pcoa up to a
+# similarity transform (M^2 ~ 0), i.e. the ordination is right, not just the arity.
+statement ok
+CREATE TABLE prog_expl AS
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, batch_size := 12, seed := 42,
+    anchors := ['s0','s1','s2','s3','s4','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
+
+query T
+SELECT DISTINCT m2 < 1e-6 FROM procrustes('full_ord', 'prog_expl', permutations := 0);
+----
+true
+
+# explicit anchors take precedence over n_anchors: an n_anchors that would be
+# rejected on the random path (< n_dims + 1) is simply ignored when anchors given.
+query I
+SELECT count(*) FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 3, batch_size := 12,
+    anchors := ['s0','s1','s2','s3','s4','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
+----
+150
+
+# determinism: same explicit anchors + seed → identical coordinates
+statement ok
+CREATE TABLE prog_expl2 AS
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, batch_size := 12, seed := 42,
+    anchors := ['s0','s1','s2','s3','s4','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
+
+query I
+SELECT count(*) FROM (SELECT * FROM prog_expl EXCEPT SELECT * FROM prog_expl2);
+----
+0
+
+# ── explicit-anchor error matrix (fail loud) ──
+# an anchor that is not a sample in the table
+statement error
+SELECT * FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, batch_size := 12,
+    anchors := ['s0','s1','s2','s3','NOPE','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
+----
+not a sample in the distance-table
+
+# fewer explicit anchors than n_dims + 1
+statement error
+SELECT * FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, batch_size := 12,
+    anchors := ['s0','s1','s2']);
+----
+n_dims + 1
+
+# a duplicated explicit anchor
+statement error
+SELECT * FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, batch_size := 12,
+    anchors := ['s0','s0','s2','s3','s4','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
+----
+duplicate explicit anchor
+
+# a NULL inside the anchors list
+statement error
+SELECT * FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, batch_size := 12,
+    anchors := ['s0','s1',NULL,'s3','s4','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
+----
+must not contain NULL

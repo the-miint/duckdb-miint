@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <unordered_map>
 
 #include "catalog_utils.hpp"
@@ -14,6 +15,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 
 namespace duckdb::unifrac_internal {
 
@@ -84,15 +86,14 @@ std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, con
 	return rows;
 }
 
-DenseDistanceMatrix ReadDistanceTable(ClientContext &context, const std::string &table_name,
-                                      const std::string &caller_name) {
+DistanceRelationIds EnumerateDistanceIds(ClientContext &context, const std::string &table_name,
+                                         const std::string &caller_name) {
 	auto &db = DatabaseInstance::GetDatabase(context);
 	Connection conn(db);
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
 
 	// Schema probe via LIMIT 0 — surfaces missing columns or unsafe casts as a
-	// binder-time error before we materialize the full relation (mirrors
-	// ReadFeatureTable).
+	// binder-time error before any scan (mirrors ReadFeatureTable).
 	auto probe = conn.Query("SELECT sample_a::VARCHAR, sample_b::VARCHAR, distance::DOUBLE FROM " + qname + " LIMIT 0");
 	if (probe->HasError()) {
 		throw InvalidInputException("%s: distance-table '%s' must expose (sample_a, sample_b, distance DOUBLE): %s",
@@ -127,97 +128,165 @@ DenseDistanceMatrix ReadDistanceTable(ClientContext &context, const std::string 
 		                      caller_name, table_name, sample_a_type.ToString(), sample_b_type.ToString());
 	}
 
-	auto result = conn.Query("SELECT sample_a::VARCHAR, sample_b::VARCHAR, distance::DOUBLE FROM " + qname);
-	if (result->HasError()) {
-		throw InvalidInputException("%s: failed to read distance-table '%s': %s", caller_name, table_name,
-		                            result->GetError());
+	auto res = conn.Query("SELECT id FROM (SELECT sample_a::VARCHAR AS id FROM " + qname +
+	                      " UNION SELECT sample_b::VARCHAR FROM " + qname + ") WHERE id IS NOT NULL ORDER BY id");
+	if (res->HasError()) {
+		throw InvalidInputException("%s: failed to enumerate ids of distance-table '%s': %s", caller_name, table_name,
+		                            res->GetError());
 	}
-
-	// Collect surviving (a, b, distance) triples and the raw id list. NULL
-	// sample ids or NULL/NaN distances are dropped ("not provided"); an unfilled
-	// pair is caught downstream by the completeness check with a named message.
-	struct RawTriple {
-		std::string a;
-		std::string b;
-		double distance;
-	};
-	std::vector<RawTriple> triples;
-	std::vector<std::string> ids_raw;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
-	while (auto chunk = materialized.Fetch()) {
+	DistanceRelationIds out;
+	out.sample_id_type = ResolveSampleIdOutputType(sample_a_type);
+	auto &mat = res->Cast<MaterializedQueryResult>();
+	while (auto chunk = mat.Fetch()) {
 		const idx_t rn = chunk->size();
 		if (rn == 0) {
 			break;
 		}
-		UnifiedVectorFormat a_u, b_u, d_u;
-		chunk->data[0].ToUnifiedFormat(rn, a_u);
-		chunk->data[1].ToUnifiedFormat(rn, b_u);
-		chunk->data[2].ToUnifiedFormat(rn, d_u);
-		auto a_data = UnifiedVectorFormat::GetData<string_t>(a_u);
-		auto b_data = UnifiedVectorFormat::GetData<string_t>(b_u);
-		auto d_data = UnifiedVectorFormat::GetData<double>(d_u);
+		UnifiedVectorFormat id_u;
+		chunk->data[0].ToUnifiedFormat(rn, id_u);
+		auto id_data = UnifiedVectorFormat::GetData<string_t>(id_u);
 		for (idx_t i = 0; i < rn; ++i) {
-			const auto ai = a_u.sel->get_index(i);
-			const auto bi = b_u.sel->get_index(i);
-			const auto di = d_u.sel->get_index(i);
-			// A NULL sample id has no identity — skip the row entirely.
-			if (!a_u.validity.RowIsValid(ai) || !b_u.validity.RowIsValid(bi)) {
-				continue;
+			const auto ii = id_u.sel->get_index(i);
+			if (id_u.validity.RowIsValid(ii)) {
+				out.sorted_ids.emplace_back(id_data[ii].GetString());
 			}
-			std::string a = a_data[ai].GetString();
-			std::string b = b_data[bi].GetString();
-			// Record both ids BEFORE gating on the distance: a sample that appears
-			// in the table must enter the dictionary even if this particular
-			// distance is missing, so a sample whose every distance is NULL/NaN
-			// (e.g. a Bray-Curtis all-zero sample, NaN against everything)
-			// surfaces as a completeness error rather than silently vanishing
-			// from the result.
-			ids_raw.push_back(a);
-			ids_raw.push_back(b);
-			if (!d_u.validity.RowIsValid(di)) {
-				continue; // NULL distance → "not provided"
-			}
-			const double dv = d_data[di];
-			if (std::isnan(dv)) {
-				continue; // NaN distance → "not provided"
-			}
-			triples.push_back({std::move(a), std::move(b), dv});
 		}
 	}
+	return out;
+}
 
-	// Stable dictionary: distinct ids from both columns, sorted lexicographically
-	// (matches build_dictionary / UnifracSupportBiomView::FromCoo). ids_raw is
-	// dead after this move.
-	std::vector<std::string> sample_ids = std::move(ids_raw);
-	std::sort(sample_ids.begin(), sample_ids.end());
-	sample_ids.erase(std::unique(sample_ids.begin(), sample_ids.end()), sample_ids.end());
+DenseDistanceMatrix ReadDistanceTable(ClientContext &context, const std::string &table_name,
+                                      const std::string &caller_name) {
+	// ── Pass 1: the id dictionary (schema probe + id-type check + sorted ids) ──
+	// Learning N before reading any distance is what keeps this bounded. The
+	// previous single-pass design had to park every row somewhere first (N was
+	// unknown until the scan ended, so the matrix could not be allocated yet):
+	// a fully materialized query result (~40 B/row) PLUS an entries vector
+	// (16 B/row) — together ~28·N² bytes of pure intermediate, on top of the
+	// matrix. That is what drove the 25k-sample EMP matrix into an OOM SIGKILL.
+	// DuckDB does the DISTINCT + ORDER BY here, which it can spill; we hold only
+	// the N-bounded dictionary.
+	auto ids = EnumerateDistanceIds(context, table_name, caller_name);
+	auto sample_ids = std::move(ids.sorted_ids);
 	const auto n = static_cast<uint32_t>(sample_ids.size());
 	if (n < 2) {
 		throw InvalidInputException(
 		    "%s: distance-table '%s' has %u distinct sample(s) after dropping NULL rows; at least 2 are required",
 		    caller_name, table_name, n);
 	}
-	std::unordered_map<std::string, uint32_t> index;
-	index.reserve(sample_ids.size());
-	for (uint32_t i = 0; i < n; ++i) {
-		index.emplace(sample_ids[i], i);
+
+	// ── Fail-loud size guard, before a single N² byte is allocated ──
+	// A full dense analysis needs an N×N fp32 matrix plus a fill bitmap (~5·N²
+	// bytes); with the in-place fsvd that is also the process peak. Refuse rather
+	// than let a large N drive the process into an OOM SIGKILL. The budget is what
+	// DuckDB's own memory_limit leaves unused: the matrix and skbb's workspace are
+	// plain extension heap and therefore NOT buffer-manager tracked, so
+	// memory_limit cannot stop them by itself — this check is what brings them
+	// under the user's declared limit. Placing it after pass 1 (which holds only
+	// the dictionary) means the estimate is compared against a budget that the
+	// reader has not already eaten into.
+	{
+		const auto est_bytes = static_cast<idx_t>(5.0 * static_cast<double>(n) * static_cast<double>(n));
+		auto &buffer_manager = BufferManager::GetBufferManager(context);
+		const auto max_memory = buffer_manager.GetMaxMemory();
+		const auto used_memory = buffer_manager.GetUsedMemory();
+		const idx_t budget_bytes = max_memory > used_memory ? max_memory - used_memory : 0;
+		if (est_bytes > budget_bytes) {
+			throw InvalidInputException(
+			    "%s: distance-table '%s' has %u distinct samples; a full dense analysis needs ~%s, exceeding the %s "
+			    "left of the %s memory_limit. Raise memory_limit, or use progressive_pcoa_from_distances (or "
+			    "progressive_pcoa_from_unifrac) for large sample counts.",
+			    caller_name, table_name, n, StringUtil::BytesToHumanReadableString(est_bytes),
+			    StringUtil::BytesToHumanReadableString(budget_bytes),
+			    StringUtil::BytesToHumanReadableString(max_memory));
+		}
 	}
 
-	std::vector<miint::unifrac::DistanceEntry> entries;
-	entries.reserve(triples.size());
-	for (const auto &t : triples) {
-		entries.push_back({index.at(t.a), index.at(t.b), t.distance});
+	// id → sorted index. The dictionary is already in the sorted order that is the
+	// contract shared with build_dictionary / FromCoo, so cells can be written at
+	// their final positions during the scan — no insertion-order remap step.
+	std::unordered_map<std::string, uint32_t> index;
+	index.reserve(n * 2);
+	for (uint32_t k = 0; k < n; ++k) {
+		index.emplace(sample_ids[k], k);
+	}
+
+	// ── Pass 2: stream the distances straight into the matrix ──
+	// SendQuery (not Query) so chunks arrive lazily instead of the whole relation
+	// being materialized: nothing per-row is retained.
+	//
+	// NULL sample ids or NULL/NaN distances are dropped ("not provided"); an
+	// unfilled pair is caught by the builder's completeness check with a named
+	// message. Pass 1 enumerated ids independently of the distance value, so a
+	// sample whose every distance is NULL/NaN is in the dictionary and surfaces as
+	// a completeness error rather than silently vanishing.
+	auto &db = DatabaseInstance::GetDatabase(context);
+	Connection conn(db);
+	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	auto result = conn.SendQuery("SELECT sample_a::VARCHAR, sample_b::VARCHAR, distance::DOUBLE FROM " + qname);
+	if (result->HasError()) {
+		throw InvalidInputException("%s: failed to read distance-table '%s': %s", caller_name, table_name,
+		                            result->GetError());
 	}
 
 	DenseDistanceMatrix out;
 	try {
-		out.matrix = miint::unifrac::BuildDenseDistanceMatrix(entries, n, sample_ids);
+		miint::unifrac::DenseDistanceMatrixBuilder builder(n, sample_ids);
+		while (auto chunk = result->Fetch()) {
+			const idx_t rn = chunk->size();
+			if (rn == 0) {
+				break;
+			}
+			UnifiedVectorFormat a_u, b_u, d_u;
+			chunk->data[0].ToUnifiedFormat(rn, a_u);
+			chunk->data[1].ToUnifiedFormat(rn, b_u);
+			chunk->data[2].ToUnifiedFormat(rn, d_u);
+			auto a_data = UnifiedVectorFormat::GetData<string_t>(a_u);
+			auto b_data = UnifiedVectorFormat::GetData<string_t>(b_u);
+			auto d_data = UnifiedVectorFormat::GetData<double>(d_u);
+			for (idx_t i = 0; i < rn; ++i) {
+				const auto ai = a_u.sel->get_index(i);
+				const auto bi = b_u.sel->get_index(i);
+				const auto di = d_u.sel->get_index(i);
+				// A NULL sample id has no identity — skip the row entirely.
+				if (!a_u.validity.RowIsValid(ai) || !b_u.validity.RowIsValid(bi)) {
+					continue;
+				}
+				if (!d_u.validity.RowIsValid(di)) {
+					continue; // NULL distance → "not provided"
+				}
+				const double dv = d_data[di];
+				if (std::isnan(dv)) {
+					continue; // NaN distance → "not provided"
+				}
+				// Both ids came from this same relation in pass 1, so a miss means
+				// the relation did not return the same rows twice — a volatile or
+				// concurrently-changing source (e.g. a view over random()/nextval,
+				// or a file rewritten between passes). Fail loud: silently dropping
+				// the row would report an incomplete matrix and blame the data.
+				const auto ia = index.find(a_data[ai].GetString());
+				const auto ib = index.find(b_data[bi].GetString());
+				if (ia == index.end() || ib == index.end()) {
+					throw InvalidInputException(
+					    "%s: distance-table '%s' returned different rows on a second scan (sample id '%s' was not in "
+					    "the enumerated id set); it must be stable across scans — materialize it into a table first",
+					    caller_name, table_name, ia == index.end() ? a_data[ai].GetString() : b_data[bi].GetString());
+				}
+				builder.Add(ia->second, ib->second, dv);
+			}
+		}
+		out.matrix = builder.Finish();
 	} catch (const std::invalid_argument &e) {
 		throw InvalidInputException("%s: %s", caller_name, e.what());
 	}
+	// A streaming result surfaces execution errors during Fetch, not at SendQuery.
+	if (result->HasError()) {
+		throw InvalidInputException("%s: failed to read distance-table '%s': %s", caller_name, table_name,
+		                            result->GetError());
+	}
 	out.sample_ids = std::move(sample_ids);
 	out.n_samples = n;
-	out.sample_id_type = ResolveSampleIdOutputType(sample_a_type);
+	out.sample_id_type = ids.sample_id_type;
 	return out;
 }
 

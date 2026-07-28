@@ -1,0 +1,167 @@
+# name: test/sql/progressive_pcoa_from_unifrac.test
+# description: progressive_pcoa_from_unifrac — scalable reference-anchored PCoA that computes UniFrac on the fly per batch from a feature table + tree; long-format output matches unifrac_pcoa.
+# group: [sql]
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+# ── fixture: 40 samples over the 5 gg_otu tree tips, with varying (all-nonzero)
+#    abundances. UniFrac distances are pairwise-local (independent of the other
+#    samples), so a per-batch UniFrac block equals the corresponding slice of the
+#    full matrix — the property that makes progressive UniFrac correct. ──
+statement ok
+CREATE TABLE tree AS SELECT * FROM read_newick('data/unifrac/gg_otu_tree.nwk');
+
+statement ok
+CREATE TABLE ft AS
+SELECT 's' || s AS sample_id, 'GG_OTU_' || (f + 1) AS feature_id, (1 + (s * 7 + f * 13) % 11)::DOUBLE AS value
+FROM range(40) t(s), range(5) u(f);
+
+# ── availability ──
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'progressive_pcoa_from_unifrac';
+----
+1
+
+# ── output arity: 40 samples * 3 dims = 120 rows ──
+query I
+SELECT count(*) FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+120
+
+query I
+SELECT count(DISTINCT sample_id) FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+40
+
+query I
+SELECT count(DISTINCT axis) FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+3
+
+query I
+SELECT DISTINCT iteration FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+0
+
+# ── CORRECTNESS ORACLE: progressive reproduces the full unifrac_pcoa up to a
+#    similarity transform (procrustes disparity is small). Same criterion as the
+#    origin PoC (2025.07.30-progressive-pcoa/poc.py). ──
+statement ok
+CREATE TABLE full_ord AS
+SELECT sample_id, axis, coordinate
+FROM unifrac_pcoa('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, seed := 42);
+
+statement ok
+CREATE TABLE prog_ord AS
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+
+# observed M^2 ~ 7.4e-5 here; 0.05 leaves generous headroom (UniFrac is non-Euclidean,
+# so full PCoA is itself an embedding and the exact value depends on FSVD).
+query T
+SELECT DISTINCT m2 < 0.05 FROM procrustes('full_ord', 'prog_ord', permutations := 0);
+----
+true
+
+# ── STRONG EQUIVALENCE: computing UniFrac on the fly per batch must give the same
+#    result as slicing a precomputed unifrac_distances matrix — UniFrac is
+#    pairwise-local, so the two paths see identical distances, identical anchors
+#    (same seed), identical block PCoAs. M^2 ~ 1e-9 (only FSVD block row-order). ──
+statement ok
+CREATE TABLE udist AS
+SELECT sample_a, sample_b, distance FROM unifrac_distances('ft', 'tree', variant := 'weighted_normalized', seed := 42);
+
+statement ok
+CREATE TABLE prog_from_dist AS
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_distances('udist', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+
+query T
+SELECT DISTINCT m2 < 1e-5 FROM procrustes('prog_ord', 'prog_from_dist', permutations := 0);
+----
+true
+
+# ── determinism: same seed → identical coordinates ──
+statement ok
+CREATE TABLE prog_ord2 AS
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+
+query I
+SELECT count(*) FROM (SELECT * FROM prog_ord EXCEPT SELECT * FROM prog_ord2);
+----
+0
+
+# ── id-type mirroring: an integer-keyed feature table emits BIGINT sample_id ──
+statement ok
+CREATE TABLE ft_int AS
+SELECT s AS sample_id, 'GG_OTU_' || (f + 1) AS feature_id, (1 + (s * 7 + f * 13) % 11)::DOUBLE AS value
+FROM range(40) t(s), range(5) u(f);
+
+query T
+SELECT DISTINCT typeof(sample_id) FROM progressive_pcoa_from_unifrac('ft_int', 'tree', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+BIGINT
+
+# ── drop rules mirror ReadFeatureTable: a row is used only if sample_id,
+#    feature_id, AND value are all valid (non-NULL) and value is nonzero/non-NaN.
+#    'd' keeps 3 valid rows despite also having a zero / NaN / NULL-feature row;
+#    'x' has ONLY droppable rows so it is excluded (cannot be ordinated) — the
+#    same silent exclusion unifrac_pcoa applies, not an error. ──
+statement ok
+CREATE TABLE ftd AS SELECT * FROM (VALUES
+  ('a', 'GG_OTU_1', 3.0), ('a', 'GG_OTU_2', 1.0), ('a', 'GG_OTU_3', 2.0),
+  ('b', 'GG_OTU_1', 1.0), ('b', 'GG_OTU_2', 4.0), ('b', 'GG_OTU_3', 1.0),
+  ('c', 'GG_OTU_1', 2.0), ('c', 'GG_OTU_2', 2.0), ('c', 'GG_OTU_3', 5.0),
+  ('d', 'GG_OTU_1', 5.0), ('d', 'GG_OTU_2', 1.0), ('d', 'GG_OTU_3', 1.0),
+  ('d', 'GG_OTU_1', 0.0), ('d', 'GG_OTU_2', 'nan'::DOUBLE), ('d', NULL, 9.0),
+  ('x', NULL, 7.0), ('x', 'GG_OTU_1', 0.0)
+) AS t(sample_id, feature_id, value);
+
+# 4 samples ordinated (a,b,c,d); x excluded. n_dims=2 → 4*2 = 8 rows.
+query I
+SELECT count(DISTINCT sample_id) FROM progressive_pcoa_from_unifrac('ftd', 'tree', n_dims := 2, n_anchors := 3, batch_size := 2, seed := 42);
+----
+4
+
+query I
+SELECT count(*) FROM progressive_pcoa_from_unifrac('ftd', 'tree', n_dims := 2, n_anchors := 3, batch_size := 2, seed := 42) WHERE sample_id = 'x';
+----
+0
+
+# 'd' survived (its 3 valid rows) despite the dropped zero/NaN/NULL-feature rows.
+query I
+SELECT count(*) FROM progressive_pcoa_from_unifrac('ftd', 'tree', n_dims := 2, n_anchors := 3, batch_size := 2, seed := 42) WHERE sample_id = 'd';
+----
+2
+
+# ── error matrix (fail loud) ──
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 0, n_anchors := 15, batch_size := 12);
+----
+
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 3, batch_size := 12);
+----
+
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 100, batch_size := 12);
+----
+
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 15, batch_size := 0);
+----
+
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('', 'tree', n_dims := 3, n_anchors := 15, batch_size := 12);
+----
+
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', '', n_dims := 3, n_anchors := 15, batch_size := 12);
+----
+
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'not_a_variant', n_dims := 3, n_anchors := 15, batch_size := 12);
+----

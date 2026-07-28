@@ -13,12 +13,15 @@ Methods to estimate alpha and beta diversity, and supporting statistics.
 - [UniFrac distances](#unifrac-distances) - Condensed (pairwise) UniFrac distances in long form
 - [Beta-distance macros](#beta-distance-macros) - within/between-group distributions and k-nearest-neighbors over a distance table
 - [PCoA (from a distance table)](#pcoa-from-a-distance-table) - metric-agnostic PCoA over any condensed distance table
+- [Progressive PCoA (from a distance table)](#progressive-pcoa-from-a-distance-table) - scalable reference-anchored PCoA without a dense N×N decomposition
+- [Progressive PCoA (from UniFrac)](#progressive-pcoa-from-unifrac) - scalable UniFrac PCoA computing distances on the fly per batch (true-10M path)
 - [PERMANOVA (from a distance table)](#permanova-from-a-distance-table) - metric-agnostic PERMANOVA over any condensed distance table
 - [UniFrac PCoA](#unifrac-pcoa) - UniFrac distance + Principal Coordinates Analysis
 - [UniFrac PERMANOVA](#unifrac-permanova) - UniFrac distance + PERMANOVA pseudo-F + p-value
 - [Faith PD](#faith-pd) - Faith's phylogenetic diversity per sample
+- [Procrustes](#procrustes-align-two-ordinations) - align two ordinations into a common frame (disparity M² + PROTEST p-value)
 
-These methods are powered by the embedded [`unifrac-binaries`](https://github.com/biocore/unifrac-binaries) and [`scikit-bio-binaries`](https://github.com/scikit-bio/scikit-bio-binaries) libraries (see `docs/internals/embedded-tools.md` for the build details).
+Most of these methods are powered by the embedded [`unifrac-binaries`](https://github.com/biocore/unifrac-binaries) and [`scikit-bio-binaries`](https://github.com/scikit-bio/scikit-bio-binaries) libraries (see `docs/internals/embedded-tools.md` for the build details); [`procrustes`](#procrustes-align-two-ordinations) is a self-contained Eigen-backed port of SciPy and works on any ordination table.
 
 ### Feature table
 
@@ -234,6 +237,8 @@ SELECT * FROM pcoa('dm', n_dims := 3, seed := 42);
 - <a name="distance-table-completeness"></a>**Completeness (fail loud):** the matrix must be complete — every unordered pair present exactly once. A missing pair, a negative or non-finite distance, a nonzero self-distance, or a pair given two conflicting values is an error that names the offending pair. Rows with a NULL `sample_a`/`sample_b` are skipped; a NULL/NaN `distance` is treated as "not provided" (its ids are still recorded, so a sample whose every distance is NULL/NaN surfaces as an incompleteness error rather than silently vanishing). `unifrac_distances` always emits the full triangle, so its output is complete by construction; a hand-built table you must complete yourself.
 - **Equivalence:** `pcoa` over `unifrac_distances(obs, tree, variant := v, seed := s)` reproduces `unifrac_pcoa(obs, tree, variant := v, n_dims := d, seed := s)` — same matrix, same FSVD call, same seed. Coordinates match up to axis sign (compare `abs(coordinate)`) within the fp32 tolerance noted under [Reproducibility](#reproducibility).
 - **Fewer than two samples**, or **`n_dims > n_samples - 1`**: an error (an ordination is undefined).
+- <a name="pcoa-memory"></a>**Memory (and the size guard):** the ordination itself is dense, needing roughly `5 × n_samples²` bytes — about 3 GB at 25,000 samples, 18 GB at 60,000 — independent of how many pairs the input has. The distances are *streamed* into that matrix (the relation is scanned twice: once to enumerate the sample ids, once to fill), so nothing per-row is held. Because the matrix is allocated outside DuckDB's buffer manager, `memory_limit` cannot bound it on its own; instead `pcoa` estimates the requirement up front and **refuses with a clear error** when it exceeds what `memory_limit` leaves unused, naming both levers (raise `memory_limit`, or switch to [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table), which never forms the dense matrix). Raising `memory_limit` above physical RAM re-enables the OOM this guard exists to prevent.
+- **The relation must be stable across scans.** Since it is read twice, a relation that returns different rows each time — a view over `random()` or `nextval()`, or a file rewritten mid-query — is rejected with an error naming the unexpected id, rather than silently producing a wrong or incomplete matrix. Materialize such input into a table first.
 
 **Example:**
 
@@ -245,6 +250,82 @@ SELECT sample_id, axis, coordinate
 FROM pcoa('bc', n_dims := 2, seed := 42)
 ORDER BY axis, sample_id;
 ```
+
+---
+
+### Progressive PCoA (from a distance table)
+
+`progressive_pcoa_from_distances(distances, ...)` runs a **scalable, reference-anchored** PCoA over a condensed `(sample_a, sample_b, distance)` relation for sample counts where the dense N×N eigendecomposition [`pcoa`](#pcoa-from-a-distance-table) performs is infeasible, but the condensed distances still fit on disk.
+
+It works by ordinating a small set of shared **anchor** samples once (this fixes a common reference frame), then streaming the remaining samples in batches: each batch is ordinated *together with the anchors* and aligned back onto the reference frame by a [partial procrustes](#procrustes-align-two-ordinations) fit on the anchor overlap. No decomposition larger than `(n_anchors + batch_size)²` is ever computed, and the dense N×N matrix is never materialized.
+
+```sql
+CREATE TABLE dm AS SELECT sample_a, sample_b, distance
+    FROM unifrac_distances('observations', 'tree', seed := 42);
+
+SELECT * FROM progressive_pcoa_from_distances('dm',
+    n_dims := 3, n_anchors := 100, batch_size := 1000, seed := 42);
+```
+
+**Parameters:**
+- `distances` (VARCHAR): name of the condensed distance relation exposing `(sample_a, sample_b, distance)`
+- `n_dims` (INTEGER, default 3): number of PCoA axes; must be `≤ n_samples - 1` and `≤ n_anchors - 1`
+- `n_anchors` (INTEGER, default 100): number of anchor samples defining the reference frame; must be `≥ n_dims + 1` and `≤ n_samples`. Anchors are chosen at random (seeded)
+- `batch_size` (INTEGER, default 1000): non-anchor samples ordinated per batch (`≥ 1`)
+- `seed` (INTEGER, default -1): seeds both the anchor draw and the FSVD randomization; `-1` = unseeded (nondeterministic)
+
+**Output schema:** identical to [`pcoa`](#pcoa-from-a-distance-table) / [`unifrac_pcoa`](#unifrac-pcoa) — `(iteration, sample_id, axis, coordinate, eigenvalue, proportion_explained)`. `iteration` is always `0`. `sample_id` mirrors the input `sample_a` type — see [Sample identifier types](#sample-identifier-types). **Caveat:** `eigenvalue` and `proportion_explained` are the *anchor* reference ordination's (they describe the anchor subspace, not the full sample set); the per-sample `coordinate`s span all samples.
+
+**Behavior:**
+- **Accuracy:** the result reproduces a full [`pcoa`](#pcoa-from-a-distance-table) up to a similarity transform — exactly (to numerical precision) for Euclidean-embeddable distances, and closely for others. Each batch is aligned to the reference *independently*, so alignment error does not compound across batches. Validate on your own data by aligning against a full `pcoa` with [`procrustes`](#procrustes-align-two-ordinations) and checking the disparity `m2`.
+- **Anchor coordinates are batch-invariant:** for a fixed anchor set and seed the anchor coordinates (and eigenvalues/proportions) do not depend on `batch_size`.
+- **Completeness (fail loud):** each batch needs its full `(anchors + batch)²` block present in the distance relation; a missing pair within a block is an error naming the offending pair. NULL sample ids and NULL/NaN distances are skipped. `sample_a`/`sample_b` must resolve to the same output type (a BIGINT/VARCHAR mix is rejected at bind).
+- **Fewer than two samples**, `n_anchors` outside `[n_dims + 1, n_samples]`, `n_dims > n_samples - 1`, or `batch_size < 1`: an error.
+
+**Example:**
+
+```sql
+-- Ordinate a large precomputed distance table without a dense N×N decomposition,
+-- then confirm it matches a full pcoa (small procrustes disparity) on a subset.
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_distances('dm', n_dims := 3, n_anchors := 100, batch_size := 1000, seed := 42)
+ORDER BY axis, sample_id;
+```
+
+> **Note:** the current implementation sources each batch's distance block with its own query against the relation (bounded memory — one block at a time), which re-reads the anchor rows per batch. A future revision caches the anchor-touching rows once and reads batch rows via contiguous ranges.
+
+---
+
+### Progressive PCoA (from UniFrac)
+
+`progressive_pcoa_from_unifrac(feature_table, tree, ...)` is the end-to-end scalable path: it runs the same reference-anchored progressive PCoA as [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table), but computes UniFrac **on the fly, one batch at a time**, directly from a feature table and tree — so the full N×N UniFrac matrix is never formed. It is to [`unifrac_pcoa`](#unifrac-pcoa) what `progressive_pcoa_from_distances` is to [`pcoa`](#pcoa-from-a-distance-table): the memory-bounded ordination for sample counts where the dense decomposition is infeasible.
+
+This is correct because **UniFrac is pairwise-local** — the distance between two samples depends only on their own abundance vectors and the tree, never on which other samples share the table — so a UniFrac block computed over `(anchors + batch)` is identical to the corresponding slice of the full matrix. (Empirically, its output matches `progressive_pcoa_from_distances` over `unifrac_distances(...)` to within a procrustes disparity of ~1e-9.)
+
+```sql
+CREATE TABLE observations AS SELECT * FROM read_biom('data/biom/test.biom');
+CREATE TABLE tree AS SELECT * FROM read_newick('data/unifrac/gg_otu_tree.nwk');
+
+SELECT * FROM progressive_pcoa_from_unifrac('observations', 'tree',
+    variant := 'weighted_normalized', n_dims := 3, n_anchors := 100, batch_size := 1000, seed := 42);
+```
+
+**Parameters:**
+- `feature_table` (VARCHAR): name of the feature relation exposing `(sample_id, feature_id, value)` (see [Feature table](#feature-table))
+- `tree` (VARCHAR): name of the tree relation (see [Tree](#tree))
+- `n_dims` (3), `n_anchors` (100), `batch_size` (1000), `seed` (-1), `threads` (0): as in [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table) — `n_anchors` must be in `[n_dims + 1, n_samples]`
+- `variant`, `variance_adjust`, `alpha`, `bypass_tips`, `normalize_sample_counts`: the UniFrac controls, identical to [`unifrac_pcoa`](#unifrac-pcoa)
+
+There is deliberately **no `subsample_depth`**: rarefaction and progressive alignment do not compose cleanly (each batch would rarefy independently against a different RNG draw). Rarefy upstream if needed.
+
+**Output schema:** identical to [`unifrac_pcoa`](#unifrac-pcoa) — `(iteration, sample_id, axis, coordinate, eigenvalue, proportion_explained)`, `iteration` always `0`. As with `progressive_pcoa_from_distances`, `eigenvalue`/`proportion_explained` are the *anchor* reference ordination's (a documented caveat). `sample_id` mirrors the input type — see [Sample identifier types](#sample-identifier-types).
+
+**Behavior:**
+- **Accuracy / batch-invariance:** same guarantees as [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table) — reproduces a full [`unifrac_pcoa`](#unifrac-pcoa) up to a similarity transform, with alignment error that does not compound across batches.
+- **Samples & features:** samples with no nonzero feature are excluded (they cannot be ordinated). The tree must cover every feature in the table (validated once at bind); each batch's features are a subset, so the check makes them all safe.
+- **Fewer than two samples**, `n_anchors` outside `[n_dims + 1, n_samples]`, `n_dims > n_samples - 1`, `batch_size < 1`, an unknown `variant`, or a tree missing a feature: an error.
+
+> **Note:** like `progressive_pcoa_from_distances`, this computes each batch's block with its own feature-table slice query (bounded memory), re-reading the anchor samples' feature rows per batch; the anchor-row-cache optimization is future work.
 
 ---
 
@@ -461,4 +542,60 @@ SELECT sample_id, count(*) AS n_iter, avg(faith_pd) AS mean_pd,
 FROM unifrac_faith_pd('observations', 'tree',
     subsample_depth := 3, n_subsamples := 100, seed := 42)
 GROUP BY sample_id;
+```
+
+---
+
+### Procrustes (align two ordinations)
+
+`procrustes(reference, other, ...)` superimposes one ordination onto another with the optimal similarity transform (translation, uniform scaling, and an orthogonal rotation/reflection), so two ordinations of the same (or overlapping) samples can be compared or plotted in a common frame. Unlike the UniFrac-powered methods above, `procrustes` is self-contained — an Eigen-backed port of [`scipy.spatial.procrustes`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.procrustes.html) / `scipy.linalg.orthogonal_procrustes` (BSD-3) — so it works on **any** long-form ordination table, not just PCoA output.
+
+Both inputs are relation *names* exposing `(sample_id, axis, coordinate)` — the same long-form shape [`pcoa`](#pcoa-from-a-distance-table) and [`unifrac_pcoa`](#unifrac-pcoa) emit (`axis` 0-indexed).
+
+```sql
+-- Two PCoA ordinations of the same samples (e.g. two metrics), aligned:
+CREATE TABLE ord_a AS SELECT sample_id, axis, coordinate FROM pcoa('dm_bray',    n_dims := 3, seed := 42);
+CREATE TABLE ord_b AS SELECT sample_id, axis, coordinate FROM pcoa('dm_unifrac', n_dims := 3, seed := 42);
+
+SELECT * FROM procrustes('ord_a', 'ord_b', permutations := 999, seed := 42);
+```
+
+**Parameters:**
+- `reference` (VARCHAR): name of the reference ordination relation `(sample_id, axis, coordinate)`; its frame is the target
+- `other` (VARCHAR): name of the ordination to transform onto the reference
+- `pairing` (VARCHAR, optional): name of a `(reference_id, other_id)` relation. Absent → **full** mode (both ordinations must describe the same samples). Present → **partial** mode: fit the transform on just the paired anchor rows, then apply it to *every* row of both ordinations (the q2-diversity `partial_procrustes` technique, qiime2/q2-diversity#338)
+- `n_dims` (INTEGER, default: all available axes): number of leading axes to use; must be `≤` the axes present in each input
+- `permutations` (INTEGER, default 999): Monte Carlo permutations for the PROTEST p-value (full mode only); `0` disables the test (p-value is NULL)
+- `seed` (INTEGER, default -1): permutation seed; `-1` = unseeded
+
+**Output schema:** mirrors the [`unifrac_pcoa`](#unifrac-pcoa) shape, with a leading `matrix` discriminator in place of `iteration` and the two fit-level scalars in the trailing slots:
+- `matrix` (VARCHAR): `'reference'` (the standardized reference) or `'other'` (the transformed other)
+- `sample_id` (mirrors input type — see [Sample identifier types](#sample-identifier-types)): sample identifier. The output type is the shared BIGINT/UUID type when `reference` and `other` agree, otherwise VARCHAR
+- `axis` (INTEGER): 0-indexed axis
+- `coordinate` (DOUBLE): the sample's coordinate on this axis, in the shared standardized frame
+- `m2` (DOUBLE): the Procrustes disparity M² — **replicated on every row** (it is a property of the whole fit). `M² = 1 − (Σσ)² ∈ [0, 1]`; `0` = a perfect superimposition
+- `pvalue` (DOUBLE): PROTEST Monte Carlo p-value — **replicated on every row**; `NULL` in partial mode and when `permutations := 0`
+
+**Behavior:**
+- **Full mode:** `reference` and `other` must describe the **same** sample set and carry the **same** number of axes (mirrors `scipy.spatial.procrustes`, which requires identical shapes). The transform is fit on all shared samples; `m2` is the disparity; `pvalue` is the PROTEST test.
+- **Partial mode (`pairing`):** the pairing must be **1:1** — a repeated `reference_id` or `other_id` is rejected (it would drop a row or feed one physical sample into the fit as several anchors). The fit uses the matched anchor rows (at least `n_dims + 1` usable pairs are required); it is then applied to every row of both inputs. `m2` is the disparity over the anchors; `pvalue` is `NULL` (matching q2's `partial_procrustes`, which defines no Monte Carlo test).
+- **Sample ids:** VARCHAR/BIGINT/UUID are all accepted (see [Sample identifier types](#sample-identifier-types)); full-mode matching and pairing lookups are by the id's string form, so a BIGINT `reference` and a VARCHAR `other` with the same ids align and emit under VARCHAR.
+- **Fail loud:** a missing `(sample_id, axis, coordinate)` column, a ragged ordination (a sample missing an axis), a duplicate `(sample_id, axis)`, an out-of-range `axis`, fewer than `n_dims + 1` points/anchors, or (full mode) differing sample sets or axis counts each raise a named error.
+- **P-value reproducibility:** the PROTEST test is reproducible under a fixed `seed` within one build, but it is **not** bit-for-bit comparable to q2's `procrustes_analysis` — q2 uses an *unseeded* RNG, and the C++ PRNG differs from NumPy's, so agreement is statistical (within Monte Carlo error), not exact. Disparity and coordinates, by contrast, match SciPy to machine precision.
+
+**Examples:**
+
+```sql
+-- Per-fit disparity + p-value (one row via DISTINCT, since both are replicated):
+SELECT DISTINCT m2, pvalue
+FROM procrustes('ord_a', 'ord_b', permutations := 999, seed := 42);
+
+-- Partial (anchored) alignment: project a new batch `ord_b` into the reference
+-- frame using a set of shared anchor samples, carrying the batch's extra samples
+-- through the same transform.
+CREATE TABLE anchors AS SELECT ref_id AS reference_id, batch_id AS other_id FROM anchor_map;
+SELECT sample_id, axis, coordinate
+FROM procrustes('ord_a', 'ord_b', pairing := 'anchors')
+WHERE matrix = 'other'
+ORDER BY sample_id, axis;
 ```

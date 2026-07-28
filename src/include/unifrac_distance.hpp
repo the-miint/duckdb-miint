@@ -51,6 +51,13 @@ public:
 	const float *matrix() const {
 		return mat_->matrix;
 	}
+	// Mutable view for routines that consume the matrix as their own scratch
+	// space (skbb_pcoa_fsvd_inplace_fp32 centers in place rather than allocating
+	// a second N×N buffer). The matrix is garbage afterwards, so callers must be
+	// done with this object — see RunPcoaOnMatrix.
+	float *mutable_matrix() {
+		return mat_->matrix;
+	}
 	uint32_t n_samples() const {
 		return mat_->n_samples;
 	}

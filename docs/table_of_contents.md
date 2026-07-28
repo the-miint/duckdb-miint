@@ -32,7 +32,7 @@ MIINT provides a range of bioinformatic capabilities. The materials included her
 ## Phylogeny & diversity
 
 - [Phylogeny estimation](phylogeny.md) - Phylogenetic estimation, tree manipulation (shear, resolve multifurcations/placements), and comparative methods (independent contrasts, ancestral state reconstruction: Brownian-motion, parsimony, and Mk maximum likelihood).
-- [Alpha and beta diversity](diversity.md) - Methods to compute and analyze alpha and beta diversity.
+- [Alpha and beta diversity](diversity.md) - Methods to compute and analyze alpha and beta diversity, including ordination (PCoA) and Procrustes alignment of ordinations.
 
 ## Mass spectrometry
 

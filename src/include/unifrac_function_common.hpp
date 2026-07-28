@@ -74,6 +74,23 @@ struct DenseDistanceMatrix {
 	LogicalType sample_id_type = LogicalType::VARCHAR;
 };
 
+// The distinct, sorted, non-null sample ids of a condensed distance relation,
+// plus the resolved output id type. Materializes only the id dictionary (bounded
+// by N), never the N×N matrix.
+struct DistanceRelationIds {
+	std::vector<std::string> sorted_ids;
+	LogicalType sample_id_type = LogicalType::VARCHAR;
+};
+
+// Enumerate a condensed distance relation's id dictionary: probe the schema,
+// reject mismatched sample_a/sample_b id types, and return the distinct non-null
+// ids from both columns in lexicographic order. Shared by the progressive PCoA
+// functions (which never build a dense matrix) and by ReadDistanceTable, where it
+// is the first of two passes — knowing N up front is what lets the second pass
+// stream cells straight into the matrix instead of parking every row on the heap.
+DistanceRelationIds EnumerateDistanceIds(ClientContext &context, const std::string &table_name,
+                                         const std::string &caller_name);
+
 // Read the user-named condensed distance relation into a dense matrix. The
 // relation must expose `(sample_a, sample_b, distance)`: sample_a/sample_b of
 // any type castable to VARCHAR, distance castable to DOUBLE (mirrors
