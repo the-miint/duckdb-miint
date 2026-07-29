@@ -44,15 +44,25 @@ std::string CommunityMetricList();
 //!                                                                [0,1]; both-empty -> 0,
 //!                                                                one-empty -> 1
 //!  - "pearson"       1 - r, r = Pearson correlation over features [0,2];
-//!                                                                constant row -> NaN
+//!                                                                both rows constant
+//!                                                                -> 0, one constant
+//!                                                                -> 1 (never NaN)
 //!  - "chisq"         correspondence-analysis χ² distance:
 //!                    sqrt(Σk (GT/colk)*(xk/rowx - yk/rowy)^2), colk>0 only,
-//!                    GT = grand total; needs positive row sums               [0,inf)
-//!  - "gower"         Σk |xk-yk| / rangek (PyCogent dist_gower, un-normalized;
+//!                    GT = grand total; both row sums 0 -> 0, one 0 -> 1    [0,inf)
+//!  - "gower"         Σk |xk-yk| / rangek (un-normalized;
 //!                    rangek = max_i M[i][k] - min_i M[i][k]), rangek>0 only    [0,inf)
 //!
 //! χ² and Gower depend on GLOBAL column statistics (column sums / column ranges
 //! over ALL samples), so they are matrix-wide, not purely per-pair.
+//!
+//! Primary sources for the metric definitions: Bray & Curtis 1957 (bray_curtis);
+//! Jaccard 1912 (jaccard); Faith, Minchin & Belbin 1987 (chisq, gower in an
+//! ecological setting); Gower 1971 (gower); Horn 1966 / Morisita 1959, as given
+//! by Magurran 2004 p.246 (morisita_horn). The zero-variance / zero-row-sum
+//! conventions above follow cogent3 `cogent3.maths.distance_transform` (BSD-3),
+//! the reference implementation of the metrics Kuczynski et al. 2010 used; see
+//! THIRD_PARTY_LICENSES.md.
 //!
 //! `n_threads` parallelizes the O(n^2 * f) pair loop. 0 or 1 runs fully serial
 //! (no threads spawned; the caller resolves 0 = "follow DuckDB" before calling,

@@ -929,3 +929,149 @@ license text under its build tree (e.g.
 
 RocksDB — also sourced via vcpkg — is documented separately above (it is
 dual `GPL-2.0-only OR Apache-2.0`, used under Apache-2.0).
+
+---
+
+## Validation oracles and algorithm references (not linked)
+
+The projects in this section are **not** dependencies of the built extension —
+nothing here is compiled, vendored, or linked. They are listed because miint
+code was developed with reference to them, or because they generated committed
+golden data used by the parity tests. This mirrors the Biopython entry above,
+where a reference-only consultation is likewise recorded.
+
+All four Python projects are distributed under the 3-clause BSD license; the
+shared license text appears once at the end of this section with each project's
+copyright notice listed alongside it.
+
+### cogent3 (and its predecessor PyCogent)
+
+The eight community β-diversity metrics in `src/community_distances.cpp` are
+independent C++ implementations of the metrics used by Kuczynski et al. 2010,
+whose reference implementation is `cogent3.maths.distance_transform` (formerly
+`cogent.maths.distance_transform` in PyCogent). No code was copied. Two
+zero-variance / zero-row-sum conventions that the published formulas leave
+undefined — `dist_pearson` on a constant profile, `dist_chisq` on a zero-sum row
+— follow that module's behavior so the reproduction is faithful; both were
+verified numerically against cogent3 (agreement ≤ 4.4e-16 across all eight
+metrics on `data/simsurvey/beta_distance_fixture.csv`).
+
+- Repository: https://github.com/cogent3/cogent3
+- Version referenced: cogent3 2026.7.6a0
+- License: `BSD-3-Clause` — Copyright 2019-2021 Gavin Huttley
+- Authoritative license text: `LICENSE` in the cogent3 source distribution
+
+#### Citations
+
+Knight, R.; Maxwell, P.; Birmingham, A.; Carnes, M.; Caporaso, J.G.; Easton, B.C.;
+Eaton, M.; Hamady, M.; Lindsay, H.; Liu, Z.; Lozupone, C.; McDonald, D.;
+Robeson, M.; Sammut, R.; Smit, S.; Wakefield, M.J.; Widmann, J.; Wikman, S.;
+Wilson, S.; Ying, H.; and Huttley, G.A. (2007) "PyCogent: a toolkit for making
+sense from sequence", Genome Biology, 8(8), R171. doi: 10.1186/gb-2007-8-8-r171
+
+cogent3 is cited via Zenodo: doi: 10.5281/zenodo.15067121
+
+### SciPy
+
+`scipy.cluster.hierarchy.linkage(method='average')` and `cophenet` generated the
+committed cophenetic goldens in `data/simsurvey/cluster_upgma_oracle.csv`, which
+`test/sql/cluster_upgma_parity.test` checks `cluster_upgma` against. SciPy
+primitives also generated `data/simsurvey/beta_distance_oracle.csv`.
+
+- Repository: https://github.com/scipy/scipy
+- Version referenced: 1.18.0
+- License: `BSD-3-Clause` — Copyright (c) 2001-2002 Enthought, Inc.; 2003-, SciPy Developers
+
+#### Citation
+
+Virtanen, P.; Gommers, R.; Oliphant, T.E.; et al. (2020) "SciPy 1.0: fundamental
+algorithms for scientific computing in Python", Nature Methods, 17(3), 261-272.
+doi: 10.1038/s41592-019-0686-2
+
+### scikit-learn
+
+`sklearn.cluster.KMeans` generated the committed goldens in
+`data/simsurvey/cluster_kmeans_oracle.csv`, which
+`test/sql/cluster_kmeans_parity.test` checks `cluster_kmeans` against. Its
+documented behavior on duplicate points (fewer than `k` non-empty clusters) also
+defines the contract recorded in `src/include/cluster_kmeans.hpp`.
+
+- Repository: https://github.com/scikit-learn/scikit-learn
+- Version referenced: 1.9.0
+- License: `BSD-3-Clause` — Copyright (c) 2007-2024 The scikit-learn developers
+
+#### Citation
+
+Pedregosa, F.; Varoquaux, G.; Gramfort, A.; Michel, V.; Thirion, B.; Grisel, O.;
+Blondel, M.; Prettenhofer, P.; Weiss, R.; Dubourg, V.; Vanderplas, J.; Passos, A.;
+Cournapeau, D.; Brucher, M.; Perrot, M.; and Duchesnay, E. (2011)
+"Scikit-learn: Machine Learning in Python", Journal of Machine Learning Research,
+12, 2825-2830.
+
+### scikit-bio (Python package)
+
+Used alongside SciPy to cross-check the community β-diversity metrics when
+generating `data/simsurvey/beta_distance_oracle.csv`, and for classical PCoA
+during validation. Distinct from the **scikit-bio-binaries (libskbb)** C++
+library documented above, which *is* linked into the extension.
+
+- Repository: https://github.com/scikit-bio/scikit-bio
+- Version referenced: 0.7.3
+- License: `BSD-3-Clause` — Copyright (c) 2013--, scikit-bio development team
+
+#### Citation
+
+Aton, M.; McDonald, D.; Cañardo Alastuey, J.; et al. (2025) "Scikit-bio: a
+fundamental Python library for biological omic data analysis", Nature Methods.
+doi: 10.1038/s41592-025-02981-z
+
+### species_abund_sim / ord_survey (Kuczynski et al. 2010 reference code)
+
+`simulate_gradient_otus` and `simulate_cluster_otus`
+(`src/simulate_resemblance.cpp`) reproduce the generative models in the
+`ord_survey` reference code accompanying Kuczynski et al. 2010. The committed
+empirical abundance vectors `data/simsurvey/soil_abundances.csv` (576 species)
+and `data/simsurvey/keyboard_abundances.csv` (684 species) were extracted from
+that code's `noah_soil_data.py` / `keyboard_data.py`, and the statistical
+tolerance bands in `data/simsurvey/gradient_oracle.csv` /
+`cluster_oracle.csv` were produced by executing it.
+
+- Author: Justin Kuczynski (2010); the code carries no license statement
+- **Used with the author's permission.**
+
+#### Citation
+
+Kuczynski, J.; Liu, Z.; Lozupone, C.; McDonald, D.; Fierer, N.; and Knight, R.
+(2010) "Microbial community resemblance methods differ in their ability to detect
+biologically relevant patterns", Nature Methods, 7(10), 813-819.
+doi: 10.1038/nmeth.1499
+
+### BSD 3-Clause License
+
+Applies to cogent3, SciPy, scikit-learn, and scikit-bio, each with its own
+copyright notice as listed above.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors
+   may be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

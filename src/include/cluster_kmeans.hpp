@@ -25,7 +25,8 @@ struct KMeansResult {
 	int32_t restarts = 0;             //!< number of k-means++ restarts actually run
 };
 
-//! Lloyd's k-means with k-means++ seeding, `n_init` random restarts, and the
+//! Lloyd's k-means (Lloyd 1982) with k-means++ seeding (Arthur & Vassilvitskii
+//! 2007), `n_init` random restarts, and the
 //! lowest-inertia restart returned. Deterministic for a given `seed` on a fixed
 //! toolchain (all randomness flows from one std::mt19937_64(seed)); note that the
 //! std::uniform_int/real_distribution mappings are not standardized across C++
@@ -35,7 +36,8 @@ struct KMeansResult {
 //! non-empty clusters; when there are fewer than `k` distinct locations the
 //! result has fewer than `k` non-empty clusters -- matching scikit-learn's
 //! KMeans, which likewise returns fewer than `k` labels (and warns) on duplicate
-//! points, since `k` non-empty clusters are then impossible.
+//! points, since `k` non-empty clusters are then impossible. (scikit-learn is the
+//! parity-test oracle; see THIRD_PARTY_LICENSES.md.)
 //!
 //! `points` is row-major, `n_points` rows x `n_dims` columns. Cluster ids are
 //! canonicalized so that clusters appear in order of first-seen point (id 0 is

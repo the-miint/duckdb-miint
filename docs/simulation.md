@@ -7,6 +7,7 @@ Generate synthetic OTU/feature tables with known ground truth, for benchmarking 
 - [Gradient communities](#gradient-communities) - Samples along a 1-D environmental gradient.
 - [Clustered communities](#clustered-communities) - Samples grouped into discrete clusters.
 - [Supplying the abundance vector](#supplying-the-abundance-vector) - Passing a `LIST(DOUBLE)` argument.
+- [Citation and provenance](#citation-and-provenance) - the paper these models reproduce, and where the abundance vectors come from.
 
 ### Gradient communities
 
@@ -101,3 +102,22 @@ SELECT * FROM simulate_gradient_otus(getvariable('ab'), 20, 1000, seed := 42);
 A small vector can also be passed as a literal, e.g. `[0.4, 0.25, 0.2, 0.1, 0.05]::DOUBLE[]`.
 
 **Reproducibility.** With `seed ≥ 0` the output is deterministic for a given build. Sample statistics (richness, distance-decay, cluster separation) are stable across builds, but exact per-cell counts are **not** portable across C++ standard-library implementations (the standard does not fix the output of `std::normal_distribution`/`std::discrete_distribution`); compare simulations by statistical summary, not byte-for-byte.
+
+---
+
+### Citation and provenance
+
+If you use these simulators, please cite the paper whose models they reproduce:
+
+> Kuczynski, J.; Liu, Z.; Lozupone, C.; McDonald, D.; Fierer, N.; and Knight, R.
+> (2010) "Microbial community resemblance methods differ in their ability to
+> detect biologically relevant patterns", *Nature Methods* 7(10), 813-819.
+> doi: [10.1038/nmeth.1499](https://doi.org/10.1038/nmeth.1499)
+
+The generative models were reconciled against that paper's `ord_survey`
+reference code (Justin Kuczynski, 2010), used with the author's permission. The
+committed empirical abundance vectors — `data/simsurvey/soil_abundances.csv`
+(576 species) and `data/simsurvey/keyboard_abundances.csv` (684 species) — and
+the statistical tolerance bands the parity tests check against come from that
+code. See [`THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md) for the full
+provenance record.

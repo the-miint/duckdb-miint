@@ -5,10 +5,12 @@
 // Kuczynski-2010 reproduction (UPGMA of community distances -> are the true
 // clusters monophyletic clades?).
 //
-// "UPGMA" = Unweighted Pair Group Method with Arithmetic mean: each merge joins
-// the two closest clusters and the merged-cluster distance to every other
-// cluster is the arithmetic mean of member-pair distances, i.e. weighted by
-// cluster size -- exactly scipy.cluster.hierarchy.linkage(method='average').
+// "UPGMA" = Unweighted Pair Group Method with Arithmetic mean (Sokal & Michener
+// 1958): each merge joins the two closest clusters and the merged-cluster
+// distance to every other cluster is the arithmetic mean of member-pair
+// distances, i.e. weighted by cluster size -- the same average-linkage
+// definition as scipy.cluster.hierarchy.linkage(method='average'), which the
+// parity test uses as its oracle (see THIRD_PARTY_LICENSES.md).
 //
 // Header/impl split with NO DuckDB dependency so the Catch2 unit-test target
 // links it without libduckdb. The DuckDB wrapper (cluster_upgma_function.cpp)

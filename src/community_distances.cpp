@@ -99,7 +99,7 @@ std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matri
 	}
 
 	// Global column statistics for the correspondence-analysis chi-square and the
-	// PyCogent Gower distance (both are matrix-wide, not purely per-pair).
+	// Gower distance (both are matrix-wide, not purely per-pair).
 	std::vector<double> colsum;
 	std::vector<double> colrange;
 	double grand = 0.0;
@@ -235,12 +235,12 @@ std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matri
 					vary += dyj * dyj;
 				}
 				// Flat (constant) profiles have zero variance -> correlation is
-				// undefined. Follow PyCogent dist_pearson (the metric Kuczynski 2010
-				// used, verified against its source), NOT scipy: two flat rows are
-				// identical (r=1 -> distance 0); a flat vs a non-flat row has no
-				// correlation (r=0 -> distance 1). This keeps a constant-profile
-				// sample as a well-defined, finite distance rather than a NaN that a
-				// downstream reader would reject.
+				// undefined. We adopt the cogent3 `dist_pearson` convention (the
+				// reference implementation of the metric Kuczynski 2010 used), NOT
+				// scipy's: two flat rows are identical (r=1 -> distance 0); a flat vs
+				// a non-flat row has no correlation (r=0 -> distance 1). This keeps a
+				// constant-profile sample as a well-defined, finite distance rather
+				// than a NaN that a downstream reader would reject.
 				if (varx == 0.0 && vary == 0.0) {
 					d = 0.0;
 				} else if (varx == 0.0 || vary == 0.0) {
@@ -254,12 +254,12 @@ std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matri
 				const double ri = rowsum[i];
 				const double rj = rowsum[j];
 				if (ri <= 0.0 && rj <= 0.0) {
-					// Both empty: no row profiles, but PyCogent dist_chisq defines
-					// this as distance 0 (identical). Follow it for faithful
-					// reproduction (verified against the PyCogent source).
+					// Both empty: no row profiles exist, but the cogent3 `dist_chisq`
+					// convention defines this as distance 0 (identical). Adopted for
+					// faithful reproduction.
 					d = 0.0;
 				} else if (ri <= 0.0 || rj <= 0.0) {
-					d = 1.0; // one empty vs non-empty -> maximal (PyCogent dist_chisq)
+					d = 1.0; // one empty vs non-empty -> maximal (cogent3 dist_chisq)
 				} else {
 					double s = 0.0;
 					for (uint32_t k = 0; k < f; ++k) {
