@@ -285,7 +285,9 @@ FROM progressive_pcoa_from_distances('dm', n_anchors := 1000, batch_size := 1000
 WHERE batch IS NOT NULL ORDER BY batch_anchor_m2 DESC LIMIT 10;
 ```
 
-Values near 0 mean batches slotted cleanly into the frame. A large value means those samples are poorly determined by the anchor set — typically too few anchors, or anchors that don't span the region that batch occupies. Raise `n_anchors` (accuracy improves monotonically with anchor count) or supply a better `anchors` set. Note this measures *frame consistency*, not total error: it cannot detect an anchor set that is self-consistent but collectively unrepresentative of the full sample space.
+Values near 0 mean batches slotted cleanly into the frame. A large value means those samples are poorly determined by the anchor set — typically too few anchors, or anchors that don't span the region that batch occupies. Raise `n_anchors` (accuracy improves monotonically with anchor count) or supply a better `anchors` set.
+
+**Read it as a relative signal, not an error bar.** It measures *frame consistency* and is deliberately conservative: it includes each batch's own ordination noise alongside any genuine disagreement. On a 25,145-sample real dataset the median batch reported `0.101` while the run's actual disparity against a full `pcoa` was `0.0075` — roughly 10× pessimistic. Use it to rank batches within a run and find the badly-placed ones, not to estimate total error. It also cannot detect an anchor set that is self-consistent but collectively unrepresentative of the sample space: every batch can agree with a frame that is itself skewed.
 
 **Behavior:**
 - **Accuracy:** the result reproduces a full [`pcoa`](#pcoa-from-a-distance-table) up to a similarity transform — exactly (to numerical precision) for Euclidean-embeddable distances, and closely for others. Each batch is aligned to the reference *independently*, so alignment error does not compound across batches. Validate on your own data by aligning against a full `pcoa` with [`procrustes`](#procrustes-align-two-ordinations) and checking the disparity `m2`.

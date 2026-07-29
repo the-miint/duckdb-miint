@@ -1203,13 +1203,55 @@ std::vector<miint::unifrac::CooRow> QueryFeatureRows(ClientContext &context, con
 // Compute the UniFrac distance block over exactly the requested samples: slice the
 // feature table → sub-biom → one_off UniFrac against the (full) tree. Compute()
 // takes the process-wide OmpThreadScope itself, so this adds none.
+// The anchor samples' feature rows are identical for every batch, but the slice
+// query re-fetched them for each one: with 1000 anchors and batch_size 1000, half
+// of every batch's query output was a re-read of rows already seen. Cached once per
+// run (bounded by the anchors' own row count, ~20 MB at 1000 anchors), so each
+// batch queries only its own samples.
+//
+// Order does not matter: the rows go to UnifracSupportBiomView::FromCoo, which
+// builds its own sorted dictionary, and the core maps block rows back by id.
+class AnchorFeatureRowCache {
+public:
+	explicit AnchorFeatureRowCache(const std::vector<std::string> &anchors)
+	    : anchors_(anchors), anchor_set_(anchors.begin(), anchors.end()) {
+	}
+
+	std::vector<miint::unifrac::CooRow> RowsFor(ClientContext &context, const std::string &qname,
+	                                            const std::vector<std::string> &requested) {
+		if (!loaded_) {
+			anchor_rows_ = QueryFeatureRows(context, qname, anchors_);
+			loaded_ = true;
+		}
+		std::vector<std::string> non_anchor;
+		non_anchor.reserve(requested.size());
+		for (const auto &id : requested) {
+			if (!anchor_set_.count(id)) {
+				non_anchor.push_back(id);
+			}
+		}
+		if (non_anchor.empty()) {
+			return anchor_rows_; // the anchors-only reference block
+		}
+		auto rows = QueryFeatureRows(context, qname, non_anchor);
+		rows.insert(rows.end(), anchor_rows_.begin(), anchor_rows_.end());
+		return rows;
+	}
+
+private:
+	std::vector<std::string> anchors_;
+	std::unordered_set<std::string> anchor_set_;
+	std::vector<miint::unifrac::CooRow> anchor_rows_;
+	bool loaded_ = false;
+};
+
 miint::progressive::DistanceBlock ComputeUnifracBlock(ClientContext &context, const std::string &qname,
                                                       const std::vector<std::string> &requested,
                                                       const miint::unifrac::UnifracBptreeView &bptree_view,
                                                       const std::string &variant_fp32, bool variance_adjust,
                                                       double alpha, bool bypass_tips, bool normalize_sample_counts,
-                                                      int seed, int n_threads) {
-	auto rows = QueryFeatureRows(context, qname, requested);
+                                                      int seed, int n_threads, AnchorFeatureRowCache &anchor_cache) {
+	auto rows = anchor_cache.RowsFor(context, qname, requested);
 	miint::unifrac::UnifracSupportBiomView biom_view = [&]() {
 		try {
 			return miint::unifrac::UnifracSupportBiomView::FromCoo(std::move(rows));
@@ -1335,9 +1377,10 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 	auto part = PickAnchors(ids.sorted_sample_ids, static_cast<uint32_t>(n_anchors), seed);
 
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	AnchorFeatureRowCache anchor_cache(part.anchors);
 	const miint::progressive::BlockProvider provider = [&](const std::vector<std::string> &requested) {
 		return ComputeUnifracBlock(context, qname, requested, bptree_view, variant_fp32, variance_adjust, alpha,
-		                           bypass_tips, normalize_sample_counts, seed, n_threads);
+		                           bypass_tips, normalize_sample_counts, seed, n_threads, anchor_cache);
 	};
 
 	miint::progressive::ProgressivePcoaResult result;
