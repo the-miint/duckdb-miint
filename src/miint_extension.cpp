@@ -70,7 +70,11 @@
 #include <align_sortmerna.hpp>
 #include <align_sortmerna_rrna.hpp>
 #endif
+#include <cluster_kmeans.hpp>
+#include <cluster_upgma.hpp>
+#include <community_distances.hpp>
 #include <deblur_table_function.hpp>
+#include <simulate_resemblance.hpp>
 #include <align_pairwise_wfa2_functions.hpp>
 #include <align_pairwise_ksw2_functions.hpp>
 #include <align_pairwise_ksw2_dual_affine_functions.hpp>
@@ -414,6 +418,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(install_gpl_boundary_stub_set);
 #endif
 	DeblurTableFunction::Register(loader);
+	RegisterSimulateResemblance(loader);
+	// Beta-diversity / ordination toolset. Independent of the UniFrac feature:
+	// these are pure in-repo C++ over generic table readers, so they are always
+	// registered. (`pcoa` / `permanova`, which consume their output, do need
+	// scikit-bio-binaries and stay behind MIINT_HAS_UNIFRAC below.)
+	RegisterCommunityDistances(loader);
+	RegisterClusterKmeans(loader);
+	RegisterClusterUpgma(loader);
 
 #ifdef MIINT_HAS_HDF5
 	CopyBiomFunction::Register(loader);

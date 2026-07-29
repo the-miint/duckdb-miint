@@ -11,12 +11,15 @@ Methods to estimate alpha and beta diversity, and supporting statistics.
 - [UniFrac algorithm variants](#unifrac-algorithm-variants) - Detail on different UniFrac algorithms and how to specify them.
 - [Rarefaction](#rarefaction) - Rarefaction detail with UniFrac and Faith PD.
 - [UniFrac distances](#unifrac-distances) - Condensed (pairwise) UniFrac distances in long form
+- [Community distances (non-phylogenetic)](#community-distances-non-phylogenetic) - taxon-based β-diversity (Bray-Curtis, Jaccard, Morisita-Horn, χ², Gower, …) from a feature table
 - [Beta-distance macros](#beta-distance-macros) - within/between-group distributions and k-nearest-neighbors over a distance table
 - [PCoA (from a distance table)](#pcoa-from-a-distance-table) - metric-agnostic PCoA over any condensed distance table
 - [PERMANOVA (from a distance table)](#permanova-from-a-distance-table) - metric-agnostic PERMANOVA over any condensed distance table
+- [Sample clustering (k-means and UPGMA)](#sample-clustering-k-means-and-upgma) - group samples from ordination coordinates or a distance table
 - [UniFrac PCoA](#unifrac-pcoa) - UniFrac distance + Principal Coordinates Analysis
 - [UniFrac PERMANOVA](#unifrac-permanova) - UniFrac distance + PERMANOVA pseudo-F + p-value
 - [Faith PD](#faith-pd) - Faith's phylogenetic diversity per sample
+- [Citations](#citations) - primary sources for the metrics, clustering, and ordination methods
 
 These methods are powered by the embedded [`unifrac-binaries`](https://github.com/biocore/unifrac-binaries) and [`scikit-bio-binaries`](https://github.com/scikit-bio/scikit-bio-binaries) libraries (see `docs/internals/embedded-tools.md` for the build details).
 
@@ -134,6 +137,68 @@ JOIN metadata a ON d.sample_a = a.sample_id
 JOIN metadata b ON d.sample_b = b.sample_id
 GROUP BY comparison;
 ```
+
+---
+
+### Community distances (non-phylogenetic)
+
+`community_distances(feature_table, metric, ...)` computes classic **taxon-based** (aphylogenetic) sample×sample distances from a feature table — the counterpart to [`unifrac_distances`](#unifrac-distances) for when you have no tree, or deliberately want a metric that ignores one. Its output is the same condensed `(sample_a, sample_b, distance)` triple, so it feeds [`pcoa`](#pcoa-from-a-distance-table), [`permanova`](#permanova-from-a-distance-table) and the [beta-distance macros](#beta-distance-macros) unchanged.
+
+It takes a relation *name*, so materialize the feature table first:
+
+```sql
+CREATE TABLE ft AS SELECT * FROM read_biom('table.biom');
+CREATE TABLE dm AS SELECT * FROM community_distances('ft', 'bray_curtis');
+
+SELECT * FROM pcoa('dm', n_dims := 3, seed := 42);
+```
+
+**Parameters:**
+- `feature_table` (VARCHAR): name of a long-form `(sample_id, feature_id, value)` relation — see [Feature table](#feature-table)
+- `metric` (VARCHAR): one of the metrics below (case-insensitive)
+- `threads` (INTEGER, default 0): worker threads for the pairwise loop; `0` follows DuckDB's thread count, `1` runs serial
+
+**Output schema:** `(sample_a, sample_b, distance DOUBLE)` — the upper triangle only, one row per unordered pair, no self-pairs. `sample_a`/`sample_b` mirror the input `sample_id` type — see [Sample identifier types](#sample-identifier-types).
+
+**Metrics.** With `x`, `y` two sample rows, sums over features, `X = Σx`, `Y = Σy`:
+
+| metric | formula | range | notes | primary source |
+|---|---|---|---|---|
+| `bray_curtis` | `Σ\|xₖ−yₖ\| / Σ(xₖ+yₖ)` | [0,1] | empty pair → 0 | Bray & Curtis 1957 |
+| `euclidean` | `sqrt(Σ(xₖ−yₖ)²)` | [0,∞) | | |
+| `jaccard` | binary presence/absence `(b+c)/(a+b+c)` | [0,1] | **presence/absence**, not abundance; empty pair → 0 | Jaccard 1912 |
+| `soergel` | `Σ\|xₖ−yₖ\| / Σ max(xₖ,yₖ)` | [0,1] | empty pair → 0 | |
+| `morisita_horn` | `1 − 2Σ(xₖyₖ) / ((Σxₖ²/X² + Σyₖ²/Y²)·X·Y)` | [0,1] | Horn's Cλ on relative abundances; both-empty → 0, one-empty → 1 | Morisita 1959; Horn 1966; Magurran 2004 p.246 |
+| `pearson` | `1 − r` over features | [0,2] | constant row → 0 vs another constant row, 1 vs a non-constant one | |
+| `chisq` | `sqrt(Σₖ (GT/colₖ)(xₖ/X − yₖ/Y)²)` | [0,∞) | correspondence-analysis χ²; `GT` = grand total; zero-sum row → 0 vs another empty row, 1 otherwise | Faith, Minchin & Belbin 1987 |
+| `gower` | `Σₖ \|xₖ−yₖ\| / rangeₖ` | [0,∞) | un-normalized; `rangeₖ` over all samples | Gower 1971; Faith, Minchin & Belbin 1987 |
+
+The zero-variance and zero-row-sum conventions (the `pearson` and `chisq` notes
+above) follow `cogent3.maths.distance_transform`, the reference implementation of
+the metrics used by Kuczynski et al. 2010 — see [Citations](#citations).
+
+**Behavior:**
+- **Raw values, no pre-normalization.** Abundances are used exactly as given; each metric applies whatever internal normalization its own definition requires. Feeding counts versus relative abundance is your modeling choice. (At equal per-sample depth the two differ only by a constant factor for most metrics, which does not change ordination geometry.)
+- **Matrix-wide metrics.** `chisq` and `gower` depend on *global* column statistics (column sums and column ranges across all samples), so a pair's distance is a function of the whole matrix, not just that pair. Subsetting samples changes them.
+- **Sparse contract:** a sample whose values are all zero or NULL is dropped before computation, matching `unifrac_distances`. Distances are therefore emitted only among samples that actually carry signal.
+- **Threading is exact:** results are **bit-identical for any thread count** (each pair writes to a fixed condensed slot), so `threads` is purely a performance knob.
+- Fewer than two samples yields no rows.
+
+**Example — comparing what different metrics see:**
+
+```sql
+-- Presence/absence vs abundance overlap can disagree sharply; that disagreement
+-- is often the biologically interesting part.
+CREATE TABLE dj AS SELECT * FROM community_distances('ft', 'jaccard');
+CREATE TABLE dmh AS SELECT * FROM community_distances('ft', 'morisita_horn');
+
+SELECT j.sample_a, j.sample_b, j.distance AS jaccard, m.distance AS morisita_horn
+FROM dj j JOIN dmh m USING (sample_a, sample_b)
+ORDER BY abs(j.distance - m.distance) DESC
+LIMIT 10;
+```
+
+> Available in builds with the UniFrac feature enabled (the default) — it shares that feature's table readers.
 
 ---
 
@@ -274,6 +339,73 @@ SELECT * FROM permanova('dm', 'metadata',
 - **Input shape / completeness:** the same dense-matrix construction and [completeness requirement](#distance-table-completeness) as `pcoa`.
 - **Metadata alignment:** every sample in the distance matrix must have a row for each tested variable, else an error naming the missing sample and variable; metadata samples not present in the distance matrix are ignored. A NULL metadata value is treated as an (empty-string) group value — filter the metadata first if you want NULL samples dropped.
 - **Equivalence:** `permanova` over `unifrac_distances(obs, tree, variant := v, seed := s)` reproduces `unifrac_permanova(obs, tree, metadata, variant := v, seed := s)` under the same `seed` and `n_permutations`: `p_value` is byte-identical (same permutations) and `f_stat` matches within `1e-5` (fp32; see the [reproducibility note](#reproducibility)).
+
+---
+
+### Sample clustering (k-means and UPGMA)
+
+Two clustering functions group **samples** — as opposed to [sequence clustering](clustering.md), which groups reads into OTUs. Both are metric-agnostic and sit downstream of an ordination or a distance table, which makes them useful for scoring how well a distance choice recovers known structure.
+
+#### `cluster_kmeans(coords_table, k, ...)`
+
+Lloyd's k-means (Lloyd 1982) with k-means++ seeding (Arthur & Vassilvitskii 2007) over ordination coordinates — the `(sample_id, axis, coordinate)` long form emitted by [`pcoa`](#pcoa-from-a-distance-table) / [`unifrac_pcoa`](#unifrac-pcoa).
+
+```sql
+CREATE TABLE dm AS SELECT * FROM community_distances('ft', 'jaccard');
+CREATE TABLE co AS SELECT * FROM pcoa('dm', n_dims := 3, seed := 42);
+
+SELECT * FROM cluster_kmeans('co', k := 3, seed := 42);
+```
+
+**Parameters:**
+- `coords_table` (VARCHAR): name of a relation exposing `(sample_id, axis, coordinate)`
+- `k` (INTEGER, required): number of clusters
+- `seed` (BIGINT, default 0): seeds all randomness
+- `max_iter` (INTEGER, default 100): Lloyd iterations per restart
+- `n_init` (INTEGER, default 10): k-means++ restarts; the lowest-inertia one wins
+- `n_dims` (INTEGER, default 0): use only the first `n_dims` axes; `0` uses every axis present
+
+**Output schema:** `(sample_id, cluster INTEGER)`, one row per sample. `sample_id` mirrors the input type. Cluster ids are canonicalized in order of first-seen sample, so equivalent solutions get a stable labelling.
+
+**Behavior:**
+- **Cluster count matches scikit-learn.** When the points span at least `k` distinct locations you get exactly `k` non-empty clusters. When there are fewer distinct locations than `k`, you get fewer — the same thing `sklearn.KMeans` does (it warns), since `k` non-empty clusters are then impossible.
+- **Determinism:** fixed `seed` reproduces on a given build. The `std::uniform_*` distribution mappings are not standardized across C++ standard libraries, so exact draws may differ between e.g. libstdc++ and libc++.
+- Empty clusters are re-seeded to the farthest still-unclaimed point.
+- Errors on a duplicate `(sample_id, axis)` pair, a missing cell in the sample×axis grid, `k < 1`, or `k >` the number of samples.
+
+#### `cluster_upgma(distances)`
+
+Average-linkage hierarchical clustering (UPGMA; Sokal & Michener 1958) over any condensed distance table.
+
+```sql
+SELECT * FROM cluster_upgma('dm');
+```
+
+**Parameters:**
+- `distances` (VARCHAR): name of a condensed `(sample_a, sample_b, distance)` relation
+
+**Output schema:** the [`read_newick`](reading.md#newick) tree-table schema — `(node_index BIGINT, name VARCHAR, branch_length DOUBLE, edge_id BIGINT, parent_index BIGINT, is_tip BOOLEAN)` — deliberately, so every existing tree utility works on the result without conversion. Leaf `name` is the sample id as text; `parent_index` is NULL at the root. Tips occupy `node_index` `0 .. n−1`, internal nodes `n .. 2n−2`, root last.
+
+**Behavior:**
+- The tree is **ultrametric**: a merge at distance `d` places its node at height `d/2`, and branch lengths are height differences.
+- Input must satisfy the same [completeness requirement](#distance-table-completeness) as `pcoa`.
+- Dense O(n²) memory and O(n³) time, with no size cap — the same characteristics as `pcoa`/`permanova`.
+
+**Example — is a known grouping recovered as clades?**
+
+```sql
+-- Walk each leaf's ancestors, then ask which nodes have a descendant leaf set
+-- exactly equal to one of the true groups.
+WITH RECURSIVE t AS (SELECT * FROM cluster_upgma('dm')),
+anc(leaf, node) AS (
+    SELECT name, node_index FROM t WHERE is_tip
+    UNION ALL
+    SELECT a.leaf, p.node_index FROM anc a JOIN t c ON c.node_index = a.node
+                                           JOIN t p ON p.node_index = c.parent_index
+)
+SELECT node, count(*) AS n_leaves, list_sort(list(leaf)) AS leaves
+FROM anc GROUP BY node ORDER BY n_leaves;
+```
 
 ---
 
@@ -462,3 +594,47 @@ FROM unifrac_faith_pd('observations', 'tree',
     subsample_depth := 3, n_subsamples := 100, seed := 42)
 GROUP BY sample_id;
 ```
+
+---
+
+### Citations
+
+If you use these methods, please cite the primary sources.
+
+**Community distances.** Bray, J.R. and Curtis, J.T. (1957) "An ordination of the
+upland forest communities of southern Wisconsin", *Ecological Monographs* 27(4),
+325-349. · Jaccard, P. (1912) "The distribution of the flora in the alpine zone",
+*New Phytologist* 11(2), 37-50. · Gower, J.C. (1971) "A general coefficient of
+similarity and some of its properties", *Biometrics* 27(4), 857-871. · Faith,
+D.P., Minchin, P.R. and Belbin, L. (1987) "Compositional dissimilarity as a robust
+measure of ecological distance", *Vegetatio* 69, 57-68. · Morisita, M. (1959)
+"Measuring of interspecific association and similarity between communities",
+*Memoirs of the Faculty of Science, Kyushu University, Series E* 3, 65-80. ·
+Horn, H.S. (1966) "Measurement of 'overlap' in comparative ecological studies",
+*The American Naturalist* 100(914), 419-424. · Magurran, A.E. (2004) *Measuring
+Biological Diversity*, Blackwell (p.246 for the Morisita-Horn form used here).
+
+**Sample clustering.** Lloyd, S.P. (1982) "Least squares quantization in PCM",
+*IEEE Transactions on Information Theory* 28(2), 129-137. · Arthur, D. and
+Vassilvitskii, S. (2007) "k-means++: the advantages of careful seeding",
+*Proceedings of the 18th Annual ACM-SIAM Symposium on Discrete Algorithms*,
+1027-1035. · Sokal, R.R. and Michener, C.D. (1958) "A statistical method for
+evaluating systematic relationships", *University of Kansas Science Bulletin* 38,
+1409-1438. · Rand, W.M. (1971) "Objective criteria for the evaluation of
+clustering methods", *Journal of the American Statistical Association* 66(336),
+846-850 (the Rand index used to score cluster recovery).
+
+**Ordination.** Torgerson, W.S. (1952) "Multidimensional scaling: I. Theory and
+method", *Psychometrika* 17, 401-419. · Gower, J.C. (1966) "Some distance
+properties of latent root and vector methods used in multivariate analysis",
+*Biometrika* 53(3-4), 325-338. · Anderson, M.J. (2001) "A new method for
+non-parametric multivariate analysis of variance", *Austral Ecology* 26(1), 32-46
+(PERMANOVA). · Lozupone, C. and Knight, R. (2005) "UniFrac: a new phylogenetic
+method for comparing microbial communities", *Applied and Environmental
+Microbiology* 71(12), 8228-8235. · Faith, D.P. (1992) "Conservation evaluation and
+phylogenetic diversity", *Biological Conservation* 61(1), 1-10.
+
+**Reference implementations.** The `cogent3` / PyCogent, SciPy, scikit-learn and
+scikit-bio projects — consulted for metric conventions and used as parity oracles
+— are credited with their licenses and citations in
+[`THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md).

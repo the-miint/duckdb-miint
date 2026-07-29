@@ -200,6 +200,14 @@ else
     echo "Warning: ASR parity goldens missing or corrupt; parity test skipped"
 fi
 
+# NOTE: the Kuczynski-2010 oracle bands, community_distances distance goldens and
+# cluster_kmeans/cluster_upgma parity goldens under data/simsurvey/ are COMMITTED,
+# so they are always present and need no availability gate. They previously sat
+# behind sha256 gates; those were removed because `sha256sum -c` also fails on a
+# MISMATCH, which turned an edited golden into a silently SKIPPED parity test --
+# the opposite of the intended protection. The parity tests themselves are the
+# integrity check, and they now always run.
+
 # NCBI BLAST network reachability. Probes the BLAST CGI endpoint so
 # live blast tests can skip gracefully in offline CI.
 if curl -sSf --max-time 5 -o /dev/null \

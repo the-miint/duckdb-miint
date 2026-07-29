@@ -1,0 +1,26 @@
+# name: test/sql/community_distances_pcoa.test
+# description: community_distances output feeds pcoa unchanged (gated: pcoa needs scikit-bio-binaries)
+# group: [sql]
+
+require miint
+
+# pcoa is registered only with the scikit-bio-binaries feature. community_distances
+# itself is not gated -- see test/sql/community_distances.test.
+require-env UNIFRAC_AVAILABLE
+
+statement ok
+CREATE TABLE feat AS
+SELECT * FROM (VALUES
+  ('s1','f0',1.0),('s1','f1',2.0),('s1','f3',3.0),
+  ('s2','f1',2.0),('s2','f2',4.0),('s2','f3',1.0),
+  ('s3','f0',2.0),('s3','f2',1.0),('s3','f3',1.0)
+) t(sample_id, feature_id, value);
+
+# The condensed output feeds pcoa unchanged (3 samples -> 3 coords/axis).
+statement ok
+CREATE TABLE cd AS SELECT * FROM community_distances('feat', 'bray_curtis');
+
+query I
+SELECT count(DISTINCT sample_id) FROM pcoa('cd', n_dims := 2, seed := 1);
+----
+3

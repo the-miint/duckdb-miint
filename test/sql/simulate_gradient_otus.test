@@ -1,0 +1,223 @@
+# name: test/sql/simulate_gradient_otus.test
+# description: simulate_gradient_otus structural invariants (always run; no oracle/fixture dependency)
+# group: [sql]
+
+require miint
+
+# Small inline abundance vector keeps these fast and independent of the committed fixtures.
+
+# Schema: (sample_id INT, otu_id INT, count BIGINT, gradient_position DOUBLE)
+query I
+SELECT count(*) FROM (
+  DESCRIBE SELECT * FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500, seed := 7)
+) WHERE (column_name='sample_id' AND column_type='INTEGER')
+     OR (column_name='otu_id' AND column_type='INTEGER')
+     OR (column_name='count' AND column_type='BIGINT')
+     OR (column_name='gradient_position' AND column_type='DOUBLE');
+----
+4
+
+# Every sample sums to exactly seqs_per_sample (multinomial invariant).
+query I
+SELECT count(*) FROM (
+  SELECT sample_id, sum("count") d
+  FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500, seed := 7)
+  GROUP BY sample_id
+) WHERE d <> 500;
+----
+0
+
+# COO stores only nonzero counts (all counts >= 1).
+query I
+SELECT count(*) FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500, seed := 7)
+WHERE "count" < 1;
+----
+0
+
+# Exactly num_samples distinct samples.
+query I
+SELECT count(DISTINCT sample_id) FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500, seed := 7);
+----
+6
+
+# gradient_position stays within [range_lo, range_hi].
+query I
+SELECT count(*) FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500, seed := 7)
+WHERE gradient_position < 0.1 OR gradient_position > 0.9;
+----
+0
+
+# linspace endpoints present at the default range.
+query RR
+SELECT min(gradient_position), max(gradient_position)
+FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500, seed := 7);
+----
+0.1	0.9
+
+# otu_id is a 0-based species index in [0, M).
+query I
+SELECT count(*) FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500, seed := 7)
+WHERE otu_id < 0 OR otu_id >= 5;
+----
+0
+
+# Custom range_lo/range_hi honored.
+query RR
+SELECT min(gradient_position), max(gradient_position)
+FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 4, 300, range_lo := 0.2, range_hi := 0.8, seed := 7);
+----
+0.2	0.8
+
+# num_samples = 1 edge case: single sample pinned at range_lo.
+query IR
+SELECT count(DISTINCT sample_id), max(gradient_position)
+FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 1, 200, range_lo := 0.3, range_hi := 0.9, seed := 7);
+----
+1	0.3
+
+# Seed determinism: two calls with the same seed produce identical output.
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500, noise := 0.5, seed := 123))
+  EXCEPT
+  (SELECT * FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500, noise := 0.5, seed := 123))
+);
+----
+0
+
+query I
+SELECT
+  (SELECT count(*) FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500, noise := 0.5, seed := 123))
+= (SELECT count(*) FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500, noise := 0.5, seed := 123));
+----
+true
+
+# noise = 0 (default, unperturbed gradient) still yields a valid table.
+query I
+SELECT count(*) > 0 FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500, seed := 7);
+----
+true
+
+# Additive noise variant ('+sample') also preserves per-sample depth.
+query I
+SELECT count(*) FROM (
+  SELECT sample_id, sum("count") d
+  FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500, noise := 0.5, noise_type := '+sample', seed := 7)
+  GROUP BY sample_id
+) WHERE d <> 500;
+----
+0
+
+# Per-species noise variant ('+species') also preserves per-sample depth.
+query I
+SELECT count(*) FROM (
+  SELECT sample_id, sum("count") d
+  FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500, noise := 0.5, noise_type := '+species', seed := 7)
+  GROUP BY sample_id
+) WHERE d <> 500;
+----
+0
+
+# noise_type defaults to '+species' (noise width taken from each species' own
+# abundance). Pinned by an identity join against the explicit spelling.
+query I
+SELECT count(*) FROM (
+  SELECT * FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500, noise := 0.5, seed := 7)
+  EXCEPT
+  SELECT * FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500, noise := 0.5, noise_type := '+species', seed := 7)
+);
+----
+0
+
+# ... and is a different model from '*sample' at the same seed, so the default is
+# not silently equivalent to the sample-total width.
+query I
+SELECT count(*) > 0 FROM (
+  SELECT * FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500, noise := 0.5, seed := 7)
+  EXCEPT
+  SELECT * FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500, noise := 0.5, noise_type := '*sample', seed := 7)
+);
+----
+true
+
+# Default seed (-1) uses std::random_device; the unseeded path still runs and
+# yields a structurally valid table.
+query I
+SELECT count(DISTINCT sample_id) FROM simulate_gradient_otus([0.4,0.25,0.2,0.1,0.05]::DOUBLE[], 6, 500);
+----
+6
+
+# --- error paths (fail loud) ---
+statement error
+SELECT * FROM simulate_gradient_otus([]::DOUBLE[], 6, 500);
+----
+non-empty
+
+statement error
+SELECT * FROM simulate_gradient_otus([0.0,0.0,0.0]::DOUBLE[], 6, 500);
+----
+all zero
+
+statement error
+SELECT * FROM simulate_gradient_otus([0.4,0.3,0.3]::DOUBLE[], 0, 500);
+----
+num_samples
+
+statement error
+SELECT * FROM simulate_gradient_otus([0.4,0.3,0.3]::DOUBLE[], 6, 0);
+----
+seqs_per_sample
+
+statement error
+SELECT * FROM simulate_gradient_otus([0.4,0.3,0.3]::DOUBLE[], 6, 500, sp_width := 0.0);
+----
+sp_width
+
+statement error
+SELECT * FROM simulate_gradient_otus([0.4,0.3,0.3]::DOUBLE[], 6, 500, noise := 0.5, noise_type := 'bogus');
+----
+noise_type
+
+statement error
+SELECT * FROM simulate_gradient_otus([0.4,0.3,0.3]::DOUBLE[], 6, 500, range_lo := 0.9, range_hi := 0.1);
+----
+range_lo
+
+# Non-finite range must be rejected loudly (NaN silently bypasses the < guard).
+statement error
+SELECT * FROM simulate_gradient_otus([0.4,0.3,0.3]::DOUBLE[], 6, 500, range_lo := 'nan'::DOUBLE);
+----
+range_lo
+
+statement error
+SELECT * FROM simulate_gradient_otus([0.4,0.3,0.3]::DOUBLE[], 6, 500, range_hi := 'inf'::DOUBLE);
+----
+range_hi
+
+# NULL / non-finite / negative abundance and negative noise must be rejected.
+statement error
+SELECT * FROM simulate_gradient_otus([0.4, NULL, 0.3]::DOUBLE[], 6, 500);
+----
+NULL
+
+statement error
+SELECT * FROM simulate_gradient_otus([0.4, -0.1, 0.3]::DOUBLE[], 6, 500);
+----
+non-negative
+
+statement error
+SELECT * FROM simulate_gradient_otus([0.4, 'inf'::DOUBLE, 0.3]::DOUBLE[], 6, 500);
+----
+finite
+
+statement error
+SELECT * FROM simulate_gradient_otus([0.4,0.3,0.3]::DOUBLE[], 6, 500, noise := -0.5);
+----
+noise
+
+# Degenerate runtime case (single species zeroed out by noise) surfaces a clean,
+# named InvalidInput error rather than a raw internal exception.
+statement error
+SELECT * FROM simulate_gradient_otus([1.0]::DOUBLE[], 5, 100, noise := 0.5);
+----
+empty sample

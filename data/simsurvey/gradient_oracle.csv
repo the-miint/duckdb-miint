@@ -1,0 +1,13 @@
+param_set,statistic,mean,lo,hi
+gradient_prominent_N20_D1000,richness_mean,312.89565,228.9553125,394.4904375
+gradient_prominent_N20_D1000,top10_frac,0.1758359,0.10274975,0.25179125
+gradient_prominent_N20_D1000,dist_decay_corr,0.7401987469,0.3231598181,1
+gradient_subtle_N20_D1000,richness_mean,458.1453,433.0084375,475.2398125
+gradient_subtle_N20_D1000,top10_frac,0.051252,0.026562,0.08409
+gradient_subtle_N20_D1000,dist_decay_corr,0.2973701989,-0.2203273901,0.7933318368
+gradient_prominent_N100_D1000,richness_mean,314.91999,246.3606375,376.9351125
+gradient_prominent_N100_D1000,top10_frac,0.17526026,0.112512225,0.243357975
+gradient_prominent_N100_D1000,dist_decay_corr,0.7428789275,0.4458396507,0.947544361
+gradient_subtle_N100_D1000,richness_mean,458.95268,446.622375,467.427525
+gradient_subtle_N100_D1000,top10_frac,0.04837899,0.0331948,0.0698257
+gradient_subtle_N100_D1000,dist_decay_corr,0.2761773041,-0.02970664454,0.5430265884

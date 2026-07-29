@@ -1,0 +1,310 @@
+# name: test/sql/community_distances_cluster.test
+# description: Kuczynski-2010 Fig 3 cluster signatures via the EXACT paper metrics (Jaccard / Soergel / Morisita-Horn) through simulate_cluster_otus -> community_distances -> pcoa -> {k-means, UPGMA}
+# group: [sql]
+
+# Faithful reproduction of the paper's Fig-3 qualitative claims (not numeric
+# parity -- the paper's exact seeds/replicate counts are unpublished). The
+# generative model is our shipped simulate_cluster_otus on the committed keyboard
+# abundance vector (3 clusters x 30 samples = 90, D=1000 seqs/sample), the
+# distances are the paper's exact metrics via community_distances, the ordination
+# is classical PCoA via pcoa, and recovery is scored three ways per the Methods:
+#   (a) mean-inter / mean-intra displayed-distance ratio (gross separation, i.e.
+#       "variance explained"),
+#   (b) k-means (k=3) adjusted Rand index vs the true cluster labels,
+#   (c) UPGMA of the distances -> how many of the 3 true clusters are monophyletic.
+#
+# Paper Fig-3 claims encoded below (Results p.6, incl. "although the Soergel and
+# Morisita-Horn distance measures explain more variance in the data, [they] do not
+# clearly recover the three-cluster pattern"):
+#   1. Jaccard recovers ALL 3 clusters when distinct (1.0/0.5): perfect k-means
+#      ARI and all 3 clusters monophyletic.
+#   2. Jaccard overlaps when subtle (0.1/0.1): recovery collapses to ~chance.
+#   3. Morisita-Horn explains MORE variance (larger inter/intra ratio) than Jaccard
+#      yet does NOT recover the 3 clusters (fewer monophyletic clades, lower ARI).
+#   4. Soergel behaves like Morisita-Horn: more variance than Jaccard, no clean
+#      3-cluster recovery. (The paper groups Soergel with Morisita-Horn.)
+#
+# Seed: these run at seed=123. Signatures were checked over 5 seeds
+# (42/1/7/123/2024); the claims (Jaccard recovers all 3; Soergel & Morisita-Horn
+# explain more variance but recover < 3) hold on every one. seed=42 is a low-tail
+# realization where Morisita-Horn barely separates at all (inter/intra ~1.2,
+# unlike the ~4.5 typical of the paper's "explains more variance" panel), so a
+# representative seed is pinned for both this test and the reproduction figure.
+#
+# NOTE: simulate_cluster_otus/community_distances/pcoa/cluster_kmeans/cluster_upgma
+# take a table NAME (resolved over a separate connection), so each stage is
+# materialized as a real table, not a CTE.
+
+require miint
+
+# pcoa / community_distances / cluster_* are registered only with the
+# scikit-bio-binaries feature (MIINT_HAS_UNIFRAC).
+require-env UNIFRAC_AVAILABLE
+
+statement ok
+CREATE TABLE keyboard AS SELECT * FROM read_csv_auto('data/simsurvey/keyboard_abundances.csv');
+
+statement ok
+SET VARIABLE kb = (SELECT list(abund ORDER BY idx) FROM keyboard);
+
+# Per-(metric, condition) cluster-recovery quality, accumulated into one table so
+# the assertions read as cross-metric / cross-condition comparisons.
+statement ok
+CREATE TABLE cq(metric VARCHAR, cluster_spacing DOUBLE, sample_spacing DOUBLE,
+                inter_intra_ratio DOUBLE, kmeans_ari DOUBLE, monophyletic INTEGER);
+
+# ===== Jaccard, distinct clusters (1.0 / 0.5) =====
+statement ok
+CREATE OR REPLACE TABLE sim AS
+SELECT CAST(sample_id AS BIGINT) AS sample_id, CAST(otu_id AS BIGINT) AS otu_id, "count", cluster_id
+FROM simulate_cluster_otus(getvariable('kb'), 1000, cluster_sizes := [30, 30, 30],
+     cluster_spacing := 1.0, sample_spacing := 0.5, seed := 123);
+
+statement ok
+CREATE OR REPLACE TABLE feat AS SELECT sample_id, otu_id AS feature_id, CAST("count" AS DOUBLE) AS value FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE truth AS SELECT DISTINCT sample_id, cluster_id FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE dist AS SELECT * FROM community_distances('feat', 'jaccard');
+
+statement ok
+CREATE OR REPLACE TABLE coords AS SELECT * FROM pcoa('dist', n_dims := 3, seed := 123);
+
+statement ok
+CREATE OR REPLACE TABLE km AS SELECT * FROM cluster_kmeans('coords', k := 3, n_dims := 3, seed := 123);
+
+statement ok
+CREATE OR REPLACE TABLE tree AS SELECT * FROM cluster_upgma('dist');
+
+statement ok
+CREATE OR REPLACE TABLE ancleaf AS
+WITH RECURSIVE down(anc, node) AS (
+  SELECT node_index, node_index FROM tree
+  UNION ALL
+  SELECT d.anc, c.node_index FROM down d JOIN tree c ON c.parent_index = d.node)
+SELECT d.anc, tr.cluster_id
+FROM down d JOIN tree t ON t.node_index = d.node AND t.is_tip
+            JOIN truth tr ON CAST(tr.sample_id AS VARCHAR) = t.name;
+
+statement ok
+INSERT INTO cq
+SELECT 'jaccard', 1.0, 0.5,
+  (SELECT avg(distance) FILTER (WHERE ta.cluster_id <> tb.cluster_id)
+        / avg(distance) FILTER (WHERE ta.cluster_id = tb.cluster_id)
+   FROM dist d JOIN truth ta ON ta.sample_id = d.sample_a JOIN truth tb ON tb.sample_id = d.sample_b),
+  (WITH ct AS (SELECT t.cluster_id tc, k.cluster kc, count(*) nij FROM truth t JOIN km k USING (sample_id) GROUP BY 1, 2),
+        a AS (SELECT sum(nij * (nij - 1) / 2.0) s FROM (SELECT sum(nij) nij FROM ct GROUP BY tc)),
+        b AS (SELECT sum(nij * (nij - 1) / 2.0) s FROM (SELECT sum(nij) nij FROM ct GROUP BY kc)),
+        ij AS (SELECT sum(nij * (nij - 1) / 2.0) s FROM ct),
+        n AS (SELECT sum(nij) n FROM ct)
+   SELECT (ij.s - a.s * b.s / (n.n * (n.n - 1) / 2.0)) / (0.5 * (a.s + b.s) - a.s * b.s / (n.n * (n.n - 1) / 2.0))
+   FROM ij, a, b, n),
+  (SELECT count(*) FROM (SELECT cluster_id, count(*) sz FROM truth GROUP BY 1) s
+   WHERE EXISTS (SELECT 1 FROM ancleaf a GROUP BY a.anc
+                 HAVING count(*) = s.sz AND count(*) FILTER (WHERE a.cluster_id = s.cluster_id) = s.sz));
+
+# ===== Soergel, distinct clusters (1.0 / 0.5) =====
+statement ok
+CREATE OR REPLACE TABLE sim AS
+SELECT CAST(sample_id AS BIGINT) AS sample_id, CAST(otu_id AS BIGINT) AS otu_id, "count", cluster_id
+FROM simulate_cluster_otus(getvariable('kb'), 1000, cluster_sizes := [30, 30, 30],
+     cluster_spacing := 1.0, sample_spacing := 0.5, seed := 123);
+
+statement ok
+CREATE OR REPLACE TABLE feat AS SELECT sample_id, otu_id AS feature_id, CAST("count" AS DOUBLE) AS value FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE truth AS SELECT DISTINCT sample_id, cluster_id FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE dist AS SELECT * FROM community_distances('feat', 'soergel');
+
+statement ok
+CREATE OR REPLACE TABLE coords AS SELECT * FROM pcoa('dist', n_dims := 3, seed := 123);
+
+statement ok
+CREATE OR REPLACE TABLE km AS SELECT * FROM cluster_kmeans('coords', k := 3, n_dims := 3, seed := 123);
+
+statement ok
+CREATE OR REPLACE TABLE tree AS SELECT * FROM cluster_upgma('dist');
+
+statement ok
+CREATE OR REPLACE TABLE ancleaf AS
+WITH RECURSIVE down(anc, node) AS (
+  SELECT node_index, node_index FROM tree
+  UNION ALL
+  SELECT d.anc, c.node_index FROM down d JOIN tree c ON c.parent_index = d.node)
+SELECT d.anc, tr.cluster_id
+FROM down d JOIN tree t ON t.node_index = d.node AND t.is_tip
+            JOIN truth tr ON CAST(tr.sample_id AS VARCHAR) = t.name;
+
+statement ok
+INSERT INTO cq
+SELECT 'soergel', 1.0, 0.5,
+  (SELECT avg(distance) FILTER (WHERE ta.cluster_id <> tb.cluster_id)
+        / avg(distance) FILTER (WHERE ta.cluster_id = tb.cluster_id)
+   FROM dist d JOIN truth ta ON ta.sample_id = d.sample_a JOIN truth tb ON tb.sample_id = d.sample_b),
+  (WITH ct AS (SELECT t.cluster_id tc, k.cluster kc, count(*) nij FROM truth t JOIN km k USING (sample_id) GROUP BY 1, 2),
+        a AS (SELECT sum(nij * (nij - 1) / 2.0) s FROM (SELECT sum(nij) nij FROM ct GROUP BY tc)),
+        b AS (SELECT sum(nij * (nij - 1) / 2.0) s FROM (SELECT sum(nij) nij FROM ct GROUP BY kc)),
+        ij AS (SELECT sum(nij * (nij - 1) / 2.0) s FROM ct),
+        n AS (SELECT sum(nij) n FROM ct)
+   SELECT (ij.s - a.s * b.s / (n.n * (n.n - 1) / 2.0)) / (0.5 * (a.s + b.s) - a.s * b.s / (n.n * (n.n - 1) / 2.0))
+   FROM ij, a, b, n),
+  (SELECT count(*) FROM (SELECT cluster_id, count(*) sz FROM truth GROUP BY 1) s
+   WHERE EXISTS (SELECT 1 FROM ancleaf a GROUP BY a.anc
+                 HAVING count(*) = s.sz AND count(*) FILTER (WHERE a.cluster_id = s.cluster_id) = s.sz));
+
+# ===== Morisita-Horn, distinct clusters (1.0 / 0.5) =====
+statement ok
+CREATE OR REPLACE TABLE sim AS
+SELECT CAST(sample_id AS BIGINT) AS sample_id, CAST(otu_id AS BIGINT) AS otu_id, "count", cluster_id
+FROM simulate_cluster_otus(getvariable('kb'), 1000, cluster_sizes := [30, 30, 30],
+     cluster_spacing := 1.0, sample_spacing := 0.5, seed := 123);
+
+statement ok
+CREATE OR REPLACE TABLE feat AS SELECT sample_id, otu_id AS feature_id, CAST("count" AS DOUBLE) AS value FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE truth AS SELECT DISTINCT sample_id, cluster_id FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE dist AS SELECT * FROM community_distances('feat', 'morisita_horn');
+
+statement ok
+CREATE OR REPLACE TABLE coords AS SELECT * FROM pcoa('dist', n_dims := 3, seed := 123);
+
+statement ok
+CREATE OR REPLACE TABLE km AS SELECT * FROM cluster_kmeans('coords', k := 3, n_dims := 3, seed := 123);
+
+statement ok
+CREATE OR REPLACE TABLE tree AS SELECT * FROM cluster_upgma('dist');
+
+statement ok
+CREATE OR REPLACE TABLE ancleaf AS
+WITH RECURSIVE down(anc, node) AS (
+  SELECT node_index, node_index FROM tree
+  UNION ALL
+  SELECT d.anc, c.node_index FROM down d JOIN tree c ON c.parent_index = d.node)
+SELECT d.anc, tr.cluster_id
+FROM down d JOIN tree t ON t.node_index = d.node AND t.is_tip
+            JOIN truth tr ON CAST(tr.sample_id AS VARCHAR) = t.name;
+
+statement ok
+INSERT INTO cq
+SELECT 'morisita_horn', 1.0, 0.5,
+  (SELECT avg(distance) FILTER (WHERE ta.cluster_id <> tb.cluster_id)
+        / avg(distance) FILTER (WHERE ta.cluster_id = tb.cluster_id)
+   FROM dist d JOIN truth ta ON ta.sample_id = d.sample_a JOIN truth tb ON tb.sample_id = d.sample_b),
+  (WITH ct AS (SELECT t.cluster_id tc, k.cluster kc, count(*) nij FROM truth t JOIN km k USING (sample_id) GROUP BY 1, 2),
+        a AS (SELECT sum(nij * (nij - 1) / 2.0) s FROM (SELECT sum(nij) nij FROM ct GROUP BY tc)),
+        b AS (SELECT sum(nij * (nij - 1) / 2.0) s FROM (SELECT sum(nij) nij FROM ct GROUP BY kc)),
+        ij AS (SELECT sum(nij * (nij - 1) / 2.0) s FROM ct),
+        n AS (SELECT sum(nij) n FROM ct)
+   SELECT (ij.s - a.s * b.s / (n.n * (n.n - 1) / 2.0)) / (0.5 * (a.s + b.s) - a.s * b.s / (n.n * (n.n - 1) / 2.0))
+   FROM ij, a, b, n),
+  (SELECT count(*) FROM (SELECT cluster_id, count(*) sz FROM truth GROUP BY 1) s
+   WHERE EXISTS (SELECT 1 FROM ancleaf a GROUP BY a.anc
+                 HAVING count(*) = s.sz AND count(*) FILTER (WHERE a.cluster_id = s.cluster_id) = s.sz));
+
+# ===== Jaccard, subtle clusters (0.1 / 0.1) =====
+statement ok
+CREATE OR REPLACE TABLE sim AS
+SELECT CAST(sample_id AS BIGINT) AS sample_id, CAST(otu_id AS BIGINT) AS otu_id, "count", cluster_id
+FROM simulate_cluster_otus(getvariable('kb'), 1000, cluster_sizes := [30, 30, 30],
+     cluster_spacing := 0.1, sample_spacing := 0.1, seed := 123);
+
+statement ok
+CREATE OR REPLACE TABLE feat AS SELECT sample_id, otu_id AS feature_id, CAST("count" AS DOUBLE) AS value FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE truth AS SELECT DISTINCT sample_id, cluster_id FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE dist AS SELECT * FROM community_distances('feat', 'jaccard');
+
+statement ok
+CREATE OR REPLACE TABLE coords AS SELECT * FROM pcoa('dist', n_dims := 3, seed := 123);
+
+statement ok
+CREATE OR REPLACE TABLE km AS SELECT * FROM cluster_kmeans('coords', k := 3, n_dims := 3, seed := 123);
+
+statement ok
+CREATE OR REPLACE TABLE tree AS SELECT * FROM cluster_upgma('dist');
+
+statement ok
+CREATE OR REPLACE TABLE ancleaf AS
+WITH RECURSIVE down(anc, node) AS (
+  SELECT node_index, node_index FROM tree
+  UNION ALL
+  SELECT d.anc, c.node_index FROM down d JOIN tree c ON c.parent_index = d.node)
+SELECT d.anc, tr.cluster_id
+FROM down d JOIN tree t ON t.node_index = d.node AND t.is_tip
+            JOIN truth tr ON CAST(tr.sample_id AS VARCHAR) = t.name;
+
+statement ok
+INSERT INTO cq
+SELECT 'jaccard', 0.1, 0.1,
+  (SELECT avg(distance) FILTER (WHERE ta.cluster_id <> tb.cluster_id)
+        / avg(distance) FILTER (WHERE ta.cluster_id = tb.cluster_id)
+   FROM dist d JOIN truth ta ON ta.sample_id = d.sample_a JOIN truth tb ON tb.sample_id = d.sample_b),
+  (WITH ct AS (SELECT t.cluster_id tc, k.cluster kc, count(*) nij FROM truth t JOIN km k USING (sample_id) GROUP BY 1, 2),
+        a AS (SELECT sum(nij * (nij - 1) / 2.0) s FROM (SELECT sum(nij) nij FROM ct GROUP BY tc)),
+        b AS (SELECT sum(nij * (nij - 1) / 2.0) s FROM (SELECT sum(nij) nij FROM ct GROUP BY kc)),
+        ij AS (SELECT sum(nij * (nij - 1) / 2.0) s FROM ct),
+        n AS (SELECT sum(nij) n FROM ct)
+   SELECT (ij.s - a.s * b.s / (n.n * (n.n - 1) / 2.0)) / (0.5 * (a.s + b.s) - a.s * b.s / (n.n * (n.n - 1) / 2.0))
+   FROM ij, a, b, n),
+  (SELECT count(*) FROM (SELECT cluster_id, count(*) sz FROM truth GROUP BY 1) s
+   WHERE EXISTS (SELECT 1 FROM ancleaf a GROUP BY a.anc
+                 HAVING count(*) = s.sz AND count(*) FILTER (WHERE a.cluster_id = s.cluster_id) = s.sz));
+
+# ── Claim 1: Jaccard recovers ALL 3 clusters when distinct ──────────────────────
+# seed=123: k-means ARI = 1.0 (perfect), all 3 clusters monophyletic. Every one of
+# 5 tested seeds gave ARI 1.0 and monophyly 3, so the thresholds carry margin.
+query I
+SELECT kmeans_ari >= 0.99 AND monophyletic = 3
+FROM cq WHERE metric = 'jaccard' AND cluster_spacing = 1.0;
+----
+true
+
+# ── Claim 2: Jaccard overlaps (fails to recover) when the clusters are subtle ───
+# seed=123: subtle ARI -0.01 (~chance), 0 monophyletic; distinct ARI (1.0) dwarfs it.
+query I
+SELECT kmeans_ari < 0.1 AND monophyletic = 0
+FROM cq WHERE metric = 'jaccard' AND cluster_spacing = 0.1;
+----
+true
+
+query I
+SELECT (SELECT kmeans_ari FROM cq WHERE metric = 'jaccard' AND cluster_spacing = 1.0)
+     - (SELECT kmeans_ari FROM cq WHERE metric = 'jaccard' AND cluster_spacing = 0.1) > 0.8;
+----
+true
+
+# ── Claim 3: Morisita-Horn explains MORE variance than Jaccard yet does NOT ──────
+# recover the 3 clusters. seed=123: inter/intra 4.49 (vs Jaccard 1.16) -- larger
+# spread -- but 0 monophyletic clades and ARI 0.54 (< Jaccard's 1.0). Direction
+# holds on every tested seed (MH inter/intra >= Jaccard, MH monophyly < 3).
+query I
+SELECT (SELECT inter_intra_ratio FROM cq WHERE metric = 'morisita_horn' AND cluster_spacing = 1.0)
+     > (SELECT inter_intra_ratio FROM cq WHERE metric = 'jaccard' AND cluster_spacing = 1.0)
+   AND (SELECT monophyletic FROM cq WHERE metric = 'morisita_horn' AND cluster_spacing = 1.0) < 3
+   AND (SELECT kmeans_ari FROM cq WHERE metric = 'morisita_horn' AND cluster_spacing = 1.0)
+     < (SELECT kmeans_ari FROM cq WHERE metric = 'jaccard' AND cluster_spacing = 1.0);
+----
+true
+
+# ── Claim 4: Soergel behaves like Morisita-Horn -- more variance than Jaccard, no ─
+# clean 3-cluster recovery (the paper groups the two). seed=123: ratio 1.69 (>
+# Jaccard 1.16), 1 monophyletic clade (< 3), ARI 0.73 (< Jaccard's 1.0).
+query I
+SELECT (SELECT inter_intra_ratio FROM cq WHERE metric = 'soergel' AND cluster_spacing = 1.0)
+     > (SELECT inter_intra_ratio FROM cq WHERE metric = 'jaccard' AND cluster_spacing = 1.0)
+   AND (SELECT monophyletic FROM cq WHERE metric = 'soergel' AND cluster_spacing = 1.0) < 3
+   AND (SELECT kmeans_ari FROM cq WHERE metric = 'soergel' AND cluster_spacing = 1.0)
+     < (SELECT kmeans_ari FROM cq WHERE metric = 'jaccard' AND cluster_spacing = 1.0);
+----
+true

@@ -4,15 +4,10 @@
 #include <string>
 #include <vector>
 
-#include "unifrac_libssu.hpp" // guarded wrapper over unifrac api.hpp (support_biom_t)
+#include "feature_table_row.hpp" // CooRow (kept free of the api.hpp include)
+#include "unifrac_libssu.hpp"    // guarded wrapper over unifrac api.hpp (support_biom_t)
 
 namespace miint::unifrac {
-
-struct CooRow {
-	std::string sample_id;
-	std::string feature_id;
-	double count;
-};
 
 // Builds a libssu-compatible CSR (obs-major) view over heap-owned storage.
 //
