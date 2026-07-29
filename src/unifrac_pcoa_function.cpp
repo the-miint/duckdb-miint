@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <cstdlib>
 #include <unordered_set>
 #include <vector>
 
@@ -30,9 +31,11 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/appender.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 
 // scikit-bio-binaries — randomized PCoA on a libssu fp32 distance matrix.
 #include "ordination.h"
@@ -545,6 +548,265 @@ AnchorPartition PartitionWithExplicitAnchors(const std::vector<std::string> &sor
 	return part;
 }
 
+miint::progressive::DistanceBlock QueryDistanceBlock(ClientContext &context, const std::string &qname,
+                                                     const std::vector<std::string> &requested);
+
+// Fill EVERY block of one wave from a single pass over the relation.
+//
+// The per-block query below costs one full scan of the relation apiece (an IN-list
+// filter has no index to use), so B batches cost B scans — O(B · pairs), i.e.
+// O(N³ / batch_size), which is what made this path unusable well before the dense
+// path's memory ceiling. Yet a single row is needed by at most one block, with two
+// exceptions, so one pass can serve a whole wave:
+//
+//   both endpoints anchors      → every block's anchor×anchor corner
+//   one anchor, one batch id    → that id's block only
+//   both ids in the SAME batch  → that block only
+//   ids in two DIFFERENT batches → NO block needs it (the common case, skipped)
+//
+// So the scan is unfiltered — no WHERE, no 2000-element IN-lists to plan — and
+// routing is two hash lookups per row. Validation is unchanged: each block is
+// filled through DenseDistanceMatrixBuilder, the same builder pcoa uses, so
+// negative / non-finite / nonzero-self / conflicting-duplicate / incomplete all
+// still throw per block.
+//
+// Memory is W blocks at once (5·(batch+anchors)² bytes each), which is why the
+// caller sizes the wave from its memory budget.
+class WaveDistanceBlockSource {
+public:
+	WaveDistanceBlockSource(ClientContext &context, std::string qname, const std::vector<std::string> &anchors)
+	    : context_(context), qname_(std::move(qname)), anchors_(anchors) {
+	}
+
+	// Fill the wave's blocks in one scan. `requests` are exactly the requests the
+	// core will then ask for, each being (batch ids..., all anchors...).
+	void Prefetch(const std::vector<std::vector<std::string>> &requests) {
+		const uint32_t a = static_cast<uint32_t>(anchors_.size());
+		blocks_.clear();
+		by_request_.clear();
+		batch_len_.assign(requests.size(), 0);
+		builders_.clear();
+		blocks_.reserve(requests.size());
+		for (size_t k = 0; k < requests.size(); ++k) {
+			if (requests[k].size() <= a) {
+				throw InvalidInputException(
+				    "progressive_pcoa_from_distances: internal error — wave request %llu has no non-anchor samples",
+				    static_cast<unsigned long long>(k));
+			}
+			batch_len_[k] = static_cast<uint32_t>(requests[k].size() - a);
+			miint::progressive::DistanceBlock blk;
+			blk.ids = requests[k];
+			blocks_.push_back(std::move(blk));
+			by_request_.emplace(requests[k].front(), k);
+		}
+		// Builders reference blocks_[k].ids for error messages, so build them only
+		// once blocks_ has stopped reallocating.
+		builders_.reserve(blocks_.size());
+		for (size_t k = 0; k < blocks_.size(); ++k) {
+			builders_.push_back(make_uniq<miint::unifrac::DenseDistanceMatrixBuilder>(
+			    static_cast<uint32_t>(blocks_[k].ids.size()), blocks_[k].ids));
+		}
+
+		auto &db = DatabaseInstance::GetDatabase(context_);
+		Connection conn(db);
+		StageWaveMaps(conn, requests);
+
+		// Routing happens in SQL — DuckDB resolves ids to integer cell positions
+		// vectorized and across all cores, and returns only the pairs some block
+		// needs. Three queries, split by which case a row falls into, because the
+		// obvious single query does not work: anchors belong to EVERY block, so a map
+		// holding one row per (anchor, block) makes the second join emit W² rows per
+		// anchor×anchor pair before the block filter discards all but W. At W=121
+		// that measured 23 GB and 92 s. Keeping anchors out of the batch map means
+		// every join key below is 1:1 on at least one side, so nothing explodes.
+		//
+		// Case 1 — both endpoints in the SAME batch. Rows spanning two batches match
+		// no block and are dropped by the join itself.
+		RunRoutedQuery(conn,
+		               "SELECT b1.block, b1.pos, b2.pos, d.distance::DOUBLE FROM " + qname_ +
+		                   " d JOIN _wave_batch b1 ON d.sample_a::VARCHAR = b1.id"
+		                   " JOIN _wave_batch b2 ON d.sample_b::VARCHAR = b2.id"
+		                   " WHERE b1.block = b2.block AND d.distance IS NOT NULL AND"
+		                   " NOT isnan(d.distance::DOUBLE)",
+		               /*a_is_anchor_ord=*/false, /*b_is_anchor_ord=*/false);
+		// Case 2/3 — one endpoint an anchor, the other a batch sample: the batch side
+		// alone determines the block, so the anchor map needs no block column.
+		RunRoutedQuery(conn,
+		               "SELECT b.block, an.ord, b.pos, d.distance::DOUBLE FROM " + qname_ +
+		                   " d JOIN _wave_anchor an ON d.sample_a::VARCHAR = an.id"
+		                   " JOIN _wave_batch b ON d.sample_b::VARCHAR = b.id"
+		                   " WHERE d.distance IS NOT NULL AND NOT isnan(d.distance::DOUBLE)",
+		               /*a_is_anchor_ord=*/true, /*b_is_anchor_ord=*/false);
+		RunRoutedQuery(conn,
+		               "SELECT b.block, b.pos, an.ord, d.distance::DOUBLE FROM " + qname_ +
+		                   " d JOIN _wave_batch b ON d.sample_a::VARCHAR = b.id"
+		                   " JOIN _wave_anchor an ON d.sample_b::VARCHAR = an.id"
+		                   " WHERE d.distance IS NOT NULL AND NOT isnan(d.distance::DOUBLE)",
+		               /*a_is_anchor_ord=*/false, /*b_is_anchor_ord=*/true);
+		// Case 4 — anchor×anchor. This corner is IDENTICAL in every block of every
+		// wave, so it is read from the relation once for the whole run and replayed
+		// into each block from memory (a²/2 triples ≈ 8 MB at 1000 anchors).
+		LoadAnchorCornerOnce(conn);
+		for (size_t k = 0; k < builders_.size(); ++k) {
+			const uint32_t off = batch_len_[k];
+			for (const auto &t : anchor_corner_) {
+				builders_[k]->Add(off + t.oa, off + t.ob, t.distance);
+			}
+		}
+
+		try {
+			for (size_t k = 0; k < blocks_.size(); ++k) {
+				blocks_[k].matrix = builders_[k]->Finish();
+			}
+		} catch (const std::invalid_argument &e) {
+			throw InvalidInputException("progressive_pcoa_from_distances: %s", e.what());
+		}
+		builders_.clear();
+	}
+
+	// Serve a request: from the wave cache when it was announced (every batch
+	// block), else by a direct query (the one-off anchors-only reference block).
+	miint::progressive::DistanceBlock Get(const std::vector<std::string> &requested) {
+		if (!requested.empty()) {
+			auto it = by_request_.find(requested.front());
+			if (it != by_request_.end() && blocks_[it->second].ids == requested) {
+				return blocks_[it->second];
+			}
+		}
+		return QueryDistanceBlock(context_, qname_, requested);
+	}
+
+private:
+	// One anchor×anchor distance, addressed by ordinal in the shared anchor order.
+	struct AnchorPair {
+		uint32_t oa;
+		uint32_t ob;
+		double distance;
+	};
+
+	// Stage the wave's id→position maps as connection-local temp tables (the same
+	// pattern sequence_table_reader.cpp uses for _batch_ids). _wave_batch holds one
+	// row per non-anchor sample of the wave; _wave_anchor holds one row per anchor,
+	// with NO block column — that is what keeps the joins from exploding.
+	void StageWaveMaps(Connection &conn, const std::vector<std::vector<std::string>> &requests) {
+		auto create = conn.Query("CREATE TEMPORARY TABLE _wave_batch (id VARCHAR, block INTEGER, pos INTEGER);"
+		                         "CREATE TEMPORARY TABLE _wave_anchor (id VARCHAR, ord INTEGER)");
+		if (create->HasError()) {
+			throw InvalidInputException("progressive_pcoa_from_distances: failed to stage the wave map: %s",
+			                            create->GetError());
+		}
+		{
+			Appender appender(conn, "_wave_batch");
+			for (size_t k = 0; k < requests.size(); ++k) {
+				for (uint32_t p = 0; p < batch_len_[k]; ++p) {
+					appender.AppendRow(Value(requests[k][p]), Value::INTEGER(static_cast<int32_t>(k)),
+					                   Value::INTEGER(static_cast<int32_t>(p)));
+				}
+			}
+			appender.Close();
+		}
+		{
+			Appender appender(conn, "_wave_anchor");
+			for (uint32_t j = 0; j < anchors_.size(); ++j) {
+				appender.AppendRow(Value(anchors_[j]), Value::INTEGER(static_cast<int32_t>(j)));
+			}
+			appender.Close();
+		}
+	}
+
+	// Stream one routed query into the builders. Columns are always
+	// (block, position_or_ordinal_a, position_or_ordinal_b, distance); an ordinal is
+	// turned into a cell position by adding that block's non-anchor count, since a
+	// request is laid out as [batch ids..., anchors...].
+	void RunRoutedQuery(Connection &conn, const std::string &sql, bool a_is_anchor_ord, bool b_is_anchor_ord) {
+		auto res = conn.SendQuery(sql);
+		if (res->HasError()) {
+			throw InvalidInputException("progressive_pcoa_from_distances: wave scan failed: %s", res->GetError());
+		}
+		try {
+			while (auto chunk = res->Fetch()) {
+				const idx_t rn = chunk->size();
+				if (rn == 0) {
+					break;
+				}
+				UnifiedVectorFormat blk_u, pa_u, pb_u, d_u;
+				chunk->data[0].ToUnifiedFormat(rn, blk_u);
+				chunk->data[1].ToUnifiedFormat(rn, pa_u);
+				chunk->data[2].ToUnifiedFormat(rn, pb_u);
+				chunk->data[3].ToUnifiedFormat(rn, d_u);
+				auto blk_data = UnifiedVectorFormat::GetData<int32_t>(blk_u);
+				auto pa_data = UnifiedVectorFormat::GetData<int32_t>(pa_u);
+				auto pb_data = UnifiedVectorFormat::GetData<int32_t>(pb_u);
+				auto d_data = UnifiedVectorFormat::GetData<double>(d_u);
+				for (idx_t i = 0; i < rn; ++i) {
+					const auto k = static_cast<size_t>(blk_data[blk_u.sel->get_index(i)]);
+					const uint32_t off = batch_len_[k];
+					const auto pa = static_cast<uint32_t>(pa_data[pa_u.sel->get_index(i)]);
+					const auto pb = static_cast<uint32_t>(pb_data[pb_u.sel->get_index(i)]);
+					builders_[k]->Add(a_is_anchor_ord ? off + pa : pa, b_is_anchor_ord ? off + pb : pb,
+					                  d_data[d_u.sel->get_index(i)]);
+				}
+			}
+		} catch (const std::invalid_argument &e) {
+			throw InvalidInputException("progressive_pcoa_from_distances: %s", e.what());
+		}
+		if (res->HasError()) {
+			throw InvalidInputException("progressive_pcoa_from_distances: wave scan failed: %s", res->GetError());
+		}
+	}
+
+	// Read the anchor×anchor distances once per run. Every block of every wave holds
+	// this same corner, so re-reading it per block (as the per-batch provider did)
+	// re-scans a×N rows for every batch — the term that made the old path's cost grow
+	// with the batch count.
+	void LoadAnchorCornerOnce(Connection &conn) {
+		if (anchor_corner_loaded_) {
+			return;
+		}
+		auto res = conn.SendQuery("SELECT a1.ord, a2.ord, d.distance::DOUBLE FROM " + qname_ +
+		                          " d JOIN _wave_anchor a1 ON d.sample_a::VARCHAR = a1.id"
+		                          " JOIN _wave_anchor a2 ON d.sample_b::VARCHAR = a2.id"
+		                          " WHERE d.distance IS NOT NULL AND NOT isnan(d.distance::DOUBLE)");
+		if (res->HasError()) {
+			throw InvalidInputException("progressive_pcoa_from_distances: anchor block scan failed: %s",
+			                            res->GetError());
+		}
+		while (auto chunk = res->Fetch()) {
+			const idx_t rn = chunk->size();
+			if (rn == 0) {
+				break;
+			}
+			UnifiedVectorFormat oa_u, ob_u, d_u;
+			chunk->data[0].ToUnifiedFormat(rn, oa_u);
+			chunk->data[1].ToUnifiedFormat(rn, ob_u);
+			chunk->data[2].ToUnifiedFormat(rn, d_u);
+			auto oa_data = UnifiedVectorFormat::GetData<int32_t>(oa_u);
+			auto ob_data = UnifiedVectorFormat::GetData<int32_t>(ob_u);
+			auto d_data = UnifiedVectorFormat::GetData<double>(d_u);
+			for (idx_t i = 0; i < rn; ++i) {
+				anchor_corner_.push_back({static_cast<uint32_t>(oa_data[oa_u.sel->get_index(i)]),
+				                          static_cast<uint32_t>(ob_data[ob_u.sel->get_index(i)]),
+				                          d_data[d_u.sel->get_index(i)]});
+			}
+		}
+		if (res->HasError()) {
+			throw InvalidInputException("progressive_pcoa_from_distances: anchor block scan failed: %s",
+			                            res->GetError());
+		}
+		anchor_corner_loaded_ = true;
+	}
+
+	ClientContext &context_;
+	std::string qname_;
+	std::vector<std::string> anchors_;
+	std::vector<miint::progressive::DistanceBlock> blocks_;
+	std::vector<std::unique_ptr<miint::unifrac::DenseDistanceMatrixBuilder>> builders_;
+	std::vector<uint32_t> batch_len_;                    // per block: non-anchor sample count
+	std::unordered_map<std::string, size_t> by_request_; // request.front() → block index
+	std::vector<AnchorPair> anchor_corner_;              // anchor×anchor, read once per run
+	bool anchor_corner_loaded_ = false;
+};
+
 // Build the dense distance block over exactly `requested` (row/col order =
 // requested order) by scanning the relation for pairs with both endpoints in the
 // set, then delegating the fill + validation to the same BuildDenseDistanceMatrix
@@ -711,14 +973,58 @@ unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context
 	}
 
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
-	const miint::progressive::BlockProvider provider = [&context, qname](const std::vector<std::string> &requested) {
-		return QueryDistanceBlock(context, qname, requested);
+	WaveDistanceBlockSource source(context, qname, part.anchors);
+	const miint::progressive::BlockProvider provider = [&source](const std::vector<std::string> &requested) {
+		return source.Get(requested);
 	};
+	const miint::progressive::WavePrefetch prefetch = [&source](const std::vector<std::vector<std::string>> &requests) {
+		source.Prefetch(requests);
+	};
+
+	// How many batches to serve per relation scan. Each block held during a wave
+	// costs ~5·(batch + anchors)² bytes (fp32 matrix + fill bitmap), so the width is
+	// whatever fits a quarter of what memory_limit currently leaves — a quarter
+	// because these blocks are extension heap the buffer manager cannot see or
+	// evict, the same reason pcoa()'s dense matrix is guarded rather than tracked.
+	// Wave width changes only how many scans the run costs, never its output.
+	const uint32_t wave_batches = [&]() -> uint32_t {
+		const size_t m = static_cast<size_t>(batch_size) + part.anchors.size();
+		const double block_bytes = 5.0 * static_cast<double>(m) * static_cast<double>(m);
+		auto &buffer_manager = BufferManager::GetBufferManager(context);
+		const auto max_memory = buffer_manager.GetMaxMemory();
+		const auto used_memory = buffer_manager.GetUsedMemory();
+		const double budget = 0.25 * static_cast<double>(max_memory > used_memory ? max_memory - used_memory : 0);
+		const double fits = block_bytes > 0.0 ? budget / block_bytes : 1.0;
+		if (fits < 1.0) {
+			return 1; // one block at a time — correct, just one scan per batch
+		}
+		const size_t n_batches =
+		    (part.remaining.size() + static_cast<size_t>(batch_size) - 1) / static_cast<size_t>(batch_size);
+		return static_cast<uint32_t>(std::min<double>(fits, static_cast<double>(std::max<size_t>(n_batches, 1))));
+	}();
 
 	miint::progressive::ProgressivePcoaResult result;
 	try {
+		// Which block-fetch strategy pays off depends on the batch COUNT, measured on
+		// the 25,145-sample EMP matrix (316 M pairs, 1000 anchors, d=10):
+		//
+		//   batches   waves            per-batch queries
+		//   25        28.0 s / 58 CPU  18.9 s / 153 CPU
+		//   121       17.1 s / 45 CPU  70.2 s / 684 CPU
+		//
+		// Per-batch queries re-read every anchor-touching row for every batch, so
+		// their cost grows with the batch count (153 → 684 CPU-seconds); the wave path
+		// does not (58 → 45). But at a small batch count per-batch still wins
+		// wall-clock, because DuckDB runs those redundant scans across all cores
+		// (8.1x effective) while a wave's blocks are consumed serially (2.1x). Until
+		// the batch loop itself is parallel, pick by count so neither regime regresses.
+		// The threshold sits between the two measured points.
+		const size_t n_batches =
+		    (part.remaining.size() + static_cast<size_t>(batch_size) - 1) / std::max<size_t>(batch_size, 1);
+		const bool use_waves = n_batches >= 64 && std::getenv("MIINT_PROGRESSIVE_NO_WAVES") == nullptr;
 		result = miint::progressive::RunProgressivePcoa(part.anchors, part.remaining, static_cast<uint32_t>(n_dims),
-		                                                static_cast<uint32_t>(batch_size), seed, n_threads, provider);
+		                                                static_cast<uint32_t>(batch_size), seed, n_threads, provider,
+		                                                use_waves ? prefetch : nullptr, use_waves ? wave_batches : 0);
 	} catch (const std::invalid_argument &e) {
 		throw InvalidInputException("progressive_pcoa_from_distances: %s", e.what());
 	}

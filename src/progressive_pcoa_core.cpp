@@ -92,7 +92,8 @@ void ValidateBlockMatchesRequest(const DistanceBlock &block, const std::vector<s
 
 ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_ids,
                                          const std::vector<std::string> &remaining_ids, uint32_t n_dims,
-                                         uint32_t batch_size, int seed, int n_threads, const BlockProvider &get_block) {
+                                         uint32_t batch_size, int seed, int n_threads, const BlockProvider &get_block,
+                                         const WavePrefetch &prefetch, uint32_t wave_batches) {
 	if (n_dims < 1) {
 		throw std::invalid_argument("progressive_pcoa: n_dims must be >= 1");
 	}
@@ -159,16 +160,28 @@ ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_
 	}
 
 	// ── Phase 1: stream the remaining samples in contiguous batches ──────────────
+	// Batches are grouped into waves: before fetching a wave's blocks we announce
+	// all of its requests, so a provider can serve them from one pass over its
+	// source instead of one pass per block (see WavePrefetch). The batch bodies
+	// below are unchanged by this — a wave is purely an I/O grouping, and W has no
+	// effect on the coordinates produced.
 	const size_t total = remaining_ids.size();
-	for (size_t start = 0; start < total; start += batch_size) {
-		const size_t end = std::min(total, start + static_cast<size_t>(batch_size));
 
-		// Block request = this batch's non-anchor samples followed by all anchors.
+	// Block request = this batch's non-anchor samples followed by all anchors. Built
+	// in one place so the request announced by prefetch is byte-identical to the one
+	// get_block is then called with — a provider is entitled to key its cache on it.
+	const auto build_request = [&](size_t start, size_t end) {
 		std::vector<std::string> req;
 		req.reserve((end - start) + a);
 		req.insert(req.end(), remaining_ids.begin() + start, remaining_ids.begin() + end);
 		req.insert(req.end(), anchor_ids.begin(), anchor_ids.end());
+		return req;
+	};
 
+	// One batch: fetch its block, ordinate it, fit it onto the reference frame
+	// through the anchor overlap, and emit its non-anchor coordinates.
+	const auto run_one_batch = [&](size_t start, size_t end) {
+		const std::vector<std::string> req = build_request(start, end);
 		const DistanceBlock blk = get_block(req);
 		ValidateBlockMatchesRequest(blk, req, "batch");
 		const uint32_t m = static_cast<uint32_t>(blk.ids.size());
@@ -235,6 +248,32 @@ ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_
 			for (uint32_t axis = 0; axis < d; ++axis) {
 				result.coords.push_back({nb_ids[r], static_cast<int32_t>(axis), nb_fit[r * d + axis], batch_index});
 			}
+		}
+	};
+
+	std::vector<std::pair<size_t, size_t>> batch_ranges;
+	for (size_t start = 0; start < total; start += batch_size) {
+		batch_ranges.emplace_back(start, std::min(total, start + static_cast<size_t>(batch_size)));
+	}
+	const size_t wave_width = std::max<size_t>(1, wave_batches);
+
+	for (size_t wave_start = 0; wave_start < batch_ranges.size(); wave_start += wave_width) {
+		const size_t wave_end = std::min(batch_ranges.size(), wave_start + wave_width);
+		// Announced for EVERY wave, including a trailing one-batch wave: a uniform
+		// contract lets a provider serve all batch blocks from its wave cache and
+		// keep a direct path only for the one-off anchor (reference) block. The
+		// alternative — skipping the announcement when there is nothing to amortize
+		// — would force every provider to implement both paths for batch blocks.
+		if (prefetch) {
+			std::vector<std::vector<std::string>> wave_requests;
+			wave_requests.reserve(wave_end - wave_start);
+			for (size_t b = wave_start; b < wave_end; ++b) {
+				wave_requests.push_back(build_request(batch_ranges[b].first, batch_ranges[b].second));
+			}
+			prefetch(wave_requests);
+		}
+		for (size_t b = wave_start; b < wave_end; ++b) {
+			run_one_batch(batch_ranges[b].first, batch_ranges[b].second);
 		}
 	}
 

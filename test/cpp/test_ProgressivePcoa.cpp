@@ -288,6 +288,94 @@ TEST_CASE("progressive PCoA batch disparity rises when a batch disagrees with th
 	REQUIRE(r.batches[3].anchor_m2 > 1e-6);
 }
 
+TEST_CASE("progressive PCoA announces each wave's requests and is unchanged by wave width", "[progressive]") {
+	// WHY: the per-block provider for a stored relation costs one full scan of the
+	// relation per batch — O(B · pairs). Waves exist so a provider can satisfy many
+	// blocks from ONE pass. Two properties make that safe, and both are pinned here:
+	//   1. every batch request is announced before it is fetched, in fetch order, so
+	//      a provider may serve batch blocks purely from its wave cache;
+	//   2. wave width is an I/O choice ONLY — coordinates are identical for any W,
+	//      so tuning it can never change a scientific result.
+	const uint32_t n = 80, d_true = 3, n_dims = 3, a = 20;
+	const int seed = 7;
+	const Oracle oracle = MakeEuclideanOracle(n, d_true, /*seed=*/31337);
+	const std::vector<std::string> anchors(oracle.ids.begin(), oracle.ids.begin() + a);
+	const std::vector<std::string> remaining(oracle.ids.begin() + a, oracle.ids.end());
+	const std::vector<std::string> anchors_only = anchors;
+
+	// A deliberately strict provider: batch blocks may ONLY come from the wave
+	// cache. Anything else means the core asked for a block it never announced.
+	std::vector<std::vector<std::string>> announced;
+	size_t prefetch_calls = 0;
+	std::vector<std::pair<std::vector<std::string>, DistanceBlock>> cache;
+	const auto prefetch = [&](const std::vector<std::vector<std::string>> &requests) {
+		++prefetch_calls;
+		cache.clear();
+		for (const auto &req : requests) {
+			announced.push_back(req);
+			cache.emplace_back(req, SliceBlock(oracle, req));
+		}
+	};
+	const auto cache_only_provider = [&](const std::vector<std::string> &req) {
+		for (const auto &entry : cache) {
+			if (entry.first == req) {
+				return entry.second;
+			}
+		}
+		// The anchors-alone reference block is fetched once, before any wave.
+		if (req == anchors_only) {
+			return SliceBlock(oracle, req);
+		}
+		throw std::invalid_argument("provider asked for an unannounced block");
+	};
+
+	const auto plain_provider = [&oracle](const std::vector<std::string> &req) {
+		return SliceBlock(oracle, req);
+	};
+
+	// 60 remaining in batches of 12 → 5 batches. W=2 → waves of 2,2,1.
+	const ProgressivePcoaResult waved = RunProgressivePcoa(anchors, remaining, n_dims, /*batch_size=*/12, seed,
+	                                                       /*n_threads=*/1, cache_only_provider, prefetch,
+	                                                       /*wave_batches=*/2);
+	REQUIRE(prefetch_calls == 3);
+	REQUIRE(announced.size() == 5); // every batch announced exactly once...
+	// ...and in fetch order: request k starts with the (k*12)th remaining sample.
+	for (size_t k = 0; k < announced.size(); ++k) {
+		REQUIRE(announced[k].front() == remaining[k * 12]);
+	}
+
+	// Same run with no waves at all (one block at a time, no prefetch) must produce
+	// identical coordinates — W is not a scientific parameter.
+	const ProgressivePcoaResult plain =
+	    RunProgressivePcoa(anchors, remaining, n_dims, /*batch_size=*/12, seed, /*n_threads=*/1, plain_provider);
+	const std::vector<double> waved_m = AssembleInOracleOrder(oracle, waved, n_dims);
+	const std::vector<double> plain_m = AssembleInOracleOrder(oracle, plain, n_dims);
+	REQUIRE(waved_m.size() == plain_m.size());
+	for (size_t i = 0; i < plain_m.size(); ++i) {
+		REQUIRE(waved_m[i] == Approx(plain_m[i]).margin(1e-12));
+	}
+	// Diagnostics too: same batches, same disparities.
+	REQUIRE(waved.batches.size() == plain.batches.size());
+	for (size_t b = 0; b < plain.batches.size(); ++b) {
+		REQUIRE(waved.batches[b].batch == plain.batches[b].batch);
+		REQUIRE(waved.batches[b].n_samples == plain.batches[b].n_samples);
+		REQUIRE(waved.batches[b].anchor_m2 == Approx(plain.batches[b].anchor_m2).margin(1e-12));
+	}
+
+	// A wave wider than the batch count is legal: one announcement, everything in it.
+	prefetch_calls = 0;
+	announced.clear();
+	const ProgressivePcoaResult one_wave = RunProgressivePcoa(anchors, remaining, n_dims, /*batch_size=*/12, seed,
+	                                                          /*n_threads=*/1, cache_only_provider, prefetch,
+	                                                          /*wave_batches=*/999);
+	REQUIRE(prefetch_calls == 1);
+	REQUIRE(announced.size() == 5);
+	const std::vector<double> one_wave_m = AssembleInOracleOrder(oracle, one_wave, n_dims);
+	for (size_t i = 0; i < plain_m.size(); ++i) {
+		REQUIRE(one_wave_m[i] == Approx(plain_m[i]).margin(1e-12));
+	}
+}
+
 TEST_CASE("progressive PCoA with no remaining samples emits only the reference anchors", "[progressive]") {
 	// Degenerate case: everything is an anchor. The result is just the standardized
 	// reference ordination (the self-fit path), with no batch phase.

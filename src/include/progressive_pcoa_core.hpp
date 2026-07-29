@@ -42,6 +42,23 @@ struct DistanceBlock {
 // once per batch (that batch's non-anchor ids followed by all anchor ids).
 using BlockProvider = std::function<DistanceBlock(const std::vector<std::string> &requested)>;
 
+// Optional announcement, made before the batches of one "wave" are fetched, of
+// every request that wave will make — in the exact order get_block will ask for
+// them.
+//
+// WHY: the natural implementation of BlockProvider for a stored relation is one
+// filtered query per block, which re-reads the whole relation for every batch:
+// with B batches that is B full scans, i.e. O(B · pairs) = O(N³ / batch_size).
+// Announcing a wave lets a provider satisfy many blocks from a SINGLE pass — most
+// rows are needed by exactly one block (both endpoints in the same batch), rows
+// touching an anchor are needed by one block, anchor×anchor rows by all of them,
+// and rows spanning two different batches by none. The wave's width is chosen by
+// the caller from a memory budget, since W blocks are held at once.
+//
+// A provider that ignores this (or a caller that passes nothing) still works —
+// get_block alone is sufficient, just at one scan per block.
+using WavePrefetch = std::function<void(const std::vector<std::vector<std::string>> &requests)>;
+
 // One (sample_id, axis) coordinate in the shared standardized reference frame.
 // `batch` is the 0-based index of the batch that placed this sample, or -1 for the
 // anchors — they define the frame rather than being fitted into it. It joins a
@@ -91,6 +108,13 @@ struct ProgressivePcoaResult {
 //                  process-wide OmpThreadScope that serializes libssu/skbb calls
 //                  against other concurrent DuckDB queries.
 //   get_block      supplies each dense distance block (see BlockProvider).
+//   prefetch       optional; when set, called once per wave with that wave's
+//                  requests before any of them is fetched (see WavePrefetch).
+//   wave_batches   how many batches form one wave (0 or 1 = no batching, i.e. the
+//                  provider is asked for one block at a time). The caller sizes
+//                  this from its memory budget: a wave holds W blocks at once.
+//                  It affects only I/O, never the result — the same anchors, seed
+//                  and batch_size produce identical coordinates for any W.
 //
 // Flow: PCoA on the anchor block defines the reference frame; its eigenvalues and
 // proportions are reported (a documented caveat — they describe the anchors, not
@@ -104,6 +128,7 @@ struct ProgressivePcoaResult {
 // procrustes core (e.g. non-finite coordinates, degenerate anchor block).
 ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_ids,
                                          const std::vector<std::string> &remaining_ids, uint32_t n_dims,
-                                         uint32_t batch_size, int seed, int n_threads, const BlockProvider &get_block);
+                                         uint32_t batch_size, int seed, int n_threads, const BlockProvider &get_block,
+                                         const WavePrefetch &prefetch = nullptr, uint32_t wave_batches = 0);
 
 } // namespace miint::progressive
