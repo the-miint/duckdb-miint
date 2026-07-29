@@ -165,3 +165,38 @@ SELECT * FROM progressive_pcoa_from_unifrac('ft', '', n_dims := 3, n_anchors := 
 statement error
 SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'not_a_variant', n_dims := 3, n_anchors := 15, batch_size := 12);
 ----
+
+# ── Per-batch quality evidence (batch, batch_anchor_m2) ──────────────────────
+# Same contract as progressive_pcoa_from_distances: the approximation reports the
+# procrustes disparity of the anchor-overlap fit that placed each batch, and the
+# anchor rows report NULL because they define the frame rather than being fitted
+# into it. Pinned here too so the two progressive functions cannot drift apart.
+query I
+SELECT list_contains(list(column_name), 'batch') AND list_contains(list(column_name), 'batch_anchor_m2')
+FROM (DESCRIBE SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42));
+----
+true
+
+query II
+SELECT count(*) FILTER (WHERE batch IS NULL AND batch_anchor_m2 IS NOT NULL),
+       count(*) FILTER (WHERE batch IS NOT NULL AND batch_anchor_m2 IS NULL)
+FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+0	0
+
+# the anchors are exactly the rows with a NULL batch
+query I
+SELECT count(DISTINCT sample_id) FROM progressive_pcoa_from_unifrac('ft', 'tree',
+    n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42) WHERE batch IS NULL;
+----
+15
+
+# one disparity value per batch, and it is finite (UniFrac is not Euclidean, so no
+# ~0 bound is asserted here — the from_distances test pins that on an exact
+# Euclidean fixture; what matters here is that the number is real and reported)
+query I
+SELECT bool_and(batch_anchor_m2 >= 0.0 AND isfinite(batch_anchor_m2))
+FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42)
+WHERE batch IS NOT NULL;
+----
+true

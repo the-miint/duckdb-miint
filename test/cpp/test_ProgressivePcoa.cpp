@@ -210,6 +210,84 @@ TEST_CASE("progressive PCoA anchors are batch-size invariant; quality does not c
 	}
 }
 
+TEST_CASE("progressive PCoA reports each batch's anchor-overlap disparity", "[progressive]") {
+	// WHY this exists: at the scale progressive PCoA is for, a user cannot check the
+	// result against a full PCoA — so the run must carry its own quality evidence.
+	// Each batch is placed into the reference frame by a procrustes fit on the
+	// anchor overlap, and that fit's disparity is already computed internally. It is
+	// the per-batch measure of "did this batch's local geometry agree with the
+	// reference frame", and reporting it turns an unverifiable run into an
+	// auditable one. On a Euclidean oracle every batch's geometry is exactly
+	// consistent, so every disparity must be ~0.
+	const uint32_t n = 80, d_true = 3, n_dims = 3, a = 20;
+	const int seed = 7;
+	const Oracle oracle = MakeEuclideanOracle(n, d_true, /*seed=*/4242);
+	const std::vector<std::string> anchors(oracle.ids.begin(), oracle.ids.begin() + a);
+	const std::vector<std::string> remaining(oracle.ids.begin() + a, oracle.ids.end());
+	const auto provider = [&oracle](const std::vector<std::string> &req) {
+		return SliceBlock(oracle, req);
+	};
+
+	const ProgressivePcoaResult r =
+	    RunProgressivePcoa(anchors, remaining, n_dims, /*batch_size=*/15, seed, /*n_threads=*/1, provider);
+
+	// 60 remaining samples in batches of 15 → exactly 4 batches, reported in order.
+	REQUIRE(r.batches.size() == 4);
+	uint32_t counted = 0;
+	for (size_t b = 0; b < r.batches.size(); ++b) {
+		REQUIRE(r.batches[b].batch == static_cast<int32_t>(b));
+		REQUIRE(r.batches[b].n_samples == 15);
+		// Exact Euclidean geometry → the anchor overlap fits the reference frame
+		// essentially perfectly. A nonzero value here is the signal a user acts on.
+		REQUIRE(r.batches[b].anchor_m2 < 1e-9);
+		counted += r.batches[b].n_samples;
+	}
+	REQUIRE(counted == remaining.size());
+}
+
+TEST_CASE("progressive PCoA batch disparity rises when a batch disagrees with the frame", "[progressive]") {
+	// The complement of the test above: the diagnostic must be able to FAIL. A
+	// disparity that is always ~0 would be decoration, not evidence. Here one
+	// batch's block is served with its non-anchor distances corrupted (scrambled
+	// against the anchors), so its local geometry genuinely contradicts the
+	// reference frame — that batch's disparity must stand out from the rest.
+	const uint32_t n = 80, d_true = 3, n_dims = 3, a = 20;
+	const int seed = 7;
+	const Oracle oracle = MakeEuclideanOracle(n, d_true, /*seed=*/4242);
+	const std::vector<std::string> anchors(oracle.ids.begin(), oracle.ids.begin() + a);
+	const std::vector<std::string> remaining(oracle.ids.begin() + a, oracle.ids.end());
+
+	// Corrupt only the LAST batch's request (its first non-anchor id identifies it):
+	// rotate the anchor block's rows so the anchors' mutual geometry is wrong for
+	// that block alone.
+	const std::string poisoned_first_id = remaining[45]; // batch 3 of 4 with batch_size=15
+	const auto provider = [&](const std::vector<std::string> &req) {
+		DistanceBlock blk = SliceBlock(oracle, req);
+		if (!req.empty() && req[0] == poisoned_first_id) {
+			const uint32_t m = static_cast<uint32_t>(req.size());
+			// Swap two anchor rows/cols — a valid symmetric matrix, but one whose
+			// anchor configuration no longer matches the reference block's.
+			const uint32_t i = m - 1, j = m - 2;
+			for (uint32_t c = 0; c < m; ++c) {
+				std::swap(blk.matrix[static_cast<size_t>(i) * m + c], blk.matrix[static_cast<size_t>(j) * m + c]);
+			}
+			for (uint32_t rr = 0; rr < m; ++rr) {
+				std::swap(blk.matrix[static_cast<size_t>(rr) * m + i], blk.matrix[static_cast<size_t>(rr) * m + j]);
+			}
+		}
+		return blk;
+	};
+
+	const ProgressivePcoaResult r =
+	    RunProgressivePcoa(anchors, remaining, n_dims, /*batch_size=*/15, seed, /*n_threads=*/1, provider);
+	REQUIRE(r.batches.size() == 4);
+	// The clean batches stay ~0; the poisoned one is orders of magnitude worse.
+	REQUIRE(r.batches[0].anchor_m2 < 1e-9);
+	REQUIRE(r.batches[1].anchor_m2 < 1e-9);
+	REQUIRE(r.batches[2].anchor_m2 < 1e-9);
+	REQUIRE(r.batches[3].anchor_m2 > 1e-6);
+}
+
 TEST_CASE("progressive PCoA with no remaining samples emits only the reference anchors", "[progressive]") {
 	// Degenerate case: everything is an anchor. The result is just the standardized
 	// reference ordination (the self-fit path), with no batch phase.

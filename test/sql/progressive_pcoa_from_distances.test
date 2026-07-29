@@ -250,3 +250,54 @@ SELECT * FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, batch_size :=
     anchors := ['s0','s1',NULL,'s3','s4','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
 ----
 must not contain NULL
+
+# ── Per-batch quality evidence (batch, batch_anchor_m2) ──────────────────────
+# The result is an approximation whose accuracy cannot be checked against a full
+# pcoa at the scale this function is for, so every run carries its own evidence:
+# each batch reports the procrustes disparity of the anchor-overlap fit that
+# placed it into the shared frame. These columns are appended AFTER pcoa's six, so
+# positional consumers of the first six are unaffected.
+query I
+SELECT list_contains(list(column_name), 'batch') AND list_contains(list(column_name), 'batch_anchor_m2')
+FROM (DESCRIBE SELECT * FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42));
+----
+true
+
+# 50 samples, 15 anchors → 35 remaining in batches of 12 → batches 0,1,2 plus the
+# anchor rows, which report NULL: the anchors DEFINE the frame, they are not fitted
+# into it, so a 0.0 disparity there would be a fabricated "perfect fit".
+query II
+SELECT batch, count(DISTINCT sample_id) FROM progressive_pcoa_from_distances('dcoo',
+    n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42)
+GROUP BY 1 ORDER BY 1 NULLS LAST;
+----
+0	12
+1	12
+2	11
+NULL	15
+
+# every anchor row has NULL disparity, and no batch row does
+query II
+SELECT count(*) FILTER (WHERE batch IS NULL AND batch_anchor_m2 IS NOT NULL),
+       count(*) FILTER (WHERE batch IS NOT NULL AND batch_anchor_m2 IS NULL)
+FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+0	0
+
+# On this exact-Euclidean fixture every batch's local geometry agrees with the
+# reference frame, so every disparity is ~0. A user reads a large value here as
+# "these samples are poorly determined by the anchor set".
+query I
+SELECT max(batch_anchor_m2) < 1e-6 FROM progressive_pcoa_from_distances('dcoo',
+    n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+true
+
+# the disparity is a property of the batch, not of the row: one value per batch
+query I
+SELECT count(*) FROM (
+    SELECT batch FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15,
+        batch_size := 12, seed := 42)
+    WHERE batch IS NOT NULL GROUP BY batch HAVING count(DISTINCT batch_anchor_m2) <> 1);
+----
+0

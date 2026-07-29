@@ -56,6 +56,12 @@ struct PcoaRow {
 	double coordinate;
 	double eigenvalue;
 	double proportion_explained;
+	// Progressive PCoA only (see BatchDiagnostic): which batch placed this sample
+	// and that batch's anchor-overlap disparity. batch < 0 means "not placed by a
+	// batch" — the anchor rows, which ARE the reference frame — and emits NULL for
+	// both columns. Unused (and unemitted) by pcoa / unifrac_pcoa.
+	int32_t batch = -1;
+	double batch_anchor_m2 = 0.0;
 };
 
 struct UnifracPcoaData : public TableFunctionData {
@@ -63,12 +69,16 @@ struct UnifracPcoaData : public TableFunctionData {
 	// Output type for sample_id — mirrors the input sample_id type (BIGINT/UUID)
 	// or VARCHAR otherwise. See ResolveSampleIdOutputType.
 	LogicalType sample_id_type = LogicalType::VARCHAR;
+	// Progressive functions append (batch, batch_anchor_m2); the dense ones don't,
+	// which keeps pcoa/unifrac_pcoa's schema exactly as documented.
+	bool with_batch_diagnostics = false;
 };
 
 struct UnifracPcoaGlobalState : public GlobalTableFunctionState {
 	std::vector<PcoaRow> rows;
 	size_t cursor = 0;
 	LogicalType sample_id_type = LogicalType::VARCHAR;
+	bool with_batch_diagnostics = false;
 	idx_t MaxThreads() const override {
 		return 1;
 	}
@@ -144,8 +154,14 @@ void RunPcoaOnMatrix(float *mat, uint32_t n, const std::vector<std::string> &ids
 // functions can never drift apart column-wise — the "identical output schema"
 // invariant is enforced structurally rather than by discipline. `sample_id_type`
 // is the mirrored input id type (see ResolveSampleIdOutputType).
+//
+// `with_batch_diagnostics` APPENDS (batch, batch_anchor_m2) for the progressive
+// functions, whose result is an approximation and must therefore carry its own
+// quality evidence. Appending (rather than interleaving) keeps the first six
+// columns positionally identical to pcoa's, so `SELECT sample_id, axis,
+// coordinate` and column-name-based consumers work across all four functions.
 void DeclarePcoaOutputSchema(const LogicalType &sample_id_type, vector<LogicalType> &return_types,
-                             vector<string> &names) {
+                             vector<string> &names, bool with_batch_diagnostics = false) {
 	names.emplace_back("iteration");
 	return_types.emplace_back(LogicalType::INTEGER);
 	names.emplace_back("sample_id");
@@ -158,6 +174,12 @@ void DeclarePcoaOutputSchema(const LogicalType &sample_id_type, vector<LogicalTy
 	return_types.emplace_back(LogicalType::DOUBLE);
 	names.emplace_back("proportion_explained");
 	return_types.emplace_back(LogicalType::DOUBLE);
+	if (with_batch_diagnostics) {
+		names.emplace_back("batch");
+		return_types.emplace_back(LogicalType::INTEGER);
+		names.emplace_back("batch_anchor_m2");
+		return_types.emplace_back(LogicalType::DOUBLE);
+	}
 }
 
 void ComputeOneIteration(const miint::unifrac::UnifracSupportBiomView &biom_view,
@@ -336,6 +358,7 @@ unique_ptr<GlobalTableFunctionState> UnifracPcoaInitGlobal(ClientContext &, Tabl
 	auto gstate = make_uniq<UnifracPcoaGlobalState>();
 	gstate->rows = std::move(data.rows);
 	gstate->sample_id_type = data.sample_id_type;
+	gstate->with_batch_diagnostics = data.with_batch_diagnostics;
 	return std::move(gstate);
 }
 
@@ -355,6 +378,12 @@ void UnifracPcoaExecute(ClientContext &, TableFunctionInput &input, DataChunk &o
 	auto coord_data = FlatVector::GetData<double>(output.data[3]);
 	auto eig_data = FlatVector::GetData<double>(output.data[4]);
 	auto pe_data = FlatVector::GetData<double>(output.data[5]);
+	int32_t *batch_data = nullptr;
+	double *m2_data = nullptr;
+	if (gstate.with_batch_diagnostics) {
+		batch_data = FlatVector::GetData<int32_t>(output.data[6]);
+		m2_data = FlatVector::GetData<double>(output.data[7]);
+	}
 
 	for (idx_t i = 0; i < n; ++i) {
 		const auto &r = gstate.rows[gstate.cursor + i];
@@ -366,6 +395,18 @@ void UnifracPcoaExecute(ClientContext &, TableFunctionInput &input, DataChunk &o
 		coord_data[i] = r.coordinate;
 		eig_data[i] = r.eigenvalue;
 		pe_data[i] = r.proportion_explained;
+		if (batch_data != nullptr) {
+			// Anchor rows (batch < 0) are the reference frame itself, not a fitted
+			// batch — NULL rather than a fabricated 0 disparity, which would read as
+			// "perfect fit" and quietly flatter the run.
+			if (r.batch < 0) {
+				FlatVector::SetNull(output.data[6], i, true);
+				FlatVector::SetNull(output.data[7], i, true);
+			} else {
+				batch_data[i] = r.batch;
+				m2_data[i] = r.batch_anchor_m2;
+			}
+		}
 	}
 
 	gstate.cursor += n;
@@ -694,10 +735,15 @@ unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context
 		row.coordinate = c.coordinate;
 		row.eigenvalue = result.eigvals[axis];
 		row.proportion_explained = result.proportion_explained[axis];
+		row.batch = c.batch;
+		if (c.batch >= 0) {
+			row.batch_anchor_m2 = result.batches[static_cast<size_t>(c.batch)].anchor_m2;
+		}
 		data->rows.push_back(std::move(row));
 	}
 
-	DeclarePcoaOutputSchema(data->sample_id_type, return_types, names);
+	data->with_batch_diagnostics = true;
+	DeclarePcoaOutputSchema(data->sample_id_type, return_types, names, /*with_batch_diagnostics=*/true);
 	return std::move(data);
 }
 
@@ -1008,10 +1054,15 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 		row.coordinate = c.coordinate;
 		row.eigenvalue = result.eigvals[axis];
 		row.proportion_explained = result.proportion_explained[axis];
+		row.batch = c.batch;
+		if (c.batch >= 0) {
+			row.batch_anchor_m2 = result.batches[static_cast<size_t>(c.batch)].anchor_m2;
+		}
 		data->rows.push_back(std::move(row));
 	}
 
-	DeclarePcoaOutputSchema(data->sample_id_type, return_types, names);
+	data->with_batch_diagnostics = true;
+	DeclarePcoaOutputSchema(data->sample_id_type, return_types, names, /*with_batch_diagnostics=*/true);
 	return std::move(data);
 }
 

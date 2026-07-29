@@ -274,7 +274,18 @@ SELECT * FROM progressive_pcoa_from_distances('dm',
 - `batch_size` (INTEGER, default 1000): non-anchor samples ordinated per batch (`≥ 1`)
 - `seed` (INTEGER, default -1): seeds both the anchor draw and the FSVD randomization; `-1` = unseeded (nondeterministic)
 
-**Output schema:** identical to [`pcoa`](#pcoa-from-a-distance-table) / [`unifrac_pcoa`](#unifrac-pcoa) — `(iteration, sample_id, axis, coordinate, eigenvalue, proportion_explained)`. `iteration` is always `0`. `sample_id` mirrors the input `sample_a` type — see [Sample identifier types](#sample-identifier-types). **Caveat:** `eigenvalue` and `proportion_explained` are the *anchor* reference ordination's (they describe the anchor subspace, not the full sample set); the per-sample `coordinate`s span all samples.
+**Output schema:** [`pcoa`](#pcoa-from-a-distance-table)'s six columns — `(iteration, sample_id, axis, coordinate, eigenvalue, proportion_explained)` — plus two appended diagnostic columns, `(batch, batch_anchor_m2)`. `iteration` is always `0`. `sample_id` mirrors the input `sample_a` type — see [Sample identifier types](#sample-identifier-types). **Caveat:** `eigenvalue` and `proportion_explained` are the *anchor* reference ordination's (they describe the anchor subspace, not the full sample set); the per-sample `coordinate`s span all samples.
+
+<a name="progressive-batch-diagnostics"></a>**Reading `batch` / `batch_anchor_m2` (per-run quality evidence).** Each batch is placed into the shared frame by a procrustes fit on its anchor overlap; `batch_anchor_m2` is that fit's disparity — how well this batch's own view of the anchors agreed with the reference view — and `batch` is the 0-based batch that placed the sample. Anchor rows report **NULL** for both: they *define* the frame rather than being fitted into it, so a `0.0` there would be a fabricated perfect fit. This matters because at the scale these functions exist for you cannot check the result against a full `pcoa` — the diagnostic is the accuracy signal you *do* have, and it costs nothing (the fit is computed anyway).
+
+```sql
+-- audit a run: worst-fitting batches first
+SELECT DISTINCT batch, batch_anchor_m2
+FROM progressive_pcoa_from_distances('dm', n_anchors := 1000, batch_size := 1000)
+WHERE batch IS NOT NULL ORDER BY batch_anchor_m2 DESC LIMIT 10;
+```
+
+Values near 0 mean batches slotted cleanly into the frame. A large value means those samples are poorly determined by the anchor set — typically too few anchors, or anchors that don't span the region that batch occupies. Raise `n_anchors` (accuracy improves monotonically with anchor count) or supply a better `anchors` set. Note this measures *frame consistency*, not total error: it cannot detect an anchor set that is self-consistent but collectively unrepresentative of the full sample space.
 
 **Behavior:**
 - **Accuracy:** the result reproduces a full [`pcoa`](#pcoa-from-a-distance-table) up to a similarity transform — exactly (to numerical precision) for Euclidean-embeddable distances, and closely for others. Each batch is aligned to the reference *independently*, so alignment error does not compound across batches. Validate on your own data by aligning against a full `pcoa` with [`procrustes`](#procrustes-align-two-ordinations) and checking the disparity `m2`.
@@ -318,7 +329,7 @@ SELECT * FROM progressive_pcoa_from_unifrac('observations', 'tree',
 
 There is deliberately **no `subsample_depth`**: rarefaction and progressive alignment do not compose cleanly (each batch would rarefy independently against a different RNG draw). Rarefy upstream if needed.
 
-**Output schema:** identical to [`unifrac_pcoa`](#unifrac-pcoa) — `(iteration, sample_id, axis, coordinate, eigenvalue, proportion_explained)`, `iteration` always `0`. As with `progressive_pcoa_from_distances`, `eigenvalue`/`proportion_explained` are the *anchor* reference ordination's (a documented caveat). `sample_id` mirrors the input type — see [Sample identifier types](#sample-identifier-types).
+**Output schema:** [`unifrac_pcoa`](#unifrac-pcoa)'s six columns — `(iteration, sample_id, axis, coordinate, eigenvalue, proportion_explained)`, `iteration` always `0` — plus the appended `(batch, batch_anchor_m2)` diagnostics, identical in meaning to `progressive_pcoa_from_distances`' (see [Reading `batch` / `batch_anchor_m2`](#progressive-batch-diagnostics)). As with `progressive_pcoa_from_distances`, `eigenvalue`/`proportion_explained` are the *anchor* reference ordination's (a documented caveat). `sample_id` mirrors the input type — see [Sample identifier types](#sample-identifier-types).
 
 **Behavior:**
 - **Accuracy / batch-invariance:** same guarantees as [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table) — reproduces a full [`unifrac_pcoa`](#unifrac-pcoa) up to a similarity transform, with alignment error that does not compound across batches.

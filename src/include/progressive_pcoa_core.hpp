@@ -43,10 +43,30 @@ struct DistanceBlock {
 using BlockProvider = std::function<DistanceBlock(const std::vector<std::string> &requested)>;
 
 // One (sample_id, axis) coordinate in the shared standardized reference frame.
+// `batch` is the 0-based index of the batch that placed this sample, or -1 for the
+// anchors — they define the frame rather than being fitted into it. It joins a
+// coordinate to its BatchDiagnostic, so a caller can attribute the quality of any
+// sample's placement without re-deriving the batching.
 struct ProgressiveCoord {
 	std::string sample_id;
 	int32_t axis = 0;
 	double coordinate = 0.0;
+	int32_t batch = -1;
+};
+
+// Per-batch quality evidence. Each batch is placed into the shared frame by a
+// procrustes fit on the anchor overlap; `anchor_m2` is that fit's disparity, i.e.
+// how well this batch's own view of the anchors agreed with the reference view.
+// It is the only accuracy signal available without computing a full PCoA — which
+// is by definition impossible at the scale this function exists for — so it is
+// reported rather than discarded. ~0 means the batch slotted into the frame
+// cleanly; a large value means this batch's samples are poorly determined by the
+// anchor set (typically too few anchors, or anchors that don't span the region
+// this batch lives in).
+struct BatchDiagnostic {
+	int32_t batch = 0;      // 0-based batch index, in emission order
+	uint32_t n_samples = 0; // non-anchor samples placed by this batch
+	double anchor_m2 = 0.0; // procrustes disparity of the anchor-overlap fit
 };
 
 struct ProgressivePcoaResult {
@@ -54,6 +74,7 @@ struct ProgressivePcoaResult {
 	std::vector<double> eigvals;              // size d — the anchor reference PCoA's eigenvalues
 	std::vector<double> proportion_explained; // size d — the anchor reference PCoA's proportions
 	uint32_t d = 0;                           // number of ordination axes actually emitted
+	std::vector<BatchDiagnostic> batches;     // one per batch, in order (empty when every sample is an anchor)
 };
 
 // Run progressive reference-anchored PCoA.

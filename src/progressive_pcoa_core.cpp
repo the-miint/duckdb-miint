@@ -19,6 +19,7 @@ namespace {
 
 using ::miint::procrustes::ApplyToOther;
 using ::miint::procrustes::ApplyToReference;
+using ::miint::procrustes::Disparity;
 using ::miint::procrustes::FitProcrustes;
 using ::miint::procrustes::ProcrustesFit;
 
@@ -196,6 +197,23 @@ ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_
 		// Fit the batch onto the reference through the anchor overlap.
 		const ProcrustesFit fit = FitProcrustes(ref_coords.data(), batch_anchor.data(), a, d);
 
+		// Score that fit and report it. This is the run's own accuracy evidence
+		// (see BatchDiagnostic): the anchors are the only samples this batch and
+		// the reference frame have in common, so the disparity over them is what
+		// says whether the batch's placement can be trusted. Costs O(a·d) against
+		// a block PCoA, i.e. nothing.
+		{
+			std::vector<double> ref_std(static_cast<size_t>(a) * d);
+			std::vector<double> anchor_fit(static_cast<size_t>(a) * d);
+			ApplyToReference(fit, ref_coords.data(), a, ref_std.data());
+			ApplyToOther(fit, batch_anchor.data(), a, anchor_fit.data());
+			BatchDiagnostic diag;
+			diag.batch = static_cast<int32_t>(result.batches.size());
+			diag.n_samples = static_cast<uint32_t>(end - start);
+			diag.anchor_m2 = Disparity(ref_std.data(), anchor_fit.data(), a, d);
+			result.batches.push_back(diag);
+		}
+
 		// This batch's non-anchor rows (raw), then mapped into the reference frame.
 		std::vector<std::string> nb_ids;
 		std::vector<double> nb_raw;
@@ -212,9 +230,10 @@ ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_
 		const uint32_t nb = static_cast<uint32_t>(nb_ids.size());
 		std::vector<double> nb_fit(static_cast<size_t>(nb) * d);
 		ApplyToOther(fit, nb_raw.data(), nb, nb_fit.data());
+		const int32_t batch_index = result.batches.back().batch;
 		for (uint32_t r = 0; r < nb; ++r) {
 			for (uint32_t axis = 0; axis < d; ++axis) {
-				result.coords.push_back({nb_ids[r], static_cast<int32_t>(axis), nb_fit[r * d + axis]});
+				result.coords.push_back({nb_ids[r], static_cast<int32_t>(axis), nb_fit[r * d + axis], batch_index});
 			}
 		}
 	}
