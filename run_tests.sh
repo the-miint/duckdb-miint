@@ -200,47 +200,13 @@ else
     echo "Warning: ASR parity goldens missing or corrupt; parity test skipped"
 fi
 
-# Resemblance-simulator (Kuczynski 2010) statistical oracle bands: committed
-# tolerance bands (mean/lo/hi per param-set x statistic) that the SQL tests check
-# simulate_gradient_otus / simulate_cluster_otus against by statistical equivalence.
-# The bands ARE the fixed expected output -- committed under data/simsurvey/ and
-# pinned by data/simsurvey/simsurvey_oracle.sha256. The generator (the actual
-# Python-2.7 ord_survey code, run in a throwaway conda env) is dev-only and
-# deliberately kept out of this BSD tree; only its numeric bands are committed.
-# The gate below just verifies the committed fixtures are intact before the
-# stat-equivalence tests run (require-env MIINT_RESEMBLANCE_SIM_ORACLE_OK).
-if [ -f data/simsurvey/simsurvey_oracle.sha256 ] && \
-        (cd data/simsurvey && sha256sum -c --quiet simsurvey_oracle.sha256) 2>/dev/null; then
-    export MIINT_RESEMBLANCE_SIM_ORACLE_OK=1
-else
-    echo "Warning: resemblance-sim oracle fixtures missing or corrupt; stat-equivalence tests skipped"
-fi
-
-# community_distances numeric-parity oracle. The fixture feature table +
-# per-metric goldens (metric, sample_a, sample_b, distance) are committed under
-# data/simsurvey/ and pinned by beta_distance_oracle.sha256. The generator (a
-# throwaway scratchpad script that cross-checks every metric against a
-# scipy/scikit-bio primitive) is dev-only and kept out of this BSD tree; only the
-# numeric goldens are committed. The gate verifies the fixtures are intact before
-# the exact-parity test runs (require-env MIINT_BETA_DISTANCE_ORACLE_OK).
-if [ -f data/simsurvey/beta_distance_oracle.sha256 ] && \
-        (cd data/simsurvey && sha256sum -c --quiet beta_distance_oracle.sha256) 2>/dev/null; then
-    export MIINT_BETA_DISTANCE_ORACLE_OK=1
-else
-    echo "Warning: community_distances parity oracle missing or corrupt; distance-parity test skipped"
-fi
-
-# cluster_kmeans / cluster_upgma parity oracle. Fixtures + reference partitions/
-# trees are committed under data/simsurvey/ and pinned by
-# cluster_methods_oracle.sha256. The generator (a throwaway scratchpad script
-# that calls scikit-learn KMeans and scipy average-linkage, both BSD-3) is
-# dev-only and kept out of this BSD tree; only the numeric goldens are committed.
-if [ -f data/simsurvey/cluster_methods_oracle.sha256 ] && \
-        (cd data/simsurvey && sha256sum -c --quiet cluster_methods_oracle.sha256) 2>/dev/null; then
-    export MIINT_CLUSTER_ORACLE_OK=1
-else
-    echo "Warning: clustering parity oracle missing or corrupt; cluster parity tests skipped"
-fi
+# NOTE: the Kuczynski-2010 oracle bands, community_distances distance goldens and
+# cluster_kmeans/cluster_upgma parity goldens under data/simsurvey/ are COMMITTED,
+# so they are always present and need no availability gate. They previously sat
+# behind sha256 gates; those were removed because `sha256sum -c` also fails on a
+# MISMATCH, which turned an edited golden into a silently SKIPPED parity test --
+# the opposite of the intended protection. The parity tests themselves are the
+# integrity check, and they now always run.
 
 # NCBI BLAST network reachability. Probes the BLAST CGI endpoint so
 # live blast tests can skip gracefully in offline CI.

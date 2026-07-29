@@ -3,15 +3,12 @@
 # group: [sql]
 
 # Oracle bands generated OFFLINE from the actual Python-2.7 ord_survey cluster code
-# over R=1000 replicates, committed as NUMBERS only under data/simsurvey/. Gated by
-# MIINT_RESEMBLANCE_SIM_ORACLE_OK (exported by run_tests.sh when the SHA-pinned
-# fixtures are intact). dissim_ratio = mean(inter-cluster L1)/mean(intra-cluster L1)
+# over R=1000 replicates, committed as NUMBERS only under data/simsurvey/. The bands
+# are committed, so this test always runs. dissim_ratio = mean(inter-cluster L1)/mean(intra-cluster L1)
 # on RELATIVE abundances; L1_rel = 2 - 2*sum_shared(min(ra,rb)) (the same shared-min
 # identity as Bray-Curtis, no full-outer-join needed).
 
 require miint
-
-require-env MIINT_RESEMBLANCE_SIM_ORACLE_OK
 
 statement ok
 CREATE TABLE kbd AS SELECT * FROM read_csv_auto('data/simsurvey/keyboard_abundances.csv');

@@ -3,17 +3,13 @@
 # group: [sql]
 
 # The fixture (3 very well-separated 3-D blobs, unique k-means optimum) and the
-# scikit-learn KMeans reference partition are committed under data/simsurvey/ and
-# pinned by cluster_methods_oracle.sha256. The generator (scikit-learn, BSD-3) is
+# scikit-learn KMeans reference partition are committed under data/simsurvey/.
+# The generator (scikit-learn, BSD-3) is
 # dev-only and not committed. Because the optimum is unique, any correct k-means
 # recovers the same partition, so this is a co-membership (partition) match that
 # is robust to label permutation.
 
 require miint
-
-require-env UNIFRAC_AVAILABLE
-
-require-env MIINT_CLUSTER_ORACLE_OK
 
 statement ok
 CREATE TABLE kfix AS SELECT * FROM read_csv_auto('data/simsurvey/cluster_kmeans_fixture.csv');

@@ -1,11 +1,8 @@
 # name: test/sql/community_distances.test
-# description: community_distances structural invariants, exact small-matrix values, id polymorphism, end-to-end into pcoa (always run; no oracle dependency)
+# description: community_distances structural invariants, exact small-matrix values, id polymorphism (always run; no oracle or UniFrac dependency)
 # group: [sql]
 
 require miint
-
-# community_distances is part of the unifrac/ordination feature group.
-require-env UNIFRAC_AVAILABLE
 
 # Tiny sparse feature table (zeros omitted) == the 3x4 matrix pinned by the
 # Catch2 pure-core test. Sorted ids s1<s2<s3 give rows:
@@ -75,15 +72,6 @@ s2-s3	2.75
 # chisq is non-negative and defined (positive row sums here).
 query I
 SELECT count(*) FROM community_distances('feat', 'chisq') WHERE distance >= 0.0 AND isfinite(distance);
-----
-3
-
-# End-to-end: the condensed output feeds pcoa unchanged (3 samples -> 3 coords/axis).
-statement ok
-CREATE TABLE cd AS SELECT * FROM community_distances('feat', 'bray_curtis');
-
-query I
-SELECT count(DISTINCT sample_id) FROM pcoa('cd', n_dims := 2, seed := 1);
 ----
 3
 

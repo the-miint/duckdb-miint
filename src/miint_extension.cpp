@@ -419,13 +419,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 #endif
 	DeblurTableFunction::Register(loader);
 	RegisterSimulateResemblance(loader);
-#ifdef MIINT_HAS_UNIFRAC
-	// Beta-diversity / ordination toolset: the wrappers link the unifrac module's
-	// table readers, so they are registered only when that feature is compiled.
+	// Beta-diversity / ordination toolset. Independent of the UniFrac feature:
+	// these are pure in-repo C++ over generic table readers, so they are always
+	// registered. (`pcoa` / `permanova`, which consume their output, do need
+	// scikit-bio-binaries and stay behind MIINT_HAS_UNIFRAC below.)
 	RegisterCommunityDistances(loader);
 	RegisterClusterKmeans(loader);
 	RegisterClusterUpgma(loader);
-#endif
 
 #ifdef MIINT_HAS_HDF5
 	CopyBiomFunction::Register(loader);

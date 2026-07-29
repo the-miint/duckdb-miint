@@ -4,9 +4,6 @@
 
 require miint
 
-# cluster_kmeans is part of the unifrac/ordination feature group.
-require-env UNIFRAC_AVAILABLE
-
 # Coordinate table in pcoa's long form (sample_id, axis, coordinate): three
 # well-separated 2-D blobs of two samples each.
 statement ok

@@ -3,8 +3,8 @@
 # group: [sql]
 
 # The fixture (8 samples, Euclidean condensed distances, no ties) and the scipy
-# reference cophenetic distances are committed under data/simsurvey/ and pinned by
-# cluster_methods_oracle.sha256. scipy.cluster.hierarchy.linkage(method='average')
+# reference cophenetic distances are committed under data/simsurvey/.
+# scipy.cluster.hierarchy.linkage(method='average')
 # IS UPGMA; cophenet(Z) gives each pair's cophenetic distance. The generator
 # (scipy, BSD-3) is dev-only and not committed.
 #
@@ -16,10 +16,6 @@
 # (min-height) common ancestor. This exercises MY tree, not scipy's.
 
 require miint
-
-require-env UNIFRAC_AVAILABLE
-
-require-env MIINT_CLUSTER_ORACLE_OK
 
 statement ok
 CREATE TABLE ufix AS SELECT * FROM read_csv_auto('data/simsurvey/cluster_upgma_fixture.csv');

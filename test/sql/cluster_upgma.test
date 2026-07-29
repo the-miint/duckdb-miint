@@ -4,9 +4,6 @@
 
 require miint
 
-# cluster_upgma is part of the unifrac/ordination feature group.
-require-env UNIFRAC_AVAILABLE
-
 # 4-taxon condensed distances (A,B,C,D): A-B=2, C-D=4, all cross pairs =6.
 # Hand-computed UPGMA: merge A,B (h=1), then C,D (h=2), then AB,CD (h=3).
 statement ok

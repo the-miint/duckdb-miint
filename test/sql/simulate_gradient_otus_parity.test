@@ -5,16 +5,13 @@
 # The oracle bands (mean/lo/hi per param-set x statistic) were generated OFFLINE by
 # running the actual Python-2.7 ord_survey generation code over R=1000 replicates and
 # committed as NUMBERS only under data/simsurvey/ (the generator itself is not in this
-# tree). run_tests.sh exports MIINT_RESEMBLANCE_SIM_ORACLE_OK when the SHA-pinned
-# fixtures are intact. Each statistic is recomputed in SQL from the emitted COO and
+# tree). The bands are committed, so this test always runs. Each statistic is recomputed in SQL from the emitted COO and
 # must fall inside its committed [lo,hi] band. Bray-Curtis uses the identity
 # L1 = Da+Db-2*sum_shared(min), so an INNER JOIN on shared OTUs suffices; this
 # equals sum|a-b|/(Da+Db) for ANY depths (the identity is not depth-restricted --
 # here every sample happens to have depth D by construction), no full-outer-join needed.
 
 require miint
-
-require-env MIINT_RESEMBLANCE_SIM_ORACLE_OK
 
 statement ok
 CREATE TABLE soil AS SELECT * FROM read_csv_auto('data/simsurvey/soil_abundances.csv');

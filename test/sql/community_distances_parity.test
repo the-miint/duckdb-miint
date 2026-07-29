@@ -3,21 +3,17 @@
 # group: [sql]
 
 # The goldens (metric, sample_a, sample_b, distance) were generated OFFLINE from
-# a committed feature-table fixture and pinned by data/simsurvey/simsurvey_oracle.sha256.
+# a committed feature-table fixture under data/simsurvey/.
 # For every one of the 8 metrics the generator asserts our formula equals a
 # scipy/scikit-bio primitive -- directly for bray_curtis/euclidean/jaccard/pearson
 # (scipy braycurtis/euclidean/jaccard/correlation), and via a documented algebraic
 # reduction for soergel/morisita_horn/chisq/gower (cityblock/sqeuclidean/seuclidean
 # transforms) -- then writes those values as the goldens. The generator itself is
-# NOT committed (scratchpad only). run_tests.sh exports MIINT_BETA_DISTANCE_ORACLE_OK
-# when the SHA-pinned fixture + oracle are intact. community_distances is
+# NOT committed (scratchpad only). The fixture and goldens are committed, so this
+# test always runs. community_distances is
 # deterministic, so this is an exact numeric-parity check, not a statistical band.
 
 require miint
-
-require-env UNIFRAC_AVAILABLE
-
-require-env MIINT_BETA_DISTANCE_ORACLE_OK
 
 statement ok
 CREATE TABLE betafix AS SELECT * FROM read_csv_auto('data/simsurvey/beta_distance_fixture.csv');
