@@ -5,11 +5,22 @@ as follows:
 
 - Bump submodules
   - `./duckdb` should be set to latest tagged release
-  - `./extension-ci-tools` should be set to updated branch corresponding to latest DuckDB release. So if you're building for DuckDB `v1.1.0` there will be a branch in `extension-ci-tools` named `v1.1.0` to which you should check out. 
-- Bump versions in `./github/workflows`
-  - `duckdb_version` input in `duckdb-stable-build` job in `MainDistributionPipeline.yml` should be set to latest tagged release
-  - `duckdb_version` input in `duckdb-stable-deploy` job in `MainDistributionPipeline.yml` should be set to latest tagged release
-  - the reusable workflow `duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml` for the `duckdb-stable-build` job should be set to latest tagged release
+  - `./extension-ci-tools` should be set to updated branch corresponding to latest DuckDB release. We track the release-series branch (e.g. `v1.5-variegata`), which upstream keeps identical to the per-patch branch (`v1.5.5`), so check out that branch's head.
+- Bump versions in `./github/workflows/MainDistributionPipeline.yml`
+  - `duckdb_version` input in the `duckdb-stable-build` job
+  - `duckdb_version` input in the `code-quality-check` job
+  - the commented-out artifact name in the disabled `verify-wasm` job (`miint-<ver>-extension-...`), so it isn't stale when that job is re-enabled
+  - `ci_tools_version` and the `uses:` refs need NO change — they point at the moving release-series branch, not a per-patch tag
+- Bump the target version everywhere else it is spelled out
+  - `Dockerfile` `ARG DUCKDB_VERSION` (local default; `docker.yml` resolves the newest Docker Hub tag at runtime and passes `--build-arg`)
+  - `DUCKDB_VERSION` default in `scripts/cron-publish-extension.sh` — it drives the `miint-<ver>-extension-*` artifact prefix and the published paths, so a stale value makes every publish reject
+  - `duckdb==` pin in `python/pyproject.toml` — the CLI `LOAD`s the extension, so its DuckDB must match exactly
+
+Outside this repo (do these after CI is green and a release tag is pushed):
+
+- The cron host's env file (e.g. `/etc/miint-publish.env`) overrides `DUCKDB_VERSION`; editing the script alone changes nothing there. The live FTP paths become `<ver>/` and `tagged/<ver>/`, leaving the previous version's trees serving until retired.
+- The playground console in the umbrella site repo pins both `@duckdb/duckdb-wasm` and `EXT_VERSION`. A C++ extension only loads into a duckdb-wasm of the *same* core version, so bump both together and verify the npm build actually reports the new version before flipping.
+- `duckdb/community-extensions` `extensions/miint/description.yml` carries the `ref` that `INSTALL miint FROM community` serves; open a PR bumping it to the new tag.
 
 # API changes
 DuckDB extensions built with this extension template are built against the internal C++ API of DuckDB. This API is not guaranteed to be stable.
