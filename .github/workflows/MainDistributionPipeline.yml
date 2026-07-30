@@ -342,3 +342,23 @@ jobs:
       ci_tools_version: v1.5-variegata
       extension_name: miint
       format_checks: 'format;tidy'
+
+  version-consistency:
+    name: DuckDB version consistency
+    runs-on: ubuntu-latest
+    # The target DuckDB version is spelled out in the two duckdb_version inputs
+    # above, the Dockerfile ARG, the publish cron's default, the Python CLI's pip
+    # pin, and the commented-out wasm artifact name. Nothing kept those in sync
+    # and they have drifted silently: python/pyproject.toml sat at duckdb==1.4.4
+    # while the extension targeted 1.5.4 — a pin that cannot work, since the CLI
+    # LOADs the extension and a C++ extension only loads into the exact DuckDB it
+    # was built against. This job is seconds long and turns that class of drift
+    # into a red check.
+    steps:
+      # No submodules: the check reads the duckdb gitlink straight out of the
+      # tree and resolves the target tag with `git ls-remote`, so it needs
+      # neither a submodule clone nor a token.
+      - uses: actions/checkout@v4
+
+      - name: Check every DuckDB version reference agrees
+        run: bash scripts/check-duckdb-version.sh
