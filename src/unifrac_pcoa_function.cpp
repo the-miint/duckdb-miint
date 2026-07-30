@@ -666,7 +666,13 @@ public:
 
 	// Serve a request: from the wave cache when it was announced (every batch
 	// block), else by a direct query (the one-off anchors-only reference block).
-	miint::progressive::DistanceBlock Get(const std::vector<std::string> &requested) {
+	//
+	// Called CONCURRENTLY once the core runs a wave's batches in parallel, which is
+	// safe because everything it touches was fixed by Prefetch and is only read
+	// here. The direct-query fallback is not concurrent in practice: batch ids are
+	// disjoint, so every announced request is found (front id + full id-vector
+	// match), and only the anchors-only block — fetched before any fan-out — misses.
+	miint::progressive::DistanceBlock Get(const std::vector<std::string> &requested) const {
 		if (!requested.empty()) {
 			auto it = by_request_.find(requested.front());
 			if (it != by_request_.end() && blocks_[it->second].ids == requested) {
@@ -987,6 +993,10 @@ unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context
 	// because these blocks are extension heap the buffer manager cannot see or
 	// evict, the same reason pcoa()'s dense matrix is guarded rather than tracked.
 	// Wave width changes only how many scans the run costs, never its output.
+	//
+	// The workers consuming the wave hold blocks too: each has the copy Get() handed
+	// it plus skbb's own centering buffer, ~2 blocks apiece, so their share is
+	// reserved before sizing the cache.
 	const uint32_t wave_batches = [&]() -> uint32_t {
 		const size_t m = static_cast<size_t>(batch_size) + part.anchors.size();
 		const double block_bytes = 5.0 * static_cast<double>(m) * static_cast<double>(m);
@@ -994,7 +1004,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context
 		const auto max_memory = buffer_manager.GetMaxMemory();
 		const auto used_memory = buffer_manager.GetUsedMemory();
 		const double budget = 0.25 * static_cast<double>(max_memory > used_memory ? max_memory - used_memory : 0);
-		const double fits = block_bytes > 0.0 ? budget / block_bytes : 1.0;
+		const double fits = (block_bytes > 0.0 ? budget / block_bytes : 1.0) - 2.0 * static_cast<double>(n_threads);
 		if (fits < 1.0) {
 			return 1; // one block at a time — correct, just one scan per batch
 		}
@@ -1006,25 +1016,40 @@ unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context
 	miint::progressive::ProgressivePcoaResult result;
 	try {
 		// Which block-fetch strategy pays off depends on the batch COUNT, measured on
-		// the 25,145-sample EMP matrix (316 M pairs, 1000 anchors, d=10):
+		// the 25,145-sample EMP matrix (316 M pairs, 1000 anchors, d=10), 14 cores:
 		//
-		//   batches   waves            per-batch queries
-		//   25        28.0 s / 58 CPU  18.9 s / 153 CPU
-		//   121       17.1 s / 45 CPU  70.2 s / 684 CPU
+		//   batches   waves             per-batch queries
+		//   25        28.1 s / 58 CPU   18.1 s / 152 CPU
+		//   121       15.2 s / 44 CPU   67.4 s / 666 CPU
 		//
 		// Per-batch queries re-read every anchor-touching row for every batch, so
-		// their cost grows with the batch count (153 → 684 CPU-seconds); the wave path
-		// does not (58 → 45). But at a small batch count per-batch still wins
+		// their cost grows with the batch count (152 → 666 CPU-seconds); the wave path
+		// does not (58 → 44). But at a small batch count per-batch still wins
 		// wall-clock, because DuckDB runs those redundant scans across all cores
-		// (8.1x effective) while a wave's blocks are consumed serially (2.1x). Until
-		// the batch loop itself is parallel, pick by count so neither regime regresses.
-		// The threshold sits between the two measured points.
+		// (8.4x effective) while the wave path only reaches 2.1x. Pick by count so
+		// neither regime regresses; the threshold sits between the measured points.
+		//
+		// That 2.1x is NOT the batch loop, which now runs a wave's batches in
+		// parallel: with the loop pinned to one worker the 25-batch run still takes
+		// 28.2 s, and at 3000 anchors (4000² blocks, 16x the ordination work) 14
+		// workers buy 28.6 → 27.2 s. It is WaveDistanceBlockSource consuming the
+		// routed scans row by row on one thread — those three queries cost 2.7 s when
+		// DuckDB aggregates them internally versus ~28 s fetched into the builders.
+		// Parallelizing that consumption is what would retire this crossover.
 		const size_t n_batches =
 		    (part.remaining.size() + static_cast<size_t>(batch_size) - 1) / std::max<size_t>(batch_size, 1);
 		const bool use_waves = n_batches >= 64 && std::getenv("MIINT_PROGRESSIVE_NO_WAVES") == nullptr;
+		// On the wave path the batches of a wave run concurrently, n_threads of them
+		// at a time, each ordination pinned to one OpenMP thread — so `threads :=`
+		// still bounds total fan-out, it just buys concurrent blocks instead of a
+		// wider fsvd. Safe here because a wave's blocks are already in the source's
+		// cache (Get is read-only during a wave) and skbb's ordination is re-entrant
+		// under a held OmpThreadScope; the from_unifrac variant stays serial because
+		// its blocks come from libssu.
 		result = miint::progressive::RunProgressivePcoa(part.anchors, part.remaining, static_cast<uint32_t>(n_dims),
 		                                                static_cast<uint32_t>(batch_size), seed, n_threads, provider,
-		                                                use_waves ? prefetch : nullptr, use_waves ? wave_batches : 0);
+		                                                use_waves ? prefetch : nullptr, use_waves ? wave_batches : 0,
+		                                                use_waves ? static_cast<uint32_t>(n_threads) : 1);
 	} catch (const std::invalid_argument &e) {
 		throw InvalidInputException("progressive_pcoa_from_distances: %s", e.what());
 	}

@@ -1,8 +1,12 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -373,6 +377,154 @@ TEST_CASE("progressive PCoA announces each wave's requests and is unchanged by w
 	const std::vector<double> one_wave_m = AssembleInOracleOrder(oracle, one_wave, n_dims);
 	for (size_t i = 0; i < plain_m.size(); ++i) {
 		REQUIRE(one_wave_m[i] == Approx(plain_m[i]).margin(1e-12));
+	}
+}
+
+TEST_CASE("progressive PCoA runs a wave's batches concurrently without changing the result", "[progressive]") {
+	// WHY: batches are independent by construction — the reference frame is fixed
+	// before the loop, and each batch is fitted onto it through the anchors alone —
+	// so how many workers process a wave must be an execution detail, never a
+	// scientific one. Both halves of that claim are pinned here, and BOTH have to
+	// hold: the workers must genuinely overlap (otherwise the parallel path is the
+	// serial path with extra machinery), and the output must be BIT-identical to the
+	// serial run — same coordinates, same order, same batch index and disparity — so
+	// no user can tell from the numbers how many threads produced them.
+	const uint32_t n = 140, d_true = 3, n_dims = 3, a = 20, batch_size = 10;
+	const int seed = 11; // >= 0: an unseeded run is deliberately nondeterministic
+	const Oracle oracle = MakeEuclideanOracle(n, d_true, /*seed=*/2718);
+	const std::vector<std::string> anchors(oracle.ids.begin(), oracle.ids.begin() + a);
+	const std::vector<std::string> remaining(oracle.ids.begin() + a, oracle.ids.end()); // 120 → 12 batches
+
+	// Observe whether two batch blocks are ever in flight at once. The first arrival
+	// waits for a peer, so the verdict is not a timing guess: if the batches run one
+	// after another nobody ever joins and the bounded wait (not a hang) is what makes
+	// the test fail. Catch2 macros are not thread-safe, so this records only.
+	std::mutex mu;
+	std::condition_variable cv;
+	size_t inside = 0, max_inside = 0;
+	bool gave_up = false;
+	const auto observing_provider = [&](const std::vector<std::string> &req) {
+		if (req.size() == a) {
+			return SliceBlock(oracle, req); // the one-off anchor block: no peer to wait for
+		}
+		{
+			std::unique_lock<std::mutex> lk(mu);
+			++inside;
+			max_inside = std::max(max_inside, inside);
+			cv.notify_all();
+			if (!gave_up && max_inside < 2) {
+				if (!cv.wait_for(lk, std::chrono::seconds(2), [&] { return max_inside >= 2; })) {
+					gave_up = true; // decided once; later batches must not pay the wait again
+				}
+			}
+			--inside;
+		}
+		return SliceBlock(oracle, req);
+	};
+	const auto plain_provider = [&oracle](const std::vector<std::string> &req) {
+		return SliceBlock(oracle, req);
+	};
+
+	// One wave holding all 12 batches, 4 workers. Workers are drawn from a wave, so
+	// a caller that asks for no waves gets no parallelism — hence wave_batches here.
+	const ProgressivePcoaResult par =
+	    RunProgressivePcoa(anchors, remaining, n_dims, batch_size, seed, /*n_threads=*/1, observing_provider,
+	                       /*prefetch=*/nullptr, /*wave_batches=*/12, /*batch_workers=*/4);
+	REQUIRE(max_inside >= 2);
+
+	// The serial baseline. n_threads=1 on both sides is required for BIT-identity:
+	// skbb's centering reduction is an OpenMP `reduction(+:)`, so its summation order
+	// — and therefore its last bits — depends on the OpenMP thread count, which is
+	// why each worker is pinned to one OpenMP thread rather than n_threads.
+	const ProgressivePcoaResult ser =
+	    RunProgressivePcoa(anchors, remaining, n_dims, batch_size, seed, /*n_threads=*/1, plain_provider);
+
+	REQUIRE(par.coords.size() == ser.coords.size());
+	for (size_t i = 0; i < ser.coords.size(); ++i) {
+		REQUIRE(par.coords[i].sample_id == ser.coords[i].sample_id);
+		REQUIRE(par.coords[i].axis == ser.coords[i].axis);
+		REQUIRE(par.coords[i].batch == ser.coords[i].batch);
+		REQUIRE(par.coords[i].coordinate == ser.coords[i].coordinate); // exact, not Approx
+	}
+	REQUIRE(par.batches.size() == 12);
+	REQUIRE(par.batches.size() == ser.batches.size());
+	for (size_t b = 0; b < ser.batches.size(); ++b) {
+		// The batch index must be the batch's POSITION, not a completion counter —
+		// otherwise a coordinate's `batch` column would name whichever worker finished
+		// first, and its diagnostic would describe a different batch's fit.
+		REQUIRE(par.batches[b].batch == static_cast<int32_t>(b));
+		REQUIRE(par.batches[b].n_samples == ser.batches[b].n_samples);
+		REQUIRE(par.batches[b].anchor_m2 == ser.batches[b].anchor_m2);
+	}
+	REQUIRE(par.eigvals == ser.eigvals);
+	REQUIRE(par.proportion_explained == ser.proportion_explained);
+}
+
+TEST_CASE("progressive PCoA worker count is bounded by the work, not asserted against it", "[progressive]") {
+	// Worker counts come from a thread setting, batch counts from the data, so every
+	// combination has to be legal: more workers than batches must not spawn idle
+	// threads' worth of trouble, and 0 workers means "serial" rather than an error
+	// (the same forgiving reading wave_batches=0 gets).
+	const uint32_t n = 40, d_true = 3, n_dims = 3, a = 10;
+	const Oracle oracle = MakeEuclideanOracle(n, d_true, /*seed=*/77);
+	const std::vector<std::string> anchors(oracle.ids.begin(), oracle.ids.begin() + a);
+	const std::vector<std::string> remaining(oracle.ids.begin() + a, oracle.ids.end()); // 30 → 3 batches
+	const auto provider = [&oracle](const std::vector<std::string> &req) {
+		return SliceBlock(oracle, req);
+	};
+
+	const ProgressivePcoaResult serial =
+	    RunProgressivePcoa(anchors, remaining, n_dims, 10, /*seed=*/5, 1, provider, nullptr, 3, /*batch_workers=*/1);
+	const std::vector<double> serial_m = AssembleInOracleOrder(oracle, serial, n_dims);
+
+	for (uint32_t workers : {0u, 2u, 64u}) {
+		const ProgressivePcoaResult r =
+		    RunProgressivePcoa(anchors, remaining, n_dims, 10, /*seed=*/5, 1, provider, nullptr, 3, workers);
+		const std::vector<double> m = AssembleInOracleOrder(oracle, r, n_dims);
+		REQUIRE(m.size() == serial_m.size());
+		for (size_t i = 0; i < m.size(); ++i) {
+			REQUIRE(m[i] == serial_m[i]);
+		}
+	}
+}
+
+TEST_CASE("progressive PCoA reports the first failing batch regardless of worker count", "[progressive]") {
+	// A parallel wave must not turn a deterministic error into a race: whichever
+	// worker happens to fail first, the reported error must be the one the serial run
+	// would have reported — the LOWEST-indexed failing batch. Otherwise the same bad
+	// input yields different messages run to run.
+	const uint32_t n = 100, d_true = 3, n_dims = 3, a = 20;
+	const Oracle oracle = MakeEuclideanOracle(n, d_true, /*seed=*/8);
+	const std::vector<std::string> anchors(oracle.ids.begin(), oracle.ids.begin() + a);
+	const std::vector<std::string> remaining(oracle.ids.begin() + a, oracle.ids.end()); // 80 → 8 batches
+
+	// Batches 2 and 5 both get a block missing one requested sample. Batch 2's
+	// message must win.
+	const std::string first_bad = remaining[20], later_bad = remaining[50];
+	const auto provider = [&](const std::vector<std::string> &req) {
+		DistanceBlock blk = SliceBlock(oracle, req);
+		if (!req.empty() && (req.front() == first_bad || req.front() == later_bad)) {
+			blk.ids.pop_back(); // one sample short of the request → fail loud
+		}
+		return blk;
+	};
+
+	std::string serial_msg;
+	try {
+		RunProgressivePcoa(anchors, remaining, n_dims, 10, 3, 1, provider, nullptr, 8, /*batch_workers=*/1);
+	} catch (const std::invalid_argument &e) {
+		serial_msg = e.what();
+	}
+	REQUIRE_FALSE(serial_msg.empty());
+
+	for (int attempt = 0; attempt < 5; ++attempt) {
+		std::string par_msg;
+		try {
+			RunProgressivePcoa(anchors, remaining, n_dims, 10, 3, 1, provider, nullptr, 8, /*batch_workers=*/8);
+		} catch (const std::invalid_argument &e) {
+			par_msg = e.what();
+		}
+		REQUIRE(par_msg == serial_msg);
 	}
 }
 

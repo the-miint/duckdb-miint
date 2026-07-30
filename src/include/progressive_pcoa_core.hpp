@@ -40,6 +40,12 @@ struct DistanceBlock {
 // Given the requested sample ids, return the dense distance block over exactly
 // those samples. Called once for the anchors alone (the reference block) and
 // once per batch (that batch's non-anchor ids followed by all anchor ids).
+//
+// Thread safety: with batch_workers > 1 this is called CONCURRENTLY, once per
+// batch of the wave, from worker threads (never for the anchor block, which is
+// fetched on the calling thread before any fan-out). A provider that mutates
+// shared state — a cache, a scratch buffer — or that calls a library with global
+// state must either be made safe or be used with batch_workers = 1.
 using BlockProvider = std::function<DistanceBlock(const std::vector<std::string> &requested)>;
 
 // Optional announcement, made before the batches of one "wave" are fetched, of
@@ -115,6 +121,20 @@ struct ProgressivePcoaResult {
 //                  this from its memory budget: a wave holds W blocks at once.
 //                  It affects only I/O, never the result — the same anchors, seed
 //                  and batch_size produce identical coordinates for any W.
+//   batch_workers  how many of a wave's batches to process at once (0 or 1 =
+//                  serial). Batches are independent — the frame is fixed before
+//                  the loop — so this only reorders execution: results are
+//                  bit-identical to a serial run for any worker count, batch
+//                  indices stay positional, and errors are reported for the
+//                  lowest-numbered failing batch as a serial run would.
+//                  Workers are drawn from one wave, so parallelism requires
+//                  wave_batches > 1; the effective count is
+//                  min(batch_workers, batches in the wave).
+//                  Each worker's PCoA is pinned to ONE OpenMP thread (the wave
+//                  holds a single OmpThreadScope), so parallelism comes from
+//                  concurrent block ordinations rather than a wider fsvd — see
+//                  OmpThreadPin for why libssu-backed providers must not use it.
+//                  Requires a thread-safe get_block (see BlockProvider).
 //
 // Flow: PCoA on the anchor block defines the reference frame; its eigenvalues and
 // proportions are reported (a documented caveat — they describe the anchors, not
@@ -129,6 +149,7 @@ struct ProgressivePcoaResult {
 ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_ids,
                                          const std::vector<std::string> &remaining_ids, uint32_t n_dims,
                                          uint32_t batch_size, int seed, int n_threads, const BlockProvider &get_block,
-                                         const WavePrefetch &prefetch = nullptr, uint32_t wave_batches = 0);
+                                         const WavePrefetch &prefetch = nullptr, uint32_t wave_batches = 0,
+                                         uint32_t batch_workers = 1);
 
 } // namespace miint::progressive

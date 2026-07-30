@@ -1,9 +1,14 @@
 #include "progressive_pcoa_core.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
+#include <exception>
+#include <iterator>
+#include <random>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -30,22 +35,33 @@ using ::miint::procrustes::ProcrustesFit;
 // Delegates to libskbb's randomized FSVD — the exact call and sample-major
 // layout that unifrac_pcoa_function.cpp's RunPcoaOnMatrix uses (the ordination.h
 // header comment says "(n_eighs × n_dims)" but the implementation writes
-// sample-major n×n_eighs). The skbb call is wrapped in the process-wide
-// OmpThreadScope exactly like every other libssu/skbb caller in the codebase:
-// the scope both pins the OpenMP thread count and serializes against skbb calls
-// from OTHER concurrent DuckDB connections (which would otherwise race on the
-// global omp thread-count and libssu RNG state). This core running one batch at a
-// time does not make the mutex unnecessary — a second, unrelated query can be in
-// skbb simultaneously. (A future inner-parallel-batches path would need a
-// mutex-free skbb entry point + the vendored report_status thread_local patch
-// before this scope could be dropped.)
+// sample-major n×n_eighs).
+//
+// The skbb call needs the process-wide OmpThreadScope, which both pins the OpenMP
+// thread count and serializes against skbb calls from OTHER concurrent DuckDB
+// connections (which would otherwise race on the global omp thread-count and
+// libssu RNG state). Running one batch at a time would not make the mutex
+// unnecessary — a second, unrelated query can be in skbb simultaneously.
+//
+// `caller_pin` is how the parallel wave path avoids queueing every worker on that
+// one mutex: the driver holds a single scope for the whole wave and each worker
+// pins itself to one OpenMP thread, so a non-null pin means "already serialized,
+// go straight in". Only a scope holder can produce one (see OmpScopeHeld), and a
+// worker must pass a seed >= 0 — a negative seed sends skbb to its process-global
+// RNG, which is not thread-safe.
 std::vector<double> PcoaBlock(const DistanceBlock &block, uint32_t d, int seed, int n_threads,
-                              std::vector<double> *eig_out, std::vector<double> *prop_out) {
+                              const miint::unifrac::OmpScopeHeld *caller_pin, std::vector<double> *eig_out,
+                              std::vector<double> *prop_out) {
 	const uint32_t m = static_cast<uint32_t>(block.ids.size());
 	std::vector<float> eig(d), samples(static_cast<size_t>(m) * d), prop(d);
-	{
-		miint::unifrac::OmpThreadScope omp_scope(n_threads);
+	const auto fsvd = [&]() {
 		skbb_pcoa_fsvd_fp32(m, block.matrix.data(), d, seed, eig.data(), samples.data(), prop.data());
+	};
+	if (caller_pin) {
+		fsvd();
+	} else {
+		miint::unifrac::OmpThreadScope omp_scope(n_threads);
+		fsvd();
 	}
 	std::vector<double> coords(static_cast<size_t>(m) * d);
 	for (size_t i = 0; i < coords.size(); ++i) {
@@ -93,7 +109,7 @@ void ValidateBlockMatchesRequest(const DistanceBlock &block, const std::vector<s
 ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_ids,
                                          const std::vector<std::string> &remaining_ids, uint32_t n_dims,
                                          uint32_t batch_size, int seed, int n_threads, const BlockProvider &get_block,
-                                         const WavePrefetch &prefetch, uint32_t wave_batches) {
+                                         const WavePrefetch &prefetch, uint32_t wave_batches, uint32_t batch_workers) {
 	if (n_dims < 1) {
 		throw std::invalid_argument("progressive_pcoa: n_dims must be >= 1");
 	}
@@ -140,7 +156,7 @@ ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_
 	// eigenvalues / proportions come from (the anchor ordination — a documented
 	// caveat: they describe the anchors, not the full data).
 	const std::vector<double> ref_coords =
-	    PcoaBlock(ref_block, d, seed, n_threads, &result.eigvals, &result.proportion_explained);
+	    PcoaBlock(ref_block, d, seed, n_threads, /*caller_pin=*/nullptr, &result.eigvals, &result.proportion_explained);
 
 	// Emit the reference anchor coordinates once, standardized into the shared
 	// frame. ApplyToReference uses only the fit's reference translate/norm, which
@@ -178,14 +194,25 @@ ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_
 		return req;
 	};
 
+	// One batch's contribution to the result. Returned rather than appended so a
+	// wave's batches can be produced in any order and merged in batch order, which
+	// is what makes the parallel path bit-identical to the serial one.
+	struct BatchOutput {
+		BatchDiagnostic diag;
+		std::vector<ProgressiveCoord> coords;
+	};
+
 	// One batch: fetch its block, ordinate it, fit it onto the reference frame
-	// through the anchor overlap, and emit its non-anchor coordinates.
-	const auto run_one_batch = [&](size_t start, size_t end) {
+	// through the anchor overlap, and return its non-anchor coordinates. Depends on
+	// nothing but its arguments and the reference frame — no shared mutable state —
+	// so it is safe to run on several threads at once.
+	const auto run_one_batch = [&](size_t start, size_t end, int32_t batch_index, int batch_seed,
+	                               const miint::unifrac::OmpScopeHeld *caller_pin) {
 		const std::vector<std::string> req = build_request(start, end);
 		const DistanceBlock blk = get_block(req);
 		ValidateBlockMatchesRequest(blk, req, "batch");
 		const uint32_t m = static_cast<uint32_t>(blk.ids.size());
-		const std::vector<double> batch_coords = PcoaBlock(blk, d, seed, n_threads, nullptr, nullptr);
+		const std::vector<double> batch_coords = PcoaBlock(blk, d, batch_seed, n_threads, caller_pin, nullptr, nullptr);
 
 		// id → batch row index.
 		std::unordered_map<std::string, uint32_t> batch_row;
@@ -210,6 +237,8 @@ ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_
 		// Fit the batch onto the reference through the anchor overlap.
 		const ProcrustesFit fit = FitProcrustes(ref_coords.data(), batch_anchor.data(), a, d);
 
+		BatchOutput out;
+
 		// Score that fit and report it. This is the run's own accuracy evidence
 		// (see BatchDiagnostic): the anchors are the only samples this batch and
 		// the reference frame have in common, so the disparity over them is what
@@ -220,11 +249,11 @@ ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_
 			std::vector<double> anchor_fit(static_cast<size_t>(a) * d);
 			ApplyToReference(fit, ref_coords.data(), a, ref_std.data());
 			ApplyToOther(fit, batch_anchor.data(), a, anchor_fit.data());
-			BatchDiagnostic diag;
-			diag.batch = static_cast<int32_t>(result.batches.size());
-			diag.n_samples = static_cast<uint32_t>(end - start);
-			diag.anchor_m2 = Disparity(ref_std.data(), anchor_fit.data(), a, d);
-			result.batches.push_back(diag);
+			// The batch's POSITION, never a completion counter: it is what joins a
+			// coordinate to the diagnostic describing how that coordinate was placed.
+			out.diag.batch = batch_index;
+			out.diag.n_samples = static_cast<uint32_t>(end - start);
+			out.diag.anchor_m2 = Disparity(ref_std.data(), anchor_fit.data(), a, d);
 		}
 
 		// This batch's non-anchor rows (raw), then mapped into the reference frame.
@@ -243,12 +272,21 @@ ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_
 		const uint32_t nb = static_cast<uint32_t>(nb_ids.size());
 		std::vector<double> nb_fit(static_cast<size_t>(nb) * d);
 		ApplyToOther(fit, nb_raw.data(), nb, nb_fit.data());
-		const int32_t batch_index = result.batches.back().batch;
+		out.coords.reserve(static_cast<size_t>(nb) * d);
 		for (uint32_t r = 0; r < nb; ++r) {
 			for (uint32_t axis = 0; axis < d; ++axis) {
-				result.coords.push_back({nb_ids[r], static_cast<int32_t>(axis), nb_fit[r * d + axis], batch_index});
+				out.coords.push_back({nb_ids[r], static_cast<int32_t>(axis), nb_fit[r * d + axis], batch_index});
 			}
 		}
+		return out;
+	};
+
+	// Merge one batch's output. Called in batch order in every path, so the emitted
+	// row order does not depend on which batch finished first.
+	const auto append_batch = [&result](BatchOutput &&out) {
+		result.batches.push_back(out.diag);
+		result.coords.insert(result.coords.end(), std::make_move_iterator(out.coords.begin()),
+		                     std::make_move_iterator(out.coords.end()));
 	};
 
 	std::vector<std::pair<size_t, size_t>> batch_ranges;
@@ -256,6 +294,30 @@ ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_
 		batch_ranges.emplace_back(start, std::min(total, start + static_cast<size_t>(batch_size)));
 	}
 	const size_t wave_width = std::max<size_t>(1, wave_batches);
+#ifdef __EMSCRIPTEN__
+	// WASM builds have no threads to fan out to (libssu/libskbb are compiled
+	// single-threaded there); batches run one at a time whatever the caller asked.
+	(void)batch_workers;
+	const size_t workers = 1;
+#else
+	const size_t workers = std::max<size_t>(1, batch_workers);
+#endif
+
+	// Per-batch seeds. The serial path passes the caller's value through verbatim,
+	// negative included — skbb then draws its randomization from a process-global
+	// RNG, which is fine from one thread and is the documented "unseeded means not
+	// reproducible". Workers cannot: that draw is unsynchronized. So when no seed
+	// was given the driver draws one non-negative seed per batch up front, and the
+	// workers touch no shared generator. A caller-supplied seed >= 0 is passed
+	// through unchanged in both paths — that is what keeps a seeded run identical
+	// however many workers run it.
+	std::vector<int> batch_seeds(batch_ranges.size(), seed);
+	if (workers > 1 && seed < 0) {
+		std::mt19937 seed_rng {std::random_device {}()};
+		for (auto &s : batch_seeds) {
+			s = static_cast<int>(seed_rng() & 0x7fffffffu);
+		}
+	}
 
 	for (size_t wave_start = 0; wave_start < batch_ranges.size(); wave_start += wave_width) {
 		const size_t wave_end = std::min(batch_ranges.size(), wave_start + wave_width);
@@ -272,8 +334,63 @@ ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_
 			}
 			prefetch(wave_requests);
 		}
-		for (size_t b = wave_start; b < wave_end; ++b) {
-			run_one_batch(batch_ranges[b].first, batch_ranges[b].second);
+		const size_t wave_count = wave_end - wave_start;
+		const size_t wave_workers = std::min(workers, wave_count);
+		if (wave_workers <= 1) {
+			for (size_t b = wave_start; b < wave_end; ++b) {
+				append_batch(run_one_batch(batch_ranges[b].first, batch_ranges[b].second, static_cast<int32_t>(b),
+				                           batch_seeds[b], /*caller_pin=*/nullptr));
+			}
+			continue;
+		}
+
+		// Parallel wave. ONE OmpThreadScope covers all of it: taking the process-wide
+		// libssu/skbb mutex per block would simply queue the workers on it. The cost
+		// is that an unrelated concurrent query calling UniFrac/skbb waits out the
+		// wave rather than a single call — accepted deliberately; do not widen it
+		// further (e.g. to the whole run) without revisiting that.
+		// Each worker then pins ITS OWN thread to one OpenMP thread: fan-out comes
+		// from W concurrent single-threaded ordinations, not one wide one.
+		miint::unifrac::OmpThreadScope wave_scope(1);
+		const miint::unifrac::OmpScopeHeld held = wave_scope.held();
+		std::vector<BatchOutput> outputs(wave_count);
+		std::vector<std::exception_ptr> errors(wave_count);
+		std::atomic<size_t> next {0};
+		const auto worker = [&]() {
+			// Cannot throw: the only failure mode is n_threads < 1.
+			miint::unifrac::OmpThreadPin pin(1, held);
+			for (size_t i = next.fetch_add(1); i < wave_count; i = next.fetch_add(1)) {
+				const size_t b = wave_start + i;
+				try {
+					outputs[i] = run_one_batch(batch_ranges[b].first, batch_ranges[b].second, static_cast<int32_t>(b),
+					                           batch_seeds[b], &held);
+				} catch (...) {
+					errors[i] = std::current_exception();
+				}
+			}
+		};
+		// The driver takes one of the worker slots rather than blocking in join(),
+		// so W workers means W threads doing work, not W plus an idle one.
+		std::vector<std::thread> pool;
+		pool.reserve(wave_workers - 1);
+		for (size_t w = 1; w < wave_workers; ++w) {
+			pool.emplace_back(worker);
+		}
+		worker();
+		for (auto &t : pool) {
+			t.join();
+		}
+		// Report the lowest-numbered failure — the one a serial run would have hit —
+		// so a bad input always produces the same message. The wave's other batches
+		// still ran; that is wasted work on an error path, and the price of not
+		// letting the reported error depend on which worker lost the race.
+		for (size_t i = 0; i < wave_count; ++i) {
+			if (errors[i]) {
+				std::rethrow_exception(errors[i]);
+			}
+		}
+		for (auto &out : outputs) {
+			append_batch(std::move(out));
 		}
 	}
 
