@@ -528,6 +528,66 @@ TEST_CASE("progressive PCoA reports the first failing batch regardless of worker
 	}
 }
 
+TEST_CASE("wave width is sized from a memory budget and always stays legal", "[progressive]") {
+	// Wave width is a pure memory decision — it changes how many scans a run costs,
+	// never its output (pinned by the wave-invariance test above). So the only way
+	// this arithmetic can hurt is by returning something ILLEGAL: zero (an empty
+	// wave), more batches than exist (blocks fetched for batches that aren't there),
+	// or a wrapped value from an overflowing intermediate. Those are what this pins,
+	// because they are silent — a bad width still "works", just wrongly or hugely.
+	using miint::progressive::ChooseWaveWidth;
+	const size_t a = 1000;
+	const uint32_t k = 1000, workers = 14;
+
+	SECTION("a budget that fits nothing still yields one batch per wave") {
+		// Not an error: one block at a time is correct, just one scan per batch.
+		REQUIRE(ChooseWaveWidth(a, k, workers, /*budget_bytes=*/0, /*n_batches=*/25) == 1);
+		REQUIRE(ChooseWaveWidth(a, k, workers, /*budget_bytes=*/1024, /*n_batches=*/25) == 1);
+	}
+	SECTION("the wave it picks fits the budget, and one batch wider would not") {
+		// The point of the arithmetic: spend the budget, don't exceed it. Encoded as
+		// the memory model itself rather than magic widths — cached blocks, plus the
+		// blocks held by however many workers the wave can actually keep busy (never
+		// more than the wave has batches), plus the materialized scan rows.
+		const double block = 5.0 * static_cast<double>(a + k) * static_cast<double>(a + k);
+		const double per_batch = block + 20.0 * (static_cast<double>(a) * k + 0.5 * static_cast<double>(k) * k);
+		const auto cost = [&](double w) {
+			return w * per_batch + 2.0 * std::min<double>(workers, w) * block;
+		};
+		for (uint64_t budget : {1ull << 26, 1ull << 28, 1ull << 30, 1ull << 32, 3ull << 30}) {
+			const uint32_t w = ChooseWaveWidth(a, k, workers, budget, /*n_batches=*/1000000);
+			REQUIRE(w >= 1);
+			if (w > 1) {
+				REQUIRE(cost(w) <= static_cast<double>(budget));
+			}
+			REQUIRE(cost(w + 1.0) > static_cast<double>(budget)); // maximal: cap can't bind here
+		}
+	}
+	SECTION("never more batches than the run actually has") {
+		REQUIRE(ChooseWaveWidth(a, k, workers, /*budget_bytes=*/1ull << 40, /*n_batches=*/25) == 25);
+		REQUIRE(ChooseWaveWidth(a, k, workers, /*budget_bytes=*/1ull << 40, /*n_batches=*/1) == 1);
+		REQUIRE(ChooseWaveWidth(a, k, workers, /*budget_bytes=*/1ull << 40, /*n_batches=*/0) == 1);
+	}
+	SECTION("a bigger budget never gives a narrower wave") {
+		uint32_t prev = 0;
+		for (uint64_t budget = 0; budget < (1ull << 34); budget = budget ? budget * 4 : 1u << 20) {
+			const uint32_t w = ChooseWaveWidth(a, k, workers, budget, /*n_batches=*/100000);
+			REQUIRE(w >= 1);
+			REQUIRE(w >= prev);
+			prev = w;
+		}
+	}
+	SECTION("extreme inputs stay legal rather than wrapping") {
+		// (anchors + batch_size)² overflows 32 bits well before these sizes; the
+		// result must still land in [1, n_batches].
+		const uint32_t w = ChooseWaveWidth(/*n_anchors=*/3000000, /*batch_size=*/1000000, workers,
+		                                   /*budget_bytes=*/~0ull, /*n_batches=*/7);
+		REQUIRE(w >= 1);
+		REQUIRE(w <= 7);
+		REQUIRE(ChooseWaveWidth(0, 1, 0, ~0ull, 9) >= 1);
+	}
+}
+
 TEST_CASE("progressive PCoA with no remaining samples emits only the reference anchors", "[progressive]") {
 	// Degenerate case: everything is an anchor. The result is just the standardized
 	// reference ordination (the self-fit path), with no batch phase.

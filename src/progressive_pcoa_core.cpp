@@ -106,6 +106,35 @@ void ValidateBlockMatchesRequest(const DistanceBlock &block, const std::vector<s
 
 } // namespace
 
+uint32_t ChooseWaveWidth(size_t n_anchors, uint32_t batch_size, uint32_t n_workers, uint64_t budget_bytes,
+                         size_t n_batches) {
+	const double a = static_cast<double>(n_anchors);
+	const double k = static_cast<double>(batch_size);
+	const double m = a + k;
+	const double block_bytes = 5.0 * m * m;
+	const double per_batch = block_bytes + 20.0 * (a * k + 0.5 * k * k);
+	const double worker_reserve = 2.0 * static_cast<double>(n_workers) * block_bytes;
+	const double cap = static_cast<double>(std::max<size_t>(n_batches, 1));
+	if (per_batch <= 0.0) {
+		return static_cast<uint32_t>(std::min<double>(cap, 4294967295.0)); // no per-batch cost to budget
+	}
+	// A wave never has more workers than batches, so charging for all n_workers
+	// would refuse waves that are affordable precisely because they are narrow —
+	// the regime large anchor sets live in, where one block is hundreds of MB.
+	// Solve the two regimes instead: below n_workers each batch also carries its
+	// worker's blocks; above it the workers' share is a fixed cost. The two agree
+	// at W = n_workers, so the result stays monotone in the budget.
+	const double budget = static_cast<double>(budget_bytes);
+	double fits = budget / (per_batch + 2.0 * block_bytes);
+	if (fits > static_cast<double>(n_workers)) {
+		fits = (budget - worker_reserve) / per_batch;
+	}
+	if (!(fits >= 1.0)) {
+		return 1; // one block at a time — correct, just one scan per batch
+	}
+	return static_cast<uint32_t>(std::min(fits, cap));
+}
+
 ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_ids,
                                          const std::vector<std::string> &remaining_ids, uint32_t n_dims,
                                          uint32_t batch_size, int seed, int n_threads, const BlockProvider &get_block,

@@ -720,15 +720,47 @@ private:
 		}
 	}
 
-	// Stream one routed query into the builders. Columns are always
+	// Run one wave query to completion and hand back its rows.
+	//
+	// MATERIALIZED, not streamed, and this is the single most important line in the
+	// class. A streaming result advances only when the fetching thread executes a
+	// task (duckdb executor.cpp: `Executor::ExecuteTask` runs it inline) and may
+	// only run ~`streaming_buffer_size` (1 MB by default) ahead of the consumer — so
+	// scanning 316 M rows through `SendQuery` ran the joins essentially
+	// single-threaded: 28 s wall for 2.7 s of work. Materializing lets DuckDB
+	// execute the whole pipeline across all cores first (25 batches: 28.1 s → 6.0 s;
+	// 121 batches: 15.2 s → 4.7 s). The per-batch provider always did this — via
+	// `conn.Query` in QueryDistanceBlock — which is why that path reached 8.4x
+	// effective cores while the wave path sat at 2.1x.
+	//
+	// BUFFER_MANAGED, not the `conn.Query` default: the result is the wave's largest
+	// allocation (~20 bytes × anchors × the wave's samples, ≈ 500 MB at 1000 anchors
+	// and a 25-batch wave), and the default IN_MEMORY collector allocates it from
+	// Allocator::DefaultAllocator — untracked heap that `memory_limit` cannot see.
+	// That is exactly the category that made pcoa() SIGKILL. Buffer-managed, it is
+	// counted and spillable instead: the same run under `memory_limit='2GB'`
+	// completes at 1.97 GB peak rather than dying.
+	static unique_ptr<QueryResult> RunWaveQuery(Connection &conn, const std::string &sql, const char *what) {
+		PendingQueryParameters params;
+		params.query_parameters.output_type = QueryResultOutputType::FORCE_MATERIALIZED;
+		params.query_parameters.memory_type = QueryResultMemoryType::BUFFER_MANAGED;
+		auto pending = conn.PendingQuery(sql, params);
+		if (pending->HasError()) {
+			throw InvalidInputException("progressive_pcoa_from_distances: %s failed: %s", what, pending->GetError());
+		}
+		auto res = pending->Execute();
+		if (res->HasError()) {
+			throw InvalidInputException("progressive_pcoa_from_distances: %s failed: %s", what, res->GetError());
+		}
+		return res;
+	}
+
+	// Route one query's rows into the builders. Columns are always
 	// (block, position_or_ordinal_a, position_or_ordinal_b, distance); an ordinal is
 	// turned into a cell position by adding that block's non-anchor count, since a
 	// request is laid out as [batch ids..., anchors...].
 	void RunRoutedQuery(Connection &conn, const std::string &sql, bool a_is_anchor_ord, bool b_is_anchor_ord) {
-		auto res = conn.SendQuery(sql);
-		if (res->HasError()) {
-			throw InvalidInputException("progressive_pcoa_from_distances: wave scan failed: %s", res->GetError());
-		}
+		auto res = RunWaveQuery(conn, sql, "wave scan");
 		try {
 			while (auto chunk = res->Fetch()) {
 				const idx_t rn = chunk->size();
@@ -769,14 +801,12 @@ private:
 		if (anchor_corner_loaded_) {
 			return;
 		}
-		auto res = conn.SendQuery("SELECT a1.ord, a2.ord, d.distance::DOUBLE FROM " + qname_ +
-		                          " d JOIN _wave_anchor a1 ON d.sample_a::VARCHAR = a1.id"
-		                          " JOIN _wave_anchor a2 ON d.sample_b::VARCHAR = a2.id"
-		                          " WHERE d.distance IS NOT NULL AND NOT isnan(d.distance::DOUBLE)");
-		if (res->HasError()) {
-			throw InvalidInputException("progressive_pcoa_from_distances: anchor block scan failed: %s",
-			                            res->GetError());
-		}
+		auto res = RunWaveQuery(conn,
+		                        "SELECT a1.ord, a2.ord, d.distance::DOUBLE FROM " + qname_ +
+		                            " d JOIN _wave_anchor a1 ON d.sample_a::VARCHAR = a1.id"
+		                            " JOIN _wave_anchor a2 ON d.sample_b::VARCHAR = a2.id"
+		                            " WHERE d.distance IS NOT NULL AND NOT isnan(d.distance::DOUBLE)",
+		                        "anchor block scan");
 		while (auto chunk = res->Fetch()) {
 			const idx_t rn = chunk->size();
 			if (rn == 0) {
@@ -987,69 +1017,54 @@ unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context
 		source.Prefetch(requests);
 	};
 
-	// How many batches to serve per relation scan. Each block held during a wave
-	// costs ~5·(batch + anchors)² bytes (fp32 matrix + fill bitmap), so the width is
-	// whatever fits a quarter of what memory_limit currently leaves — a quarter
-	// because these blocks are extension heap the buffer manager cannot see or
-	// evict, the same reason pcoa()'s dense matrix is guarded rather than tracked.
-	// Wave width changes only how many scans the run costs, never its output.
-	//
-	// The workers consuming the wave hold blocks too: each has the copy Get() handed
-	// it plus skbb's own centering buffer, ~2 blocks apiece, so their share is
-	// reserved before sizing the cache.
+	// How many batches to serve per relation scan (see ChooseWaveWidth for what a
+	// wave costs). The budget is a quarter of what memory_limit currently leaves —
+	// a quarter because the blocks are extension heap the buffer manager can neither
+	// see nor evict, the same reason pcoa()'s dense matrix is guarded rather than
+	// tracked. The scan rows ARE buffer-managed (see RunWaveQuery), so overshooting
+	// the estimate spills rather than dies; they are still charged, because spilling
+	// a wave's scan result costs far more than running a narrower wave.
 	const uint32_t wave_batches = [&]() -> uint32_t {
-		const size_t m = static_cast<size_t>(batch_size) + part.anchors.size();
-		const double block_bytes = 5.0 * static_cast<double>(m) * static_cast<double>(m);
 		auto &buffer_manager = BufferManager::GetBufferManager(context);
 		const auto max_memory = buffer_manager.GetMaxMemory();
 		const auto used_memory = buffer_manager.GetUsedMemory();
-		const double budget = 0.25 * static_cast<double>(max_memory > used_memory ? max_memory - used_memory : 0);
-		const double fits = (block_bytes > 0.0 ? budget / block_bytes : 1.0) - 2.0 * static_cast<double>(n_threads);
-		if (fits < 1.0) {
-			return 1; // one block at a time — correct, just one scan per batch
-		}
+		const uint64_t budget = (max_memory > used_memory ? max_memory - used_memory : 0) / 4;
 		const size_t n_batches =
 		    (part.remaining.size() + static_cast<size_t>(batch_size) - 1) / static_cast<size_t>(batch_size);
-		return static_cast<uint32_t>(std::min<double>(fits, static_cast<double>(std::max<size_t>(n_batches, 1))));
+		return miint::progressive::ChooseWaveWidth(part.anchors.size(), static_cast<uint32_t>(batch_size),
+		                                           static_cast<uint32_t>(n_threads), budget, n_batches);
 	}();
 
 	miint::progressive::ProgressivePcoaResult result;
 	try {
-		// Which block-fetch strategy pays off depends on the batch COUNT, measured on
-		// the 25,145-sample EMP matrix (316 M pairs, 1000 anchors, d=10), 14 cores:
+		// Waves, always. The per-batch provider re-reads every anchor-touching row for
+		// every batch, so its cost grows with the batch count; a wave reads them once.
+		// It used to win anyway at low batch counts, purely because its blocks came
+		// from a materialized query while the wave scans were streamed one row at a
+		// time (see RunWaveQuery) — measured on the 25,145-sample EMP matrix (316 M
+		// pairs, 1000 anchors, d=10), 14 cores:
 		//
-		//   batches   waves             per-batch queries
-		//   25        28.1 s / 58 CPU   18.1 s / 152 CPU
-		//   121       15.2 s / 44 CPU   67.4 s / 666 CPU
+		//   batches   waves (streamed)   waves (materialized)   per-batch queries
+		//   25        28.1 s / 58 CPU    6.0 s / 40 CPU         18.1 s / 152 CPU
+		//   121       15.2 s / 44 CPU    4.7 s / 36 CPU         67.4 s / 666 CPU
 		//
-		// Per-batch queries re-read every anchor-touching row for every batch, so
-		// their cost grows with the batch count (152 → 666 CPU-seconds); the wave path
-		// does not (58 → 44). But at a small batch count per-batch still wins
-		// wall-clock, because DuckDB runs those redundant scans across all cores
-		// (8.4x effective) while the wave path only reaches 2.1x. Pick by count so
-		// neither regime regresses; the threshold sits between the measured points.
+		// With that fixed the wave path wins in both regimes, so the old
+		// `n_batches >= 64` crossover and its MIINT_PROGRESSIVE_NO_WAVES escape hatch
+		// are gone: one path, no regime to regress.
 		//
-		// That 2.1x is NOT the batch loop, which now runs a wave's batches in
-		// parallel: with the loop pinned to one worker the 25-batch run still takes
-		// 28.2 s, and at 3000 anchors (4000² blocks, 16x the ordination work) 14
-		// workers buy 28.6 → 27.2 s. It is WaveDistanceBlockSource consuming the
-		// routed scans row by row on one thread — those three queries cost 2.7 s when
-		// DuckDB aggregates them internally versus ~28 s fetched into the builders.
-		// Parallelizing that consumption is what would retire this crossover.
-		const size_t n_batches =
-		    (part.remaining.size() + static_cast<size_t>(batch_size) - 1) / std::max<size_t>(batch_size, 1);
-		const bool use_waves = n_batches >= 64 && std::getenv("MIINT_PROGRESSIVE_NO_WAVES") == nullptr;
-		// On the wave path the batches of a wave run concurrently, n_threads of them
-		// at a time, each ordination pinned to one OpenMP thread — so `threads :=`
-		// still bounds total fan-out, it just buys concurrent blocks instead of a
-		// wider fsvd. Safe here because a wave's blocks are already in the source's
-		// cache (Get is read-only during a wave) and skbb's ordination is re-entrant
-		// under a held OmpThreadScope; the from_unifrac variant stays serial because
-		// its blocks come from libssu.
+		// A wave's batches run concurrently, n_threads of them at a time, each
+		// ordination pinned to one OpenMP thread — so `threads :=` still bounds total
+		// fan-out, it just buys concurrent blocks instead of a wider fsvd. Safe here
+		// because a wave's blocks are already in the source's cache (Get is read-only
+		// during a wave) and skbb's ordination is re-entrant under a held
+		// OmpThreadScope. It is worth little on this path (~0.2 s of the 6.0 s; the
+		// ordination stage is ~4% of a run at 1000 anchors, ~11% at 3000) — the
+		// from_unifrac variant, where a block IS a UniFrac compute, is where it would
+		// pay, and that stays serial until libssu's per-compute global `report_status`
+		// is thread-local.
 		result = miint::progressive::RunProgressivePcoa(part.anchors, part.remaining, static_cast<uint32_t>(n_dims),
 		                                                static_cast<uint32_t>(batch_size), seed, n_threads, provider,
-		                                                use_waves ? prefetch : nullptr, use_waves ? wave_batches : 0,
-		                                                use_waves ? static_cast<uint32_t>(n_threads) : 1);
+		                                                prefetch, wave_batches, static_cast<uint32_t>(n_threads));
 	} catch (const std::invalid_argument &e) {
 		throw InvalidInputException("progressive_pcoa_from_distances: %s", e.what());
 	}

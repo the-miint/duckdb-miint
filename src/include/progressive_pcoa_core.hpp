@@ -65,6 +65,28 @@ using BlockProvider = std::function<DistanceBlock(const std::vector<std::string>
 // get_block alone is sufficient, just at one scan per block.
 using WavePrefetch = std::function<void(const std::vector<std::vector<std::string>> &requests)>;
 
+// How many batches one wave should hold, given the memory a caller is willing to
+// spend on it. Lives beside the wave_batches parameter it feeds, because the
+// sizing rule is a property of what a wave costs:
+//
+//   cached blocks   W · 5·(anchors + batch_size)²   fp32 matrix + fill bitmap
+//   worker blocks   2 · n_workers · (same)          the block each worker holds
+//                                                   plus its ordination workspace
+//   scan rows       W · 20·(anchors·batch + batch²/2)  a materialized block-fill
+//                                                   query, ~20 B/row
+//
+// and a wave never has more workers than batches, so the workers' share is
+// charged per batch below n_workers and as a fixed cost above it. The result is
+// always in [1, max(n_batches, 1)]: a budget that fits nothing still yields 1 (one
+// block at a time is correct, just one scan per batch), and no wave is ever wider
+// than the run has batches. Arithmetic is done in double so the
+// (anchors + batch_size)² term cannot wrap.
+//
+// W is an I/O choice only — it never changes the coordinates a run produces — so
+// this is free to be a heuristic. What it must never return is an illegal width.
+uint32_t ChooseWaveWidth(size_t n_anchors, uint32_t batch_size, uint32_t n_workers, uint64_t budget_bytes,
+                         size_t n_batches);
+
 // One (sample_id, axis) coordinate in the shared standardized reference frame.
 // `batch` is the 0-based index of the batch that placed this sample, or -1 for the
 // anchors — they define the frame rather than being fitted into it. It joins a
