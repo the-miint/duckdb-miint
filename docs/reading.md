@@ -751,7 +751,7 @@ Read GFF3 (General Feature Format) annotation files. GFF is a standard format fo
 - `source` (VARCHAR): Annotation source (e.g., 'NCBI', 'Ensembl')
 - `type` (VARCHAR): Feature type (e.g., 'gene', 'mRNA', 'exon', 'CDS')
 - `position` (INTEGER): 1-based start position
-- `stop_position` (INTEGER): 1-based end position (inclusive)
+- `stop_position` (INTEGER): 1-based **half-open** end position — i.e. GFF3's `end` **+ 1**. See [Coordinate conventions](#coordinate-conventions) below.
 - `score` (DOUBLE, nullable): Feature score (NULL if '.')
 - `strand` (VARCHAR, nullable): Strand ('+', '-', or NULL if '.')
 - `phase` (INTEGER, nullable): CDS phase (0, 1, 2, or NULL if '.')
@@ -791,11 +791,11 @@ SELECT attributes['ID'] AS gene_id, attributes['Name'] AS gene_name
 FROM read_gff('annotations.gff')
 WHERE type = 'gene' AND strand = '+';
 
--- Calculate feature lengths
+-- Calculate feature lengths (half-open: no + 1)
 SELECT type,
-       AVG(stop_position - position + 1) AS avg_length,
-       MIN(stop_position - position + 1) AS min_length,
-       MAX(stop_position - position + 1) AS max_length
+       AVG(stop_position - position) AS avg_length,
+       MIN(stop_position - position) AS min_length,
+       MAX(stop_position - position) AS max_length
 FROM read_gff('annotations.gff')
 GROUP BY type;
 
@@ -804,12 +804,14 @@ SELECT seqid, position, stop_position, phase, attributes['Parent'] AS parent_tra
 FROM read_gff('annotations.gff')
 WHERE type = 'CDS' AND phase IS NOT NULL;
 
--- Find overlapping features between two positions
+-- Find features overlapping the window [1000, 5000].
+-- stop_position is half-open, so the end test is strict (>): an interval whose
+-- stop_position equals 1000 ends just before the window and does not overlap it.
 SELECT type, position, stop_position, attributes['ID'] AS feature_id
 FROM read_gff('annotations.gff')
 WHERE seqid = 'chr1'
   AND position <= 5000
-  AND stop_position >= 1000
+  AND stop_position > 1000
 ORDER BY position;
 
 -- Access nested attributes
@@ -852,11 +854,22 @@ SELECT parse_gff_attributes('ID=gene1;Name=TEST1;biotype=protein_coding');
 - Access values using bracket notation: `attributes['ID']`
 
 **GFF3 Format Notes:**
-- Coordinates are 1-based and inclusive (both start and end)
+- Coordinates **in the file** are 1-based and inclusive (both start and end). miint normalizes them on read — see [Coordinate conventions](#coordinate-conventions).
 - Strand: '+' (forward), '-' (reverse), '.' (unknown/not applicable)
 - Phase: Indicates position within codon (0, 1, or 2) for CDS features
 - Comment lines starting with '##' are filtered out (metadata/directives)
-- The 9th column (attributes) must contain at least an ID for most feature types
+- The 9th column (attributes) may be empty; a feature line must carry the 8 mandatory fields
+- **The GFF3 sequence section is honoured**: content after a `##FASTA` directive is not returned as feature rows. prokka and bakta always append the genome, so this is the common case. A feature line carrying only *some* of the 8 mandatory fields is a malformed GFF line and raises an error rather than being silently dropped.
+
+### Coordinate conventions
+
+**Every miint function reports intervals as 1-based half-open `[position, stop_position)`.** A feature's length is always `stop_position - position` — never `+ 1`.
+
+This holds across `read_alignments`, `align_minimap2` / `align_bowtie2` and friends, `alignment_slice`, `compute_coverage_depth`, `genome_coverage`, `read_gff` and `read_ncbi_annotation`.
+
+Some source formats are inherently **closed** (`[start, end]`): GFF3 and NCBI annotations both are. miint **normalizes these on read** by emitting `end + 1`, so a single convention holds throughout and intervals from different readers compose correctly. The value the file contained is always recoverable as `stop_position - 1`.
+
+> **Changed behaviour.** `read_gff` and `read_ncbi_annotation` previously emitted the source format's closed `end` directly under the same `stop_position` column name. Queries that consumed it now see a value one larger. Anything computing a length as `stop_position - position + 1` should drop the `+ 1`; anything that compensated with its own `+ 1` before feeding another miint function should remove that compensation. The motivation was that the mismatch was silent: feeding `read_gff` output to `genome_coverage` (which computes `SUM(stop - start)`) type-checked, ran, raised nothing, and under-counted every feature by exactly one base.
 
 **Use Cases:**
 - **Gene annotation analysis**: Extract genes, transcripts, exons from genome annotations

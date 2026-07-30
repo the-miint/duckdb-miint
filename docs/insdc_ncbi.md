@@ -152,7 +152,7 @@ Fetch feature annotations from NCBI by accession number. Returns data in the sam
 - `source` (VARCHAR): Annotation source ('RefSeq', 'GenBank', or 'NCBI')
 - `type` (VARCHAR): Feature type (e.g., 'gene', 'CDS', 'mRNA')
 - `position` (INTEGER): 1-based start position
-- `stop_position` (INTEGER): 1-based end position
+- `stop_position` (INTEGER): 1-based **half-open** end position — i.e. NCBI's annotation `end` **+ 1**, normalized on read so it matches every other miint function. A feature's length is `stop_position - position`, with no `+ 1`. The raw NCBI `end` is `stop_position - 1`. This changed: it previously emitted the closed `end` directly. See [Coordinate conventions](reading.md#coordinate-conventions).
 - `score` (DOUBLE, nullable): Feature score (typically NULL for NCBI data)
 - `strand` (VARCHAR): Strand ('+' or '-')
 - `phase` (INTEGER, nullable): CDS phase (0, 1, 2) derived from codon_start qualifier

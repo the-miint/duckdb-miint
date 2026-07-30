@@ -562,9 +562,10 @@ COPY (
 ) TO 'alignments.sam' (FORMAT SAM, REFERENCE_LENGTHS 'refs');
 
 -- Calculate coverage per reference
+-- position/stop_position are 1-based half-open, so the span is (stop - position) with no + 1.
 SELECT reference,
        compress_intervals(position, stop_position) AS coverage_regions,
-       SUM(stop_position - position + 1) AS total_aligned_bases
+       SUM(stop_position - position) AS total_aligned_bases
 FROM align_minimap2('queries', subject_table='subjects', max_secondary=0)
 GROUP BY reference;
 
