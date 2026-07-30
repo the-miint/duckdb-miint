@@ -374,7 +374,8 @@ Build and save a minimap2 index to disk for reuse. This provides 10-30x performa
 - `preset` (VARCHAR, default: 'sr'): Minimap2 preset (same options as `align_minimap2`)
 - `k` (INTEGER, optional): K-mer size (overrides preset default if specified)
 - `w` (INTEGER, optional): Minimizer window size (overrides preset default if specified)
-- `eqx` (BOOLEAN, default: true): Use =/X CIGAR operators instead of M
+
+There is deliberately no `eqx` parameter. `eqx` selects `=`/`X` CIGAR operators instead of `M`, which is an alignment-time output-formatting choice and is not stored in an `.mmi`. It previously appeared in this signature but had no effect on index construction, and was removed. Pass `eqx` to `align_minimap2` instead, where the CIGAR is produced.
 
 **Output schema:**
 - `success` (BOOLEAN): Always true if function completes successfully

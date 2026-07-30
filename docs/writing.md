@@ -26,7 +26,7 @@ Write query results to FASTQ format files. Requires `read_id`, `sequence1`, and 
 - `qual1` (BLOB): Quality scores as raw bytes
 
 **Optional columns:**
-- `comment` (VARCHAR): Comment line (only included if `INCLUDE_COMMENT=true`)
+- `comment` (VARCHAR): Comment line (only included if `INCLUDE_COMMENT=true`). Note this defaults to **false**, so a `read_fastx` → `COPY` round trip drops the comment unless you pass `INCLUDE_COMMENT true`. For Illumina data the comment carries the read number, filter flag and index (`1:N:0:ATCACG`), so pass it when a faithful round trip matters.
 - `sequence_index` (BIGINT): Used as identifier if `ID_AS_SEQUENCE_INDEX=true`
 - `sequence2` (VARCHAR): Second read for paired-end data
 - `qual2` (BLOB): Quality scores for second read

@@ -6,14 +6,13 @@
 # equal-rates Mk model (unlike its continuous ML, which the BM oracle avoids). The
 # goldens under data/asr/ml_er_* were generated OFFLINE by a dev-only R + ape script
 # kept out of this BSD tree (../duckdb-miint-localdocs/gen_asr_oracle.R) and committed
-# as NUMBERS only (never ape's code); run_tests.sh exports MIINT_ASR_PARITY_OK when the
-# committed goldens are intact. Our fitted rate matches ape to ~1e-8 and the marginal
-# posteriors to ~1e-8 (ape's own reconstruction is iterative), confirming the ER rate
-# parameterization, uniform root prior, and marginal-reconstruction conventions agree.
+# as NUMBERS only (never ape's code). The goldens are committed, so this test always
+# runs: a corrupted or missing golden fails it loudly rather than skipping it. Our
+# fitted rate matches ape to ~1e-8 and the marginal posteriors to ~1e-8 (ape's own
+# reconstruction is iterative), confirming the ER rate parameterization, uniform root
+# prior, and marginal-reconstruction conventions agree.
 
 require miint
-
-require-env MIINT_ASR_PARITY_OK
 
 statement ok
 CREATE TABLE ml_tree AS SELECT * FROM read_csv_auto('data/asr/ml_er_tree.csv', nullstr='');
