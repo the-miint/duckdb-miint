@@ -4,6 +4,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/common/types.hpp" // ListType, LogicalTypeId (column type validation)
 #include "duckdb/parallel/task_scheduler.hpp"
 
 #include <htslib-1.22.1/htslib/bgzf.h>
@@ -277,6 +278,49 @@ void ValidateRequiredColumns(bool has_read_id, bool has_sequence1, const string 
 	}
 	if (!has_sequence1) {
 		throw BinderException("COPY FORMAT %s requires 'sequence1' column", format_name);
+	}
+}
+
+// Local helpers keep the per-column checks to one line each at the call site below, so
+// adding a column to ColumnIndices makes the missing check obvious rather than silent.
+static void RequireVarchar(const vector<LogicalType> &sql_types, idx_t idx, const char *col_name) {
+	if (idx == DConstants::INVALID_INDEX) {
+		return;
+	}
+	if (sql_types[idx].id() != LogicalTypeId::VARCHAR) {
+		throw BinderException("Column '%s' must be VARCHAR", col_name);
+	}
+}
+
+static void RequireUtinyintList(const vector<LogicalType> &sql_types, idx_t idx, const char *col_name) {
+	if (idx == DConstants::INVALID_INDEX) {
+		return;
+	}
+	if (sql_types[idx].id() != LogicalTypeId::LIST ||
+	    ListType::GetChildType(sql_types[idx]).id() != LogicalTypeId::UTINYINT) {
+		throw BinderException("Column '%s' must be UTINYINT[]", col_name);
+	}
+}
+
+void ValidateSequenceColumnTypes(const ColumnIndices &indices, const vector<LogicalType> &sql_types,
+                                 bool validate_quals, bool validate_comment, bool validate_sequence_index) {
+	// Always read when present.
+	RequireVarchar(sql_types, indices.sequence1_idx, "sequence1");
+	RequireVarchar(sql_types, indices.sequence2_idx, "sequence2");
+
+	// Read only when the corresponding option turned them on.
+	if (validate_comment) {
+		RequireVarchar(sql_types, indices.comment_idx, "comment");
+	}
+	if (validate_sequence_index && indices.sequence_index_idx != DConstants::INVALID_INDEX &&
+	    sql_types[indices.sequence_index_idx].id() != LogicalTypeId::BIGINT) {
+		// Read as int64_t with no dispatch, so it must be exactly BIGINT.
+		throw BinderException("Column 'sequence_index' must be BIGINT");
+	}
+
+	if (validate_quals) {
+		RequireUtinyintList(sql_types, indices.qual1_idx, "qual1");
+		RequireUtinyintList(sql_types, indices.qual2_idx, "qual2");
 	}
 }
 
