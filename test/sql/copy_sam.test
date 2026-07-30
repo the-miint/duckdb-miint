@@ -329,6 +329,132 @@ SELECT COUNT(*) FROM read_sam('__TEST_DIR__/view_ref.bam');
 ----
 4
 
+# --- @SQ header order (issue #173) ---
+#
+# WHY THIS MATTERS: a BAM is coordinate-sorted by TID -- the @SQ index -- not by reference
+# NAME. The @SQ order used to be the iteration order of a std::unordered_map, i.e. hash-bucket
+# order: deterministic, but equal to neither the reference table's row order, nor its reverse,
+# nor name order. So NO `ORDER BY` the caller could write produced a coordinate-sorted BAM,
+# and htslib-based consumers rejected the output outright (metabat2's
+# jgi_summarize_bam_contig_depths: "the bam file is not sorted!"). Measured on a real file:
+# 11,390 of 925,483 records stepped backwards in tid despite being written
+# ORDER BY reference, position.
+#
+# The contract is now: @SQ is emitted sorted by reference name. That is deterministic
+# regardless of scan parallelism, and it makes `ORDER BY reference, position` actually yield
+# a coordinate-sorted BAM.
+#
+# NOTE: karyotype order (chr1..chr9, chr10) is deliberately NOT expressible this way --
+# 'chr10' sorts before 'chr2'. A caller needing that wants an explicit ordinal column; see
+# the follow-up noted on #173.
+#
+# These names are the reporter's own divergent case: with s<i>.ctg%06dl names the old
+# hash order diverged from the table order at n=3.
+statement ok
+CREATE TABLE sq_refs AS
+SELECT 's1.ctg' || lpad(i::VARCHAR, 6, '0') || 'l' AS reference, 1000::BIGINT AS length
+FROM range(1, 7) t(i);
+
+# NOTE: mate_reference is the '*' sentinel, NOT NULL. A NULL VARCHAR mate_reference is
+# currently written as an EMPTY RNEXT field rather than '*', which produces a BAM that htslib
+# refuses to read ("Numerical result out of range") with zero records recovered. That is a
+# separate pre-existing bug; using NULL here would make the BAM assertions below pass
+# vacuously on an empty file.
+statement ok
+CREATE TABLE sq_aln AS
+SELECT 'r1' AS read_id, 0::USMALLINT AS flags, 's1.ctg000001l' AS reference,
+       1::BIGINT AS position, 2::BIGINT AS stop_position, 60::UTINYINT AS mapq, '1M' AS cigar,
+       '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length;
+
+statement ok
+COPY sq_aln TO '__TEST_DIR__/sq_asc.sam' (FORMAT SAM, INCLUDE_HEADER true, REFERENCE_LENGTHS 'sq_refs');
+
+# @SQ must come out name-sorted. Row order is preserved by read_csv, so the sequence of rows
+# below IS the emitted header order -- before the fix this returned 5,4,3,2,6,1.
+query T
+SELECT regexp_extract(line, 'SN:([^\t]+)', 1) AS sn
+FROM read_csv('__TEST_DIR__/sq_asc.sam', delim='\x1f', header=false,
+              columns={'line':'VARCHAR'}, auto_detect=false, quote='', escape='')
+WHERE line LIKE '@SQ%';
+----
+s1.ctg000001l
+s1.ctg000002l
+s1.ctg000003l
+s1.ctg000004l
+s1.ctg000005l
+s1.ctg000006l
+
+# The emitted order must NOT depend on how the reference table was built. A DESC-ordered
+# table must yield the identical header -- this is what makes the contract usable.
+statement ok
+CREATE TABLE sq_refs_desc AS SELECT * FROM sq_refs ORDER BY reference DESC;
+
+statement ok
+COPY sq_aln TO '__TEST_DIR__/sq_desc.sam' (FORMAT SAM, INCLUDE_HEADER true, REFERENCE_LENGTHS 'sq_refs_desc');
+
+query T
+SELECT regexp_extract(line, 'SN:([^\t]+)', 1) AS sn
+FROM read_csv('__TEST_DIR__/sq_desc.sam', delim='\x1f', header=false,
+              columns={'line':'VARCHAR'}, auto_detect=false, quote='', escape='')
+WHERE line LIKE '@SQ%';
+----
+s1.ctg000001l
+s1.ctg000002l
+s1.ctg000003l
+s1.ctg000004l
+s1.ctg000005l
+s1.ctg000006l
+
+# The BAM path uses the same header builder, so assert it round-trips every record with the
+# references intact.
+#
+# NB: this deliberately does NOT claim to verify TID monotonicity. read_alignments/read_sam
+# expose no raw tid column -- each record's `reference` is decoded via sam_hdr_tid2name against
+# the file's own embedded header, and name<->tid is a bijection fixed when the header is built.
+# So reading names back yields ascending names whatever the @SQ order was, on buggy code too.
+# The name-order assertions above are the real verification of the contract; a genuine tid-order
+# assertion needs a header accessor (issue #174) or an external samtools oracle.
+statement ok
+CREATE TABLE sq_multi AS
+SELECT 'r' || i AS read_id, 0::USMALLINT AS flags,
+       's1.ctg' || lpad(i::VARCHAR, 6, '0') || 'l' AS reference,
+       1::BIGINT AS position, 2::BIGINT AS stop_position, 60::UTINYINT AS mapq, '1M' AS cigar,
+       '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length
+FROM range(1, 7) t(i);
+
+statement ok
+COPY (SELECT * FROM sq_multi ORDER BY reference, position)
+TO '__TEST_DIR__/sq_sorted.bam' (FORMAT BAM, REFERENCE_LENGTHS 'sq_refs');
+
+# Every record must survive the round trip. Guards against the empty-BAM failure mode: an
+# assertion of "nothing is out of order" passes vacuously on a file with no records.
+query I
+SELECT COUNT(*) FROM read_sam('__TEST_DIR__/sq_sorted.bam');
+----
+6
+
+query T
+SELECT DISTINCT reference FROM read_sam('__TEST_DIR__/sq_sorted.bam') ORDER BY reference;
+----
+s1.ctg000001l
+s1.ctg000002l
+s1.ctg000003l
+s1.ctg000004l
+s1.ctg000005l
+s1.ctg000006l
+
+statement ok
+DROP TABLE sq_refs;
+
+statement ok
+DROP TABLE sq_refs_desc;
+
+statement ok
+DROP TABLE sq_aln;
+
+statement ok
+DROP TABLE sq_multi;
+
 # Cleanup
 statement ok
 DROP VIEW ref_computed_view;

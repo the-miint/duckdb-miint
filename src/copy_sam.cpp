@@ -398,10 +398,16 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 	}
 
 	if (fdata.reference_lengths_table.has_value()) {
-		auto reference_lengths_map = ReadReferenceTable(context, fdata.reference_lengths_table.value());
+		// SORTED BY NAME, not the map's iteration order. A reference's index in the @SQ list IS
+		// its TID, and a BAM is coordinate-sorted by TID rather than by reference name -- so
+		// emitting @SQ in unordered_map hash order meant no ORDER BY the caller could write
+		// produced a coordinate-sorted file, and htslib consumers rejected the output (#173).
+		// Name order is deterministic regardless of scan parallelism and makes the natural
+		// `ORDER BY reference, position` correct.
+		auto reference_lengths = ReadReferenceTableSortedByName(context, fdata.reference_lengths_table.value());
 
 		// Add each reference to header
-		for (const auto &ref : reference_lengths_map) {
+		for (const auto &ref : reference_lengths) {
 			if (sam_hdr_add_line(gstate->header.get(), "SQ", "SN", ref.first.c_str(), "LN",
 			                     std::to_string(ref.second).c_str(), NULL) < 0) {
 				throw IOException("Failed to add reference to SAM header: %s", ref.first);

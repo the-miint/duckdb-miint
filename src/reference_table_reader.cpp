@@ -5,7 +5,9 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
+#include <algorithm>
 #include <limits>
+#include <unordered_set>
 
 namespace duckdb {
 
@@ -28,8 +30,13 @@ static void ValidateReferenceTableSchema(ClientContext &context, const std::stri
 	}
 }
 
-std::unordered_map<std::string, uint64_t> ReadReferenceTable(ClientContext &context, const std::string &table_name) {
-	std::unordered_map<std::string, uint64_t> result;
+// Shared core: read the table/view into (name, length) pairs in the order the scan produced
+// them, collapsing duplicate names to their FIRST occurrence. Both public entry points are thin
+// wrappers over this so the validation, error messages and duplicate handling live in one place.
+static std::vector<std::pair<std::string, uint64_t>> ReadReferenceRows(ClientContext &context,
+                                                                       const std::string &table_name) {
+	std::vector<std::pair<std::string, uint64_t>> result;
+	std::unordered_set<std::string> seen;
 
 	// Validate schema first
 	ValidateReferenceTableSchema(context, table_name);
@@ -124,7 +131,9 @@ std::unordered_map<std::string, uint64_t> ReadReferenceTable(ClientContext &cont
 				                            row_number);
 			}
 
-			result.emplace(name, static_cast<uint64_t>(length));
+			if (seen.insert(name).second) {
+				result.emplace_back(name, static_cast<uint64_t>(length));
+			}
 		}
 	}
 
@@ -133,6 +142,30 @@ std::unordered_map<std::string, uint64_t> ReadReferenceTable(ClientContext &cont
 	}
 
 	return result;
+}
+
+std::unordered_map<std::string, uint64_t> ReadReferenceTable(ClientContext &context, const std::string &table_name) {
+	auto rows = ReadReferenceRows(context, table_name);
+
+	std::unordered_map<std::string, uint64_t> result;
+	result.reserve(rows.size());
+	for (auto &row : rows) {
+		result.emplace(row.first, row.second);
+	}
+	return result;
+}
+
+std::vector<std::pair<std::string, uint64_t>> ReadReferenceTableSortedByName(ClientContext &context,
+                                                                             const std::string &table_name) {
+	auto rows = ReadReferenceRows(context, table_name);
+
+	// Byte-wise name order. See the header for why name order is the contract rather than the
+	// table's row order, and why this must agree with DuckDB's VARCHAR comparison.
+	std::sort(rows.begin(), rows.end(),
+	          [](const std::pair<std::string, uint64_t> &a, const std::pair<std::string, uint64_t> &b) {
+		          return a.first < b.first;
+	          });
+	return rows;
 }
 
 } // namespace duckdb

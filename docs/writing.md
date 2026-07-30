@@ -150,7 +150,28 @@ Write query results to SAM or BAM format files. Requires all mandatory SAM colum
 **Parameters:**
 - `INCLUDE_HEADER` (default: true): Include header with reference sequences
   - **Note:** BAM format requires `INCLUDE_HEADER=true` (headers are mandatory in BAM files)
-- `REFERENCE_LENGTHS` (VARCHAR, required if INCLUDE_HEADER=true): Table or view name containing reference sequences. Must have at least 2 columns: first column = reference name (VARCHAR), second column = reference length (INTEGER/BIGINT). Column names don't matter. Views are fully supported and can include computed columns.
+- `REFERENCE_LENGTHS` (VARCHAR, required if INCLUDE_HEADER=true): Table or view name containing reference sequences. Must have at least 2 columns: first column = reference name (VARCHAR), second column = reference length (INTEGER/BIGINT). Column names don't matter. Views are fully supported and can include computed columns. Duplicate reference names are collapsed, keeping the first occurrence.
+
+**`@SQ` order, and how to write a coordinate-sorted BAM:**
+
+`@SQ` lines are emitted **sorted by reference name**, regardless of the order of rows in `REFERENCE_LENGTHS`. This matters because a reference's index in the `@SQ` list *is* its TID, and a BAM is coordinate-sorted by **TID**, not by reference name — so the header order determines what "sorted" means.
+
+Because the order is name-sorted, sorting your records the obvious way produces a genuinely coordinate-sorted file:
+
+```sql
+COPY (SELECT * FROM aln ORDER BY reference, position)
+TO 'sorted.bam' (FORMAT BAM, REFERENCE_LENGTHS 'refs');
+-- samtools index sorted.bam   -> succeeds
+```
+
+Two consequences worth knowing:
+
+- The order does **not** depend on how `REFERENCE_LENGTHS` was built (ASC, DESC or shuffled all give the same header), and it does not depend on `PRAGMA threads`. This is deliberate: DuckDB does not guarantee the row order of a parallel table scan, so the table's own row order could not be a reproducible contract.
+- **Karyotype order is not expressible**: `'chr10'` sorts before `'chr2'`, so a human-genome BAM will be ordered `chr1, chr10, chr11, …, chr2` rather than `chr1, chr2, …, chr10`. The file is still internally consistent and indexable; it simply won't match a reference-order convention that isn't lexicographic. Sorting your records by `reference` keeps them aligned with whatever the header says.
+
+With `INCLUDE_HEADER=false` no `@SQ` lines are written at all, so the ordering above does not apply; each record's RNAME is written verbatim from its `reference` value. (This mode is SAM-only — BAM requires a header.)
+
+> **`REFERENCE_LENGTHS` must be exhaustive.** A record whose `reference` is absent from the table is currently lost silently — in SAM the name reads back as `*`, and in BAM the record is dropped entirely, with no error either way. See issue #198. Until that is fixed, make sure the table covers every reference your records use, e.g. by deriving it from the same relation you are writing.
 - `SEQUENCE_DATA` (VARCHAR, optional): Table or view name containing original read sequences from `read_fastx`. When provided, writes actual SEQ and QUAL fields into the output instead of `*`. See [Sequence Data](#sequence-data) below.
 - `COMPRESSION` (default: auto, SAM only): Enable gzip compression (auto-detected from `.gz` extension)
 - `COMPRESSION_LEVEL` (BAM only): BGZF compression level 0-9 (default: 6). Higher = better compression, slower speed.
