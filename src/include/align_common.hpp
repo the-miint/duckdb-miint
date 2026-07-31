@@ -20,6 +20,8 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
+#include <cstdlib>
+#include <string>
 
 namespace duckdb {
 
@@ -62,6 +64,71 @@ inline std::vector<LogicalType> GetAlignmentOutputTypes(const LogicalType &query
 	        LogicalType::VARCHAR,   // tag_yt
 	        LogicalType::VARCHAR,   // tag_md
 	        LogicalType::VARCHAR};  // tag_sa
+}
+
+// Parse minimap2's -f spec (high-occurrence minimizer filter) into config.
+//
+// Deliberately a transcription of minimap2's own CLI parsing (ext/minimap2/main.c, case 'f'):
+//
+//     x = strtod(arg, &p);
+//     if (x < 1.0) opt.mid_occ_frac = x, opt.mid_occ = 0;
+//     else         opt.mid_occ = (int)(x + .499);
+//     if (*p == ',') opt.max_occ = (int)(strtod(p+1, &p) + .499);
+//
+// The `x < 1.0` split is load-bearing and easy to get wrong. A value below 1 is a FRACTION: it
+// sets mid_occ_frac and zeroes mid_occ so that mm_mapopt_update derives the threshold from the
+// index's own minimizer distribution. So `occ_filter := 0` does not mean "threshold of zero" and
+// must not be written to mid_occ directly -- it means "filter the top 0 fraction", and
+// mm_idx_cal_max_occ returns INT32_MAX for f <= 0, which mm_mapopt_update then clamps to
+// max_mid_occ (1000000 under the default `sr` preset). That is minimap2's way of disabling the
+// filter. Note that presets which narrow max_mid_occ to 500 (lr:hq, map-hifi, map-ccs, lr:hqae,
+// map-iclr) therefore clamp `occ_filter := 0` to 500 rather than disabling it -- inherited from
+// minimap2, not introduced here.
+inline void ParseOccFilterSpec(const std::string &spec, miint::Minimap2Config &config) {
+	// Split on ',' BEFORE parsing, rather than letting strtod stop at it. strtod honours
+	// LC_NUMERIC, so in a locale where ',' is the decimal separator it would read "1000,5000" as
+	// the single value 1000.5 and consume the comma -- silently discarding the second value instead
+	// of failing. Splitting first makes the two-value form locale-independent.
+	const auto comma = spec.find(',');
+	const std::string first_spec = spec.substr(0, comma);
+	const bool has_second = (comma != std::string::npos);
+
+	// Rejects NaN and infinity as well as negatives and anything past int32: the comparison is
+	// written as !(in range) so that NaN, for which every ordered comparison is false, fails here.
+	// This matters more than it looks -- `occ_filter := 1e12` is a plausible way to ask for "off",
+	// and casting it to int32_t is undefined (x86 yields INT32_MIN), which mm_mapopt_update would
+	// then read as mid_occ <= 0 and quietly re-derive the DEFAULT filter: the exact silent masking
+	// #187 exists to remove.
+	auto parse_value = [&spec](const std::string &text, const char *what) {
+		const char *begin = text.c_str();
+		char *end = nullptr;
+		double v = std::strtod(begin, &end);
+		if (end == begin || *end != '\0') {
+			throw InvalidInputException("%s must be a number or 'INT1,INT2' (minimap2's -f), got '%s'", what, spec);
+		}
+		if (!(v >= 0.0 && v <= 2147483647.0)) {
+			throw InvalidInputException("%s must be between 0 and 2147483647, got '%s'", what, spec);
+		}
+		return v;
+	};
+
+	const double x = parse_value(first_spec, "occ_filter");
+	if (x < 1.0) {
+		config.occ_mid_frac = static_cast<float>(x);
+		config.occ_mid = 0;
+	} else {
+		config.occ_mid = static_cast<int32_t>(x + .499);
+	}
+
+	if (has_second) {
+		// Assigned unconditionally, including 0, because main.c:331 does: `-f 100,0` means max_occ=0
+		// (no re-chain pass), which is distinguishable from "no second value given" only by the
+		// presence of the comma. Hence the -1 "unset" sentinel on occ_max rather than 0.
+		const double y = parse_value(spec.substr(comma + 1), "occ_filter second value");
+		config.occ_max = static_cast<int32_t>(y + .499);
+	}
+
+	config.occ_filter_set = true;
 }
 
 // Parse minimap2 config parameters from named_parameters map
@@ -107,6 +174,16 @@ inline void ParseMinimap2ConfigParams(const named_parameter_map_t &params, miint
 		if (config.min_chain_coverage < 0.0f || config.min_chain_coverage > 1.0f) {
 			throw InvalidInputException("min_chain_coverage must be between 0.0 and 1.0");
 		}
+	}
+
+	auto occ_param = params.find("occ_filter");
+	if (occ_param != params.end() && !occ_param->second.IsNull()) {
+		ParseOccFilterSpec(occ_param->second.ToString(), config);
+	}
+
+	auto include_unmapped_param = params.find("include_unmapped");
+	if (include_unmapped_param != params.end() && !include_unmapped_param->second.IsNull()) {
+		config.include_unmapped = include_unmapped_param->second.GetValue<bool>();
 	}
 }
 
@@ -158,6 +235,32 @@ inline idx_t OutputSAMRecordBatch(DataChunk &output, const miint::SAMRecordBatch
 	SetAlignResultStringNullable(output.data[field_idx++], batch.tag_yt_values, offset, count);
 	SetAlignResultStringNullable(output.data[field_idx++], batch.tag_md_values, offset, count);
 	SetAlignResultStringNullable(output.data[field_idx++], batch.tag_sa_values, offset, count);
+
+	// An unmapped row (flag 0x4) has no reference, coordinates, MAPQ or CIGAR to report, so emit
+	// SQL NULL rather than the SAM text sentinels: `WHERE reference IS NULL` is then the test for
+	// "measured, did not align", which is the whole point of include_unmapped (#185). The tag
+	// columns already null themselves via their -1 / "" sentinels.
+	//
+	// This loop is inert unless include_unmapped is on. Only align_minimap2 and
+	// align_minimap2_sharded call this function, and neither ever emitted a row with 0x4 set --
+	// both skip every reg with rid < 0 -- so no pre-existing output changes.
+	//
+	// Must run after the emitters: EmitIdCell and the nullable tag setters write validity per row
+	// and would overwrite these. The plain int64/uint8/string setters do NOT touch validity at all,
+	// so for those columns what actually keeps stale NULLs from leaking across chunks is
+	// DataChunk::Reset() clearing validity before each GetData -- a dependency that was irrelevant
+	// before this loop existed, since nothing ever wrote a NULL into them.
+	static constexpr miint::SAMRecordField UNMAPPED_NULL_FIELDS[] = {
+	    miint::SAMRecordField::REFERENCE, miint::SAMRecordField::POSITION, miint::SAMRecordField::STOP_POSITION,
+	    miint::SAMRecordField::MAPQ, miint::SAMRecordField::CIGAR};
+	for (idx_t j = 0; j < count; j++) {
+		if ((batch.flags[offset + j] & 0x4) == 0) {
+			continue;
+		}
+		for (auto field : UNMAPPED_NULL_FIELDS) {
+			FlatVector::SetNull(output.data[static_cast<idx_t>(field)], j, true);
+		}
+	}
 
 	output.SetCardinality(count);
 	return count;

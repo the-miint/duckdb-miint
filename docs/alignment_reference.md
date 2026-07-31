@@ -460,6 +460,49 @@ Align query sequences to subject sequences using minimap2. This function enables
 - `k` (INTEGER, optional): K-mer size (overrides preset default if specified). **Warning:** Ignored when using `index_path` (k-mer size is baked into the pre-built index)
 - `w` (INTEGER, optional): Minimizer window size (overrides preset default if specified). **Warning:** Ignored when using `index_path` (window size is baked into the pre-built index)
 - `eqx` (BOOLEAN, default: true): Use =/X CIGAR operators instead of M
+- `occ_filter` (optional): minimap2's `-f` high-occurrence minimizer filter. Accepts a bare number or the two-value `'INT1,INT2'` string. See *Dense reference sets* below.
+- `include_unmapped` (BOOLEAN, default: false): Emit one row per query that produced no alignment, instead of no row at all. See *Unmapped queries* below.
+
+**Dense reference sets (`occ_filter`):**
+
+minimap2 defaults to `-f 1000,5000`: it discards minimizers that occur more often than that in the index. That is tuned for genome-scale references with real repeats, and it is **actively wrong for a set of near-identical homologous sequences** — rRNA panels, gene families, dereplicated marker sets — where nearly every minimizer is high-occurrence by construction and gets masked. The symptoms are that a verbatim substring of an indexed sequence may not recover a perfect self match (so reported identity is only a *lower bound*), and that many queries lose their alignment row entirely.
+
+```sql
+-- Disable the filter (minimap2's own -f 0)
+SELECT * FROM align_minimap2('q', subject_table := 's', occ_filter := 0);
+
+-- Raise the cap to a large explicit value
+SELECT * FROM align_minimap2('q', subject_table := 's', occ_filter := 100000);
+
+-- Set both values, as -f INT1,INT2 (mid_occ, max_occ)
+SELECT * FROM align_minimap2('q', subject_table := 's', occ_filter := '1000,5000');
+```
+
+The semantics are minimap2's, including two that surprise people:
+
+- **A value below 1 is a *fraction*, not a count.** `occ_filter := 0.0002` keeps the top 0.02% of minimizers masked, computed from the index's own distribution. `occ_filter := 0` is therefore "mask the top 0 fraction", i.e. **disabled** — not "a threshold of zero".
+- **The preset's *second* value does the real work for short reads.** `sr` sets `mid_occ=1000` *and* `max_occ=5000`, and minimap2 re-chains using `max_occ` when the first pass finds only repetitive seeds. So occurrences between 1000 and 5000 are already rescued, and tightening the filter requires setting both values (`'1,1'`), not just the first.
+- `occ_filter := 0` relies on a clamp to `max_mid_occ`, which the `lr:hq`, `map-hifi`, `map-ccs`, `lr:hqae` and `map-iclr` presets narrow to 500. Under those presets `occ_filter := 0` lands at 500 rather than disabling the filter; pass a large explicit value instead.
+
+`align_minimap2_sharded` accepts `occ_filter` too — the threshold is per index, so it applies to each shard independently.
+
+**Unmapped queries (`include_unmapped`):**
+
+By default a query that produces no alignment yields **no row**, so the absence of a row conflates "genuinely distant from every subject" with "the aligner found no seed chain" (repeat masking, short query, low complexity). Consumers then have to reconstruct "not measured" with an anti-join and remember the distinction exists; writing `coalesce(identity, 0) < 0.90` reads "no chain found" as "definitively distant", which inverts the safe default.
+
+With `include_unmapped := true`, every input query is represented:
+
+```sql
+SELECT read_id FROM align_minimap2('q', subject_table := 's', include_unmapped := true)
+WHERE reference IS NULL;   -- queries that were measured and did not align
+```
+
+- `reference`, `position`, `stop_position`, `mapq`, `cigar` and the `tag_*` columns are **NULL** (not the SAM `'*'`/`0` text sentinels), so `IS NULL` is the test. The one exception is `tag_yt`, the pair type, which is known regardless of whether the read aligned and is still `'UU'`/`'UP'`.
+- The SAM unmapped flag `0x4` is set, so `flags & 4 != 0` selects the same rows.
+- Queries with an empty `sequence1` also get a row — minimap2 cannot be handed a zero-length query, but the query was still submitted and must be accounted for.
+- For paired input the accounting is **per segment**: if R1 aligns and R2 does not, you get the R1 alignment plus one unmapped row for R2. Mate flags stay truthful — the unmapped row carries the paired and second-in-pair bits, *not* mate-unmapped, and it carries the mate's `mate_reference`/`mate_position` as SAM requires of a paired record whose mate is mapped.
+- These rows can be written straight out: `COPY (SELECT * FROM align_minimap2(…, include_unmapped := true)) TO 'x.bam' (FORMAT BAM, REFERENCE_LENGTHS 'r')` works, because the writer accepts a NULL `reference`/`position`/`mapq`/`cigar` on a record flagged `0x4`. Note the round-trip asymmetry: NULL is written as the SAM `*` sentinel, so reading the file back with `read_alignments` returns `'*'` rather than NULL.
+- **Not supported by `align_minimap2_sharded`** (the parameter is rejected), and **not supported with `per_subject_database`** (the combination is rejected at bind). Both re-align each query against a different subject set, so a query that finds no chain in one shard or against one subject routinely maps in another — a synthetic row there would assert "did not align" about a query that did. Correct support needs reconciliation across the whole subject set.
 
 **Output schema:**
 Returns the same schema as `read_alignments` (21 columns):
