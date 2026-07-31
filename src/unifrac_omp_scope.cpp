@@ -1,5 +1,6 @@
 #include "unifrac_omp_scope.hpp"
 
+#include <random>
 #include <stdexcept>
 
 #ifndef __EMSCRIPTEN__
@@ -15,13 +16,23 @@ std::mutex &GlobalLibssuMutex() {
 	return m;
 }
 
+// Seeds for callers that supplied none. Thread-local so concurrent skbb calls
+// draw without synchronization — the whole point is to keep them off skbb's own
+// process-global generator. Seeded once per thread from random_device, so an
+// unseeded run stays non-reproducible exactly as it was when skbb drew the seed
+// itself. Masked to 31 bits because a negative value would send skbb straight
+// back to that global generator.
+int DeriveSeed() {
+	static thread_local std::mt19937 rng {std::random_device {}()};
+	return static_cast<int>(rng() & 0x7fffffffu);
+}
+
 } // namespace
 
 #ifdef __EMSCRIPTEN__
 // WASM builds skip find_package(OpenMP); libssu_wasm.a / libskbb_wasm.a are
-// compiled single-threaded with no OpenMP runtime to mutate. OmpThreadScope still
-// takes the mutex, so the libssu/skbb global-state serialization contract holds.
-OmpThreadPin::OmpThreadPin(int n_threads, OmpScopeHeld) : prev_threads_(1) {
+// compiled single-threaded with no OpenMP runtime to mutate.
+OmpThreadPin::OmpThreadPin(int n_threads) : prev_threads_(1) {
 	if (n_threads < 1) {
 		throw std::invalid_argument("OmpThreadPin: n_threads must be >= 1");
 	}
@@ -29,7 +40,7 @@ OmpThreadPin::OmpThreadPin(int n_threads, OmpScopeHeld) : prev_threads_(1) {
 
 OmpThreadPin::~OmpThreadPin() = default;
 #else
-OmpThreadPin::OmpThreadPin(int n_threads, OmpScopeHeld) : prev_threads_(omp_get_max_threads()) {
+OmpThreadPin::OmpThreadPin(int n_threads) : prev_threads_(omp_get_max_threads()) {
 	if (n_threads < 1) {
 		throw std::invalid_argument("OmpThreadPin: n_threads must be >= 1");
 	}
@@ -41,10 +52,13 @@ OmpThreadPin::~OmpThreadPin() {
 }
 #endif
 
+SkbbCallScope::SkbbCallScope(int n_threads, int seed) : pin_(n_threads), seed_(seed >= 0 ? seed : DeriveSeed()) {
+}
+
 // Lock first, then pin: the pin is what a concurrent caller would race on, so it
 // is only touched under the lock. Members destruct in reverse, restoring the
 // thread count before the lock is released.
-OmpThreadScope::OmpThreadScope(int n_threads) : lock_(GlobalLibssuMutex()), pin_(n_threads, OmpScopeHeld()) {
+OmpThreadScope::OmpThreadScope(int n_threads) : lock_(GlobalLibssuMutex()), pin_(n_threads) {
 }
 
 OmpThreadScope::~OmpThreadScope() = default;

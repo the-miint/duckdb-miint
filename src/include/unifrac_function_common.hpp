@@ -147,7 +147,7 @@ inline LogicalType ResolveSampleIdOutputType(const LogicalType &input_type) {
 // `caller_name` is the SQL function name used in the error message
 // (e.g., "unifrac_pcoa").
 //
-// Returns a positive int suitable for OmpThreadScope.
+// Returns a positive int suitable for OmpThreadScope / SkbbCallScope.
 int ResolveThreadsParameter(ClientContext &context, int32_t user_value, const std::string &caller_name);
 
 } // namespace duckdb::unifrac_internal

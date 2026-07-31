@@ -207,15 +207,15 @@ void RunPermanovaOnMatrix(const float *mat, uint32_t n, const std::vector<std::s
 	}
 
 	for (const auto &grouping : groupings) {
-		// skbb_permanova_fp32 takes its own per-call seed for randomization, but
-		// its `#pragma omp parallel for` regions (permanova.cpp) still need the
-		// process-wide OpenMP serialization so concurrent queries don't race on
-		// omp_set_num_threads.
+		// No process-wide lock: skbb's PERMANOVA permutes from a generator array
+		// seeded per call, so it is re-entrant and two queries may run at once. The
+		// scope pins this thread's OpenMP fan-out and guarantees the non-negative
+		// seed that keeps skbb off its process-global generator (see SkbbCallScope).
 		float f_stat = 0.0f;
 		float p_value = 0.0f;
 		{
-			miint::unifrac::OmpThreadScope omp_scope(n_threads);
-			skbb_permanova_fp32(n, mat, grouping.labels.data(), n_permutations, seed, &f_stat, &p_value);
+			miint::unifrac::SkbbCallScope skbb(n_threads, seed);
+			skbb_permanova_fp32(n, mat, grouping.labels.data(), n_permutations, skbb.seed(), &f_stat, &p_value);
 		}
 		PermanovaRow row;
 		row.iteration = iteration_index;

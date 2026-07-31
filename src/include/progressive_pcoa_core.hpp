@@ -132,9 +132,10 @@ struct ProgressivePcoaResult {
 //   n_dims         number of ordination axes to compute (d).
 //   batch_size     non-anchor samples per batch (> 0).
 //   seed           passed to every skbb PCoA call; use >= 0 for reproducibility.
-//   n_threads      OpenMP fan-out for each skbb PCoA (>= 1); also drives the
-//                  process-wide OmpThreadScope that serializes libssu/skbb calls
-//                  against other concurrent DuckDB queries.
+//   n_threads      OpenMP fan-out for one block ordination (>= 1). Spent on a
+//                  single wide ordination when batches run serially; a parallel
+//                  wave instead gives each worker one OpenMP thread (see
+//                  batch_workers), so this bounds total fan-out either way.
 //   get_block      supplies each dense distance block (see BlockProvider).
 //   prefetch       optional; when set, called once per wave with that wave's
 //                  requests before any of them is fetched (see WavePrefetch).
@@ -152,11 +153,13 @@ struct ProgressivePcoaResult {
 //                  Workers are drawn from one wave, so parallelism requires
 //                  wave_batches > 1; the effective count is
 //                  min(batch_workers, batches in the wave).
-//                  Each worker's PCoA is pinned to ONE OpenMP thread (the wave
-//                  holds a single OmpThreadScope), so parallelism comes from
-//                  concurrent block ordinations rather than a wider fsvd — see
-//                  OmpThreadPin for why libssu-backed providers must not use it.
-//                  Requires a thread-safe get_block (see BlockProvider).
+//                  Each worker's PCoA is pinned to ONE OpenMP thread and takes no
+//                  process-wide lock (see SkbbCallScope), so parallelism comes
+//                  from concurrent block ordinations rather than a wider fsvd, and
+//                  an unrelated query may ordinate at the same time. Requires a
+//                  thread-safe get_block (see BlockProvider) — in particular a
+//                  libssu-backed provider must NOT use this, since libssu is not
+//                  re-entrant (see OmpThreadScope).
 //
 // Flow: PCoA on the anchor block defines the reference frame; its eigenvalues and
 // proportions are reported (a documented caveat — they describe the anchors, not

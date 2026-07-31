@@ -125,13 +125,13 @@ void RunPcoaOnMatrix(float *mat, uint32_t n, const std::vector<std::string> &ids
 	std::vector<float> samples(static_cast<size_t>(n) * n_dims);
 	std::vector<float> prop(n_dims);
 
-	// skbb_pcoa_fsvd_fp32 uses its own per-call seed for randomization, but its
-	// `#pragma omp parallel for` regions (principal_coordinate_analysis.cpp)
-	// still need the process-wide OpenMP serialization so concurrent queries
-	// don't race on omp_set_num_threads.
+	// No process-wide lock: skbb's ordination is re-entrant once its randomization
+	// is seeded per call, so two queries may ordinate at the same time. The scope
+	// pins this thread's OpenMP fan-out and guarantees the non-negative seed that
+	// keeps skbb off its process-global generator (see SkbbCallScope).
 	{
-		miint::unifrac::OmpThreadScope omp_scope(n_threads);
-		skbb_pcoa_fsvd_inplace_fp32(n, mat, n_dims, seed, eigvals.data(), samples.data(), prop.data());
+		miint::unifrac::SkbbCallScope skbb(n_threads, seed);
+		skbb_pcoa_fsvd_inplace_fp32(n, mat, n_dims, skbb.seed(), eigvals.data(), samples.data(), prop.data());
 	}
 
 	// samples is laid out (n × n_dims), sample-major. The header comment in
@@ -1056,8 +1056,8 @@ unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context
 		// ordination pinned to one OpenMP thread — so `threads :=` still bounds total
 		// fan-out, it just buys concurrent blocks instead of a wider fsvd. Safe here
 		// because a wave's blocks are already in the source's cache (Get is read-only
-		// during a wave) and skbb's ordination is re-entrant under a held
-		// OmpThreadScope. It is worth little on this path (~0.2 s of the 6.0 s; the
+		// during a wave) and skbb's ordination is re-entrant when seeded per call
+		// (see SkbbCallScope). It is worth little on this path (~0.2 s of the 6.0 s; the
 		// ordination stage is ~4% of a run at 1000 anchors, ~11% at 3000) — the
 		// from_unifrac variant, where a block IS a UniFrac compute, is where it would
 		// pay, and that stays serial until libssu's per-compute global `report_status`

@@ -1920,7 +1920,8 @@ if(MIINT_ENABLE_UNIFRAC)
         test/cpp/test_UnifracDenseDistance.cpp
         test/cpp/test_UnifracSubsampleBridge.cpp
         src/progressive_pcoa_core.cpp
-        test/cpp/test_ProgressivePcoa.cpp)
+        test/cpp/test_ProgressivePcoa.cpp
+        test/cpp/test_SkbbConcurrency.cpp)
 endif()
 
 add_executable(tests ${TEST_SOURCES})
