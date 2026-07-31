@@ -109,7 +109,7 @@ De novo chimera detection using the UCHIME algorithm, detecting chimeric sequenc
 
 **Parameters:**
 - `input_table` (VARCHAR): Name of a table or view containing sequences with abundance. By default must have `read_id` (VARCHAR, BIGINT, or UUID — see *Identifier-column types* below), `sequence1` (VARCHAR), and `size` (integer type) columns; use `id_col`/`sequence_col`/`count_col` to override.
-- `sample_id` (VARCHAR, optional): Name of a column in `input_table` to partition by. Each sample gets its own k-mer index and bootstrap; a read_id that appears in multiple samples is therefore scored independently. The sample column is prepended to the output. Execution is serialized per the vsearch wrapper's thread-safety constraints. A TEMP table or view cannot be used as the source in this mode: the per-sample path builds a fixed-name temporary view on a private per-thread connection, which must stay isolated so parallel workers do not collide on that name. Materialize the source as an ordinary table first. Tracked as #207.
+- `sample_id` (VARCHAR, optional): Name of a column in `input_table` to partition by. Each sample gets its own k-mer index and bootstrap; a read_id that appears in multiple samples is therefore scored independently. The sample column is prepended to the output. Execution is serialized per the vsearch wrapper's thread-safety constraints.
 - `id_col` (VARCHAR, default `'read_id'`): Name of the read identifier column in `input_table`.
 - `sequence_col` (VARCHAR, default `'sequence1'`): Name of the sequence column.
 - `count_col` (VARCHAR, default `'size'`): Name of the per-sequence count column. Set to `'abundance'` to chain `deblur(...)` directly into this function.
