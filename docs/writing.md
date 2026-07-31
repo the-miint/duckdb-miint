@@ -139,9 +139,23 @@ Write query results to SAM or BAM format files. Requires all mandatory SAM colum
 
 **Identifier-column types (`read_id`, `reference`, `mate_reference`):**
 - Each column is independently `VARCHAR`, `BIGINT`, or `UUID`. The three need not match. Other numeric types are rejected at bind time with the message `Column '<name>' must be VARCHAR, BIGINT, or UUID`.
-- `BIGINT` values are stringified to decimal on write; `UUID` values are stringified to their canonical 36-char lowercase form. The on-disk SAM/BAM record always carries text. NULL `BIGINT`/`UUID` values are written as the SAM `*` sentinel.
+- `BIGINT` values are stringified to decimal on write; `UUID` values are stringified to their canonical 36-char lowercase form. The on-disk SAM/BAM record always carries text.
+- A NULL in any of these three columns is written as the SAM `*` sentinel, whatever the column's type. So a single-end record can carry `NULL` (or `'*'`) for `mate_reference` interchangeably.
 - Round-trip through `read_alignments` / `read_sam` returns these columns as `VARCHAR` regardless of how they were written; the `BIGINT`/`UUID` type is not preserved on disk.
 - HTSlib normalises `RNEXT` to `=` when it equals `RNAME` at the reference-tid level. This applies to all id types — a `BIGINT`/`UUID` mate_reference that matches `reference` still appears as `=` when the file is read back.
+
+**NULL handling in the required columns:** a NULL is rejected in `flags`, `mate_position` and `template_length` (`Column '<name>' is NULL for read: <id>`), because it has no SAM spelling and no defensible default. `read_id`, `reference` and `mate_reference` accept NULL and write the `*` sentinel, as above. `position`, `mapq` and `cigar` depend on the unmapped flag — see below. (`stop_position` is not consulted by the writer at all.)
+
+**`cigar`, `position`, `mapq`:** whether a record may omit these depends on its unmapped flag (`0x4`):
+
+- **Unmapped** (`0x4` set): none of them is expected. `cigar` may be `'*'`, `''` or NULL and is written as `*`; `position` and `mapq` may be NULL and are written as 0. Nothing can be lost, since there is no alignment to describe. This is what lets `align_minimap2(…, include_unmapped := true)` output — which carries NULL in exactly these columns — be written directly.
+- **Mapped** (`0x4` clear): a CIGAR is required, and `position`/`mapq` must be present. A missing CIGAR (`'*'`, `''` or NULL) is rejected with `Mapped read '<id>' has no CIGAR (flags=<n>)`.
+
+The mapped case is refused rather than written because htslib cannot represent it: samtools reads such a record back and silently rewrites it as unmapped (`[W::sam_parse1] mapped query must have a CIGAR; treated as unmapped`, `FLAG` 0 → 4). A CIGAR dropped by a bad join would otherwise become a mapped record with no alignment, and the COPY would report success. If you genuinely mean "did not align", set the `0x4` flag.
+
+`read_alignments` / `read_sam` return `''` for a record whose on-disk CIGAR is `*`, so both spellings occur naturally and `COPY (SELECT * FROM read_alignments(...))` round-trips unmapped reads unchanged. One consequence worth knowing: a **mapped** record with no CIGAR — which older BAM files can contain, since `bam_read1` accepts `n_cigar == 0` without the rewrite `sam_parse1` applies — was previously copied through and is now rejected. Set `0x4` on such records, or filter them.
+
+Note that these validation errors, like the pre-existing position checks, fire mid-write: the output file will already exist and, for BAM, be structurally incomplete. Treat a failed COPY's output as garbage rather than a partial result.
 
 **Optional columns:**
 - `tag_as`, `tag_xs`, `tag_ys`, `tag_xn`, `tag_xm`, `tag_xo`, `tag_xg`, `tag_nm` (BIGINT): Optional integer tags
@@ -171,7 +185,7 @@ Two consequences worth knowing:
 
 With `INCLUDE_HEADER=false` no `@SQ` lines are written at all, so the ordering above does not apply; each record's RNAME is written verbatim from its `reference` value. (This mode is SAM-only — BAM requires a header.)
 
-> **`REFERENCE_LENGTHS` must be exhaustive.** A record whose `reference` is absent from the table is currently lost silently — in SAM the name reads back as `*`, and in BAM the record is dropped entirely, with no error either way. See issue #198. Until that is fixed, make sure the table covers every reference your records use, e.g. by deriving it from the same relation you are writing.
+> **`REFERENCE_LENGTHS` must be exhaustive when a header is written.** Supplying the table asserts it is the complete reference set, so a record whose `reference` (or `mate_reference`) is absent from it is rejected: `Column 'reference' is 'ctg000002' for read 'r2', which is not in the REFERENCE_LENGTHS table`. The header is serialized before the records are, so it cannot gain `@SQ` lines afterwards — a missing reference has no representation in the file being written, and earlier versions lost such records silently (SAM read the name back as `*`, BAM dropped the record). Derive the table from the same relation you are writing, e.g. `SELECT DISTINCT reference … FROM aln`. With `INCLUDE_HEADER=false` there are no `@SQ` lines to be exhaustive about, so any reference is accepted and written verbatim.
 - `SEQUENCE_DATA` (VARCHAR, optional): Table or view name containing original read sequences from `read_fastx`. When provided, writes actual SEQ and QUAL fields into the output instead of `*`. See [Sequence Data](#sequence-data) below.
 - `COMPRESSION` (default: auto, SAM only): Enable gzip compression (auto-detected from `.gz` extension)
 - `COMPRESSION_LEVEL` (BAM only): BGZF compression level 0-9 (default: 6). Higher = better compression, slower speed.
