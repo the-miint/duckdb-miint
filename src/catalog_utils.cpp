@@ -4,6 +4,7 @@
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/parser/qualified_name.hpp"
 
 namespace duckdb {
 
@@ -39,6 +40,41 @@ TableOrViewColumns GetTableOrViewColumns(ClientContext &context, const std::stri
 	}
 
 	return result;
+}
+
+void RejectRelationNameAsLiteral(ClientContext &context, const std::string &function_name, const std::string &literal) {
+	// Unqualified lookup first. This honours the session search_path, so a bare name
+	// naming a table in a non-default schema is caught.
+	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, literal, QueryErrorContext());
+	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
+
+	if (!entry && literal.find('.') != std::string::npos) {
+		// A qualified name ("s.accs", "db.s.accs") is the same mistake and must not slip
+		// through. Parse rather than split by hand — QualifiedName handles quoting and
+		// the catalog.schema.name form.
+		//
+		// Note accessions legitimately contain dots ("NC_001416.1"), so this branch is
+		// routinely entered for valid input. That is harmless: it resolves schema
+		// "NC_001416" / name "1", which does not exist, and we fall through. The guard
+		// still keys off catalog residency, never off the string's shape.
+		auto qname = QualifiedName::Parse(literal);
+		EntryLookupInfo qualified_lookup(CatalogType::TABLE_ENTRY, qname.name, QueryErrorContext());
+		entry = Catalog::GetEntry(context, qname.catalog, qname.schema, qualified_lookup, OnEntryNotFound::RETURN_NULL);
+	}
+
+	if (!entry) {
+		return;
+	}
+
+	// TABLE_ENTRY lookup returns tables and views; name whichever it actually is, so
+	// the message matches what the user sees in their own schema.
+	const char *kind = entry->type == CatalogType::VIEW_ENTRY ? "view" : "table";
+	throw InvalidInputException(
+	    "%s: '%s' is a %s in the catalog, not an NCBI accession. %s takes literal accessions, e.g. "
+	    "%s('NC_001416.1') or %s(['NC_001416.1', 'NC_000913.3']). To use accessions stored in '%s', hoist "
+	    "them into a list first — a subquery cannot be a table-function argument: "
+	    "SET VARIABLE accs = (SELECT list(<column>) FROM %s); %s(getvariable('accs'));",
+	    function_name, literal, kind, function_name, function_name, function_name, literal, literal, function_name);
 }
 
 bool HasColumn(const TableOrViewColumns &columns, const std::string &col) {

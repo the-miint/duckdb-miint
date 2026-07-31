@@ -1,4 +1,5 @@
 #include "read_ncbi_annotation.hpp"
+#include "catalog_utils.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include <sstream>
 
@@ -85,11 +86,13 @@ unique_ptr<FunctionData> ReadNCBIAnnotationTableFunction::Bind(ClientContext &co
 		throw InvalidInputException("read_ncbi_annotation: at least one accession must be provided");
 	}
 
-	// Validate that no accession is empty
+	// Validate that no accession is empty, and that none is actually a relation name
+	// (#179 — passing a table of accessions by name used to be a silent no-op).
 	for (const auto &acc : accessions) {
 		if (acc.empty()) {
 			throw InvalidInputException("read_ncbi_annotation: accession cannot be empty");
 		}
+		RejectRelationNameAsLiteral(context, "read_ncbi_annotation", acc);
 	}
 
 	// Parse api_key parameter (optional)

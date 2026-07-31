@@ -1,0 +1,194 @@
+# name: test/sql/read_ncbi_accession_guards.test
+# description: Regression: read_ncbi_* must reject a table/view name passed where a literal accession is expected (#179)
+# group: [sql]
+
+#
+# WHY THIS MATTERS
+#
+# read_ncbi, read_ncbi_fasta and read_ncbi_annotation take LITERAL accessions --
+# a VARCHAR or a VARCHAR[]. Passing the NAME OF A TABLE holding accessions is the
+# obvious mistake, and it used to fail silently: the table name was shipped to
+# NCBI as if it were an accession, NCBI returned a body that parsed to zero
+# features, and the function returned 0 rows with no error at all. A caller had
+# no way to tell "this accession has no annotations" from "you passed the wrong
+# kind of argument".
+#
+# That is the same silent-no-op class the P0 programme was spent clearing, so it
+# fails loud now.
+#
+# These tests are deliberately UNGATED -- no `require httpfs`, no `require-env`.
+# The rejection happens in Bind, before any network request is issued (the first
+# HTTP call is in Execute, via GlobalState::FetchNextAccession), so this runs
+# offline. Gating a pure binder guarantee behind an optional dependency is the
+# anti-pattern #181 removed.
+#
+# NOTE ON THE REMEDY IN THE ERROR TEXT: a subquery cannot be used as a table
+# function argument at all ("Binder Error: Table function cannot contain
+# subqueries"), so the fix is NOT `read_ncbi_annotation((SELECT list(x) FROM t))`.
+# The working idiom is SET VARIABLE + getvariable(), which the last case here
+# exercises so the advice in the message stays true.
+#
+
+require miint
+
+statement ok
+CREATE TABLE accs AS SELECT * FROM (VALUES ('NC_001416.1'), ('NC_000913.3')) t(accession);
+
+statement ok
+CREATE VIEW accs_view AS SELECT * FROM accs;
+
+# =============================================================================
+# A table name where an accession belongs -- all three functions
+# =============================================================================
+
+statement error
+SELECT * FROM read_ncbi_annotation('accs');
+----
+is a table in the catalog, not an NCBI accession
+
+statement error
+SELECT * FROM read_ncbi('accs');
+----
+is a table in the catalog, not an NCBI accession
+
+statement error
+SELECT * FROM read_ncbi_fasta('accs');
+----
+is a table in the catalog, not an NCBI accession
+
+# =============================================================================
+# A view is just as wrong, and the message must say so rather than say "table"
+# =============================================================================
+
+statement error
+SELECT * FROM read_ncbi_annotation('accs_view');
+----
+is a view in the catalog, not an NCBI accession
+
+# =============================================================================
+# A SCHEMA-QUALIFIED name is the same mistake and must not slip through.
+#
+# This is the case that needs care: real accessions contain dots ('NC_001416.1'),
+# so the qualified-lookup branch is entered routinely for perfectly valid input.
+# It must resolve nothing there and fall through — the guard keys off catalog
+# residency, never off the string's shape. Both directions are asserted below.
+# =============================================================================
+
+statement ok
+CREATE SCHEMA acc_schema;
+
+statement ok
+CREATE TABLE acc_schema.qualified_accs AS SELECT 'NC_001416.1' AS accession;
+
+statement error
+SELECT * FROM read_ncbi_annotation('acc_schema.qualified_accs');
+----
+is a table in the catalog, not an NCBI accession
+
+statement error
+SELECT * FROM read_ncbi_fasta('acc_schema.qualified_accs');
+----
+is a table in the catalog, not an NCBI accession
+
+# A dotted string that is NOT a relation must still be treated as an accession.
+# 'NC_001416.1' parses as schema 'NC_001416' / name '1', which resolves to nothing.
+statement ok
+EXPLAIN SELECT * FROM read_ncbi_annotation('NC_001416.1');
+
+# Versioned accessions inside a list, likewise.
+statement ok
+EXPLAIN SELECT * FROM read_ncbi_fasta(['NC_001416.1', 'NC_000913.3', 'NM_001101.5']);
+
+# A dotted name whose schema part exists but whose relation part does not must not
+# be rejected — otherwise creating a schema could break unrelated accessions.
+statement ok
+EXPLAIN SELECT * FROM read_ncbi_annotation('acc_schema.1');
+
+# =============================================================================
+# The LIST path must be checked too, not just the scalar VARCHAR path.
+# A caller mixing a real accession with a table name is the likeliest version of
+# this mistake, and the offending element must be named.
+# =============================================================================
+
+statement error
+SELECT * FROM read_ncbi_annotation(['NC_001416.1', 'accs']);
+----
+is a table in the catalog, not an NCBI accession
+
+# =============================================================================
+# The message must be actionable: name the offending value and the working idiom.
+# =============================================================================
+
+statement error
+SELECT * FROM read_ncbi_annotation('accs');
+----
+accs
+
+statement error
+SELECT * FROM read_ncbi_annotation('accs');
+----
+getvariable
+
+# =============================================================================
+# CONTROLS -- the guard must not break the normal path.
+#
+# EXPLAIN binds without executing, so these assert a successful bind with no
+# network access. A real accession that is NOT in the catalog must still be
+# accepted, otherwise the guard has made the functions unusable.
+# =============================================================================
+
+statement ok
+EXPLAIN SELECT * FROM read_ncbi_annotation('NC_001416.1');
+
+statement ok
+EXPLAIN SELECT * FROM read_ncbi_annotation(['NC_001416.1', 'NC_000913.3']);
+
+statement ok
+EXPLAIN SELECT * FROM read_ncbi('NC_001416.1');
+
+statement ok
+EXPLAIN SELECT * FROM read_ncbi_fasta('NC_001416.1');
+
+# A name that looks like a table but is not in the catalog is still treated as an
+# accession -- the guard keys off catalog residency, not on the string's shape.
+statement ok
+EXPLAIN SELECT * FROM read_ncbi_annotation('no_such_table_anywhere');
+
+# The idiom the error message recommends must actually work.
+statement ok
+SET VARIABLE acc_list = (SELECT list(accession) FROM accs);
+
+statement ok
+EXPLAIN SELECT * FROM read_ncbi_annotation(getvariable('acc_list'));
+
+# =============================================================================
+# Pre-existing guards must still fire -- the new check is additional, and must not
+# shadow the NULL/empty/assembly errors that already ran before it.
+# =============================================================================
+
+statement error
+SELECT * FROM read_ncbi_annotation(NULL::VARCHAR);
+----
+accession cannot be NULL
+
+statement error
+SELECT * FROM read_ncbi_annotation('');
+----
+accession cannot be empty
+
+statement error
+SELECT * FROM read_ncbi('GCF_000005845.2');
+----
+Assembly accession
+
+statement ok
+DROP VIEW accs_view;
+
+statement ok
+DROP TABLE accs;
+
+statement ok
+DROP TABLE acc_schema.qualified_accs;
+
+statement ok
+DROP SCHEMA acc_schema;
