@@ -38,7 +38,6 @@ unique_ptr<FunctionData> SaveMinimap2IndexTableFunction::Bind(ClientContext &con
 		data->config.w = w_param->second.GetValue<int32_t>();
 	}
 
-
 	// Load subjects at bind time
 	data->subjects = ReadSubjectTable(context, data->subject_table, subject_schema);
 
