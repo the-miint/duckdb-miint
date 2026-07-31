@@ -38,10 +38,6 @@ unique_ptr<FunctionData> SaveMinimap2IndexTableFunction::Bind(ClientContext &con
 		data->config.w = w_param->second.GetValue<int32_t>();
 	}
 
-	// NOTE: no `eqx` parameter here. eqx selects =/X vs M CIGAR operators, which is an
-	// alignment-time output-formatting choice with nowhere to live in an .mmi -- it had no
-	// effect on index construction and was removed (issue #190). It remains meaningful on
-	// align_minimap2, where the CIGAR is actually produced.
 
 	// Load subjects at bind time
 	data->subjects = ReadSubjectTable(context, data->subject_table, subject_schema);
