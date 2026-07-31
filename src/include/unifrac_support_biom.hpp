@@ -39,6 +39,16 @@ public:
 		return &biom_;
 	}
 
+	// The block's features, deduped and lexicographically sorted by FromCoo.
+	// Exposed so a caller can shear a tree down to exactly this set before
+	// computing: libssu's cost scales with the tree it is HANDED (it shears
+	// internally, but after sizing its traversal), so handing it a tree pruned to
+	// the features actually present is measurably cheaper and — since branches
+	// leading only to absent features are traversed by no sample — bit-identical.
+	const std::vector<std::string> &feature_ids() const {
+		return feature_ids_;
+	}
+
 	UnifracSupportBiomView(UnifracSupportBiomView &&) noexcept;
 	UnifracSupportBiomView &operator=(UnifracSupportBiomView &&) noexcept;
 	UnifracSupportBiomView(const UnifracSupportBiomView &) = delete;

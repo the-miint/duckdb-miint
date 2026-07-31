@@ -200,3 +200,96 @@ FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 15, b
 WHERE batch IS NOT NULL;
 ----
 true
+
+# ── PHYSICAL SORT ORDER IS A PERFORMANCE KNOB, NOT A SEMANTIC ONE.
+#    docs/diversity.md advises storing the feature table sorted by sample_id so a
+#    batch's slice query prunes to that batch's own rows instead of scanning the
+#    whole sample_id column (measured 9 ms vs 33 ms per batch at 104 M rows). That
+#    advice is only safe to give if layout cannot change the answer: samples are
+#    enumerated with ORDER BY sample_id::VARCHAR before batching, so a shuffled
+#    table must produce bit-identical coordinates. If this ever fails, the
+#    enumeration has started depending on scan order and the doc advice is a bug. ──
+statement ok
+CREATE TABLE ft_shuffled AS SELECT * FROM ft ORDER BY hash(sample_id || feature_id);
+
+statement ok
+CREATE TABLE ft_sorted AS SELECT * FROM ft ORDER BY sample_id;
+
+query I
+WITH a AS (SELECT sample_id, axis, coordinate, batch, batch_anchor_m2
+           FROM progressive_pcoa_from_unifrac('ft_sorted', 'tree', variant := 'weighted_normalized',
+               n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42)),
+     b AS (SELECT sample_id, axis, coordinate, batch, batch_anchor_m2
+           FROM progressive_pcoa_from_unifrac('ft_shuffled', 'tree', variant := 'weighted_normalized',
+               n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42))
+SELECT (SELECT count(*) FROM (SELECT * FROM a EXCEPT ALL SELECT * FROM b))
+     + (SELECT count(*) FROM (SELECT * FROM b EXCEPT ALL SELECT * FROM a));
+----
+0
+
+# ── SHEARING MUST NOT MOVE A COORDINATE.
+#    The bind shears the tree to the feature-table's features, and each block
+#    shears again to that block's features, because libssu's cost scales with the
+#    tree it is handed (measured 1.83 s -> 0.61 s on a 700-sample block of a
+#    197,711-feature table). That is only legitimate if a tree carrying tips the
+#    table never uses produces exactly the same ordination as one pruned to fit.
+#    Branches leading only to unused tips are traversed by no sample, so they
+#    belong to neither the numerator nor the denominator of any UniFrac distance —
+#    if this test ever fails, the shear is dropping or reweighting a branch that
+#    some sample does traverse, and every coordinate is suspect. ──
+statement ok
+CREATE TABLE tree_extra AS
+SELECT * FROM tree
+UNION ALL
+-- extra tips as siblings of real tips under Int1 (node 2), so pruning them must
+-- leave Int1 with its original two children and its original branch length
+SELECT 100 + i, 'UNUSED_SIB_' || i, 0.9, NULL::BIGINT, 2, true FROM range(3) a(i)
+UNION ALL
+-- an entire subtree off the root containing no used tip, which must vanish whole
+SELECT 200, 'UnusedInternal', 0.35, NULL::BIGINT, 8, false
+UNION ALL
+SELECT 300 + i, 'UNUSED_SUB_' || i, 1.1, NULL::BIGINT, 200, true FROM range(4) b(i);
+
+# the extended tree really is bigger, and really does cover the used features
+query II
+SELECT (SELECT count(*) FROM tree), (SELECT count(*) FROM tree_extra);
+----
+9	17
+
+query I
+WITH tight AS (SELECT sample_id, axis, coordinate, batch, batch_anchor_m2
+               FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized',
+                   n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42)),
+     extra AS (SELECT sample_id, axis, coordinate, batch, batch_anchor_m2
+               FROM progressive_pcoa_from_unifrac('ft', 'tree_extra', variant := 'weighted_normalized',
+                   n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42))
+SELECT (SELECT count(*) FROM (SELECT * FROM tight EXCEPT ALL SELECT * FROM extra))
+     + (SELECT count(*) FROM (SELECT * FROM extra EXCEPT ALL SELECT * FROM tight));
+----
+0
+
+# Unweighted is the variant most sensitive to a spurious branch — a branch's mere
+# presence enters the denominator — so pin it too. It needs its own fixture:
+# every sample in `ft` carries every feature, which makes unweighted UniFrac
+# identically zero (1 distinct distance) and the procrustes fit degenerate. Here
+# feature f is present only when bit f of ((s % 31) + 1) is set, giving 1-5
+# features per sample and 172 distinct distances.
+statement ok
+CREATE TABLE ft_pa AS
+SELECT 's' || s AS sample_id, 'GG_OTU_' || (f + 1) AS feature_id, (1 + (s * 7 + f * 13) % 11)::DOUBLE AS value
+FROM range(40) t(s), range(5) u(f) WHERE (((s % 31) + 1) >> f) & 1 = 1;
+
+query I
+SELECT count(DISTINCT distance) > 1 FROM unifrac_distances('ft_pa', 'tree', variant := 'unweighted', seed := 42);
+----
+true
+
+query I
+WITH tight AS (SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_unifrac('ft_pa', 'tree',
+                   variant := 'unweighted', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42)),
+     extra AS (SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_unifrac('ft_pa', 'tree_extra',
+                   variant := 'unweighted', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42))
+SELECT (SELECT count(*) FROM (SELECT * FROM tight EXCEPT ALL SELECT * FROM extra))
+     + (SELECT count(*) FROM (SELECT * FROM extra EXCEPT ALL SELECT * FROM tight));
+----
+0

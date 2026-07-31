@@ -78,6 +78,10 @@ The feature table's `sample_id` column may be `VARCHAR`, `BIGINT`, or `UUID` (an
 - `subsample_with_replacement := true` uses multinomial sampling; the default `false` uses permutation without replacement.
 - `seed := -1` (default) uses system entropy; any `seed >= 0` is deterministic. Per-iteration seed is `seed + iteration_index`; bind rejects `seed + n_subsamples - 1 > INT_MAX`.
 
+<a name="subsample-thread-count"></a>**A seeded subsample reproduces per thread count, not across thread counts.** libssu distributes the draw across the OpenMP team — one generator per thread, seeded in turn — so both how many generators exist and which observation consumes which one depend on the team size. The OpenMP width comes from DuckDB's `SET threads = N` (or the per-call `threads` parameter), so the *same* query with the *same* `seed` and `subsample_depth > 0` can produce a different rarefied table, and therefore different distances, on a differently configured server.
+
+Widths that happen to divide the work identically can coincidentally agree — in one measured case widths 1, 2, and 4 agreed while 8 differed — so matching results at two thread counts is not a guarantee of matching at a third. If you need a rarefied result to be reproducible across machines, fix the width explicitly (`threads := N`, or `SET threads = N`) alongside the seed, and record it with the result. This is a property of the draw itself and applies to every function in this section; it is upstream of, and independent of, the fp32 reduction-ordering noise described under [Reproducibility](#reproducibility).
+
 ---
 
 ### UniFrac distances
@@ -338,7 +342,32 @@ There is deliberately **no `subsample_depth`**: rarefaction and progressive alig
 - **Samples & features:** samples with no nonzero feature are excluded (they cannot be ordinated). The tree must cover every feature in the table (validated once at bind); each batch's features are a subset, so the check makes them all safe.
 - **Fewer than two samples**, `n_anchors` outside `[n_dims + 1, n_samples]`, `n_dims > n_samples - 1`, `batch_size < 1`, an unknown `variant`, or a tree missing a feature: an error.
 
-> **Note:** like `progressive_pcoa_from_distances`, this computes each batch's block with its own feature-table slice query (bounded memory), re-reading the anchor samples' feature rows per batch; the anchor-row-cache optimization is future work.
+> **Note:** like `progressive_pcoa_from_distances`, this computes each batch's block with its own feature-table slice query, so memory stays bounded by one `(anchors + batch)` block. The anchor samples' feature rows are read once and cached for the whole run, so each batch's query fetches only its own samples.
+
+<a name="feature-table-sort-order"></a>**Performance: store the feature table sorted by `sample_id`.** Samples are batched in sorted id order, so a batch is a contiguous id range. If the table's physical layout is also sorted, DuckDB/Parquet prune by each row group's min/max `sample_id` and a batch's slice query reads only that batch's own rows; if it is not, every slice query scans the whole `sample_id` column, so the run's slicing cost grows as `n_batches × table_rows` instead of one pass.
+
+Measured on the 17,483-sample EMP deblur table remapped to short (WoL-style) feature ids, and an 8× replication of it, `batch_size := 1000`, one batch's slice query:
+
+| feature table | sorted by `sample_id` | unsorted |
+|---|---|---|
+| 17,483 samples / 13.1 M rows | 6 ms | 7 ms |
+| 139,864 samples / 104.4 M rows | 9 ms | 33 ms |
+
+Sorted stays flat as the table grows; unsorted scales with it. The gap widens with the width of `feature_id`: repeating the 13.1 M-row measurement with the original 150 bp ASV sequences as ids gave 8 ms sorted vs **140 ms** unsorted, because an unpruned scan pays for the wide string column too. For ASV-keyed tables at scale this is the difference between minutes and hours.
+
+`read_biom` emits each sample's rows contiguously, but in the BIOM file's own sample order — **grouped is not sorted**, and grouping alone prunes nothing, since each row group then spans nearly the whole id range. Add the `ORDER BY` when you materialize:
+
+```sql
+CREATE TABLE observations AS
+    SELECT * FROM read_biom('table.biom') ORDER BY sample_id;
+-- or, writing Parquet
+COPY (SELECT * FROM read_biom('table.biom') ORDER BY sample_id)
+    TO 'observations.parquet' (FORMAT PARQUET);
+```
+
+**With a BIGINT `sample_id`, sort by the text form.** Samples are enumerated and batched by `sample_id::VARCHAR`, so batches are *lexical* ranges (`1, 10, 100, 1000, …, 2, 20`) and a numerically sorted table will not line up with them — use `ORDER BY sample_id::VARCHAR`. VARCHAR and UUID ids sort identically either way (see [Sample identifier types](#sample-identifier-types)).
+
+Sort order affects only how much a run reads — never the coordinates it produces.
 
 ---
 
@@ -535,7 +564,7 @@ SELECT * FROM unifrac_faith_pd('observations', 'tree',
 #### Behavior
 
 - **No subsampling** (`subsample_depth = 0`): one row per input sample; output is deterministic regardless of `seed`. `n_subsamples > 1` is rejected because iterations would be identical.
-- **Subsampling** (`subsample_depth > 0`): per iteration, `subsample_table_inmem_seeded(seed + i)` is called and Faith PD is computed on the bridged result. Same seed → byte-identical reconstruction (no fp32 tolerance needed).
+- **Subsampling** (`subsample_depth > 0`): per iteration, `subsample_table_inmem_seeded(seed + i)` is called and Faith PD is computed on the bridged result. Same seed **at the same thread count** → byte-identical reconstruction (no fp32 tolerance needed); across thread counts the draw itself changes, see [seeded subsampling and thread count](#subsample-thread-count).
 - **Subsampling drops low-count samples:** if a sample's total count falls below `subsample_depth`, it does not appear in that iteration's output.
 
 #### Examples
