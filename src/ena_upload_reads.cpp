@@ -6,8 +6,11 @@
 
 #include "aspera_send.hpp"
 #include "aspera_utils.hpp"
-#ifdef MIINT_HAS_CURL
+// Unconditional: RunStreamingUpload is compiled on every platform and needs
+// MakeReadOnlyHelperConnection. libcurl is auto-disabled on macOS, so anything
+// placed inside the MIINT_HAS_CURL block below is invisible there.
 #include "catalog_utils.hpp"
+#ifdef MIINT_HAS_CURL
 #include "curl_send.hpp"
 #endif
 #include "ena_upload_helpers.hpp"
