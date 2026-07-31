@@ -181,6 +181,7 @@ TO 'sorted.bam' (FORMAT BAM, REFERENCE_LENGTHS 'refs');
 Two consequences worth knowing:
 
 - The order does **not** depend on how `REFERENCE_LENGTHS` was built (ASC, DESC or shuffled all give the same header), and it does not depend on `PRAGMA threads`. This is deliberate: DuckDB does not guarantee the row order of a parallel table scan, so the table's own row order could not be a reproducible contract.
+- The header is readable back from SQL with `read_alignment_header('file.bam')`, which exposes `@SQ` as `(tid, reference, length)` — see [Reading](reading.md#read_alignment_headerpath). That is the only way to observe `tid`, and therefore the only way to check this ordering contract on a BAM.
 - **Karyotype order is not expressible**: `'chr10'` sorts before `'chr2'`, so a human-genome BAM will be ordered `chr1, chr10, chr11, …, chr2` rather than `chr1, chr2, …, chr10`. The file is still internally consistent and indexable; it simply won't match a reference-order convention that isn't lexicographic. Sorting your records by `reference` keeps them aligned with whatever the header says.
 
 With `INCLUDE_HEADER=false` no `@SQ` lines are written at all, so the ordering above does not apply; each record's RNAME is written verbatim from its `reference` value. (This mode is SAM-only — BAM requires a header.)

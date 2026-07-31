@@ -1,0 +1,287 @@
+# name: test/sql/read_alignment_header.test
+# description: read_alignment_header exposes @SQ as (tid, reference, length) (#174)
+# group: [sql]
+
+#
+# WHY THIS MATTERS
+#
+# A record's tid -- its index in the @SQ list -- is what a BAM is
+# coordinate-sorted by, but nothing in miint exposed it. read_alignments and
+# read_sam decode each record's `reference` via sam_hdr_tid2name against the
+# file's own header, and name<->tid is a bijection fixed when the header is
+# built, so reading names back yields ascending NAMES whatever the @SQ order
+# was -- on correct and buggy code alike. samtools index is not a
+# discriminating oracle either: it succeeds on both a name-sorted and a
+# DESC-ordered BAM.
+#
+# The consequence is recorded in test/sql/copy_sam.test:411-416, which states
+# that the BAM half of the @SQ name-sort contract added in c6f803b could not be
+# verified and names this issue as the missing capability. The last section of
+# this file closes that gap.
+#
+# Local paths only, by decision. Remote (https://, s3://) is rejected with a
+# clear error rather than silently mis-handled; read_alignments' hFILE
+# streaming path is not replicated here.
+#
+
+require miint
+
+# =============================================================================
+# The @SQ list, in header order, with tid exposed
+#
+# data/sam/foo_has_header.{bam,sam} is the right fixture precisely because its
+# @SQ order is NOT name-sorted: G000144735 < G1234 lexicographically, yet
+# G1234 is tid 0. Verified independently by decoding the BAM header directly.
+# =============================================================================
+
+query IIT
+SELECT tid, reference, length FROM read_alignment_header('data/sam/foo_has_header.bam') ORDER BY tid;
+----
+0	G1234	20
+1	G000144735	90
+
+query IIT
+SELECT tid, reference, length FROM read_alignment_header('data/sam/foo_has_header.sam') ORDER BY tid;
+----
+0	G1234	20
+1	G000144735	90
+
+# The point of the function, stated as an assertion: tid order and name order
+# are genuinely different for this file. If these two agreed, the fixture would
+# prove nothing.
+query T
+SELECT reference FROM read_alignment_header('data/sam/foo_has_header.bam') ORDER BY tid LIMIT 1;
+----
+G1234
+
+query T
+SELECT reference FROM read_alignment_header('data/sam/foo_has_header.bam') ORDER BY reference LIMIT 1;
+----
+G000144735
+
+# =============================================================================
+# length must be BIGINT, not a 32-bit read
+#
+# data/sam/foo_large_positions.bam carries LN=3000000000, which is
+# -1294967296 interpreted as int32. This case is why the implementation must
+# use sam_hdr_tid2len (hts_pos_t / int64) rather than a 32-bit field.
+# The .sam sibling carries 2000000000, which does fit in int32 -- both are
+# asserted so a regression in either direction shows up.
+# =============================================================================
+
+query IIT
+SELECT tid, reference, length FROM read_alignment_header('data/sam/foo_large_positions.bam');
+----
+0	chrLarge	3000000000
+
+query IIT
+SELECT tid, reference, length FROM read_alignment_header('data/sam/foo_large_positions.sam');
+----
+0	chrLarge	2000000000
+
+# =============================================================================
+# A header with no @SQ lines yields ZERO ROWS, not an error
+#
+# Unaligned BAM/SAM legitimately has no references. Erroring here would make
+# the function unusable for exactly the uBAM files miint itself writes.
+# =============================================================================
+
+query I
+SELECT COUNT(*) FROM read_alignment_header('data/sam/ubam_ccs_golden.bam');
+----
+0
+
+query I
+SELECT COUNT(*) FROM read_alignment_header('data/sam/ubam_no_sq.sam');
+----
+0
+
+# @HD present, no @SQ.
+query I
+SELECT COUNT(*) FROM read_alignment_header('data/sam/partial_header.sam');
+----
+0
+
+# =============================================================================
+# A corrupt RECORD must not stop the header from being read
+#
+# data/sam/bad_tid.bam has an intact header and a record whose refID is patched
+# to 99. A header reader never calls sam_read1, so it must succeed here -- a
+# deliberate divergence from read_sam, which fails the scan on the same file.
+# Both halves are asserted so the divergence is pinned, not accidental.
+# =============================================================================
+
+query IIT
+SELECT tid, reference, length FROM read_alignment_header('data/sam/bad_tid.bam');
+----
+0	ctg1	1000
+
+statement error
+SELECT COUNT(*) FROM read_sam('data/sam/bad_tid.bam');
+----
+Failed to read SAM/BAM record
+
+# =============================================================================
+# Error handling
+# =============================================================================
+
+statement error
+SELECT * FROM read_alignment_header('data/sam/does_not_exist.bam');
+----
+File not found
+
+statement error
+SELECT * FROM read_alignment_header(NULL);
+----
+cannot be NULL
+
+statement error
+SELECT * FROM read_alignment_header('');
+----
+cannot be empty
+
+# Local paths only, by decision -- rejected loud rather than half-supported.
+statement error
+SELECT * FROM read_alignment_header('https://example.org/foo.bam');
+----
+remote paths are not supported
+
+statement error
+SELECT * FROM read_alignment_header('s3://bucket/foo.bam');
+----
+remote paths are not supported
+
+# =============================================================================
+# THE VERIFICATION GAP THIS FUNCTION EXISTS TO CLOSE
+#
+# c6f803b made COPY ... (FORMAT BAM) emit @SQ sorted by reference NAME, so that
+# a caller's ORDER BY reference, position yields a genuinely coordinate-sorted
+# file. Until now that contract was only assertable for SAM *text*, by
+# re-reading the file with read_csv and a regexp. For BAM it was not assertable
+# at all. It is now.
+#
+# The reference table is built in deliberately NON-sorted row order, so a
+# writer that emitted @SQ in table order (or in hash order, the original bug)
+# would fail these assertions.
+# =============================================================================
+
+statement ok
+CREATE TABLE sq_refs AS SELECT * FROM (VALUES
+    ('s1.ctg000004l', 40), ('s1.ctg000001l', 10), ('s1.ctg000006l', 60),
+    ('s1.ctg000003l', 30), ('s1.ctg000002l', 20), ('s1.ctg000005l', 50)
+) t(reference, length);
+
+# mate_reference is '*', never NULL: a NULL RNEXT produces an empty field and a
+# corrupt BAM with zero records, against which "nothing is out of order" passes
+# vacuously (#197).
+statement ok
+CREATE TABLE sq_multi AS
+SELECT 'r' || i AS read_id, 0::USMALLINT AS flags,
+       's1.ctg' || lpad(i::VARCHAR, 6, '0') || 'l' AS reference,
+       1::BIGINT AS position, 2::BIGINT AS stop_position, 60::UTINYINT AS mapq, '1M' AS cigar,
+       '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length
+FROM range(1, 7) t(i);
+
+statement ok
+COPY (SELECT * FROM sq_multi ORDER BY reference, position)
+TO '__TEST_DIR__/sq_header.bam' (FORMAT BAM, REFERENCE_LENGTHS 'sq_refs');
+
+# Records survived: guards the vacuous-pass failure mode above.
+query I
+SELECT COUNT(*) FROM read_sam('__TEST_DIR__/sq_header.bam');
+----
+6
+
+# THE ASSERTION: @SQ is emitted in name-sorted order, and tid follows it. This
+# is what could not be checked before.
+query IIT
+SELECT tid, reference, length FROM read_alignment_header('__TEST_DIR__/sq_header.bam') ORDER BY tid;
+----
+0	s1.ctg000001l	10
+1	s1.ctg000002l	20
+2	s1.ctg000003l	30
+3	s1.ctg000004l	40
+4	s1.ctg000005l	50
+5	s1.ctg000006l	60
+
+# Stated as the invariant rather than as literal values: tid order IS name
+# order. This is the form that keeps holding if the fixture changes.
+query I
+SELECT COUNT(*) = 0 FROM (
+  SELECT tid, reference,
+         ROW_NUMBER() OVER (ORDER BY reference) - 1 AS expected_tid
+  FROM read_alignment_header('__TEST_DIR__/sq_header.bam')
+) WHERE tid != expected_tid;
+----
+true
+
+statement ok
+DROP TABLE sq_multi;
+
+statement ok
+DROP TABLE sq_refs;
+
+# =============================================================================
+# A header larger than one DuckDB vector
+#
+# Every fixture above has at most 6 references, so none of them reaches the
+# cursor / STANDARD_VECTOR_SIZE path in Execute -- the whole result fits in one
+# vector and a broken cursor would still look correct. A fragmented assembly
+# routinely has thousands of contigs, so 3000 references are generated here to
+# span two vectors (2048 + 952) and pin that path.
+# =============================================================================
+
+statement ok
+CREATE TABLE big_refs AS
+SELECT 'ctg' || lpad(i::VARCHAR, 6, '0') AS reference, (100 + i)::INTEGER AS length
+FROM range(1, 3001) t(i);
+
+statement ok
+CREATE TABLE big_aln AS
+SELECT 'r' || i AS read_id, 0::USMALLINT AS flags,
+       'ctg' || lpad(i::VARCHAR, 6, '0') AS reference,
+       1::BIGINT AS position, 2::BIGINT AS stop_position, 60::UTINYINT AS mapq, '1M' AS cigar,
+       '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length
+FROM range(1, 3001) t(i);
+
+statement ok
+COPY (SELECT * FROM big_aln ORDER BY reference, position)
+TO '__TEST_DIR__/big_header.bam' (FORMAT BAM, REFERENCE_LENGTHS 'big_refs');
+
+# Every reference is emitted exactly once -- a cursor that reset, double-counted
+# or stopped after the first vector would not return 3000.
+query I
+SELECT COUNT(*) FROM read_alignment_header('__TEST_DIR__/big_header.bam');
+----
+3000
+
+# tid is dense, 0-based and contiguous across the vector boundary.
+query III
+SELECT MIN(tid), MAX(tid), COUNT(DISTINCT tid) FROM read_alignment_header('__TEST_DIR__/big_header.bam');
+----
+0	2999	3000
+
+# The ordering invariant still holds at this size, i.e. rows are not merely
+# present but correctly paired across the boundary.
+query I
+SELECT COUNT(*) = 0 FROM (
+  SELECT tid, ROW_NUMBER() OVER (ORDER BY reference) - 1 AS expected_tid
+  FROM read_alignment_header('__TEST_DIR__/big_header.bam')
+) WHERE tid != expected_tid;
+----
+true
+
+# reference and length must stay aligned with tid across the boundary: length was
+# built as 100 + i and the names sort in the same order, so the pairing is
+# checkable arithmetically rather than by listing 3000 rows.
+query I
+SELECT COUNT(*) = 0 FROM read_alignment_header('__TEST_DIR__/big_header.bam')
+WHERE length != 101 + tid;
+----
+true
+
+statement ok
+DROP TABLE big_aln;
+
+statement ok
+DROP TABLE big_refs;

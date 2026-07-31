@@ -1196,6 +1196,7 @@ set(EXTENSION_SOURCES
     src/read_fastx.cpp
     src/miint_extension.cpp
     src/read_alignments.cpp
+    src/read_alignment_header.cpp
     src/read_sequences_sam.cpp
     src/SAMReader.cpp
     src/alignment_flag_functions.cpp
