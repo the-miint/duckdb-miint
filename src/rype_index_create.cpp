@@ -1,4 +1,5 @@
 #include "rype_index_create.hpp"
+#include "catalog_utils.hpp"
 #include "rype_common.hpp"
 
 #include "duckdb/main/connection.hpp"
@@ -274,6 +275,7 @@ unique_ptr<GlobalTableFunctionState> RypeIndexCreateTableFunction::InitGlobal(Cl
 	// consumption of the streamed chunk cursor during the synchronous build.
 	auto &db = DatabaseInstance::GetDatabase(context);
 	gstate->input_connection = make_uniq<Connection>(db);
+	InheritTempObjects(context, *gstate->input_connection);
 	auto &conn = *gstate->input_connection;
 
 	// Arrow v1.4 (Utf8View/BinaryView) for VARCHAR — no i32 offset 2 GiB cap. The

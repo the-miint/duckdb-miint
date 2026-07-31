@@ -1,6 +1,7 @@
 #include "align_bowtie2_sharded.hpp"
 #include "align_bowtie2_daemon_common.hpp"
 #include "align_common.hpp"
+#include "catalog_utils.hpp"
 #include "miint_log.hpp"
 #include "sequence_table_reader.hpp"
 #include "shard_progress.hpp"
@@ -408,8 +409,7 @@ struct AlignBowtie2ShardedLocalState : public LocalTableFunctionState {
 // error — we never want users to be in the business of pre-encoding ASCII
 // quality strings themselves).
 void DetectQueryColumns(ClientContext &context, AlignBowtie2ShardedBindData &bd) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	const std::string sql = "SELECT column_name, column_type FROM (DESCRIBE " +
 	                        KeywordHelper::WriteOptionallyQuoted(bd.query_table) +
 	                        ") WHERE column_name IN ('sequence2','qual1','qual2')";
@@ -731,6 +731,7 @@ unique_ptr<LocalTableFunctionState> InitLocal(ExecutionContext &context, TableFu
 	// thread-safe across a shared connection, and each shard needs its own
 	// streaming cursor.
 	ls->input_conn = std::make_unique<Connection>(DatabaseInstance::GetDatabase(context.client));
+	InheritTempObjects(context.client, *ls->input_conn);
 	// Spawn the per-thread daemon eagerly: if gpl-boundary is missing /
 	// wrong-version, we want that error to surface before any row flows.
 	// Lazy-spawning inside Execute() would let some threads stream rows

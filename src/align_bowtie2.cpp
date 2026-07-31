@@ -1,5 +1,6 @@
 #include "align_bowtie2.hpp"
 #include "align_bowtie2_daemon_common.hpp"
+#include "catalog_utils.hpp"
 #include "sequence_table_reader.hpp"
 
 #include "duckdb/common/arrow/arrow.hpp"
@@ -203,8 +204,7 @@ struct AlignBowtie2LocalState : public LocalTableFunctionState {};
 // Utf8 strings, and miint's canonical raw representation is UTINYINT[] per
 // read_fastx. FetchNextQueryBatch converts on the fly.
 void DetectQueryColumns(ClientContext &context, AlignBowtie2BindData &bd) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	const std::string sql = "SELECT column_name, column_type FROM (DESCRIBE " +
 	                        KeywordHelper::WriteOptionallyQuoted(bd.query_table) +
 	                        ") WHERE column_name IN ('sequence2','qual1','qual2')";
@@ -348,6 +348,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	// 5. Open a streaming cursor on the query table. SendQuery returns a
 	//    StreamQueryResult that fetches chunks lazily.
 	gs->input_conn = std::make_unique<Connection>(DatabaseInstance::GetDatabase(context));
+	InheritTempObjects(context, *gs->input_conn);
 	std::string select = "SELECT read_id, sequence1";
 	if (bd.query_has_sequence2) {
 		select += ", sequence2";

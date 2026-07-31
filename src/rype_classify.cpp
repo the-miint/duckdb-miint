@@ -1,4 +1,5 @@
 #include "rype_classify.hpp"
+#include "catalog_utils.hpp"
 #include "rype_common.hpp"
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/printer.hpp"
@@ -41,10 +42,12 @@ RypeClassifyTableFunction::GlobalState::~GlobalState() {
 		rype_index_free(index);
 	}
 
-	// Drop the materialized temp table BEFORE releasing the connection that owns
-	// it. The temp table is per-connection so teardown would clean it up
-	// implicitly, but the explicit drop releases memory sooner. DropRypeTempTable
-	// is a no-op if either is unset (e.g., bind failure).
+	// Drop the materialized temp table BEFORE releasing the connection that owns it.
+	// This is REQUIRED, not just an early release of memory: input_connection inherits
+	// the caller's TEMP catalog (#193) so the table lives in the user's session and is
+	// NOT reaped when the connection is torn down. DropRypeTempTable is a no-op if
+	// either is unset (e.g., bind failure) and warns rather than swallowing a failed
+	// drop, since a failure is now a visible leak into the user's catalog.
 	if (input_connection) {
 		DropRypeTempTable(*input_connection, tmp_table_name);
 	}
@@ -157,6 +160,7 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 	// is destroyed before RYpe finishes consuming, the dangling pointer causes use-after-free.
 	auto &db = DatabaseInstance::GetDatabase(context);
 	gstate->input_connection = make_uniq<Connection>(db);
+	InheritTempObjects(context, *gstate->input_connection);
 	auto &conn = *gstate->input_connection;
 
 	// Use Arrow BinaryView (v1.4+) for BLOB columns — no offset-size limits.

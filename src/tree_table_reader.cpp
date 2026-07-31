@@ -25,8 +25,7 @@ void ValidateTreeTableSchema(ClientContext &context, const std::string &table_na
 std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::string &table_name) {
 	std::vector<miint::NodeInput> result;
 
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 
 	// Optional columns (name, branch_length, edge_id) default to NULL when the
 	// tree table lacks them, so a minimal node_index+parent_index table is

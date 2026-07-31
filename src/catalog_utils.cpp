@@ -1,9 +1,12 @@
 #include "catalog_utils.hpp"
+#include "miint_log.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/main/client_data.hpp"
+#include "duckdb/main/database.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 
 namespace duckdb {
@@ -75,6 +78,41 @@ void RejectRelationNameAsLiteral(ClientContext &context, const std::string &func
 	    "them into a list first — a subquery cannot be a table-function argument: "
 	    "SET VARIABLE accs = (SELECT list(<column>) FROM %s); %s(getvariable('accs'));",
 	    function_name, literal, kind, function_name, function_name, function_name, literal, literal, function_name);
+}
+
+void InheritTempObjects(ClientContext &context, Connection &conn) {
+	// The connection's own temporary_objects — freshly constructed and empty — is
+	// released here. Nothing outside ClientData references it: ClientData's
+	// constructor only borrows an oid from the DatabaseManager, and lookups read the
+	// pointer back out of ClientData dynamically (database_manager.cpp:61), so there
+	// is no registry entry or cached oid to invalidate.
+	ClientData::Get(*conn.context).temporary_objects = ClientData::Get(context).temporary_objects;
+}
+
+Connection MakeReadOnlyHelperConnection(ClientContext &context) {
+	Connection conn(DatabaseInstance::GetDatabase(context));
+	InheritTempObjects(context, conn);
+	return conn;
+}
+
+void DropHelperTempRelation(Connection &conn, const std::string &quoted_name) {
+	if (quoted_name.empty()) {
+		return;
+	}
+	// Connection::Query converts everything DuckDB throws into an error on the result
+	// (ClientContext::Query catches std::exception plus a catch-all), and EmitWarning
+	// is itself guarded — but this runs in destructors, where propagating anything at
+	// all would terminate, so the whole body is belt-and-braces wrapped.
+	try {
+		auto result = conn.Query("DROP TABLE IF EXISTS " + quoted_name);
+		if (result->HasError()) {
+			miint::EmitWarning(*conn.context,
+			                   "Failed to drop internal temporary relation %s: %s. It may remain "
+			                   "visible in this session until it ends.",
+			                   quoted_name, result->GetError());
+		}
+	} catch (...) { // NOLINT: a destructor must not propagate; see above
+	}
 }
 
 bool HasColumn(const TableOrViewColumns &columns, const std::string &col) {

@@ -2,6 +2,7 @@
 
 #include "PileupWalker.hpp"
 #include "alignment_functions_internal.hpp"
+#include "catalog_utils.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -53,8 +54,7 @@ struct PileupGlobalState : public GlobalTableFunctionState {
 // ---------------------------------------------------------------------------
 static void ValidateTableSchema(ClientContext &context, const std::string &table_name, const std::string &probe,
                                 const char *role) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	std::string query = "SELECT " + probe + " FROM " + KeywordHelper::WriteOptionallyQuoted(table_name) + " LIMIT 0";
 	auto result = conn.Query(query);
 	if (result->HasError()) {
@@ -74,8 +74,7 @@ static void ValidateTableSchema(ClientContext &context, const std::string &table
 static std::unordered_map<std::string, std::string> LoadReference(ClientContext &context,
                                                                   const std::string &table_name) {
 	std::unordered_map<std::string, std::string> ref;
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	std::string query = "SELECT ref_id, sequence FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
 	auto result = conn.Query(query);
 	if (result->HasError()) {
@@ -198,6 +197,7 @@ static unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, T
 
 	auto &db = DatabaseInstance::GetDatabase(context);
 	gstate->conn = make_uniq<Connection>(db);
+	InheritTempObjects(context, *gstate->conn);
 	std::string query = "SELECT read_id, reference, position, cigar, sequence, qual FROM " +
 	                    KeywordHelper::WriteOptionallyQuoted(data.alignments_table);
 	gstate->alignment_stream = gstate->conn->SendQuery(query);

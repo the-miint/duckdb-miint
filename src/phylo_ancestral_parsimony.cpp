@@ -35,8 +35,7 @@ struct CostMatrix {
 // finite and non-negative. Uses a separate Connection (docs/internals/
 // reading-tables-views.md).
 CostMatrix ReadCostMatrix(ClientContext &context, const std::string &table_name) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	std::string q = "SELECT from_state::VARCHAR, to_state::VARCHAR, cost::DOUBLE FROM " +
 	                KeywordHelper::WriteOptionallyQuoted(table_name);
 	auto res = conn.Query(q);

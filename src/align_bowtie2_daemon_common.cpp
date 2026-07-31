@@ -1,6 +1,7 @@
 #include "align_bowtie2_daemon_common.hpp"
 
 #include "align_common.hpp"
+#include "catalog_utils.hpp"
 #include "fastq_encoder.hpp"
 #include "gpl_boundary/arrow_ipc.hpp"
 #include "gpl_boundary/session.hpp"
@@ -838,8 +839,7 @@ void RequireGplBoundaryVersion(const std::string &binary_path, const char *calle
 // =============================================================================
 
 LoadedSubjects LoadSingleEndSubjects(ClientContext &context, const std::string &table_name, const char *caller) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	// Probe for an optional sequence2 column first (paired subjects are
 	// rejected), then issue the actual SELECT. read_id may be VARCHAR or BIGINT;
 	// the implicit Value::GetValue<std::string>() cast below handles either.

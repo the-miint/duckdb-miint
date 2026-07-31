@@ -169,8 +169,7 @@ static unique_ptr<FunctionData> DeblurBind(ClientContext &context, TableFunction
 	}
 
 	if (data->has_sample_id) {
-		auto &db = DatabaseInstance::GetDatabase(context);
-		Connection conn(db);
+		auto conn = MakeReadOnlyHelperConnection(context);
 		// Reserved output-column names the sample_id column must not collide with.
 		DiscoverSamples(conn, data->input_table, data->sample_info.sample_id_col, {"read_id", "sequence", "abundance"},
 		                "deblur", data->sample_info);
@@ -202,8 +201,7 @@ static unique_ptr<GlobalTableFunctionState> DeblurInitGlobal(ClientContext &cont
 	gstate->max_threads = 1;
 
 	// Non-sample path: load whole table once, deblur, hold for single-threaded drain.
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	auto q_id = KeywordHelper::WriteOptionallyQuoted(data.id_col);
 	auto q_seq = KeywordHelper::WriteOptionallyQuoted(data.sequence_col);
 	auto q_count = KeywordHelper::WriteOptionallyQuoted(data.count_col);
@@ -248,8 +246,8 @@ static unique_ptr<LocalTableFunctionState> DeblurInitLocal(ExecutionContext &con
 	auto &data = input.bind_data->Cast<DeblurData>();
 	auto lstate = make_uniq<DeblurLocalState>();
 	if (data.has_sample_id) {
-		auto &db = DatabaseInstance::GetDatabase(context.client);
-		lstate->conn = make_uniq<Connection>(db);
+		lstate->conn = make_uniq<Connection>(DatabaseInstance::GetDatabase(context.client));
+		InheritTempObjects(context.client, *lstate->conn);
 	}
 	return lstate;
 }

@@ -1,6 +1,7 @@
 #include "consensus_abpoa.hpp"
 #include "AbpoaAligner.hpp"
 #include "abpoa_param_parser.hpp"
+#include "catalog_utils.hpp"
 #include "per_sample_table_function.hpp"
 #include "sequence_table_reader.hpp"
 #include "duckdb/common/exception.hpp"
@@ -79,8 +80,7 @@ static unique_ptr<FunctionData> ConsensusAbpoaBind(ClientContext &context, Table
 	}
 
 	if (data->has_sample_id) {
-		auto &db = DatabaseInstance::GetDatabase(context);
-		Connection conn(db);
+		auto conn = MakeReadOnlyHelperConnection(context);
 		DiscoverSamples(conn, data->table_name, data->sample_info.sample_id_col,
 		                {"consensus_id", "consensus_sequence", "consensus_length", "num_reads"}, "consensus_abpoa",
 		                data->sample_info);
@@ -124,8 +124,8 @@ static unique_ptr<LocalTableFunctionState> ConsensusAbpoaInitLocal(ExecutionCont
 	auto &data = input.bind_data->Cast<ConsensusAbpoaData>();
 	auto lstate = make_uniq<ConsensusAbpoaLocalState>();
 	if (data.has_sample_id) {
-		auto &db = DatabaseInstance::GetDatabase(context.client);
-		lstate->conn = make_uniq<Connection>(db);
+		lstate->conn = make_uniq<Connection>(DatabaseInstance::GetDatabase(context.client));
+		InheritTempObjects(context.client, *lstate->conn);
 	}
 	return lstate;
 }

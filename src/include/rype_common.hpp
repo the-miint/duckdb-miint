@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rype.h"
+#include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
@@ -344,16 +345,20 @@ BuildRypeArrowInput(Connection &conn, const std::string &tmp_table_name, bool in
 	return make_uniq<ResultArrowArrayStreamWrapper>(std::move(query_result), batch_size);
 }
 
-//! Drop the per-call TEMP table on `conn`. Safe with empty name (no-op) and
-//! with a name that doesn't exist (uses IF EXISTS). Errors are silently
-//! ignored — this runs in destructors where we cannot usefully propagate
-//! failures, and the connection's catalog cleanup will reap the table on
-//! teardown anyway.
+//! Drop the per-call TEMP table on `conn`. Safe with empty name (no-op) and with a
+//! name that doesn't exist (uses IF EXISTS). Never throws — this runs in destructors.
+//!
+//! This drop is REQUIRED, not merely an early release of memory. The rype input
+//! connections inherit the caller's TEMP catalog (#193, so a TEMP sequence_table
+//! resolves), which means the table lives in the user's session and does NOT get
+//! reaped when the connection is torn down. A failure therefore leaks an internal
+//! relation into the user's catalog, which is why DropHelperTempRelation warns
+//! instead of discarding the error.
 inline void DropRypeTempTable(Connection &conn, const std::string &tmp_table_name) {
 	if (tmp_table_name.empty()) {
 		return;
 	}
-	conn.Query("DROP TABLE IF EXISTS " + KeywordHelper::WriteOptionallyQuoted(tmp_table_name));
+	DropHelperTempRelation(conn, KeywordHelper::WriteOptionallyQuoted(tmp_table_name));
 }
 
 } // namespace duckdb

@@ -1,4 +1,5 @@
 #include "rype_log_ratio.hpp"
+#include "catalog_utils.hpp"
 #include "rype_common.hpp"
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/printer.hpp"
@@ -149,6 +150,7 @@ unique_ptr<GlobalTableFunctionState> RypeLogRatioTableFunction::InitGlobal(Clien
 	// Store connection in GlobalState — see rype_classify.cpp InitGlobal for rationale.
 	auto &db = DatabaseInstance::GetDatabase(context);
 	gstate->input_connection = make_uniq<Connection>(db);
+	InheritTempObjects(context, *gstate->input_connection);
 	auto &conn = *gstate->input_connection;
 
 	// Use Arrow BinaryView (v1.4+) — see rype_classify.cpp InitGlobal for rationale.

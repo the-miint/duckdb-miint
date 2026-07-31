@@ -31,8 +31,7 @@ std::map<std::string, std::unordered_map<std::string, double>> ReadContinuousTra
                                                                                     const std::string &table_name) {
 	std::map<std::string, std::unordered_map<std::string, double>> traits;
 
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 
 	std::string query =
 	    "SELECT name::VARCHAR, trait::VARCHAR, value::DOUBLE FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
@@ -96,8 +95,7 @@ std::map<std::string, std::unordered_map<std::string, std::string>> ReadDiscrete
                                                                                        const std::string &table_name) {
 	std::map<std::string, std::unordered_map<std::string, std::string>> traits;
 
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 
 	std::string query =
 	    "SELECT name::VARCHAR, trait::VARCHAR, value::VARCHAR FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);

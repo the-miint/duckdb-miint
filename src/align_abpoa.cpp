@@ -1,6 +1,7 @@
 #include "align_abpoa.hpp"
 #include "AbpoaAligner.hpp"
 #include "abpoa_param_parser.hpp"
+#include "catalog_utils.hpp"
 #include "per_sample_table_function.hpp"
 #include "sequence_table_reader.hpp"
 #include "duckdb/common/exception.hpp"
@@ -94,8 +95,7 @@ static unique_ptr<FunctionData> AlignAbpoaBind(ClientContext &context, TableFunc
 	}
 
 	if (data->has_sample_id) {
-		auto &db = DatabaseInstance::GetDatabase(context);
-		Connection conn(db);
+		auto conn = MakeReadOnlyHelperConnection(context);
 		DiscoverSamples(conn, data->table_name, data->sample_info.sample_id_col,
 		                {"sequence_index", "read_id", "aligned_sequence", "original_length", "aligned_length"},
 		                "align_abpoa", data->sample_info);
@@ -141,8 +141,8 @@ static unique_ptr<LocalTableFunctionState> AlignAbpoaInitLocal(ExecutionContext 
 	auto &data = input.bind_data->Cast<AlignAbpoaData>();
 	auto lstate = make_uniq<AlignAbpoaLocalState>();
 	if (data.has_sample_id) {
-		auto &db = DatabaseInstance::GetDatabase(context.client);
-		lstate->conn = make_uniq<Connection>(db);
+		lstate->conn = make_uniq<Connection>(DatabaseInstance::GetDatabase(context.client));
+		InheritTempObjects(context.client, *lstate->conn);
 	}
 	return lstate;
 }

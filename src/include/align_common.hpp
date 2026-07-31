@@ -9,6 +9,7 @@
 #include "Minimap2Aligner.hpp"
 #include "SAMRecord.hpp"
 #include "align_result_utils.hpp"
+#include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
@@ -420,8 +421,7 @@ struct ShardNameCount {
 // Returns pairs of (shard_name, count) ordered by count descending (largest first)
 // Throws if any shard_name is NULL or if the table is empty
 inline std::vector<ShardNameCount> ReadShardNameCounts(ClientContext &context, const std::string &table_name) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 
 	// Query shard counts ordered by count descending (largest first)
 	std::string query = "SELECT shard_name, COUNT(*) as cnt FROM " + KeywordHelper::WriteOptionallyQuoted(table_name) +
