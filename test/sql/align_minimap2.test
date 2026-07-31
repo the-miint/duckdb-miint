@@ -294,6 +294,20 @@ SELECT * FROM save_minimap2_index('empty_subjects', 'empty_index.mmi');
 ----
 is empty
 
+# save_minimap2_index does NOT accept eqx (issue #190). eqx selects =/X vs M CIGAR
+# operators -- an alignment-time output-formatting choice with nowhere to live in an
+# .mmi. It was previously accepted here and silently did nothing, so callers passed it
+# defensively believing it affected the index. Rejecting it is the contract: the only
+# place eqx is meaningful is align_minimap2, where the CIGAR is actually produced.
+statement error
+SELECT * FROM save_minimap2_index('index_test_subjects', 'eqx_index.mmi', eqx := true);
+----
+eqx
+
+# eqx remains valid on align_minimap2, where it does affect output.
+statement ok
+SELECT * FROM align_minimap2('index_test_subjects', subject_table := 'index_test_subjects', k := 5, eqx := true);
+
 # Clean up
 statement ok
 DROP TABLE index_test_subjects;

@@ -100,6 +100,15 @@ static unique_ptr<FunctionData> FastaCopyBind(ClientContext &context, CopyFuncti
 	// Validate sequence_index parameter
 	ValidateSequenceIndexParameter(result->id_as_sequence_index, has_sequence_index);
 
+	// Same rationale as the read_id check above, for every other column the sink reads with
+	// a typed accessor: a non-VARCHAR sequence1 otherwise aborts with a fatal INTERNAL error
+	// that invalidates the database (issue #191). Quality columns are NOT validated -- the
+	// FASTA writer ignores any qual1/qual2 present in the relation rather than reading them,
+	// so rejecting them would fail queries that are actually fine.
+	ValidateSequenceColumnTypes(result->indices, sql_types, /*validate_quals=*/false,
+	                            /*validate_comment=*/result->include_comment,
+	                            /*validate_sequence_index=*/result->id_as_sequence_index);
+
 	return result;
 }
 

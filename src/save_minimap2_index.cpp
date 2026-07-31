@@ -38,10 +38,6 @@ unique_ptr<FunctionData> SaveMinimap2IndexTableFunction::Bind(ClientContext &con
 		data->config.w = w_param->second.GetValue<int32_t>();
 	}
 
-	auto eqx_param = input.named_parameters.find("eqx");
-	if (eqx_param != input.named_parameters.end() && !eqx_param->second.IsNull()) {
-		data->config.eqx = eqx_param->second.GetValue<bool>();
-	}
 
 	// Load subjects at bind time
 	data->subjects = ReadSubjectTable(context, data->subject_table, subject_schema);
@@ -120,7 +116,6 @@ TableFunction SaveMinimap2IndexTableFunction::GetFunction() {
 	tf.named_parameters["preset"] = LogicalType::VARCHAR;
 	tf.named_parameters["k"] = LogicalType::INTEGER;
 	tf.named_parameters["w"] = LogicalType::INTEGER;
-	tf.named_parameters["eqx"] = LogicalType::BOOLEAN;
 
 	return tf;
 }

@@ -68,6 +68,18 @@ unique_ptr<FunctionData> AlignMinimap2TableFunction::Bind(ClientContext &context
 	// Parse minimap2 config parameters (preset, max_secondary, k, w, eqx)
 	ParseMinimap2ConfigParams(input.named_parameters, data->config, data->using_prebuilt_index());
 
+	// per_subject_database re-aligns every query against every subject in turn, so "this query
+	// produced no row" is only ever a statement about ONE subject. Emitting an unmapped row there
+	// would assert "did not align" about a query that aligns perfectly well to another subject --
+	// with N subjects, a query matching one of them would produce N-1 false negatives. This is the
+	// same reason align_minimap2_sharded does not offer the flag at all; here the mode is a runtime
+	// choice, so reject the combination rather than return confidently wrong rows.
+	if (data->per_subject_database && data->config.include_unmapped) {
+		throw BinderException("include_unmapped cannot be combined with per_subject_database: each query is aligned "
+		                      "against every subject separately, so an unmapped row would claim the query did not "
+		                      "align when it may align to a different subject");
+	}
+
 	// Handle subject_table vs index_path modes
 	if (data->using_prebuilt_index()) {
 		// Validate index file exists
@@ -307,6 +319,11 @@ TableFunction AlignMinimap2TableFunction::GetFunction() {
 	tf.named_parameters["eqx"] = LogicalType::BOOLEAN;
 	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
 	tf.named_parameters["min_chain_coverage"] = LogicalType::FLOAT;
+	// ANY so both `occ_filter := 0` and minimap2's two-value `occ_filter := '1000,5000'` bind;
+	// the value is read via ToString() either way. Same approach as read_alignments'
+	// reference_lengths.
+	tf.named_parameters["occ_filter"] = LogicalType::ANY;
+	tf.named_parameters["include_unmapped"] = LogicalType::BOOLEAN;
 
 	// Alignment output order is non-deterministic (depends on thread scheduling),
 	// so NO_ORDER lets DuckDB parallelize CTAS pipelines instead of serializing

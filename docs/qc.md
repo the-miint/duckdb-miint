@@ -27,6 +27,37 @@ All scalars accept `seq VARCHAR` + `qual LIST(UTINYINT)`. Quality is the
 decoded Phred integer list emitted by `read_fastx` (not ASCII), so values
 are 0..93 directly.
 
+### Reading the `[, ...]` notation: overloads are all-or-nothing
+
+**The bracketed arguments above are not individually optional.** Each function
+registers exactly two arities — a short form that uses every default, and a full
+form that requires *all* tuning arguments. There is nothing in between, and the
+arguments are **positional only** (`min_length := 100` is not accepted; named
+arguments are a table-function feature, not a scalar-function one).
+
+| Function | Accepted arities |
+|---|---|
+| `trim_quality_5p` / `trim_quality_3p` / `trim_quality_sliding` | 2 or 4 |
+| `trim_polyg` | 2 or 5 |
+| `trim_polyx` | 2 or 4 |
+| `trim_adapters` | 3 or 6 (`adapter` may be `VARCHAR` or `LIST(VARCHAR)` in either) |
+| `trim_adapters_pe` | 4 or 11 |
+| `filter_read` | 2 or 8 |
+
+So to change one threshold you must restate all of them, including the defaults
+you did not want to change. For `filter_read` those are
+`min_length=15, max_length=0, qualified_q=15, max_unqualified_pct=40, max_n=5, min_avg_q=0`
+(`max_length=0` and `min_avg_q=0` both mean "off"); each function's section below
+lists its own. Passing an intermediate arity is a binder error:
+
+```sql
+SELECT filter_read('ACGT', [30,30,30,30]::UTINYINT[], 3);
+-- Binder Error: No function matches the given name and argument types
+--   Candidate functions:
+--   filter_read(VARCHAR, UTINYINT[])
+--   filter_read(VARCHAR, UTINYINT[], INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER)
+```
+
 Beyond these per-read scalars, [`infer_trim`](#reconciling-external-qc-results--infer_trim)
 is a **table macro** that reconciles reads trimmed by an *external* QC tool back
 to 5'/3' trim coordinates — see its section below.

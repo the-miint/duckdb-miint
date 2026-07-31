@@ -1,0 +1,5 @@
+@HD	VN:1.6	SO:unsorted
+@SQ	SN:ctg1	LN:1000
+good1	0	ctg1	1	60	10M	*	0	0	*	*
+bad	0	ctg1	10	60		*	0	0	*	*
+good2	0	ctg1	20	60	10M	*	0	0	*	*

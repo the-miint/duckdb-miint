@@ -227,6 +227,147 @@ COPY (
 ----
 must both be set
 
+# --- Quality-column type validation (issue #191) ---
+#
+# WHY THIS MATTERS: the write path reads the qual list child buffer as raw uint8_t
+# (FlatVector::GetData<uint8_t>). Before this validation existed, Bind checked only that
+# a 'qual1' column was PRESENT, never its type -- so an INTEGER[] quality column reached
+# the sink and tripped a DuckDB assertion ("Expected vector of type UINT8, but found
+# vector of type INT32"). That is an INTERNAL Error, which INVALIDATES THE DATABASE: every
+# subsequent statement in the session then fails with "database has been invalidated",
+# so in a script the real cause is buried under a cascade of unrelated failures.
+#
+# INTEGER[] is exactly what the natural DuckDB idioms produce ([40 for _ in range(n)],
+# list_transform, array-fill patterns), so this is easy to hit while synthesising FASTQ
+# for tests. It must be a clean BinderException naming the column and the expected type --
+# mirroring how 'read_id' and SAM's 'mapq' are already validated at bind time.
+statement ok
+CREATE TABLE qual_int_list AS
+SELECT 'r1' AS read_id, 'ACGTACGT' AS sequence1, [40 for _ in range(8)] AS qual1;
+
+# Guard the premise: the natural idiom really does yield INTEGER[], not UTINYINT[].
+query I
+SELECT typeof(qual1) FROM qual_int_list;
+----
+INTEGER[]
+
+statement error
+COPY qual_int_list TO '__TEST_DIR__/qual_int.fq' (FORMAT FASTQ);
+----
+qual1
+
+# The session must SURVIVE the rejection. This is the real regression guard: a
+# BinderException leaves the database usable, an INTERNAL Error does not. If this
+# statement fails with "database has been invalidated", the bug is back.
+query I
+SELECT 1;
+----
+1
+
+# qual2 has the same unchecked read path, so it needs the same guard.
+statement ok
+CREATE TABLE qual2_int_list AS
+SELECT 'r1' AS read_id, 'ACGTACGT' AS sequence1,
+       [40 for _ in range(8)]::UTINYINT[] AS qual1,
+       'ACGTACGT' AS sequence2, [40 for _ in range(8)] AS qual2;
+
+statement error
+COPY qual2_int_list TO '__TEST_DIR__/qual2_int.{ORIENTATION}.fq' (FORMAT FASTQ);
+----
+qual2
+
+query I
+SELECT 1;
+----
+1
+
+# sequence1 is read via GetData<string_t> with no type dispatch, so a non-VARCHAR
+# sequence1 was fatal in exactly the same way. Not reported in #191, found while fixing it.
+statement ok
+CREATE TABLE bad_seq1 AS
+SELECT 'r1' AS read_id, 12345678 AS sequence1, [40 for _ in range(8)]::UTINYINT[] AS qual1;
+
+statement error
+COPY bad_seq1 TO '__TEST_DIR__/bad_seq1.fq' (FORMAT FASTQ);
+----
+sequence1
+
+query I
+SELECT 1;
+----
+1
+
+statement ok
+DROP TABLE bad_seq1;
+
+# A fixed-size ARRAY (UTINYINT[4]) is NOT a LIST, and it is a nastier failure than the
+# reported INTEGER[] case: ListVector::GetEntry guards its buffer cast with a bare D_ASSERT,
+# which is compiled out of release builds, so this would be silent type confusion rather
+# than even a catchable error. The LIST-vs-ARRAY check must reject it.
+statement error
+COPY (
+  SELECT 'r1' AS read_id, 'ACGT' AS sequence1, [40,40,40,40]::UTINYINT[4] AS qual1
+) TO '__TEST_DIR__/qual_array.fq' (FORMAT FASTQ);
+----
+qual1
+
+query I
+SELECT 1;
+----
+1
+
+# --- Presence is not enough: only columns this query actually READS are type-checked ---
+#
+# comment and sequence_index are read only when their option is on. A present-but-unread
+# column of the wrong type is harmless, so validating on mere presence would reject
+# queries that work fine (e.g. a stray sequence_index surviving a SELECT *). These four
+# cases pin both directions of that decision.
+statement error
+COPY (
+  SELECT 'r1' AS read_id, 'ACGT' AS sequence1, [40,40,40,40]::UTINYINT[] AS qual1,
+         7::INTEGER AS sequence_index
+) TO '__TEST_DIR__/si_used.fq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true);
+----
+sequence_index
+
+# Same column, same wrong type, but never read -> must be accepted.
+statement ok
+COPY (
+  SELECT 'r1' AS read_id, 'ACGT' AS sequence1, [40,40,40,40]::UTINYINT[] AS qual1,
+         7::INTEGER AS sequence_index
+) TO '__TEST_DIR__/si_unused.fq' (FORMAT FASTQ);
+
+statement error
+COPY (
+  SELECT 'r1' AS read_id, 'ACGT' AS sequence1, [40,40,40,40]::UTINYINT[] AS qual1,
+         99::INTEGER AS comment
+) TO '__TEST_DIR__/cm_used.fq' (FORMAT FASTQ, INCLUDE_COMMENT true);
+----
+comment
+
+# Same column, same wrong type, but never read -> must be accepted.
+statement ok
+COPY (
+  SELECT 'r1' AS read_id, 'ACGT' AS sequence1, [40,40,40,40]::UTINYINT[] AS qual1,
+         99::INTEGER AS comment
+) TO '__TEST_DIR__/cm_unused.fq' (FORMAT FASTQ);
+
+# The correct types still write cleanly, and round-trip.
+statement ok
+COPY (SELECT read_id, sequence1, qual1::UTINYINT[] AS qual1 FROM qual_int_list)
+TO '__TEST_DIR__/qual_cast.fq' (FORMAT FASTQ);
+
+query III
+SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/qual_cast.fq');
+----
+r1	ACGTACGT	[40, 40, 40, 40, 40, 40, 40, 40]
+
+statement ok
+DROP TABLE qual_int_list;
+
+statement ok
+DROP TABLE qual2_int_list;
+
 # Cleanup
 statement ok
 DROP TABLE test_single;

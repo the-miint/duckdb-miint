@@ -283,7 +283,9 @@ void RypeClassifyTableFunction::Execute(ClientContext &context, TableFunctionInp
 	output.SetCardinality(to_output);
 
 	// RYpe output schema: query_id (Int64), bucket_id (UInt32), score (Float64)
-	// Our output schema: read_id (VARCHAR), bucket_id (UINTEGER), bucket_name (VARCHAR), score (DOUBLE)
+	// Our output schema: read_id (mirrors the id_column's type -- VARCHAR, BIGINT or UUID;
+	// see Bind, which sets types[0] = id_type), bucket_id (UINTEGER), bucket_name (VARCHAR),
+	// score (DOUBLE)
 
 	// --- Column 0 (read_id) and Column 2 (bucket_name): manual transformation ---
 	// These require per-row lookups so they cannot be zero-copy.

@@ -101,6 +101,33 @@ struct CommonCopyParameters {
 // Common Validation Functions
 //===--------------------------------------------------------------------===//
 void ValidateRequiredColumns(bool has_read_id, bool has_sequence1, const string &format_name);
+
+// Validate the storage type of every column the FASTA/FASTQ sinks read with a TYPED
+// accessor: sequence1/sequence2/comment via GetData<string_t>, sequence_index via
+// GetData<int64_t>, and (FASTQ only) qual1/qual2 via FlatVector::GetData<uint8_t> on the
+// list child. Those reads perform no type dispatch, so a mismatched column type is not a
+// wrong answer -- it trips a DuckDB assertion, which is an INTERNAL error that
+// INVALIDATES THE DATABASE for the rest of the session, burying the real cause under a
+// cascade of "database has been invalidated" failures (issue #191).
+//
+// Validating at bind turns that into a clean BinderException naming the column and the
+// expected type. This mirrors the read_id check each writer already performs and the
+// identical checks COPY FORMAT UBAM does (src/copy_ubam.cpp:203-213) -- FASTA/FASTQ were
+// the outliers. Message wording is kept identical to UBAM's so the two never drift.
+//
+// Only columns the given writer actually reads for THIS query are validated, because a
+// column that is present but never read is harmless and rejecting it would break queries
+// that work today (e.g. a stray non-BIGINT sequence_index surviving a SELECT *):
+//   - validate_quals          false for FASTA, which ignores qual columns entirely
+//   - validate_comment        pass include_comment; comment is only read when it is set
+//   - validate_sequence_index pass id_as_sequence_index; likewise
+// sequence1/sequence2 are always read when present, so they are always validated.
+// Consequently this must be called AFTER the COPY options have been parsed.
+//
+// read_id is NOT checked here -- callers validate it via IsAllowedIdType because they also
+// need to capture the resolved type.
+void ValidateSequenceColumnTypes(const ColumnIndices &indices, const vector<LogicalType> &sql_types,
+                                 bool validate_quals, bool validate_comment, bool validate_sequence_index);
 // Resolves the output structure from the path + INTERLEAVE option. The presence of the
 // {ORIENTATION} placeholder is the split-vs-single switch: when present, R1/R2 are written to
 // separate files; when absent, output is a single file (interleaved iff INTERLEAVE=true).

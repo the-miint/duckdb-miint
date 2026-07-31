@@ -266,6 +266,55 @@ TEST_CASE("Header constructor throws on nonexistent file", "[SAMReader][header]"
 	REQUIRE_THROWS_AS(miint::SAMReader("nonexistent_file.sam"), std::runtime_error);
 }
 
+// A malformed record must fail the read, not vanish from it. sam_read1 returns -1 at end of
+// stream but < -1 on a read error, and both read paths tested only `>= 0`. That ended the batch
+// early on a bad record; because the table functions call read() again for the next batch, the
+// scan RESUMED past it -- so good1/bad/good2 returned good1 and good2 and reported success, with
+// nothing to indicate a record had been dropped. samtools exits 1 on the same input.
+//
+// An empty CIGAR field is the malformation used here: sam_parse1 rejects it and sam_read1
+// returns -2.
+static const char *MALFORMED_CIGAR_RECORD = "bad\t0\tg1\t1\t0\t\t*\t0\t0\tATGC\tIIII\n";
+
+TEST_CASE("read throws on a malformed record instead of skipping it", "[SAMReader]") {
+	TempFileFixture fixture;
+	auto path = "test_malformed_record.sam";
+	fixture.write_temp_sam(path, {header_reference_line("g1", "1000"), unpaired_record("good1", "g1", "0", "4M"),
+	                              MALFORMED_CIGAR_RECORD, unpaired_record("good2", "g1", "0", "4M")});
+
+	hts_set_log_level(HTS_LOG_OFF);
+	miint::SAMReader reader(path);
+	REQUIRE_THROWS_WITH(reader.read(10), Catch::Matchers::ContainsSubstring("truncated or malformed"));
+}
+
+TEST_CASE("read_raw throws on a malformed record instead of skipping it", "[SAMReader]") {
+	TempFileFixture fixture;
+	auto path = "test_malformed_record_raw.sam";
+	fixture.write_temp_sam(path, {header_reference_line("g1", "1000"), unpaired_record("good1", "g1", "0", "4M"),
+	                              MALFORMED_CIGAR_RECORD, unpaired_record("good2", "g1", "0", "4M")});
+
+	hts_set_log_level(HTS_LOG_OFF);
+	miint::SAMReader reader(path);
+	REQUIRE(reader.read_raw() != nullptr); // good1
+	REQUIRE_THROWS_WITH(reader.read_raw(), Catch::Matchers::ContainsSubstring("truncated or malformed"));
+}
+
+// The complement: end of stream (-1) must NOT become an error. Without this, tightening the
+// check would turn every complete read into a failure.
+TEST_CASE("read and read_raw reach end of stream without throwing", "[SAMReader]") {
+	TempFileFixture fixture;
+	auto path = "test_clean_eof.sam";
+	fixture.write_temp_sam(path, {header_reference_line("g1", "1000"), unpaired_record("r1", "g1", "0", "4M")});
+
+	miint::SAMReader reader(path);
+	REQUIRE((reader.read(10).size() == 1));
+	REQUIRE((reader.read(10).size() == 0));
+
+	miint::SAMReader raw_reader(path);
+	REQUIRE(raw_reader.read_raw() != nullptr);
+	REQUIRE(raw_reader.read_raw() == nullptr);
+}
+
 TEST_CASE("Headerless constructor with unknown reference in data", "[SAMReader][headerless]") {
 	TempFileFixture fixture;
 	auto path = "test_unknown_ref.sam";

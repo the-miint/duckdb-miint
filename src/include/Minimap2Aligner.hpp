@@ -36,6 +36,21 @@ struct Minimap2Config {
 	int k = 0;                       // k-mer size (0 = use preset default)
 	int w = 0;                       // minimizer window (0 = use preset default)
 	float min_chain_coverage = 0.0f; // min best-chain span (qe-qs)/qlen to attempt DP (0.0 = disabled)
+
+	// High-occurrence minimizer filter, minimap2's -f. Parsed at bind into minimap2's own three
+	// variables so InitOptions is a direct transcription; occ_filter_set == false leaves whatever
+	// the preset chose. occ_mid_frac defaults to minimap2's own default so that the absolute form
+	// ("-f 100000") leaves it untouched exactly as the CLI does.
+	bool occ_filter_set = false;
+	float occ_mid_frac = 2e-4f; // -> mm_mapopt_t::mid_occ_frac; only read when occ_mid <= 0
+	int32_t occ_mid = 0;        // -> mm_mapopt_t::mid_occ; <= 0 makes mm_mapopt_update derive it
+	// -> mm_mapopt_t::max_occ. -1, not 0, means "no second value was given": minimap2 accepts
+	// `-f N,0` and 0 there is meaningful (it disables the re-chain pass), so the two cannot share
+	// a sentinel.
+	int32_t occ_max = -1;
+
+	// Emit one row per query that produced no alignment, instead of nothing at all (#185)
+	bool include_unmapped = false;
 };
 
 // Custom deleter for minimap2 index
@@ -156,6 +171,14 @@ private:
 	void reg_to_sam(const mm_reg1_t *reg, const std::string &read_id, const std::string &query_seq,
 	                SAMRecordBatch &batch, int segment_idx, bool mate_mapped, bool mate_rev, int32_t mate_rid,
 	                int32_t mate_pos, int32_t tlen);
+
+	// Append a synthetic row for a query (or paired segment) that produced no alignment, so that
+	// "no alignment" is representable in the result set rather than inferable only from a missing
+	// row (#185). segment_idx is -1 for single-end. Only called when config_.include_unmapped.
+	// mate_rid < 0 means the mate did not map; when it did, its coordinates are carried onto this
+	// row as RNEXT/PNEXT, which SAM requires of a paired record whose mate is mapped.
+	void append_unmapped(const std::string &read_id, int segment_idx, bool mate_mapped, bool mate_rev, int32_t mate_rid,
+	                     int32_t mate_pos, SAMRecordBatch &batch);
 
 	// Generate CIGAR string from mm_extra_t, including soft/hard clips.
 	// When stats_out is non-null, computes XM/XO/XG during the same CIGAR walk.

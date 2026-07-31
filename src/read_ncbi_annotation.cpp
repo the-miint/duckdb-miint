@@ -184,8 +184,15 @@ void ReadNCBIAnnotationTableFunction::Execute(ClientContext &context, TableFunct
 		// position (column 3) - cast from int64_t to int32_t for schema compatibility
 		FlatVector::GetData<int32_t>(output.data[3])[i] = static_cast<int32_t>(feat.position);
 
-		// stop_position (column 4) - cast from int64_t to int32_t for schema compatibility
-		FlatVector::GetData<int32_t>(output.data[4])[i] = static_cast<int32_t>(feat.stop_position);
+		// stop_position (column 4) - cast from int64_t to int32_t for schema compatibility.
+		// NCBI's annotation `end` is 1-based CLOSED; normalize to miint's project-wide
+		// 1-based HALF-OPEN convention (+1) so stop_position means the same thing here as in
+		// read_alignments / align_* / alignment_slice / compute_coverage_depth. Kept in
+		// lockstep with the read_gff macro, whose schema this function mirrors (issue #196);
+		// the raw NCBI `end` is recoverable as stop_position - 1.
+		// Add in 64-bit, then narrow -- narrowing first and adding in int32 would be UB at
+		// INT32_MAX rather than merely truncating like the pre-existing cast does.
+		FlatVector::GetData<int32_t>(output.data[4])[i] = static_cast<int32_t>(feat.stop_position + 1);
 
 		// score (column 5) - may be NULL
 		if (feat.has_score) {

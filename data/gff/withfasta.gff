@@ -1,0 +1,13 @@
+##gff-version 3
+##sequence-region ctg1 1 30
+ctg1	prokka	CDS	10	20	.	+	0	ID=g1
+ctg1	prokka	CDS	30	40	.	-	0	ID=g2
+ctg1	prokka	rRNA	50	60	.	+	0	
+ctg2	prokka	CDS	5	15	.	+	0	ID=g3
+##FASTA
+>ctg1	Arabidopsis chloroplast contig 1
+ACGTACGTAC
+GGTTAACCGG
+
+>ctg2
+TTTTAAAACC
