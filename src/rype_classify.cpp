@@ -176,7 +176,10 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 
 	// Estimate batch size. RYpe processes one batch at a time; using
 	// STANDARD_VECTOR_SIZE (2048) causes shard I/O to dominate.
-	int is_paired = bind_data.has_sequence2 ? 1 : 0;
+	//
+	// is_paired follows sequence2 CONTENT, not the column's presence (#199) — see
+	// TableHasPairedContent in rype_common.hpp for why, and why it probes the temp table.
+	int is_paired = TableHasPairedContent(conn, KeywordHelper::WriteOptionallyQuoted(gstate->tmp_table_name)) ? 1 : 0;
 	// is_large_binary=1: sub-connection uses arrow_large_buffer_size=true, so DuckDB
 	// exports BLOB as Arrow LargeBinary (i64 offsets) — no 2 GiB per-array limit.
 	size_t batch_size = rype_recommend_batch_size(gstate->index, avg_read_length, is_paired, 0, 1);

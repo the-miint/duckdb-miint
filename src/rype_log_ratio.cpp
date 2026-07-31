@@ -169,7 +169,10 @@ unique_ptr<GlobalTableFunctionState> RypeLogRatioTableFunction::InitGlobal(Clien
 	// Log-ratio loads shards from BOTH indices per batch, so use whichever index has larger
 	// shards for a conservative memory estimate. rype_recommend_batch_size accounts for shard
 	// size in its memory budget, so the index with larger shards yields a smaller batch size.
-	int is_paired = bind_data.has_sequence2 ? 1 : 0;
+	//
+	// is_paired follows sequence2 CONTENT, not the column's presence (#199) — see
+	// rype_classify.cpp InitGlobal and TableHasPairedContent in rype_common.hpp for rationale.
+	int is_paired = TableHasPairedContent(conn, KeywordHelper::WriteOptionallyQuoted(gstate->tmp_table_name)) ? 1 : 0;
 
 	size_t num_shard_bytes = rype_index_largest_shard_bytes(gstate->numerator_index);
 	size_t denom_shard_bytes = rype_index_largest_shard_bytes(gstate->denominator_index);
