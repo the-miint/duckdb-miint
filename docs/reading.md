@@ -225,6 +225,10 @@ SELECT * FROM read_sam('alignments.sam');
 - Headerless data requires `reference_lengths` parameter
 - User must know whether their stdin data contains headers
 
+**Malformed records fail the scan.** A record htslib cannot parse — a malformed field, a truncated record, a reference id outside the header's range — raises `Failed to read SAM/BAM record: the file is truncated or malformed`, with the line number for text SAM. Earlier versions dropped such a record and carried on, so a corrupt file read back as a silently short table. If you need to salvage what is readable from a damaged file, repair it first (e.g. `samtools view`), rather than relying on the reader to skip past the damage.
+
+One case is *not* detectable and matches `samtools` exactly: a BGZF file truncated at a block boundary looks like a cleanly-ended file to htslib, so it reads back as a short table with no error. `samtools quickcheck <file>` is the tool for that — it verifies the BGZF EOF marker and exits non-zero when it is missing.
+
 ### SFF
 
 Read SFF (Standard Flowgram Format) files from 454/Roche sequencing platforms.

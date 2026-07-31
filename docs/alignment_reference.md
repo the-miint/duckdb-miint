@@ -462,6 +462,27 @@ Align query sequences to subject sequences using minimap2. This function enables
 - `eqx` (BOOLEAN, default: true): Use =/X CIGAR operators instead of M
 - `occ_filter` (optional): minimap2's `-f` high-occurrence minimizer filter. Accepts a bare number or the two-value `'INT1,INT2'` string. See *Dense reference sets* below.
 - `include_unmapped` (BOOLEAN, default: false): Emit one row per query that produced no alignment, instead of no row at all. See *Unmapped queries* below.
+- `min_chain_coverage` (FLOAT, default: 0.0 = disabled, range 0.0–1.0): Skip the expensive dynamic-programming alignment for any query whose best seed **chain** spans less than this fraction of the query. See *Chain-coverage pre-filter* below.
+- `debug` (BOOLEAN, default: false): Emit timestamped, thread-tagged diagnostics to **stderr** — index construction (with RSS), per-thread startup, and per-batch alignment counts and timings. Lines from concurrent workers interleave, so redirect and sort by thread id when reading them. A side channel only; results are unchanged.
+
+**Chain-coverage pre-filter (`min_chain_coverage`):**
+
+A speed knob with a **lossy** edge, so it is off by default. Before running DP alignment, each chain's span is measured as `(qe - qs) / qlen`; if no chain reaches the threshold, the query is dropped and produces no alignment at all.
+
+```sql
+-- Only attempt full alignment where a chain already spans ≥70% of the query
+SELECT * FROM align_minimap2('q', subject_table := 's', min_chain_coverage := 0.7);
+```
+
+Points that matter in practice:
+
+- This is **chain-phase** coverage, not post-DP aligned-base coverage. A chain's span includes the gaps between its seeds, so it *overestimates* true coverage — a chain spanning 90% of the query may align far less. Filtering on it is therefore approximate by nature.
+- It **discards queries**, it does not merely reorder work. A query filtered here is indistinguishable from one with no alignment, which is exactly the ambiguity `include_unmapped` addresses — set both together if you need to tell "filtered out" from "measured and distant". `include_unmapped` does account for queries dropped by this filter.
+- The vendored implementation records **0.70** as the empirical ceiling for zero false negatives on HiFi data. Do not tune close to it: a 51-base query whose last 15 bases diverge has a matching prefix of ~0.70 of its length, but is discarded at a threshold of `0.68` and survives only at `0.65` — the chain span the filter actually measures is around 0.66, below what the prefix fraction suggests. Estimating the right threshold by hand from expected identity will discard real alignments.
+- For paired-end input the filter is applied **per segment**, against that segment's own length.
+- Values outside 0.0–1.0 are rejected at bind with `min_chain_coverage must be between 0.0 and 1.0`.
+
+> This parameter is **not** a minimap2 command-line option. It is a local addition to the vendored minimap2 (`ext/minimap2`, commit *"Add min_chain_coverage pre-filter to skip DP for low-coverage chains"* on top of upstream 2.30), so it has no `-`-flag equivalent and will not be found in minimap2's own documentation.
 
 **Dense reference sets (`occ_filter`):**
 
@@ -655,6 +676,11 @@ Align query sequences against multiple pre-built minimap2 index shards in parall
 - `max_secondary` (INTEGER, default: 5): Maximum secondary alignments per query. Set to 0 for primary only
 - `eqx` (BOOLEAN, default: true): Use =/X CIGAR operators instead of M
 - `progress` (BOOLEAN, default: false): Opt-in progress reporting. When true, emit clean, timestamped per-shard lines to **stderr** (`shard i/N 'name': index loaded, R reads` → `done - R reads, A alignments (T s)`). Pure side channel — results are byte-identical to the default, which emits nothing, so programmatic callers are unaffected unless they pass `progress := true`.
+- `occ_filter` (optional): minimap2's `-f` high-occurrence minimizer filter, as for `align_minimap2` — see *Dense reference sets* above. The threshold is per index, so it applies to each shard independently.
+- `min_chain_coverage` (FLOAT, default: 0.0 = disabled, range 0.0–1.0): Chain-coverage pre-filter, as for `align_minimap2` — see *Chain-coverage pre-filter* above.
+- `debug` (BOOLEAN, default: false): Emit per-shard diagnostic detail to **stderr**, including memory checkpoints. A side channel only.
+
+**`include_unmapped` is not available here.** A query that finds no seed chain in one shard routinely aligns in another, so a per-shard unmapped row would assert "did not align" about a query that did. The parameter is deliberately unregistered, so passing it is a binder error rather than a source of wrong rows; doing it correctly requires reconciling results across every shard a read was assigned to.
 
 **Output schema:**
 Returns the same 21-column schema as `align_minimap2` and `read_alignments`.
