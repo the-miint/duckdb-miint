@@ -1,4 +1,5 @@
 #include "uchime_denovo.hpp"
+#include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
 #include "table_function_common.hpp"
 #include "uchime_common.hpp"
@@ -226,8 +227,7 @@ unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context,
 	data->types = GetUchimeOutputTypes(data->id_type, data->id_type);
 
 	if (data->has_sample_id) {
-		auto &db = DatabaseInstance::GetDatabase(context);
-		Connection conn(db);
+		auto conn = MakeReadOnlyHelperConnection(context);
 		// Reserved = 18 uchime output columns (case-insensitive, lowercase already).
 		DiscoverSamples(conn, data->input_table, data->sample_info.sample_id_col, data->names,
 		                "detect_chimera_uchime_denovo", data->sample_info);
@@ -260,8 +260,7 @@ unique_ptr<GlobalTableFunctionState> UchimeDenovoTableFunction::InitGlobal(Clien
 	gstate->max_threads = 1;
 	gstate->wrapper = miint::VsearchChimeraWrapper(data.params);
 
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	LoadDenovoSequences(conn, data.input_table, data.id_col, data.sequence_col, data.count_col, /*where_sql=*/"",
 	                    gstate->labels, gstate->sequences, gstate->sizes);
 
@@ -282,8 +281,8 @@ unique_ptr<LocalTableFunctionState> UchimeDenovoTableFunction::InitLocal(Executi
 	auto &data = input.bind_data->Cast<Data>();
 	auto lstate = make_uniq<LocalState>();
 	if (data.has_sample_id) {
-		auto &db = DatabaseInstance::GetDatabase(context.client);
-		lstate->conn = make_uniq<Connection>(db);
+		lstate->conn = make_uniq<Connection>(DatabaseInstance::GetDatabase(context.client));
+		InheritTempObjects(context.client, *lstate->conn);
 	}
 	return lstate;
 }

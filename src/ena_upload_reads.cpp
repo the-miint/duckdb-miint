@@ -6,6 +6,10 @@
 
 #include "aspera_send.hpp"
 #include "aspera_utils.hpp"
+// Unconditional: RunStreamingUpload is compiled on every platform and needs
+// MakeReadOnlyHelperConnection. libcurl is auto-disabled on macOS, so anything
+// placed inside the MIINT_HAS_CURL block below is invisible there.
+#include "catalog_utils.hpp"
 #ifdef MIINT_HAS_CURL
 #include "curl_send.hpp"
 #endif
@@ -692,8 +696,7 @@ void UploadOneSample(ClientContext &context, const ENAUploadReadsBindData &bind,
 // sample's streaming result is fully drained before the next query (DuckDB
 // allows only one active stream per connection).
 void RunStreamingUpload(ClientContext &context, const ENAUploadReadsBindData &bind, ENAUploadReadsGlobalState &gs) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 
 	const bool has_r2_columns = ValidateSchemaDetectR2(conn, bind.relation_name);
 	PlanSamples(conn, bind.relation_name, bind.layout_mode, has_r2_columns, gs.samples);

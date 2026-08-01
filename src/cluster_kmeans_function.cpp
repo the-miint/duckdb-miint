@@ -98,8 +98,7 @@ unique_ptr<GlobalTableFunctionState> ClusterKmeansInitGlobal(ClientContext &cont
 	auto gstate = make_uniq<ClusterKmeansGlobalState>();
 	gstate->sample_id_type = data.sample_id_type;
 
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(data.table_name);
 	auto probe = conn.Query("SELECT sample_id::VARCHAR, axis::INTEGER, coordinate::DOUBLE FROM " + qname + " LIMIT 0");
 	if (probe->HasError()) {

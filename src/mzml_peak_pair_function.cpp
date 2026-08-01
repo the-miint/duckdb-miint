@@ -1,4 +1,5 @@
 #include "mzml_peak_pair_function.hpp"
+#include "catalog_utils.hpp"
 #include "formula_parser.hpp"
 
 #include "duckdb/common/string_util.hpp"
@@ -69,8 +70,14 @@ static unique_ptr<FunctionData> PeakPairBind(ClientContext &context, TableFuncti
 	auto ms2_table = "__peak_pair_ms2_" + suffix;
 	auto mz_table = "__peak_pair_mz_" + suffix;
 
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	// Inherits the caller's TEMP catalog so `relation` may itself be a TEMP table or
+	// view (#193). The two tables created below are already uniquely named by the
+	// counter above, which is the first half of what inheriting requires; the
+	// HelperTempRelation guards are the second half — they now live in the caller's
+	// session and no longer vanish when this connection is torn down at the end of
+	// Bind. Both guards outlive the final query below, whose result is materialized
+	// into bind data before they run.
+	auto conn = MakeReadOnlyHelperConnection(context);
 
 	// Materialize MS2 peaks into a temp table.
 	auto mat_sql = "CREATE TEMP TABLE " + ms2_table +
@@ -81,6 +88,7 @@ static unique_ptr<FunctionData> PeakPairBind(ClientContext &context, TableFuncti
 	if (mat_result->HasError()) {
 		throw InvalidInputException("mzml_peak_pair: failed to materialize MS2 peaks: %s", mat_result->GetError());
 	}
+	HelperTempRelation ms2_guard(conn, ms2_table);
 
 	// Materialize distinct m/z values. The recursive CTE re-evaluates
 	// SELECT DISTINCT mz at every recursion step (~3k iterations); pre-materializing
@@ -94,6 +102,7 @@ static unique_ptr<FunctionData> PeakPairBind(ClientContext &context, TableFuncti
 		throw InvalidInputException("mzml_peak_pair: failed to materialize distinct mz: %s",
 		                            distinct_result->GetError());
 	}
+	HelperTempRelation mz_guard(conn, mz_table);
 
 	// Run the recursive query against the materialized tables.
 	auto query_sql = "WITH RECURSIVE "

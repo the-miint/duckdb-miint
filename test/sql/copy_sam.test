@@ -408,12 +408,15 @@ s1.ctg000006l
 # The BAM path uses the same header builder, so assert it round-trips every record with the
 # references intact.
 #
-# NB: this deliberately does NOT claim to verify TID monotonicity. read_alignments/read_sam
+# NB: the assertions in THIS block do not verify TID monotonicity. read_alignments/read_sam
 # expose no raw tid column -- each record's `reference` is decoded via sam_hdr_tid2name against
 # the file's own embedded header, and name<->tid is a bijection fixed when the header is built.
 # So reading names back yields ascending names whatever the @SQ order was, on buggy code too.
-# The name-order assertions above are the real verification of the contract; a genuine tid-order
-# assertion needs a header accessor (issue #174) or an external samtools oracle.
+# The name-order assertions above are the real verification of the contract here.
+#
+# The genuine tid-order assertion this comment used to say was impossible now exists: #174 added
+# read_alignment_header, and test/sql/read_alignment_header.test asserts tid order for a written
+# BAM directly, both against literal values and as the invariant "tid order == name order".
 statement ok
 CREATE TABLE sq_multi AS
 SELECT 'r' || i AS read_id, 0::USMALLINT AS flags,

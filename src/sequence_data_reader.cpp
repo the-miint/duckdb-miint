@@ -104,8 +104,7 @@ SequenceDataMap ReadSequenceDataTable(ClientContext &context, const std::string 
 	auto schema = ValidateSequenceDataSchema(context, table_name);
 
 	// Separate connection to avoid deadlocking the current context
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 
 	// Build query based on which columns exist
 	std::string columns = "read_id, sequence1, qual1";

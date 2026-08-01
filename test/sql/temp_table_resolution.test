@@ -1,0 +1,473 @@
+# name: test/sql/temp_table_resolution.test
+# description: Regression: table-name parameters must resolve TEMP tables and views (#193)
+# group: [sql]
+
+#
+# WHY THIS MATTERS
+#
+# Every miint function that takes a relation *by name* reads it through a second
+# DuckDB connection (`Connection conn(db)`), because context.Query() deadlocks
+# during bind/execution. DuckDB constructs ClientData::temporary_objects per
+# ClientContext, so that second connection has its own, empty TEMP catalog and
+# cannot see the caller's TEMP objects at all.
+#
+# The failure is not a clean "unsupported" error. Bind-time validation runs
+# Catalog::GetEntry() on the ORIGINAL context, which DOES see TEMP objects, so
+# bind succeeds and only execution fails -- with a message that claims the table
+# does not exist:
+#
+#   Invalid Input Error: Failed to read table 't': Catalog Error: Table with
+#   name t does not exist!
+#
+# That is misleading (the table plainly does exist) and it is worst under a
+# read-only catalog, where a TEMP table is the only relation a user can create.
+#
+# This is NOT specific to align_minimap2, which is how it was reported. It is a
+# property of the shared separate-connection recipe, and the fix is a per-site
+# opt-in rather than a global switch, so each reader family needs its own case:
+#   - align_minimap2          -> src/sequence_table_reader.cpp
+#   - align_minimap2_sharded  -> src/include/align_common.hpp + ReadShardIds
+#                                and ReadBatchByIds
+#   - community_distances     -> src/unifrac_function_common.cpp
+#   - shear_tree              -> src/tree_table_reader.cpp + src/shear_tree.cpp
+#   - compute_pileup          -> src/compute_pileup.cpp
+#   - woltka_ogu              -> src/woltka_ogu_function.cpp
+#   - match_short_barcodes    -> src/match_short_barcodes.cpp
+#   - rype_classify           -> src/include/rype_common.hpp (create-site)
+#   - mzml_peak_pair          -> src/mzml_peak_pair_function.cpp (create-site)
+# align_mafft reproduces it identically but is deliberately not used here: its
+# tests need require-env MAFFT_AVAILABLE, and gating a binder-level guarantee
+# behind an optional dependency is the anti-pattern #181 removed. The same goes
+# for the vsearch and sylph families, which were migrated but whose fixtures are
+# gated.
+#
+# Each TEMP case is paired with an identical non-TEMP control, so a failure here
+# means "TEMP is the discriminator", not "the fixture is wrong".
+#
+# Two limitations are pinned at the bottom of this file rather than left to be
+# rediscovered: per-sample (sample_id := ...) paths, and relations created inside
+# an uncommitted explicit transaction. The second is paired with an ordinary-table
+# control, because the claim being made is that it is NOT TEMP-specific.
+#
+
+require miint
+
+# ==============================================================================
+# align_minimap2 -- sequence_table_reader family
+# ==============================================================================
+
+statement ok
+CREATE TEMP TABLE tmp_subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('ref2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCAAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAA')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TEMP TABLE tmp_queries AS SELECT * FROM (VALUES
+    ('query1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('query2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(read_id, sequence1);
+
+# Non-TEMP controls with identical contents.
+statement ok
+CREATE TABLE reg_subjects AS SELECT * FROM tmp_subjects;
+
+statement ok
+CREATE TABLE reg_queries AS SELECT * FROM tmp_queries;
+
+# Control: both relations persistent -- this is the path that works today.
+query II
+SELECT read_id, reference
+FROM align_minimap2('reg_queries', subject_table='reg_subjects', max_secondary=0)
+ORDER BY read_id, reference;
+----
+query1	ref1
+query2	ref2
+
+# TEMP query table (positional argument 1). Read at execution time.
+query II
+SELECT read_id, reference
+FROM align_minimap2('tmp_queries', subject_table='reg_subjects', max_secondary=0)
+ORDER BY read_id, reference;
+----
+query1	ref1
+query2	ref2
+
+# TEMP subject table (named parameter). Read at bind time via ReadSubjectTable,
+# a different code path from the query table, so it is asserted separately.
+query II
+SELECT read_id, reference
+FROM align_minimap2('reg_queries', subject_table='tmp_subjects', max_secondary=0)
+ORDER BY read_id, reference;
+----
+query1	ref1
+query2	ref2
+
+# Both TEMP.
+query II
+SELECT read_id, reference
+FROM align_minimap2('tmp_queries', subject_table='tmp_subjects', max_secondary=0)
+ORDER BY read_id, reference;
+----
+query1	ref1
+query2	ref2
+
+# A TEMP VIEW is affected for the same reason a TEMP TABLE is -- temporary_objects
+# holds both -- so the view case is asserted rather than assumed.
+statement ok
+CREATE TEMP VIEW tmp_queries_view AS SELECT * FROM reg_queries;
+
+query II
+SELECT read_id, reference
+FROM align_minimap2('tmp_queries_view', subject_table='reg_subjects', max_secondary=0)
+ORDER BY read_id, reference;
+----
+query1	ref1
+query2	ref2
+
+# ==============================================================================
+# community_distances -- unifrac_function_common family
+# ==============================================================================
+
+statement ok
+CREATE TEMP TABLE tmp_feat AS SELECT * FROM (VALUES
+  ('s1','f0',1.0),('s1','f1',2.0),('s1','f3',3.0),
+  ('s2','f1',2.0),('s2','f2',4.0),('s2','f3',1.0),
+  ('s3','f0',2.0),('s3','f2',1.0),('s3','f3',1.0)
+) t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE reg_feat AS SELECT * FROM tmp_feat;
+
+# Control: persistent feature table.
+query I
+SELECT count(*) FROM community_distances('reg_feat', 'bray_curtis');
+----
+3
+
+# TEMP feature table. 3 samples -> 3 unordered pairs, same as the control.
+query I
+SELECT count(*) FROM community_distances('tmp_feat', 'bray_curtis');
+----
+3
+
+# The value must match the control exactly, not merely be present: a resolution
+# fix that silently read an empty relation would still return a row count if the
+# shape were only checked loosely. bray_curtis (s1,s2) = Sum|x-y|/Sum(x+y) = 7/13.
+query I
+SELECT abs(distance - 7.0/13.0) < 1e-9
+FROM community_distances('tmp_feat', 'bray_curtis') WHERE sample_a='s1' AND sample_b='s2';
+----
+true
+
+# ==============================================================================
+# One case per remaining reader family that was migrated. The fix is a per-site
+# opt-in, not a global switch, so "align_minimap2 works" says nothing about the
+# others -- each family reads through its own connection-construction site.
+# Only ungated functions are used: gating a binder-level guarantee behind an
+# optional dependency is the anti-pattern #181 removed.
+# ==============================================================================
+
+# --- tree_table_reader + shear_tree -------------------------------------------
+# Two independent relation parameters, read through two different files.
+
+statement ok
+CREATE TEMP TABLE tmp_tree AS SELECT * FROM read_newick('data/newick/simple.nwk');
+
+statement ok
+CREATE TEMP TABLE tmp_tips AS SELECT 'A' AS name;
+
+statement ok
+CREATE TABLE reg_tree AS SELECT * FROM tmp_tree;
+
+statement ok
+CREATE TABLE reg_tips AS SELECT * FROM tmp_tips;
+
+# Control, then each parameter TEMP in turn, then both. shear_tree keeps only the
+# named tips, so the sheared tree is the single tip 'A' -> 1 row in every case.
+query I
+SELECT count(*) FROM shear_tree('reg_tree', 'reg_tips');
+----
+1
+
+query I
+SELECT count(*) FROM shear_tree('tmp_tree', 'reg_tips');
+----
+1
+
+query I
+SELECT count(*) FROM shear_tree('reg_tree', 'tmp_tips');
+----
+1
+
+query I
+SELECT count(*) FROM shear_tree('tmp_tree', 'tmp_tips');
+----
+1
+
+# --- compute_pileup -----------------------------------------------------------
+# Reads the alignment table through a streaming cursor and the reference table
+# through a materialized read -- two sites in one file.
+
+statement ok
+CREATE TEMP TABLE tmp_ref AS SELECT 'chr1' AS ref_id, 'ACGTACGTACGTACGT' AS sequence;
+
+statement ok
+CREATE TEMP TABLE tmp_aln AS SELECT 'r1' AS read_id, 'chr1' AS reference, 1::BIGINT AS position,
+    '4M' AS cigar, 'ACGT' AS sequence, [40,40,40,40]::UTINYINT[] AS qual;
+
+# One pileup row per aligned reference base, and the bases must be the read's --
+# a count alone would pass against a reference read as empty.
+query III
+SELECT ref_pos, ref_base, query_base FROM compute_pileup('tmp_aln', 'tmp_ref') ORDER BY ref_pos;
+----
+1	A	A
+2	C	C
+3	G	G
+4	T	T
+
+# --- woltka_ogu ---------------------------------------------------------------
+
+statement ok
+CREATE TEMP TABLE tmp_ogu AS SELECT * FROM (VALUES
+    ('r1', 'ref1', 0::USMALLINT),
+    ('r2', 'ref1', 0::USMALLINT)
+) t(read_id, reference, flags);
+
+query II
+SELECT feature_id, value FROM woltka_ogu('tmp_ogu', 'read_id');
+----
+ref1	2
+
+# --- match_short_barcodes -----------------------------------------------------
+# Two relation parameters, each read on its own connection.
+
+statement ok
+CREATE TEMP TABLE tmp_obs AS SELECT * FROM (VALUES ('o1', 'ACGTACGT')) t(id, sequence);
+
+statement ok
+CREATE TEMP TABLE tmp_bc AS SELECT * FROM (VALUES ('bc1', 'ACGTACGT')) t(id, sequence);
+
+query II
+SELECT query_id, ref_id FROM match_short_barcodes('tmp_obs', 'tmp_bc', max_nm := 0);
+----
+o1	bc1
+
+# ==============================================================================
+# align_minimap2_sharded -- ReadShardIds and ReadBatchByIds
+# ==============================================================================
+#
+# ReadBatchByIds both reads a user relation AND creates one: it needs a temp table
+# of the shard's ids to JOIN against query_table. That was safe with a fixed name
+# (`_batch_ids`) only while each helper connection had a private catalog. Now that
+# the connection inherits the caller's, the table lands in the user's session, so
+# it is uniquely named -- parallel shard workers would otherwise collide on the one
+# name -- and dropped explicitly instead of dying with the connection. Both
+# properties are asserted below.
+#
+
+statement ok
+CREATE TABLE shard_subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC')
+) AS t(read_id, sequence1);
+
+query I
+SELECT success FROM save_minimap2_index('shard_subjects', '__TEST_DIR__/tmpres_shard.mmi', k := 5);
+----
+true
+
+statement ok
+CREATE TEMP TABLE tmp_shard_queries AS SELECT * FROM (VALUES
+    ('sq1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TEMP TABLE tmp_read_to_shard AS SELECT * FROM (VALUES
+    ('sq1', 'tmpres_shard')
+) AS t(read_id, shard_name);
+
+# Both the query table (ReadBatchByIds) and read_to_shard (ReadShardIds) are TEMP.
+query II
+SELECT read_id, reference
+FROM align_minimap2_sharded('tmp_shard_queries',
+    shard_directory := '__TEST_DIR__/',
+    read_to_shard := 'tmp_read_to_shard',
+    max_secondary := 0)
+WHERE flags & 4 = 0;
+----
+sq1	ref1
+
+# The batch-ids temp table must not survive the call. If it leaked, a user's
+# session would accumulate one relation per shard per query, and `SHOW TABLES`
+# would be full of miint internals.
+query I
+SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE '\_miint\_batch\_ids\_%' ESCAPE '\';
+----
+0
+
+# ...and it must not survive a FAILURE either, which is the case the RAII guard
+# exists for and the one a happy-path assertion cannot reach. This TEMP view binds
+# (so the batch-ids table is created and populated) and then throws while the JOIN
+# that reads it is executing, so the guard's drop runs during exception unwind.
+statement ok
+CREATE TEMP VIEW tmp_shard_boom AS
+SELECT read_id, (CASE WHEN random() >= 0 THEN error('induced failure') ELSE sequence1 END)::VARCHAR AS sequence1
+FROM tmp_shard_queries;
+
+statement error
+SELECT count(*) FROM align_minimap2_sharded('tmp_shard_boom',
+    shard_directory := '__TEST_DIR__/',
+    read_to_shard := 'tmp_read_to_shard',
+    max_secondary := 0);
+----
+Failed to read batch sequences
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE '\_miint\_batch\_ids\_%' ESCAPE '\';
+----
+0
+
+# ==============================================================================
+# rype_classify -- the other create-site pattern
+# ==============================================================================
+#
+# rype materializes the source into its own TEMP table before streaming it to the
+# FFI. Unlike ReadBatchByIds it does not need a scope guard: the name was already
+# UUID-suffixed, and the drop already lived in the owning GlobalState's destructor,
+# which runs on the error path too. So it satisfies the same "unique name, always
+# dropped" condition and can inherit.
+#
+# Bucket counts rather than a row count: the counts are non-zero and exact, so this
+# case fails if the relation is read as empty. (Pre-fix it fails louder still --
+# "Failed to materialize sequence table 'tmp_rype'".)
+
+statement ok
+CREATE TEMP TABLE tmp_rype AS SELECT * FROM (VALUES
+    ('rq1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('rq2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(read_id, sequence1);
+
+query II
+SELECT bucket_name, count(*)
+FROM rype_classify('data/rype/test.ryxdi', 'tmp_rype', threshold := 0.05)
+GROUP BY bucket_name ORDER BY bucket_name;
+----
+bucket_alpha	2
+bucket_beta	2
+bucket_gamma	2
+
+# Same no-leak requirement as the batch-ids table above.
+query I
+SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE '\_rype\_%' ESCAPE '\';
+----
+0
+
+# ==============================================================================
+# mzml_peak_pair -- create-site whose names were ALREADY unique
+# ==============================================================================
+#
+# It suffixes both temp tables from a process-wide atomic counter, so it only ever
+# needed the drop, not the renaming. That made it the cheapest of the create-sites
+# to bring in rather than document around.
+#
+# Fixture is the synthetic iron pair from mzml_macros.test (X=200, partner =
+# 2*200 - formula(Fe) = 344.065), so this needs no mzML file and returns a non-zero
+# count -- both peaks of the matching spectrum.
+
+statement ok
+CREATE TEMP TABLE tmp_iron AS
+SELECT 0 AS spectrum_index, 2 AS ms_level, 1.0 AS retention_time,
+       'centroid' AS spectrum_type, 'positive' AS polarity,
+       1000.0 AS base_peak_intensity, 2000.0 AS total_ion_current,
+       200.0 AS precursor_mz, 2 AS precursor_charge, 1000.0 AS precursor_intensity,
+       NULL::INTEGER AS ms1_scan_index, 'scan=1' AS spectrum_id, 1 AS scan_number,
+       [200.0, 344.0650625] AS mz_array, [1000.0, 500.0] AS intensity_array;
+
+query I
+SELECT count(*) FROM mzml_peak_pair('tmp_iron', 'Fe');
+----
+2
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE '\_\_peak\_pair%' ESCAPE '\';
+----
+0
+
+# ==============================================================================
+# Known limitations, pinned deliberately
+# ==============================================================================
+
+# 1. Per-sample paths (sample_id := ...) still cannot read a TEMP relation.
+# Those connections create a FIXED-name TEMP view (__woltka_per_sample here, and
+# the same shape in detect_chimera_uchime / sylph_profile / massql) and never drop
+# it, so they must keep an isolated catalog: inheriting would make parallel
+# workers collide on that one name -- a silent wrong answer, strictly worse than
+# the resolution failure. Uniquifying those names so they can inherit too is #207;
+# when that lands, this assertion inverts rather than being deleted.
+#
+# massql is worse than "per-sample only" and is NOT covered by this case: it
+# materializes fixed __massql_base / __massql_ms1 on every call, so it cannot take
+# a TEMP source even without sample_id. Its tests are env-gated, so that cannot be
+# asserted here -- recorded so the gap is visible rather than assumed absent.
+statement error
+SELECT count(*) FROM woltka_ogu('tmp_ogu', 'read_id', sample_id := 'reference');
+----
+Table with name tmp_ogu does not exist
+
+# 2. A relation created in an *uncommitted* explicit transaction is invisible to
+# the helper connection, because that connection's transaction cannot see another
+# transaction's unflushed catalog writes. This is NOT specific to TEMP or to this
+# fix -- an ordinary CREATE TABLE in the same position fails identically, so it is
+# a property of the separate-connection recipe itself. Asserted here so the
+# boundary of what was fixed is explicit rather than assumed.
+statement ok
+BEGIN;
+
+statement ok
+CREATE TEMP TABLE tmp_in_txn AS SELECT * FROM (VALUES
+    ('q1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT')
+) AS t(read_id, sequence1);
+
+statement error
+SELECT count(*) FROM align_minimap2('tmp_in_txn', subject_table='reg_subjects', max_secondary=0);
+----
+Table with name tmp_in_txn does not exist
+
+# The failed statement invalidates the transaction, so the CREATE above is rolled
+# back either way -- COMMIT would not preserve it. Rolling back explicitly says so.
+statement ok
+ROLLBACK;
+
+# The control that makes the "not TEMP-specific" claim testable rather than just
+# asserted in prose: an ORDINARY table in the same position fails identically. If a
+# future change fixed transaction visibility for TEMP relations only, or regressed
+# it for ordinary ones, exactly one of these two cases would start disagreeing.
+statement ok
+BEGIN;
+
+statement ok
+CREATE TABLE reg_in_txn AS SELECT * FROM (VALUES
+    ('query1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT')
+) AS t(read_id, sequence1);
+
+statement error
+SELECT count(*) FROM align_minimap2('reg_in_txn', subject_table='reg_subjects', max_secondary=0);
+----
+Table with name reg_in_txn does not exist
+
+statement ok
+ROLLBACK;
+
+# The same relation created outside a transaction resolves, which shows the
+# failure above was transaction visibility and not a resolution regression.
+statement ok
+CREATE TEMP TABLE tmp_after_txn AS SELECT * FROM (VALUES
+    ('query1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT')
+) AS t(read_id, sequence1);
+
+query II
+SELECT read_id, reference
+FROM align_minimap2('tmp_after_txn', subject_table='reg_subjects', max_secondary=0)
+ORDER BY read_id;
+----
+query1	ref1

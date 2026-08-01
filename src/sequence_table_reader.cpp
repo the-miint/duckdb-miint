@@ -7,6 +7,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
+#include "duckdb/common/types/uuid.hpp"
 
 namespace duckdb {
 
@@ -79,8 +80,7 @@ std::vector<miint::AlignmentSubject> ReadSubjectTable(ClientContext &context, co
 	std::vector<miint::AlignmentSubject> result;
 
 	// Create a new connection to avoid deadlocking
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 
 	// Query only required columns - try with sequence2 first to detect paired data
 	std::string query = "SELECT read_id, sequence1, sequence2 FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
@@ -358,8 +358,7 @@ static std::string BuildSequenceColumnList(const SequenceTableSchema &schema, co
 bool ReadQueryBatch(ClientContext &context, const std::string &table_name, const SequenceTableSchema &schema,
                     idx_t batch_size, idx_t &offset, miint::SequenceRecordBatch &output) {
 	// Create a new connection to avoid deadlocking
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 
 	// Build query with ORDER BY for deterministic pagination
 	// Use rowid for physical tables (fast), read_id for views
@@ -390,8 +389,7 @@ bool ReadQueryBatch(ClientContext &context, const std::string &table_name, const
 
 std::vector<std::string> ReadShardIds(ClientContext &context, const std::string &read_to_shard_table,
                                       const std::string &shard_name, const LogicalType &id_type) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 
 	std::string query = "SELECT read_id FROM " + KeywordHelper::WriteOptionallyQuoted(read_to_shard_table) +
 	                    " WHERE shard_name = " + KeywordHelper::WriteQuoted(shard_name, '\'') + " ORDER BY read_id";
@@ -440,8 +438,7 @@ void ReadBatchByIds(ClientContext &context, const std::string &query_table, cons
 		return;
 	}
 
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 
 	// Declare the temp table with the same id_type as the query table so the
 	// downstream JOIN type-checks naturally. The `ids` vector holds stringified
@@ -454,14 +451,25 @@ void ReadBatchByIds(ClientContext &context, const std::string &query_table, cons
 		                        schema.id_type.ToString());
 	}
 	const LogicalType &id_type = schema.id_type;
-	const std::string create_sql = "CREATE TEMPORARY TABLE _batch_ids (read_id " + id_type.ToString() + ")";
+	// The connection inherits the caller's TEMP catalog so a TEMP query_table
+	// resolves, which means this table is created in the *caller's* session rather
+	// than in a private catalog that dies with the connection. Two consequences:
+	// the name must be unique per call — sharded aligners run one of these per
+	// shard on parallel workers, and the old fixed `_batch_ids` would have had them
+	// collide — and it must be dropped explicitly. Name shape follows
+	// MaterializeRypeInputTempTable.
+	const std::string ids_table =
+	    "_miint_batch_ids_" + StringUtil::Replace(UUID::ToString(UUID::GenerateRandomUUID()), "-", "");
+	const std::string ids_quoted = KeywordHelper::WriteOptionallyQuoted(ids_table);
+	const std::string create_sql = "CREATE TEMPORARY TABLE " + ids_quoted + " (read_id " + id_type.ToString() + ")";
 	auto create_result = conn.Query(create_sql);
 	if (create_result->HasError()) {
 		throw InvalidInputException("Failed to create temp table for batch IDs: %s", create_result->GetError());
 	}
+	HelperTempRelation ids_guard(conn, ids_quoted);
 
 	{
-		Appender appender(conn, "_batch_ids");
+		Appender appender(conn, ids_table);
 		for (idx_t i = offset; i < offset + count; i++) {
 			if (id_type.id() == LogicalTypeId::BIGINT) {
 				auto parsed = miint::ParseIdAsInt64(ids[i]);
@@ -486,8 +494,8 @@ void ReadBatchByIds(ClientContext &context, const std::string &query_table, cons
 	// Join against query table using the temp table of exact IDs
 	// No ORDER BY needed — alignment doesn't depend on order
 	std::string query = "SELECT " + BuildSequenceColumnList(schema, "q.") + " FROM " +
-	                    KeywordHelper::WriteOptionallyQuoted(query_table) +
-	                    " q JOIN _batch_ids b ON q.read_id = b.read_id";
+	                    KeywordHelper::WriteOptionallyQuoted(query_table) + " q JOIN " + ids_quoted +
+	                    " b ON q.read_id = b.read_id";
 
 	auto query_result = conn.Query(query);
 	if (query_result->HasError()) {
@@ -506,6 +514,11 @@ QuerySequenceStream::QuerySequenceStream(ClientContext &context, const std::stri
                                          const SequenceTableSchema &schema, idx_t sub_batch_size)
     : owned_conn_(make_uniq<Connection>(DatabaseInstance::GetDatabase(context))), conn_ptr_(owned_conn_.get()),
       schema_(schema), sub_batch_size_(sub_batch_size), partial_(schema.has_sequence2) {
+	// Before InitStream: the stream's own SELECT must be able to resolve a TEMP
+	// relation. This constructor owns its connection and creates nothing on it, so
+	// inheriting is safe — the Connection& overload below deliberately does not,
+	// because those callers pass a connection they created TEMP objects on.
+	InheritTempObjects(context, *owned_conn_);
 	InitStream(table_name);
 }
 
@@ -628,8 +641,7 @@ LoadedSingleEndSequences LoadSingleEndSequences(Connection &conn, const std::str
 
 LoadedSingleEndSequences LoadSingleEndSequences(ClientContext &context, const std::string &table_name,
                                                 const std::string &function_name, bool strict) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	return LoadSingleEndSequences(conn, table_name, function_name, strict, /*where_sql=*/"");
 }
 

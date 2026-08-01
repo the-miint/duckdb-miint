@@ -19,8 +19,7 @@ namespace duckdb::unifrac_internal {
 
 std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, const std::string &table_name,
                                                      const std::string &caller_name, LogicalType *sample_id_type) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
 
 	// Schema probe via LIMIT 0 — surfaces missing columns or unsafe casts as a
@@ -86,8 +85,7 @@ std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, con
 
 DenseDistanceMatrix ReadDistanceTable(ClientContext &context, const std::string &table_name,
                                       const std::string &caller_name) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
 
 	// Schema probe via LIMIT 0 — surfaces missing columns or unsafe casts as a

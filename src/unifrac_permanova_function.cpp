@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "NewickTree.hpp"
+#include "catalog_utils.hpp"
 #include "tree_table_reader.hpp"
 #include "unifrac_bptree.hpp"
 #include "unifrac_distance.hpp"
@@ -75,8 +76,7 @@ struct WideMetadata {
 // (e.g. "permanova" vs "unifrac_permanova").
 WideMetadata ReadWideMetadata(ClientContext &context, const std::string &table_name,
                               const std::vector<std::string> &requested_variables, const std::string &caller_name) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
 
 	auto probe = conn.Query("SELECT * FROM " + qname + " LIMIT 0");

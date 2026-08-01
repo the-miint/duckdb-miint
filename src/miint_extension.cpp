@@ -25,6 +25,7 @@
 #include <kseq++/seqio.hpp>
 #include <read_fastx.hpp>
 #include <read_alignments.hpp>
+#include <read_alignment_header.hpp>
 #include <read_sequences_sam.hpp>
 #include <read_sequences_sff.hpp>
 #include <align_minimap2.hpp>
@@ -266,6 +267,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	ReadFastxTableFunction::Register(loader);
 	ReadAlignmentsTableFunction::Register(loader);
+	ReadAlignmentHeaderTableFunction::Register(loader);
 	ReadSequencesSamTableFunction::Register(loader);
 	ReadSequencesSFFTableFunction::Register(loader);
 #ifdef MIINT_HAS_HDF5

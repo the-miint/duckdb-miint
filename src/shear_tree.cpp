@@ -27,8 +27,7 @@ void ValidateTipsTableSchema(ClientContext &context, const std::string &table_na
 std::unordered_set<std::string> ReadTipNames(ClientContext &context, const std::string &table_name) {
 	std::unordered_set<std::string> names;
 
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 
 	std::string query = "SELECT name::VARCHAR FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
 	auto query_result = conn.Query(query);

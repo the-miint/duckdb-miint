@@ -1,4 +1,5 @@
 #include "read_ncbi.hpp"
+#include "catalog_utils.hpp"
 #include "miint_log.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include <sstream>
@@ -141,6 +142,8 @@ unique_ptr<FunctionData> ReadNCBITableFunction::Bind(ClientContext &context, Tab
 		if (acc.empty()) {
 			throw InvalidInputException("read_ncbi: accession cannot be empty");
 		}
+		// #179 — passing a table of accessions by name used to be a silent no-op.
+		RejectRelationNameAsLiteral(context, "read_ncbi", acc);
 		if (miint::NCBIParser::IsAssemblyAccession(acc)) {
 			throw InvalidInputException("read_ncbi: Assembly accession '%s' is not supported. "
 			                            "Assembly accessions (GCF_/GCA_) represent collections of sequences. "

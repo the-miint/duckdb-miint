@@ -57,8 +57,7 @@ std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const s
 	// This is necessary because context.Query() requires locking the context,
 	// but during bind/finalize the context is already locked.
 	// Using a separate connection allows us to execute queries for both tables and views.
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 
 	// Execute a query to read from the table/view
 	// This approach works for both tables and views uniformly
