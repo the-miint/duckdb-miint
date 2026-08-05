@@ -721,12 +721,15 @@ const std::string MZML_ISOTOPE_PATTERN = // NOLINT
 // Parameters:
 // alignments : a relation with columns: reference (VARCHAR), position (BIGINT),
 //     stop_position (BIGINT)
-// subject_total_length : a relation with columns: genome_id (VARCHAR),
-//     total_length (BIGINT)
-// subject_genome_id : a relation with columns: contig_id (VARCHAR),
-//     genome_id (VARCHAR)
+// subject_total_length : a relation with columns: genome_id, total_length (BIGINT)
+// subject_genome_id : a relation with columns: contig_id (VARCHAR), genome_id
 //
-// Returns: genome_id (VARCHAR), covered (BIGINT), proportion_covered (DOUBLE)
+// genome_id is passed through without casting -- VARCHAR, BIGINT and UUID all
+// work, and the output keeps the type given in subject_genome_id. See the
+// genome_coverage_per_sample comment below on mixed types across the two
+// reference relations; the behavior is identical here, same code path.
+//
+// Returns: genome_id (as supplied), covered (BIGINT), proportion_covered (DOUBLE)
 //
 // Raises, rather than returning a wrong or missing answer, when a covered genome
 // has no usable denominator:
@@ -798,6 +801,116 @@ const std::string GENOME_COVERAGE = // NOLINT
     "        WHEN tl.total_length IS NULL OR tl.total_length <= 0 "
     "          THEN error(printf('genome_coverage: total_length must be positive for genome_id ''%s'' "
     "(got %s)', tc.genome_id::VARCHAR, COALESCE(tl.total_length::VARCHAR, 'NULL'))) "
+    "        ELSE TRUE "
+    "      END;";
+
+// genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id)
+//
+// Per-sample sibling of genome_coverage. Identical arithmetic, but every step is
+// partitioned by a `sample_id` column that `alignments` must additionally carry:
+// intervals compress per (sample_id, reference) and covered bases sum per
+// (sample_id, genome_id).
+//
+// Use this whenever `alignments` holds more than one sample. genome_coverage has
+// no sample dimension, so it POOLS multi-sample input into a single row per
+// genome -- two samples covering [10,21)+[30,41) and [10,21) of a 100 bp genome
+// yield one row at 0.22 instead of 0.22 and 0.11. That is not a bug in
+// genome_coverage (it cannot see samples), but it does mean every sample below
+// the pooled maximum is silently over-reported if you feed it pooled input.
+//
+// The two macros are deliberate near-duplicates rather than one parameterized
+// macro: a DuckDB macro cannot vary its output schema, the single-sample form
+// has no sample_id column to delegate with, and a macro cannot inject a constant
+// column into a query_table() reference. Any change to the coverage arithmetic
+// here must be mirrored in GENOME_COVERAGE above, and vice versa.
+//
+// Parameters:
+// alignments : a relation with columns: sample_id (any type), reference
+//     (VARCHAR), position (BIGINT), stop_position (BIGINT)
+// subject_total_length : a relation with columns: genome_id, total_length (BIGINT)
+// subject_genome_id : a relation with columns: contig_id (VARCHAR), genome_id
+//
+// sample_id and genome_id are passed through without casting, so VARCHAR,
+// BIGINT and UUID identifiers all survive end to end; the output keeps the type
+// given in subject_genome_id. The two reference relations do NOT have to declare
+// genome_id with the same type -- it is a join key, so DuckDB implicit-casts and
+// a BIGINT 77 matches a VARCHAR '77' (pinned by Test 14 of
+// test/sql/genome_coverage_per_sample.test). Matching types are still worth
+// preferring: an unconvertible value fails as a cast error naming the column
+// rather than as a clear diagnosis of the mismatch.
+//
+// A (sample, genome) pair with no qualifying alignments produces no row at all,
+// rather than a zero-coverage row.
+//
+// Returns: sample_id (as supplied), genome_id (as supplied), covered (BIGINT),
+//     proportion_covered (DOUBLE)
+//
+// Raises on a NULL sample_id, and on the same unusable-denominator cases as
+// genome_coverage (missing total_length row; NULL, zero or negative
+// total_length). The two macros are kept in lockstep on all of it.
+//
+// `covered` is cast back to BIGINT for the same reason as genome_coverage above
+// -- DuckDB widens SUM unconditionally, and the value is bounded by the genome
+// length. Keep both macros in agreement; a type mismatch between siblings would
+// be a nasty surprise for anyone UNION-ing their results.
+const std::string GENOME_COVERAGE_PER_SAMPLE = // NOLINT
+    "CREATE OR REPLACE MACRO genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id) AS "
+    "TABLE "
+    "WITH compressed_intervals AS ( "
+    "    SELECT "
+    "        sample_id, "
+    "        reference, "
+    "        UNNEST(compress_intervals(position, stop_position)) AS ci "
+    "    FROM query_table(alignments) "
+    // Reject NULL sample_id rather than letting it form its own group. A NULL
+    // sample is not a meaningful partition, and grouping it would emit a
+    // plausible-looking row for what is almost always a data error. Every other
+    // per-sample function in the extension rejects it (see
+    // docs/internals/per-sample-pattern.md); the message reuses that family's
+    // substring so callers see one behavior. In WHERE, not the projection, so
+    // projection pruning cannot silence it.
+    "    WHERE CASE WHEN sample_id IS NULL "
+    "               THEN error('genome_coverage_per_sample: NULL values in sample_id column "
+    "''sample_id''') "
+    "               ELSE TRUE END "
+    "    GROUP BY sample_id, reference "
+    "), "
+    "internal_coverage AS ( "
+    "    SELECT "
+    "        sample_id, "
+    "        sg.genome_id, "
+    "        SUM(ci.stop - ci.start) AS covered_internal "
+    "    FROM compressed_intervals "
+    // Deduplicated for the same reason as genome_coverage above -- a repeated
+    // (contig_id, genome_id) row would double every covered count.
+    "    JOIN (SELECT DISTINCT contig_id, genome_id FROM query_table(subject_genome_id)) sg "
+    "      ON reference = sg.contig_id "
+    "    GROUP BY sample_id, sg.genome_id, reference "
+    "), "
+    "total_coverage AS ( "
+    "    SELECT "
+    "        sample_id, "
+    "        genome_id, "
+    "        SUM(covered_internal) AS covered "
+    "    FROM internal_coverage "
+    "    GROUP BY sample_id, genome_id "
+    ") "
+    "SELECT "
+    "    tc.sample_id, "
+    "    tc.genome_id, "
+    "    tc.covered::BIGINT AS covered, "
+    "    tc.covered::DOUBLE / tl.total_length AS proportion_covered "
+    "FROM total_coverage tc "
+    // Mirrors genome_coverage's guard; see the reasoning there.
+    "LEFT JOIN query_table(subject_total_length) tl "
+    "  ON tc.genome_id = tl.genome_id "
+    "WHERE CASE "
+    "        WHEN tl.genome_id IS NULL "
+    "          THEN error(printf('genome_coverage_per_sample: no total_length entry for genome_id "
+    "''%s''', tc.genome_id::VARCHAR)) "
+    "        WHEN tl.total_length IS NULL OR tl.total_length <= 0 "
+    "          THEN error(printf('genome_coverage_per_sample: total_length must be positive for "
+    "genome_id ''%s'' (got %s)', tc.genome_id::VARCHAR, COALESCE(tl.total_length::VARCHAR, 'NULL'))) "
     "        ELSE TRUE "
     "      END;";
 
@@ -1062,6 +1175,7 @@ public:
 		register_macro(PARSE_GFF_ATTRIBUTES, "parse_gff_attributes");
 		register_macro(READ_GFF, "read_gff");
 		register_macro(GENOME_COVERAGE, "genome_coverage");
+		register_macro(GENOME_COVERAGE_PER_SAMPLE, "genome_coverage_per_sample");
 		register_macro(INFER_TRIM, "infer_trim");
 
 		register_macro(READ_JPLACE, "read_jplace");

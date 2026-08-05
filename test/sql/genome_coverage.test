@@ -295,6 +295,73 @@ SELECT * FROM genome_coverage(gc7_aln, gc7_tl_extra, gc7_sg);
 ----
 genome_A	11	0.11
 
+# ---- Test 8: identifier types are passed through, not coerced ----
+# docs/alignment_analysis.md claims BIGINT and UUID genome_id work here, not
+# just in the per-sample sibling. The code path is identical, but "identical code
+# path" is the kind of reasoning that stops being true without anyone noticing --
+# and an untested prose claim is exactly what produced a wrong doc line earlier
+# in this milestone. So the base macro pins it itself.
+
+statement ok
+CREATE TABLE gc8_aln (reference VARCHAR, position BIGINT, stop_position BIGINT);
+
+statement ok
+INSERT INTO gc8_aln VALUES ('contig1', 10, 21);
+
+statement ok
+CREATE TABLE gc8_sg_bi (contig_id VARCHAR, genome_id BIGINT);
+
+statement ok
+INSERT INTO gc8_sg_bi VALUES ('contig1', 77);
+
+statement ok
+CREATE TABLE gc8_tl_bi (genome_id BIGINT, total_length BIGINT);
+
+statement ok
+INSERT INTO gc8_tl_bi VALUES (77, 100);
+
+query IIR
+SELECT * FROM genome_coverage(gc8_aln, gc8_tl_bi, gc8_sg_bi);
+----
+77	11	0.11
+
+query T
+SELECT typeof(genome_id) FROM genome_coverage(gc8_aln, gc8_tl_bi, gc8_sg_bi);
+----
+BIGINT
+
+statement ok
+CREATE TABLE gc8_sg_uu (contig_id VARCHAR, genome_id UUID);
+
+statement ok
+INSERT INTO gc8_sg_uu VALUES ('contig1', '33333333-3333-3333-3333-333333333333');
+
+statement ok
+CREATE TABLE gc8_tl_uu (genome_id UUID, total_length BIGINT);
+
+statement ok
+INSERT INTO gc8_tl_uu VALUES ('33333333-3333-3333-3333-333333333333', 100);
+
+query TIR
+SELECT * FROM genome_coverage(gc8_aln, gc8_tl_uu, gc8_sg_uu);
+----
+33333333-3333-3333-3333-333333333333	11	0.11
+
+# The two reference relations need not agree on the declared type -- genome_id is
+# a join key, so DuckDB implicit-casts and BIGINT 77 matches VARCHAR '77'. The
+# docs recommend matching types anyway, because an unconvertible value fails as a
+# cast error rather than a clear mismatch diagnosis.
+statement ok
+CREATE TABLE gc8_tl_vc (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO gc8_tl_vc VALUES ('77', 100);
+
+query IIR
+SELECT * FROM genome_coverage(gc8_aln, gc8_tl_vc, gc8_sg_bi);
+----
+77	11	0.11
+
 # ---- Cleanup ----
 
 statement ok
@@ -320,6 +387,24 @@ DROP TABLE gc7_tl_null;
 
 statement ok
 DROP TABLE gc7_tl_extra;
+
+statement ok
+DROP TABLE gc8_aln;
+
+statement ok
+DROP TABLE gc8_sg_bi;
+
+statement ok
+DROP TABLE gc8_tl_bi;
+
+statement ok
+DROP TABLE gc8_sg_uu;
+
+statement ok
+DROP TABLE gc8_tl_uu;
+
+statement ok
+DROP TABLE gc8_tl_vc;
 
 statement ok
 DROP TABLE alignments;

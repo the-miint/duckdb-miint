@@ -14,6 +14,7 @@ A considerable amount of analysis on alignment data can be performed with native
 - [Merge overlapping intervals](#merge-overlapping-intervals) - Merge overlapping genomic intervals (aggregate)
 - [Coverage depth](#coverage-depth) - Per-position depth of coverage (aggregate)
 - [Genome coverage](#genome-coverage) - Proportion of each genome covered by alignments
+- [Per-sample genome coverage](#per-sample-genome-coverage) - The same, reported separately for each sample
 - [Barcode matching](#barcode-matching) - Hamming-distance matcher for short fixed-length barcodes
 - [MSA column consensus](#msa-column-consensus) - Quality-aware consensus from a multiple alignment
 - [Concordant-pair identity filtering](#worked-example-joint-identity-filtering-of-concordant-read-pairs) - Filter paired-end alignments as a unit
@@ -565,14 +566,18 @@ Table macro that computes genome coverage from alignment data. It compresses ove
 All three parameters are unquoted table/view names (not string literals):
 
 - `alignments`: A relation with columns `reference` (VARCHAR), `position` (BIGINT), `stop_position` (BIGINT)
-- `subject_total_length`: A relation with columns `genome_id` (VARCHAR), `total_length` (BIGINT)
-- `subject_genome_id`: A relation with columns `contig_id` (VARCHAR), `genome_id` (VARCHAR)
+- `subject_total_length`: A relation with columns `genome_id`, `total_length` (BIGINT)
+- `subject_genome_id`: A relation with columns `contig_id` (VARCHAR), `genome_id`
+
+`genome_id` is passed through without casting, so VARCHAR, BIGINT and UUID identifiers all work, and the output column keeps the type given in `subject_genome_id`.
+
+The two reference relations do not have to declare `genome_id` with the *same* type — it is a join key, so DuckDB applies its usual implicit casts, and e.g. a BIGINT `77` matches a VARCHAR `'77'`. Prefer matching types anyway: when a value cannot be converted you get a cast error naming the column (`Could not convert string 'genome_A' to INT64 …`) rather than a clear diagnosis of the mismatch.
 
 **Output schema:**
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `genome_id` | VARCHAR | Genome identifier |
+| `genome_id` | as supplied | Genome identifier, in the type it was given |
 | `covered` | BIGINT | Total number of bases covered |
 | `proportion_covered` | DOUBLE | Fraction of genome covered (`covered / total_length`) |
 
@@ -580,7 +585,18 @@ All three parameters are unquoted table/view names (not string literals):
 - Overlapping alignments on the same contig are merged before counting (via `compress_intervals`)
 - Multiple contigs mapping to the same genome have their coverage summed
 - Contigs in `alignments` that are not present in `subject_genome_id` are excluded from output
+- `subject_genome_id` is deduplicated on `(contig_id, genome_id)` before use, so a repeated mapping row cannot double-count coverage. A contig mapped to two *different* genomes is not a duplicate and still counts toward both
 - Uses half-open coordinates consistent with `read_alignments` output
+- **Multi-sample input is pooled.** This macro has no sample dimension: given alignments from several samples it returns one row per genome, computed as though every read came from a single sample. Use [`genome_coverage_per_sample`](#per-sample-genome-coverage) instead
+
+**Errors:**
+
+A genome that has coverage but no usable denominator raises, rather than being dropped or divided into a meaningless number:
+
+- `no total_length entry for genome_id '<X>'` — a genome mapped in `subject_genome_id` and covered by alignments has no row in `subject_total_length`. Previously such genomes were silently omitted along with their covered bases
+- `total_length must be positive for genome_id '<X>' (got <v>)` — the length is zero, negative, or NULL. A zero length previously yielded `proportion_covered = inf`
+
+A genome listed in `subject_total_length` that has *no* coverage is not an error; it simply produces no row. Passing a complete reference catalogue is therefore fine.
 
 **Examples:**
 ```sql
@@ -600,6 +616,76 @@ INSERT INTO contig_to_genome VALUES
 SELECT * FROM genome_coverage(alignments, genome_lengths, contig_to_genome)
 WHERE proportion_covered > 0.5;
 ```
+
+### Per-sample genome coverage
+
+`genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id)`
+
+Table macro that computes genome coverage **separately for each sample**. It is the sibling of [`genome_coverage`](#genome-coverage) and performs identical arithmetic, but partitions every step by a `sample_id` column that `alignments` must additionally carry: intervals are compressed per `(sample_id, reference)` and covered bases summed per `(sample_id, genome_id)`.
+
+Use this whenever your alignment relation holds more than one sample. `genome_coverage` has no sample dimension and will pool them into a single row per genome — two samples covering 22 and 11 bases of a 100 bp genome return one row at `0.22`, over-reporting the second sample by 2×.
+
+**Parameters:**
+
+All three parameters are unquoted table/view names (not string literals):
+
+- `alignments`: A relation with columns `sample_id`, `reference` (VARCHAR), `position` (BIGINT), `stop_position` (BIGINT)
+- `subject_total_length`: A relation with columns `genome_id`, `total_length` (BIGINT)
+- `subject_genome_id`: A relation with columns `contig_id` (VARCHAR), `genome_id`
+
+`sample_id` and `genome_id` are passed through without casting, so VARCHAR, BIGINT and UUID identifiers all work.
+
+**Output schema:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `sample_id` | as supplied | Sample identifier, in the type it was given |
+| `genome_id` | as supplied | Genome identifier, in the type it was given |
+| `covered` | BIGINT | Total number of bases covered in that sample |
+| `proportion_covered` | DOUBLE | Fraction of genome covered (`covered / total_length`) |
+
+**Behavior:**
+- Intervals are merged *within* a sample, never *across* samples
+- A `(sample, genome)` pair with no qualifying alignments produces no row, rather than a zero-coverage row
+- On single-sample input the result matches `genome_coverage` exactly
+- All other behavior — contig merging, deduplication of `subject_genome_id`, half-open coordinates — matches `genome_coverage`
+
+**Errors:**
+
+Raises on the same unusable-denominator cases as `genome_coverage`, plus:
+
+- `NULL values in sample_id column 'sample_id'` — a NULL sample cannot form a meaningful partition, and is rejected rather than reported as its own group. This matches every other per-sample function in the extension
+
+**Examples:**
+```sql
+CREATE TABLE alignments AS
+  SELECT 'sampleA' AS sample_id, reference, position, stop_position
+  FROM read_alignments('sampleA.bam')
+  UNION ALL
+  SELECT 'sampleB', reference, position, stop_position
+  FROM read_alignments('sampleB.bam');
+
+SELECT * FROM genome_coverage_per_sample(alignments, genome_lengths, contig_to_genome)
+ORDER BY sample_id, genome_id;
+```
+
+Feeding per-sample coverage into absolute quantification, which expects a `(sample_id, feature_id, coverage)` shape:
+
+```sql
+SELECT sample_id, genome_id AS feature_id, proportion_covered AS coverage
+FROM genome_coverage_per_sample(alignments, genome_lengths, contig_to_genome);
+```
+
+**If you need the pooled number per sample.** Some workflows want each sample compared against coverage computed across the whole study rather than within the sample. There is no parameter for this — but it is one join, because `genome_coverage` already produces exactly that number:
+
+```sql
+-- Broadcast the pooled (all-sample) coverage to every sample.
+SELECT s.sample_id, g.genome_id, g.covered, g.proportion_covered
+FROM genome_coverage(alignments, genome_lengths, contig_to_genome) g
+CROSS JOIN (SELECT DISTINCT sample_id FROM alignments) s;
+```
+
+Be deliberate about which one you want: the pooled value is identical for every sample and is *not* a property of any single sample.
 
 ### Barcode matching
 
