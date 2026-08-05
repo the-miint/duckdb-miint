@@ -61,6 +61,22 @@ if(NOT TARGET Eigen3::Eigen)
 endif()
 add_compile_definitions(EIGEN_MPL2_ONLY)
 
+# The extension links OpenMP (libssu is built with -fopenmp), so `_OPENMP` is
+# defined for miint's own sources too, and Eigen/Core:65 would then enable its
+# parallel GEMM path. mmvec's objective contains matrix products whose reduction
+# runs over a long dimension (d1 = 2720 at cystic-fibrosis scale), so a
+# thread-count-dependent blocking would make a seeded fit non-reproducible --
+# which is exactly the guarantee mmvec's own RNG transforms exist to provide.
+#
+# Set globally rather than per-source: Eigen's macros affect templates
+# instantiated in whichever translation unit includes the headers, so a per-file
+# define would leave two differently-configured instantiations of the same
+# symbols for the linker to choose between. Nothing here loses anything measurable
+# -- the only other Eigen user is NewickTree.cpp's k x k rate matrices (k = the
+# character-state count, so single digits), orders of magnitude below the size at
+# which Eigen would consider threading a product at all.
+add_compile_definitions(EIGEN_DONT_PARALLELIZE)
+
 # libcurl powers the streaming HTTPS-PUT / FTP / FTPS transport in
 # `ena_upload_reads`. Disabled on Apple because vcpkg's libcurl pulls in
 # OpenSSL's libcrypto, which exports `MD5_*` / `SHA1_*` symbols that
@@ -1331,11 +1347,14 @@ set(EXTENSION_SOURCES
     src/community_distances.cpp
     src/cluster_kmeans.cpp
     src/cluster_upgma.cpp
+    src/mmvec.cpp
+    src/mmvec_relation.cpp
     # Generic (UniFrac-independent) table readers, and the beta-diversity /
     # ordination wrappers that use them. Always compiled: nothing here links
     # libssu or libskbb.
     src/unifrac_function_common.cpp
     src/community_distances_function.cpp
+    src/mmvec_fit_function.cpp
     src/cluster_kmeans_function.cpp
     src/cluster_upgma_function.cpp
     src/per_sample_table_function.cpp
@@ -1744,7 +1763,9 @@ set(TEST_SOURCES
     src/community_distances.cpp
     test/cpp/test_CommunityDistances.cpp
     src/mmvec.cpp
+    src/mmvec_relation.cpp
     test/cpp/test_MMvec.cpp
+    test/cpp/test_MMvecRelation.cpp
     src/cluster_kmeans.cpp
     test/cpp/test_ClusterKmeans.cpp
     src/cluster_upgma.cpp

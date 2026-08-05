@@ -74,6 +74,7 @@
 #include <cluster_kmeans.hpp>
 #include <cluster_upgma.hpp>
 #include <community_distances.hpp>
+#include <mmvec.hpp>
 #include <deblur_table_function.hpp>
 #include <simulate_resemblance.hpp>
 #include <align_pairwise_wfa2_functions.hpp>
@@ -431,6 +432,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterCommunityDistances(loader);
 	RegisterClusterKmeans(loader);
 	RegisterClusterUpgma(loader);
+
+	// Multi-omics: MMvec joint embeddings of two paired count modalities. Pure
+	// in-repo C++ over the same generic table readers, so likewise always on.
+	RegisterMmvecFit(loader);
 
 #ifdef MIINT_HAS_HDF5
 	CopyBiomFunction::Register(loader);
