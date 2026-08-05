@@ -728,6 +728,13 @@ const std::string MZML_ISOTOPE_PATTERN = // NOLINT
 //
 // Returns: genome_id (VARCHAR), covered (BIGINT), proportion_covered (DOUBLE)
 //
+// Raises, rather than returning a wrong or missing answer, when a covered genome
+// has no usable denominator:
+//   - no total_length row for a genome that has coverage
+//   - total_length that is NULL, zero or negative
+// A genome listed in subject_total_length but with no coverage is not an error;
+// it simply produces no row.
+//
 // `covered` is cast back to BIGINT deliberately -- do not remove the cast.
 // DuckDB widens the return type of SUM unconditionally (SUM(BIGINT) and even
 // SUM(INTEGER) yield HUGEINT), which is pointless here: compress_intervals
@@ -750,7 +757,14 @@ const std::string GENOME_COVERAGE = // NOLINT
     "        sg.genome_id, "
     "        SUM(ci.stop - ci.start) AS covered_internal "
     "    FROM compressed_intervals "
-    "    JOIN query_table(subject_genome_id) sg "
+    // SELECT DISTINCT, not a bare query_table(): a duplicated (contig_id,
+    // genome_id) row would otherwise multiply every interval for that contig
+    // before any GROUP BY sees it, reporting 11 covered bases as 22. Mapping
+    // tables assembled by concatenating per-genome files hit this routinely, and
+    // the inflated result looks like an ordinary low-coverage genome. The dedupe
+    // is on the PAIR, so a contig legitimately mapped to two different genomes
+    // still counts toward both.
+    "    JOIN (SELECT DISTINCT contig_id, genome_id FROM query_table(subject_genome_id)) sg "
     "      ON reference = sg.contig_id "
     "    GROUP BY sg.genome_id, reference "
     "), "
@@ -766,8 +780,26 @@ const std::string GENOME_COVERAGE = // NOLINT
     "    tc.covered::BIGINT AS covered, "
     "    tc.covered::DOUBLE / tl.total_length AS proportion_covered "
     "FROM total_coverage tc "
-    "JOIN query_table(subject_total_length) tl "
-    "  USING (genome_id);";
+    // LEFT JOIN + an explicit guard, not an inner join: a covered genome with no
+    // usable total_length must be reported, not silently dropped or divided into
+    // garbage. The guard lives in WHERE rather than the projection because
+    // DuckDB prunes unused projections -- inside SELECT it would not fire for
+    // `SELECT covered FROM genome_coverage(...)`, the very query that would
+    // otherwise hide the problem. Same reasoning as read_gff's malformed-line
+    // check above. A genome present in subject_total_length but uncovered here
+    // simply produces no row; only a genome we must divide for and cannot is
+    // fatal, so an empty result stays empty rather than raising.
+    "LEFT JOIN query_table(subject_total_length) tl "
+    "  ON tc.genome_id = tl.genome_id "
+    "WHERE CASE "
+    "        WHEN tl.genome_id IS NULL "
+    "          THEN error(printf('genome_coverage: no total_length entry for genome_id ''%s''', "
+    "                            tc.genome_id::VARCHAR)) "
+    "        WHEN tl.total_length IS NULL OR tl.total_length <= 0 "
+    "          THEN error(printf('genome_coverage: total_length must be positive for genome_id ''%s'' "
+    "(got %s)', tc.genome_id::VARCHAR, COALESCE(tl.total_length::VARCHAR, 'NULL'))) "
+    "        ELSE TRUE "
+    "      END;";
 
 // infer_trim(original_reads, qcd_reads)
 //
