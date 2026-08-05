@@ -1329,6 +1329,7 @@ set(EXTENSION_SOURCES
     src/simulate_resemblance.cpp
     src/simulate_resemblance_function.cpp
     src/community_distances.cpp
+    src/absquant.cpp
     src/cluster_kmeans.cpp
     src/cluster_upgma.cpp
     # Generic (UniFrac-independent) table readers, and the beta-diversity /
@@ -1336,6 +1337,7 @@ set(EXTENSION_SOURCES
     # libssu or libskbb.
     src/unifrac_function_common.cpp
     src/community_distances_function.cpp
+    src/absquant_function.cpp
     src/cluster_kmeans_function.cpp
     src/cluster_upgma_function.cpp
     src/per_sample_table_function.cpp
@@ -1743,6 +1745,8 @@ set(TEST_SOURCES
     test/cpp/test_SimulateCluster.cpp
     src/community_distances.cpp
     test/cpp/test_CommunityDistances.cpp
+    src/absquant.cpp
+    test/cpp/test_AbsQuant.cpp
     src/cluster_kmeans.cpp
     test/cpp/test_ClusterKmeans.cpp
     src/cluster_upgma.cpp

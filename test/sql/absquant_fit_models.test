@@ -1,0 +1,821 @@
+# name: test/sql/absquant_fit_models.test
+# description: absquant_fit_models -- per-sample synDNA regression models
+# group: [sql]
+
+require miint
+
+# ---------------------------------------------------------------------------
+# Inputs. Set A is pysyndna's own fixture set, traceable to the published
+# spreadsheet and the Zaramela notebook; Set B is synthetic and built so that
+# each of its eleven samples exercises one branch of scipy.stats.linregress.
+# See data/syndna/README.md for provenance and for the per-sample intent table.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE fit_counts AS SELECT * FROM read_csv('data/syndna/fit_counts.csv');
+
+statement ok
+CREATE TABLE fit_conc AS SELECT * FROM read_csv('data/syndna/fit_concentrations.csv');
+
+statement ok
+CREATE TABLE fit_params AS SELECT * FROM read_csv('data/syndna/fit_params.csv');
+
+statement ok
+CREATE TABLE b_counts AS SELECT * FROM read_csv('data/syndna/fitb_counts.csv');
+
+statement ok
+CREATE TABLE b_conc AS SELECT * FROM read_csv('data/syndna/fitb_concentrations.csv');
+
+statement ok
+CREATE TABLE b_params AS SELECT * FROM read_csv('data/syndna/fitb_params.csv');
+
+statement ok
+CREATE TABLE fit_mine AS
+SELECT * FROM absquant_fit_models('fit_counts', 'fit_conc', 'fit_params', 1.0, min_syndna_counts := 50);
+
+statement ok
+CREATE TABLE b_mine AS
+SELECT * FROM absquant_fit_models('b_counts', 'b_conc', 'b_params', 1.0, min_syndna_counts := 50);
+
+statement ok
+CREATE TABLE b20_mine AS
+SELECT * FROM absquant_fit_models('b_counts', 'b_conc', 'b_params', 1.0, min_syndna_counts := 20);
+
+# ---------------------------------------------------------------------------
+# Parity against all three committed fit oracles at once.
+#
+# Tagged and unioned rather than compared three times: the six-column tolerance
+# predicate is where a copy-paste slip would hide (comparing mine.stderr to
+# gold.slope, say, still returns 0 rows), so it is written exactly once. The
+# FULL JOIN is on (oracle, sample_id), so a model that is missing from one
+# configuration but present in another is still caught.
+#
+# Tolerance 1e-11, the figure data/syndna/README.md records for the fit
+# oracles: pysyndna's public API truncates its output to 12 decimal places, so
+# the goldens themselves carry only ~1e-12.
+#
+# The B configuration is what pins the mass-fraction denominator rule. At
+# min_syndna_counts = 50 the synDNA b6 is dropped, and pysyndna does NOT rescale
+# the denominator afterwards -- it keeps summing the full concentrations
+# relation, which is 1.11131 ng/uL here. Summing over the survivors instead is
+# the obvious implementation, and it shifts every fitted intercept by
+# log10(1.11131 / (1.11131 - 1e-05)) = 3.9e-06 -- five orders of magnitude above
+# this tolerance, and visible in no other configuration in this file.
+#
+# Listing the offending (oracle, sample_id) rather than counting them: a failure
+# then names which oracle and which sample diverged instead of just how many.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE all_mine AS
+          SELECT 'A' AS oracle, * FROM fit_mine
+UNION ALL SELECT 'B' AS oracle, * FROM b_mine
+UNION ALL SELECT 'B20' AS oracle, * FROM b20_mine;
+
+statement ok
+CREATE TABLE all_gold AS
+          SELECT 'A' AS oracle, * FROM read_csv('data/syndna/fit_models_oracle.csv')
+UNION ALL SELECT 'B' AS oracle, * FROM read_csv('data/syndna/fitb_models_oracle.csv')
+UNION ALL SELECT 'B20' AS oracle, * FROM read_csv('data/syndna/fitb_boundary_models_oracle.csv');
+
+query TT
+SELECT oracle, sample_id FROM all_mine m FULL JOIN all_gold g USING (oracle, sample_id)
+WHERE m.oracle IS NULL
+   OR g.oracle IS NULL
+   OR abs(m.slope - g.slope) > 1e-11 * (1.0 + abs(g.slope))
+   OR abs(m.intercept - g.intercept) > 1e-11 * (1.0 + abs(g.intercept))
+   OR abs(m.rvalue - g.rvalue) > 1e-11 * (1.0 + abs(g.rvalue))
+   OR abs(m.pvalue - g.pvalue) > 1e-11 * (1.0 + abs(g.pvalue))
+   OR abs(m.stderr - g.stderr) > 1e-11 * (1.0 + abs(g.stderr))
+   OR abs(m.intercept_stderr - g.intercept_stderr) > 1e-11 * (1.0 + abs(g.intercept_stderr))
+ORDER BY 1, 2;
+----
+
+# Row counts stated separately from the parity join, because "the models I did
+# return all match" and "I returned the right models" are different claims and a
+# reader should be able to see the second one without reconstructing it. Set B
+# puts eleven samples in and gets five models out; the other six fail by six
+# different routes.
+query TI
+SELECT oracle, count(*) FROM all_mine GROUP BY 1 ORDER BY 1;
+----
+A	2
+B	5
+B20	8
+
+# The output contract: sample_id mirrored, six DOUBLE regression fields, in
+# scipy.stats.linregress's own field order.
+query IIIIIII
+SELECT typeof(sample_id), typeof(slope), typeof(intercept), typeof(rvalue),
+       typeof(pvalue), typeof(stderr), typeof(intercept_stderr)
+FROM fit_mine LIMIT 1;
+----
+VARCHAR	DOUBLE	DOUBLE	DOUBLE	DOUBLE	DOUBLE	DOUBLE
+
+# ---------------------------------------------------------------------------
+# min_syndna_counts is a STRICT `<`, so a synDNA sitting exactly on the
+# threshold is kept.
+#
+# b6 totals exactly 20 reads across all eleven samples; the next-lowest synDNA
+# totals 1220. The threshold therefore has a wide, empty margin around 20, and
+# the three assertions below bracket it from both sides:
+#
+#   * at 20, b6 survives -- eight models, matching the boundary oracle above;
+#   * at 21, b6 is dropped and the result returns bit-for-bit to the five-model
+#     min_syndna_counts = 50 answer;
+#   * at 20 nothing at all was dropped, which a `<=` implementation could not
+#     produce.
+#
+# Without these, an implementation that wrote `<=` would satisfy every other
+# assertion in this file: the ordinary configurations all sit clearly on one
+# side of the threshold.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE b21_mine AS
+SELECT * FROM absquant_fit_models('b_counts', 'b_conc', 'b_params', 1.0, min_syndna_counts := 21);
+
+query IIIIIII
+(SELECT * FROM b21_mine EXCEPT SELECT * FROM b_mine)
+UNION ALL
+(SELECT * FROM b_mine EXCEPT SELECT * FROM b21_mine);
+----
+
+query I
+SELECT count(*) FROM miint_warnings() WHERE message LIKE '%fewer than 20 total reads%';
+----
+0
+
+# min_syndna_counts defaults to 1. Asserted against the min_syndna_counts = 20
+# result rather than a row count, because b6's 20 reads clear both thresholds:
+# the two runs drop the same (empty) set of synDNAs and so must agree exactly.
+query IIIIIII
+(SELECT * FROM absquant_fit_models('b_counts', 'b_conc', 'b_params', 1.0)
+ EXCEPT SELECT * FROM b20_mine)
+UNION ALL
+(SELECT * FROM b20_mine
+ EXCEPT SELECT * FROM absquant_fit_models('b_counts', 'b_conc', 'b_params', 1.0));
+----
+
+# ---------------------------------------------------------------------------
+# Diagnostics. Every sample that produces no model must say so somewhere the
+# user can query -- a silently short result set is the failure mode this whole
+# reporting layer exists to prevent.
+#
+# Asserted as ">= 1", not "= 1": miint_warnings() is a session-cumulative log,
+# so an exact count would couple each assertion to how many times anything else
+# in this file happens to have run. The claim being made is "this warning fired,
+# naming these ids", which is what >= 1 says. Same idiom as read_ncbi.test.
+# ---------------------------------------------------------------------------
+
+# b6 totals exactly 20 reads across all samples, well under 50.
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%fewer than 50 total reads%' AND message LIKE '%''b6''%';
+----
+true
+
+# sNULL and sNEG are rejected on their parameters, before any arithmetic.
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%mass_syndna_input_ng is NULL%'
+  AND message LIKE '%''sNEG''%' AND message LIKE '%''sNULL''%';
+----
+true
+
+# sCONSTY (NaN rvalue), sONE (one usable point), sFLAT (constant x, which scipy
+# rejects outright) all reach the fit and fail there.
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%no model could be fit%'
+  AND message LIKE '%''sCONSTY''%' AND message LIKE '%''sFLAT''%' AND message LIKE '%''sONE''%';
+----
+true
+
+# sNONE is zero in every synDNA. The reader drops zero cells, so by the time the
+# fit sees the data that sample has no rows at all -- and the warning must say
+# "no nonzero counts" rather than "no rows", because the counts relation the
+# user is looking at plainly does contain sNONE.
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%contributed no nonzero synDNA counts%' AND message LIKE '%''sNONE''%';
+----
+true
+
+# An INFINITE mass_syndna_input_ng is filtered on the same rule as a NULL or a
+# negative one. This is a deliberate divergence: pysyndna accepts it, because it
+# passes both of pysyndna's tests -- and then makes every log10 in the sample
+# infinite, whose differences are NaN, so the sample is discarded anyway but as
+# though a fit had been attempted and failed. Reported as a bad parameter here
+# instead, which is what it is.
+#
+# Set B covers the NULL and negative arms via sNULL and sNEG; nothing else in
+# this file exercises the "or not finite" clause of that warning.
+statement ok
+CREATE TABLE inf_params AS
+SELECT sample_id, CASE WHEN sample_id = 'A' THEN 'inf'::DOUBLE ELSE mass_syndna_input_ng END AS mass_syndna_input_ng
+FROM fit_params;
+
+query T
+SELECT sample_id FROM absquant_fit_models('fit_counts', 'fit_conc', 'inf_params', 1.0, min_syndna_counts := 50);
+----
+B
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%mass_syndna_input_ng is NULL, negative or not finite%' AND message LIKE '%''A''%';
+----
+true
+
+# ---------------------------------------------------------------------------
+# sample_id type mirroring: BIGINT and UUID are preserved, everything else is
+# emitted as VARCHAR. The type is taken from the COUNTS relation -- that is the
+# one whose sample_id reaches the output -- and the two reference relations are
+# read through a ::VARCHAR cast, so they need not agree on a declared type.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE bigint_counts AS
+SELECT (CASE sample_id WHEN 'A' THEN 1 ELSE 2 END)::BIGINT AS sample_id, feature_id, value FROM fit_counts;
+
+statement ok
+CREATE TABLE bigint_params AS
+SELECT (CASE sample_id WHEN 'A' THEN 1 ELSE 2 END)::BIGINT AS sample_id, mass_syndna_input_ng FROM fit_params;
+
+statement ok
+CREATE TABLE uuid_counts AS
+SELECT (CASE sample_id WHEN 'A' THEN '11111111-1111-1111-1111-111111111111'
+                       ELSE '22222222-2222-2222-2222-222222222222' END)::UUID AS sample_id,
+       feature_id, value FROM fit_counts;
+
+statement ok
+CREATE TABLE uuid_params AS
+SELECT (CASE sample_id WHEN 'A' THEN '11111111-1111-1111-1111-111111111111'
+                       ELSE '22222222-2222-2222-2222-222222222222' END)::UUID AS sample_id,
+       mass_syndna_input_ng FROM fit_params;
+
+query TT
+SELECT typeof(sample_id), sample_id::VARCHAR
+FROM absquant_fit_models('bigint_counts', 'fit_conc', 'bigint_params', 1.0, min_syndna_counts := 50)
+ORDER BY 2;
+----
+BIGINT	1
+BIGINT	2
+
+query TT
+SELECT typeof(sample_id), sample_id::VARCHAR
+FROM absquant_fit_models('uuid_counts', 'fit_conc', 'uuid_params', 1.0, min_syndna_counts := 50)
+ORDER BY 2;
+----
+UUID	11111111-1111-1111-1111-111111111111
+UUID	22222222-2222-2222-2222-222222222222
+
+# Changing the id type must change the ids and NOTHING else. Compared with
+# EXCEPT in both directions rather than a tolerance, because these are the same
+# doubles computed from the same inputs -- anything short of bit equality means
+# the id type leaked into the arithmetic.
+query IIIIIII
+(SELECT CASE sample_id WHEN 1 THEN 'A' ELSE 'B' END, slope, intercept, rvalue, pvalue, stderr, intercept_stderr
+ FROM absquant_fit_models('bigint_counts', 'fit_conc', 'bigint_params', 1.0, min_syndna_counts := 50)
+ EXCEPT SELECT * FROM fit_mine)
+UNION ALL
+(SELECT * FROM fit_mine
+ EXCEPT SELECT CASE sample_id WHEN 1 THEN 'A' ELSE 'B' END, slope, intercept, rvalue, pvalue, stderr, intercept_stderr
+ FROM absquant_fit_models('bigint_counts', 'fit_conc', 'bigint_params', 1.0, min_syndna_counts := 50));
+----
+
+query IIIIIII
+(SELECT CASE sample_id::VARCHAR WHEN '11111111-1111-1111-1111-111111111111' THEN 'A' ELSE 'B' END,
+        slope, intercept, rvalue, pvalue, stderr, intercept_stderr
+ FROM absquant_fit_models('uuid_counts', 'fit_conc', 'uuid_params', 1.0, min_syndna_counts := 50)
+ EXCEPT SELECT * FROM fit_mine)
+UNION ALL
+(SELECT * FROM fit_mine
+ EXCEPT SELECT CASE sample_id::VARCHAR WHEN '11111111-1111-1111-1111-111111111111' THEN 'A' ELSE 'B' END,
+        slope, intercept, rvalue, pvalue, stderr, intercept_stderr
+ FROM absquant_fit_models('uuid_counts', 'fit_conc', 'uuid_params', 1.0, min_syndna_counts := 50));
+----
+
+# INTEGER is not BIGINT and not UUID, so it resolves to VARCHAR. The resolution
+# is deliberately permissive -- it never rejects an id type the reader accepts,
+# it just stops promising to give it back unchanged.
+statement ok
+CREATE TABLE int_counts AS
+SELECT (CASE sample_id WHEN 'A' THEN 1 ELSE 2 END)::INTEGER AS sample_id, feature_id, value FROM fit_counts;
+
+statement ok
+CREATE TABLE int_params AS
+SELECT (CASE sample_id WHEN 'A' THEN 1 ELSE 2 END)::INTEGER AS sample_id, mass_syndna_input_ng FROM fit_params;
+
+query TT
+SELECT typeof(sample_id), sample_id
+FROM absquant_fit_models('int_counts', 'fit_conc', 'int_params', 1.0, min_syndna_counts := 50)
+ORDER BY 2;
+----
+VARCHAR	1
+VARCHAR	2
+
+# Mixed: BIGINT sample_id in the counts relation, VARCHAR in the parameters
+# relation. The two are matched on their VARCHAR rendering, and the output type
+# still comes from the counts relation alone.
+statement ok
+CREATE TABLE varchar_params AS
+SELECT (CASE sample_id WHEN 'A' THEN '1' ELSE '2' END) AS sample_id, mass_syndna_input_ng FROM fit_params;
+
+query TT
+SELECT typeof(sample_id), sample_id::VARCHAR
+FROM absquant_fit_models('bigint_counts', 'fit_conc', 'varchar_params', 1.0, min_syndna_counts := 50)
+ORDER BY 2;
+----
+BIGINT	1
+BIGINT	2
+
+# ---------------------------------------------------------------------------
+# Relation resolution. All three arguments are names looked up on a separate
+# helper connection (docs/internals/reading-tables-views.md), which is exactly
+# the path on which TEMP objects are easy to lose: a helper connection that does
+# not inherit the caller's temporary catalog reports a TEMP table as
+# non-existent. Views, TEMP views and TEMP tables are each asserted to give
+# bit-identical results to the base tables.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE VIEW v_counts AS SELECT * FROM fit_counts;
+
+statement ok
+CREATE VIEW v_conc AS SELECT * FROM fit_conc;
+
+statement ok
+CREATE VIEW v_params AS SELECT * FROM fit_params;
+
+query IIIIIII
+(SELECT * FROM absquant_fit_models('v_counts', 'v_conc', 'v_params', 1.0, min_syndna_counts := 50)
+ EXCEPT SELECT * FROM fit_mine)
+UNION ALL
+(SELECT * FROM fit_mine
+ EXCEPT SELECT * FROM absquant_fit_models('v_counts', 'v_conc', 'v_params', 1.0, min_syndna_counts := 50));
+----
+
+statement ok
+CREATE TEMP VIEW tv_counts AS SELECT * FROM fit_counts;
+
+statement ok
+CREATE TEMP VIEW tv_conc AS SELECT * FROM fit_conc;
+
+statement ok
+CREATE TEMP VIEW tv_params AS SELECT * FROM fit_params;
+
+query IIIIIII
+(SELECT * FROM absquant_fit_models('tv_counts', 'tv_conc', 'tv_params', 1.0, min_syndna_counts := 50)
+ EXCEPT SELECT * FROM fit_mine)
+UNION ALL
+(SELECT * FROM fit_mine
+ EXCEPT SELECT * FROM absquant_fit_models('tv_counts', 'tv_conc', 'tv_params', 1.0, min_syndna_counts := 50));
+----
+
+statement ok
+CREATE TEMP TABLE tt_counts AS SELECT * FROM fit_counts;
+
+statement ok
+CREATE TEMP TABLE tt_conc AS SELECT * FROM fit_conc;
+
+statement ok
+CREATE TEMP TABLE tt_params AS SELECT * FROM fit_params;
+
+query IIIIIII
+(SELECT * FROM absquant_fit_models('tt_counts', 'tt_conc', 'tt_params', 1.0, min_syndna_counts := 50)
+ EXCEPT SELECT * FROM fit_mine)
+UNION ALL
+(SELECT * FROM fit_mine
+ EXCEPT SELECT * FROM absquant_fit_models('tt_counts', 'tt_conc', 'tt_params', 1.0, min_syndna_counts := 50));
+----
+
+# A relation name needing quotes must survive interpolation into the helper
+# connection's query.
+statement ok
+CREATE TABLE "syndna counts.2024" AS SELECT * FROM fit_counts;
+
+query IIIIIII
+(SELECT * FROM absquant_fit_models('syndna counts.2024', 'fit_conc', 'fit_params', 1.0, min_syndna_counts := 50)
+ EXCEPT SELECT * FROM fit_mine)
+UNION ALL
+(SELECT * FROM fit_mine
+ EXCEPT SELECT * FROM absquant_fit_models('syndna counts.2024', 'fit_conc', 'fit_params', 1.0, min_syndna_counts := 50));
+----
+
+# ---------------------------------------------------------------------------
+# Scaling invariance. syndna_contributing_fraction multiplies the per-sample
+# input mass, so 2.5x the mass at fraction 0.4 is the same experiment as 1x the
+# mass at fraction 1.0 and must produce the same models.
+#
+# This is what proves the fraction enters as a multiplier on mass_pool and
+# nowhere else. An implementation that also applied it to the mass fractions, or
+# to the counts, would still pass every fixed-fraction parity test above,
+# because all of those use fraction = 1.0.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE scaled_params AS
+SELECT sample_id, mass_syndna_input_ng * 2.5 AS mass_syndna_input_ng FROM fit_params;
+
+query TT
+SELECT m.sample_id, s.sample_id
+FROM fit_mine m
+FULL JOIN (SELECT * FROM absquant_fit_models('fit_counts', 'fit_conc', 'scaled_params', 0.4, min_syndna_counts := 50)) s
+  USING (sample_id)
+WHERE m.sample_id IS NULL
+   OR s.sample_id IS NULL
+   OR abs(m.slope - s.slope) > 1e-12 * (1.0 + abs(m.slope))
+   OR abs(m.intercept - s.intercept) > 1e-12 * (1.0 + abs(m.intercept))
+   OR abs(m.rvalue - s.rvalue) > 1e-12 * (1.0 + abs(m.rvalue))
+   OR abs(m.pvalue - s.pvalue) > 1e-12 * (1.0 + abs(m.pvalue))
+   OR abs(m.stderr - s.stderr) > 1e-12 * (1.0 + abs(m.stderr))
+   OR abs(m.intercept_stderr - s.intercept_stderr) > 1e-12 * (1.0 + abs(m.intercept_stderr));
+----
+
+# ---------------------------------------------------------------------------
+# Id-set consistency. Both dimensions are asymmetric, and each asymmetry is
+# deliberate; the four cases below pin all of it.
+# ---------------------------------------------------------------------------
+
+# A synDNA with reads but no concentration row cannot have its mass computed.
+statement ok
+CREATE TABLE counts_extra_syndna AS SELECT * FROM fit_counts UNION ALL SELECT 'A', 'pXXX', 10.0;
+
+statement error
+SELECT * FROM absquant_fit_models('counts_extra_syndna', 'fit_conc', 'fit_params', 1.0, min_syndna_counts := 50);
+----
+names feature_id 'pXXX', which the concentrations relation does not describe
+
+# A sample with reads but no parameter row cannot be converted to mass either.
+statement ok
+CREATE TABLE counts_extra_sample AS SELECT * FROM fit_counts UNION ALL SELECT 'Z', 'p126', 10.0;
+
+statement error
+SELECT * FROM absquant_fit_models('counts_extra_sample', 'fit_conc', 'fit_params', 1.0, min_syndna_counts := 50);
+----
+names sample_id 'Z', which the sample parameters relation has no mass_syndna_input_ng row for
+
+# The other direction of the synDNA check is a DELIBERATE DIVERGENCE from
+# pysyndna, which errors here. pysyndna's read data is a dense table, so a
+# synDNA that sequenced nowhere is still present in it; miint's counts relation
+# is long-form sparse and cannot tell "zero in every sample" from "absent", so
+# erroring would reject legitimate input. Since min_syndna_counts is required to
+# be >= 1, a zero-count synDNA is dropped by pysyndna too -- the models are
+# identical, only the error behavior differs.
+#
+# The divergence itself is pinned by these queries SUCCEEDING: an implementation
+# that enforced pysyndna's symmetric check would throw on 'pZZZ' and every
+# assertion in this block would fail. The warning below then pins the second
+# half of the claim, that the accepted synDNA is dropped rather than fitted.
+#
+# The EXCEPT pair adds that a synDNA carrying an explicit zero in every sample
+# behaves exactly as one that is simply absent. Note where that equality comes
+# from: ReadFeatureTable strips zero-valued cells before the pure core is
+# reached, so the two configurations hand the core identical count vectors. The
+# assertion pins that reader contract, not the core's handling of the id sets.
+#
+# Both sides deliberately use conc_extra_syndna rather than comparing against
+# fit_mine. Adding 'pZZZ' at 1e-9 enlarges the pool, and by the un-rescaled
+# denominator rule above that shifts every intercept by
+# log10(1 + 1e-9/2.2222) = 2.0e-10 -- small, but far above bit equality. It is a
+# different experiment, not the same one.
+statement ok
+CREATE TABLE conc_extra_syndna AS SELECT * FROM fit_conc UNION ALL SELECT 'pZZZ', 1e-9;
+
+statement ok
+CREATE TABLE counts_zero_syndna AS
+SELECT * FROM fit_counts UNION ALL SELECT sample_id, 'pZZZ', 0.0 FROM fit_params;
+
+query IIIIIII
+(SELECT * FROM absquant_fit_models('fit_counts', 'conc_extra_syndna', 'fit_params', 1.0, min_syndna_counts := 50)
+ EXCEPT SELECT * FROM absquant_fit_models('counts_zero_syndna', 'conc_extra_syndna', 'fit_params', 1.0, min_syndna_counts := 50))
+UNION ALL
+(SELECT * FROM absquant_fit_models('counts_zero_syndna', 'conc_extra_syndna', 'fit_params', 1.0, min_syndna_counts := 50)
+ EXCEPT SELECT * FROM absquant_fit_models('fit_counts', 'conc_extra_syndna', 'fit_params', 1.0, min_syndna_counts := 50));
+----
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%fewer than 50 total reads%' AND message LIKE '%''pZZZ''%';
+----
+true
+
+# A sample with parameters but no reads is reported, not rejected: metadata for
+# a sample you did not sequence is untidy, not unusable. pysyndna logs the same
+# list. The models must be unaffected.
+statement ok
+CREATE TABLE params_extra_sample AS SELECT * FROM fit_params UNION ALL SELECT 'Q', 0.25;
+
+query IIIIIII
+(SELECT * FROM absquant_fit_models('fit_counts', 'fit_conc', 'params_extra_sample', 1.0, min_syndna_counts := 50)
+ EXCEPT SELECT * FROM fit_mine)
+UNION ALL
+(SELECT * FROM fit_mine
+ EXCEPT SELECT * FROM absquant_fit_models('fit_counts', 'fit_conc', 'params_extra_sample', 1.0, min_syndna_counts := 50));
+----
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%contributed no nonzero synDNA counts%' AND message LIKE '%''Q''%';
+----
+true
+
+# ---------------------------------------------------------------------------
+# Malformed relations. Each of these is structurally impossible input rather
+# than a degenerate-but-computable case, so it is refused rather than propagated
+# -- pysyndna lets several of them turn into NaN and silently void a sample.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE dup_conc AS SELECT * FROM fit_conc UNION ALL SELECT * FROM fit_conc WHERE feature_id = 'p126';
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'dup_conc', 'fit_params', 1.0, min_syndna_counts := 50);
+----
+concentrations relation has more than one row for feature_id 'p126'
+
+statement ok
+CREATE TABLE dup_params AS SELECT * FROM fit_params UNION ALL SELECT * FROM fit_params WHERE sample_id = 'A';
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'fit_conc', 'dup_params', 1.0, min_syndna_counts := 50);
+----
+sample parameters relation has more than one row for sample_id 'A'
+
+# A repeated (sample_id, feature_id) cell would silently double-weight that
+# synDNA in the regression. pysyndna's dense input has no equivalent of it.
+statement ok
+CREATE TABLE dup_cell AS
+SELECT * FROM fit_counts UNION ALL SELECT * FROM fit_counts WHERE sample_id = 'A' AND feature_id = 'p126';
+
+statement error
+SELECT * FROM absquant_fit_models('dup_cell', 'fit_conc', 'fit_params', 1.0, min_syndna_counts := 50);
+----
+more than one row for the same (sample_id, feature_id): 'A / p126'
+
+statement ok
+CREATE TABLE neg_counts AS
+SELECT sample_id, feature_id,
+       CASE WHEN sample_id = 'A' AND feature_id = 'p126' THEN -1.0 ELSE value END AS value
+FROM fit_counts;
+
+statement error
+SELECT * FROM absquant_fit_models('neg_counts', 'fit_conc', 'fit_params', 1.0, min_syndna_counts := 50);
+----
+read counts must be finite and not negative; offending (sample_id / feature_id): 'A / p126'
+
+# An infinite count is caught by the same rule, and must be: left alone it makes
+# that synDNA's total infinite, and `inf < min_syndna_counts` is false, so the
+# synDNA becomes undroppable no matter how few reads it really has.
+statement ok
+CREATE TABLE inf_counts AS
+SELECT sample_id, feature_id,
+       CASE WHEN sample_id = 'A' AND feature_id = 'p126' THEN 'inf'::DOUBLE ELSE value END AS value
+FROM fit_counts;
+
+statement error
+SELECT * FROM absquant_fit_models('inf_counts', 'fit_conc', 'fit_params', 1.0, min_syndna_counts := 50);
+----
+read counts must be finite and not negative
+
+statement ok
+CREATE TABLE null_conc AS
+SELECT feature_id, CASE WHEN feature_id = 'p126' THEN NULL ELSE syndna_indiv_ng_ul END AS syndna_indiv_ng_ul
+FROM fit_conc;
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'null_conc', 'fit_params', 1.0, min_syndna_counts := 50);
+----
+syndna_indiv_ng_ul must be present, finite, and not negative; offending feature_id 'p126'
+
+statement ok
+CREATE TABLE neg_conc AS
+SELECT feature_id, CASE WHEN feature_id = 'p126' THEN -1.0 ELSE syndna_indiv_ng_ul END AS syndna_indiv_ng_ul
+FROM fit_conc;
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'neg_conc', 'fit_params', 1.0, min_syndna_counts := 50);
+----
+syndna_indiv_ng_ul must be present, finite, and not negative
+
+# An infinite concentration is the most destructive input this relation accepts
+# if unchecked: it becomes the entire mass-fraction denominator, collapsing
+# every OTHER synDNA's fraction to exactly zero, so the run returns no models at
+# all with nothing to explain why.
+statement ok
+CREATE TABLE inf_conc AS
+SELECT feature_id, CASE WHEN feature_id = 'p126' THEN 'inf'::DOUBLE ELSE syndna_indiv_ng_ul END AS syndna_indiv_ng_ul
+FROM fit_conc;
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'inf_conc', 'fit_params', 1.0, min_syndna_counts := 50);
+----
+syndna_indiv_ng_ul must be present, finite, and not negative
+
+# Every row individually usable but summing to zero: no synDNA has any mass, so
+# there is nothing to regress against.
+statement ok
+CREATE TABLE zero_conc AS SELECT feature_id, 0.0 AS syndna_indiv_ng_ul FROM fit_conc;
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'zero_conc', 'fit_params', 1.0, min_syndna_counts := 50);
+----
+the total must be positive and finite
+
+# A NULL key is refused outright rather than dropped: an unnamed row cannot be
+# joined to anything, and silently discarding it would quietly shrink the pool
+# the mass fractions are computed against.
+statement ok
+CREATE TABLE null_key_conc AS SELECT * FROM fit_conc UNION ALL SELECT NULL, 1.0;
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'null_key_conc', 'fit_params', 1.0, min_syndna_counts := 50);
+----
+has a row with a NULL feature_id
+
+statement ok
+CREATE TABLE null_key_params AS SELECT * FROM fit_params UNION ALL SELECT NULL, 0.25;
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'fit_conc', 'null_key_params', 1.0, min_syndna_counts := 50);
+----
+has a row with a NULL sample_id
+
+# The COUNTS relation goes the other way: a row with a NULL sample_id, feature_id
+# or value is silently DROPPED. That asymmetry is not an oversight in this
+# function -- the counts relation is read by ReadFeatureTable, whose NULL-drop is
+# an established contract shared with unifrac_* and community_distances, and a
+# NULL cell in a sparse matrix is absence rather than a broken config. It is
+# pinned here because it is a contract users can hit, and because changing it
+# later must be a decision rather than an accident.
+statement ok
+CREATE TABLE null_id_counts AS
+SELECT * FROM fit_counts UNION ALL VALUES (NULL, 'p126', 10.0), ('A', NULL, 10.0), ('B', 'p136', NULL);
+
+query IIIIIII
+(SELECT * FROM absquant_fit_models('null_id_counts', 'fit_conc', 'fit_params', 1.0, min_syndna_counts := 50)
+ EXCEPT SELECT * FROM fit_mine)
+UNION ALL
+(SELECT * FROM fit_mine
+ EXCEPT SELECT * FROM absquant_fit_models('null_id_counts', 'fit_conc', 'fit_params', 1.0, min_syndna_counts := 50));
+----
+
+# ---------------------------------------------------------------------------
+# Arguments.
+# ---------------------------------------------------------------------------
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'fit_conc', 'fit_params', 0.0);
+----
+syndna_contributing_fraction must be > 0 and <= 1
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'fit_conc', 'fit_params', -0.5);
+----
+syndna_contributing_fraction must be > 0 and <= 1
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'fit_conc', 'fit_params', 1.5);
+----
+syndna_contributing_fraction must be > 0 and <= 1
+
+# The range test is written as !(x > 0) rather than x <= 0 precisely so a NaN
+# fraction is rejected too; a naive comparison would let it through and turn
+# every fitted mass into NaN.
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'fit_conc', 'fit_params', 'nan'::DOUBLE);
+----
+syndna_contributing_fraction must be > 0 and <= 1
+
+# min_syndna_counts >= 1 is what makes the concentrations-only synDNA rule above
+# safe: at 0 a zero-count synDNA would survive, and miint cannot tell it from an
+# absent one.
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'fit_conc', 'fit_params', 1.0, min_syndna_counts := 0);
+----
+min_syndna_counts must be >= 1
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'fit_conc', 'fit_params', 1.0, min_syndna_counts := -5);
+----
+min_syndna_counts must be >= 1
+
+statement error
+SELECT * FROM absquant_fit_models(NULL, 'fit_conc', 'fit_params', 1.0);
+----
+argument 1 must not be NULL
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', NULL, 'fit_params', 1.0);
+----
+argument 2 must not be NULL
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'fit_conc', NULL, 1.0);
+----
+argument 3 must not be NULL
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'fit_conc', 'fit_params', NULL);
+----
+argument 4 must not be NULL
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'fit_conc', 'fit_params', 1.0, min_syndna_counts := NULL);
+----
+min_syndna_counts must not be NULL
+
+# All three relations are resolved at bind, so a typo in ANY of them fails
+# before the query runs rather than only when that relation is first read.
+statement error
+SELECT * FROM absquant_fit_models('no_such_counts', 'fit_conc', 'fit_params', 1.0);
+----
+synDNA counts table or view 'no_such_counts' does not exist
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'no_such_conc', 'fit_params', 1.0);
+----
+synDNA concentrations table or view 'no_such_conc' does not exist
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'fit_conc', 'no_such_params', 1.0);
+----
+sample parameters table or view 'no_such_params' does not exist
+
+# The column contract for each relation, surfaced by its LIMIT 0 schema probe
+# before anything is materialized. DuckDB's own candidate-binding hint comes
+# along with the message.
+statement ok
+CREATE TABLE counts_no_value AS SELECT sample_id, feature_id FROM fit_counts;
+
+statement error
+SELECT * FROM absquant_fit_models('counts_no_value', 'fit_conc', 'fit_params', 1.0);
+----
+must expose (sample_id VARCHAR, feature_id VARCHAR, value DOUBLE)
+
+statement ok
+CREATE TABLE conc_no_value AS SELECT feature_id FROM fit_conc;
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'conc_no_value', 'fit_params', 1.0);
+----
+must expose (feature_id VARCHAR, syndna_indiv_ng_ul DOUBLE)
+
+statement ok
+CREATE TABLE params_no_value AS SELECT sample_id FROM fit_params;
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'fit_conc', 'params_no_value', 1.0);
+----
+must expose (sample_id VARCHAR, mass_syndna_input_ng DOUBLE)
+
+# ---------------------------------------------------------------------------
+# Empty relations. Each of the three empties for a different reason and must not
+# be confused with the others.
+# ---------------------------------------------------------------------------
+
+# No counts: nothing to fit, but not an error -- every synDNA simply falls under
+# min_syndna_counts and every parameterized sample is reported as contributing
+# nothing. An empty result plus two warnings, not a crash and not silence.
+statement ok
+CREATE TABLE empty_counts AS SELECT * FROM fit_counts WHERE false;
+
+query I
+SELECT count(*) FROM absquant_fit_models('empty_counts', 'fit_conc', 'fit_params', 1.0);
+----
+0
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%contributed no nonzero synDNA counts%'
+  AND message LIKE '%''A''%' AND message LIKE '%''B''%';
+----
+true
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%fewer than 1 total reads%'
+  AND message LIKE '%''p126''%' AND message LIKE '%''p266''%';
+----
+true
+
+# No concentrations: the pool has no mass at all, which is the same failure as
+# an all-zero pool and reported the same way.
+statement ok
+CREATE TABLE empty_conc AS SELECT * FROM fit_conc WHERE false;
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'empty_conc', 'fit_params', 1.0);
+----
+the total must be positive and finite
+
+# No parameters, but counts present: every sample in the counts relation is
+# unparameterized, which is the error case of the sample-id asymmetry.
+statement ok
+CREATE TABLE empty_params AS SELECT * FROM fit_params WHERE false;
+
+statement error
+SELECT * FROM absquant_fit_models('fit_counts', 'fit_conc', 'empty_params', 1.0);
+----
+which the sample parameters relation has no mass_syndna_input_ng row for

@@ -71,6 +71,7 @@
 #include <align_sortmerna.hpp>
 #include <align_sortmerna_rrna.hpp>
 #endif
+#include <absquant.hpp>
 #include <cluster_kmeans.hpp>
 #include <cluster_upgma.hpp>
 #include <community_distances.hpp>
@@ -426,6 +427,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// registered. (`pcoa` / `permanova`, which consume their output, do need
 	// scikit-bio-binaries and stay behind MIINT_HAS_UNIFRAC below.)
 	RegisterCommunityDistances(loader);
+	RegisterAbsQuant(loader);
 	RegisterClusterKmeans(loader);
 	RegisterClusterUpgma(loader);
 

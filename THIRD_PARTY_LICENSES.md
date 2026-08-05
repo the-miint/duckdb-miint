@@ -940,7 +940,7 @@ code was developed with reference to them, or because they generated committed
 golden data used by the parity tests. This mirrors the Biopython entry above,
 where a reference-only consultation is likewise recorded.
 
-All four Python projects are distributed under the 3-clause BSD license; the
+All five Python projects are distributed under the 3-clause BSD license; the
 shared license text appears once at the end of this section with each project's
 copyright notice listed alongside it.
 
@@ -978,8 +978,23 @@ committed cophenetic goldens in `data/simsurvey/cluster_upgma_oracle.csv`, which
 `test/sql/cluster_upgma_parity.test` checks `cluster_upgma` against. SciPy
 primitives also generated `data/simsurvey/beta_distance_oracle.csv`.
 
+SciPy is additionally the *behavioral specification* for `Linregress` in
+`src/absquant.cpp`. pysyndna fits its models by calling `scipy.stats.linregress`,
+so reproducing pysyndna means reproducing scipy — including several behaviors a
+textbook least-squares implementation does not have (biased covariances, a
+`TINY = 1e-20` guard inside the t statistic, a special case at n = 2, and
+`intercept_stderr = stderr·sqrt(ssxm + xmean²)`). Those were determined by
+reading scipy's source and confirmed numerically; the divergences are recorded in
+the doc comment on `Linregress` and in `docs/absolute_quantification.md`.
+
+`scipy.stats.t.sf` generated `data/syndna/studentt_sf_oracle.csv`, the grid that
+`StudentTSurvival` is checked against. The regularized incomplete beta underneath
+it is written from the standard continued fraction (DLMF 8.17.22) evaluated by
+Lentz's method — **not** transcribed from scipy's vendored Cephes `incbet.c`,
+which carries its own separate provenance.
+
 - Repository: https://github.com/scipy/scipy
-- Version referenced: 1.18.0
+- Versions referenced: 1.18.0 (`data/simsurvey/`), 1.17.1 (`data/syndna/`)
 - License: `BSD-3-Clause` — Copyright (c) 2001-2002 Enthought, Inc.; 2003-, SciPy Developers
 
 #### Citation
@@ -987,6 +1002,42 @@ primitives also generated `data/simsurvey/beta_distance_oracle.csv`.
 Virtanen, P.; Gommers, R.; Oliphant, T.E.; et al. (2020) "SciPy 1.0: fundamental
 algorithms for scientific computing in Python", Nature Methods, 17(3), 261-272.
 doi: 10.1038/s41592-019-0686-2
+
+### pysyndna
+
+The `absquant_*` functions (`src/absquant.cpp`, `src/absquant_function.cpp`) are an
+independent C++ reimplementation of pysyndna, which realizes the synDNA spike-in
+method of Zaramela et al. 2022 for turning compositional metagenomic read counts
+into absolute quantities. No code was copied; the port was written from
+pysyndna's algorithm as documented and read in its source, and the behaviors it
+deliberately does not reproduce are listed under "Differences from pysyndna" in
+`docs/absolute_quantification.md`.
+
+pysyndna also generated every golden under `data/syndna/` except
+`studentt_sf_oracle.csv`. It was run **once, offline**, in a dedicated conda
+environment pinned to the commit below; only its numbers are committed.
+duckdb-miint never invokes pysyndna at build, run, or test time, and does not
+depend on it. `data/syndna/README.md` records the provenance and the
+regeneration recipe.
+
+- Repository: https://github.com/biocore/pysyndna
+- Version referenced: `a64687d4fb37ef7939b1cef8406c0b9758ebb8d7` (version 2026.02.2)
+- License: `BSD-3-Clause` — Copyright (c) 2023, Amanda Birmingham
+- Note: the repository declares its license in `setup.py` only —
+  `license='BSD-3-Clause'` plus the header "Distributed under the terms of the
+  Modified BSD License". That header points at "the file LICENSE, distributed
+  with this software", but no such file is present in the repository at the
+  referenced commit, and no other file carries a license header. The
+  declaration in the package metadata is therefore the authoritative statement,
+  and the standard 3-clause BSD text at the end of this section is reproduced on
+  that basis.
+
+#### Citation
+
+Zaramela, L.S.; Tjuanta, M.; Moyne, O.; Neal, M.; and Zengler, K. (2022)
+"synDNA—a Synthetic DNA Spike-in Method for Absolute Quantification of Shotgun
+Metagenomic Sequencing", mSystems, 7(6), e00447-22.
+doi: 10.1128/msystems.00447-22
 
 ### scikit-learn
 
@@ -1048,8 +1099,8 @@ doi: 10.1038/nmeth.1499
 
 ### BSD 3-Clause License
 
-Applies to cogent3, SciPy, scikit-learn, and scikit-bio, each with its own
-copyright notice as listed above.
+Applies to cogent3, SciPy, pysyndna, scikit-learn, and scikit-bio, each with its
+own copyright notice as listed above.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:

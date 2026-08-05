@@ -55,6 +55,7 @@ UNION ALL SELECT 'orfb_params',       (SELECT count(*) FROM read_csv_auto('data/
 UNION ALL SELECT 'orfb_oracle',       (SELECT count(*) FROM read_csv_auto('data/syndna/orfb_oracle.csv'))
 UNION ALL SELECT 'fitb_boundary_models_oracle', (SELECT count(*) FROM read_csv_auto('data/syndna/fitb_boundary_models_oracle.csv'))
 UNION ALL SELECT 'cellsb_boundary_oracle',      (SELECT count(*) FROM read_csv_auto('data/syndna/cellsb_boundary_oracle.csv'))
+UNION ALL SELECT 'studentt_sf_oracle',          (SELECT count(*) FROM read_csv_auto('data/syndna/studentt_sf_oracle.csv'))
 ), expected(f, n) AS (VALUES
     ('fit_counts', 20), ('fit_concentrations', 10), ('fit_params', 2),
     ('fit_models_oracle', 2),
@@ -68,7 +69,8 @@ UNION ALL SELECT 'cellsb_boundary_oracle',      (SELECT count(*) FROM read_csv_a
     ('cellsb_lengths', 4), ('cellsb_params', 5), ('cellsb_oracle', 33),
     ('cellsb_boundary_oracle', 45),
     ('orfb_counts', 9), ('orfb_coords', 3), ('orfb_params', 3),
-    ('orfb_oracle', 6)
+    ('orfb_oracle', 6),
+    ('studentt_sf_oracle', 521)
 )
 SELECT a.f, a.n FROM actual a JOIN expected e USING (f) WHERE a.n <> e.n
 ORDER BY a.f;
@@ -93,7 +95,8 @@ WITH on_disk(f) AS (
     ('fitb_models_oracle'), ('fitb_boundary_models_oracle'),
     ('cellsb_counts'), ('cellsb_models'), ('cellsb_coverage'), ('cellsb_lengths'),
     ('cellsb_params'), ('cellsb_oracle'), ('cellsb_boundary_oracle'),
-    ('orfb_counts'), ('orfb_coords'), ('orfb_params'), ('orfb_oracle')
+    ('orfb_counts'), ('orfb_coords'), ('orfb_params'), ('orfb_oracle'),
+    ('studentt_sf_oracle')
 )
 SELECT d.f, r.f FROM on_disk d FULL JOIN registered r ON d.f = r.f
 WHERE d.f IS NULL OR r.f IS NULL
@@ -320,3 +323,78 @@ query I
 SELECT count(DISTINCT sample_id) FROM read_csv_auto('data/syndna/orfb_oracle.csv');
 ----
 2
+
+# ---- studentt_sf_oracle: the Student-t survival function grid ----
+# pvalue is the one regression field that cannot come from DuckDB's regr_*
+# aggregates -- it needs a Student-t survival function (a regularized incomplete
+# beta), which M2 implements from scratch. The fit oracles contain only a handful
+# of pvalues, all at df <= 6, so this grid is what actually validates those
+# numerics. Generated from scipy.stats.t.sf (BSD-3-Clause); pysyndna is not
+# involved. The checks below are properties of the survival function itself, so
+# a corrupted or mis-generated grid fails here rather than silently weakening M2.
+
+# A survival function is a probability.
+query I
+SELECT count(*) FROM read_csv_auto('data/syndna/studentt_sf_oracle.csv')
+WHERE sf < 0.0 OR sf > 1.0 OR isnan(sf);
+----
+0
+
+# sf(0, df) = 0.5 exactly, for every df in the grid -- the one value that must be
+# exact rather than approximate, and the first thing a broken implementation gets
+# wrong.
+query I
+SELECT count(*) FROM read_csv_auto('data/syndna/studentt_sf_oracle.csv')
+WHERE t = 0.0 AND sf <> 0.5;
+----
+0
+
+# Strictly decreasing in t at fixed df, except where the far tail underflows to
+# zero and ties. Anything increasing means the grid is scrambled.
+query I
+SELECT count(*) FROM (
+    SELECT sf, LAG(sf) OVER (PARTITION BY df ORDER BY t) AS prev
+    FROM read_csv_auto('data/syndna/studentt_sf_oracle.csv')
+) WHERE prev IS NOT NULL AND sf > prev;
+----
+0
+
+# Both tails are covered: negative t must appear, and must sit above 0.5.
+query I
+SELECT count(*) FROM read_csv_auto('data/syndna/studentt_sf_oracle.csv')
+WHERE t < 0.0 AND sf <= 0.5;
+----
+0
+
+# Every (t, df) is distinct. The grid is deduplicated on purpose: at df = 2 the
+# perfect-fit extreme is sqrt(2/2e-20) = 1e10 EXACTLY and collides with the 1e10
+# grid point, so a naive generator emits a duplicate row.
+query I
+SELECT count(*) - count(DISTINCT (t, df)) FROM read_csv_auto('data/syndna/studentt_sf_oracle.csv');
+----
+0
+
+# Every df carries one of the r == +/-1 extremes scipy's TINY = 1e-20 guard
+# produces (t = sqrt(df/2e-20), so 7.07e9 at df = 1 up to 2.24e11 at df = 1000).
+# These are the hardest inputs the implementation will ever see, and the whole
+# point of TINY: without it a perfect fit divides by zero instead.
+query I
+SELECT count(DISTINCT df) FROM read_csv_auto('data/syndna/studentt_sf_oracle.csv')
+WHERE t > 7.0e9;
+----
+18
+
+# At df = 1 that extreme yields sf ~4.5e-11, i.e. pvalue ~9.0e-11 -- genuinely
+# finite, not a floor.
+
+query T
+SELECT printf('%.6e', sf) FROM read_csv_auto('data/syndna/studentt_sf_oracle.csv')
+WHERE df = 1 AND t > 7.07e9 AND t < 7.08e9;
+----
+4.501582e-11
+
+# The grid spans df 1..1000; df = 1 and df = 2 are the degenerate-tail cases.
+query II
+SELECT min(df), max(df) FROM read_csv_auto('data/syndna/studentt_sf_oracle.csv');
+----
+1	1000

@@ -120,6 +120,35 @@ branch of `scipy.stats.linregress`; each cells/ORF case targets one filter.
 | `cellsb_boundary_oracle.csv` | 45 | same inputs at `min_coverage = 0.02`, `min_rsquared = 0.25` |
 | `orfb_*.csv` | 3–9 | 3 samples × 3 ORFs |
 
+## The Student-t survival function grid
+
+`studentt_sf_oracle.csv` — `(t, df, sf)`, 521 rows — stands apart from Sets A and B.
+pysyndna is not involved: it comes straight from `scipy.stats.t.sf` (scipy is
+BSD-3-Clause, so it is a license-compatible reference).
+
+`pvalue` is the one regression field that cannot be built from DuckDB's `regr_*`
+aggregates — it needs a Student-t survival function, i.e. a regularized incomplete beta,
+which miint implements itself. The identity used is
+
+```
+sf(t, df) = 0.5 * I_{df/(df+t^2)}(df/2, 1/2)
+```
+
+which reproduces `scipy.stats.t.sf` bit-for-bit, so matching this grid is matching what
+scipy actually computes rather than approximating it.
+
+The grid exists because the fit oracles between them hold only a handful of `pvalue`s,
+all at `df <= 6` — far too thin to validate new numerics. It spans `df` 1…1000 and `t`
+from 0 through 1e10, in both signs, plus one extra row per `df` at
+`t = sqrt(df / 2e-20)`: the value scipy's `TINY = 1e-20` guard produces at a perfect fit
+(`r = ±1`). Those are the hardest inputs the function will ever see, and the reason
+`TINY` exists — without it the t statistic divides by zero. At `df = 1` it gives
+`sf ≈ 4.5e-11`, i.e. `pvalue ≈ 9.0e-11`, a genuine value rather than a floor.
+
+Rows are unique on `(t, df)`. That needs saying because at `df = 2` the perfect-fit
+extreme is `sqrt(2/2e-20) = 1e10` **exactly** and collides with the `1e10` grid point;
+the generator deduplicates, and `absquant_fixtures.test` asserts the uniqueness.
+
 `fitb` sample intent — six of the eleven deliberately produce **no** model:
 
 | Sample | Outcome |
