@@ -1,0 +1,322 @@
+# name: test/sql/absquant_fixtures.test
+# description: integrity of the committed pysyndna parity fixtures under data/syndna/
+# group: [sql]
+
+# These fixtures are generated OFFLINE from pysyndna a64687d and committed as
+# NUMBERS only; the generator is dev-only and lives outside this tree. See
+# data/syndna/README.md for provenance and the regeneration recipe.
+#
+# This file deliberately tests NO absquant_* function -- none exist yet. It
+# guards the goldens themselves, so that a corrupted, truncated or
+# accidentally-regenerated fixture fails loudly here rather than silently
+# weakening a parity test in a later milestone. The numeric parity tests ship
+# with the functions they cover.
+#
+# The structural checks below are not padding: each one pins a property some
+# later milestone depends on (coverage really is a fraction, the four metrics
+# are all present, the dense zeros that justify miint's sparse output really do
+# exist in pysyndna's dense output, and so on).
+
+require miint
+
+# ------------------------------------------------------------------ row counts
+# Every fixture must have exactly the expected number of data rows. A mismatch
+# reports the offending file and its actual count rather than just "failed".
+
+query TI
+WITH actual(f, n) AS (
+      SELECT 'fit_counts',           (SELECT count(*) FROM read_csv_auto('data/syndna/fit_counts.csv'))
+UNION ALL SELECT 'fit_concentrations',(SELECT count(*) FROM read_csv_auto('data/syndna/fit_concentrations.csv'))
+UNION ALL SELECT 'fit_params',        (SELECT count(*) FROM read_csv_auto('data/syndna/fit_params.csv'))
+UNION ALL SELECT 'fit_models_oracle', (SELECT count(*) FROM read_csv_auto('data/syndna/fit_models_oracle.csv'))
+UNION ALL SELECT 'cells_counts',      (SELECT count(*) FROM read_csv_auto('data/syndna/cells_counts.csv'))
+UNION ALL SELECT 'cells_models',      (SELECT count(*) FROM read_csv_auto('data/syndna/cells_models.csv'))
+UNION ALL SELECT 'cells_coverage',    (SELECT count(*) FROM read_csv_auto('data/syndna/cells_coverage.csv'))
+UNION ALL SELECT 'cells_lengths',     (SELECT count(*) FROM read_csv_auto('data/syndna/cells_lengths.csv'))
+UNION ALL SELECT 'cells_params',      (SELECT count(*) FROM read_csv_auto('data/syndna/cells_params.csv'))
+UNION ALL SELECT 'cells_oracle',      (SELECT count(*) FROM read_csv_auto('data/syndna/cells_oracle.csv'))
+UNION ALL SELECT 'orf_counts',        (SELECT count(*) FROM read_csv_auto('data/syndna/orf_counts.csv'))
+UNION ALL SELECT 'orf_coords',        (SELECT count(*) FROM read_csv_auto('data/syndna/orf_coords.csv'))
+UNION ALL SELECT 'orf_params',        (SELECT count(*) FROM read_csv_auto('data/syndna/orf_params.csv'))
+UNION ALL SELECT 'orf_oracle',        (SELECT count(*) FROM read_csv_auto('data/syndna/orf_oracle.csv'))
+UNION ALL SELECT 'fitb_counts',       (SELECT count(*) FROM read_csv_auto('data/syndna/fitb_counts.csv'))
+UNION ALL SELECT 'fitb_concentrations',(SELECT count(*) FROM read_csv_auto('data/syndna/fitb_concentrations.csv'))
+UNION ALL SELECT 'fitb_params',       (SELECT count(*) FROM read_csv_auto('data/syndna/fitb_params.csv'))
+UNION ALL SELECT 'fitb_models_oracle',(SELECT count(*) FROM read_csv_auto('data/syndna/fitb_models_oracle.csv'))
+UNION ALL SELECT 'cellsb_counts',     (SELECT count(*) FROM read_csv_auto('data/syndna/cellsb_counts.csv'))
+UNION ALL SELECT 'cellsb_models',     (SELECT count(*) FROM read_csv_auto('data/syndna/cellsb_models.csv'))
+UNION ALL SELECT 'cellsb_coverage',   (SELECT count(*) FROM read_csv_auto('data/syndna/cellsb_coverage.csv'))
+UNION ALL SELECT 'cellsb_lengths',    (SELECT count(*) FROM read_csv_auto('data/syndna/cellsb_lengths.csv'))
+UNION ALL SELECT 'cellsb_params',     (SELECT count(*) FROM read_csv_auto('data/syndna/cellsb_params.csv'))
+UNION ALL SELECT 'cellsb_oracle',     (SELECT count(*) FROM read_csv_auto('data/syndna/cellsb_oracle.csv'))
+UNION ALL SELECT 'orfb_counts',       (SELECT count(*) FROM read_csv_auto('data/syndna/orfb_counts.csv'))
+UNION ALL SELECT 'orfb_coords',       (SELECT count(*) FROM read_csv_auto('data/syndna/orfb_coords.csv'))
+UNION ALL SELECT 'orfb_params',       (SELECT count(*) FROM read_csv_auto('data/syndna/orfb_params.csv'))
+UNION ALL SELECT 'orfb_oracle',       (SELECT count(*) FROM read_csv_auto('data/syndna/orfb_oracle.csv'))
+UNION ALL SELECT 'fitb_boundary_models_oracle', (SELECT count(*) FROM read_csv_auto('data/syndna/fitb_boundary_models_oracle.csv'))
+UNION ALL SELECT 'cellsb_boundary_oracle',      (SELECT count(*) FROM read_csv_auto('data/syndna/cellsb_boundary_oracle.csv'))
+), expected(f, n) AS (VALUES
+    ('fit_counts', 20), ('fit_concentrations', 10), ('fit_params', 2),
+    ('fit_models_oracle', 2),
+    ('cells_counts', 26), ('cells_models', 2), ('cells_coverage', 26),
+    ('cells_lengths', 13), ('cells_params', 2), ('cells_oracle', 88),
+    ('orf_counts', 20), ('orf_coords', 10), ('orf_params', 2),
+    ('orf_oracle', 20),
+    ('fitb_counts', 88), ('fitb_concentrations', 8), ('fitb_params', 11),
+    ('fitb_models_oracle', 5), ('fitb_boundary_models_oracle', 8),
+    ('cellsb_counts', 20), ('cellsb_models', 5), ('cellsb_coverage', 20),
+    ('cellsb_lengths', 4), ('cellsb_params', 5), ('cellsb_oracle', 33),
+    ('cellsb_boundary_oracle', 45),
+    ('orfb_counts', 9), ('orfb_coords', 3), ('orfb_params', 3),
+    ('orfb_oracle', 6)
+)
+SELECT a.f, a.n FROM actual a JOIN expected e USING (f) WHERE a.n <> e.n
+ORDER BY a.f;
+----
+
+# Cross-reference the registered fixture names against what is actually on disk,
+# in BOTH directions, via glob(). A CSV added to data/syndna/ without being
+# wired into the row-count check above shows up here as (name, NULL); a name
+# registered above but missing from disk shows up as (NULL, name).
+#
+# This must enumerate the directory to be worth anything -- an earlier version
+# of this check counted its own hardcoded list and therefore always passed.
+query TT
+WITH on_disk(f) AS (
+    SELECT regexp_extract(file, '([^/\\]+)\.csv$', 1) FROM glob('data/syndna/*.csv')
+), registered(f) AS (VALUES
+    ('fit_counts'), ('fit_concentrations'), ('fit_params'), ('fit_models_oracle'),
+    ('cells_counts'), ('cells_models'), ('cells_coverage'), ('cells_lengths'),
+    ('cells_params'), ('cells_oracle'),
+    ('orf_counts'), ('orf_coords'), ('orf_params'), ('orf_oracle'),
+    ('fitb_counts'), ('fitb_concentrations'), ('fitb_params'),
+    ('fitb_models_oracle'), ('fitb_boundary_models_oracle'),
+    ('cellsb_counts'), ('cellsb_models'), ('cellsb_coverage'), ('cellsb_lengths'),
+    ('cellsb_params'), ('cellsb_oracle'), ('cellsb_boundary_oracle'),
+    ('orfb_counts'), ('orfb_coords'), ('orfb_params'), ('orfb_oracle')
+)
+SELECT d.f, r.f FROM on_disk d FULL JOIN registered r ON d.f = r.f
+WHERE d.f IS NULL OR r.f IS NULL
+ORDER BY 1, 2;
+----
+
+# ------------------------------------------------------- coverage is a fraction
+# pysyndna's fixtures are percents; these were divided by 100 on the way in
+# (data/syndna/README.md). Anything outside [0,1] means that conversion was lost,
+# which would silently invert every coverage filter decision downstream.
+
+query II
+SELECT
+    (SELECT count(*) FROM read_csv_auto('data/syndna/cells_coverage.csv')
+      WHERE coverage < 0.0 OR coverage > 1.0),
+    (SELECT count(*) FROM read_csv_auto('data/syndna/cellsb_coverage.csv')
+      WHERE coverage < 0.0 OR coverage > 1.0);
+----
+0	0
+
+# ------------------------------------------------------------- oracle structure
+# All four output metrics present in both cell-count oracles.
+query II
+SELECT
+    (SELECT count(DISTINCT metric) FROM read_csv_auto('data/syndna/cells_oracle.csv')),
+    (SELECT count(DISTINCT metric) FROM read_csv_auto('data/syndna/cellsb_oracle.csv'));
+----
+4	4
+
+query I
+SELECT DISTINCT metric FROM read_csv_auto('data/syndna/cells_oracle.csv') ORDER BY metric;
+----
+cells_per_cm2_of_sample
+cells_per_g_of_gdna
+cells_per_g_of_sample
+cells_per_ul_of_sample
+
+# No NULL identifiers or values anywhere in the oracles: a NULL here would make a
+# parity FULL JOIN silently pass.
+query I
+SELECT count(*) FROM (
+    SELECT 1 FROM read_csv_auto('data/syndna/cells_oracle.csv')
+     WHERE metric IS NULL OR sample_id IS NULL OR feature_id IS NULL OR value IS NULL
+    UNION ALL
+    SELECT 1 FROM read_csv_auto('data/syndna/cellsb_oracle.csv')
+     WHERE metric IS NULL OR sample_id IS NULL OR feature_id IS NULL OR value IS NULL
+    UNION ALL
+    SELECT 1 FROM read_csv_auto('data/syndna/orf_oracle.csv')
+     WHERE sample_id IS NULL OR feature_id IS NULL OR value IS NULL
+    UNION ALL
+    SELECT 1 FROM read_csv_auto('data/syndna/orfb_oracle.csv')
+     WHERE sample_id IS NULL OR feature_id IS NULL OR value IS NULL
+);
+----
+0
+
+# Fitted models are fully populated -- pysyndna omits a sample entirely rather
+# than emitting a partial model, so a NULL column would mean a broken fixture.
+query I
+SELECT count(*) FROM (
+    SELECT 1 FROM read_csv_auto('data/syndna/fit_models_oracle.csv')
+     WHERE sample_id IS NULL OR slope IS NULL OR intercept IS NULL OR rvalue IS NULL
+        OR pvalue IS NULL OR stderr IS NULL OR intercept_stderr IS NULL
+    UNION ALL
+    SELECT 1 FROM read_csv_auto('data/syndna/fitb_models_oracle.csv')
+     WHERE sample_id IS NULL OR slope IS NULL OR intercept IS NULL OR rvalue IS NULL
+        OR pvalue IS NULL OR stderr IS NULL OR intercept_stderr IS NULL
+);
+----
+0
+
+# ---------------------------------------------------------- Set A known content
+# The two engineered low-coverage OGUs must be absent from the cell-count oracle
+# in every metric; pysyndna's fixtures exist to exercise exactly this filter.
+query I
+SELECT count(*) FROM read_csv_auto('data/syndna/cells_oracle.csv')
+WHERE feature_id IN ('Neisseria subflava', 'Haemophilus influenzae');
+----
+0
+
+# ...and both are still present in the INPUTS, so the filter has something to do.
+query I
+SELECT count(DISTINCT feature_id) FROM read_csv_auto('data/syndna/cells_counts.csv')
+WHERE feature_id IN ('Neisseria subflava', 'Haemophilus influenzae');
+----
+2
+
+# Reverse-strand ORFs (start > end) are legal per woltka and must survive here,
+# because absquant_orf_copies takes abs(end - start) + 1.
+query I
+SELECT count(*) FROM read_csv_auto('data/syndna/orf_coords.csv')
+WHERE ogu_orf_start > ogu_orf_end;
+----
+4
+
+# ---------------------------------------------------------- Set B known content
+# One NULL and one negative synDNA mass, driving the two param-filter branches.
+query II
+SELECT
+    count(*) FILTER (WHERE mass_syndna_input_ng IS NULL),
+    count(*) FILTER (WHERE mass_syndna_input_ng < 0)
+FROM read_csv_auto('data/syndna/fitb_params.csv');
+----
+1	1
+
+# Six of the eleven fitb samples produce no model (constant y, n=1, n=0,
+# constant x, NULL mass, negative mass), so the oracle carries the other five.
+query I
+SELECT count(*) FROM read_csv_auto('data/syndna/fitb_params.csv')
+WHERE sample_id NOT IN (
+    SELECT sample_id FROM read_csv_auto('data/syndna/fitb_models_oracle.csv'));
+----
+6
+
+# sNONE has zero reads for every synDNA, so no row survives to be fitted at all
+# (n = 0) -- a distinct path from sONE's n = 1.
+query I
+SELECT count(*) FROM read_csv_auto('data/syndna/fitb_models_oracle.csv')
+WHERE sample_id = 'sNONE';
+----
+0
+
+# ------------------------------------------------------- strict-< boundaries
+# All three of pysyndna's thresholds are strict `<`, so a value sitting exactly
+# ON the threshold must PASS. Without these three fixtures, a reimplementation
+# that wrote `<=` for any of them would satisfy every other assertion in this
+# file and diverge only on data nobody committed.
+
+# min_syndna_counts: b6 totals EXACTLY 20 reads across all samples. The boundary
+# oracle was generated with min_syndna_counts = 20, so b6 is retained -- which
+# lets three otherwise-unfittable samples fit, hence 8 models instead of 5.
+query I
+SELECT count(*) FROM read_csv_auto('data/syndna/fitb_boundary_models_oracle.csv');
+----
+8
+
+query I
+SELECT count(*) FROM read_csv_auto('data/syndna/fitb_boundary_models_oracle.csv')
+WHERE sample_id IN ('sCONSTY', 'sFLAT', 'sONE');
+----
+3
+
+# min_coverage: f_only1 has coverage exactly 0.02 in s2. The boundary oracle used
+# min_coverage = 0.02, so that cell must carry a real value, NOT the dense 0.0 it
+# has in the non-boundary oracle. (2.0/100.0 and the literal 0.02 are the same
+# double, so this comparison is exact rather than luck.)
+query I
+SELECT count(*) FROM read_csv_auto('data/syndna/cellsb_boundary_oracle.csv')
+WHERE metric = 'cells_per_g_of_gdna' AND sample_id = 's2'
+  AND feature_id = 'f_only1' AND value > 0.0;
+----
+1
+
+# min_rsquared: slowr2 has rvalue 0.5, so r^2 is exactly 0.25 (both exactly
+# representable). The boundary oracle used min_rsquared = 0.25, so the sample
+# must survive the gate that drops it everywhere else.
+query I
+SELECT count(*) FROM read_csv_auto('data/syndna/cellsb_boundary_oracle.csv')
+WHERE sample_id = 'slowr2';
+----
+12
+
+# The same sample is absent from the non-boundary oracle, so the two files
+# together prove the gate discriminates rather than always admitting.
+query I
+SELECT count(*) FROM read_csv_auto('data/syndna/cellsb_oracle.csv')
+WHERE sample_id = 'slowr2';
+----
+0
+
+# The dense zeros that justify miint emitting no row at all. If these ever stop
+# being zero, the equivalence argument in data/syndna/README.md is void.
+query I
+SELECT count(*) FROM read_csv_auto('data/syndna/cellsb_oracle.csv')
+WHERE metric = 'cells_per_g_of_gdna'
+  AND sample_id = 's2'
+  AND feature_id IN ('f_only1', 'f_zero')
+  AND value = 0.0;
+----
+2
+
+# f_neither fails coverage in every sample, so it appears in no metric at all.
+query I
+SELECT count(*) FROM read_csv_auto('data/syndna/cellsb_oracle.csv')
+WHERE feature_id = 'f_neither';
+----
+0
+
+# sallcov fails coverage on EVERY one of its OGUs, so it never reaches the
+# per-sample calculation -- a different code path from f_neither (one OGU failing
+# in every sample), and one that an implementation could crash on instead.
+query I
+SELECT count(*) FROM read_csv_auto('data/syndna/cellsb_oracle.csv')
+WHERE sample_id = 'sallcov';
+----
+0
+
+query I
+SELECT count(DISTINCT feature_id) FROM read_csv_auto('data/syndna/cellsb_coverage.csv')
+WHERE sample_id = 'sallcov' AND coverage < 0.1;
+----
+4
+
+# snull has a NULL denominator for cells_per_g_of_sample ONLY, so it is dropped
+# from that metric and survives the other three. This pins the fact that the
+# NaN filter applies per requested metric, not globally -- a constraint on the
+# implementation, not an accident of the fixture.
+query TI
+SELECT metric, count(*) FROM read_csv_auto('data/syndna/cellsb_oracle.csv')
+WHERE sample_id = 'snull' GROUP BY metric ORDER BY metric;
+----
+cells_per_cm2_of_sample	3
+cells_per_g_of_gdna	3
+cells_per_ul_of_sample	3
+
+query I
+SELECT count(*) FROM read_csv_auto('data/syndna/cellsb_params.csv')
+WHERE calc_mass_sample_aliquot_input_g IS NULL;
+----
+1
+
+# rnan is dropped for a NULL aliquot mass, so the ORF oracle has 2 of 3 samples.
+query I
+SELECT count(DISTINCT sample_id) FROM read_csv_auto('data/syndna/orfb_oracle.csv');
+----
+2
