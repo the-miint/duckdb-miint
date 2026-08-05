@@ -1743,6 +1743,8 @@ set(TEST_SOURCES
     test/cpp/test_SimulateCluster.cpp
     src/community_distances.cpp
     test/cpp/test_CommunityDistances.cpp
+    src/mmvec.cpp
+    test/cpp/test_MMvec.cpp
     src/cluster_kmeans.cpp
     test/cpp/test_ClusterKmeans.cpp
     src/cluster_upgma.cpp

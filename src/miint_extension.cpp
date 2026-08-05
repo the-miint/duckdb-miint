@@ -183,6 +183,9 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 	data->versions.emplace_back("htslib", hts_version());
 	data->versions.emplace_back("minimap2", MINIMAP2_GIT_VERSION);
 	data->versions.emplace_back("kseq++", KSEQPP_PROJECT_VERSION);
+	// LBFGS++ ships no version macro, so the release is spelled out here. It is
+	// pinned by checksum in ext/LBFGSpp/PROVENANCE.md -- update both together.
+	data->versions.emplace_back("LBFGS++", "0.4.0");
 	data->versions.emplace_back("WFA2-lib", WFA2_GIT_VERSION);
 #ifdef MIINT_HAS_HDF5
 #ifdef H5_VERS_STR

@@ -173,6 +173,15 @@ Two Rust crates — rype and sylph — are statically linked into the extension.
 - **Integration:** header-only, included directly via `include_directories(ext)`
 - **Requires C++20** (drives the project-wide `CMAKE_CXX_STANDARD 20` setting)
 
+### LBFGS++
+- **Location:** `ext/LBFGSpp/` (tracked file copies of upstream v0.4.0; per-file checksums and the omitted-files list in `ext/LBFGSpp/PROVENANCE.md`)
+- **Purpose:** L-BFGS quasi-Newton optimizer; drives the MAP fit in `mmvec` (`src/mmvec.cpp`)
+- **Integration:** header-only, no CMake change needed — upstream's two-level `include/LBFGS.h` + `include/LBFGSpp/*.h` is vendored **flat** into `ext/LBFGSpp/`, so `#include "LBFGSpp/LBFGS.h"` resolves through the existing `include_directories(ext)` and the headers' own relative includes resolve unpatched. Same flattening as kseq++.
+- **Reported as:** `LBFGS++` row in `miint_versions()` (a literal — upstream ships no version macro)
+- **Depends on Eigen** (`<Eigen/Core>`, `<Eigen/LU>` via `BFGSMat.h`), which the build already requires. Compiles clean under the globally-set `EIGEN_MPL2_ONLY`; nothing in the transitive include set trips that guard.
+- **Only the unbounded solver is vendored.** `mmvec`'s parameters are unconstrained, so `LBFGSB.h` / `Cauchy.h` / `SubspaceMin.h` are omitted.
+- **Gotchas for callers:** `LBFGSParam::ftol` and `wolfe` are line-search Armijo/Wolfe constants, *not* convergence tolerances (SciPy's convergence `ftol` maps to `past`/`delta`); and `minimize()` **throws** on line-search failure rather than returning a status, so callers that must survive non-convergence keep their own best-so-far snapshot.
+
 ## 3. System / vcpkg Libraries
 
 | Library | How | Required | Notes |
