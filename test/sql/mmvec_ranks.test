@@ -1,0 +1,574 @@
+# name: test/sql/mmvec_ranks.test
+# description: mmvec_ranks reads a fitted model back and reproduces the carved scikit-bio T1 values exactly (always run; fixtures are inline)
+# group: [sql]
+
+require miint
+
+# ---------------------------------------------------------------------------
+# The T1 model, carved. These 56 rows ARE the oracle's kTheta from
+# test/cpp/mmvec_oracle.hpp, unpacked into the model relation's shape --
+# (modality, x_feature_id, y_feature_id, axis, value) -- with axis 1..3 the
+# embedding coordinates and axis 0 the bias, and Y feature 'C1' (the reference
+# category) carrying zeros on every axis because it holds no parameters at all.
+#
+# This is why M4 can do something M3 could not. A fit cannot be handed a theta
+# from SQL, so mmvec_fit.test could only compare final_loss in a 1e-6 band against
+# a differently-initialised run. A model relation, though, is just a table -- so
+# the fitted state can be supplied directly and every derived quantity checked
+# against scikit-bio EXACTLY, at 1e-10, through the whole SQL path.
+#
+# Values are the committed oracle's, transcribed at full precision and verified
+# bit-identical after reconstruction; never regenerated at test time.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE t1_model AS
+SELECT * FROM (VALUES
+  ('x','O1',NULL,1,-0.5721975555132527),
+  ('x','O1',NULL,2,1.2089496331620018),
+  ('x','O1',NULL,3,0.08397991870054435),
+  ('x','O1',NULL,0,1.0176085488389561),
+  ('x','O2',NULL,1,1.2836020389403422),
+  ('x','O2',NULL,2,0.6335162113605605),
+  ('x','O2',NULL,3,-1.8188626523197196),
+  ('x','O2',NULL,0,0.276744409694671),
+  ('x','O3',NULL,1,0.4673806127809242),
+  ('x','O3',NULL,2,0.2529824214326896),
+  ('x','O3',NULL,3,-0.19773326660002266),
+  ('x','O3',NULL,0,-1.6872222518253686),
+  ('x','O4',NULL,1,-0.7706383147004933),
+  ('x','O4',NULL,2,0.3303445359073165),
+  ('x','O4',NULL,3,1.1570154221200055),
+  ('x','O4',NULL,0,-2.390767649946256),
+  ('x','O5',NULL,1,-0.40890914399147865),
+  ('x','O5',NULL,2,-1.4903507743958617),
+  ('x','O5',NULL,3,-0.365108054047986),
+  ('x','O5',NULL,0,-0.08125688425450912),
+  ('x','O6',NULL,1,-0.4605053118162978),
+  ('x','O6',NULL,2,1.4163220426797019),
+  ('x','O6',NULL,3,-1.0014294607331993),
+  ('x','O6',NULL,0,-0.8474219637894537),
+  ('x','O7',NULL,1,-0.7918986545729729),
+  ('x','O7',NULL,2,-1.8744875972601482),
+  ('x','O7',NULL,3,0.7088901725445899),
+  ('x','O7',NULL,0,0.4892923150967331),
+  ('x','O8',NULL,1,-0.19287452976777875),
+  ('x','O8',NULL,2,-2.42573021450208),
+  ('x','O8',NULL,3,-0.9987049819576244),
+  ('x','O8',NULL,0,0.5545163664726702),
+  ('y',NULL,'C1',1,0.0),
+  ('y',NULL,'C1',2,0.0),
+  ('y',NULL,'C1',3,0.0),
+  ('y',NULL,'C1',0,0.0),
+  ('y',NULL,'C2',1,0.6437810357387733),
+  ('y',NULL,'C2',2,-0.7237880887841642),
+  ('y',NULL,'C2',3,-0.8164626401785496),
+  ('y',NULL,'C2',0,-0.8781861173405375),
+  ('y',NULL,'C3',1,-0.4530281177871468),
+  ('y',NULL,'C3',2,-0.6397671091221866),
+  ('y',NULL,'C3',3,0.46416120762770485),
+  ('y',NULL,'C3',0,-1.058754126085832),
+  ('y',NULL,'C4',1,0.8167737539396377),
+  ('y',NULL,'C4',2,-0.23870093824276398),
+  ('y',NULL,'C4',3,-2.1427549273060906),
+  ('y',NULL,'C4',0,1.7338424358002857),
+  ('y',NULL,'C5',1,-0.052068440809039676),
+  ('y',NULL,'C5',2,1.3116080076658423),
+  ('y',NULL,'C5',3,-0.702799800523929),
+  ('y',NULL,'C5',0,-0.7357116841015575),
+  ('y',NULL,'C6',1,0.6411702740513423),
+  ('y',NULL,'C6',2,-0.3823823840487058),
+  ('y',NULL,'C6',3,-1.2087255221341275),
+  ('y',NULL,'C6',0,0.5601729647956318)
+) t(modality, x_feature_id, y_feature_id, axis, value);
+
+# The carved expected ranks and probs at that theta, row-major over
+# (X feature, Y feature) exactly as kT1Ranks / kT1Probs are.
+statement ok
+CREATE TABLE t1_expected AS
+SELECT * FROM (VALUES
+  ('O1','C1',-0.43534915448087985,0.061550107653899164),
+  ('O1','C2',-1.6078864684848455,0.01905470947724296),
+  ('O1','C3',-0.9517391415530412,0.036725142953984005),
+  ('O1','C4',1.380220088432347,0.3781991257409249),
+  ('O1','C5',1.4029880944160433,0.38690873973146983),
+  ('O1','C6',0.2117665816703761,0.11756217444247913),
+  ('O2','C1',-1.7738520387424097,0.001053603661815173),
+  ('O2','C2',-0.5224331808821885,0.0036826595863386343),
+  ('O2','C3',-4.386917891156295,7.723909753124013e-05),
+  ('O2','C4',5.03130325896976,0.9508645702540445),
+  ('O2','C5',-0.19043322489886338,0.005132717062636254),
+  ('O2','C6',1.8423330767099964,0.03918921033763436),
+  ('O3','C1',1.2279086125134908,0.2505243457621087),
+  ('O3','C2',-1.0582728200774625,0.02546677526639589),
+  ('O3','C3',-1.9834342689280149,0.010096746295967464),
+  ('O3','C4',2.0195798040527095,0.5529277245766827),
+  ('O3','C5',-0.74858043311206,0.034711361664404514),
+  ('O3','C6',0.5427991055513363,0.12627304643444068),
+  ('O4','C1',3.147285465812899,0.874597584838686),
+  ('O4','C2',-1.8015499404478077,0.006202351356907088),
+  ('O4','C3',0.37258262180760093,0.054546908261473244),
+  ('O4','C4',-0.6971309449419336,0.0187154140817609),
+  ('O4','C5',-0.31893560204510996,0.027317917611482945),
+  ('O4','C6',-0.7022516001856491,0.018619823849689784),
+  ('O5','C1',-0.19568884418991836,0.055028282165123274),
+  ('O5','C2',-0.04158457365040322,0.06419668313450222),
+  ('O5','C3',-0.3664441034501086,0.04639037558545762),
+  ('O5','C4',2.2609956607672768,0.641963712307725),
+  ('O5','C5',-2.6895242933597867,0.0045449277234886395),
+  ('O5','C6',1.0322461538829397,0.1878760190837032),
+  ('O6','C1',0.31522491429797944,0.06611786324499518),
+  ('O6','C2',-1.9143350363475304,0.0071126792800325625),
+  ('O6','C3',-2.753270287613292,0.0030738896733043283),
+  ('O6','C4',2.6332572449614613,0.6714713079632173),
+  ('O6','C5',1.3175328178319414,0.18014225776103038),
+  ('O6','C6',0.4015903468694399,0.07208200207742015),
+  ('O7','C1',0.17645633624125337,0.11345798134461174),
+  ('O7','C2',0.05570265155447887,0.10055238900130509),
+  ('O7','C3',1.4940217119597499,0.4236882543708413),
+  ('O7','C4',0.6812530883545936,0.18796002590814717),
+  ('O7','C5',-2.985530919235606,0.0048039827069055775),
+  ('O7','C6',0.5780971311255305,0.1695373666681892),
+  ('O8','C1',-1.3532436437585744,0.0061773608529994955),
+  ('O8','C2',0.7700375830210824,0.05163358643250054),
+  ('O8','C3',-0.6817615218288773,0.012089934606842863),
+  ('O8','C4',3.496584403936918,0.7889628079442211),
+  ('O8','C5',-4.0041137970265135,0.0004360584349718626),
+  ('O8','C6',1.7724969756559648,0.14070025172846434)
+) t(x_feature_id, y_feature_id, rank, prob);
+
+# ---------------------------------------------------------------------------
+# Schema. Four columns; both id types mirrored from the model relation, since
+# "ids in = ids out" has to survive being read back as well as written.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT string_agg(column_name, ',') FROM (
+  DESCRIBE SELECT * FROM mmvec_ranks('t1_model')
+);
+----
+x_feature_id,y_feature_id,rank,prob
+
+query II
+SELECT column_name, column_type FROM (
+  DESCRIBE SELECT * FROM mmvec_ranks('t1_model')
+) WHERE column_name IN ('rank','prob') ORDER BY column_name;
+----
+prob	DOUBLE
+rank	DOUBLE
+
+# ---------------------------------------------------------------------------
+# EXACT parity with scikit-bio, through SQL. Every one of the 48 cells, joined to
+# the carved expectation by BOTH ids -- so a transposed or mislabelled emission
+# fails here rather than averaging out. theta packs four differently-shaped
+# blocks, so a mislabelled coordinate stays in range and produces a plausible
+# model of something else; only a per-cell comparison against an external value
+# catches that.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE t1_actual AS SELECT * FROM mmvec_ranks('t1_model');
+
+query I
+SELECT count(*) FROM t1_actual;
+----
+48
+
+# Every cell present exactly once, and every (x, y) pair matched -- so the max()
+# below cannot pass by comparing a subset.
+query I
+SELECT count(*) FROM t1_actual a JOIN t1_expected e USING (x_feature_id, y_feature_id);
+----
+48
+
+query I
+SELECT max(abs(a.rank - e.rank)) < 1e-10 FROM t1_actual a JOIN t1_expected e USING (x_feature_id, y_feature_id);
+----
+true
+
+query I
+SELECT max(abs(a.prob - e.prob)) < 1e-10 FROM t1_actual a JOIN t1_expected e USING (x_feature_id, y_feature_id);
+----
+true
+
+# The margin is not marginal: the measured agreement is far tighter than the
+# threshold, so this is a real equality rather than a band that happens to hold.
+query I
+SELECT max(abs(a.rank - e.rank)) < 1e-15 FROM t1_actual a JOIN t1_expected e USING (x_feature_id, y_feature_id);
+----
+true
+
+# ---------------------------------------------------------------------------
+# The two invariants that define what these columns MEAN, independent of the
+# oracle: ranks are logits centred within each X feature's row (so they sum to
+# zero), and probs are that row's softmax (so they sum to one). A change that
+# broke either would no longer be MMvec's ranks, whatever the numbers agreed with.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT count(*) FROM (
+  SELECT x_feature_id FROM t1_actual GROUP BY x_feature_id HAVING abs(sum(rank)) > 1e-12
+);
+----
+0
+
+query I
+SELECT count(*) FROM (
+  SELECT x_feature_id FROM t1_actual GROUP BY x_feature_id HAVING abs(sum(prob) - 1.0) > 1e-12
+);
+----
+0
+
+# Every X feature carries the full Y set, including the reference category: 8 x 6.
+query II
+SELECT count(DISTINCT x_feature_id), count(DISTINCT y_feature_id) FROM t1_actual;
+----
+8	6
+
+# The reference category is NOT all-zero in the output, unlike in the model. Its
+# logit is pinned to zero, but row-centring subtracts the row mean from it like
+# any other column -- so a "helpful" special case that emitted zeros here would
+# be wrong, and the carved values above are what says so.
+query I
+SELECT count(*) FROM t1_actual WHERE y_feature_id = 'C1' AND abs(rank) < 1e-12;
+----
+0
+
+# ---------------------------------------------------------------------------
+# Over a REAL fit, straight from mmvec_fit's output -- the actual usage pattern,
+# and the one that proves modality='loss' rows are ignored rather than mistaken
+# for parameters (mmvec_fit emits 65 of them on this fixture).
+#
+# This comparison is a BAND, not equality, and cannot be otherwise: the fit starts
+# from InitTheta(seed) where the oracle started from numpy's PCG64. The oracle
+# independently measured how far that can move the answer -- max|dranks| 4.084e-04
+# across four starting points under this stopping rule -- and kT2RankTol = 0.01
+# leaves room for that while still catching anything structural.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE microbes AS
+SELECT * FROM (VALUES
+  ('S1','m1',1.0),('S1','m4',7.0),('S1','m6',2.0),('S1','m7',1.0),
+  ('S2','m2',1.0),('S2','m3',2.0),('S2','m4',9.0),('S2','m5',1.0),('S2','m6',1.0),('S2','m8',1.0),
+  ('S3','m1',2.0),('S3','m3',1.0),('S3','m4',6.0),('S3','m7',2.0),
+  ('S4','m1',1.0),('S4','m2',2.0),('S4','m3',1.0),('S4','m4',8.0),('S4','m5',3.0),('S4','m6',1.0),('S4','m8',2.0),
+  ('S5','m2',1.0),('S5','m3',3.0),('S5','m4',3.0),('S5','m5',1.0),('S5','m6',4.0),('S5','m7',1.0)
+) t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE metabolites AS
+SELECT * FROM (VALUES
+  ('S1','b2',1.0),('S1','b4',1.0),('S1','b5',1.0),('S1','b6',2.0),
+  ('S2','b1',1.0),('S2','b3',2.0),('S2','b4',1.0),('S2','b5',5.0),
+  ('S3','b2',3.0),('S3','b3',1.0),('S3','b5',1.0),('S3','b6',1.0),
+  ('S4','b1',3.0),('S4','b2',1.0),('S4','b4',2.0),('S4','b5',2.0),
+  ('S5','b3',4.0),('S5','b4',1.0),('S5','b5',7.0),('S5','b6',3.0)
+) t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE fit AS SELECT * FROM mmvec_fit('microbes', 'metabolites', dimensions := 3, max_iter := 1000);
+
+# The loss rows are there, and mmvec_ranks still reads the model.
+query I
+SELECT count(*) > 0 FROM fit WHERE modality = 'loss';
+----
+true
+
+statement ok
+CREATE TABLE t2_expected AS
+SELECT * FROM (VALUES
+  ('m1','b1',-0.227587753417512),
+  ('m1','b2',0.6908345802970584),
+  ('m1','b3',-0.5216936876022276),
+  ('m1','b4',-0.2906535849131672),
+  ('m1','b5',0.3663463665442249),
+  ('m1','b6',-0.01724592090837679),
+  ('m2','b1',0.20220677004639306),
+  ('m2','b2',-0.8590879387950286),
+  ('m2','b3',0.05357602879723902),
+  ('m2','b4',0.070049472728624),
+  ('m2','b5',1.0859584992746478),
+  ('m2','b6',-0.552702832051875),
+  ('m3','b1',-0.6021313746731568),
+  ('m3','b2',-0.8582741559000031),
+  ('m3','b3',0.5108974240945926),
+  ('m3','b4',-0.3124938909466354),
+  ('m3','b5',1.2386129871284766),
+  ('m3','b6',0.02338901029672591),
+  ('m4','b1',-0.17977227988053116),
+  ('m4','b2',-0.184049992221512),
+  ('m4','b3',-0.07416786853775062),
+  ('m4','b4',-0.11428869845556079),
+  ('m4','b5',0.8664109876442508),
+  ('m4','b6',-0.3141321485488964),
+  ('m5','b1',0.3684234101123714),
+  ('m5','b2',-0.7096293547744785),
+  ('m5','b3',-0.1091861564303695),
+  ('m5','b4',0.16497256751052888),
+  ('m5','b5',1.0105270829506405),
+  ('m5','b6',-0.7251075493686929),
+  ('m6','b1',-0.8325882196945954),
+  ('m6','b2',-1.1194493105253227),
+  ('m6','b3',0.5310695134566134),
+  ('m6','b4',-0.1887012889726971),
+  ('m6','b5',1.2363204889765136),
+  ('m6','b6',0.37334881675948905),
+  ('m7','b1',-1.3553755005447528),
+  ('m7','b2',0.4114690694648586),
+  ('m7','b3',0.2663950010555036),
+  ('m7','b4',-0.6343100757991519),
+  ('m7','b5',0.8285488300272981),
+  ('m7','b6',0.48327267579624356),
+  ('m8','b1',0.7246094589428879),
+  ('m8','b2',-0.44133949351749757),
+  ('m8','b3',-0.34687717808487106),
+  ('m8','b4',0.4593381421340787),
+  ('m8','b5',1.0356828835747676),
+  ('m8','b6',-1.4314138130493665)
+) t(x_feature_id, y_feature_id, rank);
+
+statement ok
+CREATE TABLE t2_actual AS SELECT * FROM mmvec_ranks('fit');
+
+query I
+SELECT count(*) FROM t2_actual a JOIN t2_expected e USING (x_feature_id, y_feature_id);
+----
+48
+
+query I
+SELECT max(abs(a.rank - e.rank)) < 0.01 FROM t2_actual a JOIN t2_expected e USING (x_feature_id, y_feature_id);
+----
+true
+
+# Not vacuous: the ranks are not all near zero, so agreeing to 0.01 is a real
+# statement about the values rather than about their smallness.
+query I
+SELECT max(abs(rank)) > 0.5 FROM t2_actual;
+----
+true
+
+# The row invariants hold on a fitted model too.
+query I
+SELECT count(*) FROM (
+  SELECT x_feature_id FROM t2_actual GROUP BY x_feature_id
+  HAVING abs(sum(rank)) > 1e-12 OR abs(sum(prob) - 1.0) > 1e-12
+);
+----
+0
+
+# Dropping the loss rows changes nothing -- they carry no parameters.
+statement ok
+CREATE TABLE fit_no_loss AS SELECT * FROM fit WHERE modality <> 'loss';
+
+query I
+SELECT count(*) FROM (
+  SELECT * FROM mmvec_ranks('fit') EXCEPT ALL SELECT * FROM mmvec_ranks('fit_no_loss')
+);
+----
+0
+
+# The number of axes is read off the model, not assumed: a 1-component fit still
+# yields the full d1 x d2 rank matrix, with the same row invariants.
+statement ok
+CREATE TABLE fit1 AS SELECT * FROM mmvec_fit('microbes', 'metabolites', dimensions := 1, max_iter := 200);
+
+query I
+SELECT count(*) FROM mmvec_ranks('fit1');
+----
+48
+
+query I
+SELECT count(*) FROM (
+  SELECT x_feature_id FROM mmvec_ranks('fit1') GROUP BY x_feature_id
+  HAVING abs(sum(rank)) > 1e-12 OR abs(sum(prob) - 1.0) > 1e-12
+);
+----
+0
+
+# And it is a different model from the 3-component one, so the axis count is
+# genuinely being honoured rather than defaulted.
+query I
+SELECT count(*) > 0 FROM (
+  SELECT rank FROM mmvec_ranks('fit1') EXCEPT SELECT rank FROM mmvec_ranks('fit')
+);
+----
+true
+
+# ---------------------------------------------------------------------------
+# Id types are mirrored from the model relation, per modality independently, and
+# the VALUES round-trip. The model is the only place the ids now live, so if the
+# read-back lost the type there would be no way to join a rank matrix back to
+# taxonomy or to a compound library.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE model_typed AS
+SELECT modality,
+       CASE WHEN modality = 'x' THEN CAST(10 + CAST(substr(x_feature_id, 2) AS BIGINT) AS BIGINT) END AS x_feature_id,
+       CASE WHEN modality = 'y'
+            THEN CAST('00000000-0000-4000-8000-0000000000a' || substr(y_feature_id, 2) AS UUID) END AS y_feature_id,
+       axis, value
+FROM fit WHERE modality <> 'loss';
+
+query II
+SELECT column_name, column_type FROM (
+  DESCRIBE SELECT * FROM mmvec_ranks('model_typed')
+) WHERE column_name LIKE '%feature_id' ORDER BY column_name;
+----
+x_feature_id	BIGINT
+y_feature_id	UUID
+
+query II
+SELECT DISTINCT typeof(x_feature_id), typeof(y_feature_id) FROM mmvec_ranks('model_typed');
+----
+BIGINT	UUID
+
+# The emitted ids are exactly the model's own distinct ids, on both sides.
+query I
+SELECT count(*) FROM (
+  (SELECT DISTINCT x_feature_id FROM mmvec_ranks('model_typed')
+   EXCEPT SELECT DISTINCT x_feature_id FROM model_typed WHERE modality = 'x')
+  UNION ALL
+  (SELECT DISTINCT x_feature_id FROM model_typed WHERE modality = 'x'
+   EXCEPT SELECT DISTINCT x_feature_id FROM mmvec_ranks('model_typed'))
+);
+----
+0
+
+query I
+SELECT count(*) FROM (
+  (SELECT DISTINCT y_feature_id FROM mmvec_ranks('model_typed')
+   EXCEPT SELECT DISTINCT y_feature_id FROM model_typed WHERE modality = 'y')
+  UNION ALL
+  (SELECT DISTINCT y_feature_id FROM model_typed WHERE modality = 'y'
+   EXCEPT SELECT DISTINCT y_feature_id FROM mmvec_ranks('model_typed'))
+);
+----
+0
+
+# Renaming the features is presentational: the numbers are the same model.
+query I
+SELECT count(*) FROM (
+  SELECT rank, prob FROM mmvec_ranks('model_typed')
+  EXCEPT ALL
+  SELECT rank, prob FROM mmvec_ranks('fit')
+);
+----
+0
+
+# ---------------------------------------------------------------------------
+# A model relation it cannot trust is rejected, loudly. These are the pure unit's
+# checks surfacing through SQL -- the messages come from one place, so they cannot
+# drift between the two layers.
+# ---------------------------------------------------------------------------
+
+statement error
+SELECT * FROM mmvec_ranks('no_such_model');
+----
+no_such_model
+
+statement ok
+CREATE TABLE not_a_model AS SELECT 1 AS a, 2 AS b;
+
+statement error
+SELECT * FROM mmvec_ranks('not_a_model');
+----
+must expose (modality, x_feature_id, y_feature_id, axis, value)
+
+# A filtered model is incomplete rather than smaller: guessing at the missing
+# parameter would answer with a model the user never fitted.
+statement ok
+CREATE TABLE model_clipped AS SELECT * FROM fit WHERE NOT (modality = 'x' AND x_feature_id = 'm3' AND axis = 2);
+
+statement error
+SELECT * FROM mmvec_ranks('model_clipped');
+----
+'m3' is missing axis 2
+
+# Two all-zero Y features is ambiguous: either could be the reference category.
+statement ok
+CREATE TABLE model_two_refs AS
+SELECT modality, x_feature_id, y_feature_id, axis,
+       CASE WHEN modality = 'y' AND y_feature_id = 'b4' THEN 0.0 ELSE value END AS value
+FROM fit;
+
+statement error
+SELECT * FROM mmvec_ranks('model_two_refs');
+----
+2 all-zero Y features
+
+# And none at all means nothing is pinned, so there is no reference category.
+statement ok
+CREATE TABLE model_no_ref AS
+SELECT modality, x_feature_id, y_feature_id, axis,
+       CASE WHEN modality = 'y' AND y_feature_id = 'b1' AND axis = 0 THEN 0.5 ELSE value END AS value
+FROM fit;
+
+statement error
+SELECT * FROM mmvec_ranks('model_no_ref');
+----
+0 all-zero Y features
+
+# A NULL parameter is not a parameter.
+statement ok
+CREATE TABLE model_null_value AS
+SELECT modality, x_feature_id, y_feature_id, axis,
+       CASE WHEN modality = 'x' AND x_feature_id = 'm1' AND axis = 1 THEN NULL ELSE value END AS value
+FROM fit;
+
+statement error
+SELECT * FROM mmvec_ranks('model_null_value');
+----
+NULL axis or value
+
+statement ok
+CREATE TABLE model_null_modality AS
+SELECT CASE WHEN modality = 'x' AND x_feature_id = 'm1' AND axis = 1 THEN NULL ELSE modality END AS modality,
+       x_feature_id, y_feature_id, axis, value
+FROM fit;
+
+statement error
+SELECT * FROM mmvec_ranks('model_null_modality');
+----
+NULL modality
+
+# A modality='x' row whose x_feature_id is NULL names no feature. Reported as such
+# rather than falling back to whichever id happens to be non-NULL, which would
+# read a Y id as an X feature name and invent a feature.
+statement ok
+CREATE TABLE model_null_id AS
+SELECT modality,
+       CASE WHEN modality = 'x' AND x_feature_id = 'm1' THEN NULL ELSE x_feature_id END AS x_feature_id,
+       y_feature_id, axis, value
+FROM fit;
+
+statement error
+SELECT * FROM mmvec_ranks('model_null_id');
+----
+NULL feature id
+
+# Modality is matched case-insensitively. mmvec_fit only ever emits lowercase, so
+# this exists for a hand-built or round-tripped-through-something model relation --
+# and it is tested rather than merely written, since nothing else would exercise it.
+statement ok
+CREATE TABLE model_upper AS SELECT upper(modality) AS modality, x_feature_id, y_feature_id, axis, value FROM fit;
+
+query I
+SELECT count(*) FROM (
+  SELECT * FROM mmvec_ranks('model_upper') EXCEPT ALL SELECT * FROM mmvec_ranks('fit')
+);
+----
+0
+
+# An unrecognised modality is still rejected by name.
+statement ok
+CREATE TABLE model_bad_modality AS
+SELECT CASE WHEN modality = 'loss' THEN 'diagnostic' ELSE modality END AS modality,
+       x_feature_id, y_feature_id, axis, value
+FROM fit;
+
+statement error
+SELECT * FROM mmvec_ranks('model_bad_modality');
+----
+modality 'diagnostic'

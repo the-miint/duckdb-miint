@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -354,4 +356,509 @@ TEST_CASE("model rows reject a theta that does not match the shape", "[mmvec]") 
 	model.theta = kTheta;
 	model.theta.pop_back();
 	REQUIRE_THROWS_WITH(miint::mmvec::BuildModelRows(model), ContainsSubstring("expected"));
+}
+
+// ---------------------------------------------------------------------------
+// Reading a model relation back: ParseModelCells, the inverse of BuildModelRows.
+//
+// Two independent assertions are needed, and neither replaces the other:
+//
+//  1. ROUND-TRIP IDENTITY on theta. Catches an inverse that disagrees with the
+//     forward direction -- a transposed y_main read, a shifted axis.
+//  2. The oracle's carved kT1Logits, reached from the PARSED theta. Catches what
+//     the round-trip structurally cannot: the two directions now share one
+//     spelling of theta's block offsets (BlockOffsets), so a wrong offset is wrong
+//     consistently and CANCELS in the round-trip. Only an external value sees it.
+//
+// Neither is a self-consistency check on its own terms, which is the whole point:
+// theta packs four differently-shaped blocks, so a mislabelled coordinate stays in
+// range and produces a plausible-looking model of something else.
+// ---------------------------------------------------------------------------
+namespace {
+
+using miint::mmvec::ModelCell;
+
+// The model relation as SQL would present it: BuildModelRows' indices resolved
+// through the id dictionaries, exactly as the wrapper will do it.
+std::vector<ModelCell> CellsFromRows(const std::vector<miint::mmvec::ModelRow> &rows,
+                                     const std::vector<std::string> &x_ids, const std::vector<std::string> &y_ids) {
+	std::vector<ModelCell> cells;
+	cells.reserve(rows.size());
+	for (const auto &r : rows) {
+		switch (r.kind) {
+		case miint::mmvec::ModelRow::Kind::X:
+			cells.push_back({"x", x_ids[static_cast<size_t>(r.id_index)], r.axis, r.value});
+			break;
+		case miint::mmvec::ModelRow::Kind::Y:
+			cells.push_back({"y", y_ids[static_cast<size_t>(r.id_index)], r.axis, r.value});
+			break;
+		case miint::mmvec::ModelRow::Kind::Loss:
+			cells.push_back({"loss", std::nullopt, r.axis, r.value});
+			break;
+		}
+	}
+	return cells;
+}
+
+// The oracle's toy model, as a model relation.
+std::vector<ModelCell> ToyModelCells() {
+	using namespace miint::mmvec_oracle::toy;
+	miint::mmvec::Model model;
+	model.shape = {kNFeaturesX, kNFeaturesY, kNComponents};
+	model.theta = kTheta;
+	model.loss_curve = {5.0, 4.0};
+	return CellsFromRows(miint::mmvec::BuildModelRows(model), kXIds, kYIds);
+}
+
+// The same relation, but written from kTheta using the DOCUMENTED block layout
+// spelled out HERE, independently of mmvec_relation.cpp. That independence is the
+// whole value: the round-trip test above cannot see an error that is present in
+// both directions and therefore cancels, because the two directions share one
+// spelling of the layout. This does not go through BuildModelRows at all.
+std::vector<ModelCell> ToyModelCellsFromTheta() {
+	using namespace miint::mmvec_oracle::toy;
+	const int64_t d1 = kNFeaturesX;
+	const int64_t d2 = kNFeaturesY;
+	const int64_t p = kNComponents;
+	const size_t x_main = 0;
+	const size_t x_bias = static_cast<size_t>(d1 * p);
+	const size_t y_main = x_bias + static_cast<size_t>(d1);
+	const size_t y_bias = y_main + static_cast<size_t>(p * (d2 - 1));
+
+	std::vector<ModelCell> cells;
+	for (int64_t i = 0; i < d1; ++i) {
+		for (int64_t k = 0; k < p; ++k) {
+			cells.push_back({"x", kXIds[static_cast<size_t>(i)], static_cast<int32_t>(k + 1),
+			                 kTheta[x_main + static_cast<size_t>(i * p + k)]});
+		}
+		cells.push_back({"x", kXIds[static_cast<size_t>(i)], 0, kTheta[x_bias + static_cast<size_t>(i)]});
+	}
+	for (int64_t j = 0; j < d2; ++j) {
+		for (int64_t k = 0; k < p; ++k) {
+			const double v = j == 0 ? 0.0 : kTheta[y_main + static_cast<size_t>(k * (d2 - 1) + (j - 1))];
+			cells.push_back({"y", kYIds[static_cast<size_t>(j)], static_cast<int32_t>(k + 1), v});
+		}
+		cells.push_back(
+		    {"y", kYIds[static_cast<size_t>(j)], 0, j == 0 ? 0.0 : kTheta[y_bias + static_cast<size_t>(j - 1)]});
+	}
+	return cells;
+}
+
+} // namespace
+
+TEST_CASE("a model relation round-trips through theta exactly", "[mmvec]") {
+	using namespace miint::mmvec_oracle::toy;
+	const auto parsed = miint::mmvec::ParseModelCells(ToyModelCells());
+
+	REQUIRE(parsed.shape.n_features_x == kNFeaturesX);
+	REQUIRE(parsed.shape.n_features_y == kNFeaturesY);
+	REQUIRE(parsed.shape.n_components == kNComponents);
+	REQUIRE(parsed.x_feature_ids == kXIds);
+	// The reference lands at index 0; here it is also the lexicographically first
+	// id, because that is what mmvec_fit's ordering rule made it.
+	REQUIRE(parsed.y_feature_ids == kYIds);
+
+	// EXACT, not approximate: nothing in this path does arithmetic on a parameter,
+	// so anything other than bit equality is a bug rather than rounding.
+	REQUIRE(parsed.theta.size() == kTheta.size());
+	for (size_t i = 0; i < kTheta.size(); ++i) {
+		INFO("theta element " << i);
+		REQUIRE(parsed.theta[i] == kTheta[i]);
+	}
+}
+
+TEST_CASE("parsing a relation written from theta recovers theta", "[mmvec]") {
+	using namespace miint::mmvec_oracle::toy;
+	// The anchor. Cells come from the independent layout above, so BuildModelRows is
+	// not in the loop and cannot cancel an error in ParseModelCells. A transposed
+	// y_main read applied to BOTH directions passes the round-trip test and fails
+	// here -- verified by mutation, not assumed.
+	const auto parsed = miint::mmvec::ParseModelCells(ToyModelCellsFromTheta());
+	REQUIRE(parsed.shape.n_features_x == kNFeaturesX);
+	REQUIRE(parsed.shape.n_features_y == kNFeaturesY);
+	REQUIRE(parsed.shape.n_components == kNComponents);
+	REQUIRE(parsed.theta.size() == kTheta.size());
+	for (size_t i = 0; i < kTheta.size(); ++i) {
+		INFO("theta element " << i);
+		REQUIRE(parsed.theta[i] == kTheta[i]);
+	}
+	// And the recovered model reproduces the carved logits, which is what the SQL
+	// layer will actually read it through.
+	const auto logits = miint::mmvec::ComputeLogits(parsed.shape, parsed.theta);
+	REQUIRE(logits.size() == kT1Logits.size());
+	for (size_t i = 0; i < kT1Logits.size(); ++i) {
+		INFO("logit element " << i);
+		REQUIRE(logits[i] == Catch::Approx(kT1Logits[i]).margin(miint::mmvec_oracle::kT1Tol));
+	}
+}
+
+TEST_CASE("both ways of writing the toy model relation agree", "[mmvec]") {
+	// If these two ever disagree, one of the two layout spellings is wrong and the
+	// tests above will be measuring the wrong thing. Cheap, and it pins the
+	// independence rather than leaving it as a claim in a comment.
+	const auto from_rows = ToyModelCells();
+	const auto from_theta = ToyModelCellsFromTheta();
+	std::vector<std::string> a;
+	std::vector<std::string> b;
+	for (const auto &c : from_rows) {
+		if (c.modality != "loss") {
+			a.push_back(c.modality + "|" + *c.feature_id + "|" + std::to_string(c.axis) + "|" +
+			            std::to_string(c.value));
+		}
+	}
+	for (const auto &c : from_theta) {
+		b.push_back(c.modality + "|" + *c.feature_id + "|" + std::to_string(c.axis) + "|" + std::to_string(c.value));
+	}
+	std::sort(a.begin(), a.end());
+	std::sort(b.begin(), b.end());
+	REQUIRE(a == b);
+}
+
+TEST_CASE("parsing a model ignores the loss curve and tolerates its absence", "[mmvec]") {
+	using namespace miint::mmvec_oracle::toy;
+	auto with_loss = ToyModelCells();
+	std::vector<ModelCell> without_loss;
+	for (const auto &c : with_loss) {
+		if (c.modality != "loss") {
+			without_loss.push_back(c);
+		}
+	}
+	REQUIRE(without_loss.size() + 2 == with_loss.size());
+
+	const auto a = miint::mmvec::ParseModelCells(with_loss);
+	const auto b = miint::mmvec::ParseModelCells(without_loss);
+	REQUIRE(a.theta == b.theta);
+	REQUIRE(a.y_feature_ids == b.y_feature_ids);
+}
+
+TEST_CASE("parsing a model does not depend on the order of the cells", "[mmvec]") {
+	auto cells = ToyModelCells();
+	const auto forward = miint::mmvec::ParseModelCells(cells);
+	std::reverse(cells.begin(), cells.end());
+	const auto reversed = miint::mmvec::ParseModelCells(cells);
+	// A relation has no row order -- NO_ORDER is declared on the producing function
+	// -- so a parse that depended on it would be wrong for reasons no fixture would
+	// reveal, since mmvec_fit happens to emit in dictionary order.
+	REQUIRE(forward.theta == reversed.theta);
+	REQUIRE(forward.x_feature_ids == reversed.x_feature_ids);
+	REQUIRE(forward.y_feature_ids == reversed.y_feature_ids);
+}
+
+TEST_CASE("the reference category is found by its zeros, not by its id", "[mmvec]") {
+	using namespace miint::mmvec_oracle::toy;
+	// Rename the Y features so the reference ('C1') is no longer lexicographically
+	// first: C1 -> zz_ref sorts LAST. Joining a model to metadata and renaming
+	// features to readable names is ordinary, and must not move the reference.
+	auto cells = ToyModelCells();
+	for (auto &c : cells) {
+		if (c.modality == "y" && c.feature_id == std::string("C1")) {
+			c.feature_id = "zz_ref";
+		}
+	}
+	const auto parsed = miint::mmvec::ParseModelCells(cells);
+	REQUIRE(parsed.y_feature_ids[0] == "zz_ref");
+	// Renaming is presentational: the model itself is untouched.
+	const auto original = miint::mmvec::ParseModelCells(ToyModelCells());
+	REQUIRE(parsed.theta == original.theta);
+	for (size_t j = 1; j < parsed.y_feature_ids.size(); ++j) {
+		REQUIRE(parsed.y_feature_ids[j] == original.y_feature_ids[j]);
+	}
+}
+
+TEST_CASE("parsing a model rejects a relation it cannot trust", "[mmvec]") {
+	using namespace miint::mmvec_oracle::toy;
+
+	SECTION("an unknown modality") {
+		auto cells = ToyModelCells();
+		cells[0].modality = "fit";
+		REQUIRE_THROWS_WITH(miint::mmvec::ParseModelCells(cells), ContainsSubstring("modality 'fit'"));
+	}
+
+	SECTION("a NULL feature id on a parameter row") {
+		auto cells = ToyModelCells();
+		cells[0].feature_id = std::nullopt;
+		REQUIRE_THROWS_WITH(miint::mmvec::ParseModelCells(cells), ContainsSubstring("NULL feature id"));
+	}
+
+	SECTION("a missing modality") {
+		std::vector<ModelCell> only_x;
+		for (const auto &c : ToyModelCells()) {
+			if (c.modality == "x") {
+				only_x.push_back(c);
+			}
+		}
+		REQUIRE_THROWS_WITH(miint::mmvec::ParseModelCells(only_x), ContainsSubstring("no modality 'y' rows"));
+	}
+
+	SECTION("a duplicated cell") {
+		auto cells = ToyModelCells();
+		cells.push_back(cells[0]);
+		REQUIRE_THROWS_WITH(miint::mmvec::ParseModelCells(cells), ContainsSubstring("more than one row for axis"));
+	}
+
+	SECTION("an incomplete grid names the feature and the axis") {
+		auto cells = ToyModelCells();
+		// Drop O3's axis 2 only. The count is still plausible and every other
+		// feature is whole, which is exactly why this has to be checked per slot.
+		cells.erase(std::remove_if(cells.begin(), cells.end(),
+		                           [](const ModelCell &c) {
+			                           return c.modality == "x" && c.feature_id == std::string("O3") && c.axis == 2;
+		                           }),
+		            cells.end());
+		REQUIRE_THROWS_WITH(miint::mmvec::ParseModelCells(cells), ContainsSubstring("'O3' is missing axis 2"));
+	}
+
+	SECTION("the modalities disagree on the number of axes") {
+		auto cells = ToyModelCells();
+		for (const auto &c : ToyModelCells()) {
+			if (c.modality == "y" && c.axis == 1) {
+				ModelCell extra = c;
+				extra.axis = kNComponents + 1;
+				cells.push_back(extra);
+			}
+		}
+		REQUIRE_THROWS_WITH(miint::mmvec::ParseModelCells(cells), ContainsSubstring("disagree on the number of axes"));
+	}
+
+	SECTION("a non-finite parameter") {
+		auto cells = ToyModelCells();
+		cells[0].value = std::numeric_limits<double>::infinity();
+		REQUIRE_THROWS_WITH(miint::mmvec::ParseModelCells(cells), ContainsSubstring("is not finite"));
+	}
+
+	SECTION("a negative axis") {
+		auto cells = ToyModelCells();
+		cells[0].axis = -1;
+		REQUIRE_THROWS_WITH(miint::mmvec::ParseModelCells(cells), ContainsSubstring("negative axis"));
+	}
+
+	SECTION("no reference category") {
+		auto cells = ToyModelCells();
+		for (auto &c : cells) {
+			if (c.modality == "y" && c.feature_id == std::string("C1") && c.axis == 0) {
+				c.value = 0.5; // C1 now holds a parameter, so nothing is pinned
+			}
+		}
+		REQUIRE_THROWS_WITH(miint::mmvec::ParseModelCells(cells), ContainsSubstring("has 0 all-zero Y features"));
+	}
+
+	SECTION("two reference categories is ambiguous, not a guess") {
+		auto cells = ToyModelCells();
+		for (auto &c : cells) {
+			if (c.modality == "y" && c.feature_id == std::string("C4")) {
+				c.value = 0.0;
+			}
+		}
+		REQUIRE_THROWS_WITH(miint::mmvec::ParseModelCells(cells), ContainsSubstring("has 2 all-zero Y features"));
+		REQUIRE_THROWS_WITH(miint::mmvec::ParseModelCells(cells), ContainsSubstring("C4"));
+	}
+
+	SECTION("only a bias axis is not a model") {
+		std::vector<ModelCell> bias_only;
+		for (const auto &c : ToyModelCells()) {
+			if (c.modality != "loss" && c.axis == 0) {
+				bias_only.push_back(c);
+			}
+		}
+		REQUIRE_THROWS_WITH(miint::mmvec::ParseModelCells(bias_only), ContainsSubstring("at least one embedding axis"));
+	}
+
+	SECTION("a single Y feature leaves nothing to model") {
+		std::vector<ModelCell> one_y;
+		for (const auto &c : ToyModelCells()) {
+			if (c.modality == "x" || (c.modality == "y" && c.feature_id == std::string("C1"))) {
+				one_y.push_back(c);
+			}
+		}
+		REQUIRE_THROWS_WITH(miint::mmvec::ParseModelCells(one_y), ContainsSubstring("at least two are needed"));
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Aligning a held-out table to a fitted model's dictionary.
+//
+// The counterpart to IngestPairedTables, and the opposite direction: ingest builds
+// a dictionary FROM the data, here the dictionary is the model's and the data is
+// fitted into it. Getting that backwards is a silent wrong answer -- in-range
+// column indices of plausibly the right count, naming different features -- and
+// the SQL-level guard for it is thin (measured: a fresh dictionary passes the
+// entire exact-parity block in mmvec_predict.test, because that fixture's own
+// dictionary happens to coincide with the model's). So it is pinned here directly.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("aligning to a model keeps the model's width and column order", "[mmvec]") {
+	// The model knows four features; the table carries only two of them, and the
+	// table's own sorted dictionary would be ("xb", "xd") -- two columns at indices
+	// 0 and 1. Aligned to the model they must be columns 1 and 3 of four.
+	const std::vector<std::string> model_features = {"xa", "xb", "xc", "xd"};
+	const std::vector<CooRow> rows = {{"s1", "xd", 4.0}, {"s1", "xb", 2.0}, {"s2", "xb", 20.0}};
+
+	const auto got = miint::mmvec::AlignXToModel(rows, model_features);
+	REQUIRE(got.sample_ids == std::vector<std::string> {"s1", "s2"});
+	REQUIRE(got.counts.n_rows == 2);
+	REQUIRE(got.counts.n_cols == 4); // the MODEL's width, not the table's two features
+
+	const auto dense = Densify(got.counts);
+	REQUIRE(dense == std::vector<double> {0.0, 2.0, 0.0, 4.0, 0.0, 20.0, 0.0, 0.0});
+}
+
+TEST_CASE("aligning follows the model's id order, without re-sorting it", "[mmvec]") {
+	// The dictionary is taken AS GIVEN. That matters for the Y side, where the model
+	// puts the reference category at index 0 regardless of its id -- a helpful
+	// re-sort here would silently move the reference and change what every emitted
+	// column means. X is exercised because it shares the code path.
+	const std::vector<std::string> model_features = {"zz", "aa", "mm"};
+	const std::vector<CooRow> rows = {{"s1", "aa", 1.0}, {"s1", "zz", 2.0}, {"s1", "mm", 3.0}};
+
+	const auto got = miint::mmvec::AlignXToModel(rows, model_features);
+	REQUIRE(got.counts.n_cols == 3);
+	// Column order is zz, aa, mm -- the model's -- not the sorted aa, mm, zz.
+	REQUIRE(Densify(got.counts) == std::vector<double> {2.0, 1.0, 3.0});
+}
+
+TEST_CASE("aligning rejects a table it cannot fit into the model", "[mmvec]") {
+	const std::vector<std::string> model_features = {"xa", "xb"};
+
+	SECTION("a feature the model never saw, named and counted") {
+		const std::vector<CooRow> rows = {{"s1", "xa", 1.0}, {"s1", "surprise", 2.0}};
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignXToModel(rows, model_features),
+		                    ContainsSubstring("1 feature(s) the model was never fitted on"));
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignXToModel(rows, model_features), ContainsSubstring("surprise"));
+		// The message tells the user what to do about it, because a sample-wise
+		// train/test split produces this case routinely.
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignXToModel(rows, model_features),
+		                    ContainsSubstring("restrict the table to the model's own features"));
+	}
+
+	SECTION("several unknown features are counted once each, not per cell") {
+		const std::vector<CooRow> rows = {{"s1", "p", 1.0}, {"s2", "p", 1.0}, {"s1", "q", 1.0}, {"s1", "xa", 1.0}};
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignXToModel(rows, model_features),
+		                    ContainsSubstring("2 feature(s) the model was never fitted on"));
+	}
+
+	SECTION("an empty table") {
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignXToModel({}, model_features), ContainsSubstring("no usable cells"));
+	}
+
+	SECTION("a duplicated cell, with the same message the fitting path gives") {
+		const std::vector<CooRow> rows = {{"s1", "xa", 1.0}, {"s1", "xa", 2.0}};
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignXToModel(rows, model_features), ContainsSubstring("duplicate entry"));
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The paired form, for Score: the same alignment on both modalities, plus the one
+// thing scoring adds -- X and Y must describe the SAME samples, over ONE sample
+// dictionary. Score compares the two tables cell by cell, so two independently
+// built sample orders would pair one sample's microbes against another's
+// metabolites and report a plausible number for it.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("pairing aligns both modalities into the model's own dictionaries", "[mmvec]") {
+	// Neither table's own dictionary is the model's: X's sorted features are
+	// (xa, xb, xc) but only two appear, and Y's model order (zz, aa, mm) is
+	// deliberately unsorted so a re-sort would show up as moved columns. The Y case
+	// is the one that matters -- index 0 is the reference category.
+	const std::vector<std::string> x_model = {"xa", "xb", "xc"};
+	const std::vector<std::string> y_model = {"zz", "aa", "mm"};
+	const std::vector<CooRow> x_rows = {{"s1", "xc", 4.0}, {"s1", "xa", 1.0}, {"s2", "xb", 2.0}};
+	const std::vector<CooRow> y_rows = {{"s1", "aa", 3.0}, {"s2", "zz", 5.0}, {"s2", "mm", 7.0}};
+
+	const auto got = miint::mmvec::AlignPairedToModel(x_rows, y_rows, x_model, y_model);
+	REQUIRE(got.sample_ids == std::vector<std::string> {"s1", "s2"});
+	REQUIRE(got.x.n_rows == 2);
+	REQUIRE(got.y.n_rows == 2);
+	REQUIRE(got.x.n_cols == 3);
+	REQUIRE(got.y.n_cols == 3);
+
+	REQUIRE(Densify(got.x) == std::vector<double> {1.0, 0.0, 4.0, 0.0, 2.0, 0.0});
+	// (zz, aa, mm), the model's order -- not the sorted (aa, mm, zz).
+	REQUIRE(Densify(got.y) == std::vector<double> {0.0, 3.0, 0.0, 5.0, 0.0, 7.0});
+}
+
+TEST_CASE("pairing puts both modalities on ONE sample dictionary", "[mmvec]") {
+	// Row n of x and row n of y must be the same sample. Written so that a per-table
+	// dictionary would still produce two valid-looking tables of the right shape: Y's
+	// rows arrive in the opposite order to X's, so pairing by arrival rather than by
+	// id would transpose the two samples and quietly score the wrong pairs.
+	const std::vector<std::string> x_model = {"xa"};
+	const std::vector<std::string> y_model = {"ya", "yb"};
+	const std::vector<CooRow> x_rows = {{"s1", "xa", 1.0}, {"s2", "xa", 2.0}};
+	const std::vector<CooRow> y_rows = {{"s2", "yb", 20.0}, {"s1", "ya", 10.0}};
+
+	const auto got = miint::mmvec::AlignPairedToModel(x_rows, y_rows, x_model, y_model);
+	REQUIRE(got.sample_ids == std::vector<std::string> {"s1", "s2"});
+	// s1 (row 0) holds ya, s2 (row 1) holds yb -- by id, not by arrival.
+	REQUIRE(Densify(got.y) == std::vector<double> {10.0, 0.0, 0.0, 20.0});
+	REQUIRE(Densify(got.x) == std::vector<double> {1.0, 2.0});
+}
+
+TEST_CASE("pairing rejects tables it cannot align", "[mmvec]") {
+	const std::vector<std::string> x_model = {"xa", "xb"};
+	const std::vector<std::string> y_model = {"ya", "yb"};
+	const std::vector<CooRow> x_ok = {{"s1", "xa", 1.0}, {"s2", "xb", 2.0}};
+	const std::vector<CooRow> y_ok = {{"s1", "ya", 1.0}, {"s2", "yb", 2.0}};
+
+	SECTION("a sample present in only one modality, with the fitting path's message") {
+		// Deliberately the SAME text IngestPairedTables produces: it is the same
+		// mistake, and a user who has seen it once should not have to learn it twice.
+		auto x = x_ok;
+		x.push_back({"s3", "xa", 1.0});
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignPairedToModel(x, y_ok, x_model, y_model),
+		                    ContainsSubstring("must describe the same samples"));
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignPairedToModel(x, y_ok, x_model, y_model),
+		                    ContainsSubstring("only in X: s3"));
+
+		auto y = y_ok;
+		y.push_back({"s4", "ya", 1.0});
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignPairedToModel(x_ok, y, x_model, y_model),
+		                    ContainsSubstring("only in Y: s4"));
+	}
+
+	SECTION("a mismatch of the same SIZE, which is the case this check exists for") {
+		// Where the two counts differ, Score would notice by itself -- x.n_rows and
+		// y.n_rows disagree. Here they do not, so nothing downstream can tell that s2's
+		// microbes are about to be scored against s9's metabolites. Both sides are
+		// named, not just the count.
+		const std::vector<CooRow> y = {{"s1", "ya", 1.0}, {"s9", "yb", 2.0}};
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignPairedToModel(x_ok, y, x_model, y_model),
+		                    ContainsSubstring("(X has 2, Y has 2)"));
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignPairedToModel(x_ok, y, x_model, y_model),
+		                    ContainsSubstring("only in X: s2; only in Y: s9"));
+	}
+
+	SECTION("an unknown Y feature is rejected exactly as an unknown X feature is") {
+		auto y = y_ok;
+		y.push_back({"s1", "mystery", 1.0});
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignPairedToModel(x_ok, y, x_model, y_model),
+		                    ContainsSubstring("1 feature(s) the model was never fitted on"));
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignPairedToModel(x_ok, y, x_model, y_model), ContainsSubstring("mystery"));
+		// The remedy names the Y column and the Y modality, not X's. Getting this
+		// wrong would send the user to filter the wrong table.
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignPairedToModel(x_ok, y, x_model, y_model),
+		                    ContainsSubstring("SELECT DISTINCT y_feature_id"));
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignPairedToModel(x_ok, y, x_model, y_model),
+		                    ContainsSubstring("modality = 'y'"));
+	}
+
+	SECTION("an unknown X feature, still") {
+		auto x = x_ok;
+		x.push_back({"s1", "surprise", 1.0});
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignPairedToModel(x, y_ok, x_model, y_model),
+		                    ContainsSubstring("SELECT DISTINCT x_feature_id"));
+	}
+
+	SECTION("an empty table, either side") {
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignPairedToModel({}, y_ok, x_model, y_model),
+		                    ContainsSubstring("the X feature-table has no usable cells"));
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignPairedToModel(x_ok, {}, x_model, y_model),
+		                    ContainsSubstring("the Y feature-table has no usable cells"));
+	}
+
+	SECTION("a duplicated cell, labelled with the modality it is in") {
+		auto y = y_ok;
+		y.push_back({"s1", "ya", 5.0});
+		REQUIRE_THROWS_WITH(miint::mmvec::AlignPairedToModel(x_ok, y, x_model, y_model),
+		                    ContainsSubstring("Y has a duplicate entry for sample 's1', feature 'ya'"));
+	}
 }

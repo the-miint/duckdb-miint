@@ -528,8 +528,12 @@ double Score(const ModelShape &shape, const std::vector<double> &theta, const Sp
 
 namespace duckdb {
 class ExtensionLoader;
-//! Registers the mmvec_fit table function into the extension catalog. Declared
-//! here behind a forward declaration, so this header stays free of DuckDB
-//! includes and the Catch2 target still links the core without libduckdb.
+//! Registers the mmvec table functions into the extension catalog. Declared here
+//! behind a forward declaration, so this header stays free of DuckDB includes and
+//! the Catch2 target still links the core without libduckdb.
 void RegisterMmvecFit(ExtensionLoader &loader);
+//! The functions a fitted model is read through; all consume a model relation.
+void RegisterMmvecRanks(ExtensionLoader &loader);
+void RegisterMmvecPredict(ExtensionLoader &loader);
+void RegisterMmvecScore(ExtensionLoader &loader);
 } // namespace duckdb

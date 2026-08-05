@@ -1355,6 +1355,7 @@ set(EXTENSION_SOURCES
     src/unifrac_function_common.cpp
     src/community_distances_function.cpp
     src/mmvec_fit_function.cpp
+    src/mmvec_derived_functions.cpp
     src/cluster_kmeans_function.cpp
     src/cluster_upgma_function.cpp
     src/per_sample_table_function.cpp

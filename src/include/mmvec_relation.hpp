@@ -30,6 +30,7 @@
 // conversion: CooRow lives in feature_table_row.hpp precisely so generic
 // consumers need not pull in the UniFrac feature.
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -113,5 +114,129 @@ struct ModelRow {
 //! Emits `(d1 + d2) * (p + 1) + loss_curve.size()` rows. Throws
 //! std::invalid_argument if the model's shape and theta disagree.
 std::vector<ModelRow> BuildModelRows(const Model &model);
+
+//! One cell of a model relation as SQL presents it: an id, not an index.
+struct ModelCell {
+	//! Exactly "x", "y" or "loss", lowercase. The caller lowercases; anything else
+	//! is rejected by name rather than guessed at.
+	std::string modality;
+	//! The id `modality` SELECTS -- `x_feature_id` for "x", `y_feature_id` for "y"
+	//! -- and `nullopt` for "loss". Deliberately not "whichever id is non-NULL":
+	//! that would read a Y id as an X feature name on a mislabelled row, inventing
+	//! a feature instead of complaining. `std::optional` rather than an empty-string
+	//! sentinel because "" is a legal VARCHAR feature id.
+	std::optional<std::string> feature_id;
+	int32_t axis = 0;
+	double value = 0.0;
+};
+
+//! A model relation read back into the arrays the core works in.
+struct ParsedModel {
+	ModelShape shape;
+	std::vector<double> theta;
+	std::vector<std::string> x_feature_ids; //!< index i is X feature i
+	std::vector<std::string> y_feature_ids; //!< index 0 is the REFERENCE, then the rest sorted
+};
+
+//! The inverse of BuildModelRows: rebuild `(shape, theta)` and both id
+//! dictionaries from a model relation, so a fitted model can be read back and
+//! evaluated. `modality = 'loss'` cells are ignored, so a model table can be
+//! passed through unfiltered.
+//!
+//! ORDER IS NOT RECOVERED, AND DOES NOT NEED TO BE. Lexicographic feature order
+//! is load-bearing when FITTING, because it decides which Y feature becomes the
+//! reference category and the Gaussian priors are not shift-invariant. On the way
+//! back in, the only structural requirement is that the reference sits at index 0:
+//! `ComputeLogits` pins Y feature 0's logit to zero and derives the rest from
+//! `y_main[:, j-1]`. Any order for the others works, because this function packs
+//! `theta` and labels `y_feature_ids` in the SAME order, so permuting a
+//! non-reference feature moves its column in both places and its value follows.
+//!
+//! The reference is therefore identified by the property that actually defines it
+//! -- it is the Y feature holding no parameters, which BuildModelRows emits as
+//! all zeros -- and NOT by lexicographic position. That matters in practice:
+//! joining a model to metadata and renaming features to readable names is an
+//! ordinary thing to do, and it must not silently reassign the reference category.
+//! Exactly one all-zero Y feature is required; zero or several is ambiguous and
+//! rejected rather than guessed at.
+//!
+//! Throws std::invalid_argument if:
+//!  - a `modality` is not one of "x", "y", "loss";
+//!  - an "x" or "y" cell has a NULL feature id;
+//!  - either modality has no cells at all;
+//!  - a value is not finite, or an `axis` is negative;
+//!  - a (modality, feature, axis) cell is duplicated;
+//!  - the grid is incomplete -- some feature is missing an axis (naming both);
+//!  - the two modalities disagree on the number of axes;
+//!  - `p < 1`, or `d2 < 2` (with only a reference category there is no model);
+//!  - the number of all-zero Y features is not exactly one.
+ParsedModel ParseModelCells(const std::vector<ModelCell> &cells);
+
+//! A long-form table indexed against a FITTED MODEL's feature dictionary, so its
+//! columns line up with that model's theta.
+struct AlignedTable {
+	std::vector<std::string> sample_ids; //!< lexicographically sorted
+	SparseCounts counts;                 //!< `n_cols` is the MODEL's width, always
+};
+
+//! Index a held-out X table against the model's X features, ready for Predict.
+//!
+//! This is the counterpart to IngestPairedTables, and the difference is the whole
+//! point: ingest builds a dictionary FROM the data, whereas here the dictionary is
+//! the model's and the data is fitted into it. Building a fresh dictionary over a
+//! held-out table instead would yield in-range column indices of plausibly the
+//! right count that name entirely different features -- a silent wrong answer, not
+//! a failure. `counts.n_cols` is therefore `x_feature_ids.size()` regardless of
+//! which features actually appear.
+//!
+//! UNKNOWN vs MISSING, following scikit-bio:
+//!  - A feature the model never saw is an ERROR, naming the count and examples.
+//!    scikit-bio's `predict` takes a dense array with no ids, so an extra column is
+//!    a shape mismatch there; and there is no `P(Y | unknown microbe)` to
+//!    contribute. Restricting the table to the model's features is the caller's
+//!    decision to make explicitly, in SQL, not ours to make silently.
+//!  - A model feature ABSENT from the table is fine: in scikit-bio it would be a
+//!    zero column, and in long form "no rows" is exactly that. `Predict` documents
+//!    accepting an all-zero feature -- unlike when fitting, where its parameters
+//!    would come from the prior alone -- and this is the case it accepts it for.
+//!
+//! Sample ids are collected from the table itself (the model does not constrain
+//! them; predicting for new samples is the point) and sorted, so the output order
+//! is reproducible.
+//!
+//! Throws std::invalid_argument if the table has no usable cells, if any feature is
+//! unknown to the model, or if a (sample, feature) cell is duplicated. Values are
+//! NOT validated here -- negatives, non-finite counts and all-zero samples are
+//! `Predict`'s contract, and it reports them.
+AlignedTable AlignXToModel(const std::vector<miint::unifrac::CooRow> &x_rows,
+                           const std::vector<std::string> &x_feature_ids);
+
+//! A held-out X/Y pair indexed against a fitted model, over ONE sample dictionary.
+struct AlignedPair {
+	std::vector<std::string> sample_ids; //!< lexicographically sorted; shared by both
+	SparseCounts x;                      //!< `n_cols` is the model's X width
+	SparseCounts y;                      //!< `n_cols` is the model's Y width
+};
+
+//! Index a held-out X and Y against the model's two feature dictionaries, ready
+//! for Score.
+//!
+//! Every rule AlignXToModel states applies to both modalities here -- the model's
+//! dictionary rather than a fresh one, unknown features rejected, absent features
+//! left as zero columns -- plus the one thing scoring adds: X and Y must describe
+//! the SAME samples, matched BY ID, and they are indexed over ONE sample dictionary
+//! so that row n of `x` and row n of `y` are the same sample. Score compares the
+//! two tables cell by cell, so two independently built sample orders would pair one
+//! sample's microbes against another's metabolites and report a plausible number
+//! for it. A sample set mismatch is rejected with the same message
+//! IngestPairedTables gives, because it is the same mistake.
+//!
+//! Throws std::invalid_argument if either table has no usable cells, if the two
+//! sample sets differ, if any feature is unknown to the model, or if a (sample,
+//! feature) cell is duplicated. Values are Score's contract, and it reports them.
+AlignedPair AlignPairedToModel(const std::vector<miint::unifrac::CooRow> &x_rows,
+                               const std::vector<miint::unifrac::CooRow> &y_rows,
+                               const std::vector<std::string> &x_feature_ids,
+                               const std::vector<std::string> &y_feature_ids);
 
 } // namespace miint::mmvec
