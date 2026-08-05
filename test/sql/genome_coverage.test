@@ -34,6 +34,18 @@ SELECT * FROM genome_coverage(alignments, subject_total_length, subject_genome_i
 ----
 genome_A	22	0.22
 
+# `covered` is BIGINT, as documented. It is a SUM, and DuckDB widens SUM's
+# return type to HUGEINT unconditionally, so the macro casts back explicitly.
+# The cast is safe rather than lucky: compress_intervals merges overlaps per
+# reference, so each contig contributes at most its own length and `covered`
+# cannot exceed the genome length -- BIGINT spans ~2.96 billion human genomes.
+# This pins the type because the accidental HUGEINT was not free: it is 16 bytes
+# instead of 8, and COPY to Parquet wrote it as DOUBLE.
+query T
+SELECT typeof(covered) FROM genome_coverage(alignments, subject_total_length, subject_genome_id);
+----
+BIGINT
+
 # ---- Test 2: Overlapping alignments merged by compress_intervals ----
 # contig1 [10,21) and [15,26) → compressed to [10,26) → 16 bases
 

@@ -727,6 +727,15 @@ const std::string MZML_ISOTOPE_PATTERN = // NOLINT
 //     genome_id (VARCHAR)
 //
 // Returns: genome_id (VARCHAR), covered (BIGINT), proportion_covered (DOUBLE)
+//
+// `covered` is cast back to BIGINT deliberately -- do not remove the cast.
+// DuckDB widens the return type of SUM unconditionally (SUM(BIGINT) and even
+// SUM(INTEGER) yield HUGEINT), which is pointless here: compress_intervals
+// merges overlaps per reference, so each contig contributes at most its own
+// length and `covered` is bounded by the genome length -- BIGINT holds ~2.96
+// billion human genomes. The width was not free: HUGEINT is 16 bytes rather
+// than 8, and COPY ... TO a Parquet file writes it as DOUBLE, so an integer
+// base count silently arrived as a float.
 const std::string GENOME_COVERAGE = // NOLINT
     "CREATE OR REPLACE MACRO genome_coverage(alignments, subject_total_length, subject_genome_id) AS TABLE "
     "WITH compressed_intervals AS ( "
@@ -754,7 +763,7 @@ const std::string GENOME_COVERAGE = // NOLINT
     ") "
     "SELECT "
     "    tc.genome_id, "
-    "    tc.covered, "
+    "    tc.covered::BIGINT AS covered, "
     "    tc.covered::DOUBLE / tl.total_length AS proportion_covered "
     "FROM total_coverage tc "
     "JOIN query_table(subject_total_length) tl "
