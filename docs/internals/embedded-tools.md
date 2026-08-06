@@ -13,6 +13,7 @@ Five embedding categories:
 
 | Flag | Default | Auto-disabled when |
 |---|---|---|
+| `MIINT_ENABLE_CURL` | ON | Apple (vsearch/OpenSSL `MD5_*`/`SHA1_*` symbol clash), Emscripten (no network stack, and a loadable extension is a wasm *side module*, so undefined `curl_*` symbols become imports duckdb-wasm cannot supply — they trap when **called**, not at load). Also soft-disabled when neither the vcpkg CONFIG package nor the system `FindCURL` module locates libcurl, so the no-vcpkg tidy lane still configures. |
 | `MIINT_ENABLE_HDF5` | ON | Emscripten (C++ static class members become unresolvable GOT.mem imports in WASM) |
 | `MIINT_ENABLE_MAFFT` | ON | Windows (uses `mkdtemp` and other POSIX APIs; segfaults on MinGW) |
 | `MIINT_ENABLE_ABPOA` | ON | Windows (POSIX APIs) |
@@ -22,7 +23,7 @@ Five embedding categories:
 | `MIINT_ENABLE_UNIFRAC` | ON | Windows (libssu's inmem build assumes POSIX; first-class on Emscripten via the WASM target) |
 | `MIINT_ENABLE_SYLPH`   | ON | Emscripten (WASM-incompatible), Windows/MinGW (POSIX-only sketch indexing) |
 
-Corresponding preprocessor macros: `MIINT_HAS_HDF5`, `MIINT_HAS_MAFFT`, `MIINT_HAS_ABPOA`, `MIINT_HAS_VSEARCH`, `MIINT_HAS_SORTMERNA`, `MIINT_HAS_GPL_BOUNDARY`, `MIINT_HAS_UNIFRAC`, `MIINT_HAS_SYLPH`. Also `MIINT_ASPERA_SUPPORTED=0` on Windows/WASM (POSIX-only runtime).
+Corresponding preprocessor macros: `MIINT_HAS_CURL`, `MIINT_HAS_HDF5`, `MIINT_HAS_MAFFT`, `MIINT_HAS_ABPOA`, `MIINT_HAS_VSEARCH`, `MIINT_HAS_SORTMERNA`, `MIINT_HAS_GPL_BOUNDARY`, `MIINT_HAS_UNIFRAC`, `MIINT_HAS_SYLPH`. Also `MIINT_ASPERA_SUPPORTED=0` on Windows/WASM (POSIX-only runtime).
 
 Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is linked (not on musl/macOS/Windows).
 
@@ -189,12 +190,23 @@ Two Rust crates — rype and sylph — are statically linked into the extension.
 | zlib | `find_package(ZLIB REQUIRED)` | yes | vcpkg or system |
 | Threads | `find_package(Threads REQUIRED)` | yes | pthreads / Win32 |
 | expat | `find_package(expat CONFIG REQUIRED)` | yes | XML parsing for mzML/mzXML |
+| Eigen | `find_package(Eigen3 CONFIG QUIET)`; falls back to fetching the pinned, SHA-verified header-only 3.4.0 tarball | yes | Header-only, so nothing is linked. Backs `NewickTree.cpp`'s Mk rate matrices and the vendored LBFGS++ that drives `mmvec`. **Two globally-set defines, both load-bearing** — see below. |
 | zstd | `find_package(zstd QUIET)` | optional | multiple target names tried (`zstd::libzstd_static`, `zstd::libzstd_shared`, `zstd::libzstd`, `zstd`); gates `HAVE_LIBZSTD` |
 | HDF5 | `find_package(HDF5 REQUIRED COMPONENTS CXX)` | conditional | required when `MIINT_ENABLE_HDF5=ON`; links `hdf5-static`, `hdf5_hl-static`, `hdf5_cpp-static`, `hdf5_hl_cpp-static`. For `CLANG_TIDY` builds HDF5 is optional (tidy still runs without BIOM coverage). |
 | RocksDB | `find_package(RocksDB CONFIG REQUIRED)` | conditional | required when `MIINT_ENABLE_SORTMERNA=ON`; vcpkg port gated via `"platform": "!emscripten"`. Linked against `RocksDB::rocksdb` (static archive). |
+| libcurl | `find_package(CURL CONFIG QUIET)`, falling back to the system `FindCURL` module | conditional | required when `MIINT_ENABLE_CURL=ON`; powers the streaming HTTPS-PUT / FTP / FTPS transport in `ena_upload_reads`. Reported as the `libcurl` row in `miint_versions()`. |
 | Catch2 | `FetchContent` @ v3.4.0 | yes (test) | used only for the `tests` C++ executable |
 
 `VCPKG_TOOLCHAIN_PATH` must be set before CMake configure.
+
+### The two Eigen defines
+
+Both are `add_compile_definitions` in `CMakeLists.txt` — global, not per-source — and both are set for a reason that is easy to undo by accident.
+
+- **`EIGEN_MPL2_ONLY`** confines the build to Eigen's pure-MPL2 subset, keeping miint's Modified-BSD licence clean. Nothing in the transitive include set of either Eigen user trips the guard.
+- **`EIGEN_DONT_PARALLELIZE`** exists because the extension links OpenMP (libssu is built `-fopenmp`), so `_OPENMP` is defined for miint's own sources too and Eigen would otherwise enable its parallel GEMM path. `mmvec`'s objective contains matrix products reducing over a long dimension (d1 = 2720 at cystic-fibrosis scale), and thread-count-dependent blocking would make a **seeded fit non-reproducible**. Measured at CF scale, seed 0, 500 iterations: with the define removed the same fit returns a different model as soon as `OMP_NUM_THREADS > 1` (final loss 1709324046711880.2 against 1709329920514833.8). It costs 3–5% of the fit's wall clock.
+
+Global rather than per-source because Eigen's macros configure templates instantiated in whichever TU includes the headers — a per-file define would leave two differently-configured instantiations of the same symbols for the linker to choose between.
 
 ## 4. Runtime Binaries (not compiled in)
 
