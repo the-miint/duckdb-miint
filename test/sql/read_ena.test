@@ -64,6 +64,21 @@ FROM (DESCRIBE SELECT * FROM read_ena('ERR1074767', fields='run_accession,librar
 run_accession	VARCHAR
 library_layout	VARCHAR
 
+# ---- Typed columns (BIGINT and LIST) ----
+
+query IIIIIII nosort
+SELECT column_name, column_type
+FROM (DESCRIBE SELECT * FROM read_ena('ERR1074767',
+     fields='run_accession,read_count,base_count,tax_id,fastq_ftp,fastq_bytes,fastq_md5'));
+----
+run_accession	VARCHAR
+read_count	BIGINT
+base_count	BIGINT
+tax_id	BIGINT
+fastq_ftp	VARCHAR[]
+fastq_bytes	BIGINT[]
+fastq_md5	VARCHAR[]
+
 # ---- Sample result type (resolves run -> sample accession) ----
 
 query I
