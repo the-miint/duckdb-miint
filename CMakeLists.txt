@@ -85,20 +85,33 @@ add_compile_definitions(EIGEN_DONT_PARALLELIZE)
 # Since vsearch is first-class on macOS and not all users need the
 # streaming transport (Aspera + file:// still work), we drop libcurl on
 # Apple rather than drop vsearch.
+#
+# Disabled under Emscripten for a different reason: there is no network stack to
+# stream to, and a loadable extension is a wasm SIDE MODULE, so every undefined
+# symbol silently becomes an import. Building with libcurl therefore produced an
+# extension carrying unresolved `env.curl_*` imports that duckdb-wasm cannot
+# supply -- and those trap only when CALLED, as "null function or function
+# signature mismatch" / "table index is out of bounds", not at load time. That is
+# what made `miint_versions()` fail in wasm for so long: its bind reads
+# `GetCurlVersion()`, so a version query was the first thing to touch libcurl.
+# Every other libcurl path (`ena_upload_reads`, the ENA surface) had the same
+# latent fault. Measured by scanning the built .wasm import section: `curl_version`
+# was present as an import, while statically-linked `zlibVersion` was not.
+#
+# This supersedes a narrower wasm_threads-only disable that used to sit below,
+# whose reason still holds and is worth keeping on record: vcpkg's libcurl port
+# for wasm32-emscripten is not built with -pthread, so its objects lack
+# atomics/bulk-memory and wasm-ld rejects them against wasm_threads'
+# --shared-memory. wasm_eh / wasm_mvp linked fine, which is exactly why the
+# unresolved-import fault reached them and not wasm_threads.
 option(MIINT_ENABLE_CURL "Build with libcurl streaming-upload support" ON)
 if(APPLE)
     set(MIINT_ENABLE_CURL OFF)
     message(STATUS "Apple detected: disabling libcurl streaming transport (vsearch+OpenSSL symbol clash)")
-endif()
-# vcpkg's libcurl port for wasm32-emscripten is not built with -pthread,
-# so its object files lack atomics/bulk-memory features. wasm_threads links
-# with --shared-memory which requires those features, so wasm-ld rejects the
-# port. wasm_eh / wasm_mvp don't use shared memory and link fine. Rebuilding
-# vcpkg libcurl with pthread is a port-level change; cheaper to drop the
-# streaming transport on wasm_threads (file:// + Aspera paths still work).
-if(EMSCRIPTEN AND (CMAKE_CXX_FLAGS MATCHES "-pthread" OR DUCKDB_EXPLICIT_PLATFORM STREQUAL "wasm_threads"))
+elseif(EMSCRIPTEN)
     set(MIINT_ENABLE_CURL OFF)
-    message(STATUS "Emscripten wasm_threads detected: disabling libcurl (vcpkg port not built with -pthread)")
+    message(STATUS "Emscripten detected: disabling libcurl streaming transport (no network stack; "
+                   "unresolved side-module imports trap at call time)")
 endif()
 if(MIINT_ENABLE_CURL)
     # Try VCPKG-style CONFIG package first (production builds), fall back
