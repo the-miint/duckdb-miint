@@ -68,6 +68,14 @@ add_compile_definitions(EIGEN_MPL2_ONLY)
 # thread-count-dependent blocking would make a seeded fit non-reproducible --
 # which is exactly the guarantee mmvec's own RNG transforms exist to provide.
 #
+# Measured at cystic-fibrosis scale, seed 0, 500 iterations: with this define
+# removed, the same fit returns a DIFFERENT model as soon as OMP_NUM_THREADS > 1
+# -- final loss 1709324046711880.2 against 1709329920514833.8, and the parameter
+# checksum moving by 0.6%. A user-visible reproducibility break controlled by an
+# environment variable. Keeping the define costs 3-5% of the fit's wall clock
+# (median 4.82 s against 4.66 s, interleaved A/B over five pairs, the parallel
+# build given 8 threads), which is the right trade for a seeded fit.
+#
 # Set globally rather than per-source: Eigen's macros affect templates
 # instantiated in whichever translation unit includes the headers, so a per-file
 # define would leave two differently-configured instantiations of the same
