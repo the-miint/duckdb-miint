@@ -428,6 +428,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// scikit-bio-binaries and stay behind MIINT_HAS_UNIFRAC below.)
 	RegisterCommunityDistances(loader);
 	RegisterAbsQuant(loader);
+	RegisterAbsQuantCellCounts(loader);
 	RegisterClusterKmeans(loader);
 	RegisterClusterUpgma(loader);
 

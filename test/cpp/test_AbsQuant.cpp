@@ -19,13 +19,19 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+using miint::absquant::CellCountsOptions;
+using miint::absquant::CellCountsResult;
+using miint::absquant::ComputeCellCounts;
 using miint::absquant::CountObservation;
+using miint::absquant::CoverageObservation;
 using miint::absquant::DuplicatedIds;
+using miint::absquant::FeatureLength;
 using miint::absquant::FitOptions;
 using miint::absquant::FitResult;
 using miint::absquant::FitSyndnaModels;
@@ -35,7 +41,9 @@ using miint::absquant::IsUsableSampleParameter;
 using miint::absquant::Linregress;
 using miint::absquant::LinregressResult;
 using miint::absquant::RegularizedIncompleteBeta;
+using miint::absquant::SampleCellParams;
 using miint::absquant::SampleMass;
+using miint::absquant::SampleRegression;
 using miint::absquant::StudentTSurvival;
 using miint::absquant::SyndnaConcentration;
 
@@ -233,6 +241,129 @@ struct TinyFit {
 		return FitSyndnaModels(counts, concentrations, masses, options);
 	}
 };
+
+// data/syndna/README.md's bound for the cells oracles. Looser than the fit
+// oracles' 1e-11 because these are untruncated doubles reaching ~1e13, so the
+// bound has to be relative.
+constexpr double kCellsTol = 1e-9;
+
+struct CellsFixture {
+	std::vector<CountObservation> counts;
+	std::vector<SampleRegression> models;
+	std::vector<CoverageObservation> coverage;
+	std::vector<FeatureLength> lengths;
+	std::vector<SampleCellParams> params;
+	CellCountsOptions options;
+
+	CellCountsResult Run() const {
+		return ComputeCellCounts(counts, models, coverage, lengths, params, options);
+	}
+};
+
+// Loads one cell-count fixture family ("cells" = Set A, pysyndna's own;
+// "cellsb" = Set B, the synthetic filter cases).
+CellsFixture LoadCellsFixture(const std::string &prefix) {
+	CellsFixture fixture;
+	const std::string dir = "data/syndna/";
+
+	const auto counts = ReadCsv(dir + prefix + "_counts.csv");
+	const size_t c_sample = counts.Col("sample_id");
+	const size_t c_feature = counts.Col("feature_id");
+	const size_t c_value = counts.Col("value");
+	for (const auto &row : counts.rows) {
+		// The DuckDB reader drops zero-valued cells before the core ever sees
+		// them (the sparse invariant), so the fixture loader must too -- these
+		// CSVs are stored as dense as pysyndna's own input.
+		const double value = AsDouble(row[c_value]);
+		if (value == 0.0) {
+			continue;
+		}
+		fixture.counts.push_back({row[c_sample], row[c_feature], value});
+	}
+
+	const auto models = ReadCsv(dir + prefix + "_models.csv");
+	const size_t m_sample = models.Col("sample_id");
+	const size_t m_slope = models.Col("slope");
+	const size_t m_intercept = models.Col("intercept");
+	const size_t m_rvalue = models.Col("rvalue");
+	for (const auto &row : models.rows) {
+		fixture.models.push_back(
+		    {row[m_sample], AsDouble(row[m_slope]), AsDouble(row[m_intercept]), AsDouble(row[m_rvalue])});
+	}
+
+	const auto coverage = ReadCsv(dir + prefix + "_coverage.csv");
+	const size_t v_sample = coverage.Col("sample_id");
+	const size_t v_feature = coverage.Col("feature_id");
+	const size_t v_coverage = coverage.Col("coverage");
+	for (const auto &row : coverage.rows) {
+		fixture.coverage.push_back({row[v_sample], row[v_feature], AsDouble(row[v_coverage])});
+	}
+
+	const auto lengths = ReadCsv(dir + prefix + "_lengths.csv");
+	const size_t l_feature = lengths.Col("feature_id");
+	const size_t l_len = lengths.Col("ogu_len_in_bp");
+	for (const auto &row : lengths.rows) {
+		fixture.lengths.push_back({row[l_feature], AsDouble(row[l_len])});
+	}
+
+	const auto params = ReadCsv(dir + prefix + "_params.csv");
+	const size_t p_sample = params.Col("sample_id");
+	const size_t p_mass = params.Col("sequenced_sample_gdna_mass_ng");
+	const size_t p_conc = params.Col("extracted_gdna_concentration_ng_ul");
+	const size_t p_vol = params.Col("vol_extracted_elution_ul");
+	for (const auto &row : params.rows) {
+		fixture.params.push_back({row[p_sample], AsDouble(row[p_mass]), AsDouble(row[p_conc]), AsDouble(row[p_vol])});
+	}
+	return fixture;
+}
+
+// Compares cell-count output against a committed oracle in BOTH directions.
+//
+// The golden is DENSE where pysyndna's pivot+fillna made it so, and miint omits
+// zero-valued cells, so a golden 0.0 is matched against an absent cell -- that
+// is the D10 claim, and comparing this way proves it rather than assuming it.
+// The reverse direction still catches any cell miint invents.
+void CheckCellsAgainstOracle(const CellCountsResult &result, const std::string &oracle_path,
+                             const std::string &metric) {
+	const auto gold = ReadCsv(oracle_path);
+	const size_t g_metric = gold.Col("metric");
+	const size_t g_sample = gold.Col("sample_id");
+	const size_t g_feature = gold.Col("feature_id");
+	const size_t g_value = gold.Col("value");
+
+	std::map<std::pair<std::string, std::string>, double> mine;
+	for (const auto &cell : result.values) {
+		mine[{cell.sample_id, cell.feature_id}] = cell.value;
+	}
+	// A duplicated cell would otherwise hide behind the map.
+	REQUIRE(mine.size() == result.values.size());
+
+	size_t gold_rows = 0;
+	for (const auto &row : gold.rows) {
+		if (row[g_metric] != metric) {
+			continue;
+		}
+		++gold_rows;
+		const std::pair<std::string, std::string> key {row[g_sample], row[g_feature]};
+		INFO("cell (" << key.first << ", " << key.second << ") of " << oracle_path);
+		const auto found = mine.find(key);
+		const double got = (found == mine.end()) ? 0.0 : found->second;
+		CHECK(ParityOk(got, AsDouble(row[g_value]), kCellsTol));
+	}
+	REQUIRE(gold_rows > 0);
+
+	for (const auto &cell : result.values) {
+		bool in_gold = false;
+		for (const auto &row : gold.rows) {
+			if (row[g_metric] == metric && row[g_sample] == cell.sample_id && row[g_feature] == cell.feature_id) {
+				in_gold = true;
+				break;
+			}
+		}
+		INFO("cell (" << cell.sample_id << ", " << cell.feature_id << ") is not in " << oracle_path);
+		CHECK(in_gold);
+	}
+}
 
 } // namespace
 
@@ -1340,4 +1471,607 @@ TEST_CASE("FitSyndnaModels reports a malformed relation before an id mismatch", 
 	fixture.counts.push_back({"s1", "f9", 500.0}); // no concentration row
 	CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s1 / f2'"));
 	CHECK_THROWS_WITH(fixture.Run(), !ContainsSubstring("'f9'"));
+}
+
+// ---------------------------------------------------------------------------
+// Cell counts
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The smallest input ComputeCellCounts accepts, for pinning one algebraic
+// relationship at a time. slope 1 / intercept 0 makes the predicted mass equal
+// the read count exactly, so every value below is traceable by hand.
+struct TinyCells {
+	std::vector<CountObservation> counts = {{"s1", "f1", 100.0}, {"s1", "f2", 1000.0}};
+	std::vector<SampleRegression> models = {{"s1", 1.0, 0.0, 1.0}};
+	std::vector<CoverageObservation> coverage = {{"s1", "f1", 0.5}, {"s1", "f2", 0.5}};
+	std::vector<FeatureLength> lengths = {{"f1", 1000.0}, {"f2", 2000.0}};
+	std::vector<SampleCellParams> params = {{"s1", 10.0, 2.0, 100.0}};
+	CellCountsOptions options;
+
+	TinyCells() {
+		options.min_coverage = 0.1;
+		options.min_rsquared = 0.8;
+	}
+	CellCountsResult Run() const {
+		return ComputeCellCounts(counts, models, coverage, lengths, params, options);
+	}
+	// Value of one cell, or NaN if it was dropped.
+	double ValueOf(const std::string &sample_id, const std::string &feature_id) const {
+		for (const auto &cell : Run().values) {
+			if (cell.sample_id == sample_id && cell.feature_id == feature_id) {
+				return cell.value;
+			}
+		}
+		return std::nan("");
+	}
+};
+
+} // namespace
+
+TEST_CASE("ComputeCellCounts reproduces pysyndna's cells_per_g_of_gdna", "[absquant]") {
+	// Set A: pysyndna's own fixture, traceable to the published spreadsheet and
+	// the Zaramela notebook. min_coverage 0.1 and min_rsquared 0.8 are the
+	// values data/syndna/README.md records the oracle was generated with.
+	auto fixture = LoadCellsFixture("cells");
+	fixture.options.min_coverage = 0.1;
+	fixture.options.min_rsquared = 0.8;
+
+	const auto result = fixture.Run();
+	CheckCellsAgainstOracle(result, "data/syndna/cells_oracle.csv", "cells_per_g_of_gdna");
+
+	// 13 OGUs x 2 samples, less the two that fail coverage in both samples,
+	// less the (example2, Neisseria subflava) cell whose count is zero -- which
+	// is one of those already-dropped four, so 26 - 4 = 22.
+	CHECK(result.values.size() == 22);
+}
+
+TEST_CASE("ComputeCellCounts drops features below min_coverage", "[absquant]") {
+	// pysyndna's fixture engineers these two to fail in every sample so the
+	// filter is always exercised: N. subflava at 7.9% and H. influenzae at 1.4%
+	// coverage, against a 10% threshold.
+	auto fixture = LoadCellsFixture("cells");
+	fixture.options.min_coverage = 0.1;
+	const auto result = fixture.Run();
+
+	CHECK(Contains(result.low_coverage_feature_ids, "Neisseria subflava"));
+	CHECK(Contains(result.low_coverage_feature_ids, "Haemophilus influenzae"));
+	CHECK(result.low_coverage_feature_ids.size() == 2);
+	for (const auto &cell : result.values) {
+		CHECK(cell.feature_id != "Neisseria subflava");
+		CHECK(cell.feature_id != "Haemophilus influenzae");
+	}
+
+	// At a threshold below both, nothing is dropped and all 25 nonzero cells
+	// survive -- so the 22 above really is the filter's doing, not an artifact
+	// of the fixture.
+	fixture.options.min_coverage = 0.0;
+	const auto unfiltered = fixture.Run();
+	CHECK(unfiltered.low_coverage_feature_ids.empty());
+	CHECK(unfiltered.values.size() == 25);
+}
+
+TEST_CASE("ComputeCellCounts min_coverage is a strict less-than", "[absquant]") {
+	// A feature sitting EXACTLY on the threshold is kept. pysyndna filters with
+	// `coverage >= min_coverage` (calc_cell_counts.py:602), and every ordinary
+	// fixture lands clearly on one side, so without this a `<=` bug would pass
+	// everything else.
+	TinyCells fixture;
+	fixture.coverage[0].coverage = 0.25;
+	fixture.options.min_coverage = 0.25;
+	CHECK_FALSE(std::isnan(fixture.ValueOf("s1", "f1")));
+	CHECK(fixture.Run().low_coverage_feature_ids.empty());
+
+	// The smallest representable step above the threshold drops it.
+	fixture.options.min_coverage = std::nextafter(0.25, 1.0);
+	CHECK(std::isnan(fixture.ValueOf("s1", "f1")));
+	CHECK(Contains(fixture.Run().low_coverage_feature_ids, "f1"));
+}
+
+TEST_CASE("ComputeCellCounts scales as the method requires", "[absquant]") {
+	// The oracle pins the whole chain at once; these pin each factor's role
+	// separately, so a wrong constant or an inverted ratio is localized rather
+	// than showing up as "all 22 values differ".
+	const TinyCells base;
+	const double v = base.ValueOf("s1", "f1");
+	REQUIRE(std::isfinite(v));
+	REQUIRE(v > 0.0);
+
+	// Genome length is a denominator: twice the genome, half the genomes.
+	TinyCells longer;
+	longer.lengths[0].ogu_len_in_bp *= 2.0;
+	CHECK(CloseEnough(longer.ValueOf("s1", "f1"), v / 2.0, 1e-14, 0.0));
+
+	// Normalizing by the sequenced gDNA mass: twice the gDNA, half the density.
+	TinyCells heavier;
+	heavier.params[0].sequenced_sample_gdna_mass_ng *= 2.0;
+	CHECK(CloseEnough(heavier.ValueOf("s1", "f1"), v / 2.0, 1e-14, 0.0));
+
+	// The model acts through log10, so +1 on the intercept is x10 on the mass.
+	TinyCells shifted;
+	shifted.models[0].intercept += 1.0;
+	CHECK(CloseEnough(shifted.ValueOf("s1", "f1"), v * 10.0, 1e-14, 0.0));
+
+	// ... and the slope acts on log10(count): at slope 1 the mass IS the count,
+	// so f2's ten-fold count with f1's length would be ten-fold the value.
+	TinyCells same_length;
+	same_length.lengths[1].ogu_len_in_bp = same_length.lengths[0].ogu_len_in_bp;
+	CHECK(CloseEnough(same_length.ValueOf("s1", "f2"), v * 10.0, 1e-14, 0.0));
+
+	// Every cell is per-sample: a second sample with its own model and gDNA mass
+	// must not disturb the first.
+	TinyCells two_samples;
+	two_samples.counts.push_back({"s2", "f1", 100.0});
+	two_samples.models.push_back({"s2", 1.0, 1.0, 1.0});
+	two_samples.coverage.push_back({"s2", "f1", 0.5});
+	two_samples.params.push_back({"s2", 20.0, 2.0, 100.0});
+	CHECK(CloseEnough(two_samples.ValueOf("s1", "f1"), v, 1e-14, 0.0));
+	CHECK(CloseEnough(two_samples.ValueOf("s2", "f1"), v * 10.0 / 2.0, 1e-14, 0.0));
+}
+
+TEST_CASE("ComputeCellCounts matches pysyndna once every filter is in play", "[absquant]") {
+	// Set B exists to exercise the filters Set A cannot: a sample below the r^2
+	// gate, a sample whose every feature fails coverage, a feature that passes
+	// in one sample and not another, and a zero read count. 0.1 and 0.8 are the
+	// values gen_syndna_oracle.py generated cellsb_oracle.csv with.
+	auto fixture = LoadCellsFixture("cellsb");
+	fixture.options.min_coverage = 0.1;
+	fixture.options.min_rsquared = 0.8;
+
+	const auto result = fixture.Run();
+	CheckCellsAgainstOracle(result, "data/syndna/cellsb_oracle.csv", "cells_per_g_of_gdna");
+
+	// 9 dense golden cells, of which two are the zeros D10 says we omit:
+	// (s2, f_only1) failed coverage and (s2, f_zero) had no reads.
+	CHECK(result.values.size() == 7);
+}
+
+TEST_CASE("ComputeCellCounts pins both strict-< thresholds at once", "[absquant]") {
+	// The boundary oracle sets min_coverage and min_rsquared EXACTLY to values
+	// present in the data: f_only1 has coverage 0.02 in s2, and slowr2's
+	// rvalue 0.5 gives r^2 of exactly 0.25. Both are exactly representable, so
+	// this is a real equality test rather than a lucky rounding. Everything else
+	// in the suite lands clearly on one side of each threshold, which is exactly
+	// how a `<=` for either would otherwise ship.
+	auto fixture = LoadCellsFixture("cellsb");
+	fixture.options.min_coverage = 0.02;
+	fixture.options.min_rsquared = 0.25;
+
+	const auto result = fixture.Run();
+	CheckCellsAgainstOracle(result, "data/syndna/cellsb_boundary_oracle.csv", "cells_per_g_of_gdna");
+
+	// 12 dense golden cells less the one zero, (s2, f_zero). slowr2 is back
+	// (3 cells) and so is (s2, f_only1), against the 7 above.
+	CHECK(result.values.size() == 11);
+	CHECK(result.low_rsquared_sample_ids.empty());
+	CHECK(Contains(result.uncovered_sample_ids, "sallcov"));
+
+	// One representable step up on either threshold and the sample sitting on
+	// it is gone -- which is what makes the equality above load-bearing.
+	auto rsquared = fixture;
+	rsquared.options.min_rsquared = std::nextafter(0.25, 1.0);
+	const auto tightened = rsquared.Run();
+	CHECK(tightened.low_rsquared_sample_ids == std::vector<std::string> {"slowr2"});
+	CHECK(tightened.values.size() == 8);
+
+	auto coverage = fixture;
+	coverage.options.min_coverage = std::nextafter(0.02, 1.0);
+	const auto narrowed = coverage.Run();
+	CHECK(narrowed.values.size() == 10);
+	for (const auto &cell : narrowed.values) {
+		CHECK_FALSE((cell.sample_id == "s2" && cell.feature_id == "f_only1"));
+	}
+}
+
+TEST_CASE("ComputeCellCounts reports every sample it discards", "[absquant]") {
+	// Checked against pysyndna's own log for this exact run, captured when the
+	// oracle was generated:
+	//
+	//   The following items have coverage lower than the minimum of 10.0:
+	//       ['f_neither', 'f_only1', 'f_both', 'f_zero']
+	//   R^2 of linear regression for sample slowr2 is 0.25, which is less than
+	//       the minimum allowed value of 0.8.
+	//   No cell counts calculated for sample slowr2
+	//
+	// Note what is NOT there: nothing about sallcov, whose four features are all
+	// below coverage and which therefore produces no output at all. That is the
+	// one place miint says more than pysyndna does.
+	auto fixture = LoadCellsFixture("cellsb");
+	fixture.options.min_coverage = 0.1;
+	fixture.options.min_rsquared = 0.8;
+	const auto result = fixture.Run();
+
+	CHECK(result.low_coverage_feature_ids == std::vector<std::string> {"f_both", "f_neither", "f_only1", "f_zero"});
+	CHECK(result.low_rsquared_sample_ids == std::vector<std::string> {"slowr2"});
+	CHECK(result.uncovered_sample_ids == std::vector<std::string> {"sallcov"});
+	CHECK(result.filtered_sample_ids.empty());
+	CHECK(result.samples_without_models.empty());
+
+	// f_both and f_zero reach that list only through sallcov: they pass coverage
+	// in every other sample. So the list really is "failed somewhere", not
+	// "failed everywhere", which is what pysyndna's is.
+	CHECK(Contains(result.low_coverage_feature_ids, "f_both"));
+	for (const auto &cell : result.values) {
+		CHECK(cell.sample_id != "sallcov");
+		CHECK(cell.sample_id != "slowr2");
+	}
+
+	// Total accounting: five samples in, three producing cells and two named.
+	std::set<std::string> with_values;
+	for (const auto &cell : result.values) {
+		with_values.insert(cell.sample_id);
+	}
+	CHECK(with_values == std::set<std::string> {"s1", "s2", "snull"});
+	CHECK(with_values.size() + result.filtered_sample_ids.size() + result.samples_without_models.size() +
+	          result.low_rsquared_sample_ids.size() + result.uncovered_sample_ids.size() ==
+	      5);
+}
+
+TEST_CASE("ComputeCellCounts filters bad parameters before it filters coverage", "[absquant]") {
+	// The order is invisible in the values and decides the diagnostics. pysyndna
+	// drops bad-parameter samples out of the counts table itself before the
+	// coverage filter runs, so a feature that is poorly covered ONLY in such a
+	// sample is never reported -- rightly, since no surviving sample was going
+	// to use it. Get the order wrong and the user is sent after a coverage
+	// problem in data that was already discarded for another reason.
+	TinyCells fixture;
+	fixture.counts.push_back({"s2", "f3", 100.0});
+	fixture.models.push_back({"s2", 1.0, 0.0, 1.0});
+	fixture.coverage.push_back({"s2", "f3", 0.01}); // below min_coverage 0.1
+	fixture.lengths.push_back({"f3", 1000.0});
+	fixture.params.push_back({"s2", 10.0, 2.0, 100.0});
+
+	// With s2's parameters intact, f3 fails coverage and is named.
+	const auto reported = fixture.Run();
+	CHECK(reported.low_coverage_feature_ids == std::vector<std::string> {"f3"});
+	CHECK(reported.filtered_sample_ids.empty());
+
+	// The only change is s2's gDNA mass. f3 must now go unmentioned.
+	fixture.params[1].sequenced_sample_gdna_mass_ng = std::nan("");
+	const auto silent = fixture.Run();
+	CHECK(silent.low_coverage_feature_ids.empty());
+	CHECK(silent.filtered_sample_ids == std::vector<std::string> {"s2"});
+	CHECK(silent.values.size() == 2); // s1's two cells, untouched
+}
+
+TEST_CASE("ComputeCellCounts requires the parameters it never divides by", "[absquant]") {
+	// Only sequenced_sample_gdna_mass_ng enters this metric's arithmetic. The
+	// other two are pysyndna's REQUIRED_DNA_PREP_INFO_KEYS: they feed
+	// extracted_gdna_mass_g, which only the sample-level metrics need, and yet
+	// filter_data_by_sample_info screens on them for every metric. Dropping the
+	// requirement would change which samples appear in the output while every
+	// value stayed identical -- a divergence no parity test on values could see,
+	// which is exactly why it is pinned here.
+	for (size_t which = 0; which < 3; ++which) {
+		TinyCells fixture;
+		double *fields[] = {&fixture.params[0].sequenced_sample_gdna_mass_ng,
+		                    &fixture.params[0].extracted_gdna_concentration_ng_ul,
+		                    &fixture.params[0].vol_extracted_elution_ul};
+		INFO("required parameter " << which);
+
+		*fields[which] = std::nan("");
+		CHECK(fixture.Run().filtered_sample_ids == std::vector<std::string> {"s1"});
+		CHECK(fixture.Run().values.empty());
+
+		*fields[which] = -1.0;
+		CHECK(fixture.Run().filtered_sample_ids == std::vector<std::string> {"s1"});
+
+		// Infinity passes both of pysyndna's tests and then quietly voids the
+		// sample; IsUsableSampleParameter rejects it, same as everywhere else in
+		// this port.
+		*fields[which] = std::numeric_limits<double>::infinity();
+		CHECK(fixture.Run().filtered_sample_ids == std::vector<std::string> {"s1"});
+	}
+
+	// Zero is a real measurement, not a missing one: pysyndna tests with a
+	// strict `< 0` and this filter must not exceed it. It is only a problem for
+	// the one column that is a denominator, and that is the validation layer's
+	// business -- refusing it here would report a structurally impossible number
+	// as though the metadata were merely absent.
+	TinyCells zeroed;
+	zeroed.params[0].extracted_gdna_concentration_ng_ul = 0.0;
+	zeroed.params[0].vol_extracted_elution_ul = 0.0;
+	CHECK(zeroed.Run().filtered_sample_ids.empty());
+	CHECK(zeroed.Run().values.size() == 2);
+}
+
+TEST_CASE("ComputeCellCounts reports a sample with no model", "[absquant]") {
+	// absquant_fit_models returns fewer models than it was given samples
+	// whenever a standard curve cannot be fit, so its output fed straight back
+	// in will routinely be missing samples the counts relation has. That has to
+	// be a warning, not an error, or the two functions would not compose.
+	TinyCells fixture;
+	fixture.counts.push_back({"s2", "f1", 100.0});
+	fixture.coverage.push_back({"s2", "f1", 0.5});
+	fixture.params.push_back({"s2", 10.0, 2.0, 100.0});
+
+	const auto result = fixture.Run();
+	CHECK(result.samples_without_models == std::vector<std::string> {"s2"});
+	CHECK(result.values.size() == 2); // s1's, unaffected
+	CHECK(result.low_rsquared_sample_ids.empty());
+
+	// A sample that is BOTH unmodelled and wholly uncovered is reported once,
+	// as uncovered. pysyndna reaches the model lookup only for samples still in
+	// the working table after the coverage filter, so it says nothing about the
+	// model either; the point of the single bucket is that the first reason the
+	// data was discarded is the one worth acting on.
+	fixture.coverage.back().coverage = 0.01;
+	const auto uncovered = fixture.Run();
+	CHECK(uncovered.uncovered_sample_ids == std::vector<std::string> {"s2"});
+	CHECK(uncovered.samples_without_models.empty());
+}
+
+TEST_CASE("ComputeCellCounts accepts its own minimal fixture", "[absquant]") {
+	// Guards every negative test below: each breaks one field of TinyCells and
+	// expects a throw, which proves nothing if the untouched fixture throws too.
+	TinyCells fixture;
+	CHECK_NOTHROW(fixture.Run());
+	CHECK(fixture.Run().values.size() == 2);
+}
+
+TEST_CASE("ComputeCellCounts rejects out-of-range options", "[absquant]") {
+	using Catch::Matchers::ContainsSubstring;
+	constexpr double kInf = std::numeric_limits<double>::infinity();
+
+	SECTION("min_coverage outside [0, 1]") {
+		// D9: coverage in miint is a FRACTION, so the threshold is one too.
+		// pysyndna takes either and explicitly refuses to guard the distinction
+		// ("IT IS UP TO THE USER..."), which makes min_coverage = 10 against
+		// fractional coverages a filter that drops everything, silently.
+		TinyCells fixture;
+		for (const double bad : {-0.001, 1.001, 10.0, kInf, std::nan("")}) {
+			fixture.options.min_coverage = bad;
+			CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
+			CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("min_coverage"));
+		}
+		// Both endpoints are legal: 0 keeps everything with a coverage row, and
+		// 1 keeps only fully covered features.
+		fixture.options.min_coverage = 0.0;
+		CHECK_NOTHROW(fixture.Run());
+		fixture.options.min_coverage = 1.0;
+		CHECK_NOTHROW(fixture.Run());
+	}
+
+	SECTION("min_rsquared outside [0, 1]") {
+		// r^2 is a squared correlation and cannot leave [0, 1], so a threshold
+		// outside it is not a strict filter -- it is one that admits every
+		// sample or none, with no indication that is what happened.
+		TinyCells fixture;
+		for (const double bad : {-0.001, 1.001, kInf, std::nan("")}) {
+			fixture.options.min_rsquared = bad;
+			CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
+			CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("min_rsquared"));
+		}
+		fixture.options.min_rsquared = 0.0;
+		CHECK_NOTHROW(fixture.Run());
+		fixture.options.min_rsquared = 1.0;
+		CHECK_NOTHROW(fixture.Run());
+	}
+}
+
+TEST_CASE("ComputeCellCounts rejects malformed relations", "[absquant]") {
+	using Catch::Matchers::ContainsSubstring;
+	constexpr double kInf = std::numeric_limits<double>::infinity();
+
+	SECTION("a duplicated counts cell") {
+		// Every relation here is keyed, and a repeat means the caller's join fanned
+		// out. Taking either row silently would give an answer to a question the
+		// data cannot actually answer.
+		TinyCells fixture;
+		fixture.counts.push_back({"s1", "f1", 100.0});
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s1 / f1'"));
+	}
+
+	SECTION("a duplicated coverage cell") {
+		TinyCells fixture;
+		fixture.coverage.push_back({"s1", "f2", 0.5});
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s1 / f2'"));
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("coverage"));
+	}
+
+	SECTION("a duplicated feature length") {
+		TinyCells fixture;
+		fixture.lengths.push_back({"f1", 1000.0});
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'f1'"));
+	}
+
+	SECTION("a duplicated model") {
+		TinyCells fixture;
+		fixture.models.push_back({"s1", 2.0, 0.0, 1.0});
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s1'"));
+	}
+
+	SECTION("a duplicated parameter row") {
+		TinyCells fixture;
+		fixture.params.push_back({"s1", 10.0, 2.0, 100.0});
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s1'"));
+	}
+
+	SECTION("a read count that is not a positive finite number") {
+		// Stricter than the fit's rule, which admits zero because it drops those
+		// points before taking the log. There is no such step here: log10(0) is
+		// -inf, and under a NEGATIVE slope that comes back as 10^(+inf), an
+		// INFINITE cell count -- which is what pysyndna emits for that input.
+		// The DuckDB reader drops zero-valued cells, so this is unreachable in
+		// practice; it is the guard that keeps it that way if the reader ever
+		// changes.
+		for (const double bad : {0.0, -1.0, kInf, -kInf, std::nan("")}) {
+			TinyCells fixture;
+			fixture.counts[0].count = bad;
+			CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
+			CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s1 / f1'"));
+		}
+	}
+
+	SECTION("a coverage outside [0, 1]") {
+		// The percent-versus-fraction trap, made loud. pysyndna's own fixtures
+		// carry coverages like 92.597 and compare them against min_coverage = 10;
+		// handing those to miint's fractional threshold would keep every feature
+		// and quietly disable the filter. Rejecting > 1 catches it at the door.
+		TinyCells fixture;
+		fixture.coverage[0].coverage = 92.597;
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s1 / f1'"));
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("fraction"));
+
+		for (const double bad : {-0.001, 1.001, kInf, std::nan("")}) {
+			TinyCells each;
+			each.coverage[0].coverage = bad;
+			CHECK_THROWS_AS(each.Run(), std::invalid_argument);
+		}
+		// The endpoints are ordinary data: nothing aligned, or every base did.
+		TinyCells edges;
+		edges.coverage[0].coverage = 0.0;
+		edges.coverage[1].coverage = 1.0;
+		edges.options.min_coverage = 0.0;
+		CHECK_NOTHROW(edges.Run());
+	}
+
+	SECTION("a genome length that is not positive and finite") {
+		// A denominator. pysyndna divides by it with no check at all, so a zero
+		// length yields inf cells and a NaN one yields NaN -- in both cases for
+		// that OGU in every sample, and in both cases silently.
+		for (const double bad : {0.0, -1.0, kInf, std::nan("")}) {
+			TinyCells fixture;
+			fixture.lengths[0].ogu_len_in_bp = bad;
+			CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
+			CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'f1'"));
+			CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("ogu_len_in_bp"));
+		}
+	}
+
+	SECTION("a zero sequenced gDNA mass, which the parameter filter lets past") {
+		// The other denominator, and the one case pysyndna's NaN/negative screen
+		// cannot see: zero is neither. It divides through to inf cells for every
+		// feature in the sample, with no log message -- the same situation D23
+		// already refuses for total_biological_reads_r1r2.
+		TinyCells fixture;
+		fixture.params[0].sequenced_sample_gdna_mass_ng = 0.0;
+		CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s1'"));
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("sequenced_sample_gdna_mass_ng"));
+	}
+
+	SECTION("an rvalue outside [-1, 1]") {
+		// A correlation coefficient cannot be 1.5, so this is a malformed models
+		// relation rather than a weak model -- and squaring it would turn it into
+		// an r^2 above 1 that passes any legal min_rsquared.
+		for (const double bad : {-1.001, 1.001, 2.0}) {
+			TinyCells fixture;
+			fixture.models[0].rvalue = bad;
+			CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
+			CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("rvalue"));
+		}
+		// Both endpoints are what a perfect fit actually produces.
+		for (const double good : {-1.0, 1.0}) {
+			TinyCells fixture;
+			fixture.models[0].rvalue = good;
+			CHECK_NOTHROW(fixture.Run());
+		}
+	}
+}
+
+TEST_CASE("ComputeCellCounts treats an unusable model as no model", "[absquant]") {
+	constexpr double kInf = std::numeric_limits<double>::infinity();
+	// NOT an error, unlike an out-of-range rvalue. pysyndna records None for a
+	// sample whose fit had any NaN field (_convert_linregressresults_to_dict
+	// :329-334), so "absent" and "present but unusable" are the same thing to it
+	// and reach the same log line. Keeping them one bucket here is what lets
+	// absquant_fit_models' output be fed straight back in.
+	for (size_t which = 0; which < 3; ++which) {
+		for (const double bad : {std::nan(""), kInf, -kInf}) {
+			TinyCells fixture;
+			double *fields[] = {&fixture.models[0].slope, &fixture.models[0].intercept, &fixture.models[0].rvalue};
+			INFO("model field " << which);
+			*fields[which] = bad;
+
+			const auto result = fixture.Run();
+			CHECK(result.samples_without_models == std::vector<std::string> {"s1"});
+			CHECK(result.values.empty());
+			CHECK(result.low_rsquared_sample_ids.empty());
+		}
+	}
+}
+
+TEST_CASE("ComputeCellCounts enforces id consistency asymmetrically", "[absquant]") {
+	using Catch::Matchers::ContainsSubstring;
+	// Counts are the subject: every cell must be describable. Reference
+	// relations covering more than the counts do is ordinary -- a lengths table
+	// is a whole reference database, a parameters table a whole study -- so the
+	// other direction is not checked at all.
+
+	SECTION("a counted feature with no length") {
+		TinyCells fixture;
+		fixture.counts.push_back({"s1", "f9", 100.0});
+		fixture.coverage.push_back({"s1", "f9", 0.5});
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'f9'"));
+	}
+
+	SECTION("a counted sample with no parameters") {
+		TinyCells fixture;
+		fixture.counts.push_back({"s9", "f1", 100.0});
+		fixture.coverage.push_back({"s9", "f1", 0.5});
+		fixture.models.push_back({"s9", 1.0, 0.0, 1.0});
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s9'"));
+	}
+
+	SECTION("a counted cell with no coverage") {
+		// The upstream defect this closes: pysyndna validates only the two AXIS
+		// id sets, so a sample and a feature can each be present while their
+		// pair is not. Its left join then yields NaN, `NaN >= min_coverage` is
+		// false, and the cell is dropped -- without even joining the
+		// too-low-coverage list, because `NaN < min_coverage` is false too. The
+		// cell vanishes with no log line of any kind.
+		TinyCells fixture;
+		fixture.counts.push_back({"s1", "f3", 100.0});
+		fixture.lengths.push_back({"f3", 1000.0});
+		CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
+		// s1 already has cells and f3 now has a length, so both AXIS id sets are
+		// satisfied; only the pair is missing. That is precisely the input
+		// pysyndna's two set checks wave through, and why this check has to be
+		// on the pair rather than on either axis.
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s1 / f3'"));
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("coverage"));
+	}
+
+	SECTION("reference relations may describe more than the counts do") {
+		TinyCells fixture;
+		fixture.lengths.push_back({"f_unused", 1234.0});
+		fixture.params.push_back({"s_unused", 10.0, 2.0, 100.0});
+		fixture.models.push_back({"s_unused", 1.0, 0.0, 1.0});
+		fixture.coverage.push_back({"s_unused", "f_unused", 0.5});
+		CHECK_NOTHROW(fixture.Run());
+		CHECK(fixture.Run().values.size() == 2);
+	}
+
+	SECTION("and their unused rows are not validated") {
+		// Deliberately narrower than FitSyndnaModels, which screens every
+		// concentration because it sums the whole relation into a denominator.
+		// Nothing here is summed: a lengths table of ten thousand genomes should
+		// not fail a query over twelve of them because of one bad row elsewhere.
+		TinyCells fixture;
+		fixture.lengths.push_back({"f_unused", -1.0});
+		fixture.params.push_back({"s_unused", 0.0, 2.0, 100.0});
+		fixture.models.push_back({"s_unused", 1.0, 0.0, 42.0});
+		CHECK_NOTHROW(fixture.Run());
+	}
+}
+
+TEST_CASE("ComputeCellCounts checks the call before the data", "[absquant]") {
+	using Catch::Matchers::ContainsSubstring;
+	// Same three tiers as FitSyndnaModels: a bad call, then a malformed
+	// relation, then relations that disagree. With several things wrong at once
+	// the user should hear the most basic one first, because it is often the
+	// cause of the others rather than a separate mistake.
+	TinyCells worst;
+	worst.options.min_coverage = 10.0;
+	worst.counts.push_back({"s1", "f1", 100.0}); // duplicate cell
+	worst.counts.push_back({"s1", "f9", 100.0}); // no length, no coverage
+	CHECK_THROWS_WITH(worst.Run(), ContainsSubstring("min_coverage"));
+
+	TinyCells malformed;
+	malformed.counts.push_back({"s1", "f1", 100.0});
+	malformed.counts.push_back({"s1", "f9", 100.0});
+	CHECK_THROWS_WITH(malformed.Run(), ContainsSubstring("'s1 / f1'"));
+	CHECK_THROWS_WITH(malformed.Run(), !ContainsSubstring("'f9'"));
 }

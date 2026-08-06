@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <unordered_map>
@@ -374,6 +375,249 @@ void ValidateFitInputs(const std::vector<CountObservation> &counts,
 	}
 }
 
+// Lookup maps over the four reference relations, built ONCE and shared by the
+// validation pass and the computation that follows it.
+//
+// Shared rather than built twice because the two passes need exactly the same
+// four maps, and a second construction is not just wasted work on relations the
+// header describes as "a whole reference database" / "a whole study" -- it is
+// two places that have to agree on how each map is keyed, with nothing to
+// notice if they drift apart.
+//
+// Duplicate keys are recorded here rather than rediscovered, since inserting is
+// what detects them. Each list holds one entry per occurrence past the first;
+// FormatIdList deduplicates when rendering.
+struct CellCountsIndex {
+	std::unordered_map<std::string, double> length_by_feature;
+	std::unordered_map<std::string, const SampleRegression *> model_by_sample;
+	std::unordered_map<std::string, const SampleCellParams *> params_by_sample;
+	std::map<std::pair<std::string, std::string>, double> coverage_by_cell;
+
+	std::vector<std::string> repeated_lengths;
+	std::vector<std::string> repeated_models;
+	std::vector<std::string> repeated_params;
+	std::vector<std::string> repeated_coverage;
+};
+
+// Borrows from `models` and `params`: the returned index holds pointers into
+// them, so both must outlive it. Both are const references held by
+// ComputeCellCounts for the duration, so this is safe by construction there.
+CellCountsIndex BuildCellCountsIndex(const std::vector<SampleRegression> &models,
+                                     const std::vector<CoverageObservation> &coverage,
+                                     const std::vector<FeatureLength> &lengths,
+                                     const std::vector<SampleCellParams> &params) {
+	CellCountsIndex index;
+
+	index.length_by_feature.reserve(lengths.size());
+	for (const auto &row : lengths) {
+		if (!index.length_by_feature.emplace(row.feature_id, row.ogu_len_in_bp).second) {
+			index.repeated_lengths.push_back(row.feature_id);
+		}
+	}
+	index.model_by_sample.reserve(models.size());
+	for (const auto &row : models) {
+		if (!index.model_by_sample.emplace(row.sample_id, &row).second) {
+			index.repeated_models.push_back(row.sample_id);
+		}
+	}
+	index.params_by_sample.reserve(params.size());
+	for (const auto &row : params) {
+		if (!index.params_by_sample.emplace(row.sample_id, &row).second) {
+			index.repeated_params.push_back(row.sample_id);
+		}
+	}
+	for (const auto &row : coverage) {
+		if (!index.coverage_by_cell.emplace(std::make_pair(row.sample_id, row.feature_id), row.coverage).second) {
+			index.repeated_coverage.push_back(row.sample_id + " / " + row.feature_id);
+		}
+	}
+	return index;
+}
+
+// Reject every input ComputeCellCounts cannot compute a defined answer from,
+// before any arithmetic runs. Same three tiers and the same no-prefix message
+// contract as ValidateFitInputs above.
+//
+// Narrower than that function in one respect, deliberately: the four reference
+// relations are screened only where the counts relation actually reaches them.
+// ValidateFitInputs screens every concentration because it sums the whole
+// relation into a denominator, so one bad row there corrupts every sample.
+// Nothing here is summed, and these relations are routinely far wider than the
+// query -- a lengths table is a whole reference database, a parameters table a
+// whole study. Failing a query over twelve genomes because a thirteenth nobody
+// asked about has a bad length would be its own kind of wrong answer.
+void ValidateCellCountsInputs(const std::vector<CountObservation> &counts, const CellCountsIndex &index,
+                              const CellCountsOptions &options) {
+	// Written as !(x >= 0) rather than x < 0 so a NaN option is rejected too.
+	if (!(options.min_coverage >= 0.0) || !(options.min_coverage <= 1.0)) {
+		throw std::invalid_argument("min_coverage must be between 0 and 1 inclusive (got " +
+		                            std::to_string(options.min_coverage) +
+		                            "); coverage is a fraction here, not a percent");
+	}
+	// r^2 is a squared correlation and cannot leave [0, 1]. A threshold outside
+	// that is not a strict filter, it is one that keeps every sample or none --
+	// and pysyndna, which does not check, gives no sign which happened.
+	if (!(options.min_rsquared >= 0.0) || !(options.min_rsquared <= 1.0)) {
+		throw std::invalid_argument("min_rsquared must be between 0 and 1 inclusive (got " +
+		                            std::to_string(options.min_rsquared) + ")");
+	}
+
+	const auto &length_by_feature = index.length_by_feature;
+	const auto &model_by_sample = index.model_by_sample;
+	const auto &params_by_sample = index.params_by_sample;
+	const auto &coverage_by_cell = index.coverage_by_cell;
+
+	if (!index.repeated_lengths.empty()) {
+		throw std::invalid_argument("the feature lengths relation has more than one row for feature_id " +
+		                            FormatIdList(index.repeated_lengths));
+	}
+	if (!index.repeated_models.empty()) {
+		throw std::invalid_argument("the models relation has more than one row for sample_id " +
+		                            FormatIdList(index.repeated_models));
+	}
+	if (!index.repeated_params.empty()) {
+		throw std::invalid_argument("the sample parameters relation has more than one row for sample_id " +
+		                            FormatIdList(index.repeated_params));
+	}
+
+	// The counts relation is keyed on the pair, like the coverage relation.
+	// Compared as index-free string pairs rather than a packed key so no
+	// separator character can collide with an id that legitimately contains it.
+	std::set<std::pair<std::string, std::string>> seen_counts;
+	std::vector<std::string> repeated_cells;
+	for (const auto &row : counts) {
+		if (!seen_counts.emplace(row.sample_id, row.feature_id).second) {
+			repeated_cells.push_back(row.sample_id + " / " + row.feature_id);
+		}
+	}
+	if (!repeated_cells.empty()) {
+		throw std::invalid_argument("the counts relation has more than one row for the same (sample_id, feature_id): " +
+		                            FormatIdList(repeated_cells));
+	}
+
+	if (!index.repeated_coverage.empty()) {
+		throw std::invalid_argument(
+		    "the coverage relation has more than one row for the same (sample_id, feature_id): " +
+		    FormatIdList(index.repeated_coverage));
+	}
+
+	// One pass over the counts relation collects everything that depends on it,
+	// so the reference relations are consulted exactly where they are used. The
+	// lists are reported afterwards in tier order -- a malformed value before a
+	// relation that is merely incomplete -- rather than in the order found.
+	std::vector<std::string> unusable_cells;
+	std::vector<std::string> percent_coverage;
+	std::vector<std::string> bad_lengths;
+	std::vector<std::string> zero_masses;
+	std::vector<std::string> bad_rvalues;
+	std::vector<std::string> uncovered_cells;
+	std::vector<std::string> unmeasured_features;
+	std::vector<std::string> unparameterized_samples;
+	for (const auto &row : counts) {
+		// Stricter than the fit's rule, which admits a zero count because it
+		// drops those points before taking the log. There is no such step here:
+		// log10(0) is -inf, and under a NEGATIVE slope that returns as
+		// 10^(+inf), an infinite cell count. The reader drops zero-valued cells
+		// long before this, so the check is unreachable in practice -- it is
+		// what keeps it that way if the reader ever changes.
+		if (!std::isfinite(row.count) || !(row.count > 0.0)) {
+			unusable_cells.push_back(row.sample_id + " / " + row.feature_id);
+		}
+
+		const auto covered = coverage_by_cell.find({row.sample_id, row.feature_id});
+		if (covered == coverage_by_cell.end()) {
+			uncovered_cells.push_back(row.sample_id + " / " + row.feature_id);
+		} else if (!(covered->second >= 0.0) || !(covered->second <= 1.0)) {
+			percent_coverage.push_back(row.sample_id + " / " + row.feature_id);
+		}
+
+		const auto length = length_by_feature.find(row.feature_id);
+		if (length == length_by_feature.end()) {
+			unmeasured_features.push_back(row.feature_id);
+		} else if (!std::isfinite(length->second) || !(length->second > 0.0)) {
+			bad_lengths.push_back(row.feature_id);
+		}
+
+		const auto sample_params = params_by_sample.find(row.sample_id);
+		if (sample_params == params_by_sample.end()) {
+			unparameterized_samples.push_back(row.sample_id);
+		} else if (sample_params->second->sequenced_sample_gdna_mass_ng == 0.0) {
+			zero_masses.push_back(row.sample_id);
+		}
+
+		// A sample with no model is a warning, not an error -- see the header --
+		// so only a model that is present and impossible is caught here.
+		const auto model = model_by_sample.find(row.sample_id);
+		if (model != model_by_sample.end() && std::isfinite(model->second->rvalue) &&
+		    !(model->second->rvalue >= -1.0 && model->second->rvalue <= 1.0)) {
+			bad_rvalues.push_back(row.sample_id);
+		}
+	}
+
+	if (!unusable_cells.empty()) {
+		throw std::invalid_argument("read counts must be finite and positive; offending (sample_id / feature_id): " +
+		                            FormatIdList(unusable_cells));
+	}
+	if (!percent_coverage.empty()) {
+		// D9: miint is fraction-only. pysyndna takes fractions or percents and
+		// explicitly leaves it to the caller to pass a matching min_coverage,
+		// which turns the commonest mistake -- percents against a fractional
+		// threshold -- into a filter that silently keeps everything.
+		// "present" as well as in range: a SQL NULL arrives here as NaN and fails
+		// the same test, and a message that only mentioned percents would send
+		// that user looking for a unit problem they do not have.
+		throw std::invalid_argument(
+		    "coverage must be present and a fraction between 0 and 1 inclusive, not a percent; offending "
+		    "(sample_id / feature_id): " +
+		    FormatIdList(percent_coverage));
+	}
+	if (!bad_lengths.empty()) {
+		// A denominator, divided by with no check at all on pysyndna's side: a
+		// zero length yields inf cells for that feature in every sample and a
+		// NaN one yields NaN, both silently.
+		throw std::invalid_argument("ogu_len_in_bp must be finite and positive; offending feature_id " +
+		                            FormatIdList(bad_lengths));
+	}
+	if (!zero_masses.empty()) {
+		// The other denominator, and the one case pysyndna's parameter screen
+		// cannot see: zero is neither NaN nor negative, so it passes the filter
+		// and then divides through to inf cells with no log message. Same
+		// treatment as D23 gives total_biological_reads_r1r2, for the same
+		// reason. NaN, negative and infinite masses are NOT errors -- those the
+		// filter drops, matching pysyndna.
+		throw std::invalid_argument("sequenced_sample_gdna_mass_ng must not be zero; offending sample_id " +
+		                            FormatIdList(zero_masses));
+	}
+	if (!bad_rvalues.empty()) {
+		// Malformed models relation rather than a weak model: a correlation
+		// coefficient cannot be 1.5, and squaring one gives an r^2 above 1 that
+		// passes every legal min_rsquared. A non-finite rvalue is a different
+		// thing -- an unusable model, reported as such and not an error.
+		throw std::invalid_argument("rvalue must be between -1 and 1 inclusive; offending sample_id " +
+		                            FormatIdList(bad_rvalues));
+	}
+
+	if (!unmeasured_features.empty()) {
+		throw std::invalid_argument("the counts relation names feature_id " + FormatIdList(unmeasured_features) +
+		                            ", which the feature lengths relation has no ogu_len_in_bp row for");
+	}
+	if (!unparameterized_samples.empty()) {
+		throw std::invalid_argument("the counts relation names sample_id " + FormatIdList(unparameterized_samples) +
+		                            ", which the sample parameters relation does not describe");
+	}
+	if (!uncovered_cells.empty()) {
+		// Checked on the PAIR, which is where pysyndna's equivalent has a hole:
+		// it validates the two axis id sets separately, so a sample and a
+		// feature can each be present while their cell is not. Its left join
+		// then yields NaN, `NaN >= min_coverage` is false so the cell is
+		// dropped, and `NaN < min_coverage` is false too so it does not even
+		// reach the too-low-coverage log. The cell disappears in silence.
+		throw std::invalid_argument(
+		    "the counts relation names (sample_id, feature_id) " + FormatIdList(uncovered_cells) +
+		    ", which the coverage relation has no row for; every counted cell needs a coverage to be filtered on");
+	}
+}
+
 } // namespace
 
 LinregressResult Linregress(const std::vector<double> &x, const std::vector<double> &y) {
@@ -652,6 +896,153 @@ FitResult FitSyndnaModels(const std::vector<CountObservation> &counts,
 		if (sample_pos.find(row.sample_id) == sample_pos.end()) {
 			result.samples_without_counts.push_back(row.sample_id);
 		}
+	}
+	return result;
+}
+
+CellCountsResult ComputeCellCounts(const std::vector<CountObservation> &counts,
+                                   const std::vector<SampleRegression> &models,
+                                   const std::vector<CoverageObservation> &coverage,
+                                   const std::vector<FeatureLength> &lengths,
+                                   const std::vector<SampleCellParams> &params, const CellCountsOptions &options) {
+	// Built once and used by both the validation pass and everything below it;
+	// `index` borrows from `models` and `params`, which are alive for the whole
+	// call. See CellCountsIndex.
+	const CellCountsIndex index = BuildCellCountsIndex(models, coverage, lengths, params);
+	ValidateCellCountsInputs(counts, index, options);
+
+	CellCountsResult result;
+
+	const auto &model_by_sample = index.model_by_sample;
+	const auto &length_by_feature = index.length_by_feature;
+	const auto &params_by_sample = index.params_by_sample;
+	const auto &coverage_by_cell = index.coverage_by_cell;
+
+	// Sorted and deduplicated, so the diagnostic lists below come out in an
+	// order that does not depend on the order the counts rows arrived in.
+	std::vector<std::string> sample_ids;
+	sample_ids.reserve(counts.size());
+	for (const auto &row : counts) {
+		sample_ids.push_back(row.sample_id);
+	}
+	std::sort(sample_ids.begin(), sample_ids.end());
+	sample_ids.erase(std::unique(sample_ids.begin(), sample_ids.end()), sample_ids.end());
+
+	// Samples that will produce nothing, whatever the reason. Each one is also
+	// named in exactly one of the result's lists as it is added here.
+	std::unordered_set<std::string> discarded;
+
+	// Filter 1 of 3: unusable parameters. This runs FIRST, and the order is
+	// load-bearing for the diagnostics rather than for the values -- see the
+	// header. pysyndna drops these samples out of the counts table itself
+	// (calc_cell_counts.py:1013) before the coverage filter ever sees them.
+	//
+	// All three columns are screened even though only the gDNA mass is divided
+	// by, because pysyndna screens on REQUIRED_DNA_PREP_INFO_KEYS regardless of
+	// the metric requested. Relaxing that would change which samples appear
+	// while leaving every value identical.
+	for (const auto &sample_id : sample_ids) {
+		// Validation has established that every sample in `counts` has a row
+		// here; `at` rather than `find` so a future edit that breaks that throws
+		// instead of quietly dropping the sample into no bucket at all.
+		const SampleCellParams &sample_params = *params_by_sample.at(sample_id);
+		if (!IsUsableSampleParameter(sample_params.sequenced_sample_gdna_mass_ng) ||
+		    !IsUsableSampleParameter(sample_params.extracted_gdna_concentration_ng_ul) ||
+		    !IsUsableSampleParameter(sample_params.vol_extracted_elution_ul)) {
+			result.filtered_sample_ids.push_back(sample_id);
+			discarded.insert(sample_id);
+		}
+	}
+
+	// Filter 2 of 3: coverage, over every (sample, feature) still standing, and
+	// before anything is computed. The comparison is pysyndna's
+	// `coverage >= min_coverage` (calc_cell_counts.py:602) written as its
+	// negation, so a feature sitting exactly on the threshold survives.
+	//
+	// Offenders are reported by feature rather than by cell, matching pysyndna's
+	// own log line: a genome too poorly covered to trust is a property of the
+	// assembly far more often than of one sample.
+	std::vector<std::string> low_coverage;
+	std::vector<const CountObservation *> surviving;
+	std::unordered_set<std::string> samples_with_covered_cells;
+	surviving.reserve(counts.size());
+	for (const auto &row : counts) {
+		if (discarded.count(row.sample_id) != 0) {
+			continue;
+		}
+		const auto found = coverage_by_cell.find({row.sample_id, row.feature_id});
+		const double cell_coverage = (found == coverage_by_cell.end()) ? kNaN : found->second;
+		if (!(cell_coverage >= options.min_coverage)) {
+			low_coverage.push_back(row.feature_id);
+			continue;
+		}
+		surviving.push_back(&row);
+		samples_with_covered_cells.insert(row.sample_id);
+	}
+	std::sort(low_coverage.begin(), low_coverage.end());
+	low_coverage.erase(std::unique(low_coverage.begin(), low_coverage.end()), low_coverage.end());
+	result.low_coverage_feature_ids = std::move(low_coverage);
+
+	// Filter 3 of 3: the per-sample model gates. pysyndna reaches these only for
+	// the sample ids still present in the working table after the coverage
+	// filter (calc_cell_counts.py:505), so a sample with nothing left to compute
+	// is never asked about its model -- which is why the wholly uncovered case
+	// is settled first here and reported on its own rather than as a missing or
+	// weak model it may well also be.
+	for (const auto &sample_id : sample_ids) {
+		if (discarded.count(sample_id) != 0) {
+			continue;
+		}
+		if (samples_with_covered_cells.count(sample_id) == 0) {
+			result.uncovered_sample_ids.push_back(sample_id);
+			discarded.insert(sample_id);
+			continue;
+		}
+		// "No model" and "a model none of whose fields is a number" are one
+		// bucket, because they are one thing to pysyndna: a fit with any NaN
+		// field is recorded as None (_convert_linregressresults_to_dict:329-334)
+		// and reaches the same log line as a sample that was never fitted.
+		// Keeping them together is what lets absquant_fit_models' output be fed
+		// straight back in without projection.
+		const auto found = model_by_sample.find(sample_id);
+		if (found == model_by_sample.end() || !std::isfinite(found->second->slope) ||
+		    !std::isfinite(found->second->intercept) || !std::isfinite(found->second->rvalue)) {
+			result.samples_without_models.push_back(sample_id);
+			discarded.insert(sample_id);
+			continue;
+		}
+		// r^2, not |r|: pysyndna squares before comparing (calc_cell_counts.py
+		// :680), so min_rsquared 0.25 admits a correlation of 0.5, and the two
+		// spellings differ on every threshold except 0 and 1.
+		const double rvalue = found->second->rvalue;
+		if (rvalue * rvalue < options.min_rsquared) {
+			result.low_rsquared_sample_ids.push_back(sample_id);
+			discarded.insert(sample_id);
+		}
+	}
+
+	for (const auto *row : surviving) {
+		if (discarded.count(row->sample_id) != 0) {
+			continue;
+		}
+		// Every lookup is guaranteed to hit: validation requires a length and a
+		// parameter row for each counted cell, and a sample with no usable model
+		// was discarded above. `at` rather than `find` so that a future edit
+		// which breaks that invariant throws instead of computing with garbage.
+		const SampleRegression &model = *model_by_sample.at(row->sample_id);
+		const SampleCellParams &sample_params = *params_by_sample.at(row->sample_id);
+		const double ogu_len_in_bp = length_by_feature.at(row->feature_id);
+
+		// Predict this feature's gDNA mass from its read count, convert that
+		// mass to genome copies, and normalize by the gDNA actually sequenced.
+		// Read counts are guaranteed positive here -- see the header comment on
+		// ComputeCellCounts for why that matters to the log10.
+		const double gdna_mass_ng = std::pow(10.0, model.slope * std::log10(row->count) + model.intercept);
+		const double genomes = gdna_mass_ng * kAvogadro / (ogu_len_in_bp * kGramsPerMolePerBasePair * 1e9);
+		const double genomes_per_g_gdna = genomes / sample_params.sequenced_sample_gdna_mass_ng * 1e9;
+
+		// One genome per cell: pysyndna's own explicit simplifying assumption.
+		result.values.push_back({row->sample_id, row->feature_id, genomes_per_g_gdna});
 	}
 	return result;
 }

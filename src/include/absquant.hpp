@@ -286,11 +286,206 @@ FitResult FitSyndnaModels(const std::vector<CountObservation> &counts,
                           const std::vector<SyndnaConcentration> &concentrations, const std::vector<SampleMass> &masses,
                           const FitOptions &options);
 
+// ---------------------------------------------------------------------------
+// Cell counts: applying a fitted model to turn OGU read counts into absolute
+// quantities. Reproduces pysyndna's calc_ogu_cell_counts_biom.
+// ---------------------------------------------------------------------------
+
+//! Avogadro's number, in genomes per mole.
+//!
+//! pysyndna also carries a truncated 6.022e23 behind an `is_test` flag, to
+//! reproduce the Zaramela notebook's own value. That path is deliberately NOT
+//! ported (D2): it exists only to match a rounding in a published analysis, and
+//! offering a knob that makes results *less* accurate invites someone to leave
+//! it on.
+constexpr double kAvogadro = 6.02214076e23;
+
+//! Average molar mass of one base pair of double-stranded DNA, in g/mole.
+//! pysyndna's `calc_copies_genomic_element_per_g_series` default.
+constexpr double kGramsPerMolePerBasePair = 650.0;
+
+//! One row of the per-(sample, feature) coverage relation.
+//!
+//! Coverage is a FRACTION in [0, 1], never a percent (D9). pysyndna accepts
+//! either and puts the burden on the caller to pass a matching `min_coverage`,
+//! which makes handing it percents against a fractional threshold a silent
+//! no-op that keeps every feature. miint rejects anything outside [0, 1], so
+//! that mistake fails loudly instead.
+//!
+//! Must be unique on (sample_id, feature_id).
+struct CoverageObservation {
+	std::string sample_id;
+	std::string feature_id;
+	double coverage = 0.0;
+};
+
+//! One row of the feature-length relation. `ogu_len_in_bp` is a denominator, so
+//! it must be finite and strictly positive; must be unique on feature_id.
+struct FeatureLength {
+	std::string feature_id;
+	double ogu_len_in_bp = 0.0;
+};
+
+//! A fitted per-sample model, as produced by absquant_fit_models. Only these
+//! three of its six fields are used: slope and intercept predict the mass, and
+//! rvalue feeds the r^2 gate. Must be unique on sample_id.
+struct SampleRegression {
+	std::string sample_id;
+	double slope = 0.0;
+	double intercept = 0.0;
+	double rvalue = 0.0;
+};
+
+//! Per-sample parameters for the cell-count calculation. Must be unique on
+//! sample_id.
+//!
+//! Only `sequenced_sample_gdna_mass_ng` enters the cells_per_g_of_gdna
+//! arithmetic. The other two are pysyndna's REQUIRED_DNA_PREP_INFO_KEYS
+//! (calc_cell_counts.py:53): they compute extracted_gdna_mass_g, which only the
+//! sample-level metrics need, yet they are required and NaN/negative-filtered
+//! for every metric. Keeping that is parity -- dropping the requirement would
+//! silently change which samples appear in the output.
+struct SampleCellParams {
+	std::string sample_id;
+	double sequenced_sample_gdna_mass_ng = 0.0;
+	double extracted_gdna_concentration_ng_ul = 0.0;
+	double vol_extracted_elution_ul = 0.0;
+};
+
+struct CellCountsOptions {
+	//! A (sample, feature) whose coverage is BELOW this is dropped. Strict `<`,
+	//! so a feature sitting exactly on the threshold is kept. A fraction in
+	//! [0, 1].
+	double min_coverage = 0.0;
+	//! A sample whose model has r^2 BELOW this is dropped entirely. Strict `<`.
+	double min_rsquared = 0.8;
+};
+
+//! One cell of the output feature table.
+struct CellCountValue {
+	std::string sample_id;
+	std::string feature_id;
+	double value = 0.0;
+};
+
+//! Every sample present in `counts` either contributes cells to `values` or
+//! appears in exactly one of the four sample lists below, so no sample
+//! disappears without the caller being able to say why. (Input that would break
+//! that -- a counted sample with no parameter row, a counted cell with no
+//! coverage row -- is rejected before any of this runs.)
+//! `low_coverage_feature_ids` is on the other axis, keyed by feature rather than
+//! by sample.
+struct CellCountsResult {
+	//! Surviving (sample, feature) cells. Zero-valued cells are omitted, per
+	//! miint's long-form sparse invariant (D10); pysyndna's dense output spells
+	//! the same thing as an explicit 0.0 after its final fillna.
+	std::vector<CellCountValue> values;
+	//! Features dropped somewhere for coverage below min_coverage. Keyed by
+	//! feature, not by (sample, feature): pysyndna reports the same list this
+	//! way, and a feature that fails in one sample is worth naming once.
+	//!
+	//! Sorted, where pysyndna's is in the order its melt happens to produce.
+	//! That is presentation only -- the contents are identical -- and being
+	//! independent of input row order is what makes it assertable.
+	std::vector<std::string> low_coverage_feature_ids;
+	//! Samples removed because a required parameter was unusable: NULL/NaN,
+	//! negative, or infinite. Same rule and same name as FitResult's list.
+	std::vector<std::string> filtered_sample_ids;
+	//! Samples with counts but no USABLE model -- either no row in `models` at
+	//! all, or one whose slope, intercept or rvalue is NULL/NaN or infinite.
+	//! One bucket because they are one thing to pysyndna, which records None for
+	//! a fit with any NaN field (_convert_linregressresults_to_dict:329-334) and
+	//! reaches the same log line either way.
+	//!
+	//! A warning rather than an error, matching pysyndna (calc_cell_counts.py
+	//! :674) and matching M2's treatment of a sample that could not be fit:
+	//! absquant_fit_models legitimately returns fewer models than it was given
+	//! samples, so feeding its output straight back in must not be an error.
+	//! (An rvalue that is a number but outside [-1, 1] is a different matter --
+	//! that is a malformed relation and it throws.)
+	std::vector<std::string> samples_without_models;
+	//! Samples whose model's r^2 fell below min_rsquared.
+	std::vector<std::string> low_rsquared_sample_ids;
+	//! Samples every one of whose cells fell below min_coverage, so nothing was
+	//! left to compute. pysyndna emits NO message for these at all -- it loops
+	//! over the sample ids remaining in the working table
+	//! (calc_cell_counts.py:505), which a wholly uncovered sample has already
+	//! left -- so the sample vanishes from its output unremarked. The values
+	//! agree; miint just says so. Naming the features is not a substitute,
+	//! because in a real run that list is capped at ten ids.
+	std::vector<std::string> uncovered_sample_ids;
+};
+
+//! Predict cells of each feature per gram of gDNA, reproducing pysyndna's
+//! calc_ogu_cell_counts_biom for the cells_per_g_of_gdna metric.
+//!
+//! Per surviving (sample, feature):
+//!
+//!     ogu_gdna_mass_ng   = 10 ^ (slope * log10(read_count) + intercept)
+//!     ogu_genomes        = ogu_gdna_mass_ng * kAvogadro
+//!                          / (ogu_len_in_bp * kGramsPerMolePerBasePair * 1e9)
+//!     genomes_per_g_gdna = ogu_genomes / sequenced_sample_gdna_mass_ng * 1e9
+//!     cells_per_g_gdna   = genomes_per_g_gdna
+//!
+//! The last line is an explicit simplifying assumption -- one genome per cell --
+//! which pysyndna's own comment acknowledges is wrong for dividing and
+//! polyploid microbes. It is reproduced because it is the published method.
+//!
+//! Three filters run before that arithmetic, and their ORDER is load-bearing --
+//! not for the values, which are the same whichever way round it goes, but for
+//! the diagnostics:
+//!
+//!   1. samples with an unusable required parameter  -> filtered_sample_ids
+//!   2. cells with coverage < min_coverage           -> low_coverage_feature_ids
+//!   3. samples with no model, or with r^2 < min     -> samples_without_models,
+//!                                                      low_rsquared_sample_ids
+//!
+//! pysyndna removes the bad-parameter samples from the counts table itself
+//! (calc_cell_counts.py:1013) before the coverage filter ever runs, so such a
+//! sample never contributes its poorly covered features to the coverage list.
+//! Running the coverage filter first would name features that no surviving
+//! sample was ever going to use, sending the user after a data problem that
+//! does not exist.
+//!
+//! Read counts reach here already positive: the DuckDB reader drops zero-valued
+//! cells, and a count that is not finite and positive is refused. That matters
+//! more than it looks. log10(0) is -inf, and with a NEGATIVE slope the mass
+//! would come back as 10^(+inf) = inf, i.e. an infinite cell count -- which is
+//! exactly what pysyndna emits for a zero count under a negative model. The
+//! check is unreachable through the reader, and is what keeps it that way.
+//!
+//! Id-set enforcement is asymmetric, deliberately. The counts relation is the
+//! subject: every cell it names must have a coverage row, its feature must have
+//! a length and its sample must have parameters, or nothing defined can be said
+//! about that cell. The reverse never has to hold -- a lengths table is a whole
+//! reference database and a parameters table a whole study -- so the reference
+//! relations may describe far more than the counts do, and their unused rows
+//! are not screened at all. The one id relationship that is NOT enforced is
+//! `models`: a sample with no usable model is reported, not refused, so that
+//! absquant_fit_models' output composes with this function directly.
+//!
+//! Throws std::invalid_argument on out-of-range options (min_coverage or
+//! min_rsquared outside [0, 1]), on a malformed relation (duplicate keys; a
+//! count that is not finite and positive; a coverage outside [0, 1]; a
+//! non-positive or non-finite ogu_len_in_bp; a zero sequenced_sample_gdna_mass_ng;
+//! an rvalue outside [-1, 1]) and on the id mismatches above. The DuckDB wrapper
+//! re-throws these as InvalidInputException prefixed with the function name.
+CellCountsResult ComputeCellCounts(const std::vector<CountObservation> &counts,
+                                   const std::vector<SampleRegression> &models,
+                                   const std::vector<CoverageObservation> &coverage,
+                                   const std::vector<FeatureLength> &lengths,
+                                   const std::vector<SampleCellParams> &params, const CellCountsOptions &options);
+
 } // namespace absquant
 } // namespace miint
 
 namespace duckdb {
 class ExtensionLoader;
-//! Registers the absquant_* table functions into the extension catalog.
+//! Registers absquant_fit_models into the extension catalog.
 void RegisterAbsQuant(ExtensionLoader &loader);
+//! Registers absquant_cell_counts into the extension catalog. Separate from
+//! RegisterAbsQuant, and separately sourced, because the two functions are ~350
+//! lines of bind/read apiece and the established convention is one Register* per
+//! function called from LoadInternal.
+void RegisterAbsQuantCellCounts(ExtensionLoader &loader);
 } // namespace duckdb

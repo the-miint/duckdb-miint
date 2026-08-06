@@ -669,7 +669,7 @@ SELECT * FROM genome_coverage_per_sample(alignments, genome_lengths, contig_to_g
 ORDER BY sample_id, genome_id;
 ```
 
-Feeding per-sample coverage into absolute quantification, which expects a `(sample_id, feature_id, coverage)` shape:
+Feeding per-sample coverage into [absolute quantification](absolute_quantification.md#absquant_cell_counts), which expects a `(sample_id, feature_id, coverage)` shape:
 
 ```sql
 SELECT sample_id, genome_id AS feature_id, proportion_covered AS coverage

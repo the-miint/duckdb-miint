@@ -1,5 +1,6 @@
 #include "absquant.hpp"
 
+#include "absquant_readers.hpp"
 #include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
 #include "miint_log.hpp"
@@ -9,9 +10,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include "duckdb/main/query_result.hpp"
 
-#include <cmath>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -20,6 +19,7 @@ namespace duckdb {
 
 namespace {
 
+using absquant_internal::ReadKeyedColumns;
 using miint::absquant::CountObservation;
 using miint::absquant::FitOptions;
 using miint::absquant::FitResult;
@@ -32,78 +32,6 @@ using unifrac_internal::ReadFeatureTable;
 using unifrac_internal::ResolveSampleIdOutputType;
 
 constexpr const char *kCallerName = "absquant_fit_models";
-
-// A two-column reference relation read into parallel vectors.
-struct KeyedValues {
-	std::vector<std::string> keys;
-	std::vector<double> values;
-};
-
-// Read `(key_column, value_column)` from a user-named relation, following the
-// separate-connection recipe in docs/internals/reading-tables-views.md.
-//
-// A NULL value becomes NaN, which is how SQL NULL travels into the pure core --
-// for the parameters relation that is a legitimate "skip this sample", and for
-// the concentrations relation the core rejects it. A NULL KEY is refused
-// outright: an unnamed row cannot be joined to anything, so silently dropping it
-// would quietly shrink the pool the mass fractions are computed against.
-//
-// (ReadFeatureTable, which reads the counts relation, instead drops rows with a
-// NULL id -- an established contract shared with unifrac_* and
-// community_distances that is not this milestone's to change. The asymmetry is
-// defensible on its own terms, a NULL cell in a sparse matrix being absence
-// rather than a broken config, but it is worth revisiting across all of them.)
-//
-// `table_name` is quoted before interpolation and may come from the user.
-// `key_column` and `value_column` are NOT quoted and MUST be trusted
-// compile-time literals -- wiring a user-supplied column name (a named
-// parameter, say) into either is a SQL injection. M3-M5 add per-sample
-// parameter columns and will be tempted to reuse this; keep the column names
-// baked in and select among them, never pass one through.
-KeyedValues ReadKeyedValues(ClientContext &context, const std::string &table_name, const char *key_column,
-                            const char *value_column, const char *entity) {
-	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
-	const std::string projection = std::string(key_column) + "::VARCHAR, " + std::string(value_column) + "::DOUBLE";
-
-	// Schema probe first, so a missing column or an impossible cast surfaces
-	// before the whole relation is materialized (mirrors ReadFeatureTable).
-	auto probe = conn.Query("SELECT " + projection + " FROM " + qname + " LIMIT 0");
-	if (probe->HasError()) {
-		throw InvalidInputException("%s: %s '%s' must expose (%s VARCHAR, %s DOUBLE): %s", kCallerName, entity,
-		                            table_name, key_column, value_column, probe->GetError());
-	}
-	auto result = conn.Query("SELECT " + projection + " FROM " + qname);
-	if (result->HasError()) {
-		throw InvalidInputException("%s: failed to read %s '%s': %s", kCallerName, entity, table_name,
-		                            result->GetError());
-	}
-
-	KeyedValues out;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
-	while (auto chunk = materialized.Fetch()) {
-		const idx_t n = chunk->size();
-		if (n == 0) {
-			break;
-		}
-		UnifiedVectorFormat key_u, val_u;
-		chunk->data[0].ToUnifiedFormat(n, key_u);
-		chunk->data[1].ToUnifiedFormat(n, val_u);
-		auto key_data = UnifiedVectorFormat::GetData<string_t>(key_u);
-		auto val_data = UnifiedVectorFormat::GetData<double>(val_u);
-		for (idx_t i = 0; i < n; ++i) {
-			const auto ki = key_u.sel->get_index(i);
-			const auto vi = val_u.sel->get_index(i);
-			if (!key_u.validity.RowIsValid(ki)) {
-				throw InvalidInputException("%s: %s '%s' has a row with a NULL %s", kCallerName, entity, table_name,
-				                            key_column);
-			}
-			out.keys.push_back(key_data[ki].GetString());
-			out.values.push_back(val_u.validity.RowIsValid(vi) ? val_data[vi] : std::nan(""));
-		}
-	}
-	return out;
-}
 
 struct AbsQuantFitBindData : public TableFunctionData {
 	std::string counts_table;
@@ -224,10 +152,10 @@ unique_ptr<GlobalTableFunctionState> AbsQuantFitInitGlobal(ClientContext &contex
 	// concentrations-without-counts rule exists to accept. Negative values are
 	// NOT dropped by it, so they reach the core and are rejected there.
 	const auto rows = ReadFeatureTable(context, data.counts_table, kCallerName);
-	const auto pool = ReadKeyedValues(context, data.concentrations_table, "feature_id", "syndna_indiv_ng_ul",
-	                                  "synDNA concentrations relation");
-	const auto params =
-	    ReadKeyedValues(context, data.params_table, "sample_id", "mass_syndna_input_ng", "sample parameters relation");
+	const auto pool = ReadKeyedColumns(context, data.concentrations_table, "feature_id", {"syndna_indiv_ng_ul"},
+	                                   "synDNA concentrations relation", kCallerName);
+	const auto params = ReadKeyedColumns(context, data.params_table, "sample_id", {"mass_syndna_input_ng"},
+	                                     "sample parameters relation", kCallerName);
 
 	std::vector<CountObservation> counts;
 	counts.reserve(rows.size());
@@ -236,13 +164,15 @@ unique_ptr<GlobalTableFunctionState> AbsQuantFitInitGlobal(ClientContext &contex
 	}
 	std::vector<SyndnaConcentration> concentrations;
 	concentrations.reserve(pool.keys.size());
+	const auto &ng_ul = pool.values.at("syndna_indiv_ng_ul");
 	for (size_t i = 0; i < pool.keys.size(); ++i) {
-		concentrations.push_back({pool.keys[i], pool.values[i]});
+		concentrations.push_back({pool.keys[i], ng_ul[i]});
 	}
 	std::vector<SampleMass> masses;
 	masses.reserve(params.keys.size());
+	const auto &mass_ng = params.values.at("mass_syndna_input_ng");
 	for (size_t i = 0; i < params.keys.size(); ++i) {
-		masses.push_back({params.keys[i], params.values[i]});
+		masses.push_back({params.keys[i], mass_ng[i]});
 	}
 
 	// The pure core carries the whole rejection layer and throws
