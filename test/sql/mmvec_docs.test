@@ -1,0 +1,346 @@
+# name: test/sql/mmvec_docs.test
+# description: every statement and every printed number in docs/multiomics.md actually runs and is correct
+# group: [sql]
+
+require miint
+
+# ---------------------------------------------------------------------------
+# THIS FILE IS THE OTHER HALF OF docs/multiomics.md. Every SQL statement the
+# doc shows appears here, against the same fixture, asserting the same numbers
+# the doc prints. Change one, change the other.
+#
+# There is no precedent in this repo for extracting snippets from markdown and
+# building one was out of scope, so the coupling is by convention and by the
+# note at the top of each file. That is weaker than extraction, but it is much
+# stronger than nothing: a doc example that silently stopped working is exactly
+# the failure this catches, and the numbers are the part that rots first.
+#
+# Deliberately no `require parquet`: the fixture is inline and tiny, so this
+# file runs everywhere and adds no dependency. The real-data fixtures live in
+# mmvec_soils / mmvec_cf / mmvec_synth_c.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE microbes AS SELECT * FROM (VALUES
+  ('s1','m1',12),('s1','m2', 3),('s1','m3', 1),('s1','m4', 4),
+  ('s2','m1', 9),('s2','m2', 7),('s2','m3', 2),('s2','m4', 2),
+  ('s3','m1', 2),('s3','m2',11),('s3','m3', 6),('s3','m4', 1),
+  ('s4','m1', 1),('s4','m2', 8),('s4','m3',10),('s4','m4', 1),('s4','m5', 5),
+  ('s5','m1', 6),('s5','m2', 2),('s5','m3', 3),('s5','m4', 9),('s5','m5', 2),
+  ('s6','m1', 3),('s6','m2', 4),('s6','m3', 8),('s6','m4', 5)
+) AS t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE metabolites AS SELECT * FROM (VALUES
+  ('s1','b1',300),('s1','b2', 40),('s1','b3', 10),
+  ('s2','b1',250),('s2','b2', 80),('s2','b3', 20),
+  ('s3','b1', 60),('s3','b2',260),('s3','b3', 30),
+  ('s4','b1', 30),('s4','b2',300),('s4','b3', 70),
+  ('s5','b1',180),('s5','b2', 50),('s5','b3',170),
+  ('s6','b1', 90),('s6','b2',120),('s6','b3',190)
+) AS t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE fit AS
+SELECT * FROM mmvec_fit('microbes', 'metabolites', dimensions := 1, max_iter := 200, seed := 42);
+
+# --- section "The model relation" -------------------------------------------
+# The doc prints loss 62 / x 10 / y 6 and explains the arithmetic: 5 microbes
+# and 3 metabolites, each with one bias plus one coordinate, and one loss row
+# per objective evaluation. The evaluation count is a property of the line
+# search, so it is asserted as a range -- pinning 62 exactly would make this
+# file fail on a platform where the line search took one more probe, which is
+# not a fact about the docs.
+query II
+SELECT (SELECT count(*) FROM fit WHERE modality = 'x'),
+       (SELECT count(*) FROM fit WHERE modality = 'y');
+----
+10	6
+
+query I
+SELECT count(*) BETWEEN 40 AND 90 FROM fit WHERE modality = 'loss';
+----
+true
+
+# The doc prints `true 57 47967.431`. n_iter is pinned as a band for the same
+# reason as the evaluation count; the loss is the substantive number.
+query I
+SELECT DISTINCT converged FROM fit;
+----
+true
+
+query I
+SELECT DISTINCT abs(final_loss - 47967.431) < 0.5 FROM fit;
+----
+true
+
+query I
+SELECT DISTINCT n_iter BETWEEN 40 AND 80 FROM fit;
+----
+true
+
+# --- section "mmvec_ranks" --------------------------------------------------
+# The doc's "what does each microbe co-occur with most?" query and its five
+# printed rows. This is the biology the fixture was built to contain, so the
+# PAIRS are asserted exactly; the rank values get a tolerance because they are
+# an optimizer's output, not a closed form.
+query II
+SELECT x_feature_id, y_feature_id
+FROM (SELECT *, row_number() OVER (PARTITION BY x_feature_id ORDER BY rank DESC) AS rn
+      FROM mmvec_ranks('fit'))
+WHERE rn = 1
+ORDER BY x_feature_id;
+----
+m1	b1
+m2	b2
+m3	b2
+m4	b1
+m5	b2
+
+query I
+SELECT max(abs(rank - expected)) < 0.01 FROM (
+  SELECT r.rank, e.expected FROM mmvec_ranks('fit') r
+  JOIN (VALUES ('m1','b1',0.7666),('m2','b2',0.5093),('m3','b2',0.4845),
+               ('m4','b1',0.3551),('m5','b2',0.6610)) e(x, y, expected)
+    ON r.x_feature_id = e.x AND r.y_feature_id = e.y);
+----
+true
+
+# Rows are a distribution, and ranks are centred -- the two defining properties
+# the doc states for this output.
+query II
+SELECT bool_and(abs(p - 1.0) < 1e-12), bool_and(abs(r) < 1e-12)
+FROM (SELECT x_feature_id, sum(prob) AS p, sum(rank) AS r FROM mmvec_ranks('fit') GROUP BY x_feature_id);
+----
+true	true
+
+# --- section "The reference category" ---------------------------------------
+# The doc prints b1 / 0 / 0.0 and b1 / 1 / 0.0, and makes the point that the row
+# is present rather than missing. Both halves are asserted: the model row is
+# exactly zero, AND mmvec_ranks still reports a real non-zero rank for it.
+query III
+SELECT y_feature_id, axis, value FROM fit
+WHERE modality = 'y' AND y_feature_id = 'b1' ORDER BY axis;
+----
+b1	0	0.0
+b1	1	0.0
+
+query I
+SELECT count(*) = 5 AND bool_and(rank <> 0.0) FROM mmvec_ranks('fit') WHERE y_feature_id = 'b1';
+----
+true
+
+# --- section "BIGINT and UUID ids sort by their text form" ------------------
+# The doc's claim is that ids {9, 10} make 10 the reference, because "10" sorts
+# before "9" as text. If this ever became numeric ordering the doc would be
+# actively misleading, so it is pinned.
+statement ok
+CREATE TABLE bx AS SELECT sample_id, CAST(f AS BIGINT) AS feature_id, value FROM (VALUES
+  ('s1',9,5),('s1',10,3),('s2',9,2),('s2',10,7),('s3',9,4),('s3',10,6)) t(sample_id,f,value);
+
+statement ok
+CREATE TABLE bmet AS SELECT sample_id, CAST(f AS BIGINT) AS feature_id, value FROM (VALUES
+  ('s1',9,50),('s1',10,20),('s2',9,10),('s2',10,60),('s3',9,30),('s3',10,40)) t(sample_id,f,value);
+
+statement ok
+CREATE TABLE bfit AS SELECT * FROM mmvec_fit('bx', 'bmet', dimensions := 1, max_iter := 50);
+
+query III
+SELECT y_feature_id, axis, value FROM bfit
+WHERE modality = 'y' AND value = 0.0 ORDER BY axis;
+----
+10	0	0.0
+10	1	0.0
+
+# And the id column really did keep its BIGINT type, which is the reason the
+# ordering rule is "as text" rather than "as VARCHAR ids only".
+query I
+SELECT list_contains(list(column_type), 'BIGINT') FROM (DESCRIBE SELECT * FROM bfit) WHERE column_name = 'y_feature_id';
+----
+true
+
+# --- section "Two of the id columns are always NULL" ------------------------
+# The doc warns that USING (x_feature_id, y_feature_id) against the model
+# relation returns nothing. Asserted, because it is the kind of claim a reader
+# will not believe until it bites them.
+query I
+SELECT count(*) FROM fit a JOIN fit b USING (x_feature_id, y_feature_id) WHERE a.modality = 'loss';
+----
+0
+
+query I
+SELECT count(*) FROM fit WHERE modality = 'loss' AND x_feature_id IS NULL AND y_feature_id IS NULL;
+----
+62
+
+# --- section "Counts, not proportions -- but depth does not matter" ---------
+# The doc says multiplying one sample's counts by ten leaves its prediction
+# bit-for-bit identical. Bit-for-bit, so no tolerance.
+statement ok
+CREATE TABLE microbes_deep AS
+SELECT sample_id, feature_id, value * (CASE WHEN sample_id = 's1' THEN 10 ELSE 1 END) AS value FROM microbes;
+
+query I
+SELECT bool_and(a.proportion = b.proportion)
+FROM mmvec_predict('fit', 'microbes') a
+JOIN mmvec_predict('fit', 'microbes_deep') b USING (sample_id, y_feature_id);
+----
+true
+
+# --- section "Worked example: cross-validation" -----------------------------
+statement ok
+CREATE TABLE split AS SELECT * FROM mmvec_train_test_split('microbes', 0.34, 7);
+
+# The doc names s4 and s5 as the test set. That is a promise about md5 ordering
+# being stable, which is the whole reason the macro uses md5 over hash().
+query II
+SELECT split, string_agg(sample_id, ', ' ORDER BY sample_id) FROM split GROUP BY split ORDER BY split;
+----
+test	s4, s5
+train	s1, s2, s3, s6
+
+statement ok
+CREATE TABLE x_train AS SELECT m.* FROM microbes m JOIN split s USING (sample_id) WHERE s.split = 'train';
+
+statement ok
+CREATE TABLE y_train AS SELECT m.* FROM metabolites m JOIN split s USING (sample_id) WHERE s.split = 'train';
+
+statement ok
+CREATE TABLE x_test AS SELECT m.* FROM microbes m JOIN split s USING (sample_id) WHERE s.split = 'test';
+
+statement ok
+CREATE TABLE y_test AS SELECT m.* FROM metabolites m JOIN split s USING (sample_id) WHERE s.split = 'test';
+
+statement ok
+CREATE TABLE model AS
+SELECT * FROM mmvec_fit('x_train', 'y_train', dimensions := 1, max_iter := 200, seed := 42);
+
+# The doc prints 4 and 5 here, and the whole "the filter is not optional"
+# section rests on that gap being real: m5 is test-only.
+query II
+SELECT (SELECT count(DISTINCT x_feature_id) FROM model WHERE modality = 'x'),
+       (SELECT count(DISTINCT feature_id) FROM x_test);
+----
+4	5
+
+# The doc quotes this error verbatim, including the remedy it suggests. If the
+# wording drifts, the doc is quoting something that no longer happens.
+statement error
+SELECT count(*) FROM mmvec_predict('model', 'x_test');
+----
+1 feature(s) the model was never fitted on (m5)
+
+statement error
+SELECT count(*) FROM mmvec_predict('model', 'x_test');
+----
+restrict the table to the model's own features first
+
+statement ok
+CREATE TABLE x_eval AS SELECT * FROM x_test
+  WHERE feature_id IN (SELECT DISTINCT x_feature_id FROM model WHERE modality = 'x');
+
+statement ok
+CREATE TABLE y_eval AS SELECT * FROM y_test
+  WHERE feature_id IN (SELECT DISTINCT y_feature_id FROM model WHERE modality = 'y');
+
+# The doc prints 0.037772.
+query I
+SELECT abs(q_squared - 0.037772) < 1e-5 FROM mmvec_score('model', 'x_eval', 'y_eval');
+----
+true
+
+# The doc's predict output for the two held-out samples, and its claim that
+# each sample's proportions sum to 1.
+query III
+SELECT sample_id, y_feature_id, round(proportion, 4) FROM mmvec_predict('model', 'x_eval')
+ORDER BY sample_id, y_feature_id;
+----
+s4	b1	0.3707
+s4	b2	0.4183
+s4	b3	0.211
+s5	b1	0.5112
+s5	b2	0.296
+s5	b3	0.1928
+
+query I
+SELECT bool_and(abs(t - 1.0) < 1e-12)
+FROM (SELECT sample_id, sum(proportion) AS t FROM mmvec_predict('model', 'x_eval') GROUP BY sample_id);
+----
+true
+
+# --- section "mmvec_train_test_split" ---------------------------------------
+# The doc promises exactly round(n * test_fraction) test samples, and that a
+# bad or NULL fraction is an error rather than a silent all-train split.
+query I
+SELECT count(*) FROM split WHERE split = 'test';
+----
+2
+
+statement error
+SELECT * FROM mmvec_train_test_split('microbes', 1.5, 7);
+----
+test_fraction must be in [0, 1]
+
+statement error
+SELECT * FROM mmvec_train_test_split('microbes', NULL, 7);
+----
+test_fraction must not be NULL
+
+# The doc says the split does not depend on row order. Re-running against a
+# permuted copy must give the identical assignment.
+statement ok
+CREATE TABLE microbes_shuffled AS SELECT * FROM microbes ORDER BY value DESC, feature_id, sample_id;
+
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM mmvec_train_test_split('microbes', 0.34, 7)
+   EXCEPT SELECT * FROM mmvec_train_test_split('microbes_shuffled', 0.34, 7))
+  UNION ALL
+  (SELECT * FROM mmvec_train_test_split('microbes_shuffled', 0.34, 7)
+   EXCEPT SELECT * FROM mmvec_train_test_split('microbes', 0.34, 7))
+);
+----
+0
+
+# --- section "Feature tables" -----------------------------------------------
+# The doc lists what is rejected. Each claim gets one case, because a stated
+# guarantee nobody tests is just a hope.
+statement ok
+CREATE TABLE y_missing_sample AS SELECT * FROM metabolites WHERE sample_id <> 's6';
+
+statement error
+SELECT * FROM mmvec_fit('microbes', 'y_missing_sample');
+----
+same samples
+
+# ... and the message names the sample that is missing, rather than just saying
+# the counts differ -- which is the whole point of matching by id.
+statement error
+SELECT * FROM mmvec_fit('microbes', 'y_missing_sample');
+----
+only in X: s6
+
+statement ok
+CREATE TABLE y_one AS SELECT * FROM metabolites WHERE feature_id = 'b1';
+
+statement error
+SELECT * FROM mmvec_fit('microbes', 'y_one');
+----
+needs at least two features
+
+statement ok
+CREATE TABLE y_negative AS SELECT sample_id, feature_id,
+       CASE WHEN sample_id = 's1' AND feature_id = 'b2' THEN -1.0 ELSE value END AS value FROM metabolites;
+
+statement error
+SELECT * FROM mmvec_fit('microbes', 'y_negative');
+----
+mmvec models counts
+
+statement ok
+CREATE TABLE y_dup AS SELECT * FROM metabolites UNION ALL SELECT * FROM metabolites WHERE sample_id = 's1' AND feature_id = 'b2';
+
+statement error
+SELECT * FROM mmvec_fit('microbes', 'y_dup');
+----
+duplicate entry
