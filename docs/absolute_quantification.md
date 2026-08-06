@@ -20,7 +20,8 @@ counts.
 - [Sample identifier types](#sample-identifier-types) - how VARCHAR/BIGINT/UUID sample ids are handled.
 - [`absquant_fit_models`](#absquant_fit_models) - fit the per-sample standard curve.
 - [Which samples get a model](#which-samples-get-a-model) - what is dropped, and how to find out.
-- [`absquant_cell_counts`](#absquant_cell_counts) - apply a curve to get cells per gram of gDNA.
+- [`absquant_cell_counts`](#absquant_cell_counts) - apply a curve to get absolute cell counts.
+- [Choosing a metric](#choosing-a-metric) - per gram of gDNA, or per gram, microlitre or cm² of sample.
 - [Which cells you get back](#which-cells-you-get-back) - the three filters, and how to see what they removed.
 - [Composing the two functions](#composing-the-two-functions) - end to end, from spike-ins to cell counts.
 - [Applying a model by hand](#applying-a-model-by-hand) - if you only want the mass.
@@ -191,10 +192,10 @@ an error, not a warning — reads you cannot convert to mass are unusable. The r
 
 ## `absquant_cell_counts`
 
-Turn each feature's read count into **cells per gram of sequenced gDNA**, by applying a
-fitted standard curve. This is the payoff of the whole method: the output is an ordinary
-feature table whose values are absolute rather than compositional, so it joins, pivots
-and writes to BIOM like any other.
+Turn each feature's read count into **absolute cell counts**, by applying a fitted
+standard curve. This is the payoff of the whole method: the output is an ordinary feature
+table whose values are absolute rather than compositional, so it joins, pivots and writes
+to BIOM like any other.
 
 ```sql
 absquant_cell_counts(counts, models, coverage, lengths, params,
@@ -214,6 +215,37 @@ last step assumes **one genome per cell**, which is the published method's own
 simplifying assumption and is wrong for dividing and polyploid organisms — treat the
 output as genome equivalents if that matters to you.
 
+### Choosing a metric
+
+`cells_per_g` above is per gram of the gDNA that went into the **sequencer** — an
+instrument quantity. The other three metrics restate it per unit of the material you
+actually **collected**, which is what makes numbers comparable between samples:
+
+```
+extracted_gdna_mass_g = extracted_gdna_concentration_ng_ul * vol_extracted_elution_ul / 1e9
+value                 = cells_per_g * extracted_gdna_mass_g / <the metric's denominator>
+```
+
+`extracted_gdna_mass_g` is the DNA recovered from the whole extraction, not the portion
+sequenced — that is exactly what converts an instrument-side quantity into a sample-side
+one.
+
+| `metric` | Per unit of | Denominator column required in `params` |
+|---|---|---|
+| `cells_per_g_of_gdna` | gram of sequenced gDNA | — |
+| `cells_per_g_of_sample` | gram of sample | `calc_mass_sample_aliquot_input_g` |
+| `cells_per_ul_of_sample` | microlitre of sample | `sample_volume_ul` |
+| `cells_per_cm2_of_sample` | square centimetre of sample | `sample_surface_area_cm2` |
+
+Metric names are case-insensitive. Only the requested metric's denominator has to exist:
+a study that recorded volumes but never surface areas can ask for
+`cells_per_ul_of_sample` without carrying a `sample_surface_area_cm2` column.
+
+Pick the metric that matches how the sample was taken — a swab has an area, a stool
+aliquot a mass, a saliva sample a volume. `cells_per_g_of_gdna` is the right answer only
+when you genuinely mean *per unit of DNA sequenced*, which is rarely the biological
+question.
+
 ### The five relations
 
 | Argument | Columns read | Notes |
@@ -222,21 +254,23 @@ output as genome equivalents if that matters to you.
 | `models` | `(sample_id, slope, intercept, rvalue)` | `absquant_fit_models`' output, unprojected |
 | `coverage` | `(sample_id, feature_id, coverage)` | a **fraction** in `[0, 1]`, never a percent |
 | `lengths` | `(feature_id, ogu_len_in_bp)` | genome length in base pairs; must be positive |
-| `params` | `(sample_id, sequenced_sample_gdna_mass_ng, extracted_gdna_concentration_ng_ul, vol_extracted_elution_ul)` | |
+| `params` | `(sample_id, sequenced_sample_gdna_mass_ng, extracted_gdna_concentration_ng_ul, vol_extracted_elution_ul)`, plus the metric's denominator column | see [Choosing a metric](#choosing-a-metric) |
 
 Extra columns are ignored everywhere, so relations produced for other purposes can be
 passed straight in. Each relation's key must be unique.
 
-Only `sequenced_sample_gdna_mass_ng` enters the arithmetic above. The other two parameter
-columns are required and screened anyway, matching pysyndna, which filters on them
-regardless of which metric you ask for — so a sample with a NULL elution volume is
-dropped from a calculation that never touches it. Relaxing that would change which
-samples appear in your output while every value stayed identical, which is why it is kept.
+For `cells_per_g_of_gdna`, only `sequenced_sample_gdna_mass_ng` enters the arithmetic.
+The other two parameter columns are required and screened anyway, matching pysyndna,
+which filters on them regardless of which metric you ask for — so a sample with a NULL
+elution volume is dropped from a calculation that never touches it. Relaxing that would
+change which samples appear in your output while every value stayed identical, which is
+why it is kept.
 
-`metric` is positional and currently accepts only `'cells_per_g_of_gdna'`
-(case-insensitive). It is an argument rather than a fixed behavior so that the
-sample-level metrics can be added as *values* later, leaving queries written today
-working unchanged.
+The metric's own denominator is screened the same way, and **only for the metric that
+divides by it**. A sample missing `calc_mass_sample_aliquot_input_g` disappears from
+`cells_per_g_of_sample` and stays put in the other three. That is pysyndna's rule, and
+it means changing the metric can change which samples you get back, not only their
+units — check the warnings when you switch.
 
 ### Output
 
@@ -299,7 +333,7 @@ values**:
 
 | # | Filter | Warning |
 |---|---|---|
-| 1 | Sample has a NULL, negative or non-finite required parameter | `dropped N sample(s) with a NULL, negative or non-finite required parameter: …` |
+| 1 | Sample has a NULL, negative or non-finite required parameter — including the requested metric's denominator | `dropped N sample(s) with a NULL, negative or non-finite required parameter: …` |
 | 2 | Cell's `coverage < min_coverage` (strict, so a cell exactly on the threshold is kept) | `dropped N feature(s) whose coverage fell below X in at least one sample: …` |
 | 3 | Sample has no usable model, or its `rvalue² < min_rsquared` | `no usable model in '…' for N sample(s): …` / `dropped N sample(s) whose model r^2 fell below X: …` |
 
@@ -307,6 +341,28 @@ A sample whose every cell fails the coverage filter produces nothing at all, and
 reported separately (`dropped N sample(s) with no feature at or above X coverage: …`) so
 it does not vanish without explanation. All of these go to
 [`miint_warnings()`](utilities.md).
+
+One more way to get nothing back: if a sample's every cell computes to exactly zero, the
+sparse output omits all of them and the sample disappears. In practice this means a zero
+ratio on one of the sample-level metrics — `extracted_gdna_concentration_ng_ul` or
+`vol_extracted_elution_ul` is **zero**. Zero is a legitimate measurement, a blank really
+can extract no DNA, and pysyndna's screen tests `< 0` so zero passes it, which is why
+this is a warning rather than an error:
+`N sample(s) produced only zero-valued cells for metric '…' and appear in no output row: …`.
+
+Only the *whole-sample* case is reported. A single zero cell among others is simply
+omitted, because a missing row and a dense `0.0` say the same thing (see below) and the
+sample is still in the output to be read. It is the all-zero sample that the sparse form
+cannot otherwise express.
+
+A **zero denominator** is different and is an error, because dividing by it is not a
+measurement problem but an impossible one. pysyndna divides anyway and emits `inf` for
+every feature in the sample without saying so. miint refuses, naming the column the
+metric you asked for actually divides by:
+
+```
+absquant_cell_counts: calc_mass_sample_aliquot_input_g must not be zero; offending sample_id 's1'
+```
 
 The ordering is inherited from pysyndna and is deliberate: a sample dropped on its
 parameters never contributes its poorly covered features to filter 2's list, because no
@@ -431,10 +487,11 @@ For `absquant_cell_counts` specifically:
   while their cell is not. Its join then yields NaN; `NaN >= min_coverage` is false so the
   cell is dropped, and `NaN < min_coverage` is false too so it never reaches the
   low-coverage log. The cell disappears with no diagnostic of any kind.
-- **Both denominators must be positive.** A zero `ogu_len_in_bp` or
-  `sequenced_sample_gdna_mass_ng` is refused. pysyndna's parameter screen catches NULL and
-  negative but structurally cannot catch zero, which then divides through to `inf` cell
-  counts for every affected feature, with no warning.
+- **Every denominator must be positive.** A zero `ogu_len_in_bp`,
+  `sequenced_sample_gdna_mass_ng`, or sample-level denominator column is refused.
+  pysyndna's parameter screen catches NULL and negative but structurally cannot catch
+  zero, which then divides through to `inf` cell counts for every affected feature, with
+  no warning.
 - **The truncated `6.022e23` Avogadro is not available.** pysyndna carries it behind an
   `is_test` flag to reproduce a rounding in the original published notebook. Offering a
   knob that makes results *less* accurate invites leaving it on.
@@ -442,6 +499,15 @@ For `absquant_cell_counts` specifically:
 - **A sample whose every feature fails the coverage filter is reported.** pysyndna emits
   nothing for it — such a sample never reaches its per-sample loop — so it simply vanishes
   from the output. The values agree; miint says so.
+- **A sample whose every cell comes out zero is reported.** Reached in practice through a
+  sample-level metric with a zero extraction concentration or elution volume. pysyndna's
+  output is dense, so it writes the zeros out and the question never arises; a sparse
+  output has to say in words what it cannot say in rows.
+- **A cell count that overflows to `inf` is an error.** Nothing bounds a model's
+  coefficients, so a large enough intercept overflows `10^x`, and an extraction
+  concentration times an elution volume can overflow before the divide. pysyndna emits
+  the `inf`. An infinite cell count is not a measurement, and the same reasoning applies
+  as for the zero denominators above.
 
 ## Citations
 

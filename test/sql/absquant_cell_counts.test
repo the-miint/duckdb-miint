@@ -54,10 +54,54 @@ CREATE TABLE b02_mine AS SELECT * FROM absquant_cell_counts(
     'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_g_of_gdna', 0.02,
     min_rsquared := 0.25);
 
+# The same three runs for each sample-level metric. Nine more calls rather than
+# nine more arguments: the metric is what selects the denominator column, so a
+# separate call is the only way to exercise the column selection at all.
+
+statement ok
+CREATE TABLE a_gsamp AS SELECT * FROM absquant_cell_counts(
+    'a_counts', 'a_models', 'a_coverage', 'a_lengths', 'a_params', 'cells_per_g_of_sample', 0.1);
+
+statement ok
+CREATE TABLE a_ulsamp AS SELECT * FROM absquant_cell_counts(
+    'a_counts', 'a_models', 'a_coverage', 'a_lengths', 'a_params', 'cells_per_ul_of_sample', 0.1);
+
+statement ok
+CREATE TABLE a_cm2samp AS SELECT * FROM absquant_cell_counts(
+    'a_counts', 'a_models', 'a_coverage', 'a_lengths', 'a_params', 'cells_per_cm2_of_sample', 0.1);
+
+statement ok
+CREATE TABLE b_gsamp AS SELECT * FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_g_of_sample', 0.1);
+
+statement ok
+CREATE TABLE b_ulsamp AS SELECT * FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_ul_of_sample', 0.1);
+
+statement ok
+CREATE TABLE b_cm2samp AS SELECT * FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_cm2_of_sample', 0.1);
+
+statement ok
+CREATE TABLE b02_gsamp AS SELECT * FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_g_of_sample', 0.02,
+    min_rsquared := 0.25);
+
+statement ok
+CREATE TABLE b02_ulsamp AS SELECT * FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_ul_of_sample', 0.02,
+    min_rsquared := 0.25);
+
+statement ok
+CREATE TABLE b02_cm2samp AS SELECT * FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_cm2_of_sample', 0.02,
+    min_rsquared := 0.25);
+
 # ---------------------------------------------------------------------------
-# Parity against all three committed cells oracles at once.
+# Parity against all three committed cells oracles, for all four metrics, at
+# once -- twelve combinations through one predicate.
 #
-# Tagged and unioned rather than compared three times, so the tolerance
+# Tagged and unioned rather than compared twelve times, so the tolerance
 # predicate -- where a copy-paste slip would hide -- is written exactly once.
 #
 # Tolerance 1e-9, the figure data/syndna/README.md records for the cells
@@ -77,39 +121,63 @@ CREATE TABLE b02_mine AS SELECT * FROM absquant_cell_counts(
 
 statement ok
 CREATE TABLE all_mine AS
-          SELECT 'A' AS oracle, * FROM a_mine
-UNION ALL SELECT 'B' AS oracle, * FROM b_mine
-UNION ALL SELECT 'B02' AS oracle, * FROM b02_mine;
+          SELECT 'A' AS oracle, 'cells_per_g_of_gdna' AS metric, * FROM a_mine
+UNION ALL SELECT 'A', 'cells_per_g_of_sample', * FROM a_gsamp
+UNION ALL SELECT 'A', 'cells_per_ul_of_sample', * FROM a_ulsamp
+UNION ALL SELECT 'A', 'cells_per_cm2_of_sample', * FROM a_cm2samp
+UNION ALL SELECT 'B', 'cells_per_g_of_gdna', * FROM b_mine
+UNION ALL SELECT 'B', 'cells_per_g_of_sample', * FROM b_gsamp
+UNION ALL SELECT 'B', 'cells_per_ul_of_sample', * FROM b_ulsamp
+UNION ALL SELECT 'B', 'cells_per_cm2_of_sample', * FROM b_cm2samp
+UNION ALL SELECT 'B02', 'cells_per_g_of_gdna', * FROM b02_mine
+UNION ALL SELECT 'B02', 'cells_per_g_of_sample', * FROM b02_gsamp
+UNION ALL SELECT 'B02', 'cells_per_ul_of_sample', * FROM b02_ulsamp
+UNION ALL SELECT 'B02', 'cells_per_cm2_of_sample', * FROM b02_cm2samp;
 
+# Every metric of every oracle, unfiltered: the goldens carry the metric as a
+# column, so taking all four is less code than selecting one.
 statement ok
 CREATE TABLE all_gold AS
-          SELECT 'A' AS oracle, sample_id, feature_id, value
-            FROM read_csv('data/syndna/cells_oracle.csv') WHERE metric = 'cells_per_g_of_gdna'
-UNION ALL SELECT 'B' AS oracle, sample_id, feature_id, value
-            FROM read_csv('data/syndna/cellsb_oracle.csv') WHERE metric = 'cells_per_g_of_gdna'
-UNION ALL SELECT 'B02' AS oracle, sample_id, feature_id, value
-            FROM read_csv('data/syndna/cellsb_boundary_oracle.csv') WHERE metric = 'cells_per_g_of_gdna';
+          SELECT 'A' AS oracle, metric, sample_id, feature_id, value
+            FROM read_csv('data/syndna/cells_oracle.csv')
+UNION ALL SELECT 'B' AS oracle, metric, sample_id, feature_id, value
+            FROM read_csv('data/syndna/cellsb_oracle.csv')
+UNION ALL SELECT 'B02' AS oracle, metric, sample_id, feature_id, value
+            FROM read_csv('data/syndna/cellsb_boundary_oracle.csv');
 
-query TTT
-SELECT oracle, sample_id, feature_id
-FROM all_mine m FULL JOIN all_gold g USING (oracle, sample_id, feature_id)
+query TTTT
+SELECT oracle, metric, sample_id, feature_id
+FROM all_mine m FULL JOIN all_gold g USING (oracle, metric, sample_id, feature_id)
 WHERE g.value IS NULL
    OR abs(COALESCE(m.value, 0) - g.value) > 1e-9 * (1.0 + abs(g.value))
-ORDER BY 1, 2, 3;
+ORDER BY 1, 2, 3, 4;
 ----
 
 # Row counts stated separately from the parity join, because "the cells I did
 # return all match" and "I returned the right cells" are different claims. Each
-# count is the golden's row count less its dense zeros:
+# count is the golden's row count for that metric, less its dense zeros:
 #   A    22 = 13 OGUs x 2 samples, less the 4 cells that fail coverage
 #   B     7 = 9 golden rows less (s2,f_only1) [coverage] and (s2,f_zero) [no reads]
 #   B02  11 = 12 golden rows less (s2,f_zero)
-query TI
-SELECT oracle, count(*) FROM all_mine GROUP BY 1 ORDER BY 1;
+#
+# cells_per_g_of_sample is the odd one out in both Set B rows, and that is the
+# per-metric parameter filter: snull has a NULL calc_mass_sample_aliquot_input_g
+# and so is dropped from that metric alone, taking three cells with it.
+query TTI
+SELECT oracle, metric, count(*) FROM all_mine GROUP BY 1, 2 ORDER BY 1, 2;
 ----
-A	22
-B	7
-B02	11
+A	cells_per_cm2_of_sample	22
+A	cells_per_g_of_gdna	22
+A	cells_per_g_of_sample	22
+A	cells_per_ul_of_sample	22
+B	cells_per_cm2_of_sample	7
+B	cells_per_g_of_gdna	7
+B	cells_per_g_of_sample	4
+B	cells_per_ul_of_sample	7
+B02	cells_per_cm2_of_sample	11
+B02	cells_per_g_of_gdna	11
+B02	cells_per_g_of_sample	8
+B02	cells_per_ul_of_sample	11
 
 # The output contract: both id columns mirrored, one DOUBLE value.
 query TTT
@@ -118,12 +186,129 @@ SELECT typeof(sample_id), typeof(feature_id), typeof(value) FROM a_mine LIMIT 1;
 VARCHAR	VARCHAR	DOUBLE
 
 # ---------------------------------------------------------------------------
+# The sample-level metrics differ from cells_per_g_of_gdna by one per-sample
+# ratio, and from each other only by which parameters column supplies its
+# denominator:
+#
+#     extracted_gdna_mass_g = extracted_gdna_concentration_ng_ul
+#                             * vol_extracted_elution_ul / 1e9
+#     value                 = cells_per_g_of_gdna * extracted_gdna_mass_g
+#                             / <the metric's denominator>
+#
+# The oracles above pin the whole chain; this states the relationship the four
+# outputs bear to each other, which no single-metric comparison can see. Written
+# as the formula rather than as literals -- a hand-typed expected value here
+# would be a number nobody computed.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT count(*) FROM a_mine g
+JOIN a_gsamp s USING (sample_id, feature_id)
+JOIN a_params p USING (sample_id)
+WHERE abs(s.value - g.value * (p.extracted_gdna_concentration_ng_ul * p.vol_extracted_elution_ul / 1e9)
+                             / p.calc_mass_sample_aliquot_input_g)
+      > 1e-12 * (1.0 + abs(s.value));
+----
+0
+
+query I
+SELECT count(*) FROM a_mine g
+JOIN a_ulsamp s USING (sample_id, feature_id)
+JOIN a_params p USING (sample_id)
+WHERE abs(s.value - g.value * (p.extracted_gdna_concentration_ng_ul * p.vol_extracted_elution_ul / 1e9)
+                             / p.sample_volume_ul)
+      > 1e-12 * (1.0 + abs(s.value));
+----
+0
+
+query I
+SELECT count(*) FROM a_mine g
+JOIN a_cm2samp s USING (sample_id, feature_id)
+JOIN a_params p USING (sample_id)
+WHERE abs(s.value - g.value * (p.extracted_gdna_concentration_ng_ul * p.vol_extracted_elution_ul / 1e9)
+                             / p.sample_surface_area_cm2)
+      > 1e-12 * (1.0 + abs(s.value));
+----
+0
+
+# The ratio is per SAMPLE, not per cell: within one sample every feature is
+# scaled by the same factor. A ratio applied per cell would satisfy all three
+# checks above and fail this one.
+query I
+SELECT count(DISTINCT round(s.value / g.value, 12)) FROM a_mine g
+JOIN a_ulsamp s USING (sample_id, feature_id)
+WHERE sample_id = 'example1';
+----
+1
+
+# ---------------------------------------------------------------------------
+# The per-metric parameter filter. pysyndna screens the gDNA mass, both
+# extraction parameters, and the REQUESTED metric's denominator -- no other.
+#
+# Set B's `snull` is the sample that tells the three plausible readings apart:
+# it has a NULL calc_mass_sample_aliquot_input_g and nothing else missing.
+# Screening all three sample columns would drop it everywhere; screening none
+# would compute NaN cells for cells_per_g_of_sample. Both reproduce every value
+# of every other sample, so only this membership can distinguish them.
+# ---------------------------------------------------------------------------
+
+# Counted with a FILTER rather than a WHERE, so the metric that drops snull
+# still produces a row saying zero. Grouping a filtered-out sample away would
+# leave the interesting case as a missing row, which is the very failure mode
+# this assertion exists to catch.
+query TI
+SELECT metric, count(*) FILTER (WHERE sample_id = 'snull') FROM all_mine
+WHERE oracle = 'B' GROUP BY 1 ORDER BY 1;
+----
+cells_per_cm2_of_sample	3
+cells_per_g_of_gdna	3
+cells_per_g_of_sample	0
+cells_per_ul_of_sample	3
+
+# ---------------------------------------------------------------------------
+# The params relation must expose the requested metric's denominator AND ONLY
+# that one. A study that measured volumes but not surface areas can ask for
+# cells per microlitre; refusing it because a sample_surface_area_cm2 column is
+# absent would be refusing a question the data can answer.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE thin_params AS
+SELECT sample_id, extracted_gdna_concentration_ng_ul, vol_extracted_elution_ul,
+       sequenced_sample_gdna_mass_ng, sample_volume_ul
+FROM b_params;
+
+query I
+SELECT count(*) FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'thin_params',
+                                          'cells_per_ul_of_sample', 0.1);
+----
+7
+
+# cells_per_g_of_gdna has no denominator column at all, so it is content with
+# even less.
+query I
+SELECT count(*) FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'thin_params',
+                                          'cells_per_g_of_gdna', 0.1);
+----
+7
+
+# ... and the metric whose column really is missing fails, naming that column.
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'thin_params',
+                                   'cells_per_cm2_of_sample', 0.1);
+----
+sample_surface_area_cm2
+
+# ---------------------------------------------------------------------------
 # D10, stated directly rather than left implicit in the COALESCE above.
 # ---------------------------------------------------------------------------
 
-# The golden's two dense zeros for this metric.
+# The golden's dense zeros. DISTINCT because they are the SAME two cells in
+# every metric -- the ratio is per sample, so a cell that is zero in one unit is
+# zero in all of them, which is why D10 needs proving once rather than four
+# times.
 query TT
-SELECT sample_id, feature_id FROM all_gold WHERE oracle = 'B' AND value = 0.0 ORDER BY 1, 2;
+SELECT DISTINCT sample_id, feature_id FROM all_gold WHERE oracle = 'B' AND value = 0.0 ORDER BY 1, 2;
 ----
 s2	f_only1
 s2	f_zero
@@ -510,7 +695,8 @@ CREATE TABLE composed AS SELECT * FROM absquant_cell_counts(
 # two miint functions agree with each other.
 query TT
 SELECT sample_id, feature_id
-FROM composed c FULL JOIN (SELECT sample_id, feature_id, value FROM all_gold WHERE oracle = 'A') g
+FROM composed c FULL JOIN (SELECT sample_id, feature_id, value FROM all_gold
+                           WHERE oracle = 'A' AND metric = 'cells_per_g_of_gdna') g
      USING (sample_id, feature_id)
 WHERE g.value IS NULL
    OR abs(COALESCE(c.value, 0) - g.value) > 1e-9 * (1.0 + abs(g.value))
@@ -691,15 +877,23 @@ UNION ALL
 # The call itself. Checked at bind, before any relation is read.
 # ---------------------------------------------------------------------------
 
+# M4 made the three sample-level metrics valid, so the rejected name here has to
+# be one that is genuinely not a metric. The accepted list is rendered from the
+# enum, so it cannot fall behind what the parser takes.
 statement error
 SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
-                                   'cells_per_ul_of_sample', 0.1);
+                                   'cells_per_mg_of_sample', 0.1);
 ----
-unsupported metric 'cells_per_ul_of_sample'; accepted: 'cells_per_g_of_gdna'
+unsupported metric 'cells_per_mg_of_sample'; accepted: 'cells_per_g_of_gdna', 'cells_per_g_of_sample', 'cells_per_ul_of_sample', 'cells_per_cm2_of_sample'
 
-# The metric is a positional argument even though exactly one value is accepted,
-# so that adding the three sample-level metrics adds VALUES rather than a new
-# signature and a query written today keeps working.
+# A near miss is still a miss: no prefix or trailing-space tolerance.
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna ', 0.1);
+----
+unsupported metric 'cells_per_g_of_gdna '
+
+# The metric is positional, and case-insensitive in every one of its values.
 query I
 SELECT count(*) FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
                                           'CELLS_PER_G_OF_GDNA', 0.1);
@@ -954,6 +1148,118 @@ SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_leng
                                    'cells_per_g_of_gdna', 0.1);
 ----
 sequenced_sample_gdna_mass_ng must not be zero; offending sample_id 's1'
+
+# The sample-level metrics' denominator gets the same treatment, and the message
+# names the column THIS metric divides by. Repeated for all three because a
+# generic wording, or one that always blamed the same column, would pass a
+# single-metric check and send two thirds of users to the wrong column.
+statement ok
+CREATE TABLE zero_denom AS
+SELECT * REPLACE (CASE WHEN sample_id = 's1' THEN 0.0 ELSE calc_mass_sample_aliquot_input_g END
+                  AS calc_mass_sample_aliquot_input_g,
+                  CASE WHEN sample_id = 's1' THEN 0.0 ELSE sample_volume_ul END AS sample_volume_ul,
+                  CASE WHEN sample_id = 's1' THEN 0.0 ELSE sample_surface_area_cm2 END
+                  AS sample_surface_area_cm2)
+FROM b_params;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'zero_denom',
+                                   'cells_per_g_of_sample', 0.1);
+----
+calc_mass_sample_aliquot_input_g must not be zero; offending sample_id 's1'
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'zero_denom',
+                                   'cells_per_ul_of_sample', 0.1);
+----
+sample_volume_ul must not be zero; offending sample_id 's1'
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'zero_denom',
+                                   'cells_per_cm2_of_sample', 0.1);
+----
+sample_surface_area_cm2 must not be zero; offending sample_id 's1'
+
+# The identical relation is fine for cells_per_g_of_gdna, which divides by none
+# of those three. Checking a column the query never reads would refuse data that
+# answers the question perfectly well.
+query I
+SELECT count(*) FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'zero_denom',
+                                          'cells_per_g_of_gdna', 0.1);
+----
+7
+
+# A zero EXTRACTION parameter is the other side of that split, and it is not an
+# error. pysyndna's screen tests `< 0`, so zero passes it, and a blank really can
+# extract no DNA. The ratio is then zero, every cell of the sample is exactly
+# zero, and the sparse invariant omits all of them -- so the sample would vanish
+# with nothing said. It is reported instead.
+statement ok
+CREATE TABLE zero_elution AS
+SELECT * REPLACE (CASE WHEN sample_id = 's1' THEN 0.0 ELSE vol_extracted_elution_ul END
+                  AS vol_extracted_elution_ul)
+FROM b_params;
+
+query TI
+SELECT sample_id, count(*) FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'zero_elution', 'cells_per_g_of_sample', 0.1)
+GROUP BY 1 ORDER BY 1;
+----
+s2	1
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%produced only zero-valued cells%'
+  AND message LIKE '%cells_per_g_of_sample%' AND message LIKE '%''s1''%';
+----
+true
+
+# That s1 is named ONCE -- reported here and not also as a filtered or an
+# uncovered sample -- is pinned in test/cpp/test_AbsQuant.cpp rather than here.
+# miint_warnings() is session-cumulative and s1 appears in this file's other
+# runs, so any "absence" claim about it phrased against the log would be
+# satisfied by wording that matched nothing at all.
+
+# cells_per_g_of_gdna never forms the ratio, so the same relation costs it
+# nothing -- s1 keeps all three of its cells.
+query I
+SELECT count(*) FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'zero_elution',
+                                          'cells_per_g_of_gdna', 0.1);
+----
+7
+
+# A cell count that leaves the representable range is refused rather than
+# emitted as inf. Every input below is individually finite and passes every
+# screen; it is their product that overflows. pysyndna emits the inf, which is
+# the same failure the zero-denominator check above already refuses.
+statement ok
+CREATE TABLE huge_models AS
+SELECT sample_id, slope, 400.0 AS intercept, rvalue, pvalue, stderr, intercept_stderr FROM b_models;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'huge_models', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+overflowed to a non-finite value
+
+# ... and through the extraction product, which only the sample-level metrics
+# form. 1e200 ng/ul over 1e200 ul is absurd and finite; their product is not.
+statement ok
+CREATE TABLE huge_extraction AS
+SELECT * REPLACE (1e200 AS extracted_gdna_concentration_ng_ul, 1e200 AS vol_extracted_elution_ul) FROM b_params;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'huge_extraction',
+                                   'cells_per_ul_of_sample', 0.1);
+----
+overflowed to a non-finite value
+
+# The identical relation is fine for the metric that never forms the ratio.
+query I
+SELECT count(*) FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'huge_extraction',
+                                          'cells_per_g_of_gdna', 0.1);
+----
+7
 
 # An rvalue outside [-1, 1] is a malformed models relation, not a weak model:
 # squaring it gives an r^2 above 1 that passes any legal min_rsquared. A

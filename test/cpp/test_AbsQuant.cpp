@@ -25,11 +25,13 @@
 #include <string>
 #include <vector>
 
+using miint::absquant::CellCountsMetric;
 using miint::absquant::CellCountsOptions;
 using miint::absquant::CellCountsResult;
 using miint::absquant::ComputeCellCounts;
 using miint::absquant::CountObservation;
 using miint::absquant::CoverageObservation;
+using miint::absquant::DenominatorColumnName;
 using miint::absquant::DuplicatedIds;
 using miint::absquant::FeatureLength;
 using miint::absquant::FitOptions;
@@ -40,6 +42,8 @@ using miint::absquant::IdsMissingFrom;
 using miint::absquant::IsUsableSampleParameter;
 using miint::absquant::Linregress;
 using miint::absquant::LinregressResult;
+using miint::absquant::MetricName;
+using miint::absquant::ParseCellCountsMetric;
 using miint::absquant::RegularizedIncompleteBeta;
 using miint::absquant::SampleCellParams;
 using miint::absquant::SampleMass;
@@ -261,9 +265,14 @@ struct CellsFixture {
 };
 
 // Loads one cell-count fixture family ("cells" = Set A, pysyndna's own;
-// "cellsb" = Set B, the synthetic filter cases).
-CellsFixture LoadCellsFixture(const std::string &prefix) {
+// "cellsb" = Set B, the synthetic filter cases) for one metric.
+//
+// Reads the metric's denominator column and ONLY that one, which is what the
+// DuckDB wrapper does too -- asking for cells_per_g_of_gdna must not require a
+// sample_volume_ul column to exist.
+CellsFixture LoadCellsFixture(const std::string &prefix, CellCountsMetric metric = CellCountsMetric::CellsPerGOfGdna) {
 	CellsFixture fixture;
+	fixture.options.metric = metric;
 	const std::string dir = "data/syndna/";
 
 	const auto counts = ReadCsv(dir + prefix + "_counts.csv");
@@ -311,8 +320,11 @@ CellsFixture LoadCellsFixture(const std::string &prefix) {
 	const size_t p_mass = params.Col("sequenced_sample_gdna_mass_ng");
 	const size_t p_conc = params.Col("extracted_gdna_concentration_ng_ul");
 	const size_t p_vol = params.Col("vol_extracted_elution_ul");
+	const char *denominator_column = DenominatorColumnName(metric);
+	const size_t p_denominator = denominator_column == nullptr ? 0 : params.Col(denominator_column);
 	for (const auto &row : params.rows) {
-		fixture.params.push_back({row[p_sample], AsDouble(row[p_mass]), AsDouble(row[p_conc]), AsDouble(row[p_vol])});
+		fixture.params.push_back({row[p_sample], AsDouble(row[p_mass]), AsDouble(row[p_conc]), AsDouble(row[p_vol]),
+		                          denominator_column == nullptr ? 0.0 : AsDouble(row[p_denominator])});
 	}
 	return fixture;
 }
@@ -1487,7 +1499,11 @@ struct TinyCells {
 	std::vector<SampleRegression> models = {{"s1", 1.0, 0.0, 1.0}};
 	std::vector<CoverageObservation> coverage = {{"s1", "f1", 0.5}, {"s1", "f2", 0.5}};
 	std::vector<FeatureLength> lengths = {{"f1", 1000.0}, {"f2", 2000.0}};
-	std::vector<SampleCellParams> params = {{"s1", 10.0, 2.0, 100.0}};
+	// 2.0 ng/ul over 100 ul is 2e-7 g of extracted gDNA, so against a 0.5-unit
+	// denominator the sample-level ratio is exactly 4e-7 -- traceable by hand
+	// like every other number in this fixture. Unread unless a test asks for a
+	// sample-level metric.
+	std::vector<SampleCellParams> params = {{"s1", 10.0, 2.0, 100.0, 0.5}};
 	CellCountsOptions options;
 
 	TinyCells() {
@@ -1509,6 +1525,68 @@ struct TinyCells {
 };
 
 } // namespace
+
+TEST_CASE("The metric table is consistent in both directions", "[absquant]") {
+	// MetricName is the SQL surface and DenominatorColumnName is the schema the
+	// params relation must satisfy, so the two together ARE the user-visible
+	// contract. Walking every enumerator is what makes a fifth metric that
+	// forgets one of the switches fail here rather than at a user's query.
+	// Taken from the header's own array rather than restated, so a fifth metric
+	// added there is exercised here without anyone remembering to add it.
+	const std::vector<CellCountsMetric> all(std::begin(miint::absquant::kAllCellCountsMetrics),
+	                                        std::end(miint::absquant::kAllCellCountsMetrics));
+	REQUIRE(all.size() == 4);
+
+	SECTION("every name parses back to the metric it came from") {
+		std::set<std::string> names;
+		for (const auto metric : all) {
+			CellCountsMetric parsed = CellCountsMetric::CellsPerGOfGdna;
+			INFO("metric " << MetricName(metric));
+			REQUIRE(ParseCellCountsMetric(MetricName(metric), parsed));
+			CHECK(parsed == metric);
+			names.insert(MetricName(metric));
+		}
+		// Two enumerators sharing a name would round-trip one of them to the
+		// other and the loop above would not notice.
+		CHECK(names.size() == all.size());
+	}
+
+	SECTION("parsing is case-insensitive, as the SQL argument is") {
+		CellCountsMetric parsed = CellCountsMetric::CellsPerGOfGdna;
+		REQUIRE(ParseCellCountsMetric("Cells_Per_UL_Of_Sample", parsed));
+		CHECK(parsed == CellCountsMetric::CellsPerUlOfSample);
+	}
+
+	SECTION("anything else is rejected without touching the output") {
+		CellCountsMetric parsed = CellCountsMetric::CellsPerCm2OfSample;
+		CHECK_FALSE(ParseCellCountsMetric("cells_per_mg_of_sample", parsed));
+		CHECK_FALSE(ParseCellCountsMetric("", parsed));
+		CHECK_FALSE(ParseCellCountsMetric("cells_per_g_of_gdna ", parsed));
+		CHECK(parsed == CellCountsMetric::CellsPerCm2OfSample);
+	}
+
+	SECTION("only cells_per_g_of_gdna has no denominator column") {
+		CHECK(DenominatorColumnName(CellCountsMetric::CellsPerGOfGdna) == nullptr);
+		std::set<std::string> columns;
+		for (const auto metric : all) {
+			if (metric == CellCountsMetric::CellsPerGOfGdna) {
+				continue;
+			}
+			const char *column = DenominatorColumnName(metric);
+			INFO("metric " << MetricName(metric));
+			REQUIRE(column != nullptr);
+			// Two metrics dividing by the same column would make them the same
+			// metric under different names.
+			CHECK(columns.insert(column).second);
+		}
+		// The names pysyndna's SAMPLE_LEVEL_METRICS_DICT keys on, which are also
+		// the column names in data/syndna/cells_params.csv.
+		CHECK(std::string(DenominatorColumnName(CellCountsMetric::CellsPerGOfSample)) ==
+		      "calc_mass_sample_aliquot_input_g");
+		CHECK(std::string(DenominatorColumnName(CellCountsMetric::CellsPerUlOfSample)) == "sample_volume_ul");
+		CHECK(std::string(DenominatorColumnName(CellCountsMetric::CellsPerCm2OfSample)) == "sample_surface_area_cm2");
+	}
+}
 
 TEST_CASE("ComputeCellCounts reproduces pysyndna's cells_per_g_of_gdna", "[absquant]") {
 	// Set A: pysyndna's own fixture, traceable to the published spreadsheet and
@@ -1610,6 +1688,95 @@ TEST_CASE("ComputeCellCounts scales as the method requires", "[absquant]") {
 	CHECK(CloseEnough(two_samples.ValueOf("s2", "f1"), v * 10.0 / 2.0, 1e-14, 0.0));
 }
 
+TEST_CASE("ComputeCellCounts reproduces pysyndna's sample-level metrics", "[absquant]") {
+	// Same Set A, same thresholds, same 22 surviving cells: the sample-level
+	// metrics change only the unit, so any one of them dropping or inventing a
+	// cell would mean the metric had leaked into the filters.
+	for (const auto metric : {CellCountsMetric::CellsPerGOfSample, CellCountsMetric::CellsPerUlOfSample,
+	                          CellCountsMetric::CellsPerCm2OfSample}) {
+		INFO("metric " << MetricName(metric));
+		auto fixture = LoadCellsFixture("cells", metric);
+		fixture.options.min_coverage = 0.1;
+		fixture.options.min_rsquared = 0.8;
+
+		const auto result = fixture.Run();
+		CheckCellsAgainstOracle(result, "data/syndna/cells_oracle.csv", MetricName(metric));
+		CHECK(result.values.size() == 22);
+	}
+}
+
+TEST_CASE("ComputeCellCounts converts to sample units by one per-sample ratio", "[absquant]") {
+	// The oracle pins all four metrics at once; this pins the ratio's shape, so
+	// an inverted division or a denominator read from the wrong column is
+	// localized instead of showing up as "all 22 values differ".
+	const TinyCells base;
+	const double gdna = base.ValueOf("s1", "f1");
+	REQUIRE(std::isfinite(gdna));
+	REQUIRE(gdna > 0.0);
+
+	// 2.0 ng/ul * 100 ul / 1e9 = 2e-7 g extracted, over a 0.5-unit denominator.
+	// Written as the formula rather than as 4e-7 so the test cannot agree with
+	// an arithmetic mistake it shares with the code.
+	const double extracted_gdna_mass_g =
+	    base.params[0].extracted_gdna_concentration_ng_ul * base.params[0].vol_extracted_elution_ul / 1e9;
+	const double ratio = extracted_gdna_mass_g / base.params[0].sample_denominator;
+
+	SECTION("each sample-level metric scales cells_per_g_of_gdna by that ratio") {
+		for (const auto metric : {CellCountsMetric::CellsPerGOfSample, CellCountsMetric::CellsPerUlOfSample,
+		                          CellCountsMetric::CellsPerCm2OfSample}) {
+			INFO("metric " << MetricName(metric));
+			TinyCells fixture;
+			fixture.options.metric = metric;
+			// All three read `sample_denominator`, which the caller has already
+			// resolved -- so with the same denominator they must agree exactly.
+			// That is what makes the enum a column selector rather than three
+			// different formulas.
+			CHECK(CloseEnough(fixture.ValueOf("s1", "f1"), gdna * ratio, 1e-14, 0.0));
+		}
+	}
+
+	SECTION("the denominator divides and the extraction terms multiply") {
+		TinyCells bigger;
+		bigger.options.metric = CellCountsMetric::CellsPerGOfSample;
+		const double v = bigger.ValueOf("s1", "f1");
+		REQUIRE(std::isfinite(v));
+
+		// Twice the sample, half the cells per unit of it.
+		TinyCells twice_the_sample = bigger;
+		twice_the_sample.params[0].sample_denominator *= 2.0;
+		CHECK(CloseEnough(twice_the_sample.ValueOf("s1", "f1"), v / 2.0, 1e-14, 0.0));
+
+		// Twice the extracted gDNA, from either factor, is twice the cells --
+		// varying them separately is what catches a ratio that reads only one.
+		TinyCells twice_the_concentration = bigger;
+		twice_the_concentration.params[0].extracted_gdna_concentration_ng_ul *= 2.0;
+		CHECK(CloseEnough(twice_the_concentration.ValueOf("s1", "f1"), v * 2.0, 1e-14, 0.0));
+
+		TinyCells twice_the_elution = bigger;
+		twice_the_elution.params[0].vol_extracted_elution_ul *= 2.0;
+		CHECK(CloseEnough(twice_the_elution.ValueOf("s1", "f1"), v * 2.0, 1e-14, 0.0));
+	}
+
+	SECTION("the ratio is per sample, not per feature") {
+		// Two features of the same sample must move together: a ratio applied
+		// per cell would still pass every single-feature check above.
+		TinyCells fixture;
+		fixture.options.metric = CellCountsMetric::CellsPerUlOfSample;
+		CHECK(CloseEnough(fixture.ValueOf("s1", "f2"), base.ValueOf("s1", "f2") * ratio, 1e-14, 0.0));
+	}
+
+	SECTION("cells_per_g_of_gdna is untouched by any of the three inputs") {
+		// Exact equality, not a tolerance: the gdna metric must not enter the
+		// ratio path at all, so M3's values are reproduced bit for bit rather
+		// than merely closely.
+		TinyCells fixture;
+		fixture.params[0].sample_denominator = 12345.0;
+		fixture.params[0].extracted_gdna_concentration_ng_ul = 7.0;
+		fixture.params[0].vol_extracted_elution_ul = 3.0;
+		CHECK(fixture.ValueOf("s1", "f1") == gdna);
+	}
+}
+
 TEST_CASE("ComputeCellCounts matches pysyndna once every filter is in play", "[absquant]") {
 	// Set B exists to exercise the filters Set A cannot: a sample below the r^2
 	// gate, a sample whose every feature fails coverage, a feature that passes
@@ -1664,6 +1831,155 @@ TEST_CASE("ComputeCellCounts pins both strict-< thresholds at once", "[absquant]
 	}
 }
 
+TEST_CASE("ComputeCellCounts screens only the requested metric's denominator", "[absquant]") {
+	// pysyndna's filter set is sequenced_sample_gdna_mass_ng, plus
+	// REQUIRED_DNA_PREP_INFO_KEYS, plus the requested metric's OWN denominator
+	// and no other (calc_ogu_cell_counts_biom:959-965). Set B's `snull` has a
+	// NULL calc_mass_sample_aliquot_input_g and nothing else missing, so it is
+	// the one sample that tells the three candidate readings apart:
+	//
+	//   screen all three sample columns -> snull is dropped from every metric
+	//   screen none of them             -> snull yields NaN cells for per-g
+	//   screen only the requested one   -> the goldens
+	//
+	// All three reproduce every VALUE of the samples that survive, so only the
+	// membership below can distinguish them.
+	SECTION("the metric whose denominator is missing loses the sample") {
+		auto fixture = LoadCellsFixture("cellsb", CellCountsMetric::CellsPerGOfSample);
+		fixture.options.min_coverage = 0.1;
+		fixture.options.min_rsquared = 0.8;
+
+		const auto result = fixture.Run();
+		CheckCellsAgainstOracle(result, "data/syndna/cellsb_oracle.csv", "cells_per_g_of_sample");
+
+		CHECK(result.filtered_sample_ids == std::vector<std::string> {"snull"});
+		for (const auto &cell : result.values) {
+			CHECK(cell.sample_id != "snull");
+		}
+		// 6 dense golden cells less the two zeros, against 9 less two for the
+		// metrics that keep snull.
+		CHECK(result.values.size() == 4);
+	}
+
+	SECTION("the metrics that do not read that column keep it") {
+		for (const auto metric : {CellCountsMetric::CellsPerUlOfSample, CellCountsMetric::CellsPerCm2OfSample}) {
+			INFO("metric " << MetricName(metric));
+			auto fixture = LoadCellsFixture("cellsb", metric);
+			fixture.options.min_coverage = 0.1;
+			fixture.options.min_rsquared = 0.8;
+
+			const auto result = fixture.Run();
+			CheckCellsAgainstOracle(result, "data/syndna/cellsb_oracle.csv", MetricName(metric));
+
+			CHECK(result.filtered_sample_ids.empty());
+			CHECK(result.values.size() == 7);
+			bool has_snull = false;
+			for (const auto &cell : result.values) {
+				has_snull = has_snull || cell.sample_id == "snull";
+			}
+			CHECK(has_snull);
+		}
+	}
+
+	SECTION("a bad denominator is filtered, not thrown, and only for its metric") {
+		// The same three unusable values the other required parameters get, on
+		// the one column whose relevance depends on the metric.
+		for (const double bad : {std::nan(""), -1.0, std::numeric_limits<double>::infinity()}) {
+			INFO("denominator " << bad);
+			TinyCells fixture;
+			fixture.params[0].sample_denominator = bad;
+
+			fixture.options.metric = CellCountsMetric::CellsPerGOfSample;
+			CHECK(fixture.Run().filtered_sample_ids == std::vector<std::string> {"s1"});
+			CHECK(fixture.Run().values.empty());
+
+			// cells_per_g_of_gdna has no denominator column at all, so the same
+			// row is perfectly usable for it.
+			fixture.options.metric = CellCountsMetric::CellsPerGOfGdna;
+			CHECK(fixture.Run().filtered_sample_ids.empty());
+			CHECK(fixture.Run().values.size() == 2);
+		}
+	}
+}
+
+TEST_CASE("ComputeCellCounts pins the strict-< thresholds for every metric", "[absquant]") {
+	// The boundary oracle at min_coverage 0.02 / min_rsquared 0.25, where both
+	// thresholds sit exactly on a value in the data. Running it per metric is
+	// what keeps the metric out of the filters: a threshold comparison that
+	// somehow depended on the unit would show up here and nowhere else.
+	for (const auto metric : {CellCountsMetric::CellsPerGOfSample, CellCountsMetric::CellsPerUlOfSample,
+	                          CellCountsMetric::CellsPerCm2OfSample}) {
+		INFO("metric " << MetricName(metric));
+		auto fixture = LoadCellsFixture("cellsb", metric);
+		fixture.options.min_coverage = 0.02;
+		fixture.options.min_rsquared = 0.25;
+
+		const auto result = fixture.Run();
+		CheckCellsAgainstOracle(result, "data/syndna/cellsb_boundary_oracle.csv", MetricName(metric));
+
+		// slowr2 is admitted at exactly 0.25, and sallcov is still wholly
+		// uncovered, whichever unit is asked for.
+		CHECK(result.low_rsquared_sample_ids.empty());
+		CHECK(result.uncovered_sample_ids == std::vector<std::string> {"sallcov"});
+		// 9 golden cells less one zero for the metric that drops snull, 12 less
+		// one for the two that keep it.
+		CHECK(result.values.size() == (metric == CellCountsMetric::CellsPerGOfSample ? 8u : 11u));
+	}
+}
+
+TEST_CASE("ComputeCellCounts reports a sample whose every cell came out zero", "[absquant]") {
+	// A zero extraction ratio is the one way a sample can pass every filter and
+	// still contribute nothing. Both factors of extracted_gdna_mass_g may
+	// legitimately be zero -- pysyndna's parameter screen tests `< 0`, so zero
+	// passes it, and a blank really can extract no DNA -- and then every cell of
+	// the sample is exactly 0.0 and the sparse invariant omits all of them.
+	//
+	// This cannot arise for cells_per_g_of_gdna, whose values are strictly
+	// positive, which is why M3 had no such list. Without one the sample would
+	// vanish from the output with nothing said about it, and "no rows" would be
+	// indistinguishable from "no such sample".
+	for (size_t which = 0; which < 2; ++which) {
+		INFO("zeroed extraction factor " << which);
+		TinyCells fixture;
+		fixture.options.metric = CellCountsMetric::CellsPerGOfSample;
+		double *factors[] = {&fixture.params[0].extracted_gdna_concentration_ng_ul,
+		                     &fixture.params[0].vol_extracted_elution_ul};
+		*factors[which] = 0.0;
+
+		const auto result = fixture.Run();
+		CHECK(result.values.empty());
+		CHECK(result.zero_valued_sample_ids == std::vector<std::string> {"s1"});
+		// Named ONCE. A zero parameter is not a missing one, so this must not
+		// also report the sample as filtered.
+		CHECK(result.filtered_sample_ids.empty());
+		CHECK(result.samples_without_models.empty());
+		CHECK(result.low_rsquared_sample_ids.empty());
+		CHECK(result.uncovered_sample_ids.empty());
+
+		// The identical parameters under cells_per_g_of_gdna are fine: it never
+		// forms the ratio, so there is nothing to be zero.
+		fixture.options.metric = CellCountsMetric::CellsPerGOfGdna;
+		const auto gdna = fixture.Run();
+		CHECK(gdna.values.size() == 2);
+		CHECK(gdna.zero_valued_sample_ids.empty());
+	}
+
+	SECTION("only the affected sample is lost") {
+		TinyCells fixture;
+		fixture.options.metric = CellCountsMetric::CellsPerUlOfSample;
+		fixture.counts.push_back({"s2", "f1", 100.0});
+		fixture.models.push_back({"s2", 1.0, 0.0, 1.0});
+		fixture.coverage.push_back({"s2", "f1", 0.5});
+		fixture.params.push_back({"s2", 10.0, 2.0, 100.0, 0.5});
+		fixture.params[0].vol_extracted_elution_ul = 0.0;
+
+		const auto result = fixture.Run();
+		CHECK(result.zero_valued_sample_ids == std::vector<std::string> {"s1"});
+		CHECK(result.values.size() == 1);
+		CHECK(result.values[0].sample_id == "s2");
+	}
+}
+
 TEST_CASE("ComputeCellCounts reports every sample it discards", "[absquant]") {
 	// Checked against pysyndna's own log for this exact run, captured when the
 	// oracle was generated:
@@ -1698,13 +2014,16 @@ TEST_CASE("ComputeCellCounts reports every sample it discards", "[absquant]") {
 	}
 
 	// Total accounting: five samples in, three producing cells and two named.
+	// Every list is in the sum, so a sample that starts landing in none of them
+	// -- or in two -- fails here rather than silently vanishing.
 	std::set<std::string> with_values;
 	for (const auto &cell : result.values) {
 		with_values.insert(cell.sample_id);
 	}
 	CHECK(with_values == std::set<std::string> {"s1", "s2", "snull"});
 	CHECK(with_values.size() + result.filtered_sample_ids.size() + result.samples_without_models.size() +
-	          result.low_rsquared_sample_ids.size() + result.uncovered_sample_ids.size() ==
+	          result.low_rsquared_sample_ids.size() + result.uncovered_sample_ids.size() +
+	          result.zero_valued_sample_ids.size() ==
 	      5);
 }
 
@@ -1952,6 +2271,106 @@ TEST_CASE("ComputeCellCounts rejects malformed relations", "[absquant]") {
 		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("sequenced_sample_gdna_mass_ng"));
 	}
 
+	SECTION("a zero sample denominator, for the metric that divides by it") {
+		// Same reasoning one level out: the sample-level metrics divide by their
+		// own column, pysyndna does so unguarded, and a zero there yields inf
+		// cells for every feature in the sample. Zero passes the NaN/negative
+		// screen, so this is the only thing standing between a blank metadata
+		// cell and an infinite answer.
+		for (const auto metric : {CellCountsMetric::CellsPerGOfSample, CellCountsMetric::CellsPerUlOfSample,
+		                          CellCountsMetric::CellsPerCm2OfSample}) {
+			INFO("metric " << MetricName(metric));
+			TinyCells fixture;
+			fixture.options.metric = metric;
+			fixture.params[0].sample_denominator = 0.0;
+			CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
+			CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s1'"));
+			// The message must name the column THIS metric reads, not a generic
+			// "denominator" and not one of the other two. Sending someone to
+			// sample_volume_ul to fix a blank calc_mass_sample_aliquot_input_g
+			// is worse than saying nothing.
+			CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring(DenominatorColumnName(metric)));
+			for (const auto other : {CellCountsMetric::CellsPerGOfSample, CellCountsMetric::CellsPerUlOfSample,
+			                         CellCountsMetric::CellsPerCm2OfSample}) {
+				if (other != metric) {
+					CHECK_THROWS_WITH(fixture.Run(), !ContainsSubstring(DenominatorColumnName(other)));
+				}
+			}
+		}
+
+		// cells_per_g_of_gdna has no denominator column, and its callers leave
+		// the field at zero -- so an unconditional check here would make every
+		// query for M3's metric throw.
+		TinyCells gdna;
+		gdna.params[0].sample_denominator = 0.0;
+		CHECK_NOTHROW(gdna.Run());
+		CHECK(gdna.Run().values.size() == 2);
+	}
+
+	SECTION("a cell count that overflows to a non-finite value") {
+		// Every input here is individually finite and passes every screen; it is
+		// their combination that leaves the representable range. pysyndna emits
+		// the inf. Refusing is the same call the zero denominators get, and for
+		// the same reason -- an infinite cell count is not a measurement.
+		//
+		// Reachable two ways, so both are pinned. First an extreme model, which
+		// is NOT specific to the new metrics: cells_per_g_of_gdna overflows the
+		// same way, and did so silently before this check existed.
+		TinyCells huge_model;
+		huge_model.models[0].intercept = 400.0;
+		CHECK_THROWS_AS(huge_model.Run(), std::invalid_argument);
+		CHECK_THROWS_WITH(huge_model.Run(), ContainsSubstring("non-finite"));
+		CHECK_THROWS_WITH(huge_model.Run(), ContainsSubstring("'s1 / f1'"));
+
+		// Second the extraction product, which is new surface: the multiply that
+		// makes a sample-level metric can overflow before the divide undoes it.
+		TinyCells huge_extraction;
+		huge_extraction.options.metric = CellCountsMetric::CellsPerUlOfSample;
+		huge_extraction.params[0].extracted_gdna_concentration_ng_ul = 1e200;
+		huge_extraction.params[0].vol_extracted_elution_ul = 1e200;
+		CHECK_THROWS_WITH(huge_extraction.Run(), ContainsSubstring("non-finite"));
+
+		// The identical extraction parameters are harmless to the metric that
+		// never forms the ratio.
+		TinyCells gdna = huge_extraction;
+		gdna.options.metric = CellCountsMetric::CellsPerGOfGdna;
+		CHECK_NOTHROW(gdna.Run());
+		CHECK(gdna.Run().values.size() == 2);
+	}
+
+	SECTION("a predicted mass that underflows is omitted, not reported per cell") {
+		// The other end of the same range. An extreme NEGATIVE intercept drives
+		// 10^x to exactly zero, and under D10 a zero cell is an absent cell --
+		// so the cell is omitted and nothing is said, because the sample is
+		// still in the output and still means what it says.
+		//
+		// This is why the zero-valued list documents itself as "not reachable
+		// through a realistic model" rather than "impossible": here is the
+		// unrealistic one, and it behaves.
+		TinyCells fixture;
+		fixture.models[0].intercept = -400.0;
+		const auto result = fixture.Run();
+		CHECK(result.values.empty());
+		// Every cell of the sample went that way, so the whole-sample case DOES
+		// report -- for cells_per_g_of_gdna, which the header says is not
+		// reachable in practice and does not claim is impossible.
+		CHECK(result.zero_valued_sample_ids == std::vector<std::string> {"s1"});
+
+		// One cell underflowing while others survive is silent, and correctly
+		// so. Splitting the sample takes a wide spread of counts and an
+		// intercept between them: at -330 with slope 1, f1's 10^-328 flushes to
+		// zero while f2's 10^-300 is merely subnormal and comes out 9.3e-284.
+		// (-320 does NOT split them: 10^-318 is subnormal, not zero.)
+		TinyCells split;
+		split.lengths[1].ogu_len_in_bp = split.lengths[0].ogu_len_in_bp;
+		split.models[0].intercept = -330.0;
+		split.counts[1].count = 1e30;
+		const auto partial = split.Run();
+		REQUIRE(partial.values.size() == 1);
+		CHECK(partial.values[0].feature_id == "f2");
+		CHECK(partial.zero_valued_sample_ids.empty());
+	}
+
 	SECTION("an rvalue outside [-1, 1]") {
 		// A correlation coefficient cannot be 1.5, so this is a malformed models
 		// relation rather than a weak model -- and squaring it would turn it into
@@ -2054,6 +2473,14 @@ TEST_CASE("ComputeCellCounts enforces id consistency asymmetrically", "[absquant
 		fixture.params.push_back({"s_unused", 0.0, 2.0, 100.0});
 		fixture.models.push_back({"s_unused", 1.0, 0.0, 42.0});
 		CHECK_NOTHROW(fixture.Run());
+
+		// Including the denominator: a parameters relation is a whole study, and
+		// a zero aliquot mass on a sample this query never counts is not this
+		// query's problem.
+		fixture.options.metric = CellCountsMetric::CellsPerGOfSample;
+		fixture.params.back().sample_denominator = 0.0;
+		CHECK_NOTHROW(fixture.Run());
+		CHECK(fixture.Run().values.size() == 2);
 	}
 }
 

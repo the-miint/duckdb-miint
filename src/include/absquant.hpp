@@ -304,6 +304,43 @@ constexpr double kAvogadro = 6.02214076e23;
 //! pysyndna's `calc_copies_genomic_element_per_g_series` default.
 constexpr double kGramsPerMolePerBasePair = 650.0;
 
+//! The unit the predicted cell counts are expressed per.
+//!
+//! `CellsPerGOfGdna` normalizes by the gDNA that went into the sequencer, which
+//! is an instrument quantity. The other three normalize by the material that
+//! was actually collected, which is what makes them comparable across samples,
+//! and each divides by its own column of the parameters relation.
+enum class CellCountsMetric { CellsPerGOfGdna, CellsPerGOfSample, CellsPerUlOfSample, CellsPerCm2OfSample };
+
+//! Every metric, in the order the user-facing documentation lists them.
+//!
+//! The ONE place the set is enumerated. MetricName and DenominatorColumnName
+//! are exhaustive switches with no `default:`, but this build does not enable
+//! -Wswitch (CMakeLists.txt has -Wall/-Wextra commented out for the extension
+//! target), so a fifth enumerator would not be diagnosed there either. Deriving
+//! the parser and the accepted-value list from this array is what actually
+//! makes a half-added metric impossible, rather than restating the set in each
+//! of them and hoping they stay in step.
+inline constexpr CellCountsMetric kAllCellCountsMetrics[] = {
+    CellCountsMetric::CellsPerGOfGdna, CellCountsMetric::CellsPerGOfSample, CellCountsMetric::CellsPerUlOfSample,
+    CellCountsMetric::CellsPerCm2OfSample};
+
+//! The SQL-facing spelling of a metric, e.g. "cells_per_g_of_gdna".
+const char *MetricName(CellCountsMetric metric);
+
+//! Parses one of those spellings, case-insensitively. Returns false and leaves
+//! `out` untouched for anything else.
+bool ParseCellCountsMetric(const std::string &name, CellCountsMetric &out);
+
+//! The parameters-relation column a metric divides by, or nullptr for
+//! `CellsPerGOfGdna`, which has no sample-side denominator.
+//!
+//! This is the single source of truth for that mapping: the DuckDB wrapper
+//! calls it to decide which column to read, and the core calls it to name the
+//! column in its diagnostics, so the column read and the column blamed cannot
+//! drift apart.
+const char *DenominatorColumnName(CellCountsMetric metric);
+
 //! One row of the per-(sample, feature) coverage relation.
 //!
 //! Coverage is a FRACTION in [0, 1], never a percent (D9). pysyndna accepts
@@ -350,9 +387,23 @@ struct SampleCellParams {
 	double sequenced_sample_gdna_mass_ng = 0.0;
 	double extracted_gdna_concentration_ng_ul = 0.0;
 	double vol_extracted_elution_ul = 0.0;
+	//! Whichever column DenominatorColumnName picked for the requested metric,
+	//! already resolved by the caller. ONE field rather than one per metric,
+	//! because only one is ever read: three named fields would leave two
+	//! permanently unset, which a later reader would reasonably take for data.
+	//!
+	//! Unused, and left at zero, for cells_per_g_of_gdna -- which is also why it
+	//! is screened for the other three metrics only. pysyndna filters on the
+	//! REQUESTED metric's denominator and no other
+	//! (calc_ogu_cell_counts_biom:959-965), so a sample missing a column the
+	//! query never reads stays in.
+	double sample_denominator = 0.0;
 };
 
 struct CellCountsOptions {
+	//! Which unit to express the counts per. Selects `sample_denominator`'s
+	//! meaning; see CellCountsMetric.
+	CellCountsMetric metric = CellCountsMetric::CellsPerGOfGdna;
 	//! A (sample, feature) whose coverage is BELOW this is dropped. Strict `<`,
 	//! so a feature sitting exactly on the threshold is kept. A fraction in
 	//! [0, 1].
@@ -369,7 +420,7 @@ struct CellCountValue {
 };
 
 //! Every sample present in `counts` either contributes cells to `values` or
-//! appears in exactly one of the four sample lists below, so no sample
+//! appears in exactly one of the five sample lists below, so no sample
 //! disappears without the caller being able to say why. (Input that would break
 //! that -- a counted sample with no parameter row, a counted cell with no
 //! coverage row -- is rejected before any of this runs.)
@@ -414,10 +465,31 @@ struct CellCountsResult {
 	//! agree; miint just says so. Naming the features is not a substitute,
 	//! because in a real run that list is capped at ten ids.
 	std::vector<std::string> uncovered_sample_ids;
+	//! Samples that passed every filter and still produced nothing, because
+	//! every one of their cells came out exactly zero and the sparse invariant
+	//! omits those. In practice that means a zero extraction ratio: either
+	//! extracted_gdna_concentration_ng_ul or vol_extracted_elution_ul was zero,
+	//! which pysyndna's `< 0` parameter screen admits and a blank extraction can
+	//! genuinely produce.
+	//!
+	//! Not reachable for cells_per_g_of_gdna through any realistic model, whose
+	//! values are strictly positive, which is why M3 had no such list. It is not
+	//! *impossible* there: a hand-built model with an extreme negative intercept
+	//! underflows 10^x to exactly zero, and this list would then name the
+	//! sample. That is the honest boundary -- the metric does not make the case
+	//! disappear, it makes it unreachable from absquant_fit_models' output.
+	//!
+	//! Reported only when the WHOLE sample goes this way. A single zero cell
+	//! among others needs no diagnostic, because under D10 an omitted cell and a
+	//! dense 0.0 are the same claim and the sample is still there to be read.
+	//! It is the all-zero sample that the sparse form cannot express: "no rows
+	//! for this sample" would otherwise be indistinguishable from "no such
+	//! sample". pysyndna never faces this, its output being dense.
+	std::vector<std::string> zero_valued_sample_ids;
 };
 
-//! Predict cells of each feature per gram of gDNA, reproducing pysyndna's
-//! calc_ogu_cell_counts_biom for the cells_per_g_of_gdna metric.
+//! Predict cells of each feature per unit of sample or of gDNA, reproducing
+//! pysyndna's calc_ogu_cell_counts_biom.
 //!
 //! Per surviving (sample, feature):
 //!
@@ -431,6 +503,18 @@ struct CellCountsResult {
 //! which pysyndna's own comment acknowledges is wrong for dividing and
 //! polyploid microbes. It is reproduced because it is the published method.
 //!
+//! The three sample-level metrics then scale that by one per-sample ratio:
+//!
+//!     extracted_gdna_mass_g = extracted_gdna_concentration_ng_ul
+//!                             * vol_extracted_elution_ul / 1e9
+//!     ratio                 = extracted_gdna_mass_g / sample_denominator
+//!     cells_per_<unit>      = cells_per_g_gdna * ratio
+//!
+//! `extracted_gdna_mass_g` is the gDNA recovered from the whole extraction, not
+//! the portion that was sequenced -- which is exactly what turns "per gram of
+//! sequenced gDNA" into "per unit of collected material". The ratio is 1 for
+//! cells_per_g_of_gdna, whose values are unaffected.
+//!
 //! Three filters run before that arithmetic, and their ORDER is load-bearing --
 //! not for the values, which are the same whichever way round it goes, but for
 //! the diagnostics:
@@ -439,6 +523,12 @@ struct CellCountsResult {
 //!   2. cells with coverage < min_coverage           -> low_coverage_feature_ids
 //!   3. samples with no model, or with r^2 < min     -> samples_without_models,
 //!                                                      low_rsquared_sample_ids
+//!
+//! Filter 1 screens sequenced_sample_gdna_mass_ng, both extraction parameters,
+//! and -- for the three sample-level metrics only -- sample_denominator. That
+//! last one is per metric, matching pysyndna: screening all three sample columns
+//! or none of them reproduces every VALUE and still gets the sample membership
+//! wrong.
 //!
 //! pysyndna removes the bad-parameter samples from the counts table itself
 //! (calc_cell_counts.py:1013) before the coverage filter ever runs, so such a
@@ -468,8 +558,15 @@ struct CellCountsResult {
 //! min_rsquared outside [0, 1]), on a malformed relation (duplicate keys; a
 //! count that is not finite and positive; a coverage outside [0, 1]; a
 //! non-positive or non-finite ogu_len_in_bp; a zero sequenced_sample_gdna_mass_ng;
-//! an rvalue outside [-1, 1]) and on the id mismatches above. The DuckDB wrapper
-//! re-throws these as InvalidInputException prefixed with the function name.
+//! a zero sample_denominator when the metric divides by one; an rvalue outside
+//! [-1, 1]), on the id mismatches above, and on a computed cell count that
+//! overflowed to a non-finite value. The DuckDB wrapper re-throws these as
+//! InvalidInputException prefixed with the function name.
+//!
+//! Note the split the two denominators share: zero is an ERROR, because dividing
+//! by it is structurally impossible and pysyndna silently emits inf cells for
+//! every feature in the sample, while NaN, negative and infinite values are
+//! FILTERED with a diagnostic, matching pysyndna's own screen.
 CellCountsResult ComputeCellCounts(const std::vector<CountObservation> &counts,
                                    const std::vector<SampleRegression> &models,
                                    const std::vector<CoverageObservation> &coverage,

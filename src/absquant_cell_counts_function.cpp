@@ -21,14 +21,18 @@ namespace {
 
 using absquant_internal::ReadKeyedColumns;
 using absquant_internal::ReadLongFormValues;
+using miint::absquant::CellCountsMetric;
 using miint::absquant::CellCountsOptions;
 using miint::absquant::CellCountsResult;
 using miint::absquant::CellCountValue;
 using miint::absquant::ComputeCellCounts;
 using miint::absquant::CountObservation;
 using miint::absquant::CoverageObservation;
+using miint::absquant::DenominatorColumnName;
 using miint::absquant::FeatureLength;
 using miint::absquant::FormatIdList;
+using miint::absquant::MetricName;
+using miint::absquant::ParseCellCountsMetric;
 using miint::absquant::SampleCellParams;
 using miint::absquant::SampleRegression;
 using unifrac_internal::ReadFeatureTable;
@@ -36,10 +40,20 @@ using unifrac_internal::ResolveSampleIdOutputType;
 
 constexpr const char *kCallerName = "absquant_cell_counts";
 
-// The only metric M3 computes. It is a positional argument rather than a
-// hard-coded behavior so that adding the three sample-level metrics adds
-// VALUES here, not a new signature -- a query written today keeps working.
-constexpr const char *kMetricCellsPerGOfGdna = "cells_per_g_of_gdna";
+// "'cells_per_g_of_gdna', 'cells_per_g_of_sample', ..." for the rejection
+// message. Rendered from the enum rather than spelled out, so a fifth metric
+// cannot be accepted by the parser and still be missing from the list of what
+// this function accepts.
+std::string AcceptedMetricList() {
+	std::string out;
+	for (const auto metric : miint::absquant::kAllCellCountsMetrics) {
+		if (!out.empty()) {
+			out += ", ";
+		}
+		out += std::string("'") + MetricName(metric) + "'";
+	}
+	return out;
+}
 
 struct AbsQuantCellCountsBindData : public TableFunctionData {
 	std::string counts_table;
@@ -47,7 +61,6 @@ struct AbsQuantCellCountsBindData : public TableFunctionData {
 	std::string coverage_table;
 	std::string lengths_table;
 	std::string params_table;
-	std::string metric;
 	CellCountsOptions options;
 	// Output types for the two id columns, mirrored from the counts relation
 	// (BIGINT/UUID preserved, else VARCHAR).
@@ -82,7 +95,6 @@ unique_ptr<FunctionData> AbsQuantCellCountsBind(ClientContext &context, TableFun
 	data->coverage_table = input.inputs[2].GetValue<string>();
 	data->lengths_table = input.inputs[3].GetValue<string>();
 	data->params_table = input.inputs[4].GetValue<string>();
-	data->metric = StringUtil::Lower(input.inputs[5].GetValue<string>());
 	data->options.min_coverage = input.inputs[6].GetValue<double>();
 	for (const auto &kv : input.named_parameters) {
 		if (StringUtil::Lower(kv.first) == "min_rsquared") {
@@ -95,12 +107,15 @@ unique_ptr<FunctionData> AbsQuantCellCountsBind(ClientContext &context, TableFun
 
 	// The metric IS checked here, unlike the two numeric thresholds. Their range
 	// checks live in the pure core, where they are unit-tested against pysyndna's
-	// bounds and InitGlobal re-throws them with this function's name. The metric
-	// never reaches the core at all -- it selects which core to call -- so bind
-	// is the only place that can reject it.
-	if (data->metric != kMetricCellsPerGOfGdna) {
-		throw BinderException("%s: unsupported metric '%s'; accepted: '%s'", kCallerName,
-		                      input.inputs[5].GetValue<string>(), kMetricCellsPerGOfGdna);
+	// bounds and InitGlobal re-throws them with this function's name. An
+	// unparseable metric never gets as far as the core -- it decides which
+	// columns to read -- so bind is the only place that can reject it.
+	//
+	// ParseCellCountsMetric folds case itself, so the raw argument goes in and
+	// the raw argument comes back out in the message.
+	if (!ParseCellCountsMetric(input.inputs[5].GetValue<string>(), data->options.metric)) {
+		throw BinderException("%s: unsupported metric '%s'; accepted: %s", kCallerName,
+		                      input.inputs[5].GetValue<string>(), AcceptedMetricList());
 	}
 
 	// All five relations are resolved here so a typo in ANY of them is a
@@ -142,10 +157,11 @@ unique_ptr<FunctionData> AbsQuantCellCountsBind(ClientContext &context, TableFun
 // is every feature dropped for coverage. A missing row is the one outcome a user
 // cannot debug from the output alone.
 //
-// pysyndna logs the first two of these and is silent about the other two: a
-// wholly uncovered sample never reaches its per-sample loop, and it has no
-// notion of a model that is present but unusable. The values agree either way;
-// these two lines are miint saying out loud what pysyndna leaves the user to
+// pysyndna logs the first two of these and is silent about the other three: a
+// wholly uncovered sample never reaches its per-sample loop, it has no notion of
+// a model that is present but unusable, and its dense output writes the
+// all-zero sample out rather than omitting it. The values agree either way;
+// those three lines are miint saying out loud what pysyndna leaves the user to
 // infer from an absent row.
 void EmitDiagnostics(ClientContext &context, const AbsQuantCellCountsBindData &data, const CellCountsResult &result) {
 	if (!result.low_coverage_feature_ids.empty()) {
@@ -177,6 +193,17 @@ void EmitDiagnostics(ClientContext &context, const AbsQuantCellCountsBindData &d
 		                 " sample(s) whose model r^2 fell below " + std::to_string(data.options.min_rsquared) + ": " +
 		                 FormatIdList(result.low_rsquared_sample_ids));
 	}
+	if (!result.zero_valued_sample_ids.empty()) {
+		// These passed every gate and still contribute no row, because the
+		// output is sparse and every one of their cells is zero. Naming the
+		// denominator is the actionable part: the cause is almost always a zero
+		// extraction concentration or elution volume, which is exactly the case
+		// the NULL/negative screen lets through.
+		miint::EmitWarning(
+		    context, std::string(kCallerName) + ": " + std::to_string(result.zero_valued_sample_ids.size()) +
+		                 " sample(s) produced only zero-valued cells for metric '" + MetricName(data.options.metric) +
+		                 "' and appear in no output row: " + FormatIdList(result.zero_valued_sample_ids));
+	}
 }
 
 unique_ptr<GlobalTableFunctionState> AbsQuantCellCountsInitGlobal(ClientContext &context,
@@ -197,10 +224,18 @@ unique_ptr<GlobalTableFunctionState> AbsQuantCellCountsInitGlobal(ClientContext 
 	    ReadLongFormValues(context, data.coverage_table, "coverage", "coverage relation", kCallerName);
 	const auto length_rows = ReadKeyedColumns(context, data.lengths_table, "feature_id", {"ogu_len_in_bp"},
 	                                          "feature lengths relation", kCallerName);
-	const auto param_rows = ReadKeyedColumns(
-	    context, data.params_table, "sample_id",
-	    {"sequenced_sample_gdna_mass_ng", "extracted_gdna_concentration_ng_ul", "vol_extracted_elution_ul"},
-	    "sample parameters relation", kCallerName);
+	// The requested metric's denominator joins the three base columns, and only
+	// it does. Asking for cells_per_g_of_gdna must not require a sample_volume_ul
+	// column to exist -- the LIMIT 0 probe inside ReadKeyedColumns would reject
+	// the whole relation for a column this query never reads.
+	const char *denominator_column = DenominatorColumnName(data.options.metric);
+	std::vector<const char *> param_columns = {"sequenced_sample_gdna_mass_ng", "extracted_gdna_concentration_ng_ul",
+	                                           "vol_extracted_elution_ul"};
+	if (denominator_column != nullptr) {
+		param_columns.push_back(denominator_column);
+	}
+	const auto param_rows = ReadKeyedColumns(context, data.params_table, "sample_id", param_columns,
+	                                         "sample parameters relation", kCallerName);
 
 	std::vector<CountObservation> counts;
 	counts.reserve(count_rows.size());
@@ -231,8 +266,13 @@ unique_ptr<GlobalTableFunctionState> AbsQuantCellCountsInitGlobal(ClientContext 
 	const auto &gdna_mass_ng = param_rows.values.at("sequenced_sample_gdna_mass_ng");
 	const auto &gdna_conc = param_rows.values.at("extracted_gdna_concentration_ng_ul");
 	const auto &elution_ul = param_rows.values.at("vol_extracted_elution_ul");
+	// Null for cells_per_g_of_gdna, which leaves sample_denominator at its zero
+	// default -- the core does not read it and its validation skips it.
+	const std::vector<double> *denominator =
+	    denominator_column == nullptr ? nullptr : &param_rows.values.at(denominator_column);
 	for (size_t i = 0; i < param_rows.keys.size(); ++i) {
-		params.push_back({param_rows.keys[i], gdna_mass_ng[i], gdna_conc[i], elution_ul[i]});
+		params.push_back({param_rows.keys[i], gdna_mass_ng[i], gdna_conc[i], elution_ul[i],
+		                  denominator == nullptr ? 0.0 : (*denominator)[i]});
 	}
 
 	// The pure core carries the whole rejection layer and throws

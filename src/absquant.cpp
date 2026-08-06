@@ -1,6 +1,7 @@
 #include "absquant.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -185,6 +186,59 @@ bool IsUsableSampleParameter(double value) {
 	// differences are NaN, so the sample is reported "unfittable" as though the
 	// fit had been attempted and failed.
 	return std::isfinite(value) && value >= 0.0;
+}
+
+// The metric table: one switch per mapping the rest of the port needs, the SQL
+// spelling and the parameters column. Both are exhaustive with no `default:`,
+// but this build does not turn on -Wswitch, so a fifth enumerator would fall
+// through to the CellsPerGOfGdna answer rather than fail to compile. What
+// actually keeps a metric from being half-added is that every caller iterates
+// kAllCellCountsMetrics instead of restating the set.
+const char *MetricName(CellCountsMetric metric) {
+	switch (metric) {
+	case CellCountsMetric::CellsPerGOfSample:
+		return "cells_per_g_of_sample";
+	case CellCountsMetric::CellsPerUlOfSample:
+		return "cells_per_ul_of_sample";
+	case CellCountsMetric::CellsPerCm2OfSample:
+		return "cells_per_cm2_of_sample";
+	case CellCountsMetric::CellsPerGOfGdna:
+		break;
+	}
+	return "cells_per_g_of_gdna";
+}
+
+const char *DenominatorColumnName(CellCountsMetric metric) {
+	switch (metric) {
+	case CellCountsMetric::CellsPerGOfSample:
+		return "calc_mass_sample_aliquot_input_g";
+	case CellCountsMetric::CellsPerUlOfSample:
+		return "sample_volume_ul";
+	case CellCountsMetric::CellsPerCm2OfSample:
+		return "sample_surface_area_cm2";
+	case CellCountsMetric::CellsPerGOfGdna:
+		break;
+	}
+	// Not "no such column": this metric normalizes by a parameter it already
+	// has, so requiring one of the three sample columns to exist would refuse
+	// relations that can answer the question perfectly well.
+	return nullptr;
+}
+
+bool ParseCellCountsMetric(const std::string &name, CellCountsMetric &out) {
+	// Folded here rather than assumed of the caller. The DuckDB wrapper does
+	// lowercase its input, but a precondition nothing enforces is one refactor
+	// away from being a silently rejected metric.
+	std::string lowered(name);
+	std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+	               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	for (const auto metric : kAllCellCountsMetrics) {
+		if (lowered == MetricName(metric)) {
+			out = metric;
+			return true;
+		}
+	}
+	return false;
 }
 
 std::vector<std::string> IdsMissingFrom(const std::vector<std::string> &subject,
@@ -434,6 +488,25 @@ CellCountsIndex BuildCellCountsIndex(const std::vector<SampleRegression> &models
 	return index;
 }
 
+// The factor that turns "per gram of sequenced gDNA" into "per unit of the
+// material actually collected".
+//
+// extracted_gdna_mass_g is the gDNA recovered from the WHOLE extraction, not
+// the portion that reached the sequencer, which is what makes the quotient a
+// sample-side quantity rather than an instrument-side one.
+//
+// Exactly 1.0 for cells_per_g_of_gdna -- multiplying by it is the identity on
+// every double, so that metric's values are M3's bit for bit. A branch in the
+// per-cell loop would say the same thing less obviously.
+double SampleUnitRatio(const SampleCellParams &params, CellCountsMetric metric) {
+	if (metric == CellCountsMetric::CellsPerGOfGdna) {
+		return 1.0;
+	}
+	const double extracted_gdna_mass_g =
+	    params.extracted_gdna_concentration_ng_ul * params.vol_extracted_elution_ul / 1e9;
+	return extracted_gdna_mass_g / params.sample_denominator;
+}
+
 // Reject every input ComputeCellCounts cannot compute a defined answer from,
 // before any arithmetic runs. Same three tiers and the same no-prefix message
 // contract as ValidateFitInputs above.
@@ -509,7 +582,12 @@ void ValidateCellCountsInputs(const std::vector<CountObservation> &counts, const
 	std::vector<std::string> percent_coverage;
 	std::vector<std::string> bad_lengths;
 	std::vector<std::string> zero_masses;
+	std::vector<std::string> zero_denominators;
 	std::vector<std::string> bad_rvalues;
+	// nullptr for cells_per_g_of_gdna, whose callers leave sample_denominator at
+	// zero because there is no column to fill it from. Checking it regardless
+	// would make every query for that metric throw.
+	const char *denominator_column = DenominatorColumnName(options.metric);
 	std::vector<std::string> uncovered_cells;
 	std::vector<std::string> unmeasured_features;
 	std::vector<std::string> unparameterized_samples;
@@ -541,8 +619,13 @@ void ValidateCellCountsInputs(const std::vector<CountObservation> &counts, const
 		const auto sample_params = params_by_sample.find(row.sample_id);
 		if (sample_params == params_by_sample.end()) {
 			unparameterized_samples.push_back(row.sample_id);
-		} else if (sample_params->second->sequenced_sample_gdna_mass_ng == 0.0) {
-			zero_masses.push_back(row.sample_id);
+		} else {
+			if (sample_params->second->sequenced_sample_gdna_mass_ng == 0.0) {
+				zero_masses.push_back(row.sample_id);
+			}
+			if (denominator_column != nullptr && sample_params->second->sample_denominator == 0.0) {
+				zero_denominators.push_back(row.sample_id);
+			}
 		}
 
 		// A sample with no model is a warning, not an error -- see the header --
@@ -587,6 +670,15 @@ void ValidateCellCountsInputs(const std::vector<CountObservation> &counts, const
 		// filter drops, matching pysyndna.
 		throw std::invalid_argument("sequenced_sample_gdna_mass_ng must not be zero; offending sample_id " +
 		                            FormatIdList(zero_masses));
+	}
+	if (!zero_denominators.empty()) {
+		// The sample-level metrics' denominator, and the same story a third
+		// time. Named from DenominatorColumnName rather than spelled here, so
+		// the column the message blames is the column the wrapper read -- a
+		// message pointing at sample_volume_ul when the missing value was in
+		// calc_mass_sample_aliquot_input_g is worse than no message at all.
+		throw std::invalid_argument(std::string(denominator_column) + " must not be zero; offending sample_id " +
+		                            FormatIdList(zero_denominators));
 	}
 	if (!bad_rvalues.empty()) {
 		// Malformed models relation rather than a weak model: a correlation
@@ -937,10 +1029,16 @@ CellCountsResult ComputeCellCounts(const std::vector<CountObservation> &counts,
 	// header. pysyndna drops these samples out of the counts table itself
 	// (calc_cell_counts.py:1013) before the coverage filter ever sees them.
 	//
-	// All three columns are screened even though only the gDNA mass is divided
-	// by, because pysyndna screens on REQUIRED_DNA_PREP_INFO_KEYS regardless of
-	// the metric requested. Relaxing that would change which samples appear
-	// while leaving every value identical.
+	// All three base columns are screened even though only the gDNA mass is
+	// divided by, because pysyndna screens on REQUIRED_DNA_PREP_INFO_KEYS
+	// regardless of the metric requested. Relaxing that would change which
+	// samples appear while leaving every value identical.
+	//
+	// The metric's own denominator joins them, and no other denominator does:
+	// pysyndna's filter set is those keys plus the REQUESTED metric's column
+	// (calc_ogu_cell_counts_biom:959-965). A sample missing a column this query
+	// never reads is not a sample this query cannot answer for.
+	const bool screens_denominator = DenominatorColumnName(options.metric) != nullptr;
 	for (const auto &sample_id : sample_ids) {
 		// Validation has established that every sample in `counts` has a row
 		// here; `at` rather than `find` so a future edit that breaks that throws
@@ -948,7 +1046,8 @@ CellCountsResult ComputeCellCounts(const std::vector<CountObservation> &counts,
 		const SampleCellParams &sample_params = *params_by_sample.at(sample_id);
 		if (!IsUsableSampleParameter(sample_params.sequenced_sample_gdna_mass_ng) ||
 		    !IsUsableSampleParameter(sample_params.extracted_gdna_concentration_ng_ul) ||
-		    !IsUsableSampleParameter(sample_params.vol_extracted_elution_ul)) {
+		    !IsUsableSampleParameter(sample_params.vol_extracted_elution_ul) ||
+		    (screens_denominator && !IsUsableSampleParameter(sample_params.sample_denominator))) {
 			result.filtered_sample_ids.push_back(sample_id);
 			discarded.insert(sample_id);
 		}
@@ -1021,6 +1120,8 @@ CellCountsResult ComputeCellCounts(const std::vector<CountObservation> &counts,
 		}
 	}
 
+	std::unordered_set<std::string> samples_with_values;
+	std::vector<std::string> overflowed_cells;
 	for (const auto *row : surviving) {
 		if (discarded.count(row->sample_id) != 0) {
 			continue;
@@ -1042,7 +1143,48 @@ CellCountsResult ComputeCellCounts(const std::vector<CountObservation> &counts,
 		const double genomes_per_g_gdna = genomes / sample_params.sequenced_sample_gdna_mass_ng * 1e9;
 
 		// One genome per cell: pysyndna's own explicit simplifying assumption.
-		result.values.push_back({row->sample_id, row->feature_id, genomes_per_g_gdna});
+		// The ratio then restates that per unit of collected sample, and is
+		// exactly 1 for cells_per_g_of_gdna.
+		const double value = genomes_per_g_gdna * SampleUnitRatio(sample_params, options.metric);
+		if (!std::isfinite(value)) {
+			// Every input reaching here is finite, but their combination need
+			// not be: a model with a large positive intercept overflows the
+			// 10^x, and an extraction concentration times an elution volume can
+			// overflow before the divide. pysyndna emits the inf. Refusing is
+			// the same call D23 and the zero-denominator check already make --
+			// an infinite cell count is not a measurement, and a DOUBLE column
+			// full of inf is worse than a failed query.
+			overflowed_cells.push_back(row->sample_id + " / " + row->feature_id);
+			continue;
+		}
+		if (value == 0.0) {
+			// The sparse invariant (D10): a zero cell IS an absent cell, which
+			// is exactly what pysyndna's dense output spells as an explicit
+			// 0.0. So omitting one loses nothing and needs no diagnostic --
+			// the sample is still in the output and still says what it is.
+			// Only when EVERY cell of a sample goes this way does the omission
+			// become ambiguous, and that case is reported below.
+			continue;
+		}
+		samples_with_values.insert(row->sample_id);
+		result.values.push_back({row->sample_id, row->feature_id, value});
+	}
+	if (!overflowed_cells.empty()) {
+		throw std::invalid_argument(
+		    "the predicted cell count overflowed to a non-finite value; check the model coefficients and the "
+		    "extraction parameters for (sample_id / feature_id) " +
+		    FormatIdList(overflowed_cells));
+	}
+
+	// A sample can pass every filter above and still emit nothing, if every one
+	// of its cells came out zero. Reported rather than left to be inferred from
+	// an absence: the sparse form has no way to distinguish "this sample is all
+	// zeros" from "this sample was never here". Walking `sample_ids` keeps the
+	// list sorted and independent of the order the counts arrived in.
+	for (const auto &sample_id : sample_ids) {
+		if (discarded.count(sample_id) == 0 && samples_with_values.count(sample_id) == 0) {
+			result.zero_valued_sample_ids.push_back(sample_id);
+		}
 	}
 	return result;
 }
