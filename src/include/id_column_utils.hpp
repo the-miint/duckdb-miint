@@ -165,6 +165,43 @@ inline void EmitIdCell(Vector &out, idx_t row, const std::string &s, const Logic
 	                        AllowedIdTypeList());
 }
 
+// Repeat a cell already emitted earlier in the SAME output vector.
+//
+// For a run of rows sharing one id, EmitIdCell re-does per-row work that cannot
+// change: VARCHAR re-copies the bytes into the vector's string heap, BIGINT re-parses
+// the text, UUID re-parses the hyphenated form. Copying the physical value instead is
+// exact — for VARCHAR the string_t either inlines the bytes or points into that same
+// heap, which the vector owns and which outlives the chunk, so two rows sharing it is
+// the ordinary DuckDB arrangement.
+//
+// Worth it only where runs are long: mmvec_ranks emits each X id for d2 consecutive
+// rows, and with cystic-fibrosis's 150-character sequence ids that is ~188 MB of
+// AddString copying per query.
+//
+// Precondition: `from_row` was written by EmitIdCell on this same Vector, in this same
+// chunk, with this same `id_type`; both rows are within the flat vector's capacity.
+inline void RepeatIdCell(Vector &out, idx_t row, idx_t from_row, const LogicalType &id_type) {
+	auto &validity = FlatVector::Validity(out);
+	validity.Set(row, validity.RowIsValid(from_row));
+	if (id_type.id() == LogicalTypeId::VARCHAR) {
+		auto data = FlatVector::GetData<string_t>(out);
+		data[row] = data[from_row];
+		return;
+	}
+	if (id_type.id() == LogicalTypeId::BIGINT) {
+		auto data = FlatVector::GetData<int64_t>(out);
+		data[row] = data[from_row];
+		return;
+	}
+	if (id_type.id() == LogicalTypeId::UUID) {
+		auto data = FlatVector::GetData<hugeint_t>(out);
+		data[row] = data[from_row];
+		return;
+	}
+	throw InternalException("RepeatIdCell: unsupported id type '%s' (must be %s)", id_type.ToString(),
+	                        AllowedIdTypeList());
+}
+
 // Emit `ids[offset..offset+count)` into `out` via EmitIdCell. See EmitIdCell for
 // the per-type contract and the SAM-sentinel caveat.
 // Precondition: `out` is a FlatVector sized for at least `count` rows.

@@ -1650,6 +1650,20 @@ TEST_CASE("Adam rejects invalid hyperparameters and batch sequences", "[mmvec]")
 		REQUIRE_THROWS_WITH(FitAdam(c.shape, OraclePriors(), no_vals, c.params, kTheta, 5, 0),
 		                    ContainsSubstring("needs X counts"));
 	}
+	// The theta sweep that used to catch a diverged fit runs once now, not per
+	// update, because re-checking 12 724 parameters 196 000 times costs 2.5 billion
+	// isfinite calls on a cystic-fibrosis fit. Theta does still change every update,
+	// so divergence has to remain detectable -- and it is, through the loss, which
+	// is already computed and is one value rather than n_params. This asserts the
+	// replacement actually fires, so the hoist cannot silently turn a loud failure
+	// into a returned model full of NaNs.
+	SECTION("a diverged fit is reported, not returned") {
+		auto runaway = c.params;
+		runaway.learning_rate = 1e300;
+		runaway.clipnorm = std::numeric_limits<double>::max();
+		REQUIRE_THROWS_WITH(FitAdamWithIndices(c.shape, OraclePriors(), c.mb, runaway, kTheta, c.batches),
+		                    ContainsSubstring("Adam diverged"));
+	}
 }
 
 // ---------------------------------------------------------------------------

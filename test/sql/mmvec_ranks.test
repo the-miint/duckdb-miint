@@ -457,6 +457,59 @@ SELECT count(*) FROM (
 ----
 0
 
+# The SAME check with UUID on the X side, which is not redundant with the case
+# above. Output is row-major over (X feature, Y feature), so the X id repeats for
+# d2 consecutive rows and is emitted once per run and copied thereafter, while the
+# Y id is emitted afresh every row. Those are two different code paths, and the
+# case above only exercises the run-copy for BIGINT. A UUID is 16 bytes of parsed
+# hugeint rather than a machine integer, so a copy that reached for the wrong
+# physical width would corrupt exactly here and nowhere else.
+
+statement ok
+CREATE TABLE model_uuid_x AS
+SELECT modality,
+       CASE WHEN modality = 'x'
+            THEN CAST('00000000-0000-4000-8000-0000000000b' || substr(x_feature_id, 2) AS UUID) END AS x_feature_id,
+       CASE WHEN modality = 'y' THEN CAST(20 + CAST(substr(y_feature_id, 2) AS BIGINT) AS BIGINT) END AS y_feature_id,
+       axis, value
+FROM fit WHERE modality <> 'loss';
+
+query II
+SELECT DISTINCT typeof(x_feature_id), typeof(y_feature_id) FROM mmvec_ranks('model_uuid_x');
+----
+UUID	BIGINT
+
+# Every emitted X id is the model's own, and each appears exactly d2 times -- a
+# run-copy that duplicated the wrong row would show up as a wrong count here.
+query I
+SELECT count(*) FROM (
+  SELECT x_feature_id, count(*) AS n FROM mmvec_ranks('model_uuid_x') GROUP BY x_feature_id
+) WHERE n <> (SELECT count(DISTINCT y_feature_id) FROM model_uuid_x WHERE modality = 'y');
+----
+0
+
+query I
+SELECT count(*) FROM (
+  (SELECT DISTINCT x_feature_id FROM mmvec_ranks('model_uuid_x')
+   EXCEPT SELECT DISTINCT x_feature_id FROM model_uuid_x WHERE modality = 'x')
+  UNION ALL
+  (SELECT DISTINCT x_feature_id FROM model_uuid_x WHERE modality = 'x'
+   EXCEPT SELECT DISTINCT x_feature_id FROM mmvec_ranks('model_uuid_x'))
+);
+----
+0
+
+# And the numbers are still the same model, so the id plumbing did not disturb the
+# cell each id is attached to.
+query I
+SELECT count(*) FROM (
+  SELECT rank, prob FROM mmvec_ranks('model_uuid_x')
+  EXCEPT ALL
+  SELECT rank, prob FROM mmvec_ranks('fit')
+);
+----
+0
+
 # ---------------------------------------------------------------------------
 # A model relation it cannot trust is rejected, loudly. These are the pure unit's
 # checks surfacing through SQL -- the messages come from one place, so they cannot

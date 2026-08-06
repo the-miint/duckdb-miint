@@ -288,12 +288,26 @@ void MmvecRanksExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &o
 	auto rank = FlatVector::GetData<double>(output.data[2]);
 	auto prob = FlatVector::GetData<double>(output.data[3]);
 
+	// The output is row-major over (X feature, Y feature), so within a chunk the X id
+	// repeats for up to d2 consecutive rows while the Y id never repeats. Emitting the
+	// X id once per run and copying it thereafter avoids re-adding the same string to
+	// the vector's heap d2 times -- at cystic-fibrosis scale, where the X ids are
+	// 150-character ASV sequences, that is ~188 MB of copying per query (measured
+	// 68 ms -> 55 ms). `run_start` is chunk-local, so the first row of every chunk
+	// always takes the emit path.
+	idx_t prev_i = 0;
+	idx_t run_start = 0;
 	for (idx_t r = 0; r < count; ++r) {
 		const idx_t k = g.cursor + r;
-		// Row-major over (X feature, Y feature), so the cell index carries both ids.
 		const idx_t i = k / static_cast<idx_t>(g.d2);
 		const idx_t j = k % static_cast<idx_t>(g.d2);
-		EmitIdCell(v_x, r, g.x_feature_ids[i], g.x_type);
+		if (r == 0 || i != prev_i) {
+			EmitIdCell(v_x, r, g.x_feature_ids[i], g.x_type);
+			prev_i = i;
+			run_start = r;
+		} else {
+			RepeatIdCell(v_x, r, run_start, g.x_type);
+		}
 		EmitIdCell(v_y, r, g.y_feature_ids[j], g.y_type);
 		rank[r] = g.ranks[k];
 		prob[r] = g.probs[k];

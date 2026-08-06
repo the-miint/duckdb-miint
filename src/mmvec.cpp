@@ -538,6 +538,69 @@ double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_r
 	return norm * data + PriorLoss(l, priors, theta);
 }
 
+//! The Y row total for every sample: the sum over ALL d2 features, reference
+//! included. Loop-invariant across Adam updates, so Adam computes this once.
+std::vector<double> ComputeSampleTotals(const MinibatchInputs &inputs, int64_t n_features_y) {
+	std::vector<double> totals(static_cast<size_t>(inputs.n_samples), 0.0);
+	for (int64_t s = 0; s < inputs.n_samples; ++s) {
+		const double *y_row = inputs.y_dense.data() + s * n_features_y;
+		double total = 0.0;
+		for (int64_t j = 0; j < n_features_y; ++j) {
+			total += y_row[j];
+		}
+		totals[static_cast<size_t>(s)] = total;
+	}
+	return totals;
+}
+
+//! Resolve a minibatch into the two per-row index maps the objective needs and the
+//! Y row totals it conditions on, validating every index on the way -- so the hot
+//! loop inside EvaluateObjective does not have to.
+//!
+//! `sample_totals` is the precomputed total for EVERY sample when the caller has it.
+//! Adam does, because the totals do not change between updates: re-deriving them per
+//! update costs 4.5 billion additions over a default cystic-fibrosis fit to produce
+//! only n_samples = 172 distinct values. Pass nullptr to sum each named row on the
+//! spot, which is what a one-shot caller wants -- precomputing every sample would be
+//! wasted work when the batch names only a few. Either way the sum runs over
+//! ascending j, so the two paths agree bit-for-bit.
+void ResolveBatch(const ModelShape &shape, const MinibatchInputs &inputs, const std::vector<int64_t> &batch,
+                  const double *sample_totals, Workspace &ws) {
+	const auto nnz = static_cast<int64_t>(inputs.x_row.size());
+	for (size_t b = 0; b < batch.size(); ++b) {
+		const int64_t e = batch[b];
+		if (e < 0 || e >= nnz) {
+			throw std::invalid_argument("mmvec: minibatch index " + std::to_string(e) + " out of range [0, " +
+			                            std::to_string(nnz) + ")");
+		}
+		const int64_t s = inputs.x_row[static_cast<size_t>(e)];
+		const int64_t i = inputs.x_col[static_cast<size_t>(e)];
+		if (s < 0 || s >= inputs.n_samples) {
+			throw std::invalid_argument("mmvec: minibatch entry " + std::to_string(e) + " names sample " +
+			                            std::to_string(s) + ", out of range [0, " + std::to_string(inputs.n_samples) +
+			                            ")");
+		}
+		if (i < 0 || i >= shape.n_features_x) {
+			throw std::invalid_argument("mmvec: minibatch entry " + std::to_string(e) + " names X feature " +
+			                            std::to_string(i) + ", out of range [0, " + std::to_string(shape.n_features_x) +
+			                            ")");
+		}
+		ws.sample_index[b] = s;
+		ws.x_index[b] = i;
+
+		if (sample_totals != nullptr) {
+			ws.row_totals[b] = sample_totals[static_cast<size_t>(s)];
+			continue;
+		}
+		double total = 0.0;
+		const double *y_row = inputs.y_dense.data() + s * shape.n_features_y;
+		for (int64_t j = 0; j < shape.n_features_y; ++j) {
+			total += y_row[j];
+		}
+		ws.row_totals[b] = total;
+	}
+}
+
 //! The full-batch objective packaged for LBFGS++, which needs a callable taking
 //! (x, grad) and returning the value.
 //!
@@ -707,43 +770,10 @@ double MinibatchLossAndGradient(const ModelShape &shape, const Priors &priors, c
 	ws.Resize(shape, n_rows);
 	grad.resize(l.total);
 
-	// Resolve the batch into the two per-row index maps the objective needs, and
-	// the Y row totals it conditions on. Validation happens here rather than
-	// inside the hot loop.
-	std::vector<int64_t> &x_index = ws.x_index;
-	std::vector<int64_t> &sample_index = ws.sample_index;
-	const auto nnz = static_cast<int64_t>(inputs.x_row.size());
-	for (size_t b = 0; b < batch.size(); ++b) {
-		const int64_t e = batch[b];
-		if (e < 0 || e >= nnz) {
-			throw std::invalid_argument("mmvec: minibatch index " + std::to_string(e) + " out of range [0, " +
-			                            std::to_string(nnz) + ")");
-		}
-		const int64_t s = inputs.x_row[static_cast<size_t>(e)];
-		const int64_t i = inputs.x_col[static_cast<size_t>(e)];
-		if (s < 0 || s >= inputs.n_samples) {
-			throw std::invalid_argument("mmvec: minibatch entry " + std::to_string(e) + " names sample " +
-			                            std::to_string(s) + ", out of range [0, " + std::to_string(inputs.n_samples) +
-			                            ")");
-		}
-		if (i < 0 || i >= shape.n_features_x) {
-			throw std::invalid_argument("mmvec: minibatch entry " + std::to_string(e) + " names X feature " +
-			                            std::to_string(i) + ", out of range [0, " + std::to_string(shape.n_features_x) +
-			                            ")");
-		}
-		sample_index[b] = s;
-		x_index[b] = i;
+	ResolveBatch(shape, inputs, batch, nullptr, ws);
 
-		double total = 0.0;
-		const double *y_row = inputs.y_dense.data() + s * shape.n_features_y;
-		for (int64_t j = 0; j < shape.n_features_y; ++j) {
-			total += y_row[j];
-		}
-		ws.row_totals[b] = total;
-	}
-
-	const ObsView obs {inputs.y_dense.data(), shape.n_features_y, sample_index.data()};
-	return EvaluateObjective(l, priors, n_rows, x_index.data(), obs, ws.row_totals.data(), norm, theta.data(), ws,
+	const ObsView obs {inputs.y_dense.data(), shape.n_features_y, ws.sample_index.data()};
+	return EvaluateObjective(l, priors, n_rows, ws.x_index.data(), obs, ws.row_totals.data(), norm, theta.data(), ws,
 	                         grad.data());
 }
 
@@ -991,6 +1021,20 @@ Model FitAdamWithIndices(const ModelShape &shape, const Priors &priors, const Mi
 	std::vector<double> moment2(n_params, 0.0);
 	constexpr double kAdamEps = 1e-8;
 
+	// Two things the minibatch objective re-derives on every call are invariant across
+	// updates, and at cystic-fibrosis defaults each is billions of operations: the Y
+	// row totals (4.5e9 additions to produce only n_samples = 172 distinct values) and
+	// the validation sweep over theta (2.5e9 isfinite checks). Both are done once.
+	//
+	// Update 1 still goes through the fully-validating public entry point, so every
+	// input error is raised in the same place with the same message as before; what
+	// updates 2..N skip is only the REPEAT of work whose answer cannot have changed.
+	// Theta itself does change, so the loss is checked for finiteness below -- an O(1)
+	// test that catches a diverged fit where the O(n_params) sweep used to.
+	const ParamLayout l = Layout(shape);
+	const std::vector<double> sample_totals = ComputeSampleTotals(inputs, shape.n_features_y);
+	const ObsView obs {inputs.y_dense.data(), shape.n_features_y, nullptr};
+
 	Workspace ws;
 	std::vector<double> grad;
 	std::vector<int64_t> batch(static_cast<size_t>(params.batch_size));
@@ -998,7 +1042,20 @@ Model FitAdamWithIndices(const ModelShape &shape, const Priors &priors, const Mi
 		const auto begin = batches.begin() + static_cast<std::ptrdiff_t>((update - 1) * params.batch_size);
 		batch.assign(begin, begin + static_cast<std::ptrdiff_t>(params.batch_size));
 
-		const double loss = MinibatchLossAndGradient(shape, priors, inputs, batch, norm, model.theta, ws, grad);
+		double loss = 0.0;
+		if (update == 1) {
+			loss = MinibatchLossAndGradient(shape, priors, inputs, batch, norm, model.theta, ws, grad);
+		} else {
+			ResolveBatch(shape, inputs, batch, sample_totals.data(), ws);
+			const ObsView batch_obs {obs.base, obs.stride, ws.sample_index.data()};
+			loss = EvaluateObjective(l, priors, params.batch_size, ws.x_index.data(), batch_obs, ws.row_totals.data(),
+			                         norm, model.theta.data(), ws, grad.data());
+		}
+		if (!std::isfinite(loss)) {
+			throw std::invalid_argument("mmvec: Adam diverged -- the minibatch loss became non-finite at update " +
+			                            std::to_string(update) +
+			                            ". Lower learning_rate, or tighten clipnorm, and refit.");
+		}
 		model.loss_curve.push_back(loss);
 
 		// Global L2 clipping, over all four blocks at once and AFTER the priors are
