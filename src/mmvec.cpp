@@ -444,13 +444,18 @@ double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_r
 			resids(r, j) = e;
 			shifted_sum += e;
 		}
-		const double log_norm = m + std::log(std::exp(-m) + shifted_sum);
+		// The shifted normalizer, kept as well as its log: it IS the row scale the
+		// probabilities divide by, so recovering it as exp(log_norm - m) would be a
+		// log-and-exp round trip of a number already in hand -- an extra
+		// transcendental per row per evaluation, and a double rounding that bites
+		// hardest when m is large, which is exactly where precision matters.
+		const double row_scale = std::exp(-m) + shifted_sum;
+		const double log_norm = m + std::log(row_scale);
 
 		// Data term for this row, and the residual it contributes to the
 		// gradient. resids goes exp-shifted -> probability -> residual in place.
 		const double *obs_row = obs.base + MapRow(obs.row_map, r) * obs.stride;
 		const double total = totals[static_cast<size_t>(r)];
-		const double row_scale = std::exp(log_norm - m);
 		double dot_obs_logits = 0.0;
 		for (int64_t j = 0; j < l.nref; ++j) {
 			const double o = obs_row[j + 1];
@@ -552,6 +557,8 @@ void Workspace::Resize(const ModelShape &shape, int64_t n_rows) {
 	x_bias_rows.resize(rows);
 	dx_main_rows.resize(rows * p);
 	dx_bias_rows.resize(rows);
+	x_index.resize(rows);
+	sample_index.resize(rows);
 }
 
 std::vector<double> ComputeLogits(const ModelShape &shape, const std::vector<double> &theta) {
@@ -572,7 +579,24 @@ std::vector<double> ComputeLogits(const ModelShape &shape, const std::vector<dou
 	for (int64_t i = 0; i < l.d1; ++i) {
 		out[static_cast<size_t>(i * l.d2)] = 0.0; // Y feature 0 is the reference
 		for (int64_t j = 0; j < l.nref; ++j) {
-			out[static_cast<size_t>(i * l.d2 + j + 1)] = ws.logits[static_cast<size_t>(i * l.nref + j)];
+			const double v = ws.logits[static_cast<size_t>(i * l.nref + j)];
+			// A finite theta can still produce an infinite logit: the dot product
+			// overflows once the parameters reach about 1e154. The softmax then
+			// computes exp(inf - inf) and every probability in the row comes back
+			// NaN -- silently, since nothing downstream compares against anything.
+			// A fit cannot wander there (the Gaussian prior makes it astronomically
+			// expensive), but the SQL layer rebuilds theta from a model RELATION
+			// whose values a user can write by hand, so it is reachable and has to
+			// fail loudly. Checked here rather than in CheckShapeAndTheta because
+			// the parameters themselves are finite; it is the product that is not.
+			// This is the read path -- the objective never calls ComputeLogits --
+			// so the scan costs nothing per iteration.
+			if (!std::isfinite(v)) {
+				throw std::invalid_argument("mmvec: the logit for X feature " + std::to_string(i) + ", Y feature " +
+				                            std::to_string(j + 1) +
+				                            " is not finite; the parameters are finite but their product overflowed");
+			}
+			out[static_cast<size_t>(i * l.d2 + j + 1)] = v;
 		}
 	}
 	return out;
@@ -644,8 +668,8 @@ double MinibatchLossAndGradient(const ModelShape &shape, const Priors &priors, c
 	// Resolve the batch into the two per-row index maps the objective needs, and
 	// the Y row totals it conditions on. Validation happens here rather than
 	// inside the hot loop.
-	std::vector<int64_t> x_index(batch.size());
-	std::vector<int64_t> sample_index(batch.size());
+	std::vector<int64_t> &x_index = ws.x_index;
+	std::vector<int64_t> &sample_index = ws.sample_index;
 	const auto nnz = static_cast<int64_t>(inputs.x_row.size());
 	for (size_t b = 0; b < batch.size(); ++b) {
 		const int64_t e = batch[b];
@@ -721,6 +745,7 @@ Model FitLbfgsFromInit(const ModelShape &shape, const Priors &priors, const Suff
 	model.shape = shape;
 	std::string outcome;
 	int niter = 0;
+	bool niter_known = true;
 	try {
 		niter = solver.minimize(objective, x, fx);
 		// LBFGS++ returns the same iteration count whether a convergence test
@@ -739,7 +764,15 @@ Model FitLbfgsFromInit(const ModelShape &shape, const Priors &priors, const Suff
 		// LBFGS++ reports line-search failure by throwing, where SciPy returns a
 		// status. The snapshot inside the functor is what makes this recoverable;
 		// the solver's own iterate is not trustworthy after a throw.
+		//
+		// The iteration count is genuinely LOST on this path: `minimize` returns it,
+		// so throwing leaves `niter` at its initial 0 no matter how many iterations
+		// actually ran, and LBFGS++ exposes no other accessor for it. Reporting a
+		// confident "0 iterations" for a fit that managed forty-seven would be a
+		// fabrication, so the message says the count is unavailable instead.
+		// `n_evals` is unaffected -- the functor counts those itself.
 		model.converged = false;
+		niter_known = false;
 		outcome = std::string("line search failed (") + e.what() + "); the best point seen was kept";
 	}
 
@@ -757,7 +790,9 @@ Model FitLbfgsFromInit(const ModelShape &shape, const Priors &priors, const Suff
 		model.max_abs_grad = std::fmax(model.max_abs_grad, std::fabs(g));
 	}
 
-	model.message = outcome + "; " + std::to_string(niter) + " iterations, " + std::to_string(model.n_evals) +
+	model.message = outcome + "; " +
+	                (niter_known ? std::to_string(niter) + " iterations" : std::string("iteration count unavailable")) +
+	                ", " + std::to_string(model.n_evals) +
 	                " objective evaluations, max|gradient| = " + std::to_string(model.max_abs_grad);
 	return model;
 }
@@ -873,6 +908,37 @@ Model FitAdamWithIndices(const ModelShape &shape, const Priors &priors, const Mi
 	const double norm = BatchNormFactor(params.batch_norm, x_total, inputs.n_samples, params.batch_size);
 
 	const int64_t n_updates = static_cast<int64_t>(batches.size()) / params.batch_size;
+
+	// The summed-away statistics, built BEFORE the training loop rather than after
+	// it. They are needed only at the end, for the full-batch `final_loss`, but
+	// they also carry the degenerate-data validation -- all-zero rows and columns,
+	// duplicate cells -- that the minibatch objective never performs. Computing
+	// them last meant a table L-BFGS rejects outright could run every Adam update
+	// to completion and only then throw, destroying a fully-trained model on the
+	// way out. Building them first makes the two optimizers fail on the same
+	// inputs at the same point, at no extra cost: it is the same single call,
+	// moved.
+	SparseCounts x_coo;
+	x_coo.n_rows = inputs.n_samples;
+	x_coo.n_cols = shape.n_features_x;
+	x_coo.row = inputs.x_row;
+	x_coo.col = inputs.x_col;
+	x_coo.val = inputs.x_val;
+	SparseCounts y_coo;
+	y_coo.n_rows = inputs.n_samples;
+	y_coo.n_cols = shape.n_features_y;
+	for (int64_t s = 0; s < inputs.n_samples; ++s) {
+		for (int64_t j = 0; j < shape.n_features_y; ++j) {
+			const double v = inputs.y_dense[static_cast<size_t>(s * shape.n_features_y + j)];
+			if (v != 0.0) {
+				y_coo.row.push_back(s);
+				y_coo.col.push_back(j);
+				y_coo.val.push_back(v);
+			}
+		}
+	}
+	const SufficientStats stats = ComputeSufficientStats(x_coo, y_coo);
+
 	Model model;
 	model.shape = shape;
 	model.theta = theta0;
@@ -927,27 +993,8 @@ Model FitAdamWithIndices(const ModelShape &shape, const Priors &priors, const Mi
 
 	// The full-batch objective at the final parameters, so final_loss means the
 	// same thing as it does for L-BFGS. The last minibatch loss is a noisy
-	// estimate over one draw and stays in loss_curve where it belongs.
-	SparseCounts x_coo;
-	x_coo.n_rows = inputs.n_samples;
-	x_coo.n_cols = shape.n_features_x;
-	x_coo.row = inputs.x_row;
-	x_coo.col = inputs.x_col;
-	x_coo.val = inputs.x_val;
-	SparseCounts y_coo;
-	y_coo.n_rows = inputs.n_samples;
-	y_coo.n_cols = shape.n_features_y;
-	for (int64_t s = 0; s < inputs.n_samples; ++s) {
-		for (int64_t j = 0; j < shape.n_features_y; ++j) {
-			const double v = inputs.y_dense[static_cast<size_t>(s * shape.n_features_y + j)];
-			if (v != 0.0) {
-				y_coo.row.push_back(s);
-				y_coo.col.push_back(j);
-				y_coo.val.push_back(v);
-			}
-		}
-	}
-	const SufficientStats stats = ComputeSufficientStats(x_coo, y_coo);
+	// estimate over one draw and stays in loss_curve where it belongs. `stats` was
+	// built before the loop; see the note there for why.
 	std::vector<double> full_grad;
 	model.final_loss = FullBatchLossAndGradient(shape, priors, stats, model.theta, ws, full_grad);
 	model.max_abs_grad = 0.0;

@@ -216,6 +216,14 @@ SELECT * FROM mmvec_fit('wrong_schema', 'metabolites');
 ----
 wrong_schema
 
+# And in the Y position too. X and Y are validated by two independent calls, so
+# testing only one of them would not notice a bind that checked the X table twice
+# -- and the message names the side, which is what makes this more than a repeat.
+statement error
+SELECT * FROM mmvec_fit('microbes', 'wrong_schema');
+----
+Y feature-table 'wrong_schema'
+
 # ---------------------------------------------------------------------------
 # The fit itself. The `microbes` / `metabolites` tables above hold exactly the
 # matrices the oracle in test/cpp/mmvec_oracle.hpp was carved from (toy_x /

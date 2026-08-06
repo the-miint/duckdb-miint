@@ -222,6 +222,25 @@ SELECT * FROM mmvec_train_test_split('microbes', -0.1, 0);
 ----
 test_fraction must be in [0, 1], got -0.1
 
+# NULL needs its own arm and cannot ride on the range test above. SQL's
+# three-valued logic makes `NULL < 0 OR NULL > 1` evaluate to NULL, not true, so
+# a NULL falls straight past a range test, makes n_test NULL, makes `rn <= n_test`
+# NULL, and lands every sample in the ELSE branch. The failure mode is therefore
+# not an error but a silent all-train split -- precisely what the range check
+# exists to prevent, arriving through the one door it does not cover.
+statement error
+SELECT * FROM mmvec_train_test_split('microbes', NULL, 0);
+----
+test_fraction must not be NULL
+
+# A NULL seed fails the same way for a different reason: md5(NULL || ...) is NULL
+# for every row, so the ordering collapses to plain alphabetical by sample_id and
+# the split looks seeded without being seeded.
+statement error
+SELECT * FROM mmvec_train_test_split('microbes', 0.3, NULL);
+----
+seed must not be NULL
+
 # ---------------------------------------------------------------------------
 # THE PIPELINE: split -> fit on train -> restrict the test tables to the model's
 # features -> predict -> score. This is the worked example the docs will carry, and

@@ -144,6 +144,15 @@ struct Workspace {
 	std::vector<double> dx_main_rows; //!< rows x p, before scattering back to d1 x p
 	std::vector<double> dx_bias_rows; //!< rows
 
+	//! The minibatch path's two per-row index maps: which X feature and which
+	//! sample each sampled draw resolves to. Unused by the full-batch objective,
+	//! where a row IS an X feature and the maps would be the identity. They live
+	//! here for the same reason as everything above -- Adam calls the objective
+	//! once per update, thousands of times per fit, and these were the only
+	//! per-call buffers still being heap-allocated on every one of them.
+	std::vector<int64_t> x_index;      //!< rows
+	std::vector<int64_t> sample_index; //!< rows
+
 	//! Size the buffers for `n_rows` rows under `shape`. Idempotent.
 	void Resize(const ModelShape &shape, int64_t n_rows);
 };
@@ -158,8 +167,8 @@ struct Workspace {
 //! non-reference block -- but `ranks` and `probs` are defined over the full
 //! matrix, so it is built explicitly for them.
 //!
-//! Throws std::invalid_argument if `theta.size() != NumParams(shape)` or the
-//! shape is degenerate.
+//! Throws std::invalid_argument if `theta.size() != NumParams(shape)`, the shape
+//! is degenerate, or any `theta` entry is not finite.
 std::vector<double> ComputeLogits(const ModelShape &shape, const std::vector<double> &theta);
 
 //! Negative log-posterior and its gradient at `theta`, over the whole data set.
@@ -285,7 +294,14 @@ struct Model {
 	//! comparable to each other, let alone across optimizers.
 	double final_loss = 0.0;
 	int64_t n_evals = 0; //!< == loss_curve.size()
-	int64_t n_iter = 0;  //!< L-BFGS iterations, or Adam parameter updates
+	//! L-BFGS iterations, or Adam parameter updates.
+	//!
+	//! Zero after a line-search failure, and that zero means "unknown", not "none":
+	//! LBFGS++ returns the count from `minimize`, so a throw loses it however many
+	//! iterations had run, and it exposes no other accessor. `message` says so
+	//! explicitly on that path rather than asserting a count. `n_evals` is
+	//! unaffected.
+	int64_t n_iter = 0;
 
 	//! max|gradient| at `theta`. Reported separately from `converged` because the
 	//! two answer different questions, and on this stopping rule they often
@@ -329,9 +345,11 @@ struct Model {
 //! runs that hit the iteration cap, those are the SAME point -- so this is not a
 //! divergence from scikit-bio in practice, and it is never worse than the last
 //! iterate. It earns its place in one situation: LBFGS++ signals line-search
-//! failure by throwing and leaves its iterate at the starting point, so without
-//! the snapshot such a fit would raise instead of returning the best parameters
-//! it had already found.
+//! failure by throwing, which abandons the solver's own iterate mid-update -- it
+//! is left holding either the previous outer iteration's point or a partially
+//! updated trial point, neither of them trustworthy -- so without the snapshot
+//! such a fit would raise instead of returning the best parameters it had already
+//! found.
 //!
 //! Throws std::invalid_argument if `max_iter < 1`, or for any reason
 //! FullBatchLossAndGradient would -- including a non-finite `theta0`, which would
@@ -430,7 +448,8 @@ Model FitAdamWithIndices(const ModelShape &shape, const Priors &priors, const Mi
 //! nonzero cells -- so `epochs` is not the number of parameter updates.
 //! Cells are drawn with replacement, weighted by their X count.
 //!
-//! Throws std::invalid_argument if `epochs < 1`, or for any reason
+//! Throws std::invalid_argument if `epochs < 1`, if `inputs.x_val` is empty
+//! (there are no counts to weight the sampling by), or for any reason
 //! FitAdamWithIndices would.
 Model FitAdam(const ModelShape &shape, const Priors &priors, const MinibatchInputs &inputs, const AdamParams &params,
               const std::vector<double> &theta0, int64_t epochs, uint64_t seed);
@@ -521,7 +540,9 @@ std::vector<double> Predict(const ModelShape &shape, const std::vector<double> &
 //! here and raised in the M6 divergence ledger instead.
 //!
 //! Throws std::invalid_argument for any reason Predict would, or if `y`'s shape
-//! disagrees with `x.n_rows` or `shape.n_features_y`.
+//! disagrees with `x.n_rows` or `shape.n_features_y`. Y is held to the same
+//! per-sample rule as X: a sample whose Y counts are all zero has no proportions
+//! to score against and is rejected, not scored as if it were uniform.
 double Score(const ModelShape &shape, const std::vector<double> &theta, const SparseCounts &x, const SparseCounts &y);
 
 } // namespace miint::mmvec

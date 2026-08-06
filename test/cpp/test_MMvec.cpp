@@ -639,6 +639,120 @@ TEST_CASE("full-batch objective reproduces the T1 oracle", "[mmvec]") {
 	}
 }
 
+namespace {
+// The Gaussian prior term, written from its definition:
+// 0.5*||block - mean||^2 / scale^2 over each of the four blocks.
+double GaussianPrior(const ModelShape &shape, const Priors &priors, const std::vector<double> &theta) {
+	const int64_t d1 = shape.n_features_x;
+	const int64_t d2 = shape.n_features_y;
+	const int64_t p = shape.n_components;
+	auto block = [&](size_t offset, int64_t count, double mean, double scale) {
+		double acc = 0.0;
+		for (int64_t i = 0; i < count; ++i) {
+			const double d = theta[offset + static_cast<size_t>(i)] - mean;
+			acc += d * d;
+		}
+		return 0.5 * acc / (scale * scale);
+	};
+	const size_t x_main = 0;
+	const size_t x_bias = x_main + static_cast<size_t>(d1 * p);
+	const size_t y_main = x_bias + static_cast<size_t>(d1);
+	const size_t y_bias = y_main + static_cast<size_t>(p * (d2 - 1));
+	return block(x_main, d1 * p, priors.x_prior_mean, priors.x_prior_scale) +
+	       block(x_bias, d1, priors.x_prior_mean, priors.x_prior_scale) +
+	       block(y_main, p * (d2 - 1), priors.y_prior_mean, priors.y_prior_scale) +
+	       block(y_bias, d2 - 1, priors.y_prior_mean, priors.y_prior_scale);
+}
+
+// The negative log-posterior written out from the model definition: for every
+// sample and every X feature, the X count times the multinomial log-likelihood
+// of that sample's WHOLE Y row under softmax(logits[i,:]), plus the priors.
+//
+// Deliberately shares nothing with the core. theta is unpacked here rather than
+// through ComputeLogits, the softmax is a plain exp-and-divide with no
+// row-maximum shift, and the sample axis is never summed away. So this is
+// independent of all three things FullBatchLossAndGradient relies on -- the
+// packed layout, the log-sum-exp normalizer, and above all the X^T Y collapse,
+// which is the port's single largest algebraic step and the one whose failure
+// mode is a fit that converges beautifully to the wrong answer.
+double BruteForceNegLogPosterior(const ModelShape &shape, const Priors &priors, const std::vector<double> &xd,
+                                 const std::vector<double> &yd, int64_t n_samples, const std::vector<double> &theta) {
+	const int64_t d1 = shape.n_features_x;
+	const int64_t d2 = shape.n_features_y;
+	const int64_t p = shape.n_components;
+	const double *x_main = theta.data();
+	const double *x_bias = x_main + d1 * p;
+	const double *y_main = x_bias + d1;
+	const double *y_bias = y_main + p * (d2 - 1);
+
+	double loss = 0.0;
+	std::vector<double> prob(static_cast<size_t>(d2));
+	for (int64_t n = 0; n < n_samples; ++n) {
+		for (int64_t i = 0; i < d1; ++i) {
+			const double x = xd[static_cast<size_t>(n * d1 + i)];
+			if (x == 0.0) {
+				continue;
+			}
+			double total = 0.0;
+			for (int64_t j = 0; j < d2; ++j) {
+				// Y feature 0 is the reference: its logit is zero outright, bias
+				// included, which is what makes the remaining d2-1 identified.
+				double logit = 0.0;
+				if (j > 0) {
+					for (int64_t k = 0; k < p; ++k) {
+						logit += x_main[i * p + k] * y_main[k * (d2 - 1) + (j - 1)];
+					}
+					logit += x_bias[i] + y_bias[j - 1];
+				}
+				prob[static_cast<size_t>(j)] = std::exp(logit);
+				total += prob[static_cast<size_t>(j)];
+			}
+			for (int64_t j = 0; j < d2; ++j) {
+				loss -= x * yd[static_cast<size_t>(n * d2 + j)] * std::log(prob[static_cast<size_t>(j)] / total);
+			}
+		}
+	}
+	return loss + GaussianPrior(shape, priors, theta);
+}
+} // namespace
+
+TEST_CASE("the objective is the neg-log-posterior computed the long way", "[mmvec]") {
+	// T1 pins the objective against scikit-bio's value, which is the parity
+	// statement; this pins it against its own definition, which is the
+	// correctness statement. They are not the same check: scikit-bio performs
+	// the SAME X^T Y collapse and the SAME stabilized normalizer, so a
+	// misreading shared with the reference implementation would satisfy T1 and
+	// only fail here. This is the one place the sample axis is actually walked.
+	using miint::mmvec_oracle::kT1LossRelTol;
+
+	auto check = [&](const std::vector<double> &xd, const std::vector<double> &yd, int64_t n_samples, int64_t d1,
+	                 int64_t d2, int32_t p, const std::vector<double> &theta) {
+		auto c = MakeCase(xd, yd, n_samples, d1, d2, p);
+		// Not the oracle's priors: those are mean 0 / scale 1, where a
+		// mean-subtraction bug and a scale-division bug are both invisible.
+		const Priors priors {0.3, 1.7, -0.6, 0.4};
+
+		Workspace ws;
+		std::vector<double> grad;
+		const double got = FullBatchLossAndGradient(c.shape, priors, c.stats, theta, ws, grad);
+		const double want = BruteForceNegLogPosterior(c.shape, priors, xd, yd, n_samples, theta);
+		REQUIRE(got == Approx(want).epsilon(kT1LossRelTol));
+	};
+
+	SECTION("toy") {
+		using namespace miint::mmvec_oracle::toy;
+		check(kXCounts, kYCounts, kNSamples, kNFeaturesX, kNFeaturesY, kNComponents, kTheta);
+	}
+	SECTION("synth_a") {
+		using namespace miint::mmvec_oracle::synth_a;
+		check(kXCounts, kYCounts, kNSamples, kNFeaturesX, kNFeaturesY, kNComponents, kTheta);
+	}
+	SECTION("synth_b") {
+		using namespace miint::mmvec_oracle::synth_b;
+		check(kXCounts, kYCounts, kNSamples, kNFeaturesX, kNFeaturesY, kNComponents, kTheta);
+	}
+}
+
 TEST_CASE("full-batch gradient matches central finite differences", "[mmvec]") {
 	// This is the gradient L-BFGS descends, and scikit-bio has no test for it.
 	// Every element of theta is perturbed, so a block that is transposed,
@@ -723,6 +837,74 @@ TEST_CASE("minibatch objective reduces to the full-batch one", "[mmvec]") {
 	for (size_t i = 0; i < grad_fb.size(); ++i) {
 		INFO("gradient element " << i);
 		REQUIRE(grad_mb[i] == Approx(grad_fb[i]).epsilon(1e-11).margin(1e-11));
+	}
+}
+
+TEST_CASE("the minibatch loss is an unbiased estimate of the full-batch one", "[mmvec]") {
+	// This is the property that lets Adam and L-BFGS be described as fitting the
+	// same model. It is not implied by the reduction above, which pins the two
+	// paths against each other only on a degenerate batch (every nonzero once,
+	// all X counts 1, norm 1). What has to hold for real is the statistical
+	// statement: draws weighted by X count, scaled by BatchNormFactor, average
+	// to the full-batch objective. A wrong sampling weight or a norm off by
+	// n_samples/sum(X) -- which is exactly what 'legacy' is -- breaks this and
+	// nothing else in the suite notices.
+	using namespace miint::mmvec_oracle::toy;
+	auto c = MakeCase(kXCounts, kYCounts, kNSamples, kNFeaturesX, kNFeaturesY, kNComponents);
+	const Priors priors {0.2, 1.3, -0.4, 0.8};
+	const int64_t batch_size = 10;
+	const int64_t nnz = static_cast<int64_t>(c.mb.x_val.size());
+	const double x_total = std::accumulate(c.mb.x_val.begin(), c.mb.x_val.end(), 0.0);
+	const double norm = BatchNormFactor(BatchNorm::Unbiased, x_total, kNSamples, batch_size);
+
+	Workspace ws;
+	std::vector<double> grad;
+	const double full = FullBatchLossAndGradient(c.shape, priors, c.stats, kTheta, ws, grad);
+
+	SECTION("exactly, in expectation over the draw distribution") {
+		// E[loss] = norm * batch_size * SUM_k p_k * f_k + prior, with
+		// p_k = x_val[k]/x_total and f_k the single-draw likelihood. Enumerating
+		// the finite draw space makes this an identity rather than an estimate,
+		// so it is asserted at full precision with no sampling noise to hide in.
+		const double prior = GaussianPrior(c.shape, priors, kTheta);
+		double weighted = 0.0;
+		for (int64_t k = 0; k < nnz; ++k) {
+			const std::vector<int64_t> one = {k};
+			const double f = MinibatchLossAndGradient(c.shape, priors, c.mb, one, 1.0, kTheta, ws, grad) - prior;
+			weighted += (c.mb.x_val[static_cast<size_t>(k)] / x_total) * f;
+		}
+		REQUIRE(norm * static_cast<double>(batch_size) * weighted + prior == Approx(full).epsilon(1e-12));
+
+		// 'legacy' estimates a different quantity, by exactly the factor the
+		// header claims -- so this is not merely "some other number".
+		const double legacy = BatchNormFactor(BatchNorm::Legacy, x_total, kNSamples, batch_size);
+		REQUIRE(legacy / norm == Approx(static_cast<double>(kNSamples) / x_total).epsilon(1e-14));
+	}
+
+	SECTION("empirically, through the sampler Adam actually uses") {
+		// The identity above assumes cells are drawn proportional to their X
+		// count; this runs the real weighted sampler and checks the average lands
+		// on the full-batch objective. Deterministic given the seed -- the RNG is
+		// bit-identical on every target -- so the band cannot flake, but it is
+		// also asserted to be tight relative to the loss, because a 3-sigma test
+		// with a huge sigma passes for free.
+		miint::mmvec::Rng rng(20260806);
+		const int64_t n_batches = 2000;
+		double sum = 0.0;
+		double sum_sq = 0.0;
+		for (int64_t b = 0; b < n_batches; ++b) {
+			const auto batch = miint::mmvec::SampleWeightedIndices(c.mb.x_val, batch_size, rng);
+			const double loss = MinibatchLossAndGradient(c.shape, priors, c.mb, batch, norm, kTheta, ws, grad);
+			sum += loss;
+			sum_sq += loss * loss;
+		}
+		const double n = static_cast<double>(n_batches);
+		const double mean = sum / n;
+		const double se = std::sqrt((sum_sq - n * mean * mean) / (n - 1.0) / n);
+
+		INFO("mean " << mean << " vs full-batch " << full << ", standard error " << se);
+		REQUIRE(se < 0.02 * std::abs(full));
+		REQUIRE(std::abs(mean - full) < 3.0 * se);
 	}
 }
 
@@ -1655,6 +1837,149 @@ TEST_CASE("probs survive logits far outside exp's range", "[mmvec]") {
 	}
 }
 
+TEST_CASE("the read-side functions validate the shape and theta they are given", "[mmvec]") {
+	// The fit-time entry points check this and are tested for it; the READ-side
+	// functions document the same contract (mmvec.hpp on ComputeLogits, Ranks,
+	// Probs, Predict, Score) and were not. That gap matters more than a routine
+	// missing case, because these five are what the SQL layer calls after
+	// rebuilding theta from a model RELATION -- a table a user can hand-edit,
+	// filter or mis-join. If the guard ever regressed, a length mismatch here is
+	// an out-of-bounds read, not a diagnosable error.
+	using namespace miint::mmvec_oracle::toy;
+	const ModelShape shape {kNFeaturesX, kNFeaturesY, kNComponents};
+
+	// While we are here: the oracle carries the expected parameter count, and
+	// nothing consumed it.
+	REQUIRE(NumParams(shape) == kNParams);
+
+	auto short_theta = kTheta;
+	short_theta.pop_back();
+	ModelShape degenerate = shape;
+	degenerate.n_features_y = 1; // nothing but the reference category
+
+	const int64_t n = static_cast<int64_t>(kPredictSampleIds.size());
+	const auto x_coo = ToCoo(kPredictXCounts, n, kNFeaturesX);
+	const auto y_coo = ToCoo(kScoreYCounts, n, kNFeaturesY);
+
+	SECTION("theta of the wrong length") {
+		REQUIRE_THROWS_WITH(ComputeLogits(shape, short_theta), ContainsSubstring("parameters, expected"));
+		REQUIRE_THROWS_WITH(Ranks(shape, short_theta), ContainsSubstring("parameters, expected"));
+		REQUIRE_THROWS_WITH(Probs(shape, short_theta), ContainsSubstring("parameters, expected"));
+		REQUIRE_THROWS_WITH(Predict(shape, short_theta, x_coo), ContainsSubstring("parameters, expected"));
+		REQUIRE_THROWS_WITH(Score(shape, short_theta, x_coo, y_coo), ContainsSubstring("parameters, expected"));
+	}
+
+	SECTION("a finite theta whose products overflow") {
+		// theta itself passes the finiteness check -- it is the dot product that
+		// does not. The row maximum then becomes +inf, the softmax computes
+		// exp(inf - inf), and every probability comes back NaN with nothing
+		// downstream to notice. Unreachable by fitting, since the Gaussian prior
+		// makes parameters this size astronomically expensive, but the SQL layer
+		// rebuilds theta from a model relation a user can populate by hand, so it
+		// is reachable in the way that matters. Measured 2026-08-06: 1e100 is fine,
+		// 1e200 gives 40 infinite logits and 48 NaN probabilities.
+		const std::vector<double> huge(static_cast<size_t>(NumParams(shape)), 1e200);
+		for (const double v : huge) {
+			REQUIRE(std::isfinite(v)); // the input really is legal
+		}
+		REQUIRE_THROWS_WITH(ComputeLogits(shape, huge), ContainsSubstring("their product overflowed"));
+		REQUIRE_THROWS_WITH(Ranks(shape, huge), ContainsSubstring("their product overflowed"));
+		REQUIRE_THROWS_WITH(Probs(shape, huge), ContainsSubstring("their product overflowed"));
+		REQUIRE_THROWS_WITH(Predict(shape, huge, x_coo), ContainsSubstring("their product overflowed"));
+		REQUIRE_THROWS_WITH(Score(shape, huge, x_coo, y_coo), ContainsSubstring("their product overflowed"));
+
+		// One order of magnitude below the overflow, everything still works -- so
+		// the guard is a genuine boundary, not a blanket rejection of large models.
+		const std::vector<double> large(static_cast<size_t>(NumParams(shape)), 1e100);
+		const auto probs = Probs(shape, large);
+		for (const double v : probs) {
+			REQUIRE(std::isfinite(v));
+		}
+	}
+
+	SECTION("a degenerate shape") {
+		REQUIRE_THROWS_WITH(ComputeLogits(degenerate, kTheta), ContainsSubstring("n_features_y must be >= 2"));
+		REQUIRE_THROWS_WITH(Ranks(degenerate, kTheta), ContainsSubstring("n_features_y must be >= 2"));
+		REQUIRE_THROWS_WITH(Probs(degenerate, kTheta), ContainsSubstring("n_features_y must be >= 2"));
+		REQUIRE_THROWS_WITH(Predict(degenerate, kTheta, x_coo), ContainsSubstring("n_features_y must be >= 2"));
+		REQUIRE_THROWS_WITH(Score(degenerate, kTheta, x_coo, y_coo), ContainsSubstring("n_features_y must be >= 2"));
+	}
+}
+
+TEST_CASE("the minibatch entry points reject what they document", "[mmvec]") {
+	// These throws were reachable only through the full-batch objective's tests,
+	// which is a different function: the two share validation today, and this is
+	// what would notice if they stopped sharing it.
+	using namespace miint::mmvec_oracle::toy;
+	auto c = MakeCase(kXCounts, kYCounts, kNSamples, kNFeaturesX, kNFeaturesY, kNComponents);
+	const std::vector<int64_t> batch = {0, 1, 2};
+	Workspace ws;
+	std::vector<double> grad;
+
+	SECTION("MinibatchLossAndGradient rejects a wrong-length theta") {
+		auto short_theta = kTheta;
+		short_theta.pop_back();
+		REQUIRE_THROWS_WITH(MinibatchLossAndGradient(c.shape, OraclePriors(), c.mb, batch, 1.0, short_theta, ws, grad),
+		                    ContainsSubstring("parameters, expected"));
+	}
+
+	SECTION("MinibatchLossAndGradient rejects a non-positive prior scale") {
+		Priors bad = OraclePriors();
+		bad.y_prior_scale = 0.0;
+		REQUIRE_THROWS_WITH(MinibatchLossAndGradient(c.shape, bad, c.mb, batch, 1.0, kTheta, ws, grad),
+		                    ContainsSubstring("y_prior_scale must be > 0"));
+	}
+
+	SECTION("BatchNormFactor rejects a sample count and an X total it cannot use") {
+		// Both are divisors or numerators of the likelihood scale; a zero X total
+		// would silently produce a zero-weighted likelihood, which is a fit of the
+		// prior alone.
+		REQUIRE_THROWS_WITH(BatchNormFactor(BatchNorm::Unbiased, 10.0, 0, 5),
+		                    ContainsSubstring("n_samples must be >= 1"));
+		REQUIRE_THROWS_WITH(BatchNormFactor(BatchNorm::Unbiased, 0.0, 4, 5),
+		                    ContainsSubstring("total X count must be > 0"));
+	}
+
+	SECTION("SampleWeightedIndices rejects a negative count") {
+		miint::mmvec::Rng rng(1);
+		const std::vector<double> weights = {1.0, 2.0};
+		REQUIRE_THROWS_WITH(miint::mmvec::SampleWeightedIndices(weights, -1, rng),
+		                    ContainsSubstring("sample count must be >= 0"));
+	}
+}
+
+TEST_CASE("predict is exactly rowprops(X) times the conditional probabilities", "[mmvec]") {
+	// The defining identity, and the one that ties the two halves of the read
+	// path together: whatever Probs() says about P(Y_j | X_i), a sample's
+	// prediction must be the X-proportion-weighted mixture of those rows and
+	// nothing else. The properties asserted around it -- rows summing to 1,
+	// depth invariance, COO-order independence -- are all satisfied by a range
+	// of WRONG mixtures as well (an unweighted mean over the sample's present
+	// features passes every one of them), so none of them pin the weighting.
+	//
+	// The core accumulates sparsely, over stored cells in ascending feature
+	// order; the dense product below visits every feature in that same order and
+	// the absent ones contribute an exact +0.0, so the two agree bit for bit
+	// rather than merely to rounding.
+	using namespace miint::mmvec_oracle::toy;
+	const ModelShape shape {kNFeaturesX, kNFeaturesY, kNComponents};
+	const int64_t n = static_cast<int64_t>(kPredictSampleIds.size());
+	const auto probs = Probs(shape, kTheta);
+
+	std::vector<double> want(static_cast<size_t>(n * kNFeaturesY), 0.0);
+	for (int64_t s = 0; s < n; ++s) {
+		const double total = RowSum(kPredictXCounts, s, kNFeaturesX);
+		for (int64_t i = 0; i < kNFeaturesX; ++i) {
+			const double weight = kPredictXCounts[static_cast<size_t>(s * kNFeaturesX + i)] / total;
+			for (int64_t j = 0; j < kNFeaturesY; ++j) {
+				want[static_cast<size_t>(s * kNFeaturesY + j)] +=
+				    weight * probs[static_cast<size_t>(i * kNFeaturesY + j)];
+			}
+		}
+	}
+	REQUIRE(Predict(shape, kTheta, ToCoo(kPredictXCounts, n, kNFeaturesX)) == want);
+}
+
 TEST_CASE("predict reads X as proportions, not as counts", "[mmvec]") {
 	using namespace miint::mmvec_oracle::toy;
 	const ModelShape shape {kNFeaturesX, kNFeaturesY, kNComponents};
@@ -1863,13 +2188,105 @@ TEST_CASE("a converged fit reproduces the T2 oracle's derived quantities", "[mmv
 	}
 
 	const int64_t n = static_cast<int64_t>(kPredictSampleIds.size());
-	REQUIRE(Score(m.shape, m.theta, ToCoo(kPredictXCounts, n, kNFeaturesX), ToCoo(kScoreYCounts, n, kNFeaturesY)) ==
-	        Approx(kT2Score).margin(kT2RankTol));
+	const double score =
+	    Score(m.shape, m.theta, ToCoo(kPredictXCounts, n, kNFeaturesX), ToCoo(kScoreYCounts, n, kNFeaturesY));
+	REQUIRE(score == Approx(kT2Score).margin(kT2RankTol));
 
 	// The fit is worth something on held-out samples, where the unfitted T1 theta
-	// scores about -2. Cheap, but it is the only assertion here that would catch a
-	// fit that reproduced the oracle's ranks while predicting nothing.
-	REQUIRE(kT2Score > 0.0);
+	// scores about -2. The sign has to be asserted on the value we just computed,
+	// not on kT2Score: that is a carved constant, so `kT2Score > 0.0` is a
+	// compile-time truth about the fixture and would hold however badly the fit
+	// went. This is the same class of mistake as comparing a value to itself.
+	REQUIRE(score > 0.0);
+}
+
+namespace {
+// Swap two columns of a dense row-major matrix.
+std::vector<double> SwapCols(std::vector<double> m, int64_t rows, int64_t cols, int64_t a, int64_t b) {
+	for (int64_t r = 0; r < rows; ++r) {
+		std::swap(m[static_cast<size_t>(r * cols + a)], m[static_cast<size_t>(r * cols + b)]);
+	}
+	return m;
+}
+} // namespace
+
+TEST_CASE("which Y feature is the reference changes the fitted model", "[mmvec]") {
+	// The invariant the design warns about most loudly and, until now, the one
+	// with no regression detector: mmvec.hpp, mmvec_relation.hpp and
+	// data/mmvec/README.md all state that the reference category is not
+	// statistically inert, and mmvec_oracle.hpp carries four constants measured
+	// from scikit-bio for a "behavioral test that our implementation shares this
+	// property" -- which was never written. The constants were the only orphans
+	// in the whole oracle file.
+	//
+	// The mechanism: Y feature 0's logit is pinned to zero, and the Gaussian
+	// priors are NOT softmax-shift-invariant, so the MAP solution depends on
+	// which feature holds that slot. Fit the same data twice from the same
+	// theta0, once with Y columns 0 and 1 exchanged so a different feature is the
+	// reference, realign the output, and the ranks must move.
+	//
+	// A bug that made this inert -- priors accidentally applied shift-invariantly,
+	// or the reference slot stopping short of actually pinning anything -- would
+	// otherwise ship silently, because every parity tier fixes the ordering and so
+	// never varies the thing this varies.
+	using miint::mmvec_oracle::kSynthBMaxRankDevByReference;
+	using miint::mmvec_oracle::kSynthBRanksScale;
+	using miint::mmvec_oracle::kToyMaxRankDevByReference;
+	using miint::mmvec_oracle::kToyRanksScale;
+
+	auto check = [](const std::vector<double> &xc, const std::vector<double> &yc, int64_t ns, int64_t d1, int64_t d2,
+	                int32_t p, const std::vector<double> &theta0, int64_t max_iter, double carved_scale,
+	                double carved_dev) {
+		const ModelShape shape {d1, d2, p};
+		const auto x_coo = ToCoo(xc, ns, d1);
+
+		const auto model_a =
+		    FitLbfgsFromInit(shape, OraclePriors(), ComputeSufficientStats(x_coo, ToCoo(yc, ns, d2)), theta0, max_iter);
+		const auto ranks_a = Ranks(shape, model_a.theta);
+
+		// The same theta0 for both fits. It is a starting point, not a claim about
+		// parameter correspondence, so it stays valid when the columns move.
+		const auto model_b = FitLbfgsFromInit(shape, OraclePriors(),
+		                                      ComputeSufficientStats(x_coo, ToCoo(SwapCols(yc, ns, d2, 0, 1), ns, d2)),
+		                                      theta0, max_iter);
+		const auto ranks_b = SwapCols(Ranks(shape, model_b.theta), d1, d2, 0, 1);
+
+		double scale = 0.0;
+		double dev = 0.0;
+		for (size_t i = 0; i < ranks_a.size(); ++i) {
+			scale = std::max(scale, std::abs(ranks_a[i]));
+			dev = std::max(dev, std::abs(ranks_a[i] - ranks_b[i]));
+		}
+
+		// The ranks' own magnitude is a parity check: scikit-bio measured this on
+		// the same fixture and we reproduce it to three decimals.
+		INFO("max|rank| " << scale << " vs carved " << carved_scale);
+		REQUIRE(scale == Approx(carved_scale).margin(0.005));
+
+		// The deviation is the behavioral claim. It is NOT expected to match
+		// scikit-bio's number: the permuted fit converges to a different optimum,
+		// reached from a different init under a stopping rule that leaves the
+		// converged parameters starting-point dependent at ~1e-4 (mmvec.hpp). What
+		// must match is the SIZE of the effect, so this asserts the same order of
+		// magnitude rather than the value. Measured 2026-08-06: toy 0.2810 against
+		// scikit-bio's 0.4423, synth_b 0.0677 against 0.1135 -- both about 0.6x,
+		// comfortably inside the band and four orders above that 1e-4 spread, so
+		// the band cannot be satisfied by optimizer noise.
+		INFO("max|rank delta| " << dev << " vs carved " << carved_dev);
+		REQUIRE(dev > 0.3 * carved_dev);
+		REQUIRE(dev < 3.0 * carved_dev);
+	};
+
+	SECTION("toy") {
+		using namespace miint::mmvec_oracle::toy;
+		check(kXCounts, kYCounts, kNSamples, kNFeaturesX, kNFeaturesY, kNComponents, kTheta, kT2MaxIter, kToyRanksScale,
+		      kToyMaxRankDevByReference);
+	}
+	SECTION("synth_b") {
+		using namespace miint::mmvec_oracle::synth_b;
+		check(kXCounts, kYCounts, kNSamples, kNFeaturesX, kNFeaturesY, kNComponents, kTheta, kT2MaxIter,
+		      kSynthBRanksScale, kSynthBMaxRankDevByReference);
+	}
 }
 
 TEST_CASE("Adam's T3 fit reproduces the oracle's ranks", "[mmvec]") {

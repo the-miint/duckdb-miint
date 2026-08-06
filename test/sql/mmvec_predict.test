@@ -363,6 +363,25 @@ SELECT * FROM mmvec_predict('t1_model', 'not_a_feature_table');
 ----
 must expose (sample_id, feature_id, value)
 
+# The MODEL argument was checked only for existence, never for being a model. The
+# two validators it must reach are shared with mmvec_ranks and are covered there,
+# so a generic regression in them would be caught -- but nothing here would notice
+# a predict-specific wiring bug, such as a refactor that validated the X table
+# twice, or that skipped the model checks for this entry point alone. One case per
+# validator: the bind-time schema check, and the parse-time completeness check.
+statement error
+SELECT * FROM mmvec_predict('x_test', 'x_test');
+----
+must expose (modality, x_feature_id, y_feature_id, axis, value)
+
+statement ok
+CREATE TABLE model_clipped AS SELECT * FROM t1_model WHERE NOT (modality = 'x' AND x_feature_id = 'O3' AND axis = 2);
+
+statement error
+SELECT * FROM mmvec_predict('model_clipped', 'x_test');
+----
+'O3' is missing axis 2
+
 # An empty X table has nothing to predict for.
 statement ok
 CREATE TABLE x_test_empty AS SELECT * FROM x_test WHERE false;

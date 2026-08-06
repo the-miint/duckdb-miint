@@ -1001,6 +1001,15 @@ const std::string BETA_KNN_FROM_SAMPLE = // NOLINT
 // from zero, so 10 samples at 0.35 gives 4). test_fraction outside [0, 1] is an
 // error rather than a silent all-train or all-test.
 //
+// NULL is rejected before the range test, and has to be: SQL's three-valued logic
+// makes `NULL < 0 OR NULL > 1` evaluate to NULL rather than true, so a NULL would
+// fall past a range test written on its own. It would then make n_test NULL, make
+// `rn <= n_test` NULL, and land every sample in the ELSE branch -- an all-train
+// split, silently, which is the exact outcome the range check exists to prevent.
+// A NULL seed is rejected for the same class of reason: md5(NULL || ...) is NULL
+// for every row, so the ordering would collapse to plain alphabetical by sample_id
+// and the split would look seeded without being seeded.
+//
 // The assignment is a deterministic function of (sample_id, seed) alone: samples
 // are ordered by md5(seed || ':' || sample_id) and the first n_test taken. Ties are
 // broken by sample_id, so the result depends on neither the input row order nor how
@@ -1017,7 +1026,11 @@ const std::string BETA_KNN_FROM_SAMPLE = // NOLINT
 const std::string MMVEC_TRAIN_TEST_SPLIT = // NOLINT
     "CREATE OR REPLACE MACRO mmvec_train_test_split(relation, test_fraction, seed) AS TABLE "
     "SELECT sample_id, "
-    "       CASE WHEN test_fraction < 0 OR test_fraction > 1 "
+    "       CASE WHEN test_fraction IS NULL "
+    "              THEN error('mmvec_train_test_split: test_fraction must not be NULL') "
+    "            WHEN seed IS NULL "
+    "              THEN error('mmvec_train_test_split: seed must not be NULL') "
+    "            WHEN test_fraction < 0 OR test_fraction > 1 "
     "              THEN error(printf('mmvec_train_test_split: test_fraction must be in [0, 1], got %s', "
     "                                CAST(test_fraction AS VARCHAR))) "
     "            WHEN rn <= n_test THEN 'test' ELSE 'train' END AS split "

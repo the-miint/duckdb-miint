@@ -538,6 +538,14 @@ SELECT * FROM mmvec_score('t1_model', 'x_test', 'not_a_feature_table');
 ----
 must expose (sample_id, feature_id, value)
 
+# The X position is a separate call to the same validator, and only the table name
+# distinguishes the two messages -- so this is what would catch a bind that
+# validated the Y table twice and never looked at X.
+statement error
+SELECT * FROM mmvec_score('t1_model', 'not_a_feature_table', 'y_test');
+----
+feature-table 'not_a_feature_table'
+
 statement error
 SELECT * FROM mmvec_score('x_test', 'x_test', 'y_test');
 ----
