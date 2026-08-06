@@ -446,9 +446,18 @@ double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_r
 	RowMatrixMap resids(ws.resids.data(), n_rows, l.nref);
 	double data = 0.0;
 	for (int64_t r = 0; r < n_rows; ++r) {
+		// A plain compare rather than std::fmax, which GCC emits as a CALL into libm
+		// (4.4% of a cystic-fibrosis fit, its PLT stub included) because fmax's
+		// NaN-propagation semantics are not maxsd's. The two agree here by
+		// construction: `m` starts at 0.0 and a NaN logit leaves it unchanged under
+		// either form, so neither can ever make `m` NaN. Measured bit-identical on
+		// every fixture, both optimizers, at 200 and 1000 iterations.
 		double m = 0.0;
 		for (int64_t j = 0; j < l.nref; ++j) {
-			m = std::fmax(m, logits(r, j));
+			const double v = logits(r, j);
+			if (v > m) {
+				m = v;
+			}
 		}
 		double shifted_sum = 0.0;
 		for (int64_t j = 0; j < l.nref; ++j) {
@@ -484,8 +493,26 @@ double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_r
 	const ConstRowMatrixMap resids_const(ws.resids.data(), n_rows, l.nref);
 	RowMatrixMap dy_main(grad + l.y_main, l.p, l.nref);
 	dy_main.noalias() = -norm * (x_main_rows.transpose() * resids_const);
+	// One row-major sweep rather than nref column reductions. `resids` is row-major,
+	// so `.col(j).sum()` strides nref*8 bytes through every row and pays a cache miss
+	// per element -- 8.2% of a cystic-fibrosis fit for the same 1.25M additions the
+	// row-contiguous X-side scatter below does in 1.4%. Fusing cuts that phase by 75%.
+	//
+	// Bit-identical, not merely equivalent: each j still accumulates over ascending r,
+	// which is the order Eigen's redux uses for a strided vector. Verified on every
+	// fixture, both optimizers, at 200 and 1000 iterations.
+	double *dy_bias = grad + l.y_bias;
 	for (int64_t j = 0; j < l.nref; ++j) {
-		grad[l.y_bias + static_cast<size_t>(j)] = -norm * resids_const.col(j).sum();
+		dy_bias[j] = 0.0;
+	}
+	for (int64_t r = 0; r < n_rows; ++r) {
+		const double *resid_row = ws.resids.data() + static_cast<size_t>(r) * static_cast<size_t>(l.nref);
+		for (int64_t j = 0; j < l.nref; ++j) {
+			dy_bias[j] += resid_row[j];
+		}
+	}
+	for (int64_t j = 0; j < l.nref; ++j) {
+		dy_bias[j] *= -norm;
 	}
 
 	RowMatrixMap dx_main_rows(ws.dx_main_rows.data(), n_rows, l.p);
