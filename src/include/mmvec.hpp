@@ -136,13 +136,17 @@ struct Priors {
 //! A "row" is one unit of the likelihood: an X feature for the full-batch
 //! objective, one sampled (sample, X-feature) draw for the minibatch.
 struct Workspace {
-	std::vector<double> logits;       //!< rows x (d2-1), non-reference only
-	std::vector<double> resids;       //!< rows x (d2-1); shifted exps, then probabilities, then residuals, in place
-	std::vector<double> row_totals;   //!< rows; the Y total each row is conditioned on
-	std::vector<double> x_main_rows;  //!< rows x p, the rows' gathered x_main
-	std::vector<double> x_bias_rows;  //!< rows
-	std::vector<double> dx_main_rows; //!< rows x p, before scattering back to d1 x p
-	std::vector<double> dx_bias_rows; //!< rows
+	std::vector<double> logits;      //!< rows x (d2-1), non-reference only
+	std::vector<double> resids;      //!< rows x (d2-1); shifted exps, then probabilities, then residuals, in place
+	std::vector<double> row_totals;  //!< rows; the Y total each row is conditioned on
+	std::vector<double> x_main_rows; //!< rows x p, the rows' gathered x_main
+	//! rows x p, before scattering back to d1 x p.
+	//!
+	//! The x_main blocks are gathered and staged because Eigen needs them
+	//! contiguous for the two matrix products. The BIAS blocks are not: they are
+	//! one scalar per row, read and used in the same loop, so they are taken
+	//! straight from theta and written straight into grad rather than staged here.
+	std::vector<double> dx_main_rows;
 
 	//! The minibatch path's two per-row index maps: which X feature and which
 	//! sample each sampled draw resolves to. Unused by the full-batch objective,
@@ -293,14 +297,13 @@ struct Model {
 	//! minibatch losses are noisy estimates over different draws and are not
 	//! comparable to each other, let alone across optimizers.
 	double final_loss = 0.0;
-	int64_t n_evals = 0; //!< == loss_curve.size()
 	//! L-BFGS iterations, or Adam parameter updates.
 	//!
 	//! Zero after a line-search failure, and that zero means "unknown", not "none":
 	//! LBFGS++ returns the count from `minimize`, so a throw loses it however many
 	//! iterations had run, and it exposes no other accessor. `message` says so
-	//! explicitly on that path rather than asserting a count. `n_evals` is
-	//! unaffected.
+	//! explicitly on that path rather than asserting a count. The evaluation
+	//! count is unaffected -- read `loss_curve.size()`, which is what it is.
 	int64_t n_iter = 0;
 
 	//! max|gradient| at `theta`. Reported separately from `converged` because the

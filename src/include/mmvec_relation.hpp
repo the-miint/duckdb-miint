@@ -96,6 +96,27 @@ struct ModelRow {
 	double value = 0.0;
 };
 
+//! The `modality` string a ModelRow::Kind is written as, and read back as.
+//!
+//! The one place the enum and the wire vocabulary meet. Without it the mapping
+//! gets rewritten at every site that crosses the boundary -- the SQL emitter, the
+//! parser's validation, and the round-trip test, which all had their own copy --
+//! and a renamed modality would drift the encode and decode paths apart while the
+//! round-trip test, carrying its own third copy, stayed green. That is the same
+//! silent-agreement hazard the block-offset comment at the top of
+//! mmvec_relation.cpp warns about.
+inline const char *ModalityName(ModelRow::Kind kind) {
+	switch (kind) {
+	case ModelRow::Kind::X:
+		return "x";
+	case ModelRow::Kind::Y:
+		return "y";
+	case ModelRow::Kind::Loss:
+		return "loss";
+	}
+	return "loss"; // unreachable; enumerated above, and silences -Wreturn-type
+}
+
 //! Unpack a fitted model into relation rows: every X feature, then every Y
 //! feature, then the loss curve.
 //!

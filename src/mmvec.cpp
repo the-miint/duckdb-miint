@@ -169,6 +169,16 @@ double OrderRowByFeature(const GroupedCounts &g, int64_t s, std::vector<size_t> 
 	return total;
 }
 
+//! max|v|, the convergence diagnostic both optimizers report. Zero for an empty
+//! vector, which cannot arise here -- a model always has parameters.
+double MaxAbs(const std::vector<double> &v) {
+	double worst = 0.0;
+	for (const double x : v) {
+		worst = std::fmax(worst, std::fabs(x));
+	}
+	return worst;
+}
+
 //! Subtract each row's mean from it, in place: logits -> ranks.
 void CenterRowsInPlace(double *m, int64_t rows, int64_t cols) {
 	for (int64_t i = 0; i < rows; ++i) {
@@ -376,13 +386,15 @@ void FillNonRefLogits(const ParamLayout &l, const double *theta, const int64_t *
 		for (int64_t k = 0; k < l.p; ++k) {
 			x_main_rows(r, k) = theta[l.x_main + static_cast<size_t>(i * l.p + k)];
 		}
-		ws.x_bias_rows[static_cast<size_t>(r)] = theta[l.x_bias + static_cast<size_t>(i)];
 	}
 
 	RowMatrixMap logits(out, n_rows, l.nref);
 	logits.noalias() = x_main_rows * y_main;
 	for (int64_t r = 0; r < n_rows; ++r) {
-		const double xb = ws.x_bias_rows[static_cast<size_t>(r)];
+		// Read straight from theta. x_main has to be gathered because Eigen needs
+		// it contiguous for the product above; the bias is a scalar per row and
+		// gathering it bought nothing but a buffer.
+		const double xb = theta[l.x_bias + static_cast<size_t>(MapRow(x_index, r))];
 		for (int64_t j = 0; j < l.nref; ++j) {
 			logits(r, j) += xb + theta[l.y_bias + static_cast<size_t>(j)];
 		}
@@ -478,9 +490,6 @@ double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_r
 
 	RowMatrixMap dx_main_rows(ws.dx_main_rows.data(), n_rows, l.p);
 	dx_main_rows.noalias() = resids_const * y_main.transpose();
-	for (int64_t r = 0; r < n_rows; ++r) {
-		ws.dx_bias_rows[static_cast<size_t>(r)] = resids_const.row(r).sum();
-	}
 	for (size_t i = 0; i < static_cast<size_t>(l.d1 * l.p); ++i) {
 		grad[l.x_main + i] = 0.0;
 	}
@@ -492,7 +501,10 @@ double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_r
 		for (int64_t k = 0; k < l.p; ++k) {
 			grad[l.x_main + static_cast<size_t>(i * l.p + k)] += -norm * dx_main_rows(r, k);
 		}
-		grad[l.x_bias + static_cast<size_t>(i)] += -norm * ws.dx_bias_rows[static_cast<size_t>(r)];
+		// Same reduction, taken where it is consumed rather than staged in a
+		// buffer first. resids_const is not touched by the scatter, so the value
+		// and the summation order are unchanged.
+		grad[l.x_bias + static_cast<size_t>(i)] += -norm * resids_const.row(r).sum();
 	}
 
 	AddPriorGradient(l, priors, theta, grad);
@@ -554,9 +566,7 @@ void Workspace::Resize(const ModelShape &shape, int64_t n_rows) {
 	resids.resize(rows * nref);
 	row_totals.resize(rows);
 	x_main_rows.resize(rows * p);
-	x_bias_rows.resize(rows);
 	dx_main_rows.resize(rows * p);
-	dx_bias_rows.resize(rows);
 	x_index.resize(rows);
 	sample_index.resize(rows);
 }
@@ -571,8 +581,13 @@ std::vector<double> ComputeLogits(const ModelShape &shape, const std::vector<dou
 	// per fit (for `ranks` and `probs`), not once per iteration, so the extra
 	// (d1 x d2-1) copy costs nothing worth trading a second copy of the model
 	// equation for.
+	// Sized by hand rather than through Workspace::Resize, which allocates all of
+	// the objective's buffers. FillNonRefLogits touches exactly these two, and
+	// `resids` alone is d1 x (d2-1) -- 10 MB at cystic-fibrosis scale, zero-filled
+	// and never read, on every ranks / probs / predict / score call.
 	Workspace ws;
-	ws.Resize(shape, l.d1);
+	ws.logits.resize(static_cast<size_t>(l.d1 * l.nref));
+	ws.x_main_rows.resize(static_cast<size_t>(l.d1 * l.p));
 	FillNonRefLogits(l, theta.data(), nullptr, l.d1, ws, ws.logits.data());
 
 	std::vector<double> out(static_cast<size_t>(l.d1 * l.d2), 0.0);
@@ -770,7 +785,7 @@ Model FitLbfgsFromInit(const ModelShape &shape, const Priors &priors, const Suff
 		// actually ran, and LBFGS++ exposes no other accessor for it. Reporting a
 		// confident "0 iterations" for a fit that managed forty-seven would be a
 		// fabrication, so the message says the count is unavailable instead.
-		// `n_evals` is unaffected -- the functor counts those itself.
+		// The evaluation count is unaffected -- the functor counts those itself.
 		model.converged = false;
 		niter_known = false;
 		outcome = std::string("line search failed (") + e.what() + "); the best point seen was kept";
@@ -778,21 +793,17 @@ Model FitLbfgsFromInit(const ModelShape &shape, const Priors &priors, const Suff
 
 	model.theta.assign(objective.best_theta.data(), objective.best_theta.data() + objective.best_theta.size());
 	model.loss_curve = std::move(objective.loss_curve);
-	model.n_evals = static_cast<int64_t>(model.loss_curve.size());
 	model.n_iter = niter;
 
 	// Recompute at the point actually being returned, so max|gradient| describes
 	// `theta` and not some iterate that was discarded.
 	std::vector<double> grad;
 	model.final_loss = FullBatchLossAndGradient(shape, priors, stats, model.theta, ws, grad);
-	model.max_abs_grad = 0.0;
-	for (const double g : grad) {
-		model.max_abs_grad = std::fmax(model.max_abs_grad, std::fabs(g));
-	}
+	model.max_abs_grad = MaxAbs(grad);
 
 	model.message = outcome + "; " +
 	                (niter_known ? std::to_string(niter) + " iterations" : std::string("iteration count unavailable")) +
-	                ", " + std::to_string(model.n_evals) +
+	                ", " + std::to_string(model.loss_curve.size()) +
 	                " objective evaluations, max|gradient| = " + std::to_string(model.max_abs_grad);
 	return model;
 }
@@ -988,7 +999,6 @@ Model FitAdamWithIndices(const ModelShape &shape, const Priors &priors, const Mi
 		}
 	}
 
-	model.n_evals = static_cast<int64_t>(model.loss_curve.size());
 	model.n_iter = n_updates;
 
 	// The full-batch objective at the final parameters, so final_loss means the
@@ -997,10 +1007,7 @@ Model FitAdamWithIndices(const ModelShape &shape, const Priors &priors, const Mi
 	// built before the loop; see the note there for why.
 	std::vector<double> full_grad;
 	model.final_loss = FullBatchLossAndGradient(shape, priors, stats, model.theta, ws, full_grad);
-	model.max_abs_grad = 0.0;
-	for (const double g : full_grad) {
-		model.max_abs_grad = std::fmax(model.max_abs_grad, std::fabs(g));
-	}
+	model.max_abs_grad = MaxAbs(full_grad);
 
 	// Adam has no convergence test at all -- it runs its schedule and stops -- so
 	// claiming convergence would be a fabrication.
@@ -1029,17 +1036,12 @@ Model FitAdam(const ModelShape &shape, const Priors &priors, const MinibatchInpu
 	const int64_t per_epoch = std::max<int64_t>(1, nnz / params.batch_size);
 	const int64_t n_updates = epochs * per_epoch;
 
-	double total = 0.0;
-	for (const double v : inputs.x_val) {
-		total += v;
-	}
-	std::vector<double> weights(inputs.x_val.size());
-	for (size_t i = 0; i < weights.size(); ++i) {
-		weights[i] = inputs.x_val[i] / total;
-	}
-
+	// The X counts are the sampling weights as they stand. SampleWeightedIndices
+	// builds its own cumulative sums and draws Uniform() * total, so it is
+	// scale-invariant by construction -- pre-dividing by the total would allocate
+	// an nnz-sized copy to compute a distribution it recomputes anyway.
 	Rng rng(seed);
-	const std::vector<int64_t> batches = SampleWeightedIndices(weights, n_updates * params.batch_size, rng);
+	const std::vector<int64_t> batches = SampleWeightedIndices(inputs.x_val, n_updates * params.batch_size, rng);
 	return FitAdamWithIndices(shape, priors, inputs, params, theta0, batches);
 }
 

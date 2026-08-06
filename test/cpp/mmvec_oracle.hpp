@@ -1079,9 +1079,26 @@ inline constexpr double kQ2High = 0.15707954081105335;
 } // namespace cf
 
 // =================================================================== synth_c (T4)
-// Embedding recovery against the simulator's ground truth. Embeddings are identified
-// only up to an orthogonal rotation, so recovery is measured on rotation-invariant
-// pairwise distances via Spearman correlation -- exactly as scikit-bio's own tests do.
+// scikit-bio's own simulated recovery design, from their `random_multimodal`
+// generator: a known latent structure planted in 150 samples of 8 microbes and 8
+// metabolites. Consumed by test/sql/mmvec_synth_c.test.
+//
+// Two constants were REMOVED here at M6 P2 rather than asserted: kXEmbedSpearmanR
+// (0.5041050903119868) and kYEmbedSpearmanR (0.4402597402597402). They measured
+// embedding recovery as a Spearman correlation between pairwise distances among
+// the fitted embeddings and pairwise distances among the simulator's LATENT ones
+// -- rotation-invariant, as scikit-bio's own tests do it, since embeddings are
+// identified only up to an orthogonal rotation. But only the count tables were
+// ever committed; the latent embeddings were not. So neither number is
+// recomputable by anyone, and left sitting here they read as though something
+// checks them. An unverifiable constant is worse than no constant. Recovering
+// them would mean committing the simulator's ground truth, which is a fixture
+// decision, not a test one.
+//
+// kScore survives and turns out to be the strongest parity result in the T4 tier:
+// this is the only fixture that CONVERGES (soils and cf both stop on the
+// iteration limit), so the optimum is genuinely identified and two independent
+// implementations starting from different random inits agree on it to 1.5e-5.
 namespace synth_c {
 inline const std::string kFixtureX = "synth_c_x";
 inline const std::string kFixtureY = "synth_c_y";
@@ -1089,10 +1106,7 @@ inline constexpr int kNSamples = 150;
 inline constexpr int kNFeaturesX = 8;
 inline constexpr int kNFeaturesY = 8;
 inline constexpr int kNComponents = 2;
-inline constexpr double kXEmbedSpearmanR = 0.5041050903119868;
-inline constexpr double kYEmbedSpearmanR = 0.4402597402597402;
 inline constexpr double kScore = 0.34977616313820525;
-// scikit-bio asserts x_r > 0.3 (L-BFGS) / > 0.5 (Adam) on this design.
 } // namespace synth_c
 
 // ============================================================ measured model behavior

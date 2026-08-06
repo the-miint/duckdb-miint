@@ -385,15 +385,19 @@ std::vector<ModelCell> CellsFromRows(const std::vector<miint::mmvec::ModelRow> &
 	std::vector<ModelCell> cells;
 	cells.reserve(rows.size());
 	for (const auto &r : rows) {
+		// Deliberately routed through ModalityName rather than spelling the three
+		// strings again here: a private copy would let a renamed modality drift the
+		// emitter and the parser apart with this very round trip still passing.
+		const std::string modality = miint::mmvec::ModalityName(r.kind);
 		switch (r.kind) {
 		case miint::mmvec::ModelRow::Kind::X:
-			cells.push_back({"x", x_ids[static_cast<size_t>(r.id_index)], r.axis, r.value});
+			cells.push_back({modality, x_ids[static_cast<size_t>(r.id_index)], r.axis, r.value});
 			break;
 		case miint::mmvec::ModelRow::Kind::Y:
-			cells.push_back({"y", y_ids[static_cast<size_t>(r.id_index)], r.axis, r.value});
+			cells.push_back({modality, y_ids[static_cast<size_t>(r.id_index)], r.axis, r.value});
 			break;
 		case miint::mmvec::ModelRow::Kind::Loss:
-			cells.push_back({"loss", std::nullopt, r.axis, r.value});
+			cells.push_back({modality, std::nullopt, r.axis, r.value});
 			break;
 		}
 	}

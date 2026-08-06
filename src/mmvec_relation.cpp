@@ -4,6 +4,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace miint::mmvec {
 
@@ -132,30 +133,34 @@ void RequireSameSamples(const Dictionary &x_samples, const Dictionary &y_samples
 //! them. Index uses .at(), so without this the failure would be an out_of_range
 //! with no message a user could act on.
 void RejectUnknownFeatures(const std::vector<miint::unifrac::CooRow> &rows, const Dictionary &features,
-                           const std::string &label) {
+                           const std::string &label, ModelRow::Kind side) {
 	std::vector<std::string> examples;
-	size_t n_unknown = 0;
-	std::unordered_map<std::string, size_t> seen;
+	std::unordered_set<std::string> seen;
 	for (const auto &r : rows) {
 		if (features.index.find(r.feature_id) != features.index.end()) {
 			continue;
 		}
-		if (seen.emplace(r.feature_id, 0).second) {
-			++n_unknown;
-			if (examples.size() < 3) {
-				examples.push_back(r.feature_id);
-			}
+		if (seen.insert(r.feature_id).second && examples.size() < 3) {
+			examples.push_back(r.feature_id);
 		}
 	}
+	const size_t n_unknown = seen.size();
 	if (n_unknown != 0) {
+		// Both the modality and the column name come off `side`, not off `label`.
+		// `label` is display text ("X" / "Y"); driving a functional choice from it
+		// meant that rewording a message would silently point the remedy at the
+		// wrong column. The column NAME is still the wrapper's vocabulary, which
+		// this DuckDB-free layer does not own -- see the note in
+		// mmvec_derived_functions.cpp -- but it is at least derived in one place.
+		const std::string modality = ModalityName(side);
+		const std::string id_column = modality + "_feature_id";
 		throw std::invalid_argument(
 		    "mmvec: the " + label + " table has " + std::to_string(n_unknown) +
 		    " feature(s) the model was never fitted on (" + Join(examples) +
 		    (n_unknown > examples.size() ? ", ..." : "") +
 		    "); there is no conditional probability for a feature the model has not seen, so restrict the table to the "
 		    "model's own features first -- e.g. WHERE feature_id IN (SELECT DISTINCT " +
-		    (label == "X" ? std::string("x_feature_id") : std::string("y_feature_id")) +
-		    " FROM <model> WHERE modality = '" + (label == "X" ? "x" : "y") + "') -- or refit including them");
+		    std::string(id_column) + " FROM <model> WHERE modality = '" + modality + "') -- or refit including them");
 	}
 }
 
@@ -173,14 +178,14 @@ SparseCounts Index(const std::vector<miint::unifrac::CooRow> &rows, const Dictio
 	// Duplicate detection over the linearized (sample, feature) cell. The core
 	// rejects duplicates too, but only in terms of indices; catching them here
 	// lets the message name the ids the user actually wrote.
-	std::unordered_map<int64_t, size_t> seen;
+	std::unordered_set<int64_t> seen;
 	seen.reserve(rows.size());
 
 	for (const auto &r : rows) {
 		const int64_t si = samples.index.at(r.sample_id);
 		const int64_t fi = features.index.at(r.feature_id);
 		const int64_t cell = si * t.n_cols + fi;
-		if (!seen.emplace(cell, 0).second) {
+		if (!seen.insert(cell).second) {
 			throw std::invalid_argument("mmvec: " + label + " has a duplicate entry for sample '" + r.sample_id +
 			                            "', feature '" + r.feature_id +
 			                            "'; each (sample, feature) cell must appear at most once (summing them would "
@@ -198,9 +203,9 @@ SparseCounts Index(const std::vector<miint::unifrac::CooRow> &rows, const Dictio
 //! where the feature dictionary comes from, which is exactly the intended
 //! difference: same unknown-feature rejection, same duplicate-cell messages.
 SparseCounts AlignOne(const std::vector<miint::unifrac::CooRow> &rows, const Dictionary &samples,
-                      const std::vector<std::string> &feature_ids, const std::string &label) {
+                      const std::vector<std::string> &feature_ids, const std::string &label, ModelRow::Kind side) {
 	const auto features = DictionaryFromIds(feature_ids);
-	RejectUnknownFeatures(rows, features, label);
+	RejectUnknownFeatures(rows, features, label, side);
 	return Index(rows, samples, features, label);
 }
 
@@ -254,7 +259,7 @@ AlignedTable AlignXToModel(const std::vector<miint::unifrac::CooRow> &x_rows,
 
 	AlignedTable out;
 	out.sample_ids = samples.ids;
-	out.counts = AlignOne(x_rows, samples, x_feature_ids, "X");
+	out.counts = AlignOne(x_rows, samples, x_feature_ids, "X", ModelRow::Kind::X);
 	return out;
 }
 
@@ -277,8 +282,8 @@ AlignedPair AlignPairedToModel(const std::vector<miint::unifrac::CooRow> &x_rows
 	// One dictionary indexes both tables. The check above has just proved the two
 	// are equal, so this is not what makes the pairing correct -- it is what keeps
 	// it correct if that check is ever relaxed.
-	out.x = AlignOne(x_rows, x_samples, x_feature_ids, "X");
-	out.y = AlignOne(y_rows, x_samples, y_feature_ids, "Y");
+	out.x = AlignOne(x_rows, x_samples, x_feature_ids, "X", ModelRow::Kind::X);
+	out.y = AlignOne(y_rows, x_samples, y_feature_ids, "Y", ModelRow::Kind::Y);
 	return out;
 }
 
@@ -377,6 +382,11 @@ Grid GatherGrid(const std::vector<ModelCell> &cells, const char *modality) {
 		                            "' rows; it must carry both modalities of a fitted model");
 	}
 
+	// One entry went into `ids` per cell of this modality, so the count is already
+	// in hand; a second std::count_if over every cell would only restate it, and
+	// give the number two spellings that could drift.
+	const size_t n_cells = ids.size();
+
 	Grid g;
 	g.ids = std::move(ids);
 	std::sort(g.ids.begin(), g.ids.end());
@@ -386,8 +396,6 @@ Grid GatherGrid(const std::vector<ModelCell> &cells, const char *modality) {
 	// Every feature needs axes 0..p, so p+1 rows per feature and at least one
 	// feature: an axis beyond the row count cannot possibly be filled. Checked
 	// before any product is formed, so the arithmetic below cannot overflow.
-	const size_t n_cells = static_cast<size_t>(
-	    std::count_if(cells.begin(), cells.end(), [modality](const ModelCell &c) { return c.modality == modality; }));
 	if (static_cast<size_t>(g.p) + 1 > n_cells) {
 		throw std::invalid_argument(std::string("mmvec: modality '") + modality + "' has axes 0.." +
 		                            std::to_string(g.p) + " but only " + std::to_string(n_cells) +
@@ -448,14 +456,15 @@ Grid GatherGrid(const std::vector<ModelCell> &cells, const char *modality) {
 
 ParsedModel ParseModelCells(const std::vector<ModelCell> &cells) {
 	for (const auto &c : cells) {
-		if (c.modality != "x" && c.modality != "y" && c.modality != "loss") {
+		if (c.modality != ModalityName(ModelRow::Kind::X) && c.modality != ModalityName(ModelRow::Kind::Y) &&
+		    c.modality != ModalityName(ModelRow::Kind::Loss)) {
 			throw std::invalid_argument("mmvec: the model relation has modality '" + c.modality +
 			                            "'; expected 'x', 'y' or 'loss'");
 		}
 	}
 
-	const Grid x = GatherGrid(cells, "x");
-	const Grid y = GatherGrid(cells, "y");
+	const Grid x = GatherGrid(cells, ModalityName(ModelRow::Kind::X));
+	const Grid y = GatherGrid(cells, ModalityName(ModelRow::Kind::Y));
 	if (x.p != y.p) {
 		throw std::invalid_argument("mmvec: the model relation's two modalities disagree on the number of axes (x has "
 		                            "0.." +

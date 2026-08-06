@@ -43,13 +43,20 @@ using unifrac_internal::ResolveSampleIdOutputType;
 //    each that matters. The same shallow similarity is repeated across every
 //    table function in this codebase; conforming to it beats forking style here.
 //  * `ResolveFeatureTableIdType` is a near-duplicate of `ResolveFeatureIdType` in
-//    mmvec_fit_function.cpp (M3), differing only in taking the column name and
-//    caller as parameters instead of hard-coding "feature_id"/"mmvec_fit". One
-//    implementation would belong beside ReadFeatureTable in
-//    unifrac_function_common.hpp -- and so would the equivalents in
-//    community_distances and the unifrac functions, which is a cross-feature
-//    cleanup rather than something to fold into a feature commit. Flagged for
-//    M6's simplification pass alongside the three dictionary implementations.
+//    mmvec_fit_function.cpp, differing in taking the column name and the caller
+//    as parameters instead of hard-coding "feature_id"/"mmvec_fit". The M6
+//    simplification pass looked at unifying the two and decided against it, for a
+//    reason that was not obvious beforehand: they differ on a THIRD axis, the X/Y
+//    side infix in mmvec_fit's message ("Y feature-table '...' must expose ..."),
+//    which test/sql/mmvec_fit.test asserts precisely because it is what makes the
+//    Y-side case more than a repeat of the X-side one. Preserving it means a
+//    fifth parameter on a helper with two callers, in two different TUs, whose
+//    only natural shared home is unifrac_function_common.hpp -- i.e. the
+//    cross-feature consolidation that is deferred anyway. That consolidation
+//    (this, plus the equivalents in community_distances, cluster_kmeans and the
+//    unifrac functions, plus the three dictionary builders) remains worth doing
+//    as its own PR; it restructures the shared reader layer and does not belong
+//    in a feature commit.
 // ---------------------------------------------------------------------------
 
 // The two id types a model relation carries, mirrored onto whatever output the
@@ -219,8 +226,17 @@ unique_ptr<FunctionData> MmvecRanksBind(ClientContext &context, TableFunctionBin
 	data->types = ResolveModelIdTypes(context, data->model_table, "mmvec_ranks");
 
 	// `rank` and `prob` side by side rather than as two functions: Probs is
-	// algebraically softmax(Ranks), so both come from one read of the model and one
-	// logit computation, and a separate mmvec_probs would only duplicate that.
+	// algebraically softmax(Ranks), so both come from one read of the model, and a
+	// separate mmvec_probs would make the caller pay for that read twice.
+	//
+	// They do NOT share a logit computation, though an earlier version of this
+	// comment claimed they did. Ranks() and Probs() each call ComputeLogits, so
+	// this function runs the (d1 x p)(p x d2-1) product twice -- measured at 4-5 ms
+	// of a 68 ms mmvec_ranks over the cystic-fibrosis model. Left alone
+	// deliberately: collapsing it needs a core entry point returning both, with
+	// exactly one caller, and the two must stay separately reachable because
+	// softmax(logits) and softmax(ranks) differ in the last ulps and a test pins
+	// their agreement.
 	names = {"x_feature_id", "y_feature_id", "rank", "prob"};
 	return_types = {data->types.x, data->types.y, LogicalType::DOUBLE, LogicalType::DOUBLE};
 	return std::move(data);

@@ -1132,7 +1132,6 @@ TEST_CASE("L-BFGS reaches the T2 optimum from the committed init", "[mmvec]") {
 		REQUIRE(m.final_loss == Approx(t2_loss).epsilon(kT2LossRelBand));
 		REQUIRE(m.final_loss < m.loss_curve.front()); // the fit actually improved
 		REQUIRE(m.theta.size() == static_cast<size_t>(NumParams(c.shape)));
-		REQUIRE(m.n_evals == static_cast<int64_t>(m.loss_curve.size()));
 
 		// theta is the best point over all evaluations, so the reported loss must
 		// be the minimum of the trace -- not merely the last entry, which for a

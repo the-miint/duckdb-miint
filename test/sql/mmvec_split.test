@@ -241,6 +241,23 @@ SELECT * FROM mmvec_train_test_split('microbes', 0.3, NULL);
 ----
 seed must not be NULL
 
+# CHARACTERIZATION, not an endorsement: on an EMPTY relation neither guard fires.
+# A table macro's body is evaluated per output row and CASE branches are lazy, so
+# with no rows there is nothing to evaluate and a bad parameter passes unremarked.
+#
+# Left as-is deliberately. The guards exist to stop a silent all-train or
+# all-test split, and with zero samples there is no split to get wrong -- empty
+# in, empty out, which is what the valid-fraction case above already returns.
+# Making a parameter check fire independently of the data would mean a
+# row-independent UNION ALL branch with a typed NULL id column, which is real
+# complexity in an already-dense macro for no change in outcome. Pinned here so
+# the behaviour is a decision on record rather than something nobody noticed.
+query II
+SELECT (SELECT count(*) FROM mmvec_train_test_split('microbes_empty', 99.0, 0)),
+       (SELECT count(*) FROM mmvec_train_test_split('microbes_empty', NULL, 0));
+----
+0	0
+
 # ---------------------------------------------------------------------------
 # THE PIPELINE: split -> fit on train -> restrict the test tables to the model's
 # features -> predict -> score. This is the worked example the docs will carry, and

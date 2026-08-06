@@ -30,12 +30,17 @@ struct MmvecFitBindData : public TableFunctionData {
 	std::string x_table;
 	std::string y_table;
 
-	int32_t dimensions = 3;          //!< the latent dimension p
-	std::string optimizer = "lbfgs"; //!< "lbfgs" or "adam"
-	int64_t max_iter = 1000;         //!< L-BFGS iterations, or Adam EPOCHS
-	miint::mmvec::Priors priors;     //!< scikit-bio defaults: means 0, scales 1
-	miint::mmvec::AdamParams adam;   //!< scikit-bio defaults; ignored by lbfgs
-	uint64_t seed = 0;               //!< the init draw; scikit-bio's None -> 0
+	int32_t dimensions = 3; //!< the latent dimension p
+	//! Which optimizer to run. Parsed into an enum at bind, exactly as batch_norm
+	//! is: leaving it a string means InitGlobal re-compares it and an unguarded
+	//! `else` silently means "adam", so adding a third optimizer would route it
+	//! there rather than failing.
+	enum class Optimizer { kLbfgs, kAdam };
+	Optimizer optimizer = Optimizer::kLbfgs;
+	int64_t max_iter = 1000;       //!< L-BFGS iterations, or Adam EPOCHS
+	miint::mmvec::Priors priors;   //!< scikit-bio defaults: means 0, scales 1
+	miint::mmvec::AdamParams adam; //!< scikit-bio defaults; ignored by lbfgs
+	uint64_t seed = 0;             //!< the init draw; scikit-bio's None -> 0
 
 	// Output types for the two id columns, each mirrored from its OWN relation's
 	// feature_id column so a BIGINT-keyed X beside a VARCHAR-keyed Y round-trips
@@ -78,6 +83,7 @@ unique_ptr<FunctionData> MmvecFitBind(ClientContext &context, TableFunctionBindI
 	data->y_table = input.inputs[1].GetValue<string>();
 
 	std::string batch_norm = "unbiased";
+	std::string optimizer = "lbfgs";
 	int64_t seed = 0;
 	for (const auto &kv : input.named_parameters) {
 		const auto key = StringUtil::Lower(kv.first);
@@ -87,7 +93,7 @@ unique_ptr<FunctionData> MmvecFitBind(ClientContext &context, TableFunctionBindI
 		if (key == "dimensions") {
 			data->dimensions = kv.second.GetValue<int32_t>();
 		} else if (key == "optimizer") {
-			data->optimizer = StringUtil::Lower(kv.second.GetValue<string>());
+			optimizer = StringUtil::Lower(kv.second.GetValue<string>());
 		} else if (key == "max_iter") {
 			data->max_iter = kv.second.GetValue<int64_t>();
 		} else if (key == "x_prior_mean") {
@@ -116,8 +122,12 @@ unique_ptr<FunctionData> MmvecFitBind(ClientContext &context, TableFunctionBindI
 		// No else: DuckDB rejects names absent from fn.named_parameters itself.
 	}
 
-	if (data->optimizer != "lbfgs" && data->optimizer != "adam") {
-		throw BinderException("mmvec_fit: unknown optimizer '%s' (must be 'lbfgs' or 'adam')", data->optimizer);
+	if (optimizer == "lbfgs") {
+		data->optimizer = MmvecFitBindData::Optimizer::kLbfgs;
+	} else if (optimizer == "adam") {
+		data->optimizer = MmvecFitBindData::Optimizer::kAdam;
+	} else {
+		throw BinderException("mmvec_fit: unknown optimizer '%s' (must be 'lbfgs' or 'adam')", optimizer);
 	}
 	if (batch_norm == "unbiased") {
 		data->adam.batch_norm = miint::mmvec::BatchNorm::Unbiased;
@@ -251,18 +261,22 @@ unique_ptr<GlobalTableFunctionState> MmvecFitInitGlobal(ClientContext &context, 
 	try {
 		auto tables = miint::mmvec::IngestPairedTables(x_rows, y_rows);
 		const miint::mmvec::ModelShape shape {tables.x.n_cols, tables.y.n_cols, data.dimensions};
-		const auto stats = miint::mmvec::ComputeSufficientStats(tables.x, tables.y);
 		const auto theta0 = miint::mmvec::InitTheta(shape, data.seed);
 
 		miint::mmvec::Model model;
-		if (data.optimizer == "lbfgs") {
+		if (data.optimizer == MmvecFitBindData::Optimizer::kLbfgs) {
+			// Only L-BFGS consumes the summed-away statistics. Adam builds its own
+			// before its training loop -- deliberately, so both optimizers reject
+			// degenerate data at the same point -- so computing them here as well
+			// would run the sparse outer product twice and discard one result.
+			const auto stats = miint::mmvec::ComputeSufficientStats(tables.x, tables.y);
 			model = miint::mmvec::FitLbfgsFromInit(shape, data.priors, stats, theta0, data.max_iter);
 		} else {
 			miint::mmvec::MinibatchInputs mb;
 			mb.n_samples = tables.x.n_rows;
-			mb.x_row = tables.x.row;
-			mb.x_col = tables.x.col;
-			mb.x_val = tables.x.val;
+			mb.x_row = std::move(tables.x.row);
+			mb.x_col = std::move(tables.x.col);
+			mb.x_val = std::move(tables.x.val);
 			mb.y_dense = DenseRowMajor(tables.y);
 			// max_iter is the EPOCH count on this path, matching scikit-bio, where
 			// each epoch runs max(1, nnz / batch_size) parameter updates.
@@ -312,17 +326,20 @@ void MmvecFitExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &out
 		// previous chunk's flag.
 		switch (row.kind) {
 		case miint::mmvec::ModelRow::Kind::X:
-			modality_data[r] = StringVector::AddString(v_modality, "x");
+			modality_data[r] =
+			    StringVector::AddString(v_modality, miint::mmvec::ModalityName(miint::mmvec::ModelRow::Kind::X));
 			EmitIdCell(v_x, r, g.x_feature_ids[id], g.x_type);
 			FlatVector::Validity(v_y).SetInvalid(r);
 			break;
 		case miint::mmvec::ModelRow::Kind::Y:
-			modality_data[r] = StringVector::AddString(v_modality, "y");
+			modality_data[r] =
+			    StringVector::AddString(v_modality, miint::mmvec::ModalityName(miint::mmvec::ModelRow::Kind::Y));
 			FlatVector::Validity(v_x).SetInvalid(r);
 			EmitIdCell(v_y, r, g.y_feature_ids[id], g.y_type);
 			break;
 		case miint::mmvec::ModelRow::Kind::Loss:
-			modality_data[r] = StringVector::AddString(v_modality, "loss");
+			modality_data[r] =
+			    StringVector::AddString(v_modality, miint::mmvec::ModalityName(miint::mmvec::ModelRow::Kind::Loss));
 			FlatVector::Validity(v_x).SetInvalid(r);
 			FlatVector::Validity(v_y).SetInvalid(r);
 			break;
