@@ -24,6 +24,7 @@ associations.
 - [`mmvec_train_test_split`](#mmvec_train_test_split) - reproducible sample-wise splits.
 - [Worked example: cross-validation](#worked-example-cross-validation) - split → fit → filter → predict → score.
 - [Things that surprise people](#things-that-surprise-people) - read this before filing a bug.
+- [Parallelism](#parallelism) - how many threads a fit uses, and why the answer never changes.
 - [Reproducibility](#reproducibility) - what is guaranteed, and what is not.
 - [Differences from scikit-bio](#differences-from-scikit-bio) - a complete list.
 - [Citations](#citations)
@@ -107,8 +108,9 @@ SELECT * FROM mmvec_fit('microbes', 'metabolites', dimensions := 1, max_iter := 
   `beta_1` (default 0.9), `beta_2` (default **0.95**, not the 0.999 usual elsewhere),
   `clipnorm` (default 10.0), `batch_norm` (`'unbiased'` default, or `'legacy'`)
 
-There is deliberately **no `threads` parameter**: the fit is single-threaded and pins Eigen to
-one thread, which is what makes a seeded fit bit-reproducible.
+There is deliberately **no `threads` parameter**: an L-BFGS fit takes its budget from DuckDB's own
+`SET threads`, and returns the same model whatever that budget is. See
+[Parallelism](#parallelism).
 
 **`batch_norm` is not a step size.** `'legacy'` reproduces upstream mmvec by scaling the
 likelihood by `n_samples / sum(X)` while leaving the priors untouched — a differently
@@ -422,10 +424,68 @@ Pass raw counts. Both tables are internally read as proportions, so sequencing d
 multiplying one sample's counts by ten leaves its prediction bit-for-bit identical. What *does*
 matter is the relative depth *between* features within a sample, which is the signal.
 
+## Parallelism
+
+**An L-BFGS fit runs on several threads and returns the same model on every one of them.** The
+budget is DuckDB's own setting, so there is nothing mmvec-specific to configure:
+
+```sql
+SET threads = 8;
+```
+
+`MIINT_MMVEC_THREADS` overrides it for the fit alone, in the same spirit as `MIINT_SIMD`; set it
+to `1` to force a serial fit. A value that is not a positive integer is ignored rather than
+half-read, so `MIINT_MMVEC_THREADS=8x` leaves `SET threads` in charge instead of quietly
+meaning 8.
+
+**Adam is not threaded** and gains nothing from either knob. Its updates are sequentially
+dependent — each minibatch step reads the parameters the one before it wrote — so it has no
+decomposition that satisfies the constraint below.
+
+### Why the answer does not change
+
+Threading a numerical fit normally changes its answer: splitting a sum across threads adds the
+pieces in a different order, and floating-point addition is not associative. scikit-bio's fit
+behaves that way, because it runs through OpenBLAS — changing its thread count moves the model
+by 2.8–5.4% on the cystic-fibrosis fixture.
+
+Here, **no sum is ever split across threads.** Each thread computes whole rows of the objective
+and writes each row's own contribution to its own slot; those per-row numbers are then added in
+ascending row order — the order a serial run adds them in. The gradient's bias terms are
+accumulated the same way. So the guarantee is not "close enough" but exact: an 8-thread fit is
+bit-for-bit a 1-thread fit, and bit-for-bit what this code produced before it was threaded.
+
+What that costs is the parts which *cannot* be split this way, which are left serial on purpose.
+Roughly a third of a fit is Eigen matrix products, and slicing one changes its result even when
+the slices are recombined in order, because Eigen picks its blocking from the matrix dimensions.
+
+### What to expect
+
+Speedup is real, well short of linear, and *smaller* on bigger problems. Measured on eight
+physical cores of an AMD Ryzen 9 9950X3D, minima of interleaved runs, `MIINT_SIMD=avx512`:
+
+| fit, at the default `max_iter` | 1 thread | 2 | 4 | 8 |
+|---|---|---|---|---|
+| 19 samples, 466 × 85 features | 0.127 s | 0.092 s | 0.082 s | **0.082 s** (1.6×) |
+| 172 samples, 2720 × 462 features | 3.54 s | 2.08 s | 1.58 s | **1.34 s** (2.6×) |
+
+On synthetic problems scaled up from there the best speedup *falls*: about 2.5× at 5440 × 924
+features, and 1.5× by 21760 × 3696. Peak memory does not move with the thread count — the extra
+threads share one workspace rather than each taking a copy.
+
+Two reasons for that shape. The serial part described above caps the achievable speedup near 3×
+whatever the hardware does. And the row loop becomes memory-bound once its working set no longer
+fits in cache, at which point more threads contend for bandwidth instead of adding throughput —
+which is also why the smallest fit stops improving after four threads. That second effect is
+hardware-specific, and this CPU has an unusually large L3, so read the table as the shape to
+expect rather than as a target.
+
 ## Reproducibility
 
-**Rerunning `mmvec_fit` on the same machine gives the same model, bit-for-bit.** The fit is
-single-threaded, Eigen is pinned to one thread, and the RNG is a hand-written transform over
+**Rerunning `mmvec_fit` on the same machine gives the same model, bit-for-bit** — including at a
+different thread count, which is not what a threaded numerical fit usually gives you; see
+[Parallelism](#parallelism). Eigen's own threading is compiled out, so the only concurrency is
+the decomposition described there, and the RNG is a hand-written transform over
 `std::mt19937_64` rather than `<random>`'s distributions — which are implementation-defined and
 would otherwise differ between standard libraries.
 
@@ -449,7 +509,7 @@ What a fit is conditioned on, then:
 | `optimizer` and every hyperparameter (`dimensions`, `max_iter`, `learning_rate`, `batch_size`, `beta_1`, `beta_2`, `clipnorm`, `batch_norm`, the four priors) | yes |
 | the build (compiler and version) | yes |
 | **the CPU's instruction set** | **yes** |
-| the number of DuckDB threads | no — the fit is single-threaded |
+| **the number of threads** (`SET threads`, `MIINT_MMVEC_THREADS`) | **no** — no sum is ever split across threads |
 
 Every fit reports which kernel it used, so this is visible rather than silent:
 

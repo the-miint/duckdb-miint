@@ -344,3 +344,42 @@ statement error
 SELECT * FROM mmvec_fit('microbes', 'y_dup');
 ----
 duplicate entry
+
+# --- section "Parallelism" --------------------------------------------------
+# The doc shows `SET threads` as the budget and promises the model does not
+# depend on it. Bit-for-bit, so EXCEPT rather than a tolerance.
+#
+# What this catches, and what it cannot: it is the only test that drives the
+# DuckDB-level path -- the scheduler's thread count reaching the fit -- and it
+# fails the moment the decomposition becomes thread-count-dependent. It CANNOT
+# distinguish a parallel fit from a serial one, because a fit that ignored the
+# budget entirely would match just as exactly. That is what the C++
+# [mmvec][parallel] cases use pool.Dispatches() for.
+statement ok
+SET threads = 1;
+
+statement ok
+CREATE TABLE fit_t1 AS
+SELECT * FROM mmvec_fit('microbes', 'metabolites', dimensions := 1, max_iter := 200, seed := 42);
+
+statement ok
+SET threads = 4;
+
+statement ok
+CREATE TABLE fit_t4 AS
+SELECT * FROM mmvec_fit('microbes', 'metabolites', dimensions := 1, max_iter := 200, seed := 42);
+
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM fit_t1 EXCEPT ALL SELECT * FROM fit_t4)
+  UNION ALL
+  (SELECT * FROM fit_t4 EXCEPT ALL SELECT * FROM fit_t1)
+);
+----
+0
+
+# MIINT_MMVEC_THREADS is the other half of the doc's claim, and it is absent
+# here on purpose: this harness cannot set an environment variable, so a case
+# for it would have to fake one and would assert nothing. Its parsing rules --
+# including junk being ignored rather than half-read -- are pinned in C++,
+# against ResolveThreadBudget directly.
