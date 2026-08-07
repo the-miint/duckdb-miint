@@ -1388,6 +1388,26 @@ set(EXTENSION_SOURCES
     src/compute_msa_consensus.cpp
     src/MsaConsensus.cpp)
 
+# mmvec's numeric kernel, compiled as its own OBJECT library.
+#
+# Eigen picks its packet width at COMPILE time from __AVX__ / __AVX512F__ and does
+# not runtime-dispatch, so reaching a wider instruction set means compiling this
+# source AGAIN with different flags rather than branching inside it. M7 P2 turns
+# that into several variants selected at runtime; P1 establishes the seam with
+# exactly one, so a bisect can tell the refactor apart from the ISA work.
+#
+# OBJECT rather than a static library, matching miint_nanoarrow_ipc: consumers take
+# the object files directly, avoiding an archive that would then have to join
+# DuckDB's install export set.
+#
+# It depends on nothing but src/include and Eigen -- mmvec.hpp pulls in no DuckDB
+# headers -- which is what makes recompiling it several times cheap. EIGEN_MPL2_ONLY
+# and EIGEN_DONT_PARALLELIZE reach it through add_compile_definitions above.
+add_library(miint_mmvec_kernel OBJECT src/mmvec_kernel.cpp)
+target_include_directories(miint_mmvec_kernel PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/include)
+target_link_libraries(miint_mmvec_kernel PUBLIC Eigen3::Eigen)
+set_target_properties(miint_mmvec_kernel PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 if(MIINT_ENABLE_VSEARCH)
     list(APPEND EXTENSION_SOURCES
         src/VsearchChimeraWrapper.cpp src/VsearchSearchWrapper.cpp src/VsearchClusterWrapper.cpp
@@ -1545,6 +1565,7 @@ target_link_libraries(${EXTENSION_NAME}
                       expat::expat
                       Eigen3::Eigen
 )
+target_sources(${EXTENSION_NAME} PRIVATE $<TARGET_OBJECTS:miint_mmvec_kernel>)
 if(MIINT_ENABLE_MAFFT)
     target_link_libraries(${EXTENSION_NAME} mafft_parttree)
 endif()
@@ -1684,6 +1705,7 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       expat::expat
                       Eigen3::Eigen
 )
+target_sources(${LOADABLE_EXTENSION_NAME} PRIVATE $<TARGET_OBJECTS:miint_mmvec_kernel>)
 if(MIINT_ENABLE_MAFFT)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} mafft_parttree)
 endif()
@@ -1957,6 +1979,7 @@ target_link_libraries(tests
   expat::expat
   Eigen3::Eigen
 )
+target_sources(tests PRIVATE $<TARGET_OBJECTS:miint_mmvec_kernel>)
 if(MIINT_ENABLE_CURL)
     target_link_libraries(tests CURL::libcurl)
     target_compile_definitions(tests PRIVATE MIINT_HAS_CURL)
