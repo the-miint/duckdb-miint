@@ -320,12 +320,21 @@ CREATE TABLE x_eval AS SELECT * FROM x_test
 CREATE TABLE y_eval AS SELECT * FROM y_test
   WHERE feature_id IN (SELECT DISTINCT y_feature_id FROM model WHERE modality = 'y');
 
-SELECT round(q_squared, 6) AS q_squared FROM mmvec_score('model', 'x_eval', 'y_eval');
+SELECT round(q_squared, 3) AS q_squared FROM mmvec_score('model', 'x_eval', 'y_eval');
 ```
 
 ```
-0.037772
+0.038
 ```
+
+**Three decimals, deliberately.** Q² comes out of an iterative fit, so its trailing digits inherit
+the platform's `exp` and its rounding — the same effect described under
+[Reproducibility](#reproducibility), amplified by a couple of hundred optimizer steps. On one
+machine the value is reproducible to the last bit and you can print as many digits as you like;
+*across* machines only the leading few are stable. scikit-bio reaches the same conclusion in its
+own test suite, where the expected Q² is annotated as platform-specific and asserted as a
+threshold rather than an exact value. Compare Q² between machines with a tolerance, never with
+equality.
 
 The reverse case is fine and needs no handling: a model feature *missing* from the test table is
 accepted and simply contributes no weight.
