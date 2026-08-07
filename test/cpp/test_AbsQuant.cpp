@@ -49,6 +49,7 @@ using miint::absquant::OrfCoords;
 using miint::absquant::OrfCopiesResult;
 using miint::absquant::ParseCellCountsMetric;
 using miint::absquant::RegularizedIncompleteBeta;
+using miint::absquant::RejectDuplicateCells;
 using miint::absquant::SampleCellParams;
 using miint::absquant::SampleMass;
 using miint::absquant::SampleOrfParams;
@@ -1164,6 +1165,47 @@ TEST_CASE("The shared id predicates", "[absquant]") {
 		CHECK(DuplicatedIds({"b", "a", "b", "a"}) == std::vector<std::string> {"a", "b"});
 		CHECK(DuplicatedIds({"a", "b", "c"}).empty());
 		CHECK(DuplicatedIds({}).empty());
+	}
+
+	SECTION("RejectDuplicateCells keys on the PAIR and names the relation") {
+		// Repeating either id alone is legal -- that is what a long-form table
+		// looks like. Only the pair repeating is an error, so a check keyed on
+		// one column would reject every well-formed relation.
+		const std::vector<CountObservation> distinct = {{"s1", "f1", 1.0}, {"s1", "f2", 2.0}, {"s2", "f1", 3.0}};
+		CHECK_NOTHROW(RejectDuplicateCells(distinct, "the counts relation"));
+		CHECK_NOTHROW(RejectDuplicateCells({}, "the counts relation"));
+
+		const std::vector<CountObservation> repeated = {{"s1", "f1", 1.0}, {"s2", "f2", 2.0}, {"s1", "f1", 3.0}};
+		CHECK_THROWS_AS(RejectDuplicateCells(repeated, "the counts relation"), std::invalid_argument);
+
+		// The relation name is the only thing the three call sites vary, so a
+		// splice that dropped it would still throw and still pass a bare
+		// CHECK_THROWS. Both spellings are pinned.
+		try {
+			RejectDuplicateCells(repeated, "the synDNA counts relation");
+			FAIL("expected a throw");
+		} catch (const std::invalid_argument &e) {
+			CHECK(std::string(e.what()) ==
+			      "the synDNA counts relation has more than one row for the same (sample_id, feature_id): 's1 / f1'");
+		}
+		try {
+			RejectDuplicateCells(repeated, "the counts relation");
+			FAIL("expected a throw");
+		} catch (const std::invalid_argument &e) {
+			CHECK(std::string(e.what()) ==
+			      "the counts relation has more than one row for the same (sample_id, feature_id): 's1 / f1'");
+		}
+
+		// Three occurrences of one cell arrive as two entries; FormatIdList
+		// renders it once.
+		const std::vector<CountObservation> thrice = {{"s1", "f1", 1.0}, {"s1", "f1", 2.0}, {"s1", "f1", 3.0}};
+		try {
+			RejectDuplicateCells(thrice, "the counts relation");
+			FAIL("expected a throw");
+		} catch (const std::invalid_argument &e) {
+			CHECK(std::string(e.what()) ==
+			      "the counts relation has more than one row for the same (sample_id, feature_id): 's1 / f1'");
+		}
 	}
 
 	SECTION("FormatIdList sorts, deduplicates, quotes, and caps at ten") {

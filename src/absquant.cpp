@@ -289,6 +289,25 @@ std::string FormatIdList(std::vector<std::string> ids) {
 	return out;
 }
 
+void RejectDuplicateCells(const std::vector<CountObservation> &counts, const char *relation) {
+	// Compared as index-free string pairs rather than a packed key so no
+	// separator character can collide with an id that legitimately contains it.
+	std::set<std::pair<std::string, std::string>> seen;
+	std::vector<std::string> repeated_cells;
+	for (const auto &row : counts) {
+		if (!seen.emplace(row.sample_id, row.feature_id).second) {
+			repeated_cells.push_back(row.sample_id + " / " + row.feature_id);
+		}
+	}
+	if (!repeated_cells.empty()) {
+		// One entry per occurrence past the first; FormatIdList deduplicates
+		// when rendering, so a cell repeated three times still reads once.
+		throw std::invalid_argument(
+		    std::string(relation) +
+		    " has more than one row for the same (sample_id, feature_id): " + FormatIdList(repeated_cells));
+	}
+}
+
 namespace {
 
 // Reject every input FitSyndnaModels cannot compute a defined answer from,
@@ -339,21 +358,8 @@ void ValidateFitInputs(const std::vector<CountObservation> &counts,
 		                            FormatIdList(repeated_masses));
 	}
 
-	// (sample_id, feature_id) must be unique. Compared as index-free string
-	// pairs rather than a packed key so no separator character can collide with
-	// an id that legitimately contains it.
-	std::set<std::pair<std::string, std::string>> seen;
-	std::vector<std::string> repeated_cells;
-	for (const auto &row : counts) {
-		if (!seen.emplace(row.sample_id, row.feature_id).second) {
-			repeated_cells.push_back(row.sample_id + " / " + row.feature_id);
-		}
-	}
-	if (!repeated_cells.empty()) {
-		throw std::invalid_argument(
-		    "the synDNA counts relation has more than one row for the same (sample_id, feature_id): " +
-		    FormatIdList(repeated_cells));
-	}
+	// (sample_id, feature_id) must be unique.
+	RejectDuplicateCells(counts, "the synDNA counts relation");
 
 	// A read count must be a finite number that is not negative. pysyndna lets
 	// anything else become NaN under log10 and silently voids the whole sample;
@@ -554,19 +560,7 @@ void ValidateCellCountsInputs(const std::vector<CountObservation> &counts, const
 	}
 
 	// The counts relation is keyed on the pair, like the coverage relation.
-	// Compared as index-free string pairs rather than a packed key so no
-	// separator character can collide with an id that legitimately contains it.
-	std::set<std::pair<std::string, std::string>> seen_counts;
-	std::vector<std::string> repeated_cells;
-	for (const auto &row : counts) {
-		if (!seen_counts.emplace(row.sample_id, row.feature_id).second) {
-			repeated_cells.push_back(row.sample_id + " / " + row.feature_id);
-		}
-	}
-	if (!repeated_cells.empty()) {
-		throw std::invalid_argument("the counts relation has more than one row for the same (sample_id, feature_id): " +
-		                            FormatIdList(repeated_cells));
-	}
+	RejectDuplicateCells(counts, "the counts relation");
 
 	if (!index.repeated_coverage.empty()) {
 		throw std::invalid_argument(
@@ -1270,21 +1264,9 @@ void ValidateOrfCopiesInputs(const std::vector<CountObservation> &counts, const 
 		                            FormatIdList(index.repeated_params));
 	}
 
-	// Keyed on the pair, and compared as index-free string pairs rather than a
-	// packed key so no separator character can collide with an id that
-	// legitimately contains it. pysyndna has no equivalent check because its
-	// input is a biom table, unique by construction.
-	std::set<std::pair<std::string, std::string>> seen_counts;
-	std::vector<std::string> repeated_cells;
-	for (const auto &row : counts) {
-		if (!seen_counts.emplace(row.sample_id, row.feature_id).second) {
-			repeated_cells.push_back(row.sample_id + " / " + row.feature_id);
-		}
-	}
-	if (!repeated_cells.empty()) {
-		throw std::invalid_argument("the counts relation has more than one row for the same (sample_id, feature_id): " +
-		                            FormatIdList(repeated_cells));
-	}
+	// Keyed on the pair. pysyndna has no equivalent check because its input is a
+	// biom table, unique by construction.
+	RejectDuplicateCells(counts, "the counts relation");
 
 	// One pass over the counts relation collects everything that depends on it,
 	// so the reference relations are consulted exactly where they are used. The

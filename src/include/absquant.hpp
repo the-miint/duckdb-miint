@@ -190,6 +190,20 @@ struct CountObservation {
 	double count = 0.0;
 };
 
+//! Throw if any (sample_id, feature_id) occurs more than once in `counts`.
+//!
+//! `relation` names the offending relation and is the ONLY thing that differed
+//! between the three copies this replaces ("the synDNA counts relation" for the
+//! fit, "the counts relation" for the other two); it is spliced in ahead of
+//! " has more than one row for the same (sample_id, feature_id): ".
+//!
+//! Shared because all three absquant_* functions take a long-form counts
+//! relation whose key SQL cannot enforce, and the check is a set, a loop and a
+//! throw rather than a one-line message -- which is what makes a third copy
+//! worth removing where the sibling id-mismatch messages, at two copies each,
+//! are not. See FormatIdList's note for the rule.
+void RejectDuplicateCells(const std::vector<CountObservation> &counts, const char *relation);
+
 //! One row of the per-sample parameter relation. NaN carries SQL NULL.
 //!
 //! Must be unique on sample_id; FitSyndnaModels rejects repeats. Taking the
