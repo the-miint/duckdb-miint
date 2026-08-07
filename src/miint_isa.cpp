@@ -3,6 +3,18 @@
 #include <cstdlib>
 #include <cstring>
 
+// Runtime CPU probing needs BOTH an x86 target and a compiler providing
+// __builtin_cpu_supports. Architecture alone is not enough: MSVC defines _M_X64
+// but has no such builtin, so keying off the target would break that build rather
+// than degrade it. Anywhere this is 0 -- arm64, wasm, MSVC -- every ceiling is
+// Baseline and no dispatch happens, which is correct: NEON and wasm SIMD are
+// unconditional, so Eigen already vectorizes there and there is nothing to pick.
+#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
+#define MIINT_ISA_HAS_CPU_PROBE 1
+#else
+#define MIINT_ISA_HAS_CPU_PROBE 0
+#endif
+
 namespace miint {
 
 namespace {
@@ -15,7 +27,7 @@ namespace {
 //! how CPU dispatch turns into SIGILL on an old kernel or inside a hypervisor
 //! that masks AVX state. GCC and Clang both provide it on x86.
 bool CpuHasAvx2() {
-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+#if MIINT_ISA_HAS_CPU_PROBE
 	return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
 #else
 	return false;
@@ -27,7 +39,7 @@ bool CpuHasAvx2() {
 //! era parts have all four; Knights Landing has F but neither DQ nor VL, and would
 //! fault on the first instruction from either.
 bool CpuHasAvx512() {
-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+#if MIINT_ISA_HAS_CPU_PROBE
 	return __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512dq") &&
 	       __builtin_cpu_supports("avx512vl") && __builtin_cpu_supports("avx512bw") && __builtin_cpu_supports("fma");
 #else
