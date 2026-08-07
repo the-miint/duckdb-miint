@@ -1,5 +1,5 @@
 # name: test/sql/absquant_cell_counts_biom.test
-# description: absquant_cell_counts -- BIOM round-trip proving D10
+# description: absquant_cell_counts -- BIOM round-trip proving the sparse invariant
 # group: [sql]
 
 require miint
@@ -7,11 +7,12 @@ require miint
 require-env HDF5_AVAILABLE
 
 # ---------------------------------------------------------------------------
-# D10 says a cell miint omits and a cell pysyndna writes as an explicit 0.0 are
-# the same claim about the data. Every other test in this suite ASSERTS that, by
-# comparing COALESCE(mine.value, 0) against the golden. This file PROVES it, by
-# putting the question to an independent implementation of feature-table
-# semantics that neither project wrote: the BIOM format.
+# miint's long-form sparse invariant says a cell miint omits and a cell pysyndna
+# writes as an explicit 0.0 are the same claim about the data. Every other test
+# in this suite ASSERTS that, by comparing COALESCE(mine.value, 0) against the
+# golden. This file PROVES it, by putting the question to an independent
+# implementation of feature-table semantics that neither project wrote: the
+# BIOM format.
 #
 # Two facts about BIOM do the work, both pinned in test/sql/copy_biom.test:
 #

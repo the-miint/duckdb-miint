@@ -48,14 +48,15 @@ CREATE TABLE b_mine AS SELECT * FROM absquant_orf_copies('b_counts', 'b_coords',
 # anywhere -- but the bound stays relative because exactness is a property of
 # one compiler's FMA contraction, not of the arithmetic.
 #
-# The COALESCE is the load-bearing part, and what makes this a PROOF of D10
-# rather than an assumption: pysyndna's output is dense, so an ORF with no reads
-# in a sample carries an explicit 0.0, while miint omits zero-valued rows
-# entirely. Comparing COALESCE(mine.value, 0) against the golden asserts those
+# The COALESCE is the load-bearing part, and what makes this a PROOF of the
+# sparse invariant rather than an assumption: pysyndna's output is dense, so an
+# ORF with no reads in a sample carries an explicit 0.0, while miint omits
+# zero-valued rows entirely.
+# Comparing COALESCE(mine.value, 0) against the golden asserts those
 # are the same claim. The other direction keys on `g.value IS NULL`, which
 # catches any cell miint invents -- it must NOT be written as
-# `m.value IS NULL OR ...`, which would flag every golden zero and turn the D10
-# case into a failure.
+# `m.value IS NULL OR ...`, which would flag every golden zero and turn the
+# omitted-zero case into a failure.
 # ---------------------------------------------------------------------------
 
 statement ok
@@ -341,7 +342,7 @@ read counts must be finite and not negative; offending (sample_id / feature_id):
 # A fractional coordinate. pysyndna's cast_cols would take 100.5 and hand back a
 # fractional ORF length, which divides into Avogadro's number and produces a
 # perfectly plausible-looking copy count. A genome coordinate that is not a whole
-# base is not a measurement -- the same call D9 makes on percent coverage.
+# base is not a measurement -- the same call the coverage check makes on percents.
 statement ok
 CREATE TABLE half_base AS SELECT feature_id, ogu_orf_start, ogu_orf_end + 0.5 AS ogu_orf_end FROM t_coords;
 
@@ -379,8 +380,7 @@ WHERE m.value IS DISTINCT FROM (SELECT value FROM absquant_orf_copies('t_counts'
 # ---------------------------------------------------------------------------
 # The two zero denominators. Zero is neither NaN nor negative, so it passes
 # pysyndna's screen and then divides through to an INFINITE copy count for every
-# ORF in the sample, silently. D23 is about the first of these; the second gets
-# the same treatment for the same reason.
+# ORF in the sample, silently. Both are refused for the same reason.
 #
 # The other two parameter columns are multiplied through rather than divided by,
 # so zero there is ordinary data and lands the sample in the all-zero warning

@@ -299,8 +299,8 @@ genome_A	11	0.11
 # docs/alignment_analysis.md claims BIGINT and UUID genome_id work here, not
 # just in the per-sample sibling. The code path is identical, but "identical code
 # path" is the kind of reasoning that stops being true without anyone noticing --
-# and an untested prose claim is exactly what produced a wrong doc line earlier
-# in this milestone. So the base macro pins it itself.
+# and an untested prose claim is exactly what produced the wrong doc line this
+# test now guards. So the base macro pins it itself.
 
 statement ok
 CREATE TABLE gc8_aln (reference VARCHAR, position BIGINT, stop_position BIGINT);

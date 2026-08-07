@@ -73,7 +73,9 @@ struct LongFormRow {
 // reject, since "this cell has no coverage" is exactly the situation that must
 // not pass unremarked.
 //
-// `value_column` is NOT quoted and MUST be a trusted compile-time literal.
+// Same split as ReadKeyedColumns above: `table_name` is quoted before
+// interpolation and may come from the user; `value_column` is NOT quoted and
+// MUST be a trusted compile-time literal.
 std::vector<LongFormRow> ReadLongFormValues(ClientContext &context, const std::string &table_name,
                                             const char *value_column, const char *entity,
                                             const std::string &caller_name);

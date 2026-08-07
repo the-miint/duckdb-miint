@@ -194,10 +194,9 @@ SELECT count(*) FROM (
 # ---- Test 7: identifier types are passed through, not coerced ----
 # genome_coverage and its sibling never cast the id columns, so BIGINT and UUID
 # sample/genome identifiers survive end to end. docs/alignment_analysis.md
-# currently claims genome_id is VARCHAR, which these tests show is wrong -- the
-# docs describe one accepted type rather than the passthrough that is actually
-# implemented. The doc fix is M1 Phase 4; these assertions define what it must
-# say.
+# used to claim genome_id is VARCHAR, which these tests show is wrong -- it
+# described one accepted type rather than the passthrough that is actually
+# implemented. These assertions are what the corrected wording has to keep true.
 
 statement ok
 CREATE TABLE aln_bigint (sample_id BIGINT, reference VARCHAR, position BIGINT, stop_position BIGINT);

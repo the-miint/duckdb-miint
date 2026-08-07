@@ -69,7 +69,8 @@ double StudentTSurvival(double t, double df);
 //! `ok == false` means no usable model: either the fit raised (constant x with
 //! n > 1, which scipy rejects) or some field came out NaN. pysyndna represents
 //! those two cases differently (key present with None vs key absent); miint
-//! collapses both to "omitted, with a warning" -- see the divergence ledger.
+//! collapses both to "omitted, with a warning" -- see "Differences from
+//! pysyndna" in docs/absolute_quantification.md.
 struct LinregressResult {
 	double slope = 0.0;
 	double intercept = 0.0;
@@ -147,10 +148,10 @@ LinregressResult Linregress(const std::vector<double> &x, const std::vector<doub
 //! Three different wrong answers from one unusable input, and only one of them
 //! even looks wrong. Refusing it up front is what names the problem.
 //!
-//! Shared rather than inlined because M2-M5 apply the same RULE to different
-//! parameter columns (calc_mass_sample_aliquot_input_g and friends), and
-//! "NULL, negative or infinite means drop the sample" has to mean one thing
-//! across all four functions.
+//! Shared rather than inlined because all four absquant_* functions apply the
+//! same RULE to different parameter columns (calc_mass_sample_aliquot_input_g
+//! and friends), and "NULL, negative or infinite means drop the sample" has to
+//! mean one thing across all of them.
 bool IsUsableSampleParameter(double value);
 
 //! Ids present in `subject` but absent from `reference`, deduplicated, sorted.
@@ -320,7 +321,7 @@ FitResult FitSyndnaModels(const std::vector<CountObservation> &counts,
 //!
 //! pysyndna also carries a truncated 6.022e23 behind an `is_test` flag, to
 //! reproduce the Zaramela notebook's own value. That path is deliberately NOT
-//! ported (D2): it exists only to match a rounding in a published analysis, and
+//! ported: it exists only to match a rounding in a published analysis, and
 //! offering a knob that makes results *less* accurate invites someone to leave
 //! it on.
 constexpr double kAvogadro = 6.02214076e23;
@@ -368,7 +369,7 @@ const char *DenominatorColumnName(CellCountsMetric metric);
 
 //! One row of the per-(sample, feature) coverage relation.
 //!
-//! Coverage is a FRACTION in [0, 1], never a percent (D9). pysyndna accepts
+//! Coverage is a FRACTION in [0, 1], never a percent. pysyndna accepts
 //! either and puts the burden on the caller to pass a matching `min_coverage`,
 //! which makes handing it percents against a fractional threshold a silent
 //! no-op that keeps every feature. miint rejects anything outside [0, 1], so
@@ -441,7 +442,7 @@ struct CellCountsOptions {
 //!
 //! Shared by ComputeCellCounts and ComputeOrfCopies rather than spelled twice:
 //! both return the same `(sample_id, feature_id, value)` sparse shape, and both
-//! omit zero-valued cells under the same invariant (D10). Two identical structs
+//! omit zero-valued cells under the same sparse invariant. Two identical structs
 //! would let that shape drift apart between the two functions for no reason.
 struct FeatureTableValue {
 	std::string sample_id;
@@ -458,7 +459,7 @@ struct FeatureTableValue {
 //! by sample.
 struct CellCountsResult {
 	//! Surviving (sample, feature) cells. Zero-valued cells are omitted, per
-	//! miint's long-form sparse invariant (D10); pysyndna's dense output spells
+	//! miint's long-form sparse invariant; pysyndna's dense output spells
 	//! the same thing as an explicit 0.0 after its final fillna.
 	std::vector<FeatureTableValue> values;
 	//! Features dropped somewhere for coverage below min_coverage. Keyed by
@@ -479,9 +480,9 @@ struct CellCountsResult {
 	//! reaches the same log line either way.
 	//!
 	//! A warning rather than an error, matching pysyndna (calc_cell_counts.py
-	//! :674) and matching M2's treatment of a sample that could not be fit:
-	//! absquant_fit_models legitimately returns fewer models than it was given
-	//! samples, so feeding its output straight back in must not be an error.
+	//! :674) and matching how absquant_fit_models treats a sample it could not
+	//! fit: it legitimately returns fewer models than it was given samples, so
+	//! feeding its output straight back in must not be an error.
 	//! (An rvalue that is a number but outside [-1, 1] is a different matter --
 	//! that is a malformed relation and it throws.)
 	std::vector<std::string> samples_without_models;
@@ -503,18 +504,19 @@ struct CellCountsResult {
 	//! genuinely produce.
 	//!
 	//! Not reachable for cells_per_g_of_gdna through any realistic model, whose
-	//! values are strictly positive, which is why M3 had no such list. It is not
-	//! *impossible* there: a hand-built model with an extreme negative intercept
-	//! underflows 10^x to exactly zero, and this list would then name the
-	//! sample. That is the honest boundary -- the metric does not make the case
-	//! disappear, it makes it unreachable from absquant_fit_models' output.
+	//! values are strictly positive, which is why that metric alone needs no
+	//! such list. It is not *impossible* there: a hand-built model with an
+	//! extreme negative intercept underflows 10^x to exactly zero, and this
+	//! list would then name the sample. That is the honest boundary -- the
+	//! metric does not make the case disappear, it makes it unreachable from
+	//! absquant_fit_models' output.
 	//!
 	//! Reported only when the WHOLE sample goes this way. A single zero cell
-	//! among others needs no diagnostic, because under D10 an omitted cell and a
-	//! dense 0.0 are the same claim and the sample is still there to be read.
-	//! It is the all-zero sample that the sparse form cannot express: "no rows
-	//! for this sample" would otherwise be indistinguishable from "no such
-	//! sample". pysyndna never faces this, its output being dense.
+	//! among others needs no diagnostic, because under the sparse invariant an
+	//! omitted cell and a dense 0.0 are the same claim and the sample is still
+	//! there to be read. It is the all-zero sample that the sparse form cannot
+	//! express: "no rows for this sample" would otherwise be indistinguishable
+	//! from "no such sample". pysyndna never faces this, its output being dense.
 	std::vector<std::string> zero_valued_sample_ids;
 };
 
@@ -673,10 +675,11 @@ struct OrfCopiesResult {
 	//!
 	//! Reported only when the WHOLE sample goes this way, for the same reason
 	//! CellCountsResult gives: a single zero cell among others needs no
-	//! diagnostic, because under D10 an omitted cell and a dense 0.0 are the
-	//! same claim. It is the all-zero sample the sparse form cannot express --
-	//! "no rows for this sample" would otherwise be indistinguishable from "no
-	//! such sample". pysyndna never faces this, its output being dense.
+	//! diagnostic, because under the sparse invariant an omitted cell and a
+	//! dense 0.0 are the same claim. It is the all-zero sample the sparse form
+	//! cannot express -- "no rows for this sample" would otherwise be
+	//! indistinguishable from "no such sample". pysyndna never faces this, its
+	//! output being dense.
 	std::vector<std::string> zero_valued_sample_ids;
 };
 

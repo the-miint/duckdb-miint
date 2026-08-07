@@ -214,7 +214,7 @@ unique_ptr<GlobalTableFunctionState> AbsQuantCellCountsInitGlobal(ClientContext 
 	gstate->feature_id_type = data.feature_id_type;
 
 	// ReadFeatureTable's zero-drop is what makes the log10 in the core safe, and
-	// what makes the output sparse where pysyndna's is a dense zero (D10). The
+	// what makes the output sparse where pysyndna's is a dense zero. The
 	// coverage relation must NOT go through it -- zero is a real coverage -- so it
 	// uses the zero-preserving reader instead. See absquant_readers.hpp.
 	const auto count_rows = ReadFeatureTable(context, data.counts_table, kCallerName);

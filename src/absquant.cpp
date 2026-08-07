@@ -364,8 +364,9 @@ void ValidateFitInputs(const std::vector<CountObservation> &counts,
 	// A read count must be a finite number that is not negative. pysyndna lets
 	// anything else become NaN under log10 and silently voids the whole sample;
 	// none of these is a degenerate-but-computable case, they are structurally
-	// impossible, so miint refuses them -- a deliberate divergence consistent
-	// with D23.
+	// impossible, so miint refuses them -- a deliberate divergence, and the same
+	// split every other check in this file draws: structurally impossible input
+	// is an error, merely unusable input drops the sample with a warning.
 	//
 	// One rule covering NaN, +/-inf and negatives rather than three, because the
 	// alternative is remembering to skip the bad values again at every later
@@ -502,8 +503,9 @@ CellCountsIndex BuildCellCountsIndex(const std::vector<SampleRegression> &models
 // sample-side quantity rather than an instrument-side one.
 //
 // Exactly 1.0 for cells_per_g_of_gdna -- multiplying by it is the identity on
-// every double, so that metric's values are M3's bit for bit. A branch in the
-// per-cell loop would say the same thing less obviously.
+// every double, so that metric's values are left untouched, bit for bit, by the
+// three that do scale. A branch in the per-cell loop would say the same thing
+// less obviously.
 double SampleUnitRatio(const SampleCellParams &params, CellCountsMetric metric) {
 	if (metric == CellCountsMetric::CellsPerGOfGdna) {
 		return 1.0;
@@ -636,7 +638,7 @@ void ValidateCellCountsInputs(const std::vector<CountObservation> &counts, const
 		                            FormatIdList(unusable_cells));
 	}
 	if (!percent_coverage.empty()) {
-		// D9: miint is fraction-only. pysyndna takes fractions or percents and
+		// miint is fraction-only. pysyndna takes fractions or percents and
 		// explicitly leaves it to the caller to pass a matching min_coverage,
 		// which turns the commonest mistake -- percents against a fractional
 		// threshold -- into a filter that silently keeps everything.
@@ -659,9 +661,9 @@ void ValidateCellCountsInputs(const std::vector<CountObservation> &counts, const
 		// The other denominator, and the one case pysyndna's parameter screen
 		// cannot see: zero is neither NaN nor negative, so it passes the filter
 		// and then divides through to inf cells with no log message. Same
-		// treatment as D23 gives total_biological_reads_r1r2, for the same
-		// reason. NaN, negative and infinite masses are NOT errors -- those the
-		// filter drops, matching pysyndna.
+		// treatment total_biological_reads_r1r2 gets in absquant_orf_copies, for
+		// the same reason. NaN, negative and infinite masses are NOT errors --
+		// those the filter drops, matching pysyndna.
 		throw std::invalid_argument("sequenced_sample_gdna_mass_ng must not be zero; offending sample_id " +
 		                            FormatIdList(zero_masses));
 	}
@@ -1145,18 +1147,18 @@ CellCountsResult ComputeCellCounts(const std::vector<CountObservation> &counts,
 			// not be: a model with a large positive intercept overflows the
 			// 10^x, and an extraction concentration times an elution volume can
 			// overflow before the divide. pysyndna emits the inf. Refusing is
-			// the same call D23 and the zero-denominator check already make --
+			// the same call the zero-denominator checks already make --
 			// an infinite cell count is not a measurement, and a DOUBLE column
 			// full of inf is worse than a failed query.
 			overflowed_cells.push_back(row->sample_id + " / " + row->feature_id);
 			continue;
 		}
 		if (value == 0.0) {
-			// The sparse invariant (D10): a zero cell IS an absent cell, which
-			// is exactly what pysyndna's dense output spells as an explicit
-			// 0.0. So omitting one loses nothing and needs no diagnostic --
-			// the sample is still in the output and still says what it is.
-			// Only when EVERY cell of a sample goes this way does the omission
+			// The sparse invariant: a zero cell IS an absent cell, which is
+			// exactly what pysyndna's dense output spells as an explicit 0.0.
+			// So omitting one loses nothing and needs no diagnostic -- the
+			// sample is still in the output and still says what it is. Only
+			// when EVERY cell of a sample goes this way does the omission
 			// become ambiguous, and that case is reported below.
 			continue;
 		}
@@ -1200,9 +1202,9 @@ double OrfLength(const OrfCoords &coords) {
 //
 // pysyndna's cast_cols would accept 100.5 and hand back a fractional ORF
 // length, which divides into Avogadro's number and yields a copy count nothing
-// downstream can tell from a real one. Same call D9 makes on percent-versus-
-// fraction coverage: the input that cannot mean what it says is refused rather
-// than silently reinterpreted.
+// downstream can tell from a real one. Same call the percent-versus-fraction
+// coverage check makes: the input that cannot mean what it says is refused
+// rather than silently reinterpreted.
 bool IsWholeNumber(double value) {
 	return std::isfinite(value) && std::floor(value) == value;
 }
@@ -1320,11 +1322,11 @@ void ValidateOrfCopiesInputs(const std::vector<CountObservation> &counts, const 
 		    FormatIdList(bad_coords));
 	}
 	if (!zero_reads.empty()) {
-		// The denominator D23 is about, and the one case pysyndna's parameter
-		// screen cannot see: zero is neither NaN nor negative, so it passes the
-		// filter and then divides through to an infinite copy count for every ORF
-		// in the sample, with no log message. NaN, negative and infinite values
-		// are NOT errors -- those the filter drops, matching pysyndna.
+		// The one case pysyndna's parameter screen cannot see: zero is neither
+		// NaN nor negative, so it passes the filter and then divides through to
+		// an infinite copy count for every ORF in the sample, with no log
+		// message. NaN, negative and infinite values are NOT errors -- those the
+		// filter drops, matching pysyndna.
 		throw std::invalid_argument("total_biological_reads_r1r2 must not be zero; offending sample_id " +
 		                            FormatIdList(zero_reads));
 	}
@@ -1432,7 +1434,7 @@ OrfCopiesResult ComputeOrfCopies(const std::vector<CountObservation> &counts, co
 			continue;
 		}
 		if (value == 0.0) {
-			// The sparse invariant (D10): a zero cell IS an absent cell, which is
+			// The sparse invariant: a zero cell IS an absent cell, which is
 			// exactly what pysyndna's dense output spells as an explicit 0.0. So
 			// omitting one loses nothing and needs no diagnostic. Only when EVERY
 			// cell of a sample goes this way does the omission become ambiguous,

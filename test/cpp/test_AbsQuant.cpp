@@ -280,8 +280,8 @@ struct GoldenCell {
 //
 // The golden is dense where pysyndna's pivot+fillna made it so, and miint omits
 // zero-valued cells, so a golden 0.0 is matched against an ABSENT cell -- that
-// is the D10 claim, and comparing this way proves it rather than assuming it.
-// The reverse direction still catches any cell miint invents.
+// is the sparse invariant's claim, and comparing this way proves it rather than
+// assuming it. The reverse direction still catches any cell miint invents.
 //
 // Shared by the cells and the ORF oracles because both functions return the
 // same sparse shape under the same invariant; only the selection of golden rows
@@ -812,8 +812,8 @@ TEST_CASE("Linregress's stderr stays accurate as the fit approaches perfect", "[
 	// range, scipy's drifts to 1.3e-6.
 	//
 	// This is not pedantry about a fixture. A clean synDNA standard curve is
-	// exactly the regime that gets here, so an M6 parity run against pysyndna
-	// on good data will show a disagreement that is this port being right.
+	// exactly the regime that gets here, so a parity run against pysyndna on
+	// good data will show a disagreement that is this port being right.
 	const std::vector<double> x = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0};
 	const double wobble[] = {1.0, -1.0, 0.5, -0.5, 0.25, -0.25, 0.125, -0.125};
 
@@ -1141,14 +1141,16 @@ TEST_CASE("IsUsableSampleParameter keeps zero and rejects NULL or negative", "[a
 	// the sample infinite, whose differences are NaN, and the sample is
 	// discarded as "unfittable" -- reported, but as though a fit had been tried
 	// and failed rather than as a parameter that was never usable. This helper
-	// is shared with M3-M5, so the gap would otherwise reach four functions.
+	// is shared by all four absquant_* functions, so the gap would otherwise
+	// reach every one of them.
 	CHECK_FALSE(IsUsableSampleParameter(std::numeric_limits<double>::infinity()));
 	CHECK_FALSE(IsUsableSampleParameter(-std::numeric_limits<double>::infinity()));
 }
 
 TEST_CASE("The shared id predicates", "[absquant]") {
-	// M3-M5 each read a long-form counts relation plus keyed reference
-	// relations, so these three are written once here rather than four times.
+	// Every absquant_* function reads a long-form counts relation plus keyed
+	// reference relations, so these three are written once here rather than
+	// four times.
 	SECTION("IdsMissingFrom deduplicates and sorts") {
 		const std::vector<std::string> subject = {"c", "a", "b", "a", "c"};
 		const std::vector<std::string> reference = {"b", "b"};
@@ -1321,7 +1323,7 @@ TEST_CASE("FitSyndnaModels rejects malformed relations", "[absquant]") {
 		// pysyndna lets this become NaN under log10 and silently voids the whole
 		// sample. A count below zero is structurally impossible rather than
 		// degenerate-but-computable, so miint refuses it -- a deliberate
-		// divergence, consistent with D23.
+		// divergence, and the same split every other check here draws.
 		TinyFit fixture;
 		fixture.counts.push_back({"s1", "f4", -5.0});
 		fixture.concentrations.push_back({"f4", 0.001});
@@ -1846,7 +1848,7 @@ TEST_CASE("ComputeCellCounts converts to sample units by one per-sample ratio", 
 
 	SECTION("cells_per_g_of_gdna is untouched by any of the three inputs") {
 		// Exact equality, not a tolerance: the gdna metric must not enter the
-		// ratio path at all, so M3's values are reproduced bit for bit rather
+		// ratio path at all, so its values are reproduced bit for bit rather
 		// than merely closely.
 		TinyCells fixture;
 		fixture.params[0].sample_denominator = 12345.0;
@@ -1868,8 +1870,8 @@ TEST_CASE("ComputeCellCounts matches pysyndna once every filter is in play", "[a
 	const auto result = fixture.Run();
 	CheckCellsAgainstOracle(result, "data/syndna/cellsb_oracle.csv", "cells_per_g_of_gdna");
 
-	// 9 dense golden cells, of which two are the zeros D10 says we omit:
-	// (s2, f_only1) failed coverage and (s2, f_zero) had no reads.
+	// 9 dense golden cells, of which two are the zeros the sparse invariant
+	// omits: (s2, f_only1) failed coverage and (s2, f_zero) had no reads.
 	CHECK(result.values.size() == 7);
 }
 
@@ -2014,9 +2016,9 @@ TEST_CASE("ComputeCellCounts reports a sample whose every cell came out zero", "
 	// the sample is exactly 0.0 and the sparse invariant omits all of them.
 	//
 	// This cannot arise for cells_per_g_of_gdna, whose values are strictly
-	// positive, which is why M3 had no such list. Without one the sample would
-	// vanish from the output with nothing said about it, and "no rows" would be
-	// indistinguishable from "no such sample".
+	// positive, which is why that metric alone needs no such list. Without one
+	// the sample would vanish from the output with nothing said about it, and
+	// "no rows" would be indistinguishable from "no such sample".
 	for (size_t which = 0; which < 2; ++which) {
 		INFO("zeroed extraction factor " << which);
 		TinyCells fixture;
@@ -2213,7 +2215,7 @@ TEST_CASE("ComputeCellCounts rejects out-of-range options", "[absquant]") {
 	constexpr double kInf = std::numeric_limits<double>::infinity();
 
 	SECTION("min_coverage outside [0, 1]") {
-		// D9: coverage in miint is a FRACTION, so the threshold is one too.
+		// Coverage in miint is a FRACTION, so the threshold is one too.
 		// pysyndna takes either and explicitly refuses to guard the distinction
 		// ("IT IS UP TO THE USER..."), which makes min_coverage = 10 against
 		// fractional coverages a filter that drops everything, silently.
@@ -2347,8 +2349,8 @@ TEST_CASE("ComputeCellCounts rejects malformed relations", "[absquant]") {
 	SECTION("a zero sequenced gDNA mass, which the parameter filter lets past") {
 		// The other denominator, and the one case pysyndna's NaN/negative screen
 		// cannot see: zero is neither. It divides through to inf cells for every
-		// feature in the sample, with no log message -- the same situation D23
-		// already refuses for total_biological_reads_r1r2.
+		// feature in the sample, with no log message -- the same situation
+		// absquant_orf_copies already refuses for total_biological_reads_r1r2.
 		TinyCells fixture;
 		fixture.params[0].sequenced_sample_gdna_mass_ng = 0.0;
 		CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
@@ -2385,7 +2387,7 @@ TEST_CASE("ComputeCellCounts rejects malformed relations", "[absquant]") {
 
 		// cells_per_g_of_gdna has no denominator column, and its callers leave
 		// the field at zero -- so an unconditional check here would make every
-		// query for M3's metric throw.
+		// query for cells_per_g_of_gdna throw.
 		TinyCells gdna;
 		gdna.params[0].sample_denominator = 0.0;
 		CHECK_NOTHROW(gdna.Run());
@@ -2425,9 +2427,9 @@ TEST_CASE("ComputeCellCounts rejects malformed relations", "[absquant]") {
 
 	SECTION("a predicted mass that underflows is omitted, not reported per cell") {
 		// The other end of the same range. An extreme NEGATIVE intercept drives
-		// 10^x to exactly zero, and under D10 a zero cell is an absent cell --
-		// so the cell is omitted and nothing is said, because the sample is
-		// still in the output and still means what it says.
+		// 10^x to exactly zero, and under the sparse invariant a zero cell is an
+		// absent cell -- so the cell is omitted and nothing is said, because the
+		// sample is still in the output and still means what it says.
 		//
 		// This is why the zero-valued list documents itself as "not reachable
 		// through a realistic model" rather than "impossible": here is the
@@ -2961,7 +2963,7 @@ TEST_CASE("ComputeOrfCopies rejects malformed relations", "[absquant]") {
 		CHECK_NOTHROW(fixture.Run());
 
 		// ... and the cell is omitted rather than written as a zero, which is the
-		// sparse invariant (D10) doing exactly what it does for a zero VALUE.
+		// sparse invariant doing exactly what it does for a zero VALUE.
 		const auto result = fixture.Run();
 		REQUIRE(result.values.size() == 1);
 		CHECK(result.values[0].feature_id == "f2");
@@ -2986,8 +2988,8 @@ TEST_CASE("ComputeOrfCopies rejects malformed relations", "[absquant]") {
 		// pysyndna's cast_cols would take 100.5 and hand back a fractional ORF
 		// length, which then divides into Avogadro's number and produces a
 		// perfectly plausible-looking copy count. A genome coordinate that is not
-		// a whole base is not a measurement -- the same call D9 makes on
-		// percent-versus-fraction coverage.
+		// a whole base is not a measurement -- the same call the coverage check
+		// makes on percents-versus-fractions.
 		TinyOrf fixture;
 		fixture.coords[0].ogu_orf_end = 100.5;
 		CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
@@ -3005,7 +3007,7 @@ TEST_CASE("ComputeOrfCopies rejects malformed relations", "[absquant]") {
 	}
 
 	SECTION("a zero total_biological_reads_r1r2, which the filter lets past") {
-		// The denominator D23 is about. Zero is neither NaN nor negative, so it
+		// Zero is neither NaN nor negative, so it
 		// passes pysyndna's screen and then divides through to an INFINITE copy
 		// count for every ORF in the sample, silently. Refusing it is the same
 		// call ComputeCellCounts already makes for its two denominators.
@@ -3172,10 +3174,10 @@ TEST_CASE("ComputeOrfCopies reports a sample whose every cell came out zero", "[
 	CHECK(result.values.empty());
 	CHECK(result.zero_valued_sample_ids == std::vector<std::string> {"s1"});
 
-	// A single zero cell among others needs no diagnostic: under D10 an omitted
-	// cell and a dense 0.0 are the same claim, and the sample is still in the
-	// output saying what it is. Only the WHOLE sample going that way is
-	// ambiguous.
+	// A single zero cell among others needs no diagnostic: under the sparse
+	// invariant an omitted cell and a dense 0.0 are the same claim, and the
+	// sample is still in the output saying what it is. Only the WHOLE sample
+	// going that way is ambiguous.
 	TinyOrf one_zero;
 	one_zero.counts[0].count = 0.0;
 	CHECK(one_zero.Run().values.size() == 1);

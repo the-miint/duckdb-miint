@@ -6,15 +6,14 @@
 # NUMBERS only; the generator is dev-only and lives outside this tree. See
 # data/syndna/README.md for provenance and the regeneration recipe.
 #
-# This file deliberately tests NO absquant_* function -- none exist yet. It
-# guards the goldens themselves, so that a corrupted, truncated or
-# accidentally-regenerated fixture fails loudly here rather than silently
-# weakening a parity test in a later milestone. The numeric parity tests ship
-# with the functions they cover.
+# This file deliberately tests NO absquant_* function. It guards the goldens
+# themselves, so that a corrupted, truncated or accidentally-regenerated fixture
+# fails loudly here rather than silently weakening a parity test elsewhere. The
+# numeric parity tests live with the functions they cover.
 #
 # The structural checks below are not padding: each one pins a property some
-# later milestone depends on (coverage really is a fraction, the four metrics
-# are all present, the dense zeros that justify miint's sparse output really do
+# parity test depends on (coverage really is a fraction, the four metrics are
+# all present, the dense zeros that justify miint's sparse output really do
 # exist in pysyndna's dense output, and so on).
 
 require miint
@@ -327,11 +326,12 @@ SELECT count(DISTINCT sample_id) FROM read_csv_auto('data/syndna/orfb_oracle.csv
 # ---- studentt_sf_oracle: the Student-t survival function grid ----
 # pvalue is the one regression field that cannot come from DuckDB's regr_*
 # aggregates -- it needs a Student-t survival function (a regularized incomplete
-# beta), which M2 implements from scratch. The fit oracles contain only a handful
-# of pvalues, all at df <= 6, so this grid is what actually validates those
+# beta), which miint implements from scratch. The fit oracles contain only a
+# handful of pvalues, all at df <= 6, so this grid is what actually validates those
 # numerics. Generated from scipy.stats.t.sf (BSD-3-Clause); pysyndna is not
 # involved. The checks below are properties of the survival function itself, so
-# a corrupted or mis-generated grid fails here rather than silently weakening M2.
+# a corrupted or mis-generated grid fails here rather than silently weakening
+# the survival-function tests.
 
 # A survival function is a probability.
 query I

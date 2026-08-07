@@ -144,7 +144,7 @@ unique_ptr<GlobalTableFunctionState> AbsQuantOrfCopiesInitGlobal(ClientContext &
 	gstate->feature_id_type = data.feature_id_type;
 
 	// ReadFeatureTable's zero-drop is what makes the output sparse where
-	// pysyndna's is a dense zero (D10). Unlike absquant_cell_counts nothing here
+	// pysyndna's is a dense zero. Unlike absquant_cell_counts nothing here
 	// DEPENDS on it -- a zero count is legal in this chain, there being no
 	// log10 -- so the drop is purely the storage convention.
 	const auto count_rows = ReadFeatureTable(context, data.counts_table, kCallerName);

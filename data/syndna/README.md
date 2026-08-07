@@ -208,7 +208,7 @@ both correctly rounded to the same double, and `0.5² = 0.25` is exactly represe
 ## Tolerances
 
 `test/sql/absquant_fixtures.test` checks only that these files load and are structurally
-intact. The numeric parity tests arrive with the functions they test (M2–M5) and use the
+intact. The numeric parity tests live with the functions they test and use the
 codebase's standard idiom — a `FULL JOIN` plus
 `abs(mine - gold) > tol * (1.0 + abs(gold))`, asserted to return 0 rows:
 

@@ -522,6 +522,12 @@ argument on this page.
 | `ogu_orf_start` | DOUBLE | 1-based, **inclusive** |
 | `ogu_orf_end` | DOUBLE | 1-based, **inclusive**; may be less than the start |
 
+These are **closed** coordinates, which is the one place miint departs from the half-open
+`[position, stop_position)` convention its readers use — see
+[Coordinate conventions](reading.md#coordinate-conventions) and
+[ORF coordinates from `read_gff`](#orf-coordinates-from-read_gff) below for the
+conversion.
+
 `params` — one row per sample. All four parameter columns are required and all four are
 used.
 
@@ -547,8 +553,10 @@ annotation in GFF3 becomes one with a projection. **It needs a conversion, and l
 out is silent.**
 
 `read_gff` and `read_ncbi_annotation` emit `stop_position` as 1-based **half-open** —
-normalized `+1` from GFF3's closed `end`, which is the project-wide convention (issue
-#196). `absquant_orf_copies` takes 1-based **closed** coordinates, the convention woltka's
+normalized `+1` from the source format's closed `end`, which is the project-wide
+convention every miint reader follows; see
+[Coordinate conventions](reading.md#coordinate-conventions).
+`absquant_orf_copies` takes 1-based **closed** coordinates, the convention woltka's
 `coords.txt` uses. So:
 
 ```sql

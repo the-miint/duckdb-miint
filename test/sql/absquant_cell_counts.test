@@ -109,14 +109,15 @@ CREATE TABLE b02_cm2samp AS SELECT * FROM absquant_cell_counts(
 # reach ~1e13 so the bound has to be relative.
 #
 # The COALESCE is the load-bearing part, and it is what makes this a PROOF of
-# D10 rather than an assumption. pysyndna pivots and then fillna(0), so a
-# feature that survives coverage in at least one sample carries an explicit 0.0
-# for the samples where it did not; miint omits zero-valued rows entirely.
+# the sparse invariant rather than an assumption. pysyndna pivots and then
+# fillna(0), so a feature that survives coverage in at least one sample carries
+# an explicit 0.0 for the samples where it did not; miint omits zero-valued rows
+# entirely.
 # Comparing COALESCE(mine.value, 0) against the golden asserts those are the
 # same claim. The other direction is keyed on `g.value IS NULL`, which catches
 # any cell miint invents -- note it must NOT be written as `m.value IS NULL OR
 # ...`, because that flags every golden zero as a mismatch and would turn the
-# D10 case into a failure.
+# omitted-zero case into a failure.
 # ---------------------------------------------------------------------------
 
 statement ok
@@ -300,13 +301,14 @@ SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_leng
 sample_surface_area_cm2
 
 # ---------------------------------------------------------------------------
-# D10, stated directly rather than left implicit in the COALESCE above.
+# The sparse invariant, stated directly rather than left implicit in the
+# COALESCE above.
 # ---------------------------------------------------------------------------
 
 # The golden's dense zeros. DISTINCT because they are the SAME two cells in
 # every metric -- the ratio is per sample, so a cell that is zero in one unit is
-# zero in all of them, which is why D10 needs proving once rather than four
-# times.
+# zero in all of them, which is why the invariant needs proving once rather than
+# four times.
 query TT
 SELECT DISTINCT sample_id, feature_id FROM all_gold WHERE oracle = 'B' AND value = 0.0 ORDER BY 1, 2;
 ----
@@ -877,9 +879,9 @@ UNION ALL
 # The call itself. Checked at bind, before any relation is read.
 # ---------------------------------------------------------------------------
 
-# M4 made the three sample-level metrics valid, so the rejected name here has to
-# be one that is genuinely not a metric. The accepted list is rendered from the
-# enum, so it cannot fall behind what the parser takes.
+# The three sample-level metrics are all valid names, so the rejected name here
+# has to be one that is genuinely not a metric. The accepted list is rendered
+# from the enum, so it cannot fall behind what the parser takes.
 statement error
 SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
                                    'cells_per_mg_of_sample', 0.1);
@@ -950,9 +952,77 @@ SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_leng
 sample parameters table or view 'nope' does not exist
 
 # ---------------------------------------------------------------------------
+# A relation name has to survive being interpolated into SQL.
+#
+# The five names arrive as ordinary VARCHAR arguments and reach two places. At
+# bind they are looked up through the catalog API, which builds no SQL text at
+# all. At execution the readers in src/absquant_readers.cpp do build SQL, and
+# they write the name as a QUOTED identifier with any embedded quote doubled --
+# so a name carrying a quote and a statement separator stays one identifier
+# instead of closing one and opening a statement.
+#
+# Both readers are covered by the one call, with the two names that break the
+# two different ways:
+#
+#  - the COVERAGE relation (ReadLongFormValues) is named so that concatenating
+#    it raw yields a VALID first statement followed by a second one. The `;` is
+#    not neutralized by a parse error somewhere: verified by mutating the
+#    quoting away, where DuckDB hands the trailing text on as its own statement
+#    and tries to run the DROP. Quoting is what stops that, not luck;
+#  - the LENGTHS relation (ReadKeyedColumns) is named with an embedded double
+#    quote, which is what defeats quoting that forgets to escape.
+#
+# Both names have to exist in the catalog for the test to mean anything: the
+# bind-time lookup rejects a name that is not a relation, so a name nobody
+# created never reaches the reader at all. The other absquant_* functions use
+# these same two readers, which is why this is written once.
+#
+# Column names, by contrast, are deliberately NOT quoted, and are compile-time
+# literals at every call site -- never anything a caller supplies. That is the
+# contract src/include/absquant_readers.hpp states, and it is what makes the
+# unquoted interpolation safe.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE injection_victim AS SELECT 1 AS x;
+
+statement ok
+CREATE TABLE "b_coverage; DROP TABLE injection_victim; --" AS SELECT * FROM b_coverage;
+
+statement ok
+CREATE TABLE "evil_len""; DROP TABLE injection_victim; --" AS SELECT * FROM b_lengths;
+
+statement ok
+CREATE TABLE evil_mine AS SELECT * FROM absquant_cell_counts(
+    'b_counts', 'b_models',
+    'b_coverage; DROP TABLE injection_victim; --',
+    'evil_len"; DROP TABLE injection_victim; --',
+    'b_params', 'cells_per_g_of_gdna', 0.1);
+
+# Not vacuous: the run really produced the seven cells b_mine did.
+query I
+SELECT count(*) FROM evil_mine;
+----
+7
+
+# And they are the SAME seven, both directions -- so the hostile name resolved
+# to the relation it names rather than being mangled or partly executed.
+query II
+SELECT (SELECT count(*) FROM (SELECT * FROM evil_mine EXCEPT SELECT * FROM b_mine)),
+       (SELECT count(*) FROM (SELECT * FROM b_mine EXCEPT SELECT * FROM evil_mine));
+----
+0	0
+
+# Nothing ran as a statement.
+query I
+SELECT count(*) FROM injection_victim;
+----
+1
+
+# ---------------------------------------------------------------------------
 # Both thresholds are constrained to [0, 1].
 #
-# min_coverage because coverage is a fraction here (D9) -- pysyndna accepts
+# min_coverage because coverage is a fraction here -- pysyndna accepts
 # fractions or percents and explicitly leaves it to the caller to pass a
 # matching threshold, which makes `min_coverage := 10` against fractional
 # coverages a filter that silently keeps everything. min_rsquared because r^2 is
