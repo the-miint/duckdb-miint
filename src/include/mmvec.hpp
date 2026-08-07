@@ -182,11 +182,15 @@ struct Workspace {
 	//!
 	//! Deliberately NOT scratch, unlike everything above, and deliberately
 	//! non-owning: the pool is created once per FIT, while a workspace is reused
-	//! across evaluations. It is routed through here because the workspace is
-	//! already threaded through every layer of the objective, so the alternative
-	//! was adding a parameter to both kernel entry points, the dispatcher's
-	//! function-pointer typedef, and every call site -- for a value that is
-	//! constant across a whole fit.
+	//! across evaluations. Note that `Resize` does not touch it, so it is also the
+	//! one field the "fully overwritten on each call" note above does not cover.
+	//!
+	//! A trailing parameter on the two kernel entry points would be the tidier
+	//! altitude, and the honest cost of that is about ten lines -- the
+	//! MIINT_MMVEC_KERNEL_DECLARATIONS macro, the EvaluateFn typedef, six call
+	//! sites, and the ISA tests that call the variants directly. It was not taken
+	//! because the behaviour is identical and the change would reach through M7's
+	//! dispatch seam; if that seam is ever revisited, move this with it.
 	//!
 	//! nullptr on the READ path (`ComputeLogits`) and on the MINIBATCH path, which
 	//! is exactly why Adam is unaffected: its 50-row batches are far too small to
@@ -402,14 +406,32 @@ struct Model {
 Model FitLbfgsFromInit(const ModelShape &shape, const Priors &priors, const SufficientStats &stats,
                        const std::vector<double> &theta0, int64_t max_iter, int n_threads = 1);
 
-//! The thread budget a fit will actually use: MIINT_MMVEC_THREADS if it is set to
-//! a positive integer, otherwise `requested`, and never below 1.
+//! The same fit against a pool the caller already owns, which is what the
+//! overload above is a convenience over.
+//!
+//! It is also the only way to observe that a fit really did parallelize:
+//! `pool.Dispatches()` afterwards is nonzero. Bit-identity assertions cannot show
+//! this -- a fit that quietly ran serially matches a serial fit perfectly -- so
+//! without this seam the central plumbing of M8 would be untestable.
+Model FitLbfgsFromInit(const ModelShape &shape, const Priors &priors, const SufficientStats &stats,
+                       const std::vector<double> &theta0, int64_t max_iter, miint::WorkerPool &pool);
+
+//! The budget to use given an override `request` (MIINT_MMVEC_THREADS' value, or
+//! nullptr) and the caller's own `requested`: the override if it parses to a
+//! positive integer, otherwise `requested`, and never below 1.
+//!
+//! PURE -- the environment is read by the caller, not in here. Same split, for the
+//! same reason, as ResolveIsa/DetectIsa in miint_isa.hpp: the parsing rules are the
+//! part worth testing, and a function that reads a process global can only be
+//! tested by mutating one.
 //!
 //! The override exists so the WHOLE carved-value suite can be re-run at 2, 4 and 8
 //! threads without editing a single expectation -- which is the real gate on M8,
 //! far stronger than any test written specially for it. It doubles as a user
-//! escape hatch to force a serial fit, in the same spirit as MIINT_SIMD.
-int ResolveThreadBudget(int requested);
+//! escape hatch to force a serial fit, in the same spirit as MIINT_SIMD. It applies
+//! only where a fit creates its own pool; the overload below uses the pool it is
+//! handed, whatever size that is.
+int ResolveThreadBudget(const char *request, int requested);
 
 //! Deterministic pseudo-random draws that are byte-identical on every platform.
 //!

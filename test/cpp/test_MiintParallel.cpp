@@ -16,30 +16,7 @@
 using miint::ParallelFor;
 using miint::WorkerPool;
 
-namespace {
-
-//! Every chunk range a dispatch handed out. Collected under a lock because the
-//! chunks arrive from several threads; sorted before use, since the arrival order
-//! is exactly the thing that is allowed to vary.
-class RangeLog {
-public:
-	void Add(int64_t begin, int64_t end) {
-		std::lock_guard<std::mutex> lock(m_);
-		ranges_.emplace_back(begin, end);
-	}
-
-	std::vector<std::pair<int64_t, int64_t>> Sorted() const {
-		std::vector<std::pair<int64_t, int64_t>> copy = ranges_;
-		std::sort(copy.begin(), copy.end());
-		return copy;
-	}
-
-private:
-	mutable std::mutex m_;
-	std::vector<std::pair<int64_t, int64_t>> ranges_;
-};
-
-} // namespace
+namespace {} // namespace
 
 TEST_CASE("WorkerPool reports its budget and rejects a nonsensical one", "[parallel]") {
 	// The budget INCLUDES the calling thread, so one is a legitimate request and
@@ -61,7 +38,7 @@ TEST_CASE("ParallelFor visits every index exactly once", "[parallel]") {
 		WorkerPool pool(threads);
 		for (const int64_t n : {int64_t {0}, int64_t {1}, int64_t {7}, int64_t {8}, int64_t {9}, int64_t {1000}}) {
 			std::vector<int> seen(static_cast<size_t>(n), 0);
-			ParallelFor(pool, 0, n, [&](int64_t begin, int64_t end) {
+			ParallelFor(&pool, 0, n, [&](int64_t begin, int64_t end) {
 				for (int64_t i = begin; i < end; ++i) {
 					seen[static_cast<size_t>(i)]++;
 				}
@@ -79,10 +56,15 @@ TEST_CASE("ParallelFor's chunks are a contiguous ascending partition", "[paralle
 	// that interleaved indices round-robin would satisfy the previous test and
 	// break this one.
 	WorkerPool pool(4);
-	RangeLog log;
-	ParallelFor(pool, 5, 100, [&](int64_t begin, int64_t end) { log.Add(begin, end); });
-
-	const auto ranges = log.Sorted();
+	// Collected under a lock because the chunks arrive from several threads, then
+	// sorted -- the arrival ORDER is exactly the thing that is allowed to vary.
+	std::mutex m;
+	std::vector<std::pair<int64_t, int64_t>> ranges;
+	ParallelFor(&pool, 5, 100, [&](int64_t begin, int64_t end) {
+		std::lock_guard<std::mutex> lock(m);
+		ranges.emplace_back(begin, end);
+	});
+	std::sort(ranges.begin(), ranges.end());
 	REQUIRE_FALSE(ranges.empty());
 	REQUIRE(ranges.front().first == 5);
 	REQUIRE(ranges.back().second == 100);
@@ -102,7 +84,7 @@ TEST_CASE("a budget of one thread runs inline on the caller", "[parallel]") {
 	REQUIRE(pool.Threads() == 1);
 
 	std::thread::id ran_on;
-	ParallelFor(pool, 0, 100, [&](int64_t, int64_t) { ran_on = std::this_thread::get_id(); });
+	ParallelFor(&pool, 0, 100, [&](int64_t, int64_t) { ran_on = std::this_thread::get_id(); });
 	REQUIRE(ran_on == std::this_thread::get_id());
 }
 
@@ -113,7 +95,7 @@ TEST_CASE("the calling thread is one of the workers", "[parallel]") {
 	WorkerPool pool(4);
 	std::mutex m;
 	std::set<std::thread::id> ids;
-	ParallelFor(pool, 0, 4000, [&](int64_t, int64_t) {
+	ParallelFor(&pool, 0, 4000, [&](int64_t, int64_t) {
 		std::lock_guard<std::mutex> lock(m);
 		ids.insert(std::this_thread::get_id());
 	});
@@ -131,7 +113,7 @@ TEST_CASE("an exception in the body reaches the caller, and the pool survives it
 	// there is -- rather than letting the case silently stop being tested.
 	WorkerPool pool(4);
 	const bool threaded = pool.Threads() > 1;
-	REQUIRE_THROWS_AS(ParallelFor(pool, 0, 4000,
+	REQUIRE_THROWS_AS(ParallelFor(&pool, 0, 4000,
 	                              [threaded](int64_t begin, int64_t) {
 		                              if (!threaded || begin > 0) {
 			                              throw std::runtime_error("boom");
@@ -142,7 +124,7 @@ TEST_CASE("an exception in the body reaches the caller, and the pool survives it
 	// A pool that lost a worker or left its bookkeeping inconsistent on the way out
 	// would hang here rather than fail.
 	std::atomic<int64_t> total {0};
-	ParallelFor(pool, 0, 100, [&](int64_t begin, int64_t end) { total += end - begin; });
+	ParallelFor(&pool, 0, 100, [&](int64_t begin, int64_t end) { total += end - begin; });
 	REQUIRE(total.load() == 100);
 }
 
@@ -163,7 +145,7 @@ TEST_CASE("the exception the caller sees is the lowest-numbered failing chunk", 
 	for (int rep = 0; rep < 20; ++rep) {
 		std::atomic<int> others_thrown {0};
 		try {
-			ParallelFor(pool, 0, 4000, [&](int64_t begin, int64_t) {
+			ParallelFor(&pool, 0, 4000, [&](int64_t begin, int64_t) {
 				if (begin > 0) {
 					others_thrown.fetch_add(1);
 					throw std::runtime_error(std::to_string(begin));
@@ -189,8 +171,8 @@ TEST_CASE("a nested ParallelFor runs inline instead of deadlocking", "[parallel]
 	// hanging is not. The assertion is that the work still all happens.
 	WorkerPool pool(4);
 	std::vector<int> seen(400, 0);
-	ParallelFor(pool, 0, 400, [&](int64_t begin, int64_t end) {
-		ParallelFor(pool, begin, end, [&](int64_t inner_begin, int64_t inner_end) {
+	ParallelFor(&pool, 0, 400, [&](int64_t begin, int64_t end) {
+		ParallelFor(&pool, begin, end, [&](int64_t inner_begin, int64_t inner_end) {
 			for (int64_t i = inner_begin; i < inner_end; ++i) {
 				seen[static_cast<size_t>(i)]++;
 			}
@@ -231,7 +213,7 @@ TEST_CASE("scheduling cannot change a floating-point result", "[parallel]") {
 	for (const int threads : {1, 2, 3, 4, 8}) {
 		WorkerPool pool(threads);
 		std::vector<double> slots(static_cast<size_t>(kN), 0.0);
-		ParallelFor(pool, 0, kN, [&](int64_t begin, int64_t end) {
+		ParallelFor(&pool, 0, kN, [&](int64_t begin, int64_t end) {
 			for (int64_t i = begin; i < end; ++i) {
 				slots[static_cast<size_t>(i)] = value(i);
 			}
@@ -247,8 +229,8 @@ TEST_CASE("scheduling cannot change a floating-point result", "[parallel]") {
 TEST_CASE("an empty or inverted range does no work", "[parallel]") {
 	WorkerPool pool(4);
 	std::atomic<int> calls {0};
-	ParallelFor(pool, 10, 10, [&](int64_t, int64_t) { ++calls; });
-	ParallelFor(pool, 10, 5, [&](int64_t, int64_t) { ++calls; });
+	ParallelFor(&pool, 10, 10, [&](int64_t, int64_t) { ++calls; });
+	ParallelFor(&pool, 10, 5, [&](int64_t, int64_t) { ++calls; });
 	REQUIRE(calls.load() == 0);
 }
 
@@ -262,7 +244,7 @@ TEST_CASE("one pool serves many dispatches", "[parallel]") {
 	bool all_ok = true;
 	for (int rep = 0; rep < 2000; ++rep) {
 		std::vector<int> seen(64, 0);
-		ParallelFor(pool, 0, 64, [&](int64_t begin, int64_t end) {
+		ParallelFor(&pool, 0, 64, [&](int64_t begin, int64_t end) {
 			for (int64_t i = begin; i < end; ++i) {
 				seen[static_cast<size_t>(i)]++;
 			}

@@ -1,7 +1,7 @@
 #pragma once
 //
-// A persistent, condition-variable-parked worker pool, and a `ParallelFor` over
-// it whose decomposition is deterministic.
+// A persistent, condition-variable-parked worker pool, and two ways to hand it
+// work whose decomposition is deterministic.
 //
 // Written for mmvec's fit, whose requirement is unusual and shapes everything
 // here: parallelism must change **no value**. The objective's hot loops are
@@ -11,17 +11,23 @@
 // chunks are a CONTIGUOUS ASCENDING PARTITION of the range, which is the one
 // property of this file that callers depend on and tests pin down.
 //
-// Three deliberate choices, each measured rather than assumed:
+// Three choices, each measured in M6 P4.5 / M8 P0 rather than assumed:
 //
-//   * `std::thread` rather than OpenMP. `miint_openmp` exists only under
+//   * `std::thread` over OpenMP. `miint_openmp` exists only under
 //     `if(MIINT_ENABLE_UNIFRAC AND NOT EMSCRIPTEN)`, so an OpenMP dependency would
 //     make mmvec's parallelism vanish whenever UniFrac is off, and the ISA variant
-//     objects do not receive `-fopenmp` at all.
-//   * **No spin-waiting.** Workers park on a condition variable. A spin-wait pool
-//     measured 27x SLOWER in M6 P4.5 once it oversubscribed a cpuset.
-//   * **The calling thread takes a chunk.** A pool of T plus the caller would be
-//     T+1 runnable threads on T cores.
+//     objects never receive `-fopenmp` at all.
+//   * **No spin-waiting.** Workers park on a condition variable; a spin-wait pool
+//     measured 27x SLOWER once it oversubscribed a cpuset.
+//   * **The calling thread takes a chunk**, or a pool of T plus the caller would
+//     be T+1 runnable threads on T cores.
+//
+// A null `WorkerPool *` means "run serially", and it is the SAME state as a pool
+// with a budget of one -- both run the body inline on the caller. Callers pass
+// their pool pointer straight through without testing it.
 
+#include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <exception>
@@ -55,16 +61,33 @@ public:
 
 	//! The budget actually available, always >= 1 and never above the request.
 	int Threads() const {
-		return n_threads_;
+		return static_cast<int>(workers_.size()) + 1; // + the calling thread
 	}
 
-private:
-	friend void ParallelFor(WorkerPool &pool, int64_t begin, int64_t end,
-	                        const std::function<void(int64_t, int64_t)> &fn);
+	//! How many times work has actually been handed to the worker threads.
+	//!
+	//! Counts only the threaded path -- an inline dispatch (budget of 1, a single
+	//! chunk, a nested call) does not increment it. That is deliberate and is what
+	//! makes it useful: it is the only way a test can tell "parallelised correctly"
+	//! from "silently ran serially and therefore matched trivially", which
+	//! bit-identity assertions by their nature cannot distinguish.
+	uint64_t Dispatches() const {
+		return dispatches_.load(std::memory_order_relaxed);
+	}
 
-	//! Run `chunk(c)` for every c in [0, n_chunks), and return once all have
-	//! finished. Rethrows on the caller if any chunk threw.
+	//! Run `chunk(c)` for every c in [0, n_chunks) and return once all have
+	//! finished, rethrowing on the caller if any threw.
+	//!
+	//! The primitive both `ParallelFor` and `ParallelInvoke` are built on, and
+	//! public because those two do not exhaust what it expresses: it is simply "run
+	//! N independent things", with no assumption that they are slices of a range.
 	void Dispatch(int n_chunks, const std::function<void(int)> &chunk);
+
+private:
+	//! Claim and run chunks until none are left. Called with `lock` HELD; releases
+	//! it around each chunk and re-takes it. Shared by the caller and the workers so
+	//! the next_chunk_/outstanding_ invariant is written once.
+	void DrainChunks(std::unique_lock<std::mutex> &lock);
 
 	//! Invoke one chunk, catching whatever it throws. Called with `m_` NOT held.
 	void RunChunk(int c);
@@ -89,10 +112,10 @@ private:
 	int failed_chunk_ = 0;
 
 	bool stop_ = false;
-	int n_threads_ = 1;
+	std::atomic<uint64_t> dispatches_ {0};
 };
 
-//! Split `[begin, end)` into `pool.Threads()` contiguous chunks and invoke
+//! Split `[begin, end)` into `pool->Threads()` contiguous chunks and invoke
 //! `fn(chunk_begin, chunk_end)` on each, returning once every chunk has finished.
 //!
 //! The chunks are a contiguous ascending partition and their boundaries depend
@@ -101,13 +124,65 @@ private:
 //! slot per index and reduce those slots afterwards in index order for a
 //! bit-identical result.
 //!
-//! Runs inline on the calling thread, creating and waking nothing, when the budget
-//! is 1, when the range is empty, or when called from inside another `ParallelFor`
-//! body. That last case is not a nicety: every worker is already busy running the
-//! outer body, so a nested dispatch that waited on them would wait forever.
+//! Runs inline on the calling thread, waking nothing, when `pool` is null, the
+//! budget is 1, or the range holds fewer than two elements. A TEMPLATE rather than
+//! a `std::function` parameter specifically so that path costs nothing: the
+//! minibatch objective calls this with a null pool on every one of ~196000 Adam
+//! updates, and type-erasing the body there was measured to heap-allocate a
+//! closure per call for no parallelism at all.
 //!
-//! An exception from `fn` propagates to the caller once all chunks have finished
-//! -- never out of a worker's thread function, which would call std::terminate.
-void ParallelFor(WorkerPool &pool, int64_t begin, int64_t end, const std::function<void(int64_t, int64_t)> &fn);
+//! An exception from `fn` propagates to the caller once all chunks have finished --
+//! never out of a worker's thread function, which would call std::terminate.
+template <typename Fn>
+void ParallelFor(WorkerPool *pool, int64_t begin, int64_t end, Fn &&fn) {
+	const int64_t n = end - begin;
+	if (n <= 0) {
+		return;
+	}
+	if (pool == nullptr || pool->Threads() <= 1 || n == 1) {
+		fn(begin, end);
+		return;
+	}
+	// Never more chunks than indices, so every chunk handed out is non-empty.
+	const int64_t chunks = std::min<int64_t>(pool->Threads(), n);
+	const int64_t base = n / chunks;
+	const int64_t remainder = n % chunks;
+	pool->Dispatch(static_cast<int>(chunks), [&](int c) {
+		// Spread the remainder over the first `remainder` chunks. Written as
+		// products of the chunk index rather than `n * c / chunks` so it cannot
+		// overflow for a large range, and so the boundaries are exact integers
+		// rather than the result of two roundings.
+		const int64_t lo = begin + c * base + std::min<int64_t>(c, remainder);
+		const int64_t hi = lo + base + (c < remainder ? 1 : 0);
+		fn(lo, hi);
+	});
+}
+
+//! Run two independent pieces of work at the same time, each WHOLE.
+//!
+//! Not a special case of ParallelFor with two indices, even though that is how it
+//! is implemented -- the distinction is the point. `ParallelFor` divides one
+//! computation, which for an Eigen matrix product changes its result (M8 P0
+//! measured Eigen re-blocking a sliced product and moving the fitted model). This
+//! divides nothing: each callable computes exactly what it would have computed
+//! alone, so the result is bit-identical by construction rather than by
+//! measurement. That is what makes it usable on the two gradient GEMMs.
+//!
+//! Runs `a()` then `b()` inline when there is no second thread to put one on.
+template <typename FnA, typename FnB>
+void ParallelInvoke(WorkerPool *pool, FnA &&a, FnB &&b) {
+	if (pool == nullptr || pool->Threads() <= 1) {
+		a();
+		b();
+		return;
+	}
+	pool->Dispatch(2, [&](int task) {
+		if (task == 0) {
+			a();
+		} else {
+			b();
+		}
+	});
+}
 
 } // namespace miint

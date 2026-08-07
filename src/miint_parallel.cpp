@@ -1,6 +1,5 @@
 #include "miint_parallel.hpp"
 
-#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -9,7 +8,7 @@ namespace miint {
 
 namespace {
 
-//! Nonzero while this thread is running a ParallelFor body.
+//! Nonzero while this thread is running a dispatched body.
 //!
 //! A nested dispatch has to run inline, because by construction every worker is
 //! already inside the outer body -- waiting for one to pick up the inner work
@@ -36,9 +35,9 @@ WorkerPool::WorkerPool(int n_threads) {
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
 	// A wasm build without -pthread has no threads to create at all, and there
 	// std::thread's constructor aborts rather than throwing -- so the catch below
-	// could not save us. Stay serial. WASM is a first-class CORRECTNESS target for
-	// this code; it is deliberately not a performance one.
-	(void)n_threads;
+	// could not save us. Stay serial: Threads() reads workers_.size() + 1, which is
+	// 1. WASM is a first-class CORRECTNESS target for this code; it is deliberately
+	// not a performance one.
 	return;
 #else
 	// One fewer than the budget: the calling thread is the last worker.
@@ -58,7 +57,6 @@ WorkerPool::WorkerPool(int n_threads) {
 		// `workers_` is pre-reserved, so emplace_back itself cannot throw
 		// bad_alloc; the thread constructor is the only thing here that throws.
 	}
-	n_threads_ = static_cast<int>(workers_.size()) + 1;
 #endif
 }
 
@@ -86,6 +84,21 @@ void WorkerPool::RunChunk(int c) {
 	}
 }
 
+void WorkerPool::DrainChunks(std::unique_lock<std::mutex> &lock) {
+	while (next_chunk_ < n_chunks_) {
+		const int c = next_chunk_++;
+		lock.unlock();
+		RunChunk(c);
+		lock.lock();
+		if (--outstanding_ == 0) {
+			// Inert when the CALLER runs this -- it is the only thread that ever
+			// waits on all_done_, and it is not waiting yet. Kept in the shared
+			// helper rather than split into two nearly-identical loops.
+			all_done_.notify_one();
+		}
+	}
+}
+
 void WorkerPool::Dispatch(int n_chunks, const std::function<void(int)> &chunk) {
 	if (n_chunks <= 0) {
 		return;
@@ -94,13 +107,14 @@ void WorkerPool::Dispatch(int n_chunks, const std::function<void(int)> &chunk) {
 		// Nothing to hand out, or we are already inside a body. Exceptions
 		// propagate straight to the caller here, which is the same observable
 		// behaviour as the threaded path below.
+		BodyScope scope;
 		for (int c = 0; c < n_chunks; ++c) {
-			BodyScope scope;
 			chunk(c);
 		}
 		return;
 	}
 
+	dispatches_.fetch_add(1, std::memory_order_relaxed);
 	{
 		std::lock_guard<std::mutex> lock(m_);
 		chunk_ = &chunk;
@@ -111,20 +125,25 @@ void WorkerPool::Dispatch(int n_chunks, const std::function<void(int)> &chunk) {
 		failed_chunk_ = 0;
 		++generation_;
 	}
-	work_ready_.notify_all();
+	// Wake only as many workers as there is work for. `notify_all` for a two-chunk
+	// dispatch wakes every worker so that all but one can take the mutex, find
+	// nothing to do and re-park -- contending with the caller on its way to
+	// all_done_.wait, and so slowing down the dispatch it is not helping.
+	const auto needed = static_cast<size_t>(n_chunks - 1);
+	if (needed >= workers_.size()) {
+		work_ready_.notify_all();
+	} else {
+		for (size_t i = 0; i < needed; ++i) {
+			work_ready_.notify_one();
+		}
+	}
 
 	// The caller works too, then helps with anything the workers have not claimed,
 	// so no thread sits idle while chunks remain.
 	RunChunk(0);
 	std::unique_lock<std::mutex> lock(m_);
 	--outstanding_;
-	while (next_chunk_ < n_chunks_) {
-		const int c = next_chunk_++;
-		lock.unlock();
-		RunChunk(c);
-		lock.lock();
-		--outstanding_;
-	}
+	DrainChunks(lock);
 	all_done_.wait(lock, [this] { return outstanding_ == 0; });
 
 	if (failure_) {
@@ -146,38 +165,8 @@ void WorkerPool::WorkerLoop() {
 			return;
 		}
 		seen = generation_;
-		while (next_chunk_ < n_chunks_) {
-			const int c = next_chunk_++;
-			lock.unlock();
-			RunChunk(c);
-			lock.lock();
-			if (--outstanding_ == 0) {
-				all_done_.notify_one();
-			}
-		}
+		DrainChunks(lock);
 	}
-}
-
-void ParallelFor(WorkerPool &pool, int64_t begin, int64_t end, const std::function<void(int64_t, int64_t)> &fn) {
-	const int64_t n = end - begin;
-	if (n <= 0) {
-		return;
-	}
-	// Never more chunks than indices, so every chunk handed out is non-empty.
-	const int64_t chunks = std::min<int64_t>(pool.Threads(), n);
-	const int64_t base = n / chunks;
-	const int64_t remainder = n % chunks;
-
-	pool.Dispatch(static_cast<int>(chunks), [&](int c) {
-		// Spread the remainder over the first `remainder` chunks. Written as
-		// products of the chunk index rather than `n * c / chunks` so it cannot
-		// overflow for a large range, and so the boundaries are exact integers
-		// rather than the result of two roundings.
-		const int64_t index = c;
-		const int64_t lo = begin + index * base + std::min<int64_t>(index, remainder);
-		const int64_t hi = lo + base + (index < remainder ? 1 : 0);
-		fn(lo, hi);
-	});
 }
 
 } // namespace miint

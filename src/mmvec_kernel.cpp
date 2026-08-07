@@ -13,7 +13,7 @@
 #include "miint_parallel.hpp"
 
 #include <cmath>
-#include <functional>
+#include <vector>
 
 #ifndef MIINT_ISA_VARIANT
 // Compiled without the CMake helper (a stray direct compile, or a consumer that
@@ -26,23 +26,6 @@ namespace miint::mmvec {
 namespace MIINT_ISA_VARIANT {
 
 namespace {
-
-//! Run `fn` over `[0, n)`, split across `ws.pool` if there is one.
-//!
-//! Every use of this in the file below is a loop whose iterations touch disjoint
-//! outputs and share no accumulator, so the split changes no value at any thread
-//! count. `ParallelFor` hands out a contiguous ascending partition whose
-//! boundaries depend only on `n` and the budget, never on timing.
-//!
-//! WHAT MUST NOT GO THROUGH HERE: any of the three Eigen matrix products. See the
-//! warning at the first of them.
-void ForEachChunk(Workspace &ws, int64_t n, const std::function<void(int64_t, int64_t)> &fn) {
-	if (ws.pool != nullptr) {
-		ParallelFor(*ws.pool, 0, n, fn);
-	} else {
-		fn(0, n);
-	}
-}
 
 //! Sum of squared deviations of `n` values from `mean`, i.e. `||v - mean||^2`.
 double SumSquaredDev(const double *v, size_t n, double mean) {
@@ -133,7 +116,7 @@ void FillNonRefLogits(const ParamLayout &l, const double *theta, const int64_t *
 	// them would have been worth roughly a third of a fit; it is not available at
 	// any price that keeps a carved value carved.
 	logits.noalias() = x_main_rows * y_main;
-	ForEachChunk(ws, n_rows, [&](int64_t begin, int64_t end) {
+	ParallelFor(ws.pool, 0, n_rows, [&](int64_t begin, int64_t end) {
 		for (int64_t r = begin; r < end; ++r) {
 			// Read straight from theta. x_main has to be gathered because Eigen needs
 			// it contiguous for the product above; the bias is a scalar per row and
@@ -196,7 +179,7 @@ double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_r
 	// decomposition costs. 57% of a cystic-fibrosis fit lives in this loop, and it
 	// reached 5.93x on eight cores in the M8 P0 spike.
 	double *row_data = ws.row_data.data();
-	ForEachChunk(ws, n_rows, [&](int64_t r_begin, int64_t r_end) {
+	ParallelFor(ws.pool, 0, n_rows, [&](int64_t r_begin, int64_t r_end) {
 		for (int64_t r = r_begin; r < r_end; ++r) {
 			// A plain compare rather than std::fmax, which GCC emits as a CALL into libm
 			// (4.4% of a cystic-fibrosis fit, its PLT stub included) because fmax's
@@ -280,26 +263,9 @@ double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_r
 	//
 	// Worth roughly half of what the pair costs: 10.7% and 11.9% of a
 	// cystic-fibrosis fit become max(10.7, 11.9).
-	const auto fill_dy_main = [&]() {
-		dy_main.noalias() = -norm * (x_main_rows.transpose() * resids_const);
-	};
-	const auto fill_dx_main = [&]() {
-		dx_main_rows.noalias() = resids_const * y_main.transpose();
-	};
-	if (ws.pool != nullptr && ws.pool->Threads() > 1) {
-		ParallelFor(*ws.pool, 0, 2, [&](int64_t begin, int64_t end) {
-			for (int64_t task = begin; task < end; ++task) {
-				if (task == 0) {
-					fill_dy_main();
-				} else {
-					fill_dx_main();
-				}
-			}
-		});
-	} else {
-		fill_dy_main();
-		fill_dx_main();
-	}
+	ParallelInvoke(
+	    ws.pool, [&]() { dy_main.noalias() = -norm * (x_main_rows.transpose() * resids_const); },
+	    [&]() { dx_main_rows.noalias() = resids_const * y_main.transpose(); });
 
 	// One row-major sweep rather than nref column reductions. `resids` is row-major,
 	// so `.col(j).sum()` strides nref*8 bytes through every row and pays a cache miss
@@ -311,21 +277,31 @@ double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_r
 	// fixture, both optimizers, at 200 and 1000 iterations.
 	//
 	// Split over output columns j, so each j still accumulates over ascending r on
-	// one thread and the value is unchanged. Threads take contiguous j-slices, so
-	// each reads its own contiguous piece of every row rather than the whole array.
+	// one thread and the value is unchanged.
+	//
+	// Each thread accumulates into a PRIVATE buffer and writes its slice of `grad`
+	// once at the end, rather than accumulating into `grad` directly. That is not
+	// tidiness: `grad` is a std::vector interior, so the slice boundaries have no
+	// relation to 64-byte cache lines, and accumulating in place has two threads
+	// writing the same boundary line once per ROW -- about 38000 contested transfers
+	// per evaluation at cystic-fibrosis scale, against a phase that only costs 87 us
+	// serially. On soils every slice is barely one line wide, which is what made the
+	// fit SLOWER at eight threads than at four.
+	//
+	// Bit-identical either way: the private buffer changes where the running total
+	// lives, not the order it is accumulated in.
 	double *dy_bias = grad + l.y_bias;
-	ForEachChunk(ws, l.nref, [&](int64_t j_begin, int64_t j_end) {
-		for (int64_t j = j_begin; j < j_end; ++j) {
-			dy_bias[j] = 0.0;
-		}
+	ParallelFor(ws.pool, 0, l.nref, [&](int64_t j_begin, int64_t j_end) {
+		const auto width = static_cast<size_t>(j_end - j_begin);
+		std::vector<double> acc(width, 0.0);
 		for (int64_t r = 0; r < n_rows; ++r) {
 			const double *resid_row = ws.resids.data() + static_cast<size_t>(r) * static_cast<size_t>(l.nref);
 			for (int64_t j = j_begin; j < j_end; ++j) {
-				dy_bias[j] += resid_row[j];
+				acc[static_cast<size_t>(j - j_begin)] += resid_row[j];
 			}
 		}
 		for (int64_t j = j_begin; j < j_end; ++j) {
-			dy_bias[j] *= -norm;
+			dy_bias[j] = -norm * acc[static_cast<size_t>(j - j_begin)];
 		}
 	});
 
@@ -357,7 +333,7 @@ double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_r
 		// add.at in batch order. Adam is out of M8's scope for other reasons anyway
 		// (its 50-row batches are far too small to divide), but this is why the
 		// distinction is drawn on `x_index` rather than on the optimizer.
-		ForEachChunk(ws, n_rows, scatter);
+		ParallelFor(ws.pool, 0, n_rows, scatter);
 	} else {
 		scatter(0, n_rows);
 	}

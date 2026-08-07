@@ -8,11 +8,13 @@
 #include <limits>
 #include <numeric>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "LBFGSpp/LBFGS.h"
 #include "miint_aligned_vector.hpp"
 #include "miint_isa.hpp"
+#include "miint_parallel.hpp"
 #include "mmvec.hpp"
 #include "mmvec_kernel.hpp"
 #include "mmvec_oracle.hpp"
@@ -568,6 +570,29 @@ FixtureCase MakeCase(const std::vector<double> &xd, const std::vector<double> &y
 	c.mb.x_val = x_coo.val;
 	c.mb.y_dense = yd;
 	return c;
+}
+
+//! A deterministic problem far larger than the toy fixtures: ~250 kB of logits,
+//! 400 X features, dense enough that no row or column is all zero (fitting rejects
+//! either). Two tiers need exactly this and for related reasons -- M7's
+//! reproducibility case needs a workspace big enough to move between allocations,
+//! and M8's parallel tier needs enough rows that eight threads each get a real
+//! share. The pattern is arbitrary; only its determinism matters.
+FixtureCase LargeSyntheticCase() {
+	constexpr int64_t kD1 = 400;
+	constexpr int64_t kD2 = 80;
+	constexpr int64_t kN = 16;
+	std::vector<double> xd(static_cast<size_t>(kN * kD1), 0.0);
+	std::vector<double> yd(static_cast<size_t>(kN * kD2), 0.0);
+	for (int64_t s = 0; s < kN; ++s) {
+		for (int64_t i = 0; i < kD1; ++i) {
+			xd[static_cast<size_t>(s * kD1 + i)] = static_cast<double>((s * 7 + i * 13) % 9) + 1.0;
+		}
+		for (int64_t j = 0; j < kD2; ++j) {
+			yd[static_cast<size_t>(s * kD2 + j)] = static_cast<double>((s * 11 + j * 5) % 7) + 1.0;
+		}
+	}
+	return MakeCase(xd, yd, kN, kD1, kD2, 3);
 }
 
 // Central differences: (f(t+h) - f(t-h)) / 2h, with h scaled to each parameter
@@ -2469,23 +2494,9 @@ TEST_CASE("the read path does not dispatch", "[mmvec][isa]") {
 // passing and this one failing.
 TEST_CASE("fitting the same data twice in one process gives the same model", "[mmvec][isa]") {
 	// ~250 kB of logits, the scale at which the earlier reproduction moved between
-	// offset 16 and offset 32/48 on successive fits.
-	constexpr int64_t kD1 = 400;
-	constexpr int64_t kD2 = 80;
-	constexpr int64_t kN = 16;
-	std::vector<double> xd(static_cast<size_t>(kN * kD1), 0.0);
-	std::vector<double> yd(static_cast<size_t>(kN * kD2), 0.0);
-	// Deterministic, and dense enough that no row or column is all zero -- fitting
-	// rejects either. The pattern is arbitrary; only reproducibility matters.
-	for (int64_t s = 0; s < kN; ++s) {
-		for (int64_t i = 0; i < kD1; ++i) {
-			xd[static_cast<size_t>(s * kD1 + i)] = static_cast<double>((s * 7 + i * 13) % 9) + 1.0;
-		}
-		for (int64_t j = 0; j < kD2; ++j) {
-			yd[static_cast<size_t>(s * kD2 + j)] = static_cast<double>((s * 11 + j * 5) % 7) + 1.0;
-		}
-	}
-	auto c = MakeCase(xd, yd, kN, kD1, kD2, 3);
+	// offset 16 and offset 32/48 on successive fits. The same fixture M8's parallel
+	// tier uses -- it needs the same thing, enough rows to be worth dividing.
+	auto c = LargeSyntheticCase();
 	const auto theta0 = miint::mmvec::InitTheta(c.shape, 7);
 
 	std::vector<double> first;
@@ -2544,4 +2555,268 @@ TEST_CASE("a fit reports which instruction set produced it", "[mmvec][isa]") {
 	// documents a setting that does not exist.
 	REQUIRE(miint::ResolveIsa(miint::IsaLevelName(miint::DetectIsa()), miint::IsaLevel::Avx512,
 	                          miint::IsaLevel::Avx512) == miint::DetectIsa());
+}
+
+// ---------------------------------------------------------------------------
+// M8: parallelism that changes no value.
+//
+// The whole milestone rests on one claim -- a fit is bit-identical at any thread
+// count -- and on one hazard that claim creates: a fit which quietly ran SERIALLY
+// also satisfies it, perfectly, for the wrong reason. Every test below that
+// asserts equality therefore also asserts that the pool was really used.
+//
+// The strongest evidence is not here at all: MIINT_MMVEC_THREADS re-runs this
+// entire file's carved expected values at 2, 4 and 8 threads without changing a
+// single one of them. These cases pin the pieces that a carved value cannot see.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+using miint::WorkerPool;
+
+} // namespace
+
+TEST_CASE("a fit is bit-identical at every thread count", "[mmvec][parallel]") {
+	auto c = LargeSyntheticCase();
+	const auto theta0 = miint::mmvec::InitTheta(c.shape, 7);
+
+	Model reference;
+	for (const int threads : {1, 2, 3, 4, 8}) {
+		WorkerPool pool(threads);
+		const Model m = FitLbfgsFromInit(c.shape, OraclePriors(), c.stats, theta0, 40, pool);
+
+		// Guard against the vacuous pass. If the fit silently ran serially it would
+		// match the reference perfectly and prove nothing -- so demand that work was
+		// actually handed to the workers before believing the equality below.
+		if (pool.Threads() > 1) {
+			INFO("threads " << threads);
+			REQUIRE(pool.Dispatches() > 0);
+		}
+
+		if (threads == 1) {
+			reference = m;
+			continue;
+		}
+		INFO("threads " << threads);
+		REQUIRE(m.theta.size() == reference.theta.size());
+		for (size_t i = 0; i < reference.theta.size(); ++i) {
+			INFO("theta element " << i);
+			REQUIRE(m.theta[i] == reference.theta[i]); // bit-for-bit, not a tolerance
+		}
+		// The loss curve is every evaluation the line search made, so an equal final
+		// theta with an unequal curve would mean the optimizer took a different route
+		// to the same place -- still a divergence, and one a theta comparison alone
+		// would miss.
+		REQUIRE(m.loss_curve == reference.loss_curve);
+		REQUIRE(m.final_loss == reference.final_loss);
+		REQUIRE(m.max_abs_grad == reference.max_abs_grad);
+		REQUIRE(m.n_iter == reference.n_iter);
+		REQUIRE(m.converged == reference.converged);
+	}
+}
+
+TEST_CASE("the objective hands work to the pool it is given", "[mmvec][parallel]") {
+	// Separated from the fit-level case above because it pins a different thing:
+	// that the OBJECTIVE consults ws.pool at all. A kernel that ignored it would
+	// still pass every bit-identity assertion in this file.
+	auto c = LargeSyntheticCase();
+	const auto theta = miint::mmvec::InitTheta(c.shape, 7);
+
+	WorkerPool pool(4);
+	Workspace ws;
+	std::vector<double> grad;
+	const double serial = FullBatchLossAndGradient(c.shape, OraclePriors(), c.stats, theta, ws, grad);
+	REQUIRE(pool.Dispatches() == 0); // no pool attached yet
+
+	Workspace parallel_ws;
+	parallel_ws.pool = &pool;
+	std::vector<double> parallel_grad;
+	const double parallel =
+	    FullBatchLossAndGradient(c.shape, OraclePriors(), c.stats, theta, parallel_ws, parallel_grad);
+	if (pool.Threads() > 1) {
+		// EXACTLY five parallel regions in one evaluation: the bias sweep in
+		// FillNonRefLogits, the row loop, the dy_main/dx_main task pair, dy_bias, and
+		// the X-side scatter.
+		//
+		// Asserting the exact count is deliberate, and both looser forms were
+		// measured to be too weak: a kernel ignoring the pool entirely still
+		// dispatched once through the task pair and passed "> 0", and forcing a
+		// single region serial still left four and passed ">= 4". If a region is
+		// legitimately added or removed, update this number as part of that change;
+		// do not weaken it back to an inequality.
+		INFO("dispatches: " << pool.Dispatches());
+		REQUIRE(pool.Dispatches() == 5);
+	}
+
+	REQUIRE(parallel == serial); // bit-for-bit
+	REQUIRE(parallel_grad.size() == grad.size());
+	for (size_t i = 0; i < grad.size(); ++i) {
+		INFO("gradient element " << i);
+		REQUIRE(parallel_grad[i] == grad[i]);
+	}
+}
+
+TEST_CASE("a minibatch is unchanged even when a pool is attached", "[mmvec][parallel]") {
+	// Adam is out of M8's scope, but the guard that keeps it correct lives in the
+	// shared kernel and has to be tested: the X-side scatter may only be split when
+	// `x_index` is the identity. A minibatch can name the same X feature more than
+	// once, and then the `+=` is a genuine ordered accumulation reproducing numpy's
+	// add.at -- splitting it would both race and reorder.
+	//
+	// The batch repeats draws deliberately, so the duplicate-feature case is the one
+	// under test rather than a lucky miss -- and it is LONG, because a short one does
+	// not test anything: with eight rows across four chunks the calling thread steals
+	// every chunk and runs them in order before a worker wakes, so the mutation that
+	// splits this loop passed. Verified; that is why the batch is built rather than
+	// written out. Repeated, because the failure it guards against is a race and a
+	// race need not show on the first attempt.
+	using namespace miint::mmvec_oracle::toy;
+	auto c = MakeCase(kXCounts, kYCounts, kNSamples, kNFeaturesX, kNFeaturesY, kNComponents);
+	const auto n_draws = static_cast<int64_t>(c.mb.x_val.size());
+	std::vector<int64_t> batch;
+	for (int64_t i = 0; i < 4000; ++i) {
+		// Cycles through the draws several times over, so most X features are named
+		// by many rows spread across every chunk.
+		batch.push_back((i * 7) % n_draws);
+	}
+	const Priors priors {0.25, 2.0, -0.5, 0.75};
+	const double norm = 2.5;
+
+	Workspace ws;
+	std::vector<double> grad;
+	const double serial = MinibatchLossAndGradient(c.shape, priors, c.mb, batch, norm, kTheta, ws, grad);
+
+	WorkerPool pool(4);
+	bool all_equal = true;
+	for (int rep = 0; rep < 20; ++rep) {
+		Workspace pooled_ws;
+		pooled_ws.pool = &pool;
+		std::vector<double> pooled_grad;
+		const double pooled =
+		    MinibatchLossAndGradient(c.shape, priors, c.mb, batch, norm, kTheta, pooled_ws, pooled_grad);
+		all_equal = all_equal && pooled == serial && pooled_grad.size() == grad.size();
+		for (size_t i = 0; i < grad.size() && all_equal; ++i) {
+			all_equal = all_equal && pooled_grad[i] == grad[i];
+		}
+	}
+	REQUIRE(all_equal);
+}
+
+TEST_CASE("the data term is the ASCENDING sum of the per-row contributions", "[mmvec][parallel]") {
+	// The row loop was decomposed by giving each row its own slot and summing those
+	// slots afterwards. The sum must run over ascending r, because that is the order
+	// the pre-M8 serial accumulator used and every carved value was produced under.
+	//
+	// Nothing else pins this. Reversing the loop was measured to move cf's fitted
+	// model outright -- theta hash 821b5cd9.. to 4f0b2831.., evaluations 1073 to
+	// 1064 -- and the whole C++ carved suite, mmvec_soils.test, mmvec_cf.test,
+	// mmvec_synth_c.test and mmvec_fit.test ALL still passed. The small fixtures sum
+	// the same either way, and the large SQL ones assert tolerances and derived
+	// structure rather than the exact loss.
+	//
+	// Exact and self-contained rather than a carved constant: the workspace still
+	// holds the per-row contributions the kernel computed, so the test re-adds the
+	// kernel's OWN numbers in both orders and checks which one the reported loss is.
+	auto c = LargeSyntheticCase();
+
+	// theta constant at the prior mean makes PriorLoss exactly 0.0 -- every deviation
+	// is 0, so the loss the kernel returns IS the data term, with no rounding from
+	// subtracting the prior back off. The rows still differ, because their Y totals
+	// and observed counts do.
+	const double kMean = 0.1;
+	const Priors priors {kMean, 1.0, kMean, 1.0};
+	const std::vector<double> theta(static_cast<size_t>(NumParams(c.shape)), kMean);
+
+	Workspace ws;
+	std::vector<double> grad;
+	const double loss = FullBatchLossAndGradient(c.shape, priors, c.stats, theta, ws, grad);
+
+	REQUIRE(ws.row_data.size() == static_cast<size_t>(c.shape.n_features_x));
+	double ascending = 0.0;
+	for (size_t r = 0; r < ws.row_data.size(); ++r) {
+		ascending += ws.row_data[r];
+	}
+	double descending = 0.0;
+	for (size_t r = ws.row_data.size(); r-- > 0;) {
+		descending += ws.row_data[r];
+	}
+
+	// Guard the guard: on a fixture whose contributions happen to sum identically in
+	// either direction the assertions below would pass for BOTH orders and prove
+	// nothing. That is exactly why the toy fixtures missed this.
+	REQUIRE(ascending != descending);
+	REQUIRE(loss == ascending);
+	REQUIRE(loss != descending);
+
+	// dy_bias is the OTHER reduction the decomposition reorders, and it needs the
+	// same pinning for the same reason: reversing its accumulation moved cf's fitted
+	// model (theta hash 821b5cd9.. to c18110f1.., evaluations 1073 to 1070) while the
+	// whole carved suite still passed, because the gradient oracles compare within a
+	// tolerance and a reordering lands far below it.
+	//
+	// grad[y_bias + j] == -norm * SUM_r resids[r][j], accumulated over ascending r.
+	// norm is 1 on the full-batch path, so the negation is the only scaling.
+	const ParamLayout l = Layout(c.shape);
+	const double *resids = ws.resids.data();
+	bool any_order_sensitive = false;
+	for (int64_t j = 0; j < l.nref; ++j) {
+		double asc = 0.0;
+		for (int64_t r = 0; r < l.d1; ++r) {
+			asc += resids[static_cast<size_t>(r) * static_cast<size_t>(l.nref) + static_cast<size_t>(j)];
+		}
+		double desc = 0.0;
+		for (int64_t r = l.d1; r-- > 0;) {
+			desc += resids[static_cast<size_t>(r) * static_cast<size_t>(l.nref) + static_cast<size_t>(j)];
+		}
+		INFO("y_bias column " << j);
+		REQUIRE(grad[l.y_bias + static_cast<size_t>(j)] == -1.0 * asc);
+		any_order_sensitive = any_order_sensitive || asc != desc;
+	}
+	// At least one column must actually distinguish the two orders, or the loop
+	// above would pass for a kernel that reduced in either direction.
+	REQUIRE(any_order_sensitive);
+}
+
+TEST_CASE("MIINT_MMVEC_THREADS overrides the caller's budget", "[mmvec][parallel]") {
+	// The override is what lets the whole carved suite be re-run at 2, 4 and 8
+	// threads without editing an expectation, so its parsing rules are load-bearing
+	// for M8's gate rather than a convenience.
+	//
+	// ResolveThreadBudget is PURE -- the caller reads the environment and passes the
+	// string in -- so this needs no process-global mutation and cannot be made
+	// vacuous by the environment the suite happens to run under. Same split, and the
+	// same reason, as ResolveIsa/DetectIsa.
+	using miint::mmvec::ResolveThreadBudget;
+
+	SECTION("no override: the caller's budget stands") {
+		REQUIRE(ResolveThreadBudget(nullptr, 1) == 1);
+		REQUIRE(ResolveThreadBudget(nullptr, 6) == 6);
+		// A caller asking for nonsense still gets a usable pool rather than a throw.
+		// WorkerPool itself DOES throw below 1; a budget is a hint, a pool size is a
+		// precondition.
+		REQUIRE(ResolveThreadBudget(nullptr, 0) == 1);
+		REQUIRE(ResolveThreadBudget(nullptr, -4) == 1);
+	}
+
+	SECTION("a valid override wins over the caller") {
+		REQUIRE(ResolveThreadBudget("3", 1) == 3);
+		REQUIRE(ResolveThreadBudget("3", 16) == 3);
+		REQUIRE(ResolveThreadBudget("1", 16) == 1); // forcing serial is the escape hatch
+	}
+
+	SECTION("junk is rejected, not half-parsed") {
+		// "8x" almost certainly means someone made a mistake; reading it as 8 would
+		// hide that. Each of these falls back to the caller's budget.
+		for (const char *bad : {"8x", "0", "-1", "", " ", "abc", "99999999", "3.5"}) {
+			INFO("MIINT_MMVEC_THREADS=" << bad);
+			REQUIRE(ResolveThreadBudget(bad, 5) == 5);
+		}
+		// LEADING whitespace is tolerated, trailing is not. That asymmetry is
+		// strtol's, inherited through safe_stoi and shared with the mzML/mzXML
+		// attribute parsing that helper was written for -- so it is the codebase's
+		// convention rather than a decision taken here. Pinned because it is
+		// surprising enough that someone would otherwise "fix" one side of it.
+		REQUIRE(ResolveThreadBudget(" 3", 5) == 3);
+		REQUIRE(ResolveThreadBudget("3 ", 5) == 5);
+	}
 }
