@@ -53,4 +53,15 @@ IsaLevel CpuIsaCeiling();
 //! column of a fit and for test assertions. Never null.
 const char *IsaLevelName(IsaLevel level);
 
+//! The pure resolution DetectIsa() caches: what to use given a requested level
+//! (the raw `MIINT_SIMD` string, or nullptr for unset), what the build contains,
+//! and what the CPU supports.
+//!
+//! Split out and exported ONLY so it can be tested. DetectIsa() memoizes into a
+//! function-local static, so a test that went through it could exercise exactly
+//! one combination per process -- and the combination that matters most, asking
+//! for a level the build or CPU lacks, is the one that must clamp rather than
+//! SIGILL and so cannot be reached on the machine where it would fault.
+IsaLevel ResolveIsa(const char *request, IsaLevel built, IsaLevel cpu);
+
 } // namespace miint

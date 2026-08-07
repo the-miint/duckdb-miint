@@ -68,6 +68,22 @@ inline constexpr double kT3RelTol = 1e-9;      // relative, Adam with fixed indi
 // how well the optimizer converged. This is an invariant, not a fitted quantity.
 inline constexpr double kRowCenteringTol = 1e-10;
 
+// How far apart the instruction-set variants of the kernel may be, evaluating the SAME
+// theta. Not a parity band against another implementation -- these are the same source
+// compiled at different packet widths, so the gap is purely floating-point: fused
+// multiply-add where the baseline rounds twice, a different reduction order, and
+// Eigen's packet `exp` polynomial in place of glibc's scalar one.
+//
+// MEASURED on soils and cf at seed 0, taking the worse of avx2 and avx512 against
+// baseline: loss 3.2e-16 relative, gradient 9.6e-10 max relative, logits 1.2e-10 max
+// relative. Carved with roughly an order of magnitude of headroom -- tight enough that
+// losing FMA-level agreement fails, loose enough to survive another CPU or Eigen point
+// release. The relative measure is per element, so it is dominated by gradient entries
+// near zero; that is deliberate, being the hardest case.
+inline constexpr double kIsaLossRelTol = 1e-12;
+inline constexpr double kIsaGradRelTol = 1e-8;
+inline constexpr double kIsaLogitsRelTol = 1e-8;
+
 // Adam hyperparameters, identical for every case's oracle run below (they are
 // scikit-bio's defaults). A future case needing different values must define its own in
 // its namespace and say so, rather than silently inheriting these.

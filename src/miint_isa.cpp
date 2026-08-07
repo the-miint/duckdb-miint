@@ -35,33 +35,32 @@ bool CpuHasAvx512() {
 #endif
 }
 
-//! Parse MIINT_SIMD. Unset or unrecognised means auto, which is represented by
-//! the build ceiling -- i.e. "no cap beyond what exists".
-IsaLevel RequestedCeiling() {
-	const char *env = std::getenv("MIINT_SIMD");
-	if (env == nullptr) {
-		return IsaLevel::Avx512;
-	}
-	if (std::strcmp(env, "baseline") == 0) {
-		return IsaLevel::Baseline;
-	}
-	if (std::strcmp(env, "avx2") == 0) {
-		return IsaLevel::Avx2;
-	}
-	if (std::strcmp(env, "avx512") == 0) {
-		return IsaLevel::Avx512;
-	}
-	// "auto" and anything unrecognised. Deliberately not an error: this is read
-	// on a hot-ish path with no way to report, and a typo silently disabling
-	// dispatch would be a worse failure than a typo being ignored.
-	return IsaLevel::Avx512;
-}
-
 IsaLevel Min(IsaLevel a, IsaLevel b) {
 	return static_cast<int>(a) < static_cast<int>(b) ? a : b;
 }
 
 } // namespace
+
+IsaLevel ResolveIsa(const char *request, IsaLevel built, IsaLevel cpu) {
+	// Unset, "auto", and anything unrecognised all mean "no cap beyond what
+	// exists". Unrecognised is deliberately not an error: there is nowhere to
+	// report it from, and a typo silently disabling dispatch would be a worse
+	// failure than a typo being ignored.
+	IsaLevel requested = IsaLevel::Avx512;
+	if (request != nullptr) {
+		if (std::strcmp(request, "baseline") == 0) {
+			requested = IsaLevel::Baseline;
+		} else if (std::strcmp(request, "avx2") == 0) {
+			requested = IsaLevel::Avx2;
+		} else if (std::strcmp(request, "avx512") == 0) {
+			requested = IsaLevel::Avx512;
+		}
+	}
+	// CLAMPING, not honouring, is what keeps a forced request from becoming a
+	// SIGILL: asking for avx512 on a machine or a build without it yields the
+	// best available variant instead of an illegal instruction.
+	return Min(requested, Min(built, cpu));
+}
 
 IsaLevel BuiltIsaCeiling() {
 #if defined(MIINT_HAS_AVX512)
@@ -87,7 +86,7 @@ IsaLevel DetectIsa() {
 	// Resolved once per process. CPUID is not expensive, but the objective calls
 	// through this selection once per evaluation -- 1072 times in a cystic-fibrosis
 	// L-BFGS fit, 196000 in an Adam one -- and a static keeps that a load.
-	static const IsaLevel level = Min(RequestedCeiling(), Min(BuiltIsaCeiling(), CpuIsaCeiling()));
+	static const IsaLevel level = ResolveIsa(std::getenv("MIINT_SIMD"), BuiltIsaCeiling(), CpuIsaCeiling());
 	return level;
 }
 

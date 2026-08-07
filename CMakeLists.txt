@@ -1905,6 +1905,7 @@ set(TEST_SOURCES
     src/mmvec.cpp
     src/mmvec_relation.cpp
     test/cpp/test_MMvec.cpp
+    test/cpp/test_MiintIsa.cpp
     test/cpp/test_MMvecRelation.cpp
     src/cluster_kmeans.cpp
     test/cpp/test_ClusterKmeans.cpp

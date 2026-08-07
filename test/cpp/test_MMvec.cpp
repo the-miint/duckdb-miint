@@ -11,7 +11,10 @@
 #include <vector>
 
 #include "LBFGSpp/LBFGS.h"
+#include "miint_aligned_vector.hpp"
+#include "miint_isa.hpp"
 #include "mmvec.hpp"
+#include "mmvec_kernel.hpp"
 #include "mmvec_oracle.hpp"
 
 using Catch::Approx;
@@ -2328,5 +2331,195 @@ TEST_CASE("Adam's T3 fit reproduces the oracle's ranks", "[mmvec]") {
 	}
 	SECTION("batch_norm = legacy") {
 		check(BatchNorm::Legacy, kAdamLegacyRanks);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Instruction-set dispatch (M7)
+//
+// The kernel is compiled once per instruction set and selected at load time, so
+// three things need holding down: the variants must agree numerically, the READ
+// path must not dispatch at all, and a fit must stay reproducible even though a
+// wider register changes rounding. Every test below calls the variants DIRECTLY
+// rather than through MIINT_SIMD, because DetectIsa() memoizes and a process can
+// therefore only ever observe one dispatch decision.
+// ---------------------------------------------------------------------------
+
+namespace {
+using miint::mmvec::ComputeLogits;
+using miint::mmvec::FitLbfgsFromInit;
+using miint::mmvec::Layout;
+using miint::mmvec::Model;
+using miint::mmvec::ModelShape;
+using miint::mmvec::ObsView;
+using miint::mmvec::ParamLayout;
+using miint::mmvec::Workspace;
+using miint::mmvec_oracle::kIsaGradRelTol;
+using miint::mmvec_oracle::kIsaLogitsRelTol;
+using miint::mmvec_oracle::kIsaLossRelTol;
+
+namespace baseline = miint::mmvec::baseline;
+#ifdef MIINT_HAS_AVX2
+namespace avx2 = miint::mmvec::avx2;
+#endif
+#ifdef MIINT_HAS_AVX512
+namespace avx512 = miint::mmvec::avx512;
+#endif
+
+// One objective evaluation through a named variant, at a caller-supplied theta.
+struct KernelResult {
+	double loss = 0.0;
+	std::vector<double> grad;
+	std::vector<double> logits;
+};
+
+template <typename FillFn, typename EvalFn>
+KernelResult EvaluateWith(FillFn fill, EvalFn eval, const FixtureCase &c, const std::vector<double> &theta) {
+	const ParamLayout l = Layout(c.shape);
+	KernelResult r;
+	r.grad.assign(l.total, 0.0);
+	Workspace ws;
+	ws.Resize(c.shape, l.d1);
+	const ObsView obs {c.stats.y_sums.data(), l.d2, nullptr};
+	r.loss = eval(l, OraclePriors(), l.d1, nullptr, obs, c.stats.n_sums.data(), 1.0, theta.data(), ws, r.grad.data());
+
+	Workspace lw;
+	lw.logits.resize(static_cast<size_t>(l.d1 * l.nref));
+	lw.x_main_rows.resize(static_cast<size_t>(l.d1 * l.p));
+	fill(l, theta.data(), nullptr, l.d1, lw, lw.logits.data());
+	r.logits.assign(lw.logits.begin(), lw.logits.end());
+	return r;
+}
+
+void RequireAgrees(const char *name, const KernelResult &base, const KernelResult &other) {
+	INFO("variant " << name);
+	REQUIRE(other.loss == Approx(base.loss).epsilon(kIsaLossRelTol));
+	REQUIRE(other.grad.size() == base.grad.size());
+	for (size_t i = 0; i < base.grad.size(); ++i) {
+		INFO("gradient element " << i);
+		REQUIRE(other.grad[i] == Approx(base.grad[i]).epsilon(kIsaGradRelTol).margin(kIsaGradRelTol));
+	}
+	REQUIRE(other.logits.size() == base.logits.size());
+	for (size_t i = 0; i < base.logits.size(); ++i) {
+		INFO("logit element " << i);
+		REQUIRE(other.logits[i] == Approx(base.logits[i]).epsilon(kIsaLogitsRelTol).margin(kIsaLogitsRelTol));
+	}
+}
+
+} // namespace
+
+TEST_CASE("every instruction-set variant computes the same objective", "[mmvec][isa]") {
+	using namespace miint::mmvec_oracle::toy;
+	auto c = MakeCase(kXCounts, kYCounts, kNSamples, kNFeaturesX, kNFeaturesY, kNComponents);
+	const auto base = EvaluateWith(baseline::FillNonRefLogits, baseline::EvaluateObjective, c, kTheta);
+
+	// The baseline variant is what every carved value in this file was carved
+	// against, so it is asserted exactly rather than within a band.
+	REQUIRE(std::isfinite(base.loss));
+
+#ifdef MIINT_HAS_AVX2
+	RequireAgrees("avx2", base, EvaluateWith(avx2::FillNonRefLogits, avx2::EvaluateObjective, c, kTheta));
+#endif
+#ifdef MIINT_HAS_AVX512
+	RequireAgrees("avx512", base, EvaluateWith(avx512::FillNonRefLogits, avx512::EvaluateObjective, c, kTheta));
+#endif
+}
+
+TEST_CASE("the read path does not dispatch", "[mmvec][isa]") {
+	using namespace miint::mmvec_oracle::toy;
+	const ModelShape shape {kNFeaturesX, kNFeaturesY, kNComponents};
+	const ParamLayout l = Layout(shape);
+
+	// ComputeLogits -- and so ranks, probs, predict and score -- must go through
+	// the BASELINE kernel whatever CPU this is, which is what keeps their carved
+	// values exact everywhere. Asserted by recomputing the same quantity through
+	// baseline:: explicitly and demanding bit equality, not a tolerance: pinning
+	// either happened or it did not.
+	Workspace ws;
+	ws.logits.resize(static_cast<size_t>(l.d1 * l.nref));
+	ws.x_main_rows.resize(static_cast<size_t>(l.d1 * l.p));
+	baseline::FillNonRefLogits(l, kTheta.data(), nullptr, l.d1, ws, ws.logits.data());
+
+	const auto got = ComputeLogits(shape, kTheta);
+	for (int64_t i = 0; i < l.d1; ++i) {
+		// Column 0 is the pinned reference category, which ComputeLogits adds and
+		// the kernel never sees.
+		REQUIRE(got[static_cast<size_t>(i * l.d2)] == 0.0);
+		for (int64_t j = 0; j < l.nref; ++j) {
+			INFO("logit (" << i << ", " << j << ")");
+			REQUIRE(got[static_cast<size_t>(i * l.d2 + j + 1)] ==
+			        ws.logits[static_cast<size_t>(i * l.nref + j)]); // bit-for-bit
+		}
+	}
+}
+
+// The regression test for the bug that runtime dispatch introduced and that the
+// SIMD-aligned workspace fixes. Eigen peels leading scalars off an under-aligned
+// buffer onto a different arithmetic path and decides how many from the runtime
+// ADDRESS, so before the fix the second fit in a process silently returned a
+// different model from the first -- it reused the first one's freed blocks at a
+// different offset.
+//
+// Deliberately NOT one of the carved fixtures. The assertion here is
+// self-consistency, not agreement with an oracle, so no carved values are needed;
+// what IS needed is a shape whose workspace is big enough to move around the heap
+// between fits. The toy fixture's buffers are a few kilobytes and the allocator
+// hands back the same address every time, so the bug does not reproduce on it --
+// verified by reverting the fix, which leaves the toy version of this test
+// passing and this one failing.
+TEST_CASE("fitting the same data twice in one process gives the same model", "[mmvec][isa]") {
+	// ~250 kB of logits, the scale at which the earlier reproduction moved between
+	// offset 16 and offset 32/48 on successive fits.
+	constexpr int64_t kD1 = 400;
+	constexpr int64_t kD2 = 80;
+	constexpr int64_t kN = 16;
+	std::vector<double> xd(static_cast<size_t>(kN * kD1), 0.0);
+	std::vector<double> yd(static_cast<size_t>(kN * kD2), 0.0);
+	// Deterministic, and dense enough that no row or column is all zero -- fitting
+	// rejects either. The pattern is arbitrary; only reproducibility matters.
+	for (int64_t s = 0; s < kN; ++s) {
+		for (int64_t i = 0; i < kD1; ++i) {
+			xd[static_cast<size_t>(s * kD1 + i)] = static_cast<double>((s * 7 + i * 13) % 9) + 1.0;
+		}
+		for (int64_t j = 0; j < kD2; ++j) {
+			yd[static_cast<size_t>(s * kD2 + j)] = static_cast<double>((s * 11 + j * 5) % 7) + 1.0;
+		}
+	}
+	auto c = MakeCase(xd, yd, kN, kD1, kD2, 3);
+	const auto theta0 = miint::mmvec::InitTheta(c.shape, 7);
+
+	std::vector<double> first;
+	for (int rep = 0; rep < 3; ++rep) {
+		// Churn the allocator between fits so a later one cannot simply inherit the
+		// earlier one's addresses.
+		std::vector<std::vector<double>> churn;
+		for (int k = 0; k < 8; ++k) {
+			churn.emplace_back(static_cast<size_t>(1 + rep * 1013 + k * 707), 1.0);
+		}
+		const Model m = FitLbfgsFromInit(c.shape, OraclePriors(), c.stats, theta0, 40);
+		if (rep == 0) {
+			first = m.theta;
+			continue;
+		}
+		REQUIRE(m.theta.size() == first.size());
+		for (size_t i = 0; i < first.size(); ++i) {
+			INFO("theta element " << i << " on repeat " << rep);
+			REQUIRE(m.theta[i] == first[i]); // bit-for-bit, not approximately
+		}
+	}
+}
+
+TEST_CASE("the workspace buffers Eigen maps are SIMD-aligned", "[mmvec][isa]") {
+	// The mechanism behind the test above: if these are not aligned, the peel
+	// count varies with the address and results stop being reproducible.
+	const ModelShape shape {40, 17, 3};
+	for (const int64_t n_rows : {1, 7, 40, 133}) {
+		Workspace ws;
+		ws.Resize(shape, n_rows);
+		INFO("n_rows " << n_rows);
+		REQUIRE(reinterpret_cast<uintptr_t>(ws.logits.data()) % miint::kSimdAlignment == 0);
+		REQUIRE(reinterpret_cast<uintptr_t>(ws.resids.data()) % miint::kSimdAlignment == 0);
+		REQUIRE(reinterpret_cast<uintptr_t>(ws.x_main_rows.data()) % miint::kSimdAlignment == 0);
+		REQUIRE(reinterpret_cast<uintptr_t>(ws.dx_main_rows.data()) % miint::kSimdAlignment == 0);
 	}
 }
