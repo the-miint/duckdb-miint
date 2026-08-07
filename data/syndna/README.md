@@ -172,8 +172,12 @@ implements (its docstring says otherwise; the code is authoritative).
 
 - `f_only1` passes coverage in `s1` but not `s2`, so `(f_only1, s2)` is a **dense zero** —
   the case that proves omitting zero rows loses nothing.
-- `f_zero` has a zero read count in `s2` yet passes coverage, exercising `log10(0)`; the
-  result is also `0`.
+- `f_zero` has a zero read count in `s2` yet passes coverage; the result is `0`. The zero
+  does **not** reach `log10` on either side: `calc_ogu_cell_counts_biom` converts with
+  `to_dataframe(dense=False)`, whose fill value is NaN, so biom's unstored zero arrives as
+  NaN, stays NaN down the chain, and is zeroed by the closing `fillna(0)`. miint's reader
+  drops the zero-valued cell outright. The golden `0.0` is matched by `COALESCE`, not by
+  reproducing an infinity.
 - `f_neither` fails coverage everywhere and is absent entirely.
 - `slowr2` has `r² = 0.25 < 0.8` and is dropped from **every** metric.
 - `snull` has NULL in `calc_mass_sample_aliquot_input_g` only, so it is dropped from

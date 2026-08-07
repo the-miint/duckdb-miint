@@ -1005,16 +1005,31 @@ doi: 10.1038/s41592-019-0686-2
 
 ### pysyndna
 
-The `absquant_*` functions (`src/absquant.cpp`, `src/absquant_function.cpp`) are an
-independent C++ reimplementation of pysyndna, which realizes the synDNA spike-in
-method of Zaramela et al. 2022 for turning compositional metagenomic read counts
-into absolute quantities. No code was copied; the port was written from
+The three `absquant_*` functions are an independent C++ reimplementation of
+pysyndna, which realizes the synDNA spike-in method of Zaramela et al. 2022 for
+turning compositional metagenomic read counts into absolute quantities. Each
+reimplements one pysyndna entry point:
+
+| miint | pysyndna |
+|---|---|
+| `absquant_fit_models` | `fit_linear_regression_models` |
+| `absquant_cell_counts` | `calc_ogu_cell_counts_biom` |
+| `absquant_orf_copies` | `calc_copies_of_ogu_orf_ssrna_per_g_sample_from_dfs` |
+
+They live in `src/absquant.cpp` (the pure core, which also carries `Linregress`
+and `StudentTSurvival`), the three DuckDB wrappers
+`src/absquant_function.cpp`, `src/absquant_cell_counts_function.cpp` and
+`src/absquant_orf_copies_function.cpp`, the shared relation readers in
+`src/absquant_readers.cpp`, and the headers `src/include/absquant.hpp` and
+`src/include/absquant_readers.hpp`. No code was copied; the port was written from
 pysyndna's algorithm as documented and read in its source, and the behaviors it
 deliberately does not reproduce are listed under "Differences from pysyndna" in
 `docs/absolute_quantification.md`.
 
-pysyndna also generated every golden under `data/syndna/` except
-`studentt_sf_oracle.csv`. It was run **once, offline**, in a dedicated conda
+pysyndna also generated every input fixture and parity golden under
+`data/syndna/` except `studentt_sf_oracle.csv` — including the ORF coordinate,
+count and parameter inputs and both ORF goldens (`orf_oracle.csv`,
+`orfb_oracle.csv`). It was run **once, offline**, in a dedicated conda
 environment pinned to the commit below; only its numbers are committed.
 duckdb-miint never invokes pysyndna at build, run, or test time, and does not
 depend on it. `data/syndna/README.md` records the provenance and the

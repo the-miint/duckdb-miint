@@ -278,6 +278,26 @@ divides by it**. A sample missing `calc_mass_sample_aliquot_input_g` disappears 
 it means changing the metric can change which samples you get back, not only their
 units — check the warnings when you switch.
 
+**Where `sequenced_sample_gdna_mass_ng` comes from.** This is the mass of *sample* gDNA
+that went into the library prep. It is not the gDNA recovered from the extraction, and it
+does not include the mass of the spike-in pool added alongside it. This is the easiest
+column on the page to fill with the wrong quantity, because the obvious candidate —
+`extracted_gdna_concentration_ng_ul * vol_extracted_elution_ul / 1e9`, the very expression
+[Choosing a metric](#choosing-a-metric) uses — is a *different* number, and the arithmetic
+accepts either without complaint. Getting it wrong scales every value in the sample.
+
+If you measured the mass, pass the measurement. If you did not, it follows from the
+spike-in design, since the pool is added at a known fraction of the sample gDNA mass:
+
+```
+sequenced_sample_gdna_mass_ng = mass_syndna_input_ng / syndna_mass_fraction_of_sample
+```
+
+With the customary `syndna_mass_fraction_of_sample` of `0.05` that is 20× the pool mass
+you already supplied to the fit. pysyndna's Qiita entry points derive the column this way
+(`calc_cell_counts.py:414`); miint takes it as an input column instead, matching
+`calc_ogu_cell_counts_biom`, the pysyndna function `absquant_cell_counts` mirrors.
+
 ### Output
 
 `(sample_id, feature_id, value DOUBLE)`, with both identifier types
@@ -502,7 +522,8 @@ argument on this page.
 | `ogu_orf_start` | DOUBLE | 1-based, **inclusive** |
 | `ogu_orf_end` | DOUBLE | 1-based, **inclusive**; may be less than the start |
 
-`params` — one row per sample. All four columns are required and all four are used.
+`params` — one row per sample. All four parameter columns are required and all four are
+used.
 
 | column | type | notes |
 |---|---|---|
@@ -587,8 +608,12 @@ miint's models reproduce
 own published fixtures to the full precision pysyndna emits — it serializes coefficients
 truncated to 12 decimal places, and the parity tests hold to `1e-11` relative. The cell
 counts reproduce `calc_ogu_cell_counts_biom` on the same fixtures to `1e-9` relative, and
-the ORF copies reproduce `calc_copies_of_ogu_orf_ssrna_per_g_sample` exactly — that chain
-has no `pow` or `log10` in it, only multiplies and divides.
+the ORF copies reproduce `calc_copies_of_ogu_orf_ssrna_per_g_sample` to `1e-9` as well —
+bit for bit, in fact, on the committed fixtures, because that chain has no `pow` or
+`log10` in it, only multiplies and divides, and miint applies them in pysyndna's own
+association order. The asserted bound stays `1e-9` regardless: whether the compiler
+contracts `a * b / c` into a fused multiply-add is a property of the build, not of the
+arithmetic, so bit equality is not something to rely on across platforms.
 
 The behavioral differences below are deliberate. The first five change only *which* input
 is accepted and how a rejection is reported, never a coefficient. The last one is a
