@@ -2523,3 +2523,25 @@ TEST_CASE("the workspace buffers Eigen maps are SIMD-aligned", "[mmvec][isa]") {
 		REQUIRE(reinterpret_cast<uintptr_t>(ws.dx_main_rows.data()) % miint::kSimdAlignment == 0);
 	}
 }
+
+TEST_CASE("a fit reports which instruction set produced it", "[mmvec][isa]") {
+	// The model depends on the kernel that fitted it, so the kernel is part of
+	// what a user needs in order to reproduce the number. Tied to DetectIsa()
+	// rather than to a literal, because a message naming a variant other than the
+	// one that ran would be worse than no message at all.
+	using namespace miint::mmvec_oracle::toy;
+	auto c = MakeCase(kXCounts, kYCounts, kNSamples, kNFeaturesX, kNFeaturesY, kNComponents);
+	const std::string expected = std::string("simd = ") + miint::IsaLevelName(miint::DetectIsa());
+
+	const Model lbfgs = FitLbfgsFromInit(c.shape, OraclePriors(), c.stats, kTheta, 5);
+	REQUIRE_THAT(lbfgs.message, ContainsSubstring(expected));
+
+	auto a = ToyAdamCase(BatchNorm::Unbiased);
+	const Model adam = FitAdamWithIndices(a.shape, OraclePriors(), a.mb, a.params, kTheta, a.batches);
+	REQUIRE_THAT(adam.message, ContainsSubstring(expected));
+
+	// And the name it prints must be one MIINT_SIMD would accept back, or it
+	// documents a setting that does not exist.
+	REQUIRE(miint::ResolveIsa(miint::IsaLevelName(miint::DetectIsa()), miint::IsaLevel::Avx512,
+	                          miint::IsaLevel::Avx512) == miint::DetectIsa());
+}

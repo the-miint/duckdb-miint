@@ -343,6 +343,16 @@ SELECT DISTINCT message LIKE 'converged%' FROM fit;
 ----
 true
 
+# The kernel that produced the fit is reported, because the fit DEPENDS on it: a
+# wider instruction set rounds differently and, over a thousand iterations, gives a
+# visibly different model. Recording it makes that auditable from the output rather
+# than something a user has to know about. run_tests.sh pins MIINT_SIMD=baseline,
+# which is why the expected value here is fixed rather than machine-dependent.
+query I
+SELECT DISTINCT message LIKE '%; simd = baseline' FROM fit;
+----
+true
+
 # ---------------------------------------------------------------------------
 # The loss curve. One row per objective EVALUATION, not per optimizer iteration
 # -- matching scikit-bio's loss_curve_, whose length is a property of the line

@@ -424,17 +424,55 @@ matter is the relative depth *between* features within a sample, which is the si
 
 ## Reproducibility
 
-**On a given build, a given seed reproduces bit-for-bit.** The fit is single-threaded, Eigen is
-pinned to one thread, and the RNG is a hand-written transform over `std::mt19937_64` rather than
-`<random>`'s distributions — which are implementation-defined and would otherwise differ between
-standard libraries.
+**Rerunning `mmvec_fit` on the same machine gives the same model, bit-for-bit.** The fit is
+single-threaded, Eigen is pinned to one thread, and the RNG is a hand-written transform over
+`std::mt19937_64` rather than `<random>`'s distributions — which are implementation-defined and
+would otherwise differ between standard libraries.
+
+**A fit on a different CPU gives a slightly different model.** MIINT compiles the objective for
+several x86 instruction sets and picks the widest one the processor supports, which is worth up
+to 2.1x. A wider register changes the rounding of the arithmetic — fused multiply-add where the
+baseline rounds twice, a different summation order — and over a thousand optimizer iterations
+that grows into a visibly different model. This is the same behaviour scikit-bio has: NumPy ships
+OpenBLAS, which selects its kernels by CPU at run time, so an mmvec fit there already depends on
+the machine. Measured on the cystic-fibrosis fixture, the top-ranked Y feature changes for
+1.7–3.1% of X features between instruction sets, against 0.4–3.0% for scikit-bio between CPU
+kernels and thread counts.
+
+What a fit is conditioned on, then:
+
+| | affects the model? |
+|---|---|
+| the count values | yes |
+| the **row order** of the input tables | **no** — the result is order-independent by construction |
+| `seed` | yes |
+| `optimizer` and every hyperparameter (`dimensions`, `max_iter`, `learning_rate`, `batch_size`, `beta_1`, `beta_2`, `clipnorm`, `batch_norm`, the four priors) | yes |
+| the build (compiler and version) | yes |
+| **the CPU's instruction set** | **yes** |
+| the number of DuckDB threads | no — the fit is single-threaded |
+
+Every fit reports which kernel it used, so this is visible rather than silent:
+
+```sql
+SELECT DISTINCT message FROM mmvec_fit('microbes', 'metabolites');
+-- converged; 412 iterations, ...; simd = avx512
+```
+
+**To force bit-identical results across machines**, set `MIINT_SIMD=baseline` in the environment
+before starting DuckDB. That pins the fit to the portable kernel on every x86 CPU, at the cost of
+the speedup. Accepted values are `baseline`, `avx2`, `avx512` and `auto` (the default); a value
+the CPU or the build cannot provide is quietly reduced to the best available one, never an error.
+This is the analogue of NumPy's `OPENBLAS_CORETYPE`.
+
+**Anything computed *from* a stored model is unaffected.** `mmvec_ranks` (both its `rank` and
+`prob` columns), `mmvec_predict` and `mmvec_score` are bit-identical on every CPU for a given
+model — they are deliberately pinned to the portable kernel, since they run once rather than once
+per iteration and so have nothing to gain from a wider register. Only the fitted model moves.
 
 **Across build targets, agreement is about 1e-9, not bit-identity.** The RNG stream *is*
-bit-identical everywhere, and a fixed-parameter forward pass (`ranks`, `probs`, `predict`,
-`score` on an existing model) is bit-identical too. But an *iterative fit* diverges, because the
-WebAssembly build has no `-msimd128` and so uses scalar Eigen where a native build uses 2-wide
-SSE2 — a different reduction order, amplified over hundreds of iterations. Compare fits across
-targets with a tolerance, not with equality.
+bit-identical everywhere. But an *iterative fit* diverges, because the WebAssembly build has no
+`-msimd128` and so uses scalar Eigen where a native build uses at least 2-wide SSE2 — the same
+rounding-order effect as above. Compare fits across targets with a tolerance, not with equality.
 
 Since the parameters are only identified up to a rotation, compare **ranks**, not embeddings:
 

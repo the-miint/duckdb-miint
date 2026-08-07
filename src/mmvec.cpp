@@ -367,6 +367,16 @@ EvaluateFn SelectEvaluateObjective() {
 	return &baseline::EvaluateObjective;
 }
 
+//! Which kernel the fit used, for the model's `message`.
+//!
+//! Reported because a fit's result depends on it: the same data and seed on a
+//! machine with a wider instruction set give a slightly different model (see
+//! docs/multiomics.md). Recording it turns that from a silent dependence into one
+//! a user can see in their own output and reproduce with MIINT_SIMD.
+std::string SimdNote() {
+	return std::string("; simd = ") + IsaLevelName(DetectIsa());
+}
+
 //! Every FIT-path evaluation goes through here, so one fit uses one kernel from
 //! its first update to its last. The READ path does not: `ComputeLogits` calls
 //! `baseline::FillNonRefLogits` directly, which is what keeps `ranks`, `probs`,
@@ -650,7 +660,7 @@ Model FitLbfgsFromInit(const ModelShape &shape, const Priors &priors, const Suff
 	model.message = outcome + "; " +
 	                (niter_known ? std::to_string(niter) + " iterations" : std::string("iteration count unavailable")) +
 	                ", " + std::to_string(model.loss_curve.size()) +
-	                " objective evaluations, max|gradient| = " + std::to_string(model.max_abs_grad);
+	                " objective evaluations, max|gradient| = " + std::to_string(model.max_abs_grad) + SimdNote();
 	return model;
 }
 
@@ -887,7 +897,7 @@ Model FitAdamWithIndices(const ModelShape &shape, const Priors &priors, const Mi
 	model.converged = false;
 	model.message = "ran " + std::to_string(n_updates) +
 	                " Adam updates to completion (Adam has no convergence test); max|gradient| = " +
-	                std::to_string(model.max_abs_grad);
+	                std::to_string(model.max_abs_grad) + SimdNote();
 	return model;
 }
 

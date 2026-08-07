@@ -25,7 +25,9 @@ Five embedding categories:
 
 Corresponding preprocessor macros: `MIINT_HAS_CURL`, `MIINT_HAS_HDF5`, `MIINT_HAS_MAFFT`, `MIINT_HAS_ABPOA`, `MIINT_HAS_VSEARCH`, `MIINT_HAS_SORTMERNA`, `MIINT_HAS_GPL_BOUNDARY`, `MIINT_HAS_UNIFRAC`, `MIINT_HAS_SYLPH`. Also `MIINT_ASPERA_SUPPORTED=0` on Windows/WASM (POSIX-only runtime).
 
-Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is linked (not on musl/macOS/Windows).
+`MIINT_HAS_AVX2` and `MIINT_HAS_AVX512` are different in kind: not user-facing options but the results of a configure-time **compiler probe** (mirroring htslib's `hts_probe_cc.sh`), so an old toolchain builds fewer kernel variants instead of failing. Set only on x86-64 and never under Emscripten. See "Per-instruction-set compilation of the mmvec kernel" in §3.
+
+Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is linked (not on musl/macOS/Windows). `MIINT_SIMD` selects the mmvec kernel at run time (`baseline` / `avx2` / `avx512` / `auto`); it is an environment variable rather than a DuckDB setting because the C++ unit tests need it and they never construct a database.
 
 ## 1. Statically Linked from Source (ExternalProject)
 
@@ -207,6 +209,20 @@ Both are `add_compile_definitions` in `CMakeLists.txt` — global, not per-sourc
 - **`EIGEN_DONT_PARALLELIZE`** exists because the extension links OpenMP (libssu is built `-fopenmp`), so `_OPENMP` is defined for miint's own sources too and Eigen would otherwise enable its parallel GEMM path. `mmvec`'s objective contains matrix products reducing over a long dimension (d1 = 2720 at cystic-fibrosis scale), and thread-count-dependent blocking would make a **seeded fit non-reproducible**. Measured at CF scale, seed 0, 500 iterations: with the define removed the same fit returns a different model as soon as `OMP_NUM_THREADS > 1` (final loss 1709324046711880.2 against 1709329920514833.8). It costs 3–5% of the fit's wall clock.
 
 Global rather than per-source because Eigen's macros configure templates instantiated in whichever TU includes the headers — a per-file define would leave two differently-configured instantiations of the same symbols for the linker to choose between.
+
+### Per-instruction-set compilation of the mmvec kernel
+
+Eigen picks its packet width at **compile** time from `__AVX__` / `__AVX512F__` and does not runtime-dispatch. `__attribute__((target))` does not help — under it those macros are undefined at preprocessing time and Eigen still emits SSE2. Reaching a wider instruction set therefore means compiling a source *again* with different flags and choosing between the results at load time, which is what `miint_add_isa_variants()` in `CMakeLists.txt` does. Its only caller today is `src/mmvec_kernel.cpp`; the mechanism (`src/include/miint_isa.hpp`, the `MIINT_SIMD` override, the `MIINT_HAS_AVX2` / `MIINT_HAS_AVX512` feature macros) is deliberately subsystem-agnostic so a future dense kernel need not re-derive it.
+
+The precedent is htslib's htscodecs, which does the same thing and already ships through our distribution pipeline: the published `linux_amd64` artifact carries 78,583 AVX-512 and 25,511 AVX2 instructions (`rans_*_avx2` / `_avx512`, abPOA's aligner, OpenSSL's AES). Runtime dispatch needs **no CI or packaging change** — which matters because `DuckDBPlatform()` has no CPU-feature component and so cannot express a per-ISA download.
+
+Three things here are load-bearing and easy to undo by accident:
+
+- **The baseline variant takes no extra flags.** Every carved expected value in the repo is carved against it, and `run_tests.sh` pins `MIINT_SIMD=baseline` so CI asserts a fixed contract rather than whatever the runner's CPU offers.
+- **The read path does not dispatch.** `ComputeLogits` calls `baseline::FillNonRefLogits` explicitly, so `mmvec_ranks` / `mmvec_predict` / `mmvec_score` stay bit-identical on every CPU for a given model. It costs nothing — that path runs once per call, not once per iteration.
+- **`Workspace`'s Eigen-mapped buffers are SIMD-aligned** (`src/include/miint_aligned_vector.hpp`), and that is a *correctness* requirement, not tuning. Eigen peels leading scalars off an under-aligned buffer onto a different arithmetic path and decides how many from the runtime **address**, so without it the same seeded fit returns different models in one process as the allocator moves the scratch around. It reaches the matrix products, not just the exponential. The alternative — `EIGEN_MAX_ALIGN_BYTES=0`, which makes Eigen peel nothing — was measured at +75% (AVX2) and +113% (AVX-512), putting AVX-512 behind the SSE2 baseline; alignment costs 0.0025% of instructions retired.
+
+A related trap in the fallback path: the pinned Eigen tarball's own `CMakeLists.txt` sets `-msse2` / `-mavx` / `-mavx512f` **globally** (lines 207–237). It is inert only because `FetchContent_Declare` points `SOURCE_SUBDIR` at a nonexistent directory so Eigen's CMake never runs. Removing that would inject arch flags into every target and silently move the baseline variant.
 
 ## 4. Runtime Binaries (not compiled in)
 
