@@ -9,6 +9,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -270,7 +271,16 @@ unique_ptr<GlobalTableFunctionState> MmvecFitInitGlobal(ClientContext &context, 
 			// degenerate data at the same point -- so computing them here as well
 			// would run the sparse outer product twice and discard one result.
 			const auto stats = miint::mmvec::ComputeSufficientStats(tables.x, tables.y);
-			model = miint::mmvec::FitLbfgsFromInit(shape, data.priors, stats, theta0, data.max_iter);
+			// Honour `SET threads=N`, the convention at every other threaded function
+			// here. Safe to take the whole budget rather than a share of it: this
+			// operator reports MaxThreads() == 1 and the fit runs blocking inside
+			// InitGlobal, so DuckDB is not running anything else for us meanwhile.
+			//
+			// This changes how LONG the fit takes and nothing else -- the model is
+			// bit-identical at every thread count, so `SET threads` is not a
+			// reproducibility knob the way it is for scikit-bio's BLAS.
+			const auto n_threads = NumericCast<int>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+			model = miint::mmvec::FitLbfgsFromInit(shape, data.priors, stats, theta0, data.max_iter, n_threads);
 		} else {
 			miint::mmvec::MinibatchInputs mb;
 			mb.n_samples = tables.x.n_rows;

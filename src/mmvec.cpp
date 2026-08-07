@@ -5,12 +5,14 @@
 // file keeps everything that must NOT move with them -- validation, the read
 // path, the optimizer drivers.
 #include "miint_isa.hpp"
+#include "miint_parallel.hpp"
 #include "mmvec_kernel.hpp"
 
 #include "LBFGSpp/LBFGS.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -367,6 +369,30 @@ EvaluateFn SelectEvaluateObjective() {
 	return &baseline::EvaluateObjective;
 }
 
+//! Parse MIINT_MMVEC_THREADS. Returns 0 when unset or unusable, which means
+//! "no opinion" rather than "serial" -- the caller's own budget then stands.
+//!
+//! Read once and memoized, mirroring DetectIsa(): a fit that changed thread count
+//! partway through because the environment moved under it would be a confusing
+//! thing to debug, and this is on no hot path either way.
+int ThreadBudgetOverride() {
+	static const int value = [] {
+		const char *raw = std::getenv("MIINT_MMVEC_THREADS");
+		if (raw == nullptr) {
+			return 0;
+		}
+		char *end = nullptr;
+		const long parsed = std::strtol(raw, &end, 10);
+		// Reject trailing junk and out-of-range values rather than silently taking a
+		// prefix: "8x" almost certainly means someone made a mistake worth noticing.
+		if (end == raw || *end != '\0' || parsed < 1 || parsed > 4096) {
+			return 0;
+		}
+		return static_cast<int>(parsed);
+	}();
+	return value;
+}
+
 //! Which kernel the fit used, for the model's `message`.
 //!
 //! Reported because a fit's result depends on it: the same data and seed on a
@@ -448,6 +474,7 @@ void Workspace::Resize(const ModelShape &shape, int64_t n_rows) {
 	dx_main_rows.resize(rows * p);
 	x_index.resize(rows);
 	sample_index.resize(rows);
+	row_data.resize(rows);
 }
 
 std::vector<double> ComputeLogits(const ModelShape &shape, const std::vector<double> &theta) {
@@ -576,14 +603,32 @@ double MinibatchLossAndGradient(const ModelShape &shape, const Priors &priors, c
 	                                 theta.data(), ws, grad.data());
 }
 
+int ResolveThreadBudget(int requested) {
+	const int override_value = ThreadBudgetOverride();
+	const int budget = override_value > 0 ? override_value : requested;
+	return budget > 0 ? budget : 1;
+}
+
 Model FitLbfgsFromInit(const ModelShape &shape, const Priors &priors, const SufficientStats &stats,
-                       const std::vector<double> &theta0, int64_t max_iter) {
+                       const std::vector<double> &theta0, int64_t max_iter, int n_threads) {
 	if (max_iter < 1) {
 		throw std::invalid_argument("mmvec: max_iter must be >= 1 (got " + std::to_string(max_iter) + ")");
 	}
+	// One pool for the whole fit. Creating threads is expensive and the objective is
+	// evaluated on the order of a thousand times, so this must not be per-evaluation;
+	// parking on a condition variable between evaluations is what makes that cheap.
+	//
+	// Eigen's cache-size statics are read by every matrix product and initialized on
+	// first use. They are function-local statics, so C++11 already makes that
+	// thread-safe, but initializing them here -- before anything runs concurrently --
+	// is the contract Eigen documents and costs nothing once per fit.
+	Eigen::initParallel();
+	WorkerPool pool(ResolveThreadBudget(n_threads));
+
 	// Validate through the objective so the rules live in one place; this also
 	// means the checks happen once here rather than on every evaluation.
 	Workspace ws;
+	ws.pool = &pool;
 	std::vector<double> probe_grad;
 	const double initial_loss = FullBatchLossAndGradient(shape, priors, stats, theta0, ws, probe_grad);
 

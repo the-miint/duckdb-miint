@@ -10,7 +10,10 @@
 
 #include "mmvec_kernel.hpp"
 
+#include "miint_parallel.hpp"
+
 #include <cmath>
+#include <functional>
 
 #ifndef MIINT_ISA_VARIANT
 // Compiled without the CMake helper (a stray direct compile, or a consumer that
@@ -23,6 +26,23 @@ namespace miint::mmvec {
 namespace MIINT_ISA_VARIANT {
 
 namespace {
+
+//! Run `fn` over `[0, n)`, split across `ws.pool` if there is one.
+//!
+//! Every use of this in the file below is a loop whose iterations touch disjoint
+//! outputs and share no accumulator, so the split changes no value at any thread
+//! count. `ParallelFor` hands out a contiguous ascending partition whose
+//! boundaries depend only on `n` and the budget, never on timing.
+//!
+//! WHAT MUST NOT GO THROUGH HERE: any of the three Eigen matrix products. See the
+//! warning at the first of them.
+void ForEachChunk(Workspace &ws, int64_t n, const std::function<void(int64_t, int64_t)> &fn) {
+	if (ws.pool != nullptr) {
+		ParallelFor(*ws.pool, 0, n, fn);
+	} else {
+		fn(0, n);
+	}
+}
 
 //! Sum of squared deviations of `n` values from `mean`, i.e. `||v - mean||^2`.
 double SumSquaredDev(const double *v, size_t n, double mean) {
@@ -80,6 +100,11 @@ void FillNonRefLogits(const ParamLayout &l, const double *theta, const int64_t *
                       double *out) {
 	const ConstRowMatrixMap y_main(theta + l.y_main, l.p, l.nref);
 	RowMatrixMap x_main_rows(ws.x_main_rows.data(), n_rows, l.p);
+	// Serial on purpose, unlike every other row loop in this file. The gather is
+	// n_rows * p writes -- 8160 at cystic-fibrosis scale against the 1.25M of the
+	// bias sweep below it -- so it costs about 10 us, while a dispatch costs a
+	// condition-variable wake round-trip of roughly 15. Splitting it was measured a
+	// net LOSS. Cheap work still has to clear the bar for handing it out.
 	for (int64_t r = 0; r < n_rows; ++r) {
 		const int64_t i = MapRow(x_index, r);
 		for (int64_t k = 0; k < l.p; ++k) {
@@ -88,16 +113,37 @@ void FillNonRefLogits(const ParamLayout &l, const double *theta, const int64_t *
 	}
 
 	RowMatrixMap logits(out, n_rows, l.nref);
+	// DO NOT DIVIDE THIS PRODUCT ACROSS THREADS, and do not rewrite it as a block
+	// assignment. It looks like the easiest thing in the file to parallelize -- each
+	// output element is its own sum over p -- and it is the one thing here that
+	// cannot be.
+	//
+	// Measured in M8 P0, with the pieces run SERIALLY so threading was not even
+	// involved: rewriting this as `logits.middleRows(...) = x_main_rows.middleRows(...) * y_main`
+	// changes the fitted model EVEN AT ONE FULL-SIZE BLOCK, because a Block
+	// destination sends Eigen down a different product path. Writing each piece
+	// through its own plain RowMatrixMap instead is value-neutral at one piece and
+	// bit-identical on cf and ladderB at every count -- but on the soils fixture it
+	// diverges, and diverges INCONSISTENTLY (2 and 4 pieces agree, 8 differs),
+	// because Eigen picks its blocking from the matrix dimensions. That is
+	// thread-count-dependent output, which is the one property this milestone
+	// exists to avoid.
+	//
+	// The same applies to `dy_main` and `dx_main_rows` below. Splitting the three of
+	// them would have been worth roughly a third of a fit; it is not available at
+	// any price that keeps a carved value carved.
 	logits.noalias() = x_main_rows * y_main;
-	for (int64_t r = 0; r < n_rows; ++r) {
-		// Read straight from theta. x_main has to be gathered because Eigen needs
-		// it contiguous for the product above; the bias is a scalar per row and
-		// gathering it bought nothing but a buffer.
-		const double xb = theta[l.x_bias + static_cast<size_t>(MapRow(x_index, r))];
-		for (int64_t j = 0; j < l.nref; ++j) {
-			logits(r, j) += xb + theta[l.y_bias + static_cast<size_t>(j)];
+	ForEachChunk(ws, n_rows, [&](int64_t begin, int64_t end) {
+		for (int64_t r = begin; r < end; ++r) {
+			// Read straight from theta. x_main has to be gathered because Eigen needs
+			// it contiguous for the product above; the bias is a scalar per row and
+			// gathering it bought nothing but a buffer.
+			const double xb = theta[l.x_bias + static_cast<size_t>(MapRow(x_index, r))];
+			for (int64_t j = 0; j < l.nref; ++j) {
+				logits(r, j) += xb + theta[l.y_bias + static_cast<size_t>(j)];
+			}
 		}
-	}
+	});
 }
 
 //! One evaluation of the negative log-posterior and its gradient.
@@ -143,35 +189,42 @@ double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_r
 	// without the clamp a row of strongly negative logits would send exp(-m) to
 	// infinity. resids carries exp(logits - m) forward for reuse.
 	RowMatrixMap resids(ws.resids.data(), n_rows, l.nref);
-	double data = 0.0;
-	for (int64_t r = 0; r < n_rows; ++r) {
-		// A plain compare rather than std::fmax, which GCC emits as a CALL into libm
-		// (4.4% of a cystic-fibrosis fit, its PLT stub included) because fmax's
-		// NaN-propagation semantics are not maxsd's. The two agree here by
-		// construction: `m` starts at 0.0 and a NaN logit leaves it unchanged under
-		// either form, so neither can ever make `m` NaN. Measured bit-identical on
-		// every fixture, both optimizers, at 200 and 1000 iterations.
-		double m = 0.0;
-		for (int64_t j = 0; j < l.nref; ++j) {
-			const double v = logits(r, j);
-			if (v > m) {
-				m = v;
+	// Each row writes its own slot rather than adding into a shared accumulator, so
+	// nothing about the summation crosses a thread; the ordered sum happens below,
+	// serially, over ascending r. Rows are otherwise independent -- row r reads and
+	// writes only row r of `logits` and `resids` -- so this is the whole of what the
+	// decomposition costs. 57% of a cystic-fibrosis fit lives in this loop, and it
+	// reached 5.93x on eight cores in the M8 P0 spike.
+	double *row_data = ws.row_data.data();
+	ForEachChunk(ws, n_rows, [&](int64_t r_begin, int64_t r_end) {
+		for (int64_t r = r_begin; r < r_end; ++r) {
+			// A plain compare rather than std::fmax, which GCC emits as a CALL into libm
+			// (4.4% of a cystic-fibrosis fit, its PLT stub included) because fmax's
+			// NaN-propagation semantics are not maxsd's. The two agree here by
+			// construction: `m` starts at 0.0 and a NaN logit leaves it unchanged under
+			// either form, so neither can ever make `m` NaN. Measured bit-identical on
+			// every fixture, both optimizers, at 200 and 1000 iterations.
+			double m = 0.0;
+			for (int64_t j = 0; j < l.nref; ++j) {
+				const double v = logits(r, j);
+				if (v > m) {
+					m = v;
+				}
 			}
-		}
-		// The one place a variant is allowed to compute something different, and
-		// the only reason widening pays at all. Keyed off EIGEN_VECTORIZE_AVX
-		// rather than a miint macro so any kernel compiled into a variant gets the
-		// right form without repeating this decision.
-		//
-		// Measured, not assumed: Eigen's packet `exp` is a polynomial that differs
-		// from glibc's by an ulp or so, and which of the two wins depends entirely
-		// on the packet width. At SSE2 -- 2 doubles wide -- glibc's FMA-tuned
-		// scalar `exp` beats it and the vectorized form is a 16% REGRESSION. At 4
-		// and 8 wide it is what turns a 1.15x widening into 1.68x / 2.13x on a
-		// cystic-fibrosis L-BFGS fit. The two only pay together.
+			// The one place a variant is allowed to compute something different, and
+			// the only reason widening pays at all. Keyed off EIGEN_VECTORIZE_AVX
+			// rather than a miint macro so any kernel compiled into a variant gets the
+			// right form without repeating this decision.
+			//
+			// Measured, not assumed: Eigen's packet `exp` is a polynomial that differs
+			// from glibc's by an ulp or so, and which of the two wins depends entirely
+			// on the packet width. At SSE2 -- 2 doubles wide -- glibc's FMA-tuned
+			// scalar `exp` beats it and the vectorized form is a 16% REGRESSION. At 4
+			// and 8 wide it is what turns a 1.15x widening into 1.68x / 2.13x on a
+			// cystic-fibrosis L-BFGS fit. The two only pay together.
 #if defined(EIGEN_VECTORIZE_AVX) || defined(EIGEN_VECTORIZE_AVX512)
-		resids.row(r) = (logits.row(r).array() - m).exp();
-		const double shifted_sum = resids.row(r).sum();
+			resids.row(r) = (logits.row(r).array() - m).exp();
+			const double shifted_sum = resids.row(r).sum();
 #else
 		double shifted_sum = 0.0;
 		for (int64_t j = 0; j < l.nref; ++j) {
@@ -180,25 +233,32 @@ double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_r
 			shifted_sum += e;
 		}
 #endif
-		// The shifted normalizer, kept as well as its log: it IS the row scale the
-		// probabilities divide by, so recovering it as exp(log_norm - m) would be a
-		// log-and-exp round trip of a number already in hand -- an extra
-		// transcendental per row per evaluation, and a double rounding that bites
-		// hardest when m is large, which is exactly where precision matters.
-		const double row_scale = std::exp(-m) + shifted_sum;
-		const double log_norm = m + std::log(row_scale);
+			// The shifted normalizer, kept as well as its log: it IS the row scale the
+			// probabilities divide by, so recovering it as exp(log_norm - m) would be a
+			// log-and-exp round trip of a number already in hand -- an extra
+			// transcendental per row per evaluation, and a double rounding that bites
+			// hardest when m is large, which is exactly where precision matters.
+			const double row_scale = std::exp(-m) + shifted_sum;
+			const double log_norm = m + std::log(row_scale);
 
-		// Data term for this row, and the residual it contributes to the
-		// gradient. resids goes exp-shifted -> probability -> residual in place.
-		const double *obs_row = obs.base + MapRow(obs.row_map, r) * obs.stride;
-		const double total = totals[static_cast<size_t>(r)];
-		double dot_obs_logits = 0.0;
-		for (int64_t j = 0; j < l.nref; ++j) {
-			const double o = obs_row[j + 1];
-			dot_obs_logits += o * logits(r, j);
-			resids(r, j) = o - total * (resids(r, j) / row_scale);
+			// Data term for this row, and the residual it contributes to the
+			// gradient. resids goes exp-shifted -> probability -> residual in place.
+			const double *obs_row = obs.base + MapRow(obs.row_map, r) * obs.stride;
+			const double total = totals[static_cast<size_t>(r)];
+			double dot_obs_logits = 0.0;
+			for (int64_t j = 0; j < l.nref; ++j) {
+				const double o = obs_row[j + 1];
+				dot_obs_logits += o * logits(r, j);
+				resids(r, j) = o - total * (resids(r, j) / row_scale);
+			}
+			row_data[static_cast<size_t>(r)] = total * log_norm - dot_obs_logits;
 		}
-		data += total * log_norm - dot_obs_logits;
+	});
+	// The ordered sum the loop above was decomposed to preserve. Ascending r, one
+	// thread, exactly as it was when `data` accumulated inside the loop.
+	double data = 0.0;
+	for (int64_t r = 0; r < n_rows; ++r) {
+		data += row_data[static_cast<size_t>(r)];
 	}
 
 	// Gradient of the data term. dy_* land directly in `grad`; the X-side ones go
@@ -207,7 +267,40 @@ double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_r
 	// numpy's add.at does.
 	const ConstRowMatrixMap resids_const(ws.resids.data(), n_rows, l.nref);
 	RowMatrixMap dy_main(grad + l.y_main, l.p, l.nref);
-	dy_main.noalias() = -norm * (x_main_rows.transpose() * resids_const);
+	RowMatrixMap dx_main_rows(ws.dx_main_rows.data(), n_rows, l.p);
+
+	// The two gradient products are independent -- both only READ `resids` and
+	// `y_main`/`x_main_rows`, and they write to disjoint outputs -- so they can run
+	// at the same time as each other.
+	//
+	// This is TASK parallelism, and that is the entire point. Neither Eigen
+	// expression is divided, so each computes exactly what it computed serially;
+	// the bit-identity argument is by construction rather than by measurement. See
+	// the warning in FillNonRefLogits for why dividing them is not an option.
+	//
+	// Worth roughly half of what the pair costs: 10.7% and 11.9% of a
+	// cystic-fibrosis fit become max(10.7, 11.9).
+	const auto fill_dy_main = [&]() {
+		dy_main.noalias() = -norm * (x_main_rows.transpose() * resids_const);
+	};
+	const auto fill_dx_main = [&]() {
+		dx_main_rows.noalias() = resids_const * y_main.transpose();
+	};
+	if (ws.pool != nullptr && ws.pool->Threads() > 1) {
+		ParallelFor(*ws.pool, 0, 2, [&](int64_t begin, int64_t end) {
+			for (int64_t task = begin; task < end; ++task) {
+				if (task == 0) {
+					fill_dy_main();
+				} else {
+					fill_dx_main();
+				}
+			}
+		});
+	} else {
+		fill_dy_main();
+		fill_dx_main();
+	}
+
 	// One row-major sweep rather than nref column reductions. `resids` is row-major,
 	// so `.col(j).sum()` strides nref*8 bytes through every row and pays a cache miss
 	// per element -- 8.2% of a cystic-fibrosis fit for the same 1.25M additions the
@@ -216,37 +309,57 @@ double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_r
 	// Bit-identical, not merely equivalent: each j still accumulates over ascending r,
 	// which is the order Eigen's redux uses for a strided vector. Verified on every
 	// fixture, both optimizers, at 200 and 1000 iterations.
+	//
+	// Split over output columns j, so each j still accumulates over ascending r on
+	// one thread and the value is unchanged. Threads take contiguous j-slices, so
+	// each reads its own contiguous piece of every row rather than the whole array.
 	double *dy_bias = grad + l.y_bias;
-	for (int64_t j = 0; j < l.nref; ++j) {
-		dy_bias[j] = 0.0;
-	}
-	for (int64_t r = 0; r < n_rows; ++r) {
-		const double *resid_row = ws.resids.data() + static_cast<size_t>(r) * static_cast<size_t>(l.nref);
-		for (int64_t j = 0; j < l.nref; ++j) {
-			dy_bias[j] += resid_row[j];
+	ForEachChunk(ws, l.nref, [&](int64_t j_begin, int64_t j_end) {
+		for (int64_t j = j_begin; j < j_end; ++j) {
+			dy_bias[j] = 0.0;
 		}
-	}
-	for (int64_t j = 0; j < l.nref; ++j) {
-		dy_bias[j] *= -norm;
-	}
+		for (int64_t r = 0; r < n_rows; ++r) {
+			const double *resid_row = ws.resids.data() + static_cast<size_t>(r) * static_cast<size_t>(l.nref);
+			for (int64_t j = j_begin; j < j_end; ++j) {
+				dy_bias[j] += resid_row[j];
+			}
+		}
+		for (int64_t j = j_begin; j < j_end; ++j) {
+			dy_bias[j] *= -norm;
+		}
+	});
 
-	RowMatrixMap dx_main_rows(ws.dx_main_rows.data(), n_rows, l.p);
-	dx_main_rows.noalias() = resids_const * y_main.transpose();
 	for (size_t i = 0; i < static_cast<size_t>(l.d1 * l.p); ++i) {
 		grad[l.x_main + i] = 0.0;
 	}
 	for (size_t i = 0; i < static_cast<size_t>(l.d1); ++i) {
 		grad[l.x_bias + i] = 0.0;
 	}
-	for (int64_t r = 0; r < n_rows; ++r) {
-		const int64_t i = MapRow(x_index, r);
-		for (int64_t k = 0; k < l.p; ++k) {
-			grad[l.x_main + static_cast<size_t>(i * l.p + k)] += -norm * dx_main_rows(r, k);
+	const auto scatter = [&](int64_t begin, int64_t end) {
+		for (int64_t r = begin; r < end; ++r) {
+			const int64_t i = MapRow(x_index, r);
+			for (int64_t k = 0; k < l.p; ++k) {
+				grad[l.x_main + static_cast<size_t>(i * l.p + k)] += -norm * dx_main_rows(r, k);
+			}
+			// Same reduction, taken where it is consumed rather than staged in a
+			// buffer first. resids_const is not touched by the scatter, so the value
+			// and the summation order are unchanged.
+			grad[l.x_bias + static_cast<size_t>(i)] += -norm * resids_const.row(r).sum();
 		}
-		// Same reduction, taken where it is consumed rather than staged in a
-		// buffer first. resids_const is not touched by the scatter, so the value
-		// and the summation order are unchanged.
-		grad[l.x_bias + static_cast<size_t>(i)] += -norm * resids_const.row(r).sum();
+	};
+	if (x_index == nullptr) {
+		// FULL BATCH ONLY. A row IS an X feature here, so row r is the only writer of
+		// slot r and threads never collide.
+		//
+		// The minibatch cannot do this and must not be "improved" to: it can name the
+		// same X feature several times in one batch, so the `+=` above is a genuine
+		// accumulation whose ORDER is part of the contract -- it reproduces numpy's
+		// add.at in batch order. Adam is out of M8's scope for other reasons anyway
+		// (its 50-row batches are far too small to divide), but this is why the
+		// distinction is drawn on `x_index` rather than on the optimizer.
+		ForEachChunk(ws, n_rows, scatter);
+	} else {
+		scatter(0, n_rows);
 	}
 
 	AddPriorGradient(l, priors, theta, grad);

@@ -27,6 +27,10 @@
 #include <string>
 #include <vector>
 
+namespace miint {
+class WorkerPool;
+}
+
 namespace miint::mmvec {
 
 //! One paired count table in COO (long) form: `row[k]`, `col[k]`, `val[k]`
@@ -164,6 +168,30 @@ struct Workspace {
 	//! per-call buffers still being heap-allocated on every one of them.
 	std::vector<int64_t> x_index;      //!< rows
 	std::vector<int64_t> sample_index; //!< rows
+
+	//! rows; each row's scalar contribution to the data term.
+	//!
+	//! The row loop writes here instead of into a shared accumulator, and the sum
+	//! is taken afterwards over ascending r on one thread. That is what lets the
+	//! loop be split across threads while producing bit-identical results: the
+	//! ordered sum survives, and n_rows extra additions are nothing against the
+	//! n_rows * nref exponentials the loop already does.
+	std::vector<double> row_data;
+
+	//! Threads for ONE objective evaluation, or nullptr to run serially.
+	//!
+	//! Deliberately NOT scratch, unlike everything above, and deliberately
+	//! non-owning: the pool is created once per FIT, while a workspace is reused
+	//! across evaluations. It is routed through here because the workspace is
+	//! already threaded through every layer of the objective, so the alternative
+	//! was adding a parameter to both kernel entry points, the dispatcher's
+	//! function-pointer typedef, and every call site -- for a value that is
+	//! constant across a whole fit.
+	//!
+	//! nullptr on the READ path (`ComputeLogits`) and on the MINIBATCH path, which
+	//! is exactly why Adam is unaffected: its 50-row batches are far too small to
+	//! divide, measured at ~4 us of work per thread.
+	miint::WorkerPool *pool = nullptr;
 
 	//! Size the buffers for `n_rows` rows under `shape`. Idempotent.
 	void Resize(const ModelShape &shape, int64_t n_rows);
@@ -365,8 +393,23 @@ struct Model {
 //! Throws std::invalid_argument if `max_iter < 1`, or for any reason
 //! FullBatchLossAndGradient would -- including a non-finite `theta0`, which would
 //! otherwise poison every loss and gradient without any comparison failing.
+//! `n_threads` is the TOTAL budget INCLUDING the calling thread; 1 runs the fit
+//! serially, which is what every caller got before M8 and what Emscripten still
+//! gets. The result does NOT depend on it -- see `Workspace::row_data` and
+//! `miint_parallel.hpp` for how the decomposition keeps every value bit-identical
+//! at any thread count. It is an argument rather than an ambient setting so a test
+//! can vary it, and it is overridden by MIINT_MMVEC_THREADS when that is set.
 Model FitLbfgsFromInit(const ModelShape &shape, const Priors &priors, const SufficientStats &stats,
-                       const std::vector<double> &theta0, int64_t max_iter);
+                       const std::vector<double> &theta0, int64_t max_iter, int n_threads = 1);
+
+//! The thread budget a fit will actually use: MIINT_MMVEC_THREADS if it is set to
+//! a positive integer, otherwise `requested`, and never below 1.
+//!
+//! The override exists so the WHOLE carved-value suite can be re-run at 2, 4 and 8
+//! threads without editing a single expectation -- which is the real gate on M8,
+//! far stronger than any test written specially for it. It doubles as a user
+//! escape hatch to force a serial fit, in the same spirit as MIINT_SIMD.
+int ResolveThreadBudget(int requested);
 
 //! Deterministic pseudo-random draws that are byte-identical on every platform.
 //!
