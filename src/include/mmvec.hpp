@@ -20,6 +20,8 @@
 // reproduce its results; no scikit-bio code is vendored or executed. Expected
 // values live in test/cpp/mmvec_oracle.hpp. See THIRD_PARTY_LICENSES.md.
 
+#include "miint_aligned_vector.hpp"
+
 #include <cstdint>
 #include <random>
 #include <string>
@@ -135,18 +137,24 @@ struct Priors {
 //!
 //! A "row" is one unit of the likelihood: an X feature for the full-batch
 //! objective, one sampled (sample, X-feature) draw for the minibatch.
+//!
+//! The four buffers Eigen maps are SIMD-ALIGNED, and that is a correctness
+//! requirement rather than a tuning choice: Eigen peels leading scalars off an
+//! unaligned buffer onto a different arithmetic path, and the count it peels
+//! comes from the runtime address, so without this a fit's result depends on
+//! where the allocator happened to put its scratch. See miint_aligned_vector.hpp.
 struct Workspace {
-	std::vector<double> logits;      //!< rows x (d2-1), non-reference only
-	std::vector<double> resids;      //!< rows x (d2-1); shifted exps, then probabilities, then residuals, in place
-	std::vector<double> row_totals;  //!< rows; the Y total each row is conditioned on
-	std::vector<double> x_main_rows; //!< rows x p, the rows' gathered x_main
+	AlignedVector<double> logits;      //!< rows x (d2-1), non-reference only
+	AlignedVector<double> resids;      //!< rows x (d2-1); shifted exps, then probabilities, then residuals, in place
+	std::vector<double> row_totals;    //!< rows; the Y total each row is conditioned on
+	AlignedVector<double> x_main_rows; //!< rows x p, the rows' gathered x_main
 	//! rows x p, before scattering back to d1 x p.
 	//!
 	//! The x_main blocks are gathered and staged because Eigen needs them
 	//! contiguous for the two matrix products. The BIAS blocks are not: they are
 	//! one scalar per row, read and used in the same loop, so they are taken
 	//! straight from theta and written straight into grad rather than staged here.
-	std::vector<double> dx_main_rows;
+	AlignedVector<double> dx_main_rows;
 
 	//! The minibatch path's two per-row index maps: which X feature and which
 	//! sample each sampled draw resolves to. Unused by the full-batch objective,

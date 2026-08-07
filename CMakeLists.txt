@@ -1381,6 +1381,7 @@ set(EXTENSION_SOURCES
     src/cluster_upgma_function.cpp
     src/per_sample_table_function.cpp
     src/id_column_codec.cpp
+    src/miint_isa.cpp
     src/extract_linked_amplicon.cpp
     src/match_short_barcodes.cpp
     src/compute_pileup.cpp
@@ -1388,25 +1389,118 @@ set(EXTENSION_SOURCES
     src/compute_msa_consensus.cpp
     src/MsaConsensus.cpp)
 
-# mmvec's numeric kernel, compiled as its own OBJECT library.
+# ---------------------------------------------------------------------------
+# Runtime instruction-set dispatch
+# ---------------------------------------------------------------------------
 #
 # Eigen picks its packet width at COMPILE time from __AVX__ / __AVX512F__ and does
-# not runtime-dispatch, so reaching a wider instruction set means compiling this
-# source AGAIN with different flags rather than branching inside it. M7 P2 turns
-# that into several variants selected at runtime; P1 establishes the seam with
-# exactly one, so a bisect can tell the refactor apart from the ISA work.
+# not runtime-dispatch; __attribute__((target)) does not help, because under it
+# those macros are undefined at preprocessing time and Eigen still emits SSE2.
+# Reaching a wider instruction set therefore means compiling a source AGAIN with
+# different flags and choosing between the results at load time.
 #
-# OBJECT rather than a static library, matching miint_nanoarrow_ipc: consumers take
-# the object files directly, avoiding an archive that would then have to join
-# DuckDB's install export set.
+# This is the arrangement htslib's htscodecs already uses, and the shipped CI
+# artifact proves it survives the distribution pipeline unchanged -- the published
+# linux_amd64 binary carries rans_*_avx2 / rans_*_avx512, abPOA's AVX-512 aligner
+# and OpenSSL's AVX-512 AES. Nothing here needs a CI or distribution change: the
+# extra objects live inside the one artifact we already publish, which matters
+# because DuckDB's platform string has no CPU-feature component and so cannot
+# select a per-ISA download.
 #
-# It depends on nothing but src/include and Eigen -- mmvec.hpp pulls in no DuckDB
-# headers -- which is what makes recompiling it several times cheap. EIGEN_MPL2_ONLY
-# and EIGEN_DONT_PARALLELIZE reach it through add_compile_definitions above.
-add_library(miint_mmvec_kernel OBJECT src/mmvec_kernel.cpp)
-target_include_directories(miint_mmvec_kernel PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/include)
-target_link_libraries(miint_mmvec_kernel PUBLIC Eigen3::Eigen)
-set_target_properties(miint_mmvec_kernel PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# Probe rather than assume, mirroring htslib's hts_probe_cc.sh: an old toolchain
+# degrades to fewer variants instead of failing the build. x86-64 only -- arm64
+# and wasm vectorize unconditionally, so there is nothing to choose between.
+include(CheckCXXSourceCompiles)
+set(MIINT_ISA_AVX2_FLAGS -mavx2 -mfma)
+set(MIINT_ISA_AVX512_FLAGS -mavx512f -mavx512dq -mavx512vl -mavx512bw -mfma)
+set(MIINT_HAS_AVX2 OFF)
+set(MIINT_HAS_AVX512 OFF)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64" AND NOT EMSCRIPTEN)
+    # Compile a real intrinsic, not just the flag: a compiler can accept -mavx512f
+    # and still lack the headers we would need.
+    #
+    # CMAKE_REQUIRED_FLAGS is a space-separated STRING, not a list -- assigning the
+    # list directly hands the compiler "-mavx2;-mfma" and every probe fails.
+    string(JOIN " " MIINT_ISA_AVX2_FLAGSTR ${MIINT_ISA_AVX2_FLAGS})
+    string(JOIN " " MIINT_ISA_AVX512_FLAGSTR ${MIINT_ISA_AVX512_FLAGS})
+    set(CMAKE_REQUIRED_FLAGS ${MIINT_ISA_AVX2_FLAGSTR})
+    check_cxx_source_compiles(
+        "#include <immintrin.h>
+         int main() { __m256d a = _mm256_set1_pd(1.0); a = _mm256_fmadd_pd(a, a, a); return (int)a[0]; }"
+        MIINT_PROBE_AVX2
+    )
+    set(CMAKE_REQUIRED_FLAGS ${MIINT_ISA_AVX512_FLAGSTR})
+    check_cxx_source_compiles(
+        "#include <immintrin.h>
+         int main() { __m512d a = _mm512_set1_pd(1.0); a = _mm512_fmadd_pd(a, a, a); return (int)_mm512_cvtsd_f64(a); }"
+        MIINT_PROBE_AVX512
+    )
+    unset(CMAKE_REQUIRED_FLAGS)
+    set(MIINT_HAS_AVX2 ${MIINT_PROBE_AVX2})
+    # AVX-512 without AVX2 is not a configuration we build for; the dispatch tiers
+    # are ordered and DetectIsa() clamps through Avx2 on its way down.
+    if(MIINT_PROBE_AVX512 AND MIINT_PROBE_AVX2)
+        set(MIINT_HAS_AVX512 ON)
+    endif()
+endif()
+message(STATUS "miint ISA variants: avx2=${MIINT_HAS_AVX2} avx512=${MIINT_HAS_AVX512}")
+
+# Compile `sources` once per available instruction set, each into its own OBJECT
+# library and its own C++ namespace (via -DMIINT_ISA_VARIANT), and register the
+# lot on a global property the three consuming targets drain.
+#
+# Deliberately generic: mmvec is its first caller, not its intended only one. Any
+# future dense kernel gets its variants with one call rather than a copy of this
+# apparatus. Keep it OPT-IN per kernel -- each variant multiplies compile time and
+# binary size for the sources it covers, which is negligible for one kernel and
+# would not be if applied wholesale.
+#
+# OBJECT rather than static libraries, matching miint_nanoarrow_ipc: consumers take
+# the object files directly, avoiding archives that would then have to join
+# DuckDB's install export set. EIGEN_MPL2_ONLY and EIGEN_DONT_PARALLELIZE reach
+# them through add_compile_definitions above.
+function(miint_add_isa_variants basename)
+    set(variants baseline)
+    if(MIINT_HAS_AVX2)
+        list(APPEND variants avx2)
+    endif()
+    if(MIINT_HAS_AVX512)
+        list(APPEND variants avx512)
+    endif()
+    foreach(variant ${variants})
+        set(target miint_${basename}_${variant})
+        add_library(${target} OBJECT ${ARGN})
+        target_include_directories(${target} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/include)
+        target_link_libraries(${target} PUBLIC Eigen3::Eigen)
+        set_target_properties(${target} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        target_compile_definitions(${target} PRIVATE MIINT_ISA_VARIANT=${variant})
+        # The baseline variant takes NO extra flags -- it must stay bit-identical to
+        # what the build produced before dispatch existed, because it is what the
+        # carved expected values are carved against.
+        if(NOT variant STREQUAL baseline)
+            string(TOUPPER ${variant} variant_upper)
+            target_compile_options(${target} PRIVATE ${MIINT_ISA_${variant_upper}_FLAGS})
+        endif()
+        set_property(GLOBAL APPEND PROPERTY MIINT_ISA_OBJECT_TARGETS ${target})
+    endforeach()
+endfunction()
+
+miint_add_isa_variants(mmvec_kernel src/mmvec_kernel.cpp)
+
+# Every target that consumes the variants also needs to know which exist, so the
+# dispatcher's #ifdefs and the declarations in mmvec_kernel.hpp agree with reality.
+set(MIINT_ISA_DEFINITIONS "")
+if(MIINT_HAS_AVX2)
+    list(APPEND MIINT_ISA_DEFINITIONS MIINT_HAS_AVX2)
+endif()
+if(MIINT_HAS_AVX512)
+    list(APPEND MIINT_ISA_DEFINITIONS MIINT_HAS_AVX512)
+endif()
+get_property(MIINT_ISA_OBJECT_TARGETS GLOBAL PROPERTY MIINT_ISA_OBJECT_TARGETS)
+set(MIINT_ISA_OBJECTS "")
+foreach(t ${MIINT_ISA_OBJECT_TARGETS})
+    list(APPEND MIINT_ISA_OBJECTS $<TARGET_OBJECTS:${t}>)
+endforeach()
 
 if(MIINT_ENABLE_VSEARCH)
     list(APPEND EXTENSION_SOURCES
@@ -1565,7 +1659,8 @@ target_link_libraries(${EXTENSION_NAME}
                       expat::expat
                       Eigen3::Eigen
 )
-target_sources(${EXTENSION_NAME} PRIVATE $<TARGET_OBJECTS:miint_mmvec_kernel>)
+target_sources(${EXTENSION_NAME} PRIVATE ${MIINT_ISA_OBJECTS})
+target_compile_definitions(${EXTENSION_NAME} PRIVATE ${MIINT_ISA_DEFINITIONS})
 if(MIINT_ENABLE_MAFFT)
     target_link_libraries(${EXTENSION_NAME} mafft_parttree)
 endif()
@@ -1705,7 +1800,8 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       expat::expat
                       Eigen3::Eigen
 )
-target_sources(${LOADABLE_EXTENSION_NAME} PRIVATE $<TARGET_OBJECTS:miint_mmvec_kernel>)
+target_sources(${LOADABLE_EXTENSION_NAME} PRIVATE ${MIINT_ISA_OBJECTS})
+target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE ${MIINT_ISA_DEFINITIONS})
 if(MIINT_ENABLE_MAFFT)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} mafft_parttree)
 endif()
@@ -1894,6 +1990,7 @@ set(TEST_SOURCES
     src/deblur.cpp
     test/cpp/test_deblur.cpp
     src/id_column_codec.cpp
+    src/miint_isa.cpp
     test/cpp/test_id_column_codec.cpp
     src/PileupWalker.cpp
     test/cpp/test_compute_pileup.cpp
@@ -1979,7 +2076,8 @@ target_link_libraries(tests
   expat::expat
   Eigen3::Eigen
 )
-target_sources(tests PRIVATE $<TARGET_OBJECTS:miint_mmvec_kernel>)
+target_sources(tests PRIVATE ${MIINT_ISA_OBJECTS})
+target_compile_definitions(tests PRIVATE ${MIINT_ISA_DEFINITIONS})
 if(MIINT_ENABLE_CURL)
     target_link_libraries(tests CURL::libcurl)
     target_compile_definitions(tests PRIVATE MIINT_HAS_CURL)

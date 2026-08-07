@@ -73,22 +73,49 @@ inline int64_t MapRow(const int64_t *map, int64_t r) {
 	return map != nullptr ? map[r] : r;
 }
 
-//! The model equation, evaluated into `out` (row-major, n_rows x d2-1). See the
-//! definition in mmvec_kernel.cpp for the full contract.
+//! The two entry points, declared once and instantiated into one namespace per
+//! instruction set. mmvec_kernel.cpp is compiled once per variant with
+//! `-DMIINT_ISA_VARIANT=<name>`, so each build lands in its own namespace and the
+//! three copies coexist in one binary without a symbol clash.
 //!
-//! NOTE for M7: `ComputeLogits` -- and therefore `Ranks` / `Probs` / `Predict` /
-//! `Score` -- calls this on the READ path, where it runs once per fit rather than
-//! once per iteration and so has no performance stake. That is why the read path
-//! is pinned to the baseline build: it keeps every derived carved value bit-exact
-//! on every CPU, confining instruction-set dependence to the fitted theta alone.
-void FillNonRefLogits(const ParamLayout &l, const double *theta, const int64_t *x_index, int64_t n_rows, Workspace &ws,
-                      double *out);
+//! A macro rather than three hand-written copies because the signatures must not
+//! drift between tiers -- a variant declared with a stale signature would compile
+//! and then dispatch to the wrong thing.
+//!
+//! FillNonRefLogits: the model equation, evaluated into `out` (row-major,
+//! n_rows x d2-1). EvaluateObjective: one evaluation of the negative
+//! log-posterior and its gradient, the hot function -- two thirds of an L-BFGS
+//! fit and two fifths of an Adam one. Full contracts at the definitions.
+#define MIINT_MMVEC_KERNEL_DECLARATIONS                                                                                \
+	void FillNonRefLogits(const ParamLayout &l, const double *theta, const int64_t *x_index, int64_t n_rows,           \
+	                      Workspace &ws, double *out);                                                                 \
+	double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_rows, const int64_t *x_index,       \
+	                         const ObsView &obs, const double *totals, double norm, const double *theta,               \
+	                         Workspace &ws, double *grad);
 
-//! One evaluation of the negative log-posterior and its gradient. This is the
-//! hot function: two thirds of an L-BFGS fit and two fifths of an Adam one. See
-//! the definition in mmvec_kernel.cpp for the full contract.
-double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_rows, const int64_t *x_index,
-                         const ObsView &obs, const double *totals, double norm, const double *theta, Workspace &ws,
-                         double *grad);
+//! Always built, and the only variant guaranteed to exist.
+//!
+//! It is also where the READ path stays. `ComputeLogits` -- and therefore `Ranks`
+//! / `Probs` / `Predict` / `Score` -- calls FillNonRefLogits once per fit rather
+//! than once per iteration, so it has no performance stake in a wider register.
+//! Pinning it here keeps every derived carved value bit-exact on every CPU and
+//! confines instruction-set dependence to the fitted theta alone. Measured: at a
+//! fixed theta the wide variants move `ranks` by 4e-15 and change no top-ranked
+//! feature, so this costs nothing and buys an exact oracle.
+namespace baseline {
+MIINT_MMVEC_KERNEL_DECLARATIONS
+}
+
+#ifdef MIINT_HAS_AVX2
+namespace avx2 {
+MIINT_MMVEC_KERNEL_DECLARATIONS
+}
+#endif
+
+#ifdef MIINT_HAS_AVX512
+namespace avx512 {
+MIINT_MMVEC_KERNEL_DECLARATIONS
+}
+#endif
 
 } // namespace miint::mmvec

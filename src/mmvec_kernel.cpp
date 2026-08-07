@@ -12,7 +12,15 @@
 
 #include <cmath>
 
+#ifndef MIINT_ISA_VARIANT
+// Compiled without the CMake helper (a stray direct compile, or a consumer that
+// added this file to a plain source list). Baseline is the safe reading: it is
+// what the target's default flags produce anyway.
+#define MIINT_ISA_VARIANT baseline
+#endif
+
 namespace miint::mmvec {
+namespace MIINT_ISA_VARIANT {
 
 namespace {
 
@@ -150,12 +158,28 @@ double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_r
 				m = v;
 			}
 		}
+		// The one place a variant is allowed to compute something different, and
+		// the only reason widening pays at all. Keyed off EIGEN_VECTORIZE_AVX
+		// rather than a miint macro so any kernel compiled into a variant gets the
+		// right form without repeating this decision.
+		//
+		// Measured, not assumed: Eigen's packet `exp` is a polynomial that differs
+		// from glibc's by an ulp or so, and which of the two wins depends entirely
+		// on the packet width. At SSE2 -- 2 doubles wide -- glibc's FMA-tuned
+		// scalar `exp` beats it and the vectorized form is a 16% REGRESSION. At 4
+		// and 8 wide it is what turns a 1.15x widening into 1.68x / 2.13x on a
+		// cystic-fibrosis L-BFGS fit. The two only pay together.
+#if defined(EIGEN_VECTORIZE_AVX) || defined(EIGEN_VECTORIZE_AVX512)
+		resids.row(r) = (logits.row(r).array() - m).exp();
+		const double shifted_sum = resids.row(r).sum();
+#else
 		double shifted_sum = 0.0;
 		for (int64_t j = 0; j < l.nref; ++j) {
 			const double e = std::exp(logits(r, j) - m);
 			resids(r, j) = e;
 			shifted_sum += e;
 		}
+#endif
 		// The shifted normalizer, kept as well as its log: it IS the row scale the
 		// probabilities divide by, so recovering it as exp(log_norm - m) would be a
 		// log-and-exp round trip of a number already in hand -- an extra
@@ -229,4 +253,5 @@ double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_r
 	return norm * data + PriorLoss(l, priors, theta);
 }
 
+} // namespace MIINT_ISA_VARIANT
 } // namespace miint::mmvec

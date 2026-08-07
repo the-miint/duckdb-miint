@@ -4,6 +4,7 @@
 // can be compiled again at a wider instruction set; see mmvec_kernel.hpp. This
 // file keeps everything that must NOT move with them -- validation, the read
 // path, the optimizer drivers.
+#include "miint_isa.hpp"
 #include "mmvec_kernel.hpp"
 
 #include "LBFGSpp/LBFGS.h"
@@ -338,6 +339,47 @@ void ResolveBatch(const ModelShape &shape, const MinibatchInputs &inputs, const 
 	}
 }
 
+using EvaluateFn = double (*)(const ParamLayout &, const Priors &, int64_t, const int64_t *, const ObsView &,
+                              const double *, double, const double *, Workspace &, double *);
+
+//! Pick the widest objective variant this build contains, this CPU supports, and
+//! `MIINT_SIMD` permits -- see miint_isa.hpp for the clamping rules.
+EvaluateFn SelectEvaluateObjective() {
+	switch (DetectIsa()) {
+	case IsaLevel::Avx512:
+#ifdef MIINT_HAS_AVX512
+		return &avx512::EvaluateObjective;
+#else
+		break;
+#endif
+	case IsaLevel::Avx2:
+#ifdef MIINT_HAS_AVX2
+		return &avx2::EvaluateObjective;
+#else
+		break;
+#endif
+	case IsaLevel::Baseline:
+		break;
+	}
+	// DetectIsa() already clamps to BuiltIsaCeiling(), so the #else arms above are
+	// unreachable in a consistent build. Falling through to baseline rather than
+	// asserting keeps a mismatch slow instead of fatal.
+	return &baseline::EvaluateObjective;
+}
+
+//! Every FIT-path evaluation goes through here, so one fit uses one kernel from
+//! its first update to its last. The READ path does not: `ComputeLogits` calls
+//! `baseline::FillNonRefLogits` directly, which is what keeps `ranks`, `probs`,
+//! `predict` and `score` bit-exact on every CPU for a given model.
+double EvaluateObjectiveDispatch(const ParamLayout &l, const Priors &priors, int64_t n_rows, const int64_t *x_index,
+                                 const ObsView &obs, const double *totals, double norm, const double *theta,
+                                 Workspace &ws, double *grad) {
+	// Resolved once: this is called 1072 times in a cystic-fibrosis L-BFGS fit and
+	// 196000 times in an Adam one, and CPUID in that loop would be absurd.
+	static const EvaluateFn fn = SelectEvaluateObjective();
+	return fn(l, priors, n_rows, x_index, obs, totals, norm, theta, ws, grad);
+}
+
 //! The full-batch objective packaged for LBFGS++, which needs a callable taking
 //! (x, grad) and returning the value.
 //!
@@ -357,7 +399,7 @@ public:
 
 	double operator()(const Eigen::VectorXd &x, Eigen::VectorXd &grad) {
 		const double loss =
-		    EvaluateObjective(l_, priors_, l_.d1, nullptr, obs_, totals_, 1.0, x.data(), ws_, grad.data());
+		    EvaluateObjectiveDispatch(l_, priors_, l_.d1, nullptr, obs_, totals_, 1.0, x.data(), ws_, grad.data());
 		loss_curve.push_back(loss);
 		if (loss < best_loss) {
 			best_loss = loss;
@@ -415,7 +457,16 @@ std::vector<double> ComputeLogits(const ModelShape &shape, const std::vector<dou
 	Workspace ws;
 	ws.logits.resize(static_cast<size_t>(l.d1 * l.nref));
 	ws.x_main_rows.resize(static_cast<size_t>(l.d1 * l.p));
-	FillNonRefLogits(l, theta.data(), nullptr, l.d1, ws, ws.logits.data());
+	// EXPLICITLY the baseline variant, never the dispatched one. This is the read
+	// path: `ranks`, `probs`, `predict` and `score` all reach the model through
+	// here, and pinning it makes every one of them bit-identical on every CPU for a
+	// given model, so their carved oracles stay exact and instruction-set
+	// dependence is confined to the theta a fit produces. It costs nothing --
+	// this runs once per call, not once per iteration (see above) -- and the
+	// alternative was measured: at a fixed theta the wide variants shift `ranks`
+	// by 4e-15 and change no top-ranked feature, which is harmless in itself but
+	// would have forced a tolerance onto every derived expected value.
+	baseline::FillNonRefLogits(l, theta.data(), nullptr, l.d1, ws, ws.logits.data());
 
 	std::vector<double> out(static_cast<size_t>(l.d1 * l.d2), 0.0);
 	for (int64_t i = 0; i < l.d1; ++i) {
@@ -462,7 +513,8 @@ double FullBatchLossAndGradient(const ModelShape &shape, const Priors &priors, c
 	// the totals are already grouped as n_sums. norm is 1 -- this IS the
 	// objective the minibatch version estimates.
 	const ObsView obs {stats.y_sums.data(), l.d2, nullptr};
-	return EvaluateObjective(l, priors, l.d1, nullptr, obs, stats.n_sums.data(), 1.0, theta.data(), ws, grad.data());
+	return EvaluateObjectiveDispatch(l, priors, l.d1, nullptr, obs, stats.n_sums.data(), 1.0, theta.data(), ws,
+	                                 grad.data());
 }
 
 double BatchNormFactor(BatchNorm mode, double x_total, int64_t n_samples, int64_t batch_size) {
@@ -510,8 +562,8 @@ double MinibatchLossAndGradient(const ModelShape &shape, const Priors &priors, c
 	ResolveBatch(shape, inputs, batch, nullptr, ws);
 
 	const ObsView obs {inputs.y_dense.data(), shape.n_features_y, ws.sample_index.data()};
-	return EvaluateObjective(l, priors, n_rows, ws.x_index.data(), obs, ws.row_totals.data(), norm, theta.data(), ws,
-	                         grad.data());
+	return EvaluateObjectiveDispatch(l, priors, n_rows, ws.x_index.data(), obs, ws.row_totals.data(), norm,
+	                                 theta.data(), ws, grad.data());
 }
 
 Model FitLbfgsFromInit(const ModelShape &shape, const Priors &priors, const SufficientStats &stats,
@@ -785,8 +837,8 @@ Model FitAdamWithIndices(const ModelShape &shape, const Priors &priors, const Mi
 		} else {
 			ResolveBatch(shape, inputs, batch, sample_totals.data(), ws);
 			const ObsView batch_obs {obs.base, obs.stride, ws.sample_index.data()};
-			loss = EvaluateObjective(l, priors, params.batch_size, ws.x_index.data(), batch_obs, ws.row_totals.data(),
-			                         norm, model.theta.data(), ws, grad.data());
+			loss = EvaluateObjectiveDispatch(l, priors, params.batch_size, ws.x_index.data(), batch_obs,
+			                                 ws.row_totals.data(), norm, model.theta.data(), ws, grad.data());
 		}
 		if (!std::isfinite(loss)) {
 			throw std::invalid_argument("mmvec: Adam diverged -- the minibatch loss became non-finite at update " +
