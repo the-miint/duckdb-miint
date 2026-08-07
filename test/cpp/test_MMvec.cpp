@@ -2442,11 +2442,31 @@ TEST_CASE("every instruction-set variant computes the same objective", "[mmvec][
 	// against, so it is asserted exactly rather than within a band.
 	REQUIRE(std::isfinite(base.loss));
 
+	// MIINT_HAS_* says the BUILD contains the variant, not that this CPU can run
+	// it -- the two are set by different things, a compiler probe and a cpuid
+	// check. Everywhere else that distinction is handled for us, because the
+	// dispatcher goes through DetectIsa() and clamps to CpuIsaCeiling(); this test
+	// is the one place that calls a variant directly, precisely so it can compare
+	// them, so it is also the one place that has to clamp by hand. Without this it
+	// dies with SIGILL rather than a failure on any machine that compiled AVX-512
+	// but cannot execute it -- which is most CI runners, and is how it was found.
+	auto runnable = [](miint::IsaLevel level) {
+		return miint::CpuIsaCeiling() >= level;
+	};
+
 #ifdef MIINT_HAS_AVX2
-	RequireAgrees("avx2", base, EvaluateWith(avx2::FillNonRefLogits, avx2::EvaluateObjective, c, kTheta));
+	if (runnable(miint::IsaLevel::Avx2)) {
+		RequireAgrees("avx2", base, EvaluateWith(avx2::FillNonRefLogits, avx2::EvaluateObjective, c, kTheta));
+	} else {
+		WARN("avx2 variant is built but this CPU cannot execute it; agreement not checked here");
+	}
 #endif
 #ifdef MIINT_HAS_AVX512
-	RequireAgrees("avx512", base, EvaluateWith(avx512::FillNonRefLogits, avx512::EvaluateObjective, c, kTheta));
+	if (runnable(miint::IsaLevel::Avx512)) {
+		RequireAgrees("avx512", base, EvaluateWith(avx512::FillNonRefLogits, avx512::EvaluateObjective, c, kTheta));
+	} else {
+		WARN("avx512 variant is built but this CPU cannot execute it; agreement not checked here");
+	}
 #endif
 }
 
