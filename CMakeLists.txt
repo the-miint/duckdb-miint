@@ -1382,6 +1382,7 @@ set(EXTENSION_SOURCES
     src/per_sample_table_function.cpp
     src/id_column_codec.cpp
     src/miint_isa.cpp
+    src/miint_parallel.cpp
     src/extract_linked_amplicon.cpp
     src/match_short_barcodes.cpp
     src/compute_pileup.cpp
@@ -1906,6 +1907,8 @@ set(TEST_SOURCES
     src/mmvec_relation.cpp
     test/cpp/test_MMvec.cpp
     test/cpp/test_MiintIsa.cpp
+    src/miint_parallel.cpp
+    test/cpp/test_MiintParallel.cpp
     test/cpp/test_MMvecRelation.cpp
     src/cluster_kmeans.cpp
     test/cpp/test_ClusterKmeans.cpp
