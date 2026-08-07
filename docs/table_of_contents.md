@@ -53,7 +53,7 @@ SELECT * FROM align_minimap2(getvariable('reads'), subject_table := 'refs');
 - [Sequence search](search.md) - Search sequences against a reference database.
 - [Taxonomic classification](classification.md) - Classify sequences by minimizer/k-mer content (RYpe).
 - [Profiling & feature tables](profiling.md) - Abundance profiling (sylph) and OGU feature tables (Woltka).
-- [Absolute quantification](absolute_quantification.md) - Turn compositional read counts into absolute quantities with synDNA spike-ins (Zaramela et al. 2022).
+- [Absolute quantification](absolute_quantification.md) - Turn compositional read counts into absolute quantities: cell counts from synDNA spike-ins (Zaramela et al. 2022), and copies of each ORF's ssRNA.
 
 ## Phylogeny & diversity
 

@@ -1340,6 +1340,7 @@ set(EXTENSION_SOURCES
     src/absquant_readers.cpp
     src/absquant_function.cpp
     src/absquant_cell_counts_function.cpp
+    src/absquant_orf_copies_function.cpp
     src/cluster_kmeans_function.cpp
     src/cluster_upgma_function.cpp
     src/per_sample_table_function.cpp

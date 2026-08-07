@@ -29,11 +29,13 @@ using miint::absquant::CellCountsMetric;
 using miint::absquant::CellCountsOptions;
 using miint::absquant::CellCountsResult;
 using miint::absquant::ComputeCellCounts;
+using miint::absquant::ComputeOrfCopies;
 using miint::absquant::CountObservation;
 using miint::absquant::CoverageObservation;
 using miint::absquant::DenominatorColumnName;
 using miint::absquant::DuplicatedIds;
 using miint::absquant::FeatureLength;
+using miint::absquant::FeatureTableValue;
 using miint::absquant::FitOptions;
 using miint::absquant::FitResult;
 using miint::absquant::FitSyndnaModels;
@@ -43,10 +45,13 @@ using miint::absquant::IsUsableSampleParameter;
 using miint::absquant::Linregress;
 using miint::absquant::LinregressResult;
 using miint::absquant::MetricName;
+using miint::absquant::OrfCoords;
+using miint::absquant::OrfCopiesResult;
 using miint::absquant::ParseCellCountsMetric;
 using miint::absquant::RegularizedIncompleteBeta;
 using miint::absquant::SampleCellParams;
 using miint::absquant::SampleMass;
+using miint::absquant::SampleOrfParams;
 using miint::absquant::SampleRegression;
 using miint::absquant::StudentTSurvival;
 using miint::absquant::SyndnaConcentration;
@@ -246,10 +251,67 @@ struct TinyFit {
 	}
 };
 
-// data/syndna/README.md's bound for the cells oracles. Looser than the fit
-// oracles' 1e-11 because these are untruncated doubles reaching ~1e13, so the
-// bound has to be relative.
-constexpr double kCellsTol = 1e-9;
+// data/syndna/README.md's bound for the cells AND the ORF oracles -- one row of
+// its table, so one constant here. Looser than the fit oracles' 1e-11 because
+// these are untruncated doubles reaching ~1e13, so the bound has to be
+// relative.
+//
+// Both ORF oracles in fact reproduce EXACTLY, all 26 golden cells at a
+// difference of zero, because that chain is multiply/divide/fabs with no pow or
+// log10 anywhere. The bound stays where it is rather than dropping to 0 for
+// them, because exactness is a property of one build and not of the arithmetic:
+// GCC contracts a*b/c into an FMA by default, so the last bit is the compiler's
+// to choose. It is still worth knowing which side of that line a future ORF
+// failure lands on -- anything above about 1e-16 there is a real regression,
+// not tolerance.
+constexpr double kFeatureTableTol = 1e-9;
+
+// One cell of a DENSE golden, already selected out of whichever oracle file it
+// came from.
+struct GoldenCell {
+	std::string sample_id;
+	std::string feature_id;
+	double value = 0.0;
+};
+
+// Compares a long-form output feature table against a dense golden in BOTH
+// directions.
+//
+// The golden is dense where pysyndna's pivot+fillna made it so, and miint omits
+// zero-valued cells, so a golden 0.0 is matched against an ABSENT cell -- that
+// is the D10 claim, and comparing this way proves it rather than assuming it.
+// The reverse direction still catches any cell miint invents.
+//
+// Shared by the cells and the ORF oracles because both functions return the
+// same sparse shape under the same invariant; only the selection of golden rows
+// differs, and that is the caller's business.
+void CheckValuesAgainstGolden(const std::vector<FeatureTableValue> &values, const std::vector<GoldenCell> &gold,
+                              const std::string &label) {
+	std::map<std::pair<std::string, std::string>, double> mine;
+	for (const auto &cell : values) {
+		mine[{cell.sample_id, cell.feature_id}] = cell.value;
+	}
+	// A duplicated cell would otherwise hide behind the map.
+	REQUIRE(mine.size() == values.size());
+	// An empty golden would make every check below vacuous, so a mis-selected
+	// oracle fails here rather than passing silently.
+	REQUIRE(!gold.empty());
+
+	std::set<std::pair<std::string, std::string>> golden_keys;
+	for (const auto &row : gold) {
+		const std::pair<std::string, std::string> key {row.sample_id, row.feature_id};
+		golden_keys.insert(key);
+		INFO("cell (" << key.first << ", " << key.second << ") of " << label);
+		const auto found = mine.find(key);
+		const double got = (found == mine.end()) ? 0.0 : found->second;
+		CHECK(ParityOk(got, row.value, kFeatureTableTol));
+	}
+
+	for (const auto &cell : values) {
+		INFO("cell (" << cell.sample_id << ", " << cell.feature_id << ") is not in " << label);
+		CHECK(golden_keys.count({cell.sample_id, cell.feature_id}) == 1);
+	}
+}
 
 struct CellsFixture {
 	std::vector<CountObservation> counts;
@@ -329,12 +391,11 @@ CellsFixture LoadCellsFixture(const std::string &prefix, CellCountsMetric metric
 	return fixture;
 }
 
-// Compares cell-count output against a committed oracle in BOTH directions.
+// Compares cell-count output against one metric's rows of a committed oracle.
 //
-// The golden is DENSE where pysyndna's pivot+fillna made it so, and miint omits
-// zero-valued cells, so a golden 0.0 is matched against an absent cell -- that
-// is the D10 claim, and comparing this way proves it rather than assuming it.
-// The reverse direction still catches any cell miint invents.
+// The cells oracles carry all four metrics in one file, so the selection is
+// what distinguishes this from the ORF case; everything else is the shared
+// two-directional comparison above.
 void CheckCellsAgainstOracle(const CellCountsResult &result, const std::string &oracle_path,
                              const std::string &metric) {
 	const auto gold = ReadCsv(oracle_path);
@@ -343,38 +404,14 @@ void CheckCellsAgainstOracle(const CellCountsResult &result, const std::string &
 	const size_t g_feature = gold.Col("feature_id");
 	const size_t g_value = gold.Col("value");
 
-	std::map<std::pair<std::string, std::string>, double> mine;
-	for (const auto &cell : result.values) {
-		mine[{cell.sample_id, cell.feature_id}] = cell.value;
-	}
-	// A duplicated cell would otherwise hide behind the map.
-	REQUIRE(mine.size() == result.values.size());
-
-	size_t gold_rows = 0;
+	std::vector<GoldenCell> cells;
 	for (const auto &row : gold.rows) {
 		if (row[g_metric] != metric) {
 			continue;
 		}
-		++gold_rows;
-		const std::pair<std::string, std::string> key {row[g_sample], row[g_feature]};
-		INFO("cell (" << key.first << ", " << key.second << ") of " << oracle_path);
-		const auto found = mine.find(key);
-		const double got = (found == mine.end()) ? 0.0 : found->second;
-		CHECK(ParityOk(got, AsDouble(row[g_value]), kCellsTol));
+		cells.push_back({row[g_sample], row[g_feature], AsDouble(row[g_value])});
 	}
-	REQUIRE(gold_rows > 0);
-
-	for (const auto &cell : result.values) {
-		bool in_gold = false;
-		for (const auto &row : gold.rows) {
-			if (row[g_metric] == metric && row[g_sample] == cell.sample_id && row[g_feature] == cell.feature_id) {
-				in_gold = true;
-				break;
-			}
-		}
-		INFO("cell (" << cell.sample_id << ", " << cell.feature_id << ") is not in " << oracle_path);
-		CHECK(in_gold);
-	}
+	CheckValuesAgainstGolden(result.values, cells, oracle_path + " (" + metric + ")");
 }
 
 } // namespace
@@ -880,7 +917,7 @@ TEST_CASE("FitSyndnaModels accounts for every sample it was given", "[absquant]"
 	CHECK(result.models.size() + result.filtered_sample_ids.size() + result.unfittable_sample_ids.size() == 11);
 
 	// b6 totals 20 reads across all samples, well under 50.
-	CHECK(result.dropped_syndna_ids.size() == 1);
+	REQUIRE(result.dropped_syndna_ids.size() == 1);
 	CHECK(result.dropped_syndna_ids[0] == "b6");
 }
 
@@ -906,7 +943,7 @@ TEST_CASE("FitSyndnaModels does not rescale the mass-fraction denominator", "[ab
 
 	const auto result = FitSyndnaModels(counts, concentrations, masses, options);
 	REQUIRE(result.models.size() == 1);
-	CHECK(result.dropped_syndna_ids.size() == 1);
+	REQUIRE(result.dropped_syndna_ids.size() == 1);
 	CHECK(result.dropped_syndna_ids[0] == "f4");
 
 	// With the full denominator the masses come back out as exactly the
@@ -946,7 +983,7 @@ TEST_CASE("FitSyndnaModels drops low-count synDNAs before filtering samples", "[
 	REQUIRE(kept.models.size() == 1);
 	CHECK(kept.models[0].sample_id == "g");
 	CHECK(kept.dropped_syndna_ids.empty());
-	CHECK(kept.filtered_sample_ids.size() == 1);
+	REQUIRE(kept.filtered_sample_ids.size() == 1);
 	CHECK(kept.filtered_sample_ids[0] == "bad");
 
 	// Three points, and they are not collinear (x = 3, 2, log10(5)), so the fit
@@ -962,7 +999,7 @@ TEST_CASE("FitSyndnaModels drops low-count synDNAs before filtering samples", "[
 	const std::vector<SampleMass> one_mass = {{"g", 1.11}};
 	const auto dropped = FitSyndnaModels(good, concentrations, one_mass, options);
 	REQUIRE(dropped.models.size() == 1);
-	CHECK(dropped.dropped_syndna_ids.size() == 1);
+	REQUIRE(dropped.dropped_syndna_ids.size() == 1);
 	CHECK(dropped.dropped_syndna_ids[0] == "f3");
 	CHECK(CloseEnough(dropped.models[0].fit.slope, 1.0, 1e-12, 1e-13));
 	CHECK(dropped.models[0].fit.stderr_ == 0.0);
@@ -1030,7 +1067,7 @@ TEST_CASE("FitSyndnaModels excludes zero counts before taking the log", "[absqua
 	// drops it as well -- the same outcome pysyndna reaches from an all-zero row
 	// of its dense table, which is why miint can accept sparse input without
 	// needing to tell "zero everywhere" apart from "absent".
-	CHECK(zeroed.dropped_syndna_ids.size() == 1);
+	REQUIRE(zeroed.dropped_syndna_ids.size() == 1);
 	CHECK(zeroed.dropped_syndna_ids[0] == "f4");
 
 	// Omitting the zero row entirely -- what a sparse long-form relation
@@ -1975,7 +2012,7 @@ TEST_CASE("ComputeCellCounts reports a sample whose every cell came out zero", "
 
 		const auto result = fixture.Run();
 		CHECK(result.zero_valued_sample_ids == std::vector<std::string> {"s1"});
-		CHECK(result.values.size() == 1);
+		REQUIRE(result.values.size() == 1);
 		CHECK(result.values[0].sample_id == "s2");
 	}
 }
@@ -2220,6 +2257,12 @@ TEST_CASE("ComputeCellCounts rejects malformed relations", "[absquant]") {
 			fixture.counts[0].count = bad;
 			CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
 			CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s1 / f1'"));
+			// Naming the message, not just the cell: an infinite count reaches
+			// the arithmetic as 10^(+inf) and the overflow guard refuses it too,
+			// pointing at the model coefficients and the extraction parameters
+			// instead. Only the zero case distinguishes the two checks without
+			// this, so the non-finite ones would otherwise pass either way.
+			CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("read counts"));
 		}
 	}
 
@@ -2501,4 +2544,605 @@ TEST_CASE("ComputeCellCounts checks the call before the data", "[absquant]") {
 	malformed.counts.push_back({"s1", "f9", 100.0});
 	CHECK_THROWS_WITH(malformed.Run(), ContainsSubstring("'s1 / f1'"));
 	CHECK_THROWS_WITH(malformed.Run(), !ContainsSubstring("'f9'"));
+}
+
+namespace {
+
+struct OrfFixture {
+	std::vector<CountObservation> counts;
+	std::vector<OrfCoords> coords;
+	std::vector<SampleOrfParams> params;
+
+	OrfCopiesResult Run() const {
+		return ComputeOrfCopies(counts, coords, params);
+	}
+};
+
+// Loads one ORF fixture family ("orf" = Set A, pysyndna's own; "orfb" = Set B,
+// the synthetic filter case).
+OrfFixture LoadOrfFixture(const std::string &prefix) {
+	OrfFixture fixture;
+	const std::string dir = "data/syndna/";
+
+	const auto counts = ReadCsv(dir + prefix + "_counts.csv");
+	const size_t c_sample = counts.Col("sample_id");
+	const size_t c_feature = counts.Col("feature_id");
+	const size_t c_value = counts.Col("value");
+	for (const auto &row : counts.rows) {
+		// The DuckDB reader drops zero-valued cells before the core ever sees
+		// them (the sparse invariant), so the fixture loader must too -- these
+		// CSVs are stored as dense as pysyndna's own input.
+		const double value = AsDouble(row[c_value]);
+		if (value == 0.0) {
+			continue;
+		}
+		fixture.counts.push_back({row[c_sample], row[c_feature], value});
+	}
+
+	const auto coords = ReadCsv(dir + prefix + "_coords.csv");
+	const size_t o_feature = coords.Col("feature_id");
+	const size_t o_start = coords.Col("ogu_orf_start");
+	const size_t o_end = coords.Col("ogu_orf_end");
+	for (const auto &row : coords.rows) {
+		fixture.coords.push_back({row[o_feature], AsDouble(row[o_start]), AsDouble(row[o_end])});
+	}
+
+	// An empty cell is pysyndna's NaN, which is what SQL NULL will arrive as;
+	// AsDouble turns it into one. Set B's `rnan` sample is exactly that.
+	const auto params = ReadCsv(dir + prefix + "_params.csv");
+	const size_t p_sample = params.Col("sample_id");
+	const size_t p_mass = params.Col("calc_mass_sample_aliquot_input_g");
+	const size_t p_conc = params.Col("total_rna_concentration_ng_ul");
+	const size_t p_vol = params.Col("vol_extracted_elution_ul");
+	const size_t p_reads = params.Col("total_biological_reads_r1r2");
+	for (const auto &row : params.rows) {
+		fixture.params.push_back({row[p_sample], AsDouble(row[p_mass]), AsDouble(row[p_conc]), AsDouble(row[p_vol]),
+		                          AsDouble(row[p_reads])});
+	}
+	return fixture;
+}
+
+// Compares ORF copy output against a committed oracle. Every row of an ORF
+// oracle belongs to the one metric this function computes, so unlike the cells
+// case there is nothing to select -- the whole file is the golden.
+void CheckOrfAgainstOracle(const OrfCopiesResult &result, const std::string &oracle_path) {
+	const auto gold = ReadCsv(oracle_path);
+	const size_t g_sample = gold.Col("sample_id");
+	const size_t g_feature = gold.Col("feature_id");
+	const size_t g_value = gold.Col("value");
+
+	std::vector<GoldenCell> cells;
+	for (const auto &row : gold.rows) {
+		cells.push_back({row[g_sample], row[g_feature], AsDouble(row[g_value])});
+	}
+	CheckValuesAgainstGolden(result.values, cells, oracle_path);
+}
+
+// The smallest input ComputeOrfCopies accepts, for pinning one factor of the
+// chain at a time. Every number is round: f1 spans 100 bases and f2 spans 200,
+// the sample has 1000 biological reads, 2 ng/uL over 50 uL is 1e-7 g of ssRNA,
+// and half a gram of sample went into the extraction.
+struct TinyOrf {
+	std::vector<CountObservation> counts = {{"s1", "f1", 100.0}, {"s1", "f2", 400.0}};
+	std::vector<OrfCoords> coords = {{"f1", 1.0, 100.0}, {"f2", 201.0, 400.0}};
+	std::vector<SampleOrfParams> params = {{"s1", 0.5, 2.0, 50.0, 1000.0}};
+
+	OrfCopiesResult Run() const {
+		return ComputeOrfCopies(counts, coords, params);
+	}
+	// Value of one cell, or NaN if it was dropped.
+	double ValueOf(const std::string &sample_id, const std::string &feature_id) const {
+		for (const auto &cell : Run().values) {
+			if (cell.sample_id == sample_id && cell.feature_id == feature_id) {
+				return cell.value;
+			}
+		}
+		return std::nan("");
+	}
+};
+
+} // namespace
+
+TEST_CASE("ComputeOrfCopies reproduces pysyndna's ORF copy goldens", "[absquant]") {
+	// Set A: pysyndna's own RNA fixture, two metatranscriptomes against ten
+	// OGU+ORFs. No options to set -- this workflow has no standard curve, no
+	// coverage filter and no r^2 gate, so the oracle pins the entire chain.
+	const auto result = LoadOrfFixture("orf").Run();
+	CheckOrfAgainstOracle(result, "data/syndna/orf_oracle.csv");
+
+	// 20 dense golden cells, of which 9 are zero because their read count is --
+	// dropped by the reader, and matched above against an absent cell.
+	CHECK(result.values.size() == 11);
+	CHECK(result.filtered_sample_ids.empty());
+}
+
+TEST_CASE("ComputeOrfCopies reproduces the Set B goldens and filters `rnan`", "[absquant]") {
+	// Set B exists for one reason: `rnan` has a NULL calc_mass_sample_aliquot_input_g
+	// and is therefore absent from the oracle. pysyndna's REQUIRED_PARAM_KEYS
+	// screen drops it (quant_orfs.py:313-317) rather than dividing by NaN, and
+	// the golden is what pins that -- a port that kept the sample would emit
+	// three NaN cells the parity check would catch in both directions.
+	const auto fixture = LoadOrfFixture("orfb");
+	const auto result = fixture.Run();
+	CheckOrfAgainstOracle(result, "data/syndna/orfb_oracle.csv");
+
+	// Two samples x three ORFs, less the two cells whose count is zero.
+	CHECK(result.values.size() == 4);
+	CHECK(result.filtered_sample_ids == std::vector<std::string> {"rnan"});
+	for (const auto &cell : result.values) {
+		CHECK(cell.sample_id != "rnan");
+	}
+
+	// ... and `rnan` really was in the input, so the assertion above is about
+	// the filter rather than about a fixture that never had the sample.
+	bool counted = false;
+	for (const auto &row : fixture.counts) {
+		counted = counted || row.sample_id == "rnan";
+	}
+	CHECK(counted);
+}
+
+TEST_CASE("ComputeOrfCopies measures an ORF inclusively and without direction", "[absquant]") {
+	// Both halves of `|end - start| + 1`, which pysyndna spells out in three
+	// statements (quant_orfs.py:50-57) and which four of Set A's ten features
+	// depend on.
+	const TinyOrf base;
+	const double v = base.ValueOf("s1", "f1");
+	REQUIRE(std::isfinite(v));
+	REQUIRE(v > 0.0);
+
+	// Reverse strand: start > end is legal and spans the same bases, so it must
+	// give the same answer bit for bit rather than a negative length, which
+	// would flip the sign of every copy count.
+	TinyOrf reversed;
+	reversed.coords[0] = {"f1", 100.0, 1.0};
+	CHECK(reversed.ValueOf("s1", "f1") == v);
+
+	// Inclusive: a single-base ORF has length 1, not 0. Without the +1 this
+	// divides by zero and returns inf, which is the failure the constant guards
+	// against; with a wrong +2 it would merely be quietly off.
+	TinyOrf single;
+	single.coords[0] = {"f1", 42.0, 42.0};
+	const double one_base = single.ValueOf("s1", "f1");
+	REQUIRE(std::isfinite(one_base));
+	CHECK(CloseEnough(one_base, v * 100.0, 1e-14, 0.0));
+
+	// Length is a denominator: an endpoint at 200 rather than 100 doubles the
+	// span to 200 bases and halves the value. Written as an endpoint rather than
+	// as a length so an off-by-one in the span is visible here.
+	TinyOrf longer;
+	longer.coords[0].ogu_orf_end = 200.0;
+	CHECK(CloseEnough(longer.ValueOf("s1", "f1"), v / 2.0, 1e-14, 0.0));
+}
+
+TEST_CASE("ComputeOrfCopies matches pysyndna's published copies-per-gram table", "[absquant]") {
+	// The one factor that is pure arithmetic on the coordinates, pinned against
+	// pysyndna's OWN fixture table (tests/test_quant_orfs.py:39-43) rather than
+	// against this port's oracle. That makes it an independent check on both the
+	// 340 g/mole constant and the inclusive length -- the oracle would agree
+	// with a port that had the same two mistakes it does.
+	//
+	// The rest of the chain is arranged to be exactly 1: the read count equals
+	// the sample's total biological reads, 1e7 ng/uL over 100 uL is exactly one
+	// gram of ssRNA, and one gram of sample went in. What is left IS
+	// copies_per_g_ogu_orf_ss_rna.
+	struct Published {
+		const char *feature_id;
+		double start;
+		double end;
+		double copies_per_g;
+	};
+	const Published table[] = {
+	    {"G000005825_1", 816, 2168, 1.3091041e18},           {"G000005825_2", 2348, 3490, 1.5496219e18},
+	    {"G000005825_3", 3744, 3959, 8.2000827e18},          {"G000005825_4", 3971, 5086, 1.5871128e18},
+	    {"G000005825_5", 5098, 5373, 6.4174561e18},          {"G900163845_3247", 3392209, 3390413, 9.8565268e17},
+	    {"G900163845_3248", 3393051, 3392206, 2.0936381e18}, {"G900163845_3249", 3393938, 3393048, 1.9878988e18},
+	    {"G900163845_3250", 3394702, 3393935, 2.3062733e18}, {"G900163845_3251", 3395077, 3395721, 2.7460742e18}};
+
+	for (const auto &row : table) {
+		OrfFixture fixture;
+		fixture.counts = {{"s1", row.feature_id, 1000.0}};
+		fixture.coords = {{row.feature_id, row.start, row.end}};
+		fixture.params = {{"s1", 1.0, 1e7, 100.0, 1000.0}};
+
+		const auto result = fixture.Run();
+		INFO("feature " << row.feature_id);
+		REQUIRE(result.values.size() == 1);
+		// The table is printed to eight significant figures, so that is the
+		// most this can assert; the committed oracle carries the full precision.
+		CHECK(CloseEnough(result.values[0].value, row.copies_per_g, 1e-7, 0.0));
+	}
+}
+
+TEST_CASE("ComputeOrfCopies scales as the method requires", "[absquant]") {
+	// The oracles pin the whole chain at once; these pin each factor's role
+	// separately, so an inverted division or a swapped parameter column is
+	// localized rather than showing up as "all 11 values differ".
+	const TinyOrf base;
+	const double v = base.ValueOf("s1", "f1");
+	REQUIRE(std::isfinite(v));
+	REQUIRE(v > 0.0);
+
+	// The absolute value first, so that everything below is anchored rather than
+	// merely self-consistent: a chain that is wrong by a constant factor
+	// satisfies every ratio in this test. Worked out from the fixture's own
+	// numbers, away from this implementation --
+	//
+	//   fraction     = 100 / 1000                          = 0.1
+	//   g_total      = 2 * 50 / 1e9                         = 1e-7
+	//   copies_per_g = 6.02214076e23 / (100 * 340)          = 1.7712178705882353e19
+	//   value        = 0.1 * 1e-7 * 1.7712178705882353e19 / 0.5
+	//
+	// -- and f2 is 4x the reads over 2x the length, so exactly twice f1.
+	CHECK(CloseEnough(v, 354243574117.64703, 1e-12, 0.0));
+	CHECK(CloseEnough(base.ValueOf("s1", "f2"), 708487148235.2941, 1e-12, 0.0));
+
+	// The read count is a numerator: twice the reads on this ORF, twice the
+	// copies of it.
+	TinyOrf counted;
+	counted.counts[0].count *= 2.0;
+	CHECK(CloseEnough(counted.ValueOf("s1", "f1"), v * 2.0, 1e-14, 0.0));
+
+	// ... but only because it is a FRACTION of the sample's reads: twice the
+	// biological reads with the same count on this ORF is half the share, so
+	// half the copies. This is the factor a port is likeliest to drop entirely,
+	// since omitting it changes nothing about the shape of the answer.
+	TinyOrf deeper;
+	deeper.params[0].total_biological_reads_r1r2 *= 2.0;
+	CHECK(CloseEnough(deeper.ValueOf("s1", "f1"), v / 2.0, 1e-14, 0.0));
+
+	// The extracted ssRNA mass is a numerator, and reaches the value through
+	// two separate columns whose product it is -- so both are checked, and a
+	// port that read the volume where it meant the concentration would still
+	// pass one of them.
+	TinyOrf concentrated;
+	concentrated.params[0].total_rna_concentration_ng_ul *= 2.0;
+	CHECK(CloseEnough(concentrated.ValueOf("s1", "f1"), v * 2.0, 1e-14, 0.0));
+
+	TinyOrf eluted;
+	eluted.params[0].vol_extracted_elution_ul *= 2.0;
+	CHECK(CloseEnough(eluted.ValueOf("s1", "f1"), v * 2.0, 1e-14, 0.0));
+
+	// The sample aliquot is the final denominator, and the one that makes the
+	// answer per-gram-of-sample rather than per-extraction: twice the sample in,
+	// half the copies per gram.
+	TinyOrf heavier;
+	heavier.params[0].calc_mass_sample_aliquot_input_g *= 2.0;
+	CHECK(CloseEnough(heavier.ValueOf("s1", "f1"), v / 2.0, 1e-14, 0.0));
+
+	// Every cell is per-sample: a second sample with its own parameters must not
+	// disturb the first.
+	TinyOrf two_samples;
+	two_samples.counts.push_back({"s2", "f1", 100.0});
+	two_samples.params.push_back({"s2", 1.0, 2.0, 50.0, 1000.0});
+	CHECK(CloseEnough(two_samples.ValueOf("s1", "f1"), v, 1e-14, 0.0));
+	CHECK(CloseEnough(two_samples.ValueOf("s2", "f1"), v / 2.0, 1e-14, 0.0));
+}
+
+TEST_CASE("ComputeOrfCopies screens all four parameter columns", "[absquant]") {
+	// pysyndna filters on REQUIRED_PARAM_KEYS, which is the union of its
+	// sample-info and RNA-prep key lists (quant_orfs.py:21-22) -- all four
+	// columns, not just the ones that happen to be denominators. Walking them by
+	// pointer-to-member is what makes a fifth column, or a forgotten fourth,
+	// fail here rather than at a user's query.
+	double SampleOrfParams::*const columns[] = {
+	    &SampleOrfParams::calc_mass_sample_aliquot_input_g, &SampleOrfParams::total_rna_concentration_ng_ul,
+	    &SampleOrfParams::vol_extracted_elution_ul, &SampleOrfParams::total_biological_reads_r1r2};
+	REQUIRE(std::end(columns) - std::begin(columns) == 4);
+
+	// NaN is SQL NULL, and negative is a value that cannot be what it claims to
+	// be. Infinity is miint's own addition (see IsUsableSampleParameter), and
+	// what pysyndna does with it here depends on WHICH column carries it: an
+	// infinite denominator (the biological reads, the aliquot mass) collapses the
+	// sample to zeros, while an infinite numerator (the concentration, the
+	// elution volume) writes +inf into every cell of it. Two different wrong
+	// answers from one unusable input, and reporting it as a bad parameter is the
+	// difference between a diagnosis and a mystery.
+	for (const double bad : {std::nan(""), -1.0, std::numeric_limits<double>::infinity()}) {
+		for (const auto column : columns) {
+			TinyOrf fixture;
+			fixture.params[0].*column = bad;
+			const auto result = fixture.Run();
+			INFO("bad value " << bad);
+			CHECK(result.filtered_sample_ids == std::vector<std::string> {"s1"});
+			CHECK(result.values.empty());
+		}
+	}
+
+	// Zero passes this filter, exactly as pysyndna's strict `< 0` does. Checked
+	// on the two columns for which zero stays a legal input -- a blank
+	// extraction really can yield no ssRNA -- because for the two denominators
+	// zero is refused outright, which is the validation pass's business rather
+	// than the filter's.
+	for (const auto column :
+	     {&SampleOrfParams::total_rna_concentration_ng_ul, &SampleOrfParams::vol_extracted_elution_ul}) {
+		TinyOrf fixture;
+		fixture.params[0].*column = 0.0;
+		CHECK(fixture.Run().filtered_sample_ids.empty());
+	}
+}
+
+TEST_CASE("ComputeOrfCopies rejects malformed relations", "[absquant]") {
+	using Catch::Matchers::ContainsSubstring;
+	constexpr double kInf = std::numeric_limits<double>::infinity();
+
+	SECTION("a duplicated counts cell") {
+		// Every relation here is keyed, and a repeat means the caller's join
+		// fanned out. pysyndna cannot express one -- its input is a biom table,
+		// unique by construction -- so this is a check the long-form shape needs
+		// and the reference implementation has no equivalent of.
+		TinyOrf fixture;
+		fixture.counts.push_back({"s1", "f1", 100.0});
+		CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s1 / f1'"));
+	}
+
+	SECTION("a duplicated coordinate row") {
+		TinyOrf fixture;
+		fixture.coords.push_back({"f1", 1.0, 100.0});
+		CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'f1'"));
+	}
+
+	SECTION("a duplicated parameter row") {
+		TinyOrf fixture;
+		fixture.params.push_back({"s1", 0.5, 2.0, 50.0, 1000.0});
+		CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s1'"));
+	}
+
+	SECTION("a read count that is negative or not finite") {
+		for (const double bad : {-1.0, kInf, -kInf, std::nan("")}) {
+			TinyOrf fixture;
+			fixture.counts[0].count = bad;
+			CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
+			CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s1 / f1'"));
+			// The MESSAGE matters here, not just that something threw. An
+			// infinite or NaN count sails through to the arithmetic and comes
+			// back as a non-finite value, so the overflow guard would refuse it
+			// too -- with a message sending the user to check the ORF
+			// coordinates and the extraction parameters, neither of which is
+			// wrong. Asserting only that it throws lets this check be deleted
+			// with nothing but the diagnosis changing, which is exactly how a
+			// mutation survived here.
+			CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("read counts"));
+		}
+	}
+
+	SECTION("a zero read count is legal, unlike in the cell-count chain") {
+		// The difference is the log10. ComputeCellCounts refuses a zero count
+		// because log10(0) under a negative slope returns an INFINITE cell count;
+		// nothing here takes a logarithm, so a zero count simply means no copies
+		// of that ORF. Refusing it would be a rule invented for no reason.
+		TinyOrf fixture;
+		fixture.counts[0].count = 0.0;
+		CHECK_NOTHROW(fixture.Run());
+
+		// ... and the cell is omitted rather than written as a zero, which is the
+		// sparse invariant (D10) doing exactly what it does for a zero VALUE.
+		const auto result = fixture.Run();
+		REQUIRE(result.values.size() == 1);
+		CHECK(result.values[0].feature_id == "f2");
+		CHECK(result.zero_valued_sample_ids.empty());
+	}
+
+	SECTION("a coordinate that is not finite") {
+		for (const double bad : {kInf, -kInf, std::nan("")}) {
+			TinyOrf start;
+			start.coords[0].ogu_orf_start = bad;
+			CHECK_THROWS_AS(start.Run(), std::invalid_argument);
+			CHECK_THROWS_WITH(start.Run(), ContainsSubstring("'f1'"));
+
+			TinyOrf end;
+			end.coords[0].ogu_orf_end = bad;
+			CHECK_THROWS_AS(end.Run(), std::invalid_argument);
+			CHECK_THROWS_WITH(end.Run(), ContainsSubstring("'f1'"));
+		}
+	}
+
+	SECTION("a coordinate that is not a whole number") {
+		// pysyndna's cast_cols would take 100.5 and hand back a fractional ORF
+		// length, which then divides into Avogadro's number and produces a
+		// perfectly plausible-looking copy count. A genome coordinate that is not
+		// a whole base is not a measurement -- the same call D9 makes on
+		// percent-versus-fraction coverage.
+		TinyOrf fixture;
+		fixture.coords[0].ogu_orf_end = 100.5;
+		CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'f1'"));
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("ogu_orf"));
+
+		// Negative coordinates are NOT refused: |end - start| + 1 is well defined
+		// for any pair of whole numbers, and woltka's format says nothing about
+		// the origin. Inventing a rule the reference does not have would reject
+		// legitimate input for the sake of tidiness.
+		TinyOrf negative;
+		negative.coords[0] = {"f1", -100.0, -1.0};
+		CHECK_NOTHROW(negative.Run());
+		CHECK(negative.ValueOf("s1", "f1") == TinyOrf().ValueOf("s1", "f1"));
+	}
+
+	SECTION("a zero total_biological_reads_r1r2, which the filter lets past") {
+		// The denominator D23 is about. Zero is neither NaN nor negative, so it
+		// passes pysyndna's screen and then divides through to an INFINITE copy
+		// count for every ORF in the sample, silently. Refusing it is the same
+		// call ComputeCellCounts already makes for its two denominators.
+		TinyOrf fixture;
+		fixture.params[0].total_biological_reads_r1r2 = 0.0;
+		CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s1'"));
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("total_biological_reads_r1r2"));
+	}
+
+	SECTION("a zero calc_mass_sample_aliquot_input_g, likewise") {
+		TinyOrf fixture;
+		fixture.params[0].calc_mass_sample_aliquot_input_g = 0.0;
+		CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s1'"));
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("calc_mass_sample_aliquot_input_g"));
+	}
+
+	SECTION("the two zero denominators are refused, the other two columns are not") {
+		// The split this function draws, stated in one place: zero is an ERROR
+		// where it would divide, and ordinary data where it would not. A blank
+		// extraction genuinely yields no ssRNA, and saying so is a measurement.
+		TinyOrf concentration;
+		concentration.params[0].total_rna_concentration_ng_ul = 0.0;
+		CHECK_NOTHROW(concentration.Run());
+
+		TinyOrf volume;
+		volume.params[0].vol_extracted_elution_ul = 0.0;
+		CHECK_NOTHROW(volume.Run());
+	}
+}
+
+TEST_CASE("ComputeOrfCopies screens the coordinates only where the counts reach them", "[absquant]") {
+	// A coords relation is a whole annotation -- typically every ORF of every
+	// genome in a reference database -- while the counts name the handful that
+	// sequenced. Failing a query over two ORFs because a third nobody asked
+	// about has a malformed coordinate would be its own kind of wrong answer.
+	// Same rule ComputeCellCounts applies to its lengths and parameters.
+	TinyOrf fixture;
+	fixture.coords.push_back({"unused", std::nan(""), 100.5});
+	CHECK_NOTHROW(fixture.Run());
+	CHECK(fixture.Run().values.size() == 2);
+
+	// The same coordinate becomes an error the moment something counts it.
+	TinyOrf counted;
+	counted.coords.push_back({"unused", std::nan(""), 100.5});
+	counted.counts.push_back({"s1", "unused", 10.0});
+	CHECK_THROWS_AS(counted.Run(), std::invalid_argument);
+}
+
+TEST_CASE("ComputeOrfCopies enforces id consistency asymmetrically", "[absquant]") {
+	using Catch::Matchers::ContainsSubstring;
+	// The counts relation is the subject: every cell it names must have
+	// coordinates and its sample must have parameters, or nothing defined can be
+	// said about that cell. The reverse never has to hold. pysyndna splits it
+	// the same way at quant_orfs.py:291, whose own comment says extra parameter
+	// samples "could just be samples that failed sequencing/etc.".
+	SECTION("a counted feature with no coordinates") {
+		// pysyndna does not validate this direction at all -- it reaches the
+		// coordinates through a bare `.at[]` inside a biom transform, so a
+		// missing ORF surfaces as a pandas KeyError from inside a lambda.
+		TinyOrf fixture;
+		fixture.counts.push_back({"s1", "f9", 10.0});
+		CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'f9'"));
+	}
+
+	SECTION("a counted sample with no parameters") {
+		TinyOrf fixture;
+		fixture.counts.push_back({"s9", "f1", 10.0});
+		CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
+		CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s9'"));
+	}
+
+	SECTION("coordinates for ORFs nobody counted") {
+		TinyOrf fixture;
+		fixture.coords.push_back({"f9", 1.0, 500.0});
+		CHECK_NOTHROW(fixture.Run());
+		CHECK(fixture.Run().values.size() == 2);
+	}
+
+	SECTION("parameters for samples that were never sequenced") {
+		TinyOrf fixture;
+		fixture.params.push_back({"s9", 0.5, 2.0, 50.0, 1000.0});
+		CHECK_NOTHROW(fixture.Run());
+		CHECK(fixture.Run().values.size() == 2);
+		CHECK(fixture.Run().filtered_sample_ids.empty());
+		CHECK(fixture.Run().zero_valued_sample_ids.empty());
+	}
+}
+
+TEST_CASE("ComputeOrfCopies reports a malformed relation before an id mismatch", "[absquant]") {
+	using Catch::Matchers::ContainsSubstring;
+	// With several things wrong at once the user should hear the most basic one
+	// first, because it is often the cause of the others rather than a separate
+	// mistake -- a fanned-out join produces both symptoms at the same time.
+	TinyOrf fixture;
+	fixture.counts.push_back({"s1", "f1", 100.0}); // duplicate cell
+	fixture.counts.push_back({"s1", "f9", 100.0}); // no coordinates
+	CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s1 / f1'"));
+	CHECK_THROWS_WITH(fixture.Run(), !ContainsSubstring("'f9'"));
+}
+
+TEST_CASE("ComputeOrfCopies refuses a copy count that overflowed", "[absquant]") {
+	using Catch::Matchers::ContainsSubstring;
+	// Every input finite, their combination not: the extracted ssRNA mass is a
+	// product formed before the ng->g divide, so two large-but-legal values
+	// overflow it to +inf and carry that through the whole chain. pysyndna emits
+	// the inf. An infinite copy count is not a measurement, and a DOUBLE column
+	// full of inf is worse than a failed query.
+	TinyOrf fixture;
+	fixture.params[0].total_rna_concentration_ng_ul = 1e300;
+	fixture.params[0].vol_extracted_elution_ul = 1e300;
+	CHECK_THROWS_AS(fixture.Run(), std::invalid_argument);
+	CHECK_THROWS_WITH(fixture.Run(), ContainsSubstring("'s1 / f1'"));
+
+	// The guard is not simply refusing anything large. At 1e140 the same two
+	// columns give a copy count around 1e289 -- absurd as biology, entirely
+	// representable as a double -- and it is computed rather than refused.
+	//
+	// Note where the ceiling actually sits. At 1e150 the PRODUCT is finite
+	// (1e300) and it is the later multiply by copies-per-gram that overflows, so
+	// guarding the two columns, or their product, would still have let an inf
+	// through. Guarding the computed value is what closes it.
+	TinyOrf large;
+	large.params[0].total_rna_concentration_ng_ul = 1e140;
+	large.params[0].vol_extracted_elution_ul = 1e140;
+	CHECK_NOTHROW(large.Run());
+	CHECK(std::isfinite(large.ValueOf("s1", "f1")));
+	CHECK(large.ValueOf("s1", "f1") > 1e280);
+
+	TinyOrf midway;
+	midway.params[0].total_rna_concentration_ng_ul = 1e150;
+	midway.params[0].vol_extracted_elution_ul = 1e150;
+	CHECK(std::isfinite(midway.params[0].total_rna_concentration_ng_ul * midway.params[0].vol_extracted_elution_ul /
+	                    1e9));
+	CHECK_THROWS_AS(midway.Run(), std::invalid_argument);
+}
+
+TEST_CASE("ComputeOrfCopies reports a sample whose every cell came out zero", "[absquant]") {
+	// The sparse form cannot distinguish "every cell of this sample is zero"
+	// from "this sample was never here", so the all-zero case is named. A zero
+	// extraction reaches it legitimately: both columns pass pysyndna's `< 0`
+	// screen, and a blank really can yield no ssRNA.
+	for (const auto column :
+	     {&SampleOrfParams::total_rna_concentration_ng_ul, &SampleOrfParams::vol_extracted_elution_ul}) {
+		TinyOrf fixture;
+		fixture.params[0].*column = 0.0;
+		const auto result = fixture.Run();
+		CHECK(result.values.empty());
+		CHECK(result.zero_valued_sample_ids == std::vector<std::string> {"s1"});
+		// Reported here and NOT as a bad parameter: zero is a value, not a gap,
+		// and the two lists answer different questions.
+		CHECK(result.filtered_sample_ids.empty());
+	}
+
+	// Reachable by underflow too, which is the honest boundary: 1e-300 squared
+	// is below the smallest subnormal, so the product is exactly 0.0 before the
+	// ng->g divide ever runs.
+	TinyOrf underflowed;
+	underflowed.params[0].total_rna_concentration_ng_ul = 1e-300;
+	underflowed.params[0].vol_extracted_elution_ul = 1e-300;
+	const auto result = underflowed.Run();
+	CHECK(result.values.empty());
+	CHECK(result.zero_valued_sample_ids == std::vector<std::string> {"s1"});
+
+	// A single zero cell among others needs no diagnostic: under D10 an omitted
+	// cell and a dense 0.0 are the same claim, and the sample is still in the
+	// output saying what it is. Only the WHOLE sample going that way is
+	// ambiguous.
+	TinyOrf one_zero;
+	one_zero.counts[0].count = 0.0;
+	CHECK(one_zero.Run().values.size() == 1);
+	CHECK(one_zero.Run().zero_valued_sample_ids.empty());
+
+	// A filtered sample is not also reported as zero-valued -- every sample
+	// lands in exactly one place.
+	TinyOrf filtered;
+	filtered.params[0].total_rna_concentration_ng_ul = std::nan("");
+	CHECK(filtered.Run().filtered_sample_ids == std::vector<std::string> {"s1"});
+	CHECK(filtered.Run().zero_valued_sample_ids.empty());
 }

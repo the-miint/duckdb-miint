@@ -213,9 +213,16 @@ codebase's standard idiom — a `FULL JOIN` plus
 | `fit_models_oracle`, `fitb_models_oracle`, `fitb_boundary_models_oracle` | `1e-11` | pysyndna's public API truncates to 12 decimal places, so the golden itself carries only ~1e-12 absolute precision |
 | `cells_oracle`, `cellsb_oracle`, `cellsb_boundary_oracle`, `orf_oracle`, `orfb_oracle` | `1e-9` | untruncated doubles; values reach ~1e13, so the bound must be relative |
 
-## One pysyndna behavior deliberately not reproduced
+## Two pysyndna behaviors deliberately not reproduced
 
-A sample whose `total_biological_reads_r1r2` is zero makes pysyndna's read-fraction step
-divide by zero; it emits `inf` for every feature in that sample, with no warning. No
-fixture here encodes that, because miint rejects such input with an error instead — an
+Both are divisions by a zero that pysyndna's parameter screen structurally cannot catch:
+zero is neither NaN nor negative, so it passes the `< 0` test and reaches the arithmetic.
+
+- A sample whose `total_biological_reads_r1r2` is zero makes the read-fraction step divide
+  by zero.
+- A sample whose `calc_mass_sample_aliquot_input_g` is zero makes the final per-gram step
+  divide by zero.
+
+Either way pysyndna emits `inf` for every feature in that sample, with no warning. No
+fixture here encodes them, because miint rejects such input with an error instead — an
 infinite copy count is not a usable answer and must not reach a feature table silently.

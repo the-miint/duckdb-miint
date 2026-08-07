@@ -1189,5 +1189,294 @@ CellCountsResult ComputeCellCounts(const std::vector<CountObservation> &counts,
 	return result;
 }
 
+namespace {
+
+// The number of bases an ORF spans, counting both endpoints.
+//
+// The absolute value is not defensive: woltka writes a reverse-strand ORF with
+// start > end and pysyndna says so explicitly (quant_orfs.py:248), so a signed
+// difference would hand four of the ten features in data/syndna/orf_coords.csv
+// a negative length and a negative copy count. The +1 is inclusivity, and it is
+// also what keeps a single-base ORF from dividing by zero.
+double OrfLength(const OrfCoords &coords) {
+	return std::fabs(coords.ogu_orf_end - coords.ogu_orf_start) + 1.0;
+}
+
+// A genome coordinate has to be a whole number of bases.
+//
+// pysyndna's cast_cols would accept 100.5 and hand back a fractional ORF
+// length, which divides into Avogadro's number and yields a copy count nothing
+// downstream can tell from a real one. Same call D9 makes on percent-versus-
+// fraction coverage: the input that cannot mean what it says is refused rather
+// than silently reinterpreted.
+bool IsWholeNumber(double value) {
+	return std::isfinite(value) && std::floor(value) == value;
+}
+
+// Index over the two reference relations, built once and shared by the
+// validation pass and the arithmetic below it. Borrows from `coords` and
+// `params`, so both must outlive it; ComputeOrfCopies holds them as const
+// references for the whole call, so this is safe by construction there.
+//
+// Duplicate keys are recorded here rather than rediscovered, since inserting is
+// what detects them. Each list holds one entry per occurrence past the first;
+// FormatIdList deduplicates when rendering.
+struct OrfCopiesIndex {
+	std::unordered_map<std::string, const OrfCoords *> coords_by_feature;
+	std::unordered_map<std::string, const SampleOrfParams *> params_by_sample;
+
+	std::vector<std::string> repeated_coords;
+	std::vector<std::string> repeated_params;
+};
+
+OrfCopiesIndex BuildOrfCopiesIndex(const std::vector<OrfCoords> &coords, const std::vector<SampleOrfParams> &params) {
+	OrfCopiesIndex index;
+
+	index.coords_by_feature.reserve(coords.size());
+	for (const auto &row : coords) {
+		if (!index.coords_by_feature.emplace(row.feature_id, &row).second) {
+			index.repeated_coords.push_back(row.feature_id);
+		}
+	}
+	index.params_by_sample.reserve(params.size());
+	for (const auto &row : params) {
+		if (!index.params_by_sample.emplace(row.sample_id, &row).second) {
+			index.repeated_params.push_back(row.sample_id);
+		}
+	}
+	return index;
+}
+
+// Reject every input ComputeOrfCopies cannot compute a defined answer from,
+// before any arithmetic runs. Same tier order and the same no-prefix message
+// contract as ValidateCellCountsInputs above: a malformed relation is reported
+// before relations that merely disagree, because a fanned-out join produces
+// both symptoms at once and only the first is the cause.
+//
+// There is no options tier here, this function having no options at all.
+//
+// The coordinates are screened only where the counts relation reaches them,
+// for the reason ValidateCellCountsInputs gives about its own reference
+// relations, and more sharply: a coords relation is a whole annotation, often
+// every ORF of every genome in a reference database, against a counts relation
+// naming the handful that sequenced.
+void ValidateOrfCopiesInputs(const std::vector<CountObservation> &counts, const OrfCopiesIndex &index) {
+	if (!index.repeated_coords.empty()) {
+		throw std::invalid_argument("the ORF coordinates relation has more than one row for feature_id " +
+		                            FormatIdList(index.repeated_coords));
+	}
+	if (!index.repeated_params.empty()) {
+		throw std::invalid_argument("the sample parameters relation has more than one row for sample_id " +
+		                            FormatIdList(index.repeated_params));
+	}
+
+	// Keyed on the pair, and compared as index-free string pairs rather than a
+	// packed key so no separator character can collide with an id that
+	// legitimately contains it. pysyndna has no equivalent check because its
+	// input is a biom table, unique by construction.
+	std::set<std::pair<std::string, std::string>> seen_counts;
+	std::vector<std::string> repeated_cells;
+	for (const auto &row : counts) {
+		if (!seen_counts.emplace(row.sample_id, row.feature_id).second) {
+			repeated_cells.push_back(row.sample_id + " / " + row.feature_id);
+		}
+	}
+	if (!repeated_cells.empty()) {
+		throw std::invalid_argument("the counts relation has more than one row for the same (sample_id, feature_id): " +
+		                            FormatIdList(repeated_cells));
+	}
+
+	// One pass over the counts relation collects everything that depends on it,
+	// so the reference relations are consulted exactly where they are used. The
+	// lists are reported afterwards in tier order rather than in the order found.
+	std::vector<std::string> unusable_cells;
+	std::vector<std::string> bad_coords;
+	std::vector<std::string> zero_reads;
+	std::vector<std::string> zero_masses;
+	std::vector<std::string> uncharted_features;
+	std::vector<std::string> unparameterized_samples;
+	for (const auto &row : counts) {
+		// Looser than the cell-count rule, which refuses a zero count because
+		// log10(0) under a negative slope comes back as an infinite answer.
+		// Nothing here takes a logarithm, so a zero count simply means no copies
+		// of that ORF -- refusing it would be a rule invented for no reason.
+		if (!std::isfinite(row.count) || row.count < 0.0) {
+			unusable_cells.push_back(row.sample_id + " / " + row.feature_id);
+		}
+
+		const auto orf = index.coords_by_feature.find(row.feature_id);
+		if (orf == index.coords_by_feature.end()) {
+			uncharted_features.push_back(row.feature_id);
+		} else if (!IsWholeNumber(orf->second->ogu_orf_start) || !IsWholeNumber(orf->second->ogu_orf_end)) {
+			// Negative coordinates are deliberately NOT refused: |end - start| + 1
+			// is well defined for any pair of whole numbers, and woltka's format
+			// says nothing about the origin.
+			bad_coords.push_back(row.feature_id);
+		}
+
+		const auto sample_params = index.params_by_sample.find(row.sample_id);
+		if (sample_params == index.params_by_sample.end()) {
+			unparameterized_samples.push_back(row.sample_id);
+		} else {
+			if (sample_params->second->total_biological_reads_r1r2 == 0.0) {
+				zero_reads.push_back(row.sample_id);
+			}
+			if (sample_params->second->calc_mass_sample_aliquot_input_g == 0.0) {
+				zero_masses.push_back(row.sample_id);
+			}
+		}
+	}
+
+	if (!unusable_cells.empty()) {
+		throw std::invalid_argument(
+		    "read counts must be finite and not negative; offending (sample_id / feature_id): " +
+		    FormatIdList(unusable_cells));
+	}
+	if (!bad_coords.empty()) {
+		throw std::invalid_argument(
+		    "ogu_orf_start and ogu_orf_end must be finite whole numbers of bases; offending feature_id " +
+		    FormatIdList(bad_coords));
+	}
+	if (!zero_reads.empty()) {
+		// The denominator D23 is about, and the one case pysyndna's parameter
+		// screen cannot see: zero is neither NaN nor negative, so it passes the
+		// filter and then divides through to an infinite copy count for every ORF
+		// in the sample, with no log message. NaN, negative and infinite values
+		// are NOT errors -- those the filter drops, matching pysyndna.
+		throw std::invalid_argument("total_biological_reads_r1r2 must not be zero; offending sample_id " +
+		                            FormatIdList(zero_reads));
+	}
+	if (!zero_masses.empty()) {
+		// The other denominator, same story. Between them these are the whole of
+		// the zero-is-an-error rule here: the remaining two parameter columns are
+		// multiplied through, where zero is ordinary data.
+		throw std::invalid_argument("calc_mass_sample_aliquot_input_g must not be zero; offending sample_id " +
+		                            FormatIdList(zero_masses));
+	}
+
+	if (!uncharted_features.empty()) {
+		// pysyndna does not validate this direction at all: it reaches the
+		// coordinates through a bare `.at[]` inside a biom transform
+		// (quant_orfs.py:158-161), so a counted ORF the annotation does not
+		// describe surfaces as a pandas KeyError from inside a lambda.
+		throw std::invalid_argument("the counts relation names feature_id " + FormatIdList(uncharted_features) +
+		                            ", which the ORF coordinates relation has no ogu_orf_start/ogu_orf_end row for");
+	}
+	if (!unparameterized_samples.empty()) {
+		throw std::invalid_argument("the counts relation names sample_id " + FormatIdList(unparameterized_samples) +
+		                            ", which the sample parameters relation does not describe");
+	}
+}
+
+} // namespace
+
+OrfCopiesResult ComputeOrfCopies(const std::vector<CountObservation> &counts, const std::vector<OrfCoords> &coords,
+                                 const std::vector<SampleOrfParams> &params) {
+	// Built once and used by both the validation pass and everything below it;
+	// `index` borrows from `coords` and `params`, which are alive for the whole
+	// call. See OrfCopiesIndex.
+	const OrfCopiesIndex index = BuildOrfCopiesIndex(coords, params);
+	ValidateOrfCopiesInputs(counts, index);
+
+	OrfCopiesResult result;
+
+	const auto &coords_by_feature = index.coords_by_feature;
+	const auto &params_by_sample = index.params_by_sample;
+
+	// Sorted and deduplicated, so filtered_sample_ids comes out in an order that
+	// does not depend on the order the counts rows arrived in.
+	std::vector<std::string> sample_ids;
+	sample_ids.reserve(counts.size());
+	for (const auto &row : counts) {
+		sample_ids.push_back(row.sample_id);
+	}
+	std::sort(sample_ids.begin(), sample_ids.end());
+	sample_ids.erase(std::unique(sample_ids.begin(), sample_ids.end()), sample_ids.end());
+
+	// The only filter this function has. All four columns are screened, which is
+	// pysyndna's REQUIRED_PARAM_KEYS -- the union of its sample-info and RNA-prep
+	// lists, passed whole to filter_data_by_sample_info (quant_orfs.py:313-317).
+	// Unlike the cell-count parameters there is no column here carried purely for
+	// parity: every one of the four is multiplied or divided through below.
+	std::unordered_set<std::string> discarded;
+	for (const auto &sample_id : sample_ids) {
+		// Validation has established that every sample in `counts` has a row
+		// here; `at` rather than `find` so a future edit that breaks that throws
+		// instead of quietly dropping the sample into no bucket at all.
+		const SampleOrfParams &sample_params = *params_by_sample.at(sample_id);
+		if (!IsUsableSampleParameter(sample_params.calc_mass_sample_aliquot_input_g) ||
+		    !IsUsableSampleParameter(sample_params.total_rna_concentration_ng_ul) ||
+		    !IsUsableSampleParameter(sample_params.vol_extracted_elution_ul) ||
+		    !IsUsableSampleParameter(sample_params.total_biological_reads_r1r2)) {
+			result.filtered_sample_ids.push_back(sample_id);
+			discarded.insert(sample_id);
+		}
+	}
+
+	std::unordered_set<std::string> samples_with_values;
+	std::vector<std::string> overflowed_cells;
+	for (const auto &row : counts) {
+		if (discarded.count(row.sample_id) != 0) {
+			continue;
+		}
+		// Every lookup is guaranteed to hit: validation requires coordinates for
+		// each counted feature and a parameter row for each counted sample. `at`
+		// rather than `find` so that a future edit which breaks that invariant
+		// throws instead of computing with garbage.
+		const SampleOrfParams &sample_params = *params_by_sample.at(row.sample_id);
+		const OrfCoords &orf = *coords_by_feature.at(row.feature_id);
+
+		// pysyndna applies these as four successive biom transforms
+		// (quant_orfs.py:113-166), and the association order is preserved rather
+		// than rearranged into something tidier: the goldens reproduce bit for
+		// bit this way, and any regrouping would put them an ulp out and turn a
+		// real regression later into a judgement call about tolerance.
+		const double copies_per_g_ssrna = kAvogadro / (OrfLength(orf) * kGramsPerMolePerRnaBase);
+		const double fraction_of_reads = row.count / sample_params.total_biological_reads_r1r2;
+		const double g_total_ssrna =
+		    sample_params.total_rna_concentration_ng_ul * sample_params.vol_extracted_elution_ul / 1e9;
+
+		const double value =
+		    fraction_of_reads * g_total_ssrna * copies_per_g_ssrna / sample_params.calc_mass_sample_aliquot_input_g;
+		if (!std::isfinite(value)) {
+			// Every input reaching here is finite, but their combination need
+			// not be: the extracted ssRNA mass is a product formed BEFORE the
+			// ng->g divide, so two large-but-legal values overflow it to +inf and
+			// carry that through the rest of the chain. pysyndna emits the inf.
+			// Refusing is the same call the zero-denominator checks already make
+			// -- an infinite copy count is not a measurement, and a DOUBLE column
+			// full of inf is worse than a failed query.
+			overflowed_cells.push_back(row.sample_id + " / " + row.feature_id);
+			continue;
+		}
+		if (value == 0.0) {
+			// The sparse invariant (D10): a zero cell IS an absent cell, which is
+			// exactly what pysyndna's dense output spells as an explicit 0.0. So
+			// omitting one loses nothing and needs no diagnostic. Only when EVERY
+			// cell of a sample goes this way does the omission become ambiguous,
+			// and that case is reported below.
+			continue;
+		}
+		samples_with_values.insert(row.sample_id);
+		result.values.push_back({row.sample_id, row.feature_id, value});
+	}
+	if (!overflowed_cells.empty()) {
+		throw std::invalid_argument("the predicted copy count overflowed to a non-finite value; check the ORF "
+		                            "coordinates and the extraction parameters for (sample_id / feature_id) " +
+		                            FormatIdList(overflowed_cells));
+	}
+
+	// A sample can pass the filter and still emit nothing, if every one of its
+	// cells came out zero. Reported rather than left to be inferred from an
+	// absence. Walking `sample_ids` keeps the list sorted and independent of the
+	// order the counts arrived in.
+	for (const auto &sample_id : sample_ids) {
+		if (discarded.count(sample_id) == 0 && samples_with_values.count(sample_id) == 0) {
+			result.zero_valued_sample_ids.push_back(sample_id);
+		}
+	}
+	return result;
+}
+
 } // namespace absquant
 } // namespace miint

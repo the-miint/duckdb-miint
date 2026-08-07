@@ -131,15 +131,26 @@ LinregressResult Linregress(const std::vector<double> &x, const std::vector<doub
 //! not negative. NaN carries SQL NULL, and zero is deliberately allowed --
 //! pysyndna tests with a strict `< 0` (util.py:262-264).
 //!
-//! Infinity is rejected even though pysyndna accepts it. It passes both of
-//! pysyndna's tests and then makes every log10 in the sample infinite, whose
-//! differences are NaN, so the sample is discarded anyway -- but as though a
-//! fit had been attempted and failed rather than as a bad parameter.
+//! Infinity is rejected even though pysyndna accepts it, and what pysyndna
+//! then does with it differs by function -- which is the argument for refusing
+//! it rather than the argument against bothering:
 //!
-//! Shared rather than inlined because M3-M5 apply exactly this rule to
-//! different parameter columns (calc_mass_sample_aliquot_input_g and friends),
-//! and "NULL or negative means drop the sample" has to mean one thing across
-//! all four functions.
+//!   - FitSyndnaModels: every log10 in the sample becomes infinite, their
+//!     differences NaN, so the sample is discarded anyway -- but as though a fit
+//!     had been attempted and failed rather than as a bad parameter;
+//!   - ComputeOrfCopies, which takes no logarithm at all: an infinite
+//!     DENOMINATOR (total_biological_reads_r1r2,
+//!     calc_mass_sample_aliquot_input_g) collapses the sample to zeros, while an
+//!     infinite NUMERATOR (total_rna_concentration_ng_ul,
+//!     vol_extracted_elution_ul) writes +inf into every one of its cells.
+//!
+//! Three different wrong answers from one unusable input, and only one of them
+//! even looks wrong. Refusing it up front is what names the problem.
+//!
+//! Shared rather than inlined because M2-M5 apply the same RULE to different
+//! parameter columns (calc_mass_sample_aliquot_input_g and friends), and
+//! "NULL, negative or infinite means drop the sample" has to mean one thing
+//! across all four functions.
 bool IsUsableSampleParameter(double value);
 
 //! Ids present in `subject` but absent from `reference`, deduplicated, sorted.
@@ -412,8 +423,13 @@ struct CellCountsOptions {
 	double min_rsquared = 0.8;
 };
 
-//! One cell of the output feature table.
-struct CellCountValue {
+//! One cell of a long-form output feature table.
+//!
+//! Shared by ComputeCellCounts and ComputeOrfCopies rather than spelled twice:
+//! both return the same `(sample_id, feature_id, value)` sparse shape, and both
+//! omit zero-valued cells under the same invariant (D10). Two identical structs
+//! would let that shape drift apart between the two functions for no reason.
+struct FeatureTableValue {
 	std::string sample_id;
 	std::string feature_id;
 	double value = 0.0;
@@ -430,7 +446,7 @@ struct CellCountsResult {
 	//! Surviving (sample, feature) cells. Zero-valued cells are omitted, per
 	//! miint's long-form sparse invariant (D10); pysyndna's dense output spells
 	//! the same thing as an explicit 0.0 after its final fillna.
-	std::vector<CellCountValue> values;
+	std::vector<FeatureTableValue> values;
 	//! Features dropped somewhere for coverage below min_coverage. Keyed by
 	//! feature, not by (sample, feature): pysyndna reports the same list this
 	//! way, and a feature that fails in one sample is worth naming once.
@@ -573,6 +589,147 @@ CellCountsResult ComputeCellCounts(const std::vector<CountObservation> &counts,
                                    const std::vector<FeatureLength> &lengths,
                                    const std::vector<SampleCellParams> &params, const CellCountsOptions &options);
 
+// ---------------------------------------------------------------------------
+// ORF copies: turning metatranscriptomic OGU+ORF read counts into copies of
+// each ORF's ssRNA per gram of sample. Reproduces pysyndna's
+// calc_copies_of_ogu_orf_ssrna_per_g_sample.
+// ---------------------------------------------------------------------------
+
+//! Average molar mass of one base of single-stranded RNA, in g/mole.
+//! pysyndna's RNA_BASE_G_PER_MOLE (util.py:9).
+//!
+//! Beside kGramsPerMolePerBasePair rather than instead of it: 650 is a base
+//! PAIR of double-stranded DNA and 340 is a single RNA base, so which constant
+//! applies is decided by the molecule, not by the function.
+constexpr double kGramsPerMolePerRnaBase = 340.0;
+
+//! One row of the ORF coordinate relation. Must be unique on feature_id.
+//!
+//! Both coordinates are 1-based and CLOSED, the convention woltka's coords.txt
+//! uses, so the ORF spans |end - start| + 1 bases. `start > end` is legal and
+//! marks a reverse-strand ORF -- pysyndna says so explicitly
+//! (quant_orfs.py:248, "it is NOT required that start be less than end, per
+//! woltka docs") and four of the ten features in data/syndna/orf_coords.csv
+//! are that way round.
+//!
+//! Doubles rather than integers because that is the shape a SQL DOUBLE column
+//! and a NULL (arriving as NaN) have. A coordinate that is not finite and
+//! integral is refused rather than truncated: pysyndna's cast_cols would take
+//! 100.5 and produce a fractional length, and a fractional genome coordinate is
+//! not a measurement.
+struct OrfCoords {
+	std::string feature_id;
+	double ogu_orf_start = 0.0;
+	double ogu_orf_end = 0.0;
+};
+
+//! Per-sample parameters for the ORF copy calculation. Must be unique on
+//! sample_id.
+//!
+//! All four are required, all four are screened, and all four are actually
+//! divided by or multiplied through -- unlike the cell-count parameters, none
+//! of these is carried only for parity. pysyndna screens exactly this set:
+//! REQUIRED_PARAM_KEYS is the union of its sample-info and RNA-prep key lists
+//! (quant_orfs.py:10-22) and goes to filter_data_by_sample_info whole.
+struct SampleOrfParams {
+	std::string sample_id;
+	double calc_mass_sample_aliquot_input_g = 0.0;
+	double total_rna_concentration_ng_ul = 0.0;
+	double vol_extracted_elution_ul = 0.0;
+	double total_biological_reads_r1r2 = 0.0;
+};
+
+//! Every sample present in `counts` either contributes cells to `values` or is
+//! named in exactly one of the two lists below, so no sample disappears without
+//! the caller being able to say why.
+struct OrfCopiesResult {
+	//! Surviving (sample, feature) cells, in the same sparse form and under the
+	//! same invariant as CellCountsResult::values.
+	std::vector<FeatureTableValue> values;
+	//! Samples removed because a required parameter was unusable: NULL/NaN,
+	//! negative, or infinite. Same rule and same name as FitResult's list.
+	std::vector<std::string> filtered_sample_ids;
+	//! Samples that passed the filter and still produced nothing, because every
+	//! one of their cells came out exactly zero and the sparse invariant omits
+	//! those. In practice a zero extraction: either
+	//! total_rna_concentration_ng_ul or vol_extracted_elution_ul was zero, which
+	//! pysyndna's `< 0` screen admits and a blank really can produce. Underflow
+	//! reaches it too -- their product is formed before the ng->g divide, so two
+	//! very small values can round it to exactly 0.0.
+	//!
+	//! Reported only when the WHOLE sample goes this way, for the same reason
+	//! CellCountsResult gives: a single zero cell among others needs no
+	//! diagnostic, because under D10 an omitted cell and a dense 0.0 are the
+	//! same claim. It is the all-zero sample the sparse form cannot express --
+	//! "no rows for this sample" would otherwise be indistinguishable from "no
+	//! such sample". pysyndna never faces this, its output being dense.
+	std::vector<std::string> zero_valued_sample_ids;
+};
+
+//! Copies of each ORF's ssRNA per gram of sample, reproducing pysyndna's
+//! calc_copies_of_ogu_orf_ssrna_per_g_sample.
+//!
+//! Per (sample, feature):
+//!
+//!     ogu_orf_len        = |ogu_orf_end - ogu_orf_start| + 1
+//!     copies_per_g_ssrna = kAvogadro / (ogu_orf_len * kGramsPerMolePerRnaBase)
+//!     fraction_of_reads  = count / total_biological_reads_r1r2
+//!     g_total_ssrna      = total_rna_concentration_ng_ul
+//!                          * vol_extracted_elution_ul / 1e9
+//!     value              = fraction_of_reads * g_total_ssrna
+//!                          * copies_per_g_ssrna
+//!                          / calc_mass_sample_aliquot_input_g
+//!
+//! The quantity is copies of the ORF's OWN ssRNA, not of the transcript
+//! containing it -- a transcript may carry further ORFs and be heavier.
+//! pysyndna's docstring is explicit about this and the distinction is the
+//! difference between a per-gene and a per-message abundance.
+//!
+//! No standard curve, no coverage filter and no r^2 gate: this workflow does
+//! not go through a spike-in at all. The read fraction, the extracted ssRNA
+//! mass and the ORF's length are enough on their own, which is why there is no
+//! options struct and no metric to choose -- pysyndna exposes exactly one.
+//!
+//! Read counts reach here already positive: the DuckDB reader drops
+//! zero-valued cells. A zero count is accepted regardless, unlike in
+//! ComputeCellCounts -- the difference is the log10. There is none here, so a
+//! zero count simply means no copies of that ORF, and refusing it would be a
+//! rule invented for no reason.
+//!
+//! One filter runs before the arithmetic: samples with an unusable value in any
+//! of the four parameter columns are dropped into filtered_sample_ids.
+//!
+//! Id-set enforcement is asymmetric, deliberately. The counts relation is the
+//! subject: every cell it names must have coordinates and its sample must have
+//! parameters, or nothing defined can be said about that cell. The reverse
+//! never has to hold -- a coords relation is a whole annotation and a params
+//! relation a whole study -- so both may describe far more than the counts do,
+//! and their unused rows are not screened at all. pysyndna splits the sample
+//! axis the same way (quant_orfs.py:291, whose comment says extra parameter
+//! samples "could just be samples that failed sequencing/etc.") and does not
+//! check the feature axis at all: it reaches the coordinates through a bare
+//! `.at[]` inside a biom transform, so a counted ORF the annotation does not
+//! describe surfaces as a pandas KeyError from inside a lambda.
+//!
+//! Throws std::invalid_argument on a malformed relation (duplicate keys; a
+//! count that is negative or non-finite; an ogu_orf_start or ogu_orf_end that
+//! is not a finite whole number; a zero total_biological_reads_r1r2 or
+//! calc_mass_sample_aliquot_input_g), on the id mismatches above, and on a
+//! computed copy count that overflowed to a non-finite value. The DuckDB
+//! wrapper re-throws these as InvalidInputException prefixed with the function
+//! name.
+//!
+//! Note the split the two denominators share, the same one ComputeCellCounts
+//! draws: zero is an ERROR, because dividing by it is structurally impossible
+//! and pysyndna silently emits inf copies for every ORF in the sample, while
+//! NaN, negative and infinite values are FILTERED with a diagnostic, matching
+//! pysyndna's own screen. The other two parameter columns are multiplied
+//! through rather than divided by, so zero there is ordinary data -- a blank
+//! extraction genuinely yields no ssRNA -- and lands the sample in
+//! zero_valued_sample_ids instead.
+OrfCopiesResult ComputeOrfCopies(const std::vector<CountObservation> &counts, const std::vector<OrfCoords> &coords,
+                                 const std::vector<SampleOrfParams> &params);
+
 } // namespace absquant
 } // namespace miint
 
@@ -585,4 +742,7 @@ void RegisterAbsQuant(ExtensionLoader &loader);
 //! lines of bind/read apiece and the established convention is one Register* per
 //! function called from LoadInternal.
 void RegisterAbsQuantCellCounts(ExtensionLoader &loader);
+//! Registers absquant_orf_copies into the extension catalog, on the same
+//! one-Register*-per-function convention.
+void RegisterAbsQuantOrfCopies(ExtensionLoader &loader);
 } // namespace duckdb

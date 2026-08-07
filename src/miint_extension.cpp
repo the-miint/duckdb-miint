@@ -429,6 +429,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterCommunityDistances(loader);
 	RegisterAbsQuant(loader);
 	RegisterAbsQuantCellCounts(loader);
+	RegisterAbsQuantOrfCopies(loader);
 	RegisterClusterKmeans(loader);
 	RegisterClusterUpgma(loader);
 

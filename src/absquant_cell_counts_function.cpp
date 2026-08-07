@@ -24,12 +24,12 @@ using absquant_internal::ReadLongFormValues;
 using miint::absquant::CellCountsMetric;
 using miint::absquant::CellCountsOptions;
 using miint::absquant::CellCountsResult;
-using miint::absquant::CellCountValue;
 using miint::absquant::ComputeCellCounts;
 using miint::absquant::CountObservation;
 using miint::absquant::CoverageObservation;
 using miint::absquant::DenominatorColumnName;
 using miint::absquant::FeatureLength;
+using miint::absquant::FeatureTableValue;
 using miint::absquant::FormatIdList;
 using miint::absquant::MetricName;
 using miint::absquant::ParseCellCountsMetric;
@@ -73,7 +73,7 @@ struct AbsQuantCellCountsBindData : public TableFunctionData {
 // is left for Execute is a copy loop, so it stays single-threaded -- the same
 // shape as absquant_fit_models and community_distances.
 struct AbsQuantCellCountsGlobalState : public GlobalTableFunctionState {
-	std::vector<CellCountValue> values;
+	std::vector<FeatureTableValue> values;
 	LogicalType sample_id_type = LogicalType::VARCHAR;
 	LogicalType feature_id_type = LogicalType::VARCHAR;
 	idx_t cursor = 0;

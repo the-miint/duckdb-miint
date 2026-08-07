@@ -12,7 +12,9 @@ constructs form a **per-sample standard curve** mapping read count to input mass
 that curve then converts any feature's read count into an absolute mass.
 
 This page covers fitting those standard curves and applying them to get absolute cell
-counts.
+counts. It also covers a third function, [`absquant_orf_copies`](#absquant_orf_copies),
+which asks the same kind of question of a **metatranscriptome** — how many copies of each
+gene's RNA were present per gram of sample — and gets there without a spike-in at all.
 
 ## Table of Contents
 
@@ -25,6 +27,10 @@ counts.
 - [Which cells you get back](#which-cells-you-get-back) - the three filters, and how to see what they removed.
 - [Composing the two functions](#composing-the-two-functions) - end to end, from spike-ins to cell counts.
 - [Applying a model by hand](#applying-a-model-by-hand) - if you only want the mass.
+- [`absquant_orf_copies`](#absquant_orf_copies) - copies of each ORF's ssRNA, per gram of sample.
+- [The three RNA relations](#the-three-rna-relations) - what `absquant_orf_copies` reads.
+- [ORF coordinates from `read_gff`](#orf-coordinates-from-read_gff) - and the off-by-one it will cost you.
+- [Which ORF cells you get back](#which-orf-cells-you-get-back) - one filter, one report, and what is refused.
 - [Differences from pysyndna](#differences-from-pysyndna) - for readers coming from the reference implementation.
 - [Citations](#citations)
 
@@ -438,13 +444,151 @@ quality, since a sample whose curve is poor will still produce numbers:
 SELECT * FROM models WHERE rvalue * rvalue >= 0.8;
 ```
 
+## `absquant_orf_copies`
+
+The third workflow, and the only one that is not about DNA. Given metatranscriptomic read
+counts against OGU+ORF references — woltka's output, typically — it reports **copies of
+each ORF's ssRNA per gram of sample**.
+
+```sql
+absquant_orf_copies(counts, coords, params)
+```
+
+There is no standard curve here, no spike-in, and nothing to configure: no `metric`, no
+coverage filter, no r² gate, no named parameters. The accounting is direct. What fraction
+of the sample's biological reads landed on this ORF, times how much total ssRNA came out
+of the extraction, times how many copies a gram of that ORF's ssRNA represents, divided by
+how much sample went in:
+
+```
+ogu_orf_len        = |ogu_orf_end - ogu_orf_start| + 1
+copies_per_g_ssrna = 6.02214076e23 / (ogu_orf_len * 340)
+value              = read_count / total_biological_reads_r1r2
+                     * total_rna_concentration_ng_ul * vol_extracted_elution_ul / 1e9
+                     * copies_per_g_ssrna
+                     / calc_mass_sample_aliquot_input_g
+```
+
+`340` is the average molar mass of one base of **single-stranded** RNA, in g/mole — the
+single-stranded counterpart of the `650` per base *pair* above. Which constant applies is
+decided by the molecule, not by the function.
+
+**The quantity is copies of the ORF's own ssRNA, not of the transcript containing it.**
+A transcript may carry several ORFs and so be heavier; this counts the ORF. If you want
+per-transcript abundance, this is not it, and the difference is not a scaling factor you
+can apply afterwards.
+
+`ogu_orf_start > ogu_orf_end` is legal and marks a **reverse-strand** ORF — woltka writes
+them that way, and the length is unsigned, so both orientations give the same answer.
+
+### The three RNA relations
+
+All three are passed **by name**, as quoted string literals, like every other relation
+argument on this page.
+
+`counts` — long-form OGU+ORF read counts. The same shape `absquant_cell_counts` takes.
+
+| column | type | notes |
+|---|---|---|
+| `sample_id` | VARCHAR / BIGINT / UUID | mirrored onto the output |
+| `feature_id` | VARCHAR / BIGINT / UUID | the OGU+ORF id; mirrored onto the output |
+| `value` | DOUBLE | reads assigned to this ORF in this sample |
+
+`coords` — where each ORF sits on its genome. One row per ORF.
+
+| column | type | notes |
+|---|---|---|
+| `feature_id` | joins to `counts.feature_id` | |
+| `ogu_orf_start` | DOUBLE | 1-based, **inclusive** |
+| `ogu_orf_end` | DOUBLE | 1-based, **inclusive**; may be less than the start |
+
+`params` — one row per sample. All four columns are required and all four are used.
+
+| column | type | notes |
+|---|---|---|
+| `sample_id` | joins to `counts.sample_id` | |
+| `calc_mass_sample_aliquot_input_g` | DOUBLE | grams of sample that went into the extraction |
+| `total_rna_concentration_ng_ul` | DOUBLE | ng/µL of total ssRNA in the eluate |
+| `vol_extracted_elution_ul` | DOUBLE | µL of eluate |
+| `total_biological_reads_r1r2` | DOUBLE | total biological reads for the sample, R1 + R2 |
+
+`total_biological_reads_r1r2` is the whole sequencing effort for the sample, not the reads
+that mapped to ORFs. Passing the mapped total instead inflates every value by the ratio of
+the two, and nothing about the output will look wrong.
+
+Output is `(sample_id, feature_id, value DOUBLE)`, with both id types mirrored from
+`counts` — see [Sample identifier types](#sample-identifier-types).
+
+### ORF coordinates from `read_gff`
+
+miint reads no bespoke coordinate format: `coords` is an ordinary relation, so an
+annotation in GFF3 becomes one with a projection. **It needs a conversion, and leaving it
+out is silent.**
+
+`read_gff` and `read_ncbi_annotation` emit `stop_position` as 1-based **half-open** —
+normalized `+1` from GFF3's closed `end`, which is the project-wide convention (issue
+#196). `absquant_orf_copies` takes 1-based **closed** coordinates, the convention woltka's
+`coords.txt` uses. So:
+
+```sql
+CREATE TABLE coords AS
+SELECT attributes['ID'] AS feature_id,
+       position           AS ogu_orf_start,
+       stop_position - 1  AS ogu_orf_end   -- half-open -> closed
+FROM read_gff('annotations.gff')
+WHERE type = 'CDS';
+```
+
+Without the `- 1` every ORF is one base too long, so every copy count comes out low by
+`len / (len + 1)` — about 0.3% on a 300 bp ORF. It type-checks, it runs, it raises
+nothing, and the error is small enough to survive a sanity check. If your coordinates come
+from woltka's `coords.txt` they are already closed and need no adjustment.
+
+### Which ORF cells you get back
+
+A sample is **filtered, with a warning**, when any of the four parameter columns is NULL,
+negative or non-finite. This matches pysyndna, which screens the same four.
+
+```sql
+SELECT * FROM miint_warnings()
+WHERE message LIKE 'absquant_orf_copies:%';
+```
+
+A sample is **reported, with a warning**, when it passes that filter and still produces no
+row, because every one of its cells came out zero. In practice that means a zero
+`total_rna_concentration_ng_ul` or `vol_extracted_elution_ul` — a blank extraction really
+can yield no ssRNA, and zero passes the NULL/negative screen legitimately. The output is
+sparse, so without the warning that sample would be indistinguishable from one that was
+never in the input.
+
+The following are **errors**:
+
+- a zero `total_biological_reads_r1r2` or `calc_mass_sample_aliquot_input_g` — both are
+  divided by, and zero is exactly the case the NULL/negative screen cannot catch;
+- a read count that is negative or non-finite (zero is fine, and simply means no copies —
+  there is no `log10` in this chain);
+- an `ogu_orf_start` or `ogu_orf_end` that is not a finite **whole number**. Negative
+  coordinates are accepted: the length is well defined either way and woltka's format says
+  nothing about the origin;
+- duplicate keys in any of the three relations;
+- a counted ORF with no `coords` row, or a counted sample with no `params` row. The
+  reverse is fine — a `coords` relation is a whole annotation and a `params` relation a
+  whole study, so both may describe far more than the counts do, and their unused rows are
+  not screened at all;
+- a computed value that overflows to `inf`.
+
+Zero-valued cells are omitted from the output, as everywhere else in miint — see
+[Zero-valued cells are omitted](#zero-valued-cells-are-omitted).
+
 ## Differences from pysyndna
 
 miint's models reproduce
 [pysyndna](https://github.com/biocore/pysyndna)'s `fit_linear_regression_models` on its
 own published fixtures to the full precision pysyndna emits — it serializes coefficients
 truncated to 12 decimal places, and the parity tests hold to `1e-11` relative. The cell
-counts reproduce `calc_ogu_cell_counts_biom` on the same fixtures to `1e-9` relative.
+counts reproduce `calc_ogu_cell_counts_biom` on the same fixtures to `1e-9` relative, and
+the ORF copies reproduce `calc_copies_of_ogu_orf_ssrna_per_g_sample` exactly — that chain
+has no `pow` or `log10` in it, only multiplies and divides.
 
 The behavioral differences below are deliberate. The first five change only *which* input
 is accepted and how a rejection is reported, never a coefficient. The last one is a
@@ -508,6 +652,37 @@ For `absquant_cell_counts` specifically:
   concentration times an elution volume can overflow before the divide. pysyndna emits
   the `inf`. An infinite cell count is not a measurement, and the same reasoning applies
   as for the zero denominators above.
+
+For `absquant_orf_copies` specifically:
+
+- **A zero `total_biological_reads_r1r2` or `calc_mass_sample_aliquot_input_g` is an
+  error.** Both are divided by, and zero passes pysyndna's NULL/negative screen — it then
+  divides through to `inf` copies for every ORF in the sample, silently. A NULL or
+  negative value is *not* an error and drops the sample with a warning, which is what
+  pysyndna does too: `REQUIRED_PARAM_KEYS` is the union of its sample-info and RNA-prep
+  key lists and goes to `filter_data_by_sample_info` whole.
+- **A coordinate must be a finite whole number of bases.** pysyndna's `cast_cols` accepts
+  `100.5` and produces a fractional ORF length, which divides into Avogadro's number and
+  yields a copy count nothing downstream can distinguish from a real one. Negative
+  coordinates are accepted, since the length is well defined for any pair of whole
+  numbers.
+- **A counted ORF with no coordinates is an error.** pysyndna does not validate this
+  direction: it reaches the coordinates through a bare `.at[]` inside a `biom.transform`
+  lambda, so the same input surfaces as a pandas `KeyError` from inside a callback. The
+  sample-id direction it does check, and asymmetrically — extra parameter rows are fine,
+  which miint matches.
+- **A zero read count is accepted**, unlike in `absquant_cell_counts`. The difference is
+  the `log10`: there is none in this chain, so a zero count simply means no copies of that
+  ORF. Carrying the stricter rule across would be a rule invented for no reason.
+- **A sample whose every cell comes out zero is reported**, for the same reason as above —
+  a sparse output has to say in words what it cannot say in rows. Reached through a zero
+  `total_rna_concentration_ng_ul` or `vol_extracted_elution_ul`.
+- **A copy count that overflows to `inf` is an error.** The extracted ssRNA mass is a
+  product formed before the ng→g divide, and the copies-per-gram multiply comes after
+  that, so the ceiling sits well below where the two input columns alone would reach.
+- **Duplicate keys in any relation are an error.** pysyndna cannot express one: its input
+  is a `biom.Table`, unique by construction. A long-form relation can, and a repeat means
+  the caller's join fanned out.
 
 ## Citations
 
