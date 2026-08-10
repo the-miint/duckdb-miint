@@ -94,6 +94,60 @@ SELECT count(*) FROM (SELECT * FROM prog_ord EXCEPT SELECT * FROM prog_ord2);
 ----
 0
 
+# ── worker-count invariance: blocks run CONCURRENTLY (batch_workers = wave_batches
+#    = the resolved thread count), and that must change execution order ONLY. 25
+#    non-anchor samples at batch_size 12 give 3 batches, so threads := 4 genuinely
+#    takes the parallel path while threads := 1 stays serial — a 1-batch fixture
+#    would silently test nothing, since wave_workers = min(workers, wave_count).
+#
+#    Why this is a TOLERANCE and not EXCEPT, deliberately: `threads` is not a pure
+#    scheduling knob. It also sets the OpenMP width of the anchor block's reference
+#    PCoA, and skbb's centering is an OpenMP `reduction(+:)` whose summation order
+#    depends on that width — so the reference FRAME itself shifts in its last bits
+#    and every coordinate inherits the shift. Measured 3.1e-06 max abs on this
+#    fixture. Separately, concurrent FIRST calls race on libssu/skbb's non-atomic
+#    CPU/accelerator detection caches (upstream README, "Detection caches"), which
+#    perturbs the first parallel run in a process by ~1.6e-06 and nothing after it.
+#    Both are fp32-noise scale and bounded; 1e-5 is the tolerance the rest of this
+#    repo's fp32 PCoA reproducibility tests already use. Asserting exact equality
+#    here would be asserting something untrue.
+#
+#    What IS exact is checked exactly, because these are the things concurrency
+#    could actually corrupt rather than perturb: every sample appears, and each
+#    coordinate's `batch` is its POSITION, not whichever worker finished first.
+#    This is also the guard on the shared AnchorFeatureRowCache — its anchor rows
+#    are loaded eagerly before fan-out, and if anyone reinstates the lazy fill,
+#    workers would write that vector while others read it. That corrupts a block's
+#    anchor rows outright, which moves coordinates far beyond 1e-5. ──
+statement ok
+CREATE TABLE prog_serial AS
+SELECT sample_id, axis, coordinate, batch
+FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+
+statement ok
+CREATE TABLE prog_parallel AS
+SELECT sample_id, axis, coordinate, batch
+FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 4);
+
+# same (sample_id, axis) keys on both sides, and every one of them joins
+query II
+SELECT (SELECT count(*) FROM prog_serial), (SELECT count(*) FROM prog_parallel FULL JOIN prog_serial USING (sample_id, axis));
+----
+120	120
+
+# batch indices are positional — exact, no tolerance
+query I
+SELECT count(*) FROM prog_serial s JOIN prog_parallel p USING (sample_id, axis) WHERE s.batch <> p.batch;
+----
+0
+
+# coordinates agree to fp32 PCoA tolerance
+query I
+SELECT count(*) FROM prog_serial s JOIN prog_parallel p USING (sample_id, axis)
+WHERE abs(s.coordinate - p.coordinate) >= 1e-5;
+----
+0
+
 # ── id-type mirroring: an integer-keyed feature table emits BIGINT sample_id ──
 statement ok
 CREATE TABLE ft_int AS

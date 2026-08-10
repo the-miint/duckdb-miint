@@ -1251,18 +1251,23 @@ std::vector<miint::unifrac::CooRow> QueryFeatureRows(ClientContext &context, con
 //
 // Order does not matter: the rows go to UnifracSupportBiomView::FromCoo, which
 // builds its own sorted dictionary, and the core maps block rows back by id.
+// Thread safety: the anchor rows are loaded EAGERLY here, in the constructor, on
+// the binding thread. They used to be filled lazily on the first RowsFor call
+// behind a plain `loaded_` bool, which is a data race the moment blocks run
+// concurrently — several workers would write anchor_rows_ while others read it,
+// and a vector being resized under a reader is a use-after-free, not a stale
+// read. Loading before any fan-out makes every later RowsFor a read-only use of
+// shared state, which is what lets all workers share one cache with no lock.
 class AnchorFeatureRowCache {
 public:
-	explicit AnchorFeatureRowCache(const std::vector<std::string> &anchors)
-	    : anchors_(anchors), anchor_set_(anchors.begin(), anchors.end()) {
+	AnchorFeatureRowCache(ClientContext &context, const std::string &qname, const std::vector<std::string> &anchors)
+	    : anchor_set_(anchors.begin(), anchors.end()), anchor_rows_(QueryFeatureRows(context, qname, anchors)) {
 	}
 
+	// Safe to call concurrently: reads only, and QueryFeatureRows opens its own
+	// Connection per call (see docs/internals/reading-tables-views.md).
 	std::vector<miint::unifrac::CooRow> RowsFor(ClientContext &context, const std::string &qname,
-	                                            const std::vector<std::string> &requested) {
-		if (!loaded_) {
-			anchor_rows_ = QueryFeatureRows(context, qname, anchors_);
-			loaded_ = true;
-		}
+	                                            const std::vector<std::string> &requested) const {
 		std::vector<std::string> non_anchor;
 		non_anchor.reserve(requested.size());
 		for (const auto &id : requested) {
@@ -1279,18 +1284,15 @@ public:
 	}
 
 private:
-	std::vector<std::string> anchors_;
 	std::unordered_set<std::string> anchor_set_;
 	std::vector<miint::unifrac::CooRow> anchor_rows_;
-	bool loaded_ = false;
 };
 
-miint::progressive::DistanceBlock ComputeUnifracBlock(ClientContext &context, const std::string &qname,
-                                                      const std::vector<std::string> &requested,
-                                                      const miint::NewickTree &table_tree,
-                                                      const std::string &variant_fp32, bool variance_adjust,
-                                                      double alpha, bool bypass_tips, bool normalize_sample_counts,
-                                                      int seed, int n_threads, AnchorFeatureRowCache &anchor_cache) {
+miint::progressive::DistanceBlock
+ComputeUnifracBlock(ClientContext &context, const std::string &qname, const std::vector<std::string> &requested,
+                    const miint::NewickTree &table_tree, const std::string &variant_fp32, bool variance_adjust,
+                    double alpha, bool bypass_tips, bool normalize_sample_counts, int seed, int n_threads,
+                    const AnchorFeatureRowCache &anchor_cache) {
 	auto rows = [&]() {
 		return anchor_cache.RowsFor(context, qname, requested);
 	}();
@@ -1467,16 +1469,51 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 	auto part = PickAnchors(ids.sorted_sample_ids, static_cast<uint32_t>(n_anchors), seed);
 
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
-	AnchorFeatureRowCache anchor_cache(part.anchors);
+	AnchorFeatureRowCache anchor_cache(context, qname, part.anchors);
+
+	// How wide each block's libssu compute may fan out. The core pins each worker's
+	// ORDINATION to one OpenMP thread itself, but it cannot reach into our provider,
+	// so the UniFrac width has to be divided HERE — otherwise W concurrent workers
+	// would each pin n_threads and oversubscribe the machine W-fold (196 OpenMP
+	// threads at n_threads = 14). Divided by the workers that will actually run, not
+	// by n_threads, so a table with fewer batches than threads still gets a wide
+	// compute per block instead of being needlessly pinned to one core.
+	const auto n_batches =
+	    (part.remaining.size() + static_cast<size_t>(batch_size) - 1) / static_cast<size_t>(batch_size);
+	const auto workers = static_cast<uint32_t>(n_threads);
+	const auto active_workers = std::max<size_t>(1, std::min<size_t>(workers, n_batches));
+	const int block_threads = std::max<int>(1, n_threads / static_cast<int>(active_workers));
+
 	const miint::progressive::BlockProvider provider = [&](const std::vector<std::string> &requested) {
 		return ComputeUnifracBlock(context, qname, requested, tree, variant_fp32, variance_adjust, alpha, bypass_tips,
-		                           normalize_sample_counts, seed, n_threads, anchor_cache);
+		                           normalize_sample_counts, seed, block_threads, anchor_cache);
 	};
 
+	// Run the blocks CONCURRENTLY. This is the one path where it pays: a block here
+	// is a UniFrac compute (seconds) rather than an fsvd (~9 ms at m=2000), and a
+	// single block cannot use more than one core no matter what `threads` says —
+	// libssu's parallel degree is ceil(n_samples/2048) and a block is only
+	// n_anchors + batch_size samples, so at any sane config that is one stripe.
+	// Concurrency across blocks is therefore the only way this path uses the machine.
+	//
+	// Workers are drawn from one wave, so wave_batches must be set too or
+	// batch_workers does nothing (wave_workers = min(batch_workers, wave_count)).
+	// Sized equal to the worker count: without a prefetch each block is fetched and
+	// released inside its own batch, so live memory is `workers` blocks rather than
+	// the whole wave, and a bigger wave would only buy fewer barriers at the cost of
+	// holding more batch output. Waves are a barrier, so a straggler can idle its
+	// wave's other workers; revisit together with the streaming refactor.
+	//
+	// Bit-identity is preserved, not merely approximate: each worker pins its
+	// ordination to ONE OpenMP thread, which is what the serial path uses at
+	// n_threads=1, and skbb's centering reduction sums in thread-count-dependent
+	// order (see test_ProgressivePcoa's serial-vs-parallel case).
 	miint::progressive::ProgressivePcoaResult result;
 	try {
 		result = miint::progressive::RunProgressivePcoa(part.anchors, part.remaining, static_cast<uint32_t>(n_dims),
-		                                                static_cast<uint32_t>(batch_size), seed, n_threads, provider);
+		                                                static_cast<uint32_t>(batch_size), seed, n_threads, provider,
+		                                                /*prefetch=*/nullptr, /*wave_batches=*/workers,
+		                                                /*batch_workers=*/workers);
 	} catch (const std::invalid_argument &e) {
 		throw InvalidInputException("progressive_pcoa_from_unifrac: %s", e.what());
 	}
