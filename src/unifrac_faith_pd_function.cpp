@@ -12,7 +12,7 @@
 #include "tree_table_reader.hpp"
 #include "unifrac_bptree.hpp"
 #include "unifrac_function_common.hpp"
-#include "unifrac_libssu.hpp"
+#include "api.hpp"
 #include "unifrac_omp_scope.hpp"
 #include "unifrac_subsample_bridge.hpp"
 #include "unifrac_support_biom.hpp"
@@ -104,9 +104,10 @@ void RunFaithPd(const miint::unifrac::UnifracSupportBiomView &biom_view,
 	ComputeStatus status;
 	{
 		// faith_pd_inmem internally uses libssu's OpenMP-parallel tree
-		// traversal; pin its fan-out to n_threads under the process-wide
-		// libssu/OpenMP mutex so concurrent queries can't race.
-		miint::unifrac::OmpThreadScope omp_scope(n_threads);
+		// traversal; pin its fan-out to n_threads so it honors DuckDB's thread
+		// count. A bare pin is enough here — faith_pd_inmem draws no randomness
+		// and upstream lists it as safe to call concurrently.
+		miint::unifrac::OmpThreadPin omp_pin(n_threads);
 		status = faith_pd_inmem(biom_view.support_biom(), bptree_view.support_bptree(), result.out());
 	}
 	if (status != okay) {

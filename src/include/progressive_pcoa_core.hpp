@@ -154,12 +154,10 @@ struct ProgressivePcoaResult {
 //                  wave_batches > 1; the effective count is
 //                  min(batch_workers, batches in the wave).
 //                  Each worker's PCoA is pinned to ONE OpenMP thread and takes no
-//                  process-wide lock (see SkbbCallScope), so parallelism comes
+//                  process-wide lock (see ComputeCallScope), so parallelism comes
 //                  from concurrent block ordinations rather than a wider fsvd, and
 //                  an unrelated query may ordinate at the same time. Requires a
-//                  thread-safe get_block (see BlockProvider) — in particular a
-//                  libssu-backed provider must NOT use this, since libssu is not
-//                  re-entrant (see OmpThreadScope).
+//                  thread-safe get_block (see BlockProvider).
 //
 // Flow: PCoA on the anchor block defines the reference frame; its eigenvalues and
 // proportions are reported (a documented caveat — they describe the anchors, not

@@ -15,7 +15,7 @@
 #include "ordination.h" // skbb_pcoa_fsvd_fp32
 
 #include "procrustes_core.hpp"   // FitProcrustes / ApplyToReference / ApplyToOther
-#include "unifrac_omp_scope.hpp" // SkbbCallScope — per-call OpenMP pin + non-negative seed
+#include "unifrac_omp_scope.hpp" // ComputeCallScope — per-call OpenMP pin + non-negative seed
 
 namespace miint::progressive {
 
@@ -36,7 +36,7 @@ using ::miint::procrustes::ProcrustesFit;
 // header comment says "(n_eighs × n_dims)" but the implementation writes
 // sample-major n×n_eighs).
 //
-// Each call takes a SkbbCallScope: no process-wide lock, because skbb's
+// Each call takes a ComputeCallScope: no process-wide lock, because skbb's
 // ordination is re-entrant once seeded per call — which is exactly what lets a
 // wave's batches ordinate concurrently. `omp_threads` is that call's OpenMP
 // width, so the serial path spends the caller's whole thread budget on one
@@ -51,7 +51,7 @@ std::vector<double> PcoaBlock(const DistanceBlock &block, uint32_t d, int seed, 
 	const uint32_t m = static_cast<uint32_t>(block.ids.size());
 	std::vector<float> eig(d), samples(static_cast<size_t>(m) * d), prop(d);
 	{
-		miint::unifrac::SkbbCallScope skbb(omp_threads, seed);
+		miint::unifrac::ComputeCallScope skbb(omp_threads, seed);
 		skbb_pcoa_fsvd_fp32(m, block.matrix.data(), d, skbb.seed(), eig.data(), samples.data(), prop.data());
 	}
 	std::vector<double> coords(static_cast<size_t>(m) * d);
@@ -349,7 +349,7 @@ ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_
 		}
 
 		// Parallel wave. No lock of any kind: each block's ordination takes its own
-		// SkbbCallScope (see PcoaBlock), which is safe concurrently because skbb's
+		// ComputeCallScope (see PcoaBlock), which is safe concurrently because skbb's
 		// fsvd is seeded per call. Parallelism therefore comes from W concurrent
 		// single-threaded ordinations rather than one wide one — hence the 1 below —
 		// and an unrelated query may ordinate at the same time without waiting.

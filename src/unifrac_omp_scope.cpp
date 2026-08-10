@@ -11,17 +11,12 @@ namespace miint::unifrac {
 
 namespace {
 
-std::mutex &GlobalLibssuMutex() {
-	static std::mutex m;
-	return m;
-}
-
-// Seeds for callers that supplied none. Thread-local so concurrent skbb calls
-// draw without synchronization — the whole point is to keep them off skbb's own
-// process-global generator. Seeded once per thread from random_device, so an
-// unseeded run stays non-reproducible exactly as it was when skbb drew the seed
-// itself. Masked to 31 bits because a negative value would send skbb straight
-// back to that global generator.
+// Seeds for callers that supplied none. Thread-local so concurrent calls draw
+// without synchronization — the whole point is to keep them off the libraries'
+// own process-global generators. Seeded once per thread from random_device, so
+// an unseeded run stays non-reproducible exactly as it was when the library drew
+// the seed itself. Masked to 31 bits because a negative value would send the
+// call straight back to that global generator.
 int DeriveSeed() {
 	static thread_local std::mt19937 rng {std::random_device {}()};
 	return static_cast<int>(rng() & 0x7fffffffu);
@@ -52,15 +47,7 @@ OmpThreadPin::~OmpThreadPin() {
 }
 #endif
 
-SkbbCallScope::SkbbCallScope(int n_threads, int seed) : pin_(n_threads), seed_(seed >= 0 ? seed : DeriveSeed()) {
+ComputeCallScope::ComputeCallScope(int n_threads, int seed) : pin_(n_threads), seed_(seed >= 0 ? seed : DeriveSeed()) {
 }
-
-// Lock first, then pin: the pin is what a concurrent caller would race on, so it
-// is only touched under the lock. Members destruct in reverse, restoring the
-// thread count before the lock is released.
-OmpThreadScope::OmpThreadScope(int n_threads) : lock_(GlobalLibssuMutex()), pin_(n_threads) {
-}
-
-OmpThreadScope::~OmpThreadScope() = default;
 
 } // namespace miint::unifrac

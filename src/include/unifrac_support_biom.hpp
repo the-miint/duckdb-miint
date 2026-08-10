@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "unifrac_libssu.hpp" // guarded wrapper over unifrac api.hpp (support_biom_t)
+#include "api.hpp" // libssu (support_biom_t)
 
 namespace miint::unifrac {
 

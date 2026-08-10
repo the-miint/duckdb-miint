@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "unifrac_bptree.hpp"
-#include "unifrac_libssu.hpp" // mat_full_fp32_t
+#include "api.hpp" // libssu (mat_full_fp32_t)
 #include "unifrac_support_biom.hpp"
 
 namespace miint::unifrac {
@@ -26,10 +26,12 @@ namespace miint::unifrac {
 // size. Always trust these values, never the pre-subsample
 // `ordered_sample_ids` from the input biom view.
 //
-// Thread safety: Compute() takes the process-wide libssu/OpenMP mutex
-// (via OmpThreadScope) internally — callers don't need to. The mutex is
-// held only across ssu_set_random_seed + one_off_matrix_inmem_fp32_v3,
-// not for the caller's downstream work on the returned matrix.
+// Thread safety: Compute() may be called CONCURRENTLY from several
+// threads of one process; there is no lock. It goes through
+// one_off_matrix_inmem_fp32_v4 with a per-call seed >= 0 (supplied by
+// ComputeCallScope), which upstream's README lists as safe to call
+// concurrently — inputs are read, never written, so concurrent calls may
+// share a biom view and a bptree view, and each allocates its own result.
 //
 // `n_threads` pins the libssu OpenMP fan-out (must be >= 1). Callers
 // should resolve from DuckDB's TaskScheduler::NumberOfThreads() via

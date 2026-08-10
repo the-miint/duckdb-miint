@@ -3,7 +3,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "unifrac_bptree.hpp"
-#include "unifrac_libssu.hpp" // faith_pd_inmem, r_vec*, destroy_results_vec
+#include "api.hpp" // faith_pd_inmem, r_vec*, destroy_results_vec
 #include "unifrac_support_biom.hpp"
 
 #include "NewickTree.hpp"

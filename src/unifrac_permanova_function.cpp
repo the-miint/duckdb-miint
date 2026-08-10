@@ -210,11 +210,11 @@ void RunPermanovaOnMatrix(const float *mat, uint32_t n, const std::vector<std::s
 		// No process-wide lock: skbb's PERMANOVA permutes from a generator array
 		// seeded per call, so it is re-entrant and two queries may run at once. The
 		// scope pins this thread's OpenMP fan-out and guarantees the non-negative
-		// seed that keeps skbb off its process-global generator (see SkbbCallScope).
+		// seed that keeps skbb off its process-global generator (see ComputeCallScope).
 		float f_stat = 0.0f;
 		float p_value = 0.0f;
 		{
-			miint::unifrac::SkbbCallScope skbb(n_threads, seed);
+			miint::unifrac::ComputeCallScope skbb(n_threads, seed);
 			skbb_permanova_fp32(n, mat, grouping.labels.data(), n_permutations, skbb.seed(), &f_stat, &p_value);
 		}
 		PermanovaRow row;

@@ -17,10 +17,12 @@
 #include "distance.h"   // skbb_permanova_fp32
 #include "ordination.h" // skbb_pcoa_fsvd_fp32
 
+#include "concurrent_test_util.hpp"
 #include "unifrac_omp_scope.hpp"
 
+using miint::test::RunConcurrently;
+using miint::unifrac::ComputeCallScope;
 using miint::unifrac::OmpThreadPin;
-using miint::unifrac::SkbbCallScope;
 
 namespace {
 
@@ -50,32 +52,6 @@ std::vector<float> EuclideanDm(uint32_t n, uint32_t d_true, uint64_t seed) {
 	return dm;
 }
 
-// Run `body` on `n_threads` threads that are all inside it at once, so a race
-// between them has a chance to happen rather than being serialized by luck.
-// Threads rendezvous with a bounded wait: a timeout degrades the test to "less
-// overlap than intended", never to a hang.
-void RunConcurrently(size_t n_threads, const std::function<void(size_t)> &body) {
-	std::mutex mu;
-	std::condition_variable cv;
-	size_t arrived = 0;
-	std::vector<std::thread> pool;
-	pool.reserve(n_threads);
-	for (size_t t = 0; t < n_threads; ++t) {
-		pool.emplace_back([&, t]() {
-			{
-				std::unique_lock<std::mutex> lk(mu);
-				++arrived;
-				cv.notify_all();
-				cv.wait_for(lk, std::chrono::seconds(5), [&] { return arrived == n_threads; });
-			}
-			body(t);
-		});
-	}
-	for (auto &th : pool) {
-		th.join();
-	}
-}
-
 } // namespace
 
 TEST_CASE("OmpThreadPin pins the calling thread, not the process", "[omp]") {
@@ -103,14 +79,14 @@ TEST_CASE("OmpThreadPin pins the calling thread, not the process", "[omp]") {
 	REQUIRE(observed_four == 4);
 }
 
-TEST_CASE("SkbbCallScope hands out a seed skbb can use without its global RNG", "[omp]") {
+TEST_CASE("ComputeCallScope hands out a seed skbb can use without its global RNG", "[omp]") {
 	// The whole reason concurrent skbb calls are safe is that a NON-NEGATIVE seed
 	// keeps skbb on a per-call generator; seed < 0 sends it to a process-global
 	// mt19937 (scikit-bio-binaries util/rand.cpp) that concurrent callers would
 	// race on. This scope is what makes that unmissable: you cannot obtain the
 	// thread pin without also obtaining a usable seed.
 	SECTION("an explicit seed is passed through untouched, so seeded runs stay reproducible") {
-		SkbbCallScope scope(1, 42);
+		ComputeCallScope scope(1, 42);
 		REQUIRE(scope.seed() == 42);
 		REQUIRE(scope.seed() >= 0);
 	}
@@ -119,14 +95,14 @@ TEST_CASE("SkbbCallScope hands out a seed skbb can use without its global RNG", 
 		// silently become a fixed seed.
 		std::set<int> seeds;
 		for (int i = 0; i < 8; ++i) {
-			SkbbCallScope scope(1, -1);
+			ComputeCallScope scope(1, -1);
 			REQUIRE(scope.seed() >= 0);
 			seeds.insert(scope.seed());
 		}
 		REQUIRE(seeds.size() > 1);
 	}
 	SECTION("it pins the calling thread's fan-out like a bare pin does") {
-		SkbbCallScope scope(3, 1);
+		ComputeCallScope scope(3, 1);
 		REQUIRE(omp_get_max_threads() == 3);
 	}
 }
@@ -144,7 +120,7 @@ TEST_CASE("concurrent seeded skbb PCoA reproduces the serial result exactly", "[
 		eig.assign(n_dims, 0.0f);
 		samples.assign(static_cast<size_t>(n) * n_dims, 0.0f);
 		prop.assign(n_dims, 0.0f);
-		SkbbCallScope scope(1, seed);
+		ComputeCallScope scope(1, seed);
 		skbb_pcoa_fsvd_fp32(n, dm.data(), n_dims, scope.seed(), eig.data(), samples.data(), prop.data());
 	};
 
@@ -178,7 +154,7 @@ TEST_CASE("concurrent seeded skbb PERMANOVA reproduces the serial result exactly
 	const auto permanova_once = [&](float &f_stat, float &p_value) {
 		f_stat = 0.0f;
 		p_value = 0.0f;
-		SkbbCallScope scope(1, seed);
+		ComputeCallScope scope(1, seed);
 		skbb_permanova_fp32(n, dm.data(), grouping.data(), n_perm, scope.seed(), &f_stat, &p_value);
 	};
 

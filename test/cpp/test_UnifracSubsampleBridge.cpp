@@ -3,7 +3,7 @@
 
 #include "NewickTree.hpp"
 #include "unifrac_bptree.hpp"
-#include "unifrac_libssu.hpp"
+#include "api.hpp"
 #include "unifrac_subsample_bridge.hpp"
 #include "unifrac_support_biom.hpp"
 
