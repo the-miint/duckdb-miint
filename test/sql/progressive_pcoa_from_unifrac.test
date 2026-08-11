@@ -108,9 +108,15 @@ SELECT count(*) FROM (SELECT * FROM prog_ord EXCEPT SELECT * FROM prog_ord2);
 #    fixture. Separately, concurrent FIRST calls race on libssu/skbb's non-atomic
 #    CPU/accelerator detection caches (upstream README, "Detection caches"), which
 #    perturbs the first parallel run in a process by ~1.6e-06 and nothing after it.
-#    Both are fp32-noise scale and bounded; 1e-5 is the tolerance the rest of this
-#    repo's fp32 PCoA reproducibility tests already use. Asserting exact equality
-#    here would be asserting something untrue.
+#    1e-5 is the tolerance the rest of this repo's fp32 PCoA reproducibility tests
+#    already use, and it has 3x headroom on THIS fixture. Do not read it as a
+#    universal bound: the drift is amplified by a randomized SVD and a procrustes
+#    fit, so it grows with the table — measured 2.4e-05 on 23,814 real EMP samples,
+#    which would fail this threshold. What stays invariant at that scale is the
+#    ORDINATION (procrustes M^2 vs a full unifrac_pcoa was identical to five
+#    decimals across thread counts), not the coordinates. A bigger fixture here
+#    would therefore need a procrustes comparison instead of a coordinate diff.
+#    Asserting exact equality would be asserting something untrue either way.
 #
 #    What IS exact is checked exactly, because these are the things concurrency
 #    could actually corrupt rather than perturb: every sample appears, and each
