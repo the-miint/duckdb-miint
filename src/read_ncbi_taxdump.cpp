@@ -100,6 +100,22 @@ bool ParseRefreshParam(const named_parameter_map_t &params) {
 	return false;
 }
 
+// Shared Bind-time parse of the (source, refresh) parameters every read_ncbi_taxdump*
+// function takes. Returns the source, empty meaning "auto-download the default taxdump
+// into the cache": that is both the no-argument call and an explicit NULL, the latter
+// being the taxonomy_lineage(source := NULL) default, which must route to the cached
+// download rather than error so the macro can delegate uniformly.
+std::string ParseSourceParam(TableFunctionBindInput &input, const char *fn_name) {
+	if (input.inputs.empty() || input.inputs[0].IsNull()) {
+		return {};
+	}
+	std::string source = input.inputs[0].ToString();
+	if (source.empty()) {
+		throw InvalidInputException("%s: source must not be empty", fn_name);
+	}
+	return source;
+}
+
 // Where the auto-downloaded taxdump is cached (extracted). An explicit override
 // wins (used by tests to avoid touching the user's real cache); otherwise the
 // shared miint cache location.
@@ -199,16 +215,7 @@ unique_ptr<FunctionData> ReadNCBITaxdumpTableFunction::Bind(ClientContext &conte
                                                             vector<LogicalType> &return_types,
                                                             vector<std::string> &names) {
 	auto data = make_uniq<Data>();
-	// No positional arg, or an explicit NULL, => auto-download the default taxdump
-	// into the cache. A NULL source is the taxonomy_lineage(source := NULL) default,
-	// which must route to the cached-download path (not error) so the macro can
-	// delegate here uniformly.
-	if (!input.inputs.empty() && !input.inputs[0].IsNull()) {
-		data->source = input.inputs[0].ToString();
-		if (data->source.empty()) {
-			throw InvalidInputException("read_ncbi_taxdump: source must not be empty");
-		}
-	}
+	data->source = ParseSourceParam(input, "read_ncbi_taxdump");
 	data->refresh = ParseRefreshParam(input.named_parameters);
 
 	names = {"node_index", "parent_index", "name", "rank", "is_tip"};
@@ -278,14 +285,7 @@ unique_ptr<FunctionData> ReadNCBITaxdumpMergedTableFunction::Bind(ClientContext 
                                                                   vector<LogicalType> &return_types,
                                                                   vector<std::string> &names) {
 	auto data = make_uniq<Data>();
-	// No positional arg, or an explicit NULL, => auto-download the default taxdump
-	// (mirrors read_ncbi_taxdump so both accept the NULL-source default).
-	if (!input.inputs.empty() && !input.inputs[0].IsNull()) {
-		data->source = input.inputs[0].ToString();
-		if (data->source.empty()) {
-			throw InvalidInputException("read_ncbi_taxdump_merged: source must not be empty");
-		}
-	}
+	data->source = ParseSourceParam(input, "read_ncbi_taxdump_merged");
 	data->refresh = ParseRefreshParam(input.named_parameters);
 
 	names = {"old_taxid", "new_taxid"};
@@ -330,6 +330,121 @@ void ReadNCBITaxdumpMergedTableFunction::Register(ExtensionLoader &loader) {
 	TableFunctionSet set("read_ncbi_taxdump_merged");
 	for (const auto &args : {vector<LogicalType> {}, vector<LogicalType> {LogicalType::VARCHAR}}) {
 		TableFunction tf("read_ncbi_taxdump_merged", args, Execute, Bind, InitGlobal, InitLocal);
+		tf.named_parameters["refresh"] = LogicalType::BOOLEAN;
+		set.AddFunction(tf);
+	}
+	loader.RegisterFunction(set);
+}
+
+// ── read_ncbi_taxdump_names ──────────────────────────────────────────────────
+
+unique_ptr<FunctionData> ReadNCBITaxdumpNamesTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
+                                                                 vector<LogicalType> &return_types,
+                                                                 vector<std::string> &names) {
+	auto data = make_uniq<Data>();
+	data->source = ParseSourceParam(input, "read_ncbi_taxdump_names");
+	data->refresh = ParseRefreshParam(input.named_parameters);
+
+	names = {"taxid", "name", "unique_name", "name_class"};
+	return_types = {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
+	return std::move(data);
+}
+
+unique_ptr<GlobalTableFunctionState> ReadNCBITaxdumpNamesTableFunction::InitGlobal(ClientContext &context,
+                                                                                   TableFunctionInitInput &input) {
+	auto &data = input.bind_data->Cast<Data>();
+	auto gstate = make_uniq<GlobalState>();
+	std::string source = data.source.empty() ? EnsureTaxdumpCache(context, data.refresh) : data.source;
+	auto files = LoadTaxdumpFiles(context, source);
+	gstate->names = miint::TaxdumpParser::ParseNames(files.names);
+	return std::move(gstate);
+}
+
+unique_ptr<LocalTableFunctionState>
+ReadNCBITaxdumpNamesTableFunction::InitLocal(ExecutionContext &, TableFunctionInitInput &, GlobalTableFunctionState *) {
+	return make_uniq<LocalState>();
+}
+
+void ReadNCBITaxdumpNamesTableFunction::Execute(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
+	auto &gstate = data_p.global_state->Cast<GlobalState>();
+
+	idx_t count = std::min<idx_t>(STANDARD_VECTOR_SIZE, gstate.names.size() - gstate.cursor);
+
+	auto taxid = FlatVector::GetData<int64_t>(output.data[0]);
+	auto &name_vec = output.data[1];
+	auto &unique_name_vec = output.data[2];
+	auto &name_class_vec = output.data[3];
+	for (idx_t i = 0; i < count; ++i) {
+		const auto &n = gstate.names[gstate.cursor + i];
+		taxid[i] = n.taxid;
+		FlatVector::GetData<string_t>(name_vec)[i] = StringVector::AddString(name_vec, n.name);
+		FlatVector::GetData<string_t>(unique_name_vec)[i] = StringVector::AddString(unique_name_vec, n.unique_name);
+		FlatVector::GetData<string_t>(name_class_vec)[i] = StringVector::AddString(name_class_vec, n.name_class);
+	}
+
+	gstate.cursor += count;
+	output.SetCardinality(count);
+}
+
+void ReadNCBITaxdumpNamesTableFunction::Register(ExtensionLoader &loader) {
+	TableFunctionSet set("read_ncbi_taxdump_names");
+	for (const auto &args : {vector<LogicalType> {}, vector<LogicalType> {LogicalType::VARCHAR}}) {
+		TableFunction tf("read_ncbi_taxdump_names", args, Execute, Bind, InitGlobal, InitLocal);
+		tf.named_parameters["refresh"] = LogicalType::BOOLEAN;
+		set.AddFunction(tf);
+	}
+	loader.RegisterFunction(set);
+}
+
+// ── read_ncbi_taxdump_deleted ────────────────────────────────────────────────
+
+unique_ptr<FunctionData> ReadNCBITaxdumpDeletedTableFunction::Bind(ClientContext &context,
+                                                                   TableFunctionBindInput &input,
+                                                                   vector<LogicalType> &return_types,
+                                                                   vector<std::string> &names) {
+	auto data = make_uniq<Data>();
+	data->source = ParseSourceParam(input, "read_ncbi_taxdump_deleted");
+	data->refresh = ParseRefreshParam(input.named_parameters);
+
+	names = {"taxid"};
+	return_types = {LogicalType::BIGINT};
+	return std::move(data);
+}
+
+unique_ptr<GlobalTableFunctionState> ReadNCBITaxdumpDeletedTableFunction::InitGlobal(ClientContext &context,
+                                                                                     TableFunctionInitInput &input) {
+	auto &data = input.bind_data->Cast<Data>();
+	auto gstate = make_uniq<GlobalState>();
+	std::string source = data.source.empty() ? EnsureTaxdumpCache(context, data.refresh) : data.source;
+	auto files = LoadTaxdumpFiles(context, source);
+	gstate->deleted = miint::TaxdumpParser::ParseDeleted(files.delnodes);
+	return std::move(gstate);
+}
+
+unique_ptr<LocalTableFunctionState> ReadNCBITaxdumpDeletedTableFunction::InitLocal(ExecutionContext &,
+                                                                                   TableFunctionInitInput &,
+                                                                                   GlobalTableFunctionState *) {
+	return make_uniq<LocalState>();
+}
+
+void ReadNCBITaxdumpDeletedTableFunction::Execute(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
+	auto &gstate = data_p.global_state->Cast<GlobalState>();
+
+	idx_t count = std::min<idx_t>(STANDARD_VECTOR_SIZE, gstate.deleted.size() - gstate.cursor);
+
+	auto taxid = FlatVector::GetData<int64_t>(output.data[0]);
+	for (idx_t i = 0; i < count; ++i) {
+		taxid[i] = gstate.deleted[gstate.cursor + i];
+	}
+
+	gstate.cursor += count;
+	output.SetCardinality(count);
+}
+
+void ReadNCBITaxdumpDeletedTableFunction::Register(ExtensionLoader &loader) {
+	TableFunctionSet set("read_ncbi_taxdump_deleted");
+	for (const auto &args : {vector<LogicalType> {}, vector<LogicalType> {LogicalType::VARCHAR}}) {
+		TableFunction tf("read_ncbi_taxdump_deleted", args, Execute, Bind, InitGlobal, InitLocal);
 		tf.named_parameters["refresh"] = LogicalType::BOOLEAN;
 		set.AddFunction(tf);
 	}

@@ -1,0 +1,145 @@
+# name: test/sql/read_ncbi_taxdump_names_deleted.test
+# description: Test read_ncbi_taxdump_names / read_ncbi_taxdump_deleted over local taxdump sources
+# group: [sql]
+
+require miint
+
+# --- read_ncbi_taxdump_names ------------------------------------------------
+
+# every row of names.dmp is emitted, unfiltered (14 in the synthetic fixture,
+# against the 12 live nodes read_ncbi_taxdump reports)
+query I
+SELECT COUNT(*) FROM read_ncbi_taxdump_names('data/taxonomy/synthetic');
+----
+14
+
+# schema: taxid, name, unique_name, name_class
+query I
+SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM read_ncbi_taxdump_names('data/taxonomy/synthetic'));
+----
+4
+
+# a taxon's every name class is reachable here. read_ncbi_taxdump collapses taxid 80
+# to its scientific name alone, so without this the synonym and common name cannot be
+# recovered from the dump at all.
+query TT
+SELECT name_class, name
+FROM read_ncbi_taxdump_names('data/taxonomy/synthetic')
+WHERE taxid = 80;
+----
+synonym	Bacillus coli
+common name	E. coli
+scientific name	Escherichia coli
+
+# the intended consumer shape: pivot the classes into one row per taxon. On the real
+# dump 'common name' is replaced by 'genbank common name' -- the class is a plain
+# string literal, so the mechanic is identical.
+query TT
+SELECT MAX(name) FILTER (name_class = 'scientific name') AS scientific_name,
+       MAX(name) FILTER (name_class = 'common name') AS common_name
+FROM read_ncbi_taxdump_names('data/taxonomy/synthetic')
+WHERE taxid = 80;
+----
+Escherichia coli	E. coli
+
+# a taxon with no name in the requested class pivots to NULL rather than dropping the
+# row -- the taxdump supplies a common name for only a minority of taxa.
+query TT
+SELECT MAX(name) FILTER (name_class = 'scientific name') AS scientific_name,
+       MAX(name) FILTER (name_class = 'common name') AS common_name
+FROM read_ncbi_taxdump_names('data/taxonomy/synthetic')
+WHERE taxid = 70;
+----
+Escherichia	NULL
+
+# unique_name is empty (not NULL) throughout this fixture, matching the dump's own
+# empty field; it must not be silently dropped from the schema
+query T
+SELECT DISTINCT unique_name FROM read_ncbi_taxdump_names('data/taxonomy/synthetic');
+----
+(empty)
+
+# same result whether the source is the extracted directory or the archive
+query I
+SELECT COUNT(*) FROM read_ncbi_taxdump_names('data/taxonomy/synthetic.tar.gz');
+----
+14
+
+query TT
+SELECT name_class, name
+FROM read_ncbi_taxdump_names('data/taxonomy/synthetic.tar.gz')
+WHERE taxid = 90;
+----
+scientific name	Escherichia coli K-12
+
+# --- read_ncbi_taxdump_deleted ----------------------------------------------
+
+# delnodes.dmp exposes the taxids NCBI deleted outright (888 in the fixture)
+query I
+SELECT taxid FROM read_ncbi_taxdump_deleted('data/taxonomy/synthetic');
+----
+888
+
+query I
+SELECT taxid FROM read_ncbi_taxdump_deleted('data/taxonomy/synthetic.tar.gz');
+----
+888
+
+# schema is taxid only -- a deleted taxid has no replacement, unlike a merged one
+query I
+SELECT COUNT(*) FROM (DESCRIBE SELECT * FROM read_ncbi_taxdump_deleted('data/taxonomy/synthetic'));
+----
+1
+
+# why this function has to exist: a deleted taxid appears in neither the live tree nor
+# merged.dmp, so without delnodes.dmp it is indistinguishable from a taxid that never
+# existed -- and a consumer cannot tell "retired" from "bad input".
+query III
+SELECT
+    (SELECT COUNT(*) FROM read_ncbi_taxdump('data/taxonomy/synthetic') WHERE node_index = 888),
+    (SELECT COUNT(*) FROM read_ncbi_taxdump_merged('data/taxonomy/synthetic') WHERE old_taxid = 888),
+    (SELECT COUNT(*) FROM read_ncbi_taxdump_deleted('data/taxonomy/synthetic') WHERE taxid = 888);
+----
+0	0	1
+
+# a taxid is live, merged away, or deleted -- never more than one. The three functions
+# must therefore return disjoint id sets for a well-formed dump.
+query I
+SELECT COUNT(*) FROM (
+    SELECT node_index AS id FROM read_ncbi_taxdump('data/taxonomy/synthetic')
+    INTERSECT
+    SELECT old_taxid FROM read_ncbi_taxdump_merged('data/taxonomy/synthetic')
+    UNION ALL
+    SELECT taxid FROM read_ncbi_taxdump_deleted('data/taxonomy/synthetic')
+    INTERSECT
+    SELECT node_index FROM read_ncbi_taxdump('data/taxonomy/synthetic')
+);
+----
+0
+
+# delnodes.dmp is an optional member: a dump without one yields no rows rather than an
+# error, so a partial dump degrades instead of failing the whole query
+query I
+SELECT COUNT(*) FROM read_ncbi_taxdump_deleted('data/taxonomy/noname');
+----
+0
+
+# --- error handling ---------------------------------------------------------
+
+statement error
+SELECT * FROM read_ncbi_taxdump_names('data/taxonomy/does_not_exist');
+----
+
+statement error
+SELECT * FROM read_ncbi_taxdump_deleted('data/taxonomy/does_not_exist');
+----
+
+statement error
+SELECT * FROM read_ncbi_taxdump_names('');
+----
+source must not be empty
+
+statement error
+SELECT * FROM read_ncbi_taxdump_deleted('');
+----
+source must not be empty

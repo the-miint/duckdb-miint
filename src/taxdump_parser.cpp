@@ -126,6 +126,20 @@ std::vector<TaxdumpMerge> TaxdumpParser::ParseMerged(const std::string &merged_d
 	return merged;
 }
 
+std::vector<TaxdumpName> TaxdumpParser::ParseNames(const std::string &names_dmp) {
+	std::vector<TaxdumpName> names;
+	ForEachLine(names_dmp, [&](std::string_view line) {
+		auto f = SplitFields(line);
+		// Short of the documented 4 columns there is no name class to report, so the
+		// row is skipped rather than emitted with fields shifted (as ParseNodes does).
+		if (f.size() < 4) {
+			return;
+		}
+		names.push_back(TaxdumpName {ParseInt(f[0]), std::move(f[1]), std::move(f[2]), std::move(f[3])});
+	});
+	return names;
+}
+
 std::vector<int64_t> TaxdumpParser::ParseDeleted(const std::string &delnodes_dmp) {
 	std::vector<int64_t> deleted;
 	ForEachLine(delnodes_dmp, [&](std::string_view line) {

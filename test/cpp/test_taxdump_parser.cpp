@@ -124,3 +124,53 @@ TEST_CASE("TaxdumpParser::ParseDeleted reads deleted taxids", "[taxdump]") {
 	CHECK(deleted[0] == 888);
 	CHECK(deleted[1] == 889);
 }
+
+// ParseNodes deliberately keeps only the scientific name, which leaves every other
+// name class in names.dmp unreachable. ParseNames is the verbatim view that makes
+// them reachable — consumers that need e.g. the genbank common name pivot over it,
+// so the contract is "every row, unfiltered, in file order".
+TEST_CASE("TaxdumpParser::ParseNames emits every names.dmp row verbatim", "[taxdump]") {
+	auto names = TaxdumpParser::ParseNames(kNames);
+
+	SECTION("no row is filtered out and file order is preserved") {
+		REQUIRE(names.size() == 8);
+		CHECK(names[0].taxid == 1);
+		CHECK(names[0].name == "root");
+		CHECK(names[0].name_class == "scientific name");
+		CHECK(names[7].taxid == 90);
+		CHECK(names[7].name == "Escherichia coli K-12");
+	}
+
+	SECTION("a taxon's non-scientific classes survive, unlike in ParseNodes") {
+		// The point of this function: taxid 80's synonym and common name are
+		// dropped by ParseNodes and must be recoverable here. If this ever
+		// regresses to scientific-name-only, the downstream common-name lookup
+		// silently returns NULL for every taxon.
+		std::vector<std::string> classes_for_80;
+		for (const auto &n : names) {
+			if (n.taxid == 80) {
+				classes_for_80.push_back(n.name_class);
+			}
+		}
+		REQUIRE(classes_for_80.size() == 3);
+		CHECK(classes_for_80[0] == "synonym");
+		CHECK(classes_for_80[1] == "common name");
+		CHECK(classes_for_80[2] == "scientific name");
+	}
+
+	SECTION("unique_name is carried through when NCBI populates it") {
+		// unique_name is the disambiguator NCBI supplies when a name string is
+		// shared across taxa; it is empty on most rows but must not be dropped.
+		auto disambiguated = TaxdumpParser::ParseNames("32199\t|\tBacteria\t|\tBacteria <bacteria>\t|\tsynonym\t|\n");
+		REQUIRE(disambiguated.size() == 1);
+		CHECK(disambiguated[0].unique_name == "Bacteria <bacteria>");
+		CHECK(disambiguated[0].name == "Bacteria");
+	}
+
+	SECTION("a line without a name_class field is skipped, not half-read") {
+		// Matches ParseNodes/ParseMerged, which skip short lines rather than
+		// emitting a row with fields shifted into the wrong columns.
+		auto short_line = TaxdumpParser::ParseNames("80\t|\tEscherichia coli\t|\n");
+		CHECK(short_line.empty());
+	}
+}
