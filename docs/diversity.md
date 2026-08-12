@@ -10,6 +10,7 @@ Methods to estimate alpha and beta diversity, and supporting statistics.
 - [Sample identifier types](#sample-identifier-types) - How VARCHAR/BIGINT/UUID sample ids are handled.
 - [UniFrac algorithm variants](#unifrac-algorithm-variants) - Detail on different UniFrac algorithms and how to specify them.
 - [Rarefaction](#rarefaction) - Rarefaction detail with UniFrac and Faith PD.
+- [Rarefy a feature table](#rarefy-a-feature-table) - produce an even-depth feature table as a standalone result
 - [UniFrac distances](#unifrac-distances) - Condensed (pairwise) UniFrac distances in long form
 - [Beta-distance macros](#beta-distance-macros) - within/between-group distributions and k-nearest-neighbors over a distance table
 - [PCoA (from a distance table)](#pcoa-from-a-distance-table) - metric-agnostic PCoA over any condensed distance table
@@ -81,6 +82,41 @@ The feature table's `sample_id` column may be `VARCHAR`, `BIGINT`, or `UUID` (an
 <a name="subsample-thread-count"></a>**A seeded subsample reproduces per thread count, not across thread counts.** libssu distributes the draw across the OpenMP team — one generator per thread, seeded in turn — so both how many generators exist and which observation consumes which one depend on the team size. The OpenMP width comes from DuckDB's `SET threads = N` (or the per-call `threads` parameter), so the *same* query with the *same* `seed` and `subsample_depth > 0` can produce a different rarefied table, and therefore different distances, on a differently configured server.
 
 Widths that happen to divide the work identically can coincidentally agree — in one measured case widths 1, 2, and 4 agreed while 8 differed — so matching results at two thread counts is not a guarantee of matching at a third. If you need a rarefied result to be reproducible across machines, fix the width explicitly (`threads := N`, or `SET threads = N`) alongside the seed, and record it with the result. This is a property of the draw itself and applies to every function in this section; it is upstream of, and independent of, the fp32 reduction-ordering noise described under [Reproducibility](#reproducibility).
+
+---
+
+### Rarefy a feature table
+
+Rarefy a feature table to an even per-sample depth and return **the rarefied table itself** — `(sample_id, feature_id, value)`, the same shape every function on this page consumes.
+
+```sql
+-- rarefy once, then reuse that one table for every downstream analysis
+CREATE TABLE ft_even AS
+    SELECT * FROM rarefy_feature_table('observations', depth := 1000, seed := 42, threads := 8)
+    ORDER BY sample_id;
+
+SELECT * FROM progressive_pcoa_from_unifrac('ft_even', 'tree', variant := 'unweighted', n_dims := 10);
+```
+
+**Why this exists separately** from the `subsample_depth` parameter on the other functions: those rarefy *internally* and never hand back the table, so the drawn table cannot be inspected, shared between analyses, or fed to a function that has no `subsample_depth` of its own. [`progressive_pcoa_from_unifrac`](#progressive-pcoa-from-unifrac) is exactly that case — it deliberately omits `subsample_depth` because each batch would otherwise draw independently — so rarefying through this function is the only way to give it an even-depth table. It also lets you draw **once** and reuse it, so a PCoA, a PERMANOVA, and a Faith PD all describe the same rarefied data rather than three different draws.
+
+**Parameters:**
+- `feature_table` (VARCHAR): name of the feature relation exposing `(sample_id, feature_id, value)` (see [Feature table](#feature-table))
+- `depth` (INTEGER, **required**): target per-sample total count. No default — there is no defensible universal depth, and a silent one would change every downstream result.
+- `with_replacement` (BOOLEAN, default `false`): `true` draws multinomially (a cell may exceed its input count); `false` permutes without replacement.
+- `seed` (INTEGER, default `-1`): `-1` uses system entropy; any `seed >= 0` is deterministic — subject to the thread-count caveat below.
+- `threads` (INTEGER, default 0): OpenMP threads; `0` follows DuckDB's thread count.
+
+The parameter is `depth` rather than the `subsample_depth` used elsewhere on this page: the function name already supplies that context, so `subsample_depth` would be redundant here.
+
+**Output schema:** `(sample_id, feature_id, value DOUBLE)`. **Both** id columns mirror their input types (BIGINT/UUID preserved, everything else VARCHAR — see [Sample identifier types](#sample-identifier-types)), so a rarefied table still joins to typed metadata and taxonomy exactly as its input did.
+
+**Behavior:**
+- **Every surviving sample comes out at exactly `depth`.** That is the point: without it, sequencing depth acts as a covariate, and unweighted UniFrac in particular is strongly depth-sensitive.
+- **Samples whose total count is below `depth` are DROPPED** (never padded or partially filled), matching `subsample_depth` on the other functions. Features left with no nonzero count anywhere are dropped too, preserving the sparse-storage invariant. Check what you lost before trusting the result: compare `count(DISTINCT sample_id)` against the input.
+- **If no sample reaches `depth`, that is an error**, not an empty table — an empty result reads too easily as a successful analysis of nothing.
+- **Reproducibility:** a seeded draw reproduces per thread count, not across thread counts — see [the caveat above](#subsample-thread-count). Fix `threads := N` alongside the seed if the rarefied table has to be reproducible elsewhere.
+- **Rarefy once, upstream.** Storing the result (as in the example) is preferable to calling this inline in several queries: each call is a fresh draw unless you pin both `seed` and `threads`.
 
 ---
 
@@ -333,7 +369,7 @@ SELECT * FROM progressive_pcoa_from_unifrac('observations', 'tree',
 - `n_dims` (3), `n_anchors` (100), `batch_size` (1000), `seed` (-1), `threads` (0): as in [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table) — `n_anchors` must be in `[n_dims + 1, n_samples]`
 - `variant`, `variance_adjust`, `alpha`, `bypass_tips`, `normalize_sample_counts`: the UniFrac controls, identical to [`unifrac_pcoa`](#unifrac-pcoa)
 
-There is deliberately **no `subsample_depth`**: rarefaction and progressive alignment do not compose cleanly (each batch would rarefy independently against a different RNG draw). Rarefy upstream if needed.
+There is deliberately **no `subsample_depth`**: rarefaction and progressive alignment do not compose cleanly (each batch would rarefy independently against a different RNG draw). Rarefy upstream instead with [`rarefy_feature_table`](#rarefy-a-feature-table) and pass the resulting table here — worth doing, since unweighted UniFrac is strongly depth-sensitive and an uneven-depth table makes sequencing depth a covariate of the ordination.
 
 **Output schema:** [`unifrac_pcoa`](#unifrac-pcoa)'s six columns — `(iteration, sample_id, axis, coordinate, eigenvalue, proportion_explained)`, `iteration` always `0` — plus the appended `(batch, batch_anchor_m2)` diagnostics, identical in meaning to `progressive_pcoa_from_distances`' (see [Reading `batch` / `batch_anchor_m2`](#progressive-batch-diagnostics)). As with `progressive_pcoa_from_distances`, `eigenvalue`/`proportion_explained` are the *anchor* reference ordination's (a documented caveat). `sample_id` mirrors the input type — see [Sample identifier types](#sample-identifier-types).
 

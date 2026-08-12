@@ -1425,6 +1425,7 @@ if(MIINT_ENABLE_UNIFRAC)
         src/unifrac_permanova_function.cpp
         src/unifrac_faith_pd_function.cpp
         src/unifrac_distances_function.cpp
+        src/rarefy_feature_table_function.cpp
         src/progressive_pcoa_core.cpp)
 endif()
 
@@ -1741,6 +1742,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(catch2)
 set(TEST_SOURCES
+    test/cpp/test_sigpipe_bootstrap.cpp
     src/SequenceReader.cpp
     test/cpp/test_SequenceReader.cpp
     test/cpp/test_DuckDBSeqStream.cpp

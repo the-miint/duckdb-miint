@@ -50,13 +50,17 @@ inline std::string AcceptedVariantList() {
 // as are zero/NaN values (UnifracSupportBiomView's sparse-storage
 // invariant would drop them anyway).
 //
-// When `sample_id_type` is non-null, the original SQL type of the `sample_id`
-// column (before the internal `::VARCHAR` cast) is written through it, so
+// When `sample_id_type` / `feature_id_type` are non-null, the original SQL type of
+// that column (before the internal `::VARCHAR` cast) is written through it, so
 // callers can mirror BIGINT/UUID identifiers back onto their output columns.
 // The ids themselves are always carried as canonical VARCHAR text internally.
+// Most callers emit only sample ids and pass nullptr for the feature type;
+// `rarefy_feature_table` needs both, because its output IS a feature table and has
+// to round-trip both id columns.
 std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, const std::string &table_name,
                                                      const std::string &caller_name,
-                                                     LogicalType *sample_id_type = nullptr);
+                                                     LogicalType *sample_id_type = nullptr,
+                                                     LogicalType *feature_id_type = nullptr);
 
 // A dense, symmetric, zero-diagonal fp32 distance matrix materialized from a
 // condensed COO distance relation (`sample_a, sample_b, distance`). This is the
