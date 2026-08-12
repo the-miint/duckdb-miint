@@ -11,6 +11,7 @@ Methods to estimate alpha and beta diversity, and supporting statistics.
 - [UniFrac algorithm variants](#unifrac-algorithm-variants) - Detail on different UniFrac algorithms and how to specify them.
 - [Rarefaction](#rarefaction) - Rarefaction detail with UniFrac and Faith PD.
 - [Rarefy a feature table](#rarefy-a-feature-table) - produce an even-depth feature table as a standalone result
+- [Pick anchors](#pick-anchors) - greedy farthest-point subset selection (**not** for progressive PCoA anchors — see the measurement)
 - [UniFrac distances](#unifrac-distances) - Condensed (pairwise) UniFrac distances in long form
 - [Beta-distance macros](#beta-distance-macros) - within/between-group distributions and k-nearest-neighbors over a distance table
 - [PCoA (from a distance table)](#pcoa-from-a-distance-table) - metric-agnostic PCoA over any condensed distance table
@@ -82,6 +83,33 @@ The feature table's `sample_id` column may be `VARCHAR`, `BIGINT`, or `UUID` (an
 <a name="subsample-thread-count"></a>**A seeded subsample reproduces per thread count, not across thread counts.** libssu distributes the draw across the OpenMP team — one generator per thread, seeded in turn — so both how many generators exist and which observation consumes which one depend on the team size. The OpenMP width comes from DuckDB's `SET threads = N` (or the per-call `threads` parameter), so the *same* query with the *same* `seed` and `subsample_depth > 0` can produce a different rarefied table, and therefore different distances, on a differently configured server.
 
 Widths that happen to divide the work identically can coincidentally agree — in one measured case widths 1, 2, and 4 agreed while 8 differed — so matching results at two thread counts is not a guarantee of matching at a third. If you need a rarefied result to be reproducible across machines, fix the width explicitly (`threads := N`, or `SET threads = N`) alongside the seed, and record it with the result. This is a property of the draw itself and applies to every function in this section; it is upstream of, and independent of, the fp32 reduction-ordering noise described under [Reproducibility](#reproducibility).
+
+---
+
+### Pick anchors
+
+Select `n_anchors` samples from a condensed distance table by **greedy farthest-point (k-center)** selection, returning `(anchor_rank, sample_id)` in selection order.
+
+```sql
+SELECT * FROM pick_anchors('dcoo', n_anchors := 100) ORDER BY anchor_rank;
+```
+
+> **Do NOT use this to choose anchors for the progressive PCoA functions.** It was built for that and **measured to be much worse than the seeded random default** — 15× worse on real data. On the rarefied EMP 90 bp table (23,814 samples, `unweighted`, `n_dims := 10`, `n_anchors := 1000`, `batch_size := 1000`), procrustes M² against a full `unifrac_pcoa` at d=3 was **0.0113 for random anchors and 0.1745 for these**, drawn from an identical candidate pool so the rule is the only difference. Both of two random draws landed in 0.011–0.031, so 0.1745 is far outside ordinary draw-to-draw variance.
+>
+> Why: [`progressive_pcoa_from_unifrac`](#progressive-pcoa-from-unifrac) builds its reference frame from a PCoA **of the anchors**, so the anchors' leading axes have to match the full ordination's leading axes. Random sampling gets that by being distributed like the data. Farthest-point instead maximizes mutual dissimilarity, which in a flat-spectrum space (unweighted UniFrac) selects points differing along many *low-variance* directions and rotates the frame away from the truth. A good reference frame must be **representative**, not merely **covering** — different objectives. (It is not simply outlier-picking: mean distance-to-all was 0.869 for these anchors vs 0.861 for random, against a pool mean of 0.862.)
+
+It is retained because farthest-point selection is a legitimate, well-studied rule for **diverse subset selection** generally — picking a maximally spread reference panel, a coverage-based subsample, or a diverse review set. Use it for those, not for anchoring.
+
+**Parameters:** `distance_table` (VARCHAR) — a condensed `(sample_a, sample_b, distance)` relation (see [PCoA (from a distance table)](#pcoa-from-a-distance-table)); `n_anchors` (INTEGER, **required**).
+
+**Output:** `(anchor_rank INTEGER, sample_id)`; `sample_id` mirrors the input id type. Deterministic — no seed. Rank 0 is the most peripheral sample (largest total distance) and every tie breaks to the lexicographically smallest id, so a selection is a reproducible property of the data. Selection is **prefix-stable**: the first *m* of *k* anchors are exactly the *k = m* result, so you can pick a generous `k` once and trim.
+
+**Cost:** builds the dense N×N matrix (subject to the same fail-loud memory guard as `pcoa`), then O(N·k). To pass the result into a function that takes `anchors :=`, hand it through a variable — a table function's named parameter cannot contain a subquery:
+
+```sql
+SET VARIABLE anch = (SELECT list(sample_id) FROM pick_anchors('dcoo', n_anchors := 100));
+SELECT * FROM progressive_pcoa_from_distances('dcoo', anchors := getvariable('anch'), seed := 42);
+```
 
 ---
 
@@ -366,7 +394,7 @@ SELECT * FROM progressive_pcoa_from_unifrac('observations', 'tree',
 **Parameters:**
 - `feature_table` (VARCHAR): name of the feature relation exposing `(sample_id, feature_id, value)` (see [Feature table](#feature-table))
 - `tree` (VARCHAR): name of the tree relation (see [Tree](#tree))
-- `n_dims` (3), `n_anchors` (100), `batch_size` (1000), `seed` (-1), `threads` (0): as in [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table) — `n_anchors` must be in `[n_dims + 1, n_samples]`
+- `n_dims` (3), `n_anchors` (100), `batch_size` (1000), `seed` (-1), `threads` (0), `anchors`: as in [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table) — `n_anchors` must be in `[n_dims + 1, n_samples]`. `anchors := [...]` supplies the anchor set explicitly and takes precedence over `n_anchors`/`seed`; note the seed still seeds each block's ordination, so a seeded run is required for reproducibility even with explicit anchors. Prefer the seeded random default unless you have a specific reason — see the measurement under [Pick anchors](#pick-anchors) for why a spread-maximizing anchor set is a bad idea here.
 - `variant`, `variance_adjust`, `alpha`, `bypass_tips`, `normalize_sample_counts`: the UniFrac controls, identical to [`unifrac_pcoa`](#unifrac-pcoa)
 
 There is deliberately **no `subsample_depth`**: rarefaction and progressive alignment do not compose cleanly (each batch would rarefy independently against a different RNG draw). Rarefy upstream instead with [`rarefy_feature_table`](#rarefy-a-feature-table) and pass the resulting table here — worth doing, since unweighted UniFrac is strongly depth-sensitive and an uneven-depth table makes sequencing depth a covariate of the ordination.

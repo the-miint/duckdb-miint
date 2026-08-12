@@ -1426,6 +1426,7 @@ if(MIINT_ENABLE_UNIFRAC)
         src/unifrac_faith_pd_function.cpp
         src/unifrac_distances_function.cpp
         src/rarefy_feature_table_function.cpp
+        src/pick_anchors_function.cpp
         src/progressive_pcoa_core.cpp)
 endif()
 

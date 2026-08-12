@@ -13,5 +13,6 @@ void RegisterProgressivePcoaFromDistances(ExtensionLoader &loader);
 void RegisterProgressivePcoaFromUnifrac(ExtensionLoader &loader);
 void RegisterPermanovaFromDistances(ExtensionLoader &loader);
 void RegisterRarefyFeatureTable(ExtensionLoader &loader);
+void RegisterPickAnchors(ExtensionLoader &loader);
 
 } // namespace duckdb

@@ -1,0 +1,216 @@
+# name: test/sql/pick_anchors.test
+# description: pick_anchors — greedy farthest-point (k-center) anchor selection over a condensed distance table, for feeding `anchors :=` on the progressive PCoA functions.
+# group: [sql]
+
+require miint
+
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'pick_anchors';
+----
+1
+
+require-env UNIFRAC_AVAILABLE
+
+# ── HAND-CHECKABLE ORACLE: ten points evenly spaced on a line, d(i,j) = |i-j|.
+#    Greedy farthest-point on that geometry is fully determined, so the exact
+#    selection ORDER can be asserted rather than just its shape:
+#      rank 0: most peripheral by total distance — s0 and s9 tie at 45, so the
+#              lowest id wins → s0
+#      rank 1: farthest from {s0} → s9
+#      rank 2: max-min over {s0,s9} → s4 and s5 tie at 4 → s4
+#      rank 3: max-min over {s0,s9,s4} → s2, s6, s7 all tie at 2 → s2
+#    Any change to the start rule, the max-min rule, or the tie-break shows up here. ──
+statement ok
+CREATE TABLE line_d AS
+SELECT 's' || a.i AS sample_a, 's' || b.i AS sample_b, abs(a.i - b.i)::DOUBLE AS distance
+FROM range(10) a(i) JOIN range(10) b(i) ON a.i < b.i;
+
+query IT
+SELECT anchor_rank, sample_id FROM pick_anchors('line_d', n_anchors := 4) ORDER BY anchor_rank;
+----
+0	s0
+1	s9
+2	s4
+3	s2
+
+# ── THE PROPERTY THAT JUSTIFIES THE FUNCTION: on data with well-separated clusters,
+#    a random draw can miss a cluster entirely (that is the measured failure mode —
+#    M² varied 0.087-0.262 across random draws at a fixed anchor count), leaving part
+#    of the space unanchored. Farthest-point CANNOT: asked for 3 anchors on 3 tight
+#    clusters, it must return exactly one from each. Every point here has an
+#    identical total distance (9x1 within + 20x100 between), so rank 0 falls to the
+#    tie-break and the spread is produced purely by the max-min rule. ──
+#    Within-cluster distances deliberately VARY (1 + |i-j|, a line inside each
+#    cluster) rather than being a constant. With a constant, every unchosen point
+#    ties the moment its cluster has one anchor and the tie-break alone decides the
+#    rest — which would make the k=6 case below assert an artifact of the fixture
+#    instead of the algorithm. ──
+statement ok
+CREATE TABLE clust_d AS
+WITH pts AS (
+    SELECT 'a' || i AS id, 0 AS grp, i AS pos FROM range(10) t(i)
+    UNION ALL SELECT 'b' || i, 1, i FROM range(10) t(i)
+    UNION ALL SELECT 'c' || i, 2, i FROM range(10) t(i))
+SELECT p.id AS sample_a, q.id AS sample_b,
+       (CASE WHEN p.grp = q.grp THEN 1.0 + abs(p.pos - q.pos) ELSE 100.0 END)::DOUBLE AS distance
+FROM pts p JOIN pts q ON p.id < q.id;
+
+query I
+SELECT count(DISTINCT substr(sample_id, 1, 1)) FROM pick_anchors('clust_d', n_anchors := 3);
+----
+3
+
+# 6 anchors → two per cluster, and within each cluster the two OPPOSITE ends
+# (positions 0 and 9): the rule spreads inside a cluster as well as across clusters.
+query I
+SELECT count(*) FROM (
+    SELECT substr(sample_id, 1, 1) AS grp, count(*) AS n
+    FROM pick_anchors('clust_d', n_anchors := 6) GROUP BY 1 HAVING count(*) <> 2);
+----
+0
+
+query I
+SELECT count(*) FROM pick_anchors('clust_d', n_anchors := 6)
+WHERE substr(sample_id, 2) NOT IN ('0', '9');
+----
+0
+
+# ── PREFIX STABILITY: greedy selection is incremental, so the first m of k anchors
+#    must equal the k=m result. This is what lets a caller pick a generous k once and
+#    then trim, and it would break if the implementation ever re-optimized globally. ──
+query I
+SELECT count(*) FROM (
+    (SELECT sample_id FROM pick_anchors('line_d', n_anchors := 4)
+     EXCEPT SELECT sample_id FROM pick_anchors('line_d', n_anchors := 7))
+    UNION ALL
+    (SELECT sample_id FROM pick_anchors('line_d', n_anchors := 7) WHERE anchor_rank < 4
+     EXCEPT SELECT sample_id FROM pick_anchors('line_d', n_anchors := 4)));
+----
+0
+
+# ── shape: exactly n_anchors distinct samples, ranks 0..n-1, no repeats ──
+query III
+SELECT count(*), count(DISTINCT sample_id), count(DISTINCT anchor_rank)
+FROM pick_anchors('line_d', n_anchors := 7);
+----
+7	7	7
+
+query II
+SELECT min(anchor_rank), max(anchor_rank) FROM pick_anchors('line_d', n_anchors := 7);
+----
+0	6
+
+# every anchor is a real sample of the input table
+query I
+SELECT count(*) FROM pick_anchors('line_d', n_anchors := 7) p
+WHERE p.sample_id NOT IN (SELECT sample_a FROM line_d UNION SELECT sample_b FROM line_d);
+----
+0
+
+# ── determinism: no seed, no RNG — the selection is a function of the data alone,
+#    which is why an anchor set is reproducible without recording a seed. ──
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM pick_anchors('line_d', n_anchors := 5)
+     EXCEPT SELECT * FROM pick_anchors('line_d', n_anchors := 5))
+    UNION ALL
+    (SELECT * FROM pick_anchors('line_d', n_anchors := 5)
+     EXCEPT SELECT * FROM pick_anchors('line_d', n_anchors := 5)));
+----
+0
+
+# all n samples is legal (degenerate but well-defined: it just orders every sample)
+query I
+SELECT count(*) FROM pick_anchors('line_d', n_anchors := 10);
+----
+10
+
+# ── THE POINT: it composes with `anchors :=` on both progressive functions. ──
+statement ok
+CREATE TABLE tree AS SELECT * FROM read_newick('data/unifrac/gg_otu_tree.nwk');
+
+statement ok
+CREATE TABLE ft AS
+SELECT 's' || s AS sample_id, 'GG_OTU_' || (f + 1) AS feature_id, (1 + (s * 7 + f * 13) % 11)::DOUBLE AS value
+FROM range(40) t(s), range(5) u(f);
+
+statement ok
+CREATE TABLE ft_d AS
+SELECT sample_a, sample_b, distance FROM unifrac_distances('ft', 'tree', variant := 'weighted_normalized');
+
+# A table function's named parameter cannot contain a subquery ("Binder Error: Table
+# function cannot contain subqueries"), so the anchor list is passed through a
+# variable. This is the idiomatic hand-off and the one the docs show.
+statement ok
+SET VARIABLE anch = (SELECT list(sample_id) FROM pick_anchors('ft_d', n_anchors := 15));
+
+# feed the selected anchors straight into the UniFrac progressive path
+query I
+SELECT count(*) FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized',
+    n_dims := 3, batch_size := 12, seed := 42, threads := 1, anchors := getvariable('anch'));
+----
+120
+
+# and into the distances path
+query I
+SELECT count(*) FROM progressive_pcoa_from_distances('ft_d', n_dims := 3, batch_size := 12, seed := 42,
+    anchors := getvariable('anch'));
+----
+120
+
+# a run anchored this way is a real ordination, not merely accepted: it still
+# reproduces the full unifrac_pcoa up to a similarity transform
+statement ok
+CREATE TABLE full_ord AS
+SELECT sample_id, axis, coordinate
+FROM unifrac_pcoa('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, seed := 42);
+
+statement ok
+CREATE TABLE prog_maxmin AS
+SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_unifrac('ft', 'tree',
+    variant := 'weighted_normalized', n_dims := 3, batch_size := 12, seed := 42, threads := 1,
+    anchors := getvariable('anch'));
+
+query T
+SELECT DISTINCT m2 < 0.05 FROM procrustes('full_ord', 'prog_maxmin', permutations := 0);
+----
+true
+
+# ── id-type mirroring ──
+statement ok
+CREATE TABLE line_d_bigint AS
+SELECT CAST(substr(sample_a, 2) AS BIGINT) AS sample_a, CAST(substr(sample_b, 2) AS BIGINT) AS sample_b, distance
+FROM line_d;
+
+query T
+SELECT DISTINCT typeof(sample_id) FROM pick_anchors('line_d_bigint', n_anchors := 3);
+----
+BIGINT
+
+# ── errors ──
+
+statement error
+SELECT * FROM pick_anchors('line_d', n_anchors := 0);
+----
+n_anchors
+
+statement error
+SELECT * FROM pick_anchors('line_d', n_anchors := 11);
+----
+exceeds
+
+# n_anchors is required — the function has no defensible default anchor count
+statement error
+SELECT * FROM pick_anchors('line_d');
+----
+n_anchors
+
+statement error
+SELECT * FROM pick_anchors('');
+----
+must not be empty
+
+statement error
+SELECT * FROM pick_anchors('no_such_table', n_anchors := 3);
+----
+no_such_table

@@ -517,22 +517,28 @@ AnchorPartition PickAnchors(const std::vector<std::string> &sorted_ids, uint32_t
 
 // Partition sorted ids using an explicit, caller-supplied anchor set (in place of
 // the seeded random PickAnchors). Every anchor must be a distinct sample present
-// in the distance table. Both halves come out in sorted id order (anchors sorted
+// in the source relation. Both halves come out in sorted id order (anchors sorted
 // for determinism; remaining in id order so batches stay contiguous-ish ranges).
 // This makes the reference frame fully reproducible/controllable — required for
-// apples-to-apples parity against an external oracle that fixes its own anchors.
+// apples-to-apples parity against an external oracle that fixes its own anchors,
+// and the way a caller supplies anchors chosen by some rule of its own rather than
+// by the seeded random draw.
+//
+// Shared by both progressive functions, so `caller_name` and `source_desc` carry
+// the wording ("distance-table" vs "feature-table") into the errors.
 AnchorPartition PartitionWithExplicitAnchors(const std::vector<std::string> &sorted_ids,
-                                             const std::vector<std::string> &explicit_anchors) {
+                                             const std::vector<std::string> &explicit_anchors, const char *caller_name,
+                                             const char *source_desc) {
 	std::unordered_set<std::string> id_set(sorted_ids.begin(), sorted_ids.end());
 	std::unordered_set<std::string> anchor_set;
 	anchor_set.reserve(explicit_anchors.size());
 	for (const auto &a : explicit_anchors) {
 		if (!id_set.count(a)) {
-			throw InvalidInputException(
-			    "progressive_pcoa_from_distances: explicit anchor '%s' is not a sample in the distance-table", a);
+			throw InvalidInputException("%s: explicit anchor '%s' is not a sample in the %s", caller_name, a,
+			                            source_desc);
 		}
 		if (!anchor_set.insert(a).second) {
-			throw BinderException("progressive_pcoa_from_distances: duplicate explicit anchor '%s'", a);
+			throw BinderException("%s: duplicate explicit anchor '%s'", caller_name, a);
 		}
 	}
 	AnchorPartition part;
@@ -983,7 +989,8 @@ unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context
 	if (!explicit_anchors.empty()) {
 		// Explicit anchor set: takes precedence over n_anchors/seed. Must be a
 		// valid, distinct subset of the table's samples, at least n_dims + 1 of them.
-		part = PartitionWithExplicitAnchors(ids.sorted_ids, explicit_anchors);
+		part = PartitionWithExplicitAnchors(ids.sorted_ids, explicit_anchors, "progressive_pcoa_from_distances",
+		                                    "distance-table");
 		if (part.anchors.size() < static_cast<size_t>(n_dims) + 1) {
 			throw BinderException(
 			    "progressive_pcoa_from_distances: %zu explicit anchor(s) given but n_dims + 1 (%d) are "
@@ -1364,6 +1371,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 	double alpha = 1.0;
 	bool bypass_tips = false;
 	bool normalize_sample_counts = true;
+	vector<string> explicit_anchors; // if non-empty: override seeded random anchor selection
 	for (const auto &kv : input.named_parameters) {
 		const auto key = StringUtil::Lower(kv.first);
 		if (key == "variant") {
@@ -1386,6 +1394,13 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 			bypass_tips = kv.second.GetValue<bool>();
 		} else if (key == "normalize_sample_counts") {
 			normalize_sample_counts = kv.second.GetValue<bool>();
+		} else if (key == "anchors") {
+			for (const auto &child : ListValue::GetChildren(kv.second)) {
+				if (child.IsNull()) {
+					throw BinderException("progressive_pcoa_from_unifrac: anchors list must not contain NULL");
+				}
+				explicit_anchors.push_back(child.ToString());
+			}
 		}
 	}
 	const int n_threads = ResolveThreadsParameter(context, threads, "progressive_pcoa_from_unifrac");
@@ -1399,9 +1414,6 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 	if (batch_size < 1) {
 		throw BinderException("progressive_pcoa_from_unifrac: batch_size must be >= 1 (got %d)", batch_size);
 	}
-	if (n_anchors < 1) {
-		throw BinderException("progressive_pcoa_from_unifrac: n_anchors must be >= 1 (got %d)", n_anchors);
-	}
 
 	auto ids = [&]() {
 		return EnumerateFeatureTableIds(context, table_name, "progressive_pcoa_from_unifrac");
@@ -1413,21 +1425,11 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 		    "required",
 		    table_name, n_samples);
 	}
-	if (static_cast<uint32_t>(n_anchors) > n_samples) {
-		throw BinderException(
-		    "progressive_pcoa_from_unifrac: n_anchors (%d) exceeds the %u sample(s) in the feature-table", n_anchors,
-		    n_samples);
-	}
 	if (static_cast<uint32_t>(n_dims) > n_samples - 1) {
 		throw BinderException(
 		    "progressive_pcoa_from_unifrac: n_dims (%d) must be <= n_samples - 1 (%u). PCoA loses one "
 		    "dimension to centering.",
 		    n_dims, n_samples - 1);
-	}
-	if (n_anchors < n_dims + 1) {
-		throw BinderException("progressive_pcoa_from_unifrac: n_anchors (%d) must be >= n_dims + 1 (%d); the reference "
-		                      "PCoA and the procrustes fit each need at least that many anchors",
-		                      n_anchors, n_dims + 1);
 	}
 
 	// Build the tree once and validate it covers every feature (each batch's
@@ -1466,7 +1468,38 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 	}
 	const std::string variant_fp32 = variant + "_fp32";
 
-	auto part = PickAnchors(ids.sorted_sample_ids, static_cast<uint32_t>(n_anchors), seed);
+	// Anchor selection: an explicit list takes precedence over n_anchors/seed. Same
+	// contract as progressive_pcoa_from_distances — it is what makes the reference
+	// frame reproducible against an external oracle, and the way to feed in anchors
+	// chosen by some rule other than the seeded random draw (see
+	// pick_maxvol_anchors), which matters because anchor QUALITY is the accuracy
+	// ceiling of this method.
+	AnchorPartition part;
+	if (!explicit_anchors.empty()) {
+		part = PartitionWithExplicitAnchors(ids.sorted_sample_ids, explicit_anchors, "progressive_pcoa_from_unifrac",
+		                                    "feature-table");
+		if (part.anchors.size() < static_cast<size_t>(n_dims) + 1) {
+			throw BinderException("progressive_pcoa_from_unifrac: %zu explicit anchor(s) given but n_dims + 1 (%d) are "
+			                      "required; the reference PCoA and the procrustes fit each need at least that many",
+			                      part.anchors.size(), n_dims + 1);
+		}
+	} else {
+		if (n_anchors < 1) {
+			throw BinderException("progressive_pcoa_from_unifrac: n_anchors must be >= 1 (got %d)", n_anchors);
+		}
+		if (static_cast<uint32_t>(n_anchors) > n_samples) {
+			throw BinderException(
+			    "progressive_pcoa_from_unifrac: n_anchors (%d) exceeds the %u sample(s) in the feature-table",
+			    n_anchors, n_samples);
+		}
+		if (n_anchors < n_dims + 1) {
+			throw BinderException(
+			    "progressive_pcoa_from_unifrac: n_anchors (%d) must be >= n_dims + 1 (%d); the reference "
+			    "PCoA and the procrustes fit each need at least that many anchors",
+			    n_anchors, n_dims + 1);
+		}
+		part = PickAnchors(ids.sorted_sample_ids, static_cast<uint32_t>(n_anchors), seed);
+	}
 
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
 	AnchorFeatureRowCache anchor_cache(context, qname, part.anchors);
@@ -1596,6 +1629,7 @@ void RegisterProgressivePcoaFromUnifrac(ExtensionLoader &loader) {
 	fn.named_parameters["alpha"] = LogicalType::DOUBLE;
 	fn.named_parameters["bypass_tips"] = LogicalType::BOOLEAN;
 	fn.named_parameters["normalize_sample_counts"] = LogicalType::BOOLEAN;
+	fn.named_parameters["anchors"] = LogicalType::LIST(LogicalType::VARCHAR);
 	loader.RegisterFunction(fn);
 }
 

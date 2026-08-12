@@ -154,6 +154,104 @@ WHERE abs(s.coordinate - p.coordinate) >= 1e-5;
 ----
 0
 
+# ── explicit anchors: `anchors :=` replaces the seeded random draw, which is what
+#    makes the reference frame controllable — needed to compare against an external
+#    oracle that fixes its own anchors, and to feed in anchors chosen by a rule
+#    (e.g. pick_maxvol_anchors) rather than at random. Same contract as
+#    progressive_pcoa_from_distances. ──
+statement ok
+CREATE TABLE prog_expl AS
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, batch_size := 12,
+    anchors := ['s0','s1','s2','s3','s4','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
+
+query I
+SELECT count(*) FROM prog_expl;
+----
+120
+
+# the SAME anchors the seeded draw would have to be told explicitly still reproduce
+# a full unifrac_pcoa up to a similarity transform — i.e. an explicitly-anchored run
+# is a real ordination, not just a syntactically accepted one
+query T
+SELECT DISTINCT m2 < 0.05 FROM procrustes('full_ord', 'prog_expl', permutations := 0);
+----
+true
+
+# explicit anchors take precedence over n_anchors: an n_anchors that would be
+# REJECTED on the random path (< n_dims + 1) is simply ignored when anchors is given
+query I
+SELECT count(*) FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 3, batch_size := 12,
+    anchors := ['s0','s1','s2','s3','s4','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
+----
+120
+
+# determinism: same explicit anchors + seed → identical coordinates.
+# `seed := 42` is REQUIRED even though the anchors are explicit: the seed no longer
+# selects anchors, but it still seeds every block's skbb fsvd, so an unseeded
+# explicitly-anchored run is NOT reproducible. Omitting it here made all 120 rows
+# differ. `threads := 1` is pinned for the separate reason above (concurrent blocks
+# shift coordinates at ~1e-6).
+statement ok
+CREATE TABLE prog_expl2 AS
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, batch_size := 12,
+    seed := 42, threads := 1,
+    anchors := ['s0','s1','s2','s3','s4','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
+
+statement ok
+CREATE TABLE prog_expl3 AS
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, batch_size := 12,
+    seed := 42, threads := 1,
+    anchors := ['s0','s1','s2','s3','s4','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
+
+query I
+SELECT count(*) FROM (SELECT * FROM prog_expl2 EXCEPT SELECT * FROM prog_expl3);
+----
+0
+
+# a DIFFERENT anchor set must give a different frame — otherwise `anchors` would be
+# silently ignored and every test above would pass vacuously. Same seed/threads on
+# both sides, so the difference is attributable to the anchors alone.
+statement ok
+CREATE TABLE prog_expl_alt AS
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, batch_size := 12,
+    seed := 42, threads := 1,
+    anchors := ['s20','s21','s22','s23','s24','s25','s26','s27','s28','s29','s30','s31','s32','s33','s34']);
+
+query I
+SELECT count(*) FROM prog_expl2 a JOIN prog_expl_alt b USING (sample_id, axis)
+WHERE abs(a.coordinate - b.coordinate) > 1e-9;
+----
+120
+
+# ── explicit-anchor error matrix (fail loud) ──
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, batch_size := 12,
+    anchors := ['s0','s1','s2','s3','NOPE','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
+----
+not a sample in the feature-table
+
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, batch_size := 12,
+    anchors := ['s0','s1','s0']);
+----
+duplicate explicit anchor
+
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, batch_size := 12,
+    anchors := ['s0','s1','s2']);
+----
+n_dims + 1
+
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, batch_size := 12,
+    anchors := ['s0','s1','s2','s3',NULL]);
+----
+must not contain NULL
+
 # ── id-type mirroring: an integer-keyed feature table emits BIGINT sample_id ──
 statement ok
 CREATE TABLE ft_int AS

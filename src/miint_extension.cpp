@@ -335,6 +335,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterProgressivePcoaFromUnifrac(loader);
 	RegisterPermanovaFromDistances(loader);
 	RegisterRarefyFeatureTable(loader);
+	RegisterPickAnchors(loader);
 #endif
 
 	AlignPairwiseWfa2ScoreFunction::Register(loader);
