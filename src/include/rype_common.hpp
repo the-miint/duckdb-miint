@@ -9,6 +9,7 @@
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
 #include "duckdb/common/arrow/result_arrow_wrapper.hpp"
+#include "duckdb/common/enums/arrow_format_version.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/uuid.hpp"
@@ -249,6 +250,7 @@ inline void ValidateTableHasColumns(ClientContext &context, const std::string &t
 //
 // Usage pattern (in InitGlobal, on a per-GlobalState sub-Connection):
 //
+//   ConfigureRypeArrowExport(conn);
 //   gstate->tmp_table_name = MaterializeRypeInputTempTable(
 //       conn, table_quoted, id_col_quoted, source_name_for_errors,
 //       has_sequence2, "_rype_classify_", gstate->read_ids,
@@ -263,6 +265,58 @@ inline void ValidateTableHasColumns(ClientContext &context, const std::string &t
 // The destructor must call DropRypeTempTable(*input_connection,
 // gstate->tmp_table_name) AFTER releasing the RYpe output stream and BEFORE
 // resetting input_connection.
+
+//! Pin `conn` to exporting variable-length columns with 64-bit offsets (Arrow
+//! LargeBinary / LargeUtf8). Call once on the sub-connection, before building any
+//! RYpe input stream.
+//!
+//! Do NOT express this as `arrow_output_version = '1.4'` (BinaryView). BinaryView
+//! lifts the limit on the *number* of variadic data buffers, not the 32-bit offset
+//! field inside each view, and DuckDB emits exactly one buffer with `buffer_index`
+//! hardcoded to 0. That offset is written through `UnsafeNumericCast<int32_t>`,
+//! which is an unchecked `static_cast` in release builds, so a record batch
+//! carrying more than 2 GiB of sequence silently truncates it modulo 2^32. RYpe
+//! reads the field as u32 and is handed a *different read's* bytes under the
+//! correct read_id; a spec-conformant signed reader indexes before the buffer
+//! entirely. Both boundaries were measured exactly (#222). Batch size is derived
+//! from available memory, so a large corpus on a large machine reaches this
+//! routinely rather than exceptionally.
+//!
+//! BOTH settings must be pinned, not just the offset size: for BLOB the BinaryView
+//! branch wins over `arrow_large_buffer_size` in ArrowAppender's type dispatch, and
+//! both settings are GLOBAL_DEFAULT scope — so a caller who has done
+//! `SET arrow_output_version='1.4'` for their own reasons would otherwise have it
+//! inherited by this fresh sub-connection and silently reintroduce the corruption.
+//!
+//! Throws rather than warns. Continuing on failure would fall back to 32-bit
+//! offsets, which is precisely the corruption this exists to prevent.
+inline void ConfigureRypeArrowExport(Connection &conn) {
+	// SET SESSION, not bare SET. Both settings are GLOBAL_DEFAULT scope, meaning a
+	// bare SET writes the *global* default — which is shared with the user's own
+	// connection. The pre-#222 code used a bare SET and so silently rewrote the
+	// caller's global arrow_output_version to '1.4' as a side effect of classifying,
+	// changing the format of their own unrelated Arrow exports. Session scope keeps
+	// this confined to the sub-connection that feeds RYpe.
+	for (const char *stmt :
+	     {"SET SESSION arrow_large_buffer_size = true", "SET SESSION arrow_output_version = '1.0'"}) {
+		auto result = conn.Query(stmt);
+		if (result->HasError()) {
+			throw InvalidInputException("Failed to configure Arrow export for RYpe (%s): %s", stmt, result->GetError());
+		}
+	}
+
+	// Verify what the settings actually resolved to rather than trusting that the
+	// statements above mean what we think. This is the assertion that fails loudly
+	// if the export format is ever changed out from under RYpe again.
+	auto props = conn.context->GetClientProperties();
+	if (props.arrow_offset_size != ArrowOffsetSize::LARGE || props.arrow_output_version >= ArrowFormatVersion::V1_4) {
+		throw InvalidInputException(
+		    "RYpe Arrow export must use 64-bit offsets: expected arrow_large_buffer_size=true and "
+		    "arrow_output_version < 1.4, got offset_size=%s output_version=%d",
+		    props.arrow_offset_size == ArrowOffsetSize::LARGE ? "LARGE" : "REGULAR",
+		    static_cast<int>(props.arrow_output_version));
+	}
+}
 
 //! Materialize the user's sequence_table into a per-call TEMP table on `conn`,
 //! populate `out_read_ids` from it ordered by the synthetic id, and sample the

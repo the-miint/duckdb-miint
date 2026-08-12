@@ -153,8 +153,8 @@ unique_ptr<GlobalTableFunctionState> RypeLogRatioTableFunction::InitGlobal(Clien
 	InheritTempObjects(context, *gstate->input_connection);
 	auto &conn = *gstate->input_connection;
 
-	// Use Arrow BinaryView (v1.4+) — see rype_classify.cpp InitGlobal for rationale.
-	conn.Query("SET arrow_output_version = '1.4'");
+	// Export BLOB with 64-bit offsets — see ConfigureRypeArrowExport in rype_common.hpp (#222).
+	ConfigureRypeArrowExport(conn);
 
 	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
 	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);
@@ -181,8 +181,9 @@ unique_ptr<GlobalTableFunctionState> RypeLogRatioTableFunction::InitGlobal(Clien
 	const RypeIndex *sizing_index =
 	    (denom_shard_bytes > num_shard_bytes) ? gstate->denominator_index : gstate->numerator_index;
 
-	// is_large_binary=1: sub-connection uses arrow_large_buffer_size=true, so DuckDB
-	// exports BLOB as Arrow LargeBinary (i64 offsets) — no 2 GiB per-array limit.
+	// is_large_binary=1 tells RYpe to skip its 2 GiB batch cap. That is only sound
+	// because ConfigureRypeArrowExport pinned this connection to Arrow LargeBinary
+	// (i64 offsets) above — the two must be changed together (#222).
 	size_t batch_size = rype_recommend_batch_size(sizing_index, avg_read_length, is_paired, 0, 1);
 	if (batch_size == 0) {
 		// rype_recommend_batch_size returns 0 on error — log but use safe fallback
