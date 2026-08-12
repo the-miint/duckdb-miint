@@ -7,7 +7,7 @@ name = "miint-cli"
 version = "0.1.0"
 description = "CLI for the miint DuckDB extension — bioinformatics SQL toolkit"
 requires-python = ">=3.9"
-dependencies = ["duckdb==1.4.4"]
+dependencies = ["duckdb==1.5.5"]
 
 [project.scripts]
 miint = "miint_cli.cli:main"

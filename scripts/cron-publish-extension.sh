@@ -89,7 +89,7 @@ fi
 # DUCKDB_VERSION must match both the duckdb submodule pin and the
 # duckdb_version input in .github/workflows/MainDistributionPipeline.yml.
 # When the extension targets a new DuckDB version, bump all three together.
-: "${DUCKDB_VERSION:=v1.5.4}"
+: "${DUCKDB_VERSION:=v1.5.5}"
 
 : "${DEST_USER:?DEST_USER is required}"
 : "${DEST_HOST:?DEST_HOST is required}"
@@ -465,7 +465,7 @@ log "All streams processed ($prefix)."
 #   REPO=the-miint/duckdb-miint
 #   BRANCH=v1.5-variegata
 #   WORKFLOW=MainDistributionPipeline.yml
-#   DUCKDB_VERSION=v1.5.4
+#   DUCKDB_VERSION=v1.5.5
 #   STREAMS="branch tagged"          # or just "branch" / just "tagged"
 #   DEST_USER=deploy
 #   DEST_HOST=repo.example.com

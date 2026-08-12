@@ -938,7 +938,7 @@ endif()
 find_program(CARGO cargo REQUIRED)
 message(STATUS "Found cargo: ${CARGO}")
 
-# emsdk 3.1.71 (the version DuckDB v1.5.4 pins for its WASM build) ships
+# emsdk 3.1.71 (the version DuckDB v1.5.5 pins for its WASM build) ships
 # binaryen v120, which predates the `bulk-memory-opt` and
 # `call-indirect-overlong` target-features that newer rustc/LLVM (>= LLVM 20,
 # i.e. Rust >= 1.87) stamp into wasm objects. At link time emcc forwards those

@@ -129,9 +129,9 @@ bash run_tests.sh                                                 # all SQL test
 
 ### Python CLI smoke tests
 ```bash
-cd python && conda run -n duckdb-144 pip install -e . && cd ..
+cd python && conda run -n duckdb-155 pip install -e . && cd ..
 EXT=./build/release/extension/miint/miint.duckdb_extension
-conda run -n duckdb-144 miint --extension-path $EXT convert sequence \
+conda run -n duckdb-155 miint --extension-path $EXT convert sequence \
   -1 data/fastq/small_a.fq -o /tmp/test.parquet
 ```
 Full manual smoke test procedure: `localdocs/cli-smoke-tests.md`.

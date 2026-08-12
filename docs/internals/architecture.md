@@ -143,7 +143,7 @@ Currently used by `align_minimap2` + `save_minimap2_index` (both sides), `copy_s
 - **Namespaces**: extension code in `duckdb`, readers in `miint`
 - **Error Handling**: DuckDB exceptions (`InvalidInputException`, `IOException`, `RuntimeException`)
 - **Memory Management**: RAII with smart pointers (HTSlib uses custom deleters)
-- **Formatting**: DuckDB style (`.clang-format`); pre-commit hook runs `make format-check`, auto-fix with `conda run -n duckdb-143 make format-fix`
+- **Formatting**: DuckDB style (`.clang-format`); pre-commit hook runs `make format-check`, auto-fix with `conda run -n duckdb-format make format-fix`
 
 ## Adding New Functionality
 
