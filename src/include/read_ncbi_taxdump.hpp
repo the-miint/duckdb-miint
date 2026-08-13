@@ -127,9 +127,11 @@ public:
 	static void Register(ExtensionLoader &loader);
 };
 
-// Load the taxdump member files from `source` (a directory of .dmp files or a
-// .tar.gz archive), reading through the DuckDB FileSystem. Shared by all the table
-// functions. Throws IOException on a missing/invalid source.
-miint::TaxdumpFiles LoadTaxdumpFiles(ClientContext &context, const std::string &source);
+// Load the requested taxdump member files from `source` (a directory of .dmp files or
+// a .tar.gz archive), reading through the DuckDB FileSystem. Shared by all the table
+// functions, each of which requests only the members it parses. Throws IOException on
+// a missing/invalid source, or if a requested member is absent.
+miint::TaxdumpFiles LoadTaxdumpFiles(ClientContext &context, const std::string &source,
+                                     const miint::TaxdumpMemberSet &members);
 
 } // namespace duckdb

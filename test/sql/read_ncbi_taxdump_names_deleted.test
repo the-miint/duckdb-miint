@@ -117,12 +117,51 @@ SELECT COUNT(*) FROM (
 ----
 0
 
-# delnodes.dmp is an optional member: a dump without one yields no rows rather than an
-# error, so a partial dump degrades instead of failing the whole query
-query I
+# A member a function exists to read is REQUIRED by that function: if delnodes.dmp is absent
+# the answer is unknown, not "nothing was deleted". Returning zero rows here would let a
+# consumer building a versioned release read a partial extraction as authoritative and
+# un-retire every taxid NCBI has deleted.
+statement error
 SELECT COUNT(*) FROM read_ncbi_taxdump_deleted('data/taxonomy/noname');
 ----
-0
+delnodes.dmp
+
+# same reasoning for merged.dmp -- an empty merge map read as authoritative would assert that
+# 100k+ retired taxids are live again
+statement error
+SELECT COUNT(*) FROM read_ncbi_taxdump_merged('data/taxonomy/noname');
+----
+merged.dmp
+
+# ...but a function only requires the members it actually reads. The tree needs nodes.dmp and
+# names.dmp only, so it still reads a dump carrying no merged.dmp/delnodes.dmp. That is what
+# makes the requirement above safe to impose rather than a blanket "all four or nothing".
+query I
+SELECT COUNT(*) > 0 FROM read_ncbi_taxdump('data/taxonomy/noname');
+----
+true
+
+# read_ncbi_taxdump_names likewise needs only names.dmp
+query I
+SELECT COUNT(*) > 0 FROM read_ncbi_taxdump_names('data/taxonomy/noname');
+----
+true
+
+# --- malformed members fail loudly, naming the member and line -----------------
+
+# A row whose width does not match what NCBI documents means the layout moved. Reading it
+# positionally would hand back a name_class that is really a unique_name -- well-formed to
+# every downstream check. The error must name the member and the line to be actionable.
+statement error
+SELECT * FROM read_ncbi_taxdump_names('data/taxonomy/malformed');
+----
+names.dmp line 2
+
+# a non-integer taxid is rejected rather than silently becoming 0
+statement error
+SELECT * FROM read_ncbi_taxdump_deleted('data/taxonomy/malformed');
+----
+not a valid taxid
 
 # --- error handling ---------------------------------------------------------
 

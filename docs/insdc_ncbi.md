@@ -274,6 +274,24 @@ The NCBI taxonomy is a tree in the exact shape `read_newick` emits, so `read_ncb
 output (`node_index`, `parent_index`, `name`, `is_tip`, plus `rank`) drops straight into
 the existing tree tooling.
 
+**Malformed input fails loudly.** All four taxdump readers validate what they parse rather
+than coercing it, because a taxonomy that silently reads *slightly* wrong is worse than one
+that refuses to read:
+
+- **Field widths are checked exactly** for `names.dmp` (4), `merged.dmp` (2) and
+  `delnodes.dmp` (1) — the widths NCBI's `taxdump_readme.txt` documents and whose every
+  field is consumed. A row of a different width means the layout moved, and reading it
+  positionally would return a `name_class` that is really a `unique_name`: well-formed to
+  every downstream check. Errors name the member and line. `nodes.dmp` is checked as a
+  lower bound instead, since its documented width differs between `taxdump` (13 fields) and
+  `new_taxdump` (18) and only the first three are read.
+- **Taxids must be integers outright.** A non-numeric, partially-numeric (`123abc`) or
+  out-of-range value is rejected rather than becoming `0`, being truncated, or clamping to
+  `INT64_MAX` — the latter two land inside the valid taxid range where no caller could tell
+  them from real data.
+- **A reader requires the member it reads**, and only that member (see
+  [`read_ncbi_taxdump_deleted`](#list-deleted-taxids-read_ncbi_taxdump_deleted)).
+
 ### Read the taxonomy tree (`read_ncbi_taxdump`)
 
 Reads NCBI's taxonomy dump into the tree-table schema. With no argument it downloads the
@@ -365,6 +383,7 @@ no class filtered out. Use it when you need a second name for a taxon — most o
 **Behavior:**
 - Rows are emitted in file order, so a taxon's names are grouped but not sorted by class
 - A taxon has exactly one `scientific name` but may carry several rows of another class, so aggregate rather than assuming one row per (taxid, class) pair
+- Reads **only** `names.dmp` — not the whole dump — so it can be joined against the other readers without each one paying for members it does not use
 - The classes present in the current dump, by frequency: `scientific name`, `authority`, `type material`, `synonym`, `includes`, `equivalent name`, `genbank common name`, `common name`, `acronym`, `in-part`, `blast name`. Only ~1% of taxa have a `genbank common name`, so expect NULL for most.
 
 **Examples:**
@@ -402,7 +421,7 @@ resolving cannot be told apart from bad input. This exposes `delnodes.dmp`.
 There is no replacement column: unlike a merge, a deletion names no successor.
 
 **Behavior:**
-- `delnodes.dmp` is an optional archive member; a dump without one yields **zero rows** rather than an error
+- A dump carrying no `delnodes.dmp` is an **error**, not zero rows. "Nothing was deleted" and "the extraction was incomplete" must not look alike to a caller that treats the result as authoritative — an empty answer read as truth would un-retire every taxid NCBI has deleted. Each reader requires only the member it reads, so a dump without `delnodes.dmp` is still perfectly usable via `read_ncbi_taxdump` and `read_ncbi_taxdump_names`.
 - Deletions substantially outnumber merges (~778k vs ~100k in the current dump)
 - The live, merged, and deleted id sets are mutually disjoint — a taxon is exactly one of the three
 

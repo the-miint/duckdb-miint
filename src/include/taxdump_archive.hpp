@@ -6,13 +6,35 @@
 
 namespace miint {
 
-// The taxdump member files consumed by the taxonomy reader. merged.dmp and
-// delnodes.dmp are optional (empty string if absent from the archive).
+// The taxdump member files consumed by the taxonomy reader. A member that was not
+// requested (see TaxdumpMemberSet) is left empty.
 struct TaxdumpFiles {
-	std::string nodes;    // nodes.dmp    (required)
-	std::string names;    // names.dmp    (required)
-	std::string merged;   // merged.dmp   (optional)
-	std::string delnodes; // delnodes.dmp (optional)
+	std::string nodes;    // nodes.dmp
+	std::string names;    // names.dmp
+	std::string merged;   // merged.dmp
+	std::string delnodes; // delnodes.dmp
+};
+
+// Which taxdump members a caller needs.
+//
+// Each reader requests only the members it parses, for two reasons. Cost: the full dump
+// is ~510 MB extracted, so loading all four to answer from delnodes.dmp (~7 MB) read
+// two orders of magnitude more than the query needed, once per function in a query that
+// joined several. Correctness: a member is then required exactly when some caller
+// actually reads it, so "absent" can be reported as an error instead of being flattened
+// into "empty" -- an empty merge map read as authoritative would assert that every
+// retired taxid is live again.
+struct TaxdumpMemberSet {
+	bool nodes = false;
+	bool names = false;
+	bool merged = false;
+	bool delnodes = false;
+
+	// Every member -- used when populating the on-disk cache, which must be complete
+	// even though no single reader needs all four.
+	static TaxdumpMemberSet All() {
+		return TaxdumpMemberSet {true, true, true, true};
+	}
 };
 
 // Decompression + tar extraction for NCBI taxonomy dumps. Pure C++ (no DuckDB):
@@ -28,10 +50,10 @@ public:
 	static std::unordered_map<std::string, std::string> ExtractTarMembers(const std::string &tar_bytes,
 	                                                                      const std::vector<std::string> &names);
 
-	// Gunzip a taxdump.tar.gz buffer and pull out the taxdump members. Requires
-	// nodes.dmp and names.dmp to be present; merged.dmp and delnodes.dmp are
-	// optional. Throws if a required member is missing.
-	static TaxdumpFiles ExtractTaxdump(const std::string &targz_bytes);
+	// Gunzip a taxdump.tar.gz buffer and pull out the requested taxdump members.
+	// Every requested member must be present: throws std::runtime_error naming the
+	// missing one otherwise. Members that were not requested are left empty.
+	static TaxdumpFiles ExtractTaxdump(const std::string &targz_bytes, const TaxdumpMemberSet &members);
 };
 
 } // namespace miint

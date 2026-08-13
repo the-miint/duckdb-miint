@@ -1,7 +1,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include "taxdump_parser.hpp"
 
+#include "taxdump_test_helpers.hpp"
+
+#include <string>
+
 using namespace miint;
+using miint_test::ThrowsMentioning;
 
 namespace {
 // Locate a parsed node by taxid (order-independent assertions).
@@ -166,11 +171,119 @@ TEST_CASE("TaxdumpParser::ParseNames emits every names.dmp row verbatim", "[taxd
 		CHECK(disambiguated[0].unique_name == "Bacteria <bacteria>");
 		CHECK(disambiguated[0].name == "Bacteria");
 	}
+}
 
-	SECTION("a line without a name_class field is skipped, not half-read") {
-		// Matches ParseNodes/ParseMerged, which skip short lines rather than
-		// emitting a row with fields shifted into the wrong columns.
-		auto short_line = TaxdumpParser::ParseNames("80\t|\tEscherichia coli\t|\n");
-		CHECK(short_line.empty());
+// NCBI's taxdump_readme.txt documents names.dmp, merged.dmp and delnodes.dmp with a
+// fixed width (4, 2 and 1 fields), and we consume every one of those fields. So a row
+// of the wrong width means the format moved, and reading it positionally would hand
+// back values from the wrong columns -- a `name_class` that is really a `unique name`
+// looks entirely well-formed downstream. Fail loudly instead, naming the member and
+// line so the report is actionable.
+//
+// nodes.dmp is deliberately NOT in this group: the readme documents 13 fields for
+// taxdump and 18 for new_taxdump, so its width legitimately varies and only the first
+// three are consumed. See the ParseNodes tolerance test below.
+TEST_CASE("TaxdumpParser rejects fixed-width members whose width moved", "[taxdump]") {
+	SECTION("names.dmp must be exactly 4 fields") {
+		// Too few: no name class to read at all.
+		CHECK(ThrowsMentioning([] { TaxdumpParser::ParseNames("80\t|\tEscherichia coli\t|\n"); },
+		                       {"names.dmp", "line 1", "4"}));
+		// Too many: the old guard was a lower bound only, so this read positionally
+		// and silently mislabelled the name class. This is the case the review found.
+		CHECK(ThrowsMentioning(
+		    [] { TaxdumpParser::ParseNames("80\t|\tEscherichia coli\t|\t\t|\tscientific name\t|\textra\t|\n"); },
+		    {"names.dmp", "line 1", "5"}));
+		// The line number must point at the offending row, not the first row.
+		CHECK(ThrowsMentioning(
+		    [] {
+			    TaxdumpParser::ParseNames("1\t|\troot\t|\t\t|\tscientific name\t|\n"
+			                              "10\t|\tcellular organisms\t|\t\t|\tscientific name\t|\n"
+			                              "20\t|\tBacteria\t|\n");
+		    },
+		    {"names.dmp", "line 3"}));
+	}
+
+	SECTION("merged.dmp must be exactly 2 fields") {
+		CHECK(ThrowsMentioning([] { TaxdumpParser::ParseMerged("999\t|\n"); }, {"merged.dmp", "line 1"}));
+		CHECK(ThrowsMentioning([] { TaxdumpParser::ParseMerged("999\t|\t80\t|\t70\t|\n"); },
+		                       {"merged.dmp", "line 1", "3"}));
+	}
+
+	SECTION("delnodes.dmp must be exactly 1 field") {
+		// The pre-existing guard here (`f.empty() || f[0].empty()`) could never reject
+		// a wrong width, because SplitFields always emplaces at least one element.
+		CHECK(
+		    ThrowsMentioning([] { TaxdumpParser::ParseDeleted("888\t|\t999\t|\n"); }, {"delnodes.dmp", "line 1", "2"}));
+	}
+
+	SECTION("well-formed members of the documented width still parse") {
+		CHECK(TaxdumpParser::ParseNames("80\t|\tEscherichia coli\t|\t\t|\tscientific name\t|\n").size() == 1);
+		CHECK(TaxdumpParser::ParseMerged("999\t|\t80\t|\n").size() == 1);
+		CHECK(TaxdumpParser::ParseDeleted("888\t|\n").size() == 1);
+	}
+}
+
+// nodes.dmp is the one member whose width is not fixed across dump flavours, so it
+// keeps a lower-bound guard. Only taxid/parent/rank are consumed, and appended
+// columns must not break reading -- otherwise a new_taxdump-format nodes.dmp (18
+// fields) would stop parsing.
+TEST_CASE("TaxdumpParser::ParseNodes tolerates varying nodes.dmp widths", "[taxdump]") {
+	const char *names = "1\t|\troot\t|\t\t|\tscientific name\t|\n";
+
+	SECTION("the 13-field taxdump and 18-field new_taxdump widths both parse") {
+		std::string thirteen = "1\t|\t1\t|\tno rank\t|\t\t|\t0\t|\t0\t|\t11\t|\t1\t|\t0\t|\t1\t|\t0\t|\t0\t|\t\t|\n";
+		std::string eighteen = "1\t|\t1\t|\tno rank\t|\t\t|\t0\t|\t0\t|\t11\t|\t1\t|\t0\t|\t1\t|\t0\t|\t0\t|\t\t|"
+		                       "\t0\t|\t0\t|\t1\t|\t0\t|\t0\t|\n";
+		CHECK(TaxdumpParser::ParseNodes(thirteen, names).size() == 1);
+		CHECK(TaxdumpParser::ParseNodes(eighteen, names).size() == 1);
+	}
+
+	SECTION("fewer than the three consumed fields is still an error, not a silent skip") {
+		// A truncated dump must fail loudly rather than yield a short tree that looks
+		// complete -- consistent with Gunzip rejecting a truncated gzip stream.
+		CHECK(ThrowsMentioning([&] { TaxdumpParser::ParseNodes("1\t|\t1\t|\n", names); }, {"nodes.dmp", "line 1"}));
+	}
+}
+
+// strtoll reported neither a partial parse nor a range error, so three classes of bad
+// input became ordinary-looking BIGINTs. Only the first was detectable downstream (0
+// is not a valid taxid); truncation and clamping produced in-range values a consumer
+// could not tell from real data.
+TEST_CASE("TaxdumpParser rejects taxids that are not integers", "[taxdump]") {
+	SECTION("a non-numeric taxid is rejected instead of becoming 0") {
+		CHECK(ThrowsMentioning([] { TaxdumpParser::ParseDeleted("notataxid\t|\n"); },
+		                       {"delnodes.dmp", "line 1", "notataxid"}));
+	}
+
+	SECTION("a partially-numeric taxid is rejected instead of being truncated") {
+		// "123abc" previously yielded 123 -- in range, and indistinguishable from a
+		// real taxid 123.
+		CHECK(ThrowsMentioning([] { TaxdumpParser::ParseDeleted("123abc\t|\n"); }, {"delnodes.dmp", "123abc"}));
+	}
+
+	SECTION("an out-of-range taxid is rejected instead of being clamped") {
+		// Previously clamped to INT64_MAX, again in range for a BIGINT column.
+		CHECK(ThrowsMentioning([] { TaxdumpParser::ParseDeleted("99999999999999999999\t|\n"); },
+		                       {"delnodes.dmp", "99999999999999999999"}));
+	}
+
+	SECTION("an empty taxid field is rejected") {
+		CHECK(ThrowsMentioning([] { TaxdumpParser::ParseMerged("\t|\t80\t|\n"); }, {"merged.dmp"}));
+	}
+
+	SECTION("every numeric field is checked, not only the first") {
+		// merged.dmp's new_tax_id is just as load-bearing as old_tax_id: a bad value
+		// there would silently remap a retired taxid onto the wrong live node.
+		CHECK(ThrowsMentioning([] { TaxdumpParser::ParseMerged("999\t|\tnotanumber\t|\n"); },
+		                       {"merged.dmp", "notanumber"}));
+	}
+
+	SECTION("real taxid magnitudes are unaffected") {
+		// The largest live NCBI taxid is ~3.8M, so nothing legitimate is near the
+		// int64 boundary; this pins that the new check does not reject real data.
+		auto deleted = TaxdumpParser::ParseDeleted("3799730\t|\n1\t|\n");
+		REQUIRE(deleted.size() == 2);
+		CHECK(deleted[0] == 3799730);
+		CHECK(deleted[1] == 1);
 	}
 }
