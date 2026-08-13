@@ -1,0 +1,128 @@
+# name: test/sql/rype_arrow_export.test
+# description: RYpe input streams must export sequences with 64-bit Arrow offsets (#222)
+# group: [sql]
+
+require miint
+
+# WHY THIS EXISTS
+#
+# Every RYpe table function builds its input Arrow stream on a fresh sub-Connection.
+# What DuckDB exports a BLOB/VARCHAR column as is decided by two settings, and BOTH
+# are SettingScopeTarget::GLOBAL_DEFAULT — so whatever the caller has set is inherited
+# by that sub-connection unless we pin it.
+#
+# Between b4967e2 and #222 those streams were exported as Arrow BinaryView. BinaryView
+# lifts the limit on the *number* of variadic data buffers, not the 32-bit offset field
+# inside each view, and DuckDB emits exactly one buffer with buffer_index hardcoded to
+# 0. The offset is written through UnsafeNumericCast<int32_t>, an unchecked static_cast
+# in release builds. Past 2 GiB of sequence in a single record batch the offset silently
+# truncates modulo 2^32 and RYpe is handed a *different read's* bytes under the correct
+# read_id — measured at exactly 2^31 and 2^32.
+#
+# The corruption itself only appears above 2 GiB in one batch, which is far too large to
+# assert in CI. What is asserted here is the invariant that prevents it: a hostile global
+# arrow_output_version must not reach RYpe's export. ConfigureRypeArrowExport pins both
+# settings and then verifies what they resolved to, so if the pinning is ever dropped
+# again this file fails immediately instead of silently returning another read's answer.
+
+statement ok
+CREATE TABLE sequences AS SELECT * FROM (VALUES
+    ('seq1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('seq2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA'),
+    ('seq3', 'GGGGCCCCGGGGCCCCGGGGCCCCGGGGCCCCGGGGCCCCGGGGCCCCGGGG')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE chunks AS SELECT * FROM (VALUES
+    (0, 0, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    (1, 0, 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(feature_idx, chunk_index, chunk_data);
+
+# -----------------------------------------------------------------------------
+# Baseline, with the caller's arrow settings left alone.
+# -----------------------------------------------------------------------------
+
+query II
+SELECT bucket_name, COUNT(*) AS hits
+FROM rype_classify('data/rype/test.ryxdi', 'sequences', threshold := 0.05)
+GROUP BY bucket_name
+ORDER BY bucket_name;
+----
+bucket_alpha	3
+bucket_beta	2
+bucket_gamma	3
+
+query I
+SELECT COUNT(*) FROM rype_extract_minimizer_set('sequences', 32, 10);
+----
+3
+
+query I
+SELECT COUNT(*) FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'sequences');
+----
+3
+
+statement ok
+SELECT * FROM rype_index_create('chunks', '__TEST_DIR__/baseline.ryxdi', k := 16, w := 8);
+
+# -----------------------------------------------------------------------------
+# The same calls with a caller-set global that would previously have selected the
+# 32-bit BinaryView export path. Results must be identical, and nothing may throw.
+# -----------------------------------------------------------------------------
+
+statement ok
+SET GLOBAL arrow_output_version = '1.4';
+
+query II
+SELECT bucket_name, COUNT(*) AS hits
+FROM rype_classify('data/rype/test.ryxdi', 'sequences', threshold := 0.05)
+GROUP BY bucket_name
+ORDER BY bucket_name;
+----
+bucket_alpha	3
+bucket_beta	2
+bucket_gamma	3
+
+query I
+SELECT COUNT(*) FROM rype_extract_minimizer_set('sequences', 32, 10);
+----
+3
+
+query I
+SELECT COUNT(*) FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'sequences');
+----
+3
+
+statement ok
+SELECT * FROM rype_index_create('chunks', '__TEST_DIR__/hostile.ryxdi', k := 16, w := 8);
+
+# The caller's own setting must be left as they set it — we pin the sub-connection,
+# not the session the user is working in.
+query I
+SELECT current_setting('arrow_output_version');
+----
+1.4
+
+# -----------------------------------------------------------------------------
+# Same again with the other half of the pairing set hostilely. arrow_large_buffer_size
+# alone is not sufficient: for BLOB the BinaryView branch wins over it in the appender's
+# type dispatch, which is exactly how the regression survived review.
+# -----------------------------------------------------------------------------
+
+statement ok
+SET GLOBAL arrow_large_buffer_size = false;
+
+query II
+SELECT bucket_name, COUNT(*) AS hits
+FROM rype_classify('data/rype/test.ryxdi', 'sequences', threshold := 0.05)
+GROUP BY bucket_name
+ORDER BY bucket_name;
+----
+bucket_alpha	3
+bucket_beta	2
+bucket_gamma	3
+
+query I
+SELECT COUNT(*) FROM rype_extract_minimizer_set('sequences', 32, 10);
+----
+3
