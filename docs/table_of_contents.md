@@ -35,7 +35,7 @@ SELECT * FROM align_minimap2(getvariable('reads'), subject_table := 'refs');
 ## Public data repositories
 
 - [EBI/ENA](insdc_ena.md) - Interaction with EBI/ENA including submission and fetching of data.
-- [NCBI](insdc_ncbi.md) - Interaction with NCBI including fetching of data and the NCBI taxonomy (tree, lineages, retired-taxid remapping).
+- [NCBI](insdc_ncbi.md) - Interaction with NCBI including fetching of data and the NCBI taxonomy (tree, name classes, lineages, retired/deleted-taxid handling).
 
 ## Alignment
 

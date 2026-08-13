@@ -134,23 +134,45 @@ std::unordered_map<std::string, std::string> TaxdumpArchive::ExtractTarMembers(c
 	return out;
 }
 
-TaxdumpFiles TaxdumpArchive::ExtractTaxdump(const std::string &targz_bytes) {
-	std::string tar_bytes = Gunzip(targz_bytes);
-	auto members = ExtractTarMembers(tar_bytes, {"nodes.dmp", "names.dmp", "merged.dmp", "delnodes.dmp"});
-
-	if (members.find("nodes.dmp") == members.end() || members.find("names.dmp") == members.end()) {
-		throw std::runtime_error("taxdump: archive is missing required members (nodes.dmp and/or names.dmp)");
+TaxdumpFiles TaxdumpArchive::ExtractTaxdump(const std::string &targz_bytes, const TaxdumpMemberSet &requested) {
+	// Only the requested members are named to the tar reader, so an unwanted member is
+	// never copied out of the archive. The gunzip itself is whole-stream (gzip has no
+	// random access), so this saves the member copies, not the decompression.
+	std::vector<std::string> wanted;
+	if (requested.nodes) {
+		wanted.emplace_back("nodes.dmp");
+	}
+	if (requested.names) {
+		wanted.emplace_back("names.dmp");
+	}
+	if (requested.merged) {
+		wanted.emplace_back("merged.dmp");
+	}
+	if (requested.delnodes) {
+		wanted.emplace_back("delnodes.dmp");
 	}
 
-	auto take = [&](const char *n) -> std::string {
+	std::string tar_bytes = Gunzip(targz_bytes);
+	auto members = ExtractTarMembers(tar_bytes, wanted);
+
+	// A requested member that is absent is an error, not an empty result: the caller
+	// asked for it because it intends to read it, and reporting "empty" would be
+	// indistinguishable from a genuinely empty member.
+	auto take = [&](const char *n, bool required) -> std::string {
 		auto it = members.find(n);
-		return it == members.end() ? std::string() : std::move(it->second);
+		if (it == members.end()) {
+			if (required) {
+				throw std::runtime_error("taxdump: archive is missing required member " + std::string(n));
+			}
+			return {};
+		}
+		return std::move(it->second);
 	};
 	TaxdumpFiles files;
-	files.nodes = take("nodes.dmp");
-	files.names = take("names.dmp");
-	files.merged = take("merged.dmp");
-	files.delnodes = take("delnodes.dmp");
+	files.nodes = take("nodes.dmp", requested.nodes);
+	files.names = take("names.dmp", requested.names);
+	files.merged = take("merged.dmp", requested.merged);
+	files.delnodes = take("delnodes.dmp", requested.delnodes);
 	return files;
 }
 

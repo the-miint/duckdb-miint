@@ -305,6 +305,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadNCBIAnnotationTableFunction::Register(loader);
 	ReadNCBITaxdumpTableFunction::Register(loader);
 	ReadNCBITaxdumpMergedTableFunction::Register(loader);
+	ReadNCBITaxdumpNamesTableFunction::Register(loader);
+	ReadNCBITaxdumpDeletedTableFunction::Register(loader);
 	ReadNCBILineageTableFunction::Register(loader);
 	BlastSearchTableFunction::Register(loader);
 	ReadENATableFunction::Register(loader);
