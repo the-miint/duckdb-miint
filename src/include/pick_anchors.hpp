@@ -26,14 +26,20 @@ namespace miint {
 //! take the resulting grid cell as the stratum, and draw from every stratum in
 //! proportion to its size.
 //!
-//! WHY THIS RULE IS THE DEFAULT for progressive-PCoA anchors. Four
+//! WHY THIS RULE IS THE DEFAULT for progressive-PCoA anchors. Several
 //! literature-backed rules were measured against a full ordination of the
-//! rarefied EMP 90 bp table (23,814 samples, unweighted UniFrac, 1,000 anchors),
-//! scored by procrustes M2 at d=3: farthest-point/k-center 0.1745, statistical
-//! leverage / CUR 0.0195, stratum medoids / k-medoids 0.0176, plain seeded random
-//! 0.0079, proportional stratified 0.0045. Over five matched draws stratified beat
-//! random 1.74x on the mean with non-overlapping ranges (stratified max 0.00604 <
-//! random min 0.00707).
+//! rarefied EMP 90 bp table (23,814 samples, unweighted UniFrac, 1,000 anchors
+//! drawn from a common 4,000-sample pool), scored by procrustes M2 at d=3:
+//! farthest-point/k-center 0.11, statistical leverage / CUR 0.0195, stratum
+//! medoids / k-medoids 0.0176, plain seeded random 0.0113 (mean of 10 draws,
+//! 0.0042-0.0220), proportional stratified 0.0051 (mean of 15 draws,
+//! 0.0038-0.0079).
+//!
+//! 2.19x better on the mean, and 5.3x tighter in spread (sd 0.0011 vs 0.0061) --
+//! the spread is the real product. No stratified draw of fifteen was worse than
+//! random's median; one random draw of ten beat stratified's median, so the ranges
+//! do overlap and a lucky random draw can match it. What you cannot do is know in
+//! advance which draw you got.
 //!
 //! The mechanism matters, because it is what picks this rule out of the four:
 //! leverage, medoids and farthest-point each systematically prefer a KIND of
