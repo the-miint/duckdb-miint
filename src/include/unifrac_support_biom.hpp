@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "feature_table_row.hpp" // CooRow (kept free of the api.hpp include)
-#include "api.hpp"                // libssu (support_biom_t)
+#include "api.hpp"               // libssu (support_biom_t)
 
 namespace miint::unifrac {
 
