@@ -1,0 +1,397 @@
+# name: test/sql/mmvec_id_types.test
+# description: mmvec_fit round-trips VARCHAR/BIGINT/UUID feature ids per modality, and a seeded fit is reproducible (always run; fixtures are inline)
+# group: [sql]
+
+require miint
+
+# The same 5-sample toy pair as mmvec_fit.test, relabelled below into each id
+# type. Re-declared rather than shared because sqllogictest files do not share a
+# database.
+statement ok
+CREATE TABLE microbes AS
+SELECT * FROM (VALUES
+  ('S1','m1',1.0),('S1','m4',7.0),('S1','m6',2.0),('S1','m7',1.0),
+  ('S2','m2',1.0),('S2','m3',2.0),('S2','m4',9.0),('S2','m5',1.0),('S2','m6',1.0),('S2','m8',1.0),
+  ('S3','m1',2.0),('S3','m3',1.0),('S3','m4',6.0),('S3','m7',2.0),
+  ('S4','m1',1.0),('S4','m2',2.0),('S4','m3',1.0),('S4','m4',8.0),('S4','m5',3.0),('S4','m6',1.0),('S4','m8',2.0),
+  ('S5','m2',1.0),('S5','m3',3.0),('S5','m4',3.0),('S5','m5',1.0),('S5','m6',4.0),('S5','m7',1.0)
+) t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE metabolites AS
+SELECT * FROM (VALUES
+  ('S1','b2',1.0),('S1','b4',1.0),('S1','b5',1.0),('S1','b6',2.0),
+  ('S2','b1',1.0),('S2','b3',2.0),('S2','b4',1.0),('S2','b5',5.0),
+  ('S3','b2',3.0),('S3','b3',1.0),('S3','b5',1.0),('S3','b6',1.0),
+  ('S4','b1',3.0),('S4','b2',1.0),('S4','b4',2.0),('S4','b5',2.0),
+  ('S5','b3',4.0),('S5','b4',1.0),('S5','b5',7.0),('S5','b6',3.0)
+) t(sample_id, feature_id, value);
+
+# Relabelling maps, written out so the ORDER-PRESERVING property is visible by
+# eye: 11..18 are all two digits, and the UUIDs differ only in their last digit,
+# so each list sorts as bytes in the same order as m1..m8 / b1..b6. That matters
+# because the sort order fixes which Y feature becomes the reference category,
+# and the priors are not softmax-shift-invariant -- an ordering change would move
+# the optimum, and the equality assertions further down would fail for a reason
+# that has nothing to do with id types.
+#
+# X's numbers deliberately overlap Y's (both 11..16), so a fit that confused the
+# two feature dictionaries would emit ids that exist but belong to the other
+# modality.
+statement ok
+CREATE TABLE x_map AS
+SELECT * FROM (VALUES
+  ('m1', 11, CAST('00000000-0000-4000-8000-000000000001' AS UUID)),
+  ('m2', 12, CAST('00000000-0000-4000-8000-000000000002' AS UUID)),
+  ('m3', 13, CAST('00000000-0000-4000-8000-000000000003' AS UUID)),
+  ('m4', 14, CAST('00000000-0000-4000-8000-000000000004' AS UUID)),
+  ('m5', 15, CAST('00000000-0000-4000-8000-000000000005' AS UUID)),
+  ('m6', 16, CAST('00000000-0000-4000-8000-000000000006' AS UUID)),
+  ('m7', 17, CAST('00000000-0000-4000-8000-000000000007' AS UUID)),
+  ('m8', 18, CAST('00000000-0000-4000-8000-000000000008' AS UUID))
+) t(txt, num, uu);
+
+statement ok
+CREATE TABLE y_map AS
+SELECT * FROM (VALUES
+  ('b1', 11, CAST('00000000-0000-4000-8000-0000000000a1' AS UUID)),
+  ('b2', 12, CAST('00000000-0000-4000-8000-0000000000a2' AS UUID)),
+  ('b3', 13, CAST('00000000-0000-4000-8000-0000000000a3' AS UUID)),
+  ('b4', 14, CAST('00000000-0000-4000-8000-0000000000a4' AS UUID)),
+  ('b5', 15, CAST('00000000-0000-4000-8000-0000000000a5' AS UUID)),
+  ('b6', 16, CAST('00000000-0000-4000-8000-0000000000a6' AS UUID))
+) t(txt, num, uu);
+
+# The CAST to BIGINT is required, not decorative: a bare integer literal is
+# INTEGER, and only BIGINT and UUID are mirrored onto the output (see the
+# INTEGER case at the end of this file).
+statement ok
+CREATE TABLE microbes_bigint AS
+SELECT sample_id, CAST(m.num AS BIGINT) AS feature_id, value FROM microbes JOIN x_map m ON m.txt = feature_id;
+
+statement ok
+CREATE TABLE metabolites_bigint AS
+SELECT sample_id, CAST(m.num AS BIGINT) AS feature_id, value FROM metabolites JOIN y_map m ON m.txt = feature_id;
+
+statement ok
+CREATE TABLE microbes_uuid AS
+SELECT sample_id, m.uu AS feature_id, value FROM microbes JOIN x_map m ON m.txt = feature_id;
+
+statement ok
+CREATE TABLE metabolites_uuid AS
+SELECT sample_id, m.uu AS feature_id, value FROM metabolites JOIN y_map m ON m.txt = feature_id;
+
+statement ok
+CREATE TABLE fit_txt AS SELECT * FROM mmvec_fit('microbes', 'metabolites');
+
+statement ok
+CREATE TABLE fit_num AS SELECT * FROM mmvec_fit('microbes_bigint', 'metabolites_bigint');
+
+statement ok
+CREATE TABLE fit_uu AS SELECT * FROM mmvec_fit('microbes_uuid', 'metabolites_uuid');
+
+# ---------------------------------------------------------------------------
+# The emitted ids carry their input type at RUNTIME, not just in the declared
+# schema. mmvec_fit.test already pins what DESCRIBE reports; typeof() on real
+# rows is the separate claim that the vector actually holds BIGINTs / UUIDs,
+# which is what makes the id columns joinable back to typed metadata without a
+# cast.
+# ---------------------------------------------------------------------------
+
+query II
+SELECT DISTINCT typeof(x_feature_id), typeof(y_feature_id) FROM fit_num;
+----
+BIGINT	BIGINT
+
+query II
+SELECT DISTINCT typeof(x_feature_id), typeof(y_feature_id) FROM fit_uu;
+----
+UUID	UUID
+
+# ---------------------------------------------------------------------------
+# The VALUES round-trip: the distinct ids the model relation emits are exactly
+# the distinct feature ids of the relation they came from -- no losses, no
+# inventions, no canonicalisation drift. Compared on the typed columns with no
+# cast on either side, so BIGINT is matched as BIGINT and UUID as UUID. A
+# symmetric difference rather than a count, so a dropped id and an invented id
+# are both caught (and it cannot pass vacuously: an empty fit would leave the
+# whole source side unmatched).
+# ---------------------------------------------------------------------------
+
+query I
+SELECT count(*) FROM (
+  (SELECT DISTINCT x_feature_id FROM fit_num WHERE modality='x'
+   EXCEPT SELECT DISTINCT feature_id FROM microbes_bigint)
+  UNION ALL
+  (SELECT DISTINCT feature_id FROM microbes_bigint
+   EXCEPT SELECT DISTINCT x_feature_id FROM fit_num WHERE modality='x')
+);
+----
+0
+
+query I
+SELECT count(*) FROM (
+  (SELECT DISTINCT y_feature_id FROM fit_num WHERE modality='y'
+   EXCEPT SELECT DISTINCT feature_id FROM metabolites_bigint)
+  UNION ALL
+  (SELECT DISTINCT feature_id FROM metabolites_bigint
+   EXCEPT SELECT DISTINCT y_feature_id FROM fit_num WHERE modality='y')
+);
+----
+0
+
+query I
+SELECT count(*) FROM (
+  (SELECT DISTINCT x_feature_id FROM fit_uu WHERE modality='x'
+   EXCEPT SELECT DISTINCT feature_id FROM microbes_uuid)
+  UNION ALL
+  (SELECT DISTINCT feature_id FROM microbes_uuid
+   EXCEPT SELECT DISTINCT x_feature_id FROM fit_uu WHERE modality='x')
+);
+----
+0
+
+query I
+SELECT count(*) FROM (
+  (SELECT DISTINCT y_feature_id FROM fit_uu WHERE modality='y'
+   EXCEPT SELECT DISTINCT feature_id FROM metabolites_uuid)
+  UNION ALL
+  (SELECT DISTINCT feature_id FROM metabolites_uuid
+   EXCEPT SELECT DISTINCT y_feature_id FROM fit_uu WHERE modality='y')
+);
+----
+0
+
+# ---------------------------------------------------------------------------
+# The id type is PRESENTATIONAL. Ids are carried internally as canonical text
+# whatever their SQL type, so an order-preserving relabelling must produce the
+# very same numbers -- bit-identical, not merely close. This is the assertion
+# with teeth: it fails if the BIGINT or UUID codec perturbs the id ordering
+# (numeric sorting instead of byte sorting, say, or a non-canonical UUID form),
+# because a different ordering means a different reference category and a
+# genuinely different optimum.
+#
+# Each fit is normalised back to the m*/b* names before comparing, with 'loss'
+# standing in for the rows that name no feature.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE VIEW norm_txt AS
+SELECT modality, coalesce(x_feature_id, y_feature_id, 'loss') AS feature, axis, value FROM fit_txt;
+
+statement ok
+CREATE VIEW norm_num AS
+SELECT f.modality, coalesce(mx.txt, my.txt, 'loss') AS feature, f.axis, f.value
+FROM fit_num f
+LEFT JOIN x_map mx ON mx.num = f.x_feature_id
+LEFT JOIN y_map my ON my.num = f.y_feature_id;
+
+statement ok
+CREATE VIEW norm_uu AS
+SELECT f.modality, coalesce(mx.txt, my.txt, 'loss') AS feature, f.axis, f.value
+FROM fit_uu f
+LEFT JOIN x_map mx ON mx.uu = f.x_feature_id
+LEFT JOIN y_map my ON my.uu = f.y_feature_id;
+
+query I
+SELECT (SELECT count(*) FROM (SELECT * FROM norm_num EXCEPT ALL SELECT * FROM norm_txt))
+     + (SELECT count(*) FROM (SELECT * FROM norm_txt EXCEPT ALL SELECT * FROM norm_num));
+----
+0
+
+query I
+SELECT (SELECT count(*) FROM (SELECT * FROM norm_uu EXCEPT ALL SELECT * FROM norm_txt))
+     + (SELECT count(*) FROM (SELECT * FROM norm_txt EXCEPT ALL SELECT * FROM norm_uu));
+----
+0
+
+# The diagnostics agree too, so the equality above is about the whole fit and not
+# just the parameter block.
+query I
+SELECT count(*) FROM (
+  SELECT DISTINCT converged, n_iter, final_loss, max_abs_grad, message FROM fit_txt
+  UNION
+  SELECT DISTINCT converged, n_iter, final_loss, max_abs_grad, message FROM fit_num
+  UNION
+  SELECT DISTINCT converged, n_iter, final_loss, max_abs_grad, message FROM fit_uu
+);
+----
+1
+
+# ---------------------------------------------------------------------------
+# Ordering is BYTE order, for every id type. A BIGINT-keyed table is therefore
+# ordered as text, so 10 precedes 9 -- and the reference Y category is the
+# lexicographically first id, not the numerically smallest. That is deliberate:
+# ids are canonical text internally, so one ordering rule serves all three
+# types, and a table keyed as BIGINT gives the same reference category as the
+# same table keyed as the equivalent VARCHAR text. It is also surprising enough
+# to be worth pinning here and documenting for users.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE metabolites_mixed_width AS
+SELECT sample_id, (8 + CAST(substr(feature_id, 2) AS BIGINT)) AS feature_id, value FROM metabolites;
+
+statement ok
+CREATE TABLE fit_mixed_width AS SELECT * FROM mmvec_fit('microbes', 'metabolites_mixed_width');
+
+# b1..b6 became 9..14, whose byte order is 10,11,12,13,14,9 -- so 10 is Y
+# feature 0 and gets the all-zero reference row, while 9 does not.
+query I
+SELECT y_feature_id FROM (
+  SELECT y_feature_id, sum(abs(value)) AS s FROM fit_mixed_width WHERE modality='y' GROUP BY y_feature_id
+) WHERE s = 0.0;
+----
+10
+
+query I
+SELECT sum(abs(value)) > 1e-6 FROM fit_mixed_width WHERE modality='y' AND y_feature_id = 9;
+----
+true
+
+# And a moved reference category really does reach a different optimum, which is
+# what makes the order-preservation requirement above non-negotiable rather than
+# cosmetic.
+query I
+SELECT (SELECT DISTINCT final_loss FROM fit_mixed_width) <> (SELECT DISTINCT final_loss FROM fit_txt);
+----
+true
+
+# ---------------------------------------------------------------------------
+# The two id columns resolve independently, each from its OWN relation. The
+# reverse of the mix mmvec_fit.test declares, so neither column can be silently
+# taking the other relation's type.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE fit_mixed AS SELECT * FROM mmvec_fit('microbes_uuid', 'metabolites_bigint');
+
+query II
+SELECT DISTINCT typeof(x_feature_id), typeof(y_feature_id) FROM fit_mixed;
+----
+UUID	BIGINT
+
+query II
+SELECT
+  (SELECT count(DISTINCT x_feature_id) FROM fit_mixed
+     WHERE x_feature_id IN (SELECT feature_id FROM microbes_uuid)),
+  (SELECT count(DISTINCT y_feature_id) FROM fit_mixed
+     WHERE y_feature_id IN (SELECT feature_id FROM metabolites_bigint));
+----
+8	6
+
+# ---------------------------------------------------------------------------
+# VARCHAR ids pass through verbatim, including '' and '*'. Those two strings
+# encode NULL in the shared id egress helper -- but only on its BIGINT and UUID
+# branches, and a BIGINT or UUID column can never stringify to either one, so
+# that encoding is unreachable from mmvec_fit. Asserting it here means a future
+# change that routes VARCHAR ids through the sentinel path fails loudly instead
+# of quietly NULLing out a feature that has parameters.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE microbes_sentinel AS
+SELECT sample_id, CASE feature_id WHEN 'm1' THEN '' WHEN 'm2' THEN '*' ELSE feature_id END AS feature_id, value
+FROM microbes;
+
+statement ok
+CREATE TABLE fit_sentinel AS SELECT * FROM mmvec_fit('microbes_sentinel', 'metabolites');
+
+query II
+SELECT x_feature_id, count(*) FROM fit_sentinel
+WHERE modality='x' AND x_feature_id IN ('', '*') GROUP BY x_feature_id ORDER BY x_feature_id;
+----
+(empty)	4
+*	4
+
+query I
+SELECT count(*) FROM fit_sentinel WHERE modality='x' AND x_feature_id IS NULL;
+----
+0
+
+# ---------------------------------------------------------------------------
+# Only BIGINT and UUID are mirrored; every other input type collapses to
+# VARCHAR. INTEGER is the easy one to trip over -- a bare integer literal is
+# INTEGER, not BIGINT -- so an INTEGER-keyed relation comes back as text. The
+# ids are still exactly the input's, spelled the way DuckDB spells them, because
+# they are carried internally as canonical text regardless of SQL type. This is
+# the existing id-column convention (ResolveSampleIdOutputType), shared with the
+# unifrac and community_distances readers, rather than anything mmvec chose.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE microbes_integer AS
+SELECT sample_id, CAST(m.num AS INTEGER) AS feature_id, value FROM microbes JOIN x_map m ON m.txt = feature_id;
+
+statement ok
+CREATE TABLE fit_integer AS SELECT * FROM mmvec_fit('microbes_integer', 'metabolites');
+
+query I
+SELECT DISTINCT typeof(x_feature_id) FROM fit_integer;
+----
+VARCHAR
+
+query I
+SELECT count(*) FROM (
+  (SELECT DISTINCT x_feature_id FROM fit_integer WHERE modality='x'
+   EXCEPT SELECT DISTINCT CAST(feature_id AS VARCHAR) FROM microbes_integer)
+  UNION ALL
+  (SELECT DISTINCT CAST(feature_id AS VARCHAR) FROM microbes_integer
+   EXCEPT SELECT DISTINCT x_feature_id FROM fit_integer WHERE modality='x')
+);
+----
+0
+
+# ---------------------------------------------------------------------------
+# Reproducibility on the Adam path. L-BFGS reproducibility is pinned in
+# mmvec_fit.test; Adam is the path that keeps drawing from the RNG throughout
+# the fit (minibatch indices, not just the init), so it is where run-to-run
+# drift would surface first. This asserts the path as a whole is reproducible --
+# it cannot separate the init draw from the minibatch draws, since SQL has no way
+# to hold theta0 fixed while changing the seed. The pure-core suite separates
+# them by injecting the index sequence directly.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT count(*) FROM (
+  SELECT * FROM mmvec_fit('microbes','metabolites', optimizer := 'adam', max_iter := 5, batch_size := 10, seed := 7)
+  EXCEPT ALL
+  SELECT * FROM mmvec_fit('microbes','metabolites', optimizer := 'adam', max_iter := 5, batch_size := 10, seed := 7)
+);
+----
+0
+
+query I
+SELECT count(*) > 0 FROM (
+  SELECT * FROM mmvec_fit('microbes','metabolites', optimizer := 'adam', max_iter := 5, batch_size := 10, seed := 7)
+  EXCEPT
+  SELECT * FROM mmvec_fit('microbes','metabolites', optimizer := 'adam', max_iter := 5, batch_size := 10, seed := 8)
+);
+----
+true
+
+# ---------------------------------------------------------------------------
+# The fit does not depend on how many threads are available. mmvec_fit reports
+# MaxThreads() == 1 and the core is single-threaded, so DuckDB's thread count
+# cannot reach the arithmetic. (Eigen's own parallelism is ruled out at compile
+# time by EIGEN_DONT_PARALLELIZE rather than at runtime, so no setting here can
+# exercise it -- see the CMakeLists.txt rationale.)
+# ---------------------------------------------------------------------------
+
+statement ok
+SET threads=1;
+
+statement ok
+CREATE TABLE fit_t1 AS SELECT * FROM mmvec_fit('microbes','metabolites', seed := 3);
+
+statement ok
+SET threads=8;
+
+statement ok
+CREATE TABLE fit_t8 AS SELECT * FROM mmvec_fit('microbes','metabolites', seed := 3);
+
+query I
+SELECT (SELECT count(*) FROM (SELECT * FROM fit_t1 EXCEPT ALL SELECT * FROM fit_t8))
+     + (SELECT count(*) FROM (SELECT * FROM fit_t8 EXCEPT ALL SELECT * FROM fit_t1));
+----
+0

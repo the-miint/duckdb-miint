@@ -1,0 +1,188 @@
+# name: test/sql/mmvec_errors.test
+# description: mmvec_fit rejects unpairable and unfittable input, naming the user's own ids (always run; fixtures are inline)
+# group: [sql]
+
+require miint
+
+# A minimal well-formed pair, mutated per test below. 2 samples, 2 X features,
+# 2 Y features is the smallest fittable shape: Y needs two features because
+# feature 0 is the reference category.
+statement ok
+CREATE TABLE ok_x AS
+SELECT * FROM (VALUES
+  ('s1','xa',1.0),('s1','xb',2.0),('s2','xa',3.0),('s2','xb',4.0)
+) t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE ok_y AS
+SELECT * FROM (VALUES
+  ('s1','ya',1.0),('s1','yb',2.0),('s2','ya',3.0),('s2','yb',4.0)
+) t(sample_id, feature_id, value);
+
+# ---------------------------------------------------------------------------
+# Pairing. Samples are matched by id, never by row position, so a sample present
+# in only one modality is an error rather than a silent intersection: dropping it
+# would change the sufficient statistics, and a user whose two tables disagree
+# needs to hear about it. The message names the offending ids, not row numbers.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE y_extra_sample AS
+SELECT * FROM ok_y UNION ALL SELECT * FROM (VALUES ('s3','ya',1.0),('s3','yb',1.0)) t(sample_id, feature_id, value);
+
+statement error
+SELECT * FROM mmvec_fit('ok_x', 'y_extra_sample');
+----
+must describe the same samples
+
+statement error
+SELECT * FROM mmvec_fit('ok_x', 'y_extra_sample');
+----
+only in Y: s3
+
+statement ok
+CREATE TABLE x_extra_sample AS
+SELECT * FROM ok_x UNION ALL SELECT * FROM (VALUES ('zz','xa',1.0),('zz','xb',1.0)) t(sample_id, feature_id, value);
+
+statement error
+SELECT * FROM mmvec_fit('x_extra_sample', 'ok_y');
+----
+only in X: zz
+
+# ---------------------------------------------------------------------------
+# Duplicate cells are rejected, not summed. Summing would turn X^T Y's
+# contribution from (x_a + x_b) * y into x_a*y + x_b*y, quietly changing the fit
+# -- so a table that has been double-joined must fail loudly. The pure core
+# rejects duplicates too, but knows only indices; this fires first so the message
+# can name the ids the user actually wrote.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE x_dup AS
+SELECT * FROM ok_x UNION ALL SELECT * FROM (VALUES ('s1','xa',5.0)) t(sample_id, feature_id, value);
+
+statement error
+SELECT * FROM mmvec_fit('x_dup', 'ok_y');
+----
+duplicate entry for sample 's1', feature 'xa'
+
+statement error
+SELECT * FROM mmvec_fit('x_dup', 'ok_y');
+----
+would change the fit
+
+# ---------------------------------------------------------------------------
+# Degenerate shapes.
+# ---------------------------------------------------------------------------
+
+# One Y feature is only the reference category, whose logit is pinned to zero, so
+# there is no likelihood left to fit.
+statement ok
+CREATE TABLE y_one_feature AS
+SELECT * FROM (VALUES ('s1','only',1.0),('s2','only',2.0)) t(sample_id, feature_id, value);
+
+statement error
+SELECT * FROM mmvec_fit('ok_x', 'y_one_feature');
+----
+at least two features
+
+# A table whose every value is zero has no cells at all once the sparse-storage
+# contract drops them -- indistinguishable from an empty relation, and reported
+# as such rather than as a confusing shape error.
+statement ok
+CREATE TABLE x_all_zero AS
+SELECT * FROM (VALUES ('s1','xa',0.0),('s2','xb',0.0)) t(sample_id, feature_id, value);
+
+statement error
+SELECT * FROM mmvec_fit('x_all_zero', 'ok_y');
+----
+X feature-table has no usable cells
+
+statement ok
+CREATE TABLE y_all_zero AS
+SELECT * FROM (VALUES ('s1','ya',0.0),('s2','yb',0.0)) t(sample_id, feature_id, value);
+
+statement error
+SELECT * FROM mmvec_fit('ok_x', 'y_all_zero');
+----
+Y feature-table has no usable cells
+
+# A relation that is genuinely empty reaches the same place.
+statement ok
+CREATE TABLE x_empty AS SELECT * FROM ok_x WHERE false;
+
+statement error
+SELECT * FROM mmvec_fit('x_empty', 'ok_y');
+----
+no usable cells
+
+# ---------------------------------------------------------------------------
+# The relation contract. Presence of (sample_id, feature_id, value) is checked at
+# bind; whether `value` actually converts is the reader's business.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE x_bad_value AS
+SELECT * FROM (VALUES ('s1','xa','not a number'),('s2','xb','also not')) t(sample_id, feature_id, value);
+
+statement error
+SELECT * FROM mmvec_fit('x_bad_value', 'ok_y');
+----
+mmvec_fit
+
+# NULL ids and NULL values are dropped rather than rejected -- the sparse
+# feature-table contract shared with community_distances and unifrac_distances.
+# Here every X cell for s2 is NULL, so s2 disappears entirely and the failure
+# surfaces as the sample mismatch it really is, not as a NULL complaint.
+statement ok
+CREATE TABLE x_null_sample AS
+SELECT * FROM (VALUES ('s1','xa',1.0),('s1','xb',2.0),(NULL,'xa',3.0),(NULL,'xb',4.0)) t(sample_id, feature_id, value);
+
+statement error
+SELECT * FROM mmvec_fit('x_null_sample', 'ok_y');
+----
+must describe the same samples
+
+# ---------------------------------------------------------------------------
+# Value-level rejections, which come from the pure core's own contract once the
+# sufficient statistics are computed. MMvec is a multinomial model on counts, so
+# a table that has been transformed (CLR, log, centered) is a modeling error
+# rather than something to fit quietly and report as a successful run.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE x_negative AS
+SELECT * FROM (VALUES ('s1','xa',1.0),('s1','xb',-2.0),('s2','xa',3.0),('s2','xb',4.0)) t(sample_id, feature_id, value);
+
+statement error
+SELECT * FROM mmvec_fit('x_negative', 'ok_y');
+----
+mmvec models counts
+
+statement ok
+CREATE TABLE y_negative AS
+SELECT * FROM (VALUES ('s1','ya',1.0),('s1','yb',2.0),('s2','ya',-3.0),('s2','yb',4.0)) t(sample_id, feature_id, value);
+
+statement error
+SELECT * FROM mmvec_fit('ok_x', 'y_negative');
+----
+mmvec models counts
+
+# An infinity survives the reader (only NULL and NaN are dropped as
+# "not stored"), so the core is what rejects it.
+statement ok
+CREATE TABLE x_inf AS
+SELECT * FROM (VALUES ('s1','xa',1.0),('s1','xb',CAST('inf' AS DOUBLE)),('s2','xa',3.0),('s2','xb',4.0))
+  t(sample_id, feature_id, value);
+
+statement error
+SELECT * FROM mmvec_fit('x_inf', 'ok_y');
+----
+is not finite
+
+# NOT TESTED, because it is unreachable from SQL rather than untested: the core
+# also rejects all-zero rows and all-zero columns, but a COO reader drops zero
+# cells, so an all-zero feature simply never enters the dictionary and an
+# all-zero sample disappears into the sample-set mismatch above. Those checks are
+# defensive for dense callers and are covered by the pure-core suite, exactly as
+# community_distances documents for its own empty-community handling.

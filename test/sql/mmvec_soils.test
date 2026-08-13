@@ -1,0 +1,496 @@
+# name: test/sql/mmvec_soils.test
+# description: mmvec reproduces the published soils microbe-metabolite biology end to end from the committed parquet fixtures, under both optimizers (always run; the fixtures are committed and the whole file takes under two seconds)
+# group: [sql]
+
+require miint
+
+# The fixtures are parquet, so the reader has to be there; this is DuckDB's own
+# core extension and the same line woltka.test uses. It is not an optional
+# dependency in the require-env sense -- see the note on gating below.
+require parquet
+
+# ---------------------------------------------------------------------------
+# The first test to run mmvec on real data. Everything before this file is toy
+# scale (5-50 samples) and carried as literal arrays in test/cpp/mmvec_oracle.hpp,
+# because the Catch2 target is deliberately DuckDB-free and cannot read parquet.
+# This one can, so it is where the port meets a published result.
+#
+# NOT gated behind require-env. The two fixtures are committed (34 KB) and the
+# whole file -- four L-BFGS fits at 500 iterations, two Adam fits at 200 epochs,
+# and 39610 ranks six times -- runs in under two seconds. Gating it would only
+# mean nobody ever ran it.
+#
+# What is asserted here is BIOLOGY, not floating-point parity, and that is a
+# deliberate choice grounded in measurement rather than in giving up. The soils
+# objective is ~8.0e+15 (LC/MS intensities times microbial counts), so neither
+# this implementation nor scikit-bio's reaches a stationary point at the
+# reference's own max_iter of 500 -- both stop on the iteration limit, and the
+# fitted PARAMETERS therefore still depend on the starting point. Measured over
+# all pairs of eight seeds here, individual ranks move by as much as 9.35 while
+# the rank Spearman never drops below 0.992: the parameters wander, the science
+# does not. So the science is what gets asserted, exactly as scikit-bio's own
+# soils test does.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE sx AS SELECT * FROM read_parquet('data/mmvec/soils_x.parquet');
+
+statement ok
+CREATE TABLE sy AS SELECT * FROM read_parquet('data/mmvec/soils_y.parquet');
+
+# ---------------------------------------------------------------------------
+# Fixture integrity, against the oracle's own record of the arrays scikit-bio
+# read. Every number below was carved from the oracle run that produced
+# test/cpp/mmvec_oracle.hpp's soils namespace (n_samples/d1/d2, sum_x, x_max,
+# sum_y, y_max), which in turn read the TSVs committed inside scikit-bio 0.7.3.
+#
+# This block earns its place by failing FIRST. Every biological claim below is a
+# statement about these two arrays; if a fixture were ever regenerated
+# differently, those claims would fail as a mysterious loss of signal somewhere
+# inside the fit. Here it fails as "the input is not the input any more".
+#
+# The sums are asserted exactly, not in a band: both tables hold integer-valued
+# counts and intensities whose totals (4.2e+05 and 1.3e+11) are far below 2^53,
+# so the sum is exact in double regardless of the order the rows arrive in.
+# ---------------------------------------------------------------------------
+
+query IIIIII
+SELECT (SELECT count(DISTINCT sample_id) FROM sx),
+       (SELECT count(DISTINCT feature_id) FROM sx),
+       (SELECT count(DISTINCT feature_id) FROM sy),
+       (SELECT count(*) FROM sx),
+       (SELECT count(*) FROM sy),
+       (SELECT count(*) FROM (SELECT DISTINCT sample_id FROM sx
+                              EXCEPT SELECT DISTINCT sample_id FROM sy));
+----
+19	466	85	4534	1609	0
+
+query IIII
+SELECT (SELECT sum(value) FROM sx), (SELECT max(value) FROM sx),
+       (SELECT sum(value) FROM sy), (SELECT max(value) FROM sy);
+----
+424846.0	6867.0	126840398123.0	3744201536.0
+
+# The focus organism has to be in the table for any of the biology below to mean
+# anything; a typo in the name would otherwise read as "zero positive ranks".
+query II
+SELECT count(*), count(DISTINCT sample_id) FROM sx WHERE feature_id = 'rplo 1 (Cyanobacteria)';
+----
+19	19
+
+# The 13 Microcoleus vaginatus metabolites from the mmvec soils notebook --
+# mmvec_oracle.hpp's kKnown13. Expected values, transcribed; never regenerated.
+statement ok
+CREATE TABLE known13 AS SELECT * FROM (VALUES
+  ('(3-methyladenine)'),
+  ('7-methyladenine'),
+  ('4-guanidinobutanoate'),
+  ('uracil'),
+  ('xanthine'),
+  ('hypoxanthine'),
+  ('(N6-acetyl-lysine)'),
+  ('cytosine'),
+  ('N-acetylornithine'),
+  ('succinate'),
+  ('adenosine'),
+  ('guanine'),
+  ('adenine')
+) v(feature_id);
+
+# mmvec_oracle.hpp's kCyanobacteriaTop10: the ten highest-ranked metabolites for
+# Cyanobacteria in the oracle run. A SET, deliberately -- see the top-10 block.
+statement ok
+CREATE TABLE cyano_top10 AS SELECT * FROM (VALUES
+  ('adenosine'),
+  ('adenine'),
+  ('(N6-acetyl-lysine)'),
+  ('4-guanidinobutanoate'),
+  ('isoleucine'),
+  ('leucine'),
+  ('cytosine'),
+  ('guanine'),
+  ('stearate'),
+  ('betaine')
+) v(feature_id);
+
+query II
+SELECT (SELECT count(*) FROM known13 WHERE feature_id NOT IN (SELECT feature_id FROM sy)),
+       (SELECT count(*) FROM cyano_top10 WHERE feature_id NOT IN (SELECT feature_id FROM sy));
+----
+0	0
+
+# ---------------------------------------------------------------------------
+# The fit. One latent dimension and 500 iterations are scikit-bio's own settings
+# for this dataset (mmvec_oracle.hpp: kNComponents = 1, kMaxIter = 500). No seed
+# is passed, so this also exercises the default-seed path a user would get.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE fit AS SELECT * FROM mmvec_fit('sx', 'sy', dimensions := 1, max_iter := 500);
+
+statement ok
+CREATE TABLE r AS SELECT * FROM mmvec_ranks('fit');
+
+# converged is FALSE, and that is the honest answer rather than a defect: 500
+# iterations is not enough for this objective, for either implementation. Pinned
+# so a change to the stopping rule cannot quietly start claiming otherwise, and
+# because users need to know that on real data the reference's own default
+# max_iter routinely stops early. This implementation needs about 2430 iterations
+# to reach a stationary point here.
+query II
+SELECT DISTINCT converged, n_iter FROM fit;
+----
+false	500
+
+# ---------------------------------------------------------------------------
+# Rank structure at real scale: 466 x 85 = 39610 pairs, every microbe against
+# every metabolite, none missing and none duplicated. The toy fixtures cannot
+# distinguish a genuine dense cross-product from an accidental one -- 8 x 6 is
+# small enough that several wrong constructions also produce 48 rows.
+# ---------------------------------------------------------------------------
+
+query III
+SELECT count(*), count(DISTINCT x_feature_id), count(DISTINCT y_feature_id) FROM r;
+----
+39610	466	85
+
+query I
+SELECT count(*) FROM (SELECT x_feature_id, y_feature_id FROM r GROUP BY ALL HAVING count(*) > 1);
+----
+0
+
+# Each row is a centred log-ratio over the 85 metabolites, so it sums to zero and
+# its probabilities sum to one. Absolute tolerances: the summands are O(5) and
+# O(1/85), so these are round-off floors rather than statements about the fit.
+# Measured 1.8e-13 and 1.1e-15.
+#
+# Do not delete this as redundant with the biology below. Removing the centring
+# step entirely was measured to leave every biological assertion in this file
+# passing unchanged -- 13/13 positive, identical top-10, identical Q^2 -- because
+# dropping it shifts each row by a constant, which moves neither the within-row
+# ordering nor the score. This is the only assertion here that catches it.
+query II
+SELECT max(abs(rank_sum)) < 1e-9, max(abs(prob_sum - 1)) < 1e-12 FROM (
+  SELECT sum(rank) AS rank_sum, sum(prob) AS prob_sum FROM r GROUP BY x_feature_id
+);
+----
+true	true
+
+# ---------------------------------------------------------------------------
+# THE BIOLOGY. Microcoleus vaginatus is the dominant primary producer in this
+# biocrust, and the published result is that it is positively associated with the
+# 13 exometabolites it is known to release. scikit-bio's own test asserts that at
+# least 11 of the 13 come out positive; this implementation gets all 13, from
+# every seed tried, as did all three of the oracle's inits.
+#
+# Asserted at 13 rather than at scikit-bio's >= 11 threshold on purpose. The
+# threshold is what the reference is willing to guarantee; 13 is what both
+# implementations actually do, and a regression from 13 to 12 is exactly the kind
+# of quiet degradation a >= 11 assertion would wave through.
+# ---------------------------------------------------------------------------
+
+query II
+SELECT count(*), count(*) FILTER (rank > 0)
+FROM r JOIN known13 k ON r.y_feature_id = k.feature_id
+WHERE r.x_feature_id = 'rplo 1 (Cyanobacteria)';
+----
+13	13
+
+# The ten highest-ranked metabolites, as a SET -- symmetric difference taken in
+# both directions and summed, so neither a missing nor an extra member can hide
+# behind the other. (Written as two counted EXCEPTs rather than one chained
+# expression: set operators are left-associative, so A EXCEPT B UNION ALL B
+# EXCEPT A collapses to B EXCEPT A and would assert only half of this.)
+#
+# Ten specific strings that came from outside this codebase, which makes this the
+# load-bearing assertion in the file: it can only pass if the fit really did
+# rediscover the reference implementation's answer.
+#
+# Order is NOT asserted, and that is measured rather than assumed. The top eight
+# come out in the same order from all eight seeds tried here, but positions 9 and
+# 10 are a near-tie (betaine 3.111 against stearate 3.080 at the default seed) and
+# they swap: every seed here puts betaine ninth, while the oracle's init put
+# stearate ninth. Asserting the order would be asserting the side of a coin flip.
+query I
+WITH actual AS (
+  SELECT y_feature_id FROM r WHERE x_feature_id = 'rplo 1 (Cyanobacteria)'
+  ORDER BY rank DESC LIMIT 10
+)
+SELECT (SELECT count(*) FROM (SELECT * FROM actual EXCEPT SELECT * FROM cyano_top10))
+     + (SELECT count(*) FROM (SELECT * FROM cyano_top10 EXCEPT SELECT * FROM actual));
+----
+0
+
+# ---------------------------------------------------------------------------
+# Q-SQUARED: A DOCUMENTED SANITY FLOOR, NOT A PARITY BAND. Do not tighten this
+# to the oracle's numbers.
+#
+# mmvec_oracle.hpp records kQ2Low = 0.21639 / kQ2High = 0.21733 from scikit-bio's
+# three inits. This implementation measures 0.17457 to 0.21770 across eight seeds
+# -- straddling that range on both sides, since seed 6 scores ABOVE scikit-bio's
+# best. The two are not disagreeing: neither has converged at 500 iterations, so
+# each is reporting wherever its line search happened to stop, and three samples
+# of that distribution are a sample, not a bound. Run from an identical starting
+# point, this implementation reaches a LOWER final loss than scipy's L-BFGS-B on
+# four of the five fixture/start combinations tested.
+#
+# So the assertion is the one that is actually justified: the model predicts the
+# data substantially better than each sample's own mean community does (Q^2 > 0),
+# by a wide margin, and does not somehow predict it perfectly -- which would mean
+# the score had stopped measuring prediction. The bounds sit about 14% outside the
+# extremes measured over eight seeds.
+# ---------------------------------------------------------------------------
+
+query II
+SELECT q_squared > 0.15, q_squared < 0.25 FROM mmvec_score('fit', 'sx', 'sy');
+----
+true	true
+
+# ---------------------------------------------------------------------------
+# SEED ROBUSTNESS -- the claim the oracle actually makes about this fixture.
+# Three more inits, chosen as the extremes of the eight measured rather than for
+# convenience: seed 3 gives the worst Q^2 seen (0.17457) and by far the hardest
+# starting point (780 objective evaluations for 500 iterations, against about 535
+# for every other seed), and seed 6 gives the best (0.21770). If the biology
+# survives those two it is not an artifact of a lucky draw.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE fit1 AS SELECT * FROM mmvec_fit('sx', 'sy', dimensions := 1, max_iter := 500, seed := 1);
+
+statement ok
+CREATE TABLE fit3 AS SELECT * FROM mmvec_fit('sx', 'sy', dimensions := 1, max_iter := 500, seed := 3);
+
+statement ok
+CREATE TABLE fit6 AS SELECT * FROM mmvec_fit('sx', 'sy', dimensions := 1, max_iter := 500, seed := 6);
+
+statement ok
+CREATE TABLE ranks_by_seed AS
+  SELECT 1 AS seed, * FROM mmvec_ranks('fit1')
+  UNION ALL SELECT 3, * FROM mmvec_ranks('fit3')
+  UNION ALL SELECT 6, * FROM mmvec_ranks('fit6');
+
+query III
+SELECT seed, count(*), count(*) FILTER (rank > 0)
+FROM ranks_by_seed s JOIN known13 k ON s.y_feature_id = k.feature_id
+WHERE s.x_feature_id = 'rplo 1 (Cyanobacteria)'
+GROUP BY seed ORDER BY seed;
+----
+1	13	13
+3	13	13
+6	13	13
+
+# Per-seed top-10 set equality, reported per seed so a failure names the init that
+# broke rather than just "something did".
+query II
+WITH actual AS (
+  SELECT seed, y_feature_id FROM (
+    SELECT seed, y_feature_id, row_number() OVER (PARTITION BY seed ORDER BY rank DESC) AS rn
+    FROM ranks_by_seed WHERE x_feature_id = 'rplo 1 (Cyanobacteria)'
+  ) WHERE rn <= 10
+), expected AS (
+  SELECT s.seed, t.feature_id AS y_feature_id
+  FROM (SELECT DISTINCT seed FROM ranks_by_seed) s, cyano_top10 t
+), diff AS (
+  (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+  UNION ALL
+  (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+)
+SELECT s.seed, (SELECT count(*) FROM diff WHERE diff.seed = s.seed)
+FROM (SELECT DISTINCT seed FROM ranks_by_seed) s ORDER BY s.seed;
+----
+1	0
+3	0
+6	0
+
+query II
+SELECT seed, q_squared > 0.15 AND q_squared < 0.25 FROM (
+  SELECT 1 AS seed, q_squared FROM mmvec_score('fit1', 'sx', 'sy')
+  UNION ALL SELECT 3, q_squared FROM mmvec_score('fit3', 'sx', 'sy')
+  UNION ALL SELECT 6, q_squared FROM mmvec_score('fit6', 'sx', 'sy')
+) ORDER BY seed;
+----
+1	true
+3	true
+6	true
+
+# The top-10 set surviving three more inits says the head of the distribution is
+# stable; it says nothing about the other 39600 pairs. Spearman over the FULL rank
+# matrix does, and it is the quantity the oracle measured across its own inits
+# (0.9981 and 0.9983). Seed 0 against seed 1 here gives 0.9972 -- the same regime,
+# reached from a different starting point, which is what "the parameters wander
+# but the science does not" has to mean if it is to mean anything.
+#
+# The individual ranks really do move: max |difference| between these two fits is
+# 4.24, against an oracle across-init spread of up to 4.32. Both directions are
+# asserted, so neither "it barely moved" nor "it moved wildly" passes unnoticed.
+# A failure of the LOWER bound is not necessarily a defect -- it would mean the
+# fits had become init-independent, i.e. convergence improved -- but it does mean
+# the set-and-correlation assertions above can and should then be tightened.
+#
+# That lower bound is load-bearing, and it is the ONLY assertion in this file that
+# is: making InitTheta ignore its seed was measured to pass all 59 other
+# assertions here, because every seeded fit then returns the same answer and a
+# constant sequence satisfies every stability claim above perfectly.
+query II
+WITH paired AS (
+  SELECT a.rank AS rank_a, b.rank AS rank_b
+  FROM r a JOIN ranks_by_seed b USING (x_feature_id, y_feature_id)
+  WHERE b.seed = 1
+), ranked AS (
+  SELECT rank() OVER (ORDER BY rank_a) AS ka, rank() OVER (ORDER BY rank_b) AS kb FROM paired
+)
+SELECT (SELECT corr(ka, kb) > 0.99 FROM ranked),
+       (SELECT max(abs(rank_a - rank_b)) BETWEEN 1.0 AND 8.0 FROM paired);
+----
+true	true
+
+# ===========================================================================
+# THE SECOND OPTIMIZER, ON REAL DATA
+#
+# Everything above uses L-BFGS. mmvec also ships Adam, which scikit-bio uses for
+# large problems, and until this point Adam has only ever been run at toy scale
+# (mmvec_fit.test, and the C++ T3 oracle parity test under injected minibatch
+# indices). Toy scale proves the arithmetic; it cannot show that Adam is USABLE.
+#
+# The claim worth testing is convergent validity: two optimizers with nothing in
+# common -- a quasi-Newton method with a line search, and stochastic minibatch
+# gradient descent with per-coordinate scaling -- should recover the same biology
+# from the same data. If they do, the result is a property of the model and the
+# data rather than of either search procedure.
+#
+# 200 epochs, which at soils' 4534 X nonzeros and the default batch_size of 50 is
+# 90 updates per epoch, 18000 in total, and costs about 0.5 s. Measured behaviour
+# across epoch counts, for anyone tuning this later:
+#
+#     epochs   updates    Q^2      13-positive   top-10 set
+#         10       900   -0.951        9 / 13    4 wrong
+#         50      4500   +0.073       13 / 13    exact
+#        200     18000   +0.203       13 / 13    exact
+#       1000     90000   +0.217       13 / 13    exact
+#
+# At 1000 epochs Adam reaches Q^2 0.21726 (unbiased) and 0.21713 (legacy), both
+# INSIDE scikit-bio's L-BFGS band of 0.21639-0.21733 -- a different optimizer,
+# from a different starting distribution, landing on the reference's answer. That
+# is the most striking number here and it is deliberately NOT asserted: it costs
+# 2.6 s per fit, and pinning a converged value to a four-digit band is the exact
+# mistake the Q^2 discussion above exists to prevent. 200 epochs is enough to
+# assert everything that matters, and the biology is already exact there.
+# ===========================================================================
+
+statement ok
+CREATE TABLE fit_adam AS
+SELECT * FROM mmvec_fit('sx', 'sy', dimensions := 1, max_iter := 200, optimizer := 'adam');
+
+statement ok
+CREATE TABLE r_adam AS SELECT * FROM mmvec_ranks('fit_adam');
+
+# max_iter is EPOCHS on this path, and each epoch runs floor(nnz / batch_size)
+# updates -- 4534 / 50 = 90, so 200 epochs is 18000. mmvec_fit.test pins that
+# mapping at toy scale, where the quotient is single-digit; this is the same rule
+# at a real nonzero count, which is where an off-by-one in the division would
+# actually cost minutes of compute.
+query I
+SELECT DISTINCT n_iter FROM fit_adam;
+----
+18000
+
+# The biology, from the other optimizer: all 13 positive, and the same top-10 SET
+# as L-BFGS produced -- compared against the same carved oracle list, not against
+# the L-BFGS run, so this is agreement with scikit-bio and not merely internal
+# consistency between two of our own code paths.
+query II
+SELECT count(*), count(*) FILTER (rank > 0)
+FROM r_adam a JOIN known13 k ON a.y_feature_id = k.feature_id
+WHERE a.x_feature_id = 'rplo 1 (Cyanobacteria)';
+----
+13	13
+
+query I
+WITH actual AS (
+  SELECT y_feature_id FROM r_adam WHERE x_feature_id = 'rplo 1 (Cyanobacteria)'
+  ORDER BY rank DESC LIMIT 10
+)
+SELECT (SELECT count(*) FROM (SELECT * FROM actual EXCEPT SELECT * FROM cyano_top10))
+     + (SELECT count(*) FROM (SELECT * FROM cyano_top10 EXCEPT SELECT * FROM actual));
+----
+0
+
+# A floor that only a genuinely converged Adam run clears: 200 epochs measures
+# 0.2027, while the under-trained 50-epoch run measures 0.073 and the 10-epoch
+# run is negative. So this discriminates "Adam converged" from "Adam ran".
+query I
+SELECT q_squared > 0.19 FROM mmvec_score('fit_adam', 'sx', 'sy');
+----
+true
+
+# ---------------------------------------------------------------------------
+# batch_norm, DEMONSTRATED rather than asserted away.
+#
+# The two modes scale the minibatch likelihood differently -- 'unbiased' by
+# sum(X)/batch_size, 'legacy' by n_samples/batch_size, which on this fixture is a
+# factor of 424846/19 = 22360.3 between them -- and neither scales the prior. So
+# they really do target different posteriors, and the question a user needs
+# answered is whether that reaches their conclusions. On real data it does not.
+#
+# First, that the scaling is what it claims to be. The fit relation's 'loss'
+# modality carries the optimizer's own loss curve, and its first entry is taken
+# at the shared theta0 before any update, so the ratio between modes is exactly
+# the ratio of the two batch-norm factors. Measured 22360.3158 against an
+# expected sum(X)/n_samples of 22360.3158; the residual 1e-9 is the prior, which
+# is added UNSCALED to both and so does not cancel -- a detail this assertion
+# would lose if it were written as an equality.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE fit_adam_legacy AS
+SELECT * FROM mmvec_fit('sx', 'sy', dimensions := 1, max_iter := 200, optimizer := 'adam',
+                        batch_norm := 'legacy');
+
+statement ok
+CREATE TABLE r_adam_legacy AS SELECT * FROM mmvec_ranks('fit_adam_legacy');
+
+query I
+SELECT abs(
+  (SELECT value FROM fit_adam WHERE modality = 'loss' AND axis = 1)
+  / (SELECT value FROM fit_adam_legacy WHERE modality = 'loss' AND axis = 1)
+  / ((SELECT sum(value) FROM sx) / 19.0) - 1
+) < 1e-6;
+----
+true
+
+# Second, what that costs in parameter space: the fitted values genuinely move,
+# by up to 1.20 against a largest parameter of 7.83 -- roughly 15%, not round-off.
+# Asserted as a range so that both "the modes silently became identical" and "one
+# of them diverged" fail. Note the NULL-safe join: the model relation keeps one
+# id column NULL per row by construction, and USING would drop every row.
+query I
+SELECT max(abs(a.value - b.value)) BETWEEN 0.2 AND 4.0
+FROM (SELECT * FROM fit_adam WHERE modality IN ('x', 'y')) a
+JOIN (SELECT * FROM fit_adam_legacy WHERE modality IN ('x', 'y')) b
+  ON a.modality = b.modality AND a.axis = b.axis
+ AND a.x_feature_id IS NOT DISTINCT FROM b.x_feature_id
+ AND a.y_feature_id IS NOT DISTINCT FROM b.y_feature_id;
+----
+true
+
+# Third, and the point of the whole block: none of that reaches the conclusions.
+# Same 13 positive, same top-10 set, and full-batch losses agreeing to 6.3e-8
+# relative -- because the likelihood dominates the objective by twelve orders of
+# magnitude on real counts (prior mass 3.8e+03 against a total of 8.0e+15), so
+# the directions in which the two posteriors disagree are directions the data is
+# nearly flat in. On toy fixtures, where the prior is a material fraction of the
+# objective, the two modes separate; that is mmvec_fit.test's job, not this one's.
+query III
+SELECT count(*) FILTER (rank > 0),
+       (SELECT count(*) FROM (
+          (SELECT y_feature_id FROM r_adam_legacy WHERE x_feature_id = 'rplo 1 (Cyanobacteria)'
+           ORDER BY rank DESC LIMIT 10)
+          EXCEPT SELECT feature_id FROM cyano_top10)),
+       (SELECT abs((SELECT DISTINCT final_loss FROM fit_adam)
+                 - (SELECT DISTINCT final_loss FROM fit_adam_legacy))
+             / (SELECT DISTINCT final_loss FROM fit_adam) < 1e-6)
+FROM r_adam_legacy a JOIN known13 k ON a.y_feature_id = k.feature_id
+WHERE a.x_feature_id = 'rplo 1 (Cyanobacteria)';
+----
+13	0	true

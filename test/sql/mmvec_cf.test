@@ -1,0 +1,249 @@
+# name: test/sql/mmvec_cf.test
+# description: mmvec runs the cystic fibrosis study at full scale -- 172 x 2720 x 462, 1256640 ranks -- and joins cleanly to its study metadata (always run; the fixtures are committed and the fit takes about 4.2 s)
+# group: [sql]
+
+require miint
+
+# The fixtures are parquet, and the sqllogictest runner does not autoload core
+# extensions; without this even bare read_parquet is not in the catalog.
+require parquet
+
+# ---------------------------------------------------------------------------
+# The SCALE fixture. soils (test/sql/mmvec_soils.test) proves the port
+# reproduces a published biological result; this one proves it survives real
+# dimensions -- 2720 microbes against 462 metabolites over 172 samples, a
+# 1256640-row rank matrix, and a three-dimensional latent space instead of one.
+#
+# Measured on the development machine: 4.2 s for the fit and 4.5 s for the whole
+# file, single-threaded. Recorded so that a large regression is visible rather
+# than merely annoying.
+#
+# THERE IS DELIBERATELY NO PER-PAIR BIOLOGICAL ASSERTION HERE, and that is a
+# measured decision, not an omission to be filled in later. The natural candidate
+# -- how many of the 20 expert-annotated metabolites rank positively against the
+# first Pseudomonas -- is simply not a stable quantity on this dataset. Five
+# observations of it, from the same code on the same data with nothing varying
+# but the starting point:
+#
+#     scikit-bio, init 20260804 ...  0 / 20
+#     this implementation, seed 0 .. 3 / 20
+#     scikit-bio, init 777 ........  7 / 20
+#     this implementation, seed 1 . 18 / 20
+#     this implementation, seed 2 . 18 / 20
+#
+# It spans nearly the entire range. The rank Spearman between scikit-bio's two
+# inits is only 0.453 -- against 0.998 on soils -- so at CF scale and 500
+# iterations the per-pair ranks are not yet determined by the data. scikit-bio
+# reached the same conclusion about its own implementation: its CF test is
+# @unittest.skip'ed, and the assertions inside it are mutually exclusive
+# (assertEqual(count, 19) followed by a dead assertGreaterEqual(count, 15), the
+# notebook's 19 having already been loosened to 15 "for reproducibility").
+#
+# That table is a comparison across STARTING POINTS, not across implementations,
+# and it should not be read as this port disagreeing with scikit-bio. Started
+# from scikit-bio's own theta0 -- the numpy seed 20260804 draw behind its 0/20 --
+# this implementation also returns 0/20, with all twenty ranks negative by a wide
+# margin (-0.41 to -8.56) rather than by a hair, and reaches a slightly LOWER
+# final loss than scipy's L-BFGS-B does from that same point (1.7093536e+15
+# against 1.7093651e+15). The two implementations agree; what differs between the
+# rows above is only which random draw each run began from.
+#
+# So this file asserts what IS determined: that the fixture is the study's data,
+# that the fit runs at this scale and produces a structurally sound rank matrix,
+# that it predicts substantially better than the per-sample mean, and that the
+# result joins to the study metadata without losing a single feature.
+#
+# Cross-init stability is NOT re-tested here -- mmvec_soils.test owns that claim,
+# on the fixture where it is meaningful, and re-running it here would double the
+# runtime to assert something this dataset cannot support anyway.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE cx AS SELECT * FROM read_parquet('data/mmvec/cf_x.parquet');
+
+statement ok
+CREATE TABLE cy AS SELECT * FROM read_parquet('data/mmvec/cf_y.parquet');
+
+statement ok
+CREATE TABLE mic AS SELECT * FROM read_parquet('data/mmvec/cf_microbe_meta.parquet');
+
+statement ok
+CREATE TABLE met AS SELECT * FROM read_parquet('data/mmvec/cf_metabolite_meta.parquet');
+
+# ---------------------------------------------------------------------------
+# Fixture integrity, against the oracle's record of the arrays scikit-bio read
+# (test/cpp/mmvec_oracle.hpp's cf namespace, and the oracle run behind it:
+# n_samples/d1/d2, sum_x, x_max, sum_y, y_max). As in mmvec_soils.test this block
+# exists to fail FIRST -- everything below is a claim about these two arrays, and
+# a drifted fixture should say so plainly rather than surface as a strange score.
+#
+# It matters more here than on soils. These fixtures were not read from files
+# scikit-bio ships: the CF TSVs were deleted upstream in scikit-bio PR #2448, so
+# data/mmvec/README.md documents how they were rebuilt from the original BIOMs.
+# The shape (172 x 2720 x 462) and the metadata counts (39, 20) reproducing
+# scikit-bio's documented numbers is the evidence that the reconstruction landed
+# on their data; these sums are the finer-grained version of that evidence.
+#
+# Exact equality, not a band: both tables are integer-valued and their totals
+# (1.2e+07 and 4.8e+09) are far below 2^53, so the sums are order-independent.
+# ---------------------------------------------------------------------------
+
+query IIIII
+SELECT (SELECT count(DISTINCT sample_id) FROM cx),
+       (SELECT count(DISTINCT feature_id) FROM cx),
+       (SELECT count(DISTINCT feature_id) FROM cy),
+       (SELECT count(*) FROM cx),
+       (SELECT count(*) FROM cy);
+----
+172	2720	462	9810	18429
+
+query IIII
+SELECT (SELECT sum(value) FROM cx), (SELECT max(value) FROM cx),
+       (SELECT sum(value) FROM cy), (SELECT max(value) FROM cy);
+----
+12142492.0	109043.0	4846132340.0	44242000.0
+
+# Both tables must cover the same 172 samples, checked in both directions: mmvec
+# pairs them by sample id, and a one-sided check would miss an extra sample on
+# whichever side went unchecked.
+query II
+SELECT (SELECT count(*) FROM (SELECT DISTINCT sample_id FROM cx
+                              EXCEPT SELECT DISTINCT sample_id FROM cy)),
+       (SELECT count(*) FROM (SELECT DISTINCT sample_id FROM cy
+                              EXCEPT SELECT DISTINCT sample_id FROM cx));
+----
+0	0
+
+# The study metadata, and the two counts scikit-bio documents for it. These are
+# what identify the fixture as the CF study rather than an approximation of it.
+query IIII
+SELECT (SELECT count(*) FROM mic), (SELECT count(*) FROM met),
+       (SELECT count(*) FROM mic WHERE taxon LIKE '%Pseudomonas%'),
+       (SELECT count(*) FROM met WHERE expert_annotation IS NOT NULL);
+----
+2720	462	39	20
+
+# ---------------------------------------------------------------------------
+# The fit. Three latent dimensions and 500 iterations are scikit-bio's settings
+# for this dataset (mmvec_oracle.hpp: kNComponents = 3, kMaxIter = 500). Fitted
+# once, at the default seed; every assertion below reads this one model.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE fit AS SELECT * FROM mmvec_fit('cx', 'cy', dimensions := 3, max_iter := 500);
+
+statement ok
+CREATE TABLE r AS SELECT * FROM mmvec_ranks('fit');
+
+# converged is FALSE here too, on a completely different dataset, dimensionality
+# and scale from soils -- which is what makes it a statement about real data
+# rather than about one fixture. Neither implementation reaches a stationary
+# point at the reference's own default max_iter, and M6's user documentation
+# needs to say so.
+query II
+SELECT DISTINCT converged, n_iter FROM fit;
+----
+false	500
+
+# ---------------------------------------------------------------------------
+# Scale. 2720 x 462 = 1256640 pairs, every microbe against every metabolite,
+# none missing and none duplicated -- two orders of magnitude past anything the
+# rest of the suite exercises, where an accidentally quadratic or truncating
+# emission would show up.
+# ---------------------------------------------------------------------------
+
+query III
+SELECT count(*), count(DISTINCT x_feature_id), count(DISTINCT y_feature_id) FROM r;
+----
+1256640	2720	462
+
+query I
+SELECT count(*) FROM (SELECT x_feature_id, y_feature_id FROM r GROUP BY ALL HAVING count(*) > 1);
+----
+0
+
+# Rows are centred log-ratios over the 462 metabolites, so each sums to zero and
+# its probabilities sum to one. Round-off floors, measured 1.6e-12 and 3.1e-15 --
+# both larger than soils' 1.8e-13 and 1.1e-15 because there are 5.4x as many
+# summands per row and the ranks span a wider range, which is the expected growth
+# and not drift.
+#
+# Keep this even though it looks like boilerplate. Removing the centring step was
+# measured (on soils, mmvec_soils.test) to leave every other assertion in that
+# file passing, because a per-row constant shift changes neither the within-row
+# ordering nor the score; the same is true here, where there is no ordering
+# assertion at all to notice it.
+query II
+SELECT max(abs(rank_sum)) < 1e-9, max(abs(prob_sum - 1)) < 1e-12 FROM (
+  SELECT sum(rank) AS rank_sum, sum(prob) AS prob_sum FROM r GROUP BY x_feature_id
+);
+----
+true	true
+
+# ---------------------------------------------------------------------------
+# Q-SQUARED: A DOCUMENTED SANITY FLOOR, NOT A PARITY BAND -- for the same reason
+# as soils, and with even more room. Do not tighten this to the oracle's numbers.
+#
+# mmvec_oracle.hpp records kQ2Low = 0.15668 / kQ2High = 0.15708 from scikit-bio's
+# two inits. This implementation measures 0.13412 to 0.15840 across eight seeds:
+#
+#     seed 0  0.15749    seed 4  0.13412
+#     seed 1  0.15732    seed 5  0.15767
+#     seed 2  0.15840    seed 6  0.14853
+#     seed 3  0.14794    seed 7  0.13412
+#
+# The oracle's two-init range sits INSIDE ours, which is what two samples of a
+# spread-out distribution look like. Nothing has converged at 500 iterations, so
+# each number records where a line search happened to stop. The bounds below sit
+# about 25% outside the measured extremes.
+# ---------------------------------------------------------------------------
+
+query II
+SELECT q_squared > 0.10, q_squared < 0.20 FROM mmvec_score('fit', 'cx', 'cy');
+----
+true	true
+
+# ---------------------------------------------------------------------------
+# THE METADATA JOIN, END TO END -- the thing a user actually does with a CF-scale
+# result, and the last step of the port that nothing else exercises.
+#
+# Totality first, in all four directions: every microbe in the ranks has a taxon,
+# every metabolite has an annotation row, and neither metadata table carries a
+# feature the fit did not see. A one-directional check would pass while silently
+# dropping features, which at this scale nobody would notice by eye -- and the
+# ids being joined are 150-character ASV sequences, so a truncation or a case
+# change would produce exactly that silent partial join.
+# ---------------------------------------------------------------------------
+
+query IIII
+SELECT (SELECT count(*) FROM (SELECT DISTINCT x_feature_id FROM r EXCEPT SELECT feature_id FROM mic)),
+       (SELECT count(*) FROM (SELECT feature_id FROM mic EXCEPT SELECT DISTINCT x_feature_id FROM r)),
+       (SELECT count(*) FROM (SELECT DISTINCT y_feature_id FROM r EXCEPT SELECT feature_id FROM met)),
+       (SELECT count(*) FROM (SELECT feature_id FROM met EXCEPT SELECT DISTINCT y_feature_id FROM r));
+----
+0	0	0	0
+
+# The join the study's analysis is built on: the 39 Pseudomonas microbes against
+# the 20 expert-annotated metabolites. 780 rank rows, no more and no fewer -- so
+# neither a duplicated metadata row (which would inflate it) nor a lost feature
+# (which would shrink it) can pass. WHICH pairs rank high is the quantity this
+# file refuses to assert; that they can all be found, and counted, is not.
+query III
+SELECT count(*), count(DISTINCT x_feature_id), count(DISTINCT y_feature_id)
+FROM r JOIN mic ON r.x_feature_id = mic.feature_id
+       JOIN met ON r.y_feature_id = met.feature_id
+WHERE mic.taxon LIKE '%Pseudomonas%' AND met.expert_annotation IS NOT NULL;
+----
+780	39	20
+
+# Every one of those 780 is a real number attached to a real pair. Stated as a
+# count of NULL or non-finite ranks, because "the join produced 780 rows" would
+# also be satisfied by 780 nulls.
+query I
+SELECT count(*) FROM r
+JOIN mic ON r.x_feature_id = mic.feature_id
+JOIN met ON r.y_feature_id = met.feature_id
+WHERE mic.taxon LIKE '%Pseudomonas%' AND met.expert_annotation IS NOT NULL
+  AND (rank IS NULL OR NOT isfinite(rank));
+----
+0
