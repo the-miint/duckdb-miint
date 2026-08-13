@@ -74,6 +74,7 @@
 #include <cluster_kmeans.hpp>
 #include <cluster_upgma.hpp>
 #include <community_distances.hpp>
+#include <pick_anchors.hpp>
 #include <deblur_table_function.hpp>
 #include <simulate_resemblance.hpp>
 #include <align_pairwise_wfa2_functions.hpp>
@@ -341,7 +342,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterProgressivePcoaFromUnifrac(loader);
 	RegisterPermanovaFromDistances(loader);
 	RegisterRarefyFeatureTable(loader);
-	RegisterPickAnchors(loader);
 #endif
 
 	AlignPairwiseWfa2ScoreFunction::Register(loader);
@@ -434,6 +434,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterCommunityDistances(loader);
 	RegisterClusterKmeans(loader);
 	RegisterClusterUpgma(loader);
+	RegisterPickAnchors(loader);
 
 #ifdef MIINT_HAS_HDF5
 	CopyBiomFunction::Register(loader);

@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <numeric>
+#include <set>
 #include <unordered_map>
 
 #include "catalog_utils.hpp"
@@ -288,6 +290,105 @@ DenseDistanceMatrix ReadDistanceTable(ClientContext &context, const std::string 
 	out.sample_ids = std::move(sample_ids);
 	out.n_samples = n;
 	out.sample_id_type = ids.sample_id_type;
+	return out;
+}
+
+CoordinateTable ReadCoordinateTable(ClientContext &context, const std::string &table_name,
+                                    const std::string &caller_name, int32_t n_dims) {
+	auto conn = MakeReadOnlyHelperConnection(context);
+	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+
+	// Schema probe via LIMIT 0 — surfaces missing columns or unsafe casts before
+	// any scan (mirrors ReadFeatureTable / EnumerateDistanceIds).
+	const std::string projection = "SELECT sample_id::VARCHAR, axis::INTEGER, coordinate::DOUBLE FROM " + qname;
+	auto probe = conn.Query(projection + " LIMIT 0");
+	if (probe->HasError()) {
+		throw InvalidInputException(
+		    "%s: coordinate-table '%s' must expose (sample_id, axis INTEGER, coordinate DOUBLE): %s", caller_name,
+		    table_name, probe->GetError());
+	}
+
+	CoordinateTable out;
+	{
+		auto cols = GetTableOrViewColumns(context, table_name, "coordinate-table");
+		for (idx_t i = 0; i < cols.names.size(); ++i) {
+			if (StringUtil::Lower(cols.names[i]) == "sample_id") {
+				out.sample_id_type = ResolveSampleIdOutputType(cols.types[i]);
+				break;
+			}
+		}
+	}
+
+	auto result = conn.Query(projection);
+	if (result->HasError()) {
+		throw InvalidInputException("%s: failed to read coordinate-table '%s': %s", caller_name, table_name,
+		                            result->GetError());
+	}
+
+	// (sample_id, axis) -> coordinate, dropping NULLs. std::map keeps the axis set
+	// sorted ascending and the sample ids lexicographic, which is what makes the
+	// resulting row order a function of the data rather than of scan order.
+	std::map<std::string, std::map<int32_t, double>> by_sample;
+	std::set<int32_t> axes_seen;
+	auto &materialized = result->Cast<MaterializedQueryResult>();
+	while (auto chunk = materialized.Fetch()) {
+		const idx_t n = chunk->size();
+		if (n == 0) {
+			break;
+		}
+		UnifiedVectorFormat sid_u, axis_u, coord_u;
+		chunk->data[0].ToUnifiedFormat(n, sid_u);
+		chunk->data[1].ToUnifiedFormat(n, axis_u);
+		chunk->data[2].ToUnifiedFormat(n, coord_u);
+		auto sid_data = UnifiedVectorFormat::GetData<string_t>(sid_u);
+		auto axis_data = UnifiedVectorFormat::GetData<int32_t>(axis_u);
+		auto coord_data = UnifiedVectorFormat::GetData<double>(coord_u);
+		for (idx_t i = 0; i < n; ++i) {
+			const auto si = sid_u.sel->get_index(i);
+			const auto ai = axis_u.sel->get_index(i);
+			const auto ci = coord_u.sel->get_index(i);
+			if (!sid_u.validity.RowIsValid(si) || !axis_u.validity.RowIsValid(ai) || !coord_u.validity.RowIsValid(ci)) {
+				continue;
+			}
+			const std::string sid = sid_data[si].GetString();
+			const int32_t axis = axis_data[ai];
+			if (!by_sample[sid].emplace(axis, coord_data[ci]).second) {
+				throw InvalidInputException("%s: coordinate-table '%s' has duplicate (sample_id='%s', axis=%d); "
+				                            "pass a single-iteration coordinate table",
+				                            caller_name, table_name, sid, axis);
+			}
+			axes_seen.insert(axis);
+		}
+	}
+
+	// Axis order: ascending, optionally capped to the leading n_dims.
+	out.axes.assign(axes_seen.begin(), axes_seen.end());
+	if (n_dims > 0 && static_cast<size_t>(n_dims) < out.axes.size()) {
+		out.axes.resize(static_cast<size_t>(n_dims));
+	}
+	out.n_samples = static_cast<uint32_t>(by_sample.size());
+	out.n_dims = static_cast<uint32_t>(out.axes.size());
+	if (out.n_dims == 0) {
+		throw InvalidInputException("%s: coordinate-table '%s' has no coordinates", caller_name, table_name);
+	}
+
+	// Dense n x d matrix in sorted-sample-id order; every used axis must be present
+	// for every sample, so a ragged table is an error rather than a hole read as 0.
+	out.points.resize(static_cast<size_t>(out.n_samples) * out.n_dims);
+	out.sample_ids.reserve(out.n_samples);
+	uint32_t row = 0;
+	for (auto &sample : by_sample) {
+		out.sample_ids.push_back(sample.first);
+		for (uint32_t j = 0; j < out.n_dims; ++j) {
+			auto it = sample.second.find(out.axes[j]);
+			if (it == sample.second.end()) {
+				throw InvalidInputException("%s: sample '%s' is missing a coordinate for axis %d", caller_name,
+				                            sample.first, out.axes[j]);
+			}
+			out.points[static_cast<size_t>(row) * out.n_dims + j] = it->second;
+		}
+		++row;
+	}
 	return out;
 }
 

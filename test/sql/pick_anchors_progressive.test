@@ -1,0 +1,70 @@
+# name: test/sql/pick_anchors_progressive.test
+# description: pick_anchors feeding `anchors :=` on both progressive PCoA functions — the pipeline the docs show, guarded because it needs the UniFrac feature.
+# group: [sql]
+
+#
+# Split out of pick_anchors.test deliberately: DuckDB's sqllogictest processes
+# `require-env` while PARSING, so a guard placed part-way down a file skips the
+# WHOLE file, not just the statements after it. Keeping the composition tests
+# here is what lets the selection rules themselves stay verified on builds
+# without UniFrac.
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+
+statement ok
+CREATE TABLE tree AS SELECT * FROM read_newick('data/unifrac/gg_otu_tree.nwk');
+
+statement ok
+CREATE TABLE ft AS
+SELECT 's' || s AS sample_id, 'GG_OTU_' || (f + 1) AS feature_id, (1 + (s * 7 + f * 13) % 11)::DOUBLE AS value
+FROM range(40) t(s), range(5) u(f);
+
+statement ok
+CREATE TABLE ft_d AS
+SELECT sample_a, sample_b, distance FROM unifrac_distances('ft', 'tree', variant := 'weighted_normalized');
+
+# The realistic pipeline, and the one the docs show: ordinate a candidate subset,
+# select anchors from those coordinates, then anchor the progressive run on them.
+statement ok
+CREATE TABLE cand AS SELECT sample_id, axis, coordinate FROM pcoa('ft_d', n_dims := 3, seed := 42);
+
+# A table function's named parameter cannot contain a subquery ("Binder Error: Table
+# function cannot contain subqueries"), so the anchor list is passed through a
+# variable. This is the idiomatic hand-off and the one the docs show.
+statement ok
+SET VARIABLE anch = (SELECT list(sample_id) FROM pick_anchors('cand', n_anchors := 15, seed := 42));
+
+# feed the selected anchors straight into the UniFrac progressive path
+query I
+SELECT count(*) FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized',
+    n_dims := 3, batch_size := 12, seed := 42, threads := 1, anchors := getvariable('anch'));
+----
+120
+
+# and into the distances path
+query I
+SELECT count(*) FROM progressive_pcoa_from_distances('ft_d', n_dims := 3, batch_size := 12, seed := 42,
+    anchors := getvariable('anch'));
+----
+120
+
+# a run anchored this way is a real ordination, not merely accepted: it still
+# reproduces the full unifrac_pcoa up to a similarity transform
+statement ok
+CREATE TABLE full_ord AS
+SELECT sample_id, axis, coordinate
+FROM unifrac_pcoa('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, seed := 42);
+
+statement ok
+CREATE TABLE prog_strat AS
+SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_unifrac('ft', 'tree',
+    variant := 'weighted_normalized', n_dims := 3, batch_size := 12, seed := 42, threads := 1,
+    anchors := getvariable('anch'));
+
+query T
+SELECT DISTINCT m2 < 0.05 FROM procrustes('full_ord', 'prog_strat', permutations := 0);
+----
+true

@@ -1370,6 +1370,7 @@ set(EXTENSION_SOURCES
     src/community_distances.cpp
     src/cluster_kmeans.cpp
     src/cluster_upgma.cpp
+    src/pick_anchors.cpp
     # Generic (UniFrac-independent) table readers, and the beta-diversity /
     # ordination wrappers that use them. Always compiled: nothing here links
     # libssu or libskbb.
@@ -1377,6 +1378,7 @@ set(EXTENSION_SOURCES
     src/community_distances_function.cpp
     src/cluster_kmeans_function.cpp
     src/cluster_upgma_function.cpp
+    src/pick_anchors_function.cpp
     src/per_sample_table_function.cpp
     src/id_column_codec.cpp
     src/extract_linked_amplicon.cpp
@@ -1438,7 +1440,6 @@ if(MIINT_ENABLE_UNIFRAC)
         src/unifrac_faith_pd_function.cpp
         src/unifrac_distances_function.cpp
         src/rarefy_feature_table_function.cpp
-        src/pick_anchors_function.cpp
         src/progressive_pcoa_core.cpp)
 endif()
 
@@ -1794,6 +1795,8 @@ set(TEST_SOURCES
     test/cpp/test_ClusterKmeans.cpp
     src/cluster_upgma.cpp
     test/cpp/test_ClusterUpgma.cpp
+    src/pick_anchors.cpp
+    test/cpp/test_PickAnchors.cpp
     src/Minimap2Aligner.cpp
     test/cpp/test_Minimap2Aligner.cpp
     test/cpp/test_AlignBowtie2Sharded.cpp

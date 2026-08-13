@@ -121,6 +121,42 @@ DistanceRelationIds EnumerateDistanceIds(ClientContext &context, const std::stri
 DenseDistanceMatrix ReadDistanceTable(ClientContext &context, const std::string &table_name,
                                       const std::string &caller_name);
 
+// A dense point cloud materialized from a coordinate relation in pcoa's long
+// form (`sample_id, axis, coordinate`) — the shape every ordination in this
+// extension emits, and the input contract shared by `cluster_kmeans` and
+// `pick_anchors`. Both consume ordination coordinates and neither needs a
+// distance matrix, so both are linear in the number of samples.
+struct CoordinateTable {
+	std::vector<double> points;          // n_samples * n_dims, row-major
+	std::vector<std::string> sample_ids; // lexicographically sorted, parallel to `points`' rows
+	std::vector<int32_t> axes;           // the axis labels actually used, ascending
+	uint32_t n_samples = 0;
+	uint32_t n_dims = 0;
+	// Mirrored from sample_id's input column (BIGINT/UUID → same, else VARCHAR);
+	// see ResolveSampleIdOutputType.
+	LogicalType sample_id_type = LogicalType::VARCHAR;
+};
+
+// Read the user-named coordinate relation into a dense point cloud. The relation
+// must expose `(sample_id, axis INTEGER, coordinate DOUBLE)` — any sample_id type
+// castable to VARCHAR (mirrors ReadFeatureTable's probe-then-cast approach).
+//
+// Rows with a NULL sample_id, axis, or coordinate are skipped. Sample ids are
+// sorted lexicographically (the dictionary convention shared with
+// ReadDistanceTable and UnifracSupportBiomView::FromCoo) so a caller's output
+// row order is a function of the data alone.
+//
+// `n_dims <= 0` uses every axis present; a positive value keeps the leading
+// `n_dims` axes by ascending axis label and drops the rest, which is how a caller
+// restricts an ordination to its leading axes without reshaping the input.
+//
+// Fails loud (InvalidInputException prefixed with `caller_name`) on a duplicate
+// `(sample_id, axis)` — which would mean a multi-iteration coordinate table
+// silently averaged into one cloud — on a sample missing one of the used axes,
+// and on a relation with no coordinates at all.
+CoordinateTable ReadCoordinateTable(ClientContext &context, const std::string &table_name,
+                                    const std::string &caller_name, int32_t n_dims);
+
 // Resolve the SQL type that a mirrored sample-id output column should carry.
 // BIGINT and UUID are mirrored (so results join back to typed metadata without
 // a cast — parity with align_minimap2); every other input type collapses to

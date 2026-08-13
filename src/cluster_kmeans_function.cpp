@@ -7,19 +7,16 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/table_function.hpp"
-#include "duckdb/main/connection.hpp"
-#include "duckdb/main/database.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include "duckdb/main/query_result.hpp"
 
 #include <algorithm>
-#include <map>
 #include <stdexcept>
 
 namespace duckdb {
 
 namespace {
 
+using unifrac_internal::ReadCoordinateTable;
 using unifrac_internal::ResolveSampleIdOutputType;
 
 struct ClusterKmeansBindData : public TableFunctionData {
@@ -98,103 +95,25 @@ unique_ptr<GlobalTableFunctionState> ClusterKmeansInitGlobal(ClientContext &cont
 	auto gstate = make_uniq<ClusterKmeansGlobalState>();
 	gstate->sample_id_type = data.sample_id_type;
 
-	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(data.table_name);
-	auto probe = conn.Query("SELECT sample_id::VARCHAR, axis::INTEGER, coordinate::DOUBLE FROM " + qname + " LIMIT 0");
-	if (probe->HasError()) {
-		throw InvalidInputException(
-		    "cluster_kmeans: coordinate-table '%s' must expose (sample_id, axis INTEGER, coordinate DOUBLE): %s",
-		    data.table_name, probe->GetError());
-	}
-	auto result = conn.Query("SELECT sample_id::VARCHAR, axis::INTEGER, coordinate::DOUBLE FROM " + qname);
-	if (result->HasError()) {
-		throw InvalidInputException("cluster_kmeans: failed to read coordinate-table '%s': %s", data.table_name,
-		                            result->GetError());
-	}
-
-	// Collect (sample_id, axis) -> coordinate, dropping NULLs. std::map keeps the
-	// axis set sorted ascending; sample ids sorted lexicographically below.
-	std::map<std::string, std::map<int32_t, double>> bysample;
-	std::map<int32_t, bool> axis_seen;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
-	while (auto chunk = materialized.Fetch()) {
-		const idx_t rn = chunk->size();
-		if (rn == 0) {
-			break;
-		}
-		UnifiedVectorFormat s_u, a_u, c_u;
-		chunk->data[0].ToUnifiedFormat(rn, s_u);
-		chunk->data[1].ToUnifiedFormat(rn, a_u);
-		chunk->data[2].ToUnifiedFormat(rn, c_u);
-		auto s_d = UnifiedVectorFormat::GetData<string_t>(s_u);
-		auto a_d = UnifiedVectorFormat::GetData<int32_t>(a_u);
-		auto c_d = UnifiedVectorFormat::GetData<double>(c_u);
-		for (idx_t i = 0; i < rn; ++i) {
-			const auto si = s_u.sel->get_index(i);
-			const auto ai = a_u.sel->get_index(i);
-			const auto ci = c_u.sel->get_index(i);
-			if (!s_u.validity.RowIsValid(si) || !a_u.validity.RowIsValid(ai) || !c_u.validity.RowIsValid(ci)) {
-				continue;
-			}
-			const std::string sid = s_d[si].GetString();
-			const int32_t axis = a_d[ai];
-			auto &am = bysample[sid];
-			if (!am.emplace(axis, c_d[ci]).second) {
-				throw InvalidInputException(
-				    "cluster_kmeans: coordinate-table '%s' has duplicate (sample_id='%s', axis=%d); "
-				    "pass a single-iteration coordinate table",
-				    data.table_name, sid, axis);
-			}
-			axis_seen[axis] = true;
-		}
-	}
-
-	const uint32_t n = static_cast<uint32_t>(bysample.size());
-	if (n < static_cast<uint32_t>(data.k)) {
-		throw InvalidInputException("cluster_kmeans: k (%d) must be <= number of samples (%u)", data.k, n);
-	}
-
-	// Axis order: ascending; optionally capped to the first n_dims axes.
-	std::vector<int32_t> axes;
-	axes.reserve(axis_seen.size());
-	for (auto &kv : axis_seen) {
-		axes.push_back(kv.first);
-	}
-	if (data.n_dims > 0 && static_cast<size_t>(data.n_dims) < axes.size()) {
-		axes.resize(static_cast<size_t>(data.n_dims));
-	}
-	const uint32_t d = static_cast<uint32_t>(axes.size());
-	if (d == 0) {
-		throw InvalidInputException("cluster_kmeans: coordinate-table '%s' has no coordinates", data.table_name);
-	}
-
-	// Dense n x d point matrix in sorted-sample-id order; every used axis must be
-	// present for every sample.
-	std::vector<double> points(static_cast<size_t>(n) * d);
-	std::vector<std::string> sample_ids;
-	sample_ids.reserve(n);
-	uint32_t si = 0;
-	for (auto &sp : bysample) {
-		sample_ids.push_back(sp.first);
-		for (uint32_t j = 0; j < d; ++j) {
-			auto it = sp.second.find(axes[j]);
-			if (it == sp.second.end()) {
-				throw InvalidInputException("cluster_kmeans: sample '%s' is missing a coordinate for axis %d", sp.first,
-				                            axes[j]);
-			}
-			points[static_cast<size_t>(si) * d + j] = it->second;
-		}
-		++si;
+	// ReadCoordinateTable validates the (sample_id, axis, coordinate) schema, caps
+	// the axes to the leading n_dims, rejects duplicate (sample_id, axis) pairs and
+	// ragged samples, and hands back a dense row-major cloud in
+	// lexicographically-sorted sample-id order.
+	auto coords = ReadCoordinateTable(context, data.table_name, "cluster_kmeans", data.n_dims);
+	if (coords.n_samples < static_cast<uint32_t>(data.k)) {
+		throw InvalidInputException("cluster_kmeans: k (%d) must be <= number of samples (%u)", data.k,
+		                            coords.n_samples);
 	}
 
 	miint::KMeansResult res;
 	try {
-		res = miint::KMeans(points, n, d, data.k, data.seed, data.max_iter, data.n_init);
+		res = miint::KMeans(coords.points, coords.n_samples, coords.n_dims, data.k, data.seed, data.max_iter,
+		                    data.n_init);
 	} catch (const std::invalid_argument &e) {
 		throw InvalidInputException("%s", e.what());
 	}
 
-	gstate->sample_ids = std::move(sample_ids);
+	gstate->sample_ids = std::move(coords.sample_ids);
 	gstate->assignments = std::move(res.assignments);
 	return std::move(gstate);
 }

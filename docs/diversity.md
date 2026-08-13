@@ -11,7 +11,7 @@ Methods to estimate alpha and beta diversity, and supporting statistics.
 - [UniFrac algorithm variants](#unifrac-algorithm-variants) - Detail on different UniFrac algorithms and how to specify them.
 - [Rarefaction](#rarefaction) - Rarefaction detail with UniFrac and Faith PD.
 - [Rarefy a feature table](#rarefy-a-feature-table) - produce an even-depth feature table as a standalone result
-- [Pick anchors](#pick-anchors) - greedy farthest-point subset selection (**not** for progressive PCoA anchors — see the measurement)
+- [Pick anchors](#pick-anchors) - subset selection from ordination coordinates: proportional stratified sampling (the measured best rule for progressive-PCoA anchors) or greedy farthest-point
 - [UniFrac distances](#unifrac-distances) - Condensed (pairwise) UniFrac distances in long form
 - [Community distances (non-phylogenetic)](#community-distances-non-phylogenetic) - taxon-based β-diversity (Bray-Curtis, Jaccard, Morisita-Horn, χ², Gower, …) from a feature table
 - [Beta-distance macros](#beta-distance-macros) - within/between-group distributions and k-nearest-neighbors over a distance table
@@ -91,28 +91,57 @@ Widths that happen to divide the work identically can coincidentally agree — i
 
 ### Pick anchors
 
-Select `n_anchors` samples from a condensed distance table by **greedy farthest-point (k-center)** selection, returning `(anchor_rank, sample_id)` in selection order.
+Select `n_anchors` of the samples in an **ordination coordinate table** — the `(sample_id, axis, coordinate)` long form emitted by [`pcoa`](#pcoa-from-a-distance-table) and [`unifrac_pcoa`](#unifrac-pcoa), the same contract [`cluster_kmeans`](#sample-clustering-k-means-and-upgma) consumes — returning `(anchor_rank, sample_id)` in selection order.
 
 ```sql
-SELECT * FROM pick_anchors('dcoo', n_anchors := 100) ORDER BY anchor_rank;
+-- ordinate a candidate subset, pick anchors from those coordinates, anchor the full run
+CREATE TABLE cand AS SELECT sample_id, axis, coordinate FROM pcoa('sub_dm', n_dims := 10, seed := 42);
+SET VARIABLE anch = (SELECT list(sample_id) FROM pick_anchors('cand', n_anchors := 1000, seed := 42));
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'unweighted',
+    n_dims := 10, seed := 42, anchors := getvariable('anch'));
 ```
 
-> **Do NOT use this to choose anchors for the progressive PCoA functions.** It was built for that and **measured to be much worse than the seeded random default** — 15× worse on real data. On the rarefied EMP 90 bp table (23,814 samples, `unweighted`, `n_dims := 10`, `n_anchors := 1000`, `batch_size := 1000`), procrustes M² against a full `unifrac_pcoa` at d=3 was **0.0113 for random anchors and 0.1745 for these**, drawn from an identical candidate pool so the rule is the only difference. Both of two random draws landed in 0.011–0.031, so 0.1745 is far outside ordinary draw-to-draw variance.
->
-> Why: [`progressive_pcoa_from_unifrac`](#progressive-pcoa-from-unifrac) builds its reference frame from a PCoA **of the anchors**, so the anchors' leading axes have to match the full ordination's leading axes. Random sampling gets that by being distributed like the data. Farthest-point instead maximizes mutual dissimilarity, which in a flat-spectrum space (unweighted UniFrac) selects points differing along many *low-variance* directions and rotates the frame away from the truth. A good reference frame must be **representative**, not merely **covering** — different objectives. (It is not simply outlier-picking: mean distance-to-all was 0.869 for these anchors vs 0.861 for random, against a pool mean of 0.862.)
+Working from coordinates rather than from a distance matrix is what makes this usable at scale: both rules are **linear in the number of samples**, so a 10M-sample selection needs an N×d table, not an N×N one.
 
-It is retained because farthest-point selection is a legitimate, well-studied rule for **diverse subset selection** generally — picking a maximally spread reference panel, a coverage-based subsample, or a diverse review set. Use it for those, not for anchoring.
+**Parameters:**
+- `coordinate_table` (VARCHAR): name of the relation exposing `(sample_id, axis INTEGER, coordinate DOUBLE)`
+- `n_anchors` (INTEGER, **required**): how many samples to select. No default — there is no defensible universal anchor count.
+- `method` (VARCHAR, default `'stratified'`): `'stratified'` or `'farthest_point'`; see below.
+- `seed` (BIGINT, default 0): salts the within-stratum draw. `'stratified'` only — `'farthest_point'` takes no seed.
+- `n_dims` (INTEGER, default 3): use the leading `n_dims` axes by ascending axis label; `0` uses every axis present. For `'stratified'` these are the axes the strata grid is built on; for `'farthest_point'` they are the axes distances are measured over.
+- `n_bins` (INTEGER, default 4): equal-frequency bins per axis, so the grid holds up to `n_bins ^ n_dims` strata (64 at the defaults). `'stratified'` only.
 
-**Parameters:** `distance_table` (VARCHAR) — a condensed `(sample_a, sample_b, distance)` relation (see [PCoA (from a distance table)](#pcoa-from-a-distance-table)); `n_anchors` (INTEGER, **required**).
+**Output:** `(anchor_rank INTEGER, sample_id)`; `sample_id` mirrors the input id type. Selection is **prefix-stable** under both methods: the first *m* of *k* anchors are exactly the *k = m* result, so you can pick a generous `k` once and trim.
 
-**Output:** `(anchor_rank INTEGER, sample_id)`; `sample_id` mirrors the input id type. Deterministic — no seed. Rank 0 is the most peripheral sample (largest total distance) and every tie breaks to the lexicographically smallest id, so a selection is a reproducible property of the data. Selection is **prefix-stable**: the first *m* of *k* anchors are exactly the *k = m* result, so you can pick a generous `k` once and trim.
+#### `method := 'stratified'` (default) — proportional stratified sampling
 
-**Cost:** builds the dense N×N matrix (subject to the same fail-loud memory guard as `pcoa`), then O(N·k). To pass the result into a function that takes `anchors :=`, hand it through a variable — a table function's named parameter cannot contain a subquery:
+Bin each of the leading `n_dims` axes into `n_bins` equal-frequency bins, take the resulting grid cell as the stratum, and draw from every stratum in proportion to its size. Within a stratum the order is a salted hash of the sample id, so the draw carries no geometric preference; across strata, samples are ordered by `(within-stratum rank) / (stratum size)`, so taking the first `k` draws proportionally and totals exactly `k`. Classic survey sampling — Neyman 1934, Cochran 1977 ch. 5.
 
-```sql
-SET VARIABLE anch = (SELECT list(sample_id) FROM pick_anchors('dcoo', n_anchors := 100));
-SELECT * FROM progressive_pcoa_from_distances('dcoo', anchors := getvariable('anch'), seed := 42);
-```
+**This is the measured best rule for progressive-PCoA anchors.** Four literature-backed rules were compared on the rarefied EMP 90 bp table (23,814 samples, `unweighted`, `n_anchors := 1000`, `batch_size := 1000`, `n_dims := 10`), scored by procrustes M² against a full `unifrac_pcoa` at d=3, all drawing from an identical candidate pool so the rule is the only difference:
+
+| rule | literature | M² vs the full ordination (d=3) |
+|---|---|---|
+| **proportional stratified** | survey sampling (Neyman 1934; Cochran 1977) | **0.0045** |
+| plain seeded random (the built-in default) | — | 0.0079 |
+| stratum medoids | k-medoids / PAM (Kaufman & Rousseeuw 1990) | 0.0176 |
+| leverage-proportional | CUR / column subset selection (Drineas & Mahoney) | 0.0195 |
+| farthest-point | k-center (Gonzalez 1985) | 0.1745 |
+
+Over five matched draws stratified beat random **1.74×** on the mean (0.00452 vs 0.00787) with **non-overlapping ranges** — stratified's worst draw (0.00604) was better than random's best (0.00707).
+
+The mechanism is worth stating, because it is what picks this rule out of the five: medoids, leverage and farthest-point each systematically prefer a *kind* of point — central, high-influence, extreme — and **all three lose to an unbiased draw**. [`progressive_pcoa_from_unifrac`](#progressive-pcoa-from-unifrac) builds its reference frame from a PCoA *of the anchors*, so the anchors' leading axes have to match the full ordination's, and any rule that biases *which* points are chosen rotates that frame away from the truth. Stratified sampling is the only one of the four that stays unbiased *within* a stratum and merely equalizes coverage *across* strata. So: don't bias which points are chosen, only reduce the lumpiness of where they land.
+
+Keep the number of non-empty strata well below `n_anchors` — that is what makes the allocation proportional. With far more strata than anchors the draw degenerates gracefully toward simple random sampling over the most-populated cells, which is the baseline, not a failure.
+
+#### `method := 'farthest_point'` — greedy k-center
+
+Repeatedly take the sample whose nearest already-selected neighbour is farthest away (Gonzalez 1985), a 2-approximation to minimizing the maximum distance from any sample to its nearest selected one. Deterministic and seedless: rank 0 is the most peripheral sample and every tie breaks to the lowest sorted id, so a selection is a reproducible property of the data. "Most peripheral" is the sample farthest from the centroid, which in Euclidean space is exactly the sample with the largest total squared distance to all others — the same rule a distance-matrix implementation reaches through row sums, at O(N·d) instead of O(N²·d).
+
+> **Do not use this for progressive-PCoA anchors** — that is what it was built for, and it measured **15× worse than the seeded random default** (0.1745 vs 0.0113 on the same pool; two random draws landed in 0.011–0.031, so this is far outside draw-to-draw variance). It is not simply outlier-picking: mean distance-to-all was 0.869 for these anchors against 0.861 for random and a 0.862 pool mean. A reference frame must be **representative**, not merely **covering**.
+
+It is kept because farthest-point selection is a legitimate, well-studied rule for **diverse subset selection** generally — a maximally spread reference panel, a coverage-based subsample, a diverse review set. Use it for those.
+
+**Cost:** `'stratified'` is O(N·d·log N); `'farthest_point'` is O(N·d) then O(N·k·d). Neither materializes a distance matrix. To pass the result into a function that takes `anchors :=`, hand it through a variable — a table function's named parameter cannot contain a subquery.
 
 ---
 
@@ -459,7 +488,7 @@ SELECT * FROM progressive_pcoa_from_unifrac('observations', 'tree',
 **Parameters:**
 - `feature_table` (VARCHAR): name of the feature relation exposing `(sample_id, feature_id, value)` (see [Feature table](#feature-table))
 - `tree` (VARCHAR): name of the tree relation (see [Tree](#tree))
-- `n_dims` (3), `n_anchors` (100), `batch_size` (1000), `seed` (-1), `threads` (0), `anchors`: as in [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table) — `n_anchors` must be in `[n_dims + 1, n_samples]`. `anchors := [...]` supplies the anchor set explicitly and takes precedence over `n_anchors`/`seed`; note the seed still seeds each block's ordination, so a seeded run is required for reproducibility even with explicit anchors. Prefer the seeded random default unless you have a specific reason — see the measurement under [Pick anchors](#pick-anchors) for why a spread-maximizing anchor set is a bad idea here.
+- `n_dims` (3), `n_anchors` (100), `batch_size` (1000), `seed` (-1), `threads` (0), `anchors`: as in [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table) — `n_anchors` must be in `[n_dims + 1, n_samples]`. `anchors := [...]` supplies the anchor set explicitly and takes precedence over `n_anchors`/`seed`; note the seed still seeds each block's ordination, so a seeded run is required for reproducibility even with explicit anchors. The seeded random default is a sound choice; the one rule measured to beat it is proportional stratified sampling via [`pick_anchors`](#pick-anchors), and that section also records which rules are *worse* than random and why.
 - `variant`, `variance_adjust`, `alpha`, `bypass_tips`, `normalize_sample_counts`: the UniFrac controls, identical to [`unifrac_pcoa`](#unifrac-pcoa)
 
 There is deliberately **no `subsample_depth`**: rarefaction and progressive alignment do not compose cleanly (each batch would rarefy independently against a different RNG draw). Rarefy upstream instead with [`rarefy_feature_table`](#rarefy-a-feature-table) and pass the resulting table here — worth doing, since unweighted UniFrac is strongly depth-sensitive and an uneven-depth table makes sequencing depth a covariate of the ordination.
@@ -869,6 +898,13 @@ evaluating systematic relationships", *University of Kansas Science Bulletin* 38
 1409-1438. · Rand, W.M. (1971) "Objective criteria for the evaluation of
 clustering methods", *Journal of the American Statistical Association* 66(336),
 846-850 (the Rand index used to score cluster recovery).
+
+**Subset selection.** Neyman, J. (1934) "On the two different aspects of the
+representative method", *Journal of the Royal Statistical Society* 97(4), 558-625.
+· Cochran, W.G. (1977) *Sampling Techniques*, 3rd ed., Wiley, ch. 5 (proportional
+stratified allocation, the default rule in [`pick_anchors`](#pick-anchors)). ·
+Gonzalez, T.F. (1985) "Clustering to minimize the maximum intercluster distance",
+*Theoretical Computer Science* 38, 293-306 (greedy farthest-point / k-center).
 
 **Ordination.** Torgerson, W.S. (1952) "Multidimensional scaling: I. Theory and
 method", *Psychometrika* 17, 401-419. · Gower, J.C. (1966) "Some distance
