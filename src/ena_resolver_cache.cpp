@@ -62,7 +62,7 @@ size_t ENAResolverCache::Size() {
 // study_accession so callers can tell which input accession a returned row belongs to
 // when querying by study.
 static constexpr const char *BATCH_FIELDS = "run_accession,sample_accession,experiment_accession,study_accession,"
-                                            "fastq_ftp,fastq_aspera,fastq_bytes,library_layout,"
+                                            "fastq_ftp,fastq_aspera,fastq_bytes,fastq_md5,library_layout,"
                                             "submitted_ftp,submitted_aspera,submitted_bytes,submitted_format";
 
 // Column name on a returned TSV row that matches the input accession for a given type.

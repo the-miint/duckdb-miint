@@ -183,6 +183,7 @@ unique_ptr<GlobalTableFunctionState> AlignmentSliceTableFunction::InitGlobal(Cli
 	// SendQuery streams chunks lazily — only one chunk in memory at a time.
 	auto &db = DatabaseInstance::GetDatabase(context);
 	gstate->conn = make_uniq<Connection>(db);
+	InheritTempObjects(context, *gstate->conn);
 	gstate->query_result = gstate->conn->SendQuery(data.select_query);
 
 	return gstate;

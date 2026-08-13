@@ -88,6 +88,7 @@ COPY (
 - Read orientation (forward/reverse) is considered separately via the [`alignment_is_read1()`](alignment_analysis.md#sam-flag-functions) flag — paired-end reads are handled automatically.
 - For better performance on large datasets, add a numeric index column and pass it as `sequence_id_field` instead of `read_id`.
 - Output row order is non-deterministic when `sample_id` is used (parallel per-sample execution). Use an explicit `ORDER BY` if stable ordering is required.
+- **`sample_id` mode cannot read a TEMP table or view.** Every other relation parameter in miint accepts `CREATE TEMP TABLE`/`CREATE TEMP VIEW` output, but the per-sample path builds a fixed-name temporary view on a private per-thread connection, which must stay isolated so parallel workers do not collide on that name. Materialize the source as an ordinary table (or a view in a schema) first. Tracked as #207.
 
 ### `sylph_index_create`
 
@@ -231,6 +232,7 @@ FROM sylph_profile('reads', '/refs/gtdb-r220-c200-dbv1.syldb',
 - Error if `syldb_path` cannot be opened, is corrupt, or is not a sylph `.syldb` file.
 - Error if `sample_id` is set but the named column does not exist on `source_table` or collides with an output column name.
 - IO error surfaces the underlying sylph diagnostic string (e.g., truncated database, unsupported version).
+- **`sample_id` mode cannot read a TEMP table or view.** Every other relation parameter in miint accepts `CREATE TEMP TABLE`/`CREATE TEMP VIEW` output, but the per-sample path builds a fixed-name temporary view on a private per-thread connection, which must stay isolated so parallel workers do not collide on that name. Materialize the source as an ordinary table (or a view in a schema) first. Tracked as #207.
 
 ## See also
 

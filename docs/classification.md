@@ -98,7 +98,7 @@ Classify sequences against a RYpe index, returning bucket assignments with confi
 **Behavior:**
 - A sequence can match multiple buckets (one row per match above threshold)
 - Sequences with no matches above the threshold produce no output rows
-- If the sequence table has a `sequence2` column, paired-end classification is used
+- Paired-end handling follows the **contents** of `sequence2`, not merely the presence of the column: the input is treated as paired only if at least one row has a non-NULL `sequence2`. This matters because `read_fastx` always emits a `sequence2` column, so single-end reads loaded the obvious way carry an all-NULL one — projecting it costs nothing, and an all-NULL `sequence2` is sized and classified exactly as if the column were absent
 - Works with both tables and views
 
 **Examples:**
@@ -155,7 +155,7 @@ Compute the log-ratio of classification scores between two single-bucket RYpe in
 **Behavior:**
 - Both indices must be single-bucket indices (multi-bucket indices are rejected)
 - Returns exactly one row per input sequence
-- If the sequence table has a `sequence2` column, paired-end classification is used
+- Paired-end handling follows the **contents** of `sequence2`, not merely the presence of the column: the input is treated as paired only if at least one row has a non-NULL `sequence2`. This matters because `read_fastx` always emits a `sequence2` column, so single-end reads loaded the obvious way carry an all-NULL one — projecting it costs nothing, and an all-NULL `sequence2` is sized and classified exactly as if the column were absent
 - Works with both tables and views
 - Swapping numerator and denominator negates the log_ratio (symmetry property)
 

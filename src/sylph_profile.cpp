@@ -39,6 +39,7 @@
 #include "sylph_profile.hpp"
 
 #include "SylphDatabase.hpp"
+#include "catalog_utils.hpp"
 #include "sylph.h"
 
 #include "duckdb/common/exception.hpp"
@@ -179,7 +180,7 @@ unique_ptr<FunctionData> SylphProfileTableFunction::Bind(ClientContext &context,
 	// Per-sample mode prepends a sample_id column to the output. DiscoverSamples
 	// validates the column, captures its type, and collects the distinct values.
 	if (data->has_sample_id) {
-		Connection conn(*context.db);
+		auto conn = MakeReadOnlyHelperConnection(context);
 		std::vector<std::string> reserved_lower;
 		reserved_lower.reserve(data->output_names.size());
 		for (auto &n : data->output_names) {

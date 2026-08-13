@@ -110,6 +110,19 @@ void Minimap2Aligner::InitOptions(const Minimap2Config &config, mm_idxopt_t &iop
 
 	// Coverage pre-filter threshold
 	mopt.min_chain_coverage = config.min_chain_coverage;
+
+	// High-occurrence minimizer filter (-f). Applied after mm_set_opt so it overrides the
+	// preset -- `sr` sets mid_occ=1000, max_occ=5000, which masks nearly every minimizer in a
+	// set of near-identical homologous sequences (#187). The three values were already put into
+	// minimap2's own representation at bind, so this is a straight assignment; mid_occ <= 0 is
+	// what makes mm_mapopt_update derive the threshold from mid_occ_frac.
+	if (config.occ_filter_set) {
+		mopt.mid_occ_frac = config.occ_mid_frac;
+		mopt.mid_occ = config.occ_mid;
+		if (config.occ_max >= 0) {
+			mopt.max_occ = config.occ_max;
+		}
+	}
 }
 
 // Static helper: load index from .mmi file
@@ -297,8 +310,13 @@ void Minimap2Aligner::align(const SequenceRecordBatch &queries, SAMRecordBatch &
 }
 
 void Minimap2Aligner::align_single(const std::string &read_id, const std::string &sequence, SAMRecordBatch &output) {
+	const size_t rows_before = output.size();
+
 	// Skip empty query sequences (minimap2 requires len > 0)
 	if (sequence.empty()) {
+		if (config_.include_unmapped) {
+			append_unmapped(read_id, -1, false, false, -1, 0, output);
+		}
 		return; // No alignments for empty query
 	}
 
@@ -345,6 +363,13 @@ void Minimap2Aligner::align_single(const std::string &read_id, const std::string
 		MM_FREE(regs[j].p);
 	}
 	MM_FREE(regs);
+
+	// Comparing against the row count taken on entry catches every way a query can end up with no
+	// row -- no seed chain, the min_chain_coverage prefilter, or every reg rejected by the rid
+	// bounds check above -- rather than just testing n_regs == 0 and missing the other two.
+	if (config_.include_unmapped && output.size() == rows_before) {
+		append_unmapped(read_id, -1, false, false, -1, 0, output);
+	}
 }
 
 void Minimap2Aligner::align_paired(const std::string &read_id, const std::string &sequence1,
@@ -411,6 +436,7 @@ void Minimap2Aligner::align_paired(const std::string &read_id, const std::string
 	// Process alignments for each segment
 	for (int seg = 0; seg < 2; seg++) {
 		const std::string &query_seq = (seg == 0) ? sequence1 : sequence2;
+		const size_t seg_rows_before = output.size();
 		int secondary_count = 0;
 
 		for (int j = 0; j < n_regs[seg]; j++) {
@@ -437,6 +463,13 @@ void Minimap2Aligner::align_paired(const std::string &read_id, const std::string
 			reg_to_sam(reg, read_id, query_seq, output, seg, mate_mapped[seg], mate_rev[seg], mate_rid[seg],
 			           mate_pos[seg], this_tlen);
 		}
+
+		// Per segment, not per query: R1 can align while R2 does not, and SAM represents that as
+		// two rows. mate_mapped[seg] is already computed from the other segment's primary, so the
+		// synthetic row's mate-unmapped bit stays truthful.
+		if (config_.include_unmapped && output.size() == seg_rows_before) {
+			append_unmapped(read_id, seg, mate_mapped[seg], mate_rev[seg], mate_rid[seg], mate_pos[seg], output);
+		}
 	}
 
 	// Free results (must use MM_FREE — minimap2 may use jemalloc allocator)
@@ -448,11 +481,78 @@ void Minimap2Aligner::align_paired(const std::string &read_id, const std::string
 	}
 }
 
+void Minimap2Aligner::append_unmapped(const std::string &read_id, int segment_idx, bool mate_mapped, bool mate_rev,
+                                      int32_t mate_rid, int32_t mate_pos, SAMRecordBatch &batch) {
+	const bool is_paired = (segment_idx >= 0);
+
+	uint16_t flags = 0x4; // Unmapped -- OutputSAMRecordBatch keys the NULL columns on this bit
+	if (is_paired) {
+		flags |= 0x1;                              // Paired
+		flags |= (segment_idx == 0) ? 0x40 : 0x80; // First / second in pair
+		if (!mate_mapped) {
+			flags |= 0x8; // Mate unmapped
+		} else if (mate_rev) {
+			// 0x20 is only meaningful when the mate actually mapped; reg_to_sam sets it the same way
+			flags |= 0x20; // Mate reverse strand
+		}
+	}
+
+	// Field order and count must match reg_to_sam exactly: SAMRecordBatch is a set of parallel
+	// vectors, so a missed push_back desynchronizes every later row rather than failing loudly.
+	// The placeholder values here are mostly not user-visible -- OutputSAMRecordBatch replaces
+	// reference/position/stop_position/mapq/cigar with SQL NULL for unmapped rows -- but they keep
+	// the vectors aligned and keep the batch valid if it is ever written out as SAM, where '*'
+	// and 0 are the correct sentinels.
+	batch.read_ids.push_back(read_id);
+	batch.flags.push_back(flags);
+	batch.references.push_back("*");
+	batch.positions.push_back(0);
+	batch.stop_positions.push_back(0);
+	batch.mapqs.push_back(0);
+	batch.cigars.push_back("*");
+
+	// A paired record whose mate IS mapped must carry the mate's RNEXT/PNEXT. Leaving '*'/0 there
+	// makes the record invalid -- Picard's ValidateSamFile rejects it ("MRNM should be set for
+	// paired reads") -- and destroys pair reconstruction after a coordinate sort, which relies on
+	// the unmapped mate sitting at its partner's coordinates.
+	if (is_paired && mate_mapped && mate_rid >= 0) {
+		batch.mate_references.push_back(get_reference_name(mate_rid));
+		batch.mate_positions.push_back(mate_pos);
+	} else {
+		batch.mate_references.push_back("*");
+		batch.mate_positions.push_back(0);
+	}
+
+	// TLEN is 0 by definition when either end is unplaced (SAM spec), which is always the case here.
+	batch.template_lengths.push_back(0);
+
+	// -1 is this batch's "tag absent" sentinel; SetAlignResultInt64Nullable turns it into NULL.
+	batch.tag_as_values.push_back(-1);
+	batch.tag_xs_values.push_back(-1);
+	batch.tag_ys_values.push_back(-1);
+	batch.tag_xn_values.push_back(-1);
+	batch.tag_xm_values.push_back(-1);
+	batch.tag_xo_values.push_back(-1);
+	batch.tag_xg_values.push_back(-1);
+	batch.tag_nm_values.push_back(-1);
+
+	// Likewise "" is the sentinel the nullable string setter reads as NULL.
+	batch.tag_yt_values.push_back(is_paired ? "UP" : "UU");
+	batch.tag_md_values.push_back("");
+	batch.tag_sa_values.push_back("");
+}
+
 void Minimap2Aligner::reg_to_sam(const mm_reg1_t *reg, const std::string &read_id, const std::string &query_seq,
                                  SAMRecordBatch &batch, int segment_idx, bool mate_mapped, bool mate_rev,
                                  int32_t mate_rid, int32_t mate_pos, int32_t tlen) {
 	bool is_paired = (segment_idx >= 0);
 	bool is_unmapped = (reg->rid < 0);
+
+	// NOTE: both callers `continue` on rid < 0, so is_unmapped is currently always false and the
+	// branches keyed on it below are unreachable. Left in place per Rule 3, but be aware it is
+	// load-bearing for something else now: OutputSAMRecordBatch nulls reference/position/cigar for
+	// any row with FLAG 0x4, on the premise that only include_unmapped's synthetic rows carry that
+	// bit. Relaxing either caller's rid check would extend those NULLs to ordinary output.
 
 	uint16_t flags = calculate_flags(reg, is_paired, segment_idx, mate_mapped, mate_rev, is_unmapped);
 	batch.read_ids.push_back(read_id);

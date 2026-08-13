@@ -1,0 +1,56 @@
+# name: test/sql/community_distances_parity.test
+# description: community_distances numeric parity vs committed scikit-bio / scipy-reduction goldens on a fixed feature-table fixture
+# group: [sql]
+
+# The goldens (metric, sample_a, sample_b, distance) were generated OFFLINE from
+# a committed feature-table fixture under data/simsurvey/.
+# For every one of the 8 metrics the generator asserts our formula equals a
+# scipy/scikit-bio primitive -- directly for bray_curtis/euclidean/jaccard/pearson
+# (scipy braycurtis/euclidean/jaccard/correlation), and via a documented algebraic
+# reduction for soergel/morisita_horn/chisq/gower (cityblock/sqeuclidean/seuclidean
+# transforms) -- then writes those values as the goldens. The generator itself is
+# NOT committed (scratchpad only). The fixture and goldens are committed, so this
+# test always runs. community_distances is
+# deterministic, so this is an exact numeric-parity check, not a statistical band.
+
+require miint
+
+statement ok
+CREATE TABLE betafix AS SELECT * FROM read_csv_auto('data/simsurvey/beta_distance_fixture.csv');
+
+statement ok
+CREATE TABLE beta_oracle AS SELECT * FROM read_csv_auto('data/simsurvey/beta_distance_oracle.csv');
+
+# Every metric's every pair must match the committed golden to within 1e-9 (double
+# vs double; distances are small). A FULL JOIN also catches any pair present in one
+# side but not the other (wrong pair count / orientation).
+statement ok
+CREATE TABLE mine AS
+  SELECT 'bray_curtis' AS metric, sample_a, sample_b, distance FROM community_distances('betafix','bray_curtis')
+  UNION ALL SELECT 'euclidean', sample_a, sample_b, distance FROM community_distances('betafix','euclidean')
+  UNION ALL SELECT 'jaccard', sample_a, sample_b, distance FROM community_distances('betafix','jaccard')
+  UNION ALL SELECT 'soergel', sample_a, sample_b, distance FROM community_distances('betafix','soergel')
+  UNION ALL SELECT 'morisita_horn', sample_a, sample_b, distance FROM community_distances('betafix','morisita_horn')
+  UNION ALL SELECT 'pearson', sample_a, sample_b, distance FROM community_distances('betafix','pearson')
+  UNION ALL SELECT 'chisq', sample_a, sample_b, distance FROM community_distances('betafix','chisq')
+  UNION ALL SELECT 'gower', sample_a, sample_b, distance FROM community_distances('betafix','gower');
+
+# 0 mismatches: same pair set, same distances. Tolerance is relative+absolute
+# (1e-9 * (1 + |gold|)) because the high-count s7/s8 samples make some euclidean
+# distances ~1e4, where a pure 1e-9 absolute bound is tighter than double ULP.
+query I
+SELECT count(*) FROM (
+  SELECT m.distance md, g.distance gd
+  FROM mine m FULL JOIN beta_oracle g
+    ON m.metric=g.metric AND m.sample_a=g.sample_a AND m.sample_b=g.sample_b
+  WHERE m.distance IS NULL OR g.distance IS NULL
+     OR abs(m.distance - g.distance) > 1e-9 * (1.0 + abs(g.distance))
+);
+----
+0
+
+# Sanity: the two sides cover the same number of (metric, pair) rows.
+query I
+SELECT (SELECT count(*) FROM mine) = (SELECT count(*) FROM beta_oracle);
+----
+true

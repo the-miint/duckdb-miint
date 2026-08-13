@@ -248,8 +248,72 @@ NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
 
 # Verify nullable string tags return NULL properly
 query TTT
-SELECT tag_yt, tag_md, tag_sa 
-FROM read_sam('data/sam/foo_has_header.sam') 
+SELECT tag_yt, tag_md, tag_sa
+FROM read_sam('data/sam/foo_has_header.sam')
 WHERE read_id = 'foo-1';
 ----
 NULL	NULL	NULL
+
+###############################################################################
+# MALFORMED RECORDS FAIL THE SCAN
+###############################################################################
+
+# WHY THIS MATTERS: sam_read1 returns -1 at end of stream but < -1 on a read error, and the
+# loop tested only `>= 0` -- so a malformed record ended the batch, and because the table
+# function calls read() again for the next batch, the scan RESUMED after it. The unparseable
+# record was silently dropped and the query succeeded.
+#
+# data/sam/malformed_record.sam is good1 / bad / good2, where `bad` has an empty CIGAR field.
+# It used to return good1 and good2 with exit 0. samtools rejects the same file outright:
+#   $ samtools view -c data/sam/malformed_record.sam   -> exit 1
+#   [E::read_ncigar] No CIGAR operations
+#   [W::sam_read1_sam] Parse error at line 4
+#   samtools view: error reading file "data/sam/malformed_record.sam"
+#
+# Silently returning a subset of a corrupt file is the worst available outcome: nothing
+# downstream can tell that records went missing.
+statement error
+SELECT count(*) FROM read_sam('data/sam/malformed_record.sam');
+----
+truncated or malformed
+
+# The line number must be reported, so the offending record can actually be found.
+statement error
+SELECT count(*) FROM read_sam('data/sam/malformed_record.sam');
+----
+at line 4
+
+# read_alignments shares the reader, so it must fail identically.
+statement error
+SELECT count(*) FROM read_alignments('data/sam/malformed_record.sam');
+----
+truncated or malformed
+
+# A well-formed file must still read to completion -- guards against turning end-of-stream
+# (-1) into an error along with the real failures (< -1).
+query I
+SELECT count(*) FROM read_sam('data/sam/foo_has_header.sam');
+----
+4
+
+# BAM corruption must fail loud too, and this is a DIFFERENT htslib return code, which is the whole
+# point of the test. sam_read1 reports -3 both for "this file's format holds no records" (an empty
+# or unidentifiable file, which must read as zero rows -- see test_SAMReader.cpp) and for genuine
+# per-record corruption once the format IS readable. Exempting the bare -3 code therefore swallowed
+# real BAM corruption; the check is gated on fp->format.format instead.
+#
+# data/sam/bad_tid.bam is a 3-record BAM whose first record's refID was patched to 99 against a
+# 1-reference header, which is sam_read1_bam's ERANGE/-3 path. samtools rejects the same file:
+#   $ samtools view -c data/sam/bad_tid.bam   -> exit 1
+#   samtools view: error reading file "data/sam/bad_tid.bam": Numerical result out of range
+statement error
+SELECT count(*) FROM read_sam('data/sam/bad_tid.bam');
+----
+truncated or malformed
+
+# No line number is claimed for BAM -- fp->lineno only tracks text SAM and is 0 here. Reporting
+# "at line 0" would be worse than reporting nothing.
+statement error
+SELECT count(*) FROM read_sam('data/sam/bad_tid.bam');
+----
+Failed to read SAM/BAM record: the file is truncated or malformed

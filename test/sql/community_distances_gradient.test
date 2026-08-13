@@ -1,0 +1,248 @@
+# name: test/sql/community_distances_gradient.test
+# description: Kuczynski-2010 Fig 2 gradient signatures via the EXACT paper metrics (chi-square / Euclidean / Gower) through simulate_gradient_otus -> community_distances -> pcoa
+# group: [sql]
+
+# Faithful reproduction of the paper's Fig-2 qualitative claims (not numeric
+# parity — the paper's exact seeds/replicate counts are unpublished). The
+# generative model is our shipped simulate_gradient_otus on the committed soil
+# abundance vector (D=1000 seqs/sample, equal depth), the distances are the
+# paper's exact metrics via community_distances, the ordination is classical
+# PCoA via pcoa, and the quality metric is |corr| of a sample's PC coordinate
+# vs its true gradient position. Equal per-sample depth means raw counts vs
+# relative abundance only rescale distances, which does not change the PCoA
+# shape or these correlations. Signatures verified seed-stable over 5 seeds; the
+# committed thresholds use seed=42 with margin. The noisy runs pin noise_type
+# explicitly so these thresholds cannot drift if the function's default changes
+# (the clean runs skip perturbation entirely, so noise_type is dead there).
+#
+# Paper Fig-2 claims encoded below:
+#   - every metric recovers the gradient on PC1 when clean; none escapes the
+#     characteristic arch (strong PC2-vs-position quadratic) -- incl. Euclidean;
+#   - chi-square is robust to per-sample noise (PC1 recovery stays high);
+#   - Gower is good with no noise but degrades sharply under it.
+#
+# NOTE: community_distances/pcoa take a table NAME (resolved over a separate
+# connection), so each stage is materialized as a real table, not a CTE.
+
+require miint
+
+# pcoa is registered only with the scikit-bio-binaries feature (MIINT_HAS_UNIFRAC).
+require-env UNIFRAC_AVAILABLE
+
+statement ok
+CREATE TABLE soil AS SELECT * FROM read_csv_auto('data/simsurvey/soil_abundances.csv');
+
+statement ok
+SET VARIABLE soil = (SELECT list(abund ORDER BY idx) FROM soil);
+
+# Per-(metric, noise) gradient-recovery quality, accumulated into one table so
+# the assertions read as cross-metric / cross-noise comparisons.
+statement ok
+CREATE TABLE gq(metric VARCHAR, noise DOUBLE, pc1_pearson DOUBLE, pc1_spearman DOUBLE, pc2_arch DOUBLE);
+
+# ===== chi-square, no noise =====
+statement ok
+CREATE OR REPLACE TABLE g AS SELECT * FROM simulate_gradient_otus(getvariable('soil'), 50, 1000, noise := 0.0, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE gf AS SELECT sample_id, otu_id AS feature_id, "count" AS value FROM g;
+
+statement ok
+CREATE OR REPLACE TABLE dd AS SELECT * FROM community_distances('gf', 'chisq');
+
+statement ok
+CREATE OR REPLACE TABLE pc AS SELECT * FROM pcoa('dd', n_dims := 3, seed := 42);
+
+statement ok
+INSERT INTO gq
+WITH pos AS (SELECT DISTINCT sample_id::VARCHAR sid, gradient_position gp FROM g),
+     a0 AS (SELECT sample_id sid, coordinate c FROM pc WHERE axis = 0),
+     a1 AS (SELECT sample_id sid, coordinate c FROM pc WHERE axis = 1),
+     j AS (SELECT p.sid, p.gp, a0.c c0, a1.c c1 FROM pos p JOIN a0 USING (sid) JOIN a1 USING (sid)),
+     r AS (SELECT gp, c0, c1, rank() OVER (ORDER BY gp) rgp, rank() OVER (ORDER BY c0) rc0 FROM j),
+     mg AS (SELECT avg(gp) v FROM j)
+SELECT 'chisq', 0.0,
+       abs((SELECT corr(c0, gp) FROM j)),
+       abs((SELECT corr(rc0::DOUBLE, rgp::DOUBLE) FROM r)),
+       abs((SELECT corr(c1, (gp - (SELECT v FROM mg)) * (gp - (SELECT v FROM mg))) FROM j));
+
+# ===== chi-square, noise 0.5 =====
+statement ok
+CREATE OR REPLACE TABLE g AS SELECT * FROM simulate_gradient_otus(getvariable('soil'), 50, 1000, noise := 0.5, noise_type := '+species', seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE gf AS SELECT sample_id, otu_id AS feature_id, "count" AS value FROM g;
+
+statement ok
+CREATE OR REPLACE TABLE dd AS SELECT * FROM community_distances('gf', 'chisq');
+
+statement ok
+CREATE OR REPLACE TABLE pc AS SELECT * FROM pcoa('dd', n_dims := 3, seed := 42);
+
+statement ok
+INSERT INTO gq
+WITH pos AS (SELECT DISTINCT sample_id::VARCHAR sid, gradient_position gp FROM g),
+     a0 AS (SELECT sample_id sid, coordinate c FROM pc WHERE axis = 0),
+     a1 AS (SELECT sample_id sid, coordinate c FROM pc WHERE axis = 1),
+     j AS (SELECT p.sid, p.gp, a0.c c0, a1.c c1 FROM pos p JOIN a0 USING (sid) JOIN a1 USING (sid)),
+     r AS (SELECT gp, c0, c1, rank() OVER (ORDER BY gp) rgp, rank() OVER (ORDER BY c0) rc0 FROM j),
+     mg AS (SELECT avg(gp) v FROM j)
+SELECT 'chisq', 0.5,
+       abs((SELECT corr(c0, gp) FROM j)),
+       abs((SELECT corr(rc0::DOUBLE, rgp::DOUBLE) FROM r)),
+       abs((SELECT corr(c1, (gp - (SELECT v FROM mg)) * (gp - (SELECT v FROM mg))) FROM j));
+
+# ===== Euclidean, no noise =====
+statement ok
+CREATE OR REPLACE TABLE g AS SELECT * FROM simulate_gradient_otus(getvariable('soil'), 50, 1000, noise := 0.0, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE gf AS SELECT sample_id, otu_id AS feature_id, "count" AS value FROM g;
+
+statement ok
+CREATE OR REPLACE TABLE dd AS SELECT * FROM community_distances('gf', 'euclidean');
+
+statement ok
+CREATE OR REPLACE TABLE pc AS SELECT * FROM pcoa('dd', n_dims := 3, seed := 42);
+
+statement ok
+INSERT INTO gq
+WITH pos AS (SELECT DISTINCT sample_id::VARCHAR sid, gradient_position gp FROM g),
+     a0 AS (SELECT sample_id sid, coordinate c FROM pc WHERE axis = 0),
+     a1 AS (SELECT sample_id sid, coordinate c FROM pc WHERE axis = 1),
+     j AS (SELECT p.sid, p.gp, a0.c c0, a1.c c1 FROM pos p JOIN a0 USING (sid) JOIN a1 USING (sid)),
+     r AS (SELECT gp, c0, c1, rank() OVER (ORDER BY gp) rgp, rank() OVER (ORDER BY c0) rc0 FROM j),
+     mg AS (SELECT avg(gp) v FROM j)
+SELECT 'euclidean', 0.0,
+       abs((SELECT corr(c0, gp) FROM j)),
+       abs((SELECT corr(rc0::DOUBLE, rgp::DOUBLE) FROM r)),
+       abs((SELECT corr(c1, (gp - (SELECT v FROM mg)) * (gp - (SELECT v FROM mg))) FROM j));
+
+# ===== Euclidean, noise 0.5 =====
+statement ok
+CREATE OR REPLACE TABLE g AS SELECT * FROM simulate_gradient_otus(getvariable('soil'), 50, 1000, noise := 0.5, noise_type := '+species', seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE gf AS SELECT sample_id, otu_id AS feature_id, "count" AS value FROM g;
+
+statement ok
+CREATE OR REPLACE TABLE dd AS SELECT * FROM community_distances('gf', 'euclidean');
+
+statement ok
+CREATE OR REPLACE TABLE pc AS SELECT * FROM pcoa('dd', n_dims := 3, seed := 42);
+
+statement ok
+INSERT INTO gq
+WITH pos AS (SELECT DISTINCT sample_id::VARCHAR sid, gradient_position gp FROM g),
+     a0 AS (SELECT sample_id sid, coordinate c FROM pc WHERE axis = 0),
+     a1 AS (SELECT sample_id sid, coordinate c FROM pc WHERE axis = 1),
+     j AS (SELECT p.sid, p.gp, a0.c c0, a1.c c1 FROM pos p JOIN a0 USING (sid) JOIN a1 USING (sid)),
+     r AS (SELECT gp, c0, c1, rank() OVER (ORDER BY gp) rgp, rank() OVER (ORDER BY c0) rc0 FROM j),
+     mg AS (SELECT avg(gp) v FROM j)
+SELECT 'euclidean', 0.5,
+       abs((SELECT corr(c0, gp) FROM j)),
+       abs((SELECT corr(rc0::DOUBLE, rgp::DOUBLE) FROM r)),
+       abs((SELECT corr(c1, (gp - (SELECT v FROM mg)) * (gp - (SELECT v FROM mg))) FROM j));
+
+# ===== Gower, no noise =====
+statement ok
+CREATE OR REPLACE TABLE g AS SELECT * FROM simulate_gradient_otus(getvariable('soil'), 50, 1000, noise := 0.0, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE gf AS SELECT sample_id, otu_id AS feature_id, "count" AS value FROM g;
+
+statement ok
+CREATE OR REPLACE TABLE dd AS SELECT * FROM community_distances('gf', 'gower');
+
+statement ok
+CREATE OR REPLACE TABLE pc AS SELECT * FROM pcoa('dd', n_dims := 3, seed := 42);
+
+statement ok
+INSERT INTO gq
+WITH pos AS (SELECT DISTINCT sample_id::VARCHAR sid, gradient_position gp FROM g),
+     a0 AS (SELECT sample_id sid, coordinate c FROM pc WHERE axis = 0),
+     a1 AS (SELECT sample_id sid, coordinate c FROM pc WHERE axis = 1),
+     j AS (SELECT p.sid, p.gp, a0.c c0, a1.c c1 FROM pos p JOIN a0 USING (sid) JOIN a1 USING (sid)),
+     r AS (SELECT gp, c0, c1, rank() OVER (ORDER BY gp) rgp, rank() OVER (ORDER BY c0) rc0 FROM j),
+     mg AS (SELECT avg(gp) v FROM j)
+SELECT 'gower', 0.0,
+       abs((SELECT corr(c0, gp) FROM j)),
+       abs((SELECT corr(rc0::DOUBLE, rgp::DOUBLE) FROM r)),
+       abs((SELECT corr(c1, (gp - (SELECT v FROM mg)) * (gp - (SELECT v FROM mg))) FROM j));
+
+# ===== Gower, noise 0.5 =====
+statement ok
+CREATE OR REPLACE TABLE g AS SELECT * FROM simulate_gradient_otus(getvariable('soil'), 50, 1000, noise := 0.5, noise_type := '+species', seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE gf AS SELECT sample_id, otu_id AS feature_id, "count" AS value FROM g;
+
+statement ok
+CREATE OR REPLACE TABLE dd AS SELECT * FROM community_distances('gf', 'gower');
+
+statement ok
+CREATE OR REPLACE TABLE pc AS SELECT * FROM pcoa('dd', n_dims := 3, seed := 42);
+
+statement ok
+INSERT INTO gq
+WITH pos AS (SELECT DISTINCT sample_id::VARCHAR sid, gradient_position gp FROM g),
+     a0 AS (SELECT sample_id sid, coordinate c FROM pc WHERE axis = 0),
+     a1 AS (SELECT sample_id sid, coordinate c FROM pc WHERE axis = 1),
+     j AS (SELECT p.sid, p.gp, a0.c c0, a1.c c1 FROM pos p JOIN a0 USING (sid) JOIN a1 USING (sid)),
+     r AS (SELECT gp, c0, c1, rank() OVER (ORDER BY gp) rgp, rank() OVER (ORDER BY c0) rc0 FROM j),
+     mg AS (SELECT avg(gp) v FROM j)
+SELECT 'gower', 0.5,
+       abs((SELECT corr(c0, gp) FROM j)),
+       abs((SELECT corr(rc0::DOUBLE, rgp::DOUBLE) FROM r)),
+       abs((SELECT corr(c1, (gp - (SELECT v FROM mg)) * (gp - (SELECT v FROM mg))) FROM j));
+
+# ── Claim 1: every metric recovers the gradient on PC1 when clean ───────────────
+# (|Pearson| and |Spearman| of PC1 vs true position both high). seed=42: chi2
+# 0.99, euclidean 0.98, gower 0.95 — threshold 0.85 with margin.
+query I
+SELECT count(*) FROM gq WHERE noise = 0.0 AND (pc1_pearson <= 0.85 OR pc1_spearman <= 0.85);
+----
+0
+
+# ── Claim 2: no metric escapes the arch when clean (strong PC2 quadratic) ───────
+# seed=42 PC2-arch: chi2 0.96, euclidean 0.97, gower 0.93 — threshold 0.85.
+query I
+SELECT count(*) FROM gq WHERE noise = 0.0 AND pc2_arch <= 0.85;
+----
+0
+
+# Euclidean specifically shows the strong arch the paper highlights (> 0.9).
+query I
+SELECT pc2_arch > 0.9 FROM gq WHERE metric = 'euclidean' AND noise = 0.0;
+----
+true
+
+# ── Claim 3: chi-square is noise-robust; Gower degrades ─────────────────────────
+# At noise 0.5, chi-square keeps strong PC1 recovery (> 0.80; seed=42 0.86),
+# while Gower has clearly collapsed (< 0.80; seed=42 0.04).
+query I
+SELECT pc1_pearson > 0.80 FROM gq WHERE metric = 'chisq' AND noise = 0.5;
+----
+true
+
+query I
+SELECT pc1_pearson < 0.80 FROM gq WHERE metric = 'gower' AND noise = 0.5;
+----
+true
+
+# chi-square recovery under noise strictly exceeds Gower's (robust > sensitive).
+query I
+SELECT (SELECT pc1_pearson FROM gq WHERE metric = 'chisq' AND noise = 0.5)
+     > (SELECT pc1_pearson FROM gq WHERE metric = 'gower' AND noise = 0.5);
+----
+true
+
+# ── Claim 4: chi-square degrades LESS than Gower under the same noise ───────────
+# (chi2_clean - chi2_noisy) < (gower_clean - gower_noisy). seed=42: 0.13 < 0.92.
+query I
+SELECT ((SELECT pc1_pearson FROM gq WHERE metric = 'chisq' AND noise = 0.0)
+      - (SELECT pc1_pearson FROM gq WHERE metric = 'chisq' AND noise = 0.5))
+     < ((SELECT pc1_pearson FROM gq WHERE metric = 'gower' AND noise = 0.0)
+      - (SELECT pc1_pearson FROM gq WHERE metric = 'gower' AND noise = 0.5));
+----
+true

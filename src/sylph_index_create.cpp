@@ -11,6 +11,7 @@
 
 #include "sylph_index_create.hpp"
 
+#include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
 #include "sequence_table_reader.hpp"
 #include "sylph.h"
@@ -123,7 +124,7 @@ unique_ptr<FunctionData> SylphIndexCreateTableFunction::Bind(ClientContext &cont
 	// Validate the genome_id and order_by columns exist. A `LIMIT 0` probe works
 	// for both tables and views and reports missing columns as a clean error.
 	{
-		Connection conn(*context.db);
+		auto conn = MakeReadOnlyHelperConnection(context);
 		auto src = KeywordHelper::WriteOptionallyQuoted(data->source_table);
 		auto gcol = KeywordHelper::WriteOptionallyQuoted(data->genome_id_col);
 		auto ocol = KeywordHelper::WriteOptionallyQuoted(data->order_by_col);
@@ -158,7 +159,6 @@ unique_ptr<GlobalTableFunctionState> SylphIndexCreateTableFunction::InitGlobal(C
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 
-	auto &db = *context.db;
 	auto src = KeywordHelper::WriteOptionallyQuoted(data.source_table);
 	auto gcol = KeywordHelper::WriteOptionallyQuoted(data.genome_id_col);
 	auto ocol = KeywordHelper::WriteOptionallyQuoted(data.order_by_col);
@@ -176,7 +176,7 @@ unique_ptr<GlobalTableFunctionState> SylphIndexCreateTableFunction::InitGlobal(C
 	// id column). Each becomes an independent unit of work below.
 	std::vector<Value> ids;
 	{
-		Connection conn(db);
+		auto conn = MakeReadOnlyHelperConnection(context);
 		auto res = conn.Query("SELECT DISTINCT " + gcol + " AS gk FROM " + src + " WHERE " + gcol +
 		                      " IS NOT NULL ORDER BY gk");
 		if (res->HasError()) {
@@ -233,7 +233,7 @@ unique_ptr<GlobalTableFunctionState> SylphIndexCreateTableFunction::InitGlobal(C
 	auto worker = [&](idx_t tid) {
 		try {
 			::SylphIndexBuilder *b = builders[tid];
-			Connection conn(db);
+			auto conn = MakeReadOnlyHelperConnection(context);
 			size_t i;
 			while (!failed.load(std::memory_order_relaxed) &&
 			       (i = next_genome.fetch_add(1, std::memory_order_relaxed)) < ids.size()) {

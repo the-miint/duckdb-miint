@@ -3,6 +3,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
 #include "per_sample_table_function.hpp"
 
@@ -131,8 +132,7 @@ static unique_ptr<FunctionData> WoltkaOguBind(ClientContext &context, TableFunct
 		data->has_sample_id = true;
 	}
 
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 
 	auto q_src = KeywordHelper::WriteOptionallyQuoted(data->source);
 	auto q_seq = KeywordHelper::WriteOptionallyQuoted(data->seq_id_col);

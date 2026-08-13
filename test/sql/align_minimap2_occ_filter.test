@@ -1,0 +1,155 @@
+# name: test/sql/align_minimap2_occ_filter.test
+# description: Test occ_filter (minimap2's -f high-occurrence minimizer filter) for align_minimap2
+# group: [sql]
+
+require miint
+
+# WHY THIS MATTERS: minimap2 defaults to -f 1000,5000 -- it discards minimizers occurring more
+# often than that. That is tuned for genome-scale references with real repeats, and is actively
+# wrong for a set of near-identical homologous sequences (rRNA panels, gene families, dereplicated
+# marker sets), where essentially every minimizer is high-occurrence by construction and gets
+# masked. The reporter measured a verbatim substring of an indexed sequence failing to recover a
+# perfect self match, and 40% of queries losing their alignment row outright, which reads as a
+# clean result set rather than a failed measurement (#187).
+#
+# FIXTURE NOTE, load-bearing: 6000 subjects, not 1200. `sr` sets BOTH mid_occ=1000 and
+# max_occ=5000, and minimap2 re-chains with max_occ when the first pass finds only repetitive
+# seeds (map.c: `else if (opt->max_occ > opt->mid_occ && rep_len > 0 ...)`). So occurrences between
+# 1000 and 5000 are rescued anyway -- a 1200-subject fixture still aligns at the default and would
+# prove nothing about the knob. The count must exceed the SECOND value to reach the failure.
+statement ok
+CREATE TABLE occ_subj AS
+SELECT 's' || i AS read_id,
+       'ACGTTGCAAGGTCCATGAACGTTAGCCATTGCAGGATCCTTAAGGCCATGCAATTGGCCAAGGTTCCAATTGGCCTTAAGGCCATTGCAAGGTTCCAATTGGCCAAGGTTCCAATTGG'
+       || lpad(i::VARCHAR, 12, 'T') AS sequence1
+FROM range(1, 6001) t(i);
+
+# The query is a verbatim 100-base slice of an indexed subject, taken from inside the shared core,
+# so every minimizer it contains occurs 6000 times and is masked at the default.
+#
+# The slice is equally exact against all 6000 subjects, so WHICH reference wins is arbitrary and
+# deliberately not asserted -- the CIGAR is what encodes "a perfect match was recovered".
+statement ok
+CREATE TABLE occ_q AS
+SELECT 'q1' AS read_id, substr((SELECT sequence1 FROM occ_subj WHERE read_id = 's7'), 1, 100) AS sequence1;
+
+# Default: the exact match is not recovered at all. This is the reported bug, encoded.
+query I
+SELECT count(*) FROM align_minimap2('occ_q', subject_table:='occ_subj', max_secondary:=0);
+----
+0
+
+# Raising the cap recovers it, and as a perfect 100-base match rather than a near miss to a
+# neighbour (the reporter saw e.g. 1X149= where 150= was the truth).
+query IT
+SELECT count(*), any_value(cigar)
+FROM align_minimap2('occ_q', subject_table:='occ_subj', max_secondary:=0, occ_filter:=100000);
+----
+1	100=
+
+# occ_filter := 0 disables the filter. It is NOT a threshold of zero, and getting that backwards
+# would mask everything instead of nothing: in minimap2 a value below 1 is a FRACTION, so it sets
+# mid_occ_frac and leaves mid_occ at 0 for mm_mapopt_update to derive -- and mm_idx_cal_max_occ
+# returns INT32_MAX for a fraction <= 0. Writing 0 straight into mid_occ would instead ask for
+# "auto-compute at the default 2e-4 fraction", which is not what the caller asked for.
+query IT
+SELECT count(*), any_value(cigar)
+FROM align_minimap2('occ_q', subject_table:='occ_subj', max_secondary:=0, occ_filter:=0);
+----
+1	100=
+
+# The two-value form is minimap2's -f INT1,INT2 (mid_occ, max_occ). Tightening BOTH to 1 must
+# remove the alignment -- this is what proves the second value is applied rather than parsed and
+# dropped, since setting only the first would leave the preset's max_occ=5000 rescuing it.
+query I
+SELECT count(*) FROM align_minimap2('occ_q', subject_table:='occ_subj', max_secondary:=0, occ_filter:='1,1');
+----
+0
+
+# Both spellings must bind: a bare number and minimap2's quoted two-value string. The parameter is
+# declared ANY for exactly this reason, so guard it -- narrowing it to VARCHAR or INTEGER would
+# silently break one of the two call styles the issue asked for.
+query I
+SELECT count(*) FROM align_minimap2('occ_q', subject_table:='occ_subj', max_secondary:=0, occ_filter:='100000');
+----
+1
+
+# Malformed specs must be rejected at bind, not silently ignored -- a typo'd filter that quietly
+# did nothing would reintroduce the exact silent-truncation this parameter exists to fix.
+statement error
+SELECT count(*) FROM align_minimap2('occ_q', subject_table:='occ_subj', occ_filter:='abc');
+----
+occ_filter must be a number or 'INT1,INT2'
+
+statement error
+SELECT count(*) FROM align_minimap2('occ_q', subject_table:='occ_subj', occ_filter:=-5);
+----
+occ_filter must be between 0 and 2147483647
+
+statement error
+SELECT count(*) FROM align_minimap2('occ_q', subject_table:='occ_subj', occ_filter:='100,abc');
+----
+occ_filter second value must be a number
+
+statement error
+SELECT count(*) FROM align_minimap2('occ_q', subject_table:='occ_subj', occ_filter:='100x');
+----
+occ_filter must be a number or 'INT1,INT2'
+
+# Out of int32 range, NaN and infinity must all be rejected. These matter more than they look: a
+# value like 1e12 is a plausible way to say "just turn it off", and casting it to int32_t is
+# undefined (x86 gives INT32_MIN), which mm_mapopt_update would then read as mid_occ <= 0 and use to
+# silently re-derive the DEFAULT filter -- reinstating the exact masking this parameter removes.
+# NaN needs the range test written as !(v >= 0 && v <= max), since every ordered comparison on NaN
+# is false and a plain `v < 0` check lets it through.
+statement error
+SELECT count(*) FROM align_minimap2('occ_q', subject_table:='occ_subj', occ_filter:=1e12);
+----
+occ_filter must be between 0 and 2147483647
+
+statement error
+SELECT count(*) FROM align_minimap2('occ_q', subject_table:='occ_subj', occ_filter:='nan');
+----
+occ_filter must be between 0 and 2147483647
+
+statement error
+SELECT count(*) FROM align_minimap2('occ_q', subject_table:='occ_subj', occ_filter:='inf');
+----
+occ_filter must be between 0 and 2147483647
+
+statement error
+SELECT count(*) FROM align_minimap2('occ_q', subject_table:='occ_subj', occ_filter:='1000,1e12');
+----
+occ_filter second value must be between 0 and 2147483647
+
+# `occ_filter := 'N,0'` must reach max_occ as 0, which minimap2 treats as "no re-chain pass".
+# 0 cannot double as the "no second value given" sentinel, hence -1 internally. With mid_occ=1 and
+# no re-chain, the exact match stays masked.
+statement error
+SELECT count(*) FROM align_minimap2('occ_q', subject_table:='occ_subj', occ_filter:='abc,5000');
+----
+occ_filter must be a number or 'INT1,INT2'
+
+query I
+SELECT count(*) FROM align_minimap2('occ_q', subject_table:='occ_subj', max_secondary:=0, occ_filter:='1,0');
+----
+0
+
+# --- include_unmapped is incompatible with per_subject_database (#185) ---
+#
+# per_subject_database re-aligns every query against every subject in turn, so "no row" is only ever
+# a statement about ONE subject. An unmapped row there would claim the query did not align when it
+# may align perfectly to another subject -- with N subjects, N-1 false negatives per query. Same
+# reason align_minimap2_sharded does not offer the flag; here the mode is a runtime choice, so the
+# combination is rejected instead of silently returning wrong rows.
+statement error
+SELECT count(*) FROM align_minimap2('occ_q', subject_table:='occ_subj', per_subject_database:=true,
+                                    include_unmapped:=true);
+----
+include_unmapped cannot be combined with per_subject_database
+
+statement ok
+DROP TABLE occ_q;
+
+statement ok
+DROP TABLE occ_subj;

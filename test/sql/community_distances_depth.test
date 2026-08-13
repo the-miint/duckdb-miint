@@ -1,0 +1,467 @@
+# name: test/sql/community_distances_depth.test
+# description: Kuczynski-2010 Fig 4 sequencing-depth signatures -- deep sequencing is superfluous when clusters are prominent but critical when subtle, and no depth rescues an inappropriate metric (Morisita-Horn)
+# group: [sql]
+
+# Faithful reproduction of the paper's Fig-4 depth-dependence claims (not numeric
+# parity -- exact seeds/replicate counts are unpublished). simulate_cluster_otus
+# (keyboard vector, 3x30=90 samples) is run at sequencing depths 10 / 1000 /
+# 100000 seqs per sample for four (metric, separation) panels, then the paper's
+# exact quality metrics are computed from community_distances -> pcoa -> k-means:
+#   reldist_quality = mean(inter-cluster dist) / mean(intra-cluster dist)   (Methods)
+#   kmeans_quality  = fraction of sample PAIRS whose k-means co-membership matches
+#                     truth == RAW Rand index (Methods; "good" threshold 0.85)
+#
+# Paper Fig-4 claims (Results p.6, caption):
+#   a-c Jaccard / prominent:      no substantial improvement above 1000 seqs.
+#   d-f Gower  / prominent:       already effective at moderate depth.
+#   g-i Gower  / subtle:          poor until depth grows large (needs >10000).
+#   j-l Morisita-Horn / subtle:   fails at every depth (persists even at 10M) --
+#                                 variance-explained is not a proxy for recovery.
+# => "deep sequencing is required if and only if the sample clustering is subtle."
+#
+# Signatures verified seed-stable over seeds 42/1/7/123; pinned at seed 42 with
+# margin. NOTE: community_distances/pcoa/cluster_kmeans take a table NAME
+# (separate connection), so each stage is a real table, not a CTE.
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+statement ok
+CREATE TABLE keyboard AS SELECT * FROM read_csv_auto('data/simsurvey/keyboard_abundances.csv');
+
+statement ok
+SET VARIABLE kb = (SELECT list(abund ORDER BY idx) FROM keyboard);
+
+statement ok
+CREATE TABLE dq(metric VARCHAR, condition VARCHAR, depth BIGINT, reldist_quality DOUBLE, kmeans_quality DOUBLE);
+
+# ===== jaccard, prominent clusters, depth 10 =====
+statement ok
+CREATE OR REPLACE TABLE sim AS
+SELECT CAST(sample_id AS BIGINT) AS sample_id, CAST(otu_id AS BIGINT) AS otu_id, "count", cluster_id
+FROM simulate_cluster_otus(getvariable('kb'), 10, cluster_sizes := [30, 30, 30],
+     cluster_spacing := 1.0, sample_spacing := 0.5, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE feat AS SELECT sample_id, otu_id AS feature_id, CAST("count" AS DOUBLE) AS value FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE truth AS SELECT DISTINCT sample_id, cluster_id FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE dist AS SELECT * FROM community_distances('feat', 'jaccard');
+
+statement ok
+CREATE OR REPLACE TABLE coords AS SELECT * FROM pcoa('dist', n_dims := 3, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE km AS SELECT * FROM cluster_kmeans('coords', k := 3, n_dims := 3, seed := 42);
+
+statement ok
+INSERT INTO dq
+SELECT 'jaccard', 'prominent', 10,
+  (SELECT avg(distance) FILTER (WHERE ta.cluster_id <> tb.cluster_id)
+        / avg(distance) FILTER (WHERE ta.cluster_id = tb.cluster_id)
+   FROM dist d JOIN truth ta ON ta.sample_id = d.sample_a JOIN truth tb ON tb.sample_id = d.sample_b),
+  (SELECT avg(CASE WHEN (k1.cluster = k2.cluster) = (t1.cluster_id = t2.cluster_id) THEN 1.0 ELSE 0.0 END)
+   FROM km k1 JOIN km k2 ON k1.sample_id < k2.sample_id
+   JOIN truth t1 ON t1.sample_id = k1.sample_id JOIN truth t2 ON t2.sample_id = k2.sample_id);
+
+# ===== jaccard, prominent clusters, depth 1000 =====
+statement ok
+CREATE OR REPLACE TABLE sim AS
+SELECT CAST(sample_id AS BIGINT) AS sample_id, CAST(otu_id AS BIGINT) AS otu_id, "count", cluster_id
+FROM simulate_cluster_otus(getvariable('kb'), 1000, cluster_sizes := [30, 30, 30],
+     cluster_spacing := 1.0, sample_spacing := 0.5, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE feat AS SELECT sample_id, otu_id AS feature_id, CAST("count" AS DOUBLE) AS value FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE truth AS SELECT DISTINCT sample_id, cluster_id FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE dist AS SELECT * FROM community_distances('feat', 'jaccard');
+
+statement ok
+CREATE OR REPLACE TABLE coords AS SELECT * FROM pcoa('dist', n_dims := 3, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE km AS SELECT * FROM cluster_kmeans('coords', k := 3, n_dims := 3, seed := 42);
+
+statement ok
+INSERT INTO dq
+SELECT 'jaccard', 'prominent', 1000,
+  (SELECT avg(distance) FILTER (WHERE ta.cluster_id <> tb.cluster_id)
+        / avg(distance) FILTER (WHERE ta.cluster_id = tb.cluster_id)
+   FROM dist d JOIN truth ta ON ta.sample_id = d.sample_a JOIN truth tb ON tb.sample_id = d.sample_b),
+  (SELECT avg(CASE WHEN (k1.cluster = k2.cluster) = (t1.cluster_id = t2.cluster_id) THEN 1.0 ELSE 0.0 END)
+   FROM km k1 JOIN km k2 ON k1.sample_id < k2.sample_id
+   JOIN truth t1 ON t1.sample_id = k1.sample_id JOIN truth t2 ON t2.sample_id = k2.sample_id);
+
+# ===== jaccard, prominent clusters, depth 100000 =====
+statement ok
+CREATE OR REPLACE TABLE sim AS
+SELECT CAST(sample_id AS BIGINT) AS sample_id, CAST(otu_id AS BIGINT) AS otu_id, "count", cluster_id
+FROM simulate_cluster_otus(getvariable('kb'), 100000, cluster_sizes := [30, 30, 30],
+     cluster_spacing := 1.0, sample_spacing := 0.5, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE feat AS SELECT sample_id, otu_id AS feature_id, CAST("count" AS DOUBLE) AS value FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE truth AS SELECT DISTINCT sample_id, cluster_id FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE dist AS SELECT * FROM community_distances('feat', 'jaccard');
+
+statement ok
+CREATE OR REPLACE TABLE coords AS SELECT * FROM pcoa('dist', n_dims := 3, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE km AS SELECT * FROM cluster_kmeans('coords', k := 3, n_dims := 3, seed := 42);
+
+statement ok
+INSERT INTO dq
+SELECT 'jaccard', 'prominent', 100000,
+  (SELECT avg(distance) FILTER (WHERE ta.cluster_id <> tb.cluster_id)
+        / avg(distance) FILTER (WHERE ta.cluster_id = tb.cluster_id)
+   FROM dist d JOIN truth ta ON ta.sample_id = d.sample_a JOIN truth tb ON tb.sample_id = d.sample_b),
+  (SELECT avg(CASE WHEN (k1.cluster = k2.cluster) = (t1.cluster_id = t2.cluster_id) THEN 1.0 ELSE 0.0 END)
+   FROM km k1 JOIN km k2 ON k1.sample_id < k2.sample_id
+   JOIN truth t1 ON t1.sample_id = k1.sample_id JOIN truth t2 ON t2.sample_id = k2.sample_id);
+
+# ===== gower, prominent clusters, depth 10 =====
+statement ok
+CREATE OR REPLACE TABLE sim AS
+SELECT CAST(sample_id AS BIGINT) AS sample_id, CAST(otu_id AS BIGINT) AS otu_id, "count", cluster_id
+FROM simulate_cluster_otus(getvariable('kb'), 10, cluster_sizes := [30, 30, 30],
+     cluster_spacing := 1.0, sample_spacing := 0.5, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE feat AS SELECT sample_id, otu_id AS feature_id, CAST("count" AS DOUBLE) AS value FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE truth AS SELECT DISTINCT sample_id, cluster_id FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE dist AS SELECT * FROM community_distances('feat', 'gower');
+
+statement ok
+CREATE OR REPLACE TABLE coords AS SELECT * FROM pcoa('dist', n_dims := 3, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE km AS SELECT * FROM cluster_kmeans('coords', k := 3, n_dims := 3, seed := 42);
+
+statement ok
+INSERT INTO dq
+SELECT 'gower', 'prominent', 10,
+  (SELECT avg(distance) FILTER (WHERE ta.cluster_id <> tb.cluster_id)
+        / avg(distance) FILTER (WHERE ta.cluster_id = tb.cluster_id)
+   FROM dist d JOIN truth ta ON ta.sample_id = d.sample_a JOIN truth tb ON tb.sample_id = d.sample_b),
+  (SELECT avg(CASE WHEN (k1.cluster = k2.cluster) = (t1.cluster_id = t2.cluster_id) THEN 1.0 ELSE 0.0 END)
+   FROM km k1 JOIN km k2 ON k1.sample_id < k2.sample_id
+   JOIN truth t1 ON t1.sample_id = k1.sample_id JOIN truth t2 ON t2.sample_id = k2.sample_id);
+
+# ===== gower, prominent clusters, depth 1000 =====
+statement ok
+CREATE OR REPLACE TABLE sim AS
+SELECT CAST(sample_id AS BIGINT) AS sample_id, CAST(otu_id AS BIGINT) AS otu_id, "count", cluster_id
+FROM simulate_cluster_otus(getvariable('kb'), 1000, cluster_sizes := [30, 30, 30],
+     cluster_spacing := 1.0, sample_spacing := 0.5, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE feat AS SELECT sample_id, otu_id AS feature_id, CAST("count" AS DOUBLE) AS value FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE truth AS SELECT DISTINCT sample_id, cluster_id FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE dist AS SELECT * FROM community_distances('feat', 'gower');
+
+statement ok
+CREATE OR REPLACE TABLE coords AS SELECT * FROM pcoa('dist', n_dims := 3, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE km AS SELECT * FROM cluster_kmeans('coords', k := 3, n_dims := 3, seed := 42);
+
+statement ok
+INSERT INTO dq
+SELECT 'gower', 'prominent', 1000,
+  (SELECT avg(distance) FILTER (WHERE ta.cluster_id <> tb.cluster_id)
+        / avg(distance) FILTER (WHERE ta.cluster_id = tb.cluster_id)
+   FROM dist d JOIN truth ta ON ta.sample_id = d.sample_a JOIN truth tb ON tb.sample_id = d.sample_b),
+  (SELECT avg(CASE WHEN (k1.cluster = k2.cluster) = (t1.cluster_id = t2.cluster_id) THEN 1.0 ELSE 0.0 END)
+   FROM km k1 JOIN km k2 ON k1.sample_id < k2.sample_id
+   JOIN truth t1 ON t1.sample_id = k1.sample_id JOIN truth t2 ON t2.sample_id = k2.sample_id);
+
+# ===== gower, prominent clusters, depth 100000 =====
+statement ok
+CREATE OR REPLACE TABLE sim AS
+SELECT CAST(sample_id AS BIGINT) AS sample_id, CAST(otu_id AS BIGINT) AS otu_id, "count", cluster_id
+FROM simulate_cluster_otus(getvariable('kb'), 100000, cluster_sizes := [30, 30, 30],
+     cluster_spacing := 1.0, sample_spacing := 0.5, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE feat AS SELECT sample_id, otu_id AS feature_id, CAST("count" AS DOUBLE) AS value FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE truth AS SELECT DISTINCT sample_id, cluster_id FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE dist AS SELECT * FROM community_distances('feat', 'gower');
+
+statement ok
+CREATE OR REPLACE TABLE coords AS SELECT * FROM pcoa('dist', n_dims := 3, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE km AS SELECT * FROM cluster_kmeans('coords', k := 3, n_dims := 3, seed := 42);
+
+statement ok
+INSERT INTO dq
+SELECT 'gower', 'prominent', 100000,
+  (SELECT avg(distance) FILTER (WHERE ta.cluster_id <> tb.cluster_id)
+        / avg(distance) FILTER (WHERE ta.cluster_id = tb.cluster_id)
+   FROM dist d JOIN truth ta ON ta.sample_id = d.sample_a JOIN truth tb ON tb.sample_id = d.sample_b),
+  (SELECT avg(CASE WHEN (k1.cluster = k2.cluster) = (t1.cluster_id = t2.cluster_id) THEN 1.0 ELSE 0.0 END)
+   FROM km k1 JOIN km k2 ON k1.sample_id < k2.sample_id
+   JOIN truth t1 ON t1.sample_id = k1.sample_id JOIN truth t2 ON t2.sample_id = k2.sample_id);
+
+# ===== gower, subtle clusters, depth 10 =====
+statement ok
+CREATE OR REPLACE TABLE sim AS
+SELECT CAST(sample_id AS BIGINT) AS sample_id, CAST(otu_id AS BIGINT) AS otu_id, "count", cluster_id
+FROM simulate_cluster_otus(getvariable('kb'), 10, cluster_sizes := [30, 30, 30],
+     cluster_spacing := 0.1, sample_spacing := 0.1, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE feat AS SELECT sample_id, otu_id AS feature_id, CAST("count" AS DOUBLE) AS value FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE truth AS SELECT DISTINCT sample_id, cluster_id FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE dist AS SELECT * FROM community_distances('feat', 'gower');
+
+statement ok
+CREATE OR REPLACE TABLE coords AS SELECT * FROM pcoa('dist', n_dims := 3, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE km AS SELECT * FROM cluster_kmeans('coords', k := 3, n_dims := 3, seed := 42);
+
+statement ok
+INSERT INTO dq
+SELECT 'gower', 'subtle', 10,
+  (SELECT avg(distance) FILTER (WHERE ta.cluster_id <> tb.cluster_id)
+        / avg(distance) FILTER (WHERE ta.cluster_id = tb.cluster_id)
+   FROM dist d JOIN truth ta ON ta.sample_id = d.sample_a JOIN truth tb ON tb.sample_id = d.sample_b),
+  (SELECT avg(CASE WHEN (k1.cluster = k2.cluster) = (t1.cluster_id = t2.cluster_id) THEN 1.0 ELSE 0.0 END)
+   FROM km k1 JOIN km k2 ON k1.sample_id < k2.sample_id
+   JOIN truth t1 ON t1.sample_id = k1.sample_id JOIN truth t2 ON t2.sample_id = k2.sample_id);
+
+# ===== gower, subtle clusters, depth 1000 =====
+statement ok
+CREATE OR REPLACE TABLE sim AS
+SELECT CAST(sample_id AS BIGINT) AS sample_id, CAST(otu_id AS BIGINT) AS otu_id, "count", cluster_id
+FROM simulate_cluster_otus(getvariable('kb'), 1000, cluster_sizes := [30, 30, 30],
+     cluster_spacing := 0.1, sample_spacing := 0.1, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE feat AS SELECT sample_id, otu_id AS feature_id, CAST("count" AS DOUBLE) AS value FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE truth AS SELECT DISTINCT sample_id, cluster_id FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE dist AS SELECT * FROM community_distances('feat', 'gower');
+
+statement ok
+CREATE OR REPLACE TABLE coords AS SELECT * FROM pcoa('dist', n_dims := 3, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE km AS SELECT * FROM cluster_kmeans('coords', k := 3, n_dims := 3, seed := 42);
+
+statement ok
+INSERT INTO dq
+SELECT 'gower', 'subtle', 1000,
+  (SELECT avg(distance) FILTER (WHERE ta.cluster_id <> tb.cluster_id)
+        / avg(distance) FILTER (WHERE ta.cluster_id = tb.cluster_id)
+   FROM dist d JOIN truth ta ON ta.sample_id = d.sample_a JOIN truth tb ON tb.sample_id = d.sample_b),
+  (SELECT avg(CASE WHEN (k1.cluster = k2.cluster) = (t1.cluster_id = t2.cluster_id) THEN 1.0 ELSE 0.0 END)
+   FROM km k1 JOIN km k2 ON k1.sample_id < k2.sample_id
+   JOIN truth t1 ON t1.sample_id = k1.sample_id JOIN truth t2 ON t2.sample_id = k2.sample_id);
+
+# ===== gower, subtle clusters, depth 100000 =====
+statement ok
+CREATE OR REPLACE TABLE sim AS
+SELECT CAST(sample_id AS BIGINT) AS sample_id, CAST(otu_id AS BIGINT) AS otu_id, "count", cluster_id
+FROM simulate_cluster_otus(getvariable('kb'), 100000, cluster_sizes := [30, 30, 30],
+     cluster_spacing := 0.1, sample_spacing := 0.1, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE feat AS SELECT sample_id, otu_id AS feature_id, CAST("count" AS DOUBLE) AS value FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE truth AS SELECT DISTINCT sample_id, cluster_id FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE dist AS SELECT * FROM community_distances('feat', 'gower');
+
+statement ok
+CREATE OR REPLACE TABLE coords AS SELECT * FROM pcoa('dist', n_dims := 3, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE km AS SELECT * FROM cluster_kmeans('coords', k := 3, n_dims := 3, seed := 42);
+
+statement ok
+INSERT INTO dq
+SELECT 'gower', 'subtle', 100000,
+  (SELECT avg(distance) FILTER (WHERE ta.cluster_id <> tb.cluster_id)
+        / avg(distance) FILTER (WHERE ta.cluster_id = tb.cluster_id)
+   FROM dist d JOIN truth ta ON ta.sample_id = d.sample_a JOIN truth tb ON tb.sample_id = d.sample_b),
+  (SELECT avg(CASE WHEN (k1.cluster = k2.cluster) = (t1.cluster_id = t2.cluster_id) THEN 1.0 ELSE 0.0 END)
+   FROM km k1 JOIN km k2 ON k1.sample_id < k2.sample_id
+   JOIN truth t1 ON t1.sample_id = k1.sample_id JOIN truth t2 ON t2.sample_id = k2.sample_id);
+
+# ===== morisita_horn, subtle clusters, depth 10 =====
+statement ok
+CREATE OR REPLACE TABLE sim AS
+SELECT CAST(sample_id AS BIGINT) AS sample_id, CAST(otu_id AS BIGINT) AS otu_id, "count", cluster_id
+FROM simulate_cluster_otus(getvariable('kb'), 10, cluster_sizes := [30, 30, 30],
+     cluster_spacing := 0.1, sample_spacing := 0.1, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE feat AS SELECT sample_id, otu_id AS feature_id, CAST("count" AS DOUBLE) AS value FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE truth AS SELECT DISTINCT sample_id, cluster_id FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE dist AS SELECT * FROM community_distances('feat', 'morisita_horn');
+
+statement ok
+CREATE OR REPLACE TABLE coords AS SELECT * FROM pcoa('dist', n_dims := 3, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE km AS SELECT * FROM cluster_kmeans('coords', k := 3, n_dims := 3, seed := 42);
+
+statement ok
+INSERT INTO dq
+SELECT 'morisita_horn', 'subtle', 10,
+  (SELECT avg(distance) FILTER (WHERE ta.cluster_id <> tb.cluster_id)
+        / avg(distance) FILTER (WHERE ta.cluster_id = tb.cluster_id)
+   FROM dist d JOIN truth ta ON ta.sample_id = d.sample_a JOIN truth tb ON tb.sample_id = d.sample_b),
+  (SELECT avg(CASE WHEN (k1.cluster = k2.cluster) = (t1.cluster_id = t2.cluster_id) THEN 1.0 ELSE 0.0 END)
+   FROM km k1 JOIN km k2 ON k1.sample_id < k2.sample_id
+   JOIN truth t1 ON t1.sample_id = k1.sample_id JOIN truth t2 ON t2.sample_id = k2.sample_id);
+
+# ===== morisita_horn, subtle clusters, depth 1000 =====
+statement ok
+CREATE OR REPLACE TABLE sim AS
+SELECT CAST(sample_id AS BIGINT) AS sample_id, CAST(otu_id AS BIGINT) AS otu_id, "count", cluster_id
+FROM simulate_cluster_otus(getvariable('kb'), 1000, cluster_sizes := [30, 30, 30],
+     cluster_spacing := 0.1, sample_spacing := 0.1, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE feat AS SELECT sample_id, otu_id AS feature_id, CAST("count" AS DOUBLE) AS value FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE truth AS SELECT DISTINCT sample_id, cluster_id FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE dist AS SELECT * FROM community_distances('feat', 'morisita_horn');
+
+statement ok
+CREATE OR REPLACE TABLE coords AS SELECT * FROM pcoa('dist', n_dims := 3, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE km AS SELECT * FROM cluster_kmeans('coords', k := 3, n_dims := 3, seed := 42);
+
+statement ok
+INSERT INTO dq
+SELECT 'morisita_horn', 'subtle', 1000,
+  (SELECT avg(distance) FILTER (WHERE ta.cluster_id <> tb.cluster_id)
+        / avg(distance) FILTER (WHERE ta.cluster_id = tb.cluster_id)
+   FROM dist d JOIN truth ta ON ta.sample_id = d.sample_a JOIN truth tb ON tb.sample_id = d.sample_b),
+  (SELECT avg(CASE WHEN (k1.cluster = k2.cluster) = (t1.cluster_id = t2.cluster_id) THEN 1.0 ELSE 0.0 END)
+   FROM km k1 JOIN km k2 ON k1.sample_id < k2.sample_id
+   JOIN truth t1 ON t1.sample_id = k1.sample_id JOIN truth t2 ON t2.sample_id = k2.sample_id);
+
+# ===== morisita_horn, subtle clusters, depth 100000 =====
+statement ok
+CREATE OR REPLACE TABLE sim AS
+SELECT CAST(sample_id AS BIGINT) AS sample_id, CAST(otu_id AS BIGINT) AS otu_id, "count", cluster_id
+FROM simulate_cluster_otus(getvariable('kb'), 100000, cluster_sizes := [30, 30, 30],
+     cluster_spacing := 0.1, sample_spacing := 0.1, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE feat AS SELECT sample_id, otu_id AS feature_id, CAST("count" AS DOUBLE) AS value FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE truth AS SELECT DISTINCT sample_id, cluster_id FROM sim;
+
+statement ok
+CREATE OR REPLACE TABLE dist AS SELECT * FROM community_distances('feat', 'morisita_horn');
+
+statement ok
+CREATE OR REPLACE TABLE coords AS SELECT * FROM pcoa('dist', n_dims := 3, seed := 42);
+
+statement ok
+CREATE OR REPLACE TABLE km AS SELECT * FROM cluster_kmeans('coords', k := 3, n_dims := 3, seed := 42);
+
+statement ok
+INSERT INTO dq
+SELECT 'morisita_horn', 'subtle', 100000,
+  (SELECT avg(distance) FILTER (WHERE ta.cluster_id <> tb.cluster_id)
+        / avg(distance) FILTER (WHERE ta.cluster_id = tb.cluster_id)
+   FROM dist d JOIN truth ta ON ta.sample_id = d.sample_a JOIN truth tb ON tb.sample_id = d.sample_b),
+  (SELECT avg(CASE WHEN (k1.cluster = k2.cluster) = (t1.cluster_id = t2.cluster_id) THEN 1.0 ELSE 0.0 END)
+   FROM km k1 JOIN km k2 ON k1.sample_id < k2.sample_id
+   JOIN truth t1 ON t1.sample_id = k1.sample_id JOIN truth t2 ON t2.sample_id = k2.sample_id);
+
+# ── Claim 1: Jaccard on prominent clusters plateaus by 1000 seqs/sample ──────────
+# Good (>=0.85) at 1000, and 100000 gives no substantial gain over 1000.
+# seed=42: kmeans 0.68 (D10) -> 1.0 (D1000) -> 1.0 (D100000).
+query I
+SELECT (SELECT kmeans_quality FROM dq WHERE metric='jaccard' AND condition='prominent' AND depth=1000) >= 0.85
+   AND (SELECT kmeans_quality FROM dq WHERE metric='jaccard' AND condition='prominent' AND depth=100000)
+     - (SELECT kmeans_quality FROM dq WHERE metric='jaccard' AND condition='prominent' AND depth=1000) <= 0.05;
+----
+true
+
+# ── Claim 2a: Gower on PROMINENT clusters is already effective at moderate depth ─
+# (deep sequencing not needed when the clusters are prominent). seed=42: 1.0 @ D1000.
+query I
+SELECT (SELECT kmeans_quality FROM dq WHERE metric='gower' AND condition='prominent' AND depth=1000) >= 0.85;
+----
+true
+
+# ── Claim 2b: Gower on SUBTLE clusters needs deep sequencing ─────────────────────
+# poor (<0.85) at 10 and 1000, good (>=0.85) only at 100000, and strictly improving
+# with depth. seed=42: 0.50 (D10) -> 0.55 (D1000) -> 1.0 (D100000).
+query I
+SELECT (SELECT kmeans_quality FROM dq WHERE metric='gower' AND condition='subtle' AND depth=10) < 0.85
+   AND (SELECT kmeans_quality FROM dq WHERE metric='gower' AND condition='subtle' AND depth=1000) < 0.85
+   AND (SELECT kmeans_quality FROM dq WHERE metric='gower' AND condition='subtle' AND depth=100000) >= 0.85
+   AND (SELECT kmeans_quality FROM dq WHERE metric='gower' AND condition='subtle' AND depth=100000)
+     > (SELECT kmeans_quality FROM dq WHERE metric='gower' AND condition='subtle' AND depth=1000);
+----
+true
+
+# ── Claim 3: Morisita-Horn on subtle clusters fails at EVERY depth ───────────────
+# k-means quality stays below 0.85 at 10, 1000 and 100000 (persists even at 10M in
+# the paper). seed=42: max over depths ~0.47.
+query I
+SELECT (SELECT max(kmeans_quality) FROM dq WHERE metric='morisita_horn' AND condition='subtle') < 0.85;
+----
+true
+
+# ── Claim 4: the metric matters even at huge depth (variance != recovery) ────────
+# At 100000 seqs, Gower recovers the subtle clusters while Morisita-Horn does not,
+# for the SAME data. seed=42: Gower 1.0 vs Morisita-Horn 0.42.
+query I
+SELECT (SELECT kmeans_quality FROM dq WHERE metric='gower' AND condition='subtle' AND depth=100000)
+     - (SELECT kmeans_quality FROM dq WHERE metric='morisita_horn' AND condition='subtle' AND depth=100000) > 0.4;
+----
+true

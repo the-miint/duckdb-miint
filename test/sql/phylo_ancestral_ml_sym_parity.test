@@ -5,8 +5,8 @@
 # ape::ace(type="discrete", model="SYM") fits a symmetric rate matrix. The goldens under
 # data/asr/ml_sym_* were generated OFFLINE by a dev-only R + ape script kept out of this
 # BSD tree (../duckdb-miint-localdocs/gen_asr_oracle.R) and committed as NUMBERS only
-# (never ape's code); run_tests.sh exports MIINT_ASR_PARITY_OK when the committed goldens
-# are intact. Only the
+# (never ape's code). The goldens are committed, so this test always runs: a corrupted or
+# missing golden fails it loudly rather than skipping it. Only the
 # marginal posteriors are compared: they pin the convention (uniform root prior + marginal
 # reconstruction) and confirm both optimizers reach the same MLE. Our posteriors match
 # ape's fit$lik.anc to ~1e-6 on this 60-tip, 3-state SYM dataset. (Fitted rates are not
@@ -15,8 +15,6 @@
 # constant that cancels in the normalized posteriors.)
 
 require miint
-
-require-env MIINT_ASR_PARITY_OK
 
 statement ok
 CREATE TABLE mls_tree AS SELECT * FROM read_csv_auto('data/asr/ml_sym_tree.csv', nullstr='');

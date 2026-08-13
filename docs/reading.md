@@ -6,6 +6,7 @@ MIINT supports reading FASTA, FASTQ, SAM, BAM, SFF, BIOM, mzML, mzXML, GFF, jpla
 
 - [FASTA / FASTQ](#fasta-and-fastq) - FASTA and FASTQ sequence files.
 - [SAM / BAM](#sam-and-bam) - SAM and BAM alignment files.
+  - [`read_alignment_header(path)`](#read_alignment_headerpath) - A header's `@SQ` lines as `(tid, reference, length)`.
 - [SFF](#sff) - SFF sequence files.
 - [mzML / mzXML](#mzml-and-mzxml) - mzML and mzXML files.
 - [BIOM](#biom) - BIOM-Format v2.1 files.
@@ -224,6 +225,50 @@ SELECT * FROM read_sam('alignments.sam');
 - Data with headers works without `reference_lengths`
 - Headerless data requires `reference_lengths` parameter
 - User must know whether their stdin data contains headers
+
+**Malformed records fail the scan.** A record htslib cannot parse — a malformed field, a truncated record, a reference id outside the header's range — raises `Failed to read SAM/BAM record: the file is truncated or malformed`, with the line number for text SAM. Earlier versions dropped such a record and carried on, so a corrupt file read back as a silently short table. If you need to salvage what is readable from a damaged file, repair it first (e.g. `samtools view`), rather than relying on the reader to skip past the damage.
+
+One case is *not* detectable and matches `samtools` exactly: a BGZF file truncated at a block boundary looks like a cleanly-ended file to htslib, so it reads back as a short table with no error. `samtools quickcheck <file>` is the tool for that — it verifies the BGZF EOF marker and exits non-zero when it is missing.
+
+#### `read_alignment_header(path)`
+
+Read a SAM/BAM **header's `@SQ` lines** as rows of `(tid, reference, length)`. This is the only way to
+see a reference's `tid` — its index in the `@SQ` list — from SQL.
+
+```sql
+SELECT tid, reference, length FROM read_alignment_header('reads.bam') ORDER BY tid;
+```
+
+**Output schema:**
+- `tid` (INTEGER): the reference's index in the `@SQ` list — this *is* the record's `refID` on disk
+- `reference` (VARCHAR): reference name (`SN:`)
+- `length` (BIGINT): reference length (`LN:`). BIGINT, not INTEGER: `LN` can exceed 2^31
+
+**Why it exists.** A BAM is coordinate-sorted by **tid**, not by reference name, and no other function
+exposes tid. `read_alignments` / `read_sam` decode each record's `reference` through the file's own
+header, and name↔tid is a bijection fixed when the header is built — so reading names back yields
+ascending *names* whatever the `@SQ` order was. That makes tid ordering unobservable through the record
+readers, which is why the `@SQ` ordering contract in [Writing](writing.md#sam-and-bam) could not be
+checked for BAM from SQL before this function existed.
+
+**Behavior:**
+- Reads **only** the header. `sam_read1` is never called, so a file with intact `@SQ` lines and a
+  corrupt *record* is read successfully here even though `read_alignments` fails the scan on it.
+- A header with **no `@SQ` lines returns zero rows, not an error** — unaligned BAM/SAM legitimately has
+  no references, including the uBAM files `COPY … (FORMAT UBAM)` writes.
+- Works on both BAM and text SAM.
+- **Local paths only.** `https://`, `s3://` and friends are rejected at bind with a clear error; use
+  `read_alignments` if you need remote streaming, or download the file first. Single path only — no
+  glob, no list.
+
+**Verifying a coordinate-sorted BAM:**
+```sql
+-- @SQ is emitted name-sorted, so tid order must equal name order.
+SELECT COUNT(*) = 0 AS header_is_name_sorted FROM (
+  SELECT tid, ROW_NUMBER() OVER (ORDER BY reference) - 1 AS expected_tid
+  FROM read_alignment_header('sorted.bam')
+) WHERE tid != expected_tid;
+```
 
 ### SFF
 
@@ -751,7 +796,7 @@ Read GFF3 (General Feature Format) annotation files. GFF is a standard format fo
 - `source` (VARCHAR): Annotation source (e.g., 'NCBI', 'Ensembl')
 - `type` (VARCHAR): Feature type (e.g., 'gene', 'mRNA', 'exon', 'CDS')
 - `position` (INTEGER): 1-based start position
-- `stop_position` (INTEGER): 1-based end position (inclusive)
+- `stop_position` (INTEGER): 1-based **half-open** end position — i.e. GFF3's `end` **+ 1**. See [Coordinate conventions](#coordinate-conventions) below.
 - `score` (DOUBLE, nullable): Feature score (NULL if '.')
 - `strand` (VARCHAR, nullable): Strand ('+', '-', or NULL if '.')
 - `phase` (INTEGER, nullable): CDS phase (0, 1, 2, or NULL if '.')
@@ -791,11 +836,11 @@ SELECT attributes['ID'] AS gene_id, attributes['Name'] AS gene_name
 FROM read_gff('annotations.gff')
 WHERE type = 'gene' AND strand = '+';
 
--- Calculate feature lengths
+-- Calculate feature lengths (half-open: no + 1)
 SELECT type,
-       AVG(stop_position - position + 1) AS avg_length,
-       MIN(stop_position - position + 1) AS min_length,
-       MAX(stop_position - position + 1) AS max_length
+       AVG(stop_position - position) AS avg_length,
+       MIN(stop_position - position) AS min_length,
+       MAX(stop_position - position) AS max_length
 FROM read_gff('annotations.gff')
 GROUP BY type;
 
@@ -804,12 +849,14 @@ SELECT seqid, position, stop_position, phase, attributes['Parent'] AS parent_tra
 FROM read_gff('annotations.gff')
 WHERE type = 'CDS' AND phase IS NOT NULL;
 
--- Find overlapping features between two positions
+-- Find features overlapping the window [1000, 5000].
+-- stop_position is half-open, so the end test is strict (>): an interval whose
+-- stop_position equals 1000 ends just before the window and does not overlap it.
 SELECT type, position, stop_position, attributes['ID'] AS feature_id
 FROM read_gff('annotations.gff')
 WHERE seqid = 'chr1'
   AND position <= 5000
-  AND stop_position >= 1000
+  AND stop_position > 1000
 ORDER BY position;
 
 -- Access nested attributes
@@ -852,11 +899,22 @@ SELECT parse_gff_attributes('ID=gene1;Name=TEST1;biotype=protein_coding');
 - Access values using bracket notation: `attributes['ID']`
 
 **GFF3 Format Notes:**
-- Coordinates are 1-based and inclusive (both start and end)
+- Coordinates **in the file** are 1-based and inclusive (both start and end). miint normalizes them on read — see [Coordinate conventions](#coordinate-conventions).
 - Strand: '+' (forward), '-' (reverse), '.' (unknown/not applicable)
 - Phase: Indicates position within codon (0, 1, or 2) for CDS features
 - Comment lines starting with '##' are filtered out (metadata/directives)
-- The 9th column (attributes) must contain at least an ID for most feature types
+- The 9th column (attributes) may be empty; a feature line must carry the 8 mandatory fields
+- **The GFF3 sequence section is honoured**: content after a `##FASTA` directive is not returned as feature rows. prokka and bakta always append the genome, so this is the common case. A feature line carrying only *some* of the 8 mandatory fields is a malformed GFF line and raises an error rather than being silently dropped.
+
+### Coordinate conventions
+
+**Every miint function reports intervals as 1-based half-open `[position, stop_position)`.** A feature's length is always `stop_position - position` — never `+ 1`.
+
+This holds across `read_alignments`, `align_minimap2` / `align_bowtie2` and friends, `alignment_slice`, `compute_coverage_depth`, `genome_coverage`, `read_gff` and `read_ncbi_annotation`.
+
+Some source formats are inherently **closed** (`[start, end]`): GFF3 and NCBI annotations both are. miint **normalizes these on read** by emitting `end + 1`, so a single convention holds throughout and intervals from different readers compose correctly. The value the file contained is always recoverable as `stop_position - 1`.
+
+> **Changed behaviour.** `read_gff` and `read_ncbi_annotation` previously emitted the source format's closed `end` directly under the same `stop_position` column name. Queries that consumed it now see a value one larger. Anything computing a length as `stop_position - position + 1` should drop the `+ 1`; anything that compensated with its own `+ 1` before feeding another miint function should remove that compensation. The motivation was that the mismatch was silent: feeding `read_gff` output to `genome_coverage` (which computes `SUM(stop - start)`) type-checked, ran, raised nothing, and under-counted every feature by exactly one base.
 
 **Use Cases:**
 - **Gene annotation analysis**: Extract genes, transcripts, exons from genome annotations

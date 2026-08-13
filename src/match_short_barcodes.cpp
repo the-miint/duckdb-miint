@@ -1,4 +1,5 @@
 #include "match_short_barcodes.hpp"
+#include "catalog_utils.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
@@ -120,8 +121,7 @@ static constexpr const char *FN_NAME = "match_short_barcodes";
 // Returns the per-barcode length; throws on mixed lengths or non-ACGT bases.
 static size_t LoadAndPack(ClientContext &context, const std::string &table_name, const char *role,
                           std::vector<PackedBarcode> &out) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	std::string query = "SELECT id, sequence FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
 	auto result = conn.Query(query);
 	if (result->HasError()) {
@@ -173,8 +173,7 @@ static size_t LoadAndPack(ClientContext &context, const std::string &table_name,
 // before InitGlobal materialization. Both tables and views work via the
 // catalog TABLE_ENTRY lookup.
 static void ValidateTableExists(ClientContext &context, const std::string &table_name) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	std::string query = "SELECT id, sequence FROM " + KeywordHelper::WriteOptionallyQuoted(table_name) + " LIMIT 0";
 	auto result = conn.Query(query);
 	if (result->HasError()) {

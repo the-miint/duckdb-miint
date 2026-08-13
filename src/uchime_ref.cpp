@@ -1,4 +1,5 @@
 #include "uchime_ref.hpp"
+#include "catalog_utils.hpp"
 #include "table_function_common.hpp"
 #include "uchime_common.hpp"
 
@@ -91,8 +92,7 @@ unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, Ta
 	data->types = GetUchimeOutputTypes(data->query_schema.id_type, data->ref_schema.id_type);
 
 	if (data->has_sample_id) {
-		auto &db = DatabaseInstance::GetDatabase(context);
-		Connection conn(db);
+		auto conn = MakeReadOnlyHelperConnection(context);
 		// Reserved = 18 uchime output column names (case-insensitive).
 		DiscoverSamples(conn, data->query_table, data->sample_info.sample_id_col, data->names, "detect_chimera_uchime",
 		                data->sample_info);

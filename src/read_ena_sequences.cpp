@@ -2,6 +2,7 @@
 #include "SequenceRecord.hpp"
 #include "ena_resolver_cache.hpp"
 #include "miint_log.hpp"
+#include "read_ena_sequences_policy.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include <cerrno>
 #include <fstream>
@@ -176,6 +177,16 @@ unique_ptr<FunctionData> ReadENASequencesTableFunction::Bind(ClientContext &cont
 		max_sequences = static_cast<uint64_t>(raw);
 	}
 
+	// `verify_md5`: on by default. Verifying downloaded bytes against ENA's
+	// reported fastq_md5 is cheap (incremental hashing over bytes already in
+	// flight) and catches silent truncation/corruption that a byte-count or
+	// row-count check would miss; there's no reason to make users opt in.
+	bool verify_md5 = true;
+	auto vm_param = input.named_parameters.find("verify_md5");
+	if (vm_param != input.named_parameters.end() && !vm_param->second.IsNull()) {
+		verify_md5 = vm_param->second.GetValue<bool>();
+	}
+
 	auto &db = DatabaseInstance::GetDatabase(context);
 
 	std::vector<miint::ENARunInfo> runs;
@@ -193,6 +204,7 @@ unique_ptr<FunctionData> ReadENASequencesTableFunction::Bind(ClientContext &cont
 	data->deferred_resolution = deferred;
 	data->db_ptr = &db;
 	data->max_sequences = max_sequences;
+	data->verify_md5 = verify_md5;
 	if (deferred) {
 		// Per-bind cache + ENAClient: metadata lookups across outer rows dedupe
 		// and the ENAClient's rate limiter (~3 req/sec) throttles globally.
@@ -309,8 +321,8 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 		}
 #endif
 		return std::make_unique<miint::PerRunReader>(global_state.fs, global_state.runs[idx], global_state.use_aspera,
-		                                             global_state.trim, global_state.open_mutex, cfg,
-		                                             bind_data.max_sequences, &context);
+		                                             global_state.trim, bind_data.verify_md5, global_state.open_mutex,
+		                                             cfg, bind_data.max_sequences, &context);
 	};
 
 	miint::SequenceRecordBatch batch;
@@ -443,15 +455,41 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 		}
 
 		if (batch.empty()) {
-			// Run completed successfully — wait for ascp (if any) and release.
-			// Finish() may throw on ascp non-zero exit; clean up the reader first
-			// so the throw doesn't leave dangling state behind.
+			// Run reached true EOF — Finish() verifies md5 (and reaps ascp), so it
+			// may throw on a digest mismatch or a bad ascp exit. Clean up the
+			// reader first so the throw/skip doesn't leave dangling state behind.
 			auto &reader = *global_state.readers[current_run_idx];
 			try {
 				reader.Finish();
-			} catch (...) {
+			} catch (const std::exception &e) {
 				global_state.readers[current_run_idx].reset();
-				throw;
+				// A single-run scan still throws: nothing else to discard, and a
+				// downstream that resolves a scalar accession one run per call
+				// relies on the error. A multi-run scan (varchar[] of accessions,
+				// or a project accession expanded to many runs) must NOT let one
+				// corrupt run abort the whole scan and throw away every sibling
+				// already downloaded -- skip it with a loud warning, like the
+				// open-failure and mid-stream branches, and let the rest land.
+				// The skipped run's rows were already emitted by true EOF; the
+				// warning + skipped_runs summary flag them as unverified.
+				if (!miint::ShouldSkipRunIntegrityFailure(global_state.total_runs)) {
+					throw;
+				}
+				auto &run = global_state.runs[current_run_idx];
+				miint::EmitWarning(context,
+				                   "read_ena_sequences: WARNING: run '%s' failed integrity verification at "
+				                   "completion (%s); skipping — its already-emitted rows are unverified",
+				                   run.run_accession, e.what());
+				{
+					lock_guard<mutex> skip_guard(global_state.skipped_lock);
+					global_state.skipped_runs.push_back(run.run_accession);
+				}
+				global_state.bytes_completed.fetch_add(run.total_bytes, std::memory_order_relaxed);
+				// release: publishes skipped_runs.push_back above to the summary
+				// thread's acquire load on runs_completed (see all_claimed branch).
+				global_state.runs_completed.fetch_add(1, std::memory_order_release);
+				local_state.has_run = false;
+				continue;
 			}
 			global_state.readers[current_run_idx].reset();
 			global_state.bytes_completed.fetch_add(global_state.runs[current_run_idx].total_bytes,
@@ -597,7 +635,7 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 	// download_method='aspera' in deferred mode).
 	auto make_reader_for = [&](const miint::ENARunInfo &run) {
 		return std::make_unique<miint::PerRunReader>(
-		    global.fs, run, /*use_aspera=*/false, bind_data.trim, global.open_mutex,
+		    global.fs, run, /*use_aspera=*/false, bind_data.trim, bind_data.verify_md5, global.open_mutex,
 		    static_cast<const miint::AsperaConfig *>(nullptr), bind_data.max_sequences, &context.client);
 	};
 
@@ -784,6 +822,7 @@ TableFunction ReadENASequencesTableFunction::GetFunction() {
 	tf.named_parameters["prefer_format"] = LogicalType::VARCHAR;
 	tf.named_parameters["trim_sff"] = LogicalType::BOOLEAN;
 	tf.named_parameters["max_sequences"] = LogicalType::BIGINT;
+	tf.named_parameters["verify_md5"] = LogicalType::BOOLEAN;
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	tf.table_scan_progress = Progress;
 	return tf;

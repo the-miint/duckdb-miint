@@ -112,6 +112,16 @@ static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFuncti
 	// Validate sequence_index parameter
 	ValidateSequenceIndexParameter(result->id_as_sequence_index, has_sequence_index);
 
+	// Same rationale as the read_id check above, for every other column the sink reads with
+	// a typed accessor. Without this, an INTEGER[] qual1 (what [40 for _ in range(n)]
+	// yields) or a non-VARCHAR sequence1 reaches the sink and aborts with a fatal INTERNAL
+	// error that invalidates the database (issue #191). Must run after the options are
+	// parsed: comment and sequence_index are only read when their option is on, and a
+	// present-but-unread column of the wrong type is harmless.
+	ValidateSequenceColumnTypes(result->indices, sql_types, /*validate_quals=*/true,
+	                            /*validate_comment=*/result->include_comment,
+	                            /*validate_sequence_index=*/result->id_as_sequence_index);
+
 	// Parse FASTQ-specific qual_offset parameter
 	if (!qual_offset_param.IsNull()) {
 		int64_t offset = qual_offset_param.GetValue<int64_t>();

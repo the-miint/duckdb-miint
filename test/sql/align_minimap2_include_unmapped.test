@@ -1,0 +1,163 @@
+# name: test/sql/align_minimap2_include_unmapped.test
+# description: Test include_unmapped for align_minimap2 (a row per query that produced no alignment)
+# group: [sql]
+
+require miint
+
+# WHY THIS MATTERS: with no row emitted for an unaligned query, the ABSENCE of a row conflates two
+# very different facts -- "this query is genuinely distant from every subject" and "the aligner
+# found no seed chain". Every consumer then has to rebuild "not measured" with an anti-join and
+# remember that the distinction exists. In practice people write
+# `coalesce(aln.identity, 0) < 0.90`, which reads "no chain found" as "definitively distant" and
+# silently inverts the safe default. That produced wrong conclusions downstream more than once,
+# including a quarantine step where 24% of candidates got no measurement and were all treated as
+# safe (#185).
+#
+# The contract: one row per input query, with reference/position/stop_position/mapq/cigar and every
+# tag_* NULL, so `WHERE reference IS NULL` is the test for "measured, did not align".
+
+statement ok
+CREATE TABLE iu_subj AS
+SELECT 'ref1' AS read_id,
+       'ACGTACGTTGCAAGGTCCATGAACGTTAGCCATTGCAGGATCCTTAAGGCCATGCAATTGGCCAAGGTTCCAATTGGCCTTAAGG' AS sequence1;
+
+# 'hit' is a verbatim slice of ref1; 'miss' shares nothing with it; 'empty' is the degenerate case
+# minimap2 cannot even be handed (it requires len > 0). All three are "measured" and must be
+# accounted for -- an empty query silently vanishing is the same defect in a smaller costume.
+statement ok
+CREATE TABLE iu_q AS SELECT * FROM (VALUES
+    ('hit',   'ACGTTGCAAGGTCCATGAACGTTAGCCATTGCAGGATCCTTAAGG'),
+    ('miss',  'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT'),
+    ('empty', '')
+) t(read_id, sequence1);
+
+# Default is unchanged: only the query that aligned appears. This is the regression guard -- the
+# new parameter must be opt-in, since callers already compensate with anti-joins.
+query T
+SELECT read_id FROM align_minimap2('iu_q', subject_table:='iu_subj', max_secondary:=0) ORDER BY read_id;
+----
+hit
+
+# With the flag: one row per input query, no query left unaccounted for.
+query T
+SELECT read_id FROM align_minimap2('iu_q', subject_table:='iu_subj', max_secondary:=0, include_unmapped:=true)
+ORDER BY read_id;
+----
+empty
+hit
+miss
+
+# The unmapped rows carry NULL, not the SAM '*'/0 text sentinels, so the idiom the issue asked for
+# works directly. Asserting every nulled column because each is emitted by a different setter --
+# reference goes through the id-column codec, position/stop_position through the int64 setter, mapq
+# through the uint8 setter, cigar through the string setter -- so they can regress independently.
+query TIIIIT
+SELECT read_id, position, stop_position, mapq, tag_as, cigar
+FROM align_minimap2('iu_q', subject_table:='iu_subj', max_secondary:=0, include_unmapped:=true)
+WHERE reference IS NULL ORDER BY read_id;
+----
+empty	NULL	NULL	NULL	NULL	NULL
+miss	NULL	NULL	NULL	NULL	NULL
+
+# The SAM unmapped flag (0x4) must be set, so flag-based filters agree with the NULL columns.
+# These two must never disagree: the NULL emission is keyed off this very bit.
+query TI
+SELECT read_id, flags FROM align_minimap2('iu_q', subject_table:='iu_subj', max_secondary:=0, include_unmapped:=true)
+WHERE flags & 4 != 0 ORDER BY read_id;
+----
+empty	4
+miss	4
+
+# ... and the aligned row is untouched by the flag: still a real reference, CIGAR and score.
+query TTTI
+SELECT read_id, reference, cigar, tag_as IS NOT NULL
+FROM align_minimap2('iu_q', subject_table:='iu_subj', max_secondary:=0, include_unmapped:=true)
+WHERE reference IS NOT NULL;
+----
+hit	ref1	45=	true
+
+# Every tag column must be NULL on an unmapped row -- they are emitted from two different setters
+# (int64 via a -1 sentinel, string via ""), so a miss in either would leak a bogus 0 or ''.
+#
+# tag_yt is the deliberate exception: it is the pair type, which is known regardless of whether the
+# read aligned, and mapped unpaired rows carry 'UU' too. Excluding it here is intentional, not an
+# oversight -- so assert its value rather than leaving the omission to be read as a mistake.
+query I
+SELECT count(*) FROM align_minimap2('iu_q', subject_table:='iu_subj', max_secondary:=0, include_unmapped:=true)
+WHERE reference IS NULL
+  AND tag_as IS NULL AND tag_xs IS NULL AND tag_ys IS NULL AND tag_xn IS NULL AND tag_xm IS NULL
+  AND tag_xo IS NULL AND tag_xg IS NULL AND tag_nm IS NULL AND tag_md IS NULL AND tag_sa IS NULL
+  AND tag_yt = 'UU';
+----
+2
+
+# Paired input takes a different code path (align_paired, which counts rows per SEGMENT rather than
+# per query), so it is asserted separately. R1 aligns and R2 does not, which SAM represents as two
+# rows -- the unmapped segment must get its own row rather than being collapsed into the query.
+#
+# The exact flag values are the point, because they are what proves the synthetic row's mate bits
+# are derived from the OTHER segment rather than hardcoded:
+#   73  = 0x1 paired | 0x8 mate unmapped | 0x40 first in pair   -- R1 mapped, but R2 did not,
+#                                                                  so R1 must carry mate-unmapped
+#   133 = 0x1 paired | 0x4 unmapped      | 0x80 second in pair  -- R2 unmapped, and 0x8 is absent
+#                                                                  because its mate DID map
+# A synthetic row that set 0x8 unconditionally would report 141 here and assert, falsely, that
+# nothing in the pair aligned.
+statement ok
+CREATE TABLE iu_q_paired AS SELECT * FROM (VALUES
+    ('pair1', 'ACGTTGCAAGGTCCATGAACGTTAGCCATTGCAGGATCCTTAAGG', 'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT')
+) t(read_id, sequence1, sequence2);
+
+query IT
+SELECT flags, reference IS NULL AS unmapped
+FROM align_minimap2('iu_q_paired', subject_table:='iu_subj', max_secondary:=0, include_unmapped:=true)
+ORDER BY flags;
+----
+73	false
+133	true
+
+# A paired record whose mate IS mapped must carry the mate's RNEXT/PNEXT. '*'/0 there makes the
+# record invalid (Picard ValidateSamFile: "MRNM should be set for paired reads") and breaks pair
+# reconstruction after a coordinate sort, which relies on the unmapped mate sitting at its
+# partner's coordinates. RNEXT reads back as '=' because htslib normalises it when it matches the
+# mate's own RNAME.
+query TI
+SELECT mate_reference, mate_position
+FROM align_minimap2('iu_q_paired', subject_table:='iu_subj', max_secondary:=0, include_unmapped:=true)
+WHERE reference IS NULL;
+----
+ref1	5
+
+statement ok
+DROP TABLE iu_q_paired;
+
+# --- The output must be writable as SAM/BAM (composition guard) ---
+#
+# WHY: unmapped rows carry NULL reference/position/mapq/cigar, and COPY FORMAT SAM rejects a NULL
+# cigar on a MAPPED record. Without the unmapped exemption in the writer these two features could
+# not be composed at all -- and `COPY (SELECT * FROM align_minimap2(..., include_unmapped := true))`
+# is the first thing a caller will try. This asserts the whole round trip, not just the write.
+statement ok
+CREATE TABLE iu_reflen AS SELECT 'ref1' AS reference, 1000::BIGINT AS length;
+
+statement ok
+COPY (SELECT * FROM align_minimap2('iu_q', subject_table:='iu_subj', max_secondary:=0, include_unmapped:=true))
+TO '__TEST_DIR__/iu_roundtrip.bam' (FORMAT BAM, REFERENCE_LENGTHS 'iu_reflen');
+
+# All three rows survive, and the unmapped ones come back as SAM's '*' sentinel -- NULL in SQL,
+# '*' on disk. Reading back gives '*', not NULL; that asymmetry is documented.
+query TIT
+SELECT read_id, flags, reference FROM read_sam('__TEST_DIR__/iu_roundtrip.bam') ORDER BY read_id;
+----
+empty	4	*
+hit	0	ref1
+miss	4	*
+
+statement ok
+DROP TABLE iu_reflen;
+
+statement ok
+DROP TABLE iu_q;
+
+statement ok
+DROP TABLE iu_subj;

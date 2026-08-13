@@ -15,6 +15,12 @@ struct ENARunInfo {
 	std::string sample_accession;
 	std::string experiment_accession;
 	std::vector<std::string> fastq_urls;
+	// ENA's per-file md5, aligned 1:1 with fastq_urls (same index i = same
+	// file). Empty when ENA did not report md5s for this run, or when the
+	// reported count didn't line up with fastq_urls after paired-file
+	// filtering -- see FromTSVRow. Never partially/misaligned: either fully
+	// populated and aligned, or fully empty.
+	std::vector<std::string> fastq_md5;
 	std::vector<AsperaPath> aspera_paths;
 	bool is_paired = false;
 	uint64_t total_bytes = 0;
@@ -30,6 +36,7 @@ struct ENAColumnIndexMap {
 	int fastq_ftp = -1;
 	int fastq_aspera = -1;
 	int fastq_bytes = -1;
+	int fastq_md5 = -1;
 	int library_layout = -1;
 	int submitted_ftp = -1;
 	int submitted_aspera = -1;

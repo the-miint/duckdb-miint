@@ -548,6 +548,16 @@ TableFunction AlignMinimap2ShardedTableFunction::GetFunction() {
 	tf.named_parameters["progress"] = LogicalType::BOOLEAN;
 	tf.named_parameters["min_chain_coverage"] = LogicalType::FLOAT;
 	tf.named_parameters["include_shard_name"] = LogicalType::BOOLEAN;
+	// occ_filter is per-index, so it applies cleanly to each shard independently (#187).
+	//
+	// include_unmapped is deliberately NOT offered here (#185). A query that finds no chain in
+	// shard A routinely maps in shard B, so a per-shard synthetic row would assert "did not
+	// align" about a query that did — the opposite of the guarantee the flag exists to give.
+	// Doing it correctly needs cross-shard reconciliation, emitting a row only for queries that
+	// mapped in no shard at all, which is a global aggregation this per-shard pipeline has no
+	// place to hang. Leaving it unregistered makes DuckDB reject the parameter outright rather
+	// than silently returning wrong rows.
+	tf.named_parameters["occ_filter"] = LogicalType::ANY;
 
 	tf.table_scan_progress = Progress;
 

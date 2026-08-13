@@ -1,0 +1,60 @@
+# name: test/sql/cluster_upgma_parity.test
+# description: cluster_upgma cophenetic-distance parity vs a committed scipy average-linkage (UPGMA) reference
+# group: [sql]
+
+# The fixture (8 samples, Euclidean condensed distances, no ties) and the scipy
+# reference cophenetic distances are committed under data/simsurvey/.
+# scipy.cluster.hierarchy.linkage(method='average')
+# IS UPGMA; cophenet(Z) gives each pair's cophenetic distance. The generator
+# (scipy, BSD-3) is dev-only and not committed.
+#
+# cluster_upgma emits a read_newick tree. In an ultrametric UPGMA tree the
+# cophenetic distance between two leaves is 2*height(LCA(i,j)). We reconstruct it
+# from the emitted tree alone: walking a leaf up to the root and summing
+# branch_length gives height(ancestor) (since branch_length(child) =
+# height(parent) - height(child) and height(leaf) = 0), so the LCA is the lowest
+# (min-height) common ancestor. This exercises MY tree, not scipy's.
+
+require miint
+
+statement ok
+CREATE TABLE ufix AS SELECT * FROM read_csv_auto('data/simsurvey/cluster_upgma_fixture.csv');
+
+statement ok
+CREATE TABLE ugold AS SELECT * FROM read_csv_auto('data/simsurvey/cluster_upgma_oracle.csv');
+
+statement ok
+CREATE TABLE utree AS SELECT * FROM cluster_upgma('ufix');
+
+# Reconstruct cophenetic distances from the emitted tree:
+#   height(node reached from a leaf) = sum of branch_length along leaf->node
+#   cophenetic(i,j) = 2 * height(LCA(i,j)) = 2 * min height over common ancestors.
+statement ok
+CREATE TABLE mycoph AS
+WITH RECURSIVE anc(leaf_name, node, height) AS (
+  SELECT name, node_index, CAST(0.0 AS DOUBLE) FROM utree WHERE is_tip
+  UNION ALL
+  SELECT a.leaf_name, c.parent_index, a.height + c.branch_length
+  FROM anc a JOIN utree c ON c.node_index = a.node
+  WHERE c.parent_index IS NOT NULL
+)
+SELECT a1.leaf_name AS sample_a, a2.leaf_name AS sample_b, 2 * MIN(a1.height) AS cophenetic
+FROM anc a1 JOIN anc a2 ON a1.node = a2.node AND a1.leaf_name < a2.leaf_name
+GROUP BY a1.leaf_name, a2.leaf_name;
+
+# Every reconstructed cophenetic distance matches scipy within an fp32-relative
+# tolerance (cluster_upgma reads the distance matrix as float32 internally).
+query I
+SELECT count(*) FROM mycoph m JOIN ugold g USING (sample_a, sample_b)
+WHERE abs(m.cophenetic - g.cophenetic) > 1e-4 * (1 + abs(g.cophenetic));
+----
+0
+
+# All 28 pairs are present on both sides and every pair is compared (no pair
+# silently dropped by the join -- else "0 disagreements" would be vacuous).
+query I
+SELECT (SELECT count(*) FROM mycoph) = 28
+   AND (SELECT count(*) FROM ugold) = 28
+   AND (SELECT count(*) FROM mycoph m JOIN ugold g USING (sample_a, sample_b)) = 28;
+----
+true

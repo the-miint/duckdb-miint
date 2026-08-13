@@ -6,7 +6,9 @@
 
 #include "duckdb/common/types.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "unifrac_support_biom.hpp"
+// CooRow only -- deliberately NOT unifrac_support_biom.hpp, which would pull in
+// unifrac-binaries' api.hpp and re-couple these generic readers to that feature.
+#include "feature_table_row.hpp"
 
 namespace duckdb::unifrac_internal {
 

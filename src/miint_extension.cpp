@@ -25,6 +25,7 @@
 #include <kseq++/seqio.hpp>
 #include <read_fastx.hpp>
 #include <read_alignments.hpp>
+#include <read_alignment_header.hpp>
 #include <read_sequences_sam.hpp>
 #include <read_sequences_sff.hpp>
 #include <align_minimap2.hpp>
@@ -70,7 +71,11 @@
 #include <align_sortmerna.hpp>
 #include <align_sortmerna_rrna.hpp>
 #endif
+#include <cluster_kmeans.hpp>
+#include <cluster_upgma.hpp>
+#include <community_distances.hpp>
 #include <deblur_table_function.hpp>
+#include <simulate_resemblance.hpp>
 #include <align_pairwise_wfa2_functions.hpp>
 #include <align_pairwise_ksw2_functions.hpp>
 #include <align_pairwise_ksw2_dual_affine_functions.hpp>
@@ -263,6 +268,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	ReadFastxTableFunction::Register(loader);
 	ReadAlignmentsTableFunction::Register(loader);
+	ReadAlignmentHeaderTableFunction::Register(loader);
 	ReadSequencesSamTableFunction::Register(loader);
 	ReadSequencesSFFTableFunction::Register(loader);
 #ifdef MIINT_HAS_HDF5
@@ -420,6 +426,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(install_gpl_boundary_stub_set);
 #endif
 	DeblurTableFunction::Register(loader);
+	RegisterSimulateResemblance(loader);
+	// Beta-diversity / ordination toolset. Independent of the UniFrac feature:
+	// these are pure in-repo C++ over generic table readers, so they are always
+	// registered. (`pcoa` / `permanova`, which consume their output, do need
+	// scikit-bio-binaries and stay behind MIINT_HAS_UNIFRAC below.)
+	RegisterCommunityDistances(loader);
+	RegisterClusterKmeans(loader);
+	RegisterClusterUpgma(loader);
 
 #ifdef MIINT_HAS_HDF5
 	CopyBiomFunction::Register(loader);

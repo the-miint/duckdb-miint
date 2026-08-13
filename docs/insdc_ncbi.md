@@ -4,6 +4,7 @@ MIINT provides integration with NCBI's GenBank and RefSeq.
 
 ## Table of contents
 
+- [Accessions are literals, not table names](#accessions-are-literals-not-table-names) - Applies to all three readers below; includes the idiom for driving them from accessions held in a table.
 - [Read metadata](#read-metadata) - Fetch record metadata from GenBank and RefSeq by accession.
 - [Read sequences](#read-sequences) - Fetch sequence data from GenBank and RefSeq by accession.
 - [Read annotations](#read-annotations) - Fetch annotation data from GenBank and RefSeq by accession.
@@ -12,6 +13,38 @@ MIINT provides integration with NCBI's GenBank and RefSeq.
   - [Remap retired taxids (`read_ncbi_taxdump_merged`)](#remap-retired-taxids-read_ncbi_taxdump_merged) - The retired→current taxid map.
   - [Look up lineages online (`read_ncbi_lineage`)](#look-up-lineages-online-read_ncbi_lineage) - Online/rate-limited: resolve a handful of taxids via E-utilities.
   - [Collapse the tree to lineages (`taxonomy_lineage`)](#collapse-the-tree-to-lineages-taxonomy_lineage) - Offline: rank-collapse a taxdump tree, identical schema to `read_ncbi_lineage`.
+
+### Accessions are literals, not table names
+
+`read_ncbi`, `read_ncbi_fasta` and `read_ncbi_annotation` take **literal** accessions — a VARCHAR or a
+VARCHAR[]. Passing the *name of a table* that holds accessions is rejected at bind time:
+
+```sql
+CREATE TABLE my_accessions AS SELECT 'NC_001416.1' AS accession;
+
+SELECT * FROM read_ncbi_annotation('my_accessions');
+-- Invalid Input Error: read_ncbi_annotation: 'my_accessions' is a table in the catalog,
+-- not an NCBI accession. ...
+```
+
+To drive one of these functions from accessions held in a table, hoist them into a list first. A
+subquery cannot be used as a table-function argument at all (`Binder Error: Table function cannot
+contain subqueries`), so use `SET VARIABLE` + `getvariable()`:
+
+```sql
+SET VARIABLE accs = (SELECT list(accession) FROM my_accessions);
+SELECT * FROM read_ncbi_annotation(getvariable('accs'));
+```
+
+The check keys off whether the string resolves to a table or view in the catalog, not off the string's
+shape — accession formats are open-ended (bare GenBank ids such as `J02459` carry no distinguishing
+prefix), so a pattern test would reject valid input. A name that is *not* in the catalog is still sent
+upstream as an accession.
+
+Both bare and qualified names are covered: a bare name is resolved against the session `search_path`,
+and a qualified one (`my_schema.accs`, `my_db.my_schema.accs`) is resolved as written. Versioned
+accessions are unaffected — `'NC_001416.1'` is *looked up* as schema `NC_001416` / relation `1`, finds
+nothing, and is sent upstream unchanged.
 
 ### Read metadata
 
@@ -66,6 +99,7 @@ WHERE molecule_type = 'DNA';
 
 **Notes:**
 - Empty accessions raise `InvalidInputException` at bind time
+- A table or view name passed where an accession belongs is rejected at bind time — see [Accessions are literals, not table names](#accessions-are-literals-not-table-names)
 - Invalid accessions that NCBI silently drops appear in `miint_warnings()` (filter with `SELECT * FROM miint_warnings() WHERE message LIKE '%read_ncbi%'`) — they do not raise
 - For bulk downloads, set `api_key` for the higher 10 req/s rate; with the default `batch_size=500` a 10,000-accession query is bound by ~20 round-trips, not by the per-accession rate cap
 
@@ -132,6 +166,7 @@ SELECT * FROM align_minimap2('reads', 'reference');
 - Large sequences (e.g., complete chromosomes) may take time to download
 - Output is compatible with all functions expecting `read_fastx` schema
 - Empty accessions raise `InvalidInputException` at bind time
+- A table or view name passed where an accession belongs is rejected at bind time — see [Accessions are literals, not table names](#accessions-are-literals-not-table-names)
 - Missing/invalid accessions appear in `miint_warnings()` rather than raising — query that table to see what NCBI dropped after a large batched fetch
 
 ### Read annotations
@@ -152,7 +187,7 @@ Fetch feature annotations from NCBI by accession number. Returns data in the sam
 - `source` (VARCHAR): Annotation source ('RefSeq', 'GenBank', or 'NCBI')
 - `type` (VARCHAR): Feature type (e.g., 'gene', 'CDS', 'mRNA')
 - `position` (INTEGER): 1-based start position
-- `stop_position` (INTEGER): 1-based end position
+- `stop_position` (INTEGER): 1-based **half-open** end position — i.e. NCBI's annotation `end` **+ 1**, normalized on read so it matches every other miint function. A feature's length is `stop_position - position`, with no `+ 1`. The raw NCBI `end` is `stop_position - 1`. This changed: it previously emitted the closed `end` directly. See [Coordinate conventions](reading.md#coordinate-conventions).
 - `score` (DOUBLE, nullable): Feature score (typically NULL for NCBI data)
 - `strand` (VARCHAR): Strand ('+' or '-')
 - `phase` (INTEGER, nullable): CDS phase (0, 1, 2) derived from codon_start qualifier
@@ -166,6 +201,7 @@ Fetch feature annotations from NCBI by accession number. Returns data in the sam
 - Handles complement strand (reversed positions)
 - Parses codon_start qualifier to set correct CDS phase
 - Warns on complex locations (join, complement) - uses outer bounds
+- A table or view name passed where an accession belongs is rejected at bind time — see [Accessions are literals, not table names](#accessions-are-literals-not-table-names)
 
 **Examples:**
 ```sql

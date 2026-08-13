@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rype.h"
+#include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
@@ -75,6 +76,45 @@ inline size_t SampleAvgReadLength(Connection &conn, const std::string &table_quo
 		}
 	}
 	return fallback;
+}
+
+//! Whether a materialized RYpe input table actually carries paired reads: true iff
+//! at least one row has a non-NULL sequence2.
+//!
+//! Callers must use this rather than the mere presence of a `sequence2` column.
+//! read_fastx always emits that column (see read_fastx.hpp), so single-end reads
+//! loaded the obvious way arrive with it all-NULL. Treating that as paired-end
+//! doubles RYpe's per-read memory estimate, which roughly halves the batch size,
+//! which doubles the number of full index loads — measured at ~1.8 h of waste on a
+//! 4 h job (#199).
+//!
+//! Deliberately a FULL scan, unlike SampleAvgReadLength's LIMIT 1000: a paired row
+//! beyond the sample would be missed, and a false negative under-budgets memory,
+//! which is the direction that OOMs. A false positive only costs time.
+//!
+//! Returns false for an empty table: bool_or over zero rows is NULL, and zero rows
+//! genuinely means zero paired rows, so false is the correct answer there rather
+//! than a guess.
+//!
+//! Throws on query failure — it does NOT fall back to false. Falling back would
+//! produce exactly the false negative described above, i.e. the OOM direction, and
+//! it would do so precisely when memory pressure is the likeliest cause of the
+//! failure. This query differs from the id_query in MaterializeRypeInputTempTable
+//! only in which column it selects, off the same just-created temp table on the same
+//! connection, and that one throws too; if this fails while its sibling succeeded,
+//! something is already wrong and Rule 10 says say so.
+inline bool TableHasPairedContent(Connection &conn, const std::string &table_quoted) {
+	auto result = conn.Query("SELECT bool_or(sequence2 IS NOT NULL) FROM " + table_quoted);
+	if (result->HasError()) {
+		throw InvalidInputException("Failed to detect paired content in temp table: %s", result->GetError());
+	}
+	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto chunk = materialized.Fetch();
+	if (!chunk || chunk->size() == 0) {
+		return false;
+	}
+	auto val = chunk->data[0].GetValue(0);
+	return !val.IsNull() && val.GetValue<bool>();
 }
 
 //! Column names (lowercased) and their storage types for a table/view,
@@ -305,16 +345,20 @@ BuildRypeArrowInput(Connection &conn, const std::string &tmp_table_name, bool in
 	return make_uniq<ResultArrowArrayStreamWrapper>(std::move(query_result), batch_size);
 }
 
-//! Drop the per-call TEMP table on `conn`. Safe with empty name (no-op) and
-//! with a name that doesn't exist (uses IF EXISTS). Errors are silently
-//! ignored — this runs in destructors where we cannot usefully propagate
-//! failures, and the connection's catalog cleanup will reap the table on
-//! teardown anyway.
+//! Drop the per-call TEMP table on `conn`. Safe with empty name (no-op) and with a
+//! name that doesn't exist (uses IF EXISTS). Never throws — this runs in destructors.
+//!
+//! This drop is REQUIRED, not merely an early release of memory. The rype input
+//! connections inherit the caller's TEMP catalog (#193, so a TEMP sequence_table
+//! resolves), which means the table lives in the user's session and does NOT get
+//! reaped when the connection is torn down. A failure therefore leaks an internal
+//! relation into the user's catalog, which is why DropHelperTempRelation warns
+//! instead of discarding the error.
 inline void DropRypeTempTable(Connection &conn, const std::string &tmp_table_name) {
 	if (tmp_table_name.empty()) {
 		return;
 	}
-	conn.Query("DROP TABLE IF EXISTS " + KeywordHelper::WriteOptionallyQuoted(tmp_table_name));
+	DropHelperTempRelation(conn, KeywordHelper::WriteOptionallyQuoted(tmp_table_name));
 }
 
 } // namespace duckdb

@@ -398,10 +398,16 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 	}
 
 	if (fdata.reference_lengths_table.has_value()) {
-		auto reference_lengths_map = ReadReferenceTable(context, fdata.reference_lengths_table.value());
+		// SORTED BY NAME, not the map's iteration order. A reference's index in the @SQ list IS
+		// its TID, and a BAM is coordinate-sorted by TID rather than by reference name -- so
+		// emitting @SQ in unordered_map hash order meant no ORDER BY the caller could write
+		// produced a coordinate-sorted file, and htslib consumers rejected the output (#173).
+		// Name order is deterministic regardless of scan parallelism and makes the natural
+		// `ORDER BY reference, position` correct.
+		auto reference_lengths = ReadReferenceTableSortedByName(context, fdata.reference_lengths_table.value());
 
 		// Add each reference to header
-		for (const auto &ref : reference_lengths_map) {
+		for (const auto &ref : reference_lengths) {
 			if (sam_hdr_add_line(gstate->header.get(), "SQ", "SN", ref.first.c_str(), "LN",
 			                     std::to_string(ref.second).c_str(), NULL) < 0) {
 				throw IOException("Failed to add reference to SAM header: %s", ref.first);
@@ -449,8 +455,11 @@ static unique_ptr<LocalFunctionData> SAMCopyInitializeLocal(ExecutionContext &co
 static bool ParseCIGAR(const string &cigar_str, std::vector<uint32_t> &cigar_buffer) {
 	cigar_buffer.clear();
 
-	// Handle "*" CIGAR (no alignment)
-	if (cigar_str == "*") {
+	// "*" and "" are the two spellings of "no CIGAR": the SAM sentinel, and what
+	// read_alignments/read_sam return for a record with zero CIGAR operations. Both parse to an
+	// empty buffer. Whether a record is ALLOWED to have no CIGAR depends on its unmapped flag,
+	// which the caller checks -- see the BAM_FUNMAP check in the Sink (#197).
+	if (cigar_str == "*" || cigar_str.empty()) {
 		return true;
 	}
 
@@ -461,6 +470,9 @@ static bool ParseCIGAR(const string &cigar_str, std::vector<uint32_t> &cigar_buf
 
 	ssize_t n_cigar = sam_parse_cigar(cigar_str.c_str(), &end, &cigar_array, &cigar_mem);
 
+	// A 0 return needs no separate test: both strings htslib returns 0 for -- "*" and one with
+	// no operation letters, e.g. "123" -- either returned above or leave *end at the unconsumed
+	// first byte, so the end check below already rejects them.
 	if (n_cigar < 0 || (end && *end != '\0')) {
 		if (cigar_array) {
 			free(cigar_array);
@@ -475,9 +487,21 @@ static bool ParseCIGAR(const string &cigar_str, std::vector<uint32_t> &cigar_buf
 	return true;
 }
 
-// Get reference TID from header, adding it dynamically if not present
-// When writing headerless SAM files, we add references with a sentinel length
-static int32_t GetReferenceTID(sam_hdr_t *header, const string &reference) {
+// Get reference TID from header, adding it dynamically if not present.
+//
+// allow_dynamic_append must be false whenever an @SQ header has been serialized to the file --
+// i.e. whenever include_header is true, which bind already ties to REFERENCE_LENGTHS being
+// supplied. Appending after sam_hdr_write() mutates only the in-memory header, so the added
+// entry never reaches the output and the record's reference becomes unrepresentable in the file
+// that was actually written: SAM read it back as '*', BAM dropped the record outright, neither
+// with any error (#198). Refusing is right because supplying REFERENCE_LENGTHS asserts the table
+// is the complete reference set, so a gap is a caller error.
+//
+// With include_header false there are no @SQ lines on disk to diverge from and each RNAME is
+// written verbatim from the in-memory header, so the append is lossless -- that is the
+// headerless-SAM case the mechanism exists for, and it stays.
+static int32_t GetReferenceTID(sam_hdr_t *header, const string &reference, bool allow_dynamic_append,
+                               const string &read_id, const char *column) {
 	if (reference == "*") {
 		return -1;
 	}
@@ -486,6 +510,14 @@ static int32_t GetReferenceTID(sam_hdr_t *header, const string &reference) {
 	// If reference not in header, add it with a sentinel length (2^31-1)
 	// This allows writing headerless SAM files without pre-defined reference lengths
 	if (tid < 0) {
+		if (!allow_dynamic_append) {
+			throw InvalidInputException(
+			    "Column '%s' is '%s' for read '%s', which is not in the REFERENCE_LENGTHS table. The header has "
+			    "already been written and cannot gain new @SQ lines, so this record could not be represented. "
+			    "REFERENCE_LENGTHS must cover every reference the records use (or use INCLUDE_HEADER=false to write "
+			    "headerless SAM).",
+			    column, reference, read_id);
+		}
 		constexpr const char *SENTINEL_LENGTH = "2147483647"; // 2^31-1, unknown length
 		if (sam_hdr_add_line(header, "SQ", "SN", reference.c_str(), "LN", SENTINEL_LENGTH, NULL) < 0) {
 			throw IOException("Failed to dynamically add reference to SAM header: %s", reference);
@@ -619,29 +651,52 @@ static void PrepareSeqQual(const SequenceDataMap &seq_data, const std::string &r
 // Identifier-column dispatch (read_id, reference, mate_reference)
 //===--------------------------------------------------------------------===//
 // Returns the SAM textual representation of an identifier-column cell.
-// - VARCHAR: bytes verbatim. Validity is intentionally not consulted: NULL
-//   VARCHAR slots pass through as whatever string_t::GetString() yields, not
-//   as SAM '*'. Callers producing nullable VARCHAR identifier columns are
-//   responsible for pre-filtering.
-// - BIGINT:  decimal stringification; NULL → SAM '*' sentinel.
+// - NULL → the SAM '*' sentinel, for every accepted type. VARCHAR used to be
+//   exempt and fell through to string_t::GetString() on an invalid slot, which
+//   emitted an EMPTY field: invalid SAM, and a BAM htslib refuses to read at
+//   all -- every record silently lost while the COPY reported success (#197).
+// - BIGINT: decimal stringification. UUID: canonical 36-char lowercase form.
+// - VARCHAR: bytes verbatim.
 static inline string ExtractSamIdField(const UnifiedVectorFormat &fmt, idx_t row_idx, const LogicalType &id_type) {
 	auto idx = fmt.sel->get_index(row_idx);
+	if (!fmt.validity.RowIsValid(idx)) {
+		return "*";
+	}
 	if (id_type.id() == LogicalTypeId::BIGINT) {
-		if (!fmt.validity.RowIsValid(idx)) {
-			return "*";
-		}
 		auto data = UnifiedVectorFormat::GetData<int64_t>(fmt);
 		return miint::FormatIdFromInt64(data[idx]);
 	}
 	if (id_type.id() == LogicalTypeId::UUID) {
-		if (!fmt.validity.RowIsValid(idx)) {
-			return "*";
-		}
 		auto data = UnifiedVectorFormat::GetData<hugeint_t>(fmt);
 		return UUID::ToString(data[idx]);
 	}
 	auto data = UnifiedVectorFormat::GetData<string_t>(fmt);
 	return data[idx].GetString();
+}
+
+//===--------------------------------------------------------------------===//
+// Required scalar columns
+//===--------------------------------------------------------------------===//
+// Reads a required fixed-width column, failing loud on NULL.
+//
+// Consulting validity is not optional: indexing the data array of an invalid slot is undefined,
+// and in practice yields different garbage depending on the vector's representation. Silently
+// accepting it is how a NULL flags could write a *mapped* record at an arbitrary position with the
+// COPY reporting success -- the same defect class as #197's NULL identifiers.
+//
+// null_means_zero is set by the caller for the columns where SAM itself defines 0 as "absent" AND
+// the record is unmapped, so nothing can be lost by substituting it.
+template <class T>
+static inline T RequiredScalar(const T *data, const UnifiedVectorFormat &fmt, idx_t row_idx, const char *column,
+                               const string &read_id, bool null_means_zero = false) {
+	auto idx = fmt.sel->get_index(row_idx);
+	if (fmt.validity.RowIsValid(idx)) {
+		return data[idx];
+	}
+	if (null_means_zero) {
+		return static_cast<T>(0);
+	}
+	throw InvalidInputException("Column '%s' is NULL for read: %s", column, read_id);
 }
 
 //===--------------------------------------------------------------------===//
@@ -754,26 +809,58 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 
 	// Process each row
 	for (idx_t i = 0; i < input.size(); i++) {
-		auto flags_idx = flags_data.sel->get_index(i);
-		auto position_idx = position_data.sel->get_index(i);
-		auto mapq_idx = mapq_data.sel->get_index(i);
 		auto cigar_idx = cigar_data.sel->get_index(i);
-		auto mate_position_idx = mate_position_data.sel->get_index(i);
-		auto template_length_idx = template_length_data.sel->get_index(i);
 
 		string read_id = ExtractSamIdField(read_id_data, i, fdata.read_id_type);
-		uint16_t flags = flags_ptr[flags_idx];
+
+		// flags must be present: it is what tells us whether the record even claims to be aligned,
+		// so every leniency below depends on it. A NULL here has no defensible reading.
+		uint16_t flags = RequiredScalar(flags_ptr, flags_data, i, "flags", read_id);
+		const bool row_unmapped = (flags & BAM_FUNMAP) != 0;
+
 		string reference = ExtractSamIdField(reference_data, i, fdata.reference_type);
-		int64_t position = position_ptr[position_idx];
-		uint8_t mapq = mapq_ptr[mapq_idx];
-		string cigar_str = cigar_ptr[cigar_idx].GetString();
+
+		// position and mapq are meaningless on an unmapped record, and SAM's own encoding for
+		// "absent" is 0 -- unambiguous, with no alignment that could be silently discarded. So a
+		// NULL is tolerated there and rejected on a mapped record. This is what lets
+		// align_minimap2's include_unmapped output be written straight out; those rows carry NULL
+		// position/mapq/cigar by design (#185).
+		int64_t position = RequiredScalar(position_ptr, position_data, i, "position", read_id, row_unmapped);
+		uint8_t mapq = RequiredScalar(mapq_ptr, mapq_data, i, "mapq", read_id, row_unmapped);
+
+		// Same rule for cigar, with '*' as the sentinel instead of 0. Note this must consult
+		// validity rather than reading the slot: GetString() on an invalid slot is undefined and
+		// observably varies -- "" from a materialized table, garbage from a constant-NULL vector.
+		string cigar_str;
+		if (cigar_data.validity.RowIsValid(cigar_idx)) {
+			cigar_str = cigar_ptr[cigar_idx].GetString();
+		} else if (row_unmapped) {
+			cigar_str = "*";
+		} else {
+			throw InvalidInputException("Column 'cigar' is NULL for read: %s (only an unmapped record, FLAG 0x4, may "
+			                            "omit it -- otherwise supply a CIGAR, or '*' plus the 0x4 flag)",
+			                            read_id);
+		}
+
 		string mate_reference = ExtractSamIdField(mate_reference_data, i, fdata.mate_reference_type);
-		int64_t mate_position = mate_position_ptr[mate_position_idx];
-		int64_t template_length = template_length_ptr[template_length_idx];
+		int64_t mate_position = RequiredScalar(mate_position_ptr, mate_position_data, i, "mate_position", read_id);
+		int64_t template_length =
+		    RequiredScalar(template_length_ptr, template_length_data, i, "template_length", read_id);
 
 		// Parse CIGAR
 		if (!ParseCIGAR(cigar_str, lstate.cigar_buffer)) {
 			throw InvalidInputException("Failed to parse CIGAR string '%s' for read: %s", cigar_str, read_id);
+		}
+
+		// A record that claims to be mapped must carry a CIGAR. samtools accepts this on read but
+		// silently rewrites the record as unmapped ("mapped query must have a CIGAR; treated as
+		// unmapped"), so writing one degrades the alignment with nothing in the SQL layer to show
+		// for it. Rewriting the caller's flags would be worse than refusing, so fail loud (#197).
+		// Unmapped records legitimately have no CIGAR -- that is the read_alignments round trip.
+		if (lstate.cigar_buffer.empty() && (flags & BAM_FUNMAP) == 0) {
+			throw InvalidInputException("Mapped read '%s' has no CIGAR (flags=%d): set the unmapped flag (0x4) or "
+			                            "supply a CIGAR",
+			                            read_id, flags);
 		}
 
 		// Validate position values before casting
@@ -812,15 +899,20 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 		{
 			lock_guard<mutex> glock(gstate.write_lock);
 
-			// Get reference TIDs (may add to header for headerless SAM)
-			int32_t tid = GetReferenceTID(gstate.header.get(), reference);
+			// Get reference TIDs. Appending to the header is only safe while none has been
+			// written to the file -- see GetReferenceTID. bind ties include_header to
+			// REFERENCE_LENGTHS being present, so this is exactly "the header on disk is the
+			// reference table".
+			const bool allow_dynamic_append = !fdata.include_header;
+			int32_t tid = GetReferenceTID(gstate.header.get(), reference, allow_dynamic_append, read_id, "reference");
 
 			// Handle mate_reference: "=" means same as reference
 			int32_t mtid;
 			if (mate_reference == "=") {
 				mtid = tid;
 			} else {
-				mtid = GetReferenceTID(gstate.header.get(), mate_reference);
+				mtid = GetReferenceTID(gstate.header.get(), mate_reference, allow_dynamic_append, read_id,
+				                       "mate_reference");
 			}
 
 			// Build bam1_t record

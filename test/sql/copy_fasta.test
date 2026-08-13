@@ -197,6 +197,70 @@ COPY (
 ----
 Inconsistent paired-end data
 
+# --- Column type validation (issue #191) ---
+#
+# WHY THIS MATTERS: the sink reads sequence1/sequence2/comment via GetData<string_t> with
+# no type dispatch. A mismatched type is not a wrong answer -- it trips a DuckDB assertion,
+# an INTERNAL error that INVALIDATES THE DATABASE for the rest of the session. #191 reported
+# this for FORMAT FASTQ's quality column; FORMAT FASTA has the same exposure on sequence1.
+statement ok
+CREATE TABLE fa_bad_seq1 AS SELECT 'r1' AS read_id, 12345678 AS sequence1;
+
+statement error
+COPY fa_bad_seq1 TO '__TEST_DIR__/fa_bad_seq1.fa' (FORMAT FASTA);
+----
+sequence1
+
+# The session must survive the rejection: a BinderException leaves the database usable,
+# an INTERNAL error does not.
+query I
+SELECT 1;
+----
+1
+
+statement ok
+DROP TABLE fa_bad_seq1;
+
+# Only columns this query actually reads are type-checked: sequence_index and comment are
+# read only when their option is on, so a present-but-unread column of the wrong type must
+# be accepted rather than rejected.
+statement error
+COPY (
+  SELECT 'r1' AS read_id, 'ACGT' AS sequence1, 7::INTEGER AS sequence_index
+) TO '__TEST_DIR__/fa_si_used.fa' (FORMAT FASTA, ID_AS_SEQUENCE_INDEX true);
+----
+sequence_index
+
+statement ok
+COPY (
+  SELECT 'r1' AS read_id, 'ACGT' AS sequence1, 7::INTEGER AS sequence_index
+) TO '__TEST_DIR__/fa_si_unused.fa' (FORMAT FASTA);
+
+statement error
+COPY (
+  SELECT 'r1' AS read_id, 'ACGT' AS sequence1, 99::INTEGER AS comment
+) TO '__TEST_DIR__/fa_cm_used.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
+----
+comment
+
+statement ok
+COPY (
+  SELECT 'r1' AS read_id, 'ACGT' AS sequence1, 99::INTEGER AS comment
+) TO '__TEST_DIR__/fa_cm_unused.fa' (FORMAT FASTA);
+
+# The FASTA writer ignores quality columns rather than reading them, so an INTEGER[] qual1
+# in the relation is harmless and must NOT be rejected -- only columns this writer actually
+# reads are type-checked.
+statement ok
+COPY (
+  SELECT 'r1' AS read_id, 'ACGT' AS sequence1, [40 for _ in range(4)] AS qual1
+) TO '__TEST_DIR__/fa_ignored_qual.fa' (FORMAT FASTA);
+
+query II
+SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/fa_ignored_qual.fa');
+----
+r1	ACGT
+
 # Cleanup
 statement ok
 DROP TABLE test_fasta_single;

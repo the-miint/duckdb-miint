@@ -188,17 +188,28 @@ fi
 
 # ASR (ancestral-state) parity goldens: independent ground-truth reconstructions
 # (Brownian-motion GLS via the phylogenetic VCV; ape::ace for the discrete Mk models).
-# The NUMERIC CSVs under data/asr/ ARE the fixed expected output -- committed and
-# pinned by data/asr/goldens.sha256, so there is nothing to regenerate here. The
-# offline generator is a dev-only R + ape (GPL) tool deliberately kept out of this
-# BSD tree (../duckdb-miint-localdocs/gen_asr_oracle.R); ape's code is never committed
-# or distributed -- only its numeric output is. The gate below just verifies the
-# committed goldens are intact before the parity test runs (require-env MIINT_ASR_PARITY_OK).
-if [ -f data/asr/goldens.sha256 ] && (cd data/asr && sha256sum -c --quiet goldens.sha256) 2>/dev/null; then
-    export MIINT_ASR_PARITY_OK=1
-else
-    echo "Warning: ASR parity goldens missing or corrupt; parity test skipped"
-fi
+# The NUMERIC CSVs under data/asr/ ARE the fixed expected output -- COMMITTED, so they
+# are always present and need no availability gate. The offline generator is a dev-only
+# R + ape (GPL) tool deliberately kept out of this BSD tree
+# (../duckdb-miint-localdocs/gen_asr_oracle.R); ape's code is never committed or
+# distributed -- only its numeric output is.
+#
+# These previously sat behind a require-env MIINT_ASR_PARITY_OK gate driven by
+# `sha256sum -c` against a data/asr/goldens.sha256 manifest. Both the gate and the
+# manifest were removed for the same reason as the data/simsurvey/ ones below:
+# `sha256sum -c` also fails on a MISMATCH, so a corrupted or edited golden SKIPPED the
+# parity test and left CI green -- the exact opposite of the intended protection, and a
+# Rule 10 (fail loud) violation. The parity tests themselves are the integrity check,
+# and they now always run: a corrupted golden fails them, and a missing one fails the
+# read_csv_auto that loads it.
+
+# NOTE: the Kuczynski-2010 oracle bands, community_distances distance goldens and
+# cluster_kmeans/cluster_upgma parity goldens under data/simsurvey/ are COMMITTED,
+# so they are always present and need no availability gate. They previously sat
+# behind sha256 gates; those were removed because `sha256sum -c` also fails on a
+# MISMATCH, which turned an edited golden into a silently SKIPPED parity test --
+# the opposite of the intended protection. The parity tests themselves are the
+# integrity check, and they now always run.
 
 # Procrustes parity goldens: independent numeric ground truth from SciPy
 # (scipy.spatial.procrustes full case) + a NumPy port of the q2#338 partial

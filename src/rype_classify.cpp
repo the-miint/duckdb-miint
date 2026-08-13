@@ -1,4 +1,5 @@
 #include "rype_classify.hpp"
+#include "catalog_utils.hpp"
 #include "rype_common.hpp"
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/printer.hpp"
@@ -41,10 +42,12 @@ RypeClassifyTableFunction::GlobalState::~GlobalState() {
 		rype_index_free(index);
 	}
 
-	// Drop the materialized temp table BEFORE releasing the connection that owns
-	// it. The temp table is per-connection so teardown would clean it up
-	// implicitly, but the explicit drop releases memory sooner. DropRypeTempTable
-	// is a no-op if either is unset (e.g., bind failure).
+	// Drop the materialized temp table BEFORE releasing the connection that owns it.
+	// This is REQUIRED, not just an early release of memory: input_connection inherits
+	// the caller's TEMP catalog (#193) so the table lives in the user's session and is
+	// NOT reaped when the connection is torn down. DropRypeTempTable is a no-op if
+	// either is unset (e.g., bind failure) and warns rather than swallowing a failed
+	// drop, since a failure is now a visible leak into the user's catalog.
 	if (input_connection) {
 		DropRypeTempTable(*input_connection, tmp_table_name);
 	}
@@ -157,6 +160,7 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 	// is destroyed before RYpe finishes consuming, the dangling pointer causes use-after-free.
 	auto &db = DatabaseInstance::GetDatabase(context);
 	gstate->input_connection = make_uniq<Connection>(db);
+	InheritTempObjects(context, *gstate->input_connection);
 	auto &conn = *gstate->input_connection;
 
 	// Use Arrow BinaryView (v1.4+) for BLOB columns — no offset-size limits.
@@ -176,7 +180,10 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 
 	// Estimate batch size. RYpe processes one batch at a time; using
 	// STANDARD_VECTOR_SIZE (2048) causes shard I/O to dominate.
-	int is_paired = bind_data.has_sequence2 ? 1 : 0;
+	//
+	// is_paired follows sequence2 CONTENT, not the column's presence (#199) — see
+	// TableHasPairedContent in rype_common.hpp for why, and why it probes the temp table.
+	int is_paired = TableHasPairedContent(conn, KeywordHelper::WriteOptionallyQuoted(gstate->tmp_table_name)) ? 1 : 0;
 	// is_large_binary=1: sub-connection uses arrow_large_buffer_size=true, so DuckDB
 	// exports BLOB as Arrow LargeBinary (i64 offsets) — no 2 GiB per-array limit.
 	size_t batch_size = rype_recommend_batch_size(gstate->index, avg_read_length, is_paired, 0, 1);
@@ -283,7 +290,9 @@ void RypeClassifyTableFunction::Execute(ClientContext &context, TableFunctionInp
 	output.SetCardinality(to_output);
 
 	// RYpe output schema: query_id (Int64), bucket_id (UInt32), score (Float64)
-	// Our output schema: read_id (VARCHAR), bucket_id (UINTEGER), bucket_name (VARCHAR), score (DOUBLE)
+	// Our output schema: read_id (mirrors the id_column's type -- VARCHAR, BIGINT or UUID;
+	// see Bind, which sets types[0] = id_type), bucket_id (UINTEGER), bucket_name (VARCHAR),
+	// score (DOUBLE)
 
 	// --- Column 0 (read_id) and Column 2 (bucket_name): manual transformation ---
 	// These require per-row lookups so they cannot be zero-copy.

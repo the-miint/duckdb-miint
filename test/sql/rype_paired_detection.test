@@ -1,0 +1,204 @@
+# name: test/sql/rype_paired_detection.test
+# description: Regression: RYpe paired-end detection must follow sequence2 CONTENT, not column presence (#199)
+# group: [sql]
+
+#
+# WHY THIS MATTERS
+#
+# rype_classify and rype_log_ratio derived RYpe's `is_paired` flag from whether a
+# `sequence2` COLUMN EXISTS, never from whether it holds anything. `is_paired`
+# feeds rype_recommend_batch_size, where it doubles the per-read memory estimate
+# and so roughly HALVES the batch size. rype_classify_arrow reloads the entire
+# index once per RecordBatch, so halving the batch size DOUBLES the number of
+# full index loads.
+#
+# That is not a micro-optimisation. On the reporting workload (WoL3 router, 193 GB
+# on disk, 14 shards) one full index load measured ~54 min and shard_load was
+# 99.9% of total classify time, so the two extra loads cost ~1.8 h on a job whose
+# baseline was 4 h.
+#
+# The trigger is completely ordinary SQL: read_fastx ALWAYS emits a `sequence2`
+# column (src/include/read_fastx.hpp), so single-end reads loaded the obvious way
+# carry an all-NULL sequence2 and were sized as if paired.
+#
+# WHAT THESE TESTS CAN AND CANNOT PROVE -- read before trusting them.
+#
+# The chosen batch size is not observable from SQL, and by decision we are not
+# adding a parameter to expose it. So NOTHING here fails on the original bug: the
+# classification RESULTS are identical either way, only the runtime differs.
+# These cases instead pin the two things SQL can check, both of which are real:
+#
+#   1. The optimisation must not change results. An all-NULL sequence2 must
+#      classify exactly like an absent sequence2, and genuine paired data must
+#      keep being treated as paired.
+#   2. The new content probe has its own failure modes, and these DO fail if it
+#      is written carelessly -- an empty table (bool_or over zero rows is NULL,
+#      not false) and a mixed table (some rows paired, some not).
+#
+# Detecting the sizing regression itself needs the batch size surfaced; that is
+# tracked with the rype memory-budget work, not here.
+#
+
+require miint
+
+# =============================================================================
+# 1. All-NULL sequence2 must behave exactly like an absent sequence2
+#    This is the issue's exact input shape (what read_fastx produces).
+# =============================================================================
+
+statement ok
+CREATE TABLE se_no_col AS SELECT * FROM (VALUES
+    ('seq1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('seq2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA'),
+    ('seq3', 'GGGGCCCCGGGGCCCCGGGGCCCCGGGGCCCCGGGGCCCCGGGGCCCCGGGG')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE se_null_col AS
+SELECT read_id, sequence1, CAST(NULL AS VARCHAR) AS sequence2 FROM se_no_col;
+
+# Identical bucket assignments and scores, whichever shape the input has.
+query III
+SELECT read_id, bucket_name, round(score, 9) AS score
+FROM rype_classify('data/rype/test.ryxdi', 'se_null_col', threshold := 0.05)
+EXCEPT
+SELECT read_id, bucket_name, round(score, 9) AS score
+FROM rype_classify('data/rype/test.ryxdi', 'se_no_col', threshold := 0.05);
+----
+
+# ... and the reverse direction, so neither side can merely be a subset.
+query III
+SELECT read_id, bucket_name, round(score, 9) AS score
+FROM rype_classify('data/rype/test.ryxdi', 'se_no_col', threshold := 0.05)
+EXCEPT
+SELECT read_id, bucket_name, round(score, 9) AS score
+FROM rype_classify('data/rype/test.ryxdi', 'se_null_col', threshold := 0.05);
+----
+
+# Guard against both sides being vacuously empty: assert a positive row count.
+query I
+SELECT COUNT(*) > 0
+FROM rype_classify('data/rype/test.ryxdi', 'se_null_col', threshold := 0.05);
+----
+true
+
+# =============================================================================
+# 2. Empty table carrying a sequence2 column
+#    bool_or() over zero rows returns NULL, not false. A content probe that
+#    treats NULL as "unknown" and propagates it will trip here.
+# =============================================================================
+
+statement ok
+CREATE TABLE se_empty_with_col AS SELECT * FROM se_null_col WHERE FALSE;
+
+query I
+SELECT COUNT(*) FROM rype_classify('data/rype/test.ryxdi', 'se_empty_with_col');
+----
+0
+
+# =============================================================================
+# 3. Mixed table -- some rows paired, some not
+#    Semantics pinned deliberately: ANY paired row means treat the input as
+#    paired, which yields the smaller (more conservative) batch size. Under-
+#    budgeting memory is the failure that OOMs; over-budgeting only costs time.
+#    Note ena_upload_reads instead ERRORS on mixed layouts -- that is a
+#    submission-correctness question, whereas this is only batch sizing.
+# =============================================================================
+
+statement ok
+CREATE TABLE se_mixed AS SELECT * FROM (VALUES
+    ('mix1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT', 'GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('mix2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA', NULL)
+) AS t(read_id, sequence1, sequence2);
+
+query I
+SELECT COUNT(*) > 0
+FROM rype_classify('data/rype/test.ryxdi', 'se_mixed', threshold := 0.05);
+----
+true
+
+# =============================================================================
+# 4. Genuine paired content must still be detected as paired
+#    Expected values match the existing paired case in rype_classify.test, so a
+#    content-derived flag that wrongly reported single-end would still have to
+#    reproduce these exactly.
+# =============================================================================
+
+statement ok
+CREATE TABLE pe_real AS SELECT * FROM (VALUES
+    ('paired1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT', 'GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('paired2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA', 'AATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATT')
+) AS t(read_id, sequence1, sequence2);
+
+query II
+SELECT bucket_name, COUNT(*) as hits
+FROM rype_classify('data/rype/test.ryxdi', 'pe_real', threshold := 0.05)
+GROUP BY bucket_name
+ORDER BY bucket_name;
+----
+bucket_alpha	2
+bucket_beta	2
+bucket_gamma	2
+
+# =============================================================================
+# 5. rype_log_ratio carries the IDENTICAL defect and must be fixed with it
+#    (src/rype_log_ratio.cpp -- its own is_paired, its own
+#    rype_recommend_batch_size call). Fixing only rype_classify leaves #199 live.
+# =============================================================================
+
+statement ok
+CREATE TABLE lr_no_col AS SELECT * FROM (VALUES
+    ('num_match', 'GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('denom_match', 'AATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATT'),
+    ('both_match', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE lr_null_col AS
+SELECT read_id, sequence1, CAST(NULL AS VARCHAR) AS sequence2 FROM lr_no_col;
+
+query III
+SELECT read_id, round(log_ratio, 9) AS lr, 1
+FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'lr_null_col')
+EXCEPT
+SELECT read_id, round(log_ratio, 9) AS lr, 1
+FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'lr_no_col');
+----
+
+query I
+SELECT COUNT(*) FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'lr_null_col');
+----
+3
+
+# Empty input with a sequence2 column, through log_ratio's own probe.
+statement ok
+CREATE TABLE lr_empty_with_col AS SELECT * FROM lr_null_col WHERE FALSE;
+
+query I
+SELECT COUNT(*) FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'lr_empty_with_col');
+----
+0
+
+statement ok
+DROP TABLE se_no_col;
+
+statement ok
+DROP TABLE se_null_col;
+
+statement ok
+DROP TABLE se_empty_with_col;
+
+statement ok
+DROP TABLE se_mixed;
+
+statement ok
+DROP TABLE pe_real;
+
+statement ok
+DROP TABLE lr_no_col;
+
+statement ok
+DROP TABLE lr_null_col;
+
+statement ok
+DROP TABLE lr_empty_with_col;

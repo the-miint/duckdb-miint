@@ -7,14 +7,12 @@
 # on moderate random trees, so agreement is strong independent corroboration. The
 # goldens under data/asr/ were generated OFFLINE by a dev-only R + ape script kept out
 # of this BSD tree (../duckdb-miint-localdocs/gen_asr_oracle.R) and committed as NUMBERS
-# only (never ape's code). run_tests.sh exports MIINT_ASR_PARITY_OK when the committed
-# goldens are intact. NB: ape::ace(method="ML") is NOT the oracle -- its
-# continuous-ML reconstruction is inaccurate (off ~1e-2 where our method matches
-# this GLS truth to ~1e-14).
+# only (never ape's code). The goldens are committed, so this test always runs: a
+# corrupted or missing golden fails it loudly rather than skipping it. NB:
+# ape::ace(method="ML") is NOT the oracle -- its continuous-ML reconstruction is
+# inaccurate (off ~1e-2 where our method matches this GLS truth to ~1e-14).
 
 require miint
-
-require-env MIINT_ASR_PARITY_OK
 
 # ---- Bifurcating case (60 tips, 59 internal nodes) ----
 statement ok

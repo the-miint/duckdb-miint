@@ -329,6 +329,452 @@ SELECT COUNT(*) FROM read_sam('__TEST_DIR__/view_ref.bam');
 ----
 4
 
+# --- @SQ header order (issue #173) ---
+#
+# WHY THIS MATTERS: a BAM is coordinate-sorted by TID -- the @SQ index -- not by reference
+# NAME. The @SQ order used to be the iteration order of a std::unordered_map, i.e. hash-bucket
+# order: deterministic, but equal to neither the reference table's row order, nor its reverse,
+# nor name order. So NO `ORDER BY` the caller could write produced a coordinate-sorted BAM,
+# and htslib-based consumers rejected the output outright (metabat2's
+# jgi_summarize_bam_contig_depths: "the bam file is not sorted!"). Measured on a real file:
+# 11,390 of 925,483 records stepped backwards in tid despite being written
+# ORDER BY reference, position.
+#
+# The contract is now: @SQ is emitted sorted by reference name. That is deterministic
+# regardless of scan parallelism, and it makes `ORDER BY reference, position` actually yield
+# a coordinate-sorted BAM.
+#
+# NOTE: karyotype order (chr1..chr9, chr10) is deliberately NOT expressible this way --
+# 'chr10' sorts before 'chr2'. A caller needing that wants an explicit ordinal column; see
+# the follow-up noted on #173.
+#
+# These names are the reporter's own divergent case: with s<i>.ctg%06dl names the old
+# hash order diverged from the table order at n=3.
+statement ok
+CREATE TABLE sq_refs AS
+SELECT 's1.ctg' || lpad(i::VARCHAR, 6, '0') || 'l' AS reference, 1000::BIGINT AS length
+FROM range(1, 7) t(i);
+
+# NOTE: mate_reference is the '*' sentinel, NOT NULL. A NULL VARCHAR mate_reference is
+# currently written as an EMPTY RNEXT field rather than '*', which produces a BAM that htslib
+# refuses to read ("Numerical result out of range") with zero records recovered. That is a
+# separate pre-existing bug; using NULL here would make the BAM assertions below pass
+# vacuously on an empty file.
+statement ok
+CREATE TABLE sq_aln AS
+SELECT 'r1' AS read_id, 0::USMALLINT AS flags, 's1.ctg000001l' AS reference,
+       1::BIGINT AS position, 2::BIGINT AS stop_position, 60::UTINYINT AS mapq, '1M' AS cigar,
+       '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length;
+
+statement ok
+COPY sq_aln TO '__TEST_DIR__/sq_asc.sam' (FORMAT SAM, INCLUDE_HEADER true, REFERENCE_LENGTHS 'sq_refs');
+
+# @SQ must come out name-sorted. Row order is preserved by read_csv, so the sequence of rows
+# below IS the emitted header order -- before the fix this returned 5,4,3,2,6,1.
+query T
+SELECT regexp_extract(line, 'SN:([^\t]+)', 1) AS sn
+FROM read_csv('__TEST_DIR__/sq_asc.sam', delim='\x1f', header=false,
+              columns={'line':'VARCHAR'}, auto_detect=false, quote='', escape='')
+WHERE line LIKE '@SQ%';
+----
+s1.ctg000001l
+s1.ctg000002l
+s1.ctg000003l
+s1.ctg000004l
+s1.ctg000005l
+s1.ctg000006l
+
+# The emitted order must NOT depend on how the reference table was built. A DESC-ordered
+# table must yield the identical header -- this is what makes the contract usable.
+statement ok
+CREATE TABLE sq_refs_desc AS SELECT * FROM sq_refs ORDER BY reference DESC;
+
+statement ok
+COPY sq_aln TO '__TEST_DIR__/sq_desc.sam' (FORMAT SAM, INCLUDE_HEADER true, REFERENCE_LENGTHS 'sq_refs_desc');
+
+query T
+SELECT regexp_extract(line, 'SN:([^\t]+)', 1) AS sn
+FROM read_csv('__TEST_DIR__/sq_desc.sam', delim='\x1f', header=false,
+              columns={'line':'VARCHAR'}, auto_detect=false, quote='', escape='')
+WHERE line LIKE '@SQ%';
+----
+s1.ctg000001l
+s1.ctg000002l
+s1.ctg000003l
+s1.ctg000004l
+s1.ctg000005l
+s1.ctg000006l
+
+# The BAM path uses the same header builder, so assert it round-trips every record with the
+# references intact.
+#
+# NB: the assertions in THIS block do not verify TID monotonicity. read_alignments/read_sam
+# expose no raw tid column -- each record's `reference` is decoded via sam_hdr_tid2name against
+# the file's own embedded header, and name<->tid is a bijection fixed when the header is built.
+# So reading names back yields ascending names whatever the @SQ order was, on buggy code too.
+# The name-order assertions above are the real verification of the contract here.
+#
+# The genuine tid-order assertion this comment used to say was impossible now exists: #174 added
+# read_alignment_header, and test/sql/read_alignment_header.test asserts tid order for a written
+# BAM directly, both against literal values and as the invariant "tid order == name order".
+statement ok
+CREATE TABLE sq_multi AS
+SELECT 'r' || i AS read_id, 0::USMALLINT AS flags,
+       's1.ctg' || lpad(i::VARCHAR, 6, '0') || 'l' AS reference,
+       1::BIGINT AS position, 2::BIGINT AS stop_position, 60::UTINYINT AS mapq, '1M' AS cigar,
+       '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length
+FROM range(1, 7) t(i);
+
+statement ok
+COPY (SELECT * FROM sq_multi ORDER BY reference, position)
+TO '__TEST_DIR__/sq_sorted.bam' (FORMAT BAM, REFERENCE_LENGTHS 'sq_refs');
+
+# Every record must survive the round trip. Guards against the empty-BAM failure mode: an
+# assertion of "nothing is out of order" passes vacuously on a file with no records.
+query I
+SELECT COUNT(*) FROM read_sam('__TEST_DIR__/sq_sorted.bam');
+----
+6
+
+query T
+SELECT DISTINCT reference FROM read_sam('__TEST_DIR__/sq_sorted.bam') ORDER BY reference;
+----
+s1.ctg000001l
+s1.ctg000002l
+s1.ctg000003l
+s1.ctg000004l
+s1.ctg000005l
+s1.ctg000006l
+
+statement ok
+DROP TABLE sq_refs;
+
+statement ok
+DROP TABLE sq_refs_desc;
+
+statement ok
+DROP TABLE sq_aln;
+
+statement ok
+DROP TABLE sq_multi;
+
+# --- NULL VARCHAR identifier columns write the '*' sentinel (issue #197) ---
+#
+# WHY THIS MATTERS: docs/writing.md contracts NULL BIGINT/UUID identifiers as the SAM '*'
+# sentinel. VARCHAR was the outlier -- a NULL VARCHAR was written as an EMPTY field, which is
+# invalid SAM whatever the reader tolerates. For BAM the consequence was total silent data
+# loss: htslib refused the malformed RNEXT ("Numerical result out of range") and every record
+# was dropped, while the COPY reported success and left a non-empty, header-bearing file that
+# even `samtools quickcheck` accepts. NULL mate_reference is the natural idiom for single-end
+# data, so this was reachable without doing anything unusual.
+#
+# The COUNT assertions are load-bearing, not decoration: a "mate_reference is *" check passes
+# vacuously on a file with zero records, which is exactly how this bug hid behind #173's tests.
+statement ok
+CREATE TABLE null_id_refs AS SELECT 'ctg1' AS reference, 1000::BIGINT AS length;
+
+statement ok
+CREATE TABLE null_mate_aln AS
+SELECT 'r' || i AS read_id, 0::USMALLINT AS flags, 'ctg1' AS reference,
+       1::BIGINT AS position, 2::BIGINT AS stop_position, 60::UTINYINT AS mapq, '1M' AS cigar,
+       NULL::VARCHAR AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length
+FROM range(1, 4) t(i);
+
+statement ok
+COPY null_mate_aln TO '__TEST_DIR__/null_mate.bam' (FORMAT BAM, REFERENCE_LENGTHS 'null_id_refs');
+
+query I
+SELECT COUNT(*) FROM read_sam('__TEST_DIR__/null_mate.bam');
+----
+3
+
+query III
+SELECT read_id, reference, mate_reference
+FROM read_sam('__TEST_DIR__/null_mate.bam') ORDER BY read_id;
+----
+r1	ctg1	*
+r2	ctg1	*
+r3	ctg1	*
+
+# Assert on the raw text too: the defect was an empty 7th field (two consecutive tabs), and a
+# reader that tolerates it would hide the regression. RNEXT must literally be '*'.
+statement ok
+COPY null_mate_aln TO '__TEST_DIR__/null_mate.sam' (FORMAT SAM, REFERENCE_LENGTHS 'null_id_refs');
+
+query T
+SELECT DISTINCT split_part(line, chr(9), 7) AS rnext
+FROM read_csv('__TEST_DIR__/null_mate.sam', delim='\x1f', header=false,
+              columns={'line':'VARCHAR'}, auto_detect=false, quote='', escape='')
+WHERE line NOT LIKE '@%';
+----
+*
+
+# read_id and reference take the same path, so pin all three together -- mirrors
+# copy_sam_bigint.test's NULL-id test so the VARCHAR and BIGINT contracts cannot drift.
+statement ok
+CREATE TABLE null_all_ids AS SELECT
+    NULL::VARCHAR AS read_id,
+    4::USMALLINT AS flags,
+    NULL::VARCHAR AS reference,
+    0::BIGINT AS position,
+    0::BIGINT AS stop_position,
+    0::UTINYINT AS mapq,
+    '*' AS cigar,
+    NULL::VARCHAR AS mate_reference,
+    0::BIGINT AS mate_position,
+    0::BIGINT AS template_length;
+
+statement ok
+COPY null_all_ids TO '__TEST_DIR__/null_varchar_ids.sam'
+(FORMAT SAM, INCLUDE_HEADER false, REFERENCE_LENGTHS 'null_id_refs');
+
+query III
+SELECT read_id, reference, mate_reference
+FROM read_sam('__TEST_DIR__/null_varchar_ids.sam', reference_lengths='null_id_refs');
+----
+*	*	*
+
+statement ok
+DROP TABLE null_all_ids;
+
+statement ok
+DROP TABLE null_mate_aln;
+
+# --- A mapped record must carry a CIGAR; NULL is never a CIGAR (issue #197) ---
+#
+# WHY THIS MATTERS: htslib will not represent a mapped record with no CIGAR. samtools reads one
+# and silently rewrites it -- "[W::sam_parse1] mapped query must have a CIGAR; treated as
+# unmapped", FLAG 0 becoming 4 -- so writing one degrades the alignment, and the only trace on
+# our side was htslib's own "No CIGAR operations" line on stderr emitted from inside the WRITER
+# (ParseCIGAR called sam_parse_cigar, which logs and returns 0). A CIGAR dropped by a bad join
+# became a mapped record with no alignment and a successful COPY. We refuse instead: rewriting
+# the caller's flags the way samtools does would be a second silent mutation.
+#
+# The rule is keyed on the unmapped flag (0x4), NOT on the spelling, because '' and '*' are the
+# same value here -- read_alignments returns '' for a record whose CIGAR is '*' on disk, so
+# rejecting '' outright would break `COPY (SELECT * FROM read_alignments(...))` on any unmapped
+# read. Both spellings are asserted in both directions below.
+statement ok
+CREATE TABLE null_cigar_aln AS
+SELECT 'r1' AS read_id, 0::USMALLINT AS flags, 'ctg1' AS reference,
+       1::BIGINT AS position, 60::UTINYINT AS mapq, NULL::VARCHAR AS cigar,
+       '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length;
+
+statement error
+COPY null_cigar_aln TO '__TEST_DIR__/null_cigar.sam' (FORMAT SAM, REFERENCE_LENGTHS 'null_id_refs');
+----
+Column 'cigar' is NULL for read: r1
+
+# --- Every required fixed-width column rejects NULL (issue #197, same defect class) ---
+#
+# WHY: indexing the data array of an invalid slot is undefined. #197 was that bug for the
+# identifier columns; flags/position/mapq/mate_position/template_length had it too. The worst case
+# is `flags`: a LEFT JOIN that misses drops it to NULL, and reading the slot anyway can yield 0 --
+# writing a MAPPED record at a garbage position while the COPY reports success.
+#
+# flags is rejected unconditionally: it is what says whether the record claims to be aligned, so
+# the unmapped leniency below cannot be evaluated without it.
+statement error
+COPY (SELECT 'r1' AS read_id, NULL::USMALLINT AS flags, 'ctg1' AS reference,
+             1::BIGINT AS position, 60::UTINYINT AS mapq, '1M' AS cigar,
+             '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length)
+TO '__TEST_DIR__/null_flags.sam' (FORMAT SAM, REFERENCE_LENGTHS 'null_id_refs');
+----
+Column 'flags' is NULL for read: r1
+
+statement error
+COPY (SELECT 'r1' AS read_id, 0::USMALLINT AS flags, 'ctg1' AS reference,
+             NULL::BIGINT AS position, 60::UTINYINT AS mapq, '1M' AS cigar,
+             '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length)
+TO '__TEST_DIR__/null_position.sam' (FORMAT SAM, REFERENCE_LENGTHS 'null_id_refs');
+----
+Column 'position' is NULL for read: r1
+
+statement error
+COPY (SELECT 'r1' AS read_id, 0::USMALLINT AS flags, 'ctg1' AS reference,
+             1::BIGINT AS position, NULL::UTINYINT AS mapq, '1M' AS cigar,
+             '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length)
+TO '__TEST_DIR__/null_mapq.sam' (FORMAT SAM, REFERENCE_LENGTHS 'null_id_refs');
+----
+Column 'mapq' is NULL for read: r1
+
+statement error
+COPY (SELECT 'r1' AS read_id, 0::USMALLINT AS flags, 'ctg1' AS reference,
+             1::BIGINT AS position, 60::UTINYINT AS mapq, '1M' AS cigar,
+             '*' AS mate_reference, NULL::BIGINT AS mate_position, 0::BIGINT AS template_length)
+TO '__TEST_DIR__/null_mate_position.sam' (FORMAT SAM, REFERENCE_LENGTHS 'null_id_refs');
+----
+Column 'mate_position' is NULL for read: r1
+
+statement error
+COPY (SELECT 'r1' AS read_id, 0::USMALLINT AS flags, 'ctg1' AS reference,
+             1::BIGINT AS position, 60::UTINYINT AS mapq, '1M' AS cigar,
+             '*' AS mate_reference, 0::BIGINT AS mate_position, NULL::BIGINT AS template_length)
+TO '__TEST_DIR__/null_tlen.sam' (FORMAT SAM, REFERENCE_LENGTHS 'null_id_refs');
+----
+Column 'template_length' is NULL for read: r1
+
+# Both spellings of the same NULL are pinned. Reading a string_t out of an invalid slot is
+# undefined, and the two differed in practice: a NULL materialized in a TABLE yielded "" and was
+# written silently, while an inline constant-NULL vector yielded garbage that tripped a
+# different htslib error ("CIGAR length invalid at position 1"). Neither is acceptable, and only
+# the validity check makes the outcome independent of the vector's representation.
+statement error
+COPY (SELECT 'r1' AS read_id, 0::USMALLINT AS flags, 'ctg1' AS reference,
+             1::BIGINT AS position, 60::UTINYINT AS mapq, NULL::VARCHAR AS cigar,
+             '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length)
+TO '__TEST_DIR__/null_cigar_inline.sam' (FORMAT SAM, REFERENCE_LENGTHS 'null_id_refs');
+----
+Column 'cigar' is NULL for read: r1
+
+# On an UNMAPPED record (FLAG 0x4) a NULL cigar/position/mapq is accepted and written as the SAM
+# sentinels, because there is no alignment that substituting them could discard -- the hazard the
+# rejection guards against exists only on a mapped record.
+#
+# This is what makes align_minimap2(include_unmapped := true) output writable: those rows carry
+# NULL reference/position/mapq/cigar by design (#185), and without this the two features could not
+# be composed at all.
+statement ok
+COPY (SELECT 'r1' AS read_id, 4::USMALLINT AS flags, NULL::VARCHAR AS reference,
+             NULL::BIGINT AS position, NULL::UTINYINT AS mapq, NULL::VARCHAR AS cigar,
+             '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length)
+TO '__TEST_DIR__/null_cigar_unmapped.sam' (FORMAT SAM, REFERENCE_LENGTHS 'null_id_refs');
+
+query III
+SELECT read_id, flags, reference FROM read_sam('__TEST_DIR__/null_cigar_unmapped.sam');
+----
+r1	4	*
+
+# Mapped (0x4 clear) + no CIGAR, in both spellings.
+statement error
+COPY (SELECT 'r1' AS read_id, 0::USMALLINT AS flags, 'ctg1' AS reference,
+             1::BIGINT AS position, 60::UTINYINT AS mapq, '' AS cigar,
+             '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length)
+TO '__TEST_DIR__/empty_cigar.sam' (FORMAT SAM, REFERENCE_LENGTHS 'null_id_refs');
+----
+Mapped read 'r1' has no CIGAR (flags=0)
+
+statement error
+COPY (SELECT 'r1' AS read_id, 0::USMALLINT AS flags, 'ctg1' AS reference,
+             1::BIGINT AS position, 60::UTINYINT AS mapq, '*' AS cigar,
+             '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length)
+TO '__TEST_DIR__/star_cigar_mapped.sam' (FORMAT SAM, REFERENCE_LENGTHS 'null_id_refs');
+----
+Mapped read 'r1' has no CIGAR (flags=0)
+
+# Unmapped (0x4 set) + no CIGAR is legitimate and must keep working, in both spellings. This is
+# the read_alignments round trip: the reader hands back '' for an on-disk '*'.
+statement ok
+COPY (SELECT 'r_star' AS read_id, 4::USMALLINT AS flags, '*' AS reference,
+             0::BIGINT AS position, 0::UTINYINT AS mapq, '*' AS cigar,
+             '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length
+      UNION ALL
+      SELECT 'r_empty', 4::USMALLINT, '*', 0::BIGINT, 0::UTINYINT, '',
+             '*', 0::BIGINT, 0::BIGINT)
+TO '__TEST_DIR__/unmapped_no_cigar.sam' (FORMAT SAM, REFERENCE_LENGTHS 'null_id_refs');
+
+query III
+SELECT read_id, flags, cigar FROM read_sam('__TEST_DIR__/unmapped_no_cigar.sam') ORDER BY read_id;
+----
+r_empty	4	(empty)
+r_star	4	(empty)
+
+statement ok
+DROP TABLE null_cigar_aln;
+
+statement ok
+DROP TABLE null_id_refs;
+
+# --- REFERENCE_LENGTHS must cover every reference used (issue #198) ---
+#
+# WHY THIS MATTERS: GetReferenceTID appends a missing reference to the header with a sentinel
+# length. That exists for headerless SAM, where it is correct -- but it ran unconditionally,
+# including after sam_hdr_write() had already serialized the header. The appended @SQ therefore
+# never reached the file, so the record's reference was unrepresentable in the output: SAM read
+# it back as '*' (name silently gone), BAM dropped the record entirely. No error, no warning,
+# exit 0, and `samtools quickcheck` passes because the file is structurally fine.
+#
+# An incomplete table is easy to produce by accident -- a join that drops rows, a filtered contig
+# list, or SELECT DISTINCT reference taken from a different alignment set than the one being
+# written. Supplying REFERENCE_LENGTHS asserts it is the complete reference set, so a gap is a
+# caller error and is now refused.
+statement ok
+CREATE TABLE gap_refs AS
+SELECT * FROM (VALUES ('ctg000001', 1000::BIGINT), ('ctg000003', 1000::BIGINT)) t(reference, length);
+
+statement ok
+CREATE TABLE gap_aln AS
+SELECT 'r' || i AS read_id, 0::USMALLINT AS flags, 'ctg00000' || i AS reference,
+       1::BIGINT AS position, 2::BIGINT AS stop_position, 60::UTINYINT AS mapq, '1M' AS cigar,
+       '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length
+FROM range(1, 4) t(i);
+
+# BAM was the worst case: the record vanished and COUNT(*) came back 2 instead of 3.
+statement error
+COPY gap_aln TO '__TEST_DIR__/gap.bam' (FORMAT BAM, REFERENCE_LENGTHS 'gap_refs');
+----
+Column 'reference' is 'ctg000002' for read 'r2', which is not in the REFERENCE_LENGTHS table
+
+statement error
+COPY gap_aln TO '__TEST_DIR__/gap.sam' (FORMAT SAM, REFERENCE_LENGTHS 'gap_refs');
+----
+not in the REFERENCE_LENGTHS table
+
+# mate_reference resolves through the same header, so a gap there loses RNEXT the same way.
+statement error
+COPY (SELECT 'r1' AS read_id, 0::USMALLINT AS flags, 'ctg000001' AS reference,
+             1::BIGINT AS position, 60::UTINYINT AS mapq, '1M' AS cigar,
+             'ctg000002' AS mate_reference, 1::BIGINT AS mate_position, 0::BIGINT AS template_length)
+TO '__TEST_DIR__/gap_mate.bam' (FORMAT BAM, REFERENCE_LENGTHS 'gap_refs');
+----
+Column 'mate_reference' is 'ctg000002' for read 'r1', which is not in the REFERENCE_LENGTHS table
+
+# Headerless SAM keeps the dynamic-append behaviour: with no @SQ lines on disk there is no
+# on-disk header to diverge from, and every RNAME is written verbatim. Losing this would break
+# the documented INCLUDE_HEADER=false mode, so it is asserted rather than left implicit.
+statement ok
+COPY gap_aln TO '__TEST_DIR__/gap_headerless.sam' (FORMAT SAM, INCLUDE_HEADER false, REFERENCE_LENGTHS 'gap_refs');
+
+query T
+SELECT split_part(line, chr(9), 3) AS rname
+FROM read_csv('__TEST_DIR__/gap_headerless.sam', delim='\x1f', header=false,
+              columns={'line':'VARCHAR'}, auto_detect=false, quote='', escape='')
+WHERE line NOT LIKE '@%' ORDER BY rname;
+----
+ctg000001
+ctg000002
+ctg000003
+
+# Positive control: with an exhaustive table all three records survive. This is the assertion
+# that would have caught #198 -- the bug's signature was a silently short count.
+statement ok
+CREATE TABLE gap_refs_all AS
+SELECT 'ctg00000' || i AS reference, 1000::BIGINT AS length FROM range(1, 4) t(i);
+
+statement ok
+COPY gap_aln TO '__TEST_DIR__/nogap.bam' (FORMAT BAM, REFERENCE_LENGTHS 'gap_refs_all');
+
+query I
+SELECT COUNT(*) FROM read_sam('__TEST_DIR__/nogap.bam');
+----
+3
+
+query T
+SELECT DISTINCT reference FROM read_sam('__TEST_DIR__/nogap.bam') ORDER BY reference;
+----
+ctg000001
+ctg000002
+ctg000003
+
+statement ok
+DROP TABLE gap_refs;
+
+statement ok
+DROP TABLE gap_refs_all;
+
+statement ok
+DROP TABLE gap_aln;
+
 # Cleanup
 statement ok
 DROP VIEW ref_computed_view;

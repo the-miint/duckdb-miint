@@ -20,7 +20,7 @@ Reference-based chimera detection using the UCHIME algorithm, detecting chimeric
 **Parameters:**
 - `query_table` (VARCHAR): Name of a table or view containing query sequences. Must have `read_id` (VARCHAR, BIGINT, or UUID — see *Identifier-column types* below) and `sequence1` (VARCHAR) columns.
 - `db` (VARCHAR, required): Name of a table or view containing reference sequences. Same schema requirements as `query_table` (its `read_id` type is independent of the query's).
-- `sample_id` (VARCHAR, optional): Name of a column in `query_table` to partition by. When provided, queries are scored per-sample against the (shared, load-once) reference database, and the sample column is prepended to the output. Execution is serialized (the vsearch wrapper is not thread-safe across concurrent calls).
+- `sample_id` (VARCHAR, optional): Name of a column in `query_table` to partition by. When provided, queries are scored per-sample against the (shared, load-once) reference database, and the sample column is prepended to the output. Execution is serialized (the vsearch wrapper is not thread-safe across concurrent calls). A TEMP table or view cannot be used as the source in this mode: the per-sample path builds a fixed-name temporary view on a private per-thread connection, which must stay isolated so parallel workers do not collide on that name. Materialize the source as an ordinary table first. Tracked as #207.
 - `minh` (DOUBLE, default 0.28): Minimum h-score to flag as chimeric. Range [0, 1].
 - `xn` (DOUBLE, default 8.0): Weight of "no" votes in h-score computation. Must be >= 1.0.
 - `dn` (DOUBLE, default 1.4): Pseudo-count prior on "no" votes. Must be >= 0.

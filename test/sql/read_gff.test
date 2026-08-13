@@ -4,17 +4,27 @@
 
 require miint
 
+# COORDINATE CONVENTION (issue #196): read_gff emits `stop_position` as 1-based HALF-OPEN
+# [position, stop_position), normalizing GFF3's 1-based CLOSED `end` by +1 on read. This is
+# the project-wide convention -- read_alignments, align_*, alignment_slice,
+# compute_coverage_depth and genome_coverage are all half-open. Before normalization
+# read_gff was the outlier while using the SAME column name, so feeding it to any of those
+# type-checked, ran, raised nothing, and silently dropped the interval's last base.
+# The raw GFF `end` is recoverable as `stop_position - 1`.
+#
+# The file's own values are end=500 for gene1 etc; the values below are those +1.
+
 # Test basic GFF reading
 query TTTIIRRTT
 SELECT * FROM read_gff('data/gff/test.gff') ORDER BY seqid, position, type, stop_position;
 ----
-chr1	NCBI	exon	100	200	NULL	+	NULL	{ID=exon1, Parent=transcript1}
-chr1	NCBI	gene	100	500	NULL	+	NULL	{ID=gene1, Name=TEST1, biotype=protein_coding}
-chr1	NCBI	mRNA	100	500	NULL	+	NULL	{ID=transcript1, Parent=gene1, Name=TEST1-RA}
-chr1	NCBI	CDS	150	200	NULL	+	0	{ID=cds1, Parent=transcript1}
-chr1	NCBI	CDS	300	450	NULL	+	2	{ID=cds2, Parent=transcript1}
-chr1	NCBI	exon	300	500	50.5	+	NULL	{ID=exon2, Parent=transcript1}
-chr2	Ensembl	gene	1000	2000	100.0	-	NULL	{ID=gene2, Name=TEST2}
+chr1	NCBI	exon	100	201	NULL	+	NULL	{ID=exon1, Parent=transcript1}
+chr1	NCBI	gene	100	501	NULL	+	NULL	{ID=gene1, Name=TEST1, biotype=protein_coding}
+chr1	NCBI	mRNA	100	501	NULL	+	NULL	{ID=transcript1, Parent=gene1, Name=TEST1-RA}
+chr1	NCBI	CDS	150	201	NULL	+	0	{ID=cds1, Parent=transcript1}
+chr1	NCBI	CDS	300	451	NULL	+	2	{ID=cds2, Parent=transcript1}
+chr1	NCBI	exon	300	501	50.5	+	NULL	{ID=exon2, Parent=transcript1}
+chr2	Ensembl	gene	1000	2001	100.0	-	NULL	{ID=gene2, Name=TEST2}
 
 # Test extracting specific columns
 query TTT
@@ -98,9 +108,13 @@ SELECT attributes['ID'], attributes['Name'] FROM read_gff('data/gff/test.gff') W
 gene1	TEST1
 gene2	TEST2
 
-# Test feature length calculation
+# Test feature length calculation.
+# Under half-open coordinates a feature's length is (stop_position - position) -- no +1.
+# The EXPECTED LENGTHS BELOW ARE UNCHANGED by normalization, which is the point: the
+# biology is identical, only the representation moved. If these numbers ever shift, the
+# normalization has changed a feature's meaning rather than its encoding.
 query TII
-SELECT type, MIN(stop_position - position + 1) AS min_len, MAX(stop_position - position + 1) AS max_len
+SELECT type, MIN(stop_position - position) AS min_len, MAX(stop_position - position) AS max_len
 FROM read_gff('data/gff/test.gff')
 GROUP BY type
 ORDER BY type;
@@ -142,19 +156,23 @@ SELECT COUNT(*) FROM read_gff('data/gff/empty.gff');
 query TII
 SELECT type, position, stop_position FROM read_gff('data/gff/test.gff') WHERE seqid = 'chr1' AND type = 'gene';
 ----
-gene	100	500
+gene	100	501
 
-# Test range overlap query
+# Test range overlap query.
+# Half-open [position, stop_position) overlaps the closed probe window [100, 200] iff
+# position <= 200 AND stop_position > 100. Note the strict `>` -- with half-open ends,
+# `stop_position >= 100` would also match an interval that ENDS exactly at 100 and
+# therefore does not overlap it. Same result set here, but the idiom gets copied.
 query TTII
 SELECT seqid, type, position, stop_position
 FROM read_gff('data/gff/test.gff')
-WHERE seqid = 'chr1' AND position <= 200 AND stop_position >= 100
+WHERE seqid = 'chr1' AND position <= 200 AND stop_position > 100
 ORDER BY position, type;
 ----
-chr1	exon	100	200
-chr1	gene	100	500
-chr1	mRNA	100	500
-chr1	CDS	150	200
+chr1	exon	100	201
+chr1	gene	100	501
+chr1	mRNA	100	501
+chr1	CDS	150	201
 
 # Test source field
 query T
@@ -240,3 +258,116 @@ statement error
 SELECT * FROM read_gff('data/gff/nonexistent.gff');
 ----
 data/gff/nonexistent.gff
+
+# --- GFF3 sequence section (##FASTA), issue #186 ---
+#
+# WHY THIS MATTERS: prokka and bakta ALWAYS append the genome after ##FASTA, so this is the
+# common case, not a corner one. read_gff is a read_csv over the whole file, so every line
+# of the appended FASTA used to come back as a row with the nucleotide/header text in
+# `seqid` and every other column NULL. Those rows do not fail at parse time -- they flow
+# downstream and either inflate feature counts silently or fail later with a misleading
+# error. A 99-feature prokka file returned 1638 rows.
+#
+# data/gff/withfasta.gff has 4 feature lines, then a 2-contig genome after ##FASTA whose
+# first header carries a TAB-separated description and which contains a blank line -- both
+# real-world shapes that must not be mistaken for feature lines.
+query I
+SELECT COUNT(*) FROM read_gff('data/gff/withfasta.gff');
+----
+4
+
+# The specific failure mode: no row may carry FASTA text in seqid. Counting alone would
+# pass if we dropped a real feature and kept a junk row, so pin the actual contents.
+query TTTII
+SELECT seqid, source, type, position, stop_position
+FROM read_gff('data/gff/withfasta.gff')
+ORDER BY seqid, position;
+----
+ctg1	prokka	CDS	10	21
+ctg1	prokka	CDS	30	41
+ctg1	prokka	rRNA	50	61
+ctg2	prokka	CDS	5	16
+
+# A feature line whose attributes field is EMPTY (a trailing tab, so the 9th field parses
+# as NULL) is LEGITIMATE and must survive. This is why the malformed-line check below tests
+# only the 8 mandatory fields and treats attributes as optional -- keying off the
+# attributes column would reject real prokka output.
+query TI
+SELECT type, position FROM read_gff('data/gff/withfasta.gff')
+WHERE attributes IS NULL OR cardinality(attributes) = 0;
+----
+rRNA	50
+
+# Every row must be a real feature: source/type are never NULL once FASTA is excluded.
+query I
+SELECT COUNT(*) FROM read_gff('data/gff/withfasta.gff') WHERE source IS NULL OR type IS NULL;
+----
+0
+
+# --- Malformed feature lines fail loud (issue #186) ---
+#
+# A line with only SOME of the 8 mandatory fields is a broken GFF line, not FASTA content,
+# and is not silently droppable: dropping it would trade one silent wrong answer for
+# another. Note the check lives in the macro's WHERE clause, not a projection -- DuckDB
+# prunes unused projections, so a check in a SELECT expression would NOT fire for
+# `SELECT type FROM read_gff(...)`, which is exactly the shape the issue reported.
+statement error
+SELECT COUNT(*) FROM read_gff('data/gff/malformed.gff');
+----
+malformed GFF feature line
+
+# Must also fire when only an unrelated column is projected (the pruning case above).
+statement error
+SELECT type FROM read_gff('data/gff/malformed.gff');
+----
+malformed GFF feature line
+
+# Must ALSO fire when the caller adds its own WHERE predicate that the malformed row does not
+# match. If the optimizer were to evaluate that cheap conjunct first and discard the row, the
+# error would never fire and a broken line would vanish silently -- the exact failure class
+# this check exists to prevent. malformed.gff's valid row is type='gene' and its malformed row
+# is type='CDS', so these filters genuinely discriminate between them.
+statement error
+SELECT type FROM read_gff('data/gff/malformed.gff') WHERE type = 'gene';
+----
+malformed GFF feature line
+
+statement error
+SELECT type FROM read_gff('data/gff/malformed.gff') WHERE type = 'no_such_type';
+----
+malformed GFF feature line
+
+statement error
+SELECT COUNT(*) FROM read_gff('data/gff/malformed.gff') WHERE position > 1000000;
+----
+malformed GFF feature line
+
+# --- Composition with genome_coverage (issue #196) ---
+#
+# genome_coverage computes SUM(stop - start) over compressed intervals -- half-open
+# arithmetic. Before normalization, read_gff -> genome_coverage under-counted EVERY feature
+# by exactly one base, silently. This is the test that would have caught it: two features
+# of 11 bases each on ctg1 (10-20 and 30-40 closed) plus one of 11 (50-60) = 33 covered.
+statement ok
+CREATE TABLE gc_feats AS
+SELECT seqid AS reference, position, stop_position FROM read_gff('data/gff/withfasta.gff') WHERE seqid = 'ctg1';
+
+statement ok
+CREATE TABLE gc_totals AS SELECT 'g1' AS genome_id, 100::BIGINT AS total_length;
+
+statement ok
+CREATE TABLE gc_map AS SELECT 'ctg1' AS contig_id, 'g1' AS genome_id;
+
+query TI
+SELECT genome_id, covered FROM genome_coverage('gc_feats', 'gc_totals', 'gc_map');
+----
+g1	33
+
+statement ok
+DROP TABLE gc_feats;
+
+statement ok
+DROP TABLE gc_totals;
+
+statement ok
+DROP TABLE gc_map;

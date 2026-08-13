@@ -1,5 +1,6 @@
 #include "align_mafft.hpp"
 #include "MafftAligner.hpp"
+#include "catalog_utils.hpp"
 #include "per_sample_table_function.hpp"
 #include "sequence_table_reader.hpp"
 #include "duckdb/common/exception.hpp"
@@ -152,8 +153,7 @@ static unique_ptr<FunctionData> AlignMafftBind(ClientContext &context, TableFunc
 	}
 
 	if (data->has_sample_id) {
-		auto &db = DatabaseInstance::GetDatabase(context);
-		Connection conn(db);
+		auto conn = MakeReadOnlyHelperConnection(context);
 		DiscoverSamples(conn, data->table_name, data->sample_info.sample_id_col,
 		                {"sequence_index", "read_id", "aligned_sequence", "original_length", "aligned_length"},
 		                "align_mafft", data->sample_info);
@@ -209,8 +209,8 @@ static unique_ptr<LocalTableFunctionState> AlignMafftInitLocal(ExecutionContext 
 	auto &data = input.bind_data->Cast<AlignMafftData>();
 	auto lstate = make_uniq<AlignMafftLocalState>();
 	if (data.has_sample_id) {
-		auto &db = DatabaseInstance::GetDatabase(context.client);
-		lstate->conn = make_uniq<Connection>(db);
+		lstate->conn = make_uniq<Connection>(DatabaseInstance::GetDatabase(context.client));
+		InheritTempObjects(context.client, *lstate->conn);
 	}
 	return lstate;
 }

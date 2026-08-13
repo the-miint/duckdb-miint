@@ -25,10 +25,12 @@ That's it. The `massql()` function takes your MassQL query string and a data sou
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `query` | VARCHAR | MassQL query string (positional, required) |
-| `source` | VARCHAR | File path or table/view name (positional, required) |
+| `source` | VARCHAR | File path or table/view name (positional, required). **Not a TEMP table or view** — see below. |
 | `sample_id` | VARCHAR | Column name to iterate over per-sample (named, optional) |
 
 When `sample_id` is provided, the function queries distinct values of that column, runs the MassQL pipeline independently for each value, and streams results back with the sample identifier prepended as the first output column. The output column preserves the original column's type (VARCHAR, INTEGER, etc.).
+
+> **`source` cannot be a TEMP table or view.** This applies to `massql()` in general, with or without `sample_id`: the pipeline materializes its intermediate peak tables under fixed names on a private connection, which must stay isolated so concurrent calls do not collide on those names, and an isolated connection cannot resolve the caller's TEMP objects. Every other relation parameter in miint does accept TEMP input. Materialize the source as an ordinary table (or a view in a schema) first. Tracked as #207.
 
 ## Quick Comparison: Python MassQL vs MIINT
 
