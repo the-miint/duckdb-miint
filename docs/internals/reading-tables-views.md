@@ -86,6 +86,28 @@ a TEMP source at all. Uniquifying those names so they can inherit too is tracked
 `QuerySequenceStream`'s `Connection &` overload exists for exactly those callers — they
 pass a connection they created a TEMP view on, so it deliberately does not inherit.
 
+## Helper connections at EXECUTION time
+
+Most callers open a helper connection during `Bind`. It also works from `InitGlobal`
+(`DeblurInitGlobal`) and from `Execute` — the progressive PCoA functions run their whole
+wave-fill (`CREATE TEMPORARY TABLE`, an `Appender`, and three large joins) from inside
+`ProgressivePcoaExecute`, once per wave, so a run can emit rows as it goes instead of
+computing everything up front. That means the queries run on a task-scheduler worker
+thread rather than the client thread, and it is fine for the same reason the recipe works
+at all: the helper has its own `ClientContext`, so there is no re-entrant lock, and a
+nested query drives its own execution on the calling thread rather than waiting for a free
+worker. Verified by `test/sql/temp_table_resolution_unifrac.test`, which reads a TEMP
+distance table through that path and then asserts no `_miint_wave_%` staging table
+survived.
+
+Two things to keep in mind if you do this:
+
+- The scan must be single-threaded (`MaxThreads() == 1`) if the helper work is stateful,
+  as it is here — otherwise several `Execute` calls issue overlapping nested queries.
+- Poll `context.interrupted` around the work and throw `InterruptException`. Nothing else
+  will: a blocked `Execute` is not a place DuckDB can cancel on its own, so long work
+  behind a helper connection is uninterruptible unless the caller checks.
+
 Failing only the *drop* half is cheap to fix rather than document around, and worth
 checking for before writing a caveat: `mzml_peak_pair` already suffixed its two temp
 tables from a process-wide counter, so it needed a `HelperTempRelation` guard and

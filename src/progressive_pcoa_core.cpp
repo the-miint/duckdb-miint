@@ -95,6 +95,18 @@ void ValidateBlockMatchesRequest(const DistanceBlock &block, const std::vector<s
 	}
 }
 
+// How many of a wave's batches may actually run at once.
+size_t ResolveWorkers(uint32_t batch_workers) {
+#ifdef __EMSCRIPTEN__
+	// WASM builds have no threads to fan out to (libssu/libskbb are compiled
+	// single-threaded there); batches run one at a time whatever the caller asked.
+	(void)batch_workers;
+	return 1;
+#else
+	return std::max<size_t>(1, batch_workers);
+#endif
+}
+
 } // namespace
 
 uint32_t ChooseWaveWidth(size_t n_anchors, uint32_t batch_size, uint32_t n_workers, uint64_t budget_bytes,
@@ -126,10 +138,15 @@ uint32_t ChooseWaveWidth(size_t n_anchors, uint32_t batch_size, uint32_t n_worke
 	return static_cast<uint32_t>(std::min(fits, cap));
 }
 
-ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_ids,
-                                         const std::vector<std::string> &remaining_ids, uint32_t n_dims,
-                                         uint32_t batch_size, int seed, int n_threads, const BlockProvider &get_block,
-                                         const WavePrefetch &prefetch, uint32_t wave_batches, uint32_t batch_workers) {
+ProgressivePcoaRun::ProgressivePcoaRun(const std::vector<std::string> &anchor_ids,
+                                       const std::vector<std::string> &remaining_ids, uint32_t n_dims,
+                                       uint32_t batch_size, int seed, int n_threads, BlockProvider get_block,
+                                       WavePrefetch prefetch, uint32_t wave_batches, uint32_t batch_workers,
+                                       InterruptCheck interrupt)
+    : anchor_ids_(anchor_ids), remaining_ids_(remaining_ids), d_(n_dims), a_(static_cast<uint32_t>(anchor_ids.size())),
+      batch_size_(batch_size), seed_(seed), n_threads_(n_threads), get_block_(std::move(get_block)),
+      prefetch_(std::move(prefetch)), wave_width_(std::max<size_t>(1, wave_batches)),
+      workers_(ResolveWorkers(batch_workers)), interrupt_(std::move(interrupt)) {
 	if (n_dims < 1) {
 		throw std::invalid_argument("progressive_pcoa: n_dims must be >= 1");
 	}
@@ -139,13 +156,11 @@ ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_
 	if (n_threads < 1) {
 		throw std::invalid_argument("progressive_pcoa: n_threads must be >= 1");
 	}
-	const uint32_t d = n_dims;
-	const uint32_t a = static_cast<uint32_t>(anchor_ids.size());
 	// Need a >= d + 1 for both the reference PCoA (loses one dim to centering) and
 	// the procrustes fit (d + 1 points determine a d-dimensional transform). Phrase
 	// the guard as `a <= d` so it stays correct even if d is near UINT32_MAX (d + 1
 	// would wrap): a > d is exactly a >= d + 1 for integers.
-	if (a <= d) {
+	if (a_ <= d_) {
 		throw std::invalid_argument("progressive_pcoa: need at least n_dims + 1 anchors to define the reference frame");
 	}
 
@@ -153,215 +168,217 @@ ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_
 	// pairs anchor rows 1:1 across the reference and each batch, so a duplicate or
 	// an anchor that also appears as a batch sample would silently corrupt the
 	// alignment (and double-emit that sample).
-	std::unordered_set<std::string> anchor_set;
-	anchor_set.reserve(a);
-	for (const auto &id : anchor_ids) {
-		if (!anchor_set.insert(id).second) {
+	anchor_set_.reserve(a_);
+	for (const auto &id : anchor_ids_) {
+		if (!anchor_set_.insert(id).second) {
 			throw std::invalid_argument("progressive_pcoa: duplicate anchor id '" + id + "'");
 		}
 	}
-	for (const auto &rid : remaining_ids) {
-		if (anchor_set.count(rid)) {
+	for (const auto &rid : remaining_ids_) {
+		if (anchor_set_.count(rid)) {
 			throw std::invalid_argument("progressive_pcoa: sample '" + rid + "' is both an anchor and a batch sample");
 		}
 	}
 
-	// ── Phase 0: reference PCoA on the anchors — defines the common frame ────────
-	DistanceBlock ref_block = get_block(anchor_ids);
-	ValidateBlockMatchesRequest(ref_block, anchor_ids, "anchor");
+	for (size_t start = 0; start < remaining_ids_.size(); start += batch_size_) {
+		batch_ranges_.emplace_back(start, std::min(remaining_ids_.size(), start + static_cast<size_t>(batch_size_)));
+	}
+}
 
-	ProgressivePcoaResult result;
-	result.d = d;
-	// Reference coordinates in ref_block.ids order. This is also where the reported
+// Block request = this batch's non-anchor samples followed by all anchors. Built
+// in one place so the request announced by prefetch is byte-identical to the one
+// get_block is then called with — a provider is entitled to key its cache on it.
+std::vector<std::string> ProgressivePcoaRun::BuildRequest(size_t start, size_t end) const {
+	std::vector<std::string> req;
+	req.reserve((end - start) + a_);
+	req.insert(req.end(), remaining_ids_.begin() + start, remaining_ids_.begin() + end);
+	req.insert(req.end(), anchor_ids_.begin(), anchor_ids_.end());
+	return req;
+}
+
+// ── Phase 0: reference PCoA on the anchors — defines the common frame ────────────
+std::vector<ProgressiveCoord> ProgressivePcoaRun::Start() {
+	if (started_) {
+		throw std::logic_error("progressive_pcoa: Start() may only be called once per run");
+	}
+	// Polled before the anchor block, not after: that block plus its ordination is
+	// the run's serial phase (seconds to minutes), so an already-cancelled query
+	// should not pay for it.
+	if (interrupt_) {
+		interrupt_();
+	}
+	ref_block_ = get_block_(anchor_ids_);
+	ValidateBlockMatchesRequest(ref_block_, anchor_ids_, "anchor");
+
+	// Reference coordinates in ref_block_.ids order. This is also where the reported
 	// eigenvalues / proportions come from (the anchor ordination — a documented
 	// caveat: they describe the anchors, not the full data).
-	const std::vector<double> ref_coords =
-	    PcoaBlock(ref_block, d, seed, n_threads, &result.eigvals, &result.proportion_explained);
+	ref_coords_ = PcoaBlock(ref_block_, d_, seed_, n_threads_, &eigvals_, &proportion_explained_);
 
 	// Emit the reference anchor coordinates once, standardized into the shared
 	// frame. ApplyToReference uses only the fit's reference translate/norm, which
-	// depend solely on ref_coords, so a self-fit produces the identical
+	// depend solely on ref_coords_, so a self-fit produces the identical
 	// standardization every batch fit would — and works even with zero batches.
 	// Every batch below aligns its samples into this same standardized frame.
-	const ProcrustesFit ref_fit = FitProcrustes(ref_coords.data(), ref_coords.data(), a, d);
+	const ProcrustesFit ref_fit = FitProcrustes(ref_coords_.data(), ref_coords_.data(), a_, d_);
+	std::vector<double> ref_std(static_cast<size_t>(a_) * d_);
+	ApplyToReference(ref_fit, ref_coords_.data(), a_, ref_std.data());
+	std::vector<ProgressiveCoord> out;
+	out.reserve(static_cast<size_t>(a_) * d_);
+	for (uint32_t r = 0; r < a_; ++r) {
+		for (uint32_t axis = 0; axis < d_; ++axis) {
+			out.push_back({ref_block_.ids[r], static_cast<int32_t>(axis), ref_std[r * d_ + axis]});
+		}
+	}
+	// Last, so a Start() that threw leaves the run unstarted rather than half-framed:
+	// NextWave then fails loud instead of fitting batches onto nothing.
+	started_ = true;
+	return out;
+}
+
+// One batch: fetch its block, ordinate it, fit it onto the reference frame through
+// the anchor overlap, and return its non-anchor coordinates. Depends on nothing but
+// its arguments and the reference frame (fixed by Start(), read-only thereafter) —
+// no shared mutable state — so it is safe to run on several threads at once.
+BatchOutput ProgressivePcoaRun::RunOneBatch(size_t start, size_t end, int32_t batch_index, int omp_threads) const {
+	// Polled per batch rather than per wave: a wave can be dozens of batches wide,
+	// and a cancellation that waits for the whole wave is not a cancellation. Called
+	// from the worker that will run this batch, so the hook must be thread-safe.
+	if (interrupt_) {
+		interrupt_();
+	}
+	const std::vector<std::string> req = BuildRequest(start, end);
+	const DistanceBlock blk = get_block_(req);
+	ValidateBlockMatchesRequest(blk, req, "batch");
+	const uint32_t m = static_cast<uint32_t>(blk.ids.size());
+	const std::vector<double> batch_coords = PcoaBlock(blk, d_, seed_, omp_threads, nullptr, nullptr);
+
+	// id → batch row index.
+	std::unordered_map<std::string, uint32_t> batch_row;
+	batch_row.reserve(m);
+	for (uint32_t r = 0; r < m; ++r) {
+		batch_row.emplace(blk.ids[r], r);
+	}
+
+	// Anchor rows of this batch (raw), ordered to pair 1:1 with ref_coords_ by
+	// ref_block_.ids order — so batch_anchor row r corresponds to reference row r.
+	std::vector<double> batch_anchor(static_cast<size_t>(a_) * d_);
+	for (uint32_t r = 0; r < a_; ++r) {
+		auto it = batch_row.find(ref_block_.ids[r]);
+		if (it == batch_row.end()) {
+			throw std::invalid_argument("progressive_pcoa: anchor '" + ref_block_.ids[r] +
+			                            "' missing from batch block");
+		}
+		const double *src = batch_coords.data() + static_cast<size_t>(it->second) * d_;
+		std::copy(src, src + d_, batch_anchor.begin() + static_cast<size_t>(r) * d_);
+	}
+
+	// Fit the batch onto the reference through the anchor overlap.
+	const ProcrustesFit fit = FitProcrustes(ref_coords_.data(), batch_anchor.data(), a_, d_);
+
+	BatchOutput out;
+
+	// Score that fit and report it. This is the run's own accuracy evidence
+	// (see BatchDiagnostic): the anchors are the only samples this batch and
+	// the reference frame have in common, so the disparity over them is what
+	// says whether the batch's placement can be trusted. Costs O(a·d) against
+	// a block PCoA, i.e. nothing.
 	{
-		std::vector<double> ref_std(static_cast<size_t>(a) * d);
-		ApplyToReference(ref_fit, ref_coords.data(), a, ref_std.data());
-		result.coords.reserve(static_cast<size_t>(a + remaining_ids.size()) * d);
-		for (uint32_t r = 0; r < a; ++r) {
-			for (uint32_t axis = 0; axis < d; ++axis) {
-				result.coords.push_back({ref_block.ids[r], static_cast<int32_t>(axis), ref_std[r * d + axis]});
-			}
-		}
+		std::vector<double> ref_std(static_cast<size_t>(a_) * d_);
+		std::vector<double> anchor_fit(static_cast<size_t>(a_) * d_);
+		ApplyToReference(fit, ref_coords_.data(), a_, ref_std.data());
+		ApplyToOther(fit, batch_anchor.data(), a_, anchor_fit.data());
+		// The batch's POSITION, never a completion counter: it is what joins a
+		// coordinate to the diagnostic describing how that coordinate was placed.
+		out.diag.batch = batch_index;
+		out.diag.n_samples = static_cast<uint32_t>(end - start);
+		out.diag.anchor_m2 = Disparity(ref_std.data(), anchor_fit.data(), a_, d_);
 	}
 
-	// ── Phase 1: stream the remaining samples in contiguous batches ──────────────
-	// Batches are grouped into waves: before fetching a wave's blocks we announce
-	// all of its requests, so a provider can serve them from one pass over its
-	// source instead of one pass per block (see WavePrefetch). The batch bodies
-	// below are unchanged by this — a wave is purely an I/O grouping, and W has no
-	// effect on the coordinates produced.
-	const size_t total = remaining_ids.size();
-
-	// Block request = this batch's non-anchor samples followed by all anchors. Built
-	// in one place so the request announced by prefetch is byte-identical to the one
-	// get_block is then called with — a provider is entitled to key its cache on it.
-	const auto build_request = [&](size_t start, size_t end) {
-		std::vector<std::string> req;
-		req.reserve((end - start) + a);
-		req.insert(req.end(), remaining_ids.begin() + start, remaining_ids.begin() + end);
-		req.insert(req.end(), anchor_ids.begin(), anchor_ids.end());
-		return req;
-	};
-
-	// One batch's contribution to the result. Returned rather than appended so a
-	// wave's batches can be produced in any order and merged in batch order, which
-	// is what makes the parallel path bit-identical to the serial one.
-	struct BatchOutput {
-		BatchDiagnostic diag;
-		std::vector<ProgressiveCoord> coords;
-	};
-
-	// One batch: fetch its block, ordinate it, fit it onto the reference frame
-	// through the anchor overlap, and return its non-anchor coordinates. Depends on
-	// nothing but its arguments and the reference frame — no shared mutable state —
-	// so it is safe to run on several threads at once.
-	const auto run_one_batch = [&](size_t start, size_t end, int32_t batch_index, int omp_threads) {
-		const std::vector<std::string> req = build_request(start, end);
-		const DistanceBlock blk = get_block(req);
-		ValidateBlockMatchesRequest(blk, req, "batch");
-		const uint32_t m = static_cast<uint32_t>(blk.ids.size());
-		const std::vector<double> batch_coords = PcoaBlock(blk, d, seed, omp_threads, nullptr, nullptr);
-
-		// id → batch row index.
-		std::unordered_map<std::string, uint32_t> batch_row;
-		batch_row.reserve(m);
-		for (uint32_t r = 0; r < m; ++r) {
-			batch_row.emplace(blk.ids[r], r);
+	// This batch's non-anchor rows (raw), then mapped into the reference frame.
+	std::vector<std::string> nb_ids;
+	std::vector<double> nb_raw;
+	nb_ids.reserve(end - start);
+	nb_raw.reserve((end - start) * static_cast<size_t>(d_));
+	for (uint32_t r = 0; r < m; ++r) {
+		if (anchor_set_.count(blk.ids[r])) {
+			continue; // anchors already emitted via the reference frame
 		}
-
-		// Anchor rows of this batch (raw), ordered to pair 1:1 with ref_coords by
-		// ref_block.ids order — so batch_anchor row r corresponds to reference row r.
-		std::vector<double> batch_anchor(static_cast<size_t>(a) * d);
-		for (uint32_t r = 0; r < a; ++r) {
-			auto it = batch_row.find(ref_block.ids[r]);
-			if (it == batch_row.end()) {
-				throw std::invalid_argument("progressive_pcoa: anchor '" + ref_block.ids[r] +
-				                            "' missing from batch block");
-			}
-			const double *src = batch_coords.data() + static_cast<size_t>(it->second) * d;
-			std::copy(src, src + d, batch_anchor.begin() + static_cast<size_t>(r) * d);
-		}
-
-		// Fit the batch onto the reference through the anchor overlap.
-		const ProcrustesFit fit = FitProcrustes(ref_coords.data(), batch_anchor.data(), a, d);
-
-		BatchOutput out;
-
-		// Score that fit and report it. This is the run's own accuracy evidence
-		// (see BatchDiagnostic): the anchors are the only samples this batch and
-		// the reference frame have in common, so the disparity over them is what
-		// says whether the batch's placement can be trusted. Costs O(a·d) against
-		// a block PCoA, i.e. nothing.
-		{
-			std::vector<double> ref_std(static_cast<size_t>(a) * d);
-			std::vector<double> anchor_fit(static_cast<size_t>(a) * d);
-			ApplyToReference(fit, ref_coords.data(), a, ref_std.data());
-			ApplyToOther(fit, batch_anchor.data(), a, anchor_fit.data());
-			// The batch's POSITION, never a completion counter: it is what joins a
-			// coordinate to the diagnostic describing how that coordinate was placed.
-			out.diag.batch = batch_index;
-			out.diag.n_samples = static_cast<uint32_t>(end - start);
-			out.diag.anchor_m2 = Disparity(ref_std.data(), anchor_fit.data(), a, d);
-		}
-
-		// This batch's non-anchor rows (raw), then mapped into the reference frame.
-		std::vector<std::string> nb_ids;
-		std::vector<double> nb_raw;
-		nb_ids.reserve(end - start);
-		nb_raw.reserve((end - start) * static_cast<size_t>(d));
-		for (uint32_t r = 0; r < m; ++r) {
-			if (anchor_set.count(blk.ids[r])) {
-				continue; // anchors already emitted via the reference frame
-			}
-			nb_ids.push_back(blk.ids[r]);
-			const double *src = batch_coords.data() + static_cast<size_t>(r) * d;
-			nb_raw.insert(nb_raw.end(), src, src + d);
-		}
-		const uint32_t nb = static_cast<uint32_t>(nb_ids.size());
-		std::vector<double> nb_fit(static_cast<size_t>(nb) * d);
-		ApplyToOther(fit, nb_raw.data(), nb, nb_fit.data());
-		out.coords.reserve(static_cast<size_t>(nb) * d);
-		for (uint32_t r = 0; r < nb; ++r) {
-			for (uint32_t axis = 0; axis < d; ++axis) {
-				out.coords.push_back({nb_ids[r], static_cast<int32_t>(axis), nb_fit[r * d + axis], batch_index});
-			}
-		}
-		return out;
-	};
-
-	// Merge one batch's output. Called in batch order in every path, so the emitted
-	// row order does not depend on which batch finished first.
-	const auto append_batch = [&result](BatchOutput &&out) {
-		result.batches.push_back(out.diag);
-		result.coords.insert(result.coords.end(), std::make_move_iterator(out.coords.begin()),
-		                     std::make_move_iterator(out.coords.end()));
-	};
-
-	std::vector<std::pair<size_t, size_t>> batch_ranges;
-	for (size_t start = 0; start < total; start += batch_size) {
-		batch_ranges.emplace_back(start, std::min(total, start + static_cast<size_t>(batch_size)));
+		nb_ids.push_back(blk.ids[r]);
+		const double *src = batch_coords.data() + static_cast<size_t>(r) * d_;
+		nb_raw.insert(nb_raw.end(), src, src + d_);
 	}
-	const size_t wave_width = std::max<size_t>(1, wave_batches);
-#ifdef __EMSCRIPTEN__
-	// WASM builds have no threads to fan out to (libssu/libskbb are compiled
-	// single-threaded there); batches run one at a time whatever the caller asked.
-	(void)batch_workers;
-	const size_t workers = 1;
-#else
-	const size_t workers = std::max<size_t>(1, batch_workers);
-#endif
-
-	for (size_t wave_start = 0; wave_start < batch_ranges.size(); wave_start += wave_width) {
-		const size_t wave_end = std::min(batch_ranges.size(), wave_start + wave_width);
-		// Announced for EVERY wave, including a trailing one-batch wave: a uniform
-		// contract lets a provider serve all batch blocks from its wave cache and
-		// keep a direct path only for the one-off anchor (reference) block. The
-		// alternative — skipping the announcement when there is nothing to amortize
-		// — would force every provider to implement both paths for batch blocks.
-		if (prefetch) {
-			std::vector<std::vector<std::string>> wave_requests;
-			wave_requests.reserve(wave_end - wave_start);
-			for (size_t b = wave_start; b < wave_end; ++b) {
-				wave_requests.push_back(build_request(batch_ranges[b].first, batch_ranges[b].second));
-			}
-			prefetch(wave_requests);
+	const uint32_t nb = static_cast<uint32_t>(nb_ids.size());
+	std::vector<double> nb_fit(static_cast<size_t>(nb) * d_);
+	ApplyToOther(fit, nb_raw.data(), nb, nb_fit.data());
+	out.coords.reserve(static_cast<size_t>(nb) * d_);
+	for (uint32_t r = 0; r < nb; ++r) {
+		for (uint32_t axis = 0; axis < d_; ++axis) {
+			out.coords.push_back({nb_ids[r], static_cast<int32_t>(axis), nb_fit[r * d_ + axis], batch_index});
 		}
-		const size_t wave_count = wave_end - wave_start;
-		const size_t wave_workers = std::min(workers, wave_count);
-		if (wave_workers <= 1) {
-			for (size_t b = wave_start; b < wave_end; ++b) {
-				// One batch at a time, so it may use the caller's whole thread budget.
-				append_batch(
-				    run_one_batch(batch_ranges[b].first, batch_ranges[b].second, static_cast<int32_t>(b), n_threads));
-			}
-			continue;
-		}
+	}
+	return out;
+}
 
+// ── Phase 1: one wave of the remaining samples ───────────────────────────────────
+// Batches are grouped into waves: before fetching a wave's blocks we announce all
+// of its requests, so a provider can serve them from one pass over its source
+// instead of one pass per block (see WavePrefetch). The batch bodies are unchanged
+// by this — a wave is purely an I/O grouping, and W has no effect on the
+// coordinates produced.
+std::vector<BatchOutput> ProgressivePcoaRun::NextWave() {
+	if (!started_) {
+		throw std::logic_error("progressive_pcoa: Start() must run before NextWave() — every batch is fitted onto the "
+		                       "reference frame it builds");
+	}
+	if (Done()) {
+		return {};
+	}
+	if (interrupt_) {
+		interrupt_();
+	}
+	const size_t wave_start = next_wave_start_;
+	const size_t wave_end = std::min(batch_ranges_.size(), wave_start + wave_width_);
+	// Announced for EVERY wave, including a trailing one-batch wave: a uniform
+	// contract lets a provider serve all batch blocks from its wave cache and
+	// keep a direct path only for the one-off anchor (reference) block. The
+	// alternative — skipping the announcement when there is nothing to amortize
+	// — would force every provider to implement both paths for batch blocks.
+	if (prefetch_) {
+		std::vector<std::vector<std::string>> wave_requests;
+		wave_requests.reserve(wave_end - wave_start);
+		for (size_t b = wave_start; b < wave_end; ++b) {
+			wave_requests.push_back(BuildRequest(batch_ranges_[b].first, batch_ranges_[b].second));
+		}
+		prefetch_(wave_requests);
+	}
+	const size_t wave_count = wave_end - wave_start;
+	const size_t wave_workers = std::min(workers_, wave_count);
+	// Returned rather than appended to a shared buffer so a wave's batches can be
+	// produced in any order and handed back in batch order, which is what makes the
+	// parallel path bit-identical to the serial one.
+	std::vector<BatchOutput> outputs(wave_count);
+	if (wave_workers <= 1) {
+		for (size_t i = 0; i < wave_count; ++i) {
+			const size_t b = wave_start + i;
+			// One batch at a time, so it may use the caller's whole thread budget.
+			outputs[i] =
+			    RunOneBatch(batch_ranges_[b].first, batch_ranges_[b].second, static_cast<int32_t>(b), n_threads_);
+		}
+	} else {
 		// Parallel wave. No lock of any kind: each block's ordination takes its own
 		// ComputeCallScope (see PcoaBlock), which is safe concurrently because skbb's
 		// fsvd is seeded per call. Parallelism therefore comes from W concurrent
 		// single-threaded ordinations rather than one wide one — hence the 1 below —
 		// and an unrelated query may ordinate at the same time without waiting.
-		std::vector<BatchOutput> outputs(wave_count);
 		std::vector<std::exception_ptr> errors(wave_count);
 		std::atomic<size_t> next {0};
 		const auto worker = [&]() {
 			for (size_t i = next.fetch_add(1); i < wave_count; i = next.fetch_add(1)) {
 				const size_t b = wave_start + i;
 				try {
-					outputs[i] = run_one_batch(batch_ranges[b].first, batch_ranges[b].second, static_cast<int32_t>(b),
-					                           /*omp_threads=*/1);
+					outputs[i] = RunOneBatch(batch_ranges_[b].first, batch_ranges_[b].second, static_cast<int32_t>(b),
+					                         /*omp_threads=*/1);
 				} catch (...) {
 					errors[i] = std::current_exception();
 				}
@@ -387,11 +404,35 @@ ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_
 				std::rethrow_exception(errors[i]);
 			}
 		}
-		for (auto &out : outputs) {
-			append_batch(std::move(out));
+	}
+	// Advanced only on success, so a wave that threw is not silently skipped.
+	next_wave_start_ = wave_end;
+	return outputs;
+}
+
+ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_ids,
+                                         const std::vector<std::string> &remaining_ids, uint32_t n_dims,
+                                         uint32_t batch_size, int seed, int n_threads, const BlockProvider &get_block,
+                                         const WavePrefetch &prefetch, uint32_t wave_batches, uint32_t batch_workers) {
+	ProgressivePcoaRun run(anchor_ids, remaining_ids, n_dims, batch_size, seed, n_threads, get_block, prefetch,
+	                       wave_batches, batch_workers);
+	ProgressivePcoaResult result;
+	result.d = n_dims;
+	result.coords = run.Start();
+	result.eigvals = run.eigvals();
+	result.proportion_explained = run.proportion_explained();
+	result.coords.reserve(static_cast<size_t>(anchor_ids.size() + remaining_ids.size()) * n_dims);
+	result.batches.reserve(run.n_batches());
+	while (!run.Done()) {
+		std::vector<BatchOutput> wave = run.NextWave();
+		// In batch order in every path, so the emitted row order does not depend on
+		// which batch finished first.
+		for (auto &out : wave) {
+			result.batches.push_back(out.diag);
+			result.coords.insert(result.coords.end(), std::make_move_iterator(out.coords.begin()),
+			                     std::make_move_iterator(out.coords.end()));
 		}
 	}
-
 	return result;
 }
 

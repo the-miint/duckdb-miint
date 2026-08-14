@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 // Progressive reference-anchored PCoA core — a scalable ordination that never
@@ -65,6 +67,20 @@ using BlockProvider = std::function<DistanceBlock(const std::vector<std::string>
 // get_block alone is sufficient, just at one scan per block.
 using WavePrefetch = std::function<void(const std::vector<std::vector<std::string>> &requests)>;
 
+// Optional cooperative-cancellation hook. Polled before the anchor block, at the
+// start of each wave (i.e. before its prefetch), and before each batch's block is
+// fetched. Throw from it to abort the run — the exception propagates out of the
+// call that polled it, unchanged.
+//
+// A run at the scale this core exists for takes hours, so there has to be a way
+// out of it; polling per batch rather than per wave is what bounds the wait to one
+// block. It is called from the thread that will run that batch, so with
+// batch_workers > 1 it is called CONCURRENTLY and must be thread-safe (reading an
+// atomic flag is the intended use). An abort inside a parallel wave still lets the
+// wave's in-flight batches finish — their work is discarded — because every other
+// batch of that wave polls and throws too.
+using InterruptCheck = std::function<void()>;
+
 // How many batches one wave should hold, given the memory a caller is willing to
 // spend on it. Lives beside the wave_batches parameter it feeds, because the
 // sizing rule is a property of what a wave costs:
@@ -112,6 +128,16 @@ struct BatchDiagnostic {
 	int32_t batch = 0;      // 0-based batch index, in emission order
 	uint32_t n_samples = 0; // non-anchor samples placed by this batch
 	double anchor_m2 = 0.0; // procrustes disparity of the anchor-overlap fit
+};
+
+// One batch's whole contribution: its coordinates and the diagnostic describing
+// how they were placed. Kept together because a coordinate is only interpretable
+// alongside its batch's disparity, and because a caller that consumes the run
+// incrementally (see ProgressivePcoaRun) never has the full BatchDiagnostic list
+// to join against.
+struct BatchOutput {
+	BatchDiagnostic diag;
+	std::vector<ProgressiveCoord> coords;
 };
 
 struct ProgressivePcoaResult {
@@ -174,5 +200,88 @@ ProgressivePcoaResult RunProgressivePcoa(const std::vector<std::string> &anchor_
                                          uint32_t batch_size, int seed, int n_threads, const BlockProvider &get_block,
                                          const WavePrefetch &prefetch = nullptr, uint32_t wave_batches = 0,
                                          uint32_t batch_workers = 1);
+
+// The same run, driven one wave at a time so a caller can consume each batch's
+// rows as soon as that batch is placed instead of waiting for the whole run.
+// RunProgressivePcoa above is a thin loop over this class and stays the API for
+// callers that want the whole result at once.
+//
+// WHY this exists: a caller that must hold every coordinate before emitting any
+// pays for the result twice — once in ProgressivePcoaResult::coords and once in
+// its own row representation — and at 10M samples × d = 10 that is tens of GB, two
+// copies live at the same time. Consuming per wave bounds the caller's buffer to
+// one wave's rows, gives it somewhere to poll for cancellation between batches,
+// and lets rows reach the consumer while later batches are still computing.
+//
+// Contract:
+//   - `anchor_ids` and `remaining_ids` are held BY REFERENCE — at 10M samples
+//     copying them is the very cost this class exists to avoid. They must outlive
+//     the run. Everything else is copied.
+//   - Start() exactly once, before any NextWave(); it runs the anchor block and
+//     the reference PCoA (the frame every batch is fitted into) and returns the
+//     standardized anchor coordinates (batch = -1). eigvals()/proportion_explained()
+//     are only meaningful afterwards.
+//   - NextWave() runs the next wave and returns its batches in batch order —
+//     positionally identical to a serial run, for any worker count. It returns an
+//     empty vector once every batch has been run; Done() reports the same thing
+//     without running anything.
+//   - Constructor argument validation and semantics are RunProgressivePcoa's,
+//     unchanged; see its comment above for every parameter.
+class ProgressivePcoaRun {
+public:
+	ProgressivePcoaRun(const std::vector<std::string> &anchor_ids, const std::vector<std::string> &remaining_ids,
+	                   uint32_t n_dims, uint32_t batch_size, int seed, int n_threads, BlockProvider get_block,
+	                   WavePrefetch prefetch = nullptr, uint32_t wave_batches = 0, uint32_t batch_workers = 1,
+	                   InterruptCheck interrupt = nullptr);
+
+	std::vector<ProgressiveCoord> Start();
+	std::vector<BatchOutput> NextWave();
+
+	bool Done() const {
+		return next_wave_start_ >= batch_ranges_.size();
+	}
+	uint32_t d() const {
+		return d_;
+	}
+	size_t n_batches() const {
+		return batch_ranges_.size();
+	}
+	// The anchor reference PCoA's eigenvalues / proportions (size d), available
+	// after Start(). They describe the anchors, not the full data — the documented
+	// caveat of the method.
+	const std::vector<double> &eigvals() const {
+		return eigvals_;
+	}
+	const std::vector<double> &proportion_explained() const {
+		return proportion_explained_;
+	}
+
+private:
+	std::vector<std::string> BuildRequest(size_t start, size_t end) const;
+	BatchOutput RunOneBatch(size_t start, size_t end, int32_t batch_index, int omp_threads) const;
+
+	const std::vector<std::string> &anchor_ids_;
+	const std::vector<std::string> &remaining_ids_;
+	const uint32_t d_;
+	const uint32_t a_;
+	const uint32_t batch_size_;
+	const int seed_;
+	const int n_threads_;
+	const BlockProvider get_block_;
+	const WavePrefetch prefetch_;
+	const size_t wave_width_;
+	const size_t workers_;
+	const InterruptCheck interrupt_;
+	std::unordered_set<std::string> anchor_set_;
+	std::vector<std::pair<size_t, size_t>> batch_ranges_;
+	// Fixed by Start(), then read-only — which is what lets a wave's batches run
+	// concurrently with no synchronization at all.
+	DistanceBlock ref_block_;
+	std::vector<double> ref_coords_;
+	std::vector<double> eigvals_;
+	std::vector<double> proportion_explained_;
+	bool started_ = false;
+	size_t next_wave_start_ = 0;
+};
 
 } // namespace miint::progressive

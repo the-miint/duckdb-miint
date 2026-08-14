@@ -74,16 +74,12 @@ struct UnifracPcoaData : public TableFunctionData {
 	// Output type for sample_id — mirrors the input sample_id type (BIGINT/UUID)
 	// or VARCHAR otherwise. See ResolveSampleIdOutputType.
 	LogicalType sample_id_type = LogicalType::VARCHAR;
-	// Progressive functions append (batch, batch_anchor_m2); the dense ones don't,
-	// which keeps pcoa/unifrac_pcoa's schema exactly as documented.
-	bool with_batch_diagnostics = false;
 };
 
 struct UnifracPcoaGlobalState : public GlobalTableFunctionState {
 	std::vector<PcoaRow> rows;
 	size_t cursor = 0;
 	LogicalType sample_id_type = LogicalType::VARCHAR;
-	bool with_batch_diagnostics = false;
 	idx_t MaxThreads() const override {
 		return 1;
 	}
@@ -363,18 +359,16 @@ unique_ptr<GlobalTableFunctionState> UnifracPcoaInitGlobal(ClientContext &, Tabl
 	auto gstate = make_uniq<UnifracPcoaGlobalState>();
 	gstate->rows = std::move(data.rows);
 	gstate->sample_id_type = data.sample_id_type;
-	gstate->with_batch_diagnostics = data.with_batch_diagnostics;
 	return std::move(gstate);
 }
 
-void UnifracPcoaExecute(ClientContext &, TableFunctionInput &input, DataChunk &output) {
-	auto &gstate = input.global_state->Cast<UnifracPcoaGlobalState>();
-	const idx_t total = gstate.rows.size();
-	if (gstate.cursor >= total) {
-		output.SetCardinality(0);
-		return;
-	}
-	const idx_t remaining = total - gstate.cursor;
+// Page up to one vector of rows out of `rows`, starting at `cursor` and advancing
+// it. Shared by the dense functions (pcoa / unifrac_pcoa, whose `rows` is the whole
+// result) and the progressive ones (whose `rows` is refilled one wave at a time),
+// so the two can never drift apart in how a row becomes output.
+void EmitPcoaChunk(const std::vector<PcoaRow> &rows, size_t &cursor, const LogicalType &sample_id_type,
+                   bool with_batch_diagnostics, DataChunk &output) {
+	const idx_t remaining = rows.size() - cursor;
 	const idx_t n = std::min<idx_t>(STANDARD_VECTOR_SIZE, remaining);
 
 	auto iter_data = FlatVector::GetData<int32_t>(output.data[0]);
@@ -385,17 +379,17 @@ void UnifracPcoaExecute(ClientContext &, TableFunctionInput &input, DataChunk &o
 	auto pe_data = FlatVector::GetData<double>(output.data[5]);
 	int32_t *batch_data = nullptr;
 	double *m2_data = nullptr;
-	if (gstate.with_batch_diagnostics) {
+	if (with_batch_diagnostics) {
 		batch_data = FlatVector::GetData<int32_t>(output.data[6]);
 		m2_data = FlatVector::GetData<double>(output.data[7]);
 	}
 
 	for (idx_t i = 0; i < n; ++i) {
-		const auto &r = gstate.rows[gstate.cursor + i];
+		const auto &r = rows[cursor + i];
 		iter_data[i] = r.iteration;
 		// EmitIdCell mirrors the id type; its ""/"*"→NULL sentinel branch is
 		// unreachable here (ReadFeatureTable drops NULL sample_ids).
-		EmitIdCell(sample_id_vec, i, r.sample_id, gstate.sample_id_type);
+		EmitIdCell(sample_id_vec, i, r.sample_id, sample_id_type);
 		axis_data[i] = r.axis;
 		coord_data[i] = r.coordinate;
 		eig_data[i] = r.eigenvalue;
@@ -414,8 +408,17 @@ void UnifracPcoaExecute(ClientContext &, TableFunctionInput &input, DataChunk &o
 		}
 	}
 
-	gstate.cursor += n;
+	cursor += n;
 	output.SetCardinality(n);
+}
+
+void UnifracPcoaExecute(ClientContext &, TableFunctionInput &input, DataChunk &output) {
+	auto &gstate = input.global_state->Cast<UnifracPcoaGlobalState>();
+	if (gstate.cursor >= gstate.rows.size()) {
+		output.SetCardinality(0);
+		return;
+	}
+	EmitPcoaChunk(gstate.rows, gstate.cursor, gstate.sample_id_type, /*with_batch_diagnostics=*/false, output);
 }
 
 // ── pcoa(distances, ...) — metric-agnostic PCoA over a condensed distance table ──
@@ -477,13 +480,12 @@ unique_ptr<FunctionData> PcoaFromDistancesBind(ClientContext &context, TableFunc
 // remaining samples stream in batches, each ordinated with the anchors and aligned
 // back by partial procrustes. Output is the identical long-format schema as pcoa
 // (iteration=0; eigenvalues/proportions are the anchor reference PCoA's — a
-// documented caveat) so it reuses UnifracPcoaData / *Execute / *InitGlobal.
+// documented caveat), plus the two batch-diagnostic columns.
 //
-// The distance blocks are sourced by querying the relation per batch (bounded
-// memory — one (k+a)² block plus the id set is held at a time; the dense matrix is
-// never materialized). NOTE: each block issues its own scan-and-filter query, so
-// anchor rows are re-read every batch; a future optimization caches the
-// anchor-touching rows once and reads batch rows via contiguous ranges.
+// Bind validates and picks the anchors; the run itself is driven from the scan, one
+// wave at a time (see ProgressivePcoaGlobalState). The distance blocks are sourced
+// by querying the relation a wave at a time — bounded memory, one wave of blocks
+// plus the id set, and the dense matrix is never materialized.
 
 // Partition sorted ids into (anchors, remaining). Anchors: `n_anchors` chosen by a
 // seeded partial Fisher-Yates shuffle (random+seed — no percentile heuristic).
@@ -555,6 +557,51 @@ AnchorPartition PartitionWithExplicitAnchors(const std::vector<std::string> &sor
 	}
 	return part;
 }
+
+// Everything a progressive run needs, resolved and validated at bind time. Both
+// progressive functions share it: the parameters are the same apart from how a
+// block is obtained, which `source` selects.
+//
+// It holds INPUTS, not results. The run itself happens at execution time
+// (ProgressivePcoaExecute) rather than in Bind, because a Bind that computes the
+// whole ordination has to hand it over as one materialized vector — which the
+// executor then copies again — and offers nowhere to poll for cancellation. See
+// ProgressivePcoaGlobalState.
+struct ProgressivePcoaData : public TableFunctionData {
+	// Which block source serves this run. The UNIFRAC-only fields below are read
+	// only when it is UNIFRAC.
+	enum class Source { DISTANCES, UNIFRAC };
+
+	const char *CallerName() const {
+		return source == Source::DISTANCES ? "progressive_pcoa_from_distances" : "progressive_pcoa_from_unifrac";
+	}
+
+	Source source = Source::DISTANCES;
+	// Output type for sample_id — mirrors the input id type. See UnifracPcoaData.
+	LogicalType sample_id_type = LogicalType::VARCHAR;
+	std::string qname; // quoted source relation (distance table or feature table)
+	AnchorPartition part;
+	uint32_t n_dims = 3;
+	uint32_t batch_size = 1000;
+	int seed = -1;
+	int n_threads = 1;
+
+	// ── UNIFRAC only ──
+	// Built, validated against the feature table, and sheared to its tips once at
+	// bind time; every block shears it again to its own features. Held by pointer
+	// only because NewickTree is not default-constructible in a way this struct
+	// could use.
+	unique_ptr<miint::NewickTree> tree;
+	std::string variant_fp32;
+	bool variance_adjust = false;
+	double alpha = 1.0;
+	bool bypass_tips = false;
+	bool normalize_sample_counts = true;
+	// How wide one block's UniFrac compute may fan out, and how many blocks run at
+	// once. Resolved together at bind time so their product cannot oversubscribe.
+	int block_threads = 1;
+	uint32_t workers = 1;
+};
 
 miint::progressive::DistanceBlock QueryDistanceBlock(ClientContext &context, const std::string &qname,
                                                      const std::vector<std::string> &requested);
@@ -1048,87 +1095,16 @@ unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context
 		part = PickAnchors(ids.sorted_ids, static_cast<uint32_t>(n_anchors), seed);
 	}
 
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
-	WaveDistanceBlockSource source(context, qname, part.anchors);
-	const miint::progressive::BlockProvider provider = [&source](const std::vector<std::string> &requested) {
-		return source.Get(requested);
-	};
-	const miint::progressive::WavePrefetch prefetch = [&source](const std::vector<std::vector<std::string>> &requests) {
-		source.Prefetch(requests);
-	};
-
-	// How many batches to serve per relation scan (see ChooseWaveWidth for what a
-	// wave costs). The budget is a quarter of what memory_limit currently leaves —
-	// a quarter because the blocks are extension heap the buffer manager can neither
-	// see nor evict, the same reason pcoa()'s dense matrix is guarded rather than
-	// tracked. The scan rows ARE buffer-managed (see RunWaveQuery), so overshooting
-	// the estimate spills rather than dies; they are still charged, because spilling
-	// a wave's scan result costs far more than running a narrower wave.
-	const uint32_t wave_batches = [&]() -> uint32_t {
-		auto &buffer_manager = BufferManager::GetBufferManager(context);
-		const auto max_memory = buffer_manager.GetMaxMemory();
-		const auto used_memory = buffer_manager.GetUsedMemory();
-		const uint64_t budget = (max_memory > used_memory ? max_memory - used_memory : 0) / 4;
-		const size_t n_batches =
-		    (part.remaining.size() + static_cast<size_t>(batch_size) - 1) / static_cast<size_t>(batch_size);
-		return miint::progressive::ChooseWaveWidth(part.anchors.size(), static_cast<uint32_t>(batch_size),
-		                                           static_cast<uint32_t>(n_threads), budget, n_batches);
-	}();
-
-	miint::progressive::ProgressivePcoaResult result;
-	try {
-		// Waves, always. The per-batch provider re-reads every anchor-touching row for
-		// every batch, so its cost grows with the batch count; a wave reads them once.
-		// It used to win anyway at low batch counts, purely because its blocks came
-		// from a materialized query while the wave scans were streamed one row at a
-		// time (see RunWaveQuery) — measured on the 25,145-sample EMP matrix (316 M
-		// pairs, 1000 anchors, d=10), 14 cores:
-		//
-		//   batches   waves (streamed)   waves (materialized)   per-batch queries
-		//   25        28.1 s / 58 CPU    6.0 s / 40 CPU         18.1 s / 152 CPU
-		//   121       15.2 s / 44 CPU    4.7 s / 36 CPU         67.4 s / 666 CPU
-		//
-		// With that fixed the wave path wins in both regimes, so the old
-		// `n_batches >= 64` crossover and its MIINT_PROGRESSIVE_NO_WAVES escape hatch
-		// are gone: one path, no regime to regress.
-		//
-		// A wave's batches run concurrently, n_threads of them at a time, each
-		// ordination pinned to one OpenMP thread — so `threads :=` still bounds total
-		// fan-out, it just buys concurrent blocks instead of a wider fsvd. Safe here
-		// because a wave's blocks are already in the source's cache (Get is read-only
-		// during a wave) and skbb's ordination is re-entrant when seeded per call
-		// (see ComputeCallScope). It is worth little on this path (~0.2 s of the 6.0 s; the
-		// ordination stage is ~4% of a run at 1000 anchors, ~11% at 3000) — the
-		// from_unifrac variant, where a block IS a UniFrac compute, is where it would
-		// pay, and that stays serial until libssu's per-compute global `report_status`
-		// is thread-local.
-		result = miint::progressive::RunProgressivePcoa(part.anchors, part.remaining, static_cast<uint32_t>(n_dims),
-		                                                static_cast<uint32_t>(batch_size), seed, n_threads, provider,
-		                                                prefetch, wave_batches, static_cast<uint32_t>(n_threads));
-	} catch (const std::invalid_argument &e) {
-		throw InvalidInputException("progressive_pcoa_from_distances: %s", e.what());
-	}
-
-	auto data = make_uniq<UnifracPcoaData>();
+	auto data = make_uniq<ProgressivePcoaData>();
+	data->source = ProgressivePcoaData::Source::DISTANCES;
 	data->sample_id_type = ids.sample_id_type;
-	data->rows.reserve(result.coords.size());
-	for (const auto &c : result.coords) {
-		const auto axis = static_cast<uint32_t>(c.axis);
-		PcoaRow row;
-		row.iteration = 0; // kept for schema parity with pcoa / unifrac_pcoa
-		row.sample_id = c.sample_id;
-		row.axis = c.axis;
-		row.coordinate = c.coordinate;
-		row.eigenvalue = result.eigvals[axis];
-		row.proportion_explained = result.proportion_explained[axis];
-		row.batch = c.batch;
-		if (c.batch >= 0) {
-			row.batch_anchor_m2 = result.batches[static_cast<size_t>(c.batch)].anchor_m2;
-		}
-		data->rows.push_back(std::move(row));
-	}
+	data->qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	data->part = std::move(part);
+	data->n_dims = static_cast<uint32_t>(n_dims);
+	data->batch_size = static_cast<uint32_t>(batch_size);
+	data->seed = seed;
+	data->n_threads = n_threads;
 
-	data->with_batch_diagnostics = true;
 	DeclarePcoaOutputSchema(data->sample_id_type, return_types, names, /*with_batch_diagnostics=*/true);
 	return std::move(data);
 }
@@ -1140,8 +1116,8 @@ unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context
 // correct because UniFrac is pairwise-local: the distance between two samples
 // depends only on their own abundance vectors and the tree, never on which other
 // samples share the biom — so a per-batch UniFrac block equals the corresponding
-// slice of the full matrix. Reuses the B1 core + the pcoa emit path; only the
-// BlockProvider differs from the _distances variant. subsample_depth is fixed at 0
+// slice of the full matrix. Reuses the B1 core and the whole streaming scan; only
+// the BlockProvider differs from the _distances variant. subsample_depth is fixed at 0
 // (rarefaction + progressive alignment do not compose cleanly — each batch would
 // rarefy independently against a different RNG draw).
 
@@ -1536,9 +1512,6 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 		part = PickAnchors(ids.sorted_sample_ids, static_cast<uint32_t>(n_anchors), seed);
 	}
 
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
-	AnchorFeatureRowCache anchor_cache(context, qname, part.anchors);
-
 	// How wide each block's libssu compute may fan out. The core pins each worker's
 	// ORDINATION to one OpenMP thread itself, but it cannot reach into our provider,
 	// so the UniFrac width has to be divided HERE — otherwise W concurrent workers
@@ -1552,64 +1525,243 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 	const auto active_workers = std::max<size_t>(1, std::min<size_t>(workers, n_batches));
 	const int block_threads = std::max<int>(1, n_threads / static_cast<int>(active_workers));
 
-	const miint::progressive::BlockProvider provider = [&](const std::vector<std::string> &requested) {
-		return ComputeUnifracBlock(context, qname, requested, tree, variant_fp32, variance_adjust, alpha, bypass_tips,
-		                           normalize_sample_counts, seed, block_threads, anchor_cache);
-	};
-
-	// Run the blocks CONCURRENTLY. This is the one path where it pays: a block here
-	// is a UniFrac compute (seconds) rather than an fsvd (~9 ms at m=2000), and a
-	// single block cannot use more than one core no matter what `threads` says —
-	// libssu's parallel degree is ceil(n_samples/2048) and a block is only
-	// n_anchors + batch_size samples, so at any sane config that is one stripe.
-	// Concurrency across blocks is therefore the only way this path uses the machine.
-	//
-	// Workers are drawn from one wave, so wave_batches must be set too or
-	// batch_workers does nothing (wave_workers = min(batch_workers, wave_count)).
-	// Sized equal to the worker count: without a prefetch each block is fetched and
-	// released inside its own batch, so live memory is `workers` blocks rather than
-	// the whole wave, and a bigger wave would only buy fewer barriers at the cost of
-	// holding more batch output. Waves are a barrier, so a straggler can idle its
-	// wave's other workers; revisit together with the streaming refactor.
-	//
-	// Bit-identity is preserved, not merely approximate: each worker pins its
-	// ordination to ONE OpenMP thread, which is what the serial path uses at
-	// n_threads=1, and skbb's centering reduction sums in thread-count-dependent
-	// order (see test_ProgressivePcoa's serial-vs-parallel case).
-	miint::progressive::ProgressivePcoaResult result;
-	try {
-		result = miint::progressive::RunProgressivePcoa(part.anchors, part.remaining, static_cast<uint32_t>(n_dims),
-		                                                static_cast<uint32_t>(batch_size), seed, n_threads, provider,
-		                                                /*prefetch=*/nullptr, /*wave_batches=*/workers,
-		                                                /*batch_workers=*/workers);
-	} catch (const std::invalid_argument &e) {
-		throw InvalidInputException("progressive_pcoa_from_unifrac: %s", e.what());
-	}
-
-	auto data = make_uniq<UnifracPcoaData>();
+	auto data = make_uniq<ProgressivePcoaData>();
+	data->source = ProgressivePcoaData::Source::UNIFRAC;
 	data->sample_id_type = ids.sample_id_type;
-	{
-		data->rows.reserve(result.coords.size());
-		for (const auto &c : result.coords) {
-			const auto axis = static_cast<uint32_t>(c.axis);
-			PcoaRow row;
-			row.iteration = 0; // kept for schema parity with unifrac_pcoa
-			row.sample_id = c.sample_id;
-			row.axis = c.axis;
-			row.coordinate = c.coordinate;
-			row.eigenvalue = result.eigvals[axis];
-			row.proportion_explained = result.proportion_explained[axis];
-			row.batch = c.batch;
-			if (c.batch >= 0) {
-				row.batch_anchor_m2 = result.batches[static_cast<size_t>(c.batch)].anchor_m2;
-			}
-			data->rows.push_back(std::move(row));
-		}
-	}
+	data->qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	data->part = std::move(part);
+	data->n_dims = static_cast<uint32_t>(n_dims);
+	data->batch_size = static_cast<uint32_t>(batch_size);
+	data->seed = seed;
+	data->n_threads = n_threads;
+	data->tree = make_uniq<miint::NewickTree>(std::move(tree));
+	data->variant_fp32 = variant_fp32;
+	data->variance_adjust = variance_adjust;
+	data->alpha = alpha;
+	data->bypass_tips = bypass_tips;
+	data->normalize_sample_counts = normalize_sample_counts;
+	data->block_threads = block_threads;
+	data->workers = workers;
 
-	data->with_batch_diagnostics = true;
 	DeclarePcoaOutputSchema(data->sample_id_type, return_types, names, /*with_batch_diagnostics=*/true);
 	return std::move(data);
+}
+
+// ── Driving a progressive run from the scan ──────────────────────────────────────
+// Both progressive functions share this: the run is constructed and stepped here,
+// one wave at a time, so a wave's rows reach DuckDB while the next wave is still
+// being computed and only one wave of rows is ever buffered.
+//
+// WHY not in Bind, where it used to be: Bind can only hand over a finished result,
+// which meant the coordinates existed twice at once (the core's vector plus the
+// row vector built from it — ~1.3 GB at 1M samples × d=10, ~13 GB at 10M), nothing
+// was emitted until the last batch finished, and there was no point at which a
+// multi-hour run could notice it had been cancelled.
+struct ProgressivePcoaGlobalState : public GlobalTableFunctionState {
+	// Null until the first Execute. The run owns its block source (the provider
+	// closures hold it), so this is also what bounds the source's lifetime.
+	unique_ptr<miint::progressive::ProgressivePcoaRun> run;
+	// The current wave's rows and how far Execute has paged into them. One wave, not
+	// the run — that is the whole point.
+	std::vector<PcoaRow> rows;
+	size_t cursor = 0;
+	LogicalType sample_id_type = LogicalType::VARCHAR;
+	// The run is stepped from one place, in order; a parallel scan would interleave
+	// waves and reorder rows.
+	idx_t MaxThreads() const override {
+		return 1;
+	}
+};
+
+// Convert one batch's coordinates into output rows. `anchor_m2` is that batch's
+// anchor-overlap disparity; it is ignored for the anchor coordinates themselves
+// (batch < 0), which report NULL because they define the frame rather than being
+// fitted into it.
+void AppendPcoaRows(const std::vector<miint::progressive::ProgressiveCoord> &coords, const std::vector<double> &eigvals,
+                    const std::vector<double> &proportions, double anchor_m2, std::vector<PcoaRow> &out) {
+	out.reserve(out.size() + coords.size());
+	for (const auto &c : coords) {
+		const auto axis = static_cast<uint32_t>(c.axis);
+		PcoaRow row;
+		row.iteration = 0; // kept for schema parity with pcoa / unifrac_pcoa
+		row.sample_id = c.sample_id;
+		row.axis = c.axis;
+		row.coordinate = c.coordinate;
+		row.eigenvalue = eigvals[axis];
+		row.proportion_explained = proportions[axis];
+		row.batch = c.batch;
+		if (c.batch >= 0) {
+			row.batch_anchor_m2 = anchor_m2;
+		}
+		out.push_back(std::move(row));
+	}
+}
+
+// Build the run and its block source. Called once per scan, at execution time,
+// because the source issues queries on the context that is running the scan.
+unique_ptr<miint::progressive::ProgressivePcoaRun> MakeProgressiveRun(ClientContext &context,
+                                                                      const ProgressivePcoaData &data) {
+	// Cooperative cancellation. The core polls this before every batch, which is the
+	// only thing standing between a user and an uninterruptible multi-hour query:
+	// Ctrl-C sets context.interrupted and, until now, nothing on this path ever read
+	// it. Polled from worker threads too, hence the atomic read.
+	const miint::progressive::InterruptCheck interrupt = [&context]() {
+		if (context.interrupted) {
+			throw InterruptException();
+		}
+	};
+
+	if (data.source == ProgressivePcoaData::Source::UNIFRAC) {
+		// Shared, not owned by one closure: the cache is read-only after construction
+		// (its anchor rows are loaded eagerly, before any fan-out) so every concurrent
+		// block reads the same one. The run holds the provider, so the provider owning
+		// the cache is what keeps it alive exactly as long as the run.
+		auto cache = std::make_shared<AnchorFeatureRowCache>(context, data.qname, data.part.anchors);
+		const miint::progressive::BlockProvider provider = [&context, &data,
+		                                                    cache](const std::vector<std::string> &requested) {
+			return ComputeUnifracBlock(context, data.qname, requested, *data.tree, data.variant_fp32,
+			                           data.variance_adjust, data.alpha, data.bypass_tips, data.normalize_sample_counts,
+			                           data.seed, data.block_threads, *cache);
+		};
+		// Run the blocks CONCURRENTLY. This is the one path where it pays: a block here
+		// is a UniFrac compute (seconds) rather than an fsvd (~9 ms at m=2000), and a
+		// single block cannot use more than one core no matter what `threads` says —
+		// libssu's parallel degree is ceil(n_samples/2048) and a block is only
+		// n_anchors + batch_size samples, so at any sane config that is one stripe.
+		// Concurrency across blocks is therefore the only way this path uses the machine.
+		//
+		// Workers are drawn from one wave, so wave_batches must be set too or
+		// batch_workers does nothing (wave_workers = min(batch_workers, wave_count)).
+		// Sized equal to the worker count: without a prefetch each block is fetched and
+		// released inside its own batch, so live memory is `workers` blocks rather than
+		// the whole wave, and a bigger wave would only buy fewer barriers at the cost of
+		// holding more batch output. A wave is still a barrier, so a straggler idles its
+		// wave's other workers — the remaining cost of wave quantization, now that the
+		// output no longer waits for the whole run.
+		//
+		// Bit-identity is preserved, not merely approximate: each worker pins its
+		// ordination to ONE OpenMP thread, which is what the serial path uses at
+		// n_threads=1, and skbb's centering reduction sums in thread-count-dependent
+		// order (see test_ProgressivePcoa's serial-vs-parallel case).
+		return make_uniq<miint::progressive::ProgressivePcoaRun>(
+		    data.part.anchors, data.part.remaining, data.n_dims, data.batch_size, data.seed, data.n_threads, provider,
+		    /*prefetch=*/nullptr, /*wave_batches=*/data.workers, /*batch_workers=*/data.workers, interrupt);
+	}
+
+	auto source = std::make_shared<WaveDistanceBlockSource>(context, data.qname, data.part.anchors);
+	const miint::progressive::BlockProvider provider = [source](const std::vector<std::string> &requested) {
+		return source->Get(requested);
+	};
+	const miint::progressive::WavePrefetch prefetch = [source](const std::vector<std::vector<std::string>> &requests) {
+		source->Prefetch(requests);
+	};
+
+	// How many batches to serve per relation scan (see ChooseWaveWidth for what a
+	// wave costs). The budget is a quarter of what memory_limit currently leaves —
+	// a quarter because the blocks are extension heap the buffer manager can neither
+	// see nor evict, the same reason pcoa()'s dense matrix is guarded rather than
+	// tracked. The scan rows ARE buffer-managed (see RunWaveQuery), so overshooting
+	// the estimate spills rather than dies; they are still charged, because spilling
+	// a wave's scan result costs far more than running a narrower wave.
+	auto &buffer_manager = BufferManager::GetBufferManager(context);
+	const auto max_memory = buffer_manager.GetMaxMemory();
+	const auto used_memory = buffer_manager.GetUsedMemory();
+	const uint64_t budget = (max_memory > used_memory ? max_memory - used_memory : 0) / 4;
+	const size_t n_batches = (data.part.remaining.size() + data.batch_size - 1) / data.batch_size;
+	const uint32_t wave_batches = miint::progressive::ChooseWaveWidth(
+	    data.part.anchors.size(), data.batch_size, static_cast<uint32_t>(data.n_threads), budget, n_batches);
+
+	// Waves, always. The per-batch provider re-reads every anchor-touching row for
+	// every batch, so its cost grows with the batch count; a wave reads them once.
+	// It used to win anyway at low batch counts, purely because its blocks came
+	// from a materialized query while the wave scans were streamed one row at a
+	// time (see RunWaveQuery) — measured on the 25,145-sample EMP matrix (316 M
+	// pairs, 1000 anchors, d=10), 14 cores:
+	//
+	//   batches   waves (streamed)   waves (materialized)   per-batch queries
+	//   25        28.1 s / 58 CPU    6.0 s / 40 CPU         18.1 s / 152 CPU
+	//   121       15.2 s / 44 CPU    4.7 s / 36 CPU         67.4 s / 666 CPU
+	//
+	// With that fixed the wave path wins in both regimes, so the old
+	// `n_batches >= 64` crossover and its MIINT_PROGRESSIVE_NO_WAVES escape hatch
+	// are gone: one path, no regime to regress.
+	//
+	// A wave's batches run concurrently, n_threads of them at a time, each
+	// ordination pinned to one OpenMP thread — so `threads :=` still bounds total
+	// fan-out, it just buys concurrent blocks instead of a wider fsvd. Safe here
+	// because a wave's blocks are already in the source's cache (Get is read-only
+	// during a wave) and skbb's ordination is re-entrant when seeded per call
+	// (see ComputeCallScope). It is worth little on this path (~0.2 s of the 6.0 s; the
+	// ordination stage is ~4% of a run at 1000 anchors, ~11% at 3000) — the
+	// from_unifrac variant, where a block IS a UniFrac compute, is where it pays.
+	return make_uniq<miint::progressive::ProgressivePcoaRun>(
+	    data.part.anchors, data.part.remaining, data.n_dims, data.batch_size, data.seed, data.n_threads, provider,
+	    prefetch, wave_batches, static_cast<uint32_t>(data.n_threads), interrupt);
+}
+
+// Refill `rows` with the next piece of the run: the anchor coordinates first (they
+// are the reference frame, and the whole batch phase depends on them), then one
+// wave of batches per call. Returns false once the run is complete.
+bool AdvanceProgressiveRun(ClientContext &context, const ProgressivePcoaData &data,
+                           ProgressivePcoaGlobalState &gstate) {
+	gstate.rows.clear();
+	gstate.cursor = 0;
+	try {
+		if (!gstate.run) {
+			gstate.run = MakeProgressiveRun(context, data);
+			AppendPcoaRows(gstate.run->Start(), gstate.run->eigvals(), gstate.run->proportion_explained(),
+			               /*anchor_m2=*/0.0, gstate.rows);
+			return true;
+		}
+		std::vector<miint::progressive::BatchOutput> wave = gstate.run->NextWave();
+		// Sized for the whole wave before appending any of it: reserving per batch
+		// instead reallocates once per batch and copies everything appended so far,
+		// which is quadratic in the wave's width (and a wave can be over a hundred
+		// batches wide on the _distances path). Capacity survives the clear() above, so
+		// only the first wave pays even this.
+		size_t wave_rows = 0;
+		for (const auto &out : wave) {
+			wave_rows += out.coords.size();
+		}
+		gstate.rows.reserve(wave_rows);
+		for (const auto &out : wave) {
+			AppendPcoaRows(out.coords, gstate.run->eigvals(), gstate.run->proportion_explained(), out.diag.anchor_m2,
+			               gstate.rows);
+		}
+	} catch (const std::invalid_argument &e) {
+		// The core's own guards (see RunProgressivePcoa) — a bad anchor set, a provider
+		// that returned the wrong samples. Bind pre-validates the parameter forms, so
+		// what reaches here is about the data.
+		throw InvalidInputException("%s: %s", data.CallerName(), e.what());
+	}
+	// A wave that ran any batch always yields rows — a batch has at least one sample
+	// and d >= 1 axes — so an empty refill means NextWave found nothing left to run.
+	return !gstate.rows.empty();
+}
+
+unique_ptr<GlobalTableFunctionState> ProgressivePcoaInitGlobal(ClientContext &, TableFunctionInitInput &input) {
+	auto &data = input.bind_data->Cast<ProgressivePcoaData>();
+	auto gstate = make_uniq<ProgressivePcoaGlobalState>();
+	gstate->sample_id_type = data.sample_id_type;
+	return std::move(gstate);
+}
+
+void ProgressivePcoaExecute(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
+	auto &gstate = input.global_state->Cast<ProgressivePcoaGlobalState>();
+	const auto &data = input.bind_data->Cast<ProgressivePcoaData>();
+	while (gstate.cursor >= gstate.rows.size()) {
+		// Also polled here, not only inside the run: a cancellation that arrives while
+		// DuckDB is draining the wave already produced is noticed on the next refill
+		// rather than after another wave's worth of work.
+		if (context.interrupted) {
+			throw InterruptException();
+		}
+		if (!AdvanceProgressiveRun(context, data, gstate)) {
+			output.SetCardinality(0);
+			return;
+		}
+	}
+	EmitPcoaChunk(gstate.rows, gstate.cursor, gstate.sample_id_type, /*with_batch_diagnostics=*/true, output);
 }
 
 } // namespace
@@ -1640,8 +1792,8 @@ void RegisterPcoaFromDistances(ExtensionLoader &loader) {
 }
 
 void RegisterProgressivePcoaFromDistances(ExtensionLoader &loader) {
-	TableFunction fn("progressive_pcoa_from_distances", {LogicalType::VARCHAR}, UnifracPcoaExecute,
-	                 ProgressivePcoaFromDistancesBind, UnifracPcoaInitGlobal);
+	TableFunction fn("progressive_pcoa_from_distances", {LogicalType::VARCHAR}, ProgressivePcoaExecute,
+	                 ProgressivePcoaFromDistancesBind, ProgressivePcoaInitGlobal);
 	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
 	fn.named_parameters["n_anchors"] = LogicalType::INTEGER;
 	fn.named_parameters["batch_size"] = LogicalType::INTEGER;
@@ -1652,8 +1804,8 @@ void RegisterProgressivePcoaFromDistances(ExtensionLoader &loader) {
 }
 
 void RegisterProgressivePcoaFromUnifrac(ExtensionLoader &loader) {
-	TableFunction fn("progressive_pcoa_from_unifrac", {LogicalType::VARCHAR, LogicalType::VARCHAR}, UnifracPcoaExecute,
-	                 ProgressivePcoaFromUnifracBind, UnifracPcoaInitGlobal);
+	TableFunction fn("progressive_pcoa_from_unifrac", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                 ProgressivePcoaExecute, ProgressivePcoaFromUnifracBind, ProgressivePcoaInitGlobal);
 	fn.named_parameters["variant"] = LogicalType::VARCHAR;
 	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
 	fn.named_parameters["n_anchors"] = LogicalType::INTEGER;

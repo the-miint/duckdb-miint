@@ -455,7 +455,8 @@ Values near 0 mean batches slotted cleanly into the frame. A large value means t
 - **Accuracy:** the result reproduces a full [`pcoa`](#pcoa-from-a-distance-table) up to a similarity transform — exactly (to numerical precision) for Euclidean-embeddable distances, and closely for others. Each batch is aligned to the reference *independently*, so alignment error does not compound across batches. Validate on your own data by aligning against a full `pcoa` with [`procrustes`](#procrustes-align-two-ordinations) and checking the disparity `m2`.
 - **Anchor coordinates are batch-invariant:** for a fixed anchor set and seed the anchor coordinates (and eigenvalues/proportions) do not depend on `batch_size`.
 - **Completeness (fail loud):** each batch needs its full `(anchors + batch)²` block present in the distance relation; a missing pair within a block is an error naming the offending pair. NULL sample ids and NULL/NaN distances are skipped. `sample_a`/`sample_b` must resolve to the same output type (a BIGINT/VARCHAR mix is rejected at bind).
-- **Fewer than two samples**, `n_anchors` outside `[n_dims + 1, n_samples]`, `n_dims > n_samples - 1`, or `batch_size < 1`: an error.
+- <a name="progressive-cancellation"></a>**Cancellable:** cancellation is checked before each wave's scan and before every batch, so Ctrl-C (or a client cancel) stops the run within about one block — or, if it lands while a wave's scan is running, once that scan finishes. Rows already returned are discarded with the rest of the query, as for any cancelled statement.
+- **Fewer than two samples**, `n_anchors` outside `[n_dims + 1, n_samples]`, `n_dims > n_samples - 1`, or `batch_size < 1`: an error. Parameter and schema problems are reported when the query is bound; problems in the *data* (an incomplete block, conflicting distances) surface once the run reaches the batch that hits them.
 
 **Example:**
 
@@ -467,7 +468,7 @@ FROM progressive_pcoa_from_distances('dm', n_dims := 3, n_anchors := 100, batch_
 ORDER BY axis, sample_id;
 ```
 
-> **Note:** the current implementation sources each batch's distance block with its own query against the relation (bounded memory — one block at a time), which re-reads the anchor rows per batch. A future revision caches the anchor-touching rows once and reads batch rows via contiguous ranges.
+> **Note:** blocks are filled a *wave* at a time — one pass over the relation serves many blocks, instead of one scan per batch — and the wave's width is chosen from what `memory_limit` currently leaves free. The run is driven from the scan rather than computed up front, so each batch's rows are handed to the query as that batch finishes and live memory is one wave of blocks plus that wave's rows, never the whole result.
 
 ---
 
@@ -504,9 +505,10 @@ There is deliberately **no `subsample_depth`**: rarefaction and progressive alig
 
   **Judge agreement on the ordination, not on coordinates.** The drift is amplified by a randomized SVD and a procrustes fit, so it is larger than one rounding step and it grows with the table: 3.1e-06 max abs on a 40-sample fixture, but 2.4e-05 on 23,814 samples — about 5e-4 relative to the largest coordinate there. What held exactly is the thing that matters: procrustes M² against a full `unifrac_pcoa` was **identical to five decimals (0.19484) at `threads := 1` and `threads := 14`**. So do not diff coordinates across thread counts or use them as a cache key; compare ordinations with [`procrustes`](#procrustes). If you do need identical coordinates, fix `threads := N` alongside the seed and re-run in one session, or use `threads := 1`. See [Reproducibility](#reproducibility) for the same fp32 caveat on the non-progressive paths.
 - **Samples & features:** samples with no nonzero feature are excluded (they cannot be ordinated). The tree must cover every feature in the table (validated once at bind); each batch's features are a subset, so the check makes them all safe.
-- **Fewer than two samples**, `n_anchors` outside `[n_dims + 1, n_samples]`, `n_dims > n_samples - 1`, `batch_size < 1`, an unknown `variant`, or a tree missing a feature: an error.
+- **Cancellable:** as in [`progressive_pcoa_from_distances`](#progressive-cancellation) — cancellation is checked before every batch, so a run that would take hours stops within about one block.
+- **Fewer than two samples**, `n_anchors` outside `[n_dims + 1, n_samples]`, `n_dims > n_samples - 1`, `batch_size < 1`, an unknown `variant`, or a tree missing a feature: an error. Parameter, tree and schema problems are reported when the query is bound; a failure inside a block surfaces when the run reaches it.
 
-> **Note:** like `progressive_pcoa_from_distances`, this computes each batch's block with its own feature-table slice query, so memory stays bounded by one `(anchors + batch)` block. The anchor samples' feature rows are read once and cached for the whole run, so each batch's query fetches only its own samples.
+> **Note:** like `progressive_pcoa_from_distances`, this computes each batch's block with its own feature-table slice query, so memory stays bounded by one `(anchors + batch)` block — and each batch's rows are emitted as that batch finishes, so the coordinates are never all held at once. The anchor samples' feature rows are read once and cached for the whole run, so each batch's query fetches only its own samples.
 
 <a name="feature-table-sort-order"></a>**Performance: store the feature table sorted by `sample_id`.** Samples are batched in sorted id order, so a batch is a contiguous id range. If the table's physical layout is also sorted, DuckDB/Parquet prune by each row group's min/max `sample_id` and a batch's slice query reads only that batch's own rows; if it is not, every slice query scans the whole `sample_id` column, so the run's slicing cost grows as `n_batches × table_rows` instead of one pass.
 

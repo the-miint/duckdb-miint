@@ -1,7 +1,9 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -636,5 +638,242 @@ TEST_CASE("progressive PCoA fails loud on misuse", "[progressive]") {
 		const std::vector<std::string> anchors(ids.begin(), ids.begin() + 6);
 		const std::vector<std::string> remaining(ids.begin() + 6, ids.end());
 		REQUIRE_THROWS_AS(RunProgressivePcoa(anchors, remaining, 3, 10, 1, 0, provider), std::invalid_argument);
+	}
+}
+
+TEST_CASE("the resumable run produces exactly what the one-shot call does", "[progressive]") {
+	// WHY: ProgressivePcoaRun exists so a caller can emit rows as they are produced
+	// instead of buffering the whole ordination twice. That is only worth anything if
+	// the incremental drive is the SAME computation — so this pins equality against
+	// RunProgressivePcoa element by element, including the order rows come out in and
+	// each batch's diagnostic. Equality here is exact, not approximate: the two paths
+	// run identical code on identical inputs, so any difference at all is a defect.
+	const uint32_t n = 90, d_true = 3, n_dims = 3, a = 15, batch_size = 12;
+	const int seed = 23; // >= 0: an unseeded run is deliberately nondeterministic
+	const Oracle oracle = MakeEuclideanOracle(n, d_true, /*seed=*/999);
+	const std::vector<std::string> anchors(oracle.ids.begin(), oracle.ids.begin() + a);
+	const std::vector<std::string> remaining(oracle.ids.begin() + a, oracle.ids.end());
+	const auto provider = [&oracle](const std::vector<std::string> &req) {
+		return SliceBlock(oracle, req);
+	};
+
+	const ProgressivePcoaResult one_shot = RunProgressivePcoa(anchors, remaining, n_dims, batch_size, seed,
+	                                                          /*n_threads=*/1, provider, /*prefetch=*/nullptr,
+	                                                          /*wave_batches=*/3);
+
+	miint::progressive::ProgressivePcoaRun run(anchors, remaining, n_dims, batch_size, seed, /*n_threads=*/1, provider,
+	                                           /*prefetch=*/nullptr, /*wave_batches=*/3);
+	std::vector<miint::progressive::ProgressiveCoord> streamed = run.Start();
+	std::vector<miint::progressive::BatchDiagnostic> streamed_diags;
+	size_t waves = 0;
+	while (true) {
+		std::vector<miint::progressive::BatchOutput> wave = run.NextWave();
+		if (wave.empty()) {
+			break;
+		}
+		++waves;
+		for (auto &out : wave) {
+			streamed_diags.push_back(out.diag);
+			streamed.insert(streamed.end(), out.coords.begin(), out.coords.end());
+		}
+	}
+	REQUIRE(waves == 3); // 75 remaining / 12 = 7 batches, W=3 → waves of 3,3,1
+	REQUIRE(run.Done());
+	REQUIRE(run.n_batches() == 7);
+	REQUIRE(run.d() == n_dims);
+
+	REQUIRE(streamed.size() == one_shot.coords.size());
+	for (size_t i = 0; i < streamed.size(); ++i) {
+		REQUIRE(streamed[i].sample_id == one_shot.coords[i].sample_id);
+		REQUIRE(streamed[i].axis == one_shot.coords[i].axis);
+		REQUIRE(streamed[i].batch == one_shot.coords[i].batch);
+		REQUIRE(streamed[i].coordinate == one_shot.coords[i].coordinate);
+	}
+	REQUIRE(streamed_diags.size() == one_shot.batches.size());
+	for (size_t b = 0; b < streamed_diags.size(); ++b) {
+		REQUIRE(streamed_diags[b].batch == one_shot.batches[b].batch);
+		REQUIRE(streamed_diags[b].n_samples == one_shot.batches[b].n_samples);
+		REQUIRE(streamed_diags[b].anchor_m2 == one_shot.batches[b].anchor_m2);
+	}
+	REQUIRE(run.eigvals() == one_shot.eigvals);
+	REQUIRE(run.proportion_explained() == one_shot.proportion_explained);
+
+	// Draining past the end is a no-op, not a re-run: a table function's Execute is
+	// called once more after the last row to learn that there are none left.
+	REQUIRE(run.NextWave().empty());
+}
+
+TEST_CASE("the resumable run computes nothing before it is asked to", "[progressive]") {
+	// WHY: this is the streaming property itself, and it is the one thing equality
+	// with the one-shot call cannot show. If NextWave eagerly ran ahead, the caller's
+	// buffer would grow back to the whole result and the refactor would buy nothing.
+	// Counting provider calls is how "lazy" is observable from outside.
+	const uint32_t n = 70, d_true = 3, n_dims = 3, a = 10, batch_size = 10;
+	const Oracle oracle = MakeEuclideanOracle(n, d_true, /*seed=*/4242);
+	const std::vector<std::string> anchors(oracle.ids.begin(), oracle.ids.begin() + a);
+	const std::vector<std::string> remaining(oracle.ids.begin() + a, oracle.ids.end());
+	size_t block_calls = 0, prefetch_calls = 0;
+	const auto provider = [&](const std::vector<std::string> &req) {
+		++block_calls;
+		return SliceBlock(oracle, req);
+	};
+	const auto prefetch = [&](const std::vector<std::vector<std::string>> &) {
+		++prefetch_calls;
+	};
+
+	// 60 remaining / 10 = 6 batches, one per wave.
+	miint::progressive::ProgressivePcoaRun run(anchors, remaining, n_dims, batch_size, /*seed=*/5, /*n_threads=*/1,
+	                                           provider, prefetch, /*wave_batches=*/1);
+	REQUIRE(block_calls == 0); // constructing a run must not touch the source
+	REQUIRE(prefetch_calls == 0);
+	REQUIRE_FALSE(run.Done());
+
+	(void)run.Start();
+	REQUIRE(block_calls == 1); // the anchor block, and nothing else
+	REQUIRE(prefetch_calls == 0);
+
+	for (size_t w = 1; w <= 6; ++w) {
+		const std::vector<miint::progressive::BatchOutput> wave = run.NextWave();
+		REQUIRE(wave.size() == 1);
+		REQUIRE(wave[0].diag.batch == static_cast<int32_t>(w - 1));
+		REQUIRE(wave[0].coords.size() == static_cast<size_t>(batch_size) * n_dims);
+		REQUIRE(block_calls == 1 + w); // exactly one block per wave asked for
+		REQUIRE(prefetch_calls == w);
+	}
+	REQUIRE(run.Done());
+	REQUIRE(run.NextWave().empty());
+	REQUIRE(block_calls == 7); // the trailing drain fetches nothing
+	REQUIRE(prefetch_calls == 6);
+}
+
+TEST_CASE("a progressive run can be interrupted between batches", "[progressive]") {
+	// WHY: a run at the scale this core exists for takes hours, and until now there
+	// was no poll of any kind in it — a query could not be cancelled at all. What has
+	// to hold is that the hook is polled per BATCH rather than per wave (so the wait
+	// is one block, not one wave), that the exception the caller throws is the one
+	// that comes out, and that the batches already handed over stay valid.
+	const uint32_t n = 100, d_true = 3, n_dims = 3, a = 10, batch_size = 10;
+	const Oracle oracle = MakeEuclideanOracle(n, d_true, /*seed=*/616);
+	const std::vector<std::string> anchors(oracle.ids.begin(), oracle.ids.begin() + a);
+	const std::vector<std::string> remaining(oracle.ids.begin() + a, oracle.ids.end());
+	const auto provider = [&oracle](const std::vector<std::string> &req) {
+		return SliceBlock(oracle, req);
+	};
+
+	SECTION("mid-wave, so the wait is one block rather than one wave") {
+		// 90 remaining / 10 = 9 batches in ONE wave. Cancel once 4 blocks have been
+		// fetched (the anchors plus 3 batches): a hook polled only per wave would run
+		// all 10 blocks before noticing.
+		size_t blocks = 0;
+		const auto counting_provider = [&](const std::vector<std::string> &req) {
+			++blocks;
+			return SliceBlock(oracle, req);
+		};
+		const auto interrupt = [&blocks]() {
+			if (blocks >= 4) {
+				throw std::runtime_error("cancelled");
+			}
+		};
+		miint::progressive::ProgressivePcoaRun run(anchors, remaining, n_dims, batch_size, /*seed=*/5,
+		                                           /*n_threads=*/1, counting_provider, /*prefetch=*/nullptr,
+		                                           /*wave_batches=*/9, /*batch_workers=*/1, interrupt);
+		(void)run.Start();
+		REQUIRE_THROWS_WITH(run.NextWave(), "cancelled");
+		REQUIRE(blocks == 4); // anchor + 3 batches, not all 10
+	}
+
+	SECTION("the run is polled before the anchor block, so an already-cancelled query dies at once") {
+		size_t blocks = 0;
+		const auto counting_provider = [&](const std::vector<std::string> &req) {
+			++blocks;
+			return SliceBlock(oracle, req);
+		};
+		const auto interrupt = []() {
+			throw std::runtime_error("cancelled");
+		};
+		miint::progressive::ProgressivePcoaRun run(anchors, remaining, n_dims, batch_size, /*seed=*/5,
+		                                           /*n_threads=*/1, counting_provider, /*prefetch=*/nullptr,
+		                                           /*wave_batches=*/4, /*batch_workers=*/1, interrupt);
+		REQUIRE_THROWS_WITH(run.Start(), "cancelled");
+		REQUIRE(blocks == 0); // the anchor block is the expensive serial phase; skip it
+	}
+
+	SECTION("a parallel wave is interruptible too, and reports the cancellation") {
+		// The worker loop funnels every exception through the same lowest-numbered
+		// reporting path as a bad input, so a cancellation must not come out looking
+		// like something else.
+		std::atomic<int> polls {0};
+		const auto interrupt = [&polls]() {
+			if (polls.fetch_add(1) >= 3) {
+				throw std::runtime_error("cancelled");
+			}
+		};
+		miint::progressive::ProgressivePcoaRun run(anchors, remaining, n_dims, batch_size, /*seed=*/5,
+		                                           /*n_threads=*/4, provider, /*prefetch=*/nullptr,
+		                                           /*wave_batches=*/9, /*batch_workers=*/4, interrupt);
+		(void)run.Start();
+		REQUIRE_THROWS_WITH(run.NextWave(), "cancelled");
+	}
+
+	SECTION("a hook that never throws changes nothing") {
+		size_t polls = 0;
+		const auto interrupt = [&polls]() {
+			++polls;
+		};
+		miint::progressive::ProgressivePcoaRun run(anchors, remaining, n_dims, batch_size, /*seed=*/5,
+		                                           /*n_threads=*/1, provider, /*prefetch=*/nullptr,
+		                                           /*wave_batches=*/4, /*batch_workers=*/1, interrupt);
+		std::vector<miint::progressive::ProgressiveCoord> coords = run.Start();
+		while (true) {
+			const std::vector<miint::progressive::BatchOutput> wave = run.NextWave();
+			if (wave.empty()) {
+				break;
+			}
+			for (const auto &out : wave) {
+				coords.insert(coords.end(), out.coords.begin(), out.coords.end());
+			}
+		}
+		REQUIRE(coords.size() == static_cast<size_t>(n) * n_dims);
+		REQUIRE(polls == 1 + 3 + 9); // anchor + one per wave + one per batch
+	}
+}
+
+TEST_CASE("the resumable run fails loud on misuse", "[progressive]") {
+	const uint32_t n_dims = 3, a = 10, batch_size = 10;
+	const Oracle oracle = MakeEuclideanOracle(50, 3, /*seed=*/8);
+	const std::vector<std::string> anchors(oracle.ids.begin(), oracle.ids.begin() + a);
+	const std::vector<std::string> remaining(oracle.ids.begin() + a, oracle.ids.end());
+	const auto provider = [&oracle](const std::vector<std::string> &req) {
+		return SliceBlock(oracle, req);
+	};
+
+	SECTION("NextWave before Start has no reference frame to fit into") {
+		// Silently fitting batches against an empty frame would produce coordinates
+		// that look plausible and mean nothing.
+		miint::progressive::ProgressivePcoaRun run(anchors, remaining, n_dims, batch_size, /*seed=*/5, /*n_threads=*/1,
+		                                           provider);
+		REQUIRE_THROWS_AS(run.NextWave(), std::logic_error);
+	}
+	SECTION("Start twice would re-fetch the anchor block and re-emit the anchors") {
+		miint::progressive::ProgressivePcoaRun run(anchors, remaining, n_dims, batch_size, /*seed=*/5, /*n_threads=*/1,
+		                                           provider);
+		(void)run.Start();
+		REQUIRE_THROWS_AS(run.Start(), std::logic_error);
+	}
+	SECTION("the constructor validates its arguments, before anything is fetched") {
+		// Same guards as RunProgressivePcoa — it is the same computation.
+		const std::vector<std::string> too_few(oracle.ids.begin(), oracle.ids.begin() + 3);
+		REQUIRE_THROWS_AS(
+		    miint::progressive::ProgressivePcoaRun(too_few, remaining, n_dims, batch_size, 5, 1, provider),
+		    std::invalid_argument);
+		REQUIRE_THROWS_AS(
+		    miint::progressive::ProgressivePcoaRun(anchors, remaining, /*n_dims=*/0, batch_size, 5, 1, provider),
+		    std::invalid_argument);
+		REQUIRE_THROWS_AS(
+		    miint::progressive::ProgressivePcoaRun(anchors, remaining, n_dims, /*batch_size=*/0, 5, 1, provider),
+		    std::invalid_argument);
+		REQUIRE_THROWS_AS(miint::progressive::ProgressivePcoaRun(anchors, remaining, n_dims, batch_size, 5,
+		                                                         /*n_threads=*/0, provider),
+		                  std::invalid_argument);
 	}
 }

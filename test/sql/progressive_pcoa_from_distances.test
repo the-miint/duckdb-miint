@@ -301,3 +301,22 @@ SELECT count(*) FROM (
     WHERE batch IS NOT NULL GROUP BY batch HAVING count(DISTINCT batch_anchor_m2) <> 1);
 ----
 0
+
+# ── the ordination happens per EXECUTION, not once at bind ──────────────────────
+# A prepared statement binds once and re-executes that same plan. When the run
+# lived in Bind, its result was handed to the scan by MOVING it out of the bind
+# data, so the second execution of a prepared statement silently returned zero
+# rows. Streaming the run from the scan is what makes a re-execution recompute.
+statement ok
+PREPARE prog_twice AS SELECT count(*) FROM progressive_pcoa_from_distances('dcoo',
+    n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+
+query I
+EXECUTE prog_twice;
+----
+150
+
+query I
+EXECUTE prog_twice;
+----
+150
