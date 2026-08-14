@@ -277,3 +277,36 @@ WHERE abs(viadist.c - direct.c) < 1e-5
   AND abs(viadist.e - direct.e) < 1e-5;
 ----
 18
+
+# ── the ordination happens per EXECUTION, not once at bind ──────────────────────
+# A prepared statement binds once and re-executes that same plan. When the result
+# was computed in Bind and handed to the scan by MOVING it out of the bind data,
+# the second execution silently returned zero rows.
+statement ok
+PREPARE pcoa_twice AS SELECT COUNT(*) FROM pcoa('dist', n_dims := 2);
+
+query I
+EXECUTE pcoa_twice;
+----
+8
+
+query I
+EXECUTE pcoa_twice;
+----
+8
+
+# EXPLAIN binds without executing, so it must not pay for the ordination. Timing
+# cannot be asserted here, but the consequence can: a DATA error stays unraised
+# until the query actually runs.
+statement ok
+EXPLAIN SELECT * FROM pcoa('dist_negative', n_dims := 2);
+
+statement ok
+EXPLAIN SELECT * FROM pcoa('dist_incomplete', n_dims := 2);
+
+# SCHEMA errors stay at bind, where they belong: a mismatched id type is a property
+# of the relation's definition, not of its rows, so EXPLAIN must still reject it.
+statement error
+EXPLAIN SELECT * FROM pcoa('dist_mixed_types', n_dims := 2);
+----
+mismatched

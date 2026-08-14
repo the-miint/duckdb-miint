@@ -21,20 +21,46 @@
 
 namespace duckdb::unifrac_internal {
 
+namespace {
+
+// The projection every feature-table reader casts through, in one place so the
+// probe and the read can never disagree about what they accept.
+const char *const kFeatureTableProjection = "SELECT sample_id::VARCHAR, feature_id::VARCHAR, value::DOUBLE FROM ";
+
+// Schema probe via LIMIT 0 — surfaces missing columns or unsafe casts as a
+// binder-time error before anything is materialized.
+void ProbeFeatureTableShape(Connection &conn, const std::string &qname, const std::string &table_name,
+                            const std::string &caller_name) {
+	auto probe = conn.Query(kFeatureTableProjection + qname + " LIMIT 0");
+	if (probe->HasError()) {
+		throw InvalidInputException(
+		    "%s: feature-table '%s' must expose (sample_id VARCHAR, feature_id VARCHAR, value DOUBLE): %s", caller_name,
+		    table_name, probe->GetError());
+	}
+}
+
+} // namespace
+
+LogicalType ProbeFeatureTableIdType(ClientContext &context, const std::string &table_name,
+                                    const std::string &caller_name) {
+	auto conn = MakeReadOnlyHelperConnection(context);
+	ProbeFeatureTableShape(conn, KeywordHelper::WriteOptionallyQuoted(table_name), table_name, caller_name);
+	auto cols = GetTableOrViewColumns(context, table_name, "feature-table");
+	for (idx_t i = 0; i < cols.names.size(); ++i) {
+		if (StringUtil::Lower(cols.names[i]) == "sample_id") {
+			return ResolveSampleIdOutputType(cols.types[i]);
+		}
+	}
+	return LogicalType::VARCHAR; // unreachable: the probe proved sample_id exists
+}
+
 std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, const std::string &table_name,
                                                      const std::string &caller_name, LogicalType *sample_id_type,
                                                      LogicalType *feature_id_type) {
 	auto conn = MakeReadOnlyHelperConnection(context);
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
 
-	// Schema probe via LIMIT 0 — surfaces missing columns or unsafe casts as a
-	// binder-time error before we materialize the full table.
-	auto probe = conn.Query("SELECT sample_id::VARCHAR, feature_id::VARCHAR, value::DOUBLE FROM " + qname + " LIMIT 0");
-	if (probe->HasError()) {
-		throw InvalidInputException(
-		    "%s: feature-table '%s' must expose (sample_id VARCHAR, feature_id VARCHAR, value DOUBLE): %s", caller_name,
-		    table_name, probe->GetError());
-	}
+	ProbeFeatureTableShape(conn, qname, table_name, caller_name);
 
 	// Capture the sample_id column's original SQL type (before the ::VARCHAR cast
 	// above) for callers that mirror the id type onto their output. A catalog
@@ -90,8 +116,8 @@ std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, con
 	return rows;
 }
 
-DistanceRelationIds EnumerateDistanceIds(ClientContext &context, const std::string &table_name,
-                                         const std::string &caller_name) {
+LogicalType ProbeDistanceTableIdType(ClientContext &context, const std::string &table_name,
+                                     const std::string &caller_name) {
 	auto conn = MakeReadOnlyHelperConnection(context);
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
 
@@ -130,6 +156,16 @@ DistanceRelationIds EnumerateDistanceIds(ClientContext &context, const std::stri
 		                      "both must map to the same output type (BIGINT, UUID, or VARCHAR)",
 		                      caller_name, table_name, sample_a_type.ToString(), sample_b_type.ToString());
 	}
+	return ResolveSampleIdOutputType(sample_a_type);
+}
+
+DistanceRelationIds EnumerateDistanceIds(ClientContext &context, const std::string &table_name,
+                                         const std::string &caller_name) {
+	DistanceRelationIds out;
+	out.sample_id_type = ProbeDistanceTableIdType(context, table_name, caller_name);
+
+	auto conn = MakeReadOnlyHelperConnection(context);
+	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
 
 	auto res = conn.Query("SELECT id FROM (SELECT sample_a::VARCHAR AS id FROM " + qname +
 	                      " UNION SELECT sample_b::VARCHAR FROM " + qname + ") WHERE id IS NOT NULL ORDER BY id");
@@ -137,8 +173,6 @@ DistanceRelationIds EnumerateDistanceIds(ClientContext &context, const std::stri
 		throw InvalidInputException("%s: failed to enumerate ids of distance-table '%s': %s", caller_name, table_name,
 		                            res->GetError());
 	}
-	DistanceRelationIds out;
-	out.sample_id_type = ResolveSampleIdOutputType(sample_a_type);
 	auto &mat = res->Cast<MaterializedQueryResult>();
 	while (auto chunk = mat.Fetch()) {
 		const idx_t rn = chunk->size();

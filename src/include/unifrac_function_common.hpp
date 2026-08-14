@@ -80,6 +80,23 @@ struct DenseDistanceMatrix {
 	LogicalType sample_id_type = LogicalType::VARCHAR;
 };
 
+// Validate a relation's shape and resolve the output type of its sample ids
+// WITHOUT reading a row: a `LIMIT 0` probe proves the columns exist and cast, and
+// the type comes from a catalog lookup. Together they are everything a bind needs
+// in order to declare its output schema.
+//
+// WHY they are separable: a table function that defers its real work to execution
+// time still has to produce a schema, and still ought to reject a mis-shaped
+// relation at bind — a missing column or a BIGINT/VARCHAR id mix is a property of
+// the relation's definition, not of its rows. These give a bind exactly that much
+// and nothing more, so the scan itself can happen per execution. `pcoa` and
+// `unifrac_pcoa` use them for that; the readers below call them too, so the probe
+// and its wording live in one place.
+LogicalType ProbeFeatureTableIdType(ClientContext &context, const std::string &table_name,
+                                    const std::string &caller_name);
+LogicalType ProbeDistanceTableIdType(ClientContext &context, const std::string &table_name,
+                                     const std::string &caller_name);
+
 // The distinct, sorted, non-null sample ids of a condensed distance relation,
 // plus the resolved output id type. Materializes only the id dictionary (bounded
 // by N), never the N×N matrix.

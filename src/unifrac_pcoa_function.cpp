@@ -50,6 +50,8 @@ using unifrac_internal::AcceptedVariantList;
 using unifrac_internal::DistanceRelationIds;
 using unifrac_internal::EnumerateDistanceIds;
 using unifrac_internal::IsValidVariant;
+using unifrac_internal::ProbeDistanceTableIdType;
+using unifrac_internal::ProbeFeatureTableIdType;
 using unifrac_internal::ReadDistanceTable;
 using unifrac_internal::ReadFeatureTable;
 using unifrac_internal::ResolveSampleIdOutputType;
@@ -70,11 +72,37 @@ struct PcoaRow {
 	double batch_anchor_m2 = 0.0;
 };
 
+// Inputs for a dense (whole-matrix) PCoA, resolved and validated at bind. Shared
+// by pcoa and unifrac_pcoa, which differ only in where the matrix comes from —
+// `source` selects that, and the UNIFRAC-only fields below are read accordingly.
+//
+// It holds INPUTS, not results. The ordination runs per execution, in InitGlobal,
+// for the same reasons as the progressive functions (see ProgressivePcoaData) plus
+// one specific to these: a result computed in Bind was handed to the scan by
+// MOVING it out of the bind data, so a prepared statement — which binds once and
+// re-executes that plan — returned rows the first time and NOTHING thereafter.
 struct UnifracPcoaData : public TableFunctionData {
-	std::vector<PcoaRow> rows;
+	enum class Source { DISTANCES, UNIFRAC };
+
+	Source source = Source::DISTANCES;
 	// Output type for sample_id — mirrors the input sample_id type (BIGINT/UUID)
 	// or VARCHAR otherwise. See ResolveSampleIdOutputType.
 	LogicalType sample_id_type = LogicalType::VARCHAR;
+	std::string table_name;
+	int32_t n_dims = 3;
+	int32_t seed = -1;
+	int n_threads = 1;
+
+	// ── UNIFRAC only ──
+	std::string tree_name;
+	std::string variant_fp32;
+	bool variance_adjust = false;
+	double alpha = 1.0;
+	bool bypass_tips = false;
+	bool normalize_sample_counts = true;
+	int32_t subsample_depth = 0;
+	bool subsample_with_replacement = false;
+	int32_t n_subsamples = 1;
 };
 
 struct UnifracPcoaGlobalState : public GlobalTableFunctionState {
@@ -294,11 +322,41 @@ unique_ptr<FunctionData> UnifracPcoaBind(ClientContext &context, TableFunctionBi
 		    seed, n_subsamples);
 	}
 
-	LogicalType sample_id_col_type = LogicalType::VARCHAR;
-	auto coo_rows = ReadFeatureTable(context, table_name, "unifrac_pcoa", &sample_id_col_type);
+	auto data = make_uniq<UnifracPcoaData>();
+	data->source = UnifracPcoaData::Source::UNIFRAC;
+	// Resolved without reading the table, so the schema is known at bind while the
+	// ordination is not (see ProbeFeatureTableIdType).
+	data->sample_id_type = ProbeFeatureTableIdType(context, table_name, "unifrac_pcoa");
+	data->table_name = table_name;
+	data->tree_name = tree_name;
+	data->n_dims = n_dims;
+	data->seed = seed;
+	data->n_threads = n_threads;
+	// libssu accepts both bare and `_fp32`-suffixed variant strings
+	// (unifrac-binaries/src/api.cpp:60-89). We append _fp32 explicitly so the
+	// caller's choice is pinned to fp32 even if libssu changes which bare
+	// names default to fp32 in a future release.
+	data->variant_fp32 = variant + "_fp32";
+	data->variance_adjust = variance_adjust;
+	data->alpha = alpha;
+	data->bypass_tips = bypass_tips;
+	data->normalize_sample_counts = normalize_sample_counts;
+	data->subsample_depth = subsample_depth;
+	data->subsample_with_replacement = subsample_with_replacement;
+	data->n_subsamples = n_subsamples;
+
+	DeclarePcoaOutputSchema(data->sample_id_type, return_types, names);
+
+	return std::move(data);
+}
+
+// The UniFrac ordination itself: read the table, build and check the tree, then run
+// one PCoA per subsample iteration. Runs per execution — see UnifracPcoaData.
+void RunUnifracPcoa(ClientContext &context, const UnifracPcoaData &data, std::vector<PcoaRow> &out_rows) {
+	auto coo_rows = ReadFeatureTable(context, data.table_name, "unifrac_pcoa");
 	if (coo_rows.empty()) {
 		throw InvalidInputException("unifrac_pcoa: feature-table '%s' is empty after dropping NULL/zero rows",
-		                            table_name);
+		                            data.table_name);
 	}
 	miint::unifrac::UnifracSupportBiomView biom_view = [&]() {
 		try {
@@ -309,21 +367,21 @@ unique_ptr<FunctionData> UnifracPcoaBind(ClientContext &context, TableFunctionBi
 	}();
 
 	const auto *biom_struct = biom_view.support_biom();
-	auto ordered_sample_ids = CollectIds(biom_struct->sample_ids, biom_struct->n_samples);
 	auto feature_ids = CollectIds(biom_struct->obs_ids, biom_struct->n_obs);
-	const auto n_samples = static_cast<uint32_t>(ordered_sample_ids.size());
+	const auto n_samples = static_cast<uint32_t>(biom_struct->n_samples);
 
 	if (n_samples < 2) {
-		throw BinderException("unifrac_pcoa: feature-table '%s' has %u sample(s); at least 2 are required for PCoA",
-		                      table_name, n_samples);
+		throw InvalidInputException(
+		    "unifrac_pcoa: feature-table '%s' has %u sample(s); at least 2 are required for PCoA", data.table_name,
+		    n_samples);
 	}
-	if (static_cast<uint32_t>(n_dims) > n_samples - 1) {
-		throw BinderException(
-		    "unifrac_pcoa: n_dims (%d) must be <= n_samples - 1 (%u). PCoA loses one dimension to centering.", n_dims,
-		    n_samples - 1);
+	if (static_cast<uint32_t>(data.n_dims) > n_samples - 1) {
+		throw InvalidInputException(
+		    "unifrac_pcoa: n_dims (%d) must be <= n_samples - 1 (%u). PCoA loses one dimension to centering.",
+		    data.n_dims, n_samples - 1);
 	}
 
-	auto tree_inputs = ReadTreeTable(context, tree_name);
+	auto tree_inputs = ReadTreeTable(context, data.tree_name);
 	auto tree = miint::NewickTree::build(tree_inputs);
 	try {
 		miint::unifrac::ValidateTreeCoversFeatures(tree, feature_ids);
@@ -332,34 +390,52 @@ unique_ptr<FunctionData> UnifracPcoaBind(ClientContext &context, TableFunctionBi
 	}
 	auto bptree_view = miint::unifrac::UnifracBptreeView::FromNewickTree(tree);
 
-	// libssu accepts both bare and `_fp32`-suffixed variant strings
-	// (unifrac-binaries/src/api.cpp:60-89). We append _fp32 explicitly so the
-	// caller's choice is pinned to fp32 even if libssu changes which bare
-	// names default to fp32 in a future release.
-	const std::string variant_fp32 = variant + "_fp32";
-
-	auto data = make_uniq<UnifracPcoaData>();
-	data->sample_id_type = ResolveSampleIdOutputType(sample_id_col_type);
-	const auto rows_per_iter = static_cast<size_t>(n_samples) * static_cast<size_t>(n_dims);
-	data->rows.reserve(static_cast<size_t>(n_subsamples) * rows_per_iter);
-	for (int32_t i = 0; i < n_subsamples; ++i) {
-		// seed + i overflow is prevented by the bind-time check above.
-		const int seed_iter = (seed >= 0) ? (seed + i) : -1;
-		ComputeOneIteration(biom_view, bptree_view, variant_fp32, variance_adjust, alpha, bypass_tips,
-		                    normalize_sample_counts, static_cast<uint32_t>(subsample_depth), subsample_with_replacement,
-		                    seed_iter, static_cast<uint32_t>(n_dims), n_threads, i, data->rows);
+	const auto rows_per_iter = static_cast<size_t>(n_samples) * static_cast<size_t>(data.n_dims);
+	out_rows.reserve(static_cast<size_t>(data.n_subsamples) * rows_per_iter);
+	for (int32_t i = 0; i < data.n_subsamples; ++i) {
+		// seed + i overflow is prevented by the bind-time check.
+		const int seed_iter = (data.seed >= 0) ? (data.seed + i) : -1;
+		ComputeOneIteration(biom_view, bptree_view, data.variant_fp32, data.variance_adjust, data.alpha,
+		                    data.bypass_tips, data.normalize_sample_counts, static_cast<uint32_t>(data.subsample_depth),
+		                    data.subsample_with_replacement, seed_iter, static_cast<uint32_t>(data.n_dims),
+		                    data.n_threads, i, out_rows);
 	}
-
-	DeclarePcoaOutputSchema(data->sample_id_type, return_types, names);
-
-	return std::move(data);
 }
 
-unique_ptr<GlobalTableFunctionState> UnifracPcoaInitGlobal(ClientContext &, TableFunctionInitInput &input) {
-	auto &data = input.bind_data->CastNoConst<UnifracPcoaData>();
+// The metric-agnostic ordination: read the condensed relation into a dense matrix
+// and ordinate it. Runs per execution — see UnifracPcoaData.
+void RunPcoaFromDistances(ClientContext &context, const UnifracPcoaData &data, std::vector<PcoaRow> &out_rows) {
+	auto dist = ReadDistanceTable(context, data.table_name, "pcoa");
+	if (static_cast<uint32_t>(data.n_dims) > dist.n_samples - 1) {
+		throw InvalidInputException(
+		    "pcoa: n_dims (%d) must be <= n_samples - 1 (%u). PCoA loses one dimension to centering.", data.n_dims,
+		    dist.n_samples - 1);
+	}
+	out_rows.reserve(static_cast<size_t>(dist.n_samples) * static_cast<size_t>(data.n_dims));
+	RunPcoaOnMatrix(dist.matrix.data(), dist.n_samples, dist.sample_ids, static_cast<uint32_t>(data.n_dims), data.seed,
+	                data.n_threads, /*iteration_index*/ 0, "pcoa", out_rows);
+}
+
+// The ordination happens HERE, once per execution, rather than in Bind.
+//
+// Three things follow, all of which were wrong before. A prepared statement binds
+// once and re-executes the same plan, so a Bind-computed result had to be either
+// moved (second EXECUTE returned nothing — the bug this fixes) or copied (paying
+// for the result twice). `EXPLAIN` binds without executing, so it used to run the
+// whole ordination: measured in-process on a 4,000-sample distance relation,
+// EXPLAIN took 0.644 s against 0.638 s to actually run the query, and now takes
+// 0.000 s while the query still takes 0.648 s. And an unseeded run, re-executed,
+// should redraw — which it now does, rather than replaying the first execution's
+// subsample.
+unique_ptr<GlobalTableFunctionState> UnifracPcoaInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
+	auto &data = input.bind_data->Cast<UnifracPcoaData>();
 	auto gstate = make_uniq<UnifracPcoaGlobalState>();
-	gstate->rows = std::move(data.rows);
 	gstate->sample_id_type = data.sample_id_type;
+	if (data.source == UnifracPcoaData::Source::UNIFRAC) {
+		RunUnifracPcoa(context, data, gstate->rows);
+	} else {
+		RunPcoaFromDistances(context, data, gstate->rows);
+	}
 	return std::move(gstate);
 }
 
@@ -456,17 +532,16 @@ unique_ptr<FunctionData> PcoaFromDistancesBind(ClientContext &context, TableFunc
 		throw BinderException("pcoa: n_dims must be >= 1 (got %d)", n_dims);
 	}
 
-	auto dist = ReadDistanceTable(context, table_name, "pcoa");
-	if (static_cast<uint32_t>(n_dims) > dist.n_samples - 1) {
-		throw BinderException("pcoa: n_dims (%d) must be <= n_samples - 1 (%u). PCoA loses one dimension to centering.",
-		                      n_dims, dist.n_samples - 1);
-	}
-
 	auto data = make_uniq<UnifracPcoaData>();
-	data->sample_id_type = dist.sample_id_type;
-	data->rows.reserve(static_cast<size_t>(dist.n_samples) * static_cast<size_t>(n_dims));
-	RunPcoaOnMatrix(dist.matrix.data(), dist.n_samples, dist.sample_ids, static_cast<uint32_t>(n_dims), seed, n_threads,
-	                /*iteration_index*/ 0, "pcoa", data->rows);
+	data->source = UnifracPcoaData::Source::DISTANCES;
+	// Resolved without reading the relation, so a mis-shaped or mixed-id-type
+	// relation is still rejected at bind while the matrix is not built until the
+	// query runs (see ProbeDistanceTableIdType).
+	data->sample_id_type = ProbeDistanceTableIdType(context, table_name, "pcoa");
+	data->table_name = table_name;
+	data->n_dims = n_dims;
+	data->seed = seed;
+	data->n_threads = n_threads;
 
 	DeclarePcoaOutputSchema(data->sample_id_type, return_types, names);
 
