@@ -1,0 +1,120 @@
+# name: test/sql/circular_query_coverage_minimap2.test
+# description: circular_query_coverage over real align_minimap2 output
+# group: [sql]
+
+require miint
+
+# The unit tests in circular_query_coverage.test drive the macro from transcribed CIGARs.
+# This file drives it from an actual aligner run, so that the flags, clip kinds and
+# primary/supplementary assignment the aligner really emits are exercised rather than
+# assumed. minimap2 is statically linked, so there is nothing optional to guard on.
+#
+# Sequences come from md5 hex mapped onto ACGT rather than setseed()+random(): md5 is
+# stable across DuckDB versions, so the fixture cannot drift under a version bump. Each
+# reference gets a different salt, otherwise they would share a prefix and cross-map.
+statement ok
+CREATE MACRO det_dna(salt, n_blocks) AS TABLE
+  SELECT string_agg(translate(md5(salt || i::VARCHAR),
+                              '048c159d26ae37bf', 'AAAACCCCGGGGTTTT'), '' ORDER BY i) AS s
+  FROM range(n_blocks) t(i);
+
+statement ok
+CREATE TABLE refs AS
+SELECT 'circ30k' AS read_id, substr((SELECT s FROM det_dna('c30:', 1000)), 1, 30000) AS sequence1
+UNION ALL SELECT 'plas5k',   substr((SELECT s FROM det_dna('p5:',   200)), 1, 5000)
+UNION ALL SELECT 'circ200k', substr((SELECT s FROM det_dna('c200:', 7000)), 1, 200000);
+
+statement ok
+CREATE TABLE reflen AS SELECT read_id AS reference, length(sequence1)::BIGINT AS length FROM refs;
+
+statement ok
+CREATE TABLE reads AS
+WITH G AS (SELECT sequence1 s FROM refs WHERE read_id = 'circ30k'),
+     P AS (SELECT sequence1 s FROM refs WHERE read_id = 'plas5k'),
+     B AS (SELECT sequence1 s FROM refs WHERE read_id = 'circ200k')
+SELECT * FROM (
+  -- Interior read: one fragment, unchanged by any of this.
+  SELECT 'control' AS read_id, substr(s, 10001, 6000) AS sequence1 FROM G
+  -- Across the origin: 3 kb from the contig end, then 3 kb from its start.
+  UNION ALL SELECT 'junction_fwd', substr(s,27001,3000) || substr(s,1,3000) FROM G
+  -- The same molecule sequenced in the other orientation.
+  UNION ALL SELECT 'junction_rev',
+    sequence_dna_reverse_complement(substr(s,27001,3000) || substr(s,1,3000)) FROM G
+  -- Inverted repeat: two fragments of one read on opposite strands. Not an origin span.
+  UNION ALL SELECT 'inverted',
+    substr(s,2001,3000) || sequence_dna_reverse_complement(substr(s,20001,3000)) FROM G
+  -- 15 kb read over a 5 kb plasmid: wraps three times.
+  UNION ALL SELECT 'multiwrap', substr(s,1,5000) || substr(s,1,5000) || substr(s,1,5000) FROM P
+  -- Same strand, query-adjacent, but 145 kb apart in the reference: far enough that the
+  -- aligner splits rather than chains it. Identity is 1.0 on both fragments.
+  UNION ALL SELECT 'chimera', substr(s,2001,3000) || substr(s,150001,3000) FROM B
+);
+
+statement ok
+CREATE TABLE aln AS
+SELECT * FROM align_minimap2('reads', subject_table := 'refs',
+                             preset := 'map-hifi', eqx := true, max_secondary := 0);
+
+# Every origin-spanning read is split into two or three records by the aligner, and no
+# single record explains much beyond half the read. This is the state the issue reports.
+query II
+SELECT read_id, round(max(cigar_query_coverage(cigar)), 4) AS best_single_record
+FROM aln
+WHERE read_id IN ('junction_fwd', 'junction_rev', 'multiwrap')
+GROUP BY read_id ORDER BY read_id;
+----
+junction_fwd	0.5
+junction_rev	0.5
+multiwrap	0.3333
+
+# Pooled, each read is fully explained. Values here are forced by construction -- the
+# reads are exact substrings of their references, so a perfect alignment is the only one
+# available and coverage/identity/query_length cannot drift.
+query IIIIIII
+SELECT read_id, reference, round(coverage, 6), round(identity, 6),
+       query_length, n_fragments, mixed_strand
+FROM circular_query_coverage(aln, reflen)
+ORDER BY read_id;
+----
+chimera	circ200k	1.0	1.0	6000	2	false
+control	circ30k	1.0	1.0	6000	1	false
+inverted	circ30k	1.0	1.0	6000	2	true
+junction_fwd	circ30k	1.0	1.0	6000	2	false
+junction_rev	circ30k	1.0	1.0	6000	2	false
+multiwrap	plas5k	1.0	1.0	15000	3	false
+
+# For a genuine origin span the fragments meet exactly at the contig boundary, so the
+# reference gap closes to zero modulo the reference length -- forward, reverse, and when
+# the read wraps three times. A single fragment (control), or a pair on opposite strands
+# (inverted), leaves no same-strand pair to measure and reports NULL.
+query II
+SELECT read_id, max_ref_gap FROM circular_query_coverage(aln, reflen)
+WHERE read_id <> 'chimera' ORDER BY read_id;
+----
+control	NULL
+inverted	NULL
+junction_fwd	0
+junction_rev	0
+multiwrap	0
+
+# The split chimera's fragments are tens of kilobases apart modulo the reference length.
+# Asserted as a threshold rather than an exact value: the aligner's choice of how far to
+# extend through the breakpoint is not something this test should pin.
+query I
+SELECT max_ref_gap > 1000 FROM circular_query_coverage(aln, reflen) WHERE read_id = 'chimera';
+----
+true
+
+# The recruitment gate. Origin-spanning reads are admitted; the chimera is rejected on
+# reference discontinuity and the inverted repeat on strand -- even though both reach
+# coverage 1.0 and identity 1.0, which is why the evidence columns are reported.
+query I
+SELECT read_id FROM circular_query_coverage(aln, reflen)
+WHERE coverage >= 0.90 AND identity >= 0.99
+  AND NOT mixed_strand AND COALESCE(max_ref_gap, 0) <= 100
+ORDER BY read_id;
+----
+control
+junction_fwd
+junction_rev
+multiwrap

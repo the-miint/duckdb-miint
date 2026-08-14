@@ -1,0 +1,451 @@
+# name: test/sql/circular_query_coverage.test
+# description: Test circular_query_coverage table macro
+# group: [sql]
+
+require miint
+
+# Alignment records transcribed from align_minimap2 output for synthetic reads over a
+# 30 kb circular contig and a 5 kb plasmid. flags is BIGINT rather than USMALLINT on
+# purpose: alignment relations that have been through Parquet widen it, and the macro
+# has to cast rather than fail to bind.
+statement ok
+CREATE TABLE aln (read_id VARCHAR, flags BIGINT, reference VARCHAR,
+                  position BIGINT, stop_position BIGINT, cigar VARCHAR);
+
+statement ok
+INSERT INTO aln VALUES
+  -- One non-wrapping fragment: the case cigar_query_coverage already handles.
+  ('control',         0, 'circ30k', 10001, 16001, '6000='),
+  -- A secondary placement of the same read. Filtered out: it re-places query bases the
+  -- primary already covers, so counting it would inflate n_fragments.
+  ('control',       256, 'circ30k', 20001, 26001, '6000='),
+  -- Clipped single fragment with mismatches, so both coverage and identity are
+  -- non-trivial fractions rather than 1.0.
+  ('clipped',         0, 'circ30k',   101,   131, '10S28=2X5H'),
+  -- Origin-spanning read, forward strand: primary at the contig end, supplementary at 1.
+  ('junction_fwd',    0, 'circ30k', 27001, 30001, '3000=3000S'),
+  ('junction_fwd', 2048, 'circ30k',     1,  3001, '3000H3000='),
+  -- The same molecule sequenced in the other orientation: both fragments carry 0x10.
+  ('junction_rev',   16, 'circ30k',     1,  3001, '3000S3000='),
+  ('junction_rev', 2064, 'circ30k', 27001, 30001, '3000=3000H'),
+  -- Origin span with 2 bases deleted across the junction. The fragments overlap by one
+  -- query base, so summing their coverages would exceed 1.0.
+  ('junction_ragged',    0, 'circ30k', 27001, 30001, '3000=2998S'),
+  ('junction_ragged', 2048, 'circ30k',     3,  3002, '2999H2999='),
+  -- Origin span with 2 bases duplicated across the junction, and one with a 10 bp
+  -- insertion there. In the insertion case the aligner made the read's 3' fragment the
+  -- primary, so record order is not read order -- the chain has to sort by query start.
+  ('junction_dup2',       0, 'circ30k', 27001, 30001, '3000=3002S'),
+  ('junction_dup2',    2048, 'circ30k',     1,  3001, '3002H3000='),
+  ('junction_indel10',    0, 'circ30k',     1,  3001, '3010S3000='),
+  ('junction_indel10', 2048, 'circ30k', 27001, 30001, '3000=3010H'),
+  -- Origin span whose 5' fragment carries 10 mismatches. Pooled identity must be
+  -- 5990/6000, which is neither fragment's own identity.
+  ('junction_mismatch',    0, 'circ30k', 27001, 30001, '2990=10X3000S'),
+  ('junction_mismatch', 2048, 'circ30k',     1,  3001, '3000H3000='),
+  -- Two fragments of one read on OPPOSITE strands: an inverted repeat or a chimera, not
+  -- an origin span. Pooling would manufacture coverage that does not exist.
+  ('inverted',    0, 'circ30k',  2001,  5001, '3000=3000S'),
+  ('inverted', 2064, 'circ30k', 20001, 23001, '3000=3000H'),
+  -- Same strand, query-adjacent, but reference-discontiguous: the aligner split these
+  -- because they are far apart, not because a contig was linearised. Identity is 1.0 on
+  -- every fragment, so only the reference gap can tell them from a real origin span.
+  ('chimera_split',    0, 'circ200k', 150001, 153001, '3000S3000='),
+  ('chimera_split', 2048, 'circ200k',   2001,   5001, '3000=3000H'),
+  ('chimera_backwards',    0, 'circ200k', 150001, 153002, '3001=2999S'),
+  ('chimera_backwards', 2048, 'circ200k',   2001,   5001, '3000H3000='),
+  -- 15 kb read over a 5 kb plasmid: wraps three times, three fragments.
+  ('multiwrap',       0, 'plas5k', 1, 5001, '5000S5000=5000S'),
+  ('multiwrap',    2048, 'plas5k', 1, 5001, '10000H5000='),
+  ('multiwrap',    2048, 'plas5k', 1, 5001, '5000=10000H'),
+  -- Unmapped record carrying its mate's placement. Filtered out.
+  ('unmapped_read',   4, 'circ30k', 10001, NULL, NULL),
+  -- Aligned to a contig with no recorded length: excluded, like genome_coverage
+  -- excludes contigs absent from its mapping relation.
+  ('orphan',          0, 'no_length', 1, 3001, '3000='),
+  -- Paired-end: R1 and R2 are different molecules that share a read_id. Both are 4000 bp
+  -- so a query-length check cannot separate them -- only the read1 bit can.
+  ('pe_read',        64, 'circ30k', 1000, 4000, '3000=1000S'),
+  ('pe_read',       128, 'circ30k', 8000, 10000, '2000=2000S');
+
+statement ok
+CREATE TABLE reflen (reference VARCHAR, length BIGINT);
+
+statement ok
+INSERT INTO reflen VALUES ('circ30k', 30000), ('plas5k', 5000), ('circ200k', 200000);
+
+# Coverage, pooled identity, and the topology evidence per (read, read1 bit, reference).
+#
+# max_ref_gap is the largest distance, modulo the reference length, between one
+# fragment's reference end and the next fragment's reference start in read order. A
+# genuine origin span closes to 0 (or to whatever indel sits at the junction); a chimera
+# does not. It is reported rather than enforced so the caller sets its own tolerance.
+query IIIIIIIII
+SELECT read_id, is_read1, reference, round(coverage, 6), round(identity, 6),
+       query_length, n_fragments, mixed_strand, max_ref_gap
+FROM circular_query_coverage(aln, reflen)
+ORDER BY read_id, is_read1;
+----
+chimera_backwards	false	circ200k	1.0	1.0	6000	2	false	48999
+chimera_split	false	circ200k	1.0	1.0	6000	2	false	55000
+clipped	false	circ30k	0.666667	0.933333	45	1	false	NULL
+control	false	circ30k	1.0	1.0	6000	1	false	NULL
+inverted	false	circ30k	1.0	1.0	6000	2	true	NULL
+junction_dup2	false	circ30k	0.999667	1.0	6002	2	false	0
+junction_fwd	false	circ30k	1.0	1.0	6000	2	false	0
+junction_indel10	false	circ30k	0.998336	1.0	6010	2	false	0
+junction_mismatch	false	circ30k	1.0	0.998333	6000	2	false	0
+junction_ragged	false	circ30k	1.0	1.0	5998	2	false	2
+junction_rev	false	circ30k	1.0	1.0	6000	2	false	0
+multiwrap	false	plas5k	1.0	1.0	15000	3	false	0
+pe_read	false	circ30k	0.5	1.0	4000	1	false	NULL
+pe_read	true	circ30k	0.75	1.0	4000	1	false	NULL
+
+# Identity pools across fragments: neither fragment of junction_mismatch reports the
+# pooled figure on its own, so a caller cannot get this by picking a representative row.
+query II
+SELECT round(min(cigar_sequence_identity(cigar)), 6) AS worst_fragment,
+       round(max(cigar_sequence_identity(cigar)), 6) AS best_fragment
+FROM aln WHERE read_id = 'junction_mismatch';
+----
+0.996667	1.0
+
+# The gate a recruitment pipeline actually writes. Every origin-spanning read passes,
+# including the ragged and indel-bearing ones. Both chimeras fail on reference
+# discontinuity and the inverted repeat fails on strand -- even though all three reach
+# coverage 1.0 and identity 1.0, which is exactly why the evidence columns exist.
+#
+# The identity term is safe here only because this fixture uses extended CIGARs. See the
+# legacy-M case further down for why it must not be applied unconditionally.
+query I
+SELECT read_id FROM circular_query_coverage(aln, reflen)
+WHERE coverage >= 0.90 AND identity >= 0.99
+  AND NOT mixed_strand AND COALESCE(max_ref_gap, 0) <= 100
+ORDER BY read_id;
+----
+control
+junction_dup2
+junction_fwd
+junction_indel10
+junction_mismatch
+junction_ragged
+junction_rev
+multiwrap
+
+# The origin-spanning reads are the point: no individual record reports much beyond half
+# the read, so a 0.90 query-coverage floor discards every one of them today.
+query II
+SELECT read_id, round(max(cigar_query_coverage(cigar)), 4) AS best_single_record
+FROM aln
+WHERE read_id LIKE 'junction%'
+GROUP BY read_id ORDER BY read_id;
+----
+junction_dup2	0.4998
+junction_fwd	0.5
+junction_indel10	0.4992
+junction_mismatch	0.5
+junction_ragged	0.5002
+junction_rev	0.5
+
+# ...and pooled they are fully explained, so the same floor now admits all six.
+query I
+SELECT count(*) FROM circular_query_coverage(aln, reflen)
+WHERE read_id LIKE 'junction%' AND coverage >= 0.90;
+----
+6
+
+# Control-case equality: on a group of one fragment the macro returns exactly what
+# cigar_query_coverage already returns. This is what lets a caller adopt the pooled
+# figure unconditionally instead of branching on "is this reference circular".
+query I
+SELECT c.coverage = cigar_query_coverage(a.cigar, 'aligned')
+FROM circular_query_coverage(aln, reflen) c
+JOIN aln a ON a.read_id = c.read_id
+WHERE c.read_id = 'clipped';
+----
+true
+
+# Summing per-fragment coverage overshoots on the ragged junction, because the two
+# fragments overlap by one query base. The union does not.
+#
+# The macro is called in its own CTE rather than a scalar subquery: query_table() takes
+# only literals, so a macro over relations cannot be used in a lateral position where
+# the relation name would resolve as a correlated column.
+query II
+WITH per_record AS (
+  SELECT read_id, round(sum(cigar_query_coverage(cigar)), 6) AS summed
+  FROM aln WHERE read_id = 'junction_ragged' GROUP BY read_id
+),
+pooled AS (
+  SELECT read_id, round(coverage, 6) AS pooled
+  FROM circular_query_coverage(aln, reflen) WHERE read_id = 'junction_ragged'
+)
+SELECT s.summed, p.pooled FROM per_record s JOIN pooled p USING (read_id);
+----
+1.000167	1.0
+
+# Unmapped records, secondary records, and references with no recorded length produce no
+# rows at all.
+query I
+SELECT count(*) FROM circular_query_coverage(aln, reflen)
+WHERE read_id IN ('unmapped_read', 'orphan');
+----
+0
+
+# Paired-end reads are never pooled across mates: R1 and R2 stay separate groups even
+# though they share read_id and query length.
+query I
+SELECT count(*) FROM circular_query_coverage(aln, reflen) WHERE read_id = 'pe_read';
+----
+2
+
+# Fragments of one read must agree on query length. Disagreement means the input
+# relation grouped rows from more than one read, which is a caller error, not a
+# coverage figure to guess at.
+statement ok
+CREATE TABLE aln_bad AS SELECT * FROM aln WHERE read_id = 'junction_fwd';
+
+statement ok
+INSERT INTO aln_bad VALUES ('junction_fwd', 2048, 'circ30k', 9001, 10001, '1000=500S');
+
+statement error
+SELECT * FROM circular_query_coverage(aln_bad, reflen);
+----
+report different query lengths
+
+###############################################################################
+# PRECONDITIONS AND DEGRADED INPUT
+###############################################################################
+
+# A legacy M CIGAR records that a base aligned but not whether it matched, so identity is
+# not recoverable from it and comes back NULL -- exactly as cigar_sequence_identity does on
+# the same input. Every other column is computable, so coverage and the topology evidence
+# work regardless of aligner.
+#
+# Raising instead of returning NULL was tried and rejected: making the raise conditional on
+# the column being selected relies on projection pruning, and pruning is an optimisation.
+# With the optimiser disabled the expression is evaluated anyway, so a coverage-only query
+# would fail. Semantics must not depend on the optimiser.
+statement ok
+CREATE TABLE aln_legacy AS SELECT * FROM aln LIMIT 0;
+
+statement ok
+INSERT INTO aln_legacy VALUES
+  ('junction', 0,    'circ30k', 27001, 30001, '3000M3000S'),
+  ('junction', 2048, 'circ30k',     1,  3001, '3000H3000M');
+
+query IIII
+SELECT read_id, round(coverage, 6), identity IS NULL, max_ref_gap
+FROM circular_query_coverage(aln_legacy, reflen);
+----
+junction	1.0	true	0
+
+# The read is recovered by a gate built from the aligner-independent columns.
+query I
+SELECT count(*) FROM circular_query_coverage(aln_legacy, reflen)
+WHERE coverage >= 0.90 AND NOT mixed_strand AND COALESCE(max_ref_gap, 0) <= 100;
+----
+1
+
+# The trap this documents: adding an identity term to that same gate rejects the read
+# outright, because NULL >= 0.99 is NULL rather than false.
+query I
+SELECT count(*) FROM circular_query_coverage(aln_legacy, reflen)
+WHERE coverage >= 0.90 AND identity >= 0.99
+  AND NOT mixed_strand AND COALESCE(max_ref_gap, 0) <= 100;
+----
+0
+
+# A CIGAR mixing M with =/X is internally inconsistent, so identity is NULL there too
+# rather than being derived from only part of the alignment.
+statement ok
+CREATE TABLE aln_mixed AS SELECT * FROM aln LIMIT 0;
+
+statement ok
+INSERT INTO aln_mixed VALUES ('mixed', 0, 'circ30k', 101, 131, '10M20=');
+
+query I
+SELECT identity IS NULL FROM circular_query_coverage(aln_mixed, reflen);
+----
+true
+
+# A record without reference coordinates cannot be placed, so it cannot take part in the
+# reference-contiguity test. Left in the group it is worse than useless: it contributes to
+# n_fragments and to coverage while its gap comes back NULL, and MAX() ignores NULLs -- so a
+# chimera whose fragments are 148 kb apart reports max_ref_gap NULL, and the gate this macro
+# documents, COALESCE(max_ref_gap, 0) <= 100, reads "unmeasured" as "perfectly abutting" and
+# admits it. That is the same false accept the reference_lengths validation exists to prevent,
+# arriving from the other side. Excluded alongside the unmapped and unnamed records, on the
+# same principle: what cannot be placed or grouped must not be pooled.
+statement ok
+CREATE TABLE aln_nopos AS SELECT * FROM aln LIMIT 0;
+
+statement ok
+INSERT INTO aln_nopos VALUES
+  ('chimera', 2048, 'circ200k',   2001,   NULL, '3000=3000H'),
+  ('chimera',    0, 'circ200k', 150001, 153001, '3000S3000=');
+
+query IIII
+SELECT round(coverage, 6), n_fragments, max_ref_gap,
+       (coverage >= 0.90 AND NOT mixed_strand AND COALESCE(max_ref_gap, 0) <= 100) AS passes_gate
+FROM circular_query_coverage(aln_nopos, reflen);
+----
+0.5	1	NULL	false
+
+# A NULL position is rejected on the same grounds as a NULL stop_position: both are needed to
+# measure the gap to the neighbouring fragment.
+statement ok
+CREATE TABLE aln_nostart AS SELECT * FROM aln LIMIT 0;
+
+statement ok
+INSERT INTO aln_nostart VALUES
+  ('chimera', 2048, 'circ200k',   NULL,   5001, '3000=3000H'),
+  ('chimera',    0, 'circ200k', 150001, 153001, '3000S3000=');
+
+query III
+SELECT round(coverage, 6), n_fragments, max_ref_gap
+FROM circular_query_coverage(aln_nostart, reflen);
+----
+0.5	1	NULL
+
+# coverage_type carries the same vocabulary as cigar_query_coverage, so a pipeline already
+# filtering on cigar_query_coverage(cigar, 'mapped') migrates to this macro without changing
+# what it measures. Inserted bases are the only thing that separates the two: they consume
+# read positions but align to nothing, so 'aligned' leaves them uncovered and 'mapped' counts
+# them. Worth pinning because a caller passing the wrong one gets a plausible number, not an
+# error.
+statement ok
+CREATE TABLE aln_ins AS SELECT * FROM aln LIMIT 0;
+
+statement ok
+INSERT INTO aln_ins VALUES
+  ('junction', 0,    'circ30k', 27001, 29991, '2990=10I3000S'),
+  ('junction', 2048, 'circ30k',     1,  3001, '3000H3000=');
+
+query III
+SELECT round(coverage, 6), round(identity, 6), n_fragments
+FROM circular_query_coverage(aln_ins, reflen);
+----
+0.998333	0.998333	2
+
+query III
+SELECT round(coverage, 6), round(identity, 6), n_fragments
+FROM circular_query_coverage(aln_ins, reflen, coverage_type := 'mapped');
+----
+1.0	0.998333	2
+
+# The same inconsistency spread ACROSS fragments has to be caught too: a read whose primary
+# is legacy M and whose supplementary is extended has =/X counts describing only half the
+# molecule, so pooling them would answer a different question than the caller asked. Every
+# other column is unaffected, which is the point -- the read is still recoverable on
+# coverage and topology.
+statement ok
+CREATE TABLE aln_split_encoding AS SELECT * FROM aln LIMIT 0;
+
+statement ok
+INSERT INTO aln_split_encoding VALUES
+  ('junction', 0,    'circ30k', 27001, 30001, '3000M3000S'),
+  ('junction', 2048, 'circ30k',     1,  3001, '3000H3000=');
+
+query III
+SELECT round(coverage, 6), identity IS NULL, max_ref_gap
+FROM circular_query_coverage(aln_split_encoding, reflen);
+----
+1.0	true	0
+
+# With extended CIGARs identity is always a number -- never NULL for any row the macro
+# emits -- so the aligner is the only thing that determines whether it is usable.
+query I
+SELECT count(*) FROM circular_query_coverage(aln, reflen) WHERE identity IS NULL;
+----
+0
+
+# Records with no read identifier cannot be grouped -- read_alignments maps the '*' QNAME
+# sentinel to NULL -- so they are excluded explicitly rather than pooling every unnamed
+# record into one bogus group.
+statement ok
+CREATE TABLE aln_anon AS SELECT * FROM aln_legacy;
+
+statement ok
+INSERT INTO aln_anon VALUES
+  (NULL, 0,    'circ30k', 27001, 30001, '3000M3000S'),
+  (NULL, 2048, 'circ30k',     1,  3001, '3000H3000M');
+
+query I
+SELECT count(*) FROM circular_query_coverage(aln_anon, reflen);
+----
+1
+
+# Duplicate rows in reference_lengths must not inflate anything. The documented way to
+# build that relation -- read_alignment_header() over a glob -- yields one row per contig
+# per file, so this is the common case, not an exotic one.
+statement ok
+CREATE TABLE reflen_dup AS SELECT * FROM reflen UNION ALL SELECT * FROM reflen;
+
+query III
+SELECT read_id, n_fragments, max_ref_gap
+FROM circular_query_coverage(aln, reflen_dup)
+WHERE read_id = 'control';
+----
+control	1	NULL
+
+# A reference with conflicting recorded lengths is a caller error, not a length to pick
+# from.
+statement ok
+CREATE TABLE reflen_conflict AS SELECT * FROM reflen
+UNION ALL SELECT 'circ30k', 999;
+
+statement error
+SELECT * FROM circular_query_coverage(aln, reflen_conflict);
+----
+has more than one recorded length
+
+# A missing or non-positive length is rejected rather than tolerated: modulo by NULL or 0
+# yields NULL in DuckDB, which would make max_ref_gap NULL, and COALESCE(max_ref_gap, 0)
+# would then read "unmeasured" as "perfectly abutting" -- admitting chimeras.
+statement ok
+CREATE TABLE reflen_null (reference VARCHAR, length BIGINT);
+
+statement ok
+INSERT INTO reflen_null VALUES ('circ30k', NULL), ('plas5k', 5000), ('circ200k', 200000);
+
+statement error
+SELECT * FROM circular_query_coverage(aln, reflen_null);
+----
+missing or non-positive length
+
+statement ok
+CREATE TABLE reflen_zero AS SELECT reference, 0::BIGINT AS length FROM reflen;
+
+statement error
+SELECT * FROM circular_query_coverage(aln, reflen_zero);
+----
+missing or non-positive length
+
+# max_ref_gap must not depend on physical row order. Two same-strand fragments of one read
+# beginning at the same query offset (a tandem-repeat supplementary, or a duplicated
+# record from merged BAMs) leave LEAD free to pick either peer unless the ordering is
+# fully determined, and the gate thresholds on this column.
+statement ok
+CREATE TABLE aln_tie AS SELECT * FROM aln LIMIT 0;
+
+statement ok
+INSERT INTO aln_tie VALUES
+  ('tie', 0,    'circ30k',  8001, 11001, '3000=3000S'),
+  ('tie', 2048, 'circ30k', 14001, 17001, '3000=3000H'),
+  ('tie', 2048, 'circ30k', 20001, 23001, '3000=3000H');
+
+query I
+SELECT max_ref_gap FROM circular_query_coverage(aln_tie, reflen);
+----
+3000
+
+# Same rows, materialised in the opposite physical order. Before the ordering was fully
+# determined this returned a different gap.
+statement ok
+CREATE TABLE aln_tie_rev AS SELECT * FROM aln_tie ORDER BY position DESC;
+
+query I
+SELECT max_ref_gap FROM circular_query_coverage(aln_tie_rev, reflen);
+----
+3000
