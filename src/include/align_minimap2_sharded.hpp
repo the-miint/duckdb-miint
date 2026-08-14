@@ -3,6 +3,7 @@
 #include "SAMRecord.hpp"
 #include "SequenceRecord.hpp"
 #include "align_common.hpp"
+#include "catalog_utils.hpp"
 #include "sequence_table_reader.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/typedefs.hpp"
@@ -96,11 +97,32 @@ public:
 		std::atomic<idx_t> total_associations {0};
 		std::atomic<idx_t> associations_processed {0};
 
+		// What ClaimWork reads a shard's sequences FROM: either a one-pass TEMP
+		// snapshot of the shard-assigned reads (multi-shard, #229) or an inline
+		// subquery over the query relation (single shard, where nothing is re-read so
+		// a snapshot would be pure overhead). Set once in InitGlobal; keeping the
+		// choice here is what lets ClaimWork stay branch-free.
+		std::string shard_read_source;
+
+		// Set only when shard_read_source is a snapshot. The connection is held for
+		// the life of the state so the destructor can drop the TEMP table: it was
+		// created on an inheriting connection, so it lives in the caller's catalog,
+		// and a missed drop leaks a relation into the user's session (visible in
+		// SHOW TABLES) instead of dying with us.
+		std::unique_ptr<Connection> snapshot_conn;
+		std::string query_snapshot; // unquoted; empty => no snapshot to drop
+
 		idx_t MaxThreads() const override {
 			return max_active_shards * max_threads_per_shard;
 		}
 
 		GlobalState() = default;
+
+		~GlobalState() override {
+			if (snapshot_conn) {
+				DropHelperTempRelation(*snapshot_conn, KeywordHelper::WriteOptionallyQuoted(query_snapshot));
+			}
+		}
 	};
 
 	struct LocalState : public LocalTableFunctionState {
