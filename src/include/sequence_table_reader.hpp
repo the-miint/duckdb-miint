@@ -45,28 +45,48 @@ SequenceTableSchema ValidateSequenceTableSchema(ClientContext &context, const st
 std::vector<miint::AlignmentSubject> ReadSubjectTable(ClientContext &context, const std::string &table_name,
                                                       const SequenceTableSchema &schema);
 
-// Read a batch of query sequences from a table/view.
-// Returns true if there are more rows to read, false if done.
-// The batch is appended to the output, caller should clear if needed.
-// offset is updated to the next position after reading.
-bool ReadQueryBatch(ClientContext &context, const std::string &table_name, const SequenceTableSchema &schema,
-                    idx_t batch_size, idx_t &offset, miint::SequenceRecordBatch &output);
+// NOTE: there is deliberately no offset/LIMIT batch reader here. Paging a
+// relation with a fresh `ORDER BY ... LIMIT n OFFSET k` query per batch silently
+// corrupts results for any relation that is not stable across re-evaluation
+// (volatile views, views over a changing table, registered Arrow streams): the
+// next page re-evaluates the relation and returns different rows, and an empty
+// page is indistinguishable from end-of-input (#229). Use QuerySequenceStream
+// below for a single streaming pass instead.
 
-// Read all read_ids for a shard from the read_to_shard table, ordered.
-// Returns the IDs as a vector of strings for use with ReadBatchByIds.
-// `id_type` is the storage type of the read_to_shard table's `read_id` column
-// (VARCHAR or BIGINT). For BIGINT, integer ids are stringified via the codec
-// so the carrier contract (vector<string>) remains uniform downstream.
-// No default — every callsite must commit to a type so a future BIGINT-
-// extending caller can't slip past type capture by relying on a default.
-std::vector<std::string> ReadShardIds(ClientContext &context, const std::string &read_to_shard_table,
-                                      const std::string &shard_name, const LogicalType &id_type);
+// SELECT yielding (shard_name, read_id, sequence1[, sequence2][, qual1][, qual2])
+// for every read that `read_to_shard` assigns to a shard — one pass over the
+// query relation. Shared so the snapshot below and any direct read of the same
+// rows cannot drift apart.
+std::string BuildShardedQueryReadsSelect(const std::string &query_table, const std::string &read_to_shard_table,
+                                         const SequenceTableSchema &schema);
 
-// Read sequences for a known set of IDs by creating a temp table and joining.
-// Reads ids[offset..offset+count] from the pre-materialized ID list,
-// loads them into a temp table, and joins against query_table to fetch sequences.
-void ReadBatchByIds(ClientContext &context, const std::string &query_table, const SequenceTableSchema &schema,
-                    const std::vector<std::string> &ids, idx_t offset, idx_t count, miint::SequenceRecordBatch &output);
+// Materialize the shard-assigned reads into a per-call TEMP table, reading the
+// query relation exactly ONCE (#229 — see
+// docs/internals/reading-tables-views.md § "Read the relation ONCE").
+//
+// Buffering is intrinsic for a sharded consumer rather than a choice: a read
+// assigned to shard N cannot be aligned until shard N's index is loaded, and
+// reads for all shards arrive interleaved, so a single-pass relation must be
+// either buffered or re-read.
+//
+// Returns the unquoted TEMP table name. Created on `conn`, which must inherit the
+// caller's TEMP catalog — that is what makes the table visible to the per-worker
+// connections that also inherit it. The name is uniquified per call and the
+// caller MUST drop it via DropHelperTempRelation; both halves are mandatory (see
+// catalog_utils.hpp).
+//
+// Worth calling only for more than one shard: with a single shard the relation is
+// already read once, so a snapshot would add a write and a scan for nothing.
+std::string MaterializeShardedQueryReads(Connection &conn, const std::string &query_table,
+                                         const std::string &read_to_shard_table, const SequenceTableSchema &schema);
+
+// Read every read assigned to `shard_name`. `source_sql` is anything that can
+// follow FROM and exposes a shard_name column — either a quoted snapshot table
+// name from MaterializeShardedQueryReads, or a parenthesized
+// BuildShardedQueryReadsSelect for the single-shard case where no snapshot is
+// built. One query either way: no id list, no per-shard temp table, no appender.
+void ReadShardReadsFrom(ClientContext &context, const std::string &source_sql, const SequenceTableSchema &schema,
+                        const std::string &shard_name, miint::SequenceRecordBatch &output);
 
 // Labels and single-end sequences loaded from a table for vsearch operations.
 struct LoadedSingleEndSequences {

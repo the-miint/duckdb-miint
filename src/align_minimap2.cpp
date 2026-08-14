@@ -204,16 +204,26 @@ static void ExecutePerSubject(ClientContext &context, const AlignMinimap2TableFu
 		ps.result_buffer.clear();
 		ps.buffer_offset = 0;
 
-		// Load all queries into memory on first use
+		// Load all queries into memory on first use.
+		//
+		// ONE streaming pass, deliberately not LIMIT/OFFSET paging (#229). The
+		// paging reader re-issued a fresh query per batch, so any relation that is
+		// not stable across re-evaluation — a volatile view, a view over a
+		// changing table, a registered Arrow stream — silently returned a
+		// *different* row set for the second batch, and a zero-row batch was
+		// indistinguishable from end-of-input. Measured: 2000 queries behind a
+		// nextval() view aligned ids 1..1024 and 3025..4000, never touching
+		// 1025..2000, with no error. Every query is needed here regardless, so a
+		// single pass is also strictly less work than paging was.
 		if (!ps.queries_loaded) {
 			ps.all_queries.is_paired = bind_data.query_schema.has_sequence2;
-			idx_t query_offset = 0;
-			miint::SequenceRecordBatch batch;
-			bool has_more = true;
-			while (has_more) {
-				batch.clear();
-				has_more = ReadQueryBatch(context, bind_data.query_table, bind_data.query_schema,
-				                          MINIMAP2_QUERY_BATCH_SIZE, query_offset, batch);
+			QuerySequenceStream stream(context, bind_data.query_table, bind_data.query_schema,
+			                           MINIMAP2_QUERY_BATCH_SIZE);
+			while (true) {
+				auto batch = stream.FetchSubBatch();
+				if (batch.empty()) {
+					break;
+				}
 				for (size_t i = 0; i < batch.size(); i++) {
 					ps.all_queries.read_ids.push_back(std::move(batch.read_ids[i]));
 					ps.all_queries.comments.push_back(std::move(batch.comments[i]));

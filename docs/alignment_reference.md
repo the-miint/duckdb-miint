@@ -295,6 +295,21 @@ Returns the same 21-column schema as `align_bowtie2` and `read_alignments`.
 - Unmapped reads (flag 0x4) are filtered out of results (daemon `--no-unal`)
 - Supports both single-end and paired-end query sequences
 - Supports views for both `query_table` and `read_to_shard`
+- **`query_table` must return the same rows when read more than once.** Each shard opens its own cursor over `query_table`, so a relation that is not stable across repeated reads — a view using `nextval()` / `random()` / `now()`, a view over a table being written concurrently, or a registered single-pass Arrow stream such as a `RecordBatchReader` — would deliver fewer reads to later shards. This function **fails with an error** rather than returning a partial result:
+
+  ```
+  align_bowtie2_sharded: shard 'shard_b' delivered 0 of 500 mapped reads. The query
+  relation returned different rows when re-read for this shard, ...
+  ```
+
+  Materialize the relation first and pass that instead:
+
+  ```sql
+  CREATE TEMP TABLE q AS SELECT * FROM my_unstable_view;
+  SELECT * FROM align_bowtie2_sharded('q', shard_directory := 'indexes/', read_to_shard := 'read_to_shard');
+  ```
+
+  This function deliberately does *not* buffer the reads for you: its per-shard cursors stream with bounded memory, and materializing a large corpus internally would break larger-than-memory input (TEMP tables can only spill to `temp_directory`, never into a persistent database file). A `read_to_shard` that lists reads absent from `query_table` is **not** affected — that stays supported, and does not trigger the error.
 
 **Examples:**
 ```sql
@@ -655,6 +670,7 @@ SELECT * FROM align_minimap2('paired_queries', subject_table='subjects', max_sec
 - For large reference sets, the default mode (single index) is most efficient
 - The `per_subject_database=true` mode rebuilds the index for each subject, which is slower but useful for specific analyses
 - Query sequences are streamed in batches of 1024 to limit memory usage
+- **`query_table` is read exactly once**, in both the default and `per_subject_database` modes. This makes single-pass relations safe: a registered Arrow relation — including a `RecordBatchReader` streamed from an external source such as Arrow Flight — can be passed by name with no intermediate file. Earlier versions paged `per_subject_database` through the relation with repeated `LIMIT/OFFSET` queries, which silently dropped reads for any relation that did not return identical rows on every read.
 - Secondary alignments can significantly increase output size; use `max_secondary=0` for primary-only results
 
 **Limitations:**
@@ -698,6 +714,8 @@ Returns the same 21-column schema as `align_minimap2` and `read_alignments`.
 - Unmapped reads (flag 0x4) are automatically filtered out of results
 - Supports both single-end and paired-end query sequences
 - Supports views for both `query_table` and `read_to_shard`
+- **`query_table` is read exactly once**, at the start of the scan, into a per-call TEMP table keyed by shard. Earlier versions re-read it once per shard, which silently dropped reads whenever the relation was not stable across repeated reads (a view using `nextval()` / `random()` / `now()`, a view over a concurrently-written table, or a registered single-pass Arrow stream). Reading once removes that class of failure, and is also faster on multi-shard runs — measured 39% on an 8-shard, 200k-read workload — because the relation is scanned once instead of N times.
+- Because that snapshot is a TEMP table, a very large query set needs a usable `temp_directory`: TEMP data can only be offloaded there, never into a persistent database file. Single-shard runs skip the snapshot entirely (nothing is re-read, so there is nothing to guard against).
 
 **Examples:**
 ```sql

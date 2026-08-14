@@ -355,154 +355,54 @@ static std::string BuildSequenceColumnList(const SequenceTableSchema &schema, co
 	return columns;
 }
 
-bool ReadQueryBatch(ClientContext &context, const std::string &table_name, const SequenceTableSchema &schema,
-                    idx_t batch_size, idx_t &offset, miint::SequenceRecordBatch &output) {
-	// Create a new connection to avoid deadlocking
-	auto conn = MakeReadOnlyHelperConnection(context);
-
-	// Build query with ORDER BY for deterministic pagination
-	// Use rowid for physical tables (fast), read_id for views
-	std::string order_col = schema.is_physical_table ? "rowid" : "read_id";
-	std::string query = "SELECT " + BuildSequenceColumnList(schema) + " FROM " +
-	                    KeywordHelper::WriteOptionallyQuoted(table_name) + " ORDER BY " + order_col + " LIMIT " +
-	                    std::to_string(batch_size) + " OFFSET " + std::to_string(offset);
-
-	auto query_result = conn.Query(query);
-
-	if (query_result->HasError()) {
-		throw InvalidInputException("Failed to read from query table '%s': %s", table_name, query_result->GetError());
-	}
-
-	// Clear output and set paired flag
-	output.clear();
-	output.is_paired = schema.has_sequence2;
-
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
-	idx_t total_rows = ProcessQueryResultChunks(materialized, schema, output);
-
-	// Update offset for next batch
-	offset += total_rows;
-
-	// Return true if we got a full batch (more rows may exist)
-	return total_rows == batch_size;
+std::string BuildShardedQueryReadsSelect(const std::string &query_table, const std::string &read_to_shard_table,
+                                         const SequenceTableSchema &schema) {
+	// No ORDER BY: alignment does not depend on read order. Clustering by
+	// shard_name would let a snapshot's zonemaps prune each shard's scan, but it
+	// costs a payload-carrying sort of the whole corpus on the blocking startup
+	// path — a losing trade at the shard counts seen in practice (single digits to
+	// low tens), and only worth revisiting in the hundreds.
+	//
+	// The join is on native types: ValidateReadToShardSchema enforces that both
+	// read_id columns share a type, so VARCHAR/BIGINT/UUID all compare directly.
+	return "SELECT rts.shard_name, " + BuildSequenceColumnList(schema, "q.") + " FROM " +
+	       KeywordHelper::WriteOptionallyQuoted(query_table) + " q JOIN " +
+	       KeywordHelper::WriteOptionallyQuoted(read_to_shard_table) + " rts ON q.read_id = rts.read_id";
 }
 
-std::vector<std::string> ReadShardIds(ClientContext &context, const std::string &read_to_shard_table,
-                                      const std::string &shard_name, const LogicalType &id_type) {
-	auto conn = MakeReadOnlyHelperConnection(context);
+std::string MaterializeShardedQueryReads(Connection &conn, const std::string &query_table,
+                                         const std::string &read_to_shard_table, const SequenceTableSchema &schema) {
+	// Uniquified per call: this lands in the *caller's* TEMP catalog (the
+	// connection inherits it, which is what lets worker connections see it), so a
+	// fixed name would collide across concurrent queries in one session. Name
+	// shape follows MaterializeRypeInputTempTable.
+	const std::string tmp_name =
+	    "_miint_shard_reads_" + StringUtil::Replace(UUID::ToString(UUID::GenerateRandomUUID()), "-", "");
+	const std::string tmp_quoted = KeywordHelper::WriteOptionallyQuoted(tmp_name);
 
-	std::string query = "SELECT read_id FROM " + KeywordHelper::WriteOptionallyQuoted(read_to_shard_table) +
-	                    " WHERE shard_name = " + KeywordHelper::WriteQuoted(shard_name, '\'') + " ORDER BY read_id";
-
-	auto query_result = conn.Query(query);
-	if (query_result->HasError()) {
-		throw InvalidInputException("Failed to read IDs for shard '%s': %s", shard_name, query_result->GetError());
-	}
-
-	std::vector<std::string> ids;
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
-
-	if (!IsAllowedIdType(id_type)) {
-		throw InternalException("ReadShardIds: id_type must be %s, got '%s'", AllowedIdTypeList(), id_type.ToString());
-	}
-
-	// Stringify each chunk through the shared id ingress dispatcher (VARCHAR /
-	// BIGINT / UUID) and keep only the non-NULL ids, in order.
-	std::vector<std::string> chunk_vals;
-	std::vector<bool> chunk_nulls;
-	while (true) {
-		auto chunk = materialized.Fetch();
-		if (!chunk || chunk->size() == 0) {
-			break;
-		}
-		ExtractIdColumnAsStrings(*chunk, 0, id_type, chunk_vals, chunk_nulls);
-		for (idx_t i = 0; i < chunk_vals.size(); i++) {
-			if (!chunk_nulls[i]) {
-				ids.push_back(std::move(chunk_vals[i]));
-			}
-		}
-	}
-
-	return ids;
-}
-
-void ReadBatchByIds(ClientContext &context, const std::string &query_table, const SequenceTableSchema &schema,
-                    const std::vector<std::string> &ids, idx_t offset, idx_t count,
-                    miint::SequenceRecordBatch &output) {
-	// Clamp count to available IDs
-	if (offset >= ids.size()) {
-		return;
-	}
-	count = std::min(count, static_cast<idx_t>(ids.size()) - offset);
-	if (count == 0) {
-		return;
-	}
-
-	auto conn = MakeReadOnlyHelperConnection(context);
-
-	// Declare the temp table with the same id_type as the query table so the
-	// downstream JOIN type-checks naturally. The `ids` vector holds stringified
-	// ids regardless of source type; for BIGINT we parse back through the codec
-	// before appending. INVALID is rejected here — the project convention is
-	// that any SequenceTableSchema reaching this layer has been through
-	// ValidateSequenceTableSchema, which always resolves to VARCHAR or BIGINT.
-	if (!IsAllowedIdType(schema.id_type)) {
-		throw InternalException("ReadBatchByIds: schema.id_type must be %s, got '%s'", AllowedIdTypeList(),
-		                        schema.id_type.ToString());
-	}
-	const LogicalType &id_type = schema.id_type;
-	// The connection inherits the caller's TEMP catalog so a TEMP query_table
-	// resolves, which means this table is created in the *caller's* session rather
-	// than in a private catalog that dies with the connection. Two consequences:
-	// the name must be unique per call — sharded aligners run one of these per
-	// shard on parallel workers, and the old fixed `_batch_ids` would have had them
-	// collide — and it must be dropped explicitly. Name shape follows
-	// MaterializeRypeInputTempTable.
-	const std::string ids_table =
-	    "_miint_batch_ids_" + StringUtil::Replace(UUID::ToString(UUID::GenerateRandomUUID()), "-", "");
-	const std::string ids_quoted = KeywordHelper::WriteOptionallyQuoted(ids_table);
-	const std::string create_sql = "CREATE TEMPORARY TABLE " + ids_quoted + " (read_id " + id_type.ToString() + ")";
-	auto create_result = conn.Query(create_sql);
+	auto create_result = conn.Query("CREATE TEMP TABLE " + tmp_quoted + " AS " +
+	                                BuildShardedQueryReadsSelect(query_table, read_to_shard_table, schema));
 	if (create_result->HasError()) {
-		throw InvalidInputException("Failed to create temp table for batch IDs: %s", create_result->GetError());
+		throw InvalidInputException("Failed to materialize shard-assigned reads from query table '%s': %s", query_table,
+		                            create_result->GetError());
 	}
-	HelperTempRelation ids_guard(conn, ids_quoted);
+	return tmp_name;
+}
 
-	{
-		Appender appender(conn, ids_table);
-		for (idx_t i = offset; i < offset + count; i++) {
-			if (id_type.id() == LogicalTypeId::BIGINT) {
-				auto parsed = miint::ParseIdAsInt64(ids[i]);
-				if (parsed.has_value()) {
-					appender.AppendRow(Value::BIGINT(*parsed));
-				} else {
-					appender.AppendRow(Value(LogicalType::BIGINT));
-				}
-			} else if (id_type.id() == LogicalTypeId::UUID) {
-				// ids[i] is a canonical UUID string produced by ReadShardIds. Parse
-				// via the bool-checked helper and pass the INT128 to the hugeint
-				// overload — Value::UUID(string) silently swallows parse failures,
-				// so this fails loud on a malformed id, mirroring the BIGINT branch.
-				appender.AppendRow(Value::UUID(ParseUuidOrThrow(ids[i])));
-			} else {
-				appender.AppendRow(Value(ids[i]));
-			}
-		}
-		appender.Close();
-	}
+void ReadShardReadsFrom(ClientContext &context, const std::string &source_sql, const SequenceTableSchema &schema,
+                        const std::string &shard_name, miint::SequenceRecordBatch &output) {
+	auto conn = MakeReadOnlyHelperConnection(context);
 
-	// Join against query table using the temp table of exact IDs
-	// No ORDER BY needed — alignment doesn't depend on order
-	std::string query = "SELECT " + BuildSequenceColumnList(schema, "q.") + " FROM " +
-	                    KeywordHelper::WriteOptionallyQuoted(query_table) + " q JOIN " + ids_quoted +
-	                    " b ON q.read_id = b.read_id";
+	// shard_name is a user-supplied row value from read_to_shard, so it must be
+	// quoted rather than concatenated — same reasoning as ReadShardNameCounts.
+	const std::string query = "SELECT " + BuildSequenceColumnList(schema) + " FROM " + source_sql +
+	                          " src WHERE src.shard_name = " + KeywordHelper::WriteQuoted(shard_name, '\'');
 
 	auto query_result = conn.Query(query);
 	if (query_result->HasError()) {
-		throw InvalidInputException("Failed to read batch sequences: %s", query_result->GetError());
+		throw InvalidInputException("Failed to read reads for shard '%s': %s", shard_name, query_result->GetError());
 	}
 
-	// Clear output and set paired flag
 	output.clear();
 	output.is_paired = schema.has_sequence2;
 

@@ -77,12 +77,12 @@ unique_ptr<FunctionData> AlignMinimap2ShardedTableFunction::Bind(ClientContext &
 
 	// Validate query table/view exists. Sharded mode accepts VARCHAR or BIGINT
 	// for the query side; the captured id_type drives the output `read_id`
-	// column type and propagates through ReadShardIds / ReadBatchByIds.
+	// column type and how the per-shard read extracts the id column.
 	data->query_schema = ValidateSequenceTableSchema(context, data->query_table, /*allow_bigint=*/true);
 
 	// Validate read_to_shard table schema. Its `read_id` column must share the
-	// query table's id type — the strict equality check prevents the
-	// downstream JOIN inside ReadBatchByIds from relying on implicit casts.
+	// query table's id type — the strict equality check lets the shard join in
+	// BuildShardedQueryReadsSelect compare natively, without implicit casts.
 	ValidateReadToShardSchema(context, data->read_to_shard_table, data->query_schema.id_type);
 
 	// Subject side: sharded mode always uses prebuilt .mmi indexes whose
@@ -172,6 +172,28 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2ShardedTableFunction::InitGlob
 		total += shard.read_count;
 	}
 	gstate->total_associations.store(total, std::memory_order_relaxed);
+
+	// Decide once what shards read their sequences from (#229 — see
+	// docs/internals/reading-tables-views.md § "Read the relation ONCE").
+	//
+	// Multi-shard: snapshot the shard-assigned reads into a TEMP table, so the query
+	// relation is read exactly once instead of once per shard. Re-reading it
+	// silently drops reads for any relation not stable across re-evaluation.
+	//
+	// Single shard: read the same rows inline. Nothing is re-read, so a snapshot
+	// would only add a write and a scan.
+	if (data.shards.size() > 1) {
+		gstate->snapshot_conn = make_uniq<Connection>(DatabaseInstance::GetDatabase(context));
+		InheritTempObjects(context, *gstate->snapshot_conn);
+		gstate->query_snapshot = MaterializeShardedQueryReads(*gstate->snapshot_conn, data.query_table,
+		                                                      data.read_to_shard_table, data.query_schema);
+		gstate->shard_read_source = KeywordHelper::WriteOptionallyQuoted(gstate->query_snapshot);
+		SHARD_DBG(*gstate, "InitGlobal: query snapshot '%s' materialized", gstate->query_snapshot.c_str());
+	} else {
+		gstate->shard_read_source =
+		    "(" + BuildShardedQueryReadsSelect(data.query_table, data.read_to_shard_table, data.query_schema) + ")";
+	}
+
 	SHARD_DBG_MEM(*gstate, "InitGlobal: shards=%zu db_threads=%zu max_tps=%zu max_active=%zu MaxThreads=%zu",
 	              static_cast<size_t>(gstate->shard_count), static_cast<size_t>(db_threads),
 	              static_cast<size_t>(gstate->max_threads_per_shard), static_cast<size_t>(gstate->max_active_shards),
@@ -286,30 +308,18 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 	SHARD_DBG_MEM(gstate, "ClaimWork: LOADED index shard %zu '%s' in %ldms", static_cast<size_t>(shard_idx),
 	              shard_info.name.c_str(), static_cast<long>(load_ms));
 
-	// Phase 4b+4c: Materialize read IDs and pre-fetch sequences.
-	// Wrapped in try-catch to prevent deadlock if either step fails — without cleanup,
-	// the ActiveShard would remain in active_shards with ready=false, blocking all waiters.
+	// Phase 4b: pre-fetch this shard's sequences in one query, from whatever
+	// InitGlobal chose as the source (snapshot table, or an inline subquery for the
+	// single-shard case). Wrapped in try-catch to prevent deadlock if it fails —
+	// without cleanup, the ActiveShard would remain in active_shards with
+	// ready=false, blocking all waiters.
 	idx_t seq_count;
 	try {
-		// Phase 4b: Materialize read IDs for this shard (one scan of associations table)
-		SHARD_DBG(gstate, "ClaimWork: MATERIALIZING IDs for shard %zu '%s'", static_cast<size_t>(shard_idx),
-		          shard_info.name.c_str());
-		auto ids_start = std::chrono::steady_clock::now();
-		auto shard_read_ids =
-		    ReadShardIds(context, bind_data.read_to_shard_table, shard_info.name, bind_data.query_schema.id_type);
-		auto ids_ms =
-		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - ids_start).count();
-		idx_t id_count = shard_read_ids.size();
-		SHARD_DBG_MEM(gstate, "ClaimWork: MATERIALIZED %zu IDs for shard %zu in %ldms", static_cast<size_t>(id_count),
-		              static_cast<size_t>(shard_idx), static_cast<long>(ids_ms));
-
-		// Phase 4c: Pre-fetch ALL sequences for this shard in one bulk query.
-		// Eliminates per-batch ReadBatchByIds calls in Execute (temp table + JOIN per batch).
 		SHARD_DBG(gstate, "ClaimWork: PRE-FETCHING sequences for shard %zu '%s'", static_cast<size_t>(shard_idx),
 		          shard_info.name.c_str());
 		auto fetch_start = std::chrono::steady_clock::now();
-		ReadBatchByIds(context, bind_data.query_table, bind_data.query_schema, shard_read_ids, 0, shard_read_ids.size(),
-		               active->shard_sequences);
+		ReadShardReadsFrom(context, gstate.shard_read_source, bind_data.query_schema, shard_info.name,
+		                   active->shard_sequences);
 		auto fetch_ms =
 		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - fetch_start)
 		        .count();
