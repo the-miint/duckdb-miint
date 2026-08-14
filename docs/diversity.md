@@ -521,6 +521,8 @@ Measured on the 17,483-sample EMP deblur table remapped to short (WoL-style) fea
 
 Sorted stays flat as the table grows; unsorted scales with it. The gap widens with the width of `feature_id`: repeating the 13.1 M-row measurement with the original 150 bp ASV sequences as ids gave 8 ms sorted vs **140 ms** unsorted, because an unpruned scan pays for the wide string column too. For ASV-keyed tables at scale this is the difference between minutes and hours.
 
+**You will be told.** Because nothing in the output reveals which case you are in, a multi-batch run checks the stored order up front and emits a warning naming the table when it is not sorted — readable with [`miint_warnings()`](utilities.md#miint_warnings), and on stderr. The check counts places where `sample_id` steps backwards between physically adjacent rows, which is exact (a sequence is sorted precisely when it never steps back) and costs one pass over the `sample_id` column alone: 0.09 s over 4.7 M rows, 19.6 s over 1.85 B. A single-batch run is never warned about — it reads the table once whatever the order. The warning is about cost only; ignoring it changes nothing about the coordinates.
+
 `read_biom` emits each sample's rows contiguously, but in the BIOM file's own sample order — **grouped is not sorted**, and grouping alone prunes nothing, since each row group then spans nearly the whole id range. Add the `ORDER BY` when you materialize:
 
 ```sql

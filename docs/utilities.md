@@ -388,7 +388,7 @@ WHERE library IN ('unifrac', 'scikit-bio-binaries');
 
 ### `miint_warnings()`
 
-Returns miint's operational warnings as a queryable table. Populated by user-facing warning sites — skipped accessions in `read_ena_sequences`, the SFF `max_sequences` caveat, the `threads` parameter being ignored in `align_bowtie2_sharded`, mid-stream download failures, etc. Every entry is also printed to stderr, so interactive users see no change; pipeline and `COPY TO` users now have a way to inspect warnings after the fact.
+Returns miint's operational warnings as a queryable table. Populated by user-facing warning sites — skipped accessions in `read_ena_sequences`, the SFF `max_sequences` caveat, the `threads` parameter being ignored in `align_bowtie2_sharded`, a [feature table not stored in `sample_id` order](diversity.md#feature-table-sort-order) for progressive UniFrac, mid-stream download failures, etc. Every entry is also printed to stderr, so interactive users see no change; pipeline and `COPY TO` users now have a way to inspect warnings after the fact.
 
 **Output schema:**
 

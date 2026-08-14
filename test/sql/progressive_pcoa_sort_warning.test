@@ -1,0 +1,125 @@
+# name: test/sql/progressive_pcoa_sort_warning.test
+# description: progressive_pcoa_from_unifrac warns when the feature table is not stored in sample_id order, because each batch then scans the whole table instead of its own rows.
+# group: [sql]
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+statement ok
+CREATE TABLE tree AS SELECT * FROM read_newick('data/unifrac/gg_otu_tree.nwk');
+
+# ── fixture: the same 40 samples, materialized three ways. Only the physical row
+#    order differs, so any difference in behaviour is attributable to it alone. ──
+
+# Sorted by sample_id — the layout the docs tell users to store.
+statement ok
+CREATE TABLE ft_sorted AS
+SELECT 's' || lpad(s::VARCHAR, 3, '0') AS sample_id, 'GG_OTU_' || (f + 1) AS feature_id,
+       (1 + (s * 7 + f * 13) % 11)::DOUBLE AS value
+FROM range(40) t(s), range(5) u(f)
+ORDER BY sample_id;
+
+# Interleaved: feature-major, so consecutive rows walk the whole id range. This is
+# what an ASV-keyed table looks like, and the case that silently costs hours.
+statement ok
+CREATE TABLE ft_shuffled AS
+SELECT 's' || lpad(s::VARCHAR, 3, '0') AS sample_id, 'GG_OTU_' || (f + 1) AS feature_id,
+       (1 + (s * 7 + f * 13) % 11)::DOUBLE AS value
+FROM range(5) u(f), range(40) t(s)
+ORDER BY feature_id, sample_id;
+
+# Grouped by sample but in a scrambled sample order — what read_biom emits. Grouped
+# is NOT sorted: it prunes nothing, so it must warn too.
+statement ok
+CREATE TABLE ft_grouped AS
+SELECT 's' || lpad(s::VARCHAR, 3, '0') AS sample_id, 'GG_OTU_' || (f + 1) AS feature_id,
+       (1 + (s * 7 + f * 13) % 11)::DOUBLE AS value
+FROM range(40) t(s), range(5) u(f)
+ORDER BY (s * 17) % 40, feature_id;
+
+# ── a sorted table warns about nothing ─────────────────────────────────────────
+statement ok
+SELECT count(*) FROM progressive_pcoa_from_unifrac('ft_sorted', 'tree',
+    n_dims := 3, n_anchors := 15, batch_size := 5, seed := 42);
+
+query I
+SELECT count(*) FROM miint_warnings() WHERE message LIKE '%ft_sorted%';
+----
+0
+
+# ── an interleaved table warns, names itself, and says what to do ──────────────
+statement ok
+SELECT count(*) FROM progressive_pcoa_from_unifrac('ft_shuffled', 'tree',
+    n_dims := 3, n_anchors := 15, batch_size := 5, seed := 42);
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%ft_shuffled%' AND message LIKE '%sample_id order%' AND message LIKE '%ORDER BY%';
+----
+true
+
+# ── grouped-but-unsorted warns as well: contiguity alone prunes nothing ────────
+statement ok
+SELECT count(*) FROM progressive_pcoa_from_unifrac('ft_grouped', 'tree',
+    n_dims := 3, n_anchors := 15, batch_size := 5, seed := 42);
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings() WHERE message LIKE '%ft_grouped%';
+----
+true
+
+# ── the warning is about the cost of RE-scanning, so a single-batch run is silent
+#    even on the same unsorted table: there is nothing to re-scan. Counted before
+#    and after, because ft_shuffled has already warned above — asserting on a
+#    substring alone would pass whether or not this run warned. ──
+statement ok
+CREATE TABLE warned_before AS
+SELECT count(*) AS n FROM miint_warnings() WHERE message LIKE '%ft_shuffled%';
+
+# 40 samples, 15 anchors → 25 remaining → one batch of 25.
+statement ok
+SELECT count(*) FROM progressive_pcoa_from_unifrac('ft_shuffled', 'tree',
+    n_dims := 3, n_anchors := 15, batch_size := 25, seed := 42);
+
+query I
+SELECT (SELECT count(*) FROM miint_warnings() WHERE message LIKE '%ft_shuffled%')
+     = (SELECT n FROM warned_before);
+----
+true
+
+# ── sort order changes what a run READS, never what it PRODUCES ────────────────
+# The two layouts hold identical data, so with the same anchors and seed they must
+# ordinate to the same points. This is what makes the warning safe to ignore: it is
+# advice about cost, not a correctness signal.
+statement ok
+CREATE TABLE ord_sorted AS SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_unifrac('ft_sorted', 'tree', n_dims := 3, n_anchors := 15, batch_size := 5, seed := 42);
+
+statement ok
+CREATE TABLE ord_shuffled AS SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_unifrac('ft_shuffled', 'tree', n_dims := 3, n_anchors := 15, batch_size := 5, seed := 42);
+
+query I
+SELECT max(abs(a.coordinate - b.coordinate)) < 1e-12
+FROM ord_sorted a JOIN ord_shuffled b USING (sample_id, axis);
+----
+true
+
+# ── progressive_pcoa_from_distances does NOT get this warning: it reads a distance
+#    relation a wave at a time, not one id-filtered slice per batch, so sample_id
+#    order buys it nothing. ──
+statement ok
+CREATE TABLE dcoo AS
+SELECT a.sample_id AS sample_a, b.sample_id AS sample_b, d.distance
+FROM unifrac_distances('ft_shuffled', 'tree') d
+JOIN (SELECT DISTINCT sample_id FROM ft_shuffled) a ON a.sample_id = d.sample_a
+JOIN (SELECT DISTINCT sample_id FROM ft_shuffled) b ON b.sample_id = d.sample_b;
+
+statement ok
+SELECT count(*) FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 5, seed := 42);
+
+query I
+SELECT count(*) FROM miint_warnings() WHERE message LIKE '%dcoo%';
+----
+0

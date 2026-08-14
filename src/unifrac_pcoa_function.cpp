@@ -15,6 +15,7 @@
 #include "NewickTree.hpp"
 #include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
+#include "miint_log.hpp"
 #include "progressive_pcoa_core.hpp"
 #include "tree_table_reader.hpp"
 #include "unifrac_bptree.hpp"
@@ -1204,6 +1205,70 @@ FeatureTableIds EnumerateFeatureTableIds(ClientContext &context, const std::stri
 	return out;
 }
 
+// Warn when the feature table is not stored in sample_id order.
+//
+// WHY: batches are contiguous ranges of sorted sample_id, so a batch's slice query
+// prunes to its own rows when the table's physical order agrees — and reads the
+// whole table when it does not, turning the run's slicing cost from one pass into
+// n_batches passes. Measured on a 13.1 M-row table with ASV-sequence ids, one
+// batch's slice took 8 ms sorted against 140 ms unsorted (see the sort-order note
+// in docs/diversity.md); at scale that is the difference between minutes and hours,
+// and nothing in the output reveals it. Sort order never changes the coordinates,
+// so this is a warning, not an error.
+//
+// The probe counts DESCENTS — adjacent rows, in physical order, whose sample_id
+// goes backwards. A sequence is sorted if and only if it never descends, so
+// `descents > 0` is an exact test rather than a heuristic, and it needs one pass
+// over the id column alone: measured 0.09 s over 4.7 M rows and 19.6 s over 1.85 B,
+// against runs that take minutes to hours on tables of those sizes.
+//
+// Note what a cheaper threshold would miss. Scaling the bar to the row-group count
+// (pruning's granularity) looks reasonable and is wrong: a feature-major table with
+// few features descends only once per feature block — a handful of times — while
+// every row group still spans the whole id range, so pruning is dead and the run
+// pays in full. Exactness costs nothing here, so take it.
+void WarnIfFeatureTableUnsorted(ClientContext &context, const std::string &qname, const std::string &table_name,
+                                size_t n_batches) {
+	auto conn = MakeReadOnlyHelperConnection(context);
+	// lag() over the whole relation with no ORDER BY reads it in physical order,
+	// which is the order the slice queries will have to prune against. That relies on
+	// the scan reaching the window sink in storage order; checked to still hold under
+	// `preserve_insertion_order=false` (a sorted 4.7 M-row table reports 0 descents
+	// either way), since a single scan feeding one unpartitioned window has nothing to
+	// reorder. A future plan that broke that would over-report, i.e. warn about a
+	// sorted table — noise, never a wrong result.
+	auto res = conn.Query("SELECT count(*), count(*) FILTER (WHERE t.prev IS NOT NULL AND t.sid < t.prev) FROM "
+	                      "(SELECT sample_id::VARCHAR AS sid, lag(sample_id::VARCHAR) OVER () AS prev FROM " +
+	                      qname + ") t");
+	if (res->HasError()) {
+		// A diagnostic must not fail a valid run. Say so rather than swallowing it —
+		// silence would be indistinguishable from "your table is fine".
+		miint::EmitWarning(context,
+		                   "progressive_pcoa_from_unifrac: could not check whether feature-table '%s' is "
+		                   "stored in sample_id order: %s",
+		                   table_name, res->GetError());
+		return;
+	}
+	auto &mat = res->Cast<MaterializedQueryResult>();
+	auto chunk = mat.Fetch();
+	if (!chunk || chunk->size() == 0) {
+		return;
+	}
+	const int64_t rows = chunk->GetValue(0, 0).GetValue<int64_t>();
+	const int64_t descents = chunk->GetValue(1, 0).GetValue<int64_t>();
+	if (descents <= 0) {
+		return;
+	}
+	miint::EmitWarning(context,
+	                   "progressive_pcoa_from_unifrac: feature-table '%s' is not stored in sample_id order (%lld of "
+	                   "%lld rows step backwards). Batches are contiguous sample_id ranges, so each of the %llu "
+	                   "batches reads the whole table instead of only its own rows. Store it sorted — e.g. CREATE "
+	                   "TABLE t AS SELECT * FROM ... ORDER BY sample_id::VARCHAR — which changes only what the run "
+	                   "reads, never the coordinates it produces.",
+	                   table_name, static_cast<long long>(descents), static_cast<long long>(rows),
+	                   static_cast<unsigned long long>(n_batches));
+}
+
 // Read the feature rows of exactly the requested samples (all their features) into
 // COO form, applying ReadFeatureTable's NULL/zero/NaN drops.
 std::vector<miint::unifrac::CooRow> QueryFeatureRows(ClientContext &context, const std::string &qname,
@@ -1525,10 +1590,18 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 	const auto active_workers = std::max<size_t>(1, std::min<size_t>(workers, n_batches));
 	const int block_threads = std::max<int>(1, n_threads / static_cast<int>(active_workers));
 
+	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	// Only worth probing — and only worth telling the user about — when there is more
+	// than one batch: a single batch reads the table once whatever its order, so
+	// sorting it would save nothing and the warning would be noise.
+	if (n_batches > 1) {
+		WarnIfFeatureTableUnsorted(context, qname, table_name, n_batches);
+	}
+
 	auto data = make_uniq<ProgressivePcoaData>();
 	data->source = ProgressivePcoaData::Source::UNIFRAC;
 	data->sample_id_type = ids.sample_id_type;
-	data->qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	data->qname = qname;
 	data->part = std::move(part);
 	data->n_dims = static_cast<uint32_t>(n_dims);
 	data->batch_size = static_cast<uint32_t>(batch_size);
