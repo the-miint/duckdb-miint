@@ -155,6 +155,53 @@ Currently used by `align_minimap2` + `save_minimap2_index` (both sides), `copy_s
 5. Create SQL test in `test/sql/`
 6. If the function should run per-sample (partitioning an input relation by a column), follow `docs/internals/per-sample-pattern.md`
 
+<a name="no-work-in-bind"></a>
+### Do the work in `InitGlobal` / `Execute` — never in `Bind`
+
+**`Bind` resolves the schema. It does not compute the answer.** Reading an input
+relation, running a compute, building an index: all of that belongs at execution
+time. This is easy to get wrong because doing it in `Bind` *works* — the results are
+correct, the tests pass, and the cost only shows up in four ways that no test looks
+for unless you write one:
+
+1. **A prepared statement returns nothing the second time.** `PREPARE` binds once and
+   every `EXECUTE` re-runs that same plan. A `Bind`-computed result therefore has to
+   be handed to the scan either by *moving* it out of the bind data — so the second
+   `EXECUTE` finds an empty vector and returns **zero rows, silently** — or by
+   copying it, paying for the whole result twice. Both `pcoa`/`unifrac_pcoa` and the
+   progressive pair shipped with the first bug.
+2. **`EXPLAIN` pays full price.** `EXPLAIN` binds without executing, so work in `Bind`
+   runs for a query the user never ran. Measured on a 4,000-sample ordination:
+   `EXPLAIN` took 0.644 s against 0.638 s to actually run the query. After moving it,
+   0.000 s.
+3. **The query cannot be cancelled.** Ctrl-C sets `context.interrupted`, which only
+   helps if something polls it. Nothing polls during `Bind`, so a multi-hour run is
+   uninterruptible. Execution-time work can poll between units and throw
+   `InterruptException` (see `ProgressivePcoaExecute`).
+4. **Nothing streams, and the result exists twice.** A `Bind` that computes everything
+   must hand over a finished result, which the scan then re-materializes in its own
+   row form. Driving the work from the scan instead lets rows go out as they are
+   produced and keeps one copy.
+
+**What `Bind` legitimately does**: validate parameters, and resolve the output schema
+— including rejecting a mis-shaped input. That last part does not require reading
+data. `ProbeFeatureTableIdType` / `ProbeDistanceTableIdType`
+(`unifrac_function_common`) are the pattern: a `LIMIT 0` probe proves the columns
+exist and cast, and a catalog lookup gives the id type, with no rows read. So a
+missing column or a mismatched id type still fails at bind, where a schema error
+belongs, while errors about the *data* surface when the query runs.
+
+Consequences to expect when you move work out of `Bind`: some errors change from
+`BinderException` to `InvalidInputException` and are raised later (fine — assert on
+the message, not the exception class), and per-execution work means an *unseeded*
+function redraws on re-execution instead of replaying its first result (also fine,
+and more correct).
+
+`pcoa`, `unifrac_pcoa`, `progressive_pcoa_from_distances` and
+`progressive_pcoa_from_unifrac` in `src/unifrac_pcoa_function.cpp` are the worked
+examples; the progressive pair additionally shows the streaming form, where the scan
+steps the computation one wave at a time.
+
 ### Adding a new COPY format
 1. Create `copy_<format>.cpp` and header
 2. Implement `CopyFunction` with `Bind()`, `InitGlobal()`, `Sink()`, `Finalize()`
