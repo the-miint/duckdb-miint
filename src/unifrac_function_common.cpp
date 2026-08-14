@@ -223,8 +223,10 @@ DenseDistanceMatrix ReadDistanceTable(ClientContext &context, const std::string 
 	// message. Pass 1 enumerated ids independently of the distance value, so a
 	// sample whose every distance is NULL/NaN is in the dictionary and surfaces as
 	// a completeness error rather than silently vanishing.
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	// Inherits the caller's TEMP catalog, like pass 1's EnumerateDistanceIds. Both
+	// passes must, or a TEMP distance table binds and enumerates its ids here and
+	// then fails on the very next query.
+	auto conn = MakeReadOnlyHelperConnection(context);
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
 	auto result = conn.SendQuery("SELECT sample_a::VARCHAR, sample_b::VARCHAR, distance::DOUBLE FROM " + qname);
 	if (result->HasError()) {

@@ -24,6 +24,8 @@
 #include "unifrac_omp_scope.hpp"
 #include "unifrac_support_biom.hpp"
 
+#include "duckdb/common/types/uuid.hpp"
+
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types.hpp"
@@ -581,7 +583,20 @@ miint::progressive::DistanceBlock QueryDistanceBlock(ClientContext &context, con
 class WaveDistanceBlockSource {
 public:
 	WaveDistanceBlockSource(ClientContext &context, std::string qname, const std::vector<std::string> &anchors)
-	    : context_(context), qname_(std::move(qname)), anchors_(anchors) {
+	    : context_(context), qname_(std::move(qname)), anchors_(anchors),
+	      // The staging tables below are created on a connection that inherits the
+	      // caller's TEMP catalog — needed so a TEMP distance relation resolves —
+	      // which means they land in the USER's session rather than in a private
+	      // catalog that dies with the connection. So the names must be unique per
+	      // provider (two progressive runs in one session would otherwise collide on
+	      // a fixed name) and each wave must drop them explicitly. Name shape follows
+	      // ReadBatchByIds.
+	      wave_batch_table_("_miint_wave_batch_" +
+	                        StringUtil::Replace(UUID::ToString(UUID::GenerateRandomUUID()), "-", "")),
+	      wave_anchor_table_("_miint_wave_anchor_" +
+	                         StringUtil::Replace(UUID::ToString(UUID::GenerateRandomUUID()), "-", "")),
+	      wave_batch_quoted_(KeywordHelper::WriteOptionallyQuoted(wave_batch_table_)),
+	      wave_anchor_quoted_(KeywordHelper::WriteOptionallyQuoted(wave_anchor_table_)) {
 	}
 
 	// Fill the wave's blocks in one scan. `requests` are exactly the requests the
@@ -613,8 +628,17 @@ public:
 			    static_cast<uint32_t>(blocks_[k].ids.size()), blocks_[k].ids));
 		}
 
-		auto &db = DatabaseInstance::GetDatabase(context_);
-		Connection conn(db);
+		// Inherits the caller's TEMP catalog so a TEMP distance relation resolves in
+		// the routed queries below. The guards drop the two staging tables when this
+		// wave finishes — including on the exception paths, which matter here because
+		// a failed block fill throws mid-wave and the tables now live in the user's
+		// session rather than dying with the connection.
+		auto conn = MakeReadOnlyHelperConnection(context_);
+		// Armed BEFORE the CREATEs, not after: StageWaveMaps issues two of them, and a
+		// failure on the second would otherwise leak the first. DropHelperTempRelation
+		// is DROP ... IF EXISTS, so guarding a table that was never created is a no-op.
+		HelperTempRelation batch_guard(conn, wave_batch_quoted_);
+		HelperTempRelation anchor_guard(conn, wave_anchor_quoted_);
 		StageWaveMaps(conn, requests);
 
 		// Routing happens in SQL — DuckDB resolves ids to integer cell positions
@@ -629,24 +653,24 @@ public:
 		// Case 1 — both endpoints in the SAME batch. Rows spanning two batches match
 		// no block and are dropped by the join itself.
 		RunRoutedQuery(conn,
-		               "SELECT b1.block, b1.pos, b2.pos, d.distance::DOUBLE FROM " + qname_ +
-		                   " d JOIN _wave_batch b1 ON d.sample_a::VARCHAR = b1.id"
-		                   " JOIN _wave_batch b2 ON d.sample_b::VARCHAR = b2.id"
+		               "SELECT b1.block, b1.pos, b2.pos, d.distance::DOUBLE FROM " + qname_ + " d JOIN " +
+		                   wave_batch_quoted_ + " b1 ON d.sample_a::VARCHAR = b1.id JOIN " + wave_batch_quoted_ +
+		                   " b2 ON d.sample_b::VARCHAR = b2.id"
 		                   " WHERE b1.block = b2.block AND d.distance IS NOT NULL AND"
 		                   " NOT isnan(d.distance::DOUBLE)",
 		               /*a_is_anchor_ord=*/false, /*b_is_anchor_ord=*/false);
 		// Case 2/3 — one endpoint an anchor, the other a batch sample: the batch side
 		// alone determines the block, so the anchor map needs no block column.
 		RunRoutedQuery(conn,
-		               "SELECT b.block, an.ord, b.pos, d.distance::DOUBLE FROM " + qname_ +
-		                   " d JOIN _wave_anchor an ON d.sample_a::VARCHAR = an.id"
-		                   " JOIN _wave_batch b ON d.sample_b::VARCHAR = b.id"
+		               "SELECT b.block, an.ord, b.pos, d.distance::DOUBLE FROM " + qname_ + " d JOIN " +
+		                   wave_anchor_quoted_ + " an ON d.sample_a::VARCHAR = an.id JOIN " + wave_batch_quoted_ +
+		                   " b ON d.sample_b::VARCHAR = b.id"
 		                   " WHERE d.distance IS NOT NULL AND NOT isnan(d.distance::DOUBLE)",
 		               /*a_is_anchor_ord=*/true, /*b_is_anchor_ord=*/false);
 		RunRoutedQuery(conn,
-		               "SELECT b.block, b.pos, an.ord, d.distance::DOUBLE FROM " + qname_ +
-		                   " d JOIN _wave_batch b ON d.sample_a::VARCHAR = b.id"
-		                   " JOIN _wave_anchor an ON d.sample_b::VARCHAR = an.id"
+		               "SELECT b.block, b.pos, an.ord, d.distance::DOUBLE FROM " + qname_ + " d JOIN " +
+		                   wave_batch_quoted_ + " b ON d.sample_a::VARCHAR = b.id JOIN " + wave_anchor_quoted_ +
+		                   " an ON d.sample_b::VARCHAR = an.id"
 		                   " WHERE d.distance IS NOT NULL AND NOT isnan(d.distance::DOUBLE)",
 		               /*a_is_anchor_ord=*/false, /*b_is_anchor_ord=*/true);
 		// Case 4 — anchor×anchor. This corner is IDENTICAL in every block of every
@@ -696,19 +720,22 @@ private:
 		double distance;
 	};
 
-	// Stage the wave's id→position maps as connection-local temp tables (the same
-	// pattern sequence_table_reader.cpp uses for _batch_ids). _wave_batch holds one
-	// row per non-anchor sample of the wave; _wave_anchor holds one row per anchor,
-	// with NO block column — that is what keeps the joins from exploding.
+	// Stage the wave's id→position maps as temp tables (the same pattern
+	// sequence_table_reader.cpp uses for _batch_ids, uniquely named and explicitly
+	// dropped for the same reason — see the constructor). The batch map holds one
+	// row per non-anchor sample of the wave; the anchor map holds one row per
+	// anchor, with NO block column — that is what keeps the joins from exploding.
 	void StageWaveMaps(Connection &conn, const std::vector<std::vector<std::string>> &requests) {
-		auto create = conn.Query("CREATE TEMPORARY TABLE _wave_batch (id VARCHAR, block INTEGER, pos INTEGER);"
-		                         "CREATE TEMPORARY TABLE _wave_anchor (id VARCHAR, ord INTEGER)");
+		auto create = conn.Query("CREATE TEMPORARY TABLE " + wave_batch_quoted_ +
+		                         " (id VARCHAR, block INTEGER, pos INTEGER);"
+		                         "CREATE TEMPORARY TABLE " +
+		                         wave_anchor_quoted_ + " (id VARCHAR, ord INTEGER)");
 		if (create->HasError()) {
 			throw InvalidInputException("progressive_pcoa_from_distances: failed to stage the wave map: %s",
 			                            create->GetError());
 		}
 		{
-			Appender appender(conn, "_wave_batch");
+			Appender appender(conn, wave_batch_table_);
 			for (size_t k = 0; k < requests.size(); ++k) {
 				for (uint32_t p = 0; p < batch_len_[k]; ++p) {
 					appender.AppendRow(Value(requests[k][p]), Value::INTEGER(static_cast<int32_t>(k)),
@@ -718,7 +745,7 @@ private:
 			appender.Close();
 		}
 		{
-			Appender appender(conn, "_wave_anchor");
+			Appender appender(conn, wave_anchor_table_);
 			for (uint32_t j = 0; j < anchors_.size(); ++j) {
 				appender.AppendRow(Value(anchors_[j]), Value::INTEGER(static_cast<int32_t>(j)));
 			}
@@ -807,12 +834,13 @@ private:
 		if (anchor_corner_loaded_) {
 			return;
 		}
-		auto res = RunWaveQuery(conn,
-		                        "SELECT a1.ord, a2.ord, d.distance::DOUBLE FROM " + qname_ +
-		                            " d JOIN _wave_anchor a1 ON d.sample_a::VARCHAR = a1.id"
-		                            " JOIN _wave_anchor a2 ON d.sample_b::VARCHAR = a2.id"
-		                            " WHERE d.distance IS NOT NULL AND NOT isnan(d.distance::DOUBLE)",
-		                        "anchor block scan");
+		auto res =
+		    RunWaveQuery(conn,
+		                 "SELECT a1.ord, a2.ord, d.distance::DOUBLE FROM " + qname_ + " d JOIN " + wave_anchor_quoted_ +
+		                     " a1 ON d.sample_a::VARCHAR = a1.id JOIN " + wave_anchor_quoted_ +
+		                     " a2 ON d.sample_b::VARCHAR = a2.id"
+		                     " WHERE d.distance IS NOT NULL AND NOT isnan(d.distance::DOUBLE)",
+		                 "anchor block scan");
 		while (auto chunk = res->Fetch()) {
 			const idx_t rn = chunk->size();
 			if (rn == 0) {
@@ -841,6 +869,12 @@ private:
 	ClientContext &context_;
 	std::string qname_;
 	std::vector<std::string> anchors_;
+	// Per-provider unique names for the two wave staging tables, plus their quoted
+	// forms for embedding in SQL. See the constructor for why they are not fixed.
+	std::string wave_batch_table_;
+	std::string wave_anchor_table_;
+	std::string wave_batch_quoted_;
+	std::string wave_anchor_quoted_;
 	std::vector<miint::progressive::DistanceBlock> blocks_;
 	std::vector<std::unique_ptr<miint::unifrac::DenseDistanceMatrixBuilder>> builders_;
 	std::vector<uint32_t> batch_len_;                    // per block: non-anchor sample count
@@ -858,8 +892,7 @@ private:
 // full (anchors + batch)² block present in the relation; a gap fails loud.
 miint::progressive::DistanceBlock QueryDistanceBlock(ClientContext &context, const std::string &qname,
                                                      const std::vector<std::string> &requested) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	// Filter by a literal IN-list. Value::ToSQLString escapes quotes; an id
 	// containing an embedded NUL would be truncated in the SQL text and fail to
 	// match — but that degrades to the completeness check below (a "missing pair"
@@ -1147,8 +1180,7 @@ std::vector<std::string> CollectStringColumn(QueryResult &result) {
 
 FeatureTableIds EnumerateFeatureTableIds(ClientContext &context, const std::string &table_name,
                                          const std::string &caller) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
 	auto probe = conn.Query("SELECT sample_id::VARCHAR, feature_id::VARCHAR, value::DOUBLE FROM " + qname + " LIMIT 0");
 	if (probe->HasError()) {
@@ -1200,8 +1232,11 @@ FeatureTableIds EnumerateFeatureTableIds(ClientContext &context, const std::stri
 // COO form, applying ReadFeatureTable's NULL/zero/NaN drops.
 std::vector<miint::unifrac::CooRow> QueryFeatureRows(ClientContext &context, const std::string &qname,
                                                      const std::vector<std::string> &requested) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	// Called concurrently from block workers, one connection per call. Safe: the
+	// inherit only copies the caller's temporary_objects shared_ptr (a read of a
+	// pointer nobody is writing) into this thread's own fresh context, and the
+	// shared catalog is then only read from.
+	auto conn = MakeReadOnlyHelperConnection(context);
 	std::string in_list;
 	in_list.reserve(requested.size() * 8);
 	for (size_t i = 0; i < requested.size(); ++i) {

@@ -68,8 +68,7 @@ OrdinationTable ReadOrdinationTable(ClientContext &context, const std::string &t
 	if (table_name.empty()) {
 		throw BinderException("%s: %s ordination-table name must not be empty", caller_name, role);
 	}
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
 	const std::string select = "SELECT sample_id::VARCHAR, axis::INTEGER, coordinate::DOUBLE FROM " + qname;
 
@@ -212,8 +211,7 @@ OrdinationTable ReadOrdinationTable(ClientContext &context, const std::string &t
 // `sorted(set(pairing.index) & ...)` ordering).
 std::vector<std::pair<std::string, std::string>> ReadPairing(ClientContext &context, const std::string &table_name,
                                                              const std::string &caller_name) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
+	auto conn = MakeReadOnlyHelperConnection(context);
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
 	const std::string select = "SELECT reference_id::VARCHAR, other_id::VARCHAR FROM " + qname;
 

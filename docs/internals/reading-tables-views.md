@@ -62,6 +62,11 @@ unique name **and** drops it on every exit path. Two forms, both in `catalog_uti
 
 - `HelperTempRelation` — RAII, for an object created and finished with inside one
   function. `ReadBatchByIds` (`src/sequence_table_reader.cpp`) is the reference caller.
+  `WaveDistanceBlockSource::Prefetch` (`src/unifrac_pcoa_function.cpp`) is the second,
+  and shows two wrinkles: it re-creates its two staging tables once per wave, so the
+  guards are scoped to the wave rather than to the whole run; and it arms them *before*
+  the `CREATE`s, because two statements are issued and a failure on the second would
+  otherwise leak the first. Arming early is safe — the drop is `DROP ... IF EXISTS`.
 - `DropHelperTempRelation` — call it from the destructor of whatever state owns the
   object, when it outlives the creating function. `MaterializeRypeInputTempTable` plus
   the `rype_*` global states are the reference callers.

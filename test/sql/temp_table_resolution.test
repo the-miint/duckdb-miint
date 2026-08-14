@@ -394,6 +394,126 @@ SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE '\_\_peak\_pair%' ESC
 0
 
 # ==============================================================================
+# cluster_upgma -- ReadDistanceTable, the OTHER reader in unifrac_function_common
+# ==============================================================================
+#
+# community_distances above covers ReadFeatureTable. ReadDistanceTable is a
+# separate two-pass reader and only pass 1 (EnumerateDistanceIds) was migrated, so
+# a TEMP distance table used to bind, enumerate its ids, and then fail in pass 2.
+# cluster_upgma is the ungated consumer of it; pcoa / permanova / progressive_*
+# take the same path but need the UniFrac feature, so they live in
+# temp_table_resolution_unifrac.test.
+
+statement ok
+CREATE TEMP TABLE tmp_dist AS SELECT * FROM (VALUES
+    ('a','b',1.0),('a','c',2.0),('b','c',1.5)
+) t(sample_a, sample_b, distance);
+
+statement ok
+CREATE TABLE reg_dist AS SELECT * FROM tmp_dist;
+
+# UPGMA over 3 tips: 3 tips + 2 internal nodes = 5 rows, TEMP and non-TEMP alike.
+query I
+SELECT count(*) FROM cluster_upgma('reg_dist');
+----
+5
+
+query I
+SELECT count(*) FROM cluster_upgma('tmp_dist');
+----
+5
+
+# ==============================================================================
+# procrustes -- ReadOrdinationTable and ReadPairing
+# ==============================================================================
+#
+# Three independent relation parameters through two reader functions in
+# procrustes_function.cpp. procrustes is registered unconditionally, so unlike the
+# rest of the ordination family it can be asserted here.
+
+statement ok
+CREATE TEMP TABLE tmp_ord_a AS SELECT * FROM (VALUES
+    ('a',0,0.0),('a',1,1.0),('b',0,1.0),('b',1,0.0),
+    ('c',0,2.0),('c',1,2.0),('d',0,3.0),('d',1,1.0)
+) t(sample_id, axis, coordinate);
+
+# A pure scaling of ord_a: procrustes removes scale, so M2 must be 0 either way.
+# An exact known answer is what makes this fail if a relation were read as empty --
+# a NULL or a missing row would not be 0.
+statement ok
+CREATE TEMP TABLE tmp_ord_b AS SELECT sample_id, axis, coordinate * 3 AS coordinate FROM tmp_ord_a;
+
+statement ok
+CREATE TABLE reg_ord_a AS SELECT * FROM tmp_ord_a;
+
+statement ok
+CREATE TABLE reg_ord_b AS SELECT * FROM tmp_ord_b;
+
+query T
+SELECT DISTINCT m2 < 1e-12 FROM procrustes('reg_ord_a', 'reg_ord_b', permutations := 0);
+----
+true
+
+# Each positional argument TEMP in turn, then both: ReadOrdinationTable is called
+# once per side, so one working side says nothing about the other.
+query T
+SELECT DISTINCT m2 < 1e-12 FROM procrustes('tmp_ord_a', 'reg_ord_b', permutations := 0);
+----
+true
+
+query T
+SELECT DISTINCT m2 < 1e-12 FROM procrustes('reg_ord_a', 'tmp_ord_b', permutations := 0);
+----
+true
+
+query T
+SELECT DISTINCT m2 < 1e-12 FROM procrustes('tmp_ord_a', 'tmp_ord_b', permutations := 0);
+----
+true
+
+# The pairing table is read by a different function (ReadPairing) and so is
+# asserted separately.
+statement ok
+CREATE TEMP TABLE tmp_pair AS SELECT * FROM (VALUES ('a','a'),('b','b'),('c','c')) t(reference_id, other_id);
+
+query T
+SELECT DISTINCT m2 < 1e-12
+FROM procrustes('tmp_ord_a', 'tmp_ord_b', pairing := 'tmp_pair', permutations := 0);
+----
+true
+
+# Success alone is weak evidence here: the pairing only selects the anchors used
+# for the fit -- every sample is still transformed and emitted -- so a pairing read
+# as EMPTY could not be told apart from one read correctly by looking at the
+# output. This under-sized pairing can: procrustes needs at least n_dims + 1
+# anchors, and the error reports the count it actually matched. Seeing "2" proves
+# the TEMP relation's CONTENTS reached the code, not merely that the call survived.
+statement ok
+CREATE TEMP TABLE tmp_pair_short AS SELECT * FROM (VALUES ('a','a'),('b','b')) t(reference_id, other_id);
+
+statement error
+SELECT count(*) FROM procrustes('tmp_ord_a', 'tmp_ord_b', pairing := 'tmp_pair_short', permutations := 0);
+----
+only 2 usable anchor pair
+
+# ==============================================================================
+# pick_anchors / cluster_kmeans -- ReadCoordinateTable
+# ==============================================================================
+#
+# Both consume the (sample_id, axis, coordinate) contract through one shared
+# reader, so one case covers the pair.
+
+query I
+SELECT count(*) FROM pick_anchors('tmp_ord_a', n_anchors := 2, seed := 42);
+----
+2
+
+query I
+SELECT count(DISTINCT cluster) FROM cluster_kmeans('tmp_ord_a', k := 2, seed := 42);
+----
+2
+
+# ==============================================================================
 # Known limitations, pinned deliberately
 # ==============================================================================
 
