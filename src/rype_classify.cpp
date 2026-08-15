@@ -370,6 +370,7 @@ TableFunction RypeClassifyTableFunction::GetFunction() {
 	tf.named_parameters["threshold"] = LogicalType::DOUBLE;
 	tf.named_parameters["negative_index"] = LogicalType::VARCHAR;
 
+	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }
 

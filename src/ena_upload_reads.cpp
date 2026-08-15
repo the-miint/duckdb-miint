@@ -888,6 +888,7 @@ TableFunction ENAUploadReadsTableFunction::GetFunction() {
 	tf.named_parameters["qual_offset"] = LogicalType::BIGINT;
 	tf.named_parameters["layout"] = LogicalType::VARCHAR;
 	tf.named_parameters["aspera_rate_limit_mbps"] = LogicalType::BIGINT;
+	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }
 

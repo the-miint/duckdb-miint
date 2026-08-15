@@ -175,6 +175,7 @@ static void PeakPairExecute(ClientContext &context, TableFunctionInput &input, D
 void MzmlPeakPairFunction::Register(ExtensionLoader &loader) {
 	TableFunction func("mzml_peak_pair", {LogicalType::VARCHAR, LogicalType::VARCHAR}, PeakPairExecute, PeakPairBind,
 	                   PeakPairInitGlobal, PeakPairInitLocal);
+	func.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(func);
 }
 
