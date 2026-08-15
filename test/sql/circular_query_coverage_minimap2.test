@@ -25,7 +25,11 @@ UNION ALL SELECT 'plas5k',   substr((SELECT s FROM det_dna('p5:',   200)), 1, 50
 UNION ALL SELECT 'circ200k', substr((SELECT s FROM det_dna('c200:', 7000)), 1, 200000);
 
 statement ok
-CREATE TABLE reflen AS SELECT read_id AS reference, length(sequence1)::BIGINT AS length FROM refs;
+-- Every reference here is a synthetic circular replicon, so is_circular is true throughout.
+-- The macro requires the column: whether a reference is circular cannot be read off an
+-- alignment, and assuming it is what lets an end-join on a linear contig pose as a wrap.
+CREATE TABLE reflen AS
+SELECT read_id AS reference, length(sequence1)::BIGINT AS length, true AS is_circular FROM refs;
 
 statement ok
 CREATE TABLE reads AS

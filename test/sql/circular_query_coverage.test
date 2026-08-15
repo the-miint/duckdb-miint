@@ -69,10 +69,10 @@ INSERT INTO aln VALUES
   ('pe_read',       128, 'circ30k', 8000, 10000, '2000=2000S');
 
 statement ok
-CREATE TABLE reflen (reference VARCHAR, length BIGINT);
+CREATE TABLE reflen (reference VARCHAR, length BIGINT, is_circular BOOLEAN);
 
 statement ok
-INSERT INTO reflen VALUES ('circ30k', 30000), ('plas5k', 5000), ('circ200k', 200000);
+INSERT INTO reflen VALUES ('circ30k', 30000, true), ('plas5k', 5000, true), ('circ200k', 200000, true);
 
 # Coverage, pooled identity, and the topology evidence per (read, read1 bit, reference).
 #
@@ -393,7 +393,7 @@ control	1	NULL
 # from.
 statement ok
 CREATE TABLE reflen_conflict AS SELECT * FROM reflen
-UNION ALL SELECT 'circ30k', 999;
+UNION ALL SELECT 'circ30k', 999, true;
 
 statement error
 SELECT * FROM circular_query_coverage(aln, reflen_conflict);
@@ -404,10 +404,10 @@ has more than one recorded length
 # yields NULL in DuckDB, which would make max_ref_gap NULL, and COALESCE(max_ref_gap, 0)
 # would then read "unmeasured" as "perfectly abutting" -- admitting chimeras.
 statement ok
-CREATE TABLE reflen_null (reference VARCHAR, length BIGINT);
+CREATE TABLE reflen_null (reference VARCHAR, length BIGINT, is_circular BOOLEAN);
 
 statement ok
-INSERT INTO reflen_null VALUES ('circ30k', NULL), ('plas5k', 5000), ('circ200k', 200000);
+INSERT INTO reflen_null VALUES ('circ30k', NULL, true), ('plas5k', 5000, true), ('circ200k', 200000, true);
 
 statement error
 SELECT * FROM circular_query_coverage(aln, reflen_null);
@@ -415,12 +415,67 @@ SELECT * FROM circular_query_coverage(aln, reflen_null);
 missing or non-positive length
 
 statement ok
-CREATE TABLE reflen_zero AS SELECT reference, 0::BIGINT AS length FROM reflen;
+CREATE TABLE reflen_zero AS SELECT reference, 0::BIGINT AS length, is_circular FROM reflen;
 
 statement error
 SELECT * FROM circular_query_coverage(aln, reflen_zero);
 ----
 missing or non-positive length
+
+# is_circular is what licenses the modulo, and only the caller knows it. The very same pair
+# of same-strand fragments -- one ending where the contig ends, the next starting at its
+# origin -- is a wrap on a circular reference and an end-join on a linear one. An adapter
+# chimera or an assembly-graph artifact joining a contig's two ends produces exactly that
+# shape, so treating every reference as circular admits it as a perfect origin span.
+statement ok
+CREATE TABLE reflen_linear AS SELECT reference, length, false AS is_circular FROM reflen;
+
+query II
+SELECT max_ref_gap,
+       (coverage >= 0.90 AND NOT mixed_strand AND COALESCE(max_ref_gap, 0) <= 100) AS passes_gate
+FROM circular_query_coverage(aln, reflen_linear) WHERE read_id = 'junction_fwd';
+----
+30000	false
+
+query II
+SELECT max_ref_gap,
+       (coverage >= 0.90 AND NOT mixed_strand AND COALESCE(max_ref_gap, 0) <= 100) AS passes_gate
+FROM circular_query_coverage(aln, reflen) WHERE read_id = 'junction_fwd';
+----
+0	true
+
+# Coverage is unaffected by the declaration: pooling a read's records is worth doing on a
+# linear reference too -- a read split across a supplementary is still one molecule. Only
+# the wrap reading of the gap depends on circularity, so linear references keep their rows
+# rather than being filtered out and losing the pooled figure.
+query II
+SELECT round(coverage, 6), n_fragments
+FROM circular_query_coverage(aln, reflen_linear) WHERE read_id = 'junction_fwd';
+----
+1.0	2
+
+# A real assembly is mixed: a circular chromosome alongside linear contigs, described by one
+# relation. The declaration is per reference, not per call.
+statement ok
+CREATE TABLE reflen_mixed AS
+SELECT reference, length, reference <> 'plas5k' AS is_circular FROM reflen;
+
+query III
+SELECT read_id, reference, max_ref_gap FROM circular_query_coverage(aln, reflen_mixed)
+WHERE read_id IN ('junction_fwd', 'multiwrap') ORDER BY read_id;
+----
+junction_fwd	circ30k	0
+multiwrap	plas5k	5000
+
+# An undeclared reference is rejected rather than assumed circular. Assuming is what created
+# the false accept above, and the assumption is invisible at the call site.
+statement ok
+CREATE TABLE reflen_undeclared AS SELECT reference, length, NULL::BOOLEAN AS is_circular FROM reflen;
+
+statement error
+SELECT * FROM circular_query_coverage(aln, reflen_undeclared);
+----
+does not say whether it is circular
 
 # max_ref_gap must not depend on physical row order. Two same-strand fragments of one read
 # beginning at the same query offset (a tandem-repeat supplementary, or a duplicated

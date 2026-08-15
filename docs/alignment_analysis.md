@@ -745,6 +745,10 @@ WHERE proportion_covered > 0.5;
 
 `circular_query_coverage(alignments, reference_lengths, [coverage_type='aligned'])`
 
+> `reference_lengths` needs an `is_circular` column. Nothing in an alignment records whether
+> a reference is circular, and the wrap test is only meaningful if it is — so the macro asks
+> rather than assumes.
+
 How much of each read is explained by each reference, **pooling every alignment record the
 aligner split the read into**.
 
@@ -781,7 +785,15 @@ is bounded by 1.0, and is unaffected by a read wrapping the reference more than 
 The first two are unquoted table/view names, not string literals:
 
 - `alignments`: a relation with columns `read_id`, `flags`, `reference`, `position` (BIGINT), `stop_position` (BIGINT), `cigar` (VARCHAR) — the schema produced by `read_alignments` and by the `align_*` functions. `flags` may be any integer type; it is cast internally
-- `reference_lengths`: a relation with columns `reference` and `length` (BIGINT). This is exactly [`read_alignment_header`](reading.md#read_alignment_headerpath)'s output shape, so it can be passed straight through
+- `reference_lengths`: a relation with columns `reference`, `length` (BIGINT) and `is_circular` (BOOLEAN). [`read_alignment_header`](reading.md#read_alignment_headerpath) supplies the first two; `is_circular` you add, because circularity is not recorded anywhere in an alignment and cannot be inferred from one:
+  ```sql
+  -- whole assembly is circular
+  SELECT reference, length, true AS is_circular FROM read_alignment_header('aln.bam')
+  -- mixed assembly: circular chromosome, linear contigs
+  SELECT reference, length, reference IN ('chr', 'plasmid_1') AS is_circular
+  FROM read_alignment_header('aln.bam')
+  ```
+  A reference whose `is_circular` is NULL is rejected rather than assumed circular — see below
 - `coverage_type` (VARCHAR, named argument, default `'aligned'`): what counts as covered, using the same vocabulary as [`cigar_query_coverage`](#cigar-query-coverage) and [`cigar_query_intervals`](#cigar-query-intervals) — `'aligned'` counts `M`/`=`/`X`, `'mapped'` additionally counts inserted bases. Pass it as `coverage_type := 'mapped'`. Note this knob also moves `identity` and `n_fragments`: a record covering no query positions under `'aligned'` is excluded from the read's group entirely, and `'mapped'` admits it, so its `=`/`X` counts join the pooled identity too
 
 **Output schema:**
@@ -813,9 +825,10 @@ WHERE coverage >= 0.90
 ```
 
 `max_ref_gap` is the distance between one fragment's reference end and the next fragment's
-reference start, taken in **read order**, modulo the reference length. Linearising a circle is
-the only reason the aligner could not chain those fragments itself, so a genuine origin span
-closes to 0 — or to whatever indel sits at the junction. On synthetic reads this measures
+reference start, taken in **read order** — modulo the reference length on a reference declared
+circular, and as a plain distance on one declared linear. On a circular reference, linearising
+the circle is the only reason the aligner could not chain those fragments itself, so a genuine
+origin span closes to 0 — or to whatever indel sits at the junction. On synthetic reads this measures
 **0–2 bases for real origin spans and 48999–55000 for split chimeras**, so any tolerance from
 roughly 50 to 1000 behaves identically. It is not a knife-edge.
 
@@ -866,6 +879,38 @@ regardless of aligner.
 - **Records with a NULL `read_id` are excluded.** `read_alignments` maps the `*` QNAME sentinel
   to NULL, and such records cannot be grouped; pooling every unnamed record together would
   merge unrelated molecules.
+- **`is_circular` is required per reference, and NULL is rejected.** Only the caller knows
+  which references are circular. The identical pair of same-strand fragments — one ending
+  where the contig ends, the next starting at its origin — is a wrap on a circular reference
+  and an end-join on a linear one, and adapter chimeras and assembly-graph artifacts produce
+  exactly that shape. Assuming circular would admit them as perfect origin spans, with the
+  assumption invisible at the call site. A reference recorded as both circular and linear
+  raises, like a reference with two different lengths.
+- **Linear references keep their rows.** Only the *wrap* reading of the gap depends on
+  circularity; pooling a read's records is worth doing either way, since a read split across
+  a supplementary is one molecule whatever the reference's topology. So `coverage`,
+  `identity` and the rest are computed identically, and only `max_ref_gap` changes: on a
+  linear reference it is the plain distance between the fragments, so an end-join reports the
+  whole contig rather than 0 and fails the gate.
+- **A read explained by two references produces one row per reference.** Each says how much
+  of the read that reference explains, which is the question being asked — but it means the
+  rows do not partition the read. A recruitment gate looks at one reference at a time and is
+  unaffected. **Do not sum `coverage` across references to get abundance**: a read explained
+  by three references contributes 3.0. For abundance use
+  [`woltka_ogu`](profiling.md#woltka_ogu), which distributes multi-mapped reads fractionally
+  instead of double-counting them. To reduce to one reference per read first:
+  ```sql
+  -- best reference per read, ties broken deterministically
+  SELECT * FROM circular_query_coverage(alignments, reference_lengths)
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY read_id, is_read1
+                             ORDER BY coverage DESC, identity DESC NULLS LAST, reference) = 1;
+
+  -- or keep only reads that one reference explains unambiguously
+  SELECT * FROM circular_query_coverage(alignments, reference_lengths)
+  QUALIFY COUNT(*) OVER (PARTITION BY read_id, is_read1) = 1;
+  ```
+  Both are policies, not facts, which is why the macro reports the rows and leaves the choice
+  to you.
 - **Records with a NULL `position` or `stop_position` are excluded.** They cannot be placed on
   the reference, so they cannot take part in the contiguity test. Keeping them would be
   actively unsafe: such a record counts toward `coverage` and `n_fragments` while its gap is
@@ -893,8 +938,13 @@ CREATE VIEW recruited AS
   SELECT * FROM align_minimap2('sample_reads', subject_table := 'sample_assembly',
                                preset := 'map-hifi', eqx := true);
 
+-- Circularity is a claim about the assembly, not something the alignment records, so it is
+-- stated here. Most assemblers flag circular contigs in the FASTA header or a companion
+-- table; substitute your own predicate for the name match.
 CREATE VIEW contig_lengths AS
-  SELECT read_id AS reference, length(sequence1) AS length FROM sample_assembly;
+  SELECT read_id AS reference, length(sequence1) AS length,
+         read_id LIKE '%circular%' AS is_circular
+  FROM sample_assembly;
 
 -- Reads confidently recruited to their own sample's assembly, including those crossing
 -- the origin of a circular contig.

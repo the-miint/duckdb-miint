@@ -787,11 +787,19 @@ const std::string GENOME_COVERAGE = // NOLINT
 // so they cannot raise a union but would inflate n_fragments. Unmapped records and
 // references absent from reference_lengths produce no rows.
 //
+// A read explained by two references yields one row per reference, each reporting how much
+// of the read that reference explains. That is the question being answered, but it means the
+// rows do not partition the read: summing coverage across references counts it more than
+// once. Recruitment gates one reference at a time and is unaffected; abundance is not, and
+// wants woltka_ogu, which distributes multi-mapped reads fractionally.
+//
 // Parameters:
 // alignments : a relation with columns: read_id, flags, reference, position (BIGINT),
 //     stop_position (BIGINT), cigar (VARCHAR)
-// reference_lengths : a relation with columns: reference, length (BIGINT). This is
-//     read_alignment_header()'s output shape, so it can be passed straight through.
+// reference_lengths : a relation with columns: reference, length (BIGINT),
+//     is_circular (BOOLEAN). read_alignment_header() supplies the first two; is_circular
+//     has to be added, because circularity is not recorded in an alignment and cannot be
+//     inferred from one. A reference left NULL is rejected rather than assumed circular.
 // coverage_type : 'aligned' (default) counts M/=/X; 'mapped' also counts insertions.
 //     Same vocabulary as cigar_query_coverage and cigar_query_intervals, so a pipeline
 //     already filtering on cigar_query_coverage(cigar, 'mapped') can migrate unchanged.
@@ -838,7 +846,24 @@ const std::string CIRCULAR_QUERY_COVERAGE = // NOLINT
     "             THEN error('circular_query_coverage: reference ' || reference::VARCHAR "
     "                        || ' has a missing or non-positive length; a reference length is ' "
     "                        || 'required to recognise wrapping') "
-    "             ELSE MAX(length) END AS ref_length "
+    "             ELSE MAX(length) END AS ref_length, "
+    // Circularity is the premise the whole gap measure rests on and it cannot be inferred
+    // from an alignment: the same two fragments, one ending where the contig ends and the
+    // next starting at its origin, are a wrap on a circular reference and an end-join on a
+    // linear one. Assuming circular is what makes an adapter chimera or an assembly-graph
+    // artifact look like a perfect origin span, and the assumption would be invisible at the
+    // call site, so an undeclared reference is rejected rather than guessed at.
+    // BOOL_OR <> BOOL_AND is "both values occur", the same idiom mixed_strand uses; both
+    // ignore NULLs, so an all-NULL group falls through to the second branch.
+    "        CASE WHEN BOOL_OR(is_circular) <> BOOL_AND(is_circular) "
+    "             THEN error('circular_query_coverage: reference ' || reference::VARCHAR "
+    "                        || ' is recorded as both circular and linear in reference_lengths') "
+    "             WHEN BOOL_AND(is_circular) IS NULL "
+    "             THEN error('circular_query_coverage: reference ' || reference::VARCHAR "
+    "                        || ' does not say whether it is circular; set is_circular in ' "
+    "                        || 'reference_lengths, because a reference gap that wraps is only ' "
+    "                        || 'evidence of an origin span if the reference actually is circular') "
+    "             ELSE BOOL_AND(is_circular) END AS is_circular "
     "    FROM query_table(reference_lengths) "
     "    WHERE reference IS NOT NULL "
     "    GROUP BY reference "
@@ -848,6 +873,7 @@ const std::string CIRCULAR_QUERY_COVERAGE = // NOLINT
     "        a.read_id AS read_id, "
     "        a.reference AS reference, "
     "        r.ref_length AS ref_length, "
+    "        r.is_circular AS is_circular, "
     // flags is cast because alignment relations that have been through Parquet widen it
     // to BIGINT, and every alignment_is_* function is USMALLINT-only.
     "        alignment_is_read1(a.flags::USMALLINT) AS is_read1, "
@@ -900,12 +926,15 @@ const std::string CIRCULAR_QUERY_COVERAGE = // NOLINT
     "        CASE WHEN LEAD(is_reverse) OVER w <> is_reverse THEN NULL "
     "             WHEN is_reverse THEN ref_start - LEAD(ref_stop) OVER w "
     "             ELSE LEAD(ref_start) OVER w - ref_stop END AS ref_delta, "
-    // Reduce the signed delta into [0, ref_length), then take its distance to zero, which
-    // is the absolute signed representative without forming it. A delta of -ref_length --
-    // one fragment ending where the contig ends and the next starting at its origin --
-    // lands on 0, which is what makes wrapping indistinguishable from contiguity.
+    // On a circular reference, reduce the signed delta into [0, ref_length) and take its
+    // distance to zero, which is the absolute signed representative without forming it. A
+    // delta of -ref_length -- one fragment ending where the contig ends and the next starting
+    // at its origin -- lands on 0, which is what makes wrapping indistinguishable from
+    // contiguity. On a linear reference that identification is exactly what must not happen,
+    // so the plain distance is reported and an end-join shows up as the whole contig.
     "        (ref_delta % ref_length + ref_length) % ref_length AS delta_mod, "
-    "        LEAST(delta_mod, ref_length - delta_mod) AS ref_gap "
+    "        CASE WHEN is_circular THEN LEAST(delta_mod, ref_length - delta_mod) "
+    "             ELSE abs(ref_delta) END AS ref_gap "
     "    FROM covering "
     // ref_start/ref_stop/is_reverse are tie-breakers, not decoration: two same-strand
     // fragments of one read can begin at the same query offset (a tandem-repeat
