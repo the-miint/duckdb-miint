@@ -1780,20 +1780,60 @@ unique_ptr<miint::progressive::ProgressivePcoaRun> MakeProgressiveRun(ClientCont
 		//
 		// Workers are drawn from one wave, so wave_batches must be set too or
 		// batch_workers does nothing (wave_workers = min(batch_workers, wave_count)).
-		// Sized equal to the worker count: without a prefetch each block is fetched and
-		// released inside its own batch, so live memory is `workers` blocks rather than
-		// the whole wave, and a bigger wave would only buy fewer barriers at the cost of
-		// holding more batch output. A wave is still a barrier, so a straggler idles its
-		// wave's other workers — the remaining cost of wave quantization, now that the
-		// output no longer waits for the whole run.
+		//
+		// The wave is sized as WIDE as its buffered output can afford, not to the
+		// worker count, because a wave is a barrier and one-batch-per-worker is the
+		// worst way to draw it. Instrumented on 23,814 EMP samples, 14 threads, 23
+		// batches: a batch is 94.6% UniFrac compute (the fsvd is 14 ms; the row read,
+		// biom build and shear together are 5%) and genuinely uneven — 4.4 s to 9.5 s,
+		// max/mean 1.19 — so wave 1's fourteen batches finished between 8.5 s and
+		// 12.1 s and wave 2 could not start until 12.1 s. Widened, a worker takes the
+		// next batch the moment it frees (batch 14 started at 7.959 s, when batch 13
+		// ended at 7.958 s). A/B'd against a stashed build, interleaved, 4 pairs:
+		// 20.89 s -> 19.39 s, same checksum to 6 dp over all 238,140 coordinates —
+		// wave width has never changed a coordinate, and this confirms it end to end.
+		//
+		// The gain is smaller than the idle workers suggest because keeping the pool
+		// busy makes each block dearer: in the instrumented run the same 2000-sample
+		// block averaged 8.45 s while fourteen ran at once and 6.23 s while nine did.
+		// The batch phase is memory-bandwidth-bound, so filling an idle worker returns
+		// less than the arithmetic promises — the 1→14 thread curve bends for the same
+		// reason, 8 → 14 threads buying only 1.04× in this build AND in the one before
+		// it. What is left is quantization — 23 batches over 14 workers is two rounds
+		// however they are scheduled, and no scheduler fixes that; it fades to under 1%
+		// by a few hundred batches. Two things that DO close it were measured and left
+		// to the caller: `threads := 28` on this 14-core box ran 17.2 s (a block is one
+		// core, so oversubscribing lets the OS split the tail) but would break `threads`
+		// as a bound on a machine with more cores than the budget. Re-cutting batch_size
+		// to make the batch count a multiple of the pool did NOT help once the barrier
+		// was gone (28 batches: 18.6 s vs 18.9 s) — it only helped the barrier build, so
+		// do not re-derive it. Judge all of this on WALL time: the CLI timer's CPU column
+		// reported 284 vs 141 CPU-seconds for two runs that execute identically.
+		//
+		// A continuous cross-wave work queue was priced and rejected: at a wave of
+		// `budget/bytes_per_batch` batches the barrier costs about (max-mean)/width per
+		// wave, ~2% at defaults, which does not pay for a producer/consumer thread pool
+		// and its cancellation and lifetime edges. The budget is what keeps this from
+		// being the old "materialize the whole run" bug (#11) on a big table: 64 MB of
+		// coordinates, well under the ~280 MB of blocks the workers already hold, and
+		// the floor of `workers` batches is exactly what this path buffered before.
 		//
 		// Bit-identity is preserved, not merely approximate: each worker pins its
 		// ordination to ONE OpenMP thread, which is what the serial path uses at
 		// n_threads=1, and skbb's centering reduction sums in thread-count-dependent
 		// order (see test_ProgressivePcoa's serial-vs-parallel case).
+		//
+		// A batch's coordinates are charged twice over because they exist twice while
+		// a wave is drained: the core's ProgressiveCoord and the PcoaRow copied from
+		// it (see AppendPcoaRows).
+		const uint64_t bytes_per_batch = static_cast<uint64_t>(data.batch_size) * data.n_dims *
+		                                 (sizeof(miint::progressive::ProgressiveCoord) + sizeof(PcoaRow));
+		const size_t n_batches = (data.part.remaining.size() + data.batch_size - 1) / data.batch_size;
+		const uint32_t wave_batches = miint::progressive::ChooseWaveWidthByOutput(
+		    n_batches, data.workers, bytes_per_batch, /*budget_bytes=*/64ull << 20);
 		return make_uniq<miint::progressive::ProgressivePcoaRun>(
 		    data.part.anchors, data.part.remaining, data.n_dims, data.batch_size, data.seed, data.n_threads, provider,
-		    /*prefetch=*/nullptr, /*wave_batches=*/data.workers, /*batch_workers=*/data.workers, interrupt);
+		    /*prefetch=*/nullptr, wave_batches, /*batch_workers=*/data.workers, interrupt);
 	}
 
 	auto source = std::make_shared<WaveDistanceBlockSource>(context, data.qname, data.part.anchors);

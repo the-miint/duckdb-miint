@@ -138,6 +138,18 @@ uint32_t ChooseWaveWidth(size_t n_anchors, uint32_t batch_size, uint32_t n_worke
 	return static_cast<uint32_t>(std::min(fits, cap));
 }
 
+uint32_t ChooseWaveWidthByOutput(size_t n_batches, uint32_t n_workers, uint64_t bytes_per_batch,
+                                 uint64_t budget_bytes) {
+	const uint64_t cap = std::max<uint64_t>(n_batches, 1);
+	// The floor: never narrower than the pool, never wider than the run.
+	uint64_t width = std::min<uint64_t>(cap, std::max<uint32_t>(n_workers, 1));
+	if (bytes_per_batch == 0) {
+		return static_cast<uint32_t>(cap); // nothing to charge, so nothing to limit
+	}
+	width = std::max(width, std::min<uint64_t>(cap, budget_bytes / bytes_per_batch));
+	return static_cast<uint32_t>(std::min<uint64_t>(width, 4294967295ull));
+}
+
 ProgressivePcoaRun::ProgressivePcoaRun(const std::vector<std::string> &anchor_ids,
                                        const std::vector<std::string> &remaining_ids, uint32_t n_dims,
                                        uint32_t batch_size, int seed, int n_threads, BlockProvider get_block,

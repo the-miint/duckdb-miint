@@ -103,6 +103,24 @@ using InterruptCheck = std::function<void()>;
 uint32_t ChooseWaveWidth(size_t n_anchors, uint32_t batch_size, uint32_t n_workers, uint64_t budget_bytes,
                          size_t n_batches);
 
+// The same decision for a provider that fetches and releases each block INSIDE its
+// own batch (no wave staging — the progressive UniFrac path). Nothing about a wave
+// is held there except the output of the batches already in it, so that is all this
+// charges: `bytes_per_batch` is what one batch's coordinates occupy on the way out.
+//
+// Width matters because a wave is a barrier. One batch per worker — the obvious
+// sizing, and what this path used to do — is its worst case: every barrier waits
+// for the wave's slowest batch, so the run pays max(batch) per wave instead of
+// mean(batch), and the ragged final wave leaves the rest of the pool idle to the
+// end. Widening the wave amortizes both, and a wave wide enough to hold the whole
+// run has no barrier at all. See the call site for the measured cost.
+//
+// `n_workers` is the floor rather than a term: a wave narrower than the pool idles
+// workers by construction, and holding a pool's worth of output is what the
+// un-widened path already did, so the floor cannot regress memory. Result is always
+// in [1, max(n_batches, 1)].
+uint32_t ChooseWaveWidthByOutput(size_t n_batches, uint32_t n_workers, uint64_t bytes_per_batch, uint64_t budget_bytes);
+
 // One (sample_id, axis) coordinate in the shared standardized reference frame.
 // `batch` is the 0-based index of the batch that placed this sample, or -1 for the
 // anchors — they define the frame rather than being fitted into it. It joins a

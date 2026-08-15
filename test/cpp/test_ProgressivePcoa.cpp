@@ -590,6 +590,66 @@ TEST_CASE("wave width is sized from a memory budget and always stays legal", "[p
 	}
 }
 
+TEST_CASE("wave width for a per-batch-fetch provider is sized by output, never below the worker pool",
+          "[progressive]") {
+	// A wave is a BARRIER: nothing in wave N+1 starts until wave N's slowest batch
+	// finishes. Sizing a wave to the worker pool — one batch per worker — is the
+	// worst case for that, because then every barrier pays max(batch) instead of
+	// mean(batch) and the run's ragged last wave leaves workers idle to the end.
+	// Measured on 23,814 EMP samples at 14 threads: batches ran 4.4-9.5 s (max/mean
+	// 1.19), and the 23-batch run spent 17.6 s of wall on 171 s of work that 14
+	// workers could have finished in 12.3. Widening the wave is the whole fix, and
+	// on a provider that fetches each block inside its own batch it costs nothing
+	// but the OUTPUT the wave buffers before it is handed on — which is what this
+	// charges. The floor is the worker pool, so a wave is never narrower (and never
+	// buffers more) than the one-batch-per-worker arrangement it replaces.
+	using miint::progressive::ChooseWaveWidthByOutput;
+	const uint32_t workers = 14;
+	const uint64_t per_batch = 480ull * 1024; // 1000 samples x 10 axes x 48 B
+
+	SECTION("a budget that fits nothing still keeps every worker fed") {
+		REQUIRE(ChooseWaveWidthByOutput(/*n_batches=*/100, workers, per_batch, /*budget_bytes=*/0) == workers);
+		REQUIRE(ChooseWaveWidthByOutput(/*n_batches=*/100, workers, per_batch, /*budget_bytes=*/1024) == workers);
+		// A batch so wide that not even one fits still gets a full pool's wave: that
+		// is the memory the un-widened path already held, so it cannot be a regression.
+		REQUIRE(ChooseWaveWidthByOutput(/*n_batches=*/100, workers, /*bytes_per_batch=*/1ull << 40,
+		                                /*budget_bytes=*/1ull << 20) == workers);
+	}
+	SECTION("the whole run collapses into one wave when the budget allows") {
+		// The case that matters most: a run whose batches all fit is scheduled with no
+		// barrier at all, which is the best any scheduler could do.
+		REQUIRE(ChooseWaveWidthByOutput(/*n_batches=*/23, workers, per_batch, /*budget_bytes=*/64ull << 20) == 23);
+	}
+	SECTION("the wave it picks fits the budget, and one batch wider would not") {
+		for (uint64_t budget : {32ull << 20, 64ull << 20, 256ull << 20, 1ull << 30}) {
+			const uint32_t w = ChooseWaveWidthByOutput(/*n_batches=*/1000000, workers, per_batch, budget);
+			REQUIRE(w > workers); // every one of these budgets buys more than the floor
+			REQUIRE(static_cast<uint64_t>(w) * per_batch <= budget);
+			REQUIRE(static_cast<uint64_t>(w + 1) * per_batch > budget);
+		}
+	}
+	SECTION("never more batches than the run actually has") {
+		REQUIRE(ChooseWaveWidthByOutput(/*n_batches=*/3, workers, per_batch, /*budget_bytes=*/1ull << 40) == 3);
+		REQUIRE(ChooseWaveWidthByOutput(/*n_batches=*/1, workers, per_batch, /*budget_bytes=*/1ull << 40) == 1);
+	}
+	SECTION("a bigger budget never gives a narrower wave") {
+		uint32_t prev = 0;
+		for (uint64_t budget = 0; budget < (1ull << 34); budget = budget ? budget * 4 : 1u << 20) {
+			const uint32_t w = ChooseWaveWidthByOutput(/*n_batches=*/100000, workers, per_batch, budget);
+			REQUIRE(w >= prev);
+			prev = w;
+		}
+	}
+	SECTION("degenerate inputs stay legal rather than wrapping") {
+		REQUIRE(ChooseWaveWidthByOutput(/*n_batches=*/0, workers, per_batch, /*budget_bytes=*/1ull << 30) == 1);
+		REQUIRE(ChooseWaveWidthByOutput(/*n_batches=*/9, /*workers=*/0, per_batch, /*budget_bytes=*/0) == 1);
+		REQUIRE(ChooseWaveWidthByOutput(/*n_batches=*/9, workers, /*bytes_per_batch=*/0, /*budget_bytes=*/~0ull) == 9);
+		const uint32_t w = ChooseWaveWidthByOutput(/*n_batches=*/~size_t {0}, workers, /*bytes_per_batch=*/1,
+		                                           /*budget_bytes=*/~0ull);
+		REQUIRE(w >= workers);
+	}
+}
+
 TEST_CASE("progressive PCoA with no remaining samples emits only the reference anchors", "[progressive]") {
 	// Degenerate case: everything is an anchor. The result is just the standardized
 	// reference ordination (the self-fit path), with no batch phase.
