@@ -9,11 +9,14 @@ A considerable amount of analysis on alignment data can be performed with native
 - [Alignment slicing](#alignment-slicing) - Slice an alignment based on start and stop coordinates with implicit CIGAR update.
 - [Sequence identity](#sequence-identity) - Sequence identity calculation (multi-mode, requires NM/MD for legacy CIGAR)
 - [Sequence identity from CIGAR](#sequence-identity-from-cigar) - Sequence identity from extended CIGAR alone
+- [Pooled sequence identity](#pooled-sequence-identity) - One identity for a read the aligner split into several records (aggregate)
 - [Query length](#cigar-query-length) - Query length from CIGAR
 - [Query coverage](#cigar-query-coverage) - Query coverage from CIGAR
+- [Query intervals](#cigar-query-intervals) - Which read positions an alignment covers, on the read's own axis
 - [Merge overlapping intervals](#merge-overlapping-intervals) - Merge overlapping genomic intervals (aggregate)
 - [Coverage depth](#coverage-depth) - Per-position depth of coverage (aggregate)
 - [Genome coverage](#genome-coverage) - Proportion of each genome covered by alignments
+- [Circular query coverage](#circular-query-coverage) - Query coverage pooled across the fragments of one read, for reads spanning a circular reference's origin
 - [Barcode matching](#barcode-matching) - Hamming-distance matcher for short fixed-length barcodes
 - [MSA column consensus](#msa-column-consensus) - Quality-aware consensus from a multiple alignment
 - [Concordant-pair identity filtering](#worked-example-joint-identity-filtering-of-concordant-read-pairs) - Filter paired-end alignments as a unit
@@ -283,7 +286,70 @@ SELECT read_id, cigar_sequence_identity(cigar) AS identity
 FROM alignment_slice('my_alignments', 1000, 2000);
 ```
 
-**See also:** `alignment_seq_identity` for legacy `M`-only CIGAR or BLAST/gap-compressed/gap-excluded identity flavors.
+**See also:** `alignment_seq_identity` for legacy `M`-only CIGAR or BLAST/gap-compressed/gap-excluded identity flavors, and [`cigar_pooled_identity`](#pooled-sequence-identity) when one read is described by several alignment records.
+
+### Pooled sequence identity
+
+Sequence identity for a read the aligner reported as **several alignment records** — a
+supplementary alignment, a read spanning a circular reference's origin, any split alignment.
+`cigar_sequence_identity` is correct per record but cannot see the others, so no record's
+figure describes the molecule. This aggregate pools them.
+
+**Function signature:**
+
+`cigar_pooled_identity(cigar)` — aggregate
+
+**Parameters:**
+- `cigar` (VARCHAR): CIGAR strings with extended ops (`=`/`X`), one row per alignment record. Group by whatever identifies one read: `read_id`, or `(read_id, alignment_is_read1(flags))` for paired data.
+
+**Formula:** `sum(match_ops) / sum(alignment_columns)` over the group — the same ratio as
+[`cigar_sequence_identity`](#sequence-identity-from-cigar), with both terms summed across the
+records first. Clipping contributes to neither, so the split itself costs nothing: a perfect
+read reported as two records is 1.0, not 1.0 minus a fabricated gap.
+
+**Returns:** DOUBLE in [0.0, 1.0], or NULL under the same conditions as
+`cigar_sequence_identity` applied to the totals:
+- every CIGAR in the group is NULL, empty, or `*`
+- the group uses only `M` (legacy — can't distinguish matches from mismatches). Re-aligning with extended CIGARs is the only way to recover a *pooled* figure; [`alignment_seq_identity`](#sequence-identity) with NM or MD reconstructs what `M` omits but only per record, and those per-record figures cannot be averaged into the read's identity (see below)
+- the group mixes `M` with `=`/`X`, **including across records** — one record in legacy `M` and another extended means the `=`/`X` counts describe only part of the read, so no identity is reported for any of it
+- the group has no `=`/`X` ops at all
+
+NULL CIGARs are skipped rather than poisoning the group. On a group of one record the result
+is exactly `cigar_sequence_identity` of that record, including every case where that is NULL,
+so a query can move from one to the other without changing what identity means.
+
+**Example:**
+```sql
+-- One identity per read, however many records the aligner emitted
+SELECT read_id, cigar_pooled_identity(cigar) AS identity
+FROM read_alignments('alignments.bam')
+WHERE NOT alignment_is_unmapped(flags) AND NOT alignment_is_secondary(flags)
+GROUP BY read_id;
+
+-- Paired data: keep the mates apart, they are different molecules
+SELECT read_id, alignment_is_read1(flags) AS is_read1,
+       cigar_pooled_identity(cigar) AS identity
+FROM read_alignments('alignments.bam')
+GROUP BY read_id, is_read1;
+```
+
+A split read's records mislead individually, and averaging them is not the answer either. Take
+a read split into a 1000-column record at 100% and a 100-column record with one mismatch
+(`1000=` and `99=1X`): the records report 1.0 and 0.99, their mean is 0.995, and the read is
+**0.99909** — one mismatch in 1100 aligned columns. The mean overstates the error more than
+fivefold, because it gives a record ten times shorter equal weight. Pooling weights each
+record by the columns it actually aligned, which is the only reading under which the figure
+means "identity of this read against this reference".
+
+> Do **not** approximate this with `cigar_sequence_identity(string_agg(cigar, ''))`.
+> Concatenating CIGARs builds a string the SAM spec forbids, because clipping is only legal at
+> an end, and it fails outright on a group containing an unmapped record. It also does not
+> generalise: anything adjacency-sensitive — gap-compressed identity above all — is *wrong* on
+> concatenated input, because joining two records manufactures a gap-open event that never
+> happened.
+
+**See also:** [`circular_query_coverage`](#circular-query-coverage), which reports this as its
+`identity` column alongside the coverage and topology evidence for the same read.
 
 ## `cigar_query_length(cigar, [include_hard_clips=true])`
 
@@ -449,6 +515,80 @@ GROUP BY reference;
 - Filter reads based on alignment quality thresholds
 - QC metrics for sequencing runs
 
+> ⚠️ **This is a per-row measure and cannot see a read's other alignment records.** When a
+> read is split across several records — it spans the origin of a circular reference, or has
+> supplementary alignments — each record covers only part of the read, so **no row passes a
+> coverage floor like `> 0.9` even when the read is fully explained**. That is a silent loss,
+> and for assembled circular genomes it is concentrated at the origin. Use
+> [`circular_query_coverage`](#circular-query-coverage) to pool a read's records; it returns
+> the same value as this function for reads with a single alignment.
+
+### CIGAR query intervals
+
+Return which positions of the read an alignment covers, as half-open `[start, stop)`
+intervals on the **read's own axis**.
+
+`cigar_query_coverage` answers "how much of the read does this one alignment record
+explain" and collapses the answer to a single number. When a read is split across several
+records — an origin-spanning read on a circular reference, a supplementary alignment, a
+chimera — you need to know *which* part of the read each record explains before you can
+combine them. That is what this returns.
+
+**Function signature:**
+
+`cigar_query_intervals(cigar, flags, [type='aligned'])`
+
+**Parameters:**
+- `cigar` (VARCHAR): CIGAR string from the alignment
+- `flags` (USMALLINT): SAM flags. Only the reverse-strand bit (`0x10`) is consulted
+- `type` (VARCHAR, default `'aligned'`): `'aligned'` counts `M`/`=`/`X`; `'mapped'` also counts `I`. Same vocabulary as [`cigar_query_coverage`](#cigar-query-coverage)
+
+**Returns:** `LIST<STRUCT(start BIGINT, stop BIGINT)>` — 0-based, half-open, ascending and
+non-overlapping. Empty list for an unmapped or empty CIGAR. NULL if `cigar` or `flags` is
+NULL.
+
+**Behavior:**
+- **Intervals are in the original read's orientation, not the reference's.** SAM writes
+  CIGARs in reference orientation, so on a reverse-strand record the leading clip sits at
+  the read's 3′ end. The reverse bit mirrors each interval onto the read axis, which is what
+  makes intervals from different records of the same read directly comparable.
+- `S` and `H` advance the cursor but are never covered, so the denominator is the full read
+  length — the same quantity `cigar_query_length(cigar, true)` reports.
+- `D`, `N` and `P` consume no query, so the runs they separate are contiguous on the read
+  and are returned merged.
+- Under `'aligned'`, an insertion is a gap in coverage and splits the interval; under
+  `'mapped'` it does not.
+- The field names `start`/`stop` match [`compress_intervals`](#merge-overlapping-intervals),
+  so the two compose directly.
+
+**Examples:**
+```sql
+-- A trailing soft clip is not covered
+SELECT cigar_query_intervals('3000=3000S', 0);
+-- [{'start': 0, 'stop': 3000}]
+
+-- Same alignment on the reverse strand: the covered block is at the other end of the read
+SELECT cigar_query_intervals('3000=3000S', 16);
+-- [{'start': 3000, 'stop': 6000}]
+
+-- An insertion splits the covered region under 'aligned' but not under 'mapped'
+SELECT cigar_query_intervals('100=10I100=', 0);            -- two intervals
+SELECT cigar_query_intervals('100=10I100=', 0, 'mapped');  -- one interval
+
+-- Pool the fragments of each read onto its own axis
+SELECT read_id, compress_intervals(iv.start, iv.stop) AS covered
+FROM (
+  SELECT read_id, UNNEST(cigar_query_intervals(cigar, flags)) AS iv
+  FROM read_alignments('alignments.bam')
+  WHERE NOT alignment_is_unmapped(flags) AND NOT alignment_is_secondary(flags)
+)
+GROUP BY read_id;
+```
+
+For the common case of pooling coverage across a read's fragments, prefer
+[`circular_query_coverage`](#circular-query-coverage), which does this and reports the
+evidence needed to tell a genuine wrap from a chimera.
+
 ### Merge overlapping intervals
 
 `compress_intervals(start, stop)`
@@ -601,6 +741,238 @@ SELECT * FROM genome_coverage(alignments, genome_lengths, contig_to_genome)
 WHERE proportion_covered > 0.5;
 ```
 
+### Circular query coverage
+
+`circular_query_coverage(alignments, reference_lengths, [coverage_type='aligned'])`
+
+> `reference_lengths` needs an `is_circular` column. Nothing in an alignment records whether
+> a reference is circular, and the wrap test is only meaningful if it is — so the macro asks
+> rather than assumes.
+
+How much of each read is explained by each reference, **pooling every alignment record the
+aligner split the read into**.
+
+#### Why this exists alongside `cigar_query_coverage`
+
+[`cigar_query_coverage`](#cigar-query-coverage) answers a per-row question — *how much of the
+read does **this record** explain* — and cannot see the read's other records. A read that
+spans the **origin of a circular reference** held as a linearised contig is emitted as two or
+more records, so no single row reports much beyond half the read:
+
+| record | position–stop | cigar | `cigar_query_coverage` |
+|---|---|---|---|
+| primary | 27001–30001 | `3000=3000S` | 0.5 |
+| supplementary | 1–3001 | `3000H3000=` | 0.5 |
+
+The read is a perfect, unambiguous match to the reference it came from, yet a query-coverage
+floor of 0.90 discards it. For an assembled circular genome that is a systematic, silent loss
+localised at the origin — and it is worst for exactly the elements most often recovered as
+complete circles, small plasmids and phages.
+
+This macro answers the question that actually matters — *how much of the read does **this
+reference** explain* — and returns 1.0 for the read above.
+
+**On a read with a single alignment the two agree exactly**, so you can use this
+unconditionally rather than branching on whether a reference is circular.
+
+Note that coverage is the **union** of the fragments' footprints on the read, not their sum.
+Summing overshoots: a junction read with a couple of bases deleted across the origin produces
+fragments that overlap by a base or two, and their coverages sum to more than 1.0. The union
+is bounded by 1.0, and is unaffected by a read wrapping the reference more than once.
+
+**Parameters:**
+
+The first two are unquoted table/view names, not string literals:
+
+- `alignments`: a relation with columns `read_id`, `flags`, `reference`, `position` (BIGINT), `stop_position` (BIGINT), `cigar` (VARCHAR) — the schema produced by `read_alignments` and by the `align_*` functions. `flags` may be any integer type; it is cast internally
+- `reference_lengths`: a relation with columns `reference`, `length` (BIGINT) and `is_circular` (BOOLEAN). [`read_alignment_header`](reading.md#read_alignment_headerpath) supplies the first two; `is_circular` you add, because circularity is not recorded anywhere in an alignment and cannot be inferred from one:
+  ```sql
+  -- whole assembly is circular
+  SELECT reference, length, true AS is_circular FROM read_alignment_header('aln.bam')
+  -- mixed assembly: circular chromosome, linear contigs
+  SELECT reference, length, reference IN ('chr', 'plasmid_1') AS is_circular
+  FROM read_alignment_header('aln.bam')
+  ```
+  A reference whose `is_circular` is NULL is rejected rather than assumed circular — see below
+- `coverage_type` (VARCHAR, named argument, default `'aligned'`): what counts as covered, using the same vocabulary as [`cigar_query_coverage`](#cigar-query-coverage) and [`cigar_query_intervals`](#cigar-query-intervals) — `'aligned'` counts `M`/`=`/`X`, `'mapped'` additionally counts inserted bases. Pass it as `coverage_type := 'mapped'`. Note this knob also moves `identity` and `n_fragments`: a record covering no query positions under `'aligned'` is excluded from the read's group entirely, and `'mapped'` admits it, so its `=`/`X` counts join the pooled identity too
+
+**Output schema:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `read_id` | (inherits) | grouping key |
+| `is_read1` | BOOLEAN | the SAM read1 bit; keeps paired mates apart |
+| `reference` | (inherits) | grouping key |
+| `coverage` | DOUBLE | union of the fragments' read footprints, over the read length |
+| `identity` | DOUBLE | [`cigar_pooled_identity`](#pooled-sequence-identity) over the fragments — **see the caveat below** |
+| `query_length` | BIGINT | full read length, including hard-clipped bases |
+| `n_fragments` | BIGINT | alignment records pooled |
+| `mixed_strand` | BOOLEAN | some pair of query-adjacent fragments lie on opposite strands |
+| `max_ref_gap` | BIGINT | largest reference gap, modulo the reference length, between query-adjacent same-strand fragments. NULL when there is no such pair to measure |
+
+#### The evidence columns are reported, not enforced
+
+Two fragments of one read can reach `coverage` 1.0 and `identity` 1.0 while **not being an
+origin span at all** — an inverted repeat, a chimera, an inversion, a misassembly. Identity
+does not catch those: a chimera the aligner splits scores 1.0 on every fragment. So the macro
+returns what it observed and you set the policy:
+
+```sql
+SELECT * FROM circular_query_coverage(alignments, reference_lengths)
+WHERE coverage >= 0.90
+  AND NOT mixed_strand
+  AND COALESCE(max_ref_gap, 0) <= 100;
+```
+
+`max_ref_gap` is the distance between one fragment's reference end and the next fragment's
+reference start, taken in **read order** — modulo the reference length on a reference declared
+circular, and as a plain distance on one declared linear. On a circular reference, linearising
+the circle is the only reason the aligner could not chain those fragments itself, so a genuine
+origin span closes to 0 — or to whatever indel sits at the junction. On synthetic reads this measures
+**0–2 bases for real origin spans and 48999–55000 for split chimeras**, so any tolerance from
+roughly 50 to 1000 behaves identically. It is not a knife-edge.
+
+`mixed_strand` exists because a genuine origin-spanning read is one contiguous molecule;
+linearisation merely cuts it, so both fragments must lie on the same strand. Fragments on
+opposite strands are not a wrap and pooling them would manufacture coverage.
+
+> Testing abutment against the contig ends instead — `position = 1 AND stop_position = L+1` —
+> looks simpler and is wrong twice over. It rejects a junction read with a couple of bases
+> deleted at the origin, whose supplementary then starts at position 3 rather than 1. And it
+> degenerates on a read that wraps more than once, where every fragment starts at 1 *and* ends
+> at the contig end simultaneously.
+
+#### ⚠️ `identity` requires an extended CIGAR
+
+`identity` is **NULL** unless the aligner wrote an extended CIGAR using `=` and `X`. bowtie2,
+bwa-mem and minimap2 without `eqx` all emit legacy `M`, which records that a base aligned but
+not whether it matched — so identity is not recoverable from it, and
+[`cigar_sequence_identity`](#sequence-identity-from-cigar) returns NULL on the same input for
+the same reason. It is also NULL when the fragments **disagree** about the encoding — one in
+legacy `M`, another extended — because the `=`/`X` counts would then describe only part of the
+read.
+
+Because `NULL >= 0.99` is NULL rather than false, **adding `AND identity >= 0.99` to the gate
+above does not merely lose the identity check — it rejects every row**, silently discarding the
+origin-spanning reads this macro exists to rescue. To gate on identity, either align with
+extended CIGARs:
+
+```sql
+SELECT * FROM align_minimap2('reads', subject_table := 'refs',
+                             preset := 'map-hifi', eqx := true);
+```
+
+Re-aligning is the only route to a pooled identity for a legacy-`M` read.
+[`alignment_seq_identity`](#sequence-identity) with the NM or MD tag reconstructs what `M`
+omits, but only one record at a time, and this macro computes `identity` internally — so it
+cannot be substituted here, and the per-record figures it gives cannot be averaged into the
+read's identity (see [Pooled sequence identity](#pooled-sequence-identity) for why). Every
+other column is computable from legacy `M` CIGARs, so coverage and the topology evidence work
+regardless of aligner.
+
+**Preconditions and exclusions:**
+- **Secondary records are excluded.** They re-place query bases a sibling already covers, so
+  they cannot raise a union but would inflate `n_fragments`.
+- **Unmapped records are excluded**, as are references absent from `reference_lengths` — the
+  latter mirrors [`genome_coverage`](#genome-coverage) excluding contigs absent from its
+  mapping relation.
+- **Records with a NULL `read_id` are excluded.** `read_alignments` maps the `*` QNAME sentinel
+  to NULL, and such records cannot be grouped; pooling every unnamed record together would
+  merge unrelated molecules.
+- **`is_circular` is required per reference, and NULL is rejected.** Only the caller knows
+  which references are circular. The identical pair of same-strand fragments — one ending
+  where the contig ends, the next starting at its origin — is a wrap on a circular reference
+  and an end-join on a linear one, and adapter chimeras and assembly-graph artifacts produce
+  exactly that shape. Assuming circular would admit them as perfect origin spans, with the
+  assumption invisible at the call site. A reference recorded as both circular and linear
+  raises, like a reference with two different lengths.
+- **Linear references keep their rows.** Only the *wrap* reading of the gap depends on
+  circularity; pooling a read's records is worth doing either way, since a read split across
+  a supplementary is one molecule whatever the reference's topology. So `coverage`,
+  `identity` and the rest are computed identically, and only `max_ref_gap` changes: on a
+  linear reference it is the plain distance between the fragments, so an end-join reports the
+  whole contig rather than 0 and fails the gate.
+- **A read explained by two references produces one row per reference.** Each says how much
+  of the read that reference explains, which is the question being asked — but it means the
+  rows do not partition the read. A recruitment gate looks at one reference at a time and is
+  unaffected. **Do not sum `coverage` across references to get abundance**: a read explained
+  by three references contributes 3.0. For abundance use
+  [`woltka_ogu`](profiling.md#woltka_ogu), which distributes multi-mapped reads fractionally
+  instead of double-counting them. To reduce to one reference per read first:
+  ```sql
+  -- best reference per read, ties broken deterministically
+  SELECT * FROM circular_query_coverage(alignments, reference_lengths)
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY read_id, is_read1
+                             ORDER BY coverage DESC, identity DESC NULLS LAST, reference) = 1;
+
+  -- or keep only reads that one reference explains unambiguously
+  SELECT * FROM circular_query_coverage(alignments, reference_lengths)
+  QUALIFY COUNT(*) OVER (PARTITION BY read_id, is_read1) = 1;
+  ```
+  Both are policies, not facts, which is why the macro reports the rows and leaves the choice
+  to you.
+- **Records with a NULL `position` or `stop_position` are excluded.** They cannot be placed on
+  the reference, so they cannot take part in the contiguity test. Keeping them would be
+  actively unsafe: such a record counts toward `coverage` and `n_fragments` while its gap is
+  unmeasurable, and since `max_ref_gap` ignores unmeasurable pairs, a chimera could reach
+  coverage 1.0 with `max_ref_gap` NULL and pass `COALESCE(max_ref_gap, 0) <= 100` on a gap
+  that was never checked. Dropping the record instead lowers the read's coverage by whatever
+  it would have explained, so the read fails a coverage floor rather than slipping through.
+  Well-formed mapped records always carry both columns.
+- **Paired mates are never pooled.** R1 and R2 share a `read_id` but are different molecules,
+  so `is_read1` is part of the grouping key and appears in the output.
+- **`reference_lengths` may repeat a reference but not contradict itself.** Duplicate identical
+  rows are collapsed; two different lengths for one reference raise. This matters because
+  `read_alignment_header()` over a glob, or a `UNION ALL` of headers, yields one row per contig
+  *per file*.
+- **A missing or non-positive `length` raises.** It cannot be tolerated: modulo by NULL or zero
+  yields NULL in DuckDB, `max_ref_gap` would become NULL, and `COALESCE(max_ref_gap, 0)` would
+  then read "unmeasured" as "perfectly abutting" — turning the one column that distinguishes an
+  origin span from a chimera into a false accept.
+- **All records of one read must report the same query length.** Disagreement raises: it means
+  the relation grouped rows from more than one read under a single `read_id`.
+
+**Example:**
+```sql
+CREATE VIEW recruited AS
+  SELECT * FROM align_minimap2('sample_reads', subject_table := 'sample_assembly',
+                               preset := 'map-hifi', eqx := true);
+
+-- Circularity is a claim about the assembly, not something the alignment records, so it is
+-- stated here. Most assemblers flag circular contigs in the FASTA header or a companion
+-- table; substitute your own predicate for the name match.
+CREATE VIEW contig_lengths AS
+  SELECT read_id AS reference, length(sequence1) AS length,
+         read_id LIKE '%circular%' AS is_circular
+  FROM sample_assembly;
+
+-- Reads confidently recruited to their own sample's assembly, including those crossing
+-- the origin of a circular contig.
+SELECT read_id, reference, coverage, identity
+FROM circular_query_coverage(recruited, contig_lengths)
+WHERE coverage >= 0.90 AND identity >= 0.99
+  AND NOT mixed_strand AND COALESCE(max_ref_gap, 0) <= 100;
+```
+
+> **Calling convention.** Like [`genome_coverage`](#genome-coverage), the relation arguments are
+> resolved by name, so they must be tables or views — not inline subqueries. They also cannot
+> appear in a lateral position: a scalar subquery calling this macro from inside a query whose
+> `FROM` already names the same relation fails to bind (`query_table` accepts only literals).
+> Use a CTE or a join instead.
+
+**Performance notes:**
+- Grouping is done by DuckDB's own window and hash-aggregate operators rather than by
+  bespoke machinery, and it handles per-read grouping over large alignment sets well —
+  roughly a second per two million records on one machine. It is **not** a streaming
+  pipeline, though: ordering fragments along the read requires a window operator, which
+  materialises and sorts its input before emitting anything, so size memory for the whole
+  input rather than for a constant-space scan. Per-group state is small and bounded
+  (interval endpoints and four counters per read).
+- Reference-side questions are a different axis: for how many times a read covers a reference,
+  or per-position depth, use [`compress_intervals`](#merge-overlapping-intervals) or
+  [`compute_coverage_depth`](#coverage-depth). Query coverage is capped at 1.0 by definition and
+  says nothing about multiplicity.
+
 ### Barcode matching
 
 `match_short_barcodes(query_table, ref_table, max_nm:=N, [report_all:=true])`
@@ -740,9 +1112,9 @@ PARTITION BY read_id, reference,
 | Both mates must pass (strict) | `MIN(cigar_sequence_identity(cigar)) OVER pair >= t` |
 | At least one mate passes | `MAX(cigar_sequence_identity(cigar)) OVER pair >= t` |
 | Mean of the two mate identities (equal weight per mate) | `AVG(cigar_sequence_identity(cigar)) OVER pair >= t` |
-| Fragment-pooled identity (weighted by aligned length) | `cigar_sequence_identity(string_agg(cigar, '') OVER pair) >= t` |
+| Fragment-pooled identity (weighted by aligned length) | [`cigar_pooled_identity(cigar)`](#pooled-sequence-identity)` OVER pair >= t` |
 
-The pooled form concatenates the two CIGARs and scores them as one alignment; because `cigar_sequence_identity` is additive over CIGAR ops (`#= / (M+I+D)`), this is exactly `(matches₁+matches₂)/(cols₁+cols₂)`. It differs from `AVG` only when the two mates align over different numbers of columns (the longer mate gets more weight) — the correct behavior when read/aligned lengths are unequal.
+The pooled form sums both mates' counters and scores them once, giving exactly `(matches₁+matches₂)/(cols₁+cols₂)`. It differs from `AVG` only when the two mates align over different numbers of columns (the longer mate gets more weight) — the correct behavior when read/aligned lengths are unequal.
 
 **Example** — keep only concordant pairs whose fragment-pooled identity is ≥ 0.99:
 
@@ -755,17 +1127,14 @@ WITH aln AS (
 )
 SELECT *
 FROM aln
-QUALIFY cigar_sequence_identity(
-          string_agg(cigar, '') OVER (
-            PARTITION BY read_id, reference,
-                         LEAST(position, mate_position),
-                         GREATEST(position, mate_position))
-        ) >= 0.99;
+QUALIFY cigar_pooled_identity(cigar) OVER (
+          PARTITION BY read_id, reference,
+                       LEAST(position, mate_position),
+                       GREATEST(position, mate_position)) >= 0.99;
 ```
 
 **Gotchas:**
-- `string_agg(cigar, '')` — the empty separator is required. The default separator is a comma, which injects `,` into the concatenated CIGAR and raises `Invalid CIGAR string`.
 - Clause order: `QUALIFY` must come **after** any named `WINDOW` clause. To avoid the ordering entirely, inline the window with `OVER ( ... )` as above.
-- `string_agg` skips NULL CIGARs, so the pooled form silently degrades to a single-mate identity if one mate is unmapped — safe under `no_mixed`/`no_discordant` (both mates always mapped), but add a guard if you relax those.
+- If one mate is unmapped the pooled figure degrades to the other mate's identity, which is safe under `no_mixed`/`no_discordant` (both mates always mapped) but worth a guard if you relax those.
 - This filter is a partitioned window aggregate (roughly one pass over the data); it scales linearly and comfortably handles tens of millions of alignment rows.
 

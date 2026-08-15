@@ -691,3 +691,165 @@ TEST_CASE("ComputeCigarIdentity - Degenerate and ambiguous cases", "[alignment_f
 		REQUIRE(!miint::ComputeCigarIdentity(stats).has_value());
 	}
 }
+
+// Helper: parse then compute, so the test bodies read as CIGAR -> intervals.
+static std::vector<miint::QueryInterval> Intervals(const std::string &cigar, bool reverse, const std::string &type) {
+	return miint::ComputeQueryIntervals(miint::ParseCigarOperations(cigar), reverse, type);
+}
+
+static bool Equals(const std::vector<miint::QueryInterval> &got, const std::vector<std::pair<int64_t, int64_t>> &want) {
+	if (got.size() != want.size()) {
+		return false;
+	}
+	for (size_t i = 0; i < got.size(); i++) {
+		if (got[i].start != want[i].first || got[i].stop != want[i].second) {
+			return false;
+		}
+	}
+	return true;
+}
+
+TEST_CASE("ComputeQueryIntervals - Forward strand", "[alignment_functions]") {
+	SECTION("Unclipped alignment covers the whole read") {
+		REQUIRE(Equals(Intervals("6000=", false, "aligned"), {{0, 6000}}));
+	}
+
+	SECTION("Trailing soft clip is not covered") {
+		REQUIRE(Equals(Intervals("3000=3000S", false, "aligned"), {{0, 3000}}));
+	}
+
+	SECTION("Leading hard clip offsets the covered block") {
+		REQUIRE(Equals(Intervals("3000H3000=", false, "aligned"), {{3000, 6000}}));
+	}
+
+	SECTION("Trailing hard clip is not covered") {
+		REQUIRE(Equals(Intervals("3000=3000H", false, "aligned"), {{0, 3000}}));
+	}
+
+	SECTION("Leading soft and trailing hard clip both offset and truncate") {
+		REQUIRE(Equals(Intervals("10S30=5H", false, "aligned"), {{10, 40}}));
+	}
+
+	SECTION("Legacy M counts as aligned") {
+		REQUIRE(Equals(Intervals("50M", false, "aligned"), {{0, 50}}));
+	}
+
+	SECTION("Mismatches are covered") {
+		REQUIRE(Equals(Intervals("10=2X10=", false, "aligned"), {{0, 22}}));
+	}
+}
+
+TEST_CASE("ComputeQueryIntervals - Operations that consume no query merge runs", "[alignment_functions]") {
+	SECTION("Deletion leaves the query contiguous") {
+		REQUIRE(Equals(Intervals("100=10D100=", false, "aligned"), {{0, 200}}));
+	}
+
+	SECTION("Reference skip leaves the query contiguous") {
+		REQUIRE(Equals(Intervals("100=10N100=", false, "aligned"), {{0, 200}}));
+	}
+
+	SECTION("Padding leaves the query contiguous") {
+		REQUIRE(Equals(Intervals("100=10P100=", false, "aligned"), {{0, 200}}));
+	}
+}
+
+TEST_CASE("ComputeQueryIntervals - Insertions distinguish aligned from mapped", "[alignment_functions]") {
+	SECTION("aligned: inserted bases are a gap in coverage") {
+		REQUIRE(Equals(Intervals("100=10I100=", false, "aligned"), {{0, 100}, {110, 210}}));
+	}
+
+	SECTION("mapped: inserted bases are covered, so the block is contiguous") {
+		REQUIRE(Equals(Intervals("100=10I100=", false, "mapped"), {{0, 210}}));
+	}
+}
+
+TEST_CASE("ComputeQueryIntervals - Reverse strand mirrors onto the read axis", "[alignment_functions]") {
+	// The CIGAR is written in reference orientation, so the leading clip is at the
+	// read's 3' end. Without the mirror, intervals from a reverse fragment would be
+	// placed on the wrong half of the read and could not be pooled with its mates.
+	SECTION("Leading soft clip in reference orientation is trailing on the read") {
+		REQUIRE(Equals(Intervals("3000S3000=", true, "aligned"), {{0, 3000}}));
+	}
+
+	SECTION("Trailing hard clip in reference orientation is leading on the read") {
+		REQUIRE(Equals(Intervals("3000=3000H", true, "aligned"), {{3000, 6000}}));
+	}
+
+	SECTION("Multiple intervals stay ascending and non-overlapping after mirroring") {
+		// Reference orientation: [0,100) and [110,160) of a 160 bp read.
+		// Mirrored: [60,160) and [0,50).
+		REQUIRE(Equals(Intervals("100=10I50=", true, "aligned"), {{0, 50}, {60, 160}}));
+	}
+
+	SECTION("An unclipped alignment is unchanged by mirroring") {
+		REQUIRE(Equals(Intervals("6000=", true, "aligned"), {{0, 6000}}));
+	}
+}
+
+TEST_CASE("ComputeQueryIntervals - Degenerate input", "[alignment_functions]") {
+	SECTION("Unmapped CIGAR covers nothing") {
+		REQUIRE(Intervals("*", false, "aligned").empty());
+	}
+
+	SECTION("Empty CIGAR covers nothing") {
+		REQUIRE(Intervals("", false, "aligned").empty());
+	}
+
+	SECTION("Clip-only CIGAR covers nothing") {
+		REQUIRE(Intervals("100S", false, "aligned").empty());
+		REQUIRE(Intervals("100H", false, "aligned").empty());
+	}
+
+	SECTION("Pure insertion covers nothing under aligned but everything under mapped") {
+		REQUIRE(Intervals("10I", false, "aligned").empty());
+		REQUIRE(Equals(Intervals("10I", false, "mapped"), {{0, 10}}));
+	}
+
+	SECTION("Unrecognised type is rejected") {
+		REQUIRE_THROWS_AS(Intervals("10=", false, "covered"), miint::InvalidInputException);
+	}
+
+	SECTION("Invalid CIGAR is rejected") {
+		REQUIRE_THROWS_AS(Intervals("10Z", false, "aligned"), miint::InvalidInputException);
+	}
+}
+
+TEST_CASE("ComputeQueryIntervals - Agrees with ComputeQueryCoverage on one fragment", "[alignment_functions]") {
+	// The reason a caller can adopt the pooled coverage unconditionally: on a group of
+	// one fragment the union of these intervals, over the full query length, is exactly
+	// what cigar_query_coverage already reports. If this drifts, the two functions
+	// disagree on non-wrapping reads and the whole design premise is broken.
+	const std::vector<std::string> cigars = {"6000=",       "3000=3000S",  "3000H3000=", "10S30=5H",
+	                                         "100=10I100=", "100=10D100=", "50M",        "10=2X10="};
+	for (const auto &type : {std::string("aligned"), std::string("mapped")}) {
+		for (const auto &cigar : cigars) {
+			auto stats = miint::ParseCigar(cigar);
+			auto query_length = miint::ComputeQueryLength(stats, /*include_hard_clips=*/true);
+			int64_t covered = 0;
+			for (const auto &iv : Intervals(cigar, false, type)) {
+				covered += iv.stop - iv.start;
+			}
+			auto from_intervals = static_cast<double>(covered) / static_cast<double>(query_length);
+			REQUIRE_THAT(from_intervals, Catch::Matchers::WithinAbs(miint::ComputeQueryCoverage(stats, type), 1e-12));
+		}
+	}
+}
+
+TEST_CASE("ComputeQueryIntervals - Origin-spanning fragments tile the read exactly once", "[alignment_functions]") {
+	// The case from the issue: a 6 kb read across the origin of a 30 kb circular contig.
+	// Neither fragment covers more than half, but together they must tile the read with
+	// no overlap -- which is what makes the union, rather than the sum, the right
+	// operator.
+	auto primary = Intervals("3000=3000S", false, "aligned");
+	auto supplementary = Intervals("3000H3000=", false, "aligned");
+	REQUIRE(Equals(primary, {{0, 3000}}));
+	REQUIRE(Equals(supplementary, {{3000, 6000}}));
+	REQUIRE((primary[0].stop == supplementary[0].start));
+
+	// Same read sequenced in the other orientation: both fragments carry FLAG 0x10 and
+	// must still tile the read.
+	auto rev_primary = Intervals("3000S3000=", true, "aligned");
+	auto rev_supplementary = Intervals("3000=3000H", true, "aligned");
+	REQUIRE(Equals(rev_primary, {{0, 3000}}));
+	REQUIRE(Equals(rev_supplementary, {{3000, 6000}}));
+}

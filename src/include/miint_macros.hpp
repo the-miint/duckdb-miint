@@ -760,6 +760,275 @@ const std::string GENOME_COVERAGE = // NOLINT
     "JOIN query_table(subject_total_length) tl "
     "  USING (genome_id);";
 
+// circular_query_coverage(alignments, reference_lengths)
+//
+// How much of each read is explained by each reference, pooling every alignment record
+// the aligner split the read into.
+//
+// cigar_query_coverage answers a per-row question -- "how much of the read does THIS
+// record explain" -- and cannot see sibling records. A read that spans the origin of a
+// circular reference held as a linearised contig is emitted as two or more records, so
+// no single row reports more than about half the read and a query-coverage floor
+// discards it silently. That is a systematic loss localised at the origin of every
+// assembled circular genome and plasmid.
+//
+// Coverage here is the UNION of the fragments' query footprints, not their sum. Summing
+// overshoots: a junction read with a couple of bases deleted across the origin produces
+// fragments that overlap by a base or two. The union is bounded by 1.0 for free, is
+// unaffected by a read wrapping the reference more than once, and on a group of one
+// fragment equals cigar_query_coverage exactly -- so a caller can use this
+// unconditionally rather than branching on whether a reference is circular.
+//
+// Grouping is (read_id, read1 bit, reference). The read1 bit is load-bearing: R1 and R2
+// share a read_id but are different molecules, and pooling them would manufacture
+// coverage. Same reason woltka_ogu partitions on alignment_is_read1.
+//
+// Secondary records are excluded -- they re-place query bases a sibling already covers,
+// so they cannot raise a union but would inflate n_fragments. Unmapped records and
+// references absent from reference_lengths produce no rows.
+//
+// A read explained by two references yields one row per reference, each reporting how much
+// of the read that reference explains. That is the question being answered, but it means the
+// rows do not partition the read: summing coverage across references counts it more than
+// once. Recruitment gates one reference at a time and is unaffected; abundance is not, and
+// wants woltka_ogu, which distributes multi-mapped reads fractionally.
+//
+// Parameters:
+// alignments : a relation with columns: read_id, flags, reference, position (BIGINT),
+//     stop_position (BIGINT), cigar (VARCHAR)
+// reference_lengths : a relation with columns: reference, length (BIGINT),
+//     is_circular (BOOLEAN). read_alignment_header() supplies the first two; is_circular
+//     has to be added, because circularity is not recorded in an alignment and cannot be
+//     inferred from one. A reference left NULL is rejected rather than assumed circular.
+// coverage_type : 'aligned' (default) counts M/=/X; 'mapped' also counts insertions.
+//     Same vocabulary as cigar_query_coverage and cigar_query_intervals, so a pipeline
+//     already filtering on cigar_query_coverage(cigar, 'mapped') can migrate unchanged.
+//
+// Returns: read_id, is_read1 (BOOLEAN), reference, coverage (DOUBLE), identity (DOUBLE),
+//     query_length (BIGINT), n_fragments (BIGINT), mixed_strand (BOOLEAN),
+//     max_ref_gap (BIGINT)
+//
+// mixed_strand and max_ref_gap are topology evidence, REPORTED not enforced: two fragments
+// of one read can reach coverage 1.0 and identity 1.0 while not being an origin span at all
+// (inverted repeat, chimera, inversion, misassembly), and identity does not catch those --
+// a chimera the aligner splits scores 1.0 on every fragment. max_ref_gap is the reference
+// gap modulo the reference length between query-adjacent same-strand fragments; a genuine
+// wrap closes to 0, because linearising a circle is the only reason the aligner could not
+// chain the fragments itself. Testing abutment against the contig ends instead would be
+// wrong twice over -- see the docs.
+//
+// identity is NULL for legacy M CIGARs. That is a trap worth knowing before gating on it;
+// the consequence is spelled out at the identity expression below and in the docs.
+//
+// The user-facing reference -- worked examples, the recommended gate, the measured gap
+// separation, and the full list of preconditions -- lives in
+// docs/alignment_analysis.md#circular-query-coverage. Keep behavioural changes in step with
+// it; the comments from here down explain the implementation, not the contract.
+const std::string CIRCULAR_QUERY_COVERAGE = // NOLINT
+    "CREATE OR REPLACE MACRO circular_query_coverage(alignments, reference_lengths, "
+    "                                                coverage_type := 'aligned') AS TABLE "
+    // One row per reference, validated. Collapsing first matters because the documented
+    // way to build this relation -- read_alignment_header() over a glob, or a UNION ALL of
+    // headers -- yields one row per contig PER FILE. Joining those duplicates would double
+    // n_fragments and fabricate a nonzero max_ref_gap for an ordinary non-wrapping read,
+    // dropping it from the very gate below. A length that is missing or non-positive is
+    // rejected rather than tolerated: `x % 0` and `x % NULL` are both NULL in DuckDB, which
+    // would silently make max_ref_gap NULL, and COALESCE(max_ref_gap, 0) then reads
+    // "unmeasured" as "perfectly abutting" -- turning the one column that distinguishes an
+    // origin span from a chimera into a false accept.
+    "WITH ref_len AS ( "
+    "    SELECT "
+    "        reference, "
+    "        CASE WHEN MIN(length) <> MAX(length) "
+    "             THEN error('circular_query_coverage: reference ' || reference::VARCHAR "
+    "                        || ' has more than one recorded length in reference_lengths') "
+    "             WHEN MAX(length) IS NULL OR MAX(length) <= 0 "
+    "             THEN error('circular_query_coverage: reference ' || reference::VARCHAR "
+    "                        || ' has a missing or non-positive length; a reference length is ' "
+    "                        || 'required to recognise wrapping') "
+    "             ELSE MAX(length) END AS ref_length, "
+    // Circularity is the premise the whole gap measure rests on and it cannot be inferred
+    // from an alignment: the same two fragments, one ending where the contig ends and the
+    // next starting at its origin, are a wrap on a circular reference and an end-join on a
+    // linear one. Assuming circular is what makes an adapter chimera or an assembly-graph
+    // artifact look like a perfect origin span, and the assumption would be invisible at the
+    // call site, so an undeclared reference is rejected rather than guessed at.
+    // BOOL_OR <> BOOL_AND is "both values occur", the same idiom mixed_strand uses; both
+    // ignore NULLs, so an all-NULL group falls through to the second branch.
+    "        CASE WHEN BOOL_OR(is_circular) <> BOOL_AND(is_circular) "
+    "             THEN error('circular_query_coverage: reference ' || reference::VARCHAR "
+    "                        || ' is recorded as both circular and linear in reference_lengths') "
+    "             WHEN BOOL_AND(is_circular) IS NULL "
+    "             THEN error('circular_query_coverage: reference ' || reference::VARCHAR "
+    "                        || ' does not say whether it is circular; set is_circular in ' "
+    "                        || 'reference_lengths, because a reference gap that wraps is only ' "
+    "                        || 'evidence of an origin span if the reference actually is circular') "
+    "             ELSE BOOL_AND(is_circular) END AS is_circular "
+    "    FROM query_table(reference_lengths) "
+    "    WHERE reference IS NOT NULL "
+    "    GROUP BY reference "
+    "), "
+    "frag AS ( "
+    "    SELECT "
+    "        a.read_id AS read_id, "
+    "        a.reference AS reference, "
+    "        r.ref_length AS ref_length, "
+    "        r.is_circular AS is_circular, "
+    // flags is cast because alignment relations that have been through Parquet widen it
+    // to BIGINT, and every alignment_is_* function is USMALLINT-only.
+    "        alignment_is_read1(a.flags::USMALLINT) AS is_read1, "
+    "        alignment_is_reverse(a.flags::USMALLINT) AS is_reverse, "
+    // Carried as-is: every consumer takes a difference of these two, and the window below
+    // only orders by them, so converting to 0-based would cancel out.
+    "        a.position AS ref_start, "
+    "        a.stop_position AS ref_stop, "
+    "        a.cigar AS cigar, "
+    "        cigar_query_length(a.cigar, true) AS query_length, "
+    "        cigar_query_intervals(a.cigar, a.flags::USMALLINT, coverage_type) AS intervals "
+    "    FROM query_table(alignments) a "
+    "    JOIN ref_len r "
+    "      ON a.reference = r.reference "
+    "    WHERE NOT alignment_is_unmapped(a.flags::USMALLINT) "
+    "      AND NOT alignment_is_secondary(a.flags::USMALLINT) "
+    // A record whose read_id is NULL cannot be grouped: read_alignments maps the '*' QNAME
+    // sentinel to NULL, and pooling every unnamed record together would merge unrelated
+    // molecules. Excluded explicitly so it is a stated rule rather than an accident of
+    // NULL never matching in the final equi-join.
+    "      AND a.read_id IS NOT NULL "
+    // A record with no reference coordinates cannot be placed, so it cannot take part in the
+    // reference-contiguity test. Leaving it in is worse than dropping it: it would count
+    // toward n_fragments and coverage while its gap came back NULL, and MAX() ignores NULLs,
+    // so a chimera whose fragments sit 148 kb apart would report max_ref_gap NULL and the gate
+    // documented above -- COALESCE(max_ref_gap, 0) <= 100 -- would read "unmeasured" as
+    // "perfectly abutting" and admit it. That is the same false accept the ref_len validation
+    // prevents, arriving from the alignments side. Dropping the record instead surfaces the
+    // problem where a caller will see it: the read's coverage falls by whatever that record
+    // would have explained, so it fails a coverage floor rather than passing a gap check it
+    // was never measured against. Well-formed mapped records always carry both columns, so
+    // this fires only on malformed input.
+    "      AND a.position IS NOT NULL "
+    "      AND a.stop_position IS NOT NULL "
+    "), "
+    // A mapped record that covers no query positions (a clip-only CIGAR) would
+    // contribute to n_fragments while contributing nothing to the union.
+    "covering AS ( "
+    "    SELECT * FROM frag WHERE len(intervals) > 0 "
+    "), "
+    // Fragment granularity. Ordered by where each fragment starts on the READ, which is
+    // not record order -- the aligner is free to make any fragment the primary. On a
+    // reverse-strand fragment travel along the read runs backwards along the reference,
+    // so the successor's reference END is what the current fragment's START must meet.
+    // A strand change is not a gap to measure but a different event entirely, so it
+    // yields NULL here and is reported through mixed_strand instead.
+    "chain AS ( "
+    "    SELECT "
+    "        read_id, is_read1, reference, query_length, is_reverse, "
+    "        CASE WHEN LEAD(is_reverse) OVER w <> is_reverse THEN NULL "
+    "             WHEN is_reverse THEN ref_start - LEAD(ref_stop) OVER w "
+    "             ELSE LEAD(ref_start) OVER w - ref_stop END AS ref_delta, "
+    // On a circular reference, reduce the signed delta into [0, ref_length) and take its
+    // distance to zero, which is the absolute signed representative without forming it. A
+    // delta of -ref_length -- one fragment ending where the contig ends and the next starting
+    // at its origin -- lands on 0, which is what makes wrapping indistinguishable from
+    // contiguity. On a linear reference that identification is exactly what must not happen,
+    // so the plain distance is reported and an end-join shows up as the whole contig.
+    "        (ref_delta % ref_length + ref_length) % ref_length AS delta_mod, "
+    "        CASE WHEN is_circular THEN LEAST(delta_mod, ref_length - delta_mod) "
+    "             ELSE abs(ref_delta) END AS ref_gap "
+    "    FROM covering "
+    // ref_start/ref_stop/is_reverse are tie-breakers, not decoration: two same-strand
+    // fragments of one read can begin at the same query offset (a tandem-repeat
+    // supplementary, or a duplicated record from merged BAMs). Ordering on the query start
+    // alone leaves LEAD to pick an arbitrary peer, so max_ref_gap would vary with physical
+    // scan order and the gate below would admit or reject the same read depending on it.
+    "    WINDOW w AS (PARTITION BY read_id, is_read1, reference "
+    "                 ORDER BY intervals[1].start, ref_start, ref_stop, is_reverse) "
+    "), "
+    // Union of the fragments' read-axis footprints, via the same compress_intervals
+    // aggregate genome_coverage uses on the reference axis -- one definition of "union of
+    // half-open intervals" for the whole extension, rather than a second one in SQL that
+    // could drift from IntervalCompressor. A hand-rolled window sweep was tried here to
+    // avoid per-group aggregate state; benchmarked at 500k and 2M read groups the
+    // aggregate is equal or faster (0.224s vs 0.277s at 2M) with identical results, so the
+    // second implementation bought nothing.
+    "covered AS ( "
+    "    SELECT read_id, is_read1, reference, SUM(ci.stop - ci.start) AS covered_bases "
+    "    FROM ( "
+    "        SELECT read_id, is_read1, reference, "
+    "               UNNEST(compress_intervals(x.start, x.stop)) AS ci "
+    "        FROM (SELECT read_id, is_read1, reference, UNNEST(intervals) AS x FROM covering) "
+    "        GROUP BY read_id, is_read1, reference "
+    "    ) "
+    "    GROUP BY read_id, is_read1, reference "
+    "), "
+    // Identity is aggregated straight off `covering` rather than alongside the other evidence
+    // columns, which read from `chain`. Everything selected in `chain` travels through the
+    // window operator's sort payload -- it does not project down to the columns the window
+    // functions actually use -- so leaving the CIGAR there copies every record's string
+    // through the sort and back for the sake of an aggregate that needs no ordering at all.
+    // Measured over 2M records in 1M read groups, hoisting it cuts this section from 0.37s to
+    // 0.13s wall and drops the sort's system time by an order of magnitude. It cannot ride
+    // along in `covered` either: that CTE unnests intervals, so a fragment contributing two
+    // intervals would have its CIGAR counted twice.
+    "pooled_identity AS ( "
+    "    SELECT read_id, is_read1, reference, "
+    // sum(=) / sum(alignment columns) over the fragments, which on a single fragment is
+    // exactly cigar_sequence_identity of that fragment. Note it does NOT charge the junction
+    // as a gap -- the fragments are one molecule, and the reference discontinuity between
+    // them is what max_ref_gap is for.
+    //
+    // NULL for legacy M CIGARs, where identity is not recoverable from the CIGAR at all,
+    // matching cigar_sequence_identity's own behaviour on the same input, and NULL when the
+    // fragments disagree about the encoding. Raising instead was tried and rejected: making
+    // the raise conditional on the column being selected depends on projection pruning, and
+    // pruning is an optimisation -- with the optimiser disabled the expression is evaluated
+    // and the error fires even for a query that only asked for coverage. Semantics must not
+    // vary with the optimiser, so this stays NULL and the precondition is documented in the
+    // header comment instead.
+    "           cigar_pooled_identity(cigar) AS identity "
+    "    FROM covering "
+    "    GROUP BY read_id, is_read1, reference "
+    "), "
+    "evidence AS ( "
+    "    SELECT "
+    "        read_id, is_read1, reference, "
+    // Every record of one read reports the same full query length, because clipping is
+    // what the aligner uses to account for the bases a fragment does not align.
+    // Disagreement means the relation grouped rows from more than one read under a
+    // single read_id, which is a caller error rather than a coverage figure to guess at.
+    // MIN <> MAX rather than COUNT(DISTINCT ...): a distinct aggregate builds a second
+    // hash table keyed on (group, value) over every row, which over millions of read-level
+    // groups measured ~30% of the whole macro's CPU. Both ignore NULLs, so "more than one
+    // distinct non-null value" is exactly MIN <> MAX, and an all-NULL group falls through
+    // to MAX (NULL) either way.
+    "        CASE WHEN MIN(query_length) <> MAX(query_length) "
+    "             THEN error('circular_query_coverage: fragments under read_id ' "
+    "                        || read_id::VARCHAR || ' report different query lengths; the ' "
+    "                        || 'alignments relation groups rows from more than one read') "
+    "             ELSE MAX(query_length) END AS query_length, "
+    "        COUNT(*) AS n_fragments, "
+    // "some query-adjacent pair differs in strand" is just "both strand values occur in the
+    // group" -- a transition has to happen somewhere -- so this needs no ordering and no
+    // window at all.
+    "        BOOL_OR(is_reverse) <> BOOL_AND(is_reverse) AS mixed_strand, "
+    "        MAX(ref_gap) AS max_ref_gap "
+    "    FROM chain "
+    "    GROUP BY read_id, is_read1, reference "
+    ") "
+    "SELECT "
+    "    e.read_id, "
+    "    e.is_read1, "
+    "    e.reference, "
+    "    c.covered_bases::DOUBLE / e.query_length AS coverage, "
+    "    p.identity, "
+    "    e.query_length, "
+    "    e.n_fragments, "
+    "    e.mixed_strand, "
+    "    e.max_ref_gap "
+    "FROM evidence e "
+    "JOIN covered c USING (read_id, is_read1, reference) "
+    "JOIN pooled_identity p USING (read_id, is_read1, reference);";
+
 // infer_trim(original_reads, qcd_reads)
 //
 // Recover per-read 5'/3' trim coordinates from reads that were quality-
@@ -1077,6 +1346,7 @@ public:
 		register_macro(PARSE_GFF_ATTRIBUTES, "parse_gff_attributes");
 		register_macro(READ_GFF, "read_gff");
 		register_macro(GENOME_COVERAGE, "genome_coverage");
+		register_macro(CIRCULAR_QUERY_COVERAGE, "circular_query_coverage");
 		register_macro(INFER_TRIM, "infer_trim");
 
 		register_macro(READ_JPLACE, "read_jplace");
