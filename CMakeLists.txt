@@ -61,6 +61,30 @@ if(NOT TARGET Eigen3::Eigen)
 endif()
 add_compile_definitions(EIGEN_MPL2_ONLY)
 
+# The extension links OpenMP (libssu is built with -fopenmp), so `_OPENMP` is
+# defined for miint's own sources too, and Eigen/Core:65 would then enable its
+# parallel GEMM path. mmvec's objective contains matrix products whose reduction
+# runs over a long dimension (d1 = 2720 at cystic-fibrosis scale), so a
+# thread-count-dependent blocking would make a seeded fit non-reproducible --
+# which is exactly the guarantee mmvec's own RNG transforms exist to provide.
+#
+# Measured at cystic-fibrosis scale, seed 0, 500 iterations: with this define
+# removed, the same fit returns a DIFFERENT model as soon as OMP_NUM_THREADS > 1
+# -- final loss 1709324046711880.2 against 1709329920514833.8, and the parameter
+# checksum moving by 0.6%. A user-visible reproducibility break controlled by an
+# environment variable. Keeping the define costs 3-5% of the fit's wall clock
+# (median 4.82 s against 4.66 s, interleaved A/B over five pairs, the parallel
+# build given 8 threads), which is the right trade for a seeded fit.
+#
+# Set globally rather than per-source: Eigen's macros affect templates
+# instantiated in whichever translation unit includes the headers, so a per-file
+# define would leave two differently-configured instantiations of the same
+# symbols for the linker to choose between. Nothing here loses anything measurable
+# -- the only other Eigen user is NewickTree.cpp's k x k rate matrices (k = the
+# character-state count, so single digits), orders of magnitude below the size at
+# which Eigen would consider threading a product at all.
+add_compile_definitions(EIGEN_DONT_PARALLELIZE)
+
 # libcurl powers the streaming HTTPS-PUT / FTP / FTPS transport in
 # `ena_upload_reads`. Disabled on Apple because vcpkg's libcurl pulls in
 # OpenSSL's libcrypto, which exports `MD5_*` / `SHA1_*` symbols that
@@ -69,20 +93,33 @@ add_compile_definitions(EIGEN_MPL2_ONLY)
 # Since vsearch is first-class on macOS and not all users need the
 # streaming transport (Aspera + file:// still work), we drop libcurl on
 # Apple rather than drop vsearch.
+#
+# Disabled under Emscripten for a different reason: there is no network stack to
+# stream to, and a loadable extension is a wasm SIDE MODULE, so every undefined
+# symbol silently becomes an import. Building with libcurl therefore produced an
+# extension carrying unresolved `env.curl_*` imports that duckdb-wasm cannot
+# supply -- and those trap only when CALLED, as "null function or function
+# signature mismatch" / "table index is out of bounds", not at load time. That is
+# what made `miint_versions()` fail in wasm for so long: its bind reads
+# `GetCurlVersion()`, so a version query was the first thing to touch libcurl.
+# Every other libcurl path (`ena_upload_reads`, the ENA surface) had the same
+# latent fault. Measured by scanning the built .wasm import section: `curl_version`
+# was present as an import, while statically-linked `zlibVersion` was not.
+#
+# This supersedes a narrower wasm_threads-only disable that used to sit below,
+# whose reason still holds and is worth keeping on record: vcpkg's libcurl port
+# for wasm32-emscripten is not built with -pthread, so its objects lack
+# atomics/bulk-memory and wasm-ld rejects them against wasm_threads'
+# --shared-memory. wasm_eh / wasm_mvp linked fine, which is exactly why the
+# unresolved-import fault reached them and not wasm_threads.
 option(MIINT_ENABLE_CURL "Build with libcurl streaming-upload support" ON)
 if(APPLE)
     set(MIINT_ENABLE_CURL OFF)
     message(STATUS "Apple detected: disabling libcurl streaming transport (vsearch+OpenSSL symbol clash)")
-endif()
-# vcpkg's libcurl port for wasm32-emscripten is not built with -pthread,
-# so its object files lack atomics/bulk-memory features. wasm_threads links
-# with --shared-memory which requires those features, so wasm-ld rejects the
-# port. wasm_eh / wasm_mvp don't use shared memory and link fine. Rebuilding
-# vcpkg libcurl with pthread is a port-level change; cheaper to drop the
-# streaming transport on wasm_threads (file:// + Aspera paths still work).
-if(EMSCRIPTEN AND (CMAKE_CXX_FLAGS MATCHES "-pthread" OR DUCKDB_EXPLICIT_PLATFORM STREQUAL "wasm_threads"))
+elseif(EMSCRIPTEN)
     set(MIINT_ENABLE_CURL OFF)
-    message(STATUS "Emscripten wasm_threads detected: disabling libcurl (vcpkg port not built with -pthread)")
+    message(STATUS "Emscripten detected: disabling libcurl streaming transport (no network stack; "
+                   "unresolved side-module imports trap at call time)")
 endif()
 if(MIINT_ENABLE_CURL)
     # Try VCPKG-style CONFIG package first (production builds), fall back
@@ -1371,16 +1408,22 @@ set(EXTENSION_SOURCES
     src/cluster_kmeans.cpp
     src/cluster_upgma.cpp
     src/pick_anchors.cpp
+    src/mmvec.cpp
+    src/mmvec_relation.cpp
     # Generic (UniFrac-independent) table readers, and the beta-diversity /
     # ordination wrappers that use them. Always compiled: nothing here links
     # libssu or libskbb.
     src/unifrac_function_common.cpp
     src/community_distances_function.cpp
+    src/mmvec_fit_function.cpp
+    src/mmvec_derived_functions.cpp
     src/cluster_kmeans_function.cpp
     src/cluster_upgma_function.cpp
     src/pick_anchors_function.cpp
     src/per_sample_table_function.cpp
     src/id_column_codec.cpp
+    src/miint_isa.cpp
+    src/miint_parallel.cpp
     src/extract_linked_amplicon.cpp
     src/match_short_barcodes.cpp
     src/compute_pileup.cpp
@@ -1389,6 +1432,119 @@ set(EXTENSION_SOURCES
     src/MsaConsensus.cpp
     src/procrustes_core.cpp
     src/procrustes_function.cpp)
+
+# ---------------------------------------------------------------------------
+# Runtime instruction-set dispatch
+# ---------------------------------------------------------------------------
+#
+# Eigen picks its packet width at COMPILE time from __AVX__ / __AVX512F__ and does
+# not runtime-dispatch; __attribute__((target)) does not help, because under it
+# those macros are undefined at preprocessing time and Eigen still emits SSE2.
+# Reaching a wider instruction set therefore means compiling a source AGAIN with
+# different flags and choosing between the results at load time.
+#
+# This is the arrangement htslib's htscodecs already uses, and the shipped CI
+# artifact proves it survives the distribution pipeline unchanged -- the published
+# linux_amd64 binary carries rans_*_avx2 / rans_*_avx512, abPOA's AVX-512 aligner
+# and OpenSSL's AVX-512 AES. Nothing here needs a CI or distribution change: the
+# extra objects live inside the one artifact we already publish, which matters
+# because DuckDB's platform string has no CPU-feature component and so cannot
+# select a per-ISA download.
+#
+# Probe rather than assume, mirroring htslib's hts_probe_cc.sh: an old toolchain
+# degrades to fewer variants instead of failing the build. x86-64 only -- arm64
+# and wasm vectorize unconditionally, so there is nothing to choose between.
+include(CheckCXXSourceCompiles)
+set(MIINT_ISA_AVX2_FLAGS -mavx2 -mfma)
+set(MIINT_ISA_AVX512_FLAGS -mavx512f -mavx512dq -mavx512vl -mavx512bw -mfma)
+set(MIINT_HAS_AVX2 OFF)
+set(MIINT_HAS_AVX512 OFF)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64" AND NOT EMSCRIPTEN)
+    # Compile a real intrinsic, not just the flag: a compiler can accept -mavx512f
+    # and still lack the headers we would need.
+    #
+    # CMAKE_REQUIRED_FLAGS is a space-separated STRING, not a list -- assigning the
+    # list directly hands the compiler "-mavx2;-mfma" and every probe fails.
+    string(JOIN " " MIINT_ISA_AVX2_FLAGSTR ${MIINT_ISA_AVX2_FLAGS})
+    string(JOIN " " MIINT_ISA_AVX512_FLAGSTR ${MIINT_ISA_AVX512_FLAGS})
+    set(CMAKE_REQUIRED_FLAGS ${MIINT_ISA_AVX2_FLAGSTR})
+    check_cxx_source_compiles(
+        "#include <immintrin.h>
+         int main() { __m256d a = _mm256_set1_pd(1.0); a = _mm256_fmadd_pd(a, a, a); return (int)a[0]; }"
+        MIINT_PROBE_AVX2
+    )
+    set(CMAKE_REQUIRED_FLAGS ${MIINT_ISA_AVX512_FLAGSTR})
+    check_cxx_source_compiles(
+        "#include <immintrin.h>
+         int main() { __m512d a = _mm512_set1_pd(1.0); a = _mm512_fmadd_pd(a, a, a); return (int)_mm512_cvtsd_f64(a); }"
+        MIINT_PROBE_AVX512
+    )
+    unset(CMAKE_REQUIRED_FLAGS)
+    set(MIINT_HAS_AVX2 ${MIINT_PROBE_AVX2})
+    # AVX-512 without AVX2 is not a configuration we build for; the dispatch tiers
+    # are ordered and DetectIsa() clamps through Avx2 on its way down.
+    if(MIINT_PROBE_AVX512 AND MIINT_PROBE_AVX2)
+        set(MIINT_HAS_AVX512 ON)
+    endif()
+endif()
+message(STATUS "miint ISA variants: avx2=${MIINT_HAS_AVX2} avx512=${MIINT_HAS_AVX512}")
+
+# Compile `sources` once per available instruction set, each into its own OBJECT
+# library and its own C++ namespace (via -DMIINT_ISA_VARIANT), and register the
+# lot on a global property the three consuming targets drain.
+#
+# Deliberately generic: mmvec is its first caller, not its intended only one. Any
+# future dense kernel gets its variants with one call rather than a copy of this
+# apparatus. Keep it OPT-IN per kernel -- each variant multiplies compile time and
+# binary size for the sources it covers, which is negligible for one kernel and
+# would not be if applied wholesale.
+#
+# OBJECT rather than static libraries, matching miint_nanoarrow_ipc: consumers take
+# the object files directly, avoiding archives that would then have to join
+# DuckDB's install export set. EIGEN_MPL2_ONLY and EIGEN_DONT_PARALLELIZE reach
+# them through add_compile_definitions above.
+function(miint_add_isa_variants basename)
+    set(variants baseline)
+    if(MIINT_HAS_AVX2)
+        list(APPEND variants avx2)
+    endif()
+    if(MIINT_HAS_AVX512)
+        list(APPEND variants avx512)
+    endif()
+    foreach(variant ${variants})
+        set(target miint_${basename}_${variant})
+        add_library(${target} OBJECT ${ARGN})
+        target_include_directories(${target} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/include)
+        target_link_libraries(${target} PUBLIC Eigen3::Eigen)
+        set_target_properties(${target} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        target_compile_definitions(${target} PRIVATE MIINT_ISA_VARIANT=${variant})
+        # The baseline variant takes NO extra flags -- it must stay bit-identical to
+        # what the build produced before dispatch existed, because it is what the
+        # carved expected values are carved against.
+        if(NOT variant STREQUAL baseline)
+            string(TOUPPER ${variant} variant_upper)
+            target_compile_options(${target} PRIVATE ${MIINT_ISA_${variant_upper}_FLAGS})
+        endif()
+        set_property(GLOBAL APPEND PROPERTY MIINT_ISA_OBJECT_TARGETS ${target})
+    endforeach()
+endfunction()
+
+miint_add_isa_variants(mmvec_kernel src/mmvec_kernel.cpp)
+
+# Every target that consumes the variants also needs to know which exist, so the
+# dispatcher's #ifdefs and the declarations in mmvec_kernel.hpp agree with reality.
+set(MIINT_ISA_DEFINITIONS "")
+if(MIINT_HAS_AVX2)
+    list(APPEND MIINT_ISA_DEFINITIONS MIINT_HAS_AVX2)
+endif()
+if(MIINT_HAS_AVX512)
+    list(APPEND MIINT_ISA_DEFINITIONS MIINT_HAS_AVX512)
+endif()
+get_property(MIINT_ISA_OBJECT_TARGETS GLOBAL PROPERTY MIINT_ISA_OBJECT_TARGETS)
+set(MIINT_ISA_OBJECTS "")
+foreach(t ${MIINT_ISA_OBJECT_TARGETS})
+    list(APPEND MIINT_ISA_OBJECTS $<TARGET_OBJECTS:${t}>)
+endforeach()
 
 if(MIINT_ENABLE_VSEARCH)
     list(APPEND EXTENSION_SOURCES
@@ -1549,6 +1705,8 @@ target_link_libraries(${EXTENSION_NAME}
                       expat::expat
                       Eigen3::Eigen
 )
+target_sources(${EXTENSION_NAME} PRIVATE ${MIINT_ISA_OBJECTS})
+target_compile_definitions(${EXTENSION_NAME} PRIVATE ${MIINT_ISA_DEFINITIONS})
 if(MIINT_ENABLE_MAFFT)
     target_link_libraries(${EXTENSION_NAME} mafft_parttree)
 endif()
@@ -1688,6 +1846,8 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
                       expat::expat
                       Eigen3::Eigen
 )
+target_sources(${LOADABLE_EXTENSION_NAME} PRIVATE ${MIINT_ISA_OBJECTS})
+target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE ${MIINT_ISA_DEFINITIONS})
 if(MIINT_ENABLE_MAFFT)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} mafft_parttree)
 endif()
@@ -1791,6 +1951,13 @@ set(TEST_SOURCES
     test/cpp/test_SimulateCluster.cpp
     src/community_distances.cpp
     test/cpp/test_CommunityDistances.cpp
+    src/mmvec.cpp
+    src/mmvec_relation.cpp
+    test/cpp/test_MMvec.cpp
+    test/cpp/test_MiintIsa.cpp
+    src/miint_parallel.cpp
+    test/cpp/test_MiintParallel.cpp
+    test/cpp/test_MMvecRelation.cpp
     src/cluster_kmeans.cpp
     test/cpp/test_ClusterKmeans.cpp
     src/cluster_upgma.cpp
@@ -1877,6 +2044,7 @@ set(TEST_SOURCES
     src/deblur.cpp
     test/cpp/test_deblur.cpp
     src/id_column_codec.cpp
+    src/miint_isa.cpp
     test/cpp/test_id_column_codec.cpp
     src/PileupWalker.cpp
     test/cpp/test_compute_pileup.cpp
@@ -1965,6 +2133,8 @@ target_link_libraries(tests
   expat::expat
   Eigen3::Eigen
 )
+target_sources(tests PRIVATE ${MIINT_ISA_OBJECTS})
+target_compile_definitions(tests PRIVATE ${MIINT_ISA_DEFINITIONS})
 if(MIINT_ENABLE_CURL)
     target_link_libraries(tests CURL::libcurl)
     target_compile_definitions(tests PRIVATE MIINT_HAS_CURL)

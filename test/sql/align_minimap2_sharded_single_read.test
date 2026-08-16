@@ -1,0 +1,89 @@
+# name: test/sql/align_minimap2_sharded_single_read.test
+# description: align_minimap2_sharded must read the query relation exactly once (#229)
+# group: [sql]
+
+require miint
+
+# ---------------------------------------------------------------------------
+# WHY THIS TEST EXISTS (#229)
+#
+# align_minimap2_sharded used to read the query relation once PER SHARD. When the
+# relation is not stable across re-evaluation, a later shard's read produces a
+# different row set, its join matches nothing, and that shard contributes zero
+# alignments — with no error. Mechanism and remedies:
+# docs/internals/reading-tables-views.md § "Read the relation ONCE".
+#
+# Invariant under test: *** the query relation is read exactly once ***
+# A nextval()-backed view makes a re-read observable, since a second read hands
+# out ids that no longer match read_to_shard.
+#
+# Note this asserts the surviving id SET, not a particular id: which shard is
+# claimed first is nondeterministic, so on broken code the survivor varies
+# between runs (observed as both {1} and {2}). Only "both survive" is stable.
+# ---------------------------------------------------------------------------
+
+# Single-threaded so nextval() assignment order is deterministic; the defect is
+# a per-shard re-read, so this does not mask it.
+statement ok
+SET threads=1;
+
+# Two queries, one per shard — two shards is the minimum that triggers a second
+# read of the query relation. Uses the committed data/shards/shard_{a,b}.mmi
+# fixtures (ref1 / ref2) rather than building indexes, so this test adds no
+# generated files.
+statement ok
+CREATE TABLE base_q AS SELECT * FROM (VALUES
+    ('ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(sequence1);
+
+# BIGINT read_id to match the nextval() view's id type — read_to_shard and query
+# read_id types must match exactly.
+statement ok
+CREATE TABLE r2s AS SELECT * FROM (VALUES
+    (1::BIGINT, 'shard_a'),
+    (2::BIGINT, 'shard_b')
+) AS t(read_id, shard_name);
+
+# ---------------------------------------------------------------------------
+# Control: stable physical table. Establishes the correct answer and proves the
+# assertion below cannot pass vacuously.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE stable_q AS SELECT row_number() OVER () AS read_id, sequence1 FROM base_q;
+
+query II
+SELECT read_id, reference
+FROM align_minimap2_sharded('stable_q',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'r2s',
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+1	ref1
+2	ref2
+
+# ---------------------------------------------------------------------------
+# The real assertion: same logical input behind a non-replayable view.
+# Read once => both reads survive. Read per-shard => one of them vanishes.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE SEQUENCE s START 1;
+
+statement ok
+CREATE VIEW v AS SELECT nextval('s') AS read_id, sequence1 FROM base_q;
+
+query II
+SELECT read_id, reference
+FROM align_minimap2_sharded('v',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'r2s',
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+1	ref1
+2	ref2

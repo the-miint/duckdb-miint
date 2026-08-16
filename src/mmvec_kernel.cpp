@@ -1,0 +1,346 @@
+//
+// mmvec's numeric kernel. Split out of mmvec.cpp so it can be compiled more than
+// once at different instruction sets -- Eigen fixes its packet width at compile
+// time, so a wider ISA is a different translation unit, not a runtime choice.
+// See mmvec_kernel.hpp for why the seam sits exactly here.
+//
+// Nothing in this file may depend on anything but its arguments: the same source
+// is compiled several times, and every copy has to compute the same function of
+// its inputs (bit-for-bit within one instruction set).
+
+#include "mmvec_kernel.hpp"
+
+#include "miint_parallel.hpp"
+
+#include <cmath>
+#include <vector>
+
+#ifndef MIINT_ISA_VARIANT
+// Compiled without the CMake helper (a stray direct compile, or a consumer that
+// added this file to a plain source list). Baseline is the safe reading: it is
+// what the target's default flags produce anyway.
+#define MIINT_ISA_VARIANT baseline
+#endif
+
+namespace miint::mmvec {
+namespace MIINT_ISA_VARIANT {
+
+namespace {
+
+//! Sum of squared deviations of `n` values from `mean`, i.e. `||v - mean||^2`.
+double SumSquaredDev(const double *v, size_t n, double mean) {
+	double acc = 0.0;
+	for (size_t i = 0; i < n; ++i) {
+		const double d = v[i] - mean;
+		acc += d * d;
+	}
+	return acc;
+}
+
+//! The Gaussian prior's contribution to the objective:
+//! `0.5 * ||block - mean||^2 / scale^2`, summed over the four blocks.
+double PriorLoss(const ParamLayout &l, const Priors &priors, const double *theta) {
+	const double x_sq = priors.x_prior_scale * priors.x_prior_scale;
+	const double y_sq = priors.y_prior_scale * priors.y_prior_scale;
+	double loss = 0.0;
+	loss += 0.5 * SumSquaredDev(theta + l.x_main, static_cast<size_t>(l.d1 * l.p), priors.x_prior_mean) / x_sq;
+	loss += 0.5 * SumSquaredDev(theta + l.x_bias, static_cast<size_t>(l.d1), priors.x_prior_mean) / x_sq;
+	loss += 0.5 * SumSquaredDev(theta + l.y_main, static_cast<size_t>(l.p * l.nref), priors.y_prior_mean) / y_sq;
+	loss += 0.5 * SumSquaredDev(theta + l.y_bias, static_cast<size_t>(l.nref), priors.y_prior_mean) / y_sq;
+	return loss;
+}
+
+//! Add `(block - mean) / scale^2` -- the prior's gradient -- to each block.
+void AddPriorGradient(const ParamLayout &l, const Priors &priors, const double *theta, double *grad) {
+	const double x_sq = priors.x_prior_scale * priors.x_prior_scale;
+	const double y_sq = priors.y_prior_scale * priors.y_prior_scale;
+	const auto add = [&](size_t begin, size_t n, double mean, double scale_sq) {
+		for (size_t i = begin; i < begin + n; ++i) {
+			grad[i] += (theta[i] - mean) / scale_sq;
+		}
+	};
+	add(l.x_main, static_cast<size_t>(l.d1 * l.p), priors.x_prior_mean, x_sq);
+	add(l.x_bias, static_cast<size_t>(l.d1), priors.x_prior_mean, x_sq);
+	add(l.y_main, static_cast<size_t>(l.p * l.nref), priors.y_prior_mean, y_sq);
+	add(l.y_bias, static_cast<size_t>(l.nref), priors.y_prior_mean, y_sq);
+}
+
+} // namespace
+
+//! The model equation, in the one place it is written:
+//!
+//!     out(r, j) = x_main[i_r] . y_main[:,j] + x_bias[i_r] + y_bias[j]
+//!
+//! for the d2-1 NON-REFERENCE Y features, over `n_rows` rows whose X features are
+//! given by `x_index` (nullptr = identity). `out` is row-major (n_rows x d2-1).
+//!
+//! The rows' X-side parameters are gathered into `ws.x_main_rows` /
+//! `ws.x_bias_rows` on the way, because the gradient needs the same gathered
+//! matrix afterwards. For an identity map that gather is a straight copy of
+//! x_main -- d1*p elements, which is what buys a single code path for both
+//! objectives instead of the same algebra written twice.
+void FillNonRefLogits(const ParamLayout &l, const double *theta, const int64_t *x_index, int64_t n_rows, Workspace &ws,
+                      double *out) {
+	const ConstRowMatrixMap y_main(theta + l.y_main, l.p, l.nref);
+	RowMatrixMap x_main_rows(ws.x_main_rows.data(), n_rows, l.p);
+	// Serial on purpose, unlike every other row loop in this file. The gather is
+	// n_rows * p writes -- 8160 at cystic-fibrosis scale against the 1.25M of the
+	// bias sweep below it -- so it costs about 10 us, while a dispatch costs a
+	// condition-variable wake round-trip of roughly 15. Splitting it was measured a
+	// net LOSS. Cheap work still has to clear the bar for handing it out.
+	for (int64_t r = 0; r < n_rows; ++r) {
+		const int64_t i = MapRow(x_index, r);
+		for (int64_t k = 0; k < l.p; ++k) {
+			x_main_rows(r, k) = theta[l.x_main + static_cast<size_t>(i * l.p + k)];
+		}
+	}
+
+	RowMatrixMap logits(out, n_rows, l.nref);
+	// DO NOT DIVIDE THIS PRODUCT ACROSS THREADS, and do not rewrite it as a block
+	// assignment. It looks like the easiest thing in the file to parallelize -- each
+	// output element is its own sum over p -- and it is the one thing here that
+	// cannot be.
+	//
+	// Measured in M8 P0, with the pieces run SERIALLY so threading was not even
+	// involved: rewriting this as `logits.middleRows(...) = x_main_rows.middleRows(...) * y_main`
+	// changes the fitted model EVEN AT ONE FULL-SIZE BLOCK, because a Block
+	// destination sends Eigen down a different product path. Writing each piece
+	// through its own plain RowMatrixMap instead is value-neutral at one piece and
+	// bit-identical on cf and ladderB at every count -- but on the soils fixture it
+	// diverges, and diverges INCONSISTENTLY (2 and 4 pieces agree, 8 differs),
+	// because Eigen picks its blocking from the matrix dimensions. That is
+	// thread-count-dependent output, which is the one property this milestone
+	// exists to avoid.
+	//
+	// The same applies to `dy_main` and `dx_main_rows` below. Splitting the three of
+	// them would have been worth roughly a third of a fit; it is not available at
+	// any price that keeps a carved value carved.
+	logits.noalias() = x_main_rows * y_main;
+	ParallelFor(ws.pool, 0, n_rows, [&](int64_t begin, int64_t end) {
+		for (int64_t r = begin; r < end; ++r) {
+			// Read straight from theta. x_main has to be gathered because Eigen needs
+			// it contiguous for the product above; the bias is a scalar per row and
+			// gathering it bought nothing but a buffer.
+			const double xb = theta[l.x_bias + static_cast<size_t>(MapRow(x_index, r))];
+			for (int64_t j = 0; j < l.nref; ++j) {
+				logits(r, j) += xb + theta[l.y_bias + static_cast<size_t>(j)];
+			}
+		}
+	});
+}
+
+//! One evaluation of the negative log-posterior and its gradient.
+//!
+//! Both the full-batch and the minibatch objective are this function; they are
+//! genuinely the same computation over a different set of rows. A "row" is an
+//! X-feature paired with an observed non-reference Y count vector and that
+//! vector's total, and the two paths supply:
+//!
+//!                       | full batch                 | minibatch
+//!   ------------------- | -------------------------- | -----------------------
+//!   n_rows              | d1                         | batch size
+//!   x_index             | identity (nullptr)         | X feature per draw
+//!   obs                 | y_sums, no indirection     | y_dense via sample index
+//!   totals              | n_sums                     | Y row sums of the draws
+//!   norm                | 1                          | BatchNormFactor(...)
+//!
+//! `norm` scales the data term only. Priors are added at full strength either
+//! way, because they are not part of the sampled sum.
+//!
+//! `grad` must already have `l.total` elements. Every element is written here --
+//! the dy_* blocks by assignment, the dx_* blocks zeroed and then accumulated --
+//! so callers need only size it, not clear it.
+double EvaluateObjective(const ParamLayout &l, const Priors &priors, int64_t n_rows, const int64_t *x_index,
+                         const ObsView &obs, const double *totals, double norm, const double *theta, Workspace &ws,
+                         double *grad) {
+	const ConstRowMatrixMap y_main(theta + l.y_main, l.p, l.nref);
+	FillNonRefLogits(l, theta, x_index, n_rows, ws, ws.logits.data());
+	const ConstRowMatrixMap x_main_rows(ws.x_main_rows.data(), n_rows, l.p);
+	const RowMatrixMap logits(ws.logits.data(), n_rows, l.nref);
+
+	// Log-normalizer with the reference category left implicit at logit 0:
+	//   m        = max(0, rowmax(logits))
+	//   log_norm = m + log(exp(-m) + SUM_j exp(logits - m))
+	//
+	// The `exp(-m)` term is the reference category: it is exp(0 - m), the
+	// reference's own shifted exponential, which is how the zero column enters
+	// without being materialized.
+	//
+	// The shift by m is an algebraic identity for ANY m, so clamping it at 0
+	// changes no value -- it buys numerical range. m >= 0 keeps every shifted
+	// exponential, the reference's included, at or below 1, so nothing overflows;
+	// without the clamp a row of strongly negative logits would send exp(-m) to
+	// infinity. resids carries exp(logits - m) forward for reuse.
+	RowMatrixMap resids(ws.resids.data(), n_rows, l.nref);
+	// Each row writes its own slot rather than adding into a shared accumulator, so
+	// nothing about the summation crosses a thread; the ordered sum happens below,
+	// serially, over ascending r. Rows are otherwise independent -- row r reads and
+	// writes only row r of `logits` and `resids` -- so this is the whole of what the
+	// decomposition costs. 57% of a cystic-fibrosis fit lives in this loop, and it
+	// reached 5.93x on eight cores in the M8 P0 spike.
+	double *row_data = ws.row_data.data();
+	ParallelFor(ws.pool, 0, n_rows, [&](int64_t r_begin, int64_t r_end) {
+		for (int64_t r = r_begin; r < r_end; ++r) {
+			// A plain compare rather than std::fmax, which GCC emits as a CALL into libm
+			// (4.4% of a cystic-fibrosis fit, its PLT stub included) because fmax's
+			// NaN-propagation semantics are not maxsd's. The two agree here by
+			// construction: `m` starts at 0.0 and a NaN logit leaves it unchanged under
+			// either form, so neither can ever make `m` NaN. Measured bit-identical on
+			// every fixture, both optimizers, at 200 and 1000 iterations.
+			double m = 0.0;
+			for (int64_t j = 0; j < l.nref; ++j) {
+				const double v = logits(r, j);
+				if (v > m) {
+					m = v;
+				}
+			}
+			// The one place a variant is allowed to compute something different, and
+			// the only reason widening pays at all. Keyed off EIGEN_VECTORIZE_AVX
+			// rather than a miint macro so any kernel compiled into a variant gets the
+			// right form without repeating this decision.
+			//
+			// Measured, not assumed: Eigen's packet `exp` is a polynomial that differs
+			// from glibc's by an ulp or so, and which of the two wins depends entirely
+			// on the packet width. At SSE2 -- 2 doubles wide -- glibc's FMA-tuned
+			// scalar `exp` beats it and the vectorized form is a 16% REGRESSION. At 4
+			// and 8 wide it is what turns a 1.15x widening into 1.68x / 2.13x on a
+			// cystic-fibrosis L-BFGS fit. The two only pay together.
+#if defined(EIGEN_VECTORIZE_AVX) || defined(EIGEN_VECTORIZE_AVX512)
+			resids.row(r) = (logits.row(r).array() - m).exp();
+			const double shifted_sum = resids.row(r).sum();
+#else
+		double shifted_sum = 0.0;
+		for (int64_t j = 0; j < l.nref; ++j) {
+			const double e = std::exp(logits(r, j) - m);
+			resids(r, j) = e;
+			shifted_sum += e;
+		}
+#endif
+			// The shifted normalizer, kept as well as its log: it IS the row scale the
+			// probabilities divide by, so recovering it as exp(log_norm - m) would be a
+			// log-and-exp round trip of a number already in hand -- an extra
+			// transcendental per row per evaluation, and a double rounding that bites
+			// hardest when m is large, which is exactly where precision matters.
+			const double row_scale = std::exp(-m) + shifted_sum;
+			const double log_norm = m + std::log(row_scale);
+
+			// Data term for this row, and the residual it contributes to the
+			// gradient. resids goes exp-shifted -> probability -> residual in place.
+			const double *obs_row = obs.base + MapRow(obs.row_map, r) * obs.stride;
+			const double total = totals[static_cast<size_t>(r)];
+			double dot_obs_logits = 0.0;
+			for (int64_t j = 0; j < l.nref; ++j) {
+				const double o = obs_row[j + 1];
+				dot_obs_logits += o * logits(r, j);
+				resids(r, j) = o - total * (resids(r, j) / row_scale);
+			}
+			row_data[static_cast<size_t>(r)] = total * log_norm - dot_obs_logits;
+		}
+	});
+	// The ordered sum the loop above was decomposed to preserve. Ascending r, one
+	// thread, exactly as it was when `data` accumulated inside the loop.
+	double data = 0.0;
+	for (int64_t r = 0; r < n_rows; ++r) {
+		data += row_data[static_cast<size_t>(r)];
+	}
+
+	// Gradient of the data term. dy_* land directly in `grad`; the X-side ones go
+	// through a per-row buffer first because a minibatch can name the same X
+	// feature several times and must accumulate, in batch order, exactly as
+	// numpy's add.at does.
+	const ConstRowMatrixMap resids_const(ws.resids.data(), n_rows, l.nref);
+	RowMatrixMap dy_main(grad + l.y_main, l.p, l.nref);
+	RowMatrixMap dx_main_rows(ws.dx_main_rows.data(), n_rows, l.p);
+
+	// The two gradient products are independent -- both only READ `resids` and
+	// `y_main`/`x_main_rows`, and they write to disjoint outputs -- so they can run
+	// at the same time as each other.
+	//
+	// This is TASK parallelism, and that is the entire point. Neither Eigen
+	// expression is divided, so each computes exactly what it computed serially;
+	// the bit-identity argument is by construction rather than by measurement. See
+	// the warning in FillNonRefLogits for why dividing them is not an option.
+	//
+	// Worth roughly half of what the pair costs: 10.7% and 11.9% of a
+	// cystic-fibrosis fit become max(10.7, 11.9).
+	ParallelInvoke(
+	    ws.pool, [&]() { dy_main.noalias() = -norm * (x_main_rows.transpose() * resids_const); },
+	    [&]() { dx_main_rows.noalias() = resids_const * y_main.transpose(); });
+
+	// One row-major sweep rather than nref column reductions. `resids` is row-major,
+	// so `.col(j).sum()` strides nref*8 bytes through every row and pays a cache miss
+	// per element -- 8.2% of a cystic-fibrosis fit for the same 1.25M additions the
+	// row-contiguous X-side scatter below does in 1.4%. Fusing cuts that phase by 75%.
+	//
+	// Bit-identical, not merely equivalent: each j still accumulates over ascending r,
+	// which is the order Eigen's redux uses for a strided vector. Verified on every
+	// fixture, both optimizers, at 200 and 1000 iterations.
+	//
+	// Split over output columns j, so each j still accumulates over ascending r on
+	// one thread and the value is unchanged.
+	//
+	// Each thread accumulates into a PRIVATE buffer and writes its slice of `grad`
+	// once at the end, rather than accumulating into `grad` directly. That is not
+	// tidiness: `grad` is a std::vector interior, so the slice boundaries have no
+	// relation to 64-byte cache lines, and accumulating in place has two threads
+	// writing the same boundary line once per ROW -- about 38000 contested transfers
+	// per evaluation at cystic-fibrosis scale, against a phase that only costs 87 us
+	// serially. On soils every slice is barely one line wide, which is what made the
+	// fit SLOWER at eight threads than at four.
+	//
+	// Bit-identical either way: the private buffer changes where the running total
+	// lives, not the order it is accumulated in.
+	double *dy_bias = grad + l.y_bias;
+	ParallelFor(ws.pool, 0, l.nref, [&](int64_t j_begin, int64_t j_end) {
+		const auto width = static_cast<size_t>(j_end - j_begin);
+		std::vector<double> acc(width, 0.0);
+		for (int64_t r = 0; r < n_rows; ++r) {
+			const double *resid_row = ws.resids.data() + static_cast<size_t>(r) * static_cast<size_t>(l.nref);
+			for (int64_t j = j_begin; j < j_end; ++j) {
+				acc[static_cast<size_t>(j - j_begin)] += resid_row[j];
+			}
+		}
+		for (int64_t j = j_begin; j < j_end; ++j) {
+			dy_bias[j] = -norm * acc[static_cast<size_t>(j - j_begin)];
+		}
+	});
+
+	for (size_t i = 0; i < static_cast<size_t>(l.d1 * l.p); ++i) {
+		grad[l.x_main + i] = 0.0;
+	}
+	for (size_t i = 0; i < static_cast<size_t>(l.d1); ++i) {
+		grad[l.x_bias + i] = 0.0;
+	}
+	const auto scatter = [&](int64_t begin, int64_t end) {
+		for (int64_t r = begin; r < end; ++r) {
+			const int64_t i = MapRow(x_index, r);
+			for (int64_t k = 0; k < l.p; ++k) {
+				grad[l.x_main + static_cast<size_t>(i * l.p + k)] += -norm * dx_main_rows(r, k);
+			}
+			// Same reduction, taken where it is consumed rather than staged in a
+			// buffer first. resids_const is not touched by the scatter, so the value
+			// and the summation order are unchanged.
+			grad[l.x_bias + static_cast<size_t>(i)] += -norm * resids_const.row(r).sum();
+		}
+	};
+	if (x_index == nullptr) {
+		// FULL BATCH ONLY. A row IS an X feature here, so row r is the only writer of
+		// slot r and threads never collide.
+		//
+		// The minibatch cannot do this and must not be "improved" to: it can name the
+		// same X feature several times in one batch, so the `+=` above is a genuine
+		// accumulation whose ORDER is part of the contract -- it reproduces numpy's
+		// add.at in batch order. Adam is out of M8's scope for other reasons anyway
+		// (its 50-row batches are far too small to divide), but this is why the
+		// distinction is drawn on `x_index` rather than on the optimizer.
+		ParallelFor(ws.pool, 0, n_rows, scatter);
+	} else {
+		scatter(0, n_rows);
+	}
+
+	AddPriorGradient(l, priors, theta, grad);
+	return norm * data + PriorLoss(l, priors, theta);
+}
+
+} // namespace MIINT_ISA_VARIANT
+} // namespace miint::mmvec

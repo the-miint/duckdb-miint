@@ -1,0 +1,88 @@
+# name: test/sql/align_minimap2_per_subject_single_read.test
+# description: align_minimap2 per_subject_database must read the query relation exactly once (#229)
+# group: [sql]
+
+require miint
+
+# ---------------------------------------------------------------------------
+# WHY THIS TEST EXISTS (#229)
+#
+# per_subject_database mode used to page through the query relation with a
+# fresh `ORDER BY ... LIMIT 1024 OFFSET k` query per batch. That silently
+# corrupts results whenever the relation is not stable across re-evaluation:
+# the second batch re-evaluates the relation and returns a DIFFERENT row set,
+# while a zero-row batch is indistinguishable from end-of-input.
+#
+# The failure is silent, which is what makes it dangerous — with a 2000-row
+# input the row COUNT still came out right (2000) while the rows themselves
+# were wrong (ids up to 4000, with ids 1025..2000 never aligned at all).
+#
+# The invariant under test is therefore not "how many rows" but:
+#   *** the query relation is read exactly once ***
+# A nextval()-backed view makes that directly observable — every read hands
+# out fresh ids, so ids above N prove a re-read. This needs no Arrow, no
+# python, and no DuckDB-version coupling.
+#
+# The input must exceed ALIGNMENT_QUERY_BATCH_SIZE (1024) or a single batch
+# would cover it and the re-read would never happen.
+# ---------------------------------------------------------------------------
+
+# Single-threaded so nextval() assignment order is deterministic; the defect is
+# sequential re-reads, so this does not mask it.
+statement ok
+SET threads=1;
+
+statement ok
+CREATE TABLE subjects AS SELECT * FROM (VALUES
+    ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC'),
+    ('ref2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCAAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAA')
+) AS t(read_id, sequence1);
+
+# 2000 queries — crosses the 1024 batch boundary, so a paging reader takes two
+# passes over the relation.
+statement ok
+CREATE TABLE base_q AS
+    SELECT CASE WHEN i % 2 = 0
+                THEN 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'
+                ELSE 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA' END AS sequence1
+    FROM range(2000) t(i);
+
+# ---------------------------------------------------------------------------
+# Control: a stable physical table. Establishes the correct answer, and proves
+# the assertion below is not passing vacuously.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE stable_q AS SELECT row_number() OVER () AS read_id, sequence1 FROM base_q;
+
+query III
+SELECT count(*), min(read_id), max(read_id)
+FROM align_minimap2('stable_q', subject_table='subjects', max_secondary=0,
+                    per_subject_database := true);
+----
+2000	1	2000
+
+# ---------------------------------------------------------------------------
+# The real assertion: same logical input behind a non-replayable view.
+#
+# Read exactly once  => ids are 1..2000, so max(read_id) = 2000.
+# Read twice         => the second pass hands out 2001..4000 and max jumps,
+#                       which is the #229 defect.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE SEQUENCE s START 1;
+
+statement ok
+CREATE VIEW v AS SELECT nextval('s') AS read_id, sequence1 FROM base_q;
+
+# count(DISTINCT) is included here rather than in a second run: nextval() ids are
+# strictly increasing, so count + min + max already pin the set to exactly 1..2000
+# — a separate duplicate-detection pass would cost another full per-subject
+# alignment and assert nothing new.
+query IIII
+SELECT count(*), min(read_id), max(read_id), count(DISTINCT read_id)
+FROM align_minimap2('v', subject_table='subjects', max_secondary=0,
+                    per_subject_database := true);
+----
+2000	1	2000	2000

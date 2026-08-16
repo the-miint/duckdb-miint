@@ -27,6 +27,33 @@ SET VARIABLE reads = 'my_temp_reads';
 SELECT * FROM align_minimap2(getvariable('reads'), subject_table := 'refs');
 ```
 
+### Arrow relations
+
+A relation registered from Arrow works by name like any other, because DuckDB's registration creates a
+temporary view. This includes a `RecordBatchReader` streamed from an external source such as Arrow
+Flight, so a streaming query set can be handed to a function directly rather than spilled to Parquet
+first:
+
+```python
+con.register('reads', flight_reader)          # pyarrow Table or RecordBatchReader
+con.execute("SELECT * FROM align_minimap2('reads', subject_table := 'refs')")
+```
+
+Two constraints come with it:
+
+- **A `RecordBatchReader` is consumed once.** A second reference to the same registered name returns zero
+  rows, silently — that is Arrow's semantics, not something MIINT can detect. `align_minimap2` (both
+  modes) and `align_minimap2_sharded` read their relation exactly once and are safe;
+  `align_bowtie2_sharded` re-reads per shard and will raise an error rather than return a partial result.
+  Other relation-taking functions have **not** been audited for this yet — notably the per-sample
+  (`sample_id := ...`) paths, which read the relation once per sample — so prefer a materialized table
+  there. See `docs/internals/reading-tables-views.md` for the audit status.
+- **Do not register a reader that is itself backed by a DuckDB query on the same connection.** In DuckDB
+  1.5.4 `con.execute(...).arrow()` returns exactly that — a lazy `RecordBatchReader`, not a materialized
+  table — and passing it to a MIINT function **deadlocks the process** with no error and no timeout. The
+  cause is a lock-ordering hazard inside DuckDB's own Arrow scan, and nothing in MIINT can intercept it.
+  Materialize first: `con.execute(...).arrow().read_all()`, or `CREATE TEMP TABLE ... AS SELECT`.
+
 ## Reading & writing
 
 - [Reading files](reading.md) - File formats with read support in MIINT (FASTA/FASTQ, SAM/BAM, SFF, BIOM, mzML/mzXML, GFF, jplace, Newick).
@@ -35,7 +62,7 @@ SELECT * FROM align_minimap2(getvariable('reads'), subject_table := 'refs');
 ## Public data repositories
 
 - [EBI/ENA](insdc_ena.md) - Interaction with EBI/ENA including submission and fetching of data.
-- [NCBI](insdc_ncbi.md) - Interaction with NCBI including fetching of data and the NCBI taxonomy (tree, lineages, retired-taxid remapping).
+- [NCBI](insdc_ncbi.md) - Interaction with NCBI including fetching of data and the NCBI taxonomy (tree, name classes, lineages, retired/deleted-taxid handling).
 
 ## Alignment
 
@@ -60,6 +87,7 @@ SELECT * FROM align_minimap2(getvariable('reads'), subject_table := 'refs');
 - [Alpha and beta diversity](diversity.md) - Methods to compute and analyze alpha and beta diversity, including rarefaction, ordination (PCoA) and Procrustes alignment of ordinations.
 - [Alpha and beta diversity](diversity.md) - Methods to compute and analyze alpha and beta diversity, including non-phylogenetic community distances, ordination, and sample clustering.
 - [Community simulation](simulation.md) - Generate synthetic gradient / clustered OTU tables with known ground truth for benchmarking resemblance and ordination methods.
+- [Multi-omics integration](multiomics.md) - MMvec: learn which metabolites co-occur with which microbes from paired count tables, without the spurious associations correlation produces on compositional data.
 
 ## Mass spectrometry
 

@@ -163,9 +163,9 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 	InheritTempObjects(context, *gstate->input_connection);
 	auto &conn = *gstate->input_connection;
 
-	// Use Arrow BinaryView (v1.4+) for BLOB columns — no offset-size limits.
-	// RYpe supports Binary, LargeBinary, and BinaryView.
-	conn.Query("SET arrow_output_version = '1.4'");
+	// Export BLOB with 64-bit offsets. See ConfigureRypeArrowExport in rype_common.hpp
+	// for why this must not be BinaryView (#222).
+	ConfigureRypeArrowExport(conn);
 
 	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
 	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);
@@ -184,8 +184,9 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 	// is_paired follows sequence2 CONTENT, not the column's presence (#199) — see
 	// TableHasPairedContent in rype_common.hpp for why, and why it probes the temp table.
 	int is_paired = TableHasPairedContent(conn, KeywordHelper::WriteOptionallyQuoted(gstate->tmp_table_name)) ? 1 : 0;
-	// is_large_binary=1: sub-connection uses arrow_large_buffer_size=true, so DuckDB
-	// exports BLOB as Arrow LargeBinary (i64 offsets) — no 2 GiB per-array limit.
+	// is_large_binary=1 tells RYpe to skip its 2 GiB batch cap. That is only sound
+	// because ConfigureRypeArrowExport pinned this connection to Arrow LargeBinary
+	// (i64 offsets) above — the two must be changed together (#222).
 	size_t batch_size = rype_recommend_batch_size(gstate->index, avg_read_length, is_paired, 0, 1);
 	if (batch_size == 0) {
 		const char *err = rype_get_last_error();

@@ -26,8 +26,8 @@
 # property of the shared separate-connection recipe, and the fix is a per-site
 # opt-in rather than a global switch, so each reader family needs its own case:
 #   - align_minimap2          -> src/sequence_table_reader.cpp
-#   - align_minimap2_sharded  -> src/include/align_common.hpp + ReadShardIds
-#                                and ReadBatchByIds
+#   - align_minimap2_sharded  -> src/include/align_common.hpp +
+#                                MaterializeShardedQueryReads
 #   - community_distances     -> src/unifrac_function_common.cpp
 #   - shear_tree              -> src/tree_table_reader.cpp + src/shear_tree.cpp
 #   - compute_pileup          -> src/compute_pileup.cpp
@@ -254,16 +254,19 @@ SELECT query_id, ref_id FROM match_short_barcodes('tmp_obs', 'tmp_bc', max_nm :=
 o1	bc1
 
 # ==============================================================================
-# align_minimap2_sharded -- ReadShardIds and ReadBatchByIds
+# align_minimap2_sharded -- MaterializeShardedQueryReads
 # ==============================================================================
 #
-# ReadBatchByIds both reads a user relation AND creates one: it needs a temp table
-# of the shard's ids to JOIN against query_table. That was safe with a fixed name
-# (`_batch_ids`) only while each helper connection had a private catalog. Now that
-# the connection inherits the caller's, the table lands in the user's session, so
-# it is uniquely named -- parallel shard workers would otherwise collide on the one
+# The sharded reader both reads a user relation AND creates one: with more than one
+# shard it snapshots the shard-assigned reads into a temp table once, so the query
+# relation is read exactly once instead of once per shard (#229). Because the helper
+# connection inherits the caller's catalog, that table lands in the user's session,
+# so it must be uniquely named -- concurrent queries would otherwise collide on one
 # name -- and dropped explicitly instead of dying with the connection. Both
 # properties are asserted below.
+#
+# TWO shards deliberately: a single-shard call reads the relation inline and creates
+# no temp table at all, so it cannot exercise either property.
 #
 
 statement ok
@@ -271,44 +274,63 @@ CREATE TABLE shard_subjects AS SELECT * FROM (VALUES
     ('ref1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC')
 ) AS t(read_id, sequence1);
 
+statement ok
+CREATE TABLE shard_subjects2 AS SELECT * FROM (VALUES
+    ('ref2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCAAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAATTAA')
+) AS t(read_id, sequence1);
+
 query I
 SELECT success FROM save_minimap2_index('shard_subjects', '__TEST_DIR__/tmpres_shard.mmi', k := 5);
 ----
 true
 
+query I
+SELECT success FROM save_minimap2_index('shard_subjects2', '__TEST_DIR__/tmpres_shard2.mmi', k := 5);
+----
+true
+
 statement ok
 CREATE TEMP TABLE tmp_shard_queries AS SELECT * FROM (VALUES
-    ('sq1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT')
+    ('sq1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('sq2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
 ) AS t(read_id, sequence1);
 
 statement ok
 CREATE TEMP TABLE tmp_read_to_shard AS SELECT * FROM (VALUES
-    ('sq1', 'tmpres_shard')
+    ('sq1', 'tmpres_shard'),
+    ('sq2', 'tmpres_shard2')
 ) AS t(read_id, shard_name);
 
-# Both the query table (ReadBatchByIds) and read_to_shard (ReadShardIds) are TEMP.
+# Both the query table and read_to_shard are TEMP -- the snapshot's JOIN has to
+# resolve them on an inheriting helper connection.
 query II
 SELECT read_id, reference
 FROM align_minimap2_sharded('tmp_shard_queries',
     shard_directory := '__TEST_DIR__/',
     read_to_shard := 'tmp_read_to_shard',
     max_secondary := 0)
-WHERE flags & 4 = 0;
+WHERE flags & 4 = 0
+ORDER BY read_id;
 ----
 sq1	ref1
+sq2	ref2
 
-# The batch-ids temp table must not survive the call. If it leaked, a user's
-# session would accumulate one relation per shard per query, and `SHOW TABLES`
-# would be full of miint internals.
+# The snapshot temp table must not survive the call. If it leaked, a user's session
+# would accumulate one relation per query, and `SHOW TABLES` would be full of miint
+# internals.
 query I
-SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE '\_miint\_batch\_ids\_%' ESCAPE '\';
+SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE '\_miint\_shard\_reads\_%' ESCAPE '\';
 ----
 0
 
-# ...and it must not survive a FAILURE either, which is the case the RAII guard
-# exists for and the one a happy-path assertion cannot reach. This TEMP view binds
-# (so the batch-ids table is created and populated) and then throws while the JOIN
-# that reads it is executing, so the guard's drop runs during exception unwind.
+# ...and nothing must survive a FAILURE either. This TEMP view binds and then throws
+# while being read, so the snapshot's CREATE ... AS SELECT fails mid-flight.
+#
+# Note what this does and does not cover: the throw happens while the snapshot is
+# being built, so it proves a failed create leaves no relation behind. It does not
+# exercise the destructor's drop-during-unwind path, which needs a snapshot that
+# succeeds and a later failure -- not inducible from SQL now that the relation is
+# read exactly once.
 statement ok
 CREATE TEMP VIEW tmp_shard_boom AS
 SELECT read_id, (CASE WHEN random() >= 0 THEN error('induced failure') ELSE sequence1 END)::VARCHAR AS sequence1
@@ -320,10 +342,10 @@ SELECT count(*) FROM align_minimap2_sharded('tmp_shard_boom',
     read_to_shard := 'tmp_read_to_shard',
     max_secondary := 0);
 ----
-Failed to read batch sequences
+induced failure
 
 query I
-SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE '\_miint\_batch\_ids\_%' ESCAPE '\';
+SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE '\_miint\_shard\_reads\_%' ESCAPE '\';
 ----
 0
 

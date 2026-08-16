@@ -28,6 +28,8 @@ Methods to estimate alpha and beta diversity, and supporting statistics.
 
 Most of these methods are powered by the embedded [`unifrac-binaries`](https://github.com/biocore/unifrac-binaries) and [`scikit-bio-binaries`](https://github.com/scikit-bio/scikit-bio-binaries) libraries (see `docs/internals/embedded-tools.md` for the build details); [`procrustes`](#procrustes-align-two-ordinations) is a self-contained Eigen-backed port of SciPy and works on any ordination table.
 
+> Relating **two** feature tables of the same samples — microbes against metabolites, say — is a different problem from the ordination and distance methods here, because correlating compositional tables directly produces spurious associations. See [multi-omics integration](multiomics.md) for MMvec.
+
 ### Feature table
 
 A long-form `(sample_id VARCHAR, feature_id VARCHAR, value DOUBLE)` relation — the same schema produced by [`read_biom`](reading.md#biom). Duplicate `(sample_id, feature_id)` rows are summed; rows with NULL or zero values are silently dropped (sparse-storage invariant).

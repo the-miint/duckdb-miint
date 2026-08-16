@@ -25,6 +25,16 @@ struct TaxdumpMerge {
 	int64_t new_taxid;
 };
 
+// One row of names.dmp, unfiltered. TaxdumpNode keeps only the scientific name,
+// which leaves every other name class (e.g. "genbank common name") unreachable;
+// this is the verbatim view consumers pivot over to recover them.
+struct TaxdumpName {
+	int64_t taxid;
+	std::string name;        // name_txt
+	std::string unique_name; // NCBI's disambiguator; empty on most rows
+	std::string name_class;  // e.g. "scientific name", "genbank common name", "synonym"
+};
+
 // Cleanroom parser for NCBI taxonomy dump (taxdump) files. The dump is a set of
 // pipe-delimited text files: fields joined by "\t|\t" and each line terminated by
 // "\t|". Nothing here touches DuckDB — it is pure string parsing so it can be unit
@@ -40,6 +50,10 @@ public:
 
 	// Parse merged.dmp into (old_taxid, new_taxid) pairs, in file order.
 	static std::vector<TaxdumpMerge> ParseMerged(const std::string &merged_dmp);
+
+	// Parse names.dmp into every (taxid, name, unique_name, name_class) row, in file
+	// order. Unlike ParseNodes, no name class is filtered out.
+	static std::vector<TaxdumpName> ParseNames(const std::string &names_dmp);
 
 	// Parse delnodes.dmp into deleted taxids, in file order.
 	static std::vector<int64_t> ParseDeleted(const std::string &delnodes_dmp);

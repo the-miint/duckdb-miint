@@ -1,0 +1,428 @@
+# name: test/sql/mmvec_predict.test
+# description: mmvec_predict aligns a held-out X table to a fitted model and reproduces the carved scikit-bio T1 proportions exactly (always run; fixtures are inline)
+# group: [sql]
+
+require miint
+
+# The T1 model, carved -- the oracle's kTheta unpacked into the model relation's
+# shape. Identical to the fixture in mmvec_ranks.test; see that file's header for
+# why supplying a fitted theta directly is what makes exact parity reachable here.
+statement ok
+CREATE TABLE t1_model AS
+SELECT * FROM (VALUES
+  ('x','O1',NULL,1,-0.5721975555132527),
+  ('x','O1',NULL,2,1.2089496331620018),
+  ('x','O1',NULL,3,0.08397991870054435),
+  ('x','O1',NULL,0,1.0176085488389561),
+  ('x','O2',NULL,1,1.2836020389403422),
+  ('x','O2',NULL,2,0.6335162113605605),
+  ('x','O2',NULL,3,-1.8188626523197196),
+  ('x','O2',NULL,0,0.276744409694671),
+  ('x','O3',NULL,1,0.4673806127809242),
+  ('x','O3',NULL,2,0.2529824214326896),
+  ('x','O3',NULL,3,-0.19773326660002266),
+  ('x','O3',NULL,0,-1.6872222518253686),
+  ('x','O4',NULL,1,-0.7706383147004933),
+  ('x','O4',NULL,2,0.3303445359073165),
+  ('x','O4',NULL,3,1.1570154221200055),
+  ('x','O4',NULL,0,-2.390767649946256),
+  ('x','O5',NULL,1,-0.40890914399147865),
+  ('x','O5',NULL,2,-1.4903507743958617),
+  ('x','O5',NULL,3,-0.365108054047986),
+  ('x','O5',NULL,0,-0.08125688425450912),
+  ('x','O6',NULL,1,-0.4605053118162978),
+  ('x','O6',NULL,2,1.4163220426797019),
+  ('x','O6',NULL,3,-1.0014294607331993),
+  ('x','O6',NULL,0,-0.8474219637894537),
+  ('x','O7',NULL,1,-0.7918986545729729),
+  ('x','O7',NULL,2,-1.8744875972601482),
+  ('x','O7',NULL,3,0.7088901725445899),
+  ('x','O7',NULL,0,0.4892923150967331),
+  ('x','O8',NULL,1,-0.19287452976777875),
+  ('x','O8',NULL,2,-2.42573021450208),
+  ('x','O8',NULL,3,-0.9987049819576244),
+  ('x','O8',NULL,0,0.5545163664726702),
+  ('y',NULL,'C1',1,0.0),
+  ('y',NULL,'C1',2,0.0),
+  ('y',NULL,'C1',3,0.0),
+  ('y',NULL,'C1',0,0.0),
+  ('y',NULL,'C2',1,0.6437810357387733),
+  ('y',NULL,'C2',2,-0.7237880887841642),
+  ('y',NULL,'C2',3,-0.8164626401785496),
+  ('y',NULL,'C2',0,-0.8781861173405375),
+  ('y',NULL,'C3',1,-0.4530281177871468),
+  ('y',NULL,'C3',2,-0.6397671091221866),
+  ('y',NULL,'C3',3,0.46416120762770485),
+  ('y',NULL,'C3',0,-1.058754126085832),
+  ('y',NULL,'C4',1,0.8167737539396377),
+  ('y',NULL,'C4',2,-0.23870093824276398),
+  ('y',NULL,'C4',3,-2.1427549273060906),
+  ('y',NULL,'C4',0,1.7338424358002857),
+  ('y',NULL,'C5',1,-0.052068440809039676),
+  ('y',NULL,'C5',2,1.3116080076658423),
+  ('y',NULL,'C5',3,-0.702799800523929),
+  ('y',NULL,'C5',0,-0.7357116841015575),
+  ('y',NULL,'C6',1,0.6411702740513423),
+  ('y',NULL,'C6',2,-0.3823823840487058),
+  ('y',NULL,'C6',3,-1.2087255221341275),
+  ('y',NULL,'C6',0,0.5601729647956318)
+) t(modality, x_feature_id, y_feature_id, axis, value);
+
+# The oracle's held-out X (kFixturePredictX): three samples S6-S8 that appear
+# NOWHERE in the model. That is the point of predict -- the model constrains which
+# FEATURES may appear, never which samples -- and it means this fixture exercises
+# alignment against a fitted dictionary rather than a round trip of the same table.
+# Stored sparse, with the 5 zero cells of 24 omitted per the feature-table contract.
+statement ok
+CREATE TABLE x_test AS
+SELECT * FROM (VALUES
+  ('S6','O1',3.0),
+  ('S6','O3',2.0),
+  ('S6','O4',6.0),
+  ('S6','O5',1.0),
+  ('S6','O6',4.0),
+  ('S6','O7',4.0),
+  ('S7','O1',2.0),
+  ('S7','O2',1.0),
+  ('S7','O3',5.0),
+  ('S7','O6',3.0),
+  ('S7','O7',6.0),
+  ('S7','O8',1.0),
+  ('S8','O1',8.0),
+  ('S8','O2',4.0),
+  ('S8','O3',1.0),
+  ('S8','O4',1.0),
+  ('S8','O5',5.0),
+  ('S8','O7',5.0),
+  ('S8','O8',1.0)
+) t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE t1_expected AS
+SELECT * FROM (VALUES
+  ('S6','C1',0.33533080920207914),
+  ('S6','C2',0.032008437168290806),
+  ('S6','C3',0.11055446613923833),
+  ('S6','C4',0.32162171793299443),
+  ('S6','C5',0.10691931688936743),
+  ('S6','C6',0.09356525266802991),
+  ('S7','C1',0.12566968813532292),
+  ('S7','C2',0.04696732850851293),
+  ('S7','C3',0.14930291035206333),
+  ('S7','C4',0.46683546288344796),
+  ('S7','C5',0.08456631848928303),
+  ('S7','C6',0.12665829163136977),
+  ('S8','C1',0.09881383539523694),
+  ('S8','C2',0.04296865551592553),
+  ('S8','C3',0.10884947355871101),
+  ('S8','C4',0.4935710369850241),
+  ('S8','C5',0.12900042703860537),
+  ('S8','C6',0.1267965715064971)
+) t(sample_id, y_feature_id, proportion);
+
+# ---------------------------------------------------------------------------
+# Schema. sample_id comes from the NEW X table and y_feature_id from the MODEL --
+# two different relations, resolved independently, because the samples are the
+# caller's and the Y features are the model's.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT string_agg(column_name, ',') FROM (
+  DESCRIBE SELECT * FROM mmvec_predict('t1_model', 'x_test')
+);
+----
+sample_id,y_feature_id,proportion
+
+# ---------------------------------------------------------------------------
+# EXACT parity with scikit-bio, through SQL: all 18 cells, joined by both keys.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE t1_actual AS SELECT * FROM mmvec_predict('t1_model', 'x_test');
+
+query I
+SELECT count(*) FROM t1_actual;
+----
+18
+
+query I
+SELECT count(*) FROM t1_actual a JOIN t1_expected e USING (sample_id, y_feature_id);
+----
+18
+
+query I
+SELECT max(abs(a.proportion - e.proportion)) < 1e-10
+FROM t1_actual a JOIN t1_expected e USING (sample_id, y_feature_id);
+----
+true
+
+query I
+SELECT max(abs(a.proportion - e.proportion)) < 1e-15
+FROM t1_actual a JOIN t1_expected e USING (sample_id, y_feature_id);
+----
+true
+
+# Every held-out sample is predicted, and every Y feature of the model appears --
+# including the reference category, which carries a real proportion here.
+query II
+SELECT count(DISTINCT sample_id), count(DISTINCT y_feature_id) FROM t1_actual;
+----
+3	6
+
+# ---------------------------------------------------------------------------
+# What the column MEANS, independent of the oracle: a prediction is a composition
+# over the model's Y features, so each sample's row sums to one.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT count(*) FROM (
+  SELECT sample_id FROM t1_actual GROUP BY sample_id HAVING abs(sum(proportion) - 1.0) > 1e-12
+);
+----
+0
+
+query I
+SELECT count(*) FROM t1_actual WHERE proportion < 0.0 OR proportion > 1.0;
+----
+0
+
+# ---------------------------------------------------------------------------
+# Depth invariance. X is read as PROPORTIONS, so scaling a sample's counts cannot
+# change its prediction -- which is what makes predictions comparable across
+# samples sequenced to different depths. Exact, not approximate: the scaling here
+# is by 4, so the proportions are bit-identical rather than merely close.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE x_test_deep AS
+SELECT sample_id, feature_id, value * CASE sample_id WHEN 'S6' THEN 4 WHEN 'S7' THEN 16 ELSE 1 END AS value
+FROM x_test;
+
+query I
+SELECT count(*) FROM (
+  SELECT * FROM mmvec_predict('t1_model', 'x_test_deep')
+  EXCEPT ALL
+  SELECT * FROM mmvec_predict('t1_model', 'x_test')
+);
+----
+0
+
+# ---------------------------------------------------------------------------
+# UNKNOWN vs MISSING features. This follows scikit-bio, where predict takes a
+# dense array with no ids: an extra column is a shape mismatch, while a zero
+# column is perfectly legal.
+#
+# A feature the model never saw is an ERROR. There is no P(Y | unknown microbe)
+# to contribute, so the alternative would be to drop it silently and quietly
+# change the composition the prediction is made from. The message says how to fix
+# it, because a sample-wise train/test split produces this case routinely.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE x_test_unknown AS
+SELECT * FROM x_test UNION ALL SELECT * FROM (VALUES ('S6','O99',5.0)) t(sample_id, feature_id, value);
+
+statement error
+SELECT * FROM mmvec_predict('t1_model', 'x_test_unknown');
+----
+1 feature(s) the model was never fitted on (O99)
+
+statement error
+SELECT * FROM mmvec_predict('t1_model', 'x_test_unknown');
+----
+restrict the table to the model's own features first
+
+# Applying the suggested fix works, and reproduces the original answer exactly --
+# so the guidance in the message is not just plausible, it is correct.
+statement ok
+CREATE TABLE x_test_unknown_filtered AS
+SELECT * FROM x_test_unknown
+WHERE feature_id IN (SELECT DISTINCT x_feature_id FROM t1_model WHERE modality = 'x');
+
+query I
+SELECT count(*) FROM (
+  SELECT * FROM mmvec_predict('t1_model', 'x_test_unknown_filtered')
+  EXCEPT ALL
+  SELECT * FROM mmvec_predict('t1_model', 'x_test')
+);
+----
+0
+
+# A model feature ABSENT from the table is fine: in scikit-bio it would be a zero
+# column, and in long form "no rows" is exactly that. Predict documents accepting
+# an all-zero feature -- unlike when fitting, where its parameters would come from
+# the prior alone -- and this is the case it accepts it for.
+#
+# THIS CASE IS LOAD-BEARING BEYOND ITS OWN CLAIM. It is the only test here that
+# pins the alignment to the MODEL's feature dictionary rather than to one built
+# from the held-out data. Measured: replacing the model's dictionary with a fresh
+# one passes the entire exact-parity block above -- all 22 assertions -- because
+# this fixture happens to contain all 8 X features in the same lexicographic
+# order the model has them in, so the two dictionaries coincide. Only a table
+# whose own dictionary DIFFERS from the model's can tell them apart, and with
+# unknown features rejected that means a table missing one. Do not remove it, and
+# do not "simplify" it into a variant that keeps every feature.
+statement ok
+CREATE TABLE x_test_dropped AS SELECT * FROM x_test WHERE feature_id <> 'O6';
+
+statement ok
+CREATE TABLE x_test_zeroed AS
+SELECT sample_id, feature_id, CASE WHEN feature_id = 'O6' THEN 0.0 ELSE value END AS value FROM x_test;
+
+query I
+SELECT count(*) FROM mmvec_predict('t1_model', 'x_test_dropped');
+----
+18
+
+query I
+SELECT count(*) FROM (
+  SELECT * FROM mmvec_predict('t1_model', 'x_test_dropped')
+  EXCEPT ALL
+  SELECT * FROM mmvec_predict('t1_model', 'x_test_zeroed')
+);
+----
+0
+
+# But dropping a feature is NOT a no-op: its counts leave the sample's total, so
+# the composition -- and therefore the prediction -- genuinely changes. A test
+# that expected otherwise would be asserting that X is read as counts, not
+# proportions.
+query I
+SELECT count(*) > 0 FROM (
+  SELECT * FROM mmvec_predict('t1_model', 'x_test_dropped')
+  EXCEPT
+  SELECT * FROM mmvec_predict('t1_model', 'x_test')
+);
+----
+true
+
+# ---------------------------------------------------------------------------
+# Degenerate and invalid input, all from the pure core's own contract.
+# ---------------------------------------------------------------------------
+
+# A sample with no counts at all has no composition to predict from.
+statement ok
+CREATE TABLE x_test_zero_sample AS
+SELECT * FROM x_test UNION ALL SELECT * FROM (VALUES ('S9','O1',0.0)) t(sample_id, feature_id, value);
+
+query I
+SELECT count(DISTINCT sample_id) FROM mmvec_predict('t1_model', 'x_test_zero_sample');
+----
+3
+
+# ... and when the zero is the only thing distinguishing it, the sparse contract
+# drops the cell so the sample simply never appears -- which is why the check
+# above is a count rather than an error. An explicitly all-zero sample is
+# unreachable from SQL for the same reason it is in mmvec_fit.
+
+statement ok
+CREATE TABLE x_test_negative AS
+SELECT sample_id, feature_id, CASE WHEN sample_id = 'S6' AND feature_id = 'O1' THEN -3.0 ELSE value END AS value
+FROM x_test;
+
+statement error
+SELECT * FROM mmvec_predict('t1_model', 'x_test_negative');
+----
+mmvec models counts
+
+statement ok
+CREATE TABLE x_test_inf AS
+SELECT sample_id, feature_id,
+       CASE WHEN sample_id = 'S6' AND feature_id = 'O1' THEN CAST('inf' AS DOUBLE) ELSE value END AS value
+FROM x_test;
+
+statement error
+SELECT * FROM mmvec_predict('t1_model', 'x_test_inf');
+----
+is not finite
+
+statement ok
+CREATE TABLE x_test_dup AS
+SELECT * FROM x_test UNION ALL SELECT * FROM (VALUES ('S6','O1',1.0)) t(sample_id, feature_id, value);
+
+statement error
+SELECT * FROM mmvec_predict('t1_model', 'x_test_dup');
+----
+duplicate entry for sample 'S6', feature 'O1'
+
+statement error
+SELECT * FROM mmvec_predict('no_such_model', 'x_test');
+----
+no_such_model
+
+statement error
+SELECT * FROM mmvec_predict('t1_model', 'no_such_x');
+----
+no_such_x
+
+statement ok
+CREATE TABLE not_a_feature_table AS SELECT 1 AS a;
+
+statement error
+SELECT * FROM mmvec_predict('t1_model', 'not_a_feature_table');
+----
+must expose (sample_id, feature_id, value)
+
+# The MODEL argument was checked only for existence, never for being a model. The
+# two validators it must reach are shared with mmvec_ranks and are covered there,
+# so a generic regression in them would be caught -- but nothing here would notice
+# a predict-specific wiring bug, such as a refactor that validated the X table
+# twice, or that skipped the model checks for this entry point alone. One case per
+# validator: the bind-time schema check, and the parse-time completeness check.
+statement error
+SELECT * FROM mmvec_predict('x_test', 'x_test');
+----
+must expose (modality, x_feature_id, y_feature_id, axis, value)
+
+statement ok
+CREATE TABLE model_clipped AS SELECT * FROM t1_model WHERE NOT (modality = 'x' AND x_feature_id = 'O3' AND axis = 2);
+
+statement error
+SELECT * FROM mmvec_predict('model_clipped', 'x_test');
+----
+'O3' is missing axis 2
+
+# An empty X table has nothing to predict for.
+statement ok
+CREATE TABLE x_test_empty AS SELECT * FROM x_test WHERE false;
+
+statement error
+SELECT * FROM mmvec_predict('t1_model', 'x_test_empty');
+----
+no usable cells
+
+# ---------------------------------------------------------------------------
+# Id types, each mirrored from its own relation: a BIGINT-keyed sample column
+# beside a UUID-keyed model must yield BIGINT sample_id and UUID y_feature_id.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE model_uuid_y AS
+SELECT modality, x_feature_id,
+       CASE WHEN modality = 'y'
+            THEN CAST('00000000-0000-4000-8000-0000000000c' || substr(y_feature_id, 2) AS UUID) END AS y_feature_id,
+       axis, value
+FROM t1_model;
+
+statement ok
+CREATE TABLE x_test_bigint_samples AS
+SELECT CAST(100 + CAST(substr(sample_id, 2) AS BIGINT) AS BIGINT) AS sample_id, feature_id, value FROM x_test;
+
+query II
+SELECT DISTINCT typeof(sample_id), typeof(y_feature_id)
+FROM mmvec_predict('model_uuid_y', 'x_test_bigint_samples');
+----
+BIGINT	UUID
+
+# The values round-trip, and renaming is presentational: the same numbers come
+# back for the same (sample, Y feature) pair under any id spelling.
+query I
+SELECT max(abs(a.proportion - e.proportion)) < 1e-15
+FROM (
+  SELECT CAST(sample_id - 100 AS VARCHAR) AS s, right(CAST(y_feature_id AS VARCHAR), 1) AS c, proportion
+  FROM mmvec_predict('model_uuid_y', 'x_test_bigint_samples')
+) a
+JOIN (SELECT substr(sample_id, 2) AS s, substr(y_feature_id, 2) AS c, proportion FROM t1_expected) e
+  ON a.s = e.s AND a.c = e.c;
+----
+true

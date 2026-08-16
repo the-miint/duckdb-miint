@@ -1,0 +1,459 @@
+# name: test/sql/mmvec_fit.test
+# description: mmvec_fit bind — model-relation schema, id-type mirroring, and every rejected parameter (always run; fixtures are inline)
+# group: [sql]
+
+require miint
+
+# The 5-sample docstring example carved into test/cpp/mmvec_oracle.hpp (toy_x /
+# toy_y), inline here as sparse COO with the zeros omitted. Feature ids are
+# deliberately NOT in insertion order: mmvec_fit must sort them
+# lexicographically, because that is what fixes which Y feature becomes the
+# reference category, and the priors are not softmax-shift-invariant so the
+# choice changes the fitted optimum.
+statement ok
+CREATE TABLE microbes AS
+SELECT * FROM (VALUES
+  ('S1','m1',1.0),('S1','m4',7.0),('S1','m6',2.0),('S1','m7',1.0),
+  ('S2','m2',1.0),('S2','m3',2.0),('S2','m4',9.0),('S2','m5',1.0),('S2','m6',1.0),('S2','m8',1.0),
+  ('S3','m1',2.0),('S3','m3',1.0),('S3','m4',6.0),('S3','m7',2.0),
+  ('S4','m1',1.0),('S4','m2',2.0),('S4','m3',1.0),('S4','m4',8.0),('S4','m5',3.0),('S4','m6',1.0),('S4','m8',2.0),
+  ('S5','m2',1.0),('S5','m3',3.0),('S5','m4',3.0),('S5','m5',1.0),('S5','m6',4.0),('S5','m7',1.0)
+) t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE metabolites AS
+SELECT * FROM (VALUES
+  ('S1','b2',1.0),('S1','b4',1.0),('S1','b5',1.0),('S1','b6',2.0),
+  ('S2','b1',1.0),('S2','b3',2.0),('S2','b4',1.0),('S2','b5',5.0),
+  ('S3','b2',3.0),('S3','b3',1.0),('S3','b5',1.0),('S3','b6',1.0),
+  ('S4','b1',3.0),('S4','b2',1.0),('S4','b4',2.0),('S4','b5',2.0),
+  ('S5','b3',4.0),('S5','b4',1.0),('S5','b5',7.0),('S5','b6',3.0)
+) t(sample_id, feature_id, value);
+
+# ---------------------------------------------------------------------------
+# The model relation's schema. Ten columns: five describing the parameter or
+# loss value, five broadcasting how the fit went. The diagnostics are repeated
+# per row (the unifrac_pcoa convention) rather than encoded as extra rows, so
+# each keeps its natural type -- converged really is BOOLEAN, message really is
+# VARCHAR -- and reading them needs no pivot.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT count(*) FROM (DESCRIBE SELECT * FROM mmvec_fit('microbes', 'metabolites'));
+----
+10
+
+query II
+SELECT column_name, column_type FROM (
+  DESCRIBE SELECT * FROM mmvec_fit('microbes', 'metabolites')
+) ORDER BY column_name;
+----
+axis	INTEGER
+converged	BOOLEAN
+final_loss	DOUBLE
+max_abs_grad	DOUBLE
+message	VARCHAR
+modality	VARCHAR
+n_iter	BIGINT
+value	DOUBLE
+x_feature_id	VARCHAR
+y_feature_id	VARCHAR
+
+# Column ORDER is part of the contract too: `SELECT *` output is positional, so
+# a reordering would silently break every downstream query and every M4 reader.
+query I
+SELECT string_agg(column_name, ',') FROM (
+  DESCRIBE SELECT * FROM mmvec_fit('microbes', 'metabolites')
+);
+----
+modality,x_feature_id,y_feature_id,axis,value,converged,n_iter,final_loss,max_abs_grad,message
+
+# ---------------------------------------------------------------------------
+# Id-type mirroring, per modality independently. The two feature-id columns take
+# their types from their OWN relation: a BIGINT-keyed microbe table next to a
+# VARCHAR-keyed metabolite table must yield BIGINT x_feature_id and VARCHAR
+# y_feature_id. "ids in = ids out" is why the relation carries two id columns,
+# one of which is always NULL by construction -- a single VARCHAR id column
+# would lose the type the moment anyone inspected the model.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE microbes_bigint AS
+SELECT sample_id, (10 + CAST(substr(feature_id, 2) AS BIGINT)) AS feature_id, value FROM microbes;
+
+statement ok
+CREATE TABLE metabolites_uuid AS
+SELECT sample_id,
+       CAST('00000000-0000-4000-8000-0000000000' || lpad(substr(feature_id, 2), 2, '0') AS UUID) AS feature_id,
+       value
+FROM metabolites;
+
+query II
+SELECT column_name, column_type FROM (
+  DESCRIBE SELECT * FROM mmvec_fit('microbes_bigint', 'metabolites')
+) WHERE column_name IN ('x_feature_id', 'y_feature_id') ORDER BY column_name;
+----
+x_feature_id	BIGINT
+y_feature_id	VARCHAR
+
+query II
+SELECT column_name, column_type FROM (
+  DESCRIBE SELECT * FROM mmvec_fit('microbes', 'metabolites_uuid')
+) WHERE column_name IN ('x_feature_id', 'y_feature_id') ORDER BY column_name;
+----
+x_feature_id	VARCHAR
+y_feature_id	UUID
+
+query II
+SELECT column_name, column_type FROM (
+  DESCRIBE SELECT * FROM mmvec_fit('microbes_bigint', 'metabolites_uuid')
+) WHERE column_name IN ('x_feature_id', 'y_feature_id') ORDER BY column_name;
+----
+x_feature_id	BIGINT
+y_feature_id	UUID
+
+# A type outside the accepted id set falls back to VARCHAR rather than failing:
+# the ids are carried internally as canonical text either way, and only exact
+# BIGINT/UUID round-tripping is promised.
+statement ok
+CREATE TABLE microbes_double AS
+SELECT sample_id, CAST(substr(feature_id, 2) AS DOUBLE) AS feature_id, value FROM microbes;
+
+query I
+SELECT column_type FROM (
+  DESCRIBE SELECT * FROM mmvec_fit('microbes_double', 'metabolites')
+) WHERE column_name = 'x_feature_id';
+----
+VARCHAR
+
+# ---------------------------------------------------------------------------
+# Rejected parameters. Every one of these is caught at BIND time, so the query
+# fails before any data is read or any fit is attempted -- a typo in a
+# hyperparameter should not cost a multi-minute fit first. The bounds are the
+# same ones the pure core enforces on its own contract; both check, so neither
+# can silently drift.
+# ---------------------------------------------------------------------------
+
+statement error
+SELECT * FROM mmvec_fit('microbes', 'metabolites', optimizer := 'sgd');
+----
+unknown optimizer
+
+statement error
+SELECT * FROM mmvec_fit('microbes', 'metabolites', batch_norm := 'raw');
+----
+unknown batch_norm
+
+statement error
+SELECT * FROM mmvec_fit('microbes', 'metabolites', dimensions := 0);
+----
+dimensions must be >= 1
+
+statement error
+SELECT * FROM mmvec_fit('microbes', 'metabolites', max_iter := 0);
+----
+max_iter must be >= 1
+
+statement error
+SELECT * FROM mmvec_fit('microbes', 'metabolites', x_prior_scale := 0.0);
+----
+x_prior_scale must be > 0
+
+statement error
+SELECT * FROM mmvec_fit('microbes', 'metabolites', y_prior_scale := -1.0);
+----
+y_prior_scale must be > 0
+
+statement error
+SELECT * FROM mmvec_fit('microbes', 'metabolites', learning_rate := 0.0);
+----
+learning_rate must be > 0
+
+statement error
+SELECT * FROM mmvec_fit('microbes', 'metabolites', batch_size := 0);
+----
+batch_size must be >= 1
+
+statement error
+SELECT * FROM mmvec_fit('microbes', 'metabolites', beta_1 := 1.0);
+----
+beta_1 must be in [0, 1)
+
+statement error
+SELECT * FROM mmvec_fit('microbes', 'metabolites', beta_2 := -0.1);
+----
+beta_2 must be in [0, 1)
+
+statement error
+SELECT * FROM mmvec_fit('microbes', 'metabolites', clipnorm := 0.0);
+----
+clipnorm must be > 0
+
+statement error
+SELECT * FROM mmvec_fit('microbes', 'metabolites', seed := -1);
+----
+seed must be >= 0
+
+# Prior MEANS are unconstrained -- a non-zero mean is a legitimate modeling
+# choice that shifts the posterior, not an error.
+statement ok
+SELECT count(*) FROM (
+  DESCRIBE SELECT * FROM mmvec_fit('microbes', 'metabolites', x_prior_mean := -2.5, y_prior_mean := 1.5)
+);
+
+# A missing relation is a bind error naming the relation, not a crash at fit time.
+statement error
+SELECT * FROM mmvec_fit('no_such_table', 'metabolites');
+----
+no_such_table
+
+# A relation without the feature-table columns is rejected by name too.
+statement ok
+CREATE TABLE wrong_schema AS SELECT 1 AS a, 2 AS b;
+
+statement error
+SELECT * FROM mmvec_fit('wrong_schema', 'metabolites');
+----
+wrong_schema
+
+# And in the Y position too. X and Y are validated by two independent calls, so
+# testing only one of them would not notice a bind that checked the X table twice
+# -- and the message names the side, which is what makes this more than a repeat.
+statement error
+SELECT * FROM mmvec_fit('microbes', 'wrong_schema');
+----
+Y feature-table 'wrong_schema'
+
+# ---------------------------------------------------------------------------
+# The fit itself. The `microbes` / `metabolites` tables above hold exactly the
+# matrices the oracle in test/cpp/mmvec_oracle.hpp was carved from (toy_x /
+# toy_y), with ids m1..m8 / b1..b6 whose lexicographic order matches the
+# oracle's O1..O8 / C1..C6 -- so the index assignment, and therefore the fit, is
+# the oracle's.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE fit AS SELECT * FROM mmvec_fit('microbes', 'metabolites', dimensions := 3, max_iter := 1000);
+
+# Row counts follow from the shape alone: one row per (feature, axis) with axis
+# running 1..dimensions for the coordinates plus 0 for the bias. 8 X features and
+# 6 Y features at dimensions=3 give 8*4 and 6*4.
+query II
+SELECT modality, count(*) FROM fit WHERE modality IN ('x','y') GROUP BY modality ORDER BY modality;
+----
+x	32
+y	24
+
+query I
+SELECT count(DISTINCT x_feature_id) FROM fit WHERE modality='x';
+----
+8
+
+# Every feature carries the full axis set, and nothing else.
+query I
+SELECT count(*) FROM (
+  SELECT x_feature_id FROM fit WHERE modality='x' GROUP BY x_feature_id
+  HAVING count(*) = 4 AND min(axis) = 0 AND max(axis) = 3
+);
+----
+8
+
+# The id column that does not apply to a row is NULL by construction.
+query III
+SELECT
+  count(*) FILTER (WHERE modality='x' AND x_feature_id IS NOT NULL AND y_feature_id IS NULL),
+  count(*) FILTER (WHERE modality='y' AND y_feature_id IS NOT NULL AND x_feature_id IS NULL),
+  count(*) FILTER (WHERE modality='loss' AND x_feature_id IS NULL AND y_feature_id IS NULL)
+FROM fit;
+----
+32	24	65
+
+# ---------------------------------------------------------------------------
+# The reference category. 'b1' is lexicographically first, so it is Y feature 0,
+# whose logit is pinned to zero and which holds no parameters in theta at all. It
+# is nonetheless emitted, with every coordinate AND its bias exactly zero: that
+# is what scikit-bio publishes (y_embeddings is (d2, p+1) with row 0 all zeros),
+# it keeps the relation rectangular, and it stops a user's lexicographically
+# first metabolite silently vanishing from its own model.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT sum(abs(value)) FROM fit WHERE modality='y' AND y_feature_id='b1';
+----
+0.0
+
+query I
+SELECT count(*) FROM fit WHERE modality='y' AND y_feature_id='b1';
+----
+4
+
+# No other Y feature is all-zero -- otherwise the check above would pass for the
+# trivial reason that nothing was fitted.
+query I
+SELECT count(*) FROM (
+  SELECT y_feature_id FROM fit WHERE modality='y' AND y_feature_id <> 'b1'
+  GROUP BY y_feature_id HAVING sum(abs(value)) > 1e-6
+);
+----
+5
+
+# ---------------------------------------------------------------------------
+# Parity with the carved oracle. This is NOT bit parity and cannot be: the fit
+# starts from InitTheta(seed), our own portable RNG, where the oracle started
+# from numpy's PCG64 draw. What makes the comparison meaningful is that the toy
+# problem's optimum is init-insensitive -- the oracle measured max|dranks| of
+# 4.1e-04 across four starting points -- so landing in the same basin is a real
+# end-to-end check on the objective, the ordering rule and the optimizer wiring
+# together. Measured agreement is 3.1e-10 relative; the 1e-6 band leaves room for
+# an innocuous change of starting point while still catching anything structural.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT abs(final_loss - 959.8658591339574) / 959.8658591339574 < 1e-6 FROM fit LIMIT 1;
+----
+true
+
+# It stopped on its own terms rather than running out of budget.
+query II
+SELECT DISTINCT converged, n_iter < 1000 FROM fit;
+----
+true	true
+
+# But converged does NOT mean a stationary point was reached: scikit-bio's rule
+# stops on the objective-change test, typically with the gradient still far from
+# zero. Anyone needing stationarity has to read max_abs_grad, which is why it is
+# a separate column. Pinning the disagreement here so the two never get merged.
+query I
+SELECT DISTINCT converged AND max_abs_grad > 1e-6 FROM fit;
+----
+true
+
+# Diagnostics are broadcast, so they are constant across every row.
+query I
+SELECT count(*) FROM (
+  SELECT count(DISTINCT converged) AS a, count(DISTINCT n_iter) AS b, count(DISTINCT final_loss) AS c,
+         count(DISTINCT max_abs_grad) AS d, count(DISTINCT message) AS e
+  FROM fit
+) WHERE a=1 AND b=1 AND c=1 AND d=1 AND e=1;
+----
+1
+
+query I
+SELECT DISTINCT message LIKE 'converged%' FROM fit;
+----
+true
+
+# The kernel that produced the fit is reported, because the fit DEPENDS on it: a
+# wider instruction set rounds differently and, over a thousand iterations, gives a
+# visibly different model. Recording it makes that auditable from the output rather
+# than something a user has to know about. run_tests.sh pins MIINT_SIMD=baseline,
+# which is why the expected value here is fixed rather than machine-dependent.
+query I
+SELECT DISTINCT message LIKE '%; simd = baseline' FROM fit;
+----
+true
+
+# ---------------------------------------------------------------------------
+# The loss curve. One row per objective EVALUATION, not per optimizer iteration
+# -- matching scikit-bio's loss_curve_, whose length is a property of the line
+# search and so must never be asserted for equality across implementations.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT min(axis) = 1 AND max(axis) = count(*) FROM fit WHERE modality='loss';
+----
+true
+
+# There are more evaluations than iterations, because the line search probes.
+query I
+SELECT (SELECT count(*) FROM fit WHERE modality='loss') > (SELECT DISTINCT n_iter FROM fit);
+----
+true
+
+# The fit made progress: the objective at the end is far below the start.
+query I
+SELECT (SELECT value FROM fit WHERE modality='loss' AND axis=1)
+     > (SELECT value FROM fit WHERE modality='loss' AND axis=(SELECT max(axis) FROM fit WHERE modality='loss'));
+----
+true
+
+# ---------------------------------------------------------------------------
+# Reproducibility. The core is single-threaded and Eigen is compiled with
+# EIGEN_DONT_PARALLELIZE, so a seeded fit is bit-identical run to run -- which is
+# the whole point of mmvec carrying its own RNG transforms.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT count(*) FROM (
+  SELECT * FROM mmvec_fit('microbes','metabolites', seed := 7)
+  EXCEPT ALL
+  SELECT * FROM mmvec_fit('microbes','metabolites', seed := 7)
+);
+----
+0
+
+# And the seed genuinely matters -- otherwise the check above would be vacuous.
+query I
+SELECT count(*) > 0 FROM (
+  SELECT * FROM mmvec_fit('microbes','metabolites', seed := 7)
+  EXCEPT
+  SELECT * FROM mmvec_fit('microbes','metabolites', seed := 8)
+);
+----
+true
+
+# ---------------------------------------------------------------------------
+# Adam. `max_iter` is the EPOCH count on this path (scikit-bio's own mapping),
+# and each epoch runs max(1, nnz / batch_size) updates -- 27 X cells over batches
+# of 10 gives 2 updates per epoch, so 5 epochs is 10 updates.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE fit_adam AS
+SELECT * FROM mmvec_fit('microbes','metabolites', optimizer := 'adam', max_iter := 5, batch_size := 10);
+
+query I
+SELECT DISTINCT n_iter FROM fit_adam;
+----
+10
+
+# Adam always reports false: it has no convergence test at all, and the message
+# says so rather than implying something went wrong.
+query I
+SELECT DISTINCT converged FROM fit_adam;
+----
+false
+
+query I
+SELECT DISTINCT message LIKE '%no convergence test%' FROM fit_adam;
+----
+true
+
+# Same shape as the L-BFGS fit, and the reference category is still pinned.
+query II
+SELECT modality, count(*) FROM fit_adam WHERE modality IN ('x','y') GROUP BY modality ORDER BY modality;
+----
+x	32
+y	24
+
+query I
+SELECT sum(abs(value)) FROM fit_adam WHERE modality='y' AND y_feature_id='b1';
+----
+0.0
+
+# The two batch_norm modes target materially different posteriors -- 'legacy'
+# rescales the likelihood against unscaled priors -- so they must not agree.
+query I
+SELECT count(*) > 0 FROM (
+  SELECT * FROM mmvec_fit('microbes','metabolites', optimizer := 'adam', max_iter := 5, batch_norm := 'unbiased')
+  EXCEPT
+  SELECT * FROM mmvec_fit('microbes','metabolites', optimizer := 'adam', max_iter := 5, batch_norm := 'legacy')
+);
+----
+true
+
+# dimensions flows through to the axis range.
+query I
+SELECT max(axis) FROM mmvec_fit('microbes','metabolites', dimensions := 1) WHERE modality='x';
+----
+1

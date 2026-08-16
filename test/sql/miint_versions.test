@@ -4,9 +4,9 @@
 
 require miint
 
-# At least 8 core libraries always present (HDF5, vsearch, and abpoa are optional)
+# At least 9 core libraries always present (HDF5, vsearch, and abpoa are optional)
 query I
-SELECT COUNT(*) >= 8 FROM miint_versions();
+SELECT COUNT(*) >= 9 FROM miint_versions();
 ----
 true
 
@@ -19,14 +19,14 @@ SELECT COUNT(*) FROM miint_versions() WHERE version = '' OR version IS NULL;
 # All always-present library names
 query I
 SELECT COUNT(*) FROM miint_versions()
-WHERE library IN ('miint', 'htslib', 'minimap2', 'kseq++', 'WFA2-lib', 'zlib', 'rype', 'mafft');
+WHERE library IN ('miint', 'htslib', 'minimap2', 'kseq++', 'LBFGS++', 'WFA2-lib', 'zlib', 'rype', 'mafft');
 ----
-8
+9
 
 # Every row matches either a core or optional library name
 query I
 SELECT COUNT(*) FROM miint_versions()
-WHERE library NOT IN ('miint', 'htslib', 'minimap2', 'kseq++', 'WFA2-lib', 'HDF5', 'zlib', 'libdeflate', 'libcurl', 'rype', 'vsearch', 'mafft', 'abpoa', 'sylph', 'unifrac', 'scikit-bio-binaries');
+WHERE library NOT IN ('miint', 'htslib', 'minimap2', 'kseq++', 'LBFGS++', 'WFA2-lib', 'HDF5', 'zlib', 'libdeflate', 'libcurl', 'rype', 'vsearch', 'mafft', 'abpoa', 'sylph', 'unifrac', 'scikit-bio-binaries');
 ----
 0
 
@@ -35,3 +35,8 @@ query I
 SELECT version FROM miint_versions() WHERE library = 'kseq++';
 ----
 1.1.2
+
+query I
+SELECT version FROM miint_versions() WHERE library = 'LBFGS++';
+----
+0.4.0

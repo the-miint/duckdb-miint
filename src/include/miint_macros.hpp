@@ -986,6 +986,62 @@ const std::string BETA_KNN_FROM_SAMPLE = // NOLINT
     "    SELECT sample_a AS neighbor, distance FROM query_table(distances) WHERE sample_b = source "
     ") ORDER BY distance, neighbor LIMIT k; ";
 
+// mmvec_train_test_split(relation, test_fraction, seed)
+//
+// Split a long-form feature-table's SAMPLES into 'train' and 'test', for holding
+// data back from mmvec_fit and scoring on it with mmvec_score. Returns one row per
+// distinct sample_id: (sample_id, split), sample_id passed through with its own
+// type so it joins back to the feature table without a cast.
+//
+// ONE relation, not two. mmvec_fit requires its X and Y tables to describe exactly
+// the same samples and validates that itself, so a second relation would carry no
+// information -- split either one and filter both by the result.
+//
+// Exactly round(n * test_fraction) samples are assigned 'test' (rounding half away
+// from zero, so 10 samples at 0.35 gives 4). test_fraction outside [0, 1] is an
+// error rather than a silent all-train or all-test.
+//
+// NULL is rejected before the range test, and has to be: SQL's three-valued logic
+// makes `NULL < 0 OR NULL > 1` evaluate to NULL rather than true, so a NULL would
+// fall past a range test written on its own. It would then make n_test NULL, make
+// `rn <= n_test` NULL, and land every sample in the ELSE branch -- an all-train
+// split, silently, which is the exact outcome the range check exists to prevent.
+// A NULL seed is rejected for the same class of reason: md5(NULL || ...) is NULL
+// for every row, so the ordering would collapse to plain alphabetical by sample_id
+// and the split would look seeded without being seeded.
+//
+// The assignment is a deterministic function of (sample_id, seed) alone: samples
+// are ordered by md5(seed || ':' || sample_id) and the first n_test taken. Ties are
+// broken by sample_id, so the result depends on neither the input row order nor how
+// the scan was parallelized, and re-running it -- in another session, on a permuted
+// table -- gives the same split. md5 rather than DuckDB's hash() deliberately: hash()
+// is an implementation detail that may change between versions, whereas md5 is
+// specified, so a split recorded in a paper still reproduces after an upgrade. Not a
+// cryptographic claim -- this is a permutation, not a secret.
+//
+// A sample-wise split routinely leaves test-only FEATURES in the held-out tables,
+// which mmvec_predict and mmvec_score reject by design (there is no conditional
+// probability for a feature the model never saw). Restrict the test tables to the
+// model's own features first -- their error messages name the exact predicate.
+const std::string MMVEC_TRAIN_TEST_SPLIT = // NOLINT
+    "CREATE OR REPLACE MACRO mmvec_train_test_split(relation, test_fraction, seed) AS TABLE "
+    "SELECT sample_id, "
+    "       CASE WHEN test_fraction IS NULL "
+    "              THEN error('mmvec_train_test_split: test_fraction must not be NULL') "
+    "            WHEN seed IS NULL "
+    "              THEN error('mmvec_train_test_split: seed must not be NULL') "
+    "            WHEN test_fraction < 0 OR test_fraction > 1 "
+    "              THEN error(printf('mmvec_train_test_split: test_fraction must be in [0, 1], got %s', "
+    "                                CAST(test_fraction AS VARCHAR))) "
+    "            WHEN rn <= n_test THEN 'test' ELSE 'train' END AS split "
+    "FROM ( "
+    "    SELECT sample_id, "
+    "           ROW_NUMBER() OVER (ORDER BY md5(CAST(seed AS VARCHAR) || ':' || CAST(sample_id AS VARCHAR)), "
+    "                                       sample_id) AS rn, "
+    "           CAST(round(COUNT(*) OVER () * test_fraction) AS BIGINT) AS n_test "
+    "    FROM (SELECT DISTINCT sample_id FROM query_table(relation)) "
+    "); ";
+
 class MIINTMacros {
 public:
 	static void Register(ExtensionLoader &loader) {
@@ -1067,6 +1123,8 @@ public:
 		register_macro(BETA_GROUP_DISTANCES, "beta_group_distances");
 		register_macro(BETA_KNN, "beta_knn");
 		register_macro(BETA_KNN_FROM_SAMPLE, "beta_knn_from_sample");
+
+		register_macro(MMVEC_TRAIN_TEST_SPLIT, "mmvec_train_test_split");
 	}
 };
 

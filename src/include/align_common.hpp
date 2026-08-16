@@ -342,8 +342,9 @@ inline void FilterMappedOnly(miint::SAMRecordBatch &batch) {
 //   - `read_id` defaults to VARCHAR (back-compat). When `expected_read_id_type`
 //     is non-INVALID, the column must match it exactly — supports BIGINT once
 //     the caller has captured the query table's id type. The strict equality
-//     check keeps the downstream JOIN inside ReadBatchByIds well-typed without
-//     relying on implicit casts.
+//     check keeps the downstream shard join (BuildShardedQueryReadsSelect for
+//     minimap2, OpenCurrentShardStream for bowtie2) well-typed without relying on
+//     implicit casts.
 inline void ValidateReadToShardSchema(ClientContext &context, const std::string &table_name,
                                       const LogicalType &expected_read_id_type = LogicalType(LogicalTypeId::INVALID)) {
 	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
@@ -420,12 +421,23 @@ struct ShardNameCount {
 // Read shard names and counts from read_to_shard table
 // Returns pairs of (shard_name, count) ordered by count descending (largest first)
 // Throws if any shard_name is NULL or if the table is empty
-inline std::vector<ShardNameCount> ReadShardNameCounts(ClientContext &context, const std::string &table_name) {
+//
+// `join_query_table`, when non-empty, restricts the count to reads that actually
+// exist in that query relation (`read_to_shard JOIN <query_table> USING read_id`)
+// instead of counting mapping rows. Callers that use the result to verify how many
+// reads a shard *should* deliver need this form: a mapping legitimately listing
+// reads absent from the query relation would otherwise look like data loss (#229).
+inline std::vector<ShardNameCount> ReadShardNameCounts(ClientContext &context, const std::string &table_name,
+                                                       const std::string &join_query_table = "") {
 	auto conn = MakeReadOnlyHelperConnection(context);
 
 	// Query shard counts ordered by count descending (largest first)
-	std::string query = "SELECT shard_name, COUNT(*) as cnt FROM " + KeywordHelper::WriteOptionallyQuoted(table_name) +
-	                    " GROUP BY shard_name ORDER BY cnt DESC";
+	std::string from = KeywordHelper::WriteOptionallyQuoted(table_name) + " rts";
+	if (!join_query_table.empty()) {
+		from += " JOIN " + KeywordHelper::WriteOptionallyQuoted(join_query_table) + " q ON q.read_id = rts.read_id";
+	}
+	std::string query = "SELECT rts.shard_name AS shard_name, COUNT(*) as cnt FROM " + from +
+	                    " GROUP BY rts.shard_name ORDER BY cnt DESC";
 
 	auto query_result = conn.Query(query);
 	if (query_result->HasError()) {

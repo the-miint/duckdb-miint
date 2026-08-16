@@ -247,6 +247,53 @@ This source code is released under the terms of the MIT License.
 
 ---
 
+## LBFGS++
+
+Header-only L-BFGS quasi-Newton optimizer (Eigen-backed). Drives the
+maximum-a-posteriori fit in `mmvec`. Vendored as tracked file copies at
+`ext/LBFGSpp/` (the same treatment as kseq++ and concurrentqueue: header-only,
+no build step). Only the unbounded solver is vendored; the bounded `LBFGSB`
+solver is omitted as unused. Every vendored file is unmodified — see
+`ext/LBFGSpp/PROVENANCE.md` for per-file checksums.
+
+- Repository: https://github.com/yixuan/LBFGSpp
+- Version: v0.4.0, tag commit `c524a407fb85b74807f53de5a3ca2ddbcc164e54`
+- License: MIT (also vendored verbatim at `ext/LBFGSpp/LICENSE.md`)
+
+Portions derive from Jorge Nocedal's original Fortran L-BFGS and from
+libLBFGS (Naoaki Okazaki); all copyright holders are listed below.
+
+### MIT License
+
+Copyright (c) 1990 Jorge Nocedal
+
+Copyright (c) 2007-2010 Naoaki Okazaki
+
+Copyright (c) 2016-2023 Yixuan Qiu
+
+Copyright (c) 2018-2023 Dirk Toewe
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+---
+
 ## Biopython
 
 The SFF binary parser (`src/SFFReader.cpp`) was developed with reference to
@@ -955,12 +1002,14 @@ explicit linking exceptions that authorize inclusion in non-GPL binaries.
 
 ## System libraries (via vcpkg)
 
-The following libraries are fetched and built at configure time by vcpkg
-(see `vcpkg.json`) and linked into the extension. Their source is not
-vendored in this repository; vcpkg places each library's authoritative
+The following libraries are fetched at configure time by vcpkg (see
+`vcpkg.json`) and compiled into or linked against the extension. Their source is
+not vendored in this repository; vcpkg places each library's authoritative
 license text under its build tree (e.g.
 `vcpkg/buildtrees/<port>/src/.../COPYING`) and installed share directory
-(`vcpkg_installed/<triplet>/share/<port>/copyright`). All are permissive.
+(`vcpkg_installed/<triplet>/share/<port>/copyright`). All are permissive except
+Eigen, which is weak-copyleft (MPL-2.0) and is therefore restricted at compile
+time to its pure-MPL2 subset — see its row below.
 
 | Library | Purpose | SPDX / License | Notes |
 |---|---|---|---|
@@ -971,6 +1020,12 @@ license text under its build tree (e.g.
 | curl | HTTP(S) transfers (INSDC/ENA paths) | `curl` (MIT/X-derivative) | Linked only when `MIINT_ENABLE_CURL` is on (auto-disabled on macOS to avoid an MD5/SHA1 symbol clash with vsearch) |
 | OpenSSL | TLS backend | `Apache-2.0` (OpenSSL 3.x) | Pulled in transitively by curl; present only where curl is linked |
 | HDF5 | HDF5 container I/O (fast5, etc.) | `BSD-3-Clause`-style (The HDF Group license) | Not built for Emscripten (`vcpkg.json` `platform: !emscripten`) |
+| Eigen | Linear algebra: `SelfAdjointEigenSolver` for the SYM/ARD Mk ancestral-state reconstruction, and the matrix backend for the vendored LBFGS++ used by `mmvec` | `MPL-2.0` | Header-only, so nothing is linked — the headers are compiled in. `EIGEN_MPL2_ONLY` is defined globally (`CMakeLists.txt`), which confines the build to Eigen's pure-MPL2 subset and keeps no stronger-copyleft file reachable. Authoritative text ships as `COPYING.MPL2` in the vcpkg source tree. A pinned, SHA-verified header-only Eigen 3.4.0 is fetched directly when the vcpkg CONFIG package is absent (the no-vcpkg "Tidy Check" CI lane only). |
+
+Per the policy above, MPL-2.0 is identified by SPDX expression with a pointer to
+the upstream licence file rather than inlined. MPL-2.0 obligations attach
+per-file to Eigen's own sources, which are unmodified; it imposes no condition on
+miint's own Modified-BSD code.
 
 RocksDB — also sourced via vcpkg — is documented separately above (it is
 dual `GPL-2.0-only OR Apache-2.0`, used under Apache-2.0).
@@ -985,7 +1040,7 @@ code was developed with reference to them, or because they generated committed
 golden data used by the parity tests. This mirrors the Biopython entry above,
 where a reference-only consultation is likewise recorded.
 
-All four Python projects are distributed under the 3-clause BSD license; the
+All five Python projects are distributed under the 3-clause BSD license; the
 shared license text appears once at the end of this section with each project's
 copyright notice listed alongside it.
 
@@ -1060,6 +1115,16 @@ generating `data/simsurvey/beta_distance_oracle.csv`, and for classical PCoA
 during validation. Distinct from the **scikit-bio-binaries (libskbb)** C++
 library documented above, which *is* linked into the extension.
 
+`mmvec` (`src/mmvec.cpp`) is an independent C++ reimplementation of
+`skbio.stats.ordination.mmvec`, written to reproduce its results. Every expected
+value in `test/cpp/mmvec_oracle.hpp` was produced by executing scikit-bio 0.7.3
+(the module's sha256 is recorded in that header), and the synthetic input
+fixtures in `data/mmvec/` were generated by its private test simulator
+`random_multimodal`. The `soils` fixtures were unpivoted from the TSVs committed
+in scikit-bio's own test data. No scikit-bio code is vendored, translated
+line-by-line, or executed by miint at any point — see `data/mmvec/README.md` for
+the full derivation.
+
 - Repository: https://github.com/scikit-bio/scikit-bio
 - Version referenced: 0.7.3
 - License: `BSD-3-Clause` — Copyright (c) 2013--, scikit-bio development team
@@ -1069,6 +1134,29 @@ library documented above, which *is* linked into the extension.
 Aton, M.; McDonald, D.; Cañardo Alastuey, J.; et al. (2025) "Scikit-bio: a
 fundamental Python library for biological omic data analysis", Nature Methods.
 doi: 10.1038/s41592-025-02981-z
+
+### mmvec (biocore/mmvec)
+
+The original implementation of the microbe–metabolite co-occurrence method that
+scikit-bio's `mmvec` — and therefore miint's — derives from. Consulted as an
+algorithm reference; no code is vendored or executed.
+
+The cystic-fibrosis fixtures `data/mmvec/cf_*.parquet` are derived from the BIOM
+tables and metadata this project distributes under `examples/cf/`; upstream file
+checksums and the derivation are recorded in `data/mmvec/README.md`, along with
+the citations for the two studies (`soils`, `cf`) whose data the fixtures carry.
+
+- Repository: https://github.com/biocore/mmvec
+- License: `BSD-3-Clause` — Copyright (c) 2018, Jamie Morton
+
+#### Citation
+
+Morton, J. T.; Aksenov, A. A.; Nothias, L. F.; Foulds, J. R.; Quinn, R. A.;
+Badri, M. H.; Swenson, T. L.; Van Goethem, M. W.; Northen, T. R.; Vazquez-Baeza,
+Y.; Wang, M.; Bokulich, N. A.; Watters, A.; Song, S. J.; Bonneau, R.;
+Dorrestein, P. C.; and Knight, R. (2019) "Learning representations of
+microbe-metabolite interactions", Nature Methods, 16(12), 1306-1314.
+doi: 10.1038/s41592-019-0616-3
 
 ### species_abund_sim / ord_survey (Kuczynski et al. 2010 reference code)
 
@@ -1093,8 +1181,8 @@ doi: 10.1038/nmeth.1499
 
 ### BSD 3-Clause License
 
-Applies to cogent3, SciPy, scikit-learn, and scikit-bio, each with its own
-copyright notice as listed above.
+Applies to cogent3, SciPy, scikit-learn, scikit-bio, and mmvec, each with its
+own copyright notice as listed above.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
