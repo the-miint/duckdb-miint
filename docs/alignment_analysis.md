@@ -14,6 +14,7 @@ A considerable amount of analysis on alignment data can be performed with native
 - [Query coverage](#cigar-query-coverage) - Query coverage from CIGAR
 - [Query intervals](#cigar-query-intervals) - Which read positions an alignment covers, on the read's own axis
 - [Merge overlapping intervals](#merge-overlapping-intervals) - Merge overlapping genomic intervals (aggregate)
+- [Genome bins](#genome-bins) - Divide a genome into equal-width bins; map positions and intervals to them
 - [Coverage depth](#coverage-depth) - Per-position depth of coverage (aggregate)
 - [Genome coverage](#genome-coverage) - Proportion of each genome covered by alignments
 - [Per-sample genome coverage](#per-sample-genome-coverage) - The same, reported separately for each sample
@@ -644,6 +645,95 @@ WHERE LEAD(interval.start) OVER (PARTITION BY reference ORDER BY interval.start)
 - Automatic periodic compression at 1M intervals prevents memory bloat with large datasets
 - Multi-threaded aggregation: each thread maintains its own state, merged at finalization
 - Algorithm: sorts intervals by start position, then single-pass merge (O(n log n))
+
+### Genome bins
+
+`bin_of(pos, n_bins, genome_length)`
+`bin_start(b, n_bins, genome_length)`
+`interval_bins(start, stop, n_bins, genome_length)`
+
+Scalar macros that divide a genome into `n_bins` near-equal-width bins. `bin_of` maps a position to its bin; `bin_start` maps a bin back to its first position; `interval_bins` reports which bins a half-open interval touches, designed to be `UNNEST`ed so a read spanning a boundary is counted in every bin it overlaps.
+
+Together these support finding genomic regions whose coverage differs between sample groups: bin the alignments, count samples or reads per bin per group, and rank bins by the standard deviation of the per-group counts. Only the fan-out needed a primitive — the ranking half is plain SQL.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `pos` | BIGINT | A 1-based genomic position, in `[1, genome_length]` |
+| `start` | BIGINT | 1-based inclusive interval start, matching `read_alignments` |
+| `stop` | BIGINT | Exclusive interval end (half-open) |
+| `b` | BIGINT | 0-based bin index, in `[0, n_bins]` |
+| `n_bins` | BIGINT | Number of bins (must be ≥ 1); widths differ by at most one base |
+| `genome_length` | BIGINT | Total length being binned (must be ≥ 1) |
+
+**Returns:** `interval_bins` → `LIST(BIGINT)`, the bin indices touched, ascending and deduplicated. `bin_of` and `bin_start` → `BIGINT`. Every operand is normalized to `BIGINT` internally — in the bounds checks as well as the arithmetic — so `INTEGER` inputs, which is what `read_gff` and `read_ncbi_annotation` emit, cannot overflow. A `genome_length` or `n_bins` arriving as `DOUBLE`/`DECIMAL` (an inferred CSV or Parquet column) is rounded once and behaves exactly like that rounded integer.
+
+**Bin index convention:** bins are **0-based**. They are array positions rather than genomic coordinates, so this deliberately cuts against the 1-based coordinate convention used elsewhere. The bin index is the join key you will carry into downstream queries, so it is worth stating explicitly in your own code too.
+
+`bin_of` is the definition and `bin_start` is its left inverse:
+
+```
+bin_of(p)    = ((p - 1) * n_bins) // genome_length
+bin_start(b) = ceil(b * genome_length / n_bins) + 1
+```
+
+The guarantee is **containment**, `bin_start(bin_of(p)) <= p < bin_start(bin_of(p) + 1)` for every `p` in `[1, genome_length]`. It is not a round trip in both directions: when `n_bins > genome_length`, zero-width bins make `bin_start` non-injective, so `bin_of(bin_start(b))` need not be `b` (with `n_bins=5, genome_length=3`, `bin_start(2) = 3` but `bin_of(3) = 3`).
+
+**Bin edges are half-open, like every other interval in miint.** Bin `b` spans `[bin_start(b), bin_start(b + 1))` and its width is the plain difference — no `+1`, matching the `stop_position` rule in [`docs/internals/architecture.md`](internals/architecture.md). That makes `bin_start(0) = 1` and `bin_start(n_bins) = genome_length + 1`, so a bin drops straight into anything taking a half-open `(start, stop)` pair — `compress_intervals`, or your own region table — with no adjustment. Bin widths differ by at most one base, and every base belongs to exactly one bin.
+
+> **If your source uses an inclusive end**, add one before calling: `interval_bins(start, end + 1, ...)`. Getting this wrong is silent — every interval's last base lands one bin early and the ranking still looks plausible. `read_alignments`, `compress_intervals`, `read_gff` and `read_ncbi_annotation` are all already half-open, so no adjustment is needed for those.
+
+> **Do not pass `stop_position` to `bin_of`.** `bin_of` takes a position; `stop_position` is an exclusive end, so a read reaching the reference end carries `genome_length + 1` and `bin_of` raises. Use `bin_of(stop_position - 1, ...)` for the last covered base, or `interval_bins(position, stop_position, ...)` for the whole read. The error message says as much, but it aborts the query rather than one row — and it only triggers on reads at the very end of a reference, so it will pass on a small fixture and fail on a real BAM.
+
+**Behavior:**
+- NULL in any argument → NULL
+- `stop <= start` (empty or inverted interval) → empty list, so `UNNEST` drops the row
+- Intervals are clamped to `[1, genome_length]`; bins outside the genome are never emitted
+- When `n_bins` exceeds `genome_length` some bins are zero-width. This is legitimate when a fixed bin count is applied across genomes of very different sizes. Such bins contain no bases and are **not** emitted, even for an interval that spans across them.
+- `n_bins < 1` or `genome_length < 1` **raises**, rather than returning an empty list, so a bin count or length that computed to zero surfaces instead of quietly emptying the result.
+- A NULL `genome_length` yields NULL, **not** an error — and `UNNEST(NULL)` emits no rows, so those reads disappear with no diagnostic. This is the shape a missed join takes (a miss produces NULL, not 0), so the positivity check above does not cover it. If a genome may be absent from your lengths table, guard the join yourself rather than relying on an error.
+- `bin_of` raises on a position outside `[1, genome_length]`; `bin_start` raises on a bin index outside `[0, n_bins]`. Both would otherwise return a plausible-looking but fictional coordinate.
+
+**Examples:**
+```sql
+-- Rank bins by how variable their per-group sample counts are, then turn the
+-- top-ranked bins into half-open regions. One statement, so top_bins stays in scope.
+CREATE TABLE differential_regions AS
+WITH binned AS (
+    SELECT p.genome_id, md.country, p.sample_id,
+           UNNEST(interval_bins(p.start, p.stop, 500, g.length)) AS bin_index
+    FROM positions p
+    JOIN sample_metadata md USING (sample_id)
+    JOIN genome_lengths  g  USING (genome_id)
+    WHERE p.genome_id = 'G000436435'
+), per_group AS (
+    SELECT genome_id, bin_index, country, COUNT(DISTINCT sample_id) AS sample_hits
+    FROM binned GROUP BY genome_id, bin_index, country
+), top_bins AS (
+    SELECT genome_id, bin_index, stddev_samp(sample_hits) AS sample_hits_std
+    FROM per_group GROUP BY genome_id, bin_index
+    ORDER BY sample_hits_std DESC NULLS LAST, bin_index
+    LIMIT 20
+)
+SELECT genome_id,
+       bin_start(bin_index, 500, 4719737)     AS region_start,
+       bin_start(bin_index + 1, 500, 4719737) AS region_stop,   -- exclusive
+       'bin_' || bin_index                    AS region_id,
+       sample_hits_std
+FROM top_bins;
+
+-- Which bin does a single position fall in?
+SELECT bin_of(481323, 500, 4719737);
+```
+
+> The `ORDER BY` above carries `bin_index` as a tiebreak. Without it, ties in `sample_hits_std` — common, since many bins share a std dev of 0 — make the reported top-20 vary between runs and thread counts.
+
+> **A group with no sample in a bin contributes no row**, so `stddev_samp` sees one value and returns NULL rather than treating the absent group as zero. If absent-means-zero is what you want, densify against your sample roster first — that is a metadata decision, not a binning one.
+
+**Performance notes:**
+- When `n_bins <= genome_length` (the normal case) every bin is at least one base wide, so the result is a contiguous bin range and the cost is the number of bins the interval touches
+- When `n_bins > genome_length` the macro enumerates positions rather than bins, so the cost is the interval's length rather than `n_bins`. Binning a 3 bp plasmid into 10⁶ bins costs three positions, not a million
 
 ### Coverage depth
 

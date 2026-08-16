@@ -914,6 +914,143 @@ const std::string GENOME_COVERAGE_PER_SAMPLE = // NOLINT
     "        ELSE TRUE "
     "      END;";
 
+// bin_of(pos, n_bins, genome_length)
+// bin_start(b, n_bins, genome_length)
+// interval_bins(start, stop, n_bins, genome_length)
+//
+// Divide a genome into n_bins near-equal-width bins. bin_of maps a position to its bin,
+// bin_start maps a bin back to its first position, and interval_bins reports which bins
+// a half-open interval touches. Used to find genomic regions whose coverage differs
+// between sample groups: bin, count samples/reads per bin per group, then rank bins by
+// the standard deviation of the per-group counts -- all plain SQL once the fan-out
+// exists (issue #215).
+//
+// Widths are near-equal, not equal: they differ by at most one base when n_bins does not
+// divide genome_length. That is the entire reason bin_start cannot be computed by the
+// obvious floor formula -- see below.
+//
+// Bin indices are 0-BASED. They are array positions, not genomic coordinates, so they
+// deliberately cut against the 1-based coordinate convention used everywhere else here.
+//
+// Genomic positions stay 1-based half-open, matching read_alignments and the normalized
+// stop_position rule in docs/internals/architecture.md: bin b spans
+// [bin_start(b), bin_start(b+1)) and its width is the plain difference, no +1. That makes
+// bin_start(0) = 1 and bin_start(n_bins) = genome_length + 1, so (bin_start(b),
+// bin_start(b+1)) is directly usable as a half-open (start, stop) pair.
+//
+// bin_of is the definition; bin_start is its left inverse:
+//
+//   bin_of(p)    = ((p - 1) * n_bins) // genome_length
+//   bin_start(b) = ceil(b * genome_length / n_bins) + 1
+//
+// The invariant is CONTAINMENT, not round-tripping in both directions:
+//
+//   bin_start(bin_of(p)) <= p < bin_start(bin_of(p) + 1)   for every p in [1, genome_length]
+//
+// bin_of(bin_start(b)) = b fails when n_bins > genome_length, because zero-width bins make
+// bin_start non-injective (n_bins=5, genome_length=3: bin_start(2) = 3 but bin_of(3) = 3).
+//
+// bin_start must use ceil. With floor, genome_length=10 / n_bins=4 gives bounds
+// [1,3) [3,6) [6,8) [8,11), which places position 3 in bin 1 while bin_of(3) is 0 --
+// the two disagree at 4 of 10 positions. bin_start is the join key callers carry
+// around, so a mismatch there shifts every downstream bin and the ranking still looks
+// perfectly plausible. Pinned by the containment assertions in
+// test/sql/interval_bins.test, which report 23 violations against the floor variant.
+//
+// Every operand is normalized with ::BIGINT before it is used in arithmetic OR in a
+// bounds comparison, and the normalized value is what the error messages quote. Two
+// reasons. read_gff and read_ncbi_annotation emit INTEGER positions, and an unwidened
+// (position * n_bins) overflows INT32 at ~4.3 Mbp / 500 bins -- an ordinary bacterial
+// genome. And a genome_length arriving as DOUBLE or DECIMAL (an inferred CSV/Parquet
+// column) must compare against the same rounded value the arithmetic uses, or the clamp
+// and the bounds check disagree and the caller sees an error about a position they never
+// supplied.
+//
+// NULL in any argument yields NULL, following the SQL convention compress_intervals uses.
+// Note what that means downstream: UNNEST(NULL) emits no rows, so a genome_length that
+// arrived NULL from a missed join drops those reads silently. The positivity check below
+// cannot catch that -- a join miss produces NULL, not 0. Guard the join if it matters.
+const std::string BIN_OF = // NOLINT
+    "CREATE OR REPLACE MACRO bin_of(pos, n_bins, genome_length) AS ( "
+    "  CASE "
+    "    WHEN pos IS NULL OR n_bins IS NULL OR genome_length IS NULL THEN NULL "
+    "    WHEN n_bins::BIGINT < 1 OR genome_length::BIGINT < 1 "
+    "      THEN error(printf('bin_of: n_bins and genome_length must be positive "
+    "(got n_bins=%s, genome_length=%s)', "
+    "                        n_bins::BIGINT::VARCHAR, genome_length::BIGINT::VARCHAR)) "
+    // The hint is not decoration. stop_position is an EXCLUSIVE end, so a read reaching
+    // the reference end legitimately carries genome_length + 1, and
+    // `SELECT bin_of(position, ...), bin_of(stop_position, ...)` is the natural thing to
+    // write. It passes on small fixtures and aborts on a real BAM, so the error has to
+    // name the fix.
+    "    WHEN pos::BIGINT < 1 OR pos::BIGINT > genome_length::BIGINT "
+    "      THEN error(printf('bin_of: position %s outside genome [1, %s] "
+    "(if this is an exclusive stop_position, pass stop_position - 1)', "
+    "                        pos::BIGINT::VARCHAR, genome_length::BIGINT::VARCHAR)) "
+    "    ELSE ((pos::BIGINT - 1) * n_bins::BIGINT) // genome_length::BIGINT "
+    "  END);";
+
+// b may equal n_bins: that is the exclusive end of the last bin, genome_length + 1, and
+// callers need it to close the final region.
+const std::string BIN_START = // NOLINT
+    "CREATE OR REPLACE MACRO bin_start(b, n_bins, genome_length) AS ( "
+    "  CASE "
+    "    WHEN b IS NULL OR n_bins IS NULL OR genome_length IS NULL THEN NULL "
+    "    WHEN n_bins::BIGINT < 1 OR genome_length::BIGINT < 1 "
+    "      THEN error(printf('bin_start: n_bins and genome_length must be positive "
+    "(got n_bins=%s, genome_length=%s)', "
+    "                        n_bins::BIGINT::VARCHAR, genome_length::BIGINT::VARCHAR)) "
+    "    WHEN b::BIGINT < 0 OR b::BIGINT > n_bins::BIGINT "
+    "      THEN error(printf('bin_start: bin index %s outside [0, %s]', "
+    "                        b::BIGINT::VARCHAR, n_bins::BIGINT::VARCHAR)) "
+    "    ELSE ((b::BIGINT * genome_length::BIGINT + n_bins::BIGINT - 1) "
+    "          // n_bins::BIGINT) + 1 "
+    "  END);";
+
+// Two regimes, because range() materializes every element before anything can prune it.
+//
+// n_bins <= genome_length: every bin is at least one base wide, so no bin in the spanned
+// range can be empty and the range IS the answer. Cost is the number of bins touched.
+//
+// n_bins > genome_length: some bins are zero-width. That is legitimate -- a fixed bin
+// count applied across genomes of very different sizes -- but those bins hold no bases,
+// so an interval cannot touch them and they must not be emitted. Enumerating the range
+// and filtering would cost O(n_bins) (measured 19 ms/row at n_bins=1e6, genome_length=3);
+// enumerating positions instead costs O(interval length), which in this regime is bounded
+// by genome_length < n_bins. Same answer, 269x faster on that case.
+//
+// The bin arithmetic is inlined rather than delegated to bin_of, which duplicates the
+// floor formula on purpose. Delegating would resolve `bin_of` in the CALLER's catalog, so
+// a user macro of that name silently hijacks every result (verified: a user
+// `CREATE MACRO bin_of(...) AS 999` turns interval_bins(1,5,4,10) into [999]). It also
+// re-ran bin_of's NULL and bounds guards once per enumerated position -- all already
+// established here, and measured at ~1.4x -- when the clamp below already guarantees
+// every p is inside [1, genome_length]. Any change to the formula must be mirrored in
+// BIN_OF above; the containment tests cover both.
+const std::string INTERVAL_BINS = // NOLINT
+    "CREATE OR REPLACE MACRO interval_bins(start, stop, n_bins, genome_length) AS ( "
+    "  CASE "
+    "    WHEN start IS NULL OR stop IS NULL OR n_bins IS NULL OR genome_length IS NULL "
+    "      THEN NULL "
+    "    WHEN n_bins::BIGINT < 1 OR genome_length::BIGINT < 1 "
+    "      THEN error(printf('interval_bins: n_bins and genome_length must be positive "
+    "(got n_bins=%s, genome_length=%s)', "
+    "                        n_bins::BIGINT::VARCHAR, genome_length::BIGINT::VARCHAR)) "
+    // Clamp to the genome, then treat an empty or inverted interval as touching nothing
+    // so UNNEST drops the row.
+    "    WHEN LEAST(stop::BIGINT, genome_length::BIGINT + 1) "
+    "         <= GREATEST(start::BIGINT, 1) THEN []::BIGINT[] "
+    "    WHEN n_bins::BIGINT <= genome_length::BIGINT "
+    "      THEN range(((GREATEST(start::BIGINT, 1) - 1) * n_bins::BIGINT) "
+    "                 // genome_length::BIGINT, "
+    "                 ((LEAST(stop::BIGINT, genome_length::BIGINT + 1) - 2) "
+    "                  * n_bins::BIGINT) // genome_length::BIGINT + 1) "
+    "    ELSE list_sort(list_distinct(list_transform( "
+    "           range(GREATEST(start::BIGINT, 1), "
+    "                 LEAST(stop::BIGINT, genome_length::BIGINT + 1)), "
+    "           lambda p: ((p - 1) * n_bins::BIGINT) // genome_length::BIGINT))) "
+    "  END);";
+
 // circular_query_coverage(alignments, reference_lengths)
 //
 // How much of each read is explained by each reference, pooling every alignment record
@@ -1501,6 +1638,9 @@ public:
 		register_macro(READ_GFF, "read_gff");
 		register_macro(GENOME_COVERAGE, "genome_coverage");
 		register_macro(GENOME_COVERAGE_PER_SAMPLE, "genome_coverage_per_sample");
+		register_macro(BIN_OF, "bin_of");
+		register_macro(BIN_START, "bin_start");
+		register_macro(INTERVAL_BINS, "interval_bins");
 		register_macro(CIRCULAR_QUERY_COVERAGE, "circular_query_coverage");
 		register_macro(INFER_TRIM, "infer_trim");
 
