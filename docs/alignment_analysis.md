@@ -19,6 +19,7 @@ A considerable amount of analysis on alignment data can be performed with native
 - [Genome coverage](#genome-coverage) - Proportion of each genome covered by alignments
 - [Per-sample genome coverage](#per-sample-genome-coverage) - The same, reported separately for each sample
 - [Region presence](#region-presence) - Three-state (present / absent / not applicable) region calls per sample
+- [Region coverage](#region-coverage) - Breadth of coverage of a sub-genome region, with the region's own length as the denominator
 - [Circular query coverage](#circular-query-coverage) - Query coverage pooled across the fragments of one read, for reads spanning a circular reference's origin
 - [Barcode matching](#barcode-matching) - Hamming-distance matcher for short fixed-length barcodes
 - [MSA column consensus](#msa-column-consensus) - Quality-aware consensus from a multiple alignment
@@ -1033,6 +1034,121 @@ WHERE bin_start(bin_index + 1, 500, length) > bin_start(bin_index, 500, length);
 > `region_id` is qualified with `genome_id` on purpose. A bare `'bin_' || bin_index` repeats across genomes — every genome has a bin 3 — which breaks the uniqueness the `PIVOT` recipe above depends on.
 
 > That `WHERE` matters only when `n_bins > genome_length`, where `bin_start` legitimately produces zero-width bins. A zero-width region is unanswerable — every sample would score `absent` — so `region_presence` rejects it rather than inventing a negative result, and the error names this filter as the remedy.
+
+### Region coverage
+
+`region_coverage(positions, regions)`
+
+Table macro giving, per sample, how much of a sub-genome region is covered — with the **region's** length as the denominator. [`genome_coverage`](#genome-coverage) divides by the genome, so a fully covered 5 kb region inside a 5 Mb genome reports 0.1% there and 100% here. That denominator is the point of the function.
+
+Two things have to be right for the number to mean anything, and the macro does both:
+
+- Alignments are **clipped** to the region before they are merged, so one hanging over the boundary contributes only its in-region portion and one strictly containing the region contributes exactly `region_length`, not its own length.
+- The clipped intervals are then **merged**, so a base under two alignments is counted once. An unmerged sum inflates the proportion — past 1.0 on a short region, invisibly on a long one.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `positions` | relation | Columns `sample_id` (any type), `genome_id` (any type), `start`, `stop` (any integer type). 1-based half-open. |
+| `regions` | relation | Columns `genome_id` (any type), `region_start`, `region_stop` (any integer type), `region_id` (any type). Half-open on the same convention. |
+
+Coordinates are normalized to `BIGINT` internally and come back as `BIGINT`, so `INTEGER` inputs — what `read_gff` and `read_ncbi_annotation` emit — need no cast, and are widened before they can overflow. Numeric coordinates arriving as `VARCHAR`, which is what an unconfigured BED or CSV read gives you, are also normalized rather than compared as text; that is defensive, not an invitation — type your coordinate columns.
+
+> **Same column contract as [`region_presence`](#region-presence)**, deliberately — the two are called on the same relation in the same pipeline, and a rename between two consecutive lines of a query would be a needless trap. It is *not* `genome_coverage`'s contract: coming from `read_alignments` you rename once, in a view (`reference` → `genome_id`, `position` → `start`, `stop_position` → `stop`), and both region functions then take it. `genome_coverage` keeps the alignment names because it predates the sample dimension.
+
+`positions` does not need to be pre-compressed — `compress_intervals` runs inside — so raw alignment rows are safe input.
+
+**Returns:** one row per `(sample, region)` pair **that has overlap**. See [No zero rows](#no-zero-rows) below.
+
+| Column | Type | Description |
+|---|---|---|
+| `sample_id` | from `positions`, uncast | |
+| `genome_id` | from **`regions`**, uncast | |
+| `region_id` | from `regions`, uncast | |
+| `region_start`, `region_stop` | BIGINT | The region's bounds, as supplied |
+| `covered` | BIGINT | Covered bases **within the region** |
+| `region_length` | BIGINT | `region_stop - region_start` (half-open, no `+1`) |
+| `proportion_covered` | DOUBLE | `covered / region_length` |
+
+Identifiers are carried through uncast, so VARCHAR, BIGINT and UUID all survive end to end. The same [type-matching caveat as `region_presence`](#region-presence) applies — `genome_id` takes the **`regions`** type in the output, and one unconvertible identifier aborts the query with an error that names neither the function nor the relation.
+
+The coordinates are emitted alongside `region_id` because the join is keyed on them: two rows sharing a `region_id` but covering different spans are scored independently, and without the coordinates those rows are indistinguishable downstream.
+
+<a name="no-zero-rows"></a>
+**No zero rows, on purpose.** A `(sample, region)` pair with no overlap gets no row — not a row with `covered = 0`. A fabricated zero asserts the region *was measured and found empty*, which is true of a sample that covers the genome elsewhere and false of a sample where the organism simply is not present. That is the conflation [`region_presence`](#region-presence) exists to prevent, and it cannot be undone downstream. To fill the grid honestly, compose the two — `region_presence` supplies the roster and the three states, `region_coverage` supplies the number where there is one:
+
+```sql
+SELECT p.sample_id, p.state,
+       COALESCE(c.covered, 0)             AS covered,
+       COALESCE(c.proportion_covered, 0)  AS proportion_covered
+FROM region_presence(positions, regions, roster) p
+LEFT JOIN region_coverage(positions, regions) c
+       ON c.sample_id = p.sample_id AND c.genome_id = p.genome_id
+      AND c.region_id = p.region_id
+      AND c.region_start = p.region_start AND c.region_stop = p.region_stop
+WHERE p.state IN ('present', 'absent');   -- drop non-detections; do not pool them
+```
+
+> **Join on the coordinates too, not just `region_id`.** Both functions emit `region_start`/`region_stop` because that is the tuple identifying a region, and two spans sharing a `region_id` are scored independently by design. Keyed on `region_id` alone this join cross-assigns: with regions `('g1',50,60,'RD')` and `('g1',700,750,'RD')` it reports the `[700,750)` row as `absent` while handing it `covered = 5` — the value belonging to `[50,60)` — and duplicates every row of a sample present in both spans. An `absent` row carrying coverage is a contradiction with no downstream tell.
+
+**Behavior:**
+- The overlap test is `start < region_stop AND stop > region_start`. An alignment starting exactly where a region ends shares no base with it and contributes nothing.
+- **Overlapping regions are each scored against their own bounds**, so a base can count in two regions. Well defined, and required for sliding-window regions — but it means `SUM(covered)` across regions is not a partition of the genome.
+- **Multi-contig genomes.** `regions.genome_id` is matched against `positions.genome_id` directly, so regions are effectively contig-level. Whole-genome coordinates for a multi-contig assembly are ambiguous; pick the contig yourself.
+- Duplicate rows in either relation do not inflate the result — the merge and the final grouping absorb them.
+- **NULL and degenerate intervals in `positions` drop; a NULL `sample_id` or `genome_id` raises.** The interval columns have a defined NULL meaning (a sample that exists with no coverage); the identity columns do not, and silently dropping an unattributable interval would subtract real coverage from whichever sample it belonged to.
+- **An unusable region raises** — any NULL column, a zero-width region (no denominator), or inverted coordinates. Each error names the offending `region_id` and its bounds, and zero-width and inverted are reported separately because the remedies differ: filtering is right for a bin expansion and wrong for transposed coordinates.
+- Empty `positions` or empty `regions` are legitimate and produce no rows.
+
+> **Validation covers the rows the query reads.** As with `region_presence`, the guards are ordinary SQL expressions, so a filter such as `WHERE region_id = 'PC351'` may be pushed beneath them and a malformed row *outside* that filter will not raise. This never changes the rows you get back.
+
+**Examples:**
+```sql
+-- Rename read_alignments' columns into the contract once, in a view.
+CREATE VIEW positions AS
+SELECT sample_id, reference AS genome_id, position AS start, stop_position AS stop
+FROM alignments;
+
+CREATE TABLE regions AS SELECT * FROM (VALUES
+    ('G000436435', 481323, 486671, 'PC351')
+) t(genome_id, region_start, region_stop, region_id);
+
+-- Per-sample breadth of one differential region, region-relative denominator
+SELECT * FROM region_coverage(positions, regions)
+ORDER BY proportion_covered DESC;
+
+-- Rank regions by how consistently the cohort covers them
+SELECT region_id, AVG(proportion_covered) AS mean_prop, COUNT(*) AS n_samples
+FROM region_coverage(positions, regions)
+GROUP BY region_id
+ORDER BY mean_prop DESC;
+```
+
+**When each genome is a single contig**, a whole-genome "region" reproduces `genome_coverage` with a sample dimension, which makes a useful equivalence check:
+
+```sql
+CREATE TABLE whole AS
+SELECT genome_id, 1 AS region_start, total_length + 1 AS region_stop, genome_id AS region_id
+FROM genome_lengths;
+
+SELECT * FROM region_coverage(positions, whole);
+```
+
+> **That equivalence does not survive a multi-contig genome**, and neither does the obvious workaround. `genome_coverage` maps contigs to genomes through `subject_genome_id` and sums across them; `region_coverage` matches `regions.genome_id` against `positions.genome_id` directly, so its regions are contig-level. Hand it whole-genome coordinates for a 3-contig assembly and it matches nothing — **zero rows**, where `genome_coverage` returns the real proportion.
+>
+> Relabelling the contigs to the genome name is worse, not better: each contig has its own 1-based frame, so three `[10, 60)` intervals stack onto one another, the merge collapses them, and you get `covered = 50` where the truth is `150`. Zero rows are at least visibly wrong; 50 looks like an answer.
+>
+> Keep regions **contig-level** — one region per contig, in that contig's own frame — and sum afterwards:
+>
+> ```sql
+> SELECT SUM(covered) AS covered,
+>        SUM(covered)::DOUBLE / SUM(region_length) AS proportion_covered
+> FROM region_coverage(positions, contig_regions)
+> GROUP BY sample_id;
+> ```
+
+Regions can come straight from [`bin_start`](#genome-bins) — `(bin_start(b), bin_start(b + 1))` is already half-open on the same convention. Use the [`bin_regions` recipe](#region-presence) shown for `region_presence`; both functions take it unchanged.
 
 ### Circular query coverage
 
