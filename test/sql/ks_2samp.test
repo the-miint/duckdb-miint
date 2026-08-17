@@ -1,0 +1,565 @@
+# name: test/sql/ks_2samp.test
+# description: ks_2samp contract -- statistic, NULL/empty semantics, method validation, exact-p ceiling (issue #218)
+# group: [sql]
+
+# Two-sided two-sample Kolmogorov-Smirnov test, micov's last reason to depend on
+# SciPy. Numeric parity against a committed scipy.stats.ks_2samp golden lives in
+# test/sql/ks_2samp_parity.test; this file pins the SQL-level contract.
+
+require miint
+
+# ---------------------------------------------------------------------------
+# Test 1 -- registered, with both overloads
+# ---------------------------------------------------------------------------
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'ks_2samp';
+----
+2
+
+# ---------------------------------------------------------------------------
+# Test 2 -- the examples in issue #218, run verbatim rather than eyeballed
+# ---------------------------------------------------------------------------
+query I
+SELECT (ks_2samp([1.0, 2.0, 3.0], [1.0, 2.0, 3.0])).statistic = 0.0
+   AND (ks_2samp([1.0, 2.0, 3.0], [1.0, 2.0, 3.0])).pvalue = 1.0;
+----
+true
+
+query I
+SELECT (ks_2samp([1.0, 2.0], [10.0, 20.0])).statistic = 1.0;
+----
+true
+
+# ---------------------------------------------------------------------------
+# Test 3 -- hand-computable statistic
+#   a = {1,2,3,4}, b = {2.5}: the ECDF gap peaks at 0.5 (at v=2.0 and v=2.5).
+# ---------------------------------------------------------------------------
+query I
+SELECT (ks_2samp([4.0, 1.0, 3.0, 2.0], [2.5])).statistic = 0.5;
+----
+true
+
+# Fully separated samples of 5 and 5: D = 1 and p = 2/C(10,5) = 2/252, because only
+# the two fully separated interleavings out of 252 reach that gap.
+query I
+SELECT abs((ks_2samp([1.0,2.0,3.0,4.0,5.0], [6.0,7.0,8.0,9.0,10.0])).pvalue - 2.0/252.0) < 1e-15;
+----
+true
+
+# ---------------------------------------------------------------------------
+# Test 4 -- ties. Every value is shared; only the multiplicities differ, so the gap
+# is 1/3 at v=1 and 0 at v=2. A walk that compared the ECDFs part-way through a run
+# of equal values would report a jump neither ECDF has.
+# ---------------------------------------------------------------------------
+query I
+SELECT abs((ks_2samp([1.0, 1.0, 2.0], [1.0, 2.0, 2.0])).statistic - 1.0/3.0) < 1e-15;
+----
+true
+
+# A sample against itself is 0 even when it contains repeats -- this is the case that
+# distinguishes the two tie conventions; distinct values could not.
+query I
+SELECT (ks_2samp([1.0,1.0,2.0,2.0,3.0], [1.0,1.0,2.0,2.0,3.0])).statistic = 0.0
+   AND (ks_2samp([1.0,1.0,2.0,2.0,3.0], [1.0,1.0,2.0,2.0,3.0])).pvalue = 1.0;
+----
+true
+
+# ---------------------------------------------------------------------------
+# Test 5 -- NULL in, NULL out
+# ---------------------------------------------------------------------------
+query III
+SELECT ks_2samp(NULL, [1.0, 2.0]) IS NULL,
+       ks_2samp([1.0, 2.0], NULL) IS NULL,
+       ks_2samp([1.0, 2.0], [3.0, 4.0], NULL) IS NULL;
+----
+true	true	true
+
+# ---------------------------------------------------------------------------
+# Test 6 -- an EMPTY sample is NULL, not 0.0
+#
+# 0.0 would read as "the two samples are identical", which is the opposite of what an
+# empty group means. A list whose every element is NULL reduces to the same case.
+# ---------------------------------------------------------------------------
+query III
+SELECT ks_2samp([]::DOUBLE[], [1.0]) IS NULL,
+       ks_2samp([1.0], []::DOUBLE[]) IS NULL,
+       ks_2samp([NULL]::DOUBLE[], [1.0]) IS NULL;
+----
+true	true	true
+
+# ---------------------------------------------------------------------------
+# Test 6b -- the same NULL and empty cases, but from a TABLE, and asserting the
+# STRUCT'S FIELDS are NULL rather than only the struct itself.
+#
+# Tests 5 and 6 above pass literals, which DuckDB constant-folds away before this
+# function ever runs (`EXPLAIN SELECT ks_2samp(NULL, [3.0])` is a plain NULL
+# projection over a dummy scan). They therefore pin the optimizer, not the wrapper.
+# This is the version that actually exercises the per-row validity branch, and it is
+# the only place a NULL column value reaches the function at all.
+#
+# The FIELD-level half is the load-bearing one. Marking only the struct's validity
+# leaves its children holding whatever was written into them, and struct_extract
+# references a child directly without applying its parent's validity -- so
+# (ks_2samp(a,b)).statistic would hand back 0.0, which is precisely the "the two
+# samples are identical" misreading that returning NULL for an empty sample exists to
+# prevent. The docs use (ks_2samp(...)).statistic as the access idiom, so that is the
+# path a user takes.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE nullcases(id INTEGER, a DOUBLE[], b DOUBLE[], m VARCHAR);
+
+statement ok
+INSERT INTO nullcases VALUES
+  (1, NULL,             [1.0, 2.0],   'auto'),
+  (2, [1.0, 2.0],       NULL,         'auto'),
+  (3, []::DOUBLE[],     [1.0],        'auto'),
+  (4, [1.0],            []::DOUBLE[], 'auto'),
+  (5, [NULL]::DOUBLE[], [1.0],        'auto'),
+  (6, [1.0, 2.0],       [3.0, 4.0],   NULL),
+  (7, [1.0, 2.0],       [3.0, 4.0],   'auto');
+
+query IIII
+SELECT id,
+       ks_2samp(a, b, m) IS NULL             AS struct_null,
+       (ks_2samp(a, b, m)).statistic IS NULL AS statistic_null,
+       (ks_2samp(a, b, m)).pvalue IS NULL    AS pvalue_null
+FROM nullcases ORDER BY id;
+----
+1	true	true	true
+2	true	true	true
+3	true	true	true
+4	true	true	true
+5	true	true	true
+6	true	true	true
+7	false	false	false
+
+# The same rows through the TWO-argument overload. The overloads are registered
+# separately, and Tests 5 and 6 cover the 2-arg form only through constant-folded
+# literals, so without this its per-row validity branch has no table-sourced coverage.
+query IIII
+SELECT id,
+       ks_2samp(a, b) IS NULL             AS struct_null,
+       (ks_2samp(a, b)).statistic IS NULL AS statistic_null,
+       (ks_2samp(a, b)).pvalue IS NULL    AS pvalue_null
+FROM nullcases WHERE id <> 6 ORDER BY id;
+----
+1	true	true	true
+2	true	true	true
+3	true	true	true
+4	true	true	true
+5	true	true	true
+7	false	false	false
+
+# ---------------------------------------------------------------------------
+# Test 7 -- NULL ELEMENTS inside a list are dropped, and the sample size shrinks
+# with them.
+#
+# The p-value is what makes this assertion able to fail. Dropping the NULL leaves
+# n1 = 2, so p = 2/C(4,2) = 1/3. Retaining it would make n1 = 3 and change the
+# p-value with it -- measured 0.6 under a mutation that keeps the slot. Asserting only
+# the statistic here would prove nothing, because the statistic can stay 1.0 either
+# way; verified by mutation that this p-value assertion is what catches it.
+# ---------------------------------------------------------------------------
+query I
+SELECT (ks_2samp([1.0, NULL, 2.0], [3.0, 4.0])).statistic = 1.0
+   AND abs((ks_2samp([1.0, NULL, 2.0], [3.0, 4.0])).pvalue - 1.0/3.0) < 1e-15;
+----
+true
+
+# Equivalent to passing the already-filtered list.
+query I
+SELECT ks_2samp([1.0, NULL, 2.0], [3.0, NULL, 4.0]) = ks_2samp([1.0, 2.0], [3.0, 4.0]);
+----
+true
+
+# ---------------------------------------------------------------------------
+# Test 8 -- NaN is an error, not a dropped value.
+#
+# NaN has no position in the sort order, so the ECDF is undefined; and silently
+# discarding it would change the sample size the p-value is computed against.
+# ---------------------------------------------------------------------------
+statement error
+SELECT ks_2samp([1.0, 'nan'::DOUBLE], [3.0, 4.0]);
+----
+contains NaN
+
+statement error
+SELECT ks_2samp([1.0, 2.0], ['nan'::DOUBLE]);
+----
+contains NaN
+
+# A NaN must still be reported when the OTHER sample is empty. The empty-to-NULL short
+# circuit runs after the NaN check for exactly this reason; reversed, these two return
+# NULL and the docs' unconditional "NaN is an error" would be false.
+statement error
+SELECT ks_2samp([]::DOUBLE[], ['nan'::DOUBLE]);
+----
+contains NaN
+
+statement error
+SELECT ks_2samp([NULL]::DOUBLE[], ['nan'::DOUBLE]);
+----
+contains NaN
+
+# ---------------------------------------------------------------------------
+# Test 9 -- method validation
+# ---------------------------------------------------------------------------
+query IIII
+SELECT ks_2samp([1.0,2.0], [3.0,4.0], 'auto') IS NOT NULL,
+       ks_2samp([1.0,2.0], [3.0,4.0], 'exact') IS NOT NULL,
+       ks_2samp([1.0,2.0], [3.0,4.0], 'AUTO') IS NOT NULL,
+       ks_2samp([1.0,2.0], [3.0,4.0], 'Exact') IS NOT NULL;
+----
+true	true	true	true
+
+# 'auto' and 'exact' agree, because the exact distribution is the only one
+# implemented. Stated so a reader does not assume they diverge.
+query I
+SELECT ks_2samp([1.0,2.0,5.0], [3.0,4.0], 'auto') = ks_2samp([1.0,2.0,5.0], [3.0,4.0], 'exact');
+----
+true
+
+# 'asymp' is a legitimate SciPy method that miint does not implement. It must not be
+# reported as though the caller made a typo, and the message has to say what to do.
+statement error
+SELECT ks_2samp([1.0,2.0], [3.0,4.0], 'asymp');
+----
+method 'asymp' is not implemented
+
+statement error
+SELECT ks_2samp([1.0,2.0], [3.0,4.0], 'asymp');
+----
+issue #218
+
+statement error
+SELECT ks_2samp([1.0,2.0], [3.0,4.0], 'bogus');
+----
+unknown method 'bogus'
+
+statement error
+SELECT ks_2samp([1.0,2.0], [3.0,4.0], '');
+----
+unknown method
+
+# ---------------------------------------------------------------------------
+# Test 10 -- a bogus method is reported even for rows whose data is NULL.
+#
+# The method is validated before the validity checks precisely so this raises rather
+# than returning NULL and swallowing the typo. Note the LIMIT of that guarantee: a
+# LITERAL NULL argument is constant-folded away before the function runs at all
+# (EXPLAIN SELECT ks_2samp(NULL,[3.0],'bogus') is a plain NULL projection), so it is
+# a NULL COLUMN VALUE that exercises this, not a NULL literal.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE nullrow(a DOUBLE[], b DOUBLE[]);
+
+statement ok
+INSERT INTO nullrow VALUES (NULL, [3.0]);
+
+statement error
+SELECT ks_2samp(a, b, 'bogus') FROM nullrow;
+----
+unknown method 'bogus'
+
+# ---------------------------------------------------------------------------
+# Test 11 -- the exact-p ceiling
+#
+# Above 10000 SciPy switches to method 'asymp', which miint does not implement, so it
+# raises rather than returning a number that would silently disagree with previously
+# published micov values. The ceiling applies to max(n1, n2), so an oversized sample
+# is rejected even when the other one is tiny -- the case a `both are too big` check
+# would wrongly admit.
+# ---------------------------------------------------------------------------
+statement error
+SELECT ks_2samp((SELECT list(v::DOUBLE) FROM range(10001) t(v)), [1.0, 2.0]);
+----
+exceed the maximum of 10000
+
+statement error
+SELECT ks_2samp([1.0, 2.0], (SELECT list(v::DOUBLE) FROM range(10001) t(v)));
+----
+exceed the maximum of 10000
+
+statement error
+SELECT ks_2samp((SELECT list(v::DOUBLE) FROM range(10001) t(v)), [1.0, 2.0]);
+----
+issue #218
+
+# Exactly at the ceiling is accepted -- pins the boundary against an off-by-one.
+query I
+SELECT (ks_2samp((SELECT list(v::DOUBLE) FROM range(10000) t(v)),
+                 (SELECT list(v::DOUBLE) FROM range(10000) t(v)))).statistic = 0.0
+   AND (ks_2samp((SELECT list(v::DOUBLE) FROM range(10000) t(v)),
+                 (SELECT list(v::DOUBLE) FROM range(10000) t(v)))).pvalue = 1.0;
+----
+true
+
+# ---------------------------------------------------------------------------
+# Test 12 -- the answer does not depend on the order values arrive in.
+#
+# Would fail if the implementation trusted its input to be sorted. list() has no
+# defined order without ORDER BY, so ascending vs descending is the discriminating
+# pair.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE ordvals(grp VARCHAR, v DOUBLE);
+
+statement ok
+INSERT INTO ordvals VALUES
+  ('a', 3.5), ('a', -1.0), ('a', 7.25), ('a', 0.0), ('a', 2.5),
+  ('b', 1.0), ('b', 9.0), ('b', -4.5), ('b', 6.0);
+
+query I
+SELECT ks_2samp(list(v ORDER BY v) FILTER (WHERE grp = 'a'), list(v ORDER BY v) FILTER (WHERE grp = 'b'))
+     = ks_2samp(list(v ORDER BY v DESC) FILTER (WHERE grp = 'a'), list(v ORDER BY v DESC) FILTER (WHERE grp = 'b'))
+FROM ordvals;
+----
+true
+
+# ---------------------------------------------------------------------------
+# Test 13 -- symmetric in its two arguments.
+#
+# D is symmetric, so the p-value must be too. An asymmetric index into the lattice
+# band would show up here and nowhere else, since every other test fixes one
+# orientation.
+# ---------------------------------------------------------------------------
+query I
+SELECT ks_2samp([1.0,4.0,9.0,16.0,25.0,36.0,49.0], [2.0,3.0,5.0,8.0,13.0,21.0,34.0,55.0,89.0,144.0,233.0,377.0,610.0])
+     = ks_2samp([2.0,3.0,5.0,8.0,13.0,21.0,34.0,55.0,89.0,144.0,233.0,377.0,610.0], [1.0,4.0,9.0,16.0,25.0,36.0,49.0]);
+----
+true
+
+# ---------------------------------------------------------------------------
+# Test 14 -- integer, decimal and bigint lists are accepted via implicit cast.
+# read_alignments and the coverage macros emit INTEGER/BIGINT, and a literal like
+# [0.1, 0.2] is DECIMAL, not DOUBLE.
+# ---------------------------------------------------------------------------
+query I
+SELECT (ks_2samp([1, 2, 3], [4, 5, 6])).statistic = 1.0
+   AND (ks_2samp([1::BIGINT, 2::BIGINT], [3::BIGINT, 4::BIGINT])).statistic = 1.0
+   AND (ks_2samp([0.1, 0.2], [0.3, 0.4])).statistic = 1.0;
+----
+true
+
+# 2/C(6,3) = 0.1 for the integer case, so the p-value survives the cast too.
+query I
+SELECT abs((ks_2samp([1, 2, 3], [4, 5, 6])).pvalue - 2.0/20.0) < 1e-16;
+----
+true
+
+# ---------------------------------------------------------------------------
+# Test 15 -- per-row list arguments, not literals.
+#
+# The input class that breaks a scalar function reading LIST children with a
+# row-independent offset: it looks correct for a single row and returns row 0's
+# answer for every subsequent one. Four rows of DIFFERENT lengths, each with a
+# distinct expected answer, so a shared-offset bug cannot pass.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE perrow(id INTEGER, a DOUBLE[], b DOUBLE[]);
+
+statement ok
+INSERT INTO perrow VALUES
+  (1, [1.0, 2.0],                [3.0, 4.0]),
+  (2, [1.0, 2.0, 3.0],           [4.0, 5.0, 6.0]),
+  (3, [1.0, 2.0, 3.0, 4.0, 5.0], [1.0, 2.0, 3.0, 4.0, 5.0]),
+  (4, [10.0],                    [1.0, 2.0, 3.0, 4.0]);
+
+# id 1: D=1, p=2/C(4,2)=1/3.  id 2: D=1, p=2/C(6,3)=0.1.
+# id 3: identical, D=0, p=1.   id 4: D=1, p=2/C(5,1)=0.4.
+query IIII
+SELECT id,
+       (ks_2samp(a, b)).statistic = CASE WHEN id = 3 THEN 0.0 ELSE 1.0 END AS statistic_ok,
+       abs((ks_2samp(a, b)).pvalue - CASE id WHEN 1 THEN 2.0 / 6.0
+                                             WHEN 2 THEN 2.0 / 20.0
+                                             WHEN 3 THEN 1.0
+                                             WHEN 4 THEN 2.0 / 5.0 END) < 1e-15 AS pvalue_ok,
+       len(a) AS n_a
+FROM perrow ORDER BY id;
+----
+1	true	true	2
+2	true	true	3
+3	true	true	5
+4	true	true	1
+
+# The same rows behind a filter, so the input arrives with a selection vector rather
+# than flat -- a different vector layout through the same code.
+query II
+SELECT id, abs((ks_2samp(a, b)).pvalue - CASE id WHEN 2 THEN 2.0 / 20.0 WHEN 4 THEN 2.0 / 5.0 END) < 1e-15
+FROM perrow WHERE id IN (2, 4) ORDER BY id;
+----
+2	true
+4	true
+
+# ---------------------------------------------------------------------------
+# Test 16 -- the long-form composition from issue #218: list(...) FILTER (...)
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE observations(grp VARCHAR, v DOUBLE);
+
+statement ok
+INSERT INTO observations
+  SELECT 'A', v::DOUBLE FROM range(1, 11) t(v)
+  UNION ALL
+  SELECT 'B', (v + 20)::DOUBLE FROM range(1, 11) t(v);
+
+# The two groups are fully separated, so D = 1 and p = 2/C(20,10) = 2/184756.
+query I
+SELECT (ks_2samp(list(v) FILTER (WHERE grp = 'A'), list(v) FILTER (WHERE grp = 'B'))).statistic = 1.0
+   AND abs((ks_2samp(list(v) FILTER (WHERE grp = 'A'), list(v) FILTER (WHERE grp = 'B'))).pvalue
+           - 2.0/184756.0) < 1e-18
+FROM observations;
+----
+true
+
+# ---------------------------------------------------------------------------
+# Test 17 -- the pairwise + Bonferroni example from issue #218, run end to end.
+#
+# A = 1..8, B = 5..12, C = 41..48, so three pairs and the correction factor is 3.
+# Both expected p-values are checkable by hand against the Gnedenko-Korolyuk closed
+# form for equal sample sizes, P(D_{n,n} >= h/n) = 2*sum_k (-1)^(k-1) C(2n, n-kh)/C(2n, n):
+#   A vs B: D = 0.5, so h = 4 and p = 2*(C(16,4) - C(16,0))/C(16,8)
+#                                   = 2*(1820 - 1)/12870 = 3638/12870
+#                                   = 0.2826728826728827, times 3 = 0.8480186480186481
+#   A vs C: disjoint, so p = 2/C(16,8) = 2/12870, times 3 = 0.0004662004662004662
+# The DP lands 1 ULP below the closed form's nearest double (…661 vs …662), which is
+# why these are asserted with a 1e-15 tolerance rather than as literal DOUBLEs -- a
+# bare DOUBLE expected block would have been compared with a ~1% tolerance anyway.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE gobs(grp VARCHAR, v DOUBLE);
+
+statement ok
+INSERT INTO gobs
+  SELECT 'A', v::DOUBLE FROM range(1, 9) t(v)
+  UNION ALL SELECT 'B', (v + 4)::DOUBLE FROM range(1, 9) t(v)
+  UNION ALL SELECT 'C', (v + 40)::DOUBLE FROM range(1, 9) t(v);
+
+query IIII
+WITH curves AS (SELECT grp, list(v) AS curve FROM gobs GROUP BY grp),
+pairs AS (
+    SELECT a.grp AS group_a, b.grp AS group_b, ks_2samp(a.curve, b.curve) AS ks
+    FROM curves a JOIN curves b ON a.grp < b.grp
+)
+SELECT group_a, group_b,
+       ks.statistic = CASE WHEN group_b = 'C' THEN 1.0 ELSE 0.5 END AS statistic_ok,
+       abs(least(1.0, ks.pvalue * COUNT(*) OVER ())
+           - CASE WHEN group_b = 'C' THEN 3.0 * 2.0 / 12870.0
+                  ELSE 3.0 * 2.0 * (1820.0 - 1.0) / 12870.0 END) < 1e-15 AS bonferroni_ok
+FROM pairs
+ORDER BY group_a, group_b;
+----
+A	B	true	true
+A	C	true	true
+B	C	true	true
+
+# ---------------------------------------------------------------------------
+# Test 18 -- the actual micov step: cumulative_coverage_curve -> ks_2samp.
+#
+# This is what #218 exists for -- comparing two groups' cumulative coverage curves.
+# The curves are what feed ks_2samp, so n is the number of SAMPLES in a group, which
+# is why the 10000 ceiling is never a constraint for micov.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE cc_pos(sample_id VARCHAR, start BIGINT, stop BIGINT);
+
+statement ok
+INSERT INTO cc_pos VALUES
+  ('s1', 1, 200), ('s1', 300, 400),
+  ('s2', 1, 150),
+  ('s3', 1, 600), ('s3', 700, 900),
+  ('s4', 1, 50),
+  ('s5', 1, 800), ('s5', 850, 1000),
+  ('s6', 1, 700);
+
+statement ok
+CREATE TABLE cc_roster(sample_id VARCHAR, group_id VARCHAR);
+
+statement ok
+INSERT INTO cc_roster VALUES ('s1','A'), ('s2','A'), ('s3','A'), ('s4','B'), ('s5','B'), ('s6','B');
+
+# Group A's curve is (0.149, 0.299, 0.799); group B's is (0.049, 0.699, 0.949).
+# Pooled, the largest ECDF gap is 1/3, and with n1 = n2 = 3 the exact p-value is 1.
+query I
+WITH curves AS (
+    SELECT group_id, list(proportion_covered ORDER BY rank) AS curve
+    FROM cumulative_coverage_curve(cc_pos, cc_roster, 1000)
+    GROUP BY group_id
+)
+SELECT abs((ks_2samp(a.curve, b.curve)).statistic - 1.0/3.0) < 1e-15
+   AND (ks_2samp(a.curve, b.curve)).pvalue = 1.0
+FROM curves a JOIN curves b ON a.group_id < b.group_id;
+----
+true
+
+# ---------------------------------------------------------------------------
+# Test 19 -- more separation cannot make a smaller p-value.
+#
+# Three nested comparisons over a fixed sample size, so only the statistic changes.
+# Not structurally guaranteed: it is the band width that moves with the statistic,
+# and a band-edge error breaks the ordering while leaving the endpoints correct.
+#
+# All three literals are derived from the Gnedenko-Korolyuk closed form at n = 6,
+# not read off the implementation:
+#   overlapping: D = 1/6 -> h = 1, and h = 1 admits no path at all for equal sizes,
+#                so p = 1 exactly
+#   partial:     D = 1/2 -> h = 3, p = 2*(C(12,3) - C(12,0))/C(12,6)
+#                                    = 2*(220 - 1)/924 = 438/924 = 0.474025974025974
+#   disjoint:    D = 1   -> h = 6, p = 2/C(12,6) = 2/924 = 0.0021645021645021645
+# ---------------------------------------------------------------------------
+query II
+WITH p AS (
+  SELECT (ks_2samp([1.0,2.0,3.0,4.0,5.0,6.0], [1.5,2.5,3.5,4.5,5.5,6.5])).pvalue AS overlapping,
+         (ks_2samp([1.0,2.0,3.0,4.0,5.0,6.0], [4.0,5.0,6.0,7.0,8.0,9.0])).pvalue AS partial,
+         (ks_2samp([1.0,2.0,3.0,4.0,5.0,6.0], [7.0,8.0,9.0,10.0,11.0,12.0])).pvalue AS disjoint
+)
+SELECT overlapping = 1.0
+   AND abs(partial  - 438.0/924.0) < 1e-15
+   AND abs(disjoint -   2.0/924.0) < 1e-15   AS closed_forms_ok,
+       overlapping > partial AND partial > disjoint AS strictly_decreasing
+FROM p;
+----
+true	true
+
+# ---------------------------------------------------------------------------
+# Test 20 -- statistic and p-value are probabilities over a WIDE set of shapes, with
+# a guard written so that it can actually fail.
+#
+# Two changes from the obvious form. The input set is widened from Test 15's four rows
+# to seven, by unioning three further fixtures onto them -- Test 15's rows are still in
+# here (that is the first UNION ALL branch), they are just no longer all of it. And the
+# predicate is NULL- and NaN-aware: `s < 0 OR s > 1` is FALSE
+# for NaN and NULL under three-valued logic, so the naive version cannot catch either
+# of the two regressions a range guard exists for -- a NULL leaking through (which this
+# function shipped with once; see Test 6b) or a NaN escaping the sort.
+# NOT (x BETWEEN 0 AND 1) is TRUE for NaN and for +/-Inf.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE shapes AS
+  SELECT (ks_2samp(a, b)).statistic AS s, (ks_2samp(a, b)).pvalue AS p FROM perrow
+  UNION ALL
+  SELECT (ks_2samp(a, b)).statistic, (ks_2samp(a, b)).pvalue FROM nullcases WHERE id = 7
+  UNION ALL
+  SELECT (ks_2samp(list(v ORDER BY v) FILTER (WHERE grp = 'a'),
+                   list(v ORDER BY v) FILTER (WHERE grp = 'b'))).statistic,
+         (ks_2samp(list(v ORDER BY v) FILTER (WHERE grp = 'a'),
+                   list(v ORDER BY v) FILTER (WHERE grp = 'b'))).pvalue
+  FROM ordvals
+  UNION ALL
+  SELECT (ks_2samp(x.c, y.c)).statistic, (ks_2samp(x.c, y.c)).pvalue
+  FROM (SELECT list(v::DOUBLE) AS c FROM range(1, 40) t(v)) x,
+       (SELECT list((v * 3 % 17)::DOUBLE) AS c FROM range(1, 61) t(v)) y;
+
+# Exactly 7: four rows from perrow, one from nullcases, one from ordvals, one from the
+# generated pair. Pinned exactly so that editing the union has to be deliberate rather
+# than quietly losing coverage.
+query I
+SELECT count(*) = 7 FROM shapes;
+----
+true
+
+query I
+SELECT count(*) FROM shapes
+WHERE s IS NULL OR p IS NULL OR NOT (s BETWEEN 0 AND 1) OR NOT (p BETWEEN 0 AND 1);
+----
+0

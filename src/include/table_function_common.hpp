@@ -63,6 +63,17 @@ void SetResultVectorListUInt8(Vector &result_vector, const std::vector<miint::Qu
 // not free it.
 void GetListUInt8Slice(Vector &list_vec, UnifiedVectorFormat &list_data, idx_t row_idx, const uint8_t *&out_data,
                        idx_t &out_length);
+// Mark one row of a STRUCT-returning function's result NULL, children included.
+//
+// FlatVector::Validity(result).SetInvalid(row_idx) is NOT sufficient for a STRUCT. It
+// marks only the struct's own validity, while struct_extract hands back a bare
+// reference to the child without applying its parent's validity -- so `f(x) IS NULL`
+// reads true while `(f(x)).some_field` returns whatever was left in the child buffer.
+// DuckDB treats "a NULL struct entry implies NULL children" as an invariant and
+// asserts it in debug builds, so the shortcut is a debug-build abort as well as a
+// wrong release-build answer. This recurses into every child, nested structs included.
+void SetStructRowNull(Vector &result, idx_t row_idx);
+
 void SetResultVectorInt32(Vector &result_vector, const std::vector<int32_t> &values);
 void SetResultVectorInt32Nullable(Vector &result_vector, const std::vector<int32_t> &values,
                                   const std::vector<bool> &valid);

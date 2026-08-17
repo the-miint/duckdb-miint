@@ -236,7 +236,7 @@ static void MergePairsExecute(DataChunk &args, ExpressionState &state, Vector &r
 		// NULL if any input is NULL
 		if (!fwd_seq_data.validity.RowIsValid(fi) || !fwd_qual_data.validity.RowIsValid(fqi) ||
 		    !rev_seq_data.validity.RowIsValid(rsi) || !rev_qual_data.validity.RowIsValid(rqi)) {
-			result_validity.SetInvalid(i);
+			SetStructRowNull(result, i);
 			qual_list_entries[i].offset = qual_child_offset;
 			qual_list_entries[i].length = 0;
 			continue;

@@ -1,0 +1,95 @@
+# name: test/sql/struct_null_children.test
+# description: every STRUCT-returning scalar marks a NULL row's CHILDREN null, not just the struct
+# group: [sql]
+
+# Marking only a struct's own validity is not enough. struct_extract hands back a bare
+# reference to the child vector without applying its parent's validity, so
+# `f(x) IS NULL` reads true while `(f(x)).some_field` returns whatever was left in the
+# child buffer -- a stale value from an earlier row of the same chunk. Field access is
+# how these functions are actually used, so that is the path a caller takes.
+#
+# DuckDB treats "a NULL struct entry implies NULL children" as an invariant and asserts
+# it in debug builds, so the shortcut is a debug-build abort as well as a wrong
+# release-build answer. `SetStructRowNull` in table_function_common.hpp is the one
+# correct way to do it; this file pins every function that uses it.
+#
+# Found while fixing ks_2samp (issue #218), where `(ks_2samp(a,b)).statistic` returned
+# 0.0 for an empty sample -- precisely the "the two samples are identical" reading that
+# returning NULL exists to prevent. The same defect was present in trim_adapters,
+# trim_adapters_pe, filter_read and merge_pairs_vsearch.
+#
+# EVERY ROW HERE MUST COME FROM A TABLE. A literal NULL argument is constant-folded away
+# before the function runs at all (`EXPLAIN SELECT f(NULL, ...)` is a plain NULL
+# projection over a dummy scan), so a literal-only version of this file would pin the
+# optimizer and not the functions.
+
+require miint
+
+statement ok
+CREATE TABLE reads(id INTEGER, seq VARCHAR, qual UTINYINT[], seq2 VARCHAR, qual2 UTINYINT[], adapter VARCHAR);
+
+# One row with everything present (the control -- fields must NOT be null), then rows
+# with each argument null in turn.
+statement ok
+INSERT INTO reads VALUES
+  (1, 'ACGTACGTACGTACGTAAAA', [30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30],
+      'TTTTACGTACGTACGTACGT', [30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30], 'ACGT'),
+  (2, NULL,                   [30,30,30,30],
+      'TTTTACGTACGTACGTACGT', [30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30], 'ACGT'),
+  (3, 'ACGTACGTACGTACGTAAAA', NULL,
+      'TTTTACGTACGTACGTACGT', [30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30], 'ACGT'),
+  (4, 'ACGTACGTACGTACGTAAAA', [30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30],
+      'TTTTACGTACGTACGTACGT', [30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30], NULL);
+
+# ---------------------------------------------------------------------------
+# trim_adapters -- 4 struct fields
+# ---------------------------------------------------------------------------
+query IIIII
+SELECT id,
+       trim_adapters(seq, qual, adapter) IS NULL              AS struct_null,
+       (trim_adapters(seq, qual, adapter)).sequence IS NULL   AS f_sequence,
+       (trim_adapters(seq, qual, adapter)).quality IS NULL    AS f_quality,
+       (trim_adapters(seq, qual, adapter)).trimmed_5p IS NULL AS f_trimmed_5p
+FROM reads ORDER BY id;
+----
+1	false	false	false	false
+2	true	true	true	true
+3	true	true	true	true
+4	true	true	true	true
+
+# ---------------------------------------------------------------------------
+# trim_adapters_pe -- 8 struct fields
+# ---------------------------------------------------------------------------
+query IIIII
+SELECT id,
+       trim_adapters_pe(seq, qual, seq2, qual2) IS NULL                  AS struct_null,
+       (trim_adapters_pe(seq, qual, seq2, qual2)).sequence1 IS NULL      AS f_sequence1,
+       (trim_adapters_pe(seq, qual, seq2, qual2)).quality2 IS NULL       AS f_quality2,
+       (trim_adapters_pe(seq, qual, seq2, qual2)).adapter_trimmed IS NULL AS f_adapter_trimmed
+FROM reads ORDER BY id;
+----
+1	false	false	false	false
+2	true	true	true	true
+3	true	true	true	true
+4	false	false	false	false
+
+# ---------------------------------------------------------------------------
+# filter_read -- 6 struct fields, including the fail_reason VARCHAR that has its own
+# validity mask
+# ---------------------------------------------------------------------------
+query IIIII
+SELECT id,
+       filter_read(seq, qual) IS NULL                AS struct_null,
+       (filter_read(seq, qual)).passed IS NULL       AS f_passed,
+       (filter_read(seq, qual)).length IS NULL       AS f_length,
+       (filter_read(seq, qual)).mean_quality IS NULL AS f_mean_quality
+FROM reads ORDER BY id;
+----
+1	false	false	false	false
+2	true	true	true	true
+3	true	true	true	true
+4	false	false	false	false
+
+# merge_pairs_vsearch has the same contract, but it needs vsearch, so its case lives in
+# test/sql/merge_pairs.test which already carries the require-env guard. A mid-file
+# require-env here would risk skipping everything above it.

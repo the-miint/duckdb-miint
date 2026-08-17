@@ -195,3 +195,37 @@ JOIN vsearch_merged v ON miint_out.read_id = v.read_id
 WHERE (miint_out.m).sequence = v.vsearch_sequence;
 ----
 50
+
+# ---------------------------------------------------------------------------
+# A NULL row must mark the struct's CHILDREN null too, not just the struct.
+#
+# struct_extract references a child without applying its parent's validity, so marking
+# only the struct leaves `(merge_pairs_vsearch(...)).quality` returning a stale value
+# from an earlier row of the chunk while the struct itself reads NULL. See
+# test/sql/struct_null_children.test for the shared contract and the other functions.
+# Rows must come from a TABLE -- a literal NULL argument is constant-folded away before
+# the function runs.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE mp_nullrows(id INTEGER, seq VARCHAR, qual UTINYINT[], seq2 VARCHAR, qual2 UTINYINT[]);
+
+statement ok
+INSERT INTO mp_nullrows VALUES
+  (1, 'ACGTACGTACGTACGTAAAA', [30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30],
+      'TTTTACGTACGTACGTACGT', [30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30]),
+  (2, NULL,                   [30,30,30,30],
+      'TTTTACGTACGTACGTACGT', [30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30]),
+  (3, 'ACGTACGTACGTACGTAAAA', [30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30],
+      'TTTTACGTACGTACGTACGT', NULL);
+
+query IIIII
+SELECT id,
+       merge_pairs_vsearch(seq, qual, seq2, qual2) IS NULL           AS struct_null,
+       (merge_pairs_vsearch(seq, qual, seq2, qual2)).merged IS NULL  AS f_merged,
+       (merge_pairs_vsearch(seq, qual, seq2, qual2)).quality IS NULL AS f_quality,
+       (merge_pairs_vsearch(seq, qual, seq2, qual2)).overlap IS NULL AS f_overlap
+FROM mp_nullrows ORDER BY id;
+----
+1	false	false	false	false
+2	true	true	true	true
+3	true	true	true	true

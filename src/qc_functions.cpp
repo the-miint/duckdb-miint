@@ -142,7 +142,7 @@ static void TrimExecuteImpl(DataChunk &args, Vector &result, idx_t n_optional, c
 			}
 		}
 		if (!all_valid) {
-			result_validity.SetInvalid(i);
+			SetStructRowNull(result, i);
 			qual_out_entries[i].offset = qual_child_offset;
 			qual_out_entries[i].length = 0;
 			continue;
@@ -459,7 +459,7 @@ static void TrimAdaptersExecuteImpl(DataChunk &args, Vector &result, bool adapte
 			}
 		}
 		if (!all_valid) {
-			result_validity.SetInvalid(i);
+			SetStructRowNull(result, i);
 			qual_out_entries[i].offset = qual_child_offset;
 			qual_out_entries[i].length = 0;
 			continue;
@@ -752,7 +752,7 @@ static void TrimAdaptersPeExecute(DataChunk &args, ExpressionState &state, Vecto
 
 		if (!seq1_data.validity.RowIsValid(s1i) || !qual1_data.validity.RowIsValid(q1i) ||
 		    !seq2_data.validity.RowIsValid(s2i) || !qual2_data.validity.RowIsValid(q2i)) {
-			result_validity.SetInvalid(i);
+			SetStructRowNull(result, i);
 			qual1_entries[i].offset = qual1_off;
 			qual1_entries[i].length = 0;
 			qual2_entries[i].offset = qual2_off;
@@ -893,7 +893,7 @@ static void FilterReadExecute(DataChunk &args, ExpressionState &state, Vector &r
 			            p6_data.validity.RowIsValid(p6_data.sel->get_index(i));
 		}
 		if (!all_valid) {
-			result_validity.SetInvalid(i);
+			SetStructRowNull(result, i);
 			continue;
 		}
 

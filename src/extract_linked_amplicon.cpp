@@ -274,11 +274,7 @@ static void Execute(DataChunk &args, ExpressionState &state, Vector &result) {
 	ListVector::Reserve(qual_out_vec, qual_child_offset + ListVector::GetListSize(args.data[1]));
 
 	auto invalidate = [&](idx_t i) {
-		result_validity.SetInvalid(i);
-		FlatVector::Validity(seq_out_vec).SetInvalid(i);
-		FlatVector::Validity(qual_out_vec).SetInvalid(i);
-		FlatVector::Validity(*entries[2]).SetInvalid(i);
-		FlatVector::Validity(*entries[3]).SetInvalid(i);
+		SetStructRowNull(result, i);
 		qual_out_entries[i].offset = qual_child_offset;
 		qual_out_entries[i].length = 0;
 		start_data[i] = 0;
