@@ -1051,6 +1051,192 @@ const std::string INTERVAL_BINS = // NOLINT
     "           lambda p: ((p - 1) * n_bins::BIGINT) // genome_length::BIGINT))) "
     "  END);";
 
+// region_presence(positions, regions, samples)
+//
+// Is a genomic region present in a sample? The answer is THREE-state, and the third
+// state is what makes downstream statistics honest (issue #216):
+//
+//   present         the sample has a covered interval overlapping the region
+//   absent          the sample covers the genome, but none of it overlaps the region
+//   not applicable  the sample has no coverage of the genome at all
+//
+// Collapsing 'not applicable' into 'absent' conflates "the organism is here and this
+// region is missing from it" -- a strain-content claim -- with "the organism is not
+// here", a detection failure. Those must not be pooled, and the distinction is easy to
+// lose when hand-rolling the SQL.
+//
+// Parameters:
+// positions : a relation with columns: sample_id (any type), genome_id (any type),
+//     start, stop (any integral type). Intervals are 1-based half-open, matching
+//     compress_intervals output. Note these are NOT read_alignments' column names --
+//     positions is a covered-interval relation, so the caller renames
+//     reference/position/stop_position on the way in. The docs show the rename.
+// regions : a relation with columns: genome_id (any type), region_start, region_stop
+//     (any integral type), region_id (any type). Half-open on the same convention.
+// samples : a relation with a sample_id column -- the full cohort roster.
+//
+// Returns: sample_id (from samples), genome_id / region_id (from regions, uncast),
+//     region_start / region_stop (from regions, as BIGINT), state (VARCHAR:
+//     'present' / 'absent' / 'not applicable')
+//
+// One row per region ROW per sample. The coordinates are emitted, not just region_id,
+// because the presence join is keyed on them: two rows sharing a region_id but covering
+// different spans are scored independently, and without the coordinates in the output
+// those rows would be indistinguishable -- a PIVOT would silently collapse them and a
+// join back to metadata would duplicate samples. When region_ids are unique, which is
+// the normal case, (sample_id, region_id) still keys the output.
+//
+// Long form, deliberately, rather than a sample x region matrix: it is what read_biom,
+// woltka_ogu and the diversity functions already consume, and callers who want the
+// matrix can PIVOT. micov builds the wide form internally with two PIVOTs and a Polars
+// coalesce because pivot columns cannot be named in advance; long form makes that
+// workaround unnecessary.
+//
+// samples is REQUIRED, not optional. 'not applicable' cannot be derived from positions
+// alone -- a sample with no coverage contributes no rows, so it is indistinguishable
+// from a sample that is not in the study. Without the roster the function could only
+// emit 'present' and 'absent', which is the very conflation it exists to prevent. A
+// macro also cannot vary its body on whether an argument was supplied. region_id is
+// likewise required rather than synthesized, because a macro body cannot conditionally
+// reference a column that may not exist.
+//
+// positions does NOT need to be pre-compressed. Presence asks only whether ANY interval
+// overlaps, so overlapping input intervals give the same answer as their union, and the
+// DISTINCTs below absorb the duplication.
+//
+// EVERY coordinate operand is normalized with ::BIGINT before it is compared, not just
+// before it is used arithmetically -- the same rule bin_of/bin_start/interval_bins
+// follow. Without it, coordinates loaded as VARCHAR (a BED file, an inferred CSV column)
+// compare lexicographically: '9' < '10' is FALSE, so real intervals get discarded as
+// degenerate, and '9' <= '100' is FALSE, so an inverted region passes validation. The
+// result is a silent, cohort-wide 'not applicable' -- the exact conflation this function
+// exists to prevent.
+//
+// NULL handling in positions splits on what the column means. The interval columns have
+// a defined NULL meaning -- a NULL start or stop marks a sample that exists with zero
+// coverage -- so those rows drop out without counting as coverage. The identity columns
+// do not: a NULL sample_id or genome_id is an unattributable interval, and silently
+// dropping it would downgrade real coverage to a non-detection, so it raises. An
+// interval with start >= stop covers no bases and drops out for the same reason a NULL
+// one does. That is deliberately NOT symmetric with the hard error on an empty region:
+// a region is the QUESTION, and an unanswerable question must not be silently answered
+// 'absent', whereas a degenerate interval is just data that contributes nothing.
+//
+// Samples present in positions but absent from the roster are ignored: the roster
+// defines the cohort.
+//
+// The overlap test is `start < region_stop AND stop > region_start`. micov's predicate
+// (_view.py:330) is `pos.start <= fm.stop AND pos.stop > fm.start`, which admits a
+// zero-width touch at the region's exclusive end and reports a read starting exactly
+// where the region finishes as present. It shares no base with the region.
+//
+// Three structural details that are load-bearing, not stylistic:
+//
+// 1. The positions guard and the degeneracy filter are ONE CASE, not two predicates.
+//    Split across two CTEs, DuckDB collapses them into a single FILTER and evaluates the
+//    cheap interval test first, so a row that is BOTH unattributable and degenerate is
+//    discarded before the error branch is ever reached -- the guard silently does
+//    nothing on exactly the rows most likely to be malformed.
+// 2. _rp_checked is MATERIALIZED. That is an optimizer barrier: it stops the roster
+//    semi-join below from being reordered ahead of the guard (a NULL sample_id matches
+//    no roster entry, so the semi-join would prune the offending row before it could
+//    raise). It also pins positions to a single scan, which matters for a relation that
+//    can only be consumed once, such as an Arrow RecordBatchReader.
+// 3. CTE names are prefixed. query_table() resolves in the caller's scope, so an
+//    unprefixed CTE named `roster` or `cov` shadows a user relation of that name passed
+//    as an argument, and the failure is an unattributable binder error about a missing
+//    column. `roster` is exactly the name the docs use.
+//
+// One thing MATERIALIZED does NOT fix: the validation guards are still ordinary SQL
+// expressions, so the optimizer may push a CALLER's filter beneath them and a malformed
+// row outside that filter will not raise (verified: materializing does not change this).
+// That never affects the rows returned -- each output row depends only on its own region
+// and sample -- but validation covers what the query reads, not the whole relation.
+const std::string REGION_PRESENCE = // NOLINT
+    "CREATE OR REPLACE MACRO region_presence(positions, regions, samples) AS TABLE "
+    "WITH _rp_roster AS ( "
+    "    SELECT DISTINCT sample_id FROM query_table(samples) "
+    // The message reuses the per-sample family's substring
+    // (docs/internals/per-sample-pattern.md) so callers see one behavior.
+    "    WHERE CASE WHEN sample_id IS NULL "
+    "               THEN error('region_presence: NULL values in sample_id column "
+    "''sample_id''') "
+    "               ELSE TRUE END "
+    "), "
+    "_rp_reg AS ( "
+    "    SELECT DISTINCT genome_id, region_start::BIGINT AS region_start, "
+    "           region_stop::BIGINT AS region_stop, region_id "
+    "    FROM query_table(regions) "
+    // An unusable region must not be scored: a NULL bound makes the overlap predicate
+    // NULL and an empty or inverted region can never overlap anything, so every sample
+    // would come back 'absent' -- indistinguishable from a real negative result. NULLs
+    // are checked first so the comparisons below never see one. Zero-width and inverted
+    // are separate branches because they have different causes and different remedies:
+    // filtering is right for a bin expansion and wrong for transposed coordinates.
+    "    WHERE CASE "
+    "            WHEN genome_id IS NULL OR region_start IS NULL "
+    "                 OR region_stop IS NULL OR region_id IS NULL "
+    "              THEN error(printf('region_presence: genome_id, region_start, "
+    "region_stop and region_id must not be NULL (got genome_id=%s, region_start=%s, "
+    "region_stop=%s, region_id=%s)', "
+    "                                COALESCE(genome_id::VARCHAR, 'NULL'), "
+    "                                COALESCE(region_start::VARCHAR, 'NULL'), "
+    "                                COALESCE(region_stop::VARCHAR, 'NULL'), "
+    "                                COALESCE(region_id::VARCHAR, 'NULL'))) "
+    "            WHEN region_stop::BIGINT = region_start::BIGINT "
+    "              THEN error(printf('region_presence: region is zero-width "
+    "(region_id ''%s'': [%s, %s)). Zero-width regions arise from bin_start when "
+    "n_bins > genome_length; filter them with WHERE region_stop > region_start', "
+    "                                region_id::VARCHAR, region_start::VARCHAR, "
+    "                                region_stop::VARCHAR)) "
+    "            WHEN region_stop::BIGINT < region_start::BIGINT "
+    "              THEN error(printf('region_presence: region coordinates are inverted "
+    "(region_id ''%s'': [%s, %s)); region_stop must be greater than region_start', "
+    "                                region_id::VARCHAR, region_start::VARCHAR, "
+    "                                region_stop::VARCHAR)) "
+    "            ELSE TRUE "
+    "          END "
+    "), "
+    // See note 1 and note 2 above: one CASE, and MATERIALIZED.
+    "_rp_checked AS MATERIALIZED ( "
+    "    SELECT sample_id, genome_id, start::BIGINT AS start, stop::BIGINT AS stop "
+    "    FROM query_table(positions) "
+    "    WHERE CASE "
+    "            WHEN sample_id IS NULL OR genome_id IS NULL "
+    "              THEN error('region_presence: NULL values in sample_id or genome_id "
+    "column of positions (an interval that cannot be attributed would silently become a "
+    "non-detection)') "
+    "            ELSE start::BIGINT < stop::BIGINT "
+    "          END "
+    "), "
+    // Drop non-cohort samples once, here, rather than scoring them against every region
+    // and discarding them at the final join.
+    "_rp_cov AS ( "
+    "    SELECT c.* FROM _rp_checked c "
+    "    SEMI JOIN _rp_roster s ON c.sample_id = s.sample_id "
+    "), "
+    "_rp_genome_cov AS (SELECT DISTINCT sample_id, genome_id FROM _rp_cov), "
+    "_rp_hit AS ( "
+    "    SELECT DISTINCT c.sample_id, r.genome_id, r.region_start, r.region_stop, "
+    "           r.region_id "
+    "    FROM _rp_cov c "
+    "    JOIN _rp_reg r ON c.genome_id = r.genome_id "
+    "                  AND c.start < r.region_stop AND c.stop > r.region_start "
+    ") "
+    "SELECT s.sample_id, r.genome_id, r.region_id, r.region_start, r.region_stop, "
+    "       CASE WHEN h.sample_id IS NOT NULL THEN 'present' "
+    "            WHEN g.sample_id IS NOT NULL THEN 'absent' "
+    "            ELSE 'not applicable' END AS state "
+    "FROM _rp_roster s "
+    "CROSS JOIN _rp_reg r "
+    "LEFT JOIN _rp_hit h ON h.sample_id = s.sample_id "
+    "                   AND h.genome_id = r.genome_id "
+    "                   AND h.region_start = r.region_start "
+    "                   AND h.region_stop = r.region_stop "
+    "                   AND h.region_id = r.region_id "
+    "LEFT JOIN _rp_genome_cov g ON g.sample_id = s.sample_id "
+    "                          AND g.genome_id = r.genome_id;";
+
 // circular_query_coverage(alignments, reference_lengths)
 //
 // How much of each read is explained by each reference, pooling every alignment record
@@ -1641,6 +1827,7 @@ public:
 		register_macro(BIN_OF, "bin_of");
 		register_macro(BIN_START, "bin_start");
 		register_macro(INTERVAL_BINS, "interval_bins");
+		register_macro(REGION_PRESENCE, "region_presence");
 		register_macro(CIRCULAR_QUERY_COVERAGE, "circular_query_coverage");
 		register_macro(INFER_TRIM, "infer_trim");
 

@@ -78,8 +78,8 @@ SELECT interval_bins(1, 1, 10, 100);
 # docs/internals/architecture.md fixes stop_position as an EXCLUSIVE end with
 # width = stop - start (no +1). Bin bounds must obey the same rule, so that
 # (bin_start(b), bin_start(b+1)) can be handed to anything consuming a half-open
-# (start, stop) pair -- compress_intervals today, region_coverage and
-# region_presence once they land -- with no adjustment. That requires
+# (start, stop) pair -- compress_intervals and region_presence today,
+# region_coverage once it lands -- with no adjustment. That requires
 # bin_start(0) = 1 and bin_start(n_bins) = genome_length + 1 exactly.
 #
 # Deliberately NOT asserted here: SUM(bin_start(b+1) - bin_start(b)) == genome_length.

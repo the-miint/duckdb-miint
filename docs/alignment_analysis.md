@@ -18,6 +18,7 @@ A considerable amount of analysis on alignment data can be performed with native
 - [Coverage depth](#coverage-depth) - Per-position depth of coverage (aggregate)
 - [Genome coverage](#genome-coverage) - Proportion of each genome covered by alignments
 - [Per-sample genome coverage](#per-sample-genome-coverage) - The same, reported separately for each sample
+- [Region presence](#region-presence) - Three-state (present / absent / not applicable) region calls per sample
 - [Circular query coverage](#circular-query-coverage) - Query coverage pooled across the fragments of one read, for reads spanning a circular reference's origin
 - [Barcode matching](#barcode-matching) - Hamming-distance matcher for short fixed-length barcodes
 - [MSA column consensus](#msa-column-consensus) - Quality-aware consensus from a multiple alignment
@@ -916,6 +917,122 @@ CROSS JOIN (SELECT DISTINCT sample_id FROM alignments) s;
 ```
 
 Be deliberate about which one you want: the pooled value is identical for every sample and is *not* a property of any single sample.
+### Region presence
+
+`region_presence(positions, regions, samples)`
+
+Table macro answering, per sample, whether a genomic region is present. The answer is **three-state**, and the third state is what makes downstream statistics honest:
+
+| State | Meaning |
+|---|---|
+| `present` | The sample has at least one covered interval overlapping the region. |
+| `absent` | The sample has coverage of the genome, but none of it overlaps the region. |
+| `not applicable` | The sample has no coverage of the genome at all. |
+
+Collapsing `not applicable` into `absent` conflates "the organism is here and this region is missing from it" — a strain-content claim — with "the organism is not here", a detection failure. Those must not be pooled, and the distinction is easy to lose when hand-rolling the SQL.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `positions` | relation | Columns `sample_id` (any type), `genome_id` (any type), `start` (BIGINT), `stop` (BIGINT). Intervals 1-based half-open, matching [`compress_intervals`](#merge-overlapping-intervals) output. |
+| `regions` | relation | Columns `genome_id` (any type), `region_start` (BIGINT), `region_stop` (BIGINT), `region_id` (any type). Half-open on the same convention. |
+| `samples` | relation | A `sample_id` column: the full cohort roster. |
+
+> **These are not `read_alignments`' column names.** `positions` is a *covered-interval* relation, so rename on the way in — `reference` → `genome_id`, `position` → `start`, `stop_position` → `stop`. The first example below shows the rename. (`genome_coverage` takes the raw alignment names instead, because it consumes alignments directly.)
+
+**Returns:** one row per region row per sample.
+
+| Column | Source |
+|---|---|
+| `sample_id` | from `samples`, uncast |
+| `genome_id` | from **`regions`**, uncast |
+| `region_id` | from `regions`, uncast |
+| `region_start`, `region_stop` | from `regions` |
+| `state` | VARCHAR — `present` / `absent` / `not applicable` |
+
+`sample_id`, `genome_id` and `region_id` are carried through uncast, so VARCHAR, BIGINT and UUID identifiers all survive end to end. Coordinates are normalized to `BIGINT`, so they come back as `BIGINT` whatever they went in as — including VARCHAR, which is what a BED file or an inferred CSV column gives you.
+
+> **Match your identifier types across relations.** `genome_id` joins `positions` to `regions`, and `sample_id` joins `positions` to `samples`. DuckDB implicit-casts, so a BIGINT `77` does match a VARCHAR `'77'` — but two things follow. The output `genome_id` takes the **`regions`** type, not the `positions` type, so a carefully typed coverage table and a loosely typed region table give you the loose one back. And a single unconvertible value aborts the whole query with a bare `Conversion Error: Could not convert string 'abc' to INT64 … source column sample_id` that names neither `region_presence` nor which relation the bad value came from. One malformed roster id is enough.
+
+The coordinates are emitted, not just `region_id`, because the presence join is keyed on them. Two rows sharing a `region_id` but covering different spans are scored independently, and without the coordinates in the output those rows would be indistinguishable — a `PIVOT` would silently collapse them and a join back to metadata would duplicate samples. When `region_id` is unique, the normal case, `(sample_id, region_id)` still keys the output.
+
+**Why `samples` is required.** `not applicable` cannot be derived from `positions` alone: a sample with no coverage contributes no rows, so it is indistinguishable from a sample that is not in the study. Without the roster this function could only emit `present` and `absent` — the very conflation it exists to prevent. Keeping the roster explicit also means the caller decides what "the cohort" is.
+
+**Behavior:**
+- The overlap test is `start < region_stop AND stop > region_start`. A read starting exactly where a region ends shares no base with it and is `absent`.
+- `positions` does **not** need to be pre-compressed. Presence asks only whether *any* interval overlaps, so overlapping input intervals give the same answer as their union — no `compress_intervals` pass needed.
+- Samples appearing in `positions` but not in the roster are ignored — the roster defines the cohort.
+- Duplicate rows in `positions`, `regions` or `samples` do not multiply the output — which is what makes passing uncompressed alignments safe.
+- **NULL and empty intervals in `positions`.** A NULL `start` or `stop` has a defined meaning — a sample that exists with zero coverage — so the row is dropped and does *not* count as covering the genome. An interval with `start >= stop` covers no bases and is dropped for the same reason. Neither promotes a sample from `not applicable` to `absent`. Note the macro takes no `genome_length`, so it can recognise an *empty* interval but not an out-of-range one: `[-5, -1)` is well formed and does count as coverage. Clamp upstream if that matters.
+- **A NULL `sample_id` or `genome_id` in `positions` raises.** Unlike the interval columns, these have no defined NULL meaning; silently dropping an unattributable interval would downgrade real coverage to a non-detection.
+- Raises on a NULL `sample_id` in the roster, on any NULL column in `regions`, and on an empty or inverted region (`region_stop <= region_start`) — each would otherwise report every sample `absent`, indistinguishable from a real negative result. Both `regions` errors name the offending row.
+- An empty roster, an empty `regions`, or empty `positions` are all legitimate: the first two produce no rows, and the third makes every pair `not applicable`.
+
+> **Validation covers the rows the query reads.** The guards are ordinary SQL expressions, so a filter such as `WHERE region_id = 'PC351'` may be pushed beneath them and a malformed row *outside* that filter will not raise. This never changes the rows you get back — each output row depends only on its own region and sample — but do not treat a clean run of a filtered query as a validation pass over the whole relation.
+
+**Examples:**
+```sql
+-- Build `positions` from alignments: compress per (sample, contig), then rename
+-- into the column contract above.
+CREATE TABLE positions AS
+SELECT sample_id, reference AS genome_id, ci.start, ci.stop
+FROM (
+    SELECT sample_id, reference, UNNEST(compress_intervals(position, stop_position)) AS ci
+    FROM alignments
+    GROUP BY sample_id, reference
+);
+
+CREATE TABLE regions AS SELECT * FROM (VALUES
+    ('G000436435', 481323, 486671, 'PC351')
+) t(genome_id, region_start, region_stop, region_id);
+
+CREATE VIEW roster AS SELECT sample_id FROM sample_metadata;
+
+-- Three-state calls per sample
+SELECT * FROM region_presence(positions, regions, roster);
+
+-- How many samples carry the region, keeping non-detections separate
+SELECT state, COUNT(*) FROM region_presence(positions, regions, roster)
+GROUP BY state;
+
+-- Feed presence into PERMANOVA as a metadata variable. Non-detections are
+-- DROPPED rather than pooled with 'absent'.
+CREATE TABLE region_md AS
+    SELECT sample_id, state AS pc351
+    FROM region_presence(positions, regions, roster)
+    WHERE region_id = 'PC351' AND state IN ('present', 'absent');
+
+SELECT * FROM permanova('dm', 'region_md', variables := ['pc351'],
+                        n_permutations := 999999, seed := 42);
+```
+
+> **Filter positively — `state IN ('present', 'absent')`, not `state <> 'not applicable'`.** The state labels are plain strings and DuckDB will happily compare against one that does not exist, so a typo cannot be caught for you. It fails differently in the two forms: a typo in `<>` matches *everything*, silently pooling non-detections back into the cohort, whereas a typo in `IN` drops the mistyped level — an empty or visibly halved cohort rather than a quietly wrong one. Neither is safe if you don't check the row count, but only one of them fails loudly enough to notice.
+
+Long form is deliberate — it is what `read_biom`, `woltka_ogu` and the diversity functions already consume. For a sample x region matrix, `PIVOT`:
+
+```sql
+PIVOT (SELECT sample_id, region_id, state FROM region_presence(positions, regions, roster))
+ON region_id USING first(state);
+```
+
+> `first(state)` picks one row per `(sample_id, region_id)` cell, so pivot only when `region_id` is unique across your `regions` relation. If it is not, pivot on the coordinates too.
+
+Regions can come straight from [`bin_start`](#genome-bins) — `(bin_start(b), bin_start(b + 1))` is already half-open on the same convention:
+
+```sql
+CREATE TABLE bin_regions AS
+SELECT genome_id,
+       bin_start(bin_index, 500, length)     AS region_start,
+       bin_start(bin_index + 1, 500, length) AS region_stop,
+       genome_id || ':bin_' || bin_index     AS region_id
+FROM top_bins JOIN genome_lengths USING (genome_id)
+WHERE bin_start(bin_index + 1, 500, length) > bin_start(bin_index, 500, length);
+```
+
+> `region_id` is qualified with `genome_id` on purpose. A bare `'bin_' || bin_index` repeats across genomes — every genome has a bin 3 — which breaks the uniqueness the `PIVOT` recipe above depends on.
+
+> That `WHERE` matters only when `n_bins > genome_length`, where `bin_start` legitimately produces zero-width bins. A zero-width region is unanswerable — every sample would score `absent` — so `region_presence` rejects it rather than inventing a negative result, and the error names this filter as the remedy.
 
 ### Circular query coverage
 
