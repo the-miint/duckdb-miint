@@ -134,6 +134,10 @@ double KsExactPValue(int64_t n1, int64_t n2, double d) {
 	// it gives column i-1's value (the +x predecessor) while f[j-1] has already
 	// become column i's (the +y predecessor).
 	std::vector<double> f(static_cast<size_t>(n2 + 1), 0.0);
+	// Seed the origin. h >= 1 here, so (0,0) is always inside the band, and the sweep
+	// visits it exactly once -- so pre-seeding is identical to special-casing it in the
+	// recurrence, and it keeps the inner loop to a single uniform expression.
+	f[0] = 1.0;
 	double escape = 0.0;
 	int64_t jlo_prev = 0;
 
@@ -151,18 +155,17 @@ double KsExactPValue(int64_t n1, int64_t n2, double d) {
 		const int64_t vhi = std::min<int64_t>(jhi + 1, n2);
 
 		for (int64_t j = vlo; j <= vhi; j++) {
-			double inflow;
 			if (i == 0 && j == 0) {
-				inflow = 1.0; // h >= 1, so the origin is inside
-			} else {
-				const double denom = static_cast<double>(n1 + n2 - i - j + 1);
-				inflow = 0.0;
-				if (i > 0) {
-					inflow += f[static_cast<size_t>(j)] * static_cast<double>(n1 - i + 1) / denom;
-				}
-				if (j > 0) {
-					inflow += f[static_cast<size_t>(j - 1)] * static_cast<double>(n2 - j + 1) / denom;
-				}
+				continue; // seeded above
+			}
+
+			const double denom = static_cast<double>(n1 + n2 - i - j + 1);
+			double inflow = 0.0;
+			if (i > 0) {
+				inflow += f[static_cast<size_t>(j)] * static_cast<double>(n1 - i + 1) / denom;
+			}
+			if (j > 0) {
+				inflow += f[static_cast<size_t>(j - 1)] * static_cast<double>(n2 - j + 1) / denom;
 			}
 
 			if (j >= jlo && j <= jhi) {

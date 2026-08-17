@@ -266,7 +266,6 @@ static void Execute(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &qual_out_vec = *entries[1];
 	auto start_data = FlatVector::GetData<int32_t>(*entries[2]);
 	auto stop_data = FlatVector::GetData<int32_t>(*entries[3]);
-	auto &result_validity = FlatVector::Validity(result);
 
 	auto qual_out_entries = FlatVector::GetData<list_entry_t>(qual_out_vec);
 	idx_t qual_child_offset = ListVector::GetListSize(qual_out_vec);

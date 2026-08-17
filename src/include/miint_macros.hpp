@@ -1023,14 +1023,40 @@ const std::string BIN_START = // NOLINT
 // enumerating positions instead costs O(interval length), which in this regime is bounded
 // by genome_length < n_bins. Same answer, 269x faster on that case.
 //
-// The bin arithmetic is inlined rather than delegated to bin_of, which duplicates the
-// floor formula on purpose. Delegating would resolve `bin_of` in the CALLER's catalog, so
-// a user macro of that name silently hijacks every result (verified: a user
-// `CREATE MACRO bin_of(...) AS 999` turns interval_bins(1,5,4,10) into [999]). It also
-// re-ran bin_of's NULL and bounds guards once per enumerated position -- all already
-// established here, and measured at ~1.4x -- when the clamp below already guarantees
-// every p is inside [1, genome_length]. Any change to the formula must be mirrored in
-// BIN_OF above; the containment tests cover both.
+// The bin arithmetic is inlined rather than delegated to bin_of, duplicating the floor
+// formula on purpose. The reason is COST, not safety:
+//
+//   - Delegating re-runs bin_of's NULL and bounds guards once per enumerated position,
+//     measured at ~1.4x, when all of them are already established here and the clamp below
+//     already guarantees every p is inside [1, genome_length].
+//
+//   - A BARE `bin_of(...)` reference would also resolve in the CALLER's catalog, so a user
+//     macro of that name silently hijacks every result (verified: a user
+//     `CREATE MACRO bin_of(...) AS 999` turns interval_bins(1,5,4,10) into [999]).
+//
+// An earlier version of this comment claimed the hijack made delegation impossible. That
+// is FALSE and was corrected here. Schema-qualifying the callee defeats it completely, and
+// the qualification cannot be spoofed:
+//
+//   CREATE MACRO delegator_q(p,nb,gl) AS system.main.bin_of(p,nb,gl);
+//   CREATE MACRO delegator_u(p,nb,gl) AS bin_of(p,nb,gl);
+//   CREATE MACRO bin_of(p,nb,gl) AS 999;      -- shadow created AFTER both
+//   SELECT delegator_q(1,4,10), delegator_u(1,4,10);   -->   0   |   999
+//
+//   ATTACH ':memory:' AS system;               -->  "reserved name"
+//   CREATE MACRO system.main.bin_of(...);      -->  "Cannot create entry in system catalog"
+//
+// (miint's macros do live in system.main -- confirmed via duckdb_functions().) So the
+// file's mzml family is right to delegate: MZML_X_OFFSET_PAIR and MZML_X_OFFSET_TRIPLET
+// call mzml_x_offset_ntuple, and READ_GFF calls parse_gff_attributes. There is no
+// project-wide "never delegate" rule, and this comment should not be read as one.
+//
+// A shared, schema-qualified `_miint_bin_index` helper would remove the triplication at no
+// measured cost and is the obvious follow-up; it is deliberately NOT done here to keep this
+// change to correcting the record. Until then, any change to the formula must be mirrored
+// in BIN_OF above and in both branches below -- test/sql/interval_bins.test Test 5
+// cross-checks interval_bins against bin_of over both regimes, including a non-dividing
+// (3,5) pair, so the copies cannot drift silently.
 const std::string INTERVAL_BINS = // NOLINT
     "CREATE OR REPLACE MACRO interval_bins(start, stop, n_bins, genome_length) AS ( "
     "  CASE "
@@ -1146,10 +1172,18 @@ const std::string INTERVAL_BINS = // NOLINT
 //    no roster entry, so the semi-join would prune the offending row before it could
 //    raise). It also pins positions to a single scan, which matters for a relation that
 //    can only be consumed once, such as an Arrow RecordBatchReader.
-// 3. CTE names are prefixed. query_table() resolves in the caller's scope, so an
-//    unprefixed CTE named `roster` or `cov` shadows a user relation of that name passed
-//    as an argument, and the failure is an unattributable binder error about a missing
-//    column. `roster` is exactly the name the docs use.
+// 3. CTE names are prefixed. query_table() resolves in the caller's scope, so a CTE can
+//    shadow a user relation of the same name passed as an argument, and the failure is an
+//    unattributable binder error about a missing column. `roster` is exactly the name the
+//    docs use, so the hazard is real here.
+//
+//    The PRECISE rule -- established later, while testing region_coverage, and stated in
+//    full at _rc_reg below -- is narrower than "an unprefixed CTE shadows an argument":
+//    a CTE shadows an argument if and only if it is DECLARED BEFORE the query_table() call
+//    that resolves that argument. Whether the argument is a CTE, a view or a base table is
+//    irrelevant. An earlier version of this comment stated the broad form as fact; it is
+//    wrong, and prefixing is kept here as a blanket precaution rather than because every
+//    name listed above could actually collide.
 //
 // One thing MATERIALIZED does NOT fix: the validation guards are still ordinary SQL
 // expressions, so the optimizer may push a CALLER's filter beneath them and a malformed

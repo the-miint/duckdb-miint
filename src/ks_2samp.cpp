@@ -91,58 +91,55 @@ void KsTwoSampleScalarFunction(DataChunk &args, ExpressionState &state, Vector &
 	auto statistic_data = FlatVector::GetData<double>(*entries[0]);
 	auto pvalue_data = FlatVector::GetData<double>(*entries[1]);
 
+	// Hoisted: the payload pointer does not change per row.
+	auto method_values = has_method ? UnifiedVectorFormat::GetData<string_t>(method_fmt) : nullptr;
+
 	std::vector<double> a;
 	std::vector<double> b;
 
-	for (idx_t i = 0; i < count; i++) {
-		bool method_is_null = false;
-		if (has_method) {
-			const auto mi = method_fmt.sel->get_index(i);
-			if (!method_fmt.validity.RowIsValid(mi)) {
-				method_is_null = true;
-			} else {
-				auto method_values = UnifiedVectorFormat::GetData<string_t>(method_fmt);
-				try {
+	// One handler for the whole scan. Every miint::InvalidInputException raised below is a
+	// hard error that aborts the query, so per-statement try blocks bought nothing except
+	// three copies of the same rethrow.
+	try {
+		for (idx_t i = 0; i < count; i++) {
+			bool method_is_null = false;
+			if (has_method) {
+				const auto mi = method_fmt.sel->get_index(i);
+				if (!method_fmt.validity.RowIsValid(mi)) {
+					method_is_null = true;
+				} else {
 					miint::ValidateKsMethod(method_values[mi].GetString());
-				} catch (const miint::InvalidInputException &e) {
-					throw InvalidInputException("%s", e.what());
 				}
 			}
-		}
 
-		const auto ai = a_fmt.sel->get_index(i);
-		const auto bi = b_fmt.sel->get_index(i);
-		if (method_is_null || !a_fmt.validity.RowIsValid(ai) || !b_fmt.validity.RowIsValid(bi)) {
-			SetStructRowNull(result, i);
-			continue;
-		}
+			const auto ai = a_fmt.sel->get_index(i);
+			const auto bi = b_fmt.sel->get_index(i);
+			if (method_is_null || !a_fmt.validity.RowIsValid(ai) || !b_fmt.validity.RowIsValid(bi)) {
+				SetStructRowNull(result, i);
+				continue;
+			}
 
-		CollectSample(a_fmt, a_child_fmt, i, a);
-		CollectSample(b_fmt, b_child_fmt, i, b);
+			CollectSample(a_fmt, a_child_fmt, i, a);
+			CollectSample(b_fmt, b_child_fmt, i, b);
 
-		// NaN is checked BEFORE the empty short circuit, or a NaN in one sample would go
-		// unreported whenever the other sample is empty -- ks_2samp([], ['nan']) is a
-		// data error, not an absence, and the docs promise NaN always raises.
-		try {
+			// NaN is checked BEFORE the empty short circuit, or a NaN in one sample would go
+			// unreported whenever the other sample is empty -- ks_2samp([], ['nan']) is a
+			// data error, not an absence, and the docs promise NaN always raises.
 			miint::RejectKsNaN(a, b);
-		} catch (const miint::InvalidInputException &e) {
-			throw InvalidInputException("%s", e.what());
-		}
 
-		// The SQL contract turns an empty sample into NULL; the algorithm treats it
-		// as a precondition violation and throws. This is where the two meet.
-		if (a.empty() || b.empty()) {
-			SetStructRowNull(result, i);
-			continue;
-		}
+			// The SQL contract turns an empty sample into NULL; the algorithm treats it
+			// as a precondition violation and throws. This is where the two meet.
+			if (a.empty() || b.empty()) {
+				SetStructRowNull(result, i);
+				continue;
+			}
 
-		try {
 			const auto r = miint::KsTwoSample(a, b);
 			statistic_data[i] = r.statistic;
 			pvalue_data[i] = r.pvalue;
-		} catch (const miint::InvalidInputException &e) {
-			throw InvalidInputException("%s", e.what());
 		}
+	} catch (const miint::InvalidInputException &e) {
+		throw InvalidInputException("%s", e.what());
 	}
 }
 

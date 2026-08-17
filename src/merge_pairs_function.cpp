@@ -218,7 +218,6 @@ static void MergePairsExecute(DataChunk &args, ExpressionState &state, Vector &r
 	auto fwd_errors_data = FlatVector::GetData<int32_t>(*entries[6]);
 	auto rev_errors_data = FlatVector::GetData<int32_t>(*entries[7]);
 	auto overlap_data = FlatVector::GetData<int32_t>(*entries[8]);
-	auto &result_validity = FlatVector::Validity(result);
 
 	// Quality output: LIST(UTINYINT) managed via ListVector
 	auto qual_list_entries = FlatVector::GetData<list_entry_t>(qual_list_vec);
