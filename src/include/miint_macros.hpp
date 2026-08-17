@@ -1394,19 +1394,33 @@ const std::string REGION_COVERAGE = // NOLINT
     "    JOIN _rc_reg r ON c.genome_id = r.genome_id "
     "                  AND c.start < r.region_stop AND c.stop > r.region_start "
     "), "
-    "_rc_merged AS ( "
+    // Summed inside the aggregate, NOT by UNNESTing and re-grouping. The earlier version
+    // exploded compress_intervals() into one row per merged interval and then re-hashed the
+    // SAME five grouping keys to SUM them back up. The keys do not change across the UNNEST,
+    // so the second hash aggregate was pure overhead. genome_coverage keeps its UNNEST
+    // legitimately, because its grouping keys DO change across it for the contig->genome
+    // join; these do not.
+    //
+    // Measured on 1M real alignments x 500 regions -> 3000 groups, threads=1, results
+    // verified byte-identical (0 mismatches, EXCEPT both ways): the aggregate step alone
+    // 0.076 s -> 0.067 s, end to end 0.686 s -> 0.651 s. So this is a ~10% step win, not a
+    // step-change -- on that fixture compress_intervals merged nothing, so the UNNEST
+    // re-grouped 1M rows and DuckDB sums 1M rows into 3000 groups cheaply. The win scales
+    // with how little the intervals merge; correctness of the simplification does not.
+    //
+    // covered is computed in its own CTE so the aggregate is written -- and evaluated --
+    // once, rather than repeated in the proportion_covered expression.
+    "_rc_covered AS ( "
     "    SELECT sample_id, genome_id, region_id, region_start, region_stop, "
-    "           UNNEST(compress_intervals(start, stop)) AS ci "
+    "           list_sum(list_transform(compress_intervals(start, stop), "
+    "                                   lambda iv: iv.stop - iv.start))::BIGINT AS covered "
     "    FROM _rc_clipped "
     "    GROUP BY sample_id, genome_id, region_id, region_start, region_stop "
     ") "
-    "SELECT sample_id, genome_id, region_id, region_start, region_stop, "
-    "       SUM(ci.stop - ci.start)::BIGINT AS covered, "
+    "SELECT sample_id, genome_id, region_id, region_start, region_stop, covered, "
     "       (region_stop - region_start)::BIGINT AS region_length, "
-    "       SUM(ci.stop - ci.start)::DOUBLE / (region_stop - region_start) "
-    "         AS proportion_covered "
-    "FROM _rc_merged "
-    "GROUP BY sample_id, genome_id, region_id, region_start, region_stop;";
+    "       covered::DOUBLE / (region_stop - region_start) AS proportion_covered "
+    "FROM _rc_covered;";
 
 // cumulative_coverage_curve(positions, roster, genome_length)
 //

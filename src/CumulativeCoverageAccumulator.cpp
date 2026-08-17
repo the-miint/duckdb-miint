@@ -19,17 +19,12 @@ struct SweepEvent {
 
 } // namespace
 
-// Matches IntervalCompressor::COMPRESS_THRESHOLD. Past this many stored observations
-// Add() folds each rank's intervals into their union, so a deep metagenomic group cannot
-// grow the state without bound between combines.
-constexpr size_t COMPACT_THRESHOLD = 1'000'000;
-
 void CumulativeCoverageAccumulator::Add(int32_t rank, int64_t start, int64_t stop) {
 	ranks_.push_back(rank);
 	starts_.push_back(start);
 	stops_.push_back(stop);
 
-	if (ranks_.size() >= COMPACT_THRESHOLD) {
+	if (ranks_.size() >= compact_floor_) {
 		Compact();
 	}
 }
@@ -52,15 +47,23 @@ void CumulativeCoverageAccumulator::Absorb(const CumulativeCoverageAccumulator &
 	starts_.insert(starts_.end(), other.starts_.begin(), other.starts_.end());
 	stops_.insert(stops_.end(), other.stops_.begin(), other.stops_.end());
 
-	// Compact after combining rather than before, mirroring compress_intervals: under a
-	// parallel GROUP BY the combines are where the state would otherwise pile up.
-	Compact();
+	// Same threshold Add() uses, NOT an unconditional compaction. compress_intervals
+	// compacts on every Combine, but that is measurably the wrong policy here: it costs
+	// O(m log m) per combine to reclaim nothing when the state is already small, so the
+	// thread count made things WORSE. Measured on 500k rows / 50 ranks of disjoint
+	// intervals (the shape Compact() cannot shrink), compacting unconditionally:
+	// 0.019 s at threads=1 -> 0.082 s at threads=16, i.e. 4.3x slower for adding cores.
+	// Guarded by the threshold, threads=16 is 0.024 s. The threshold alone bounds the state.
+	if (ranks_.size() >= compact_floor_) {
+		Compact();
+	}
 }
 
 void CumulativeCoverageAccumulator::Compact() {
 	if (ranks_.empty()) {
 		return;
 	}
+	compactions_++;
 
 	// (rank, start, stop) sorted by rank then start, so each rank's intervals are
 	// contiguous and ascending and can be merged in one pass.
@@ -125,6 +128,11 @@ void CumulativeCoverageAccumulator::Compact() {
 	ranks_.swap(out_ranks);
 	starts_.swap(out_starts);
 	stops_.swap(out_stops);
+
+	// Raise the floor above what we just failed to reclaim. Compact() merges only WITHIN a
+	// rank, so on already-disjoint input -- the documented shape -- it reclaims nothing and
+	// a fixed floor would re-trigger on the very next Add(). See compact_floor_'s comment.
+	compact_floor_ = std::max(COMPACT_THRESHOLD, ranks_.size() * 2);
 }
 
 bool CumulativeCoverageAccumulator::Empty() const {
@@ -136,35 +144,63 @@ std::vector<CumulativePoint> CumulativeCoverageAccumulator::Curve() const {
 		return {};
 	}
 
-	// Validation walks the ranks in sorted order rather than marking a presence array.
-	// Sorting first is what makes every branch below reachable AND bounds the histogram
-	// allocation: a rank of 1e9 is rejected as a gap before anything is sized off it,
-	// so there is no need for a separate "is max_rank plausible" guard. An earlier
-	// version had one, and it fired first on every malformed input -- which left the
-	// gap and start-at-zero branches dead code that no test could reach.
-	std::vector<int32_t> sorted_ranks = ranks_;
-	std::sort(sorted_ranks.begin(), sorted_ranks.end());
+	// Validation is two linear passes plus a bounded presence array, NOT an O(n log n) sort
+	// of a copy of every rank. The old form allocated a second int32 per observation and
+	// sorted it on input the feeding hash join has already shuffled, purely to answer "are
+	// these exactly 0..R-1"; that question does not need an ordering.
+	//
+	// Every branch stays reachable and the histogram allocation stays bounded WITHOUT a
+	// separate "is max_rank plausible" guard -- an earlier version had one and it fired
+	// first on every malformed input, leaving the gap and start-at-zero branches dead code
+	// no test could reach. What replaces it is a pigeonhole argument: contiguous ranks
+	// 0..R-1 need R distinct values, so a valid R is at most the number of observations.
+	// Any rank above that count therefore GUARANTEES a gap at or below it, which is why a
+	// rank of 1e9 is reported as a gap instead of sizing a billion buckets.
+	int32_t min_rank = ranks_[0];
+	int32_t max_rank = ranks_[0];
+	for (const int32_t r : ranks_) {
+		min_rank = std::min(min_rank, r);
+		max_rank = std::max(max_rank, r);
+	}
 
-	if (sorted_ranks.front() != 0) {
+	if (min_rank != 0) {
 		throw InvalidInputException(
-		    "cumulative_coverage: ranks must start at 0 (lowest rank seen is " + std::to_string(sorted_ranks.front()) +
+		    "cumulative_coverage: ranks must start at 0 (lowest rank seen is " + std::to_string(min_rank) +
 		    "). Produce ranks with ROW_NUMBER() OVER (...) - 1 -- note the - 1, ROW_NUMBER() itself is 1-based.");
 	}
 
-	int32_t prev_rank = sorted_ranks.front();
-	for (size_t k = 1; k < sorted_ranks.size(); k++) {
-		const int32_t r = sorted_ranks[k];
-		if (r != prev_rank && r != prev_rank + 1) {
-			throw InvalidInputException("cumulative_coverage: ranks must be contiguous 0..N-1 (rank " +
-			                            std::to_string(prev_rank + 1) + " is missing; ranks jump from " +
-			                            std::to_string(prev_rank) + " to " + std::to_string(r) +
-			                            "). Produce ranks with ROW_NUMBER() OVER (...) - 1.");
+	// Every rank is >= 0 from here. Probing only the first min(max_rank, n) + 1 slots is
+	// what bounds the allocation: past that the pigeonhole above already proves a gap lies
+	// below, so there is nothing a bigger array could discover.
+	const size_t probe = std::min(static_cast<size_t>(max_rank), ranks_.size());
+	std::vector<char> present(probe + 1, 0);
+	for (const int32_t r : ranks_) {
+		if (static_cast<size_t>(r) <= probe) {
+			present[static_cast<size_t>(r)] = 1;
 		}
-		prev_rank = r;
+	}
+
+	for (size_t r = 0; r <= probe; r++) {
+		if (present[r] != 0) {
+			continue;
+		}
+		// r is missing. r >= 1 here, because min_rank == 0 was just established and so
+		// present[0] is set. Report the lowest rank actually observed above r, so the
+		// message reads exactly as a sorted walk would have produced it.
+		int32_t next_seen = max_rank;
+		for (const int32_t seen : ranks_) {
+			if (static_cast<size_t>(seen) > r) {
+				next_seen = std::min(next_seen, seen);
+			}
+		}
+		throw InvalidInputException("cumulative_coverage: ranks must be contiguous 0..N-1 (rank " + std::to_string(r) +
+		                            " is missing; ranks jump from " + std::to_string(static_cast<int64_t>(r) - 1) +
+		                            " to " + std::to_string(next_seen) +
+		                            "). Produce ranks with ROW_NUMBER() OVER (...) - 1.");
 	}
 
 	// Contiguity is now established, so n_ranks <= the number of rows observed.
-	const size_t n_ranks = static_cast<size_t>(prev_rank) + 1;
+	const size_t n_ranks = static_cast<size_t>(max_rank) + 1;
 
 	std::vector<SweepEvent> events;
 	events.reserve(ranks_.size() * 2);

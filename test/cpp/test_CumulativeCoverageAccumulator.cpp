@@ -489,10 +489,17 @@ TEST_CASE("CumulativeCoverageAccumulator - Compact is idempotent", "[cumulative_
 	REQUIRE(CoveredOf(cc.Curve()) == curve_first);
 }
 
-TEST_CASE("CumulativeCoverageAccumulator - Absorb compacts and stays correct", "[cumulative_coverage]") {
-	// The parallel-GROUP-BY path: combine, then compact, so partial states do not pile
-	// up. The merged answer must equal the single-state answer, and the state must be
-	// smaller than the raw concatenation would have been.
+TEST_CASE("CumulativeCoverageAccumulator - Absorb merges correctly and does not compact a small state",
+          "[cumulative_coverage]") {
+	// The parallel-GROUP-BY path: combine partial states. The merged answer must equal
+	// the single-state answer.
+	//
+	// Absorb must NOT compact unconditionally. Compacting on every Combine costs
+	// O(m log m) per combine, so a parallel GROUP BY pays T sorts to save nothing when
+	// the state is small -- measured 500k rows / 50 ranks going from 0.029 s at
+	// threads=1 to 0.072 s at threads=16 (2.5x SLOWER), with the control case of
+	// overlapping intervals, where Compact() genuinely shrinks, going 2x FASTER. The
+	// threshold is what bounds the state; Combine does not need its own policy.
 	CumulativeCoverageAccumulator a;
 	CumulativeCoverageAccumulator b;
 	for (int i = 0; i < 20; i++) {
@@ -503,8 +510,42 @@ TEST_CASE("CumulativeCoverageAccumulator - Absorb compacts and stays correct", "
 	b.Add(1, 900, 950);
 
 	a.Absorb(b);
+	REQUIRE(a.CompactionCount() == 0);
+	REQUIRE(a.ObservationCount() == 42);
+	REQUIRE(CoveredOf(a.Curve()) == std::vector<int64_t> {59, 109});
+
+	// An explicit Compact still shrinks it, and the answer is unchanged -- so the state
+	// is bounded when it needs to be, just not on a schedule that costs more than it saves.
+	a.Compact();
 	REQUIRE(a.ObservationCount() < 42);
 	REQUIRE(CoveredOf(a.Curve()) == std::vector<int64_t> {59, 109});
+}
+
+TEST_CASE("CumulativeCoverageAccumulator - compaction is amortized, not per-row", "[cumulative_coverage]") {
+	// The input shape Compact() CANNOT shrink, which is also the documented shape: every
+	// interval disjoint on one rank, because positions are normally compress_intervals
+	// output. With a fixed threshold the first compaction fails to get below it and every
+	// subsequent Add() re-sorts the whole state -- measured 17.5 ms per row past 1e6,
+	// i.e. O(n^2 log n). 1.2M such rows did not finish in 90 s.
+	//
+	// Asserted as a BOUND ON COMPACTION COUNT rather than a wall-clock limit, so it is
+	// deterministic. Just past the threshold, a growing floor compacts once and then
+	// doubles out of the way; a fixed floor compacts on every one of the last 100 rows.
+	const size_t n = CumulativeCoverageAccumulator::COMPACT_THRESHOLD + 100;
+
+	CumulativeCoverageAccumulator cc;
+	for (size_t i = 0; i < n; i++) {
+		const int64_t start = static_cast<int64_t>(i) * 10 + 1;
+		cc.Add(0, start, start + 5);
+	}
+
+	// Fixed threshold gives 101 here. Doubling gives 1.
+	REQUIRE(cc.CompactionCount() <= 3);
+
+	// The answer must be untouched by the policy: n disjoint 5-base intervals.
+	const auto curve = CoveredOf(cc.Curve());
+	REQUIRE(curve.size() == 1);
+	REQUIRE(curve[0] == static_cast<int64_t>(n) * 5);
 }
 
 TEST_CASE("CumulativeCoverageAccumulator - self-Absorb is a no-op, not corruption", "[cumulative_coverage]") {

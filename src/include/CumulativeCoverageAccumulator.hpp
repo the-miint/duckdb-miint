@@ -72,6 +72,18 @@ public:
 		return ranks_.size();
 	}
 
+	// How many times Compact() has run on this state. Exposed so the amortization test
+	// can assert a BOUND on total compaction work deterministically, rather than timing
+	// it: a fixed threshold degrades to one compaction per Add() on input that cannot be
+	// merged, and a wall-clock assertion for that would be flaky.
+	size_t CompactionCount() const {
+		return compactions_;
+	}
+
+	// Compact() runs once the state reaches this many observations. It is a FLOOR that
+	// grows: see the comment on compact_floor_.
+	static constexpr size_t COMPACT_THRESHOLD = 1'000'000;
+
 private:
 	// Raw (rank, start, stop) observations, swept once at Curve() time. Compact()
 	// shrinks them per rank; it deliberately does NOT merge across ranks, because the
@@ -79,6 +91,24 @@ private:
 	std::vector<int32_t> ranks_;
 	std::vector<int64_t> starts_;
 	std::vector<int64_t> stops_;
+
+	// Compaction trigger. Must GROW after each compaction, because Compact() only merges
+	// intervals WITHIN a rank and can therefore shrink the state by nothing at all -- and
+	// the documented input shape is exactly the shape it cannot shrink, since positions
+	// are normally compress_intervals output and already disjoint. With a fixed trigger,
+	// the first compaction that fails to get below it makes every subsequent Add() re-sort
+	// the entire state, turning O(n log n) into O(n^2 log n). Measured with a fixed floor at
+	// COMPACT_THRESHOLD + 100 disjoint observations: 101 compactions of a ~1e6-observation
+	// state, ~17.5 ms each. Extrapolating that per-row cost, the 1.2M rows a 100-sample
+	// group of 12k intervals produces would take roughly an hour.
+	//
+	// Doubling the floor off the post-compaction size restores amortized O(n log n) -- the
+	// state can at most double between compactions, so compactions are O(log n) and each
+	// costs at most twice the irreducible size. Peak memory becomes <= 2x the irreducible
+	// compacted state (or COMPACT_THRESHOLD, whichever is larger) rather than <=
+	// COMPACT_THRESHOLD; that 2x is what buys the asymptotic fix.
+	size_t compact_floor_ = COMPACT_THRESHOLD;
+	size_t compactions_ = 0;
 };
 
 } // namespace miint

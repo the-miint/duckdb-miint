@@ -2,8 +2,6 @@
 
 namespace miint {
 
-constexpr size_t COMPRESS_THRESHOLD = 1'000'000;
-
 IntervalCompressor::IntervalCompressor() = default;
 
 void IntervalCompressor::Add(int64_t start, int64_t stop) {
@@ -15,7 +13,7 @@ void IntervalCompressor::Add(int64_t start, int64_t stop) {
 	starts.push_back(start);
 	stops.push_back(stop);
 
-	if (starts.size() >= COMPRESS_THRESHOLD) {
+	if (starts.size() >= compress_floor_) {
 		Compress();
 	}
 }
@@ -24,6 +22,7 @@ void IntervalCompressor::Compress() {
 	if (starts.empty()) {
 		return;
 	}
+	compressions_++;
 
 	std::vector<std::pair<int64_t, int64_t>> intervals;
 	intervals.reserve(starts.size());
@@ -52,6 +51,11 @@ void IntervalCompressor::Compress() {
 
 	starts.push_back(current_start);
 	stops.push_back(current_stop);
+
+	// Raise the floor above what we just failed to reclaim: a disjoint set survives
+	// compression untouched, so a fixed floor would re-trigger on the next Add().
+	// See compress_floor_ in the header.
+	compress_floor_ = std::max(COMPRESS_THRESHOLD, starts.size() * 2);
 }
 
 bool IntervalCompressor::Empty() const {

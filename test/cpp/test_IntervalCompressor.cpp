@@ -267,6 +267,36 @@ TEST_CASE("IntervalCompressor - automatic compression at threshold", "[interval_
 	REQUIRE(compressor.stops[0] == 1000009);
 }
 
+TEST_CASE("IntervalCompressor - compression is amortized, not per-row", "[interval_compressor]") {
+	// The input shape Compress() cannot reclaim anything from: every interval disjoint.
+	// The threshold is a FLOOR THAT MUST GROW, because a fixed one re-triggers on the very
+	// next Add() once compression fails to get the state below it -- every subsequent Add()
+	// then re-sorts the whole state, which is O(n^2 log n) overall (measured ~10 ms per row
+	// past 1e6). The test above covers the opposite shape, where everything merges to one.
+	//
+	// Asserted as a bound on compression COUNT so it is deterministic rather than a flaky
+	// wall-clock limit. A fixed floor gives 101 here; a doubling floor gives 1.
+	const size_t n = IntervalCompressor::COMPRESS_THRESHOLD + 100;
+
+	IntervalCompressor compressor;
+	for (size_t i = 0; i < n; i++) {
+		const int64_t start = static_cast<int64_t>(i) * 10;
+		compressor.Add(start, start + 5);
+	}
+
+	REQUIRE(compressor.CompressionCount() <= 3);
+
+	// The policy must not change the answer: n disjoint intervals stay n after a final
+	// Compress(), and the total width is exactly 5 per interval.
+	compressor.Compress();
+	REQUIRE(compressor.Size() == n);
+	int64_t total = 0;
+	for (size_t i = 0; i < compressor.Size(); i++) {
+		total += compressor.stops[i] - compressor.starts[i];
+	}
+	REQUIRE(total == static_cast<int64_t>(n) * 5);
+}
+
 TEST_CASE("IntervalCompressor - mix of positive and negative", "[interval_compressor]") {
 	IntervalCompressor compressor;
 	compressor.Add(-50, -10);
