@@ -20,6 +20,7 @@ A considerable amount of analysis on alignment data can be performed with native
 - [Per-sample genome coverage](#per-sample-genome-coverage) - The same, reported separately for each sample
 - [Region presence](#region-presence) - Three-state (present / absent / not applicable) region calls per sample
 - [Region coverage](#region-coverage) - Breadth of coverage of a sub-genome region, with the region's own length as the denominator
+- [Cumulative coverage](#cumulative-coverage) - Rank-ordered cumulative breadth: how a cohort's coverage stacks (aggregate + curve macro)
 - [Circular query coverage](#circular-query-coverage) - Query coverage pooled across the fragments of one read, for reads spanning a circular reference's origin
 - [Barcode matching](#barcode-matching) - Hamming-distance matcher for short fixed-length barcodes
 - [MSA column consensus](#msa-column-consensus) - Quality-aware consensus from a multiple alignment
@@ -1149,6 +1150,108 @@ SELECT * FROM region_coverage(positions, whole);
 > ```
 
 Regions can come straight from [`bin_start`](#genome-bins) — `(bin_start(b), bin_start(b + 1))` is already half-open on the same convention. Use the [`bin_regions` recipe](#region-presence) shown for `region_presence`; both functions take it unchanged.
+
+### Cumulative coverage
+
+`cumulative_coverage_curve(positions, roster, genome_length)` — table macro, the usual entry point
+`cumulative_coverage(rank, start, stop)` — aggregate, for when you want to rank by something else
+
+Rank the samples in a group by their own breadth against one genome, then accumulate their covered intervals from lowest breadth upward. The resulting curve is the central primitive of micov (Weng, Guccione, McDonald et al., *Communications Biology* 2025): samples that individually cover little of a genome **stack** into a detectable signal, the way a long exposure builds an astronomical image out of frames that are each too faint to use. That is what exposes a region present in one sample group and absent from another when no single sample has good coverage.
+
+Coverage accumulates as a **union**, not a sum. A running `SUM` of per-sample breadths double-counts every base two samples share, which on a well-covered genome saturates past 1.0 and on a poorly covered one just inflates quietly.
+
+> **Why this is in the extension at all.** Everything else micov needs is expressible in SQL; this is not. The accumulation cannot be a window function over [`compress_intervals`](#merge-overlapping-intervals), because each step needs the *union* of all preceding samples rather than a running total. micov recompresses the whole accumulated interval set at every rank, which is O(n²) in intervals and dominates a micov run. Here every rank is computed in a single O(n log n) sweep.
+
+#### `cumulative_coverage_curve`
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `positions` | relation | Columns `sample_id` (any type), `start`, `stop` (any integer type), **pre-filtered to a single genome**. 1-based half-open. |
+| `roster` | relation | Columns `sample_id` (any type), `group_id` (any type). The cohort, and the grouping the curves are computed within. |
+| `genome_length` | scalar | The breadth denominator. Must be a positive whole number of bases. |
+
+> **`positions` must be one genome.** There is no `genome_id` parameter, and that is deliberate rather than an omission: pooling genomes would rank each sample by its summed breadth across unrelated references, which is not a quantity the curve means anything about. Filter first, and call once per genome.
+
+**Returns:** one row per `(group_id, rank)`.
+
+| Column | Type | Description |
+|---|---|---|
+| `group_id` | from `roster`, uncast | |
+| `rank` | INTEGER | 0-based, ascending by the sample's own breadth |
+| `sample_id` | from `roster`, uncast | The sample added *at* this rank |
+| `covered` | BIGINT | Bases covered by the union of ranks `0..rank` |
+| `proportion_covered` | DOUBLE | `covered / genome_length` |
+
+**Behavior:**
+- **`roster` is required, and it is what makes the curve comparable across groups.** A sample with no coverage of the target contributes no `positions` rows at all, so without the roster it would silently vanish — the group would look smaller than it is, and two groups with different detection rates would have incomparable x-axes. Zero-coverage samples sort first, so the curve correctly starts flat.
+- Samples in `positions` but not in `roster` are ignored; the roster defines the cohort.
+- **Ties in breadth are broken by `sample_id`**, so the curve is byte-identical across runs and thread counts. This matters more than it looks: micov's Monte Carlo null calls this ~100× per genome per group, and an unstable ordering would surface as noise in the null.
+- Duplicate rows in either relation do not distort the curve.
+- A NULL `sample_id` in `positions`, or a NULL `sample_id`/`group_id` in `roster`, raises — unattributable coverage would quietly lower somebody's breadth and reorder the curve.
+- An empty roster gives no rows. Empty `positions` with a populated roster gives a fully flat curve, which is a real result (nothing was detected) and not an empty one.
+- There is **no RNG and no `seed`**, because the ordering is fully determined by the data.
+- An interval with `start >= stop` covers nothing, and the sample keeps its rank — so a row with transposed coordinates makes that sample a zero-coverage sample rather than, as one might expect from `compress_intervals`, its best-covered one.
+- A `start`/`stop` pair with **exactly one** NULL raises. Both NULL means "no coverage" and is what the roster join produces; one NULL is a broken join or a blank field, and silently reading it as no-coverage would discard real coverage.
+- **`genome_length` is validated as a positive whole number** — a fractional value is rejected rather than rounded, since a genome length is a count of bases.
+- **`covered` exceeding `genome_length` raises.** The union of intervals on a genome cannot be longer than the genome, so it means the denominator is wrong (a contig length where a genome length belongs, a mismatched reference build) or `positions` carries coordinates past the end. `proportion_covered` is therefore always in `(0, 1]`, and never silently above 1.0.
+
+**Example:**
+```sql
+-- positions for ONE genome, per sample
+CREATE TABLE positions AS
+SELECT sample_id, position AS start, stop_position AS stop
+FROM alignments WHERE reference = 'G000436435';
+
+CREATE TABLE roster AS SELECT sample_id, country AS group_id FROM sample_metadata;
+
+SELECT * FROM cumulative_coverage_curve(positions, roster, 4719737)
+ORDER BY group_id, rank;
+```
+
+The percentile x-axis micov plots is a window function on the output, which is why the aggregate has no such parameter:
+
+```sql
+SELECT group_id,
+       rank * 100.0 / NULLIF(COUNT(*) OVER (PARTITION BY group_id) - 1, 0) AS pct_of_group,
+       proportion_covered
+FROM cumulative_coverage_curve(positions, roster, 4719737);
+```
+
+Plotting stays outside miint, as does the Monte Carlo null — for the latter, resample `sample_id`s in SQL and call again.
+
+#### `cumulative_coverage` (aggregate)
+
+`cumulative_coverage(rank, start, stop)` → `LIST<STRUCT(rank INTEGER, covered BIGINT)>`
+
+The curve macro ranks by breadth. Use the aggregate directly to rank by anything else — sequencing depth, collection date, a clinical score — since the rank is just an integer you supply:
+
+```sql
+SELECT group_id, UNNEST(cumulative_coverage(rank, start, stop)) AS pt
+FROM (
+    SELECT r.group_id, p.start, p.stop,
+           (DENSE_RANK() OVER (PARTITION BY r.group_id
+                               ORDER BY m.collection_date, r.sample_id) - 1)::INTEGER AS rank
+    FROM roster r
+    LEFT JOIN positions p USING (sample_id)
+    LEFT JOIN sample_metadata m USING (sample_id)   -- LEFT, see below
+)
+GROUP BY group_id;
+```
+
+> **Every join off `roster` must be a LEFT join.** An inner join to the metadata table drops any roster member missing from it — verified: a two-sample group silently returns a one-point curve, with no error. That is the same vanishing-sample failure the roster exists to prevent, reintroduced one join later. `DENSE_RANK` puts all NULL-keyed samples on one rank, which is a defensible default for missing metadata, but decide that deliberately rather than inheriting it.
+
+> **`DENSE_RANK` here, not `ROW_NUMBER` — and the difference is the whole contract.** The aggregate is fed one row per `(sample, interval)`, so `ROW_NUMBER()` over that relation assigns a *distinct rank to every interval*. That is contiguous, so nothing raises, but the curve then has one point per alignment instead of one per sample and the x-axis means nothing. What the aggregate actually requires is **one rank per sample**, contiguous across the group. `DENSE_RANK` over a per-sample ordering key delivers that because it collapses a sample's repeated rows onto one rank; `ROW_NUMBER` only works when applied to a relation that is already one row per sample, which is how `cumulative_coverage_curve` uses it internally.
+
+> **`rank` is `INTEGER`, and `ROW_NUMBER()` returns `BIGINT`, so the `::INTEGER` cast is required** — there is no implicit conversion here and DuckDB fails with `No function matches ... cumulative_coverage(BIGINT, BIGINT, BIGINT)`. The error names the expected signature, so it is loud rather than subtle, but it will happen on the first attempt. `cumulative_coverage_curve` handles the cast for you.
+
+- **`rank` must be contiguous `0..N-1` within each group, one rank per sample.** Contiguity is what the aggregate can check, and a gap is rejected rather than tolerated because it would shift the x-axis silently — rank 1 reporting what is really rank 2's coverage. One-rank-per-sample is what the aggregate *cannot* check, and is on you: see the `DENSE_RANK` note above. The errors name the offending rank, and the start-at-zero message calls out the missing `- 1` specifically, since `ROW_NUMBER()` without it is the likely cause.
+- **A row with a NULL `start` or `stop` registers its rank with zero coverage.** This is how a zero-coverage sample keeps its place, and it falls out of a `LEFT JOIN` from the roster. A NULL `rank` raises.
+- Contiguity is judged **per group**, so two groups each numbered `0..n-1` are both valid.
+- Intervals with `start >= stop` cover nothing and are dropped, though their rank is still registered. Note this differs from [`compress_intervals`](#merge-overlapping-intervals), which silently *swaps* an inverted pair — swapping manufactures coverage out of transposed columns, so the newer convention is followed here.
+- The result is independent of input row order and of thread count.
+- **Aggregate state grows with the number of input intervals**, because every `(rank, start, stop)` triple is held until the single sweep at finalize. Unlike `compress_intervals`, it cannot shrink its state by merging as it goes — merging early is precisely the O(n²) recompression this avoids. In practice `positions` is already one merged interval set per sample, so this is small; feeding raw alignment rows for a deep metagenome is what would make it large. Measured: 2 M intervals produce a 50-point curve in ~0.2 s.
 
 ### Circular query coverage
 

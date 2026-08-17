@@ -7,6 +7,7 @@
 #include <alignment_slice.hpp>
 #include <alignment_functions.hpp>
 #include <compress_intervals.hpp>
+#include <cumulative_coverage.hpp>
 #include <compute_coverage_depth.hpp>
 #include <copy_fasta.hpp>
 #include <copy_fastq.hpp>
@@ -342,6 +343,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	CigarQueryIntervalsFunction::Register(loader);
 	CigarPooledIdentityFunction::Register(loader);
 	CompressIntervalsFunction::Register(loader);
+	CumulativeCoverageFunction::Register(loader);
 	ComputeCoverageDepthFunction::Register(loader);
 	AlignmentSliceTableFunction::Register(loader);
 	SequenceFunctions::Register(loader);

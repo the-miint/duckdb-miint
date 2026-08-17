@@ -1408,6 +1408,187 @@ const std::string REGION_COVERAGE = // NOLINT
     "FROM _rc_merged "
     "GROUP BY sample_id, genome_id, region_id, region_start, region_stop;";
 
+// cumulative_coverage_curve(positions, roster, genome_length)
+//
+// The rank-ordered cumulative breadth curve of issue #214, wrapped so the caller does
+// not have to assemble the ranking, the zero-coverage backfill and the aggregate by
+// hand. micov's framing is long-exposure astrophotography: samples that individually
+// cover little of a genome stack into a detectable signal, which is what exposes a
+// region present in one sample group and absent from another.
+//
+// Parameters:
+// positions : a relation with columns sample_id (any type), start (BIGINT), stop
+//     (BIGINT), PRE-FILTERED to a single genome. There is no genome_id parameter
+//     because the curve is only meaningful against one target -- pooling genomes would
+//     rank samples by their summed breadth across unrelated references.
+// roster : a relation with columns sample_id (any type), group_id (any type). The
+//     cohort, and the grouping the curves are computed within. Required for the same
+//     reason region_presence requires one: a sample with no coverage of the target
+//     contributes no position rows, so without the roster it would silently vanish and
+//     the group would look smaller than it is.
+// genome_length : the breadth denominator. Scalar, must be positive.
+//
+// Returns: group_id, rank (INTEGER, 0-based), sample_id, covered (BIGINT),
+//     proportion_covered (DOUBLE)
+//
+// The ranking is a window function here, not a parameter of the aggregate: samples are
+// ordered by their OWN breadth ascending, ties broken by sample_id. The tiebreak is
+// load-bearing rather than tidy -- without it two equal-breadth samples swap ranks
+// between runs and thread counts, and micov's Monte Carlo null calls this ~100x per
+// genome per group, so an unstable curve would surface as noise in the null.
+//
+// Zero-coverage samples reach the aggregate as a row with NULL start/stop, which is how
+// cumulative_coverage is told "this rank exists and covers nothing". That comes free
+// from the roster LEFT JOIN, and it puts those samples at the low ranks, so the curve
+// correctly starts flat.
+//
+// The aggregate returns only (rank, covered); sample_id is reattached by joining the
+// curve back to the ranking on (group_id, rank), where it costs nothing. That is why
+// the aggregate needs no id-type mirroring in its bind, and why VARCHAR, BIGINT and
+// UUID sample identifiers all survive uncast.
+//
+// Conventions carried from region_presence/region_coverage, with one correction each
+// time a claim was actually measured rather than assumed:
+//
+// - Every coordinate is ::BIGINT-normalized before comparison, so VARCHAR coordinates
+//   from a BED or inferred CSV column are not compared as text.
+// - Internal CTE names are prefixed. An argument name is resolved with the macro's own
+//   WITH list in scope and binds to an internal CTE only when that CTE is declared
+//   BEFORE the query_table() call resolving the argument. Measured for this macro: the
+//   prefix on _cc_checked is load-bearing for the `roster` slot; the prefixes on
+//   _cc_own/_cc_ranked/_cc_feed/_cc_curve protect nothing, because those are declared
+//   after both query_table() calls. Declaration ORDER does more here than the prefix
+//   does -- see the note on _cc_len below.
+// - MATERIALIZED on _cc_checked is belt-and-braces, and the comment says so because the
+//   measurement did not support more. Unlike region_coverage, where a pruning join sits
+//   ahead of the guard and dropping the barrier lets a malformed row escape, here the
+//   guard fires either way and EXPLAIN shows a byte-identical plan with and without it:
+//   DuckDB already materializes a CTE referenced twice. It is kept for the explicit
+//   single-scan guarantee, which matters for a relation that can only be consumed once
+//   such as an Arrow RecordBatchReader, and for consistency with the sibling macros --
+//   not because it is what makes validation work.
+const std::string CUMULATIVE_COVERAGE_CURVE = // NOLINT
+    "CREATE OR REPLACE MACRO cumulative_coverage_curve(positions, roster, genome_length) AS TABLE "
+    "WITH _cc_checked AS MATERIALIZED ( "
+    "    SELECT sample_id, start::BIGINT AS start, stop::BIGINT AS stop "
+    "    FROM query_table(positions) "
+    // The `start < stop` clause is load-bearing and was missing in the first version.
+    // Without it an inverted interval reaches compress_intervals in _cc_own, which
+    // SWAPS it -- so a sample with transposed coordinates was ranked as the best-covered
+    // in its group while the aggregate (which drops inverted intervals) credited it with
+    // nothing. Two conventions in one pipeline: the ranking said 90 bases, the curve said
+    // 0, and both the curve shape and the per-rank sample_id were wrong. Filtering here
+    // makes both halves agree, and the _cc_feed LEFT JOIN then supplies the NULL row that
+    // registers the sample as zero-coverage, so it keeps its place at rank 0.
+    //
+    // A half-NULL interval raises rather than being swept into the zero-coverage case:
+    // both-NULL is a sample with no coverage, but exactly one NULL is a broken join or a
+    // blank field, and treating it as "covers nothing" would silently discard real
+    // coverage.
+    "    WHERE CASE "
+    "            WHEN sample_id IS NULL "
+    "              THEN error('cumulative_coverage_curve: NULL values in sample_id column of "
+    "positions (coverage that cannot be attributed to a sample would silently lower "
+    "somebody''s breadth and reorder the curve)') "
+    "            WHEN (start IS NULL) <> (stop IS NULL) "
+    "              THEN error(printf('cumulative_coverage_curve: start and stop must both be "
+    "NULL or both be present (sample_id ''%s'' has start=%s, stop=%s). One NULL is a broken "
+    "join or a blank field, not a zero-coverage sample.', "
+    "                                COALESCE(sample_id::VARCHAR, 'NULL'), "
+    "                                COALESCE(start::VARCHAR, 'NULL'), "
+    "                                COALESCE(stop::VARCHAR, 'NULL'))) "
+    "            WHEN start IS NULL THEN FALSE "
+    "            ELSE start::BIGINT < stop::BIGINT "
+    "          END "
+    "), "
+    // The DISTINCT bounds the join fan-out for a roster consolidated from shards; it is
+    // NOT required for correctness, because _cc_own's GROUP BY absorbs duplicate roster
+    // rows either way (measured). Same situation as the DISTINCT in region_coverage.
+    "_cc_roster AS ( "
+    "    SELECT DISTINCT sample_id, group_id FROM query_table(roster) "
+    "    WHERE CASE "
+    "            WHEN sample_id IS NULL OR group_id IS NULL "
+    "              THEN error('cumulative_coverage_curve: NULL values in sample_id or group_id "
+    "column of roster (a cohort member that belongs to no group cannot be ranked)') "
+    "            ELSE TRUE "
+    "          END "
+    "), "
+    // Each sample's OWN breadth, which is what the ranking sorts on. LEFT JOIN so a
+    // roster sample with no coverage survives with 0 rather than disappearing;
+    // compress_intervals returns NULL for an all-NULL group, hence the COALESCE.
+    "_cc_own AS ( "
+    "    SELECT s.group_id, s.sample_id, "
+    "           COALESCE(list_sum(list_transform( "
+    "               compress_intervals(c.start, c.stop), lambda iv: iv.stop - iv.start)), 0) "
+    "             AS own_covered "
+    "    FROM _cc_roster s "
+    "    LEFT JOIN _cc_checked c ON c.sample_id = s.sample_id "
+    "    GROUP BY s.group_id, s.sample_id "
+    "), "
+    "_cc_ranked AS ( "
+    "    SELECT group_id, sample_id, "
+    "           (ROW_NUMBER() OVER (PARTITION BY group_id "
+    "                               ORDER BY own_covered, sample_id) - 1)::INTEGER AS rank "
+    "    FROM _cc_own "
+    "), "
+    // One row per (rank, interval); a sample with no intervals yields exactly one row
+    // with NULL start/stop, which registers the rank with zero coverage. That is also
+    // what guarantees the aggregate sees a contiguous 0..n-1 rank set.
+    "_cc_feed AS ( "
+    "    SELECT k.group_id, k.rank, c.start, c.stop "
+    "    FROM _cc_ranked k "
+    "    LEFT JOIN _cc_checked c ON c.sample_id = k.sample_id "
+    "), "
+    "_cc_curve AS ( "
+    "    SELECT group_id, UNNEST(cumulative_coverage(rank, start, stop)) AS pt "
+    "    FROM _cc_feed "
+    "    GROUP BY group_id "
+    "), "
+    // Declared LAST on purpose. An argument name is resolved with the macro's own WITH
+    // list in scope, and it binds to an internal CTE only if that CTE was declared
+    // BEFORE the query_table() call resolving the argument. Sitting first, this CTE
+    // shadowed BOTH arguments; sitting last it shadows neither, which leaves _cc_checked
+    // as the only name a caller relation can collide with (and only in the roster slot).
+    // Verified by passing caller relations named after each internal CTE, in both slots,
+    // as base tables and as CTEs.
+    // Every test is against the DOUBLE value, before any narrowing. Casting to BIGINT
+    // first rounds, so 1.6 became 2 and silently divided by the wrong denominator, while
+    // 0.4 was rejected as "not positive" -- which it is. A genome length is a count of
+    // bases, so a fractional value is a mistake worth naming rather than rounding.
+    "_cc_len AS ( "
+    "    SELECT CASE "
+    "             WHEN genome_length IS NULL "
+    "               THEN error('cumulative_coverage_curve: genome_length must be positive "
+    "(got NULL)') "
+    "             WHEN genome_length::DOUBLE <> FLOOR(genome_length::DOUBLE) "
+    "               THEN error(printf('cumulative_coverage_curve: genome_length must be a whole "
+    "number of bases (got %s)', genome_length::VARCHAR)) "
+    "             WHEN genome_length::DOUBLE < 1 "
+    "               THEN error(printf('cumulative_coverage_curve: genome_length must be positive "
+    "(got %s)', genome_length::VARCHAR)) "
+    "             ELSE genome_length::BIGINT "
+    "           END AS genome_length "
+    ") "
+    // covered > genome_length is impossible for a correct denominator -- the union of
+    // intervals on a genome cannot exceed its length -- so it means genome_length is
+    // wrong (a contig length where a genome length belongs, or a mismatched reference
+    // build) or positions carries coordinates off the end. Unclamped this returned
+    // proportion_covered = 5.0 with no signal, which is worse than useless because the
+    // docs teach that a proportion above 1.0 is the symptom of the summing mistake this
+    // function exists to avoid.
+    "SELECT v.group_id, v.pt.rank AS rank, k.sample_id, "
+    "       v.pt.covered AS covered, "
+    "       CASE WHEN v.pt.covered > l.genome_length "
+    "              THEN error(printf('cumulative_coverage_curve: covered (%s) exceeds "
+    "genome_length (%s) at rank %s -- genome_length is too small for these positions "
+    "(a contig length used where a genome length belongs, or a mismatched reference)', "
+    "                                v.pt.covered::VARCHAR, l.genome_length::VARCHAR, "
+    "                                v.pt.rank::VARCHAR)) "
+    "            ELSE v.pt.covered::DOUBLE / l.genome_length END AS proportion_covered "
+    "FROM _cc_curve v "
+    "JOIN _cc_ranked k ON k.group_id = v.group_id AND k.rank = v.pt.rank "
+    "CROSS JOIN _cc_len l;";
+
 // circular_query_coverage(alignments, reference_lengths)
 //
 // How much of each read is explained by each reference, pooling every alignment record
@@ -2000,6 +2181,7 @@ public:
 		register_macro(INTERVAL_BINS, "interval_bins");
 		register_macro(REGION_PRESENCE, "region_presence");
 		register_macro(REGION_COVERAGE, "region_coverage");
+		register_macro(CUMULATIVE_COVERAGE_CURVE, "cumulative_coverage_curve");
 		register_macro(CIRCULAR_QUERY_COVERAGE, "circular_query_coverage");
 		register_macro(INFER_TRIM, "infer_trim");
 
