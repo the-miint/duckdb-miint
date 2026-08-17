@@ -1420,13 +1420,48 @@ const std::string REGION_COVERAGE = // NOLINT
     "            ELSE start::BIGINT < stop::BIGINT "
     "          END "
     "), "
+    // Totally disjoint genome_id domains are a naming error, not an answer. Because this
+    // function emits no row for a region with no overlap (see the header note), handing it
+    // genome ids where contig ids belong produced ZERO ROWS AND NO COMPLAINT -- and that is
+    // exactly the mistake a multi-contig assembly invites, since regions here are matched
+    // contig-to-contig. Both sides must be non-empty for this to fire: an empty positions
+    // relation legitimately yields nothing, and "this sample covers none of that genome" is
+    // region_presence's question, which has a roster and a three-state answer.
+    // Reads query_table(regions) directly rather than _rc_reg. Going through _rc_reg would
+    // force every region row through the validation CASE before a caller's filter could
+    // prune it, which changes when the per-region guards fire (Test 12b in
+    // test/sql/region_coverage.test pins that pushdown in both directions). regions is the
+    // small side, so the extra scan is cheap.
+    "_rc_domain AS MATERIALIZED ( "
+    "    SELECT CASE "
+    "             WHEN (SELECT count(*) FROM query_table(regions)) > 0 "
+    "                  AND (SELECT count(*) FROM _rc_checked) > 0 "
+    "                  AND NOT EXISTS (SELECT 1 FROM query_table(regions) r, _rc_checked c "
+    "                                  WHERE r.genome_id = c.genome_id) "
+    "               THEN error(printf('region_coverage: no genome_id in regions matches any "
+    "genome_id in positions, so every region would return no row at all. regions has "
+    "genome_id like ''%s''; positions has genome_id like ''%s''. regions.genome_id is "
+    "matched against positions.genome_id DIRECTLY, so regions are contig-level. For "
+    "whole-genome coordinates over a multi-contig assembly, shift positions into the genome "
+    "frame first by adding each contig''s offset to start and stop -- relabelling contigs to "
+    "the genome WITHOUT offsets stacks their coordinate frames and undercounts', "
+    "                                (SELECT min(genome_id::VARCHAR) "
+    "                                 FROM query_table(regions)), "
+    "                                (SELECT min(genome_id::VARCHAR) FROM _rc_checked))) "
+    "             ELSE TRUE "
+    "           END AS ok "
+    "), "
     "_rc_clipped AS ( "
     "    SELECT c.sample_id, r.genome_id, r.region_id, r.region_start, r.region_stop, "
     "           GREATEST(c.start, r.region_start) AS start, "
     "           LEAST(c.stop, r.region_stop) AS stop "
     "    FROM _rc_checked c "
+    "    CROSS JOIN _rc_domain d "
     "    JOIN _rc_reg r ON c.genome_id = r.genome_id "
     "                  AND c.start < r.region_stop AND c.stop > r.region_start "
+    // d.ok must be REFERENCED, not merely cross-joined: an unreferenced CTE is pruned and
+    // the guard would never run. It is always TRUE when it does not raise.
+    "    WHERE d.ok "
     "), "
     // Summed inside the aggregate, NOT by UNNESTing and re-grouping. The earlier version
     // exploded compress_intervals() into one row per merged interval and then re-hashed the

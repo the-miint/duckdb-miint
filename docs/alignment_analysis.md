@@ -1096,7 +1096,7 @@ WHERE p.state IN ('present', 'absent');   -- drop non-detections; do not pool th
 **Behavior:**
 - The overlap test is `start < region_stop AND stop > region_start`. An alignment starting exactly where a region ends shares no base with it and contributes nothing.
 - **Overlapping regions are each scored against their own bounds**, so a base can count in two regions. Well defined, and required for sliding-window regions — but it means `SUM(covered)` across regions is not a partition of the genome.
-- **Multi-contig genomes.** `regions.genome_id` is matched against `positions.genome_id` directly, so regions are effectively contig-level. Whole-genome coordinates for a multi-contig assembly are ambiguous; pick the contig yourself.
+- **Multi-contig genomes.** `regions.genome_id` is matched against `positions.genome_id` directly, so regions are **contig-level** by default. Genome-level regions work too, but you must shift `positions` into the genome's coordinate frame first — see [Multi-contig genomes](#multi-contig-genomes) below. If no `genome_id` in `regions` matches any in `positions`, the call **raises** rather than returning zero rows, since that is almost always a contig-vs-genome naming mixup.
 - Duplicate rows in either relation do not inflate the result — the merge and the final grouping absorb them.
 - **NULL and degenerate intervals in `positions` drop; a NULL `sample_id` or `genome_id` raises.** The interval columns have a defined NULL meaning (a sample that exists with no coverage); the identity columns do not, and silently dropping an unattributable interval would subtract real coverage from whichever sample it belonged to.
 - **An unusable region raises** — any NULL column, a zero-width region (no denominator), or inverted coordinates. Each error names the offending `region_id` and its bounds, and zero-width and inverted are reported separately because the remedies differ: filtering is right for a bin expansion and wrong for transposed coordinates.
@@ -1136,18 +1136,48 @@ FROM genome_lengths;
 SELECT * FROM region_coverage(positions, whole);
 ```
 
-> **That equivalence does not survive a multi-contig genome**, and neither does the obvious workaround. `genome_coverage` maps contigs to genomes through `subject_genome_id` and sums across them; `region_coverage` matches `regions.genome_id` against `positions.genome_id` directly, so its regions are contig-level. Hand it whole-genome coordinates for a 3-contig assembly and it matches nothing — **zero rows**, where `genome_coverage` returns the real proportion.
->
-> Relabelling the contigs to the genome name is worse, not better: each contig has its own 1-based frame, so three `[10, 60)` intervals stack onto one another, the merge collapses them, and you get `covered = 50` where the truth is `150`. Zero rows are at least visibly wrong; 50 looks like an answer.
->
-> Keep regions **contig-level** — one region per contig, in that contig's own frame — and sum afterwards:
->
-> ```sql
-> SELECT SUM(covered) AS covered,
->        SUM(covered)::DOUBLE / SUM(region_length) AS proportion_covered
-> FROM region_coverage(positions, contig_regions)
-> GROUP BY sample_id;
-> ```
+> **A multi-contig genome needs one extra step first** — see [Multi-contig genomes](#multi-contig-genomes) immediately below.
+
+#### Multi-contig genomes
+
+`genome_coverage` maps contigs to genomes through `subject_genome_id` and sums across them. `region_coverage` matches `regions.genome_id` against `positions.genome_id` directly, so its regions are **contig-level**: the genome id of a 3-contig assembly matches no contig id, and the call **raises** rather than quietly returning nothing.
+
+There are two correct approaches, and one trap.
+
+**1. Contig-level regions** — one region per contig, in that contig's own frame, summed afterwards. Use this when the regions are naturally per-contig (genes from a GFF, for instance):
+
+```sql
+SELECT SUM(covered) AS covered,
+       SUM(covered)::DOUBLE / SUM(region_length) AS proportion_covered
+FROM region_coverage(positions, contig_regions)
+GROUP BY sample_id;
+```
+
+**2. Genome-frame regions** — shift `positions` into the genome's coordinate frame by adding each contig's offset, then use genome-level regions directly. Use this when the regions *are* genome-level, which is what [`bin_start`](#genome-bins) produces for equal-width bins across a whole assembly:
+
+```sql
+-- Offsets are the cumulative contig lengths, in whatever contig order you chose when
+-- you defined the regions. That order is your data, which is why this is a view you
+-- write rather than a parameter this function takes.
+CREATE TABLE contig_offsets AS
+SELECT contig_id, genome_id,
+       COALESCE(SUM(contig_length) OVER (PARTITION BY genome_id ORDER BY contig_id
+                                         ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+                0) AS contig_offset
+FROM contig_lengths;
+
+CREATE VIEW genome_frame_positions AS
+SELECT p.sample_id, o.genome_id,
+       p.start + o.contig_offset AS start,
+       p.stop  + o.contig_offset AS stop
+FROM positions p JOIN contig_offsets o ON p.genome_id = o.contig_id;
+
+SELECT * FROM region_coverage(genome_frame_positions, genome_bins);
+```
+
+This reproduces `genome_coverage` exactly on a whole-genome region, and the per-bin numbers sum back to the whole-genome total — both pinned in `test/sql/region_coverage.test`.
+
+**The trap:** relabelling the contigs to the genome name *without* adding offsets. Each contig has its own 1-based frame, so three `[10, 60)` intervals stack onto one another, the merge collapses them, and you get `covered = 50` where the truth is `150`. This is the dangerous case — the ids now match, so the guard above cannot catch it, and 50 looks like an answer. The offset is the fix, not the join; with every offset set to `0` you get the wrong 50 back.
 
 Regions can come straight from [`bin_start`](#genome-bins) — `(bin_start(b), bin_start(b + 1))` is already half-open on the same convention. Use the [`bin_regions` recipe](#region-presence) shown for `region_presence`; both functions take it unchanged.
 
