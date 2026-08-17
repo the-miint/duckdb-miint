@@ -373,6 +373,60 @@ CREATE TABLE ft_shuffled AS SELECT * FROM ft ORDER BY hash(sample_id || feature_
 statement ok
 CREATE TABLE ft_sorted AS SELECT * FROM ft ORDER BY sample_id;
 
+# ── TEMPORARY DIAGNOSTIC (PR #244). The exact-equality assertion further down
+#    fails on linux_amd64 — all 240 rows of the symmetric difference — and does NOT
+#    reproduce on macOS/arm64 at threads 1, 2, 4 or 14, so it is an fp32 summation
+#    -order effect or a genuine order dependence, and the count alone cannot tell
+#    which. These five brackets separate the two so the fix is chosen from data:
+#      c1  do the two layouts assign samples to the SAME batches? (the semantic
+#          question — enumeration is ORDER BY sample_id, so this must hold)
+#      c2-c4  bracket the coordinate difference: 1e-12 / 1e-9 / 1e-6
+#      c5  did the UniFrac DISTANCES themselves move? (localizes it to the compute
+#          rather than to the progressive machinery)
+#    c1 and c5 true with the magnitude at ~1e-12 means the exact assertion is simply
+#    stricter than fp32 permits on x86 and should become a tolerance. c1 or c5 false
+#    means scan order is reaching the answer, which is a real bug and the doc advice
+#    in docs/diversity.md would be wrong. Remove this block with whichever fix wins. ──
+query IIIII
+WITH a AS (SELECT sample_id, axis, coordinate, batch
+           FROM progressive_pcoa_from_unifrac('ft_sorted', 'tree', variant := 'weighted_normalized',
+               n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42)),
+     b AS (SELECT sample_id, axis, coordinate, batch
+           FROM progressive_pcoa_from_unifrac('ft_shuffled', 'tree', variant := 'weighted_normalized',
+               n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42)),
+     j AS (SELECT a.coordinate AS ca, b.coordinate AS cb, a.batch AS ba, b.batch AS bb
+           FROM a JOIN b USING (sample_id, axis)),
+     d AS (SELECT coalesce(max(abs(x.distance - y.distance)), 0.0) AS dd
+           FROM unifrac_distances('ft_sorted', 'tree', variant := 'weighted_normalized') x
+           JOIN unifrac_distances('ft_shuffled', 'tree', variant := 'weighted_normalized') y
+             USING (sample_a, sample_b))
+SELECT count(*) FILTER (WHERE ba IS DISTINCT FROM bb) = 0,
+       max(abs(ca - cb)) < 1e-12,
+       max(abs(ca - cb)) < 1e-9,
+       max(abs(ca - cb)) < 1e-6,
+       (SELECT dd FROM d) < 1e-12
+FROM j;
+----
+true	true	true	true	true
+
+# and the same comparison the way the docs tell users to make it: as ordinations,
+# through procrustes. M^2 is frame-invariant, so this is the claim that matters —
+# "layout does not change the ordination" — independent of last-bit coordinate noise.
+statement ok
+CREATE TABLE dg_ord_sorted AS
+SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_unifrac('ft_sorted', 'tree',
+    variant := 'weighted_normalized', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+
+statement ok
+CREATE TABLE dg_ord_shuffled AS
+SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_unifrac('ft_shuffled', 'tree',
+    variant := 'weighted_normalized', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+
+query I
+SELECT max(m2) < 1e-12 FROM procrustes('dg_ord_sorted', 'dg_ord_shuffled', permutations := 0);
+----
+true
+
 query I
 WITH a AS (SELECT sample_id, axis, coordinate, batch, batch_anchor_m2
            FROM progressive_pcoa_from_unifrac('ft_sorted', 'tree', variant := 'weighted_normalized',
