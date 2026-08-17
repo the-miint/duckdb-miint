@@ -1,4 +1,5 @@
 #include "rype_log_ratio.hpp"
+#include "rype_input_stream.hpp"
 #include "catalog_utils.hpp"
 #include "rype_common.hpp"
 #include "duckdb/common/helper.hpp"
@@ -40,13 +41,9 @@ RypeLogRatioTableFunction::GlobalState::~GlobalState() {
 		rype_index_free(numerator_index);
 	}
 
-	// Drop the materialized temp table BEFORE releasing input_connection — see
-	// rype_classify.cpp destructor for rationale.
-	if (input_connection) {
-		DropRypeTempTable(*input_connection, tmp_table_name);
-	}
-
-	// Release sub-connection LAST — see rype_classify.cpp destructor for rationale.
+	// Input stream after the output stream, connection last — see rype_classify.cpp
+	// destructor for rationale.
+	input_stream.reset();
 	input_connection.reset();
 }
 
@@ -94,6 +91,25 @@ unique_ptr<FunctionData> RypeLogRatioTableFunction::Bind(ClientContext &context,
 		if (data->skip_threshold > 1.0) {
 			throw BinderException("skip_threshold must be <= 1.0");
 		}
+	}
+
+	// Byte budget for RYpe's batch sizing. 0 (default) derives one from the
+	// detected allocation minus what DuckDB is holding — see
+	// ResolveRypeMemoryBudget in rype_common.hpp (#204).
+	auto max_mem_param = input.named_parameters.find("max_memory");
+	if (max_mem_param != input.named_parameters.end() && !max_mem_param->second.IsNull()) {
+		data->max_memory = max_mem_param->second.GetValue<int64_t>();
+		if (data->max_memory < 0) {
+			throw BinderException("max_memory must be >= 0 (0 = derive a budget automatically)");
+		}
+	}
+
+	// Report batch sizing through miint_warnings(). Off by default: shard loading
+	// is ~99.9% of a classify, so batch count nearly multiplies runtime, but that
+	// is diagnostic detail rather than something every query should print (#204).
+	auto debug_param = input.named_parameters.find("debug");
+	if (debug_param != input.named_parameters.end() && !debug_param->second.IsNull()) {
+		data->debug = debug_param->second.GetValue<bool>();
 	}
 
 	// Validate sequence table exists and has required columns. Capture the id
@@ -159,13 +175,7 @@ unique_ptr<GlobalTableFunctionState> RypeLogRatioTableFunction::InitGlobal(Clien
 	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
 	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);
 
-	// Materialize the user's sequence_table into a per-call TEMP table with an
-	// explicit id column, then read read_ids and the sequence stream from it.
-	// See rype_common.hpp for the design rationale (row-index ↔ read_id fix).
-	size_t avg_read_length = 0;
-	gstate->tmp_table_name =
-	    MaterializeRypeInputTempTable(conn, table_quoted, id_col_quoted, bind_data.sequence_table,
-	                                  bind_data.has_sequence2, "_rype_log_ratio_", gstate->read_ids, avg_read_length);
+	size_t avg_read_length = SampleAvgReadLength(conn, table_quoted);
 
 	// Step 5: Estimate batch size.
 	// Log-ratio loads shards from BOTH indices per batch, so use whichever index has larger
@@ -173,41 +183,47 @@ unique_ptr<GlobalTableFunctionState> RypeLogRatioTableFunction::InitGlobal(Clien
 	// size in its memory budget, so the index with larger shards yields a smaller batch size.
 	//
 	// is_paired follows sequence2 CONTENT, not the column's presence (#199) — see
-	// rype_classify.cpp InitGlobal and TableHasPairedContent in rype_common.hpp for rationale.
-	int is_paired = TableHasPairedContent(conn, KeywordHelper::WriteOptionallyQuoted(gstate->tmp_table_name)) ? 1 : 0;
+	// rype_classify.cpp InitGlobal and TableHasPairedContent in rype_common.hpp for rationale,
+	// including why the scan is skipped outright when there is no sequence2 column.
+	int is_paired = (bind_data.has_sequence2 && TableHasPairedContent(conn, table_quoted)) ? 1 : 0;
 
 	size_t num_shard_bytes = rype_index_largest_shard_bytes(gstate->numerator_index);
 	size_t denom_shard_bytes = rype_index_largest_shard_bytes(gstate->denominator_index);
 	const RypeIndex *sizing_index =
 	    (denom_shard_bytes > num_shard_bytes) ? gstate->denominator_index : gstate->numerator_index;
 
-	// is_large_binary=1 tells RYpe to skip its 2 GiB batch cap. That is only sound
-	// because ConfigureRypeArrowExport pinned this connection to Arrow LargeBinary
-	// (i64 offsets) above — the two must be changed together (#222).
-	size_t batch_size = rype_recommend_batch_size(sizing_index, avg_read_length, is_paired, 0, 1);
-	if (batch_size == 0) {
-		// rype_recommend_batch_size returns 0 on error — log but use safe fallback
-		const char *err = rype_get_last_error();
-		Printer::Print(StringUtil::Format("Warning: rype_recommend_batch_size failed (%s), using default",
-		                                  err ? err : "unknown error"));
-		batch_size = STANDARD_VECTOR_SIZE;
-	}
+	const size_t memory_budget = ResolveRypeMemoryBudget(context, bind_data.max_memory);
+	const size_t batch_size = ResolveRypeBatchSize(context, "rype_log_ratio", sizing_index, avg_read_length, is_paired,
+	                                               memory_budget, bind_data.debug);
 
-	// Step 6: Build the Arrow input stream from the same temp table, ordered by id.
-	auto input_wrapper = BuildRypeArrowInput(conn, gstate->tmp_table_name, /*include_pair_column=*/true, batch_size);
-	ArrowArrayStream *input_stream = &input_wrapper->stream;
+	// Step 6: Build the Arrow input stream — one streaming scan of the caller's
+	// relation, carrying the identifier and the sequence in the same row. See
+	// rype_input_stream.hpp.
+	gstate->id_map = make_uniq<RypeIdMap>(bind_data.id_type);
+	RypeInputStreamOptions stream_options;
+	stream_options.relation_quoted = table_quoted;
+	stream_options.id_column_quoted = id_col_quoted;
+	stream_options.source_name = bind_data.sequence_table;
+	stream_options.id_column_name = bind_data.id_column;
+	stream_options.id_type = bind_data.id_type;
+	stream_options.include_pair_column = true;
+	stream_options.has_sequence2 = bind_data.has_sequence2;
+	// Cap the Arrow batch by bytes; batch_size governs only how often RYpe runs a
+	// classification pass. See the same block in rype_classify.cpp InitGlobal.
+	stream_options.batch_rows = batch_size;
+	stream_options.batch_bytes = RYPE_ARROW_BATCH_BYTES;
+	gstate->input_stream = BuildRypeInputStream(conn, *gstate->id_map, std::move(stream_options));
 
-	// Step 7: Call RYpe log-ratio classification
-	int result = rype_classify_arrow_log_ratio(gstate->numerator_index, gstate->denominator_index, input_stream,
-	                                           bind_data.skip_threshold, &gstate->output_stream);
+	// Step 7: Call RYpe log-ratio classification. The input stream stays owned by
+	// this GlobalState — see rype_classify.cpp InitGlobal for why.
+	int result = rype_classify_arrow_log_ratio_ex(gstate->numerator_index, gstate->denominator_index,
+	                                              &gstate->input_stream->stream, bind_data.skip_threshold, batch_size,
+	                                              &gstate->output_stream);
 
 	if (result != 0) {
 		const char *err = rype_get_last_error();
 		throw IOException("RYpe log-ratio classification failed: %s", err ? err : "unknown error");
 	}
-
-	// Success - RYpe now owns the stream
-	(void)input_wrapper.release();
 
 	// Step 8: Get output schema
 	if (gstate->output_stream.get_schema(&gstate->output_stream, &gstate->output_schema) != 0) {
@@ -241,7 +257,6 @@ unique_ptr<LocalTableFunctionState> RypeLogRatioTableFunction::InitLocal(Executi
 void RypeLogRatioTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 	auto &lstate = data_p.local_state->Cast<LocalState>();
-	auto &bind_data = data_p.bind_data->Cast<Data>();
 
 	if (gstate.done) {
 		output.SetCardinality(0);
@@ -294,13 +309,13 @@ void RypeLogRatioTableFunction::Execute(ClientContext &context, TableFunctionInp
 	for (idx_t i = 0; i < to_output; i++) {
 		idx_t array_idx = gstate.batch_offset + i + batch.offset;
 
-		// Column 0: read_id (lookup from query_id which is a row index)
+		// Column 0: read_id (lookup from query_id, the surrogate miint assigned)
 		int64_t query_id = query_ids[array_idx + query_id_array.offset];
-		if (query_id < 0 || static_cast<size_t>(query_id) >= gstate.read_ids.size()) {
+		if (query_id < 0 || static_cast<size_t>(query_id) >= gstate.id_map->size()) {
 			throw IOException("RYpe returned invalid query_id %lld (expected 0-%zu)", static_cast<long long>(query_id),
-			                  gstate.read_ids.size() - 1);
+			                  gstate.id_map->size() - 1);
 		}
-		EmitIdCell(output.data[0], i, gstate.read_ids[query_id], bind_data.id_type);
+		gstate.id_map->Emit(output.data[0], i, static_cast<idx_t>(query_id));
 	}
 
 	// --- Column 1 (log_ratio) and Column 2 (fast_path): zero-copy via Arrow conversion ---
@@ -343,6 +358,8 @@ TableFunction RypeLogRatioTableFunction::GetFunction() {
 	// Named parameters
 	tf.named_parameters["id_column"] = LogicalType::VARCHAR;
 	tf.named_parameters["skip_threshold"] = LogicalType::DOUBLE;
+	tf.named_parameters["max_memory"] = LogicalType::BIGINT;
+	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
 
 	return tf;
 }

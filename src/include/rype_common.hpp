@@ -3,16 +3,15 @@
 #include "rype.h"
 #include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
+#include "miint_log.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
-#include "duckdb/common/arrow/result_arrow_wrapper.hpp"
 #include "duckdb/common/enums/arrow_format_version.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -20,6 +19,7 @@
 
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 
 #include <algorithm>
 #include <string>
@@ -60,8 +60,100 @@ struct RypeArrowLocalState : public LocalTableFunctionState {
 	}
 };
 
-//! Sample average read length from the first 1000 sequences in a table.
-//! Returns fallback (default 300) if the query fails or the table is empty.
+//! Floor for the memory budget handed to RYpe. Below this the recommender just
+//! returns its own 1000-row minimum, so a smaller number buys nothing.
+constexpr size_t RYPE_MIN_MEMORY_BUDGET = 256ULL * 1024 * 1024;
+
+//! Resolve the `max_memory` byte budget to pass to RYpe's batch sizing.
+//!
+//! `requested` is the caller's `max_memory` named parameter; > 0 is used
+//! verbatim, on the principle that someone who names a number knows their
+//! deployment better than this heuristic does.
+//!
+//! Otherwise: RYpe's own auto-detection (`max_memory = 0`) resolves to the
+//! cgroups/SLURM limit for the whole process
+//! (`ext/rype/src/memory.rs` `detect_available_memory`). Inside DuckDB that
+//! double-counts whatever DuckDB is already holding — two budgets drawn against
+//! one allocation, neither aware of the other, which is #204.
+//!
+//! Policy: subtract what DuckDB is *actually* holding, plus a reserve for it to
+//! grow into. Deliberately not `memory_limit`: that is a ceiling on the buffer
+//! pool rather than a reservation, it defaults to ~80% of RAM, and subtracting
+//! it would cut the budget roughly fourfold on an unconfigured host — which,
+//! since batch size scales with the budget and each batch costs a full pass over
+//! the index, trades an occasional OOM for a reliable severalfold slowdown. A
+//! deployment that needs disjoint budgets guaranteed rather than estimated
+//! should say so with `max_memory`, which is the point of the parameter.
+//!
+//! The reserve matches what `rype_extract` already withheld before this existed
+//! (a tenth, floor 256 MiB), so no call site becomes more permissive.
+//!
+//! Returns 0 only when detection fails, which leaves RYpe to its own devices —
+//! the same behavior as before this existed, and better than inventing a number
+//! from a failed measurement.
+inline size_t ResolveRypeMemoryBudget(ClientContext &context, int64_t requested) {
+	if (requested > 0) {
+		return static_cast<size_t>(requested);
+	}
+	const size_t available = rype_detect_available_memory();
+	if (available == 0) {
+		return 0;
+	}
+	const size_t duckdb_held = BufferManager::GetBufferManager(context).GetUsedMemory();
+	const size_t reserve = MaxValue<size_t>(available / 10, RYPE_MIN_MEMORY_BUDGET);
+	const size_t claimed = duckdb_held + reserve;
+	if (claimed >= available) {
+		return RYPE_MIN_MEMORY_BUDGET;
+	}
+	return MaxValue<size_t>(available - claimed, RYPE_MIN_MEMORY_BUDGET);
+}
+
+//! Ask RYpe to size a classification batch, and report the numbers when asked.
+//!
+//! Wraps rype_calculate_batch_config rather than rype_recommend_batch_size
+//! because it returns the same batch_size plus the memory estimates behind it.
+//! Those estimates were the missing signal in #204/#199: shard loading is ~99.9%
+//! of a classify, so batch count is very nearly a direct multiplier on runtime,
+//! and nothing reached the caller. `debug` surfaces them through
+//! miint::EmitWarning, i.e. stderr and miint_warnings().
+//!
+//! `label` names the calling function in the message. `sizing_index` is the
+//! index whose shard sizes bound the estimate — for log-ratio, the larger of the
+//! two. Returns STANDARD_VECTOR_SIZE if RYpe cannot size a batch, warning either
+//! way since that fallback is not a considered choice.
+inline size_t ResolveRypeBatchSize(ClientContext &context, const char *label, const RypeIndex *sizing_index,
+                                   size_t avg_read_length, int is_paired, size_t memory_budget, bool debug) {
+	// is_large_binary=1 tells RYpe to skip its 2 GiB batch cap. That is only sound
+	// because ConfigureRypeArrowExport pinned the connection to Arrow LargeBinary
+	// (i64 offsets) — the two must be changed together (#222).
+	const RypeBatchConfig config =
+	    rype_calculate_batch_config(sizing_index, avg_read_length, is_paired, memory_budget, 1);
+
+	if (config.batch_size == 0) {
+		const char *err = rype_get_last_error();
+		miint::EmitWarning(context, "%s: could not size a classification batch (%s); falling back to %llu reads", label,
+		                   err ? err : "unknown error", (unsigned long long)STANDARD_VECTOR_SIZE);
+		return STANDARD_VECTOR_SIZE;
+	}
+
+	if (debug) {
+		// batch_count is documented as "always 1, reserved for
+		// forward-compatibility", so it is deliberately not reported.
+		miint::EmitWarning(context,
+		                   "%s debug: classification batch = %llu reads; memory budget %.2f GB, "
+		                   "estimated %.2f GB per batch and %.2f GB peak; avg read length %llu, is_paired %d",
+		                   label, (unsigned long long)config.batch_size, double(memory_budget) / 1e9,
+		                   double(config.per_batch_memory) / 1e9, double(config.peak_memory) / 1e9,
+		                   (unsigned long long)avg_read_length, is_paired);
+	}
+	return config.batch_size;
+}
+
+//! Sample average read length from the first 1000 sequences in a table or view.
+//! Returns fallback (default 300) if the query fails or the relation is empty.
+//!
+//! Runs against the caller's relation. The LIMIT pushes down, so for a view over
+//! a join this touches 1000 rows rather than the whole corpus.
 inline size_t SampleAvgReadLength(Connection &conn, const std::string &table_quoted, size_t fallback = 300) {
 	std::string query =
 	    "SELECT AVG(LENGTH(sequence1))::BIGINT FROM (SELECT sequence1 FROM " + table_quoted + " LIMIT 1000)";
@@ -79,8 +171,8 @@ inline size_t SampleAvgReadLength(Connection &conn, const std::string &table_quo
 	return fallback;
 }
 
-//! Whether a materialized RYpe input table actually carries paired reads: true iff
-//! at least one row has a non-NULL sequence2.
+//! Whether the caller's relation actually carries paired reads: true iff at least
+//! one row has a non-NULL sequence2.
 //!
 //! Callers must use this rather than the mere presence of a `sequence2` column.
 //! read_fastx always emits that column (see read_fastx.hpp), so single-end reads
@@ -89,25 +181,29 @@ inline size_t SampleAvgReadLength(Connection &conn, const std::string &table_quo
 //! which doubles the number of full index loads — measured at ~1.8 h of waste on a
 //! 4 h job (#199).
 //!
+//! Callers must ALSO skip this entirely when the relation has no `sequence2`
+//! column at all: miint then projects `NULL::BLOB AS sequence2` itself, so the
+//! answer is known to be false without touching the data. That is the common
+//! single-end shape, and the scan below is the expensive part of it.
+//!
 //! Deliberately a FULL scan, unlike SampleAvgReadLength's LIMIT 1000: a paired row
 //! beyond the sample would be missed, and a false negative under-budgets memory,
-//! which is the direction that OOMs. A false positive only costs time.
+//! which is the direction that OOMs. A false positive only costs time. Only the
+//! `sequence2` column is projected, so column pruning keeps it off the sequence
+//! bytes.
 //!
-//! Returns false for an empty table: bool_or over zero rows is NULL, and zero rows
-//! genuinely means zero paired rows, so false is the correct answer there rather
-//! than a guess.
+//! Returns false for an empty relation: bool_or over zero rows is NULL, and zero
+//! rows genuinely means zero paired rows, so false is the correct answer there
+//! rather than a guess.
 //!
 //! Throws on query failure — it does NOT fall back to false. Falling back would
 //! produce exactly the false negative described above, i.e. the OOM direction, and
 //! it would do so precisely when memory pressure is the likeliest cause of the
-//! failure. This query differs from the id_query in MaterializeRypeInputTempTable
-//! only in which column it selects, off the same just-created temp table on the same
-//! connection, and that one throws too; if this fails while its sibling succeeded,
-//! something is already wrong and Rule 10 says say so.
+//! failure. Rule 10: surface it.
 inline bool TableHasPairedContent(Connection &conn, const std::string &table_quoted) {
 	auto result = conn.Query("SELECT bool_or(sequence2 IS NOT NULL) FROM " + table_quoted);
 	if (result->HasError()) {
-		throw InvalidInputException("Failed to detect paired content in temp table: %s", result->GetError());
+		throw InvalidInputException("Failed to detect paired content in '%s': %s", table_quoted, result->GetError());
 	}
 	auto &materialized = result->Cast<MaterializedQueryResult>();
 	auto chunk = materialized.Fetch();
@@ -235,36 +331,31 @@ inline void ValidateTableHasColumns(ClientContext &context, const std::string &t
 // ============================================================================
 //
 // Background: rype_classify, rype_extract_*, and rype_log_ratio all need to
-// build (a) a vector of read_ids indexed by a synthetic id and (b) an Arrow
+// build (a) a map from a synthetic id to the caller's read_id and (b) an Arrow
 // stream of (id, sequence, [pair_sequence]) for RYpe to consume. The naive
 // approach of issuing two independent SELECTs against the user's
 // sequence_table corrupts the correspondence whenever the two scans see rows
 // in different orders (multi-threaded scans, views, parquet sources,
-// preserve_insertion_order=false). The helpers below materialize the source
-// once into a per-call TEMP table with an explicit id column. id, read_id, and
-// sequence now live together in one row, so the correspondence is intrinsic to
-// the data rather than an emergent property of independent scans. read_ids is
-// read ORDER BY id (so the vector is indexed by id); the sequence stream needs
-// no ordering — RYpe echoes each row's id back as the output query_id, so it is
-// fed unordered and lazily (SendQuery) to keep memory at O(batch).
+// preserve_insertion_order=false). This used to be fixed by materializing the
+// source into a per-call TEMP table; RypeInputStream now does it with a single
+// streaming scan that carries the identifier and the sequence in the same row,
+// which is the same guarantee without the second copy of the corpus. See
+// rype_input_stream.hpp.
 //
 // Usage pattern (in InitGlobal, on a per-GlobalState sub-Connection):
 //
 //   ConfigureRypeArrowExport(conn);
-//   gstate->tmp_table_name = MaterializeRypeInputTempTable(
-//       conn, table_quoted, id_col_quoted, source_name_for_errors,
-//       has_sequence2, "_rype_classify_", gstate->read_ids,
-//       avg_read_length);
-//   // ... compute batch_size from avg_read_length ...
-//   auto wrapper = BuildRypeArrowInput(conn, gstate->tmp_table_name,
-//                                      /*include_pair_column=*/true,
-//                                      batch_size);
-//   ArrowArrayStream *input_stream = &wrapper->stream;
-//   // hand input_stream to rype_*_arrow(); on success, wrapper.release().
+//   size_t avg_read_length = SampleAvgReadLength(conn, table_quoted);
+//   int is_paired = (has_sequence2 && TableHasPairedContent(conn, table_quoted)) ? 1 : 0;
+//   // ... compute batch_size from avg_read_length and is_paired ...
+//   auto input = BuildRypeInputStream(conn, gstate->id_map, std::move(opts));
+//   ArrowArrayStream *input_stream = &input->stream;
+//   // hand input_stream to rype_*_arrow(); on success, input.release().
 //
-// The destructor must call DropRypeTempTable(*input_connection,
-// gstate->tmp_table_name) AFTER releasing the RYpe output stream and BEFORE
-// resetting input_connection.
+// The destructor must release the RYpe output stream BEFORE resetting
+// input_connection: releasing it releases the input stream, which owns the
+// streaming QueryResult that holds a non-owning ClientContext pointer into that
+// connection.
 
 //! Pin `conn` to exporting variable-length columns with 64-bit offsets (Arrow
 //! LargeBinary / LargeUtf8). Call once on the sub-connection, before building any
@@ -316,103 +407,6 @@ inline void ConfigureRypeArrowExport(Connection &conn) {
 		    props.arrow_offset_size == ArrowOffsetSize::LARGE ? "LARGE" : "REGULAR",
 		    static_cast<int>(props.arrow_output_version));
 	}
-}
-
-//! Materialize the user's sequence_table into a per-call TEMP table on `conn`,
-//! populate `out_read_ids` from it ordered by the synthetic id, and sample the
-//! average read length for batch-size estimation. Returns the name of the
-//! created TEMP table; the caller must store this and drop it later via
-//! DropRypeTempTable.
-//!
-//! `source_name_for_errors` is the user-facing source-table name (unquoted);
-//! used only in error messages.
-//! `name_prefix` is the per-function debug prefix (e.g. "_rype_classify_").
-inline std::string MaterializeRypeInputTempTable(Connection &conn, const std::string &table_quoted,
-                                                 const std::string &id_col_quoted,
-                                                 const std::string &source_name_for_errors, bool has_sequence2,
-                                                 const std::string &name_prefix, std::vector<std::string> &out_read_ids,
-                                                 size_t &out_avg_read_length) {
-	std::string tmp_table_name = name_prefix + StringUtil::Replace(UUID::ToString(UUID::GenerateRandomUUID()), "-", "");
-	std::string tmp_quoted = KeywordHelper::WriteOptionallyQuoted(tmp_table_name);
-	std::string seq2_proj = has_sequence2 ? "sequence2" : "NULL::BLOB AS sequence2";
-	std::string create_sql = "CREATE TEMP TABLE " + tmp_quoted +
-	                         " AS SELECT (row_number() OVER () - 1)::BIGINT AS id, " + id_col_quoted +
-	                         " AS read_id, sequence1, " + seq2_proj + " FROM " + table_quoted;
-	auto create_result = conn.Query(create_sql);
-	if (create_result->HasError()) {
-		throw InvalidInputException("Failed to materialize sequence table '%s': %s", source_name_for_errors,
-		                            create_result->GetError());
-	}
-
-	std::string id_query = "SELECT read_id FROM " + tmp_quoted + " ORDER BY id";
-	auto id_result = conn.Query(id_query);
-	if (id_result->HasError()) {
-		throw InvalidInputException("Failed to read read_ids from temp table: %s", id_result->GetError());
-	}
-
-	out_read_ids.reserve(id_result->RowCount());
-	auto &id_materialized = id_result->Cast<MaterializedQueryResult>();
-	while (auto chunk = id_materialized.Fetch()) {
-		for (idx_t i = 0; i < chunk->size(); i++) {
-			// Carry a NULL id as the empty string, not Value::ToString()'s literal
-			// "NULL". The egress codec (EmitIdCell) maps the empty carrier to SQL
-			// NULL for BIGINT/UUID — matching align_minimap2 — rather than throwing
-			// mid-stream on an unparseable "NULL"; VARCHAR emits the empty string.
-			auto id_val = chunk->data[0].GetValue(i);
-			out_read_ids.push_back(id_val.IsNull() ? std::string() : id_val.ToString());
-		}
-	}
-
-	out_avg_read_length = SampleAvgReadLength(conn, tmp_quoted);
-	return tmp_table_name;
-}
-
-//! Build the Arrow input stream RYpe will consume. Reads (id, sequence1, [sequence2])
-//! from the named TEMP table. `include_pair_column` exposes a pair_sequence column
-//! (true for classify/log_ratio, false for extract).
-//!
-//! Streamed via SendQuery (NOT Query) so RYpe consumes one batch at a time —
-//! O(batch_size) memory — instead of materializing the whole sequence corpus in
-//! RAM up front (which OOMs on large inputs, e.g. many genomes).
-//!
-//! No ORDER BY: RYpe echoes each row's `id` column back as the output query_id and
-//! never relies on input row order (see rype_classify/extract/log_ratio Execute,
-//! which all index read_ids[query_id]). id, read_id, and sequence already travel
-//! together in one temp-table row, so the read_ids[query_id] mapping is
-//! order-independent. Avoiding the sort also avoids a corpus-wide sort of large
-//! sequence BLOBs, which DuckDB cannot spill and which OOMs at scale.
-//!
-//! Caller transfers ownership of the returned wrapper to RYpe by calling
-//! .release() AFTER rype_*_arrow() succeeds; on failure, the unique_ptr's
-//! destructor cleans up the wrapper.
-inline unique_ptr<ResultArrowArrayStreamWrapper>
-BuildRypeArrowInput(Connection &conn, const std::string &tmp_table_name, bool include_pair_column, size_t batch_size) {
-	std::string tmp_quoted = KeywordHelper::WriteOptionallyQuoted(tmp_table_name);
-	std::string select_cols = include_pair_column
-	                              ? std::string("id, sequence1::BLOB AS sequence, sequence2::BLOB AS pair_sequence")
-	                              : std::string("id, sequence1::BLOB AS sequence");
-	std::string query = "SELECT " + select_cols + " FROM " + tmp_quoted;
-	auto query_result = conn.SendQuery(query);
-	if (query_result->HasError()) {
-		throw InvalidInputException("Failed to read from temp table: %s", query_result->GetError());
-	}
-	return make_uniq<ResultArrowArrayStreamWrapper>(std::move(query_result), batch_size);
-}
-
-//! Drop the per-call TEMP table on `conn`. Safe with empty name (no-op) and with a
-//! name that doesn't exist (uses IF EXISTS). Never throws — this runs in destructors.
-//!
-//! This drop is REQUIRED, not merely an early release of memory. The rype input
-//! connections inherit the caller's TEMP catalog (#193, so a TEMP sequence_table
-//! resolves), which means the table lives in the user's session and does NOT get
-//! reaped when the connection is torn down. A failure therefore leaks an internal
-//! relation into the user's catalog, which is why DropHelperTempRelation warns
-//! instead of discarding the error.
-inline void DropRypeTempTable(Connection &conn, const std::string &tmp_table_name) {
-	if (tmp_table_name.empty()) {
-		return;
-	}
-	DropHelperTempRelation(conn, KeywordHelper::WriteOptionallyQuoted(tmp_table_name));
 }
 
 } // namespace duckdb

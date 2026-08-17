@@ -1343,6 +1343,7 @@ set(EXTENSION_SOURCES
     src/rype_classify.cpp
     src/rype_extract.cpp
     src/rype_index_create.cpp
+    src/rype_input_stream.cpp
     src/MsBinaryDecoder.cpp
     src/MzMLReader.cpp
     src/read_mzml.cpp

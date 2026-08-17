@@ -1,0 +1,270 @@
+# name: test/sql/rype_input_stream_batching.test
+# description: RYpe input stream must produce identical results across Arrow batch boundaries
+# group: [sql]
+
+#
+# RypeInputStream closes an Arrow record batch once its sequence payload reaches
+# a byte ceiling (RYPE_ARROW_BATCH_BYTES, 256 MiB) so that peak memory stops
+# scaling with the corpus (the-miint/Qiita#459). Crossing that ceiling for real
+# would need a quarter-gigabyte fixture, so this file runs with the ceiling
+# lowered via MIINT_RYPE_ARROW_BATCH_BYTES; run_tests.sh invokes it separately
+# with that set, and the ordinary `make test` pass skips it.
+#
+# What can break when one logical scan becomes many Arrow batches:
+#
+#   * Surrogate ids. Column 0 of each batch carries base + (i - from), where
+#     base is the running RypeIdMap size. If the id map and the batches ever
+#     fall out of lockstep, RYpe echoes back a surrogate that resolves to some
+#     other read's identifier — silently, with no error, and only for reads
+#     after the first boundary. That is the failure this file exists to catch,
+#     and it is invisible in a single-batch run.
+#   * A source DataChunk left partly consumed by the byte ceiling rather than
+#     by the row ceiling — the resume path in FetchBatch.
+#   * On the RYpe side, rype_classify_arrow_ex accumulating several input
+#     batches into one classification pass.
+#
+# The invariants below are the same content-based ones as
+# rype_row_id_correspondence.test: each read_id must carry the classification of
+# ITS OWN sequence. Reads are engineered against data/rype/test.ryxdi in
+# RY-space:
+#   "two_*"   carries GGGGCCCC content -> exactly {bucket_alpha, bucket_gamma}
+#   "three_*" carries ACGTACGT content -> exactly {bucket_alpha, bucket_beta, bucket_gamma}
+# A mis-paired surrogate shows up as a "two_*" read carrying bucket_beta.
+
+require miint
+
+require-env MIINT_RYPE_ARROW_BATCH_BYTES
+
+# =============================================================================
+# Fixture
+# =============================================================================
+# 4000 reads of 56 sequence bytes each = 224000 bytes total. Against the
+# lowered ceiling this is hundreds of Arrow batches, and because 56 does not
+# divide the ceiling the boundaries land mid-read-run rather than lining up
+# with any chunk boundary.
+#
+# Interleaved so the two content classes straddle every batch boundary: if
+# batching lost or shifted reads, a run of one class would inherit the other's
+# buckets.
+
+statement ok
+CREATE TABLE seqs AS
+SELECT
+    CASE WHEN i % 2 = 0
+         THEN 'two_'   || lpad((i::INTEGER)::VARCHAR, 6, '0')
+         ELSE 'three_' || lpad((i::INTEGER)::VARCHAR, 6, '0')
+    END AS read_id,
+    CASE WHEN i % 2 = 0
+         THEN repeat('GGGGCCCC', 7)
+         ELSE repeat('ACGTACGT', 7)
+    END AS sequence1
+FROM range(0, 4000) t(i);
+
+query II
+SELECT count(*), count(DISTINCT length(sequence1)) FROM seqs;
+----
+4000	1
+
+# =============================================================================
+# rype_classify across many Arrow batches
+# =============================================================================
+
+statement ok
+CREATE TEMP TABLE classify_run AS
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seqs', threshold := 0.05);
+
+# The load-bearing invariant: no "two_*" read may carry bucket_beta. A surrogate
+# that drifts by even one position across a batch boundary produces these.
+query I
+SELECT count(*) FROM classify_run WHERE read_id LIKE 'two_%' AND bucket_name = 'bucket_beta';
+----
+0
+
+query I
+SELECT count(*) FROM (
+    SELECT read_id, list_sort(list(bucket_name)) AS buckets
+    FROM classify_run WHERE read_id LIKE 'two_%' GROUP BY read_id
+) WHERE buckets != ['bucket_alpha', 'bucket_gamma'];
+----
+0
+
+query I
+SELECT count(*) FROM (
+    SELECT read_id, list_sort(list(bucket_name)) AS buckets
+    FROM classify_run WHERE read_id LIKE 'three_%' GROUP BY read_id
+) WHERE buckets != ['bucket_alpha', 'bucket_beta', 'bucket_gamma'];
+----
+0
+
+# 2000*2 + 2000*3 = 10000. Catches reads dropped at a boundary, which the
+# per-read invariants above cannot see.
+query I
+SELECT count(*) FROM classify_run;
+----
+10000
+
+query I
+SELECT count(DISTINCT read_id) FROM classify_run;
+----
+4000
+
+statement ok
+DROP TABLE classify_run;
+
+# =============================================================================
+# Determinism: batching must not make the result order-dependent
+# =============================================================================
+
+statement ok
+CREATE TEMP TABLE run1 AS
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seqs', threshold := 0.05);
+
+statement ok
+CREATE TEMP TABLE run2 AS
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seqs', threshold := 0.05);
+
+query I
+SELECT (
+    (SELECT count(*) FROM (SELECT * FROM run1 EXCEPT SELECT * FROM run2)) +
+    (SELECT count(*) FROM (SELECT * FROM run2 EXCEPT SELECT * FROM run1))
+);
+----
+0
+
+statement ok
+DROP TABLE run1;
+
+statement ok
+DROP TABLE run2;
+
+# =============================================================================
+# A single read larger than the byte ceiling must still flow
+# =============================================================================
+# FetchBatch forces the first row of an empty batch even when it alone exceeds
+# the ceiling. Without that, the stream would return an empty batch forever and
+# the query would either hang or silently return nothing.
+
+statement ok
+CREATE TABLE oversized AS SELECT * FROM (VALUES
+    ('small_a', repeat('GGGGCCCC', 7)),
+    ('huge',    repeat('ACGTACGT', 2000)),
+    ('small_b', repeat('GGGGCCCC', 7))
+) AS t(read_id, sequence1);
+
+query I
+SELECT count(DISTINCT read_id)
+FROM rype_classify('data/rype/test.ryxdi', 'oversized', threshold := 0.05);
+----
+3
+
+query I
+SELECT count(*) FROM rype_classify('data/rype/test.ryxdi', 'oversized', threshold := 0.05)
+WHERE read_id LIKE 'small_%' AND bucket_name = 'bucket_beta';
+----
+0
+
+# =============================================================================
+# rype_extract_minimizer_set across many Arrow batches
+# =============================================================================
+# Extraction has no index pass behind it, so it takes the byte ceiling with no
+# RYpe-side accumulation. Reads sharing content must still share a minimizer
+# set — a drifting surrogate splits one class into several distinct sets.
+
+statement ok
+CREATE TEMP TABLE extract_run AS
+SELECT * FROM rype_extract_minimizer_set('seqs', 32, 10);
+
+query I
+SELECT count(*) FROM extract_run;
+----
+4000
+
+query I
+SELECT count(DISTINCT (fwd_set, rc_set)) FROM extract_run WHERE read_id LIKE 'two_%';
+----
+1
+
+query I
+SELECT count(DISTINCT (fwd_set, rc_set)) FROM extract_run WHERE read_id LIKE 'three_%';
+----
+1
+
+query I
+SELECT count(DISTINCT (fwd_set, rc_set)) FROM extract_run;
+----
+2
+
+statement ok
+DROP TABLE extract_run;
+
+# =============================================================================
+# rype_extract_strand_minimizers across many Arrow batches
+# =============================================================================
+
+statement ok
+CREATE TEMP TABLE strand_run AS
+SELECT * FROM rype_extract_strand_minimizers('seqs', 32, 10);
+
+query I
+SELECT count(*) FROM strand_run;
+----
+4000
+
+query I
+SELECT count(DISTINCT (fwd_hashes, fwd_positions, rc_hashes, rc_positions))
+FROM strand_run WHERE read_id LIKE 'two_%';
+----
+1
+
+query I
+SELECT count(DISTINCT (fwd_hashes, fwd_positions, rc_hashes, rc_positions))
+FROM strand_run;
+----
+2
+
+statement ok
+DROP TABLE strand_run;
+
+# =============================================================================
+# rype_log_ratio across many Arrow batches
+# =============================================================================
+# One row per input read, and the ratio must follow the read's own content:
+#   num_*   -> +inf (numerator only)
+#   denom_* -> -inf (denominator only)
+# A surrogate that drifts across a batch boundary swaps these signs.
+
+statement ok
+CREATE TABLE lr_seqs AS
+SELECT
+    CASE WHEN i % 2 = 0
+         THEN 'num_'   || lpad((i::INTEGER)::VARCHAR, 6, '0')
+         ELSE 'denom_' || lpad((i::INTEGER)::VARCHAR, 6, '0')
+    END AS read_id,
+    CASE WHEN i % 2 = 0
+         THEN repeat('GGCCTTAA', 7)
+         ELSE repeat('AATTAATT', 7)
+    END AS sequence1
+FROM range(0, 2000) t(i);
+
+statement ok
+CREATE TEMP TABLE lr_run AS
+SELECT * FROM rype_log_ratio(
+    'data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'lr_seqs');
+
+query I
+SELECT count(*) FROM lr_run;
+----
+2000
+
+query I
+SELECT count(*) FROM lr_run WHERE read_id LIKE 'num_%' AND log_ratio != 'inf'::DOUBLE;
+----
+0
+
+query I
+SELECT count(*) FROM lr_run WHERE read_id LIKE 'denom_%' AND log_ratio != '-inf'::DOUBLE;
+----
+0
+
+statement ok
+DROP TABLE lr_run;

@@ -1,4 +1,5 @@
 #include "rype_extract.hpp"
+#include "rype_input_stream.hpp"
 #include "catalog_utils.hpp"
 #include "rype_common.hpp"
 #include "duckdb/common/helper.hpp"
@@ -26,13 +27,9 @@ RypeExtractGlobalState::~RypeExtractGlobalState() {
 		output_stream.release(&output_stream);
 	}
 
-	// Drop the materialized temp table BEFORE releasing input_connection — see
-	// rype_classify.cpp destructor for rationale.
-	if (input_connection) {
-		DropRypeTempTable(*input_connection, tmp_table_name);
-	}
-
-	// Release sub-connection LAST — see rype_classify.cpp destructor for rationale.
+	// Input stream after the output stream, connection last — see rype_classify.cpp
+	// destructor for rationale.
+	input_stream.reset();
 	input_connection.reset();
 }
 
@@ -72,6 +69,25 @@ static unique_ptr<RypeExtractData> BindExtraction(ClientContext &context, TableF
 		data->id_column = id_col_param->second.ToString();
 	}
 
+	// Byte budget for RYpe's batch sizing. 0 (default) derives one from the
+	// detected allocation minus what DuckDB is holding — see
+	// ResolveRypeMemoryBudget in rype_common.hpp (#204).
+	auto max_mem_param = input.named_parameters.find("max_memory");
+	if (max_mem_param != input.named_parameters.end() && !max_mem_param->second.IsNull()) {
+		data->max_memory = max_mem_param->second.GetValue<int64_t>();
+		if (data->max_memory < 0) {
+			throw BinderException("max_memory must be >= 0 (0 = derive a budget automatically)");
+		}
+	}
+
+	// Report batch sizing through miint_warnings(). Off by default: shard loading
+	// is ~99.9% of a classify, so batch count nearly multiplies runtime, but that
+	// is diagnostic detail rather than something every query should print (#204).
+	auto debug_param = input.named_parameters.find("debug");
+	if (debug_param != input.named_parameters.end() && !debug_param->second.IsNull()) {
+		data->debug = debug_param->second.GetValue<bool>();
+	}
+
 	// Capture the id column's storage type so read_id mirrors it on output
 	// (BIGINT/UUID/VARCHAR) instead of always VARCHAR. Extraction is single-end,
 	// so has_sequence2 is irrelevant here.
@@ -80,11 +96,11 @@ static unique_ptr<RypeExtractData> BindExtraction(ClientContext &context, TableF
 	return data;
 }
 
-// Build read_ids vector and create Arrow input stream for extraction.
+// Build the id map and Arrow input stream for extraction. The stream is owned by
+// the returned GlobalState and stays owned by it — see the ownership note in
+// rype_input_stream.hpp.
 static unique_ptr<RypeExtractGlobalState>
-BuildExtractionInputStream(ClientContext &context, const RypeExtractData &bind_data,
-                           ArrowArrayStream **out_input_stream,
-                           unique_ptr<ResultArrowArrayStreamWrapper> &out_wrapper) {
+BuildExtractionInputStream(ClientContext &context, const RypeExtractData &bind_data, const char *label) {
 	auto gstate = make_uniq<RypeExtractGlobalState>();
 
 	// Store connection in GlobalState — see rype_classify.cpp InitGlobal for rationale.
@@ -99,15 +115,8 @@ BuildExtractionInputStream(ClientContext &context, const RypeExtractData &bind_d
 	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
 	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);
 
-	// Materialize the user's sequence_table into a per-call TEMP table with an
-	// explicit id column, then read read_ids and the sequence stream from it.
-	// See rype_common.hpp for the design rationale (row-index ↔ read_id fix).
-	// Extraction is single-sequence; pass has_sequence2=false to keep the temp
-	// table's sequence2 slot NULL, and include_pair_column=false on the stream.
-	size_t avg_read_length = 0;
-	gstate->tmp_table_name =
-	    MaterializeRypeInputTempTable(conn, table_quoted, id_col_quoted, bind_data.sequence_table,
-	                                  /*has_sequence2=*/false, "_rype_extract_", gstate->read_ids, avg_read_length);
+	// Extraction is single-sequence, so the stream carries no pair column.
+	size_t avg_read_length = SampleAvgReadLength(conn, table_quoted);
 
 	// Estimate batch size — extraction has no index overhead, just sequence data
 	// + minimizer lists.
@@ -116,31 +125,58 @@ BuildExtractionInputStream(ClientContext &context, const RypeExtractData &bind_d
 	                                 : 1;
 	size_t record_cost = avg_read_length + minimizers_per_read * sizeof(uint64_t);
 
-	size_t available = rype_detect_available_memory();
-	size_t safety = available / 10;
-	if (safety < 256ULL * 1024 * 1024) {
-		safety = 256ULL * 1024 * 1024;
-	}
-	size_t budget = (available > safety) ? available - safety : 0;
+	// Budget comes from the same resolver the classify paths use, so `max_memory`
+	// means the same thing on every RYpe function and the DuckDB-aware default
+	// applies here too (#204). A resolver result of 0 means detection failed;
+	// fall back to the row floor below rather than dividing by it.
+	const size_t budget = ResolveRypeMemoryBudget(context, bind_data.max_memory);
 	size_t batch_size = budget / record_cost;
 	if (batch_size < 1000) {
 		batch_size = STANDARD_VECTOR_SIZE;
 	}
 
-	// Build the Arrow input stream from the same temp table, ordered by id.
-	// Extraction does not consume pair_sequence.
-	out_wrapper = BuildRypeArrowInput(conn, gstate->tmp_table_name, /*include_pair_column=*/false, batch_size);
-	*out_input_stream = &out_wrapper->stream;
+	// Extraction sizes its own batch rather than going through
+	// ResolveRypeBatchSize: there is no index, so RYpe's shard-aware estimate
+	// does not apply and there is no RypeIndex to pass it. Report the same shape
+	// of numbers anyway so `debug` means one thing across the RYpe functions (#204).
+	if (bind_data.debug) {
+		miint::EmitWarning(context,
+		                   "%s debug: extraction batch = %llu reads; memory budget %.2f GB, "
+		                   "estimated %llu bytes per read (%llu sequence + %llu minimizers); "
+		                   "avg read length %llu",
+		                   label, (unsigned long long)batch_size, double(budget) / 1e9, (unsigned long long)record_cost,
+		                   (unsigned long long)avg_read_length,
+		                   (unsigned long long)(minimizers_per_read * sizeof(uint64_t)),
+		                   (unsigned long long)avg_read_length);
+	}
+
+	// One streaming scan of the caller's relation, carrying the identifier and the
+	// sequence in the same row. See rype_input_stream.hpp.
+	gstate->id_map = make_uniq<RypeIdMap>(bind_data.id_type);
+	RypeInputStreamOptions stream_options;
+	stream_options.relation_quoted = table_quoted;
+	stream_options.id_column_quoted = id_col_quoted;
+	stream_options.source_name = bind_data.sequence_table;
+	stream_options.id_column_name = bind_data.id_column;
+	stream_options.id_type = bind_data.id_type;
+	stream_options.include_pair_column = false;
+	stream_options.batch_rows = batch_size;
+	// Extraction runs per batch with no index pass behind it, so a smaller Arrow
+	// batch costs nothing here — it just bounds the sequence bytes resident at
+	// once, which the row-derived batch_size above cannot.
+	stream_options.batch_bytes = RYPE_ARROW_BATCH_BYTES;
+	gstate->input_stream = BuildRypeInputStream(conn, *gstate->id_map, std::move(stream_options));
 
 	return gstate;
 }
 
 // Shared Execute logic: fetches batches from the Arrow output stream and
 // uses DuckDB's built-in Arrow conversion for zero-copy on list columns.
-// Column 0 (id → read_id) requires manual transformation.
+// Column 0 (surrogate id → read_id) is resolved through gstate.id_map, which
+// already knows the caller's id type.
 // num_list_cols is the number of list columns starting at index 1.
 static void ExecuteExtraction(RypeExtractGlobalState &gstate, RypeExtractLocalState &lstate, DataChunk &output,
-                              idx_t num_list_cols, const LogicalType &id_type) {
+                              idx_t num_list_cols) {
 	if (gstate.done) {
 		output.SetCardinality(0);
 		return;
@@ -186,11 +222,11 @@ static void ExecuteExtraction(RypeExtractGlobalState &gstate, RypeExtractLocalSt
 		idx_t array_idx = gstate.batch_offset + i + batch.offset;
 		int64_t query_id = query_ids[array_idx + id_array.offset];
 
-		if (query_id < 0 || static_cast<size_t>(query_id) >= gstate.read_ids.size()) {
+		if (query_id < 0 || static_cast<size_t>(query_id) >= gstate.id_map->size()) {
 			throw IOException("RYpe returned invalid query_id %lld (expected 0-%zu)", static_cast<long long>(query_id),
-			                  gstate.read_ids.size() - 1);
+			                  gstate.id_map->size() - 1);
 		}
-		EmitIdCell(output.data[0], i, gstate.read_ids[query_id], id_type);
+		gstate.id_map->Emit(output.data[0], i, static_cast<idx_t>(query_id));
 	}
 
 	// Columns 1..N: List<UInt64> — use DuckDB's built-in Arrow-to-DuckDB conversion.
@@ -239,19 +275,14 @@ unique_ptr<GlobalTableFunctionState> RypeExtractMinimizerSetTableFunction::InitG
                                                                                       TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<RypeExtractData>();
 
-	ArrowArrayStream *input_stream = nullptr;
-	unique_ptr<ResultArrowArrayStreamWrapper> input_wrapper;
-	auto gstate = BuildExtractionInputStream(context, bind_data, &input_stream, input_wrapper);
+	auto gstate = BuildExtractionInputStream(context, bind_data, "rype_extract_minimizer_set");
 
-	int result = rype_extract_minimizer_set_arrow(input_stream, bind_data.k, bind_data.w, bind_data.salt,
-	                                              &gstate->output_stream);
+	int result = rype_extract_minimizer_set_arrow(&gstate->input_stream->stream, bind_data.k, bind_data.w,
+	                                              bind_data.salt, &gstate->output_stream);
 	if (result != 0) {
 		const char *err = rype_get_last_error();
 		throw IOException("RYpe minimizer set extraction failed: %s", err ? err : "unknown error");
 	}
-
-	// RYpe took ownership of input_stream — release unique_ptr to avoid double-free
-	(void)input_wrapper.release();
 
 	if (gstate->output_stream.get_schema(&gstate->output_stream, &gstate->output_schema) != 0) {
 		const char *err = gstate->output_stream.get_last_error(&gstate->output_stream);
@@ -279,9 +310,8 @@ void RypeExtractMinimizerSetTableFunction::Execute(ClientContext &context, Table
                                                    DataChunk &output) {
 	auto &gstate = data_p.global_state->Cast<RypeExtractGlobalState>();
 	auto &lstate = data_p.local_state->Cast<RypeExtractLocalState>();
-	auto &bind_data = data_p.bind_data->Cast<RypeExtractData>();
 	// Output: read_id, fwd_set, rc_set → 2 list columns
-	ExecuteExtraction(gstate, lstate, output, 2, bind_data.id_type);
+	ExecuteExtraction(gstate, lstate, output, 2);
 }
 
 TableFunction RypeExtractMinimizerSetTableFunction::GetFunction() {
@@ -289,6 +319,8 @@ TableFunction RypeExtractMinimizerSetTableFunction::GetFunction() {
 	                 Execute, Bind, InitGlobal, InitLocal);
 	tf.named_parameters["salt"] = LogicalType::UBIGINT;
 	tf.named_parameters["id_column"] = LogicalType::VARCHAR;
+	tf.named_parameters["max_memory"] = LogicalType::BIGINT;
+	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
 	return tf;
 }
 
@@ -323,18 +355,14 @@ unique_ptr<GlobalTableFunctionState>
 RypeExtractStrandMinimizersTableFunction::InitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<RypeExtractData>();
 
-	ArrowArrayStream *input_stream = nullptr;
-	unique_ptr<ResultArrowArrayStreamWrapper> input_wrapper;
-	auto gstate = BuildExtractionInputStream(context, bind_data, &input_stream, input_wrapper);
+	auto gstate = BuildExtractionInputStream(context, bind_data, "rype_extract_strand_minimizers");
 
-	int result = rype_extract_strand_minimizers_arrow(input_stream, bind_data.k, bind_data.w, bind_data.salt,
-	                                                  &gstate->output_stream);
+	int result = rype_extract_strand_minimizers_arrow(&gstate->input_stream->stream, bind_data.k, bind_data.w,
+	                                                  bind_data.salt, &gstate->output_stream);
 	if (result != 0) {
 		const char *err = rype_get_last_error();
 		throw IOException("RYpe strand minimizer extraction failed: %s", err ? err : "unknown error");
 	}
-
-	(void)input_wrapper.release();
 
 	if (gstate->output_stream.get_schema(&gstate->output_stream, &gstate->output_schema) != 0) {
 		const char *err = gstate->output_stream.get_last_error(&gstate->output_stream);
@@ -362,9 +390,8 @@ void RypeExtractStrandMinimizersTableFunction::Execute(ClientContext &context, T
                                                        DataChunk &output) {
 	auto &gstate = data_p.global_state->Cast<RypeExtractGlobalState>();
 	auto &lstate = data_p.local_state->Cast<RypeExtractLocalState>();
-	auto &bind_data = data_p.bind_data->Cast<RypeExtractData>();
 	// Output: read_id, fwd_hashes, fwd_positions, rc_hashes, rc_positions → 4 list columns
-	ExecuteExtraction(gstate, lstate, output, 4, bind_data.id_type);
+	ExecuteExtraction(gstate, lstate, output, 4);
 }
 
 TableFunction RypeExtractStrandMinimizersTableFunction::GetFunction() {
@@ -372,6 +399,8 @@ TableFunction RypeExtractStrandMinimizersTableFunction::GetFunction() {
 	                 Execute, Bind, InitGlobal, InitLocal);
 	tf.named_parameters["salt"] = LogicalType::UBIGINT;
 	tf.named_parameters["id_column"] = LogicalType::VARCHAR;
+	tf.named_parameters["max_memory"] = LogicalType::BIGINT;
+	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
 	return tf;
 }
 

@@ -1,0 +1,204 @@
+# name: test/sql/rype_max_memory.test
+# description: max_memory named parameter on the RYpe table functions
+# group: [sql]
+
+#
+# max_memory bounds how many reads RYpe accumulates before each pass over the
+# index. It exists because RYpe's own auto-detection resolves to the cgroup or
+# SLURM limit for the whole process, which inside DuckDB is memory DuckDB has
+# already claimed via memory_limit — two budgets against one allocation (#204).
+#
+# What is pinned here:
+#   * the parameter is accepted on all four functions, so a caller in a
+#     memory-constrained deployment has a way to say so at all;
+#   * it does not change results. Batch sizing is a performance knob; if the
+#     answer moved with the budget, tuning it would be unsafe. A budget small
+#     enough to force RYpe's 1000-row floor must agree exactly with one large
+#     enough to classify everything in a single pass.
+#   * a negative value is rejected at bind time rather than wrapping to a huge
+#     size_t and being silently treated as "effectively unlimited".
+#
+# What is NOT pinned here: the derived default. It depends on the detected
+# cgroup/SLURM allocation and on memory_limit, so it is machine-dependent by
+# construction and any expected value would be a fiction.
+
+require miint
+
+statement ok
+CREATE TABLE seqs AS
+SELECT
+    CASE WHEN i % 2 = 0
+         THEN 'two_'   || lpad((i::INTEGER)::VARCHAR, 5, '0')
+         ELSE 'three_' || lpad((i::INTEGER)::VARCHAR, 5, '0')
+    END AS read_id,
+    CASE WHEN i % 2 = 0
+         THEN repeat('GGGGCCCC', 7)
+         ELSE repeat('ACGTACGT', 7)
+    END AS sequence1
+FROM range(0, 5000) t(i);
+
+# =============================================================================
+# Accepted on every RYpe function that sizes a batch
+# =============================================================================
+
+statement ok
+SELECT count(*) FROM rype_classify(
+    'data/rype/test.ryxdi', 'seqs', threshold := 0.05, max_memory := 1000000000);
+
+statement ok
+SELECT count(*) FROM rype_log_ratio(
+    'data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'seqs',
+    max_memory := 1000000000);
+
+statement ok
+SELECT count(*) FROM rype_extract_minimizer_set('seqs', 32, 10, max_memory := 1000000000);
+
+statement ok
+SELECT count(*) FROM rype_extract_strand_minimizers('seqs', 32, 10, max_memory := 1000000000);
+
+# =============================================================================
+# Results are independent of the budget
+# =============================================================================
+# 1 byte is below anything usable, so RYpe falls back to MIN_BATCH_SIZE (1000
+# rows, ext/rype/src/memory.rs) and classifies 5000 reads in five passes. 1 GB
+# does it in one. The fixture is 5000 rather than 2000 reads so the tight side
+# is multi-pass even if the budget is rejected outright and miint falls back to
+# STANDARD_VECTOR_SIZE instead — otherwise this comparison could pass without
+# ever crossing a group boundary.
+
+statement ok
+CREATE TEMP TABLE tight AS
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seqs', threshold := 0.05, max_memory := 1);
+
+statement ok
+CREATE TEMP TABLE roomy AS
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seqs', threshold := 0.05, max_memory := 1000000000);
+
+query I
+SELECT (
+    (SELECT count(*) FROM (SELECT * FROM tight EXCEPT SELECT * FROM roomy)) +
+    (SELECT count(*) FROM (SELECT * FROM roomy EXCEPT SELECT * FROM tight))
+);
+----
+0
+
+# Guard against both sides being empty, which would satisfy the check above
+# without testing anything: 2500 "two_*" x 2 buckets + 2500 "three_*" x 3.
+query I
+SELECT count(*) FROM tight;
+----
+12500
+
+# The read_id <-> content correspondence must survive the small-budget path too,
+# since a smaller budget means more classification groups.
+query I
+SELECT count(*) FROM tight WHERE read_id LIKE 'two_%' AND bucket_name = 'bucket_beta';
+----
+0
+
+statement ok
+DROP TABLE tight;
+
+statement ok
+DROP TABLE roomy;
+
+# Same for extraction: reads sharing content share a minimizer set regardless of
+# how the work was divided.
+query I
+SELECT count(DISTINCT (fwd_set, rc_set))
+FROM rype_extract_minimizer_set('seqs', 32, 10, max_memory := 1);
+----
+2
+
+# =============================================================================
+# A negative budget is rejected, not wrapped
+# =============================================================================
+# max_memory reaches RYpe as size_t. Without the bind-time check, -1 would
+# become SIZE_MAX and read as "unlimited" — the opposite of what was asked.
+
+statement error
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seqs', max_memory := -1);
+----
+max_memory must be >= 0
+
+statement error
+SELECT * FROM rype_log_ratio(
+    'data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'seqs',
+    max_memory := -1);
+----
+max_memory must be >= 0
+
+statement error
+SELECT * FROM rype_extract_minimizer_set('seqs', 32, 10, max_memory := -1);
+----
+max_memory must be >= 0
+
+statement error
+SELECT * FROM rype_extract_strand_minimizers('seqs', 32, 10, max_memory := -1);
+----
+max_memory must be >= 0
+
+# =============================================================================
+# 0 is the documented default, and means "derive one"
+# =============================================================================
+# Explicitly passing 0 must behave exactly as omitting the parameter.
+
+statement ok
+CREATE TEMP TABLE omitted AS
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seqs', threshold := 0.05);
+
+statement ok
+CREATE TEMP TABLE explicit_zero AS
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seqs', threshold := 0.05, max_memory := 0);
+
+query I
+SELECT (
+    (SELECT count(*) FROM (SELECT * FROM omitted EXCEPT SELECT * FROM explicit_zero)) +
+    (SELECT count(*) FROM (SELECT * FROM explicit_zero EXCEPT SELECT * FROM omitted))
+);
+----
+0
+
+statement ok
+DROP TABLE omitted;
+
+statement ok
+DROP TABLE explicit_zero;
+
+# =============================================================================
+# Teardown after a failure that happens once the input stream exists
+# =============================================================================
+# Not about max_memory, but this is the only place a RYpe call is driven to
+# return -1 *after* miint has built the Arrow input stream, and that is the
+# path the input stream's ownership rules exist for.
+#
+# rype_*_arrow_ex takes ownership of the input stream only once it begins
+# consuming it, and a -1 return does not say whether that happened — argument
+# validation fails before, a failure inside ArrowArrayStreamReader::from_raw
+# fails after. miint therefore keeps ownership itself rather than guessing (see
+# rype_input_stream.hpp); this pins that the guess is not being made, by
+# reaching the failure with a live stream and a live streaming QueryResult and
+# requiring a clean error rather than a crash.
+#
+# A negative index built with a different w is the reachable trigger: RYpe
+# rejects the k/w/salt mismatch after miint has constructed the stream.
+
+statement ok
+CREATE TABLE refs AS SELECT 0::BIGINT AS feature_idx, 0 AS chunk_index,
+    repeat('ACGTACGTTGCA', 200) AS chunk_data;
+
+statement ok
+SELECT * FROM rype_index_create('refs', '__TEST_DIR__/mismatched.ryxdi', k := 16, w := 12);
+
+statement error
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seqs',
+                            negative_index := '__TEST_DIR__/mismatched.ryxdi');
+----
+do not match
+
+# The connection, id map and input stream all survived that teardown intact —
+# a subsequent classify in the same session must still work.
+query I
+SELECT count(*) FROM rype_classify('data/rype/test.ryxdi', 'seqs', threshold := 0.05);
+----
+12500
