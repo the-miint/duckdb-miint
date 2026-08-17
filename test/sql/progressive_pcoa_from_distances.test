@@ -69,7 +69,8 @@ CREATE TABLE full_ord AS SELECT sample_id, axis, coordinate FROM pcoa('dcoo', n_
 statement ok
 CREATE TABLE prog_ord AS
 SELECT sample_id, axis, coordinate
-FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42,
+    threads := 1);
 
 # observed M^2 ~ 1.4e-13 (Euclidean-exact); 1e-6 bounds it with generous headroom
 # for cross-platform fp32/FSVD rounding while asserting numerical reproduction.
@@ -95,7 +96,8 @@ true
 statement ok
 CREATE TABLE prog_ord2 AS
 SELECT sample_id, axis, coordinate
-FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42,
+    threads := 1);
 
 query I
 SELECT count(*) FROM (SELECT * FROM prog_ord EXCEPT SELECT * FROM prog_ord2);
@@ -194,7 +196,7 @@ SELECT count(DISTINCT sample_id) FROM progressive_pcoa_from_distances('dcoo', n_
 statement ok
 CREATE TABLE prog_expl AS
 SELECT sample_id, axis, coordinate
-FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, batch_size := 12, seed := 42,
+FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, batch_size := 12, seed := 42, threads := 1,
     anchors := ['s0','s1','s2','s3','s4','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
 
 query T
@@ -214,7 +216,7 @@ SELECT count(*) FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anch
 statement ok
 CREATE TABLE prog_expl2 AS
 SELECT sample_id, axis, coordinate
-FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, batch_size := 12, seed := 42,
+FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, batch_size := 12, seed := 42, threads := 1,
     anchors := ['s0','s1','s2','s3','s4','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
 
 query I

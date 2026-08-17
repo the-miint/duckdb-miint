@@ -56,7 +56,8 @@ FROM unifrac_pcoa('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, s
 statement ok
 CREATE TABLE prog_ord AS
 SELECT sample_id, axis, coordinate
-FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, n_anchors := 15,
+    batch_size := 12, seed := 42, threads := 1);
 
 # observed M^2 ~ 7.4e-5 here; 0.05 leaves generous headroom (UniFrac is non-Euclidean,
 # so full PCoA is itself an embedding and the exact value depends on FSVD).
@@ -87,7 +88,8 @@ true
 statement ok
 CREATE TABLE prog_ord2 AS
 SELECT sample_id, axis, coordinate
-FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, n_anchors := 15,
+    batch_size := 12, seed := 42, threads := 1);
 
 query I
 SELECT count(*) FROM (SELECT * FROM prog_ord EXCEPT SELECT * FROM prog_ord2);
@@ -373,45 +375,34 @@ CREATE TABLE ft_shuffled AS SELECT * FROM ft ORDER BY hash(sample_id || feature_
 statement ok
 CREATE TABLE ft_sorted AS SELECT * FROM ft ORDER BY sample_id;
 
-# ── TEMPORARY DIAGNOSTIC (PR #244). The exact-equality assertion further down
-#    fails on linux_amd64 — all 240 rows of the symmetric difference — and does NOT
-#    reproduce on macOS/arm64 at threads 1, 2, 4 or 14, so it is an fp32 summation
-#    -order effect or a genuine order dependence, and the count alone cannot tell
-#    which. These five brackets separate the two so the fix is chosen from data:
-#      c1  do the two layouts assign samples to the SAME batches? (the semantic
-#          question — enumeration is ORDER BY sample_id, so this must hold)
-#      c2-c4  bracket the coordinate difference: 1e-12 / 1e-9 / 1e-6
-#      c5  did the UniFrac DISTANCES themselves move? (localizes it to the compute
-#          rather than to the progressive machinery)
-#    c1 and c5 true with the magnitude at ~1e-12 means the exact assertion is simply
-#    stricter than fp32 permits on x86 and should become a tolerance. c1 or c5 false
-#    means scan order is reaching the answer, which is a real bug and the doc advice
-#    in docs/diversity.md would be wrong. Remove this block with whichever fix wins. ──
-query IIIII
-WITH a AS (SELECT sample_id, axis, coordinate, batch
+#    Compared at threads := 1, which is where exact equality is WELL-POSED. Two
+#    progressive runs compared bit-for-bit also assert that skbb's centering
+#    reduction sums in a reproducible order, and that is only true at a fixed single
+#    width (see the worker-count-invariance note above). Left at the default width
+#    this failed intermittently on linux_amd64 with every one of the 240 rows
+#    differing — the whole frame shifted, which says nothing whatever about layout;
+#    measured on the same runner, batches, distances and M^2 were all identical.
+query I
+WITH a AS (SELECT sample_id, axis, coordinate, batch, batch_anchor_m2
            FROM progressive_pcoa_from_unifrac('ft_sorted', 'tree', variant := 'weighted_normalized',
-               n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42)),
-     b AS (SELECT sample_id, axis, coordinate, batch
+               n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1)),
+     b AS (SELECT sample_id, axis, coordinate, batch, batch_anchor_m2
            FROM progressive_pcoa_from_unifrac('ft_shuffled', 'tree', variant := 'weighted_normalized',
-               n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42)),
-     j AS (SELECT a.coordinate AS ca, b.coordinate AS cb, a.batch AS ba, b.batch AS bb
-           FROM a JOIN b USING (sample_id, axis)),
-     d AS (SELECT coalesce(max(abs(x.distance - y.distance)), 0.0) AS dd
-           FROM unifrac_distances('ft_sorted', 'tree', variant := 'weighted_normalized') x
-           JOIN unifrac_distances('ft_shuffled', 'tree', variant := 'weighted_normalized') y
-             USING (sample_a, sample_b))
-SELECT count(*) FILTER (WHERE ba IS DISTINCT FROM bb) = 0,
-       max(abs(ca - cb)) < 1e-12,
-       max(abs(ca - cb)) < 1e-9,
-       max(abs(ca - cb)) < 1e-6,
-       (SELECT dd FROM d) < 1e-12
-FROM j;
+               n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1))
+SELECT (SELECT count(*) FROM (SELECT * FROM a EXCEPT ALL SELECT * FROM b))
+     + (SELECT count(*) FROM (SELECT * FROM b EXCEPT ALL SELECT * FROM a));
 ----
-true	true	true	true	true
+0
 
-# and the same comparison the way the docs tell users to make it: as ordinations,
-# through procrustes. M^2 is frame-invariant, so this is the claim that matters —
-# "layout does not change the ordination" — independent of last-bit coordinate noise.
+# ── ...and the same guarantee at the DEFAULT thread count, where the reference
+#    frame may shift in its last bits but the ANSWER may not. Three of these are
+#    exact because nothing fp32 can perturb them, and the fourth is frame-invariant:
+#      c1  batch assignment — integers, decided by an ORDER BY sample_id enumeration
+#      c2  the UniFrac distances themselves (pinned width, so exactly comparable)
+#      c3  coordinates to 1e-5, the fp32 tolerance used elsewhere in this file
+#      c4  procrustes M^2 ~ 0 — immune to a frame shift by construction, which is
+#          why docs/diversity.md tells users to compare ordinations and not
+#          coordinates. This is the assertion that actually backs the doc advice. ──
 statement ok
 CREATE TABLE dg_ord_sorted AS
 SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_unifrac('ft_sorted', 'tree',
@@ -422,22 +413,26 @@ CREATE TABLE dg_ord_shuffled AS
 SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_unifrac('ft_shuffled', 'tree',
     variant := 'weighted_normalized', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
 
-query I
-SELECT max(m2) < 1e-12 FROM procrustes('dg_ord_sorted', 'dg_ord_shuffled', permutations := 0);
-----
-true
-
-query I
-WITH a AS (SELECT sample_id, axis, coordinate, batch, batch_anchor_m2
+query IIII
+WITH a AS (SELECT sample_id, axis, coordinate, batch
            FROM progressive_pcoa_from_unifrac('ft_sorted', 'tree', variant := 'weighted_normalized',
                n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42)),
-     b AS (SELECT sample_id, axis, coordinate, batch, batch_anchor_m2
+     b AS (SELECT sample_id, axis, coordinate, batch
            FROM progressive_pcoa_from_unifrac('ft_shuffled', 'tree', variant := 'weighted_normalized',
-               n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42))
-SELECT (SELECT count(*) FROM (SELECT * FROM a EXCEPT ALL SELECT * FROM b))
-     + (SELECT count(*) FROM (SELECT * FROM b EXCEPT ALL SELECT * FROM a));
+               n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42)),
+     j AS (SELECT a.coordinate AS ca, b.coordinate AS cb, a.batch AS ba, b.batch AS bb
+           FROM a JOIN b USING (sample_id, axis)),
+     d AS (SELECT coalesce(max(abs(x.distance - y.distance)), 0.0) AS dd
+           FROM unifrac_distances('ft_sorted', 'tree', variant := 'weighted_normalized', threads := 1) x
+           JOIN unifrac_distances('ft_shuffled', 'tree', variant := 'weighted_normalized', threads := 1) y
+             USING (sample_a, sample_b))
+SELECT count(*) FILTER (WHERE ba IS DISTINCT FROM bb) = 0,
+       (SELECT dd FROM d) = 0.0,
+       max(abs(ca - cb)) < 1e-5,
+       (SELECT max(m2) < 1e-9 FROM procrustes('dg_ord_sorted', 'dg_ord_shuffled', permutations := 0))
+FROM j;
 ----
-0
+true	true	true	true
 
 # ── SHEARING MUST NOT MOVE A COORDINATE.
 #    The bind shears the tree to the feature-table's features, and each block
@@ -471,10 +466,10 @@ SELECT (SELECT count(*) FROM tree), (SELECT count(*) FROM tree_extra);
 query I
 WITH tight AS (SELECT sample_id, axis, coordinate, batch, batch_anchor_m2
                FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized',
-                   n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42)),
+                   n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1)),
      extra AS (SELECT sample_id, axis, coordinate, batch, batch_anchor_m2
                FROM progressive_pcoa_from_unifrac('ft', 'tree_extra', variant := 'weighted_normalized',
-                   n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42))
+                   n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1))
 SELECT (SELECT count(*) FROM (SELECT * FROM tight EXCEPT ALL SELECT * FROM extra))
      + (SELECT count(*) FROM (SELECT * FROM extra EXCEPT ALL SELECT * FROM tight));
 ----
@@ -498,9 +493,11 @@ true
 
 query I
 WITH tight AS (SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_unifrac('ft_pa', 'tree',
-                   variant := 'unweighted', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42)),
+                   variant := 'unweighted', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42,
+                   threads := 1)),
      extra AS (SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_unifrac('ft_pa', 'tree_extra',
-                   variant := 'unweighted', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42))
+                   variant := 'unweighted', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42,
+                   threads := 1))
 SELECT (SELECT count(*) FROM (SELECT * FROM tight EXCEPT ALL SELECT * FROM extra))
      + (SELECT count(*) FROM (SELECT * FROM extra EXCEPT ALL SELECT * FROM tight));
 ----
