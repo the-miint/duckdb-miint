@@ -453,15 +453,6 @@ fi
 make test
 ./build/release/extension/miint/tests
 
-# RypeInputStream closes an Arrow batch at a 256 MiB sequence-payload ceiling,
-# so the multi-batch path — surrogate ids staying in lockstep with the id map
-# across batch boundaries — needs a quarter-gigabyte corpus to reach. Instead
-# run that one file again with the ceiling lowered. It is require-env gated on
-# this variable, so the `make test` pass above skips it.
-echo "Running RYpe multi-Arrow-batch input-stream test..."
-MIINT_RYPE_ARROW_BATCH_BYTES=512 \
-    ./build/release/test/unittest "test/sql/rype_input_stream_batching.test"
-
 # Run shell script tests
 echo "Running shell script tests..."
 for test_script in test/shell/*.sh; do

@@ -3,7 +3,6 @@
 #include "rype_common.hpp"
 #include "rype_input_stream.hpp"
 #include "duckdb/common/helper.hpp"
-#include "duckdb/common/printer.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
@@ -93,24 +92,7 @@ unique_ptr<FunctionData> RypeClassifyTableFunction::Bind(ClientContext &context,
 		data->negative_index_path = neg_idx_param->second.ToString();
 	}
 
-	// Byte budget for RYpe's batch sizing. 0 (default) derives one from the
-	// detected allocation minus what DuckDB is holding — see
-	// ResolveRypeMemoryBudget in rype_common.hpp (#204).
-	auto max_mem_param = input.named_parameters.find("max_memory");
-	if (max_mem_param != input.named_parameters.end() && !max_mem_param->second.IsNull()) {
-		data->max_memory = max_mem_param->second.GetValue<int64_t>();
-		if (data->max_memory < 0) {
-			throw BinderException("max_memory must be >= 0 (0 = derive a budget automatically)");
-		}
-	}
-
-	// Report batch sizing through miint_warnings(). Off by default: shard loading
-	// is ~99.9% of a classify, so batch count nearly multiplies runtime, but that
-	// is diagnostic detail rather than something every query should print (#204).
-	auto debug_param = input.named_parameters.find("debug");
-	if (debug_param != input.named_parameters.end() && !debug_param->second.IsNull()) {
-		data->debug = debug_param->second.GetValue<bool>();
-	}
+	ParseRypeSharedParams(input, data->max_memory, data->debug);
 
 	// Note: We do NOT validate index paths here. Path validation is deferred to
 	// rype_index_load() in InitGlobal() which provides proper error messages for
@@ -185,20 +167,6 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
 	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);
 
-	// Estimate the classification batch size: how many reads RYpe accumulates
-	// before each pass over the index shards. Too small and shard I/O dominates.
-	// This is no longer the Arrow batch size — see stream_options.batch_bytes.
-	size_t avg_read_length = SampleAvgReadLength(conn, table_quoted);
-
-	// is_paired follows sequence2 CONTENT, not the column's presence (#199) — see
-	// TableHasPairedContent in rype_common.hpp. Skipped entirely when the relation
-	// has no sequence2 column: miint projects NULL::BLOB for it, so the answer is
-	// known false without scanning.
-	int is_paired = (bind_data.has_sequence2 && TableHasPairedContent(conn, table_quoted)) ? 1 : 0;
-	const size_t memory_budget = ResolveRypeMemoryBudget(context, bind_data.max_memory);
-	const size_t batch_size = ResolveRypeBatchSize(context, "rype_classify", gstate->index, avg_read_length, is_paired,
-	                                               memory_budget, bind_data.debug);
-
 	// Build the Arrow input stream: one streaming scan of the caller's relation,
 	// carrying the identifier and the sequence in the same row. See
 	// rype_input_stream.hpp.
@@ -211,13 +179,25 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 	stream_options.id_type = bind_data.id_type;
 	stream_options.include_pair_column = true;
 	stream_options.has_sequence2 = bind_data.has_sequence2;
-	// Cap the Arrow batch by bytes, and let batch_size govern only how often RYpe
-	// runs a classification pass. rype_classify_arrow_ex accumulates input batches
-	// as minimizers and releases each batch's sequence bytes, so the sequence
-	// residency is one Arrow batch rather than the whole classification group.
-	stream_options.batch_rows = batch_size;
-	stream_options.batch_bytes = RYPE_ARROW_BATCH_BYTES;
+	// Cap the Arrow batch by bytes, and let batch_size below govern only how often
+	// RYpe runs a classification pass. rype_classify_arrow_ex accumulates input
+	// batches as minimizers and releases each batch's sequence bytes, so the
+	// sequence residency is one Arrow batch rather than the whole classification
+	// group.
+	stream_options.batch_bytes = GetRypeArrowBatchBytes(context);
 	gstate->input_stream = BuildRypeInputStream(conn, *gstate->id_map, std::move(stream_options));
+
+	// Estimate the classification batch size: how many reads RYpe accumulates
+	// before each pass over the index shards. Too small and shard I/O dominates.
+	//
+	// The inputs come from the head of the stream's own scan, not from separate
+	// queries against the caller's relation — that relation must be read exactly
+	// once (#229). SampleSizing does not consume the rows it measures.
+	const auto sizing = gstate->input_stream->SampleSizing();
+	const size_t memory_budget = ResolveRypeMemoryBudget(context, bind_data.max_memory);
+	const size_t batch_size = ResolveRypeBatchSize(context, "rype_classify", gstate->index, sizing.avg_read_length,
+	                                               sizing.is_paired ? 1 : 0, memory_budget, bind_data.debug);
+	gstate->input_stream->SetBatchRows(batch_size);
 
 	// Step 5: Call RYpe classify.
 	// The stream stays owned by this GlobalState. rype_*_arrow_ex takes ownership
@@ -330,8 +310,10 @@ void RypeClassifyTableFunction::Execute(ClientContext &context, TableFunctionInp
 		// echoed something it was not given.
 		int64_t query_id = query_ids[array_idx + query_id_array.offset];
 		if (query_id < 0 || static_cast<size_t>(query_id) >= gstate.id_map->size()) {
-			throw IOException("RYpe returned invalid query_id %lld (expected 0-%zu)", static_cast<long long>(query_id),
-			                  gstate.id_map->size() - 1);
+			// size() - 1 would wrap on an empty map and report a range that contains
+			// every possible value, i.e. deny the failure it is reporting.
+			throw IOException("RYpe returned invalid query_id %lld (the input carried %zu rows)",
+			                  static_cast<long long>(query_id), gstate.id_map->size());
 		}
 		gstate.id_map->Emit(output.data[0], i, static_cast<idx_t>(query_id));
 
@@ -386,8 +368,7 @@ TableFunction RypeClassifyTableFunction::GetFunction() {
 	tf.named_parameters["id_column"] = LogicalType::VARCHAR;
 	tf.named_parameters["threshold"] = LogicalType::DOUBLE;
 	tf.named_parameters["negative_index"] = LogicalType::VARCHAR;
-	tf.named_parameters["max_memory"] = LogicalType::BIGINT;
-	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
+	AddRypeSharedNamedParameters(tf);
 
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;

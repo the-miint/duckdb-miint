@@ -125,15 +125,24 @@ would otherwise look like data loss and fail a valid workload.
 
 ### Audit status
 
-Only the alignment paths have been fixed. The rest of the codebase has **not** been
-audited, and at least one shared helper is known to be exposed — record findings
+Only the alignment and RYpe paths have been fixed. The rest of the codebase has **not**
+been audited, and at least one shared helper is known to be exposed — record findings
 here so the remaining surface stays visible rather than being rediscovered.
+
+A warning from the RYpe fix, for whoever writes the next regression test here: the
+obvious construction — `nextval() AS read_id` over a stable body, then assert the ids
+stay in `1..N` — can pass against code that genuinely re-reads. If the extra read
+projects only the sequence columns and never references the id, column pruning deletes
+the `nextval()` from that plan and the sequence is never advanced. Put the volatility
+in a column every reader must evaluate, and verify the test fails against the defect
+before trusting it. `test/sql/rype_single_read.test` documents both forms.
 
 | Reader | Reads relation | Status |
 | --- | --- | --- |
 | `align_minimap2` (default + `per_subject_database`) | once | fixed, remedy (1) |
 | `align_minimap2_sharded` | once | fixed, remedy (2) |
 | `align_bowtie2_sharded` | once per shard | fixed by remedy (3) — fails loud |
+| `rype_classify`, `rype_log_ratio`, `rype_extract_*` | once | fixed, remedy (1) — guarded by `test/sql/rype_single_read.test` |
 | `per_sample_table_function` (`DiscoverSamples` + per-sample re-read) | once per sample | **exposed** — shared by `woltka_ogu`, `sylph_profile`, `detect_chimera_uchime`, `align_abpoa`, `consensus_abpoa`, `align_mafft`, `uchime_denovo`, `deblur`, `massql` |
 | `ena_upload_reads` | plan scan + per-sample scan | **exposed** |
 | everything else taking a relation by name | unaudited | unknown |

@@ -62,6 +62,11 @@ struct RypeArrowLocalState : public LocalTableFunctionState {
 
 //! Floor for the memory budget handed to RYpe. Below this the recommender just
 //! returns its own 1000-row minimum, so a smaller number buys nothing.
+//!
+//! It is a floor, not a guarantee: see ResolveRypeMemoryBudget, which clamps it
+//! to a quarter of what was actually detected. Handing back a flat 256 MiB on a
+//! host that only has 256 MiB would be a budget the size of the machine, and
+//! rype_extract spends the budget literally (batch_size = budget / record_cost).
 constexpr size_t RYPE_MIN_MEMORY_BUDGET = 256ULL * 1024 * 1024;
 
 //! Resolve the `max_memory` byte budget to pass to RYpe's batch sizing.
@@ -88,6 +93,13 @@ constexpr size_t RYPE_MIN_MEMORY_BUDGET = 256ULL * 1024 * 1024;
 //! The reserve matches what `rype_extract` already withheld before this existed
 //! (a tenth, floor 256 MiB), so no call site becomes more permissive.
 //!
+//! The floor is clamped to a quarter of the detected allocation. Without that
+//! clamp the floor is the *most* permissive branch on the smallest machines: on
+//! a 256 MiB container `rype_extract` used to fall through to
+//! STANDARD_VECTOR_SIZE (2048 reads) because its budget arithmetic bottomed out
+//! at zero, whereas an unclamped 256 MiB floor divides straight into
+//! `record_cost` and asks for a batch the size of the whole container.
+//!
 //! Returns 0 only when detection fails, which leaves RYpe to its own devices —
 //! the same behavior as before this existed, and better than inventing a number
 //! from a failed measurement.
@@ -99,13 +111,46 @@ inline size_t ResolveRypeMemoryBudget(ClientContext &context, int64_t requested)
 	if (available == 0) {
 		return 0;
 	}
+	// Identical to RYPE_MIN_MEMORY_BUDGET on anything with 1 GiB or more, which is
+	// every realistic deployment; it only engages on genuinely tiny hosts.
+	const size_t floor = MinValue<size_t>(RYPE_MIN_MEMORY_BUDGET, available / 4);
 	const size_t duckdb_held = BufferManager::GetBufferManager(context).GetUsedMemory();
 	const size_t reserve = MaxValue<size_t>(available / 10, RYPE_MIN_MEMORY_BUDGET);
 	const size_t claimed = duckdb_held + reserve;
 	if (claimed >= available) {
-		return RYPE_MIN_MEMORY_BUDGET;
+		return floor;
 	}
-	return MaxValue<size_t>(available - claimed, RYPE_MIN_MEMORY_BUDGET);
+	return MaxValue<size_t>(available - claimed, floor);
+}
+
+//! Parse the `max_memory` and `debug` named parameters shared by all four RYpe
+//! table functions. Identical on every one of them, error string included, so it
+//! lives here rather than in three Binds that would drift apart.
+inline void ParseRypeSharedParams(TableFunctionBindInput &input, int64_t &max_memory, bool &debug) {
+	// Byte budget for RYpe's batch sizing. 0 (default) derives one from the
+	// detected allocation minus what DuckDB is holding — see
+	// ResolveRypeMemoryBudget (#204).
+	auto max_mem_param = input.named_parameters.find("max_memory");
+	if (max_mem_param != input.named_parameters.end() && !max_mem_param->second.IsNull()) {
+		max_memory = max_mem_param->second.GetValue<int64_t>();
+		if (max_memory < 0) {
+			throw BinderException("max_memory must be >= 0 (0 = derive a budget automatically)");
+		}
+	}
+
+	// Report batch sizing through miint_warnings(). Off by default: shard loading
+	// is ~99.9% of a classify, so batch count nearly multiplies runtime, but that
+	// is diagnostic detail rather than something every query should print (#204).
+	auto debug_param = input.named_parameters.find("debug");
+	if (debug_param != input.named_parameters.end() && !debug_param->second.IsNull()) {
+		debug = debug_param->second.GetValue<bool>();
+	}
+}
+
+//! Declare the two shared named parameters on a RYpe table function.
+inline void AddRypeSharedNamedParameters(TableFunction &tf) {
+	tf.named_parameters["max_memory"] = LogicalType::BIGINT;
+	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
 }
 
 //! Ask RYpe to size a classification batch, and report the numbers when asked.
@@ -149,70 +194,21 @@ inline size_t ResolveRypeBatchSize(ClientContext &context, const char *label, co
 	return config.batch_size;
 }
 
-//! Sample average read length from the first 1000 sequences in a table or view.
-//! Returns fallback (default 300) if the query fails or the relation is empty.
-//!
-//! Runs against the caller's relation. The LIMIT pushes down, so for a view over
-//! a join this touches 1000 rows rather than the whole corpus.
-inline size_t SampleAvgReadLength(Connection &conn, const std::string &table_quoted, size_t fallback = 300) {
-	std::string query =
-	    "SELECT AVG(LENGTH(sequence1))::BIGINT FROM (SELECT sequence1 FROM " + table_quoted + " LIMIT 1000)";
-	auto result = conn.Query(query);
-	if (!result->HasError()) {
-		auto &materialized = result->Cast<MaterializedQueryResult>();
-		auto chunk = materialized.Fetch();
-		if (chunk && chunk->size() > 0 && !chunk->data[0].GetValue(0).IsNull()) {
-			auto val = chunk->data[0].GetValue(0).GetValue<int64_t>();
-			if (val > 0) {
-				return static_cast<size_t>(val);
-			}
-		}
-	}
-	return fallback;
-}
-
-//! Whether the caller's relation actually carries paired reads: true iff at least
-//! one row has a non-NULL sequence2.
-//!
-//! Callers must use this rather than the mere presence of a `sequence2` column.
-//! read_fastx always emits that column (see read_fastx.hpp), so single-end reads
-//! loaded the obvious way arrive with it all-NULL. Treating that as paired-end
-//! doubles RYpe's per-read memory estimate, which roughly halves the batch size,
-//! which doubles the number of full index loads — measured at ~1.8 h of waste on a
-//! 4 h job (#199).
-//!
-//! Callers must ALSO skip this entirely when the relation has no `sequence2`
-//! column at all: miint then projects `NULL::BLOB AS sequence2` itself, so the
-//! answer is known to be false without touching the data. That is the common
-//! single-end shape, and the scan below is the expensive part of it.
-//!
-//! Deliberately a FULL scan, unlike SampleAvgReadLength's LIMIT 1000: a paired row
-//! beyond the sample would be missed, and a false negative under-budgets memory,
-//! which is the direction that OOMs. A false positive only costs time. Only the
-//! `sequence2` column is projected, so column pruning keeps it off the sequence
-//! bytes.
-//!
-//! Returns false for an empty relation: bool_or over zero rows is NULL, and zero
-//! rows genuinely means zero paired rows, so false is the correct answer there
-//! rather than a guess.
-//!
-//! Throws on query failure — it does NOT fall back to false. Falling back would
-//! produce exactly the false negative described above, i.e. the OOM direction, and
-//! it would do so precisely when memory pressure is the likeliest cause of the
-//! failure. Rule 10: surface it.
-inline bool TableHasPairedContent(Connection &conn, const std::string &table_quoted) {
-	auto result = conn.Query("SELECT bool_or(sequence2 IS NOT NULL) FROM " + table_quoted);
-	if (result->HasError()) {
-		throw InvalidInputException("Failed to detect paired content in '%s': %s", table_quoted, result->GetError());
-	}
-	auto &materialized = result->Cast<MaterializedQueryResult>();
-	auto chunk = materialized.Fetch();
-	if (!chunk || chunk->size() == 0) {
-		return false;
-	}
-	auto val = chunk->data[0].GetValue(0);
-	return !val.IsNull() && val.GetValue<bool>();
-}
+// avg_read_length and is_paired used to be two extra queries against the
+// caller's relation here — SampleAvgReadLength (LIMIT 1000) and
+// TableHasPairedContent (a full scan for sequence2 content, #199). Both are gone.
+//
+// They were affordable only while the RYpe path materialized the relation into a
+// per-call TEMP table first: the one read of the caller's relation had already
+// happened, and the probes ran against the snapshot. Removing the snapshot
+// without moving the probes turned one read of the caller's relation into three,
+// which is a correctness bug and not a performance one — a relation passed by
+// name is not guaranteed to return the same rows twice, and a registered Arrow
+// relation returns zero rows on a second read (#229,
+// docs/internals/reading-tables-views.md "Read the relation ONCE").
+//
+// Both facts now come from the head of the single pass:
+// RypeInputStream::SampleSizing.
 
 //! Column names (lowercased) and their storage types for a table/view,
 //! index-aligned. The single backing query for both GetTableColumnNamesLower
@@ -345,12 +341,15 @@ inline void ValidateTableHasColumns(ClientContext &context, const std::string &t
 // Usage pattern (in InitGlobal, on a per-GlobalState sub-Connection):
 //
 //   ConfigureRypeArrowExport(conn);
-//   size_t avg_read_length = SampleAvgReadLength(conn, table_quoted);
-//   int is_paired = (has_sequence2 && TableHasPairedContent(conn, table_quoted)) ? 1 : 0;
-//   // ... compute batch_size from avg_read_length and is_paired ...
-//   auto input = BuildRypeInputStream(conn, gstate->id_map, std::move(opts));
-//   ArrowArrayStream *input_stream = &input->stream;
-//   // hand input_stream to rype_*_arrow(); on success, input.release().
+//   gstate->input_stream = BuildRypeInputStream(conn, *gstate->id_map, std::move(opts));
+//   const auto sizing = gstate->input_stream->SampleSizing();
+//   // ... compute batch_size from sizing.avg_read_length and sizing.is_paired ...
+//   rype_*_arrow_ex(..., &gstate->input_stream->stream, ..., batch_size, ...);
+//
+// Note the order: the stream is built FIRST and the sizing facts come out of its
+// own scan. Querying the caller's relation for them separately would read that
+// relation more than once, which #229 forbids — see the note above
+// GetTableColumnNamesLower and docs/internals/reading-tables-views.md.
 //
 // The destructor must release the RYpe output stream BEFORE resetting
 // input_connection: releasing it releases the input stream, which owns the

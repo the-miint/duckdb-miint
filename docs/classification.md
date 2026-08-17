@@ -100,7 +100,7 @@ Classify sequences against a RYpe index, returning bucket assignments with confi
 **Behavior:**
 - A sequence can match multiple buckets (one row per match above threshold)
 - Sequences with no matches above the threshold produce no output rows
-- Paired-end handling follows the **contents** of `sequence2`, not merely the presence of the column: the input is treated as paired only if at least one row has a non-NULL `sequence2`. This matters because `read_fastx` always emits a `sequence2` column, so single-end reads loaded the obvious way carry an all-NULL one — projecting it costs nothing, and an all-NULL `sequence2` is sized and classified exactly as if the column were absent
+- Paired-end handling follows the **contents** of `sequence2`, not merely the presence of the column. This matters because `read_fastx` always emits a `sequence2` column, so single-end reads loaded the obvious way carry an all-NULL one; treating that as paired-end would halve the batch size and double the number of index passes. The check samples the first chunk of the single pass over your relation rather than scanning it separately — the relation is read exactly once, which it must be, since a view or a registered Arrow relation need not return the same rows twice. A relation that only becomes paired well after its first few thousand rows is therefore sized as single-end; set `max_memory` if that under-budgets
 - Works with both tables and views
 
 **Examples:**
@@ -159,7 +159,7 @@ Compute the log-ratio of classification scores between two single-bucket RYpe in
 **Behavior:**
 - Both indices must be single-bucket indices (multi-bucket indices are rejected)
 - Returns exactly one row per input sequence
-- Paired-end handling follows the **contents** of `sequence2`, not merely the presence of the column: the input is treated as paired only if at least one row has a non-NULL `sequence2`. This matters because `read_fastx` always emits a `sequence2` column, so single-end reads loaded the obvious way carry an all-NULL one — projecting it costs nothing, and an all-NULL `sequence2` is sized and classified exactly as if the column were absent
+- Paired-end handling follows the **contents** of `sequence2`, not merely the presence of the column. This matters because `read_fastx` always emits a `sequence2` column, so single-end reads loaded the obvious way carry an all-NULL one; treating that as paired-end would halve the batch size and double the number of index passes. The check samples the first chunk of the single pass over your relation rather than scanning it separately — the relation is read exactly once, which it must be, since a view or a registered Arrow relation need not return the same rows twice. A relation that only becomes paired well after its first few thousand rows is therefore sized as single-end; set `max_memory` if that under-budgets
 - Works with both tables and views
 - Swapping numerator and denominator negates the log_ratio (symmetry property)
 
@@ -331,6 +331,21 @@ Since batch size scales with the budget and every batch costs a full pass over
 the index, that would trade an occasional out-of-memory kill for a reliable
 severalfold slowdown. If you need the two budgets to be provably disjoint rather
 than estimated, say so with `max_memory` — that is what the parameter is for.
+
+**Bounding the Arrow batch.** Separately from `max_memory`, the sequence bytes
+handed to RYpe at any one moment are capped by the
+`miint_rype_arrow_batch_bytes` setting (bytes, default 256 MiB). This is what
+stops peak memory from scaling with the corpus: without it a batch is sized by a
+row count, so its byte size is unbounded.
+
+```sql
+SET miint_rype_arrow_batch_bytes = 67108864;  -- 64 MiB
+SET miint_rype_arrow_batch_bytes = 0;         -- no ceiling (one unbounded batch)
+```
+
+Lowering it does not change how often RYpe passes over the index — that is
+`max_memory`'s job — so it is close to free. Raising it is rarely useful; the
+default is already large enough that per-batch fixed costs are negligible.
 
 **When to set it explicitly.** Pass a value when you need a hard guarantee
 rather than a heuristic — a container sized close to the job, a shared node, or

@@ -69,24 +69,7 @@ static unique_ptr<RypeExtractData> BindExtraction(ClientContext &context, TableF
 		data->id_column = id_col_param->second.ToString();
 	}
 
-	// Byte budget for RYpe's batch sizing. 0 (default) derives one from the
-	// detected allocation minus what DuckDB is holding — see
-	// ResolveRypeMemoryBudget in rype_common.hpp (#204).
-	auto max_mem_param = input.named_parameters.find("max_memory");
-	if (max_mem_param != input.named_parameters.end() && !max_mem_param->second.IsNull()) {
-		data->max_memory = max_mem_param->second.GetValue<int64_t>();
-		if (data->max_memory < 0) {
-			throw BinderException("max_memory must be >= 0 (0 = derive a budget automatically)");
-		}
-	}
-
-	// Report batch sizing through miint_warnings(). Off by default: shard loading
-	// is ~99.9% of a classify, so batch count nearly multiplies runtime, but that
-	// is diagnostic detail rather than something every query should print (#204).
-	auto debug_param = input.named_parameters.find("debug");
-	if (debug_param != input.named_parameters.end() && !debug_param->second.IsNull()) {
-		data->debug = debug_param->second.GetValue<bool>();
-	}
+	ParseRypeSharedParams(input, data->max_memory, data->debug);
 
 	// Capture the id column's storage type so read_id mirrors it on output
 	// (BIGINT/UUID/VARCHAR) instead of always VARCHAR. Extraction is single-end,
@@ -115,11 +98,29 @@ BuildExtractionInputStream(ClientContext &context, const RypeExtractData &bind_d
 	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
 	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);
 
-	// Extraction is single-sequence, so the stream carries no pair column.
-	size_t avg_read_length = SampleAvgReadLength(conn, table_quoted);
+	// One streaming scan of the caller's relation, carrying the identifier and the
+	// sequence in the same row. Extraction is single-sequence, so no pair column.
+	// See rype_input_stream.hpp.
+	gstate->id_map = make_uniq<RypeIdMap>(bind_data.id_type);
+	RypeInputStreamOptions stream_options;
+	stream_options.relation_quoted = table_quoted;
+	stream_options.id_column_quoted = id_col_quoted;
+	stream_options.source_name = bind_data.sequence_table;
+	stream_options.id_column_name = bind_data.id_column;
+	stream_options.id_type = bind_data.id_type;
+	stream_options.include_pair_column = false;
+	// Extraction runs per batch with no index pass behind it, so a smaller Arrow
+	// batch costs nothing here — it just bounds the sequence bytes resident at
+	// once, which the row-derived batch_size below cannot.
+	stream_options.batch_bytes = GetRypeArrowBatchBytes(context);
+	gstate->input_stream = BuildRypeInputStream(conn, *gstate->id_map, std::move(stream_options));
 
 	// Estimate batch size — extraction has no index overhead, just sequence data
-	// + minimizer lists.
+	// + minimizer lists. avg_read_length comes from the head of the stream's own
+	// scan rather than a separate query: the caller's relation must be read
+	// exactly once (#229). Extraction ignores sequence2 entirely, so is_paired
+	// does not enter the estimate.
+	const size_t avg_read_length = gstate->input_stream->SampleSizing().avg_read_length;
 	size_t minimizers_per_read = (bind_data.w > 0 && avg_read_length > bind_data.k)
 	                                 ? ((avg_read_length - bind_data.k + 1) / bind_data.w + 1)
 	                                 : 1;
@@ -134,6 +135,7 @@ BuildExtractionInputStream(ClientContext &context, const RypeExtractData &bind_d
 	if (batch_size < 1000) {
 		batch_size = STANDARD_VECTOR_SIZE;
 	}
+	gstate->input_stream->SetBatchRows(batch_size);
 
 	// Extraction sizes its own batch rather than going through
 	// ResolveRypeBatchSize: there is no index, so RYpe's shard-aware estimate
@@ -149,23 +151,6 @@ BuildExtractionInputStream(ClientContext &context, const RypeExtractData &bind_d
 		                   (unsigned long long)(minimizers_per_read * sizeof(uint64_t)),
 		                   (unsigned long long)avg_read_length);
 	}
-
-	// One streaming scan of the caller's relation, carrying the identifier and the
-	// sequence in the same row. See rype_input_stream.hpp.
-	gstate->id_map = make_uniq<RypeIdMap>(bind_data.id_type);
-	RypeInputStreamOptions stream_options;
-	stream_options.relation_quoted = table_quoted;
-	stream_options.id_column_quoted = id_col_quoted;
-	stream_options.source_name = bind_data.sequence_table;
-	stream_options.id_column_name = bind_data.id_column;
-	stream_options.id_type = bind_data.id_type;
-	stream_options.include_pair_column = false;
-	stream_options.batch_rows = batch_size;
-	// Extraction runs per batch with no index pass behind it, so a smaller Arrow
-	// batch costs nothing here — it just bounds the sequence bytes resident at
-	// once, which the row-derived batch_size above cannot.
-	stream_options.batch_bytes = RYPE_ARROW_BATCH_BYTES;
-	gstate->input_stream = BuildRypeInputStream(conn, *gstate->id_map, std::move(stream_options));
 
 	return gstate;
 }
@@ -223,8 +208,10 @@ static void ExecuteExtraction(RypeExtractGlobalState &gstate, RypeExtractLocalSt
 		int64_t query_id = query_ids[array_idx + id_array.offset];
 
 		if (query_id < 0 || static_cast<size_t>(query_id) >= gstate.id_map->size()) {
-			throw IOException("RYpe returned invalid query_id %lld (expected 0-%zu)", static_cast<long long>(query_id),
-			                  gstate.id_map->size() - 1);
+			// size() - 1 would wrap on an empty map and report a range that contains
+			// every possible value, i.e. deny the failure it is reporting.
+			throw IOException("RYpe returned invalid query_id %lld (the input carried %zu rows)",
+			                  static_cast<long long>(query_id), gstate.id_map->size());
 		}
 		gstate.id_map->Emit(output.data[0], i, static_cast<idx_t>(query_id));
 	}
@@ -319,8 +306,7 @@ TableFunction RypeExtractMinimizerSetTableFunction::GetFunction() {
 	                 Execute, Bind, InitGlobal, InitLocal);
 	tf.named_parameters["salt"] = LogicalType::UBIGINT;
 	tf.named_parameters["id_column"] = LogicalType::VARCHAR;
-	tf.named_parameters["max_memory"] = LogicalType::BIGINT;
-	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
+	AddRypeSharedNamedParameters(tf);
 	return tf;
 }
 
@@ -399,8 +385,7 @@ TableFunction RypeExtractStrandMinimizersTableFunction::GetFunction() {
 	                 Execute, Bind, InitGlobal, InitLocal);
 	tf.named_parameters["salt"] = LogicalType::UBIGINT;
 	tf.named_parameters["id_column"] = LogicalType::VARCHAR;
-	tf.named_parameters["max_memory"] = LogicalType::BIGINT;
-	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
+	AddRypeSharedNamedParameters(tf);
 	return tf;
 }
 

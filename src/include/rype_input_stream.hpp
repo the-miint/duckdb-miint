@@ -49,25 +49,44 @@
 
 namespace duckdb {
 
-//! Byte ceiling for one Arrow record batch's sequence payload.
+//! Default byte ceiling for one Arrow record batch's sequence payload, and the
+//! default of the `miint_rype_arrow_batch_bytes` setting registered in
+//! LoadInternal.
 //!
 //! Why a power of two: ArrowBuffer::reserve rounds every growth to
 //! NextPowerOfTwo and grows by realloc
-//! (duckdb/src/include/duckdb/common/arrow/arrow_buffer.hpp). A batch that
-//! stops just short of 2^k therefore has capacity exactly 2^k, so the
-//! over-allocation is at most one read length rather than up to a full
+//! (duckdb/src/include/duckdb/common/arrow/arrow_buffer.hpp). A single-column
+//! batch that stops just short of 2^k therefore has capacity exactly 2^k, so
+//! the over-allocation is at most one read length rather than up to a full
 //! doubling. Sizing by rows instead — which is all rype_recommend_batch_size
-//! can give us, from a 1000-row sampled mean — leaves the byte size of a batch
-//! unbounded, and that byte size is what actually drives peak memory
+//! can give us, from a sampled mean — leaves the byte size of a batch unbounded,
+//! and that byte size is what actually drives peak memory
 //! (the-miint/Qiita#459).
+//!
+//! The exact-2^k argument holds for one buffer. A paired batch splits the
+//! budget across two aux buffers that ArrowBuffer rounds up independently, so
+//! the worst case is 1.5x the ceiling: mates of unequal length landing at, say,
+//! 160 MiB and 96 MiB round to 256 + 128 MiB. That is bounded and constant,
+//! which is the property being bought here; it is not the "one read length"
+//! bound that a single column enjoys.
 //!
 //! 256 MiB is large enough that per-batch fixed costs stay negligible and
 //! small enough that the ceiling is a constant rather than a fraction of the
 //! corpus.
-//!
-//! MIINT_RYPE_ARROW_BATCH_BYTES overrides this downwards (0 removes the ceiling
-//! entirely) — see ResolveBatchBytes in rype_input_stream.cpp.
 constexpr idx_t RYPE_ARROW_BATCH_BYTES = 256ULL * 1024 * 1024;
+
+//! Read the session-scoped `miint_rype_arrow_batch_bytes` setting: the byte
+//! ceiling above, 0 to disable it entirely.
+//!
+//! A DuckDB setting rather than an environment variable because this has to be
+//! reachable from a SQL test in every lane. The multi-batch path — surrogate ids
+//! and id-map entries staying in lockstep across Arrow batch boundaries — is the
+//! load-bearing invariant of this stream, and at 256 MiB it would only ever run
+//! on corpora far too large to keep as fixtures. Gating that test on an env var
+//! kept it out of `make test` and out of every CI lane but one; and getenv on
+//! the ingest path meant a typo like `1G` parsed as 1 byte with no diagnostic.
+//! DuckDB parses and range-checks the value for us.
+idx_t GetRypeArrowBatchBytes(ClientContext &context);
 
 //! Everything the stream needs that is not derivable from the connection.
 struct RypeInputStreamOptions {
@@ -120,6 +139,47 @@ public:
 	RypeInputStream(const RypeInputStream &) = delete;
 	RypeInputStream &operator=(const RypeInputStream &) = delete;
 
+	//! What RYpe's batch sizing needs to know about the input, read from the
+	//! front of this stream's own scan.
+	struct Sizing {
+		size_t avg_read_length;
+		bool is_paired;
+		//! False when the relation turned out to be empty, so the caller can tell
+		//! a real measurement from the fallback.
+		bool sampled;
+	};
+
+	//! Measure `avg_read_length` and `is_paired` from the first source chunk
+	//! WITHOUT consuming it — the chunk stays queued for the first get_next.
+	//!
+	//! These used to be two extra queries against the caller's relation
+	//! (SampleAvgReadLength's LIMIT 1000, and a full scan for sequence2 content).
+	//! That is forbidden: a relation passed by name is not guaranteed to return
+	//! the same rows twice, and a registered Arrow relation returns *zero* rows on
+	//! a second read, which is indistinguishable from end-of-input (#229, and
+	//! docs/internals/reading-tables-views.md "Read the relation ONCE"). The old
+	//! TEMP-table design could afford those probes because it had already taken
+	//! its one read and was querying the snapshot; removing the snapshot without
+	//! moving the probes turned one read of the caller's relation into three.
+	//!
+	//! Both facts are therefore estimates taken from the head of the single pass.
+	//! For avg_read_length that matches what the LIMIT 1000 sample always did. For
+	//! is_paired it is weaker than the full scan #199 introduced: a relation whose
+	//! first chunk is single-ended but which pairs up later is under-budgeted, the
+	//! direction that OOMs. That is the deliberate trade — correctness of the data
+	//! outranks accuracy of a sizing hint — and `max_memory` is the explicit lever
+	//! for anyone who hits it. When the relation has no sequence2 column at all,
+	//! is_paired is known false without sampling and nothing is estimated.
+	Sizing SampleSizing(size_t fallback_read_length = 300);
+
+	//! Set the row ceiling for one Arrow record batch.
+	//!
+	//! Deferred configuration rather than a constructor argument because the
+	//! ceiling comes from RYpe's batch sizing, which needs SampleSizing's numbers,
+	//! which need this stream to exist. Must be called before RYpe pulls the first
+	//! batch; SampleSizing does not consume anything, so that ordering is free.
+	void SetBatchRows(idx_t rows);
+
 	//! Drop the scan (streaming QueryResult and its chunk state) without
 	//! destroying the object. Called from the release callback so the scan's
 	//! resources go as soon as RYpe is done, rather than at GlobalState
@@ -132,6 +192,10 @@ private:
 	static void StreamRelease(ArrowArrayStream *stream);
 	static const char *StreamGetLastError(ArrowArrayStream *stream);
 
+	//! Make a source chunk with unread rows current, loading the next one if the
+	//! current is spent. False at end of stream; throws only when the scan
+	//! reported an actual error.
+	bool EnsureChunk();
 	//! Build one record batch; leaves out->release null when the input is drained.
 	void FetchBatch(ArrowArray *out);
 	//! Append rows of `chunk` starting at `from` to `appender`, recording

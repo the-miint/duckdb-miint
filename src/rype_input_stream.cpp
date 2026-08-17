@@ -3,8 +3,6 @@
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/main/chunk_scan_state/query_result.hpp"
 
-#include <cstdlib>
-
 namespace duckdb {
 
 namespace {
@@ -15,42 +13,27 @@ constexpr idx_t COL_ID = 0;
 constexpr idx_t COL_SEQUENCE = 1;
 constexpr idx_t COL_PAIR_SEQUENCE = 2;
 
-//! Apply the MIINT_RYPE_ARROW_BATCH_BYTES override to a configured byte ceiling.
-//!
-//! Two reasons this override exists, both about being able to observe the
-//! ceiling's effect rather than take it on faith:
-//!
-//!   * Lowering it. At the 256 MiB default the multi-batch path — surrogate ids
-//!     and id-map entries staying in lockstep across Arrow batch boundaries —
-//!     would only ever run on corpora far too large to keep as test fixtures.
-//!     test/sql/rype_input_stream_batching.test sets a few hundred bytes.
-//!   * Disabling it, with 0. That restores one unbounded Arrow batch, which is
-//!     the A/B baseline for the memory claim and an escape hatch if the ceiling
-//!     ever turns out to hurt a workload.
-//!
-//! The override never *raises* a ceiling and never introduces one where the
-//! caller did not ask for one.
-idx_t ResolveBatchBytes(idx_t configured) {
-	if (configured == 0) {
-		return 0;
-	}
-	const char *env = std::getenv("MIINT_RYPE_ARROW_BATCH_BYTES");
-	if (!env) {
-		return configured;
-	}
-	try {
-		const auto parsed = std::stoull(env);
-		if (parsed < configured) {
-			return NumericCast<idx_t>(parsed);
-		}
-	} catch (const std::exception &) {
-		// Unparseable: keep the configured ceiling rather than silently
-		// disabling the thing that bounds memory.
-	}
-	return configured;
-}
-
 } // namespace
+
+idx_t GetRypeArrowBatchBytes(ClientContext &context) {
+	Value v;
+	// Registered as a BIGINT extension option at extension load (LoadInternal in
+	// src/miint_extension.cpp). Missing means the option was never registered,
+	// which is a load-order programmer error rather than a user mistake.
+	if (!context.TryGetCurrentSetting("miint_rype_arrow_batch_bytes", v)) {
+		throw InternalException(
+		    "miint extension option 'miint_rype_arrow_batch_bytes' is not registered — was LoadInternal completed?");
+	}
+	if (v.IsNull()) {
+		return RYPE_ARROW_BATCH_BYTES;
+	}
+	const auto bytes = v.GetValue<int64_t>();
+	if (bytes < 0) {
+		throw InvalidInputException(
+		    "miint_rype_arrow_batch_bytes must be >= 0 (0 disables the Arrow batch byte ceiling)");
+	}
+	return NumericCast<idx_t>(bytes);
+}
 
 // ============================================================================
 // Construction
@@ -60,7 +43,6 @@ RypeInputStream::RypeInputStream(unique_ptr<QueryResult> result_p, RypeIdMap &id
                                  RypeInputStreamOptions options_p)
     : result(std::move(result_p)), id_map(id_map_p), options(std::move(options_p)) {
 	D_ASSERT(result);
-	options.batch_bytes = ResolveBatchBytes(options.batch_bytes);
 	appender_capacity =
 	    options.batch_bytes > 0 ? MinValue<idx_t>(options.batch_rows, STANDARD_VECTOR_SIZE) : options.batch_rows;
 	client_properties = result->client_properties;
@@ -165,6 +147,13 @@ void RypeInputStream::StreamRelease(ArrowArrayStream *stream) {
 }
 
 void RypeInputStream::ReleaseScan() {
+	// transformed's sequence columns Reference the last source chunk's vectors, so
+	// they keep that chunk's buffers (and its string heap) alive. Dropping the scan
+	// without this would pin one DataChunk of sequence data for the rest of the
+	// query — negligible for short reads, hundreds of MB for long ones. Reset
+	// restores the vectors from their own caches, releasing the references; the
+	// !result guard in FetchBatch means nothing reads transformed afterwards.
+	transformed.Reset();
 	// Order matters: the scan state borrows the QueryResult.
 	scan_state.reset();
 	result.reset();
@@ -181,6 +170,90 @@ const char *RypeInputStream::StreamGetLastError(ArrowArrayStream *stream) {
 // ============================================================================
 // Batch construction
 // ============================================================================
+
+bool RypeInputStream::EnsureChunk() {
+	if (scan_state->RemainingInChunk() > 0) {
+		return true;
+	}
+	ErrorData error;
+	if (scan_state->LoadNextChunk(error)) {
+		return !(scan_state->ChunkIsEmpty() || scan_state->Finished());
+	}
+	// LoadNextChunk returns false for two different situations: a genuine fetch
+	// failure, which populates one of the two error slots, and a call made after
+	// it has already finished, which returns early and leaves `error`
+	// default-constructed (duckdb/src/main/chunk_scan_state/query_result.cpp:42).
+	// Throwing unconditionally would assert on !initialized in a debug build and,
+	// in release, replace the real cause with an empty message. Report only a real
+	// error; otherwise this is end of stream, which is what DuckDB's own
+	// ArrowUtil::TryFetchChunk returns here.
+	if (scan_state->HasError()) {
+		scan_state->GetError().Throw();
+	}
+	if (error.HasError()) {
+		error.Throw();
+	}
+	return false;
+}
+
+void RypeInputStream::SetBatchRows(idx_t rows) {
+	D_ASSERT(rows > 0);
+	options.batch_rows = rows;
+	// Mirrors the constructor: with a byte ceiling a batch closes well short of
+	// the row ceiling, so reserving batch_rows worth of offsets would waste far
+	// more than any batch uses.
+	appender_capacity = options.batch_bytes > 0 ? MinValue<idx_t>(rows, STANDARD_VECTOR_SIZE) : rows;
+}
+
+RypeInputStream::Sizing RypeInputStream::SampleSizing(size_t fallback_read_length) {
+	Sizing sizing {fallback_read_length, false, false};
+	if (!result || !EnsureChunk()) {
+		return sizing;
+	}
+
+	// EnsureChunk leaves the chunk current with its offset untouched, so the rows
+	// measured here are the same rows the first get_next will append. Nothing is
+	// consumed and the relation is read once.
+	auto &chunk = scan_state->CurrentChunk();
+	const idx_t chunk_size = chunk.size();
+	const idx_t from = scan_state->CurrentOffset();
+
+	UnifiedVectorFormat sequence_format;
+	chunk.data[COL_SEQUENCE].ToUnifiedFormat(chunk_size, sequence_format);
+	auto sequence_data = UnifiedVectorFormat::GetData<string_t>(sequence_format);
+
+	idx_t total_bytes = 0;
+	idx_t counted = 0;
+	for (idx_t i = from; i < chunk_size; i++) {
+		const idx_t idx = sequence_format.sel->get_index(i);
+		if (sequence_format.validity.RowIsValid(idx)) {
+			total_bytes += sequence_data[idx].GetSize();
+			counted++;
+		}
+	}
+	if (counted > 0) {
+		sizing.sampled = true;
+		// rype_calculate_batch_config requires avg_read_length > 0; a chunk of
+		// empty sequences would otherwise round to zero.
+		sizing.avg_read_length = MaxValue<size_t>(total_bytes / counted, 1);
+	}
+
+	// A relation with no sequence2 column is projected as NULL::BLOB by
+	// BuildRypeInputStream, so its validity is uniformly false and the loop below
+	// would reach the same answer. Skipping it makes "known, not estimated"
+	// explicit.
+	if (options.include_pair_column && options.has_sequence2) {
+		UnifiedVectorFormat pair_format;
+		chunk.data[COL_PAIR_SEQUENCE].ToUnifiedFormat(chunk_size, pair_format);
+		for (idx_t i = from; i < chunk_size; i++) {
+			if (pair_format.validity.RowIsValid(pair_format.sel->get_index(i))) {
+				sizing.is_paired = true;
+				break;
+			}
+		}
+	}
+	return sizing;
+}
 
 void RypeInputStream::FetchBatch(ArrowArray *out) {
 	out->release = nullptr;
@@ -205,17 +278,8 @@ void RypeInputStream::FetchBatch(ArrowArray *out) {
 	// the scan is drained. "Full" is a row count and, when configured, a byte
 	// ceiling — a source chunk can be left partly consumed by either.
 	while (appended < options.batch_rows) {
-		if (scan_state->RemainingInChunk() == 0) {
-			ErrorData error;
-			if (!scan_state->LoadNextChunk(error)) {
-				if (scan_state->HasError()) {
-					error = scan_state->GetError();
-				}
-				error.Throw();
-			}
-			if (scan_state->ChunkIsEmpty() || scan_state->Finished()) {
-				break;
-			}
+		if (!EnsureChunk()) {
+			break;
 		}
 		auto &chunk = scan_state->CurrentChunk();
 		const idx_t from = scan_state->CurrentOffset();

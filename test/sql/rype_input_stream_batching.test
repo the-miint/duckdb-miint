@@ -6,9 +6,16 @@
 # RypeInputStream closes an Arrow record batch once its sequence payload reaches
 # a byte ceiling (RYPE_ARROW_BATCH_BYTES, 256 MiB) so that peak memory stops
 # scaling with the corpus (the-miint/Qiita#459). Crossing that ceiling for real
-# would need a quarter-gigabyte fixture, so this file runs with the ceiling
-# lowered via MIINT_RYPE_ARROW_BATCH_BYTES; run_tests.sh invokes it separately
-# with that set, and the ordinary `make test` pass skips it.
+# would need a quarter-gigabyte fixture, so this file lowers it with
+# `SET miint_rype_arrow_batch_bytes`.
+#
+# That setting exists so this file can run in EVERY lane. It was briefly an
+# environment variable with a `require-env` guard, which was wrong twice over:
+# require-env is for optional dependencies that may genuinely be absent (a
+# runtime binary, a compile-time feature, downloaded data), not for a knob the
+# extension itself owns, and the guard meant the batch-boundary invariant below
+# — the load-bearing one for this whole code path — was skipped by `make test`
+# and by every CI lane except the single one that runs run_tests.sh.
 #
 # What can break when one logical scan becomes many Arrow batches:
 #
@@ -33,7 +40,10 @@
 
 require miint
 
-require-env MIINT_RYPE_ARROW_BATCH_BYTES
+# 512 bytes: roughly nine reads per Arrow batch, so the 4000-read fixture below
+# spans hundreds of batches.
+statement ok
+SET miint_rype_arrow_batch_bytes = 512;
 
 # =============================================================================
 # Fixture
@@ -268,3 +278,151 @@ SELECT count(*) FROM lr_run WHERE read_id LIKE 'denom_%' AND log_ratio != '-inf'
 
 statement ok
 DROP TABLE lr_run;
+
+# =============================================================================
+# Every id type must survive a batch boundary
+# =============================================================================
+# RypeIdMap stores identifiers three different ways — an int64_t vector for
+# BIGINT, a hugeint_t vector for UUID, and a byte arena plus offsets for VARCHAR
+# — and AppendRange writes into whichever one applies while the Arrow batch is
+# being built. The surrogate is `base + (i - from)` where base is the map's
+# running size, so a boundary is exactly where a per-type bookkeeping slip
+# (arena offset, validity index) would put a read's classification onto its
+# neighbour's identifier. The VARCHAR sections above cover one of the three.
+#
+# These cases join the result back to the source row rather than reading the
+# class out of the identifier, so the assertion works for an opaque id and is
+# strictly stronger: it checks every read against its OWN sequence.
+
+statement ok
+CREATE TABLE seqs_bigint AS
+SELECT
+    i::BIGINT AS read_id,
+    CASE WHEN i % 2 = 0
+         THEN repeat('GGGGCCCC', 7)
+         ELSE repeat('ACGTACGT', 7)
+    END AS sequence1
+FROM range(0, 4000) t(i);
+
+statement ok
+CREATE TEMP TABLE bigint_run AS
+SELECT read_id, list_sort(list(bucket_name)) AS buckets
+FROM rype_classify('data/rype/test.ryxdi', 'seqs_bigint', threshold := 0.05)
+GROUP BY read_id;
+
+query I
+SELECT count(*) FROM bigint_run r JOIN seqs_bigint s USING (read_id)
+WHERE r.buckets != CASE WHEN s.sequence1 = repeat('GGGGCCCC', 7)
+                        THEN ['bucket_alpha', 'bucket_gamma']
+                        ELSE ['bucket_alpha', 'bucket_beta', 'bucket_gamma'] END;
+----
+0
+
+# The join above is vacuous if it matched nothing.
+query I
+SELECT count(*) FROM bigint_run r JOIN seqs_bigint s USING (read_id);
+----
+4000
+
+statement ok
+CREATE TABLE seqs_uuid AS
+SELECT
+    gen_random_uuid() AS read_id,
+    CASE WHEN i % 2 = 0
+         THEN repeat('GGGGCCCC', 7)
+         ELSE repeat('ACGTACGT', 7)
+    END AS sequence1
+FROM range(0, 4000) t(i);
+
+statement ok
+CREATE TEMP TABLE uuid_run AS
+SELECT read_id, list_sort(list(bucket_name)) AS buckets
+FROM rype_classify('data/rype/test.ryxdi', 'seqs_uuid', threshold := 0.05)
+GROUP BY read_id;
+
+query I
+SELECT count(*) FROM uuid_run r JOIN seqs_uuid s USING (read_id)
+WHERE r.buckets != CASE WHEN s.sequence1 = repeat('GGGGCCCC', 7)
+                        THEN ['bucket_alpha', 'bucket_gamma']
+                        ELSE ['bucket_alpha', 'bucket_beta', 'bucket_gamma'] END;
+----
+0
+
+query I
+SELECT count(*) FROM uuid_run r JOIN seqs_uuid s USING (read_id);
+----
+4000
+
+statement ok
+DROP TABLE bigint_run;
+
+statement ok
+DROP TABLE uuid_run;
+
+# =============================================================================
+# A NULL identifier, past the first batch
+# =============================================================================
+# A NULL id is carried through the map rather than rejected. Placing it well
+# beyond the first boundary checks that the map's validity bookkeeping is indexed
+# the same way as the surrogates around it: a slip would move the NULL onto a
+# neighbouring read, or drop a read entirely.
+#
+# BIGINT because its NULL is unambiguous. The two id representations differ here
+# by design and rype_classify_bigint.test:81 pins the reason — a NULL id travels
+# as the empty string, which the codec resolves back to SQL NULL for BIGINT and
+# UUID but leaves as an empty string for VARCHAR. The VARCHAR case is asserted
+# below so the divergence is stated rather than assumed.
+
+statement ok
+CREATE TABLE seqs_null_id AS
+SELECT
+    CASE WHEN i = 2500 THEN NULL ELSE i::BIGINT END AS read_id,
+    repeat('GGGGCCCC', 7) AS sequence1
+FROM range(0, 4000) t(i);
+
+statement ok
+CREATE TEMP TABLE null_id_run AS
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seqs_null_id', threshold := 0.05);
+
+# Exactly the one NULL-identified read, carrying its own two buckets.
+query II
+SELECT count(*), count(DISTINCT bucket_name) FROM null_id_run WHERE read_id IS NULL;
+----
+2	2
+
+query I
+SELECT count(DISTINCT read_id) FROM null_id_run WHERE read_id IS NOT NULL;
+----
+3999
+
+# Uniform content, so every read must land on the same two buckets — a shifted
+# identifier would show up as a missing or duplicated read_id above.
+query I
+SELECT count(*) FROM (
+    SELECT read_id, list_sort(list(bucket_name)) AS buckets
+    FROM null_id_run WHERE read_id IS NOT NULL GROUP BY read_id
+) WHERE buckets != ['bucket_alpha', 'bucket_gamma'];
+----
+0
+
+statement ok
+DROP TABLE null_id_run;
+
+# The VARCHAR divergence, same position past the same boundary: empty string,
+# not SQL NULL, and still exactly one read.
+
+statement ok
+CREATE TABLE seqs_null_varchar AS
+SELECT
+    CASE WHEN i = 2500 THEN NULL ELSE 'r' || lpad((i::INTEGER)::VARCHAR, 6, '0') END AS read_id,
+    repeat('GGGGCCCC', 7) AS sequence1
+FROM range(0, 4000) t(i);
+
+query III
+SELECT
+    count(*) FILTER (WHERE read_id IS NULL),
+    count(DISTINCT read_id) FILTER (WHERE read_id = ''),
+    count(DISTINCT read_id)
+FROM rype_classify('data/rype/test.ryxdi', 'seqs_null_varchar', threshold := 0.05);
+----
+0	1	4000
