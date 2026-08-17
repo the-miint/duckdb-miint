@@ -391,3 +391,57 @@ SELECT bin_start(1, 10, 100) AS region_start,
        bin_start(2, 10, 100) - bin_start(1, 10, 100) AS region_length;
 ----
 11	21	10
+
+# ---- Delegation is hijack-proof ----
+# bin_of and both of interval_bins' regimes share one definition of the bin formula,
+# `_miint_bin_index`, instead of writing it out three times. A macro body resolves its
+# callee in the CALLER's catalog, so a bare `_miint_bin_index(...)` reference would let any
+# user macro of that name silently replace the arithmetic -- and the results would still
+# look like plausible bin indices. Schema-qualifying the callee as
+# `system.main._miint_bin_index(...)` is what prevents that.
+#
+# THIS TEST DISCRIMINATES: verified by building the delegation with bare references first,
+# where every assertion below fails. It is the regression guard for the qualification, so
+# do not "simplify" the qualified names away.
+#
+# The qualification cannot itself be spoofed: `ATTACH ':memory:' AS system` is refused
+# ("reserved name") and `CREATE MACRO system.main.x` is refused ("Cannot create entry in
+# system catalog"), so a user cannot inject a callee into the resolved path either.
+
+statement ok
+CREATE MACRO _miint_bin_index(pos, n_bins, genome_length) AS 999;
+
+statement ok
+CREATE MACRO bin_of(pos, n_bins, genome_length) AS 999;
+
+# The user's own macros do take effect when called by name -- the hijack is real, which is
+# what makes the assertions below meaningful rather than vacuous.
+query II
+SELECT _miint_bin_index(1, 4, 10) AS shadowed_helper, bin_of(1, 4, 10) AS shadowed_bin_of;
+----
+999	999
+
+# interval_bins is unaffected in BOTH regimes.
+# Regime 1 (n_bins <= genome_length): positions 1..5 of a 10 bp genome in 4 bins.
+query I
+SELECT interval_bins(1, 6, 4, 10);
+----
+[0, 1]
+
+# Regime 2 (n_bins > genome_length), which reaches the formula through a lambda.
+query I
+SELECT interval_bins(1, 4, 10, 3);
+----
+[0, 3, 6]
+
+# And the round trip still holds across both regimes, against the formula written out
+# literally here rather than through either shadowed macro.
+query I
+SELECT COUNT(*) AS mismatches
+FROM (VALUES (10, 4), (100, 7), (3, 5), (97, 13)) AS params(gl, nb),
+     range(1, 98) AS t(p)
+WHERE p <= params.gl
+  AND interval_bins(p, p + 1, params.nb, params.gl)
+      <> [((p - 1) * params.nb) // params.gl];
+----
+0

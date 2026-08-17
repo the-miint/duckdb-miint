@@ -683,6 +683,8 @@ bin_start(b) = ceil(b * genome_length / n_bins) + 1
 
 The guarantee is **containment**, `bin_start(bin_of(p)) <= p < bin_start(bin_of(p) + 1)` for every `p` in `[1, genome_length]`. It is not a round trip in both directions: when `n_bins > genome_length`, zero-width bins make `bin_start` non-injective, so `bin_of(bin_start(b))` need not be `b` (with `n_bins=5, genome_length=3`, `bin_start(2) = 3` but `bin_of(3) = 3`).
 
+> You may notice a macro named `_miint_bin_index` in `duckdb_functions()`. It is **internal** — the shared, unguarded definition of the `bin_of` formula that `bin_of` and `interval_bins` both delegate to, so the arithmetic exists in one place. It performs no validation whatsoever and will return a plausible wrong number for out-of-range input. Call `bin_of` instead; it is the same formula with the guards.
+
 **Bin edges are half-open, like every other interval in miint.** Bin `b` spans `[bin_start(b), bin_start(b + 1))` and its width is the plain difference — no `+1`, matching the `stop_position` rule in [`docs/internals/architecture.md`](internals/architecture.md). That makes `bin_start(0) = 1` and `bin_start(n_bins) = genome_length + 1`, so a bin drops straight into anything taking a half-open `(start, stop)` pair — `compress_intervals`, or your own region table — with no adjustment. Bin widths differ by at most one base, and every base belongs to exactly one bin.
 
 > **If your source uses an inclusive end**, add one before calling: `interval_bins(start, end + 1, ...)`. Getting this wrong is silent — every interval's last base lands one bin early and the ranking still looks plausible. `read_alignments`, `compress_intervals`, `read_gff` and `read_ncbi_annotation` are all already half-open, so no adjustment is needed for those.

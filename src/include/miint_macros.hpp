@@ -974,6 +974,21 @@ const std::string GENOME_COVERAGE_PER_SAMPLE = // NOLINT
 // Note what that means downstream: UNNEST(NULL) emits no rows, so a genome_length that
 // arrived NULL from a missed join drops those reads silently. The positivity check below
 // cannot catch that -- a join miss produces NULL, not 0. Guard the join if it matters.
+// The bin-index formula itself, with NO guards -- the single definition that bin_of and
+// both of interval_bins' regimes delegate to, so the arithmetic cannot drift between them.
+// It was written out three times before; interval_bins' header explains why the obvious
+// objection to delegating (a user macro of the same name hijacking the call) does not
+// apply once the callee is schema-qualified.
+//
+// INTERNAL. The leading underscore marks it as such: it performs no validation at all and
+// assumes its caller has already established that pos, n_bins and genome_length are
+// non-NULL, that n_bins and genome_length are positive, and that pos is inside
+// [1, genome_length]. Called with anything else it returns a plausible wrong number rather
+// than raising. Callers outside this file should use bin_of, which carries the guards.
+const std::string MIINT_BIN_INDEX = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_bin_index(pos, n_bins, genome_length) AS ( "
+    "  ((pos::BIGINT - 1) * n_bins::BIGINT) // genome_length::BIGINT);";
+
 const std::string BIN_OF = // NOLINT
     "CREATE OR REPLACE MACRO bin_of(pos, n_bins, genome_length) AS ( "
     "  CASE "
@@ -991,7 +1006,7 @@ const std::string BIN_OF = // NOLINT
     "      THEN error(printf('bin_of: position %s outside genome [1, %s] "
     "(if this is an exclusive stop_position, pass stop_position - 1)', "
     "                        pos::BIGINT::VARCHAR, genome_length::BIGINT::VARCHAR)) "
-    "    ELSE ((pos::BIGINT - 1) * n_bins::BIGINT) // genome_length::BIGINT "
+    "    ELSE system.main._miint_bin_index(pos, n_bins, genome_length) "
     "  END);";
 
 // b may equal n_bins: that is the exclusive end of the last bin, genome_length + 1, and
@@ -1023,20 +1038,20 @@ const std::string BIN_START = // NOLINT
 // enumerating positions instead costs O(interval length), which in this regime is bounded
 // by genome_length < n_bins. Same answer, 269x faster on that case.
 //
-// The bin arithmetic is inlined rather than delegated to bin_of, duplicating the floor
-// formula on purpose. The reason is COST, not safety:
+// Both regimes delegate the bin arithmetic to `system.main._miint_bin_index`, which is also
+// what bin_of's ELSE branch uses -- ONE definition of the formula, not three.
 //
-//   - Delegating re-runs bin_of's NULL and bounds guards once per enumerated position,
-//     measured at ~1.4x, when all of them are already established here and the clamp below
-//     already guarantees every p is inside [1, genome_length].
+// It delegates to the bare helper rather than to bin_of because bin_of re-runs its NULL and
+// bounds guards once per enumerated position, measured at ~1.4x, when all of them are
+// already established here and the clamp below guarantees every p is inside
+// [1, genome_length]. Delegating to the unguarded helper is free: measured against an
+// inlined twin on the same data, regime 1 is 0.015 s vs 0.016 s over 200k intervals and
+// regime 2 is 0.058 s vs 0.055 s over 20k, with zero result mismatches in either.
 //
-//   - A BARE `bin_of(...)` reference would also resolve in the CALLER's catalog, so a user
-//     macro of that name silently hijacks every result (verified: a user
-//     `CREATE MACRO bin_of(...) AS 999` turns interval_bins(1,5,4,10) into [999]).
-//
-// An earlier version of this comment claimed the hijack made delegation impossible. That
-// is FALSE and was corrected here. Schema-qualifying the callee defeats it completely, and
-// the qualification cannot be spoofed:
+// THE QUALIFICATION IS LOAD-BEARING. A macro body resolves its callee in the CALLER's
+// catalog, so a bare `_miint_bin_index(...)` would let any user macro of that name silently
+// replace the arithmetic -- and the results would still look like plausible bin indices.
+// Qualifying defeats it, and the qualification itself cannot be spoofed:
 //
 //   CREATE MACRO delegator_q(p,nb,gl) AS system.main.bin_of(p,nb,gl);
 //   CREATE MACRO delegator_u(p,nb,gl) AS bin_of(p,nb,gl);
@@ -1046,17 +1061,19 @@ const std::string BIN_START = // NOLINT
 //   ATTACH ':memory:' AS system;               -->  "reserved name"
 //   CREATE MACRO system.main.bin_of(...);      -->  "Cannot create entry in system catalog"
 //
-// (miint's macros do live in system.main -- confirmed via duckdb_functions().) So the
-// file's mzml family is right to delegate: MZML_X_OFFSET_PAIR and MZML_X_OFFSET_TRIPLET
-// call mzml_x_offset_ntuple, and READ_GFF calls parse_gff_attributes. There is no
-// project-wide "never delegate" rule, and this comment should not be read as one.
+// (miint's macros do live in system.main -- confirmed via duckdb_functions().) An earlier
+// version of this comment claimed the hijack made delegation impossible and used that to
+// justify writing the formula out three times. That was false. The delegation is pinned by
+// test/sql/interval_bins.test, which shadows both `_miint_bin_index` and `bin_of` with
+// macros returning 999 and asserts interval_bins is unaffected in both regimes; that test
+// was verified to FAIL against an unqualified version, so do not drop the `system.main.`
+// prefixes. Test 5 additionally cross-checks interval_bins against bin_of over both
+// regimes, including a non-dividing (3,5) pair.
 //
-// A shared, schema-qualified `_miint_bin_index` helper would remove the triplication at no
-// measured cost and is the obvious follow-up; it is deliberately NOT done here to keep this
-// change to correcting the record. Until then, any change to the formula must be mirrored
-// in BIN_OF above and in both branches below -- test/sql/interval_bins.test Test 5
-// cross-checks interval_bins against bin_of over both regimes, including a non-dividing
-// (3,5) pair, so the copies cannot drift silently.
+// Note the mzml family delegates UNQUALIFIED (MZML_X_OFFSET_PAIR and MZML_X_OFFSET_TRIPLET
+// call mzml_x_offset_ntuple, READ_GFF calls parse_gff_attributes), so those calls are
+// hijackable in the same way. Pre-existing and out of scope here, but the same one-word fix
+// applies if it ever matters.
 const std::string INTERVAL_BINS = // NOLINT
     "CREATE OR REPLACE MACRO interval_bins(start, stop, n_bins, genome_length) AS ( "
     "  CASE "
@@ -1071,14 +1088,18 @@ const std::string INTERVAL_BINS = // NOLINT
     "    WHEN LEAST(stop::BIGINT, genome_length::BIGINT + 1) "
     "         <= GREATEST(start::BIGINT, 1) THEN []::BIGINT[] "
     "    WHEN n_bins::BIGINT <= genome_length::BIGINT "
-    "      THEN range(((GREATEST(start::BIGINT, 1) - 1) * n_bins::BIGINT) "
-    "                 // genome_length::BIGINT, "
-    "                 ((LEAST(stop::BIGINT, genome_length::BIGINT + 1) - 2) "
-    "                  * n_bins::BIGINT) // genome_length::BIGINT + 1) "
+    // The exclusive end: bin of the LAST included position, plus one. The -1 is what makes
+    // it the last included position rather than one past it.
+    "      THEN range( "
+    "             system.main._miint_bin_index( "
+    "               GREATEST(start::BIGINT, 1), n_bins, genome_length), "
+    "             system.main._miint_bin_index( "
+    "               LEAST(stop::BIGINT, genome_length::BIGINT + 1) - 1, "
+    "               n_bins, genome_length) + 1) "
     "    ELSE list_sort(list_distinct(list_transform( "
     "           range(GREATEST(start::BIGINT, 1), "
     "                 LEAST(stop::BIGINT, genome_length::BIGINT + 1)), "
-    "           lambda p: ((p - 1) * n_bins::BIGINT) // genome_length::BIGINT))) "
+    "           lambda p: system.main._miint_bin_index(p, n_bins, genome_length)))) "
     "  END);";
 
 // region_presence(positions, regions, samples)
@@ -2259,6 +2280,9 @@ public:
 		register_macro(READ_GFF, "read_gff");
 		register_macro(GENOME_COVERAGE, "genome_coverage");
 		register_macro(GENOME_COVERAGE_PER_SAMPLE, "genome_coverage_per_sample");
+		// _miint_bin_index must be registered before bin_of and interval_bins (they
+		// delegate to it), matching the mzml_x_offset_ntuple ordering below.
+		register_macro(MIINT_BIN_INDEX, "_miint_bin_index");
 		register_macro(BIN_OF, "bin_of");
 		register_macro(BIN_START, "bin_start");
 		register_macro(INTERVAL_BINS, "interval_bins");
