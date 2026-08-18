@@ -260,8 +260,8 @@ cells_per_g_of_gdna = genomes / sequenced_sample_gdna_mass_ng * 1e9
 `650` is the average molar mass of a base pair of double-stranded DNA, in g/mole, so
 `ogu_len_in_bp * 650` is the molar mass of one genome.
 
-**Both `1e9` are ng→g conversions**, and neither appears in the equation as published in
-Zaramela et al. 2022 — but without them the units do not match. In the second line the
+**Both `1e9` are ng→g conversions**. This factor is not in the general equation published in
+Zaramela et al. 2022, but if gDNA is measured in ng, it is necessary to make the units match. In the second line the
 mass is in nanograms while the molar mass is in grams per mole, so dividing by `1e9` puts
 both on the same scale before Avogadro's number turns moles into molecules. In the third,
 `sequenced_sample_gdna_mass_ng` is likewise in nanograms, and the result is wanted *per
