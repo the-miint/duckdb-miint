@@ -1,0 +1,138 @@
+# name: test/sql/rype_null_sequence.test
+# description: A NULL sequence1 reaching RYpe must be reported against the caller's read_id (#243)
+# group: [sql]
+
+#
+# WHY THIS MATTERS
+#
+# RYpe rejects a NULL sequence, and it can only describe the offending row by its
+# position inside the Arrow record batch it was handed:
+#
+#   IO Error: Error getting next batch from RYpe: External error:
+#   Unexpected null in column 'sequence' at row 36504
+#
+# That row index is an index into an internal batch whose size miint chooses from
+# a memory budget. It does not correspond to any row number the caller can see, it
+# changes with available memory, and it cannot be joined back to a read_id. #243
+# was reported against a 1.68M-row relation the reporter had already verified was
+# null-free, and the row index gave them nothing to check.
+#
+# miint builds that batch, so miint can name the row. These cases pin that the
+# error identifies the caller's identifier column, its value, and the relation —
+# not an internal offset. A test that only asserted "this errors" would still pass
+# against the old opaque message, which is exactly the failure mode being fixed.
+#
+
+require miint
+
+# =============================================================================
+# rype_classify
+# =============================================================================
+
+statement ok
+CREATE TABLE seq_with_null AS SELECT * FROM (VALUES
+    ('read_a', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('read_b', CAST(NULL AS VARCHAR)),
+    ('read_c', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(read_id, sequence1);
+
+# The identifier of the offending row, its column name, and the relation all
+# appear. read_b is the second row, so a message that merely echoed a batch
+# offset would not contain it.
+statement error
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seq_with_null', threshold := 0.05);
+----
+read_b
+
+statement error
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seq_with_null', threshold := 0.05);
+----
+seq_with_null
+
+statement error
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seq_with_null', threshold := 0.05);
+----
+sequence1 is NULL
+
+# =============================================================================
+# The same boundary check covers the other two ingest paths, which share it
+# =============================================================================
+
+statement error
+SELECT * FROM rype_extract_minimizer_set('seq_with_null', 32, 10);
+----
+read_b
+
+statement ok
+CREATE TABLE lr_with_null AS SELECT * FROM seq_with_null;
+
+statement error
+SELECT * FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'lr_with_null');
+----
+read_b
+
+# =============================================================================
+# A non-VARCHAR identifier is reported in its own storage type, not stringified
+# through an intermediate carrier
+# =============================================================================
+
+statement ok
+CREATE TABLE seq_bigint_with_null (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO seq_bigint_with_null VALUES
+    (1001, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    (1002, NULL);
+
+statement error
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seq_bigint_with_null', threshold := 0.05);
+----
+1002
+
+# =============================================================================
+# A NULL identifier is NOT an error — only a NULL sequence is. This is the
+# pre-existing contract (see rype_classify_bigint.test) and the boundary check
+# must not tighten it by accident.
+# =============================================================================
+
+statement ok
+CREATE TABLE seq_null_id (read_id BIGINT, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO seq_null_id VALUES
+    (NULL, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    (2002, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT');
+
+query I
+SELECT COUNT(*) > 0 FROM rype_classify('data/rype/test.ryxdi', 'seq_null_id', threshold := 0.05);
+----
+true
+
+# =============================================================================
+# An empty sequence is not a NULL sequence: RYpe scores it 0 rather than failing.
+# Keeps the check from over-reaching into "falsy" values.
+# =============================================================================
+
+statement ok
+CREATE TABLE seq_empty AS SELECT * FROM (VALUES
+    ('read_a', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('read_empty', '')
+) AS t(read_id, sequence1);
+
+statement ok
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seq_empty', threshold := 0.05);
+
+statement ok
+DROP TABLE seq_with_null;
+
+statement ok
+DROP TABLE lr_with_null;
+
+statement ok
+DROP TABLE seq_bigint_with_null;
+
+statement ok
+DROP TABLE seq_null_id;
+
+statement ok
+DROP TABLE seq_empty;

@@ -71,6 +71,31 @@ union'd with 4-byte length + 12 inline bytes). Consequences for us:
 A **morsel is 122,880 rows (60 data chunks)** — the granularity a thread claims from a
 source.
 
+## Arrow export (ArrowAppender)
+
+**`ArrowBuffer` capacity is always a power of two, and it grows by `realloc`.**
+`ArrowBuffer::reserve` does `NextPowerOfTwo(bytes)` before allocating
+(`duckdb/src/include/duckdb/common/arrow/arrow_buffer.hpp`). So a finished Arrow batch
+holding *N* bytes of payload occupies `NextPowerOfTwo(N)` — up to 2× the payload, and
+`realloc` may need both blocks live while it moves. Two consequences:
+
+- **Never let an Arrow batch's byte size scale with the input.** A batch sized by *rows*
+  has an unbounded byte size, so the slack is an unbounded fraction of the corpus. Size
+  by bytes against a power-of-two ceiling instead: a batch that stops just short of 2^k
+  has capacity exactly 2^k, so the slack is one row rather than one doubling. That is
+  what `RYPE_ARROW_BATCH_BYTES` in `src/include/rype_input_stream.hpp` does, and it is
+  most of the fix for the-miint/Qiita#459.
+- The buffers use plain `malloc`/`realloc`, not DuckDB's allocator, so none of this is
+  visible to `memory_limit` or to `duckdb_memory()`. Peak RSS on an Arrow-exporting path
+  is not bounded by `SET memory_limit` — measured directly: 10.2 GB peak at a 2 GB limit
+  vs 11.0 GB at 24 GB, for the same query.
+
+**The appender's `initial_capacity` argument is a row count that also sizes the data
+buffer.** `ArrowVarcharData::Initialize` reserves `(capacity + 1) * sizeof(int64_t)` for
+offsets *and* `capacity` bytes for the payload, each rounded up to a power of two. Passing
+a large row hint to an appender that will be closed early therefore over-reserves the
+offsets buffer by more than the batch ever uses.
+
 ## Pipelines and parallelism
 
 Execution is **push-based**, not the Volcano pull model (changed in 0.3.0, Oct 2021).

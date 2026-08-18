@@ -2,6 +2,9 @@
 #include "catalog_utils.hpp"
 #include "rype_common.hpp"
 
+// The chunk-table input is still exported through DuckDB's generic wrapper: it
+// feeds rype_index_create, not the (id, sequence) shape RypeInputStream builds.
+#include "duckdb/common/arrow/result_arrow_wrapper.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 

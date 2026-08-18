@@ -263,6 +263,18 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                 "Default false.",
 	                                 LogicalType::BOOLEAN, Value::BOOLEAN(false));
 
+	// Byte ceiling on one Arrow record batch's sequence payload in the RYpe input
+	// stream. Bounds how much sequence data is resident at once independently of
+	// the row count RYpe's batch sizing produces (the-miint/Qiita#459); see
+	// RYPE_ARROW_BATCH_BYTES in src/include/rype_input_stream.hpp for why it is a
+	// power of two. Lowering it is how test/sql/rype_input_stream_batching.test
+	// reaches the multi-batch path without a quarter-gigabyte fixture.
+	ena_db_config.AddExtensionOption(
+	    "miint_rype_arrow_batch_bytes",
+	    "Byte ceiling on one Arrow record batch's sequence payload in rype_classify / rype_log_ratio / "
+	    "rype_extract_*. 0 disables the ceiling, restoring a single unbounded batch. Default 256 MiB.",
+	    LogicalType::BIGINT, Value::BIGINT(NumericCast<int64_t>(RYPE_ARROW_BATCH_BYTES)));
+
 	ScalarFunction version_func("miint_version", {}, LogicalType::VARCHAR, MiintVersionFunction);
 	loader.RegisterFunction(version_func);
 

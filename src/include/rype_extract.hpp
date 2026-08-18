@@ -2,6 +2,8 @@
 
 #include "rype.h"
 #include "rype_common.hpp"
+#include "rype_id_map.hpp"
+#include "rype_input_stream.hpp"
 
 #include "duckdb/common/arrow/arrow.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
@@ -28,6 +30,10 @@ struct RypeExtractData : public TableFunctionData {
 	size_t k;
 	size_t w;
 	uint64_t salt;
+	// Byte budget handed to RYpe's batch sizing; 0 = derive one (ResolveRypeMemoryBudget).
+	int64_t max_memory = 0;
+	// Report the chosen batch size and memory estimates via miint_warnings() (#204).
+	bool debug = false;
 	LogicalType id_type = LogicalType(LogicalTypeId::INVALID); // Storage type of id_column; drives read_id output
 
 	std::vector<std::string> names;
@@ -41,34 +47,35 @@ struct RypeExtractData : public TableFunctionData {
 // Shared global state for both extraction functions
 // ============================================================================
 struct RypeExtractGlobalState : public GlobalTableFunctionState {
-	// Original read_ids indexed by row number (0-based).
-	std::vector<std::string> read_ids;
+	// Caller identifiers indexed by the surrogate id miint hands RYpe. Filled
+	// incrementally by RypeInputStream as RYpe pulls input batches, so it must
+	// outlive the input stream. Constructed in BuildExtractionInputStream.
+	unique_ptr<RypeIdMap> id_map;
 
 	// Sub-connection used to query the sequence table. Must outlive the RYpe
-	// output_stream because RYpe lazily consumes the input Arrow stream (backed
-	// by a ResultArrowArrayStreamWrapper whose QueryResult holds a non-owning
-	// optional_ptr<ClientContext> into this connection). Destroyed explicitly
-	// in the destructor AFTER releasing RYpe streams.
+	// output_stream because RYpe lazily consumes the input Arrow stream, which
+	// owns a streaming QueryResult holding a non-owning optional_ptr<ClientContext>
+	// into this connection. Destroyed explicitly in the destructor AFTER
+	// releasing RYpe streams.
 	unique_ptr<Connection> input_connection;
 
-	// Name of the per-call TEMP table that materializes (id, read_id, sequence1)
-	// once on input_connection. Populated by BuildExtractionInputStream; the
-	// destructor drops the table before tearing down input_connection.
-	std::string tmp_table_name;
+	// The Arrow input stream handed to RYpe. Owned here, not by RYpe — see the
+	// ownership note in rype_input_stream.hpp. Reset after output_stream is
+	// released and before input_connection.
+	unique_ptr<RypeInputStream> input_stream;
 
 	// Arrow output stream from RYpe extraction.
 	// OWNERSHIP HIERARCHY (destruction must be in reverse order):
 	// 1. current_chunk (shared_ptr — may outlive gstate via Vector ArrowAuxiliaryData)
 	// 2. arrow_table (holds pointers into output_schema)
 	// 3. output_schema
-	// 4. output_stream - until released, RYpe may still pull from the input Arrow stream
-	//                    wrapper, which holds a non-owning ClientContext pointer into
-	//                    input_connection — so this must be released before the DROP and
-	//                    before input_connection.reset().
-	// 5. tmp_table - DROPPED on input_connection (which owns the per-call TEMP). Must run
-	//                while input_connection is alive AND after step 4 returns, since
-	//                step 4 can re-enter the connection through RYpe's stream callbacks.
-	// 6. input_connection - reset last; outlives steps 4 and 5.
+	// 4. output_stream - releasing it makes RYpe drop its reader, which calls the input
+	//                    stream's release callback and stops further writes to id_map.
+	// 5. input_stream - after step 4; RYpe consumes it lazily and may still be pulling
+	//                    from it until then.
+	// 6. input_connection / id_map - torn down last. input_stream holds a streaming
+	//                    QueryResult with a non-owning ClientContext pointer into the
+	//                    connection.
 	ArrowArrayStream output_stream;
 	ArrowSchema output_schema;
 	ArrowTableSchema arrow_table;
