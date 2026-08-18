@@ -848,7 +848,7 @@ SELECT * FROM procrustes('ord_a', 'ord_b', permutations := 999, seed := 42);
 **Parameters:**
 - `reference` (VARCHAR): name of the reference ordination relation `(sample_id, axis, coordinate)`; its frame is the target
 - `other` (VARCHAR): name of the ordination to transform onto the reference
-- `pairing` (VARCHAR, optional): name of a `(reference_id, other_id)` relation. Absent → **full** mode (both ordinations must describe the same samples). Present → **partial** mode: fit the transform on just the paired anchor rows, then apply it to *every* row of both ordinations (the q2-diversity `partial_procrustes` technique, qiime2/q2-diversity#338)
+- `pairing` (VARCHAR, optional): name of a `(reference_id, other_id)` relation. Absent → **full** mode (both ordinations must describe the same samples). Present → **partial** mode: fit the transform on just the paired anchor rows, then apply it to *every* row of both ordinations — a partial-procrustes technique (McDonald, qiime2/q2-diversity#338)
 - `n_dims` (INTEGER, default: all available axes): number of leading axes to use; must be `≤` the axes present in each input
 - `permutations` (INTEGER, default 999): Monte Carlo permutations for the PROTEST p-value (full mode only); `0` disables the test (p-value is NULL)
 - `seed` (INTEGER, default -1): permutation seed; `-1` = unseeded
@@ -863,10 +863,10 @@ SELECT * FROM procrustes('ord_a', 'ord_b', permutations := 999, seed := 42);
 
 **Behavior:**
 - **Full mode:** `reference` and `other` must describe the **same** sample set and carry the **same** number of axes (mirrors `scipy.spatial.procrustes`, which requires identical shapes). The transform is fit on all shared samples; `m2` is the disparity; `pvalue` is the PROTEST test.
-- **Partial mode (`pairing`):** the pairing must be **1:1** — a repeated `reference_id` or `other_id` is rejected (it would drop a row or feed one physical sample into the fit as several anchors). The fit uses the matched anchor rows (at least `n_dims + 1` usable pairs are required); it is then applied to every row of both inputs. `m2` is the disparity over the anchors; `pvalue` is `NULL` (matching q2's `partial_procrustes`, which defines no Monte Carlo test).
+- **Partial mode (`pairing`):** the pairing must be **1:1** — a repeated `reference_id` or `other_id` is rejected (it would drop a row or feed one physical sample into the fit as several anchors). The fit uses the matched anchor rows (at least `n_dims + 1` usable pairs are required); it is then applied to every row of both inputs. `m2` is the disparity over the anchors; `pvalue` is `NULL` — a partial fit has no null model to permute against, and `q2-diversity`'s `partial_procrustes` likewise defines no Monte Carlo test.
 - **Sample ids:** VARCHAR/BIGINT/UUID are all accepted (see [Sample identifier types](#sample-identifier-types)); full-mode matching and pairing lookups are by the id's string form, so a BIGINT `reference` and a VARCHAR `other` with the same ids align and emit under VARCHAR.
 - **Fail loud:** a missing `(sample_id, axis, coordinate)` column, a ragged ordination (a sample missing an axis), a duplicate `(sample_id, axis)`, an out-of-range `axis`, fewer than `n_dims + 1` points/anchors, or (full mode) differing sample sets or axis counts each raise a named error.
-- **P-value reproducibility:** the PROTEST test is reproducible under a fixed `seed` within one build, but it is **not** bit-for-bit comparable to q2's `procrustes_analysis` — q2 uses an *unseeded* RNG, and the C++ PRNG differs from NumPy's, so agreement is statistical (within Monte Carlo error), not exact. Disparity and coordinates, by contrast, match SciPy to machine precision.
+- **P-value reproducibility:** the PROTEST test is reproducible under a fixed `seed` within one build, but it is **not** bit-for-bit comparable to `q2-diversity`'s `procrustes_analysis` — that implementation uses an *unseeded* RNG, and the C++ PRNG differs from NumPy's, so agreement is statistical (within Monte Carlo error), not exact. Disparity and coordinates, by contrast, match SciPy to machine precision.
 
 **Examples:**
 
@@ -928,7 +928,22 @@ method for comparing microbial communities", *Applied and Environmental
 Microbiology* 71(12), 8228-8235. · Faith, D.P. (1992) "Conservation evaluation and
 phylogenetic diversity", *Biological Conservation* 61(1), 1-10.
 
+**Ordination alignment.** Gower, J.C. (1975) "Generalized procrustes analysis",
+*Psychometrika* 40(1), 33-51. · Jackson, D.A. (1995) "PROTEST: a PROcrustean
+Randomization TEST of community environment concordance", *Écoscience* 2(3),
+297-303 (the permutation test behind `pvalue`). · Peres-Neto, P.R. and Jackson,
+D.A. (2001) "How well do multivariate data sets match? The advantages of a
+Procrustean superimposition approach over the Mantel test", *Oecologia* 129(2),
+169-178. · McDonald, D., qiime2/q2-diversity#338 (the partial-procrustes
+technique — fit on a paired subset, apply to all rows — used by
+[`procrustes`](#procrustes-align-two-ordinations) in partial mode and by
+[`progressive_pcoa_from_unifrac`](#progressive-pcoa-from-unifrac) to place each
+batch into the anchor frame).
+
 **Reference implementations.** The `cogent3` / PyCogent, SciPy, scikit-learn and
 scikit-bio projects — consulted for metric conventions and used as parity oracles
 — are credited with their licenses and citations in
-[`THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md).
+[`THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md). `q2-diversity` is used
+the same way, as an optional test-time cross-check only (see
+`test/scripts/gen_procrustes_oracle.py --check-q2`); no code from it is
+incorporated.

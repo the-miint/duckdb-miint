@@ -14,7 +14,7 @@
 //
 // The "deconstructed" split (fit the transform on a paired subset, then apply
 // it to all rows) generalizes the standard full-overlap case and supports the
-// partial / reference-anchored use (author's own technique, q2-diversity#338).
+// partial / reference-anchored use (McDonald, q2-diversity#338).
 // Full procrustes == the degenerate case where the paired subset is every row.
 namespace miint::procrustes {
 
@@ -60,18 +60,23 @@ double Disparity(const double *ref_std, const double *other_fit, uint32_t n, uin
 // FitProcrustes on degenerate/non-finite input.
 double FullDisparity(const double *ref, const double *other, uint32_t n, uint32_t d);
 
-// Monte Carlo PROTEST p-value for a full procrustes fit (q2-diversity
-// `_procrustes_monte_carlo` parity). Permutes `other`'s rows `permutations`
-// times, recomputes the full-overlap disparity each trial, counts trials whose
-// disparity is strictly below `true_m2`, and returns (count + 1)/(permutations
-// + 1) — the +1 avoids a zero p-value (scikit-bio convention). `ref`/`other` are
-// the (n x d) row-major clouds the true fit used. Reproducible given `seed`
-// within one C++ standard library (unlike q2, which uses an unseeded
-// default_rng); the exact draw sequence is NOT portable across libstdc++/libc++/
-// MSVC because std::uniform_int_distribution's algorithm is implementation-
-// defined. `permutations == 0` returns NaN. NOTE: exact q2 parity is impossible
-// (q2 is unseeded; NumPy's PRNG differs from this std::mt19937_64) — agreement is
-// statistical, within Monte Carlo error.
+// Monte Carlo PROTEST p-value for a full procrustes fit — the Procrustean
+// randomization test of Jackson (1995), Écoscience 2(3), 297-303; see also
+// Peres-Neto & Jackson (2001), Oecologia 129(2), 169-178. Permutes `other`'s rows
+// `permutations` times, recomputes the full-overlap disparity each trial, counts
+// trials whose disparity is strictly below `true_m2`, and returns
+// (count + 1)/(permutations + 1) — the +1 avoids a zero p-value (scikit-bio
+// convention). `ref`/`other` are the (n x d) row-major clouds the true fit used.
+// Reproducible given `seed` within one C++ standard library; the exact draw
+// sequence is NOT portable across libstdc++/libc++/MSVC because
+// std::uniform_int_distribution's algorithm is implementation-defined.
+// `permutations == 0` returns NaN.
+//
+// NOTE: this is an independent implementation of the published test, not a port.
+// Bit-for-bit agreement with q2-diversity's `procrustes_analysis` is impossible
+// and is not attempted — that implementation leaves its RNG unseeded, and NumPy's
+// PRNG differs from this std::mt19937_64 regardless. Agreement is statistical,
+// within Monte Carlo error.
 double MonteCarloPValue(const double *ref, const double *other, uint32_t n, uint32_t d, double true_m2,
                         uint32_t permutations, uint64_t seed);
 

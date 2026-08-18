@@ -21,8 +21,8 @@
 // BlockProvider so the core stays block-source-agnostic.
 //
 // The partial-procrustes technique (fit the similarity transform on the anchor
-// overlap, apply it to a larger set) is the author's own work (Daniel McDonald,
-// q2-diversity#338); the alignment math is reused from miint::procrustes (A1),
+// overlap, apply it to a larger set) is McDonald, q2-diversity#338; the
+// alignment math is reused from miint::procrustes (A1),
 // itself ported from SciPy (BSD-3-Clause). PCoA is delegated to libskbb's
 // randomized FSVD (skbb_pcoa_fsvd_fp32) — the same call the pcoa/unifrac_pcoa
 // table functions use — so this header (and its implementation) is only compiled
