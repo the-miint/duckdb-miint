@@ -18,15 +18,16 @@ gene's RNA were present per gram of sample — and gets there without a spike-in
 
 ## Table of Contents
 
-- [Input relations](#input-relations) - the three relations the fit takes.
+- [The three fit relations](#the-three-fit-relations) - what `absquant_fit_models` reads.
 - [Sample identifier types](#sample-identifier-types) - how VARCHAR/BIGINT/UUID sample ids are handled.
 - [`absquant_fit_models`](#absquant_fit_models) - fit the per-sample standard curve.
 - [Which samples get a model](#which-samples-get-a-model) - what is dropped, and how to find out.
 - [`absquant_cell_counts`](#absquant_cell_counts) - apply a curve to get absolute cell counts.
+- [The five cell-count relations](#the-five-cell-count-relations) - what `absquant_cell_counts` reads.
 - [Choosing a metric](#choosing-a-metric) - per gram of gDNA, or per gram, microlitre or cm² of sample.
 - [Which cells you get back](#which-cells-you-get-back) - the three filters, and how to see what they removed.
 - [Composing the two functions](#composing-the-two-functions) - end to end, from spike-ins to cell counts.
-- [Applying a model by hand](#applying-a-model-by-hand) - if you only want the mass.
+- [Inverting a model by hand](#inverting-a-model-by-hand) - and why the mass it gives you is rarely what you want.
 - [`absquant_orf_copies`](#absquant_orf_copies) - copies of each ORF's ssRNA, per gram of sample.
 - [The three RNA relations](#the-three-rna-relations) - what `absquant_orf_copies` reads.
 - [ORF coordinates from `read_gff`](#orf-coordinates-from-read_gff) - and the off-by-one it will cost you.
@@ -34,11 +35,11 @@ gene's RNA were present per gram of sample — and gets there without a spike-in
 - [Differences from pysyndna](#differences-from-pysyndna) - for readers coming from the reference implementation.
 - [Citations](#citations)
 
-## Input relations
+## The three fit relations
 
 These three are what `absquant_fit_models` takes; `absquant_cell_counts` takes
-[five of its own](#absquant_cell_counts). All are passed **by name**, as quoted string
-literals — see
+[five of its own](#the-five-cell-count-relations). All are passed **by name**, as quoted
+string literals — see
 [Passing relations by name](table_of_contents.md#passing-relations-by-name). Tables,
 views, `TEMP` tables and `TEMP` views all work.
 
@@ -64,6 +65,16 @@ carries no information for a log-scale fit, so dropping it changes nothing.
 Counts must be **finite and not negative**, and each `(sample_id, feature_id)` may appear
 at most once. Both are errors rather than filters; see
 [Differences from pysyndna](#differences-from-pysyndna).
+
+**Every `feature_id` here must also appear in the [pool composition](#syndna-pool-composition)
+relation**, and every `sample_id` here must also appear in the
+[sample parameters](#sample-parameters) relation. Both are errors: a construct with reads
+but no concentration has no known input mass, and a sample with reads but no
+`mass_syndna_input_ng` has no known pool mass, so in neither case can the point be placed
+on the curve. The reverse directions are not errors — a construct named by the pool that
+never sequenced is [accepted and dropped as the zero-count construct it
+is](#differences-from-pysyndna), and parameters for a sample you did not sequence are
+merely untidy and are warned about.
 
 ### synDNA pool composition
 
@@ -147,15 +158,17 @@ SELECT * FROM absquant_fit_models(
 - `syndna_counts` (VARCHAR): name of the [synDNA counts](#syndna-counts) relation
 - `syndna_pool` (VARCHAR): name of the [pool composition](#syndna-pool-composition) relation
 - `sample_params` (VARCHAR): name of the [sample parameters](#sample-parameters) relation
-- `syndna_contributing_fraction` (DOUBLE): fraction of the input pool mass that actually contributed reads — the mass entering the model is `mass_syndna_input_ng × syndna_contributing_fraction`. Must be `> 0` and `<= 1`. Use `1.0` when the whole spike-in is assumed to be sequenced.
+- `syndna_contributing_fraction` (DOUBLE): fraction of the pool's mass that is *capable* of contributing reads — the mass entering the model is `mass_syndna_input_ng × syndna_contributing_fraction`. Must be `> 0` and `<= 1`. See [Where `syndna_contributing_fraction` comes from](#where-syndna_contributing_fraction-comes-from) below; it is a property of your construct design and library prep, and there is no safe default.
 - `min_syndna_counts` (BIGINT, default 1): drop any construct whose read count **summed over every sample** falls below this. Must be `>= 1`. The comparison is strict, so a construct landing exactly on the threshold is kept.
 
 **Output schema:** `(sample_id, slope DOUBLE, intercept DOUBLE, rvalue DOUBLE, pvalue DOUBLE, stderr DOUBLE, intercept_stderr DOUBLE)` — the six fields `scipy.stats.linregress` returns, in its order. `sample_id` mirrors the input type (see [above](#sample-identifier-types)). Rows are **not** returned in any particular order; add `ORDER BY` if you need one.
 
 **Reading the fit.** `slope` and `intercept` are the model; the other four describe how much to trust it. `rvalue` is Pearson's *r* — its square is the fraction of variance explained, and `r² < 0.8` is the conventional cut for discarding a sample's curve. `stderr` and `intercept_stderr` are the standard errors of the two coefficients, and `pvalue` is the two-sided test of a zero slope.
 
-**How the mass of each construct is derived.** Each construct's share of the pool is its
-concentration over the sum of **all** concentrations in the pool relation:
+**How the mass of each construct is derived.** Below, ***s* is one sample** and ***i* is
+one synDNA construct**; `Σ` runs over every construct in the pool relation. Each
+construct's share of the pool is its concentration over the sum of **all** concentrations
+in that relation:
 
 ```
 mass_pool(s)     = mass_syndna_input_ng(s) × syndna_contributing_fraction
@@ -168,9 +181,34 @@ That denominator is the **full** pool relation and is never rescaled, including 
 the regression but does not change how much mass the remaining ones carry. This matters
 — rescaling to the survivors shifts every fitted intercept.
 
-Note the consequence for `syndna_contributing_fraction`: because it multiplies the mass
-of every construct equally, it shifts the intercept by `log10` of itself and leaves the
-slope untouched. Halving it is not the same as halving your answer.
+### Where `syndna_contributing_fraction` comes from
+
+Not every nanogram of synDNA you add can produce a read that lands on a synDNA construct.
+The constructs are carried on plasmids, and **only the insert is counted** — the plasmid
+backbone is shared across the pool, so reads landing there are not attributable to any one
+construct and are not what the counts relation holds. Only the insert's share of the
+plasmid can contribute:
+
+```
+syndna_contributing_fraction = (insert length / whole plasmid length) × sheared fraction
+```
+
+A 2000 bp insert in a 5000 bp plasmid puts the ceiling at `2000 / 5000 = 0.4` before
+anything else is considered. Multiply in any further factor that keeps synDNA mass from
+being sequenced — most importantly the fraction of the pool that **successfully sheared**,
+which stops being close to 1 for long plasmids and for long-read protocols.
+
+`1.0` therefore does not mean "the whole spike-in was sequenced" and is not a safe
+default: it asserts that the plasmid is all insert and that shearing was complete, which
+no real construct satisfies. Use the value your own construct design and library prep
+imply.
+
+> This factor does not appear in the calculations published in Zaramela et al. 2022. It
+> was found to be necessary in later work, and matters most for long reads.
+
+Note the consequence for the fit: because `syndna_contributing_fraction` multiplies the
+mass of every construct equally, it shifts the intercept by `log10` of itself and leaves
+the slope untouched. Halving it is not the same as halving your answer.
 
 ## Which samples get a model
 
@@ -190,18 +228,21 @@ CREATE TABLE models AS SELECT * FROM absquant_fit_models(…);
 SELECT message FROM miint_warnings();
 ```
 
-A sample present in the counts relation but **missing** from the parameters relation is
-an error, not a warning — reads you cannot convert to mass are unusable. The reverse
-(parameters for a sample you did not sequence) is merely untidy and is warned about.
+Note that these are the samples that *reach* the fit and then fall out of it. A sample or
+construct missing from the relation that gives it a mass never gets that far: it is an
+error, described with the relation it is missing from under
+[The three fit relations](#the-three-fit-relations).
 
 ---
 
 ## `absquant_cell_counts`
 
 Turn each feature's read count into **absolute cell counts**, by applying a fitted
-standard curve. This is the payoff of the whole method: the output is an ordinary feature
-table whose values are absolute rather than compositional, so it joins, pivots and writes
-to BIOM like any other.
+standard curve. This is the payoff of the whole method: the values are absolute rather
+than compositional, so they can be compared *across* samples and analysed with ordinary
+statistics. A taxon's rise or fall now means what it says, instead of being contingent on
+what everything else did; and plain correlation, regression and difference-of-means become
+usable, none of which are safe on compositional data.
 
 ```sql
 absquant_cell_counts(counts, models, coverage, lengths, params,
@@ -211,25 +252,48 @@ absquant_cell_counts(counts, models, coverage, lengths, params,
 The chain, per surviving `(sample, feature)`:
 
 ```
-gdna_mass_ng   = 10 ^ (slope * log10(read_count) + intercept)
-genomes        = gdna_mass_ng * 6.02214076e23 / (ogu_len_in_bp * 650 * 1e9)
-cells_per_g    = genomes / sequenced_sample_gdna_mass_ng * 1e9
+gdna_mass_ng        = 10 ^ (slope * log10(read_count) + intercept)
+genomes             = gdna_mass_ng * 6.02214076e23 / (ogu_len_in_bp * 650 * 1e9)
+cells_per_g_of_gdna = genomes / sequenced_sample_gdna_mass_ng * 1e9
 ```
 
-`650` is the average molar mass of a base pair of double-stranded DNA, in g/mole. The
-last step assumes **one genome per cell**, which is the published method's own
+`650` is the average molar mass of a base pair of double-stranded DNA, in g/mole, so
+`ogu_len_in_bp * 650` is the molar mass of one genome.
+
+**Both `1e9` are ng→g conversions**, and neither appears in the equation as published in
+Zaramela et al. 2022 — but without them the units do not match. In the second line the
+mass is in nanograms while the molar mass is in grams per mole, so dividing by `1e9` puts
+both on the same scale before Avogadro's number turns moles into molecules. In the third,
+`sequenced_sample_gdna_mass_ng` is likewise in nanograms, and the result is wanted *per
+gram*. Check them if you ever re-derive this chain from the paper: dropping either is a
+silent factor of a billion, in opposite directions.
+
+The last step assumes **one genome per cell**, which is the published method's own
 simplifying assumption and is wrong for dividing and polyploid organisms — treat the
 output as genome equivalents if that matters to you.
 
+**The curve is only valid over the read counts the constructs actually spanned.** The
+first line applies a model fitted on `log10` of both axes, and nothing in it knows where
+the calibration stopped: a feature with far more or far fewer reads than any synDNA
+construct gets a number anyway, extrapolated off the end of a power law. That is how a
+spike-in method turns into noise, and it is worth checking the range your constructs
+covered against the range of your biological counts before trusting the tails.
+
+**Fit quality is gated here, not at fitting time.** `absquant_fit_models` returns every
+model it could fit, however poor. `min_rsquared` (default `0.8`) is what actually keeps a
+weak curve from producing numbers, and samples it excludes are reported through
+[`miint_warnings()`](utilities.md) — see
+[Which cells you get back](#which-cells-you-get-back).
+
 ### Choosing a metric
 
-`cells_per_g` above is per gram of the gDNA that went into the **sequencer** — an
+`cells_per_g_of_gdna` above is per gram of the gDNA that went into the **sequencer** — an
 instrument quantity. The other three metrics restate it per unit of the material you
 actually **collected**, which is what makes numbers comparable between samples:
 
 ```
 extracted_gdna_mass_g = extracted_gdna_concentration_ng_ul * vol_extracted_elution_ul / 1e9
-value                 = cells_per_g * extracted_gdna_mass_g / <the metric's denominator>
+value                 = cells_per_g_of_gdna * extracted_gdna_mass_g / <the metric's denominator>
 ```
 
 `extracted_gdna_mass_g` is the DNA recovered from the whole extraction, not the portion
@@ -252,18 +316,65 @@ aliquot a mass, a saliva sample a volume. `cells_per_g_of_gdna` is the right ans
 when you genuinely mean *per unit of DNA sequenced*, which is rarely the biological
 question.
 
-### The five relations
+### The five cell-count relations
 
 | Argument | Columns read | Notes |
 |---|---|---|
 | `counts` | `(sample_id, feature_id, value)` | your biological feature table, not the synDNA one |
-| `models` | `(sample_id, slope, intercept, rvalue)` | `absquant_fit_models`' output, unprojected |
-| `coverage` | `(sample_id, feature_id, coverage)` | a **fraction** in `[0, 1]`, never a percent |
-| `lengths` | `(feature_id, ogu_len_in_bp)` | genome length in base pairs; must be positive |
+| `models` | `(sample_id, slope, intercept, rvalue)` | pass `absquant_fit_models`' output as it comes — do not select a subset of its columns, since `rvalue` is what `min_rsquared` gates on |
+| `coverage` | `(sample_id, feature_id, coverage)` | breadth of coverage, as a **fraction** in `[0, 1]` — see below |
+| `lengths` | `(feature_id, ogu_len_in_bp)` | genome length in base pairs — see below |
 | `params` | `(sample_id, sequenced_sample_gdna_mass_ng, extracted_gdna_concentration_ng_ul, vol_extracted_elution_ul)`, plus the metric's denominator column | see [Choosing a metric](#choosing-a-metric) |
 
 Extra columns are ignored everywhere, so relations produced for other purposes can be
 passed straight in. Each relation's key must be unique.
+
+**`coverage` is breadth, not depth.** It is the fraction of the feature's genome that has
+at least one read on it — the quantity
+[`genome_coverage_per_sample`](alignment_analysis.md#per-sample-genome-coverage) returns as
+`proportion_covered`:
+
+```sql
+SELECT sample_id, genome_id AS feature_id, proportion_covered AS coverage
+FROM genome_coverage_per_sample(alignments, genome_lengths, contig_to_genome);
+```
+
+Its job here is to decide **which genomes are likely present**: reads spread across a
+genome are evidence that the genome is there, while reads piled into one corner of it are
+better explained by a conserved region of something else. That is why it gates rather than
+scales — no value in the output depends on it. Two ways to get it wrong, both of which run
+to completion:
+
+- **A percent instead of a fraction.** `85.0` is not `0.85`. Every value clears a
+  fractional `min_coverage`, so the filter silently keeps everything, and the run looks
+  successful. miint refuses values outside `[0, 1]`; pysyndna accepts either and leaves
+  matching the threshold to you.
+- **Depth instead of breadth.** Mean or per-base depth is not bounded by 1 and does not
+  answer the presence question — a single repetitive region read 300 times is high depth
+  and near-zero breadth, which is exactly the case this filter exists to exclude. If your
+  number can exceed 1, it is not this column.
+
+Per-sample is the only supported shape. If you have one coverage vector for the whole
+study, broadcast it explicitly, so that the choice is visible in your query rather than
+implied:
+
+```sql
+CREATE TABLE ogu_coverage AS
+SELECT s.sample_id, c.feature_id, c.coverage
+FROM (SELECT DISTINCT sample_id FROM ogu_counts) s
+CROSS JOIN study_wide_coverage c;
+```
+
+**`lengths` is the whole genome's length**, in base pairs, and must be positive. It is the
+length of the reference the feature's reads were assigned to — the same denominator
+`genome_coverage_per_sample` used, not the length of any one contig and not the summed
+length of the reads. Where a feature is an assembly of several contigs, this is their
+total.
+
+Unlike `coverage`, this one **scales the answer**: it sets the genome's molar mass
+(`ogu_len_in_bp * 650`), which divides into the feature's DNA mass, so the cell count moves
+inversely with it. A length recorded at twice the truth halves every cell count for that
+feature, and nothing in the output looks wrong.
 
 For `cells_per_g_of_gdna`, only `sequenced_sample_gdna_mass_ng` enters the arithmetic.
 The other two parameter columns are required and screened anyway, matching pysyndna,
@@ -322,35 +433,6 @@ ORDER BY sample_id, feature_id LIMIT 5;
 │ example1  │ Neisseria flavescens        │  958792227127.9537 │
 └───────────┴─────────────────────────────┴────────────────────┘
 ```
-
-### Where coverage comes from
-
-`coverage` is the fraction of each genome that aligned reads actually covered — a guard
-against calling a genome present on the strength of a handful of reads landing in one
-conserved region. [`genome_coverage_per_sample`](alignment_analysis.md#per-sample-genome-coverage)
-produces it directly:
-
-```sql
-CREATE TABLE ogu_coverage AS
-SELECT sample_id, genome_id AS feature_id, proportion_covered AS coverage
-FROM genome_coverage_per_sample(alignments, genome_lengths, contig_to_genome);
-```
-
-Per-sample is the only supported shape. If you have one coverage vector for the whole
-study, broadcast it explicitly so that the choice is visible in your query rather than
-implied:
-
-```sql
-CREATE TABLE ogu_coverage AS
-SELECT s.sample_id, c.feature_id, c.coverage
-FROM (SELECT DISTINCT sample_id FROM ogu_counts) s
-CROSS JOIN study_wide_coverage c;
-```
-
-**Coverage is a fraction, always.** pysyndna accepts fractions or percents and leaves it
-to you to pass a matching `min_coverage`; get that pairing wrong and the filter silently
-keeps everything. miint rejects any coverage outside `[0, 1]`, so `92.597` is an error
-rather than a disabled filter.
 
 ## Which cells you get back
 
@@ -435,14 +517,17 @@ different pipelines, and if their sample naming differs by so much as a prefix, 
 sample lands in the "no usable model" warning and the result is empty rather than wrong.
 Check the warnings before you check the numbers.
 
-Note also that the two functions are gated independently. `absquant_fit_models` returns
-every model it could fit, however poor; `min_rsquared` here is what actually excludes a
-weak curve from being used.
+Note also that the two functions are gated independently: `absquant_fit_models` returns
+every model it could fit, however poor, and `min_rsquared` on this second call is what
+excludes a weak curve from being used.
 
-## Applying a model by hand
+## Inverting a model by hand
 
-If you want the DNA mass rather than a cell count — the intermediate step of the chain
-above — the fitted curve inverts directly:
+> **This is documentation of an intermediate quantity, not a recommended analysis.** If
+> you want a number to analyse, use [`absquant_cell_counts`](#absquant_cell_counts).
+
+The first line of the cell-count chain — read count to nanograms of gDNA — is just the
+fitted curve evaluated, so it can be written directly:
 
 ```sql
 -- ng of DNA attributable to each feature, per sample.
@@ -454,15 +539,20 @@ JOIN models m USING (sample_id)
 WHERE c.value > 0;
 ```
 
-Two cautions, which apply to `absquant_cell_counts` equally. The model is fitted on
-`log10` of both axes, so it must be applied on that scale and only within the range of
-read counts the constructs actually spanned — extrapolating a power law beyond its
-calibration is how a spike-in method turns into noise. And it is worth filtering on fit
-quality, since a sample whose curve is poor will still produce numbers:
+**Be clear about what this number is not.** It is the mass of that feature's DNA in *one
+particular library prep* — the aliquot that went into the sequencer, at the depth it was
+sequenced to. It is not a property of the sample, let alone of the organism, and it is
+**not comparable between samples**: two samples holding identical microbial loads give
+different values here whenever their extraction yields, elution volumes or input masses
+differ, which is essentially always. Everything that makes the numbers comparable — the
+conversion through genome mass to cell counts, and the division by
+`sequenced_sample_gdna_mass_ng` or a sample-level denominator — happens in the steps this
+query stops short of. See [Choosing a metric](#choosing-a-metric).
 
-```sql
-SELECT * FROM models WHERE rvalue * rvalue >= 0.8;
-```
+It also carries none of `absquant_cell_counts`' safeguards: no `min_coverage` presence
+filter, no `min_rsquared` gate on the fitted curve, no screen on the parameter columns,
+and no warnings about any of it. If you use this at all, use it to inspect the middle of
+the chain, not to produce a result.
 
 ## `absquant_orf_copies`
 
@@ -675,7 +765,10 @@ For `absquant_cell_counts` specifically:
 - **Output is sparse**; see [Zero-valued cells are omitted](#zero-valued-cells-are-omitted).
 - **A sample whose every feature fails the coverage filter is reported.** pysyndna emits
   nothing for it — such a sample never reaches its per-sample loop — so it simply vanishes
-  from the output. The values agree; miint says so.
+  from the output. Neither implementation produces any cells for that sample, so the two
+  results are identical; the difference is only that miint tells you the sample was
+  dropped, through [`miint_warnings()`](utilities.md), instead of leaving you to notice
+  its absence.
 - **A sample whose every cell comes out zero is reported.** Reached in practice through a
   sample-level metric with a zero extraction concentration or elution volume. pysyndna's
   output is dense, so it writes the zeros out and the question never arises; a sparse
