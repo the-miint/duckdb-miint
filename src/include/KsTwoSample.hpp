@@ -6,6 +6,22 @@
 
 namespace miint {
 
+// PROVENANCE. The exact two-sample p-value below is worked out from the lattice-path
+// formulation of the null distribution in Hodges (1958) -- following Drion and
+// Gnedenko-Korolyuk -- and is NOT transcribed from SciPy or any other implementation.
+// It is also computed differently from SciPy's: as the probability mass ESCAPING an
+// absorbing band, rather than as 1 - P(stay inside), which is what lets it keep full
+// relative precision at very small p (see KsExactPValue).
+//
+// SciPy is used only as a test oracle, to generate the committed goldens under
+// data/ks2samp/ that test/sql/ks_2samp_parity.test checks against. Nothing in this file
+// derives from it, and method := 'asymp' is deliberately not implemented, so none of
+// SciPy's _ksstats.py region selection is reproduced either. Recorded in
+// THIRD_PARTY_LICENSES.md under "Validation oracles and algorithm references".
+//
+//   Hodges, J. L. (1958) "The significance probability of the Smirnov two-sample test",
+//   Arkiv for Matematik, 3(5), 469-486. doi: 10.1007/BF02589501
+
 struct KsTwoSampleResult {
 	double statistic; // two-sided D = sup|F_a(x) - F_b(x)|, in [0, 1]
 	double pvalue;    // P(D_{n1,n2} >= statistic) under H0, exact

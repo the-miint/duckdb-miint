@@ -734,7 +734,11 @@ method for comparing microbial communities", *Applied and Environmental
 Microbiology* 71(12), 8228-8235. · Faith, D.P. (1992) "Conservation evaluation and
 phylogenetic diversity", *Biological Conservation* 61(1), 1-10.
 
-**Reference implementations.** The `cogent3` / PyCogent, SciPy, scikit-learn and
-scikit-bio projects — consulted for metric conventions and used as parity oracles
-— are credited with their licenses and citations in
-[`THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md).
+**Reference implementations.** The `cogent3` / PyCogent, NumPy, SciPy,
+scikit-learn and scikit-bio projects — consulted for metric conventions and used
+as parity oracles — are credited with their licenses and citations in
+[`THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md). Note that `ks_2samp` is
+checked against `scipy.stats.ks_2samp` but is **not** derived from it: the exact
+p-value comes from the lattice-path formulation in Hodges (1958) and is computed
+as escaping probability mass rather than as `1 - P(stay inside)`. See the SciPy
+entry there, and `src/include/KsTwoSample.hpp`.
