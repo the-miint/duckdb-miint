@@ -1134,7 +1134,7 @@ GROUP BY region_id
 ORDER BY mean_prop DESC;
 ```
 
-**When each genome is a single contig**, a whole-genome "region" reproduces `genome_coverage` with a sample dimension, which makes a useful equivalence check:
+**When each genome is a single contig**, a whole-genome "region" reproduces [`genome_coverage_per_sample`](#per-sample-genome-coverage) — the two agree row for row, since both carry the sample dimension — and reproduces [`genome_coverage`](#genome-coverage) once you pool, since that one has no sample dimension. Either makes a useful equivalence check:
 
 ```sql
 CREATE TABLE whole AS
