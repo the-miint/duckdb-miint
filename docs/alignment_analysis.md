@@ -14,9 +14,13 @@ A considerable amount of analysis on alignment data can be performed with native
 - [Query coverage](#cigar-query-coverage) - Query coverage from CIGAR
 - [Query intervals](#cigar-query-intervals) - Which read positions an alignment covers, on the read's own axis
 - [Merge overlapping intervals](#merge-overlapping-intervals) - Merge overlapping genomic intervals (aggregate)
+- [Genome bins](#genome-bins) - Divide a genome into equal-width bins; map positions and intervals to them
 - [Coverage depth](#coverage-depth) - Per-position depth of coverage (aggregate)
 - [Genome coverage](#genome-coverage) - Proportion of each genome covered by alignments
 - [Per-sample genome coverage](#per-sample-genome-coverage) - The same, reported separately for each sample
+- [Region presence](#region-presence) - Three-state (present / absent / not applicable) region calls per sample
+- [Region coverage](#region-coverage) - Breadth of coverage of a sub-genome region, with the region's own length as the denominator
+- [Cumulative coverage](#cumulative-coverage) - Rank-ordered cumulative breadth: how a cohort's coverage stacks (aggregate + curve macro)
 - [Circular query coverage](#circular-query-coverage) - Query coverage pooled across the fragments of one read, for reads spanning a circular reference's origin
 - [Barcode matching](#barcode-matching) - Hamming-distance matcher for short fixed-length barcodes
 - [MSA column consensus](#msa-column-consensus) - Quality-aware consensus from a multiple alignment
@@ -645,6 +649,103 @@ WHERE LEAD(interval.start) OVER (PARTITION BY reference ORDER BY interval.start)
 - Multi-threaded aggregation: each thread maintains its own state, merged at finalization
 - Algorithm: sorts intervals by start position, then single-pass merge (O(n log n))
 
+### Genome bins
+
+`bin_of(pos, n_bins, genome_length)`
+`bin_start(b, n_bins, genome_length)`
+`interval_bins(start, stop, n_bins, genome_length)`
+
+Scalar macros that divide a genome into `n_bins` near-equal-width bins. `bin_of` maps a position to its bin; `bin_start` maps a bin back to its first position; `interval_bins` reports which bins a half-open interval touches, designed to be `UNNEST`ed so a read spanning a boundary is counted in every bin it overlaps.
+
+Together these support finding genomic regions whose coverage differs between sample groups: bin the alignments, count samples or reads per bin per group, and rank bins by the standard deviation of the per-group counts. Only the fan-out needed a primitive — the ranking half is plain SQL.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `pos` | BIGINT | A 1-based genomic position, in `[1, genome_length]` |
+| `start` | BIGINT | 1-based inclusive interval start, matching `read_alignments` |
+| `stop` | BIGINT | Exclusive interval end (half-open) |
+| `b` | BIGINT | 0-based bin index, in `[0, n_bins]` |
+| `n_bins` | BIGINT | Number of bins (must be ≥ 1); widths differ by at most one base |
+| `genome_length` | BIGINT | Total length being binned (must be ≥ 1) |
+
+**Returns:** `interval_bins` → `LIST(BIGINT)`, the bin indices touched, ascending and deduplicated. `bin_of` and `bin_start` → `BIGINT`. Every operand is normalized to `BIGINT` internally — in the bounds checks as well as the arithmetic — so `INTEGER` inputs, which is what `read_gff` and `read_ncbi_annotation` emit, cannot overflow. A `genome_length` or `n_bins` arriving as `DOUBLE`/`DECIMAL` (an inferred CSV or Parquet column) is rounded once and behaves exactly like that rounded integer.
+
+**Bin index convention:** bins are **0-based**. They are array positions rather than genomic coordinates, so this deliberately cuts against the 1-based coordinate convention used elsewhere. The bin index is the join key you will carry into downstream queries, so it is worth stating explicitly in your own code too.
+
+`bin_of` is the definition and `bin_start` is its left inverse:
+
+```
+bin_of(p)    = ((p - 1) * n_bins) // genome_length
+bin_start(b) = ceil(b * genome_length / n_bins) + 1
+```
+
+The guarantee is **containment**, `bin_start(bin_of(p)) <= p < bin_start(bin_of(p) + 1)` for every `p` in `[1, genome_length]`. It is not a round trip in both directions: when `n_bins > genome_length`, zero-width bins make `bin_start` non-injective, so `bin_of(bin_start(b))` need not be `b` (with `n_bins=5, genome_length=3`, `bin_start(2) = 3` but `bin_of(3) = 3`).
+
+> **These bin edges are miint's own convention — bins are not portable between tools.** If you are carrying bin indices or breakpoints in from another binning implementation, expect the boundaries to move rather than assuming a drop-in. Three things vary independently between tools: whether the index is 0-based or 1-based, whether the first edge is `0` or `1`, and whether the edge rule rounds or takes a ceiling. Only the last of those actually changes which bases land in which bin. The other two are a presentation offset you can absorb with `bin + 1` and `edge - 1`.
+>
+> `round(b·L/n)` and `ceil(b·L/n)` disagree exactly when `b·L/n` has a fractional part in `(0, 0.5]`, so how much they differ depends entirely on divisibility, and the easy case is misleading. At `n_bins = 1000`: a genome length that `n_bins` divides (5,348,000, say, or 1,000,000) gives **identical** edges under both rules, because every `b·L/n` is already an integer. Any length it does not divide gives **about 50%** — measured 49.6% at 4,641,652, 49.9% at 2,821,361 and 49.8% at 3,099,706. So a comparison that happens to use a round genome length will agree perfectly and tell you nothing.
+>
+> The `ceil` rule here is deliberate: it is the exact inverse of `bin_of`, which is what makes the containment guarantee above hold. A `round`-based rule does not have that property. So this is not a knob — if you need another tool's exact geometry, compute those edges in plain SQL rather than trying to coax it out of `bin_start`.
+
+> You may notice a macro named `_miint_bin_index` in `duckdb_functions()`. It is **internal** — the shared, unguarded definition of the `bin_of` formula that `bin_of` and `interval_bins` both delegate to, so the arithmetic exists in one place. It performs no validation whatsoever and will return a plausible wrong number for out-of-range input. Call `bin_of` instead; it is the same formula with the guards.
+
+**Bin edges are half-open, like every other interval in miint.** Bin `b` spans `[bin_start(b), bin_start(b + 1))` and its width is the plain difference — no `+1`, matching the `stop_position` rule in [`docs/internals/architecture.md`](internals/architecture.md). That makes `bin_start(0) = 1` and `bin_start(n_bins) = genome_length + 1`, so a bin drops straight into anything taking a half-open `(start, stop)` pair — `compress_intervals`, or your own region table — with no adjustment. Bin widths differ by at most one base, and every base belongs to exactly one bin.
+
+> **If your source uses an inclusive end**, add one before calling: `interval_bins(start, end + 1, ...)`. Getting this wrong is silent — every interval's last base lands one bin early and the ranking still looks plausible. `read_alignments`, `compress_intervals`, `read_gff` and `read_ncbi_annotation` are all already half-open, so no adjustment is needed for those.
+
+> **Do not pass `stop_position` to `bin_of`.** `bin_of` takes a position; `stop_position` is an exclusive end, so a read reaching the reference end carries `genome_length + 1` and `bin_of` raises. Use `bin_of(stop_position - 1, ...)` for the last covered base, or `interval_bins(position, stop_position, ...)` for the whole read. The error message says as much, but it aborts the query rather than one row — and it only triggers on reads at the very end of a reference, so it will pass on a small fixture and fail on a real BAM.
+
+**Behavior:**
+- NULL in any argument → NULL
+- `stop <= start` (empty or inverted interval) → empty list, so `UNNEST` drops the row
+- Intervals are clamped to `[1, genome_length]`; bins outside the genome are never emitted
+- When `n_bins` exceeds `genome_length` some bins are zero-width. This is legitimate when a fixed bin count is applied across genomes of very different sizes. Such bins contain no bases and are **not** emitted, even for an interval that spans across them.
+- `n_bins < 1` or `genome_length < 1` **raises**, rather than returning an empty list, so a bin count or length that computed to zero surfaces instead of quietly emptying the result.
+- A NULL `genome_length` yields NULL, **not** an error — and `UNNEST(NULL)` emits no rows, so those reads disappear with no diagnostic. This is the shape a missed join takes (a miss produces NULL, not 0), so the positivity check above does not cover it. If a genome may be absent from your lengths table, guard the join yourself rather than relying on an error.
+- `bin_of` raises on a position outside `[1, genome_length]`; `bin_start` raises on a bin index outside `[0, n_bins]`. Both would otherwise return a plausible-looking but fictional coordinate.
+
+**Examples:**
+```sql
+-- Rank bins by how variable their per-group sample counts are, then turn the
+-- top-ranked bins into half-open regions. One statement, so top_bins stays in scope.
+CREATE TABLE differential_regions AS
+WITH binned AS (
+    SELECT p.genome_id, md.country, p.sample_id,
+           UNNEST(interval_bins(p.start, p.stop, 500, g.length)) AS bin_index
+    FROM positions p
+    JOIN sample_metadata md USING (sample_id)
+    JOIN genome_lengths  g  USING (genome_id)
+    WHERE p.genome_id = 'G000436435'
+), per_group AS (
+    SELECT genome_id, bin_index, country, COUNT(DISTINCT sample_id) AS sample_hits
+    FROM binned GROUP BY genome_id, bin_index, country
+), top_bins AS (
+    SELECT genome_id, bin_index, stddev_samp(sample_hits) AS sample_hits_std
+    FROM per_group GROUP BY genome_id, bin_index
+    ORDER BY sample_hits_std DESC NULLS LAST, bin_index
+    LIMIT 20
+)
+SELECT genome_id,
+       bin_start(bin_index, 500, 4719737)     AS region_start,
+       bin_start(bin_index + 1, 500, 4719737) AS region_stop,   -- exclusive
+       'bin_' || bin_index                    AS region_id,
+       sample_hits_std
+FROM top_bins;
+
+-- Which bin does a single position fall in?
+SELECT bin_of(481323, 500, 4719737);
+```
+
+> The `ORDER BY` above carries `bin_index` as a tiebreak. Without it, ties in `sample_hits_std` — common, since many bins share a std dev of 0 — make the reported top-20 vary between runs and thread counts.
+
+> **A group with no sample in a bin contributes no row**, so `stddev_samp` sees one value and returns NULL rather than treating the absent group as zero. If absent-means-zero is what you want, densify against your sample roster first — that is a metadata decision, not a binning one.
+
+**Performance notes:**
+- When `n_bins <= genome_length` (the normal case) every bin is at least one base wide, so the result is a contiguous bin range and the cost is the number of bins the interval touches
+- When `n_bins > genome_length` the macro enumerates positions rather than bins, so the cost is the interval's length rather than `n_bins`. Binning a 3 bp plasmid into 10⁶ bins costs three positions, not a million
+
 ### Coverage depth
 
 `compute_coverage_depth(position, stop_position, cigar, reference_length, mode)`
@@ -826,6 +927,369 @@ CROSS JOIN (SELECT DISTINCT sample_id FROM alignments) s;
 ```
 
 Be deliberate about which one you want: the pooled value is identical for every sample and is *not* a property of any single sample.
+### Region presence
+
+`region_presence(positions, regions, samples)`
+
+Table macro answering, per sample, whether a genomic region is present. The answer is **three-state**, and the third state is what makes downstream statistics honest:
+
+| State | Meaning |
+|---|---|
+| `present` | The sample has at least one covered interval overlapping the region. |
+| `absent` | The sample has coverage of the genome, but none of it overlaps the region. |
+| `not applicable` | The sample has no coverage of the genome at all. |
+
+Collapsing `not applicable` into `absent` conflates "the organism is here and this region is missing from it" — a strain-content claim — with "the organism is not here", a detection failure. Those must not be pooled, and the distinction is easy to lose when hand-rolling the SQL.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `positions` | relation | Columns `sample_id` (any type), `genome_id` (any type), `start` (BIGINT), `stop` (BIGINT). Intervals 1-based half-open, matching [`compress_intervals`](#merge-overlapping-intervals) output. |
+| `regions` | relation | Columns `genome_id` (any type), `region_start` (BIGINT), `region_stop` (BIGINT), `region_id` (any type). Half-open on the same convention. |
+| `samples` | relation | A `sample_id` column: the full cohort roster. |
+
+> **These are not `read_alignments`' column names.** `positions` is a *covered-interval* relation, so rename on the way in — `reference` → `genome_id`, `position` → `start`, `stop_position` → `stop`. The first example below shows the rename. (`genome_coverage` takes the raw alignment names instead, because it consumes alignments directly.)
+
+**Returns:** one row per region row per sample.
+
+| Column | Source |
+|---|---|
+| `sample_id` | from `samples`, uncast |
+| `genome_id` | from **`regions`**, uncast |
+| `region_id` | from `regions`, uncast |
+| `region_start`, `region_stop` | from `regions` |
+| `state` | VARCHAR — `present` / `absent` / `not applicable` |
+
+`sample_id`, `genome_id` and `region_id` are carried through uncast, so VARCHAR, BIGINT and UUID identifiers all survive end to end. Coordinates are normalized to `BIGINT`, so they come back as `BIGINT` whatever they went in as — including VARCHAR, which is what a BED file or an inferred CSV column gives you.
+
+> **Match your identifier types across relations.** `genome_id` joins `positions` to `regions`, and `sample_id` joins `positions` to `samples`. DuckDB implicit-casts, so a BIGINT `77` does match a VARCHAR `'77'` — but two things follow. The output `genome_id` takes the **`regions`** type, not the `positions` type, so a carefully typed coverage table and a loosely typed region table give you the loose one back. And a single unconvertible value aborts the whole query with a bare `Conversion Error: Could not convert string 'abc' to INT64 … source column sample_id` that names neither `region_presence` nor which relation the bad value came from. One malformed roster id is enough.
+
+The coordinates are emitted, not just `region_id`, because the presence join is keyed on them. Two rows sharing a `region_id` but covering different spans are scored independently, and without the coordinates in the output those rows would be indistinguishable — a `PIVOT` would silently collapse them and a join back to metadata would duplicate samples. When `region_id` is unique, the normal case, `(sample_id, region_id)` still keys the output.
+
+**Why `samples` is required.** `not applicable` cannot be derived from `positions` alone: a sample with no coverage contributes no rows, so it is indistinguishable from a sample that is not in the study. Without the roster this function could only emit `present` and `absent` — the very conflation it exists to prevent. Keeping the roster explicit also means the caller decides what "the cohort" is.
+
+**Behavior:**
+- The overlap test is `start < region_stop AND stop > region_start`. A read starting exactly where a region ends shares no base with it and is `absent`.
+- `positions` does **not** need to be pre-compressed. Presence asks only whether *any* interval overlaps, so overlapping input intervals give the same answer as their union — no `compress_intervals` pass needed.
+- Samples appearing in `positions` but not in the roster are ignored — the roster defines the cohort.
+- Duplicate rows in `positions`, `regions` or `samples` do not multiply the output — which is what makes passing uncompressed alignments safe.
+- **NULL and empty intervals in `positions`.** A NULL `start` or `stop` has a defined meaning — a sample that exists with zero coverage — so the row is dropped and does *not* count as covering the genome. An interval with `start >= stop` covers no bases and is dropped for the same reason. Neither promotes a sample from `not applicable` to `absent`. Note the macro takes no `genome_length`, so it can recognise an *empty* interval but not an out-of-range one: `[-5, -1)` is well formed and does count as coverage. Clamp upstream if that matters.
+- **A NULL `sample_id` or `genome_id` in `positions` raises.** Unlike the interval columns, these have no defined NULL meaning; silently dropping an unattributable interval would downgrade real coverage to a non-detection.
+- Raises on a NULL `sample_id` in the roster, on any NULL column in `regions`, and on an empty or inverted region (`region_stop <= region_start`) — each would otherwise report every sample `absent`, indistinguishable from a real negative result. Both `regions` errors name the offending row.
+- An empty roster, an empty `regions`, or empty `positions` are all legitimate: the first two produce no rows, and the third makes every pair `not applicable`.
+
+> **Validation covers the rows the query reads.** The guards are ordinary SQL expressions, so a filter such as `WHERE region_id = 'PC351'` may be pushed beneath them and a malformed row *outside* that filter will not raise. This never changes the rows you get back — each output row depends only on its own region and sample — but do not treat a clean run of a filtered query as a validation pass over the whole relation.
+
+**Examples:**
+```sql
+-- Build `positions` from alignments: compress per (sample, contig), then rename
+-- into the column contract above.
+CREATE TABLE positions AS
+SELECT sample_id, reference AS genome_id, ci.start, ci.stop
+FROM (
+    SELECT sample_id, reference, UNNEST(compress_intervals(position, stop_position)) AS ci
+    FROM alignments
+    GROUP BY sample_id, reference
+);
+
+CREATE TABLE regions AS SELECT * FROM (VALUES
+    ('G000436435', 481323, 486671, 'PC351')
+) t(genome_id, region_start, region_stop, region_id);
+
+CREATE VIEW roster AS SELECT sample_id FROM sample_metadata;
+
+-- Three-state calls per sample
+SELECT * FROM region_presence(positions, regions, roster);
+
+-- How many samples carry the region, keeping non-detections separate
+SELECT state, COUNT(*) FROM region_presence(positions, regions, roster)
+GROUP BY state;
+
+-- Feed presence into PERMANOVA as a metadata variable. Non-detections are
+-- DROPPED rather than pooled with 'absent'.
+CREATE TABLE region_md AS
+    SELECT sample_id, state AS pc351
+    FROM region_presence(positions, regions, roster)
+    WHERE region_id = 'PC351' AND state IN ('present', 'absent');
+
+SELECT * FROM permanova('dm', 'region_md', variables := ['pc351'],
+                        n_permutations := 999999, seed := 42);
+```
+
+> **Filter positively — `state IN ('present', 'absent')`, not `state <> 'not applicable'`.** The state labels are plain strings and DuckDB will happily compare against one that does not exist, so a typo cannot be caught for you. It fails differently in the two forms: a typo in `<>` matches *everything*, silently pooling non-detections back into the cohort, whereas a typo in `IN` drops the mistyped level — an empty or visibly halved cohort rather than a quietly wrong one. Neither is safe if you don't check the row count, but only one of them fails loudly enough to notice.
+
+Long form is deliberate — it is what `read_biom`, `woltka_ogu` and the diversity functions already consume. For a sample x region matrix, `PIVOT`:
+
+```sql
+PIVOT (SELECT sample_id, region_id, state FROM region_presence(positions, regions, roster))
+ON region_id USING first(state);
+```
+
+> `first(state)` picks one row per `(sample_id, region_id)` cell, so pivot only when `region_id` is unique across your `regions` relation. If it is not, pivot on the coordinates too.
+
+Regions can come straight from [`bin_start`](#genome-bins) — `(bin_start(b), bin_start(b + 1))` is already half-open on the same convention:
+
+```sql
+CREATE TABLE bin_regions AS
+SELECT genome_id,
+       bin_start(bin_index, 500, length)     AS region_start,
+       bin_start(bin_index + 1, 500, length) AS region_stop,
+       genome_id || ':bin_' || bin_index     AS region_id
+FROM top_bins JOIN genome_lengths USING (genome_id)
+WHERE bin_start(bin_index + 1, 500, length) > bin_start(bin_index, 500, length);
+```
+
+> `region_id` is qualified with `genome_id` on purpose. A bare `'bin_' || bin_index` repeats across genomes — every genome has a bin 3 — which breaks the uniqueness the `PIVOT` recipe above depends on.
+
+> That `WHERE` matters only when `n_bins > genome_length`, where `bin_start` legitimately produces zero-width bins. A zero-width region is unanswerable — every sample would score `absent` — so `region_presence` rejects it rather than inventing a negative result, and the error names this filter as the remedy.
+
+### Region coverage
+
+`region_coverage(positions, regions)`
+
+Table macro giving, per sample, how much of a sub-genome region is covered — with the **region's** length as the denominator. [`genome_coverage`](#genome-coverage) divides by the genome, so a fully covered 5 kb region inside a 5 Mb genome reports 0.1% there and 100% here. That denominator is the point of the function.
+
+Two things have to be right for the number to mean anything, and the macro does both:
+
+- Alignments are **clipped** to the region before they are merged, so one hanging over the boundary contributes only its in-region portion and one strictly containing the region contributes exactly `region_length`, not its own length.
+- The clipped intervals are then **merged**, so a base under two alignments is counted once. An unmerged sum inflates the proportion — past 1.0 on a short region, invisibly on a long one.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `positions` | relation | Columns `sample_id` (any type), `genome_id` (any type), `start`, `stop` (any integer type). 1-based half-open. |
+| `regions` | relation | Columns `genome_id` (any type), `region_start`, `region_stop` (any integer type), `region_id` (any type). Half-open on the same convention. |
+
+Coordinates are normalized to `BIGINT` internally and come back as `BIGINT`, so `INTEGER` inputs — what `read_gff` and `read_ncbi_annotation` emit — need no cast, and are widened before they can overflow. Numeric coordinates arriving as `VARCHAR`, which is what an unconfigured BED or CSV read gives you, are also normalized rather than compared as text; that is defensive, not an invitation — type your coordinate columns.
+
+> **Same column contract as [`region_presence`](#region-presence)**, deliberately — the two are called on the same relation in the same pipeline, and a rename between two consecutive lines of a query would be a needless trap. It is *not* `genome_coverage`'s contract: coming from `read_alignments` you rename once, in a view (`reference` → `genome_id`, `position` → `start`, `stop_position` → `stop`), and both region functions then take it. `genome_coverage` keeps the alignment names because it predates the sample dimension.
+
+`positions` does not need to be pre-compressed — `compress_intervals` runs inside — so raw alignment rows are safe input.
+
+**Returns:** one row per `(sample, region)` pair **that has overlap**. See [No zero rows](#no-zero-rows) below.
+
+| Column | Type | Description |
+|---|---|---|
+| `sample_id` | from `positions`, uncast | |
+| `genome_id` | from **`regions`**, uncast | |
+| `region_id` | from `regions`, uncast | |
+| `region_start`, `region_stop` | BIGINT | The region's bounds, as supplied |
+| `covered` | BIGINT | Covered bases **within the region** |
+| `region_length` | BIGINT | `region_stop - region_start` (half-open, no `+1`) |
+| `proportion_covered` | DOUBLE | `covered / region_length` |
+
+Identifiers are carried through uncast, so VARCHAR, BIGINT and UUID all survive end to end. The same [type-matching caveat as `region_presence`](#region-presence) applies — `genome_id` takes the **`regions`** type in the output, and one unconvertible identifier aborts the query with an error that names neither the function nor the relation.
+
+The coordinates are emitted alongside `region_id` because the join is keyed on them: two rows sharing a `region_id` but covering different spans are scored independently, and without the coordinates those rows are indistinguishable downstream.
+
+<a name="no-zero-rows"></a>
+**No zero rows, on purpose.** A `(sample, region)` pair with no overlap gets no row — not a row with `covered = 0`. A fabricated zero asserts the region *was measured and found empty*, which is true of a sample that covers the genome elsewhere and false of a sample where the organism simply is not present. That is the conflation [`region_presence`](#region-presence) exists to prevent, and it cannot be undone downstream. To fill the grid honestly, compose the two — `region_presence` supplies the roster and the three states, `region_coverage` supplies the number where there is one:
+
+```sql
+SELECT p.sample_id, p.state,
+       COALESCE(c.covered, 0)             AS covered,
+       COALESCE(c.proportion_covered, 0)  AS proportion_covered
+FROM region_presence(positions, regions, roster) p
+LEFT JOIN region_coverage(positions, regions) c
+       ON c.sample_id = p.sample_id AND c.genome_id = p.genome_id
+      AND c.region_id = p.region_id
+      AND c.region_start = p.region_start AND c.region_stop = p.region_stop
+WHERE p.state IN ('present', 'absent');   -- drop non-detections; do not pool them
+```
+
+> **Join on the coordinates too, not just `region_id`.** Both functions emit `region_start`/`region_stop` because that is the tuple identifying a region, and two spans sharing a `region_id` are scored independently by design. Keyed on `region_id` alone this join cross-assigns: with regions `('g1',50,60,'RD')` and `('g1',700,750,'RD')` it reports the `[700,750)` row as `absent` while handing it `covered = 5` — the value belonging to `[50,60)` — and duplicates every row of a sample present in both spans. An `absent` row carrying coverage is a contradiction with no downstream tell.
+
+**Behavior:**
+- The overlap test is `start < region_stop AND stop > region_start`. An alignment starting exactly where a region ends shares no base with it and contributes nothing.
+- **Overlapping regions are each scored against their own bounds**, so a base can count in two regions. Well defined, and required for sliding-window regions — but it means `SUM(covered)` across regions is not a partition of the genome.
+- **Multi-contig genomes.** `regions.genome_id` is matched against `positions.genome_id` directly, so regions are **contig-level** by default. Genome-level regions work too, but you must shift `positions` into the genome's coordinate frame first — see [Multi-contig genomes](#multi-contig-genomes) below. If no `genome_id` in `regions` matches any in `positions`, the call **raises** rather than returning zero rows, since that is almost always a contig-vs-genome naming mixup.
+- Duplicate rows in either relation do not inflate the result — the merge and the final grouping absorb them.
+- **NULL and degenerate intervals in `positions` drop; a NULL `sample_id` or `genome_id` raises.** The interval columns have a defined NULL meaning (a sample that exists with no coverage); the identity columns do not, and silently dropping an unattributable interval would subtract real coverage from whichever sample it belonged to.
+- **An unusable region raises** — any NULL column, a zero-width region (no denominator), or inverted coordinates. Each error names the offending `region_id` and its bounds, and zero-width and inverted are reported separately because the remedies differ: filtering is right for a bin expansion and wrong for transposed coordinates.
+- Empty `positions` or empty `regions` are legitimate and produce no rows.
+
+> **Validation covers the rows the query reads.** As with `region_presence`, the guards are ordinary SQL expressions, so a filter such as `WHERE region_id = 'PC351'` may be pushed beneath them and a malformed row *outside* that filter will not raise. This never changes the rows you get back.
+
+**Examples:**
+```sql
+-- Rename read_alignments' columns into the contract once, in a view.
+CREATE VIEW positions AS
+SELECT sample_id, reference AS genome_id, position AS start, stop_position AS stop
+FROM alignments;
+
+CREATE TABLE regions AS SELECT * FROM (VALUES
+    ('G000436435', 481323, 486671, 'PC351')
+) t(genome_id, region_start, region_stop, region_id);
+
+-- Per-sample breadth of one differential region, region-relative denominator
+SELECT * FROM region_coverage(positions, regions)
+ORDER BY proportion_covered DESC;
+
+-- Rank regions by how consistently the cohort covers them
+SELECT region_id, AVG(proportion_covered) AS mean_prop, COUNT(*) AS n_samples
+FROM region_coverage(positions, regions)
+GROUP BY region_id
+ORDER BY mean_prop DESC;
+```
+
+**When each genome is a single contig**, a whole-genome "region" reproduces [`genome_coverage_per_sample`](#per-sample-genome-coverage) — the two agree row for row, since both carry the sample dimension — and reproduces [`genome_coverage`](#genome-coverage) once you pool, since that one has no sample dimension. Either makes a useful equivalence check:
+
+```sql
+CREATE TABLE whole AS
+SELECT genome_id, 1 AS region_start, total_length + 1 AS region_stop, genome_id AS region_id
+FROM genome_lengths;
+
+SELECT * FROM region_coverage(positions, whole);
+```
+
+> **A multi-contig genome needs one extra step first** — see [Multi-contig genomes](#multi-contig-genomes) immediately below.
+
+#### Multi-contig genomes
+
+`genome_coverage` maps contigs to genomes through `subject_genome_id` and sums across them. `region_coverage` matches `regions.genome_id` against `positions.genome_id` directly, so its regions are **contig-level**: the genome id of a 3-contig assembly matches no contig id, and the call **raises** rather than quietly returning nothing.
+
+There are two correct approaches, and one trap.
+
+**1. Contig-level regions** — one region per contig, in that contig's own frame, summed afterwards. Use this when the regions are naturally per-contig (genes from a GFF, for instance):
+
+```sql
+SELECT SUM(covered) AS covered,
+       SUM(covered)::DOUBLE / SUM(region_length) AS proportion_covered
+FROM region_coverage(positions, contig_regions)
+GROUP BY sample_id;
+```
+
+**2. Genome-frame regions** — shift `positions` into the genome's coordinate frame by adding each contig's offset, then use genome-level regions directly. Use this when the regions *are* genome-level, which is what [`bin_start`](#genome-bins) produces for equal-width bins across a whole assembly:
+
+```sql
+-- Offsets are the cumulative contig lengths, in whatever contig order you chose when
+-- you defined the regions. That order is your data, which is why this is a view you
+-- write rather than a parameter this function takes.
+CREATE TABLE contig_offsets AS
+SELECT contig_id, genome_id,
+       COALESCE(SUM(contig_length) OVER (PARTITION BY genome_id ORDER BY contig_id
+                                         ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+                0) AS contig_offset
+FROM contig_lengths;
+
+CREATE VIEW genome_frame_positions AS
+SELECT p.sample_id, o.genome_id,
+       p.start + o.contig_offset AS start,
+       p.stop  + o.contig_offset AS stop
+FROM positions p JOIN contig_offsets o ON p.genome_id = o.contig_id;
+
+SELECT * FROM region_coverage(genome_frame_positions, genome_bins);
+```
+
+This reproduces `genome_coverage` exactly on a whole-genome region, and the per-bin numbers sum back to the whole-genome total — both pinned in `test/sql/region_coverage.test`.
+
+**The trap:** relabelling the contigs to the genome name *without* adding offsets. Each contig has its own 1-based frame, so three `[10, 60)` intervals stack onto one another, the merge collapses them, and you get `covered = 50` where the truth is `150`. This is the dangerous case — the ids now match, so the guard above cannot catch it, and 50 looks like an answer. The offset is the fix, not the join; with every offset set to `0` you get the wrong 50 back.
+
+Regions can come straight from [`bin_start`](#genome-bins) — `(bin_start(b), bin_start(b + 1))` is already half-open on the same convention. Use the [`bin_regions` recipe](#region-presence) shown for `region_presence`; both functions take it unchanged.
+
+### Cumulative coverage
+
+`cumulative_coverage_curve(positions, roster, genome_length)` — table macro, the usual entry point
+`cumulative_coverage(rank, start, stop)` — aggregate, for when you want to rank by something else
+
+Rank the samples in a group by their own breadth against one genome, then accumulate their covered intervals from lowest breadth upward. The resulting curve is the central primitive of micov (Weng, Guccione, McDonald et al., *Communications Biology* 2025): samples that individually cover little of a genome **stack** into a detectable signal, the way a long exposure builds an astronomical image out of frames that are each too faint to use. That is what exposes a region present in one sample group and absent from another when no single sample has good coverage.
+
+Coverage accumulates as a **union**, not a sum. A running `SUM` of per-sample breadths double-counts every base two samples share, which on a well-covered genome saturates past 1.0 and on a poorly covered one just inflates quietly.
+
+> **Why this is in the extension at all.** Everything else micov needs is expressible in SQL; this is not. The accumulation cannot be a window function over [`compress_intervals`](#merge-overlapping-intervals), because each step needs the *union* of all preceding samples rather than a running total. micov recompresses the whole accumulated interval set at every rank, which is O(n²) in intervals and dominates a micov run. Here every rank is computed in a single O(n log n) sweep.
+
+#### `cumulative_coverage_curve`
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `positions` | relation | Columns `sample_id` (any type), `start`, `stop` (any integer type), **pre-filtered to a single genome**. 1-based half-open. |
+| `roster` | relation | Columns `sample_id` (any type), `group_id` (any type). The cohort, and the grouping the curves are computed within. |
+| `genome_length` | scalar | The breadth denominator. Must be a positive whole number of bases. |
+
+> **`positions` must be one genome.** There is no `genome_id` parameter, and that is deliberate rather than an omission: pooling genomes would rank each sample by its summed breadth across unrelated references, which is not a quantity the curve means anything about. Filter first, and call once per genome.
+
+**Returns:** one row per `(group_id, rank)`.
+
+| Column | Type | Description |
+|---|---|---|
+| `group_id` | from `roster`, uncast | |
+| `rank` | INTEGER | 0-based, ascending by the sample's own breadth |
+| `sample_id` | from `roster`, uncast | The sample added *at* this rank |
+| `covered` | BIGINT | Bases covered by the union of ranks `0..rank` |
+| `proportion_covered` | DOUBLE | `covered / genome_length` |
+
+**Behavior:**
+- **`roster` is required, and it is what makes the curve comparable across groups.** A sample with no coverage of the target contributes no `positions` rows at all, so without the roster it would silently vanish — the group would look smaller than it is, and two groups with different detection rates would have incomparable x-axes. Zero-coverage samples sort first, so the curve correctly starts flat.
+- Samples in `positions` but not in `roster` are ignored; the roster defines the cohort.
+- **Ties in breadth are broken by `sample_id`**, so the curve is byte-identical across runs and thread counts. This matters more than it looks: micov's Monte Carlo null calls this ~100× per genome per group, and an unstable ordering would surface as noise in the null.
+- Duplicate rows in either relation do not distort the curve.
+- A NULL `sample_id` in `positions`, or a NULL `sample_id`/`group_id` in `roster`, raises — unattributable coverage would quietly lower somebody's breadth and reorder the curve.
+- An empty roster gives no rows. Empty `positions` with a populated roster gives a fully flat curve, which is a real result (nothing was detected) and not an empty one.
+- There is **no RNG and no `seed`**, because the ordering is fully determined by the data.
+- An interval with `start >= stop` covers nothing, and the sample keeps its rank — so a row with transposed coordinates makes that sample a zero-coverage sample rather than, as one might expect from `compress_intervals`, its best-covered one.
+- A `start`/`stop` pair with **exactly one** NULL raises. Both NULL means "no coverage" and is what the roster join produces; one NULL is a broken join or a blank field, and silently reading it as no-coverage would discard real coverage.
+- **`genome_length` is validated as a positive whole number** — a fractional value is rejected rather than rounded, since a genome length is a count of bases.
+- **`covered` exceeding `genome_length` raises.** The union of intervals on a genome cannot be longer than the genome, so it means the denominator is wrong (a contig length where a genome length belongs, a mismatched reference build) or `positions` carries coordinates past the end. `proportion_covered` is therefore always in `(0, 1]`, and never silently above 1.0.
+
+**Example:**
+```sql
+-- positions for ONE genome, per sample
+CREATE TABLE positions AS
+SELECT sample_id, position AS start, stop_position AS stop
+FROM alignments WHERE reference = 'G000436435';
+
+CREATE TABLE roster AS SELECT sample_id, country AS group_id FROM sample_metadata;
+
+SELECT * FROM cumulative_coverage_curve(positions, roster, 4719737)
+ORDER BY group_id, rank;
+```
+
+The percentile x-axis micov plots is a window function on the output, which is why the aggregate has no such parameter:
+
+```sql
+SELECT group_id,
+       rank * 100.0 / NULLIF(COUNT(*) OVER (PARTITION BY group_id) - 1, 0) AS pct_of_group,
+       proportion_covered
+FROM cumulative_coverage_curve(positions, roster, 4719737);
+```
+
+Plotting stays outside miint, as does the Monte Carlo null — for the latter, resample `sample_id`s in SQL and call again.
+
+#### `cumulative_coverage` (aggregate)
+
+`cumulative_coverage(rank, start, stop)` → `LIST<STRUCT(rank INTEGER, covered BIGINT)>`
+
+The curve macro ranks by breadth. Use the aggregate directly to rank by anything else — sequencing depth, collection date, a clinical score — since the rank is just an integer you supply:
+
+```sql
+SELECT group_id, UNNEST(cumulative_coverage(rank, start, stop)) AS pt
+FROM (
+    SELECT r.group_id, p.start, p.stop,
+           (DENSE_RANK() OVER (PARTITION BY r.group_id
+                               ORDER BY m.collection_date, r.sample_id) - 1)::INTEGER AS rank
+    FROM roster r
+    LEFT JOIN positions p USING (sample_id)
+    LEFT JOIN sample_metadata m USING (sample_id)   -- LEFT, see below
+)
+GROUP BY group_id;
+```
+
+> **Every join off `roster` must be a LEFT join.** An inner join to the metadata table drops any roster member missing from it — verified: a two-sample group silently returns a one-point curve, with no error. That is the same vanishing-sample failure the roster exists to prevent, reintroduced one join later. `DENSE_RANK` puts all NULL-keyed samples on one rank, which is a defensible default for missing metadata, but decide that deliberately rather than inheriting it.
+
+> **`DENSE_RANK` here, not `ROW_NUMBER` — and the difference is the whole contract.** The aggregate is fed one row per `(sample, interval)`, so `ROW_NUMBER()` over that relation assigns a *distinct rank to every interval*. That is contiguous, so nothing raises, but the curve then has one point per alignment instead of one per sample and the x-axis means nothing. What the aggregate actually requires is **one rank per sample**, contiguous across the group. `DENSE_RANK` over a per-sample ordering key delivers that because it collapses a sample's repeated rows onto one rank; `ROW_NUMBER` only works when applied to a relation that is already one row per sample, which is how `cumulative_coverage_curve` uses it internally.
+
+> **`rank` is `INTEGER`, and `ROW_NUMBER()` returns `BIGINT`, so the `::INTEGER` cast is required** — there is no implicit conversion here and DuckDB fails with `No function matches ... cumulative_coverage(BIGINT, BIGINT, BIGINT)`. The error names the expected signature, so it is loud rather than subtle, but it will happen on the first attempt. `cumulative_coverage_curve` handles the cast for you.
+
+- **`rank` must be contiguous `0..N-1` within each group, one rank per sample.** Contiguity is what the aggregate can check, and a gap is rejected rather than tolerated because it would shift the x-axis silently — rank 1 reporting what is really rank 2's coverage. One-rank-per-sample is what the aggregate *cannot* check, and is on you: see the `DENSE_RANK` note above. The errors name the offending rank, and the start-at-zero message calls out the missing `- 1` specifically, since `ROW_NUMBER()` without it is the likely cause.
+- **A row with a NULL `start` or `stop` registers its rank with zero coverage.** This is how a zero-coverage sample keeps its place, and it falls out of a `LEFT JOIN` from the roster. A NULL `rank` raises.
+- Contiguity is judged **per group**, so two groups each numbered `0..n-1` are both valid.
+- Intervals with `start >= stop` cover nothing and are dropped, though their rank is still registered. Note this differs from [`compress_intervals`](#merge-overlapping-intervals), which silently *swaps* an inverted pair — swapping manufactures coverage out of transposed columns, so the newer convention is followed here.
+- The result is independent of input row order and of thread count.
+- **Aggregate state grows with the number of input intervals**, because every `(rank, start, stop)` triple is held until the single sweep at finalize. Unlike `compress_intervals`, it cannot shrink its state by merging as it goes — merging early is precisely the O(n²) recompression this avoids. In practice `positions` is already one merged interval set per sample, so this is small; feeding raw alignment rows for a deep metagenome is what would make it large. Measured: 2 M intervals produce a 50-point curve in ~0.2 s.
 
 ### Circular query coverage
 

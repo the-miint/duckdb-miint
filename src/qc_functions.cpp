@@ -125,7 +125,6 @@ static void TrimExecuteImpl(DataChunk &args, Vector &result, idx_t n_optional, c
 	auto &qual_out_vec = *entries[1];
 	auto trimmed_5p_data = FlatVector::GetData<uint32_t>(*entries[2]);
 	auto trimmed_3p_data = FlatVector::GetData<uint32_t>(*entries[3]);
-	auto &result_validity = FlatVector::Validity(result);
 
 	auto qual_out_entries = FlatVector::GetData<list_entry_t>(qual_out_vec);
 	idx_t qual_child_offset = ListVector::GetListSize(qual_out_vec);
@@ -142,7 +141,7 @@ static void TrimExecuteImpl(DataChunk &args, Vector &result, idx_t n_optional, c
 			}
 		}
 		if (!all_valid) {
-			result_validity.SetInvalid(i);
+			SetStructRowNull(result, i);
 			qual_out_entries[i].offset = qual_child_offset;
 			qual_out_entries[i].length = 0;
 			continue;
@@ -398,7 +397,6 @@ static void TrimAdaptersExecuteImpl(DataChunk &args, Vector &result, bool adapte
 	auto &qual_out_vec = *entries[1];
 	auto trimmed_5p_data = FlatVector::GetData<uint32_t>(*entries[2]);
 	auto trimmed_3p_data = FlatVector::GetData<uint32_t>(*entries[3]);
-	auto &result_validity = FlatVector::Validity(result);
 
 	auto qual_out_entries = FlatVector::GetData<list_entry_t>(qual_out_vec);
 	idx_t qual_child_offset = ListVector::GetListSize(qual_out_vec);
@@ -459,7 +457,7 @@ static void TrimAdaptersExecuteImpl(DataChunk &args, Vector &result, bool adapte
 			}
 		}
 		if (!all_valid) {
-			result_validity.SetInvalid(i);
+			SetStructRowNull(result, i);
 			qual_out_entries[i].offset = qual_child_offset;
 			qual_out_entries[i].length = 0;
 			continue;
@@ -728,7 +726,6 @@ static void TrimAdaptersPeExecute(DataChunk &args, ExpressionState &state, Vecto
 	auto adapter_trimmed_data = FlatVector::GetData<bool>(*entries[5]);
 	auto trimmed1_data = FlatVector::GetData<uint32_t>(*entries[6]);
 	auto trimmed2_data = FlatVector::GetData<uint32_t>(*entries[7]);
-	auto &result_validity = FlatVector::Validity(result);
 
 	auto qual1_entries = FlatVector::GetData<list_entry_t>(qual1_out);
 	auto qual2_entries = FlatVector::GetData<list_entry_t>(qual2_out);
@@ -752,7 +749,7 @@ static void TrimAdaptersPeExecute(DataChunk &args, ExpressionState &state, Vecto
 
 		if (!seq1_data.validity.RowIsValid(s1i) || !qual1_data.validity.RowIsValid(q1i) ||
 		    !seq2_data.validity.RowIsValid(s2i) || !qual2_data.validity.RowIsValid(q2i)) {
-			result_validity.SetInvalid(i);
+			SetStructRowNull(result, i);
 			qual1_entries[i].offset = qual1_off;
 			qual1_entries[i].length = 0;
 			qual2_entries[i].offset = qual2_off;
@@ -876,7 +873,6 @@ static void FilterReadExecute(DataChunk &args, ExpressionState &state, Vector &r
 	auto n_bases_data = FlatVector::GetData<uint32_t>(*entries[3]);
 	auto low_qual_data = FlatVector::GetData<uint32_t>(*entries[4]);
 	auto mean_q_data = FlatVector::GetData<float>(*entries[5]);
-	auto &result_validity = FlatVector::Validity(result);
 	auto &fail_reason_validity = FlatVector::Validity(fail_reason_vec);
 
 	for (idx_t i = 0; i < row_count; i++) {
@@ -893,7 +889,7 @@ static void FilterReadExecute(DataChunk &args, ExpressionState &state, Vector &r
 			            p6_data.validity.RowIsValid(p6_data.sel->get_index(i));
 		}
 		if (!all_valid) {
-			result_validity.SetInvalid(i);
+			SetStructRowNull(result, i);
 			continue;
 		}
 

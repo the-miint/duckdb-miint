@@ -995,7 +995,7 @@ code was developed with reference to them, or because they generated committed
 golden data used by the parity tests. This mirrors the Biopython entry above,
 where a reference-only consultation is likewise recorded.
 
-All five Python projects are distributed under the 3-clause BSD license; the
+All seven Python projects are distributed under the 3-clause BSD license; the
 shared license text appears once at the end of this section with each project's
 copyright notice listed alongside it.
 
@@ -1026,6 +1026,27 @@ sense from sequence", Genome Biology, 8(8), R171. doi: 10.1186/gb-2007-8-8-r171
 
 cogent3 is cited via Zenodo: doi: 10.5281/zenodo.15067121
 
+### NumPy
+
+The seeded generator `numpy.random.default_rng(20260817)` produced the input
+samples committed in `data/ks2samp/ks_2samp_fixture.csv` (1902 rows), which
+`test/sql/ks_2samp_parity.test` reads. NumPy runs only inside
+`test/scripts/generate_ks2samp_oracle.py`, when those goldens are regenerated; no
+NumPy code is vendored, translated, or executed by miint itself.
+
+- Repository: https://github.com/numpy/numpy
+- Version referenced: 2.5.1
+- License: `BSD-3-Clause` — Copyright (c) 2005-2025, NumPy Developers.
+  (The published NumPy wheel additionally bundles vendored components under
+  0BSD, MIT, Zlib and CC0-1.0. None of NumPy is distributed with miint, so only
+  its own BSD-3-Clause terms are reproduced here.)
+
+#### Citation
+
+Harris, C.R.; Millman, K.J.; van der Walt, S.J.; Gommers, R.; Virtanen, P.;
+Cournapeau, D.; et al. (2020) "Array programming with NumPy", Nature, 585(7825),
+357-362. doi: 10.1038/s41586-020-2649-2
+
 ### SciPy
 
 `scipy.cluster.hierarchy.linkage(method='average')` and `cophenet` generated the
@@ -1047,6 +1068,24 @@ the doc comment on `Linregress` and in `docs/absolute_quantification.md`.
 it is written from the standard continued fraction (DLMF 8.17.22) evaluated by
 Lentz's method — **not** transcribed from scipy's vendored Cephes `incbet.c`,
 which carries its own separate provenance.
+`scipy.stats.ks_2samp` generated the committed parity goldens
+`data/ks2samp/ks_2samp_oracle.csv` (32 cases x 2 methods = 64 rows) and
+`data/ks2samp/ks_2samp_large_oracle.csv` (5 cases at n = 5000-10000, 10 rows),
+which `test/sql/ks_2samp_parity.test` checks miint's `ks_2samp` against. Unusually
+for this section the generator itself is committed, at
+`test/scripts/generate_ks2samp_oracle.py`: the small grid is drawn from a seeded
+NumPy generator, and a seeded draw sequence cannot be reconstructed from a prose
+description of the grid, so without the script a reviewer facing a SciPy bump
+could not tell a real regression from a different set of draws.
+
+**miint's `ks_2samp` is not derived from SciPy's.** The exact two-sample p-value
+is worked out from the lattice-path formulation in Hodges (1958) -- following
+Drion and Gnedenko-Korolyuk -- and is computed differently from SciPy's, as the
+probability mass escaping an absorbing band rather than as `1 - P(stay inside)`.
+SciPy is the oracle the result is checked against, not its source. `method :=
+'asymp'` is deliberately not implemented, so none of SciPy's `_ksstats.py` region
+selection is reproduced either. The same statement appears next to the algorithm,
+in `src/include/KsTwoSample.hpp`.
 
 - Repository: https://github.com/scipy/scipy
 - Versions referenced: 1.18.0 (`data/simsurvey/`), 1.17.1 (`data/syndna/`)
@@ -1202,8 +1241,8 @@ doi: 10.1038/nmeth.1499
 
 ### BSD 3-Clause License
 
-Applies to cogent3, SciPy, pysyndna, scikit-learn, scikit-bio, and mmvec, each with its
-own copyright notice as listed above.
+Applies to cogent3, NumPy, SciPy, pysyndna, scikit-learn, scikit-bio, and mmvec,
+each with its own copyright notice as listed above.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:

@@ -128,16 +128,24 @@ inline void RunPairwiseAlignCigarExecute(DataChunk &args, ExpressionState &state
 	auto score_data = FlatVector::GetData<int32_t>(*entries[0]);
 	auto &cigar_vec = *entries[1];
 	auto cigar_data = FlatVector::GetData<string_t>(cigar_vec);
-	auto &result_validity = FlatVector::Validity(result);
 
+	// FlatVector::SetNull, not Validity().SetInvalid: this returns a STRUCT, and
+	// struct_extract hands back a bare reference to a child WITHOUT applying the parent's
+	// validity. Marking only the struct left `(align_pairwise_wfa2_cigar(NULL, s)).cigar IS
+	// NULL` reading false and `.score` returning 0. SetNull recurses into the children,
+	// which is the invariant DuckDB asserts in debug builds. Four lines here cover all
+	// eight struct-returning align_pairwise_* functions. Called directly rather than via
+	// SetStructRowNull() in table_function_common.hpp, which is the same one-line forward:
+	// that header pulls in client_context / file_system / SpectrumBatch, which is a
+	// disproportionate dependency for an alignment header included by four TUs.
 	for (idx_t i = 0; i < args.size(); i++) {
 		if (!GetAlignInput(inputs, i, lstate.query_buf, lstate.subject_buf)) {
-			result_validity.SetInvalid(i);
+			FlatVector::SetNull(result, i, true);
 			continue;
 		}
 		auto cigar_result = (lstate.aligner.*Method)(lstate.query_buf, lstate.subject_buf);
 		if (!cigar_result.has_value()) {
-			result_validity.SetInvalid(i);
+			FlatVector::SetNull(result, i, true);
 			continue;
 		}
 		score_data[i] = cigar_result->score;
@@ -158,16 +166,17 @@ inline void RunPairwiseAlignFullExecute(DataChunk &args, ExpressionState &state,
 	auto cigar_data = FlatVector::GetData<string_t>(cigar_vec);
 	auto query_aligned_data = FlatVector::GetData<string_t>(query_aligned_vec);
 	auto subject_aligned_data = FlatVector::GetData<string_t>(subject_aligned_vec);
-	auto &result_validity = FlatVector::Validity(result);
 
+	// STRUCT result: see the note in RunPairwiseAlignCigarExecute above for why this is
+	// FlatVector::SetNull and not Validity().SetInvalid.
 	for (idx_t i = 0; i < args.size(); i++) {
 		if (!GetAlignInput(inputs, i, lstate.query_buf, lstate.subject_buf)) {
-			result_validity.SetInvalid(i);
+			FlatVector::SetNull(result, i, true);
 			continue;
 		}
 		auto full_result = (lstate.aligner.*Method)(lstate.query_buf, lstate.subject_buf);
 		if (!full_result.has_value()) {
-			result_validity.SetInvalid(i);
+			FlatVector::SetNull(result, i, true);
 			continue;
 		}
 		score_data[i] = full_result->score;

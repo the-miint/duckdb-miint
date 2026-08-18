@@ -63,6 +63,33 @@ void SetResultVectorListUInt8(Vector &result_vector, const std::vector<miint::Qu
 // not free it.
 void GetListUInt8Slice(Vector &list_vec, UnifiedVectorFormat &list_data, idx_t row_idx, const uint8_t *&out_data,
                        idx_t &out_length);
+// Mark one row of a STRUCT-returning function's result NULL, children included.
+//
+// FlatVector::Validity(result).SetInvalid(row_idx) is NOT sufficient for a STRUCT. It
+// marks only the struct's own validity, while struct_extract hands back a bare
+// reference to the child without applying its parent's validity -- so `f(x) IS NULL`
+// reads true while `(f(x)).some_field` returns whatever was left in the child buffer.
+// DuckDB treats "a NULL struct entry implies NULL children" as an invariant and
+// asserts it in debug builds, so the shortcut is a debug-build abort as well as a
+// wrong release-build answer.
+//
+// This is a one-line forward to duckdb::FlatVector::SetNull(result, row_idx, true), which
+// already recurses into STRUCT and ARRAY children. It exists to give the rule one name and
+// somewhere to record the reasoning, NOT because core lacks the behaviour -- a caller that
+// would need a heavyweight include to reach this header (see pairwise_align_shared.hpp)
+// calls FlatVector::SetNull directly and is equally correct.
+//
+// It does NOT reset a LIST child's list_entry_t. That is not a correctness gap, because a
+// NULL row's list_entry is not read through the null parent, but it is why several callers
+// still zero their own list offsets alongside this call -- they are not compensating for a
+// deficiency here.
+//
+// Only a BARE STRUCT return needs this. A LIST(STRUCT) return does not leak: measured on
+// cigar_query_intervals, sequence_split, compress_intervals and cumulative_coverage, a NULL
+// list row gives NULL from len(), from list_extract(), and from (list_extract(...)).field.
+// The full inventory and the evidence are in test/sql/struct_null_children.test.
+void SetStructRowNull(Vector &result, idx_t row_idx);
+
 void SetResultVectorInt32(Vector &result_vector, const std::vector<int32_t> &values);
 void SetResultVectorInt32Nullable(Vector &result_vector, const std::vector<int32_t> &values,
                                   const std::vector<bool> &valid);

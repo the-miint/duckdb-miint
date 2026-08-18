@@ -1,0 +1,870 @@
+# name: test/sql/cumulative_coverage.test
+# description: Test cumulative_coverage aggregate and cumulative_coverage_curve macro
+# group: [sql]
+
+require miint
+
+# Cumulative breadth of coverage in rank order (issue #214): element k is how many bases
+# are covered by the UNION of every sample with rank <= k. micov's framing is long-
+# exposure astrophotography -- individually weak signals stack into a detectable one --
+# and the union is what makes that true. A running SUM of per-sample breadths would
+# double-count every base two samples share.
+#
+# The rank is produced by the CALLER in SQL. That is the one departure from the shape
+# #214 proposed, which folded sample_id, the breadth ranking, the tie policy and a
+# genome_length check into the aggregate. cumulative_coverage_curve() is the wrapper that
+# does the ranking; the bare aggregate lets callers rank by anything at all.
+
+# ---- Test 1: the aggregate on a hand-derived fixture ----
+#   rank 0  [100,110)            -> 10
+#   rank 1  [105,115)            -> union [100,115)          = 15
+#   rank 2  [200,210)            -> + a disjoint run          = 25
+#   rank 3  NULL (no coverage)   -> unchanged                 = 25
+# Rank 1 overlaps rank 0 by 5 bases: a summing implementation reports 20 here.
+
+statement ok
+CREATE TABLE agg_basic(rank INTEGER, start BIGINT, stop BIGINT);
+
+statement ok
+INSERT INTO agg_basic VALUES
+  (0, 100, 110),
+  (1, 105, 115),
+  (2, 200, 210),
+  (3, NULL, NULL);
+
+query II
+SELECT pt.rank, pt.covered
+FROM (SELECT UNNEST(cumulative_coverage(rank, start, stop)) AS pt FROM agg_basic)
+ORDER BY pt.rank;
+----
+0	10
+1	15
+2	25
+3	25
+
+# ---- Test 2: a NULL interval registers a rank with zero coverage ----
+# This is the zero-coverage backfill, and it is the whole reason the aggregate accepts
+# NULL intervals instead of ignoring them. A sample in the group with no coverage of the
+# target produces no interval rows, so without an explicit signal it vanishes -- the
+# group looks smaller than it is and curves from groups with different detection rates
+# stop being comparable.
+#
+# Fails with a 2-point curve starting at 10 if the NULL row is dropped.
+
+statement ok
+CREATE TABLE agg_zero(rank INTEGER, start BIGINT, stop BIGINT);
+
+statement ok
+INSERT INTO agg_zero VALUES (0, NULL, NULL), (1, NULL, NULL), (2, 10, 20);
+
+query II
+SELECT pt.rank, pt.covered
+FROM (SELECT UNNEST(cumulative_coverage(rank, start, stop)) AS pt FROM agg_zero)
+ORDER BY pt.rank;
+----
+0	0
+1	0
+2	10
+
+# A group where nothing is covered at all is a flat curve, not an absent one.
+
+statement ok
+CREATE TABLE agg_allzero AS SELECT i::INTEGER AS rank, NULL::BIGINT AS start, NULL::BIGINT AS stop
+FROM range(0, 4) t(i);
+
+query II
+SELECT COUNT(*), COALESCE(SUM(pt.covered), -1)
+FROM (SELECT UNNEST(cumulative_coverage(rank, start, stop)) AS pt FROM agg_allzero);
+----
+4	0
+
+# ---- Test 3: the curve is invariant to input row order ----
+# A GROUP BY delivers rows in whatever order the scan produces, so the aggregate must
+# sort internally. Fails if it leans on rows arriving sorted by position or by rank.
+
+statement ok
+CREATE TABLE agg_shuffled AS
+SELECT rank, start, stop FROM agg_basic ORDER BY stop DESC NULLS FIRST, rank DESC;
+
+query II
+SELECT pt.rank, pt.covered
+FROM (SELECT UNNEST(cumulative_coverage(rank, start, stop)) AS pt FROM agg_shuffled)
+ORDER BY pt.rank;
+----
+0	10
+1	15
+2	25
+3	25
+
+# ---- Test 4: identical to itself across thread counts ----
+# Under a parallel GROUP BY each thread builds a partial state and Combine merges them,
+# so a curve that depended on the partition would change here. There is no RNG and no
+# tiebreak inside the aggregate, so this must be exactly stable.
+#
+# This fixture DOES exercise cross-partial Combine, which was checked rather than
+# assumed: with Absorb() mutated to drop its source, curve_t1 stays a correct 40-row
+# curve (threads=1 builds one state and never combines) while curve_t4 comes back
+# EMPTY. So the two COUNT columns below are what catch a broken Combine, not the
+# mismatch column. A review flagged this test as vacuous on the theory that 4000 rows
+# is one row group and so caps the scan at one thread; that is true of the scan, but
+# the hash aggregate still builds per-thread partials, and the mutation above is the
+# evidence.
+
+statement ok
+CREATE TABLE agg_wide AS
+SELECT (i % 40)::INTEGER AS rank,
+       (hash(i * 7919) % 5000 + 1)::BIGINT AS a,
+       (hash(i * 104729) % 5000 + 1)::BIGINT AS b
+FROM range(0, 4000) t(i);
+
+statement ok
+CREATE TABLE agg_wide_iv AS
+SELECT rank, LEAST(a, b) AS start, GREATEST(a, b) AS stop FROM agg_wide WHERE a <> b;
+
+statement ok
+SET threads = 1;
+
+statement ok
+CREATE TABLE curve_t1 AS
+SELECT pt.rank AS rank, pt.covered AS covered
+FROM (SELECT UNNEST(cumulative_coverage(rank, start, stop)) AS pt FROM agg_wide_iv);
+
+statement ok
+SET threads = 4;
+
+statement ok
+CREATE TABLE curve_t4 AS
+SELECT pt.rank AS rank, pt.covered AS covered
+FROM (SELECT UNNEST(cumulative_coverage(rank, start, stop)) AS pt FROM agg_wide_iv);
+
+query III
+SELECT (SELECT COUNT(*) FROM curve_t1),
+       (SELECT COUNT(*) FROM curve_t4),
+       (SELECT COUNT(*) FROM curve_t1 FULL OUTER JOIN curve_t4 USING (rank)
+        WHERE curve_t1.covered IS DISTINCT FROM curve_t4.covered);
+----
+40	40	0
+
+# And again with the scan forced parallel, which partitions into more and smaller
+# partials than the thread count alone would, so Combine runs more times.
+
+statement ok
+PRAGMA verify_parallelism;
+
+statement ok
+CREATE TABLE curve_tp AS
+SELECT pt.rank AS rank, pt.covered AS covered
+FROM (SELECT UNNEST(cumulative_coverage(rank, start, stop)) AS pt FROM agg_wide_iv);
+
+statement ok
+PRAGMA disable_verify_parallelism;
+
+statement ok
+RESET threads;
+
+query II
+SELECT (SELECT COUNT(*) FROM curve_tp),
+       (SELECT COUNT(*) FROM curve_t1 FULL OUTER JOIN curve_tp USING (rank)
+        WHERE curve_t1.covered IS DISTINCT FROM curve_tp.covered);
+----
+40	0
+
+# ---- Test 5: agreement with a brute-force SQL oracle ----
+# The oracle is micov's own algorithm, written out: for every k, compress_intervals over
+# every row with rank <= k and sum the widths. It is O(n^2) and shares no code with the
+# sweep, which is exactly what makes it a usable check. This is the assertion that would
+# catch a min-covering-rank error the hand-built cases miss.
+
+statement ok
+CREATE TABLE oracle_pairs AS
+SELECT r.k, f.start, f.stop
+FROM (SELECT DISTINCT rank AS k FROM agg_wide_iv) r
+JOIN agg_wide_iv f ON f.rank <= r.k;
+
+statement ok
+CREATE TABLE oracle_curve AS
+SELECT r.k AS rank, COALESCE(s.covered, 0) AS covered
+FROM (SELECT DISTINCT rank AS k FROM agg_wide_iv) r
+LEFT JOIN (
+    SELECT k, SUM(ci.stop - ci.start) AS covered
+    FROM (SELECT k, UNNEST(compress_intervals(start, stop)) AS ci FROM oracle_pairs GROUP BY k)
+    GROUP BY k
+) s ON s.k = r.k;
+
+query II
+SELECT COUNT(*),
+       COUNT(*) FILTER (WHERE o.covered IS DISTINCT FROM c.covered)
+FROM oracle_curve o JOIN curve_t4 c USING (rank);
+----
+40	0
+
+# ---- Test 6: the last point is the union of everything ----
+# Monotonicity is NOT asserted here, and that is deliberate. The curve is a prefix sum
+# of per-rank widths that are non-negative by construction, so it is monotonic for ANY
+# choice of credited rank -- including crediting every segment to the HIGHEST active
+# rank instead of the lowest. A monotonicity assertion therefore cannot fail, and the
+# comment that used to sit here claimed it would catch exactly the misattribution it is
+# blind to.
+#
+# What can fail: the final point must equal the union of every interval regardless of
+# rank, computed independently by compress_intervals. That catches a width or
+# double-counting error, and it is the check the vacuous one was standing in for.
+
+query II
+SELECT (SELECT covered FROM curve_t4 ORDER BY rank DESC LIMIT 1),
+       (SELECT SUM(ci.stop - ci.start)::BIGINT
+        FROM (SELECT UNNEST(compress_intervals(start, stop)) AS ci FROM agg_wide_iv));
+----
+4997	4997
+
+# ---- Test 7: a NULL rank raises ----
+# ROW_NUMBER() cannot produce one, so a NULL means the rank column came from somewhere
+# else and the curve's x-axis is not what the caller thinks it is.
+
+statement ok
+CREATE TABLE agg_nullrank AS SELECT * FROM (VALUES
+  (0::INTEGER, 10::BIGINT, 20::BIGINT),
+  (NULL::INTEGER, 30::BIGINT, 40::BIGINT)) t(rank, start, stop);
+
+statement error
+SELECT UNNEST(cumulative_coverage(rank, start, stop)) FROM agg_nullrank;
+----
+rank must not be NULL
+
+# ---- Test 8: ranks must be contiguous, and each cause says which ----
+# A gap silently shifts the x-axis: rank 1 would report what is really rank 2's
+# coverage. Each fixture below carries enough rows that a row-count shortcut cannot be
+# what rejects it -- the C++ unit tests found that an earlier implementation had exactly
+# such a shortcut, which made the individual branches unreachable.
+
+statement ok
+CREATE TABLE agg_gap AS SELECT * FROM (VALUES
+  (0::INTEGER, 10::BIGINT, 20::BIGINT),
+  (0::INTEGER, 25::BIGINT, 30::BIGINT),
+  (0::INTEGER, 35::BIGINT, 40::BIGINT),
+  (2::INTEGER, 50::BIGINT, 60::BIGINT)) t(rank, start, stop);
+
+statement error
+SELECT UNNEST(cumulative_coverage(rank, start, stop)) FROM agg_gap;
+----
+rank 1 is missing
+
+statement ok
+CREATE TABLE agg_from_one AS SELECT * FROM (VALUES
+  (1::INTEGER, 10::BIGINT, 20::BIGINT),
+  (1::INTEGER, 25::BIGINT, 30::BIGINT),
+  (1::INTEGER, 35::BIGINT, 40::BIGINT),
+  (2::INTEGER, 50::BIGINT, 60::BIGINT)) t(rank, start, stop);
+
+statement error
+SELECT UNNEST(cumulative_coverage(rank, start, stop)) FROM agg_from_one;
+----
+ranks must start at 0
+
+# The likely cause is ROW_NUMBER() without the `- 1`, so the message says so outright.
+
+statement error
+SELECT UNNEST(cumulative_coverage(rank, start, stop)) FROM agg_from_one;
+----
+note the - 1
+
+# ---- Test 9: accumulation is per GROUP ----
+# Two groups each numbered 0..n-1 are both valid even though the union of their ranks
+# repeats.
+#
+# What this actually pins is per-group ACCUMULATION, not per-group validation. Hoisting
+# the contiguity check above the grouping could never raise on valid input anyway: every
+# group's ranks start at 0 and are contiguous, so their union is contiguous too and the
+# check accepts repeats by design. There is no fixture that would make it fire. What
+# would show up here is POOLING -- if the two groups' intervals were accumulated
+# together, g1's rank 0 would be 20 rather than 10, since the groups are disjoint.
+
+statement ok
+CREATE TABLE agg_groups AS SELECT * FROM (VALUES
+  ('g1', 0::INTEGER, 10::BIGINT, 20::BIGINT),
+  ('g1', 1::INTEGER, 15::BIGINT, 30::BIGINT),
+  ('g2', 0::INTEGER, 50::BIGINT, 60::BIGINT),
+  ('g2', 1::INTEGER, 55::BIGINT, 90::BIGINT)) t(g, rank, start, stop);
+
+query TII
+SELECT g, pt.rank, pt.covered
+FROM (SELECT g, UNNEST(cumulative_coverage(rank, start, stop)) AS pt FROM agg_groups GROUP BY g)
+ORDER BY g, pt.rank;
+----
+g1	0	10
+g1	1	20
+g2	0	10
+g2	1	40
+
+# ---- Test 10: degenerate intervals cover nothing but keep their rank ----
+# Diverges from compress_intervals, which silently SWAPS an inverted pair and would
+# report 10 covered bases for [20,10). Swapping manufactures coverage out of transposed
+# columns, so region_presence/region_coverage drop instead and this follows them.
+
+statement ok
+CREATE TABLE agg_degen AS SELECT * FROM (VALUES
+  (0::INTEGER, 15::BIGINT, 15::BIGINT),
+  (0::INTEGER, 20::BIGINT, 10::BIGINT),
+  (1::INTEGER, 10::BIGINT, 20::BIGINT)) t(rank, start, stop);
+
+query II
+SELECT pt.rank, pt.covered
+FROM (SELECT UNNEST(cumulative_coverage(rank, start, stop)) AS pt FROM agg_degen)
+ORDER BY pt.rank;
+----
+0	0
+1	10
+
+# ================= cumulative_coverage_curve =================
+
+# ---- Shared wrapper fixture ----
+# positions is pre-filtered to ONE genome; the macro takes no genome_id, because the
+# curve is only meaningful against a single target.
+#   sA [1,11)    own 10
+#   sB [6,16)    own 10   -- ties with sA, broken by sample_id
+#   sC [1,101)   own 100
+#   sD  none     own 0    -- in the roster only
+# Ranked by (own_covered, sample_id): sD=0, sA=1, sB=2, sC=3
+#   rank 0  sD                          0
+#   rank 1  + [1,11)                    10
+#   rank 2  + [6,16)  -> [1,16)         15   (a sum would say 20)
+#   rank 3  + [1,101) -> [1,101)        100
+# genome_length 200, so proportions are 0, 0.05, 0.075, 0.5.
+
+statement ok
+CREATE TABLE positions(sample_id VARCHAR, start BIGINT, stop BIGINT);
+
+statement ok
+INSERT INTO positions VALUES
+  ('sA',  1,  11),
+  ('sB',  6,  16),
+  ('sC',  1, 101),
+  ('sE',  1,  51),
+  ('sF', 40,  61);
+
+statement ok
+CREATE TABLE roster(sample_id VARCHAR, group_id VARCHAR);
+
+statement ok
+INSERT INTO roster VALUES
+  ('sA', 'g1'), ('sB', 'g1'), ('sC', 'g1'), ('sD', 'g1'),
+  ('sE', 'g2'), ('sF', 'g2');
+
+# ---- Test 11: the wrapper end to end ----
+# g2 checks a second group in the same call: sF own 21, sE own 50, so sF ranks first,
+# then the union [1,61) = 60.
+
+query TITIR
+SELECT group_id, rank, sample_id, covered, proportion_covered
+FROM cumulative_coverage_curve(positions, roster, 200)
+ORDER BY group_id, rank;
+----
+g1	0	sD	0	0.0
+g1	1	sA	10	0.05
+g1	2	sB	15	0.075
+g1	3	sC	100	0.5
+g2	0	sF	21	0.105
+g2	1	sE	60	0.3
+
+# ---- Test 12: a roster sample with no coverage occupies rank 0 ----
+# sD contributes no rows to positions at all. It must still appear, at rank 0, with
+# covered 0 -- otherwise g1 looks like a 3-sample group and its curve cannot be compared
+# with a group where every sample was detected.
+# Fails with a 3-row g1 curve starting at sA if the roster LEFT JOIN is dropped.
+
+query TII
+SELECT sample_id, rank, covered FROM cumulative_coverage_curve(positions, roster, 200)
+WHERE group_id = 'g1' AND rank = 0;
+----
+sD	0	0
+
+# ---- Test 13: ties are broken deterministically by sample_id ----
+# sA and sB both cover 10 bases. Without a deterministic tiebreak their ranks swap
+# between runs and thread counts, and the curve stops being reproducible -- which
+# matters because micov's Monte Carlo null calls this ~100x per genome per group.
+
+query TI
+SELECT sample_id, rank FROM cumulative_coverage_curve(positions, roster, 200)
+WHERE group_id = 'g1' AND sample_id IN ('sA', 'sB') ORDER BY rank;
+----
+sA	1
+sB	2
+
+statement ok
+SET threads = 1;
+
+query TI
+SELECT sample_id, rank FROM cumulative_coverage_curve(positions, roster, 200)
+WHERE group_id = 'g1' AND sample_id IN ('sA', 'sB') ORDER BY rank;
+----
+sA	1
+sB	2
+
+statement ok
+RESET threads;
+
+# ---- Test 13b: an inverted interval must not win the ranking ----
+# The bug this pins was real and subtle. _cc_own measures each sample's own breadth with
+# compress_intervals, which SWAPS an inverted pair -- so (100, 10) counted as 90 covered
+# bases and ranked sA as the BEST-covered sample in its group, while the aggregate
+# (which drops inverted intervals) credited it with nothing. The ranking and the curve
+# disagreed about the same interval.
+#
+# Correct per the documented convention: sA covers nothing, so it ranks FIRST with
+# covered 0, and sB follows with 50. Before the fix this returned rank 0 = sB/50 and
+# rank 1 = sA/50 -- wrong curve shape AND wrong sample attribution.
+
+statement ok
+CREATE TABLE inv_pos AS SELECT * FROM (VALUES
+  ('sA', 100, 10),
+  ('sB',   1, 51)) t(sample_id, start, stop);
+
+statement ok
+CREATE TABLE inv_roster AS SELECT * FROM (VALUES
+  ('sA', 'g'), ('sB', 'g')) t(sample_id, group_id);
+
+query ITI
+SELECT rank, sample_id, covered FROM cumulative_coverage_curve(inv_pos, inv_roster, 200)
+ORDER BY rank;
+----
+0	sA	0
+1	sB	50
+
+# A zero-width interval behaves the same way, and both must still keep their rank rather
+# than vanishing from the cohort.
+
+statement ok
+CREATE TABLE zw_pos AS SELECT * FROM (VALUES
+  ('sA', 40, 40),
+  ('sB',  1, 51)) t(sample_id, start, stop);
+
+query ITI
+SELECT rank, sample_id, covered FROM cumulative_coverage_curve(zw_pos, inv_roster, 200)
+ORDER BY rank;
+----
+0	sA	0
+1	sB	50
+
+# ---- Test 13c: a half-NULL interval raises ----
+# Both-NULL means "this sample has no coverage" and comes from the roster LEFT JOIN.
+# Exactly one NULL is a broken join or a blank field: treating it as no-coverage would
+# discard real coverage and understate this rank and every rank above it. Asserted on
+# both paths, because the macro filters intervals before the aggregate sees them and
+# would otherwise swallow it.
+
+statement ok
+CREATE TABLE half_null AS SELECT * FROM (VALUES
+  ('sA', 1::BIGINT, 51::BIGINT),
+  ('sB', NULL::BIGINT, 100::BIGINT)) t(sample_id, start, stop);
+
+statement error
+SELECT * FROM cumulative_coverage_curve(half_null, inv_roster, 200);
+----
+start and stop must both be NULL or both be present
+
+statement error
+SELECT cumulative_coverage(rank, start, stop)
+FROM (VALUES (0::INTEGER, NULL::BIGINT, 100::BIGINT)) v(rank, start, stop);
+----
+start and stop must both be NULL (a rank with no coverage) or both be present
+
+statement error
+SELECT cumulative_coverage(rank, start, stop)
+FROM (VALUES (0::INTEGER, 10::BIGINT, NULL::BIGINT)) v(rank, start, stop);
+----
+start present and stop NULL
+
+# ---- Test 13d: covered can never exceed genome_length ----
+# The union of intervals on a genome cannot be longer than the genome, so this means the
+# denominator is wrong -- a contig length where a genome length belongs, or a mismatched
+# reference build. Unclamped it returned proportion_covered = 5.0 with no signal, which
+# is particularly bad here because the docs teach that a proportion above 1.0 is the
+# symptom of the summing mistake this function exists to avoid.
+
+statement ok
+CREATE TABLE over_pos AS SELECT * FROM (VALUES ('sA', 1, 501)) t(sample_id, start, stop);
+
+statement ok
+CREATE TABLE over_roster AS SELECT * FROM (VALUES ('sA', 'g')) t(sample_id, group_id);
+
+statement error
+SELECT * FROM cumulative_coverage_curve(over_pos, over_roster, 100);
+----
+covered (500) exceeds genome_length (100)
+
+# Exactly equal is fine -- a fully covered genome is proportion 1.0, not an error.
+
+query IR
+SELECT covered, proportion_covered
+FROM cumulative_coverage_curve(over_pos, over_roster, 500);
+----
+500	1.0
+
+# ---- Test 14: the roster defines the cohort ----
+# A sample present in positions but absent from the roster is ignored -- same rule as
+# region_presence. Fails if sX leaks in and shifts every rank in g1.
+
+statement ok
+CREATE TABLE pos_extra AS
+SELECT * FROM positions UNION ALL SELECT 'sX', 1, 1000;
+
+query TII
+SELECT sample_id, rank, covered FROM cumulative_coverage_curve(pos_extra, roster, 200)
+WHERE group_id = 'g1' ORDER BY rank;
+----
+sD	0	0
+sA	1	10
+sB	2	15
+sC	3	100
+
+# ---- Test 15: genome_length is validated ----
+# It is the denominator, so zero or negative produces either a division error or a
+# silently absurd proportion. NULL would make every proportion NULL.
+
+statement error
+SELECT * FROM cumulative_coverage_curve(positions, roster, 0);
+----
+genome_length must be positive
+
+statement error
+SELECT * FROM cumulative_coverage_curve(positions, roster, -5);
+----
+genome_length must be positive
+
+statement error
+SELECT * FROM cumulative_coverage_curve(positions, roster, NULL);
+----
+genome_length must be positive
+
+# A fractional genome_length is rejected as such, not rounded. Every test is against the
+# DOUBLE value before narrowing: casting to BIGINT first made 1.6 into 2 and silently
+# divided by the wrong denominator, while 0.4 was reported as "not positive", which it
+# is not. A genome length is a count of bases.
+
+statement error
+SELECT * FROM cumulative_coverage_curve(positions, roster, 1.6);
+----
+genome_length must be a whole number of bases (got 1.6)
+
+statement error
+SELECT * FROM cumulative_coverage_curve(positions, roster, 0.4);
+----
+genome_length must be a whole number of bases (got 0.4)
+
+# An integral value that happens to arrive as DOUBLE or VARCHAR is fine.
+
+query I
+SELECT COUNT(*) FROM cumulative_coverage_curve(positions, roster, 200.0);
+----
+6
+
+query I
+SELECT COUNT(*) FROM cumulative_coverage_curve(positions, roster, '200');
+----
+6
+
+# ---- Test 16: unattributable rows raise ----
+# A NULL sample_id in positions is coverage that cannot be assigned to a rank; dropping
+# it would quietly lower somebody's breadth and reorder the curve. A NULL sample_id or
+# group_id in the roster is a cohort member who belongs nowhere.
+#
+# Each fixture carries several well-formed rows, because a two-row fixture lets DuckDB
+# plan the guard away -- the failure mode found in Phase 3.
+
+statement ok
+CREATE TABLE pos_nullsample AS
+SELECT * FROM positions UNION ALL SELECT NULL, 5, 25;
+
+statement error
+SELECT * FROM cumulative_coverage_curve(pos_nullsample, roster, 200);
+----
+NULL values in sample_id column of positions
+
+statement ok
+CREATE TABLE roster_nullsample AS
+SELECT * FROM roster UNION ALL SELECT NULL, 'g1';
+
+statement error
+SELECT * FROM cumulative_coverage_curve(positions, roster_nullsample, 200);
+----
+NULL values in sample_id or group_id column of roster
+
+statement ok
+CREATE TABLE roster_nullgroup AS
+SELECT * FROM roster UNION ALL SELECT 'sZ', NULL;
+
+statement error
+SELECT * FROM cumulative_coverage_curve(positions, roster_nullgroup, 200);
+----
+NULL values in sample_id or group_id column of roster
+
+# ---- Test 17: the wrapper agrees with the brute-force oracle ----
+# Same O(n^2) oracle as Test 5, but driven through the macro so the ranking, the roster
+# LEFT JOIN and the sample_id reattachment are all in the loop.
+
+statement ok
+CREATE TABLE big_pos AS
+SELECT 's' || (i % 25) AS sample_id,
+       LEAST((hash(i * 7919) % 3000 + 1)::BIGINT, (hash(i * 104729) % 3000 + 1)::BIGINT) AS start,
+       GREATEST((hash(i * 7919) % 3000 + 1)::BIGINT, (hash(i * 104729) % 3000 + 1)::BIGINT) AS stop
+FROM range(0, 1200) t(i)
+WHERE (hash(i * 7919) % 3000) <> (hash(i * 104729) % 3000);
+
+statement ok
+CREATE TABLE big_roster AS
+SELECT 's' || i AS sample_id, 'grp' AS group_id FROM range(0, 30) t(i);
+
+statement ok
+CREATE TABLE big_curve AS
+SELECT rank, sample_id, covered FROM cumulative_coverage_curve(big_pos, big_roster, 3000);
+
+statement ok
+CREATE TABLE big_feed AS
+SELECT c.rank, p.start, p.stop
+FROM big_curve c LEFT JOIN big_pos p ON p.sample_id = c.sample_id;
+
+statement ok
+CREATE TABLE big_oracle AS
+SELECT r.k AS rank, COALESCE(s.covered, 0) AS covered
+FROM (SELECT DISTINCT rank AS k FROM big_curve) r
+LEFT JOIN (
+    SELECT k, SUM(ci.stop - ci.start) AS covered
+    FROM (SELECT r2.k, UNNEST(compress_intervals(f.start, f.stop)) AS ci
+          FROM (SELECT DISTINCT rank AS k FROM big_curve) r2
+          JOIN big_feed f ON f.rank <= r2.k
+          GROUP BY r2.k)
+    GROUP BY k
+) s ON s.k = r.k;
+
+query III
+SELECT (SELECT COUNT(*) FROM big_curve),
+       (SELECT COUNT(*) FROM big_oracle),
+       (SELECT COUNT(*) FROM big_oracle o JOIN big_curve c USING (rank)
+        WHERE o.covered IS DISTINCT FROM c.covered);
+----
+30	30	0
+
+# Every roster sample appears exactly once, ranks are 0..29 with no gaps, and breadth is
+# non-decreasing in rank -- the three properties that make the x-axis meaningful.
+
+query IIII
+SELECT COUNT(DISTINCT sample_id), COUNT(DISTINCT rank), MIN(rank), MAX(rank) FROM big_curve;
+----
+30	30	0	29
+
+# ---- Test 18: relation kinds ----
+# query_table() resolves in the caller's scope, so views, TEMP tables, schema-qualified
+# names and CTEs all work.
+
+statement ok
+CREATE VIEW pos_view AS SELECT * FROM positions;
+
+statement ok
+CREATE TEMP TABLE roster_temp AS SELECT * FROM roster;
+
+statement ok
+CREATE SCHEMA cc_s;
+
+statement ok
+CREATE TABLE cc_s.pos_q AS SELECT * FROM positions;
+
+query TII
+SELECT sample_id, rank, covered FROM cumulative_coverage_curve(pos_view, roster_temp, 200)
+WHERE group_id = 'g1' AND rank = 2;
+----
+sB	2	15
+
+query TII
+SELECT sample_id, rank, covered FROM cumulative_coverage_curve(cc_s.pos_q, roster, 200)
+WHERE group_id = 'g1' AND rank = 2;
+----
+sB	2	15
+
+query TII
+WITH pos_cte AS (SELECT * FROM positions)
+SELECT sample_id, rank, covered FROM cumulative_coverage_curve(pos_cte, roster, 200)
+WHERE group_id = 'g1' AND rank = 2;
+----
+sB	2	15
+
+# ---- Test 19: identifier types are carried through uncast ----
+# sample_id and group_id are join keys the caller supplies; forcing them to VARCHAR
+# would break a join back to a BIGINT or UUID metadata table.
+
+statement ok
+CREATE TABLE uu_pos AS SELECT * FROM (VALUES
+  ('11111111-1111-1111-1111-111111111111'::UUID, 1::BIGINT, 11::BIGINT),
+  ('22222222-2222-2222-2222-222222222222'::UUID, 1::BIGINT, 51::BIGINT))
+  t(sample_id, start, stop);
+
+statement ok
+CREATE TABLE uu_roster AS SELECT * FROM (VALUES
+  ('11111111-1111-1111-1111-111111111111'::UUID, 7::BIGINT),
+  ('22222222-2222-2222-2222-222222222222'::UUID, 7::BIGINT)) t(sample_id, group_id);
+
+query TTII
+SELECT typeof(sample_id), typeof(group_id), rank, covered
+FROM cumulative_coverage_curve(uu_pos, uu_roster, 200) ORDER BY rank;
+----
+UUID	BIGINT	0	10
+UUID	BIGINT	1	50
+
+# ---- Test 19a: duplicate rows do not distort the curve ----
+# A roster or a positions table consolidated from shards will have duplicates. A
+# duplicated roster row must not create a second rank for the same sample, and a
+# duplicated interval must not inflate breadth -- both would silently reorder the curve.
+#
+# Note the mechanism is _cc_own's GROUP BY and the interval union, not the DISTINCT on
+# the roster CTE: measured, removing that DISTINCT changes nothing here. It is kept as a
+# fan-out bound. This assertion pins the contract, whichever part delivers it.
+
+statement ok
+CREATE TABLE dup_roster AS SELECT * FROM roster UNION ALL SELECT * FROM roster;
+
+statement ok
+CREATE TABLE dup_pos AS SELECT * FROM positions UNION ALL SELECT * FROM positions;
+
+query TII
+SELECT sample_id, rank, covered FROM cumulative_coverage_curve(positions, dup_roster, 200)
+WHERE group_id = 'g1' ORDER BY rank;
+----
+sD	0	0
+sA	1	10
+sB	2	15
+sC	3	100
+
+query TII
+SELECT sample_id, rank, covered FROM cumulative_coverage_curve(dup_pos, roster, 200)
+WHERE group_id = 'g1' ORDER BY rank;
+----
+sD	0	0
+sA	1	10
+sB	2	15
+sC	3	100
+
+# ---- Test 19b: coordinates arriving as VARCHAR ----
+# What an unconfigured BED or CSV read hands you. Without the ::BIGINT normalization
+# this is not a wrong answer but a hard failure -- DuckDB will not implicitly cast
+# VARCHAR to BIGINT for compress_intervals, so the whole call dies in the binder with
+# "No function matches ... compress_intervals(VARCHAR, VARCHAR)". Measured; that is the
+# input class the cast exists for, and nothing else in this macro compares coordinates.
+#
+#   sC [9,20)  own 11 -> rank 0
+#   sB [60,80) own 20 -> rank 1, disjoint, so 31
+#   sA [9,100) own 91 -> rank 2, union [9,100) = 91
+
+statement ok
+CREATE TABLE vc_pos AS SELECT * FROM (VALUES
+  ('sA', '9', '100'), ('sB', '60', '80'), ('sC', '9', '20')) t(sample_id, start, stop);
+
+statement ok
+CREATE TABLE vc_roster AS SELECT * FROM (VALUES
+  ('sA', 'g'), ('sB', 'g'), ('sC', 'g')) t(sample_id, group_id);
+
+query TTII
+SELECT typeof(covered), sample_id, rank, covered
+FROM cumulative_coverage_curve(vc_pos, vc_roster, 200) ORDER BY rank;
+----
+BIGINT	sC	0	11
+BIGINT	sB	1	31
+BIGINT	sA	2	91
+
+# ---- Test 20: empty inputs ----
+# An empty roster is an empty cohort: no rows, not an error. Empty positions with a
+# populated roster is a fully flat curve -- every sample detected nothing, which is a
+# real result and must not collapse to no rows.
+
+statement ok
+CREATE TABLE empty_roster AS SELECT * FROM roster WHERE FALSE;
+
+statement ok
+CREATE TABLE empty_pos AS SELECT * FROM positions WHERE FALSE;
+
+query I
+SELECT COUNT(*) FROM cumulative_coverage_curve(positions, empty_roster, 200);
+----
+0
+
+query III
+SELECT COUNT(*), SUM(covered), SUM(proportion_covered)
+FROM cumulative_coverage_curve(empty_pos, roster, 200);
+----
+6	0	0.0
+
+# ---- Test 21: the percentile x-axis is plain SQL ----
+# #214 asked whether the aggregate needed a --percentile mode. It does not: rank over
+# (group size - 1) is a window function on the output, which is why the aggregate has no
+# such parameter.
+
+query TRR
+SELECT group_id,
+       ROUND(rank * 100.0 / NULLIF(COUNT(*) OVER (PARTITION BY group_id) - 1, 0), 1) AS pct,
+       ROUND(proportion_covered, 4)
+FROM cumulative_coverage_curve(positions, roster, 200)
+WHERE group_id = 'g1'
+ORDER BY rank;
+----
+g1	0.0	0.0
+g1	33.3	0.05
+g1	66.7	0.075
+g1	100.0	0.5
+
+# ---- Test 22: internal CTE names do not shadow the caller's relations ----
+# An argument name is resolved with the macro's own WITH list in scope, and binds to an
+# internal CTE only when that CTE is declared BEFORE the query_table() call resolving
+# the argument. Base table, view and caller CTE all behave the same way.
+#
+# Measured for this macro, by passing a caller relation named after each internal CTE in
+# both slots, as a base table and as a CTE:
+#   `len`     collided in BOTH slots  -- which is why _cc_len is now declared LAST
+#   `checked` collides in the ROSTER slot only (it holds query_table(positions) itself)
+#   `own` / `ranked` / `feed` / `curve` never collide -- declared after both
+#                                        query_table() calls, so the prefix does nothing
+#                                        for them
+#
+# Only the two cases below discriminate. An earlier version of this test passed
+# `checked` in the POSITIONS slot and `ranked` in the roster slot -- both non-colliding
+# -- so all of its assertions passed against a fully unprefixed macro.
+
+query II
+WITH checked AS (SELECT * FROM roster)
+SELECT rank, covered FROM cumulative_coverage_curve(positions, checked, 200)
+WHERE group_id = 'g1' AND rank = 2;
+----
+2	15
+
+statement ok
+CREATE TABLE checked AS SELECT * FROM roster;
+
+query II
+SELECT rank, covered FROM cumulative_coverage_curve(positions, checked, 200)
+WHERE group_id = 'g1' AND rank = 2;
+----
+2	15
+
+# _cc_len is declared LAST in the WITH list, and that placement is what this pins --
+# not the prefix. Declared first (where it originally was) it preceded BOTH
+# query_table() calls and shadowed both arguments; declared last it precedes neither.
+# So the discriminating name here is `_cc_len` itself: measured, this query fails with
+# "Referenced column sample_id not found ... Candidate bindings: genome_length" if the
+# CTE is moved back to the front, and passes where it now sits.
+
+statement ok
+CREATE TABLE _cc_len AS SELECT * FROM positions;
+
+query II
+SELECT rank, covered FROM cumulative_coverage_curve(_cc_len, roster, 200)
+WHERE group_id = 'g1' AND rank = 2;
+----
+2	15
+
+# The names that cannot collide at all -- declared after both query_table() calls --
+# kept as coverage of the resolution rule but labelled, because they pass against a
+# fully unprefixed macro and so are not evidence the prefix does anything.
+
+query II
+WITH ranked AS (SELECT * FROM positions), feed AS (SELECT * FROM roster)
+SELECT rank, covered FROM cumulative_coverage_curve(ranked, feed, 200)
+WHERE group_id = 'g1' AND rank = 2;
+----
+2	15

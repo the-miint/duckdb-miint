@@ -1243,6 +1243,10 @@ set(EXTENSION_SOURCES
     src/qc_algorithms.cpp
     src/IntervalCompressor.cpp
     src/compress_intervals.cpp
+    src/CumulativeCoverageAccumulator.cpp
+    src/cumulative_coverage.cpp
+    src/KsTwoSample.cpp
+    src/ks_2samp.cpp
     src/CoverageDepthCalculator.cpp
     src/compute_coverage_depth.cpp
     src/AlignmentSlicer.cpp
@@ -1891,6 +1895,10 @@ set(TEST_SOURCES
     test/cpp/test_AlignmentFunctions.cpp
     src/IntervalCompressor.cpp
     test/cpp/test_IntervalCompressor.cpp
+    src/CumulativeCoverageAccumulator.cpp
+    test/cpp/test_CumulativeCoverageAccumulator.cpp
+    src/KsTwoSample.cpp
+    test/cpp/test_KsTwoSample.cpp
     src/CoverageDepthCalculator.cpp
     test/cpp/test_CoverageDepthCalculator.cpp
     src/AlignmentSlicer.cpp

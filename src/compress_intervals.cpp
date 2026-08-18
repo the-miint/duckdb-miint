@@ -96,8 +96,28 @@ struct CompressIntervalsOperation {
 		for (idx_t i = 0; i < source.Size(); i++) {
 			target.Add(source.Starts()[i], source.Stops()[i]);
 		}
-		// Compress after combining to avoid memory bloat in parallel execution
-		target.Compress();
+		// Deliberately NO Compress() here. Add() checks IntervalCompressor's growing
+		// compression floor on every push, so the state is already bounded when this loop
+		// ends -- and Finalize() compresses each state before reading Size()/Empty(), so the
+		// output is unaffected either way. An unconditional compression here therefore
+		// reclaimed nothing on disjoint input and cost O(m log m) PER COMBINE. It could also
+		// compress twice in a row, when the Add loop above had just crossed the floor itself.
+		//
+		// Disjoint intervals are exactly what this aggregate is normally fed, and Compress()
+		// merges only overlaps, so "compaction reclaims nothing" is the common case rather
+		// than a corner. See compress_floor_ in IntervalCompressor.
+		//
+		// Measured on 500k rows / 50 groups of disjoint intervals, results bit-identical
+		// (500000 intervals, 2500000 total width at both thread counts):
+		//
+		//   threads=1    0.016 s -> 0.012 s
+		//   threads=16   0.025 s -> 0.019 s
+		//
+		// So about 25% off this shape at either thread count. Note what this does NOT fix:
+		// threads=16 remains slower than threads=1 here, and still is at 4M rows / 200
+		// groups (0.112 s vs 0.120 s). That residual is not the merge policy -- Combine runs
+		// at threads=1 too, since the hash aggregate builds partials per radix partition --
+		// so do not read this as making the aggregate scale with cores.
 	}
 
 	static void Finalize(Vector &state_vector, AggregateInputData &aggr_input_data, Vector &result, idx_t count,
