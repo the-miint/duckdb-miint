@@ -1,0 +1,27 @@
+sample_id,feature_id,value
+example1,Lactobacillus gasseri,79950.0
+example1,Ruminococcus albus,93024.0
+example1,Escherichia coli,86188.0
+example1,Tyzzerella nexilis,45441.0
+example1,Prevotella sp. oral taxon 299,31185.0
+example1,Streptococcus mitis,24929.0
+example1,Leptolyngbya valderiana,1975.0
+example1,Neisseria subflava,26130.0
+example1,Neisseria flavescens,22303.0
+example1,Fusobacterium periodonticum,19783.0
+example1,Streptococcus pneumoniae,14478.0
+example1,Haemophilus influenzae,12145.0
+example1,Veillonella dispar,14609.0
+example2,Lactobacillus gasseri,79951.0
+example2,Ruminococcus albus,93024.0
+example2,Escherichia coli,86188.0
+example2,Tyzzerella nexilis,45441.0
+example2,Prevotella sp. oral taxon 299,31185.0
+example2,Streptococcus mitis,24929.0
+example2,Leptolyngbya valderiana,1975.0
+example2,Neisseria subflava,0.0
+example2,Neisseria flavescens,22303.0
+example2,Fusobacterium periodonticum,197830.0
+example2,Streptococcus pneumoniae,14478.0
+example2,Haemophilus influenzae,100.0
+example2,Veillonella dispar,14609.0

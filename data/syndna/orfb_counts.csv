@@ -1,0 +1,10 @@
+sample_id,feature_id,value
+r1,g1_1,10.0
+r1,g1_2,0.0
+r1,g1_3,40.0
+r2,g1_1,20.0
+r2,g1_2,5.0
+r2,g1_3,0.0
+rnan,g1_1,30.0
+rnan,g1_2,7.0
+rnan,g1_3,9.0

@@ -1,0 +1,725 @@
+# name: test/sql/genome_coverage_per_sample.test
+# description: Test genome_coverage_per_sample table macro
+# group: [sql]
+
+# genome_coverage() has no sample dimension: it compresses intervals per
+# `reference` and sums per `genome_id`, so handing it a multi-sample alignment
+# table silently returns POOLED coverage. Every sample below the pooled maximum
+# is over-reported. genome_coverage_per_sample() partitions by a `sample_id`
+# column in the alignments relation and reports each sample separately.
+#
+# Note: stop_position uses half-open coordinates (exclusive end), matching
+# read_alignments output where stop_position = position + ref_length.
+
+require miint
+
+# ---- Setup ----
+
+statement ok
+CREATE TABLE alignments (sample_id VARCHAR, reference VARCHAR, position BIGINT, stop_position BIGINT);
+
+statement ok
+CREATE TABLE subject_total_length (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+CREATE TABLE subject_genome_id (contig_id VARCHAR, genome_id VARCHAR);
+
+# ---- Test 1: the pooling bug ----
+# s1 covers [10,21) and [30,41) = 22 bases; s2 covers [10,21) = 11 bases.
+# genome_coverage() pools these into a single 0.22 row, over-reporting s2 by 2x.
+# Per-sample must report 0.22 and 0.11 separately.
+
+statement ok
+INSERT INTO alignments VALUES
+    ('s1', 'contig1', 10, 21), ('s1', 'contig1', 30, 41),
+    ('s2', 'contig1', 10, 21);
+
+statement ok
+INSERT INTO subject_genome_id VALUES ('contig1', 'genome_A');
+
+statement ok
+INSERT INTO subject_total_length VALUES ('genome_A', 100);
+
+query TTIR
+SELECT * FROM genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id)
+ORDER BY sample_id;
+----
+s1	genome_A	22	0.22
+s2	genome_A	11	0.11
+
+# The pooled behavior of the original macro on the same input, kept here so the
+# difference the new macro exists to fix is visible in one file. This is not a
+# bug report against genome_coverage -- it has no sample column and cannot do
+# better -- it is why callers with multiple samples need the sibling.
+query TIR
+SELECT * FROM genome_coverage(alignments, subject_total_length, subject_genome_id);
+----
+genome_A	22	0.22
+
+# ---- Test 2: intervals merge WITHIN a sample, never ACROSS samples ----
+# s1: [10,21) and [15,26) overlap -> compressed to [10,26) = 16 bases.
+# s2: [10,21) alone = 11 bases. If compression leaked across samples, s2 would
+# report 16 as well.
+
+statement ok
+DELETE FROM alignments;
+
+statement ok
+INSERT INTO alignments VALUES
+    ('s1', 'contig1', 10, 21), ('s1', 'contig1', 15, 26),
+    ('s2', 'contig1', 10, 21);
+
+query TTIR
+SELECT * FROM genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id)
+ORDER BY sample_id;
+----
+s1	genome_A	16	0.16
+s2	genome_A	11	0.11
+
+# ---- Test 3: multiple contigs per genome, per sample ----
+# s1: contig1 [10,21) + contig2 [30,41) = 22 bases on genome_A.
+# s2: contig2 only = 11 bases.
+
+statement ok
+DELETE FROM alignments;
+
+statement ok
+DELETE FROM subject_genome_id;
+
+statement ok
+INSERT INTO subject_genome_id VALUES ('contig1', 'genome_A'), ('contig2', 'genome_A');
+
+statement ok
+INSERT INTO alignments VALUES
+    ('s1', 'contig1', 10, 21), ('s1', 'contig2', 30, 41),
+    ('s2', 'contig2', 30, 41);
+
+query TTIR
+SELECT * FROM genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id)
+ORDER BY sample_id;
+----
+s1	genome_A	22	0.22
+s2	genome_A	11	0.11
+
+# ---- Test 4: multiple genomes and multiple samples ----
+
+statement ok
+DELETE FROM alignments;
+
+statement ok
+DELETE FROM subject_genome_id;
+
+statement ok
+DELETE FROM subject_total_length;
+
+statement ok
+INSERT INTO subject_genome_id VALUES ('contig1', 'genome_A'), ('contig2', 'genome_B');
+
+statement ok
+INSERT INTO subject_total_length VALUES ('genome_A', 100), ('genome_B', 200);
+
+statement ok
+INSERT INTO alignments VALUES
+    ('s1', 'contig1', 10, 21), ('s1', 'contig2', 30, 51),
+    ('s2', 'contig2', 30, 51);
+
+query TTIR
+SELECT * FROM genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id)
+ORDER BY sample_id, genome_id;
+----
+s1	genome_A	11	0.11
+s1	genome_B	21	0.105
+s2	genome_B	21	0.105
+
+# A sample with no alignments on a given genome produces no row for it -- s2 has
+# nothing on genome_A. Absence, not a zero row.
+query I
+SELECT count(*) FROM genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id)
+WHERE sample_id = 's2' AND genome_id = 'genome_A';
+----
+0
+
+# ---- Test 5: contigs absent from the mapping are excluded, per sample ----
+
+statement ok
+DELETE FROM alignments;
+
+statement ok
+DELETE FROM subject_genome_id;
+
+statement ok
+DELETE FROM subject_total_length;
+
+statement ok
+INSERT INTO subject_genome_id VALUES ('contig1', 'genome_A');
+
+statement ok
+INSERT INTO subject_total_length VALUES ('genome_A', 100);
+
+statement ok
+INSERT INTO alignments VALUES
+    ('s1', 'contig1', 10, 21), ('s1', 'contig_unknown', 50, 61),
+    ('s2', 'contig_unknown', 50, 61);
+
+# s1 keeps only its mapped contig; s2 has nothing mapped at all and so vanishes
+# entirely rather than appearing with zero coverage.
+query TTIR
+SELECT * FROM genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id)
+ORDER BY sample_id;
+----
+s1	genome_A	11	0.11
+
+# ---- Test 6: single-sample input agrees with genome_coverage ----
+# The property that makes the sibling safe to introduce: on one sample, the two
+# macros must produce identical coverage. If they ever disagree, one of them is
+# wrong.
+
+statement ok
+DELETE FROM alignments;
+
+statement ok
+INSERT INTO alignments VALUES
+    ('only', 'contig1', 10, 21), ('only', 'contig1', 15, 26), ('only', 'contig1', 40, 51);
+
+query I
+SELECT count(*) FROM (
+    SELECT p.covered AS a, g.covered AS b, p.proportion_covered AS c, g.proportion_covered AS d
+    FROM genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id) p
+    FULL JOIN genome_coverage(alignments, subject_total_length, subject_genome_id) g
+      ON p.genome_id = g.genome_id
+) WHERE a IS DISTINCT FROM b OR c IS DISTINCT FROM d;
+----
+0
+
+# ---- Test 7: identifier types are passed through, not coerced ----
+# genome_coverage and its sibling never cast the id columns, so BIGINT and UUID
+# sample/genome identifiers survive end to end. docs/alignment_analysis.md
+# used to claim genome_id is VARCHAR, which these tests show is wrong -- it
+# described one accepted type rather than the passthrough that is actually
+# implemented. These assertions are what the corrected wording has to keep true.
+
+statement ok
+CREATE TABLE aln_bigint (sample_id BIGINT, reference VARCHAR, position BIGINT, stop_position BIGINT);
+
+statement ok
+CREATE TABLE tl_bigint (genome_id BIGINT, total_length BIGINT);
+
+statement ok
+CREATE TABLE sg_bigint (contig_id VARCHAR, genome_id BIGINT);
+
+statement ok
+INSERT INTO aln_bigint VALUES (1001, 'contig1', 10, 21), (1002, 'contig1', 10, 31);
+
+statement ok
+INSERT INTO sg_bigint VALUES ('contig1', 77);
+
+statement ok
+INSERT INTO tl_bigint VALUES (77, 100);
+
+query IIIR
+SELECT * FROM genome_coverage_per_sample(aln_bigint, tl_bigint, sg_bigint) ORDER BY sample_id;
+----
+1001	77	11	0.11
+1002	77	21	0.21
+
+query TT
+SELECT typeof(sample_id), typeof(genome_id)
+FROM genome_coverage_per_sample(aln_bigint, tl_bigint, sg_bigint) LIMIT 1;
+----
+BIGINT	BIGINT
+
+statement ok
+CREATE TABLE aln_uuid (sample_id UUID, reference VARCHAR, position BIGINT, stop_position BIGINT);
+
+statement ok
+CREATE TABLE tl_uuid (genome_id UUID, total_length BIGINT);
+
+statement ok
+CREATE TABLE sg_uuid (contig_id VARCHAR, genome_id UUID);
+
+statement ok
+INSERT INTO aln_uuid VALUES
+    ('11111111-1111-1111-1111-111111111111', 'contig1', 10, 21),
+    ('22222222-2222-2222-2222-222222222222', 'contig1', 10, 31);
+
+statement ok
+INSERT INTO sg_uuid VALUES ('contig1', '33333333-3333-3333-3333-333333333333');
+
+statement ok
+INSERT INTO tl_uuid VALUES ('33333333-3333-3333-3333-333333333333', 100);
+
+query TTIR
+SELECT * FROM genome_coverage_per_sample(aln_uuid, tl_uuid, sg_uuid) ORDER BY sample_id;
+----
+11111111-1111-1111-1111-111111111111	33333333-3333-3333-3333-333333333333	11	0.11
+22222222-2222-2222-2222-222222222222	33333333-3333-3333-3333-333333333333	21	0.21
+
+query TT
+SELECT typeof(sample_id), typeof(genome_id)
+FROM genome_coverage_per_sample(aln_uuid, tl_uuid, sg_uuid) LIMIT 1;
+----
+UUID	UUID
+
+# `covered` is BIGINT, matching genome_coverage. DuckDB widens SUM's return type
+# to HUGEINT unconditionally, so both macros cast back explicitly -- the value is
+# bounded by the genome length, so the extra width bought nothing and cost a
+# Parquet round trip (HUGEINT writes as DOUBLE). The siblings must agree on this:
+# a type mismatch between them would be a nasty surprise for anyone UNION-ing
+# their output.
+query T
+SELECT typeof(covered) FROM genome_coverage_per_sample(aln_bigint, tl_bigint, sg_bigint) LIMIT 1;
+----
+BIGINT
+
+# The siblings agree on the full output type signature, not just on values. Test 6
+# above proves the numbers match on single-sample input; this proves a caller can
+# UNION ALL the two results without a cast.
+query T
+SELECT typeof(covered) FROM genome_coverage(alignments, subject_total_length, subject_genome_id) LIMIT 1;
+----
+BIGINT
+
+# ---- Test 8: integration with read_alignments over real SAM data ----
+
+statement ok
+CREATE TABLE sam_aln AS
+SELECT 'sampleA' AS sample_id, reference, position, stop_position
+  FROM read_alignments('data/sam/foo_has_header.sam')
+UNION ALL
+SELECT 'sampleB', reference, position, stop_position
+  FROM read_alignments('data/sam/foo_has_header.sam') WHERE reference = 'G1234';
+
+statement ok
+CREATE TABLE sam_sg (contig_id VARCHAR, genome_id VARCHAR);
+
+statement ok
+INSERT INTO sam_sg VALUES ('G1234', 'genomeX'), ('G000144735', 'genomeX');
+
+statement ok
+CREATE TABLE sam_tl (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO sam_tl VALUES ('genomeX', 100000);
+
+# sampleA sees both contigs (286 bases, as in genome_coverage.test); sampleB was
+# filtered to G1234 only and so sees 10.
+query TTIR
+SELECT * FROM genome_coverage_per_sample(sam_aln, sam_tl, sam_sg) ORDER BY sample_id;
+----
+sampleA	genomeX	286	0.00286
+sampleB	genomeX	10	0.0001
+
+# ---- Shared reference tables for the remaining tests ----
+
+statement ok
+CREATE TABLE p3_tl (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO p3_tl VALUES ('genome_A', 100);
+
+statement ok
+CREATE TABLE p3_sg (contig_id VARCHAR, genome_id VARCHAR);
+
+statement ok
+INSERT INTO p3_sg VALUES ('contig1', 'genome_A');
+
+statement ok
+CREATE TABLE p3_base (sample_id VARCHAR, reference VARCHAR, position BIGINT, stop_position BIGINT);
+
+statement ok
+INSERT INTO p3_base VALUES ('s1', 'contig1', 10, 21), ('s2', 'contig1', 10, 31);
+
+# ---- Test 9: empty alignments relation ----
+# No rows, not an error. An empty input is a normal consequence of upstream
+# filtering (a sample set that matched nothing), not a malformed call.
+
+statement ok
+CREATE TABLE p3_empty (sample_id VARCHAR, reference VARCHAR, position BIGINT, stop_position BIGINT);
+
+query I
+SELECT count(*) FROM genome_coverage_per_sample(p3_empty, p3_tl, p3_sg);
+----
+0
+
+# ---- Test 10: views and TEMP views are accepted as inputs ----
+# Passing a filtered VIEW is the natural way to scope a call to a subset of
+# samples, so query_table() must resolve views and not just base tables --
+# including TEMP views, which live in a different catalog
+# (docs/internals/reading-tables-views.md).
+
+statement ok
+CREATE VIEW p3_view AS SELECT * FROM p3_base WHERE sample_id = 's1';
+
+query TTIR
+SELECT * FROM genome_coverage_per_sample(p3_view, p3_tl, p3_sg);
+----
+s1	genome_A	11	0.11
+
+statement ok
+CREATE TEMP VIEW p3_tview AS SELECT * FROM p3_base WHERE sample_id = 's2';
+
+query TTIR
+SELECT * FROM genome_coverage_per_sample(p3_tview, p3_tl, p3_sg);
+----
+s2	genome_A	21	0.21
+
+# ---- Test 11: degenerate intervals ----
+# A zero-length interval (position == stop_position) contributes nothing. An
+# inverted one is normalized rather than subtracted: IntervalCompressor swaps the
+# endpoints deliberately ("Ensure start <= stop; swap if inverted",
+# src/IntervalCompressor.cpp:10), so [30,21) counts as [21,30) = 9 bases. Without
+# that swap the SUM would go negative and quietly cancel real coverage.
+
+statement ok
+CREATE TABLE p3_degen (sample_id VARCHAR, reference VARCHAR, position BIGINT, stop_position BIGINT);
+
+statement ok
+INSERT INTO p3_degen VALUES
+    ('s_zero', 'contig1', 10, 10), ('s_zero', 'contig1', 20, 31),
+    ('s_inv', 'contig1', 30, 21);
+
+query TTIR
+SELECT * FROM genome_coverage_per_sample(p3_degen, p3_tl, p3_sg) ORDER BY sample_id;
+----
+s_inv	genome_A	9	0.09
+s_zero	genome_A	11	0.11
+
+# ---- Test 12: NULL sample_id is rejected ----
+# A NULL sample_id cannot be a meaningful group in a per-sample result, and
+# silently folding it into its own bucket would let a data error through as a
+# plausible-looking row. Rejecting matches the convention every other per-sample
+# function in the codebase follows (docs/internals/per-sample-pattern.md), down
+# to the error substring, so callers see one behavior across the extension.
+
+statement ok
+CREATE TABLE p3_nullsample (sample_id VARCHAR, reference VARCHAR, position BIGINT, stop_position BIGINT);
+
+statement ok
+INSERT INTO p3_nullsample VALUES (NULL, 'contig1', 10, 21), ('s1', 'contig1', 10, 31);
+
+statement error
+SELECT * FROM genome_coverage_per_sample(p3_nullsample, p3_tl, p3_sg);
+----
+NULL values in sample_id column 'sample_id'
+
+# A table with no NULLs is unaffected -- the guard must not cost correct callers.
+query TTIR
+SELECT * FROM genome_coverage_per_sample(p3_base, p3_tl, p3_sg) ORDER BY sample_id;
+----
+s1	genome_A	11	0.11
+s2	genome_A	21	0.21
+
+# ---- Test 13: the reference tables must be complete and usable ----
+# Each case below is an input from which no correct proportion can be computed.
+# All three previously produced a silently wrong or missing answer; they now
+# raise. An unusable denominator must not reach a result table disguised as data.
+
+# (a) A genome that is mapped but absent from subject_total_length. Previously
+# the inner join dropped it, so its covered bases vanished without a trace.
+
+statement ok
+CREATE TABLE p3_two (sample_id VARCHAR, reference VARCHAR, position BIGINT, stop_position BIGINT);
+
+statement ok
+INSERT INTO p3_two VALUES ('s1', 'contig1', 10, 21), ('s1', 'contig2', 10, 21);
+
+statement ok
+CREATE TABLE p3_sg2 (contig_id VARCHAR, genome_id VARCHAR);
+
+statement ok
+INSERT INTO p3_sg2 VALUES ('contig1', 'genome_A'), ('contig2', 'genome_B');
+
+statement error
+SELECT * FROM genome_coverage_per_sample(p3_two, p3_tl, p3_sg2);
+----
+no total_length entry for genome_id 'genome_B'
+
+# (b) total_length = 0. Previously divided by zero and returned infinity.
+
+statement ok
+CREATE TABLE p3_tl_zero (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO p3_tl_zero VALUES ('genome_A', 0);
+
+statement error
+SELECT * FROM genome_coverage_per_sample(p3_base, p3_tl_zero, p3_sg);
+----
+total_length must be positive for genome_id 'genome_A'
+
+# (c) NULL total_length. Previously produced a NULL proportion, which is the
+# least harmful of the three but still not an answer.
+
+statement ok
+CREATE TABLE p3_tl_null (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO p3_tl_null VALUES ('genome_A', NULL);
+
+statement error
+SELECT * FROM genome_coverage_per_sample(p3_base, p3_tl_null, p3_sg);
+----
+total_length must be positive for genome_id 'genome_A'
+
+# A genome that has a length but no coverage in this sample is NOT an error --
+# it is simply absent. Only a genome we must divide for and cannot is fatal.
+statement ok
+CREATE TABLE p3_tl_extra (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO p3_tl_extra VALUES ('genome_A', 100), ('genome_unused', 500);
+
+query TTIR
+SELECT * FROM genome_coverage_per_sample(p3_base, p3_tl_extra, p3_sg) ORDER BY sample_id;
+----
+s1	genome_A	11	0.11
+s2	genome_A	21	0.21
+
+# (d) A DUPLICATED contig->genome mapping row must not double-count. The join
+# previously multiplied every interval for that contig, reporting s1's 11 real
+# bases as 22 -- a result that looks like an ordinary low-coverage genome. A
+# mapping assembled by concatenating per-genome files hits this routinely, so
+# the mapping is deduplicated on (contig_id, genome_id) before the join. A contig
+# genuinely mapped to two different genomes still counts for both: those are
+# distinct pairs, not duplicates.
+
+statement ok
+CREATE TABLE p3_sg_dup (contig_id VARCHAR, genome_id VARCHAR);
+
+statement ok
+INSERT INTO p3_sg_dup VALUES ('contig1', 'genome_A'), ('contig1', 'genome_A');
+
+query TTIR
+SELECT * FROM genome_coverage_per_sample(p3_base, p3_tl, p3_sg_dup) ORDER BY sample_id;
+----
+s1	genome_A	11	0.11
+s2	genome_A	21	0.21
+
+# The duplicate-free mapping must give the identical answer -- proving the
+# dedupe changed nothing for callers who were already correct.
+query TTIR
+SELECT * FROM genome_coverage_per_sample(p3_base, p3_tl, p3_sg) ORDER BY sample_id;
+----
+s1	genome_A	11	0.11
+s2	genome_A	21	0.21
+
+# A contig mapped to two DIFFERENT genomes is not a duplicate and still counts
+# toward both, so the dedupe must be on the pair, not on contig_id alone.
+statement ok
+CREATE TABLE p3_sg_multi (contig_id VARCHAR, genome_id VARCHAR);
+
+statement ok
+INSERT INTO p3_sg_multi VALUES ('contig1', 'genome_A'), ('contig1', 'genome_B');
+
+statement ok
+CREATE TABLE p3_tl_multi (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO p3_tl_multi VALUES ('genome_A', 100), ('genome_B', 200);
+
+query TTIR
+SELECT * FROM genome_coverage_per_sample(p3_base, p3_tl_multi, p3_sg_multi)
+ORDER BY sample_id, genome_id;
+----
+s1	genome_A	11	0.11
+s1	genome_B	11	0.055
+s2	genome_A	21	0.21
+s2	genome_B	21	0.105
+
+# ---- Test 14: genome_id types need not match between the reference relations ----
+# genome_id is the join key between subject_genome_id and subject_total_length,
+# so DuckDB applies its usual implicit casts rather than requiring identical
+# declared types. docs/alignment_analysis.md states this; the assertions here
+# keep the claim from rotting, since an unenforced "must" in prose is exactly
+# the kind of contract that drifts. The output keeps the mapping table's type.
+
+statement ok
+CREATE TABLE p3_aln1 (sample_id VARCHAR, reference VARCHAR, position BIGINT, stop_position BIGINT);
+
+statement ok
+INSERT INTO p3_aln1 VALUES ('s1', 'contig1', 10, 21);
+
+statement ok
+CREATE TABLE p3_sg_bi (contig_id VARCHAR, genome_id BIGINT);
+
+statement ok
+INSERT INTO p3_sg_bi VALUES ('contig1', 77);
+
+statement ok
+CREATE TABLE p3_tl_vc (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO p3_tl_vc VALUES ('77', 100);
+
+query TIIR
+SELECT sample_id, genome_id, covered, proportion_covered
+FROM genome_coverage_per_sample(p3_aln1, p3_tl_vc, p3_sg_bi);
+----
+s1	77	11	0.11
+
+query T
+SELECT typeof(genome_id) FROM genome_coverage_per_sample(p3_aln1, p3_tl_vc, p3_sg_bi);
+----
+BIGINT
+
+# When a value cannot be converted the failure is a cast error naming the
+# column, not a clean "types must match" diagnosis -- which is why the docs
+# recommend matching types even though mismatches often work.
+statement ok
+CREATE TABLE p3_tl_unconv (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO p3_tl_unconv VALUES ('genome_A', 100);
+
+statement error
+SELECT * FROM genome_coverage_per_sample(p3_aln1, p3_tl_unconv, p3_sg_bi);
+----
+Could not convert string 'genome_A' to INT64
+
+# ---- Test 15: alignments without a sample_id column ----
+# A macro has no bind-time validation hook, so this surfaces as DuckDB's generic
+# binder error rather than the per-sample family's "sample_id column '<X>' not
+# found" (see docs/internals/per-sample-pattern.md, "The macro exception").
+# Pinned so a future refactor cannot quietly turn a loud bind failure into an
+# empty result -- the failure mode that would actually hurt.
+
+statement ok
+CREATE TABLE p3_no_sample (reference VARCHAR, position BIGINT, stop_position BIGINT);
+
+statement ok
+INSERT INTO p3_no_sample VALUES ('contig1', 10, 21);
+
+statement error
+SELECT * FROM genome_coverage_per_sample(p3_no_sample, p3_tl, p3_sg);
+----
+Referenced column "sample_id" not found
+
+# ---- Test 16: the guards survive projection pruning ----
+# The reference-table guards live in a WHERE clause rather than in the SELECT
+# list for one specific reason: DuckDB prunes unused projections, so a check
+# written as a projected expression would NOT fire for a query that never
+# selects it -- exactly the query that would otherwise hide the bad input. These
+# two pin that, and would fail if anyone "simplified" the guard into the
+# projection. read_gff carries the same hazard and the same note.
+
+statement ok
+CREATE TABLE p3_prune_tl (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO p3_prune_tl VALUES ('genome_A', 0);
+
+# proportion_covered -- the column the guard protects -- is not selected here.
+statement error
+SELECT covered FROM genome_coverage_per_sample(p3_base, p3_prune_tl, p3_sg);
+----
+total_length must be positive for genome_id 'genome_A'
+
+# count(*) projects no columns at all.
+statement error
+SELECT count(*) FROM genome_coverage_per_sample(p3_base, p3_prune_tl, p3_sg);
+----
+total_length must be positive for genome_id 'genome_A'
+
+# ---- Cleanup ----
+
+statement ok
+DROP TABLE alignments;
+
+statement ok
+DROP TABLE subject_total_length;
+
+statement ok
+DROP TABLE subject_genome_id;
+
+statement ok
+DROP TABLE aln_bigint;
+
+statement ok
+DROP TABLE tl_bigint;
+
+statement ok
+DROP TABLE sg_bigint;
+
+statement ok
+DROP TABLE aln_uuid;
+
+statement ok
+DROP TABLE tl_uuid;
+
+statement ok
+DROP TABLE sg_uuid;
+
+statement ok
+DROP TABLE sam_aln;
+
+statement ok
+DROP TABLE sam_sg;
+
+statement ok
+DROP TABLE sam_tl;
+
+statement ok
+DROP VIEW p3_view;
+
+statement ok
+DROP VIEW p3_tview;
+
+statement ok
+DROP TABLE p3_base;
+
+statement ok
+DROP TABLE p3_tl;
+
+statement ok
+DROP TABLE p3_sg;
+
+statement ok
+DROP TABLE p3_empty;
+
+statement ok
+DROP TABLE p3_degen;
+
+statement ok
+DROP TABLE p3_nullsample;
+
+statement ok
+DROP TABLE p3_two;
+
+statement ok
+DROP TABLE p3_sg2;
+
+statement ok
+DROP TABLE p3_tl_zero;
+
+statement ok
+DROP TABLE p3_tl_null;
+
+statement ok
+DROP TABLE p3_sg_dup;
+
+statement ok
+DROP TABLE p3_tl_extra;
+
+statement ok
+DROP TABLE p3_sg_multi;
+
+statement ok
+DROP TABLE p3_tl_multi;
+
+statement ok
+DROP TABLE p3_aln1;
+
+statement ok
+DROP TABLE p3_sg_bi;
+
+statement ok
+DROP TABLE p3_tl_vc;
+
+statement ok
+DROP TABLE p3_tl_unconv;
+
+statement ok
+DROP TABLE p3_no_sample;
+
+statement ok
+DROP TABLE p3_prune_tl;

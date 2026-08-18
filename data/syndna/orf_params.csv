@@ -1,0 +1,3 @@
+sample_id,calc_mass_sample_aliquot_input_g,total_rna_concentration_ng_ul,vol_extracted_elution_ul,total_biological_reads_r1r2
+IBSRS3526007,0.003,0.132714286,70,213988
+IQSRS3526010,0.00082,0.0042,70,3028580

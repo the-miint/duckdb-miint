@@ -1,0 +1,89 @@
+metric,sample_id,feature_id,value
+cells_per_g_of_gdna,example1,Escherichia coli,2260023103719.978
+cells_per_g_of_gdna,example1,Fusobacterium periodonticum,732784863204.921
+cells_per_g_of_gdna,example1,Lactobacillus gasseri,5438576851832.265
+cells_per_g_of_gdna,example1,Leptolyngbya valderiana,1158313590928.3313
+cells_per_g_of_gdna,example1,Neisseria flavescens,958792227127.9536
+cells_per_g_of_gdna,example1,Prevotella sp. oral taxon 299,1308077383248.3533
+cells_per_g_of_gdna,example1,Ruminococcus albus,2859984606316.3467
+cells_per_g_of_gdna,example1,Streptococcus mitis,1195417056032.4636
+cells_per_g_of_gdna,example1,Streptococcus pneumoniae,599635357838.6421
+cells_per_g_of_gdna,example1,Tyzzerella nexilis,1327927321117.1
+cells_per_g_of_gdna,example1,Veillonella dispar,589840565922.8608
+cells_per_g_of_gdna,example2,Escherichia coli,1952836093054.1042
+cells_per_g_of_gdna,example2,Fusobacterium periodonticum,11145133111026.762
+cells_per_g_of_gdna,example2,Lactobacillus gasseri,4698762891240.716
+cells_per_g_of_gdna,example2,Leptolyngbya valderiana,993783562051.9403
+cells_per_g_of_gdna,example2,Neisseria flavescens,826365482621.3341
+cells_per_g_of_gdna,example2,Prevotella sp. oral taxon 299,1128119680829.8582
+cells_per_g_of_gdna,example2,Ruminococcus albus,2471604715978.2427
+cells_per_g_of_gdna,example2,Streptococcus mitis,1030524022882.8402
+cells_per_g_of_gdna,example2,Streptococcus pneumoniae,516394509546.61127
+cells_per_g_of_gdna,example2,Tyzzerella nexilis,1146050767964.4905
+cells_per_g_of_gdna,example2,Veillonella dispar,507968035834.4735
+cells_per_g_of_sample,example1,Escherichia coli,16242205.77909725
+cells_per_g_of_sample,example1,Fusobacterium periodonticum,5266336.667262957
+cells_per_g_of_sample,example1,Lactobacillus gasseri,39085655.46409537
+cells_per_g_of_sample,example1,Leptolyngbya valderiana,8324502.377704044
+cells_per_g_of_sample,example1,Neisseria flavescens,6890593.563746456
+cells_per_g_of_sample,example1,Prevotella sp. oral taxon 299,9400816.300829837
+cells_per_g_of_sample,example1,Ruminococcus albus,20553975.056440882
+cells_per_g_of_sample,example1,Streptococcus mitis,8591155.454987602
+cells_per_g_of_sample,example1,Streptococcus pneumoniae,4309425.358708445
+cells_per_g_of_sample,example1,Tyzzerella nexilis,9543472.707764706
+cells_per_g_of_sample,example1,Veillonella dispar,4239032.704050315
+cells_per_g_of_sample,example2,Escherichia coli,9270305.911103543
+cells_per_g_of_sample,example2,Fusobacterium periodonticum,52907048.22932864
+cells_per_g_of_sample,example2,Lactobacillus gasseri,22305491.771928225
+cells_per_g_of_sample,example2,Leptolyngbya valderiana,4717588.773791879
+cells_per_g_of_sample,example2,Neisseria flavescens,3922838.606641957
+cells_per_g_of_sample,example2,Prevotella sp. oral taxon 299,5355295.604596105
+cells_per_g_of_sample,example2,Ruminococcus albus,11732951.828338465
+cells_per_g_of_sample,example2,Streptococcus mitis,4891999.372012999
+cells_per_g_of_sample,example2,Streptococcus pneumoniae,2451375.7664242103
+cells_per_g_of_sample,example2,Tyzzerella nexilis,5440416.24715691
+cells_per_g_of_sample,example2,Veillonella dispar,2411374.4630167023
+cells_per_ul_of_sample,example1,Escherichia coli,2260.023103719978
+cells_per_ul_of_sample,example1,Fusobacterium periodonticum,732.784863204921
+cells_per_ul_of_sample,example1,Lactobacillus gasseri,5438.576851832264
+cells_per_ul_of_sample,example1,Leptolyngbya valderiana,1158.3135909283312
+cells_per_ul_of_sample,example1,Neisseria flavescens,958.7922271279534
+cells_per_ul_of_sample,example1,Prevotella sp. oral taxon 299,1308.077383248353
+cells_per_ul_of_sample,example1,Ruminococcus albus,2859.9846063163463
+cells_per_ul_of_sample,example1,Streptococcus mitis,1195.4170560324635
+cells_per_ul_of_sample,example1,Streptococcus pneumoniae,599.635357838642
+cells_per_ul_of_sample,example1,Tyzzerella nexilis,1327.9273211170998
+cells_per_ul_of_sample,example1,Veillonella dispar,589.8405659228607
+cells_per_ul_of_sample,example2,Escherichia coli,1822.6470201838308
+cells_per_ul_of_sample,example2,Fusobacterium periodonticum,10402.124236958312
+cells_per_ul_of_sample,example2,Lactobacillus gasseri,4385.512031824668
+cells_per_ul_of_sample,example2,Leptolyngbya valderiana,927.5313245818111
+cells_per_ul_of_sample,example2,Neisseria flavescens,771.2744504465786
+cells_per_ul_of_sample,example2,Prevotella sp. oral taxon 299,1052.9117021078678
+cells_per_ul_of_sample,example2,Ruminococcus albus,2306.8310682463602
+cells_per_ul_of_sample,example2,Streptococcus mitis,961.8224213573176
+cells_per_ul_of_sample,example2,Streptococcus pneumoniae,481.9682089101706
+cells_per_ul_of_sample,example2,Tyzzerella nexilis,1069.6473834335245
+cells_per_ul_of_sample,example2,Veillonella dispar,474.1035001121753
+cells_per_cm2_of_sample,example1,Escherichia coli,113001.1551859989
+cells_per_cm2_of_sample,example1,Fusobacterium periodonticum,36639.24316024605
+cells_per_cm2_of_sample,example1,Lactobacillus gasseri,271928.84259161324
+cells_per_cm2_of_sample,example1,Leptolyngbya valderiana,57915.67954641656
+cells_per_cm2_of_sample,example1,Neisseria flavescens,47939.611356397676
+cells_per_cm2_of_sample,example1,Prevotella sp. oral taxon 299,65403.86916241766
+cells_per_cm2_of_sample,example1,Ruminococcus albus,142999.23031581732
+cells_per_cm2_of_sample,example1,Streptococcus mitis,59770.85280162318
+cells_per_cm2_of_sample,example1,Streptococcus pneumoniae,29981.767891932104
+cells_per_cm2_of_sample,example1,Tyzzerella nexilis,66396.366055855
+cells_per_cm2_of_sample,example1,Veillonella dispar,29492.028296143042
+cells_per_cm2_of_sample,example2,Escherichia coli,45566.17550459577
+cells_per_cm2_of_sample,example2,Fusobacterium periodonticum,260053.10592395777
+cells_per_cm2_of_sample,example2,Lactobacillus gasseri,109637.8007956167
+cells_per_cm2_of_sample,example2,Leptolyngbya valderiana,23188.283114545273
+cells_per_cm2_of_sample,example2,Neisseria flavescens,19281.861261164464
+cells_per_cm2_of_sample,example2,Prevotella sp. oral taxon 299,26322.79255269669
+cells_per_cm2_of_sample,example2,Ruminococcus albus,57670.776706159
+cells_per_cm2_of_sample,example2,Streptococcus mitis,24045.560533932938
+cells_per_cm2_of_sample,example2,Streptococcus pneumoniae,12049.205222754263
+cells_per_cm2_of_sample,example2,Tyzzerella nexilis,26741.184585838113
+cells_per_cm2_of_sample,example2,Veillonella dispar,11852.587502804383

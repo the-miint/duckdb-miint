@@ -910,7 +910,7 @@ SELECT parse_gff_attributes('ID=gene1;Name=TEST1;biotype=protein_coding');
 
 **Every miint function reports intervals as 1-based half-open `[position, stop_position)`.** A feature's length is always `stop_position - position` — never `+ 1`.
 
-This holds across `read_alignments`, `align_minimap2` / `align_bowtie2` and friends, `alignment_slice`, `compute_coverage_depth`, `genome_coverage`, `read_gff` and `read_ncbi_annotation`.
+This holds across `read_alignments`, `align_minimap2` / `align_bowtie2` and friends, `alignment_slice`, `compute_coverage_depth`, `genome_coverage` / `genome_coverage_per_sample`, `read_gff` and `read_ncbi_annotation`.
 
 Some source formats are inherently **closed** (`[start, end]`): GFF3 and NCBI annotations both are. miint **normalizes these on read** by emitting `end + 1`, so a single convention holds throughout and intervals from different readers compose correctly. The value the file contained is always recoverable as `stop_position - 1`.
 

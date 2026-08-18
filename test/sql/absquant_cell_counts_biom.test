@@ -1,0 +1,224 @@
+# name: test/sql/absquant_cell_counts_biom.test
+# description: absquant_cell_counts -- BIOM round-trip proving the sparse invariant
+# group: [sql]
+
+require miint
+
+require-env HDF5_AVAILABLE
+
+# ---------------------------------------------------------------------------
+# miint's long-form sparse invariant says a cell miint omits and a cell pysyndna
+# writes as an explicit 0.0 are the same claim about the data. Every other test
+# in this suite ASSERTS that, by comparing COALESCE(mine.value, 0) against the
+# golden. This file PROVES it, by putting the question to an independent
+# implementation of feature-table semantics that neither project wrote: the
+# BIOM format.
+#
+# Two facts about BIOM do the work, both pinned in test/sql/copy_biom.test:
+#
+#   * `COPY ... (FORMAT BIOM)` REMOVES explicit zeros on write. A zero cell and
+#     an absent cell therefore produce the same file.
+#   * `read_biom` returns only the stored nonzero entries.
+#
+# So if the dense form and the sparse form really are the same table, writing
+# either must produce the same BIOM and reading it back must give the same rows.
+# That is not something this port can arrange for itself.
+#
+# Set B is the fixture that has the case at all: its cells_per_g_of_gdna golden
+# carries two dense zeros, (s2, f_only1) which failed the coverage filter and
+# (s2, f_zero) whose read count was zero. They reach the same place by different
+# routes, which is why both are here.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE b_counts AS SELECT * FROM read_csv('data/syndna/cellsb_counts.csv');
+
+statement ok
+CREATE TABLE b_models AS SELECT * FROM read_csv('data/syndna/cellsb_models.csv');
+
+statement ok
+CREATE TABLE b_coverage AS SELECT * FROM read_csv('data/syndna/cellsb_coverage.csv');
+
+statement ok
+CREATE TABLE b_lengths AS SELECT * FROM read_csv('data/syndna/cellsb_lengths.csv');
+
+statement ok
+CREATE TABLE b_params AS SELECT * FROM read_csv('data/syndna/cellsb_params.csv');
+
+statement ok
+CREATE TABLE b_gold AS SELECT sample_id, feature_id, value
+FROM read_csv('data/syndna/cellsb_oracle.csv') WHERE metric = 'cells_per_g_of_gdna';
+
+statement ok
+CREATE TABLE b_mine AS SELECT * FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_g_of_gdna', 0.1);
+
+# The starting position: 7 sparse rows against 9 dense golden ones, differing by
+# exactly the two zeros.
+query I
+SELECT count(*) FROM b_mine;
+----
+7
+
+query TT
+SELECT sample_id, feature_id FROM b_gold WHERE value = 0.0 ORDER BY 1, 2;
+----
+s2	f_only1
+s2	f_zero
+
+# ---------------------------------------------------------------------------
+# Round-trip 1: miint's own output. Nothing lost, nothing invented, values
+# preserved exactly -- so the sparse table is a well-formed BIOM feature table
+# in the first place, which everything below depends on.
+#
+# Note the column order: COPY ... (FORMAT BIOM) takes (feature_id, sample_id,
+# value), while read_biom returns (sample_id, feature_id, value).
+# ---------------------------------------------------------------------------
+
+statement ok
+COPY (SELECT feature_id, sample_id, value FROM b_mine) TO '__TEST_DIR__/sparse.biom' (FORMAT BIOM);
+
+statement ok
+CREATE TABLE rt_sparse AS SELECT sample_id, feature_id, value FROM read_biom('__TEST_DIR__/sparse.biom');
+
+query TTR
+(SELECT * FROM rt_sparse EXCEPT SELECT * FROM b_mine)
+UNION ALL
+(SELECT * FROM b_mine EXCEPT SELECT * FROM rt_sparse);
+----
+
+# ---------------------------------------------------------------------------
+# Round-trip 2: the SAME data written the way pysyndna would have -- miint's
+# seven rows plus the two explicit zeros, i.e. the golden's nine rows exactly.
+#
+# If the two forms are the same feature table, this file and the one above must
+# read back identically. If they are not, this is where it shows.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE b_dense AS
+          SELECT sample_id, feature_id, value FROM b_mine
+UNION ALL SELECT sample_id, feature_id, value FROM b_gold WHERE value = 0.0;
+
+query I
+SELECT count(*) FROM b_dense;
+----
+9
+
+statement ok
+COPY (SELECT feature_id, sample_id, value FROM b_dense) TO '__TEST_DIR__/dense.biom' (FORMAT BIOM);
+
+statement ok
+CREATE TABLE rt_dense AS SELECT sample_id, feature_id, value FROM read_biom('__TEST_DIR__/dense.biom');
+
+# THE claim: the dense write and the sparse write are the same table.
+query TTR
+(SELECT * FROM rt_dense EXCEPT SELECT * FROM rt_sparse)
+UNION ALL
+(SELECT * FROM rt_sparse EXCEPT SELECT * FROM rt_dense);
+----
+
+# Stated the other way round, so a reader does not have to work out that an
+# empty symmetric difference between two 7-row tables is the point.
+query I
+SELECT count(*) FROM rt_dense;
+----
+7
+
+# ---------------------------------------------------------------------------
+# And the loop back to pysyndna: densifying the round-tripped table over its own
+# axes must reproduce the golden's nine rows, zeros included.
+#
+# The axes are not supplied here -- they are whatever samples and features
+# survived into the BIOM file. For Set B that is 3 samples x 3 features = 9,
+# which is exactly the shape of pysyndna's pivot. If miint had dropped a sample
+# or a feature entirely rather than one cell, the cross join would be the wrong
+# shape and this would fail even though every stored value matched.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE b_densified AS
+SELECT s.sample_id, f.feature_id, COALESCE(r.value, 0.0) AS value
+FROM (SELECT DISTINCT sample_id FROM rt_sparse) s
+CROSS JOIN (SELECT DISTINCT feature_id FROM rt_sparse) f
+LEFT JOIN rt_sparse r ON r.sample_id = s.sample_id AND r.feature_id = f.feature_id;
+
+query I
+SELECT count(*) FROM b_densified;
+----
+9
+
+query TT
+SELECT sample_id, feature_id
+FROM b_densified d FULL JOIN b_gold g USING (sample_id, feature_id)
+WHERE d.value IS NULL
+   OR g.value IS NULL
+   OR abs(d.value - g.value) > 1e-9 * (1.0 + abs(g.value))
+ORDER BY 1, 2;
+----
+
+# The two reconstructed zeros are the cells pysyndna wrote as 0.0, not an
+# artifact of the join finding nothing anywhere.
+query TT
+SELECT sample_id, feature_id FROM b_densified WHERE value = 0.0 ORDER BY 1, 2;
+----
+s2	f_only1
+s2	f_zero
+
+# ---------------------------------------------------------------------------
+# Set A round-trips too, and has no zero cell at all: 22 sparse rows over
+# 2 samples x 11 features -- the two OGUs that fail coverage in every sample
+# never reach the output, so they are not an axis and not a zero. That is the
+# other half of the README's distinction, and it is why a densify-everything
+# implementation would disagree with pysyndna here rather than at Set B.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE a_counts AS SELECT * FROM read_csv('data/syndna/cells_counts.csv');
+
+statement ok
+CREATE TABLE a_models AS SELECT * FROM read_csv('data/syndna/cells_models.csv');
+
+statement ok
+CREATE TABLE a_coverage AS SELECT * FROM read_csv('data/syndna/cells_coverage.csv');
+
+statement ok
+CREATE TABLE a_lengths AS SELECT * FROM read_csv('data/syndna/cells_lengths.csv');
+
+statement ok
+CREATE TABLE a_params AS SELECT * FROM read_csv('data/syndna/cells_params.csv');
+
+statement ok
+CREATE TABLE a_mine AS SELECT * FROM absquant_cell_counts(
+    'a_counts', 'a_models', 'a_coverage', 'a_lengths', 'a_params', 'cells_per_g_of_gdna', 0.1);
+
+statement ok
+COPY (SELECT feature_id, sample_id, value FROM a_mine) TO '__TEST_DIR__/set_a.biom' (FORMAT BIOM);
+
+statement ok
+CREATE TABLE rt_a AS SELECT sample_id, feature_id, value FROM read_biom('__TEST_DIR__/set_a.biom');
+
+query TTR
+(SELECT * FROM rt_a EXCEPT SELECT * FROM a_mine)
+UNION ALL
+(SELECT * FROM a_mine EXCEPT SELECT * FROM rt_a);
+----
+
+query III
+SELECT count(*), count(DISTINCT sample_id), count(DISTINCT feature_id) FROM rt_a;
+----
+22	2	11
+
+# 2 x 11 = 22 with nothing left over, so densifying Set A adds no cell and
+# invents no zero. Compared against the golden, which has 22 rows for this
+# metric and none of them zero.
+query TT
+SELECT sample_id, feature_id
+FROM rt_a m FULL JOIN (SELECT sample_id, feature_id, value FROM read_csv('data/syndna/cells_oracle.csv')
+                       WHERE metric = 'cells_per_g_of_gdna') g
+     USING (sample_id, feature_id)
+WHERE m.value IS NULL
+   OR g.value IS NULL
+   OR abs(m.value - g.value) > 1e-9 * (1.0 + abs(g.value))
+ORDER BY 1, 2;
+----

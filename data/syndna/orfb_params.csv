@@ -1,0 +1,4 @@
+sample_id,calc_mass_sample_aliquot_input_g,total_rna_concentration_ng_ul,vol_extracted_elution_ul,total_biological_reads_r1r2
+r1,0.003,0.132714286,70.0,213988
+r2,0.00082,0.0042,70.0,3028580
+rnan,,0.05,70.0,1000
