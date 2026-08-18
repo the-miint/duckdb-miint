@@ -3,7 +3,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "unifrac_bptree.hpp"
-#include "unifrac_libssu.hpp" // faith_pd_inmem, r_vec*, destroy_results_vec
+#include "api.hpp" // faith_pd_inmem, r_vec*, destroy_results_vec
 #include "unifrac_support_biom.hpp"
 
 #include "NewickTree.hpp"
@@ -193,4 +193,43 @@ TEST_CASE("UnifracSupportBiomView feeds faith_pd_inmem with hand-checked values"
 	REQUIRE(result->values[3] == Catch::Approx(1.4));
 
 	destroy_results_vec(&result);
+}
+
+TEST_CASE("UnifracSupportBiomView exposes its features as the canonical dictionary", "[unifrac][support_biom]") {
+	// progressive_pcoa_from_unifrac shears the tree to feature_ids() before every
+	// block, so this accessor has to be the SAME set the CSR was built against —
+	// deduplicated and lexicographically sorted, matching obs_ids one for one. If
+	// it ever drifted (an id present in the matrix but missing here), the shear
+	// would prune a tip some sample in that block actually uses and the block's
+	// distances would silently change.
+	std::vector<CooRow> rows = {
+	    {"S2", "F2", 2.0}, {"S1", "F1", 1.0}, {"S3", "F4", 6.0}, {"S3", "F1", 4.0},
+	    {"S1", "F3", 3.0}, {"S3", "F2", 5.0}, {"S1", "F1", 7.0}, // duplicate id, must not duplicate here
+	};
+	auto view = UnifracSupportBiomView::FromCoo(rows);
+	const support_biom_t *biom = view.support_biom();
+	const auto &fids = view.feature_ids();
+
+	REQUIRE(fids == std::vector<std::string> {"F1", "F2", "F3", "F4"});
+	REQUIRE(fids.size() == static_cast<size_t>(biom->n_obs));
+	for (int i = 0; i < biom->n_obs; ++i) {
+		REQUIRE(fids[static_cast<size_t>(i)] == std::string(biom->obs_ids[i]));
+	}
+}
+
+TEST_CASE("UnifracSupportBiomView canonicalizes ids the dictionary never sees in order", "[unifrac][support_biom]") {
+	// The dictionary is built from a hash set, whose iteration order is arbitrary
+	// and differs from insertion order — the sort is what makes the result
+	// canonical. Ids chosen so that first-appearance order, reverse order and
+	// lexicographic order all disagree.
+	std::vector<CooRow> rows = {
+	    {"b", "z", 1.0}, {"c", "y", 2.0}, {"a", "x", 3.0}, {"c", "z", 4.0}, {"a", "y", 5.0},
+	};
+	auto view = UnifracSupportBiomView::FromCoo(rows);
+	const support_biom_t *biom = view.support_biom();
+
+	REQUIRE(std::string(biom->sample_ids[0]) == "a");
+	REQUIRE(std::string(biom->sample_ids[1]) == "b");
+	REQUIRE(std::string(biom->sample_ids[2]) == "c");
+	REQUIRE(view.feature_ids() == std::vector<std::string> {"x", "y", "z"});
 }

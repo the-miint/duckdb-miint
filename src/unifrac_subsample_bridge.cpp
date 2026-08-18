@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "unifrac_libssu.hpp"
+#include "api.hpp"
 
 namespace miint::unifrac {
 
@@ -30,6 +30,8 @@ const char *ComputeStatusName(ComputeStatus s) {
 		return "invalid_method";
 	case grouping_missing:
 		return "grouping_missing";
+	case unsupported_device:
+		return "unsupported_device";
 	}
 	return "unknown";
 }

@@ -1,0 +1,9 @@
+procrustes parity oracle
+seed=42 (per-case: SeedSequence([SEED, sha256(case_name)]))
+numpy=1.26.4
+scipy=1.14.1
+oracle: scipy.spatial.procrustes (full) + numpy deconstructed partial (q2#338)
+case full_small: full  n=6 d=3 reflect=False
+case full_reflect: full  n=8 d=3 reflect=True
+case full_wide: full  n=12 d=5 reflect=False
+case partial_anchored: partial anchors=6 extra=4 d=3

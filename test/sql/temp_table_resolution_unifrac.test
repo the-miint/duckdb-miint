@@ -1,0 +1,202 @@
+# name: test/sql/temp_table_resolution_unifrac.test
+# description: Regression: the UniFrac-family table-name parameters must resolve TEMP tables and views (#193, continued)
+# group: [sql]
+
+#
+# The companion to test/sql/temp_table_resolution.test, which explains the defect
+# in full. Split off only because these functions need the UniFrac feature, and
+# DuckDB processes `require-env` while PARSING -- a guard part-way down a file
+# skips the whole file, so the ungated cases have to live somewhere else.
+#
+# Sites covered here, none of which any other case reaches:
+#   - ReadDistanceTable pass 2   -> src/unifrac_function_common.cpp
+#     (pass 1, EnumerateDistanceIds, was migrated already, so a TEMP distance
+#      table used to bind AND enumerate its ids before failing in pass 2)
+#   - StageWaveMaps              -> src/unifrac_pcoa_function.cpp (the wave path's
+#     routed queries, and the one site here that CREATES relations)
+#   - QueryDistanceBlock         -> src/unifrac_pcoa_function.cpp (per-batch provider)
+#   - EnumerateFeatureTableIds   -> src/unifrac_pcoa_function.cpp
+#   - QueryFeatureRows           -> src/unifrac_pcoa_function.cpp (called from
+#     worker threads, one connection per call)
+#
+# As in the ungated file, every TEMP case is paired with an identical non-TEMP
+# control, so a failure means "TEMP is the discriminator", not "the fixture is
+# wrong", and the assertions are exact values rather than mere row counts -- a
+# resolution fix that silently read an empty relation would still produce a shape.
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+statement ok
+CREATE TEMP TABLE tmp_tree AS SELECT * FROM read_newick('data/unifrac/gg_otu_tree.nwk');
+
+statement ok
+CREATE TEMP TABLE tmp_ft AS
+SELECT 's' || s AS sample_id, 'GG_OTU_' || (f + 1) AS feature_id, (1 + (s * 7 + f * 13) % 11)::DOUBLE AS value
+FROM range(40) t(s), range(5) u(f);
+
+statement ok
+CREATE TABLE reg_tree AS SELECT * FROM tmp_tree;
+
+statement ok
+CREATE TABLE reg_ft AS SELECT * FROM tmp_ft;
+
+statement ok
+CREATE TABLE reg_dm AS
+SELECT sample_a, sample_b, distance FROM unifrac_distances('reg_ft', 'reg_tree', variant := 'weighted_normalized');
+
+statement ok
+CREATE TEMP TABLE tmp_dm AS SELECT * FROM reg_dm;
+
+# ==============================================================================
+# ReadDistanceTable pass 2 -- pcoa and permanova
+# ==============================================================================
+
+# 40 samples x 3 axes. The control first.
+query I
+SELECT count(*) FROM pcoa('reg_dm', n_dims := 3, seed := 42);
+----
+120
+
+query I
+SELECT count(*) FROM pcoa('tmp_dm', n_dims := 3, seed := 42);
+----
+120
+
+# Not merely the right shape: the TEMP read must produce the SAME ordination as
+# the persistent one. A pass-2 read that returned an empty or partial matrix could
+# still emit 120 rows.
+statement ok
+CREATE TABLE ord_reg AS SELECT sample_id, axis, coordinate FROM pcoa('reg_dm', n_dims := 3, seed := 42);
+
+statement ok
+CREATE TABLE ord_tmp AS SELECT sample_id, axis, coordinate FROM pcoa('tmp_dm', n_dims := 3, seed := 42);
+
+query T
+SELECT DISTINCT m2 < 1e-12 FROM procrustes('ord_reg', 'ord_tmp', permutations := 0);
+----
+true
+
+# permanova reaches the same pass-2 site through a different caller. Its metadata
+# reader already inherited, so a TEMP metadata relation is the control that says
+# so -- both TEMP here, to cover the pair.
+statement ok
+CREATE TEMP TABLE tmp_md AS SELECT 's' || s AS sample_id, (s % 2)::VARCHAR AS grp FROM range(40) t(s);
+
+query TT
+SELECT variable, f_stat IS NOT NULL FROM permanova('tmp_dm', 'tmp_md', n_permutations := 9, seed := 42);
+----
+grp	true
+
+# ==============================================================================
+# progressive_pcoa_from_distances -- StageWaveMaps and its routed queries
+# ==============================================================================
+#
+# The wave path is taken always, so this is the default route rather than a corner
+# case. StageWaveMaps is the only site in this file that CREATES relations, so it
+# needed uniquified names plus an explicit drop before it could inherit -- see the
+# no-leak assertion below.
+
+query I
+SELECT count(*) FROM progressive_pcoa_from_distances('reg_dm', n_dims := 3, n_anchors := 15,
+    batch_size := 12, seed := 42);
+----
+120
+
+query I
+SELECT count(*) FROM progressive_pcoa_from_distances('tmp_dm', n_dims := 3, n_anchors := 15,
+    batch_size := 12, seed := 42);
+----
+120
+
+# Every sample of the input must come back, which is what fails if a routed query
+# read the relation as empty for some blocks but not others.
+query I
+SELECT count(*) FROM (
+    SELECT DISTINCT sample_id FROM progressive_pcoa_from_distances('tmp_dm', n_dims := 3,
+        n_anchors := 15, batch_size := 12, seed := 42)
+    EXCEPT SELECT DISTINCT sample_id FROM tmp_ft);
+----
+0
+
+# The wave-map tables must not survive the call. On an inheriting connection they
+# are created in the USER's session, so a leak would put miint internals in their
+# SHOW TABLES -- and a fixed name would make two concurrent runs collide.
+query I
+SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE '\_miint\_wave\_%' ESCAPE '\';
+----
+0
+
+# ==============================================================================
+# progressive_pcoa_from_unifrac -- EnumerateFeatureTableIds and QueryFeatureRows
+# ==============================================================================
+#
+# QueryFeatureRows is called from worker threads, one connection per call, so this
+# also exercises concurrent construction of inheriting connections.
+
+query I
+SELECT count(*) FROM progressive_pcoa_from_unifrac('reg_ft', 'reg_tree', variant := 'weighted_normalized',
+    n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+120
+
+query I
+SELECT count(*) FROM progressive_pcoa_from_unifrac('tmp_ft', 'tmp_tree', variant := 'weighted_normalized',
+    n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+120
+
+# The feature table TEMP and the tree persistent, and vice versa: the two relations
+# are read through different files, so one working says nothing about the other.
+query I
+SELECT count(*) FROM progressive_pcoa_from_unifrac('tmp_ft', 'reg_tree', variant := 'weighted_normalized',
+    n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+120
+
+query I
+SELECT count(*) FROM progressive_pcoa_from_unifrac('reg_ft', 'tmp_tree', variant := 'weighted_normalized',
+    n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+120
+
+# ...and the result must be a real ordination of the TEMP data, not an empty or
+# partial read that happened to have the right row count.
+statement ok
+CREATE TABLE prog_tmp AS
+SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_unifrac('tmp_ft', 'tmp_tree',
+    variant := 'weighted_normalized', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+
+statement ok
+CREATE TABLE full_reg AS
+SELECT sample_id, axis, coordinate FROM unifrac_pcoa('reg_ft', 'reg_tree',
+    variant := 'weighted_normalized', n_dims := 3, seed := 42);
+
+query T
+SELECT DISTINCT m2 < 0.05 FROM procrustes('full_reg', 'prog_tmp', permutations := 0);
+----
+true
+
+# ==============================================================================
+# Controls: readers in this family that already inherited
+# ==============================================================================
+#
+# ReadFeatureTable and the tree reader were migrated earlier. Asserted so that a
+# regression in them is attributed here rather than mistaken for one of the sites
+# above.
+
+query I
+SELECT count(*) FROM unifrac_distances('tmp_ft', 'tmp_tree', variant := 'weighted_normalized');
+----
+780
+
+query I
+SELECT count(DISTINCT sample_id) FROM rarefy_feature_table('tmp_ft', depth := 10, seed := 42, threads := 1);
+----
+40
+
+query I
+SELECT count(*) FROM unifrac_faith_pd('tmp_ft', 'tmp_tree');
+----
+40

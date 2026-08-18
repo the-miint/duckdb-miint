@@ -77,6 +77,7 @@
 #include <cluster_kmeans.hpp>
 #include <cluster_upgma.hpp>
 #include <community_distances.hpp>
+#include <pick_anchors.hpp>
 #include <mmvec.hpp>
 #include <deblur_table_function.hpp>
 #include <simulate_resemblance.hpp>
@@ -103,6 +104,7 @@
 #include <search_sequences.hpp>
 #include <cluster_sequences.hpp>
 #endif
+#include <procrustes_table_function.hpp>
 #ifdef MIINT_HAS_UNIFRAC
 #include <unifrac_table_functions.hpp>
 #endif
@@ -354,13 +356,17 @@ static void LoadInternal(ExtensionLoader &loader) {
 	MassQLFunction::Register(loader);
 	WoltkaOguFunction::Register(loader);
 	MzmlPeakPairFunction::Register(loader);
+	RegisterProcrustes(loader);
 #ifdef MIINT_HAS_UNIFRAC
 	RegisterUnifracPcoa(loader);
 	RegisterUnifracPermanova(loader);
 	RegisterUnifracFaithPD(loader);
 	RegisterUnifracDistances(loader);
 	RegisterPcoaFromDistances(loader);
+	RegisterProgressivePcoaFromDistances(loader);
+	RegisterProgressivePcoaFromUnifrac(loader);
 	RegisterPermanovaFromDistances(loader);
+	RegisterRarefyFeatureTable(loader);
 #endif
 
 	AlignPairwiseWfa2ScoreFunction::Register(loader);
@@ -456,6 +462,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterAbsQuantOrfCopies(loader);
 	RegisterClusterKmeans(loader);
 	RegisterClusterUpgma(loader);
+	RegisterPickAnchors(loader);
 
 	// Multi-omics: MMvec joint embeddings of two paired count modalities. Pure
 	// in-repo C++ over the same generic table readers, so likewise always on.

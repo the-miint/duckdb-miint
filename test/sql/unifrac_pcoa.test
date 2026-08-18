@@ -248,3 +248,32 @@ query T
 SELECT DISTINCT typeof(sample_id) FROM unifrac_pcoa('observations', 'tree', n_dims := 3, seed := 42);
 ----
 VARCHAR
+
+# ── the ordination happens per EXECUTION, not once at bind ──────────────────────
+# Same defect as pcoa: with the work in Bind, the second EXECUTE of a prepared
+# statement returned nothing, because InitGlobal moved the rows out of the bind data.
+statement ok
+PREPARE unifrac_pcoa_twice AS
+SELECT COUNT(*) FROM unifrac_pcoa('observations', 'tree', n_dims := 3, seed := 42);
+
+query I
+EXECUTE unifrac_pcoa_twice;
+----
+18
+
+query I
+EXECUTE unifrac_pcoa_twice;
+----
+18
+
+# EXPLAIN binds but does not execute, so a tree that fails to cover the table's
+# features — a data-level mismatch — is not reported until the query runs.
+statement ok
+EXPLAIN SELECT * FROM unifrac_pcoa('observations_extra_feature', 'tree',
+    variant := 'weighted_normalized', n_dims := 3);
+
+# ...while a bad parameter is still rejected at bind.
+statement error
+EXPLAIN SELECT * FROM unifrac_pcoa('observations', 'tree', variant := 'made_up_metric', n_dims := 3);
+----
+variant

@@ -1,0 +1,299 @@
+# name: test/sql/procrustes.test
+# description: procrustes table function — align two long-format ordination tables (sample_id, axis, coordinate) into a shared frame; emit both clouds + M^2 + PROTEST p-value.
+# group: [sql]
+
+require miint
+
+# ── fixtures: 4 asymmetric, non-collinear points in 2-D. Asymmetric (no square
+#    symmetry) so the identity pairing is the unique minimum-disparity match —
+#    this keeps the perfect-fit p-value floor deterministic (a symmetric square
+#    would let a symmetry permutation tie the identity's M^2). ──
+statement ok
+CREATE TABLE ref_sq AS SELECT * FROM (VALUES
+  ('S0', 0, 0.0), ('S0', 1, 0.0),
+  ('S1', 0, 1.0), ('S1', 1, 0.0),
+  ('S2', 0, 0.3), ('S2', 1, 1.4),
+  ('S3', 0, 1.2), ('S3', 1, 0.8)) t(sample_id, axis, coordinate);
+
+# an exact copy — the identity case
+statement ok
+CREATE TABLE oth_copy AS SELECT * FROM ref_sq;
+
+# a uniform scale (x2) + translation (+5) of the reference: a pure similarity with
+# no rotation, which procrustes removes -> M^2 ~ 0
+statement ok
+CREATE TABLE oth_scaled AS SELECT sample_id, axis, coordinate * 2.0 + 5.0 AS coordinate FROM ref_sq;
+
+# ── availability ──
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'procrustes';
+----
+1
+
+# ── output arity: both clouds stacked = 2 * n * d rows ──
+query I
+SELECT count(*) FROM procrustes('ref_sq', 'oth_copy', permutations := 0);
+----
+16
+
+# ── the two matrices present ──
+query T
+SELECT DISTINCT matrix FROM procrustes('ref_sq', 'oth_copy', permutations := 0) ORDER BY 1;
+----
+other
+reference
+
+# ── identity: disparity is ~0 ──
+query T
+SELECT DISTINCT m2 < 1e-9 FROM procrustes('ref_sq', 'oth_copy', permutations := 0);
+----
+true
+
+# ── identity: the reference and other clouds coincide (n*d matched cells) ──
+query I
+WITH p AS (SELECT * FROM procrustes('ref_sq', 'oth_copy', permutations := 0))
+SELECT count(*) FROM p a JOIN p b
+  ON a.sample_id = b.sample_id AND a.axis = b.axis
+WHERE a.matrix = 'reference' AND b.matrix = 'other'
+  AND abs(a.coordinate - b.coordinate) < 1e-9;
+----
+8
+
+# ── scale + translation are removed: disparity ~0 ──
+query T
+SELECT DISTINCT m2 < 1e-9 FROM procrustes('ref_sq', 'oth_scaled', permutations := 0);
+----
+true
+
+# ── p-value: full case emits a non-NULL p-value; a perfect fit cannot be beaten
+#    by any permutation, so it sits at the floor (0 + 1)/(perms + 1) = 1/100
+#    (seed-independent here; seed reproducibility is covered by the C++ test) ──
+query T
+SELECT DISTINCT round(pvalue, 6) = round(1.0 / 100.0, 6) FROM procrustes('ref_sq', 'oth_copy', permutations := 99, seed := 42);
+----
+true
+
+query T
+SELECT DISTINCT pvalue IS NOT NULL FROM procrustes('ref_sq', 'oth_copy', permutations := 99, seed := 42);
+----
+true
+
+# ── permutations := 0 disables the test -> p-value is NULL ──
+query T
+SELECT DISTINCT pvalue IS NULL FROM procrustes('ref_sq', 'oth_copy', permutations := 0);
+----
+true
+
+# ── sample_id type is mirrored: VARCHAR ──
+query T
+SELECT DISTINCT typeof(sample_id) FROM procrustes('ref_sq', 'oth_copy', permutations := 0);
+----
+VARCHAR
+
+# ── sample_id type is mirrored: BIGINT ──
+statement ok
+CREATE TABLE ref_bi AS SELECT sample_id::BIGINT AS sample_id, axis, coordinate
+  FROM (VALUES (10, 0, 0.0), (10, 1, 0.0), (11, 0, 1.0), (11, 1, 0.0),
+               (12, 0, 0.0), (12, 1, 1.0), (13, 0, 1.0), (13, 1, 1.0)) t(sample_id, axis, coordinate);
+
+statement ok
+CREATE TABLE oth_bi AS SELECT * FROM ref_bi;
+
+query T
+SELECT DISTINCT typeof(sample_id) FROM procrustes('ref_bi', 'oth_bi', permutations := 0);
+----
+BIGINT
+
+# ── sample_id type is mirrored: UUID ──
+statement ok
+CREATE TABLE ref_uu AS SELECT sample_id::UUID AS sample_id, axis, coordinate FROM (VALUES
+  ('11111111-1111-1111-1111-111111111111', 0, 0.0), ('11111111-1111-1111-1111-111111111111', 1, 0.0),
+  ('22222222-2222-2222-2222-222222222222', 0, 1.0), ('22222222-2222-2222-2222-222222222222', 1, 0.0),
+  ('33333333-3333-3333-3333-333333333333', 0, 0.0), ('33333333-3333-3333-3333-333333333333', 1, 1.0),
+  ('44444444-4444-4444-4444-444444444444', 0, 1.0), ('44444444-4444-4444-4444-444444444444', 1, 1.0))
+  t(sample_id, axis, coordinate);
+
+statement ok
+CREATE TABLE oth_uu AS SELECT * FROM ref_uu;
+
+query T
+SELECT DISTINCT typeof(sample_id) FROM procrustes('ref_uu', 'oth_uu', permutations := 0);
+----
+UUID
+
+# ── mixed input id types collapse to VARCHAR (reference BIGINT, other VARCHAR
+#    with the same string ids) — deliberately permissive, unlike the distance
+#    reader's fail-loud on mismatched sample_a/sample_b ──
+statement ok
+CREATE TABLE oth_bi_as_str AS SELECT sample_id::VARCHAR AS sample_id, axis, coordinate FROM ref_bi;
+
+query T
+SELECT DISTINCT typeof(sample_id) FROM procrustes('ref_bi', 'oth_bi_as_str', permutations := 0);
+----
+VARCHAR
+
+# ── n_dims truncation: a 3-axis ordination restricted to 2 axes ──
+statement ok
+CREATE TABLE r3 AS SELECT * FROM (VALUES
+  ('S0', 0, 0.0), ('S0', 1, 0.0), ('S0', 2, 0.5),
+  ('S1', 0, 1.0), ('S1', 1, 0.0), ('S1', 2, 0.2),
+  ('S2', 0, 0.3), ('S2', 1, 1.4), ('S2', 2, 0.9),
+  ('S3', 0, 1.2), ('S3', 1, 0.8), ('S3', 2, 0.1)) t(sample_id, axis, coordinate);
+
+statement ok
+CREATE TABLE o3 AS SELECT * FROM r3;
+
+# default uses all 3 axes: 2 clouds * 4 samples * 3 axes = 24 rows, max axis 2
+query II
+SELECT count(*), max(axis) FROM procrustes('r3', 'o3', permutations := 0);
+----
+24	2
+
+# n_dims := 2 truncates to the first 2 axes: 2 * 4 * 2 = 16 rows, max axis 1
+query II
+SELECT count(*), max(axis) FROM procrustes('r3', 'o3', n_dims := 2, permutations := 0);
+----
+16	1
+
+# n_dims beyond available axes is rejected
+statement error
+SELECT * FROM procrustes('r3', 'o3', n_dims := 5, permutations := 0);
+----
+exceeds available axes
+
+# ── views are accepted (separate-connection reader handles both tables and views) ──
+statement ok
+CREATE VIEW ref_view AS SELECT * FROM ref_sq;
+
+query I
+SELECT count(*) FROM procrustes('ref_view', 'oth_copy', permutations := 0);
+----
+16
+
+# ── partial / anchored case ─────────────────────────────────────────────────
+# reference = 4 anchors; other = the 4 anchors (distinct ids) + 2 extra samples,
+# all in a different frame; fit on the anchor pairing, apply to every row.
+statement ok
+CREATE TABLE ref_anchor AS SELECT * FROM ref_sq;
+
+# B0..B3 are a pure scale+translate image of the reference anchors S0..S3 (so the
+# anchor fit is exact, M^2 ~ 0), plus two extra samples X0/X1 in the same frame.
+statement ok
+CREATE TABLE other_frame AS
+  SELECT 'B' || substr(sample_id, 2) AS sample_id, axis, coordinate * 3.0 - 2.0 AS coordinate FROM ref_anchor
+  UNION ALL
+  SELECT * FROM (VALUES
+    ('X0', 0, 0.5), ('X0', 1, 2.0),
+    ('X1', 0, 2.0), ('X1', 1, 0.5)) t(sample_id, axis, coordinate);
+
+statement ok
+CREATE TABLE pairs AS SELECT * FROM (VALUES
+  ('S0', 'B0'), ('S1', 'B1'), ('S2', 'B2'), ('S3', 'B3')) t(reference_id, other_id);
+
+# rows = (4 reference + 6 other) * 2 axes = 20
+query I
+SELECT count(*) FROM procrustes('ref_anchor', 'other_frame', pairing := 'pairs');
+----
+20
+
+# the anchor alignment is a pure similarity -> M^2 ~ 0, and the partial case
+# leaves the p-value NULL (q2's partial_procrustes runs no Monte Carlo test)
+query TT
+SELECT DISTINCT m2 < 1e-9, pvalue IS NULL FROM procrustes('ref_anchor', 'other_frame', pairing := 'pairs');
+----
+true	true
+
+# the extra `other` samples (X0, X1) are carried through into the shared frame
+query I
+SELECT count(DISTINCT sample_id) FROM procrustes('ref_anchor', 'other_frame', pairing := 'pairs') WHERE matrix = 'other';
+----
+6
+
+# partial case also honors n_dims truncation (fit on 1 axis -> max axis 0)
+query II
+SELECT count(*), max(axis) FROM procrustes('ref_anchor', 'other_frame', pairing := 'pairs', n_dims := 1);
+----
+10	0
+
+# a duplicate reference_id in the pairing is rejected (must be 1:1)
+statement ok
+CREATE TABLE pairs_dup_ref AS SELECT * FROM (VALUES
+  ('S0', 'B0'), ('S0', 'B1'), ('S2', 'B2'), ('S3', 'B3')) t(reference_id, other_id);
+
+statement error
+SELECT * FROM procrustes('ref_anchor', 'other_frame', pairing := 'pairs_dup_ref');
+----
+duplicate reference_id
+
+# a duplicate other_id in the pairing is rejected — otherwise one physical sample
+# would enter the fit as two independent anchors and silently corrupt it
+statement ok
+CREATE TABLE pairs_dup_other AS SELECT * FROM (VALUES
+  ('S0', 'B0'), ('S1', 'B0'), ('S2', 'B2'), ('S3', 'B3')) t(reference_id, other_id);
+
+statement error
+SELECT * FROM procrustes('ref_anchor', 'other_frame', pairing := 'pairs_dup_other');
+----
+duplicate other_id
+
+# ── error matrix ─────────────────────────────────────────────────────────────
+# full case: different sample sets
+statement ok
+CREATE TABLE oth_diff AS SELECT * FROM (VALUES
+  ('Z0', 0, 0.0), ('Z0', 1, 0.0), ('Z1', 0, 1.0), ('Z1', 1, 0.0),
+  ('Z2', 0, 0.0), ('Z2', 1, 1.0), ('Z3', 0, 1.0), ('Z3', 1, 1.0)) t(sample_id, axis, coordinate);
+
+statement error
+SELECT * FROM procrustes('ref_sq', 'oth_diff', permutations := 0);
+----
+different sample sets
+
+# full case: different axis counts
+statement ok
+CREATE TABLE oth_3d AS SELECT sample_id, axis, coordinate FROM ref_sq
+  UNION ALL SELECT sample_id, 2 AS axis, 0.5 AS coordinate FROM (SELECT DISTINCT sample_id FROM ref_sq) s;
+
+statement error
+SELECT * FROM procrustes('ref_sq', 'oth_3d', permutations := 0);
+----
+different axis counts
+
+# missing required column
+statement ok
+CREATE TABLE bad_cols AS SELECT sample_id, axis AS wrong_name, coordinate FROM ref_sq;
+
+statement error
+SELECT * FROM procrustes('bad_cols', 'oth_copy', permutations := 0);
+----
+must expose
+
+# ragged ordination: a sample missing an axis
+statement ok
+CREATE TABLE ragged AS SELECT * FROM ref_sq WHERE NOT (sample_id = 'S1' AND axis = 1);
+
+statement error
+SELECT * FROM procrustes('ragged', 'oth_copy', permutations := 0);
+----
+ragged
+
+# too few samples for the fit (need >= d + 1 = 3)
+statement ok
+CREATE TABLE tiny AS SELECT * FROM ref_sq WHERE sample_id IN ('S0', 'S1');
+
+statement ok
+CREATE TABLE tiny_o AS SELECT * FROM tiny;
+
+statement error
+SELECT * FROM procrustes('tiny', 'tiny_o', permutations := 0);
+----
+too few
+
+# a stray out-of-range axis (e.g. the wrong column mapped to `axis`) is rejected
+# before any n*d buffer is sized, rather than attempting a huge allocation
+statement ok
+CREATE TABLE bad_axis AS SELECT * FROM ref_sq UNION ALL SELECT 'S0', 999, 0.0;
+
+statement error
+SELECT * FROM procrustes('bad_axis', 'oth_copy', permutations := 0);
+----
+at most n axes

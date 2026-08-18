@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "NewickTree.hpp"
-#include "unifrac_libssu.hpp" // guarded wrapper over unifrac api.hpp (support_bptree_t)
+#include "api.hpp" // libssu (support_bptree_t)
 
 namespace miint::unifrac {
 

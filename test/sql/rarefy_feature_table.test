@@ -1,0 +1,205 @@
+# name: test/sql/rarefy_feature_table.test
+# description: rarefy_feature_table — rarefy (subsample without replacement) a feature table to an even per-sample depth, returning a feature table the other diversity functions consume.
+# group: [sql]
+
+require miint
+
+# ── availability (unguarded, so it always runs) ──
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'rarefy_feature_table';
+----
+1
+
+require-env UNIFRAC_AVAILABLE
+
+# ── fixture: five samples with deliberately uneven depths. s1's total (2) is below
+#    the depths tested here, so it exercises the drop rule; s4 holds all its counts
+#    in ONE feature, which makes its rarefied result independent of the RNG. ──
+statement ok
+CREATE TABLE ft AS SELECT * FROM (VALUES
+    ('s1', 'f1',  1.0), ('s1', 'f2',  1.0),
+    ('s2', 'f1',  5.0), ('s2', 'f2',  5.0),
+    ('s3', 'f1',  3.0), ('s3', 'f3',  7.0),
+    ('s4', 'f2', 10.0),
+    ('s5', 'f1',  2.0), ('s5', 'f2',  4.0), ('s5', 'f3', 4.0)
+) t(sample_id, feature_id, value);
+
+# ── THE CONTRACT: every surviving sample comes out at exactly `depth`. That is what
+#    "even depth" means and it is the entire reason to rarefy — an unrarefied table
+#    makes depth itself a covariate, which unweighted UniFrac is highly sensitive
+#    to. If this ever fails, downstream diversity results are confounded. ──
+query I
+SELECT count(DISTINCT total) FROM (
+    SELECT sample_id, sum(value) AS total
+    FROM rarefy_feature_table('ft', depth := 3, seed := 42) GROUP BY sample_id);
+----
+1
+
+query I
+SELECT DISTINCT total FROM (
+    SELECT sample_id, sum(value) AS total
+    FROM rarefy_feature_table('ft', depth := 3, seed := 42) GROUP BY sample_id);
+----
+3
+
+# ── drop rule: a sample whose total count is below `depth` cannot be rarefied to it
+#    and is DROPPED, not padded or partially filled. s1 (total 2) goes; the other
+#    four (total 10) stay. This mirrors unifrac_distances' subsample_depth behavior.
+#    Silent dropping is why the count is asserted explicitly rather than implied. ──
+query I
+SELECT count(DISTINCT sample_id) FROM rarefy_feature_table('ft', depth := 3, seed := 42);
+----
+4
+
+query I
+SELECT count(*) FROM rarefy_feature_table('ft', depth := 3, seed := 42) WHERE sample_id = 's1';
+----
+0
+
+# ── RNG-INDEPENDENT ORACLE, depth 10: drawing 10 items WITHOUT replacement from a
+#    sample holding exactly 10 is not a random choice — it must return every item.
+#    So at depth 10 the whole output is determined: the input minus s1, unchanged.
+#    This pins the draw's correctness without depending on libssu's generator, and
+#    would catch a draw that loses or duplicates counts. ──
+query I
+SELECT count(*) FROM (
+    (SELECT sample_id, feature_id, value FROM ft WHERE sample_id <> 's1'
+     EXCEPT SELECT sample_id, feature_id, value FROM rarefy_feature_table('ft', depth := 10, seed := 7))
+    UNION ALL
+    (SELECT sample_id, feature_id, value FROM rarefy_feature_table('ft', depth := 10, seed := 7)
+     EXCEPT SELECT sample_id, feature_id, value FROM ft WHERE sample_id <> 's1'));
+----
+0
+
+# ── second RNG-independent oracle, this one at a depth where the draw IS random for
+#    every other sample: s4's counts all sit in f2, so any 3 of its 10 items are 3
+#    f2 items. Exactly one row, value exactly 3. ──
+query TTR
+SELECT sample_id, feature_id, value
+FROM rarefy_feature_table('ft', depth := 3, seed := 42) WHERE sample_id = 's4';
+----
+s4	f2	3.0
+
+# ── counts stay counts: no zero, negative, fractional, or NULL cells. A zero cell
+#    would also violate the sparse-storage invariant the readers assume. ──
+query I
+SELECT count(*) FROM rarefy_feature_table('ft', depth := 3, seed := 42)
+WHERE value IS NULL OR value <= 0 OR value <> floor(value);
+----
+0
+
+# ── no rarefied cell may exceed its input cell: subsampling removes counts, never
+#    invents them. (A with_replacement draw MAY exceed it — tested separately.) ──
+query I
+SELECT count(*) FROM rarefy_feature_table('ft', depth := 3, seed := 42) r
+JOIN ft USING (sample_id, feature_id) WHERE r.value > ft.value;
+----
+0
+
+# ── reproducibility: same seed → identical draw. `threads` is fixed because a
+#    seeded libssu draw reproduces per thread count, not across thread counts
+#    (see docs/diversity.md#subsample-thread-count) — leaving it unset would make
+#    this test's meaning depend on the host's core count. ──
+statement ok
+CREATE TABLE r1 AS SELECT * FROM rarefy_feature_table('ft', depth := 3, seed := 42, threads := 1);
+
+statement ok
+CREATE TABLE r2 AS SELECT * FROM rarefy_feature_table('ft', depth := 3, seed := 42, threads := 1);
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r1 EXCEPT SELECT * FROM r2)
+                      UNION ALL (SELECT * FROM r2 EXCEPT SELECT * FROM r1));
+----
+0
+
+# ── THE POINT OF THE FUNCTION: its output is a feature table, so it composes with
+#    the functions that consume one. progressive_pcoa_from_unifrac has no
+#    subsample_depth of its own (per-batch draws would each use a different draw),
+#    so rarefying upstream through this function is the ONLY way to feed it an
+#    even-depth table — which is what this asserts is possible. ──
+statement ok
+CREATE TABLE tree AS SELECT * FROM read_newick('data/unifrac/gg_otu_tree.nwk');
+
+# the same fixture keyed to that tree's tip names (its two unused tips are fine —
+# the tree must COVER the features, not match them exactly)
+statement ok
+CREATE TABLE ft_gg AS
+SELECT sample_id, 'GG_OTU_' || substr(feature_id, 2, 1) AS feature_id, value FROM ft;
+
+statement ok
+CREATE TABLE ft_rare AS SELECT * FROM rarefy_feature_table('ft_gg', depth := 3, seed := 42, threads := 1);
+
+# 4 surviving samples → C(4,2) = 6 pairs, i.e. the rarefied output was accepted as a
+# feature table and every sample in it ordinated
+query I
+SELECT count(*) FROM unifrac_distances('ft_rare', 'tree', variant := 'unweighted');
+----
+6
+
+# ── with_replacement: a multinomial draw may exceed an input cell (that is the
+#    difference from the default permutation draw), but the even-depth contract
+#    still holds. ──
+query I
+SELECT DISTINCT total FROM (
+    SELECT sample_id, sum(value) AS total
+    FROM rarefy_feature_table('ft', depth := 3, with_replacement := true, seed := 42)
+    GROUP BY sample_id);
+----
+3
+
+# ── id-type mirroring: the output must round-trip BOTH id columns, or a rarefied
+#    table would no longer join to typed metadata/taxonomy the way its input did. ──
+statement ok
+CREATE TABLE ft_bigint AS
+SELECT (100 + CAST(substr(sample_id, 2, 1) AS BIGINT)) AS sample_id,
+       (900 + CAST(substr(feature_id, 2, 1) AS BIGINT)) AS feature_id, value FROM ft;
+
+query TT
+SELECT DISTINCT typeof(sample_id), typeof(feature_id)
+FROM rarefy_feature_table('ft_bigint', depth := 3, seed := 42);
+----
+BIGINT	BIGINT
+
+# ── unseeded runs still work (just not reproducible) ──
+query I
+SELECT DISTINCT total FROM (
+    SELECT sample_id, sum(value) AS total
+    FROM rarefy_feature_table('ft', depth := 3) GROUP BY sample_id);
+----
+3
+
+# ── errors ──
+
+# depth must be >= 1: depth 0 would be a no-op draw, not a rarefaction.
+statement error
+SELECT * FROM rarefy_feature_table('ft', depth := 0);
+----
+depth
+
+statement error
+SELECT * FROM rarefy_feature_table('ft', depth := -5);
+----
+depth
+
+# depth is required — there is no defensible default per-sample depth.
+statement error
+SELECT * FROM rarefy_feature_table('ft');
+----
+depth
+
+statement error
+SELECT * FROM rarefy_feature_table('');
+----
+must not be empty
+
+statement error
+SELECT * FROM rarefy_feature_table('no_such_table', depth := 3);
+----
+no_such_table
+
+# a depth above EVERY sample's total drops everything — fail loudly rather than
+# return an empty table that looks like a successful analysis.
+statement error
+SELECT * FROM rarefy_feature_table('ft', depth := 100000);
+----
+rarefy_feature_table

@@ -1,0 +1,314 @@
+# name: test/sql/pick_anchors.test
+# description: pick_anchors — proportional stratified (default) and greedy farthest-point subset selection over an ordination coordinate table, for feeding `anchors :=` on the progressive PCoA functions.
+# group: [sql]
+
+require miint
+
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'pick_anchors';
+----
+1
+
+# ── THE PROPORTIONAL-ALLOCATION ORACLE, and the reason this fixture is shaped the
+#    way it is. 100 samples in 2-D whose equal-frequency 2x2 grid has DELIBERATELY
+#    UNEQUAL cell sizes 40/10/10/40:
+#      axis 0 = i, so its two bins are {0..49} and {50..99}
+#      axis 1 is small for {0..39} and {50..59} (50 samples) and large otherwise,
+#      so its two bins are exactly those sets
+#    giving cells (0,0)={0..39} 40, (0,1)={40..49} 10, (1,0)={50..59} 10,
+#    (1,1)={60..99} 40.
+#
+#    At n_anchors := 20 proportional allocation must draw 8/2/2/8. Equal-per-stratum
+#    allocation would draw 5/5/5/5 and simple random sampling would only average
+#    8/2/2/8 rather than hit it. Nothing else about the function separates those
+#    three, which is why this assertion is the core of the file. ──
+statement ok
+CREATE TABLE grid AS
+SELECT 's' || lpad(i::VARCHAR, 3, '0') AS sample_id, a.axis,
+       (CASE WHEN a.axis = 0 THEN i
+             WHEN i < 40 OR (i >= 50 AND i < 60) THEN i
+             ELSE 1000 + i END)::DOUBLE AS coordinate
+FROM range(100) t(i), (VALUES (0), (1)) a(axis);
+
+query II
+WITH picked AS (
+    SELECT CAST(substr(sample_id, 2) AS INTEGER) AS i
+    FROM pick_anchors('grid', n_anchors := 20, n_dims := 2, n_bins := 2, seed := 42))
+SELECT (CASE WHEN i < 50 THEN 0 ELSE 2 END)
+       + (CASE WHEN i < 40 OR (i >= 50 AND i < 60) THEN 0 ELSE 1 END) AS cell, count(*)
+FROM picked GROUP BY 1 ORDER BY 1;
+----
+0	8
+1	2
+2	2
+3	8
+
+# ── THE MECHANISM, asserted as two halves. The seed must change WHICH samples are
+#    taken — the draw is unbiased inside a stratum, which is precisely why this rule
+#    beat leverage, medoid and farthest-point selection, all of which systematically
+#    prefer a KIND of point — without changing HOW MANY come from each stratum,
+#    which is fixed by size alone. A rule whose seed moved the counts would not be
+#    proportional allocation; one whose seed changed nothing would not be a draw. ──
+query T
+SELECT count(*) > 0 FROM (
+    (SELECT sample_id FROM pick_anchors('grid', n_anchors := 20, n_dims := 2, n_bins := 2, seed := 1)
+     EXCEPT SELECT sample_id FROM pick_anchors('grid', n_anchors := 20, n_dims := 2, n_bins := 2, seed := 2)));
+----
+true
+
+query II
+WITH picked AS (
+    SELECT CAST(substr(sample_id, 2) AS INTEGER) AS i
+    FROM pick_anchors('grid', n_anchors := 20, n_dims := 2, n_bins := 2, seed := 7))
+SELECT (CASE WHEN i < 50 THEN 0 ELSE 2 END)
+       + (CASE WHEN i < 40 OR (i >= 50 AND i < 60) THEN 0 ELSE 1 END) AS cell, count(*)
+FROM picked GROUP BY 1 ORDER BY 1;
+----
+0	8
+1	2
+2	2
+3	8
+
+# determinism at a fixed seed — the counterpart of the above, and what lets an
+# anchor set be recorded as (data, seed) rather than as a list of ids
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM pick_anchors('grid', n_anchors := 20, seed := 5)
+     EXCEPT SELECT * FROM pick_anchors('grid', n_anchors := 20, seed := 5))
+    UNION ALL
+    (SELECT * FROM pick_anchors('grid', n_anchors := 20, seed := 5)
+     EXCEPT SELECT * FROM pick_anchors('grid', n_anchors := 20, seed := 5)));
+----
+0
+
+# ── n_dims caps the axes the grid is built on, and it has to actually take effect:
+#    stratifying on axis 0 alone with 4 bins gives 4 equal strata of 25, so k=20
+#    must come out 5 per bin. With the default n_dims the joint grid would give a
+#    different allocation entirely, so this fails if the cap is ignored. ──
+query II
+WITH picked AS (
+    SELECT CAST(substr(sample_id, 2) AS INTEGER) AS i
+    FROM pick_anchors('grid', n_anchors := 20, n_dims := 1, n_bins := 4, seed := 42))
+SELECT i // 25 AS bin, count(*) FROM picked GROUP BY 1 ORDER BY 1;
+----
+0	5
+1	5
+2	5
+3	5
+
+# 0 = every axis present; a coordinate table wider than n_dims is the normal case
+# (ordinate at 10 axes, stratify on 3), so both directions must be reachable
+query I
+SELECT count(*) FROM pick_anchors('grid', n_anchors := 20, n_dims := 0, seed := 42);
+----
+20
+
+# ── THE DEFAULT IS THE MEASURED WINNER. 'stratified' beat a seeded random draw
+#    1.74x on the rarefied EMP 90bp table with non-overlapping ranges, while
+#    'farthest_point' lost to it 15x — so which rule the default names is the single
+#    most consequential thing about this function. Assert both that the default IS
+#    stratified and that the two methods genuinely differ, or the first assertion
+#    could pass vacuously. ──
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM pick_anchors('grid', n_anchors := 20, seed := 42)
+     EXCEPT SELECT * FROM pick_anchors('grid', n_anchors := 20, seed := 42, method := 'stratified'))
+    UNION ALL
+    (SELECT * FROM pick_anchors('grid', n_anchors := 20, seed := 42, method := 'stratified')
+     EXCEPT SELECT * FROM pick_anchors('grid', n_anchors := 20, seed := 42)));
+----
+0
+
+query T
+SELECT count(*) > 0 FROM (
+    SELECT sample_id FROM pick_anchors('grid', n_anchors := 20, seed := 42)
+    EXCEPT SELECT sample_id FROM pick_anchors('grid', n_anchors := 20, method := 'farthest_point'));
+----
+true
+
+# ── HAND-CHECKABLE ORACLE for the farthest-point rule: ten points evenly spaced on
+#    a line, coordinate i for sample si. The greedy sequence is fully determined:
+#      rank 0: farthest from the centroid (4.5) — s0 and s9 tie, so the tie-break
+#              to the lowest id decides → s0
+#      rank 1: farthest from {s0}                                          → s9
+#      rank 2: max-min over {s0,s9} — s4 and s5 both at 4, tie-break        → s4
+#      rank 3: max-min over {s0,s9,s4} — s2, s6, s7 all at 2, tie-break     → s2
+#    Any change to the start rule, the max-min rule, or the tie-break shows up here.
+#    This is the same selection the distance-matrix formulation produced, which is
+#    the point: moving to coordinates changed the cost, not the rule. ──
+statement ok
+CREATE TABLE line_c AS SELECT 's' || i AS sample_id, 0 AS axis, i::DOUBLE AS coordinate FROM range(10) t(i);
+
+query IT
+SELECT anchor_rank, sample_id FROM pick_anchors('line_c', n_anchors := 4, method := 'farthest_point')
+ORDER BY anchor_rank;
+----
+0	s0
+1	s9
+2	s4
+3	s2
+
+# ── WHY farthest-point is retained at all: on data with well-separated clusters a
+#    random draw can miss a cluster entirely, leaving part of the space uncovered.
+#    Farthest-point cannot — asked for 3 anchors on 3 clusters it must return exactly
+#    one from each. The clusters sit at UNEQUAL distances from the cloud's centroid
+#    (A near (0,0), B near (100,0), C near (0,140)) so no step lands on a tie and the
+#    order is forced: most peripheral first (C), then farthest from it (B), then A. ──
+statement ok
+CREATE TABLE clust_c AS
+WITH pts AS (
+    SELECT 'a' || i AS sample_id, 0.0 + (i // 2) AS x, 0.0 + (i % 2) AS y FROM range(4) t(i)
+    UNION ALL SELECT 'b' || i, 100.0 + (i // 2), 0.0 + (i % 2) FROM range(4) t(i)
+    UNION ALL SELECT 'c' || i, 0.0 + (i // 2), 140.0 + (i % 2) FROM range(4) t(i))
+SELECT sample_id, a.axis, (CASE WHEN a.axis = 0 THEN x ELSE y END)::DOUBLE AS coordinate
+FROM pts, (VALUES (0), (1)) a(axis);
+
+query IT
+SELECT anchor_rank, substr(sample_id, 1, 1) FROM pick_anchors('clust_c', n_anchors := 3,
+    method := 'farthest_point') ORDER BY anchor_rank;
+----
+0	c
+1	b
+2	a
+
+# ── PREFIX STABILITY, for both rules. Selection order is built without reference to
+#    n_anchors, so the first m of a k-selection are exactly the m-selection. This is
+#    what lets a caller pick a generous k once and then trim, and it would break if
+#    either rule ever re-optimized globally. ──
+query I
+SELECT count(*) FROM (
+    (SELECT sample_id FROM pick_anchors('line_c', n_anchors := 4, method := 'farthest_point')
+     EXCEPT SELECT sample_id FROM pick_anchors('line_c', n_anchors := 7, method := 'farthest_point'))
+    UNION ALL
+    (SELECT sample_id FROM pick_anchors('line_c', n_anchors := 7, method := 'farthest_point')
+     WHERE anchor_rank < 4
+     EXCEPT SELECT sample_id FROM pick_anchors('line_c', n_anchors := 4, method := 'farthest_point')));
+----
+0
+
+query I
+SELECT count(*) FROM (
+    (SELECT sample_id FROM pick_anchors('grid', n_anchors := 10, seed := 42)
+     EXCEPT SELECT sample_id FROM pick_anchors('grid', n_anchors := 20, seed := 42))
+    UNION ALL
+    (SELECT sample_id FROM pick_anchors('grid', n_anchors := 20, seed := 42) WHERE anchor_rank < 10
+     EXCEPT SELECT sample_id FROM pick_anchors('grid', n_anchors := 10, seed := 42)));
+----
+0
+
+# ── shape: exactly n_anchors distinct samples, ranks 0..n-1, every one a real
+#    sample of the input ──
+query III
+SELECT count(*), count(DISTINCT sample_id), count(DISTINCT anchor_rank)
+FROM pick_anchors('grid', n_anchors := 7, seed := 42);
+----
+7	7	7
+
+query II
+SELECT min(anchor_rank), max(anchor_rank) FROM pick_anchors('grid', n_anchors := 7, seed := 42);
+----
+0	6
+
+query I
+SELECT count(*) FROM pick_anchors('grid', n_anchors := 7, seed := 42) p
+WHERE p.sample_id NOT IN (SELECT sample_id FROM grid);
+----
+0
+
+# all n samples is legal for both rules (degenerate but well-defined: it just
+# orders every sample)
+query II
+SELECT (SELECT count(*) FROM pick_anchors('line_c', n_anchors := 10, method := 'farthest_point')),
+       (SELECT count(*) FROM pick_anchors('line_c', n_anchors := 10, method := 'stratified'));
+----
+10	10
+
+# ── id-type mirroring: a BIGINT sample_id survives selection, so anchors still join
+#    back to typed metadata without a cast ──
+statement ok
+CREATE TABLE line_bigint AS
+SELECT CAST(substr(sample_id, 2) AS BIGINT) AS sample_id, axis, coordinate FROM line_c;
+
+query T
+SELECT DISTINCT typeof(sample_id) FROM pick_anchors('line_bigint', n_anchors := 3);
+----
+BIGINT
+
+# ── it consumes the coordinate contract shared with cluster_kmeans, so anything
+#    that emits (sample_id, axis, coordinate) can be selected from ──
+query I
+SELECT count(DISTINCT cluster) FROM cluster_kmeans('clust_c', k := 3, seed := 42);
+----
+3
+
+# ── errors ──
+
+statement error
+SELECT * FROM pick_anchors('grid', n_anchors := 0);
+----
+n_anchors
+
+statement error
+SELECT * FROM pick_anchors('grid', n_anchors := 101);
+----
+exceeds
+
+# n_anchors is required — the function has no defensible default anchor count
+statement error
+SELECT * FROM pick_anchors('grid');
+----
+n_anchors
+
+statement error
+SELECT * FROM pick_anchors('');
+----
+must not be empty
+
+statement error
+SELECT * FROM pick_anchors('no_such_table', n_anchors := 3);
+----
+no_such_table
+
+# an unknown method must name the alternatives rather than silently falling back
+statement error
+SELECT * FROM pick_anchors('grid', n_anchors := 3, method := 'kmedoids');
+----
+stratified
+
+statement error
+SELECT * FROM pick_anchors('grid', n_anchors := 3, n_bins := 0);
+----
+n_bins
+
+statement error
+SELECT * FROM pick_anchors('grid', n_anchors := 3, n_dims := -1);
+----
+n_dims
+
+# a relation without the coordinate columns is rejected with the contract spelled out
+statement ok
+CREATE TABLE not_coords AS SELECT 's1' AS sample_id, 1.0 AS value;
+
+statement error
+SELECT * FROM pick_anchors('not_coords', n_anchors := 1);
+----
+coordinate
+
+# a multi-iteration coordinate table would be silently collapsed into one cloud
+statement ok
+CREATE TABLE dup_coords AS SELECT * FROM (VALUES ('s1', 0, 1.0), ('s1', 0, 2.0)) t(sample_id, axis, coordinate);
+
+statement error
+SELECT * FROM pick_anchors('dup_coords', n_anchors := 1);
+----
+duplicate
+
+# a sample missing an axis must not be read as a zero coordinate
+statement ok
+CREATE TABLE ragged AS
+SELECT * FROM (VALUES ('s1', 0, 1.0), ('s1', 1, 1.0), ('s2', 0, 2.0)) t(sample_id, axis, coordinate);
+
+statement error
+SELECT * FROM pick_anchors('ragged', n_anchors := 1);
+----
+missing a coordinate

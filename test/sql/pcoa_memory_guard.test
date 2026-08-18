@@ -1,0 +1,70 @@
+# name: test/sql/pcoa_memory_guard.test
+# description: pcoa()/permanova() over a distance table fail loud (a clear error, not an OOM SIGKILL) when the full dense N×N analysis would not fit in what is left of DuckDB's memory_limit.
+# group: [sql]
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+# 1000 samples → the dense analysis needs ~4.7 MiB (5·N² bytes: the fp32 matrix
+# plus the fill bitmap). The 4 MB limit set below is smaller than that on its own,
+# so the guard fires regardless of how much of the fixture is resident.
+statement ok
+CREATE TABLE dcoo_guard AS
+SELECT a.i AS sample_a, b.i AS sample_b, abs(a.i - b.i)::DOUBLE AS distance
+FROM range(1000) a(i) JOIN range(1000) b(i) ON a.i < b.i;
+
+# The fixture's own pages count against memory_limit, and an in-memory database
+# cannot evict them without somewhere to put them — so `SET memory_limit` below
+# would fail before the guard was ever reached. A temp directory makes those pages
+# spillable, leaving the limit to be spent on the guard's subject: the dense matrix.
+statement ok
+SET temp_directory='__TEST_DIR__/pcoa_guard_spill';
+
+# threads=1 keeps the id-enumeration pass's own (buffer-manager tracked) working
+# set small rather than per-thread scan buffers.
+statement ok
+SET threads=1;
+
+statement ok
+SET memory_limit='4MB';
+
+# refused before a single N² byte is allocated — the size guard, not an OOM kill.
+# The matrix is extension heap and untracked by the buffer manager, so without
+# this check memory_limit could not stop it.
+statement error
+SELECT * FROM pcoa('dcoo_guard', n_dims := 3);
+----
+distinct samples; a full dense analysis needs
+
+# the message names memory_limit as the budget and points at the progressive
+# alternative, so the user has both levers
+statement error
+SELECT * FROM pcoa('dcoo_guard', n_dims := 3);
+----
+memory_limit
+
+statement error
+SELECT * FROM pcoa('dcoo_guard', n_dims := 3);
+----
+progressive_pcoa_from_distances
+
+# permanova shares ReadDistanceTable, so the same check guards it
+statement ok
+CREATE TABLE meta_guard AS SELECT i AS sample_id, (i % 2)::VARCHAR AS grp FROM range(1000) t(i);
+
+statement error
+SELECT * FROM permanova('dcoo_guard', 'meta_guard', variables := ['grp'], n_permutations := 9);
+----
+a full dense analysis needs
+
+# raising the limit lets the same table through: the guard is a budget check, not
+# a hard sample-count ceiling. This is also the negative control — it must not
+# fire when the matrix genuinely fits.
+statement ok
+SET memory_limit='64MB';
+
+query I
+SELECT count(*) FROM pcoa('dcoo_guard', n_dims := 3);
+----
+3000

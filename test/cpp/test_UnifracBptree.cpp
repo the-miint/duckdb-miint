@@ -6,7 +6,7 @@
 #include "unifrac_bptree.hpp"
 #include "unifrac_support_biom.hpp" // for the live faith_pd test fixture
 
-#include "unifrac_libssu.hpp" // load_bptree_opaque, convert_bptree_opaque, faith_pd_inmem
+#include "api.hpp" // load_bptree_opaque, convert_bptree_opaque, faith_pd_inmem
 
 #include <string>
 #include <vector>

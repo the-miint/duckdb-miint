@@ -10,19 +10,24 @@ Methods to estimate alpha and beta diversity, and supporting statistics.
 - [Sample identifier types](#sample-identifier-types) - How VARCHAR/BIGINT/UUID sample ids are handled.
 - [UniFrac algorithm variants](#unifrac-algorithm-variants) - Detail on different UniFrac algorithms and how to specify them.
 - [Rarefaction](#rarefaction) - Rarefaction detail with UniFrac and Faith PD.
+- [Rarefy a feature table](#rarefy-a-feature-table) - produce an even-depth feature table as a standalone result
+- [Pick anchors](#pick-anchors) - subset selection from ordination coordinates: proportional stratified sampling (the measured best rule for progressive-PCoA anchors) or greedy farthest-point
 - [UniFrac distances](#unifrac-distances) - Condensed (pairwise) UniFrac distances in long form
 - [Community distances (non-phylogenetic)](#community-distances-non-phylogenetic) - taxon-based β-diversity (Bray-Curtis, Jaccard, Morisita-Horn, χ², Gower, …) from a feature table
 - [Beta-distance macros](#beta-distance-macros) - within/between-group distributions and k-nearest-neighbors over a distance table
 - [PCoA (from a distance table)](#pcoa-from-a-distance-table) - metric-agnostic PCoA over any condensed distance table
+- [Progressive PCoA (from a distance table)](#progressive-pcoa-from-a-distance-table) - scalable reference-anchored PCoA without a dense N×N decomposition
+- [Progressive PCoA (from UniFrac)](#progressive-pcoa-from-unifrac) - scalable UniFrac PCoA computing distances on the fly per batch (true-10M path)
 - [PERMANOVA (from a distance table)](#permanova-from-a-distance-table) - metric-agnostic PERMANOVA over any condensed distance table
 - [Two-sample Kolmogorov-Smirnov test](#two-sample-kolmogorov-smirnov-test) - `ks_2samp` over two numeric lists, with SciPy-exact p-values
 - [Sample clustering (k-means and UPGMA)](#sample-clustering-k-means-and-upgma) - group samples from ordination coordinates or a distance table
 - [UniFrac PCoA](#unifrac-pcoa) - UniFrac distance + Principal Coordinates Analysis
 - [UniFrac PERMANOVA](#unifrac-permanova) - UniFrac distance + PERMANOVA pseudo-F + p-value
 - [Faith PD](#faith-pd) - Faith's phylogenetic diversity per sample
+- [Procrustes](#procrustes-align-two-ordinations) - align two ordinations into a common frame (disparity M² + PROTEST p-value)
 - [Citations](#citations) - primary sources for the metrics, clustering, and ordination methods
 
-These methods are powered by the embedded [`unifrac-binaries`](https://github.com/biocore/unifrac-binaries) and [`scikit-bio-binaries`](https://github.com/scikit-bio/scikit-bio-binaries) libraries (see `docs/internals/embedded-tools.md` for the build details).
+Most of these methods are powered by the embedded [`unifrac-binaries`](https://github.com/biocore/unifrac-binaries) and [`scikit-bio-binaries`](https://github.com/scikit-bio/scikit-bio-binaries) libraries (see `docs/internals/embedded-tools.md` for the build details); [`procrustes`](#procrustes-align-two-ordinations) is a self-contained Eigen-backed port of SciPy and works on any ordination table.
 
 > Relating **two** feature tables of the same samples — microbes against metabolites, say — is a different problem from the ordination and distance methods here, because correlating compositional tables directly produces spurious associations. See [multi-omics integration](multiomics.md) for MMvec.
 
@@ -80,6 +85,101 @@ The feature table's `sample_id` column may be `VARCHAR`, `BIGINT`, or `UUID` (an
 - `subsample_depth > 0`: libssu rarefies every sample to exactly `subsample_depth` total counts. **Samples whose total count is below the depth are dropped** from the result; depending on the function's invariants this can also cause a bind-time error (e.g., `unifrac_pcoa` requires `n_dims ≤ n_samples - 1` after subsampling).
 - `subsample_with_replacement := true` uses multinomial sampling; the default `false` uses permutation without replacement.
 - `seed := -1` (default) uses system entropy; any `seed >= 0` is deterministic. Per-iteration seed is `seed + iteration_index`; bind rejects `seed + n_subsamples - 1 > INT_MAX`.
+
+<a name="subsample-thread-count"></a>**A seeded subsample reproduces per thread count, not across thread counts.** libssu distributes the draw across the OpenMP team — one generator per thread, seeded in turn — so both how many generators exist and which observation consumes which one depend on the team size. The OpenMP width comes from DuckDB's `SET threads = N` (or the per-call `threads` parameter), so the *same* query with the *same* `seed` and `subsample_depth > 0` can produce a different rarefied table, and therefore different distances, on a differently configured server.
+
+Widths that happen to divide the work identically can coincidentally agree — in one measured case widths 1, 2, and 4 agreed while 8 differed — so matching results at two thread counts is not a guarantee of matching at a third. If you need a rarefied result to be reproducible across machines, fix the width explicitly (`threads := N`, or `SET threads = N`) alongside the seed, and record it with the result. This is a property of the draw itself and applies to every function in this section; it is upstream of, and independent of, the fp32 reduction-ordering noise described under [Reproducibility](#reproducibility).
+
+---
+
+### Pick anchors
+
+Select `n_anchors` of the samples in an **ordination coordinate table** — the `(sample_id, axis, coordinate)` long form emitted by [`pcoa`](#pcoa-from-a-distance-table) and [`unifrac_pcoa`](#unifrac-pcoa), the same contract [`cluster_kmeans`](#sample-clustering-k-means-and-upgma) consumes — returning `(anchor_rank, sample_id)` in selection order.
+
+```sql
+-- ordinate a candidate subset, pick anchors from those coordinates, anchor the full run
+CREATE TABLE cand AS SELECT sample_id, axis, coordinate FROM pcoa('sub_dm', n_dims := 10, seed := 42);
+SET VARIABLE anch = (SELECT list(sample_id) FROM pick_anchors('cand', n_anchors := 1000, seed := 42));
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'unweighted',
+    n_dims := 10, seed := 42, anchors := getvariable('anch'));
+```
+
+Working from coordinates rather than from a distance matrix is what makes this usable at scale: both rules are **linear in the number of samples**, so a 10M-sample selection needs an N×d table, not an N×N one.
+
+**Parameters:**
+- `coordinate_table` (VARCHAR): name of the relation exposing `(sample_id, axis INTEGER, coordinate DOUBLE)`
+- `n_anchors` (INTEGER, **required**): how many samples to select. No default — there is no defensible universal anchor count.
+- `method` (VARCHAR, default `'stratified'`): `'stratified'` or `'farthest_point'`; see below.
+- `seed` (BIGINT, default 0): salts the within-stratum draw. `'stratified'` only — `'farthest_point'` takes no seed.
+- `n_dims` (INTEGER, default 3): use the leading `n_dims` axes by ascending axis label; `0` uses every axis present. For `'stratified'` these are the axes the strata grid is built on; for `'farthest_point'` they are the axes distances are measured over.
+- `n_bins` (INTEGER, default 4): equal-frequency bins per axis, so the grid holds up to `n_bins ^ n_dims` strata (64 at the defaults). `'stratified'` only.
+
+**Output:** `(anchor_rank INTEGER, sample_id)`; `sample_id` mirrors the input id type. Selection is **prefix-stable** under both methods: the first *m* of *k* anchors are exactly the *k = m* result, so you can pick a generous `k` once and trim.
+
+#### `method := 'stratified'` (default) — proportional stratified sampling
+
+Bin each of the leading `n_dims` axes into `n_bins` equal-frequency bins, take the resulting grid cell as the stratum, and draw from every stratum in proportion to its size. Within a stratum the order is a salted hash of the sample id, so the draw carries no geometric preference; across strata, samples are ordered by `(within-stratum rank) / (stratum size)`, so taking the first `k` draws proportionally and totals exactly `k`. Classic survey sampling — Neyman 1934, Cochran 1977 ch. 5.
+
+**This is the measured best rule for progressive-PCoA anchors.** Several literature-backed rules were compared on the rarefied EMP 90 bp table (23,814 samples, `unweighted`, `n_anchors := 1000`, `batch_size := 1000`, `n_dims := 10`), scored by procrustes M² against a full `unifrac_pcoa` at d=3, all drawing from an identical 4,000-sample candidate pool so the rule is the only difference. Lower is better:
+
+| rule | literature | M² vs the full ordination (d=3) |
+|---|---|---|
+| **proportional stratified** | survey sampling (Neyman 1934; Cochran 1977) | **0.0051** (mean of 15 draws, 0.0038–0.0079) |
+| plain seeded random (the built-in default) | — | 0.0113 (mean of 10 draws, 0.0042–0.0220) |
+| stratum medoids | k-medoids / PAM (Kaufman & Rousseeuw 1990) | 0.0176 |
+| leverage-proportional | CUR / column subset selection (Drineas & Mahoney) | 0.0195 |
+| farthest-point | k-center (Gonzalez 1985) | 0.11 (over coordinates) / 0.17 (over full distances) |
+
+Stratified is **2.19× better on the mean**, and — the more useful property — its spread is **5.3× tighter** (sd 0.0011 vs 0.0061). That is what you are buying: random anchoring is not reliably bad, it is *unreliable*. Its best draw of ten (0.0042) beat stratified's median, but its worst (0.0220) was nearly 3× worse than stratified's worst, and **no stratified draw in fifteen was worse than random's median** while only one random draw in ten beat stratified's median. Over all 150 pairings a stratified draw beats a random one 84% of the time. The ranges do overlap, so a single lucky random draw can match it; the point is that you cannot tell in advance which draw you got, and stratified removes most of that exposure.
+
+The mechanism is worth stating, because it is what picks this rule out of the five: medoids, leverage and farthest-point each systematically prefer a *kind* of point — central, high-influence, extreme — and **all three lose to an unbiased draw**. [`progressive_pcoa_from_unifrac`](#progressive-pcoa-from-unifrac) builds its reference frame from a PCoA *of the anchors*, so the anchors' leading axes have to match the full ordination's, and any rule that biases *which* points are chosen rotates that frame away from the truth. Stratified sampling is the only one of the four that stays unbiased *within* a stratum and merely equalizes coverage *across* strata. Measured directly on the same pool: the fraction drawn per grid cell has sd 0.058 under stratified against 0.092 under random, around a 25% target. So: don't bias which points are chosen, only reduce the lumpiness of where they land.
+
+Keep the number of non-empty strata well below `n_anchors` — that is what makes the allocation proportional. With far more strata than anchors the draw degenerates gracefully toward simple random sampling over the most-populated cells, which is the baseline, not a failure.
+
+#### `method := 'farthest_point'` — greedy k-center
+
+Repeatedly take the sample whose nearest already-selected neighbour is farthest away (Gonzalez 1985), a 2-approximation to minimizing the maximum distance from any sample to its nearest selected one. Deterministic and seedless: rank 0 is the most peripheral sample and every tie breaks to the lowest sorted id, so a selection is a reproducible property of the data. "Most peripheral" is the sample farthest from the centroid, which in Euclidean space is exactly the sample with the largest total squared distance to all others — the same rule a distance-matrix implementation reaches through row sums, at O(N·d) instead of O(N²·d).
+
+> **Do not use this for progressive-PCoA anchors** — that is what it was built for, and it measured **an order of magnitude worse than either the seeded random default or `'stratified'`**: M² of 0.11 selecting over the leading 3 coordinate axes, and 0.17 in an earlier formulation selecting over the full distance matrix, against a random band of 0.004–0.022 on the same pool. It is not simply outlier-picking: mean distance-to-all was 0.869 for these anchors against 0.861 for random and a 0.862 pool mean. A reference frame must be **representative**, not merely **covering**.
+
+It is kept because farthest-point selection is a legitimate, well-studied rule for **diverse subset selection** generally — a maximally spread reference panel, a coverage-based subsample, a diverse review set. Use it for those.
+
+**Cost:** `'stratified'` is O(N·d·log N); `'farthest_point'` is O(N·d) then O(N·k·d). Neither materializes a distance matrix. To pass the result into a function that takes `anchors :=`, hand it through a variable — a table function's named parameter cannot contain a subquery.
+
+---
+
+### Rarefy a feature table
+
+Rarefy a feature table to an even per-sample depth and return **the rarefied table itself** — `(sample_id, feature_id, value)`, the same shape every function on this page consumes.
+
+```sql
+-- rarefy once, then reuse that one table for every downstream analysis
+CREATE TABLE ft_even AS
+    SELECT * FROM rarefy_feature_table('observations', depth := 1000, seed := 42, threads := 8)
+    ORDER BY sample_id;
+
+SELECT * FROM progressive_pcoa_from_unifrac('ft_even', 'tree', variant := 'unweighted', n_dims := 10);
+```
+
+**Why this exists separately** from the `subsample_depth` parameter on the other functions: those rarefy *internally* and never hand back the table, so the drawn table cannot be inspected, shared between analyses, or fed to a function that has no `subsample_depth` of its own. [`progressive_pcoa_from_unifrac`](#progressive-pcoa-from-unifrac) is exactly that case — it deliberately omits `subsample_depth` because each batch would otherwise draw independently — so rarefying through this function is the only way to give it an even-depth table. It also lets you draw **once** and reuse it, so a PCoA, a PERMANOVA, and a Faith PD all describe the same rarefied data rather than three different draws.
+
+**Parameters:**
+- `feature_table` (VARCHAR): name of the feature relation exposing `(sample_id, feature_id, value)` (see [Feature table](#feature-table))
+- `depth` (INTEGER, **required**): target per-sample total count. No default — there is no defensible universal depth, and a silent one would change every downstream result.
+- `with_replacement` (BOOLEAN, default `false`): `true` draws multinomially (a cell may exceed its input count); `false` permutes without replacement.
+- `seed` (INTEGER, default `-1`): `-1` uses system entropy; any `seed >= 0` is deterministic — subject to the thread-count caveat below.
+- `threads` (INTEGER, default 0): OpenMP threads; `0` follows DuckDB's thread count.
+
+The parameter is `depth` rather than the `subsample_depth` used elsewhere on this page: the function name already supplies that context, so `subsample_depth` would be redundant here.
+
+**Output schema:** `(sample_id, feature_id, value DOUBLE)`. **Both** id columns mirror their input types (BIGINT/UUID preserved, everything else VARCHAR — see [Sample identifier types](#sample-identifier-types)), so a rarefied table still joins to typed metadata and taxonomy exactly as its input did.
+
+**Behavior:**
+- **Every surviving sample comes out at exactly `depth`.** That is the point: without it, sequencing depth acts as a covariate, and unweighted UniFrac in particular is strongly depth-sensitive.
+- **Samples whose total count is below `depth` are DROPPED** (never padded or partially filled), matching `subsample_depth` on the other functions. Features left with no nonzero count anywhere are dropped too, preserving the sparse-storage invariant. Check what you lost before trusting the result: compare `count(DISTINCT sample_id)` against the input.
+- **If no sample reaches `depth`, that is an error**, not an empty table — an empty result reads too easily as a successful analysis of nothing.
+- **Reproducibility:** a seeded draw reproduces per thread count, not across thread counts — see [the caveat above](#subsample-thread-count). Fix `threads := N` alongside the seed if the rarefied table has to be reproducible elsewhere.
+- **Rarefy once, upstream.** Storing the result (as in the example) is preferable to calling this inline in several queries: each call is a fresh draw unless you pin both `seed` and `threads`.
 
 ---
 
@@ -302,6 +402,8 @@ SELECT * FROM pcoa('dm', n_dims := 3, seed := 42);
 - <a name="distance-table-completeness"></a>**Completeness (fail loud):** the matrix must be complete — every unordered pair present exactly once. A missing pair, a negative or non-finite distance, a nonzero self-distance, or a pair given two conflicting values is an error that names the offending pair. Rows with a NULL `sample_a`/`sample_b` are skipped; a NULL/NaN `distance` is treated as "not provided" (its ids are still recorded, so a sample whose every distance is NULL/NaN surfaces as an incompleteness error rather than silently vanishing). `unifrac_distances` always emits the full triangle, so its output is complete by construction; a hand-built table you must complete yourself.
 - **Equivalence:** `pcoa` over `unifrac_distances(obs, tree, variant := v, seed := s)` reproduces `unifrac_pcoa(obs, tree, variant := v, n_dims := d, seed := s)` — same matrix, same FSVD call, same seed. Coordinates match up to axis sign (compare `abs(coordinate)`) within the fp32 tolerance noted under [Reproducibility](#reproducibility).
 - **Fewer than two samples**, or **`n_dims > n_samples - 1`**: an error (an ordination is undefined).
+- <a name="pcoa-memory"></a>**Memory (and the size guard):** the ordination itself is dense, needing roughly `5 × n_samples²` bytes — about 3 GB at 25,000 samples, 18 GB at 60,000 — independent of how many pairs the input has. The distances are *streamed* into that matrix (the relation is scanned twice: once to enumerate the sample ids, once to fill), so nothing per-row is held. Because the matrix is allocated outside DuckDB's buffer manager, `memory_limit` cannot bound it on its own; instead `pcoa` estimates the requirement up front and **refuses with a clear error** when it exceeds what `memory_limit` leaves unused, naming both levers (raise `memory_limit`, or switch to [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table), which never forms the dense matrix). Raising `memory_limit` above physical RAM re-enables the OOM this guard exists to prevent.
+- **The relation must be stable across scans.** Since it is read twice, a relation that returns different rows each time — a view over `random()` or `nextval()`, or a file rewritten mid-query — is rejected with an error naming the unexpected id, rather than silently producing a wrong or incomplete matrix. Materialize such input into a table first.
 
 **Example:**
 
@@ -313,6 +415,136 @@ SELECT sample_id, axis, coordinate
 FROM pcoa('bc', n_dims := 2, seed := 42)
 ORDER BY axis, sample_id;
 ```
+
+---
+
+### Progressive PCoA (from a distance table)
+
+`progressive_pcoa_from_distances(distances, ...)` runs a **scalable, reference-anchored** PCoA over a condensed `(sample_a, sample_b, distance)` relation for sample counts where the dense N×N eigendecomposition [`pcoa`](#pcoa-from-a-distance-table) performs is infeasible, but the condensed distances still fit on disk.
+
+It works by ordinating a small set of shared **anchor** samples once (this fixes a common reference frame), then streaming the remaining samples in batches: each batch is ordinated *together with the anchors* and aligned back onto the reference frame by a [partial procrustes](#procrustes-align-two-ordinations) fit on the anchor overlap. No decomposition larger than `(n_anchors + batch_size)²` is ever computed, and the dense N×N matrix is never materialized.
+
+```sql
+CREATE TABLE dm AS SELECT sample_a, sample_b, distance
+    FROM unifrac_distances('observations', 'tree', seed := 42);
+
+SELECT * FROM progressive_pcoa_from_distances('dm',
+    n_dims := 3, n_anchors := 100, batch_size := 1000, seed := 42);
+```
+
+**Parameters:**
+- `distances` (VARCHAR): name of the condensed distance relation exposing `(sample_a, sample_b, distance)`
+- `n_dims` (INTEGER, default 3): number of PCoA axes; must be `≤ n_samples - 1` and `≤ n_anchors - 1`
+- `n_anchors` (INTEGER, default 100): number of anchor samples defining the reference frame; must be `≥ n_dims + 1` and `≤ n_samples`. Anchors are chosen at random (seeded)
+- `batch_size` (INTEGER, default 1000): non-anchor samples ordinated per batch (`≥ 1`)
+- `seed` (INTEGER, default -1): seeds both the anchor draw and the FSVD randomization; `-1` = unseeded (nondeterministic)
+
+**Output schema:** [`pcoa`](#pcoa-from-a-distance-table)'s six columns — `(iteration, sample_id, axis, coordinate, eigenvalue, proportion_explained)` — plus two appended diagnostic columns, `(batch, batch_anchor_m2)`. `iteration` is always `0`. `sample_id` mirrors the input `sample_a` type — see [Sample identifier types](#sample-identifier-types). **Caveat:** `eigenvalue` and `proportion_explained` are the *anchor* reference ordination's (they describe the anchor subspace, not the full sample set); the per-sample `coordinate`s span all samples.
+
+<a name="progressive-batch-diagnostics"></a>**Reading `batch` / `batch_anchor_m2` (per-run quality evidence).** Each batch is placed into the shared frame by a procrustes fit on its anchor overlap; `batch_anchor_m2` is that fit's disparity — how well this batch's own view of the anchors agreed with the reference view — and `batch` is the 0-based batch that placed the sample. Anchor rows report **NULL** for both: they *define* the frame rather than being fitted into it, so a `0.0` there would be a fabricated perfect fit. This matters because at the scale these functions exist for you cannot check the result against a full `pcoa` — the diagnostic is the accuracy signal you *do* have, and it costs nothing (the fit is computed anyway).
+
+```sql
+-- audit a run: worst-fitting batches first
+SELECT DISTINCT batch, batch_anchor_m2
+FROM progressive_pcoa_from_distances('dm', n_anchors := 1000, batch_size := 1000)
+WHERE batch IS NOT NULL ORDER BY batch_anchor_m2 DESC LIMIT 10;
+```
+
+Values near 0 mean batches slotted cleanly into the frame. A large value means those samples are poorly determined by the anchor set — typically too few anchors, or anchors that don't span the region that batch occupies. Raise `n_anchors` (accuracy improves monotonically with anchor count) or supply a better `anchors` set.
+
+**Read it as a relative signal, not an error bar.** It measures *frame consistency* and is deliberately conservative: it includes each batch's own ordination noise alongside any genuine disagreement. On a 25,145-sample real dataset the median batch reported `0.101` while the run's actual disparity against a full `pcoa` was `0.0075` — roughly 10× pessimistic. Use it to rank batches within a run and find the badly-placed ones, not to estimate total error. It also cannot detect an anchor set that is self-consistent but collectively unrepresentative of the sample space: every batch can agree with a frame that is itself skewed.
+
+**Behavior:**
+- **Accuracy:** the result reproduces a full [`pcoa`](#pcoa-from-a-distance-table) up to a similarity transform — exactly (to numerical precision) for Euclidean-embeddable distances, and closely for others. Each batch is aligned to the reference *independently*, so alignment error does not compound across batches. Validate on your own data by aligning against a full `pcoa` with [`procrustes`](#procrustes-align-two-ordinations) and checking the disparity `m2`.
+- **Anchor coordinates are batch-invariant:** for a fixed anchor set and seed the anchor coordinates (and eigenvalues/proportions) do not depend on `batch_size`.
+- **Reproducibility:** a seeded run is byte-reproducible only at `threads := 1`; above that, two runs of the same query can differ in every coordinate by a last-bit frame shift. Compare ordinations with [`procrustes`](#procrustes-align-two-ordinations), not coordinates — the full explanation is under [`progressive_pcoa_from_unifrac`](#progressive-repro) and applies unchanged here, since the effect is in the ordination rather than in how blocks are obtained.
+- **Completeness (fail loud):** each batch needs its full `(anchors + batch)²` block present in the distance relation; a missing pair within a block is an error naming the offending pair. NULL sample ids and NULL/NaN distances are skipped. `sample_a`/`sample_b` must resolve to the same output type (a BIGINT/VARCHAR mix is rejected at bind).
+- <a name="progressive-cancellation"></a>**Cancellable:** cancellation is checked before each wave's scan and before every batch, so Ctrl-C (or a client cancel) stops the run within about one block — or, if it lands while a wave's scan is running, once that scan finishes. Rows already returned are discarded with the rest of the query, as for any cancelled statement.
+- **Fewer than two samples**, `n_anchors` outside `[n_dims + 1, n_samples]`, `n_dims > n_samples - 1`, or `batch_size < 1`: an error. Parameter and schema problems are reported when the query is bound; problems in the *data* (an incomplete block, conflicting distances) surface once the run reaches the batch that hits them.
+
+**Example:**
+
+```sql
+-- Ordinate a large precomputed distance table without a dense N×N decomposition,
+-- then confirm it matches a full pcoa (small procrustes disparity) on a subset.
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_distances('dm', n_dims := 3, n_anchors := 100, batch_size := 1000, seed := 42)
+ORDER BY axis, sample_id;
+```
+
+> **Note:** blocks are filled a *wave* at a time — one pass over the relation serves many blocks, instead of one scan per batch — and the wave's width is chosen from what `memory_limit` currently leaves free. The run is driven from the scan rather than computed up front, so each batch's rows are handed to the query as that batch finishes and live memory is one wave of blocks plus that wave's rows, never the whole result.
+
+---
+
+### Progressive PCoA (from UniFrac)
+
+`progressive_pcoa_from_unifrac(feature_table, tree, ...)` is the end-to-end scalable path: it runs the same reference-anchored progressive PCoA as [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table), but computes UniFrac **on the fly, one batch at a time**, directly from a feature table and tree — so the full N×N UniFrac matrix is never formed. It is to [`unifrac_pcoa`](#unifrac-pcoa) what `progressive_pcoa_from_distances` is to [`pcoa`](#pcoa-from-a-distance-table): the memory-bounded ordination for sample counts where the dense decomposition is infeasible.
+
+This is correct because **UniFrac is pairwise-local** — the distance between two samples depends only on their own abundance vectors and the tree, never on which other samples share the table — so a UniFrac block computed over `(anchors + batch)` is identical to the corresponding slice of the full matrix. (Empirically, its output matches `progressive_pcoa_from_distances` over `unifrac_distances(...)` to within a procrustes disparity of ~1e-9.)
+
+```sql
+CREATE TABLE observations AS SELECT * FROM read_biom('data/biom/test.biom');
+CREATE TABLE tree AS SELECT * FROM read_newick('data/unifrac/gg_otu_tree.nwk');
+
+SELECT * FROM progressive_pcoa_from_unifrac('observations', 'tree',
+    variant := 'weighted_normalized', n_dims := 3, n_anchors := 100, batch_size := 1000, seed := 42);
+```
+
+**Parameters:**
+- `feature_table` (VARCHAR): name of the feature relation exposing `(sample_id, feature_id, value)` (see [Feature table](#feature-table))
+- `tree` (VARCHAR): name of the tree relation (see [Tree](#tree))
+- `n_dims` (3), `n_anchors` (100), `batch_size` (1000), `seed` (-1), `threads` (0), `anchors`: as in [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table) — `n_anchors` must be in `[n_dims + 1, n_samples]`. `anchors := [...]` supplies the anchor set explicitly and takes precedence over `n_anchors`/`seed`; note the seed still seeds each block's ordination, so a seeded run is required for reproducibility even with explicit anchors. The seeded random default is a sound choice; the one rule measured to beat it is proportional stratified sampling via [`pick_anchors`](#pick-anchors), and that section also records which rules are *worse* than random and why.
+- `variant`, `variance_adjust`, `alpha`, `bypass_tips`, `normalize_sample_counts`: the UniFrac controls, identical to [`unifrac_pcoa`](#unifrac-pcoa)
+
+There is deliberately **no `subsample_depth`**: rarefaction and progressive alignment do not compose cleanly (each batch would rarefy independently against a different RNG draw). Rarefy upstream instead with [`rarefy_feature_table`](#rarefy-a-feature-table) and pass the resulting table here — worth doing, since unweighted UniFrac is strongly depth-sensitive and an uneven-depth table makes sequencing depth a covariate of the ordination.
+
+**Output schema:** [`unifrac_pcoa`](#unifrac-pcoa)'s six columns — `(iteration, sample_id, axis, coordinate, eigenvalue, proportion_explained)`, `iteration` always `0` — plus the appended `(batch, batch_anchor_m2)` diagnostics, identical in meaning to `progressive_pcoa_from_distances`' (see [Reading `batch` / `batch_anchor_m2`](#progressive-batch-diagnostics)). As with `progressive_pcoa_from_distances`, `eigenvalue`/`proportion_explained` are the *anchor* reference ordination's (a documented caveat). `sample_id` mirrors the input type — see [Sample identifier types](#sample-identifier-types).
+
+**Behavior:**
+- **Accuracy / batch-invariance:** same guarantees as [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table) — reproduces a full [`unifrac_pcoa`](#unifrac-pcoa) up to a similarity transform, with alignment error that does not compound across batches.
+- <a name="progressive-unifrac-threads"></a>**`threads` controls block CONCURRENCY here, and it is the main performance knob.** Unlike `unifrac_pcoa`, a single block cannot use more than one core no matter how high you set it: libssu's UniFrac parallel degree is `ceil(n_samples / 2048)` over the *block*, and a block is only `n_anchors + batch_size` samples, so at any ordinary setting that is one stripe. So `threads` is spent running that many *blocks* at once instead, each pinned narrow. On 17,483 samples (`n_dims := 5`, `n_anchors := 200`, `batch_size := 500`) this took roughly **250 s at `threads := 1` versus ~32 s at `threads := 14`** — about **8×**, moving from ~1.1 to ~9.8 cores busy. (Timings here and below are indicative: they come from a shared machine, so treat the ratios and the ordering as the result, not the exact seconds.)
+
+  **Expect the returns to stop well before your core count.** Measured 1 → 14 threads on 23,814 EMP samples (`n_dims := 10`, `n_anchors := 1000`, `batch_size := 1000`) on a 14-core host: **142 s / 74 s / 41 s / 25 s / 24 s** at 1 / 2 / 4 / 8 / 14 threads — that is 1.9× / 3.5× / 5.8× / 6.0×, so **96%, 88%, 72% and 43%** of linear. The last step buys **1.04× for 1.75× the threads**. Blocks are memory-bandwidth-bound, so past a point the extra workers contend rather than add: the same block took 8.45 s when fourteen ran at once and 6.23 s when nine did. Set `threads` to roughly the point where your own curve flattens (~8 on that host) rather than to the core count, and leave the rest for whoever else is on the machine.
+- <a name="progressive-unifrac-batch-count"></a>**With few batches, `threads` above your core count can still help — nothing else will.** Blocks are handed to workers from one pool, so a worker takes its next block the moment it frees; blocks are uneven (each shears the tree to its own features — 4.4 s to 9.5 s on EMP), and pulling from a pool is what keeps that unevenness from idling anyone. What no scheduler can remove is that *k* indivisible blocks over *t* workers take `ceil(k/t)` rounds: on 23,814 EMP samples `batch_size := 1000` is 23 batches, so at `threads := 14` the second round runs nine blocks on fourteen workers. Since a block is one core here, raising `threads` past the core count is what closes that — measured ~19.4 s at `threads := 14` versus ~17.2 s at `threads := 28`, same result — at the cost of holding one block per concurrent batch, so only do it on a machine you are not sharing and with the memory to spare. Adjusting `batch_size` to make the batch count a multiple of `threads` is **not** worth it: `batch_size := 815` (28 batches, two exact rounds) measured no faster than 1000 (~18.6 s vs ~18.9 s). All of this fades as the run grows; by a few hundred batches the last round is under 1% of the work.
+- <a name="progressive-unifrac-batch-size"></a>**Tune `m = n_anchors + batch_size`, and keep it small — the opposite of what a serial run wants.** A block's cost grows with `m` faster than linearly, and once blocks run concurrently it is total CPU, not per-block latency, that sets wall time; smaller blocks also mean *more* of them, which is what there is to parallelize. Serially the ordering reverses (big blocks amortize a fixed per-block cost), so a `batch_size` tuned on a one-core run is the wrong one here. The optimum tracks `m`, not `batch_size` alone — at `n_anchors := 200`, `batch_size` 244 → ~31 s, 500 → ~34 s, 1000 → ~56 s, 1849 → ~73 s, 3000 → ~103 s (17,483 samples, `threads := 14`), with total CPU rising ~3.5× across that range. Total CPU is the more trustworthy signal here, since it is far less sensitive to other load on the machine than wall clock. At `n_anchors := 1000` the same table's optimum moves out to `batch_size` 500–1000, because `n_anchors` then dominates `m` and shrinking `batch_size` only adds blocks without shrinking the block.
+- **`batch_size` also trades accuracy, and which way depends on how many axes you actually use.** On the real EMP 90 bp deblur table (23,814 samples, `unweighted`, `n_dims := 10`, `n_anchors := 1000`, procrustes vs a full `unifrac_pcoa`): at **d = 3** smaller is better — M² 0.0087 / 0.0106 / 0.0188 for `batch_size` 500 / 1000 / 3000 — while at **d = 10** it inverts, 0.197 / 0.195 / 0.135. Bigger batches align the low-variance axes better; smaller batches align the leading ones better, and per-batch `batch_anchor_m2` rises with `batch_size` (0.081 / 0.117 / 0.160). Since the usual practice is *compute wide, compare narrow* (see the note under `n_dims` below), a smaller `batch_size` is usually the right call — but if you intend to interpret all ten axes, raise it. `batch_size` changes coordinates either way, so pin it alongside the seed when comparing runs.
+- <a name="progressive-repro"></a>**Coordinates are reproducible only at `threads := 1`; the ordination is preserved everywhere.** Three effects, none of them a correctness bug, all of them reasons not to diff coordinates. (1) `threads` also sets the OpenMP width of the *anchor* block's reference PCoA, and skbb's centering is an OpenMP `reduction(+:)` whose summation order depends on that width — so the reference frame shifts in its last bits and every coordinate inherits the shift. (2) Concurrent *first* calls race on libssu/skbb's non-atomic CPU/accelerator detection caches, so the **first** progressive run in a session differs slightly from later ones and nothing after it does. (3) **At any width above 1, two runs of the same seeded query need not agree bit-for-bit even on the same machine** — the summation order is not pinned by the seed, only the draw is. Observed on `linux_amd64`: the same query, same `seed`, run twice in one session, differing in *every* coordinate by the usual last-bit shift. Not observed on `macos/arm64`, so treat it as platform-dependent and not as something you can test your way out of.
+
+  **So do not expect a seeded run to be byte-reproducible unless you also pin `threads := 1`** — and note that even then the general fp32 caveat under [Reproducibility](#reproducibility) applies, since the FSVD and its BLAS reductions carry ~1e-7 noise of their own. If you need to compare two runs — different storage layout, different tree, different build — compare them as ordinations with [`procrustes`](#procrustes), whose M² is frame-invariant and therefore immune to all three effects. That is the only comparison this project is willing to promise. The same applies to `progressive_pcoa_from_distances`, which exhibits it without any UniFrac being involved at all.
+
+  **Judge agreement on the ordination, not on coordinates.** The drift is amplified by a randomized SVD and a procrustes fit, so it is larger than one rounding step and it grows with the table: 3.1e-06 max abs on a 40-sample fixture, but 2.4e-05 on 23,814 samples — about 5e-4 relative to the largest coordinate there. What held exactly is the thing that matters: procrustes M² against a full `unifrac_pcoa` was **identical to five decimals (0.19484) at `threads := 1` and `threads := 14`**. So do not diff coordinates across thread counts or use them as a cache key; compare ordinations with [`procrustes`](#procrustes). Fixing `threads := N` and re-running in one session is **not** enough to get identical coordinates back at N > 1 — see the point above — so pin `threads := 1` if you need to compare coordinates at all. See [Reproducibility](#reproducibility) for the same fp32 caveat on the non-progressive paths.
+- **Samples & features:** samples with no nonzero feature are excluded (they cannot be ordinated). The tree must cover every feature in the table (validated once at bind); each batch's features are a subset, so the check makes them all safe.
+- **Cancellable:** as in [`progressive_pcoa_from_distances`](#progressive-cancellation) — cancellation is checked before every batch, so a run that would take hours stops within about one block.
+- **Fewer than two samples**, `n_anchors` outside `[n_dims + 1, n_samples]`, `n_dims > n_samples - 1`, `batch_size < 1`, an unknown `variant`, or a tree missing a feature: an error. Parameter, tree and schema problems are reported when the query is bound; a failure inside a block surfaces when the run reaches it.
+
+> **Note:** like `progressive_pcoa_from_distances`, this computes each batch's block with its own feature-table slice query, so live blocks are bounded by one `(anchors + batch)` block per worker. Rows reach the query a group of batches at a time — at least `threads` of them, plus as many more as a 64 MB coordinate budget allows — so the coordinates are never all held at once. The anchor samples' feature rows are read once and cached for the whole run, so each batch's query fetches only its own samples.
+
+<a name="feature-table-sort-order"></a>**Performance: store the feature table sorted by `sample_id`.** Samples are batched in sorted id order, so a batch is a contiguous id range. If the table's physical layout is also sorted, DuckDB/Parquet prune by each row group's min/max `sample_id` and a batch's slice query reads only that batch's own rows; if it is not, every slice query scans the whole `sample_id` column, so the run's slicing cost grows as `n_batches × table_rows` instead of one pass.
+
+Measured on the 17,483-sample EMP deblur table remapped to short (WoL-style) feature ids, and an 8× replication of it, `batch_size := 1000`, one batch's slice query:
+
+| feature table | sorted by `sample_id` | unsorted |
+|---|---|---|
+| 17,483 samples / 13.1 M rows | 6 ms | 7 ms |
+| 139,864 samples / 104.4 M rows | 9 ms | 33 ms |
+
+Sorted stays flat as the table grows; unsorted scales with it. The gap widens with the width of `feature_id`: repeating the 13.1 M-row measurement with the original 150 bp ASV sequences as ids gave 8 ms sorted vs **140 ms** unsorted, because an unpruned scan pays for the wide string column too. For ASV-keyed tables at scale this is the difference between minutes and hours.
+
+**You will be told.** Because nothing in the output reveals which case you are in, a multi-batch run checks the stored order up front and emits a warning naming the table when it is not sorted — readable with [`miint_warnings()`](utilities.md#miint_warnings), and on stderr. The check counts places where `sample_id` steps backwards between physically adjacent rows, which is exact (a sequence is sorted precisely when it never steps back) and costs one pass over the `sample_id` column alone: 0.09 s over 4.7 M rows, 19.6 s over 1.85 B. A single-batch run is never warned about — it reads the table once whatever the order. The warning is about cost only; ignoring it changes nothing about the coordinates.
+
+`read_biom` emits each sample's rows contiguously, but in the BIOM file's own sample order — **grouped is not sorted**, and grouping alone prunes nothing, since each row group then spans nearly the whole id range. Add the `ORDER BY` when you materialize:
+
+```sql
+CREATE TABLE observations AS
+    SELECT * FROM read_biom('table.biom') ORDER BY sample_id;
+-- or, writing Parquet
+COPY (SELECT * FROM read_biom('table.biom') ORDER BY sample_id)
+    TO 'observations.parquet' (FORMAT PARQUET);
+```
+
+**With a BIGINT `sample_id`, sort by the text form.** Samples are enumerated and batched by `sample_id::VARCHAR`, so batches are *lexical* ranges (`1, 10, 100, 1000, …, 2, 20`) and a numerically sorted table will not line up with them — use `ORDER BY sample_id::VARCHAR`. VARCHAR and UUID ids sort identically either way (see [Sample identifier types](#sample-identifier-types)).
+
+Sort order affects only how much a run reads — never the coordinates it produces.
 
 ---
 
@@ -673,7 +905,7 @@ SELECT * FROM unifrac_faith_pd('observations', 'tree',
 #### Behavior
 
 - **No subsampling** (`subsample_depth = 0`): one row per input sample; output is deterministic regardless of `seed`. `n_subsamples > 1` is rejected because iterations would be identical.
-- **Subsampling** (`subsample_depth > 0`): per iteration, `subsample_table_inmem_seeded(seed + i)` is called and Faith PD is computed on the bridged result. Same seed → byte-identical reconstruction (no fp32 tolerance needed).
+- **Subsampling** (`subsample_depth > 0`): per iteration, `subsample_table_inmem_seeded(seed + i)` is called and Faith PD is computed on the bridged result. Same seed **at the same thread count** → byte-identical reconstruction (no fp32 tolerance needed); across thread counts the draw itself changes, see [seeded subsampling and thread count](#subsample-thread-count).
 - **Subsampling drops low-count samples:** if a sample's total count falls below `subsample_depth`, it does not appear in that iteration's output.
 
 #### Examples
@@ -697,6 +929,59 @@ GROUP BY sample_id;
 
 ---
 
+### Procrustes (align two ordinations)
+
+`procrustes(reference, other, ...)` superimposes one ordination onto another with the optimal similarity transform (translation, uniform scaling, and an orthogonal rotation/reflection), so two ordinations of the same (or overlapping) samples can be compared or plotted in a common frame. Unlike the UniFrac-powered methods above, `procrustes` is self-contained — an Eigen-backed port of [`scipy.spatial.procrustes`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.procrustes.html) / `scipy.linalg.orthogonal_procrustes` (BSD-3) — so it works on **any** long-form ordination table, not just PCoA output.
+
+Both inputs are relation *names* exposing `(sample_id, axis, coordinate)` — the same long-form shape [`pcoa`](#pcoa-from-a-distance-table) and [`unifrac_pcoa`](#unifrac-pcoa) emit (`axis` 0-indexed).
+
+```sql
+-- Two PCoA ordinations of the same samples (e.g. two metrics), aligned:
+CREATE TABLE ord_a AS SELECT sample_id, axis, coordinate FROM pcoa('dm_bray',    n_dims := 3, seed := 42);
+CREATE TABLE ord_b AS SELECT sample_id, axis, coordinate FROM pcoa('dm_unifrac', n_dims := 3, seed := 42);
+
+SELECT * FROM procrustes('ord_a', 'ord_b', permutations := 999, seed := 42);
+```
+
+**Parameters:**
+- `reference` (VARCHAR): name of the reference ordination relation `(sample_id, axis, coordinate)`; its frame is the target
+- `other` (VARCHAR): name of the ordination to transform onto the reference
+- `pairing` (VARCHAR, optional): name of a `(reference_id, other_id)` relation. Absent → **full** mode (both ordinations must describe the same samples). Present → **partial** mode: fit the transform on just the paired anchor rows, then apply it to *every* row of both ordinations — a partial-procrustes technique (McDonald, qiime2/q2-diversity#338)
+- `n_dims` (INTEGER, default: all available axes): number of leading axes to use; must be `≤` the axes present in each input
+- `permutations` (INTEGER, default 999): Monte Carlo permutations for the PROTEST p-value (full mode only); `0` disables the test (p-value is NULL)
+- `seed` (INTEGER, default -1): permutation seed; `-1` = unseeded
+
+**Output schema:** mirrors the [`unifrac_pcoa`](#unifrac-pcoa) shape, with a leading `matrix` discriminator in place of `iteration` and the two fit-level scalars in the trailing slots:
+- `matrix` (VARCHAR): `'reference'` (the standardized reference) or `'other'` (the transformed other)
+- `sample_id` (mirrors input type — see [Sample identifier types](#sample-identifier-types)): sample identifier. The output type is the shared BIGINT/UUID type when `reference` and `other` agree, otherwise VARCHAR
+- `axis` (INTEGER): 0-indexed axis
+- `coordinate` (DOUBLE): the sample's coordinate on this axis, in the shared standardized frame
+- `m2` (DOUBLE): the Procrustes disparity M² — **replicated on every row** (it is a property of the whole fit). `M² = 1 − (Σσ)² ∈ [0, 1]`; `0` = a perfect superimposition
+- `pvalue` (DOUBLE): PROTEST Monte Carlo p-value — **replicated on every row**; `NULL` in partial mode and when `permutations := 0`
+
+**Behavior:**
+- **Full mode:** `reference` and `other` must describe the **same** sample set and carry the **same** number of axes (mirrors `scipy.spatial.procrustes`, which requires identical shapes). The transform is fit on all shared samples; `m2` is the disparity; `pvalue` is the PROTEST test.
+- **Partial mode (`pairing`):** the pairing must be **1:1** — a repeated `reference_id` or `other_id` is rejected (it would drop a row or feed one physical sample into the fit as several anchors). The fit uses the matched anchor rows (at least `n_dims + 1` usable pairs are required); it is then applied to every row of both inputs. `m2` is the disparity over the anchors; `pvalue` is `NULL` — a partial fit has no null model to permute against, and `q2-diversity`'s `partial_procrustes` likewise defines no Monte Carlo test.
+- **Sample ids:** VARCHAR/BIGINT/UUID are all accepted (see [Sample identifier types](#sample-identifier-types)); full-mode matching and pairing lookups are by the id's string form, so a BIGINT `reference` and a VARCHAR `other` with the same ids align and emit under VARCHAR.
+- **Fail loud:** a missing `(sample_id, axis, coordinate)` column, a ragged ordination (a sample missing an axis), a duplicate `(sample_id, axis)`, an out-of-range `axis`, fewer than `n_dims + 1` points/anchors, or (full mode) differing sample sets or axis counts each raise a named error.
+- **P-value reproducibility:** the PROTEST test is reproducible under a fixed `seed` within one build, but it is **not** bit-for-bit comparable to `q2-diversity`'s `procrustes_analysis` — that implementation uses an *unseeded* RNG, and the C++ PRNG differs from NumPy's, so agreement is statistical (within Monte Carlo error), not exact. Disparity and coordinates, by contrast, match SciPy to machine precision.
+
+**Examples:**
+
+```sql
+-- Per-fit disparity + p-value (one row via DISTINCT, since both are replicated):
+SELECT DISTINCT m2, pvalue
+FROM procrustes('ord_a', 'ord_b', permutations := 999, seed := 42);
+
+-- Partial (anchored) alignment: project a new batch `ord_b` into the reference
+-- frame using a set of shared anchor samples, carrying the batch's extra samples
+-- through the same transform.
+CREATE TABLE anchors AS SELECT ref_id AS reference_id, batch_id AS other_id FROM anchor_map;
+SELECT sample_id, axis, coordinate
+FROM procrustes('ord_a', 'ord_b', pairing := 'anchors')
+WHERE matrix = 'other'
+ORDER BY sample_id, axis;
+```
 ### Citations
 
 If you use these methods, please cite the primary sources.
@@ -724,6 +1009,13 @@ evaluating systematic relationships", *University of Kansas Science Bulletin* 38
 clustering methods", *Journal of the American Statistical Association* 66(336),
 846-850 (the Rand index used to score cluster recovery).
 
+**Subset selection.** Neyman, J. (1934) "On the two different aspects of the
+representative method", *Journal of the Royal Statistical Society* 97(4), 558-625.
+· Cochran, W.G. (1977) *Sampling Techniques*, 3rd ed., Wiley, ch. 5 (proportional
+stratified allocation, the default rule in [`pick_anchors`](#pick-anchors)). ·
+Gonzalez, T.F. (1985) "Clustering to minimize the maximum intercluster distance",
+*Theoretical Computer Science* 38, 293-306 (greedy farthest-point / k-center).
+
 **Ordination.** Torgerson, W.S. (1952) "Multidimensional scaling: I. Theory and
 method", *Psychometrika* 17, 401-419. · Gower, J.C. (1966) "Some distance
 properties of latent root and vector methods used in multivariate analysis",
@@ -734,11 +1026,26 @@ method for comparing microbial communities", *Applied and Environmental
 Microbiology* 71(12), 8228-8235. · Faith, D.P. (1992) "Conservation evaluation and
 phylogenetic diversity", *Biological Conservation* 61(1), 1-10.
 
+**Ordination alignment.** Gower, J.C. (1975) "Generalized procrustes analysis",
+*Psychometrika* 40(1), 33-51. · Jackson, D.A. (1995) "PROTEST: a PROcrustean
+Randomization TEST of community environment concordance", *Écoscience* 2(3),
+297-303 (the permutation test behind `pvalue`). · Peres-Neto, P.R. and Jackson,
+D.A. (2001) "How well do multivariate data sets match? The advantages of a
+Procrustean superimposition approach over the Mantel test", *Oecologia* 129(2),
+169-178. · McDonald, D., qiime2/q2-diversity#338 (the partial-procrustes
+technique — fit on a paired subset, apply to all rows — used by
+[`procrustes`](#procrustes-align-two-ordinations) in partial mode and by
+[`progressive_pcoa_from_unifrac`](#progressive-pcoa-from-unifrac) to place each
+batch into the anchor frame).
+
 **Reference implementations.** The `cogent3` / PyCogent, NumPy, SciPy,
 scikit-learn and scikit-bio projects — consulted for metric conventions and used
 as parity oracles — are credited with their licenses and citations in
-[`THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md). Note that `ks_2samp` is
-checked against `scipy.stats.ks_2samp` but is **not** derived from it: the exact
-p-value comes from the lattice-path formulation in Hodges (1958) and is computed
-as escaping probability mass rather than as `1 - P(stay inside)`. See the SciPy
-entry there, and `src/include/KsTwoSample.hpp`.
+[`THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md). `q2-diversity` is used
+the same way, as an optional test-time cross-check only (see
+`test/scripts/gen_procrustes_oracle.py --check-q2`); no code from it is
+incorporated. Note that `ks_2samp` is checked against `scipy.stats.ks_2samp` but
+is **not** derived from it: the exact p-value comes from the lattice-path
+formulation in Hodges (1958) and is computed as escaping probability mass rather
+than as `1 - P(stay inside)`. See the SciPy entry there, and
+`src/include/KsTwoSample.hpp`.

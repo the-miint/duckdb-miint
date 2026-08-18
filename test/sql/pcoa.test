@@ -183,6 +183,25 @@ SELECT * FROM pcoa('dist_mixed_types', n_dims := 2);
 ----
 mismatched
 
+# ── An unstable relation is rejected, not silently misread ────────────────────
+# The reader makes two passes: one to enumerate the id dictionary, one to stream
+# the distances into the matrix. That is only sound if the relation returns the
+# same rows both times. A view over nextval() advances on every scan, so pass 2
+# presents ids pass 1 never saw — which must fail loud and name the offending id.
+# Dropping such rows instead would report a bogus "incomplete matrix" and blame
+# the user's data for the reader's assumption.
+statement ok
+CREATE SEQUENCE seq_unstable;
+
+statement ok
+CREATE VIEW dist_unstable AS
+    SELECT ('s' || nextval('seq_unstable')) AS sample_a, 'x' AS sample_b, 0.5 AS distance FROM range(4);
+
+statement error
+SELECT * FROM pcoa('dist_unstable', n_dims := 2);
+----
+returned different rows on a second scan
+
 # ── Order-independence: ids are collected from BOTH columns ───────────────────
 # Swapping sample_a<->sample_b (so sample_a > sample_b for every row, and 'A'
 # now appears only in sample_b) must yield the identical ordination. A reader
@@ -258,3 +277,36 @@ WHERE abs(viadist.c - direct.c) < 1e-5
   AND abs(viadist.e - direct.e) < 1e-5;
 ----
 18
+
+# ── the ordination happens per EXECUTION, not once at bind ──────────────────────
+# A prepared statement binds once and re-executes that same plan. When the result
+# was computed in Bind and handed to the scan by MOVING it out of the bind data,
+# the second execution silently returned zero rows.
+statement ok
+PREPARE pcoa_twice AS SELECT COUNT(*) FROM pcoa('dist', n_dims := 2);
+
+query I
+EXECUTE pcoa_twice;
+----
+8
+
+query I
+EXECUTE pcoa_twice;
+----
+8
+
+# EXPLAIN binds without executing, so it must not pay for the ordination. Timing
+# cannot be asserted here, but the consequence can: a DATA error stays unraised
+# until the query actually runs.
+statement ok
+EXPLAIN SELECT * FROM pcoa('dist_negative', n_dims := 2);
+
+statement ok
+EXPLAIN SELECT * FROM pcoa('dist_incomplete', n_dims := 2);
+
+# SCHEMA errors stay at bind, where they belong: a mismatched id type is a property
+# of the relation's definition, not of its rows, so EXPLAIN must still reject it.
+statement error
+EXPLAIN SELECT * FROM pcoa('dist_mixed_types', n_dims := 2);
+----
+mismatched

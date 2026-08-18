@@ -9,6 +9,7 @@
 #include <vector>
 
 using miint::unifrac::BuildDenseDistanceMatrix;
+using miint::unifrac::DenseDistanceMatrixBuilder;
 using miint::unifrac::DistanceEntry;
 
 namespace {
@@ -142,4 +143,105 @@ TEST_CASE("BuildDenseDistanceMatrix requires at least two samples", "[unifrac][d
 	std::vector<DistanceEntry> none;
 	REQUIRE_THROWS_AS(BuildDenseDistanceMatrix(none, 0, {}), std::invalid_argument);
 	REQUIRE_THROWS_AS(BuildDenseDistanceMatrix(none, 1, {"A"}), std::invalid_argument);
+}
+
+// ── DenseDistanceMatrixBuilder — the incremental form ────────────────────────
+//
+// WHY this exists: the batch entry point needs the caller to hold every entry in
+// memory before the fill starts, which is O(N^2) heap on top of the matrix — the
+// dominant cost for a condensed COO of a large distance table. The builder lets a
+// streaming reader write cells as rows arrive and keep nothing per-row. The two
+// forms MUST agree exactly (the batch function is a wrapper over the builder), so
+// these tests pin equivalence and that every validation fires at the same point
+// in the lifecycle.
+
+TEST_CASE("DenseDistanceMatrixBuilder matches the batch result cell for cell", "[unifrac][dense_distance]") {
+	// The equivalence that lets ReadDistanceTable stream without changing output.
+	std::vector<DistanceEntry> entries = {{0, 1, 0.5}, {0, 2, 0.25}, {1, 2, 0.75}};
+	const auto batch = BuildDenseDistanceMatrix(entries, 3, kIds3);
+
+	DenseDistanceMatrixBuilder builder(3, kIds3);
+	for (const auto &e : entries) {
+		builder.Add(e.i, e.j, e.distance);
+	}
+	const auto streamed = builder.Finish();
+
+	REQUIRE(streamed.size() == batch.size());
+	for (size_t k = 0; k < batch.size(); ++k) {
+		REQUIRE(streamed[k] == batch[k]);
+	}
+}
+
+TEST_CASE("DenseDistanceMatrixBuilder tolerates duplicates and mirrors, ignores self-pairs",
+          "[unifrac][dense_distance]") {
+	// Same tolerance rules as the batch form: a repeated unordered pair with the
+	// same value is a no-op, and a zero self-pair is the (ignored) diagonal.
+	DenseDistanceMatrixBuilder builder(3, kIds3);
+	builder.Add(0, 1, 0.5);
+	builder.Add(1, 0, 0.5); // mirror, identical value
+	builder.Add(0, 0, 0.0); // diagonal, ignored
+	builder.Add(0, 2, 0.25);
+	builder.Add(1, 2, 0.75);
+	const auto m = builder.Finish();
+	REQUIRE(m[0 * 3 + 1] == 0.5f);
+	REQUIRE(m[1 * 3 + 0] == 0.5f);
+	REQUIRE(m[0 * 3 + 0] == 0.0f);
+}
+
+TEST_CASE("DenseDistanceMatrixBuilder rejects bad values at Add, not at Finish", "[unifrac][dense_distance]") {
+	// A streaming reader must fail on the offending ROW, while the row is still
+	// the thing being processed — deferring to Finish would lose which input was
+	// at fault. Each of these is the per-entry validation the batch form applies.
+	const double nan_v = std::numeric_limits<double>::quiet_NaN();
+	const double inf_v = std::numeric_limits<double>::infinity();
+	{
+		DenseDistanceMatrixBuilder b(3, kIds3);
+		REQUIRE_THROWS_AS(b.Add(0, 3, 0.5), std::invalid_argument); // index >= n
+	}
+	{
+		DenseDistanceMatrixBuilder b(3, kIds3);
+		REQUIRE_THROWS_AS(b.Add(0, 1, nan_v), std::invalid_argument);
+	}
+	{
+		DenseDistanceMatrixBuilder b(3, kIds3);
+		REQUIRE_THROWS_AS(b.Add(0, 1, inf_v), std::invalid_argument);
+	}
+	{
+		DenseDistanceMatrixBuilder b(3, kIds3);
+		REQUIRE_THROWS_AS(b.Add(0, 1, -0.5), std::invalid_argument);
+	}
+	{
+		DenseDistanceMatrixBuilder b(3, kIds3);
+		REQUIRE_THROWS_AS(b.Add(0, 0, 3.7), std::invalid_argument); // nonzero self-distance
+	}
+	{
+		DenseDistanceMatrixBuilder b(3, kIds3);
+		b.Add(0, 1, 0.5);
+		REQUIRE_THROWS_AS(b.Add(1, 0, 0.9), std::invalid_argument); // conflicting mirror
+	}
+}
+
+TEST_CASE("DenseDistanceMatrixBuilder reports an incomplete matrix at Finish", "[unifrac][dense_distance]") {
+	// Completeness is only knowable once the stream ends, so unlike the value
+	// checks it must surface from Finish — and must name the first missing pair in
+	// row-major order, exactly as the batch form does.
+	DenseDistanceMatrixBuilder builder(3, kIds3);
+	builder.Add(0, 1, 0.5);
+	builder.Add(1, 2, 0.75); // (A,C) never provided
+	try {
+		builder.Finish();
+		FAIL("expected an incomplete-matrix throw");
+	} catch (const std::invalid_argument &e) {
+		const std::string msg = e.what();
+		REQUIRE(msg.find("incomplete distance matrix") != std::string::npos);
+		REQUIRE(msg.find("'A'") != std::string::npos);
+		REQUIRE(msg.find("'C'") != std::string::npos);
+	}
+}
+
+TEST_CASE("DenseDistanceMatrixBuilder validates its contract at construction", "[unifrac][dense_distance]") {
+	// n < 2 and an ids/n mismatch are caller-contract bugs; catching them at
+	// construction means the N^2 allocation never happens on a bad contract.
+	REQUIRE_THROWS_AS(DenseDistanceMatrixBuilder(1, {"A"}), std::invalid_argument);
+	REQUIRE_THROWS_AS(DenseDistanceMatrixBuilder(3, {"A", "B"}), std::invalid_argument);
 }

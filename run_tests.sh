@@ -228,6 +228,20 @@ fi
 # the opposite of the intended protection. The parity tests themselves are the
 # integrity check, and they now always run.
 
+# Procrustes parity goldens: independent numeric ground truth from SciPy
+# (scipy.spatial.procrustes full case) + a NumPy port of the q2#338 partial
+# technique, cross-checked against the shipped q2_diversity._partial_procrustes.
+# The expected CSVs under data/procrustes/ are the committed, SHA-pinned output
+# (data/procrustes/goldens.sha256); the generator (test/scripts/gen_procrustes_oracle.py)
+# needs only SciPy/NumPy (BSD, in-tree-compatible). The gate below just verifies
+# the committed goldens are intact before the parity test runs (require-env
+# MIINT_PROCRUSTES_PARITY_OK). To refresh: rerun the generator under a SciPy env.
+if [ -f data/procrustes/goldens.sha256 ] && (cd data/procrustes && sha256sum -c --quiet goldens.sha256) 2>/dev/null; then
+    export MIINT_PROCRUSTES_PARITY_OK=1
+else
+    echo "Warning: procrustes parity goldens missing or corrupt; parity test skipped"
+fi
+
 # NCBI BLAST network reachability. Probes the BLAST CGI endpoint so
 # live blast tests can skip gracefully in offline CI.
 if curl -sSf --max-time 5 -o /dev/null \

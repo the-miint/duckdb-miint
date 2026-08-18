@@ -3,18 +3,25 @@
 #include <algorithm>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace miint::unifrac {
 
 namespace {
 
-// Stable ID dictionary: sort unique IDs lexicographically, return both the
+// Stable ID dictionary: sort the DISTINCT ids lexicographically, return both the
 // ordered list and a name->index map.
+//
+// Takes the already-deduplicated set rather than the raw per-row ids on purpose.
+// The obvious shape — copy every row's id into a vector, sort, unique — sorts nnz
+// strings to discover a few thousand distinct ones: on a 3200-sample block that is
+// ~2.4M strings sorted to find ~60k, twice (once for samples, once for features),
+// which measured as the bulk of FromCoo's cost. Deduplicating during the single
+// pass the caller already makes over the rows leaves only the survivors to sort.
 std::pair<std::vector<std::string>, std::unordered_map<std::string, uint32_t>>
-build_dictionary(const std::vector<std::string> &ids) {
-	std::vector<std::string> unique(ids.begin(), ids.end());
+build_dictionary(const std::unordered_set<std::string> &distinct_ids) {
+	std::vector<std::string> unique(distinct_ids.begin(), distinct_ids.end());
 	std::sort(unique.begin(), unique.end());
-	unique.erase(std::unique(unique.begin(), unique.end()), unique.end());
 	std::unordered_map<std::string, uint32_t> index;
 	index.reserve(unique.size());
 	for (uint32_t i = 0; i < unique.size(); ++i) {
@@ -30,16 +37,21 @@ UnifracSupportBiomView UnifracSupportBiomView::FromCoo(std::vector<CooRow> rows)
 		throw std::invalid_argument("UnifracSupportBiomView: input feature-table is empty");
 	}
 
-	std::vector<std::string> sample_ids_raw;
-	std::vector<std::string> feature_ids_raw;
-	sample_ids_raw.reserve(rows.size());
-	feature_ids_raw.reserve(rows.size());
+	// One pass to collect the distinct ids of both dimensions. An id already seen
+	// costs a hash and a compare, not a copy, so this does not grow with how
+	// duplicated the input is — unlike materializing one id per row per dimension.
+	std::unordered_set<std::string> distinct_samples;
+	std::unordered_set<std::string> distinct_features;
 	for (const auto &r : rows) {
-		sample_ids_raw.push_back(r.sample_id);
-		feature_ids_raw.push_back(r.feature_id);
+		distinct_samples.insert(r.sample_id);
+		distinct_features.insert(r.feature_id);
 	}
-	auto [sample_ids, sample_index] = build_dictionary(sample_ids_raw);
-	auto [feature_ids, feature_index] = build_dictionary(feature_ids_raw);
+	auto [sample_ids, sample_index] = build_dictionary(distinct_samples);
+	auto [feature_ids, feature_index] = build_dictionary(distinct_features);
+	// The index maps carry everything needed from here; release the sets before
+	// the entries vector below allocates.
+	distinct_samples = {};
+	distinct_features = {};
 
 	// CSR layout (obs-major) per libssu's documented contract: outer loop is
 	// over n_obs, inner indices are sample column indices. Sort by

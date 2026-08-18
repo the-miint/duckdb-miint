@@ -1,0 +1,504 @@
+# name: test/sql/progressive_pcoa_from_unifrac.test
+# description: progressive_pcoa_from_unifrac — scalable reference-anchored PCoA that computes UniFrac on the fly per batch from a feature table + tree; long-format output matches unifrac_pcoa.
+# group: [sql]
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+# ── fixture: 40 samples over the 5 gg_otu tree tips, with varying (all-nonzero)
+#    abundances. UniFrac distances are pairwise-local (independent of the other
+#    samples), so a per-batch UniFrac block equals the corresponding slice of the
+#    full matrix — the property that makes progressive UniFrac correct. ──
+statement ok
+CREATE TABLE tree AS SELECT * FROM read_newick('data/unifrac/gg_otu_tree.nwk');
+
+statement ok
+CREATE TABLE ft AS
+SELECT 's' || s AS sample_id, 'GG_OTU_' || (f + 1) AS feature_id, (1 + (s * 7 + f * 13) % 11)::DOUBLE AS value
+FROM range(40) t(s), range(5) u(f);
+
+# ── availability ──
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'progressive_pcoa_from_unifrac';
+----
+1
+
+# ── output arity: 40 samples * 3 dims = 120 rows ──
+query I
+SELECT count(*) FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+120
+
+query I
+SELECT count(DISTINCT sample_id) FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+40
+
+query I
+SELECT count(DISTINCT axis) FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+3
+
+query I
+SELECT DISTINCT iteration FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+0
+
+# ── CORRECTNESS ORACLE: progressive reproduces the full unifrac_pcoa up to a
+#    similarity transform (procrustes disparity is small). Same criterion as the
+#    origin PoC (2025.07.30-progressive-pcoa/poc.py). ──
+statement ok
+CREATE TABLE full_ord AS
+SELECT sample_id, axis, coordinate
+FROM unifrac_pcoa('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, seed := 42);
+
+statement ok
+CREATE TABLE prog_ord AS
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, n_anchors := 15,
+    batch_size := 12, seed := 42, threads := 1);
+
+# observed M^2 ~ 7.4e-5 here; 0.05 leaves generous headroom (UniFrac is non-Euclidean,
+# so full PCoA is itself an embedding and the exact value depends on FSVD).
+query T
+SELECT DISTINCT m2 < 0.05 FROM procrustes('full_ord', 'prog_ord', permutations := 0);
+----
+true
+
+# ── STRONG EQUIVALENCE: computing UniFrac on the fly per batch must give the same
+#    result as slicing a precomputed unifrac_distances matrix — UniFrac is
+#    pairwise-local, so the two paths see identical distances, identical anchors
+#    (same seed), identical block PCoAs. M^2 ~ 1e-9 (only FSVD block row-order). ──
+statement ok
+CREATE TABLE udist AS
+SELECT sample_a, sample_b, distance FROM unifrac_distances('ft', 'tree', variant := 'weighted_normalized', seed := 42);
+
+statement ok
+CREATE TABLE prog_from_dist AS
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_distances('udist', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+
+query T
+SELECT DISTINCT m2 < 1e-5 FROM procrustes('prog_ord', 'prog_from_dist', permutations := 0);
+----
+true
+
+# ── determinism: same seed → identical coordinates ──
+statement ok
+CREATE TABLE prog_ord2 AS
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, n_anchors := 15,
+    batch_size := 12, seed := 42, threads := 1);
+
+query I
+SELECT count(*) FROM (SELECT * FROM prog_ord EXCEPT SELECT * FROM prog_ord2);
+----
+0
+
+# ── worker-count invariance: blocks run CONCURRENTLY (batch_workers = wave_batches
+#    = the resolved thread count), and that must change execution order ONLY. 25
+#    non-anchor samples at batch_size 12 give 3 batches, so threads := 4 genuinely
+#    takes the parallel path while threads := 1 stays serial — a 1-batch fixture
+#    would silently test nothing, since wave_workers = min(workers, wave_count).
+#
+#    Why this is a TOLERANCE and not EXCEPT, deliberately: `threads` is not a pure
+#    scheduling knob. It also sets the OpenMP width of the anchor block's reference
+#    PCoA, and skbb's centering is an OpenMP `reduction(+:)` whose summation order
+#    depends on that width — so the reference FRAME itself shifts in its last bits
+#    and every coordinate inherits the shift. Measured 3.1e-06 max abs on this
+#    fixture. Separately, concurrent FIRST calls race on libssu/skbb's non-atomic
+#    CPU/accelerator detection caches (upstream README, "Detection caches"), which
+#    perturbs the first parallel run in a process by ~1.6e-06 and nothing after it.
+#    1e-5 is the tolerance the rest of this repo's fp32 PCoA reproducibility tests
+#    already use, and it has 3x headroom on THIS fixture. Do not read it as a
+#    universal bound: the drift is amplified by a randomized SVD and a procrustes
+#    fit, so it grows with the table — measured 2.4e-05 on 23,814 real EMP samples,
+#    which would fail this threshold. What stays invariant at that scale is the
+#    ORDINATION (procrustes M^2 vs a full unifrac_pcoa was identical to five
+#    decimals across thread counts), not the coordinates. A bigger fixture here
+#    would therefore need a procrustes comparison instead of a coordinate diff.
+#    Asserting exact equality would be asserting something untrue either way.
+#
+#    What IS exact is checked exactly, because these are the things concurrency
+#    could actually corrupt rather than perturb: every sample appears, and each
+#    coordinate's `batch` is its POSITION, not whichever worker finished first.
+#    This is also the guard on the shared AnchorFeatureRowCache — its anchor rows
+#    are loaded eagerly before fan-out, and if anyone reinstates the lazy fill,
+#    workers would write that vector while others read it. That corrupts a block's
+#    anchor rows outright, which moves coordinates far beyond 1e-5. ──
+statement ok
+CREATE TABLE prog_serial AS
+SELECT sample_id, axis, coordinate, batch
+FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+
+statement ok
+CREATE TABLE prog_parallel AS
+SELECT sample_id, axis, coordinate, batch
+FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 4);
+
+# same (sample_id, axis) keys on both sides, and every one of them joins
+query II
+SELECT (SELECT count(*) FROM prog_serial), (SELECT count(*) FROM prog_parallel FULL JOIN prog_serial USING (sample_id, axis));
+----
+120	120
+
+# batch indices are positional — exact, no tolerance
+query I
+SELECT count(*) FROM prog_serial s JOIN prog_parallel p USING (sample_id, axis) WHERE s.batch <> p.batch;
+----
+0
+
+# coordinates agree to fp32 PCoA tolerance
+query I
+SELECT count(*) FROM prog_serial s JOIN prog_parallel p USING (sample_id, axis)
+WHERE abs(s.coordinate - p.coordinate) >= 1e-5;
+----
+0
+
+# ── explicit anchors: `anchors :=` replaces the seeded random draw, which is what
+#    makes the reference frame controllable — needed to compare against an external
+#    oracle that fixes its own anchors, and to feed in anchors chosen by a rule
+#    (e.g. pick_maxvol_anchors) rather than at random. Same contract as
+#    progressive_pcoa_from_distances. ──
+statement ok
+CREATE TABLE prog_expl AS
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, batch_size := 12,
+    anchors := ['s0','s1','s2','s3','s4','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
+
+query I
+SELECT count(*) FROM prog_expl;
+----
+120
+
+# the SAME anchors the seeded draw would have to be told explicitly still reproduce
+# a full unifrac_pcoa up to a similarity transform — i.e. an explicitly-anchored run
+# is a real ordination, not just a syntactically accepted one
+query T
+SELECT DISTINCT m2 < 0.05 FROM procrustes('full_ord', 'prog_expl', permutations := 0);
+----
+true
+
+# explicit anchors take precedence over n_anchors: an n_anchors that would be
+# REJECTED on the random path (< n_dims + 1) is simply ignored when anchors is given
+query I
+SELECT count(*) FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 3, batch_size := 12,
+    anchors := ['s0','s1','s2','s3','s4','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
+----
+120
+
+# determinism: same explicit anchors + seed → identical coordinates.
+# `seed := 42` is REQUIRED even though the anchors are explicit: the seed no longer
+# selects anchors, but it still seeds every block's skbb fsvd, so an unseeded
+# explicitly-anchored run is NOT reproducible. Omitting it here made all 120 rows
+# differ. `threads := 1` is pinned for the separate reason above (concurrent blocks
+# shift coordinates at ~1e-6).
+statement ok
+CREATE TABLE prog_expl2 AS
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, batch_size := 12,
+    seed := 42, threads := 1,
+    anchors := ['s0','s1','s2','s3','s4','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
+
+statement ok
+CREATE TABLE prog_expl3 AS
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, batch_size := 12,
+    seed := 42, threads := 1,
+    anchors := ['s0','s1','s2','s3','s4','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
+
+query I
+SELECT count(*) FROM (SELECT * FROM prog_expl2 EXCEPT SELECT * FROM prog_expl3);
+----
+0
+
+# a DIFFERENT anchor set must give a different frame — otherwise `anchors` would be
+# silently ignored and every test above would pass vacuously. Same seed/threads on
+# both sides, so the difference is attributable to the anchors alone.
+statement ok
+CREATE TABLE prog_expl_alt AS
+SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized', n_dims := 3, batch_size := 12,
+    seed := 42, threads := 1,
+    anchors := ['s20','s21','s22','s23','s24','s25','s26','s27','s28','s29','s30','s31','s32','s33','s34']);
+
+query I
+SELECT count(*) FROM prog_expl2 a JOIN prog_expl_alt b USING (sample_id, axis)
+WHERE abs(a.coordinate - b.coordinate) > 1e-9;
+----
+120
+
+# ── explicit-anchor error matrix (fail loud) ──
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, batch_size := 12,
+    anchors := ['s0','s1','s2','s3','NOPE','s5','s6','s7','s8','s9','s10','s11','s12','s13','s14']);
+----
+not a sample in the feature-table
+
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, batch_size := 12,
+    anchors := ['s0','s1','s0']);
+----
+duplicate explicit anchor
+
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, batch_size := 12,
+    anchors := ['s0','s1','s2']);
+----
+n_dims + 1
+
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, batch_size := 12,
+    anchors := ['s0','s1','s2','s3',NULL]);
+----
+must not contain NULL
+
+# ── id-type mirroring: an integer-keyed feature table emits BIGINT sample_id ──
+statement ok
+CREATE TABLE ft_int AS
+SELECT s AS sample_id, 'GG_OTU_' || (f + 1) AS feature_id, (1 + (s * 7 + f * 13) % 11)::DOUBLE AS value
+FROM range(40) t(s), range(5) u(f);
+
+query T
+SELECT DISTINCT typeof(sample_id) FROM progressive_pcoa_from_unifrac('ft_int', 'tree', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+BIGINT
+
+# ── drop rules mirror ReadFeatureTable: a row is used only if sample_id,
+#    feature_id, AND value are all valid (non-NULL) and value is nonzero/non-NaN.
+#    'd' keeps 3 valid rows despite also having a zero / NaN / NULL-feature row;
+#    'x' has ONLY droppable rows so it is excluded (cannot be ordinated) — the
+#    same silent exclusion unifrac_pcoa applies, not an error. ──
+statement ok
+CREATE TABLE ftd AS SELECT * FROM (VALUES
+  ('a', 'GG_OTU_1', 3.0), ('a', 'GG_OTU_2', 1.0), ('a', 'GG_OTU_3', 2.0),
+  ('b', 'GG_OTU_1', 1.0), ('b', 'GG_OTU_2', 4.0), ('b', 'GG_OTU_3', 1.0),
+  ('c', 'GG_OTU_1', 2.0), ('c', 'GG_OTU_2', 2.0), ('c', 'GG_OTU_3', 5.0),
+  ('d', 'GG_OTU_1', 5.0), ('d', 'GG_OTU_2', 1.0), ('d', 'GG_OTU_3', 1.0),
+  ('d', 'GG_OTU_1', 0.0), ('d', 'GG_OTU_2', 'nan'::DOUBLE), ('d', NULL, 9.0),
+  ('x', NULL, 7.0), ('x', 'GG_OTU_1', 0.0)
+) AS t(sample_id, feature_id, value);
+
+# 4 samples ordinated (a,b,c,d); x excluded. n_dims=2 → 4*2 = 8 rows.
+query I
+SELECT count(DISTINCT sample_id) FROM progressive_pcoa_from_unifrac('ftd', 'tree', n_dims := 2, n_anchors := 3, batch_size := 2, seed := 42);
+----
+4
+
+query I
+SELECT count(*) FROM progressive_pcoa_from_unifrac('ftd', 'tree', n_dims := 2, n_anchors := 3, batch_size := 2, seed := 42) WHERE sample_id = 'x';
+----
+0
+
+# 'd' survived (its 3 valid rows) despite the dropped zero/NaN/NULL-feature rows.
+query I
+SELECT count(*) FROM progressive_pcoa_from_unifrac('ftd', 'tree', n_dims := 2, n_anchors := 3, batch_size := 2, seed := 42) WHERE sample_id = 'd';
+----
+2
+
+# ── error matrix (fail loud) ──
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 0, n_anchors := 15, batch_size := 12);
+----
+
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 3, batch_size := 12);
+----
+
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 100, batch_size := 12);
+----
+
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 15, batch_size := 0);
+----
+
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('', 'tree', n_dims := 3, n_anchors := 15, batch_size := 12);
+----
+
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', '', n_dims := 3, n_anchors := 15, batch_size := 12);
+----
+
+statement error
+SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'not_a_variant', n_dims := 3, n_anchors := 15, batch_size := 12);
+----
+
+# ── Per-batch quality evidence (batch, batch_anchor_m2) ──────────────────────
+# Same contract as progressive_pcoa_from_distances: the approximation reports the
+# procrustes disparity of the anchor-overlap fit that placed each batch, and the
+# anchor rows report NULL because they define the frame rather than being fitted
+# into it. Pinned here too so the two progressive functions cannot drift apart.
+query I
+SELECT list_contains(list(column_name), 'batch') AND list_contains(list(column_name), 'batch_anchor_m2')
+FROM (DESCRIBE SELECT * FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42));
+----
+true
+
+query II
+SELECT count(*) FILTER (WHERE batch IS NULL AND batch_anchor_m2 IS NOT NULL),
+       count(*) FILTER (WHERE batch IS NOT NULL AND batch_anchor_m2 IS NULL)
+FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+0	0
+
+# the anchors are exactly the rows with a NULL batch
+query I
+SELECT count(DISTINCT sample_id) FROM progressive_pcoa_from_unifrac('ft', 'tree',
+    n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42) WHERE batch IS NULL;
+----
+15
+
+# one disparity value per batch, and it is finite (UniFrac is not Euclidean, so no
+# ~0 bound is asserted here — the from_distances test pins that on an exact
+# Euclidean fixture; what matters here is that the number is real and reported)
+query I
+SELECT bool_and(batch_anchor_m2 >= 0.0 AND isfinite(batch_anchor_m2))
+FROM progressive_pcoa_from_unifrac('ft', 'tree', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42)
+WHERE batch IS NOT NULL;
+----
+true
+
+# ── PHYSICAL SORT ORDER IS A PERFORMANCE KNOB, NOT A SEMANTIC ONE.
+#    docs/diversity.md advises storing the feature table sorted by sample_id so a
+#    batch's slice query prunes to that batch's own rows instead of scanning the
+#    whole sample_id column (measured 9 ms vs 33 ms per batch at 104 M rows). That
+#    advice is only safe to give if layout cannot change the answer: samples are
+#    enumerated with ORDER BY sample_id::VARCHAR before batching, so a shuffled
+#    table must produce bit-identical coordinates. If this ever fails, the
+#    enumeration has started depending on scan order and the doc advice is a bug. ──
+statement ok
+CREATE TABLE ft_shuffled AS SELECT * FROM ft ORDER BY hash(sample_id || feature_id);
+
+statement ok
+CREATE TABLE ft_sorted AS SELECT * FROM ft ORDER BY sample_id;
+
+#    Compared at threads := 1, which is where exact equality is WELL-POSED. Two
+#    progressive runs compared bit-for-bit also assert that skbb's centering
+#    reduction sums in a reproducible order, and that is only true at a fixed single
+#    width (see the worker-count-invariance note above). Left at the default width
+#    this failed intermittently on linux_amd64 with every one of the 240 rows
+#    differing — the whole frame shifted, which says nothing whatever about layout;
+#    measured on the same runner, batches, distances and M^2 were all identical.
+query I
+WITH a AS (SELECT sample_id, axis, coordinate, batch, batch_anchor_m2
+           FROM progressive_pcoa_from_unifrac('ft_sorted', 'tree', variant := 'weighted_normalized',
+               n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1)),
+     b AS (SELECT sample_id, axis, coordinate, batch, batch_anchor_m2
+           FROM progressive_pcoa_from_unifrac('ft_shuffled', 'tree', variant := 'weighted_normalized',
+               n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1))
+SELECT (SELECT count(*) FROM (SELECT * FROM a EXCEPT ALL SELECT * FROM b))
+     + (SELECT count(*) FROM (SELECT * FROM b EXCEPT ALL SELECT * FROM a));
+----
+0
+
+# ── ...and the same guarantee at the DEFAULT thread count, where the reference
+#    frame may shift in its last bits but the ANSWER may not. Three of these are
+#    exact because nothing fp32 can perturb them, and the fourth is frame-invariant:
+#      c1  batch assignment — integers, decided by an ORDER BY sample_id enumeration
+#      c2  the UniFrac distances themselves (pinned width, so exactly comparable)
+#      c3  coordinates to 1e-5, the fp32 tolerance used elsewhere in this file
+#      c4  procrustes M^2 ~ 0 — immune to a frame shift by construction, which is
+#          why docs/diversity.md tells users to compare ordinations and not
+#          coordinates. This is the assertion that actually backs the doc advice. ──
+statement ok
+CREATE TABLE dg_ord_sorted AS
+SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_unifrac('ft_sorted', 'tree',
+    variant := 'weighted_normalized', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+
+statement ok
+CREATE TABLE dg_ord_shuffled AS
+SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_unifrac('ft_shuffled', 'tree',
+    variant := 'weighted_normalized', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+
+query IIII
+WITH a AS (SELECT sample_id, axis, coordinate, batch
+           FROM progressive_pcoa_from_unifrac('ft_sorted', 'tree', variant := 'weighted_normalized',
+               n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42)),
+     b AS (SELECT sample_id, axis, coordinate, batch
+           FROM progressive_pcoa_from_unifrac('ft_shuffled', 'tree', variant := 'weighted_normalized',
+               n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42)),
+     j AS (SELECT a.coordinate AS ca, b.coordinate AS cb, a.batch AS ba, b.batch AS bb
+           FROM a JOIN b USING (sample_id, axis)),
+     d AS (SELECT coalesce(max(abs(x.distance - y.distance)), 0.0) AS dd
+           FROM unifrac_distances('ft_sorted', 'tree', variant := 'weighted_normalized', threads := 1) x
+           JOIN unifrac_distances('ft_shuffled', 'tree', variant := 'weighted_normalized', threads := 1) y
+             USING (sample_a, sample_b))
+SELECT count(*) FILTER (WHERE ba IS DISTINCT FROM bb) = 0,
+       (SELECT dd FROM d) = 0.0,
+       max(abs(ca - cb)) < 1e-5,
+       (SELECT max(m2) < 1e-9 FROM procrustes('dg_ord_sorted', 'dg_ord_shuffled', permutations := 0))
+FROM j;
+----
+true	true	true	true
+
+# ── SHEARING MUST NOT MOVE A COORDINATE.
+#    The bind shears the tree to the feature-table's features, and each block
+#    shears again to that block's features, because libssu's cost scales with the
+#    tree it is handed (measured 1.83 s -> 0.61 s on a 700-sample block of a
+#    197,711-feature table). That is only legitimate if a tree carrying tips the
+#    table never uses produces exactly the same ordination as one pruned to fit.
+#    Branches leading only to unused tips are traversed by no sample, so they
+#    belong to neither the numerator nor the denominator of any UniFrac distance —
+#    if this test ever fails, the shear is dropping or reweighting a branch that
+#    some sample does traverse, and every coordinate is suspect. ──
+statement ok
+CREATE TABLE tree_extra AS
+SELECT * FROM tree
+UNION ALL
+-- extra tips as siblings of real tips under Int1 (node 2), so pruning them must
+-- leave Int1 with its original two children and its original branch length
+SELECT 100 + i, 'UNUSED_SIB_' || i, 0.9, NULL::BIGINT, 2, true FROM range(3) a(i)
+UNION ALL
+-- an entire subtree off the root containing no used tip, which must vanish whole
+SELECT 200, 'UnusedInternal', 0.35, NULL::BIGINT, 8, false
+UNION ALL
+SELECT 300 + i, 'UNUSED_SUB_' || i, 1.1, NULL::BIGINT, 200, true FROM range(4) b(i);
+
+# the extended tree really is bigger, and really does cover the used features
+query II
+SELECT (SELECT count(*) FROM tree), (SELECT count(*) FROM tree_extra);
+----
+9	17
+
+query I
+WITH tight AS (SELECT sample_id, axis, coordinate, batch, batch_anchor_m2
+               FROM progressive_pcoa_from_unifrac('ft', 'tree', variant := 'weighted_normalized',
+                   n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1)),
+     extra AS (SELECT sample_id, axis, coordinate, batch, batch_anchor_m2
+               FROM progressive_pcoa_from_unifrac('ft', 'tree_extra', variant := 'weighted_normalized',
+                   n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1))
+SELECT (SELECT count(*) FROM (SELECT * FROM tight EXCEPT ALL SELECT * FROM extra))
+     + (SELECT count(*) FROM (SELECT * FROM extra EXCEPT ALL SELECT * FROM tight));
+----
+0
+
+# Unweighted is the variant most sensitive to a spurious branch — a branch's mere
+# presence enters the denominator — so pin it too. It needs its own fixture:
+# every sample in `ft` carries every feature, which makes unweighted UniFrac
+# identically zero (1 distinct distance) and the procrustes fit degenerate. Here
+# feature f is present only when bit f of ((s % 31) + 1) is set, giving 1-5
+# features per sample and 172 distinct distances.
+statement ok
+CREATE TABLE ft_pa AS
+SELECT 's' || s AS sample_id, 'GG_OTU_' || (f + 1) AS feature_id, (1 + (s * 7 + f * 13) % 11)::DOUBLE AS value
+FROM range(40) t(s), range(5) u(f) WHERE (((s % 31) + 1) >> f) & 1 = 1;
+
+query I
+SELECT count(DISTINCT distance) > 1 FROM unifrac_distances('ft_pa', 'tree', variant := 'unweighted', seed := 42);
+----
+true
+
+query I
+WITH tight AS (SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_unifrac('ft_pa', 'tree',
+                   variant := 'unweighted', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42,
+                   threads := 1)),
+     extra AS (SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_unifrac('ft_pa', 'tree_extra',
+                   variant := 'unweighted', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42,
+                   threads := 1))
+SELECT (SELECT count(*) FROM (SELECT * FROM tight EXCEPT ALL SELECT * FROM extra))
+     + (SELECT count(*) FROM (SELECT * FROM extra EXCEPT ALL SELECT * FROM tight));
+----
+0
