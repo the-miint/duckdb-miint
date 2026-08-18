@@ -218,7 +218,6 @@ static void MergePairsExecute(DataChunk &args, ExpressionState &state, Vector &r
 	auto fwd_errors_data = FlatVector::GetData<int32_t>(*entries[6]);
 	auto rev_errors_data = FlatVector::GetData<int32_t>(*entries[7]);
 	auto overlap_data = FlatVector::GetData<int32_t>(*entries[8]);
-	auto &result_validity = FlatVector::Validity(result);
 
 	// Quality output: LIST(UTINYINT) managed via ListVector
 	auto qual_list_entries = FlatVector::GetData<list_entry_t>(qual_list_vec);
@@ -236,7 +235,7 @@ static void MergePairsExecute(DataChunk &args, ExpressionState &state, Vector &r
 		// NULL if any input is NULL
 		if (!fwd_seq_data.validity.RowIsValid(fi) || !fwd_qual_data.validity.RowIsValid(fqi) ||
 		    !rev_seq_data.validity.RowIsValid(rsi) || !rev_qual_data.validity.RowIsValid(rqi)) {
-			result_validity.SetInvalid(i);
+			SetStructRowNull(result, i);
 			qual_list_entries[i].offset = qual_child_offset;
 			qual_list_entries[i].length = 0;
 			continue;

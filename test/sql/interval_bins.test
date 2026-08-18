@@ -1,0 +1,447 @@
+# name: test/sql/interval_bins.test
+# description: Test bin_of / bin_start / interval_bins scalar macros for genome binning
+# group: [sql]
+
+require miint
+
+# Bin convention (issue #215). Bins are 0-based array positions, NOT genomic
+# coordinates. Genomic positions stay 1-based half-open like read_alignments.
+#
+#   bin_of(p)     = ((p - 1) * n_bins) // genome_length        <- the DEFINITION
+#   bin_start(b)  = ceil(b * genome_length / n_bins) + 1       <- its exact inverse
+#
+# The inverse must be ceil. With floor, L=10/n=4 gives bounds [1,3) [3,6) [6,8)
+# [8,11), which maps position 3 to bin 1 while bin_of(3) = 0 -- they disagree at 4
+# of 10 positions. Since bin_start is the join key users carry around, a mismatch
+# there silently shifts every downstream bin. Test 4 is what pins this: it fails
+# against the floor variant.
+
+# ---- Shared fixture ----
+# Used by Tests 3, 4 and 5. Kept at the top so no test depends on another's setup;
+# if you narrow it, check all three.
+# (10,4) and (100,7) divide unevenly; (97,13) is coprime; (97,97) is one base per
+# bin; (3,5) has more bins than bases.
+
+statement ok
+CREATE TABLE bin_params(l BIGINT, n BIGINT);
+
+statement ok
+INSERT INTO bin_params VALUES (10, 4), (100, 7), (97, 13), (97, 97), (3, 5);
+
+# ---- Test 1: bin membership on exact boundaries (L=10, n=4) ----
+# bin_start: b0=1 b1=4 b2=6 b3=9 b4=11, so the bins are
+#   b0={1,2,3}  b1={4,5}  b2={6,7,8}  b3={9,10}
+
+query I
+SELECT interval_bins(1, 4, 4, 10);
+----
+[0]
+
+query I
+SELECT interval_bins(4, 6, 4, 10);
+----
+[1]
+
+# straddles the b0/b1 boundary: positions 3 and 4
+query I
+SELECT interval_bins(3, 5, 4, 10);
+----
+[0, 1]
+
+# whole genome touches every bin
+query I
+SELECT interval_bins(1, 11, 4, 10);
+----
+[0, 1, 2, 3]
+
+# ---- Test 2: the worked examples from issue #215 ----
+# Bin width here is exactly 5348, so bin 0 is [1, 5349) and the half-open
+# interval [1, 5349) IS bin 0. The issue claims [0, 1]; that is a
+# closed-vs-half-open slip. Do NOT change this expected value to match the issue.
+
+query I
+SELECT interval_bins(1, 5349, 1000, 5348000);
+----
+[0]
+
+query I
+SELECT interval_bins(100, 200, 1000, 5348000);
+----
+[0]
+
+query I
+SELECT interval_bins(1, 1, 10, 100);
+----
+[]
+
+# ---- Test 3: bin edges are half-open and match normalized positions ----
+# docs/internals/architecture.md fixes stop_position as an EXCLUSIVE end with
+# width = stop - start (no +1). Bin bounds must obey the same rule, so that
+# (bin_start(b), bin_start(b+1)) can be handed to anything consuming a half-open
+# (start, stop) pair -- compress_intervals, region_presence and region_coverage --
+# with no adjustment. That requires
+# bin_start(0) = 1 and bin_start(n_bins) = genome_length + 1 exactly.
+#
+# Deliberately NOT asserted here: SUM(bin_start(b+1) - bin_start(b)) == genome_length.
+# That sum telescopes to bin_start(n) - bin_start(0), so it restates the two
+# endpoints below and passes against a wrong bin_start. Test 4 checks the interior.
+
+query IIII
+SELECT bin_start(0, 500, 4719737), bin_start(500, 500, 4719737),
+       bin_start(0, 4, 10), bin_start(4, 4, 10);
+----
+1	4719738	1	11
+
+# ---- Test 4: containment -- every position lies inside its own bin's bounds ----
+# This is the assertion that catches a wrong bin_start. Unlike a sum of widths
+# (which telescopes to bin_start(n) - bin_start(0) and cannot fail), this checks
+# every bin's interior. Verified to report failures against the floor variant.
+
+query I
+WITH pos AS (SELECT l, n, UNNEST(range(1, l + 1)) AS p FROM bin_params)
+SELECT COUNT(*) FROM pos
+WHERE p <  bin_start(bin_of(p, n, l), n, l)
+   OR p >= bin_start(bin_of(p, n, l) + 1, n, l);
+----
+0
+
+# Complementary direction: the number of positions landing in a bin must equal
+# that bin's width, so no base is dropped or double-counted.
+query I
+WITH pos AS (SELECT l, n, UNNEST(range(1, l + 1)) AS p FROM bin_params),
+     hist AS (SELECT l, n, bin_of(p, n, l) AS b, COUNT(*) AS cnt
+              FROM pos GROUP BY l, n, bin_of(p, n, l))
+SELECT COUNT(*) FROM hist
+WHERE cnt <> bin_start(b + 1, n, l) - bin_start(b, n, l);
+----
+0
+
+# ---- Test 5: interval_bins agrees with bin_of, and both agree with bin_start ----
+# A single-base interval must report exactly the bin bin_of names.
+
+query I
+WITH pos AS (SELECT l, n, UNNEST(range(1, l + 1)) AS p FROM bin_params)
+SELECT COUNT(*) FROM pos
+WHERE interval_bins(p, p + 1, n, l) IS DISTINCT FROM [bin_of(p, n, l)];
+----
+0
+
+# Same cross-check at a realistic bin count with a NON-dividing width
+# (534800 / 1000 = 534.8), where the ceil/floor distinction actually bites.
+# Every bin's first and last position must be exactly bin_start(b) and
+# bin_start(b+1) - 1, and all 1000 bins must be reachable.
+
+query II
+WITH pos AS (SELECT UNNEST(range(1, 534801)) AS p),
+     mapped AS (SELECT p, bin_of(p, 1000, 534800) AS b FROM pos),
+     spans AS (SELECT b, MIN(p) AS lo, MAX(p) AS hi FROM mapped GROUP BY b)
+SELECT COUNT(*),
+       COUNT(*) FILTER (WHERE lo <> bin_start(b, 1000, 534800)
+                           OR hi <> bin_start(b + 1, 1000, 534800) - 1)
+FROM spans;
+----
+1000	0
+
+# ---- Test 6: INTEGER inputs must not overflow ----
+# read_gff and read_ncbi_annotation emit INTEGER position/stop_position
+# (docs/reading.md). An unwidened (position * n_bins) overflows INT32 at ~4.3 Mbp
+# with 500 bins -- an ordinary bacterial genome -- so the macros cast to BIGINT
+# before multiplying. Without the cast these three raise
+# "Overflow in multiplication of INT32".
+
+statement ok
+CREATE TABLE p_int(start INTEGER, stop INTEGER);
+
+statement ok
+INSERT INTO p_int VALUES (4300000, 4300100);
+
+query I
+SELECT interval_bins(start, stop, 500, 4719737) FROM p_int;
+----
+[455]
+
+query II
+SELECT bin_start(456, 500, 4719737), bin_of(4300000, 500, 4719737);
+----
+4304402	455
+
+# Return types are BIGINT regardless of what the caller passed in.
+query III
+SELECT typeof(interval_bins(1, 4, 4, 10)), typeof(bin_start(1, 4, 10)),
+       typeof(bin_of(1, 4, 10));
+----
+BIGINT[]	BIGINT	BIGINT
+
+# ---- Test 6b: n_bins and genome_length supplied PER ROW ----
+# This is the documented workflow -- genome_length joined per genome -- and it is
+# where a mismatch between the arithmetic and the bounds comparisons shows up.
+
+statement ok
+CREATE TABLE reads(gid VARCHAR, s BIGINT, e BIGINT);
+
+statement ok
+INSERT INTO reads VALUES ('g1', 1, 21), ('g1', 95, 105), ('g2', 1, 4), ('g_missing', 1, 5);
+
+statement ok
+CREATE TABLE lens(gid VARCHAR, l BIGINT, nb BIGINT);
+
+statement ok
+INSERT INTO lens VALUES ('g1', 100, 10), ('g2', 3, 5);
+
+query III
+SELECT r.gid, r.s, interval_bins(r.s, r.e, x.nb, x.l)
+FROM reads r JOIN lens x USING (gid) ORDER BY r.gid, r.s;
+----
+g1	1	[0, 1]
+g1	95	[9]
+g2	1	[0, 1, 3]
+
+# A non-integral genome_length (an inferred DOUBLE/DECIMAL column) must behave
+# exactly like its rounded value, not raise. Before the operands were normalized
+# in the bounds comparisons too, this leaked
+# "bin_of: position 11 outside genome [1, 10.6]" from a function never called.
+
+query III
+SELECT interval_bins(1, 99, 10, 10.6), interval_bins(1, 99, 10, 11),
+       interval_bins(1, 99, 20, 10.6::DOUBLE);
+----
+[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]	[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]	[0, 1, 3, 5, 7, 9, 10, 12, 14, 16, 18]
+
+# NULL genome_length -- what a LEFT JOIN miss actually produces -- yields NULL,
+# following the SQL convention compress_intervals uses. UNNEST then drops the row
+# SILENTLY. The positivity guard cannot catch this (a miss is NULL, not 0), so this
+# pins the behavior rather than pretending otherwise; guard the join if it matters.
+
+query II
+SELECT r.gid, interval_bins(r.s, r.e, 10, x.l) AS bins
+FROM reads r LEFT JOIN lens x USING (gid)
+WHERE r.gid = 'g_missing';
+----
+g_missing	NULL
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT UNNEST(interval_bins(r.s, r.e, 10, x.l)) AS b
+    FROM reads r LEFT JOIN lens x USING (gid) WHERE r.gid = 'g_missing');
+----
+0
+
+# ---- Test 7: clamping to [1, genome_length] ----
+# An interval running off either end contributes only its in-genome part; bins
+# outside the genome are never emitted.
+
+query I
+SELECT interval_bins(-5, 3, 4, 10);
+----
+[0]
+
+query I
+SELECT interval_bins(8, 999, 4, 10);
+----
+[2, 3]
+
+# entirely off the end -> nothing
+query I
+SELECT interval_bins(50, 99, 4, 10);
+----
+[]
+
+# ---- Test 8: empty interval and NULL propagation ----
+
+query I
+SELECT interval_bins(5, 5, 4, 10);
+----
+[]
+
+# stop < start is empty, not reversed
+query I
+SELECT interval_bins(9, 2, 4, 10);
+----
+[]
+
+query IIII
+SELECT interval_bins(NULL, 3, 4, 10), interval_bins(1, NULL, 4, 10),
+       interval_bins(1, 3, NULL, 10), interval_bins(1, 3, 4, NULL);
+----
+NULL	NULL	NULL	NULL
+
+query III
+SELECT bin_of(NULL, 4, 10), bin_start(NULL, 4, 10), bin_start(1, 4, NULL);
+----
+NULL	NULL	NULL
+
+# ---- Test 9: invalid parameters fail loud ----
+# Silently returning an empty list here is the worst outcome: every read vanishes
+# through UNNEST and the ranking query reports "no differential bins" instead of
+# "your genome_length join produced a zero".
+
+statement error
+SELECT interval_bins(1, 5, 0, 10);
+----
+n_bins and genome_length must be positive
+
+statement error
+SELECT interval_bins(1, 5, -4, 10);
+----
+n_bins and genome_length must be positive
+
+statement error
+SELECT interval_bins(1, 5, 4, 0);
+----
+n_bins and genome_length must be positive
+
+statement error
+SELECT bin_of(1, 4, 0);
+----
+n_bins and genome_length must be positive
+
+statement error
+SELECT bin_start(1, 0, 10);
+----
+n_bins and genome_length must be positive
+
+# A bin index outside [0, n_bins] would yield a plausible-looking but fictional
+# coordinate -- the same silent-shift failure the ceil/floor rule guards against.
+statement error
+SELECT bin_start(-1, 4, 10);
+----
+bin index -1 outside [0, 4]
+
+statement error
+SELECT bin_start(99, 4, 10);
+----
+bin index 99 outside [0, 4]
+
+# ...but b = n_bins is valid: it is the exclusive end of the last bin.
+query I
+SELECT bin_start(4, 4, 10);
+----
+11
+
+statement error
+SELECT bin_of(0, 4, 10);
+----
+position 0 outside genome [1, 10]
+
+statement error
+SELECT bin_of(11, 4, 10);
+----
+position 11 outside genome [1, 10]
+
+# ---- Test 10: more bins than bases ----
+# Legitimate when a fixed n_bins is applied across genomes of very different
+# sizes (a 1000-bin grid over a 3 bp plasmid). Bins that contain no bases are
+# unreachable and must NOT be emitted, even when an interval spans across them.
+# L=3, n=5: bin_start b0=1 b1=2 b2=3 b3=3 b4=4, so b2 and b4 are zero-width.
+
+query I
+SELECT interval_bins(1, 4, 5, 3);
+----
+[0, 1, 3]
+
+query I
+SELECT interval_bins(3, 4, 5, 3);
+----
+[3]
+
+# The same case at a bin count where an O(n_bins) implementation would stall:
+# 1e6 bins over 3 bases still costs only the 3 positions.
+query I
+SELECT interval_bins(1, 4, 1000000, 3);
+----
+[0, 333333, 666666]
+
+# ---- Test 11: the micov binning + variance ranking, now plain SQL ----
+# This is what replaces micov's _quant.py pl.cut/int_ranges/explode pipeline and
+# makes _rank.py unnecessary. Bin 0 is hit by all six samples; bin 1 is hit by
+# all three cases but only one control, so it ranks top by std dev.
+#
+# Note the denominator subtlety this encodes: a group with NO sample in a bin
+# contributes no row at all, so stddev_samp sees one value and returns NULL --
+# it does not see a zero. Callers who want absent-as-zero must densify the
+# group roster themselves; that is a metadata question, not a binning one.
+
+statement ok
+CREATE TABLE positions(sample_id VARCHAR, grp VARCHAR, start BIGINT, stop BIGINT);
+
+statement ok
+INSERT INTO positions VALUES
+  ('a', 'case', 1, 21), ('b', 'case', 1, 21), ('c', 'case', 1, 21),
+  ('d', 'ctrl', 1, 21), ('e', 'ctrl', 1, 11), ('f', 'ctrl', 1, 11);
+
+query IR
+WITH binned AS (
+    SELECT grp, sample_id, UNNEST(interval_bins(start, stop, 10, 100)) AS bin_index
+    FROM positions
+), per_group AS (
+    SELECT bin_index, grp, COUNT(DISTINCT sample_id) AS sample_hits
+    FROM binned GROUP BY bin_index, grp
+)
+SELECT bin_index, stddev_samp(sample_hits) AS sample_hits_std
+FROM per_group GROUP BY bin_index
+ORDER BY sample_hits_std DESC NULLS LAST, bin_index
+LIMIT 1;
+----
+1	1.414214
+
+# A top-ranked bin converts straight into a half-open region, no adjustment.
+query III
+SELECT bin_start(1, 10, 100) AS region_start,
+       bin_start(2, 10, 100) AS region_stop,
+       bin_start(2, 10, 100) - bin_start(1, 10, 100) AS region_length;
+----
+11	21	10
+
+# ---- Delegation is hijack-proof ----
+# bin_of and both of interval_bins' regimes share one definition of the bin formula,
+# `_miint_bin_index`, instead of writing it out three times. A macro body resolves its
+# callee in the CALLER's catalog, so a bare `_miint_bin_index(...)` reference would let any
+# user macro of that name silently replace the arithmetic -- and the results would still
+# look like plausible bin indices. Schema-qualifying the callee as
+# `system.main._miint_bin_index(...)` is what prevents that.
+#
+# THIS TEST DISCRIMINATES: verified by building the delegation with bare references first,
+# where every assertion below fails. It is the regression guard for the qualification, so
+# do not "simplify" the qualified names away.
+#
+# The qualification cannot itself be spoofed: `ATTACH ':memory:' AS system` is refused
+# ("reserved name") and `CREATE MACRO system.main.x` is refused ("Cannot create entry in
+# system catalog"), so a user cannot inject a callee into the resolved path either.
+
+statement ok
+CREATE MACRO _miint_bin_index(pos, n_bins, genome_length) AS 999;
+
+statement ok
+CREATE MACRO bin_of(pos, n_bins, genome_length) AS 999;
+
+# The user's own macros do take effect when called by name -- the hijack is real, which is
+# what makes the assertions below meaningful rather than vacuous.
+query II
+SELECT _miint_bin_index(1, 4, 10) AS shadowed_helper, bin_of(1, 4, 10) AS shadowed_bin_of;
+----
+999	999
+
+# interval_bins is unaffected in BOTH regimes.
+# Regime 1 (n_bins <= genome_length): positions 1..5 of a 10 bp genome in 4 bins.
+query I
+SELECT interval_bins(1, 6, 4, 10);
+----
+[0, 1]
+
+# Regime 2 (n_bins > genome_length), which reaches the formula through a lambda.
+query I
+SELECT interval_bins(1, 4, 10, 3);
+----
+[0, 3, 6]
+
+# And the round trip still holds across both regimes, against the formula written out
+# literally here rather than through either shadowed macro.
+query I
+SELECT COUNT(*) AS mismatches
+FROM (VALUES (10, 4), (100, 7), (3, 5), (97, 13)) AS params(gl, nb),
+     range(1, 98) AS t(p)
+WHERE p <= params.gl
+  AND interval_bins(p, p + 1, params.nb, params.gl)
+      <> [((p - 1) * params.nb) // params.gl];
+----
+0

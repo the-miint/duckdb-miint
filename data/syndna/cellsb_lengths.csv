@@ -1,0 +1,5 @@
+feature_id,ogu_len_in_bp
+f_both,2000000.0
+f_only1,3000000.0
+f_neither,4000000.0
+f_zero,2500000.0

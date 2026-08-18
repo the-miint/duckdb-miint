@@ -80,12 +80,12 @@ Two constraints come with it:
 - [Sequence search](search.md) - Search sequences against a reference database.
 - [Taxonomic classification](classification.md) - Classify sequences by minimizer/k-mer content (RYpe).
 - [Profiling & feature tables](profiling.md) - Abundance profiling (sylph) and OGU feature tables (Woltka).
+- [Absolute quantification](absolute_quantification.md) - Turn compositional read counts into absolute quantities: cell counts from synDNA spike-ins (Zaramela et al. 2022), and copies of each ORF's ssRNA.
 
 ## Phylogeny & diversity
 
 - [Phylogeny estimation](phylogeny.md) - Phylogenetic estimation, tree manipulation (shear, resolve multifurcations/placements), and comparative methods (independent contrasts, ancestral state reconstruction: Brownian-motion, parsimony, and Mk maximum likelihood).
-- [Alpha and beta diversity](diversity.md) - Methods to compute and analyze alpha and beta diversity, including rarefaction, ordination (PCoA) and Procrustes alignment of ordinations.
-- [Alpha and beta diversity](diversity.md) - Methods to compute and analyze alpha and beta diversity, including non-phylogenetic community distances, ordination, and sample clustering.
+- [Alpha and beta diversity](diversity.md) - Methods to compute and analyze alpha and beta diversity, including rarefaction, non-phylogenetic community distances, ordination (PCoA) and Procrustes alignment, sample clustering, and the two-sample Kolmogorov-Smirnov test.
 - [Community simulation](simulation.md) - Generate synthetic gradient / clustered OTU tables with known ground truth for benchmarking resemblance and ordination methods.
 - [Multi-omics integration](multiomics.md) - MMvec: learn which metabolites co-occur with which microbes from paired count tables, without the spurious associations correlation produces on compositional data.
 

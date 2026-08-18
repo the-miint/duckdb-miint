@@ -538,6 +538,7 @@ void RegisterPermanovaFromDistances(ExtensionLoader &loader) {
 	fn.named_parameters["variables"] = LogicalType::LIST(LogicalType::VARCHAR);
 	fn.named_parameters["seed"] = LogicalType::INTEGER;
 	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);
 }
 

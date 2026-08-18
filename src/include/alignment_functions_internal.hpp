@@ -46,8 +46,14 @@ static inline std::vector<CigarOperation> ParseCigarOperations(const std::string
 	size_t len = cigar_str.size();
 
 	if (len == 0 || (len == 1 && cigar[0] == '*')) {
-		return ops; // Empty or unmapped
+		return ops; // Empty or unmapped -- no allocation at all, and unmapped records are common
 	}
+
+	// Every operation needs at least two characters (a length digit and an op code), so this
+	// is an upper bound -- loose on real CIGARs, whose lengths run to several digits, but it
+	// spares the growth-by-doubling reallocations that otherwise dominate this function's
+	// cost on long ones.
+	ops.reserve(len / 2 + 1);
 
 	int64_t op_len = 0;
 
@@ -90,6 +96,13 @@ static inline std::vector<CigarOperation> ParseCigarOperations(const std::string
 
 	return ops;
 }
+
+// A half-open [start, stop) run of query positions, 0-based, in the ORIGINAL READ's
+// orientation (not the reference orientation the CIGAR is written in).
+struct QueryInterval {
+	int64_t start;
+	int64_t stop;
+};
 
 // MD parsing result structure
 struct MdStats {
@@ -254,6 +267,20 @@ static inline int64_t ComputeQueryLength(const CigarStats &stats, bool include_h
 	return length;
 }
 
+// Decode the coverage `type` vocabulary shared by ComputeQueryCoverage and
+// ComputeQueryIntervals: both count M/=/X, and "mapped" additionally counts I.
+// Single source of truth for the accepted values and the rejection message, so the two
+// cannot drift apart on what they accept.
+static inline bool CoverageTypeCountsInsertions(const std::string &type) {
+	if (type == "aligned") {
+		return false;
+	}
+	if (type == "mapped") {
+		return true;
+	}
+	throw InvalidInputException("Invalid coverage type: " + type + ". Must be 'aligned' or 'mapped'.");
+}
+
 // Compute query coverage from CIGAR statistics
 // Returns the proportion of query bases covered by the reference
 static inline double ComputeQueryCoverage(const CigarStats &stats, const std::string &type) {
@@ -264,44 +291,174 @@ static inline double ComputeQueryCoverage(const CigarStats &stats, const std::st
 		return 0.0; // Avoid division by zero, return 0% coverage
 	}
 
-	int64_t covered_bases = 0;
-	if (type == "aligned") {
-		// Only bases that align to reference (M, =, X)
-		covered_bases = stats.matches;
-	} else if (type == "mapped") {
-		// Bases that are mapped (not clipped): M, I, =, X
-		covered_bases = stats.matches + stats.insertions;
-	} else {
-		throw InvalidInputException("Invalid coverage type: " + type + ". Must be 'aligned' or 'mapped'.");
-	}
+	// "aligned" counts only bases that align to the reference (M, =, X); "mapped" also
+	// counts insertions, which are unclipped but align to nothing.
+	int64_t covered_bases = stats.matches + (CoverageTypeCountsInsertions(type) ? stats.insertions : 0);
 
 	return static_cast<double>(covered_bases) / static_cast<double>(query_length);
+}
+
+// Compute the query positions this alignment covers, as half-open intervals in the
+// ORIGINAL READ's orientation.
+//
+// `type` selects what counts as covered, using the same vocabulary as
+// ComputeQueryCoverage: "aligned" counts M/=/X, "mapped" additionally counts I.
+// S and H advance the query cursor but are never covered; D/N/P consume no query, so
+// runs they separate are contiguous on the query axis and are emitted merged.
+//
+// SAM writes CIGARs in reference orientation, so on a reverse-strand alignment the
+// leading clip sits at the read's 3' end. `reverse` (FLAG 0x10) puts the returned intervals
+// on the read's own axis regardless of orientation, so intervals from fragments of the same
+// read are directly comparable -- which is the whole point of returning intervals rather
+// than a count. Intervals are always returned ascending and non-overlapping.
+//
+// Empty for an unmapped or empty CIGAR. Throws on an unrecognised type.
+static inline std::vector<QueryInterval> ComputeQueryIntervals(const std::vector<CigarOperation> &ops, bool reverse,
+                                                               const std::string &type) {
+	const bool count_insertions = CoverageTypeCountsInsertions(type);
+
+	std::vector<QueryInterval> intervals;
+	intervals.reserve(ops.size());
+	int64_t cursor = 0; // offset from the read's own 5' end
+
+	// SAM writes the CIGAR in reference orientation, so on a reverse-strand alignment the
+	// last operation is the one at the read's 5' end. Walking the operations backwards
+	// therefore makes the cursor a read-axis offset directly, and intervals come out
+	// ascending with the run-merging below unchanged -- no mirror pass afterwards.
+	for (size_t i = 0; i < ops.size(); i++) {
+		const auto &op = ops[reverse ? ops.size() - 1 - i : i];
+		bool consumes_query = true;
+		bool covered = false;
+
+		switch (op.op) {
+		case 'M':
+		case '=':
+		case 'X':
+			covered = true;
+			break;
+		case 'I':
+			covered = count_insertions;
+			break;
+		case 'S':
+		case 'H':
+			break;
+		case 'D':
+		case 'N':
+		case 'P':
+			consumes_query = false;
+			break;
+		default:
+			// ParseCigarOperations admits exactly the nine SAM ops, so reaching here means
+			// the parser gained an operation this consumer was not taught about. Listed
+			// exhaustively rather than defaulted to reference-only so that drift fails
+			// loudly instead of silently mis-placing intervals.
+			throw InvalidInputException("Unhandled CIGAR operation in query interval computation: " +
+			                            std::string(1, op.op));
+		}
+
+		// ParseCigarOperations bounds each operation's length but not their sum. Without this
+		// a hand-written CIGAR summing past INT64_MAX yields intervals with stop < start,
+		// because the interval below is built from the cursor directly.
+		if (consumes_query && cursor > INT64_MAX - op.length) {
+			throw InvalidInputException("CIGAR query length exceeds maximum");
+		}
+
+		if (covered) {
+			// Runs separated only by D/N/P are contiguous on the query axis; extend
+			// rather than emitting an interval that abuts its predecessor.
+			if (!intervals.empty() && intervals.back().stop == cursor) {
+				intervals.back().stop = cursor + op.length;
+			} else {
+				intervals.push_back({cursor, cursor + op.length});
+			}
+		}
+		if (consumes_query) {
+			cursor += op.length;
+		}
+	}
+
+	return intervals;
+}
+
+// The counters sequence identity is a function of, isolated from the rest of CigarStats so
+// that identity can be pooled over the several alignment records one read was split into.
+//
+// Only these four are additive across records. gap_opens is not: an operation ending one
+// record and one beginning the next are not adjacent in any alignment, so summing gap opens
+// would count events that never happened. The clip counters describe an individual record's
+// accounting rather than the molecule. Carrying either here would be a number that looks
+// poolable and is not.
+struct IdentityCounts {
+	int64_t matches = 0;           // M, =, X
+	int64_t match_ops = 0;         // = only
+	int64_t mismatch_ops = 0;      // X only
+	int64_t alignment_columns = 0; // M + I + D
+
+	// ParseCigar bounds each operation's length but not the sum of them, so a CIGAR can
+	// already carry counters near INT64_MAX, and pooling widens that exposure from one CIGAR
+	// to a whole read group. Checked because an overflowed sum does not fail visibly: signed
+	// overflow is undefined behaviour, and the observable result is an identity outside
+	// [0.0, 1.0] -- a number that looks like an answer.
+	void Add(const IdentityCounts &other) {
+		matches = AddCounts(matches, other.matches);
+		match_ops = AddCounts(match_ops, other.match_ops);
+		mismatch_ops = AddCounts(mismatch_ops, other.mismatch_ops);
+		alignment_columns = AddCounts(alignment_columns, other.alignment_columns);
+	}
+
+private:
+	// Both operands are operation-length totals, so both are non-negative.
+	static int64_t AddCounts(int64_t a, int64_t b) {
+		if (a > INT64_MAX - b) {
+			throw InvalidInputException("CIGAR operation counts exceed maximum");
+		}
+		return a + b;
+	}
+};
+
+// Project a parsed CIGAR onto the counters identity is computed from.
+static inline IdentityCounts ToIdentityCounts(const CigarStats &stats) {
+	IdentityCounts counts;
+	counts.matches = stats.matches;
+	counts.match_ops = stats.match_ops;
+	counts.mismatch_ops = stats.mismatch_ops;
+	counts.alignment_columns = stats.alignment_columns;
+	return counts;
 }
 
 // Compute sequence identity from extended-CIGAR operations (= and X) alone.
 //
 // Formula: match_ops / alignment_columns, where alignment_columns = M + I + D
-// (= and X count toward the M field in CigarStats).
+// (= and X count toward the matches field).
 //
-// Returns std::nullopt when identity cannot be determined from the CIGAR:
+// Returns std::nullopt when identity cannot be determined:
 //   - Legacy CIGAR with only M ops (can't distinguish matches from mismatches)
 //   - Mixed M alongside = or X (inconsistent encoding)
 //   - Degenerate CIGARs with no =/X ops at all (pure I/D/S/H/N/P)
 // SQL wrappers materialize std::nullopt as NULL.
-static inline std::optional<double> ComputeCigarIdentity(const CigarStats &stats) {
-	if (stats.match_ops + stats.mismatch_ops == 0) {
+//
+// Taking counts rather than a whole CigarStats is what lets one read's records be pooled
+// through the identical rules: the caller sums the counters and asks once. Applied to sums,
+// the second rule also rejects a read whose records disagree about the encoding -- one in
+// legacy M and one extended -- where the =/X counts describe only part of the molecule.
+static inline std::optional<double> ComputeCigarIdentity(const IdentityCounts &counts) {
+	if (counts.match_ops + counts.mismatch_ops == 0) {
 		// No = or X ops observed (M-only or degenerate)
 		return std::nullopt;
 	}
 
-	// If M ops are present alongside =/X, the CIGAR is inconsistent
-	int64_t m_only = stats.matches - stats.match_ops - stats.mismatch_ops;
+	// If M ops are present alongside =/X, the encoding is inconsistent
+	int64_t m_only = counts.matches - counts.match_ops - counts.mismatch_ops;
 	if (m_only > 0) {
 		return std::nullopt;
 	}
 
 	// alignment_columns is guaranteed > 0 here because =/X ops exist
-	return static_cast<double>(stats.match_ops) / static_cast<double>(stats.alignment_columns);
+	return static_cast<double>(counts.match_ops) / static_cast<double>(counts.alignment_columns);
+}
+
+static inline std::optional<double> ComputeCigarIdentity(const CigarStats &stats) {
+	return ComputeCigarIdentity(ToIdentityCounts(stats));
 }
 
 } // namespace miint

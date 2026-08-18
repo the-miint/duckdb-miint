@@ -1,0 +1,1001 @@
+# name: test/sql/region_coverage.test
+# description: Test region_coverage table macro -- breadth of coverage with region-relative denominators
+# group: [sql]
+
+require miint
+
+# region_coverage answers "how much of this region does this sample cover", with the
+# denominator being the REGION's length, not the genome's (issue #217). A fully covered
+# 5 kb region inside a 5 Mb genome is 100% covered, not 0.1%.
+#
+# Two things have to be right for that number to mean anything:
+#   - alignments are CLIPPED to the region before they are merged, so an alignment
+#     hanging over the boundary contributes only its in-region portion
+#   - the merge happens at all, so a base under two alignments is counted once
+#
+# It deliberately does NOT emit a row for a (sample, region) pair with no overlap.
+# See Test 9 -- a fabricated `covered = 0` is exactly the conflation region_presence
+# exists to prevent.
+
+# ---- Shared fixture ----
+# Consumed by Tests 1-5 and 9. Editing it changes the golden table in Test 1.
+# s5 and s8 sit exactly on R1's exclusive boundaries; s6 needs merging; s9 overlaps
+# outside the region; s7 has a row but no interval.
+
+statement ok
+CREATE TABLE positions(sample_id VARCHAR, genome_id VARCHAR, start BIGINT, stop BIGINT);
+
+statement ok
+INSERT INTO positions VALUES
+  ('s1', 'g1',  40,  55),      -- hangs over R1's low edge
+  ('s2', 'g1',  10, 900),      -- strictly contains R1 and R2
+  ('s3', 'g1', 700, 800),      -- hangs over R2's high edge, misses R1
+  ('s4', 'g2',  10,  20),      -- hangs over R3's high edge
+  ('s5', 'g1',  60,  70),      -- starts exactly at R1's exclusive end
+  ('s6', 'g1',  48,  54),      -- s6's two intervals overlap each other
+  ('s6', 'g1',  52,  58),
+  ('s7', 'g1', NULL, NULL),    -- a row, but no interval
+  ('s8', 'g1',  45,  50),      -- ends exactly at R1's start
+  ('s9', 'g1',  10,  52),      -- s9's two intervals overlap OUTSIDE R1
+  ('s9', 'g1',  40, 900);
+
+statement ok
+CREATE TABLE regions(genome_id VARCHAR, region_start BIGINT, region_stop BIGINT, region_id VARCHAR);
+
+statement ok
+INSERT INTO regions VALUES
+  ('g1',  50,  60, 'R1'),      -- length 10
+  ('g1', 700, 750, 'R2'),      -- length 50
+  ('g2',   5,  15, 'R3');      -- length 10
+
+# ---- Test 1: the whole table ----
+# Every number here is hand-derived; the derivations are in the tests that follow.
+#   R1 [50,60): s1 [50,55)=5 | s2 [50,60)=10 | s6 [50,58)=8 | s9 [50,60)=10
+#   R2 [700,750): s2 =50 | s3 =50 | s9 =50
+#   R3 [5,15): s4 [10,15)=5
+# s5, s7 and s8 contribute no rows at all.
+
+query TTTIIIIR
+SELECT * FROM region_coverage(positions, regions) ORDER BY region_id, sample_id;
+----
+s1	g1	R1	50	60	5	10	0.5
+s2	g1	R1	50	60	10	10	1.0
+s6	g1	R1	50	60	8	10	0.8
+s9	g1	R1	50	60	10	10	1.0
+s2	g1	R2	700	750	50	50	1.0
+s3	g1	R2	700	750	50	50	1.0
+s9	g1	R2	700	750	50	50	1.0
+s4	g2	R3	5	15	5	10	0.5
+
+# ---- Test 2: clipping ----
+# The alignment's own length is never the answer.
+#   s1 [40,55)  is 15 bases long, contributes 5   (hangs over the low edge)
+#   s3 [700,800) is 100 bases long, contributes 50 (hangs over the high edge)
+#   s2 [10,900) is 890 bases long, contributes exactly region_length
+# Without clipping these report 15, 100 and 890.
+
+query TTII
+SELECT sample_id, region_id, covered, region_length
+FROM region_coverage(positions, regions)
+WHERE (sample_id, region_id) IN (('s1','R1'), ('s3','R2'), ('s2','R1'))
+ORDER BY sample_id;
+----
+s1	R1	5	10
+s2	R1	10	10
+s3	R2	50	50
+
+# An alignment strictly containing the region contributes region_length and no more --
+# stated as its own assertion because "clip the high edge" and "clip the low edge" are
+# separate code paths (LEAST and GREATEST) and a containing alignment exercises both.
+
+query TI
+SELECT sample_id, covered FROM region_coverage(positions, regions)
+WHERE region_id = 'R1' AND covered > region_length;
+----
+
+# ---- Test 3: half-open boundaries ----
+# R1 = [50, 60). A zero-width touch at either end shares no base and yields NO ROW,
+# not a row with covered = 0. One base of overlap flips it.
+
+statement ok
+CREATE TABLE edge_pos AS SELECT * FROM (VALUES
+  ('e_hi_in',  'g1', 59, 70),   -- one base inside at the HIGH end
+  ('e_lo_in',  'g1', 45, 51),   -- one base inside at the LOW end
+  ('e_hi_out', 'g1', 60, 70),   -- HIGH end, no shared base
+  ('e_lo_out', 'g1', 45, 50)) t(sample_id, genome_id, start, stop);
+
+query TI
+SELECT sample_id, covered FROM region_coverage(edge_pos, regions)
+WHERE region_id = 'R1' ORDER BY sample_id;
+----
+e_hi_in	1
+e_lo_in	1
+
+# ---- Test 4: merge before counting ----
+# s6 = [48,54) + [52,58). Clipped to R1 that is [50,54) + [52,58); bases 52 and 53 are
+# under both. The union is [50,58) = 8. Summing the clipped lengths gives 4 + 6 = 10,
+# which is also > region_length only because R1 happens to be short -- on a long region
+# an unmerged sum just quietly inflates the proportion.
+
+query I
+SELECT covered FROM region_coverage(positions, regions)
+WHERE sample_id = 's6' AND region_id = 'R1';
+----
+8
+
+# ---- Test 5: clipping before merging is not load-bearing ----
+# Issue #217 claims clipping must happen before the merge or "two alignments that
+# overlap only outside the region merge into one interval that appears to span it".
+# That cannot happen: intersection distributes over union, so (A u B) n R equals
+# (A n R) u (B n R) for any intervals. s9 is built to trigger it if it were true --
+# [10,52) and [40,900) overlap at [40,52), entirely outside R1 = [50,60).
+#
+# This asserts the two orders agree. It is a real assertion, not a tautology: the
+# right-hand side merges FIRST and clips after, in SQL, with no reference to the macro.
+
+query II
+SELECT rc.covered, merge_then_clip.covered
+FROM (SELECT covered FROM region_coverage(positions, regions)
+      WHERE sample_id = 's9' AND region_id = 'R1') rc,
+     (SELECT SUM(LEAST(ci.stop, 60) - GREATEST(ci.start, 50)) AS covered
+      FROM (SELECT UNNEST(compress_intervals(start, stop)) AS ci
+            FROM positions WHERE sample_id = 's9' GROUP BY sample_id)
+      WHERE ci.start < 60 AND ci.stop > 50) merge_then_clip;
+----
+10	10
+
+# ---- Test 6: a whole-genome region reproduces genome_coverage ----
+# The equivalence is the point: region_coverage with region = [1, total_length + 1) is
+# genome_coverage with a sample dimension. If the two ever disagree, one of them is
+# wrong about half-open arithmetic.
+
+statement ok
+CREATE TABLE gc_aln(reference VARCHAR, position BIGINT, stop_position BIGINT);
+
+statement ok
+INSERT INTO gc_aln VALUES ('c1', 10, 21), ('c1', 15, 26), ('c1', 40, 50);
+
+statement ok
+CREATE TABLE gc_len(genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO gc_len VALUES ('c1', 100);
+
+statement ok
+CREATE TABLE gc_map(contig_id VARCHAR, genome_id VARCHAR);
+
+statement ok
+INSERT INTO gc_map VALUES ('c1', 'c1');
+
+statement ok
+CREATE VIEW gc_pos AS
+SELECT 'sA' AS sample_id, reference AS genome_id, position AS start, stop_position AS stop
+FROM gc_aln;
+
+statement ok
+CREATE TABLE gc_whole AS
+SELECT genome_id, 1 AS region_start, total_length + 1 AS region_stop, genome_id AS region_id
+FROM gc_len;
+
+query IIR
+SELECT covered, region_length, proportion_covered
+FROM region_coverage(gc_pos, gc_whole);
+----
+26	100	0.26
+
+# Compared with a tolerance, not `=`. The two macros reach the ratio through different
+# expression trees, so exact DOUBLE equality would turn any future reassociation into a
+# 1-ULP miss that reads as a coverage regression.
+#
+# Both `covered` columns are BIGINT. DuckDB widens SUM to INT128 whatever the
+# magnitude, so both macros cast back; genome_coverage previously did not and returned
+# a HUGEINT its own docs described as BIGINT. typeof() is asserted here because that is
+# the only thing that would catch the cast being dropped again -- the values compare
+# equal either way.
+
+query TTIIT
+SELECT typeof(rc.covered), typeof(gc.covered), rc.covered, gc.covered,
+       abs(rc.proportion_covered - gc.proportion_covered) < 1e-12 AS prop_agrees
+FROM region_coverage(gc_pos, gc_whole) rc, genome_coverage(gc_aln, gc_len, gc_map) gc;
+----
+BIGINT	BIGINT	26	26	true
+
+# Multi-contig genomes. genome_coverage maps contigs to genomes through
+# subject_genome_id and sums across them; region_coverage matches regions.genome_id
+# against positions.genome_id directly, so ITS regions are contig-level. Handed
+# whole-genome coordinates for a 3-contig assembly, the genome id matches no contig id.
+#
+# That used to return zero rows in silence, which this file pinned as a limitation. It
+# now RAISES, because this function emits no row for a region with no overlap, so a
+# naming error and a genuine absence of coverage were indistinguishable in the output --
+# and mismatching ids is exactly what a multi-contig assembly invites. The guard fires
+# only when both relations are non-empty and their genome_id domains are wholly
+# disjoint; "this sample covers none of that genome" remains region_presence's question.
+
+statement ok
+CREATE TABLE mc_aln AS SELECT * FROM (VALUES
+  ('c1', 10, 60), ('c2', 10, 60), ('c3', 10, 60)) t(reference, position, stop_position);
+
+statement ok
+CREATE TABLE mc_len AS SELECT * FROM (VALUES ('gA', 300)) t(genome_id, total_length);
+
+statement ok
+CREATE TABLE mc_map AS SELECT * FROM (VALUES
+  ('c1', 'gA'), ('c2', 'gA'), ('c3', 'gA')) t(contig_id, genome_id);
+
+statement ok
+CREATE VIEW mc_pos AS
+SELECT 'sA' AS sample_id, reference AS genome_id, position AS start, stop_position AS stop
+FROM mc_aln;
+
+statement ok
+CREATE TABLE mc_whole AS
+SELECT genome_id, 1 AS region_start, total_length + 1 AS region_stop, genome_id AS region_id
+FROM mc_len;
+
+query IR
+SELECT covered::BIGINT, proportion_covered FROM genome_coverage(mc_aln, mc_len, mc_map);
+----
+150	0.5
+
+statement error
+SELECT COUNT(*) FROM region_coverage(mc_pos, mc_whole);
+----
+no genome_id in regions matches any genome_id in positions
+
+# The message must name both domains, so the caller can see the contig/genome mixup
+# rather than guessing at it.
+statement error
+SELECT COUNT(*) FROM region_coverage(mc_pos, mc_whole);
+----
+regions has genome_id like 'gA'; positions has genome_id like 'c1'
+
+# The guard must NOT fire when positions is empty -- nothing to attribute is a legitimate
+# zero-row answer, not a naming error, and a cohort pipeline may hand it an empty shard.
+statement ok
+CREATE VIEW mc_pos_empty AS SELECT * FROM mc_pos WHERE false;
+
+query I
+SELECT COUNT(*) FROM region_coverage(mc_pos_empty, mc_whole);
+----
+0
+
+# Nor when the domains overlap only partially: a region on a contig this sample never
+# touched is a real absence, and that is the no-zero-rows contract, not an error.
+statement ok
+CREATE TABLE mc_reg_partial AS SELECT * FROM (VALUES
+  ('c1', 1, 101, 'c1'),
+  ('cZ', 1, 101, 'cZ')) t(genome_id, region_start, region_stop, region_id);
+
+query I
+SELECT COUNT(*) FROM region_coverage(mc_pos, mc_reg_partial);
+----
+1
+
+# And renaming the contigs to the genome is NOT the remedy, though it is the obvious
+# thing to reach for. Each contig has its own 1-based coordinate system, so relabelling
+# c1/c2/c3 as gA stacks three [10,60) intervals on top of each other; the merge then
+# collapses them to ONE interval and reports 50 covered where the truth is 150. This is
+# the dangerous case: it passes the guard, because the ids now match, and 50 looks like
+# an answer.
+
+statement ok
+CREATE VIEW mc_pos_renamed AS
+SELECT p.sample_id, m.genome_id, p.start, p.stop
+FROM mc_pos p JOIN mc_map m ON p.genome_id = m.contig_id;
+
+query IR
+SELECT covered, proportion_covered FROM region_coverage(mc_pos_renamed, mc_whole);
+----
+50	0.16666666666666666
+
+# The actual remedy is contig-level regions -- one per contig, in that contig's own
+# frame -- summed afterwards. That reproduces genome_coverage exactly.
+
+statement ok
+CREATE TABLE mc_reg AS SELECT * FROM (VALUES
+  ('c1', 1, 101, 'c1'),
+  ('c2', 1, 101, 'c2'),
+  ('c3', 1, 101, 'c3')) t(genome_id, region_start, region_stop, region_id);
+
+query IIT
+SELECT s.covered, s.total,
+       abs(s.covered::DOUBLE / s.total - gc.proportion_covered) < 1e-12 AS prop_agrees
+FROM (SELECT SUM(covered)::BIGINT AS covered, SUM(region_length)::BIGINT AS total
+      FROM region_coverage(mc_pos, mc_reg)) s,
+     genome_coverage(mc_aln, mc_len, mc_map) gc;
+----
+150	300	true
+
+# The OTHER remedy, and the one to reach for when the regions genuinely are genome-level
+# (equal-width bins across a whole assembly, say, which is what interval_bins/bin_start
+# produce): shift positions into the genome's coordinate frame FIRST, by adding each
+# contig's offset. The offsets are the cumulative contig lengths in whatever contig order
+# the caller chose for the regions -- that order is the caller's data, which is why this
+# is a caller-side view rather than a parameter.
+#
+# This is the case an earlier version of this file recorded as impossible ("whole-genome
+# coordinates ... are ambiguous; pick the contig yourself"). It is not ambiguous once the
+# offsets are supplied, and it reproduces genome_coverage EXACTLY on the genome-level
+# region -- which the same comment said the equivalence could not survive.
+
+statement ok
+CREATE TABLE mc_offsets AS SELECT * FROM (VALUES
+  ('c1', 'gA', 0),
+  ('c2', 'gA', 100),
+  ('c3', 'gA', 200)) t(contig_id, genome_id, contig_offset);
+
+statement ok
+CREATE VIEW mc_pos_genome_frame AS
+SELECT p.sample_id, o.genome_id,
+       p.start + o.contig_offset AS start,
+       p.stop  + o.contig_offset AS stop
+FROM mc_pos p JOIN mc_offsets o ON p.genome_id = o.contig_id;
+
+query IIIT
+SELECT rc.covered, rc.region_length, rc.covered = 150 AS covered_is_real_total,
+       abs(rc.proportion_covered - gc.proportion_covered) < 1e-12 AS matches_genome_coverage
+FROM region_coverage(mc_pos_genome_frame, mc_whole) rc,
+     genome_coverage(mc_aln, mc_len, mc_map) gc;
+----
+150	300	true	true
+
+# The offsets must actually separate the contigs: with every offset 0 this degenerates
+# into the relabelling trap above and reports 50. Pins that the fix is the OFFSET, not
+# merely the join.
+statement ok
+CREATE TABLE mc_offsets_zero AS SELECT * FROM (VALUES
+  ('c1', 'gA', 0), ('c2', 'gA', 0), ('c3', 'gA', 0)) t(contig_id, genome_id, contig_offset);
+
+statement ok
+CREATE VIEW mc_pos_zero_frame AS
+SELECT p.sample_id, o.genome_id,
+       p.start + o.contig_offset AS start,
+       p.stop  + o.contig_offset AS stop
+FROM mc_pos p JOIN mc_offsets_zero o ON p.genome_id = o.contig_id;
+
+query I
+SELECT covered FROM region_coverage(mc_pos_zero_frame, mc_whole);
+----
+50
+
+# Genome-level BINS over the multi-contig frame, which is the real use case: the per-bin
+# coverage must sum back to the whole-genome total. Fails if the offset shift double
+# counted or dropped a contig at a bin boundary.
+statement ok
+CREATE TABLE mc_bins AS
+SELECT 'gA' AS genome_id, 'bin' || b AS region_id,
+       bin_start(b, 6, 300) AS region_start,
+       bin_start(b + 1, 6, 300) AS region_stop
+FROM range(0, 6) t(b);
+
+query III
+SELECT COUNT(*) AS n_bins_with_coverage,
+       SUM(covered)::BIGINT AS summed,
+       SUM(region_length)::BIGINT AS spanned
+FROM region_coverage(mc_pos_genome_frame, mc_bins);
+----
+6	150	300
+
+# ---- Test 7: the region-relative denominator ----
+# The headline from the issue: a fully covered 5 kb region inside a 5 Mb genome is
+# 1.0, not 0.001. Dividing by the genome length instead gives 0.001, so this single
+# number distinguishes the two denominators.
+
+statement ok
+CREATE TABLE big_pos AS SELECT * FROM (VALUES
+  ('sB', 'G000436435', 999000, 1006000)) t(sample_id, genome_id, start, stop);
+
+statement ok
+CREATE TABLE big_reg AS SELECT * FROM (VALUES
+  ('G000436435', 1000000, 1005000, 'PC351')) t(genome_id, region_start, region_stop, region_id);
+
+query IIR
+SELECT covered, region_length, proportion_covered FROM region_coverage(big_pos, big_reg);
+----
+5000	5000	1.0
+
+# ---- Test 8: overlapping regions are scored independently ----
+# A base under two regions counts in both. That is well defined and it is what the
+# caller asked for by supplying overlapping regions -- rejecting it would break the
+# bin_start recipe the moment someone uses a sliding window.
+#   OV1 [100,200), OV2 [150,250), sX covers [140,160)
+#   OV1 gets [140,160) = 20; OV2 gets [150,160) = 10; 150-159 is in both.
+
+statement ok
+CREATE TABLE ov_pos AS SELECT * FROM (VALUES
+  ('sX', 'g3', 140, 160)) t(sample_id, genome_id, start, stop);
+
+statement ok
+CREATE TABLE ov_reg AS SELECT * FROM (VALUES
+  ('g3', 100, 200, 'OV1'),
+  ('g3', 150, 250, 'OV2')) t(genome_id, region_start, region_stop, region_id);
+
+query TIIR
+SELECT region_id, covered, region_length, proportion_covered
+FROM region_coverage(ov_pos, ov_reg) ORDER BY region_id;
+----
+OV1	20	100	0.2
+OV2	10	100	0.1
+
+# ---- Test 9: no fabricated zeros ----
+# s3 covers g1 but misses R1; s4 has no g1 coverage at all. NEITHER gets an R1 row.
+# Emitting `covered = 0` for both would state that the region was measured and found
+# empty in each -- which is true of s3 and false of s4, and is precisely the
+# conflation region_presence exists to prevent.
+
+query T
+SELECT sample_id FROM region_coverage(positions, regions)
+WHERE region_id = 'R1' AND sample_id IN ('s3', 's4', 's5', 's7');
+----
+
+# The honest zero-fill composes the two functions: region_presence supplies the roster
+# grid and the three states, region_coverage supplies the number where there is one.
+#
+# The join carries region_start and region_stop as well as region_id. Both functions
+# emit the coordinates precisely because the pairing is keyed on them, and dropping
+# them from the join is not a cosmetic shortcut -- see the repeated-region_id case
+# below, which is what that costs.
+
+statement ok
+CREATE TABLE roster AS SELECT UNNEST(['s1','s2','s3','s4','s5','s6','s7','s8','s9']) AS sample_id;
+
+query TTIR
+SELECT p.sample_id, p.state, COALESCE(c.covered, 0) AS covered,
+       COALESCE(c.proportion_covered, 0.0) AS proportion_covered
+FROM region_presence(positions, regions, roster) p
+LEFT JOIN region_coverage(positions, regions) c
+       ON c.sample_id = p.sample_id AND c.genome_id = p.genome_id
+      AND c.region_id = p.region_id
+      AND c.region_start = p.region_start AND c.region_stop = p.region_stop
+WHERE p.region_id = 'R1'
+ORDER BY p.sample_id;
+----
+s1	present	5	0.5
+s2	present	10	1.0
+s3	absent	0	0.0
+s4	not applicable	0	0.0
+s5	absent	0	0.0
+s6	present	8	0.8
+s7	not applicable	0	0.0
+s8	absent	0	0.0
+s9	present	10	1.0
+
+# Why the coordinates belong in that join. Two spans can share a region_id -- the macro
+# header says overlapping and repeated regions are scored independently, so this is
+# supported input, not abuse. Keyed on region_id alone the composition cross-assigns:
+# it reports the [700,750) row as `absent` while handing it covered = 5, the value
+# belonging to [50,60), and duplicates every row of a sample present in both spans.
+# An `absent` row carrying coverage is a contradiction the caller has no way to detect.
+#
+# rd_reg is deliberately separate from the shared fixture, whose region_ids are unique
+# and therefore cannot discriminate here.
+
+statement ok
+CREATE TABLE rd_pos AS SELECT * FROM (VALUES
+  ('s1', 'g1',  40,  55),
+  ('s2', 'g1',  10, 900)) t(sample_id, genome_id, start, stop);
+
+statement ok
+CREATE TABLE rd_reg AS SELECT * FROM (VALUES
+  ('g1',  50,  60, 'RD'),
+  ('g1', 700, 750, 'RD')) t(genome_id, region_start, region_stop, region_id);
+
+statement ok
+CREATE TABLE rd_roster AS SELECT UNNEST(['s1','s2']) AS sample_id;
+
+query TIITI
+SELECT p.sample_id, p.region_start, p.region_stop, p.state, COALESCE(c.covered, 0)
+FROM region_presence(rd_pos, rd_reg, rd_roster) p
+LEFT JOIN region_coverage(rd_pos, rd_reg) c
+       ON c.sample_id = p.sample_id AND c.genome_id = p.genome_id
+      AND c.region_id = p.region_id
+      AND c.region_start = p.region_start AND c.region_stop = p.region_stop
+ORDER BY p.sample_id, p.region_start;
+----
+s1	50	60	present	5
+s1	700	750	absent	0
+s2	50	60	present	10
+s2	700	750	present	50
+
+# The two functions must agree on WHICH pairs have overlap: the set region_coverage
+# emits a row for is exactly the set region_presence calls 'present'. They implement
+# the same predicate in two places, so this pins them together -- if one is changed
+# and the other is not, the composition above starts producing 'present' rows with
+# COALESCE'd zeros, which reads as a real measurement of nothing.
+#
+# Correlated on the coordinates too, and run over rd_* where region_id repeats, so the
+# NOT EXISTS is keyed on the tuple that actually identifies a region.
+
+query III
+SELECT (SELECT COUNT(*) FROM region_coverage(rd_pos, rd_reg)),
+       (SELECT COUNT(*) FROM region_presence(rd_pos, rd_reg, rd_roster)
+        WHERE state = 'present'),
+       (SELECT COUNT(*) FROM region_presence(rd_pos, rd_reg, rd_roster) p
+        WHERE p.state = 'present' AND NOT EXISTS (
+            SELECT 1 FROM region_coverage(rd_pos, rd_reg) c
+            WHERE c.sample_id = p.sample_id AND c.genome_id = p.genome_id
+              AND c.region_id = p.region_id
+              AND c.region_start = p.region_start AND c.region_stop = p.region_stop));
+----
+3	3	0
+
+query III
+SELECT (SELECT COUNT(*) FROM region_coverage(positions, regions)),
+       (SELECT COUNT(*) FROM region_presence(positions, regions, roster)
+        WHERE state = 'present'),
+       (SELECT COUNT(*) FROM region_presence(positions, regions, roster) p
+        WHERE p.state = 'present' AND NOT EXISTS (
+            SELECT 1 FROM region_coverage(positions, regions) c
+            WHERE c.sample_id = p.sample_id AND c.genome_id = p.genome_id
+              AND c.region_id = p.region_id
+              AND c.region_start = p.region_start AND c.region_stop = p.region_stop));
+----
+8	8	0
+
+# ---- Test 10: unattributable coverage raises ----
+# A NULL sample_id or genome_id in positions cannot be attributed. Dropping it would
+# silently subtract real coverage from whichever sample it belonged to, and the result
+# would look like an ordinary low-coverage measurement.
+
+# Every fixture below carries EIGHT well-formed rows, and that is not padding.
+# DuckDB plans a two-row scan differently: measured on this fixture, a macro whose
+# guard is entirely bypassed still raises at one or two well-formed rows and stops
+# raising at three. A guard test written on a two-row VALUES list therefore passes
+# against a macro that does not validate anything. Eight leaves margin.
+
+statement ok
+CREATE TABLE guard_ok AS
+SELECT 's' || i AS sample_id, 'g1' AS genome_id, (40 + i)::BIGINT AS start,
+       (55 + i)::BIGINT AS stop
+FROM range(1, 9) t(i);
+
+statement ok
+CREATE TABLE null_sample AS
+SELECT * FROM guard_ok UNION ALL SELECT NULL::VARCHAR, 'g1', 50::BIGINT, 60::BIGINT;
+
+statement error
+SELECT * FROM region_coverage(null_sample, regions);
+----
+NULL values in sample_id or genome_id column of positions
+
+statement ok
+CREATE TABLE null_genome AS
+SELECT * FROM guard_ok UNION ALL SELECT 's9', NULL::VARCHAR, 50::BIGINT, 60::BIGINT;
+
+statement error
+SELECT * FROM region_coverage(null_genome, regions);
+----
+NULL values in sample_id or genome_id column of positions
+
+# The guard has to survive two things that would otherwise dispose of the offending
+# row before it is reached. Both are regressions that actually happened in #216.
+#
+# (a) A row that is BOTH unattributable AND degenerate. Split into two predicates the
+#     optimizer evaluates the cheap interval test first and the row is filtered out,
+#     so the guard silently does nothing on exactly the rows most likely to be
+#     malformed. One CASE fixes it.
+
+statement ok
+CREATE TABLE null_and_degenerate AS
+SELECT * FROM guard_ok UNION ALL SELECT NULL::VARCHAR, 'g1', 60::BIGINT, 60::BIGINT;
+
+statement error
+SELECT * FROM region_coverage(null_and_degenerate, regions);
+----
+NULL values in sample_id or genome_id column of positions
+
+# (b) A malformed row on a genome that no region mentions. The region join prunes it,
+#     so without the MATERIALIZED barrier the join reorders ahead of the guard and the
+#     query returns a perfectly ordinary answer instead of raising. Measured: dropping
+#     MATERIALIZED makes this return rows.
+
+statement ok
+CREATE TABLE null_offgenome AS
+SELECT * FROM guard_ok UNION ALL SELECT NULL::VARCHAR, 'g99', 10::BIGINT, 20::BIGINT;
+
+statement error
+SELECT * FROM region_coverage(null_offgenome, regions);
+----
+NULL values in sample_id or genome_id column of positions
+
+# ---- Test 11: NULL and degenerate intervals drop, they do not raise ----
+# Unlike the identity columns these have a defined meaning: a sample that exists with
+# no coverage. s7 is such a row in the shared fixture and produces no output at all.
+# A zero-width or inverted interval covers no bases and drops for the same reason.
+
+statement ok
+CREATE TABLE degen_pos AS SELECT * FROM (VALUES
+  ('sd', 'g1', 40, 55),        -- real: contributes 5 to R1
+  ('sd', 'g1', 52, 52),        -- zero-width
+  ('sd', 'g1', 58, 51),        -- inverted
+  ('sd', 'g1', NULL, 57),      -- half NULL
+  ('sd', 'g1', 56, NULL)) t(sample_id, genome_id, start, stop);
+
+query I
+SELECT covered FROM region_coverage(degen_pos, regions) WHERE region_id = 'R1';
+----
+5
+
+# ---- Test 12: an unusable region raises, and says which one ----
+# A region is the QUESTION. An unanswerable question must not be answered with a
+# number: a NULL bound makes the overlap test NULL and a zero-width region has no
+# denominator at all. Zero-width and inverted are separate branches because the
+# remedies differ -- filtering is right for a bin expansion and wrong for transposed
+# coordinates.
+
+# The NULL branch fires on any of FOUR columns and formats four printf arguments in a
+# fixed order. Testing only one of them leaves a transposed COALESCE pair, or a dropped
+# OR term, passing every assertion -- so each column gets a fixture, and the full
+# message is pinned once so the argument ORDER is covered too.
+
+statement ok
+CREATE TABLE reg_null AS SELECT * FROM (VALUES
+  ('g1', NULL::BIGINT, 60::BIGINT, 'RN')) t(genome_id, region_start, region_stop, region_id);
+
+statement error
+SELECT * FROM region_coverage(positions, reg_null);
+----
+got genome_id=g1, region_start=NULL, region_stop=60, region_id=RN
+
+statement ok
+CREATE TABLE reg_null_g AS SELECT * FROM (VALUES
+  (NULL::VARCHAR, 50::BIGINT, 60::BIGINT, 'RN')) t(genome_id, region_start, region_stop, region_id);
+
+statement error
+SELECT * FROM region_coverage(positions, reg_null_g);
+----
+got genome_id=NULL, region_start=50, region_stop=60, region_id=RN
+
+statement ok
+CREATE TABLE reg_null_stop AS SELECT * FROM (VALUES
+  ('g1', 50::BIGINT, NULL::BIGINT, 'RN')) t(genome_id, region_start, region_stop, region_id);
+
+statement error
+SELECT * FROM region_coverage(positions, reg_null_stop);
+----
+got genome_id=g1, region_start=50, region_stop=NULL, region_id=RN
+
+statement ok
+CREATE TABLE reg_null_id AS SELECT * FROM (VALUES
+  ('g1', 50::BIGINT, 60::BIGINT, NULL::VARCHAR)) t(genome_id, region_start, region_stop, region_id);
+
+statement error
+SELECT * FROM region_coverage(positions, reg_null_id);
+----
+got genome_id=g1, region_start=50, region_stop=60, region_id=NULL
+
+statement ok
+CREATE TABLE reg_zero AS SELECT * FROM (VALUES
+  ('g1', 55, 55, 'RZ')) t(genome_id, region_start, region_stop, region_id);
+
+statement error
+SELECT * FROM region_coverage(positions, reg_zero);
+----
+region is zero-width (region_id 'RZ': [55, 55))
+
+# The zero-width branch's remedy names the filter that fixes a bin expansion.
+
+statement error
+SELECT * FROM region_coverage(positions, reg_zero);
+----
+filter them with WHERE region_stop > region_start
+
+statement ok
+CREATE TABLE reg_inv AS SELECT * FROM (VALUES
+  ('g1', 60, 50, 'RI')) t(genome_id, region_start, region_stop, region_id);
+
+statement error
+SELECT * FROM region_coverage(positions, reg_inv);
+----
+coordinates are inverted (region_id 'RI': [60, 50))
+
+# The inverted branch's remedy is DIFFERENT -- transposed coordinates must be repaired,
+# not filtered away -- so it is asserted separately. Previously this block ran against
+# reg_zero by mistake and matched the zero-width message's remedy text, leaving the
+# inverted remedy with no assertion at all.
+
+statement error
+SELECT * FROM region_coverage(positions, reg_inv);
+----
+region_stop must be greater than region_start
+
+# ---- Test 12b: validation is scoped to the rows the query reads ----
+# The docs make this claim explicitly, so it needs an assertion. The guards are
+# ordinary SQL expressions, so a caller's filter may be pushed beneath them: the same
+# relation raises unfiltered and does not raise once a filter excludes the bad row.
+#
+# Pinned in BOTH directions on purpose. If a future DuckDB stops pushing the filter
+# under the CTE guard, the documented behavior silently inverts -- callers doing
+# partial scans of a dirty region table would start getting hard errors -- and the
+# second assertion is what would notice.
+
+statement ok
+CREATE TABLE mixed_reg AS SELECT * FROM (VALUES
+  ('g1',  50,  60, 'GOOD'),
+  ('g1', 700, 650, 'BAD')) t(genome_id, region_start, region_stop, region_id);
+
+statement error
+SELECT COUNT(*) FROM region_coverage(positions, mixed_reg);
+----
+coordinates are inverted (region_id 'BAD': [700, 650))
+
+query I
+SELECT COUNT(*) FROM region_coverage(positions, mixed_reg) WHERE region_id = 'GOOD';
+----
+4
+
+# ---- Test 13: coordinates are compared numerically, not lexicographically ----
+# A BED file or an inferred CSV column arrives as VARCHAR. Lexicographically '9' > '60',
+# so the overlap test rejects an interval that plainly overlaps, and GREATEST/LEAST clip
+# to the wrong end. Both silently produce a smaller, entirely plausible coverage number.
+
+statement ok
+CREATE TABLE vc_pos AS SELECT * FROM (VALUES
+  ('sv', 'gv', '9', '100')) t(sample_id, genome_id, start, stop);
+
+statement ok
+CREATE TABLE vc_reg AS SELECT * FROM (VALUES
+  ('gv', '50', '60', 'RV')) t(genome_id, region_start, region_stop, region_id);
+
+query IIIIR
+SELECT region_start, region_stop, covered, region_length, proportion_covered
+FROM region_coverage(vc_pos, vc_reg);
+----
+50	60	10	10	1.0
+
+# INTEGER is what read_gff and read_ncbi_annotation emit. Coordinates come back BIGINT
+# whatever went in, so a caller can join the output to a BIGINT metadata table.
+
+statement ok
+CREATE TABLE int_pos AS SELECT * FROM (VALUES
+  ('si', 'gi', 4300000::INTEGER, 4300100::INTEGER)) t(sample_id, genome_id, start, stop);
+
+statement ok
+CREATE TABLE int_reg AS SELECT * FROM (VALUES
+  ('gi', 4300050::INTEGER, 4300150::INTEGER, 'RG')) t(genome_id, region_start, region_stop, region_id);
+
+query TTIR
+SELECT typeof(region_start), typeof(covered), covered, proportion_covered
+FROM region_coverage(int_pos, int_reg);
+----
+BIGINT	BIGINT	50	0.5
+
+# ---- Test 14: identifier types are carried through uncast ----
+# sample_id and genome_id are join keys the caller supplies; forcing them to VARCHAR
+# would break a join back to a BIGINT or UUID metadata table.
+
+statement ok
+CREATE TABLE uu_pos AS SELECT * FROM (VALUES
+  ('11111111-1111-1111-1111-111111111111'::UUID, 77::BIGINT, 40, 55))
+  t(sample_id, genome_id, start, stop);
+
+statement ok
+CREATE TABLE uu_reg AS SELECT * FROM (VALUES
+  (77::BIGINT, 50, 60, 99::BIGINT)) t(genome_id, region_start, region_stop, region_id);
+
+query TTTI
+SELECT typeof(sample_id), typeof(genome_id), typeof(region_id), covered
+FROM region_coverage(uu_pos, uu_reg);
+----
+UUID	BIGINT	BIGINT	5
+
+# ---- Test 15: relation kinds ----
+# query_table() resolves in the caller's scope, so views, TEMP tables, schema-qualified
+# names and CTEs all work. This is the whole reason region_coverage is a macro.
+
+statement ok
+CREATE VIEW pos_view AS SELECT * FROM positions;
+
+statement ok
+CREATE TEMP TABLE pos_temp AS SELECT * FROM positions;
+
+statement ok
+CREATE SCHEMA rc_s;
+
+statement ok
+CREATE TABLE rc_s.pos_q AS SELECT * FROM positions;
+
+query I
+SELECT covered FROM region_coverage(pos_view, regions)
+WHERE sample_id = 's6' AND region_id = 'R1';
+----
+8
+
+query I
+SELECT covered FROM region_coverage(pos_temp, regions)
+WHERE sample_id = 's6' AND region_id = 'R1';
+----
+8
+
+query I
+SELECT covered FROM region_coverage(rc_s.pos_q, regions)
+WHERE sample_id = 's6' AND region_id = 'R1';
+----
+8
+
+query I
+WITH pos_cte AS (SELECT * FROM positions)
+SELECT covered FROM region_coverage(pos_cte, regions)
+WHERE sample_id = 's6' AND region_id = 'R1';
+----
+8
+
+# ---- Test 16: internal CTE names do not shadow the caller's relations ----
+# The rule, stated exactly, because a looser version of it produced tests that could
+# not fail: an argument name is resolved with the macro's own WITH list in scope, so
+# an argument collides with an internal CTE if and only if that CTE is declared
+# BEFORE the query_table() call that resolves the argument. Whether the caller's
+# relation is a CTE, a view or a base table is irrelevant -- all three collide.
+#
+# For this macro that is exactly one slot. `_rc_reg` precedes query_table(positions),
+# so a `positions` argument named _rc_reg collides. `_rc_checked` contains the
+# query_table(positions) call itself and resolves outward; `_rc_clipped` and
+# `_rc_merged` are declared after both query_table() calls. Nothing else can collide,
+# and the prefix earns its keep on one name, not four.
+#
+# So the discriminating case is a relation named `reg` in the POSITIONS slot. Against
+# an unprefixed implementation both forms below fail with
+#   Binder Error: Referenced column "sample_id" not found in FROM clause!
+#   Candidate bindings: "genome_id", "region_id"
+# A view behaves as the base table does -- both are catalog entries.
+
+query I
+WITH reg AS (SELECT * FROM positions)
+SELECT covered FROM region_coverage(reg, regions)
+WHERE sample_id = 's6' AND region_id = 'R1';
+----
+8
+
+statement ok
+CREATE TABLE reg AS SELECT * FROM positions;
+
+query I
+SELECT covered FROM region_coverage(reg, regions)
+WHERE sample_id = 's6' AND region_id = 'R1';
+----
+8
+
+# The other three internal names in the positions slot. These pass against an
+# UNPREFIXED implementation too -- declaration order already protects them -- so they
+# are coverage of the resolution rule, not evidence that the prefix does anything.
+# Labelled rather than deleted, so nobody reads them as a guarantee the prefix
+# provides.
+
+query I
+WITH checked AS (SELECT * FROM positions)
+SELECT covered FROM region_coverage(checked, regions)
+WHERE sample_id = 's6' AND region_id = 'R1';
+----
+8
+
+query I
+WITH clipped AS (SELECT * FROM positions), merged AS (SELECT * FROM regions)
+SELECT covered FROM region_coverage(clipped, merged)
+WHERE sample_id = 's6' AND region_id = 'R1';
+----
+8
+
+# The prefix makes the collision improbable, not impossible: an argument named
+# `_rc_reg` in the positions slot still breaks. Asserted so the residual hazard is on
+# record rather than implied to be gone -- and asserted for a base table as well as a
+# CTE, since the earlier claim that base tables were immune was simply wrong.
+
+statement error
+WITH _rc_reg AS (SELECT * FROM positions)
+SELECT covered FROM region_coverage(_rc_reg, regions) WHERE sample_id = 's6';
+----
+not found in FROM clause
+
+statement ok
+CREATE TABLE _rc_reg AS SELECT * FROM positions;
+
+statement error
+SELECT covered FROM region_coverage(_rc_reg, regions) WHERE sample_id = 's6';
+----
+not found in FROM clause
+
+# ---- Test 17: empty inputs ----
+# Empty is not an error. No positions means nothing was measured; no regions means
+# nothing was asked. Both are empty results, not zeros.
+
+statement ok
+CREATE TABLE empty_pos AS SELECT * FROM positions WHERE FALSE;
+
+statement ok
+CREATE TABLE empty_reg AS SELECT * FROM regions WHERE FALSE;
+
+query I
+SELECT COUNT(*) FROM region_coverage(empty_pos, regions);
+----
+0
+
+query I
+SELECT COUNT(*) FROM region_coverage(positions, empty_reg);
+----
+0
+
+# ---- Test 18: duplicate rows do not inflate coverage ----
+# This is what makes passing raw, uncompressed alignments safe: the same interval twice
+# is the same bases twice, and the merge collapses them. A caller consolidating shards
+# will have duplicates.
+
+statement ok
+CREATE TABLE dup_pos AS
+SELECT * FROM positions UNION ALL SELECT * FROM positions;
+
+statement ok
+CREATE TABLE dup_reg AS
+SELECT * FROM regions UNION ALL SELECT * FROM regions;
+
+query I
+SELECT covered FROM region_coverage(dup_pos, regions)
+WHERE sample_id = 's6' AND region_id = 'R1';
+----
+8
+
+# Duplicate REGION rows collapse too. The final GROUP BY is what does that, not the
+# DISTINCT on the regions CTE -- the DISTINCT only bounds the join fan-out. This pins
+# the output shape, which is the contract, whichever mechanism delivers it.
+
+query II
+SELECT COUNT(*), SUM(covered)::BIGINT FROM region_coverage(positions, dup_reg);
+----
+8	188
+
+# ---- Test 19: genomes are independent ----
+# g2 coverage must not leak into a g1 region even when the coordinates overlap. s4
+# covers g2 [10,20), which numerically overlaps R2's neighbourhood on g1 not at all,
+# so build the collision explicitly.
+
+statement ok
+CREATE TABLE xg_pos AS SELECT * FROM (VALUES
+  ('sg', 'gA', 50, 60),
+  ('sg', 'gB', 50, 60)) t(sample_id, genome_id, start, stop);
+
+statement ok
+CREATE TABLE xg_reg AS SELECT * FROM (VALUES
+  ('gA', 50, 60, 'RA')) t(genome_id, region_start, region_stop, region_id);
+
+query TTI
+SELECT genome_id, region_id, covered FROM region_coverage(xg_pos, xg_reg);
+----
+gA	RA	10
+
+# ---- Test 20: regions straight from bin_start ----
+# (bin_start(b), bin_start(b + 1)) is already half-open on the same convention, so the
+# binning recipe from issue #215 feeds this directly. Bin 3 of 10 over a 100 bp genome
+# is [31, 41); a sample covering [35, 45) contributes 6 bases -- 41 - 35.
+
+statement ok
+CREATE TABLE bin_pos AS SELECT * FROM (VALUES
+  ('sb', 'gb', 35, 45)) t(sample_id, genome_id, start, stop);
+
+statement ok
+CREATE TABLE bin_reg AS
+SELECT 'gb' AS genome_id,
+       bin_start(b, 10, 100)     AS region_start,
+       bin_start(b + 1, 10, 100) AS region_stop,
+       'bin_' || b               AS region_id
+FROM range(0, 10) t(b);
+
+query TIIIR
+SELECT region_id, region_start, region_stop, covered, proportion_covered
+FROM region_coverage(bin_pos, bin_reg) ORDER BY region_start;
+----
+bin_3	31	41	6	0.6
+bin_4	41	51	4	0.4
+
+# ---- Test 21: the ranking recipe ----
+# What micov actually does with this: rank regions by how consistently the cohort
+# covers them. Plain SQL over the output, which is the point of returning long form.
+
+query TR
+SELECT region_id, ROUND(AVG(proportion_covered), 3) AS mean_prop
+FROM region_coverage(positions, regions)
+GROUP BY region_id
+ORDER BY mean_prop DESC, region_id;
+----
+R2	1.0
+R1	0.825
+R3	0.5

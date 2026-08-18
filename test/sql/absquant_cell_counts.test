@@ -1,0 +1,1505 @@
+# name: test/sql/absquant_cell_counts.test
+# description: absquant_cell_counts -- OGU cells per gram of gDNA
+# group: [sql]
+
+require miint
+
+# ---------------------------------------------------------------------------
+# Inputs. Set A is pysyndna's own fixture set, traceable to the published
+# spreadsheet and the Zaramela notebook; Set B is synthetic and built so that
+# each of its five samples and four OGUs exercises one filter. See
+# data/syndna/README.md for provenance and the per-case intent tables.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE a_counts AS SELECT * FROM read_csv('data/syndna/cells_counts.csv');
+
+statement ok
+CREATE TABLE a_models AS SELECT * FROM read_csv('data/syndna/cells_models.csv');
+
+statement ok
+CREATE TABLE a_coverage AS SELECT * FROM read_csv('data/syndna/cells_coverage.csv');
+
+statement ok
+CREATE TABLE a_lengths AS SELECT * FROM read_csv('data/syndna/cells_lengths.csv');
+
+statement ok
+CREATE TABLE a_params AS SELECT * FROM read_csv('data/syndna/cells_params.csv');
+
+statement ok
+CREATE TABLE b_counts AS SELECT * FROM read_csv('data/syndna/cellsb_counts.csv');
+
+statement ok
+CREATE TABLE b_models AS SELECT * FROM read_csv('data/syndna/cellsb_models.csv');
+
+statement ok
+CREATE TABLE b_coverage AS SELECT * FROM read_csv('data/syndna/cellsb_coverage.csv');
+
+statement ok
+CREATE TABLE b_lengths AS SELECT * FROM read_csv('data/syndna/cellsb_lengths.csv');
+
+statement ok
+CREATE TABLE b_params AS SELECT * FROM read_csv('data/syndna/cellsb_params.csv');
+
+statement ok
+CREATE TABLE a_mine AS SELECT * FROM absquant_cell_counts(
+    'a_counts', 'a_models', 'a_coverage', 'a_lengths', 'a_params', 'cells_per_g_of_gdna', 0.1);
+
+statement ok
+CREATE TABLE b_mine AS SELECT * FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_g_of_gdna', 0.1);
+
+statement ok
+CREATE TABLE b02_mine AS SELECT * FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_g_of_gdna', 0.02,
+    min_rsquared := 0.25);
+
+# The same three runs for each sample-level metric. Nine more calls rather than
+# nine more arguments: the metric is what selects the denominator column, so a
+# separate call is the only way to exercise the column selection at all.
+
+statement ok
+CREATE TABLE a_gsamp AS SELECT * FROM absquant_cell_counts(
+    'a_counts', 'a_models', 'a_coverage', 'a_lengths', 'a_params', 'cells_per_g_of_sample', 0.1);
+
+statement ok
+CREATE TABLE a_ulsamp AS SELECT * FROM absquant_cell_counts(
+    'a_counts', 'a_models', 'a_coverage', 'a_lengths', 'a_params', 'cells_per_ul_of_sample', 0.1);
+
+statement ok
+CREATE TABLE a_cm2samp AS SELECT * FROM absquant_cell_counts(
+    'a_counts', 'a_models', 'a_coverage', 'a_lengths', 'a_params', 'cells_per_cm2_of_sample', 0.1);
+
+statement ok
+CREATE TABLE b_gsamp AS SELECT * FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_g_of_sample', 0.1);
+
+statement ok
+CREATE TABLE b_ulsamp AS SELECT * FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_ul_of_sample', 0.1);
+
+statement ok
+CREATE TABLE b_cm2samp AS SELECT * FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_cm2_of_sample', 0.1);
+
+statement ok
+CREATE TABLE b02_gsamp AS SELECT * FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_g_of_sample', 0.02,
+    min_rsquared := 0.25);
+
+statement ok
+CREATE TABLE b02_ulsamp AS SELECT * FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_ul_of_sample', 0.02,
+    min_rsquared := 0.25);
+
+statement ok
+CREATE TABLE b02_cm2samp AS SELECT * FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_cm2_of_sample', 0.02,
+    min_rsquared := 0.25);
+
+# ---------------------------------------------------------------------------
+# Parity against all three committed cells oracles, for all four metrics, at
+# once -- twelve combinations through one predicate.
+#
+# Tagged and unioned rather than compared twelve times, so the tolerance
+# predicate -- where a copy-paste slip would hide -- is written exactly once.
+#
+# Tolerance 1e-9, the figure data/syndna/README.md records for the cells
+# oracles: unlike the fit goldens these are untruncated doubles, but the values
+# reach ~1e13 so the bound has to be relative.
+#
+# The COALESCE is the load-bearing part, and it is what makes this a PROOF of
+# the sparse invariant rather than an assumption. pysyndna pivots and then
+# fillna(0), so a feature that survives coverage in at least one sample carries
+# an explicit 0.0 for the samples where it did not; miint omits zero-valued rows
+# entirely.
+# Comparing COALESCE(mine.value, 0) against the golden asserts those are the
+# same claim. The other direction is keyed on `g.value IS NULL`, which catches
+# any cell miint invents -- note it must NOT be written as `m.value IS NULL OR
+# ...`, because that flags every golden zero as a mismatch and would turn the
+# omitted-zero case into a failure.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE all_mine AS
+          SELECT 'A' AS oracle, 'cells_per_g_of_gdna' AS metric, * FROM a_mine
+UNION ALL SELECT 'A', 'cells_per_g_of_sample', * FROM a_gsamp
+UNION ALL SELECT 'A', 'cells_per_ul_of_sample', * FROM a_ulsamp
+UNION ALL SELECT 'A', 'cells_per_cm2_of_sample', * FROM a_cm2samp
+UNION ALL SELECT 'B', 'cells_per_g_of_gdna', * FROM b_mine
+UNION ALL SELECT 'B', 'cells_per_g_of_sample', * FROM b_gsamp
+UNION ALL SELECT 'B', 'cells_per_ul_of_sample', * FROM b_ulsamp
+UNION ALL SELECT 'B', 'cells_per_cm2_of_sample', * FROM b_cm2samp
+UNION ALL SELECT 'B02', 'cells_per_g_of_gdna', * FROM b02_mine
+UNION ALL SELECT 'B02', 'cells_per_g_of_sample', * FROM b02_gsamp
+UNION ALL SELECT 'B02', 'cells_per_ul_of_sample', * FROM b02_ulsamp
+UNION ALL SELECT 'B02', 'cells_per_cm2_of_sample', * FROM b02_cm2samp;
+
+# Every metric of every oracle, unfiltered: the goldens carry the metric as a
+# column, so taking all four is less code than selecting one.
+statement ok
+CREATE TABLE all_gold AS
+          SELECT 'A' AS oracle, metric, sample_id, feature_id, value
+            FROM read_csv('data/syndna/cells_oracle.csv')
+UNION ALL SELECT 'B' AS oracle, metric, sample_id, feature_id, value
+            FROM read_csv('data/syndna/cellsb_oracle.csv')
+UNION ALL SELECT 'B02' AS oracle, metric, sample_id, feature_id, value
+            FROM read_csv('data/syndna/cellsb_boundary_oracle.csv');
+
+query TTTT
+SELECT oracle, metric, sample_id, feature_id
+FROM all_mine m FULL JOIN all_gold g USING (oracle, metric, sample_id, feature_id)
+WHERE g.value IS NULL
+   OR abs(COALESCE(m.value, 0) - g.value) > 1e-9 * (1.0 + abs(g.value))
+ORDER BY 1, 2, 3, 4;
+----
+
+# Row counts stated separately from the parity join, because "the cells I did
+# return all match" and "I returned the right cells" are different claims. Each
+# count is the golden's row count for that metric, less its dense zeros:
+#   A    22 = 13 OGUs x 2 samples, less the 4 cells that fail coverage
+#   B     7 = 9 golden rows less (s2,f_only1) [coverage] and (s2,f_zero) [no reads]
+#   B02  11 = 12 golden rows less (s2,f_zero)
+#
+# cells_per_g_of_sample is the odd one out in both Set B rows, and that is the
+# per-metric parameter filter: snull has a NULL calc_mass_sample_aliquot_input_g
+# and so is dropped from that metric alone, taking three cells with it.
+query TTI
+SELECT oracle, metric, count(*) FROM all_mine GROUP BY 1, 2 ORDER BY 1, 2;
+----
+A	cells_per_cm2_of_sample	22
+A	cells_per_g_of_gdna	22
+A	cells_per_g_of_sample	22
+A	cells_per_ul_of_sample	22
+B	cells_per_cm2_of_sample	7
+B	cells_per_g_of_gdna	7
+B	cells_per_g_of_sample	4
+B	cells_per_ul_of_sample	7
+B02	cells_per_cm2_of_sample	11
+B02	cells_per_g_of_gdna	11
+B02	cells_per_g_of_sample	8
+B02	cells_per_ul_of_sample	11
+
+# The output contract: both id columns mirrored, one DOUBLE value.
+query TTT
+SELECT typeof(sample_id), typeof(feature_id), typeof(value) FROM a_mine LIMIT 1;
+----
+VARCHAR	VARCHAR	DOUBLE
+
+# ---------------------------------------------------------------------------
+# The sample-level metrics differ from cells_per_g_of_gdna by one per-sample
+# ratio, and from each other only by which parameters column supplies its
+# denominator:
+#
+#     extracted_gdna_mass_g = extracted_gdna_concentration_ng_ul
+#                             * vol_extracted_elution_ul / 1e9
+#     value                 = cells_per_g_of_gdna * extracted_gdna_mass_g
+#                             / <the metric's denominator>
+#
+# The oracles above pin the whole chain; this states the relationship the four
+# outputs bear to each other, which no single-metric comparison can see. Written
+# as the formula rather than as literals -- a hand-typed expected value here
+# would be a number nobody computed.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT count(*) FROM a_mine g
+JOIN a_gsamp s USING (sample_id, feature_id)
+JOIN a_params p USING (sample_id)
+WHERE abs(s.value - g.value * (p.extracted_gdna_concentration_ng_ul * p.vol_extracted_elution_ul / 1e9)
+                             / p.calc_mass_sample_aliquot_input_g)
+      > 1e-12 * (1.0 + abs(s.value));
+----
+0
+
+query I
+SELECT count(*) FROM a_mine g
+JOIN a_ulsamp s USING (sample_id, feature_id)
+JOIN a_params p USING (sample_id)
+WHERE abs(s.value - g.value * (p.extracted_gdna_concentration_ng_ul * p.vol_extracted_elution_ul / 1e9)
+                             / p.sample_volume_ul)
+      > 1e-12 * (1.0 + abs(s.value));
+----
+0
+
+query I
+SELECT count(*) FROM a_mine g
+JOIN a_cm2samp s USING (sample_id, feature_id)
+JOIN a_params p USING (sample_id)
+WHERE abs(s.value - g.value * (p.extracted_gdna_concentration_ng_ul * p.vol_extracted_elution_ul / 1e9)
+                             / p.sample_surface_area_cm2)
+      > 1e-12 * (1.0 + abs(s.value));
+----
+0
+
+# The ratio is per SAMPLE, not per cell: within one sample every feature is
+# scaled by the same factor. A ratio applied per cell would satisfy all three
+# checks above and fail this one.
+query I
+SELECT count(DISTINCT round(s.value / g.value, 12)) FROM a_mine g
+JOIN a_ulsamp s USING (sample_id, feature_id)
+WHERE sample_id = 'example1';
+----
+1
+
+# ---------------------------------------------------------------------------
+# The per-metric parameter filter. pysyndna screens the gDNA mass, both
+# extraction parameters, and the REQUESTED metric's denominator -- no other.
+#
+# Set B's `snull` is the sample that tells the three plausible readings apart:
+# it has a NULL calc_mass_sample_aliquot_input_g and nothing else missing.
+# Screening all three sample columns would drop it everywhere; screening none
+# would compute NaN cells for cells_per_g_of_sample. Both reproduce every value
+# of every other sample, so only this membership can distinguish them.
+# ---------------------------------------------------------------------------
+
+# Counted with a FILTER rather than a WHERE, so the metric that drops snull
+# still produces a row saying zero. Grouping a filtered-out sample away would
+# leave the interesting case as a missing row, which is the very failure mode
+# this assertion exists to catch.
+query TI
+SELECT metric, count(*) FILTER (WHERE sample_id = 'snull') FROM all_mine
+WHERE oracle = 'B' GROUP BY 1 ORDER BY 1;
+----
+cells_per_cm2_of_sample	3
+cells_per_g_of_gdna	3
+cells_per_g_of_sample	0
+cells_per_ul_of_sample	3
+
+# ---------------------------------------------------------------------------
+# The params relation must expose the requested metric's denominator AND ONLY
+# that one. A study that measured volumes but not surface areas can ask for
+# cells per microlitre; refusing it because a sample_surface_area_cm2 column is
+# absent would be refusing a question the data can answer.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE thin_params AS
+SELECT sample_id, extracted_gdna_concentration_ng_ul, vol_extracted_elution_ul,
+       sequenced_sample_gdna_mass_ng, sample_volume_ul
+FROM b_params;
+
+query I
+SELECT count(*) FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'thin_params',
+                                          'cells_per_ul_of_sample', 0.1);
+----
+7
+
+# cells_per_g_of_gdna has no denominator column at all, so it is content with
+# even less.
+query I
+SELECT count(*) FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'thin_params',
+                                          'cells_per_g_of_gdna', 0.1);
+----
+7
+
+# ... and the metric whose column really is missing fails, naming that column.
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'thin_params',
+                                   'cells_per_cm2_of_sample', 0.1);
+----
+sample_surface_area_cm2
+
+# ---------------------------------------------------------------------------
+# The sparse invariant, stated directly rather than left implicit in the
+# COALESCE above.
+# ---------------------------------------------------------------------------
+
+# The golden's dense zeros. DISTINCT because they are the SAME two cells in
+# every metric -- the ratio is per sample, so a cell that is zero in one unit is
+# zero in all of them, which is why the invariant needs proving once rather than
+# four times.
+query TT
+SELECT DISTINCT sample_id, feature_id FROM all_gold WHERE oracle = 'B' AND value = 0.0 ORDER BY 1, 2;
+----
+s2	f_only1
+s2	f_zero
+
+# ... and miint emits no row at all for either. (f_only1) fails coverage in s2
+# and (f_zero) has a zero read count, which the reader drops; both reach the
+# same place by different routes.
+query I
+SELECT count(*) FROM b_mine WHERE sample_id = 's2' AND feature_id IN ('f_only1', 'f_zero');
+----
+0
+
+# No zero-valued row anywhere in any output. If one appeared, the COALESCE above
+# would still pass while the sparse invariant had been broken.
+query I
+SELECT count(*) FROM all_mine WHERE value = 0.0;
+----
+0
+
+# ---------------------------------------------------------------------------
+# The coverage filter. pysyndna's own Set A fixture engineers two OGUs to fail
+# in EVERY sample so the filter is always exercised: Neisseria subflava at 7.9%
+# and Haemophilus influenzae at 1.4%, against a 10% threshold.
+# ---------------------------------------------------------------------------
+
+query T
+SELECT DISTINCT feature_id FROM a_mine
+WHERE feature_id IN ('Neisseria subflava', 'Haemophilus influenzae');
+----
+
+# At a threshold below both, nothing is dropped and all 25 nonzero cells
+# survive -- so the 22 above really is the filter's doing and not an artifact of
+# the fixture. (26 cells less the one zero read count, which the reader drops.)
+query I
+SELECT count(*) FROM absquant_cell_counts(
+    'a_counts', 'a_models', 'a_coverage', 'a_lengths', 'a_params', 'cells_per_g_of_gdna', 0.0);
+----
+25
+
+# ---------------------------------------------------------------------------
+# The coverage relation is read by a reader that PRESERVES zero-valued rows,
+# unlike the counts reader, whose zero-drop maintains the sparse-storage
+# invariant. Zero is a real coverage measurement: at min_coverage := 0 pysyndna
+# keeps a zero-coverage feature, so a reader that dropped the row would silently
+# disagree about which cells exist -- the cell would become a (sample, feature)
+# pair with no coverage, and the query would fail rather than return it.
+#
+# Nothing else in this file has a zero coverage, so without this the two readers
+# could be swapped and every other assertion would still pass.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE zerocov_coverage AS
+SELECT sample_id, feature_id,
+       CASE WHEN sample_id = 's1' AND feature_id = 'f_both' THEN 0.0 ELSE coverage END AS coverage
+FROM b_coverage;
+
+query I
+SELECT count(*) FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'zerocov_coverage', 'b_lengths', 'b_params', 'cells_per_g_of_gdna', 0.0)
+WHERE sample_id = 's1' AND feature_id = 'f_both';
+----
+1
+
+# A NULL identifier in the coverage relation IS dropped, matching the counts
+# reader: an unidentified cell cannot be joined to anything. It is not an error
+# because it describes no cell the counts relation named, so the result is
+# unchanged.
+statement ok
+CREATE TABLE nullid_coverage AS SELECT * FROM b_coverage UNION ALL SELECT NULL, 'f_both', 0.9;
+
+query TTR
+(SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'nullid_coverage', 'b_lengths', 'b_params',
+                                    'cells_per_g_of_gdna', 0.1)
+ EXCEPT SELECT * FROM b_mine)
+UNION ALL
+(SELECT * FROM b_mine
+ EXCEPT SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'nullid_coverage', 'b_lengths', 'b_params',
+                                           'cells_per_g_of_gdna', 0.1));
+----
+
+# ---------------------------------------------------------------------------
+# Both thresholds are a STRICT `<`, so a value sitting exactly ON one passes.
+#
+# These are the assertions that a `<=` for either could not survive, and nothing
+# else in this file would catch it: every other configuration lands clearly on
+# one side. f_only1 has coverage exactly 0.02 in s2, and slowr2's rvalue of 0.5
+# gives an r^2 of exactly 0.25 -- both are exactly representable as doubles, so
+# this is a real equality rather than a lucky rounding.
+# ---------------------------------------------------------------------------
+
+# At min_coverage = 0.02 the cell on the threshold is kept ...
+query I
+SELECT count(*) FROM b02_mine WHERE sample_id = 's2' AND feature_id = 'f_only1';
+----
+1
+
+# ... and one representable step above it, it is gone. 11 - 1 = 10.
+query I
+SELECT count(*) FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_g_of_gdna',
+    0.020000000000000004, min_rsquared := 0.25);
+----
+10
+
+# At min_rsquared = 0.25 the sample on the threshold survives, contributing its
+# three cells ...
+query I
+SELECT count(*) FROM b02_mine WHERE sample_id = 'slowr2';
+----
+3
+
+# ... and one representable step above it, the whole sample is dropped.
+query I
+SELECT count(*) FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_g_of_gdna',
+    0.02, min_rsquared := 0.25000000000000006);
+----
+8
+
+# ---------------------------------------------------------------------------
+# Which samples come out, and why the three that do not are three different
+# situations. Set B puts five samples in and gets three out at the defaults.
+# ---------------------------------------------------------------------------
+
+query T
+SELECT DISTINCT sample_id FROM b_mine ORDER BY 1;
+----
+s1
+s2
+snull
+
+# snull's NULL is in calc_mass_sample_aliquot_input_g, which this metric neither
+# divides by nor requires, so it survives here. It is dropped only from
+# cells_per_g_of_sample -- pysyndna filters on the REQUESTED metric's
+# denominator, not on every metric's.
+query I
+SELECT count(*) FROM b_mine WHERE sample_id = 'snull';
+----
+3
+
+# ---------------------------------------------------------------------------
+# Diagnostics. Every sample and feature that produces no output must say so
+# somewhere the user can query -- a silently short result set is the failure
+# mode this whole reporting layer exists to prevent.
+#
+# Asserted as ">= 1", not "= 1": miint_warnings() is a session-cumulative log,
+# so an exact count would couple each assertion to how many times anything else
+# in this file happens to have run.
+#
+# The first two lines below are checked against pysyndna's OWN log for the Set B
+# run, captured when the oracle was generated:
+#
+#   The following items have coverage lower than the minimum of 10.0:
+#       ['f_neither', 'f_only1', 'f_both', 'f_zero']
+#   R^2 of linear regression for sample slowr2 is 0.25, which is less than the
+#       minimum allowed value of 0.8.
+#
+# Note what is NOT in pysyndna's log: anything about sallcov, whose four
+# features all fall below coverage so the sample never reaches its per-sample
+# loop and vanishes from its output unremarked. The values agree; the third
+# assertion below is miint saying so out loud.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%coverage fell below%'
+  AND message LIKE '%''f_both''%' AND message LIKE '%''f_neither''%'
+  AND message LIKE '%''f_only1''%' AND message LIKE '%''f_zero''%';
+----
+true
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%r^2 fell below%' AND message LIKE '%''slowr2''%';
+----
+true
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%no feature at or above%' AND message LIKE '%''sallcov''%';
+----
+true
+
+# Set A names its two low-coverage OGUs in the same list.
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%coverage fell below%'
+  AND message LIKE '%''Neisseria subflava''%' AND message LIKE '%''Haemophilus influenzae''%';
+----
+true
+
+# A sample with no model is a WARNING, not an error. absquant_fit_models
+# legitimately returns fewer models than it was given samples, so feeding its
+# output straight back in must not fail.
+statement ok
+CREATE TABLE nomodel_models AS SELECT * FROM b_models WHERE sample_id <> 's1';
+
+query I
+SELECT count(*) FROM absquant_cell_counts(
+    'b_counts', 'nomodel_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_g_of_gdna', 0.1)
+WHERE sample_id = 's1';
+----
+0
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%no usable model%' AND message LIKE '%''s1''%';
+----
+true
+
+# A model that is PRESENT but whose fields are not numbers is the same bucket,
+# because it is the same thing to pysyndna: a fit with any NaN field is recorded
+# as None and reaches the same log line as a sample that was never fitted.
+statement ok
+CREATE TABLE nanmodel_models AS
+SELECT sample_id, CASE WHEN sample_id = 's2' THEN 'nan'::DOUBLE ELSE slope END AS slope,
+       intercept, rvalue, pvalue, stderr, intercept_stderr
+FROM b_models;
+
+query I
+SELECT count(*) FROM absquant_cell_counts(
+    'b_counts', 'nanmodel_models', 'b_coverage', 'b_lengths', 'b_params', 'cells_per_g_of_gdna', 0.1)
+WHERE sample_id = 's2';
+----
+0
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%no usable model%' AND message LIKE '%''s2''%';
+----
+true
+
+# A sample removed for a bad required parameter is a third, distinct bucket.
+statement ok
+CREATE TABLE badparam_params AS
+SELECT sample_id, sequenced_sample_gdna_mass_ng,
+       CASE WHEN sample_id = 's1' THEN NULL ELSE extracted_gdna_concentration_ng_ul END
+            AS extracted_gdna_concentration_ng_ul,
+       vol_extracted_elution_ul
+FROM b_params;
+
+query I
+SELECT count(*) FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'badparam_params', 'cells_per_g_of_gdna', 0.1)
+WHERE sample_id = 's1';
+----
+0
+
+# extracted_gdna_concentration_ng_ul never enters this metric's arithmetic --
+# it feeds extracted_gdna_mass_g, which only the sample-level metrics need --
+# and pysyndna screens on it regardless of the metric requested. Relaxing that
+# would change which samples appear while every emitted value stayed identical,
+# which no parity test on values could see.
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%NULL, negative or non-finite required parameter%' AND message LIKE '%''s1''%';
+----
+true
+
+# ---------------------------------------------------------------------------
+# The filter ORDER: parameters, THEN coverage, then the model gates.
+#
+# Invisible in the values and decisive for the diagnostics. pysyndna drops
+# bad-parameter samples out of the counts table itself before the coverage
+# filter runs, so a feature poorly covered ONLY in such a sample is never
+# reported -- rightly, since no surviving sample was going to use it. Get the
+# order wrong and the user is sent after a coverage problem in data that was
+# already discarded for another reason.
+#
+# Two independent fixtures rather than one run twice, with different feature
+# ids, so neither assertion depends on the order the statements in this file
+# execute in (miint_warnings() is cumulative, so an "absence" claim about an id
+# used elsewhere would be worthless).
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE ord_counts AS SELECT * FROM (VALUES
+    ('s1', 'ok_hi', 100.0), ('s2', 'ok_low', 100.0)) t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE ord_coverage AS SELECT * FROM (VALUES
+    ('s1', 'ok_hi', 0.5), ('s2', 'ok_low', 0.01)) t(sample_id, feature_id, coverage);
+
+statement ok
+CREATE TABLE ord_lengths AS SELECT * FROM (VALUES
+    ('ok_hi', 1000.0), ('ok_low', 1000.0)) t(feature_id, ogu_len_in_bp);
+
+statement ok
+CREATE TABLE ord_models AS SELECT * FROM (VALUES
+    ('s1', 1.0, 0.0, 1.0), ('s2', 1.0, 0.0, 1.0)) t(sample_id, slope, intercept, rvalue);
+
+statement ok
+CREATE TABLE ord_params AS SELECT * FROM (VALUES
+    ('s1', 10.0, 2.0, 100.0), ('s2', 10.0, 2.0, 100.0))
+    t(sample_id, sequenced_sample_gdna_mass_ng, extracted_gdna_concentration_ng_ul, vol_extracted_elution_ul);
+
+# s2's parameters are intact, so its poorly covered feature IS reported.
+statement ok
+SELECT * FROM absquant_cell_counts(
+    'ord_counts', 'ord_models', 'ord_coverage', 'ord_lengths', 'ord_params', 'cells_per_g_of_gdna', 0.1);
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%coverage fell below%' AND message LIKE '%''ok_low''%';
+----
+true
+
+# The same shape with different ids, and the only change is that s2's gDNA mass
+# is NULL. Its feature must now go unmentioned.
+statement ok
+CREATE TABLE ordf_counts AS SELECT * FROM (VALUES
+    ('s1', 'bad_hi', 100.0), ('s2', 'bad_low', 100.0)) t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE ordf_coverage AS SELECT * FROM (VALUES
+    ('s1', 'bad_hi', 0.5), ('s2', 'bad_low', 0.01)) t(sample_id, feature_id, coverage);
+
+statement ok
+CREATE TABLE ordf_lengths AS SELECT * FROM (VALUES
+    ('bad_hi', 1000.0), ('bad_low', 1000.0)) t(feature_id, ogu_len_in_bp);
+
+statement ok
+CREATE TABLE ordf_params AS SELECT * FROM (VALUES
+    ('s1', 10.0, 2.0, 100.0), ('s2', NULL, 2.0, 100.0))
+    t(sample_id, sequenced_sample_gdna_mass_ng, extracted_gdna_concentration_ng_ul, vol_extracted_elution_ul);
+
+# The surviving cell's value is asserted against the chain written out, rather
+# than against a copied constant: slope 1 and intercept 0 make the predicted
+# mass equal the read count, so 100 reads is 100 ng, which is
+# 100 * Avogadro / (1000 bp * 650 g/mole/bp * 1e9) genomes, normalized by the
+# 10 ng of gDNA sequenced.
+query TTT
+SELECT sample_id, feature_id,
+       abs(value - 100.0 * 6.02214076e23 / (1000.0 * 650.0 * 1e9) / 10.0 * 1e9) <= 1e-9 * value
+FROM absquant_cell_counts(
+    'ordf_counts', 'ord_models', 'ordf_coverage', 'ordf_lengths', 'ordf_params',
+    'cells_per_g_of_gdna', 0.1);
+----
+s1	bad_hi	true
+
+query I
+SELECT count(*) FROM miint_warnings()
+WHERE message LIKE '%coverage fell below%' AND message LIKE '%''bad_low''%';
+----
+0
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%NULL, negative or non-finite required parameter%' AND message LIKE '%''s2''%';
+----
+true
+
+# ---------------------------------------------------------------------------
+# Composition: absquant_fit_models' output is absquant_cell_counts' models
+# argument, with no projection in between. That is the whole point of the two
+# functions, and the extra three columns the fit emits are ignored.
+#
+# The fit fixtures call the two samples A and B; the cells fixtures call the
+# same two example1 and example2, so the ids are remapped here. A view, not a
+# table, so a derived relation is exercised as the models argument too.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE fit_counts AS SELECT * FROM read_csv('data/syndna/fit_counts.csv');
+
+statement ok
+CREATE TABLE fit_conc AS SELECT * FROM read_csv('data/syndna/fit_concentrations.csv');
+
+statement ok
+CREATE TABLE fit_params AS SELECT * FROM read_csv('data/syndna/fit_params.csv');
+
+statement ok
+CREATE VIEW fitted AS
+SELECT CASE sample_id WHEN 'A' THEN 'example1' ELSE 'example2' END AS sample_id, * EXCLUDE (sample_id)
+FROM absquant_fit_models('fit_counts', 'fit_conc', 'fit_params', 1.0, min_syndna_counts := 50);
+
+statement ok
+CREATE TABLE composed AS SELECT * FROM absquant_cell_counts(
+    'a_counts', 'fitted', 'a_coverage', 'a_lengths', 'a_params', 'cells_per_g_of_gdna', 0.1);
+
+# Against the committed oracle, not against a_mine: this asserts that fitting
+# and then applying reproduces pysyndna end to end, rather than only that the
+# two miint functions agree with each other.
+query TT
+SELECT sample_id, feature_id
+FROM composed c FULL JOIN (SELECT sample_id, feature_id, value FROM all_gold
+                           WHERE oracle = 'A' AND metric = 'cells_per_g_of_gdna') g
+     USING (sample_id, feature_id)
+WHERE g.value IS NULL
+   OR abs(COALESCE(c.value, 0) - g.value) > 1e-9 * (1.0 + abs(g.value))
+ORDER BY 1, 2;
+----
+
+# ---------------------------------------------------------------------------
+# Identifier type mirroring. BIGINT and UUID are preserved, everything else is
+# emitted as VARCHAR. BOTH id columns are mirrored, and both from the COUNTS
+# relation -- that is the one whose ids reach the output -- so the four
+# reference relations need not agree on a declared type.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE bi_counts AS SELECT * FROM (VALUES (1::BIGINT, 10::BIGINT, 100.0))
+    t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE bi_coverage AS SELECT * FROM (VALUES (1::BIGINT, 10::BIGINT, 0.5))
+    t(sample_id, feature_id, coverage);
+
+statement ok
+CREATE TABLE bi_lengths AS SELECT * FROM (VALUES (10::BIGINT, 1000.0)) t(feature_id, ogu_len_in_bp);
+
+statement ok
+CREATE TABLE bi_models AS SELECT * FROM (VALUES (1::BIGINT, 1.0, 0.0, 1.0))
+    t(sample_id, slope, intercept, rvalue);
+
+statement ok
+CREATE TABLE bi_params AS SELECT * FROM (VALUES (1::BIGINT, 10.0, 2.0, 100.0))
+    t(sample_id, sequenced_sample_gdna_mass_ng, extracted_gdna_concentration_ng_ul, vol_extracted_elution_ul);
+
+query TTTT
+SELECT typeof(sample_id), typeof(feature_id), sample_id::VARCHAR, feature_id::VARCHAR
+FROM absquant_cell_counts('bi_counts', 'bi_models', 'bi_coverage', 'bi_lengths', 'bi_params',
+                          'cells_per_g_of_gdna', 0.1);
+----
+BIGINT	BIGINT	1	10
+
+# Mixed: BIGINT ids in the counts relation, VARCHAR in every reference
+# relation. They are matched on their VARCHAR rendering, and the output types
+# still come from the counts relation alone.
+statement ok
+CREATE TABLE vc_coverage AS SELECT sample_id::VARCHAR AS sample_id, feature_id::VARCHAR AS feature_id, coverage
+FROM bi_coverage;
+
+statement ok
+CREATE TABLE vc_lengths AS SELECT feature_id::VARCHAR AS feature_id, ogu_len_in_bp FROM bi_lengths;
+
+statement ok
+CREATE TABLE vc_models AS SELECT sample_id::VARCHAR AS sample_id, slope, intercept, rvalue FROM bi_models;
+
+statement ok
+CREATE TABLE vc_params AS SELECT sample_id::VARCHAR AS sample_id, sequenced_sample_gdna_mass_ng,
+       extracted_gdna_concentration_ng_ul, vol_extracted_elution_ul FROM bi_params;
+
+query TTTT
+SELECT typeof(sample_id), typeof(feature_id), sample_id::VARCHAR, feature_id::VARCHAR
+FROM absquant_cell_counts('bi_counts', 'vc_models', 'vc_coverage', 'vc_lengths', 'vc_params',
+                          'cells_per_g_of_gdna', 0.1);
+----
+BIGINT	BIGINT	1	10
+
+# UUID on both axes.
+statement ok
+CREATE TABLE uu_counts AS SELECT * FROM (VALUES
+    ('11111111-1111-1111-1111-111111111111'::UUID, '22222222-2222-2222-2222-222222222222'::UUID, 100.0))
+    t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE uu_coverage AS SELECT sample_id, feature_id, 0.5 AS coverage FROM uu_counts;
+
+statement ok
+CREATE TABLE uu_lengths AS SELECT feature_id, 1000.0 AS ogu_len_in_bp FROM uu_counts;
+
+statement ok
+CREATE TABLE uu_models AS SELECT sample_id, 1.0 AS slope, 0.0 AS intercept, 1.0 AS rvalue FROM uu_counts;
+
+statement ok
+CREATE TABLE uu_params AS SELECT sample_id, 10.0 AS sequenced_sample_gdna_mass_ng,
+       2.0 AS extracted_gdna_concentration_ng_ul, 100.0 AS vol_extracted_elution_ul FROM uu_counts;
+
+query TTTT
+SELECT typeof(sample_id), typeof(feature_id), sample_id::VARCHAR, feature_id::VARCHAR
+FROM absquant_cell_counts('uu_counts', 'uu_models', 'uu_coverage', 'uu_lengths', 'uu_params',
+                          'cells_per_g_of_gdna', 0.1);
+----
+UUID	UUID	11111111-1111-1111-1111-111111111111	22222222-2222-2222-2222-222222222222
+
+# INTEGER is neither BIGINT nor UUID, so it resolves to VARCHAR. The resolution
+# is deliberately permissive -- it never rejects an id type the ::VARCHAR-casting
+# reader accepts, it just stops promising to give it back unchanged.
+statement ok
+CREATE TABLE in_counts AS SELECT sample_id::INTEGER AS sample_id, feature_id::INTEGER AS feature_id, value
+FROM bi_counts;
+
+query TTTT
+SELECT typeof(sample_id), typeof(feature_id), sample_id, feature_id
+FROM absquant_cell_counts('in_counts', 'bi_models', 'bi_coverage', 'bi_lengths', 'bi_params',
+                          'cells_per_g_of_gdna', 0.1);
+----
+VARCHAR	VARCHAR	1	10
+
+# ---------------------------------------------------------------------------
+# Relation resolution. All five arguments are names looked up on a separate
+# helper connection (docs/internals/reading-tables-views.md), which is exactly
+# the path on which TEMP objects are easy to lose: a helper connection that does
+# not inherit the caller's temporary catalog reports a TEMP table as
+# non-existent. With five relations there are five chances to get it wrong.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE VIEW v_counts AS SELECT * FROM b_counts;
+
+statement ok
+CREATE VIEW v_models AS SELECT * FROM b_models;
+
+statement ok
+CREATE VIEW v_coverage AS SELECT * FROM b_coverage;
+
+statement ok
+CREATE VIEW v_lengths AS SELECT * FROM b_lengths;
+
+statement ok
+CREATE VIEW v_params AS SELECT * FROM b_params;
+
+query TTR
+(SELECT * FROM absquant_cell_counts('v_counts', 'v_models', 'v_coverage', 'v_lengths', 'v_params',
+                                    'cells_per_g_of_gdna', 0.1)
+ EXCEPT SELECT * FROM b_mine)
+UNION ALL
+(SELECT * FROM b_mine
+ EXCEPT SELECT * FROM absquant_cell_counts('v_counts', 'v_models', 'v_coverage', 'v_lengths', 'v_params',
+                                           'cells_per_g_of_gdna', 0.1));
+----
+
+statement ok
+CREATE TEMP TABLE tt_counts AS SELECT * FROM b_counts;
+
+statement ok
+CREATE TEMP TABLE tt_models AS SELECT * FROM b_models;
+
+statement ok
+CREATE TEMP VIEW tv_coverage AS SELECT * FROM b_coverage;
+
+statement ok
+CREATE TEMP TABLE tt_lengths AS SELECT * FROM b_lengths;
+
+statement ok
+CREATE TEMP VIEW tv_params AS SELECT * FROM b_params;
+
+query TTR
+(SELECT * FROM absquant_cell_counts('tt_counts', 'tt_models', 'tv_coverage', 'tt_lengths', 'tv_params',
+                                    'cells_per_g_of_gdna', 0.1)
+ EXCEPT SELECT * FROM b_mine)
+UNION ALL
+(SELECT * FROM b_mine
+ EXCEPT SELECT * FROM absquant_cell_counts('tt_counts', 'tt_models', 'tv_coverage', 'tt_lengths', 'tv_params',
+                                           'cells_per_g_of_gdna', 0.1));
+----
+
+# A relation name needing quotes must survive interpolation into the helper
+# connection's query.
+statement ok
+CREATE TABLE "ogu counts.2024" AS SELECT * FROM b_counts;
+
+query TTR
+(SELECT * FROM absquant_cell_counts('ogu counts.2024', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
+                                    'cells_per_g_of_gdna', 0.1)
+ EXCEPT SELECT * FROM b_mine)
+UNION ALL
+(SELECT * FROM b_mine
+ EXCEPT SELECT * FROM absquant_cell_counts('ogu counts.2024', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
+                                           'cells_per_g_of_gdna', 0.1));
+----
+
+# ---------------------------------------------------------------------------
+# The call itself. Checked at bind, before any relation is read.
+# ---------------------------------------------------------------------------
+
+# The three sample-level metrics are all valid names, so the rejected name here
+# has to be one that is genuinely not a metric. The accepted list is rendered
+# from the enum, so it cannot fall behind what the parser takes.
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_mg_of_sample', 0.1);
+----
+unsupported metric 'cells_per_mg_of_sample'; accepted: 'cells_per_g_of_gdna', 'cells_per_g_of_sample', 'cells_per_ul_of_sample', 'cells_per_cm2_of_sample'
+
+# A near miss is still a miss: no prefix or trailing-space tolerance.
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna ', 0.1);
+----
+unsupported metric 'cells_per_g_of_gdna '
+
+# The metric is positional, and case-insensitive in every one of its values.
+query I
+SELECT count(*) FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
+                                          'CELLS_PER_G_OF_GDNA', 0.1);
+----
+7
+
+statement error
+SELECT * FROM absquant_cell_counts(NULL, 'b_models', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+argument 1 must not be NULL
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', NULL);
+----
+argument 7 must not be NULL
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1, min_rsquared := NULL);
+----
+min_rsquared must not be NULL
+
+# A typo in ANY of the five relations is a bind-time error naming which one.
+statement error
+SELECT * FROM absquant_cell_counts('nope', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+feature counts table or view 'nope' does not exist
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'nope', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+models table or view 'nope' does not exist
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'nope', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+coverage table or view 'nope' does not exist
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'nope', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+feature lengths table or view 'nope' does not exist
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'nope',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+sample parameters table or view 'nope' does not exist
+
+# ---------------------------------------------------------------------------
+# A relation name has to survive being interpolated into SQL.
+#
+# The five names arrive as ordinary VARCHAR arguments and reach two places. At
+# bind they are looked up through the catalog API, which builds no SQL text at
+# all. At execution the readers in src/absquant_readers.cpp do build SQL, and
+# they write the name as a QUOTED identifier with any embedded quote doubled --
+# so a name carrying a quote and a statement separator stays one identifier
+# instead of closing one and opening a statement.
+#
+# Both readers are covered by the one call, with the two names that break the
+# two different ways:
+#
+#  - the COVERAGE relation (ReadLongFormValues) is named so that concatenating
+#    it raw yields a VALID first statement followed by a second one. The `;` is
+#    not neutralized by a parse error somewhere: verified by mutating the
+#    quoting away, where DuckDB hands the trailing text on as its own statement
+#    and tries to run the DROP. Quoting is what stops that, not luck;
+#  - the LENGTHS relation (ReadKeyedColumns) is named with an embedded double
+#    quote, which is what defeats quoting that forgets to escape.
+#
+# Both names have to exist in the catalog for the test to mean anything: the
+# bind-time lookup rejects a name that is not a relation, so a name nobody
+# created never reaches the reader at all. The other absquant_* functions use
+# these same two readers, which is why this is written once.
+#
+# Column names, by contrast, are deliberately NOT quoted, and are compile-time
+# literals at every call site -- never anything a caller supplies. That is the
+# contract src/include/absquant_readers.hpp states, and it is what makes the
+# unquoted interpolation safe.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE injection_victim AS SELECT 1 AS x;
+
+statement ok
+CREATE TABLE "b_coverage; DROP TABLE injection_victim; --" AS SELECT * FROM b_coverage;
+
+statement ok
+CREATE TABLE "evil_len""; DROP TABLE injection_victim; --" AS SELECT * FROM b_lengths;
+
+statement ok
+CREATE TABLE evil_mine AS SELECT * FROM absquant_cell_counts(
+    'b_counts', 'b_models',
+    'b_coverage; DROP TABLE injection_victim; --',
+    'evil_len"; DROP TABLE injection_victim; --',
+    'b_params', 'cells_per_g_of_gdna', 0.1);
+
+# Not vacuous: the run really produced the seven cells b_mine did.
+query I
+SELECT count(*) FROM evil_mine;
+----
+7
+
+# And they are the SAME seven, both directions -- so the hostile name resolved
+# to the relation it names rather than being mangled or partly executed.
+query II
+SELECT (SELECT count(*) FROM (SELECT * FROM evil_mine EXCEPT SELECT * FROM b_mine)),
+       (SELECT count(*) FROM (SELECT * FROM b_mine EXCEPT SELECT * FROM evil_mine));
+----
+0	0
+
+# Nothing ran as a statement.
+query I
+SELECT count(*) FROM injection_victim;
+----
+1
+
+# ---------------------------------------------------------------------------
+# Both thresholds are constrained to [0, 1].
+#
+# min_coverage because coverage is a fraction here -- pysyndna accepts
+# fractions or percents and explicitly leaves it to the caller to pass a
+# matching threshold, which makes `min_coverage := 10` against fractional
+# coverages a filter that silently keeps everything. min_rsquared because r^2 is
+# a squared correlation and cannot leave [0, 1], so a threshold outside it keeps
+# every sample or none with no indication which.
+# ---------------------------------------------------------------------------
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 10.0);
+----
+min_coverage must be between 0 and 1 inclusive
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', -0.1);
+----
+min_coverage must be between 0 and 1 inclusive
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1, min_rsquared := 1.5);
+----
+min_rsquared must be between 0 and 1 inclusive
+
+# Both endpoints are legal on both.
+statement ok
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 1.0, min_rsquared := 0.0);
+
+# ---------------------------------------------------------------------------
+# The column contract for each relation, surfaced by its LIMIT 0 schema probe
+# before anything is materialized. DuckDB's own candidate-binding hint comes
+# along with the message.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE no_value AS SELECT sample_id, feature_id FROM b_counts;
+
+statement error
+SELECT * FROM absquant_cell_counts('no_value', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+must expose (sample_id VARCHAR, feature_id VARCHAR, value DOUBLE)
+
+statement ok
+CREATE TABLE no_slope AS SELECT sample_id, intercept, rvalue FROM b_models;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'no_slope', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+must expose (sample_id VARCHAR, slope DOUBLE, intercept DOUBLE, rvalue DOUBLE)
+
+statement ok
+CREATE TABLE no_coverage AS SELECT sample_id, feature_id FROM b_coverage;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'no_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+must expose (sample_id VARCHAR, feature_id VARCHAR, coverage DOUBLE)
+
+statement ok
+CREATE TABLE no_len AS SELECT feature_id FROM b_lengths;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'no_len', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+must expose (feature_id VARCHAR, ogu_len_in_bp DOUBLE)
+
+statement ok
+CREATE TABLE no_mass AS SELECT sample_id, extracted_gdna_concentration_ng_ul, vol_extracted_elution_ul FROM b_params;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'no_mass',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+must expose (sample_id VARCHAR, sequenced_sample_gdna_mass_ng DOUBLE, extracted_gdna_concentration_ng_ul DOUBLE, vol_extracted_elution_ul DOUBLE)
+
+# ---------------------------------------------------------------------------
+# Malformed relations. Each of these is structurally impossible input that
+# pysyndna would carry through to an inf, a NaN or a silently missing row.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE dup_counts AS SELECT * FROM b_counts UNION ALL SELECT * FROM b_counts WHERE sample_id = 's1' AND feature_id = 'f_both';
+
+statement error
+SELECT * FROM absquant_cell_counts('dup_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+the counts relation has more than one row for the same (sample_id, feature_id): 's1 / f_both'
+
+statement ok
+CREATE TABLE dup_coverage AS SELECT * FROM b_coverage UNION ALL SELECT * FROM b_coverage WHERE sample_id = 's1' AND feature_id = 'f_both';
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'dup_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+the coverage relation has more than one row for the same (sample_id, feature_id): 's1 / f_both'
+
+statement ok
+CREATE TABLE dup_lengths AS SELECT * FROM b_lengths UNION ALL SELECT * FROM b_lengths WHERE feature_id = 'f_both';
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'dup_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+the feature lengths relation has more than one row for feature_id 'f_both'
+
+statement ok
+CREATE TABLE dup_models AS SELECT * FROM b_models UNION ALL SELECT * FROM b_models WHERE sample_id = 's1';
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'dup_models', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+the models relation has more than one row for sample_id 's1'
+
+statement ok
+CREATE TABLE dup_params AS SELECT * FROM b_params UNION ALL SELECT * FROM b_params WHERE sample_id = 's1';
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'dup_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+the sample parameters relation has more than one row for sample_id 's1'
+
+# A negative read count. Zero is not reachable here -- the reader drops
+# zero-valued cells before the core sees them -- but negative reaches it.
+statement ok
+CREATE TABLE neg_counts AS
+SELECT sample_id, feature_id, CASE WHEN sample_id = 's1' AND feature_id = 'f_both' THEN -1.0 ELSE value END AS value
+FROM b_counts;
+
+statement error
+SELECT * FROM absquant_cell_counts('neg_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+read counts must be finite and positive; offending (sample_id / feature_id): 's1 / f_both'
+
+# Coverage as a percent. pysyndna's own fixtures store 92.597 and compare it
+# against min_coverage = 10; handing those to miint's fractional threshold would
+# keep every feature and quietly disable the filter.
+statement ok
+CREATE TABLE pct_coverage AS SELECT sample_id, feature_id, coverage * 100.0 AS coverage FROM b_coverage;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'pct_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+coverage must be present and a fraction between 0 and 1 inclusive, not a percent
+
+# A NULL coverage arrives as NaN and fails the same test, which is why the
+# message says "present" as well as in-range.
+statement ok
+CREATE TABLE null_coverage AS
+SELECT sample_id, feature_id, CASE WHEN sample_id = 's1' AND feature_id = 'f_both' THEN NULL ELSE coverage END AS coverage
+FROM b_coverage;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'null_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+coverage must be present and a fraction between 0 and 1 inclusive, not a percent; offending (sample_id / feature_id): 's1 / f_both'
+
+# Both denominators must be positive and finite. pysyndna divides by each with
+# no check: a zero genome length yields inf cells for that OGU in every sample,
+# and a zero sequenced gDNA mass yields inf for every OGU in that sample. Zero
+# is the case its NaN/negative parameter screen structurally cannot see.
+statement ok
+CREATE TABLE zero_lengths AS
+SELECT feature_id, CASE WHEN feature_id = 'f_both' THEN 0.0 ELSE ogu_len_in_bp END AS ogu_len_in_bp FROM b_lengths;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'zero_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+ogu_len_in_bp must be finite and positive; offending feature_id 'f_both'
+
+statement ok
+CREATE TABLE zero_mass AS
+SELECT sample_id, CASE WHEN sample_id = 's1' THEN 0.0 ELSE sequenced_sample_gdna_mass_ng END
+           AS sequenced_sample_gdna_mass_ng,
+       extracted_gdna_concentration_ng_ul, vol_extracted_elution_ul
+FROM b_params;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'zero_mass',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+sequenced_sample_gdna_mass_ng must not be zero; offending sample_id 's1'
+
+# The sample-level metrics' denominator gets the same treatment, and the message
+# names the column THIS metric divides by. Repeated for all three because a
+# generic wording, or one that always blamed the same column, would pass a
+# single-metric check and send two thirds of users to the wrong column.
+statement ok
+CREATE TABLE zero_denom AS
+SELECT * REPLACE (CASE WHEN sample_id = 's1' THEN 0.0 ELSE calc_mass_sample_aliquot_input_g END
+                  AS calc_mass_sample_aliquot_input_g,
+                  CASE WHEN sample_id = 's1' THEN 0.0 ELSE sample_volume_ul END AS sample_volume_ul,
+                  CASE WHEN sample_id = 's1' THEN 0.0 ELSE sample_surface_area_cm2 END
+                  AS sample_surface_area_cm2)
+FROM b_params;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'zero_denom',
+                                   'cells_per_g_of_sample', 0.1);
+----
+calc_mass_sample_aliquot_input_g must not be zero; offending sample_id 's1'
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'zero_denom',
+                                   'cells_per_ul_of_sample', 0.1);
+----
+sample_volume_ul must not be zero; offending sample_id 's1'
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'zero_denom',
+                                   'cells_per_cm2_of_sample', 0.1);
+----
+sample_surface_area_cm2 must not be zero; offending sample_id 's1'
+
+# The identical relation is fine for cells_per_g_of_gdna, which divides by none
+# of those three. Checking a column the query never reads would refuse data that
+# answers the question perfectly well.
+query I
+SELECT count(*) FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'zero_denom',
+                                          'cells_per_g_of_gdna', 0.1);
+----
+7
+
+# A zero EXTRACTION parameter is the other side of that split, and it is not an
+# error. pysyndna's screen tests `< 0`, so zero passes it, and a blank really can
+# extract no DNA. The ratio is then zero, every cell of the sample is exactly
+# zero, and the sparse invariant omits all of them -- so the sample would vanish
+# with nothing said. It is reported instead.
+statement ok
+CREATE TABLE zero_elution AS
+SELECT * REPLACE (CASE WHEN sample_id = 's1' THEN 0.0 ELSE vol_extracted_elution_ul END
+                  AS vol_extracted_elution_ul)
+FROM b_params;
+
+query TI
+SELECT sample_id, count(*) FROM absquant_cell_counts(
+    'b_counts', 'b_models', 'b_coverage', 'b_lengths', 'zero_elution', 'cells_per_g_of_sample', 0.1)
+GROUP BY 1 ORDER BY 1;
+----
+s2	1
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%produced only zero-valued cells%'
+  AND message LIKE '%cells_per_g_of_sample%' AND message LIKE '%''s1''%';
+----
+true
+
+# That s1 is named ONCE -- reported here and not also as a filtered or an
+# uncovered sample -- is pinned in test/cpp/test_AbsQuant.cpp rather than here.
+# miint_warnings() is session-cumulative and s1 appears in this file's other
+# runs, so any "absence" claim about it phrased against the log would be
+# satisfied by wording that matched nothing at all.
+
+# cells_per_g_of_gdna never forms the ratio, so the same relation costs it
+# nothing -- s1 keeps all three of its cells.
+query I
+SELECT count(*) FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'zero_elution',
+                                          'cells_per_g_of_gdna', 0.1);
+----
+7
+
+# A cell count that leaves the representable range is refused rather than
+# emitted as inf. Every input below is individually finite and passes every
+# screen; it is their product that overflows. pysyndna emits the inf, which is
+# the same failure the zero-denominator check above already refuses.
+statement ok
+CREATE TABLE huge_models AS
+SELECT sample_id, slope, 400.0 AS intercept, rvalue, pvalue, stderr, intercept_stderr FROM b_models;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'huge_models', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+overflowed to a non-finite value
+
+# ... and through the extraction product, which only the sample-level metrics
+# form. 1e200 ng/ul over 1e200 ul is absurd and finite; their product is not.
+statement ok
+CREATE TABLE huge_extraction AS
+SELECT * REPLACE (1e200 AS extracted_gdna_concentration_ng_ul, 1e200 AS vol_extracted_elution_ul) FROM b_params;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'huge_extraction',
+                                   'cells_per_ul_of_sample', 0.1);
+----
+overflowed to a non-finite value
+
+# The identical relation is fine for the metric that never forms the ratio.
+query I
+SELECT count(*) FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'huge_extraction',
+                                          'cells_per_g_of_gdna', 0.1);
+----
+7
+
+# An rvalue outside [-1, 1] is a malformed models relation, not a weak model:
+# squaring it gives an r^2 above 1 that passes any legal min_rsquared. A
+# non-finite one is the different case tested above -- a warning, not an error.
+statement ok
+CREATE TABLE bad_r_models AS
+SELECT sample_id, slope, intercept, CASE WHEN sample_id = 's1' THEN 1.5 ELSE rvalue END AS rvalue,
+       pvalue, stderr, intercept_stderr
+FROM b_models;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'bad_r_models', 'b_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+rvalue must be between -1 and 1 inclusive; offending sample_id 's1'
+
+# A NULL key in a reference relation is refused outright rather than dropped: an
+# unnamed row cannot be joined to anything.
+statement ok
+CREATE TABLE null_key_lengths AS SELECT * FROM b_lengths UNION ALL SELECT NULL, 1000.0;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'null_key_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+has a row with a NULL feature_id
+
+statement ok
+CREATE TABLE null_key_params AS SELECT * FROM b_params UNION ALL SELECT NULL, 2.0, 100.0, 5.0, 0.02, 200.0, 4.0;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'null_key_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+has a row with a NULL sample_id
+
+# ---------------------------------------------------------------------------
+# Id consistency. The counts relation is the subject: every cell it names must
+# be describable, or nothing defined can be said about it. The reverse never has
+# to hold -- a lengths table is a whole reference database, a parameters table a
+# whole study -- so reference relations may describe far more than the counts do.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE short_lengths AS SELECT * FROM b_lengths WHERE feature_id <> 'f_both';
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'short_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+which the feature lengths relation has no ogu_len_in_bp row for
+
+statement ok
+CREATE TABLE short_params AS SELECT * FROM b_params WHERE sample_id <> 's1';
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'short_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+which the sample parameters relation does not describe
+
+# The one pysyndna validates only by AXIS: it checks the sample id set and the
+# feature id set separately, so a sample and a feature can each be present while
+# their PAIR is not. Its left join then yields NaN; `NaN >= min_coverage` is
+# false so the cell is dropped, and `NaN < min_coverage` is false too so it never
+# even joins the too-low-coverage log. The cell disappears in silence.
+statement ok
+CREATE TABLE holed_coverage AS SELECT * FROM b_coverage WHERE NOT (sample_id = 's1' AND feature_id = 'f_both');
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'holed_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+which the coverage relation has no row for; every counted cell needs a coverage to be filtered on
+
+# Both axes of that hole are individually satisfied, which is exactly why an
+# axis-wise check passes it.
+query I
+SELECT count(*) >= 1 FROM holed_coverage WHERE sample_id = 's1';
+----
+true
+
+query I
+SELECT count(*) >= 1 FROM holed_coverage WHERE feature_id = 'f_both';
+----
+true
+
+# Reference relations describing MORE than the counts do is ordinary usage.
+statement ok
+CREATE TABLE wide_lengths AS SELECT * FROM b_lengths UNION ALL SELECT 'f_unused', 4242.0;
+
+query TTR
+(SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'wide_lengths', 'b_params',
+                                    'cells_per_g_of_gdna', 0.1)
+ EXCEPT SELECT * FROM b_mine)
+UNION ALL
+(SELECT * FROM b_mine
+ EXCEPT SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'wide_lengths', 'b_params',
+                                           'cells_per_g_of_gdna', 0.1));
+----
+
+# ... and their unused rows are not screened, deliberately narrower than
+# absquant_fit_models, which screens every concentration because it sums the
+# whole relation into a denominator. Nothing here is summed, so a lengths table
+# of ten thousand genomes must not fail a query over four of them.
+statement ok
+CREATE TABLE bad_unused_lengths AS SELECT * FROM b_lengths UNION ALL SELECT 'f_unused', -1.0;
+
+query TTR
+(SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'bad_unused_lengths', 'b_params',
+                                    'cells_per_g_of_gdna', 0.1)
+ EXCEPT SELECT * FROM b_mine)
+UNION ALL
+(SELECT * FROM b_mine
+ EXCEPT SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'bad_unused_lengths', 'b_params',
+                                           'cells_per_g_of_gdna', 0.1));
+----
+
+# ---------------------------------------------------------------------------
+# Empty relations. Each empties for a different reason and must not be confused
+# with the others.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE empty_counts AS SELECT * FROM b_counts WHERE false;
+
+# No counts: nothing to compute, and not an error. There is no cell to be unable
+# to describe, so every id-consistency check is vacuously satisfied.
+query I
+SELECT count(*) FROM absquant_cell_counts('empty_counts', 'b_models', 'b_coverage', 'b_lengths', 'b_params',
+                                          'cells_per_g_of_gdna', 0.1);
+----
+0
+
+# No models: every sample is reported as having none, and the result is empty
+# rather than an error.
+statement ok
+CREATE TABLE empty_models AS SELECT * FROM b_models WHERE false;
+
+query I
+SELECT count(*) FROM absquant_cell_counts('b_counts', 'empty_models', 'b_coverage', 'b_lengths', 'b_params',
+                                          'cells_per_g_of_gdna', 0.1);
+----
+0
+
+# No coverage, no lengths, no parameters: each IS an error, because now every
+# counted cell names something no relation can describe.
+statement ok
+CREATE TABLE empty_coverage AS SELECT * FROM b_coverage WHERE false;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'empty_coverage', 'b_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+which the coverage relation has no row for
+
+statement ok
+CREATE TABLE empty_lengths AS SELECT * FROM b_lengths WHERE false;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'empty_lengths', 'b_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+which the feature lengths relation has no ogu_len_in_bp row for
+
+statement ok
+CREATE TABLE empty_params AS SELECT * FROM b_params WHERE false;
+
+statement error
+SELECT * FROM absquant_cell_counts('b_counts', 'b_models', 'b_coverage', 'b_lengths', 'empty_params',
+                                   'cells_per_g_of_gdna', 0.1);
+----
+which the sample parameters relation does not describe

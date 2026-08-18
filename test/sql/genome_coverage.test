@@ -34,6 +34,18 @@ SELECT * FROM genome_coverage(alignments, subject_total_length, subject_genome_i
 ----
 genome_A	22	0.22
 
+# `covered` is BIGINT, as documented. It is a SUM, and DuckDB widens SUM's
+# return type to HUGEINT unconditionally, so the macro casts back explicitly.
+# The cast is safe rather than lucky: compress_intervals merges overlaps per
+# reference, so each contig contributes at most its own length and `covered`
+# cannot exceed the genome length -- BIGINT spans ~2.96 billion human genomes.
+# This pins the type because the accidental HUGEINT was not free: it is 16 bytes
+# instead of 8, and COPY to Parquet wrote it as DOUBLE.
+query T
+SELECT typeof(covered) FROM genome_coverage(alignments, subject_total_length, subject_genome_id);
+----
+BIGINT
+
 # ---- Test 2: Overlapping alignments merged by compress_intervals ----
 # contig1 [10,21) and [15,26) → compressed to [10,26) → 16 bases
 
@@ -188,7 +200,211 @@ SELECT * FROM genome_coverage(sam_alignments, total_length_6b, genome_id_6b) ORD
 genome1	10	0.01
 genome2	276	0.00276
 
+# ---- Test 7: the reference tables must be complete and usable ----
+# genome_coverage and genome_coverage_per_sample are kept in lockstep, so these
+# mirror test/sql/genome_coverage_per_sample.test. Each input below is one from
+# which no correct proportion can be computed; each previously produced a
+# silently wrong or missing answer instead of raising.
+
+statement ok
+CREATE TABLE gc7_aln (reference VARCHAR, position BIGINT, stop_position BIGINT);
+
+statement ok
+INSERT INTO gc7_aln VALUES ('contig1', 10, 21);
+
+statement ok
+CREATE TABLE gc7_sg (contig_id VARCHAR, genome_id VARCHAR);
+
+statement ok
+INSERT INTO gc7_sg VALUES ('contig1', 'genome_A');
+
+statement ok
+CREATE TABLE gc7_tl (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO gc7_tl VALUES ('genome_A', 100);
+
+# A duplicated (contig_id, genome_id) row must not double the count. Before the
+# mapping was deduplicated this returned 22 for 11 real bases -- a wrong answer
+# indistinguishable from a genuine low-coverage result.
+statement ok
+CREATE TABLE gc7_sg_dup (contig_id VARCHAR, genome_id VARCHAR);
+
+statement ok
+INSERT INTO gc7_sg_dup VALUES ('contig1', 'genome_A'), ('contig1', 'genome_A');
+
+query TIR
+SELECT * FROM genome_coverage(gc7_aln, gc7_tl, gc7_sg_dup);
+----
+genome_A	11	0.11
+
+# ... and is identical to the duplicate-free mapping, proving the dedupe changed
+# nothing for callers who were already correct.
+query TIR
+SELECT * FROM genome_coverage(gc7_aln, gc7_tl, gc7_sg);
+----
+genome_A	11	0.11
+
+# A covered genome with no total_length row is reported, not silently dropped.
+statement ok
+CREATE TABLE gc7_tl_missing (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO gc7_tl_missing VALUES ('some_other_genome', 100);
+
+statement error
+SELECT * FROM genome_coverage(gc7_aln, gc7_tl_missing, gc7_sg);
+----
+no total_length entry for genome_id 'genome_A'
+
+# total_length = 0 raises rather than returning infinity.
+statement ok
+CREATE TABLE gc7_tl_zero (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO gc7_tl_zero VALUES ('genome_A', 0);
+
+statement error
+SELECT * FROM genome_coverage(gc7_aln, gc7_tl_zero, gc7_sg);
+----
+total_length must be positive for genome_id 'genome_A'
+
+# NULL total_length raises rather than returning a NULL proportion.
+statement ok
+CREATE TABLE gc7_tl_null (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO gc7_tl_null VALUES ('genome_A', NULL);
+
+statement error
+SELECT * FROM genome_coverage(gc7_aln, gc7_tl_null, gc7_sg);
+----
+total_length must be positive for genome_id 'genome_A'
+
+# A genome with a length but no coverage is NOT an error -- it is simply absent.
+# Only a genome we must divide for and cannot is fatal, so the guard must not
+# turn an ordinary uncovered genome into a failure.
+statement ok
+CREATE TABLE gc7_tl_extra (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO gc7_tl_extra VALUES ('genome_A', 100), ('genome_uncovered', 500);
+
+query TIR
+SELECT * FROM genome_coverage(gc7_aln, gc7_tl_extra, gc7_sg);
+----
+genome_A	11	0.11
+
+# ---- Test 8: identifier types are passed through, not coerced ----
+# docs/alignment_analysis.md claims BIGINT and UUID genome_id work here, not
+# just in the per-sample sibling. The code path is identical, but "identical code
+# path" is the kind of reasoning that stops being true without anyone noticing --
+# and an untested prose claim is exactly what produced the wrong doc line this
+# test now guards. So the base macro pins it itself.
+
+statement ok
+CREATE TABLE gc8_aln (reference VARCHAR, position BIGINT, stop_position BIGINT);
+
+statement ok
+INSERT INTO gc8_aln VALUES ('contig1', 10, 21);
+
+statement ok
+CREATE TABLE gc8_sg_bi (contig_id VARCHAR, genome_id BIGINT);
+
+statement ok
+INSERT INTO gc8_sg_bi VALUES ('contig1', 77);
+
+statement ok
+CREATE TABLE gc8_tl_bi (genome_id BIGINT, total_length BIGINT);
+
+statement ok
+INSERT INTO gc8_tl_bi VALUES (77, 100);
+
+query IIR
+SELECT * FROM genome_coverage(gc8_aln, gc8_tl_bi, gc8_sg_bi);
+----
+77	11	0.11
+
+query T
+SELECT typeof(genome_id) FROM genome_coverage(gc8_aln, gc8_tl_bi, gc8_sg_bi);
+----
+BIGINT
+
+statement ok
+CREATE TABLE gc8_sg_uu (contig_id VARCHAR, genome_id UUID);
+
+statement ok
+INSERT INTO gc8_sg_uu VALUES ('contig1', '33333333-3333-3333-3333-333333333333');
+
+statement ok
+CREATE TABLE gc8_tl_uu (genome_id UUID, total_length BIGINT);
+
+statement ok
+INSERT INTO gc8_tl_uu VALUES ('33333333-3333-3333-3333-333333333333', 100);
+
+query TIR
+SELECT * FROM genome_coverage(gc8_aln, gc8_tl_uu, gc8_sg_uu);
+----
+33333333-3333-3333-3333-333333333333	11	0.11
+
+# The two reference relations need not agree on the declared type -- genome_id is
+# a join key, so DuckDB implicit-casts and BIGINT 77 matches VARCHAR '77'. The
+# docs recommend matching types anyway, because an unconvertible value fails as a
+# cast error rather than a clear mismatch diagnosis.
+statement ok
+CREATE TABLE gc8_tl_vc (genome_id VARCHAR, total_length BIGINT);
+
+statement ok
+INSERT INTO gc8_tl_vc VALUES ('77', 100);
+
+query IIR
+SELECT * FROM genome_coverage(gc8_aln, gc8_tl_vc, gc8_sg_bi);
+----
+77	11	0.11
+
 # ---- Cleanup ----
+
+statement ok
+DROP TABLE gc7_aln;
+
+statement ok
+DROP TABLE gc7_sg;
+
+statement ok
+DROP TABLE gc7_sg_dup;
+
+statement ok
+DROP TABLE gc7_tl;
+
+statement ok
+DROP TABLE gc7_tl_missing;
+
+statement ok
+DROP TABLE gc7_tl_zero;
+
+statement ok
+DROP TABLE gc7_tl_null;
+
+statement ok
+DROP TABLE gc7_tl_extra;
+
+statement ok
+DROP TABLE gc8_aln;
+
+statement ok
+DROP TABLE gc8_sg_bi;
+
+statement ok
+DROP TABLE gc8_tl_bi;
+
+statement ok
+DROP TABLE gc8_sg_uu;
+
+statement ok
+DROP TABLE gc8_tl_uu;
+
+statement ok
+DROP TABLE gc8_tl_vc;
 
 statement ok
 DROP TABLE alignments;

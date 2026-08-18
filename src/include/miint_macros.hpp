@@ -721,12 +721,31 @@ const std::string MZML_ISOTOPE_PATTERN = // NOLINT
 // Parameters:
 // alignments : a relation with columns: reference (VARCHAR), position (BIGINT),
 //     stop_position (BIGINT)
-// subject_total_length : a relation with columns: genome_id (VARCHAR),
-//     total_length (BIGINT)
-// subject_genome_id : a relation with columns: contig_id (VARCHAR),
-//     genome_id (VARCHAR)
+// subject_total_length : a relation with columns: genome_id, total_length (BIGINT)
+// subject_genome_id : a relation with columns: contig_id (VARCHAR), genome_id
 //
-// Returns: genome_id (VARCHAR), covered (BIGINT), proportion_covered (DOUBLE)
+// genome_id is passed through without casting -- VARCHAR, BIGINT and UUID all
+// work, and the output keeps the type given in subject_genome_id. See the
+// genome_coverage_per_sample comment below on mixed types across the two
+// reference relations; the behavior is identical here, same code path.
+//
+// Returns: genome_id (as supplied), covered (BIGINT), proportion_covered (DOUBLE)
+//
+// Raises, rather than returning a wrong or missing answer, when a covered genome
+// has no usable denominator:
+//   - no total_length row for a genome that has coverage
+//   - total_length that is NULL, zero or negative
+// A genome listed in subject_total_length but with no coverage is not an error;
+// it simply produces no row.
+//
+// `covered` is cast back to BIGINT deliberately -- do not remove the cast.
+// DuckDB widens the return type of SUM unconditionally (SUM(BIGINT) and even
+// SUM(INTEGER) yield HUGEINT), which is pointless here: compress_intervals
+// merges overlaps per reference, so each contig contributes at most its own
+// length and `covered` is bounded by the genome length -- BIGINT holds ~2.96
+// billion human genomes. The width was not free: HUGEINT is 16 bytes rather
+// than 8, and COPY ... TO a Parquet file writes it as DOUBLE, so an integer
+// base count silently arrived as a float.
 const std::string GENOME_COVERAGE = // NOLINT
     "CREATE OR REPLACE MACRO genome_coverage(alignments, subject_total_length, subject_genome_id) AS TABLE "
     "WITH compressed_intervals AS ( "
@@ -741,7 +760,14 @@ const std::string GENOME_COVERAGE = // NOLINT
     "        sg.genome_id, "
     "        SUM(ci.stop - ci.start) AS covered_internal "
     "    FROM compressed_intervals "
-    "    JOIN query_table(subject_genome_id) sg "
+    // SELECT DISTINCT, not a bare query_table(): a duplicated (contig_id,
+    // genome_id) row would otherwise multiply every interval for that contig
+    // before any GROUP BY sees it, reporting 11 covered bases as 22. Mapping
+    // tables assembled by concatenating per-genome files hit this routinely, and
+    // the inflated result looks like an ordinary low-coverage genome. The dedupe
+    // is on the PAIR, so a contig legitimately mapped to two different genomes
+    // still counts toward both.
+    "    JOIN (SELECT DISTINCT contig_id, genome_id FROM query_table(subject_genome_id)) sg "
     "      ON reference = sg.contig_id "
     "    GROUP BY sg.genome_id, reference "
     "), "
@@ -752,13 +778,1189 @@ const std::string GENOME_COVERAGE = // NOLINT
     "    FROM internal_coverage "
     "    GROUP BY genome_id "
     ") "
+    // SUM widens to INT128 in DuckDB regardless of how small the values are, so this
+    // returned HUGEINT while the docs promised BIGINT. Narrowing is always safe:
+    // covered is bounded by total_length, and the largest known genome is ~150 Gbp,
+    // about 38 bits.
     "SELECT "
     "    tc.genome_id, "
-    "    tc.covered, "
+    "    tc.covered::BIGINT AS covered, "
     "    tc.covered::DOUBLE / tl.total_length AS proportion_covered "
     "FROM total_coverage tc "
-    "JOIN query_table(subject_total_length) tl "
-    "  USING (genome_id);";
+    // LEFT JOIN + an explicit guard, not an inner join: a covered genome with no
+    // usable total_length must be reported, not silently dropped or divided into
+    // garbage. The guard lives in WHERE rather than the projection because
+    // DuckDB prunes unused projections -- inside SELECT it would not fire for
+    // `SELECT covered FROM genome_coverage(...)`, the very query that would
+    // otherwise hide the problem. Same reasoning as read_gff's malformed-line
+    // check above. A genome present in subject_total_length but uncovered here
+    // simply produces no row; only a genome we must divide for and cannot is
+    // fatal, so an empty result stays empty rather than raising.
+    "LEFT JOIN query_table(subject_total_length) tl "
+    "  ON tc.genome_id = tl.genome_id "
+    "WHERE CASE "
+    "        WHEN tl.genome_id IS NULL "
+    "          THEN error(printf('genome_coverage: no total_length entry for genome_id ''%s''', "
+    "                            tc.genome_id::VARCHAR)) "
+    "        WHEN tl.total_length IS NULL OR tl.total_length <= 0 "
+    "          THEN error(printf('genome_coverage: total_length must be positive for genome_id ''%s'' "
+    "(got %s)', tc.genome_id::VARCHAR, COALESCE(tl.total_length::VARCHAR, 'NULL'))) "
+    "        ELSE TRUE "
+    "      END;";
+
+// genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id)
+//
+// Per-sample sibling of genome_coverage. Identical arithmetic, but every step is
+// partitioned by a `sample_id` column that `alignments` must additionally carry:
+// intervals compress per (sample_id, reference) and covered bases sum per
+// (sample_id, genome_id).
+//
+// Use this whenever `alignments` holds more than one sample. genome_coverage has
+// no sample dimension, so it POOLS multi-sample input into a single row per
+// genome -- two samples covering [10,21)+[30,41) and [10,21) of a 100 bp genome
+// yield one row at 0.22 instead of 0.22 and 0.11. That is not a bug in
+// genome_coverage (it cannot see samples), but it does mean every sample below
+// the pooled maximum is silently over-reported if you feed it pooled input.
+//
+// The two macros are deliberate near-duplicates rather than one parameterized
+// macro: a DuckDB macro cannot vary its output schema, the single-sample form
+// has no sample_id column to delegate with, and a macro cannot inject a constant
+// column into a query_table() reference. Any change to the coverage arithmetic
+// here must be mirrored in GENOME_COVERAGE above, and vice versa.
+//
+// Parameters:
+// alignments : a relation with columns: sample_id (any type), reference
+//     (VARCHAR), position (BIGINT), stop_position (BIGINT)
+// subject_total_length : a relation with columns: genome_id, total_length (BIGINT)
+// subject_genome_id : a relation with columns: contig_id (VARCHAR), genome_id
+//
+// sample_id and genome_id are passed through without casting, so VARCHAR,
+// BIGINT and UUID identifiers all survive end to end; the output keeps the type
+// given in subject_genome_id. The two reference relations do NOT have to declare
+// genome_id with the same type -- it is a join key, so DuckDB implicit-casts and
+// a BIGINT 77 matches a VARCHAR '77' (pinned by Test 14 of
+// test/sql/genome_coverage_per_sample.test). Matching types are still worth
+// preferring: an unconvertible value fails as a cast error naming the column
+// rather than as a clear diagnosis of the mismatch.
+//
+// A (sample, genome) pair with no qualifying alignments produces no row at all,
+// rather than a zero-coverage row.
+//
+// Returns: sample_id (as supplied), genome_id (as supplied), covered (BIGINT),
+//     proportion_covered (DOUBLE)
+//
+// Raises on a NULL sample_id, and on the same unusable-denominator cases as
+// genome_coverage (missing total_length row; NULL, zero or negative
+// total_length). The two macros are kept in lockstep on all of it.
+//
+// `covered` is cast back to BIGINT for the same reason as genome_coverage above
+// -- DuckDB widens SUM unconditionally, and the value is bounded by the genome
+// length. Keep both macros in agreement; a type mismatch between siblings would
+// be a nasty surprise for anyone UNION-ing their results.
+const std::string GENOME_COVERAGE_PER_SAMPLE = // NOLINT
+    "CREATE OR REPLACE MACRO genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id) AS "
+    "TABLE "
+    "WITH compressed_intervals AS ( "
+    "    SELECT "
+    "        sample_id, "
+    "        reference, "
+    "        UNNEST(compress_intervals(position, stop_position)) AS ci "
+    "    FROM query_table(alignments) "
+    // Reject NULL sample_id rather than letting it form its own group. A NULL
+    // sample is not a meaningful partition, and grouping it would emit a
+    // plausible-looking row for what is almost always a data error. Every other
+    // per-sample function in the extension rejects it (see
+    // docs/internals/per-sample-pattern.md); the message reuses that family's
+    // substring so callers see one behavior. In WHERE, not the projection, so
+    // projection pruning cannot silence it.
+    "    WHERE CASE WHEN sample_id IS NULL "
+    "               THEN error('genome_coverage_per_sample: NULL values in sample_id column "
+    "''sample_id''') "
+    "               ELSE TRUE END "
+    "    GROUP BY sample_id, reference "
+    "), "
+    "internal_coverage AS ( "
+    "    SELECT "
+    "        sample_id, "
+    "        sg.genome_id, "
+    "        SUM(ci.stop - ci.start) AS covered_internal "
+    "    FROM compressed_intervals "
+    // Deduplicated for the same reason as genome_coverage above -- a repeated
+    // (contig_id, genome_id) row would double every covered count.
+    "    JOIN (SELECT DISTINCT contig_id, genome_id FROM query_table(subject_genome_id)) sg "
+    "      ON reference = sg.contig_id "
+    "    GROUP BY sample_id, sg.genome_id, reference "
+    "), "
+    "total_coverage AS ( "
+    "    SELECT "
+    "        sample_id, "
+    "        genome_id, "
+    "        SUM(covered_internal) AS covered "
+    "    FROM internal_coverage "
+    "    GROUP BY sample_id, genome_id "
+    ") "
+    "SELECT "
+    "    tc.sample_id, "
+    "    tc.genome_id, "
+    "    tc.covered::BIGINT AS covered, "
+    "    tc.covered::DOUBLE / tl.total_length AS proportion_covered "
+    "FROM total_coverage tc "
+    // Mirrors genome_coverage's guard; see the reasoning there.
+    "LEFT JOIN query_table(subject_total_length) tl "
+    "  ON tc.genome_id = tl.genome_id "
+    "WHERE CASE "
+    "        WHEN tl.genome_id IS NULL "
+    "          THEN error(printf('genome_coverage_per_sample: no total_length entry for genome_id "
+    "''%s''', tc.genome_id::VARCHAR)) "
+    "        WHEN tl.total_length IS NULL OR tl.total_length <= 0 "
+    "          THEN error(printf('genome_coverage_per_sample: total_length must be positive for "
+    "genome_id ''%s'' (got %s)', tc.genome_id::VARCHAR, COALESCE(tl.total_length::VARCHAR, 'NULL'))) "
+    "        ELSE TRUE "
+    "      END;";
+
+// bin_of(pos, n_bins, genome_length)
+// bin_start(b, n_bins, genome_length)
+// interval_bins(start, stop, n_bins, genome_length)
+//
+// Divide a genome into n_bins near-equal-width bins. bin_of maps a position to its bin,
+// bin_start maps a bin back to its first position, and interval_bins reports which bins
+// a half-open interval touches. Used to find genomic regions whose coverage differs
+// between sample groups: bin, count samples/reads per bin per group, then rank bins by
+// the standard deviation of the per-group counts -- all plain SQL once the fan-out
+// exists (issue #215).
+//
+// Widths are near-equal, not equal: they differ by at most one base when n_bins does not
+// divide genome_length. That is the entire reason bin_start cannot be computed by the
+// obvious floor formula -- see below.
+//
+// Bin indices are 0-BASED. They are array positions, not genomic coordinates, so they
+// deliberately cut against the 1-based coordinate convention used everywhere else here.
+//
+// Genomic positions stay 1-based half-open, matching read_alignments and the normalized
+// stop_position rule in docs/internals/architecture.md: bin b spans
+// [bin_start(b), bin_start(b+1)) and its width is the plain difference, no +1. That makes
+// bin_start(0) = 1 and bin_start(n_bins) = genome_length + 1, so (bin_start(b),
+// bin_start(b+1)) is directly usable as a half-open (start, stop) pair.
+//
+// bin_of is the definition; bin_start is its left inverse:
+//
+//   bin_of(p)    = ((p - 1) * n_bins) // genome_length
+//   bin_start(b) = ceil(b * genome_length / n_bins) + 1
+//
+// The invariant is CONTAINMENT, not round-tripping in both directions:
+//
+//   bin_start(bin_of(p)) <= p < bin_start(bin_of(p) + 1)   for every p in [1, genome_length]
+//
+// bin_of(bin_start(b)) = b fails when n_bins > genome_length, because zero-width bins make
+// bin_start non-injective (n_bins=5, genome_length=3: bin_start(2) = 3 but bin_of(3) = 3).
+//
+// bin_start must use ceil. With floor, genome_length=10 / n_bins=4 gives bounds
+// [1,3) [3,6) [6,8) [8,11), which places position 3 in bin 1 while bin_of(3) is 0 --
+// the two disagree at 4 of 10 positions. bin_start is the join key callers carry
+// around, so a mismatch there shifts every downstream bin and the ranking still looks
+// perfectly plausible. Pinned by the containment assertions in
+// test/sql/interval_bins.test, which report 23 violations against the floor variant.
+//
+// Every operand is normalized with ::BIGINT before it is used in arithmetic OR in a
+// bounds comparison, and the normalized value is what the error messages quote. Two
+// reasons. read_gff and read_ncbi_annotation emit INTEGER positions, and an unwidened
+// (position * n_bins) overflows INT32 at ~4.3 Mbp / 500 bins -- an ordinary bacterial
+// genome. And a genome_length arriving as DOUBLE or DECIMAL (an inferred CSV/Parquet
+// column) must compare against the same rounded value the arithmetic uses, or the clamp
+// and the bounds check disagree and the caller sees an error about a position they never
+// supplied.
+//
+// NULL in any argument yields NULL, following the SQL convention compress_intervals uses.
+// Note what that means downstream: UNNEST(NULL) emits no rows, so a genome_length that
+// arrived NULL from a missed join drops those reads silently. The positivity check below
+// cannot catch that -- a join miss produces NULL, not 0. Guard the join if it matters.
+// The bin-index formula itself, with NO guards -- the single definition that bin_of and
+// both of interval_bins' regimes delegate to, so the arithmetic cannot drift between them.
+// It was written out three times before; interval_bins' header explains why the obvious
+// objection to delegating (a user macro of the same name hijacking the call) does not
+// apply once the callee is schema-qualified.
+//
+// INTERNAL. The leading underscore marks it as such: it performs no validation at all and
+// assumes its caller has already established that pos, n_bins and genome_length are
+// non-NULL, that n_bins and genome_length are positive, and that pos is inside
+// [1, genome_length]. Called with anything else it returns a plausible wrong number rather
+// than raising. Callers outside this file should use bin_of, which carries the guards.
+const std::string MIINT_BIN_INDEX = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_bin_index(pos, n_bins, genome_length) AS ( "
+    "  ((pos::BIGINT - 1) * n_bins::BIGINT) // genome_length::BIGINT);";
+
+const std::string BIN_OF = // NOLINT
+    "CREATE OR REPLACE MACRO bin_of(pos, n_bins, genome_length) AS ( "
+    "  CASE "
+    "    WHEN pos IS NULL OR n_bins IS NULL OR genome_length IS NULL THEN NULL "
+    "    WHEN n_bins::BIGINT < 1 OR genome_length::BIGINT < 1 "
+    "      THEN error(printf('bin_of: n_bins and genome_length must be positive "
+    "(got n_bins=%s, genome_length=%s)', "
+    "                        n_bins::BIGINT::VARCHAR, genome_length::BIGINT::VARCHAR)) "
+    // The hint is not decoration. stop_position is an EXCLUSIVE end, so a read reaching
+    // the reference end legitimately carries genome_length + 1, and
+    // `SELECT bin_of(position, ...), bin_of(stop_position, ...)` is the natural thing to
+    // write. It passes on small fixtures and aborts on a real BAM, so the error has to
+    // name the fix.
+    "    WHEN pos::BIGINT < 1 OR pos::BIGINT > genome_length::BIGINT "
+    "      THEN error(printf('bin_of: position %s outside genome [1, %s] "
+    "(if this is an exclusive stop_position, pass stop_position - 1)', "
+    "                        pos::BIGINT::VARCHAR, genome_length::BIGINT::VARCHAR)) "
+    "    ELSE system.main._miint_bin_index(pos, n_bins, genome_length) "
+    "  END);";
+
+// b may equal n_bins: that is the exclusive end of the last bin, genome_length + 1, and
+// callers need it to close the final region.
+const std::string BIN_START = // NOLINT
+    "CREATE OR REPLACE MACRO bin_start(b, n_bins, genome_length) AS ( "
+    "  CASE "
+    "    WHEN b IS NULL OR n_bins IS NULL OR genome_length IS NULL THEN NULL "
+    "    WHEN n_bins::BIGINT < 1 OR genome_length::BIGINT < 1 "
+    "      THEN error(printf('bin_start: n_bins and genome_length must be positive "
+    "(got n_bins=%s, genome_length=%s)', "
+    "                        n_bins::BIGINT::VARCHAR, genome_length::BIGINT::VARCHAR)) "
+    "    WHEN b::BIGINT < 0 OR b::BIGINT > n_bins::BIGINT "
+    "      THEN error(printf('bin_start: bin index %s outside [0, %s]', "
+    "                        b::BIGINT::VARCHAR, n_bins::BIGINT::VARCHAR)) "
+    "    ELSE ((b::BIGINT * genome_length::BIGINT + n_bins::BIGINT - 1) "
+    "          // n_bins::BIGINT) + 1 "
+    "  END);";
+
+// Two regimes, because range() materializes every element before anything can prune it.
+//
+// n_bins <= genome_length: every bin is at least one base wide, so no bin in the spanned
+// range can be empty and the range IS the answer. Cost is the number of bins touched.
+//
+// n_bins > genome_length: some bins are zero-width. That is legitimate -- a fixed bin
+// count applied across genomes of very different sizes -- but those bins hold no bases,
+// so an interval cannot touch them and they must not be emitted. Enumerating the range
+// and filtering would cost O(n_bins) (measured 19 ms/row at n_bins=1e6, genome_length=3);
+// enumerating positions instead costs O(interval length), which in this regime is bounded
+// by genome_length < n_bins. Same answer, 269x faster on that case.
+//
+// Both regimes delegate the bin arithmetic to `system.main._miint_bin_index`, which is also
+// what bin_of's ELSE branch uses -- ONE definition of the formula, not three.
+//
+// It delegates to the bare helper rather than to bin_of because bin_of re-runs its NULL and
+// bounds guards once per enumerated position, measured at ~1.4x, when all of them are
+// already established here and the clamp below guarantees every p is inside
+// [1, genome_length]. Delegating to the unguarded helper is free: measured against an
+// inlined twin on the same data, regime 1 is 0.015 s vs 0.016 s over 200k intervals and
+// regime 2 is 0.058 s vs 0.055 s over 20k, with zero result mismatches in either.
+//
+// THE QUALIFICATION IS LOAD-BEARING. A macro body resolves its callee in the CALLER's
+// catalog, so a bare `_miint_bin_index(...)` would let any user macro of that name silently
+// replace the arithmetic -- and the results would still look like plausible bin indices.
+// Qualifying defeats it, and the qualification itself cannot be spoofed:
+//
+//   CREATE MACRO delegator_q(p,nb,gl) AS system.main.bin_of(p,nb,gl);
+//   CREATE MACRO delegator_u(p,nb,gl) AS bin_of(p,nb,gl);
+//   CREATE MACRO bin_of(p,nb,gl) AS 999;      -- shadow created AFTER both
+//   SELECT delegator_q(1,4,10), delegator_u(1,4,10);   -->   0   |   999
+//
+//   ATTACH ':memory:' AS system;               -->  "reserved name"
+//   CREATE MACRO system.main.bin_of(...);      -->  "Cannot create entry in system catalog"
+//
+// (miint's macros do live in system.main -- confirmed via duckdb_functions().) An earlier
+// version of this comment claimed the hijack made delegation impossible and used that to
+// justify writing the formula out three times. That was false. The delegation is pinned by
+// test/sql/interval_bins.test, which shadows both `_miint_bin_index` and `bin_of` with
+// macros returning 999 and asserts interval_bins is unaffected in both regimes; that test
+// was verified to FAIL against an unqualified version, so do not drop the `system.main.`
+// prefixes. Test 5 additionally cross-checks interval_bins against bin_of over both
+// regimes, including a non-dividing (3,5) pair.
+//
+// Note the mzml family delegates UNQUALIFIED (MZML_X_OFFSET_PAIR and MZML_X_OFFSET_TRIPLET
+// call mzml_x_offset_ntuple, READ_GFF calls parse_gff_attributes), so those calls are
+// hijackable in the same way. Pre-existing and out of scope here, but the same one-word fix
+// applies if it ever matters.
+const std::string INTERVAL_BINS = // NOLINT
+    "CREATE OR REPLACE MACRO interval_bins(start, stop, n_bins, genome_length) AS ( "
+    "  CASE "
+    "    WHEN start IS NULL OR stop IS NULL OR n_bins IS NULL OR genome_length IS NULL "
+    "      THEN NULL "
+    "    WHEN n_bins::BIGINT < 1 OR genome_length::BIGINT < 1 "
+    "      THEN error(printf('interval_bins: n_bins and genome_length must be positive "
+    "(got n_bins=%s, genome_length=%s)', "
+    "                        n_bins::BIGINT::VARCHAR, genome_length::BIGINT::VARCHAR)) "
+    // Clamp to the genome, then treat an empty or inverted interval as touching nothing
+    // so UNNEST drops the row.
+    "    WHEN LEAST(stop::BIGINT, genome_length::BIGINT + 1) "
+    "         <= GREATEST(start::BIGINT, 1) THEN []::BIGINT[] "
+    "    WHEN n_bins::BIGINT <= genome_length::BIGINT "
+    // The exclusive end: bin of the LAST included position, plus one. The -1 is what makes
+    // it the last included position rather than one past it.
+    "      THEN range( "
+    "             system.main._miint_bin_index( "
+    "               GREATEST(start::BIGINT, 1), n_bins, genome_length), "
+    "             system.main._miint_bin_index( "
+    "               LEAST(stop::BIGINT, genome_length::BIGINT + 1) - 1, "
+    "               n_bins, genome_length) + 1) "
+    "    ELSE list_sort(list_distinct(list_transform( "
+    "           range(GREATEST(start::BIGINT, 1), "
+    "                 LEAST(stop::BIGINT, genome_length::BIGINT + 1)), "
+    "           lambda p: system.main._miint_bin_index(p, n_bins, genome_length)))) "
+    "  END);";
+
+// region_presence(positions, regions, samples)
+//
+// Is a genomic region present in a sample? The answer is THREE-state, and the third
+// state is what makes downstream statistics honest (issue #216):
+//
+//   present         the sample has a covered interval overlapping the region
+//   absent          the sample covers the genome, but none of it overlaps the region
+//   not applicable  the sample has no coverage of the genome at all
+//
+// Collapsing 'not applicable' into 'absent' conflates "the organism is here and this
+// region is missing from it" -- a strain-content claim -- with "the organism is not
+// here", a detection failure. Those must not be pooled, and the distinction is easy to
+// lose when hand-rolling the SQL.
+//
+// Parameters:
+// positions : a relation with columns: sample_id (any type), genome_id (any type),
+//     start, stop (any integral type). Intervals are 1-based half-open, matching
+//     compress_intervals output. Note these are NOT read_alignments' column names --
+//     positions is a covered-interval relation, so the caller renames
+//     reference/position/stop_position on the way in. The docs show the rename.
+// regions : a relation with columns: genome_id (any type), region_start, region_stop
+//     (any integral type), region_id (any type). Half-open on the same convention.
+// samples : a relation with a sample_id column -- the full cohort roster.
+//
+// Returns: sample_id (from samples), genome_id / region_id (from regions, uncast),
+//     region_start / region_stop (from regions, as BIGINT), state (VARCHAR:
+//     'present' / 'absent' / 'not applicable')
+//
+// One row per region ROW per sample. The coordinates are emitted, not just region_id,
+// because the presence join is keyed on them: two rows sharing a region_id but covering
+// different spans are scored independently, and without the coordinates in the output
+// those rows would be indistinguishable -- a PIVOT would silently collapse them and a
+// join back to metadata would duplicate samples. When region_ids are unique, which is
+// the normal case, (sample_id, region_id) still keys the output.
+//
+// Long form, deliberately, rather than a sample x region matrix: it is what read_biom,
+// woltka_ogu and the diversity functions already consume, and callers who want the
+// matrix can PIVOT. micov builds the wide form internally with two PIVOTs and a Polars
+// coalesce because pivot columns cannot be named in advance; long form makes that
+// workaround unnecessary.
+//
+// samples is REQUIRED, not optional. 'not applicable' cannot be derived from positions
+// alone -- a sample with no coverage contributes no rows, so it is indistinguishable
+// from a sample that is not in the study. Without the roster the function could only
+// emit 'present' and 'absent', which is the very conflation it exists to prevent. A
+// macro also cannot vary its body on whether an argument was supplied. region_id is
+// likewise required rather than synthesized, because a macro body cannot conditionally
+// reference a column that may not exist.
+//
+// positions does NOT need to be pre-compressed. Presence asks only whether ANY interval
+// overlaps, so overlapping input intervals give the same answer as their union, and the
+// DISTINCTs below absorb the duplication.
+//
+// EVERY coordinate operand is normalized with ::BIGINT before it is compared, not just
+// before it is used arithmetically -- the same rule bin_of/bin_start/interval_bins
+// follow. Without it, coordinates loaded as VARCHAR (a BED file, an inferred CSV column)
+// compare lexicographically: '9' < '10' is FALSE, so real intervals get discarded as
+// degenerate, and '9' <= '100' is FALSE, so an inverted region passes validation. The
+// result is a silent, cohort-wide 'not applicable' -- the exact conflation this function
+// exists to prevent.
+//
+// NULL handling in positions splits on what the column means. The interval columns have
+// a defined NULL meaning -- a NULL start or stop marks a sample that exists with zero
+// coverage -- so those rows drop out without counting as coverage. The identity columns
+// do not: a NULL sample_id or genome_id is an unattributable interval, and silently
+// dropping it would downgrade real coverage to a non-detection, so it raises. An
+// interval with start >= stop covers no bases and drops out for the same reason a NULL
+// one does. That is deliberately NOT symmetric with the hard error on an empty region:
+// a region is the QUESTION, and an unanswerable question must not be silently answered
+// 'absent', whereas a degenerate interval is just data that contributes nothing.
+//
+// Samples present in positions but absent from the roster are ignored: the roster
+// defines the cohort.
+//
+// The overlap test is `start < region_stop AND stop > region_start`. micov's predicate
+// (_view.py:330) is `pos.start <= fm.stop AND pos.stop > fm.start`, which admits a
+// zero-width touch at the region's exclusive end and reports a read starting exactly
+// where the region finishes as present. It shares no base with the region.
+//
+// Three structural details that are load-bearing, not stylistic:
+//
+// 1. The positions guard and the degeneracy filter are ONE CASE, not two predicates.
+//    Split across two CTEs, DuckDB collapses them into a single FILTER and evaluates the
+//    cheap interval test first, so a row that is BOTH unattributable and degenerate is
+//    discarded before the error branch is ever reached -- the guard silently does
+//    nothing on exactly the rows most likely to be malformed.
+// 2. _rp_checked is MATERIALIZED. That is an optimizer barrier: it stops the roster
+//    semi-join below from being reordered ahead of the guard (a NULL sample_id matches
+//    no roster entry, so the semi-join would prune the offending row before it could
+//    raise). It also pins positions to a single scan, which matters for a relation that
+//    can only be consumed once, such as an Arrow RecordBatchReader.
+// 3. CTE names are prefixed. query_table() resolves in the caller's scope, so a CTE can
+//    shadow a user relation of the same name passed as an argument, and the failure is an
+//    unattributable binder error about a missing column. `roster` is exactly the name the
+//    docs use, so the hazard is real here.
+//
+//    The PRECISE rule -- established later, while testing region_coverage, and stated in
+//    full at _rc_reg below -- is narrower than "an unprefixed CTE shadows an argument":
+//    a CTE shadows an argument if and only if it is DECLARED BEFORE the query_table() call
+//    that resolves that argument. Whether the argument is a CTE, a view or a base table is
+//    irrelevant. An earlier version of this comment stated the broad form as fact; it is
+//    wrong, and prefixing is kept here as a blanket precaution rather than because every
+//    name listed above could actually collide.
+//
+// One thing MATERIALIZED does NOT fix: the validation guards are still ordinary SQL
+// expressions, so the optimizer may push a CALLER's filter beneath them and a malformed
+// row outside that filter will not raise (verified: materializing does not change this).
+// That never affects the rows returned -- each output row depends only on its own region
+// and sample -- but validation covers what the query reads, not the whole relation.
+const std::string REGION_PRESENCE = // NOLINT
+    "CREATE OR REPLACE MACRO region_presence(positions, regions, samples) AS TABLE "
+    "WITH _rp_roster AS ( "
+    "    SELECT DISTINCT sample_id FROM query_table(samples) "
+    // The message reuses the per-sample family's substring
+    // (docs/internals/per-sample-pattern.md) so callers see one behavior.
+    "    WHERE CASE WHEN sample_id IS NULL "
+    "               THEN error('region_presence: NULL values in sample_id column "
+    "''sample_id''') "
+    "               ELSE TRUE END "
+    "), "
+    "_rp_reg AS ( "
+    "    SELECT DISTINCT genome_id, region_start::BIGINT AS region_start, "
+    "           region_stop::BIGINT AS region_stop, region_id "
+    "    FROM query_table(regions) "
+    // An unusable region must not be scored: a NULL bound makes the overlap predicate
+    // NULL and an empty or inverted region can never overlap anything, so every sample
+    // would come back 'absent' -- indistinguishable from a real negative result. NULLs
+    // are checked first so the comparisons below never see one. Zero-width and inverted
+    // are separate branches because they have different causes and different remedies:
+    // filtering is right for a bin expansion and wrong for transposed coordinates.
+    "    WHERE CASE "
+    "            WHEN genome_id IS NULL OR region_start IS NULL "
+    "                 OR region_stop IS NULL OR region_id IS NULL "
+    "              THEN error(printf('region_presence: genome_id, region_start, "
+    "region_stop and region_id must not be NULL (got genome_id=%s, region_start=%s, "
+    "region_stop=%s, region_id=%s)', "
+    "                                COALESCE(genome_id::VARCHAR, 'NULL'), "
+    "                                COALESCE(region_start::VARCHAR, 'NULL'), "
+    "                                COALESCE(region_stop::VARCHAR, 'NULL'), "
+    "                                COALESCE(region_id::VARCHAR, 'NULL'))) "
+    "            WHEN region_stop::BIGINT = region_start::BIGINT "
+    "              THEN error(printf('region_presence: region is zero-width "
+    "(region_id ''%s'': [%s, %s)). Zero-width regions arise from bin_start when "
+    "n_bins > genome_length; filter them with WHERE region_stop > region_start', "
+    "                                region_id::VARCHAR, region_start::VARCHAR, "
+    "                                region_stop::VARCHAR)) "
+    "            WHEN region_stop::BIGINT < region_start::BIGINT "
+    "              THEN error(printf('region_presence: region coordinates are inverted "
+    "(region_id ''%s'': [%s, %s)); region_stop must be greater than region_start', "
+    "                                region_id::VARCHAR, region_start::VARCHAR, "
+    "                                region_stop::VARCHAR)) "
+    "            ELSE TRUE "
+    "          END "
+    "), "
+    // See note 1 and note 2 above: one CASE, and MATERIALIZED.
+    "_rp_checked AS MATERIALIZED ( "
+    "    SELECT sample_id, genome_id, start::BIGINT AS start, stop::BIGINT AS stop "
+    "    FROM query_table(positions) "
+    "    WHERE CASE "
+    "            WHEN sample_id IS NULL OR genome_id IS NULL "
+    "              THEN error('region_presence: NULL values in sample_id or genome_id "
+    "column of positions (an interval that cannot be attributed would silently become a "
+    "non-detection)') "
+    "            ELSE start::BIGINT < stop::BIGINT "
+    "          END "
+    "), "
+    // Drop non-cohort samples once, here, rather than scoring them against every region
+    // and discarding them at the final join.
+    "_rp_cov AS ( "
+    "    SELECT c.* FROM _rp_checked c "
+    "    SEMI JOIN _rp_roster s ON c.sample_id = s.sample_id "
+    "), "
+    "_rp_genome_cov AS (SELECT DISTINCT sample_id, genome_id FROM _rp_cov), "
+    "_rp_hit AS ( "
+    "    SELECT DISTINCT c.sample_id, r.genome_id, r.region_start, r.region_stop, "
+    "           r.region_id "
+    "    FROM _rp_cov c "
+    "    JOIN _rp_reg r ON c.genome_id = r.genome_id "
+    "                  AND c.start < r.region_stop AND c.stop > r.region_start "
+    ") "
+    "SELECT s.sample_id, r.genome_id, r.region_id, r.region_start, r.region_stop, "
+    "       CASE WHEN h.sample_id IS NOT NULL THEN 'present' "
+    "            WHEN g.sample_id IS NOT NULL THEN 'absent' "
+    "            ELSE 'not applicable' END AS state "
+    "FROM _rp_roster s "
+    "CROSS JOIN _rp_reg r "
+    "LEFT JOIN _rp_hit h ON h.sample_id = s.sample_id "
+    "                   AND h.genome_id = r.genome_id "
+    "                   AND h.region_start = r.region_start "
+    "                   AND h.region_stop = r.region_stop "
+    "                   AND h.region_id = r.region_id "
+    "LEFT JOIN _rp_genome_cov g ON g.sample_id = s.sample_id "
+    "                          AND g.genome_id = r.genome_id;";
+
+// region_coverage(positions, regions)
+//
+// Breadth of coverage of a sub-genome region, per sample, with the REGION's length as
+// the denominator. genome_coverage divides by the genome, so a fully covered 5 kb region
+// inside a 5 Mb genome reports 0.1% there and 100% here. That denominator is the whole
+// point of the function (issue #217).
+//
+// Parameters:
+// positions : a relation with columns sample_id (any type), genome_id (any type),
+//     start (BIGINT), stop (BIGINT). 1-based half-open intervals.
+// regions : a relation with columns genome_id (any type), region_start (BIGINT),
+//     region_stop (BIGINT), region_id (any type). Half-open on the same convention.
+//
+// Returns: sample_id, genome_id, region_id, region_start, region_stop, covered (BIGINT),
+//     region_length (BIGINT), proportion_covered (DOUBLE)
+//
+// The column contract is region_presence's, NOT genome_coverage's. The two region_*
+// functions are called on the same relation in the same pipeline -- typically
+// region_coverage for the number and region_presence for whether the number means
+// anything -- and making one of them demand `reference`/`position`/`stop_position` while
+// its sibling demands `genome_id`/`start`/`stop` would force a rename between two
+// consecutive lines of a query. genome_coverage keeps the alignment names because it
+// predates the sample dimension and consumes read_alignments output directly; a caller
+// coming from there renames once, in a view, and both region functions then take it.
+// Uncompressed alignments are safe input either way -- compress_intervals runs inside.
+//
+// Clipping is `GREATEST(start, region_start)` / `LEAST(stop, region_stop)` on the rows
+// the overlap test admits, and it happens before the merge. That ordering is NOT
+// load-bearing, contrary to the claim in #217 that unclipped alignments overlapping
+// outside the region would merge into one interval spanning it: intersection distributes
+// over union, so (A u B) n R = (A n R) u (B n R) for intervals, and both orders return
+// the same number on a fixture built to trigger it (test/sql/region_coverage.test,
+// Test 5, asserts the equality against merge-then-clip written out in SQL). Clipping
+// first is still the right order because it bounds what the merge has to sort.
+//
+// The MERGE, by contrast, is load-bearing. Two alignments overlapping INSIDE the region
+// cover their union, not the sum of their lengths, and an unmerged sum inflates the
+// proportion -- past 1.0 on a short region, invisibly on a long one.
+//
+// No roster, and no row for a (sample, region) pair with no overlap. That is deliberate:
+// a fabricated `covered = 0` asserts the region was measured and found empty, which is
+// true of a sample that covers the genome elsewhere and false of a sample where the
+// organism is simply not present -- the exact conflation region_presence exists to
+// prevent, and it cannot be undone downstream. Callers who need the full grid LEFT JOIN
+// this onto region_presence, which supplies both the roster and the distinction.
+//
+// Every coordinate is normalized ::BIGINT before it is compared, not merely before it is
+// subtracted. VARCHAR coordinates -- what a BED file or an inferred CSV column gives you
+// -- otherwise compare lexicographically ('9' < '60' is FALSE), which drops real
+// intervals from the overlap test and clips the survivors to the wrong end. Both failures
+// produce a smaller, entirely plausible coverage number. INTEGER coordinates, which
+// read_gff and read_ncbi_annotation emit, are widened for the same reason.
+//
+// covered is cast to BIGINT. DuckDB widens SUM to INT128 regardless of magnitude; the
+// cast is always safe because covered is bounded by region_length. genome_coverage had
+// the same widening and was returning HUGEINT against docs that promised BIGINT, so it
+// now casts too -- the two are consistent.
+//
+// The two structural details from region_presence apply unchanged, and both were
+// re-verified here by mutation rather than assumed:
+//
+// 1. The positions guard and the degeneracy filter are ONE CASE behind a MATERIALIZED
+//    barrier. Split into two predicates, DuckDB collapses them and evaluates the cheap
+//    interval test first, so a row that is both unattributable and degenerate is
+//    discarded before the error branch is reached. Without MATERIALIZED, the region
+//    join reorders ahead of the guard and an unattributable row on a genome no region
+//    mentions is pruned before it can raise -- measured, and note it takes only three
+//    well-formed rows alongside it for DuckDB to pick that plan, which is why the guard
+//    fixtures in the test are deliberately not two-row VALUES lists.
+// 2. CTE names are prefixed. An argument name is resolved with the macro's own WITH
+//    list in scope, so an argument collides with an internal CTE if and only if that
+//    CTE is declared BEFORE the query_table() call that resolves the argument. The
+//    failure is a bare "Referenced column not found" naming neither the macro nor the
+//    collision. Whether the caller's relation is a CTE, a view or a base table makes
+//    no difference -- all three collide; an earlier version of this comment claimed
+//    base tables were immune, which is simply false.
+//
+//    For this macro that is exactly ONE slot: _rc_reg precedes query_table(positions),
+//    so a `positions` argument named _rc_reg collides. _rc_checked contains the
+//    query_table(positions) call itself and resolves outward, and _rc_clipped and
+//    _rc_merged are declared after both query_table() calls -- none of those three can
+//    collide with anything, prefixed or not. So the prefix earns its keep on one name.
+//    It makes the collision improbable, not impossible: `_rc_reg` in the positions slot
+//    still breaks, and test/sql/region_coverage.test Test 16 asserts that it does.
+//
+//    The corollary for anyone adding a CTE here: putting it above _rc_checked adds a
+//    new colliding name, putting it below does not.
+//
+// The DISTINCT on _rc_reg is NOT in that category: it bounds the join fan-out when a
+// caller passes a regions relation consolidated from shards, but duplicate region rows
+// cannot reach the output regardless, because the final GROUP BY absorbs them. It is
+// load-bearing in region_presence, where a CROSS JOIN and no final aggregate mean a
+// duplicated region row duplicates the answer.
+//
+// As in region_presence, the guards are still ordinary SQL expressions: a caller's
+// filter may be pushed beneath them, so validation covers the rows the query reads,
+// not the whole relation.
+const std::string REGION_COVERAGE = // NOLINT
+    "CREATE OR REPLACE MACRO region_coverage(positions, regions) AS TABLE "
+    "WITH _rc_reg AS ( "
+    "    SELECT DISTINCT genome_id, region_start::BIGINT AS region_start, "
+    "           region_stop::BIGINT AS region_stop, region_id "
+    "    FROM query_table(regions) "
+    // A region is the QUESTION. A NULL bound makes the overlap test NULL, and a
+    // zero-width region has no denominator at all -- answering either with a number
+    // would be inventing a measurement. Zero-width and inverted are separate branches
+    // because the causes and the remedies differ: filtering is right for a bin
+    // expansion and wrong for transposed coordinates.
+    "    WHERE CASE "
+    "            WHEN genome_id IS NULL OR region_start IS NULL "
+    "                 OR region_stop IS NULL OR region_id IS NULL "
+    "              THEN error(printf('region_coverage: genome_id, region_start, "
+    "region_stop and region_id must not be NULL (got genome_id=%s, region_start=%s, "
+    "region_stop=%s, region_id=%s)', "
+    "                                COALESCE(genome_id::VARCHAR, 'NULL'), "
+    "                                COALESCE(region_start::VARCHAR, 'NULL'), "
+    "                                COALESCE(region_stop::VARCHAR, 'NULL'), "
+    "                                COALESCE(region_id::VARCHAR, 'NULL'))) "
+    "            WHEN region_stop::BIGINT = region_start::BIGINT "
+    "              THEN error(printf('region_coverage: region is zero-width "
+    "(region_id ''%s'': [%s, %s)); it has no denominator. Zero-width regions arise from "
+    "bin_start when n_bins > genome_length; filter them with "
+    "WHERE region_stop > region_start', "
+    "                                region_id::VARCHAR, region_start::VARCHAR, "
+    "                                region_stop::VARCHAR)) "
+    "            WHEN region_stop::BIGINT < region_start::BIGINT "
+    "              THEN error(printf('region_coverage: region coordinates are inverted "
+    "(region_id ''%s'': [%s, %s)); region_stop must be greater than region_start', "
+    "                                region_id::VARCHAR, region_start::VARCHAR, "
+    "                                region_stop::VARCHAR)) "
+    "            ELSE TRUE "
+    "          END "
+    "), "
+    // ONE CASE, and MATERIALIZED -- see the header note.
+    "_rc_checked AS MATERIALIZED ( "
+    "    SELECT sample_id, genome_id, start::BIGINT AS start, stop::BIGINT AS stop "
+    "    FROM query_table(positions) "
+    "    WHERE CASE "
+    "            WHEN sample_id IS NULL OR genome_id IS NULL "
+    "              THEN error('region_coverage: NULL values in sample_id or genome_id "
+    "column of positions (an interval that cannot be attributed would silently vanish "
+    "from the coverage it belongs to)') "
+    "            ELSE start::BIGINT < stop::BIGINT "
+    "          END "
+    "), "
+    // Totally disjoint genome_id domains are a naming error, not an answer. Because this
+    // function emits no row for a region with no overlap (see the header note), handing it
+    // genome ids where contig ids belong produced ZERO ROWS AND NO COMPLAINT -- and that is
+    // exactly the mistake a multi-contig assembly invites, since regions here are matched
+    // contig-to-contig. Both sides must be non-empty for this to fire: an empty positions
+    // relation legitimately yields nothing, and "this sample covers none of that genome" is
+    // region_presence's question, which has a roster and a three-state answer.
+    // Reads query_table(regions) directly rather than _rc_reg. Going through _rc_reg would
+    // force every region row through the validation CASE before a caller's filter could
+    // prune it, which changes when the per-region guards fire (Test 12b in
+    // test/sql/region_coverage.test pins that pushdown in both directions). regions is the
+    // small side, so the extra scan is cheap.
+    "_rc_domain AS MATERIALIZED ( "
+    "    SELECT CASE "
+    "             WHEN (SELECT count(*) FROM query_table(regions)) > 0 "
+    "                  AND (SELECT count(*) FROM _rc_checked) > 0 "
+    "                  AND NOT EXISTS (SELECT 1 FROM query_table(regions) r, _rc_checked c "
+    "                                  WHERE r.genome_id = c.genome_id) "
+    "               THEN error(printf('region_coverage: no genome_id in regions matches any "
+    "genome_id in positions, so every region would return no row at all. regions has "
+    "genome_id like ''%s''; positions has genome_id like ''%s''. regions.genome_id is "
+    "matched against positions.genome_id DIRECTLY, so regions are contig-level. For "
+    "whole-genome coordinates over a multi-contig assembly, shift positions into the genome "
+    "frame first by adding each contig''s offset to start and stop -- relabelling contigs to "
+    "the genome WITHOUT offsets stacks their coordinate frames and undercounts', "
+    "                                (SELECT min(genome_id::VARCHAR) "
+    "                                 FROM query_table(regions)), "
+    "                                (SELECT min(genome_id::VARCHAR) FROM _rc_checked))) "
+    "             ELSE TRUE "
+    "           END AS ok "
+    "), "
+    "_rc_clipped AS ( "
+    "    SELECT c.sample_id, r.genome_id, r.region_id, r.region_start, r.region_stop, "
+    "           GREATEST(c.start, r.region_start) AS start, "
+    "           LEAST(c.stop, r.region_stop) AS stop "
+    "    FROM _rc_checked c "
+    "    CROSS JOIN _rc_domain d "
+    "    JOIN _rc_reg r ON c.genome_id = r.genome_id "
+    "                  AND c.start < r.region_stop AND c.stop > r.region_start "
+    // d.ok must be REFERENCED, not merely cross-joined: an unreferenced CTE is pruned and
+    // the guard would never run. It is always TRUE when it does not raise.
+    "    WHERE d.ok "
+    "), "
+    // Summed inside the aggregate, NOT by UNNESTing and re-grouping. The earlier version
+    // exploded compress_intervals() into one row per merged interval and then re-hashed the
+    // SAME five grouping keys to SUM them back up. The keys do not change across the UNNEST,
+    // so the second hash aggregate was pure overhead. genome_coverage keeps its UNNEST
+    // legitimately, because its grouping keys DO change across it for the contig->genome
+    // join; these do not.
+    //
+    // Measured on 1M real alignments x 500 regions -> 3000 groups, threads=1, results
+    // verified byte-identical (0 mismatches, EXCEPT both ways): the aggregate step alone
+    // 0.076 s -> 0.067 s, end to end 0.686 s -> 0.651 s. So this is a ~10% step win, not a
+    // step-change -- on that fixture compress_intervals merged nothing, so the UNNEST
+    // re-grouped 1M rows and DuckDB sums 1M rows into 3000 groups cheaply. The win scales
+    // with how little the intervals merge; correctness of the simplification does not.
+    //
+    // covered is computed in its own CTE so the aggregate is written -- and evaluated --
+    // once, rather than repeated in the proportion_covered expression.
+    "_rc_covered AS ( "
+    "    SELECT sample_id, genome_id, region_id, region_start, region_stop, "
+    "           list_sum(list_transform(compress_intervals(start, stop), "
+    "                                   lambda iv: iv.stop - iv.start))::BIGINT AS covered "
+    "    FROM _rc_clipped "
+    "    GROUP BY sample_id, genome_id, region_id, region_start, region_stop "
+    ") "
+    "SELECT sample_id, genome_id, region_id, region_start, region_stop, covered, "
+    "       (region_stop - region_start)::BIGINT AS region_length, "
+    "       covered::DOUBLE / (region_stop - region_start) AS proportion_covered "
+    "FROM _rc_covered;";
+
+// cumulative_coverage_curve(positions, roster, genome_length)
+//
+// The rank-ordered cumulative breadth curve of issue #214, wrapped so the caller does
+// not have to assemble the ranking, the zero-coverage backfill and the aggregate by
+// hand. micov's framing is long-exposure astrophotography: samples that individually
+// cover little of a genome stack into a detectable signal, which is what exposes a
+// region present in one sample group and absent from another.
+//
+// Parameters:
+// positions : a relation with columns sample_id (any type), start (BIGINT), stop
+//     (BIGINT), PRE-FILTERED to a single genome. There is no genome_id parameter
+//     because the curve is only meaningful against one target -- pooling genomes would
+//     rank samples by their summed breadth across unrelated references.
+// roster : a relation with columns sample_id (any type), group_id (any type). The
+//     cohort, and the grouping the curves are computed within. Required for the same
+//     reason region_presence requires one: a sample with no coverage of the target
+//     contributes no position rows, so without the roster it would silently vanish and
+//     the group would look smaller than it is.
+// genome_length : the breadth denominator. Scalar, must be positive.
+//
+// Returns: group_id, rank (INTEGER, 0-based), sample_id, covered (BIGINT),
+//     proportion_covered (DOUBLE)
+//
+// The ranking is a window function here, not a parameter of the aggregate: samples are
+// ordered by their OWN breadth ascending, ties broken by sample_id. The tiebreak is
+// load-bearing rather than tidy -- without it two equal-breadth samples swap ranks
+// between runs and thread counts, and micov's Monte Carlo null calls this ~100x per
+// genome per group, so an unstable curve would surface as noise in the null.
+//
+// Zero-coverage samples reach the aggregate as a row with NULL start/stop, which is how
+// cumulative_coverage is told "this rank exists and covers nothing". That comes free
+// from the roster LEFT JOIN, and it puts those samples at the low ranks, so the curve
+// correctly starts flat.
+//
+// The aggregate returns only (rank, covered); sample_id is reattached by joining the
+// curve back to the ranking on (group_id, rank), where it costs nothing. That is why
+// the aggregate needs no id-type mirroring in its bind, and why VARCHAR, BIGINT and
+// UUID sample identifiers all survive uncast.
+//
+// Conventions carried from region_presence/region_coverage, with one correction each
+// time a claim was actually measured rather than assumed:
+//
+// - Every coordinate is ::BIGINT-normalized before comparison, so VARCHAR coordinates
+//   from a BED or inferred CSV column are not compared as text.
+// - Internal CTE names are prefixed. An argument name is resolved with the macro's own
+//   WITH list in scope and binds to an internal CTE only when that CTE is declared
+//   BEFORE the query_table() call resolving the argument. Measured for this macro: the
+//   prefix on _cc_checked is load-bearing for the `roster` slot; the prefixes on
+//   _cc_own/_cc_ranked/_cc_feed/_cc_curve protect nothing, because those are declared
+//   after both query_table() calls. Declaration ORDER does more here than the prefix
+//   does -- see the note on _cc_len below.
+// - MATERIALIZED on _cc_checked is belt-and-braces, and the comment says so because the
+//   measurement did not support more. Unlike region_coverage, where a pruning join sits
+//   ahead of the guard and dropping the barrier lets a malformed row escape, here the
+//   guard fires either way and EXPLAIN shows a byte-identical plan with and without it:
+//   DuckDB already materializes a CTE referenced twice. It is kept for the explicit
+//   single-scan guarantee, which matters for a relation that can only be consumed once
+//   such as an Arrow RecordBatchReader, and for consistency with the sibling macros --
+//   not because it is what makes validation work.
+const std::string CUMULATIVE_COVERAGE_CURVE = // NOLINT
+    "CREATE OR REPLACE MACRO cumulative_coverage_curve(positions, roster, genome_length) AS TABLE "
+    "WITH _cc_checked AS MATERIALIZED ( "
+    "    SELECT sample_id, start::BIGINT AS start, stop::BIGINT AS stop "
+    "    FROM query_table(positions) "
+    // The `start < stop` clause is load-bearing and was missing in the first version.
+    // Without it an inverted interval reaches compress_intervals in _cc_own, which
+    // SWAPS it -- so a sample with transposed coordinates was ranked as the best-covered
+    // in its group while the aggregate (which drops inverted intervals) credited it with
+    // nothing. Two conventions in one pipeline: the ranking said 90 bases, the curve said
+    // 0, and both the curve shape and the per-rank sample_id were wrong. Filtering here
+    // makes both halves agree, and the _cc_feed LEFT JOIN then supplies the NULL row that
+    // registers the sample as zero-coverage, so it keeps its place at rank 0.
+    //
+    // A half-NULL interval raises rather than being swept into the zero-coverage case:
+    // both-NULL is a sample with no coverage, but exactly one NULL is a broken join or a
+    // blank field, and treating it as "covers nothing" would silently discard real
+    // coverage.
+    "    WHERE CASE "
+    "            WHEN sample_id IS NULL "
+    "              THEN error('cumulative_coverage_curve: NULL values in sample_id column of "
+    "positions (coverage that cannot be attributed to a sample would silently lower "
+    "somebody''s breadth and reorder the curve)') "
+    "            WHEN (start IS NULL) <> (stop IS NULL) "
+    "              THEN error(printf('cumulative_coverage_curve: start and stop must both be "
+    "NULL or both be present (sample_id ''%s'' has start=%s, stop=%s). One NULL is a broken "
+    "join or a blank field, not a zero-coverage sample.', "
+    "                                COALESCE(sample_id::VARCHAR, 'NULL'), "
+    "                                COALESCE(start::VARCHAR, 'NULL'), "
+    "                                COALESCE(stop::VARCHAR, 'NULL'))) "
+    "            WHEN start IS NULL THEN FALSE "
+    "            ELSE start::BIGINT < stop::BIGINT "
+    "          END "
+    "), "
+    // The DISTINCT bounds the join fan-out for a roster consolidated from shards; it is
+    // NOT required for correctness, because _cc_own's GROUP BY absorbs duplicate roster
+    // rows either way (measured). Same situation as the DISTINCT in region_coverage.
+    "_cc_roster AS ( "
+    "    SELECT DISTINCT sample_id, group_id FROM query_table(roster) "
+    "    WHERE CASE "
+    "            WHEN sample_id IS NULL OR group_id IS NULL "
+    "              THEN error('cumulative_coverage_curve: NULL values in sample_id or group_id "
+    "column of roster (a cohort member that belongs to no group cannot be ranked)') "
+    "            ELSE TRUE "
+    "          END "
+    "), "
+    // Each sample's OWN breadth, which is what the ranking sorts on. LEFT JOIN so a
+    // roster sample with no coverage survives with 0 rather than disappearing;
+    // compress_intervals returns NULL for an all-NULL group, hence the COALESCE.
+    "_cc_own AS ( "
+    "    SELECT s.group_id, s.sample_id, "
+    "           COALESCE(list_sum(list_transform( "
+    "               compress_intervals(c.start, c.stop), lambda iv: iv.stop - iv.start)), 0) "
+    "             AS own_covered "
+    "    FROM _cc_roster s "
+    "    LEFT JOIN _cc_checked c ON c.sample_id = s.sample_id "
+    "    GROUP BY s.group_id, s.sample_id "
+    "), "
+    "_cc_ranked AS ( "
+    "    SELECT group_id, sample_id, "
+    "           (ROW_NUMBER() OVER (PARTITION BY group_id "
+    "                               ORDER BY own_covered, sample_id) - 1)::INTEGER AS rank "
+    "    FROM _cc_own "
+    "), "
+    // One row per (rank, interval); a sample with no intervals yields exactly one row
+    // with NULL start/stop, which registers the rank with zero coverage. That is also
+    // what guarantees the aggregate sees a contiguous 0..n-1 rank set.
+    "_cc_feed AS ( "
+    "    SELECT k.group_id, k.rank, c.start, c.stop "
+    "    FROM _cc_ranked k "
+    "    LEFT JOIN _cc_checked c ON c.sample_id = k.sample_id "
+    "), "
+    "_cc_curve AS ( "
+    "    SELECT group_id, UNNEST(cumulative_coverage(rank, start, stop)) AS pt "
+    "    FROM _cc_feed "
+    "    GROUP BY group_id "
+    "), "
+    // Declared LAST on purpose. An argument name is resolved with the macro's own WITH
+    // list in scope, and it binds to an internal CTE only if that CTE was declared
+    // BEFORE the query_table() call resolving the argument. Sitting first, this CTE
+    // shadowed BOTH arguments; sitting last it shadows neither, which leaves _cc_checked
+    // as the only name a caller relation can collide with (and only in the roster slot).
+    // Verified by passing caller relations named after each internal CTE, in both slots,
+    // as base tables and as CTEs.
+    // Every test is against the DOUBLE value, before any narrowing. Casting to BIGINT
+    // first rounds, so 1.6 became 2 and silently divided by the wrong denominator, while
+    // 0.4 was rejected as "not positive" -- which it is. A genome length is a count of
+    // bases, so a fractional value is a mistake worth naming rather than rounding.
+    "_cc_len AS ( "
+    "    SELECT CASE "
+    "             WHEN genome_length IS NULL "
+    "               THEN error('cumulative_coverage_curve: genome_length must be positive "
+    "(got NULL)') "
+    "             WHEN genome_length::DOUBLE <> FLOOR(genome_length::DOUBLE) "
+    "               THEN error(printf('cumulative_coverage_curve: genome_length must be a whole "
+    "number of bases (got %s)', genome_length::VARCHAR)) "
+    "             WHEN genome_length::DOUBLE < 1 "
+    "               THEN error(printf('cumulative_coverage_curve: genome_length must be positive "
+    "(got %s)', genome_length::VARCHAR)) "
+    "             ELSE genome_length::BIGINT "
+    "           END AS genome_length "
+    ") "
+    // covered > genome_length is impossible for a correct denominator -- the union of
+    // intervals on a genome cannot exceed its length -- so it means genome_length is
+    // wrong (a contig length where a genome length belongs, or a mismatched reference
+    // build) or positions carries coordinates off the end. Unclamped this returned
+    // proportion_covered = 5.0 with no signal, which is worse than useless because the
+    // docs teach that a proportion above 1.0 is the symptom of the summing mistake this
+    // function exists to avoid.
+    "SELECT v.group_id, v.pt.rank AS rank, k.sample_id, "
+    "       v.pt.covered AS covered, "
+    "       CASE WHEN v.pt.covered > l.genome_length "
+    "              THEN error(printf('cumulative_coverage_curve: covered (%s) exceeds "
+    "genome_length (%s) at rank %s -- genome_length is too small for these positions "
+    "(a contig length used where a genome length belongs, or a mismatched reference)', "
+    "                                v.pt.covered::VARCHAR, l.genome_length::VARCHAR, "
+    "                                v.pt.rank::VARCHAR)) "
+    "            ELSE v.pt.covered::DOUBLE / l.genome_length END AS proportion_covered "
+    "FROM _cc_curve v "
+    "JOIN _cc_ranked k ON k.group_id = v.group_id AND k.rank = v.pt.rank "
+    "CROSS JOIN _cc_len l;";
+
+// circular_query_coverage(alignments, reference_lengths)
+//
+// How much of each read is explained by each reference, pooling every alignment record
+// the aligner split the read into.
+//
+// cigar_query_coverage answers a per-row question -- "how much of the read does THIS
+// record explain" -- and cannot see sibling records. A read that spans the origin of a
+// circular reference held as a linearised contig is emitted as two or more records, so
+// no single row reports more than about half the read and a query-coverage floor
+// discards it silently. That is a systematic loss localised at the origin of every
+// assembled circular genome and plasmid.
+//
+// Coverage here is the UNION of the fragments' query footprints, not their sum. Summing
+// overshoots: a junction read with a couple of bases deleted across the origin produces
+// fragments that overlap by a base or two. The union is bounded by 1.0 for free, is
+// unaffected by a read wrapping the reference more than once, and on a group of one
+// fragment equals cigar_query_coverage exactly -- so a caller can use this
+// unconditionally rather than branching on whether a reference is circular.
+//
+// Grouping is (read_id, read1 bit, reference). The read1 bit is load-bearing: R1 and R2
+// share a read_id but are different molecules, and pooling them would manufacture
+// coverage. Same reason woltka_ogu partitions on alignment_is_read1.
+//
+// Secondary records are excluded -- they re-place query bases a sibling already covers,
+// so they cannot raise a union but would inflate n_fragments. Unmapped records and
+// references absent from reference_lengths produce no rows.
+//
+// A read explained by two references yields one row per reference, each reporting how much
+// of the read that reference explains. That is the question being answered, but it means the
+// rows do not partition the read: summing coverage across references counts it more than
+// once. Recruitment gates one reference at a time and is unaffected; abundance is not, and
+// wants woltka_ogu, which distributes multi-mapped reads fractionally.
+//
+// Parameters:
+// alignments : a relation with columns: read_id, flags, reference, position (BIGINT),
+//     stop_position (BIGINT), cigar (VARCHAR)
+// reference_lengths : a relation with columns: reference, length (BIGINT),
+//     is_circular (BOOLEAN). read_alignment_header() supplies the first two; is_circular
+//     has to be added, because circularity is not recorded in an alignment and cannot be
+//     inferred from one. A reference left NULL is rejected rather than assumed circular.
+// coverage_type : 'aligned' (default) counts M/=/X; 'mapped' also counts insertions.
+//     Same vocabulary as cigar_query_coverage and cigar_query_intervals, so a pipeline
+//     already filtering on cigar_query_coverage(cigar, 'mapped') can migrate unchanged.
+//
+// Returns: read_id, is_read1 (BOOLEAN), reference, coverage (DOUBLE), identity (DOUBLE),
+//     query_length (BIGINT), n_fragments (BIGINT), mixed_strand (BOOLEAN),
+//     max_ref_gap (BIGINT)
+//
+// mixed_strand and max_ref_gap are topology evidence, REPORTED not enforced: two fragments
+// of one read can reach coverage 1.0 and identity 1.0 while not being an origin span at all
+// (inverted repeat, chimera, inversion, misassembly), and identity does not catch those --
+// a chimera the aligner splits scores 1.0 on every fragment. max_ref_gap is the reference
+// gap modulo the reference length between query-adjacent same-strand fragments; a genuine
+// wrap closes to 0, because linearising a circle is the only reason the aligner could not
+// chain the fragments itself. Testing abutment against the contig ends instead would be
+// wrong twice over -- see the docs.
+//
+// identity is NULL for legacy M CIGARs. That is a trap worth knowing before gating on it;
+// the consequence is spelled out at the identity expression below and in the docs.
+//
+// The user-facing reference -- worked examples, the recommended gate, the measured gap
+// separation, and the full list of preconditions -- lives in
+// docs/alignment_analysis.md#circular-query-coverage. Keep behavioural changes in step with
+// it; the comments from here down explain the implementation, not the contract.
+const std::string CIRCULAR_QUERY_COVERAGE = // NOLINT
+    "CREATE OR REPLACE MACRO circular_query_coverage(alignments, reference_lengths, "
+    "                                                coverage_type := 'aligned') AS TABLE "
+    // One row per reference, validated. Collapsing first matters because the documented
+    // way to build this relation -- read_alignment_header() over a glob, or a UNION ALL of
+    // headers -- yields one row per contig PER FILE. Joining those duplicates would double
+    // n_fragments and fabricate a nonzero max_ref_gap for an ordinary non-wrapping read,
+    // dropping it from the very gate below. A length that is missing or non-positive is
+    // rejected rather than tolerated: `x % 0` and `x % NULL` are both NULL in DuckDB, which
+    // would silently make max_ref_gap NULL, and COALESCE(max_ref_gap, 0) then reads
+    // "unmeasured" as "perfectly abutting" -- turning the one column that distinguishes an
+    // origin span from a chimera into a false accept.
+    "WITH ref_len AS ( "
+    "    SELECT "
+    "        reference, "
+    "        CASE WHEN MIN(length) <> MAX(length) "
+    "             THEN error('circular_query_coverage: reference ' || reference::VARCHAR "
+    "                        || ' has more than one recorded length in reference_lengths') "
+    "             WHEN MAX(length) IS NULL OR MAX(length) <= 0 "
+    "             THEN error('circular_query_coverage: reference ' || reference::VARCHAR "
+    "                        || ' has a missing or non-positive length; a reference length is ' "
+    "                        || 'required to recognise wrapping') "
+    "             ELSE MAX(length) END AS ref_length, "
+    // Circularity is the premise the whole gap measure rests on and it cannot be inferred
+    // from an alignment: the same two fragments, one ending where the contig ends and the
+    // next starting at its origin, are a wrap on a circular reference and an end-join on a
+    // linear one. Assuming circular is what makes an adapter chimera or an assembly-graph
+    // artifact look like a perfect origin span, and the assumption would be invisible at the
+    // call site, so an undeclared reference is rejected rather than guessed at.
+    // BOOL_OR <> BOOL_AND is "both values occur", the same idiom mixed_strand uses; both
+    // ignore NULLs, so an all-NULL group falls through to the second branch.
+    "        CASE WHEN BOOL_OR(is_circular) <> BOOL_AND(is_circular) "
+    "             THEN error('circular_query_coverage: reference ' || reference::VARCHAR "
+    "                        || ' is recorded as both circular and linear in reference_lengths') "
+    "             WHEN BOOL_AND(is_circular) IS NULL "
+    "             THEN error('circular_query_coverage: reference ' || reference::VARCHAR "
+    "                        || ' does not say whether it is circular; set is_circular in ' "
+    "                        || 'reference_lengths, because a reference gap that wraps is only ' "
+    "                        || 'evidence of an origin span if the reference actually is circular') "
+    "             ELSE BOOL_AND(is_circular) END AS is_circular "
+    "    FROM query_table(reference_lengths) "
+    "    WHERE reference IS NOT NULL "
+    "    GROUP BY reference "
+    "), "
+    "frag AS ( "
+    "    SELECT "
+    "        a.read_id AS read_id, "
+    "        a.reference AS reference, "
+    "        r.ref_length AS ref_length, "
+    "        r.is_circular AS is_circular, "
+    // flags is cast because alignment relations that have been through Parquet widen it
+    // to BIGINT, and every alignment_is_* function is USMALLINT-only.
+    "        alignment_is_read1(a.flags::USMALLINT) AS is_read1, "
+    "        alignment_is_reverse(a.flags::USMALLINT) AS is_reverse, "
+    // Carried as-is: every consumer takes a difference of these two, and the window below
+    // only orders by them, so converting to 0-based would cancel out.
+    "        a.position AS ref_start, "
+    "        a.stop_position AS ref_stop, "
+    "        a.cigar AS cigar, "
+    "        cigar_query_length(a.cigar, true) AS query_length, "
+    "        cigar_query_intervals(a.cigar, a.flags::USMALLINT, coverage_type) AS intervals "
+    "    FROM query_table(alignments) a "
+    "    JOIN ref_len r "
+    "      ON a.reference = r.reference "
+    "    WHERE NOT alignment_is_unmapped(a.flags::USMALLINT) "
+    "      AND NOT alignment_is_secondary(a.flags::USMALLINT) "
+    // A record whose read_id is NULL cannot be grouped: read_alignments maps the '*' QNAME
+    // sentinel to NULL, and pooling every unnamed record together would merge unrelated
+    // molecules. Excluded explicitly so it is a stated rule rather than an accident of
+    // NULL never matching in the final equi-join.
+    "      AND a.read_id IS NOT NULL "
+    // A record with no reference coordinates cannot be placed, so it cannot take part in the
+    // reference-contiguity test. Leaving it in is worse than dropping it: it would count
+    // toward n_fragments and coverage while its gap came back NULL, and MAX() ignores NULLs,
+    // so a chimera whose fragments sit 148 kb apart would report max_ref_gap NULL and the gate
+    // documented above -- COALESCE(max_ref_gap, 0) <= 100 -- would read "unmeasured" as
+    // "perfectly abutting" and admit it. That is the same false accept the ref_len validation
+    // prevents, arriving from the alignments side. Dropping the record instead surfaces the
+    // problem where a caller will see it: the read's coverage falls by whatever that record
+    // would have explained, so it fails a coverage floor rather than passing a gap check it
+    // was never measured against. Well-formed mapped records always carry both columns, so
+    // this fires only on malformed input.
+    "      AND a.position IS NOT NULL "
+    "      AND a.stop_position IS NOT NULL "
+    "), "
+    // A mapped record that covers no query positions (a clip-only CIGAR) would
+    // contribute to n_fragments while contributing nothing to the union.
+    "covering AS ( "
+    "    SELECT * FROM frag WHERE len(intervals) > 0 "
+    "), "
+    // Fragment granularity. Ordered by where each fragment starts on the READ, which is
+    // not record order -- the aligner is free to make any fragment the primary. On a
+    // reverse-strand fragment travel along the read runs backwards along the reference,
+    // so the successor's reference END is what the current fragment's START must meet.
+    // A strand change is not a gap to measure but a different event entirely, so it
+    // yields NULL here and is reported through mixed_strand instead.
+    "chain AS ( "
+    "    SELECT "
+    "        read_id, is_read1, reference, query_length, is_reverse, "
+    "        CASE WHEN LEAD(is_reverse) OVER w <> is_reverse THEN NULL "
+    "             WHEN is_reverse THEN ref_start - LEAD(ref_stop) OVER w "
+    "             ELSE LEAD(ref_start) OVER w - ref_stop END AS ref_delta, "
+    // On a circular reference, reduce the signed delta into [0, ref_length) and take its
+    // distance to zero, which is the absolute signed representative without forming it. A
+    // delta of -ref_length -- one fragment ending where the contig ends and the next starting
+    // at its origin -- lands on 0, which is what makes wrapping indistinguishable from
+    // contiguity. On a linear reference that identification is exactly what must not happen,
+    // so the plain distance is reported and an end-join shows up as the whole contig.
+    "        (ref_delta % ref_length + ref_length) % ref_length AS delta_mod, "
+    "        CASE WHEN is_circular THEN LEAST(delta_mod, ref_length - delta_mod) "
+    "             ELSE abs(ref_delta) END AS ref_gap "
+    "    FROM covering "
+    // ref_start/ref_stop/is_reverse are tie-breakers, not decoration: two same-strand
+    // fragments of one read can begin at the same query offset (a tandem-repeat
+    // supplementary, or a duplicated record from merged BAMs). Ordering on the query start
+    // alone leaves LEAD to pick an arbitrary peer, so max_ref_gap would vary with physical
+    // scan order and the gate below would admit or reject the same read depending on it.
+    "    WINDOW w AS (PARTITION BY read_id, is_read1, reference "
+    "                 ORDER BY intervals[1].start, ref_start, ref_stop, is_reverse) "
+    "), "
+    // Union of the fragments' read-axis footprints, via the same compress_intervals
+    // aggregate genome_coverage uses on the reference axis -- one definition of "union of
+    // half-open intervals" for the whole extension, rather than a second one in SQL that
+    // could drift from IntervalCompressor. A hand-rolled window sweep was tried here to
+    // avoid per-group aggregate state; benchmarked at 500k and 2M read groups the
+    // aggregate is equal or faster (0.224s vs 0.277s at 2M) with identical results, so the
+    // second implementation bought nothing.
+    "covered AS ( "
+    "    SELECT read_id, is_read1, reference, SUM(ci.stop - ci.start) AS covered_bases "
+    "    FROM ( "
+    "        SELECT read_id, is_read1, reference, "
+    "               UNNEST(compress_intervals(x.start, x.stop)) AS ci "
+    "        FROM (SELECT read_id, is_read1, reference, UNNEST(intervals) AS x FROM covering) "
+    "        GROUP BY read_id, is_read1, reference "
+    "    ) "
+    "    GROUP BY read_id, is_read1, reference "
+    "), "
+    // Identity is aggregated straight off `covering` rather than alongside the other evidence
+    // columns, which read from `chain`. Everything selected in `chain` travels through the
+    // window operator's sort payload -- it does not project down to the columns the window
+    // functions actually use -- so leaving the CIGAR there copies every record's string
+    // through the sort and back for the sake of an aggregate that needs no ordering at all.
+    // Measured over 2M records in 1M read groups, hoisting it cuts this section from 0.37s to
+    // 0.13s wall and drops the sort's system time by an order of magnitude. It cannot ride
+    // along in `covered` either: that CTE unnests intervals, so a fragment contributing two
+    // intervals would have its CIGAR counted twice.
+    "pooled_identity AS ( "
+    "    SELECT read_id, is_read1, reference, "
+    // sum(=) / sum(alignment columns) over the fragments, which on a single fragment is
+    // exactly cigar_sequence_identity of that fragment. Note it does NOT charge the junction
+    // as a gap -- the fragments are one molecule, and the reference discontinuity between
+    // them is what max_ref_gap is for.
+    //
+    // NULL for legacy M CIGARs, where identity is not recoverable from the CIGAR at all,
+    // matching cigar_sequence_identity's own behaviour on the same input, and NULL when the
+    // fragments disagree about the encoding. Raising instead was tried and rejected: making
+    // the raise conditional on the column being selected depends on projection pruning, and
+    // pruning is an optimisation -- with the optimiser disabled the expression is evaluated
+    // and the error fires even for a query that only asked for coverage. Semantics must not
+    // vary with the optimiser, so this stays NULL and the precondition is documented in the
+    // header comment instead.
+    "           cigar_pooled_identity(cigar) AS identity "
+    "    FROM covering "
+    "    GROUP BY read_id, is_read1, reference "
+    "), "
+    "evidence AS ( "
+    "    SELECT "
+    "        read_id, is_read1, reference, "
+    // Every record of one read reports the same full query length, because clipping is
+    // what the aligner uses to account for the bases a fragment does not align.
+    // Disagreement means the relation grouped rows from more than one read under a
+    // single read_id, which is a caller error rather than a coverage figure to guess at.
+    // MIN <> MAX rather than COUNT(DISTINCT ...): a distinct aggregate builds a second
+    // hash table keyed on (group, value) over every row, which over millions of read-level
+    // groups measured ~30% of the whole macro's CPU. Both ignore NULLs, so "more than one
+    // distinct non-null value" is exactly MIN <> MAX, and an all-NULL group falls through
+    // to MAX (NULL) either way.
+    "        CASE WHEN MIN(query_length) <> MAX(query_length) "
+    "             THEN error('circular_query_coverage: fragments under read_id ' "
+    "                        || read_id::VARCHAR || ' report different query lengths; the ' "
+    "                        || 'alignments relation groups rows from more than one read') "
+    "             ELSE MAX(query_length) END AS query_length, "
+    "        COUNT(*) AS n_fragments, "
+    // "some query-adjacent pair differs in strand" is just "both strand values occur in the
+    // group" -- a transition has to happen somewhere -- so this needs no ordering and no
+    // window at all.
+    "        BOOL_OR(is_reverse) <> BOOL_AND(is_reverse) AS mixed_strand, "
+    "        MAX(ref_gap) AS max_ref_gap "
+    "    FROM chain "
+    "    GROUP BY read_id, is_read1, reference "
+    ") "
+    "SELECT "
+    "    e.read_id, "
+    "    e.is_read1, "
+    "    e.reference, "
+    "    c.covered_bases::DOUBLE / e.query_length AS coverage, "
+    "    p.identity, "
+    "    e.query_length, "
+    "    e.n_fragments, "
+    "    e.mixed_strand, "
+    "    e.max_ref_gap "
+    "FROM evidence e "
+    "JOIN covered c USING (read_id, is_read1, reference) "
+    "JOIN pooled_identity p USING (read_id, is_read1, reference);";
 
 // infer_trim(original_reads, qcd_reads)
 //
@@ -1077,6 +2279,17 @@ public:
 		register_macro(PARSE_GFF_ATTRIBUTES, "parse_gff_attributes");
 		register_macro(READ_GFF, "read_gff");
 		register_macro(GENOME_COVERAGE, "genome_coverage");
+		register_macro(GENOME_COVERAGE_PER_SAMPLE, "genome_coverage_per_sample");
+		// _miint_bin_index must be registered before bin_of and interval_bins (they
+		// delegate to it), matching the mzml_x_offset_ntuple ordering below.
+		register_macro(MIINT_BIN_INDEX, "_miint_bin_index");
+		register_macro(BIN_OF, "bin_of");
+		register_macro(BIN_START, "bin_start");
+		register_macro(INTERVAL_BINS, "interval_bins");
+		register_macro(REGION_PRESENCE, "region_presence");
+		register_macro(REGION_COVERAGE, "region_coverage");
+		register_macro(CUMULATIVE_COVERAGE_CURVE, "cumulative_coverage_curve");
+		register_macro(CIRCULAR_QUERY_COVERAGE, "circular_query_coverage");
 		register_macro(INFER_TRIM, "infer_trim");
 
 		register_macro(READ_JPLACE, "read_jplace");

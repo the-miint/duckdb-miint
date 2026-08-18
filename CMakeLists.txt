@@ -1282,6 +1282,10 @@ set(EXTENSION_SOURCES
     src/qc_algorithms.cpp
     src/IntervalCompressor.cpp
     src/compress_intervals.cpp
+    src/CumulativeCoverageAccumulator.cpp
+    src/cumulative_coverage.cpp
+    src/KsTwoSample.cpp
+    src/ks_2samp.cpp
     src/CoverageDepthCalculator.cpp
     src/compute_coverage_depth.cpp
     src/AlignmentSlicer.cpp
@@ -1382,6 +1386,7 @@ set(EXTENSION_SOURCES
     src/rype_classify.cpp
     src/rype_extract.cpp
     src/rype_index_create.cpp
+    src/rype_input_stream.cpp
     src/MsBinaryDecoder.cpp
     src/MzMLReader.cpp
     src/read_mzml.cpp
@@ -1405,6 +1410,7 @@ set(EXTENSION_SOURCES
     src/simulate_resemblance.cpp
     src/simulate_resemblance_function.cpp
     src/community_distances.cpp
+    src/absquant.cpp
     src/cluster_kmeans.cpp
     src/cluster_upgma.cpp
     src/pick_anchors.cpp
@@ -1415,6 +1421,10 @@ set(EXTENSION_SOURCES
     # libssu or libskbb.
     src/unifrac_function_common.cpp
     src/community_distances_function.cpp
+    src/absquant_readers.cpp
+    src/absquant_function.cpp
+    src/absquant_cell_counts_function.cpp
+    src/absquant_orf_copies_function.cpp
     src/mmvec_fit_function.cpp
     src/mmvec_derived_functions.cpp
     src/cluster_kmeans_function.cpp
@@ -1931,6 +1941,10 @@ set(TEST_SOURCES
     test/cpp/test_AlignmentFunctions.cpp
     src/IntervalCompressor.cpp
     test/cpp/test_IntervalCompressor.cpp
+    src/CumulativeCoverageAccumulator.cpp
+    test/cpp/test_CumulativeCoverageAccumulator.cpp
+    src/KsTwoSample.cpp
+    test/cpp/test_KsTwoSample.cpp
     src/CoverageDepthCalculator.cpp
     test/cpp/test_CoverageDepthCalculator.cpp
     src/AlignmentSlicer.cpp
@@ -1951,6 +1965,8 @@ set(TEST_SOURCES
     test/cpp/test_SimulateCluster.cpp
     src/community_distances.cpp
     test/cpp/test_CommunityDistances.cpp
+    src/absquant.cpp
+    test/cpp/test_AbsQuant.cpp
     src/mmvec.cpp
     src/mmvec_relation.cpp
     test/cpp/test_MMvec.cpp

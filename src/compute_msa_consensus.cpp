@@ -155,7 +155,6 @@ struct ConsensusOperation {
 		state_vector.ToUnifiedFormat(count, state_data);
 		auto states = UnifiedVectorFormat::GetData<ConsensusState *>(state_data);
 
-		auto &result_validity = FlatVector::Validity(result);
 		auto &entries = StructVector::GetEntries(result);
 		auto &seq_vec = *entries[0];
 		auto &qual_list_vec = *entries[1];
@@ -166,7 +165,13 @@ struct ConsensusOperation {
 			auto &state = *states[si];
 
 			if (state.Empty()) {
-				result_validity.SetInvalid(i + offset);
+				// FlatVector::SetNull, not Validity().SetInvalid: this returns a STRUCT and
+				// struct_extract reads a child without applying the parent's validity, so
+				// marking only the struct left `(compute_msa_consensus(...)).seq IS NULL`
+				// reading false on an empty group. The list_entry_t below was already being
+				// zeroed by hand -- evidence that patching one child is not the same as
+				// marking the row null; SetNull recurses into every child.
+				FlatVector::SetNull(result, i + offset, true);
 				qual_list_entries[i + offset].offset = ListVector::GetListSize(qual_list_vec);
 				qual_list_entries[i + offset].length = 0;
 				continue;

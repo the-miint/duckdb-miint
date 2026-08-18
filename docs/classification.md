@@ -78,7 +78,7 @@ SELECT * FROM rype_classify('bacteria.ryxdi', 'reads');
 
 ### rype_classify
 
-`rype_classify(index_path, sequence_table, [id_column='read_id'], [threshold=0.1], [negative_index=path])`
+`rype_classify(index_path, sequence_table, [id_column='read_id'], [threshold=0.1], [negative_index=path], [max_memory=0], [debug=false])`
 
 Classify sequences against a RYpe index, returning bucket assignments with confidence scores.
 
@@ -88,6 +88,8 @@ Classify sequences against a RYpe index, returning bucket assignments with confi
 - `id_column` (VARCHAR, optional, default `'read_id'`): Name of the identifier column in the sequence table
 - `threshold` (DOUBLE, optional, default 0.1): Minimum score threshold (0.0-1.0). Only matches with score >= threshold are returned
 - `negative_index` (VARCHAR, optional): Path to a second RYpe index used as a negative filter
+- `max_memory` (BIGINT, optional, default 0): Byte budget for RYpe's internal batch sizing (how many reads it accumulates before each pass over the index). 0 derives one — see [Memory budget](#memory-budget) below
+- `debug` (BOOLEAN, optional, default false): Report the chosen batch size and the memory estimates behind it through `miint_warnings()` — see [Memory budget](#memory-budget)
 
 **Output schema:**
 - `read_id` (VARCHAR): Sequence identifier from the input table
@@ -98,7 +100,7 @@ Classify sequences against a RYpe index, returning bucket assignments with confi
 **Behavior:**
 - A sequence can match multiple buckets (one row per match above threshold)
 - Sequences with no matches above the threshold produce no output rows
-- Paired-end handling follows the **contents** of `sequence2`, not merely the presence of the column: the input is treated as paired only if at least one row has a non-NULL `sequence2`. This matters because `read_fastx` always emits a `sequence2` column, so single-end reads loaded the obvious way carry an all-NULL one — projecting it costs nothing, and an all-NULL `sequence2` is sized and classified exactly as if the column were absent
+- Paired-end handling follows the **contents** of `sequence2`, not merely the presence of the column. This matters because `read_fastx` always emits a `sequence2` column, so single-end reads loaded the obvious way carry an all-NULL one; treating that as paired-end would halve the batch size and double the number of index passes. The check samples the first chunk of the single pass over your relation rather than scanning it separately — the relation is read exactly once, which it must be, since a view or a registered Arrow relation need not return the same rows twice. A relation that only becomes paired well after its first few thousand rows is therefore sized as single-end; set `max_memory` if that under-budgets
 - Works with both tables and views
 
 **Examples:**
@@ -136,7 +138,7 @@ SELECT * FROM rype_classify('my_index.ryxdi', 'paired');
 
 ### rype_log_ratio
 
-`rype_log_ratio(numerator_path, denominator_path, sequence_table, [id_column='read_id'], [skip_threshold=0.5])`
+`rype_log_ratio(numerator_path, denominator_path, sequence_table, [id_column='read_id'], [skip_threshold=0.5], [max_memory=0], [debug=false])`
 
 Compute the log-ratio of classification scores between two single-bucket RYpe indices. For each input sequence, this returns `log10(numerator_score / denominator_score)`, indicating which index the sequence is more similar to.
 
@@ -146,6 +148,8 @@ Compute the log-ratio of classification scores between two single-bucket RYpe in
 - `sequence_table` (VARCHAR): Name of a DuckDB table or view containing sequences. Must have columns: identifier column + `sequence1` + optional `sequence2`
 - `id_column` (VARCHAR, optional, default `'read_id'`): Name of the identifier column in the sequence table
 - `skip_threshold` (DOUBLE, optional, default 0.5): Numerator score threshold for fast-path. Reads with numerator score >= this value skip denominator classification and get `+inf` log_ratio immediately. Set to 0 or negative to disable the fast-path
+- `max_memory` (BIGINT, optional, default 0): Byte budget for RYpe's internal batch sizing (how many reads it accumulates before each pass over the index). 0 derives one — see [Memory budget](#memory-budget) below
+- `debug` (BOOLEAN, optional, default false): Report the chosen batch size and the memory estimates behind it through `miint_warnings()` — see [Memory budget](#memory-budget)
 
 **Output schema:**
 - `read_id` (VARCHAR): Sequence identifier from the input table
@@ -155,7 +159,7 @@ Compute the log-ratio of classification scores between two single-bucket RYpe in
 **Behavior:**
 - Both indices must be single-bucket indices (multi-bucket indices are rejected)
 - Returns exactly one row per input sequence
-- Paired-end handling follows the **contents** of `sequence2`, not merely the presence of the column: the input is treated as paired only if at least one row has a non-NULL `sequence2`. This matters because `read_fastx` always emits a `sequence2` column, so single-end reads loaded the obvious way carry an all-NULL one — projecting it costs nothing, and an all-NULL `sequence2` is sized and classified exactly as if the column were absent
+- Paired-end handling follows the **contents** of `sequence2`, not merely the presence of the column. This matters because `read_fastx` always emits a `sequence2` column, so single-end reads loaded the obvious way carry an all-NULL one; treating that as paired-end would halve the batch size and double the number of index passes. The check samples the first chunk of the single pass over your relation rather than scanning it separately — the relation is read exactly once, which it must be, since a view or a registered Arrow relation need not return the same rows twice. A relation that only becomes paired well after its first few thousand rows is therefore sized as single-end; set `max_memory` if that under-budgets
 - Works with both tables and views
 - Swapping numerator and denominator negates the log_ratio (symmetry property)
 
@@ -199,7 +203,7 @@ SELECT * FROM rype_log_ratio('host.ryxdi', 'microbe.ryxdi', 'seqs', id_column :=
 
 ### rype_extract_minimizer_set
 
-`rype_extract_minimizer_set(sequence_table, k, w, [salt=6148914691236517205], [id_column='read_id'])`
+`rype_extract_minimizer_set(sequence_table, k, w, [salt=6148914691236517205], [id_column='read_id'], [max_memory=0], [debug=false])`
 
 Extract deduplicated minimizer hash sets from sequences for both forward and reverse complement strands.
 
@@ -209,6 +213,8 @@ Extract deduplicated minimizer hash sets from sequences for both forward and rev
 - `w` (BIGINT): Window size for minimizer selection. Must be > 0
 - `salt` (UBIGINT, optional, default 6148914691236517205): Hash salt for reproducible but varied minimizer selection
 - `id_column` (VARCHAR, optional, default `'read_id'`): Name of the identifier column
+- `max_memory` (BIGINT, optional, default 0): Byte budget for RYpe's internal batch sizing (how many reads it accumulates before each pass over the index). 0 derives one — see [Memory budget](#memory-budget) below
+- `debug` (BOOLEAN, optional, default false): Report the chosen batch size and the memory estimates behind it through `miint_warnings()` — see [Memory budget](#memory-budget)
 
 **Output schema:**
 - `read_id` (VARCHAR): Sequence identifier from the input table
@@ -252,7 +258,7 @@ WHERE a.read_id < b.read_id;
 
 ### rype_extract_strand_minimizers
 
-`rype_extract_strand_minimizers(sequence_table, k, w, [salt=6148914691236517205], [id_column='read_id'])`
+`rype_extract_strand_minimizers(sequence_table, k, w, [salt=6148914691236517205], [id_column='read_id'], [max_memory=0], [debug=false])`
 
 Extract minimizer hashes with their positions for both forward and reverse complement strands. Unlike `rype_extract_minimizer_set`, this preserves positional information and may contain duplicate hashes at different positions.
 
@@ -262,6 +268,8 @@ Extract minimizer hashes with their positions for both forward and reverse compl
 - `w` (BIGINT): Window size for minimizer selection. Must be > 0
 - `salt` (UBIGINT, optional, default 6148914691236517205): Hash salt for reproducible but varied minimizer selection
 - `id_column` (VARCHAR, optional, default `'read_id'`): Name of the identifier column
+- `max_memory` (BIGINT, optional, default 0): Byte budget for RYpe's internal batch sizing (how many reads it accumulates before each pass over the index). 0 derives one — see [Memory budget](#memory-budget) below
+- `debug` (BOOLEAN, optional, default false): Report the chosen batch size and the memory estimates behind it through `miint_warnings()` — see [Memory budget](#memory-budget)
 
 **Output schema:**
 - `read_id` (VARCHAR): Sequence identifier from the input table
@@ -298,3 +306,99 @@ ORDER BY read_id, pos;
 - `sequence_table` does not exist, or is missing the identifier column or `sequence1`
 - `k` not in {16, 32, 64}
 - `w` not greater than 0
+
+---
+
+## Memory budget
+
+`rype_classify`, `rype_log_ratio`, `rype_extract_minimizer_set` and
+`rype_extract_strand_minimizers` all accept `max_memory` (BIGINT, bytes,
+default 0), which bounds how many reads RYpe accumulates before each pass over
+the index. That accumulation is the dominant memory term on a large corpus, so
+this is the knob to reach for if a classify is being killed.
+
+**What 0 does.** RYpe's own auto-detection resolves to the cgroups or SLURM
+limit for the whole process, which inside DuckDB double-counts whatever DuckDB
+is already holding — both would size themselves against the same allocation
+without either knowing about the other. Instead, miint subtracts what DuckDB is
+actually holding when the function starts, plus a tenth of the allocation as
+room for it to grow into.
+
+It deliberately does not subtract DuckDB's `memory_limit`. That is a ceiling on
+the buffer pool rather than a reservation, and it defaults to about 80% of RAM,
+so subtracting it would cut the budget roughly fourfold on an unconfigured host.
+Since batch size scales with the budget and every batch costs a full pass over
+the index, that would trade an occasional out-of-memory kill for a reliable
+severalfold slowdown. If you need the two budgets to be provably disjoint rather
+than estimated, say so with `max_memory` — that is what the parameter is for.
+
+**Bounding the Arrow batch.** Separately from `max_memory`, the sequence bytes
+handed to RYpe at any one moment are capped by the
+`miint_rype_arrow_batch_bytes` setting (bytes, default 256 MiB). This is what
+stops peak memory from scaling with the corpus: without it a batch is sized by a
+row count, so its byte size is unbounded.
+
+```sql
+SET miint_rype_arrow_batch_bytes = 67108864;  -- 64 MiB
+SET miint_rype_arrow_batch_bytes = 0;         -- no ceiling (one unbounded batch)
+```
+
+Lowering it does not change how often RYpe passes over the index — that is
+`max_memory`'s job — so it is close to free. Raising it is rarely useful; the
+default is already large enough that per-batch fixed costs are negligible.
+
+**When to set it explicitly.** Pass a value when you need a hard guarantee
+rather than a heuristic — a container sized close to the job, a shared node, or
+a scheduler that kills on RSS. A stated `max_memory` is used verbatim.
+
+```sql
+-- Bound RYpe to 8 GB regardless of what is detected
+SELECT * FROM rype_classify('host.ryxdi', 'reads', max_memory := 8000000000);
+
+-- Pair it with DuckDB's own limit when the two must fit one allocation
+SET memory_limit = '16GB';
+SELECT * FROM rype_classify('host.ryxdi', 'reads', max_memory := 8000000000);
+```
+
+Lowering `max_memory` lowers peak memory but increases the number of index
+passes, and index loading dominates runtime — so it trades wall clock for
+footprint, not the other way round.
+
+Two notes on what `max_memory` does **not** cover:
+
+- It does not bound the Arrow batches miint builds to feed RYpe. Those are
+  capped separately at a fixed 256 MiB of sequence payload, independent of
+  corpus size and of this setting.
+- DuckDB's `memory_limit` does not bound RYpe either, in the other direction:
+  RYpe allocates outside DuckDB's buffer manager, so lowering `memory_limit`
+  alone will not reduce peak RSS for these functions.
+
+### Seeing what was chosen
+
+Batch sizing is invisible by default, which makes a slow classify hard to
+diagnose: index loading is roughly 99.9% of the work, so the number of batches
+is very nearly a direct multiplier on runtime. Pass `debug := true` to have the
+chosen batch size and the estimates behind it recorded in `miint_warnings()`:
+
+```sql
+SELECT count(*) FROM rype_classify('host.ryxdi', 'reads', debug := true);
+
+SELECT message FROM miint_warnings();
+-- rype_classify debug: classification batch = 1354645 reads; memory budget
+-- 21.30 GB, estimated 2.87 GB per batch and 3.12 GB peak; avg read length 150,
+-- is_paired 0
+```
+
+Read it as: RYpe will classify 1,354,645 reads per pass over the index, and
+expects to need about 3.12 GB at peak against the 21.30 GB it was given. If the
+batch size is far below your read count, the corpus is being classified in
+several passes — raise `max_memory` if the memory is genuinely available, or
+accept the extra passes if it is not.
+
+`debug := true` also reports on `rype_log_ratio`,
+`rype_extract_minimizer_set` and `rype_extract_strand_minimizers`. The
+extraction functions report a per-read cost rather than shard-aware estimates,
+because they do not load an index at all.
+
+A `max_memory` too small for even the minimum batch is not an error: RYpe falls
+back to a 1000-read floor. `debug := true` is how you notice that has happened.

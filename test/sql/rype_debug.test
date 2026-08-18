@@ -1,0 +1,153 @@
+# name: test/sql/rype_debug.test
+# description: debug named parameter surfaces RYpe batch sizing via miint_warnings()
+# group: [sql]
+
+#
+# Closes the observability half of #204. Shard loading is ~99.9% of a classify,
+# so the number of batches nearly multiplies runtime — and before this the chosen
+# batch size reached the caller nowhere: not in the result, not on stderr, not
+# through RUST_LOG.
+#
+# What is pinned:
+#   * `debug := true` puts a message in miint_warnings() naming the calling
+#     function and the chosen batch size, on all four RYpe functions;
+#   * the default is silent, so a normal query does not accumulate warnings;
+#   * `debug` does not change results — it is a report, not a mode.
+#
+# Numbers inside the message are machine-dependent (the derived budget comes from
+# detected memory), so the assertions match on structure and on the one value
+# that is deterministic: an explicit `max_memory` is echoed back as given.
+
+require miint
+
+statement ok
+CREATE TABLE seqs AS SELECT * FROM (VALUES
+    ('r1', 'GGGGCCCCGGGGCCCCGGGGCCCCGGGGCCCCGGGGCCCCGGGGCCCCGGGG'),
+    ('r2', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT')
+) AS t(read_id, sequence1);
+
+# =============================================================================
+# Silent by default
+# =============================================================================
+# Establish the baseline first: whatever is already in miint_warnings() from
+# earlier in this session, a default-parameter classify must not add a RYpe
+# debug line.
+
+statement ok
+CREATE TEMP TABLE baseline AS
+SELECT count(*) AS n FROM miint_warnings() WHERE message LIKE '%debug: %';
+
+statement ok
+SELECT count(*) FROM rype_classify('data/rype/test.ryxdi', 'seqs', threshold := 0.05);
+
+query I
+SELECT (SELECT count(*) FROM miint_warnings() WHERE message LIKE '%debug: %')
+       - (SELECT n FROM baseline);
+----
+0
+
+statement ok
+DROP TABLE baseline;
+
+# =============================================================================
+# rype_classify
+# =============================================================================
+
+statement ok
+SELECT count(*) FROM rype_classify('data/rype/test.ryxdi', 'seqs',
+                                   threshold := 0.05, max_memory := 4000000000, debug := true);
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE 'rype_classify debug: classification batch = %reads;%';
+----
+true
+
+# An explicit max_memory must be reported verbatim, not replaced by the derived
+# budget — otherwise the report would not tell you what RYpe was actually given.
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE 'rype_classify debug:%memory budget 4.00 GB%';
+----
+true
+
+# The paired-end flag and sampled read length are part of the batch estimate, so
+# a report that omitted them could not be checked against a suspect batch size.
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE 'rype_classify debug:%avg read length 52, is_paired 0%';
+----
+true
+
+# =============================================================================
+# rype_log_ratio
+# =============================================================================
+
+statement ok
+SELECT count(*) FROM rype_log_ratio(
+    'data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'seqs',
+    max_memory := 4000000000, debug := true);
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE 'rype_log_ratio debug: classification batch = %reads;%memory budget 4.00 GB%';
+----
+true
+
+# =============================================================================
+# The extraction functions
+# =============================================================================
+# They size their own batch (no index to be shard-aware about), so they report a
+# per-read cost instead. Still one `debug` parameter meaning one thing.
+
+statement ok
+SELECT count(*) FROM rype_extract_minimizer_set('seqs', 32, 10,
+                                                max_memory := 4000000000, debug := true);
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE 'rype_extract_minimizer_set debug: extraction batch = %reads;%memory budget 4.00 GB%';
+----
+true
+
+statement ok
+SELECT count(*) FROM rype_extract_strand_minimizers('seqs', 32, 10,
+                                                    max_memory := 4000000000, debug := true);
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE 'rype_extract_strand_minimizers debug: extraction batch = %reads;%';
+----
+true
+
+# =============================================================================
+# debug is a report, not a mode
+# =============================================================================
+
+statement ok
+CREATE TEMP TABLE quiet AS
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seqs', threshold := 0.05);
+
+statement ok
+CREATE TEMP TABLE loud AS
+SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seqs', threshold := 0.05, debug := true);
+
+query I
+SELECT (
+    (SELECT count(*) FROM (SELECT * FROM quiet EXCEPT SELECT * FROM loud)) +
+    (SELECT count(*) FROM (SELECT * FROM loud EXCEPT SELECT * FROM quiet))
+);
+----
+0
+
+# Guard against both being empty.
+query I
+SELECT count(*) > 0 FROM quiet;
+----
+true
+
+statement ok
+DROP TABLE quiet;
+
+statement ok
+DROP TABLE loud;

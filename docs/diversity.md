@@ -19,6 +19,7 @@ Methods to estimate alpha and beta diversity, and supporting statistics.
 - [Progressive PCoA (from a distance table)](#progressive-pcoa-from-a-distance-table) - scalable reference-anchored PCoA without a dense N×N decomposition
 - [Progressive PCoA (from UniFrac)](#progressive-pcoa-from-unifrac) - scalable UniFrac PCoA computing distances on the fly per batch (true-10M path)
 - [PERMANOVA (from a distance table)](#permanova-from-a-distance-table) - metric-agnostic PERMANOVA over any condensed distance table
+- [Two-sample Kolmogorov-Smirnov test](#two-sample-kolmogorov-smirnov-test) - `ks_2samp` over two numeric lists, with SciPy-exact p-values
 - [Sample clustering (k-means and UPGMA)](#sample-clustering-k-means-and-upgma) - group samples from ordination coordinates or a distance table
 - [UniFrac PCoA](#unifrac-pcoa) - UniFrac distance + Principal Coordinates Analysis
 - [UniFrac PERMANOVA](#unifrac-permanova) - UniFrac distance + PERMANOVA pseudo-F + p-value
@@ -576,6 +577,103 @@ SELECT * FROM permanova('dm', 'metadata',
 
 ---
 
+### Two-sample Kolmogorov-Smirnov test
+
+`ks_2samp(a, b [, method])` is the two-sided two-sample Kolmogorov–Smirnov test: a scalar over two numeric lists, returning the statistic and an **exact** p-value.
+
+It is the last step of the micov coverage-curve comparison — with [`cumulative_coverage_curve`](alignment_analysis.md#cumulative-coverage) producing curves in-database, comparing two metadata groups runs entirely in SQL.
+
+```sql
+SELECT ks_2samp([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]);
+-- {'statistic': 0.0, 'pvalue': 1.0}
+
+SELECT (ks_2samp([1.0, 2.0], [10.0, 20.0])).statistic;
+-- 1.0
+```
+
+**Parameters:**
+- `a`, `b` (`LIST(DOUBLE)`): the two samples. They need not be the same length. `LIST(INTEGER)`/`LIST(BIGINT)`/`LIST(DECIMAL)` are accepted by implicit cast, so the coverage macros' output feeds in directly.
+- `method` (VARCHAR, optional, default `'auto'`): `'auto'` or `'exact'` (case-insensitive). See [Method and the size ceiling](#method-and-the-size-ceiling).
+
+**Returns** a `STRUCT`:
+
+| Field | Type | Description |
+|---|---|---|
+| `statistic` | DOUBLE | the two-sided statistic `D = sup\|F_a(x) − F_b(x)\|`, in `[0, 1]` |
+| `pvalue` | DOUBLE | `P(D ≥ statistic)` under H₀ that both samples are drawn from the same continuous distribution |
+
+**Behavior:**
+- **NULL `a`, `b`, or `method` → NULL.**
+- **Either list empty → NULL**, not `0.0`. `0.0` would read as "the two samples are identical", the opposite of what an empty group means.
+- **NULL elements *inside* a list are dropped** and the test runs on the remainder, matching [`compress_intervals`](alignment_analysis.md) and the QC aggregates. The sample size shrinks with them, so the p-value reflects the surviving observations. A list whose every element is NULL reduces to the empty case, and therefore to NULL.
+- **NaN is an error**, not a dropped value: it has no position in the sort order, so the ECDF would be undefined, and silently discarding it would change the sample size the p-value is computed against. `±Infinity` is fine — it sorts.
+- **Ties are handled correctly in the statistic**, which matters here more than usual: coverage curves are mostly ties. The ECDFs are compared only after *every* observation equal to the current pooled value is consumed, so a sample compared against itself gives `D = 0` even when it contains repeats.
+- **But the p-value is conservative under ties.** The exact null distribution assumes all `C(n₁+n₂, n₁)` interleavings are equally likely, which requires a continuous distribution; ties break that, so the reported p-value is somewhat *larger* than the tie-aware permutation p-value — the test is under-powered, never anti-conservative. This matters because the headline use case is tie-heavy by construction. SciPy has the identical limitation, so parity is unaffected.
+- **The p-value can lose accuracy, and eventually underflow, when `n` is large *and* `D` is large.** The value itself stays good far further down than you might expect: it is accurate to ~1e-15 relative across the normal range and remains **bit-identical to SciPy at `6.6e-318`** for equal-sized disjoint samples, well inside the subnormal range. What breaks it is not the magnitude of the *answer* but underflow of the sweep's *intermediate* probabilities, which needs a large `n` together with a large `D`. Measured: 9000 vs 5000 at `D = 0.411` gives `1.86e-321` where SciPy gives `8.90e-321` — a factor of ~4.8, because both accumulate in probability space but in different orders. Past that, the answer underflows to exactly `0.0` (two disjoint samples of 10000 have a true p-value near `1e-6019`), which means "below double precision", not "impossible under H₀", and propagates through a Bonferroni or FDR correction as `0.0`. Treat a p-value that small as "vanishingly small" rather than as a number.
+- **Symmetric to the bit:** `ks_2samp(a, b)` and `ks_2samp(b, a)` return identical values, not merely values within 1 ULP.
+- **Order-independent:** the lists are sorted internally, so `list(v)` without an `ORDER BY` is fine.
+
+#### Method and the size ceiling
+
+The p-value is **exact** — the null distribution over all `C(n₁+n₂, n₁)` interleavings, not an asymptotic approximation. `'auto'` and `'exact'` therefore behave identically today; both names are accepted for signature parity with SciPy.
+
+**`ks_2samp` raises when `max(n₁, n₂) > 10000`** rather than returning an approximation. Two distinct things meet at that number and only one of them is SciPy's:
+
+- For **`'auto'`**, 10000 is SciPy's own `MAX_AUTO_N`: above it SciPy switches to `'asymp'`, which miint does not implement — see below.
+- For **`'exact'`**, SciPy has *no* size cap; it computes exactly at any size, bailing only when `lcm(n₁,n₂) ≥ 2³¹`. There the ceiling is **miint's own cost bound**, not SciPy behaviour, and a conservative one — the lcm at 10000×9999 is `1.0e8`, three orders below SciPy's guard. Raising it needs only a cost decision, not new mathematics.
+
+The `'asymp'` reason is worth stating in full, because the obvious substitute is wrong:
+
+SciPy's `ks_2samp` switches `method='auto'` to `'asymp'` above that same size, and its asymptotic branch is *not* the textbook Kolmogorov series `2·Σ(−1)^(k−1)·exp(−2k²λ²)`. It is `kstwo.sf(d, round(n₁n₂/(n₁+n₂)))` — the exact *one-sample* KS distribution at an effective sample size — which SciPy evaluates by selecting per `(n, d)` region among the Durbin-matrix, Pomeranz, and Pelz-Good expansions. Measured against SciPy 1.18.0, the plain Kolmogorov series is 0.7% off in the most favourable reachable case and 47% off at small effective `n`, which `'auto'` does reach when the samples are lopsided. Since micov's published statistics came from SciPy, shipping an approximation would silently break reproducibility of already-published results — so miint declines to answer instead. [Issue #218](https://github.com/the-miint/duckdb-miint/issues/218) records what implementing it would take.
+
+This ceiling is not a practical constraint for the curve-comparison use case: `n` there is the number of **samples in a group** (one curve rank per sample), so 10–100 against a ceiling of 10000.
+
+Cost grows with both the sample sizes and the observed statistic — the exact computation sweeps a band of an `n₁ × n₂` lattice whose width is proportional to `D`, so a *small* `D` at a large `n` is cheap and only a large `D` at a large `n` is not. Measured: 100 vs 100 is 6 ms, 1000 vs 1000 is 4 ms, 10000 vs 10000 with a small `D` is 2 ms, and 10000 vs 10000 with `D = 1` — the widest band, and the worst case at the ceiling — is 513 ms. 2000 separate 100-vs-100 comparisons in one query total 88 ms. A lopsided pair is cheap in memory as well as time: the working state is `O(min(n₁, n₂))`, so 10000 vs 5 needs six doubles, not ten thousand.
+
+#### Examples
+
+Long-form input, one list per group:
+
+```sql
+SELECT ks_2samp(list(v) FILTER (WHERE grp = 'A'),
+                list(v) FILTER (WHERE grp = 'B')) AS ks
+FROM observations;
+```
+
+Pairwise comparison of cumulative coverage curves between metadata groups, with a Bonferroni correction done in SQL. No multiple-comparison function is provided — the correction is one expression, and which one to apply is the analyst's call:
+
+```sql
+WITH curves AS (
+    SELECT group_id, list(proportion_covered ORDER BY rank) AS curve
+    FROM cumulative_coverage_curve(positions, roster, 4719737)
+    GROUP BY group_id
+),
+pairs AS (
+    SELECT a.group_id AS group_a, b.group_id AS group_b,
+           ks_2samp(a.curve, b.curve) AS ks
+    FROM curves a JOIN curves b ON a.group_id < b.group_id
+)
+SELECT group_a, group_b,
+       ks.statistic,
+       ks.pvalue,
+       least(1.0, ks.pvalue * COUNT(*) OVER ()) AS pvalue_bonferroni
+FROM pairs
+ORDER BY ks.pvalue;
+```
+
+#### SciPy parity
+
+`statistic` and `pvalue` match `scipy.stats.ks_2samp` to double precision wherever `ks_2samp` answers, except where the sweep's intermediate probabilities underflow (see the accuracy note above). Parity is pinned by a committed golden of SciPy 1.18.0 outputs (`test/sql/ks_2samp_parity.test`, fixtures under `data/ks2samp/`) in two grids:
+
+- **32 small cases** covering unequal and coprime sizes, lopsided pairs in both orientations, heavy ties, curve-shaped input, `n = 1`, identical samples, and disjoint samples down to `p = 2.2e-59`.
+- **5 large cases** at `n₁` of 5000–10000 (with `n₂` down to 3000), including one at `p = 1.7e-98`, so the claim is evidenced across the size range rather than only at the small end. Their inputs are arithmetic ranges the test rebuilds in SQL, which is why reaching `n = 10000` costs ten oracle rows instead of forty thousand fixture rows.
+
+The generator is committed at `test/scripts/generate_ks2samp_oracle.py` and reproduces both goldens byte for byte, so a future SciPy bump can be audited rather than guessed at. The test itself needs no SciPy installed.
+
+One-sided variants (`less` / `greater`) are not implemented; only the two-sided form is.
+
+---
+
 ### Sample clustering (k-means and UPGMA)
 
 Two clustering functions group **samples** — as opposed to [sequence clustering](clustering.md), which groups reads into OTUs. Both are metric-agnostic and sit downstream of an ordination or a distance table, which makes them useful for scoring how well a distance choice recovers known structure.
@@ -940,10 +1038,14 @@ technique — fit on a paired subset, apply to all rows — used by
 [`progressive_pcoa_from_unifrac`](#progressive-pcoa-from-unifrac) to place each
 batch into the anchor frame).
 
-**Reference implementations.** The `cogent3` / PyCogent, SciPy, scikit-learn and
-scikit-bio projects — consulted for metric conventions and used as parity oracles
-— are credited with their licenses and citations in
+**Reference implementations.** The `cogent3` / PyCogent, NumPy, SciPy,
+scikit-learn and scikit-bio projects — consulted for metric conventions and used
+as parity oracles — are credited with their licenses and citations in
 [`THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md). `q2-diversity` is used
 the same way, as an optional test-time cross-check only (see
 `test/scripts/gen_procrustes_oracle.py --check-q2`); no code from it is
-incorporated.
+incorporated. Note that `ks_2samp` is checked against `scipy.stats.ks_2samp` but
+is **not** derived from it: the exact p-value comes from the lattice-path
+formulation in Hodges (1958) and is computed as escaping probability mass rather
+than as `1 - P(stay inside)`. See the SciPy entry there, and
+`src/include/KsTwoSample.hpp`.

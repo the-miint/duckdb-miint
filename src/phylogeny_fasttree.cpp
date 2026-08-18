@@ -947,6 +947,7 @@ TableFunction PhylogenyFastTreeTableFunction::GetFunction() {
 	fn.named_parameters["quote"] = LogicalType::BOOLEAN;
 	fn.named_parameters["fastest"] = LogicalType::BOOLEAN;
 	fn.named_parameters["gamma"] = LogicalType::BOOLEAN;
+	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return fn;
 }
 

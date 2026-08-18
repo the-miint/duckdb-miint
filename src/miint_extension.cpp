@@ -7,6 +7,8 @@
 #include <alignment_slice.hpp>
 #include <alignment_functions.hpp>
 #include <compress_intervals.hpp>
+#include <cumulative_coverage.hpp>
+#include <ks_2samp.hpp>
 #include <compute_coverage_depth.hpp>
 #include <copy_fasta.hpp>
 #include <copy_fastq.hpp>
@@ -71,6 +73,7 @@
 #include <align_sortmerna.hpp>
 #include <align_sortmerna_rrna.hpp>
 #endif
+#include <absquant.hpp>
 #include <cluster_kmeans.hpp>
 #include <cluster_upgma.hpp>
 #include <community_distances.hpp>
@@ -265,6 +268,18 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                 "Default false.",
 	                                 LogicalType::BOOLEAN, Value::BOOLEAN(false));
 
+	// Byte ceiling on one Arrow record batch's sequence payload in the RYpe input
+	// stream. Bounds how much sequence data is resident at once independently of
+	// the row count RYpe's batch sizing produces (the-miint/Qiita#459); see
+	// RYPE_ARROW_BATCH_BYTES in src/include/rype_input_stream.hpp for why it is a
+	// power of two. Lowering it is how test/sql/rype_input_stream_batching.test
+	// reaches the multi-batch path without a quarter-gigabyte fixture.
+	ena_db_config.AddExtensionOption(
+	    "miint_rype_arrow_batch_bytes",
+	    "Byte ceiling on one Arrow record batch's sequence payload in rype_classify / rype_log_ratio / "
+	    "rype_extract_*. 0 disables the ceiling, restoring a single unbounded batch. Default 256 MiB.",
+	    LogicalType::BIGINT, Value::BIGINT(NumericCast<int64_t>(RYPE_ARROW_BATCH_BYTES)));
+
 	ScalarFunction version_func("miint_version", {}, LogicalType::VARCHAR, MiintVersionFunction);
 	loader.RegisterFunction(version_func);
 
@@ -328,7 +343,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	CigarSequenceIdentityFunction::Register(loader);
 	CigarQueryLengthFunction::Register(loader);
 	CigarQueryCoverageFunction::Register(loader);
+	CigarQueryIntervalsFunction::Register(loader);
+	CigarPooledIdentityFunction::Register(loader);
 	CompressIntervalsFunction::Register(loader);
+	CumulativeCoverageFunction::Register(loader);
+	KsTwoSampleFunction::Register(loader);
 	ComputeCoverageDepthFunction::Register(loader);
 	AlignmentSliceTableFunction::Register(loader);
 	SequenceFunctions::Register(loader);
@@ -438,6 +457,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// registered. (`pcoa` / `permanova`, which consume their output, do need
 	// scikit-bio-binaries and stay behind MIINT_HAS_UNIFRAC below.)
 	RegisterCommunityDistances(loader);
+	RegisterAbsQuant(loader);
+	RegisterAbsQuantCellCounts(loader);
+	RegisterAbsQuantOrfCopies(loader);
 	RegisterClusterKmeans(loader);
 	RegisterClusterUpgma(loader);
 	RegisterPickAnchors(loader);

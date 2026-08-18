@@ -4,6 +4,18 @@ A family of miint table functions accept a `sample_id` named parameter that part
 
 Functions currently using the pattern: `massql`, `woltka_ogu`, `deblur`, `align_mafft`, `detect_chimera_uchime_denovo`, `detect_chimera_uchime`.
 
+## The macro exception
+
+`genome_coverage_per_sample` solves the same problem but **cannot** use this helper, because it is a SQL table macro rather than a C++ table function. A macro cannot vary its output schema by parameter, so the sample column cannot be conditionally prepended; it cannot delegate to a non-sample sibling, because that sibling's input has no sample column; and it cannot inject a constant column into a `query_table()` reference. It is therefore a deliberate second pattern — a *separate macro* (`genome_coverage_per_sample`, sibling to `genome_coverage`) that requires a column literally named `sample_id`, rather than a named parameter naming an arbitrary column.
+
+What a reader should know about the divergence:
+
+- The sample column name is fixed at `sample_id`. There is no equivalent of `sample_id := 'my_col'`.
+- There is no bind-time validation, so a missing `sample_id` column surfaces as a generic DuckDB binder error rather than `sample_id column '<X>' not found`.
+- NULL rejection **is** implemented, reusing this family's error substring (`NULL values in sample_id column 'sample_id'`), so what a caller sees matches the rest of the extension.
+
+If you need per-sample behavior on a new *macro*, follow that sibling-macro shape. If you are writing a C++ table function, use the helper below — do not copy the macro approach.
+
 ## The helper
 
 `src/include/per_sample_table_function.hpp` exposes a small, opinionated API. Callers use it for bind-time sample discovery and exec-time atomic claim; everything else — the non-sample branch, data loading, result buffering, chunk emission — stays in the caller.

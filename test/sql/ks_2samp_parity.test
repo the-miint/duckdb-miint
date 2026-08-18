@@ -1,0 +1,227 @@
+# name: test/sql/ks_2samp_parity.test
+# description: ks_2samp numeric parity vs a committed scipy.stats.ks_2samp golden (issue #218)
+# group: [sql]
+
+# micov's published KS statistics and p-values came from scipy.stats.ks_2samp, so
+# parity is an acceptance criterion, not a nicety: if these numbers move, previously
+# published results stop reproducing.
+#
+# The goldens were generated OFFLINE with SciPy 1.18.0 by
+# test/scripts/generate_ks2samp_oracle.py, which IS committed and reproduces every CSV
+# under data/ks2samp/ byte for byte. That matters because the small grid comes from a
+# seeded NumPy generator: without the script, a reviewer facing a SciPy bump could not
+# tell a real regression from a different draw sequence. This test itself needs no
+# SciPy. ks_2samp is deterministic, so this is an exact numeric parity check, not a
+# statistical band. data/ks2samp/README.md documents the grid and why each case is in it.
+
+require miint
+
+statement ok
+CREATE TABLE ksfix AS SELECT * FROM read_csv_auto('data/ks2samp/ks_2samp_fixture.csv');
+
+statement ok
+CREATE TABLE ks_oracle AS SELECT * FROM read_csv_auto('data/ks2samp/ks_2samp_oracle.csv');
+
+statement ok
+CREATE TABLE ks_samples AS
+  SELECT case_id,
+         list(value ORDER BY idx) FILTER (WHERE sample = 'a') AS a,
+         list(value ORDER BY idx) FILTER (WHERE sample = 'b') AS b
+  FROM ksfix
+  GROUP BY case_id;
+
+# Both overloads, evaluated once per row and unpacked with (alias).field -- LATERAL
+# would be ~50x slower for chaining struct field access.
+statement ok
+CREATE TABLE ks_mine AS
+  WITH r AS (SELECT case_id, ks_2samp(a, b) AS k_auto, ks_2samp(a, b, 'exact') AS k_exact FROM ks_samples)
+  SELECT case_id, 'auto' AS method, (k_auto).statistic AS statistic, (k_auto).pvalue AS pvalue FROM r
+  UNION ALL
+  SELECT case_id, 'exact' AS method, (k_exact).statistic AS statistic, (k_exact).pvalue AS pvalue FROM r;
+
+# The p-value tolerance below is RELATIVE, not absolute, which is only meaningful if
+# the grid actually contains a tiny p-value. It does: disjoint_100_100 is 2.2e-59.
+# An absolute 1e-9 bound there would pass even if ks_2samp returned 0.0, so assert
+# the grid's range first -- otherwise the parity check silently stops discriminating.
+query II
+SELECT (SELECT min(pvalue) < 1e-50 FROM ks_oracle), (SELECT min(pvalue) > 0 FROM ks_oracle);
+----
+true	true
+
+# 0 mismatches. The FULL JOIN also catches a case present on one side only, which is
+# what a mis-keyed join or a dropped case would look like.
+#
+# statistic: absolute 1e-13 (it lives in [0,1]).
+# pvalue: relative 1e-11. Measured worst relative error against the oracle is ~1e-15,
+# so 1e-11 has four orders of headroom while still failing on a real regression --
+# including at 2.2e-59, where computing the p-value by subtracting from 1 would lose
+# every significant digit.
+#
+# The IS NULL disjuncts are load-bearing, not belt-and-braces: `abs(NULL - x) > tol` is
+# NULL, not TRUE, so a regression that made ks_2samp return NULL for part of the grid
+# would be dropped by the WHERE and leave this count reading 0. The FULL JOIN does not
+# catch it either, since the row still matches on (case_id, method).
+query I
+SELECT count(*) FROM (
+  SELECT m.case_id, o.case_id AS ocase
+  FROM ks_mine m FULL JOIN ks_oracle o ON m.case_id = o.case_id AND m.method = o.method
+  WHERE m.case_id IS NULL OR o.case_id IS NULL
+     OR m.statistic IS NULL OR m.pvalue IS NULL
+     OR o.statistic IS NULL OR o.pvalue IS NULL
+     OR abs(m.statistic - o.statistic) > 1e-13
+     OR abs(m.pvalue - o.pvalue) > 1e-11 * abs(o.pvalue)
+);
+----
+0
+
+# Same number of (case, method) rows on both sides.
+query I
+SELECT (SELECT count(*) FROM ks_mine) = (SELECT count(*) FROM ks_oracle);
+----
+true
+
+# 32 cases x 2 methods.
+query I
+SELECT count(*) FROM ks_oracle;
+----
+64
+
+# SciPy's 'auto' resolves to 'exact' for every size in this grid, so the two methods
+# must agree with each other as well as with SciPy.
+query I
+SELECT count(*) FROM (
+  SELECT a.case_id
+  FROM ks_mine a JOIN ks_mine b ON a.case_id = b.case_id AND a.method = 'auto' AND b.method = 'exact'
+  WHERE a.statistic <> b.statistic OR a.pvalue <> b.pvalue
+);
+----
+0
+
+# Spot-check the two closed forms the grid is anchored on, independently of the
+# oracle file: identical samples give exactly 1, and fully disjoint samples give
+# 2/C(n1+n2, n1). If the oracle CSV were ever regenerated wrongly, these still hold.
+#
+# Asserted as BOOLEANS throughout this file. sqllogictest compares a DOUBLE result
+# column with a ~1% relative + 1e-8 absolute tolerance, so a bare `0.0<TAB>1.0`
+# expected block pins only about two significant digits -- far looser than the claims
+# these checks are making. A boolean column is compared exactly.
+query I
+SELECT statistic = 0.0 AND pvalue = 1.0 FROM ks_mine WHERE case_id = 'identical_tied' AND method = 'auto';
+----
+true
+
+query I
+SELECT abs(pvalue - 2.0 / 252.0) < 1e-15 FROM ks_mine WHERE case_id = 'disjoint_5_5' AND method = 'auto';
+----
+true
+
+# h1_overshoot_5_5 is the case where SciPy's OWN exact routine returns
+# 1.0000000000000002, declares itself unsuccessful, and silently falls back to its
+# asymptotic branch before clipping to 1.0. miint lands on 1.0 directly, so the two
+# agree without needing that fallback -- which is what this row pins.
+#
+# It does NOT pin miint's clamping: miint's raw escape sum here is exactly 1.0, so
+# the clamp is inert, and mutation testing confirmed that removing the clamp leaves
+# this whole file green. The clamp is pinned in test/cpp/test_KsTwoSample.cpp at
+# n1=7, n2=13, where the sum really does reach 1.0000000000000002.
+query I
+SELECT abs(statistic - 0.2) < 1e-15 AND pvalue = 1.0
+FROM ks_mine WHERE case_id = 'h1_overshoot_5_5' AND method = 'auto';
+----
+true
+
+# ---------------------------------------------------------------------------
+# Large-n parity.
+#
+# The grid above tops out at n = 211 while ks_2samp answers up to 10000, so on its own
+# it left 98% of the answerable size range with no SciPy evidence behind the parity
+# claim in docs/diversity.md. These cases close that, and carry NO fixture rows: their
+# inputs are arithmetic ranges SQL rebuilds exactly (every integer below 2^53 is exact
+# in a double), so reaching n = 10000 costs 10 oracle rows rather than 40000 CSV rows.
+#
+# Subnormal and zero p-values are deliberately NOT in this grid -- not because a
+# subnormal result is inaccurate (miint is bit-identical to SciPy at 6.6e-318 for
+# equal-sized disjoint samples) but because a large n together with a large D underflows
+# the sweep's INTERMEDIATE probabilities, and there the two diverge: 9000 vs 5000 at
+# D = 0.411 gives 1.86e-321 against SciPy's 8.90e-321, a factor of ~4.8. The generator
+# refuses to emit such a case; docs/diversity.md documents the limit.
+# The smallest p-value here is 1.7e-98, comfortably normal.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE ks_large_oracle AS SELECT * FROM read_csv_auto('data/ks2samp/ks_2samp_large_oracle.csv');
+
+statement ok
+CREATE TABLE ks_large_mine AS
+  WITH inputs AS (
+              SELECT 'gen_10000_10000_shift5' AS case_id,
+                     (SELECT list(v::DOUBLE)        FROM range(10000) t(v)) AS a,
+                     (SELECT list((v + 5)::DOUBLE)  FROM range(10000) t(v)) AS b
+    UNION ALL SELECT 'gen_10000_10000_shift500',
+                     (SELECT list(v::DOUBLE)          FROM range(10000) t(v)),
+                     (SELECT list((v + 500)::DOUBLE)  FROM range(10000) t(v))
+    UNION ALL SELECT 'gen_10000_10000_shift1500',
+                     (SELECT list(v::DOUBLE)           FROM range(10000) t(v)),
+                     (SELECT list((v + 1500)::DOUBLE)  FROM range(10000) t(v))
+    UNION ALL SELECT 'gen_5000_5000_shift50',
+                     (SELECT list(v::DOUBLE)         FROM range(5000) t(v)),
+                     (SELECT list((v + 50)::DOUBLE)  FROM range(5000) t(v))
+    UNION ALL SELECT 'gen_9000_3000_stride3',
+                     (SELECT list(v::DOUBLE)       FROM range(9000) t(v)),
+                     (SELECT list((v * 3)::DOUBLE) FROM range(3000) t(v))
+  ),
+  r AS (SELECT case_id, ks_2samp(a, b) AS k_auto, ks_2samp(a, b, 'exact') AS k_exact FROM inputs)
+  SELECT case_id, 'auto' AS method, (k_auto).statistic AS statistic, (k_auto).pvalue AS pvalue FROM r
+  UNION ALL
+  SELECT case_id, 'exact' AS method, (k_exact).statistic AS statistic, (k_exact).pvalue AS pvalue FROM r;
+
+# The grid must actually reach the sizes it claims to, and must contain a p-value small
+# enough that the relative tolerance below has real work to do.
+# min(pvalue) > 0 is not redundant with < 1e-90: a fully underflowed 0.0 satisfies the
+# upper bound, and would then make the relative comparison below `abs(m - 0) > 1e-11*0`,
+# i.e. exact equality of two zeros, which passes whatever the DP does. The small grid is
+# guarded the same way.
+query IIII
+SELECT max(n1) = 10000, min(n2) = 3000,
+       (SELECT min(pvalue) < 1e-90 FROM ks_large_oracle),
+       (SELECT min(pvalue) > 0 FROM ks_large_oracle)
+FROM ks_large_oracle;
+----
+true	true	true	true
+
+query I
+SELECT count(*) FROM (
+  SELECT m.case_id, o.case_id AS ocase
+  FROM ks_large_mine m FULL JOIN ks_large_oracle o ON m.case_id = o.case_id AND m.method = o.method
+  WHERE m.case_id IS NULL OR o.case_id IS NULL
+     OR m.statistic IS NULL OR m.pvalue IS NULL
+     OR o.statistic IS NULL OR o.pvalue IS NULL
+     OR abs(m.statistic - o.statistic) > 1e-13
+     OR abs(m.pvalue - o.pvalue) > 1e-11 * abs(o.pvalue)
+);
+----
+0
+
+# 5 cases x 2 methods, present on both sides.
+query II
+SELECT (SELECT count(*) FROM ks_large_mine) = (SELECT count(*) FROM ks_large_oracle),
+       (SELECT count(*) FROM ks_large_oracle) = 10;
+----
+true	true
+
+# Every p-value is a probability and every statistic is in [0,1] -- across the whole
+# grid, including the heavily tied and lopsided cases.
+#
+# Written with IS NULL plus NOT(... BETWEEN ...) rather than `statistic < 0 OR
+# statistic > 1`: under three-valued logic every bare comparison is FALSE for NaN and
+# NULL for NULL, so the naive form cannot catch either of the two regressions a range
+# guard exists for. NOT(x BETWEEN 0 AND 1) is TRUE for NaN and for +/-Inf.
+# Over BOTH grids. Pointing this at ks_mine alone left the large-n cases -- the only
+# place the banded sweep runs at n = 5000-10000, including the lopsided 9000-vs-3000
+# path -- with no probability-range check at all.
+query I
+SELECT count(*) FROM (SELECT statistic, pvalue FROM ks_mine
+                      UNION ALL SELECT statistic, pvalue FROM ks_large_mine)
+WHERE statistic IS NULL OR pvalue IS NULL
+   OR NOT (statistic BETWEEN 0 AND 1) OR NOT (pvalue BETWEEN 0 AND 1);
+----
+0

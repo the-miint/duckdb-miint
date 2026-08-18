@@ -1,0 +1,203 @@
+# name: test/sql/struct_null_children.test
+# description: every STRUCT-returning scalar marks a NULL row's CHILDREN null, not just the struct
+# group: [sql]
+
+# Marking only a struct's own validity is not enough. struct_extract hands back a bare
+# reference to the child vector without applying its parent's validity, so
+# `f(x) IS NULL` reads true while `(f(x)).some_field` returns whatever was left in the
+# child buffer -- a stale value from an earlier row of the same chunk. Field access is
+# how these functions are actually used, so that is the path a caller takes.
+#
+# DuckDB treats "a NULL struct entry implies NULL children" as an invariant and asserts
+# it in debug builds, so the shortcut is a debug-build abort as well as a wrong
+# release-build answer. The fix is FlatVector::SetNull, which recurses into the children --
+# either directly or through the SetStructRowNull wrapper in table_function_common.hpp.
+#
+# THIS FILE PINS EVERY AFFECTED FUNCTION IN src/, and the set is bounded as follows.
+#
+# Only a BARE STRUCT return leaks. A LIST(STRUCT) return does not: measured on
+# cigar_query_intervals, sequence_split, compress_intervals and cumulative_coverage (the
+# last via an aggregate FILTER that empties the state), a NULL list row gives NULL from
+# len(), from list_extract(), and from (list_extract(...)).field. So the LIST-returning
+# SetInvalid call sites in alignment_functions.cpp, sequence_functions.cpp,
+# compress_intervals.cpp, compute_coverage_depth.cpp and cumulative_coverage.cpp are
+# correct as written and are deliberately absent from this file.
+#
+# The bare-STRUCT returners in src/ are: qc_functions.cpp (3 return types, 4 sites),
+# merge_pairs_function.cpp, extract_linked_amplicon.cpp, ks_2samp.cpp,
+# pairwise_align_shared.hpp (2 templates serving 8 SQL functions), and
+# compute_msa_consensus.cpp -- all covered here or, for merge_pairs_vsearch, in
+# test/sql/merge_pairs.test. install_gpl_boundary.cpp, miint_extension.cpp,
+# ena_modify_functions.cpp and ena_storage.cpp also return bare STRUCTs but never mark a
+# result row NULL at all, so there is nothing to pin.
+#
+# An earlier version of this comment claimed to pin "every function that uses
+# SetStructRowNull". That was true and misleading: it pinned only the six sites converted
+# at the time, while nine functions behind two templates were still leaking.
+#
+# Found while fixing ks_2samp (issue #218), where `(ks_2samp(a,b)).statistic` returned
+# 0.0 for an empty sample -- precisely the "the two samples are identical" reading that
+# returning NULL exists to prevent. The same defect was present in trim_adapters,
+# trim_adapters_pe, filter_read and merge_pairs_vsearch.
+#
+# EVERY ROW HERE MUST COME FROM A TABLE. A literal NULL argument is constant-folded away
+# before the function runs at all (`EXPLAIN SELECT f(NULL, ...)` is a plain NULL
+# projection over a dummy scan), so a literal-only version of this file would pin the
+# optimizer and not the functions.
+
+require miint
+
+statement ok
+CREATE TABLE reads(id INTEGER, seq VARCHAR, qual UTINYINT[], seq2 VARCHAR, qual2 UTINYINT[], adapter VARCHAR);
+
+# One row with everything present (the control -- fields must NOT be null), then rows
+# with each argument null in turn.
+statement ok
+INSERT INTO reads VALUES
+  (1, 'ACGTACGTACGTACGTAAAA', [30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30],
+      'TTTTACGTACGTACGTACGT', [30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30], 'ACGT'),
+  (2, NULL,                   [30,30,30,30],
+      'TTTTACGTACGTACGTACGT', [30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30], 'ACGT'),
+  (3, 'ACGTACGTACGTACGTAAAA', NULL,
+      'TTTTACGTACGTACGTACGT', [30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30], 'ACGT'),
+  (4, 'ACGTACGTACGTACGTAAAA', [30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30],
+      'TTTTACGTACGTACGTACGT', [30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30], NULL);
+
+# ---------------------------------------------------------------------------
+# trim_adapters -- 4 struct fields
+# ---------------------------------------------------------------------------
+query IIIII
+SELECT id,
+       trim_adapters(seq, qual, adapter) IS NULL              AS struct_null,
+       (trim_adapters(seq, qual, adapter)).sequence IS NULL   AS f_sequence,
+       (trim_adapters(seq, qual, adapter)).quality IS NULL    AS f_quality,
+       (trim_adapters(seq, qual, adapter)).trimmed_5p IS NULL AS f_trimmed_5p
+FROM reads ORDER BY id;
+----
+1	false	false	false	false
+2	true	true	true	true
+3	true	true	true	true
+4	true	true	true	true
+
+# ---------------------------------------------------------------------------
+# trim_adapters_pe -- 8 struct fields
+# ---------------------------------------------------------------------------
+query IIIII
+SELECT id,
+       trim_adapters_pe(seq, qual, seq2, qual2) IS NULL                  AS struct_null,
+       (trim_adapters_pe(seq, qual, seq2, qual2)).sequence1 IS NULL      AS f_sequence1,
+       (trim_adapters_pe(seq, qual, seq2, qual2)).quality2 IS NULL       AS f_quality2,
+       (trim_adapters_pe(seq, qual, seq2, qual2)).adapter_trimmed IS NULL AS f_adapter_trimmed
+FROM reads ORDER BY id;
+----
+1	false	false	false	false
+2	true	true	true	true
+3	true	true	true	true
+4	false	false	false	false
+
+# ---------------------------------------------------------------------------
+# filter_read -- 6 struct fields, including the fail_reason VARCHAR that has its own
+# validity mask
+# ---------------------------------------------------------------------------
+query IIIII
+SELECT id,
+       filter_read(seq, qual) IS NULL                AS struct_null,
+       (filter_read(seq, qual)).passed IS NULL       AS f_passed,
+       (filter_read(seq, qual)).length IS NULL       AS f_length,
+       (filter_read(seq, qual)).mean_quality IS NULL AS f_mean_quality
+FROM reads ORDER BY id;
+----
+1	false	false	false	false
+2	true	true	true	true
+3	true	true	true	true
+4	false	false	false	false
+
+# ---------------------------------------------------------------------------
+# align_pairwise_*_cigar / _full -- eight functions, two shared templates
+#
+# These were MISSED by the first sweep of this defect, which hand-edited six call sites
+# and walked past the cheapest instance: RunPairwiseAlignCigarExecute and
+# RunPairwiseAlignFullExecute in src/include/pairwise_align_shared.hpp are already the
+# shared abstraction, so four lines there cover all eight SQL functions. The four
+# align_pairwise_*_score functions return INT32, not a STRUCT, so their SetInvalid is
+# correct and they are deliberately not listed here.
+#
+# All eight declare SPECIAL_HANDLING, so unlike the trim_* family above a literal NULL is
+# NOT constant-folded and does reach the wrapper. The rows still come from a table,
+# because that is the contract worth pinning and because a folded literal would pin the
+# optimizer instead.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE pw(id INTEGER, query VARCHAR, subject VARCHAR);
+
+statement ok
+INSERT INTO pw VALUES (1, 'ACGTACGTACGT', 'ACGTACGTACGT'), (2, NULL, 'ACGTACGTACGT'), (3, 'ACGTACGTACGT', NULL);
+
+query IIIII
+SELECT id,
+       align_pairwise_wfa2_cigar(query, subject) IS NULL                 AS struct_null,
+       (align_pairwise_wfa2_cigar(query, subject)).score IS NULL         AS f_score,
+       (align_pairwise_wfa2_cigar(query, subject)).cigar IS NULL         AS f_cigar,
+       (align_pairwise_ksw2_cigar(query, subject)).score IS NULL         AS k_score
+FROM pw ORDER BY id;
+----
+1	false	false	false	false
+2	true	true	true	true
+3	true	true	true	true
+
+query IIIIII
+SELECT id,
+       align_pairwise_wfa2_full(query, subject) IS NULL                          AS struct_null,
+       (align_pairwise_wfa2_full(query, subject)).score IS NULL                  AS f_score,
+       (align_pairwise_wfa2_full(query, subject)).query_aligned IS NULL          AS f_qa,
+       (align_pairwise_wfa2_full(query, subject)).subject_aligned IS NULL        AS f_sa,
+       (align_pairwise_ksw2_full(query, subject)).query_aligned IS NULL          AS k_qa
+FROM pw ORDER BY id;
+----
+1	false	false	false	false	false
+2	true	true	true	true	true
+3	true	true	true	true	true
+
+# The remaining four of the eight, through the same two templates.
+query IIIII
+SELECT id,
+       (align_pairwise_ksw2_dual_affine_cigar(query, subject)).cigar IS NULL          AS da_cigar,
+       (align_pairwise_ksw2_dual_affine_full(query, subject)).subject_aligned IS NULL AS da_sa,
+       (align_pairwise_ksw2_splice_cigar(query, subject)).cigar IS NULL               AS sp_cigar,
+       (align_pairwise_ksw2_splice_full(query, subject)).subject_aligned IS NULL      AS sp_sa
+FROM pw ORDER BY id;
+----
+1	false	false	false	false
+2	true	true	true	true
+3	true	true	true	true
+
+# ---------------------------------------------------------------------------
+# compute_msa_consensus -- a struct-returning AGGREGATE
+#
+# Its Finalize marks an empty state NULL. It already zeroed the qual LIST's list_entry_t
+# by hand, which is why only the seq child leaked -- a reminder that marking the struct
+# and patching one child is not the same as marking the row null.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE msa(bin_id INTEGER, aligned_seq VARCHAR, qual UTINYINT[]);
+
+statement ok
+INSERT INTO msa VALUES
+  (1, 'ACGT', [30,30,30,30]),
+  (1, 'ACGT', [30,30,30,30]),
+  (2, NULL,   [30,30,30,30]),
+  (2, NULL,   [30,30,30,30]);
+
+query IIII
+SELECT bin_id,
+       compute_msa_consensus(aligned_seq, qual) IS NULL         AS struct_null,
+       (compute_msa_consensus(aligned_seq, qual)).seq IS NULL   AS f_seq,
+       (compute_msa_consensus(aligned_seq, qual)).qual IS NULL  AS f_qual
+FROM msa GROUP BY bin_id ORDER BY bin_id;
+----
+1	false	false	false
+2	true	true	true
+
+# merge_pairs_vsearch has the same contract, but it needs vsearch, so its case lives in
+# test/sql/merge_pairs.test which already carries the require-env guard. A mid-file
+# require-env here would risk skipping everything above it.

@@ -1,0 +1,167 @@
+# name: test/sql/rype_single_read.test
+# description: the RYpe table functions must read the sequence relation exactly once (#229)
+# group: [sql]
+
+require miint
+
+# ---------------------------------------------------------------------------
+# WHY THIS TEST EXISTS (#229)
+#
+# A relation passed by name is not guaranteed to return the same rows twice.
+# Volatile views, views over a table another connection is writing, views over a
+# file still being written, and registered Arrow relations all differ between
+# reads — and a registered Arrow relation returns ZERO rows on a second read,
+# which is indistinguishable from end-of-input. Reading the relation more than
+# once is therefore a correctness bug, not a performance choice. See
+# docs/internals/reading-tables-views.md "Read the relation ONCE".
+#
+# The RYpe path satisfied this for the wrong reason: it copied the whole relation
+# into a per-call TEMP table and then queried that snapshot as often as it liked.
+# When the copy was removed to bound memory (the-miint/Qiita#459), the two probe
+# queries it had been hiding — a LIMIT 1000 sample for avg_read_length and a full
+# scan for sequence2 content — were left pointing at the caller's relation. That
+# turned one read into three, silently.
+#
+# Both facts now come from the head of the single pass
+# (RypeInputStream::SampleSizing).
+#
+# HOW THE VOLATILITY IS PLACED, AND WHY IT MATTERS
+#
+# The obvious construction — `nextval() AS read_id` over a stable body, and then
+# assert the ids stay in 1..N — does NOT work here, and silently passes. Both
+# removed probes projected a single sequence column and never referenced the id,
+# so DuckDB's column pruning deletes the nextval() expression from the probe's
+# plan entirely and the sequence is never advanced. A test built that way is
+# green against the three-scan code it is supposed to catch (verified by
+# reintroducing the probe).
+#
+# So the volatility lives in `sequence1`, which every reader must evaluate. The
+# view yields GGGGCCCC content for the first 2000 rows any scan pulls and
+# ACGTACGT after that, so a single scan is uniformly the first class and ANY
+# extra read of the relation shifts a suffix of the real scan into the second.
+# In RY-space against data/rype/test.ryxdi those classes are distinguishable:
+#   GGGGCCCC -> exactly {bucket_alpha, bucket_gamma}
+#   ACGTACGT -> exactly {bucket_alpha, bucket_beta, bucket_gamma}
+# so a stray bucket_beta is the signature of a re-read.
+# ---------------------------------------------------------------------------
+
+# Single-threaded so nextval() assignment order is deterministic. The defect is
+# sequential re-reads, so this does not mask it.
+statement ok
+SET threads=1;
+
+# ---------------------------------------------------------------------------
+# Control: a stable physical table of the first class only. Establishes the
+# answer and proves the assertions below are not vacuous.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE stable_q AS
+SELECT i::BIGINT AS read_id, repeat('GGGGCCCC', 7) AS sequence1 FROM range(2000) t(i);
+
+query II
+SELECT count(DISTINCT read_id), count(*) FILTER (WHERE bucket_name = 'bucket_beta')
+FROM rype_classify('data/rype/test.ryxdi', 'stable_q', threshold := 0.05);
+----
+2000	0
+
+# ---------------------------------------------------------------------------
+# rype_classify over a volatile view
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE SEQUENCE classify_seq START 1;
+
+statement ok
+CREATE VIEW volatile_classify AS
+SELECT i::BIGINT AS read_id,
+       repeat(CASE WHEN nextval('classify_seq') <= 2000 THEN 'GGGGCCCC' ELSE 'ACGTACGT' END, 7) AS sequence1
+FROM range(2000) t(i);
+
+# A bucket_beta here means some read's sequence came from a later evaluation of
+# the view than the one that produced the row it was paired with.
+query II
+SELECT count(DISTINCT read_id), count(*) FILTER (WHERE bucket_name = 'bucket_beta')
+FROM rype_classify('data/rype/test.ryxdi', 'volatile_classify', threshold := 0.05);
+----
+2000	0
+
+# ---------------------------------------------------------------------------
+# The paired shape, which used to take an EXTRA scan on top
+# ---------------------------------------------------------------------------
+# When the relation carries a sequence2 column, is_paired was resolved by a full
+# scan of it (#199) — a third read. is_paired now comes from the same first chunk
+# as avg_read_length, so this must still be a single scan.
+
+statement ok
+CREATE SEQUENCE paired_seq START 1;
+
+statement ok
+CREATE VIEW volatile_paired AS
+SELECT i::BIGINT AS read_id,
+       repeat(CASE WHEN nextval('paired_seq') <= 2000 THEN 'GGGGCCCC' ELSE 'ACGTACGT' END, 7) AS sequence1,
+       repeat('GGGGCCCC', 7) AS sequence2
+FROM range(2000) t(i);
+
+query II
+SELECT count(DISTINCT read_id), count(*) FILTER (WHERE bucket_name = 'bucket_beta')
+FROM rype_classify('data/rype/test.ryxdi', 'volatile_paired', threshold := 0.05);
+----
+2000	0
+
+# ---------------------------------------------------------------------------
+# rype_log_ratio
+# ---------------------------------------------------------------------------
+# Numerator content is GGCCTTAA and denominator AATTAATT, so a single scan puts
+# every read on +inf; a shifted suffix would land on -inf.
+
+statement ok
+CREATE SEQUENCE lr_seq START 1;
+
+statement ok
+CREATE VIEW volatile_lr AS
+SELECT i::BIGINT AS read_id,
+       repeat(CASE WHEN nextval('lr_seq') <= 2000 THEN 'GGCCTTAA' ELSE 'AATTAATT' END, 7) AS sequence1
+FROM range(2000) t(i);
+
+query II
+SELECT count(DISTINCT read_id), count(*) FILTER (WHERE log_ratio != 'inf'::DOUBLE)
+FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype/test_denominator.ryxdi', 'volatile_lr');
+----
+2000	0
+
+# ---------------------------------------------------------------------------
+# The extraction functions
+# ---------------------------------------------------------------------------
+# Extraction returns minimizers rather than buckets, so the signature of a
+# re-read is a read whose minimizer set differs from the uniform first-class one.
+
+statement ok
+CREATE SEQUENCE extract_seq START 1;
+
+statement ok
+CREATE VIEW volatile_extract AS
+SELECT i::BIGINT AS read_id,
+       repeat(CASE WHEN nextval('extract_seq') <= 2000 THEN 'GGGGCCCC' ELSE 'ACGTACGT' END, 7) AS sequence1
+FROM range(2000) t(i);
+
+query II
+SELECT count(*), count(DISTINCT fwd_set)
+FROM rype_extract_minimizer_set('volatile_extract', 32, 10);
+----
+2000	1
+
+statement ok
+CREATE SEQUENCE strand_seq START 1;
+
+statement ok
+CREATE VIEW volatile_strand AS
+SELECT i::BIGINT AS read_id,
+       repeat(CASE WHEN nextval('strand_seq') <= 2000 THEN 'GGGGCCCC' ELSE 'ACGTACGT' END, 7) AS sequence1
+FROM range(2000) t(i);
+
+query II
+SELECT count(*), count(DISTINCT fwd_hashes)
+FROM rype_extract_strand_minimizers('volatile_strand', 32, 10);
+----
+2000	1

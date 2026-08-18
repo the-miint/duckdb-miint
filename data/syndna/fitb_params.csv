@@ -1,0 +1,12 @@
+sample_id,mass_syndna_input_ng
+sA,0.25
+sB,0.25
+sPERFECT,0.25
+sZERO,0.25
+sTWO,0.25
+sCONSTY,0.25
+sONE,0.25
+sNONE,0.25
+sFLAT,0.25
+sNULL,
+sNEG,-0.3

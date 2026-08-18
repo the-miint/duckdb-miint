@@ -346,6 +346,7 @@ TableFunction ReadNCBIFastaTableFunction::GetFunction() {
 	tf.named_parameters["api_key"] = LogicalType::VARCHAR;
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
 	tf.named_parameters["batch_size"] = LogicalType::BIGINT;
+	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }
 

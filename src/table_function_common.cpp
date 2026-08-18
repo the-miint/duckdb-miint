@@ -350,4 +350,8 @@ void GetListUInt8Slice(Vector &list_vec, UnifiedVectorFormat &list_data, idx_t r
 	out_length = entry.length;
 }
 
+void SetStructRowNull(Vector &result, idx_t row_idx) {
+	FlatVector::SetNull(result, row_idx, true);
+}
+
 } // namespace duckdb

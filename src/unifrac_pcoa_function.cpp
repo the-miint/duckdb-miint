@@ -1976,6 +1976,7 @@ void RegisterPcoaFromDistances(ExtensionLoader &loader) {
 	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
 	fn.named_parameters["seed"] = LogicalType::INTEGER;
 	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);
 }
 

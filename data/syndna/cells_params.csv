@@ -1,0 +1,3 @@
+sample_id,extracted_gdna_concentration_ng_ul,vol_extracted_elution_ul,sequenced_sample_gdna_mass_ng,calc_mass_sample_aliquot_input_g,sample_volume_ul,sample_surface_area_cm2
+example1,2.0,100,5.0,0.027829017,200,4
+example2,1.4,100,4.76,0.029491697,150,6
