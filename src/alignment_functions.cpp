@@ -404,4 +404,190 @@ void CigarQueryCoverageFunction::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(function_set);
 }
 
+// cigar_query_intervals(cigar, flags, [type='aligned']) implementation
+//
+// Returns the query positions this alignment covers as half-open [start, stop)
+// intervals in the ORIGINAL READ's orientation. cigar_query_coverage answers "how much
+// of the read does this one record explain" and cannot see sibling records; a read
+// spanning the origin of a circular reference is emitted as several records, and
+// pooling them requires their query footprints on a common axis. Hence intervals rather
+// than a count.
+//
+// `start`/`stop` deliberately match compress_intervals' struct field names so the two
+// compose without renaming.
+static const LogicalType &CigarQueryIntervalsReturnType() {
+	static const LogicalType type =
+	    LogicalType::LIST(LogicalType::STRUCT({{"start", LogicalType::BIGINT}, {"stop", LogicalType::BIGINT}}));
+	return type;
+}
+
+// One body serves both the two- and three-argument overloads, keyed off ColumnCount().
+static void CigarQueryIntervalsScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	const idx_t count = args.size();
+	const bool has_type = args.ColumnCount() > 2;
+
+	UnifiedVectorFormat cigar_fmt, flags_fmt, type_fmt;
+	args.data[0].ToUnifiedFormat(count, cigar_fmt);
+	args.data[1].ToUnifiedFormat(count, flags_fmt);
+	if (has_type) {
+		args.data[2].ToUnifiedFormat(count, type_fmt);
+	}
+	const auto cigar_data = UnifiedVectorFormat::GetData<string_t>(cigar_fmt);
+	const auto flags_data = UnifiedVectorFormat::GetData<uint16_t>(flags_fmt);
+	const auto type_data = has_type ? UnifiedVectorFormat::GetData<string_t>(type_fmt) : nullptr;
+
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto list_entries = FlatVector::GetData<list_entry_t>(result);
+	auto &result_validity = FlatVector::Validity(result);
+
+	// The interval count is only known by computing the intervals, so there is no cheap
+	// sizing pass as in sequence_split. Rather than buffer the whole chunk and copy it in
+	// afterwards -- which would double peak memory for no benefit -- grow the list child
+	// per row and write straight into it, the way compute_coverage_depth's Finalize does.
+	idx_t total = 0;
+	for (idx_t row = 0; row < count; row++) {
+		const auto cigar_idx = cigar_fmt.sel->get_index(row);
+		const auto flags_idx = flags_fmt.sel->get_index(row);
+		list_entries[row].offset = total;
+		list_entries[row].length = 0;
+
+		const idx_t type_idx = has_type ? type_fmt.sel->get_index(row) : 0;
+		const bool valid = cigar_fmt.validity.RowIsValid(cigar_idx) && flags_fmt.validity.RowIsValid(flags_idx) &&
+		                   (!has_type || type_fmt.validity.RowIsValid(type_idx));
+		if (!valid) {
+			result_validity.SetInvalid(row);
+			continue;
+		}
+
+		// An unmapped or empty CIGAR needs no special case: ParseCigarOperations yields no
+		// operations for it and ComputeQueryIntervals then covers nothing, which is the
+		// empty list rather than an unknown one. Going through the normal path also means
+		// the `type` argument is validated on unmapped rows, so a typo'd type fails on
+		// every batch instead of only on batches that happen to hold a mapped record.
+		// Deliberately stricter than cigar_query_coverage, which returns 0.0 for an
+		// unmapped CIGAR without inspecting its type at all.
+		try {
+			auto ops = miint::ParseCigarOperations(cigar_data[cigar_idx].GetString());
+			// 0x10 is the SAM reverse-strand bit; the CIGAR is written in reference
+			// orientation, so it decides which end of the read the clips sit at.
+			auto intervals = miint::ComputeQueryIntervals(ops, (flags_data[flags_idx] & 0x10) != 0,
+			                                              has_type ? type_data[type_idx].GetString() : "aligned");
+			if (intervals.empty()) {
+				continue;
+			}
+			// Reserve may reallocate the child, so re-fetch its data pointers each time.
+			ListVector::Reserve(result, total + intervals.size());
+			auto &struct_children = StructVector::GetEntries(ListVector::GetEntry(result));
+			auto start_data = FlatVector::GetData<int64_t>(*struct_children[0]);
+			auto stop_data = FlatVector::GetData<int64_t>(*struct_children[1]);
+			for (idx_t i = 0; i < intervals.size(); i++) {
+				start_data[total + i] = intervals[i].start;
+				stop_data[total + i] = intervals[i].stop;
+			}
+			list_entries[row].length = intervals.size();
+			total += intervals.size();
+		} catch (const miint::InvalidInputException &e) {
+			throw InvalidInputException(e.what());
+		}
+	}
+
+	ListVector::SetListSize(result, total);
+}
+
+ScalarFunction CigarQueryIntervalsFunction::GetFunction() {
+	ScalarFunction func("cigar_query_intervals", {LogicalType::VARCHAR, LogicalType::USMALLINT, LogicalType::VARCHAR},
+	                    CigarQueryIntervalsReturnType(), CigarQueryIntervalsScalarFunction);
+	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	return func;
+}
+
+void CigarQueryIntervalsFunction::Register(ExtensionLoader &loader) {
+	// Two-argument overload; type defaults to 'aligned' inside the shared body.
+	ScalarFunction func_two_args("cigar_query_intervals", {LogicalType::VARCHAR, LogicalType::USMALLINT},
+	                             CigarQueryIntervalsReturnType(), CigarQueryIntervalsScalarFunction);
+	func_two_args.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+
+	ScalarFunctionSet function_set("cigar_query_intervals");
+	function_set.AddFunction(func_two_args);
+	function_set.AddFunction(GetFunction());
+	loader.RegisterFunction(function_set);
+}
+
+// cigar_pooled_identity(cigar) — sequence identity for a read the aligner reported as
+// several alignment records, as sum(=) / sum(alignment columns) over the group.
+//
+// An aggregate rather than cigar_sequence_identity(string_agg(cigar, '')): concatenating
+// CIGARs produces a string the SAM spec forbids, because clipping is only legal at an end,
+// and its arithmetic came out right only because ParseCigar accumulates operation by
+// operation without validating structure. Summing the counters needs no such indulgence,
+// generalises to metrics that concatenation would get wrong (anything adjacency-sensitive,
+// gap_opens above all), and drops both the per-group string copy and a whole reparse.
+//
+// The state is miint::IdentityCounts itself: four counters, no allocation, and Combine is
+// four adds. On a single record the result is cigar_sequence_identity of that record,
+// including every input where that is NULL — the rules live in one place and are applied
+// once, to the sums.
+struct CigarPooledIdentityOperation {
+	template <class STATE>
+	static void Initialize(STATE &state) {
+		state = miint::IdentityCounts();
+	}
+
+	template <class INPUT_TYPE, class STATE, class OP>
+	static void Operation(STATE &state, const INPUT_TYPE &input, AggregateUnaryInput &unary_input) {
+		try {
+			std::string cigar(input.GetData(), input.GetSize());
+			state.Add(miint::ToIdentityCounts(miint::ParseCigar(cigar)));
+		} catch (const miint::InvalidInputException &e) {
+			throw InvalidInputException(e.what());
+		}
+	}
+
+	template <class INPUT_TYPE, class STATE, class OP>
+	static void ConstantOperation(STATE &state, const INPUT_TYPE &input, AggregateUnaryInput &unary_input,
+	                              idx_t count) {
+		for (idx_t i = 0; i < count; i++) {
+			Operation<INPUT_TYPE, STATE, OP>(state, input, unary_input);
+		}
+	}
+
+	template <class STATE, class OP>
+	static void Combine(const STATE &source, STATE &target, AggregateInputData &aggr_input_data) {
+		target.Add(source);
+	}
+
+	template <class T, class STATE>
+	static void Finalize(STATE &state, T &target, AggregateFinalizeData &finalize_data) {
+		auto identity = miint::ComputeCigarIdentity(state);
+		if (!identity.has_value()) {
+			finalize_data.ReturnNull();
+			return;
+		}
+		target = *identity;
+	}
+
+	// A record with no CIGAR contributes no operations, so it contributes nothing. An
+	// unmapped or empty CIGAR reaches ParseCigar and lands in the same place.
+	static bool IgnoreNull() {
+		return true;
+	}
+};
+
+AggregateFunction CigarPooledIdentityFunction::GetFunction() {
+	auto function =
+	    AggregateFunction::UnaryAggregate<miint::IdentityCounts, string_t, double, CigarPooledIdentityOperation>(
+	        LogicalType::VARCHAR, LogicalType::DOUBLE);
+	function.name = "cigar_pooled_identity";
+	// Four commutative adds; the result cannot depend on the order records arrive in. Stated
+	// explicitly because DuckDB assumes the opposite by default, which costs the window path
+	// its partial-aggregate reuse and wraps the aggregate in a sort it does not need -- and
+	// windowing this over a mate pair is a documented use.
+	function.SetOrderDependent(AggregateOrderDependent::NOT_ORDER_DEPENDENT);
+	return function;
+}
+
+void CigarPooledIdentityFunction::Register(ExtensionLoader &loader) {
+	loader.RegisterFunction(GetFunction());
+}
+
 } // namespace duckdb

@@ -1053,3 +1053,277 @@ query I
 SELECT alignment_seq_identity('10M', 20, '', 'gap_compressed') IS NULL;
 ----
 true
+
+###############################################################################
+# CIGAR QUERY INTERVALS
+###############################################################################
+
+# Unclipped alignment covers the whole read
+query I
+SELECT cigar_query_intervals('6000=', 0);
+----
+[{'start': 0, 'stop': 6000}]
+
+# Trailing soft clip is not covered
+query I
+SELECT cigar_query_intervals('3000=3000S', 0);
+----
+[{'start': 0, 'stop': 3000}]
+
+# Leading hard clip offsets the covered block
+query I
+SELECT cigar_query_intervals('3000H3000=', 0);
+----
+[{'start': 3000, 'stop': 6000}]
+
+# Reverse strand: the CIGAR's leading clip is at the read's 3' end, so the covered
+# block lands on the read's first half
+query I
+SELECT cigar_query_intervals('3000S3000=', 16);
+----
+[{'start': 0, 'stop': 3000}]
+
+query I
+SELECT cigar_query_intervals('3000=3000H', 16);
+----
+[{'start': 3000, 'stop': 6000}]
+
+# Only the reverse bit (0x10) matters; 2064 = supplementary + reverse
+query I
+SELECT cigar_query_intervals('3000=3000H', 2064) = cigar_query_intervals('3000=3000H', 16);
+----
+true
+
+# The reverse flag is genuinely consulted: the same CIGAR maps to a different part
+# of the read depending on orientation
+query I
+SELECT cigar_query_intervals('3000S3000=', 0) = cigar_query_intervals('3000S3000=', 16);
+----
+false
+
+# Both fragments of a reverse-strand origin-spanning read land on complementary halves
+# of the read -- the property that makes them poolable into one coverage figure
+query II
+SELECT (cigar_query_intervals('3000S3000=', 16))[1].stop AS primary_stop,
+       (cigar_query_intervals('3000=3000H', 2064))[1].start AS supplementary_start;
+----
+3000	3000
+
+# aligned: inserted bases are a gap in coverage
+query I
+SELECT cigar_query_intervals('100=10I100=', 0);
+----
+[{'start': 0, 'stop': 100}, {'start': 110, 'stop': 210}]
+
+# mapped: inserted bases are covered, so the block is contiguous
+query I
+SELECT cigar_query_intervals('100=10I100=', 0, 'mapped');
+----
+[{'start': 0, 'stop': 210}]
+
+# Deletions consume no query, so the runs they separate are contiguous
+query I
+SELECT cigar_query_intervals('100=10D100=', 0);
+----
+[{'start': 0, 'stop': 200}]
+
+# Interval lengths reproduce cigar_query_coverage on a single alignment -- the reason a
+# caller can adopt the pooled figure unconditionally
+query I
+SELECT list_sum(list_transform(cigar_query_intervals('10S30=5H', 0), lambda x: x.stop - x.start))::DOUBLE
+       / cigar_query_length('10S30=5H', true)
+       = cigar_query_coverage('10S30=5H', 'aligned');
+----
+true
+
+# Unmapped and empty CIGARs cover nothing (empty list, not NULL) -- consistent with
+# cigar_query_coverage returning 0.0 rather than NULL for these
+query I
+SELECT cigar_query_intervals('*', 0);
+----
+[]
+
+query I
+SELECT cigar_query_intervals('', 0);
+----
+[]
+
+# NULL propagates from either argument
+query I
+SELECT cigar_query_intervals(NULL, 0) IS NULL;
+----
+true
+
+query I
+SELECT cigar_query_intervals('10=', NULL) IS NULL;
+----
+true
+
+statement error
+SELECT cigar_query_intervals('10=', 0, 'covered');
+----
+Invalid coverage type: covered. Must be 'aligned' or 'mapped'.
+
+statement error
+SELECT cigar_query_intervals('10Z', 0);
+----
+Invalid CIGAR operation: Z
+
+# The struct fields are named start/stop so the intervals feed compress_intervals
+# directly. That composition is the whole design premise -- pooling the fragments of one
+# read on its own query axis -- so it is asserted here rather than left to a comment: a
+# rename on either side has to fail a test, not just invalidate a claim.
+statement ok
+CREATE TABLE junction_records (read_id VARCHAR, flags USMALLINT, cigar VARCHAR);
+
+statement ok
+INSERT INTO junction_records VALUES
+  ('fwd',    0, '3000=3000S'), ('fwd', 2048, '3000H3000='),
+  ('rev',   16, '3000S3000='), ('rev', 2064, '3000=3000H');
+
+query II
+SELECT read_id, compress_intervals(iv.start, iv.stop) AS pooled
+FROM (SELECT read_id, UNNEST(cigar_query_intervals(cigar, flags)) AS iv FROM junction_records)
+GROUP BY read_id ORDER BY read_id;
+----
+fwd	[{'start': 0, 'stop': 6000}]
+rev	[{'start': 0, 'stop': 6000}]
+
+# The type is validated even when the CIGAR is unmapped, so a typo'd type fails on every
+# batch rather than only on batches that happen to contain a mapped record.
+statement error
+SELECT cigar_query_intervals('*', 0, 'bogus');
+----
+Invalid coverage type: bogus
+
+# Operation lengths are individually bounded but their sum is not; a CIGAR whose query
+# length overflows must fail rather than emit an interval with stop < start.
+statement error
+SELECT cigar_query_intervals('4611686018427387904=4611686018427387904S', 16);
+----
+CIGAR query length exceeds maximum
+
+###############################################################################
+# CIGAR POOLED IDENTITY
+###############################################################################
+
+# Identity for a read the aligner reported as several fragments. Each fragment describes
+# part of one molecule, so the metric for the molecule is sum(=) / sum(alignment columns)
+# over the group -- not any fragment's own figure, and not their average.
+
+# On a single CIGAR it is cigar_sequence_identity, including every case where that returns
+# NULL. Asserted across the vocabulary rather than on one input: the two must not be
+# allowed to disagree about what identity means or when it is unknowable, because callers
+# reach for whichever one matches the shape of their data.
+query I
+SELECT bool_and(agree) FROM (
+  SELECT cigar_pooled_identity(c) IS NOT DISTINCT FROM cigar_sequence_identity(c) AS agree
+  FROM (VALUES ('100='), ('98=2X'), ('50=10I40='), ('50=10D40='), ('10S80=10H'),
+               ('100M'), ('10M20='), ('30S'), ('*'), ('')) t(c)
+  GROUP BY c
+);
+----
+true
+
+# The mismatches sit entirely in one fragment, so neither fragment's own identity is the
+# read's. This is the whole reason the aggregate exists.
+query III
+SELECT round(cigar_pooled_identity(cigar), 6),
+       round(min(cigar_sequence_identity(cigar)), 6),
+       round(max(cigar_sequence_identity(cigar)), 6)
+FROM (VALUES ('2990=10X3000S'), ('3000H3000=')) t(cigar);
+----
+0.998333	0.996667	1.0
+
+# Pooling is a sum of counters, NOT the mean of the per-record identities. Every other
+# fixture here has equal-length records, where the two coincide and an averaging
+# implementation would pass -- so this case, with a 1000-column record beside a 100-column
+# one, is what actually pins the definition. The long record dominates, as it must: it
+# accounts for ten times as many aligned columns.
+query II
+SELECT round(cigar_pooled_identity(c), 7) AS pooled,
+       round(avg(cigar_sequence_identity(c)), 7) AS unweighted_mean
+FROM (VALUES ('1000='), ('99=1X')) t(c);
+----
+0.9990909	0.995
+
+# The junction itself is not charged as a gap. The fragments are one molecule split by the
+# aligner, not an alignment containing an indel, so a perfect origin-spanning read is 1.0.
+query I
+SELECT cigar_pooled_identity(cigar) FROM (VALUES ('3000=3000S'), ('3000H3000=')) t(cigar);
+----
+1.0
+
+# Legacy M records that a base aligned but not whether it matched, so a group of them has
+# no identity to report.
+query I
+SELECT cigar_pooled_identity(cigar) IS NULL FROM (VALUES ('3000M3000S'), ('3000H3000M')) t(cigar);
+----
+true
+
+# Inconsistent encoding ACROSS fragments is as much a defect as within one CIGAR: one
+# fragment in legacy M and one extended means the =/X counts describe only part of the
+# molecule. Reporting the extended fragment's figure would silently answer a different
+# question than the caller asked.
+query I
+SELECT cigar_pooled_identity(cigar) IS NULL FROM (VALUES ('3000M3000S'), ('3000H3000=')) t(cigar);
+----
+true
+
+# Why this is an aggregate over the counts rather than
+# cigar_sequence_identity(string_agg(cigar, '')): concatenation builds a string the SAM
+# spec forbids -- clipping is legal only at the ends -- and its arithmetic only ever worked
+# because the parser does not validate structure. On a group holding an unmapped record the
+# concatenation stops being quietly invalid and fails outright, while pooling the counts is
+# unaffected. Neither implementation is asked to reason about a CIGAR that cannot exist.
+statement ok
+CREATE TABLE pooled_frags (grp VARCHAR, cigar VARCHAR);
+
+statement ok
+INSERT INTO pooled_frags VALUES ('unmapped_peer', '*'), ('unmapped_peer', '100=');
+
+query I
+SELECT cigar_pooled_identity(cigar) FROM pooled_frags GROUP BY grp;
+----
+1.0
+
+statement error
+SELECT cigar_sequence_identity(string_agg(cigar, '')) FROM pooled_frags GROUP BY grp;
+----
+Invalid CIGAR string: operation without length
+
+# A NULL CIGAR contributes nothing rather than poisoning the group; a group with nothing
+# but NULLs has no identity at all.
+statement ok
+INSERT INTO pooled_frags VALUES
+  ('some_null', NULL), ('some_null', '98=2X'), ('all_null', NULL), ('all_null', NULL);
+
+query II
+SELECT grp, cigar_pooled_identity(cigar) FROM pooled_frags
+WHERE grp IN ('some_null', 'all_null') GROUP BY grp ORDER BY grp;
+----
+all_null	NULL
+some_null	0.98
+
+# Partial states are merged, not recomputed from one thread's rows: over a group large
+# enough to be aggregated in parallel the answer must still be the whole group's. Half the
+# rows carry one mismatch in a hundred columns and half are perfect, so a Combine that
+# dropped or double-counted a partial state could not land on 0.995.
+query I
+SELECT round(cigar_pooled_identity(CASE WHEN i % 2 = 0 THEN '99=1X' ELSE '100=' END), 6)
+FROM range(100000) t(i);
+----
+0.995
+
+statement error
+SELECT cigar_pooled_identity('10Z');
+----
+Invalid CIGAR operation: Z
+
+# Operation lengths are bounded individually but their totals are not, and pooling widens that
+# from one CIGAR to a whole group. An overflowed sum has to fail rather than return a number
+# outside [0.0, 1.0] that reads like an answer -- this returned -0.5 before the guard.
+statement error
+SELECT cigar_pooled_identity(c) FROM (VALUES ('4611686018427387904='), ('4611686018427387904X')) t(c);
+----
+CIGAR operation counts exceed maximum

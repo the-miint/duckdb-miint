@@ -38,6 +38,16 @@ jobs:
       ci_tools_version: v1.5-variegata
       extension_name: miint
       extra_toolchains: 'rust;omp'
+      # mmvec compiles its objective once per instruction set and picks the widest
+      # the CPU offers at load time, and a wider kernel rounds differently -- so a
+      # fitted model, and every value carved from one, depends on which kernel ran.
+      # The carved expectations are all taken against `baseline`, which is why
+      # run_tests.sh exports it. These lanes run `make test_<type>` directly rather
+      # than through that script, so without this they resolve `auto` and fail on
+      # any runner wide enough to pick avx2/avx512. The reusable workflow feeds
+      # test_env_variables into docker_env.txt AND into the non-docker test step,
+      # so this one line covers both.
+      test_config: '{"test_env_variables": {"MIINT_SIMD": "baseline"}}'
       # Restore caches everywhere, but only SAVE on push to a tracked branch
       # or tag. The reusable workflow keys each arch's ccache with a timestamp,
       # so saving on PRs writes up to 3 fresh ~1G caches per run into the
@@ -99,7 +109,13 @@ jobs:
           # tag to lock to a specific upstream version.
           curl -fsSL https://github.com/the-miint/GPL-boundary/releases/latest/download/install.sh | sh
           echo "$HOME/.local/bin" >> $GITHUB_PATH
-          "$HOME/.local/bin/gpl-boundary" --version | head -3
+          # No smoke check here on purpose: install.sh already prints the version
+          # JSON, and `gpl-boundary --version | head -3` intermittently killed this
+          # step. `--version` emits a 25-line JSON document, so head closes the pipe
+          # after 3 lines; if the binary still has a write outstanding it panics on
+          # EPIPE ("failed printing to stdout: Broken pipe", exit 101), and this
+          # shell runs with pipefail, so the step fails and every later step —
+          # including the build and the whole test suite — is skipped.
 
       - name: Install FastTree (parity oracle)
         shell: bash -el {0}

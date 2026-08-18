@@ -1,0 +1,1137 @@
+#pragma once
+//
+// MMvec oracle: expected values for the duckdb-miint port, carved from the reference
+// implementation and committed. NOT regenerated at test time.
+//
+// Reference implementation : scikit-bio 0.7.3
+//   skbio/stats/ordination/_mmvec.py sha256
+//     45e6f1861429d22d8f002cab65319ead666f3040715994d282afc7d2d7cf5d3d
+//   (identical to the scikit-bio 0.7.3 release tag and to the analyzed working tree)
+// Oracle environment       : conda env `miint-mmvec-oracle`
+//   python 3.12.13, numpy 2.5.1, scipy 1.18.0,
+//   pandas 3.0.5, h5py 3.16.0, pyarrow 25.0.0
+//   Validated two ways before any value below was produced:
+//     1. the installed _mmvec.py hashes equal to the analyzed file (above);
+//     2. the `mmvec` docstring reproduces verbatim (20/20 doctest examples), which
+//        exercises numpy's PCG64 stream and scipy's L-BFGS-B, not just the source.
+//
+// Inputs live in data/mmvec/*.parquet (long-form COO feature tables). Tests must load
+// them with duckdb-miint's ORDERING RULE applied:
+//   features and samples in lexicographic id order; Y's first feature is the reference category (zero logit)
+// The reference category is NOT inert: permuting Y so a different feature comes first
+// changes the MAP optimum (measured: up to 31% of rank magnitude on `toy`, and a
+// genuinely lower optimum). See "measured model behavior" at the end of this file.
+//
+// Priors for every value here: x_prior_mean=0.0,
+//   x_prior_scale=1.0, y_prior_mean=0.0,
+//   y_prior_scale=1.0
+// Parameter packing order (theta): [x_main (d1 x p), x_bias (d1), y_main (p x d2-1),
+//   y_bias (d2-1)], all C-order row-major.
+// Theta recipe (committed verbatim below, reproduced here only for traceability):
+//   numpy.random.default_rng(seed).standard_normal(n_params), seed=20260804
+//
+// TIERS
+//   T1  fixed-theta, optimizer-free: loss, gradient, logits, ranks, probs, predict,
+//       score. Exactly reproducible by any correct implementation -> tightest tier.
+//       Cross-checked against an independent per-(sample, X-feature) re-derivation
+//       before carving: loss agreed to 1.1e-16 relative, gradient to 5.5e-6 vs finite
+//       differences of that independent implementation.
+//   T2  converged, using scikit-bio's OWN stopping rule (L-BFGS-B, ftol=1e-9,
+//       gtol=1e-5, maxiter=max_iter). Compare within kT2RankTol -- see the tolerance
+//       note below; do not expect more.
+//   T3  Adam with the minibatch index sequence supplied as INPUT (kAdamIndexBlocks),
+//       which removes the RNG stream from the comparison and makes Adam exactly
+//       reproducible.
+//   T4  real data: robust functionals only (counts, Q-squared bands, invariants).
+//
+// TOLERANCE NOTE (measured, not guessed). scikit-bio hard-codes ftol=1e-9/gtol=1e-5.
+// Under that rule the converged ranks depend on the starting point:
+//   max|dranks| across 4 inits: toy 4.084e-04, synth_a 2.580e-04, synth_b 1.268e-03
+// The optimum itself is effectively unique -- at ftol=1e-16/gtol=1e-10 the same spread
+// is toy 2.149e-07, synth_a 1.164e-07, synth_b 6.872e-07 -- so the spread is an
+// artifact of the stopping rule, not of multiple optima. duckdb-miint deliberately
+// matches scikit-bio's stopping rule, so T2 comparisons must use the loose band.
+
+#include <string>
+#include <vector>
+
+namespace miint::mmvec_oracle {
+
+inline const std::string kFixtureDir = "data/mmvec";
+
+// Comparison tolerances. T1 is optimizer-free so it is bounded only by floating-point
+// summation order. T2/T3 bands come from the measurements quoted in the header.
+inline constexpr double kT1Tol = 1e-10;        // absolute, on all T1 quantities
+inline constexpr double kT1LossRelTol = 1e-12; // relative, on the T1 loss
+inline constexpr double kT3RelTol = 1e-9;      // relative, Adam with fixed indices
+// `ranks` is row-centered by construction, so every row must sum to zero regardless of
+// how well the optimizer converged. This is an invariant, not a fitted quantity.
+inline constexpr double kRowCenteringTol = 1e-10;
+
+// How far apart the instruction-set variants of the kernel may be, evaluating the SAME
+// theta. Not a parity band against another implementation -- these are the same source
+// compiled at different packet widths, so the gap is purely floating-point: fused
+// multiply-add where the baseline rounds twice, a different reduction order, and
+// Eigen's packet `exp` polynomial in place of glibc's scalar one.
+//
+// MEASURED on soils and cf at seed 0, taking the worse of avx2 and avx512 against
+// baseline: loss 3.2e-16 relative, gradient 9.6e-10 max relative, logits 1.2e-10 max
+// relative. Carved with roughly an order of magnitude of headroom -- tight enough that
+// losing FMA-level agreement fails, loose enough to survive another CPU or Eigen point
+// release. The relative measure is per element, so it is dominated by gradient entries
+// near zero; that is deliberate, being the hardest case.
+inline constexpr double kIsaLossRelTol = 1e-12;
+inline constexpr double kIsaGradRelTol = 1e-8;
+inline constexpr double kIsaLogitsRelTol = 1e-8;
+
+// Adam hyperparameters, identical for every case's oracle run below (they are
+// scikit-bio's defaults). A future case needing different values must define its own in
+// its namespace and say so, rather than silently inheriting these.
+inline constexpr double kAdamLearningRate = 0.001;
+inline constexpr double kAdamBeta1 = 0.9;
+inline constexpr double kAdamBeta2 = 0.95;
+inline constexpr double kAdamClipnorm = 10.0;
+
+// ===================================================================== toy
+namespace toy {
+inline const std::string kFixtureX = "toy_x";
+inline const std::string kFixtureY = "toy_y";
+inline const std::string kFixturePredictX = "toy_x_test";
+inline const std::string kFixtureScoreY = "toy_y_test";
+inline constexpr int kNSamples = 5;
+inline constexpr int kNFeaturesX = 8;
+inline constexpr int kNFeaturesY = 6;
+inline constexpr int kNComponents = 3;
+inline constexpr int kNParams = 52;
+
+// Feature ids in the order the ordering rule requires (Y[0] is the reference).
+inline const std::vector<std::string> kXIds = {
+    "O1", "O2", "O3", "O4", "O5", "O6", "O7", "O8",
+};
+inline const std::vector<std::string> kYIds = {
+    "C1", "C2", "C3", "C4", "C5", "C6",
+};
+
+// ---- Inputs. Carried here as literals so the pure-core tests need no file I/O
+// (a DuckDB-free target cannot read the parquet fixtures) and provably see the
+// same numbers the oracle consumed. Equivalent to reading the fixture named
+// above and applying the ordering rule. Dense, row-major, samples x features.
+inline const std::vector<std::string> kSampleIds = {
+    "S1", "S2", "S3", "S4", "S5",
+};
+// 40 values
+inline const std::vector<double> kXCounts = {
+    1.0, 0.0, 0.0, 7.0, 0.0, 2.0, 1.0, 0.0, 0.0, 1.0, 2.0, 9.0, 1.0, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0, 6.0,
+    0.0, 0.0, 2.0, 0.0, 1.0, 2.0, 1.0, 8.0, 3.0, 1.0, 0.0, 2.0, 0.0, 1.0, 3.0, 3.0, 1.0, 4.0, 1.0, 0.0,
+};
+// 30 values
+inline const std::vector<double> kYCounts = {
+    0.0, 1.0, 0.0, 1.0, 1.0, 2.0, 1.0, 0.0, 2.0, 1.0, 5.0, 0.0, 0.0, 3.0, 1.0,
+    0.0, 1.0, 1.0, 3.0, 1.0, 0.0, 2.0, 2.0, 0.0, 0.0, 0.0, 4.0, 1.0, 7.0, 3.0,
+};
+// Held-out samples for predict/score (kFixturePredictX / kFixtureScoreY).
+inline const std::vector<std::string> kPredictSampleIds = {
+    "S6",
+    "S7",
+    "S8",
+};
+// 24 values
+inline const std::vector<double> kPredictXCounts = {
+    3.0, 0.0, 2.0, 6.0, 1.0, 4.0, 4.0, 0.0, 2.0, 1.0, 5.0, 0.0,
+    0.0, 3.0, 6.0, 1.0, 8.0, 4.0, 1.0, 1.0, 5.0, 0.0, 5.0, 1.0,
+};
+// 18 values
+inline const std::vector<double> kScoreYCounts = {
+    0.0, 5.0, 1.0, 1.0, 8.0, 0.0, 1.0, 0.0, 5.0, 3.0, 2.0, 3.0, 4.0, 1.0, 0.0, 1.0, 6.0, 3.0,
+};
+
+// ---- T1: given kTheta, an implementation must reproduce all of the below.
+// 52 values
+inline const std::vector<double> kTheta = {
+    -0.5721975555132527,   1.2089496331620018,   0.08397991870054435,  1.2836020389403422,   0.6335162113605605,
+    -1.8188626523197196,   0.4673806127809242,   0.2529824214326896,   -0.19773326660002266, -0.7706383147004933,
+    0.3303445359073165,    1.1570154221200055,   -0.40890914399147865, -1.4903507743958617,  -0.365108054047986,
+    -0.4605053118162978,   1.4163220426797019,   -1.0014294607331993,  -0.7918986545729729,  -1.8744875972601482,
+    0.7088901725445899,    -0.19287452976777875, -2.42573021450208,    -0.9987049819576244,  1.0176085488389561,
+    0.276744409694671,     -1.6872222518253686,  -2.390767649946256,   -0.08125688425450912, -0.8474219637894537,
+    0.4892923150967331,    0.5545163664726702,   0.6437810357387733,   -0.4530281177871468,  0.8167737539396377,
+    -0.052068440809039676, 0.6411702740513423,   -0.7237880887841642,  -0.6397671091221866,  -0.23870093824276398,
+    1.3116080076658423,    -0.3823823840487058,  -0.8164626401785496,  0.46416120762770485,  -2.1427549273060906,
+    -0.702799800523929,    -1.2087255221341275,  -0.8781861173405375,  -1.058754126085832,   1.7338424358002857,
+    -0.7357116841015575,   0.5601729647956318,
+};
+inline constexpr double kT1Loss = 2025.2986145118552;
+// 52 values
+inline const std::vector<double> kT1Grad = {
+    -0.5769423929455866, 12.340263381244533,  -10.108447944013962, 28.876620925812848,  -22.004292142055746,
+    -58.90007835685686,  37.01459786335367,   -37.3675357142275,   -59.94068032720921,  -46.61399157201577,
+    -61.86459507486046,  172.1405222663117,   24.77146890420343,   -30.205076757383956, -45.845460676611175,
+    41.27584382686854,   -21.56493876386013,  -86.43013611176734,  -3.8688032996233277, -17.242852262535767,
+    7.526059315443508,   14.869313628754526,  -17.476138191616705, -30.691969446936355, 2.4788558574914736,
+    7.23460026322207,    -15.977596875507738, -197.66073729284335, 7.277385571819577,   -2.59967606610402,
+    -3.1413630879308356, 7.400082345147689,   29.996439759142877,  5.708992284890365,   39.97279944785787,
+    56.69804509489312,   20.471505953171366,  -16.55940808209296,  -46.58091148244305,  19.659406866099964,
+    -3.4418785914397207, -38.94592371851535,  -33.60197228004829,  15.49710614679812,   -171.42277984123626,
+    -37.2066124250126,   -23.652053432645708, -50.465996600617466, -61.768904532583534, 136.6546142684663,
+    -188.99977130012078, -28.118520537069074,
+};
+// row-major (kNFeaturesX x kNFeaturesY); column 0 is the zero reference logit
+// 48 values
+inline const std::vector<double> kT1Logits = {
+    0.0, -1.1725373140039657, -0.5163899870721613, 1.8155692429132269,  1.8383372488969232,  0.647115736151256,
+    0.0, 1.2514188578602212,  -2.6130658524138854, 6.80515529771217,    1.5834188138435463,  3.616185115452406,
+    0.0, -2.2861814325909533, -3.2113428814415057, 0.7916711915392188,  -1.9764890456255508, -0.6851095069621546,
+    0.0, -4.948835406260707,  -2.774702844005298,  -3.8444164107548326, -3.466221067858009,  -3.849537065998548,
+    0.0, 0.15410427053951514, -0.1707552592601902, 2.4566845049571953,  -2.493835449169868,  1.227934998072858,
+    0.0, -2.22955995064551,   -3.0684952019112712, 2.318032330663482,   1.002307903533962,   0.08636543257146045,
+    0.0, -0.1207536846867745, 1.3175653757184964,  0.5047967521133403,  -3.1619872554768595, 0.4016407948842772,
+    0.0, 2.123281226779657,   0.6714821219296971,  4.8498280476954925,  -2.650870153267939,  3.125740619414539,
+};
+// 48 values
+inline const std::vector<double> kT1Ranks = {
+    -0.43534915448087985, -1.6078864684848455, -0.9517391415530412,  1.380220088432347,   1.4029880944160433,
+    0.2117665816703761,   -1.7738520387424097, -0.5224331808821885,  -4.386917891156295,  5.03130325896976,
+    -0.19043322489886338, 1.8423330767099964,  1.2279086125134908,   -1.0582728200774625, -1.9834342689280149,
+    2.0195798040527095,   -0.74858043311206,   0.5427991055513363,   3.147285465812899,   -1.8015499404478077,
+    0.37258262180760093,  -0.6971309449419336, -0.31893560204510996, -0.7022516001856491, -0.19568884418991836,
+    -0.04158457365040322, -0.3664441034501086, 2.2609956607672768,   -2.6895242933597867, 1.0322461538829397,
+    0.31522491429797944,  -1.9143350363475304, -2.753270287613292,   2.6332572449614613,  1.3175328178319414,
+    0.4015903468694399,   0.17645633624125337, 0.05570265155447887,  1.4940217119597499,  0.6812530883545936,
+    -2.985530919235606,   0.5780971311255305,  -1.3532436437585744,  0.7700375830210824,  -0.6817615218288773,
+    3.496584403936918,    -4.0041137970265135, 1.7724969756559648,
+};
+// 48 values
+inline const std::vector<double> kT1Probs = {
+    0.061550107653899164,  0.01905470947724296,   0.036725142953984005,  0.3781991257409249,    0.38690873973146983,
+    0.11756217444247913,   0.001053603661815173,  0.0036826595863386343, 7.723909753124013e-05, 0.9508645702540445,
+    0.005132717062636254,  0.03918921033763436,   0.2505243457621087,    0.02546677526639589,   0.010096746295967464,
+    0.5529277245766827,    0.034711361664404514,  0.12627304643444068,   0.874597584838686,     0.006202351356907088,
+    0.054546908261473244,  0.0187154140817609,    0.027317917611482945,  0.018619823849689784,  0.055028282165123274,
+    0.06419668313450222,   0.04639037558545762,   0.641963712307725,     0.0045449277234886395, 0.1878760190837032,
+    0.06611786324499518,   0.0071126792800325625, 0.0030738896733043283, 0.6714713079632173,    0.18014225776103038,
+    0.07208200207742015,   0.11345798134461174,   0.10055238900130509,   0.4236882543708413,    0.18796002590814717,
+    0.0048039827069055775, 0.1695373666681892,    0.0061773608529994955, 0.05163358643250054,   0.012089934606842863,
+    0.7889628079442211,    0.0004360584349718626, 0.14070025172846434,
+};
+// row-major (3 samples x kNFeaturesY) over kFixturePredictX
+// 18 values
+inline const std::vector<double> kT1Predict = {
+    0.33533080920207914, 0.032008437168290806, 0.11055446613923833, 0.32162171793299443, 0.10691931688936743,
+    0.09356525266802991, 0.12566968813532292,  0.04696732850851293, 0.14930291035206333, 0.46683546288344796,
+    0.08456631848928303, 0.12665829163136977,  0.09881383539523694, 0.04296865551592553, 0.10884947355871101,
+    0.4935710369850241,  0.12900042703860537,  0.1267965715064971,
+};
+inline constexpr double kT1Score = -2.0072764362887527;
+
+// ---- T2: converged under scikit-bio's stopping rule (ftol=1e-9, gtol=1e-5).
+inline constexpr int kT2MaxIter = 100;
+inline constexpr double kT2FinalLoss = 959.8658591339574;
+inline constexpr int kT2NumEvals = 69; // objective evaluations, not iterations
+// 48 values
+inline const std::vector<double> kT2Ranks = {
+    -0.227587753417512,   0.6908345802970584,   -0.5216936876022276, -0.2906535849131672,  0.3663463665442249,
+    -0.01724592090837679, 0.20220677004639306,  -0.8590879387950286, 0.05357602879723902,  0.070049472728624,
+    1.0859584992746478,   -0.552702832051875,   -0.6021313746731568, -0.8582741559000031,  0.5108974240945926,
+    -0.3124938909466354,  1.2386129871284766,   0.02338901029672591, -0.17977227988053116, -0.184049992221512,
+    -0.07416786853775062, -0.11428869845556079, 0.8664109876442508,  -0.3141321485488964,  0.3684234101123714,
+    -0.7096293547744785,  -0.1091861564303695,  0.16497256751052888, 1.0105270829506405,   -0.7251075493686929,
+    -0.8325882196945954,  -1.1194493105253227,  0.5310695134566134,  -0.1887012889726971,  1.2363204889765136,
+    0.37334881675948905,  -1.3553755005447528,  0.4114690694648586,  0.2663950010555036,   -0.6343100757991519,
+    0.8285488300272981,   0.48327267579624356,  0.7246094589428879,  -0.44133949351749757, -0.34687717808487106,
+    0.4593381421340787,   1.0356828835747676,   -1.4314138130493665,
+};
+// 48 values
+inline const std::vector<double> kT2Probs = {
+    0.1214386117059642,   0.3042443664055564,   0.09049575535610908, 0.11401648579232788,  0.21993740906205336,
+    0.14986737167798891,  0.16738886987816604,  0.057917811287593,   0.14427034371720732,  0.1466666567079964,
+    0.4050746604432405,   0.0786816579657968,   0.06981298595469966, 0.054037446310514096, 0.21248020613545063,
+    0.0932661768149662,   0.4399074656534491,   0.1304957191309204,  0.12664914328644655,  0.12610853179783296,
+    0.1407555958146359,   0.13522015033350604,  0.3605403504297588,  0.11072622833781955,  0.19952361145831177,
+    0.06788939369754024,  0.1237573775154752,   0.16279337194960508, 0.3791895664398535,   0.0668466789392141,
+    0.053132082921934144, 0.039881790972151436, 0.20777144991582402, 0.1011564041159375,   0.42060310797182904,
+    0.17745516410232376,  0.03431691566898091,  0.20083485848938934, 0.1737137626484605,   0.0705769656400929,
+    0.3047716267437119,   0.21578587080936448,  0.2562921204039887,  0.07986749402729468,  0.08777978651625995,
+    0.196575498233106,    0.34981040715976125,  0.02967469365958949,
+};
+inline constexpr double kT2Score = 0.02289301473436267;
+// measured max|dranks| across 4 inits under this stopping rule: 4.084e-04
+inline constexpr double kT2RankTol = 0.01;
+// for reference only, NOT a target: the tight optimum is 959.865857078414
+// (|g|inf = 5.41e-07 after 117 iterations)
+
+// ---- T3: Adam driven by a committed minibatch index sequence.
+inline constexpr int kAdamBatchSize = 10;
+inline constexpr int kAdamEpochs = 5;
+inline constexpr int kAdamNumUpdates = 10;
+// learning rate / betas / clipnorm: see the shared constants above.
+// kAdamNumUpdates blocks of kAdamBatchSize indices into the nonzero X entries,
+// ordered by (sample_id, feature_id) as scipy's coo_array yields them.
+inline const std::vector<int> kAdamIndexBlocks = {
+    17, 25, 26, 13, 23, 6,  1,  1,  3,  17, 22, 10, 12, 6,  22, 12, 25, 8,  14, 17, 18, 2,  17, 6,  12,
+    18, 5,  17, 15, 6,  26, 19, 1,  15, 17, 17, 23, 7,  2,  17, 13, 8,  6,  7,  17, 1,  11, 23, 1,  12,
+    23, 17, 13, 1,  18, 1,  6,  6,  12, 17, 22, 25, 14, 12, 17, 12, 2,  1,  20, 14, 25, 23, 25, 17, 1,
+    6,  17, 11, 6,  17, 20, 18, 17, 17, 1,  25, 25, 17, 17, 6,  7,  6,  23, 17, 25, 25, 18, 12, 10, 15,
+};
+// batch_norm = 'unbiased'
+inline constexpr double kAdamUnbiasedFinalLoss = 2242.1334622168906;
+// 10 values
+inline const std::vector<double> kAdamUnbiasedLossCurve = {
+    1946.5817952331365, 2056.2799005993775, 1699.5260124249985, 1967.9525923278243, 1815.785587741591,
+    1752.8473230935608, 1812.0006457564614, 2045.703281774279,  1883.9255527725309, 2242.1334622168906,
+};
+// 48 values
+inline const std::vector<double> kAdamUnbiasedRanks = {
+    -0.43948736835352026, -1.5974045106827237, -0.9342955122990035, 1.3500690761544494,  1.3986340271622604,
+    0.2224842880185373,   -1.7512511675968385, -0.5335140499422282, -4.352050506177264,  4.994191642557746,
+    -0.19139521130407955, 1.8340192924626644,  1.2277469846099616,  -1.0596724038269583, -1.964354759902475,
+    1.9924094137548343,   -0.7362436762098248, 0.5401144415744625,  3.114762121342986,   -1.7883241503754732,
+    0.3458348593065437,   -0.6900973927746499, -0.2976992636765834, -0.6844761738228256, -0.18662241053063866,
+    -0.04548408243244895, -0.3608217853475073, 2.242397040959531,   -2.6679312023781097, 1.018462439729174,
+    0.31468539120831673,  -1.9174897331932086, -2.719692805898436,  2.586043835823665,   1.3324906398846914,
+    0.4039626721749711,   0.15952929348580244, 0.06355865511597578, 1.4677469142317363,  0.6950740027505445,
+    -2.96304427224261,    0.5771354066585507,  -1.334166496442516,  0.7635811979029816,  -0.6822647598185476,
+    3.4861100292375946,   -3.9855871248402774, 1.7523271539607628,
+};
+// batch_norm = 'legacy'
+inline constexpr double kAdamLegacyFinalLoss = 190.31637708416378;
+// 10 values
+inline const std::vector<double> kAdamLegacyLossCurve = {
+    168.84359937443168, 176.87596132328983, 150.59760892879194, 170.30006205557345, 159.1007527898412,
+    154.4362021455635,  158.7558988235802,  175.94542380405844, 164.00718750403422, 190.31637708416378,
+};
+// 48 values
+inline const std::vector<double> kAdamLegacyRanks = {
+    -0.44035382642973575, -1.5899934230868396,  -0.9434496906675691, 1.3590374663703573,  1.3879317160872704,
+    0.22682775772651653,  -1.7486548547193872,  -0.5314197070144611, -4.336119712821861,  4.985274935578973,
+    -0.19909840263997114, 1.830017741616709,    1.22636049610493,    -1.0588124455345624, -1.959899104900676,
+    1.9900799314959274,   -0.7368020040688019,  0.539073126903183,   3.11463027459244,    -1.7870172046387487,
+    0.34096753269790847,  -0.6867828799519797,  -0.2983796155788734, -0.6834181071207484, -0.18669710520172886,
+    -0.04773034180274757, -0.36263908982201654, 2.2433804372694737,  -2.6633049993517415, 1.0169910989087612,
+    0.31075960448894074,  -1.9121514365202334,  -2.7164111757697835, 2.589386799648474,   1.3239991005995906,
+    0.404417107553011,    0.16231254931504022,  0.06104029904558059, 1.4550386526640489,  0.7018920930160687,
+    -2.958445131616368,   0.5781615375756293,   -1.3325228835745655, 0.759248691241539,   -0.6818334569395781,
+    3.484632689272753,    -3.978663160255784,   1.7491381202556346,
+};
+} // namespace toy
+
+// ===================================================================== synth_a
+namespace synth_a {
+inline const std::string kFixtureX = "synth_a_x";
+inline const std::string kFixtureY = "synth_a_y";
+inline const std::string kFixturePredictX = "synth_a_x";
+inline const std::string kFixtureScoreY = "synth_a_y";
+inline constexpr int kNSamples = 8;
+inline constexpr int kNFeaturesX = 4;
+inline constexpr int kNFeaturesY = 6;
+inline constexpr int kNComponents = 2;
+inline constexpr int kNParams = 27;
+
+// Feature ids in the order the ordering rule requires (Y[0] is the reference).
+inline const std::vector<std::string> kXIds = {
+    "x_feature_0",
+    "x_feature_1",
+    "x_feature_2",
+    "x_feature_3",
+};
+inline const std::vector<std::string> kYIds = {
+    "y_feature_0", "y_feature_1", "y_feature_2", "y_feature_3", "y_feature_4", "y_feature_5",
+};
+
+// ---- Inputs. Carried here as literals so the pure-core tests need no file I/O
+// (a DuckDB-free target cannot read the parquet fixtures) and provably see the
+// same numbers the oracle consumed. Equivalent to reading the fixture named
+// above and applying the ordering rule. Dense, row-major, samples x features.
+inline const std::vector<std::string> kSampleIds = {
+    "sample_0", "sample_1", "sample_2", "sample_3", "sample_4", "sample_5", "sample_6", "sample_7",
+};
+// 32 values
+inline const std::vector<double> kXCounts = {
+    2.0, 3.0, 2.0, 3.0, 1.0, 4.0, 2.0, 3.0, 3.0, 3.0, 1.0, 3.0, 1.0, 4.0, 2.0, 3.0,
+    2.0, 4.0, 2.0, 2.0, 2.0, 3.0, 3.0, 2.0, 3.0, 3.0, 1.0, 3.0, 1.0, 2.0, 3.0, 4.0,
+};
+// 48 values
+inline const std::vector<double> kYCounts = {
+    14.0, 10.0, 12.0, 19.0, 20.0, 25.0, 14.0, 13.0, 10.0, 11.0, 21.0, 31.0, 7.0,  21.0, 14.0, 13.0,
+    25.0, 20.0, 11.0, 15.0, 20.0, 9.0,  15.0, 30.0, 11.0, 20.0, 12.0, 7.0,  24.0, 26.0, 9.0,  13.0,
+    12.0, 9.0,  23.0, 34.0, 14.0, 22.0, 9.0,  19.0, 19.0, 17.0, 11.0, 7.0,  15.0, 14.0, 14.0, 39.0,
+};
+// predict/score for this case reuse kXCounts / kYCounts (see the fixture
+// names above), so no separate input arrays are carved.
+
+// ---- T1: given kTheta, an implementation must reproduce all of the below.
+// 27 values
+inline const std::vector<double> kTheta = {
+    -0.5721975555132527, 1.2089496331620018,   0.08397991870054435,  1.2836020389403422,   0.6335162113605605,
+    -1.8188626523197196, 0.4673806127809242,   0.2529824214326896,   -0.19773326660002266, -0.7706383147004933,
+    0.3303445359073165,  1.1570154221200055,   -0.40890914399147865, -1.4903507743958617,  -0.365108054047986,
+    -0.4605053118162978, 1.4163220426797019,   -1.0014294607331993,  -0.7918986545729729,  -1.8744875972601482,
+    0.7088901725445899,  -0.19287452976777875, -2.42573021450208,    -0.9987049819576244,  1.0176085488389561,
+    0.276744409694671,   -1.6872222518253686,
+};
+inline constexpr double kT1Loss = 24488.179433034456;
+// 27 values
+inline const std::vector<double> kT1Grad = {
+    -539.3847448500944,  1093.432565753692,   -644.8866278772364,  1753.9030905941333,  -626.4617391063373,
+    -2286.483556464107,  -570.2877045658361,  -374.1618133430783,  -135.51182330578135, -661.8210346643746,
+    164.68092436860178,  63.54825408835948,   -168.2015146737443,  -188.26383863921407, 1193.0384749464436,
+    -345.25683524658353, -337.43419259345427, -493.8731989233051,  -186.47807075874346, -2693.0925879853635,
+    2601.97002485834,    -526.9387682828075,  -1147.5639196761122, -796.1572374967644,  1655.281934406745,
+    1614.3387506678991,  -1899.3395002814405,
+};
+// row-major (kNFeaturesX x kNFeaturesY); column 0 is the zero reference logit
+// 24 values
+inline const std::vector<double> kT1Logits = {
+    0.0, -3.6001644476741843, -1.30102876653853,    -1.2373718748109863, 1.199523670866732,   -2.928547121075303,
+    0.0, -4.516145583522949,  -2.910985561171157,   -2.18978761236891,   0.3773657672096828,  -2.586492096197412,
+    0.0, -0.5329736052266414, -0.17216693501883662, 4.526086696501578,   -0.9740224942891234, -0.10880246259481652,
+    0.0, -1.713175048542852,  -0.7385870571964412,  1.5297671336263465,  1.3978653293692722,  0.08296076892406234,
+};
+// 24 values
+inline const std::vector<double> kT1Ranks = {
+    1.3112647565387119,  -2.288899691135472,  0.010235990000181827, 0.07389288172772557,   2.510788427405444,
+    -1.6172823645365912, 1.9710075143417907,  -2.5451380691811583,  -0.9399780468293661,   -0.2187800980271195,
+    2.3483732815514733,  -0.6154845818556214, -0.4563535332286934,  -0.9893271384553348,   -0.62852046824753,
+    4.069733163272884,   -1.4303760275178168, -0.56515599582351,    -0.09313852103006463,  -1.8063135695729167,
+    -0.8317255782265058, 1.436628612596282,   1.3047268083392076,   -0.010177752106002289,
+};
+// 24 values
+inline const std::vector<double> kT1Probs = {
+    0.2015427266927874,  0.005505992003391774, 0.05487032288015843,  0.05847676683524646,  0.668826759989384,
+    0.01077743159903176, 0.368865537057567,    0.004032097031736904, 0.020074425028302905, 0.04129100035099587,
+    0.5379673909044581,  0.027769549626939224, 0.010405887604565822, 0.006106771005962944, 0.008760078155498119,
+    0.9614652839968076,  0.003928859842978068, 0.00933311939418746,  0.0876559831885917,   0.015803711583150196,
+    0.04188102306198738, 0.4047165740424151,   0.3547045539885966,   0.09523815413525895,
+};
+// row-major (8 samples x kNFeaturesY) over kFixturePredictX
+// 48 values
+inline const std::vector<double> kT1Predict = {
+    0.17934617893331825,  0.008273295186337074,  0.03131271463421839,  0.3377906824844341,   0.40235270743438883,
+    0.0409244213273033,   0.19607845996979623,   0.008125905689171587, 0.02783312484903284,  0.33607210583600905,
+    0.3892667705258963,   0.04262363313009404,   0.19845986284214043,  0.008213217286079957, 0.03592373910668443,
+    0.24749183076827802,  0.4688424974490294,    0.04106885254778773,  0.19607845996979623,  0.008125905689171587,
+    0.02783312484903284,  0.33607210583600905,   0.3892667705258963,   0.04262363313009404,  0.2074671343202158,
+    0.007096133731195745, 0.029132054830849945,  0.30144812511529223,  0.420678991125975,    0.03417756087647132,
+    0.17162116937491567,  0.0073036011286183485, 0.02800062014356947,  0.3934655534798734,   0.3672751380198269,
+    0.03233391785319615,  0.19845986284214043,   0.008213217286079957, 0.03592373910668443,  0.24749183076827802,
+    0.4688424974490294,   0.04106885254778773,   0.13211153963759856,  0.00951053454173552,  0.02888234996512081,
+    0.46443209156973214,  0.3175366337281621,    0.04752685055765084,
+};
+inline constexpr double kT1Score = -15.143994805699169;
+
+// ---- T2: converged under scikit-bio's stopping rule (ftol=1e-9, gtol=1e-5).
+inline constexpr int kT2MaxIter = 200;
+inline constexpr double kT2FinalLoss = 13895.943559084943;
+inline constexpr int kT2NumEvals = 113; // objective evaluations, not iterations
+// 24 values
+inline const std::vector<double> kT2Ranks = {
+    -0.35857241199466666, 0.047420751236655734, -0.23903860380397762,  -0.18282039355752916, 0.268809990597978,
+    0.4642006675215398,   -0.32211909890029217, -0.023473736034560544, -0.20169434433333827, -0.2607605708132745,
+    0.2564125420607469,   0.5516352080207187,   -0.3238283085668048,   -0.1253127940610669,  -0.15573714898153868,
+    -0.26203779175649916, 0.21916517235113242,  0.647750871014777,     -0.32201324469126136, -0.081744197540456,
+    -0.19198554021258324, -0.19192372396648322, 0.2166355626777292,    0.5710311437330545,
+};
+// 24 values
+inline const std::vector<double> kT2Probs = {
+    0.11149001539607782, 0.1673233557250296,  0.12564605252530228, 0.13291197371182895, 0.2087875946120457,
+    0.2538410080297157,  0.11469739137121944, 0.15461569386078064, 0.12937588898600133, 0.12195544936524948,
+    0.204553370480774,   0.2748022059359751,  0.11325490289219105, 0.13812465445395442, 0.1339855844801504,
+    0.12047371217205022, 0.19492883378256254, 0.2992323122190914,  0.11486825131332296, 0.1460654600907358,
+    0.13081884915629133, 0.13082693613641613, 0.19684854741786428, 0.28057195588536954,
+};
+inline constexpr double kT2Score = 0.06000986061868807;
+// measured max|dranks| across 4 inits under this stopping rule: 2.580e-04
+inline constexpr double kT2RankTol = 0.01;
+// for reference only, NOT a target: the tight optimum is 13895.943065103787
+// (|g|inf = 5.75e-06 after 288 iterations)
+
+// ---- T3: Adam driven by a committed minibatch index sequence.
+inline constexpr int kAdamBatchSize = 8;
+inline constexpr int kAdamEpochs = 4;
+inline constexpr int kAdamNumUpdates = 16;
+// learning rate / betas / clipnorm: see the shared constants above.
+// kAdamNumUpdates blocks of kAdamBatchSize indices into the nonzero X entries,
+// ordered by (sample_id, feature_id) as scipy's coo_array yields them.
+inline const std::vector<int> kAdamIndexBlocks = {
+    19, 30, 31, 16, 29, 10, 2,  1,  5,  22, 27, 12, 13, 9,  27, 15, 30, 11, 17, 19, 23, 5,  21, 8,  15, 23,
+    5,  20, 18, 9,  31, 24, 0,  18, 21, 21, 29, 11, 4,  22, 16, 11, 6,  11, 22, 1,  13, 29, 3,  15, 29, 21,
+    17, 3,  23, 1,  8,  8,  15, 19, 26, 31, 17, 15, 22, 15, 5,  1,  24, 17, 31, 28, 30, 20, 1,  7,  21, 13,
+    7,  22, 25, 24, 21, 19, 0,  31, 31, 22, 20, 8,  11, 11, 29, 20, 31, 30, 22, 14, 13, 17, 9,  22, 31, 31,
+    21, 20, 13, 1,  8,  31, 23, 15, 17, 11, 29, 17, 9,  25, 17, 20, 9,  1,  9,  30, 22, 24, 31, 1,
+};
+// batch_norm = 'unbiased'
+inline constexpr double kAdamUnbiasedFinalLoss = 25249.86453289461;
+// 16 values
+inline const std::vector<double> kAdamUnbiasedLossCurve = {
+    26029.10894572986,  23872.6430301454,   22876.1557781446,   23509.97075814787,
+    26084.356868180646, 25466.174472274324, 20552.737761671728, 22438.398058104263,
+    23851.363185492894, 24897.156959404914, 22975.613365996665, 22959.736822216684,
+    26819.475462091843, 21637.75813794366,  23182.152341925444, 25249.86453289461,
+};
+// 24 values
+inline const std::vector<double> kAdamUnbiasedRanks = {
+    1.2898505113973304,  -2.266430297412886,  0.012151645810574374, 0.09928855331734443,  2.4458680079494695,
+    -1.5807284210618324, 1.943596480885948,   -2.5168258124155836,  -0.9323052581956042,  -0.20612985738052214,
+    2.284033842389411,   -0.5723693952836479, -0.431429616064605,   -0.994991615024621,   -0.6433782409818569,
+    3.9960382745112515,  -1.3953460257380885, -0.5308927767020801,  -0.08089417435858752, -1.7996202554818452,
+    -0.8370248866197108, 1.3872014362734273,  1.2955667907914163,   0.03477108939529956,
+};
+// batch_norm = 'legacy'
+inline constexpr double kAdamLegacyFinalLoss = 2538.6011232304154;
+// 16 values
+inline const std::vector<double> kAdamLegacyLossCurve = {
+    2616.7618921531875, 2401.1031780397066, 2301.438678858724,  2364.8040430975016,
+    2622.226716974553,  2560.3940636707025, 2069.0312299836005, 2257.5819616837675,
+    2398.860248103407,  2503.424931836145,  2311.25486418798,   2309.651635404222,
+    2695.616569404421,  2177.4202756070804, 2331.8421769502097, 2538.6011232304154,
+};
+// 24 values
+inline const std::vector<double> kAdamLegacyRanks = {
+    1.2897875356823658,  -2.266395572904682,  0.012200257021061534, 0.0993153483518201,   2.445751352022224,
+    -1.580658920172789,  1.9435399783724172,  -2.5167759758192236,  -0.9322025473517477,  -0.206139177249959,
+    2.2839898069406943,  -0.5724120848921799, -0.4313248650703397,  -0.9950207491778047,  -0.6434628605486321,
+    3.9960031513404966,  -1.3952225369295737, -0.5309721396141458,  -0.08014541643838295, -1.7997365298694228,
+    -0.8371256483980907, 1.3870442369760128,  1.2954248530215935,   0.034538504708289855,
+};
+} // namespace synth_a
+
+// ===================================================================== synth_b
+namespace synth_b {
+inline const std::string kFixtureX = "synth_b_x";
+inline const std::string kFixtureY = "synth_b_y";
+inline const std::string kFixturePredictX = "synth_b_x";
+inline const std::string kFixtureScoreY = "synth_b_y";
+inline constexpr int kNSamples = 50;
+inline constexpr int kNFeaturesX = 8;
+inline constexpr int kNFeaturesY = 10;
+inline constexpr int kNComponents = 3;
+inline constexpr int kNParams = 68;
+
+// Feature ids in the order the ordering rule requires (Y[0] is the reference).
+inline const std::vector<std::string> kXIds = {
+    "x_feature_0", "x_feature_1", "x_feature_2", "x_feature_3",
+    "x_feature_4", "x_feature_5", "x_feature_6", "x_feature_7",
+};
+inline const std::vector<std::string> kYIds = {
+    "y_feature_0", "y_feature_1", "y_feature_2", "y_feature_3", "y_feature_4",
+    "y_feature_5", "y_feature_6", "y_feature_7", "y_feature_8", "y_feature_9",
+};
+
+// ---- Inputs. Carried here as literals so the pure-core tests need no file I/O
+// (a DuckDB-free target cannot read the parquet fixtures) and provably see the
+// same numbers the oracle consumed. Equivalent to reading the fixture named
+// above and applying the ordering rule. Dense, row-major, samples x features.
+inline const std::vector<std::string> kSampleIds = {
+    "sample_0",  "sample_1",  "sample_10", "sample_11", "sample_12", "sample_13", "sample_14", "sample_15", "sample_16",
+    "sample_17", "sample_18", "sample_19", "sample_2",  "sample_20", "sample_21", "sample_22", "sample_23", "sample_24",
+    "sample_25", "sample_26", "sample_27", "sample_28", "sample_29", "sample_3",  "sample_30", "sample_31", "sample_32",
+    "sample_33", "sample_34", "sample_35", "sample_36", "sample_37", "sample_38", "sample_39", "sample_4",  "sample_40",
+    "sample_41", "sample_42", "sample_43", "sample_44", "sample_45", "sample_46", "sample_47", "sample_48", "sample_49",
+    "sample_5",  "sample_6",  "sample_7",  "sample_8",  "sample_9",
+};
+// 400 values
+inline const std::vector<double> kXCounts = {
+    0.0, 0.0, 1.0, 4.0, 1.0, 2.0, 1.0, 1.0, 0.0, 3.0, 0.0, 1.0, 1.0, 1.0, 3.0, 1.0, 0.0, 5.0, 0.0, 0.0, 1.0, 0.0, 1.0,
+    3.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 2.0, 3.0, 2.0, 2.0, 0.0, 2.0, 0.0, 1.0, 3.0, 0.0, 0.0, 3.0, 0.0, 1.0, 1.0, 0.0,
+    0.0, 5.0, 1.0, 2.0, 4.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 2.0, 0.0, 3.0, 2.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 3.0,
+    0.0, 2.0, 2.0, 1.0, 2.0, 0.0, 3.0, 2.0, 0.0, 0.0, 2.0, 1.0, 1.0, 1.0, 3.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 2.0, 1.0,
+    1.0, 3.0, 2.0, 0.0, 3.0, 1.0, 1.0, 1.0, 2.0, 0.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 0.0, 2.0, 0.0, 0.0, 3.0, 2.0,
+    4.0, 1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 2.0, 5.0, 0.0, 1.0, 0.0, 1.0, 0.0, 4.0, 1.0, 0.0, 2.0, 1.0, 1.0, 4.0, 0.0,
+    0.0, 2.0, 1.0, 1.0, 1.0, 1.0, 3.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 5.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 0.0, 3.0, 0.0,
+    0.0, 1.0, 2.0, 5.0, 2.0, 0.0, 0.0, 1.0, 0.0, 0.0, 3.0, 0.0, 3.0, 0.0, 3.0, 0.0, 1.0, 2.0, 0.0, 0.0, 2.0, 3.0, 2.0,
+    2.0, 3.0, 2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 3.0, 3.0, 0.0, 0.0, 1.0, 1.0, 2.0, 0.0, 1.0, 0.0, 2.0, 3.0, 0.0, 1.0, 1.0,
+    2.0, 1.0, 0.0, 1.0, 1.0, 3.0, 0.0, 2.0, 2.0, 2.0, 2.0, 1.0, 1.0, 3.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 3.0, 2.0,
+    2.0, 0.0, 3.0, 1.0, 2.0, 2.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 0.0, 3.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+    1.0, 1.0, 3.0, 2.0, 4.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 3.0, 2.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 5.0, 1.0, 1.0, 0.0,
+    2.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 3.0, 2.0, 1.0, 2.0, 1.0, 1.0, 0.0, 3.0, 3.0, 2.0, 1.0, 0.0, 0.0, 2.0, 2.0, 2.0,
+    0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 3.0, 0.0, 1.0, 1.0, 1.0, 1.0, 2.0, 3.0, 0.0, 1.0, 4.0, 1.0, 1.0, 0.0, 0.0, 0.0, 2.0,
+    1.0, 1.0, 0.0, 1.0, 3.0, 2.0, 3.0, 0.0, 0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 1.0, 2.0, 0.0, 1.0, 4.0, 1.0, 1.0, 0.0, 0.0,
+    1.0, 0.0, 1.0, 1.0, 2.0, 3.0, 2.0, 2.0, 1.0, 3.0, 1.0, 0.0, 2.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 2.0, 3.0, 3.0, 1.0,
+    1.0, 2.0, 2.0, 0.0, 3.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 1.0, 3.0, 0.0, 0.0, 2.0, 0.0,
+    2.0, 0.0, 2.0, 0.0, 1.0, 1.0, 1.0, 3.0, 2.0,
+};
+// 500 values
+inline const std::vector<double> kYCounts = {
+    4.0,  6.0,  17.0, 17.0, 22.0, 17.0, 1.0, 12.0, 4.0,  0.0,  12.0, 21.0, 8.0,  17.0, 3.0,  14.0, 6.0, 9.0,  6.0,  4.0,
+    17.0, 5.0,  11.0, 19.0, 3.0,  6.0,  7.0, 16.0, 10.0, 6.0,  7.0,  15.0, 11.0, 28.0, 8.0,  13.0, 4.0, 10.0, 3.0,  1.0,
+    12.0, 19.0, 12.0, 24.0, 1.0,  15.0, 1.0, 11.0, 3.0,  2.0,  1.0,  1.0,  13.0, 25.0, 14.0, 10.0, 2.0, 19.0, 7.0,  8.0,
+    4.0,  12.0, 8.0,  23.0, 4.0,  9.0,  5.0, 14.0, 12.0, 9.0,  7.0,  3.0,  13.0, 26.0, 4.0,  15.0, 4.0, 19.0, 6.0,  3.0,
+    12.0, 11.0, 18.0, 22.0, 9.0,  7.0,  3.0, 12.0, 5.0,  1.0,  3.0,  2.0,  20.0, 22.0, 13.0, 7.0,  4.0, 17.0, 4.0,  8.0,
+    1.0,  12.0, 15.0, 23.0, 14.0, 13.0, 4.0, 12.0, 4.0,  2.0,  6.0,  14.0, 14.0, 13.0, 4.0,  17.0, 7.0, 21.0, 1.0,  3.0,
+    9.0,  12.0, 12.0, 26.0, 4.0,  11.0, 4.0, 14.0, 8.0,  0.0,  8.0,  14.0, 13.0, 22.0, 5.0,  8.0,  1.0, 17.0, 10.0, 2.0,
+    9.0,  0.0,  13.0, 14.0, 13.0, 19.0, 4.0, 19.0, 7.0,  2.0,  10.0, 12.0, 8.0,  19.0, 3.0,  18.0, 1.0, 23.0, 5.0,  1.0,
+    3.0,  9.0,  14.0, 25.0, 3.0,  13.0, 6.0, 14.0, 6.0,  7.0,  6.0,  21.0, 12.0, 23.0, 12.0, 11.0, 1.0, 8.0,  6.0,  0.0,
+    5.0,  16.0, 10.0, 37.0, 10.0, 13.0, 1.0, 3.0,  5.0,  0.0,  3.0,  4.0,  19.0, 27.0, 10.0, 15.0, 4.0, 14.0, 2.0,  2.0,
+    7.0,  1.0,  20.0, 19.0, 5.0,  20.0, 1.0, 23.0, 3.0,  1.0,  1.0,  7.0,  18.0, 33.0, 16.0, 16.0, 0.0, 8.0,  1.0,  0.0,
+    7.0,  19.0, 20.0, 22.0, 4.0,  13.0, 0.0, 7.0,  4.0,  4.0,  9.0,  28.0, 9.0,  12.0, 1.0,  8.0,  7.0, 11.0, 11.0, 4.0,
+    7.0,  26.0, 9.0,  16.0, 0.0,  8.0,  6.0, 15.0, 8.0,  5.0,  1.0,  12.0, 17.0, 25.0, 15.0, 13.0, 2.0, 6.0,  5.0,  4.0,
+    12.0, 18.0, 8.0,  20.0, 7.0,  11.0, 1.0, 17.0, 5.0,  1.0,  6.0,  10.0, 13.0, 19.0, 1.0,  17.0, 4.0, 20.0, 8.0,  2.0,
+    3.0,  18.0, 13.0, 16.0, 1.0,  20.0, 8.0, 16.0, 5.0,  0.0,  7.0,  17.0, 14.0, 21.0, 7.0,  9.0,  2.0, 9.0,  6.0,  8.0,
+    9.0,  21.0, 4.0,  12.0, 8.0,  21.0, 1.0, 13.0, 8.0,  3.0,  4.0,  10.0, 11.0, 30.0, 6.0,  12.0, 4.0, 15.0, 6.0,  2.0,
+    6.0,  15.0, 8.0,  12.0, 3.0,  20.0, 6.0, 13.0, 10.0, 7.0,  5.0,  18.0, 12.0, 19.0, 4.0,  9.0,  8.0, 10.0, 12.0, 3.0,
+    5.0,  18.0, 7.0,  33.0, 2.0,  9.0,  6.0, 11.0, 4.0,  5.0,  11.0, 9.0,  12.0, 14.0, 10.0, 23.0, 0.0, 16.0, 4.0,  1.0,
+    4.0,  2.0,  18.0, 25.0, 11.0, 16.0, 2.0, 15.0, 5.0,  2.0,  8.0,  13.0, 8.0,  23.0, 5.0,  16.0, 2.0, 14.0, 10.0, 1.0,
+    9.0,  10.0, 12.0, 25.0, 4.0,  11.0, 2.0, 14.0, 6.0,  7.0,  1.0,  8.0,  21.0, 20.0, 17.0, 10.0, 2.0, 15.0, 6.0,  0.0,
+    7.0,  25.0, 8.0,  20.0, 6.0,  14.0, 5.0, 8.0,  4.0,  3.0,  13.0, 5.0,  20.0, 29.0, 3.0,  12.0, 0.0, 14.0, 4.0,  0.0,
+    9.0,  6.0,  17.0, 16.0, 4.0,  14.0, 2.0, 24.0, 5.0,  3.0,  7.0,  22.0, 11.0, 26.0, 7.0,  11.0, 0.0, 13.0, 2.0,  1.0,
+    2.0,  9.0,  21.0, 18.0, 4.0,  14.0, 1.0, 12.0, 8.0,  11.0, 9.0,  20.0, 11.0, 16.0, 2.0,  16.0, 1.0, 20.0, 3.0,  2.0,
+    8.0,  12.0, 8.0,  15.0, 2.0,  22.0, 4.0, 14.0, 11.0, 4.0,  7.0,  13.0, 12.0, 31.0, 8.0,  11.0, 1.0, 9.0,  5.0,  3.0,
+    5.0,  5.0,  12.0, 22.0, 7.0,  14.0, 3.0, 18.0, 7.0,  7.0,  17.0, 15.0, 14.0, 17.0, 7.0,  8.0,  1.0, 16.0, 2.0,  3.0,
+};
+// predict/score for this case reuse kXCounts / kYCounts (see the fixture
+// names above), so no separate input arrays are carved.
+
+// ---- T1: given kTheta, an implementation must reproduce all of the below.
+// 68 values
+inline const std::vector<double> kTheta = {
+    -0.5721975555132527,   1.2089496331620018,   0.08397991870054435,  1.2836020389403422,   0.6335162113605605,
+    -1.8188626523197196,   0.4673806127809242,   0.2529824214326896,   -0.19773326660002266, -0.7706383147004933,
+    0.3303445359073165,    1.1570154221200055,   -0.40890914399147865, -1.4903507743958617,  -0.365108054047986,
+    -0.4605053118162978,   1.4163220426797019,   -1.0014294607331993,  -0.7918986545729729,  -1.8744875972601482,
+    0.7088901725445899,    -0.19287452976777875, -2.42573021450208,    -0.9987049819576244,  1.0176085488389561,
+    0.276744409694671,     -1.6872222518253686,  -2.390767649946256,   -0.08125688425450912, -0.8474219637894537,
+    0.4892923150967331,    0.5545163664726702,   0.6437810357387733,   -0.4530281177871468,  0.8167737539396377,
+    -0.052068440809039676, 0.6411702740513423,   -0.7237880887841642,  -0.6397671091221866,  -0.23870093824276398,
+    1.3116080076658423,    -0.3823823840487058,  -0.8164626401785496,  0.46416120762770485,  -2.1427549273060906,
+    -0.702799800523929,    -1.2087255221341275,  -0.8781861173405375,  -1.058754126085832,   1.7338424358002857,
+    -0.7357116841015575,   0.5601729647956318,   -2.546896468730699,   -0.6073915014078114,  -1.087932275219774,
+    0.41664795421684,      0.37720052074556043,  0.2666850364110395,   -2.276209177955001,   -0.9683391438675221,
+    0.7904113963724347,    -0.8206320865303982,  -0.07067738371932641, -1.2558282913048693,  0.8485381339135903,
+    0.10396796707989928,   -0.7337555980530815,  -0.4228638702042925,
+};
+inline constexpr double kT1Loss = 212010.7181663509;
+// 68 values
+inline const std::vector<double> kT1Grad = {
+    462.31152042324817,  3833.242935410362,   -212.32545000117216, 6602.18812709955,    12239.810037497688,
+    -10478.1254116349,   264.8734856128842,   2648.651232886477,   515.5842854176202,   -3040.8609492801634,
+    51.46248967957734,   6259.500954690029,   -3236.4771164979215, -7350.883533319246,  4080.2441345565453,
+    4728.274684069907,   9422.302231919792,   -7001.6423365777155, -4415.63238380205,   -5943.51945094085,
+    5730.09372828286,    -2159.7048457027863, -9504.119507555262,  2257.515212269532,   11.5929420095269,
+    515.4479982325786,   -1723.9688276308173, -2743.955682247248,  442.1584073037008,   80.50460440784283,
+    509.64146727627093,  397.9254685305544,   1194.5913300984328,  -1382.0135500045826, 3538.9749864218716,
+    -2894.7858242574484, 1322.2832869213335,  -4196.557442226362,  -192.98576028743935, -133.75029918619256,
+    4010.4283374165097,  2132.5712258038056,  284.70135352499483,  5860.823271407309,   -19642.666142539503,
+    1799.9954664873364,  -7102.884073888517,  969.5829489693572,   -48.34572327823476,  12276.830317843778,
+    1533.308802461087,   3483.4193324277753,  -184.87855854741522, -4478.78725521585,   1619.665010314383,
+    2670.2260986321126,  2837.9844138931467,  1112.9990268549168,  -12646.045417595013, -5637.559604284068,
+    -1313.5464122539909, -7763.096805184137,  7295.860898424491,   -6210.16801469744,   6271.152613315624,
+    -4224.244630093576,  -1856.5848882461653, 10927.67254913507,
+};
+// row-major (kNFeaturesX x kNFeaturesY); column 0 is the zero reference logit
+// 80 values
+inline const std::vector<double> kT1Logits = {
+    0.0,
+    -0.8431665803052659,
+    1.1272225974954093,
+    0.07687988020375225,
+    -1.6647668725604508,
+    -1.5461098310002404,
+    0.8539982426087301,
+    0.45764417651556066,
+    -0.8371471805166674,
+    1.749218097868034,
+    0.0,
+    1.2306769817865755,
+    -1.0504720126511207,
+    5.431033295090241,
+    -0.11347639698564244,
+    1.3774879061476306,
+    -1.3273459393634797,
+    -1.6829150704883045,
+    -1.9192095547646169,
+    6.775992406094819,
+    0.0,
+    -2.3059319675692063,
+    -1.4258629406630354,
+    -1.5050793360411214,
+    -2.204213239684834,
+    -2.6060555802473626,
+    -1.5651401088177508,
+    -2.179019769807708,
+    -2.8531207265876803,
+    -0.608352033664929,
+    0.0,
+    -4.83277682216873,
+    -0.8728206410026099,
+    -6.63430225984874,
+    -3.831927814608931,
+    -5.6316268152733215,
+    -0.9016784461168396,
+    -1.6474478017304257,
+    -2.98176609968008,
+    -5.8852506528000035,
+    0.0,
+    -0.4743458368589098,
+    1.9066939189149057,
+    -0.9977458290155867,
+    3.2845769879618314,
+    -0.1546345005769103,
+    2.712548311632496,
+    1.455404115697313,
+    0.7631406910383033,
+    -2.7934203754318565,
+    0.0,
+    -1.9170389384569393,
+    -1.5657364571358512,
+    1.1637562043830285,
+    -3.3206928458336304,
+    -2.304415989459035,
+    -1.7947637070164468,
+    -2.0703719142766457,
+    -3.2378575705983774,
+    2.8608539014081877,
+    0.0,
+    -0.7936239111876766,
+    3.566006270738292,
+    -3.653676112268118,
+    4.045841528568034,
+    -0.7281128424399412,
+    4.472095902601791,
+    3.0134337224066443,
+    2.1182355482557838,
+    -5.835880630124337,
+    0.0,
+    1.124323684740562,
+    2.85337591262876,
+    0.994017752333834,
+    6.298231946684423,
+    1.9663487542304807,
+    4.058588420143771,
+    2.535409673409012,
+    2.1687122985361804,
+    -2.053895819155132,
+};
+// 80 values
+inline const std::vector<double> kT1Ranks = {
+    0.06262274696911381,   -0.7805438333361521, 1.1898453444645232,   0.13950262717286604, -1.602144125591337,
+    -1.4834870840311265,   0.916620989577844,   0.5202669234846745,   -0.7745244335475535, 1.811840844837148,
+    -0.8721771614866103,   0.3584998202999652,  -1.922649174137731,   4.558856133603631,   -0.9856535584722528,
+    0.5053107446610203,    -2.19952310085009,   -2.555092231974915,   -2.7913867162512274, 5.903815244608208,
+    1.725277570308363,     -0.5806543972608433, 0.2994146296453275,   0.2201982342672415,  -0.47893566937647103,
+    -0.8807780099389997,   0.16013746149061214, -0.45374219949934513, -1.1278431562793174, 1.1169255366434339,
+    3.321959735322968,     -1.5108170868457624, 2.449139094320358,    -3.312342524525772,  -0.5099680792859629,
+    -2.3096670799503536,   2.4202812892061285,  1.6745119335925422,   0.34019363564288785, -2.5632909174770355,
+    -0.5702217483361586,   -1.0445675851950684, 1.3364721705787472,   -1.5679675773517454, 2.714355239625673,
+    -0.7248562489130689,   2.1423265632963377,  0.8851823673611544,   0.1929189427021447,  -3.363642123768015,
+    1.218626731698571,     -0.6984122067583682, -0.34710972543728014, 2.3823829360815996,  -2.1020661141350594,
+    -1.0857892577604638,   -0.5761369753178758, -0.8517451825780746,  -2.0192308388998064, 4.079480633106758,
+    -0.6204319476550473,   -1.414055858842724,  2.9455743230832447,   -4.274108059923165,  3.4254095809129868,
+    -1.3485447900949885,   3.8516639549467437,  2.393001774751597,    1.4978036006007365,  -6.456312577779384,
+    -1.9945112623551893,   -0.8701875776146273, 0.8588646502735706,   -1.0004935100213552, 4.3037206843292335,
+    -0.028162508124708552, 2.0640771577885815,  0.5408984110538229,   0.17420103618099114, -4.048407081510321,
+};
+// 80 values
+inline const std::vector<double> kT1Probs = {
+    0.062065333313740256,   0.0267095455579005,     0.19160006232939705,    0.06702511993685632,
+    0.011744918991255696,   0.013224587182866768,   0.14579271257112988,    0.09808473715074843,
+    0.026870805848952167,   0.35688217711715287,    0.0008967301810943203,  0.003069997410636268,
+    0.0003136516586356077,  0.20479982352311898,    0.0008005336904966646,  0.003555471350527222,
+    0.00023779502806613154, 0.00016664069120954513, 0.00013157084615715123, 0.7860277856200582,
+    0.37449659358870213,    0.037324529559789314,   0.08999190900652775,    0.08313812414655976,
+    0.04132094306077106,    0.027647273811470564,   0.07829177855660245,    0.04237518524340675,
+    0.021595003758053906,   0.20381865926811624,    0.4752371082723183,     0.0037849664867746187,
+    0.198540520698447,      0.0006246970885500226,  0.010297344435413336,   0.0017026520068084798,
+    0.19289295711225052,    0.0915024779255015,     0.024096045866795847,   0.001321230107140117,
+    0.017290188142541848,   0.010759545825948505,   0.11637678806150133,    0.006375059040151092,
+    0.4616080568299283,     0.014812992697793284,   0.26052204747944613,    0.07410946796261865,
+    0.03708749579571399,    0.0010583581643566098,  0.04444077914281736,    0.006534648501940772,
+    0.00928519354917796,    0.1422966127839924,     0.00160554722921183,    0.0044359487118732005,
+    0.007384578137164423,   0.005605709224686449,   0.00174420685240883,    0.7766667758667268,
+    0.004745819236742654,   0.0021460740691715227,  0.16788350907531976,    0.00012289658587730793,
+    0.27126754868095193,    0.0022913730598812625,  0.4154490454144632,     0.0966115010092689,
+    0.03946837104249633,    1.3861825827198307e-05, 0.0015284202914157751,  0.004704683008728363,
+    0.026512349024663148,   0.004129896991280079,   0.8308644455217882,     0.010919863464414733,
+    0.08848412283219215,    0.01929111034970944,    0.013369112531151185,   0.00019599598465692224,
+};
+// row-major (50 samples x kNFeaturesY) over kFixturePredictX
+// 500 values
+inline const std::vector<double> kT1Predict = {
+    0.23878910126343106,   0.008314399541461775,  0.1213497025060156,   0.03808579906860531,  0.16494614662935164,
+    0.007135400848454016,  0.1629087979006035,    0.06096085947163827,  0.021139258029941647, 0.17637053474049713,
+    0.05554241441026043,   0.004143205826281564,  0.08553063335356555,  0.07681944262309624,  0.21205796411306874,
+    0.0049411990112115155, 0.17963442268886412,   0.04808431905639514,  0.019509668671203028, 0.3137367302460537,
+    0.0031104919159003434, 0.004236965597448646,  0.036536560250398864, 0.10428867642154635,  0.3229471610528728,
+    0.006764131290355485,  0.09426124365308165,   0.022942750347706358, 0.011732105866244963, 0.3931799136044445,
+    0.09876069018078526,   0.010351943309688187,  0.10210985388696803,  0.031209509714170445, 0.35617052444738484,
+    0.009916579092381902,  0.17812345331820964,   0.056277391057462794, 0.0230437637800371,   0.1340362912129118,
+    0.11350765803873511,   0.008010188962007812,  0.12938441901480965,  0.0687564583638675,   0.0861093787506399,
+    0.004827548897192193,  0.1931578643803447,    0.06749479237874122,  0.022234616510370817, 0.3065170747032911,
+    0.0502859588415222,    0.0047277919588273746, 0.04484200088591709,  0.06420487116544585,  0.46286292299457726,
+    0.008178137607825708,  0.08965490038368558,   0.026256741971029597, 0.012842381685673723, 0.2361442925054956,
+    0.20433565158312142,   0.019278338218300477,  0.09451313804712091,  0.08140547542350407,  0.1291059097253487,
+    0.014583851366090797,  0.11562615422125778,   0.04753238487912744,  0.019044749201392545, 0.27457434733473585,
+    0.0954235793676915,    0.015448121957857082,  0.07661106323086113,  0.0745949491432813,   0.23140870492732912,
+    0.013630534513787613,  0.11874334862572603,   0.04358326810157098,  0.019831239783432795, 0.3107251903484624,
+    0.060261821525109525,  0.007954466108895667,  0.11283763150709496,  0.03000804048232934,  0.3611930956012431,
+    0.008934416168217432,  0.21283559436430957,   0.06438874823732721,  0.02680358770963422,  0.11478259829583892,
+    0.1527207335360799,    0.007513289750885063,  0.10736272019143381,  0.049950877031160676, 0.2629183024381922,
+    0.007690919822876269,  0.14229595145872903,   0.05597266089343282,  0.020033530179538437, 0.19354101469767168,
+    0.1931175188714009,    0.010260392339443914,  0.11975850248005634,  0.0509761624273486,   0.16501040273106438,
+    0.008199546629925248,  0.1574840951355816,    0.061075178540815275, 0.02125547042753211,  0.21286273041683157,
+    0.1385231189675296,    0.011615966248710339,  0.08588373772298129,  0.08052114594686714,  0.11026995601269199,
+    0.009325625593345224,  0.14632881819733876,   0.04605690867587404,  0.018867448266699397, 0.35260727436796224,
+    0.10776810477965777,   0.015267797886069863,  0.1290795702574787,   0.05066409162262573,  0.21130016860230447,
+    0.011541638063728914,  0.17337779316158564,   0.06924200625965787,  0.02534475131829389,  0.2064140780485971,
+    0.18065014819754446,   0.013780977485190471,  0.13374991676716244,  0.04523464971822517,  0.15815332386958816,
+    0.010968864168530119,  0.20403421647247208,   0.07074486421235497,  0.02714962096212295,  0.15553341814680915,
+    0.26699219989525025,   0.010975846312453442,  0.10914636438442517,  0.07895495662568276,  0.058784092176461376,
+    0.008758456239955,     0.11893908181258515,   0.05253696722250668,  0.017705639931747667, 0.2772063953989324,
+    0.11658016431215691,   0.01169328272882643,   0.15300486154385146,  0.016729782583744548, 0.26233923596839315,
+    0.010621081492819819,  0.2395430622178455,    0.0846333270974862,   0.032683955345256234, 0.07217124670961962,
+    0.21304446137546604,   0.01997126843656138,   0.09630744642522938,  0.06890483327567876,  0.1292669124330917,
+    0.014759946838359992,  0.11705551084307744,   0.048620198585822824, 0.01936727640264288,  0.2727021453840696,
+    0.12667407566131153,   0.013855306661094045,  0.14835391304251447,  0.042227433932582624, 0.16329199630977298,
+    0.008876383067904652,  0.17407965583722868,   0.07709616930002801,  0.024734450135117072, 0.22081061605244595,
+    0.024302469977785963,  0.011233277428845563,  0.08845306347360046,  0.03641443541368391,  0.4462430080492872,
+    0.010100040064242843,  0.1302632375425978,    0.04929269734347479,  0.01886705580975176,  0.18483071489672973,
+    0.14542491017877798,   0.01060822488559497,   0.08841856930761231,  0.05172738245816188,  0.30302680252378544,
+    0.00998411681613922,   0.11434671944934865,   0.04612200271728012,  0.017572851242833133, 0.2127684204204662,
+    0.15003033091316828,   0.011176148866696262,  0.10875272778092844,  0.04008560390924001,  0.2373167010539663,
+    0.011398943873780036,  0.1781457086452663,    0.06071388993568759,  0.025871298817503323, 0.17650864620376333,
+    0.16256842564333943,   0.007178243955023177,  0.08946142521462615,  0.050817874052832376, 0.2540046930550496,
+    0.0064399979732156,    0.10120776868159512,   0.044728262965044056, 0.014449890160001973, 0.2691434182992724,
+    0.08560657739371928,   0.010663594175906774,  0.07555430820453325,  0.06642977811244154,  0.25621850513568944,
+    0.009643576250568801,  0.15949058903233737,   0.04245451533546215,  0.0191953330256874,   0.27474322333365403,
+    0.08900515020583957,   0.014371636467480301,  0.10677754248737156,  0.09150946484938209,  0.09223359712183993,
+    0.009928425521990013,  0.16952295035830525,   0.057125426988974576, 0.02157314448799726,  0.34795266151081944,
+    0.026010879624334824,  0.011092497137184265,  0.10371701417254169,  0.0964392295375824,   0.1043385059466301,
+    0.007417186312961098,  0.1536896239243125,    0.05676923127317168,  0.019877557481844343, 0.42064827458943704,
+    0.2289013284270491,    0.013080359272637202,  0.11973988431116174,  0.03858547628480558,  0.2059880825372778,
+    0.010219413952681727,  0.14808570102370983,   0.05981419723474407,  0.021029975392265504, 0.15455558156366736,
+    0.09762180786587031,   0.011379919323810972,  0.12180545724188417,  0.017841870544673417, 0.3652451365382705,
+    0.011343596414311765,  0.2206409927171632,    0.06860960269254694,  0.028949931000823895, 0.05656168566064473,
+    0.10322742125150579,   0.01350932935306545,   0.11893737309408638,  0.06466607818613909,  0.17328009120304258,
+    0.010964039403832814,  0.17602609387200466,   0.0649320323749949,   0.02504266614447067,  0.24941487511685756,
+    0.05877024182702822,   0.011674415514839618,  0.098537339242806,    0.06589272634667277,  0.1984436758052636,
+    0.010232095398175333,  0.18515556756973922,   0.05673893874411314,  0.024228502363011554, 0.2903264971883505,
+    0.18928343733725145,   0.01722683832553655,   0.13465745561567594,  0.05776536193810649,  0.12414038598593727,
+    0.011514032105998162,  0.14839185723258172,   0.06780787898402496,  0.022496357121636067, 0.2267163953532514,
+    0.14367507076234853,   0.010263131936128692,  0.14153907677404162,  0.03693312696215692,  0.18114798443160626,
+    0.008433274093371187,  0.23774994315825815,   0.07616849578894118,  0.02893695769056719,  0.13515293840258025,
+    0.09837578127522043,   0.010444335643834662,  0.0853528681452996,   0.05167720240789461,  0.3291238229483393,
+    0.010042988921446498,  0.13660232827956992,   0.04663290502565686,  0.01911008376040318,  0.21263768359233493,
+    0.019572279416537542,  0.008984403216413526,  0.07045125710039987,  0.11061739993674895,  0.15920375710063783,
+    0.007313123770180491,  0.10643763991177901,   0.03924538256126186,  0.01459370813043033,  0.4635810488556106,
+    0.10884381808354057,   0.014076353312137866,  0.10676409716595979,  0.08409872344530664,  0.11921916532828968,
+    0.0093781815304103,    0.12203562098221947,   0.05499734765872375,  0.01811482992900769,  0.3624718625644042,
+    0.07250461858603241,   0.019760742048099664,  0.14489429575104712,  0.06359365620201397,  0.12953297340483547,
+    0.012924303953179946,  0.17439862768136735,   0.07777959486228646,  0.02697239664828962,  0.27763879086284793,
+    0.15166492691908512,   0.005147546817186931,  0.12002533506014598,  0.03660963358160984,  0.23299137707694972,
+    0.005822797106258969,  0.2026727553121993,    0.0641012831985885,   0.024064476150652537, 0.156899868777323,
+    0.2690287594324703,    0.01780917738514301,   0.1299236121116502,   0.047336031450648026, 0.10914214423688774,
+    0.013533629874516367,  0.14877755926737454,   0.06535423718073968,  0.023986315316733824, 0.1751085337438362,
+    0.09429225209805911,   0.015835309646244137,  0.0883869085699783,   0.08628506006143709,  0.1673078389746927,
+    0.01213148426236916,   0.1220484366174863,    0.047687091471701304, 0.01888639471280968,  0.3471392235852222,
+    0.0609526259234275,    0.006855413869110144,  0.07376517267390763,  0.08391036499873442,  0.24206539082818276,
+    0.006897369463963413,  0.11997229714630368,   0.040499603604587146, 0.0156399863007141,   0.34944177519106917,
+    0.25233719939045557,   0.01498872265084786,   0.15846161603991862,  0.04353839441354723,  0.05809586818353316,
+    0.009338058479697127,  0.1555148370335605,    0.0782354485584963,   0.023742330742021662, 0.2057475245079219,
+    0.0913262239659086,    0.006963172759474854,  0.08551201518467094,  0.06442875648055323,  0.2530356439192822,
+    0.006961066333967995,  0.17023602857699235,   0.046823337750323935, 0.019284173635936423, 0.2554295813928895,
+    0.07765630602179396,   0.013819111797493929,  0.12746454025064846,  0.03736268028349958,  0.2724434321479894,
+    0.011598419652286987,  0.17682279857127814,   0.07070913808026172,  0.026817176598006833, 0.18530639659674092,
+    0.06574432528979746,   0.008835341274085399,  0.10334437412156183,  0.06451692096021185,  0.21429486540375392,
+    0.008801747445365729,  0.1804083073208925,    0.058857557854309905, 0.024079255448582346, 0.271117304881439,
+    0.05995998831746487,   0.004653139495221223,  0.08904765727922254,  0.0505021288959997,   0.2951448566500694,
+    0.0057656859587348645, 0.18917373378018654,   0.050540672875592815, 0.020994686440327603, 0.2342174503071804,
+    0.181416426442405,     0.019002162370518973,  0.0897112760158479,   0.08776122554843259,  0.09926260852709465,
+    0.013444088004564208,  0.08228447920589047,   0.04454666774475106,  0.015961176592098787, 0.3666098895483964,
+    0.055816518530388166,  0.008959047193375159,  0.08807639420276867,  0.05272766673277511,  0.26140207899729073,
+    0.008837508798673526,  0.19563208670025697,   0.051653686222021954, 0.023277684156534854, 0.25361732846591484,
+    0.09139091436605189,   0.014845795954770948,  0.08985102504687253,  0.08044457017665367,  0.17536851388937394,
+    0.012679637737199666,  0.1507251625730433,    0.05077140031417923,  0.02227990203394214,  0.31164307790791257,
+    0.09693506575266084,   0.008170985044283003,  0.08125849727234334,  0.05880365165206795,  0.27215019608805135,
+    0.008301276033893796,  0.1554580070944005,    0.0451170412990066,   0.01920734971188336,  0.25459793005140935,
+    0.13404555764431475,   0.01909413402271435,   0.07250845884846951,  0.08811174553870559,  0.18131931863573214,
+    0.014365809150324833,  0.07184359577788464,   0.03732553098717185,  0.014888483258534323, 0.3664973661361481,
+    0.05560558342129257,   0.004306674386090773,  0.08815050309016831,  0.05675244996991236,  0.2950643552961979,
+    0.005677638222600266,  0.18845905546927672,   0.04999676602224513,  0.020833422839702433, 0.23515355128251356,
+};
+inline constexpr double kT1Score = -8.851648921158128;
+
+// ---- T2: converged under scikit-bio's stopping rule (ftol=1e-9, gtol=1e-5).
+inline constexpr int kT2MaxIter = 200;
+inline constexpr double kT2FinalLoss = 106966.7520033004;
+inline constexpr int kT2NumEvals = 211; // objective evaluations, not iterations
+// 80 values
+inline const std::vector<double> kT2Ranks = {
+    -0.2789544393132814,   0.514610430436611,   0.3884016534199744,  0.9707470702949053,   -0.3036985875090847,
+    0.4155851475724877,    -0.9436712875711608, 0.43475719697758314, -0.3189345449536627,  -0.8788426393543716,
+    -0.08868103235159694,  0.37168537959207226, 0.29563324693501836, 0.8289801387276436,   -0.5709140429240996,
+    0.37460775191750584,   -0.7827425818223293, 0.48800046575354283, -0.1922780894430882,  -0.724291236384669,
+    -0.42964364848837533,  0.302078370855584,   0.417158242950735,   0.9236082083638305,   -0.2981120644244347,
+    0.43553647596091205,   -0.8800563503036052, 0.524221340400648,   -0.23504136255873362, -0.7597492127565604,
+    -0.2836306507242156,   0.19342967421960938, 0.6120290269909416,  1.0468340779696599,   0.16448263168023652,
+    0.555780924597326,     -1.2398918132578387, 0.5713678093663497,  -0.4844092880122565,  -1.1359923928298126,
+    -0.018730474368013984, 0.29142558307857414, 0.503426201666257,   0.8867579697636183,   -0.28464225149598293,
+    0.6091295327064411,    -1.0783802735857737, 0.7066766413924367,  -0.39848892445946255, -1.2171740046980941,
+    -0.2886949935839931,   0.4277996545215411,  0.5198965216593321,  1.0024410593117634,   -0.12025694392401046,
+    0.556153871592075,     -1.107888372404914,  0.576230199566568,   -0.42496785369950785, -1.140713143038854,
+    0.014171878894578105,  0.7046081631174066,  0.3478991669797287,  0.9334952178326961,   -0.4817564160546513,
+    0.4674953953242237,    -0.9705402707666333, 0.4721948272180719,  -0.3819275456374213,  -1.105640416907999,
+    -0.2525355925669678,   0.33078609911621715, 0.4833440936173097,  1.0517715662292586,   0.04225624955246832,
+    0.3954545287928245,    -1.1176741116610502, 0.3761164631531123,  -0.41641540750064165, -0.8931038887325308,
+};
+// 80 values
+inline const std::vector<double> kT2Probs = {
+    0.063720057759038,   0.1409019503988366,   0.12419531957716186, 0.2223384790428181,   0.062162706333560414,
+    0.12761768753859978, 0.03277881895520724,  0.13008798481347192, 0.0612227765328775,   0.03497421904842874,
+    0.08016513797946728, 0.1270340478425405,   0.11773107653148067, 0.20068768685263366,  0.04949421139692511,
+    0.12740583160904434, 0.040045935485605935, 0.14270366821558175, 0.07227596754025027,  0.042456436546470695,
+    0.05566814641233322, 0.11571498305529376,  0.1298279350338903,  0.2154351556709888,   0.06349363659131427,
+    0.13223600331657198, 0.035480931234358526, 0.14449907332293435, 0.06762720829092503,  0.040016927071389916,
+    0.05986718760112732, 0.09646583398490105,  0.1466117954710871,  0.2264656544479632,   0.09371346208700669,
+    0.138592800929544,   0.02300858497819136,  0.14076995438921439, 0.04897695745337205,  0.02552776865759296,
+    0.07961543050414516, 0.10856661872915718,  0.13420447914938402, 0.19690007543336654,  0.06102576472196352,
+    0.14916721599570476, 0.02759288984989306,  0.16445139252635027, 0.054459073495219265, 0.024017059594816065,
+    0.06040559300785548, 0.12366500636472652,  0.13559509677346915, 0.21969006399047278,  0.0714872955846496,
+    0.14060162898993106, 0.02662600370875878,  0.1434529193583773,  0.05271019234646126,  0.02576619987529787,
+    0.08309338565284678, 0.16573686629453482,  0.11601185588011625, 0.20836439430096912,  0.05060431294419873,
+    0.1307501983670207,  0.031039263078342358, 0.13136609607051872, 0.05591684514992872,  0.027116782261523868,
+    0.06455408553067767, 0.11567969241416487,  0.13474486399139052, 0.23789051970118977,  0.08668624753340598,
+    0.1234077025815075,  0.02717683317007765,  0.12104416312458328, 0.054796350381204444, 0.03401954157179845,
+};
+inline constexpr double kT2Score = 0.1322215069004795;
+// measured max|dranks| across 4 inits under this stopping rule: 1.717e-02
+inline constexpr double kT2RankTol = 1.0;
+// for reference only, NOT a target: the tight optimum is 106966.68996544751
+// (|g|inf = 8.50e-05 after 551 iterations)
+
+// ---- T3: Adam driven by a committed minibatch index sequence.
+inline constexpr int kAdamBatchSize = 25;
+inline constexpr int kAdamEpochs = 4;
+inline constexpr int kAdamNumUpdates = 44;
+// learning rate / betas / clipnorm: see the shared constants above.
+// kAdamNumUpdates blocks of kAdamBatchSize indices into the nonzero X entries,
+// ordered by (sample_id, feature_id) as scipy's coo_array yields them.
+inline const std::vector<int> kAdamIndexBlocks = {
+    169, 265, 284, 143, 252, 92,  20,  6,   42,  199, 239, 108, 119, 83,  244, 131, 265, 99,  151, 170, 209, 40,  186,
+    80,  130, 208, 52,  179, 159, 84,  283, 221, 6,   157, 182, 191, 255, 96,  35,  201, 142, 102, 58,  96,  196, 12,
+    117, 257, 28,  127, 254, 185, 144, 27,  209, 12,  77,  72,  128, 168, 234, 278, 148, 131, 196, 131, 36,  16,  222,
+    151, 276, 250, 268, 178, 7,   68,  183, 118, 69,  192, 230, 210, 192, 170, 6,   277, 276, 198, 177, 78,  95,  94,
+    258, 179, 276, 264, 204, 120, 114, 153, 84,  199, 284, 279, 192, 180, 116, 14,  82,  276, 206, 134, 151, 96,  255,
+    157, 88,  231, 144, 177, 84,  12,  84,  264, 201, 214, 276, 10,  48,  269, 105, 254, 227, 118, 144, 209, 135, 82,
+    135, 171, 47,  118, 247, 151, 216, 140, 54,  88,  73,  6,   241, 272, 198, 222, 0,   207, 98,  134, 135, 210, 44,
+    14,  123, 235, 186, 172, 58,  195, 263, 1,   148, 96,  55,  106, 107, 205, 12,  182, 151, 251, 277, 87,  155, 36,
+    138, 228, 220, 119, 162, 36,  101, 19,  89,  249, 118, 74,  42,  171, 77,  101, 238, 47,  1,   213, 198, 2,   6,
+    69,  134, 183, 89,  233, 83,  126, 69,  258, 88,  137, 254, 279, 210, 31,  41,  188, 136, 217, 21,  251, 264, 210,
+    154, 63,  94,  48,  137, 70,  75,  85,  162, 36,  97,  34,  3,   264, 229, 234, 224, 140, 94,  94,  121, 169, 254,
+    51,  264, 134, 157, 82,  276, 105, 274, 112, 84,  151, 57,  222, 228, 201, 279, 15,  96,  152, 247, 204, 169, 99,
+    194, 9,   157, 126, 27,  27,  273, 99,  158, 1,   55,  46,  185, 144, 199, 127, 146, 54,  205, 41,  163, 149, 278,
+    100, 161, 233, 194, 146, 240, 106, 170, 235, 195, 107, 279, 276, 135, 218, 174, 184, 88,  91,  158, 2,   267, 139,
+    210, 239, 274, 248, 122, 55,  127, 91,  14,  41,  192, 232, 115, 201, 205, 85,  34,  149, 134, 162, 46,  239, 175,
+    31,  274, 7,   217, 130, 68,  96,  69,  263, 137, 248, 34,  153, 15,  31,  95,  46,  241, 180, 151, 224, 198, 247,
+    48,  114, 167, 68,  96,  180, 233, 49,  64,  209, 127, 27,  65,  144, 41,  192, 4,   94,  43,  169, 157, 180, 260,
+    179, 171, 32,  236, 148, 222, 244, 221, 75,  19,  201, 21,  185, 239, 88,  41,  199, 107, 87,  115, 75,  262, 158,
+    131, 56,  272, 14,  34,  25,  24,  159, 88,  116, 88,  119, 143, 198, 27,  192, 32,  30,  112, 278, 158, 134, 240,
+    169, 43,  221, 116, 52,  105, 230, 58,  32,  94,  146, 162, 276, 267, 281, 247, 144, 233, 241, 64,  37,  49,  102,
+    189, 137, 34,  192, 72,  70,  114, 83,  235, 199, 83,  162, 115, 8,   111, 239, 151, 106, 118, 157, 46,  115, 85,
+    273, 27,  199, 82,  192, 120, 119, 83,  198, 279, 151, 103, 261, 93,  242, 94,  6,   5,   93,  24,  8,   96,  109,
+    84,  114, 64,  129, 61,  216, 47,  100, 82,  18,  187, 112, 31,  41,  122, 36,  43,  118, 3,   93,  96,  206, 222,
+    88,  106, 83,  136, 198, 79,  64,  147, 231, 112, 116, 12,  15,  115, 189, 87,  78,  28,  94,  187, 241, 203, 106,
+    18,  78,  178, 48,  130, 128, 42,  207, 134, 19,  2,   12,  105, 134, 204, 178, 91,  22,  282, 237, 20,  90,  134,
+    97,  247, 50,  264, 272, 22,  94,  257, 130, 205, 213, 201, 211, 239, 256, 158, 268, 85,  105, 82,  192, 19,  153,
+    91,  157, 78,  204, 36,  233, 273, 208, 169, 58,  244, 273, 137, 185, 193, 6,   170, 272, 84,  78,  262, 130, 72,
+    157, 51,  1,   65,  162, 183, 111, 41,  240, 64,  246, 25,  88,  1,   168, 91,  94,  233, 233, 187, 192, 27,  136,
+    30,  148, 119, 20,  259, 103, 26,  216, 125, 116, 278, 144, 12,  156, 238, 204, 271, 126, 209, 210, 64,  186, 10,
+    257, 122, 156, 240, 22,  231, 225, 131, 97,  129, 107, 34,  86,  124, 170, 111, 249, 113, 137, 91,  25,  204, 100,
+    6,   272, 43,  84,  49,  238, 129, 255, 105, 92,  234, 264, 136, 88,  157, 79,  165, 137, 12,  165, 12,  105, 102,
+    51,  148, 204, 67,  56,  93,  76,  34,  151, 27,  271, 149, 15,  25,  201, 214, 264, 87,  27,  103, 57,  185, 113,
+    91,  203, 5,   61,  6,   279, 205, 264, 231, 176, 178, 254, 168, 248, 68,  1,   146, 63,  227, 96,  122, 1,   28,
+    137, 203, 13,  83,  163, 129, 178, 228, 241, 216, 232, 154, 115, 15,  47,  15,  84,  227, 45,  58,  165, 93,  189,
+    11,  204, 178, 202, 125, 75,  16,  79,  57,  205, 198, 157, 145, 178, 91,  101, 170, 279, 80,  182, 147, 60,  49,
+    87,  67,  26,  50,  270, 147, 21,  204, 170, 89,  233, 212, 116, 257, 158, 116, 21,  134, 51,  180, 264, 19,  180,
+    144, 195, 264, 141, 49,  241, 206, 81,  12,  222, 52,  41,  102, 232, 136, 103, 151, 222, 259, 249, 156, 225, 218,
+    38,  223, 96,  277, 179, 132, 168, 253, 91,  134, 147, 73,  274, 198, 185, 136, 26,  231, 126, 112, 42,  52,  34,
+    281, 94,  281, 122, 248, 0,   47,  283, 145, 279, 250, 151, 137, 107, 12,  169, 215, 1,   105, 248, 225, 88,  283,
+    112, 84,  127, 189, 170, 248, 48,  209, 178, 23,  182, 186, 263, 252, 133, 94,  214, 23,  283, 248, 128, 129, 179,
+    273, 238, 262, 143, 131, 15,  231, 152, 105, 40,  252, 108, 103, 12,  29,  201, 212, 261, 250, 217, 69,  130, 87,
+    178, 10,  257, 13,  82,  15,  27,  205, 125, 146, 31,  273, 23,  250, 60,  247, 39,  159, 234, 129, 233, 68,  251,
+    274, 97,  192, 23,  274, 210, 82,  93,  113, 183, 243, 81,  94,  84,  129, 169, 265, 31,  133, 197, 12,  200, 105,
+    31,  185, 248, 84,  105, 156, 252, 271, 54,  130, 109, 31,  238, 17,  216, 91,  268, 185, 124, 43,  157, 246, 200,
+    72,  196, 10,  214, 5,   34,  151, 213, 157, 45,  137, 48,  146, 161, 78,  199, 157, 145, 83,  278, 215, 162, 265,
+    105, 198, 61,  134, 118, 58,  41,  133, 67,  147, 23,  132, 162, 231, 271, 176, 274, 47,  96,  80,  1,   209, 273,
+    260, 112, 131, 25,  235, 222, 81,  61,  88,  239, 67,  88,  118, 37,  107, 223, 281, 114, 169, 198, 1,   240, 157,
+    14,  227, 185, 75,  114, 86,  193, 115, 144, 4,   126, 54,  41,  47,  91,  109, 81,  201, 123,
+};
+// batch_norm = 'unbiased'
+inline constexpr double kAdamUnbiasedFinalLoss = 194785.58040276243;
+// 44 values
+inline const std::vector<double> kAdamUnbiasedLossCurve = {
+    218328.9013775155,  217187.62778684977, 222989.04464855633, 197868.7386161117,  222278.03415893702,
+    219077.67373001706, 204341.11421914093, 225999.26755937398, 198890.5943906155,  234263.8788688006,
+    206948.3765503568,  211703.15999831926, 198142.7188689045,  199536.22667336732, 201233.65435941686,
+    214811.91742532703, 221276.22470834386, 208644.8784944169,  189454.6051204733,  211378.9469901669,
+    212091.81972694525, 190890.41779070743, 195661.50040994617, 202319.0043690018,  212665.3438343523,
+    197022.07493676615, 203557.44429626837, 214263.06547716455, 205415.16385877194, 209053.49220853994,
+    212517.52101688724, 211647.21386458533, 206947.83817376965, 190258.7358399073,  178877.03605107637,
+    211260.3893330165,  214523.30168065493, 205329.92150821327, 193092.25015622863, 210877.80699077537,
+    204843.33089210902, 197446.393589762,   206108.0959383912,  194785.58040276243,
+};
+// 80 values
+inline const std::vector<double> kAdamUnbiasedRanks = {
+    0.036148945210657035, -0.7746388158216845, 1.2238032798386609,   0.1131117900439037,  -1.5530215383853316,
+    -1.4597754858224432,  0.9378861079548405,  0.5554822831225209,   -0.7107909412503065, 1.6317943751091826,
+    -0.8610372460292102,  0.3305894587183611,  -1.71338208542408,    4.313572917106142,   -0.9859212679015936,
+    0.47921314412855676,  -2.029158976055637,  -2.3874323213193236,  -2.6318658852982475, 5.4854222620750335,
+    1.64215701921638,     -0.5746573072429004, 0.34253502221437504,  0.2319177203961995,  -0.4431236198130144,
+    -0.8503479055631911,  0.16319276847175712, -0.4044867150246565,  -1.0771385484448983, 0.9699515657899482,
+    3.260156041311789,    -1.452159432865166,  2.3491600060186544,   -3.1237269909719503, -0.5108773714575543,
+    -2.2351491372200316,  2.2571528634747264,  1.5985125693404565,   0.2993413724628371,  -2.442409920093759,
+    -0.5705776775615691,  -0.9313633614283872, 1.2496698718150157,   -1.3451214473141768, 2.476748874572621,
+    -0.6132070911442663,  1.9092472256077242,  0.861275580179195,    0.14417443688302722, -3.1808464116091844,
+    1.221823627333076,    -0.6965291347082645, -0.22060742273577727, 2.214960435907689,   -2.0928572409412247,
+    -1.0784229981101772,  -0.4617414206607371, -0.740419685021078,   -1.8858488433510863, 3.73964268228758,
+    -0.607121460825013,   -1.297328615117014,  2.800998968401398,    -3.981695307409469,  3.205760759179284,
+    -1.2358676964923743,  3.5501992627042,     2.335019986381301,    1.410050950234016,   -6.180016847056328,
+    -2.0078469889812345,  -0.7300185195921811, 0.783537983094023,    -0.7694009787770475, 3.99234803362737,
+    0.10869471374160078,  1.8080715956861502,  0.5498191422310046,   0.13183988437922123, -3.867044865408901,
+};
+// batch_norm = 'legacy'
+inline constexpr double kAdamLegacyFinalLoss = 19510.55147979289;
+// 44 values
+inline const std::vector<double> kAdamLegacyLossCurve = {
+    21866.361077285983, 21752.201263741674, 22332.306179228573, 19820.235729388893, 22261.138385142967,
+    21941.082305743068, 20467.363472487606, 22633.14775848719,  19922.235162134388, 23459.533079725043,
+    20727.982085276482, 21203.43078953547,  19847.352934569903, 19986.6543503059,   20156.350768538672,
+    21514.21433380973,  22160.550533183414, 20897.446658520894, 18978.324274779305, 21170.68535326783,
+    21241.98656311087,  19121.789755872538, 19599.024094060893, 20264.609213334676, 21299.05653303548,
+    19734.710321841703, 20388.3962273814,   21458.879973964224, 20573.882349688785, 20937.8361488129,
+    21284.319871560827, 21197.207287624118, 20727.099385065187, 19058.481750831117, 17920.020440558303,
+    21158.26404631814,  21484.429124947135, 20565.23752298428,  19341.33416421969,  21120.098798673225,
+    20516.575985029067, 19776.593681450395, 20643.002845666993, 19510.55147979289,
+};
+// 80 values
+inline const std::vector<double> kAdamLegacyRanks = {
+    0.03798357032415802, -0.7747704108606607, 1.2234620931206084,   0.11298003643425172, -1.5533409805120773,
+    -1.4598732006897615, 0.9373667876405388,  0.5550215648276892,   -0.7105577007129149, 1.6317282404281677,
+    -0.8609828866140867, 0.33039441956963755, -1.7133321889605877,  4.312738596428751,   -0.9859197715543688,
+    0.4789919521040231,  -2.0290991065507877, -2.386957610596486,   -2.631152886173526,  5.485319482347432,
+    1.6421327506978236,  -0.5748125577653034, 0.34260702135877064,  0.23158851780131906, -0.44308880969716213,
+    -0.8505057173426636, 0.16340920872525255, -0.4041331493136684,  -1.0767900011684524, 0.9695927367040839,
+    3.2599411178387045,  -1.4520813074197045, 2.3490532222649847,   -3.123420792104608,  -0.5106464942333502,
+    -2.2349769501773205, 2.257165089051113,   1.5983558858563065,   0.2994062394048731,  -2.442796010481003,
+    -0.5703617234552967, -0.9312087426128629, 1.2494112798522683,   -1.3450647815232826, 2.4769378797015786,
+    -0.61311809766633,   1.9094515075009468,  0.8611407752548781,   0.14337769818345114, -3.18056579523535,
+    1.2187361453601753,  -0.6962599007268429, -0.22014911152117755, 2.214758603846744,   -2.09258138410671,
+    -1.0781658649242747, -0.4614526321299206, -0.7400261704276405,  -1.8847457984155218, 3.7398861130451695,
+    -0.6068627953817781, -1.2970912353198272, 2.8006107404795393,   -3.981140769634885,  3.2059442480590983,
+    -1.2356690444066623, 3.550357865016711,   2.334681654558842,    1.4088763227341121,  -6.179706986105151,
+    -2.0073114636831138, -0.7298516261736343, 0.7832287299630805,   -0.7695682647677431, 3.992649210828585,
+    0.1087416033213664,  1.808436983609461,   0.549736151611671,    0.13063950363993992, -3.8667008283496105,
+};
+} // namespace synth_b
+
+// ===================================================================== soils (T4)
+// Biocrust wetting study. Robust functionals only: this objective is ~8.00e+15
+// (LC/MS intensities x microbial counts), so L-BFGS-B does not reach a stationary
+// point and the fitted PARAMETERS move with the starting point -- but the biology does
+// not. Measured across 3 inits: positive count [13, 13, 13], rank
+// Spearman 0.9981, identical top-10 metabolite SET,
+// max|dranks| up to 4.32. Assert the counts and the band, never a rank value.
+namespace soils {
+inline const std::string kFixtureX = "soils_x";
+inline const std::string kFixtureY = "soils_y";
+inline constexpr int kNSamples = 19;
+inline constexpr int kNFeaturesX = 466;
+inline constexpr int kNFeaturesY = 85;
+inline constexpr int kNComponents = 1;
+inline constexpr int kMaxIter = 500;
+inline const std::string kCyanobacteria = "rplo 1 (Cyanobacteria)";
+// The 13 Microcoleus vaginatus metabolites from the mmvec soils notebook.
+inline const std::vector<std::string> kKnown13 = {
+    "(3-methyladenine)",
+    "7-methyladenine",
+    "4-guanidinobutanoate",
+    "uracil",
+    "xanthine",
+    "hypoxanthine",
+    "(N6-acetyl-lysine)",
+    "cytosine",
+    "N-acetylornithine",
+    "succinate",
+    "adenosine",
+    "guanine",
+    "adenine",
+};
+inline constexpr int kCyanobacteriaPositiveOf13 = 13;
+// scikit-bio asserts >= 11 of 13; all three inits here give 13/13.
+inline constexpr double kQ2Low = 0.21639226755437257;
+inline constexpr double kQ2High = 0.2173334901116829;
+// scikit-bio's own (commented-out) expectation for this quantity was 0.217611.
+
+// The 10 highest-ranked metabolites for Cyanobacteria. Assert SET membership, not
+// order: the set is identical across all three inits, the ordering within it is not.
+inline const std::vector<std::string> kCyanobacteriaTop10 = {
+    "adenosine",  "adenine", "(N6-acetyl-lysine)", "4-guanidinobutanoate",
+    "isoleucine", "leucine", "cytosine",           "guanine",
+    "stearate",   "betaine",
+};
+} // namespace soils
+
+// ======================================================================== cf (T4)
+// Cystic fibrosis study: a SCALE fixture, deliberately carrying no per-pair
+// assertion. Measured across two inits, the positive-rank count for the first
+// Pseudomonas is 0/20 and 7/20, with rank Spearman only
+// 0.453. The predictive functional is stable (0.156677..0.157080),
+// the per-pair ranks are not. scikit-bio's own CF test is @unittest.skip'ed and its
+// assertions are mutually exclusive (assertEqual(count, 19) followed by dead
+// assertGreaterEqual(count, 15)); the original author had already loosened the
+// notebook's 19 to 15 "for reproducibility". This is the reference implementation's
+// behavior, reproduced faithfully -- not a defect introduced by the port.
+namespace cf {
+inline const std::string kFixtureX = "cf_x";
+inline const std::string kFixtureY = "cf_y";
+inline const std::string kFixtureMicrobeMeta = "cf_microbe_meta";
+inline const std::string kFixtureMetaboliteMeta = "cf_metabolite_meta";
+inline constexpr int kNSamples = 172;
+inline constexpr int kNFeaturesX = 2720;
+inline constexpr int kNFeaturesY = 462;
+inline constexpr int kNComponents = 3;
+inline constexpr int kMaxIter = 500;
+inline constexpr int kNumPseudomonas = 39;
+inline constexpr int kNumExpertAnnotated = 20;
+inline constexpr double kQ2Low = 0.15667749865891434;
+inline constexpr double kQ2High = 0.15707954081105335;
+} // namespace cf
+
+// =================================================================== synth_c (T4)
+// scikit-bio's own simulated recovery design, from their `random_multimodal`
+// generator: a known latent structure planted in 150 samples of 8 microbes and 8
+// metabolites. Consumed by test/sql/mmvec_synth_c.test.
+//
+// Two constants were REMOVED here at M6 P2 rather than asserted: kXEmbedSpearmanR
+// (0.5041050903119868) and kYEmbedSpearmanR (0.4402597402597402). They measured
+// embedding recovery as a Spearman correlation between pairwise distances among
+// the fitted embeddings and pairwise distances among the simulator's LATENT ones
+// -- rotation-invariant, as scikit-bio's own tests do it, since embeddings are
+// identified only up to an orthogonal rotation. But only the count tables were
+// ever committed; the latent embeddings were not. So neither number is
+// recomputable by anyone, and left sitting here they read as though something
+// checks them. An unverifiable constant is worse than no constant. Recovering
+// them would mean committing the simulator's ground truth, which is a fixture
+// decision, not a test one.
+//
+// kScore survives and turns out to be the strongest parity result in the T4 tier:
+// this is the only fixture that CONVERGES (soils and cf both stop on the
+// iteration limit), so the optimum is genuinely identified and two independent
+// implementations starting from different random inits agree on it to 1.5e-5.
+namespace synth_c {
+inline const std::string kFixtureX = "synth_c_x";
+inline const std::string kFixtureY = "synth_c_y";
+inline constexpr int kNSamples = 150;
+inline constexpr int kNFeaturesX = 8;
+inline constexpr int kNFeaturesY = 8;
+inline constexpr int kNComponents = 2;
+inline constexpr double kScore = 0.34977616313820525;
+} // namespace synth_c
+
+// ============================================================ measured model behavior
+// Reference-category sensitivity, measured at tight tolerance by permuting Y columns
+// and realigning the output. Used by the behavioral test that our implementation shares
+// this property (rename the lexicographically-first Y feature; ranks must move).
+inline constexpr double kToyRanksScale = 1.432;
+inline constexpr double kToyMaxRankDevByReference = 0.4423;
+inline constexpr double kSynthBRanksScale = 1.242;
+inline constexpr double kSynthBMaxRankDevByReference = 0.1135;
+
+} // namespace miint::mmvec_oracle

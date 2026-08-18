@@ -75,6 +75,7 @@
 #include <cluster_kmeans.hpp>
 #include <cluster_upgma.hpp>
 #include <community_distances.hpp>
+#include <mmvec.hpp>
 #include <deblur_table_function.hpp>
 #include <simulate_resemblance.hpp>
 #include <align_pairwise_wfa2_functions.hpp>
@@ -184,6 +185,9 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 	data->versions.emplace_back("htslib", hts_version());
 	data->versions.emplace_back("minimap2", MINIMAP2_GIT_VERSION);
 	data->versions.emplace_back("kseq++", KSEQPP_PROJECT_VERSION);
+	// LBFGS++ ships no version macro, so the release is spelled out here. It is
+	// pinned by checksum in ext/LBFGSpp/PROVENANCE.md -- update both together.
+	data->versions.emplace_back("LBFGS++", "0.4.0");
 	data->versions.emplace_back("WFA2-lib", WFA2_GIT_VERSION);
 #ifdef MIINT_HAS_HDF5
 #ifdef H5_VERS_STR
@@ -306,6 +310,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadNCBIAnnotationTableFunction::Register(loader);
 	ReadNCBITaxdumpTableFunction::Register(loader);
 	ReadNCBITaxdumpMergedTableFunction::Register(loader);
+	ReadNCBITaxdumpNamesTableFunction::Register(loader);
+	ReadNCBITaxdumpDeletedTableFunction::Register(loader);
 	ReadNCBILineageTableFunction::Register(loader);
 	BlastSearchTableFunction::Register(loader);
 	ReadENATableFunction::Register(loader);
@@ -321,6 +327,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	CigarSequenceIdentityFunction::Register(loader);
 	CigarQueryLengthFunction::Register(loader);
 	CigarQueryCoverageFunction::Register(loader);
+	CigarQueryIntervalsFunction::Register(loader);
+	CigarPooledIdentityFunction::Register(loader);
 	CompressIntervalsFunction::Register(loader);
 	ComputeCoverageDepthFunction::Register(loader);
 	AlignmentSliceTableFunction::Register(loader);
@@ -432,6 +440,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterAbsQuantOrfCopies(loader);
 	RegisterClusterKmeans(loader);
 	RegisterClusterUpgma(loader);
+
+	// Multi-omics: MMvec joint embeddings of two paired count modalities. Pure
+	// in-repo C++ over the same generic table readers, so likewise always on.
+	RegisterMmvecFit(loader);
+	RegisterMmvecRanks(loader);
+	RegisterMmvecPredict(loader);
+	RegisterMmvecScore(loader);
 
 #ifdef MIINT_HAS_HDF5
 	CopyBiomFunction::Register(loader);

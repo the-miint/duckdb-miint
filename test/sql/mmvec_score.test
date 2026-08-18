@@ -1,0 +1,552 @@
+# name: test/sql/mmvec_score.test
+# description: mmvec_score reproduces the carved scikit-bio T1 Q-squared exactly and pairs the two held-out tables by sample id (always run; fixtures are inline)
+# group: [sql]
+
+require miint
+
+# The T1 model, carved -- the oracle's kTheta unpacked into the model relation's
+# shape. Identical to the fixture in mmvec_ranks.test and mmvec_predict.test; see
+# mmvec_ranks.test's header for why supplying a fitted theta directly is what makes
+# exact parity reachable from SQL at all.
+statement ok
+CREATE TABLE t1_model AS
+SELECT * FROM (VALUES
+  ('x','O1',NULL,1,-0.5721975555132527),
+  ('x','O1',NULL,2,1.2089496331620018),
+  ('x','O1',NULL,3,0.08397991870054435),
+  ('x','O1',NULL,0,1.0176085488389561),
+  ('x','O2',NULL,1,1.2836020389403422),
+  ('x','O2',NULL,2,0.6335162113605605),
+  ('x','O2',NULL,3,-1.8188626523197196),
+  ('x','O2',NULL,0,0.276744409694671),
+  ('x','O3',NULL,1,0.4673806127809242),
+  ('x','O3',NULL,2,0.2529824214326896),
+  ('x','O3',NULL,3,-0.19773326660002266),
+  ('x','O3',NULL,0,-1.6872222518253686),
+  ('x','O4',NULL,1,-0.7706383147004933),
+  ('x','O4',NULL,2,0.3303445359073165),
+  ('x','O4',NULL,3,1.1570154221200055),
+  ('x','O4',NULL,0,-2.390767649946256),
+  ('x','O5',NULL,1,-0.40890914399147865),
+  ('x','O5',NULL,2,-1.4903507743958617),
+  ('x','O5',NULL,3,-0.365108054047986),
+  ('x','O5',NULL,0,-0.08125688425450912),
+  ('x','O6',NULL,1,-0.4605053118162978),
+  ('x','O6',NULL,2,1.4163220426797019),
+  ('x','O6',NULL,3,-1.0014294607331993),
+  ('x','O6',NULL,0,-0.8474219637894537),
+  ('x','O7',NULL,1,-0.7918986545729729),
+  ('x','O7',NULL,2,-1.8744875972601482),
+  ('x','O7',NULL,3,0.7088901725445899),
+  ('x','O7',NULL,0,0.4892923150967331),
+  ('x','O8',NULL,1,-0.19287452976777875),
+  ('x','O8',NULL,2,-2.42573021450208),
+  ('x','O8',NULL,3,-0.9987049819576244),
+  ('x','O8',NULL,0,0.5545163664726702),
+  ('y',NULL,'C1',1,0.0),
+  ('y',NULL,'C1',2,0.0),
+  ('y',NULL,'C1',3,0.0),
+  ('y',NULL,'C1',0,0.0),
+  ('y',NULL,'C2',1,0.6437810357387733),
+  ('y',NULL,'C2',2,-0.7237880887841642),
+  ('y',NULL,'C2',3,-0.8164626401785496),
+  ('y',NULL,'C2',0,-0.8781861173405375),
+  ('y',NULL,'C3',1,-0.4530281177871468),
+  ('y',NULL,'C3',2,-0.6397671091221866),
+  ('y',NULL,'C3',3,0.46416120762770485),
+  ('y',NULL,'C3',0,-1.058754126085832),
+  ('y',NULL,'C4',1,0.8167737539396377),
+  ('y',NULL,'C4',2,-0.23870093824276398),
+  ('y',NULL,'C4',3,-2.1427549273060906),
+  ('y',NULL,'C4',0,1.7338424358002857),
+  ('y',NULL,'C5',1,-0.052068440809039676),
+  ('y',NULL,'C5',2,1.3116080076658423),
+  ('y',NULL,'C5',3,-0.702799800523929),
+  ('y',NULL,'C5',0,-0.7357116841015575),
+  ('y',NULL,'C6',1,0.6411702740513423),
+  ('y',NULL,'C6',2,-0.3823823840487058),
+  ('y',NULL,'C6',3,-1.2087255221341275),
+  ('y',NULL,'C6',0,0.5601729647956318)
+) t(modality, x_feature_id, y_feature_id, axis, value);
+
+# The oracle's held-out pair (kFixturePredictX / kFixtureScoreY): three samples
+# S6-S8 that appear nowhere in the model. Stored sparse, so the 5 structural zeros
+# of X's 24 cells and the 4 of Y's 18 are omitted per the feature-table contract.
+statement ok
+CREATE TABLE x_test AS
+SELECT * FROM (VALUES
+  ('S6','O1',3.0),
+  ('S6','O3',2.0),
+  ('S6','O4',6.0),
+  ('S6','O5',1.0),
+  ('S6','O6',4.0),
+  ('S6','O7',4.0),
+  ('S7','O1',2.0),
+  ('S7','O2',1.0),
+  ('S7','O3',5.0),
+  ('S7','O6',3.0),
+  ('S7','O7',6.0),
+  ('S7','O8',1.0),
+  ('S8','O1',8.0),
+  ('S8','O2',4.0),
+  ('S8','O3',1.0),
+  ('S8','O4',1.0),
+  ('S8','O5',5.0),
+  ('S8','O7',5.0),
+  ('S8','O8',1.0)
+) t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE y_test AS
+SELECT * FROM (VALUES
+  ('S6','C2',5.0),
+  ('S6','C3',1.0),
+  ('S6','C4',1.0),
+  ('S6','C5',8.0),
+  ('S7','C1',1.0),
+  ('S7','C3',5.0),
+  ('S7','C4',3.0),
+  ('S7','C5',2.0),
+  ('S7','C6',3.0),
+  ('S8','C1',4.0),
+  ('S8','C2',1.0),
+  ('S8','C4',1.0),
+  ('S8','C5',6.0),
+  ('S8','C6',3.0)
+) t(sample_id, feature_id, value);
+
+# ---------------------------------------------------------------------------
+# Shape: one row, one number. Q^2 summarizes the whole (sample x Y feature)
+# comparison, so there is nothing to key it by.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT string_agg(column_name, ',') FROM (
+  DESCRIBE SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test')
+);
+----
+q_squared
+
+query I
+SELECT count(*) FROM mmvec_score('t1_model', 'x_test', 'y_test');
+----
+1
+
+# ---------------------------------------------------------------------------
+# EXACT parity with scikit-bio, through SQL. kT1Score = -2.0072764362887527: the
+# unfitted T1 theta predicts the held-out samples much WORSE than their own mean
+# community does, which is exactly what an arbitrary theta should do. Q^2 is
+# unbounded below for that reason, and a value this far from zero is what makes the
+# comparison a statement about the arithmetic rather than about smallness.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT abs(q_squared - (-2.0072764362887527)) < 1e-10 FROM mmvec_score('t1_model', 'x_test', 'y_test');
+----
+true
+
+query I
+SELECT abs(q_squared - (-2.0072764362887527)) < 1e-15 FROM mmvec_score('t1_model', 'x_test', 'y_test');
+----
+true
+
+# ---------------------------------------------------------------------------
+# Depth invariance, on BOTH sides. X is read as proportions (that is what makes
+# predictions comparable across sequencing depths) and so is Y, so rescaling either
+# table's per-sample totals cannot move the score. Scaling by powers of two, so the
+# result is bit-identical rather than merely close.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE x_test_deep AS
+SELECT sample_id, feature_id, value * CASE sample_id WHEN 'S6' THEN 4 WHEN 'S7' THEN 16 ELSE 1 END AS value
+FROM x_test;
+
+statement ok
+CREATE TABLE y_test_deep AS
+SELECT sample_id, feature_id, value * CASE sample_id WHEN 'S7' THEN 8 WHEN 'S8' THEN 32 ELSE 1 END AS value
+FROM y_test;
+
+query I
+SELECT count(*) FROM (
+  SELECT * FROM mmvec_score('t1_model', 'x_test_deep', 'y_test_deep')
+  EXCEPT ALL
+  SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test')
+);
+----
+0
+
+# Row order is not information either: the two tables are joined by sample id, so
+# how the rows happen to arrive cannot matter.
+statement ok
+CREATE TABLE y_test_reordered AS SELECT * FROM y_test ORDER BY feature_id DESC, sample_id DESC;
+
+query I
+SELECT count(*) FROM (
+  SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test_reordered')
+  EXCEPT ALL
+  SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test')
+);
+----
+0
+
+# But the PAIRING is information. Rotating Y's sample labels keeps every count and
+# every marginal, and changes only which metabolite profile is compared against
+# which microbe profile -- so a score that survived it would be measuring something
+# other than the model's predictions.
+statement ok
+CREATE TABLE y_test_rotated AS
+SELECT CASE sample_id WHEN 'S6' THEN 'S7' WHEN 'S7' THEN 'S8' ELSE 'S6' END AS sample_id, feature_id, value
+FROM y_test;
+
+query I
+SELECT count(*) > 0 FROM (
+  SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test_rotated')
+  EXCEPT
+  SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test')
+);
+----
+true
+
+# ---------------------------------------------------------------------------
+# SS_tot = 0: with a single sample the mean community IS that sample, so there is
+# no variance to explain and Q^2 is 0/0. scikit-bio returns 0.0 and so do we -- the
+# alternative is a NaN propagating silently into whatever consumes the score.
+#
+# One sample is the ONLY case that reaches this branch reliably: several identical
+# samples do not, because colmean sums n copies and divides by n, which is an ulp
+# off for most values and leaves SS_tot near 1e-33 rather than at zero. The guard
+# tests exact equality, matching scikit-bio, which is why this test uses one sample
+# rather than three identical ones.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE x_one AS SELECT * FROM x_test WHERE sample_id = 'S6';
+
+statement ok
+CREATE TABLE y_one AS SELECT * FROM y_test WHERE sample_id = 'S6';
+
+query I
+SELECT q_squared = 0.0 FROM mmvec_score('t1_model', 'x_one', 'y_one');
+----
+true
+
+# ---------------------------------------------------------------------------
+# The two tables must describe the SAME samples, matched by id. Intersecting them
+# silently would score a subset of the data the user asked about, so this is an
+# error -- and deliberately the same message the fitting path gives, because it is
+# the same mistake.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE y_test_extra AS
+SELECT * FROM y_test UNION ALL SELECT * FROM (VALUES ('S9','C1',1.0)) t(sample_id, feature_id, value);
+
+statement error
+SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test_extra');
+----
+must describe the same samples (X has 3, Y has 4)
+
+statement error
+SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test_extra');
+----
+only in Y: S9
+
+statement ok
+CREATE TABLE x_test_extra AS
+SELECT * FROM x_test UNION ALL SELECT * FROM (VALUES ('S9','O1',1.0)) t(sample_id, feature_id, value);
+
+statement error
+SELECT * FROM mmvec_score('t1_model', 'x_test_extra', 'y_test');
+----
+only in X: S9
+
+# A mismatch of the SAME SIZE is the case this check exists for, and the only one
+# it is not redundant on. Where the counts differ the core would notice anyway
+# (X and Y disagree on n_rows); here they do not, so without this check S8's
+# microbes would be scored against S9's metabolites. Measured: removing the check
+# turns this into a bare "unordered_map::at" -- the shared sample dictionary keeps
+# it from being silent, but only this check makes it legible.
+statement ok
+CREATE TABLE y_test_swapped AS
+SELECT CASE sample_id WHEN 'S8' THEN 'S9' ELSE sample_id END AS sample_id, feature_id, value FROM y_test;
+
+statement error
+SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test_swapped');
+----
+must describe the same samples (X has 3, Y has 3); only in X: S8; only in Y: S9
+
+# ---------------------------------------------------------------------------
+# Unknown vs missing features, symmetrically on both modalities -- the same rule
+# mmvec_predict applies to X, for the same reason: there is no P(Y | unknown
+# microbe), and no coefficient for an unobserved metabolite.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE y_test_unknown AS
+SELECT * FROM y_test UNION ALL SELECT * FROM (VALUES ('S6','C99',5.0)) t(sample_id, feature_id, value);
+
+statement error
+SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test_unknown');
+----
+1 feature(s) the model was never fitted on (C99)
+
+# The remedy names the Y column and the Y modality. Sending the user to filter X
+# would be worse than saying nothing.
+statement error
+SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test_unknown');
+----
+SELECT DISTINCT y_feature_id FROM <model> WHERE modality = 'y'
+
+# ... and applying it reproduces the original score exactly, so the guidance is
+# correct and not merely plausible.
+statement ok
+CREATE TABLE y_test_unknown_filtered AS
+SELECT * FROM y_test_unknown
+WHERE feature_id IN (SELECT DISTINCT y_feature_id FROM t1_model WHERE modality = 'y');
+
+query I
+SELECT count(*) FROM (
+  SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test_unknown_filtered')
+  EXCEPT ALL
+  SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test')
+);
+----
+0
+
+statement ok
+CREATE TABLE x_test_unknown AS
+SELECT * FROM x_test UNION ALL SELECT * FROM (VALUES ('S6','O99',5.0)) t(sample_id, feature_id, value);
+
+statement error
+SELECT * FROM mmvec_score('t1_model', 'x_test_unknown', 'y_test');
+----
+SELECT DISTINCT x_feature_id FROM <model> WHERE modality = 'x'
+
+# A model feature ABSENT from either table is fine -- "no rows" is a zero column,
+# which is what scikit-bio would be handed. For Y this is also what pins the width
+# to the MODEL's d2: a dictionary built from y_test_dropped would be 5 columns wide
+# and the core would reject it outright.
+statement ok
+CREATE TABLE y_test_dropped AS SELECT * FROM y_test WHERE feature_id <> 'C6';
+
+statement ok
+CREATE TABLE y_test_zeroed AS
+SELECT sample_id, feature_id, CASE WHEN feature_id = 'C6' THEN 0.0 ELSE value END AS value FROM y_test;
+
+query I
+SELECT count(*) FROM (
+  SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test_dropped')
+  EXCEPT ALL
+  SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test_zeroed')
+);
+----
+0
+
+# Dropping a feature is not a no-op, though: its counts leave each sample's total,
+# so the proportions being predicted genuinely change.
+query I
+SELECT count(*) > 0 FROM (
+  SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test_dropped')
+  EXCEPT
+  SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test')
+);
+----
+true
+
+# ---------------------------------------------------------------------------
+# Y IS ALIGNED TO THE MODEL'S FEATURE ORDER, WHATEVER THAT ORDER IS -- LOAD-BEARING.
+#
+# Renaming a model's features and the matching table's features is a relabelling,
+# not a different model, so the score must come back bit-identical. The renaming
+# below is chosen so that the model's order and the SORTED order disagree: the
+# reference category becomes 'zz' and sorts LAST, while the model still carries it
+# first (ParseModelCells finds it by its all-zero row). A fresh dictionary built
+# over the table would therefore rotate every column by one and score a different
+# number.
+#
+# This is the only assertion in this file that can see a same-width misalignment.
+# Measured: replacing the model's dictionary with a fresh one passes the entire
+# exact-parity block above, the depth-invariance block and the row-order block --
+# 16 assertions -- because the main fixture's own dictionary happens to coincide
+# with the model's. The width check catches a NARROWER table (y_test_dropped, and
+# incidentally the single-sample case); only this catches a permuted one.
+statement ok
+CREATE TABLE relabel AS SELECT * FROM (VALUES
+  ('C1','zz'),('C2','a2'),('C3','b3'),('C4','c4'),('C5','d5'),('C6','e6')
+) t(old_id, new_id);
+
+statement ok
+CREATE TABLE model_relabelled AS
+SELECT m.modality, m.x_feature_id, r.new_id AS y_feature_id, m.axis, m.value
+FROM t1_model m LEFT JOIN relabel r ON m.y_feature_id = r.old_id;
+
+statement ok
+CREATE TABLE y_test_relabelled AS
+SELECT y.sample_id, r.new_id AS feature_id, y.value
+FROM y_test y JOIN relabel r ON y.feature_id = r.old_id;
+
+# The relabelling really does put the reference last in sort order, so the two
+# orders genuinely differ -- without this the test would be vacuous.
+query I
+SELECT min(y_feature_id) <> 'zz' FROM model_relabelled WHERE modality = 'y';
+----
+true
+
+query I
+SELECT count(*) FROM (
+  SELECT * FROM mmvec_score('model_relabelled', 'x_test', 'y_test_relabelled')
+  EXCEPT ALL
+  SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test')
+);
+----
+0
+
+# ---------------------------------------------------------------------------
+# Over a REAL fit -- the actual usage pattern. Same training fixture as
+# mmvec_ranks.test (the oracle's toy X and Y under different ids), scored on the
+# held-out pair.
+#
+# A BAND, not equality, and it cannot be otherwise: the fit starts from
+# InitTheta(seed) where the oracle started from numpy's PCG64, and scikit-bio's own
+# stopping rule (ftol=1e-9, gtol=1e-5) stops well short of a stationary point. The
+# oracle measured that spread -- max|dranks| 4.084e-04 across four starting points
+# -- and kT2RankTol = 0.01 leaves room for it.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE microbes AS
+SELECT * FROM (VALUES
+  ('S1','m1',1.0),('S1','m4',7.0),('S1','m6',2.0),('S1','m7',1.0),
+  ('S2','m2',1.0),('S2','m3',2.0),('S2','m4',9.0),('S2','m5',1.0),('S2','m6',1.0),('S2','m8',1.0),
+  ('S3','m1',2.0),('S3','m3',1.0),('S3','m4',6.0),('S3','m7',2.0),
+  ('S4','m1',1.0),('S4','m2',2.0),('S4','m3',1.0),('S4','m4',8.0),('S4','m5',3.0),('S4','m6',1.0),('S4','m8',2.0),
+  ('S5','m2',1.0),('S5','m3',3.0),('S5','m4',3.0),('S5','m5',1.0),('S5','m6',4.0),('S5','m7',1.0)
+) t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE metabolites AS
+SELECT * FROM (VALUES
+  ('S1','b2',1.0),('S1','b4',1.0),('S1','b5',1.0),('S1','b6',2.0),
+  ('S2','b1',1.0),('S2','b3',2.0),('S2','b4',1.0),('S2','b5',5.0),
+  ('S3','b2',3.0),('S3','b3',1.0),('S3','b5',1.0),('S3','b6',1.0),
+  ('S4','b1',3.0),('S4','b2',1.0),('S4','b4',2.0),('S4','b5',2.0),
+  ('S5','b3',4.0),('S5','b4',1.0),('S5','b5',7.0),('S5','b6',3.0)
+) t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE microbes_test AS
+SELECT * FROM (VALUES
+  ('S6','m1',3.0),('S6','m3',2.0),('S6','m4',6.0),('S6','m5',1.0),('S6','m6',4.0),('S6','m7',4.0),
+  ('S7','m1',2.0),('S7','m2',1.0),('S7','m3',5.0),('S7','m6',3.0),('S7','m7',6.0),('S7','m8',1.0),
+  ('S8','m1',8.0),('S8','m2',4.0),('S8','m3',1.0),('S8','m4',1.0),('S8','m5',5.0),('S8','m7',5.0),('S8','m8',1.0)
+) t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE metabolites_test AS
+SELECT * FROM (VALUES
+  ('S6','b2',5.0),('S6','b3',1.0),('S6','b4',1.0),('S6','b5',8.0),
+  ('S7','b1',1.0),('S7','b3',5.0),('S7','b4',3.0),('S7','b5',2.0),('S7','b6',3.0),
+  ('S8','b1',4.0),('S8','b2',1.0),('S8','b4',1.0),('S8','b5',6.0),('S8','b6',3.0)
+) t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE fit AS SELECT * FROM mmvec_fit('microbes', 'metabolites', dimensions := 3, max_iter := 1000);
+
+# The loss rows are present and ignored -- mmvec_fit emits 65 of them here.
+query I
+SELECT count(*) > 0 FROM fit WHERE modality = 'loss';
+----
+true
+
+query I
+SELECT abs(q_squared - 0.02289301473436267) < 0.01
+FROM mmvec_score('fit', 'microbes_test', 'metabolites_test');
+----
+true
+
+# Not vacuous, and the only assertion here that would catch a fit which reproduced
+# the oracle's parameters while predicting nothing: a fitted model beats the mean
+# community on samples it never saw, where the unfitted T1 theta scores about -2.
+query I
+SELECT q_squared > 0.0 FROM mmvec_score('fit', 'microbes_test', 'metabolites_test');
+----
+true
+
+# ---------------------------------------------------------------------------
+# Invalid input, from the pure core's own contract and from the readers.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE y_test_negative AS
+SELECT sample_id, feature_id, CASE WHEN sample_id = 'S6' AND feature_id = 'C2' THEN -3.0 ELSE value END AS value
+FROM y_test;
+
+statement error
+SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test_negative');
+----
+mmvec models counts
+
+statement ok
+CREATE TABLE y_test_inf AS
+SELECT sample_id, feature_id,
+       CASE WHEN sample_id = 'S6' AND feature_id = 'C2' THEN CAST('inf' AS DOUBLE) ELSE value END AS value
+FROM y_test;
+
+statement error
+SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test_inf');
+----
+is not finite
+
+statement ok
+CREATE TABLE y_test_dup AS
+SELECT * FROM y_test UNION ALL SELECT * FROM (VALUES ('S6','C2',1.0)) t(sample_id, feature_id, value);
+
+statement error
+SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test_dup');
+----
+Y has a duplicate entry for sample 'S6', feature 'C2'
+
+statement ok
+CREATE TABLE y_test_empty AS SELECT * FROM y_test WHERE false;
+
+statement error
+SELECT * FROM mmvec_score('t1_model', 'x_test', 'y_test_empty');
+----
+the Y feature-table has no usable cells
+
+statement error
+SELECT * FROM mmvec_score('no_such_model', 'x_test', 'y_test');
+----
+no_such_model
+
+statement error
+SELECT * FROM mmvec_score('t1_model', 'no_such_x', 'y_test');
+----
+no_such_x
+
+statement error
+SELECT * FROM mmvec_score('t1_model', 'x_test', 'no_such_y');
+----
+no_such_y
+
+statement ok
+CREATE TABLE not_a_feature_table AS SELECT 1 AS a;
+
+statement error
+SELECT * FROM mmvec_score('t1_model', 'x_test', 'not_a_feature_table');
+----
+must expose (sample_id, feature_id, value)
+
+# The X position is a separate call to the same validator, and only the table name
+# distinguishes the two messages -- so this is what would catch a bind that
+# validated the Y table twice and never looked at X.
+statement error
+SELECT * FROM mmvec_score('t1_model', 'not_a_feature_table', 'y_test');
+----
+feature-table 'not_a_feature_table'
+
+statement error
+SELECT * FROM mmvec_score('x_test', 'x_test', 'y_test');
+----
+must expose (modality, x_feature_id, y_feature_id, axis, value)

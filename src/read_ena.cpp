@@ -1,6 +1,7 @@
 #include "read_ena.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include <algorithm>
+#include <sstream>
 
 namespace duckdb {
 
@@ -95,17 +96,50 @@ static std::vector<int> BuildColumnMap(const std::vector<std::string> &schema_na
 	return map;
 }
 
+// Map a field name to its LogicalType. Fields not listed here default to VARCHAR.
+static LogicalType FieldTypeForColumn(const std::string &field_name) {
+	if (field_name == "read_count" || field_name == "base_count" || field_name == "tax_id") {
+		return LogicalType::BIGINT;
+	}
+	if (field_name == "fastq_ftp" || field_name == "fastq_aspera" || field_name == "fastq_md5") {
+		return LogicalType::LIST(LogicalType::VARCHAR);
+	}
+	if (field_name == "fastq_bytes") {
+		return LogicalType::LIST(LogicalType::BIGINT);
+	}
+	return LogicalType::VARCHAR;
+}
+
+// Split a ;-delimited string into parts (mirrors ENAParser::SplitSemicolon semantics).
+static std::vector<std::string> SplitSemicolon(const std::string &field) {
+	std::vector<std::string> parts;
+	if (field.empty()) {
+		return parts;
+	}
+	std::string::size_type start = 0;
+	while (true) {
+		auto pos = field.find(';', start);
+		if (pos == std::string::npos) {
+			parts.push_back(field.substr(start));
+			break;
+		}
+		parts.push_back(field.substr(start, pos - start));
+		start = pos + 1;
+	}
+	return parts;
+}
+
 // ---- Data ----
 
 ReadENATableFunction::Data::Data(std::vector<std::string> accessions, const std::string &result_type,
                                  const std::string &fields)
     : accessions(std::move(accessions)), result_type(result_type), fields(fields) {
-	// Column names from the user-specified fields string (comma-separated)
+	// Column names and types from the user-specified fields string (comma-separated)
 	std::istringstream stream(fields);
 	std::string field;
 	while (std::getline(stream, field, ',')) {
 		names.push_back(field);
-		types.push_back(LogicalType::VARCHAR);
+		types.push_back(FieldTypeForColumn(field));
 	}
 }
 
@@ -248,19 +282,92 @@ void ReadENATableFunction::Execute(ClientContext &context, TableFunctionInput &d
 	idx_t num_cols = bind_data.names.size();
 
 	for (idx_t col = 0; col < num_cols; col++) {
-		auto col_data = FlatVector::GetData<string_t>(output.data[col]);
+		const auto &col_type = bind_data.types[col];
 		auto &validity = FlatVector::Validity(output.data[col]);
-		for (idx_t i = 0; i < count; i++) {
-			auto &row = rows[offset + i];
-			if (col < row.size()) {
-				const auto &val = row[col];
-				if (val.empty()) {
-					validity.SetInvalid(i);
+
+		if (col_type.id() == LogicalTypeId::BIGINT) {
+			auto col_data = FlatVector::GetData<int64_t>(output.data[col]);
+			for (idx_t i = 0; i < count; i++) {
+				auto &row = rows[offset + i];
+				if (col < row.size()) {
+					const auto &val = row[col];
+					if (val.empty()) {
+						validity.SetInvalid(i);
+					} else {
+						try {
+							col_data[i] = std::stoll(val);
+						} catch (const std::exception &) {
+							throw IOException("read_ena: cannot parse '%s' as BIGINT for column '%s'", val,
+							                  bind_data.names[col]);
+						}
+					}
 				} else {
-					col_data[i] = StringVector::AddString(output.data[col], val);
+					validity.SetInvalid(i);
 				}
-			} else {
-				validity.SetInvalid(i);
+			}
+		} else if (col_type.id() == LogicalTypeId::LIST) {
+			// List columns: LIST(VARCHAR) or LIST(BIGINT)
+			auto &child_type = ListType::GetChildType(col_type);
+			auto list_entries = ListVector::GetData(output.data[col]);
+			auto &child_vec = ListVector::GetEntry(output.data[col]);
+
+			// Reserve capacity for the worst case (every row contributes at least one element)
+			idx_t worst_case = 0;
+			for (idx_t i = 0; i < count; i++) {
+				auto &row = rows[offset + i];
+				if (col < row.size() && !row[col].empty()) {
+					auto parts = SplitSemicolon(row[col]);
+					worst_case += parts.size();
+				}
+			}
+			ListVector::Reserve(output.data[col], worst_case);
+
+			idx_t child_offset = 0;
+			for (idx_t i = 0; i < count; i++) {
+				auto &row = rows[offset + i];
+				if (col < row.size() && !row[col].empty()) {
+					auto parts = SplitSemicolon(row[col]);
+					list_entries[i] = list_entry_t(child_offset, parts.size());
+
+					if (child_type.id() == LogicalTypeId::BIGINT) {
+						auto child_data = FlatVector::GetData<int64_t>(child_vec);
+						for (size_t j = 0; j < parts.size(); j++) {
+							try {
+								child_data[child_offset + j] = std::stoll(parts[j]);
+							} catch (const std::exception &) {
+								throw IOException("read_ena: cannot parse '%s' as BIGINT for column '%s'", parts[j],
+								                  bind_data.names[col]);
+							}
+						}
+					} else {
+						auto child_data = FlatVector::GetData<string_t>(child_vec);
+						for (size_t j = 0; j < parts.size(); j++) {
+							child_data[child_offset + j] = StringVector::AddString(child_vec, parts[j]);
+						}
+					}
+					child_offset += parts.size();
+				} else {
+					// Empty/missing → NULL list
+					validity.SetInvalid(i);
+					list_entries[i] = list_entry_t(child_offset, 0);
+				}
+			}
+			ListVector::SetListSize(output.data[col], child_offset);
+		} else {
+			// Default: VARCHAR
+			auto col_data = FlatVector::GetData<string_t>(output.data[col]);
+			for (idx_t i = 0; i < count; i++) {
+				auto &row = rows[offset + i];
+				if (col < row.size()) {
+					const auto &val = row[col];
+					if (val.empty()) {
+						validity.SetInvalid(i);
+					} else {
+						col_data[i] = StringVector::AddString(output.data[col], val);
+					}
+				} else {
+					validity.SetInvalid(i);
+				}
 			}
 		}
 	}

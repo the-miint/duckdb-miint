@@ -1,0 +1,138 @@
+# name: test/sql/align_bowtie2_sharded_single_read.test
+# description: align_bowtie2_sharded must read the query relation exactly once (#229)
+# group: [sql]
+
+require miint
+
+require-env GPL_BOUNDARY_AVAILABLE
+
+# ---------------------------------------------------------------------------
+# WHY THIS TEST EXISTS (#229)
+#
+# OpenCurrentShardStream opens a fresh `query_table JOIN read_to_shard` cursor
+# per shard — and, because each worker owns its own connection, per shard per
+# worker. When the query relation is not stable across re-evaluation, later
+# cursors see a different row set, their JOIN matches nothing, and those reads
+# were silently dropped.
+#
+# Measured before the fix: 2 reads over a stable table -> 2 rows;
+# the same reads behind a non-replayable view -> 1 row. No error either way.
+#
+# Unlike the minimap2 paths, this function is NOT fixed by buffering the reads.
+# Its cursors stream with bounded memory, and materializing the corpus into a
+# TEMP table would break larger-than-memory input: TEMP blocks can only spill to
+# `temp_directory`, never into a persistent database file, so a large corpus
+# fails outright when that directory is disabled or exhausted. Keeping the
+# stream and refusing to return a wrong answer is the deliberate trade.
+#
+# Invariant under test: *** a short read is an error, never a silent result ***
+#
+# The expected count comes from the same `query JOIN read_to_shard` the cursors
+# use, NOT from read_to_shard alone — so a mapping that legitimately lists reads
+# absent from the query relation reduces expectation and actual equally and does
+# not trip the check.
+#
+# Rows are counted WITHOUT filtering `flags & 4` (unmapped) on purpose. This
+# test is about whether every input read reaches the aligner at all, not about
+# whether it aligns — so it stays valid regardless of what the committed shard
+# indexes happen to contain.
+# ---------------------------------------------------------------------------
+
+# sqllogictest runs table functions in a constrained mode that does not handle
+# parallel execution well (same reason as align_bowtie2_sharded.test), and it
+# also makes nextval() assignment order deterministic. The defect is a
+# per-shard re-read, so single-threading does not mask it.
+statement ok
+SET threads=1;
+
+statement ok
+CREATE TABLE base_q AS SELECT * FROM (VALUES
+    ('ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(sequence1);
+
+# VARCHAR ids, matching the committed shard fixtures' convention.
+statement ok
+CREATE TABLE r2s AS SELECT * FROM (VALUES
+    ('r1', 'shard_a'),
+    ('r2', 'shard_b')
+) AS t(read_id, shard_name);
+
+# ---------------------------------------------------------------------------
+# Control: stable physical table. Both reads reach the aligner.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE stable_q AS SELECT 'r' || row_number() OVER () AS read_id, sequence1 FROM base_q;
+
+query I
+SELECT count(*)
+FROM align_bowtie2_sharded('stable_q',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'r2s',
+    max_secondary := 0);
+----
+2
+
+# ---------------------------------------------------------------------------
+# The real assertion: same logical input behind a non-replayable view must FAIL
+# rather than quietly return one read's worth of alignments.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE SEQUENCE s START 1;
+
+statement ok
+CREATE VIEW v AS SELECT ('r' || nextval('s')) AS read_id, sequence1 FROM base_q;
+
+statement error
+SELECT count(*)
+FROM align_bowtie2_sharded('v',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'r2s',
+    max_secondary := 0);
+----
+mapped reads
+
+# ---------------------------------------------------------------------------
+# A STABLE view must still work. Without this, the error above could be satisfied
+# by a function that simply rejects all views — and views are documented as
+# supported for query_table. This is the case a TEMP-table control cannot cover.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE VIEW stable_view AS SELECT read_id, sequence1 FROM stable_q;
+
+query I
+SELECT count(*)
+FROM align_bowtie2_sharded('stable_view',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'r2s',
+    max_secondary := 0);
+----
+2
+
+# ---------------------------------------------------------------------------
+# The check must NOT fire when read_to_shard legitimately maps reads that are
+# absent from the query relation. That is existing supported behaviour (the JOIN
+# filters both directions), and it is precisely why the expected count is taken
+# from the JOIN rather than from COUNT(*) over read_to_shard — the latter would
+# make this a false failure.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE r2s_superset AS SELECT * FROM (VALUES
+    ('r1', 'shard_a'),
+    ('r2', 'shard_b'),
+    ('r_absent_a', 'shard_a'),
+    ('r_absent_b', 'shard_b')
+) AS t(read_id, shard_name);
+
+query I
+SELECT count(*)
+FROM align_bowtie2_sharded('stable_q',
+    shard_directory := 'data/bowtie2_shards/',
+    read_to_shard := 'r2s_superset',
+    max_secondary := 0);
+----
+2

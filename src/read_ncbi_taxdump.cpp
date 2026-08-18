@@ -100,6 +100,22 @@ bool ParseRefreshParam(const named_parameter_map_t &params) {
 	return false;
 }
 
+// Shared Bind-time parse of the (source, refresh) parameters every read_ncbi_taxdump*
+// function takes. Returns the source, empty meaning "auto-download the default taxdump
+// into the cache": that is both the no-argument call and an explicit NULL, the latter
+// being the taxonomy_lineage(source := NULL) default, which must route to the cached
+// download rather than error so the macro can delegate uniformly.
+std::string ParseSourceParam(TableFunctionBindInput &input, const char *fn_name) {
+	if (input.inputs.empty() || input.inputs[0].IsNull()) {
+		return {};
+	}
+	std::string source = input.inputs[0].ToString();
+	if (source.empty()) {
+		throw InvalidInputException("%s: source must not be empty", fn_name);
+	}
+	return source;
+}
+
 // Where the auto-downloaded taxdump is cached (extracted). An explicit override
 // wins (used by tests to avoid touching the user's real cache); otherwise the
 // shared miint cache location.
@@ -144,7 +160,9 @@ std::string EnsureTaxdumpCache(ClientContext &context, bool refresh) {
 	std::string archive_bytes = HttpGetToString(context, DEFAULT_TAXDUMP_URL);
 	miint::TaxdumpFiles files;
 	try {
-		files = miint::TaxdumpArchive::ExtractTaxdump(archive_bytes);
+		// All four: the cache backs every reader, so it must be complete even though no
+		// single reader needs all of them.
+		files = miint::TaxdumpArchive::ExtractTaxdump(archive_bytes, miint::TaxdumpMemberSet::All());
 	} catch (const std::exception &e) {
 		throw IOException("read_ncbi_taxdump: failed to extract taxdump from " + std::string(DEFAULT_TAXDUMP_URL) +
 		                  ": " + e.what());
@@ -156,28 +174,52 @@ std::string EnsureTaxdumpCache(ClientContext &context, bool refresh) {
 	return dir;
 }
 
+// Run a TaxdumpParser call, translating its std::runtime_error into a DuckDB error.
+//
+// The parser is deliberately DuckDB-free (the Catch2 binary links no libduckdb), so it
+// reports malformed input as std::runtime_error. Without this the message would reach
+// the user as an opaque internal exception instead of a normal miint error. Only the
+// parse call is wrapped -- duckdb::Exception also derives from std::runtime_error, so
+// including the file load here would double-prefix its message.
+template <typename Fn>
+auto WrapParseErrors(const char *fn_name, Fn &&fn) -> decltype(fn()) {
+	try {
+		return fn();
+	} catch (const std::runtime_error &e) {
+		throw InvalidInputException("%s: %s", fn_name, e.what());
+	}
+}
+
 } // namespace
 
-miint::TaxdumpFiles LoadTaxdumpFiles(ClientContext &context, const std::string &source) {
+miint::TaxdumpFiles LoadTaxdumpFiles(ClientContext &context, const std::string &source,
+                                     const miint::TaxdumpMemberSet &members) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
-	// A directory of already-extracted .dmp files.
+	// A directory of already-extracted .dmp files. This is also the cached-download
+	// path (the default source caches the extracted members), so it is the branch that
+	// matters most for skipping members the caller does not read.
 	if (fs.DirectoryExists(source)) {
-		auto read_member = [&](const char *name, bool required) -> std::string {
+		auto read_member = [&](const char *name, bool wanted) -> std::string {
+			if (!wanted) {
+				return {};
+			}
 			std::string path = fs.JoinPath(source, name);
 			if (!fs.FileExists(path)) {
-				if (required) {
-					throw IOException("read_ncbi_taxdump: required file not found: " + path);
-				}
-				return {};
+				// Requested but absent. Reporting empty here would be indistinguishable
+				// from a genuinely empty member, which for merged.dmp/delnodes.dmp means
+				// a partial extraction reads as "nothing is retired". Not prefixed with a
+				// function name: this is shared by all four readers, and naming the wrong
+				// one is worse than naming none.
+				throw IOException("taxdump: required member not found: " + path);
 			}
 			return ReadWholeFile(fs, path);
 		};
 		miint::TaxdumpFiles files;
-		files.nodes = read_member("nodes.dmp", true);
-		files.names = read_member("names.dmp", true);
-		files.merged = read_member("merged.dmp", false);
-		files.delnodes = read_member("delnodes.dmp", false);
+		files.nodes = read_member("nodes.dmp", members.nodes);
+		files.names = read_member("names.dmp", members.names);
+		files.merged = read_member("merged.dmp", members.merged);
+		files.delnodes = read_member("delnodes.dmp", members.delnodes);
 		return files;
 	}
 
@@ -187,7 +229,7 @@ miint::TaxdumpFiles LoadTaxdumpFiles(ClientContext &context, const std::string &
 	}
 	std::string archive_bytes = ReadArchiveBytes(context, fs, source);
 	try {
-		return miint::TaxdumpArchive::ExtractTaxdump(archive_bytes);
+		return miint::TaxdumpArchive::ExtractTaxdump(archive_bytes, members);
 	} catch (const std::exception &e) {
 		throw IOException("read_ncbi_taxdump: failed to read taxdump archive '" + source + "': " + e.what());
 	}
@@ -199,16 +241,7 @@ unique_ptr<FunctionData> ReadNCBITaxdumpTableFunction::Bind(ClientContext &conte
                                                             vector<LogicalType> &return_types,
                                                             vector<std::string> &names) {
 	auto data = make_uniq<Data>();
-	// No positional arg, or an explicit NULL, => auto-download the default taxdump
-	// into the cache. A NULL source is the taxonomy_lineage(source := NULL) default,
-	// which must route to the cached-download path (not error) so the macro can
-	// delegate here uniformly.
-	if (!input.inputs.empty() && !input.inputs[0].IsNull()) {
-		data->source = input.inputs[0].ToString();
-		if (data->source.empty()) {
-			throw InvalidInputException("read_ncbi_taxdump: source must not be empty");
-		}
-	}
+	data->source = ParseSourceParam(input, "read_ncbi_taxdump");
 	data->refresh = ParseRefreshParam(input.named_parameters);
 
 	names = {"node_index", "parent_index", "name", "rank", "is_tip"};
@@ -222,8 +255,14 @@ unique_ptr<GlobalTableFunctionState> ReadNCBITaxdumpTableFunction::InitGlobal(Cl
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 	std::string source = data.source.empty() ? EnsureTaxdumpCache(context, data.refresh) : data.source;
-	auto files = LoadTaxdumpFiles(context, source);
-	gstate->nodes = miint::TaxdumpParser::ParseNodes(files.nodes, files.names);
+	// The tree is built from nodes.dmp joined with names.dmp; merged.dmp and delnodes.dmp
+	// hold retired ids, which are by definition absent from the live tree.
+	miint::TaxdumpMemberSet members;
+	members.nodes = true;
+	members.names = true;
+	auto files = LoadTaxdumpFiles(context, source, members);
+	gstate->nodes = WrapParseErrors("read_ncbi_taxdump",
+	                                [&] { return miint::TaxdumpParser::ParseNodes(files.nodes, files.names); });
 	return std::move(gstate);
 }
 
@@ -278,14 +317,7 @@ unique_ptr<FunctionData> ReadNCBITaxdumpMergedTableFunction::Bind(ClientContext 
                                                                   vector<LogicalType> &return_types,
                                                                   vector<std::string> &names) {
 	auto data = make_uniq<Data>();
-	// No positional arg, or an explicit NULL, => auto-download the default taxdump
-	// (mirrors read_ncbi_taxdump so both accept the NULL-source default).
-	if (!input.inputs.empty() && !input.inputs[0].IsNull()) {
-		data->source = input.inputs[0].ToString();
-		if (data->source.empty()) {
-			throw InvalidInputException("read_ncbi_taxdump_merged: source must not be empty");
-		}
-	}
+	data->source = ParseSourceParam(input, "read_ncbi_taxdump_merged");
 	data->refresh = ParseRefreshParam(input.named_parameters);
 
 	names = {"old_taxid", "new_taxid"};
@@ -298,8 +330,11 @@ unique_ptr<GlobalTableFunctionState> ReadNCBITaxdumpMergedTableFunction::InitGlo
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 	std::string source = data.source.empty() ? EnsureTaxdumpCache(context, data.refresh) : data.source;
-	auto files = LoadTaxdumpFiles(context, source);
-	gstate->merged = miint::TaxdumpParser::ParseMerged(files.merged);
+	miint::TaxdumpMemberSet members;
+	members.merged = true;
+	auto files = LoadTaxdumpFiles(context, source, members);
+	gstate->merged =
+	    WrapParseErrors("read_ncbi_taxdump_merged", [&] { return miint::TaxdumpParser::ParseMerged(files.merged); });
 	return std::move(gstate);
 }
 
@@ -330,6 +365,127 @@ void ReadNCBITaxdumpMergedTableFunction::Register(ExtensionLoader &loader) {
 	TableFunctionSet set("read_ncbi_taxdump_merged");
 	for (const auto &args : {vector<LogicalType> {}, vector<LogicalType> {LogicalType::VARCHAR}}) {
 		TableFunction tf("read_ncbi_taxdump_merged", args, Execute, Bind, InitGlobal, InitLocal);
+		tf.named_parameters["refresh"] = LogicalType::BOOLEAN;
+		set.AddFunction(tf);
+	}
+	loader.RegisterFunction(set);
+}
+
+// ── read_ncbi_taxdump_names ──────────────────────────────────────────────────
+
+unique_ptr<FunctionData> ReadNCBITaxdumpNamesTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
+                                                                 vector<LogicalType> &return_types,
+                                                                 vector<std::string> &names) {
+	auto data = make_uniq<Data>();
+	data->source = ParseSourceParam(input, "read_ncbi_taxdump_names");
+	data->refresh = ParseRefreshParam(input.named_parameters);
+
+	names = {"taxid", "name", "unique_name", "name_class"};
+	return_types = {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
+	return std::move(data);
+}
+
+unique_ptr<GlobalTableFunctionState> ReadNCBITaxdumpNamesTableFunction::InitGlobal(ClientContext &context,
+                                                                                   TableFunctionInitInput &input) {
+	auto &data = input.bind_data->Cast<Data>();
+	auto gstate = make_uniq<GlobalState>();
+	std::string source = data.source.empty() ? EnsureTaxdumpCache(context, data.refresh) : data.source;
+	miint::TaxdumpMemberSet members;
+	members.names = true;
+	auto files = LoadTaxdumpFiles(context, source, members);
+	gstate->names =
+	    WrapParseErrors("read_ncbi_taxdump_names", [&] { return miint::TaxdumpParser::ParseNames(files.names); });
+	return std::move(gstate);
+}
+
+unique_ptr<LocalTableFunctionState>
+ReadNCBITaxdumpNamesTableFunction::InitLocal(ExecutionContext &, TableFunctionInitInput &, GlobalTableFunctionState *) {
+	return make_uniq<LocalState>();
+}
+
+void ReadNCBITaxdumpNamesTableFunction::Execute(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
+	auto &gstate = data_p.global_state->Cast<GlobalState>();
+
+	idx_t count = std::min<idx_t>(STANDARD_VECTOR_SIZE, gstate.names.size() - gstate.cursor);
+
+	auto taxid = FlatVector::GetData<int64_t>(output.data[0]);
+	auto &name_vec = output.data[1];
+	auto &unique_name_vec = output.data[2];
+	auto &name_class_vec = output.data[3];
+	for (idx_t i = 0; i < count; ++i) {
+		const auto &n = gstate.names[gstate.cursor + i];
+		taxid[i] = n.taxid;
+		FlatVector::GetData<string_t>(name_vec)[i] = StringVector::AddString(name_vec, n.name);
+		FlatVector::GetData<string_t>(unique_name_vec)[i] = StringVector::AddString(unique_name_vec, n.unique_name);
+		FlatVector::GetData<string_t>(name_class_vec)[i] = StringVector::AddString(name_class_vec, n.name_class);
+	}
+
+	gstate.cursor += count;
+	output.SetCardinality(count);
+}
+
+void ReadNCBITaxdumpNamesTableFunction::Register(ExtensionLoader &loader) {
+	TableFunctionSet set("read_ncbi_taxdump_names");
+	for (const auto &args : {vector<LogicalType> {}, vector<LogicalType> {LogicalType::VARCHAR}}) {
+		TableFunction tf("read_ncbi_taxdump_names", args, Execute, Bind, InitGlobal, InitLocal);
+		tf.named_parameters["refresh"] = LogicalType::BOOLEAN;
+		set.AddFunction(tf);
+	}
+	loader.RegisterFunction(set);
+}
+
+// ── read_ncbi_taxdump_deleted ────────────────────────────────────────────────
+
+unique_ptr<FunctionData> ReadNCBITaxdumpDeletedTableFunction::Bind(ClientContext &context,
+                                                                   TableFunctionBindInput &input,
+                                                                   vector<LogicalType> &return_types,
+                                                                   vector<std::string> &names) {
+	auto data = make_uniq<Data>();
+	data->source = ParseSourceParam(input, "read_ncbi_taxdump_deleted");
+	data->refresh = ParseRefreshParam(input.named_parameters);
+
+	names = {"taxid"};
+	return_types = {LogicalType::BIGINT};
+	return std::move(data);
+}
+
+unique_ptr<GlobalTableFunctionState> ReadNCBITaxdumpDeletedTableFunction::InitGlobal(ClientContext &context,
+                                                                                     TableFunctionInitInput &input) {
+	auto &data = input.bind_data->Cast<Data>();
+	auto gstate = make_uniq<GlobalState>();
+	std::string source = data.source.empty() ? EnsureTaxdumpCache(context, data.refresh) : data.source;
+	miint::TaxdumpMemberSet members;
+	members.delnodes = true;
+	auto files = LoadTaxdumpFiles(context, source, members);
+	gstate->deleted = WrapParseErrors("read_ncbi_taxdump_deleted",
+	                                  [&] { return miint::TaxdumpParser::ParseDeleted(files.delnodes); });
+	return std::move(gstate);
+}
+
+unique_ptr<LocalTableFunctionState> ReadNCBITaxdumpDeletedTableFunction::InitLocal(ExecutionContext &,
+                                                                                   TableFunctionInitInput &,
+                                                                                   GlobalTableFunctionState *) {
+	return make_uniq<LocalState>();
+}
+
+void ReadNCBITaxdumpDeletedTableFunction::Execute(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
+	auto &gstate = data_p.global_state->Cast<GlobalState>();
+
+	idx_t count = std::min<idx_t>(STANDARD_VECTOR_SIZE, gstate.deleted.size() - gstate.cursor);
+
+	auto taxid = FlatVector::GetData<int64_t>(output.data[0]);
+	for (idx_t i = 0; i < count; ++i) {
+		taxid[i] = gstate.deleted[gstate.cursor + i];
+	}
+
+	gstate.cursor += count;
+	output.SetCardinality(count);
+}
+
+void ReadNCBITaxdumpDeletedTableFunction::Register(ExtensionLoader &loader) {
+	TableFunctionSet set("read_ncbi_taxdump_deleted");
+	for (const auto &args : {vector<LogicalType> {}, vector<LogicalType> {LogicalType::VARCHAR}}) {
+		TableFunction tf("read_ncbi_taxdump_deleted", args, Execute, Bind, InitGlobal, InitLocal);
 		tf.named_parameters["refresh"] = LogicalType::BOOLEAN;
 		set.AddFunction(tf);
 	}

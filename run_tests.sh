@@ -9,6 +9,23 @@ if grep -nE '\bmake\b[^\n]*\bclean\b[^\n]*(\blib[A-Za-z0-9_]+\.a\b|\ball\b)' CMa
     exit 1
 fi
 
+# mmvec compiles its objective once per instruction set and picks at load time, so
+# a fit's result depends on the CPU running it -- the same property scikit-bio has
+# through OpenBLAS, and an accepted one. Expected values in the SQL tests are
+# carved against the BASELINE kernel, so pin it here: without this the suite would
+# assert different numbers on an AVX-512 CI runner than on an AVX2 one, and a real
+# regression would be indistinguishable from a change of machine.
+#
+# The wide variants are not left untested by this. test/cpp/test_MMvec.cpp calls
+# each one directly -- no environment variable involved, since DetectIsa() memoizes
+# and one process can only ever observe one dispatch decision -- and checks them
+# against baseline within the carved kIsa*Tol bands.
+#
+# Honours an externally-set value so `MIINT_SIMD=avx512 bash run_tests.sh` still
+# works for a deliberate cross-check.
+export MIINT_SIMD="${MIINT_SIMD:-baseline}"
+echo "MIINT_SIMD=$MIINT_SIMD (mmvec kernel; expected values are carved against 'baseline')"
+
 # Start local HTTP server for HTTPS reader tests (unless already set externally)
 HTTP_SERVER_PID=""
 if [ -z "$MIINT_HTTPS_TEST_URL" ]; then

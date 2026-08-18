@@ -297,6 +297,20 @@ struct AlignBowtie2ShardedGlobalState : public GlobalTableFunctionState {
 	// read-only from workers). When false, no progress lines are emitted.
 	bool progress = false;
 
+	// How many reads each shard's cursor should deliver, keyed by shard name,
+	// computed once in InitGlobal (#229). Empty for a single shard, where nothing is
+	// re-read and the check cannot detect anything a lone cursor would have missed.
+	//
+	// Deliberately NOT ShardInfo::read_count, which is COUNT(*) over read_to_shard
+	// alone: a mapping that legitimately lists reads absent from the query relation
+	// would then look like data loss. These counts come from the same
+	// `query JOIN read_to_shard` the cursors use, so a mapping superset reduces
+	// expectation and actual equally, and only a genuine short read shows up.
+	//
+	// One extra scan of the query relation, projecting read_id only, and no
+	// materialization — so the cursors keep their bounded memory profile.
+	std::unordered_map<std::string, idx_t> expected_reads_per_shard;
+
 	idx_t MaxThreads() const override {
 		// DuckDB clamps to its own scheduler concurrency anyway, but
 		// returning the per-shard ceiling here keeps the planner honest
@@ -382,6 +396,9 @@ struct AlignBowtie2ShardedLocalState : public LocalTableFunctionState {
 	// forward onto that shard's first batch line (0 on subsequent batches).
 	// Progress-only per-shard accumulators (used when GlobalState::progress is
 	// true). Reset when a shard stream opens; read when it exhausts.
+	// `shard_reads` is accumulated unconditionally, not just when progress is on:
+	// it is also compared against the shard's expected count when the cursor
+	// exhausts (#229). One add per batch, so it is free.
 	idx_t shard_reads = 0;
 	idx_t shard_alignments = 0;
 	TelClock::time_point shard_start;
@@ -721,6 +738,17 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 		}
 	}
 
+	// Per-shard expected read counts, from the same JOIN the cursors use (#229), so
+	// the comparison in Execute turns what used to be silent truncation into a hard
+	// error. Skipped for a single shard: its lone cursor reads the relation once, so
+	// there is nothing to detect and no reason to pay an extra scan — matching the
+	// single-shard skip in align_minimap2_sharded.
+	if (bd.shards.size() > 1) {
+		for (auto &sc : ReadShardNameCounts(context, bd.read_to_shard_table, bd.query_table)) {
+			gs->expected_reads_per_shard[sc.name] = sc.count;
+		}
+	}
+
 	return std::move(gs);
 }
 
@@ -1053,16 +1081,49 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 					rec.wall_ms = TelMsSince(gs.telemetry_start);
 					EmitBatchTelemetry(gs.telemetry_fd, rec);
 				}
+				local.shard_reads += static_cast<idx_t>(qb.read_ids.size());
 				if (gs.progress) {
-					local.shard_reads += static_cast<idx_t>(qb.read_ids.size());
 					for (const auto &w : local.current_batches) {
 						local.shard_alignments += static_cast<idx_t>(w.arrow_array.length);
 					}
 				}
 				continue; // loop back to drain decoded rows
 			}
-			// Shard exhausted — release for re-claim attempt. Drop this worker
-			// from the active count so a surviving worker can grow its `-p`.
+			// Shard exhausted. Before releasing it, verify the cursor actually
+			// delivered every read mapped to this shard (#229).
+			//
+			// Each shard opens its own cursor over the query relation, so a relation
+			// that is not stable across re-evaluation — a volatile view, a view over
+			// a changing table, a registered single-pass Arrow stream — returns a
+			// different row set to a later cursor, its JOIN matches less (often
+			// nothing), and those reads were previously dropped with no error.
+			// Failing here is the whole point: a short read is a wrong answer, and a
+			// wrong answer that looks right is worse than a stopped query.
+			//
+			// Two honest limits. (1) This compares VOLUME, not identity: a relation
+			// that re-reads to a *different* set of the same size passes. It catches
+			// the realistic failures (an exhausted stream yields nothing; a shifted
+			// key yields fewer join matches) and costs one add per batch, where a
+			// per-read digest would put hashing on the alignment path. (2) It fires
+			// mid-scan, so shards already completed have emitted rows — the partial
+			// output that InitLocal's eager daemon spawn (see its comment) exists to
+			// avoid. Accepted deliberately: the alternative is knowing at bind
+			// whether a relation is replayable, which is not decidable here.
+			{
+				auto expected = gs.expected_reads_per_shard.find(local.current_shard_name);
+				if (expected != gs.expected_reads_per_shard.end() && local.shard_reads < expected->second) {
+					throw InvalidInputException(
+					    "align_bowtie2_sharded: shard '%s' delivered %llu of %llu mapped reads. The query relation "
+					    "returned different rows when re-read for this shard, so reads would be silently dropped. "
+					    "This happens when '%s' is not stable across repeated reads (a volatile view, a view over a "
+					    "changing table, or a registered single-pass Arrow stream). Materialize it first, e.g. "
+					    "CREATE TEMP TABLE q AS SELECT * FROM %s, and pass that instead.",
+					    local.current_shard_name, static_cast<uint64_t>(local.shard_reads),
+					    static_cast<uint64_t>(expected->second), bd.query_table, bd.query_table);
+				}
+			}
+			// Release for re-claim attempt. Drop this worker from the active count
+			// so a surviving worker can grow its `-p`.
 			if (gs.progress) {
 				const double elapsed_s = std::chrono::duration<double>(TelClock::now() - local.shard_start).count();
 				shard_progress::Emit("bowtie2", shard_progress::FormatShardDone(
@@ -1131,6 +1192,9 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 		// of this shard, then announce it. Read count is unknown at open (reads
 		// stream in batches), so the "started" line omits it; the "done" line
 		// below reports the totals.
+		// Must reset per shard: shard_reads is compared against a per-shard expected
+		// count when the cursor exhausts, so carrying it across shards would make
+		// that check pass vacuously.
 		local.shard_reads = 0;
 		local.shard_alignments = 0;
 		local.shard_start = TelClock::now();
